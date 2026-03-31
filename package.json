@@ -1,0 +1,30 @@
+{
+  "name": "wasiai-a2a",
+  "version": "0.0.1",
+  "private": true,
+  "description": "A2A Protocol for agent discovery, composition, and orchestration",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ferrosasfp/wasiai-a2a.git"
+  },
+  "author": "WasiAI <hello@wasiai.io>",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "clean": "turbo run clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "pnpm@9.0.0"
+}
