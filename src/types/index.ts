@@ -1,0 +1,189 @@
+/**
+ * WasiAI A2A Protocol — Types
+ */
+
+// ============================================================
+// REGISTRY TYPES
+// ============================================================
+
+export interface RegistryConfig {
+  /** Unique identifier */
+  id: string
+  
+  /** Human-readable name */
+  name: string
+  
+  /** Discovery endpoint URL */
+  discoveryEndpoint: string
+  
+  /** Invoke endpoint URL template (use {agentId} or {slug} as placeholder) */
+  invokeEndpoint: string
+  
+  /** Optional: Get single agent endpoint */
+  agentEndpoint?: string
+  
+  /** Schema mapping for API compatibility */
+  schema: RegistrySchema
+  
+  /** Authentication config */
+  auth?: RegistryAuth
+  
+  /** Is this registry active? */
+  enabled: boolean
+  
+  /** When was it registered */
+  createdAt: Date
+}
+
+export interface RegistrySchema {
+  /** How to map discovery params */
+  discovery: {
+    /** Query param for capabilities/tags */
+    capabilityParam?: string
+    /** Query param for free text search */
+    queryParam?: string
+    /** Query param for limit */
+    limitParam?: string
+    /** Query param for max price */
+    maxPriceParam?: string
+    /** Path to agents array in response */
+    agentsPath?: string
+    /** Field mappings for agent object */
+    agentMapping?: AgentFieldMapping
+  }
+  
+  /** How to call invoke */
+  invoke: {
+    method: 'GET' | 'POST'
+    /** Field name for input in request body */
+    inputField?: string
+    /** Path to result in response */
+    resultPath?: string
+  }
+}
+
+export interface AgentFieldMapping {
+  id?: string
+  name?: string
+  slug?: string
+  description?: string
+  capabilities?: string
+  price?: string
+  reputation?: string
+}
+
+export interface RegistryAuth {
+  type: 'header' | 'query' | 'bearer'
+  key: string
+  value?: string  // If static, otherwise must be provided per-request
+}
+
+// ============================================================
+// AGENT TYPES
+// ============================================================
+
+export interface Agent {
+  id: string
+  name: string
+  slug: string
+  description: string
+  capabilities: string[]
+  priceUsdc: number
+  reputation?: number
+  registry: string
+  invokeUrl: string
+  metadata?: Record<string, unknown>
+}
+
+// ============================================================
+// DISCOVERY TYPES
+// ============================================================
+
+export interface DiscoveryQuery {
+  capabilities?: string[]
+  query?: string
+  maxPrice?: number
+  minReputation?: number
+  limit?: number
+  registry?: string  // Filter to specific registry
+}
+
+export interface DiscoveryResult {
+  agents: Agent[]
+  total: number
+  registries: string[]
+}
+
+// ============================================================
+// COMPOSE TYPES
+// ============================================================
+
+export interface ComposeStep {
+  /** Agent ID or slug */
+  agent: string
+  /** Registry name (optional, will search all if not specified) */
+  registry?: string
+  /** Input for this step */
+  input: Record<string, unknown>
+  /** Use output from previous step */
+  passOutput?: boolean
+}
+
+export interface ComposeRequest {
+  steps: ComposeStep[]
+  /** Max budget in USDC */
+  maxBudget?: number
+}
+
+export interface ComposeResult {
+  success: boolean
+  output: unknown
+  steps: StepResult[]
+  totalCostUsdc: number
+  totalLatencyMs: number
+  error?: string
+}
+
+export interface StepResult {
+  agent: Agent
+  output: unknown
+  costUsdc: number
+  latencyMs: number
+}
+
+// ============================================================
+// ORCHESTRATE TYPES
+// ============================================================
+
+export interface OrchestrateRequest {
+  /** Natural language goal */
+  goal: string
+  /** Max budget in USDC */
+  budget: number
+  /** Preferred capabilities (hints) */
+  preferCapabilities?: string[]
+  /** Max agents to use */
+  maxAgents?: number
+}
+
+export interface OrchestrateResult {
+  answer: unknown
+  reasoning: string
+  pipeline: ComposeResult
+  consideredAgents: Agent[]
+}
+
+// ============================================================
+// PAYMENT TYPES (Kite)
+// ============================================================
+
+export interface PaymentConfig {
+  /** Agent Passport address */
+  passportAddress: string
+  /** Network (testnet/mainnet) */
+  network: 'kite-testnet' | 'kite-mainnet'
+}
+
+export interface PaymentAuth {
+  xPayment: string  // Base64 encoded x402 payload
+}
