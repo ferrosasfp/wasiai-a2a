@@ -13,7 +13,7 @@ Servicio de discovery, composición y orquestación de agentes autónomos. Imple
 
 **Repo:** github.com/ferrosasfp/wasiai-a2a
 **Puerto:** 3001 (default)
-**Stack:** Fastify + PostgreSQL + Redis + BullMQ + TypeScript
+**Stack:** Fastify + Supabase PostgreSQL + Redis + BullMQ + Claude Sonnet + TypeScript
 
 ---
 
@@ -56,9 +56,10 @@ Kite L1 (x402 + Agent Passport)
 
 ### Backend
 - **Framework:** Fastify — el más rápido en Node.js, listo para escala
-- **DB:** PostgreSQL — registries, tasks, logs, métricas
+- **DB:** Supabase PostgreSQL (`bdwvrwzvsldephfibmuu`) — compartido con wasiai-v2 dev, tablas con prefijo `a2a_`
 - **Queue:** Redis + BullMQ — pipelines async, no bloquear requests
 - **Cache:** Redis — cache de discovery, schemas inferidos, transformaciones
+- **LLM:** Claude Sonnet (`claude-sonnet-4-20250514`) — transform y orchestrate
 - **Protocol:** Google A2A (JSON-RPC 2.0) — estándar abierto
 - **Runtime:** Node.js 20+
 - **Lenguaje:** TypeScript strict — sin `any` explícito en producción
@@ -252,19 +253,21 @@ Agente B (input adaptado)
 PORT=3001
 NODE_ENV=development|production
 
-# Database
-DATABASE_URL=postgresql://...
+# Supabase (compartido con wasiai-v2 dev)
+SUPABASE_URL=https://bdwvrwzvsldephfibmuu.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=sb_secret_...
+DATABASE_URL=postgresql://postgres:[pwd]@db.bdwvrwzvsldephfibmuu.supabase.co:5432/postgres
 
 # Redis
 REDIS_URL=redis://...
+
+# LLM (Claude Sonnet via Anthropic)
+ANTHROPIC_API_KEY=...  # Mismo token de OpenClaw
 
 # Kite (blockchain)
 KITE_RPC_URL=https://rpc-testnet.gokite.ai/
 KITE_CHAIN_ID=2368
 OPERATOR_PRIVATE_KEY=0x...
-
-# LLM (para transform/orchestrate)
-GROQ_API_KEY=...
 
 # WasiAI Registry (pre-registrado)
 WASIAI_API_URL=https://app.wasiai.io/api/v1
@@ -284,13 +287,52 @@ WASIAI_API_KEY=wasi_...
 
 ---
 
+## Tablas DB (prefijo a2a_)
+
+```sql
+-- Registries (marketplaces registrados)
+a2a_registries (
+  id UUID PRIMARY KEY,
+  name TEXT NOT NULL,
+  discovery_endpoint TEXT,
+  invoke_endpoint TEXT,
+  a2a_support TEXT DEFAULT 'none',  -- 'full' | 'partial' | 'none'
+  default_input_schema JSONB,
+  default_output_schema JSONB,
+  infer_schemas BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ DEFAULT now()
+)
+
+-- Tasks (A2A standard)
+a2a_tasks (
+  id UUID PRIMARY KEY,
+  context_id TEXT,
+  status TEXT DEFAULT 'submitted',  -- submitted|working|completed|failed|canceled
+  messages JSONB DEFAULT '[]',
+  artifacts JSONB DEFAULT '[]',
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+)
+
+-- Transform cache (schemas inferidos/transformaciones)
+a2a_transform_cache (
+  id UUID PRIMARY KEY,
+  source_schema_hash TEXT NOT NULL,
+  target_schema_hash TEXT NOT NULL,
+  transform_template JSONB NOT NULL,
+  hit_count INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT now()
+)
+```
+
+---
+
 ## Deuda técnica conocida
 
 | # | Deuda | Impacto | Estado |
 |---|-------|---------|--------|
-| 1 | Storage in-memory | Datos se pierden en restart | Pendiente migrar a PostgreSQL |
-| 2 | Discovery sin API Kite | No podemos descubrir en Kite | Bloqueado por Kite |
-| 3 | Pagos no implementados | No cobra 1% fee | Pendiente integración x402 |
+| 1 | Discovery sin API Kite | No podemos descubrir en Kite | Bloqueado por Kite |
+| 2 | Pagos no implementados | No cobra 1% fee | Pendiente integración x402 |
 
 ---
 
