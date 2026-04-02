@@ -4,6 +4,7 @@
 
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { registryService } from '../services/registry.js'
+import type { RegistrySchema, RegistryAuth } from '../types/index.js'
 
 const registriesRoutes: FastifyPluginAsync = async (fastify) => {
   /**
@@ -52,8 +53,8 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
           discoveryEndpoint: string
           invokeEndpoint: string
           agentEndpoint?: string
-          schema: unknown
-          auth?: unknown
+          schema: RegistrySchema
+          auth?: RegistryAuth
           enabled?: boolean
         }
       }>,

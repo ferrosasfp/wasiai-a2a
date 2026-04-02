@@ -4,6 +4,7 @@
 
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { composeService } from '../services/compose.js'
+import type { ComposeStep } from '../types/index.js'
 
 const composeRoutes: FastifyPluginAsync = async (fastify) => {
   /**
@@ -24,12 +25,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
     async (
       request: FastifyRequest<{
         Body: {
-          steps: Array<{
-            agent: string
-            registry?: string
-            input?: Record<string, unknown>
-            passOutput?: boolean
-          }>
+          steps: ComposeStep[]
           maxBudget?: number
         }
       }>,
