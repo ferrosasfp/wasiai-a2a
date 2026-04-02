@@ -2,53 +2,77 @@
  * Discovery Routes — Search agents across registries
  */
 
-import { Hono } from 'hono'
-import { discoveryService } from '../services/discovery'
+import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
+import { discoveryService } from '../services/discovery.js'
 
-const app = new Hono()
+const discoverRoutes: FastifyPluginAsync = async (fastify) => {
+  /**
+   * GET /discover
+   * Search agents across all registered marketplaces
+   *
+   * Query params:
+   * - capabilities: comma-separated list of capabilities
+   * - q: free text search
+   * - maxPrice: maximum price per call in USDC
+   * - minReputation: minimum reputation score (0-1)
+   * - limit: max results
+   * - registry: filter to specific registry
+   */
+  fastify.get(
+    '/',
+    async (
+      request: FastifyRequest<{
+        Querystring: {
+          capabilities?: string
+          q?: string
+          maxPrice?: string
+          minReputation?: string
+          limit?: string
+          registry?: string
+        }
+      }>,
+      reply: FastifyReply,
+    ) => {
+      const query = request.query
 
-/**
- * GET /discover
- * Search agents across all registered marketplaces
- * 
- * Query params:
- * - capabilities: comma-separated list of capabilities
- * - q: free text search
- * - maxPrice: maximum price per call in USDC
- * - minReputation: minimum reputation score (0-1)
- * - limit: max results
- * - registry: filter to specific registry
- */
-app.get('/', async (c) => {
-  const query = c.req.query()
-  
-  const result = await discoveryService.discover({
-    capabilities: query.capabilities?.split(',').map(s => s.trim()),
-    query: query.q,
-    maxPrice: query.maxPrice ? parseFloat(query.maxPrice) : undefined,
-    minReputation: query.minReputation ? parseFloat(query.minReputation) : undefined,
-    limit: query.limit ? parseInt(query.limit) : undefined,
-    registry: query.registry,
-  })
+      const result = await discoveryService.discover({
+        capabilities: query.capabilities?.split(',').map((s) => s.trim()),
+        query: query.q,
+        maxPrice: query.maxPrice ? parseFloat(query.maxPrice) : undefined,
+        minReputation: query.minReputation ? parseFloat(query.minReputation) : undefined,
+        limit: query.limit ? parseInt(query.limit) : undefined,
+        registry: query.registry,
+      })
 
-  return c.json(result)
-})
+      return reply.send(result)
+    },
+  )
 
-/**
- * GET /discover/:slug
- * Get a specific agent by slug
- */
-app.get('/:slug', async (c) => {
-  const slug = c.req.param('slug')
-  const registry = c.req.query('registry')
-  
-  const agent = await discoveryService.getAgent(slug, registry)
-  
-  if (!agent) {
-    return c.json({ error: 'Agent not found' }, 404)
-  }
-  
-  return c.json(agent)
-})
+  /**
+   * GET /discover/:slug
+   * Get a specific agent by slug
+   */
+  fastify.get(
+    '/:slug',
+    async (
+      request: FastifyRequest<{
+        Params: { slug: string }
+        Querystring: { registry?: string }
+      }>,
+      reply: FastifyReply,
+    ) => {
+      const { slug } = request.params
+      const { registry } = request.query
 
-export default app
+      const agent = await discoveryService.getAgent(slug, registry)
+
+      if (!agent) {
+        return reply.status(404).send({ error: 'Agent not found' })
+      }
+
+      return reply.send(agent)
+    },
+  )
+}
+
+export default discoverRoutes
