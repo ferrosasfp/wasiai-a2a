@@ -15,6 +15,9 @@ import discoverRoutes from './routes/discover'
 import composeRoutes from './routes/compose'
 import orchestrateRoutes from './routes/orchestrate'
 
+// Kite: importar dispara la inicialización (top-level await en el módulo)
+import { kiteClient } from './services/kite-client.js'
+
 const app = new Hono()
 
 // Middleware
@@ -52,6 +55,7 @@ console.log(`
 ║   Agent Discovery, Composition & Orchestration Service    ║
 ╠═══════════════════════════════════════════════════════════╣
 ║   Server running on http://localhost:${port}                  ║
+║   Kite: ${kiteClient ? 'connected (chainId: 2368)     ' : 'disabled (KITE_RPC_URL not set)'}║
 ║                                                           ║
 ║   Endpoints:                                              ║
 ║   • GET  /registries     — List marketplaces              ║
