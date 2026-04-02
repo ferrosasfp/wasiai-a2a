@@ -3,7 +3,7 @@
  */
 
 import { Hono } from 'hono'
-import { composeService } from '../services/compose'
+import { composeService } from '../services/compose.js'
 
 const app = new Hono()
 

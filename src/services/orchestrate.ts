@@ -7,9 +7,9 @@ import type {
   OrchestrateRequest, 
   OrchestrateResult,
   ComposeStep,
-} from '../types'
-import { discoveryService } from './discovery'
-import { composeService } from './compose'
+} from '../types/index.js'
+import { discoveryService } from './discovery.js'
+import { composeService } from './compose.js'
 
 export const orchestrateService = {
   /**

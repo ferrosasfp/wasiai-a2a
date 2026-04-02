@@ -3,7 +3,7 @@
  */
 
 import { Hono } from 'hono'
-import { orchestrateService } from '../services/orchestrate'
+import { orchestrateService } from '../services/orchestrate.js'
 
 const app = new Hono()
 
