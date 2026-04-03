@@ -1,36 +1,82 @@
 sprint: 1
 nombre: "Sprint 1 — Kite Foundations"
-periodo: "2026-04-01 → 2026-04-06"
-estado: ACTIVO
+periodo: "2026-04-01 → 2026-04-02"
+estado: CERRADO
 goal: "Gateway conectado a Ozone Testnet, Agent Passport funcional"
+goal_cumplido: true
 
-issues:
+completadas:
   - id: WKH-19
     hu: "SPIKE: Kite Ozone Testnet — RPC, chain ID, faucet, ABIs"
-    prioridad: P0
-    estado: IN_PROGRESS
+    modo: QUALITY
+    estado: DONE
+    commit: spike
+
   - id: WKH-5
     hu: "Kite Chain — Conexión Ozone Testnet"
-    prioridad: P1
-    estado: TODO
-    bloqueo: WKH-19
+    modo: QUALITY
+    estado: DONE
+    commit: e6b9a42
+
+  - id: WKH-20
+    hu: "Migrar framework de Hono a Fastify"
+    modo: QUALITY
+    estado: DONE
+    commit: 90eebff
+    nota: "No planificado — emergió como prerequisito técnico de WKH-6/WKH-7"
+
   - id: WKH-6
-    hu: "Agent Passport — Mint y Verify en Ozone Testnet"
-    prioridad: P2
-    estado: TODO
-    bloqueo: WKH-5
+    hu: "x402 Payment Middleware — Kite Service Provider"
+    modo: QUALITY
+    estado: DONE
+    commit: 5b76c30
+
   - id: WKH-7
     hu: "Supabase — Migrar registries de in-memory a PostgreSQL"
-    prioridad: P3
-    estado: TODO
+    modo: QUALITY
+    estado: DONE
+    commit: f0bc18d
 
-proxima_ceremonia: "Status — miércoles 2026-04-02"
+carry_over: []
 
-log:
-  - fecha: 2026-04-01
-    evento: "Sprint kickoff + pipeline completo WKH-5"
-    detalle: |
-      WKH-19 (Spike) DONE — RPC testnet.gokite.ai, chainId 2368, faucet, contratos
-      WKH-5 IN PROGRESS — Story File listo, branch feat/wkh-5-kite-chain
-      Decisión arquitectura: Opción A (Service Provider x402) para Agent Passport
-      Solicitar invitación portal Kite: https://x402-portal-eight.vercel.app/
+deuda_tecnica_nueva:
+  - descripcion: "Orquestador delega operaciones git/DB a sub-agentes (aún lo hace el orquestador directamente)"
+    severidad: MENOR
+    sprint_objetivo: 2
+
+  - descripcion: "Gate compliance tracking — registrar si gates fueron respetados"
+    severidad: MENOR
+    sprint_objetivo: 2
+
+mejoras_proceso_aplicadas:
+  - "Grounding Check obligatorio en F2.5"
+  - "git fetch obligatorio en AR Paso 0"
+  - "Wave -1 Environment Gate en Story Files"
+  - "Checklist pre-F3 en orquestador"
+  - "DONE obligatorio antes de cerrar HU"
+  - "Engram para métricas en DONE"
+  - "Auto-Blindaje F3 paralelo en repo compartido"
+
+auto_blindaje:
+  - error: "F3 paralelo sobre repo compartido mezcla commits"
+    fix: "Serializar F3 o usar git worktrees"
+    documentado_en: ".agent/skills/nexus-agile/references/subagent_protocol.md"
+
+  - error: "Gate SPEC_APPROVED omitido — Story Files generados sin aprobación"
+    fix: "Respetar tabla de gates sin excepciones"
+    documentado_en: "quality_pipeline.md + SKILL.md"
+
+  - error: "AR Adversary no hizo git fetch — reportó branch vacío"
+    fix: "Paso 0 obligatorio git fetch + reset --hard"
+    documentado_en: "quality_pipeline.md"
+
+  - error: "Story File WKH-7 referenció discover.ts pero código estaba en discovery.ts"
+    fix: "Grounding Check obligatorio en F2.5"
+    documentado_en: "quality_pipeline.md"
+
+velocidad:
+  hu_completadas: 5
+  dias_duracion: 2
+  hu_por_dia: 2.5
+
+proxima_ceremonia: "Sprint 2 Planning — lunes 2026-04-06"
