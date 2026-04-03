@@ -2,35 +2,25 @@
  * Compose Routes — Multi-agent pipelines
  */
 
-import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
+import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import { composeService } from '../services/compose.js'
 import type { ComposeStep } from '../types/index.js'
+import { requirePayment } from '../middleware/x402.js'
+
+type ComposeBody = {
+  steps: ComposeStep[]
+  maxBudget?: number
+}
 
 const composeRoutes: FastifyPluginAsync = async (fastify) => {
-  /**
-   * POST /compose
-   * Execute a multi-agent pipeline
-   *
-   * Body:
-   * {
-   *   "steps": [
-   *     { "agent": "agent-slug", "registry": "wasiai", "input": {...}, "passOutput": false },
-   *     { "agent": "another-agent", "input": {...}, "passOutput": true }
-   *   ],
-   *   "maxBudget": 0.50
-   * }
-   */
-  fastify.post(
+  fastify.post<{ Body: ComposeBody }>(
     '/',
-    async (
-      request: FastifyRequest<{
-        Body: {
-          steps: ComposeStep[]
-          maxBudget?: number
-        }
-      }>,
-      reply: FastifyReply,
-    ) => {
+    {
+      preHandler: requirePayment({
+        description: 'WasiAI Compose Service — Multi-agent pipeline execution',
+      }),
+    },
+    async (request, reply: FastifyReply) => {
       try {
         const body = request.body
 
@@ -51,7 +41,8 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
           return reply.status(400).send(result)
         }
 
-        return reply.send(result)
+        const kiteTxHash = request.kiteTxHash
+        return reply.send({ kiteTxHash, ...result })
       } catch (err) {
         return reply.status(500).send({
           error: err instanceof Error ? err.message : 'Compose failed',

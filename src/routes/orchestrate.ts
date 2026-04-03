@@ -2,35 +2,26 @@
  * Orchestrate Routes — Goal-based orchestration
  */
 
-import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
+import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import { orchestrateService } from '../services/orchestrate.js'
+import { requirePayment } from '../middleware/x402.js'
+
+type OrchestrateBody = {
+  goal: string
+  budget: number
+  preferCapabilities?: string[]
+  maxAgents?: number
+}
 
 const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
-  /**
-   * POST /orchestrate
-   * Execute goal-based orchestration
-   *
-   * Body:
-   * {
-   *   "goal": "Analyze token 0xABC and tell me if it's safe to buy",
-   *   "budget": 0.50,
-   *   "preferCapabilities": ["token-analysis", "risk-assessment"],
-   *   "maxAgents": 3
-   * }
-   */
-  fastify.post(
+  fastify.post<{ Body: OrchestrateBody }>(
     '/',
-    async (
-      request: FastifyRequest<{
-        Body: {
-          goal: string
-          budget: number
-          preferCapabilities?: string[]
-          maxAgents?: number
-        }
-      }>,
-      reply: FastifyReply,
-    ) => {
+    {
+      preHandler: requirePayment({
+        description: 'WasiAI Orchestration Service — Goal-based AI agent orchestration',
+      }),
+    },
+    async (request, reply: FastifyReply) => {
       try {
         const body = request.body
 
@@ -49,7 +40,8 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           maxAgents: body.maxAgents,
         })
 
-        return reply.send(result)
+        const kiteTxHash = request.kiteTxHash
+        return reply.send({ kiteTxHash, ...result })
       } catch (err) {
         return reply.status(500).send({
           error: err instanceof Error ? err.message : 'Orchestration failed',
