@@ -1,14 +1,12 @@
 /**
  * WasiAI A2A Protocol
- * 
+ *
  * Agent discovery, composition, and orchestration service.
  * Supports multiple marketplace registries via configuration.
  */
 
-import { serve } from '@hono/node-server'
-import { Hono } from 'hono'
-import { cors } from 'hono/cors'
-import { logger } from 'hono/logger'
+import Fastify from 'fastify'
+import cors from '@fastify/cors'
 
 import registriesRoutes from './routes/registries.js'
 import discoverRoutes from './routes/discover.js'
@@ -18,15 +16,14 @@ import orchestrateRoutes from './routes/orchestrate.js'
 // Kite: importar dispara la inicialización (top-level await en el módulo)
 import { kiteClient } from './services/kite-client.js'
 
-const app = new Hono()
+const fastify = Fastify({ logger: true })
 
-// Middleware
-app.use('*', cors())
-app.use('*', logger())
+// CORS
+await fastify.register(cors, { origin: '*' })
 
 // Health check
-app.get('/', (c) => {
-  return c.json({
+fastify.get('/', async (_request, reply) => {
+  return reply.send({
     name: 'WasiAI A2A Protocol',
     version: '0.1.0',
     description: 'Agent discovery, composition, and orchestration service',
@@ -41,10 +38,10 @@ app.get('/', (c) => {
 })
 
 // Routes
-app.route('/registries', registriesRoutes)
-app.route('/discover', discoverRoutes)
-app.route('/compose', composeRoutes)
-app.route('/orchestrate', orchestrateRoutes)
+await fastify.register(registriesRoutes, { prefix: '/registries' })
+await fastify.register(discoverRoutes, { prefix: '/discover' })
+await fastify.register(composeRoutes, { prefix: '/compose' })
+await fastify.register(orchestrateRoutes, { prefix: '/orchestrate' })
 
 // Start server
 const port = parseInt(process.env.PORT ?? '3001')
@@ -66,6 +63,4 @@ console.log(`
 ╚═══════════════════════════════════════════════════════════╝
 `)
 
-serve({ fetch: app.fetch, port })
-
-export default app
+await fastify.listen({ port, host: '0.0.0.0' })
