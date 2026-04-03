@@ -1,331 +1,231 @@
 # WasiAI A2A Protocol
 
-> The universal A2A Gateway for agent discovery, composition, and orchestration — built on Google A2A Protocol standard
+> Universal agent discovery, composition, and orchestration gateway — built on [Google A2A Protocol](https://google.github.io/A2A/) standard with native Kite x402 payments.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Google A2A](https://img.shields.io/badge/Protocol-Google%20A2A-4285f4.svg)](https://a2a-protocol.org)
-[![Kite AI Hackathon](https://img.shields.io/badge/Hackathon-Kite%20AI%202026-6366f1.svg)](https://gokite.ai)
+**🌐 Live:** https://wasiai-a2a-production.up.railway.app
 
-## What is this?
+---
 
-WasiAI A2A is an open protocol that enables AI agents from **any marketplace** to:
+## What It Does
 
-- **Discover** agents across multiple registries (WasiAI, Kite, others)
-- **Compose** multi-agent pipelines with automatic schema transformation
-- **Orchestrate** complex workflows from a single goal (LLM selects agents)
-- **Pay** for services via Kite x402
-
-**Zero human in the loop. Standards-based. Universal translator.**
-
-## Why Google A2A Protocol?
-
-We implement the [Google Agent2Agent (A2A) Protocol](https://a2a-protocol.org) — an open standard with 50+ partners including LangChain, PayPal, Atlassian, and MongoDB.
-
-- **Agent Cards** — Standardized metadata for capability discovery
-- **Tasks** — Lifecycle management for long-running pipelines
-- **Streaming** — Real-time updates via SSE
-- **JSON-RPC 2.0** — Industry-standard transport
-
-## Architecture
+WasiAI A2A is the protocol layer that lets AI agents find each other, compose multi-agent pipelines, and pay autonomously — without human intervention.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    AUTONOMOUS AGENTS                        │
-│            (any framework, any location)                    │
-└─────────────────────────────────────────────────────────────┘
-                            │
-                            ▼ Google A2A Protocol (JSON-RPC 2.0)
-┌─────────────────────────────────────────────────────────────┐
-│                  WasiAI A2A Gateway                         │
-│                                                             │
-│  REST Endpoints:                                            │
-│  ├── POST /registries      → Register any marketplace       │
-│  ├── POST /discover        → Multi-registry search          │
-│  ├── POST /compose         → Pipeline execution             │
-│  ├── POST /orchestrate     → Goal-based (LLM decides)       │
-│  └── GET  /agents/:id/agent-card → A2A Agent Card           │
-│                                                             │
-│  JSON-RPC Endpoint (POST /a2a):                             │
-│  ├── message/send          → Send message to agent          │
-│  ├── message/stream        → Streaming response (SSE)       │
-│  ├── task/get              → Get task status                │
-│  ├── task/list             → List tasks                     │
-│  └── task/cancel           → Cancel task                    │
-│                                                             │
-│  Features:                                                  │
-│  ├── Agent Cards (auto-generated)                           │
-│  ├── Schema Transform (LLM-powered, cached)                 │
-│  └── Tasks + Streaming (A2A standard)                       │
-└─────────────────────────────────────────────────────────────┘
-        │                                           │
-        ▼ Multi-Registry Discovery                  ▼ Payments
-┌───────────────┐ ┌───────────────┐         ┌───────────────┐
-│ WasiAI        │ │ Kite          │         │ Kite L1       │
-│ (A2A native)  │ │ (LLM infer)   │         │ x402 + ERC8004│
-└───────────────┘ └───────────────┘         └───────────────┘
+AI Agent
+  ↓ POST /discover      → Find agents across registered marketplaces
+  ↓ POST /compose       → Execute multi-agent pipelines
+  ↓ POST /orchestrate   → Goal-based orchestration (LLM decides agents)
+  ↓ x402 payment        → Pay per call via Kite Testnet
 ```
 
-## Technical Stack
+**Key features:**
+- Multi-registry agent discovery
+- Multi-agent pipeline composition
+- LLM-based goal orchestration
+- x402 HTTP-native payments (Kite Testnet)
+- Supabase persistent registry storage
+- Kite Agent Passport: Service Provider integration
 
-| Component | Technology |
-|-----------|------------|
-| **Framework** | Fastify |
-| **Database** | Supabase PostgreSQL |
-| **Queue** | Redis + BullMQ |
-| **Cache** | Redis |
-| **LLM** | Claude Sonnet (transform + orchestrate) |
-| **Protocol** | Google A2A (JSON-RPC 2.0) |
-| **Identity** | Kite Passport (ERC-8004) |
-| **Payments** | Kite x402 |
-| **Blockchain** | viem v2 |
+---
 
 ## Quick Start
 
+### Prerequisites
+- Node.js 20+
+- Supabase project (or use the dev instance)
+- Kite Testnet wallet
+
+### Run locally
+
 ```bash
-# Install dependencies
+git clone https://github.com/ferrosasfp/wasiai-a2a.git
+cd wasiai-a2a
+
 npm install
 
-# Copy environment variables
 cp .env.example .env
+# Edit .env with your credentials (see below)
 
-# Run development server
 npm run dev
-
-# Server starts at http://localhost:3001
 ```
 
-## Environment Variables
+### Environment variables
 
 ```bash
 # Server
 PORT=3001
 NODE_ENV=development
 
-# Database (Supabase)
+# Supabase (required)
 SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=your-key
-DATABASE_URL=postgresql://...
+SUPABASE_SERVICE_KEY=your-service-role-key
 
-# Redis
-REDIS_URL=redis://localhost:6379
+# Kite x402 payments (required for /orchestrate and /compose)
+KITE_WALLET_ADDRESS=0xYourWalletAddress
+KITE_FACILITATOR_URL=https://facilitator.pieverse.io
+KITE_MERCHANT_NAME=YourServiceName
 
-# LLM (Claude Sonnet)
-ANTHROPIC_API_KEY=your-key
-
-# Kite (blockchain)
+# Kite Chain (optional — enables chain features)
 KITE_RPC_URL=https://rpc-testnet.gokite.ai/
-KITE_CHAIN_ID=2368
-OPERATOR_PRIVATE_KEY=0x...
-
-# WasiAI Registry (pre-registered)
-WASIAI_API_URL=https://app.wasiai.io/api/v1
-WASIAI_API_KEY=wasi_...
 ```
 
-## API Reference
-
-### REST Endpoints
-
-#### Register a Marketplace
-
-Any marketplace can register itself — no code required:
+### Run migrations
 
 ```bash
-curl -X POST http://localhost:3001/registries \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-marketplace",
-    "discoveryEndpoint": "https://api.example.com/agents",
-    "invokeEndpoint": "https://api.example.com/agents/{slug}/invoke",
-    "a2aSupport": "none",
-    "inferSchemas": true
-  }'
+# Apply to your Supabase project via SQL Editor:
+# supabase/migrations/20260401000000_kite_registries.sql
 ```
 
-#### Discover Agents (Multi-Registry)
-
-Search agents across ALL registered marketplaces:
+### Build & start
 
 ```bash
-curl -X POST http://localhost:3001/discover \
-  -H "Content-Type: application/json" \
-  -d '{
-    "capabilities": ["risk-analysis"],
-    "maxPrice": 0.10
-  }'
+npm run build
+npm start
 ```
-
-Response:
-```json
-{
-  "agents": [
-    {
-      "id": "risk-analyzer",
-      "name": "Risk Analyzer",
-      "priceUsdc": 0.05,
-      "registry": "wasiai",
-      "agentCard": "https://a2a.wasiai.io/agents/risk-analyzer/agent-card"
-    }
-  ],
-  "total": 1,
-  "registries": ["wasiai", "kite"]
-}
-```
-
-#### Get Agent Card (A2A Standard)
-
-```bash
-curl http://localhost:3001/agents/risk-analyzer/agent-card
-```
-
-Response:
-```json
-{
-  "name": "Risk Analyzer",
-  "description": "Analyzes token risk factors",
-  "url": "https://a2a.wasiai.io/agents/risk-analyzer",
-  "capabilities": {
-    "streaming": true,
-    "pushNotifications": true
-  },
-  "skills": [
-    { "id": "token-risk", "name": "Token Risk Analysis" }
-  ],
-  "inputModes": ["text", "data"],
-  "outputModes": ["text", "data"],
-  "defaultInputSchema": { "type": "object", "properties": { "token": { "type": "string" } } },
-  "defaultOutputSchema": { "type": "object", "properties": { "risk_score": { "type": "number" } } }
-}
-```
-
-#### Compose Pipeline
-
-Chain multiple agents with automatic schema transformation:
-
-```bash
-curl -X POST http://localhost:3001/compose \
-  -H "Content-Type: application/json" \
-  -d '{
-    "steps": [
-      { "agent": "price-oracle", "input": { "token": "0xABC" } },
-      { "agent": "risk-analyzer", "passOutput": true },
-      { "agent": "report-generator", "passOutput": true }
-    ],
-    "maxBudget": 0.50
-  }'
-```
-
-#### Orchestrate from Goal
-
-Just give a goal — Claude Sonnet selects the right agents:
-
-```bash
-curl -X POST http://localhost:3001/orchestrate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "goal": "Analyze token 0xABC and tell me if it is safe to buy",
-    "budget": 0.50,
-    "maxAgents": 3
-  }'
-```
-
-### JSON-RPC Endpoint (A2A Protocol)
-
-All A2A methods available at `POST /a2a`:
-
-```bash
-# Send message to agent
-curl -X POST http://localhost:3001/a2a \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "message/send",
-    "params": {
-      "agentId": "risk-analyzer",
-      "message": {
-        "role": "user",
-        "parts": [{ "kind": "text", "text": "Analyze 0xABC" }]
-      }
-    },
-    "id": "1"
-  }'
-
-# Get task status
-curl -X POST http://localhost:3001/a2a \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "task/get",
-    "params": { "id": "task-uuid" },
-    "id": "2"
-  }'
-```
-
-## Interoperability Strategy
-
-Not every marketplace implements Google A2A. WasiAI handles both:
-
-| Marketplace | A2A Support | Strategy |
-|-------------|-------------|----------|
-| **WasiAI** | ✅ Full | Native Agent Cards, zero transform cost |
-| **Kite** | ❌ None (today) | LLM schema inference + caching |
-| **New with A2A** | ✅ Full | Automatic interoperability |
-| **New without A2A** | ❌ None | Manual config or LLM inference |
-
-### Schema Transform Flow
-
-When Agent A's output doesn't match Agent B's input:
-
-1. Read `outputSchema` from Agent A's Agent Card
-2. Read `inputSchema` from Agent B's Agent Card
-3. If incompatible → Claude Sonnet transforms
-4. Cache the transform → zero cost on subsequent calls
-5. Agent B receives properly formatted input
-
-## Database Schema
-
-Tables use `a2a_` prefix (shared Supabase with wasiai-v2 dev):
-
-```sql
--- Registered marketplaces
-a2a_registries (
-  id, name, discovery_endpoint, invoke_endpoint,
-  a2a_support, default_input_schema, default_output_schema,
-  infer_schemas, created_at
-)
-
--- A2A Tasks
-a2a_tasks (
-  id, context_id, status, messages, artifacts,
-  created_at, updated_at
-)
-
--- Transform cache
-a2a_transform_cache (
-  id, source_schema_hash, target_schema_hash,
-  transform_template, hit_count, created_at
-)
-```
-
-## Business Model
-
-| Revenue | How |
-|---------|-----|
-| **1% Protocol Fee** | Per compose/orchestrate call |
-| **Discovery Premium** | Advanced features (reputation, matching) |
-| **B2B Licensing** | Other marketplaces license the A2A Gateway |
-
-## Related Projects
-
-- **[wasiai-v2](https://github.com/ferrosasfp/wasiai-v2)** — The WasiAI Marketplace (consumes this service)
-- **[@wasiai/sdk](https://www.npmjs.com/package/@wasiai/sdk)** — TypeScript SDK for developers
-
-## License
-
-MIT — use it, fork it, build on it.
 
 ---
 
-**Kite AI Global Hackathon 2026** · Track: Agentic Commerce
+## API Reference
 
-[Live Demo](https://app.wasiai.io) · [Pitch](https://wasiai.io/pitch-v6/) · [Google A2A Protocol](https://a2a-protocol.org)
+### Health
+```
+GET /
+```
+Returns service info and available endpoints.
+
+### Registries
+```
+GET    /registries          List all registered marketplaces
+POST   /registries          Register a new marketplace
+GET    /registries/:id      Get a specific registry
+PATCH  /registries/:id      Update a registry
+DELETE /registries/:id      Delete a registry
+```
+
+### Discovery
+```
+POST /discover
+{
+  "query": "token analysis",
+  "capabilities": ["risk-assessment"],
+  "maxPrice": 0.10
+}
+```
+
+### Compose (x402 protected)
+```
+POST /compose
+X-Payment: <kite-payment-token>
+
+{
+  "steps": [
+    { "agent": "agent-slug", "registry": "wasiai", "input": {...} },
+    { "agent": "another-agent", "input": {...}, "passOutput": true }
+  ],
+  "maxBudget": 0.50
+}
+```
+
+### Orchestrate (x402 protected)
+```
+POST /orchestrate
+X-Payment: <kite-payment-token>
+
+{
+  "goal": "Analyze token 0xABC and tell me if it's safe to buy",
+  "budget": 0.50,
+  "preferCapabilities": ["token-analysis"],
+  "maxAgents": 3
+}
+```
+
+---
+
+## x402 Payment Flow
+
+Endpoints `/compose` and `/orchestrate` require payment via [x402 protocol](https://x402.org):
+
+**1. Call without payment → receive 402:**
+```bash
+curl -X POST https://wasiai-a2a-production.up.railway.app/orchestrate \
+  -H "Content-Type: application/json" \
+  -d '{"goal":"test","budget":1}'
+
+# Response 402:
+{
+  "error": "X-PAYMENT header is required",
+  "accepts": [{
+    "scheme": "gokite-aa",
+    "network": "kite-testnet",
+    "maxAmountRequired": "1000000000000000000",
+    "payTo": "0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba",
+    "asset": "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63",
+    ...
+  }],
+  "x402Version": 1
+}
+```
+
+**2. Get payment token via [Kite Agent Passport](https://docs.gokite.ai/kite-agent-passport/kite-agent-passport)**
+
+**3. Call with X-Payment header → service executes + returns kiteTxHash**
+
+---
+
+## Architecture
+
+```
+wasiai-a2a/
+├── src/
+│   ├── index.ts              # Fastify server
+│   ├── middleware/
+│   │   └── x402.ts           # x402 payment preHandler
+│   ├── routes/
+│   │   ├── registries.ts     # Registry CRUD
+│   │   ├── discover.ts       # Multi-registry discovery
+│   │   ├── compose.ts        # Pipeline execution (x402)
+│   │   └── orchestrate.ts    # Goal-based orchestration (x402)
+│   ├── services/
+│   │   ├── registry.ts       # Supabase registry service
+│   │   ├── discovery.ts      # Discovery logic
+│   │   ├── compose.ts        # Pipeline logic
+│   │   └── orchestrate.ts    # Orchestration logic
+│   └── lib/
+│       ├── supabase.ts       # Supabase client singleton
+│       └── kite-chain.ts     # Kite chain definition (viem)
+├── supabase/
+│   └── migrations/           # SQL migrations (prefijo kite_)
+└── doc/sdd/                  # NexusAgile methodology artifacts
+```
+
+**Stack:** Fastify · Supabase PostgreSQL · TypeScript · viem · x402
+
+---
+
+## Network Info (Kite Testnet)
+
+| Parameter | Value |
+|-----------|-------|
+| Chain ID | 2368 |
+| RPC | https://rpc-testnet.gokite.ai/ |
+| Explorer | https://testnet.kitescan.ai/ |
+| Payment token | `0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63` |
+| Facilitator | https://facilitator.pieverse.io |
+| Service wallet | `0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba` |
+
+---
+
+## Built With
+
+This project was built entirely through conversational AI using:
+- **Claude Sonnet** (Anthropic) — orchestration LLM + code generation
+- **NexusAgile** — AI-native development methodology (F0→F1→F2→F3→AR pipeline)
+- **OpenClaw** — AI agent runtime
+
+---
+
+## Hackathon
+
+Built for [Kite AI Global Buildathon 2026](https://www.encodeclub.com/programmes/kites-hackathon-ai-agentic-economy) — Agentic Commerce track.
+
+**Goal:** Universal A2A gateway enabling autonomous agent-to-agent commerce with Kite-native x402 payments.
