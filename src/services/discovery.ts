@@ -11,8 +11,8 @@ export const discoveryService = {
    */
   async discover(query: DiscoveryQuery): Promise<DiscoveryResult> {
     const registries = query.registry
-      ? [registryService.get(query.registry)].filter(Boolean) as RegistryConfig[]
-      : registryService.getEnabled()
+      ? [await registryService.get(query.registry)].filter(Boolean) as RegistryConfig[]
+      : await registryService.getEnabled()
 
     if (registries.length === 0) {
       return { agents: [], total: 0, registries: [] }
@@ -132,8 +132,8 @@ export const discoveryService = {
    */
   async getAgent(slug: string, registryId?: string): Promise<Agent | null> {
     const registries = registryId
-      ? [registryService.get(registryId)].filter(Boolean) as RegistryConfig[]
-      : registryService.getEnabled()
+      ? [await registryService.get(registryId)].filter(Boolean) as RegistryConfig[]
+      : await registryService.getEnabled()
 
     for (const registry of registries) {
       try {
