@@ -17,3 +17,11 @@
 **Causa:** El Story File usa el patrón `fastify.post('/', { preHandler }, async (request: FastifyRequest<Generic>, ...)` que en TypeScript strict no infiere el generic correctamente. El fix es mover el generic al nivel del `fastify.post<Generic>`.  
 **Corrección mínima aplicada:** `fastify.post<{ Body: ... }>(...)` con handler tipado via `request.body` sin re-declarar el tipo del parámetro, compatible con Fastify v4/v5.  
 **Impacto:** Cero impacto en lógica de negocio.
+
+## Nota — Errores pre-existentes en main (fuera de scope WKH-6)
+
+**Archivos afectados:** `src/services/discovery.ts`, `src/routes/registries.ts`  
+**Confirmación:** Verificado con `git stash` — los mismos errores existen en `main` antes de cualquier cambio de WKH-6.  
+**Causa probable:** Trabajo de WKH-7 (feat/wkh-7 — Supabase registry) que dejó `getAll()` retornando Promise en lugar de array, pero `discovery.ts` sigue usando el valor como si fuera síncrono.  
+**Acción WKH-6:** NINGUNA. Story File prohíbe explícitamente tocar `src/services/discovery.ts` y `src/routes/registries.ts`. Estos errores son pre-existentes y deben resolverse en una story separada.  
+**Impacto en WKH-6:** Los archivos creados/modificados por WKH-6 compilan sin errores propios.
