@@ -2,7 +2,7 @@
  * Registry Service — Manages marketplace registrations
  */
 
-import type { RegistryConfig, RegistrySchema, RegistryAuth } from '../types'
+import type { RegistryConfig, RegistrySchema, RegistryAuth } from '../types/index.js'
 
 // In-memory store (replace with DB in production)
 const registries = new Map<string, RegistryConfig>()

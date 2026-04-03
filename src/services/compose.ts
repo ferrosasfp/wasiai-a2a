@@ -8,8 +8,8 @@ import type {
   ComposeResult, 
   ComposeStep, 
   StepResult 
-} from '../types'
-import { discoveryService } from './discovery'
+} from '../types/index.js'
+import { discoveryService } from './discovery.js'
 
 export const composeService = {
   /**

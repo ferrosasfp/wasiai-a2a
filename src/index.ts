@@ -13,6 +13,9 @@ import discoverRoutes from './routes/discover.js'
 import composeRoutes from './routes/compose.js'
 import orchestrateRoutes from './routes/orchestrate.js'
 
+// Kite: importar dispara la inicialización (top-level await en el módulo)
+import { kiteClient } from './services/kite-client.js'
+
 const fastify = Fastify({ logger: true })
 
 // CORS
@@ -49,6 +52,7 @@ console.log(`
 ║   Agent Discovery, Composition & Orchestration Service    ║
 ╠═══════════════════════════════════════════════════════════╣
 ║   Server running on http://localhost:${port}                  ║
+║   Kite: ${kiteClient ? 'connected (chainId: 2368)     ' : 'disabled (KITE_RPC_URL not set)'}║
 ║                                                           ║
 ║   Endpoints:                                              ║
 ║   • GET  /registries     — List marketplaces              ║
