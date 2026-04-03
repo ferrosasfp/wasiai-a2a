@@ -187,3 +187,94 @@ export interface PaymentConfig {
 export interface PaymentAuth {
   xPayment: string  // Base64 encoded x402 payload
 }
+
+// ============================================================
+// x402 PROTOCOL TYPES (Kite Testnet)
+// ============================================================
+
+/**
+ * Payload dentro del array "accepts" de una respuesta 402.
+ * Describe el pago que el cliente debe realizar.
+ */
+export interface X402PaymentPayload {
+  scheme: 'gokite-aa'
+  network: 'kite-testnet' | 'kite-mainnet'
+  /** Monto máximo requerido en wei */
+  maxAmountRequired: string
+  /** URL del endpoint que requiere pago */
+  resource: string
+  description: string
+  mimeType: string
+  outputSchema?: {
+    input?: Record<string, unknown>
+    output?: Record<string, unknown>
+  }
+  /** Wallet address del service provider que recibe el pago */
+  payTo: string
+  maxTimeoutSeconds: number
+  /** Contract address del token de pago */
+  asset: string
+  extra: null | Record<string, unknown>
+  merchantName: string
+}
+
+/**
+ * Body completo de una respuesta HTTP 402 conforme a x402.
+ */
+export interface X402Response {
+  error: string
+  accepts: X402PaymentPayload[]
+  x402Version: 1
+}
+
+/**
+ * Payload decodificado del header X-Payment (base64 JSON).
+ * Generado por el cliente (Kite MCP / Agent Passport).
+ */
+export interface X402PaymentRequest {
+  authorization: {
+    from: string        // Wallet address del pagador
+    to: string          // Wallet address del service provider
+    value: string       // Monto en wei
+    validAfter: string  // Unix timestamp (string) — "0" si inmediato
+    validBefore: string // Unix timestamp (string) — deadline de expiración
+    nonce: string       // 0x... nonce único para esta autorización
+  }
+  signature: string     // Firma EIP-712 del pagador
+  network?: string      // "kite-testnet" (opcional)
+}
+
+/**
+ * Request body para POST /v2/verify en Pieverse.
+ */
+export interface PieverseVerifyRequest {
+  authorization: X402PaymentRequest['authorization']
+  signature: string
+  network: string
+}
+
+/**
+ * Response de POST /v2/verify en Pieverse.
+ */
+export interface PieverseVerifyResponse {
+  valid: boolean
+  error?: string
+}
+
+/**
+ * Request body para POST /v2/settle en Pieverse.
+ */
+export interface PieverseSettleRequest {
+  authorization: X402PaymentRequest['authorization']
+  signature: string
+  network: string
+}
+
+/**
+ * Response de POST /v2/settle en Pieverse.
+ */
+export interface PieverseSettleResult {
+  txHash: string
+  success: boolean
+  error?: string
+}
