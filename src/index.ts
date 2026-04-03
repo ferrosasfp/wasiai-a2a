@@ -10,10 +10,13 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 
-import registriesRoutes from './routes/registries'
-import discoverRoutes from './routes/discover'
-import composeRoutes from './routes/compose'
-import orchestrateRoutes from './routes/orchestrate'
+import registriesRoutes from './routes/registries.js'
+import discoverRoutes from './routes/discover.js'
+import composeRoutes from './routes/compose.js'
+import orchestrateRoutes from './routes/orchestrate.js'
+
+// Kite: importar dispara la inicialización (top-level await en el módulo)
+import { kiteClient } from './services/kite-client.js'
 
 const app = new Hono()
 
@@ -52,6 +55,7 @@ console.log(`
 ║   Agent Discovery, Composition & Orchestration Service    ║
 ╠═══════════════════════════════════════════════════════════╣
 ║   Server running on http://localhost:${port}                  ║
+║   Kite: ${kiteClient ? 'connected (chainId: 2368)     ' : 'disabled (KITE_RPC_URL not set)'}║
 ║                                                           ║
 ║   Endpoints:                                              ║
 ║   • GET  /registries     — List marketplaces              ║

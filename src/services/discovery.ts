@@ -2,8 +2,8 @@
  * Discovery Service — Search agents across all registries
  */
 
-import type { Agent, DiscoveryQuery, DiscoveryResult, RegistryConfig } from '../types'
-import { registryService } from './registry'
+import type { Agent, DiscoveryQuery, DiscoveryResult, RegistryConfig } from '../types/index.js'
+import { registryService } from './registry.js'
 
 export const discoveryService = {
   /**

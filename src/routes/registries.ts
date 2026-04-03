@@ -3,7 +3,7 @@
  */
 
 import { Hono } from 'hono'
-import { registryService } from '../services/registry'
+import { registryService } from '../services/registry.js'
 
 const app = new Hono()
 

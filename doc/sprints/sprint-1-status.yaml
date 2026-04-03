@@ -25,3 +25,12 @@ issues:
     estado: TODO
 
 proxima_ceremonia: "Status — miércoles 2026-04-02"
+
+log:
+  - fecha: 2026-04-01
+    evento: "Sprint kickoff + pipeline completo WKH-5"
+    detalle: |
+      WKH-19 (Spike) DONE — RPC testnet.gokite.ai, chainId 2368, faucet, contratos
+      WKH-5 IN PROGRESS — Story File listo, branch feat/wkh-5-kite-chain
+      Decisión arquitectura: Opción A (Service Provider x402) para Agent Passport
+      Solicitar invitación portal Kite: https://x402-portal-eight.vercel.app/
