@@ -12,7 +12,7 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
    * List all registered marketplaces
    */
   fastify.get('/', async (_request: FastifyRequest, reply: FastifyReply) => {
-    const registries = registryService.list()
+    const registries = await registryService.list()
     return reply.send({
       registries,
       total: registries.length,
@@ -30,7 +30,7 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
       reply: FastifyReply,
     ) => {
       const { id } = request.params
-      const registry = registryService.get(id)
+      const registry = await registryService.get(id)
 
       if (!registry) {
         return reply.status(404).send({ error: 'Registry not found' })
@@ -70,7 +70,7 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
           })
         }
 
-        const registry = registryService.register({
+        const registry = await registryService.register({
           name: body.name,
           discoveryEndpoint: body.discoveryEndpoint,
           invokeEndpoint: body.invokeEndpoint,
@@ -103,7 +103,7 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
         const { id } = request.params
         const body = request.body
 
-        const registry = registryService.update(id, body)
+        const registry = await registryService.update(id, body)
         return reply.send(registry)
       } catch (err) {
         return reply.status(400).send({
@@ -125,7 +125,7 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
     ) => {
       try {
         const { id } = request.params
-        const deleted = registryService.delete(id)
+        const deleted = await registryService.delete(id)
 
         if (!deleted) {
           return reply.status(404).send({ error: 'Registry not found' })
