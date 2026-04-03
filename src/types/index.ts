@@ -278,3 +278,29 @@ export interface PieverseSettleResult {
   success: boolean
   error?: string
 }
+
+// ============================================================
+// AGENT CARD TYPES (Google A2A Protocol)
+// ============================================================
+
+export interface AgentSkill {
+  id: string
+  name: string
+  description: string
+}
+
+export interface AgentCard {
+  name: string
+  description: string
+  url: string
+  capabilities: {
+    streaming: boolean
+    pushNotifications: boolean
+  }
+  skills: AgentSkill[]
+  inputModes: string[]
+  outputModes: string[]
+  authentication: {
+    schemes: string[]
+  }
+}

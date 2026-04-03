@@ -12,6 +12,8 @@ import registriesRoutes from './routes/registries.js'
 import discoverRoutes from './routes/discover.js'
 import composeRoutes from './routes/compose.js'
 import orchestrateRoutes from './routes/orchestrate.js'
+import agentCardRoutes from './routes/agent-card.js'
+import wellKnownRoutes from './routes/well-known.js'
 
 // Kite: importar dispara la inicialización (top-level await en el módulo)
 import { kiteClient } from './services/kite-client.js'
@@ -32,6 +34,8 @@ fastify.get('/', async (_request, reply) => {
       discover: '/discover — Search agents across all registries',
       compose: '/compose — Execute multi-agent pipelines',
       orchestrate: '/orchestrate — Goal-based orchestration',
+      agentCard: '/agents/:slug/agent-card — A2A Agent Card',
+      wellKnown: '/.well-known/agent.json — Gateway self Agent Card',
     },
     docs: 'https://github.com/ferrosasfp/wasiai-a2a',
   })
@@ -42,6 +46,8 @@ await fastify.register(registriesRoutes, { prefix: '/registries' })
 await fastify.register(discoverRoutes, { prefix: '/discover' })
 await fastify.register(composeRoutes, { prefix: '/compose' })
 await fastify.register(orchestrateRoutes, { prefix: '/orchestrate' })
+await fastify.register(agentCardRoutes, { prefix: '/agents' })
+await fastify.register(wellKnownRoutes, { prefix: '/.well-known' })
 
 // Start server
 const port = parseInt(process.env.PORT ?? '3001')
