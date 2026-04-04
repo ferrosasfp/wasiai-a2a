@@ -304,3 +304,31 @@ export interface AgentCard {
     schemes: string[]
   }
 }
+
+// ============================================================
+// TASK TYPES (Google A2A Protocol)
+// ============================================================
+
+export const TASK_STATES = [
+  'submitted',
+  'working',
+  'completed',
+  'failed',
+  'canceled',
+  'input-required',
+] as const
+
+export type TaskState = (typeof TASK_STATES)[number]
+
+export const TERMINAL_STATES: readonly TaskState[] = ['completed', 'failed', 'canceled'] as const
+
+export interface Task {
+  id: string
+  contextId: string | null
+  status: TaskState
+  messages: unknown[]
+  artifacts: unknown[]
+  metadata: Record<string, unknown> | null
+  createdAt: Date
+  updatedAt: Date
+}
