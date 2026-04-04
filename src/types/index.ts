@@ -168,9 +168,13 @@ export interface OrchestrateRequest {
 }
 
 export interface OrchestrateResult {
+  orchestrationId: string
   answer: unknown
   reasoning: string
-  pipeline: ComposeResult
+  steps: StepResult[]
+  totalCostUsdc: number
+  protocolFeeUsdc: number
+  attestationTxHash?: string
   consideredAgents: Agent[]
 }
 

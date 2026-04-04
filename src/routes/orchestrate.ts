@@ -40,9 +40,16 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           maxAgents: body.maxAgents,
         })
 
-        const kiteTxHash = request.kiteTxHash
-        return reply.send({ kiteTxHash, ...result })
+        return reply.send(result)
       } catch (err: unknown) {
+        // Timeout — 504
+        if (
+          err instanceof Error &&
+          'code' in err &&
+          (err as NodeJS.ErrnoException).code === 'ORCHESTRATION_TIMEOUT'
+        ) {
+          return reply.status(504).send({ error: 'Orchestration timeout: exceeded 120s' })
+        }
         // Capacidades faltantes — 422
         if (
           err instanceof Error &&

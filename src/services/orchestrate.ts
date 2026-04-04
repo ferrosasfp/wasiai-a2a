@@ -1,5 +1,7 @@
 /**
  * Orchestrate Service — Goal-based multi-agent orchestration
+ *
+ * WKH-13: orchestrationId, structured logs, 120s timeout, protocolFeeUsdc, attestation on-chain.
  */
 
 import type { 
@@ -10,27 +12,79 @@ import type {
 } from '../types/index.js'
 import { discoveryService } from './discovery.js'
 import { composeService } from './compose.js'
+import { attestOrchestration, computePipelineHash } from '../lib/kite-attestation.js'
+
+// ─── Constants ────────────────────────────────────────────────
+
+const ORCHESTRATION_TIMEOUT_MS = 120_000
+
+// ─── Structured log helper ────────────────────────────────────
+
+function structuredLog(
+  orchestrationId: string,
+  step: string,
+  detail: Record<string, unknown> = {},
+): void {
+  console.log(JSON.stringify({
+    orchestrationId,
+    step,
+    timestamp: new Date().toISOString(),
+    detail,
+  }))
+}
+
+// ─── Service ─────────────────────────────────────────────────
 
 export const orchestrateService = {
   /**
-   * Orchestrate from a natural language goal
+   * Orchestrate from a natural language goal.
+   * Wraps the pipeline in a 120s timeout.
    */
   async orchestrate(request: OrchestrateRequest): Promise<OrchestrateResult> {
+    const orchestrationId = crypto.randomUUID()
+
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(Object.assign(new Error('Orchestration timeout: exceeded 120s'), { code: 'ORCHESTRATION_TIMEOUT' })),
+        ORCHESTRATION_TIMEOUT_MS,
+      ),
+    )
+
+    return Promise.race([
+      this._runPipeline(orchestrationId, request),
+      timeoutPromise,
+    ])
+  },
+
+  /**
+   * Internal: runs the full orchestration pipeline.
+   * Extracted for testability and clean timeout wrapping.
+   */
+  async _runPipeline(
+    orchestrationId: string,
+    request: OrchestrateRequest,
+  ): Promise<OrchestrateResult> {
     const { goal, budget, preferCapabilities, maxAgents = 5 } = request
 
-    // Step 1: Discover relevant agents
+    // ── Step 1: Discover ────────────────────────────────────
+    structuredLog(orchestrationId, 'discover', { query: goal })
+
     const discovered = await discoveryService.discover({
       query: goal,
       capabilities: preferCapabilities,
-      maxPrice: budget / maxAgents,  // Rough per-agent budget
-      limit: maxAgents * 2,  // Get more than needed for selection
+      maxPrice: budget / maxAgents,
+      limit: maxAgents * 2,
     })
 
     if (discovered.agents.length === 0) {
       throw new Error(`No agents found for goal: ${goal}`)
     }
 
-    // Step 2: Plan pipeline — LLM con fallback a precio
+    structuredLog(orchestrationId, 'discover-done', { agentsFound: discovered.agents.length })
+
+    // ── Step 2: Plan ─────────────────────────────────────────
+    structuredLog(orchestrationId, 'plan', { strategy: process.env.ANTHROPIC_API_KEY ? 'llm' : 'price' })
+
     let steps: ComposeStep[]
     let reasoning: string
 
@@ -51,11 +105,9 @@ export const orchestrateService = {
         steps = planSuccess.steps
         reasoning = planSuccess.reasoning
       } catch (err: unknown) {
-        // Propagar errores de capacidades faltantes
         if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'MISSING_CAPABILITIES') {
           throw err
         }
-        // Fallback silencioso para errores técnicos
         console.warn('[Orchestrate] LLM planner failed, falling back to price strategy:', (err as Error).message)
         const fallback = this.planPipeline(goal, discovered.agents, budget, maxAgents)
         steps = fallback.steps
@@ -67,26 +119,51 @@ export const orchestrateService = {
       reasoning = fallback.reasoning
     }
 
-    // Step 3: Execute pipeline
+    structuredLog(orchestrationId, 'plan-done', { stepsCount: steps.length, reasoning: reasoning.slice(0, 120) })
+
+    // ── Step 3: Compose ──────────────────────────────────────
+    structuredLog(orchestrationId, 'compose', { stepsCount: steps.length })
+
     const pipeline = await composeService.compose({
       steps,
       maxBudget: budget,
     })
 
-    // Step 4: Return result
+    const protocolFeeUsdc = pipeline.totalCostUsdc * 0.01
+
+    structuredLog(orchestrationId, 'compose-done', {
+      totalCostUsdc: pipeline.totalCostUsdc,
+      protocolFeeUsdc,
+      success: pipeline.success,
+    })
+
+    // ── Step 4: Attest ───────────────────────────────────────
+    const pipelineHash = computePipelineHash({ steps: pipeline.steps, totalCostUsdc: pipeline.totalCostUsdc })
+    structuredLog(orchestrationId, 'attest', { pipelineHash })
+
+    const attestationTxHash = (await attestOrchestration(orchestrationId, pipelineHash)) ?? undefined
+
+    structuredLog(orchestrationId, 'done', {
+      totalCostUsdc: pipeline.totalCostUsdc,
+      protocolFeeUsdc,
+      attestationTxHash: attestationTxHash ?? null,
+    })
+
+    // ── Result ───────────────────────────────────────────────
     return {
+      orchestrationId,
       answer: pipeline.output,
       reasoning,
-      pipeline,
+      steps: pipeline.steps,
+      totalCostUsdc: pipeline.totalCostUsdc,
+      protocolFeeUsdc,
+      attestationTxHash,
       consideredAgents: discovered.agents,
     }
   },
 
   /**
-   * Plan a pipeline from available agents
-   * 
-   * Simple strategy: select top N agents within budget
-   * TODO: Replace with LLM-based planning
+   * Plan a pipeline from available agents (price-based fallback)
    */
   planPipeline(
     goal: string, 
@@ -97,7 +174,6 @@ export const orchestrateService = {
     const selectedAgents: Agent[] = []
     let remainingBudget = budget
 
-    // Select agents that fit budget
     for (const agent of agents) {
       if (agent.priceUsdc > remainingBudget) continue
       if (selectedAgents.length >= maxAgents) break
@@ -110,14 +186,11 @@ export const orchestrateService = {
       throw new Error(`No agents fit within budget: ${budget} USDC`)
     }
 
-    // Create steps
     const steps: ComposeStep[] = selectedAgents.map((agent, index) => ({
       agent: agent.slug,
       registry: agent.registry,
-      input: index === 0 
-        ? { goal } 
-        : { goal },  // Each step gets the original goal
-      passOutput: index > 0,  // Pass output from previous step
+      input: { goal },
+      passOutput: index > 0,
     }))
 
     const reasoning = `Selected ${selectedAgents.length} agents based on relevance to goal and budget constraints. ` +
