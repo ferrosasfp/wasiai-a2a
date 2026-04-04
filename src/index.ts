@@ -13,6 +13,7 @@ import discoverRoutes from './routes/discover.js'
 import composeRoutes from './routes/compose.js'
 import orchestrateRoutes from './routes/orchestrate.js'
 import agentCardRoutes from './routes/agent-card.js'
+import mockRegistryRoutes from './routes/mock-registry.js'
 import wellKnownRoutes from './routes/well-known.js'
 import tasksRoutes from './routes/tasks.js'
 
@@ -50,6 +51,7 @@ await fastify.register(orchestrateRoutes, { prefix: '/orchestrate' })
 await fastify.register(agentCardRoutes, { prefix: '/agents' })
 await fastify.register(wellKnownRoutes, { prefix: '/.well-known' })
 await fastify.register(tasksRoutes, { prefix: '/tasks' })
+await fastify.register(mockRegistryRoutes, { prefix: '/mock-registry/agents' })
 
 // Start server
 const port = parseInt(process.env.PORT ?? '3001')
