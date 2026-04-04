@@ -117,16 +117,19 @@ Si NO puedes armar un pipeline válido con los agentes disponibles, responde:
       throw new Error('LLM returned empty steps')
     }
 
+    // Cap al máximo de agentes permitido
+    const cappedSteps = steps.slice(0, maxAgents)
+
     // Validar que los slugs existen en la lista disponible
     const availableSlugs = new Set(agents.map(a => a.slug))
-    for (const step of steps) {
+    for (const step of cappedSteps) {
       if (!availableSlugs.has(step.agent)) {
         throw new Error(`LLM returned unknown agent slug: ${step.agent}`)
       }
     }
 
     return {
-      steps,
+      steps: cappedSteps,
       reasoning: String(parsed.reasoning ?? ''),
     }
   } finally {
