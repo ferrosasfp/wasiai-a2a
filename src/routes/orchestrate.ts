@@ -42,7 +42,18 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
 
         const kiteTxHash = request.kiteTxHash
         return reply.send({ kiteTxHash, ...result })
-      } catch (err) {
+      } catch (err: unknown) {
+        // Capacidades faltantes — 422
+        if (
+          err instanceof Error &&
+          'code' in err &&
+          (err as NodeJS.ErrnoException).code === 'MISSING_CAPABILITIES'
+        ) {
+          return reply.status(422).send({
+            error: 'Cannot build pipeline',
+            missingCapabilities: ((err as unknown) as { missingCapabilities: string[] }).missingCapabilities,
+          })
+        }
         return reply.status(500).send({
           error: err instanceof Error ? err.message : 'Orchestration failed',
         })

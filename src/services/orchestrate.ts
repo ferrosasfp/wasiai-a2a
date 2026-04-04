@@ -30,14 +30,42 @@ export const orchestrateService = {
       throw new Error(`No agents found for goal: ${goal}`)
     }
 
-    // Step 2: Plan pipeline (simple strategy for now)
-    // TODO: Use LLM to plan optimal pipeline based on goal and available agents
-    const { steps, reasoning } = this.planPipeline(
-      goal, 
-      discovered.agents, 
-      budget, 
-      maxAgents
-    )
+    // Step 2: Plan pipeline — LLM con fallback a precio
+    let steps: ComposeStep[]
+    let reasoning: string
+
+    const useLLM = !!process.env.ANTHROPIC_API_KEY
+    if (useLLM) {
+      try {
+        const { planOrchestration } = await import('./llm/planner.js')
+        const result = await planOrchestration(goal, discovered.agents, budget, maxAgents)
+
+        if ('error' in result && result.error === 'missing_capabilities') {
+          throw Object.assign(new Error('Cannot build pipeline: missing capabilities'), {
+            code: 'MISSING_CAPABILITIES',
+            missingCapabilities: result.missingCapabilities,
+          })
+        }
+
+        const planSuccess = result as { steps: ComposeStep[]; reasoning: string }
+        steps = planSuccess.steps
+        reasoning = planSuccess.reasoning
+      } catch (err: unknown) {
+        // Propagar errores de capacidades faltantes
+        if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'MISSING_CAPABILITIES') {
+          throw err
+        }
+        // Fallback silencioso para errores técnicos
+        console.warn('[Orchestrate] LLM planner failed, falling back to price strategy:', (err as Error).message)
+        const fallback = this.planPipeline(goal, discovered.agents, budget, maxAgents)
+        steps = fallback.steps
+        reasoning = fallback.reasoning
+      }
+    } else {
+      const fallback = this.planPipeline(goal, discovered.agents, budget, maxAgents)
+      steps = fallback.steps
+      reasoning = fallback.reasoning
+    }
 
     // Step 3: Execute pipeline
     const pipeline = await composeService.compose({
