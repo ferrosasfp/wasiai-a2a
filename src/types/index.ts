@@ -150,6 +150,33 @@ export interface StepResult {
   costUsdc: number
   latencyMs: number
   txHash?: string  // Hash de tx on-chain si hubo pago x402
+  /** Cache hit status for schema transform applied after this step */
+  cacheHit?: boolean | 'SKIPPED'
+  /** Latency of schema transform (ms) */
+  transformLatencyMs?: number
+}
+
+// ============================================================
+// SCHEMA TRANSFORM TYPES (WKH-14)
+// ============================================================
+
+/** Result of a maybeTransform call */
+export interface TransformResult {
+  transformedOutput: unknown
+  /** true = cache hit, false = LLM generated, 'SKIPPED' = schemas compatible */
+  cacheHit: boolean | 'SKIPPED'
+  latencyMs: number
+}
+
+/** Row in kite_schema_transforms table */
+export interface SchemaTransformEntry {
+  id: string
+  sourceAgentId: string
+  targetAgentId: string
+  transformFn: string
+  hitCount: number
+  createdAt: Date
+  updatedAt: Date
 }
 
 // ============================================================

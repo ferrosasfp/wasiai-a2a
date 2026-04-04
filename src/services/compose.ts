@@ -15,6 +15,7 @@ import { discoveryService } from './discovery.js'
 import { registryService } from './registry.js'
 import { signX402Authorization } from '../lib/x402-signer.js'
 import { settlePayment } from '../middleware/x402.js'
+import { maybeTransform } from './llm/transform.js'
 
 // ─── Helpers ─────────────────────────────────────────────────
 
@@ -104,6 +105,29 @@ export const composeService = {
         totalCost += agent.priceUsdc
         totalLatency += latencyMs
         lastOutput = output
+
+        // Schema transform — if there's a next step with inputSchema
+        if (i < steps.length - 1) {
+          const nextStep = steps[i + 1]
+          const nextAgent = await this.resolveAgent(nextStep)
+          const inputSchema = nextAgent?.metadata?.inputSchema as Record<string, unknown> | undefined
+          if (inputSchema) {
+            try {
+              const tr = await maybeTransform(
+                agent.id,
+                nextAgent!.id,
+                lastOutput,
+                inputSchema,
+              )
+              result.cacheHit = tr.cacheHit
+              result.transformLatencyMs = tr.latencyMs
+              lastOutput = tr.transformedOutput
+            } catch (transformErr) {
+              console.error(`[Compose] Transform failed at step ${i}:`, transformErr)
+              // Non-blocking: pass output as-is if transform fails
+            }
+          }
+        }
 
       } catch (err) {
         return {

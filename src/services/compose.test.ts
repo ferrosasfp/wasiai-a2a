@@ -41,6 +41,15 @@ vi.mock('./discovery.js', () => ({
 const mockFetch = vi.fn()
 vi.stubGlobal('fetch', mockFetch)
 
+// Mock transform service (WKH-14) — bypass in compose tests
+vi.mock('./llm/transform.js', () => ({
+  maybeTransform: vi.fn().mockResolvedValue({
+    transformedOutput: null,  // will be overridden per test if needed
+    cacheHit: 'SKIPPED',
+    latencyMs: 0,
+  }),
+}))
+
 // Import after mocks
 import { composeService } from './compose.js'
 import { registryService } from './registry.js'
@@ -274,8 +283,9 @@ describe('composeService.invokeAgent', () => {
     const agent2 = makeAgent({ slug: 'a2', priceUsdc: 0.6, metadata: { payTo: '0xPAY' } })
 
     vi.mocked(discoveryService.getAgent)
-      .mockResolvedValueOnce(agent1)
-      .mockResolvedValueOnce(agent2)
+      .mockResolvedValueOnce(agent1)   // resolveAgent(step[0]) in loop
+      .mockResolvedValueOnce(agent2)   // resolveAgent(step[1]) in transform check after step[0]
+      .mockResolvedValueOnce(agent2)   // resolveAgent(step[1]) in loop budget check
 
     // Need to sign x402 for agent1 (priceUsdc > 0)
     vi.mocked(signX402Authorization).mockResolvedValue({
