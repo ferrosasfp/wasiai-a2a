@@ -35,6 +35,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_context_id
   WHERE context_id IS NOT NULL;
 
 -- Trigger para updated_at automático
+DROP TRIGGER IF EXISTS set_updated_at ON tasks;
 CREATE TRIGGER set_updated_at
   BEFORE UPDATE ON tasks
   FOR EACH ROW

@@ -335,7 +335,24 @@ describe('taskService', () => {
     ).rejects.toThrow(TaskNotFoundError)
   })
 
-  it('20. append() sin messages ni artifacts retorna task sin cambios', async () => {
+  // ─ MNR-4: input-required no es estado terminal ───────────
+
+  it('20. updateStatus() de input-required a working NO lanza TerminalStateError', async () => {
+    const currentRow = makeTaskRow({ status: 'input-required' })
+    const updatedRow = makeTaskRow({ status: 'working' })
+
+    const getChain = mockChain({ data: currentRow, error: null })
+    const updateChain = mockChain({ data: updatedRow, error: null })
+
+    mockFrom
+      .mockReturnValueOnce(getChain as unknown as ReturnType<typeof mockFrom>)
+      .mockReturnValueOnce(updateChain as unknown as ReturnType<typeof mockFrom>)
+
+    const task = await taskService.updateStatus('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'working')
+    expect(task.status).toBe('working')
+  })
+
+  it('21. append() sin messages ni artifacts retorna task sin cambios', async () => {
     const row = makeTaskRow()
     const chain = mockChain({ data: row, error: null })
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>)

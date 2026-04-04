@@ -271,4 +271,32 @@ describe('tasks routes', () => {
 
     expect(res.statusCode).toBe(404)
   })
+
+  // ─ MNR-3: UUID inválido → 400 ─────────────────────────────
+
+  it('18. GET /tasks/not-a-uuid retorna 400', async () => {
+    const res = await app.inject({ method: 'GET', url: '/tasks/not-a-uuid' })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/Invalid UUID/)
+  })
+
+  it('19. PATCH /tasks/not-a-uuid/status retorna 400', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/tasks/not-a-uuid/status',
+      payload: { status: 'working' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/Invalid UUID/)
+  })
+
+  it('20. PATCH /tasks/not-a-uuid retorna 400', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/tasks/not-a-uuid',
+      payload: { messages: [{ text: 'x' }] },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/Invalid UUID/)
+  })
 })

@@ -69,10 +69,13 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(400).send({ error: `Invalid status: ${status}` })
       }
 
+      const parsedLimit = limit ? parseInt(limit, 10) : undefined
+      const safeLimit = parsedLimit !== undefined && Number.isFinite(parsedLimit) ? parsedLimit : undefined
+
       const tasks = await taskService.list({
         status: status as TaskState | undefined,
         contextId: context_id,
-        limit: limit ? parseInt(limit, 10) : undefined,
+        limit: safeLimit,
       })
 
       return reply.send({ tasks, total: tasks.length })
@@ -115,6 +118,9 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
       if (!isValidUUID(request.params.id)) {
         return reply.status(400).send({ error: 'Invalid UUID format' })
       }
+      if (!request.body || typeof request.body !== 'object') {
+        return reply.status(400).send({ error: 'Invalid request body' })
+      }
       const { status } = request.body
 
       if (!status || !TASK_STATES.includes(status as TaskState)) {
@@ -151,6 +157,9 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
     ) => {
       if (!isValidUUID(request.params.id)) {
         return reply.status(400).send({ error: 'Invalid UUID format' })
+      }
+      if (!request.body || typeof request.body !== 'object') {
+        return reply.status(400).send({ error: 'Invalid request body' })
       }
       const { messages, artifacts } = request.body
 
