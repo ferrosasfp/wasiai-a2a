@@ -149,6 +149,7 @@ export interface StepResult {
   output: unknown
   costUsdc: number
   latencyMs: number
+  txHash?: string  // Hash de tx on-chain si hubo pago x402
 }
 
 // ============================================================
