@@ -16,6 +16,8 @@ import type {
 import { discoveryService } from './discovery.js'
 import { composeService } from './compose.js'
 import { eventService } from './event.js'
+import { keccak256, toHex } from 'viem'
+import { attestationService } from './attestation.js'
 
 const MODEL = 'claude-sonnet-4-20250514'
 const LLM_TIMEOUT_MS = 30_000
@@ -351,6 +353,40 @@ export const orchestrateService = {
     // Step 4: Calculate protocol fee (display only, not charged)
     const protocolFeeUsdc = Number((pipeline.totalCostUsdc * PROTOCOL_FEE_RATE).toFixed(6))
 
+    // Step 4.5: Attestation (best-effort, non-blocking)
+    let attestationTxHash: string | undefined
+
+    if (pipeline.success && pipeline.steps.length > 0) {
+      try {
+        const attestationData = {
+          orchestrationId,
+          agents: pipeline.steps.map(s => s.agent.slug),
+          totalCostUsdc: BigInt(Math.round(pipeline.totalCostUsdc * 1e6)),
+          resultHash: keccak256(toHex(JSON.stringify(pipeline.output ?? null))),
+        }
+
+        let attestationTimeoutId: ReturnType<typeof setTimeout>
+        const timeoutPromise = new Promise<null>((resolve) => {
+          attestationTimeoutId = setTimeout(() => resolve(null), 15_000)
+        })
+
+        const txHash = await Promise.race([
+          attestationService.write(attestationData),
+          timeoutPromise,
+        ])
+        clearTimeout(attestationTimeoutId!)
+
+        if (txHash) {
+          attestationTxHash = txHash
+        }
+      } catch (err) {
+        console.warn(
+          '[Orchestrate] attestation failed:',
+          err instanceof Error ? err.message : err,
+        )
+      }
+    }
+
     const totalLatencyMs = Date.now() - startTime
 
     // AC6: Track orchestrate_goal event (fire-and-forget)
@@ -375,6 +411,7 @@ export const orchestrateService = {
       pipeline,
       consideredAgents: discovered.agents,
       protocolFeeUsdc,
+      attestationTxHash,
     }
   },
 }

@@ -38,7 +38,7 @@ const EIP712_TYPES = {
 
 let _walletClient: ReturnType<typeof createWalletClient> | null = null
 
-function getWalletClient() {
+export function getWalletClient() {
   if (_walletClient) return _walletClient
 
   const pk = process.env.OPERATOR_PRIVATE_KEY
