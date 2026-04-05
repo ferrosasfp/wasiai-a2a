@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WasiAI A2A — Dashboard</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <style>
+    :root {
+      --kpi-bg: #1a1a2e;
+      --kpi-border: #16213e;
+      --success: #00b894;
+      --failed: #e17055;
+      --accent: #6c5ce7;
+    }
+    body { padding: 1rem 2rem; }
+    h1 { margin-bottom: 0.25rem; }
+    .subtitle { color: var(--pico-muted-color); margin-bottom: 1.5rem; font-size: 0.9rem; }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    .kpi-card {
+      background: var(--kpi-bg);
+      border: 1px solid var(--kpi-border);
+      border-radius: 8px;
+      padding: 1.25rem;
+      text-align: center;
+    }
+    .kpi-card .value {
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--accent);
+      line-height: 1.2;
+    }
+    .kpi-card .label {
+      font-size: 0.8rem;
+      color: var(--pico-muted-color);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-top: 0.25rem;
+    }
+    .status-badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .status-success { background: var(--success); color: #fff; }
+    .status-failed { background: var(--failed); color: #fff; }
+    .status-submitted { background: #636e72; color: #fff; }
+    .status-working { background: #fdcb6e; color: #2d3436; }
+    .status-completed { background: var(--success); color: #fff; }
+    .status-canceled { background: #b2bec3; color: #2d3436; }
+    .tx-link { font-family: monospace; font-size: 0.8rem; }
+    table { font-size: 0.85rem; }
+    .section-title { margin-top: 2rem; margin-bottom: 0.5rem; }
+    .refresh-indicator {
+      position: fixed;
+      top: 0.5rem;
+      right: 1rem;
+      font-size: 0.75rem;
+      color: var(--pico-muted-color);
+    }
+    .agents-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    .agent-card {
+      background: var(--kpi-bg);
+      border: 1px solid var(--kpi-border);
+      border-radius: 8px;
+      padding: 1rem;
+    }
+    .agent-card h4 { margin-bottom: 0.5rem; color: var(--accent); }
+    .agent-card .meta { font-size: 0.8rem; color: var(--pico-muted-color); }
+    .empty-state {
+      text-align: center;
+      color: var(--pico-muted-color);
+      padding: 2rem;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>WasiAI A2A Protocol</h1>
+    <p class="subtitle">Agent Discovery, Composition & Orchestration — Live Dashboard</p>
+  </header>
+
+  <div class="refresh-indicator" id="refresh-indicator">Auto-refresh: 5s</div>
+
+  <!-- KPI Cards -->
+  <div class="kpi-grid" id="kpi-grid">
+    <div class="kpi-card"><div class="value" id="kpi-registries">0</div><div class="label">Registries</div></div>
+    <div class="kpi-card"><div class="value" id="kpi-tasks">0</div><div class="label">Tasks</div></div>
+    <div class="kpi-card"><div class="value" id="kpi-invocations">0</div><div class="label">Agent Invocations</div></div>
+    <div class="kpi-card"><div class="value" id="kpi-success-rate">0%</div><div class="label">Success Rate</div></div>
+    <div class="kpi-card"><div class="value" id="kpi-cost">0</div><div class="label">Total Cost (USDC)</div></div>
+    <div class="kpi-card"><div class="value" id="kpi-latency">0</div><div class="label">Avg Latency (ms)</div></div>
+  </div>
+
+  <!-- Agents -->
+  <h3 class="section-title">Agents Invoked</h3>
+  <div class="agents-grid" id="agents-grid">
+    <div class="empty-state">No agents invoked yet</div>
+  </div>
+
+  <!-- Registries -->
+  <h3 class="section-title">Registries</h3>
+  <div id="registries-table">
+    <div class="empty-state">No registries configured</div>
+  </div>
+
+  <!-- Tasks -->
+  <h3 class="section-title">Recent Tasks</h3>
+  <div id="tasks-table">
+    <div class="empty-state">No tasks yet</div>
+  </div>
+
+  <!-- Events -->
+  <h3 class="section-title">Recent Events</h3>
+  <div id="events-table">
+    <div class="empty-state">No events recorded yet</div>
+  </div>
+
+  <footer style="text-align:center; margin-top:2rem; font-size:0.75rem; color:var(--pico-muted-color);">
+    WasiAI A2A Protocol v0.1.0 | Kite Hackathon 2026 | Auto-refresh: 5s
+  </footer>
+
+  <script>
+    const EXPLORER_URL = '{{KITE_EXPLORER_URL}}';
+    const BASE = window.location.origin;
+
+    function esc(s) {
+      if (s == null) return '';
+      var d = document.createElement('div');
+      d.appendChild(document.createTextNode(String(s)));
+      return d.innerHTML;
+    }
+
+    function truncHash(hash) {
+      if (!hash) return '';
+      return hash.slice(0, 10) + '...' + hash.slice(-6);
+    }
+
+    function statusBadge(status) {
+      return '<span class="status-badge status-' + status + '">' + status + '</span>';
+    }
+
+    async function fetchJSON(url) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json();
+      } catch (err) {
+        console.error('Fetch error:', url, err);
+        return null;
+      }
+    }
+
+    async function loadStats() {
+      const data = await fetchJSON(BASE + '/dashboard/api/stats');
+      if (!data) return;
+
+      document.getElementById('kpi-registries').textContent = data.registriesCount;
+
+      const totalTasks = Object.values(data.tasksByStatus).reduce(function(a, b) { return a + b; }, 0);
+      document.getElementById('kpi-tasks').textContent = totalTasks;
+
+      document.getElementById('kpi-invocations').textContent = data.eventsTotal;
+      document.getElementById('kpi-success-rate').textContent = data.successRate + '%';
+      document.getElementById('kpi-cost').textContent = data.totalCostUsdc.toFixed(4);
+      document.getElementById('kpi-latency').textContent = data.avgLatencyMs;
+
+      // Agents grid
+      var agentsEl = document.getElementById('agents-grid');
+      if (data.agents && data.agents.length > 0) {
+        agentsEl.innerHTML = data.agents.map(function(a) {
+          return '<div class="agent-card">' +
+            '<h4>' + esc(a.agentName) + '</h4>' +
+            '<div class="meta">Registry: ' + a.registry + '</div>' +
+            '<div class="meta">Invocations: ' + a.invocations + '</div>' +
+            '<div class="meta">Avg Latency: ' + a.avgLatencyMs + 'ms</div>' +
+            '<div class="meta">Total Cost: ' + a.totalCostUsdc.toFixed(4) + ' USDC</div>' +
+          '</div>';
+        }).join('');
+      } else {
+        agentsEl.innerHTML = '<div class="empty-state">No agents invoked yet</div>';
+      }
+    }
+
+    async function loadRegistries() {
+      var data = await fetchJSON(BASE + '/registries');
+      var el = document.getElementById('registries-table');
+      if (!data || !data.registries || data.registries.length === 0) {
+        el.innerHTML = '<div class="empty-state">No registries configured</div>';
+        return;
+      }
+      var html = '<table><thead><tr><th>Name</th><th>Discovery Endpoint</th><th>Enabled</th></tr></thead><tbody>';
+      data.registries.forEach(function(r) {
+        html += '<tr><td><strong>' + r.name + '</strong></td>';
+        html += '<td style="font-size:0.8rem">' + esc(r.discoveryEndpoint) + '</td>';
+        html += '<td>' + (r.enabled ? '✓' : '✗') + '</td></tr>';
+      });
+      html += '</tbody></table>';
+      el.innerHTML = html;
+    }
+
+    async function loadTasks() {
+      var data = await fetchJSON(BASE + '/tasks');
+      var el = document.getElementById('tasks-table');
+      var tasks = data;
+      if (Array.isArray(data)) {
+        tasks = data;
+      } else if (data && data.tasks) {
+        tasks = data.tasks;
+      }
+      if (!tasks || tasks.length === 0) {
+        el.innerHTML = '<div class="empty-state">No tasks yet</div>';
+        return;
+      }
+      var html = '<table><thead><tr><th>ID</th><th>Status</th><th>Created</th></tr></thead><tbody>';
+      tasks.slice(0, 10).forEach(function(t) {
+        html += '<tr><td style="font-family:monospace;font-size:0.75rem">' + t.id.slice(0, 8) + '...</td>';
+        html += '<td>' + statusBadge(t.status) + '</td>';
+        html += '<td style="font-size:0.8rem">' + new Date(t.createdAt || t.created_at).toLocaleString() + '</td></tr>';
+      });
+      html += '</tbody></table>';
+      el.innerHTML = html;
+    }
+
+    async function loadEvents() {
+      var data = await fetchJSON(BASE + '/dashboard/api/events');
+      var el = document.getElementById('events-table');
+      if (!data || !data.events || data.events.length === 0) {
+        el.innerHTML = '<div class="empty-state">No events recorded yet</div>';
+        return;
+      }
+      var html = '<table><thead><tr><th>Agent</th><th>Registry</th><th>Status</th><th>Latency</th><th>Cost</th><th>Tx</th><th>Time</th></tr></thead><tbody>';
+      data.events.forEach(function(e) {
+        var txCell = '';
+        if (e.txHash) {
+          txCell = '<a href="' + EXPLORER_URL + '/tx/' + e.txHash + '" target="_blank" class="tx-link">' + truncHash(e.txHash) + '</a>';
+        } else {
+          txCell = '-';
+        }
+        html += '<tr>';
+        html += '<td>' + esc(e.agentName || e.agentId || '-') + '</td>';
+        html += '<td>' + esc(e.registry || '-') + '</td>';
+        html += '<td>' + statusBadge(e.status) + '</td>';
+        html += '<td>' + (e.latencyMs != null ? e.latencyMs + 'ms' : '-') + '</td>';
+        html += '<td>' + (e.costUsdc > 0 ? e.costUsdc.toFixed(4) : '0') + '</td>';
+        html += '<td>' + txCell + '</td>';
+        html += '<td style="font-size:0.8rem">' + new Date(e.createdAt).toLocaleString() + '</td>';
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      el.innerHTML = html;
+    }
+
+    async function refreshAll() {
+      await Promise.all([loadStats(), loadRegistries(), loadTasks(), loadEvents()]);
+    }
+
+    // Initial load
+    refreshAll();
+
+    // Auto-refresh every 5s
+    setInterval(refreshAll, 5000);
+  </script>
+</body>
+</html>

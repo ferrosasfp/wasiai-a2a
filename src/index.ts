@@ -16,6 +16,7 @@ import agentCardRoutes from './routes/agent-card.js'
 import mockRegistryRoutes from './routes/mock-registry.js'
 import wellKnownRoutes from './routes/well-known.js'
 import tasksRoutes from './routes/tasks.js'
+import dashboardRoutes from './routes/dashboard.js'
 
 // Kite: importar dispara la inicialización (top-level await en el módulo)
 import { kiteClient } from './services/kite-client.js'
@@ -51,6 +52,7 @@ await fastify.register(orchestrateRoutes, { prefix: '/orchestrate' })
 await fastify.register(agentCardRoutes, { prefix: '/agents' })
 await fastify.register(wellKnownRoutes, { prefix: '/.well-known' })
 await fastify.register(tasksRoutes, { prefix: '/tasks' })
+await fastify.register(dashboardRoutes, { prefix: '/dashboard' })
 await fastify.register(mockRegistryRoutes, { prefix: '/mock-registry/agents' })
 
 // Start server

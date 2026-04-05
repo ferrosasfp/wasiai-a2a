@@ -360,3 +360,41 @@ export interface Task {
   createdAt: Date
   updatedAt: Date
 }
+
+// ============================================================
+// EVENT TYPES (WKH-27 Dashboard)
+// ============================================================
+
+export interface A2AEvent {
+  id: string
+  eventType: string
+  agentId: string | null
+  agentName: string | null
+  registry: string | null
+  status: "success" | "failed"
+  latencyMs: number | null
+  costUsdc: number
+  txHash: string | null
+  goal: string | null
+  metadata: Record<string, unknown>
+  createdAt: Date
+}
+
+export interface AgentSummary {
+  agentId: string
+  agentName: string
+  registry: string
+  invocations: number
+  avgLatencyMs: number
+  totalCostUsdc: number
+}
+
+export interface DashboardStats {
+  registriesCount: number
+  tasksByStatus: Record<string, number>
+  eventsTotal: number
+  successRate: number
+  totalCostUsdc: number
+  avgLatencyMs: number
+  agents: AgentSummary[]
+}

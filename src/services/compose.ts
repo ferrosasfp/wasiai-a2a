@@ -16,6 +16,7 @@ import { registryService } from './registry.js'
 import { signX402Authorization } from '../lib/x402-signer.js'
 import { settlePayment } from '../middleware/x402.js'
 import { maybeTransform } from './llm/transform.js'
+import { eventService } from './event.js'
 
 // ─── Helpers ─────────────────────────────────────────────────
 
@@ -102,6 +103,19 @@ export const composeService = {
         }
 
         results.push(result)
+
+        // Track event (fire-and-forget) — WKH-27
+        eventService.track({
+          eventType: 'compose_step',
+          agentId: agent.slug,
+          agentName: agent.name,
+          registry: agent.registry,
+          status: 'success',
+          latencyMs,
+          costUsdc: agent.priceUsdc,
+          txHash,
+        }).catch(err => console.error('[Compose] event tracking failed:', err))
+
         totalCost += agent.priceUsdc
         totalLatency += latencyMs
         lastOutput = output
@@ -130,6 +144,17 @@ export const composeService = {
         }
 
       } catch (err) {
+        // Track failed event (fire-and-forget) — WKH-27
+        eventService.track({
+          eventType: 'compose_step',
+          agentId: agent?.slug,
+          agentName: agent?.name,
+          registry: agent?.registry,
+          status: 'failed',
+          latencyMs: Date.now() - startTime,
+          costUsdc: 0,
+        }).catch(trackErr => console.error('[Compose] event tracking failed:', trackErr))
+
         return {
           success: false,
           output: null,

@@ -14,3 +14,4 @@
 | 011 | 2026-04-04 | LLM Planning — Claude selects agents by goal (WKH-10) | feature | QUALITY | DONE | feat/wkh-10-llm-planner |
 | 012 | 2026-04-04 | POST /orchestrate — Flujo completo goal→discover→compose→pay (WKH-13) | feature | QUALITY | DONE | feat/wkh-13-orchestrate-full |
 | 013 | 2026-04-04 | Schema Transform — LLM adapts output/input between agents (WKH-14) | feature | QUALITY | DONE | feat/wkh-14-schema-transform |
+| 014 | 2026-04-05 | Dashboard Analytics — KPIs + events + UI (WKH-27) | feature | QUALITY | DONE | feat/wkh-27-dashboard |
