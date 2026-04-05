@@ -1,7 +1,11 @@
 /**
- * Orchestrate Routes — Goal-based orchestration
+ * Orchestrate Routes — Goal-based orchestration with LLM planning
+ *
+ * WKH-13: orchestrationId generated here (not in service),
+ * passed to service, always available for response/error.
  */
 
+import crypto from 'node:crypto'
 import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import { orchestrateService } from '../services/orchestrate.js'
 import { requirePayment } from '../middleware/x402.js'
@@ -17,34 +21,50 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: OrchestrateBody }>(
     '/',
     {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['goal', 'budget'],
+          properties: {
+            goal: { type: 'string', minLength: 1, maxLength: 2000 },
+            budget: { type: 'number', exclusiveMinimum: 0, maximum: 100000 },
+            maxAgents: { type: 'integer', minimum: 1, maximum: 20 },
+            preferCapabilities: {
+              type: 'array',
+              items: { type: 'string', maxLength: 100 },
+              maxItems: 20,
+            },
+          },
+        },
+      },
       preHandler: requirePayment({
         description: 'WasiAI Orchestration Service — Goal-based AI agent orchestration',
       }),
     },
     async (request, reply: FastifyReply) => {
+      const orchestrationId = crypto.randomUUID()
+
       try {
         const body = request.body
 
-        if (!body.goal) {
-          return reply.status(400).send({ error: 'Missing required field: goal' })
-        }
-
-        if (!body.budget || body.budget <= 0) {
-          return reply.status(400).send({ error: 'Missing or invalid budget' })
-        }
-
-        const result = await orchestrateService.orchestrate({
-          goal: body.goal,
-          budget: body.budget,
-          preferCapabilities: body.preferCapabilities,
-          maxAgents: body.maxAgents,
-        })
+        const result = await orchestrateService.orchestrate(
+          {
+            goal: body.goal.trim(),
+            budget: body.budget,
+            preferCapabilities: body.preferCapabilities,
+            maxAgents: body.maxAgents,
+          },
+          orchestrationId,
+        )
 
         const kiteTxHash = request.kiteTxHash
         return reply.send({ kiteTxHash, ...result })
       } catch (err) {
+        const message = err instanceof Error ? err.message : 'Orchestration failed'
+        console.error('[Orchestrate] Error:', message)
         return reply.status(500).send({
-          error: err instanceof Error ? err.message : 'Orchestration failed',
+          orchestrationId,
+          error: 'Orchestration failed',
         })
       }
     },

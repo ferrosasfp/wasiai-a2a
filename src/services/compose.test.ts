@@ -37,6 +37,13 @@ vi.mock('./discovery.js', () => ({
   },
 }))
 
+// Mock eventService (prevents supabase import crash)
+vi.mock('./event.js', () => ({
+  eventService: {
+    track: vi.fn().mockResolvedValue({}),
+  },
+}))
+
 // Mock global fetch
 const mockFetch = vi.fn()
 vi.stubGlobal('fetch', mockFetch)

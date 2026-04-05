@@ -195,10 +195,13 @@ export interface OrchestrateRequest {
 }
 
 export interface OrchestrateResult {
+  orchestrationId: string
   answer: unknown
   reasoning: string
   pipeline: ComposeResult
   consideredAgents: Agent[]
+  protocolFeeUsdc: number
+  attestationTxHash?: string
 }
 
 // ============================================================

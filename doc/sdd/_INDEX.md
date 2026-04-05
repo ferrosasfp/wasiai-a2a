@@ -15,3 +15,4 @@
 | 012 | 2026-04-04 | POST /orchestrate — Flujo completo goal→discover→compose→pay (WKH-13) | feature | QUALITY | DONE | feat/wkh-13-orchestrate-full |
 | 013 | 2026-04-04 | Schema Transform — LLM adapts output/input between agents (WKH-14) | feature | QUALITY | DONE | feat/wkh-14-schema-transform |
 | 014 | 2026-04-05 | Dashboard Analytics — KPIs + events + UI (WKH-27) | feature | QUALITY | DONE | feat/wkh-27-dashboard |
+| 015 | 2026-04-05 | POST /orchestrate — LLM Planning + Fallback (WKH-13) | evolutivo | QUALITY | DONE | feat/015-orchestrate-llm-planning |
