@@ -401,3 +401,41 @@ export interface DashboardStats {
   avgLatencyMs: number
   agents: AgentSummary[]
 }
+
+// ============================================================
+// GASLESS TYPES (WKH-29 — EIP-3009)
+// ============================================================
+
+export interface GaslessSupportedToken {
+  network: 'testnet' | 'mainnet'
+  symbol: string                  // "PYUSD"
+  address: `0x${string}`          // 0x8E04...2ec9
+  decimals: number                // 18
+  eip712Name: string              // "PYUSD"
+  eip712Version: string           // "1"
+  minimumTransferAmount: string   // wei string ("10000000000000000")
+}
+
+export interface GaslessTransferRequest {
+  from: `0x${string}`
+  to: `0x${string}`
+  value: string                   // wei
+  validAfter: string              // unix seconds (string)
+  validBefore: string             // unix seconds (string)
+  tokenAddress: `0x${string}`
+  nonce: `0x${string}`            // 0x + 32 random bytes
+  v: number
+  r: `0x${string}`
+  s: `0x${string}`
+}
+
+export interface GaslessTransferResponse {
+  txHash: `0x${string}`
+}
+
+export interface GaslessStatus {
+  enabled: boolean
+  network: 'kite-testnet'
+  supportedToken: GaslessSupportedToken | null
+  operatorAddress: `0x${string}` | null   // NUNCA private key
+}

@@ -17,6 +17,7 @@ import mockRegistryRoutes from './routes/mock-registry.js'
 import wellKnownRoutes from './routes/well-known.js'
 import tasksRoutes from './routes/tasks.js'
 import dashboardRoutes from './routes/dashboard.js'
+import gaslessRoutes from './routes/gasless.js'
 
 // Kite: importar dispara la inicialización (top-level await en el módulo)
 import { kiteClient } from './services/kite-client.js'
@@ -54,6 +55,11 @@ await fastify.register(wellKnownRoutes, { prefix: '/.well-known' })
 await fastify.register(tasksRoutes, { prefix: '/tasks' })
 await fastify.register(dashboardRoutes, { prefix: '/dashboard' })
 await fastify.register(mockRegistryRoutes, { prefix: '/mock-registry/agents' })
+
+if (process.env.GASLESS_ENABLED === 'true') {
+  await fastify.register(gaslessRoutes, { prefix: '/gasless' })
+  fastify.log.info('Gasless EIP-3009 module enabled (testnet PYUSD)')
+}
 
 // Start server
 const port = parseInt(process.env.PORT ?? '3001')
