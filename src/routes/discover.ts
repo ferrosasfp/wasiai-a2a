@@ -14,7 +14,7 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    * - capabilities: comma-separated list of capabilities
    * - q: free text search
    * - maxPrice: maximum price per call in USDC
-   * - minReputation: minimum reputation score (0-1)
+   * - minReputation: minimum reputation score (0-5)
    * - limit: max results
    * - registry: filter to specific registry
    */

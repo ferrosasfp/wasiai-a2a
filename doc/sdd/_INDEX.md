@@ -16,3 +16,4 @@
 | 013 | 2026-04-04 | Schema Transform — LLM adapts output/input between agents (WKH-14) | feature | QUALITY | DONE | feat/wkh-14-schema-transform |
 | 014 | 2026-04-05 | Dashboard Analytics — KPIs + events + UI (WKH-27) | feature | QUALITY | DONE | feat/wkh-27-dashboard |
 | 015 | 2026-04-05 | POST /orchestrate — LLM Planning + Fallback (WKH-13) | evolutivo | QUALITY | DONE | feat/015-orchestrate-llm-planning |
+| 017 | 2026-04-05 | Reputation Scoring — Agent Reputation from Events (WKH-28) | feature | QUALITY | DONE | feat/017-reputation-scoring |

@@ -5,6 +5,7 @@
 
 import type { A2AEvent, AgentSummary, DashboardStats } from '../types/index.js'
 import { supabase } from '../lib/supabase.js'
+import { reputationService } from './reputation.js'
 
 // ── Tipo interno para filas de Supabase ─────────────────────
 
@@ -177,8 +178,21 @@ export const eventService = {
         invocations: data.invocations,
         avgLatencyMs: data.latencyCount > 0 ? Math.round(data.totalLatency / data.latencyCount) : 0,
         totalCostUsdc: Number(data.totalCost.toFixed(6)),
+        reputationScore: null as number | null,
       }),
     )
+
+    // ── Reputation enrichment (WKH-28) ───────────────────────
+    try {
+      const slugs = agents.map(a => a.agentId)  // agentId stores slug (CD-3)
+      const scores = await reputationService.getScores(slugs)
+      const scoreMap = new Map(scores.map(s => [s.agentSlug, s.reputationScore]))
+      for (const agent of agents) {
+        agent.reputationScore = scoreMap.get(agent.agentId) ?? null
+      }
+    } catch {
+      // Non-blocking: dashboard continues without reputation scores
+    }
 
     return {
       registriesCount: registriesCount ?? 0,

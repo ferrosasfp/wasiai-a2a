@@ -4,6 +4,7 @@
 
 import type { Agent, DiscoveryQuery, DiscoveryResult, RegistryConfig } from '../types/index.js'
 import { registryService } from './registry.js'
+import { reputationService } from './reputation.js'
 
 export const discoveryService = {
   /**
@@ -30,7 +31,24 @@ export const discoveryService = {
 
     // Merge and sort results
     const allAgents = results.flat()
-    
+
+    // ── Reputation enrichment (WKH-28) ───────────────────────
+    try {
+      const slugs = allAgents.map(a => a.slug)
+      const scores = await reputationService.getScores(slugs)
+      const scoreMap = new Map(scores.map(s => [s.agentSlug, s.reputationScore]))
+      for (const agent of allAgents) {
+        const computed = scoreMap.get(agent.slug)
+        if (computed !== undefined) {
+          agent.reputation = computed
+        }
+      }
+    } catch (err) {
+      // CD-4: Reputation errors NEVER break discovery
+      console.error('[Discovery] Reputation enrichment failed, continuing:',
+        err instanceof Error ? err.message : err)
+    }
+
     // Sort by reputation (desc) then by price (asc)
     allAgents.sort((a, b) => {
       const repDiff = (b.reputation ?? 0) - (a.reputation ?? 0)
@@ -38,12 +56,17 @@ export const discoveryService = {
       return a.priceUsdc - b.priceUsdc
     })
 
+    // ── minReputation filter (WKH-28) ────────────────────────
+    const filtered = query.minReputation
+      ? allAgents.filter(a => (a.reputation ?? 0) >= query.minReputation!)
+      : allAgents
+
     // Apply limit
-    const limited = query.limit ? allAgents.slice(0, query.limit) : allAgents
+    const limited = query.limit ? filtered.slice(0, query.limit) : filtered
 
     return {
       agents: limited,
-      total: allAgents.length,
+      total: filtered.length,
       registries: registries.map(r => r.name),
     }
   },

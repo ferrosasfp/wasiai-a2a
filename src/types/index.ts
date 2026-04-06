@@ -390,6 +390,7 @@ export interface AgentSummary {
   invocations: number
   avgLatencyMs: number
   totalCostUsdc: number
+  reputationScore?: number | null  // WKH-28: 0-5 scale, null if no events
 }
 
 export interface DashboardStats {
@@ -400,4 +401,22 @@ export interface DashboardStats {
   totalCostUsdc: number
   avgLatencyMs: number
   agents: AgentSummary[]
+}
+
+// ============================================================
+// REPUTATION TYPES (WKH-28)
+// ============================================================
+
+export interface ReputationScore {
+  agentSlug: string
+  agentName: string
+  registry: string
+  totalInvocations: number
+  successCount: number
+  successRate: number
+  avgLatencyMs: number
+  avgCostUsdc: number
+  latencyScore: number
+  costEfficiency: number
+  reputationScore: number  // 0-5 scale (CD-1)
 }
