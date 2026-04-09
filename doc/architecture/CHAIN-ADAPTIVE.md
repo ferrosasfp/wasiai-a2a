@@ -297,16 +297,17 @@ The final answer to "do we use Kite Passport or our own?":
 
 ## 8. Migration roadmap
 
-### Fase 0 — Today (pre-WKH-26)
-- ✅ This document created
-- ⏳ Pitch update with "chain-adaptive agentic economy gateway" framing
-- ⏳ Remove `passportAddress` dangling field from `src/types/index.ts`
-- ⏳ Mark Kite-hardcoded files with `// TODO(WKH-35): extract to adapters/kite-ozone/`
+### Fase 0 — Pre-WKH-26 (2026-04-08 / 2026-04-09)
+- ✅ This document created (2026-04-08)
+- ✅ **WKH-36** FAST — `doc/kite-contracts.md` source-of-truth + DEPRECATED banner in spike (commit `a56c119`, 2026-04-09)
+- ✅ **WKH-37** FAST+AR — Pitch update with "chain-adaptive agentic economy gateway" framing + remove `passportAddress` dangling field from `src/types/index.ts` + new "Not blocked on Passport" / "Works with any agent host" cards (2026-04-09)
+- ⏳ **WKH-38** FAST+AR — Gasless graceful degradation (`src/lib/gasless-signer.ts` + `src/routes/gasless.ts`)
+- ⏳ Mark Kite-hardcoded files with `// TODO(WKH-35): extract to adapters/kite-ozone/` (will be covered as part of WKH-35 itself)
 
 ### Fase 1 — Post-WKH-26, pre-final-submission (11–25 April)
 - **WKH-34** — Agentic Economy Primitives L3 (`a2a_agent_keys` table, IdentityService, BudgetService, AuthzService, L4 auth endpoints, optional `x-a2a-key` middleware). Mode: QUALITY full pipeline.
 - **WKH-35** — Adapter refactor L2 (extract Kite hardcoding to `src/adapters/kite-ozone/*`, define interfaces, keep behavior identical). Mode: QUALITY with strong AR for regression. Verify with existing 112 tests + new contract tests.
-- **WKH-36** — EVM-generic adapter spike (proof of concept on Avalanche testnet or Base Sepolia, end-to-end one payment). Mode: LAUNCH.
+- **WKH-36 (original EVM spike)** — replaced by a post-v1 ticket. See Fase 2. Rationale: focus Sprint 4/5 on L2 + L3 for the primary chain (Kite Ozone) before introducing secondary chains.
 
 ### Fase 2 — Post-hackathon (May+)
 - Multi-chain simultaneous deployment (one binary, multiple adapters active)

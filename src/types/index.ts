@@ -205,15 +205,8 @@ export interface OrchestrateResult {
 }
 
 // ============================================================
-// PAYMENT TYPES (Kite)
+// PAYMENT TYPES (chain-agnostic)
 // ============================================================
-
-export interface PaymentConfig {
-  /** Agent Passport address */
-  passportAddress: string
-  /** Network (testnet/mainnet) */
-  network: 'kite-testnet' | 'kite-mainnet'
-}
 
 export interface PaymentAuth {
   xPayment: string  // Base64 encoded x402 payload
@@ -260,7 +253,9 @@ export interface X402Response {
 
 /**
  * Payload decodificado del header X-Payment (base64 JSON).
- * Generado por el cliente (Kite MCP / Agent Passport).
+ * Generado por el cliente (wallet del pagador firmando EIP-712) al responder
+ * a un 402 Payment Required. Ver `doc/architecture/CHAIN-ADAPTIVE.md` §L2
+ * para cómo cada adapter de cadena verifica este payload.
  */
 export interface X402PaymentRequest {
   authorization: {
