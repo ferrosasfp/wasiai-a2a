@@ -7,6 +7,19 @@
 
 ---
 
+> ⚠️ **DEPRECATED SECTIONS (updated 2026-04-09 — WKH-36)**
+>
+> Some contracts and flows referenced in this spike have been deprecated by the Kite team. For the current source of truth, see **`doc/kite-contracts.md`**.
+>
+> Specifically deprecated:
+> - `GokiteAccountFactory` at `0xF0Fc19F0dc393867F19351d25EDfc5E099561cb7` — deprecated, no longer the official factory for Gokite Smart Wallets (confirmed by Kite team in Discord 2026-04-09).
+> - `ViaLabs` / `MessageClient.sol` — previous mainnet bridging implementation has been replaced by **Lucid + LayerZero**. The old `bridgeTokens(address asset, uint256 amount, string destination)` signature is no longer active.
+> - The `AccountFactory` section below (§4.1 Gokite Contracts table) reflects pre-deprecation state.
+>
+> This spike is retained **for historical context only**. Do not use the deprecated addresses in any new code or adapter. Consult `doc/kite-contracts.md` before implementing.
+
+---
+
 ## 1. Información de Red (Testnet)
 
 > ⚠️ **NOTA IMPORTANTE sobre "Ozone Testnet":**  

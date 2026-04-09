@@ -18,3 +18,4 @@
 | 015 | 2026-04-05 | POST /orchestrate — LLM Planning + Fallback (WKH-13) | evolutivo | QUALITY | DONE | feat/015-orchestrate-llm-planning |
 | 016 | 2026-04-06 | Build — copy src/static/* into dist/static (fixes /dashboard ENOENT) | patch | FAST | DONE | main (5a14ab8) |
 | 018 | 2026-04-06 | Gasless Integration EIP-3009 — testnet PYUSD (WKH-29) | feature | QUALITY | DONE | feat/018-gasless-aa |
+| 020 | 2026-04-09 | Kite contracts source-of-truth doc + DEPRECATED banner in spike (WKH-36) | patch | FAST | DONE | main |
