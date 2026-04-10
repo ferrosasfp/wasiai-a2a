@@ -18,9 +18,12 @@ import wellKnownRoutes from './routes/well-known.js'
 import tasksRoutes from './routes/tasks.js'
 import dashboardRoutes from './routes/dashboard.js'
 import gaslessRoutes from './routes/gasless.js'
+import authRoutes from './routes/auth.js'
 
-// Kite: importar dispara la inicialización (top-level await en el módulo)
-import { kiteClient } from './services/kite-client.js'
+import { initAdapters, getChainConfig } from './adapters/registry.js'
+
+// Initialize chain-adaptive adapters before server starts
+await initAdapters()
 
 const fastify = Fastify({ logger: true })
 
@@ -60,6 +63,9 @@ await fastify.register(mockRegistryRoutes, { prefix: '/mock-registry/agents' })
 // discoverable even when disabled; it returns funding_state for degradation info.
 await fastify.register(gaslessRoutes, { prefix: '/gasless' })
 
+// WKH-34: Auth routes (agent-signup, deposit, me, bind)
+await fastify.register(authRoutes, { prefix: '/auth' })
+
 // Start server
 const port = parseInt(process.env.PORT ?? '3001')
 
@@ -69,7 +75,7 @@ console.log(`
 ║   Agent Discovery, Composition & Orchestration Service    ║
 ╠═══════════════════════════════════════════════════════════╣
 ║   Server running on http://localhost:${port}                  ║
-║   Kite: ${kiteClient ? 'connected (chainId: 2368)     ' : 'disabled (KITE_RPC_URL not set)'}║
+║   Chain: ${(() => { try { const c = getChainConfig(); return `${c.name} (chainId: ${c.chainId})`.padEnd(27); } catch { return 'not configured              '; } })()}║
 ║                                                           ║
 ║   Endpoints:                                              ║
 ║   • GET  /registries     — List marketplaces              ║

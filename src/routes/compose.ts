@@ -41,7 +41,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
           return reply.status(400).send(result)
         }
 
-        const kiteTxHash = request.kiteTxHash
+        const kiteTxHash = request.paymentTxHash
         return reply.send({ kiteTxHash, ...result })
       } catch (err) {
         return reply.status(500).send({
