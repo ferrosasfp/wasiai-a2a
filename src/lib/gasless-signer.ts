@@ -11,12 +11,13 @@ import { createWalletClient, http, parseSignature } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { randomBytes } from 'node:crypto'
 import { kiteTestnet } from './kite-chain.js'
-import { requireKiteClient } from '../services/kite-client.js'
+import { requireKiteClient, kiteClient } from '../services/kite-client.js'
 import type {
   GaslessSupportedToken,
   GaslessTransferRequest,
   GaslessTransferResponse,
   GaslessStatus,
+  GaslessFundingState,
 } from '../types/index.js'
 
 // ─── Constantes ──────────────────────────────────────────────
@@ -258,22 +259,78 @@ export async function submitGaslessTransfer(
 }
 
 /**
- * Status del modulo gasless (AC-7). NUNCA throw — degrada a supportedToken null.
- * NUNCA expone private key.
+ * Check operator PYUSD balance via readContract (DT-2, WKH-38).
+ * Returns balance in wei, or null if check fails for any reason.
+ * NEVER throws — all errors degrade to null.
+ */
+async function getOperatorTokenBalance(
+  operatorAddress: `0x${string}`,
+  tokenAddress: `0x${string}`,
+): Promise<bigint | null> {
+  try {
+    const client = kiteClient
+    if (!client) return null
+    const balance = await client.readContract({
+      address: tokenAddress,
+      abi: [
+        {
+          name: 'balanceOf',
+          type: 'function',
+          stateMutability: 'view',
+          inputs: [{ name: 'account', type: 'address' }],
+          outputs: [{ name: '', type: 'uint256' }],
+        },
+      ] as const,
+      functionName: 'balanceOf',
+      args: [operatorAddress],
+    })
+    return balance
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Compute funding_state from env + balance (WKH-38).
+ * NEVER throws — degrades to safest state.
+ */
+function computeFundingState(opts: {
+  enabled: boolean
+  operatorAddress: `0x${string}` | null
+  balance: bigint | null
+}): GaslessFundingState {
+  if (!opts.enabled) return 'disabled'
+  if (!opts.operatorAddress) return 'unconfigured'
+  if (opts.balance === null || opts.balance === 0n) return 'unfunded'
+  return 'ready'
+}
+
+/**
+ * Status del modulo gasless (AC-7, WKH-38). NUNCA throw — degrada a safe state.
+ * NUNCA expone private key (CD-1).
  */
 export async function getGaslessStatus(): Promise<GaslessStatus> {
   const enabled = process.env.GASLESS_ENABLED === 'true'
 
-  // H-3: short-circuit con flag OFF — sin side effects (no PK load, no fetch).
+  const baseFields = {
+    network: 'kite-testnet' as const,
+    chain_id: kiteTestnet.id,
+    relayer: GASLESS_BASE_URL,
+    documentation: 'https://github.com/ferrosasfp/wasiai-a2a/blob/main/doc/architecture/CHAIN-ADAPTIVE.md',
+  }
+
+  // AC-6: disabled state — no side effects (no PK load, no fetch).
   if (!enabled) {
     return {
       enabled: false,
-      network: 'kite-testnet',
+      ...baseFields,
       supportedToken: null,
       operatorAddress: null,
+      funding_state: 'disabled',
     }
   }
 
+  // AC-1, AC-2: derive operator address; malformed PK → null → unconfigured
   let operatorAddress: `0x${string}` | null = null
   const pk = process.env.OPERATOR_PRIVATE_KEY
   if (pk) {
@@ -291,11 +348,20 @@ export async function getGaslessStatus(): Promise<GaslessStatus> {
     supportedToken = null
   }
 
+  // AC-3, AC-4: balance check (DT-2) — only if operator address is valid
+  let balance: bigint | null = null
+  if (operatorAddress && supportedToken) {
+    balance = await getOperatorTokenBalance(operatorAddress, supportedToken.address)
+  }
+
+  const funding_state = computeFundingState({ enabled, operatorAddress, balance })
+
   return {
     enabled,
-    network: 'kite-testnet',
+    ...baseFields,
     supportedToken,
     operatorAddress,
+    funding_state,
   }
 }
 
