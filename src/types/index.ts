@@ -221,8 +221,8 @@ export interface PaymentAuth {
  * Describe el pago que el cliente debe realizar.
  */
 export interface X402PaymentPayload {
-  scheme: 'gokite-aa'
-  network: 'kite-testnet' | 'kite-mainnet'
+  scheme: string
+  network: string
   /** Monto máximo requerido en wei */
   maxAmountRequired: string
   /** URL del endpoint que requiere pago */
@@ -269,6 +269,8 @@ export interface X402PaymentRequest {
   signature: string     // Firma EIP-712 del pagador
   network?: string      // "kite-testnet" (opcional)
 }
+
+// NOTE: Pieverse types used by kite-ozone adapter only. Will move to adapters/kite-ozone/types.ts post-hackathon.
 
 /**
  * Request body para POST /v2/verify en Pieverse.
@@ -432,7 +434,7 @@ export type GaslessFundingState = 'disabled' | 'unconfigured' | 'unfunded' | 're
 
 export interface GaslessStatus {
   enabled: boolean
-  network: 'kite-testnet'
+  network: string
   supportedToken: GaslessSupportedToken | null
   operatorAddress: `0x${string}` | null   // NUNCA private key
   /** Degradation state: disabled | unconfigured | unfunded | ready (WKH-38) */
@@ -444,3 +446,9 @@ export interface GaslessStatus {
   /** Documentation link */
   documentation?: string
 }
+
+// ============================================================
+// A2A AGENT KEY TYPES (WKH-34)
+// ============================================================
+
+export * from './a2a-key.js'

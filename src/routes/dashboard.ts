@@ -12,11 +12,11 @@ import { eventService } from '../services/event.js'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 // Read HTML at startup (not per-request)
-const KITE_EXPLORER_URL = process.env.KITE_EXPLORER_URL || 'https://testnet.kitescan.ai'
+const CHAIN_EXPLORER_URL = process.env.CHAIN_EXPLORER_URL || process.env.KITE_EXPLORER_URL || 'https://testnet.kitescan.ai'
 const dashboardHtml = readFileSync(
   resolve(__dirname, '../static/dashboard.html'),
   'utf-8',
-).replace('{{KITE_EXPLORER_URL}}', KITE_EXPLORER_URL)
+).replace('{{CHAIN_EXPLORER_URL}}', CHAIN_EXPLORER_URL)
 
 const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
   /**

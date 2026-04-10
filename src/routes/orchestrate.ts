@@ -57,8 +57,8 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           orchestrationId,
         )
 
-        const kiteTxHash = request.kiteTxHash
-        return reply.send({ kiteTxHash, ...result })
+        const paymentTxHash = request.paymentTxHash
+        return reply.send({ paymentTxHash, ...result })
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Orchestration failed'
         console.error('[Orchestrate] Error:', message)

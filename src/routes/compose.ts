@@ -41,8 +41,8 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
           return reply.status(400).send(result)
         }
 
-        const kiteTxHash = request.kiteTxHash
-        return reply.send({ kiteTxHash, ...result })
+        const paymentTxHash = request.paymentTxHash
+        return reply.send({ paymentTxHash, ...result })
       } catch (err) {
         return reply.status(500).send({
           error: err instanceof Error ? err.message : 'Compose failed',
