@@ -8,7 +8,7 @@
 import crypto from 'node:crypto'
 import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import { orchestrateService } from '../services/orchestrate.js'
-import { requirePayment } from '../middleware/x402.js'
+import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js'
 
 type OrchestrateBody = {
   goal: string
@@ -37,7 +37,7 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           },
         },
       },
-      preHandler: requirePayment({
+      preHandler: requirePaymentOrA2AKey({
         description: 'WasiAI Orchestration Service — Goal-based AI agent orchestration',
       }),
     },
