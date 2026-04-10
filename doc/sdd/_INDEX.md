@@ -25,3 +25,4 @@
 | 026 | 2026-04-06 | Hardening — Rate Limiting, Error Boundaries, Circuit Breaker, Backpressure (WKH-18) | feature | QUALITY | in progress | feat/026-hardening |
 | 027 | 2026-04-06 | Demo Script E2E — smoke test automatizado (WKH-30) | feature | FAST | DONE | feat/027-demo-script-e2e |
 | 028 | 2026-04-06 | README.md rewrite — reflect production architecture (WKH-17) | doc | FAST | in progress | feat/028-readme-rewrite |
+| 029 | 2026-04-06 | E2E Test Suite — full middleware chain + inject (WKH-E2E) | test | QUALITY | in progress | feat/029-e2e-tests |
