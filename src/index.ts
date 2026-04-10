@@ -7,6 +7,9 @@
 
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
+import { genReqId, registerRequestIdHook } from './middleware/request-id.js'
+import { registerErrorBoundary } from './middleware/error-boundary.js'
+import { registerRateLimit } from './middleware/rate-limit.js'
 
 import registriesRoutes from './routes/registries.js'
 import discoverRoutes from './routes/discover.js'
@@ -25,13 +28,18 @@ import { initAdapters, getChainConfig } from './adapters/registry.js'
 // Initialize chain-adaptive adapters before server starts
 await initAdapters()
 
-const fastify = Fastify({ logger: true })
+const fastify = Fastify({ logger: true, genReqId })
 
 // CORS
 await fastify.register(cors, { origin: '*' })
 
+// Resilience middleware (order matters: request-id -> error boundary -> rate limit)
+registerRequestIdHook(fastify)
+registerErrorBoundary(fastify)
+await registerRateLimit(fastify)
+
 // Health check
-fastify.get('/', async (_request, reply) => {
+fastify.get('/', { config: { rateLimit: false } }, async (_request, reply) => {
   return reply.send({
     name: 'WasiAI A2A Protocol',
     version: '0.1.0',
@@ -87,3 +95,24 @@ console.log(`
 `)
 
 await fastify.listen({ port, host: '0.0.0.0' })
+
+// Graceful shutdown (AC-12)
+async function gracefulShutdown(signal: string) {
+  fastify.log.info({ signal }, 'Received signal, starting graceful shutdown')
+  const graceMs = parseInt(process.env.SHUTDOWN_GRACE_MS ?? '30000')
+  const forceTimer = setTimeout(() => {
+    fastify.log.error('Graceful shutdown timed out, forcing exit')
+    process.exit(1)
+  }, graceMs)
+  forceTimer.unref()
+  try {
+    await fastify.close()
+    process.exit(0)
+  } catch (err) {
+    fastify.log.error({ err }, 'Error during graceful shutdown')
+    process.exit(1)
+  }
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
+process.on('SIGINT', () => gracefulShutdown('SIGINT'))
