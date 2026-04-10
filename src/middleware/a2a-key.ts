@@ -76,8 +76,24 @@ export function requirePaymentOrA2AKey(
     request: FastifyRequest,
     reply: FastifyReply,
   ) => {
-    const rawKey = request.headers['x-a2a-key']
-    if (!rawKey || typeof rawKey !== 'string') {
+    // DT-2 (WKH-BEARER-AUTH): Priority order: x-a2a-key > Bearer wasi_a2a_* > x402
+    let rawKey: string | undefined
+
+    const headerKey = request.headers['x-a2a-key']
+    if (headerKey && typeof headerKey === 'string') {
+      rawKey = headerKey
+    } else {
+      // Check Authorization: Bearer wasi_a2a_* (DT-1/DT-3: case-insensitive scheme, case-sensitive prefix)
+      const authHeader = request.headers['authorization']
+      if (authHeader && typeof authHeader === 'string') {
+        const match = /^bearer\s+(.+)$/i.exec(authHeader)
+        if (match && match[1].startsWith('wasi_a2a_')) {
+          rawKey = match[1]
+        }
+      }
+    }
+
+    if (!rawKey) {
       // No a2a key -- delegate to x402 flow
       await runX402Fallback(x402Handlers, request, reply)
       return

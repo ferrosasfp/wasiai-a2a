@@ -9,6 +9,7 @@ import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import { genReqId, registerRequestIdHook } from './middleware/request-id.js'
 import { registerErrorBoundary } from './middleware/error-boundary.js'
+import { registerEventTracking } from './middleware/event-tracking.js'
 import { registerRateLimit } from './middleware/rate-limit.js'
 
 import registriesRoutes from './routes/registries.js'
@@ -35,6 +36,7 @@ await fastify.register(cors, { origin: '*' })
 
 // Resilience middleware (order matters: request-id -> error boundary -> rate limit)
 registerRequestIdHook(fastify)
+registerEventTracking(fastify)
 registerErrorBoundary(fastify)
 await registerRateLimit(fastify)
 
