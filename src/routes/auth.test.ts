@@ -198,6 +198,53 @@ describe('auth routes', () => {
     expect(res.statusCode).toBe(403)
   })
 
+  // ── GET /auth/me with Bearer auth (WKH-BEARER-FIX AC-4, AC-5) ──
+
+  it('GET /auth/me with Authorization: Bearer wasi_a2a_* returns 200 (AC-4)', async () => {
+    const keyRow = makeKeyRow()
+    mockLookupByHash.mockResolvedValue(keyRow)
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/auth/me',
+      headers: { authorization: `Bearer ${TEST_KEY}` },
+    })
+
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.key_id).toBe(TEST_KEY_ID)
+  })
+
+  it('GET /auth/me with Authorization: Bearer non_wasi_token returns 403 (AC-5)', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/auth/me',
+      headers: { authorization: 'Bearer non_wasi_token_abc123' },
+    })
+
+    expect(res.statusCode).toBe(403)
+  })
+
+  it('GET /auth/me with both x-a2a-key and Bearer prefers x-a2a-key (AC-2)', async () => {
+    const keyRow = makeKeyRow()
+    mockLookupByHash.mockResolvedValue(keyRow)
+
+    const otherKey = 'wasi_a2a_' + 'b'.repeat(64)
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/auth/me',
+      headers: {
+        'x-a2a-key': TEST_KEY,
+        authorization: `Bearer ${otherKey}`,
+      },
+    })
+
+    expect(res.statusCode).toBe(200)
+    // Verify lookupByHash was called with the hash of TEST_KEY (x-a2a-key), not otherKey
+    expect(mockLookupByHash).toHaveBeenCalledWith(TEST_KEY_HASH)
+  })
+
   // ── POST /auth/bind/:chain (AC-16) ────────────────────────
 
   it('POST /auth/bind/:chain returns 501 with not_implemented', async () => {

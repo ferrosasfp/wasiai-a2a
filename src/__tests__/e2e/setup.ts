@@ -57,7 +57,7 @@ vi.mock('../../services/event.js', () => ({
 
 vi.mock('../../services/discovery.js', () => ({
   discoveryService: {
-    discover: vi.fn().mockResolvedValue({ agents: [], total: 0 }),
+    discover: vi.fn().mockResolvedValue({ agents: [], total: 0, registries: [] }),
     queryRegistry: vi.fn().mockResolvedValue([]),
     mapAgent: vi.fn(),
     getAgent: vi.fn().mockResolvedValue(null),
@@ -254,6 +254,16 @@ export async function buildTestApp() {
         wellKnown: '/.well-known/agent.json — Gateway self Agent Card',
       },
       docs: 'https://github.com/ferrosasfp/wasiai-a2a',
+    })
+  })
+
+  // Health endpoint (same as index.ts)
+  app.get('/health', { config: { rateLimit: false } }, async (_request, reply) => {
+    return reply.send({
+      status: 'ok',
+      version: '0.1.0',
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
     })
   })
 

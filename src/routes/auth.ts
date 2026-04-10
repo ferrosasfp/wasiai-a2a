@@ -18,10 +18,26 @@ import type { A2AAgentKeyRow, CreateKeyInput } from '../types/index.js'
 // ── Helper: resolve caller key from x-a2a-key header ────────
 
 async function resolveCallerKey(request: FastifyRequest): Promise<A2AAgentKeyRow | null> {
-  const headerValue = request.headers['x-a2a-key']
-  if (!headerValue || typeof headerValue !== 'string') return null
+  // DT-2 (WKH-BEARER-FIX): Priority order: x-a2a-key > Bearer wasi_a2a_* > null
+  let rawKey: string | undefined
 
-  const keyHash = crypto.createHash('sha256').update(headerValue).digest('hex')
+  const headerValue = request.headers['x-a2a-key']
+  if (headerValue && typeof headerValue === 'string') {
+    rawKey = headerValue
+  } else {
+    // DT-1/DT-3: case-insensitive scheme, case-sensitive prefix (same as a2a-key.ts:86-93)
+    const authHeader = request.headers['authorization']
+    if (authHeader && typeof authHeader === 'string') {
+      const match = /^bearer\s+(.+)$/i.exec(authHeader)
+      if (match && match[1].startsWith('wasi_a2a_')) {
+        rawKey = match[1]
+      }
+    }
+  }
+
+  if (!rawKey) return null
+
+  const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex')
   return identityService.lookupByHash(keyHash)
 }
 

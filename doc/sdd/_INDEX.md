@@ -31,3 +31,5 @@
 | 032 | 2026-04-06 | Bearer Auth — Authorization: Bearer as alternative to x-a2a-key (WKH-BEARER-AUTH) | feature | FAST+AR | in progress | feat/032-bearer-auth |
 | 033 | 2026-04-06 | Invoke docs — clarify proxy invocation in Agent Card + /discover (WKH-INVOKE-DOCS) | doc | FAST | in progress | feat/033-invoke-docs |
 | 034 | 2026-04-06 | Global Event Tracking — onResponse hook for all endpoints (WKH-EVENT-TRACKING) | feature | FAST+AR | in progress | feat/034-event-tracking |
+| 035 | 2026-04-06 | Bearer Auth Fix on /auth/* + Test Hardening (WKH-BEARER-FIX) | bugfix | FAST+AR | in progress | feat/035-bearer-fix |
+| 036 | 2026-04-06 | Sync .env.example + README.md with current features (WKH-DOCS-SYNC) | doc | FAST | in progress | feat/036-docs-sync |

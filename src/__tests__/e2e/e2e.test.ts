@@ -249,6 +249,72 @@ describe('E2E', () => {
       const res = await app.inject({ method: 'GET', url: '/discover' })
       expect(res.statusCode).toBe(200)
     })
+
+    it('POST /discover returns 200 (WKH-BEARER-FIX AC-9)', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/discover',
+        payload: { query: 'test' },
+      })
+      expect(res.statusCode).toBe(200)
+    })
+
+    it('GET /discover with agents includes invocationNote (WKH-BEARER-FIX AC-11)', async () => {
+      mockDiscover.mockResolvedValueOnce({
+        agents: [{
+          id: 'agent-1',
+          name: 'Test Agent',
+          slug: 'test-agent',
+          description: 'A test agent',
+          capabilities: ['test'],
+          priceUsdc: 0,
+          registry: 'mock',
+          invokeUrl: 'https://example.com/invoke',
+          invocationNote: 'The invokeUrl is an internal reference. To invoke this agent, use POST /compose or POST /orchestrate on the WasiAI A2A gateway.',
+          metadata: {},
+        }],
+        total: 1,
+        registries: ['mock'],
+      })
+
+      const res = await app.inject({ method: 'GET', url: '/discover' })
+      expect(res.statusCode).toBe(200)
+      const body = res.json()
+      expect(body.agents[0]).toHaveProperty('invocationNote')
+      expect(body.agents[0].invocationNote).toContain('/compose')
+    })
+  })
+
+  // ── Health (WKH-BEARER-FIX AC-10) ──────────────────────────
+
+  describe('Health', () => {
+    it('AC-10: GET /health returns 200 with status and uptime', async () => {
+      const res = await app.inject({ method: 'GET', url: '/health' })
+      expect(res.statusCode).toBe(200)
+      const body = res.json()
+      expect(body).toHaveProperty('status', 'ok')
+      expect(body).toHaveProperty('uptime')
+      expect(typeof body.uptime).toBe('number')
+    })
+  })
+
+  // ── Bearer auth on /auth/me (WKH-BEARER-FIX AC-8) ────────
+
+  describe('Bearer auth', () => {
+    it('AC-8: GET /auth/me with Bearer wasi_a2a_* returns 200', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow())
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/auth/me',
+        headers: { authorization: `Bearer ${TEST_KEY}` },
+      })
+
+      expect(res.statusCode).toBe(200)
+      const body = res.json()
+      expect(body).toHaveProperty('budget')
+      expect(body).toHaveProperty('scoping')
+    })
   })
 
   // ── Error handling (AC-17, AC-18) ───────────────────────────
