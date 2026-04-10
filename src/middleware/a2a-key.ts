@@ -2,7 +2,7 @@
  * A2A Key Middleware — Fastify preHandler hook
  * WKH-34-W4: Agentic Economy L3
  *
- * When x-a2a-key header is present: hash -> lookup -> validate -> execute -> debit.
+ * When x-a2a-key header is present: hash -> lookup -> validate -> debit -> execute.
  * When absent: delegate to existing x402 requirePayment() flow.
  */
 import crypto from 'node:crypto'
@@ -83,71 +83,80 @@ export function requirePaymentOrA2AKey(
       return
     }
 
-    // 1. Hash the key
-    const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex')
-
-    // 2. Look up the row
-    const keyRow = await identityService.lookupByHash(keyHash)
-    if (!keyRow) {
-      return send403(reply, 'KEY_NOT_FOUND', 'A2A key not found')
-    }
-
-    // 3. Validate is_active
-    if (!keyRow.is_active) {
-      return send403(reply, 'KEY_INACTIVE', 'A2A key is inactive')
-    }
-
-    // 4. Check daily limit with lazy reset
-    if (keyRow.daily_limit_usd !== null) {
-      const now = new Date()
-      const resetAt = new Date(keyRow.daily_reset_at)
-      let dailySpent = parseFloat(keyRow.daily_spent_usd)
-
-      // Lazy reset: if past reset time, treat spent as 0
-      if (now >= resetAt) {
-        dailySpent = 0
-      }
-
-      if (dailySpent >= parseFloat(keyRow.daily_limit_usd)) {
-        return send403(reply, 'DAILY_LIMIT', 'Daily spending limit exceeded')
-      }
-    }
-
-    // 5. Check scoping via authzService
-    const scopingResult = authzService.checkScoping(keyRow, {})
-    if (!scopingResult.allowed) {
-      return send403(reply, 'SCOPE_DENIED', scopingResult.reason ?? 'Scope denied')
-    }
-
-    // 6. Check per_call_limit (DT-2: placeholder cost estimation)
-    if (keyRow.max_spend_per_call_usd !== null) {
-      const estimatedCostUsd = 1.0
-      if (estimatedCostUsd > parseFloat(keyRow.max_spend_per_call_usd)) {
-        return send403(reply, 'PER_CALL_LIMIT', 'Estimated cost exceeds per-call limit')
-      }
-    }
-
-    // 7. Check budget on chain (CD-4: no hardcoded chain IDs)
-    const chainId = getChainConfig().chainId
-    const balance = await budgetService.getBalance(keyRow.id, chainId)
-    if (parseFloat(balance) <= 0) {
-      return send403(reply, 'INSUFFICIENT_BUDGET', 'Insufficient budget')
-    }
-
-    // 8. Augment request (AC-4)
-    request.a2aKeyRow = keyRow
-
-    // 9. Set remaining budget header (AC-1)
+    // DT-2 placeholder cost estimation (MNR-2: single const)
     const estimatedCostUsd = 1.0
-    const remainingBalance = (parseFloat(balance) - estimatedCostUsd).toFixed(6)
-    reply.header('x-a2a-remaining-budget', remainingBalance)
 
-    // 10. Debit after response is sent (DT-3)
-    request.raw.on('close', () => {
-      budgetService.debit(keyRow.id, chainId, estimatedCostUsd).catch((err) => {
-        console.error(`[a2a-key] Failed to debit key ${keyRow.id}:`, err)
-      })
-    })
+    let keyRow: A2AAgentKeyRow | null = null
+
+    try {
+      // 1. Hash the key
+      const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex')
+
+      // 2. Look up the row
+      keyRow = await identityService.lookupByHash(keyHash)
+      if (!keyRow) {
+        return send403(reply, 'KEY_NOT_FOUND', 'A2A key not found')
+      }
+
+      // 3. Validate is_active
+      if (!keyRow.is_active) {
+        return send403(reply, 'KEY_INACTIVE', 'A2A key is inactive')
+      }
+
+      // 4. Check daily limit with lazy reset
+      if (keyRow.daily_limit_usd !== null) {
+        const now = new Date()
+        const resetAt = new Date(keyRow.daily_reset_at)
+        let dailySpent = parseFloat(keyRow.daily_spent_usd)
+
+        // Lazy reset: if past reset time, treat spent as 0
+        if (now >= resetAt) {
+          dailySpent = 0
+        }
+
+        if (dailySpent >= parseFloat(keyRow.daily_limit_usd)) {
+          return send403(reply, 'DAILY_LIMIT', 'Daily spending limit exceeded')
+        }
+      }
+
+      // 5. Check scoping via authzService
+      const scopingResult = authzService.checkScoping(keyRow, {})
+      if (!scopingResult.allowed) {
+        return send403(reply, 'SCOPE_DENIED', scopingResult.reason ?? 'Scope denied')
+      }
+
+      // 6. Check per_call_limit
+      if (keyRow.max_spend_per_call_usd !== null) {
+        if (estimatedCostUsd > parseFloat(keyRow.max_spend_per_call_usd)) {
+          return send403(reply, 'PER_CALL_LIMIT', 'Estimated cost exceeds per-call limit')
+        }
+      }
+
+      // 7. Optimistic debit BEFORE execution (BLQ-1/2/3/4 fix)
+      // Like Stripe/AWS: charge first, deliver after.
+      // The PG function increment_a2a_key_spend is atomic with FOR UPDATE,
+      // so this eliminates the race condition (BLQ-4) and ensures failed
+      // requests are charged (BLQ-1), debit failures are surfaced (BLQ-2),
+      // and service errors return 503 (BLQ-3).
+      const chainId = getChainConfig().chainId
+      const debitResult = await budgetService.debit(keyRow.id, chainId, estimatedCostUsd)
+      if (!debitResult.success) {
+        return send403(reply, 'INSUFFICIENT_BUDGET', debitResult.error ?? 'Budget debit failed')
+      }
+
+      // 8. Augment request (AC-4)
+      request.a2aKeyRow = keyRow
+
+      // 9. Set remaining budget header (AC-1) — read balance AFTER debit
+      const postDebitBalance = await budgetService.getBalance(keyRow.id, chainId)
+      reply.header('x-a2a-remaining-budget', postDebitBalance)
+    } catch (err) {
+      request.log.error(
+        { err: err instanceof Error ? err.message : 'unknown', keyId: keyRow?.id },
+        'a2a-key middleware error',
+      )
+      return reply.status(503).send({ error: 'SERVICE_ERROR', message: 'Budget service temporarily unavailable' })
+    }
   }
 
   return [handler]

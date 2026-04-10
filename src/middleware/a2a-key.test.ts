@@ -128,8 +128,9 @@ describe('requirePaymentOrA2AKey middleware', () => {
   it('AC-1: valid a2a key — 200 with augmented request and remaining budget header', async () => {
     const keyRow = makeKeyRow()
     mockLookupByHash.mockResolvedValue(keyRow)
-    mockGetBalance.mockResolvedValue('10.000000')
     mockDebit.mockResolvedValue({ success: true })
+    // getBalance called AFTER debit to read post-debit balance
+    mockGetBalance.mockResolvedValue('9.000000')
 
     const response = await app.inject({
       method: 'POST',
@@ -143,6 +144,10 @@ describe('requirePaymentOrA2AKey middleware', () => {
     expect(body.ok).toBe(true)
     expect(body.a2aKeyId).toBe(TEST_KEY_ID)
     expect(response.headers['x-a2a-remaining-budget']).toBe('9.000000')
+
+    // BLQ-1/2: debit happens BEFORE response, not fire-and-forget on close
+    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0)
+    expect(mockDebit).toHaveBeenCalledTimes(1)
   })
 
   // ── AC-2: x402 fallback ───────────────────────────────────
@@ -223,8 +228,8 @@ describe('requirePaymentOrA2AKey middleware', () => {
         daily_reset_at: new Date(Date.now() - 86400000).toISOString(), // yesterday
       }),
     )
-    mockGetBalance.mockResolvedValue('10.000000')
     mockDebit.mockResolvedValue({ success: true })
+    mockGetBalance.mockResolvedValue('9.000000')
 
     const response = await app.inject({
       method: 'POST',
@@ -237,9 +242,9 @@ describe('requirePaymentOrA2AKey middleware', () => {
     expect(response.statusCode).toBe(200)
   })
 
-  it('AC-3: INSUFFICIENT_BUDGET — balance is 0', async () => {
+  it('AC-3: INSUFFICIENT_BUDGET — debit fails (insufficient funds)', async () => {
     mockLookupByHash.mockResolvedValue(makeKeyRow())
-    mockGetBalance.mockResolvedValue('0')
+    mockDebit.mockResolvedValue({ success: false, error: 'Insufficient budget' })
 
     const response = await app.inject({
       method: 'POST',
@@ -290,8 +295,8 @@ describe('requirePaymentOrA2AKey middleware', () => {
     mockLookupByHash.mockResolvedValue(
       makeKeyRow({ max_spend_per_call_usd: '5.000000' }),
     )
-    mockGetBalance.mockResolvedValue('10.000000')
     mockDebit.mockResolvedValue({ success: true })
+    mockGetBalance.mockResolvedValue('9.000000')
 
     const response = await app.inject({
       method: 'POST',
@@ -301,5 +306,56 @@ describe('requirePaymentOrA2AKey middleware', () => {
     })
 
     expect(response.statusCode).toBe(200)
+  })
+
+  // ── BLQ-2: debit failure is surfaced ────────────────────────
+
+  it('BLQ-2: debit fails → 403 INSUFFICIENT_BUDGET (not silent 200)', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow())
+    mockDebit.mockResolvedValue({ success: false, error: 'Budget debit failed' })
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect(response.json().error_code).toBe('INSUFFICIENT_BUDGET')
+    expect(response.json().error).toContain('Budget debit failed')
+  })
+
+  // ── BLQ-3: lookupByHash throws → 503 ───────────────────────
+
+  it('BLQ-3: lookupByHash throws → 503 SERVICE_ERROR', async () => {
+    mockLookupByHash.mockRejectedValue(new Error('DB connection lost'))
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    })
+
+    expect(response.statusCode).toBe(503)
+    expect(response.json().error).toBe('SERVICE_ERROR')
+  })
+
+  // ── BLQ-3: debit rejects with error → 503 ──────────────────
+
+  it('BLQ-3: debit rejects (throws) → 503 SERVICE_ERROR', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow())
+    mockDebit.mockRejectedValue(new Error('PG timeout'))
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    })
+
+    expect(response.statusCode).toBe(503)
+    expect(response.json().error).toBe('SERVICE_ERROR')
   })
 })
