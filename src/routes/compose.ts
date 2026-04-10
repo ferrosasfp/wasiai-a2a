@@ -5,7 +5,7 @@
 import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import { composeService } from '../services/compose.js'
 import type { ComposeStep } from '../types/index.js'
-import { requirePayment } from '../middleware/x402.js'
+import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js'
 
 type ComposeBody = {
   steps: ComposeStep[]
@@ -16,7 +16,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: ComposeBody }>(
     '/',
     {
-      preHandler: requirePayment({
+      preHandler: requirePaymentOrA2AKey({
         description: 'WasiAI Compose Service — Multi-agent pipeline execution',
       }),
     },
