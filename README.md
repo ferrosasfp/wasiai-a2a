@@ -224,6 +224,39 @@ This project was built entirely through conversational AI using:
 
 ---
 
+## Smoke Test / Demo
+
+Run the automated smoke test to verify all endpoints are working:
+
+```bash
+# Against production (default)
+./scripts/smoke-test.sh
+
+# Against a custom URL (e.g., local dev server)
+./scripts/smoke-test.sh http://localhost:3001
+```
+
+**Requirements:** `curl` (required), `jq` (recommended, falls back to grep if missing).
+
+The script tests the following endpoints in sequence:
+
+| Endpoint | Method | Validates |
+|----------|--------|-----------|
+| `/` | GET | HTTP 200, `name` + `version` fields |
+| `/.well-known/agent.json` | GET | HTTP 200, `name` + `skills` fields |
+| `/gasless/status` | GET | HTTP 200, `funding_state` field |
+| `/dashboard` | GET | HTTP 200, HTML content |
+| `/dashboard/api/stats` | GET | HTTP 200, `registriesCount` field |
+| `/auth/agent-signup` | POST | HTTP 201, key starting with `wasi_a2a_` |
+| `/auth/me` | GET | HTTP 200, key status info (uses key from signup) |
+| `/discover` | POST | HTTP 200, `agents` array |
+| `/compose` | POST | SKIP (requires x402 payment) |
+| `/orchestrate` | POST | SKIP (requires x402 payment) |
+
+**Exit codes:** `0` = all passed, `1` = at least one failure.
+
+---
+
 ## Hackathon
 
 Built for [Kite AI Global Buildathon 2026](https://www.encodeclub.com/programmes/kites-hackathon-ai-agentic-economy) — Agentic Commerce track.

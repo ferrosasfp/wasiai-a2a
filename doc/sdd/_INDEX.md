@@ -2,7 +2,7 @@
 
 | # | Fecha | HU | Tipo | Mode | Status | Branch |
 |---|-------|----|------|------|--------|--------|
-| 001 | 2026-04-01 | Kite Chain — Conexión Ozone Testnet | feature | QUALITY | DONE | feat/wkh-5-kite-chain |
+| 001 | 2026-04-01 | Kite Chain — Conexion Ozone Testnet | feature | QUALITY | DONE | feat/wkh-5-kite-chain |
 | 002 | 2026-04-02 | x402 Payment Middleware — Kite Service Provider | feature | QUALITY | DONE | feat/wkh-6-kite-payment-clean |
 | 003 | 2026-04-02 | Supabase — Migrar registries de in-memory a PostgreSQL | evolutivo | QUALITY | DONE | feat/wkh-7-supabase-registries |
 | 004 | 2026-04-02 | Migrar framework de Hono a Fastify | refactor | QUALITY | DONE | feat/wkh-20-fastify-migration |
@@ -21,3 +21,6 @@
 | 020 | 2026-04-09 | Kite contracts source-of-truth doc + DEPRECATED banner in spike (WKH-36) | patch | FAST | DONE | main |
 | 021 | 2026-04-09 | Pitch Fase 0 — Passport drift fix + chain-adaptive framing + types cleanup (WKH-37) | patch | FAST+AR | DONE | main + wasiai-landing |
 | 022 | 2026-04-06 | Gasless graceful degradation (WKH-38) | feature | FAST+AR | DONE | feat/022-gasless-degradation |
+| 025 | 2026-04-06 | A2A Key Middleware — requirePaymentOrA2AKey (WKH-34-W4) | feature | LAUNCH | in progress | feat/025-a2a-key-middleware |
+| 026 | 2026-04-06 | Hardening — Rate Limiting, Error Boundaries, Circuit Breaker, Backpressure (WKH-18) | feature | QUALITY | in progress | feat/026-hardening |
+| 027 | 2026-04-06 | Demo Script E2E — smoke test automatizado (WKH-30) | feature | FAST | in progress | feat/027-demo-script-e2e |
