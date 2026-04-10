@@ -29,9 +29,29 @@ export const discoveryService = {
       )
     )
 
-    // Merge and sort results
-    const allAgents = results.flat()
-    
+    // Merge results
+    let allAgents = results.flat()
+
+    // Local post-fetch filters (upstream may not support all filter params)
+    if (query.capabilities?.length) {
+      const caps = query.capabilities.map(c => c.toLowerCase())
+      allAgents = allAgents.filter(a =>
+        a.capabilities.some(ac => caps.includes(ac.toLowerCase())) ||
+        caps.some(c => a.description.toLowerCase().includes(c))
+      )
+    }
+    if (query.query) {
+      const q = query.query.toLowerCase()
+      allAgents = allAgents.filter(a =>
+        a.name.toLowerCase().includes(q) ||
+        a.description.toLowerCase().includes(q) ||
+        a.capabilities.some(c => c.toLowerCase().includes(q))
+      )
+    }
+    if (query.maxPrice != null) {
+      allAgents = allAgents.filter(a => a.priceUsdc <= query.maxPrice!)
+    }
+
     // Sort by reputation (desc) then by price (asc)
     allAgents.sort((a, b) => {
       const repDiff = (b.reputation ?? 0) - (a.reputation ?? 0)
