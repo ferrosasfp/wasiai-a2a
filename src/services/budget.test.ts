@@ -132,64 +132,26 @@ describe('budgetService', () => {
   })
 
   describe('registerDeposit', () => {
-    it('increments chain budget and returns new balance string (AC-10)', async () => {
-      const readMock = chainMock()
-      readMock.single = vi.fn().mockResolvedValue({
-        data: { budget: { '2368': '5.000000' } },
-        error: null,
-      })
-
-      const updateMock = chainMock()
-      updateMock.eq = vi.fn().mockResolvedValue({ error: null })
-
-      let callCount = 0
-      mockFrom.mockImplementation(() => {
-        callCount++
-        if (callCount === 1) return readMock as unknown as ReturnType<typeof supabase.from>
-        return updateMock as unknown as ReturnType<typeof supabase.from>
-      })
+    it('calls supabase.rpc with correct params and returns new balance (AC-10, BLQ-4)', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockRpc.mockResolvedValue({ data: '15.000000', error: null } as any)
 
       const result = await budgetService.registerDeposit('key-1', 2368, '10.00')
+
+      expect(mockRpc).toHaveBeenCalledWith('register_a2a_key_deposit', {
+        p_key_id: 'key-1',
+        p_chain_id: 2368,
+        p_amount_usd: 10.00,
+      })
       expect(result).toBe('15.000000')
     })
 
-    it('creates chain entry if none exists (AC-10)', async () => {
-      const readMock = chainMock()
-      readMock.single = vi.fn().mockResolvedValue({
-        data: { budget: {} },
-        error: null,
-      })
-
-      const updateMock = chainMock()
-      let updatedBudget: Record<string, string> | undefined
-      updateMock.update = vi.fn().mockImplementation((val: Record<string, unknown>) => {
-        updatedBudget = val.budget as Record<string, string>
-        return updateMock
-      })
-      updateMock.eq = vi.fn().mockResolvedValue({ error: null })
-
-      let callCount = 0
-      mockFrom.mockImplementation(() => {
-        callCount++
-        if (callCount === 1) return readMock as unknown as ReturnType<typeof supabase.from>
-        return updateMock as unknown as ReturnType<typeof supabase.from>
-      })
-
-      const result = await budgetService.registerDeposit('key-1', 2368, '7.50')
-      expect(result).toBe('7.500000')
-      expect(updatedBudget?.['2368']).toBe('7.500000')
-    })
-
-    it('throws on read error', async () => {
-      const mock = chainMock()
-      mock.single = vi.fn().mockResolvedValue({
-        data: null,
-        error: { message: 'read fail' },
-      })
-      mockFrom.mockReturnValue(mock as unknown as ReturnType<typeof supabase.from>)
+    it('throws on RPC error (BLQ-4)', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockRpc.mockResolvedValue({ data: null, error: { message: 'key_not_found' } } as any)
 
       await expect(budgetService.registerDeposit('x', 1, '1'))
-        .rejects.toThrow('Failed to read budget for deposit: read fail')
+        .rejects.toThrow('Failed to register deposit: key_not_found')
     })
   })
 })

@@ -49,6 +49,7 @@ export const budgetService = {
 
   /**
    * Register a deposit: atomically increment budget for a chain.
+   * Uses Postgres function with FOR UPDATE to prevent race conditions (BLQ-4).
    * Returns the new balance as a string.
    */
   async registerDeposit(
@@ -56,31 +57,14 @@ export const budgetService = {
     chainId: number,
     amountUsd: string,
   ): Promise<string> {
-    // 1. Read current budget
-    const { data, error: readErr } = await supabase
-      .from('a2a_agent_keys')
-      .select('budget')
-      .eq('id', keyId)
-      .single()
+    const { data, error } = await supabase.rpc('register_a2a_key_deposit', {
+      p_key_id: keyId,
+      p_chain_id: chainId,
+      p_amount_usd: parseFloat(amountUsd),
+    })
 
-    if (readErr) throw new Error(`Failed to read budget for deposit: ${readErr.message}`)
+    if (error) throw new Error(`Failed to register deposit: ${error.message}`)
 
-    const budget = { ...((data as Pick<A2AAgentKeyRow, 'budget'>).budget) }
-    const chainKey = chainId.toString()
-    const currentBalance = parseFloat(budget[chainKey] ?? '0')
-    const depositAmount = parseFloat(amountUsd)
-    const newBalance = (currentBalance + depositAmount).toFixed(6)
-
-    // 2. Update with new balance
-    budget[chainKey] = newBalance
-
-    const { error: updateErr } = await supabase
-      .from('a2a_agent_keys')
-      .update({ budget })
-      .eq('id', keyId)
-
-    if (updateErr) throw new Error(`Failed to register deposit: ${updateErr.message}`)
-
-    return newBalance
+    return data as string
   },
 }

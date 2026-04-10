@@ -28,11 +28,9 @@ vi.mock('../services/budget.js', () => ({
 }))
 
 import { identityService } from '../services/identity.js'
-import { budgetService } from '../services/budget.js'
 
 const mockCreateKey = vi.mocked(identityService.createKey)
 const mockLookupByHash = vi.mocked(identityService.lookupByHash)
-const mockRegisterDeposit = vi.mocked(budgetService.registerDeposit)
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -124,12 +122,9 @@ describe('auth routes', () => {
     expect(res.statusCode).toBe(400)
   })
 
-  // ── POST /auth/deposit (AC-14) ────────────────────────────
+  // ── POST /auth/deposit (AC-14, BLQ-5: disabled until on-chain verification) ──
 
-  it('POST /auth/deposit with valid key and ownership returns 200 + balance', async () => {
-    mockLookupByHash.mockResolvedValue(makeKeyRow())
-    mockRegisterDeposit.mockResolvedValue('20.000000')
-
+  it('POST /auth/deposit returns 501 — disabled until on-chain verification (BLQ-5)', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/auth/deposit',
@@ -143,60 +138,10 @@ describe('auth routes', () => {
       },
     })
 
-    expect(res.statusCode).toBe(200)
+    expect(res.statusCode).toBe(501)
     const body = res.json()
-    expect(body.balance).toBe('20.000000')
-    expect(body.chain_id).toBe(2368)
-  })
-
-  it('POST /auth/deposit with invalid key returns 403', async () => {
-    mockLookupByHash.mockResolvedValue(null)
-
-    const res = await app.inject({
-      method: 'POST',
-      url: '/auth/deposit',
-      headers: { 'x-a2a-key': 'wasi_a2a_invalid' },
-      payload: {
-        key_id: TEST_KEY_ID,
-        chain_id: 2368,
-        token: 'PYUSD',
-        amount: '10.00',
-        tx_hash: '0xabc123',
-      },
-    })
-
-    expect(res.statusCode).toBe(403)
-  })
-
-  it('POST /auth/deposit with key not owned by caller returns 403', async () => {
-    mockLookupByHash.mockResolvedValue(makeKeyRow({ id: 'different-key-id' }))
-
-    const res = await app.inject({
-      method: 'POST',
-      url: '/auth/deposit',
-      headers: { 'x-a2a-key': TEST_KEY },
-      payload: {
-        key_id: TEST_KEY_ID,
-        chain_id: 2368,
-        token: 'PYUSD',
-        amount: '10.00',
-        tx_hash: '0xabc123',
-      },
-    })
-
-    expect(res.statusCode).toBe(403)
-    expect(res.json().error).toContain('does not own')
-  })
-
-  it('POST /auth/deposit missing required fields returns 400', async () => {
-    const res = await app.inject({
-      method: 'POST',
-      url: '/auth/deposit',
-      headers: { 'x-a2a-key': TEST_KEY },
-      payload: { key_id: TEST_KEY_ID },
-    })
-
-    expect(res.statusCode).toBe(400)
+    expect(body.error).toBe('deposit_verification_pending')
+    expect(body.message).toContain('PaymentAdapter.verify()')
   })
 
   // ── GET /auth/me (AC-15) ──────────────────────────────────

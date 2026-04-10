@@ -18,16 +18,17 @@ import wellKnownRoutes from './routes/well-known.js'
 import tasksRoutes from './routes/tasks.js'
 import dashboardRoutes from './routes/dashboard.js'
 import gaslessRoutes from './routes/gasless.js'
+import authRoutes from './routes/auth.js'
 
 import { initAdapters, getChainConfig } from './adapters/registry.js'
+
+// Initialize chain-adaptive adapters before server starts
+await initAdapters()
 
 const fastify = Fastify({ logger: true })
 
 // CORS
 await fastify.register(cors, { origin: '*' })
-
-// Initialize adapters before route registration
-await initAdapters()
 
 // Health check
 fastify.get('/', async (_request, reply) => {
@@ -57,13 +58,16 @@ await fastify.register(wellKnownRoutes, { prefix: '/.well-known' })
 await fastify.register(tasksRoutes, { prefix: '/tasks' })
 await fastify.register(dashboardRoutes, { prefix: '/dashboard' })
 await fastify.register(mockRegistryRoutes, { prefix: '/mock-registry/agents' })
+
+// DT-1 (WKH-38): always register gasless routes — /gasless/status must be
+// discoverable even when disabled; it returns funding_state for degradation info.
 await fastify.register(gaslessRoutes, { prefix: '/gasless' })
+
+// WKH-34: Auth routes (agent-signup, deposit, me, bind)
+await fastify.register(authRoutes, { prefix: '/auth' })
 
 // Start server
 const port = parseInt(process.env.PORT ?? '3001')
-
-let chainInfo = 'no chain configured'
-try { const cfg = getChainConfig(); chainInfo = `${cfg.name} (chainId: ${cfg.chainId})` } catch { /* adapter not initialized */ }
 
 console.log(`
 ╔═══════════════════════════════════════════════════════════╗
@@ -71,7 +75,7 @@ console.log(`
 ║   Agent Discovery, Composition & Orchestration Service    ║
 ╠═══════════════════════════════════════════════════════════╣
 ║   Server running on http://localhost:${port}                  ║
-║   Chain: ${chainInfo.padEnd(45)}║
+║   Chain: ${(() => { try { const c = getChainConfig(); return `${c.name} (chainId: ${c.chainId})`.padEnd(27); } catch { return 'not configured              '; } })()}║
 ║                                                           ║
 ║   Endpoints:                                              ║
 ║   • GET  /registries     — List marketplaces              ║

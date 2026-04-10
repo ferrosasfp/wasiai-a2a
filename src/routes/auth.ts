@@ -11,8 +11,9 @@
 import crypto from 'node:crypto'
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { identityService } from '../services/identity.js'
-import { budgetService } from '../services/budget.js'
-import type { A2AAgentKeyRow, CreateKeyInput, DepositInput } from '../types/index.js'
+// budgetService import retained as comment — re-enable when deposit verification lands (WKH-35)
+// import { budgetService } from '../services/budget.js'
+import type { A2AAgentKeyRow, CreateKeyInput } from '../types/index.js'
 
 // ── Helper: resolve caller key from x-a2a-key header ────────
 
@@ -60,44 +61,15 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * POST /deposit — Register a deposit (AC-14)
+   * BLQ-5: Disabled until on-chain verification is implemented.
+   * The atomic registerDeposit service (BLQ-4 fix) is ready for re-enable.
    */
-  fastify.post('/deposit', async (req: FastifyRequest, reply: FastifyReply) => {
-    const body = req.body as Partial<DepositInput> | undefined
-
-    if (!body?.key_id || !body?.chain_id || !body?.token || !body?.amount || !body?.tx_hash) {
-      return reply.status(400).send({ error: 'Missing required fields: key_id, chain_id, token, amount, tx_hash' })
-    }
-
-    // Resolve caller key from header
-    const callerKey = await resolveCallerKey(req)
-    if (!callerKey || !callerKey.is_active) {
-      return reply.status(403).send({ error: 'Invalid or inactive API key' })
-    }
-
-    // Verify caller owns the key_id
-    if (callerKey.id !== body.key_id) {
-      return reply.status(403).send({ error: 'API key does not own the specified key_id' })
-    }
-
-    try {
-      // TODO(WKH-35): verify deposit on-chain via PaymentAdapter.verify
-      const balance = await budgetService.registerDeposit(
-        body.key_id,
-        body.chain_id,
-        body.amount,
-      )
-
-      return reply.status(200).send({
-        balance,
-        chain_id: body.chain_id,
-      })
-    } catch (err) {
-      fastify.log.error(
-        { errorClass: err instanceof Error ? err.constructor.name : 'unknown' },
-        'deposit failed',
-      )
-      return reply.status(500).send({ error: 'Failed to register deposit' })
-    }
+  fastify.post('/deposit', async (_req: FastifyRequest, reply: FastifyReply) => {
+    return reply.status(501).send({
+      error: 'deposit_verification_pending',
+      message: 'Deposit endpoint requires on-chain verification via PaymentAdapter.verify() (WKH-35). Currently disabled for safety.',
+      documentation: 'https://github.com/ferrosasfp/wasiai-a2a/blob/main/doc/architecture/CHAIN-ADAPTIVE.md',
+    })
   })
 
   /**

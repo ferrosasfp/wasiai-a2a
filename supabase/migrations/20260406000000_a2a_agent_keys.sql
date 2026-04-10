@@ -119,3 +119,29 @@ BEGIN
   WHERE id = p_key_id;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Function: register_a2a_key_deposit
+-- Atomically increments budget for a given chain using FOR UPDATE to prevent
+-- race conditions on concurrent deposits (BLQ-4).
+CREATE OR REPLACE FUNCTION register_a2a_key_deposit(
+  p_key_id UUID,
+  p_chain_id INT,
+  p_amount_usd NUMERIC
+)
+RETURNS TEXT AS $$
+DECLARE
+  v_budget JSONB;
+  v_chain TEXT := p_chain_id::TEXT;
+  v_current NUMERIC;
+  v_new NUMERIC;
+BEGIN
+  SELECT budget INTO v_budget FROM a2a_agent_keys WHERE id = p_key_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'key_not_found'; END IF;
+  v_current := COALESCE((v_budget ->> v_chain)::NUMERIC, 0);
+  v_new := v_current + p_amount_usd;
+  UPDATE a2a_agent_keys
+  SET budget = jsonb_set(COALESCE(v_budget, '{}'::jsonb), ARRAY[v_chain], to_jsonb(v_new::TEXT))
+  WHERE id = p_key_id;
+  RETURN v_new::TEXT;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
