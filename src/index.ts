@@ -19,13 +19,15 @@ import tasksRoutes from './routes/tasks.js'
 import dashboardRoutes from './routes/dashboard.js'
 import gaslessRoutes from './routes/gasless.js'
 
-// Kite: importar dispara la inicialización (top-level await en el módulo)
-import { kiteClient } from './services/kite-client.js'
+import { initAdapters, getChainConfig } from './adapters/registry.js'
 
 const fastify = Fastify({ logger: true })
 
 // CORS
 await fastify.register(cors, { origin: '*' })
+
+// Initialize adapters before route registration
+await initAdapters()
 
 // Health check
 fastify.get('/', async (_request, reply) => {
@@ -55,13 +57,13 @@ await fastify.register(wellKnownRoutes, { prefix: '/.well-known' })
 await fastify.register(tasksRoutes, { prefix: '/tasks' })
 await fastify.register(dashboardRoutes, { prefix: '/dashboard' })
 await fastify.register(mockRegistryRoutes, { prefix: '/mock-registry/agents' })
-
-// DT-1 (WKH-38): always register gasless routes — /gasless/status must be
-// discoverable even when disabled; it returns funding_state for degradation info.
 await fastify.register(gaslessRoutes, { prefix: '/gasless' })
 
 // Start server
 const port = parseInt(process.env.PORT ?? '3001')
+
+let chainInfo = 'no chain configured'
+try { const cfg = getChainConfig(); chainInfo = `${cfg.name} (chainId: ${cfg.chainId})` } catch { /* adapter not initialized */ }
 
 console.log(`
 ╔═══════════════════════════════════════════════════════════╗
@@ -69,7 +71,7 @@ console.log(`
 ║   Agent Discovery, Composition & Orchestration Service    ║
 ╠═══════════════════════════════════════════════════════════╣
 ║   Server running on http://localhost:${port}                  ║
-║   Kite: ${kiteClient ? 'connected (chainId: 2368)     ' : 'disabled (KITE_RPC_URL not set)'}║
+║   Chain: ${chainInfo.padEnd(45)}║
 ║                                                           ║
 ║   Endpoints:                                              ║
 ║   • GET  /registries     — List marketplaces              ║
