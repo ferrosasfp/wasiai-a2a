@@ -41,16 +41,52 @@ Parsear `$ARGUMENTS` para extraer la lista de HU-IDs y el flag `--user` si exist
 
 ---
 
-## §3 Pipeline selection (delegado al Analyst)
+## §3 Pipeline selection (Analyst propone, orquestador valida)
 
-El orquestador **NO decide** qué pipeline usar. Cada HU pasa por F1 (analyst) que incluye
-**Smart Sizing**. El sizing determina el pipeline:
+Cada HU pasa por F1 (analyst) que incluye **Smart Sizing**. El sizing propone el pipeline:
 
 | Sizing del Analyst | Pipeline AUTO |
 |--------------------|---------------|
 | FAST | FAST AUTO (§7.1) |
 | FAST + categoría de riesgo | FAST+AR AUTO (§7.2) |
 | QUALITY / full | QUALITY AUTO (§7.3) |
+
+### §3.1 Orchestrator Override
+
+El orquestador **puede y debe** subir el pipeline si el clinical review detecta riesgo
+que el analyst no capturó. Nunca bajar.
+
+**Señales de override:**
+- Analyst dice FAST pero el scope toca auth/payment/RLS → subir a FAST+AR
+- Analyst dice FAST+AR pero hay >5 archivos o necesita SDD → subir a QUALITY
+- Analyst dice LAUNCH pero toca auth/payment path → subir a FAST+AR mínimo
+
+**Regla: siempre subir, nunca bajar.** Si el analyst dice QUALITY, no bajarlo a FAST
+aunque parezca chico — el analyst vio algo que justificó QUALITY.
+
+### §3.2 Classification Table (obligatoria en Phase 2)
+
+Después de evaluar todos los F1, el orquestador presenta una tabla de clasificación:
+
+```
+┌───────────┬─────────────┬────────────────┬─────────────┬──────────────────────────────┐
+│    HU     │  Analyst    │ My assessment  │   Final     │          Rationale           │
+│           │   sizing    │                │  pipeline   │                              │
+├───────────┼─────────────┼────────────────┼─────────────┼──────────────────────────────┤
+│ WKH-XX    │ FAST        │ ✅ FAST        │ FAST        │ Correct: script only, no DB  │
+├───────────┼─────────────┼────────────────┼─────────────┼──────────────────────────────┤
+│ WKH-YY    │ LAUNCH      │ FAST+AR ↑      │ FAST+AR     │ Touches auth middleware →    │
+│           │             │ upgrade        │             │ needs adversarial review     │
+├───────────┼─────────────┼────────────────┼─────────────┼──────────────────────────────┤
+│ WKH-ZZ    │ QUALITY     │ ✅ QUALITY     │ QUALITY     │ Correct: 12 ACs, 4 waves    │
+└───────────┴─────────────┴────────────────┴─────────────┴──────────────────────────────┘
+```
+
+**Columnas:**
+- **Analyst sizing**: lo que el analyst propuso en el work-item
+- **My assessment**: `✅` si coincide, o `↑ upgrade` con razón si el orquestador sube
+- **Final pipeline**: el pipeline que efectivamente se ejecutará
+- **Rationale**: 1 línea explicando por qué
 
 Si el analyst aborta (scope too large, ambigüedad) → escalar al humano (§6 regla #3).
 
@@ -171,7 +207,7 @@ El orquestador **PARA** y usa `AskUserQuestion` cuando:
 | 7 | Sub-agente crashea o retorna output vacío | Reportar error, ofrecer re-lanzar o abortar |
 | 8 | SDD con items irresolubles sin conocimiento de dominio humano | Listar items pendientes, pedir decisión |
 | 9 | Conflicto de Scope IN entre HUs sin orden claro | Presentar overlap y opciones de ordenamiento |
-| 10 | Batch completo (todas las HUs en DONE) | Presentar dashboard final (§8) para cierre |
+| 10 | Batch completo (todas las HUs en DONE) | Presentar completion report (§8.2) para cierre |
 
 **Regla general:** ante incertidumbre del orquestador sobre si self-aprobar o escalar → **escalar siempre**.
 Es más barato preguntar al humano que aprobar algo incorrecto.
@@ -318,30 +354,216 @@ Fase 8 — DONE
 - SPEC_APPROVED es clinical review (§4.2) en vez de pregunta al humano
 - El resto del pipeline (F3→DONE) ya es automático en manual — sin cambios
 
+### §7.4 AR+CR BLQ Deduplication (fix-pack prep)
+
+Cuando AR y CR corren en paralelo, ambos pueden encontrar el **mismo issue**.
+Antes de lanzar fix-pack, el orquestador DEBE:
+
+1. Leer `ar-report.md` y `cr-report.md`
+2. Identificar BLQs duplicados (mismo archivo + misma causa raíz)
+3. Consolidar en una tabla deduplicada con columna **Source**:
+
+```
+┌────────────┬─────────────┬──────────────────────────┬────────────────────────────┐
+│    BLQ     │   Source    │        Problema          │           Fix              │
+├────────────┼─────────────┼──────────────────────────┼────────────────────────────┤
+│ BLQ-1      │ AR+CR ambos │ [issue encontrado x2]    │ [fix unificado]            │
+├────────────┼─────────────┼──────────────────────────┼────────────────────────────┤
+│ BLQ-2 (AR) │ AR          │ [issue solo de AR]       │ [fix]                      │
+├────────────┼─────────────┼──────────────────────────┼────────────────────────────┤
+│ BLQ-2 (CR) │ CR          │ [issue solo de CR]       │ [fix]                      │
+└────────────┴─────────────┴──────────────────────────┴────────────────────────────┘
+```
+
+**Por qué importa:** sin deduplicación, el dev del fix-pack puede aplicar 2 fixes
+contradictorios al mismo archivo. La tabla consolidada es el input del fix-pack.
+
+**Métrica:** "AR encontró N BLOQUEANTEs → fix-pack → N resueltos" se incluye en el
+completion report (§8.2). Cuando AR encuentra BLQs reales, documenta:
+"AR justified its existence" — dato útil para validar que FAST+AR fue la elección correcta.
+
 ---
 
-## §8 Completion Dashboard
+## §8 Progress Reporting
 
-Al terminar TODAS las HUs del batch (o al escalar en la regla #10), presentar:
+### §8.1 In-Flight Progress (obligatorio)
+
+Después de cada lanzamiento de sub-agente y cada transición de fase, el orquestador
+DEBE mostrar la **progress bar visual** de cada HU del batch. Formato:
 
 ```
-╔══════════════════════════════════════════════════╗
-║           NEXUS-AUTO — BATCH COMPLETE            ║
-╠══════════════════════════════════════════════════╣
-║ HU       │ Pipeline  │ Status │ Time   │ Branch ║
-║──────────┼───────────┼────────┼────────┼────────║
-║ WKH-XX   │ FAST      │ ✅ DONE │ 12 min │ feat/… ║
-║ WKH-YY   │ FAST+AR   │ ✅ DONE │ 25 min │ feat/… ║
-║ WKH-ZZ   │ QUALITY   │ ⚠️ ESC  │ 40 min │ feat/… ║
-╠══════════════════════════════════════════════════╣
-║ Gates self-approved: N                           ║
-║ Gates escalated: N                               ║
-║ Fix-pack iterations: N                           ║
-║ Total wallclock: NN min                          ║
-╚══════════════════════════════════════════════════╝
+WKH-XX:  F0✅ → F1✅ → HU✅ → [F2 🔄] → F2.5 → F3 → AR+CR → F4 → DONE
 ```
 
-Si alguna HU fue escalada, incluir el motivo en una sección debajo del dashboard.
+**Convenciones:**
+- `✅` = fase completada
+- `🔄` = fase en ejecución (dentro de corchetes: `[fase 🔄]`)
+- Sin icono = fase pendiente
+- Gates aprobados se marcan con el nombre corto: `HU✅` = HU_APPROVED, `SPEC✅` = SPEC_APPROVED
+
+**Progress bars por pipeline type:**
+
+```
+FAST:      F1✅ → HU✅ → [F3 🔄] → F4 → DONE
+FAST+AR:   F1✅ → HU✅ → F3✅ → [AR+CR 🔄] → F4 → DONE
+QUALITY:   F0✅ → F1✅ → HU✅ → F2✅ → SPEC✅ → F2.5✅ → [F3 🔄] → AR+CR → F4 → DONE
+```
+
+**En batch de N HUs**, mostrar todas las progress bars juntas:
+
+```
+WKH-34:  F1✅ → HU✅ → F3✅ → AR+CR✅ → F4✅ → DONE✅     (FAST — 12 min)
+WKH-35:  F0✅ → F1✅ → HU✅ → F2✅ → SPEC✅ → F2.5✅ → [F3 🔄] → AR+CR → F4 → DONE
+WKH-36:  F1✅ → HU✅ → [F3 🔄] → AR+CR → F4 → DONE
+```
+
+**Después de cada progress bar**, incluir una línea de contexto explicando qué sigue:
+
+```
+WKH-18:  F0✅ → F1✅ → HU✅ → F2✅ → SPEC✅ → F2.5✅ → [F3 impl 🔄] → AR+CR → F4 → DONE
+
+Este es el más grande del batch — 4 waves, ~19 archivos. Cuando F3 completa → AR+CR → F4 → DONE.
+```
+
+**Cuándo mostrar la progress bar:**
+- Al lanzar cada sub-agente
+- Al completar cada sub-agente (actualizar ✅)
+- Al self-aprobar un gate (actualizar HU✅ o SPEC✅)
+- Al escalar al humano (marcar `[⚠️ ESCALATED]` en vez de 🔄)
+
+### §8.2 Completion Report
+
+Al terminar TODAS las HUs del batch (o al escalar en la regla #10), presentar un reporte
+estructurado con 3 secciones obligatorias:
+
+**Sección 1 — Tabla de resultados**
+
+Tabla con una fila por HU (o bloque de trabajo si hubo tareas no-HU como memory/Jira reorg):
+
+```
+Resumen de la sesión YYYY-MM-DD
+
+┌────────┬──────────┬───────────────┬───────────────┬──────────────────────────────────────────┐
+│ Bloque │  Ticket  │     Modo      │    Estado     │          Deliverable clave                │
+├────────┼──────────┼───────────────┼───────────────┼──────────────────────────────────────────┤
+│ 1      │ WKH-XX   │ FAST          │ ✅ Finalizada │ [descripción 1 línea del output]          │
+├────────┼──────────┼───────────────┼───────────────┼──────────────────────────────────────────┤
+│ 2      │ WKH-YY   │ FAST+AR       │ ✅ Finalizada │ [descripción 1 línea del output]          │
+├────────┼──────────┼───────────────┼───────────────┼──────────────────────────────────────────┤
+│ 3      │ WKH-ZZ   │ QUALITY       │ ✅ Finalizada │ [descripción 1 línea del output]          │
+├────────┼──────────┼───────────────┼───────────────┼──────────────────────────────────────────┤
+│ 4      │ WKH-AA   │ QUALITY W1-W3 │ ⚠️ Parcial    │ [descripción + qué falta]                 │
+└────────┴──────────┴───────────────┴───────────────┴──────────────────────────────────────────┘
+```
+
+**Columnas:**
+- **Bloque**: número secuencial de ejecución
+- **Ticket**: HU-ID o nombre de tarea
+- **Modo**: FAST / FAST+AR / QUALITY / QUALITY W1-WN (si parcial)
+- **Estado**: ✅ Finalizada / ⚠️ Parcial / ❌ Escalada / ❌ Abortada
+- **Deliverable clave**: 1 línea concisa del output principal (archivos creados, features deployed, etc.)
+
+**Sección 2 — Pipeline summary**
+
+Resumen agrupado por tipo de pipeline con árbol visual:
+
+```
+Pipeline NexusAgil ejecutado
+
+N HUs procesadas:
+├── N FAST (WKH-XX, WKH-YY)
+├── N FAST+AR (WKH-ZZ) — con nexus-adversary AR+CR
+└── N QUALITY (WKH-AA, WKH-BB) — full pipeline F0→...→DONE
+
+AR encontró N BLOQUEANTEs → fix-pack → N resueltos
+Gates self-approved: N | Gates escalated: N
+Total wallclock: NN min
+```
+
+**Sección 3 — Production State (si hubo merge)**
+
+Tabla por capa/feature mostrando qué está live en producción después del batch:
+
+```
+Lo que está en producción ahora
+
+┌───────────────┬──────────────────────────────────────────────────┬─────────┐
+│     Capa      │                    Feature                       │ Status  │
+├───────────────┼──────────────────────────────────────────────────┼─────────┤
+│ L2 Adapters   │ PaymentAdapter, GaslessAdapter, etc.             │ ✅ Live │
+├───────────────┼──────────────────────────────────────────────────┼─────────┤
+│ L3 Identity   │ POST /auth/agent-signup → wasi_a2a_ keys         │ ✅ Live │
+├───────────────┼──────────────────────────────────────────────────┼─────────┤
+│ Hardening     │ Rate limit, circuit breaker, error boundary      │ ✅ Live │
+├───────────────┼──────────────────────────────────────────────────┼─────────┤
+│ Smoke test    │ scripts/smoke-test.sh — 8/8 endpoints            │ ✅ Live │
+└───────────────┴──────────────────────────────────────────────────┴─────────┘
+```
+
+**Columnas:**
+- **Capa**: nivel arquitectónico o subsistema (L1/L2/L3/L4, Middleware, Hardening, Docs, etc.)
+- **Feature**: descripción concisa de lo que se deployó
+- **Status**: ✅ Live / 🔄 Deploying / ⚠️ Pending review
+
+Incluir también el estado técnico:
+
+```
+- PR #N merged a main: [timestamp]
+- Tests: N/N passing, tsc clean
+- Deploy: [status — auto-triggered / manual / pending]
+- New deps: [si aplica]
+```
+
+Si no hubo merge (branches pendientes de review humano):
+
+```
+Branches pendientes de merge
+
+- feat/NNN-titulo (WKH-XX) — ready for PR
+- feat/NNN-titulo (WKH-YY) — ready for PR
+```
+
+**Sección 4 — What Remains (siempre)**
+
+Tabla de tickets pendientes del proyecto/sprint que NO se procesaron en este batch:
+
+```
+Lo que queda
+
+┌────────┬──────────────────────────────────────┬───────────────────┐
+│ Ticket │                 Qué                  │     Esfuerzo      │
+├────────┼──────────────────────────────────────┼───────────────────┤
+│ WKH-26 │ Mid-checkpoint submission            │ Operativo — horas │
+├────────┼──────────────────────────────────────┼───────────────────┤
+│ WKH-17 │ Video + README final                 │ 1 día             │
+├────────┼──────────────────────────────────────┼───────────────────┤
+│ WKH-31 │ Pitch deck final                     │ Owner: [nombre]   │
+└────────┴──────────────────────────────────────┴───────────────────┘
+```
+
+**Columnas:**
+- **Ticket**: HU-ID o nombre
+- **Qué**: descripción de 1 línea
+- **Esfuerzo**: estimación libre (horas, días, "owner-name-owned", etc.)
+
+Si no quedan tickets pendientes, indicar: "El backlog está vacío. Sprint completo."
+
+**Sección 5 — Cross-session summary (si aplica)**
+
+Si el batch es parte de un sprint de múltiples sesiones, incluir totales acumulados:
+
+```
+Resumen acumulado (sesiones YYYY-MM-DD a YYYY-MM-DD)
+
+- N HUs shipped en producción
+- Tests: N → N (+N new)
+- BLOQUEANTEs encontrados por AR: N → todos resueltos
+- PRs merged: #N, #N, #N
+- Modos usados: N FAST, N FAST+AR, N QUALITY
+```
+
+Esta sección solo aparece cuando hay contexto de sesiones anteriores (vía Engram o memoria persistente).
+Si es la primera sesión del sprint, omitir.
 
 ---
 
@@ -372,7 +594,12 @@ Si alguna HU fue escalada, incluir el motivo en una sección debajo del dashboar
 
 9. **Máximo 3 fix-pack iterations** — si AR no aprueba después de 3 rondas, escalar.
 
-10. **Dashboard final obligatorio** — el batch no está completo sin el dashboard de §8.
+10. **Dashboard final obligatorio** — el batch no está completo sin el completion report de §8.2.
+
+11. **Permisos Bash para background agents** — antes de lanzar F3/F4/DONE en background,
+    verificar que `.claude/settings.json` tenga permisos granulares de Bash configurados
+    (git, npm test, npx tsc, mkdir, etc.). Sin esto, los background agents fallan
+    silenciosamente. Ver Auto-Blindaje "Bash bloqueado" en `subagent_protocol.md`.
 
 ---
 
