@@ -3,12 +3,15 @@
  *
  * WKH-13: orchestrationId generated here (not in service),
  * passed to service, always available for response/error.
+ * WKH-18: Backpressure + timeout preHandlers, structured logging, error boundary.
  */
 
 import crypto from 'node:crypto'
 import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import { orchestrateService } from '../services/orchestrate.js'
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js'
+import { createBackpressureHandler } from '../middleware/backpressure.js'
+import { createTimeoutHandler } from '../middleware/timeout.js'
 
 type OrchestrateBody = {
   goal: string
@@ -37,15 +40,21 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           },
         },
       },
-      preHandler: requirePaymentOrA2AKey({
-        description: 'WasiAI Orchestration Service — Goal-based AI agent orchestration',
-      }),
+      preHandler: [
+        createBackpressureHandler(),
+        createTimeoutHandler(parseInt(process.env.TIMEOUT_ORCHESTRATE_MS ?? '120000')),
+        ...requirePaymentOrA2AKey({
+          description: 'WasiAI Orchestration Service — Goal-based AI agent orchestration',
+        }),
+      ],
     },
     async (request, reply: FastifyReply) => {
       const orchestrationId = crypto.randomUUID()
 
       try {
         const body = request.body
+
+        request.log.info({ orchestrationId }, 'Orchestration started')
 
         const result = await orchestrateService.orchestrate(
           {
@@ -61,11 +70,11 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.send({ kiteTxHash, ...result })
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Orchestration failed'
-        console.error('[Orchestrate] Error:', message)
-        return reply.status(500).send({
-          orchestrationId,
-          error: 'Orchestration failed',
-        })
+        request.log.error({ orchestrationId, err: message }, 'Orchestration failed')
+        // Attach orchestrationId to the error for the error boundary
+        const wrappedErr = err instanceof Error ? err : new Error(message)
+        ;(wrappedErr as Error & { orchestrationId?: string }).orchestrationId = orchestrationId
+        throw wrappedErr
       }
     },
   )

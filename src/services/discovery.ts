@@ -4,6 +4,7 @@
 
 import type { Agent, DiscoveryQuery, DiscoveryResult, RegistryConfig } from '../types/index.js'
 import { registryService } from './registry.js'
+import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js'
 
 export const discoveryService = {
   /**
@@ -81,7 +82,8 @@ export const discoveryService = {
       headers['Authorization'] = `Bearer ${registry.auth.value}`
     }
 
-    const response = await fetch(url.toString(), { headers })
+    const cb = getRegistryCircuitBreaker(registry.name)
+    const response = await cb.execute(() => fetch(url.toString(), { headers }))
 
     if (!response.ok) {
       throw new Error(`Registry ${registry.name} returned ${response.status}`)

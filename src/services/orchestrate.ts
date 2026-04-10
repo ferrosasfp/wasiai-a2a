@@ -6,6 +6,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk'
+import { anthropicCircuitBreaker, CircuitOpenError } from '../lib/circuit-breaker.js'
 import type {
   Agent,
   OrchestrateRequest,
@@ -105,14 +106,16 @@ async function llmPlan(
   const timeoutId = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS)
 
   try {
-    const response = await client.messages.create(
-      {
-        model: MODEL,
-        max_tokens: 1024,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userPrompt }],
-      },
-      { signal: controller.signal },
+    const response = await anthropicCircuitBreaker.execute(() =>
+      client.messages.create(
+        {
+          model: MODEL,
+          max_tokens: 1024,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userPrompt }],
+        },
+        { signal: controller.signal },
+      ),
     )
 
     const text = response.content
@@ -149,6 +152,8 @@ async function llmPlan(
       reasoning,
     }
   } catch (err) {
+    // Let CircuitOpenError propagate to error boundary
+    if (err instanceof CircuitOpenError) throw err
     console.error('[Orchestrate] LLM planning failed:', err instanceof Error ? err.message : err)
     return null
   } finally {
