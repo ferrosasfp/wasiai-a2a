@@ -56,6 +56,16 @@ fastify.get('/', { config: { rateLimit: false } }, async (_request, reply) => {
   })
 })
 
+// Health endpoint (WKH-HEALTH)
+fastify.get('/health', { config: { rateLimit: false } }, async (_request, reply) => {
+  return reply.send({
+    status: 'ok',
+    version: '0.1.0',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  })
+})
+
 // Routes
 await fastify.register(registriesRoutes, { prefix: '/registries' })
 await fastify.register(discoverRoutes, { prefix: '/discover' })
@@ -88,7 +98,7 @@ console.log(`
 ║   Endpoints:                                              ║
 ║   • GET  /registries     — List marketplaces              ║
 ║   • POST /registries     — Register marketplace           ║
-║   • GET  /discover       — Search agents                  ║
+║   • GET|POST /discover   — Search agents                  ║
 ║   • POST /compose        — Execute pipeline               ║
 ║   • POST /orchestrate    — Goal-based orchestration       ║
 ╚═══════════════════════════════════════════════════════════╝

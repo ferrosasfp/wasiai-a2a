@@ -50,6 +50,51 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
   )
 
   /**
+   * POST /discover
+   * Same as GET /discover but reads params from JSON body (WKH-DISCOVER-POST)
+   */
+  fastify.post(
+    '/',
+    { config: { rateLimit: false } },
+    async (
+      request: FastifyRequest<{
+        Body: {
+          capabilities?: string | string[]
+          q?: string
+          maxPrice?: number
+          minReputation?: number
+          limit?: number
+          registry?: string
+        }
+      }>,
+      reply: FastifyReply,
+    ) => {
+      const body = (request.body ?? {}) as Record<string, unknown>
+
+      // Normalize capabilities: accept comma-separated string or string array
+      let capabilities: string[] | undefined
+      if (body.capabilities) {
+        if (Array.isArray(body.capabilities)) {
+          capabilities = (body.capabilities as string[]).map((s) => String(s).trim())
+        } else {
+          capabilities = String(body.capabilities).split(',').map((s) => s.trim())
+        }
+      }
+
+      const result = await discoveryService.discover({
+        capabilities,
+        query: body.q != null ? String(body.q) : undefined,
+        maxPrice: body.maxPrice != null ? Number(body.maxPrice) : undefined,
+        minReputation: body.minReputation != null ? Number(body.minReputation) : undefined,
+        limit: body.limit != null ? Number(body.limit) : undefined,
+        registry: body.registry != null ? String(body.registry) : undefined,
+      })
+
+      return reply.send(result)
+    },
+  )
+
+  /**
    * GET /discover/:slug
    * Get a specific agent by slug
    */

@@ -95,6 +95,18 @@ else
   report "GET /" "FAIL" "$HTTP_CODE" "expected 200 with name+version fields"
 fi
 
+# ── GET /health ─────────────────────────────────────────────────────────────
+
+RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/health")
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" = "200" ] && json_has_field "$BODY" "status" && json_has_field "$BODY" "uptime"; then
+  report "GET /health" "PASS" "$HTTP_CODE"
+else
+  report "GET /health" "FAIL" "$HTTP_CODE" "expected 200 with status+uptime fields"
+fi
+
 # ── AC-7: GET /.well-known/agent.json ───────────────────────────────────────
 
 RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/.well-known/agent.json")

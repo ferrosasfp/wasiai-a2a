@@ -62,6 +62,7 @@ export const agentCardService = {
       authentication: {
         schemes: this.resolveAuthSchemes(registryConfig),
       },
+      invocationNote: 'Do not call the agent URL directly. Invoke this agent through POST /compose or POST /orchestrate on the WasiAI A2A gateway.',
     }
   },
 
@@ -100,6 +101,7 @@ export const agentCardService = {
       authentication: {
         schemes: [],
       },
+      invocationNote: 'Agent invocations must go through POST /compose or POST /orchestrate on this gateway, not directly to external agent hosts.',
     }
   },
 }

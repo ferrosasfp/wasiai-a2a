@@ -92,6 +92,8 @@ export interface Agent {
   reputation?: number
   registry: string
   invokeUrl: string
+  /** Explains that invocation must go through POST /compose or POST /orchestrate on the gateway */
+  invocationNote: string
   metadata?: Record<string, unknown>
 }
 
@@ -331,6 +333,8 @@ export interface AgentCard {
   authentication: {
     schemes: string[]
   }
+  /** Explains that agent invocations must go through POST /compose or POST /orchestrate on the gateway */
+  invocationNote?: string
 }
 
 // ============================================================

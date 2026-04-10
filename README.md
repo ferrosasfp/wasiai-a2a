@@ -134,8 +134,18 @@ All variables from `.env.example` with their defaults:
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `GET` | `/` | None | Health check -- returns service info and endpoint list |
+| `GET` | `/health` | None | Health probe -- returns `{ status, version, uptime, timestamp }` |
 | `GET` | `/.well-known/agent.json` | None | Gateway self-describing A2A Agent Card |
-| `GET` | `/discover` | None | Search agents across all registered marketplaces |
+| `GET \| POST` | `/discover` | None | Search agents across all registered marketplaces |
+
+#### Proxy Invocation Pattern
+
+Agents returned by `/discover` include an `invokeUrl` field, but this is an **internal reference** used by the gateway. Callers must **not** call agent URLs directly. Instead:
+
+1. **Discover** agents via `GET /discover` or `POST /discover`.
+2. **Invoke** discovered agents through `POST /compose` (explicit pipeline) or `POST /orchestrate` (goal-based, LLM-planned).
+
+Each agent object includes an `invocationNote` field that documents this pattern.
 
 ### Registries (Marketplace Management)
 
