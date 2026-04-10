@@ -184,7 +184,7 @@ Each agent object includes an `invocationNote` field that documents this pattern
 |--------|------|------|-------------|
 | `POST` | `/auth/agent-signup` | None | Create a new `wasi_a2a_xxx` agent key |
 | `POST` | `/auth/deposit` | None | Register a deposit (501 until on-chain verification lands) |
-| `GET` | `/auth/me` | x-a2a-key | Get key status: budget, scoping, bindings |
+| `GET` | `/auth/me` | x-a2a-key / Bearer | Get key status: budget, scoping, bindings |
 | `POST` | `/auth/bind/:chain` | None | On-chain identity binding (501 -- planned for Fase 2) |
 
 ### Gasless (EIP-3009)
@@ -229,13 +229,22 @@ The plaintext key is returned **once** at signup. Store it securely.
 
 ### Check Status
 
+Pass your key via the `x-a2a-key` header or the standard `Authorization: Bearer` header:
+
 ```bash
+# Option 1: x-a2a-key header
 curl https://wasiai-a2a-production.up.railway.app/auth/me \
   -H "x-a2a-key: wasi_a2a_abc123..."
+
+# Option 2: Authorization: Bearer header
+curl https://wasiai-a2a-production.up.railway.app/auth/me \
+  -H "Authorization: Bearer wasi_a2a_abc123..."
 
 # Response 200:
 # { "key_id": "...", "budget": {"2368": "10.00"}, "scoping": {...}, ... }
 ```
+
+When both headers are present, `x-a2a-key` takes priority. The Bearer token must start with `wasi_a2a_` to be recognized; other Bearer schemes are ignored.
 
 ### Key Features
 
@@ -272,18 +281,27 @@ curl -X POST https://wasiai-a2a-production.up.railway.app/orchestrate \
   -d '{"goal": "analyze token safety", "budget": 1}'
 ```
 
-### Path 2: x-a2a-key (heavy users, pre-funded)
+### Path 2: x-a2a-key / Bearer (heavy users, pre-funded)
 
 1. Sign up via `POST /auth/agent-signup` to get a `wasi_a2a_xxx` key.
 2. Fund the key (deposit flow -- pending on-chain verification in WKH-35).
-3. Pass the key in the `x-a2a-key` header on every paid request.
+3. Pass the key via `x-a2a-key` header or `Authorization: Bearer wasi_a2a_xxx` on every paid request.
 
 ```bash
+# Using x-a2a-key header
 curl -X POST https://wasiai-a2a-production.up.railway.app/orchestrate \
   -H "Content-Type: application/json" \
   -H "x-a2a-key: wasi_a2a_abc123..." \
   -d '{"goal": "analyze token safety", "budget": 1}'
+
+# Using Authorization: Bearer header (equivalent)
+curl -X POST https://wasiai-a2a-production.up.railway.app/orchestrate \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer wasi_a2a_abc123..." \
+  -d '{"goal": "analyze token safety", "budget": 1}'
 ```
+
+Priority: `x-a2a-key` > `Authorization: Bearer wasi_a2a_*` > x402. Bearer tokens that do not start with `wasi_a2a_` are ignored.
 
 The middleware hashes the key, validates budget/scoping/limits, performs an optimistic debit, then executes the request. The response includes an `x-a2a-remaining-budget` header.
 

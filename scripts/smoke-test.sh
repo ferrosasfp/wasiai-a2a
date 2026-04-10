@@ -193,6 +193,23 @@ else
   report "GET /auth/me" "SKIP" "---" "no key from signup step"
 fi
 
+# ── Bearer auth on /auth/me (WKH-BEARER-FIX AC-6) ─────────────────────────
+
+if [ -n "$AGENT_KEY" ]; then
+  RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/auth/me" \
+    -H "Authorization: Bearer $AGENT_KEY")
+  HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+  BODY=$(echo "$RESPONSE" | sed '$d')
+
+  if [ "$HTTP_CODE" = "200" ] && json_has_field "$BODY" "key_id"; then
+    report "GET /auth/me (Bearer)" "PASS" "$HTTP_CODE"
+  else
+    report "GET /auth/me (Bearer)" "FAIL" "$HTTP_CODE" "expected 200 with key status info via Bearer auth"
+  fi
+else
+  report "GET /auth/me (Bearer)" "SKIP" "---" "no key from signup step"
+fi
+
 # ── AC-13: GET /discover ───────────────────────────────────────────────────
 
 RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/discover")
@@ -203,6 +220,20 @@ if [ "$HTTP_CODE" = "200" ]; then
   report "GET /discover" "PASS" "$HTTP_CODE"
 else
   report "GET /discover" "FAIL" "$HTTP_CODE" "expected 200 with agents array"
+fi
+
+# ── POST /discover (WKH-BEARER-FIX AC-7) ──────────────────────────────────
+
+RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$BASE_URL/discover" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "test"}')
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" = "200" ]; then
+  report "POST /discover" "PASS" "$HTTP_CODE"
+else
+  report "POST /discover" "FAIL" "$HTTP_CODE" "expected 200"
 fi
 
 # ── AC-14: x402-protected endpoints (SKIP) ─────────────────────────────────
