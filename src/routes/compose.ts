@@ -44,10 +44,16 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         })
       }
 
+      // BLQ-2: bail early if timeout already sent 504
+      if (reply.sent) return
+
       const result = await composeService.compose({
         steps: body.steps,
         maxBudget: body.maxBudget,
       })
+
+      // BLQ-2: bail early if timeout fired during compose
+      if (reply.sent) return
 
       if (!result.success) {
         return reply.status(400).send({

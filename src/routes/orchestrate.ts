@@ -56,6 +56,9 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
 
         request.log.info({ orchestrationId }, 'Orchestration started')
 
+        // BLQ-2: bail early if timeout already sent 504
+        if (reply.sent) return
+
         const result = await orchestrateService.orchestrate(
           {
             goal: body.goal.trim(),
@@ -65,6 +68,9 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           },
           orchestrationId,
         )
+
+        // BLQ-2: bail early if timeout fired during orchestration
+        if (reply.sent) return
 
         const kiteTxHash = request.paymentTxHash
         return reply.send({ kiteTxHash, ...result })

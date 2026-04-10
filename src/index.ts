@@ -39,7 +39,7 @@ registerErrorBoundary(fastify)
 await registerRateLimit(fastify)
 
 // Health check
-fastify.get('/', async (_request, reply) => {
+fastify.get('/', { config: { rateLimit: false } }, async (_request, reply) => {
   return reply.send({
     name: 'WasiAI A2A Protocol',
     version: '0.1.0',

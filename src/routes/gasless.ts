@@ -5,7 +5,7 @@ import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { getGaslessAdapter } from '../adapters/registry.js'
 
 const gaslessRoutes: FastifyPluginAsync = async (fastify) => {
-  fastify.get('/status', async (_req: FastifyRequest, reply: FastifyReply) => {
+  fastify.get('/status', { config: { rateLimit: false } }, async (_req: FastifyRequest, reply: FastifyReply) => {
     try {
       const status = await getGaslessAdapter().status()
       return reply.send(status)

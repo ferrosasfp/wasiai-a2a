@@ -23,7 +23,7 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
    * GET /dashboard
    * Serve the dashboard HTML
    */
-  fastify.get('/', async (_request: FastifyRequest, reply: FastifyReply) => {
+  fastify.get('/', { config: { rateLimit: false } }, async (_request: FastifyRequest, reply: FastifyReply) => {
     return reply.type('text/html').send(dashboardHtml)
   })
 
@@ -31,7 +31,7 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
    * GET /dashboard/api/stats
    * Aggregated KPIs for the dashboard
    */
-  fastify.get('/api/stats', async (_request: FastifyRequest, reply: FastifyReply) => {
+  fastify.get('/api/stats', { config: { rateLimit: false } }, async (_request: FastifyRequest, reply: FastifyReply) => {
     try {
       const stats = await eventService.stats()
       return reply.send(stats)
@@ -48,6 +48,7 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
    */
   fastify.get(
     '/api/events',
+    { config: { rateLimit: false } },
     async (
       request: FastifyRequest<{ Querystring: { limit?: string } }>,
       reply: FastifyReply,

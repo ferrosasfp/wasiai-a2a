@@ -14,8 +14,10 @@ export async function registerRateLimit(fastify: FastifyInstance): Promise<void>
   const max = parseInt(process.env.RATE_LIMIT_MAX ?? '10')
   const timeWindow = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000')
 
+  // global: true applies rate limiting to ALL routes by default.
+  // Routes that should be exempt must set config: { rateLimit: false }.
   await fastify.register(rateLimit, {
-    global: false,
+    global: true,
     max,
     timeWindow,
     errorResponseBuilder: (_request, context) => {

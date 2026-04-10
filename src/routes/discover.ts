@@ -20,6 +20,7 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    */
   fastify.get(
     '/',
+    { config: { rateLimit: false } },
     async (
       request: FastifyRequest<{
         Querystring: {
@@ -54,6 +55,7 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    */
   fastify.get(
     '/:slug',
+    { config: { rateLimit: false } },
     async (
       request: FastifyRequest<{
         Params: { slug: string }

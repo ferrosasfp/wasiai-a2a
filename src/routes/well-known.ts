@@ -8,6 +8,7 @@ const wellKnownRoutes: FastifyPluginAsync = async (fastify) => {
    */
   fastify.get(
     '/agent.json',
+    { config: { rateLimit: false } },
     async (request: FastifyRequest, reply: FastifyReply) => {
       const baseUrl = resolveBaseUrl(request)
       const card = agentCardService.buildSelfAgentCard(baseUrl)

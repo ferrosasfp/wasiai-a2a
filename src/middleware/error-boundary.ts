@@ -22,6 +22,9 @@ export function registerErrorBoundary(fastify: FastifyInstance): void {
       })
     }
 
+    // BLQ-3: Extract orchestrationId from error if present (e.g. /orchestrate failures)
+    const orchestrationId = (error as unknown as { orchestrationId?: string }).orchestrationId ?? undefined
+
     // 2. Custom errors with code (CircuitOpenError, rate-limit, backpressure, timeout, etc.)
     const errorAsUnknown = error as unknown as { code?: string; statusCode?: number; retryAfterMs?: number }
     if ('code' in error && typeof errorAsUnknown.code === 'string') {
@@ -35,6 +38,7 @@ export function registerErrorBoundary(fastify: FastifyInstance): void {
       if (typeof errorAsUnknown.retryAfterMs === 'number') {
         body.retryAfterMs = errorAsUnknown.retryAfterMs
       }
+      if (orchestrationId) body.orchestrationId = orchestrationId
       return reply.status(statusCode).send(body)
     }
 
@@ -49,11 +53,13 @@ export function registerErrorBoundary(fastify: FastifyInstance): void {
 
     // 4. Default: internal error
     const isDev = process.env.NODE_ENV === 'development'
-    return reply.status(error.statusCode ?? 500).send({
+    const defaultBody: Record<string, unknown> = {
       error: isDev ? error.message : 'Internal server error',
       code: 'INTERNAL_ERROR',
       details: isDev ? { stack: error.stack } : undefined,
       requestId,
-    })
+    }
+    if (orchestrationId) defaultBody.orchestrationId = orchestrationId
+    return reply.status(error.statusCode ?? 500).send(defaultBody)
   })
 }
