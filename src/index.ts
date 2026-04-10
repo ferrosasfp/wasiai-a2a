@@ -56,10 +56,9 @@ await fastify.register(tasksRoutes, { prefix: '/tasks' })
 await fastify.register(dashboardRoutes, { prefix: '/dashboard' })
 await fastify.register(mockRegistryRoutes, { prefix: '/mock-registry/agents' })
 
-if (process.env.GASLESS_ENABLED === 'true') {
-  await fastify.register(gaslessRoutes, { prefix: '/gasless' })
-  fastify.log.info('Gasless EIP-3009 module enabled (testnet PYUSD)')
-}
+// DT-1 (WKH-38): always register gasless routes — /gasless/status must be
+// discoverable even when disabled; it returns funding_state for degradation info.
+await fastify.register(gaslessRoutes, { prefix: '/gasless' })
 
 // Start server
 const port = parseInt(process.env.PORT ?? '3001')

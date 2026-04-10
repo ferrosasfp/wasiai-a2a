@@ -428,9 +428,19 @@ export interface GaslessTransferResponse {
   txHash: `0x${string}`
 }
 
+export type GaslessFundingState = 'disabled' | 'unconfigured' | 'unfunded' | 'ready'
+
 export interface GaslessStatus {
   enabled: boolean
   network: 'kite-testnet'
   supportedToken: GaslessSupportedToken | null
   operatorAddress: `0x${string}` | null   // NUNCA private key
+  /** Degradation state: disabled | unconfigured | unfunded | ready (WKH-38) */
+  funding_state: GaslessFundingState
+  /** Chain ID for the gasless network */
+  chain_id?: number
+  /** Gasless relayer base URL */
+  relayer?: string
+  /** Documentation link */
+  documentation?: string
 }

@@ -11,10 +11,15 @@ const TEST_PK =
 process.env.OPERATOR_PRIVATE_KEY = TEST_PK
 process.env.KITE_RPC_URL = process.env.KITE_RPC_URL ?? 'https://rpc-testnet.gokite.ai/'
 
-// Mock requireKiteClient para controlar getBlock determinista (A-4, A-5)
-const mockGetBlock = vi.fn()
+// Mock kite-client: requireKiteClient for signing, kiteClient for balance reads
+// vi.hoisted ensures these are available when vi.mock factory runs (hoisted above imports)
+const { mockGetBlock, mockReadContract } = vi.hoisted(() => ({
+  mockGetBlock: vi.fn(),
+  mockReadContract: vi.fn(),
+}))
 vi.mock('../services/kite-client.js', () => ({
   requireKiteClient: () => ({ getBlock: mockGetBlock }),
+  kiteClient: { readContract: mockReadContract },
 }))
 
 import {
@@ -53,6 +58,7 @@ describe('gasless-signer', () => {
     _resetGaslessSigner()
     vi.restoreAllMocks()
     mockGetBlock.mockReset()
+    mockReadContract.mockReset()
   })
 
   // ─── getSupportedToken ───────────────────────────────────
@@ -262,24 +268,136 @@ describe('gasless-signer', () => {
     }
   })
 
-  // ─── getGaslessStatus ────────────────────────────────────
+  // ─── getGaslessStatus (WKH-38 funding_state) ─────────────
 
-  it('should return operatorAddress in getGaslessStatus but never the private key', async () => {
-    vi.stubGlobal('fetch', mockFetchOk(TESTNET_RAW))
+  it('AC-6: should return funding_state "disabled" when GASLESS_ENABLED is falsy', async () => {
     const prev = process.env.GASLESS_ENABLED
-    process.env.GASLESS_ENABLED = 'true' // H-3: status side effects only con flag ON
+    delete process.env.GASLESS_ENABLED
 
     const s = await getGaslessStatus()
 
     process.env.GASLESS_ENABLED = prev
 
+    expect(s.enabled).toBe(false)
+    expect(s.funding_state).toBe('disabled')
+    expect(s.operatorAddress).toBeNull()
+    expect(s.supportedToken).toBeNull()
+    // Enrichment fields present
+    expect(s.chain_id).toBe(2368)
+    expect(s.relayer).toBeTruthy()
+    expect(s.documentation).toBeTruthy()
+  })
+
+  it('AC-1: should return funding_state "unconfigured" when PK is absent', async () => {
+    vi.stubGlobal('fetch', mockFetchOk(TESTNET_RAW))
+    const prevEnabled = process.env.GASLESS_ENABLED
+    const prevPk = process.env.OPERATOR_PRIVATE_KEY
+    process.env.GASLESS_ENABLED = 'true'
+    delete process.env.OPERATOR_PRIVATE_KEY
+
+    const s = await getGaslessStatus()
+
+    process.env.GASLESS_ENABLED = prevEnabled
+    process.env.OPERATOR_PRIVATE_KEY = prevPk
+
     expect(s.enabled).toBe(true)
+    expect(s.funding_state).toBe('unconfigured')
+    expect(s.operatorAddress).toBeNull()
+  })
+
+  it('AC-2: should return funding_state "unconfigured" when PK is malformed', async () => {
+    vi.stubGlobal('fetch', mockFetchOk(TESTNET_RAW))
+    const prevEnabled = process.env.GASLESS_ENABLED
+    const prevPk = process.env.OPERATOR_PRIVATE_KEY
+    process.env.GASLESS_ENABLED = 'true'
+    process.env.OPERATOR_PRIVATE_KEY = 'not-a-valid-hex-key'
+
+    const s = await getGaslessStatus()
+
+    process.env.GASLESS_ENABLED = prevEnabled
+    process.env.OPERATOR_PRIVATE_KEY = prevPk
+
+    expect(s.enabled).toBe(true)
+    expect(s.funding_state).toBe('unconfigured')
+    expect(s.operatorAddress).toBeNull()
+  })
+
+  it('AC-3: should return funding_state "unfunded" when PK valid but balance is 0', async () => {
+    vi.stubGlobal('fetch', mockFetchOk(TESTNET_RAW))
+    mockReadContract.mockResolvedValue(0n)
+    const prevEnabled = process.env.GASLESS_ENABLED
+    process.env.GASLESS_ENABLED = 'true'
+
+    const s = await getGaslessStatus()
+
+    process.env.GASLESS_ENABLED = prevEnabled
+
+    expect(s.enabled).toBe(true)
+    expect(s.funding_state).toBe('unfunded')
+    expect(s.operatorAddress).toBeTruthy()
+  })
+
+  it('AC-4: should return funding_state "ready" when PK valid and balance > 0', async () => {
+    vi.stubGlobal('fetch', mockFetchOk(TESTNET_RAW))
+    mockReadContract.mockResolvedValue(20000000000000000n) // 0.02 PYUSD
+    const prevEnabled = process.env.GASLESS_ENABLED
+    process.env.GASLESS_ENABLED = 'true'
+
+    const s = await getGaslessStatus()
+
+    process.env.GASLESS_ENABLED = prevEnabled
+
+    expect(s.enabled).toBe(true)
+    expect(s.funding_state).toBe('ready')
     expect(s.operatorAddress).toBeTruthy()
     expect(s.operatorAddress?.startsWith('0x')).toBe(true)
     expect(s.operatorAddress?.length).toBe(42)
+  })
+
+  it('AC-8: should never expose private key in any status response', async () => {
+    vi.stubGlobal('fetch', mockFetchOk(TESTNET_RAW))
+    mockReadContract.mockResolvedValue(20000000000000000n)
+    const prevEnabled = process.env.GASLESS_ENABLED
+    process.env.GASLESS_ENABLED = 'true'
+
+    const s = await getGaslessStatus()
+
+    process.env.GASLESS_ENABLED = prevEnabled
 
     const serialized = JSON.stringify(s)
     expect(serialized).not.toContain(TEST_PK)
     expect(serialized).not.toContain('privateKey')
+    expect(serialized).not.toContain('OPERATOR_PRIVATE_KEY')
+  })
+
+  it('CD-3: getGaslessStatus never throws even when readContract fails', async () => {
+    vi.stubGlobal('fetch', mockFetchOk(TESTNET_RAW))
+    mockReadContract.mockRejectedValue(new Error('RPC down'))
+    const prevEnabled = process.env.GASLESS_ENABLED
+    process.env.GASLESS_ENABLED = 'true'
+
+    // Must not throw -- CD-3
+    const s = await getGaslessStatus()
+
+    process.env.GASLESS_ENABLED = prevEnabled
+
+    // Balance check failed → null → unfunded (safe state)
+    expect(s.funding_state).toBe('unfunded')
+  })
+
+  it('AC-7: getGaslessStatus never throws at import time regardless of env state', async () => {
+    // This test validates that getGaslessStatus itself never throws
+    // even with unusual env combinations
+    const prevEnabled = process.env.GASLESS_ENABLED
+    const prevPk = process.env.OPERATOR_PRIVATE_KEY
+    process.env.GASLESS_ENABLED = 'true'
+    process.env.OPERATOR_PRIVATE_KEY = ''
+
+    const s = await getGaslessStatus()
+
+    process.env.GASLESS_ENABLED = prevEnabled
+    process.env.OPERATOR_PRIVATE_KEY = prevPk
+
+    expect(s.funding_state).toBe('unconfigured')
   })
 })
