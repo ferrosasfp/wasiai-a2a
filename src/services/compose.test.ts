@@ -19,7 +19,7 @@ import { composeService } from './compose.js'
 import { registryService } from './registry.js'
 import { discoveryService } from './discovery.js'
 
-function makeAgent(o: Partial<Agent> = {}): Agent { return { id: 'agent-1', name: 'Test Agent', slug: 'test-agent', description: 'A test agent', capabilities: ['test'], priceUsdc: 0, registry: 'test-registry', invokeUrl: 'https://example.com/invoke', metadata: {}, ...o } }
+function makeAgent(o: Partial<Agent> = {}): Agent { return { id: 'agent-1', name: 'Test Agent', slug: 'test-agent', description: 'A test agent', capabilities: ['test'], priceUsdc: 0, registry: 'test-registry', invokeUrl: 'https://example.com/invoke', invocationNote: 'Use POST /compose or POST /orchestrate on the gateway.', metadata: {}, ...o } }
 function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig { return { id: 'reg-1', name: 'test-registry', discoveryEndpoint: 'https://example.com/discover', invokeEndpoint: 'https://example.com/invoke/{slug}', schema: { discovery: {}, invoke: { method: 'POST' } }, enabled: true, createdAt: new Date(), ...o } }
 function mockFetchOk(data: unknown = { result: 'ok' }) { mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => data }) }
 function mockFetchError(status: number) { mockFetch.mockResolvedValueOnce({ ok: false, status, json: async () => ({ error: 'fail' }) }) }

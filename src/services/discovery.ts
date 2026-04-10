@@ -125,6 +125,7 @@ export const discoveryService = {
       reputation: Number(getNestedValue(raw, mapping.reputation ?? 'reputation') ?? undefined),
       registry: registry.name,
       invokeUrl,
+      invocationNote: 'The invokeUrl is an internal reference. To invoke this agent, use POST /compose or POST /orchestrate on the WasiAI A2A gateway.',
       metadata: raw,
     }
   },

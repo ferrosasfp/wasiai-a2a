@@ -308,6 +308,97 @@ describe('requirePaymentOrA2AKey middleware', () => {
     expect(response.statusCode).toBe(200)
   })
 
+  // ── WKH-BEARER-AUTH: Bearer token as alternative auth ──────
+
+  it('BEARER AC-1: Authorization: Bearer wasi_a2a_xxx (no x-a2a-key) — processes as a2a key', async () => {
+    const keyRow = makeKeyRow()
+    mockLookupByHash.mockResolvedValue(keyRow)
+    mockDebit.mockResolvedValue({ success: true })
+    mockGetBalance.mockResolvedValue('9.000000')
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${TEST_KEY}` },
+      payload: {},
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json().a2aKeyId).toBe(TEST_KEY_ID)
+    expect(response.headers['x-a2a-remaining-budget']).toBe('9.000000')
+    expect(mockLookupByHash).toHaveBeenCalledWith(TEST_KEY_HASH)
+  })
+
+  it('BEARER AC-2: both x-a2a-key and Bearer present — x-a2a-key wins', async () => {
+    const keyRow = makeKeyRow()
+    mockLookupByHash.mockResolvedValue(keyRow)
+    mockDebit.mockResolvedValue({ success: true })
+    mockGetBalance.mockResolvedValue('9.000000')
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: {
+        'x-a2a-key': TEST_KEY,
+        authorization: 'Bearer wasi_a2a_should_be_ignored',
+      },
+      payload: {},
+    })
+
+    expect(response.statusCode).toBe(200)
+    // Verify lookup used the x-a2a-key value, not the Bearer value
+    expect(mockLookupByHash).toHaveBeenCalledWith(TEST_KEY_HASH)
+  })
+
+  it('BEARER AC-3/DT-1: Bearer without wasi_a2a_ prefix — falls through to x402', async () => {
+    const prev = process.env.PAYMENT_WALLET_ADDRESS
+    process.env.PAYMENT_WALLET_ADDRESS = '0x1234567890123456789012345678901234567890'
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: 'Bearer some_other_token_abc123' },
+      payload: {},
+    })
+
+    // Should fall through to x402 (402 since no X-Payment header)
+    expect(response.statusCode).toBe(402)
+    expect(mockLookupByHash).not.toHaveBeenCalled()
+
+    process.env.PAYMENT_WALLET_ADDRESS = prev
+  })
+
+  it('BEARER AC-5: non-Bearer scheme (Basic) — falls through to x402', async () => {
+    const prev = process.env.PAYMENT_WALLET_ADDRESS
+    process.env.PAYMENT_WALLET_ADDRESS = '0x1234567890123456789012345678901234567890'
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: 'Basic dXNlcjpwYXNz' },
+      payload: {},
+    })
+
+    expect(response.statusCode).toBe(402)
+    expect(mockLookupByHash).not.toHaveBeenCalled()
+
+    process.env.PAYMENT_WALLET_ADDRESS = prev
+  })
+
+  it('BEARER: invalid key via Bearer — 403 KEY_NOT_FOUND', async () => {
+    mockLookupByHash.mockResolvedValue(null)
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${TEST_KEY}` },
+      payload: {},
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect(response.json().error_code).toBe('KEY_NOT_FOUND')
+  })
+
   // ── BLQ-2: debit failure is surfaced ────────────────────────
 
   it('BLQ-2: debit fails → 403 INSUFFICIENT_BUDGET (not silent 200)', async () => {

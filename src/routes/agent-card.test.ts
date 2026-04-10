@@ -44,6 +44,7 @@ describe('agent-card routes', () => {
         id: 'a1',
         priceUsdc: 0,
         invokeUrl: 'https://example.com',
+        invocationNote: 'Use POST /compose or POST /orchestrate on the gateway.',
       })
 
       mockGetEnabled.mockResolvedValue([

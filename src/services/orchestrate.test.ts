@@ -56,6 +56,7 @@ const mockAgents: Agent[] = [
     reputation: 90,
     registry: 'wasiai',
     invokeUrl: 'https://example.com/invoke/summarizer-v1',
+    invocationNote: 'Use POST /compose or POST /orchestrate on the gateway.',
   },
   {
     id: 'agent-2',
@@ -67,6 +68,7 @@ const mockAgents: Agent[] = [
     reputation: 85,
     registry: 'wasiai',
     invokeUrl: 'https://example.com/invoke/translator-v1',
+    invocationNote: 'Use POST /compose or POST /orchestrate on the gateway.',
   },
 ]
 

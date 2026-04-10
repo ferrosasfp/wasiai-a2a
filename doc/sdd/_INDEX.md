@@ -26,3 +26,8 @@
 | 027 | 2026-04-06 | Demo Script E2E — smoke test automatizado (WKH-30) | feature | FAST | DONE | feat/027-demo-script-e2e |
 | 028 | 2026-04-06 | README.md rewrite — reflect production architecture (WKH-17) | doc | FAST | in progress | feat/028-readme-rewrite |
 | 029 | 2026-04-06 | E2E Test Suite — full middleware chain + inject (WKH-E2E) | test | QUALITY | in progress | feat/029-e2e-tests |
+| 030 | 2026-04-06 | GET /health endpoint (WKH-HEALTH) | patch | FAST | in progress | main |
+| 031 | 2026-04-06 | POST /discover alias — fix 404 for POST callers (WKH-DISCOVER-POST) | bugfix | FAST | in progress | feat/031-discover-post |
+| 032 | 2026-04-06 | Bearer Auth — Authorization: Bearer as alternative to x-a2a-key (WKH-BEARER-AUTH) | feature | FAST+AR | in progress | feat/032-bearer-auth |
+| 033 | 2026-04-06 | Invoke docs — clarify proxy invocation in Agent Card + /discover (WKH-INVOKE-DOCS) | doc | FAST | in progress | feat/033-invoke-docs |
+| 034 | 2026-04-06 | Global Event Tracking — onResponse hook for all endpoints (WKH-EVENT-TRACKING) | feature | FAST+AR | in progress | feat/034-event-tracking |

@@ -9,6 +9,7 @@ import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import { genReqId, registerRequestIdHook } from './middleware/request-id.js'
 import { registerErrorBoundary } from './middleware/error-boundary.js'
+import { registerEventTracking } from './middleware/event-tracking.js'
 import { registerRateLimit } from './middleware/rate-limit.js'
 
 import registriesRoutes from './routes/registries.js'
@@ -35,6 +36,7 @@ await fastify.register(cors, { origin: '*' })
 
 // Resilience middleware (order matters: request-id -> error boundary -> rate limit)
 registerRequestIdHook(fastify)
+registerEventTracking(fastify)
 registerErrorBoundary(fastify)
 await registerRateLimit(fastify)
 
@@ -53,6 +55,16 @@ fastify.get('/', { config: { rateLimit: false } }, async (_request, reply) => {
       wellKnown: '/.well-known/agent.json — Gateway self Agent Card',
     },
     docs: 'https://github.com/ferrosasfp/wasiai-a2a',
+  })
+})
+
+// Health endpoint (WKH-HEALTH)
+fastify.get('/health', { config: { rateLimit: false } }, async (_request, reply) => {
+  return reply.send({
+    status: 'ok',
+    version: '0.1.0',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
   })
 })
 
@@ -88,7 +100,7 @@ console.log(`
 ║   Endpoints:                                              ║
 ║   • GET  /registries     — List marketplaces              ║
 ║   • POST /registries     — Register marketplace           ║
-║   • GET  /discover       — Search agents                  ║
+║   • GET|POST /discover   — Search agents                  ║
 ║   • POST /compose        — Execute pipeline               ║
 ║   • POST /orchestrate    — Goal-based orchestration       ║
 ╚═══════════════════════════════════════════════════════════╝
