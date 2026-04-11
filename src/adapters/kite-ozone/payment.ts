@@ -7,7 +7,9 @@ import type { X402PaymentRequest, PieverseVerifyRequest, PieverseVerifyResponse,
 
 const KITE_SCHEME = 'exact' as const
 const KITE_NETWORK = 'eip155:2368' as const
-const KITE_PAYMENT_TOKEN = '0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63' as `0x${string}`
+// PYUSD — the ONLY token on Kite testnet with transferWithAuthorization (EIP-3009)
+// Test USDT (0x0fF5...) does NOT support EIP-3009 and causes Pieverse 500 errors
+const KITE_PAYMENT_TOKEN = '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9' as `0x${string}`
 const KITE_MAX_TIMEOUT_SECONDS = 300 as const
 const KITE_FACILITATOR_DEFAULT_URL = 'https://facilitator.pieverse.io'
 const KITE_FACILITATOR_ADDRESS = '0x12343e649e6b2b2b77649DFAb88f103c02F3C78b' as `0x${string}`
