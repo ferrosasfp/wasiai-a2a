@@ -33,3 +33,4 @@
 | 034 | 2026-04-06 | Global Event Tracking — onResponse hook for all endpoints (WKH-EVENT-TRACKING) | feature | FAST+AR | in progress | feat/034-event-tracking |
 | 035 | 2026-04-06 | Bearer Auth Fix on /auth/* + Test Hardening (WKH-BEARER-FIX) | bugfix | FAST+AR | in progress | feat/035-bearer-fix |
 | 036 | 2026-04-06 | Sync .env.example + README.md with current features (WKH-DOCS-SYNC) | doc | FAST | in progress | feat/036-docs-sync |
+| 037 | 2026-04-06 | Migrate x402 from v1 to v2 — Pieverse format (WKH-X402-V2) | bugfix | QUALITY | in progress | feat/037-x402-v2 |

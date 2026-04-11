@@ -78,7 +78,7 @@ export const composeService = {
       if (!payTo) throw new Error(`No payTo address for agent ${agent.slug} — agent metadata must include payTo`)
       const valueWei = String(BigInt(Math.round(agent.priceUsdc * 1e6)) * BigInt(1e12))
       const result = await getPaymentAdapter().sign({ to: payTo as `0x${string}`, value: valueWei })
-      headers['X-Payment'] = result.xPaymentHeader
+      headers['PAYMENT-SIGNATURE'] = result.xPaymentHeader
       paymentRequest = result.paymentRequest
     }
     const response = await fetch(agent.invokeUrl, { method: 'POST', headers, body: JSON.stringify({ input }) })
