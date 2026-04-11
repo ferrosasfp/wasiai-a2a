@@ -19,23 +19,23 @@ export interface PaymentMiddlewareOptions {
   amount?: string
 }
 
-export function buildX402Response(opts: PaymentMiddlewareOptions, resource: string, errorMessage: string = 'X-PAYMENT header is required'): X402Response {
+export function buildX402Response(opts: PaymentMiddlewareOptions, resource: string, errorMessage: string = 'payment-signature header is required'): X402Response {
   const adapter = getPaymentAdapter()
   const walletAddress = process.env.PAYMENT_WALLET_ADDRESS || process.env.KITE_WALLET_ADDRESS || ''
   const amount = opts.amount ?? '1000000000000000000'
   const merchantName = adapter.getMerchantName()
   const payload: X402PaymentPayload = { scheme: adapter.getScheme(), network: adapter.getNetwork(), maxAmountRequired: amount, resource, description: opts.description, mimeType: 'application/json', outputSchema: undefined, payTo: walletAddress, maxTimeoutSeconds: adapter.getMaxTimeoutSeconds(), asset: adapter.getToken(), extra: null, merchantName }
-  return { error: errorMessage, accepts: [payload], x402Version: 1 }
+  return { error: errorMessage, accepts: [payload], x402Version: 2 }
 }
 
 export function decodeXPayment(header: string): X402PaymentRequest {
   let decoded: string
   try { decoded = Buffer.from(header, 'base64').toString('utf8') } catch { throw new Error('Cannot decode base64: invalid characters') }
   let parsed: unknown
-  try { parsed = JSON.parse(decoded) } catch { throw new Error('Cannot parse JSON from decoded X-Payment header') }
+  try { parsed = JSON.parse(decoded) } catch { throw new Error('Cannot parse JSON from decoded payment-signature header') }
   const obj = parsed as Record<string, unknown>
-  if (!obj.authorization || typeof obj.authorization !== 'object') throw new Error('Missing or invalid "authorization" field in X-Payment')
-  if (!obj.signature || typeof obj.signature !== 'string') throw new Error('Missing or invalid "signature" field in X-Payment')
+  if (!obj.authorization || typeof obj.authorization !== 'object') throw new Error('Missing or invalid "authorization" field in payment-signature')
+  if (!obj.signature || typeof obj.signature !== 'string') throw new Error('Missing or invalid "signature" field in payment-signature')
   return parsed as X402PaymentRequest
 }
 
@@ -46,12 +46,12 @@ export function requirePayment(opts: PaymentMiddlewareOptions): preHandlerHookHa
       return reply.status(503).send({ error: 'Service payment not configured. Contact administrator.' })
     }
     const resource = `${request.protocol}://${request.hostname}${request.url}`
-    const xPaymentHeader = request.headers['x-payment']
+    const xPaymentHeader = request.headers['payment-signature']
     if (!xPaymentHeader || typeof xPaymentHeader !== 'string') return reply.status(402).send(buildX402Response(opts, resource))
     let paymentPayload: X402PaymentRequest
     try { paymentPayload = decodeXPayment(xPaymentHeader) } catch (err) {
       const detail = err instanceof Error ? err.message : String(err)
-      return reply.status(402).send(buildX402Response(opts, resource, `Invalid X-Payment format: ${detail}`))
+      return reply.status(402).send(buildX402Response(opts, resource, `Invalid payment-signature format: ${detail}`))
     }
     let verifyResult: { valid: boolean; error?: string }
     try { verifyResult = await getPaymentAdapter().verify({ authorization: paymentPayload.authorization, signature: paymentPayload.signature, network: paymentPayload.network ?? '' }) } catch (err) {
@@ -67,6 +67,7 @@ export function requirePayment(opts: PaymentMiddlewareOptions): preHandlerHookHa
     if (!settleResult.success) return reply.status(402).send(buildX402Response(opts, resource, `Payment settlement failed: ${settleResult.error ?? 'unknown reason'}`))
     request.paymentTxHash = settleResult.txHash
     request.paymentVerified = true
+    reply.header('payment-response', settleResult.txHash)
   }
   return [handler]
 }

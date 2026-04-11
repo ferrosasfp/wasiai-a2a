@@ -5,8 +5,8 @@ import { kiteTestnet } from './chain.js'
 import type { PaymentAdapter, TokenSpec, SettleRequest, SettleResult, X402Proof, VerifyResult, QuoteResult, SignRequest, SignResult } from '../types.js'
 import type { X402PaymentRequest, PieverseVerifyRequest, PieverseVerifyResponse, PieverseSettleRequest, PieverseSettleResult } from '../../types/index.js'
 
-const KITE_SCHEME = 'gokite-aa' as const
-const KITE_NETWORK = 'kite-testnet' as const
+const KITE_SCHEME = 'exact' as const
+const KITE_NETWORK = 'eip155:2368' as const
 const KITE_PAYMENT_TOKEN = '0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63' as `0x${string}`
 const KITE_MAX_TIMEOUT_SECONDS = 300 as const
 const KITE_FACILITATOR_DEFAULT_URL = 'https://facilitator.pieverse.io'
@@ -42,7 +42,10 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
 
   async verify(proof: X402Proof): Promise<VerifyResult> {
     const facilitatorUrl = process.env.KITE_FACILITATOR_URL ?? KITE_FACILITATOR_DEFAULT_URL
-    const body: PieverseVerifyRequest = { authorization: proof.authorization, signature: proof.signature, network: KITE_NETWORK }
+    const body: PieverseVerifyRequest = {
+      paymentPayload: { x402Version: 2, scheme: KITE_SCHEME, network: KITE_NETWORK, payload: { authorization: proof.authorization, signature: proof.signature } },
+      paymentRequirements: { x402Version: 2, scheme: KITE_SCHEME, network: KITE_NETWORK, maxAmountRequired: proof.authorization.value, payTo: proof.authorization.to, asset: KITE_PAYMENT_TOKEN, extra: null }
+    }
     let response: Response
     try { response = await fetch(`${facilitatorUrl}/v2/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) }
     catch (err) { throw new Error(`Facilitator network error: ${err instanceof Error ? err.message : String(err)}`) }
@@ -53,7 +56,10 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
 
   async settle(req: SettleRequest): Promise<SettleResult> {
     const facilitatorUrl = process.env.KITE_FACILITATOR_URL ?? KITE_FACILITATOR_DEFAULT_URL
-    const body: PieverseSettleRequest = { authorization: req.authorization, signature: req.signature, network: KITE_NETWORK }
+    const body: PieverseSettleRequest = {
+      paymentPayload: { x402Version: 2, scheme: KITE_SCHEME, network: KITE_NETWORK, payload: { authorization: req.authorization, signature: req.signature } },
+      paymentRequirements: { x402Version: 2, scheme: KITE_SCHEME, network: KITE_NETWORK, maxAmountRequired: req.authorization.value, payTo: req.authorization.to, asset: KITE_PAYMENT_TOKEN, extra: null }
+    }
     let response: Response
     try { response = await fetch(`${facilitatorUrl}/v2/settle`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) }
     catch (err) { throw new Error(`Facilitator network error on settle: ${err instanceof Error ? err.message : String(err)}`) }

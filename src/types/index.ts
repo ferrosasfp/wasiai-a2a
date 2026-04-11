@@ -250,7 +250,7 @@ export interface X402PaymentPayload {
 export interface X402Response {
   error: string
   accepts: X402PaymentPayload[]
-  x402Version: 1
+  x402Version: 2
 }
 
 /**
@@ -275,12 +275,27 @@ export interface X402PaymentRequest {
 // NOTE: Pieverse types used by kite-ozone adapter only. Will move to adapters/kite-ozone/types.ts post-hackathon.
 
 /**
- * Request body para POST /v2/verify en Pieverse.
+ * Request body para POST /v2/verify en Pieverse (v2 envelope).
  */
 export interface PieverseVerifyRequest {
-  authorization: X402PaymentRequest['authorization']
-  signature: string
-  network: string
+  paymentPayload: {
+    x402Version: 2
+    scheme: string
+    network: string
+    payload: {
+      authorization: X402PaymentRequest['authorization']
+      signature: string
+    }
+  }
+  paymentRequirements: {
+    x402Version: 2
+    scheme: string
+    network: string
+    maxAmountRequired: string
+    payTo: string
+    asset: string
+    extra: null | Record<string, unknown>
+  }
 }
 
 /**
@@ -292,12 +307,27 @@ export interface PieverseVerifyResponse {
 }
 
 /**
- * Request body para POST /v2/settle en Pieverse.
+ * Request body para POST /v2/settle en Pieverse (v2 envelope).
  */
 export interface PieverseSettleRequest {
-  authorization: X402PaymentRequest['authorization']
-  signature: string
-  network: string
+  paymentPayload: {
+    x402Version: 2
+    scheme: string
+    network: string
+    payload: {
+      authorization: X402PaymentRequest['authorization']
+      signature: string
+    }
+  }
+  paymentRequirements: {
+    x402Version: 2
+    scheme: string
+    network: string
+    maxAmountRequired: string
+    payTo: string
+    asset: string
+    extra: null | Record<string, unknown>
+  }
 }
 
 /**
