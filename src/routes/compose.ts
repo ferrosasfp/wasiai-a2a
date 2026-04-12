@@ -8,6 +8,7 @@ import { composeService } from '../services/compose.js'
 import type { ComposeStep } from '../types/index.js'
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js'
 import { createTimeoutHandler } from '../middleware/timeout.js'
+import { orchestrateRateLimit } from '../middleware/rate-limit.js'
 
 type ComposeBody = {
   steps: ComposeStep[]
@@ -18,6 +19,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: ComposeBody }>(
     '/',
     {
+      config: { rateLimit: orchestrateRateLimit() },
       preHandler: [
         createTimeoutHandler(parseInt(process.env.TIMEOUT_COMPOSE_MS ?? '60000')),
         ...requirePaymentOrA2AKey({

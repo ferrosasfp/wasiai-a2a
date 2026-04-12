@@ -12,6 +12,7 @@ import { orchestrateService } from '../services/orchestrate.js'
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js'
 import { createBackpressureHandler } from '../middleware/backpressure.js'
 import { createTimeoutHandler } from '../middleware/timeout.js'
+import { orchestrateRateLimit } from '../middleware/rate-limit.js'
 
 type OrchestrateBody = {
   goal: string
@@ -24,6 +25,7 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: OrchestrateBody }>(
     '/',
     {
+      config: { rateLimit: orchestrateRateLimit() },
       schema: {
         body: {
           type: 'object',

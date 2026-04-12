@@ -11,6 +11,7 @@
 import crypto from 'node:crypto'
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { identityService } from '../services/identity.js'
+import { authSignupRateLimit } from '../middleware/rate-limit.js'
 // budgetService import retained as comment — re-enable when deposit verification lands (WKH-35)
 // import { budgetService } from '../services/budget.js'
 import type { A2AAgentKeyRow, CreateKeyInput } from '../types/index.js'
@@ -47,7 +48,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * POST /agent-signup — Create a new agent key (AC-13)
    */
-  fastify.post('/agent-signup', async (req: FastifyRequest, reply: FastifyReply) => {
+  fastify.post('/agent-signup', { config: { rateLimit: authSignupRateLimit() } }, async (req: FastifyRequest, reply: FastifyReply) => {
     const body = req.body as Partial<CreateKeyInput> | undefined
 
     if (!body?.owner_ref || typeof body.owner_ref !== 'string' || body.owner_ref.trim() === '') {
