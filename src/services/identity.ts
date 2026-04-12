@@ -3,9 +3,13 @@
  * WKH-34: Agentic Economy Primitives L3
  */
 
-import crypto from 'node:crypto'
-import { supabase } from '../lib/supabase.js'
-import type { A2AAgentKeyRow, CreateKeyInput, AgentSignupResponse } from '../types/index.js'
+import crypto from 'node:crypto';
+import { supabase } from '../lib/supabase.js';
+import type {
+  A2AAgentKeyRow,
+  AgentSignupResponse,
+  CreateKeyInput,
+} from '../types/index.js';
 
 // ── Service ─────────────────────────────────────────────────
 
@@ -16,11 +20,11 @@ export const identityService = {
    */
   async createKey(input: CreateKeyInput): Promise<AgentSignupResponse> {
     // 1. Generate 32 random bytes -> 64 hex chars
-    const randomHex = crypto.randomBytes(32).toString('hex')
-    const plaintext = `wasi_a2a_${randomHex}`
+    const randomHex = crypto.randomBytes(32).toString('hex');
+    const plaintext = `wasi_a2a_${randomHex}`;
 
     // 2. Compute SHA-256 hash
-    const keyHash = crypto.createHash('sha256').update(plaintext).digest('hex')
+    const keyHash = crypto.createHash('sha256').update(plaintext).digest('hex');
 
     // 3. Insert row
     const row: Record<string, unknown> = {
@@ -32,20 +36,20 @@ export const identityService = {
       allowed_agent_slugs: input.allowed_agent_slugs ?? null,
       allowed_categories: input.allowed_categories ?? null,
       max_spend_per_call_usd: input.max_spend_per_call_usd ?? null,
-    }
+    };
 
     const { data, error } = await supabase
       .from('a2a_agent_keys')
       .insert(row)
       .select('id')
-      .single()
+      .single();
 
-    if (error) throw new Error(`Failed to create agent key: ${error.message}`)
+    if (error) throw new Error(`Failed to create agent key: ${error.message}`);
 
     return {
       key: plaintext,
       key_id: (data as { id: string }).id,
-    }
+    };
   },
 
   /**
@@ -56,15 +60,15 @@ export const identityService = {
       .from('a2a_agent_keys')
       .select('*')
       .eq('key_hash', keyHash)
-      .single()
+      .single();
 
     if (error) {
       // PGRST116 = "no rows found" — not an error, just null
-      if (error.code === 'PGRST116') return null
-      throw new Error(`Failed to lookup agent key: ${error.message}`)
+      if (error.code === 'PGRST116') return null;
+      throw new Error(`Failed to lookup agent key: ${error.message}`);
     }
 
-    return data as A2AAgentKeyRow
+    return data as A2AAgentKeyRow;
   },
 
   /**
@@ -75,8 +79,9 @@ export const identityService = {
     const { error } = await supabase
       .from('a2a_agent_keys')
       .update({ is_active: false })
-      .eq('id', keyId)
+      .eq('id', keyId);
 
-    if (error) throw new Error(`Failed to deactivate agent key: ${error.message}`)
+    if (error)
+      throw new Error(`Failed to deactivate agent key: ${error.message}`);
   },
-}
+};

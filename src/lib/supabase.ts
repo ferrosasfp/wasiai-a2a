@@ -5,11 +5,11 @@
  * Valida env vars en startup; falla con mensaje descriptivo si faltan.
  */
 
-import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 function createSupabaseClient(): SupabaseClient {
-  const url = process.env.SUPABASE_URL
-  const key = process.env.SUPABASE_SERVICE_KEY
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_KEY;
 
   if (!url || !key) {
     const missing = [
@@ -17,20 +17,22 @@ function createSupabaseClient(): SupabaseClient {
       !key ? 'SUPABASE_SERVICE_KEY' : null,
     ]
       .filter(Boolean)
-      .join(', ')
+      .join(', ');
 
-    console.error(`[FATAL] Missing required environment variables: ${missing}`)
-    console.error('Set these variables in your .env file. See .env.example for reference.')
-    process.exit(1)
+    console.error(`[FATAL] Missing required environment variables: ${missing}`);
+    console.error(
+      'Set these variables in your .env file. See .env.example for reference.',
+    );
+    process.exit(1);
   }
 
   return createClient(url, key, {
     auth: {
-      persistSession: false,  // servidor: no persistir sesión de usuario
+      persistSession: false, // servidor: no persistir sesión de usuario
       autoRefreshToken: false,
     },
-  })
+  });
 }
 
 // Singleton — se instancia una vez al importar el módulo
-export const supabase = createSupabaseClient()
+export const supabase = createSupabaseClient();

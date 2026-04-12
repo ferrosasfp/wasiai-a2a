@@ -3,9 +3,11 @@
  * WKH-18: Hardening — AC-8 (120s orchestrate), AC-9 (60s compose)
  */
 
-import type { preHandlerAsyncHookHandler } from 'fastify'
+import type { preHandlerAsyncHookHandler } from 'fastify';
 
-export function createTimeoutHandler(timeoutMs: number): preHandlerAsyncHookHandler {
+export function createTimeoutHandler(
+  timeoutMs: number,
+): preHandlerAsyncHookHandler {
   return async (request, reply) => {
     const timer = setTimeout(() => {
       if (!reply.sent) {
@@ -13,11 +15,11 @@ export function createTimeoutHandler(timeoutMs: number): preHandlerAsyncHookHand
           error: 'Request timeout',
           code: 'TIMEOUT',
           requestId: request.id,
-        })
+        });
       }
-    }, timeoutMs)
+    }, timeoutMs);
 
     // Clean up timer when response is sent
-    reply.raw.on('close', () => clearTimeout(timer))
-  }
+    reply.raw.on('close', () => clearTimeout(timer));
+  };
 }

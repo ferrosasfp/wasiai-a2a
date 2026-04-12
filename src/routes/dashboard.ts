@@ -3,52 +3,63 @@
  * WKH-27: Dashboard Analytics
  */
 
-import { readFileSync } from 'node:fs'
-import { resolve, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
-import { eventService } from '../services/event.js'
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { eventService } from '../services/event.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Read HTML at startup (not per-request)
-const CHAIN_EXPLORER_URL = process.env.CHAIN_EXPLORER_URL || process.env.KITE_EXPLORER_URL || 'https://testnet.kitescan.ai'
+const CHAIN_EXPLORER_URL =
+  process.env.CHAIN_EXPLORER_URL ||
+  process.env.KITE_EXPLORER_URL ||
+  'https://testnet.kitescan.ai';
 const dashboardHtml = readFileSync(
   resolve(__dirname, '../static/dashboard.html'),
   'utf-8',
-).replace('{{CHAIN_EXPLORER_URL}}', CHAIN_EXPLORER_URL)
+).replace('{{CHAIN_EXPLORER_URL}}', CHAIN_EXPLORER_URL);
 
 const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * GET /dashboard
    * Serve the dashboard HTML
    */
-  fastify.get('/', { config: { rateLimit: false } }, async (_request: FastifyRequest, reply: FastifyReply) => {
-    return reply.type('text/html').send(dashboardHtml)
-  })
+  fastify.get(
+    '/',
+    { config: { rateLimit: false } },
+    async (_request: FastifyRequest, reply: FastifyReply) => {
+      return reply.type('text/html').send(dashboardHtml);
+    },
+  );
 
   /**
    * GET /dashboard/api/stats
    * Aggregated KPIs for the dashboard (cached 30s)
    */
-  let statsCache: { data: unknown; expiresAt: number } | null = null
-  const STATS_CACHE_TTL_MS = 30_000
+  let statsCache: { data: unknown; expiresAt: number } | null = null;
+  const STATS_CACHE_TTL_MS = 30_000;
 
-  fastify.get('/api/stats', { config: { rateLimit: false } }, async (_request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      const now = Date.now()
-      if (statsCache && now < statsCache.expiresAt) {
-        return reply.send(statsCache.data)
+  fastify.get(
+    '/api/stats',
+    { config: { rateLimit: false } },
+    async (_request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const now = Date.now();
+        if (statsCache && now < statsCache.expiresAt) {
+          return reply.send(statsCache.data);
+        }
+        const stats = await eventService.stats();
+        statsCache = { data: stats, expiresAt: now + STATS_CACHE_TTL_MS };
+        return reply.send(stats);
+      } catch (err) {
+        return reply.status(500).send({
+          error: err instanceof Error ? err.message : 'Failed to get stats',
+        });
       }
-      const stats = await eventService.stats()
-      statsCache = { data: stats, expiresAt: now + STATS_CACHE_TTL_MS }
-      return reply.send(stats)
-    } catch (err) {
-      return reply.status(500).send({
-        error: err instanceof Error ? err.message : 'Failed to get stats',
-      })
-    }
-  })
+    },
+  );
 
   /**
    * GET /dashboard/api/events
@@ -62,17 +73,17 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
       reply: FastifyReply,
     ) => {
       try {
-        const parsed = parseInt(request.query.limit ?? '20', 10)
-        const limit = Number.isNaN(parsed) ? 20 : parsed
-        const events = await eventService.recent(limit)
-        return reply.send({ events, total: events.length })
+        const parsed = parseInt(request.query.limit ?? '20', 10);
+        const limit = Number.isNaN(parsed) ? 20 : parsed;
+        const events = await eventService.recent(limit);
+        return reply.send({ events, total: events.length });
       } catch (err) {
         return reply.status(500).send({
           error: err instanceof Error ? err.message : 'Failed to get events',
-        })
+        });
       }
     },
-  )
-}
+  );
+};
 
-export default dashboardRoutes
+export default dashboardRoutes;

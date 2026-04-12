@@ -5,12 +5,15 @@
  * Rejects new /orchestrate requests when in-flight count >= max (default 20).
  */
 
-import type { preHandlerAsyncHookHandler } from 'fastify'
+import type { preHandlerAsyncHookHandler } from 'fastify';
 
-let inFlight = 0
+let inFlight = 0;
 
-export function createBackpressureHandler(opts?: { max?: number }): preHandlerAsyncHookHandler {
-  const maxInFlight = opts?.max ?? parseInt(process.env.BACKPRESSURE_MAX ?? '20')
+export function createBackpressureHandler(opts?: {
+  max?: number;
+}): preHandlerAsyncHookHandler {
+  const maxInFlight =
+    opts?.max ?? parseInt(process.env.BACKPRESSURE_MAX ?? '20', 10);
 
   return async (request, reply) => {
     if (inFlight >= maxInFlight) {
@@ -18,21 +21,21 @@ export function createBackpressureHandler(opts?: { max?: number }): preHandlerAs
         error: 'Service overloaded',
         code: 'BACKPRESSURE',
         requestId: request.id,
-      })
+      });
     }
-    inFlight++
+    inFlight++;
     // Decrement when response completes (always, even on error)
     reply.raw.on('close', () => {
-      inFlight--
-    })
-  }
+      inFlight--;
+    });
+  };
 }
 
 export function getInFlightCount(): number {
-  return inFlight
+  return inFlight;
 }
 
 /** For testing: reset counter */
 export function resetInFlightCount(): void {
-  inFlight = 0
+  inFlight = 0;
 }

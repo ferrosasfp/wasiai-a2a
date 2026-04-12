@@ -8,21 +8,25 @@
  * NUNCA loguear el campo auth completo ni auth.value.
  */
 
-import type { RegistryConfig, RegistrySchema, RegistryAuth } from '../types/index.js'
-import { supabase } from '../lib/supabase.js'
+import { supabase } from '../lib/supabase.js';
+import type {
+  RegistryAuth,
+  RegistryConfig,
+  RegistrySchema,
+} from '../types/index.js';
 
 // ── Tipo interno para filas de Supabase ─────────────────────
 
 interface RegistryRow {
-  id: string
-  name: string
-  discovery_endpoint: string
-  invoke_endpoint: string
-  agent_endpoint: string | null
-  schema: RegistrySchema
-  auth: RegistryAuth | null
-  enabled: boolean
-  created_at: string
+  id: string;
+  name: string;
+  discovery_endpoint: string;
+  invoke_endpoint: string;
+  agent_endpoint: string | null;
+  schema: RegistrySchema;
+  auth: RegistryAuth | null;
+  enabled: boolean;
+  created_at: string;
 }
 
 // ── Helper: Row → RegistryConfig ────────────────────────────
@@ -38,7 +42,7 @@ function rowToRegistry(row: RegistryRow): RegistryConfig {
     auth: row.auth ?? undefined,
     enabled: row.enabled,
     createdAt: new Date(row.created_at),
-  }
+  };
 }
 
 // ── Helper: RegistryConfig → columnas para INSERT/UPDATE ────
@@ -56,7 +60,7 @@ function registryToRow(
     schema: config.schema,
     auth: config.auth ?? null,
     enabled: config.enabled,
-  }
+  };
 }
 
 // ── Service ─────────────────────────────────────────────────
@@ -69,11 +73,11 @@ export const registryService = {
     const { data, error } = await supabase
       .from('registries')
       .select('*')
-      .order('created_at', { ascending: true })
+      .order('created_at', { ascending: true });
 
-    if (error) throw new Error(`Failed to list registries: ${error.message}`)
+    if (error) throw new Error(`Failed to list registries: ${error.message}`);
 
-    return (data as RegistryRow[]).map(rowToRegistry)
+    return (data as RegistryRow[]).map(rowToRegistry);
   },
 
   /**
@@ -84,71 +88,80 @@ export const registryService = {
       .from('registries')
       .select('*')
       .eq('id', id)
-      .maybeSingle()
+      .maybeSingle();
 
-    if (error) throw new Error(`Failed to get registry '${id}': ${error.message}`)
+    if (error)
+      throw new Error(`Failed to get registry '${id}': ${error.message}`);
 
-    return data ? rowToRegistry(data as RegistryRow) : undefined
+    return data ? rowToRegistry(data as RegistryRow) : undefined;
   },
 
   /**
    * Register a new marketplace
    * ID is generated from name (slug)
    */
-  async register(config: Omit<RegistryConfig, 'id' | 'createdAt'>): Promise<RegistryConfig> {
-    const id = config.name.toLowerCase().replace(/\s+/g, '-')
+  async register(
+    config: Omit<RegistryConfig, 'id' | 'createdAt'>,
+  ): Promise<RegistryConfig> {
+    const id = config.name.toLowerCase().replace(/\s+/g, '-');
 
-    const row = registryToRow(config, id)
+    const row = registryToRow(config, id);
 
     const { data, error } = await supabase
       .from('registries')
       .insert(row)
       .select()
-      .single()
+      .single();
 
     if (error) {
       // PK violation = ya existe
       if (error.code === '23505') {
-        throw new Error(`Registry '${id}' already exists`)
+        throw new Error(`Registry '${id}' already exists`);
       }
-      throw new Error(`Failed to register: ${error.message}`)
+      throw new Error(`Failed to register: ${error.message}`);
     }
 
-    return rowToRegistry(data as RegistryRow)
+    return rowToRegistry(data as RegistryRow);
   },
 
   /**
    * Update a registry (partial update)
    * ID cannot be changed
    */
-  async update(id: string, updates: Partial<RegistryConfig>): Promise<RegistryConfig> {
+  async update(
+    id: string,
+    updates: Partial<RegistryConfig>,
+  ): Promise<RegistryConfig> {
     // Construir objeto de actualización con snake_case
-    const updateRow: Partial<Omit<RegistryRow, 'id' | 'created_at'>> = {}
+    const updateRow: Partial<Omit<RegistryRow, 'id' | 'created_at'>> = {};
 
-    if (updates.name !== undefined) updateRow.name = updates.name
-    if (updates.discoveryEndpoint !== undefined) updateRow.discovery_endpoint = updates.discoveryEndpoint
-    if (updates.invokeEndpoint !== undefined) updateRow.invoke_endpoint = updates.invokeEndpoint
-    if (updates.agentEndpoint !== undefined) updateRow.agent_endpoint = updates.agentEndpoint ?? null
-    if (updates.schema !== undefined) updateRow.schema = updates.schema
-    if (updates.auth !== undefined) updateRow.auth = updates.auth ?? null
-    if (updates.enabled !== undefined) updateRow.enabled = updates.enabled
+    if (updates.name !== undefined) updateRow.name = updates.name;
+    if (updates.discoveryEndpoint !== undefined)
+      updateRow.discovery_endpoint = updates.discoveryEndpoint;
+    if (updates.invokeEndpoint !== undefined)
+      updateRow.invoke_endpoint = updates.invokeEndpoint;
+    if (updates.agentEndpoint !== undefined)
+      updateRow.agent_endpoint = updates.agentEndpoint ?? null;
+    if (updates.schema !== undefined) updateRow.schema = updates.schema;
+    if (updates.auth !== undefined) updateRow.auth = updates.auth ?? null;
+    if (updates.enabled !== undefined) updateRow.enabled = updates.enabled;
 
     const { data, error } = await supabase
       .from('registries')
       .update(updateRow)
       .eq('id', id)
       .select()
-      .single()
+      .single();
 
     if (error) {
       // PGRST116 = no rows matched
       if (error.code === 'PGRST116') {
-        throw new Error(`Registry '${id}' not found`)
+        throw new Error(`Registry '${id}' not found`);
       }
-      throw new Error(`Failed to update registry '${id}': ${error.message}`)
+      throw new Error(`Failed to update registry '${id}': ${error.message}`);
     }
 
-    return rowToRegistry(data as RegistryRow)
+    return rowToRegistry(data as RegistryRow);
   },
 
   /**
@@ -157,19 +170,20 @@ export const registryService = {
    */
   async delete(id: string): Promise<boolean> {
     if (id === 'wasiai') {
-      throw new Error('Cannot delete the WasiAI registry')
+      throw new Error('Cannot delete the WasiAI registry');
     }
 
     const { data, error } = await supabase
       .from('registries')
       .delete()
       .eq('id', id)
-      .select()
+      .select();
 
-    if (error) throw new Error(`Failed to delete registry '${id}': ${error.message}`)
+    if (error)
+      throw new Error(`Failed to delete registry '${id}': ${error.message}`);
 
     // data es el array de filas eliminadas; si está vacío, no existía
-    return Array.isArray(data) && data.length > 0
+    return Array.isArray(data) && data.length > 0;
   },
 
   /**
@@ -180,10 +194,11 @@ export const registryService = {
       .from('registries')
       .select('*')
       .eq('enabled', true)
-      .order('created_at', { ascending: true })
+      .order('created_at', { ascending: true });
 
-    if (error) throw new Error(`Failed to get enabled registries: ${error.message}`)
+    if (error)
+      throw new Error(`Failed to get enabled registries: ${error.message}`);
 
-    return (data as RegistryRow[]).map(rowToRegistry)
+    return (data as RegistryRow[]).map(rowToRegistry);
   },
-}
+};

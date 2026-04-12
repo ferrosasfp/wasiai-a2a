@@ -3,8 +3,8 @@
  * WKH-34: Agentic Economy Primitives L3
  */
 
-import { supabase } from '../lib/supabase.js'
-import type { A2AAgentKeyRow } from '../types/index.js'
+import { supabase } from '../lib/supabase.js';
+import type { A2AAgentKeyRow } from '../types/index.js';
 
 // ── Service ─────────────────────────────────────────────────
 
@@ -17,12 +17,12 @@ export const budgetService = {
       .from('a2a_agent_keys')
       .select('budget')
       .eq('id', keyId)
-      .single()
+      .single();
 
-    if (error) throw new Error(`Failed to get balance: ${error.message}`)
+    if (error) throw new Error(`Failed to get balance: ${error.message}`);
 
-    const budget = (data as Pick<A2AAgentKeyRow, 'budget'>).budget
-    return budget[chainId.toString()] ?? '0'
+    const budget = (data as Pick<A2AAgentKeyRow, 'budget'>).budget;
+    return budget[chainId.toString()] ?? '0';
   },
 
   /**
@@ -38,13 +38,13 @@ export const budgetService = {
       p_key_id: keyId,
       p_chain_id: chainId,
       p_amount_usd: amountUsd,
-    })
+    });
 
     if (error) {
-      return { success: false, error: error.message }
+      return { success: false, error: error.message };
     }
 
-    return { success: true }
+    return { success: true };
   },
 
   /**
@@ -61,10 +61,10 @@ export const budgetService = {
       p_key_id: keyId,
       p_chain_id: chainId,
       p_amount_usd: parseFloat(amountUsd),
-    })
+    });
 
-    if (error) throw new Error(`Failed to register deposit: ${error.message}`)
+    if (error) throw new Error(`Failed to register deposit: ${error.message}`);
 
-    return data as string
+    return data as string;
   },
-}
+};

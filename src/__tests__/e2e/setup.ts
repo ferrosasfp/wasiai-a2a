@@ -5,7 +5,7 @@
  * mocking only external dependencies (Supabase, Anthropic, adapters).
  */
 
-import { vi } from 'vitest'
+import { vi } from 'vitest';
 
 // ── Layer 1: Supabase client ──────────────────────────────────
 vi.mock('../../lib/supabase.js', () => ({
@@ -22,7 +22,7 @@ vi.mock('../../lib/supabase.js', () => ({
       limit: vi.fn().mockResolvedValue({ data: [], error: null }),
     })),
   },
-}))
+}));
 
 // ── Layer 2: Services ─────────────────────────────────────────
 vi.mock('../../services/identity.js', () => ({
@@ -31,7 +31,7 @@ vi.mock('../../services/identity.js', () => ({
     lookupByHash: vi.fn(),
     deactivate: vi.fn(),
   },
-}))
+}));
 
 vi.mock('../../services/budget.js', () => ({
   budgetService: {
@@ -39,13 +39,13 @@ vi.mock('../../services/budget.js', () => ({
     debit: vi.fn(),
     registerDeposit: vi.fn(),
   },
-}))
+}));
 
 vi.mock('../../services/authz.js', () => ({
   authzService: {
     checkScoping: vi.fn().mockReturnValue({ allowed: true }),
   },
-}))
+}));
 
 vi.mock('../../services/event.js', () => ({
   eventService: {
@@ -53,30 +53,40 @@ vi.mock('../../services/event.js', () => ({
     stats: vi.fn().mockResolvedValue({ total_events: 0, events_24h: 0 }),
     recent: vi.fn().mockResolvedValue([]),
   },
-}))
+}));
 
 vi.mock('../../services/discovery.js', () => ({
   discoveryService: {
-    discover: vi.fn().mockResolvedValue({ agents: [], total: 0, registries: [] }),
+    discover: vi
+      .fn()
+      .mockResolvedValue({ agents: [], total: 0, registries: [] }),
     queryRegistry: vi.fn().mockResolvedValue([]),
     mapAgent: vi.fn(),
     getAgent: vi.fn().mockResolvedValue(null),
   },
-}))
+}));
 
 vi.mock('../../services/compose.js', () => ({
   composeService: {
-    compose: vi.fn().mockResolvedValue({ success: true, output: null, steps: [], totalCostUsdc: 0, totalLatencyMs: 0 }),
+    compose: vi.fn().mockResolvedValue({
+      success: true,
+      output: null,
+      steps: [],
+      totalCostUsdc: 0,
+      totalLatencyMs: 0,
+    }),
     resolveAgent: vi.fn(),
     invokeAgent: vi.fn(),
   },
-}))
+}));
 
 vi.mock('../../services/orchestrate.js', () => ({
   orchestrateService: {
-    orchestrate: vi.fn().mockResolvedValue({ success: true, agents: [], result: null }),
+    orchestrate: vi
+      .fn()
+      .mockResolvedValue({ success: true, agents: [], result: null }),
   },
-}))
+}));
 
 vi.mock('../../services/registry.js', () => ({
   registryService: {
@@ -85,7 +95,7 @@ vi.mock('../../services/registry.js', () => ({
     register: vi.fn(),
     delete: vi.fn(),
   },
-}))
+}));
 
 vi.mock('../../services/agent-card.js', () => ({
   agentCardService: {
@@ -96,11 +106,13 @@ vi.mock('../../services/agent-card.js', () => ({
       description: 'Agent discovery service',
       url: 'http://localhost:3001',
       capabilities: { streaming: true, pushNotifications: true },
-      skills: [{ id: 'discover', name: 'Discover', description: 'Find agents' }],
+      skills: [
+        { id: 'discover', name: 'Discover', description: 'Find agents' },
+      ],
     }),
   },
   resolveBaseUrl: vi.fn().mockReturnValue('http://localhost:3001'),
-}))
+}));
 
 vi.mock('../../services/task.js', () => ({
   taskService: {
@@ -111,12 +123,18 @@ vi.mock('../../services/task.js', () => ({
     update: vi.fn(),
   },
   TaskNotFoundError: class TaskNotFoundError extends Error {
-    constructor(id: string) { super(`Task ${id} not found`); this.name = 'TaskNotFoundError' }
+    constructor(id: string) {
+      super(`Task ${id} not found`);
+      this.name = 'TaskNotFoundError';
+    }
   },
   TerminalStateError: class TerminalStateError extends Error {
-    constructor(msg: string) { super(msg); this.name = 'TerminalStateError' }
+    constructor(msg: string) {
+      super(msg);
+      this.name = 'TerminalStateError';
+    }
   },
-}))
+}));
 
 // ── Layer 3: Adapters ─────────────────────────────────────────
 vi.mock('../../adapters/registry.js', () => ({
@@ -133,7 +151,11 @@ vi.mock('../../adapters/registry.js', () => ({
     getMerchantName: () => 'WasiAI Test',
     settle: vi.fn(),
     verify: vi.fn(),
-    quote: vi.fn().mockResolvedValue({ amountWei: '1000000000000000000', token: { symbol: 'PYUSD', address: '0x0', decimals: 6 }, facilitatorUrl: '' }),
+    quote: vi.fn().mockResolvedValue({
+      amountWei: '1000000000000000000',
+      token: { symbol: 'PYUSD', address: '0x0', decimals: 6 },
+      facilitatorUrl: '',
+    }),
     sign: vi.fn(),
   })),
   getChainConfig: vi.fn(() => ({
@@ -147,14 +169,14 @@ vi.mock('../../adapters/registry.js', () => ({
   })),
   getAttestationAdapter: vi.fn(),
   getIdentityBindingAdapter: vi.fn(),
-}))
+}));
 
 // ── Layer 4: Anthropic SDK ────────────────────────────────────
 vi.mock('@anthropic-ai/sdk', () => ({
-  default: vi.fn().mockImplementation(function () {
-    return { messages: { create: vi.fn() } }
-  }),
-}))
+  default: vi
+    .fn()
+    .mockImplementation(() => ({ messages: { create: vi.fn() } })),
+}));
 
 // ── Layer 5: Circuit breaker ──────────────────────────────────
 vi.mock('../../lib/circuit-breaker.js', () => ({
@@ -164,43 +186,53 @@ vi.mock('../../lib/circuit-breaker.js', () => ({
     status: 'closed',
   },
   CircuitOpenError: class CircuitOpenError extends Error {
-    constructor() { super('Circuit open'); this.name = 'CircuitOpenError' }
+    constructor() {
+      super('Circuit open');
+      this.name = 'CircuitOpenError';
+    }
   },
-}))
+}));
 
 // ── Layer 6: LLM Transform ───────────────────────────────────
 vi.mock('../../services/llm/transform.js', () => ({
   maybeTransform: vi.fn().mockResolvedValue({ transformed: false, data: null }),
-}))
+}));
 
+import crypto from 'node:crypto';
+import cors from '@fastify/cors';
 // ── Imports (after mocks) ─────────────────────────────────────
-import Fastify from 'fastify'
-import cors from '@fastify/cors'
-import crypto from 'node:crypto'
-import type { A2AAgentKeyRow } from '../../types/index.js'
-import { genReqId, registerRequestIdHook } from '../../middleware/request-id.js'
-import { registerErrorBoundary } from '../../middleware/error-boundary.js'
-import { registerRateLimit } from '../../middleware/rate-limit.js'
-
-import registriesRoutes from '../../routes/registries.js'
-import discoverRoutes from '../../routes/discover.js'
-import composeRoutes from '../../routes/compose.js'
-import orchestrateRoutes from '../../routes/orchestrate.js'
-import agentCardRoutes from '../../routes/agent-card.js'
-import wellKnownRoutes from '../../routes/well-known.js'
-import tasksRoutes from '../../routes/tasks.js'
-import dashboardRoutes from '../../routes/dashboard.js'
-import mockRegistryRoutes from '../../routes/mock-registry.js'
-import gaslessRoutes from '../../routes/gasless.js'
-import authRoutes from '../../routes/auth.js'
+import Fastify from 'fastify';
+import { registerErrorBoundary } from '../../middleware/error-boundary.js';
+import { registerRateLimit } from '../../middleware/rate-limit.js';
+import {
+  genReqId,
+  registerRequestIdHook,
+} from '../../middleware/request-id.js';
+import agentCardRoutes from '../../routes/agent-card.js';
+import authRoutes from '../../routes/auth.js';
+import composeRoutes from '../../routes/compose.js';
+import dashboardRoutes from '../../routes/dashboard.js';
+import discoverRoutes from '../../routes/discover.js';
+import gaslessRoutes from '../../routes/gasless.js';
+import mockRegistryRoutes from '../../routes/mock-registry.js';
+import orchestrateRoutes from '../../routes/orchestrate.js';
+import registriesRoutes from '../../routes/registries.js';
+import tasksRoutes from '../../routes/tasks.js';
+import wellKnownRoutes from '../../routes/well-known.js';
+import type { A2AAgentKeyRow } from '../../types/index.js';
 
 // ── Helpers ───────────────────────────────────────────────────
 
-export const TEST_KEY = 'wasi_a2a_' + 'a'.repeat(64)
-export const TEST_KEY_HASH = crypto.createHash('sha256').update(TEST_KEY).digest('hex')
-export const TEST_KEY_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+export const TEST_KEY = `wasi_a2a_${'a'.repeat(64)}`;
+export const TEST_KEY_HASH = crypto
+  .createHash('sha256')
+  .update(TEST_KEY)
+  .digest('hex');
+export const TEST_KEY_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-export function makeKeyRow(overrides: Partial<A2AAgentKeyRow> = {}): A2AAgentKeyRow {
+export function makeKeyRow(
+  overrides: Partial<A2AAgentKeyRow> = {},
+): A2AAgentKeyRow {
   return {
     id: TEST_KEY_ID,
     owner_ref: 'user-1',
@@ -223,21 +255,21 @@ export function makeKeyRow(overrides: Partial<A2AAgentKeyRow> = {}): A2AAgentKey
     agentkit_wallet: null,
     metadata: {},
     ...overrides,
-  }
+  };
 }
 
 // ── buildTestApp ──────────────────────────────────────────────
 
 export async function buildTestApp() {
-  const app = Fastify({ logger: false, genReqId })
+  const app = Fastify({ logger: false, genReqId });
 
   // CORS
-  await app.register(cors, { origin: '*' })
+  await app.register(cors, { origin: '*' });
 
   // Middleware (same order as index.ts)
-  registerRequestIdHook(app)
-  registerErrorBoundary(app)
-  await registerRateLimit(app)
+  registerRequestIdHook(app);
+  registerErrorBoundary(app);
+  await registerRateLimit(app);
 
   // Health route (inline, same as index.ts lines 42-57)
   app.get('/', { config: { rateLimit: false } }, async (_request, reply) => {
@@ -254,44 +286,48 @@ export async function buildTestApp() {
         wellKnown: '/.well-known/agent.json — Gateway self Agent Card',
       },
       docs: 'https://github.com/ferrosasfp/wasiai-a2a',
-    })
-  })
+    });
+  });
 
   // Health endpoint (same as index.ts)
-  app.get('/health', { config: { rateLimit: false } }, async (_request, reply) => {
-    return reply.send({
-      status: 'ok',
-      version: '0.1.0',
-      uptime: process.uptime(),
-      timestamp: new Date().toISOString(),
-    })
-  })
+  app.get(
+    '/health',
+    { config: { rateLimit: false } },
+    async (_request, reply) => {
+      return reply.send({
+        status: 'ok',
+        version: '0.1.0',
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+      });
+    },
+  );
 
   // Routes (same order as index.ts lines 60-75)
-  await app.register(registriesRoutes, { prefix: '/registries' })
-  await app.register(discoverRoutes, { prefix: '/discover' })
-  await app.register(composeRoutes, { prefix: '/compose' })
-  await app.register(orchestrateRoutes, { prefix: '/orchestrate' })
-  await app.register(agentCardRoutes, { prefix: '/agents' })
-  await app.register(wellKnownRoutes, { prefix: '/.well-known' })
-  await app.register(tasksRoutes, { prefix: '/tasks' })
-  await app.register(dashboardRoutes, { prefix: '/dashboard' })
-  await app.register(mockRegistryRoutes, { prefix: '/mock-registry/agents' })
-  await app.register(gaslessRoutes, { prefix: '/gasless' })
-  await app.register(authRoutes, { prefix: '/auth' })
+  await app.register(registriesRoutes, { prefix: '/registries' });
+  await app.register(discoverRoutes, { prefix: '/discover' });
+  await app.register(composeRoutes, { prefix: '/compose' });
+  await app.register(orchestrateRoutes, { prefix: '/orchestrate' });
+  await app.register(agentCardRoutes, { prefix: '/agents' });
+  await app.register(wellKnownRoutes, { prefix: '/.well-known' });
+  await app.register(tasksRoutes, { prefix: '/tasks' });
+  await app.register(dashboardRoutes, { prefix: '/dashboard' });
+  await app.register(mockRegistryRoutes, { prefix: '/mock-registry/agents' });
+  await app.register(gaslessRoutes, { prefix: '/gasless' });
+  await app.register(authRoutes, { prefix: '/auth' });
 
-  await app.ready()
-  return app
+  await app.ready();
+  return app;
 }
 
+import { budgetService as _budget } from '../../services/budget.js';
+import { discoveryService as _disc } from '../../services/discovery.js';
+import { eventService as _event } from '../../services/event.js';
 // ── Re-export mocked services for test manipulation ───────────
 // In vitest 4, re-exports of mocked modules lose spy identity.
 // Import them directly so tests get the actual mock objects.
-import { identityService as _id } from '../../services/identity.js'
-import { budgetService as _budget } from '../../services/budget.js'
-import { eventService as _event } from '../../services/event.js'
-import { discoveryService as _disc } from '../../services/discovery.js'
-export const identityService = _id
-export const budgetService = _budget
-export const eventService = _event
-export const discoveryService = _disc
+import { identityService as _id } from '../../services/identity.js';
+export const identityService = _id;
+export const budgetService = _budget;
+export const eventService = _event;
+export const discoveryService = _disc;

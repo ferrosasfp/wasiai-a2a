@@ -13,31 +13,36 @@
  * via route-level config.rateLimit overrides.
  */
 
-import type { FastifyInstance } from 'fastify'
-import rateLimit from '@fastify/rate-limit'
+import rateLimit from '@fastify/rate-limit';
+import type { FastifyInstance } from 'fastify';
 
-const rateLimitErrorBuilder = (_request: unknown, context: { ban?: boolean; ttl: number }) => {
+const rateLimitErrorBuilder = (
+  _request: unknown,
+  context: { ban?: boolean; ttl: number },
+) => {
   const err = new Error('Too Many Requests') as Error & {
-    statusCode: number
-    code: string
-    retryAfterMs: number
-  }
-  err.statusCode = context.ban ? 403 : 429
-  err.code = 'RATE_LIMIT_EXCEEDED'
-  err.retryAfterMs = context.ttl
-  return err
-}
+    statusCode: number;
+    code: string;
+    retryAfterMs: number;
+  };
+  err.statusCode = context.ban ? 403 : 429;
+  err.code = 'RATE_LIMIT_EXCEEDED';
+  err.retryAfterMs = context.ttl;
+  return err;
+};
 
-export async function registerRateLimit(fastify: FastifyInstance): Promise<void> {
-  const max = parseInt(process.env.RATE_LIMIT_MAX ?? '60')
-  const timeWindow = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000')
+export async function registerRateLimit(
+  fastify: FastifyInstance,
+): Promise<void> {
+  const max = parseInt(process.env.RATE_LIMIT_MAX ?? '60', 10);
+  const timeWindow = parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10);
 
   await fastify.register(rateLimit, {
     global: true,
     max,
     timeWindow,
     errorResponseBuilder: rateLimitErrorBuilder,
-  })
+  });
 }
 
 /**
@@ -46,16 +51,16 @@ export async function registerRateLimit(fastify: FastifyInstance): Promise<void>
  */
 export function orchestrateRateLimit() {
   return {
-    max: parseInt(process.env.RATE_LIMIT_ORCHESTRATE_MAX ?? '10'),
-    timeWindow: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000'),
+    max: parseInt(process.env.RATE_LIMIT_ORCHESTRATE_MAX ?? '10', 10),
+    timeWindow: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10),
     errorResponseBuilder: rateLimitErrorBuilder,
-  }
+  };
 }
 
 export function authSignupRateLimit() {
   return {
-    max: parseInt(process.env.RATE_LIMIT_SIGNUP_MAX ?? '5'),
-    timeWindow: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000'),
+    max: parseInt(process.env.RATE_LIMIT_SIGNUP_MAX ?? '5', 10),
+    timeWindow: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10),
     errorResponseBuilder: rateLimitErrorBuilder,
-  }
+  };
 }

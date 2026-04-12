@@ -64,7 +64,7 @@ Kite L1 (x402 + Agent Passport)
 - **Runtime:** Node.js 20+
 - **Lenguaje:** TypeScript strict — sin `any` explícito en producción
 - **Tests:** vitest
-- **Lint:** eslint
+- **Lint:** biome
 
 ### Blockchain (Kite)
 - **Network:** Kite Testnet (Chain ID 2368) → Mainnet (2366) para producción

@@ -6,16 +6,16 @@
  * Caches transforms in-memory (L1) and in Supabase kite_schema_transforms (L2).
  */
 
-import Anthropic from '@anthropic-ai/sdk'
-import { supabase } from '../../lib/supabase.js'
-import type { TransformResult } from '../../types/index.js'
+import Anthropic from '@anthropic-ai/sdk';
+import { supabase } from '../../lib/supabase.js';
+import type { TransformResult } from '../../types/index.js';
 
-const MODEL = 'claude-sonnet-4-20250514'
-const TIMEOUT_MS = 30_000
+const MODEL = 'claude-sonnet-4-20250514';
+const TIMEOUT_MS = 30_000;
 
 // ─── L1 In-memory cache ────────────────────────────────────────
 // Key: `${sourceAgentId}:${targetAgentId}`
-const l1Cache = new Map<string, string>()
+const l1Cache = new Map<string, string>();
 
 // ─── Helpers ───────────────────────────────────────────────────
 
@@ -28,14 +28,16 @@ function isCompatible(
   output: unknown,
   inputSchema: Record<string, unknown> | undefined,
 ): boolean {
-  if (!inputSchema) return true
-  if (typeof output !== 'object' || output === null) return false
+  if (!inputSchema) return true;
+  if (typeof output !== 'object' || output === null) return false;
 
-  const required = inputSchema['required']
-  if (!Array.isArray(required) || required.length === 0) return true
+  const required = inputSchema.required;
+  if (!Array.isArray(required) || required.length === 0) return true;
 
-  const outputKeys = new Set(Object.keys(output as Record<string, unknown>))
-  return required.every((key: unknown) => typeof key === 'string' && outputKeys.has(key))
+  const outputKeys = new Set(Object.keys(output as Record<string, unknown>));
+  return required.every(
+    (key: unknown) => typeof key === 'string' && outputKeys.has(key),
+  );
 }
 
 /**
@@ -47,8 +49,8 @@ function isCompatible(
  */
 function applyTransformFn(transformFn: string, output: unknown): unknown {
   // eslint-disable-next-line no-new-func
-  const fn = new Function('output', transformFn)
-  return fn(output) as unknown
+  const fn = new Function('output', transformFn);
+  return fn(output) as unknown;
 }
 
 /**
@@ -61,15 +63,15 @@ async function generateTransformFn(
   output: unknown,
   inputSchema: Record<string, unknown>,
 ): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY
+  const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY not configured')
+    throw new Error('ANTHROPIC_API_KEY not configured');
   }
 
-  const client = new Anthropic({ apiKey })
+  const client = new Anthropic({ apiKey });
 
   const systemPrompt =
-    'Eres un experto en transformación de schemas JSON. Dado un valor de output y un inputSchema JSON Schema, genera SOLO el cuerpo de una función JavaScript (sin declaración de función) que recibe `output` y retorna el objeto transformado para satisfacer el inputSchema. Responde SOLO con JSON válido, sin markdown.'
+    'Eres un experto en transformación de schemas JSON. Dado un valor de output y un inputSchema JSON Schema, genera SOLO el cuerpo de una función JavaScript (sin declaración de función) que recibe `output` y retorna el objeto transformado para satisfacer el inputSchema. Responde SOLO con JSON válido, sin markdown.';
 
   const userPrompt = `Output actual (valor real del agente anterior):
 ${JSON.stringify(output, null, 2)}
@@ -84,10 +86,10 @@ Responde con este JSON exacto:
 
 Ejemplo válido de transformFn:
 "return { query: output.text || output.content || String(output), ...output };"
-`
+`;
 
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
     const response = await client.messages.create(
@@ -98,24 +100,24 @@ Ejemplo válido de transformFn:
         messages: [{ role: 'user', content: userPrompt }],
       },
       { signal: controller.signal },
-    )
+    );
 
     const text = response.content
-      .filter(b => b.type === 'text')
-      .map(b => (b as { type: 'text'; text: string }).text)
+      .filter((b) => b.type === 'text')
+      .map((b) => (b as { type: 'text'; text: string }).text)
       .join('')
-      .trim()
+      .trim();
 
-    const parsed = JSON.parse(text) as Record<string, unknown>
+    const parsed = JSON.parse(text) as Record<string, unknown>;
 
-    const fn = parsed['transformFn']
+    const fn = parsed.transformFn;
     if (typeof fn !== 'string' || fn.trim().length === 0) {
-      throw new Error('LLM returned empty or invalid transformFn')
+      throw new Error('LLM returned empty or invalid transformFn');
     }
 
-    return fn
+    return fn;
   } finally {
-    clearTimeout(timeoutId)
+    clearTimeout(timeoutId);
   }
 }
 
@@ -132,9 +134,9 @@ async function getFromL2(
     .select('transform_fn, hit_count')
     .eq('source_agent_id', sourceAgentId)
     .eq('target_agent_id', targetAgentId)
-    .single()
+    .single();
 
-  if (error || !data) return null
+  if (error || !data) return null;
 
   // Update hit_count (fire-and-forget — no await)
   void supabase
@@ -144,9 +146,9 @@ async function getFromL2(
       updated_at: new Date().toISOString(),
     })
     .eq('source_agent_id', sourceAgentId)
-    .eq('target_agent_id', targetAgentId)
+    .eq('target_agent_id', targetAgentId);
 
-  return data.transform_fn as string
+  return data.transform_fn as string;
 }
 
 /**
@@ -158,17 +160,15 @@ async function persistToL2(
   targetAgentId: string,
   transformFn: string,
 ): Promise<void> {
-  await supabase
-    .from('kite_schema_transforms')
-    .upsert(
-      {
-        source_agent_id: sourceAgentId,
-        target_agent_id: targetAgentId,
-        transform_fn: transformFn,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'source_agent_id,target_agent_id' },
-    )
+  await supabase.from('kite_schema_transforms').upsert(
+    {
+      source_agent_id: sourceAgentId,
+      target_agent_id: targetAgentId,
+      transform_fn: transformFn,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'source_agent_id,target_agent_id' },
+  );
 }
 
 // ─── Public API ────────────────────────────────────────────────
@@ -193,7 +193,7 @@ export async function maybeTransform(
   output: unknown,
   inputSchema: Record<string, unknown> | undefined,
 ): Promise<TransformResult> {
-  const start = Date.now()
+  const start = Date.now();
 
   // 1. Compatible? → skip
   if (isCompatible(output, inputSchema)) {
@@ -201,55 +201,60 @@ export async function maybeTransform(
       transformedOutput: output,
       cacheHit: 'SKIPPED',
       latencyMs: Date.now() - start,
-    }
+    };
   }
 
-  const cacheKey = `${sourceAgentId}:${targetAgentId}`
+  const cacheKey = `${sourceAgentId}:${targetAgentId}`;
 
   // 2. L1 cache hit
-  const l1Fn = l1Cache.get(cacheKey)
+  const l1Fn = l1Cache.get(cacheKey);
   if (l1Fn) {
-    const transformedOutput = applyTransformFn(l1Fn, output)
+    const transformedOutput = applyTransformFn(l1Fn, output);
     return {
       transformedOutput,
       cacheHit: true,
       latencyMs: Date.now() - start,
-    }
+    };
   }
 
   // 3. L2 cache hit (Supabase)
-  const l2Fn = await getFromL2(sourceAgentId, targetAgentId)
+  const l2Fn = await getFromL2(sourceAgentId, targetAgentId);
   if (l2Fn) {
-    l1Cache.set(cacheKey, l2Fn)
-    const transformedOutput = applyTransformFn(l2Fn, output)
+    l1Cache.set(cacheKey, l2Fn);
+    const transformedOutput = applyTransformFn(l2Fn, output);
     return {
       transformedOutput,
       cacheHit: true,
       latencyMs: Date.now() - start,
-    }
+    };
   }
 
   // 4. Cache miss → LLM
-  const schema = inputSchema ?? {}
-  const transformFn = await generateTransformFn(output, schema)
+  const schema = inputSchema ?? {};
+  const transformFn = await generateTransformFn(output, schema);
 
   // Persist async to L2 (don't block on this)
-  persistToL2(sourceAgentId, targetAgentId, transformFn).catch((err: unknown) => {
-    console.error(`[Transform] Failed to persist to L2 for ${cacheKey}:`, err)
-  })
+  persistToL2(sourceAgentId, targetAgentId, transformFn).catch(
+    (err: unknown) => {
+      console.error(
+        `[Transform] Failed to persist to L2 for ${cacheKey}:`,
+        err,
+      );
+    },
+  );
 
   // Update L1
-  l1Cache.set(cacheKey, transformFn)
+  l1Cache.set(cacheKey, transformFn);
 
-  const transformedOutput = applyTransformFn(transformFn, output)
+  const transformedOutput = applyTransformFn(transformFn, output);
   return {
     transformedOutput,
     cacheHit: false,
     latencyMs: Date.now() - start,
-  }
+  };
 }
 
 /** Clears L1 cache — for testing only */
 export function _clearL1Cache(): void {
-  l1Cache.clear()
+  l1Cache.clear();
 }

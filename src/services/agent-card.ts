@@ -1,5 +1,10 @@
-import type { FastifyRequest } from 'fastify'
-import type { Agent, AgentCard, AgentSkill, RegistryConfig } from '../types/index.js'
+import type { FastifyRequest } from 'fastify';
+import type {
+  Agent,
+  AgentCard,
+  AgentSkill,
+  RegistryConfig,
+} from '../types/index.js';
 
 /**
  * Resolve the public base URL for the gateway.
@@ -11,11 +16,13 @@ import type { Agent, AgentCard, AgentSkill, RegistryConfig } from '../types/inde
  */
 export function resolveBaseUrl(request: FastifyRequest): string {
   if (process.env.BASE_URL) {
-    return process.env.BASE_URL.replace(/\/$/, '')
+    return process.env.BASE_URL.replace(/\/$/, '');
   }
 
-  const proto = (request.headers['x-forwarded-proto'] as string | undefined) ?? request.protocol
-  return `${proto}://${request.hostname}`
+  const proto =
+    (request.headers['x-forwarded-proto'] as string | undefined) ??
+    request.protocol;
+  return `${proto}://${request.hostname}`;
 }
 
 export const agentCardService = {
@@ -24,29 +31,33 @@ export const agentCardService = {
    * bearer → ["bearer"], header → ["apiKey"], query → [], undefined → []
    */
   resolveAuthSchemes(registryConfig: RegistryConfig): string[] {
-    if (!registryConfig.auth?.type) return []
+    if (!registryConfig.auth?.type) return [];
 
     switch (registryConfig.auth.type) {
       case 'bearer':
-        return ['bearer']
+        return ['bearer'];
       case 'header':
-        return ['apiKey']
+        return ['apiKey'];
       case 'query':
-        return []
+        return [];
     }
 
-    return []
+    return [];
   },
 
   /**
    * Build an A2A Agent Card from an internal Agent + its registry config.
    */
-  buildAgentCard(agent: Agent, registryConfig: RegistryConfig, baseUrl: string): AgentCard {
+  buildAgentCard(
+    agent: Agent,
+    registryConfig: RegistryConfig,
+    baseUrl: string,
+  ): AgentCard {
     const skills: AgentSkill[] = agent.capabilities.map((cap) => ({
       id: cap,
       name: cap,
       description: cap,
-    }))
+    }));
 
     return {
       name: agent.name,
@@ -62,8 +73,9 @@ export const agentCardService = {
       authentication: {
         schemes: this.resolveAuthSchemes(registryConfig),
       },
-      invocationNote: 'Do not call the agent URL directly. Invoke this agent through POST /compose or POST /orchestrate on the WasiAI A2A gateway.',
-    }
+      invocationNote:
+        'Do not call the agent URL directly. Invoke this agent through POST /compose or POST /orchestrate on the WasiAI A2A gateway.',
+    };
   },
 
   /**
@@ -83,7 +95,8 @@ export const agentCardService = {
         {
           id: 'discover',
           name: 'Discover Agents',
-          description: 'Search and discover AI agents across multiple registries',
+          description:
+            'Search and discover AI agents across multiple registries',
         },
         {
           id: 'compose',
@@ -93,7 +106,8 @@ export const agentCardService = {
         {
           id: 'orchestrate',
           name: 'Orchestrate Agents',
-          description: 'Goal-based orchestration that automatically selects and chains agents',
+          description:
+            'Goal-based orchestration that automatically selects and chains agents',
         },
       ],
       inputModes: ['text/plain'],
@@ -101,7 +115,8 @@ export const agentCardService = {
       authentication: {
         schemes: [],
       },
-      invocationNote: 'Agent invocations must go through POST /compose or POST /orchestrate on this gateway, not directly to external agent hosts.',
-    }
+      invocationNote:
+        'Agent invocations must go through POST /compose or POST /orchestrate on this gateway, not directly to external agent hosts.',
+    };
   },
-}
+};

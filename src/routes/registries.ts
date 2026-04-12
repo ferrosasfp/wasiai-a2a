@@ -2,9 +2,9 @@
  * Registries Routes — CRUD for marketplace registrations
  */
 
-import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
-import { registryService } from '../services/registry.js'
-import type { RegistrySchema, RegistryAuth } from '../types/index.js'
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { registryService } from '../services/registry.js';
+import type { RegistryAuth, RegistrySchema } from '../types/index.js';
 
 const registriesRoutes: FastifyPluginAsync = async (fastify) => {
   /**
@@ -12,12 +12,12 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
    * List all registered marketplaces
    */
   fastify.get('/', async (_request: FastifyRequest, reply: FastifyReply) => {
-    const registries = await registryService.list()
+    const registries = await registryService.list();
     return reply.send({
       registries,
       total: registries.length,
-    })
-  })
+    });
+  });
 
   /**
    * GET /registries/:id
@@ -29,16 +29,16 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
       request: FastifyRequest<{ Params: { id: string } }>,
       reply: FastifyReply,
     ) => {
-      const { id } = request.params
-      const registry = await registryService.get(id)
+      const { id } = request.params;
+      const registry = await registryService.get(id);
 
       if (!registry) {
-        return reply.status(404).send({ error: 'Registry not found' })
+        return reply.status(404).send({ error: 'Registry not found' });
       }
 
-      return reply.send(registry)
+      return reply.send(registry);
     },
-  )
+  );
 
   /**
    * POST /registries
@@ -49,25 +49,31 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
     async (
       request: FastifyRequest<{
         Body: {
-          name: string
-          discoveryEndpoint: string
-          invokeEndpoint: string
-          agentEndpoint?: string
-          schema: RegistrySchema
-          auth?: RegistryAuth
-          enabled?: boolean
-        }
+          name: string;
+          discoveryEndpoint: string;
+          invokeEndpoint: string;
+          agentEndpoint?: string;
+          schema: RegistrySchema;
+          auth?: RegistryAuth;
+          enabled?: boolean;
+        };
       }>,
       reply: FastifyReply,
     ) => {
       try {
-        const body = request.body
+        const body = request.body;
 
         // Validate required fields
-        if (!body.name || !body.discoveryEndpoint || !body.invokeEndpoint || !body.schema) {
+        if (
+          !body.name ||
+          !body.discoveryEndpoint ||
+          !body.invokeEndpoint ||
+          !body.schema
+        ) {
           return reply.status(400).send({
-            error: 'Missing required fields: name, discoveryEndpoint, invokeEndpoint, schema',
-          })
+            error:
+              'Missing required fields: name, discoveryEndpoint, invokeEndpoint, schema',
+          });
         }
 
         const registry = await registryService.register({
@@ -78,16 +84,16 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
           schema: body.schema,
           auth: body.auth,
           enabled: body.enabled ?? true,
-        })
+        });
 
-        return reply.status(201).send(registry)
+        return reply.status(201).send(registry);
       } catch (err) {
         return reply.status(400).send({
           error: err instanceof Error ? err.message : 'Failed to register',
-        })
+        });
       }
     },
-  )
+  );
 
   /**
    * PATCH /registries/:id
@@ -96,22 +102,25 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.patch(
     '/:id',
     async (
-      request: FastifyRequest<{ Params: { id: string }; Body: Record<string, unknown> }>,
+      request: FastifyRequest<{
+        Params: { id: string };
+        Body: Record<string, unknown>;
+      }>,
       reply: FastifyReply,
     ) => {
       try {
-        const { id } = request.params
-        const body = request.body
+        const { id } = request.params;
+        const body = request.body;
 
-        const registry = await registryService.update(id, body)
-        return reply.send(registry)
+        const registry = await registryService.update(id, body);
+        return reply.send(registry);
       } catch (err) {
         return reply.status(400).send({
           error: err instanceof Error ? err.message : 'Failed to update',
-        })
+        });
       }
     },
-  )
+  );
 
   /**
    * DELETE /registries/:id
@@ -124,21 +133,21 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
       reply: FastifyReply,
     ) => {
       try {
-        const { id } = request.params
-        const deleted = await registryService.delete(id)
+        const { id } = request.params;
+        const deleted = await registryService.delete(id);
 
         if (!deleted) {
-          return reply.status(404).send({ error: 'Registry not found' })
+          return reply.status(404).send({ error: 'Registry not found' });
         }
 
-        return reply.send({ success: true })
+        return reply.send({ success: true });
       } catch (err) {
         return reply.status(400).send({
           error: err instanceof Error ? err.message : 'Failed to delete',
-        })
+        });
       }
     },
-  )
-}
+  );
+};
 
-export default registriesRoutes
+export default registriesRoutes;

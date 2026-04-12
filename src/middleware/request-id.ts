@@ -3,15 +3,15 @@
  * WKH-18: Hardening — AC-10
  */
 
-import crypto from 'node:crypto'
-import type { FastifyInstance } from 'fastify'
+import crypto from 'node:crypto';
+import type { FastifyInstance } from 'fastify';
 
 /** Generate a UUID v4 request ID — pass to Fastify({ genReqId }) */
-export const genReqId = () => crypto.randomUUID()
+export const genReqId = () => crypto.randomUUID();
 
 /** Register onSend hook to add x-request-id header to ALL responses */
 export function registerRequestIdHook(fastify: FastifyInstance): void {
   fastify.addHook('onSend', async (request, reply) => {
-    reply.header('x-request-id', request.id)
-  })
+    reply.header('x-request-id', request.id);
+  });
 }

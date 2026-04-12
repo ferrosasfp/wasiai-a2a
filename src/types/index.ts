@@ -8,74 +8,74 @@
 
 export interface RegistryConfig {
   /** Unique identifier */
-  id: string
-  
+  id: string;
+
   /** Human-readable name */
-  name: string
-  
+  name: string;
+
   /** Discovery endpoint URL */
-  discoveryEndpoint: string
-  
+  discoveryEndpoint: string;
+
   /** Invoke endpoint URL template (use {agentId} or {slug} as placeholder) */
-  invokeEndpoint: string
-  
+  invokeEndpoint: string;
+
   /** Optional: Get single agent endpoint */
-  agentEndpoint?: string
-  
+  agentEndpoint?: string;
+
   /** Schema mapping for API compatibility */
-  schema: RegistrySchema
-  
+  schema: RegistrySchema;
+
   /** Authentication config */
-  auth?: RegistryAuth
-  
+  auth?: RegistryAuth;
+
   /** Is this registry active? */
-  enabled: boolean
-  
+  enabled: boolean;
+
   /** When was it registered */
-  createdAt: Date
+  createdAt: Date;
 }
 
 export interface RegistrySchema {
   /** How to map discovery params */
   discovery: {
     /** Query param for capabilities/tags */
-    capabilityParam?: string
+    capabilityParam?: string;
     /** Query param for free text search */
-    queryParam?: string
+    queryParam?: string;
     /** Query param for limit */
-    limitParam?: string
+    limitParam?: string;
     /** Query param for max price */
-    maxPriceParam?: string
+    maxPriceParam?: string;
     /** Path to agents array in response */
-    agentsPath?: string
+    agentsPath?: string;
     /** Field mappings for agent object */
-    agentMapping?: AgentFieldMapping
-  }
-  
+    agentMapping?: AgentFieldMapping;
+  };
+
   /** How to call invoke */
   invoke: {
-    method: 'GET' | 'POST'
+    method: 'GET' | 'POST';
     /** Field name for input in request body */
-    inputField?: string
+    inputField?: string;
     /** Path to result in response */
-    resultPath?: string
-  }
+    resultPath?: string;
+  };
 }
 
 export interface AgentFieldMapping {
-  id?: string
-  name?: string
-  slug?: string
-  description?: string
-  capabilities?: string
-  price?: string
-  reputation?: string
+  id?: string;
+  name?: string;
+  slug?: string;
+  description?: string;
+  capabilities?: string;
+  price?: string;
+  reputation?: string;
 }
 
 export interface RegistryAuth {
-  type: 'header' | 'query' | 'bearer'
-  key: string
-  value?: string  // If static, otherwise must be provided per-request
+  type: 'header' | 'query' | 'bearer';
+  key: string;
+  value?: string; // If static, otherwise must be provided per-request
 }
 
 // ============================================================
@@ -83,18 +83,18 @@ export interface RegistryAuth {
 // ============================================================
 
 export interface Agent {
-  id: string
-  name: string
-  slug: string
-  description: string
-  capabilities: string[]
-  priceUsdc: number
-  reputation?: number
-  registry: string
-  invokeUrl: string
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  capabilities: string[];
+  priceUsdc: number;
+  reputation?: number;
+  registry: string;
+  invokeUrl: string;
   /** Explains that invocation must go through POST /compose or POST /orchestrate on the gateway */
-  invocationNote: string
-  metadata?: Record<string, unknown>
+  invocationNote: string;
+  metadata?: Record<string, unknown>;
 }
 
 // ============================================================
@@ -102,18 +102,18 @@ export interface Agent {
 // ============================================================
 
 export interface DiscoveryQuery {
-  capabilities?: string[]
-  query?: string
-  maxPrice?: number
-  minReputation?: number
-  limit?: number
-  registry?: string  // Filter to specific registry
+  capabilities?: string[];
+  query?: string;
+  maxPrice?: number;
+  minReputation?: number;
+  limit?: number;
+  registry?: string; // Filter to specific registry
 }
 
 export interface DiscoveryResult {
-  agents: Agent[]
-  total: number
-  registries: string[]
+  agents: Agent[];
+  total: number;
+  registries: string[];
 }
 
 // ============================================================
@@ -122,40 +122,40 @@ export interface DiscoveryResult {
 
 export interface ComposeStep {
   /** Agent ID or slug */
-  agent: string
+  agent: string;
   /** Registry name (optional, will search all if not specified) */
-  registry?: string
+  registry?: string;
   /** Input for this step */
-  input: Record<string, unknown>
+  input: Record<string, unknown>;
   /** Use output from previous step */
-  passOutput?: boolean
+  passOutput?: boolean;
 }
 
 export interface ComposeRequest {
-  steps: ComposeStep[]
+  steps: ComposeStep[];
   /** Max budget in USDC */
-  maxBudget?: number
+  maxBudget?: number;
 }
 
 export interface ComposeResult {
-  success: boolean
-  output: unknown
-  steps: StepResult[]
-  totalCostUsdc: number
-  totalLatencyMs: number
-  error?: string
+  success: boolean;
+  output: unknown;
+  steps: StepResult[];
+  totalCostUsdc: number;
+  totalLatencyMs: number;
+  error?: string;
 }
 
 export interface StepResult {
-  agent: Agent
-  output: unknown
-  costUsdc: number
-  latencyMs: number
-  txHash?: string  // Hash de tx on-chain si hubo pago x402
+  agent: Agent;
+  output: unknown;
+  costUsdc: number;
+  latencyMs: number;
+  txHash?: string; // Hash de tx on-chain si hubo pago x402
   /** Cache hit status for schema transform applied after this step */
-  cacheHit?: boolean | 'SKIPPED'
+  cacheHit?: boolean | 'SKIPPED';
   /** Latency of schema transform (ms) */
-  transformLatencyMs?: number
+  transformLatencyMs?: number;
 }
 
 // ============================================================
@@ -164,21 +164,21 @@ export interface StepResult {
 
 /** Result of a maybeTransform call */
 export interface TransformResult {
-  transformedOutput: unknown
+  transformedOutput: unknown;
   /** true = cache hit, false = LLM generated, 'SKIPPED' = schemas compatible */
-  cacheHit: boolean | 'SKIPPED'
-  latencyMs: number
+  cacheHit: boolean | 'SKIPPED';
+  latencyMs: number;
 }
 
 /** Row in kite_schema_transforms table */
 export interface SchemaTransformEntry {
-  id: string
-  sourceAgentId: string
-  targetAgentId: string
-  transformFn: string
-  hitCount: number
-  createdAt: Date
-  updatedAt: Date
+  id: string;
+  sourceAgentId: string;
+  targetAgentId: string;
+  transformFn: string;
+  hitCount: number;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 // ============================================================
@@ -187,23 +187,23 @@ export interface SchemaTransformEntry {
 
 export interface OrchestrateRequest {
   /** Natural language goal */
-  goal: string
+  goal: string;
   /** Max budget in USDC */
-  budget: number
+  budget: number;
   /** Preferred capabilities (hints) */
-  preferCapabilities?: string[]
+  preferCapabilities?: string[];
   /** Max agents to use */
-  maxAgents?: number
+  maxAgents?: number;
 }
 
 export interface OrchestrateResult {
-  orchestrationId: string
-  answer: unknown
-  reasoning: string
-  pipeline: ComposeResult
-  consideredAgents: Agent[]
-  protocolFeeUsdc: number
-  attestationTxHash?: string
+  orchestrationId: string;
+  answer: unknown;
+  reasoning: string;
+  pipeline: ComposeResult;
+  consideredAgents: Agent[];
+  protocolFeeUsdc: number;
+  attestationTxHash?: string;
 }
 
 // ============================================================
@@ -211,7 +211,7 @@ export interface OrchestrateResult {
 // ============================================================
 
 export interface PaymentAuth {
-  xPayment: string  // Base64 encoded x402 payload
+  xPayment: string; // Base64 encoded x402 payload
 }
 
 // ============================================================
@@ -223,34 +223,34 @@ export interface PaymentAuth {
  * Describe el pago que el cliente debe realizar.
  */
 export interface X402PaymentPayload {
-  scheme: string
-  network: string
+  scheme: string;
+  network: string;
   /** Monto máximo requerido en wei */
-  maxAmountRequired: string
+  maxAmountRequired: string;
   /** URL del endpoint que requiere pago */
-  resource: string
-  description: string
-  mimeType: string
+  resource: string;
+  description: string;
+  mimeType: string;
   outputSchema?: {
-    input?: Record<string, unknown>
-    output?: Record<string, unknown>
-  }
+    input?: Record<string, unknown>;
+    output?: Record<string, unknown>;
+  };
   /** Wallet address del service provider que recibe el pago */
-  payTo: string
-  maxTimeoutSeconds: number
+  payTo: string;
+  maxTimeoutSeconds: number;
   /** Contract address del token de pago */
-  asset: string
-  extra: null | Record<string, unknown>
-  merchantName: string
+  asset: string;
+  extra: null | Record<string, unknown>;
+  merchantName: string;
 }
 
 /**
  * Body completo de una respuesta HTTP 402 conforme a x402.
  */
 export interface X402Response {
-  error: string
-  accepts: X402PaymentPayload[]
-  x402Version: 2
+  error: string;
+  accepts: X402PaymentPayload[];
+  x402Version: 2;
 }
 
 /**
@@ -261,15 +261,15 @@ export interface X402Response {
  */
 export interface X402PaymentRequest {
   authorization: {
-    from: string        // Wallet address del pagador
-    to: string          // Wallet address del service provider
-    value: string       // Monto en wei
-    validAfter: string  // Unix timestamp (string) — "0" si inmediato
-    validBefore: string // Unix timestamp (string) — deadline de expiración
-    nonce: string       // 0x... nonce único para esta autorización
-  }
-  signature: string     // Firma EIP-712 del pagador
-  network?: string      // "kite-testnet" (opcional)
+    from: string; // Wallet address del pagador
+    to: string; // Wallet address del service provider
+    value: string; // Monto en wei
+    validAfter: string; // Unix timestamp (string) — "0" si inmediato
+    validBefore: string; // Unix timestamp (string) — deadline de expiración
+    nonce: string; // 0x... nonce único para esta autorización
+  };
+  signature: string; // Firma EIP-712 del pagador
+  network?: string; // "kite-testnet" (opcional)
 }
 
 // NOTE: Pieverse types used by kite-ozone adapter only. Will move to adapters/kite-ozone/types.ts post-hackathon.
@@ -279,31 +279,31 @@ export interface X402PaymentRequest {
  */
 export interface PieverseVerifyRequest {
   paymentPayload: {
-    x402Version: 2
-    scheme: string
-    network: string
+    x402Version: 2;
+    scheme: string;
+    network: string;
     payload: {
-      authorization: X402PaymentRequest['authorization']
-      signature: string
-    }
-  }
+      authorization: X402PaymentRequest['authorization'];
+      signature: string;
+    };
+  };
   paymentRequirements: {
-    x402Version: 2
-    scheme: string
-    network: string
-    maxAmountRequired: string
-    payTo: string
-    asset: string
-    extra: null | Record<string, unknown>
-  }
+    x402Version: 2;
+    scheme: string;
+    network: string;
+    maxAmountRequired: string;
+    payTo: string;
+    asset: string;
+    extra: null | Record<string, unknown>;
+  };
 }
 
 /**
  * Response de POST /v2/verify en Pieverse.
  */
 export interface PieverseVerifyResponse {
-  valid: boolean
-  error?: string
+  valid: boolean;
+  error?: string;
 }
 
 /**
@@ -311,32 +311,32 @@ export interface PieverseVerifyResponse {
  */
 export interface PieverseSettleRequest {
   paymentPayload: {
-    x402Version: 2
-    scheme: string
-    network: string
+    x402Version: 2;
+    scheme: string;
+    network: string;
     payload: {
-      authorization: X402PaymentRequest['authorization']
-      signature: string
-    }
-  }
+      authorization: X402PaymentRequest['authorization'];
+      signature: string;
+    };
+  };
   paymentRequirements: {
-    x402Version: 2
-    scheme: string
-    network: string
-    maxAmountRequired: string
-    payTo: string
-    asset: string
-    extra: null | Record<string, unknown>
-  }
+    x402Version: 2;
+    scheme: string;
+    network: string;
+    maxAmountRequired: string;
+    payTo: string;
+    asset: string;
+    extra: null | Record<string, unknown>;
+  };
 }
 
 /**
  * Response de POST /v2/settle en Pieverse.
  */
 export interface PieverseSettleResult {
-  txHash: string
-  success: boolean
-  error?: string
+  txHash: string;
+  success: boolean;
+  error?: string;
 }
 
 // ============================================================
@@ -344,27 +344,27 @@ export interface PieverseSettleResult {
 // ============================================================
 
 export interface AgentSkill {
-  id: string
-  name: string
-  description: string
+  id: string;
+  name: string;
+  description: string;
 }
 
 export interface AgentCard {
-  name: string
-  description: string
-  url: string
+  name: string;
+  description: string;
+  url: string;
   capabilities: {
-    streaming: boolean
-    pushNotifications: boolean
-  }
-  skills: AgentSkill[]
-  inputModes: string[]
-  outputModes: string[]
+    streaming: boolean;
+    pushNotifications: boolean;
+  };
+  skills: AgentSkill[];
+  inputModes: string[];
+  outputModes: string[];
   authentication: {
-    schemes: string[]
-  }
+    schemes: string[];
+  };
   /** Explains that agent invocations must go through POST /compose or POST /orchestrate on the gateway */
-  invocationNote?: string
+  invocationNote?: string;
 }
 
 // ============================================================
@@ -378,21 +378,25 @@ export const TASK_STATES = [
   'failed',
   'canceled',
   'input-required',
-] as const
+] as const;
 
-export type TaskState = (typeof TASK_STATES)[number]
+export type TaskState = (typeof TASK_STATES)[number];
 
-export const TERMINAL_STATES: readonly TaskState[] = ['completed', 'failed', 'canceled'] as const
+export const TERMINAL_STATES: readonly TaskState[] = [
+  'completed',
+  'failed',
+  'canceled',
+] as const;
 
 export interface Task {
-  id: string
-  contextId: string | null
-  status: TaskState
-  messages: unknown[]
-  artifacts: unknown[]
-  metadata: Record<string, unknown> | null
-  createdAt: Date
-  updatedAt: Date
+  id: string;
+  contextId: string | null;
+  status: TaskState;
+  messages: unknown[];
+  artifacts: unknown[];
+  metadata: Record<string, unknown> | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 // ============================================================
@@ -400,37 +404,37 @@ export interface Task {
 // ============================================================
 
 export interface A2AEvent {
-  id: string
-  eventType: string
-  agentId: string | null
-  agentName: string | null
-  registry: string | null
-  status: "success" | "failed"
-  latencyMs: number | null
-  costUsdc: number
-  txHash: string | null
-  goal: string | null
-  metadata: Record<string, unknown>
-  createdAt: Date
+  id: string;
+  eventType: string;
+  agentId: string | null;
+  agentName: string | null;
+  registry: string | null;
+  status: 'success' | 'failed';
+  latencyMs: number | null;
+  costUsdc: number;
+  txHash: string | null;
+  goal: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: Date;
 }
 
 export interface AgentSummary {
-  agentId: string
-  agentName: string
-  registry: string
-  invocations: number
-  avgLatencyMs: number
-  totalCostUsdc: number
+  agentId: string;
+  agentName: string;
+  registry: string;
+  invocations: number;
+  avgLatencyMs: number;
+  totalCostUsdc: number;
 }
 
 export interface DashboardStats {
-  registriesCount: number
-  tasksByStatus: Record<string, number>
-  eventsTotal: number
-  successRate: number
-  totalCostUsdc: number
-  avgLatencyMs: number
-  agents: AgentSummary[]
+  registriesCount: number;
+  tasksByStatus: Record<string, number>;
+  eventsTotal: number;
+  successRate: number;
+  totalCostUsdc: number;
+  avgLatencyMs: number;
+  agents: AgentSummary[];
 }
 
 // ============================================================
@@ -438,51 +442,55 @@ export interface DashboardStats {
 // ============================================================
 
 export interface GaslessSupportedToken {
-  network: 'testnet' | 'mainnet'
-  symbol: string                  // "PYUSD"
-  address: `0x${string}`          // 0x8E04...2ec9
-  decimals: number                // 18
-  eip712Name: string              // "PYUSD"
-  eip712Version: string           // "1"
-  minimumTransferAmount: string   // wei string ("10000000000000000")
+  network: 'testnet' | 'mainnet';
+  symbol: string; // "PYUSD"
+  address: `0x${string}`; // 0x8E04...2ec9
+  decimals: number; // 18
+  eip712Name: string; // "PYUSD"
+  eip712Version: string; // "1"
+  minimumTransferAmount: string; // wei string ("10000000000000000")
 }
 
 export interface GaslessTransferRequest {
-  from: `0x${string}`
-  to: `0x${string}`
-  value: string                   // wei
-  validAfter: string              // unix seconds (string)
-  validBefore: string             // unix seconds (string)
-  tokenAddress: `0x${string}`
-  nonce: `0x${string}`            // 0x + 32 random bytes
-  v: number
-  r: `0x${string}`
-  s: `0x${string}`
+  from: `0x${string}`;
+  to: `0x${string}`;
+  value: string; // wei
+  validAfter: string; // unix seconds (string)
+  validBefore: string; // unix seconds (string)
+  tokenAddress: `0x${string}`;
+  nonce: `0x${string}`; // 0x + 32 random bytes
+  v: number;
+  r: `0x${string}`;
+  s: `0x${string}`;
 }
 
 export interface GaslessTransferResponse {
-  txHash: `0x${string}`
+  txHash: `0x${string}`;
 }
 
-export type GaslessFundingState = 'disabled' | 'unconfigured' | 'unfunded' | 'ready'
+export type GaslessFundingState =
+  | 'disabled'
+  | 'unconfigured'
+  | 'unfunded'
+  | 'ready';
 
 export interface GaslessStatus {
-  enabled: boolean
-  network: string
-  supportedToken: GaslessSupportedToken | null
-  operatorAddress: `0x${string}` | null   // NUNCA private key
+  enabled: boolean;
+  network: string;
+  supportedToken: GaslessSupportedToken | null;
+  operatorAddress: `0x${string}` | null; // NUNCA private key
   /** Degradation state: disabled | unconfigured | unfunded | ready (WKH-38) */
-  funding_state: GaslessFundingState
+  funding_state: GaslessFundingState;
   /** Chain ID for the gasless network */
-  chain_id?: number
+  chain_id?: number;
   /** Gasless relayer base URL */
-  relayer?: string
+  relayer?: string;
   /** Documentation link */
-  documentation?: string
+  documentation?: string;
 }
 
 // ============================================================
 // A2A AGENT KEY TYPES (WKH-34)
 // ============================================================
 
-export * from './a2a-key.js'
+export * from './a2a-key.js';

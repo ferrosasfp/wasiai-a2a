@@ -1,5 +1,5 @@
-import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
-import { agentCardService, resolveBaseUrl } from '../services/agent-card.js'
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { agentCardService, resolveBaseUrl } from '../services/agent-card.js';
 
 const wellKnownRoutes: FastifyPluginAsync = async (fastify) => {
   /**
@@ -10,11 +10,11 @@ const wellKnownRoutes: FastifyPluginAsync = async (fastify) => {
     '/agent.json',
     { config: { rateLimit: false } },
     async (request: FastifyRequest, reply: FastifyReply) => {
-      const baseUrl = resolveBaseUrl(request)
-      const card = agentCardService.buildSelfAgentCard(baseUrl)
-      return reply.send(card)
+      const baseUrl = resolveBaseUrl(request);
+      const card = agentCardService.buildSelfAgentCard(baseUrl);
+      return reply.send(card);
     },
-  )
-}
+  );
+};
 
-export default wellKnownRoutes
+export default wellKnownRoutes;

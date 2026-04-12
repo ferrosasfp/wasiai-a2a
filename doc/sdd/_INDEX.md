@@ -34,3 +34,5 @@
 | 035 | 2026-04-06 | Bearer Auth Fix on /auth/* + Test Hardening (WKH-BEARER-FIX) | bugfix | FAST+AR | in progress | feat/035-bearer-fix |
 | 036 | 2026-04-06 | Sync .env.example + README.md with current features (WKH-DOCS-SYNC) | doc | FAST | in progress | feat/036-docs-sync |
 | 037 | 2026-04-06 | Migrate x402 from v1 to v2 — Pieverse format (WKH-X402-V2) | bugfix | QUALITY | in progress | feat/037-x402-v2 |
+| 038 | 2026-04-11 | Biome Linter + Formatter (WKH-QG-LINT) | tooling | FAST | DONE | feat/038-biome-linter |
+| 039 | 2026-04-11 | Security Headers — X-Content-Type-Options + X-Frame-Options (WKH-QG-HEADERS) | patch | FAST | DONE | feat/039-security-headers |
