@@ -103,7 +103,12 @@ export const discoveryService = {
     }
 
     const cb = getRegistryCircuitBreaker(registry.name)
-    const response = await cb.execute(() => fetch(url.toString(), { headers }))
+    const timeoutMs = parseInt(process.env.DISCOVERY_REGISTRY_TIMEOUT_MS ?? '5000')
+    const response = await cb.execute(() => {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
+      return fetch(url.toString(), { headers, signal: controller.signal }).finally(() => clearTimeout(timer))
+    })
 
     if (!response.ok) {
       throw new Error(`Registry ${registry.name} returned ${response.status}`)

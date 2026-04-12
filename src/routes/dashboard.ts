@@ -29,11 +29,19 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * GET /dashboard/api/stats
-   * Aggregated KPIs for the dashboard
+   * Aggregated KPIs for the dashboard (cached 30s)
    */
+  let statsCache: { data: unknown; expiresAt: number } | null = null
+  const STATS_CACHE_TTL_MS = 30_000
+
   fastify.get('/api/stats', { config: { rateLimit: false } }, async (_request: FastifyRequest, reply: FastifyReply) => {
     try {
+      const now = Date.now()
+      if (statsCache && now < statsCache.expiresAt) {
+        return reply.send(statsCache.data)
+      }
       const stats = await eventService.stats()
+      statsCache = { data: stats, expiresAt: now + STATS_CACHE_TTL_MS }
       return reply.send(stats)
     } catch (err) {
       return reply.status(500).send({
