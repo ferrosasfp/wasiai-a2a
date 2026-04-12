@@ -21,9 +21,9 @@ process.env.KITE_WALLET_ADDRESS = '0x1234567890123456789012345678901234567890'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-const mockCreateKey = vi.mocked(identityService.createKey)
-const mockLookupByHash = vi.mocked(identityService.lookupByHash)
-const mockDiscover = vi.mocked(discoveryService.discover)
+const mockCreateKey = identityService.createKey as ReturnType<typeof vi.fn>
+const mockLookupByHash = identityService.lookupByHash as ReturnType<typeof vi.fn>
+const mockDiscover = discoveryService.discover as ReturnType<typeof vi.fn>
 
 describe('E2E', () => {
   let app: ReturnType<typeof Fastify>

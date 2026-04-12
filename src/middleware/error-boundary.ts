@@ -8,8 +8,26 @@
 
 import type { FastifyInstance } from 'fastify'
 
+interface AppError {
+  message: string
+  statusCode?: number
+  code?: string
+  stack?: string
+  validation?: unknown[]
+  retryAfterMs?: number
+  orchestrationId?: string
+}
+
+function toAppError(err: unknown): AppError {
+  if (err instanceof Error) {
+    return err as unknown as AppError
+  }
+  return { message: String(err) }
+}
+
 export function registerErrorBoundary(fastify: FastifyInstance): void {
-  fastify.setErrorHandler((error, request, reply) => {
+  fastify.setErrorHandler((rawError: unknown, request, reply) => {
+    const error = toAppError(rawError)
     const requestId = request.id
 
     // 1. Fastify schema validation error (AC-4)
@@ -23,20 +41,19 @@ export function registerErrorBoundary(fastify: FastifyInstance): void {
     }
 
     // BLQ-3: Extract orchestrationId from error if present (e.g. /orchestrate failures)
-    const orchestrationId = (error as unknown as { orchestrationId?: string }).orchestrationId ?? undefined
+    const orchestrationId = error.orchestrationId ?? undefined
 
     // 2. Custom errors with code (CircuitOpenError, rate-limit, backpressure, timeout, etc.)
-    const errorAsUnknown = error as unknown as { code?: string; statusCode?: number; retryAfterMs?: number }
-    if ('code' in error && typeof errorAsUnknown.code === 'string') {
-      const statusCode = errorAsUnknown.statusCode ?? 500
+    if (error.code && typeof error.code === 'string') {
+      const statusCode = error.statusCode ?? 500
       const body: Record<string, unknown> = {
         error: error.message,
-        code: errorAsUnknown.code,
+        code: error.code,
         requestId,
       }
       // Include retryAfterMs for rate-limit errors (AC-1)
-      if (typeof errorAsUnknown.retryAfterMs === 'number') {
-        body.retryAfterMs = errorAsUnknown.retryAfterMs
+      if (typeof error.retryAfterMs === 'number') {
+        body.retryAfterMs = error.retryAfterMs
       }
       if (orchestrationId) body.orchestrationId = orchestrationId
       return reply.status(statusCode).send(body)

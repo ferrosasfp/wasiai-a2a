@@ -23,6 +23,7 @@ import tasksRoutes from './routes/tasks.js'
 import dashboardRoutes from './routes/dashboard.js'
 import gaslessRoutes from './routes/gasless.js'
 import authRoutes from './routes/auth.js'
+import metricsRoutes from './routes/metrics.js'
 
 import { initAdapters, getChainConfig } from './adapters/registry.js'
 
@@ -85,6 +86,9 @@ await fastify.register(gaslessRoutes, { prefix: '/gasless' })
 
 // WKH-34: Auth routes (agent-signup, deposit, me, bind)
 await fastify.register(authRoutes, { prefix: '/auth' })
+
+// Prometheus metrics (Doctor 4: APM)
+await fastify.register(metricsRoutes, { prefix: '/metrics' })
 
 // Start server
 const port = parseInt(process.env.PORT ?? '3001')

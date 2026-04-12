@@ -151,9 +151,9 @@ vi.mock('../../adapters/registry.js', () => ({
 
 // ── Layer 4: Anthropic SDK ────────────────────────────────────
 vi.mock('@anthropic-ai/sdk', () => ({
-  default: vi.fn().mockImplementation(() => ({
-    messages: { create: vi.fn() },
-  })),
+  default: vi.fn().mockImplementation(function () {
+    return { messages: { create: vi.fn() } }
+  }),
 }))
 
 // ── Layer 5: Circuit breaker ──────────────────────────────────
@@ -285,7 +285,13 @@ export async function buildTestApp() {
 }
 
 // ── Re-export mocked services for test manipulation ───────────
-export { identityService } from '../../services/identity.js'
-export { budgetService } from '../../services/budget.js'
-export { eventService } from '../../services/event.js'
-export { discoveryService } from '../../services/discovery.js'
+// In vitest 4, re-exports of mocked modules lose spy identity.
+// Import them directly so tests get the actual mock objects.
+import { identityService as _id } from '../../services/identity.js'
+import { budgetService as _budget } from '../../services/budget.js'
+import { eventService as _event } from '../../services/event.js'
+import { discoveryService as _disc } from '../../services/discovery.js'
+export const identityService = _id
+export const budgetService = _budget
+export const eventService = _event
+export const discoveryService = _disc
