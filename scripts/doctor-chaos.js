@@ -217,6 +217,5 @@ export function handleSummary(data) {
     `  Verdict: ${crashCount === 0 ? '✅ PASS — server survived chaos' : '❌ FAIL — server crashed under chaos'}`,
     '═══════════════════════════════════════════════\n',
   ]
-  console.log(lines.join('\n'))
-  return { stdout: '' }
+  return { stdout: lines.join('\n') + '\n' }
 }

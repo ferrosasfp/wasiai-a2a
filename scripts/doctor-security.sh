@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Doctor 1: Security Scanner — npm audit + header checks + env checks
-set -euo pipefail
+set -uo pipefail
 
 BASE_URL="${1:-https://wasiai-a2a-production.up.railway.app}"
 PASS=0; FAIL=0; WARN=0

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Doctor 3: Dependency Audit — unused deps, licenses, outdated
-set -euo pipefail
+set -uo pipefail
 
 PASS=0; FAIL=0; WARN=0
 
