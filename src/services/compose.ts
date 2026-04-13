@@ -194,7 +194,7 @@ export const composeService = {
     const response = await fetch(agent.invokeUrl, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ input }),
+      body: JSON.stringify(input),
     });
     if (!response.ok)
       throw new Error(`Agent ${agent.slug} returned ${response.status}`);
