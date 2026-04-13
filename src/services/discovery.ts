@@ -43,6 +43,17 @@ export const discoveryService = {
     // Merge results
     let allAgents = results.flat();
 
+    // Blocklist: exclude known-broken or mock agents (env-configurable)
+    const blocklist = (process.env.AGENT_BLOCKLIST ?? '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    if (blocklist.length > 0) {
+      allAgents = allAgents.filter(
+        (a) => !blocklist.includes(a.slug.toLowerCase()),
+      );
+    }
+
     // Filter by status: default to active-only unless includeInactive=true (AC-1, AC-2)
     if (!query.includeInactive) {
       allAgents = allAgents.filter((a) => a.status === 'active');
