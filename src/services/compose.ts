@@ -154,12 +154,12 @@ export const composeService = {
   async resolveAgent(step: ComposeStep): Promise<Agent | null> {
     const agent = await discoveryService.getAgent(step.agent, step.registry);
     if (agent) return agent;
+    // Fallback: fetch all agents and match by slug directly
     const result = await discoveryService.discover({
-      query: step.agent,
-      limit: 1,
+      limit: 50,
       registry: step.registry,
     });
-    return result.agents[0] ?? null;
+    return result.agents.find((a) => a.slug === step.agent) ?? null;
   },
   async invokeAgent(
     agent: Agent,
