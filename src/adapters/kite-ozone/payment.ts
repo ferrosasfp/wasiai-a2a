@@ -23,21 +23,61 @@ import { kiteTestnet } from './chain.js';
 
 const KITE_SCHEME = 'exact' as const;
 const KITE_NETWORK = 'eip155:2368' as const;
-// PYUSD — the ONLY token on Kite testnet with transferWithAuthorization (EIP-3009)
-// Test USDT (0x0fF5...) does NOT support EIP-3009 and causes Pieverse 500 errors
-const KITE_PAYMENT_TOKEN =
-  '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9' as `0x${string}`;
 const KITE_MAX_TIMEOUT_SECONDS = 300 as const;
 const KITE_FACILITATOR_DEFAULT_URL = 'https://facilitator.pieverse.io';
 const KITE_FACILITATOR_ADDRESS =
   '0x12343e649e6b2b2b77649DFAb88f103c02F3C78b' as `0x${string}`;
 
-const EIP712_DOMAIN = {
-  name: 'Kite x402',
-  version: '1',
-  chainId: kiteTestnet.id,
-  verifyingContract: KITE_FACILITATOR_ADDRESS,
-} as const;
+// ── Defaults for env-driven configuration (CD-1: no hardcoded addresses in logic) ──
+const DEFAULT_PAYMENT_TOKEN =
+  '0x1b7425d288ea676FCBc65c29711fccF0B6D5c293' as `0x${string}`;
+const DEFAULT_EIP712_DOMAIN_NAME = 'Kite X402 USD';
+const DEFAULT_EIP712_DOMAIN_VERSION = '1';
+const DEFAULT_TOKEN_SYMBOL = 'KXUSD';
+
+// ── Lazy env-var readers (DT-2: read at call time, not module load) ──
+
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+let _warnedDefaultToken = false;
+
+function getPaymentToken(): `0x${string}` {
+  const token = process.env.X402_PAYMENT_TOKEN;
+  if (!token) {
+    if (!_warnedDefaultToken) {
+      console.warn(
+        `X402_PAYMENT_TOKEN not set — defaulting to KXUSD (${DEFAULT_PAYMENT_TOKEN})`,
+      );
+      _warnedDefaultToken = true;
+    }
+    return DEFAULT_PAYMENT_TOKEN;
+  }
+  if (!ADDRESS_RE.test(token)) {
+    if (!_warnedDefaultToken) {
+      console.warn(
+        `X402_PAYMENT_TOKEN has invalid format "${token}" — defaulting to KXUSD (${DEFAULT_PAYMENT_TOKEN})`,
+      );
+      _warnedDefaultToken = true;
+    }
+    return DEFAULT_PAYMENT_TOKEN;
+  }
+  return token as `0x${string}`;
+}
+
+function getEip712Domain() {
+  return {
+    name:
+      process.env.X402_EIP712_DOMAIN_NAME ?? DEFAULT_EIP712_DOMAIN_NAME,
+    version:
+      process.env.X402_EIP712_DOMAIN_VERSION ?? DEFAULT_EIP712_DOMAIN_VERSION,
+    chainId: kiteTestnet.id,
+    verifyingContract: KITE_FACILITATOR_ADDRESS,
+  } as const;
+}
+
+function getTokenSymbol(): string {
+  return process.env.X402_TOKEN_SYMBOL ?? DEFAULT_TOKEN_SYMBOL;
+}
+
 const EIP712_TYPES = {
   Authorization: [
     { name: 'from', type: 'address' },
@@ -70,9 +110,13 @@ function getWalletClient() {
 export class KiteOzonePaymentAdapter implements PaymentAdapter {
   readonly name = 'kite-ozone';
   readonly chainId = 2368;
-  readonly supportedTokens: TokenSpec[] = [
-    { symbol: 'PYUSD', address: KITE_PAYMENT_TOKEN, decimals: 18 },
-  ];
+
+  get supportedTokens(): TokenSpec[] {
+    const token = getPaymentToken();
+    return [
+      { symbol: getTokenSymbol(), address: token, decimals: 18 },
+    ];
+  }
 
   getScheme(): string {
     return KITE_SCHEME;
@@ -81,7 +125,7 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
     return KITE_NETWORK;
   }
   getToken(): `0x${string}` {
-    return KITE_PAYMENT_TOKEN;
+    return getPaymentToken();
   }
   getMaxTimeoutSeconds(): number {
     return KITE_MAX_TIMEOUT_SECONDS;
@@ -93,6 +137,7 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
   async verify(proof: X402Proof): Promise<VerifyResult> {
     const facilitatorUrl =
       process.env.KITE_FACILITATOR_URL ?? KITE_FACILITATOR_DEFAULT_URL;
+    const token = getPaymentToken();
     const body: PieverseVerifyRequest = {
       paymentPayload: {
         x402Version: 2,
@@ -109,7 +154,7 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
         network: KITE_NETWORK,
         maxAmountRequired: proof.authorization.value,
         payTo: proof.authorization.to,
-        asset: KITE_PAYMENT_TOKEN,
+        asset: token,
         extra: null,
       },
     };
@@ -136,6 +181,7 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
   async settle(req: SettleRequest): Promise<SettleResult> {
     const facilitatorUrl =
       process.env.KITE_FACILITATOR_URL ?? KITE_FACILITATOR_DEFAULT_URL;
+    const token = getPaymentToken();
     const body: PieverseSettleRequest = {
       paymentPayload: {
         x402Version: 2,
@@ -149,7 +195,7 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
         network: KITE_NETWORK,
         maxAmountRequired: req.authorization.value,
         payTo: req.authorization.to,
-        asset: KITE_PAYMENT_TOKEN,
+        asset: token,
         extra: null,
       },
     };
@@ -178,9 +224,10 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
   }
 
   async quote(_amountUsd: number): Promise<QuoteResult> {
+    const token = getPaymentToken();
     return {
       amountWei: '1000000000000000000',
-      token: { symbol: 'PYUSD', address: KITE_PAYMENT_TOKEN, decimals: 18 },
+      token: { symbol: getTokenSymbol(), address: token, decimals: 18 },
       facilitatorUrl:
         process.env.KITE_FACILITATOR_URL ?? KITE_FACILITATOR_DEFAULT_URL,
     };
@@ -200,9 +247,10 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
       validBefore: String(now + (opts.timeoutSeconds ?? 300)),
       nonce,
     };
+    const domain = getEip712Domain();
     const signature = await client.signTypedData({
       account,
-      domain: EIP712_DOMAIN,
+      domain,
       types: EIP712_TYPES,
       primaryType: 'Authorization',
       message: {
@@ -228,4 +276,5 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
 
 export function _resetWalletClient(): void {
   _walletClient = null;
+  _warnedDefaultToken = false;
 }
