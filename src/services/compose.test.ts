@@ -46,6 +46,8 @@ function makeAgent(o: Partial<Agent> = {}): Agent {
     registry: 'test-registry',
     invokeUrl: 'https://example.com/invoke',
     invocationNote: 'Use POST /compose or POST /orchestrate on the gateway.',
+    verified: false,
+    status: 'active',
     metadata: {},
     ...o,
   };

@@ -30,6 +30,8 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
           minReputation?: string;
           limit?: string;
           registry?: string;
+          verified?: string;
+          includeInactive?: string;
         };
       }>,
       reply: FastifyReply,
@@ -45,6 +47,8 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
           : undefined,
         limit: query.limit ? parseInt(query.limit, 10) : undefined,
         registry: query.registry,
+        verified: query.verified === 'true' ? true : undefined,
+        includeInactive: query.includeInactive === 'true' ? true : undefined,
       });
 
       return reply.send(result);
@@ -67,6 +71,8 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
           minReputation?: number;
           limit?: number;
           registry?: string;
+          verified?: boolean;
+          includeInactive?: boolean;
         };
       }>,
       reply: FastifyReply,
@@ -95,6 +101,8 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
           body.minReputation != null ? Number(body.minReputation) : undefined,
         limit: body.limit != null ? Number(body.limit) : undefined,
         registry: body.registry != null ? String(body.registry) : undefined,
+        verified: body.verified === true ? true : undefined,
+        includeInactive: body.includeInactive === true ? true : undefined,
       });
 
       return reply.send(result);

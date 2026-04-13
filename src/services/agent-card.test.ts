@@ -47,6 +47,8 @@ describe('agentCardService', () => {
       priceUsdc: 0.01,
       invokeUrl: 'https://example.com/invoke',
       invocationNote: 'Use POST /compose or POST /orchestrate on the gateway.',
+      verified: false,
+      status: 'active',
     };
 
     const registryConfig = {

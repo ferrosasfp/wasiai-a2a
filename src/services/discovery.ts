@@ -5,6 +5,7 @@
 import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
 import type {
   Agent,
+  AgentStatus,
   DiscoveryQuery,
   DiscoveryResult,
   RegistryConfig,
@@ -42,6 +43,16 @@ export const discoveryService = {
     // Merge results
     let allAgents = results.flat();
 
+    // Filter by status: default to active-only unless includeInactive=true (AC-1, AC-2)
+    if (!query.includeInactive) {
+      allAgents = allAgents.filter((a) => a.status === 'active');
+    }
+
+    // Filter by verified if requested (AC-3, AC-9: AND logic with status filter)
+    if (query.verified === true) {
+      allAgents = allAgents.filter((a) => a.verified === true);
+    }
+
     // Local post-fetch filters (upstream may not support all filter params)
     if (query.capabilities?.length) {
       const caps = query.capabilities.map((c) => c.toLowerCase());
@@ -65,8 +76,10 @@ export const discoveryService = {
       allAgents = allAgents.filter((a) => a.priceUsdc <= maxPrice);
     }
 
-    // Sort by reputation (desc) then by price (asc)
+    // Sort: verified-first (AC-7), then reputation (desc), then price (asc)
     allAgents.sort((a, b) => {
+      const verifiedDiff = Number(b.verified) - Number(a.verified);
+      if (verifiedDiff !== 0) return verifiedDiff;
       const repDiff = (b.reputation ?? 0) - (a.reputation ?? 0);
       if (repDiff !== 0) return repDiff;
       return a.priceUsdc - b.priceUsdc;
@@ -179,6 +192,10 @@ export const discoveryService = {
       reputation: Number(
         getNestedValue(raw, mapping.reputation ?? 'reputation') ?? undefined,
       ),
+      verified: Boolean(
+        getNestedValue(raw, mapping.verified ?? 'verified') ?? false,
+      ),
+      status: toAgentStatus(getNestedValue(raw, mapping.status ?? 'status')),
       registry: registry.name,
       invokeUrl,
       invocationNote:
@@ -228,6 +245,18 @@ function getNestedValue(obj: unknown, path: string): unknown {
     }
     return undefined;
   }, obj);
+}
+
+// Helper: Convert raw value to AgentStatus, defaulting to "active" (AC-6)
+const VALID_STATUSES: ReadonlySet<string> = new Set([
+  'active',
+  'inactive',
+  'unreachable',
+]);
+
+function toAgentStatus(value: unknown): AgentStatus {
+  const s = typeof value === 'string' ? value.toLowerCase() : '';
+  return VALID_STATUSES.has(s) ? (s as AgentStatus) : 'active';
 }
 
 // Helper: Convert value to array

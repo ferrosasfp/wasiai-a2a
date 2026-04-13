@@ -292,6 +292,8 @@ describe('E2E', () => {
             invokeUrl: 'https://example.com/invoke',
             invocationNote:
               'The invokeUrl is an internal reference. To invoke this agent, use POST /compose or POST /orchestrate on the WasiAI A2A gateway.',
+            verified: false,
+            status: 'active',
             metadata: {},
           },
         ],

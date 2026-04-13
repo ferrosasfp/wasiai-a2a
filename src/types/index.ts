@@ -62,6 +62,8 @@ export interface RegistrySchema {
   };
 }
 
+export type AgentStatus = 'active' | 'inactive' | 'unreachable';
+
 export interface AgentFieldMapping {
   id?: string;
   name?: string;
@@ -70,6 +72,8 @@ export interface AgentFieldMapping {
   capabilities?: string;
   price?: string;
   reputation?: string;
+  verified?: string;
+  status?: string;
 }
 
 export interface RegistryAuth {
@@ -94,6 +98,8 @@ export interface Agent {
   invokeUrl: string;
   /** Explains that invocation must go through POST /compose or POST /orchestrate on the gateway */
   invocationNote: string;
+  verified: boolean;
+  status: AgentStatus;
   metadata?: Record<string, unknown>;
 }
 
@@ -108,6 +114,8 @@ export interface DiscoveryQuery {
   minReputation?: number;
   limit?: number;
   registry?: string; // Filter to specific registry
+  verified?: boolean;
+  includeInactive?: boolean;
 }
 
 export interface DiscoveryResult {

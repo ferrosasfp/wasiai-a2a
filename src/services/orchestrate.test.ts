@@ -58,6 +58,8 @@ const mockAgents: Agent[] = [
     registry: 'wasiai',
     invokeUrl: 'https://example.com/invoke/summarizer-v1',
     invocationNote: 'Use POST /compose or POST /orchestrate on the gateway.',
+    verified: false,
+    status: 'active',
   },
   {
     id: 'agent-2',
@@ -70,6 +72,8 @@ const mockAgents: Agent[] = [
     registry: 'wasiai',
     invokeUrl: 'https://example.com/invoke/translator-v1',
     invocationNote: 'Use POST /compose or POST /orchestrate on the gateway.',
+    verified: false,
+    status: 'active',
   },
 ];
 
