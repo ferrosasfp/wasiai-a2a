@@ -69,14 +69,19 @@ async function llmPlan(
     return null;
   }
 
-  const agentList = agents.slice(0, MAX_AGENTS_IN_PROMPT).map((a) => ({
-    slug: a.slug,
-    registry: a.registry,
-    name: a.name,
-    description: a.description,
-    capabilities: a.capabilities,
-    priceUsdc: a.priceUsdc,
-  }));
+  const agentList = agents.slice(0, MAX_AGENTS_IN_PROMPT).map((a) => {
+    const meta = a.metadata as Record<string, unknown> | undefined;
+    return {
+      slug: a.slug,
+      registry: a.registry,
+      name: a.name,
+      description: a.description,
+      capabilities: a.capabilities,
+      priceUsdc: a.priceUsdc,
+      input_schema: meta?.input_schema ?? undefined,
+      example_input: meta?.example_input ?? undefined,
+    };
+  });
 
   const systemPrompt = [
     'You are an expert AI agent orchestrator. Given a user goal, a budget, and a list of available agents, select the optimal agents and generate an execution plan.',
@@ -84,7 +89,7 @@ async function llmPlan(
     `- Select 1 or more agents (max ${maxAgents}) that best accomplish the goal.`,
     '- Total cost of selected agents MUST NOT exceed the budget.',
     '- Order agents logically: if outputs of one feed into another, place the producer first.',
-    '- For each agent, generate a specific input object with relevant fields based on the goal and agent description.',
+    '- For each agent, generate the input object matching its input_schema. Use example_input as reference if available. Do NOT invent fields — only use fields defined in the schema.',
     '- If only one agent is needed, select just one.',
     '- Respond ONLY with valid JSON, no markdown.',
   ].join('\n');
