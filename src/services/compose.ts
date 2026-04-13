@@ -152,13 +152,13 @@ export const composeService = {
     };
   },
   async resolveAgent(step: ComposeStep): Promise<Agent | null> {
+    // Try with registry hint first, then without (LLM may pass wrong case)
     const agent = await discoveryService.getAgent(step.agent, step.registry);
     if (agent) return agent;
+    const agentNoRegistry = await discoveryService.getAgent(step.agent);
+    if (agentNoRegistry) return agentNoRegistry;
     // Fallback: fetch all agents and match by slug directly
-    const result = await discoveryService.discover({
-      limit: 50,
-      registry: step.registry,
-    });
+    const result = await discoveryService.discover({ limit: 50 });
     return result.agents.find((a) => a.slug === step.agent) ?? null;
   },
   async invokeAgent(
