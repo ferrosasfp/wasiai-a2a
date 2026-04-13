@@ -224,8 +224,10 @@ export const orchestrateService = {
     const { goal, budget, preferCapabilities, maxAgents = 5 } = request;
 
     // Step 1: Discover relevant agents
+    // Note: do NOT pass goal as query — the text filter is too strict for
+    // generic agents (e.g. "Bitcoin" won't match "BlexSignal Scanner").
+    // The LLM planner handles relevance matching instead.
     const discovered = await discoveryService.discover({
-      query: goal,
       capabilities: preferCapabilities,
       maxPrice: budget / maxAgents,
       limit: maxAgents * 2,
