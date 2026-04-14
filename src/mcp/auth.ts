@@ -103,8 +103,11 @@ export function createMcpAuthHandler(): preHandlerAsyncHookHandler {
   const expectedBuffers = hashes.map((h) => Buffer.from(h, 'hex'));
 
   return async (request: FastifyRequest, reply: FastifyReply) => {
-    // Accept token from X-MCP-Token (preferred) OR Authorization: Bearer <token>
-    // (required by Claude Managed Agent MCP client which only allows bearer auth).
+    // Accept token from (in order of preference):
+    //   1. X-MCP-Token header
+    //   2. Authorization: Bearer <token>
+    //   3. ?token=<token> query param (Claude Managed Agent fallback — its
+    //      MCP client schema does not accept custom headers or bearer auth)
     const mcpHeader = request.headers['x-mcp-token'];
     let token = typeof mcpHeader === 'string' ? mcpHeader : '';
     if (token.length === 0) {
@@ -112,6 +115,13 @@ export function createMcpAuthHandler(): preHandlerAsyncHookHandler {
       if (typeof authHeader === 'string') {
         const match = /^Bearer\s+(.+)$/i.exec(authHeader.trim());
         if (match) token = match[1].trim();
+      }
+    }
+    if (token.length === 0) {
+      const query = request.query;
+      if (query && typeof query === 'object' && 'token' in query) {
+        const raw = (query as Record<string, unknown>).token;
+        if (typeof raw === 'string') token = raw;
       }
     }
     if (token.length === 0) {

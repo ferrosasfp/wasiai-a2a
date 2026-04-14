@@ -170,6 +170,18 @@ describe('MCP auth — handler', () => {
     await app.close();
   });
 
+  it('accepts ?token=<value> query param as last-resort fallback', async () => {
+    process.env.MCP_TOKEN_HASH = sha256Hex('query-secret');
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mcp?token=query-secret',
+      payload: { jsonrpc: '2.0', method: 'tools/list', id: 1 },
+    });
+    expect(res.statusCode).toBe(200);
+    await app.close();
+  });
+
   it('AC-13: no-match returns 401 JSON-RPC', async () => {
     process.env.MCP_TOKEN_HASH = sha256Hex('correct');
     const app = await buildApp();
