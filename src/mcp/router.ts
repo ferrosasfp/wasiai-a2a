@@ -117,7 +117,25 @@ export async function dispatch(
 
   const method = req.method;
 
-  // 2. tools/list — AC-14.
+  // 2a. initialize — MCP spec handshake (required by clients like Claude Managed Agent).
+  if (method === 'initialize') {
+    return {
+      jsonrpc: '2.0',
+      id,
+      result: {
+        protocolVersion: '2024-11-05',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'wasiai', version: '1.0.0' },
+      },
+    };
+  }
+
+  // 2b. notifications/initialized — client acknowledgement, no response body required.
+  if (method === 'notifications/initialized') {
+    return { jsonrpc: '2.0', id, result: {} };
+  }
+
+  // 2c. tools/list — AC-14.
   if (method === 'tools/list') {
     return {
       jsonrpc: '2.0',
