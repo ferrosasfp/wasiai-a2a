@@ -105,19 +105,27 @@ export async function dispatch(
   if (!isRecord(req)) {
     return buildError(null, MCP_ERRORS.PARSE_ERROR, 'Parse error');
   }
-  const id = isValidId(req.id) ? req.id : null;
-  if (
-    req.jsonrpc !== '2.0' ||
-    typeof req.method !== 'string' ||
-    !('id' in req) ||
-    !isValidId(req.id)
-  ) {
+  if (req.jsonrpc !== '2.0' || typeof req.method !== 'string') {
+    const id = isValidId(req.id) ? req.id : null;
     return buildError(id, MCP_ERRORS.PARSE_ERROR, 'Parse error');
   }
 
   const method = req.method;
+  const hasId = 'id' in req && isValidId(req.id);
+  const id = hasId ? (req.id as string | number | null) : null;
 
-  // 2a. initialize — MCP spec handshake (required by clients like Claude Managed Agent).
+  // 2a. notifications/* — MCP spec: no response body required (no id).
+  //     Must be handled BEFORE the id-required check.
+  if (method.startsWith('notifications/')) {
+    return { jsonrpc: '2.0', id: null, result: {} };
+  }
+
+  // 2b. Every other method requires an id per JSON-RPC 2.0.
+  if (!hasId) {
+    return buildError(null, MCP_ERRORS.PARSE_ERROR, 'Parse error');
+  }
+
+  // 2c. initialize — MCP spec handshake (required by clients like Claude Managed Agent).
   if (method === 'initialize') {
     return {
       jsonrpc: '2.0',
@@ -128,11 +136,6 @@ export async function dispatch(
         serverInfo: { name: 'wasiai', version: '1.0.0' },
       },
     };
-  }
-
-  // 2b. notifications/initialized — client acknowledgement, no response body required.
-  if (method === 'notifications/initialized') {
-    return { jsonrpc: '2.0', id, result: {} };
   }
 
   // 2c. tools/list — AC-14.
