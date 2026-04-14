@@ -143,6 +143,8 @@ export interface ComposeRequest {
   steps: ComposeStep[];
   /** Max budget in USDC */
   maxBudget?: number;
+  /** Propagated to agent invocations as header `x-a2a-key` (WKH-MCP-X402) */
+  a2aKey?: string;
 }
 
 export interface ComposeResult {
@@ -202,6 +204,8 @@ export interface OrchestrateRequest {
   preferCapabilities?: string[];
   /** Max agents to use */
   maxAgents?: number;
+  /** Propagated downstream to compose/invokeAgent as header `x-a2a-key` (WKH-MCP-X402) */
+  a2aKey?: string;
 }
 
 export interface OrchestrateResult {

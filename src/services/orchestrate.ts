@@ -382,6 +382,7 @@ export const orchestrateService = {
     const pipeline = await composeService.compose({
       steps,
       maxBudget: budget,
+      a2aKey: request.a2aKey,
     });
 
     // Step 4: Calculate protocol fee (display only, not charged)

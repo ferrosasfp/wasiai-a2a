@@ -7,6 +7,7 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { renderMcpMetrics } from '../mcp/metrics.js';
 
 // ── Metric storage ───────────────────────────────────────────
 interface RouteStat {
@@ -136,6 +137,9 @@ const metricsRoutes: FastifyPluginAsync = async (fastify) => {
       lines.push('# HELP wasiai_memory_heap_used_bytes Heap used in bytes');
       lines.push('# TYPE wasiai_memory_heap_used_bytes gauge');
       lines.push(`wasiai_memory_heap_used_bytes ${mem.heapUsed}`);
+
+      // WKH-MCP-X402: append MCP tool metrics (AC-18).
+      lines.push(renderMcpMetrics());
 
       return reply
         .type('text/plain; version=0.0.4; charset=utf-8')

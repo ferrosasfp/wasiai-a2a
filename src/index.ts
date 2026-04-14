@@ -8,6 +8,7 @@
 import cors from '@fastify/cors';
 import Fastify from 'fastify';
 import { getChainConfig, initAdapters } from './adapters/registry.js';
+import mcpPlugin from './mcp/index.js';
 import { registerErrorBoundary } from './middleware/error-boundary.js';
 import { registerEventTracking } from './middleware/event-tracking.js';
 import { registerRateLimit } from './middleware/rate-limit.js';
@@ -93,6 +94,9 @@ await fastify.register(authRoutes, { prefix: '/auth' });
 
 // Prometheus metrics (Doctor 4: APM)
 await fastify.register(metricsRoutes, { prefix: '/metrics' });
+
+// WKH-MCP-X402: MCP Server plugin (CD-14: DESPUÉS de metricsRoutes, ANTES de server start)
+await fastify.register(mcpPlugin, { prefix: '/mcp' });
 
 // Start server
 const port = parseInt(process.env.PORT ?? '3001', 10);

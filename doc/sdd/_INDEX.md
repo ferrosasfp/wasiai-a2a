@@ -38,3 +38,4 @@
 | 039 | 2026-04-11 | Security Headers — X-Content-Type-Options + X-Frame-Options (WKH-QG-HEADERS) | patch | FAST | DONE | feat/039-security-headers |
 | 040 | 2026-04-12 | Discover verified+status — filtro activos por defecto (WKH-DISCOVER-VERIFIED) | feature | FAST+AR | DONE | main (779f93a) |
 | 041 | 2026-04-13 | Migrate x402 payment token from PYUSD to KXUSD (WKH-KXUSD) | config | FAST+AR | DONE | main |
+| 042 | 2026-04-13 | MCP Server x402 — Tools para Claude Managed Agent (WKH-MCP-X402) | feature | QUALITY | DONE | feat/042-mcp-server-x402 |

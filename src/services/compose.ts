@@ -35,7 +35,7 @@ function buildAuthHeaders(
 
 export const composeService = {
   async compose(request: ComposeRequest): Promise<ComposeResult> {
-    const { steps, maxBudget } = request;
+    const { steps, maxBudget, a2aKey } = request;
     const results: StepResult[] = [];
     let totalCost = 0;
     let totalLatency = 0;
@@ -67,7 +67,7 @@ export const composeService = {
           : step.input;
       const startTime = Date.now();
       try {
-        const { output, txHash } = await this.invokeAgent(agent, input);
+        const { output, txHash } = await this.invokeAgent(agent, input, a2aKey);
         const latencyMs = Date.now() - startTime;
         const result: StepResult = {
           agent,
@@ -164,6 +164,7 @@ export const composeService = {
   async invokeAgent(
     agent: Agent,
     input: Record<string, unknown>,
+    a2aKey?: string,
   ): Promise<{ output: unknown; txHash?: string }> {
     const registries = await registryService.getEnabled();
     const registry = registries.find(
@@ -175,6 +176,9 @@ export const composeService = {
       'Content-Type': 'application/json',
       ...authHeaders,
     };
+    if (a2aKey) {
+      headers['x-a2a-key'] = a2aKey;
+    }
     if (agent.priceUsdc > 0) {
       const payTo = agent.metadata?.payTo as string | undefined;
       if (!payTo)
