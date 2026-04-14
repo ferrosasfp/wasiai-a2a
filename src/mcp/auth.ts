@@ -103,8 +103,17 @@ export function createMcpAuthHandler(): preHandlerAsyncHookHandler {
   const expectedBuffers = hashes.map((h) => Buffer.from(h, 'hex'));
 
   return async (request: FastifyRequest, reply: FastifyReply) => {
-    const raw = request.headers['x-mcp-token'];
-    const token = typeof raw === 'string' ? raw : '';
+    // Accept token from X-MCP-Token (preferred) OR Authorization: Bearer <token>
+    // (required by Claude Managed Agent MCP client which only allows bearer auth).
+    const mcpHeader = request.headers['x-mcp-token'];
+    let token = typeof mcpHeader === 'string' ? mcpHeader : '';
+    if (token.length === 0) {
+      const authHeader = request.headers.authorization;
+      if (typeof authHeader === 'string') {
+        const match = /^Bearer\s+(.+)$/i.exec(authHeader.trim());
+        if (match) token = match[1].trim();
+      }
+    }
     if (token.length === 0) {
       unauthorizedResponse(reply);
       return;
