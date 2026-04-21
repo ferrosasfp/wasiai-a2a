@@ -87,4 +87,26 @@ LLM inference para marketplaces sin A2A.
 
 ---
 
-*Última actualización: 2026-03-31*
+## Post-Hackathon
+
+### E10: Multi-Rail Payment Adapters
+Extender WasiAI-a2a como gateway neutral multi-rail (no sólo Kite x402).
+
+- [ ] HU-090: Adapter `tempo-mpp` — integrar Machine Payments Protocol (Stripe + Paradigm, mainnet live 2026-03-18)
+  - Co-existe con `kite-ozone` bajo `src/adapters/`
+  - MPP revive HTTP 402 para pagos machine-to-machine (open-source spec)
+  - Validadores anchor: Visa, Stripe, Zodia Custody
+  - Gas en stablecoins USD, finalidad ~0.6s, EVM-friendly
+  - Docs: https://docs.tempo.xyz, https://stripe.com/blog/machine-payments-protocol
+  - **Valor**: posiciona a WasiAI como "A2A gateway neutral" (Kite + Tempo + futuros), no wrapper de un solo rail
+- [ ] HU-091: Selector de rail por policy (cost, latency, geography)
+- [ ] HU-092: Unificar chain de pago (hoy a2a orquesta en Kite pero agentes wasiai-v2 cobran USDC en Avalanche — deuda de negocio)
+
+### E11: Technical Debt (saved from hackathon)
+- [ ] HU-100: `AGENT_BLOCKLIST` env var → tabla DB con razón + expiración
+- [ ] HU-101: Compose registry case-sensitivity fix
+- [ ] HU-102: Documentar reproducción E2E en README
+
+---
+
+*Última actualización: 2026-04-21*

@@ -32,3 +32,10 @@ pnpm-debug.log*
 # Test
 coverage/
 .nyc_output/
+
+# Supabase CLI cache (local)
+supabase/.temp/
+
+# Claude Code local settings (keep .claude/agents/ tracked, only settings.json is local)
+.claude/settings.json
+.claude/settings.local.json
