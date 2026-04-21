@@ -23,3 +23,26 @@ Registro de errores cometidos durante F3 y sus fixes, para proteger HUs futuras.
   aplicación real a QA/DONE.
 
 ---
+
+## [2026-04-21 02:04] Wave 2 — Mismatch entre mock chain y chain real de supabase
+
+- **Error**: FT-12 falla con `Cannot destructure property 'paymentRequest'
+  of 'signResult' as it is undefined` en lugar de retornar `already-charged`.
+- **Causa raíz**: el test helper `stubInsert` estaba encadenando
+  `.select().maybeSingle()` después del `.insert()`, pero la implementación
+  real de `chargeProtocolFee` usa `await supabase.from(...).insert({...})`
+  directamente (el builder de Supabase retorna la promise desde el insert).
+  Cuando `.select` no se llama, el mockFrom de `insert` nunca dispara; el
+  siguiente `from()` (supuestamente UPDATE) recibe el chain de `.select` y el
+  flujo se rompe más abajo (signResult undefined porque sign no se llama a
+  tiempo).
+- **Fix**: alinear el stub con la cadena real — `stubInsert` ahora retorna
+  `{ insert: () => Promise<{error}> }`. Regla general: **el mock del chain
+  de Supabase debe replicar EXACTAMENTE la cadena del impl, no una más
+  larga, no una más corta**.
+- **Aplicar en**: cualquier test que mockee Supabase con chain builders.
+  Regla: leer el impl antes de escribir el stub; si el impl hace `.insert().select().single()`,
+  el stub debe hacer lo mismo. Si el impl hace `.insert()` a secas, el stub
+  también.
+
+---

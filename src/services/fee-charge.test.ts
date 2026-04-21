@@ -56,15 +56,11 @@ function stubSelect(result: { data: unknown; error?: unknown }) {
 
 /**
  * Stub para el INSERT (pending). Pattern:
- *   supabase.from('a2a_protocol_fees').insert({...}).select('orchestration_id').maybeSingle()
+ *   supabase.from('a2a_protocol_fees').insert({...})  → Promise<{error}>
  */
-function stubInsert(result: { data: unknown; error?: unknown }) {
+function stubInsert(result: { error?: unknown }) {
   mockFrom.mockImplementationOnce(() => ({
-    insert: mockInsert.mockImplementationOnce(() => ({
-      select: mockSelect.mockImplementationOnce(() => ({
-        maybeSingle: mockMaybeSingle.mockResolvedValueOnce(result),
-      })),
-    })),
+    insert: mockInsert.mockImplementationOnce(() => Promise.resolve(result)),
   }));
 }
 
@@ -183,7 +179,7 @@ describe('getProtocolFeeRate', () => {
 
 // ─── chargeProtocolFee (FT-9..FT-16 — implementado en W2) ───
 
-describe.skip('chargeProtocolFee (W2 — stub in W1)', () => {
+describe('chargeProtocolFee', () => {
   const originalWallet = process.env.WASIAI_PROTOCOL_FEE_WALLET;
 
   beforeEach(() => {
@@ -234,7 +230,7 @@ describe.skip('chargeProtocolFee (W2 — stub in W1)', () => {
     // 1. select previo: no existe
     stubSelect({ data: null });
     // 2. insert pending: OK
-    stubInsert({ data: { orchestration_id: 'id-10' } });
+    stubInsert({});
     // 3. update charged: OK
     stubUpdate({});
 
@@ -296,7 +292,7 @@ describe.skip('chargeProtocolFee (W2 — stub in W1)', () => {
 
     stubSelect({ data: null });
     // Postgres unique_violation 23505 al insertar pending
-    stubInsert({ data: null, error: { code: '23505', message: 'dup' } });
+    stubInsert({ error: { code: '23505', message: 'dup' } });
 
     const result = await chargeProtocolFee({
       orchestrationId: 'id-12',
@@ -317,7 +313,7 @@ describe.skip('chargeProtocolFee (W2 — stub in W1)', () => {
       '0x1111111111111111111111111111111111111111';
 
     stubSelect({ data: null });
-    stubInsert({ data: { orchestration_id: 'id-13' } });
+    stubInsert({});
     stubUpdate({});
 
     mockSign.mockResolvedValueOnce({
@@ -354,7 +350,7 @@ describe.skip('chargeProtocolFee (W2 — stub in W1)', () => {
       '0x1111111111111111111111111111111111111111';
 
     stubSelect({ data: null });
-    stubInsert({ data: { orchestration_id: 'id-14' } });
+    stubInsert({});
     stubUpdate({});
 
     mockSign.mockRejectedValueOnce(new Error('sig failure'));
@@ -400,7 +396,7 @@ describe.skip('chargeProtocolFee (W2 — stub in W1)', () => {
       '0x1111111111111111111111111111111111111111';
 
     stubSelect({ data: null });
-    stubInsert({ data: { orchestration_id: 'id-16' } });
+    stubInsert({});
     stubUpdate({});
 
     mockSign.mockResolvedValueOnce({
