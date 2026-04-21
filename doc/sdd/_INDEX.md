@@ -40,4 +40,5 @@
 | 041 | 2026-04-13 | Migrate x402 payment token from PYUSD to KXUSD (WKH-KXUSD) | config | FAST+AR | DONE | main |
 | 042 | 2026-04-13 | MCP Server x402 — Tools para Claude Managed Agent (WKH-MCP-X402) | feature | QUALITY | DONE | feat/042-mcp-server-x402 |
 | 043 | 2026-04-20 | Security Hardening — HSTS + CORS restrictivo + requireAuth en /registries (WKH-SEC-01) | security | QUALITY | DONE | feat/043-wkh-sec-01-hardening |
+| 044 | 2026-04-21 | 1% Protocol Fee Real Charge — deduct from budget + transfer to Kite wallet (WKH-44) | feature | QUALITY | DONE | feat/044-wkh-44-protocol-fee-real-charge |
 | 046 | 2026-04-20 | Marketplace Integration Guide — Auth + CORS policy for 3rd-party consumers (WKH-46) | doc | FAST | DONE | feat/046-wkh-46-integration-guide |

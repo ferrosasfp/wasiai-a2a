@@ -37,11 +37,32 @@ vi.mock('./event.js', () => ({
   },
 }));
 
+// WKH-44: mock fee-charge. Preservamos `ProtocolFeeError` (es una clase
+// real que el SUT usa en `instanceof`) y reemplazamos las funciones.
+vi.mock('./fee-charge.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('./fee-charge.js')>('./fee-charge.js');
+  return {
+    ...actual,
+    chargeProtocolFee: vi.fn().mockResolvedValue({
+      status: 'skipped',
+      feeUsdc: 0,
+      reason: 'WALLET_UNSET',
+    }),
+    getProtocolFeeRate: vi.fn().mockReturnValue(0.01),
+  };
+});
+
 // ─── Imports (after mocks) ───────────────────────────────────
 
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
+import {
+  chargeProtocolFee,
+  getProtocolFeeRate,
+  ProtocolFeeError,
+} from './fee-charge.js';
 import { orchestrateService } from './orchestrate.js';
 
 // ─── Fixtures ────────────────────────────────────────────────
@@ -172,7 +193,9 @@ describe('orchestrateService', () => {
     );
 
     expect(result.orchestrationId).toBe('orch-id-abc');
-    expect(result.protocolFeeUsdc).toBeCloseTo(0.5 * 0.01, 6); // 1% of 0.50
+    // WKH-44: fee ahora se calcula sobre el budget (5.0), no sobre el
+    // totalCostUsdc del pipeline. Budget 5.0 * 0.01 = 0.05.
+    expect(result.protocolFeeUsdc).toBeCloseTo(5.0 * 0.01, 6);
   });
 
   // T-3: No agents found returns answer:null
@@ -272,8 +295,10 @@ describe('orchestrateService', () => {
     );
   });
 
-  // T-7: protocolFeeUsdc = totalCostUsdc * 0.01
-  it('T-7: protocolFeeUsdc is 1% of totalCostUsdc', async () => {
+  // T-7: protocolFeeUsdc = budget * 0.01
+  // WKH-44: semántica cambiada — antes era totalCostUsdc * 0.01, ahora
+  // es budget * rate (el fee se calcula UP-FRONT sobre el budget).
+  it('T-7: protocolFeeUsdc is 1% of budget', async () => {
     const customCompose: ComposeResult = {
       ...mockComposeResult,
       totalCostUsdc: 10.0,
@@ -299,7 +324,8 @@ describe('orchestrateService', () => {
       'orch-fee',
     );
 
-    expect(result.protocolFeeUsdc).toBeCloseTo(0.1, 6); // 1% of 10.0
+    // WKH-44: budget 20 * 0.01 = 0.2 (antes era 0.1 sobre totalCost=10)
+    expect(result.protocolFeeUsdc).toBeCloseTo(0.2, 6);
   });
   // T-8: LLM returns malformed JSON -> fallback (AR fix M-1)
   it('T-8: LLM malformed JSON triggers fallback', async () => {
@@ -359,5 +385,221 @@ describe('orchestrateService', () => {
     expect(result.answer).toBeDefined();
     // LLM should NOT have been called
     expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  // ─── WKH-44 ─ Protocol Fee Real Charge ──────────────────
+
+  function setLlmOneAgent(): void {
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'wasiai',
+            input: { q: 'x' },
+            reasoning: 'ok',
+          },
+        ],
+        reasoning: 'ok',
+      }),
+    );
+  }
+
+  // T-11 (AC-1): compose receives maxBudget = budget - feeUsdc
+  it('T-11: compose receives maxBudget = budget - feeUsdc', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01);
+    setLlmOneAgent();
+
+    await orchestrateService.orchestrate(
+      { goal: 'maxBudget test', budget: 1.0 },
+      'orch-maxbudget',
+    );
+
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
+    // budget 1.0 - fee 0.01 = 0.99
+    expect(composeCall.maxBudget).toBeCloseTo(0.99, 6);
+  });
+
+  // T-12 (AC-2): chargeProtocolFee invoked when pipeline.success=true
+  it('T-12: chargeProtocolFee invoked when pipeline.success=true', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01);
+    vi.mocked(chargeProtocolFee).mockResolvedValueOnce({
+      status: 'charged',
+      feeUsdc: 0.01,
+      txHash: '0xFEE',
+    });
+    setLlmOneAgent();
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'happy path', budget: 1.0 },
+      'orch-12',
+    );
+
+    expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledWith({
+      orchestrationId: 'orch-12',
+      budgetUsdc: 1.0,
+      feeRate: 0.01,
+    });
+    expect(result.feeChargeTxHash).toBe('0xFEE');
+    expect(result.feeChargeError).toBeUndefined();
+  });
+
+  // T-13 (AC-2): chargeProtocolFee NOT invoked when pipeline.success=false
+  it('T-13: chargeProtocolFee NOT invoked when pipeline.success=false', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01);
+    vi.mocked(composeService.compose).mockResolvedValueOnce({
+      ...mockComposeResult,
+      success: false,
+    });
+    setLlmOneAgent();
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'compose failed', budget: 1.0 },
+      'orch-13',
+    );
+
+    expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
+    expect(result.feeChargeError).toBeUndefined();
+    expect(result.feeChargeTxHash).toBeUndefined();
+  });
+
+  // T-14 (AC-5): wallet unset → skipped → no feeChargeError/feeChargeTxHash
+  it('T-14: skipped status leaves feeChargeError/TxHash undefined', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01);
+    vi.mocked(chargeProtocolFee).mockResolvedValueOnce({
+      status: 'skipped',
+      feeUsdc: 0.01,
+      reason: 'WALLET_UNSET',
+    });
+    setLlmOneAgent();
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'wallet unset', budget: 1.0 },
+      'orch-14',
+    );
+
+    expect(result.feeChargeError).toBeUndefined();
+    expect(result.feeChargeTxHash).toBeUndefined();
+    expect(result.protocolFeeUsdc).toBeCloseTo(0.01, 6);
+  });
+
+  // T-15 (AC-6): fee charge fails → feeChargeError set, HTTP 200 (no throw)
+  it('T-15: feeChargeError present + no throw when fee charge fails', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01);
+    vi.mocked(chargeProtocolFee).mockResolvedValueOnce({
+      status: 'failed',
+      feeUsdc: 0.01,
+      error: 'net',
+    });
+    setLlmOneAgent();
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'fee fails', budget: 1.0 },
+      'orch-15',
+    );
+
+    expect(result.feeChargeError).toBe('net');
+    expect(result.feeChargeTxHash).toBeUndefined();
+    // answer still defined (HTTP 200 semantically)
+    expect(result.answer).toBeDefined();
+  });
+
+  // T-16 (AC-7): throws ProtocolFeeError when feeUsdc > budget (before discovery)
+  it('T-16: throws ProtocolFeeError 400 when feeUsdc > budget', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(1.5); // corrupt rate
+
+    await expect(
+      orchestrateService.orchestrate(
+        { goal: 'broken rate', budget: 1.0 },
+        'orch-16',
+      ),
+    ).rejects.toBeInstanceOf(ProtocolFeeError);
+
+    // Discovery NOT called — safety guard aborts early.
+    expect(vi.mocked(discoveryService.discover)).not.toHaveBeenCalled();
+  });
+
+  // T-17 (AC-8): second call with same orchestrationId returns already-charged
+  it('T-17: already-charged second call populates feeChargeTxHash', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01);
+    vi.mocked(chargeProtocolFee)
+      .mockResolvedValueOnce({
+        status: 'charged',
+        feeUsdc: 0.01,
+        txHash: '0xFIRST',
+      })
+      .mockResolvedValueOnce({
+        status: 'already-charged',
+        feeUsdc: 0.01,
+        txHash: '0xFIRST',
+      });
+    setLlmOneAgent();
+
+    const r1 = await orchestrateService.orchestrate(
+      { goal: 'first', budget: 1.0 },
+      'same-id',
+    );
+    setLlmOneAgent();
+    const r2 = await orchestrateService.orchestrate(
+      { goal: 'second', budget: 1.0 },
+      'same-id',
+    );
+
+    expect(r1.feeChargeTxHash).toBe('0xFIRST');
+    expect(r2.feeChargeTxHash).toBe('0xFIRST');
+    expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledTimes(2);
+  });
+
+  // T-18 (AC-10): rate change reflected in next orchestrate call (no cache)
+  it('T-18: PROTOCOL_FEE_RATE change reflected in next call', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValueOnce(0.01);
+    setLlmOneAgent();
+    const r1 = await orchestrateService.orchestrate(
+      { goal: 'first rate', budget: 1.0 },
+      'orch-18a',
+    );
+    expect(r1.protocolFeeUsdc).toBeCloseTo(0.01, 6);
+
+    vi.mocked(getProtocolFeeRate).mockReturnValueOnce(0.02);
+    setLlmOneAgent();
+    const r2 = await orchestrateService.orchestrate(
+      { goal: 'second rate', budget: 1.0 },
+      'orch-18b',
+    );
+    expect(r2.protocolFeeUsdc).toBeCloseTo(0.02, 6);
+  });
+
+  // T-19 (AC-9): fee calculated with default 0.01 when env unset
+  it('T-19: fee uses default 0.01 when rate unset', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01); // sim default
+    setLlmOneAgent();
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'default rate', budget: 10.0 },
+      'orch-19',
+    );
+
+    expect(result.protocolFeeUsdc).toBeCloseTo(0.1, 6);
+  });
+
+  // T-20 (CD-D): early-return no-agents keeps protocolFeeUsdc=0
+  it('T-20: early-return no-agents returns protocolFeeUsdc=0', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01);
+    vi.mocked(discoveryService.discover).mockResolvedValueOnce({
+      agents: [],
+      total: 0,
+      registries: [],
+    });
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'no agents', budget: 1.0 },
+      'orch-20',
+    );
+
+    expect(result.answer).toBeNull();
+    expect(result.protocolFeeUsdc).toBe(0);
+    // chargeProtocolFee NOT called (early return before compose).
+    expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
   });
 });
