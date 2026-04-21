@@ -3,6 +3,7 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import { registryService } from '../services/registry.js';
 import type { RegistryAuth, RegistrySchema } from '../types/index.js';
 
@@ -44,22 +45,26 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
    * POST /registries
    * Register a new marketplace
    */
-  fastify.post(
+  fastify.post<{
+    Body: {
+      name: string;
+      discoveryEndpoint: string;
+      invokeEndpoint: string;
+      agentEndpoint?: string;
+      schema: RegistrySchema;
+      auth?: RegistryAuth;
+      enabled?: boolean;
+    };
+  }>(
     '/',
-    async (
-      request: FastifyRequest<{
-        Body: {
-          name: string;
-          discoveryEndpoint: string;
-          invokeEndpoint: string;
-          agentEndpoint?: string;
-          schema: RegistrySchema;
-          auth?: RegistryAuth;
-          enabled?: boolean;
-        };
-      }>,
-      reply: FastifyReply,
-    ) => {
+    {
+      preHandler: [
+        ...requirePaymentOrA2AKey({
+          description: 'WasiAI Registry Management — Register marketplace',
+        }),
+      ],
+    },
+    async (request, reply: FastifyReply) => {
       try {
         const body = request.body;
 
@@ -99,15 +104,19 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
    * PATCH /registries/:id
    * Update a registry
    */
-  fastify.patch(
+  fastify.patch<{
+    Params: { id: string };
+    Body: Record<string, unknown>;
+  }>(
     '/:id',
-    async (
-      request: FastifyRequest<{
-        Params: { id: string };
-        Body: Record<string, unknown>;
-      }>,
-      reply: FastifyReply,
-    ) => {
+    {
+      preHandler: [
+        ...requirePaymentOrA2AKey({
+          description: 'WasiAI Registry Management — Update marketplace',
+        }),
+      ],
+    },
+    async (request, reply: FastifyReply) => {
       try {
         const { id } = request.params;
         const body = request.body;
@@ -126,12 +135,16 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
    * DELETE /registries/:id
    * Delete a registry
    */
-  fastify.delete(
+  fastify.delete<{ Params: { id: string } }>(
     '/:id',
-    async (
-      request: FastifyRequest<{ Params: { id: string } }>,
-      reply: FastifyReply,
-    ) => {
+    {
+      preHandler: [
+        ...requirePaymentOrA2AKey({
+          description: 'WasiAI Registry Management — Delete marketplace',
+        }),
+      ],
+    },
+    async (request, reply: FastifyReply) => {
       try {
         const { id } = request.params;
         const deleted = await registryService.delete(id);
