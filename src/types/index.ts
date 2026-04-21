@@ -216,6 +216,10 @@ export interface OrchestrateResult {
   consideredAgents: Agent[];
   protocolFeeUsdc: number;
   attestationTxHash?: string;
+  /** WKH-44: error string propagado cuando el fee charge best-effort falla. */
+  feeChargeError?: string;
+  /** WKH-44: tx hash del transfer EIP-712 del protocol fee (si tuvo éxito). */
+  feeChargeTxHash?: string;
 }
 
 // ============================================================
