@@ -19,11 +19,17 @@ import type {
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
+import {
+  chargeProtocolFee,
+  getProtocolFeeRate,
+  ProtocolFeeError,
+} from './fee-charge.js';
 
 const MODEL = 'claude-sonnet-4-20250514';
 const LLM_TIMEOUT_MS = 30_000;
 const MAX_AGENTS_IN_PROMPT = 10;
-const PROTOCOL_FEE_RATE = 0.01;
+// WKH-44 (CD-G): el PROTOCOL_FEE_RATE literal fue eliminado. Ahora se lee
+// por request desde process.env vía getProtocolFeeRate() en ./fee-charge.ts.
 const PRE_COMPOSE_TIMEOUT_MS = 90_000;
 
 // ─── LLM Planning ───────────────────────────────────────────
@@ -228,6 +234,21 @@ export const orchestrateService = {
     const startTime = Date.now();
     const { goal, budget, preferCapabilities, maxAgents = 5 } = request;
 
+    // WKH-44: leer el rate por request (CD-G) y calcular el fee sobre el
+    // budget ANTES de cualquier otro trabajo. Esto garantiza que:
+    //   (a) AC-7 — si rate corrupto hace feeUsdc > budget, abortamos antes
+    //       de gastar tiempo en discovery/LLM (safety guard → HTTP 400).
+    //   (b) AC-1 — `maxBudget` que ve compose se deduce del fee.
+    //   (c) AC-3 — el protocolFeeUsdc reportado en el result es el fee real
+    //       aplicable al budget (no un cálculo sobre el costo ya gastado).
+    const feeRate = getProtocolFeeRate();
+    const feeUsdc = Number((budget * feeRate).toFixed(6));
+    if (feeUsdc > budget) {
+      throw new ProtocolFeeError(
+        `Protocol fee (${feeUsdc}) exceeds budget (${budget}) — check PROTOCOL_FEE_RATE env var.`,
+      );
+    }
+
     // Step 1: Discover relevant agents
     // Note: do NOT pass goal as query — the text filter is too strict for
     // generic agents (e.g. "Bitcoin" won't match "BlexSignal Scanner").
@@ -378,17 +399,40 @@ export const orchestrateService = {
       );
     }
 
-    // Step 3: Execute pipeline
+    // Step 3: Execute pipeline. WKH-44 (AC-1): maxBudget deducido del fee.
     const pipeline = await composeService.compose({
       steps,
-      maxBudget: budget,
+      maxBudget: budget - feeUsdc,
       a2aKey: request.a2aKey,
     });
 
-    // Step 4: Calculate protocol fee (display only, not charged)
-    const protocolFeeUsdc = Number(
-      (pipeline.totalCostUsdc * PROTOCOL_FEE_RATE).toFixed(6),
-    );
+    // WKH-44 (AC-3): el fee ya fue calculado al inicio con `budget * feeRate`.
+    // `protocolFeeUsdc` expuesto en el result refleja ese valor (no el
+    // totalCostUsdc del pipeline como era antes).
+    const protocolFeeUsdc = feeUsdc;
+
+    // Step 4: WKH-44 — best-effort transfer del fee post-compose si el
+    // pipeline ejecutó OK. Cualquier fallo queda en `feeChargeError` y NO
+    // rompe la respuesta 200 (CD-4).
+    let feeChargeError: string | undefined;
+    let feeChargeTxHash: string | undefined;
+    if (pipeline.success) {
+      const feeResult = await chargeProtocolFee({
+        orchestrationId,
+        budgetUsdc: budget,
+        feeRate,
+      });
+      if (feeResult.status === 'failed') {
+        feeChargeError = feeResult.error;
+        console.error('[Orchestrate] fee charge failed:', feeResult.error);
+      } else if (
+        feeResult.status === 'charged' ||
+        feeResult.status === 'already-charged'
+      ) {
+        feeChargeTxHash = feeResult.txHash;
+      }
+      // 'skipped' → no error, no txHash → ambos undefined (wallet unset).
+    }
 
     const totalLatencyMs = Date.now() - startTime;
 
@@ -418,6 +462,9 @@ export const orchestrateService = {
       pipeline,
       consideredAgents: discovered.agents,
       protocolFeeUsdc,
+      // WKH-44: spread condicional — solo aparecen en el body si hay valor.
+      ...(feeChargeError !== undefined && { feeChargeError }),
+      ...(feeChargeTxHash !== undefined && { feeChargeTxHash }),
     };
   },
 };
