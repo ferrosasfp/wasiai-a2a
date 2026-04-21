@@ -47,4 +47,15 @@ describe('security-headers middleware', () => {
     expect(response.headers['x-content-type-options']).toBe('nosniff');
     expect(response.headers['x-frame-options']).toBe('DENY');
   });
+
+  it('WKH-SEC-01 AC-3: response includes Strict-Transport-Security header', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/health',
+    });
+
+    expect(response.headers['strict-transport-security']).toBe(
+      'max-age=31536000; includeSubDomains; preload',
+    );
+  });
 });

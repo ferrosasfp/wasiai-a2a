@@ -5,7 +5,7 @@
  * Supports multiple marketplace registries via configuration.
  */
 
-import cors from '@fastify/cors';
+import cors, { type FastifyCorsOptions } from '@fastify/cors';
 import Fastify from 'fastify';
 import { getChainConfig, initAdapters } from './adapters/registry.js';
 import mcpPlugin from './mcp/index.js';
@@ -32,8 +32,30 @@ await initAdapters();
 
 const fastify = Fastify({ logger: true, genReqId });
 
-// CORS
-await fastify.register(cors, { origin: '*' });
+// CORS — env-aware (WKH-SEC-01 AC-4/AC-5/AC-6)
+const isProduction = process.env.NODE_ENV === 'production';
+const originsEnv = process.env.CORS_ALLOWED_ORIGINS;
+
+let corsOptions: FastifyCorsOptions;
+if (!isProduction) {
+  corsOptions = { origin: '*' };
+} else {
+  const origins = (originsEnv ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  if (origins.length > 0) {
+    corsOptions = { origin: origins };
+  } else {
+    fastify.log.warn(
+      'CORS_ALLOWED_ORIGINS not set in production — blocking all cross-origin requests',
+    );
+    corsOptions = { origin: false };
+  }
+}
+
+await fastify.register(cors, corsOptions);
 
 // Resilience middleware (order matters: request-id -> error boundary -> rate limit)
 registerRequestIdHook(fastify);
