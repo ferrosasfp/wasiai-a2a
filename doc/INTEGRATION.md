@@ -193,7 +193,7 @@ x402 lets a client pay per request with a single EIP-712 signature — no pre-fu
 ### Asset and network
 
 - **Network:** Kite Ozone testnet (chain id `2368`)
-- **Asset:** `KXUSD` (EIP-3009 compliant), contract `0x1b7425d288ea676FCBc65c29711fccF0B6D5c293`
+- **Asset:** `PYUSD` (EIP-3009 compliant), contract `0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9`
 - **Facilitator:** Pieverse, verifier contract `0x12343e649e6b2b2b77649DFAb88f103c02F3C78b`
 
 ### Cycle
@@ -210,7 +210,7 @@ x402 lets a client pay per request with a single EIP-712 signature — no pre-fu
           "network": "kite-ozone-testnet",
           "maxAmountRequired": "1000000000000000000",
           "payTo": "0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba",
-          "asset": "0x1b7425d288ea676FCBc65c29711fccF0B6D5c293",
+          "asset": "0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9",
           "maxTimeoutSeconds": 300,
           "merchantName": "WasiAI",
           "mimeType": "application/json",
@@ -232,7 +232,7 @@ x402 lets a client pay per request with a single EIP-712 signature — no pre-fu
     { "goal": "...", "budget": 0.10 }
     ```
 
-4. **Gateway verifies + executes.** The gateway asks Pieverse to verify the signature, settles the KXUSD transfer on-chain, then executes the request. The response carries the business result; on failure the gateway returns the appropriate HTTP code and does not settle.
+4. **Gateway verifies + executes.** The gateway asks Pieverse to verify the signature, settles the PYUSD transfer on-chain, then executes the request. The response carries the business result; on failure the gateway returns the appropriate HTTP code and does not settle.
 
 A complete, runnable reference implementation lives in [`scripts/demo-x402.ts`](../scripts/demo-x402.ts). It uses `viem` to sign and targets the production gateway; point it at your own base URL by passing it as the first argument.
 

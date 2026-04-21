@@ -28,7 +28,7 @@ import {
 } from '../../adapters/kite-ozone/payment.js';
 import type { PaymentAdapter } from '../../adapters/types.js';
 
-const KXUSD_DEFAULT = '0x1b7425d288ea676FCBc65c29711fccF0B6D5c293';
+const PYUSD_DEFAULT = '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9';
 
 describe('KiteOzonePaymentAdapter', () => {
   let adapter: PaymentAdapter;
@@ -40,7 +40,7 @@ describe('KiteOzonePaymentAdapter', () => {
     process.env.OPERATOR_PRIVATE_KEY =
       '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
     // Set token env var to suppress console.warn in tests
-    process.env.X402_PAYMENT_TOKEN = KXUSD_DEFAULT;
+    process.env.X402_PAYMENT_TOKEN = PYUSD_DEFAULT;
   });
 
   afterEach(() => {
@@ -58,10 +58,10 @@ describe('KiteOzonePaymentAdapter', () => {
     expect(adapter.chainId).toBe(2368);
   });
 
-  it('has supportedTokens with KXUSD by default', () => {
+  it('has supportedTokens with PYUSD by default', () => {
     expect(adapter.supportedTokens).toHaveLength(1);
-    expect(adapter.supportedTokens[0].symbol).toBe('KXUSD');
-    expect(adapter.supportedTokens[0].address).toBe(KXUSD_DEFAULT);
+    expect(adapter.supportedTokens[0].symbol).toBe('PYUSD');
+    expect(adapter.supportedTokens[0].address).toBe(PYUSD_DEFAULT);
   });
 
   it('reads token address from X402_PAYMENT_TOKEN env var', () => {
@@ -71,10 +71,17 @@ describe('KiteOzonePaymentAdapter', () => {
     expect(adapter.supportedTokens[0].address).toBe(customToken);
   });
 
-  it('defaults to KXUSD when X402_PAYMENT_TOKEN is not set (warns once)', () => {
+  it('respects env override even with legacy KXUSD address (backward-compat AC-5)', () => {
+    const KXUSD_LEGACY = '0x1b7425d288ea676FCBc65c29711fccF0B6D5c293';
+    process.env.X402_PAYMENT_TOKEN = KXUSD_LEGACY;
+    expect(adapter.getToken()).toBe(KXUSD_LEGACY);
+    expect(adapter.supportedTokens[0].address).toBe(KXUSD_LEGACY);
+  });
+
+  it('defaults to PYUSD when X402_PAYMENT_TOKEN is not set (warns once)', () => {
     delete process.env.X402_PAYMENT_TOKEN;
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(adapter.getToken()).toBe(KXUSD_DEFAULT);
+    expect(adapter.getToken()).toBe(PYUSD_DEFAULT);
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('X402_PAYMENT_TOKEN not set'),
@@ -88,7 +95,7 @@ describe('KiteOzonePaymentAdapter', () => {
   it('falls back to default when X402_PAYMENT_TOKEN has invalid format', () => {
     process.env.X402_PAYMENT_TOKEN = 'not-an-address';
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(adapter.getToken()).toBe(KXUSD_DEFAULT);
+    expect(adapter.getToken()).toBe(PYUSD_DEFAULT);
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('invalid format'),
     );
@@ -100,9 +107,9 @@ describe('KiteOzonePaymentAdapter', () => {
     expect(adapter.supportedTokens[0].symbol).toBe('CUSTOM');
   });
 
-  it('defaults token symbol to KXUSD', () => {
+  it('defaults token symbol to PYUSD', () => {
     delete process.env.X402_TOKEN_SYMBOL;
-    expect(adapter.supportedTokens[0].symbol).toBe('KXUSD');
+    expect(adapter.supportedTokens[0].symbol).toBe('PYUSD');
   });
 
   it('settle() returns SettleResult shape', async () => {
@@ -153,14 +160,14 @@ describe('KiteOzonePaymentAdapter', () => {
     expect(result.valid).toBe(true);
   });
 
-  it('quote() returns QuoteResult with KXUSD token', async () => {
+  it('quote() returns QuoteResult with PYUSD token', async () => {
     const result = await adapter.quote(1.0);
 
     expect(result).toHaveProperty('amountWei');
     expect(result).toHaveProperty('token');
     expect(result).toHaveProperty('facilitatorUrl');
-    expect(result.token.symbol).toBe('KXUSD');
-    expect(result.token.address).toBe(KXUSD_DEFAULT);
+    expect(result.token.symbol).toBe('PYUSD');
+    expect(result.token.address).toBe(PYUSD_DEFAULT);
   });
 
   it('sign() returns SignResult shape', async () => {

@@ -117,7 +117,7 @@ export function getProtocolFeeRate(): number {
  *   BigInt(Math.round(usdc * 1e6)) * BigInt(1e12)
  *
  * Rationale: USDC tiene 6 decimals lógicos; 1e12 escala a 18 decimals para
- * el token KXUSD.
+ * el token PYUSD.
  */
 function feeUsdcToWei(feeUsdc: number): string {
   return String(BigInt(Math.round(feeUsdc * 1e6)) * BigInt(1e12));
