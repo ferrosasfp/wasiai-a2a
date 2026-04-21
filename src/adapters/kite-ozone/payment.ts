@@ -30,10 +30,10 @@ const KITE_FACILITATOR_ADDRESS =
 
 // ── Defaults for env-driven configuration (CD-1: no hardcoded addresses in logic) ──
 const DEFAULT_PAYMENT_TOKEN =
-  '0x1b7425d288ea676FCBc65c29711fccF0B6D5c293' as `0x${string}`;
-const DEFAULT_EIP712_DOMAIN_NAME = 'Kite X402 USD';
+  '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9' as `0x${string}`;
+const DEFAULT_EIP712_DOMAIN_NAME = 'PYUSD';
 const DEFAULT_EIP712_DOMAIN_VERSION = '1';
-const DEFAULT_TOKEN_SYMBOL = 'KXUSD';
+const DEFAULT_TOKEN_SYMBOL = 'PYUSD';
 
 // ── Lazy env-var readers (DT-2: read at call time, not module load) ──
 
@@ -45,7 +45,7 @@ function getPaymentToken(): `0x${string}` {
   if (!token) {
     if (!_warnedDefaultToken) {
       console.warn(
-        `X402_PAYMENT_TOKEN not set — defaulting to KXUSD (${DEFAULT_PAYMENT_TOKEN})`,
+        `X402_PAYMENT_TOKEN not set — defaulting to PYUSD (${DEFAULT_PAYMENT_TOKEN})`,
       );
       _warnedDefaultToken = true;
     }
@@ -54,7 +54,7 @@ function getPaymentToken(): `0x${string}` {
   if (!ADDRESS_RE.test(token)) {
     if (!_warnedDefaultToken) {
       console.warn(
-        `X402_PAYMENT_TOKEN has invalid format "${token}" — defaulting to KXUSD (${DEFAULT_PAYMENT_TOKEN})`,
+        `X402_PAYMENT_TOKEN has invalid format "${token}" — defaulting to PYUSD (${DEFAULT_PAYMENT_TOKEN})`,
       );
       _warnedDefaultToken = true;
     }
