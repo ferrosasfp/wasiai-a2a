@@ -485,9 +485,16 @@ At minimum, configure in your deployment environment:
 
 | Document | Description |
 |----------|-------------|
+| [`doc/INTEGRATION.md`](doc/INTEGRATION.md) | Marketplace integration guide — auth, onboarding, x402, end-to-end examples |
 | [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md) | Full L1-L4 architecture, adapter interfaces, migration roadmap |
 | [`doc/kite-contracts.md`](doc/kite-contracts.md) | Kite contract addresses, token specs, infrastructure endpoints |
 | [`doc/sdd/`](doc/sdd/) | NexusAgile methodology artifacts (SDDs, story files, reviews) |
+
+---
+
+## For Marketplace Developers
+
+Integrating a third-party marketplace or agent with WasiAI A2A? Start with [`doc/INTEGRATION.md`](doc/INTEGRATION.md) — it covers server-to-server auth (the B2B default), the x402 payment flow, the full endpoint reference, error-code playbook, and copy-pasteable curl + fetch examples against the production gateway.
 
 ---
 
