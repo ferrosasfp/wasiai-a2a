@@ -196,6 +196,7 @@ export function requirePaymentOrA2AKey(
       const postDebitBalance = await budgetService.getBalance(
         keyRow.id,
         chainId,
+        keyRow.owner_ref,
       );
       reply.header('x-a2a-remaining-budget', postDebitBalance);
     } catch (err) {

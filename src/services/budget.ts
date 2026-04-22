@@ -5,6 +5,10 @@
 
 import { supabase } from '../lib/supabase.js';
 import type { A2AAgentKeyRow } from '../types/index.js';
+import {
+  OwnershipMismatchError,
+  logOwnershipMismatch,
+} from './security/errors.js';
 
 // ── Service ─────────────────────────────────────────────────
 
@@ -12,14 +16,25 @@ export const budgetService = {
   /**
    * Get balance for a specific chain. Returns "0" if no entry exists.
    */
-  async getBalance(keyId: string, chainId: number): Promise<string> {
+  async getBalance(
+    keyId: string,
+    chainId: number,
+    ownerId: string,
+  ): Promise<string> {
     const { data, error } = await supabase
       .from('a2a_agent_keys')
       .select('budget')
       .eq('id', keyId)
+      .eq('owner_ref', ownerId)
       .single();
 
-    if (error) throw new Error(`Failed to get balance: ${error.message}`);
+    if (error) {
+      if (error.code === 'PGRST116') {
+        logOwnershipMismatch('getBalance', keyId, ownerId);
+        throw new OwnershipMismatchError();
+      }
+      throw new Error(`Failed to get balance: ${error.message}`);
+    }
 
     const budget = (data as Pick<A2AAgentKeyRow, 'budget'>).budget;
     return budget[chainId.toString()] ?? '0';
