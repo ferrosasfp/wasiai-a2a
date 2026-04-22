@@ -124,3 +124,84 @@ Cada agente tiene su bloque `⛔ PROHIBIDO EN ESTA FASE` integrado en su system 
 5. **Sub-agentes son OBLIGATORIOS** — el orquestador NUNCA ejecuta ni evalúa roles directamente. Usá los 6 agentes custom + 8 slash commands. Si no podés (sub-agente no disponible), parar y avisar al humano antes de improvisar.
 6. **Un gate por lanzamiento** — NUNCA incluyas `HU_APPROVED → F2 → SPEC_APPROVED` en el mismo prompt. Los sub-agentes one-shot no pueden esperar gates. Lanzá `/nexus-f0-f1`, esperá HU_APPROVED, lanzá `/nexus-f2`, esperá SPEC_APPROVED, lanzá `/nexus-f2-5`, etc.
 7. **Entre gates el pipeline corre solo** — F2.5 → F3 → AR → CR → F4 → DONE NO tiene gates humanos. NO preguntes "¿continuo?". Si tenés F2.5 listo, lanzá F3 inmediatamente.
+
+---
+
+## Security Conventions — Ownership Guard
+
+**Regla obligatoria (WKH-53):** toda query o mutación sobre `a2a_agent_keys`
+hecha desde `src/services/` DEBE filtrar por `owner_ref` además del `id`.
+
+El cliente de Supabase usa `SUPABASE_SERVICE_ROLE_KEY`, que **bypassea RLS**.
+Por eso el ownership check vive en la capa de aplicación: si un service hace
+`.eq('id', keyId)` sin cruzar con `.eq('owner_ref', callerOwnerRef)`, cualquier
+caller autenticado puede leer o modificar datos de otro owner (IDOR).
+
+### Patrón obligatorio
+
+```ts
+// OK
+async getBalance(keyId: string, chainId: number, ownerId: string): Promise<string> {
+  const { data, error } = await supabase
+    .from('a2a_agent_keys')
+    .select('budget')
+    .eq('id', keyId)
+    .eq('owner_ref', ownerId)   // <- imprescindible
+    .single();
+  if (error?.code === 'PGRST116') throw new OwnershipMismatchError();
+  // ...
+}
+
+// MAL — cross-tenant leak
+async getBalance(keyId: string, chainId: number): Promise<string> {
+  const { data } = await supabase
+    .from('a2a_agent_keys')
+    .select('budget')
+    .eq('id', keyId)
+    .single();
+  // sin .eq('owner_ref', ...) → cualquier owner puede leer cualquier balance
+}
+```
+
+### Cómo obtener el `ownerId`
+
+En rutas autenticadas post-middleware `requirePaymentOrA2AKey`, el row del
+caller está en `request.a2aKeyRow`. El `owner_ref` se pasa como argumento
+al service:
+
+```ts
+const balance = await budgetService.getBalance(
+  keyRow.id,
+  chainId,
+  keyRow.owner_ref,  // <- el owner_ref del caller autenticado
+);
+```
+
+### Qué debe detectar Adversary Review (AR) / Code Review (CR)
+
+En cualquier PR que modifique `src/services/*.ts` y toque queries sobre
+`a2a_agent_keys`:
+
+1. Buscar `.from('a2a_agent_keys')` y verificar que la cadena incluye
+   `.eq('owner_ref', <value>)` antes del `.single()` / `.maybeSingle()` /
+   resolución de la promise.
+2. Si el service agrega una nueva función que recibe un `keyId`, su firma
+   DEBE incluir un `ownerId: string` (no `string | undefined`).
+3. Si detectás una violación, marcalo **BLOQUEANTE** en el AR. El bug es
+   equivalente a un IDOR (Insecure Direct Object Reference).
+
+### Tablas con ownership en app-layer (hoy)
+
+| Tabla | Columna owner | Protegida en services |
+|-------|--------------|----------------------|
+| `a2a_agent_keys` | `owner_ref` | SI (WKH-53) |
+| `tasks` | — (no tiene, pending WKH-54) | no |
+| `a2a_events` | — (telemetría global) | N/A |
+| `registries` | — (admin global) | N/A |
+
+### RLS real (Postgres-level)
+
+Hoy la defensa es **solo app-layer**. El plan de `ALTER TABLE a2a_agent_keys
+ENABLE ROW LEVEL SECURITY` + `CREATE POLICY` está trackeado en **WKH-SEC-02**
+(TD-SEC-01). Hasta que se implemente, la app es la única línea de defensa.
+La **Fase B** (WKH-54) agrega `owner_ref` a `tasks` + RPC update.

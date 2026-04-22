@@ -43,3 +43,4 @@
 | 044 | 2026-04-21 | 1% Protocol Fee Real Charge — deduct from budget + transfer to Kite wallet (WKH-44) | feature | QUALITY | DONE | feat/044-wkh-44-protocol-fee-real-charge |
 | 046 | 2026-04-20 | Marketplace Integration Guide — Auth + CORS policy for 3rd-party consumers (WKH-46) | doc | FAST | DONE | feat/046-wkh-46-integration-guide |
 | 052 | 2026-04-21 | Migrate x402 payment token from KXUSD → PYUSD (WKH-52) | config | QUALITY | DONE | feat/052-wkh-52-pyusd-migration |
+| 053 | 2026-04-22 | Supabase RLS + ownership checks en queries (WKH-53) | security | QUALITY | DONE | feat/wkh-53-rls-ownership ([DONE.md](053-wkh-53-rls-ownership/DONE.md)) |

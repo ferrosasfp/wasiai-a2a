@@ -56,7 +56,7 @@ describe('budgetService', () => {
         mock as unknown as ReturnType<typeof supabase.from>,
       );
 
-      const result = await budgetService.getBalance('key-1', 2368);
+      const result = await budgetService.getBalance('key-1', 2368, 'user-1');
       expect(result).toBe('0');
     });
 
@@ -70,7 +70,7 @@ describe('budgetService', () => {
         mock as unknown as ReturnType<typeof supabase.from>,
       );
 
-      const result = await budgetService.getBalance('key-1', 2368);
+      const result = await budgetService.getBalance('key-1', 2368, 'user-1');
       expect(result).toBe('10.500000');
     });
 
@@ -84,9 +84,26 @@ describe('budgetService', () => {
         mock as unknown as ReturnType<typeof supabase.from>,
       );
 
-      await expect(budgetService.getBalance('x', 1)).rejects.toThrow(
+      await expect(budgetService.getBalance('x', 1, 'user-1')).rejects.toThrow(
         'Failed to get balance: DB down',
       );
+    });
+
+    it('throws OwnershipMismatchError when owner mismatch (AC-3)', async () => {
+      const mock = chainMock();
+      mock.single = vi.fn().mockResolvedValue({
+        data: null,
+        error: { code: 'PGRST116', message: 'no rows' },
+      });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+
+      await expect(
+        budgetService.getBalance('key-of-other-owner', 2368, 'user-A'),
+      ).rejects.toMatchObject({ code: 'OWNERSHIP_MISMATCH' });
+
+      expect(mock.eq).toHaveBeenCalledWith('owner_ref', 'user-A');
     });
   });
 

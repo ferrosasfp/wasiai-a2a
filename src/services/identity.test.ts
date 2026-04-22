@@ -193,30 +193,50 @@ describe('identityService', () => {
   });
 
   describe('deactivate', () => {
-    it('calls update with is_active = false', async () => {
+    it('calls update with is_active = false AND owner_ref filter (AC-4)', async () => {
       const mock = chainMock();
       const mockUpdate = vi.fn().mockReturnValue(mock);
       mock.update = mockUpdate;
+      mock.select = vi.fn().mockResolvedValue({
+        data: [{ id: 'key-id-1' }],
+        error: null,
+      });
       mockFrom.mockReturnValue(
         mock as unknown as ReturnType<typeof supabase.from>,
       );
 
-      mock.eq = vi.fn().mockResolvedValue({ error: null });
-
-      await identityService.deactivate('key-id-1');
+      await identityService.deactivate('key-id-1', 'user-A');
 
       expect(mockUpdate).toHaveBeenCalledWith({ is_active: false });
+      expect(mock.eq).toHaveBeenCalledWith('id', 'key-id-1');
+      expect(mock.eq).toHaveBeenCalledWith('owner_ref', 'user-A');
+    });
+
+    it('throws OwnershipMismatchError when owner mismatch (AC-4)', async () => {
+      const mock = chainMock();
+      mock.update = vi.fn().mockReturnValue(mock);
+      mock.select = vi.fn().mockResolvedValue({ data: [], error: null });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+
+      await expect(
+        identityService.deactivate('other-key', 'user-A'),
+      ).rejects.toMatchObject({ code: 'OWNERSHIP_MISMATCH' });
     });
 
     it('throws on DB error', async () => {
       const mock = chainMock();
       mock.update = vi.fn().mockReturnValue(mock);
-      mock.eq = vi.fn().mockResolvedValue({ error: { message: 'fail' } });
+      mock.select = vi.fn().mockResolvedValue({
+        data: null,
+        error: { message: 'fail' },
+      });
       mockFrom.mockReturnValue(
         mock as unknown as ReturnType<typeof supabase.from>,
       );
 
-      await expect(identityService.deactivate('x')).rejects.toThrow(
+      await expect(identityService.deactivate('x', 'user-A')).rejects.toThrow(
         'Failed to deactivate agent key: fail',
       );
     });

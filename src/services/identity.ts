@@ -10,6 +10,10 @@ import type {
   AgentSignupResponse,
   CreateKeyInput,
 } from '../types/index.js';
+import {
+  logOwnershipMismatch,
+  OwnershipMismatchError,
+} from './security/errors.js';
 
 // ── Service ─────────────────────────────────────────────────
 
@@ -75,13 +79,20 @@ export const identityService = {
    * Deactivate an agent key by setting is_active = false.
    * updated_at is handled by the DB trigger.
    */
-  async deactivate(keyId: string): Promise<void> {
-    const { error } = await supabase
+  async deactivate(keyId: string, ownerId: string): Promise<void> {
+    const { data, error } = await supabase
       .from('a2a_agent_keys')
       .update({ is_active: false })
-      .eq('id', keyId);
+      .eq('id', keyId)
+      .eq('owner_ref', ownerId)
+      .select('id');
 
     if (error)
       throw new Error(`Failed to deactivate agent key: ${error.message}`);
+
+    if (!data || data.length === 0) {
+      logOwnershipMismatch('deactivate', keyId, ownerId);
+      throw new OwnershipMismatchError();
+    }
   },
 };
