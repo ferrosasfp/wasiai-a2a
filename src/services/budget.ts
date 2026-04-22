@@ -6,8 +6,8 @@
 import { supabase } from '../lib/supabase.js';
 import type { A2AAgentKeyRow } from '../types/index.js';
 import {
-  OwnershipMismatchError,
   logOwnershipMismatch,
+  OwnershipMismatchError,
 } from './security/errors.js';
 
 // ── Service ─────────────────────────────────────────────────

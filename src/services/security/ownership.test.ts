@@ -40,7 +40,9 @@ function chainMock(overrides: Record<string, unknown> = {}) {
 }
 
 const OWNER_A = 'owner-A-uuid';
-const OWNER_B = 'owner-B-uuid';
+// NOTE: OWNER_B omitted — tests use OWNER_A as the caller (the "attacker"
+// when probing KEY_OF_B). The conceptual "owner B" exists only as the
+// implicit owner of KEY_OF_B at the DB layer (not needed as a JS constant).
 const KEY_OF_A = 'key-belongs-to-A';
 const KEY_OF_B = 'key-belongs-to-B';
 

@@ -11,8 +11,8 @@ import type {
   CreateKeyInput,
 } from '../types/index.js';
 import {
-  OwnershipMismatchError,
   logOwnershipMismatch,
+  OwnershipMismatchError,
 } from './security/errors.js';
 
 // ── Service ─────────────────────────────────────────────────
