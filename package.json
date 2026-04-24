@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc && mkdir -p dist/static && cp -r src/static/. dist/static/",
+    "build": "tsc -p tsconfig.build.json && mkdir -p dist/static && cp -r src/static/. dist/static/",
     "start": "node dist/index.js",
     "lint": "biome check src/",
     "format": "biome format --write src/",
