@@ -1,6 +1,8 @@
 /**
  * Tasks Routes — A2A Protocol task management
- * WKH-23
+ * WKH-23 (baseline)
+ * WKH-54 (ownership isolation): every endpoint now requires an A2A key or
+ *        x402 payment and filters by `request.a2aKeyRow.owner_ref`.
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
@@ -11,6 +13,7 @@ import {
 } from '../services/task.js';
 import type { TaskState } from '../types/index.js';
 import { TASK_STATES } from '../types/index.js';
+import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 
 // ── UUID validation helper ──────────────────────────────────
 const UUID_RE =
@@ -19,29 +22,46 @@ function isValidUUID(id: string): boolean {
   return UUID_RE.test(id);
 }
 
+/**
+ * Extract the authenticated caller's owner_ref from the request.
+ * Middleware `requirePaymentOrA2AKey` guarantees `request.a2aKeyRow` is
+ * set for all authenticated paths. A missing value is treated as an auth
+ * bug (defense-in-depth 500).
+ */
+function getOwnerRef(request: FastifyRequest): string {
+  const ownerRef = request.a2aKeyRow?.owner_ref;
+  if (!ownerRef) {
+    throw new Error('auth middleware did not populate a2aKeyRow.owner_ref');
+  }
+  return ownerRef;
+}
+
 const tasksRoutes: FastifyPluginAsync = async (fastify) => {
+  // WKH-54: all /tasks/* require authentication + ownership isolation.
+  const authPreHandler = requirePaymentOrA2AKey({
+    description: 'WasiAI A2A Tasks — CRUD requires API key or x402 payment',
+  });
+
   /**
    * POST /tasks — Create a new task (AC-2)
    */
-  fastify.post(
+  fastify.post<{
+    Body: {
+      contextId?: string;
+      messages?: unknown[];
+      artifacts?: unknown[];
+      metadata?: Record<string, unknown>;
+    };
+  }>(
     '/',
-    async (
-      request: FastifyRequest<{
-        Body: {
-          contextId?: string;
-          messages?: unknown[];
-          artifacts?: unknown[];
-          metadata?: Record<string, unknown>;
-        };
-      }>,
-      reply: FastifyReply,
-    ) => {
+    { preHandler: authPreHandler },
+    async (request, reply: FastifyReply) => {
       const body = request.body;
       if (body === null || typeof body !== 'object') {
         return reply.status(400).send({ error: 'Invalid request body' });
       }
 
-      const task = await taskService.create({
+      const task = await taskService.create(getOwnerRef(request), {
         contextId: body.contextId,
         messages: body.messages,
         artifacts: body.artifacts,
@@ -54,22 +74,20 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * GET /tasks — List tasks with filters (AC-4)
+   * Scoped to the caller's owner_ref.
    */
-  fastify.get(
+  fastify.get<{
+    Querystring: {
+      status?: string;
+      context_id?: string;
+      limit?: string;
+    };
+  }>(
     '/',
-    async (
-      request: FastifyRequest<{
-        Querystring: {
-          status?: string;
-          context_id?: string;
-          limit?: string;
-        };
-      }>,
-      reply: FastifyReply,
-    ) => {
+    { preHandler: authPreHandler },
+    async (request, reply: FastifyReply) => {
       const { status, context_id, limit } = request.query;
 
-      // Validate status if provided
       if (status && !TASK_STATES.includes(status as TaskState)) {
         return reply.status(400).send({ error: `Invalid status: ${status}` });
       }
@@ -80,7 +98,7 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
           ? parsedLimit
           : undefined;
 
-      const tasks = await taskService.list({
+      const tasks = await taskService.list(getOwnerRef(request), {
         status: status as TaskState | undefined,
         contextId: context_id,
         limit: safeLimit,
@@ -92,17 +110,16 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * GET /tasks/:id — Get a task by ID (AC-3)
+   * Returns 404 for both "not found" and "not yours" (existence not leaked).
    */
-  fastify.get(
+  fastify.get<{ Params: { id: string } }>(
     '/:id',
-    async (
-      request: FastifyRequest<{ Params: { id: string } }>,
-      reply: FastifyReply,
-    ) => {
+    { preHandler: authPreHandler },
+    async (request, reply: FastifyReply) => {
       if (!isValidUUID(request.params.id)) {
         return reply.status(400).send({ error: 'Invalid UUID format' });
       }
-      const task = await taskService.get(request.params.id);
+      const task = await taskService.get(getOwnerRef(request), request.params.id);
       if (!task) {
         return reply.status(404).send({ error: 'Task not found' });
       }
@@ -114,15 +131,13 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
    * PATCH /tasks/:id/status — Update task status (AC-5)
    * ⚠️ DEBE registrarse ANTES que PATCH /:id (CD-12)
    */
-  fastify.patch(
+  fastify.patch<{
+    Params: { id: string };
+    Body: { status: string };
+  }>(
     '/:id/status',
-    async (
-      request: FastifyRequest<{
-        Params: { id: string };
-        Body: { status: string };
-      }>,
-      reply: FastifyReply,
-    ) => {
+    { preHandler: authPreHandler },
+    async (request, reply: FastifyReply) => {
       if (!isValidUUID(request.params.id)) {
         return reply.status(400).send({ error: 'Invalid UUID format' });
       }
@@ -137,6 +152,7 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
 
       try {
         const task = await taskService.updateStatus(
+          getOwnerRef(request),
           request.params.id,
           status as TaskState,
         );
@@ -155,17 +171,14 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * PATCH /tasks/:id — Append messages/artifacts (AC-6)
-   * ⚠️ Registrado DESPUÉS de PATCH /:id/status (CD-12)
    */
-  fastify.patch(
+  fastify.patch<{
+    Params: { id: string };
+    Body: { messages?: unknown[]; artifacts?: unknown[] };
+  }>(
     '/:id',
-    async (
-      request: FastifyRequest<{
-        Params: { id: string };
-        Body: { messages?: unknown[]; artifacts?: unknown[] };
-      }>,
-      reply: FastifyReply,
-    ) => {
+    { preHandler: authPreHandler },
+    async (request, reply: FastifyReply) => {
       if (!isValidUUID(request.params.id)) {
         return reply.status(400).send({ error: 'Invalid UUID format' });
       }
@@ -181,10 +194,11 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       try {
-        const task = await taskService.append(request.params.id, {
-          messages,
-          artifacts,
-        });
+        const task = await taskService.append(
+          getOwnerRef(request),
+          request.params.id,
+          { messages, artifacts },
+        );
         return reply.send(task);
       } catch (err) {
         if (err instanceof TaskNotFoundError) {

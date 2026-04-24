@@ -16,6 +16,20 @@ import {
 import type { Task } from '../types/index.js';
 import tasksRoutes from './tasks.js';
 
+// ── Mock auth middleware (WKH-54) — pass-through that populates a2aKeyRow
+vi.mock('../middleware/a2a-key.js', () => ({
+  requirePaymentOrA2AKey: () =>
+    async (
+      request: import('fastify').FastifyRequest,
+      _reply: import('fastify').FastifyReply,
+    ) => {
+      (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = {
+        id: 'test-key-id',
+        owner_ref: 'test-owner-ref',
+      };
+    },
+}));
+
 // ── Mock taskService ─────────────────────────────────────────
 vi.mock('../services/task.js', () => ({
   taskService: {
@@ -166,6 +180,7 @@ describe('tasks routes', () => {
 
     expect(res.statusCode).toBe(200);
     expect(mockList).toHaveBeenCalledWith(
+      'test-owner-ref',
       expect.objectContaining({ status: 'working' }),
     );
   });
@@ -189,6 +204,7 @@ describe('tasks routes', () => {
 
     expect(res.statusCode).toBe(200);
     expect(mockList).toHaveBeenCalledWith(
+      'test-owner-ref',
       expect.objectContaining({ contextId: 'abc' }),
     );
   });
