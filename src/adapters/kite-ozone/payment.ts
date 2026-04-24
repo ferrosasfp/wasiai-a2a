@@ -28,6 +28,43 @@ const KITE_FACILITATOR_DEFAULT_URL = 'https://facilitator.pieverse.io';
 const KITE_FACILITATOR_ADDRESS =
   '0x12343e649e6b2b2b77649DFAb88f103c02F3C78b' as `0x${string}`;
 
+// WasiAI self-hosted facilitator (x402 canonical — fallback when Pieverse is
+// unavailable or the tournament requires the spec-compliant path).
+const WASIAI_FACILITATOR_DEFAULT_URL =
+  'https://wasiai-facilitator-production.up.railway.app';
+
+/**
+ * Which facilitator protocol to use when talking to the external settler.
+ *   'pieverse' — Pieverse custom scheme (default; current production path).
+ *                Signs `primaryType: 'Authorization'` against the Pieverse
+ *                facilitator contract; posts to `/v2/verify` and `/v2/settle`
+ *                with the `{paymentPayload, paymentRequirements}` envelope.
+ *   'x402'     — x402 canonical spec (EIP-3009). Signs `TransferWithAuthorization`
+ *                against the PYUSD token contract directly; posts to `/verify`
+ *                and `/settle` with `{x402Version, resource, accepted, payload}`.
+ *                Compatible with the WasiAI self-hosted facilitator.
+ *
+ * Toggle via `KITE_FACILITATOR_MODE=x402`. Any other value (or absent)
+ * defaults to `pieverse` to preserve current production behavior.
+ */
+type FacilitatorMode = 'pieverse' | 'x402';
+
+function getFacilitatorMode(): FacilitatorMode {
+  return process.env.KITE_FACILITATOR_MODE === 'x402' ? 'x402' : 'pieverse';
+}
+
+/**
+ * Resolve the facilitator base URL. Explicit env always wins.
+ * If unset, picks a sensible default for the selected mode.
+ */
+function getFacilitatorUrl(): string {
+  const explicit = process.env.KITE_FACILITATOR_URL;
+  if (explicit) return explicit;
+  return getFacilitatorMode() === 'x402'
+    ? WASIAI_FACILITATOR_DEFAULT_URL
+    : KITE_FACILITATOR_DEFAULT_URL;
+}
+
 // ── Defaults for env-driven configuration (CD-1: no hardcoded addresses in logic) ──
 const DEFAULT_PAYMENT_TOKEN =
   '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9' as `0x${string}`;
@@ -135,8 +172,10 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
   }
 
   async verify(proof: X402Proof): Promise<VerifyResult> {
-    const facilitatorUrl =
-      process.env.KITE_FACILITATOR_URL ?? KITE_FACILITATOR_DEFAULT_URL;
+    if (getFacilitatorMode() === 'x402') {
+      return verifyX402(proof);
+    }
+    const facilitatorUrl = getFacilitatorUrl();
     const token = getPaymentToken();
     const body: PieverseVerifyRequest = {
       paymentPayload: {
@@ -179,8 +218,10 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
   }
 
   async settle(req: SettleRequest): Promise<SettleResult> {
-    const facilitatorUrl =
-      process.env.KITE_FACILITATOR_URL ?? KITE_FACILITATOR_DEFAULT_URL;
+    if (getFacilitatorMode() === 'x402') {
+      return settleX402(req);
+    }
+    const facilitatorUrl = getFacilitatorUrl();
     const token = getPaymentToken();
     const body: PieverseSettleRequest = {
       paymentPayload: {
@@ -228,8 +269,7 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
     return {
       amountWei: '1000000000000000000',
       token: { symbol: getTokenSymbol(), address: token, decimals: 18 },
-      facilitatorUrl:
-        process.env.KITE_FACILITATOR_URL ?? KITE_FACILITATOR_DEFAULT_URL,
+      facilitatorUrl: getFacilitatorUrl(),
     };
   }
 
@@ -247,21 +287,51 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
       validBefore: String(now + (opts.timeoutSeconds ?? 300)),
       nonce,
     };
-    const domain = getEip712Domain();
-    const signature = await client.signTypedData({
-      account,
-      domain,
-      types: EIP712_TYPES,
-      primaryType: 'Authorization',
-      message: {
-        from: authorization.from,
-        to: authorization.to,
-        value: BigInt(authorization.value),
-        validAfter: BigInt(authorization.validAfter),
-        validBefore: BigInt(authorization.validBefore),
-        nonce: authorization.nonce as `0x${string}`,
-      },
-    });
+    const mode = getFacilitatorMode();
+    let signature: string;
+    if (mode === 'x402') {
+      // x402 canonical — sign EIP-3009 TransferWithAuthorization directly
+      // against the PYUSD token contract (verifyingContract = token address).
+      const token = getPaymentToken();
+      signature = await client.signTypedData({
+        account,
+        domain: {
+          name: process.env.X402_EIP712_DOMAIN_NAME ?? DEFAULT_EIP712_DOMAIN_NAME,
+          version:
+            process.env.X402_EIP712_DOMAIN_VERSION ?? DEFAULT_EIP712_DOMAIN_VERSION,
+          chainId: kiteTestnet.id,
+          verifyingContract: token,
+        },
+        types: {
+          TransferWithAuthorization: EIP712_TYPES.Authorization,
+        },
+        primaryType: 'TransferWithAuthorization',
+        message: {
+          from: authorization.from,
+          to: authorization.to,
+          value: BigInt(authorization.value),
+          validAfter: BigInt(authorization.validAfter),
+          validBefore: BigInt(authorization.validBefore),
+          nonce: authorization.nonce as `0x${string}`,
+        },
+      });
+    } else {
+      // Pieverse — sign custom Authorization against Pieverse facilitator contract.
+      signature = await client.signTypedData({
+        account,
+        domain: getEip712Domain(),
+        types: EIP712_TYPES,
+        primaryType: 'Authorization',
+        message: {
+          from: authorization.from,
+          to: authorization.to,
+          value: BigInt(authorization.value),
+          validAfter: BigInt(authorization.validAfter),
+          validBefore: BigInt(authorization.validBefore),
+          nonce: authorization.nonce as `0x${string}`,
+        },
+      });
+    }
     const paymentRequest: X402PaymentRequest = {
       authorization,
       signature,
@@ -272,6 +342,112 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
     );
     return { xPaymentHeader, paymentRequest };
   }
+}
+
+// ─── x402 canonical helpers (KITE_FACILITATOR_MODE=x402) ─────────────────────
+// Uses the wasiai-facilitator self-hosted service. Sends the canonical x402
+// v2 request body and parses the canonical response shape.
+
+interface X402VerifyResponse {
+  verified: boolean;
+  client?: string;
+  amount?: string;
+  asset?: string;
+  network?: string;
+  payTo?: string;
+  expiresAt?: number;
+  error?: { code: string; message: string; http: number };
+}
+
+interface X402SettleResponse {
+  settled: boolean;
+  transactionHash?: string;
+  blockNumber?: number;
+  amount?: string;
+  from?: string;
+  to?: string;
+  asset?: string;
+  error?: { code: string; message: string; http: number };
+}
+
+function buildX402CanonicalBody(
+  authorization: X402PaymentRequest['authorization'],
+  signature: string,
+): unknown {
+  const token = getPaymentToken();
+  return {
+    x402Version: 2,
+    resource: {
+      url: process.env.X402_RESOURCE_URL ?? 'https://wasiai.ai/pay',
+    },
+    accepted: {
+      scheme: KITE_SCHEME,
+      network: KITE_NETWORK,
+      amount: authorization.value,
+      asset: token,
+      payTo: authorization.to,
+      maxTimeoutSeconds: KITE_MAX_TIMEOUT_SECONDS,
+      extra: { assetTransferMethod: 'eip3009' },
+    },
+    payload: { signature, authorization },
+  };
+}
+
+async function verifyX402(proof: X402Proof): Promise<VerifyResult> {
+  const facilitatorUrl = getFacilitatorUrl();
+  const body = buildX402CanonicalBody(proof.authorization, proof.signature);
+  let response: Response;
+  try {
+    response = await fetch(`${facilitatorUrl}/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new Error(
+      `Facilitator network error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const result = (await response.json().catch(() => null)) as X402VerifyResponse | null;
+  if (result === null) {
+    throw new Error(`Facilitator returned HTTP ${response.status} on /verify (no JSON body)`);
+  }
+  if (!response.ok) {
+    return { valid: false, error: result.error?.message ?? `HTTP ${response.status}` };
+  }
+  return { valid: result.verified === true, error: result.error?.message };
+}
+
+async function settleX402(req: SettleRequest): Promise<SettleResult> {
+  const facilitatorUrl = getFacilitatorUrl();
+  const body = buildX402CanonicalBody(req.authorization, req.signature);
+  let response: Response;
+  try {
+    response = await fetch(`${facilitatorUrl}/settle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new Error(
+      `Facilitator network error on settle: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const result = (await response.json().catch(() => null)) as X402SettleResponse | null;
+  if (result === null) {
+    throw new Error(`Facilitator returned HTTP ${response.status} on /settle (no JSON body)`);
+  }
+  if (!response.ok || !result.settled) {
+    return {
+      txHash: result?.transactionHash ?? '',
+      success: false,
+      error: result?.error?.message ?? `HTTP ${response.status}`,
+    };
+  }
+  return {
+    txHash: result.transactionHash ?? '',
+    success: true,
+  };
 }
 
 export function _resetWalletClient(): void {
