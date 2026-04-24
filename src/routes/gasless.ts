@@ -1,8 +1,11 @@
 /**
  * Gasless Routes (WKH-29 + WKH-38) -- chain-adaptive gasless transfers.
+ * WKH-54: POST /transfer now requires authentication (was publicly callable,
+ *         a drain vector while the gasless module is funded).
  */
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { getGaslessAdapter } from '../adapters/registry.js';
+import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 
 const gaslessRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
@@ -26,6 +29,11 @@ const gaslessRoutes: FastifyPluginAsync = async (fastify) => {
 
   fastify.post(
     '/transfer',
+    {
+      preHandler: requirePaymentOrA2AKey({
+        description: 'WasiAI Gasless Transfer — on-chain transfer from operator wallet',
+      }),
+    },
     async (req: FastifyRequest, reply: FastifyReply) => {
       const status = await getGaslessAdapter().status();
       if (status.funding_state !== 'ready') {

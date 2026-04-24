@@ -15,6 +15,9 @@ vi.mock('../lib/supabase.js', () => ({
 import { supabase } from '../lib/supabase.js';
 import { TaskNotFoundError, TerminalStateError, taskService } from './task.js';
 
+// WKH-54: ownership fixture — tests that don't care about cross-tenant use this.
+const TEST_OWNER_REF = 'test-owner-0xdeadbeef';
+
 // ── Helpers ──────────────────────────────────────────────────
 
 function makeTaskRow(
@@ -43,6 +46,7 @@ function makeTaskRow(
 }
 
 // Chain builder for list() — limit() returns a thenable chain that also supports eq()
+// Service chain (WKH-54): from → select → eq('owner_ref') → order → limit → eq('status')? → eq('context_id')?
 function makeListChain(result: { data: unknown; error: unknown }) {
   // Thenable terminal node that also supports .eq() for post-limit filters
   const terminal: Record<string, unknown> = {
@@ -53,20 +57,18 @@ function makeListChain(result: { data: unknown; error: unknown }) {
   const eqOnTerminal = vi.fn().mockReturnValue(terminal);
   terminal.eq = eqOnTerminal;
 
-  const eqFn = vi.fn();
-  // eq() on the pre-limit chain returns terminal (for chaining after limit)
-  eqFn.mockReturnValue(terminal);
-
   const limitFn = vi.fn().mockReturnValue(terminal);
 
   const chain: Record<string, unknown> = {
     select: vi.fn(),
     order: vi.fn(),
     limit: limitFn,
-    eq: eqFn,
+    eq: vi.fn(),
   };
   (chain.select as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.order as ReturnType<typeof vi.fn>).mockReturnValue(chain);
+  // Pre-limit eq() (e.g. owner_ref) keeps building on the same chain
+  (chain.eq as ReturnType<typeof vi.fn>).mockReturnValue(chain);
 
   return chain;
 }
@@ -115,7 +117,7 @@ describe('taskService', () => {
     const chain = mockChain({ data: row, error: null });
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
-    const task = await taskService.create({});
+    const task = await taskService.create(TEST_OWNER_REF, {});
     expect(task.status).toBe('submitted');
     expect(task.messages).toEqual([]);
     expect(task.artifacts).toEqual([]);
@@ -131,7 +133,7 @@ describe('taskService', () => {
     const chain = mockChain({ data: row, error: null });
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
-    const task = await taskService.create({
+    const task = await taskService.create(TEST_OWNER_REF, {
       contextId: 'ctx-1',
       messages: [{ text: 'hello' }],
       artifacts: [{ url: 'file.txt' }],
@@ -151,7 +153,7 @@ describe('taskService', () => {
     const chain = mockChain({ data: row, error: null });
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
-    const task = await taskService.get('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    const task = await taskService.get(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
     expect(task).toBeDefined();
     expect(task?.id).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
   });
@@ -160,7 +162,7 @@ describe('taskService', () => {
     const chain = mockChain({ data: null, error: null });
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
-    const task = await taskService.get('ffffffff-ffff-ffff-ffff-ffffffffffff');
+    const task = await taskService.get(TEST_OWNER_REF, 'ffffffff-ffff-ffff-ffff-ffffffffffff');
     expect(task).toBeUndefined();
   });
 
@@ -174,7 +176,7 @@ describe('taskService', () => {
     const chain = makeListChain({ data: rows, error: null });
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
-    const tasks = await taskService.list();
+    const tasks = await taskService.list(TEST_OWNER_REF);
     expect(Array.isArray(tasks)).toBe(true);
     expect(tasks).toHaveLength(2);
   });
@@ -184,7 +186,7 @@ describe('taskService', () => {
     const chain = makeListChain(result);
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
-    await taskService.list({ status: 'working' });
+    await taskService.list(TEST_OWNER_REF, { status: 'working' });
     // eq() is called on what limit() returns (terminal)
     const limitResult = (chain.limit as ReturnType<typeof vi.fn>).mock
       .results[0]?.value as Record<string, unknown>;
@@ -195,7 +197,7 @@ describe('taskService', () => {
     const chain = makeListChain({ data: [], error: null });
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
-    await taskService.list({ contextId: 'ctx-abc' });
+    await taskService.list(TEST_OWNER_REF, { contextId: 'ctx-abc' });
     const limitResult = (chain.limit as ReturnType<typeof vi.fn>).mock
       .results[0]?.value as Record<string, unknown>;
     expect(limitResult?.eq).toHaveBeenCalledWith('context_id', 'ctx-abc');
@@ -205,7 +207,7 @@ describe('taskService', () => {
     const chain = makeListChain({ data: [], error: null });
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
-    await taskService.list({ limit: 2 });
+    await taskService.list(TEST_OWNER_REF, { limit: 2 });
     expect(chain.limit).toHaveBeenCalledWith(2);
   });
 
@@ -213,7 +215,7 @@ describe('taskService', () => {
     const chain = makeListChain({ data: [], error: null });
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
-    await taskService.list({ limit: 999 });
+    await taskService.list(TEST_OWNER_REF, { limit: 999 });
     expect(chain.limit).toHaveBeenCalledWith(100);
   });
 
@@ -234,8 +236,7 @@ describe('taskService', () => {
         updateChain as unknown as ReturnType<typeof mockFrom>,
       );
 
-    const task = await taskService.updateStatus(
-      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    const task = await taskService.updateStatus(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       'working',
     );
     expect(task.status).toBe('working');
@@ -247,8 +248,7 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     await expect(
-      taskService.updateStatus(
-        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      taskService.updateStatus(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         'working',
       ),
     ).rejects.toThrow(TerminalStateError);
@@ -260,8 +260,7 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     await expect(
-      taskService.updateStatus(
-        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      taskService.updateStatus(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         'working',
       ),
     ).rejects.toThrow(TerminalStateError);
@@ -273,8 +272,7 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     await expect(
-      taskService.updateStatus(
-        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      taskService.updateStatus(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         'working',
       ),
     ).rejects.toThrow(TerminalStateError);
@@ -285,8 +283,7 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     await expect(
-      taskService.updateStatus(
-        'ffffffff-ffff-ffff-ffff-ffffffffffff',
+      taskService.updateStatus(TEST_OWNER_REF, 'ffffffff-ffff-ffff-ffff-ffffffffffff',
         'working',
       ),
     ).rejects.toThrow(TaskNotFoundError);
@@ -309,9 +306,7 @@ describe('taskService', () => {
         updateChain as unknown as ReturnType<typeof mockFrom>,
       );
 
-    const task = await taskService.append(
-      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-      {
+    const task = await taskService.append(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
         messages: [{ text: 'new' }],
       },
     );
@@ -333,9 +328,7 @@ describe('taskService', () => {
         updateChain as unknown as ReturnType<typeof mockFrom>,
       );
 
-    const task = await taskService.append(
-      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-      {
+    const task = await taskService.append(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
         artifacts: [{ url: 'b.txt' }],
       },
     );
@@ -361,9 +354,7 @@ describe('taskService', () => {
         updateChain as unknown as ReturnType<typeof mockFrom>,
       );
 
-    const task = await taskService.append(
-      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-      {
+    const task = await taskService.append(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
         messages: [{ text: 'b' }],
         artifacts: [{ url: 'y' }],
       },
@@ -378,7 +369,7 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     await expect(
-      taskService.append('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
+      taskService.append(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
         messages: [{ text: 'x' }],
       }),
     ).rejects.toThrow(TerminalStateError);
@@ -389,7 +380,7 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     await expect(
-      taskService.append('ffffffff-ffff-ffff-ffff-ffffffffffff', {
+      taskService.append(TEST_OWNER_REF, 'ffffffff-ffff-ffff-ffff-ffffffffffff', {
         messages: [{ text: 'x' }],
       }),
     ).rejects.toThrow(TaskNotFoundError);
@@ -410,8 +401,7 @@ describe('taskService', () => {
         updateChain as unknown as ReturnType<typeof mockFrom>,
       );
 
-    const task = await taskService.updateStatus(
-      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    const task = await taskService.updateStatus(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       'working',
     );
     expect(task.status).toBe('working');
@@ -423,9 +413,7 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     // Should only call get(), no update
-    const task = await taskService.append(
-      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-      {},
+    const task = await taskService.append(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {},
     );
     expect(task.id).toBe(row.id);
     // Only one from() call (get), not two (get + update)

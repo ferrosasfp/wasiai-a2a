@@ -1,6 +1,14 @@
 /**
  * Task Service — CRUD + terminal state guard + append messages/artifacts
  * WKH-23: A2A Protocol task management
+ * WKH-54: ownership isolation — every query filters by `owner_ref` to
+ *         prevent cross-tenant reads/writes (same pattern as WKH-53 for
+ *         a2a_agent_keys).
+ *
+ * Contract: every method requires `ownerRef` — the `owner_ref` of the
+ * caller's A2A key row, obtained via `request.a2aKeyRow.owner_ref` in
+ * routes. Rows matching the `id` but NOT the `ownerRef` are treated as
+ * NOT FOUND (to avoid leaking existence to unauthorized owners).
  */
 
 import { supabase } from '../lib/supabase.js';
@@ -11,6 +19,7 @@ import { TERMINAL_STATES } from '../types/index.js';
 
 interface TaskRow {
   id: string;
+  owner_ref: string;
   context_id: string | null;
   status: TaskState;
   messages: unknown[];
@@ -39,15 +48,19 @@ function rowToTask(row: TaskRow): Task {
 
 export const taskService = {
   /**
-   * Create a new task (status defaults to 'submitted' via DB)
+   * Create a new task. `ownerRef` stamps the row for subsequent ownership
+   * filtering. Caller MUST supply the authenticated caller's `owner_ref`.
    */
-  async create(input: {
-    contextId?: string;
-    messages?: unknown[];
-    artifacts?: unknown[];
-    metadata?: Record<string, unknown>;
-  }): Promise<Task> {
-    const row: Partial<TaskRow> = {};
+  async create(
+    ownerRef: string,
+    input: {
+      contextId?: string;
+      messages?: unknown[];
+      artifacts?: unknown[];
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<Task> {
+    const row: Partial<TaskRow> = { owner_ref: ownerRef };
     if (input.contextId !== undefined) row.context_id = input.contextId;
     if (input.messages !== undefined) row.messages = input.messages;
     if (input.artifacts !== undefined) row.artifacts = input.artifacts;
@@ -64,13 +77,16 @@ export const taskService = {
   },
 
   /**
-   * Get a task by ID. Returns undefined if not found.
+   * Get a task by ID. Returns undefined if not found OR if the row exists
+   * but belongs to another owner (deliberate: don't leak existence of other
+   * tenants' tasks).
    */
-  async get(id: string): Promise<Task | undefined> {
+  async get(ownerRef: string, id: string): Promise<Task | undefined> {
     const { data, error } = await supabase
       .from('tasks')
       .select('*')
       .eq('id', id)
+      .eq('owner_ref', ownerRef)
       .maybeSingle();
 
     if (error) throw new Error(`Failed to get task '${id}': ${error.message}`);
@@ -78,18 +94,22 @@ export const taskService = {
   },
 
   /**
-   * List tasks with optional filters
+   * List tasks scoped to `ownerRef`. Optional filters are additive.
    */
-  async list(filters?: {
-    status?: TaskState;
-    contextId?: string;
-    limit?: number;
-  }): Promise<Task[]> {
+  async list(
+    ownerRef: string,
+    filters?: {
+      status?: TaskState;
+      contextId?: string;
+      limit?: number;
+    },
+  ): Promise<Task[]> {
     const limit = Math.min(Math.max(filters?.limit ?? 50, 1), 100);
 
     let query = supabase
       .from('tasks')
       .select('*')
+      .eq('owner_ref', ownerRef)
       .order('created_at', { ascending: false })
       .limit(limit);
 
@@ -108,11 +128,16 @@ export const taskService = {
 
   /**
    * Update task status with terminal state guard.
-   * Throws if task is in a terminal state.
+   * Throws `TaskNotFoundError` if the task doesn't exist OR belongs to another
+   * owner (existence not leaked).
    */
-  async updateStatus(id: string, status: TaskState): Promise<Task> {
-    // 1. Fetch current task
-    const current = await this.get(id);
+  async updateStatus(
+    ownerRef: string,
+    id: string,
+    status: TaskState,
+  ): Promise<Task> {
+    // 1. Fetch current task scoped to owner (returns undefined if cross-tenant)
+    const current = await this.get(ownerRef, id);
     if (!current) throw new TaskNotFoundError(id);
 
     // 2. Terminal state guard
@@ -120,11 +145,12 @@ export const taskService = {
       throw new TerminalStateError(id, current.status);
     }
 
-    // 3. Update status
+    // 3. Update status — filter by owner_ref defense-in-depth
     const { data, error } = await supabase
       .from('tasks')
       .update({ status })
       .eq('id', id)
+      .eq('owner_ref', ownerRef)
       .select()
       .single();
 
@@ -134,27 +160,24 @@ export const taskService = {
   },
 
   /**
-   * Append messages and/or artifacts to a task.
-   * Uses fetch-concat-update pattern (consistent with Supabase patterns in this project).
+   * Append messages and/or artifacts to a task (scoped to owner).
    *
    * ⚠️ Race condition conocida (CD-11): dos requests simultáneos pueden
    * perder datos porque el segundo update sobrescribe el array del primero.
    * Aceptado para v1 — fix futuro con `jsonb_concat` RPC o SELECT FOR UPDATE en v2.
    */
   async append(
+    ownerRef: string,
     id: string,
     input: { messages?: unknown[]; artifacts?: unknown[] },
   ): Promise<Task> {
-    // 1. Fetch current task
-    const current = await this.get(id);
+    const current = await this.get(ownerRef, id);
     if (!current) throw new TaskNotFoundError(id);
 
-    // 2. Terminal state guard
     if (TERMINAL_STATES.includes(current.status)) {
       throw new TerminalStateError(id, current.status);
     }
 
-    // 3. Build update payload with appended arrays
     const updateRow: Partial<Pick<TaskRow, 'messages' | 'artifacts'>> = {};
     if (input.messages?.length) {
       updateRow.messages = [...current.messages, ...input.messages];
@@ -164,13 +187,14 @@ export const taskService = {
     }
 
     if (Object.keys(updateRow).length === 0) {
-      return current; // nothing to append
+      return current;
     }
 
     const { data, error } = await supabase
       .from('tasks')
       .update(updateRow)
       .eq('id', id)
+      .eq('owner_ref', ownerRef)
       .select()
       .single();
 
