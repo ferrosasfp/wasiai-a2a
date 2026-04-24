@@ -347,6 +347,150 @@ if (!settleable) {
   console.log(`  Explorer: ${EXPLORER}/tx/${txHash}`);
 }
 
+// ─── Orchestration path (A2A key budget mode) ─────────────
+// This is the other half of the hackathon narrative: a client with an
+// A2A key submits a *goal*, the gateway plans with an LLM, calls one or
+// more registered agents, and returns the composed output.
+//
+// Requires SUPABASE_* env vars (we need to provision a temp key). If
+// missing, this section is skipped cleanly.
+
+let orchestrateSummary = '⏭ skipped (no SUPABASE creds)';
+let composeSummary = '⏭ skipped (no SUPABASE creds)';
+const SB_URL = env.SUPABASE_URL;
+const SB_TOKEN = env.SUPABASE_ACCESS_TOKEN;
+
+if (SB_URL && SB_TOKEN) {
+  const ref = SB_URL.match(/^https?:\/\/([^.]+)\./)?.[1];
+  const sbApi = `https://api.supabase.com/v1/projects/${ref}/database/query`;
+  const sbHeaders = {
+    Authorization: `Bearer ${SB_TOKEN}`,
+    'Content-Type': 'application/json',
+    'User-Agent': 'Mozilla/5.0',
+  };
+  const sbQuery = async (q) => {
+    const r = await fetch(sbApi, {
+      method: 'POST',
+      headers: sbHeaders,
+      body: JSON.stringify({ query: q }),
+    });
+    const text = await r.text();
+    if (!r.ok) throw new Error(`Supabase query ${r.status}: ${text}`);
+    return JSON.parse(text);
+  };
+
+  // Provision ephemeral A2A key scoped to a one-off owner_ref.
+  step(7, 'Provision ephemeral A2A key (budget mode)');
+  const { randomBytes, createHash } = await import('node:crypto');
+  const rawKey = `wasi_a2a_${randomBytes(32).toString('hex')}`;
+  const keyHash = createHash('sha256').update(rawKey).digest('hex');
+  const ownerRef = `e2e-demo-${Date.now()}`;
+  await sbQuery(
+    `INSERT INTO a2a_agent_keys (key_hash, owner_ref, display_name, budget) VALUES ('${keyHash}', '${ownerRef}', 'hackathon-e2e-demo', '{"${CHAIN_ID}": "100"}'::jsonb);`,
+  );
+  console.log(`  key provisioned  : owner_ref=${ownerRef}`);
+  console.log(`  budget           : 100 USD on chain ${CHAIN_ID}`);
+
+  try {
+    // ─ Step 8: orchestrate ──────────────────────────────────
+    step(8, 'POST /orchestrate — goal-based multi-agent pipeline');
+    const orchBody = {
+      goal: 'List one security-auditing agent that could review a Solidity ERC-20 contract, and summarize its capabilities in one sentence.',
+      budget: 5,
+      maxAgents: 1,
+    };
+    console.log(`  goal   : ${orchBody.goal.slice(0, 80)}…`);
+    console.log(`  budget : ${orchBody.budget} USD, maxAgents: ${orchBody.maxAgents}`);
+
+    const orchStart = Date.now();
+    const orch = await getJson(`${A2A}/orchestrate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-A2A-Key': rawKey,
+      },
+      body: JSON.stringify(orchBody),
+    });
+    const orchElapsed = ((Date.now() - orchStart) / 1000).toFixed(1);
+    console.log(`  HTTP ${orch.status} (${orchElapsed}s)`);
+
+    const bodyPreview = JSON.stringify(orch.body).slice(0, 800);
+    console.log(`  body   : ${bodyPreview}${bodyPreview.length >= 800 ? '…' : ''}`);
+
+    if (orch.status === 200 && orch.body) {
+      const considered = orch.body.consideredAgents?.length ?? 0;
+      const pipelineOk = orch.body.pipeline?.success === true;
+      const pipelineErr = orch.body.pipeline?.error ?? '';
+      if (pipelineOk) {
+        orchestrateSummary = `✓ HTTP 200, pipeline.success=true, agents=${considered}`;
+        console.log(`  ✓ full pipeline succeeded`);
+      } else {
+        orchestrateSummary = `⚠ gateway OK (HTTP 200, plan+routing worked, ${considered} agent(s) considered); downstream agent error: ${pipelineErr.slice(0, 80)}`;
+        console.log(`  ⚠ gateway OK but downstream agent returned an error`);
+        console.log(`    ${pipelineErr}`);
+      }
+    } else {
+      orchestrateSummary = `⚠ HTTP ${orch.status} — ${JSON.stringify(orch.body).slice(0, 200)}`;
+      console.log(`  ⚠ orchestration non-200 (gateway error, not downstream)`);
+    }
+
+    // ─ Step 9: compose ──────────────────────────────────────
+    step(9, 'POST /compose — explicit multi-step pipeline');
+    const firstAgent = discover.body?.agents?.[0];
+    // ComposeStep.agent = id-or-slug. Prefer slug (non-empty) over id.
+    const agentRef = firstAgent?.slug || firstAgent?.id;
+    if (!agentRef) {
+      composeSummary = '⏭ skipped (no agent slug available)';
+      console.log('  ⏭ no agent available to compose against');
+    } else {
+      const composeBody = {
+        steps: [
+          {
+            agent: agentRef,
+            registry: firstAgent?.registry,
+            input: { prompt: 'Say hello in one short sentence.' },
+          },
+        ],
+        maxBudget: 5,
+      };
+      console.log(`  step 1 agent: ${agentRef} (registry=${firstAgent?.registry ?? '?'})`);
+      const composeStart = Date.now();
+      const comp = await getJson(`${A2A}/compose`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-A2A-Key': rawKey,
+        },
+        body: JSON.stringify(composeBody),
+      });
+      const compElapsed = ((Date.now() - composeStart) / 1000).toFixed(1);
+      console.log(`  HTTP ${comp.status} (${compElapsed}s)`);
+      const preview = JSON.stringify(comp.body).slice(0, 800);
+      console.log(`  body: ${preview}${preview.length >= 800 ? '…' : ''}`);
+      if (comp.status === 200) {
+        composeSummary = '✓ HTTP 200 (full pipeline)';
+      } else if (typeof comp.body?.error === 'string' && comp.body.error.includes('returned')) {
+        const err = comp.body.error.slice(0, 80);
+        composeSummary = `⚠ gateway OK, downstream agent returned error: ${err}`;
+      } else {
+        composeSummary = `⚠ HTTP ${comp.status}`;
+      }
+    }
+  } finally {
+    // ─ Cleanup ──────────────────────────────────────────────
+    step(10, 'Cleanup — delete ephemeral A2A key');
+    await sbQuery(
+      `DELETE FROM a2a_agent_keys WHERE key_hash = '${keyHash}';`,
+    );
+    await sbQuery(`DELETE FROM tasks WHERE owner_ref = '${ownerRef}';`);
+    console.log('  ✓ removed temp key + any tasks created under owner_ref');
+  }
+} else {
+  console.log(
+    '\n▶ Steps 7-10 SKIPPED (no SUPABASE_URL / SUPABASE_ACCESS_TOKEN — cannot provision temp key).',
+  );
+}
+
 // ─── Summary ──────────────────────────────────────────────
 section(settleable ? '✅ HACKATHON E2E PASSED' : '⚠ HACKATHON E2E — OFF-CHAIN OK, /settle SKIPPED');
 console.log(`  A2A gateway up .................... ✓`);
@@ -356,6 +500,8 @@ console.log(`  Kite PYUSD in supported chains .... ${kiteEntry ? '✓' : '(liste
 console.log(`  EIP-3009 signature recovery ....... ✓`);
 console.log(`  /verify off-chain ................. ✓`);
 console.log(`  /settle on-chain .................. ${onChainConfirmed ? '✓' : '⏭ skipped (no operator PYUSD)'}`);
+console.log(`  /orchestrate (A2A-key path) ....... ${orchestrateSummary}`);
+console.log(`  /compose (A2A-key path) ........... ${composeSummary}`);
 if (txHash) {
   console.log(`  TX hash: ${txHash}`);
   console.log(`  ${EXPLORER}/tx/${txHash}`);
