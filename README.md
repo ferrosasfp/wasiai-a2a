@@ -87,6 +87,29 @@ npm start
 npm test
 ```
 
+### Hackathon E2E (end-to-end PYUSD settlement on Kite)
+
+Reproducible proof of the full x402 + Kite PYUSD path against the live
+production endpoints — discovery, canonical x402 `/verify`, on-chain
+`/settle`, and receipt verification. Auto-mints PYUSD via the
+permissionless `claim()` on the token contract if the wallet is empty.
+
+```bash
+# requires OPERATOR_PRIVATE_KEY in .env (any wallet with some native KITE for gas)
+node scripts/hackathon-e2e.mjs
+```
+
+Overrides (optional):
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `A2A_URL` | `https://wasiai-a2a-production.up.railway.app` | A2A gateway to hit |
+| `WASIAI_FACILITATOR_URL` | `https://wasiai-facilitator-production.up.railway.app` | Our canonical x402 facilitator (not Pieverse) |
+| `X402_PAYMENT_TOKEN` | `0x8E04D099…2ec9` | PYUSD contract address on Kite Testnet |
+| `KITE_TESTNET_RPC_URL` | `https://rpc-testnet.gokite.ai/` | Kite RPC endpoint |
+
+The script prints a tx hash + explorer URL on success.
+
 ---
 
 ## Environment Variables
