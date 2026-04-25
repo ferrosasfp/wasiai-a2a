@@ -200,8 +200,14 @@ function buildCanonicalBody(args: {
 }
 
 /**
- * POST al facilitator. Retorna `null` en error (network/non-2xx/error field).
+ * POST al facilitator. Retorna `null` en error (network/non-2xx/error field/timeout).
+ *
+ * AR-WKH-55-MNR-1 fix: el fetch lleva un AbortSignal.timeout(10s). Sin esto,
+ * un facilitator colgado (TCP accept + no response) bloquearía el invoke
+ * upstream durante el default de Node (~30-120s). Misma defensa que
+ * `discovery.ts` aplica en sus fetches.
  */
+const FACILITATOR_TIMEOUT_MS = 10_000;
 async function postFacilitator(
   path: '/verify' | '/settle',
   body: unknown,
@@ -212,6 +218,7 @@ async function postFacilitator(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(FACILITATOR_TIMEOUT_MS),
     });
     if (!res.ok) return null;
     return await res.json();
