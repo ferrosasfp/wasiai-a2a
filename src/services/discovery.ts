@@ -5,12 +5,39 @@
 import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
 import type {
   Agent,
+  AgentPaymentSpec,
   AgentStatus,
   DiscoveryQuery,
   DiscoveryResult,
   RegistryConfig,
 } from '../types/index.js';
 import { registryService } from './registry.js';
+
+/**
+ * Type guard para `agent.payment` (WKH-55).
+ * Pass-through del raw object — NO normaliza method/chain a lowercase.
+ * Retorna undefined si el campo esta ausente o malformado.
+ */
+function readPayment(
+  raw: Record<string, unknown>,
+): AgentPaymentSpec | undefined {
+  const p = raw.payment;
+  if (!p || typeof p !== 'object') return undefined;
+  const obj = p as Record<string, unknown>;
+  if (
+    typeof obj.method !== 'string' ||
+    typeof obj.chain !== 'string' ||
+    typeof obj.contract !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    method: obj.method,
+    chain: obj.chain,
+    contract: obj.contract as `0x${string}`,
+    asset: typeof obj.asset === 'string' ? obj.asset : undefined,
+  };
+}
 
 export const discoveryService = {
   /**
@@ -212,6 +239,7 @@ export const discoveryService = {
       invocationNote:
         'The invokeUrl is an internal reference. To invoke this agent, use POST /compose or POST /orchestrate on the WasiAI A2A gateway.',
       metadata: raw,
+      payment: readPayment(raw),
     };
   },
 

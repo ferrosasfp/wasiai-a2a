@@ -107,6 +107,59 @@ Extender WasiAI-a2a como gateway neutral multi-rail (no sólo Kite x402).
 - [ ] HU-101: Compose registry case-sensitivity fix
 - [ ] HU-102: Documentar reproducción E2E en README
 
+### E12: WKH-55 Technical Debt (Post-DONE)
+
+**TD-WKH-55-LIGHT** — Sugerencias CR + upgrade arquitectónico menor. NO bloquea producción.
+
+- [ ] **TD-WKH-55-1**: Race condition balance/settle (AR-MNR-2)
+  - **Descripción**: Dos invokes paralelos del mismo agente pueden ambos pasar el pre-flight balance check pero solo 1 settle con éxito.
+  - **Archivo**: `src/lib/downstream-payment.ts:343-370` (readOperatorBalance)
+  - **Solución V2**: Investigar optimistic locking en Fuji nonce (si `wasiai-facilitator` soporta idempotency key)
+  - **Estimación**: L
+  - **Prioridad**: BAJA (concurrencia baja esperada)
+
+- [ ] **TD-WKH-55-2**: Comments ES/EN consistency (CR-MNR-1)
+  - **Descripción**: Comentarios mezclados español/inglés, algunos sin tildes (ej: "inyeccion" → "inyección")
+  - **Archivos**: `src/lib/downstream-payment.ts` (múltiples líneas)
+  - **Solución**: Unificar a inglés (idioma codebase)
+  - **Estimación**: S
+  - **Prioridad**: BAJA
+
+- [ ] **TD-WKH-55-3**: Underscore prefix pattern (CR-MNR-2)
+  - **Descripción**: `_warnedDefaultUsdc` usa underscore (patrón Python, no idiomatic en TS)
+  - **Archivo**: `src/lib/downstream-payment.ts:38`
+  - **Solución**: Renombrar a `warnedDefaultUsdc` (sin underscore)
+  - **Estimación**: XS
+  - **Prioridad**: BAJA
+
+- [ ] **TD-WKH-55-4**: DownstreamLogger consolidation (CR-MNR-3)
+  - **Descripción**: `DownstreamLogger` interface definida en 3 sitios (types + constant + usage)
+  - **Archivos**: `src/types/index.ts`, `src/lib/downstream-payment.ts`
+  - **Solución**: Exportar ÚNICO desde `types/index.ts`, importar en downstream-payment
+  - **Estimación**: S
+  - **Prioridad**: BAJA
+
+- [ ] **TD-WKH-55-5**: Test naming clarity (CR-MNR-6)
+  - **Descripción**: Tests T-W2-01..14 numeración mecánica, poco descriptivos
+  - **Archivo**: `src/lib/downstream-payment.test.ts`
+  - **Solución**: Renombrar a descriptivos (T-FlagOff, T-PreflightBalance, T-InsufficientBalance, etc.)
+  - **Estimación**: M
+  - **Prioridad**: BAJA
+
+- [ ] **TD-WKH-55-6**: toMatchObject → exact matchers (AR-MNR-3)
+  - **Descripción**: Mock response shape usa `toMatchObject` (permisivo, puede tener campos extra). Mejorar precisión.
+  - **Archivo**: `src/lib/downstream-payment.test.ts` (tests `/verify` + `/settle` response)
+  - **Solución**: Cambiar a exact shape matchers (ej: `expect(res).toEqual({...})`)
+  - **Estimación**: S
+  - **Prioridad**: BAJA
+
+- [ ] **TD-WKH-55-7**: Streaming JSON optimization (CR-MNR-5)
+  - **Descripción**: Body x402 serializa 2 veces (JSON.stringify + parse interno facilitator). Perf despreciable (< 1ms).
+  - **Archivo**: `src/lib/downstream-payment.ts:220` (postFacilitator)
+  - **Solución**: Stream JSON OPCIONAL (backpressure handling si facilitator rate-limits)
+  - **Estimación**: M
+  - **Prioridad**: BAJA (optimización cosmética)
+
 ---
 
-*Última actualización: 2026-04-21*
+*Última actualización: 2026-04-24*
