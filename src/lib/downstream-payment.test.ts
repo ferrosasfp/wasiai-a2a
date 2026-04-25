@@ -86,9 +86,9 @@ afterEach(() => {
   delete process.env.FUJI_USDC_ADDRESS;
 });
 
-// ─── T-W2-01: flag off → returns null sin tocar nada (CD-NEW-SDD-7, AC-1) ──
+// ─── Flag off → returns null sin tocar nada (CD-NEW-SDD-7, AC-1) ──
 describe('signAndSettleDownstream — flag off', () => {
-  it('returns null without calling viem or fetch when flag is unset', async () => {
+  it('returns null without calling viem or fetch when flag is unset (T-W2-01 / AC-1)', async () => {
     // Arrange
     const { signAndSettleDownstream } = await importWithFlag(false);
     const agent = makeAgent();
@@ -106,10 +106,9 @@ describe('signAndSettleDownstream — flag off', () => {
   });
 });
 
-// ─── T-W2-02..14: flag on, varios escenarios ────────────────────────
+// ─── Flag on, varios escenarios (T-W2-02..14) ────────────────────────
 describe('signAndSettleDownstream — flag on', () => {
-  // T-W2-02: agent.payment undefined → null + log info (AC-5 caso ausente)
-  it('returns null when agent.payment is undefined', async () => {
+  it('returns null when agent.payment is undefined (T-W2-02 / AC-5 absent)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const agent = makeAgent({ payment: undefined });
     const logger = makeLogger();
@@ -121,8 +120,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  // T-W2-03: method !== 'x402' → null (AC-5)
-  it('returns null when method is not x402', async () => {
+  it('returns null when method is not x402 (T-W2-03 / AC-5)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const agent = makeAgent({
       payment: {
@@ -136,8 +134,7 @@ describe('signAndSettleDownstream — flag on', () => {
     expect(mockSignTypedData).not.toHaveBeenCalled();
   });
 
-  // T-W2-04: chain !== 'avalanche' → null (AC-6)
-  it('returns null when chain is not avalanche', async () => {
+  it('returns null when chain is not avalanche (T-W2-04 / AC-6)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const agent = makeAgent({
       payment: { method: 'x402', chain: 'polygon', contract: PAYTO_ADDR },
@@ -147,8 +144,7 @@ describe('signAndSettleDownstream — flag on', () => {
     expect(mockSignTypedData).not.toHaveBeenCalled();
   });
 
-  // T-W2-05: payTo formato invalido → null (R-1)
-  it('returns null when contract has invalid format', async () => {
+  it('returns null when contract has invalid format (T-W2-05 / R-1)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const agent = makeAgent({
       payment: {
@@ -166,8 +162,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  // T-W2-06: payTo zero-address → null
-  it('returns null when contract is zero-address', async () => {
+  it('returns null when contract is zero-address (T-W2-06 / R-1)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const agent = makeAgent({
       payment: {
@@ -185,8 +180,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  // T-W2-07: balance < value → null (AC-10)
-  it('returns null when operator balance < required value', async () => {
+  it('returns null when operator balance < required value (T-W2-07 / AC-10)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(0n); // balance 0
     const logger = makeLogger();
@@ -199,8 +193,7 @@ describe('signAndSettleDownstream — flag on', () => {
     expect(mockSignTypedData).not.toHaveBeenCalled();
   });
 
-  // T-W2-08: balance read RPC throws → null
-  it('returns null when balance read RPC fails', async () => {
+  it('returns null when balance read RPC fails (T-W2-08 / AC-10)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockRejectedValueOnce(new Error('RPC down'));
     const logger = makeLogger();
@@ -212,8 +205,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  // T-W2-09: signTypedData throws → null
-  it('returns null when signTypedData throws', async () => {
+  it('returns null when signTypedData throws (T-W2-09 / AC-2)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockRejectedValueOnce(new Error('keystore error'));
@@ -226,8 +218,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  // T-W2-10: facilitator /verify devuelve verified=false → null (AC-4)
-  it('returns null when /verify returns verified=false', async () => {
+  it('returns null when /verify returns verified=false (T-W2-10 / AC-4)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockResolvedValueOnce('0xSIG');
@@ -243,8 +234,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  // T-W2-11: facilitator /settle 500 → null (AC-4)
-  it('returns null when /settle returns 500', async () => {
+  it('returns null when /settle returns 500 (T-W2-11 / AC-4)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockResolvedValueOnce('0xSIG');
@@ -262,8 +252,61 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  // T-W2-12: happy path → returns DownstreamResult (AC-3 unit-level)
-  it('returns DownstreamResult when /verify ok and /settle ok', async () => {
+  // AR-MNR-2: el body raw debe surfacing al log warn cuando facilitator 5xx
+  it('logs facilitatorErrorBody when /settle returns non-2xx (T-W2-11b / AR-MNR-2)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
+    mockSignTypedData.mockResolvedValueOnce('0xSIG');
+    vi.mocked(globalThis.fetch)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ verified: true }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response('nonce already used', { status: 409 }),
+      );
+    const logger = makeLogger();
+    await signAndSettleDownstream(makeAgent(), logger);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'SETTLE_FAILED',
+        facilitatorStatus: 409,
+        facilitatorErrorBody: 'nonce already used',
+      }),
+      expect.any(String),
+    );
+  });
+
+  // AR-MNR-2: si facilitator devuelve 200 + settled=false (race condition),
+  // el body parsed debe llegar al log para diagnostico
+  it('logs facilitatorBody when /settle returns 200 with settled=false (T-W2-11c / AR-MNR-2)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
+    mockSignTypedData.mockResolvedValueOnce('0xSIG');
+    vi.mocked(globalThis.fetch)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ verified: true }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ settled: false, error: 'race-detected' }),
+          { status: 200 },
+        ),
+      );
+    const logger = makeLogger();
+    await signAndSettleDownstream(makeAgent(), logger);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'SETTLE_FAILED',
+        facilitatorBody: expect.objectContaining({
+          settled: false,
+          error: 'race-detected',
+        }),
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('returns DownstreamResult when /verify ok and /settle ok (T-W2-12 / AC-3)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockResolvedValueOnce('0xSIG');
@@ -290,8 +333,7 @@ describe('signAndSettleDownstream — flag on', () => {
     });
   });
 
-  // T-W2-13: domain EIP-712 verification (AC-2, CD-8)
-  it('signs with correct EIP-712 domain (USDC Fuji) and TransferWithAuthorization', async () => {
+  it('signs with correct EIP-712 domain (USDC Fuji) and TransferWithAuthorization (T-W2-13 / AC-2, CD-8)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockResolvedValueOnce('0xSIG');
@@ -330,8 +372,31 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  // T-W2-14: AC-9 — guard de decimales
-  it('computes atomic value with 6 decimals (NOT 18 like Kite/PYUSD)', async () => {
+  // CR-MNR-7: priceUsdc guard
+  it.each([
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['-Infinity', Number.NEGATIVE_INFINITY],
+    ['zero', 0],
+    ['negative', -1],
+  ])(
+    'returns null with INVALID_PRICE when priceUsdc is %s (T-W2-15 / CR-MNR-7)',
+    async (_label, badPrice) => {
+      const { signAndSettleDownstream } = await importWithFlag(true);
+      const logger = makeLogger();
+      const agent = makeAgent({ priceUsdc: badPrice });
+      const result = await signAndSettleDownstream(agent, logger);
+      expect(result).toBeNull();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'INVALID_PRICE' }),
+        expect.any(String),
+      );
+      expect(mockReadContract).not.toHaveBeenCalled();
+      expect(mockSignTypedData).not.toHaveBeenCalled();
+    },
+  );
+
+  it('computes atomic value with 6 decimals not 18 like Kite/PYUSD (T-W2-14 / AC-9)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockResolvedValueOnce('0xSIG');
