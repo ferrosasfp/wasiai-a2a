@@ -3,6 +3,10 @@
  */
 
 import { getPaymentAdapter } from '../adapters/registry.js';
+import {
+  type DownstreamResult,
+  signAndSettleDownstream,
+} from '../lib/downstream-payment.js';
 import type {
   Agent,
   ComposeRequest,
@@ -67,7 +71,11 @@ export const composeService = {
           : step.input;
       const startTime = Date.now();
       try {
-        const { output, txHash } = await this.invokeAgent(agent, input, a2aKey);
+        const { output, txHash, downstream } = await this.invokeAgent(
+          agent,
+          input,
+          a2aKey,
+        );
         const latencyMs = Date.now() - startTime;
         const result: StepResult = {
           agent,
@@ -75,6 +83,11 @@ export const composeService = {
           costUsdc: agent.priceUsdc,
           latencyMs,
           txHash,
+          ...(downstream && {
+            downstreamTxHash: downstream.txHash,
+            downstreamBlockNumber: downstream.blockNumber,
+            downstreamSettledAmount: downstream.settledAmount,
+          }),
         };
         results.push(result);
         eventService
@@ -165,7 +178,15 @@ export const composeService = {
     agent: Agent,
     input: Record<string, unknown>,
     a2aKey?: string,
-  ): Promise<{ output: unknown; txHash?: string }> {
+    logger?: {
+      warn: (obj: unknown, msg?: string) => void;
+      info: (obj: unknown, msg?: string) => void;
+    },
+  ): Promise<{
+    output: unknown;
+    txHash?: string;
+    downstream?: DownstreamResult;
+  }> {
     const registries = await registryService.getEnabled();
     const registry = registries.find(
       (r: RegistryConfig) => r.name === agent.registry,
@@ -220,6 +241,15 @@ export const composeService = {
         `[Compose] x402 settled for ${agent.slug} — txHash: ${txHash}`,
       );
     }
-    return { output, txHash };
+
+    // ─── WKH-55: Downstream x402 hook (AC-1..AC-10) ──────────────────
+    // Defensive logger fallback: si el caller no paso uno, usamos console.
+    const _logger = logger ?? {
+      warn: (obj: unknown, _msg?: string) => console.warn('[Downstream]', obj),
+      info: (obj: unknown, _msg?: string) => console.log('[Downstream]', obj),
+    };
+    const downstream = await signAndSettleDownstream(agent, _logger);
+
+    return { output, txHash, ...(downstream && { downstream }) };
   },
 };

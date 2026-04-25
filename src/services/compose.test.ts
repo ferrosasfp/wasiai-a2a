@@ -30,10 +30,17 @@ vi.mock('./llm/transform.js', () => ({
     latencyMs: 0,
   }),
 }));
+// WKH-55: mock del modulo downstream-payment (DT-K)
+vi.mock('../lib/downstream-payment.js', () => ({
+  signAndSettleDownstream: vi.fn().mockResolvedValue(null),
+}));
 
+import { signAndSettleDownstream } from '../lib/downstream-payment.js';
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { registryService } from './registry.js';
+
+const mockDownstream = vi.mocked(signAndSettleDownstream);
 
 function makeAgent(o: Partial<Agent> = {}): Agent {
   return {
@@ -87,6 +94,8 @@ beforeEach(() => {
     total: 0,
     registries: [],
   });
+  // WKH-55: default downstream mock = null (no-op)
+  mockDownstream.mockResolvedValue(null);
 });
 
 describe('composeService.invokeAgent', () => {
@@ -308,5 +317,82 @@ describe('composeService.invokeAgent', () => {
       expect(logStr).not.toContain('SECRET_SIG_VALUE');
     }
     logSpy.mockRestore();
+  });
+});
+
+// ─── WKH-55: Downstream x402 hook (compose service integration) ────
+describe('composeService — WKH-55 downstream x402 hook', () => {
+  // T-W3-01: AC-1 — flag off / no payment → downstream undefined in result
+  it('does NOT propagate downstream when signAndSettleDownstream returns null (AC-1)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockDownstream.mockResolvedValue(null);
+    const agent = makeAgent({ priceUsdc: 0, payment: undefined });
+    mockFetchOk();
+    const result = await composeService.invokeAgent(agent, { foo: 'bar' }, 'k1');
+    expect(result.downstream).toBeUndefined();
+  });
+
+  // T-W3-02: AC-3 — downstream success → propagated to StepResult
+  it('propagates downstreamTxHash to StepResult when downstream succeeds', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockDownstream.mockResolvedValue({
+      txHash: '0xabc',
+      blockNumber: 1,
+      settledAmount: '500000',
+    });
+    const agent = makeAgent({
+      slug: 'ds-agent',
+      priceUsdc: 0,
+      payment: {
+        method: 'x402',
+        chain: 'avalanche',
+        contract: '0x000000000000000000000000000000000000aBcD',
+      },
+    });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk();
+
+    const composeResult = await composeService.compose({
+      steps: [{ agent: agent.slug, input: {} }],
+    });
+
+    expect(composeResult.success).toBe(true);
+    expect(composeResult.steps[0].downstreamTxHash).toBe('0xabc');
+    expect(composeResult.steps[0].downstreamBlockNumber).toBe(1);
+    expect(composeResult.steps[0].downstreamSettledAmount).toBe('500000');
+  });
+
+  // T-W3-03: AC-4 — downstream returns null → invoke result preserved sin downstream*
+  it('returns invoke result without downstreamTxHash when downstream fails', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockDownstream.mockResolvedValue(null);
+    const agent = makeAgent({ priceUsdc: 0 });
+    mockFetchOk();
+    const result = await composeService.invokeAgent(agent, {}, 'k1');
+    expect(result.output).toBe('ok');
+    expect(result.downstream).toBeUndefined();
+  });
+
+  // T-W3-04: AC-12 — snapshot regresion fetch body
+  it('sends bit-exact same fetch body as baseline when flag off (AC-12)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockDownstream.mockResolvedValue(null); // simula flag off / no-op
+    const agent = makeAgent({ priceUsdc: 0, payment: undefined });
+    const input = { task: 'translate', text: 'hola' };
+    mockFetchOk();
+    await composeService.invokeAgent(agent, input, 'a2a-key-1');
+
+    // Solo deberia haber 1 llamada al marketplace (no facilitator porque downstream es no-op)
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe(agent.invokeUrl);
+    expect(init).toMatchObject({
+      method: 'POST',
+      headers: expect.objectContaining({
+        'Content-Type': 'application/json',
+        'x-a2a-key': 'a2a-key-1',
+      }),
+    });
+    expect(init.body).toBe(JSON.stringify(input));
   });
 });

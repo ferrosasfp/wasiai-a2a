@@ -64,6 +64,17 @@ export interface RegistrySchema {
 
 export type AgentStatus = 'active' | 'inactive' | 'unreachable';
 
+/**
+ * Payment specification declared by an agent in its agent card (WKH-55).
+ * Pass-through del raw response — no se normaliza chain/method (preservar shape).
+ */
+export interface AgentPaymentSpec {
+  method: string; // e.g. 'x402'
+  chain: string; // e.g. 'avalanche'
+  contract: `0x${string}`; // payTo on-chain address
+  asset?: string; // e.g. 'USDC' (opcional, pass-through)
+}
+
 export interface AgentFieldMapping {
   id?: string;
   name?: string;
@@ -101,6 +112,8 @@ export interface Agent {
   verified: boolean;
   status: AgentStatus;
   metadata?: Record<string, unknown>;
+  /** Payment spec del agent card (WKH-55). Undefined si el registry no lo expone. */
+  payment?: AgentPaymentSpec;
 }
 
 // ============================================================
@@ -166,6 +179,12 @@ export interface StepResult {
   cacheHit?: boolean | 'SKIPPED';
   /** Latency of schema transform (ms) */
   transformLatencyMs?: number;
+  /** Hash de la tx downstream Fuji USDC settle (WKH-55) */
+  downstreamTxHash?: string;
+  /** Block number en Fuji donde se confirmo el downstream settle (WKH-55) */
+  downstreamBlockNumber?: number;
+  /** Atomic units (string, 6-dec USDC) que se settearon downstream (WKH-55) */
+  downstreamSettledAmount?: string;
 }
 
 // ============================================================

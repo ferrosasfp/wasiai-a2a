@@ -149,6 +149,49 @@ describe('discoveryService', () => {
     });
   });
 
+  describe('WKH-55 AC-7: mapAgent propagates raw.payment to agent.payment', () => {
+    it('mapAgent maps raw.payment to agent.payment when present and valid', () => {
+      const registry = makeRegistry();
+      const raw = {
+        id: '1',
+        slug: 'agent-1',
+        name: 'A1',
+        description: 'd',
+        capabilities: ['x'],
+        price: 0.5,
+        status: 'active',
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain: 'avalanche',
+          contract: '0x000000000000000000000000000000000000aBcD',
+        },
+      };
+      const agent = discoveryService.mapAgent(registry, raw);
+      expect(agent.payment).toEqual({
+        method: 'x402',
+        asset: 'USDC',
+        chain: 'avalanche',
+        contract: '0x000000000000000000000000000000000000aBcD',
+      });
+    });
+
+    it('mapAgent leaves agent.payment undefined when raw.payment is absent', () => {
+      const registry = makeRegistry();
+      const raw = {
+        id: '1',
+        slug: 'agent-1',
+        name: 'A1',
+        description: 'd',
+        capabilities: ['x'],
+        price: 0.5,
+        status: 'active',
+      };
+      const agent = discoveryService.mapAgent(registry, raw);
+      expect(agent.payment).toBeUndefined();
+    });
+  });
+
   describe('AC-9: verified + includeInactive combine with AND logic', () => {
     it('returns only verified agents of all statuses', async () => {
       setupRegistryResponse([
