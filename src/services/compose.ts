@@ -4,6 +4,7 @@
 
 import { getPaymentAdapter } from '../adapters/registry.js';
 import {
+  type DownstreamLogger,
   type DownstreamResult,
   signAndSettleDownstream,
 } from '../lib/downstream-payment.js';
@@ -178,10 +179,7 @@ export const composeService = {
     agent: Agent,
     input: Record<string, unknown>,
     a2aKey?: string,
-    logger?: {
-      warn: (obj: unknown, msg?: string) => void;
-      info: (obj: unknown, msg?: string) => void;
-    },
+    logger?: DownstreamLogger,
   ): Promise<{
     output: unknown;
     txHash?: string;
@@ -243,12 +241,12 @@ export const composeService = {
     }
 
     // ─── WKH-55: Downstream x402 hook (AC-1..AC-10) ──────────────────
-    // Defensive logger fallback: si el caller no paso uno, usamos console.
-    const _logger = logger ?? {
+    // Defensive logger fallback: si el caller no pasó uno, usamos console.
+    const effectiveLogger: DownstreamLogger = logger ?? {
       warn: (obj: unknown, _msg?: string) => console.warn('[Downstream]', obj),
       info: (obj: unknown, _msg?: string) => console.log('[Downstream]', obj),
     };
-    const downstream = await signAndSettleDownstream(agent, _logger);
+    const downstream = await signAndSettleDownstream(agent, effectiveLogger);
 
     return { output, txHash, ...(downstream && { downstream }) };
   },

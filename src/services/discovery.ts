@@ -16,7 +16,7 @@ import { registryService } from './registry.js';
 /**
  * Type guard para `agent.payment` (WKH-55).
  * Pass-through del raw object — NO normaliza method/chain a lowercase.
- * Retorna undefined si el campo esta ausente o malformado.
+ * Retorna undefined si el campo está ausente o malformado.
  */
 function readPayment(
   raw: Record<string, unknown>,

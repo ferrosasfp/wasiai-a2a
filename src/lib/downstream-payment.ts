@@ -2,7 +2,7 @@
  * Downstream x402 Payment — Avalanche Fuji USDC (WKH-55)
  *
  * Aislado del adapter Kite (CD-NEW-SDD-1). NUNCA throw (CD-NEW-SDD-6).
- * Returns null en cualquier skip o failure — el caller logea y continua.
+ * Returns null en cualquier skip o failure — el caller logea y continúa.
  */
 import { randomBytes } from 'node:crypto';
 import {
@@ -51,6 +51,7 @@ export type DownstreamSkipCode =
   | 'CHAIN_NOT_SUPPORTED'
   | 'INVALID_PAY_TO_FORMAT'
   | 'ZERO_PAY_TO'
+  | 'INVALID_PRICE'
   | 'INSUFFICIENT_BALANCE'
   | 'BALANCE_READ_FAILED'
   | 'SIGNING_FAILED'
@@ -64,10 +65,46 @@ export interface DownstreamLogger {
   info: (obj: unknown, msg?: string) => void;
 }
 
+// ─── x402 wire types (CR-MNR-4: concrete shapes for facilitator I/O) ─
+export interface X402Authorization {
+  from: `0x${string}`;
+  to: `0x${string}`;
+  value: string;
+  validAfter: string;
+  validBefore: string;
+  nonce: `0x${string}`;
+}
+
+export interface X402CanonicalBody {
+  x402Version: 2;
+  resource: { url: string };
+  accepted: {
+    scheme: typeof X402_SCHEME;
+    network: typeof FUJI_NETWORK;
+    amount: string;
+    asset: `0x${string}`;
+    payTo: `0x${string}`;
+    maxTimeoutSeconds: typeof MAX_TIMEOUT_SECONDS;
+    extra: { assetTransferMethod: 'eip3009' };
+  };
+  payload: { signature: string; authorization: X402Authorization };
+}
+
+export interface X402VerifyResponse {
+  verified?: boolean;
+}
+
+export interface X402SettleResponse {
+  settled?: boolean;
+  transactionHash?: string;
+  blockNumber?: number;
+  amount?: string;
+}
+
 // ─── Helpers internos ───────────────────────────────────────────────
 
 /**
- * Resuelve la direccion USDC Fuji desde env, con warn-once si esta ausente.
+ * Resuelve la dirección USDC Fuji desde env, con warn-once si está ausente.
  * Retorna el default canonical Circle USDC en Fuji.
  */
 function getFujiUsdcAddress(): `0x${string}` {
@@ -172,17 +209,10 @@ function buildClients(): {
  * NO se importa nada de kite-ozone (CD-NEW-SDD-1) — body construido inline.
  */
 function buildCanonicalBody(args: {
-  authorization: {
-    from: `0x${string}`;
-    to: `0x${string}`;
-    value: string;
-    validAfter: string;
-    validBefore: string;
-    nonce: `0x${string}`;
-  };
+  authorization: X402Authorization;
   signature: string;
   asset: `0x${string}`;
-}): unknown {
+}): X402CanonicalBody {
   return {
     x402Version: 2,
     resource: { url: 'https://wasiai.ai/downstream' },
@@ -200,7 +230,9 @@ function buildCanonicalBody(args: {
 }
 
 /**
- * POST al facilitator. Retorna `null` en error (network/non-2xx/error field/timeout).
+ * POST al facilitator. Retorna un descriptor estructurado en lugar de `null`
+ * crudo, para que el caller pueda distinguir verify/settle failures por su
+ * cuerpo raw (AR-MNR-2: race condition observability).
  *
  * AR-WKH-55-MNR-1 fix: el fetch lleva un AbortSignal.timeout(10s). Sin esto,
  * un facilitator colgado (TCP accept + no response) bloquearía el invoke
@@ -208,10 +240,22 @@ function buildCanonicalBody(args: {
  * `discovery.ts` aplica en sus fetches.
  */
 const FACILITATOR_TIMEOUT_MS = 10_000;
-async function postFacilitator(
+
+interface FacilitatorOk<T> {
+  ok: true;
+  data: T;
+}
+interface FacilitatorErr {
+  ok: false;
+  status: number | null; // null = network/timeout (no HTTP response)
+  body: string | null;
+}
+type FacilitatorResponse<T> = FacilitatorOk<T> | FacilitatorErr;
+
+async function postFacilitator<T>(
   path: '/verify' | '/settle',
-  body: unknown,
-): Promise<unknown | null> {
+  body: X402CanonicalBody,
+): Promise<FacilitatorResponse<T>> {
   const url = `${getFacilitatorUrl()}${path}`;
   try {
     const res = await fetch(url, {
@@ -220,10 +264,20 @@ async function postFacilitator(
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(FACILITATOR_TIMEOUT_MS),
     });
-    if (!res.ok) return null;
-    return await res.json();
+    if (!res.ok) {
+      // Capture raw body for AR-MNR-2 (best-effort, never throw)
+      let raw: string | null = null;
+      try {
+        raw = await res.text();
+      } catch {
+        raw = null;
+      }
+      return { ok: false, status: res.status, body: raw };
+    }
+    const data = (await res.json()) as T;
+    return { ok: true, data };
   } catch {
-    return null;
+    return { ok: false, status: null, body: null };
   }
 }
 
@@ -239,7 +293,7 @@ const TRANSFER_WITH_AUTHORIZATION_TYPES = {
   ],
 } as const;
 
-// ─── API publica (UNICA exportacion funcional) ──────────────────────
+// ─── API pública (ÚNICA exportación funcional) ──────────────────────
 
 /**
  * Sign EIP-3009 + POST /verify + POST /settle. NEVER throws (CD-NEW-SDD-6).
@@ -248,7 +302,8 @@ const TRANSFER_WITH_AUTHORIZATION_TYPES = {
  *  - flag `WASIAI_DOWNSTREAM_X402` no es 'true'
  *  - agent.payment ausente / malformado
  *  - method !== 'x402' o chain !== 'avalanche'
- *  - payTo invalido o zero
+ *  - payTo inválido o zero
+ *  - priceUsdc no es un número finito positivo
  *  - balance insuficiente
  *  - balance read RPC failure
  *  - signing failure
@@ -256,7 +311,7 @@ const TRANSFER_WITH_AUTHORIZATION_TYPES = {
  *  - facilitator /settle devuelve settled=false / network error / 5xx
  *  - config missing (OPERATOR_PRIVATE_KEY o FUJI_RPC_URL ausentes)
  *
- * Retorna `DownstreamResult` SOLO cuando facilitator confirmo `settled: true`
+ * Retorna `DownstreamResult` SOLO cuando facilitator confirmó `settled: true`
  * con `transactionHash` y `blockNumber` poblados.
  */
 export async function signAndSettleDownstream(
@@ -328,7 +383,22 @@ export async function signAndSettleDownstream(
   }
   const { publicClient, walletClient, account } = clients;
 
-  // 7. Compute atomic value (CD-NEW-SDD-5, AC-9)
+  // 7a. priceUsdc guard (CR-MNR-7: explicit edge-case for non-finite / non-positive
+  // price). Sin esto, valores como NaN, Infinity, -1, 0 o sub-atómicos como 5e-7
+  // se filtran al `parseUnits` y ahí pueden producir 0n o un throw genérico.
+  if (!Number.isFinite(agent.priceUsdc) || agent.priceUsdc <= 0) {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        code: 'INVALID_PRICE',
+        priceUsdc: agent.priceUsdc,
+      },
+      '[Downstream] priceUsdc must be a finite positive number',
+    );
+    return null;
+  }
+
+  // 7b. Compute atomic value (CD-NEW-SDD-5, AC-9)
   let value: bigint;
   try {
     value = computeAtomicValue(agent.priceUsdc);
@@ -417,34 +487,46 @@ export async function signAndSettleDownstream(
     signature,
     asset: usdcAddress,
   });
-  const verifyRes = (await postFacilitator('/verify', body)) as
-    | { verified?: boolean }
-    | null;
-  if (!verifyRes || verifyRes.verified !== true) {
+  const verifyRes = await postFacilitator<X402VerifyResponse>('/verify', body);
+  if (!verifyRes.ok || verifyRes.data.verified !== true) {
     logger.warn(
-      { agentSlug: agent.slug, code: 'VERIFY_FAILED' },
+      {
+        agentSlug: agent.slug,
+        code: 'VERIFY_FAILED',
+        ...(verifyRes.ok
+          ? {}
+          : {
+              facilitatorStatus: verifyRes.status,
+              facilitatorErrorBody: verifyRes.body,
+            }),
+      },
       '[Downstream] facilitator /verify failed or returned verified=false',
     );
     return null;
   }
 
   // 12. POST /settle
-  const settleRes = (await postFacilitator('/settle', body)) as
-    | {
-        settled?: boolean;
-        transactionHash?: string;
-        blockNumber?: number;
-        amount?: string;
-      }
-    | null;
+  const settleRes = await postFacilitator<X402SettleResponse>('/settle', body);
   if (
-    !settleRes ||
-    settleRes.settled !== true ||
-    !settleRes.transactionHash ||
-    typeof settleRes.blockNumber !== 'number'
+    !settleRes.ok ||
+    settleRes.data.settled !== true ||
+    !settleRes.data.transactionHash ||
+    typeof settleRes.data.blockNumber !== 'number'
   ) {
+    // AR-MNR-2: incluir el body raw del facilitator para distinguir race
+    // condition (ej: "nonce already used", "balance changed mid-flight") vs
+    // otros errores (5xx, malformed response, network).
     logger.warn(
-      { agentSlug: agent.slug, code: 'SETTLE_FAILED' },
+      {
+        agentSlug: agent.slug,
+        code: 'SETTLE_FAILED',
+        ...(settleRes.ok
+          ? { facilitatorBody: settleRes.data }
+          : {
+              facilitatorStatus: settleRes.status,
+              facilitatorErrorBody: settleRes.body,
+            }),
+      },
       '[Downstream] facilitator /settle failed or settled=false',
     );
     return null;
@@ -452,8 +534,8 @@ export async function signAndSettleDownstream(
 
   // 13. Success
   return {
-    txHash: settleRes.transactionHash as `0x${string}`,
-    blockNumber: settleRes.blockNumber,
-    settledAmount: settleRes.amount ?? value.toString(),
+    txHash: settleRes.data.transactionHash as `0x${string}`,
+    blockNumber: settleRes.data.blockNumber,
+    settledAmount: settleRes.data.amount ?? value.toString(),
   };
 }

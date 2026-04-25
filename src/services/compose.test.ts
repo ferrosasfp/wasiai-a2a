@@ -322,8 +322,7 @@ describe('composeService.invokeAgent', () => {
 
 // ─── WKH-55: Downstream x402 hook (compose service integration) ────
 describe('composeService — WKH-55 downstream x402 hook', () => {
-  // T-W3-01: AC-1 — flag off / no payment → downstream undefined in result
-  it('does NOT propagate downstream when signAndSettleDownstream returns null (AC-1)', async () => {
+  it('does NOT propagate downstream when signAndSettleDownstream returns null (T-W3-01 / AC-1)', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     mockDownstream.mockResolvedValue(null);
     const agent = makeAgent({ priceUsdc: 0, payment: undefined });
@@ -332,8 +331,7 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
     expect(result.downstream).toBeUndefined();
   });
 
-  // T-W3-02: AC-3 — downstream success → propagated to StepResult
-  it('propagates downstreamTxHash to StepResult when downstream succeeds', async () => {
+  it('propagates downstreamTxHash to StepResult when downstream succeeds (T-W3-02 / AC-3)', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     mockDownstream.mockResolvedValue({
       txHash: '0xabc',
@@ -362,8 +360,7 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
     expect(composeResult.steps[0].downstreamSettledAmount).toBe('500000');
   });
 
-  // T-W3-03: AC-4 — downstream returns null → invoke result preserved sin downstream*
-  it('returns invoke result without downstreamTxHash when downstream fails', async () => {
+  it('returns invoke result without downstreamTxHash when downstream fails (T-W3-03 / AC-4)', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     mockDownstream.mockResolvedValue(null);
     const agent = makeAgent({ priceUsdc: 0 });
@@ -373,8 +370,7 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
     expect(result.downstream).toBeUndefined();
   });
 
-  // T-W3-04: AC-12 — snapshot regresion fetch body
-  it('sends bit-exact same fetch body as baseline when flag off (AC-12)', async () => {
+  it('sends bit-exact same fetch body as baseline when flag off (T-W3-04 / AC-12)', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     mockDownstream.mockResolvedValue(null); // simula flag off / no-op
     const agent = makeAgent({ priceUsdc: 0, payment: undefined });
@@ -382,17 +378,19 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
     mockFetchOk();
     await composeService.invokeAgent(agent, input, 'a2a-key-1');
 
-    // Solo deberia haber 1 llamada al marketplace (no facilitator porque downstream es no-op)
+    // Sólo debería haber 1 llamada al marketplace (no facilitator porque downstream es no-op)
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const [url, init] = mockFetch.mock.calls[0];
     expect(url).toBe(agent.invokeUrl);
-    expect(init).toMatchObject({
-      method: 'POST',
-      headers: expect.objectContaining({
-        'Content-Type': 'application/json',
-        'x-a2a-key': 'a2a-key-1',
-      }),
-    });
+    // AR-MNR-3: pin EXACT method + EXACT header key set when flag-off, en
+    // lugar de un toMatchObject permisivo. Si compose agrega un header nuevo
+    // sin actualizar este snapshot, el test falla.
+    expect(init.method).toBe('POST');
+    expect(Object.keys(init.headers).sort()).toEqual(
+      ['Content-Type', 'x-a2a-key'].sort(),
+    );
+    expect(init.headers['Content-Type']).toBe('application/json');
+    expect(init.headers['x-a2a-key']).toBe('a2a-key-1');
     expect(init.body).toBe(JSON.stringify(input));
   });
 });
