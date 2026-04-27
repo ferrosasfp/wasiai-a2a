@@ -762,4 +762,62 @@ describe('composeService — WAS-V2-3-CLIENT integration (WKH-57)', () => {
     expect(mockDownstream).toHaveBeenCalledTimes(1);
     expect(result.steps[0].downstreamTxHash).toBe('0xfeeb');
   });
+
+  it('T-INT-02: payTo falls back to metadata.payment.contract when top-level payTo missing (WAS-V2-3-CLIENT-2)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockDownstream.mockResolvedValue({
+      txHash: '0xfeeb',
+      blockNumber: 42,
+      settledAmount: '1000', // 0.001 USDC in atomic units (6-dec)
+    });
+    // v2 schema drift: marketplace exposes payTo via payment.contract (nested),
+    // NOT via top-level metadata.payTo. Compose must fall back transparently.
+    const agent = makeAgent({
+      slug: 'wasi-chainlink-price',
+      priceUsdc: 0.001,
+      payment: {
+        method: 'x402',
+        chain: 'avalanche',
+        contract: '0xC01DEF0ca66b86E9F8655dc202347F1cf104b7A7',
+      },
+      metadata: {
+        payment: {
+          protocol: 'x402',
+          price: 0.001,
+          currency: 'USDC',
+          settlement: 'wasiai-native',
+          contract: '0xC01DEF0ca66b86E9F8655dc202347F1cf104b7A7',
+        },
+        // NOTE: no top-level payTo — must resolve from payment.contract
+      },
+    });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    // Self-contained upstream x402 mocks (mirrors T-INT-01 pattern)
+    mockSign.mockResolvedValueOnce({
+      xPaymentHeader: 'mockheader',
+      paymentRequest: {
+        authorization: {
+          from: '0xA',
+          to: '0xC01DEF0ca66b86E9F8655dc202347F1cf104b7A7',
+          value: '1000',
+          validAfter: '0',
+          validBefore: '9999999999',
+          nonce: '0x1234',
+        },
+        signature: '0xSIG',
+        network: 'eip155:43113',
+      },
+    });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xUPSTREAM' });
+    mockFetchOk();
+
+    const result = await composeService.compose({
+      steps: [{ agent: agent.slug, input: { q: 'price' } }],
+    });
+
+    expect(result.success).toBe(true);
+    // Downstream Fuji USDC settle fired end-to-end via fallback payTo
+    expect(mockDownstream).toHaveBeenCalledTimes(1);
+    expect(result.steps[0].downstreamTxHash).toBe('0xfeeb');
+  });
 });
