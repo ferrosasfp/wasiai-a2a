@@ -47,3 +47,4 @@
 | 054 | 2026-04-24 | Downstream x402 Payment — wasiai-a2a → wasiai-v2 Agents (Avalanche Fuji) (WKH-55) | feature | QUALITY | DONE | feat/wkh-55-downstream-x402-fuji |
 | 055 | 2026-04-26 | A2A Fast-Path en compose — passthrough estructurado entre agentes A2A-compliant (WKH-56) | feature | QUALITY | DONE | feat/055-wkh-56-a2a-fast-path ([done-report.md](055-wkh-56-a2a-fast-path/done-report.md)) |
 | 056 | 2026-04-26 | LLM Bridge Pro — model selector + verification + cache fingerprint + telemetry (WKH-57) | feature | QUALITY | DONE | feat/056-wkh-57-llm-bridge-pro ([done-report.md](056-wkh-57-llm-bridge-pro/done-report.md)) |
+| 057 | 2026-04-27 | Defensive fallback en discovery para v2 schema drift (WAS-V2-3-CLIENT / WKH-57) | bugfix | QUALITY | DONE | feat/057-wkh-57-was-v2-3-client ([done-report.md](057-wkh-57-was-v2-3-client/done-report.md)) |
