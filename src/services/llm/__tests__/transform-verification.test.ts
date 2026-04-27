@@ -164,6 +164,25 @@ describe('WKH-57 W0 helpers — selectModel', () => {
     };
     expect(selectModel(schema)).toBe('claude-sonnet-4-6');
   });
+
+  it('T-Ws7: defensive guards — non-object inputs fall back to Haiku (CD-12)', () => {
+    // null and undefined
+    expect(selectModel(null as unknown as Record<string, unknown>)).toBe(
+      'claude-haiku-4-5-20251001',
+    );
+    expect(selectModel(undefined)).toBe('claude-haiku-4-5-20251001');
+    // primitives (cast to bypass TS at the call site — runtime guard must catch them)
+    expect(selectModel('string' as unknown as Record<string, unknown>)).toBe(
+      'claude-haiku-4-5-20251001',
+    );
+    expect(selectModel(42 as unknown as Record<string, unknown>)).toBe(
+      'claude-haiku-4-5-20251001',
+    );
+    // arrays are typeof 'object' but must not be treated as schemas
+    expect(selectModel([] as unknown as Record<string, unknown>)).toBe(
+      'claude-haiku-4-5-20251001',
+    );
+  });
 });
 
 // ──────────────────────────────────────────────────────────────

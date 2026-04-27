@@ -10,7 +10,9 @@ import type { PricedModel } from './pricing.js';
 export function selectModel(
   schema: Record<string, unknown> | undefined,
 ): PricedModel {
-  if (!schema) return 'claude-haiku-4-5-20251001';
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+    return 'claude-haiku-4-5-20251001';
+  }
 
   const required = Array.isArray(schema.required) ? schema.required : [];
   if (required.length >= 5) return 'claude-sonnet-4-6';
