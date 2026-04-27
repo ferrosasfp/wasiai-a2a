@@ -104,6 +104,17 @@ describe('WKH-57 W0 helpers — canonicalJson / schemaHash', () => {
     const h = schemaHash({ required: ['x'] });
     expect(h).toMatch(/^[0-9a-f]{16}$/);
   });
+
+  it('T-Cp7: canonicalJson throws on circular reference', () => {
+    const a: Record<string, unknown> = { x: 1 };
+    a.self = a;
+    expect(() => canonicalJson(a)).toThrow(/circular/i);
+
+    // Also detect cycles via arrays
+    const arr: unknown[] = [1, 2];
+    arr.push(arr);
+    expect(() => canonicalJson(arr)).toThrow(/circular/i);
+  });
 });
 
 describe('WKH-57 W0 helpers — selectModel', () => {
