@@ -66,6 +66,11 @@ export const agentCardService = {
       capabilities: {
         streaming: false,
         pushNotifications: false,
+        // WKH-56: surface a2aCompliant only when agent.metadata explicitly
+        // declares `true`. Truthy values like 'yes' / 1 are NOT promoted.
+        // The field is OMITTED (not set to false) when absent to preserve
+        // backward-compat with consumers that validate exact shape.
+        ...(agent.metadata?.a2aCompliant === true && { a2aCompliant: true }),
       },
       skills,
       inputModes: ['text/plain'],
