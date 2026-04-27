@@ -13,6 +13,16 @@ import type {
 } from '../types/index.js';
 import { registryService } from './registry.js';
 
+// ─── WAS-V2-3-CLIENT (WKH-57) module-scoped warn dedup ────────────────
+// Set lives for process lifetime. Reset via `_resetFallbackWarnDedup()`
+// in test setUp to avoid cross-test contamination (CD-11).
+const _warnedFallbackSlugs = new Set<string>();
+
+/** TEST-ONLY: clears the dedup Set. NOT for production code paths. */
+export function _resetFallbackWarnDedup(): void {
+  _warnedFallbackSlugs.clear();
+}
+
 /**
  * Type guard para `agent.payment` (WKH-55).
  * Pass-through del raw object — NO normaliza method/chain a lowercase.
@@ -226,7 +236,7 @@ export const discoveryService = {
       capabilities: toArray(
         getNestedValue(raw, mapping.capabilities ?? 'capabilities'),
       ),
-      priceUsdc: Number(getNestedValue(raw, mapping.price ?? 'price') ?? 0),
+      priceUsdc: resolvePriceWithFallback(raw, mapping.price ?? 'price', slug),
       reputation: Number(
         getNestedValue(raw, mapping.reputation ?? 'reputation') ?? undefined,
       ),
@@ -329,4 +339,37 @@ export function parsePriceSafe(raw: unknown): number {
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
   }
   return 0;
+}
+
+/**
+ * Resolves agent.priceUsdc from a raw response, with v2 schema-drift fallback.
+ *
+ * - If `canonicalPath` is populated (even with 0), returns parsePriceSafe(canonical).
+ *   This preserves CD-2 backward-compat: explicit 0 from canonical wins.
+ * - Else attempts to read V2_PRICE_FALLBACK_FIELD ('price_per_call').
+ * - When the fallback IS taken (i.e. canonical was null/undefined AND fallback was
+ *   present), emits exactly one console.warn per slug per process (CD-3 + DT-B).
+ *
+ * @param raw  Raw registry response object.
+ * @param canonicalPath  Path configured by registry (e.g. 'price_per_call_usdc').
+ * @param slug  Agent slug for log dedup.
+ */
+function resolvePriceWithFallback(
+  raw: Record<string, unknown>,
+  canonicalPath: string,
+  slug: string,
+): number {
+  const canonical = getNestedValue(raw, canonicalPath);
+  if (canonical !== null && canonical !== undefined) {
+    return parsePriceSafe(canonical);
+  }
+  const fallback = getNestedValue(raw, V2_PRICE_FALLBACK_FIELD);
+  if (fallback === null || fallback === undefined) return 0;
+  if (!_warnedFallbackSlugs.has(slug)) {
+    _warnedFallbackSlugs.add(slug);
+    console.warn(
+      `[Discovery] price_per_call_usdc is null for agent "${slug}" — using fallback "price_per_call"`,
+    );
+  }
+  return parsePriceSafe(fallback);
 }
