@@ -6,6 +6,7 @@
  *         When unset → endpoints remain public (local dev behavior).
  */
 
+import { timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,12 +21,24 @@ import { eventService } from '../services/event.js';
 /**
  * Admin-token preHandler. Opt-in: only active when DASHBOARD_ADMIN_TOKEN
  * is configured. Callers must supply it via `X-Admin-Token` header.
+ *
+ * Uses crypto.timingSafeEqual to prevent byte-by-byte timing recovery of
+ * the admin token. Length-normalized buffer comparison rejects
+ * mismatched-length tokens before the constant-time check.
  */
 const requireAdminToken: preHandlerAsyncHookHandler = async (request, reply) => {
   const expected = process.env.DASHBOARD_ADMIN_TOKEN;
   if (!expected) return; // not configured → allow (dev mode)
   const provided = request.headers['x-admin-token'];
-  if (typeof provided !== 'string' || provided !== expected) {
+  if (typeof provided !== 'string') {
+    return reply.status(401).send({
+      error: 'unauthorized',
+      message: 'X-Admin-Token header required for dashboard API',
+    });
+  }
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
     return reply.status(401).send({
       error: 'unauthorized',
       message: 'X-Admin-Token header required for dashboard API',
