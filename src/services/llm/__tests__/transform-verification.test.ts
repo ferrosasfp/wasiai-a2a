@@ -433,10 +433,19 @@ describe('WKH-57 maybeTransform — retry loop (AC-3)', () => {
   });
 
   it('T-VER-4: retry fails on second attempt throws (AC-3 sad)', async () => {
-    setupLLMResponseSequence([
-      { transformFn: 'return { wrong: 1 };' },
-      { transformFn: 'return { still_wrong: 2 };' },
-    ]);
+    // AR MNR-4: drive responses via call-count + mockImplementation so the
+    // test does not depend on the order in which mockResolvedValueOnce
+    // queue entries are consumed.
+    let callCount = 0;
+    mockCreate.mockImplementation(() => {
+      callCount++;
+      const transformFn =
+        callCount === 1 ? 'return { wrong: 1 };' : 'return { still_wrong: 2 };';
+      return Promise.resolve({
+        content: [{ type: 'text', text: JSON.stringify({ transformFn }) }],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      });
+    });
 
     const schema = {
       required: ['query'],
