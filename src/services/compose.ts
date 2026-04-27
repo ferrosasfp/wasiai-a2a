@@ -93,20 +93,6 @@ export const composeService = {
           }),
         };
         results.push(result);
-        eventService
-          .track({
-            eventType: 'compose_step',
-            agentId: agent.slug,
-            agentName: agent.name,
-            registry: agent.registry,
-            status: 'success',
-            latencyMs,
-            costUsdc: agent.priceUsdc,
-            txHash,
-          })
-          .catch((err) =>
-            console.error('[Compose] event tracking failed:', err),
-          );
         totalCost += agent.priceUsdc;
         totalLatency += latencyMs;
         lastOutput = output;
@@ -162,6 +148,23 @@ export const composeService = {
             );
           }
         }
+        // ── WKH-56 (W3): emit compose_step event AFTER bridge resolved.
+        // metadata.bridge_type ∈ BridgeType for non-last steps, null otherwise.
+        eventService
+          .track({
+            eventType: 'compose_step',
+            agentId: agent.slug,
+            agentName: agent.name,
+            registry: agent.registry,
+            status: 'success',
+            latencyMs,
+            costUsdc: agent.priceUsdc,
+            txHash,
+            metadata: { bridge_type: result.bridgeType ?? null },
+          })
+          .catch((err) =>
+            console.error('[Compose] event tracking failed:', err),
+          );
       } catch (err) {
         eventService
           .track({

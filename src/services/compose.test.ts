@@ -539,4 +539,57 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
     // 3rd arg of maybeTransform(srcId, tgtId, output, schema) is the unwrapped payload
     expect(callArgs[2]).toEqual({ x: 1 });
   });
+
+  it('T-13: emits compose_step event with metadata.bridge_type (AC-6)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const transformMock = vi.mocked(maybeTransform);
+    transformMock.mockClear();
+    const trackSpy = vi.mocked(eventService.track);
+    trackSpy.mockClear();
+    trackSpy.mockResolvedValue({} as never);
+
+    const agent1 = makeAgent({
+      slug: 'a1',
+      id: 'agent-a1',
+      priceUsdc: 0,
+      metadata: { a2aCompliant: true },
+    });
+    const agent2 = makeAgent({
+      slug: 'a2',
+      id: 'agent-a2',
+      priceUsdc: 0,
+      metadata: { a2aCompliant: true },
+    });
+    vi.mocked(discoveryService.getAgent)
+      .mockResolvedValueOnce(agent1)
+      .mockResolvedValueOnce(agent2)
+      .mockResolvedValueOnce(agent2);
+
+    const a2aOutput = {
+      role: 'agent',
+      parts: [{ kind: 'data', data: { x: 1 } }],
+    };
+    mockFetchOk({ result: a2aOutput });
+    mockFetchOk({ result: a2aOutput });
+
+    await composeService.compose({
+      steps: [
+        { agent: 'a1', input: {} },
+        { agent: 'a2', input: {}, passOutput: true },
+      ],
+    });
+
+    // Event for first step → A2A_PASSTHROUGH
+    expect(trackSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'compose_step',
+        agentId: 'a1',
+        metadata: expect.objectContaining({ bridge_type: 'A2A_PASSTHROUGH' }),
+      }),
+    );
+
+    // Event for last step → bridge_type === null (no bridge after last step)
+    const lastCall = trackSpy.mock.calls[trackSpy.mock.calls.length - 1];
+    expect(lastCall[0].metadata?.bridge_type).toBeNull();
+  });
 });
