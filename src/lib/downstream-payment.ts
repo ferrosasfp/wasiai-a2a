@@ -271,6 +271,13 @@ async function postFacilitator<T>(
 ): Promise<FacilitatorResponse<T>> {
   const url = `${getFacilitatorUrl()}${path}`;
   try {
+    // CR-MNR-5: the body is materialized in-memory via JSON.stringify before
+    // fetch sends it. For the canonical x402 v2 body the size stays well
+    // under 2 KB, so the cost of "build JS object → serialize string → write
+    // to socket" is < 1 ms and not worth optimizing today. If this ever
+    // grows (e.g. multi-payload batch settles), a future hardening could
+    // switch to a streaming JSON encoder (e.g. fast-json-stringify or a
+    // ReadableStream) to avoid the intermediate string allocation.
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
