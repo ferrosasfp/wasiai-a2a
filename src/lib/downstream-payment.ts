@@ -17,7 +17,12 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { avalancheFuji } from 'viem/chains';
-import type { Agent } from '../types/index.js';
+import type { Agent, DownstreamLogger } from '../types/index.js';
+
+// Re-export for backward-compat: callers historically import
+// `DownstreamLogger` from this module (e.g. compose.ts). The canonical
+// definition now lives in `types/index.ts` (TD-WKH-55-4 / CR-MNR-3).
+export type { DownstreamLogger };
 
 // ─── Constants (DT-N) — env override + warn-once ────────────────────
 const DEFAULT_FUJI_USDC =
@@ -59,11 +64,6 @@ export type DownstreamSkipCode =
   | 'SETTLE_FAILED'
   | 'NETWORK_ERROR'
   | 'CONFIG_MISSING';
-
-export interface DownstreamLogger {
-  warn: (obj: unknown, msg?: string) => void;
-  info: (obj: unknown, msg?: string) => void;
-}
 
 // ─── x402 wire types (CR-MNR-4: concrete shapes for facilitator I/O) ─
 export interface X402Authorization {
