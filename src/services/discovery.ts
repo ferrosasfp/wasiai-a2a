@@ -304,3 +304,29 @@ function toArray(value: unknown): string[] {
   if (typeof value === 'string') return value.split(',').map((s) => s.trim());
   return [];
 }
+
+// ─── WAS-V2-3-CLIENT (WKH-57): defensive fallback for v2 schema drift ──
+
+/** Field name used as fallback when registry's canonical price path is null/undefined. */
+const V2_PRICE_FALLBACK_FIELD = 'price_per_call' as const;
+
+/**
+ * Parses a raw value (number | string | null | undefined) into a finite,
+ * non-negative number. Returns 0 for any of: null, undefined, NaN, Infinity,
+ * negative number, non-parseable string, empty string.
+ *
+ * Pattern: mirrors `getProtocolFeeRate` in fee-charge.ts (Number.parseFloat
+ * + Number.isFinite). CD-7 safe floor applies — never inflate via fallback.
+ */
+export function parsePriceSafe(raw: unknown): number {
+  if (raw === null || raw === undefined) return 0;
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) && raw >= 0 ? raw : 0;
+  }
+  if (typeof raw === 'string') {
+    if (raw === '') return 0;
+    const parsed = Number.parseFloat(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  }
+  return 0;
+}

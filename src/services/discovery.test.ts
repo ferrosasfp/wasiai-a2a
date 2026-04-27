@@ -22,7 +22,7 @@ vi.mock('../lib/circuit-breaker.js', () => ({
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
-import { discoveryService } from './discovery.js';
+import { discoveryService, parsePriceSafe } from './discovery.js';
 import { registryService } from './registry.js';
 
 function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig {
@@ -233,5 +233,31 @@ describe('discoveryService', () => {
         'inactive-verified',
       ]);
     });
+  });
+});
+
+describe('parsePriceSafe (W0 — WAS-V2-3-CLIENT helper)', () => {
+  it('T-PARSE-1: number passthrough returns finite positive', () => {
+    expect(parsePriceSafe(0.05)).toBe(0.05);
+  });
+  it('T-PARSE-2: parseable string returns parsed number', () => {
+    expect(parsePriceSafe('0.05')).toBe(0.05);
+  });
+  it('T-PARSE-3: non-parseable string returns 0', () => {
+    expect(parsePriceSafe('free')).toBe(0);
+    expect(parsePriceSafe('N/A')).toBe(0);
+  });
+  it('T-PARSE-4: null/undefined return 0', () => {
+    expect(parsePriceSafe(null)).toBe(0);
+    expect(parsePriceSafe(undefined)).toBe(0);
+  });
+  it('T-PARSE-5: negative/NaN/Infinity return 0 (CD-7 safe floor)', () => {
+    expect(parsePriceSafe(-1.0)).toBe(0);
+    expect(parsePriceSafe(Number.NaN)).toBe(0);
+    expect(parsePriceSafe(Number.POSITIVE_INFINITY)).toBe(0);
+    expect(parsePriceSafe(Number.NEGATIVE_INFINITY)).toBe(0);
+  });
+  it('T-PARSE-6: empty string returns 0 (AB-WKH-53-#3 edge)', () => {
+    expect(parsePriceSafe('')).toBe(0);
   });
 });
