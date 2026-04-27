@@ -13,6 +13,16 @@ import type {
 } from '../types/index.js';
 import { registryService } from './registry.js';
 
+// ─── WAS-V2-3-CLIENT (WKH-57) module-scoped warn dedup ────────────────
+// Set lives for process lifetime. Reset via `_resetFallbackWarnDedup()`
+// in test setUp to avoid cross-test contamination (CD-11).
+const _warnedFallbackSlugs = new Set<string>();
+
+/** TEST-ONLY: clears the dedup Set. NOT for production code paths. */
+export function _resetFallbackWarnDedup(): void {
+  _warnedFallbackSlugs.clear();
+}
+
 /**
  * Type guard para `agent.payment` (WKH-55).
  * Pass-through del raw object — NO normaliza method/chain a lowercase.
@@ -226,7 +236,7 @@ export const discoveryService = {
       capabilities: toArray(
         getNestedValue(raw, mapping.capabilities ?? 'capabilities'),
       ),
-      priceUsdc: Number(getNestedValue(raw, mapping.price ?? 'price') ?? 0),
+      priceUsdc: resolvePriceWithFallback(raw, mapping.price ?? 'price', slug),
       reputation: Number(
         getNestedValue(raw, mapping.reputation ?? 'reputation') ?? undefined,
       ),
@@ -303,4 +313,63 @@ function toArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(String);
   if (typeof value === 'string') return value.split(',').map((s) => s.trim());
   return [];
+}
+
+// ─── WAS-V2-3-CLIENT (WKH-57): defensive fallback for v2 schema drift ──
+
+/** Field name used as fallback when registry's canonical price path is null/undefined. */
+const V2_PRICE_FALLBACK_FIELD = 'price_per_call' as const;
+
+/**
+ * Parses a raw value (number | string | null | undefined) into a finite,
+ * non-negative number. Returns 0 for any of: null, undefined, NaN, Infinity,
+ * negative number, non-parseable string, empty string.
+ *
+ * Pattern: mirrors `getProtocolFeeRate` in fee-charge.ts (Number.parseFloat
+ * + Number.isFinite). CD-7 safe floor applies — never inflate via fallback.
+ */
+export function parsePriceSafe(raw: unknown): number {
+  if (raw === null || raw === undefined) return 0;
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) && raw >= 0 ? raw : 0;
+  }
+  if (typeof raw === 'string') {
+    if (raw === '') return 0;
+    const parsed = Number.parseFloat(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  }
+  return 0;
+}
+
+/**
+ * Resolves agent.priceUsdc from a raw response, with v2 schema-drift fallback.
+ *
+ * - If `canonicalPath` is populated (even with 0), returns parsePriceSafe(canonical).
+ *   This preserves CD-2 backward-compat: explicit 0 from canonical wins.
+ * - Else attempts to read V2_PRICE_FALLBACK_FIELD ('price_per_call').
+ * - When the fallback IS taken (i.e. canonical was null/undefined AND fallback was
+ *   present), emits exactly one console.warn per slug per process (CD-3 + DT-B).
+ *
+ * @param raw  Raw registry response object.
+ * @param canonicalPath  Path configured by registry (e.g. 'price_per_call_usdc').
+ * @param slug  Agent slug for log dedup.
+ */
+function resolvePriceWithFallback(
+  raw: Record<string, unknown>,
+  canonicalPath: string,
+  slug: string,
+): number {
+  const canonical = getNestedValue(raw, canonicalPath);
+  if (canonical !== null && canonical !== undefined) {
+    return parsePriceSafe(canonical);
+  }
+  const fallback = getNestedValue(raw, V2_PRICE_FALLBACK_FIELD);
+  if (fallback === null || fallback === undefined) return 0;
+  if (!_warnedFallbackSlugs.has(slug)) {
+    _warnedFallbackSlugs.add(slug);
+    console.warn(
+      `[Discovery] price_per_call_usdc is null for agent "${slug}" — using fallback "price_per_call"`,
+    );
+  }
+  return parsePriceSafe(fallback);
 }

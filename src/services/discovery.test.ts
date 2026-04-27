@@ -1,7 +1,7 @@
 /**
  * Tests for Discovery Service — verified + status filters (WKH-DISCOVER-VERIFIED)
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RegistryConfig } from '../types/index.js';
 
 // Mock registry service
@@ -22,7 +22,11 @@ vi.mock('../lib/circuit-breaker.js', () => ({
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
-import { discoveryService } from './discovery.js';
+import {
+  _resetFallbackWarnDedup,
+  discoveryService,
+  parsePriceSafe,
+} from './discovery.js';
 import { registryService } from './registry.js';
 
 function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig {
@@ -233,5 +237,161 @@ describe('discoveryService', () => {
         'inactive-verified',
       ]);
     });
+  });
+});
+
+describe('parsePriceSafe (W0 — WAS-V2-3-CLIENT helper)', () => {
+  it('T-PARSE-1: number passthrough returns finite positive', () => {
+    expect(parsePriceSafe(0.05)).toBe(0.05);
+  });
+  it('T-PARSE-2: parseable string returns parsed number', () => {
+    expect(parsePriceSafe('0.05')).toBe(0.05);
+  });
+  it('T-PARSE-3: non-parseable string returns 0', () => {
+    expect(parsePriceSafe('free')).toBe(0);
+    expect(parsePriceSafe('N/A')).toBe(0);
+  });
+  it('T-PARSE-4: null/undefined return 0', () => {
+    expect(parsePriceSafe(null)).toBe(0);
+    expect(parsePriceSafe(undefined)).toBe(0);
+  });
+  it('T-PARSE-5: negative/NaN/Infinity return 0 (CD-7 safe floor)', () => {
+    expect(parsePriceSafe(-1.0)).toBe(0);
+    expect(parsePriceSafe(Number.NaN)).toBe(0);
+    expect(parsePriceSafe(Number.POSITIVE_INFINITY)).toBe(0);
+    expect(parsePriceSafe(Number.NEGATIVE_INFINITY)).toBe(0);
+  });
+  it('T-PARSE-6: empty string returns 0 (AB-WKH-53-#3 edge)', () => {
+    expect(parsePriceSafe('')).toBe(0);
+  });
+});
+
+function makeV2RawAgent(
+  o: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: 'v2-agent-1',
+    slug: 'v2-agent',
+    name: 'V2 Agent',
+    description: 'descr',
+    capabilities: ['x'],
+    status: 'active',
+    ...o,
+  };
+}
+
+function makeV2Registry(): RegistryConfig {
+  return makeRegistry({
+    schema: {
+      discovery: {
+        agentMapping: { price: 'price_per_call_usdc' },
+      },
+      invoke: { method: 'POST' },
+    },
+  });
+}
+
+describe('mapAgent — v2 schema drift fallback (WAS-V2-3-CLIENT)', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    _resetFallbackWarnDedup(); // CD-11: reset Set per test
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('T-fallback-numeric: takes price_per_call when canonical is null (AC-1)', () => {
+    const reg = makeV2Registry();
+    const raw = makeV2RawAgent({
+      price_per_call_usdc: null,
+      price_per_call: 0.05,
+    });
+    const agent = discoveryService.mapAgent(reg, raw);
+    expect(agent.priceUsdc).toBe(0.05);
+  });
+
+  it('T-fallback-undefined-canonical: takes price_per_call when canonical absent (AC-1)', () => {
+    const reg = makeV2Registry();
+    const raw = makeV2RawAgent({ price_per_call: 0.1 });
+    const agent = discoveryService.mapAgent(reg, raw);
+    expect(agent.priceUsdc).toBe(0.1);
+  });
+
+  it('T-canonical-wins: canonical numeric wins over populated fallback (AC-2)', () => {
+    const reg = makeV2Registry();
+    const raw = makeV2RawAgent({
+      price_per_call_usdc: 0.2,
+      price_per_call: 0.99,
+    });
+    const agent = discoveryService.mapAgent(reg, raw);
+    expect(agent.priceUsdc).toBe(0.2);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('T-canonical-zero-wins: canonical 0 wins over fallback (AC-2 edge / CD-2)', () => {
+    const reg = makeV2Registry();
+    const raw = makeV2RawAgent({
+      price_per_call_usdc: 0,
+      price_per_call: 0.05,
+    });
+    const agent = discoveryService.mapAgent(reg, raw);
+    expect(agent.priceUsdc).toBe(0);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('T-both-null: both null returns 0 with no warn (AC-3)', () => {
+    const reg = makeV2Registry();
+    const raw = makeV2RawAgent({
+      price_per_call_usdc: null,
+      price_per_call: null,
+    });
+    const agent = discoveryService.mapAgent(reg, raw);
+    expect(agent.priceUsdc).toBe(0);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('T-fallback-string-parseable: parses string fallback (AC-5 happy)', () => {
+    const reg = makeV2Registry();
+    const raw = makeV2RawAgent({
+      price_per_call_usdc: null,
+      price_per_call: '0.05',
+    });
+    const agent = discoveryService.mapAgent(reg, raw);
+    expect(agent.priceUsdc).toBe(0.05);
+  });
+
+  it('T-fallback-string-non-parseable: non-parseable returns 0 (AC-5 sad)', () => {
+    const reg = makeV2Registry();
+    const raw = makeV2RawAgent({
+      price_per_call_usdc: null,
+      price_per_call: 'free',
+    });
+    const agent = discoveryService.mapAgent(reg, raw);
+    expect(agent.priceUsdc).toBe(0);
+  });
+
+  it('T-warn-emitted-on-fallback: emits 1 warn referencing slug (AC-6)', () => {
+    const reg = makeV2Registry();
+    const raw = makeV2RawAgent({
+      price_per_call_usdc: null,
+      price_per_call: 0.05,
+    });
+    discoveryService.mapAgent(reg, raw);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const msg = String(warnSpy.mock.calls[0][0]);
+    expect(msg).toContain('v2-agent');
+    expect(msg).toContain('fallback');
+  });
+
+  it('T-warn-once-per-slug: same slug fallback called twice → 1 warn (AC-6 dedup)', () => {
+    const reg = makeV2Registry();
+    const raw = makeV2RawAgent({
+      price_per_call_usdc: null,
+      price_per_call: 0.05,
+    });
+    discoveryService.mapAgent(reg, raw);
+    discoveryService.mapAgent(reg, raw);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 });

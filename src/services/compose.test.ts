@@ -710,3 +710,56 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
     expect(lastCall[0].metadata?.bridge_type).toBeNull();
   });
 });
+
+// ─── WAS-V2-3-CLIENT (WKH-57): integration — fallback unblocks downstream ─
+describe('composeService — WAS-V2-3-CLIENT integration (WKH-57)', () => {
+  it('T-INT-01: triggers downstream Fuji USDC settle when priceUsdc is resolved via v2 fallback (AC-4)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockDownstream.mockResolvedValue({
+      txHash: '0xfeeb',
+      blockNumber: 42,
+      settledAmount: '50000', // 0.05 USDC in atomic units (6-dec)
+    });
+    // Simulate the OUTPUT of mapAgent post-fallback: priceUsdc resolved
+    // from price_per_call when price_per_call_usdc was null.
+    const agent = makeAgent({
+      slug: 'v2-fallback-agent',
+      priceUsdc: 0.05,
+      payment: {
+        method: 'x402',
+        chain: 'avalanche',
+        contract: '0x000000000000000000000000000000000000aBcD',
+      },
+      metadata: { payTo: '0x000000000000000000000000000000000000aBcD' },
+    });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    // Self-contained upstream x402 mocks (AR BLQ-MED-1): clearAllMocks resets
+    // call history but NOT mockResolvedValue implementations from prior tests.
+    mockSign.mockResolvedValueOnce({
+      xPaymentHeader: 'mockheader',
+      paymentRequest: {
+        authorization: {
+          from: '0xA',
+          to: '0xB',
+          value: '50000',
+          validAfter: '0',
+          validBefore: '9999999999',
+          nonce: '0x1234',
+        },
+        signature: '0xSIG',
+        network: 'eip155:2368',
+      },
+    });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xUPSTREAM' });
+    mockFetchOk();
+
+    const result = await composeService.compose({
+      steps: [{ agent: agent.slug, input: { q: 'x' } }],
+    });
+
+    expect(result.success).toBe(true);
+    // AC-4: downstream path executed (vs current bug where priceUsdc=0 skips it)
+    expect(mockDownstream).toHaveBeenCalledTimes(1);
+    expect(result.steps[0].downstreamTxHash).toBe('0xfeeb');
+  });
+});
