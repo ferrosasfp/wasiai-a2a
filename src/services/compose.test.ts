@@ -27,6 +27,7 @@ vi.mock('./llm/transform.js', () => ({
   maybeTransform: vi.fn().mockResolvedValue({
     transformedOutput: null,
     cacheHit: 'SKIPPED',
+    bridgeType: 'SKIPPED',
     latencyMs: 0,
   }),
 }));
