@@ -88,7 +88,7 @@ afterEach(() => {
 
 // ─── Flag off → returns null sin tocar nada (CD-NEW-SDD-7, AC-1) ──
 describe('signAndSettleDownstream — flag off', () => {
-  it('returns null without calling viem or fetch when flag is unset (T-W2-01 / AC-1)', async () => {
+  it('returns null without calling viem or fetch when flag is unset (T-FlagOff / AC-1)', async () => {
     // Arrange
     const { signAndSettleDownstream } = await importWithFlag(false);
     const agent = makeAgent();
@@ -106,9 +106,9 @@ describe('signAndSettleDownstream — flag off', () => {
   });
 });
 
-// ─── Flag on, varios escenarios (T-W2-02..14) ────────────────────────
+// ─── Flag on, multiple scenarios (T-NoPaymentField..T-AtomicValue6Decimals) ──
 describe('signAndSettleDownstream — flag on', () => {
-  it('returns null when agent.payment is undefined (T-W2-02 / AC-5 absent)', async () => {
+  it('returns null when agent.payment is undefined (T-NoPaymentField / AC-5 absent)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const agent = makeAgent({ payment: undefined });
     const logger = makeLogger();
@@ -120,7 +120,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  it('returns null when method is not x402 (T-W2-03 / AC-5)', async () => {
+  it('returns null when method is not x402 (T-MethodNotX402 / AC-5)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const agent = makeAgent({
       payment: {
@@ -134,7 +134,7 @@ describe('signAndSettleDownstream — flag on', () => {
     expect(mockSignTypedData).not.toHaveBeenCalled();
   });
 
-  it('returns null when chain is not avalanche (T-W2-04 / AC-6)', async () => {
+  it('returns null when chain is not avalanche (T-ChainNotAvalanche / AC-6)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const agent = makeAgent({
       payment: { method: 'x402', chain: 'polygon', contract: PAYTO_ADDR },
@@ -144,7 +144,7 @@ describe('signAndSettleDownstream — flag on', () => {
     expect(mockSignTypedData).not.toHaveBeenCalled();
   });
 
-  it('returns null when contract has invalid format (T-W2-05 / R-1)', async () => {
+  it('returns null when contract has invalid format (T-InvalidPayToFormat / R-1)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const agent = makeAgent({
       payment: {
@@ -162,7 +162,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  it('returns null when contract is zero-address (T-W2-06 / R-1)', async () => {
+  it('returns null when contract is zero-address (T-ZeroPayTo / R-1)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const agent = makeAgent({
       payment: {
@@ -180,7 +180,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  it('returns null when operator balance < required value (T-W2-07 / AC-10)', async () => {
+  it('returns null when operator balance < required value (T-InsufficientBalance / AC-10)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(0n); // balance 0
     const logger = makeLogger();
@@ -193,7 +193,7 @@ describe('signAndSettleDownstream — flag on', () => {
     expect(mockSignTypedData).not.toHaveBeenCalled();
   });
 
-  it('returns null when balance read RPC fails (T-W2-08 / AC-10)', async () => {
+  it('returns null when balance read RPC fails (T-BalanceReadRpcFailure / AC-10)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockRejectedValueOnce(new Error('RPC down'));
     const logger = makeLogger();
@@ -205,7 +205,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  it('returns null when signTypedData throws (T-W2-09 / AC-2)', async () => {
+  it('returns null when signTypedData throws (T-SigningFailure / AC-2)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockRejectedValueOnce(new Error('keystore error'));
@@ -218,7 +218,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  it('returns null when /verify returns verified=false (T-W2-10 / AC-4)', async () => {
+  it('returns null when /verify returns verified=false (T-VerifyRejected / AC-4)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockResolvedValueOnce('0xSIG');
@@ -234,7 +234,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  it('returns null when /settle returns 500 (T-W2-11 / AC-4)', async () => {
+  it('returns null when /settle returns 500 (T-SettleHttp500 / AC-4)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockResolvedValueOnce('0xSIG');
@@ -253,7 +253,7 @@ describe('signAndSettleDownstream — flag on', () => {
   });
 
   // AR-MNR-2: el body raw debe surfacing al log warn cuando facilitator 5xx
-  it('logs facilitatorErrorBody when /settle returns non-2xx (T-W2-11b / AR-MNR-2)', async () => {
+  it('logs facilitatorErrorBody when /settle returns non-2xx (T-SettleErrorBodyLogged / AR-MNR-2)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockResolvedValueOnce('0xSIG');
@@ -278,7 +278,7 @@ describe('signAndSettleDownstream — flag on', () => {
 
   // AR-MNR-2: si facilitator devuelve 200 + settled=false (race condition),
   // el body parsed debe llegar al log para diagnostico
-  it('logs facilitatorBody when /settle returns 200 with settled=false (T-W2-11c / AR-MNR-2)', async () => {
+  it('logs facilitatorBody when /settle returns 200 with settled=false (T-SettleRaceConditionLogged / AR-MNR-2)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockResolvedValueOnce('0xSIG');
@@ -306,7 +306,7 @@ describe('signAndSettleDownstream — flag on', () => {
     );
   });
 
-  it('returns DownstreamResult when /verify ok and /settle ok (T-W2-12 / AC-3)', async () => {
+  it('returns DownstreamResult when /verify ok and /settle ok (T-HappyPath / AC-3)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockResolvedValueOnce('0xSIG');
@@ -333,7 +333,7 @@ describe('signAndSettleDownstream — flag on', () => {
     });
   });
 
-  it('signs with correct EIP-712 domain (USDC Fuji) and TransferWithAuthorization (T-W2-13 / AC-2, CD-8)', async () => {
+  it('signs with correct EIP-712 domain (USDC Fuji) and TransferWithAuthorization (T-Eip712DomainContract / AC-2, CD-8)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockResolvedValueOnce('0xSIG');
@@ -380,7 +380,7 @@ describe('signAndSettleDownstream — flag on', () => {
     ['zero', 0],
     ['negative', -1],
   ])(
-    'returns null with INVALID_PRICE when priceUsdc is %s (T-W2-15 / CR-MNR-7)',
+    'returns null with INVALID_PRICE when priceUsdc is %s (T-InvalidPrice / CR-MNR-7)',
     async (_label, badPrice) => {
       const { signAndSettleDownstream } = await importWithFlag(true);
       const logger = makeLogger();
@@ -396,7 +396,7 @@ describe('signAndSettleDownstream — flag on', () => {
     },
   );
 
-  it('computes atomic value with 6 decimals not 18 like Kite/PYUSD (T-W2-14 / AC-9)', async () => {
+  it('computes atomic value with 6 decimals not 18 like Kite/PYUSD (T-AtomicValue6Decimals / AC-9)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     mockReadContract.mockResolvedValueOnce(parseUnits('100', 6));
     mockSignTypedData.mockResolvedValueOnce('0xSIG');
