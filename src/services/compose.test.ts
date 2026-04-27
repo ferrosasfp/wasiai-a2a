@@ -540,6 +540,123 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
     expect(callArgs[2]).toEqual({ x: 1 });
   });
 
+  it('T-14: compose_step metadata includes 6 telemetry fields, llm_* null on non-LLM (WKH-57 AC-6)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const transformMock = vi.mocked(maybeTransform);
+    transformMock.mockClear();
+    const trackSpy = vi.mocked(eventService.track);
+    trackSpy.mockClear();
+    trackSpy.mockResolvedValue({} as never);
+
+    // First subtest: LLM bridge — all 6 fields populated with real values.
+    transformMock.mockResolvedValueOnce({
+      transformedOutput: { x: 1 },
+      cacheHit: false,
+      bridgeType: 'LLM',
+      latencyMs: 42,
+      llm: {
+        model: 'claude-haiku-4-5-20251001',
+        tokensIn: 250,
+        tokensOut: 60,
+        retries: 0,
+        costUsd: 0.000_440, // 250/1M*0.8 + 60/1M*4.0
+      },
+    });
+
+    const agent1 = makeAgent({
+      slug: 'a1',
+      id: 'agent-a1',
+      priceUsdc: 0,
+    });
+    const agent2 = makeAgent({
+      slug: 'a2',
+      id: 'agent-a2',
+      priceUsdc: 0,
+      metadata: {
+        inputSchema: { type: 'object', required: ['x'] },
+      },
+    });
+    vi.mocked(discoveryService.getAgent)
+      .mockResolvedValueOnce(agent1)
+      .mockResolvedValueOnce(agent2)
+      .mockResolvedValueOnce(agent2);
+
+    mockFetchOk({ result: { plain: 'string' } });
+    mockFetchOk({ result: 'final' });
+
+    await composeService.compose({
+      steps: [
+        { agent: 'a1', input: {} },
+        { agent: 'a2', input: {}, passOutput: true },
+      ],
+    });
+
+    // First step's event must include the 6 metadata fields with LLM values.
+    const firstStepCall = trackSpy.mock.calls.find(
+      (c) => c[0].agentId === 'a1',
+    );
+    expect(firstStepCall).toBeDefined();
+    const meta1 = firstStepCall?.[0].metadata;
+    expect(meta1?.bridge_type).toBe('LLM');
+    expect(typeof meta1?.bridge_latency_ms).toBe('number');
+    expect(meta1?.bridge_cost_usd).toBeCloseTo(0.000_440, 6);
+    expect(meta1?.llm_model).toBe('claude-haiku-4-5-20251001');
+    expect(meta1?.llm_tokens_in).toBe(250);
+    expect(meta1?.llm_tokens_out).toBe(60);
+
+    // Second subtest: non-LLM bridge (SKIPPED) — llm_* fields must be null.
+    trackSpy.mockClear();
+    transformMock.mockClear();
+    transformMock.mockResolvedValueOnce({
+      transformedOutput: { x: 1 },
+      cacheHit: 'SKIPPED',
+      bridgeType: 'SKIPPED',
+      latencyMs: 0,
+      // No llm field — explicitly omitted (CD-17)
+    });
+
+    const agent3 = makeAgent({
+      slug: 'b1',
+      id: 'agent-b1',
+      priceUsdc: 0,
+    });
+    const agent4 = makeAgent({
+      slug: 'b2',
+      id: 'agent-b2',
+      priceUsdc: 0,
+      metadata: {
+        inputSchema: { type: 'object', required: ['x'] },
+      },
+    });
+    vi.mocked(discoveryService.getAgent)
+      .mockResolvedValueOnce(agent3)
+      .mockResolvedValueOnce(agent4)
+      .mockResolvedValueOnce(agent4);
+
+    mockFetchOk({ result: { x: 1 } });
+    mockFetchOk({ result: 'final' });
+
+    await composeService.compose({
+      steps: [
+        { agent: 'b1', input: {} },
+        { agent: 'b2', input: {}, passOutput: true },
+      ],
+    });
+
+    const skipStepCall = trackSpy.mock.calls.find(
+      (c) => c[0].agentId === 'b1',
+    );
+    expect(skipStepCall).toBeDefined();
+    const meta2 = skipStepCall?.[0].metadata;
+    expect(meta2?.bridge_type).toBe('SKIPPED');
+    expect(typeof meta2?.bridge_latency_ms).toBe('number');
+    // AB-WKH-56-4: llm_* + bridge_cost_usd must be null (not undefined).
+    expect(meta2?.bridge_cost_usd).toBeNull();
+    expect(meta2?.llm_model).toBeNull();
+    expect(meta2?.llm_tokens_in).toBeNull();
+    expect(meta2?.llm_tokens_out).toBeNull();
+  });
+
   it('T-13: emits compose_step event with metadata.bridge_type (AC-6)', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     const transformMock = vi.mocked(maybeTransform);

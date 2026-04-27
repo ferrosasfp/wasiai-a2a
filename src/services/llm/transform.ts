@@ -9,8 +9,10 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { supabase } from '../../lib/supabase.js';
 import type { TransformResult } from '../../types/index.js';
+import { schemaHash } from './canonical-json.js';
+import { computeCostUsd, type PricedModel } from './pricing.js';
+import { selectModel } from './select-model.js';
 
-const MODEL = 'claude-sonnet-4-20250514';
 const TIMEOUT_MS = 30_000;
 
 // ─── L1 In-memory cache ────────────────────────────────────────
@@ -54,15 +56,22 @@ function applyTransformFn(transformFn: string, output: unknown): unknown {
 }
 
 /**
- * Calls Claude Sonnet to generate a JS transform function.
- * Returns the function body as a string (to be used with new Function('output', body)).
+ * Calls Claude (model selected by caller) to generate a JS transform function.
+ * Returns the function body as a string (to be used with new Function('output', body)),
+ * plus token usage for cost telemetry (WKH-57).
+ *
+ * If `missingFields` is non-empty (retry attempt), the system prompt is enriched
+ * with the names of required fields the previous attempt failed to produce
+ * (CD-10: nombre específico del campo, no genérico).
  *
  * @throws on API error, timeout, or invalid JSON response
  */
 async function generateTransformFn(
   output: unknown,
   inputSchema: Record<string, unknown>,
-): Promise<string> {
+  model: PricedModel,
+  missingFields: string[],
+): Promise<{ fn: string; tokensIn: number; tokensOut: number }> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error('ANTHROPIC_API_KEY not configured');
@@ -70,8 +79,18 @@ async function generateTransformFn(
 
   const client = new Anthropic({ apiKey });
 
-  const systemPrompt =
+  let systemPrompt =
     'Eres un experto en transformación de schemas JSON. Dado un valor de output y un inputSchema JSON Schema, genera SOLO el cuerpo de una función JavaScript (sin declaración de función) que recibe `output` y retorna el objeto transformado para satisfacer el inputSchema. Responde SOLO con JSON válido, sin markdown.';
+
+  // CD-10: si el primer intento falló por campos requeridos faltantes, agregar
+  // los nombres específicos al systemPrompt para guiar al LLM.
+  if (missingFields.length > 0) {
+    systemPrompt +=
+      `\n\nPREVIOUS ATTEMPT FAILED: missing required fields [${missingFields.join(
+        ', ',
+      )}]. ` +
+      'The transformFn MUST produce an object that contains ALL of these fields.';
+  }
 
   const userPrompt = `Output actual (valor real del agente anterior):
 ${JSON.stringify(output, null, 2)}
@@ -94,7 +113,7 @@ Ejemplo válido de transformFn:
   try {
     const response = await client.messages.create(
       {
-        model: MODEL,
+        model,
         max_tokens: 512,
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }],
@@ -115,7 +134,10 @@ Ejemplo válido de transformFn:
       throw new Error('LLM returned empty or invalid transformFn');
     }
 
-    return fn;
+    const tokensIn = response.usage?.input_tokens ?? 0;
+    const tokensOut = response.usage?.output_tokens ?? 0;
+
+    return { fn, tokensIn, tokensOut };
   } finally {
     clearTimeout(timeoutId);
   }
@@ -128,12 +150,14 @@ Ejemplo válido de transformFn:
 async function getFromL2(
   sourceAgentId: string,
   targetAgentId: string,
+  schemaHashValue: string,
 ): Promise<string | null> {
   const { data, error } = await supabase
     .from('kite_schema_transforms')
     .select('transform_fn, hit_count')
     .eq('source_agent_id', sourceAgentId)
     .eq('target_agent_id', targetAgentId)
+    .eq('schema_hash', schemaHashValue)
     .single();
 
   if (error || !data) return null;
@@ -146,7 +170,8 @@ async function getFromL2(
       updated_at: new Date().toISOString(),
     })
     .eq('source_agent_id', sourceAgentId)
-    .eq('target_agent_id', targetAgentId);
+    .eq('target_agent_id', targetAgentId)
+    .eq('schema_hash', schemaHashValue);
 
   return data.transform_fn as string;
 }
@@ -158,16 +183,18 @@ async function getFromL2(
 async function persistToL2(
   sourceAgentId: string,
   targetAgentId: string,
+  schemaHashValue: string,
   transformFn: string,
 ): Promise<void> {
   await supabase.from('kite_schema_transforms').upsert(
     {
       source_agent_id: sourceAgentId,
       target_agent_id: targetAgentId,
+      schema_hash: schemaHashValue,
       transform_fn: transformFn,
       updated_at: new Date().toISOString(),
     },
-    { onConflict: 'source_agent_id,target_agent_id' },
+    { onConflict: 'source_agent_id,target_agent_id,schema_hash' },
   );
 }
 
@@ -205,7 +232,10 @@ export async function maybeTransform(
     };
   }
 
-  const cacheKey = `${sourceAgentId}:${targetAgentId}`;
+  // WKH-57 (DT-B): cache key includes deterministic schema fingerprint so
+  // schema changes do NOT collide with stale entries from a previous schema.
+  const schemaHashValue = schemaHash(inputSchema);
+  const cacheKey = `${sourceAgentId}:${targetAgentId}:${schemaHashValue}`;
 
   // 2. L1 cache hit
   const l1Fn = l1Cache.get(cacheKey);
@@ -220,7 +250,7 @@ export async function maybeTransform(
   }
 
   // 3. L2 cache hit (Supabase)
-  const l2Fn = await getFromL2(sourceAgentId, targetAgentId);
+  const l2Fn = await getFromL2(sourceAgentId, targetAgentId, schemaHashValue);
   if (l2Fn) {
     l1Cache.set(cacheKey, l2Fn);
     const transformedOutput = applyTransformFn(l2Fn, output);
@@ -232,30 +262,111 @@ export async function maybeTransform(
     };
   }
 
-  // 4. Cache miss → LLM
+  // 4. Cache miss → LLM with model selector + retry verification (WKH-57)
   const schema = inputSchema ?? {};
-  const transformFn = await generateTransformFn(output, schema);
+  const model = selectModel(inputSchema);
 
-  // Persist async to L2 (don't block on this)
-  persistToL2(sourceAgentId, targetAgentId, transformFn).catch(
-    (err: unknown) => {
+  // Attempt 1
+  const attempt1 = await generateTransformFn(output, schema, model, []);
+  const transformed1 = applyTransformFn(attempt1.fn, output);
+
+  if (isCompatible(transformed1, inputSchema)) {
+    // Happy path — persist and return
+    persistToL2(
+      sourceAgentId,
+      targetAgentId,
+      schemaHashValue,
+      attempt1.fn,
+    ).catch((err: unknown) => {
       console.error(
         `[Transform] Failed to persist to L2 for ${cacheKey}:`,
         err,
       );
-    },
+    });
+    l1Cache.set(cacheKey, attempt1.fn);
+
+    return {
+      transformedOutput: transformed1,
+      cacheHit: false,
+      bridgeType: 'LLM',
+      latencyMs: Date.now() - start,
+      llm: {
+        model,
+        tokensIn: attempt1.tokensIn,
+        tokensOut: attempt1.tokensOut,
+        retries: 0,
+        costUsd: computeCostUsd(model, attempt1.tokensIn, attempt1.tokensOut),
+      },
+    };
+  }
+
+  // Attempt 2 — retry with missing fields hint (CD-10)
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const transformed1Keys =
+    transformed1 !== null && typeof transformed1 === 'object'
+      ? new Set(Object.keys(transformed1 as Record<string, unknown>))
+      : new Set<string>();
+  const missing = required.filter(
+    (k): k is string => typeof k === 'string' && !transformed1Keys.has(k),
   );
 
-  // Update L1
-  l1Cache.set(cacheKey, transformFn);
+  // CD-14: log NO leak raw output/schema. Solo nombres de campos + count + model.
+  console.error(
+    `[Transform] retry attempt 1: missing fields [${missing.join(
+      ', ',
+    )}] (model=${model})`,
+  );
 
-  const transformedOutput = applyTransformFn(transformFn, output);
-  return {
-    transformedOutput,
-    cacheHit: false,
-    bridgeType: 'LLM',
-    latencyMs: Date.now() - start,
-  };
+  const attempt2 = await generateTransformFn(output, schema, model, missing);
+  const transformed2 = applyTransformFn(attempt2.fn, output);
+
+  const totalIn = attempt1.tokensIn + attempt2.tokensIn;
+  const totalOut = attempt1.tokensOut + attempt2.tokensOut;
+
+  if (isCompatible(transformed2, inputSchema)) {
+    // Retry succeeded — persist with attempt2.fn
+    persistToL2(
+      sourceAgentId,
+      targetAgentId,
+      schemaHashValue,
+      attempt2.fn,
+    ).catch((err: unknown) => {
+      console.error(
+        `[Transform] Failed to persist to L2 for ${cacheKey}:`,
+        err,
+      );
+    });
+    l1Cache.set(cacheKey, attempt2.fn);
+
+    return {
+      transformedOutput: transformed2,
+      cacheHit: false,
+      bridgeType: 'LLM',
+      latencyMs: Date.now() - start,
+      llm: {
+        model,
+        tokensIn: totalIn,
+        tokensOut: totalOut,
+        retries: 1,
+        costUsd: computeCostUsd(model, totalIn, totalOut),
+      },
+    };
+  }
+
+  // Retry FAILED — throw with explicit message + missing fields (DT-C, AC-3)
+  const transformed2Keys =
+    transformed2 !== null && typeof transformed2 === 'object'
+      ? new Set(Object.keys(transformed2 as Record<string, unknown>))
+      : new Set<string>();
+  const missingFinal = required.filter(
+    (k): k is string => typeof k === 'string' && !transformed2Keys.has(k),
+  );
+
+  throw new Error(
+    `transform validation failed after retry: missing required fields [${missingFinal.join(
+      ', ',
+    )}] in last attempt (model=${model})`,
+  );
 }
 
 /** Clears L1 cache — for testing only */

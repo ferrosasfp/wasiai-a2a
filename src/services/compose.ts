@@ -14,6 +14,7 @@ import type {
   ComposeRequest,
   ComposeResult,
   ComposeStep,
+  LLMBridgeStats,
   RegistryConfig,
   StepResult,
   X402PaymentRequest,
@@ -132,6 +133,11 @@ export const composeService = {
                 result.cacheHit = tr.cacheHit; // legacy, DT-3
                 result.bridgeType = tr.bridgeType; // nuevo, DT-3
                 result.transformLatencyMs = tr.latencyMs;
+                // WKH-57: telemetría LLM presente solo si bridgeType==='LLM'.
+                // CD-17: omitir el campo en non-LLM (no setear como null).
+                if (tr.llm) {
+                  result.transformLLM = tr.llm;
+                }
                 lastOutput = tr.transformedOutput;
               } else if (outputIsA2A && !targetA2A) {
                 // Schema-less + A2A output unwrapped: surface unwrapped payload
@@ -149,7 +155,10 @@ export const composeService = {
           }
         }
         // ── WKH-56 (W3): emit compose_step event AFTER bridge resolved.
-        // metadata.bridge_type ∈ BridgeType for non-last steps, null otherwise.
+        // ── WKH-57 (W4): metadata extendida con 6 campos de telemetría
+        //    (bridge + LLM). Constructor explícito (AB-WKH-55-5), todos los
+        //    campos opcionales con `?? null` (AB-WKH-56-4 / CD-15).
+        const llm: LLMBridgeStats | undefined = result.transformLLM;
         eventService
           .track({
             eventType: 'compose_step',
@@ -160,7 +169,14 @@ export const composeService = {
             latencyMs,
             costUsdc: agent.priceUsdc,
             txHash,
-            metadata: { bridge_type: result.bridgeType ?? null },
+            metadata: {
+              bridge_type: result.bridgeType ?? null,
+              bridge_latency_ms: result.transformLatencyMs ?? null,
+              bridge_cost_usd: llm?.costUsd ?? null,
+              llm_model: llm?.model ?? null,
+              llm_tokens_in: llm?.tokensIn ?? null,
+              llm_tokens_out: llm?.tokensOut ?? null,
+            },
           })
           .catch((err) =>
             console.error('[Compose] event tracking failed:', err),
