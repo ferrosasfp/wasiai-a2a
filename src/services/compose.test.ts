@@ -39,6 +39,8 @@ vi.mock('../lib/downstream-payment.js', () => ({
 import { signAndSettleDownstream } from '../lib/downstream-payment.js';
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
+import { eventService } from './event.js';
+import { maybeTransform } from './llm/transform.js';
 import { registryService } from './registry.js';
 
 const mockDownstream = vi.mocked(signAndSettleDownstream);
@@ -393,5 +395,148 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
     expect(init.headers['Content-Type']).toBe('application/json');
     expect(init.headers['x-a2a-key']).toBe('a2a-key-1');
     expect(init.body).toBe(JSON.stringify(input));
+  });
+});
+
+// ─── WKH-56: A2A fast-path bridge (compose service integration) ────
+describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
+  it('T-10: A2A_PASSTHROUGH bypasses maybeTransform when output is Message + target a2aCompliant (AC-1)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const transformMock = vi.mocked(maybeTransform);
+    transformMock.mockClear();
+
+    const agent1 = makeAgent({
+      slug: 'a1',
+      id: 'agent-a1',
+      priceUsdc: 0,
+      metadata: { a2aCompliant: true },
+    });
+    const agent2 = makeAgent({
+      slug: 'a2',
+      id: 'agent-a2',
+      priceUsdc: 0,
+      metadata: {
+        a2aCompliant: true,
+        inputSchema: { type: 'object', required: ['x'] },
+      },
+    });
+    vi.mocked(discoveryService.getAgent)
+      .mockResolvedValueOnce(agent1)
+      .mockResolvedValueOnce(agent2)
+      .mockResolvedValueOnce(agent2);
+
+    const a2aOutput = {
+      role: 'agent',
+      parts: [{ kind: 'data', data: { x: 1 } }],
+    };
+    mockFetchOk({ result: a2aOutput });
+    mockFetchOk({ result: 'final' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'a1', input: {} },
+        { agent: 'a2', input: {}, passOutput: true },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+    expect(transformMock).not.toHaveBeenCalled();
+    expect(result.steps[0].bridgeType).toBe('A2A_PASSTHROUGH');
+    expect(result.steps[0].transformLatencyMs).toBeLessThan(50);
+  });
+
+  it('T-11: falls back to maybeTransform when isA2AMessage returns false (AC-2)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const transformMock = vi.mocked(maybeTransform);
+    transformMock.mockClear();
+    transformMock.mockResolvedValueOnce({
+      transformedOutput: { x: 'transformed' },
+      cacheHit: 'SKIPPED',
+      bridgeType: 'SKIPPED',
+      latencyMs: 0,
+    });
+
+    const agent1 = makeAgent({
+      slug: 'a1',
+      id: 'agent-a1',
+      priceUsdc: 0,
+    });
+    const agent2 = makeAgent({
+      slug: 'a2',
+      id: 'agent-a2',
+      priceUsdc: 0,
+      metadata: {
+        a2aCompliant: true,
+        inputSchema: { type: 'object', required: ['x'] },
+      },
+    });
+    vi.mocked(discoveryService.getAgent)
+      .mockResolvedValueOnce(agent1)
+      .mockResolvedValueOnce(agent2)
+      .mockResolvedValueOnce(agent2);
+
+    mockFetchOk({ result: { plain: 'string' } }); // NOT a Message
+    mockFetchOk({ result: 'final' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'a1', input: {} },
+        { agent: 'a2', input: {}, passOutput: true },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+    expect(transformMock).toHaveBeenCalledTimes(1);
+    expect(result.steps[0].bridgeType).toBe('SKIPPED');
+  });
+
+  it('T-12: unwraps parts[0] when output is A2A but target is non-a2aCompliant (AC-3)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const transformMock = vi.mocked(maybeTransform);
+    transformMock.mockClear();
+    transformMock.mockResolvedValueOnce({
+      transformedOutput: { x: 1 },
+      cacheHit: 'SKIPPED',
+      bridgeType: 'SKIPPED',
+      latencyMs: 0,
+    });
+
+    const agent1 = makeAgent({
+      slug: 'a1',
+      id: 'agent-a1',
+      priceUsdc: 0,
+    });
+    const agent2 = makeAgent({
+      slug: 'a2',
+      id: 'agent-a2',
+      priceUsdc: 0,
+      // NO a2aCompliant flag — target is non-A2A
+      metadata: {
+        inputSchema: { type: 'object', required: ['x'] },
+      },
+    });
+    vi.mocked(discoveryService.getAgent)
+      .mockResolvedValueOnce(agent1)
+      .mockResolvedValueOnce(agent2)
+      .mockResolvedValueOnce(agent2);
+
+    const a2aOutput = {
+      role: 'agent',
+      parts: [{ kind: 'data', data: { x: 1 } }],
+    };
+    mockFetchOk({ result: a2aOutput });
+    mockFetchOk({ result: 'final' });
+
+    await composeService.compose({
+      steps: [
+        { agent: 'a1', input: {} },
+        { agent: 'a2', input: {}, passOutput: true },
+      ],
+    });
+
+    expect(transformMock).toHaveBeenCalledTimes(1);
+    const callArgs = transformMock.mock.calls[0];
+    // 3rd arg of maybeTransform(srcId, tgtId, output, schema) is the unwrapped payload
+    expect(callArgs[2]).toEqual({ x: 1 });
   });
 });
