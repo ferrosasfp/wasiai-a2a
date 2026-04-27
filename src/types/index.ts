@@ -187,11 +187,32 @@ export interface StepResult {
   downstreamBlockNumber?: number;
   /** Atomic units (string, 6-dec USDC) que se settearon downstream (WKH-55) */
   downstreamSettledAmount?: string;
+  /** WKH-57: telemetry del bridge LLM. Presente solo si bridgeType==='LLM'. */
+  transformLLM?: LLMBridgeStats;
 }
 
 // ============================================================
 // SCHEMA TRANSFORM TYPES (WKH-14)
 // ============================================================
+
+/**
+ * WKH-57: telemetry del path LLM. Presente sii bridgeType==='LLM'.
+ *
+ * tokensIn/tokensOut son SUMA de attempts cuando hubo retry (retries===1).
+ * costUsd se computa con PRICING_USD_PER_M_TOKENS centralizado (CD-6).
+ */
+export interface LLMBridgeStats {
+  /** Modelo Anthropic invocado (string literal del SDK). */
+  model: 'claude-haiku-4-5-20251001' | 'claude-sonnet-4-6';
+  /** Total tokens de input cobrados por Anthropic (suma de attempts si hubo retry). */
+  tokensIn: number;
+  /** Total tokens de output cobrados por Anthropic. */
+  tokensOut: number;
+  /** 0 = first attempt OK; 1 = second attempt OK (retry exitoso). */
+  retries: 0 | 1;
+  /** Costo USD computado a partir de PRICING_USD_PER_M_TOKENS. */
+  costUsd: number;
+}
 
 /** Result of a maybeTransform call */
 export interface TransformResult {
@@ -204,9 +225,13 @@ export interface TransformResult {
    * Optional in W0 to keep the wave standalone-mergeable (CD-9).
    * W1 populates this in every return of `maybeTransform` and downstream
    * consumers (compose.ts) treat it as always present after W1+.
+   *
+   * WKH-57 NO tightener a required (AB-WKH-56-2).
    */
   bridgeType?: BridgeType; // 'SKIPPED' | 'CACHE_L1' | 'CACHE_L2' | 'LLM'
   latencyMs: number;
+  /** WKH-57: telemetry del path LLM. undefined si bridgeType !== 'LLM'. */
+  llm?: LLMBridgeStats;
 }
 
 /** Row in kite_schema_transforms table */
