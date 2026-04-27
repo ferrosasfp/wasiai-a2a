@@ -247,10 +247,23 @@ export const composeService = {
       headers['x-a2a-key'] = a2aKey;
     }
     if (agent.priceUsdc > 0) {
-      const payTo = agent.metadata?.payTo as string | undefined;
+      // WAS-V2-3-CLIENT-2: schema drift fallback for payTo (mirrors price_per_call fallback in discovery)
+      // canonical: agent.metadata.payTo  ←  preferred (kite registry)
+      // fallback:  agent.metadata.payment.contract  ←  wasiai-v2 marketplace exposes payTo here
+      const meta = agent.metadata as Record<string, unknown> | undefined;
+      const canonicalPayTo =
+        typeof meta?.payTo === 'string' ? meta.payTo : undefined;
+      const fallbackPayment = meta?.payment as
+        | Record<string, unknown>
+        | undefined;
+      const fallbackPayTo =
+        typeof fallbackPayment?.contract === 'string'
+          ? fallbackPayment.contract
+          : undefined;
+      const payTo = canonicalPayTo ?? fallbackPayTo;
       if (!payTo)
         throw new Error(
-          `No payTo address for agent ${agent.slug} — agent metadata must include payTo`,
+          `No payTo address for agent ${agent.slug} — neither metadata.payTo nor metadata.payment.contract present`,
         );
       const valueWei = String(
         BigInt(Math.round(agent.priceUsdc * 1e6)) * BigInt(1e12),
