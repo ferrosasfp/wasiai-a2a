@@ -1,6 +1,8 @@
 -- WKH-57 (DT-D): cache key fortalecido con schema fingerprint.
 -- Aditiva — entradas legacy quedan stale (schema_hash IS NULL) y se ignoran al SELECT.
 
+BEGIN;
+
 ALTER TABLE kite_schema_transforms
   ADD COLUMN IF NOT EXISTS schema_hash text;
 
@@ -22,3 +24,5 @@ ALTER TABLE kite_schema_transforms
 
 CREATE INDEX IF NOT EXISTS idx_kite_schema_transforms_pair_hash
   ON kite_schema_transforms (source_agent_id, target_agent_id, schema_hash);
+
+COMMIT;

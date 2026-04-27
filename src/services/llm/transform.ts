@@ -198,6 +198,34 @@ async function persistToL2(
   );
 }
 
+/**
+ * Builds a TransformResult for the LLM bridge path. Shared between the
+ * happy path (attempt 1) and the retry-happy path (attempt 2). Keeps the
+ * returned shape identical to inline construction (no behavioural change).
+ */
+function buildLLMResult(
+  transformedOutput: unknown,
+  model: PricedModel,
+  tokensIn: number,
+  tokensOut: number,
+  retries: 0 | 1,
+  latencyMs: number,
+): TransformResult {
+  return {
+    transformedOutput,
+    cacheHit: false,
+    bridgeType: 'LLM',
+    latencyMs,
+    llm: {
+      model,
+      tokensIn,
+      tokensOut,
+      retries,
+      costUsd: computeCostUsd(model, tokensIn, tokensOut),
+    },
+  };
+}
+
 // ─── Public API ────────────────────────────────────────────────
 
 /**
@@ -285,19 +313,14 @@ export async function maybeTransform(
     });
     l1Cache.set(cacheKey, attempt1.fn);
 
-    return {
-      transformedOutput: transformed1,
-      cacheHit: false,
-      bridgeType: 'LLM',
-      latencyMs: Date.now() - start,
-      llm: {
-        model,
-        tokensIn: attempt1.tokensIn,
-        tokensOut: attempt1.tokensOut,
-        retries: 0,
-        costUsd: computeCostUsd(model, attempt1.tokensIn, attempt1.tokensOut),
-      },
-    };
+    return buildLLMResult(
+      transformed1,
+      model,
+      attempt1.tokensIn,
+      attempt1.tokensOut,
+      0,
+      Date.now() - start,
+    );
   }
 
   // Attempt 2 — retry with missing fields hint (CD-10)
@@ -338,19 +361,14 @@ export async function maybeTransform(
     });
     l1Cache.set(cacheKey, attempt2.fn);
 
-    return {
-      transformedOutput: transformed2,
-      cacheHit: false,
-      bridgeType: 'LLM',
-      latencyMs: Date.now() - start,
-      llm: {
-        model,
-        tokensIn: totalIn,
-        tokensOut: totalOut,
-        retries: 1,
-        costUsd: computeCostUsd(model, totalIn, totalOut),
-      },
-    };
+    return buildLLMResult(
+      transformed2,
+      model,
+      totalIn,
+      totalOut,
+      1,
+      Date.now() - start,
+    );
   }
 
   // Retry FAILED — throw with explicit message + missing fields (DT-C, AC-3)

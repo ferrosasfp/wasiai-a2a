@@ -104,6 +104,17 @@ describe('WKH-57 W0 helpers — canonicalJson / schemaHash', () => {
     const h = schemaHash({ required: ['x'] });
     expect(h).toMatch(/^[0-9a-f]{16}$/);
   });
+
+  it('T-Cp7: canonicalJson throws on circular reference', () => {
+    const a: Record<string, unknown> = { x: 1 };
+    a.self = a;
+    expect(() => canonicalJson(a)).toThrow(/circular/i);
+
+    // Also detect cycles via arrays
+    const arr: unknown[] = [1, 2];
+    arr.push(arr);
+    expect(() => canonicalJson(arr)).toThrow(/circular/i);
+  });
 });
 
 describe('WKH-57 W0 helpers — selectModel', () => {
@@ -163,6 +174,25 @@ describe('WKH-57 W0 helpers — selectModel', () => {
       },
     };
     expect(selectModel(schema)).toBe('claude-sonnet-4-6');
+  });
+
+  it('T-Ws7: defensive guards — non-object inputs fall back to Haiku (CD-12)', () => {
+    // null and undefined
+    expect(selectModel(null as unknown as Record<string, unknown>)).toBe(
+      'claude-haiku-4-5-20251001',
+    );
+    expect(selectModel(undefined)).toBe('claude-haiku-4-5-20251001');
+    // primitives (cast to bypass TS at the call site — runtime guard must catch them)
+    expect(selectModel('string' as unknown as Record<string, unknown>)).toBe(
+      'claude-haiku-4-5-20251001',
+    );
+    expect(selectModel(42 as unknown as Record<string, unknown>)).toBe(
+      'claude-haiku-4-5-20251001',
+    );
+    // arrays are typeof 'object' but must not be treated as schemas
+    expect(selectModel([] as unknown as Record<string, unknown>)).toBe(
+      'claude-haiku-4-5-20251001',
+    );
   });
 });
 
@@ -262,7 +292,8 @@ beforeEach(() => {
 });
 
 describe('WKH-57 maybeTransform — model selector (AC-1, AC-2)', () => {
-  it('T-VER-1: schema with 4 required + primitives selects Haiku (AC-1, AB-WKH-56-1)', async () => {
+  // T-VER-1
+  it('AC-1: Haiku model selected when schema has <5 required fields and primitive types only', async () => {
     setupLLMResponse(
       'return { a: output.a, b: output.b, c: output.c, d: output.d };',
     );
@@ -402,10 +433,19 @@ describe('WKH-57 maybeTransform — retry loop (AC-3)', () => {
   });
 
   it('T-VER-4: retry fails on second attempt throws (AC-3 sad)', async () => {
-    setupLLMResponseSequence([
-      { transformFn: 'return { wrong: 1 };' },
-      { transformFn: 'return { still_wrong: 2 };' },
-    ]);
+    // AR MNR-4: drive responses via call-count + mockImplementation so the
+    // test does not depend on the order in which mockResolvedValueOnce
+    // queue entries are consumed.
+    let callCount = 0;
+    mockCreate.mockImplementation(() => {
+      callCount++;
+      const transformFn =
+        callCount === 1 ? 'return { wrong: 1 };' : 'return { still_wrong: 2 };';
+      return Promise.resolve({
+        content: [{ type: 'text', text: JSON.stringify({ transformFn }) }],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      });
+    });
 
     const schema = {
       required: ['query'],

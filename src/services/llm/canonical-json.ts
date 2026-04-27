@@ -6,18 +6,28 @@
 
 import { createHash } from 'node:crypto';
 
-export function canonicalJson(value: unknown): string {
+export function canonicalJson(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet(),
+): string {
   if (value === null || typeof value !== 'object') {
     // primitives + null. JSON.stringify(undefined) === undefined, fall back to 'null'.
     return JSON.stringify(value) ?? 'null';
   }
+  if (seen.has(value as object)) {
+    throw new Error('canonicalJson: circular reference detected');
+  }
+  seen.add(value as object);
   if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(',')}]`;
+    return `[${value.map((v) => canonicalJson(v, seen)).join(',')}]`;
   }
   const keys = Object.keys(value as Record<string, unknown>).sort();
   const parts = keys.map(
     (k) =>
-      `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`,
+      `${JSON.stringify(k)}:${canonicalJson(
+        (value as Record<string, unknown>)[k],
+        seen,
+      )}`,
   );
   return `{${parts.join(',')}}`;
 }
