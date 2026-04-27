@@ -292,7 +292,8 @@ beforeEach(() => {
 });
 
 describe('WKH-57 maybeTransform — model selector (AC-1, AC-2)', () => {
-  it('T-VER-1: schema with 4 required + primitives selects Haiku (AC-1, AB-WKH-56-1)', async () => {
+  // T-VER-1
+  it('AC-1: Haiku model selected when schema has <5 required fields and primitive types only', async () => {
     setupLLMResponse(
       'return { a: output.a, b: output.b, c: output.c, d: output.d };',
     );
