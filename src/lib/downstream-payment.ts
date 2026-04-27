@@ -161,8 +161,21 @@ function computeAtomicValue(priceUsdc: number): bigint {
 }
 
 /**
- * Lee balance USDC del operator on Fuji (DT-H, AC-10).
- * Throw on RPC failure — el caller lo captura y devuelve null.
+ * Reads the operator's USDC balance on Fuji (DT-H, AC-10).
+ * Throws on RPC failure — the caller catches and returns null.
+ *
+ * AR-WKH-55-MNR-2 — Known race condition (intentional V1 limitation):
+ * The pre-flight balance check and the EIP-3009 signing/settlement happen at
+ * different points in time. Between this read and the facilitator's on-chain
+ * `transferWithAuthorization` execution, the operator balance can drift (e.g.
+ * a parallel downstream invoke on the same hot path consumes the same USDC).
+ * The result is a `SETTLE_FAILED` from the facilitator, surfaced to the caller
+ * (compose) via `null` and logged with `facilitatorErrorBody` for diagnosis.
+ *
+ * Mitigation in V2 (planned): wasiai-facilitator will accept an idempotency
+ * key + nonce-pinning on the Fuji RPC layer (optimistic locking on the
+ * authorization nonce) so concurrent settles deterministically fail one of
+ * them at the chain level instead of racing on balance.
  */
 async function readOperatorBalance(
   publicClient: PublicClient,
