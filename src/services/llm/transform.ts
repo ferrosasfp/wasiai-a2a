@@ -9,6 +9,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { supabase } from '../../lib/supabase.js';
 import type { TransformResult } from '../../types/index.js';
+import { schemaHash } from './canonical-json.js';
 
 const MODEL = 'claude-sonnet-4-20250514';
 const TIMEOUT_MS = 30_000;
@@ -128,12 +129,14 @@ Ejemplo válido de transformFn:
 async function getFromL2(
   sourceAgentId: string,
   targetAgentId: string,
+  schemaHashValue: string,
 ): Promise<string | null> {
   const { data, error } = await supabase
     .from('kite_schema_transforms')
     .select('transform_fn, hit_count')
     .eq('source_agent_id', sourceAgentId)
     .eq('target_agent_id', targetAgentId)
+    .eq('schema_hash', schemaHashValue)
     .single();
 
   if (error || !data) return null;
@@ -146,7 +149,8 @@ async function getFromL2(
       updated_at: new Date().toISOString(),
     })
     .eq('source_agent_id', sourceAgentId)
-    .eq('target_agent_id', targetAgentId);
+    .eq('target_agent_id', targetAgentId)
+    .eq('schema_hash', schemaHashValue);
 
   return data.transform_fn as string;
 }
@@ -158,16 +162,18 @@ async function getFromL2(
 async function persistToL2(
   sourceAgentId: string,
   targetAgentId: string,
+  schemaHashValue: string,
   transformFn: string,
 ): Promise<void> {
   await supabase.from('kite_schema_transforms').upsert(
     {
       source_agent_id: sourceAgentId,
       target_agent_id: targetAgentId,
+      schema_hash: schemaHashValue,
       transform_fn: transformFn,
       updated_at: new Date().toISOString(),
     },
-    { onConflict: 'source_agent_id,target_agent_id' },
+    { onConflict: 'source_agent_id,target_agent_id,schema_hash' },
   );
 }
 
@@ -205,7 +211,10 @@ export async function maybeTransform(
     };
   }
 
-  const cacheKey = `${sourceAgentId}:${targetAgentId}`;
+  // WKH-57 (DT-B): cache key includes deterministic schema fingerprint so
+  // schema changes do NOT collide with stale entries from a previous schema.
+  const schemaHashValue = schemaHash(inputSchema);
+  const cacheKey = `${sourceAgentId}:${targetAgentId}:${schemaHashValue}`;
 
   // 2. L1 cache hit
   const l1Fn = l1Cache.get(cacheKey);
@@ -220,7 +229,7 @@ export async function maybeTransform(
   }
 
   // 3. L2 cache hit (Supabase)
-  const l2Fn = await getFromL2(sourceAgentId, targetAgentId);
+  const l2Fn = await getFromL2(sourceAgentId, targetAgentId, schemaHashValue);
   if (l2Fn) {
     l1Cache.set(cacheKey, l2Fn);
     const transformedOutput = applyTransformFn(l2Fn, output);
@@ -237,14 +246,17 @@ export async function maybeTransform(
   const transformFn = await generateTransformFn(output, schema);
 
   // Persist async to L2 (don't block on this)
-  persistToL2(sourceAgentId, targetAgentId, transformFn).catch(
-    (err: unknown) => {
-      console.error(
-        `[Transform] Failed to persist to L2 for ${cacheKey}:`,
-        err,
-      );
-    },
-  );
+  persistToL2(
+    sourceAgentId,
+    targetAgentId,
+    schemaHashValue,
+    transformFn,
+  ).catch((err: unknown) => {
+    console.error(
+      `[Transform] Failed to persist to L2 for ${cacheKey}:`,
+      err,
+    );
+  });
 
   // Update L1
   l1Cache.set(cacheKey, transformFn);

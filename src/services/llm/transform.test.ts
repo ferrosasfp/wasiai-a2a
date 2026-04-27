@@ -97,8 +97,10 @@ beforeEach(() => {
   _clearL1Cache();
   process.env.ANTHROPIC_API_KEY = 'test-key';
 
-  // Re-setup from mock chain after clearAllMocks
-  // Chain: from().select('...').eq('source_agent_id', x).eq('target_agent_id', y).single()
+  // Re-setup from mock chain after clearAllMocks.
+  // WKH-57 W2: cache key now includes schema_hash so the chain has 3 .eq()
+  // calls (source_agent_id, target_agent_id, schema_hash) before .single().
+  // Chain: from().select(...).eq(src).eq(tgt).eq(hash).single()
   const single = vi.fn().mockResolvedValue({
     data: null,
     error: {
@@ -109,10 +111,13 @@ beforeEach(() => {
       name: 'PostgrestError',
     },
   });
-  const eq2 = vi.fn().mockReturnValue({ single });
+  const eq3 = vi.fn().mockReturnValue({ single });
+  const eq2 = vi.fn().mockReturnValue({ eq: eq3, single });
   const eq1 = vi.fn().mockReturnValue({ eq: eq2, single });
   const select = vi.fn().mockReturnValue({ eq: eq1 });
-  const update = vi.fn().mockReturnValue({ eq: vi.fn().mockReturnThis() });
+  // Update chain (fire-and-forget): .update().eq().eq().eq()
+  const updateEqChain = vi.fn().mockReturnThis();
+  const update = vi.fn().mockReturnValue({ eq: updateEqChain });
   const upsert = vi.fn().mockResolvedValue({ error: null });
   vi.mocked(supabase.from).mockReturnValue({
     select,
@@ -155,7 +160,8 @@ describe('maybeTransform', () => {
     );
 
     vi.clearAllMocks();
-    // Re-setup from mock but keep L1 (don't call _clearL1Cache)
+    // Re-setup from mock but keep L1 (don't call _clearL1Cache).
+    // WKH-57 W2: 3-eq chain incl. schema_hash.
     const single2 = vi.fn().mockResolvedValue({
       data: null,
       error: {
@@ -166,7 +172,8 @@ describe('maybeTransform', () => {
         name: 'PostgrestError',
       },
     });
-    const eq2b = vi.fn().mockReturnValue({ single: single2 });
+    const eq3b = vi.fn().mockReturnValue({ single: single2 });
+    const eq2b = vi.fn().mockReturnValue({ eq: eq3b, single: single2 });
     const eq1b = vi.fn().mockReturnValue({ eq: eq2b, single: single2 });
     vi.mocked(supabase.from).mockReturnValue({
       select: vi.fn().mockReturnValue({ eq: eq1b }),
@@ -188,6 +195,7 @@ describe('maybeTransform', () => {
 
   // T-3: L2 cache hit → no LLM call
   it('T-3: L2 Supabase hit returns transform without calling LLM', async () => {
+    // WKH-57 W2: 3-eq chain incl. schema_hash.
     const single3 = vi.fn().mockResolvedValue({
       data: { transform_fn: 'return { query: output.text };', hit_count: 5 },
       error: null,
@@ -195,7 +203,8 @@ describe('maybeTransform', () => {
       status: 200,
       statusText: 'OK',
     });
-    const eq2c = vi.fn().mockReturnValue({ single: single3 });
+    const eq3c = vi.fn().mockReturnValue({ single: single3 });
+    const eq2c = vi.fn().mockReturnValue({ eq: eq3c, single: single3 });
     const eq1c = vi.fn().mockReturnValue({ eq: eq2c, single: single3 });
     vi.mocked(supabase.from).mockReturnValue({
       select: vi.fn().mockReturnValue({ eq: eq1c }),
