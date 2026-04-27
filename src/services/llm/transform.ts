@@ -200,6 +200,7 @@ export async function maybeTransform(
     return {
       transformedOutput: output,
       cacheHit: 'SKIPPED',
+      bridgeType: 'SKIPPED',
       latencyMs: Date.now() - start,
     };
   }
@@ -213,6 +214,7 @@ export async function maybeTransform(
     return {
       transformedOutput,
       cacheHit: true,
+      bridgeType: 'CACHE_L1',
       latencyMs: Date.now() - start,
     };
   }
@@ -225,6 +227,7 @@ export async function maybeTransform(
     return {
       transformedOutput,
       cacheHit: true,
+      bridgeType: 'CACHE_L2',
       latencyMs: Date.now() - start,
     };
   }
@@ -250,6 +253,7 @@ export async function maybeTransform(
   return {
     transformedOutput,
     cacheHit: false,
+    bridgeType: 'LLM',
     latencyMs: Date.now() - start,
   };
 }

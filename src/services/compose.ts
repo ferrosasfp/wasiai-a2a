@@ -9,6 +9,7 @@ import {
   signAndSettleDownstream,
 } from '../lib/downstream-payment.js';
 import type {
+  A2AMessage,
   Agent,
   ComposeRequest,
   ComposeResult,
@@ -17,6 +18,7 @@ import type {
   StepResult,
   X402PaymentRequest,
 } from '../types/index.js';
+import { extractA2APayload, isA2AMessage } from './a2a-protocol.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
 import { maybeTransform } from './llm/transform.js';
@@ -91,6 +93,63 @@ export const composeService = {
           }),
         };
         results.push(result);
+        totalCost += agent.priceUsdc;
+        totalLatency += latencyMs;
+        lastOutput = output;
+        if (i < steps.length - 1) {
+          const nextStep = steps[i + 1];
+          const nextAgent = await this.resolveAgent(nextStep);
+          const inputSchema = nextAgent?.metadata?.inputSchema as
+            | Record<string, unknown>
+            | undefined;
+          // ── WKH-56: A2A fast-path bridge resolution ──
+          // DT-4: target a2aCompliant requires strict literal `true`
+          // (truthy values like 'yes' / 1 do NOT activate the fast-path).
+          const targetA2A = nextAgent?.metadata?.a2aCompliant === true;
+          const outputIsA2A = isA2AMessage(lastOutput);
+          const bridgeStart = Date.now();
+          try {
+            if (outputIsA2A && targetA2A) {
+              // AC-1: A2A → A2A passthrough. NO maybeTransform call.
+              result.bridgeType = 'A2A_PASSTHROUGH';
+              result.transformLatencyMs = Date.now() - bridgeStart;
+              // lastOutput UNCHANGED (CD-15: anti-mutation)
+            } else {
+              // AC-3 unwrap: A2A output but target is non-A2A → use parts[0].
+              // AC-2 fallback: non-A2A output → maybeTransform actual flow.
+              const payloadForTransform =
+                outputIsA2A && !targetA2A
+                  ? (extractA2APayload(lastOutput as A2AMessage)[0] ??
+                    lastOutput)
+                  : lastOutput;
+              if (inputSchema && nextAgent) {
+                const tr = await maybeTransform(
+                  agent.id,
+                  nextAgent.id,
+                  payloadForTransform,
+                  inputSchema,
+                );
+                result.cacheHit = tr.cacheHit; // legacy, DT-3
+                result.bridgeType = tr.bridgeType; // nuevo, DT-3
+                result.transformLatencyMs = tr.latencyMs;
+                lastOutput = tr.transformedOutput;
+              } else if (outputIsA2A && !targetA2A) {
+                // Schema-less + A2A output unwrapped: surface unwrapped payload
+                // to next step but mark bridge as SKIPPED (no transform ran).
+                lastOutput = payloadForTransform;
+                result.bridgeType = 'SKIPPED';
+                result.transformLatencyMs = Date.now() - bridgeStart;
+              }
+            }
+          } catch (transformErr) {
+            console.error(
+              `[Compose] Transform failed at step ${i}:`,
+              transformErr,
+            );
+          }
+        }
+        // ── WKH-56 (W3): emit compose_step event AFTER bridge resolved.
+        // metadata.bridge_type ∈ BridgeType for non-last steps, null otherwise.
         eventService
           .track({
             eventType: 'compose_step',
@@ -101,38 +160,11 @@ export const composeService = {
             latencyMs,
             costUsdc: agent.priceUsdc,
             txHash,
+            metadata: { bridge_type: result.bridgeType ?? null },
           })
           .catch((err) =>
             console.error('[Compose] event tracking failed:', err),
           );
-        totalCost += agent.priceUsdc;
-        totalLatency += latencyMs;
-        lastOutput = output;
-        if (i < steps.length - 1) {
-          const nextStep = steps[i + 1];
-          const nextAgent = await this.resolveAgent(nextStep);
-          const inputSchema = nextAgent?.metadata?.inputSchema as
-            | Record<string, unknown>
-            | undefined;
-          if (inputSchema && nextAgent) {
-            try {
-              const tr = await maybeTransform(
-                agent.id,
-                nextAgent.id,
-                lastOutput,
-                inputSchema,
-              );
-              result.cacheHit = tr.cacheHit;
-              result.transformLatencyMs = tr.latencyMs;
-              lastOutput = tr.transformedOutput;
-            } catch (transformErr) {
-              console.error(
-                `[Compose] Transform failed at step ${i}:`,
-                transformErr,
-              );
-            }
-          }
-        }
       } catch (err) {
         eventService
           .track({

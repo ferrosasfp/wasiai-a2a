@@ -45,3 +45,5 @@
 | 052 | 2026-04-21 | Migrate x402 payment token from KXUSD → PYUSD (WKH-52) | config | QUALITY | DONE | feat/052-wkh-52-pyusd-migration |
 | 053 | 2026-04-22 | Supabase RLS + ownership checks en queries (WKH-53) | security | QUALITY | DONE | feat/wkh-53-rls-ownership ([DONE.md](053-wkh-53-rls-ownership/DONE.md)) |
 | 054 | 2026-04-24 | Downstream x402 Payment — wasiai-a2a → wasiai-v2 Agents (Avalanche Fuji) (WKH-55) | feature | QUALITY | DONE | feat/wkh-55-downstream-x402-fuji |
+| 055 | 2026-04-26 | A2A Fast-Path en compose — passthrough estructurado entre agentes A2A-compliant (WKH-56) | feature | QUALITY | DONE | feat/055-wkh-56-a2a-fast-path ([done-report.md](055-wkh-56-a2a-fast-path/done-report.md)) |
+| 056 | 2026-04-26 | LLM Bridge Pro — model selector + verification + cache fingerprint + telemetry (WKH-57) | feature | QUALITY | in progress | feat/056-wkh-57-llm-bridge-pro |

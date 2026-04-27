@@ -118,6 +118,26 @@ describe('agentCardService', () => {
       );
       expect(card.authentication.schemes).toEqual(['bearer']);
     });
+
+    // WKH-56: a2aCompliant flag in capabilities (DT-2)
+    it('surfaces a2aCompliant=true when agent.metadata.a2aCompliant === true', () => {
+      const a2aAgent: Agent = { ...agent, metadata: { a2aCompliant: true } };
+      const card = agentCardService.buildAgentCard(
+        a2aAgent,
+        registryConfig,
+        baseUrl,
+      );
+      expect(card.capabilities.a2aCompliant).toBe(true);
+    });
+
+    it('omits a2aCompliant when agent.metadata.a2aCompliant is absent', () => {
+      const card = agentCardService.buildAgentCard(
+        agent,
+        registryConfig,
+        baseUrl,
+      );
+      expect(card.capabilities.a2aCompliant).toBeUndefined();
+    });
   });
 
   // ---------- buildSelfAgentCard ----------
