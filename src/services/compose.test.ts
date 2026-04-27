@@ -733,6 +733,24 @@ describe('composeService — WAS-V2-3-CLIENT integration (WKH-57)', () => {
       metadata: { payTo: '0x000000000000000000000000000000000000aBcD' },
     });
     vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    // Self-contained upstream x402 mocks (AR BLQ-MED-1): clearAllMocks resets
+    // call history but NOT mockResolvedValue implementations from prior tests.
+    mockSign.mockResolvedValueOnce({
+      xPaymentHeader: 'mockheader',
+      paymentRequest: {
+        authorization: {
+          from: '0xA',
+          to: '0xB',
+          value: '50000',
+          validAfter: '0',
+          validBefore: '9999999999',
+          nonce: '0x1234',
+        },
+        signature: '0xSIG',
+        network: 'eip155:2368',
+      },
+    });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xUPSTREAM' });
     mockFetchOk();
 
     const result = await composeService.compose({
