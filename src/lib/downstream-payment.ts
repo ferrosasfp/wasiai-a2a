@@ -1,8 +1,8 @@
 /**
  * Downstream x402 Payment — Avalanche Fuji USDC (WKH-55)
  *
- * Aislado del adapter Kite (CD-NEW-SDD-1). NUNCA throw (CD-NEW-SDD-6).
- * Returns null en cualquier skip o failure — el caller logea y continúa.
+ * Isolated from the Kite adapter (CD-NEW-SDD-1). NEVER throws (CD-NEW-SDD-6).
+ * Returns null on any skip or failure — the caller logs and continues.
  */
 import { randomBytes } from 'node:crypto';
 import {
@@ -17,9 +17,14 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { avalancheFuji } from 'viem/chains';
-import type { Agent } from '../types/index.js';
+import type { Agent, DownstreamLogger } from '../types/index.js';
 
-// ─── Constantes (DT-N) — env override + warn-once ───────────────────
+// Re-export for backward-compat: callers historically import
+// `DownstreamLogger` from this module (e.g. compose.ts). The canonical
+// definition now lives in `types/index.ts` (TD-WKH-55-4 / CR-MNR-3).
+export type { DownstreamLogger };
+
+// ─── Constants (DT-N) — env override + warn-once ────────────────────
 const DEFAULT_FUJI_USDC =
   '0x5425890298aed601595a70AB815c96711a31Bc65' as `0x${string}`;
 const FUJI_CHAIN_ID = 43113 as const;
@@ -31,13 +36,13 @@ const VALID_BEFORE_SECONDS = 300 as const;
 const X402_SCHEME = 'exact' as const;
 const MAX_TIMEOUT_SECONDS = 60 as const;
 
-// CD-NEW-SDD-3: lectura del flag UNA sola vez al module load
+// CD-NEW-SDD-3: read the flag ONCE at module load
 const DOWNSTREAM_FLAG = process.env.WASIAI_DOWNSTREAM_X402 === 'true';
 
-// Warn-once flag (patron heredado de payment.ts:78-101)
-let _warnedDefaultUsdc = false;
+// Warn-once flag (pattern inherited from payment.ts:78-101)
+let warnedDefaultUsdc = false;
 
-// ─── Tipos publicos ─────────────────────────────────────────────────
+// ─── Public types ───────────────────────────────────────────────────
 export interface DownstreamResult {
   txHash: `0x${string}`;
   blockNumber: number;
@@ -59,11 +64,6 @@ export type DownstreamSkipCode =
   | 'SETTLE_FAILED'
   | 'NETWORK_ERROR'
   | 'CONFIG_MISSING';
-
-export interface DownstreamLogger {
-  warn: (obj: unknown, msg?: string) => void;
-  info: (obj: unknown, msg?: string) => void;
-}
 
 // ─── x402 wire types (CR-MNR-4: concrete shapes for facilitator I/O) ─
 export interface X402Authorization {
@@ -101,17 +101,17 @@ export interface X402SettleResponse {
   amount?: string;
 }
 
-// ─── Helpers internos ───────────────────────────────────────────────
+// ─── Internal helpers ───────────────────────────────────────────────
 
 /**
- * Resuelve la dirección USDC Fuji desde env, con warn-once si está ausente.
- * Retorna el default canonical Circle USDC en Fuji.
+ * Resolves the Fuji USDC address from env, warn-once if absent.
+ * Returns the canonical default Circle USDC on Fuji.
  */
 function getFujiUsdcAddress(): `0x${string}` {
   const env = process.env.FUJI_USDC_ADDRESS;
   if (!env) {
-    if (!_warnedDefaultUsdc) {
-      _warnedDefaultUsdc = true;
+    if (!warnedDefaultUsdc) {
+      warnedDefaultUsdc = true;
       console.warn(
         `[WKH-55] FUJI_USDC_ADDRESS not set, using default ${DEFAULT_FUJI_USDC}`,
       );
@@ -135,8 +135,8 @@ function getFacilitatorUrl(): string {
 }
 
 /**
- * Valida formato y zero-address del payTo (R-1 mitigacion).
- * Retorna { ok: true, addr } o { ok: false, code }.
+ * Validates payTo format and rejects the zero-address (R-1 mitigation).
+ * Returns { ok: true, addr } or { ok: false, code }.
  */
 function validatePayTo(
   contract: string,
@@ -153,16 +153,29 @@ function validatePayTo(
 }
 
 /**
- * Computa atomic value en USDC Fuji (6 decimales).
- * CD-NEW-SDD-5: usa parseUnits, NO BigInt(Math.round(x*1e6)).
+ * Computes the atomic value in Fuji USDC (6 decimals).
+ * CD-NEW-SDD-5: uses parseUnits, NOT BigInt(Math.round(x*1e6)).
  */
 function computeAtomicValue(priceUsdc: number): bigint {
   return parseUnits(priceUsdc.toString(), FUJI_USDC_DECIMALS);
 }
 
 /**
- * Lee balance USDC del operator on Fuji (DT-H, AC-10).
- * Throw on RPC failure — el caller lo captura y devuelve null.
+ * Reads the operator's USDC balance on Fuji (DT-H, AC-10).
+ * Throws on RPC failure — the caller catches and returns null.
+ *
+ * AR-WKH-55-MNR-2 — Known race condition (intentional V1 limitation):
+ * The pre-flight balance check and the EIP-3009 signing/settlement happen at
+ * different points in time. Between this read and the facilitator's on-chain
+ * `transferWithAuthorization` execution, the operator balance can drift (e.g.
+ * a parallel downstream invoke on the same hot path consumes the same USDC).
+ * The result is a `SETTLE_FAILED` from the facilitator, surfaced to the caller
+ * (compose) via `null` and logged with `facilitatorErrorBody` for diagnosis.
+ *
+ * Mitigation in V2 (planned): wasiai-facilitator will accept an idempotency
+ * key + nonce-pinning on the Fuji RPC layer (optimistic locking on the
+ * authorization nonce) so concurrent settles deterministically fail one of
+ * them at the chain level instead of racing on balance.
  */
 async function readOperatorBalance(
   publicClient: PublicClient,
@@ -179,8 +192,8 @@ async function readOperatorBalance(
 }
 
 /**
- * Lazy-init wallet/public clients (patron heredado de payment.ts:131-145).
- * NO se cachean en module-level porque tests necesitan resetearlos via vi.mock.
+ * Lazy-init wallet/public clients (pattern inherited from payment.ts:131-145).
+ * NOT cached at module level because tests need to reset them via vi.mock.
  */
 function buildClients(): {
   publicClient: PublicClient;
@@ -205,8 +218,8 @@ function buildClients(): {
 }
 
 /**
- * Construye el body canonical x402 v2 (mismo shape que kite-ozone:373-394).
- * NO se importa nada de kite-ozone (CD-NEW-SDD-1) — body construido inline.
+ * Builds the canonical x402 v2 body (same shape as kite-ozone:373-394).
+ * Nothing is imported from kite-ozone (CD-NEW-SDD-1) — body built inline.
  */
 function buildCanonicalBody(args: {
   authorization: X402Authorization;
@@ -230,14 +243,14 @@ function buildCanonicalBody(args: {
 }
 
 /**
- * POST al facilitator. Retorna un descriptor estructurado en lugar de `null`
- * crudo, para que el caller pueda distinguir verify/settle failures por su
- * cuerpo raw (AR-MNR-2: race condition observability).
+ * POSTs to the facilitator. Returns a structured descriptor instead of a raw
+ * `null` so the caller can distinguish verify/settle failures by their raw
+ * body (AR-MNR-2: race condition observability).
  *
- * AR-WKH-55-MNR-1 fix: el fetch lleva un AbortSignal.timeout(10s). Sin esto,
- * un facilitator colgado (TCP accept + no response) bloquearía el invoke
- * upstream durante el default de Node (~30-120s). Misma defensa que
- * `discovery.ts` aplica en sus fetches.
+ * AR-WKH-55-MNR-1 fix: the fetch carries an AbortSignal.timeout(10s). Without
+ * it, a hung facilitator (TCP accept + no response) would block the upstream
+ * invoke during Node's default (~30-120s). Same defense `discovery.ts`
+ * applies to its fetches.
  */
 const FACILITATOR_TIMEOUT_MS = 10_000;
 
@@ -258,6 +271,13 @@ async function postFacilitator<T>(
 ): Promise<FacilitatorResponse<T>> {
   const url = `${getFacilitatorUrl()}${path}`;
   try {
+    // CR-MNR-5: the body is materialized in-memory via JSON.stringify before
+    // fetch sends it. For the canonical x402 v2 body the size stays well
+    // under 2 KB, so the cost of "build JS object → serialize string → write
+    // to socket" is < 1 ms and not worth optimizing today. If this ever
+    // grows (e.g. multi-payload batch settles), a future hardening could
+    // switch to a streaming JSON encoder (e.g. fast-json-stringify or a
+    // ReadableStream) to avoid the intermediate string allocation.
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -281,7 +301,7 @@ async function postFacilitator<T>(
   }
 }
 
-// ─── EIP-712 types (referencia: payment.ts EIP712_TYPES.Authorization) ────
+// ─── EIP-712 types (reference: payment.ts EIP712_TYPES.Authorization) ────
 const TRANSFER_WITH_AUTHORIZATION_TYPES = {
   TransferWithAuthorization: [
     { name: 'from', type: 'address' },
@@ -293,32 +313,32 @@ const TRANSFER_WITH_AUTHORIZATION_TYPES = {
   ],
 } as const;
 
-// ─── API pública (ÚNICA exportación funcional) ──────────────────────
+// ─── Public API (SINGLE functional export) ──────────────────────────
 
 /**
  * Sign EIP-3009 + POST /verify + POST /settle. NEVER throws (CD-NEW-SDD-6).
  *
- * Retorna `null` en cualquiera de estos casos:
- *  - flag `WASIAI_DOWNSTREAM_X402` no es 'true'
- *  - agent.payment ausente / malformado
- *  - method !== 'x402' o chain !== 'avalanche'
- *  - payTo inválido o zero
- *  - priceUsdc no es un número finito positivo
- *  - balance insuficiente
+ * Returns `null` in any of these cases:
+ *  - flag `WASIAI_DOWNSTREAM_X402` is not 'true'
+ *  - agent.payment absent / malformed
+ *  - method !== 'x402' or chain !== 'avalanche'
+ *  - payTo invalid or zero
+ *  - priceUsdc is not a finite positive number
+ *  - insufficient balance
  *  - balance read RPC failure
  *  - signing failure
- *  - facilitator /verify devuelve verified=false
- *  - facilitator /settle devuelve settled=false / network error / 5xx
- *  - config missing (OPERATOR_PRIVATE_KEY o FUJI_RPC_URL ausentes)
+ *  - facilitator /verify returns verified=false
+ *  - facilitator /settle returns settled=false / network error / 5xx
+ *  - config missing (OPERATOR_PRIVATE_KEY or FUJI_RPC_URL absent)
  *
- * Retorna `DownstreamResult` SOLO cuando facilitator confirmó `settled: true`
- * con `transactionHash` y `blockNumber` poblados.
+ * Returns `DownstreamResult` ONLY when the facilitator confirmed `settled: true`
+ * with `transactionHash` and `blockNumber` populated.
  */
 export async function signAndSettleDownstream(
   agent: Agent,
   logger: DownstreamLogger,
 ): Promise<DownstreamResult | null> {
-  // 1. Flag check (CD-NEW-SDD-7 — zero overhead cuando off)
+  // 1. Flag check (CD-NEW-SDD-7 — zero overhead when off)
   if (!DOWNSTREAM_FLAG) {
     return null;
   }
@@ -384,8 +404,8 @@ export async function signAndSettleDownstream(
   const { publicClient, walletClient, account } = clients;
 
   // 7a. priceUsdc guard (CR-MNR-7: explicit edge-case for non-finite / non-positive
-  // price). Sin esto, valores como NaN, Infinity, -1, 0 o sub-atómicos como 5e-7
-  // se filtran al `parseUnits` y ahí pueden producir 0n o un throw genérico.
+  // price). Without this, values like NaN, Infinity, -1, 0 or sub-atomic ones such
+  // as 5e-7 would slip into `parseUnits` and produce 0n or a generic throw.
   if (!Number.isFinite(agent.priceUsdc) || agent.priceUsdc <= 0) {
     logger.warn(
       {
@@ -444,14 +464,14 @@ export async function signAndSettleDownstream(
   const nonce = `0x${randomBytes(32).toString('hex')}` as `0x${string}`;
   const authorization = {
     from: account.address,
-    to: payToCheck.addr, // CD-8: agent.payment.contract validado
+    to: payToCheck.addr, // CD-8: agent.payment.contract validated
     value: value.toString(),
     validAfter: '0',
     validBefore: String(now + VALID_BEFORE_SECONDS),
     nonce,
   };
 
-  // 10. Sign EIP-712 (CD-8: domain exacto USDC Fuji)
+  // 10. Sign EIP-712 (CD-8: exact USDC Fuji domain)
   let signature: Hex;
   try {
     signature = await walletClient.signTypedData({
@@ -513,9 +533,9 @@ export async function signAndSettleDownstream(
     !settleRes.data.transactionHash ||
     typeof settleRes.data.blockNumber !== 'number'
   ) {
-    // AR-MNR-2: incluir el body raw del facilitator para distinguir race
-    // condition (ej: "nonce already used", "balance changed mid-flight") vs
-    // otros errores (5xx, malformed response, network).
+    // AR-MNR-2: include the facilitator's raw body to distinguish race
+    // conditions (e.g. "nonce already used", "balance changed mid-flight")
+    // from other errors (5xx, malformed response, network).
     logger.warn(
       {
         agentSlug: agent.slug,

@@ -277,6 +277,24 @@ export interface OrchestrateResult {
 }
 
 // ============================================================
+// DOWNSTREAM PAYMENT LOGGER (WKH-55)
+// ============================================================
+
+/**
+ * Structural logger interface used by `signAndSettleDownstream` and any
+ * caller that wants to plumb a Pino-like logger into the downstream
+ * payment flow without taking a hard dependency on Pino itself.
+ *
+ * Canonical home (TD-WKH-55-4 / CR-MNR-3): defined here in `types/index.ts`
+ * and consumed via re-export from `src/lib/downstream-payment.ts` and
+ * `src/services/compose.ts` to avoid duplicate definitions.
+ */
+export interface DownstreamLogger {
+  warn: (obj: unknown, msg?: string) => void;
+  info: (obj: unknown, msg?: string) => void;
+}
+
+// ============================================================
 // PAYMENT TYPES (chain-agnostic)
 // ============================================================
 
