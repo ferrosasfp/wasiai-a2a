@@ -132,6 +132,12 @@ export const registryService = {
     id: string,
     updates: Partial<RegistryConfig>,
   ): Promise<RegistryConfig> {
+    // Guard: 'wasiai' is canonical and immutable (mirrors delete() guard).
+    // Prevents cross-tenant takeover via repointing discoveryEndpoint.
+    if (id === 'wasiai') {
+      throw new Error('Cannot modify the WasiAI registry');
+    }
+
     // Construir objeto de actualización con snake_case
     const updateRow: Partial<Omit<RegistryRow, 'id' | 'created_at'>> = {};
 
