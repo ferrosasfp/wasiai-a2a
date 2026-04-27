@@ -175,10 +175,12 @@ export interface StepResult {
   costUsdc: number;
   latencyMs: number;
   txHash?: string; // Hash de tx on-chain si hubo pago x402
-  /** Cache hit status for schema transform applied after this step */
+  /** @deprecated Use bridgeType. Kept for backward-compat (WKH-56 DT-3). */
   cacheHit?: boolean | 'SKIPPED';
-  /** Latency of schema transform (ms) */
+  /** Latency of bridge resolution (ms). Includes A2A fast-path or maybeTransform. */
   transformLatencyMs?: number;
+  /** Bridge type for the transition step→step+1. WKH-56. */
+  bridgeType?: BridgeType;
   /** Hash de la tx downstream Fuji USDC settle (WKH-55) */
   downstreamTxHash?: string;
   /** Block number en Fuji donde se confirmo el downstream settle (WKH-55) */
@@ -194,8 +196,16 @@ export interface StepResult {
 /** Result of a maybeTransform call */
 export interface TransformResult {
   transformedOutput: unknown;
-  /** true = cache hit, false = LLM generated, 'SKIPPED' = schemas compatible */
+  /** @deprecated Use bridgeType. true = cache hit, false = LLM generated, 'SKIPPED' = schemas compatible */
   cacheHit: boolean | 'SKIPPED';
+  /**
+   * WKH-56: explicit bridge type derived from cache layer used.
+   *
+   * Optional in W0 to keep the wave standalone-mergeable (CD-9).
+   * W1 populates this in every return of `maybeTransform` and downstream
+   * consumers (compose.ts) treat it as always present after W1+.
+   */
+  bridgeType?: BridgeType; // 'SKIPPED' | 'CACHE_L1' | 'CACHE_L2' | 'LLM'
   latencyMs: number;
 }
 
@@ -391,6 +401,8 @@ export interface AgentCard {
   capabilities: {
     streaming: boolean;
     pushNotifications: boolean;
+    /** WKH-56: agent natively speaks Google A2A v1 (Message{role,parts}). */
+    a2aCompliant?: boolean;
   };
   skills: AgentSkill[];
   inputModes: string[];
@@ -523,6 +535,51 @@ export interface GaslessStatus {
   /** Documentation link */
   documentation?: string;
 }
+
+// ============================================================
+// A2A PROTOCOL TYPES (Google A2A v1 — WKH-56)
+// ============================================================
+
+/** Discriminated union por kind. Google A2A v1. */
+export type A2APart = A2ATextPart | A2ADataPart | A2AFilePart;
+
+export interface A2ATextPart {
+  kind: 'text';
+  text: string;
+}
+
+export interface A2ADataPart {
+  kind: 'data';
+  data: unknown;
+}
+
+export interface A2AFilePart {
+  kind: 'file';
+  file: {
+    name?: string;
+    mimeType?: string;
+    bytes?: string; // base64
+    uri?: string;
+  };
+}
+
+export interface A2AMessage {
+  /** Optional client-side correlator. NO se valida en isA2AMessage. */
+  messageId?: string;
+  role: 'agent' | 'user' | 'tool';
+  parts: A2APart[]; // non-empty (validado en isA2AMessage)
+}
+
+// ============================================================
+// BRIDGE TYPES (WKH-56)
+// ============================================================
+
+export type BridgeType =
+  | 'A2A_PASSTHROUGH'
+  | 'SKIPPED'
+  | 'CACHE_L1'
+  | 'CACHE_L2'
+  | 'LLM';
 
 // ============================================================
 // A2A AGENT KEY TYPES (WKH-34)
