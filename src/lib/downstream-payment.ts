@@ -35,7 +35,7 @@ const MAX_TIMEOUT_SECONDS = 60 as const;
 const DOWNSTREAM_FLAG = process.env.WASIAI_DOWNSTREAM_X402 === 'true';
 
 // Warn-once flag (pattern inherited from payment.ts:78-101)
-let _warnedDefaultUsdc = false;
+let warnedDefaultUsdc = false;
 
 // ─── Public types ───────────────────────────────────────────────────
 export interface DownstreamResult {
@@ -110,8 +110,8 @@ export interface X402SettleResponse {
 function getFujiUsdcAddress(): `0x${string}` {
   const env = process.env.FUJI_USDC_ADDRESS;
   if (!env) {
-    if (!_warnedDefaultUsdc) {
-      _warnedDefaultUsdc = true;
+    if (!warnedDefaultUsdc) {
+      warnedDefaultUsdc = true;
       console.warn(
         `[WKH-55] FUJI_USDC_ADDRESS not set, using default ${DEFAULT_FUJI_USDC}`,
       );
