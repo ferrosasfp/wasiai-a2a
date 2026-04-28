@@ -32,10 +32,21 @@ export function _resetFallbackWarnDedup(): void {
  * Schema drift fallback for wasiai-v2 marketplace shape:
  *   - v2 expone `obj.protocol` (e.g. "x402"), pero el WKH-55 código espera `obj.method`.
  *   - v2 expone `chain` top-level (e.g. "avalanche-testnet"), pero WKH-55 lo busca en payment.
- *   - WKH-55 guard chequea `chain === "avalanche"`; v2 expone "avalanche-testnet" → normalizamos.
+ *   - WKH-55 guard chequea `chain === "avalanche"`; normalizamos solo testnet → avalanche.
  *
- * Retorna undefined si los campos críticos siguen ausentes.
+ * SEC-AR-2026-04-28 BLQ-MED-1: chain allowlist explícita.
+ * Registry comprometido podría exponer `chain: 'avalanche'` (literal) o variantes
+ * exóticas para bypassear el guard del downstream-payment. La defensa-en-profundidad
+ * es rechazar cualquier chain que no esté en la allowlist conocida — que hoy
+ * solo soporta Fuji testnet via wasiai-facilitator.
+ *
+ * Retorna undefined si los campos críticos siguen ausentes O chain no permitida.
  */
+const ALLOWED_CHAIN_VALUES = new Set([
+  'avalanche', // canonical (post-normalization)
+  'avalanche-testnet', // wasiai-v2 v2 marketplace exposed value
+]);
+
 function readPayment(
   raw: Record<string, unknown>,
 ): AgentPaymentSpec | undefined {
@@ -60,6 +71,11 @@ function readPayment(
         : undefined;
 
   if (!methodRaw || !chainRaw || typeof obj.contract !== 'string') {
+    return undefined;
+  }
+
+  // SEC-AR BLQ-MED-1: reject chain outside allowlist BEFORE normalization
+  if (!ALLOWED_CHAIN_VALUES.has(chainRaw)) {
     return undefined;
   }
 

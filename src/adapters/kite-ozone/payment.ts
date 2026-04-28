@@ -393,6 +393,9 @@ function buildX402CanonicalBody(
   };
 }
 
+// SEC-AR-2026-04-28 MNR-8: bound facilitator hangs symmetric to downstream-payment.ts
+const X402_FACILITATOR_TIMEOUT_MS = 10_000;
+
 async function verifyX402(proof: X402Proof): Promise<VerifyResult> {
   const facilitatorUrl = getFacilitatorUrl();
   const body = buildX402CanonicalBody(proof.authorization, proof.signature);
@@ -402,6 +405,7 @@ async function verifyX402(proof: X402Proof): Promise<VerifyResult> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(X402_FACILITATOR_TIMEOUT_MS),
     });
   } catch (err) {
     throw new Error(
@@ -427,6 +431,7 @@ async function settleX402(req: SettleRequest): Promise<SettleResult> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(X402_FACILITATOR_TIMEOUT_MS),
     });
   } catch (err) {
     throw new Error(
