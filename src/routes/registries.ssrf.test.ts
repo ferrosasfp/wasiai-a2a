@@ -149,6 +149,7 @@ describe('registries routes — write-time SSRF guard (WKH-62 W2)', () => {
       schema: { discovery: {}, invoke: { method: 'POST' } },
       enabled: true,
       createdAt: new Date(),
+      ownerRef: 'tenant-A',
     });
 
     const res = await app.inject({
@@ -215,6 +216,7 @@ describe('registries routes — write-time SSRF guard (WKH-62 W2)', () => {
       schema: { discovery: {}, invoke: { method: 'POST' } },
       enabled: true,
       createdAt: new Date(),
+      ownerRef: 'tenant-A',
     });
 
     const res = await app.inject({
@@ -238,6 +240,7 @@ describe('registries routes — write-time SSRF guard (WKH-62 W2)', () => {
       schema: { discovery: {}, invoke: { method: 'POST' } },
       enabled: true,
       createdAt: new Date(),
+      ownerRef: 'tenant-A',
     });
 
     const res = await app.inject({

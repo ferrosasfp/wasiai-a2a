@@ -73,6 +73,7 @@ function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig {
     schema: { discovery: {}, invoke: { method: 'POST' } },
     enabled: true,
     createdAt: new Date(),
+    ownerRef: 'system',
     ...o,
   };
 }
