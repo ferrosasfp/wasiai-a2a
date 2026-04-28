@@ -56,9 +56,16 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       // BLQ-2: bail early if timeout already sent 504
       if (reply.sent) return;
 
+      // WKH-58 fix-pack: propagate x-a2a-key header to service so compose
+      // can skip Pieverse inbound x402 (broken upstream WKH-45) when caller
+      // already paid via a2a-key (middleware debited budget per-call).
+      const a2aKeyHeader = request.headers['x-a2a-key'];
+      const a2aKey =
+        typeof a2aKeyHeader === 'string' ? a2aKeyHeader : undefined;
       const result = await composeService.compose({
         steps: body.steps,
         maxBudget: body.maxBudget,
+        a2aKey,
         // WKH-61: propagar el row del caller para scoping per-step
         scopingKeyRow: request.a2aKeyRow,
       });

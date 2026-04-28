@@ -49,8 +49,8 @@ describe('WKH-57 W0 helpers — pricing', () => {
     const haiku: PricedModel = 'claude-haiku-4-5-20251001';
     const sonnet: PricedModel = 'claude-sonnet-4-6';
     expect(PRICING_USD_PER_M_TOKENS[haiku]).toEqual({
-      input: 0.8,
-      output: 4.0,
+      input: 1.0,
+      output: 5.0,
     });
     expect(PRICING_USD_PER_M_TOKENS[sonnet]).toEqual({
       input: 3.0,
@@ -64,7 +64,7 @@ describe('WKH-57 W0 helpers — pricing', () => {
       1_000_000,
       1_000_000,
     );
-    expect(haikuCost).toBeCloseTo(0.8 + 4.0, 10);
+    expect(haikuCost).toBeCloseTo(1.0 + 5.0, 10);
 
     const sonnetCost = computeCostUsd(
       'claude-sonnet-4-6',
@@ -79,7 +79,7 @@ describe('WKH-57 W0 helpers — pricing', () => {
       500_000,
       500_000,
     );
-    expect(half).toBeCloseTo((0.8 + 4.0) / 2, 10);
+    expect(half).toBeCloseTo((1.0 + 5.0) / 2, 10);
   });
 });
 
