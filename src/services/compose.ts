@@ -293,7 +293,12 @@ export const composeService = {
     if (a2aKey) {
       headers['x-a2a-key'] = a2aKey;
     }
-    if (agent.priceUsdc > 0) {
+    // WKH-58: only sign inbound x402 when caller paid via x402 (no a2aKey).
+    // a2a-key path: middleware already debited per-call budget, no inbound
+    // settle needed. Pieverse /v2/settle (HTTP 500 since 2026-04-13) is the
+    // legacy path for x402 callers only. Downstream Fuji USDC settle (WKH-55)
+    // still runs for both paths via signAndSettleDownstream below.
+    if (agent.priceUsdc > 0 && !a2aKey) {
       // WAS-V2-3-CLIENT-2: schema drift fallback for payTo (mirrors price_per_call fallback in discovery)
       // canonical: agent.metadata.payTo  ←  preferred (kite registry)
       // fallback:  agent.metadata.payment.contract  ←  wasiai-v2 marketplace exposes payTo here
