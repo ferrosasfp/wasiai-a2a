@@ -133,10 +133,7 @@ describe('discoveryService — runtime SSRF guard (WKH-62 W1)', () => {
       name: 'good-reg',
       discoveryEndpoint: 'https://good.example/agents',
     });
-    vi.mocked(registryService.getEnabled).mockResolvedValue([
-      ssrfReg,
-      goodReg,
-    ]);
+    vi.mocked(registryService.getEnabled).mockResolvedValue([ssrfReg, goodReg]);
 
     // ssrf registry → 10.0.0.1 (private), good registry → public
     mockLookup

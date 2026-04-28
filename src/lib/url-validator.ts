@@ -29,9 +29,7 @@ import { promises as dns } from 'node:dns';
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
-export type Result<T, E> =
-  | { ok: true; value: T }
-  | { ok: false; error: E };
+export type Result<T, E> = { ok: true; value: T } | { ok: false; error: E };
 
 export type SSRFCategory =
   | 'invalid-url'

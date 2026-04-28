@@ -220,9 +220,7 @@ describe('validateOutboundUrl — core (Result-style, never throws)', () => {
   // ── Happy paths + DNS failure ─────────────────────────────────────
 
   it('accepts public IPv4 address', async () => {
-    mockLookup.mockResolvedValueOnce([
-      { address: '93.184.216.34', family: 4 },
-    ]);
+    mockLookup.mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }]);
     const r = await validateOutboundUrl('https://example.com');
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.value.hostname).toBe('example.com');
@@ -264,9 +262,7 @@ describe('validateRegistryUrl — domain wrapper (throws SSRFViolationError)', (
   });
 
   it('returns parsed URL for public host', async () => {
-    mockLookup.mockResolvedValueOnce([
-      { address: '93.184.216.34', family: 4 },
-    ]);
+    mockLookup.mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }]);
     const url = await validateRegistryUrl('https://example.com/discover');
     expect(url).toBeInstanceOf(URL);
     expect(url.hostname).toBe('example.com');
@@ -277,9 +273,7 @@ describe('validateRegistryUrl — domain wrapper (throws SSRFViolationError)', (
     // be irrelevant on the registry path.
     process.env.DISCOVERY_SSRF_ALLOWLIST = 'internal.test';
     process.env.MCP_GATEWAY_ALLOWLIST = ''; // explicitly empty
-    mockLookup.mockResolvedValueOnce([
-      { address: '192.168.1.1', family: 4 },
-    ]);
+    mockLookup.mockResolvedValueOnce([{ address: '192.168.1.1', family: 4 }]);
     const url = await validateRegistryUrl('https://internal.test/x');
     expect(url.hostname).toBe('internal.test');
   });

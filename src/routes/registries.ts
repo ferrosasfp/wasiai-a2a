@@ -3,6 +3,10 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import {
+  SSRFViolationError,
+  validateRegistryUrl,
+} from '../lib/url-validator.js';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import { registryService } from '../services/registry.js';
 import type { RegistryAuth, RegistrySchema } from '../types/index.js';
@@ -81,6 +85,38 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
           });
         }
 
+        // SSRF guard (WKH-62 / CD-A5) — validate ALL outbound URLs in the
+        // body BEFORE persisting. agentEndpoint is scope OUT of WKH-62
+        // (validated runtime in discoveryService.getAgent).
+        try {
+          for (const field of [
+            'discoveryEndpoint',
+            'invokeEndpoint',
+          ] as const) {
+            try {
+              await validateRegistryUrl(body[field]);
+            } catch (err) {
+              if (err instanceof SSRFViolationError) {
+                err.field = field;
+              }
+              throw err;
+            }
+          }
+        } catch (err) {
+          if (err instanceof SSRFViolationError) {
+            request.log.warn(
+              { field: err.field, category: err.category },
+              'SSRF blocked',
+            );
+            return reply.status(422).send({
+              error: 'SSRF_BLOCKED',
+              field: err.field,
+              reason: err.reason,
+            });
+          }
+          throw err;
+        }
+
         const registry = await registryService.register({
           name: body.name,
           discoveryEndpoint: body.discoveryEndpoint,
@@ -120,6 +156,40 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
       try {
         const { id } = request.params;
         const body = request.body;
+
+        // SSRF guard (WKH-62 / CD-A5) — validate URL fields if present in
+        // the PATCH body. Other fields (name, enabled, schema) skip the
+        // check.
+        try {
+          for (const field of [
+            'discoveryEndpoint',
+            'invokeEndpoint',
+          ] as const) {
+            const value = body[field];
+            if (typeof value !== 'string') continue;
+            try {
+              await validateRegistryUrl(value);
+            } catch (err) {
+              if (err instanceof SSRFViolationError) {
+                err.field = field;
+              }
+              throw err;
+            }
+          }
+        } catch (err) {
+          if (err instanceof SSRFViolationError) {
+            request.log.warn(
+              { field: err.field, category: err.category },
+              'SSRF blocked',
+            );
+            return reply.status(422).send({
+              error: 'SSRF_BLOCKED',
+              field: err.field,
+              reason: err.reason,
+            });
+          }
+          throw err;
+        }
 
         const registry = await registryService.update(id, body);
         return reply.send(registry);

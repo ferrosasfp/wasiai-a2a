@@ -9,6 +9,10 @@
  */
 
 import { supabase } from '../lib/supabase.js';
+import {
+  SSRFViolationError,
+  validateRegistryUrl,
+} from '../lib/url-validator.js';
 import type {
   RegistryAuth,
   RegistryConfig,
@@ -103,6 +107,20 @@ export const registryService = {
   async register(
     config: Omit<RegistryConfig, 'id' | 'createdAt'>,
   ): Promise<RegistryConfig> {
+    // Defense-in-depth (WKH-62): re-validate even if the route handler
+    // bypassed the SSRF guard. The service throws Error (not
+    // SSRFViolationError) so callers see a uniform message.
+    for (const field of ['discoveryEndpoint', 'invokeEndpoint'] as const) {
+      try {
+        await validateRegistryUrl(config[field]);
+      } catch (err) {
+        if (err instanceof SSRFViolationError) {
+          throw new Error(`Invalid ${field}: ${err.reason}`);
+        }
+        throw err;
+      }
+    }
+
     const id = config.name.toLowerCase().replace(/\s+/g, '-');
 
     const row = registryToRow(config, id);
@@ -136,6 +154,21 @@ export const registryService = {
     // Prevents cross-tenant takeover via repointing discoveryEndpoint.
     if (id === 'wasiai') {
       throw new Error('Cannot modify the WasiAI registry');
+    }
+
+    // Defense-in-depth (WKH-62): re-validate URL fields when present in
+    // the partial update.
+    for (const field of ['discoveryEndpoint', 'invokeEndpoint'] as const) {
+      const value = updates[field];
+      if (typeof value !== 'string') continue;
+      try {
+        await validateRegistryUrl(value);
+      } catch (err) {
+        if (err instanceof SSRFViolationError) {
+          throw new Error(`Invalid ${field}: ${err.reason}`);
+        }
+        throw err;
+      }
     }
 
     // Construir objeto de actualización con snake_case

@@ -13,8 +13,8 @@
  */
 
 import {
-  validateOutboundUrl,
   type ValidationFailure,
+  validateOutboundUrl,
 } from '../lib/url-validator.js';
 import { MCP_ERRORS, MCPToolError } from './types.js';
 
