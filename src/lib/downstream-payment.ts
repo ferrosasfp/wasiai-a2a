@@ -340,16 +340,8 @@ export async function signAndSettleDownstream(
 ): Promise<DownstreamResult | null> {
   // 1. Flag check (CD-NEW-SDD-7 — zero overhead when off)
   if (!DOWNSTREAM_FLAG) {
-    logger.info(
-      { agentSlug: agent.slug, code: 'FLAG_OFF', envValue: process.env.WASIAI_DOWNSTREAM_X402 ?? '<unset>' },
-      '[Downstream] WASIAI_DOWNSTREAM_X402 flag OFF — skipped',
-    );
     return null;
   }
-  logger.info(
-    { agentSlug: agent.slug, code: 'FLAG_ON', priceUsdc: agent.priceUsdc, paymentMethod: agent.payment?.method ?? '<undefined>', paymentChain: agent.payment?.chain ?? '<undefined>' },
-    '[Downstream] flag ON, entering pipeline',
-  );
 
   // 2. agent.payment presence + shape
   if (!agent.payment) {
