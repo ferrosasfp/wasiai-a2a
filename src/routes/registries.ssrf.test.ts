@@ -227,7 +227,14 @@ describe('registries routes — write-time SSRF guard (WKH-62 W2)', () => {
 
     expect(res.statusCode).toBe(200);
     expect(mockUpdate).toHaveBeenCalledTimes(1);
-    expect(mockUpdate).toHaveBeenCalledWith('some-id', { name: 'renamed' });
+    // WKH-63: update now takes a 3rd `ownerRef` arg from request.a2aKeyRow.
+    // In this test the auth middleware is mocked as a no-op (no a2aKeyRow),
+    // so the route falls back to the 'x402-anonymous' sentinel.
+    expect(mockUpdate).toHaveBeenCalledWith(
+      'some-id',
+      { name: 'renamed' },
+      'x402-anonymous',
+    );
   });
 
   it('T-REG-07: PATCH with valid invokeEndpoint → 200, update called', async () => {

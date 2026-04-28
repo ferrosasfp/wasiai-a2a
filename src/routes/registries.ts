@@ -1,5 +1,11 @@
 /**
  * Registries Routes — CRUD for marketplace registrations
+ *
+ * WKH-63 (SEC-REG-1): POST/PATCH/DELETE pasan
+ * `request.a2aKeyRow.owner_ref` al service. Mapping de errores:
+ *   - `OwnershipMismatchError` → 404 (disclosure-safe — no enumera ids).
+ *   - `SystemRegistryImmutableError` → 403 con `'System registry is immutable'`.
+ * GET sigue público (visibilidad sin cambios — no rompe discovery).
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
@@ -8,8 +14,29 @@ import {
   validateRegistryUrl,
 } from '../lib/url-validator.js';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
-import { registryService } from '../services/registry.js';
+import {
+  registryService,
+  SystemRegistryImmutableError,
+} from '../services/registry.js';
+import { OwnershipMismatchError } from '../services/security/errors.js';
 import type { RegistryAuth, RegistrySchema } from '../types/index.js';
+
+/**
+ * Mapea errores de ownership/system al status HTTP correcto.
+ * Retorna `null` si no es un error reconocido (el caller debe re-lanzar).
+ */
+function mapOwnershipError(
+  err: unknown,
+  reply: FastifyReply,
+): FastifyReply | null {
+  if (err instanceof OwnershipMismatchError) {
+    return reply.status(404).send({ error: 'Registry not found' });
+  }
+  if (err instanceof SystemRegistryImmutableError) {
+    return reply.status(403).send({ error: 'System registry is immutable' });
+  }
+  return null;
+}
 
 const registriesRoutes: FastifyPluginAsync = async (fastify) => {
   /**
@@ -117,18 +144,30 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
           throw err;
         }
 
-        const registry = await registryService.register({
-          name: body.name,
-          discoveryEndpoint: body.discoveryEndpoint,
-          invokeEndpoint: body.invokeEndpoint,
-          agentEndpoint: body.agentEndpoint,
-          schema: body.schema,
-          auth: body.auth,
-          enabled: body.enabled ?? true,
-        });
+        // WKH-63: ownerRef desde el caller autenticado. El middleware
+        // `requirePaymentOrA2AKey` garantiza que `a2aKeyRow` está poblado
+        // cuando se llega aquí vía a2a-key. Si el caller llegó vía x402
+        // (sin a2a-key), no hay ownerRef de tenant → usamos un fallback
+        // que NO matchea 'system' para evitar bypass del guard.
+        const ownerRef = request.a2aKeyRow?.owner_ref ?? 'x402-anonymous';
+
+        const registry = await registryService.register(
+          {
+            name: body.name,
+            discoveryEndpoint: body.discoveryEndpoint,
+            invokeEndpoint: body.invokeEndpoint,
+            agentEndpoint: body.agentEndpoint,
+            schema: body.schema,
+            auth: body.auth,
+            enabled: body.enabled ?? true,
+          },
+          ownerRef,
+        );
 
         return reply.status(201).send(registry);
       } catch (err) {
+        const mapped = mapOwnershipError(err, reply);
+        if (mapped) return mapped;
         return reply.status(400).send({
           error: err instanceof Error ? err.message : 'Failed to register',
         });
@@ -191,9 +230,13 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
           throw err;
         }
 
-        const registry = await registryService.update(id, body);
+        // WKH-63: ver POST handler para racional del fallback.
+        const ownerRef = request.a2aKeyRow?.owner_ref ?? 'x402-anonymous';
+        const registry = await registryService.update(id, body, ownerRef);
         return reply.send(registry);
       } catch (err) {
+        const mapped = mapOwnershipError(err, reply);
+        if (mapped) return mapped;
         return reply.status(400).send({
           error: err instanceof Error ? err.message : 'Failed to update',
         });
@@ -217,7 +260,9 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply: FastifyReply) => {
       try {
         const { id } = request.params;
-        const deleted = await registryService.delete(id);
+        // WKH-63: ver POST handler para racional del fallback.
+        const ownerRef = request.a2aKeyRow?.owner_ref ?? 'x402-anonymous';
+        const deleted = await registryService.delete(id, ownerRef);
 
         if (!deleted) {
           return reply.status(404).send({ error: 'Registry not found' });
@@ -225,6 +270,8 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
 
         return reply.send({ success: true });
       } catch (err) {
+        const mapped = mapOwnershipError(err, reply);
+        if (mapped) return mapped;
         return reply.status(400).send({
           error: err instanceof Error ? err.message : 'Failed to delete',
         });
