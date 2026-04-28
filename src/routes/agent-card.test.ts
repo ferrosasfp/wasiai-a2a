@@ -60,6 +60,7 @@ describe('agent-card routes', () => {
           schema: { discovery: {}, invoke: { method: 'POST' } },
           enabled: true,
           createdAt: new Date(),
+          ownerRef: 'system',
         },
       ]);
 

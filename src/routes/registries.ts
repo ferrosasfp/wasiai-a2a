@@ -1,5 +1,18 @@
 /**
  * Registries Routes — CRUD for marketplace registrations
+ *
+ * WKH-63 (SEC-REG-1): POST/PATCH/DELETE pasan
+ * `request.a2aKeyRow.owner_ref` al service. Mapping de errores:
+ *   - `OwnershipMismatchError` → 404 (disclosure-safe — no enumera ids).
+ *   - `SystemRegistryImmutableError` → 403 con `'System registry is immutable'`.
+ * GET sigue público (visibilidad sin cambios — no rompe discovery).
+ *
+ * WKH-63 fix-pack (BLQ-ALTO-1): los mutations requieren un `a2a-key`
+ * autenticado. El path x402 puro (sin a2a-key) NO puede mutar registries
+ * porque no aporta tenant identity — un sentinel `'x402-anonymous'` sería
+ * compartido entre TODOS los payers x402 y permitiría que cualquier payer
+ * con $1 USDC modifique/borre registries de otros payers (cross-tenant
+ * IDOR). El guard retorna 403 `A2A_KEY_REQUIRED` antes de llegar al service.
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
@@ -8,8 +21,29 @@ import {
   validateRegistryUrl,
 } from '../lib/url-validator.js';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
-import { registryService } from '../services/registry.js';
+import {
+  registryService,
+  SystemRegistryImmutableError,
+} from '../services/registry.js';
+import { OwnershipMismatchError } from '../services/security/errors.js';
 import type { RegistryAuth, RegistrySchema } from '../types/index.js';
+
+/**
+ * Mapea errores de ownership/system al status HTTP correcto.
+ * Retorna `null` si no es un error reconocido (el caller debe re-lanzar).
+ */
+function mapOwnershipError(
+  err: unknown,
+  reply: FastifyReply,
+): FastifyReply | null {
+  if (err instanceof OwnershipMismatchError) {
+    return reply.status(404).send({ error: 'Registry not found' });
+  }
+  if (err instanceof SystemRegistryImmutableError) {
+    return reply.status(403).send({ error: 'System registry is immutable' });
+  }
+  return null;
+}
 
 const registriesRoutes: FastifyPluginAsync = async (fastify) => {
   /**
@@ -117,18 +151,37 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
           throw err;
         }
 
-        const registry = await registryService.register({
-          name: body.name,
-          discoveryEndpoint: body.discoveryEndpoint,
-          invokeEndpoint: body.invokeEndpoint,
-          agentEndpoint: body.agentEndpoint,
-          schema: body.schema,
-          auth: body.auth,
-          enabled: body.enabled ?? true,
-        });
+        // WKH-63 fix-pack (BLQ-ALTO-1): exigir a2a-key. Sin tenant identity
+        // no se puede mutar registries (un sentinel 'x402-anonymous' sería
+        // compartido entre todos los payers x402 → cross-tenant IDOR).
+        const keyRow = request.a2aKeyRow;
+        if (!keyRow) {
+          return reply.status(403).send({
+            error: 'a2a-key required',
+            error_code: 'A2A_KEY_REQUIRED',
+            message:
+              'Registry mutation requires an authenticated a2a-key. The x402 anonymous path is read-only for registries.',
+          });
+        }
+        const ownerRef = keyRow.owner_ref;
+
+        const registry = await registryService.register(
+          {
+            name: body.name,
+            discoveryEndpoint: body.discoveryEndpoint,
+            invokeEndpoint: body.invokeEndpoint,
+            agentEndpoint: body.agentEndpoint,
+            schema: body.schema,
+            auth: body.auth,
+            enabled: body.enabled ?? true,
+          },
+          ownerRef,
+        );
 
         return reply.status(201).send(registry);
       } catch (err) {
+        const mapped = mapOwnershipError(err, reply);
+        if (mapped) return mapped;
         return reply.status(400).send({
           error: err instanceof Error ? err.message : 'Failed to register',
         });
@@ -191,9 +244,22 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
           throw err;
         }
 
-        const registry = await registryService.update(id, body);
+        // WKH-63 fix-pack (BLQ-ALTO-1): ver POST handler para racional.
+        const keyRow = request.a2aKeyRow;
+        if (!keyRow) {
+          return reply.status(403).send({
+            error: 'a2a-key required',
+            error_code: 'A2A_KEY_REQUIRED',
+            message:
+              'Registry mutation requires an authenticated a2a-key. The x402 anonymous path is read-only for registries.',
+          });
+        }
+        const ownerRef = keyRow.owner_ref;
+        const registry = await registryService.update(id, body, ownerRef);
         return reply.send(registry);
       } catch (err) {
+        const mapped = mapOwnershipError(err, reply);
+        if (mapped) return mapped;
         return reply.status(400).send({
           error: err instanceof Error ? err.message : 'Failed to update',
         });
@@ -217,7 +283,18 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply: FastifyReply) => {
       try {
         const { id } = request.params;
-        const deleted = await registryService.delete(id);
+        // WKH-63 fix-pack (BLQ-ALTO-1): ver POST handler para racional.
+        const keyRow = request.a2aKeyRow;
+        if (!keyRow) {
+          return reply.status(403).send({
+            error: 'a2a-key required',
+            error_code: 'A2A_KEY_REQUIRED',
+            message:
+              'Registry mutation requires an authenticated a2a-key. The x402 anonymous path is read-only for registries.',
+          });
+        }
+        const ownerRef = keyRow.owner_ref;
+        const deleted = await registryService.delete(id, ownerRef);
 
         if (!deleted) {
           return reply.status(404).send({ error: 'Registry not found' });
@@ -225,6 +302,8 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
 
         return reply.send({ success: true });
       } catch (err) {
+        const mapped = mapOwnershipError(err, reply);
+        if (mapped) return mapped;
         return reply.status(400).send({
           error: err instanceof Error ? err.message : 'Failed to delete',
         });

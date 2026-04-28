@@ -38,6 +38,19 @@ export interface RegistryConfig {
 
   /** When was it registered */
   createdAt: Date;
+
+  /**
+   * Owner identifier (WKH-63 / SEC-REG-1).
+   *
+   * Default 'system' for canonical entries (e.g. 'wasiai') created by the
+   * platform. Service-layer guards (`registryService.update/delete`) treat
+   * `owner_ref === 'system'` as immutable (403). For tenant-created entries,
+   * holds the caller's `a2a_agent_keys.owner_ref`.
+   *
+   * Defense-in-depth: enforced in app-layer because Supabase service-role
+   * client bypasses RLS. RLS policy tracked in TD-SEC-01.
+   */
+  ownerRef: string;
 }
 
 export interface RegistrySchema {
