@@ -20,7 +20,15 @@
 -- Defense-in-depth (TD-SEC-01): mientras RLS no esté habilitado a nivel
 -- Postgres, el ownership check vive en `src/services/registry.ts` (app-layer)
 -- — el cliente Supabase usa SUPABASE_SERVICE_ROLE_KEY que bypassea RLS.
+--
+-- WKH-63 fix-pack (MNR-2): wrap atómico con BEGIN/COMMIT. Si el `CREATE INDEX`
+-- falla, el `ALTER TABLE` se revierte y la migration queda re-aplicable
+-- (idempotente por los `IF NOT EXISTS`). Sin la transacción, la columna
+-- quedaría agregada y la siguiente corrida saltaría al CREATE INDEX dejando
+-- estado parcial difícil de auditar.
 -- ============================================================
+
+BEGIN;
 
 ALTER TABLE registries
   ADD COLUMN IF NOT EXISTS owner_ref TEXT NOT NULL DEFAULT 'system';
@@ -29,3 +37,5 @@ ALTER TABLE registries
 -- acelerar el pre-fetch del ownership check en update/delete.
 CREATE INDEX IF NOT EXISTS idx_registries_owner_ref
   ON registries (owner_ref);
+
+COMMIT;

@@ -51,10 +51,13 @@ vi.mock('../services/registry.js', () => ({
 }));
 
 // AB-WKH-55: mock the auth middleware so the x402 fallback never runs.
+// WKH-63 fix-pack (BLQ-ALTO-1): inject a fake a2aKeyRow so the new
+// `a2a-key required` guard pasa y los tests SSRF mantienen su contrato
+// (verifican el guard SSRF, no el guard de auth).
 vi.mock('../middleware/a2a-key.js', () => ({
   requirePaymentOrA2AKey: () => [
-    async () => {
-      /* noop — pass auth */
+    async (request: { a2aKeyRow?: { id: string; owner_ref: string } }) => {
+      request.a2aKeyRow = { id: 'fake-key-id', owner_ref: 'tenant-ssrf' };
     },
   ],
 }));
@@ -227,13 +230,13 @@ describe('registries routes — write-time SSRF guard (WKH-62 W2)', () => {
 
     expect(res.statusCode).toBe(200);
     expect(mockUpdate).toHaveBeenCalledTimes(1);
-    // WKH-63: update now takes a 3rd `ownerRef` arg from request.a2aKeyRow.
-    // In this test the auth middleware is mocked as a no-op (no a2aKeyRow),
-    // so the route falls back to the 'x402-anonymous' sentinel.
+    // WKH-63: update toma un 3er `ownerRef` arg desde request.a2aKeyRow.
+    // WKH-63 fix-pack (BLQ-ALTO-1): el sentinel 'x402-anonymous' se eliminó.
+    // El mock de auth ahora inyecta `a2aKeyRow` con `owner_ref='tenant-ssrf'`.
     expect(mockUpdate).toHaveBeenCalledWith(
       'some-id',
       { name: 'renamed' },
-      'x402-anonymous',
+      'tenant-ssrf',
     );
   });
 

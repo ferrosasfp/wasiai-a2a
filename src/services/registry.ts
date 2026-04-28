@@ -26,7 +26,10 @@ import type {
   RegistryConfig,
   RegistrySchema,
 } from '../types/index.js';
-import { OwnershipMismatchError } from './security/errors.js';
+import {
+  logOwnershipMismatch,
+  OwnershipMismatchError,
+} from './security/errors.js';
 
 // ── Constantes ──────────────────────────────────────────────
 
@@ -208,12 +211,23 @@ export const registryService = {
     // 1+2+3+4: pre-fetch + ownership/system check
     const existing = await this.get(id);
     if (!existing) {
+      logOwnershipMismatch({
+        op: 'registryUpdate',
+        resourceId: id,
+        callerOwnerRef: ownerRef,
+      });
       throw new OwnershipMismatchError();
     }
     if (existing.ownerRef === SYSTEM_OWNER_REF) {
       throw new SystemRegistryImmutableError();
     }
     if (existing.ownerRef !== ownerRef) {
+      logOwnershipMismatch({
+        op: 'registryUpdate',
+        resourceId: id,
+        callerOwnerRef: ownerRef,
+        actualOwnerRef: existing.ownerRef,
+      });
       throw new OwnershipMismatchError();
     }
 
@@ -259,6 +273,11 @@ export const registryService = {
     if (error) {
       // PGRST116 = no rows matched (race: alguien cambió el owner_ref).
       if (error.code === 'PGRST116') {
+        logOwnershipMismatch({
+          op: 'registryUpdate',
+          resourceId: id,
+          callerOwnerRef: ownerRef,
+        });
         throw new OwnershipMismatchError();
       }
       throw new Error(`Failed to update registry '${id}': ${error.message}`);
@@ -281,12 +300,23 @@ export const registryService = {
   async delete(id: string, ownerRef: string): Promise<boolean> {
     const existing = await this.get(id);
     if (!existing) {
+      logOwnershipMismatch({
+        op: 'registryDelete',
+        resourceId: id,
+        callerOwnerRef: ownerRef,
+      });
       throw new OwnershipMismatchError();
     }
     if (existing.ownerRef === SYSTEM_OWNER_REF) {
       throw new SystemRegistryImmutableError();
     }
     if (existing.ownerRef !== ownerRef) {
+      logOwnershipMismatch({
+        op: 'registryDelete',
+        resourceId: id,
+        callerOwnerRef: ownerRef,
+        actualOwnerRef: existing.ownerRef,
+      });
       throw new OwnershipMismatchError();
     }
 

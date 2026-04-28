@@ -6,6 +6,13 @@
  *   - `OwnershipMismatchError` → 404 (disclosure-safe — no enumera ids).
  *   - `SystemRegistryImmutableError` → 403 con `'System registry is immutable'`.
  * GET sigue público (visibilidad sin cambios — no rompe discovery).
+ *
+ * WKH-63 fix-pack (BLQ-ALTO-1): los mutations requieren un `a2a-key`
+ * autenticado. El path x402 puro (sin a2a-key) NO puede mutar registries
+ * porque no aporta tenant identity — un sentinel `'x402-anonymous'` sería
+ * compartido entre TODOS los payers x402 y permitiría que cualquier payer
+ * con $1 USDC modifique/borre registries de otros payers (cross-tenant
+ * IDOR). El guard retorna 403 `A2A_KEY_REQUIRED` antes de llegar al service.
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
@@ -144,12 +151,19 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
           throw err;
         }
 
-        // WKH-63: ownerRef desde el caller autenticado. El middleware
-        // `requirePaymentOrA2AKey` garantiza que `a2aKeyRow` está poblado
-        // cuando se llega aquí vía a2a-key. Si el caller llegó vía x402
-        // (sin a2a-key), no hay ownerRef de tenant → usamos un fallback
-        // que NO matchea 'system' para evitar bypass del guard.
-        const ownerRef = request.a2aKeyRow?.owner_ref ?? 'x402-anonymous';
+        // WKH-63 fix-pack (BLQ-ALTO-1): exigir a2a-key. Sin tenant identity
+        // no se puede mutar registries (un sentinel 'x402-anonymous' sería
+        // compartido entre todos los payers x402 → cross-tenant IDOR).
+        const keyRow = request.a2aKeyRow;
+        if (!keyRow) {
+          return reply.status(403).send({
+            error: 'a2a-key required',
+            error_code: 'A2A_KEY_REQUIRED',
+            message:
+              'Registry mutation requires an authenticated a2a-key. The x402 anonymous path is read-only for registries.',
+          });
+        }
+        const ownerRef = keyRow.owner_ref;
 
         const registry = await registryService.register(
           {
@@ -230,8 +244,17 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
           throw err;
         }
 
-        // WKH-63: ver POST handler para racional del fallback.
-        const ownerRef = request.a2aKeyRow?.owner_ref ?? 'x402-anonymous';
+        // WKH-63 fix-pack (BLQ-ALTO-1): ver POST handler para racional.
+        const keyRow = request.a2aKeyRow;
+        if (!keyRow) {
+          return reply.status(403).send({
+            error: 'a2a-key required',
+            error_code: 'A2A_KEY_REQUIRED',
+            message:
+              'Registry mutation requires an authenticated a2a-key. The x402 anonymous path is read-only for registries.',
+          });
+        }
+        const ownerRef = keyRow.owner_ref;
         const registry = await registryService.update(id, body, ownerRef);
         return reply.send(registry);
       } catch (err) {
@@ -260,8 +283,17 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
     async (request, reply: FastifyReply) => {
       try {
         const { id } = request.params;
-        // WKH-63: ver POST handler para racional del fallback.
-        const ownerRef = request.a2aKeyRow?.owner_ref ?? 'x402-anonymous';
+        // WKH-63 fix-pack (BLQ-ALTO-1): ver POST handler para racional.
+        const keyRow = request.a2aKeyRow;
+        if (!keyRow) {
+          return reply.status(403).send({
+            error: 'a2a-key required',
+            error_code: 'A2A_KEY_REQUIRED',
+            message:
+              'Registry mutation requires an authenticated a2a-key. The x402 anonymous path is read-only for registries.',
+          });
+        }
+        const ownerRef = keyRow.owner_ref;
         const deleted = await registryService.delete(id, ownerRef);
 
         if (!deleted) {
