@@ -45,9 +45,7 @@ async function gaslessCostEstimatorPreHandler(
   try {
     valueWei = BigInt(body.value);
   } catch {
-    reply
-      .status(400)
-      .send({ error: 'invalid value: must be a bigint string' });
+    reply.status(400).send({ error: 'invalid value: must be a bigint string' });
     return;
   }
 
