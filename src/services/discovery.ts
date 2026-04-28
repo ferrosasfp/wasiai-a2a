@@ -72,10 +72,20 @@ export const discoveryService = {
     const results = await Promise.all(
       registries.map((registry) =>
         this.queryRegistry(registry, query).catch((err) => {
-          console.error(
-            `[Discovery] Error querying ${registry.name}:`,
-            err.message,
-          );
+          // TD-sprint-security MNR-5: SSRF violations are config issues,
+          // not transient errors — log them with a distinct prefix so
+          // operators can grep for misconfigured registry endpoints.
+          if (err instanceof SSRFViolationError) {
+            console.error(
+              `[Discovery] SSRF blocked for ${registry.name} (${err.category}):`,
+              err.reason,
+            );
+          } else {
+            console.error(
+              `[Discovery] Error querying ${registry.name}:`,
+              err.message,
+            );
+          }
           return [] as Agent[];
         }),
       ),
