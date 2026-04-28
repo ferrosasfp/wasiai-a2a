@@ -29,8 +29,12 @@ export function _resetFallbackWarnDedup(): void {
 
 /**
  * Type guard para `agent.payment` (WKH-55).
- * Pass-through del raw object — NO normaliza method/chain a lowercase.
- * Retorna undefined si el campo está ausente o malformado.
+ * Schema drift fallback for wasiai-v2 marketplace shape:
+ *   - v2 expone `obj.protocol` (e.g. "x402"), pero el WKH-55 código espera `obj.method`.
+ *   - v2 expone `chain` top-level (e.g. "avalanche-testnet"), pero WKH-55 lo busca en payment.
+ *   - WKH-55 guard chequea `chain === "avalanche"`; v2 expone "avalanche-testnet" → normalizamos.
+ *
+ * Retorna undefined si los campos críticos siguen ausentes.
  */
 function readPayment(
   raw: Record<string, unknown>,
@@ -38,16 +42,33 @@ function readPayment(
   const p = raw.payment;
   if (!p || typeof p !== 'object') return undefined;
   const obj = p as Record<string, unknown>;
-  if (
-    typeof obj.method !== 'string' ||
-    typeof obj.chain !== 'string' ||
-    typeof obj.contract !== 'string'
-  ) {
+
+  // method: prefer obj.method; fallback to obj.protocol (v2 schema drift)
+  const methodRaw =
+    typeof obj.method === 'string'
+      ? obj.method
+      : typeof obj.protocol === 'string'
+        ? obj.protocol
+        : undefined;
+
+  // chain: prefer obj.chain; fallback to raw.chain (v2 exposes at top level)
+  const chainRaw =
+    typeof obj.chain === 'string'
+      ? obj.chain
+      : typeof raw.chain === 'string'
+        ? raw.chain
+        : undefined;
+
+  if (!methodRaw || !chainRaw || typeof obj.contract !== 'string') {
     return undefined;
   }
+
+  // Normalize chain: "avalanche-testnet" → "avalanche" (downstream guard expects canonical name)
+  const chain = chainRaw === 'avalanche-testnet' ? 'avalanche' : chainRaw;
+
   return {
-    method: obj.method,
-    chain: obj.chain,
+    method: methodRaw,
+    chain,
     contract: obj.contract as `0x${string}`,
     asset: typeof obj.asset === 'string' ? obj.asset : undefined,
   };
