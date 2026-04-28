@@ -22,6 +22,7 @@ import { type PaymentMiddlewareOptions, requirePayment } from './x402.js';
 declare module 'fastify' {
   interface FastifyRequest {
     a2aKeyRow?: A2AAgentKeyRow;
+    gaslessEstimatedCostUsd?: number; // WKH-59
   }
 }
 
@@ -111,8 +112,14 @@ export function requirePaymentOrA2AKey(
       return;
     }
 
-    // DT-2 placeholder cost estimation (MNR-2: single const)
-    const estimatedCostUsd = 1.0;
+    // WKH-59: rutas que mueven valor on-chain (POST /gasless/transfer) inyectan
+    // el costo real vía request.gaslessEstimatedCostUsd desde un preHandler
+    // upstream. El resto de las rutas siguen con $1 placeholder (backward-compat).
+    // CD-7: el middleware NO lee request.body — solo el campo augmentado.
+    const estimatedCostUsd =
+      typeof request.gaslessEstimatedCostUsd === 'number'
+        ? request.gaslessEstimatedCostUsd
+        : 1.0;
 
     let keyRow: A2AAgentKeyRow | null = null;
 
