@@ -37,7 +37,7 @@ const WASIAI_FACILITATOR_DEFAULT_URL =
  * Which facilitator protocol to use when talking to the external settler.
  *   'pieverse' — Pieverse custom scheme (default; current production path).
  *                Signs `primaryType: 'Authorization'` against the Pieverse
- *                facilitator contract; posts to `/v2/verify` and `/v2/settle`
+ *                facilitator contract; posts to `/verify` and `/settle`
  *                with the `{paymentPayload, paymentRequirements}` envelope.
  *   'x402'     — x402 canonical spec (EIP-3009). Signs `TransferWithAuthorization`
  *                against the PYUSD token contract directly; posts to `/verify`
@@ -199,7 +199,7 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
     };
     let response: Response;
     try {
-      response = await fetch(`${facilitatorUrl}/v2/verify`, {
+      response = await fetch(`${facilitatorUrl}/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -211,7 +211,7 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
     }
     if (!response.ok)
       throw new Error(
-        `Facilitator returned HTTP ${response.status} on /v2/verify`,
+        `Facilitator returned HTTP ${response.status} on /verify`,
       );
     const result = (await response.json()) as PieverseVerifyResponse;
     return { valid: result.valid, error: result.error };
@@ -242,7 +242,7 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
     };
     let response: Response;
     try {
-      response = await fetch(`${facilitatorUrl}/v2/settle`, {
+      response = await fetch(`${facilitatorUrl}/settle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -254,7 +254,7 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
     }
     if (!response.ok)
       throw new Error(
-        `Facilitator returned HTTP ${response.status} on /v2/settle`,
+        `Facilitator returned HTTP ${response.status} on /settle`,
       );
     const result = (await response.json()) as PieverseSettleResult;
     return {
