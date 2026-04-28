@@ -164,11 +164,18 @@ export const composeService = {
                     lastOutput)
                   : lastOutput;
               if (inputSchema && nextAgent) {
+                // WKH-60: propagate caller's owner_ref so the L2 cache is
+                // scoped per-tenant (cross-tenant cache poisoning blocked).
+                // When the caller is anonymous (x402, no scopingKeyRow),
+                // ownerRef stays undefined and maybeTransform runs in
+                // never-cache mode for L2 (L1 still works in-process).
+                const ownerRef = scopingKeyRow?.owner_ref;
                 const tr = await maybeTransform(
                   agent.id,
                   nextAgent.id,
                   payloadForTransform,
                   inputSchema,
+                  ownerRef,
                 );
                 result.cacheHit = tr.cacheHit; // legacy, DT-3
                 result.bridgeType = tr.bridgeType; // nuevo, DT-3
