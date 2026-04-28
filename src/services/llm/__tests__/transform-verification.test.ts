@@ -209,6 +209,7 @@ function setupSupabaseMissChain(): {
   eq1: ReturnType<typeof vi.fn>;
   eq2: ReturnType<typeof vi.fn>;
   eq3: ReturnType<typeof vi.fn>;
+  eq4: ReturnType<typeof vi.fn>;
 } {
   const single = vi.fn().mockResolvedValue({
     data: null,
@@ -220,7 +221,9 @@ function setupSupabaseMissChain(): {
       name: 'PostgrestError',
     },
   });
-  const eq3 = vi.fn().mockReturnValue({ single });
+  // WKH-60 W3: 4-eq chain incl. owner_ref.
+  const eq4 = vi.fn().mockReturnValue({ single });
+  const eq3 = vi.fn().mockReturnValue({ eq: eq4, single });
   const eq2 = vi.fn().mockReturnValue({ eq: eq3, single });
   const eq1 = vi.fn().mockReturnValue({ eq: eq2, single });
   const select = vi.fn().mockReturnValue({ eq: eq1 });
@@ -232,18 +235,28 @@ function setupSupabaseMissChain(): {
     update,
     upsert,
   } as unknown as ReturnType<typeof supabase.from>);
-  return { eq1, eq2, eq3 };
+  return { eq1, eq2, eq3, eq4 };
 }
 
-function setupSupabaseHitChain(transformFn: string, hitCount = 0): void {
+function setupSupabaseHitChain(
+  transformFn: string,
+  hitCount = 0,
+  transformFnSig: string | null = null,
+): void {
   const single = vi.fn().mockResolvedValue({
-    data: { transform_fn: transformFn, hit_count: hitCount },
+    data: {
+      transform_fn: transformFn,
+      transform_fn_sig: transformFnSig,
+      hit_count: hitCount,
+    },
     error: null,
     count: null,
     status: 200,
     statusText: 'OK',
   });
-  const eq3 = vi.fn().mockReturnValue({ single });
+  // WKH-60 W3: 4-eq chain incl. owner_ref.
+  const eq4 = vi.fn().mockReturnValue({ single });
+  const eq3 = vi.fn().mockReturnValue({ eq: eq4, single });
   const eq2 = vi.fn().mockReturnValue({ eq: eq3, single });
   const eq1 = vi.fn().mockReturnValue({ eq: eq2, single });
   const select = vi.fn().mockReturnValue({ eq: eq1 });
@@ -482,8 +495,23 @@ describe('WKH-57 maybeTransform — cache key with schema_hash (AC-4)', () => {
       properties: { question: { type: 'string' } },
     };
 
-    await maybeTransform('agent-x', 'agent-y', { text: 'a' }, schemaA);
-    await maybeTransform('agent-x', 'agent-y', { text: 'b' }, schemaB);
+    // WKH-60: pass ownerId so the L2 path runs and we can inspect the eq()
+    // chain. Both calls share the same owner so any L2 difference is purely
+    // schema_hash-driven.
+    await maybeTransform(
+      'agent-x',
+      'agent-y',
+      { text: 'a' },
+      schemaA,
+      'tenant-1',
+    );
+    await maybeTransform(
+      'agent-x',
+      'agent-y',
+      { text: 'b' },
+      schemaB,
+      'tenant-1',
+    );
 
     // Both calls must hit the LLM (no L1 hit, no L2 hit) because schema_hash differs.
     expect(mockCreate).toHaveBeenCalledTimes(2);
@@ -547,11 +575,13 @@ describe('WKH-57 maybeTransform — result.llm shape (AC-5)', () => {
       required: ['query'],
       properties: { query: { type: 'string' } },
     };
+    // WKH-60: ownerId required for L2 to be consulted.
     const result = await maybeTransform(
       'src-l2',
       'tgt-l2',
       { text: 'hi' },
       schema,
+      'tenant-1',
     );
 
     expect(result.bridgeType).toBe('CACHE_L2');
@@ -568,11 +598,17 @@ describe('WKH-57 maybeTransform — result.llm shape (AC-5)', () => {
       properties: { query: { type: 'string' } },
     };
 
-    // First call: populates L1
-    await maybeTransform('src-l1', 'tgt-l1', { text: 'first' }, schema);
+    // First call: populates L1 (ownerId required so L1 is written).
+    await maybeTransform(
+      'src-l1',
+      'tgt-l1',
+      { text: 'first' },
+      schema,
+      'tenant-1',
+    );
     expect(mockCreate).toHaveBeenCalledTimes(1);
 
-    // Second call: SAME source/target/schema, different output → L1 hit
+    // Second call: SAME source/target/schema/owner, different output → L1 hit
     vi.clearAllMocks();
     setupSupabaseMissChain(); // reset chain (but L1 still has the entry)
     const result = await maybeTransform(
@@ -580,6 +616,7 @@ describe('WKH-57 maybeTransform — result.llm shape (AC-5)', () => {
       'tgt-l1',
       { text: 'second' },
       schema,
+      'tenant-1',
     );
 
     expect(result.bridgeType).toBe('CACHE_L1');

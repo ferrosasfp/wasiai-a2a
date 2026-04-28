@@ -1,9 +1,18 @@
 /**
- * Schema Transform Service — WKH-14
+ * Schema Transform Service — WKH-14 (+ WKH-57 + WKH-60)
  *
  * Uses Claude Sonnet to generate a JS transform function when the output
  * of step N is incompatible with the inputSchema of step N+1.
  * Caches transforms in-memory (L1) and in Supabase kite_schema_transforms (L2).
+ *
+ * WKH-60 / SEC-RCE-1 hardening:
+ *  - LLM-generated transformFn is executed in node:vm sandbox (no `new Function`).
+ *  - L2 cache is scoped by owner_ref (cross-tenant cache poisoning blocked).
+ *  - Cached fn body is HMAC-signed (when SCHEMA_TRANSFORM_HMAC_KEY is set);
+ *    rows whose signature does not verify are treated as miss.
+ *  - When ownerId is undefined (anonymous x402 caller), L2 read + L2 persist
+ *    are bypassed (never-cache mode). L1 still works for the lifetime of the
+ *    process.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -12,12 +21,42 @@ import type { TransformResult } from '../../types/index.js';
 import { schemaHash } from './canonical-json.js';
 import { computeCostUsd, type PricedModel } from './pricing.js';
 import { selectModel } from './select-model.js';
+import { signTransformFn, verifyTransformFn } from './transform-hmac.js';
+import {
+  TransformExecutionError,
+  TransformTimeoutError,
+  executeTransformInVm,
+} from './vm-runner.js';
 
 const TIMEOUT_MS = 30_000;
+// Sandboxed transform execution budget. 1s is generous for legitimate
+// JSON-shape transforms; an infinite loop or runaway recursion is killed
+// by node:vm before user-visible latency degrades.
+const VM_TIMEOUT_MS = 1_000;
 
 // ─── L1 In-memory cache ────────────────────────────────────────
-// Key: `${sourceAgentId}:${targetAgentId}`
+// Key: `${sourceAgentId}:${targetAgentId}:${schemaHash}:${ownerId ?? '__anon__'}`
 const l1Cache = new Map<string, string>();
+
+// One-shot warning so the operator notices missing HMAC config without
+// flooding logs on every call.
+let hmacWarnEmitted = false;
+function getHmacKey(): string | undefined {
+  const k = process.env.SCHEMA_TRANSFORM_HMAC_KEY;
+  if (typeof k === 'string' && k.length > 0) return k;
+  if (!hmacWarnEmitted) {
+    hmacWarnEmitted = true;
+    console.warn(
+      '[Transform] SCHEMA_TRANSFORM_HMAC_KEY not configured — running in degraded mode (cached transformFn integrity NOT verified). Set the env var in production.',
+    );
+  }
+  return undefined;
+}
+
+/** Test-only escape hatch so unit tests can re-arm the warn-once flag. */
+export function _resetHmacWarn(): void {
+  hmacWarnEmitted = false;
+}
 
 // ─── Helpers ───────────────────────────────────────────────────
 
@@ -45,19 +84,20 @@ function isCompatible(
 /**
  * Applies a transform function string to an output value.
  * The transform fn is a JS function body that receives `output` and returns the transformed value.
- * Uses `new Function` — NOT eval().
  *
- * @throws if transformFn is invalid JS or throws at runtime
+ * WKH-60: executed in node:vm sandbox (no `new Function`). The sandbox has
+ * NO access to process / require / fetch / eval / setTimeout / globalThis.
+ *
+ * @throws TransformExecutionError on syntax error or runtime throw.
+ * @throws TransformTimeoutError when CPU time exceeds VM_TIMEOUT_MS.
  */
 function applyTransformFn(transformFn: string, output: unknown): unknown {
-  // eslint-disable-next-line no-new-func
-  const fn = new Function('output', transformFn);
-  return fn(output) as unknown;
+  return executeTransformInVm(transformFn, output, VM_TIMEOUT_MS);
 }
 
 /**
  * Calls Claude (model selected by caller) to generate a JS transform function.
- * Returns the function body as a string (to be used with new Function('output', body)),
+ * Returns the function body as a string (to be executed by executeTransformInVm),
  * plus token usage for cost telemetry (WKH-57).
  *
  * If `missingFields` is non-empty (retry attempt), the system prompt is enriched
@@ -145,22 +185,51 @@ Ejemplo válido de transformFn:
 
 /**
  * Retrieves transform function from L2 (Supabase), updates hit_count.
- * Returns null if not found.
+ * Returns null if not found OR if HMAC verification fails.
+ *
+ * @param ownerId  REQUIRED — caller's owner_ref. When undefined the caller
+ *                 MUST NOT call this function (use never-cache mode).
+ *                 Filters by `.eq('owner_ref', ownerId)` (4-eq chain).
  */
 async function getFromL2(
   sourceAgentId: string,
   targetAgentId: string,
   schemaHashValue: string,
+  ownerId: string,
 ): Promise<string | null> {
   const { data, error } = await supabase
     .from('kite_schema_transforms')
-    .select('transform_fn, hit_count')
+    .select('transform_fn, transform_fn_sig, hit_count')
     .eq('source_agent_id', sourceAgentId)
     .eq('target_agent_id', targetAgentId)
     .eq('schema_hash', schemaHashValue)
+    .eq('owner_ref', ownerId)
     .single();
 
   if (error || !data) return null;
+
+  const transformFn = data.transform_fn as string;
+  const sig = data.transform_fn_sig as string | null;
+
+  // WKH-60: integrity check. When HMAC key is configured, a row WITHOUT a sig
+  // is rejected (treated as miss + warn) so a rogue admin can't bypass HMAC
+  // by writing a row with NULL sig.
+  const hmacKey = getHmacKey();
+  if (hmacKey !== undefined) {
+    if (typeof sig !== 'string' || sig.length === 0) {
+      console.warn(
+        `[Transform] L2 row missing transform_fn_sig (key=${sourceAgentId}:${targetAgentId}:${schemaHashValue.slice(0, 8)}…) — treating as cache miss`,
+      );
+      return null;
+    }
+    if (!verifyTransformFn(transformFn, sig, hmacKey)) {
+      console.warn(
+        `[Transform] L2 HMAC verify FAILED (key=${sourceAgentId}:${targetAgentId}:${schemaHashValue.slice(0, 8)}…) — treating as cache miss`,
+      );
+      return null;
+    }
+  }
+  // Else degraded mode: warn-once already emitted in getHmacKey().
 
   // Update hit_count (fire-and-forget — no await)
   void supabase
@@ -171,30 +240,40 @@ async function getFromL2(
     })
     .eq('source_agent_id', sourceAgentId)
     .eq('target_agent_id', targetAgentId)
-    .eq('schema_hash', schemaHashValue);
+    .eq('schema_hash', schemaHashValue)
+    .eq('owner_ref', ownerId);
 
-  return data.transform_fn as string;
+  return transformFn;
 }
 
 /**
  * Persists a transform function to L2 (Supabase).
  * Uses upsert to handle race conditions.
+ *
+ * @param ownerId  REQUIRED — caller's owner_ref. When undefined the caller
+ *                 MUST NOT call this function (use never-cache mode).
  */
 async function persistToL2(
   sourceAgentId: string,
   targetAgentId: string,
   schemaHashValue: string,
   transformFn: string,
+  ownerId: string,
 ): Promise<void> {
+  const hmacKey = getHmacKey();
+  const sig = hmacKey !== undefined ? signTransformFn(transformFn, hmacKey) : null;
+
   await supabase.from('kite_schema_transforms').upsert(
     {
       source_agent_id: sourceAgentId,
       target_agent_id: targetAgentId,
       schema_hash: schemaHashValue,
+      owner_ref: ownerId,
       transform_fn: transformFn,
+      transform_fn_sig: sig,
       updated_at: new Date().toISOString(),
     },
-    { onConflict: 'source_agent_id,target_agent_id,schema_hash' },
+    { onConflict: 'source_agent_id,target_agent_id,schema_hash,owner_ref' },
   );
 }
 
@@ -234,19 +313,27 @@ function buildLLMResult(
  * Flow:
  * 1. isCompatible? → SKIPPED (no transform needed)
  * 2. L1 hit? → apply cached fn
- * 3. L2 hit? → apply cached fn, update L1
+ * 3. L2 hit? → apply cached fn, update L1   (only if ownerId !== undefined)
  * 4. Miss? → LLM generate → persist L2 + L1 → apply
+ *
+ * WKH-60 ownership scoping:
+ *  - L1 cache key is `${src}:${tgt}:${hash}:${ownerId ?? '__anon__'}` so two
+ *    callers with different owner_ref never share an L1 entry.
+ *  - L2 read + persist are bypassed entirely when ownerId === undefined.
  *
  * @param sourceAgentId ID of the agent that produced output
  * @param targetAgentId ID of the agent that will consume the transformed output
  * @param output The raw output from the source agent
  * @param inputSchema The JSON Schema expected by the target agent
+ * @param ownerId The owner_ref of the caller (a2a_agent_keys.owner_ref). When
+ *                undefined (anonymous x402), L2 cache is bypassed.
  */
 export async function maybeTransform(
   sourceAgentId: string,
   targetAgentId: string,
   output: unknown,
   inputSchema: Record<string, unknown> | undefined,
+  ownerId?: string,
 ): Promise<TransformResult> {
   const start = Date.now();
 
@@ -260,10 +347,12 @@ export async function maybeTransform(
     };
   }
 
-  // WKH-57 (DT-B): cache key includes deterministic schema fingerprint so
-  // schema changes do NOT collide with stale entries from a previous schema.
+  // WKH-57 (DT-B): cache key includes deterministic schema fingerprint.
+  // WKH-60: cache key ALSO includes ownerId so different tenants never share
+  // an L1 entry.
   const schemaHashValue = schemaHash(inputSchema);
-  const cacheKey = `${sourceAgentId}:${targetAgentId}:${schemaHashValue}`;
+  const ownerSegment = ownerId ?? '__anon__';
+  const cacheKey = `${sourceAgentId}:${targetAgentId}:${schemaHashValue}:${ownerSegment}`;
 
   // 2. L1 cache hit
   const l1Fn = l1Cache.get(cacheKey);
@@ -277,17 +366,26 @@ export async function maybeTransform(
     };
   }
 
-  // 3. L2 cache hit (Supabase)
-  const l2Fn = await getFromL2(sourceAgentId, targetAgentId, schemaHashValue);
-  if (l2Fn) {
-    l1Cache.set(cacheKey, l2Fn);
-    const transformedOutput = applyTransformFn(l2Fn, output);
-    return {
-      transformedOutput,
-      cacheHit: true,
-      bridgeType: 'CACHE_L2',
-      latencyMs: Date.now() - start,
-    };
+  // 3. L2 cache hit (Supabase) — ONLY when ownerId is defined.
+  // never-cache mode for anonymous callers (x402 path) avoids leaking cached
+  // fns generated for one tenant into another tenant's pipeline.
+  if (ownerId !== undefined) {
+    const l2Fn = await getFromL2(
+      sourceAgentId,
+      targetAgentId,
+      schemaHashValue,
+      ownerId,
+    );
+    if (l2Fn) {
+      l1Cache.set(cacheKey, l2Fn);
+      const transformedOutput = applyTransformFn(l2Fn, output);
+      return {
+        transformedOutput,
+        cacheHit: true,
+        bridgeType: 'CACHE_L2',
+        latencyMs: Date.now() - start,
+      };
+    }
   }
 
   // 4. Cache miss → LLM with model selector + retry verification (WKH-57)
@@ -299,19 +397,22 @@ export async function maybeTransform(
   const transformed1 = applyTransformFn(attempt1.fn, output);
 
   if (isCompatible(transformed1, inputSchema)) {
-    // Happy path — persist and return
-    persistToL2(
-      sourceAgentId,
-      targetAgentId,
-      schemaHashValue,
-      attempt1.fn,
-    ).catch((err: unknown) => {
-      console.error(
-        `[Transform] Failed to persist to L2 for ${cacheKey}:`,
-        err,
-      );
-    });
-    l1Cache.set(cacheKey, attempt1.fn);
+    // Happy path — persist (only when authenticated) and return.
+    if (ownerId !== undefined) {
+      persistToL2(
+        sourceAgentId,
+        targetAgentId,
+        schemaHashValue,
+        attempt1.fn,
+        ownerId,
+      ).catch((err: unknown) => {
+        console.error(
+          `[Transform] Failed to persist to L2 for ${cacheKey}:`,
+          err,
+        );
+      });
+      l1Cache.set(cacheKey, attempt1.fn);
+    }
 
     return buildLLMResult(
       transformed1,
@@ -347,19 +448,22 @@ export async function maybeTransform(
   const totalOut = attempt1.tokensOut + attempt2.tokensOut;
 
   if (isCompatible(transformed2, inputSchema)) {
-    // Retry succeeded — persist with attempt2.fn
-    persistToL2(
-      sourceAgentId,
-      targetAgentId,
-      schemaHashValue,
-      attempt2.fn,
-    ).catch((err: unknown) => {
-      console.error(
-        `[Transform] Failed to persist to L2 for ${cacheKey}:`,
-        err,
-      );
-    });
-    l1Cache.set(cacheKey, attempt2.fn);
+    // Retry succeeded — persist (only when authenticated) with attempt2.fn.
+    if (ownerId !== undefined) {
+      persistToL2(
+        sourceAgentId,
+        targetAgentId,
+        schemaHashValue,
+        attempt2.fn,
+        ownerId,
+      ).catch((err: unknown) => {
+        console.error(
+          `[Transform] Failed to persist to L2 for ${cacheKey}:`,
+          err,
+        );
+      });
+      l1Cache.set(cacheKey, attempt2.fn);
+    }
 
     return buildLLMResult(
       transformed2,
@@ -386,6 +490,11 @@ export async function maybeTransform(
     )}] in last attempt (model=${model})`,
   );
 }
+
+// Re-export the VM error classes so callers (compose service, integration
+// tests) can branch on TransformTimeoutError without importing vm-runner
+// directly.
+export { TransformExecutionError, TransformTimeoutError };
 
 /** Clears L1 cache — for testing only */
 export function _clearL1Cache(): void {
