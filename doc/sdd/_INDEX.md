@@ -52,4 +52,4 @@
 | 059 | 2026-04-27 | SEC-SCOPE-1: requirePaymentOrA2AKey — checkScoping con target vacío (WKH-61) | security | QUALITY | DONE | feat/059-wkh-61-sec-scope-1 ([done-report.md](059-wkh-61-sec-scope-1/done-report.md)) |
 | 060 | 2026-04-27 | registries CRUD sin ownership — cross-tenant takeover del discovery surface (WKH-63 / SEC-REG-1) | security | QUALITY | DONE | feat/060-wkh-63-sec-reg-1 ([done-report.md](060-wkh-63-sec-reg-1/done-report.md)) |
 | 061 | 2026-04-27 | SEC-DRAIN-1: /gasless/transfer drain del operator wallet con budget mínimo (WKH-59) | security | QUALITY | DONE | feat/061-wkh-59-sec-drain-1 ([done-report.md](061-wkh-59-sec-drain-1/done-report.md)) |
-| 062 | 2026-04-27 | SEC-RCE-1: L2 transform cache poisoning + new Function() = RCE multi-tenant (WKH-60) | security | QUALITY | in progress | feat/062-wkh-60-sec-rce-1 |
+| 062 | 2026-04-27 | SEC-RCE-1: L2 transform cache poisoning + new Function() = RCE multi-tenant (WKH-60) | security | QUALITY | DONE | feat/062-wkh-60-sec-rce-1 ([done-report.md](062-wkh-60-sec-rce-1/done-report.md)) |
