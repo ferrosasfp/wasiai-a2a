@@ -59,13 +59,17 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       const result = await composeService.compose({
         steps: body.steps,
         maxBudget: body.maxBudget,
+        // WKH-61: propagar el row del caller para scoping per-step
+        scopingKeyRow: request.a2aKeyRow,
       });
 
       // BLQ-2: bail early if timeout fired during compose
       if (reply.sent) return;
 
       if (!result.success) {
-        return reply.status(400).send({
+        // WKH-61: errorCode='SCOPE_DENIED' → 403; default 400 (preserva legacy).
+        const status = result.errorCode === 'SCOPE_DENIED' ? 403 : 400;
+        return reply.status(status).send({
           ...result,
           requestId: request.id,
         });

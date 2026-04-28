@@ -2,6 +2,11 @@
  * WasiAI A2A Protocol — Types
  */
 
+// WKH-61: importamos A2AAgentKeyRow del subarchivo para tiparlo en
+// ComposeRequest / OrchestrateRequest. El re-export `export * from './a2a-key.js'`
+// del bottom mantiene la API pública intacta.
+import type { A2AAgentKeyRow } from './a2a-key.js';
+
 // ============================================================
 // REGISTRY TYPES
 // ============================================================
@@ -158,6 +163,13 @@ export interface ComposeRequest {
   maxBudget?: number;
   /** Propagated to agent invocations as header `x-a2a-key` (WKH-MCP-X402) */
   a2aKey?: string;
+  /**
+   * WKH-61: row de la a2a_agent_keys del caller, para scoping post-resolve.
+   * Cuando está presente, composeService chequea allowed_registries /
+   * allowed_agent_slugs / allowed_categories contra el Agent real de cada step.
+   * Cuando es undefined (path x402), el check no se ejecuta.
+   */
+  scopingKeyRow?: A2AAgentKeyRow;
 }
 
 export interface ComposeResult {
@@ -167,6 +179,10 @@ export interface ComposeResult {
   totalCostUsdc: number;
   totalLatencyMs: number;
   error?: string;
+  /** WKH-61: discriminator para que el route handler mapee a 403. */
+  errorCode?: 'SCOPE_DENIED';
+  /** WKH-61: target denegado, para debugging. `category` se omite si el agent no la expone. */
+  scopeDeniedTarget?: { registry: string; agent_slug: string; category?: string };
 }
 
 export interface StepResult {
@@ -260,6 +276,8 @@ export interface OrchestrateRequest {
   maxAgents?: number;
   /** Propagated downstream to compose/invokeAgent as header `x-a2a-key` (WKH-MCP-X402) */
   a2aKey?: string;
+  /** WKH-61: row de a2a_agent_keys, propagado a composeService.compose. */
+  scopingKeyRow?: A2AAgentKeyRow;
 }
 
 export interface OrchestrateResult {
