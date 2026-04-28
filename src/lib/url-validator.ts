@@ -125,7 +125,11 @@ function isPrivateIPv4(ip: string): boolean {
  *  - `::ffff:abcd:efgh` (hex IPv4-mapped)     — DT-B (WKH-62)
  */
 function isPrivateIPv6(ip: string): boolean {
-  const lower = ip.toLowerCase();
+  // TD-sprint-security MNR-2: defensive normalization — strip optional
+  // bracket form (e.g. "[::1]") before classification. Node's URL.hostname
+  // strips brackets for us, but callers passing raw addresses (tests,
+  // future code paths) shouldn't slip past private-range checks.
+  const lower = ip.toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
   // Loopback
   if (lower === '::1' || lower === '0:0:0:0:0:0:0:1') return true;
   // Unspecified
@@ -162,7 +166,10 @@ function isPrivateIPv6(ip: string): boolean {
  * Literal block is NOT bypassable via allowlist (CD-AC-4).
  */
 function isBlockedHostnameLiteral(hostname: string): boolean {
-  const h = hostname.toLowerCase();
+  // TD-sprint-security MNR-3: RFC 1035 § 3.1 allows trailing dot
+  // ("localhost." == FQDN localhost). Strip it before matching so the
+  // literal block can't be bypassed via `http://localhost./...`.
+  const h = hostname.toLowerCase().replace(/\.$/, '');
   if (h === 'localhost') return true;
   if (h.endsWith('.local')) return true;
   if (h.endsWith('.localhost')) return true;

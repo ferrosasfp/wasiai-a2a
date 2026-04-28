@@ -33,8 +33,10 @@ type A2AKeyMiddlewareErrorCode =
   | 'KEY_INACTIVE'
   | 'DAILY_LIMIT'
   | 'INSUFFICIENT_BUDGET'
-  | 'SCOPE_DENIED'
   | 'PER_CALL_LIMIT';
+// TD-sprint-security WKH-61 MNR-2: 'SCOPE_DENIED' removed from this union.
+// Scope enforcement moved to composeService.compose post-resolveAgent
+// (see doc/sdd/059-wkh-61-sec-scope-1/); the middleware never emits it.
 
 function send403(
   reply: FastifyReply,
