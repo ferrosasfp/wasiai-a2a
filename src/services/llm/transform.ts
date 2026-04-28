@@ -23,9 +23,9 @@ import { computeCostUsd, type PricedModel } from './pricing.js';
 import { selectModel } from './select-model.js';
 import { signTransformFn, verifyTransformFn } from './transform-hmac.js';
 import {
+  executeTransformInVm,
   TransformExecutionError,
   TransformTimeoutError,
-  executeTransformInVm,
 } from './vm-runner.js';
 
 const TIMEOUT_MS = 30_000;
@@ -85,13 +85,19 @@ function isCompatible(
  * Applies a transform function string to an output value.
  * The transform fn is a JS function body that receives `output` and returns the transformed value.
  *
- * WKH-60: executed in node:vm sandbox (no `new Function`). The sandbox has
- * NO access to process / require / fetch / eval / setTimeout / globalThis.
+ * WKH-60: executed in a worker_threads + node:vm sandbox (no `new Function`).
+ * The sandbox has NO access to process / require / fetch / eval / setTimeout /
+ * globalThis, and the host-realm prototype-chain escape
+ * (`output.constructor.constructor`) is closed by parsing `output` INSIDE the
+ * vm context. Async leaks (microtasks, timers) are killed by worker termination.
  *
  * @throws TransformExecutionError on syntax error or runtime throw.
  * @throws TransformTimeoutError when CPU time exceeds VM_TIMEOUT_MS.
  */
-function applyTransformFn(transformFn: string, output: unknown): unknown {
+async function applyTransformFn(
+  transformFn: string,
+  output: unknown,
+): Promise<unknown> {
   return executeTransformInVm(transformFn, output, VM_TIMEOUT_MS);
 }
 
@@ -358,7 +364,7 @@ export async function maybeTransform(
   // 2. L1 cache hit
   const l1Fn = l1Cache.get(cacheKey);
   if (l1Fn) {
-    const transformedOutput = applyTransformFn(l1Fn, output);
+    const transformedOutput = await applyTransformFn(l1Fn, output);
     return {
       transformedOutput,
       cacheHit: true,
@@ -379,7 +385,7 @@ export async function maybeTransform(
     );
     if (l2Fn) {
       l1Cache.set(cacheKey, l2Fn);
-      const transformedOutput = applyTransformFn(l2Fn, output);
+      const transformedOutput = await applyTransformFn(l2Fn, output);
       return {
         transformedOutput,
         cacheHit: true,
@@ -395,7 +401,7 @@ export async function maybeTransform(
 
   // Attempt 1
   const attempt1 = await generateTransformFn(output, schema, model, []);
-  const transformed1 = applyTransformFn(attempt1.fn, output);
+  const transformed1 = await applyTransformFn(attempt1.fn, output);
 
   if (isCompatible(transformed1, inputSchema)) {
     // Happy path — persist (only when authenticated) and return.
@@ -443,7 +449,7 @@ export async function maybeTransform(
   );
 
   const attempt2 = await generateTransformFn(output, schema, model, missing);
-  const transformed2 = applyTransformFn(attempt2.fn, output);
+  const transformed2 = await applyTransformFn(attempt2.fn, output);
 
   const totalIn = attempt1.tokensIn + attempt2.tokensIn;
   const totalOut = attempt1.tokensOut + attempt2.tokensOut;

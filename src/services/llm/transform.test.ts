@@ -48,44 +48,6 @@ import { _clearL1Cache, maybeTransform } from './transform.js';
 
 // ─── Setup ───────────────────────────────────────────────────
 
-function getFromMock<T>(obj: unknown, ...path: string[]): T {
-  return path.reduce(
-    (o: Record<string, unknown>, k) => o[k] as Record<string, unknown>,
-    obj as Record<string, unknown>,
-  ) as unknown as T;
-}
-
-function _setupSupabaseMiss() {
-  const single = getFromMock<ReturnType<typeof vi.fn>>(
-    supabase.from('x'),
-    'single',
-  );
-  single.mockResolvedValue({
-    data: null,
-    error: {
-      message: 'not found',
-      details: '',
-      hint: '',
-      code: '404',
-      name: 'PostgrestError',
-    },
-  });
-}
-
-function _setupSupabaseHit(transformFn: string, hitCount = 0) {
-  const single = getFromMock<ReturnType<typeof vi.fn>>(
-    supabase.from('x'),
-    'single',
-  );
-  single.mockResolvedValue({
-    data: { transform_fn: transformFn, hit_count: hitCount },
-    error: null,
-    count: null,
-    status: 200,
-    statusText: 'OK',
-  });
-}
-
 function setupLLMResponse(transformFn: string) {
   mockCreate.mockResolvedValue({
     content: [{ type: 'text', text: JSON.stringify({ transformFn }) }],

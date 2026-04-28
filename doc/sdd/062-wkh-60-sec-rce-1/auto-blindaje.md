@@ -55,3 +55,41 @@ Errores y aprendizajes durante la implementación. Fuente para futuras HUs.
 - **Aplicar en**: cuando un Story File falte pero el orquestador adjunte el
   detalle equivalente en el prompt, ese prompt es el contrato. No inventar
   más allá de lo escrito.
+
+### [2026-04-27 22:38] Post-AR fix-pack — `node:vm` no es security boundary
+
+- **Error**: 3 BLQ-ALTOs verificados con repro real (`node /tmp/repro-blq*.mjs`):
+  1. `output.constructor.constructor("return process.env.HOME")()` exfiltró
+     `/home/ferdev` (host-realm prototype chain — `output` pasa al sandbox como
+     ref del realm caller, así que su `Object.prototype.constructor.constructor`
+     es el `Function` del realm caller, NO el del vm context).
+  2. `Promise.resolve().then(() => output.leak = 1)` ejecutó el setter
+     `MICROTASK FIRED` DESPUÉS de que `vm.runInContext` retornara — el
+     `timeout` del vm solo mata CPU sync, no microtasks ni timers.
+  3. `})(output); ATTACK = output.constructor.constructor(...); (function(o){`
+     cerró el IIFE wrapper y combinó con #1 para exfiltración via breakout.
+- **Causa raíz**: `node:vm` está documentado por Node.js como NO security
+  boundary. La isolation que provee es para cargar código en un namespace
+  separado, pero los objetos cruzan realms con su prototype chain del
+  realm origen. Y el event loop es el mismo que el caller — async leaks
+  sobreviven.
+- **Fix**: refactor a `worker_threads.Worker` (`eval: true` + inline
+  script CommonJS) que **adentro** del worker abre un `vm.createContext`
+  con `codeGeneration: { strings: false, wasm: false }` y parsea `output`
+  vía `JSON.parse` **dentro del vm context**. Esto da:
+  - Isolation real de event loop → `worker.terminate()` mata microtasks /
+    timers / Promise callbacks instantáneamente.
+  - Prototype chain del `output` desde el realm del vm (no del caller),
+    cuyo `Function` está bloqueado por `codeGeneration.strings = false`.
+  - `resourceLimits` (64 MB old gen, 16 MB young gen) evita OOM por
+    cuerpos maliciosos.
+  - API pública `executeTransformInVm(body, output, timeoutMs)` se mantiene
+    pero ahora retorna `Promise<unknown>` (workers son async). Los 4 call
+    sites en `transform.ts` (todos dentro de `maybeTransform` async) se
+    actualizaron con `await`.
+  - 3 tests nuevos T-VER-RCE-13/14/15 cubren los 3 BLQs específicos.
+- **Aplicar en**: cualquier futuro caso de "ejecutar código no-confiable
+  en Node". `node:vm` solo NUNCA es suficiente — siempre combinar con
+  worker_threads (o `isolated-vm` si se acepta dep externa). Para datos
+  cross-realm: serialize via `JSON.stringify` y `JSON.parse` adentro del
+  realm destino.
