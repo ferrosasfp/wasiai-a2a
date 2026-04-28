@@ -31,10 +31,7 @@ const HEX = /^[0-9a-f]{64}$/;
  *                     32+ random bytes (base64 or hex).
  * @returns A 64-char lowercase hex string (HMAC-SHA256).
  */
-export function signTransformFn(
-  transformFn: string,
-  hmacKey: string,
-): string {
+export function signTransformFn(transformFn: string, hmacKey: string): string {
   if (typeof transformFn !== 'string') {
     throw new TypeError('transformFn must be a string');
   }

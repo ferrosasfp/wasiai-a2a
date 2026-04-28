@@ -261,7 +261,8 @@ async function persistToL2(
   ownerId: string,
 ): Promise<void> {
   const hmacKey = getHmacKey();
-  const sig = hmacKey !== undefined ? signTransformFn(transformFn, hmacKey) : null;
+  const sig =
+    hmacKey !== undefined ? signTransformFn(transformFn, hmacKey) : null;
 
   await supabase.from('kite_schema_transforms').upsert(
     {

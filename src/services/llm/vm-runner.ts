@@ -83,9 +83,7 @@ export function executeTransformInVm(
   timeoutMs: number,
 ): unknown {
   if (typeof transformFnBody !== 'string') {
-    throw new TransformExecutionError(
-      'transformFnBody must be a string',
-    );
+    throw new TransformExecutionError('transformFnBody must be a string');
   }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new TransformExecutionError(
@@ -117,7 +115,8 @@ export function executeTransformInVm(
     const e = err as { code?: string; message?: string };
     if (
       e?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT' ||
-      (typeof e?.message === 'string' && e.message.includes('Script execution timed out'))
+      (typeof e?.message === 'string' &&
+        e.message.includes('Script execution timed out'))
     ) {
       throw new TransformTimeoutError(timeoutMs);
     }

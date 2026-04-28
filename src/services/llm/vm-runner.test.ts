@@ -79,58 +79,42 @@ describe('vm-runner — executeTransformInVm', () => {
   it('T-VM-6: eval is blocked by codeGeneration.strings = false', () => {
     // eslint-disable-next-line no-eval
     expect(() =>
-      executeTransformInVm(
-        'return eval("1 + 1");',
-        {},
-        1000,
-      ),
+      executeTransformInVm('return eval("1 + 1");', {}, 1000),
     ).toThrow(TransformExecutionError);
   });
 
   // T-VM-7 — new Function blocked (strings: false)
   it('T-VM-7: new Function is blocked by codeGeneration.strings = false', () => {
     expect(() =>
-      executeTransformInVm(
-        'return new Function("return 1")();',
-        {},
-        1000,
-      ),
+      executeTransformInVm('return new Function("return 1")();', {}, 1000),
     ).toThrow(TransformExecutionError);
   });
 
   // T-VM-8 — Infinite loop is killed by timeout
   it('T-VM-8: infinite loop raises TransformTimeoutError within budget', () => {
     expect(() =>
-      executeTransformInVm(
-        'while (true) {} return 0;',
-        {},
-        50,
-      ),
+      executeTransformInVm('while (true) {} return 0;', {}, 50),
     ).toThrow(TransformTimeoutError);
   });
 
   // T-VM-9 — Syntax error becomes TransformExecutionError
   it('T-VM-9: a syntax error in the body wraps as TransformExecutionError', () => {
-    expect(() =>
-      executeTransformInVm(
-        'return { ;',
-        {},
-        1000,
-      ),
-    ).toThrow(TransformExecutionError);
+    expect(() => executeTransformInVm('return { ;', {}, 1000)).toThrow(
+      TransformExecutionError,
+    );
   });
 
   // T-VM-10 — Input guard for timeoutMs
   it('T-VM-10: invalid timeoutMs throws TransformExecutionError before running', () => {
-    expect(() =>
-      executeTransformInVm('return 1;', {}, 0),
-    ).toThrow(TransformExecutionError);
-    expect(() =>
-      executeTransformInVm('return 1;', {}, -10),
-    ).toThrow(TransformExecutionError);
-    expect(() =>
-      executeTransformInVm('return 1;', {}, Number.NaN),
-    ).toThrow(TransformExecutionError);
+    expect(() => executeTransformInVm('return 1;', {}, 0)).toThrow(
+      TransformExecutionError,
+    );
+    expect(() => executeTransformInVm('return 1;', {}, -10)).toThrow(
+      TransformExecutionError,
+    );
+    expect(() => executeTransformInVm('return 1;', {}, Number.NaN)).toThrow(
+      TransformExecutionError,
+    );
   });
 
   // T-VM-11 — No state leaks between calls
