@@ -3,6 +3,10 @@
  */
 
 import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
+import {
+  SSRFViolationError,
+  validateRegistryUrl,
+} from '../lib/url-validator.js';
 import type {
   Agent,
   AgentPaymentSpec,
@@ -150,6 +154,12 @@ export const discoveryService = {
     registry: RegistryConfig,
     query: DiscoveryQuery,
   ): Promise<Agent[]> {
+    // SSRF guard (WKH-62) — validate before any fetch (CD-A3: outside
+    // circuit breaker scope so SSRF attempts don't pollute breaker stats).
+    // We validate the raw discoveryEndpoint, NOT url.toString(), because
+    // url has query params appended below.
+    await validateRegistryUrl(registry.discoveryEndpoint);
+
     const url = new URL(registry.discoveryEndpoint);
     const schema = registry.schema.discovery;
 
@@ -270,6 +280,18 @@ export const discoveryService = {
         const url = registry.agentEndpoint
           .replace('{slug}', slug)
           .replace('{agentId}', slug);
+
+        // SSRF guard (WKH-62) — runtime check on agentEndpoint before
+        // outbound fetch. agentEndpoint is NOT validated at write-time
+        // (scope OUT of WKH-62) so we MUST validate here. Skip this
+        // registry on SSRF violation and try the next one (preserves the
+        // existing skip-and-continue pattern in the empty catch below).
+        try {
+          await validateRegistryUrl(url);
+        } catch (err) {
+          if (err instanceof SSRFViolationError) continue;
+          throw err;
+        }
 
         const response = await fetch(url, {
           headers: { 'Content-Type': 'application/json' },

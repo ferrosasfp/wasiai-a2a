@@ -48,3 +48,8 @@
 | 055 | 2026-04-26 | A2A Fast-Path en compose — passthrough estructurado entre agentes A2A-compliant (WKH-56) | feature | QUALITY | DONE | feat/055-wkh-56-a2a-fast-path ([done-report.md](055-wkh-56-a2a-fast-path/done-report.md)) |
 | 056 | 2026-04-26 | LLM Bridge Pro — model selector + verification + cache fingerprint + telemetry (WKH-57) | feature | QUALITY | DONE | feat/056-wkh-57-llm-bridge-pro ([done-report.md](056-wkh-57-llm-bridge-pro/done-report.md)) |
 | 057 | 2026-04-27 | Defensive fallback en discovery para v2 schema drift (WAS-V2-3-CLIENT / WKH-57) | bugfix | QUALITY | DONE | feat/057-wkh-57-was-v2-3-client ([done-report.md](057-wkh-57-was-v2-3-client/done-report.md)) |
+| 058 | 2026-04-27 | SSRF Protection — validateRegistryUrl en discoveryEndpoint (WKH-62 / SEC-SSRF-1) | security | QUALITY | DONE | feat/058-wkh-62-sec-ssrf-1 ([done-report.md](058-wkh-62-sec-ssrf-1/done-report.md)) |
+| 059 | 2026-04-27 | SEC-SCOPE-1: requirePaymentOrA2AKey — checkScoping con target vacío (WKH-61) | security | QUALITY | in progress | feat/059-wkh-61-sec-scope-1 |
+| 060 | 2026-04-27 | registries CRUD sin ownership — cross-tenant takeover del discovery surface (WKH-63 / SEC-REG-1) | security | QUALITY | in progress | feat/060-wkh-63-sec-reg-1 |
+| 061 | 2026-04-27 | SEC-DRAIN-1: /gasless/transfer drain del operator wallet con budget mínimo (WKH-59) | security | QUALITY | in progress | feat/061-wkh-59-sec-drain-1 |
+| 062 | 2026-04-27 | SEC-RCE-1: L2 transform cache poisoning + new Function() = RCE multi-tenant (WKH-60) | security | QUALITY | in progress | feat/062-wkh-60-sec-rce-1 |
