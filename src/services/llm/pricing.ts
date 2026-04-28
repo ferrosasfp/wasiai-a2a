@@ -6,11 +6,11 @@
  * If real prices differ, update ONLY the values; do NOT rename keys.
  */
 
-// PRICING [VALIDATION REQUIRED]: validar contra console.anthropic.com pre-deploy
-// VALIDATE before deploy — see SDD §11. No console access available during F3
-// implementation; values come from work-item §DT-F. CD-6 + CD-11.
+// PRICING — validated 2026-04-28 against https://platform.claude.com/docs/en/about-claude/pricing
+// Haiku 4.5: $1/MTok input, $5/MTok output (NOT $0.80/$4.00 — those are Haiku 3.5 values)
+// Sonnet 4.6: $3/MTok input, $15/MTok output
 export const PRICING_USD_PER_M_TOKENS = {
-  'claude-haiku-4-5-20251001': { input: 0.8, output: 4.0 },
+  'claude-haiku-4-5-20251001': { input: 1.0, output: 5.0 },
   'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
 } as const;
 
