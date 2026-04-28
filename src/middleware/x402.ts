@@ -124,6 +124,9 @@ export function requirePayment(
         network: paymentPayload.network ?? '',
       });
     } catch (err) {
+      // Guard FST_ERR_REP_ALREADY_SENT: si timeout disparó 504 mientras
+      // estábamos en el await, NO intentar reply.send (Fastify throws).
+      if (reply.sent) return;
       const detail = err instanceof Error ? err.message : String(err);
       return reply
         .status(402)
@@ -135,6 +138,7 @@ export function requirePayment(
           ),
         );
     }
+    if (reply.sent) return;
     if (!verifyResult.valid)
       return reply
         .status(402)
@@ -153,6 +157,7 @@ export function requirePayment(
         network: paymentPayload.network ?? '',
       });
     } catch (err) {
+      if (reply.sent) return;
       const detail = err instanceof Error ? err.message : String(err);
       return reply
         .status(402)
@@ -164,6 +169,7 @@ export function requirePayment(
           ),
         );
     }
+    if (reply.sent) return;
     if (!settleResult.success)
       return reply
         .status(402)
@@ -176,7 +182,7 @@ export function requirePayment(
         );
     request.paymentTxHash = settleResult.txHash;
     request.paymentVerified = true;
-    reply.header('payment-response', settleResult.txHash);
+    if (!reply.sent) reply.header('payment-response', settleResult.txHash);
   };
   return [handler];
 }

@@ -22,7 +22,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       config: { rateLimit: orchestrateRateLimit() },
       preHandler: [
         createTimeoutHandler(
-          parseInt(process.env.TIMEOUT_COMPOSE_MS ?? '60000', 10),
+          parseInt(process.env.TIMEOUT_COMPOSE_MS ?? '120000', 10),
         ),
         ...requirePaymentOrA2AKey({
           description:
