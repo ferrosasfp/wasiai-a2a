@@ -2,8 +2,10 @@
  * Tests for Compose Service -- auth headers + x402 payment
  * 9 tests: T-1 through T-9
  */
+import crypto from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
+  A2AAgentKeyRow,
   Agent,
   RegistryConfig,
   X402PaymentRequest,
@@ -74,6 +76,36 @@ function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig {
     ...o,
   };
 }
+// WKH-61: helper local de keyRow para tests de scoping (no compartido con
+// middleware/a2a-key.test.ts; cada archivo mantiene su propio fixture).
+function makeKeyRow(
+  overrides: Partial<A2AAgentKeyRow> = {},
+): A2AAgentKeyRow {
+  return {
+    id: 'key-id-test',
+    owner_ref: 'owner-test',
+    key_hash: crypto.createHash('sha256').update('test').digest('hex'),
+    display_name: null,
+    budget: { '2368': '10.000000' },
+    daily_limit_usd: null,
+    daily_spent_usd: '0.000000',
+    daily_reset_at: new Date(Date.now() + 86400000).toISOString(),
+    allowed_registries: null,
+    allowed_agent_slugs: null,
+    allowed_categories: null,
+    max_spend_per_call_usd: null,
+    is_active: true,
+    last_used_at: null,
+    created_at: '2026-04-27T00:00:00.000Z',
+    updated_at: '2026-04-27T00:00:00.000Z',
+    erc8004_identity: null,
+    kite_passport: null,
+    agentkit_wallet: null,
+    metadata: {},
+    ...overrides,
+  };
+}
+
 function mockFetchOk(data: unknown = { result: 'ok' }) {
   mockFetch.mockResolvedValueOnce({
     ok: true,
@@ -819,5 +851,201 @@ describe('composeService — WAS-V2-3-CLIENT integration (WKH-57)', () => {
     // Downstream Fuji USDC settle fired end-to-end via fallback payTo
     expect(mockDownstream).toHaveBeenCalledTimes(1);
     expect(result.steps[0].downstreamTxHash).toBe('0xfeeb');
+  });
+});
+
+// ─── WKH-61: scoping per step (composeService.compose) ───────────────────
+describe('composeService.compose — WKH-61 scoping per step', () => {
+  beforeEach(() => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+  });
+
+  it('T-SCOPE-1 (AC-1): registry match → success', async () => {
+    const agent = makeAgent({
+      slug: 'wasiai-x',
+      registry: 'wasiai',
+      priceUsdc: 0,
+    });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk({ result: 'ok' });
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'wasiai-x', input: {} }],
+      scopingKeyRow: makeKeyRow({ allowed_registries: ['wasiai'] }),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.errorCode).toBeUndefined();
+    expect(result.steps).toHaveLength(1);
+  });
+
+  it('T-SCOPE-2 (AC-2): registry mismatch → SCOPE_DENIED, agent NOT invoked', async () => {
+    const agent = makeAgent({
+      slug: 'other-x',
+      registry: 'other',
+      priceUsdc: 0,
+    });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'other-x', input: {} }],
+      scopingKeyRow: makeKeyRow({ allowed_registries: ['wasiai'] }),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('SCOPE_DENIED');
+    expect(result.scopeDeniedTarget?.registry).toBe('other');
+    expect(result.scopeDeniedTarget?.agent_slug).toBe('other-x');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('T-SCOPE-3 (AC-3): slug mismatch → SCOPE_DENIED', async () => {
+    const agent = makeAgent({
+      slug: 'other-slug',
+      registry: 'wasiai',
+      priceUsdc: 0,
+    });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'other-slug', input: {} }],
+      scopingKeyRow: makeKeyRow({ allowed_agent_slugs: ['allowed-slug'] }),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('SCOPE_DENIED');
+    expect(result.scopeDeniedTarget?.agent_slug).toBe('other-slug');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('T-SCOPE-4 (AC-4): category mismatch → SCOPE_DENIED', async () => {
+    const agent = makeAgent({
+      slug: 'social-bot',
+      registry: 'wasiai',
+      priceUsdc: 0,
+      metadata: { category: 'social' },
+    });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'social-bot', input: {} }],
+      scopingKeyRow: makeKeyRow({ allowed_categories: ['defi'] }),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('SCOPE_DENIED');
+    expect(result.scopeDeniedTarget?.category).toBe('social');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('T-SCOPE-5 (AC-5): allowed_*=null → no scope check, success path', async () => {
+    const agent = makeAgent({
+      slug: 'any',
+      registry: 'whatever',
+      priceUsdc: 0,
+    });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk({ result: 'done' });
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'any', input: {} }],
+      scopingKeyRow: makeKeyRow({
+        allowed_registries: null,
+        allowed_agent_slugs: null,
+        allowed_categories: null,
+      }),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.errorCode).toBeUndefined();
+  });
+
+  it('T-SCOPE-6 (AC-6): check evaluates real agent.registry, not step.registry hint', async () => {
+    // Step pide registry='wasiai', pero discovery resuelve un Agent
+    // con registry='other' (drift / fallback). El scope check debe denegar
+    // contra el registry REAL del agent, no el hint del step.
+    const agent = makeAgent({
+      slug: 'mismatched',
+      registry: 'other',
+      priceUsdc: 0,
+    });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'mismatched', registry: 'wasiai', input: {} }],
+      scopingKeyRow: makeKeyRow({ allowed_registries: ['wasiai'] }),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('SCOPE_DENIED');
+    expect(result.scopeDeniedTarget?.registry).toBe('other');
+  });
+
+  it('T-SCOPE-7 (AC-7): step 1 fails scope → step 2 NOT invoked', async () => {
+    const ok = makeAgent({ slug: 's0', registry: 'wasiai', priceUsdc: 0 });
+    const denied = makeAgent({
+      slug: 's1',
+      registry: 'other',
+      priceUsdc: 0,
+    });
+    vi.mocked(discoveryService.getAgent)
+      .mockResolvedValueOnce(ok)
+      .mockResolvedValueOnce(ok) // for next-step bridge resolution after step 0
+      .mockResolvedValueOnce(denied);
+    mockFetchOk({ result: 'step0-done' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 's0', input: {} },
+        { agent: 's1', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ allowed_registries: ['wasiai'] }),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('SCOPE_DENIED');
+    expect(result.steps).toHaveLength(1);
+    // Solo step 0 disparó fetch; step 1 abortado antes de invokeAgent.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-SCOPE-8 (corner): allowed_categories=defi but agent has no metadata.category → SCOPE_DENIED', async () => {
+    const agent = makeAgent({
+      slug: 'no-cat',
+      registry: 'wasiai',
+      priceUsdc: 0,
+      metadata: {}, // ningún campo category
+    });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'no-cat', input: {} }],
+      scopingKeyRow: makeKeyRow({ allowed_categories: ['defi'] }),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('SCOPE_DENIED');
+    // category undefined → omitida del scopeDeniedTarget (CD anti-undefined-in-JSON)
+    expect(result.scopeDeniedTarget?.category).toBeUndefined();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('T-SCOPE-9 (CD-13): scopingKeyRow=undefined → check skipped, x402 path intact', async () => {
+    const agent = makeAgent({
+      slug: 'any',
+      registry: 'restricted',
+      priceUsdc: 0,
+    });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk({ result: 'done' });
+
+    // NO scopingKeyRow → check NO se ejecuta (path x402)
+    const result = await composeService.compose({
+      steps: [{ agent: 'any', input: {} }],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.errorCode).toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });

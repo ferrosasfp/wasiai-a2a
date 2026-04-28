@@ -12,7 +12,6 @@ import type {
   preHandlerAsyncHookHandler,
 } from 'fastify';
 import { getChainConfig } from '../adapters/registry.js';
-import { authzService } from '../services/authz.js';
 import { budgetService } from '../services/budget.js';
 import { identityService } from '../services/identity.js';
 import type { A2AAgentKeyRow } from '../types/index.js';
@@ -148,17 +147,11 @@ export function requirePaymentOrA2AKey(
         }
       }
 
-      // 5. Check scoping via authzService
-      const scopingResult = authzService.checkScoping(keyRow, {});
-      if (!scopingResult.allowed) {
-        return send403(
-          reply,
-          'SCOPE_DENIED',
-          scopingResult.reason ?? 'Scope denied',
-        );
-      }
-
-      // 6. Check per_call_limit
+      // 5. Check per_call_limit
+      // WKH-61: scoping check removed from middleware (it ran with empty target
+      // and 403'd ALL keys with allowed_*). Scope is now enforced per-step in
+      // composeService.compose, post-resolveAgent, where the real Agent target
+      // is known. See doc/sdd/059-wkh-61-sec-scope-1/.
       if (keyRow.max_spend_per_call_usd !== null) {
         if (estimatedCostUsd > parseFloat(keyRow.max_spend_per_call_usd)) {
           return send403(
@@ -169,7 +162,7 @@ export function requirePaymentOrA2AKey(
         }
       }
 
-      // 7. Optimistic debit BEFORE execution (BLQ-1/2/3/4 fix)
+      // 6. Optimistic debit BEFORE execution (BLQ-1/2/3/4 fix)
       // Like Stripe/AWS: charge first, deliver after.
       // The PG function increment_a2a_key_spend is atomic with FOR UPDATE,
       // so this eliminates the race condition (BLQ-4) and ensures failed
@@ -189,10 +182,10 @@ export function requirePaymentOrA2AKey(
         );
       }
 
-      // 8. Augment request (AC-4)
+      // 7. Augment request (AC-4)
       request.a2aKeyRow = keyRow;
 
-      // 9. Set remaining budget header (AC-1) — read balance AFTER debit
+      // 8. Set remaining budget header (AC-1) — read balance AFTER debit
       const postDebitBalance = await budgetService.getBalance(
         keyRow.id,
         chainId,

@@ -280,10 +280,13 @@ describe('requirePaymentOrA2AKey middleware', () => {
     expect(response.json().error_code).toBe('INSUFFICIENT_BUDGET');
   });
 
-  it('AC-3: SCOPE_DENIED — registry not in allowed list', async () => {
+  it('REGRESSION-WKH-61: key with allowed_registries no longer 403s at middleware level', async () => {
+    // WKH-61 fix: middleware ya no chequea scope; eso vive en composeService post-resolve.
     mockLookupByHash.mockResolvedValue(
       makeKeyRow({ allowed_registries: ['morpheus'] }),
     );
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('9.000000');
 
     const response = await app.inject({
       method: 'POST',
@@ -292,8 +295,7 @@ describe('requirePaymentOrA2AKey middleware', () => {
       payload: {},
     });
 
-    expect(response.statusCode).toBe(403);
-    expect(response.json().error_code).toBe('SCOPE_DENIED');
+    expect(response.statusCode).toBe(200);
   });
 
   // ── AC-5: PER_CALL_LIMIT ─────────────────────────────────

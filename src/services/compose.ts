@@ -11,6 +11,7 @@ import {
 import type {
   A2AMessage,
   Agent,
+  AuthzTarget,
   ComposeRequest,
   ComposeResult,
   ComposeStep,
@@ -20,6 +21,7 @@ import type {
   X402PaymentRequest,
 } from '../types/index.js';
 import { extractA2APayload, isA2AMessage } from './a2a-protocol.js';
+import { authzService } from './authz.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
 import { maybeTransform } from './llm/transform.js';
@@ -41,9 +43,20 @@ function buildAuthHeaders(
   return headers;
 }
 
+/**
+ * WKH-61: lee category del Agent.metadata con type-guard.
+ * Retorna `undefined` si metadata.category no es un string (registries que no
+ * exponen category). NO usar `agent.capabilities[0]` como proxy (CD-8).
+ */
+function readCategory(agent: Agent): string | undefined {
+  const meta = agent.metadata as Record<string, unknown> | undefined;
+  const cat = meta?.category;
+  return typeof cat === 'string' ? cat : undefined;
+}
+
 export const composeService = {
   async compose(request: ComposeRequest): Promise<ComposeResult> {
-    const { steps, maxBudget, a2aKey } = request;
+    const { steps, maxBudget, a2aKey, scopingKeyRow } = request;
     const results: StepResult[] = [];
     let totalCost = 0;
     let totalLatency = 0;
@@ -60,6 +73,33 @@ export const composeService = {
           totalLatencyMs: totalLatency,
           error: `Agent not found: ${step.agent}`,
         };
+      // WKH-61: scoping check post-resolve, pre-invoke. Skip si caller es x402
+      // (sin keyRow). Aborta el pipeline antes del budget-check para evitar
+      // evaluar costo de agentes que la key no puede invocar.
+      if (scopingKeyRow) {
+        const target: AuthzTarget = {
+          registry: agent.registry,
+          agent_slug: agent.slug,
+          category: readCategory(agent),
+        };
+        const scope = authzService.checkScoping(scopingKeyRow, target);
+        if (!scope.allowed) {
+          return {
+            success: false,
+            output: null,
+            steps: results,
+            totalCostUsdc: totalCost,
+            totalLatencyMs: totalLatency,
+            error: `Step ${i} denied by scope: ${scope.reason ?? 'SCOPE_DENIED'}`,
+            errorCode: 'SCOPE_DENIED',
+            scopeDeniedTarget: {
+              registry: agent.registry,
+              agent_slug: agent.slug,
+              ...(target.category !== undefined && { category: target.category }),
+            },
+          };
+        }
+      }
       if (maxBudget && totalCost + agent.priceUsdc > maxBudget)
         return {
           success: false,

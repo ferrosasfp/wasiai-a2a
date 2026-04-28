@@ -400,10 +400,13 @@ export const orchestrateService = {
     }
 
     // Step 3: Execute pipeline. WKH-44 (AC-1): maxBudget deducido del fee.
+    // WKH-61: scopingKeyRow se propaga end-to-end para que cada step del
+    // pipeline aplique el check de scope contra el Agent real post-resolve.
     const pipeline = await composeService.compose({
       steps,
       maxBudget: budget - feeUsdc,
       a2aKey: request.a2aKey,
+      scopingKeyRow: request.scopingKeyRow,
     });
 
     // WKH-44 (AC-3): el fee ya fue calculado al inicio con `budget * feeRate`.
