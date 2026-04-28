@@ -479,4 +479,85 @@ describe('requirePaymentOrA2AKey middleware', () => {
     expect(response.statusCode).toBe(503);
     expect(response.json().error).toBe('SERVICE_ERROR');
   });
+
+  // ── WKH-59: cost estimation injection ────────────────────────
+
+  describe('WKH-59 cost estimation injection', () => {
+    let appB: ReturnType<typeof Fastify>;
+
+    beforeAll(async () => {
+      appB = Fastify();
+
+      // Ruta SIN preHandler upstream → middleware debe usar placeholder $1.
+      appB.post(
+        '/test-legacy',
+        {
+          preHandler: requirePaymentOrA2AKey({
+            description: 'legacy route without cost injection',
+          }),
+        },
+        async (_req: FastifyRequest, reply: FastifyReply) =>
+          reply.send({ ok: true }),
+      );
+
+      // Ruta CON preHandler upstream que inyecta gaslessEstimatedCostUsd=5.
+      appB.post(
+        '/test-gasless-mw',
+        {
+          preHandler: [
+            async (req: FastifyRequest) => {
+              req.gaslessEstimatedCostUsd = 5;
+            },
+            ...requirePaymentOrA2AKey({
+              description: 'route with cost injection',
+            }),
+          ],
+        },
+        async (_req: FastifyRequest, reply: FastifyReply) =>
+          reply.send({ ok: true }),
+      );
+
+      await appB.ready();
+    });
+
+    afterAll(() => appB.close());
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it('T-MW-GASLESS-1: ruta legacy sin gaslessEstimatedCostUsd → debita $1 placeholder (regresión)', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockDebit.mockResolvedValue({ success: true });
+      mockGetBalance.mockResolvedValue('9.000000');
+
+      const response = await appB.inject({
+        method: 'POST',
+        url: '/test-legacy',
+        headers: { 'x-a2a-key': TEST_KEY },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(200);
+      // CD-3 backward-compat: debit con placeholder $1.
+      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    });
+
+    it('T-MW-GASLESS-2: con gaslessEstimatedCostUsd=5 inyectado → debita $5', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockDebit.mockResolvedValue({ success: true });
+      mockGetBalance.mockResolvedValue('5.000000');
+
+      const response = await appB.inject({
+        method: 'POST',
+        url: '/test-gasless-mw',
+        headers: { 'x-a2a-key': TEST_KEY },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(200);
+      // El middleware lee request.gaslessEstimatedCostUsd y lo usa en debit.
+      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 5);
+    });
+  });
 });
