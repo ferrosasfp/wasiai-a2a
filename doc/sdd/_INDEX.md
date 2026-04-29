@@ -54,3 +54,4 @@
 | 061 | 2026-04-27 | SEC-DRAIN-1: /gasless/transfer drain del operator wallet con budget mínimo (WKH-59) | security | QUALITY | DONE | feat/061-wkh-59-sec-drain-1 ([done-report.md](061-wkh-59-sec-drain-1/done-report.md)) |
 | 062 | 2026-04-27 | SEC-RCE-1: L2 transform cache poisoning + new Function() = RCE multi-tenant (WKH-60) | security | QUALITY | DONE | feat/062-wkh-60-sec-rce-1 ([done-report.md](062-wkh-60-sec-rce-1/done-report.md)) |
 | 063 | 2026-04-28 | Cross-Chain E2E Retro — PRs #48-#52 consolidated post-mortem (Kite PYUSD inbound + Fuji USDC outbound) | retro | QUALITY | DONE | main (#48 edde596 → #52 e4d217d) ([done-report.md](063-cross-chain-e2e-retro/done-report.md)) |
+| 064 | 2026-04-28 | Forward-key middleware — llamadas internas v2 → wasiai-a2a (WKH-65) | security | FAST+AR | DONE | feat/064-wkh-65-a2a-forward-key ([done-report.md](064-wkh-65-a2a-forward-key/done-report.md)) |
