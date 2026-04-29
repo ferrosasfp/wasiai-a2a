@@ -5,6 +5,7 @@
 
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
+import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';
 import { createTimeoutHandler } from '../middleware/timeout.js';
 import { composeService } from '../services/compose.js';
@@ -21,8 +22,11 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
     {
       config: { rateLimit: orchestrateRateLimit() },
       preHandler: [
+        // WKH-65: forward-key (optional, env-gated) runs BEFORE timeout/payment.
+        // Returns [] when WASIAI_V2_FORWARD_KEY is unset → no-op spread.
+        ...requireForwardKey(),
         createTimeoutHandler(
-          parseInt(process.env.TIMEOUT_COMPOSE_MS ?? '120000', 10),
+          parseInt(process.env.TIMEOUT_COMPOSE_MS ?? '180000', 10),
         ),
         ...requirePaymentOrA2AKey({
           description:

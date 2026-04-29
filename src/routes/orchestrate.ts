@@ -10,6 +10,7 @@ import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import { createBackpressureHandler } from '../middleware/backpressure.js';
+import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';
 import { createTimeoutHandler } from '../middleware/timeout.js';
 import { orchestrateService } from '../services/orchestrate.js';
@@ -43,6 +44,9 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         },
       },
       preHandler: [
+        // WKH-65: forward-key (optional, env-gated) runs BEFORE backpressure/timeout/payment.
+        // Returns [] when WASIAI_V2_FORWARD_KEY is unset → no-op spread.
+        ...requireForwardKey(),
         createBackpressureHandler(),
         createTimeoutHandler(
           parseInt(process.env.TIMEOUT_ORCHESTRATE_MS ?? '120000', 10),
