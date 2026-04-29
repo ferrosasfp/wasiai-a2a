@@ -143,12 +143,46 @@ ALL services share: caldzjhjgctpgodldqav (Supabase prod DB)
 | Gate | Result |
 |------|--------|
 | TypeScript strict (zero `any`) | ✅ tsc --noEmit clean across 3 repos |
-| Test suites | ✅ 612 a2a + 398 v2 + facilitator suites green |
+| Test suites | ✅ 644 a2a + 403 v2 + 553 facilitator green |
 | Adversarial review (AR) | ✅ APROBADO con 0 bloqueantes (multi-HU) |
 | Code review (CR) | ✅ APPROVED across all PRs |
 | QA validation (F4) | ✅ PASS — every AC has file:line evidence |
-| Smoke E2E real-tx | ✅ 30 onchain txs (10 batches), 100% success |
+| Smoke E2E real-tx | ✅ 37 onchain txs (12 batches), 100% success |
 | Production cutover | ✅ 3 services on shared prod DB |
+| Tech debt cleanup | ✅ TD-002 + TD-003 resolved, 8/9 menores closed, 5/6 trial.test fails fixed |
+| Mainnet readiness | ✅ Code staged for Kite mainnet (2366) + Avalanche C-Chain (43114), env-gated |
+
+### Post-merge verification (2026-04-29 05:49 UTC, after 5 PRs merged)
+
+All endpoints verified via `app.wasiai.io`:
+
+| Verification | Result |
+|--------------|--------|
+| `GET /api/v1/capabilities?limit=20` | ✅ 19 agents (was 0 before TD-002 fix) |
+| `POST /api/v1/compose` 3-agent E2E | ✅ 4 onchain txs, 19.4s, $0.061 |
+| `POST /api/v1/orchestrate` LLM planner | ✅ 3 onchain txs (LLM picked 2 agents), 22.4s, $0.05 |
+| `GET /supported` (facilitator) | ✅ 2 chains testnet (mainnet flags default OFF as designed) |
+| Vercel `wasiai-prod` latest deploy | ✅ READY (sha 06830be) |
+
+**Most recent verifiable txs**:
+
+Compose 3-agent:
+- Kite inbound: [`0x532651fb…`](https://testnet.kitescan.ai/tx/0x532651fb5039c64ec1e33a715f59a5ab388a36a9fc6a214f95a007a1b5520b4c)
+- Fuji outbound: [`0x50d88859…`](https://testnet.snowtrace.io/tx/0x50d888596f99a2bd8972d27e3ffa904e2560b214e3b79f08aef4164c28ab0167) [`0x811333cf…`](https://testnet.snowtrace.io/tx/0x811333cf39346bfba80773cdd37a624a3856ef50b67536d7cebf95327e6cfd40) [`0x1beb00a7…`](https://testnet.snowtrace.io/tx/0x1beb00a770b35b6a7bea1393ea2fb17d54e20520126a3fb7b7fd86b934954313)
+
+Orchestrate LLM planner:
+- Kite inbound: [`0xe02f23c3…`](https://testnet.kitescan.ai/tx/0xe02f23c38d3ab6c9bc594e0213933cb2153ce8a48dc6d94f856c1589e0544ab7)
+- Fuji outbound: [`0xaf6b2311…`](https://testnet.snowtrace.io/tx/0xaf6b23114cee87aba4de148afdcac0a7179131262109441fa11c487b67a5e4ef) [`0x3323d934…`](https://testnet.snowtrace.io/tx/0x3323d934183e47c2ac77b4a3082bb39637f554803e86c347e05a102ee7c738e1)
+
+### PRs merged this session
+
+| PR | Repo | Title |
+|----|------|-------|
+| [#4](https://github.com/ferrosasfp/wasiai-v2/pull/4) | wasiai-v2 | fix(TD-002): /api/v1/capabilities loop-break + param mapping |
+| [#5](https://github.com/ferrosasfp/wasiai-v2/pull/5) | wasiai-v2 | chore(TD-LIGHT): close 8/9 menores from WKH-65+WKH-66 AR+CR |
+| [#56](https://github.com/ferrosasfp/wasiai-a2a/pull/56) | wasiai-a2a | docs(hackathon): final submission + mainnet activation runbook |
+| [#57](https://github.com/ferrosasfp/wasiai-a2a/pull/57) | wasiai-a2a | feat: Kite mainnet (2366) + Avalanche C-Chain (43114) support |
+| [#34](https://github.com/ferrosasfp/wasiai-facilitator/pull/34) | wasiai-facilitator | feat: Kite mainnet + Avalanche C-Chain — opt-in chain adapters |
 
 ---
 
