@@ -14,7 +14,13 @@ const APP_URL = 'https://app.wasiai.io';
 const KITE_CHAIN_ID = 2368;
 const KITE_PYUSD = '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9';
 const KITE_EXPLORER = 'https://testnet.kitescan.ai/tx';
-const FUJI_EXPLORER = 'https://testnet.snowtrace.io/tx';
+// Auto-detect outbound network from env hint (best-effort label only).
+// Real chain is decided by a2a Railway env WASIAI_DOWNSTREAM_NETWORK.
+const OUTBOUND_MAINNET = process.env.OUTBOUND_MAINNET === 'true';
+const FUJI_EXPLORER = OUTBOUND_MAINNET
+  ? 'https://snowtrace.io/tx'
+  : 'https://testnet.snowtrace.io/tx';
+const OUTBOUND_LABEL = OUTBOUND_MAINNET ? 'Avalanche MAINNET USDC' : 'Avalanche Fuji USDC';
 
 const PIPELINE = [
   { agent: 'wasi-chainlink-price', input: { token: 'AVAX' }, registry: 'wasiai' },
@@ -139,7 +145,7 @@ for (let i = 0; i < (body.steps?.length ?? 0); i++) {
   console.log(`        cost=${s.costUsdc} USDC latency=${s.latencyMs}ms`);
   if (s.downstreamTxHash) {
     downstreamTxs.push(s.downstreamTxHash);
-    console.log(`        ✓ Fuji USDC tx: ${s.downstreamTxHash}`);
+    console.log(`        ✓ ${OUTBOUND_LABEL} tx: ${s.downstreamTxHash}`);
     console.log(`          Explorer:    ${FUJI_EXPLORER}/${s.downstreamTxHash}`);
   }
 }

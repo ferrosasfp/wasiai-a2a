@@ -174,6 +174,32 @@ Orchestrate LLM planner:
 - Kite inbound: [`0xe02f23c3…`](https://testnet.kitescan.ai/tx/0xe02f23c38d3ab6c9bc594e0213933cb2153ce8a48dc6d94f856c1589e0544ab7)
 - Fuji outbound: [`0xaf6b2311…`](https://testnet.snowtrace.io/tx/0xaf6b23114cee87aba4de148afdcac0a7179131262109441fa11c487b67a5e4ef) [`0x3323d934…`](https://testnet.snowtrace.io/tx/0x3323d934183e47c2ac77b4a3082bb39637f554803e86c347e05a102ee7c738e1)
 
+### 🔴 MAINNET HYBRID MODE ACTIVATED — 2026-04-29 06:21 UTC
+
+**Real money cross-chain proven**: Kite testnet inbound + **Avalanche C-Chain MAINNET** outbound.
+
+| Activation step | Result |
+|-----------------|--------|
+| Operator wallet funding | ✅ 0.1 AVAX + 5 USDC mainnet at `0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba` |
+| Railway env update (a2a) | ✅ `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` + `AVALANCHE_RPC_URL` set |
+| Railway env update (facilitator) | ✅ `AVALANCHE_MAINNET_ENABLED=true` + `AVALANCHE_MAINNET_RPC_URL` set |
+| facilitator `/supported` | ✅ 3 chains: Kite testnet + Fuji testnet + **Avalanche MAINNET (eip155:43114)** |
+| Smoke real-money via app.wasiai.io | ✅ 4 onchain txs, $0.061 USDC mainnet spent |
+| Operator USDC balance change | ✅ 5.000 → 4.939 (-$0.061 = exact match cost) |
+
+**Verifiable mainnet tx hashes**:
+
+| # | Agent | Cost | Mainnet tx | Block |
+|---|-------|------|------------|-------|
+| 1 | wasi-chainlink-price | $0.001 | [`0x9fa6ff83…`](https://snowtrace.io/tx/0x9fa6ff83eb10e51685ce078e69f9c42fcbe3b138b5b8c3f32909c9fee279c6f1) | 84159513 |
+| 2 | wasi-defi-sentiment | $0.010 | [`0xa22086d0…`](https://snowtrace.io/tx/0xa22086d048b0222a8e08a5ca08997ae6c359e5ba674e63133a0ffbc463af16f9) | confirmed |
+| 3 | wasi-wallet-profiler | $0.050 | [`0xca10320c…`](https://snowtrace.io/tx/0xca10320c24ff513d773ce65e0bd306d4acce3e4883180c9dca5573da6cf1dfdb) | confirmed |
+| Inbound | Kite testnet PYUSD (free) | 1.0 PYUSD | [`0x6f406c08…`](https://testnet.kitescan.ai/tx/0x6f406c08f6e59e3c5029f57ec3a84bb4596b94bb02568055ec4f9572981a1bf9) | testnet |
+
+**Architectural significance**: This is the first proven `Kite testnet → Avalanche C-Chain mainnet` cross-chain agent payment in our stack. Same flow used in Demo 1/2 above, but the `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` flag now routes outbound to mainnet USDC at `0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E`.
+
+Rollback path (if needed): `WASIAI_DOWNSTREAM_NETWORK=fuji` + `AVALANCHE_MAINNET_ENABLED=false` → reverts to testnet-only in ~3min.
+
 ### PRs merged this session
 
 | PR | Repo | Title |
