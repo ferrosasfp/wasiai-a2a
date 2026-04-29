@@ -77,8 +77,10 @@ describe('timeout middleware', () => {
     expect(timeoutMs).toBe(120000);
   });
 
-  it('AC-9: compose timeout uses 60s by default', () => {
-    const timeoutMs = parseInt(process.env.TIMEOUT_COMPOSE_MS ?? '60000', 10);
-    expect(timeoutMs).toBe(60000);
+  it('WKH-65 AC-7: compose timeout uses 180s by default', () => {
+    // WKH-65 bumped the compose default 120000 → 180000 to absorb the
+    // wasiai-v2 thin-proxy network hop (Vercel → Railway).
+    const timeoutMs = parseInt(process.env.TIMEOUT_COMPOSE_MS ?? '180000', 10);
+    expect(timeoutMs).toBe(180000);
   });
 });
