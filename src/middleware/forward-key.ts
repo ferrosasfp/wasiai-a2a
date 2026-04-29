@@ -5,21 +5,23 @@
  * thin proxy) calling /compose and /orchestrate from Vercel into Railway.
  *
  * Behavior (env-gated, CD-2):
- *   - WASIAI_V2_FORWARD_KEY unset/empty → factory returns [] (NOT mounted).
+ *   - WASIAI_V2_FORWARD_KEY unset/empty/whitespace/<16 chars → factory returns
+ *     [] (NOT mounted).
  *   - Header x-wasiai-forward-key absent → passthrough to next preHandler (AC-4).
  *   - Header present + value matches → passthrough (AC-2).
  *   - Header present + value differs → 401 INVALID_FORWARD_KEY (AC-3).
  *
  * Security (CD-3, AC-5):
- *   - crypto.timingSafeEqual on equal-length Buffers.
- *   - Length mismatch → compare against a same-length dummy buffer to avoid
- *     leaking the expected key length via timing; never throws.
+ *   - HMAC-SHA256 both inputs to a fixed 32-byte digest, then
+ *     crypto.timingSafeEqual. Eliminates the length branch entirely and
+ *     prevents leaking the expected secret length via timing.
  *
  * Logging (CD-4, DT-3, AC-6):
  *   - NEVER logs the forward key value (env or header).
- *   - When x-wasiai-source is present, logs `{ forwardSource }` at info level.
+ *   - When x-wasiai-source is present, logs `{ forwardSource }` at info level
+ *     after capping at 100 chars to prevent log amplification.
  */
-import crypto from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import type {
   FastifyReply,
   FastifyRequest,
@@ -28,27 +30,29 @@ import type {
 
 const FORWARD_KEY_HEADER = 'x-wasiai-forward-key';
 const FORWARD_SOURCE_HEADER = 'x-wasiai-source';
+const FORWARD_SOURCE_LOG_MAX = 100;
+const FORWARD_KEY_MIN_LENGTH = 16;
 
 /**
- * Constant-time compare two strings using crypto.timingSafeEqual without
- * leaking length information. If lengths differ, compares `received` against
- * a same-length dummy buffer (false return), so timing matches the
- * equal-length path. Never throws on length mismatch.
+ * Hash an arbitrary string into a fixed 32-byte digest using HMAC-SHA256.
+ * The "key" is a static domain-separation tag — we are NOT authenticating
+ * the input here; we just need both sides of the compare to be hashed to
+ * a uniform length so the subsequent timingSafeEqual call has constant
+ * time regardless of the original input lengths.
+ */
+function hmacDigest(input: string): Buffer {
+  return createHmac('sha256', 'wasiai-forward-key-compare-v1')
+    .update(input)
+    .digest();
+}
+
+/**
+ * Constant-time compare two strings using HMAC-SHA256 + timingSafeEqual.
+ * Both paths execute exactly one HMAC + one timingSafeEqual on 32-byte
+ * buffers, eliminating any length-dependent branch.
  */
 function safeStringEquals(received: string, expected: string): boolean {
-  const recvBuf = Buffer.from(received, 'utf8');
-  const expBuf = Buffer.from(expected, 'utf8');
-
-  if (recvBuf.length !== expBuf.length) {
-    // Length mismatch → constant-time compare against dummy of the SAME
-    // length as the received buffer so the comparison itself doesn't throw
-    // (timingSafeEqual requires equal-length inputs). Result is always false.
-    const dummy = Buffer.alloc(recvBuf.length, 0);
-    crypto.timingSafeEqual(recvBuf, dummy);
-    return false;
-  }
-
-  return crypto.timingSafeEqual(recvBuf, expBuf);
+  return timingSafeEqual(hmacDigest(received), hmacDigest(expected));
 }
 
 /**
@@ -60,10 +64,17 @@ function safeStringEquals(received: string, expected: string): boolean {
  * Returns a single async preHandler when the env var is set.
  */
 export function requireForwardKey(): preHandlerAsyncHookHandler[] {
-  const expected = process.env.WASIAI_V2_FORWARD_KEY;
+  // CD-2 + MNR-2 hardening: trim whitespace and require ≥16 chars.
+  // Values like "   ", "0", "false", "changeme" are rejected as misconfig.
+  const expected = process.env.WASIAI_V2_FORWARD_KEY?.trim();
 
-  // CD-2: completely inoperante if unset OR empty string.
-  if (!expected || expected.length === 0) {
+  if (!expected || expected.length < FORWARD_KEY_MIN_LENGTH) {
+    if (expected && expected.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[forward-key] WASIAI_V2_FORWARD_KEY too short or whitespace-only; middleware NOT mounted',
+      );
+    }
     return [];
   }
 
@@ -72,9 +83,18 @@ export function requireForwardKey(): preHandlerAsyncHookHandler[] {
     reply: FastifyReply,
   ) => {
     // AC-6 / DT-3: log x-wasiai-source value (informational only, no auth effect).
+    // CR-NIT-1: cap the header value at 100 chars BEFORE logging to prevent
+    // log amplification attacks (a malicious client could send a 10MB header).
     const sourceHeader = request.headers[FORWARD_SOURCE_HEADER];
-    if (typeof sourceHeader === 'string' && sourceHeader.length > 0) {
-      request.log.info({ forwardSource: sourceHeader }, 'forward-key source');
+    const truncatedSource =
+      typeof sourceHeader === 'string' && sourceHeader.length > 0
+        ? sourceHeader.slice(0, FORWARD_SOURCE_LOG_MAX)
+        : null;
+    if (truncatedSource) {
+      request.log.info(
+        { forwardSource: truncatedSource },
+        'forward-key source',
+      );
     }
 
     const headerValue = request.headers[FORWARD_KEY_HEADER];

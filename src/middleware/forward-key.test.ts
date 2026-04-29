@@ -136,7 +136,9 @@ describe('requireForwardKey middleware', () => {
   });
 
   it('AC-5: header longer than expected → 401 without throw', async () => {
-    process.env.WASIAI_V2_FORWARD_KEY = 'short-expected';
+    // ≥16 chars to satisfy MNR-2 hardening; still much shorter than the
+    // attacker header below (the point of the test).
+    process.env.WASIAI_V2_FORWARD_KEY = 'short-expected-aa';
 
     const app = Fastify();
     app.post(
@@ -206,6 +208,10 @@ describe('requireForwardKey middleware', () => {
         // capture log output via a custom stream
         stream: {
           write(line: string) {
+            // CR-NIT-2: do NOT silently swallow JSON parse errors — pino
+            // should always emit valid JSON when configured this way.
+            // If this branch trips it indicates a regression (e.g. a logger
+            // misconfiguration or a stray non-JSON write), so fail loudly.
             try {
               const parsed = JSON.parse(line) as Record<string, unknown>;
               logs.push({
@@ -215,8 +221,10 @@ describe('requireForwardKey middleware', () => {
                     : undefined,
                 msg: typeof parsed.msg === 'string' ? parsed.msg : '',
               });
-            } catch {
-              // ignore non-JSON output
+            } catch (err) {
+              expect.fail(
+                `unparsable log line: ${JSON.stringify(line)}, err: ${String(err)}`,
+              );
             }
           },
         },
