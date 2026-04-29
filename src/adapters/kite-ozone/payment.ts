@@ -19,10 +19,20 @@ import type {
   VerifyResult,
   X402Proof,
 } from '../types.js';
-import { kiteTestnet } from './chain.js';
+import { getKiteChain, getKiteNetwork } from './chain.js';
 
 const KITE_SCHEME = 'exact' as const;
-const KITE_NETWORK = 'eip155:2368' as const;
+// Network tag x402 (formato eip155:<chainId>) — runtime depending on KITE_NETWORK.
+const KITE_TESTNET_NETWORK = 'eip155:2368' as const;
+const KITE_MAINNET_NETWORK = 'eip155:2366' as const;
+type KiteNetworkTag = typeof KITE_TESTNET_NETWORK | typeof KITE_MAINNET_NETWORK;
+
+function getKiteNetworkTag(): KiteNetworkTag {
+  return getKiteNetwork() === 'mainnet'
+    ? KITE_MAINNET_NETWORK
+    : KITE_TESTNET_NETWORK;
+}
+
 const KITE_MAX_TIMEOUT_SECONDS = 300 as const;
 const KITE_FACILITATOR_DEFAULT_URL = 'https://facilitator.pieverse.io';
 const KITE_FACILITATOR_ADDRESS =
@@ -66,11 +76,40 @@ function getFacilitatorUrl(): string {
 }
 
 // ── Defaults for env-driven configuration (CD-1: no hardcoded addresses in logic) ──
-const DEFAULT_PAYMENT_TOKEN =
-  '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9' as `0x${string}`;
-const DEFAULT_EIP712_DOMAIN_NAME = 'PYUSD';
+//
+// Testnet defaults (chainId 2368): PYUSD — el path histórico WKH-29.
+// Mainnet defaults (chainId 2366): USDC.e — Kite mainnet stablecoin canonical.
+//   * PYUSD NO existe en Kite mainnet (es testnet-only).
+//   * USDC.e address verificado 2026-04-28: 0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e
+//
+// Activación mainnet: setear `KITE_NETWORK=mainnet` + opcionalmente
+// `X402_PAYMENT_TOKEN`/`X402_EIP712_DOMAIN_NAME`/`X402_TOKEN_SYMBOL` para
+// override. Sin overrides, los defaults mainnet aplican.
+const DEFAULT_PAYMENT_TOKEN_TESTNET =
+  '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9' as `0x${string}`; // PYUSD testnet
+const DEFAULT_PAYMENT_TOKEN_MAINNET =
+  '0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e' as `0x${string}`; // USDC.e mainnet
+const DEFAULT_EIP712_DOMAIN_NAME_TESTNET = 'PYUSD';
+const DEFAULT_EIP712_DOMAIN_NAME_MAINNET = 'USDC';
 const DEFAULT_EIP712_DOMAIN_VERSION = '1';
-const DEFAULT_TOKEN_SYMBOL = 'PYUSD';
+const DEFAULT_TOKEN_SYMBOL_TESTNET = 'PYUSD';
+const DEFAULT_TOKEN_SYMBOL_MAINNET = 'USDC.e';
+
+function getDefaultPaymentToken(): `0x${string}` {
+  return getKiteNetwork() === 'mainnet'
+    ? DEFAULT_PAYMENT_TOKEN_MAINNET
+    : DEFAULT_PAYMENT_TOKEN_TESTNET;
+}
+function getDefaultEip712DomainName(): string {
+  return getKiteNetwork() === 'mainnet'
+    ? DEFAULT_EIP712_DOMAIN_NAME_MAINNET
+    : DEFAULT_EIP712_DOMAIN_NAME_TESTNET;
+}
+function getDefaultTokenSymbol(): string {
+  return getKiteNetwork() === 'mainnet'
+    ? DEFAULT_TOKEN_SYMBOL_MAINNET
+    : DEFAULT_TOKEN_SYMBOL_TESTNET;
+}
 
 // ── Lazy env-var readers (DT-2: read at call time, not module load) ──
 
@@ -79,40 +118,53 @@ let _warnedDefaultToken = false;
 
 function getPaymentToken(): `0x${string}` {
   const token = process.env.X402_PAYMENT_TOKEN;
+  const fallback = getDefaultPaymentToken();
   if (!token) {
     if (!_warnedDefaultToken) {
       console.warn(
-        `X402_PAYMENT_TOKEN not set — defaulting to PYUSD (${DEFAULT_PAYMENT_TOKEN})`,
+        `X402_PAYMENT_TOKEN not set — defaulting to ${getDefaultTokenSymbol()} (${fallback})`,
       );
       _warnedDefaultToken = true;
     }
-    return DEFAULT_PAYMENT_TOKEN;
+    return fallback;
   }
   if (!ADDRESS_RE.test(token)) {
     if (!_warnedDefaultToken) {
       console.warn(
-        `X402_PAYMENT_TOKEN has invalid format "${token}" — defaulting to PYUSD (${DEFAULT_PAYMENT_TOKEN})`,
+        `X402_PAYMENT_TOKEN has invalid format "${token}" — defaulting to ${getDefaultTokenSymbol()} (${fallback})`,
       );
       _warnedDefaultToken = true;
     }
-    return DEFAULT_PAYMENT_TOKEN;
+    return fallback;
   }
   return token as `0x${string}`;
 }
 
 function getEip712Domain() {
+  // Pieverse mode firma contra el contrato del facilitator. Cuando se active
+  // mainnet en producción, este address debería rotar al deployment mainnet
+  // del facilitator Pieverse (TBD). Hoy default es testnet; el path mainnet
+  // recomendado es `KITE_FACILITATOR_MODE=x402` que firma contra el token
+  // contract directamente y NO depende de KITE_FACILITATOR_ADDRESS.
   return {
-    name:
-      process.env.X402_EIP712_DOMAIN_NAME ?? DEFAULT_EIP712_DOMAIN_NAME,
+    name: process.env.X402_EIP712_DOMAIN_NAME ?? getDefaultEip712DomainName(),
     version:
       process.env.X402_EIP712_DOMAIN_VERSION ?? DEFAULT_EIP712_DOMAIN_VERSION,
-    chainId: kiteTestnet.id,
+    chainId: getKiteChain().id,
     verifyingContract: KITE_FACILITATOR_ADDRESS,
   } as const;
 }
 
 function getTokenSymbol(): string {
-  return process.env.X402_TOKEN_SYMBOL ?? DEFAULT_TOKEN_SYMBOL;
+  return process.env.X402_TOKEN_SYMBOL ?? getDefaultTokenSymbol();
+}
+
+/** Resolves the active RPC URL for the selected Kite network. */
+function getKiteRpcUrl(): string | undefined {
+  if (getKiteNetwork() === 'mainnet') {
+    return process.env.KITE_MAINNET_RPC_URL ?? process.env.KITE_RPC_URL;
+  }
+  return process.env.KITE_RPC_URL;
 }
 
 const EIP712_TYPES = {
@@ -138,28 +190,37 @@ function getWalletClient() {
   const account = privateKeyToAccount(pk as `0x${string}`);
   _walletClient = createWalletClient({
     account,
-    chain: kiteTestnet,
-    transport: http(process.env.KITE_RPC_URL),
+    chain: getKiteChain(),
+    transport: http(getKiteRpcUrl()),
   });
   return _walletClient;
 }
 
 export class KiteOzonePaymentAdapter implements PaymentAdapter {
   readonly name = 'kite-ozone';
-  readonly chainId = 2368;
+
+  /**
+   * `chainId` reportado por el adapter. Es DINÁMICO según `KITE_NETWORK`:
+   *   - `testnet` (default) → 2368
+   *   - `mainnet` → 2366
+   *
+   * Se evalúa en el getter (no en el constructor) para que un cambio del
+   * env-var entre tests / restarts se refleje sin recargar el módulo.
+   */
+  get chainId(): number {
+    return getKiteChain().id;
+  }
 
   get supportedTokens(): TokenSpec[] {
     const token = getPaymentToken();
-    return [
-      { symbol: getTokenSymbol(), address: token, decimals: 18 },
-    ];
+    return [{ symbol: getTokenSymbol(), address: token, decimals: 18 }];
   }
 
   getScheme(): string {
     return KITE_SCHEME;
   }
   getNetwork(): string {
-    return KITE_NETWORK;
+    return getKiteNetworkTag();
   }
   getToken(): `0x${string}` {
     return getPaymentToken();
@@ -177,11 +238,12 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
     }
     const facilitatorUrl = getFacilitatorUrl();
     const token = getPaymentToken();
+    const network = getKiteNetworkTag();
     const body: PieverseVerifyRequest = {
       paymentPayload: {
         x402Version: 2,
         scheme: KITE_SCHEME,
-        network: KITE_NETWORK,
+        network,
         payload: {
           authorization: proof.authorization,
           signature: proof.signature,
@@ -190,7 +252,7 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
       paymentRequirements: {
         x402Version: 2,
         scheme: KITE_SCHEME,
-        network: KITE_NETWORK,
+        network,
         maxAmountRequired: proof.authorization.value,
         payTo: proof.authorization.to,
         asset: token,
@@ -223,17 +285,18 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
     }
     const facilitatorUrl = getFacilitatorUrl();
     const token = getPaymentToken();
+    const network = getKiteNetworkTag();
     const body: PieverseSettleRequest = {
       paymentPayload: {
         x402Version: 2,
         scheme: KITE_SCHEME,
-        network: KITE_NETWORK,
+        network,
         payload: { authorization: req.authorization, signature: req.signature },
       },
       paymentRequirements: {
         x402Version: 2,
         scheme: KITE_SCHEME,
-        network: KITE_NETWORK,
+        network,
         maxAmountRequired: req.authorization.value,
         payTo: req.authorization.to,
         asset: token,
@@ -291,15 +354,19 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
     let signature: string;
     if (mode === 'x402') {
       // x402 canonical — sign EIP-3009 TransferWithAuthorization directly
-      // against the PYUSD token contract (verifyingContract = token address).
+      // against the token contract (verifyingContract = token address).
+      // Domain name / version se resuelven via env override; los defaults
+      // varían por chain (PYUSD on testnet, USDC on mainnet).
       const token = getPaymentToken();
       signature = await client.signTypedData({
         account,
         domain: {
-          name: process.env.X402_EIP712_DOMAIN_NAME ?? DEFAULT_EIP712_DOMAIN_NAME,
+          name:
+            process.env.X402_EIP712_DOMAIN_NAME ?? getDefaultEip712DomainName(),
           version:
-            process.env.X402_EIP712_DOMAIN_VERSION ?? DEFAULT_EIP712_DOMAIN_VERSION,
-          chainId: kiteTestnet.id,
+            process.env.X402_EIP712_DOMAIN_VERSION ??
+            DEFAULT_EIP712_DOMAIN_VERSION,
+          chainId: getKiteChain().id,
           verifyingContract: token,
         },
         types: {
@@ -335,7 +402,7 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
     const paymentRequest: X402PaymentRequest = {
       authorization,
       signature,
-      network: KITE_NETWORK,
+      network: getKiteNetworkTag(),
     };
     const xPaymentHeader = Buffer.from(JSON.stringify(paymentRequest)).toString(
       'base64',
@@ -382,7 +449,7 @@ function buildX402CanonicalBody(
     },
     accepted: {
       scheme: KITE_SCHEME,
-      network: KITE_NETWORK,
+      network: getKiteNetworkTag(),
       amount: authorization.value,
       asset: token,
       payTo: authorization.to,
@@ -412,12 +479,19 @@ async function verifyX402(proof: X402Proof): Promise<VerifyResult> {
       `Facilitator network error: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  const result = (await response.json().catch(() => null)) as X402VerifyResponse | null;
+  const result = (await response
+    .json()
+    .catch(() => null)) as X402VerifyResponse | null;
   if (result === null) {
-    throw new Error(`Facilitator returned HTTP ${response.status} on /verify (no JSON body)`);
+    throw new Error(
+      `Facilitator returned HTTP ${response.status} on /verify (no JSON body)`,
+    );
   }
   if (!response.ok) {
-    return { valid: false, error: result.error?.message ?? `HTTP ${response.status}` };
+    return {
+      valid: false,
+      error: result.error?.message ?? `HTTP ${response.status}`,
+    };
   }
   return { valid: result.verified === true, error: result.error?.message };
 }
@@ -438,9 +512,13 @@ async function settleX402(req: SettleRequest): Promise<SettleResult> {
       `Facilitator network error on settle: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  const result = (await response.json().catch(() => null)) as X402SettleResponse | null;
+  const result = (await response
+    .json()
+    .catch(() => null)) as X402SettleResponse | null;
   if (result === null) {
-    throw new Error(`Facilitator returned HTTP ${response.status} on /settle (no JSON body)`);
+    throw new Error(
+      `Facilitator returned HTTP ${response.status} on /settle (no JSON body)`,
+    );
   }
   if (!response.ok || !result.settled) {
     return {
