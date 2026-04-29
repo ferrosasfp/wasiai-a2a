@@ -195,6 +195,54 @@ describe('discoveryService', () => {
       const agent = discoveryService.mapAgent(registry, raw);
       expect(agent.payment).toBeUndefined();
     });
+
+    // 068: chain allowlist mainnet support
+    it('mapAgent accepts chain="avalanche-mainnet" and normalizes to "avalanche"', () => {
+      const registry = makeRegistry();
+      const raw = {
+        id: '1',
+        slug: 'agent-1',
+        name: 'A1',
+        description: 'd',
+        capabilities: ['x'],
+        price: 0.5,
+        status: 'active',
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain: 'avalanche-mainnet',
+          contract: '0x000000000000000000000000000000000000aBcD',
+        },
+      };
+      const agent = discoveryService.mapAgent(registry, raw);
+      expect(agent.payment).toEqual({
+        method: 'x402',
+        asset: 'USDC',
+        chain: 'avalanche', // normalized
+        contract: '0x000000000000000000000000000000000000aBcD',
+      });
+    });
+
+    it('mapAgent rejects chain outside allowlist (e.g. "polygon")', () => {
+      const registry = makeRegistry();
+      const raw = {
+        id: '1',
+        slug: 'agent-1',
+        name: 'A1',
+        description: 'd',
+        capabilities: ['x'],
+        price: 0.5,
+        status: 'active',
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain: 'polygon',
+          contract: '0x000000000000000000000000000000000000aBcD',
+        },
+      };
+      const agent = discoveryService.mapAgent(registry, raw);
+      expect(agent.payment).toBeUndefined();
+    });
   });
 
   describe('AC-9: verified + includeInactive combine with AND logic', () => {

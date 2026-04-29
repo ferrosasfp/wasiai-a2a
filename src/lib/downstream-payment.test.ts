@@ -3,8 +3,9 @@
  * Mocks: viem (signTypedData + readContract), fetch global, viem/accounts.
  * NO E2E contra Fuji RPC (CD-7).
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
 import { parseUnits } from 'viem';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Agent } from '../types/index.js';
 
 // IMPORTANTE: el flag se lee al module load, asi que tenemos que setearlo
@@ -379,22 +380,19 @@ describe('signAndSettleDownstream — flag on', () => {
     ['-Infinity', Number.NEGATIVE_INFINITY],
     ['zero', 0],
     ['negative', -1],
-  ])(
-    'returns null with INVALID_PRICE when priceUsdc is %s (T-InvalidPrice / CR-MNR-7)',
-    async (_label, badPrice) => {
-      const { signAndSettleDownstream } = await importWithFlag(true);
-      const logger = makeLogger();
-      const agent = makeAgent({ priceUsdc: badPrice });
-      const result = await signAndSettleDownstream(agent, logger);
-      expect(result).toBeNull();
-      expect(logger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ code: 'INVALID_PRICE' }),
-        expect.any(String),
-      );
-      expect(mockReadContract).not.toHaveBeenCalled();
-      expect(mockSignTypedData).not.toHaveBeenCalled();
-    },
-  );
+  ])('returns null with INVALID_PRICE when priceUsdc is %s (T-InvalidPrice / CR-MNR-7)', async (_label, badPrice) => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+    const agent = makeAgent({ priceUsdc: badPrice });
+    const result = await signAndSettleDownstream(agent, logger);
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'INVALID_PRICE' }),
+      expect.any(String),
+    );
+    expect(mockReadContract).not.toHaveBeenCalled();
+    expect(mockSignTypedData).not.toHaveBeenCalled();
+  });
 
   it('computes atomic value with 6 decimals not 18 like Kite/PYUSD (T-AtomicValue6Decimals / AC-9)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);

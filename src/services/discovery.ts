@@ -32,19 +32,31 @@ export function _resetFallbackWarnDedup(): void {
  * Schema drift fallback for wasiai-v2 marketplace shape:
  *   - v2 expone `obj.protocol` (e.g. "x402"), pero el WKH-55 código espera `obj.method`.
  *   - v2 expone `chain` top-level (e.g. "avalanche-testnet"), pero WKH-55 lo busca en payment.
- *   - WKH-55 guard chequea `chain === "avalanche"`; normalizamos solo testnet → avalanche.
+ *   - WKH-55 guard chequea `chain === "avalanche"`; normalizamos solo testnet/mainnet → avalanche.
  *
  * SEC-AR-2026-04-28 BLQ-MED-1: chain allowlist explícita.
  * Registry comprometido podría exponer `chain: 'avalanche'` (literal) o variantes
  * exóticas para bypassear el guard del downstream-payment. La defensa-en-profundidad
- * es rechazar cualquier chain que no esté en la allowlist conocida — que hoy
- * solo soporta Fuji testnet via wasiai-facilitator.
+ * es rechazar cualquier chain que no esté en la allowlist conocida.
+ *
+ * Allowlist actual:
+ *   - `avalanche` (canonical, post-normalization)
+ *   - `avalanche-testnet` (wasiai-v2 valor cuando `chain_id=43113`)
+ *   - `avalanche-mainnet` (wasiai-v2 valor cuando `chain_id=43114`)
+ *
+ * El downstream pago real (Fuji vs C-Chain) se decide a nivel de
+ * `downstream-payment.ts` mediante `WASIAI_DOWNSTREAM_NETWORK`. Esta
+ * allowlist NO discrimina: ambas variantes son aceptadas y se normalizan
+ * a `avalanche`. Si el operator NO tiene downstream-network seteado a
+ * mainnet, los pagos contra agentes mainnet harán skip (CHAIN_NOT_SUPPORTED
+ * en el path de pago, no en discovery).
  *
  * Retorna undefined si los campos críticos siguen ausentes O chain no permitida.
  */
 const ALLOWED_CHAIN_VALUES = new Set([
   'avalanche', // canonical (post-normalization)
-  'avalanche-testnet', // wasiai-v2 v2 marketplace exposed value
+  'avalanche-testnet', // wasiai-v2 valor cuando chain_id=43113
+  'avalanche-mainnet', // wasiai-v2 valor cuando chain_id=43114
 ]);
 
 function readPayment(
@@ -79,8 +91,13 @@ function readPayment(
     return undefined;
   }
 
-  // Normalize chain: "avalanche-testnet" → "avalanche" (downstream guard expects canonical name)
-  const chain = chainRaw === 'avalanche-testnet' ? 'avalanche' : chainRaw;
+  // Normalize chain: "avalanche-testnet" / "avalanche-mainnet" → "avalanche"
+  // (downstream guard expects canonical name; el discriminator de testnet vs
+  // mainnet vive a nivel de WASIAI_DOWNSTREAM_NETWORK).
+  const chain =
+    chainRaw === 'avalanche-testnet' || chainRaw === 'avalanche-mainnet'
+      ? 'avalanche'
+      : chainRaw;
 
   return {
     method: methodRaw,

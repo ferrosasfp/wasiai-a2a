@@ -11,12 +11,12 @@ import {
   erc20Abi,
   type Hex,
   http,
-  parseUnits,
   type PublicClient,
+  parseUnits,
   type WalletClient,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { avalancheFuji } from 'viem/chains';
+import { avalanche, avalancheFuji } from 'viem/chains';
 import type { Agent, DownstreamLogger } from '../types/index.js';
 
 // Re-export for backward-compat: callers historically import
@@ -24,14 +24,44 @@ import type { Agent, DownstreamLogger } from '../types/index.js';
 // definition now lives in `types/index.ts` (TD-WKH-55-4 / CR-MNR-3).
 export type { DownstreamLogger };
 
-// ─── Constants (DT-N) — env override + warn-once ────────────────────
+// ─── Network selection (068) — env-gated, default fuji ─────────────
+/**
+ * Selección de chain target para el downstream pago.
+ *   - `fuji` (default): chainId 43113, USDC fuji (Circle test).
+ *   - `avalanche-mainnet`: chainId 43114, USDC native (Circle prod).
+ *
+ * Activación mainnet requiere setear `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`
+ * Y haber fundeado el operator wallet con USDC en la chain correspondiente.
+ * Sin balance suficiente, el path falla con `INSUFFICIENT_BALANCE` (ya
+ * cubierto por la pre-flight check existente, AC-10).
+ */
+type DownstreamNetwork = 'fuji' | 'avalanche-mainnet';
+
+function getDownstreamNetwork(): DownstreamNetwork {
+  return process.env.WASIAI_DOWNSTREAM_NETWORK === 'avalanche-mainnet'
+    ? 'avalanche-mainnet'
+    : 'fuji';
+}
+
+// USDC contract addresses canonical Circle (verificados 2026-04-28):
+//   - Fuji testnet: 0x5425890298aed601595a70AB815c96711a31Bc65
+//   - Avalanche C-Chain mainnet: 0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E
 const DEFAULT_FUJI_USDC =
   '0x5425890298aed601595a70AB815c96711a31Bc65' as `0x${string}`;
+const DEFAULT_AVALANCHE_USDC =
+  '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E' as `0x${string}`;
+
+// Chain IDs y network tags x402 (formato eip155:<chainId>).
 const FUJI_CHAIN_ID = 43113 as const;
+const AVALANCHE_CHAIN_ID = 43114 as const;
 const FUJI_NETWORK = 'eip155:43113' as const;
-const FUJI_USDC_DECIMALS = 6 as const; // CD-NEW-SDD-5
-const FUJI_USDC_EIP712_NAME = 'USD Coin' as const;
-const FUJI_USDC_EIP712_VERSION_DEFAULT = '2' as const;
+const AVALANCHE_NETWORK = 'eip155:43114' as const;
+
+// USDC decimals + EIP-712 domain — idénticos en ambas chains (mismo Circle ABI).
+const USDC_DECIMALS = 6 as const; // CD-NEW-SDD-5
+const USDC_EIP712_NAME = 'USD Coin' as const;
+const USDC_EIP712_VERSION_DEFAULT = '2' as const;
+
 const VALID_BEFORE_SECONDS = 300 as const;
 const X402_SCHEME = 'exact' as const;
 const MAX_TIMEOUT_SECONDS = 60 as const;
@@ -80,7 +110,7 @@ export interface X402CanonicalBody {
   resource: { url: string };
   accepted: {
     scheme: typeof X402_SCHEME;
-    network: typeof FUJI_NETWORK;
+    network: typeof FUJI_NETWORK | typeof AVALANCHE_NETWORK;
     amount: string;
     asset: `0x${string}`;
     payTo: `0x${string}`;
@@ -104,10 +134,30 @@ export interface X402SettleResponse {
 // ─── Internal helpers ───────────────────────────────────────────────
 
 /**
- * Resolves the Fuji USDC address from env, warn-once if absent.
- * Returns the canonical default Circle USDC on Fuji.
+ * Resolves the USDC contract address for the active downstream network.
+ *
+ *   - `fuji` → reads `FUJI_USDC_ADDRESS`; falls back to canonical Circle Fuji.
+ *   - `avalanche-mainnet` → reads `AVALANCHE_USDC_ADDRESS`; falls back to canonical
+ *     Circle USDC on Avalanche C-Chain.
+ *
+ * Warn-once per process when the env-var is absent (preserves WKH-55 behavior).
  */
-function getFujiUsdcAddress(): `0x${string}` {
+function getUsdcAddress(): `0x${string}` {
+  const network = getDownstreamNetwork();
+  if (network === 'avalanche-mainnet') {
+    const env = process.env.AVALANCHE_USDC_ADDRESS;
+    if (!env) {
+      if (!warnedDefaultUsdc) {
+        warnedDefaultUsdc = true;
+        console.warn(
+          `[downstream] AVALANCHE_USDC_ADDRESS not set, using default ${DEFAULT_AVALANCHE_USDC}`,
+        );
+      }
+      return DEFAULT_AVALANCHE_USDC;
+    }
+    return env as `0x${string}`;
+  }
+  // Default: fuji
   const env = process.env.FUJI_USDC_ADDRESS;
   if (!env) {
     if (!warnedDefaultUsdc) {
@@ -121,10 +171,17 @@ function getFujiUsdcAddress(): `0x${string}` {
   return env as `0x${string}`;
 }
 
-function getFujiUsdcEip712Version(): string {
-  return (
-    process.env.FUJI_USDC_EIP712_VERSION ?? FUJI_USDC_EIP712_VERSION_DEFAULT
-  );
+function getUsdcEip712Version(): string {
+  // Misma versión '2' aplica a Circle USDC en ambas chains.
+  // Override permitido vía FUJI_USDC_EIP712_VERSION (legacy) o
+  // AVALANCHE_USDC_EIP712_VERSION (nuevo).
+  const network = getDownstreamNetwork();
+  if (network === 'avalanche-mainnet') {
+    return (
+      process.env.AVALANCHE_USDC_EIP712_VERSION ?? USDC_EIP712_VERSION_DEFAULT
+    );
+  }
+  return process.env.FUJI_USDC_EIP712_VERSION ?? USDC_EIP712_VERSION_DEFAULT;
 }
 
 function getFacilitatorUrl(): string {
@@ -157,7 +214,7 @@ function validatePayTo(
  * CD-NEW-SDD-5: uses parseUnits, NOT BigInt(Math.round(x*1e6)).
  */
 function computeAtomicValue(priceUsdc: number): bigint {
-  return parseUnits(priceUsdc.toString(), FUJI_USDC_DECIMALS);
+  return parseUnits(priceUsdc.toString(), USDC_DECIMALS);
 }
 
 /**
@@ -199,12 +256,36 @@ function buildClients(): {
   publicClient: PublicClient;
   walletClient: WalletClient;
   account: ReturnType<typeof privateKeyToAccount>;
+  chainId: number;
+  network: typeof FUJI_NETWORK | typeof AVALANCHE_NETWORK;
 } | null {
   const pk = process.env.OPERATOR_PRIVATE_KEY;
-  if (!pk || !pk.startsWith('0x')) return null;
+  if (!pk?.startsWith('0x')) return null;
+  const network = getDownstreamNetwork();
+  const account = privateKeyToAccount(pk as `0x${string}`);
+  if (network === 'avalanche-mainnet') {
+    const rpc = process.env.AVALANCHE_RPC_URL;
+    if (!rpc) return null;
+    const publicClient = createPublicClient({
+      chain: avalanche,
+      transport: http(rpc),
+    });
+    const walletClient = createWalletClient({
+      account,
+      chain: avalanche,
+      transport: http(rpc),
+    });
+    return {
+      publicClient,
+      walletClient,
+      account,
+      chainId: AVALANCHE_CHAIN_ID,
+      network: AVALANCHE_NETWORK,
+    };
+  }
+  // Default: fuji
   const rpc = process.env.FUJI_RPC_URL;
   if (!rpc) return null;
-  const account = privateKeyToAccount(pk as `0x${string}`);
   const publicClient = createPublicClient({
     chain: avalancheFuji,
     transport: http(rpc),
@@ -214,7 +295,13 @@ function buildClients(): {
     chain: avalancheFuji,
     transport: http(rpc),
   });
-  return { publicClient, walletClient, account };
+  return {
+    publicClient,
+    walletClient,
+    account,
+    chainId: FUJI_CHAIN_ID,
+    network: FUJI_NETWORK,
+  };
 }
 
 /**
@@ -225,13 +312,14 @@ function buildCanonicalBody(args: {
   authorization: X402Authorization;
   signature: string;
   asset: `0x${string}`;
+  network: typeof FUJI_NETWORK | typeof AVALANCHE_NETWORK;
 }): X402CanonicalBody {
   return {
     x402Version: 2,
     resource: { url: 'https://wasiai.ai/downstream' },
     accepted: {
       scheme: X402_SCHEME,
-      network: FUJI_NETWORK,
+      network: args.network,
       amount: args.authorization.value,
       asset: args.asset,
       payTo: args.authorization.to,
@@ -397,11 +485,11 @@ export async function signAndSettleDownstream(
   if (!clients) {
     logger.warn(
       { agentSlug: agent.slug, code: 'CONFIG_MISSING' },
-      '[Downstream] OPERATOR_PRIVATE_KEY or FUJI_RPC_URL missing',
+      '[Downstream] OPERATOR_PRIVATE_KEY or RPC URL missing for active network',
     );
     return null;
   }
-  const { publicClient, walletClient, account } = clients;
+  const { publicClient, walletClient, account, chainId, network } = clients;
 
   // 7a. priceUsdc guard (CR-MNR-7: explicit edge-case for non-finite / non-positive
   // price). Without this, values like NaN, Infinity, -1, 0 or sub-atomic ones such
@@ -431,7 +519,7 @@ export async function signAndSettleDownstream(
   }
 
   // 8. Pre-flight balance (DT-H, AC-10)
-  const usdcAddress = getFujiUsdcAddress();
+  const usdcAddress = getUsdcAddress();
   let balance: bigint;
   try {
     balance = await readOperatorBalance(
@@ -471,15 +559,16 @@ export async function signAndSettleDownstream(
     nonce,
   };
 
-  // 10. Sign EIP-712 (CD-8: exact USDC Fuji domain)
+  // 10. Sign EIP-712 (CD-8: exact USDC domain — Circle USDC ABI is identical
+  // on Fuji y Avalanche C-Chain; sólo varía chainId + verifyingContract).
   let signature: Hex;
   try {
     signature = await walletClient.signTypedData({
       account,
       domain: {
-        name: FUJI_USDC_EIP712_NAME,
-        version: getFujiUsdcEip712Version(),
-        chainId: FUJI_CHAIN_ID,
+        name: USDC_EIP712_NAME,
+        version: getUsdcEip712Version(),
+        chainId,
         verifyingContract: usdcAddress,
       },
       types: TRANSFER_WITH_AUTHORIZATION_TYPES,
@@ -506,6 +595,7 @@ export async function signAndSettleDownstream(
     authorization,
     signature,
     asset: usdcAddress,
+    network,
   });
   const verifyRes = await postFacilitator<X402VerifyResponse>('/verify', body);
   if (!verifyRes.ok || verifyRes.data.verified !== true) {
