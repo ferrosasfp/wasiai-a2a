@@ -14,6 +14,11 @@ Servicio de discovery, composición y orquestación de agentes autónomos siguie
 - wasiai-v2 (el marketplace) **consume** wasiai-a2a
 - Otros marketplaces también pueden consumir wasiai-a2a
 
+### Realignment status (2026-04-28)
+- **PROD CUTOVER COMPLETO** — `compose`, `orchestrate`, `capabilities` ya delegan de v2 → a2a en prod (Railway).
+- Plan completo: `doc/migration/2026-04-28-wasiai-v2-realignment-plan.md`
+- Final report (placeholder): `HACKATHON-FINAL.md` (lo escribe `nexus-docs` en el cierre del hackathon).
+
 ---
 
 ## Antes de cualquier tarea
