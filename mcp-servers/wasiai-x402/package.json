@@ -13,7 +13,9 @@
     "test:sign": "node --test tests/sign.test.mjs",
     "test:config": "node --test tests/config.test.mjs",
     "test:url": "node --test tests/url-validator.test.mjs",
-    "test:tools": "node --test tests/tools.test.mjs"
+    "test:tools": "node --test tests/tools.test.mjs",
+    "test:auth": "node --test tests/auth.test.mjs",
+    "test:http": "node --test tests/http.test.mjs"
   },
   "engines": {
     "node": ">=20.10.0"

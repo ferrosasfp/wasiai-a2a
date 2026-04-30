@@ -27,7 +27,7 @@ cd wasiai-a2a/mcp-servers/wasiai-x402
 npm install
 cp .env.example .env
 # Edit .env — set OPERATOR_PRIVATE_KEY (testnet wallet for local dev).
-npm test         # 36+ tests should pass
+npm test         # 100+ tests should pass
 npm start        # MCP server starts on stdio (waits for client)
 ```
 
@@ -46,6 +46,8 @@ npm run test:sign     # 8 tests (golden vector + signature shape)
 npm run test:config   # 7+ tests (env validation + warn-once)
 npm run test:url      # 9+ tests (SSRF guard, IPv4/IPv6 private ranges)
 npm run test:tools    # 12+ tests (handlers, mocked fetch, concurrency)
+npm run test:auth     # bearer token validation (timing-safe, AC-5/AC-6, WKH-65)
+npm run test:http     # HTTP transport via api/mcp.mjs (auth, CORS, leaks, WKH-65)
 ```
 
 ---
@@ -64,8 +66,12 @@ npm run test:tools    # 12+ tests (handlers, mocked fetch, concurrency)
    │   ├── config.mjs
    │   ├── log.mjs
    │   ├── url-validator.mjs
-   │   └── sign.mjs
+   │   ├── handlers.mjs    # required (post-WKH-65 refactor: shared handlers for stdio + HTTP)
+   │   ├── sign.mjs
+   │   └── auth.mjs        # optional for stdio; required only if you also want HTTP transport
    ```
+   > For HTTP transport (Vercel), see "Deploy a Vercel" section below — that path
+   > additionally requires `api/mcp.mjs` and `vercel.json` on top of the files above.
 4. Entry command: `node src/index.mjs`.
 5. Env vars (set via Claude Console env panel — never commit):
    - `OPERATOR_PRIVATE_KEY` — REQUIRED. Mainnet-funded wallet for production demos.

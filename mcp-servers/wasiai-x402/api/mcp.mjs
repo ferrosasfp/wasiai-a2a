@@ -57,13 +57,24 @@ function jsonError(status, body) {
   });
 }
 
-// ── CORS preflight handler (AC-9) ──────────────────────────────────────────
-function corsPreflightResponse(request) {
+// ── CORS allowlist parser (AC-9, MNR-AR-2) ────────────────────────────────
+//
+// Returns the literal origin to echo back, or null if the request origin is
+// not in MCP_CORS_ALLOWED_ORIGINS. Note: '*' is NOT supported as a wildcard
+// (deny-by-default literal match — see .env.example for rationale).
+function resolveAllowedOrigin(request) {
   const origin = request.headers.get('origin') ?? '';
+  if (!origin) return null;
   const allowed = (process.env.MCP_CORS_ALLOWED_ORIGINS ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+  return allowed.includes(origin) ? origin : null;
+}
+
+// ── CORS preflight handler (AC-9) ──────────────────────────────────────────
+function corsPreflightResponse(request) {
+  const echoOrigin = resolveAllowedOrigin(request);
   // Only echo the origin back when it is explicitly in the allowlist.
   // For any other origin (or missing var), we omit Allow-Origin entirely
   // so the browser refuses the cross-origin request (deny-by-default).
@@ -72,8 +83,8 @@ function corsPreflightResponse(request) {
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Max-Age': '86400',
   };
-  if (origin && allowed.includes(origin)) {
-    headers['Access-Control-Allow-Origin'] = origin;
+  if (echoOrigin) {
+    headers['Access-Control-Allow-Origin'] = echoOrigin;
     headers['Vary'] = 'Origin';
   }
   return new Response(null, { status: 204, headers });
@@ -134,13 +145,19 @@ function buildServer(cfg) {
 // Response | Promise<Response>` signature for `*.mjs` files in /api when
 // they `export default`. We rely on that exclusively — no req/res shim.
 //
-// Order of operations (CD-7, AC-5, AC-6):
+// Order of operations (CD-7, AC-5, AC-6, MNR-CR-6):
 //   1. CORS preflight → 204 (no auth required for OPTIONS).
 //   2. Reject non-POST methods → 405.
-//   3. Load config — if MCP_BEARER_TOKEN or OPERATOR_PRIVATE_KEY missing
-//      or gateway URL invalid, fail with 500 BEFORE inspecting the body.
-//   4. Validate bearer token (timing-safe) BEFORE parsing the body.
-//   5. Hand the request off to WebStandardStreamableHTTPServerTransport.
+//   3. Bearer token presence + timing-safe verify — BEFORE any DNS or
+//      gateway-URL validation. An unauth caller must never trigger
+//      validateGatewayUrl (which does DNS lookups for SSRF defense).
+//   4. loadConfig() — validate OPERATOR_PRIVATE_KEY, gateway URL, etc.
+//      Only authenticated callers reach this step.
+//   5. Setup MCP server + transport per request (stateless, CD-8).
+//   6. Hand the request off to WebStandardStreamableHTTPServerTransport,
+//      then close transport + server in `finally` (MNR-CR-1).
+//   7. Echo Access-Control-Allow-Origin on the response if the request
+//      origin is in the allowlist (MNR-AR-2 — browsers need it on POST).
 export default async function handler(request) {
   // 1. CORS preflight (AC-9).
   if (request.method === 'OPTIONS') {
@@ -154,7 +171,44 @@ export default async function handler(request) {
     return jsonError(405, { error: 'method not allowed' });
   }
 
-  // 3. Config + bearer token presence (CD-7, AC-7).
+  // 3. Bearer token presence + verify (MNR-CR-6: BEFORE loadConfig).
+  //
+  //    Why first: loadConfig() runs validateGatewayUrl(), which performs
+  //    DNS lookups + literal-host checks against WASIAI_GATEWAY_URL. If we
+  //    let an unauthenticated caller drive that path, we expose a free
+  //    DNS-lookup primitive (and waste compute on every 401). Verifying the
+  //    bearer first keeps unauthenticated traffic strictly off the
+  //    config/SSRF code path.
+  //
+  //    AC-7 still holds: if MCP_BEARER_TOKEN is missing, we return 500
+  //    without ever calling loadConfig — the auth-disabled scenario is
+  //    impossible.
+  const expectedToken = process.env.MCP_BEARER_TOKEN;
+  if (!expectedToken) {
+    log.error('mcp.http.missing-bearer-token', {
+      stage: 'startup', ok: false,
+    });
+    return jsonError(500, { error: 'server misconfigured' });
+  }
+  try {
+    validateBearerToken(request.headers.get('authorization') ?? '', expectedToken);
+  } catch (e) {
+    if (e instanceof AuthError) {
+      // CD-1 / CD-5: never log the presented header (could be the right
+      // token, a partial guess, or unrelated PII).
+      log.warn('mcp.http.unauthorized', {
+        stage: 'verify', ok: false,
+      });
+      return jsonError(401, { error: 'unauthorized' });
+    }
+    log.error('mcp.http.auth-unexpected', {
+      stage: 'verify', ok: false, error: e.message,
+    });
+    return jsonError(500, { error: 'server error' });
+  }
+
+  // 4. Config (CD-7, AC-7) — only after auth so unauth callers never
+  //    trigger DNS / SSRF validation work.
   let cfg;
   try {
     cfg = await loadConfig();
@@ -173,32 +227,6 @@ export default async function handler(request) {
     return jsonError(500, { error: 'server misconfigured' });
   }
 
-  const expectedToken = process.env.MCP_BEARER_TOKEN;
-  if (!expectedToken) {
-    log.error('mcp.http.missing-bearer-token', {
-      stage: 'startup', ok: false,
-    });
-    return jsonError(500, { error: 'server misconfigured' });
-  }
-
-  // 4. Auth (AC-5, AC-6, CD-2).
-  try {
-    validateBearerToken(request.headers.get('authorization') ?? '', expectedToken);
-  } catch (e) {
-    if (e instanceof AuthError) {
-      // CD-1 / CD-5: never log the presented header (could be the right
-      // token, a partial guess, or unrelated PII).
-      log.warn('mcp.http.unauthorized', {
-        stage: 'verify', ok: false,
-      });
-      return jsonError(401, { error: 'unauthorized' });
-    }
-    log.error('mcp.http.auth-unexpected', {
-      stage: 'verify', ok: false, error: e.message,
-    });
-    return jsonError(500, { error: 'server error' });
-  }
-
   // 5. Setup MCP server + transport per request (CD-8, DT-H stateless).
   const server = buildServer(cfg);
   const transport = new WebStandardStreamableHTTPServerTransport({
@@ -210,5 +238,26 @@ export default async function handler(request) {
 
   // 6. Delegate. WebStandardStreamableHTTPServerTransport.handleRequest
   //    returns a Web Standard Response — Vercel forwards it verbatim.
-  return await transport.handleRequest(request);
+  //    MNR-CR-1: try/finally to clean up transport + server even though
+  //    stateless mode does not accumulate session state today. Defensive
+  //    against future config changes (e.g. enableJsonResponse:false ⇒ SSE).
+  let response;
+  try {
+    response = await transport.handleRequest(request);
+  } finally {
+    try { await transport.close?.(); } catch { /* ignore — best-effort cleanup */ }
+    try { await server.close?.(); } catch { /* ignore — best-effort cleanup */ }
+  }
+
+  // 7. MNR-AR-2: echo Access-Control-Allow-Origin on POST responses for
+  //    origins explicitly in the allowlist. Browsers require this header
+  //    on the actual response (not just the preflight) for the JS to read
+  //    the body. We don't mutate the response if the origin is not allowed
+  //    or missing — same deny-by-default semantics as preflight.
+  const echoOrigin = resolveAllowedOrigin(request);
+  if (echoOrigin) {
+    response.headers.set('Access-Control-Allow-Origin', echoOrigin);
+    response.headers.set('Vary', 'Origin');
+  }
+  return response;
 }

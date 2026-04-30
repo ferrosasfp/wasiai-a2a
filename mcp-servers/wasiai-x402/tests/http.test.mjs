@@ -510,3 +510,107 @@ test('T-HTTP-12 (AC-5): auth check runs BEFORE body parse', async () => {
     cap.restore();
   }
 });
+
+// ──────────────────────────────────────────────────────────────────────────
+// FIX-PACK iter 1 — MNR-AR-2 + MNR-CR-6 covering tests
+// ──────────────────────────────────────────────────────────────────────────
+
+test('T-FIX-1 (MNR-AR-2): POST with allowed origin echoes Access-Control-Allow-Origin + Vary', async () => {
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    // tools/list is a happy-path call that returns 200 without needing fetch.
+    const req = new Request('https://wasiai-x402-mcp.vercel.app/api/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: `Bearer ${TEST_BEARER}`,
+        Origin: 'https://platform.claude.com',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    });
+    const res = await handler(req);
+    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
+    // MNR-AR-2: response must echo Allow-Origin for browser cross-origin reads.
+    assert.equal(
+      res.headers.get('access-control-allow-origin'),
+      'https://platform.claude.com',
+      'POST response must echo allowed origin',
+    );
+    const vary = res.headers.get('vary') ?? '';
+    assert.match(vary, /Origin/i, 'Vary must include Origin (cache correctness)');
+  } finally {
+    cap.restore();
+  }
+});
+
+test('T-FIX-2 (MNR-AR-2): POST with non-allowed origin omits Access-Control-Allow-Origin', async () => {
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    const req = new Request('https://wasiai-x402-mcp.vercel.app/api/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: `Bearer ${TEST_BEARER}`,
+        Origin: 'https://evil.com',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    });
+    const res = await handler(req);
+    // The JSON-RPC call should still succeed (CORS is enforced by the
+    // browser, not by us refusing the body), but the response MUST NOT
+    // include Allow-Origin so the browser blocks the JS read.
+    assert.equal(res.status, 200);
+    const allow = res.headers.get('access-control-allow-origin');
+    assert.ok(!allow, `expected no Allow-Origin for non-allowed origin, got: ${allow}`);
+  } finally {
+    cap.restore();
+  }
+});
+
+test('T-FIX-3 (MNR-CR-6): 401 short-circuits BEFORE loadConfig (no DNS / SSRF validation on unauth)', async () => {
+  // Strategy: set WASIAI_GATEWAY_URL to a value that loadConfig would reject
+  // (validateGatewayUrl flags it as invalid scheme). If the handler ran
+  // loadConfig before auth, the response would be 500 ("server
+  // misconfigured"). With auth-first ordering, an unauth caller MUST get
+  // 401 — proving the config code path (and its DNS/SSRF lookups) was
+  // never reached.
+  process.env.WASIAI_GATEWAY_URL = 'ftp://invalid-scheme.example';
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    const req = new Request('https://wasiai-x402-mcp.vercel.app/api/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, // no Authorization
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+    });
+    const res = await handler(req);
+    assert.equal(res.status, 401, 'unauth → 401 (auth-first), NOT 500 (config validated before auth)');
+    const body = await res.json();
+    assert.deepEqual(body, { error: 'unauthorized' });
+    // Negative log assertion: we should have an mcp.http.unauthorized log
+    // line, but NOT mcp.http.config-error / config-error-unexpected.
+    const blob = cap.lines.join('\n');
+    assert.match(blob, /mcp\.http\.unauthorized/, 'expected unauthorized log');
+    assert.ok(
+      !/mcp\.http\.config-error/.test(blob),
+      `loadConfig must NOT have run: stderr leaked config-error log: ${blob}`,
+    );
+    // Sanity: confirm loadConfig WOULD have failed if it had run, by
+    // calling it directly with the same env var. This pins the test's
+    // negative assertion to a truly-broken config (so the test can never
+    // accidentally green if loadConfig becomes a no-op).
+    const { loadConfig } = await import('../src/config.mjs');
+    await assert.rejects(
+      () => loadConfig(),
+      (err) => /WASIAI_GATEWAY_URL invalid/.test(err.message),
+      'sanity: loadConfig should reject ftp:// gateway',
+    );
+  } finally {
+    delete process.env.WASIAI_GATEWAY_URL;
+    cap.restore();
+  }
+});
