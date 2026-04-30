@@ -536,6 +536,205 @@ test('Bonus V6.2: per-call maxAmountWei wins over env default', async () => {
   }
 });
 
+// ── BLQ-1 fix-pack iter 1: SSRF runtime via absolute endpoint ──────────────
+// pay_x402 / get_payment_quote MUST reject absolute / protocol-relative URLs.
+// Otherwise `new URL(endpoint, base)` discards the gateway base and the
+// signed envelope is captured by an attacker-controlled host (replay drain).
+
+test('T-X1: pay_x402 rejects absolute https endpoint (no fetch, no sign)', async () => {
+  const calls = [];
+  const fetchFn = async (url) => {
+    calls.push(typeof url === 'string' ? url : url.toString());
+    throw new Error('fetch must NOT be called for rejected absolute URL');
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler(
+      { endpoint: 'https://attacker.com/x402' },
+      fakeConfig(),
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'validation');
+    assert.match(r.error, /path starting with/);
+    assert.equal(calls.length, 0, 'fetch must not be invoked');
+    // Signature must never appear (no sign performed).
+    const blob = cap.lines.join('\n');
+    assert.ok(!blob.includes('attacker.com'), 'attacker host must not be reached');
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('T-X2: pay_x402 rejects AWS metadata endpoint', async () => {
+  const calls = [];
+  const fetchFn = async (url) => {
+    calls.push(typeof url === 'string' ? url : url.toString());
+    throw new Error('fetch must NOT be called');
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler(
+      { endpoint: 'http://169.254.169.254/latest/meta-data/' },
+      fakeConfig(),
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'validation');
+    assert.equal(calls.length, 0);
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('T-X3: pay_x402 rejects protocol-relative URL', async () => {
+  const calls = [];
+  const fetchFn = async (url) => {
+    calls.push(typeof url === 'string' ? url : url.toString());
+    throw new Error('fetch must NOT be called');
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler(
+      { endpoint: '//evil.com/path' },
+      fakeConfig(),
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'validation');
+    assert.equal(calls.length, 0);
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('T-X4: pay_x402 accepts valid path-only endpoint /api/v1/compose', async () => {
+  const accepts = { payTo: '0x' + '99'.repeat(20), maxAmountRequired: '1000' };
+  const { fetchFn, calls } = makeFetchFake([
+    { status: 402, body: { accepts: [accepts] } },
+    { status: 200, body: { kiteTxHash: '0xok' } },
+  ]);
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler(
+      { endpoint: '/api/v1/compose' },
+      fakeConfig(),
+    );
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(calls.length, 2);
+    // First request must hit the configured gateway, NOT an attacker host.
+    const probeUrl = new URL(calls[0].url);
+    assert.equal(probeUrl.hostname, 'app.wasiai.io');
+    assert.equal(probeUrl.pathname, '/api/v1/compose');
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('T-X1q: get_payment_quote rejects absolute https endpoint', async () => {
+  const calls = [];
+  const fetchFn = async (url) => {
+    calls.push(typeof url === 'string' ? url : url.toString());
+    throw new Error('fetch must NOT be called');
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { getPaymentQuoteHandler } = await loadHandlers();
+    const r = await getPaymentQuoteHandler(
+      { endpoint: 'https://attacker.com/api/v1/orchestrate' },
+      fakeConfig(),
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'validation');
+    assert.match(r.error, /path starting with/);
+    assert.equal(calls.length, 0);
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+// ── BLQ-2 fix-pack iter 1: sanitize sign error in agent response ───────────
+test('T-Y1: pay_x402 sign throw via viem returns sanitized error (no internals)', async () => {
+  const accepts = { payTo: '0x' + '99'.repeat(20), maxAmountRequired: '1000' };
+  // Force viem signTypedData to throw with verbose internals by injecting
+  // a malformed PK that viem will reject during privateKeyToAccount.
+  const { fetchFn } = makeFetchFake([
+    { status: 402, body: { accepts: [accepts] } },
+  ]);
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  // PK that is NOT obviously "missing" but is invalid → viem throws verbose error.
+  process.env.OPERATOR_PRIVATE_KEY = '0xZZ' + 'ee'.repeat(31);
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler({ endpoint: '/api/v1/x' }, fakeConfig());
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'sign');
+    // Sanitized: stable label, NO viem internals leaked.
+    assert.equal(r.error, 'signing failed (see stderr logs)');
+    // Defensive: no stack trace, no "viem" word, no PK substring.
+    assert.ok(!r.error.includes('viem'));
+    assert.ok(!r.error.includes('Stack'));
+    assert.ok(!r.error.includes('ZZ'));
+  } finally {
+    process.env.OPERATOR_PRIVATE_KEY = TEST_PK_LC;
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+// ── BLQ-3 fix-pack iter 1: signature truncation tightened to 4 chars ───────
+test('T-Z1: signature in stderr is truncated to 4 chars (no fingerprint correlation)', async () => {
+  const accepts = { payTo: '0x' + '99'.repeat(20), maxAmountRequired: '1000' };
+  const origFetch = globalThis.fetch;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    // Run 5 sign calls back-to-back with distinct nonces (random per call).
+    for (let i = 0; i < 5; i++) {
+      const { fetchFn } = makeFetchFake([
+        { status: 402, body: { accepts: [accepts] } },
+        { status: 200, body: { kiteTxHash: `0x${i}` } },
+      ]);
+      globalThis.fetch = fetchFn;
+      const r = await payX402Handler({ endpoint: '/api/v1/x' }, fakeConfig());
+      assert.equal(r.ok, true, JSON.stringify(r));
+    }
+    // Pull all signed-event log lines and assert truncation length.
+    const signedLines = cap.lines
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((p) => p && p.event === 'tool.pay_x402.signed');
+    assert.equal(signedLines.length, 5, 'expected 5 sign events');
+    for (const ev of signedLines) {
+      // Truncated form: '0x' + 2 hex + ellipsis = 5 chars total (slice(0,4) + '…')
+      assert.ok(ev.signature.endsWith('…'), 'signature must be truncated');
+      assert.equal(ev.signature.length, 5, `signature truncated to 5 chars (4+ellipsis), got: ${ev.signature}`);
+      // Cannot reconstruct full signature from 4-char prefix (16 bits).
+      assert.ok(!/^0x[0-9a-f]{130}/i.test(ev.signature), 'full signature must not appear');
+    }
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
 // ── Bonus AC-10: signature/authorization in input ignored ──────────────────
 test('Bonus AC-10: pay_x402 ignores signature/authorization keys in input', async () => {
   const accepts = { payTo: '0x' + '99'.repeat(20), maxAmountRequired: '1000' };

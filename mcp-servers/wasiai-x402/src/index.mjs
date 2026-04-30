@@ -15,7 +15,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { randomBytes } from 'node:crypto';
 import { loadConfig, ConfigError } from './config.mjs';
 import { signX402Envelope } from './sign.mjs';
-import { SSRFViolationError } from './url-validator.mjs';
+import { SSRFViolationError, isPathOnly } from './url-validator.mjs';
 import * as log from './log.mjs';
 
 // ── Top-level input sanitizer (AC-10, V5.4 explicit scope: top-level only) ─
@@ -70,7 +70,17 @@ export async function discoverAgentsHandler(rawInput, cfg) {
     tool: 'discover_agents', stage: 'fetch', gateway: cfg.gatewayUrl.toString(),
     operator: cfg.operatorAddress, ok: true,
   });
-  const res = await fetch(url.toString(), { signal: AbortSignal.timeout(cfg.payTimeoutMs) });
+  // MNR-1: homologar try/catch con payX402Handler.
+  let res;
+  try {
+    res = await fetch(url.toString(), { signal: AbortSignal.timeout(cfg.payTimeoutMs) });
+  } catch (e) {
+    log.warn('tool.discover_agents.error', {
+      tool: 'discover_agents', stage: 'fetch', gateway: cfg.gatewayUrl.toString(),
+      operator: cfg.operatorAddress, ok: false, error: e.message,
+    });
+    return { ok: false, stage: 'probe', error: `gateway request failed: ${e.message}` };
+  }
   let body;
   try { body = await res.json(); } catch { body = {}; }
   log.info('tool.discover_agents.response', {
@@ -88,6 +98,15 @@ export async function getPaymentQuoteHandler(rawInput, cfg) {
   if (!endpoint || typeof endpoint !== 'string') {
     return { ok: false, stage: 'input', error: 'endpoint required' };
   }
+  // BLQ-1: reject absolute URLs and protocol-relative URLs to prevent SSRF
+  // / replay-attack via captured envelope.
+  if (!isPathOnly(endpoint)) {
+    return {
+      ok: false,
+      stage: 'validation',
+      error: 'endpoint must be a path starting with / (absolute URLs are rejected)',
+    };
+  }
   if (!['compose', 'orchestrate'].some(m => endpoint.includes(`/api/v1/${m}`))) {
     log.warn('tool.get_payment_quote.unexpected-endpoint', { endpoint });
   }
@@ -98,19 +117,33 @@ export async function getPaymentQuoteHandler(rawInput, cfg) {
     tool: 'get_payment_quote', stage: 'probe', gateway: cfg.gatewayUrl.toString(),
     operator: cfg.operatorAddress, ok: true,
   });
-  const res = await fetch(url, {
-    method,
-    headers,
-    body: payload ? JSON.stringify(payload) : undefined,
-    signal: AbortSignal.timeout(cfg.payTimeoutMs),
-  });
+  // MNR-1: homologar try/catch con payX402Handler.
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers,
+      body: payload ? JSON.stringify(payload) : undefined,
+      signal: AbortSignal.timeout(cfg.payTimeoutMs),
+    });
+  } catch (e) {
+    log.warn('tool.get_payment_quote.probe-error', {
+      tool: 'get_payment_quote', stage: 'probe', gateway: cfg.gatewayUrl.toString(),
+      operator: cfg.operatorAddress, ok: false, error: e.message,
+    });
+    return { ok: false, stage: 'probe', error: `gateway request failed: ${e.message}` };
+  }
   const text = await res.text();
   let body;
   try { body = JSON.parse(text); } catch { body = { raw: text }; }
   log.info('tool.get_payment_quote.done', {
     tool: 'get_payment_quote', stage: 'done', gateway: cfg.gatewayUrl.toString(),
-    operator: cfg.operatorAddress, ok: res.status === 402, status: res.status,
+    operator: cfg.operatorAddress, ok: res.status === 402 || res.status === 200, status: res.status,
   });
+  // MNR-4: HTTP 200 (free endpoint) is a valid outcome — return ok:true.
+  if (res.status === 200) {
+    return { ok: true, stage: 'free', status: 200, body };
+  }
   if (res.status !== 402) {
     return { ok: false, stage: 'probe', status: res.status, body };
   }
@@ -134,6 +167,16 @@ export async function payX402Handler(rawInput, cfg) {
 
   if (!endpoint || typeof endpoint !== 'string') {
     return { ok: false, stage: 'input', error: 'endpoint required' };
+  }
+  // BLQ-1: reject absolute URLs and protocol-relative URLs to prevent
+  // SSRF / replay-attack where a captured signed envelope could be
+  // submitted to an attacker-controlled host.
+  if (!isPathOnly(endpoint)) {
+    return {
+      ok: false,
+      stage: 'validation',
+      error: 'endpoint must be a path starting with / (absolute URLs are rejected)',
+    };
   }
   const url = new URL(endpoint, cfg.gatewayUrl).toString();
 
@@ -177,6 +220,18 @@ export async function payX402Handler(rawInput, cfg) {
     return { ok: false, stage: 'probe', error: 'invalid 402: missing accepts[0]', body: probeBody };
   }
 
+  // MNR-AR-2: warn on network mismatch between the 402 challenge and our chainId.
+  // The signed domain.chainId is `cfg.chainId`, so submitting on a different
+  // network is operator-side misconfiguration that must be visible in logs.
+  const expectedNetwork = `eip155:${cfg.chainId}`;
+  if (accepts.network && accepts.network !== expectedNetwork) {
+    log.warn('tool.pay_x402.chain-mismatch', {
+      tool: 'pay_x402', stage: 'probe', event: 'chain_mismatch',
+      gateway: cfg.gatewayUrl.toString(), operator: cfg.operatorAddress,
+      ok: false, expected: expectedNetwork, received: accepts.network,
+    });
+  }
+
   // [2] Cap guard (AC-11) BEFORE signing
   let guard;
   try {
@@ -217,11 +272,24 @@ export async function payX402Handler(rawInput, cfg) {
     });
   } catch (e) {
     // AC-5: never expose PK in error message.
+    // BLQ-2: sanitize agent-facing error. viem's signTypedData throws verbose
+    // messages that expose internals; we keep them in stderr only.
     log.error('tool.pay_x402.sign-error', {
       tool: 'pay_x402', stage: 'sign', gateway: cfg.gatewayUrl.toString(),
       operator: cfg.operatorAddress, ok: false, error: e.message,
     });
-    return { ok: false, stage: 'sign', error: `signing failed: ${e.message}` };
+    // Allow our own well-known throw messages through so the agent can
+    // distinguish "config missing" from "signing failed". Anything else
+    // gets a stable, non-verbose label.
+    const isOurOwn = typeof e.message === 'string'
+      && e.message.includes('OPERATOR_PRIVATE_KEY missing at sign-time');
+    return {
+      ok: false,
+      stage: 'sign',
+      error: isOurOwn
+        ? `signing failed: ${e.message}`
+        : 'signing failed (see stderr logs)',
+    };
   }
 
   log.info('tool.pay_x402.signed', {
@@ -351,6 +419,7 @@ async function main() {
     throw e;
   }
   log.info('mcp.startup', {
+    tool: '_lifecycle', stage: 'startup', ok: true,
     operator: cfg.operatorAddress,
     gateway: cfg.gatewayUrl.toString(),
     chainId: cfg.chainId,
@@ -395,7 +464,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  log.info('mcp.connected', { transport: 'stdio' });
+  log.info('mcp.connected', { tool: '_lifecycle', stage: 'connected', ok: true, transport: 'stdio' });
 }
 
 // Only run main() when invoked directly (allows test imports without bootstrap).

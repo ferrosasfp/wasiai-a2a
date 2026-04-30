@@ -16,6 +16,19 @@ export class SSRFViolationError extends Error {
   }
 }
 
+// isPathOnly — strict path-only validator for tool endpoint inputs.
+//
+// Used by get_payment_quote / pay_x402 to reject absolute URLs and
+// protocol-relative URLs (`//host/path`) that would otherwise bypass the
+// gateway base in `new URL(endpoint, base)` and let an attacker capture a
+// signed envelope (BLQ-1 fix-pack iter 1, WKH-64).
+export function isPathOnly(endpoint) {
+  if (typeof endpoint !== 'string' || endpoint.length === 0) return false;
+  if (!endpoint.startsWith('/')) return false;
+  if (endpoint.startsWith('//')) return false; // protocol-relative URL
+  return true;
+}
+
 export function isPrivateIPv4(ip) {
   const o = ip.split('.').map(Number);
   if (o.length !== 4 || o.some(x => Number.isNaN(x) || x < 0 || x > 255)) return false;
