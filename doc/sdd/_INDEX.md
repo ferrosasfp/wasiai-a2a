@@ -22,7 +22,7 @@
 | 021 | 2026-04-09 | Pitch Fase 0 — Passport drift fix + chain-adaptive framing + types cleanup (WKH-37) | patch | FAST | DONE | main + wasiai-landing |
 | 022 | 2026-04-06 | Gasless graceful degradation (WKH-38) | feature | FAST+AR | DONE | feat/022-gasless-degradation |
 | 025 | 2026-04-06 | A2A Key Middleware — requirePaymentOrA2AKey (WKH-34-W4) | feature | LAUNCH | in progress | feat/025-a2a-key-middleware |
-| 026 | 2026-04-06 | Hardening — Rate Limiting, Error Boundaries, Circuit Breaker, Backpressure (WKH-18) | feature | QUALITY | in progress | feat/026-hardening |
+| 026 | 2026-04-06 | Hardening — Rate Limiting, Error Limiting, Circuit Breaker, Backpressure (WKH-18) | feature | QUALITY | in progress | feat/026-hardening |
 | 027 | 2026-04-06 | Demo Script E2E — smoke test automatizado (WKH-30) | feature | FAST | DONE | feat/027-demo-script-e2e |
 | 028 | 2026-04-06 | README.md rewrite — reflect production architecture (WKH-17) | doc | FAST | in progress | feat/028-readme-rewrite |
 | 029 | 2026-04-06 | E2E Test Suite — full middleware chain + inject (WKH-E2E) | test | QUALITY | in progress | feat/029-e2e-tests |
@@ -56,3 +56,4 @@
 | 063 | 2026-04-28 | Cross-Chain E2E Retro — PRs #48-#52 consolidated post-mortem (Kite PYUSD inbound + Fuji USDC outbound) | retro | QUALITY | DONE | main (#48 edde596 → #52 e4d217d) ([done-report.md](063-cross-chain-e2e-retro/done-report.md)) |
 | 064 | 2026-04-28 | Forward-key middleware — llamadas internas v2 → wasiai-a2a (WKH-65) | security | FAST+AR | DONE | feat/064-wkh-65-a2a-forward-key ([done-report.md](064-wkh-65-a2a-forward-key/done-report.md)) |
 | 069 | 2026-04-30 | [MCP-X402] Build wasiai-x402 MCP server for Claude Console managed agents (WKH-64) | feature | QUALITY | DONE | feat/069-wkh-64-mcp-x402 ([done-report.md](069-wkh-64-mcp-x402/done-report.md)) |
+| 070 | 2026-04-30 | [MCP-VERCEL] HTTP transport for wasiai-x402 + Vercel remote deploy (WKH-65) | feature | FAST+AR | DONE | feat/070-wkh-65-mcp-vercel-deploy ([done-report.md](070-wkh-65-mcp-vercel-deploy/done-report.md)) |
