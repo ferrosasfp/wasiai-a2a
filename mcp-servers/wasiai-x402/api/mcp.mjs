@@ -55,8 +55,7 @@ import {
   checkBalanceWithClaim,
   releaseClaim,
 } from '../src/balance-guard.mjs';
-import { createPublicClient, http as viemHttp } from 'viem';
-import { avalanche } from 'viem/chains';
+import { getAvaxClient } from '../src/avax-client.mjs';
 
 // ── JSON helper for short error replies ────────────────────────────────────
 function jsonError(status, body) {
@@ -121,7 +120,7 @@ function asToolResult(value) {
 //   - rpcUrl        : AVALANCHE_RPC_URL
 //   - threshold     : MCP_BALANCE_THRESHOLD_USDC (default 0.50)
 //   - requestedWei  : args.maxAmountWei (cast to BigInt)
-async function runWithBalanceGate(args, cfg, runHandler) {
+export async function runWithBalanceGate(args, cfg, runHandler) {
   // cfg.operatorAddress is already derived inside loadConfig (which has
   // already run on every request — see step 5). We re-use it here so we
   // never need to touch the PK in the balance-gate code path (defense in
@@ -139,7 +138,18 @@ async function runWithBalanceGate(args, cfg, runHandler) {
     ?? '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E';
   const rpcUrl = process.env.AVALANCHE_RPC_URL
     ?? 'https://api.avax.network/ext/bc/C/rpc';
-  const threshold = parseFloat(process.env.MCP_BALANCE_THRESHOLD_USDC ?? '0.50');
+
+  // MNR-AR-2: validate MCP_BALANCE_THRESHOLD_USDC before use. parseFloat('abc')
+  // returns NaN, parseFloat('-1') returns -1 — both would silently bypass the
+  // gate (NaN comparisons always false; negative thresholds approve anything).
+  const thresholdRaw = process.env.MCP_BALANCE_THRESHOLD_USDC ?? '0.50';
+  const threshold = parseFloat(thresholdRaw);
+  if (!Number.isFinite(threshold) || threshold < 0) {
+    log.error('mcp.balance-gate.invalid-threshold', {
+      thresholdRaw, stage: 'config', ok: false,
+    });
+    return { ok: false, stage: 'balance-gate', error: 'invalid threshold config' };
+  }
 
   let requestedWei;
   try {
@@ -157,10 +167,9 @@ async function runWithBalanceGate(args, cfg, runHandler) {
   }
 
   const kv = getKvClient();
-  const publicClient = createPublicClient({
-    chain: avalanche,
-    transport: viemHttp(rpcUrl),
-  });
+  // MNR-CR-3 + MNR-CR-4: reuse the singleton viem PublicClient instead of
+  // instantiating one per request.
+  const publicClient = getAvaxClient(rpcUrl);
 
   const gate = await checkBalanceWithClaim({
     operator,

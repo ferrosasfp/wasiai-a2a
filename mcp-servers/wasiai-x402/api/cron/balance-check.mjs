@@ -24,6 +24,7 @@
 import * as log from '../../src/log.mjs';
 import { validateCronSecret, CronAuthError } from '../../src/cron-auth.mjs';
 import { getOperatorBalance } from '../../src/balance-guard.mjs';
+import { getAvaxClient } from '../../src/avax-client.mjs';
 import { sendAlert } from '../../src/alerts.mjs';
 import { getKvClient } from '../../src/kv-client.mjs';
 
@@ -79,7 +80,19 @@ export default async function balanceCheckHandler(req, res) {
   const rpcUrl = process.env.AVALANCHE_RPC_URL ?? 'https://api.avax.network/ext/bc/C/rpc';
   const usdcAddress = process.env.AVALANCHE_USDC_ADDRESS
     ?? '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E';
-  const threshold = parseFloat(process.env.MCP_BALANCE_THRESHOLD_USDC ?? '0.50');
+
+  // MNR-AR-2: validate MCP_BALANCE_THRESHOLD_USDC before use. NaN or negative
+  // values would corrupt the alert decision (NaN < x is always false; negative
+  // thresholds never alert).
+  const thresholdRaw = process.env.MCP_BALANCE_THRESHOLD_USDC ?? '0.50';
+  const threshold = parseFloat(thresholdRaw);
+  if (!Number.isFinite(threshold) || threshold < 0) {
+    log.error('mcp.cron.balance-check.invalid-threshold', {
+      thresholdRaw, stage: 'config', ok: false,
+    });
+    _json(res, 500, { error: 'invalid threshold config' });
+    return;
+  }
   const chainId = parseInt(process.env.MCP_OPERATOR_CHAIN_ID ?? '43114', 10);
 
   // 3. Read balance.
@@ -88,10 +101,10 @@ export default async function balanceCheckHandler(req, res) {
   try {
     balanceWei = await getOperatorBalance(rpcUrl, operator, usdcAddress);
     // blockNumber is best-effort context for the alert/snapshot; not critical.
+    // MNR-CR-3 + MNR-CR-4: reuse the singleton viem PublicClient instead of
+    // instantiating one per cron tick.
     try {
-      const { createPublicClient, http: viemHttp } = await import('viem');
-      const { avalanche } = await import('viem/chains');
-      const client = createPublicClient({ chain: avalanche, transport: viemHttp(rpcUrl) });
+      const client = getAvaxClient(rpcUrl);
       blockNumber = (await client.getBlockNumber()).toString();
     } catch {
       blockNumber = null;

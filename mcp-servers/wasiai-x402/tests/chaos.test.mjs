@@ -283,24 +283,35 @@ test('T-CH-10: KV slow (slowMs=200) → balance-gate latency observed but ok', a
   }
 });
 
-// ── T-CH-11: KV stale data → re-fetches RPC, updates snapshot ────────────
-test('T-CH-11: KV snapshot stale → re-fetches RPC, updates snapshot', async () => {
-  const kv = createKvMock({
-    staleData: {
-      [`balance-snapshot:eip155:${CHAIN_ID}:${OPERATOR.toLowerCase()}`]:
-        JSON.stringify({ balanceWei: '99', checkedAt: 'old' }),
-    },
-  });
+// ── T-CH-11 (FIX): Redis-fresh BUT data-stale → re-fetches RPC ───────────
+//
+// Previously this test used `staleData` (Redis-expired: purged on get) which
+// passed for the wrong reason — the snapshot was simply absent. The real
+// freshness bug (BLQ-ALTO-1) is when the snapshot is *Redis-fresh* (TTL not
+// yet expired) but its `checkedAt` timestamp is older than 30s. The guard
+// MUST fall through to RPC on data-staleness regardless of Redis TTL.
+test('T-CH-11: Redis-fresh but data-stale snapshot (>30s checkedAt) → re-fetches RPC', async () => {
+  const kv = createKvMock();
   const rpc = createRpcMock({ balance: usdc(1) });
   const cap = captureStderr();
   try {
+    // Pre-seed: Redis TTL 1500s (very fresh) BUT checkedAt 60s ago (data-stale).
+    const snapKey = `balance-snapshot:eip155:${CHAIN_ID}:${OPERATOR.toLowerCase()}`;
+    await kv.set(
+      snapKey,
+      JSON.stringify({
+        balanceWei: '99', // deliberately wrong — must NOT be trusted
+        checkedAt: new Date(Date.now() - 60_000).toISOString(),
+      }),
+      { ex: 1500 },
+    );
     const r = await checkBalanceWithClaim({
       operator: OPERATOR, chainId: CHAIN_ID, requestedWei: usdc(0.1),
       threshold: 0.5, kvClient: kv, publicClient: rpc, usdcAddress: USDC_ADDR,
     });
     assert.equal(r.ok, true);
-    // RPC was called (rpc._calls has entries).
-    assert.ok(rpc._calls.length >= 1, 'expected RPC re-fetch on stale snapshot');
+    // RPC was called — gate fell through despite Redis-fresh snapshot.
+    assert.ok(rpc._calls.length >= 1, 'expected RPC re-fetch on data-stale snapshot');
   } finally {
     auditLog.lines.push(...cap.lines);
     cap.restore();

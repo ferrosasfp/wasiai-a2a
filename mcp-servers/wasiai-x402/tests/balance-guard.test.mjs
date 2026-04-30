@@ -17,6 +17,7 @@ import {
   checkBalanceWithClaim,
   releaseClaim,
 } from '../src/balance-guard.mjs';
+import { runWithBalanceGate } from '../api/mcp.mjs';
 import { createKvMock } from './_mocks/kv-mock.mjs';
 import { createRpcMock } from './_mocks/rpc-mock.mjs';
 
@@ -198,4 +199,123 @@ test('T-BG-08: claim TTL expiry libera huérfanos', async () => {
   // get() purges expired entries.
   const after = await kv.get(r.claimKey);
   assert.equal(after, null, 'expired claim key must be absent');
+});
+
+// ── BLQ-ALTO-1: snapshot freshness gate (≤30s checkedAt) ────────────────
+//
+// The cron writes a balance snapshot with Redis TTL 1800s (30 min) but the
+// guard MUST validate `checkedAt` against a 30s freshness window. Otherwise
+// an external drain between cron runs would leave the gate approving
+// against stale data for ≤15 min.
+
+test('T-BG-09: stale snapshot (>30s checkedAt) → RPC fallback', async () => {
+  // On-chain real balance is $5.00 (1 successful call's worth), but the
+  // KV snapshot says $999 (stale, deliberately wrong).
+  rpc = createRpcMock({ balance: usdc(5) });
+
+  const snapKey = `balance-snapshot:eip155:${CHAIN_ID}:${OPERATOR.toLowerCase()}`;
+  // Pre-seed snapshot with checkedAt 60s ago BUT Redis TTL still valid (1500s).
+  await kv.set(
+    snapKey,
+    JSON.stringify({
+      balanceWei: '999000000', // stale $999 — must be ignored
+      balanceUsdc: 999.0,
+      checkedAt: new Date(Date.now() - 60_000).toISOString(),
+      blockNumber: '12345',
+    }),
+    { ex: 1500 },
+  );
+
+  const r = await checkBalanceWithClaim({
+    operator: OPERATOR,
+    chainId: CHAIN_ID,
+    requestedWei: usdc(0.1),
+    threshold: 0.5,
+    kvClient: kv,
+    publicClient: rpc,
+    usdcAddress: USDC_ADDR,
+  });
+
+  // Must FALL THROUGH to RPC despite Redis-fresh snapshot.
+  assert.equal(rpc._calls.length, 1, 'must call RPC despite Redis-fresh snapshot');
+  assert.equal(r.ok, true, 'gate must approve against real on-chain $5');
+  // Cached re-write happened on the RPC path (snapshot now reflects $5).
+  const refreshed = await kv.get(snapKey);
+  const parsed = typeof refreshed === 'string' ? JSON.parse(refreshed) : refreshed;
+  assert.equal(parsed.balanceWei, usdc(5).toString(), 'snapshot must be refreshed with on-chain value');
+});
+
+test('T-BG-10: fresh snapshot (<30s) → no RPC call', async () => {
+  rpc = createRpcMock({ balance: usdc(5) });
+
+  const snapKey = `balance-snapshot:eip155:${CHAIN_ID}:${OPERATOR.toLowerCase()}`;
+  // Fresh snapshot: checkedAt 5s ago.
+  await kv.set(
+    snapKey,
+    JSON.stringify({
+      balanceWei: usdc(5).toString(),
+      balanceUsdc: 5.0,
+      checkedAt: new Date(Date.now() - 5_000).toISOString(),
+      blockNumber: '12345',
+    }),
+    { ex: 1500 },
+  );
+
+  const r = await checkBalanceWithClaim({
+    operator: OPERATOR,
+    chainId: CHAIN_ID,
+    requestedWei: usdc(0.1),
+    threshold: 0.5,
+    kvClient: kv,
+    publicClient: rpc,
+    usdcAddress: USDC_ADDR,
+  });
+
+  assert.equal(rpc._calls.length, 0, 'fresh snapshot must NOT trigger RPC');
+  assert.equal(r.ok, true);
+});
+
+// ── MNR-AR-2: invalid threshold env → balance-gate rejects with clear error.
+//
+// parseFloat('abc') returns NaN → NaN comparisons are always false → the
+// gate would silently approve every call. parseFloat('-1') returns -1 →
+// any positive balance passes the threshold check. Both cases must produce
+// a structured rejection (NOT a 500) so callers see `stage:'balance-gate'`
+// and can act on it. The validation runs BEFORE kv/rpc are touched so this
+// test does not need any mocks.
+test('T-BG-11: invalid threshold env (NaN) → balance-gate rejects with clear error', async () => {
+  const prev = process.env.MCP_BALANCE_THRESHOLD_USDC;
+  process.env.MCP_BALANCE_THRESHOLD_USDC = 'abc';
+  try {
+    const cfg = { operatorAddress: OPERATOR };
+    const args = { maxAmountWei: '100000' };
+    let handlerCalled = false;
+    const result = await runWithBalanceGate(args, cfg, async () => {
+      handlerCalled = true;
+      return { ok: true };
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.stage, 'balance-gate');
+    assert.match(result.error, /invalid threshold/i);
+    assert.equal(handlerCalled, false, 'handler must NOT run when threshold is invalid');
+  } finally {
+    if (prev === undefined) delete process.env.MCP_BALANCE_THRESHOLD_USDC;
+    else process.env.MCP_BALANCE_THRESHOLD_USDC = prev;
+  }
+});
+
+test('T-BG-11b: negative threshold env → balance-gate rejects', async () => {
+  const prev = process.env.MCP_BALANCE_THRESHOLD_USDC;
+  process.env.MCP_BALANCE_THRESHOLD_USDC = '-1';
+  try {
+    const cfg = { operatorAddress: OPERATOR };
+    const args = { maxAmountWei: '100000' };
+    const result = await runWithBalanceGate(args, cfg, async () => ({ ok: true }));
+    assert.equal(result.ok, false);
+    assert.equal(result.stage, 'balance-gate');
+    assert.match(result.error, /invalid threshold/i);
+  } finally {
+    if (prev === undefined) delete process.env.MCP_BALANCE_THRESHOLD_USDC;
+    else process.env.MCP_BALANCE_THRESHOLD_USDC = prev;
+  }
 });

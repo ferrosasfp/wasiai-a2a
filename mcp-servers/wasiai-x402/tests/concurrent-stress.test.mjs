@@ -83,3 +83,65 @@ test('T-CS-01: 10 concurrent claims against $0.61 / threshold $0.50 / amount $0.
   const zero = Number(await kv.get(claimKey));
   assert.equal(zero, 0, 'ledger should be zero after winner release');
 });
+
+// ── T-CS-02: concurrent stress with Redis-fresh / data-stale snapshot ───
+//
+// BLQ-ALTO-1 regression: simulate the exact mainnet scenario the bug enabled:
+//   - On-chain real balance is $0.30 (below threshold $0.50) — gate must reject.
+//   - But the cron snapshot says $5.00 with checkedAt 60s ago (data-stale).
+//   - Without the freshness check, 4 concurrent calls would each see $5 cached,
+//     pass threshold, INCRBY to claim, and double-spend.
+//   - With the fix, every call sees the >30s checkedAt, falls through to RPC,
+//     reads the real $0.30, and rejects with `below threshold`.
+test('T-CS-02: concurrent stress + stale snapshot → no double-spend (BLQ-ALTO-1)', async () => {
+  const kv = createKvMock();
+  // Real on-chain: $0.30 — below threshold $0.50.
+  const rpc = createRpcMock({ balance: usdc(0.3) });
+
+  // Pre-seed snapshot: Redis-fresh (TTL 1500s) BUT data-stale (60s old) with
+  // a wrong "approve me" balance of $5.00.
+  const snapKey = `balance-snapshot:eip155:${CHAIN_ID}:${OPERATOR.toLowerCase()}`;
+  await kv.set(
+    snapKey,
+    JSON.stringify({
+      balanceWei: usdc(5).toString(),
+      balanceUsdc: 5.0,
+      checkedAt: new Date(Date.now() - 60_000).toISOString(),
+      blockNumber: '12345',
+    }),
+    { ex: 1500 },
+  );
+
+  const calls = Array.from({ length: 10 }, () =>
+    checkBalanceWithClaim({
+      operator: OPERATOR,
+      chainId: CHAIN_ID,
+      requestedWei: usdc(0.1),
+      threshold: 0.5,
+      kvClient: kv,
+      publicClient: rpc,
+      usdcAddress: USDC_ADDR,
+    }),
+  );
+  const results = await Promise.all(calls);
+
+  const okCount = results.filter((r) => r.ok).length;
+  assert.equal(okCount, 0, `expected ZERO passes (real balance below threshold), got ${okCount}`);
+
+  // Every failure must be `below threshold` — the gate consulted the RPC,
+  // not the stale snapshot.
+  for (const r of results) {
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'balance-gate');
+    assert.match(r.error, /below threshold/);
+  }
+
+  // Ledger invariant: zero outstanding claims (no INCRBY survived).
+  const claimKey = `balance-claim:eip155:${CHAIN_ID}:${OPERATOR.toLowerCase()}`;
+  const claimed = await kv.get(claimKey);
+  // Either absent or 0 — both prove no double-spend.
+  assert.ok(
+    claimed === null || Number(claimed) === 0,
+    `ledger must be 0 (no double-spend), got ${claimed}`,
+  );
+});

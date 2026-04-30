@@ -30,8 +30,8 @@
 //   - isCircuitOpen(balanceUsdc, threshold) → boolean
 
 import { randomUUID } from 'node:crypto';
-import { erc20Abi, createPublicClient, http } from 'viem';
-import { avalanche } from 'viem/chains';
+import { erc20Abi } from 'viem';
+import { getAvaxClient } from './avax-client.mjs';
 import * as log from './log.mjs';
 
 // USDC on Avalanche has 6 decimals. Native USDC.
@@ -40,6 +40,12 @@ const USDC_DECIMALS_DIVISOR = 10n ** BigInt(USDC_DECIMALS);
 
 const CLAIM_TTL_DEFAULT_SEC = 30;
 const SNAPSHOT_TTL_DEFAULT_SEC = 30;
+
+// BLQ-ALTO-1 (CD-2): never trust a snapshot whose checkedAt is older than this.
+// The cron writes Redis TTL 1800s; this freshness window forces an RPC fallback
+// after 30s even if the cached blob is technically still in Redis. Closes the
+// 15-min blind-gate window between cron runs after an external drain.
+const SNAPSHOT_FRESH_MS = 30_000;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -78,10 +84,9 @@ function _usdcToWei(usdcNumber) {
  * NO retries — caller decides fail-secure semantics.
  */
 export async function getOperatorBalance(rpcUrl, operator, usdcAddress) {
-  const client = createPublicClient({
-    chain: avalanche,
-    transport: http(rpcUrl),
-  });
+  // MNR-CR-3 + MNR-CR-4: reuse the singleton viem PublicClient instead of
+  // instantiating one per call.
+  const client = getAvaxClient(rpcUrl);
   const balance = await client.readContract({
     address: usdcAddress,
     abi: erc20Abi,
@@ -140,15 +145,36 @@ export async function checkBalanceWithClaim({
   const snapKey = _snapshotKey(chainId, operator);
   const claimKey = _claimKey(chainId, operator);
 
-  // 1) Try cached balance first.
+  // 1) Try cached balance first — but only if the snapshot is FRESH.
+  //
+  // BLQ-ALTO-1: the cron writes the snapshot with Redis TTL 1800s (30 min)
+  // because it runs every ~15 min. The Redis TTL is a coarse safety net
+  // (snapshot eventually disappears) — it is NOT a freshness signal.
+  // We MUST validate `checkedAt` against SNAPSHOT_FRESH_MS (30s) and fall
+  // through to RPC if older. Otherwise an external drain between cron runs
+  // would let the gate keep approving against stale data for ≤15 min.
   let balanceWei = null;
   try {
     const cached = await kvClient.get(snapKey);
     if (cached) {
-      // Snapshot is JSON {balanceWei: '<bigint-string>', ...}.
-      const parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
-      if (parsed && typeof parsed.balanceWei === 'string') {
-        balanceWei = BigInt(parsed.balanceWei);
+      // Snapshot is JSON {balanceWei: '<bigint-string>', checkedAt: <iso>, ...}.
+      let parsed;
+      try {
+        parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
+      } catch {
+        parsed = null;
+      }
+      if (parsed && typeof parsed.balanceWei === 'string' && typeof parsed.checkedAt === 'string') {
+        const ageMs = Date.now() - new Date(parsed.checkedAt).getTime();
+        if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= SNAPSHOT_FRESH_MS) {
+          // Fresh — trust the cached value.
+          balanceWei = BigInt(parsed.balanceWei);
+        } else {
+          // Stale (>30s or invalid timestamp) — log and fall through to RPC.
+          log.info('mcp.balance.snapshot-stale', {
+            stage: 'balance-gate', ageMs: Number.isFinite(ageMs) ? ageMs : null, ok: true,
+          });
+        }
       }
     }
   } catch (e) {
