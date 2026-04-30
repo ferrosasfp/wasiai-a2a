@@ -75,8 +75,11 @@ function captureStderr() {
 }
 
 // Lazy-import handlers fresh each test (cheap; module is small).
+// MNR-CR-3 (WKH-65): import directly from handlers.mjs (post-refactor) instead
+// of re-routing through src/index.mjs. Avoids loading the stdio bootstrap path
+// in unit tests and pins the test surface to the canonical handler module.
 async function loadHandlers() {
-  return await import('../src/index.mjs');
+  return await import('../src/handlers.mjs');
 }
 
 beforeEach(() => {

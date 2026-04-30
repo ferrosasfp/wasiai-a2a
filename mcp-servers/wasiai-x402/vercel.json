@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/mcp.mjs": {
+      "maxDuration": 60,
+      "runtime": "nodejs22.x"
+    }
+  },
+  "regions": ["iad1"]
+}

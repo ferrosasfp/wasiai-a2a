@@ -27,7 +27,7 @@ cd wasiai-a2a/mcp-servers/wasiai-x402
 npm install
 cp .env.example .env
 # Edit .env — set OPERATOR_PRIVATE_KEY (testnet wallet for local dev).
-npm test         # 36+ tests should pass
+npm test         # 100+ tests should pass
 npm start        # MCP server starts on stdio (waits for client)
 ```
 
@@ -46,6 +46,8 @@ npm run test:sign     # 8 tests (golden vector + signature shape)
 npm run test:config   # 7+ tests (env validation + warn-once)
 npm run test:url      # 9+ tests (SSRF guard, IPv4/IPv6 private ranges)
 npm run test:tools    # 12+ tests (handlers, mocked fetch, concurrency)
+npm run test:auth     # bearer token validation (timing-safe, AC-5/AC-6, WKH-65)
+npm run test:http     # HTTP transport via api/mcp.mjs (auth, CORS, leaks, WKH-65)
 ```
 
 ---
@@ -64,8 +66,12 @@ npm run test:tools    # 12+ tests (handlers, mocked fetch, concurrency)
    │   ├── config.mjs
    │   ├── log.mjs
    │   ├── url-validator.mjs
-   │   └── sign.mjs
+   │   ├── handlers.mjs    # required (post-WKH-65 refactor: shared handlers for stdio + HTTP)
+   │   ├── sign.mjs
+   │   └── auth.mjs        # optional for stdio; required only if you also want HTTP transport
    ```
+   > For HTTP transport (Vercel), see "Deploy a Vercel" section below — that path
+   > additionally requires `api/mcp.mjs` and `vercel.json` on top of the files above.
 4. Entry command: `node src/index.mjs`.
 5. Env vars (set via Claude Console env panel — never commit):
    - `OPERATOR_PRIVATE_KEY` — REQUIRED. Mainnet-funded wallet for production demos.
@@ -83,6 +89,101 @@ npm run test:tools    # 12+ tests (handlers, mocked fetch, concurrency)
    verify the response.
 7. **Before mainnet**: invoke `pay_x402` against testnet first. Then with a small
    `MCP_MAX_AMOUNT_WEI_DEFAULT` cap, verify the explorer shows the tx.
+
+---
+
+## Deploy a Vercel (Remote MCP via HTTP Streamable transport)
+
+The `api/mcp.mjs` Vercel Serverless Function exposes the same 3 tools over the
+MCP HTTP Streamable transport, so a Claude Console managed agent can consume
+the server through the **"Add Remote MCP"** UI without bundling code.
+
+Prerequisites: a Vercel account, the `vercel` CLI installed locally
+(`npm i -g vercel`), and a funded operator wallet for testnet/mainnet.
+
+### 1. Generate the bearer token
+
+The HTTP transport is protected by a single bearer token (timing-safe
+comparison via `node:crypto.timingSafeEqual`). Generate one with:
+
+```bash
+openssl rand -hex 32
+# → 64 hex chars; copy this value, you'll set it in Vercel below.
+```
+
+Treat the token like a production credential — anyone holding it can call the
+3 tools and trigger payments. Rotate on suspected leak by adding a new token
+in Vercel env, redeploying, and removing the old one.
+
+### 2. Configure Vercel env vars
+
+```bash
+cd mcp-servers/wasiai-x402
+vercel login
+vercel link                              # link this folder to a Vercel project
+                                         #   (project name e.g. wasiai-x402-mcp)
+vercel env add OPERATOR_PRIVATE_KEY production
+vercel env add MCP_BEARER_TOKEN production       # paste the openssl-generated hex
+vercel env add WASIAI_GATEWAY_URL production     # e.g. https://app.wasiai.io
+vercel env add MCP_CORS_ALLOWED_ORIGINS production  # CSV; usually leave empty
+                                                    # (Claude Console proxies
+                                                    #  server-side; deny-by-default)
+vercel env add MCP_MAX_AMOUNT_WEI_DEFAULT production  # cap, e.g. 5000000000000000000
+# Optional, per ticket / chain config:
+#   KITE_CHAIN_ID, KITE_PYUSD, X402_EIP712_DOMAIN_NAME, X402_EIP712_DOMAIN_VERSION
+```
+
+### 3. Deploy
+
+```bash
+vercel deploy --prod
+# → outputs e.g. https://wasiai-x402-mcp.vercel.app
+```
+
+### 4. Configure in Claude Console
+
+In Claude Console, open **Settings → Connectors → Add Remote MCP** and provide:
+
+| Field | Value |
+|-------|-------|
+| Name | `wasiai-x402` |
+| URL | `https://wasiai-x402-mcp.vercel.app/api/mcp` |
+| Custom header | `Authorization: Bearer <MCP_BEARER_TOKEN>` |
+
+After saving, the 3 tools (`discover_agents`, `get_payment_quote`, `pay_x402`)
+appear in the agent's tool palette. Behavior is identical to stdio: the
+handlers are the exact same code path (`src/handlers.mjs`).
+
+### Operational notes
+
+- `vercel.json` declares `maxDuration: 60` so a slow x402 flow
+  (probe + sign + Kite + Avalanche confirms) completes within the function
+  budget. On Vercel Hobby this is the cap; for higher latencies upgrade to
+  Pro and raise `maxDuration`.
+- Region is pinned to `iad1` (Virginia) — adjust if your gateway is elsewhere.
+- Logs go to **Vercel Logs** as JSON-line stderr (`log.mjs`). The bearer
+  token, the operator PK, and the presented `Authorization` header are
+  NEVER written to logs (verified by `tests/http.test.mjs::T-HTTP-11`).
+- Auth runs **before** body parse: an unauthenticated request never touches
+  the JSON-RPC parser, never reaches the handlers, and never hits the
+  gateway.
+
+### Local dev for the HTTP transport
+
+The HTTP function is testable in-process via `node --test tests/http.test.mjs`
+without spinning up Vercel; for end-to-end smoke against a real Vercel
+deploy, use:
+
+```bash
+curl -X POST https://wasiai-x402-mcp.vercel.app/api/mcp \
+  -H "Authorization: Bearer <MCP_BEARER_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+The stdio transport (`npm start`) is unchanged — it still works for local
+dev and for the original "Deploy to Claude Console managed env" path above.
 
 ---
 
