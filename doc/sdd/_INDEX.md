@@ -19,7 +19,7 @@
 | 016 | 2026-04-06 | Build — copy src/static/* into dist/static (fixes /dashboard ENOENT) | patch | FAST | DONE | main (5a14ab8) |
 | 018 | 2026-04-06 | Gasless Integration EIP-3009 — testnet PYUSD (WKH-29) | feature | QUALITY | DONE | feat/018-gasless-aa |
 | 020 | 2026-04-09 | Kite contracts source-of-truth doc + DEPRECATED banner in spike (WKH-36) | patch | FAST | DONE | main |
-| 021 | 2026-04-09 | Pitch Fase 0 — Passport drift fix + chain-adaptive framing + types cleanup (WKH-37) | patch | FAST+AR | DONE | main + wasiai-landing |
+| 021 | 2026-04-09 | Pitch Fase 0 — Passport drift fix + chain-adaptive framing + types cleanup (WKH-37) | patch | FAST | DONE | main + wasiai-landing |
 | 022 | 2026-04-06 | Gasless graceful degradation (WKH-38) | feature | FAST+AR | DONE | feat/022-gasless-degradation |
 | 025 | 2026-04-06 | A2A Key Middleware — requirePaymentOrA2AKey (WKH-34-W4) | feature | LAUNCH | in progress | feat/025-a2a-key-middleware |
 | 026 | 2026-04-06 | Hardening — Rate Limiting, Error Boundaries, Circuit Breaker, Backpressure (WKH-18) | feature | QUALITY | in progress | feat/026-hardening |
@@ -55,3 +55,4 @@
 | 062 | 2026-04-27 | SEC-RCE-1: L2 transform cache poisoning + new Function() = RCE multi-tenant (WKH-60) | security | QUALITY | DONE | feat/062-wkh-60-sec-rce-1 ([done-report.md](062-wkh-60-sec-rce-1/done-report.md)) |
 | 063 | 2026-04-28 | Cross-Chain E2E Retro — PRs #48-#52 consolidated post-mortem (Kite PYUSD inbound + Fuji USDC outbound) | retro | QUALITY | DONE | main (#48 edde596 → #52 e4d217d) ([done-report.md](063-cross-chain-e2e-retro/done-report.md)) |
 | 064 | 2026-04-28 | Forward-key middleware — llamadas internas v2 → wasiai-a2a (WKH-65) | security | FAST+AR | DONE | feat/064-wkh-65-a2a-forward-key ([done-report.md](064-wkh-65-a2a-forward-key/done-report.md)) |
+| 069 | 2026-04-30 | [MCP-X402] Build wasiai-x402 MCP server for Claude Console managed agents (WKH-64) | feature | QUALITY | DONE | feat/069-wkh-64-mcp-x402 ([done-report.md](069-wkh-64-mcp-x402/done-report.md)) |
