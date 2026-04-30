@@ -43,6 +43,39 @@ export function sanitizeInput(toolName, input) {
   return clean;
 }
 
+// ── SSRF guard: post-resolution endpoint validation (BLQ-iter2-1) ──────────
+//
+// Why post-resolution: the WHATWG URL parser treats `\` as `/` for special
+// schemes (https:/http:), so endpoints like `/\evil.com/x`, `/\\evil.com`,
+// `/\@evil.com`, etc. resolve to https://evil.com/... when combined with
+// the gateway base. String-shape heuristics ("starts with /", "no //") can
+// be bypassed by these backslash variants. Validating AFTER `new URL(...)`
+// is the only reliable approach: we compare what the parser actually
+// produced to the configured gateway's host+protocol — i.e. what fetch()
+// would actually call. If they don't match, reject before any network or
+// signing operation.
+//
+// Returns { ok: true, url: string } on success, { ok: false, error } on
+// rejection. Caller maps `ok:false` to the canonical validation response.
+export function resolveEndpoint(endpoint, gatewayUrl) {
+  // gatewayUrl is a URL instance (loadConfig returns it from validateGatewayUrl).
+  // Defensive: accept a string too, in case a future caller passes a string.
+  const gw = gatewayUrl instanceof URL ? gatewayUrl : new URL(gatewayUrl);
+  let target;
+  try {
+    target = new URL(endpoint, gw);
+  } catch {
+    return { ok: false, error: 'endpoint could not be resolved against the gateway' };
+  }
+  if (target.host !== gw.host || target.protocol !== gw.protocol) {
+    return {
+      ok: false,
+      error: 'endpoint must resolve to the configured gateway (host and protocol must match)',
+    };
+  }
+  return { ok: true, url: target.toString() };
+}
+
 // ── Cap guard resolver (AC-11, V6.2 priority per-call > env > undefined) ───
 export function resolveMaxAmountGuard(perCall, envDefault) {
   if (perCall !== undefined && perCall !== null) {
@@ -98,8 +131,8 @@ export async function getPaymentQuoteHandler(rawInput, cfg) {
   if (!endpoint || typeof endpoint !== 'string') {
     return { ok: false, stage: 'input', error: 'endpoint required' };
   }
-  // BLQ-1: reject absolute URLs and protocol-relative URLs to prevent SSRF
-  // / replay-attack via captured envelope.
+  // BLQ-1 (iter 1): early shape check — reject absolute / protocol-relative
+  // URLs and the backslash-bypass class before any URL parsing work.
   if (!isPathOnly(endpoint)) {
     return {
       ok: false,
@@ -107,10 +140,18 @@ export async function getPaymentQuoteHandler(rawInput, cfg) {
       error: 'endpoint must be a path starting with / (absolute URLs are rejected)',
     };
   }
+  // BLQ-iter2-1: authoritative SSRF guard. Even if a future regression makes
+  // isPathOnly() pass a malicious shape, the post-resolution check ensures
+  // the resolved URL's host+protocol match the configured gateway exactly,
+  // so the captured signed envelope can never be replayed off-gateway.
+  const resolved = resolveEndpoint(endpoint, cfg.gatewayUrl);
+  if (!resolved.ok) {
+    return { ok: false, stage: 'validation', error: resolved.error };
+  }
   if (!['compose', 'orchestrate'].some(m => endpoint.includes(`/api/v1/${m}`))) {
     log.warn('tool.get_payment_quote.unexpected-endpoint', { endpoint });
   }
-  const url = new URL(endpoint, cfg.gatewayUrl).toString();
+  const url = resolved.url;
   // AC-2: NO payment-signature header here.
   const headers = { 'Content-Type': 'application/json' };
   log.info('tool.get_payment_quote.probe', {
@@ -168,9 +209,8 @@ export async function payX402Handler(rawInput, cfg) {
   if (!endpoint || typeof endpoint !== 'string') {
     return { ok: false, stage: 'input', error: 'endpoint required' };
   }
-  // BLQ-1: reject absolute URLs and protocol-relative URLs to prevent
-  // SSRF / replay-attack where a captured signed envelope could be
-  // submitted to an attacker-controlled host.
+  // BLQ-1 (iter 1): early shape check — reject absolute / protocol-relative
+  // URLs and the backslash-bypass class before any URL parsing work.
   if (!isPathOnly(endpoint)) {
     return {
       ok: false,
@@ -178,7 +218,18 @@ export async function payX402Handler(rawInput, cfg) {
       error: 'endpoint must be a path starting with / (absolute URLs are rejected)',
     };
   }
-  const url = new URL(endpoint, cfg.gatewayUrl).toString();
+  // BLQ-iter2-1: authoritative SSRF guard. The WHATWG URL parser treats
+  // `\` as `/` for special schemes, so without post-resolution validation
+  // an endpoint like `/\evil.com/x` would resolve to https://evil.com/x
+  // and the signed envelope would be replayed to an attacker host. By
+  // validating that the resolved URL's host+protocol match the gateway
+  // AFTER `new URL(endpoint, gateway)`, we close the backslash-bypass
+  // class even if isPathOnly() ever regresses.
+  const resolved = resolveEndpoint(endpoint, cfg.gatewayUrl);
+  if (!resolved.ok) {
+    return { ok: false, stage: 'validation', error: resolved.error };
+  }
+  const url = resolved.url;
 
   // [1] Probe (no signature)
   let probeRes;
@@ -225,8 +276,10 @@ export async function payX402Handler(rawInput, cfg) {
   // network is operator-side misconfiguration that must be visible in logs.
   const expectedNetwork = `eip155:${cfg.chainId}`;
   if (accepts.network && accepts.network !== expectedNetwork) {
+    // MNR-iter2-1: do NOT include `event` in payload — it would clobber
+    // the canonical event name passed as the first arg to log.warn().
     log.warn('tool.pay_x402.chain-mismatch', {
-      tool: 'pay_x402', stage: 'probe', event: 'chain_mismatch',
+      tool: 'pay_x402', stage: 'probe',
       gateway: cfg.gatewayUrl.toString(), operator: cfg.operatorAddress,
       ok: false, expected: expectedNetwork, received: accepts.network,
     });

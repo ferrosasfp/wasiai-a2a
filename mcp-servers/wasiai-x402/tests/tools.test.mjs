@@ -735,6 +735,222 @@ test('T-Z1: signature in stderr is truncated to 4 chars (no fingerprint correlat
   }
 });
 
+// ── BLQ-iter2-1 fix-pack iter 2: backslash bypass of SSRF guard ────────────
+// The WHATWG URL parser treats `\` as `/` for special schemes (https:/http:),
+// so endpoints like `/\evil.com/x` resolve to https://evil.com/x when combined
+// with the gateway base — the signed envelope would then be replayed to an
+// attacker host. iter-1's `startsWith('//')` check did NOT cover this class.
+// iter-2 fix combines a tightened isPathOnly() (rejects `\`) with a
+// post-resolution host/protocol guard. Both layers must reject these inputs;
+// fetch() must NEVER be called and signing must NEVER occur.
+
+test('T-X5 (iter2): pay_x402 rejects /\\evil.com/x (backslash → host hijack)', async () => {
+  const calls = [];
+  const fetchFn = async (url) => {
+    calls.push(typeof url === 'string' ? url : url.toString());
+    throw new Error('fetch must NOT be called for backslash-bypass URL');
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler({ endpoint: '/\\evil.com/x' }, fakeConfig());
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'validation');
+    assert.equal(calls.length, 0, 'fetch must not be invoked for backslash bypass');
+    const blob = cap.lines.join('\n');
+    assert.ok(!blob.includes('evil.com'), 'attacker host must not appear in any log');
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('T-X6 (iter2): pay_x402 rejects /\\@evil.com (backslash + userinfo trick)', async () => {
+  const calls = [];
+  const fetchFn = async (url) => {
+    calls.push(typeof url === 'string' ? url : url.toString());
+    throw new Error('fetch must NOT be called');
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler({ endpoint: '/\\@evil.com' }, fakeConfig());
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'validation');
+    assert.equal(calls.length, 0);
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('T-X7 (iter2): pay_x402 rejects /\\\\evil.com (double backslash)', async () => {
+  const calls = [];
+  const fetchFn = async (url) => {
+    calls.push(typeof url === 'string' ? url : url.toString());
+    throw new Error('fetch must NOT be called');
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler({ endpoint: '/\\\\evil.com' }, fakeConfig());
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'validation');
+    assert.equal(calls.length, 0);
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('T-X8 (iter2): pay_x402 rejects /\\/evil.com (backslash + slash)', async () => {
+  const calls = [];
+  const fetchFn = async (url) => {
+    calls.push(typeof url === 'string' ? url : url.toString());
+    throw new Error('fetch must NOT be called');
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler({ endpoint: '/\\/evil.com' }, fakeConfig());
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'validation');
+    assert.equal(calls.length, 0);
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('T-X9 (iter2): pay_x402 still accepts valid /api/v1/compose (no regression)', async () => {
+  const accepts = { payTo: '0x' + '99'.repeat(20), maxAmountRequired: '1000' };
+  const { fetchFn, calls } = makeFetchFake([
+    { status: 402, body: { accepts: [accepts] } },
+    { status: 200, body: { kiteTxHash: '0xok' } },
+  ]);
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler({ endpoint: '/api/v1/compose' }, fakeConfig());
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(calls.length, 2);
+    const u = new URL(calls[0].url);
+    assert.equal(u.hostname, 'app.wasiai.io');
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+// Same coverage on get_payment_quote (no signature involved, but the SSRF
+// guard must still reject — captured probe could fingerprint internal hosts).
+test('T-X5q (iter2): get_payment_quote rejects /\\evil.com/x', async () => {
+  const calls = [];
+  const fetchFn = async (url) => {
+    calls.push(typeof url === 'string' ? url : url.toString());
+    throw new Error('fetch must NOT be called');
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { getPaymentQuoteHandler } = await loadHandlers();
+    const r = await getPaymentQuoteHandler({ endpoint: '/\\evil.com/x' }, fakeConfig());
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'validation');
+    assert.equal(calls.length, 0);
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('T-X6q (iter2): get_payment_quote rejects /\\@evil.com', async () => {
+  const calls = [];
+  const fetchFn = async (url) => {
+    calls.push(typeof url === 'string' ? url : url.toString());
+    throw new Error('fetch must NOT be called');
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { getPaymentQuoteHandler } = await loadHandlers();
+    const r = await getPaymentQuoteHandler({ endpoint: '/\\@evil.com' }, fakeConfig());
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'validation');
+    assert.equal(calls.length, 0);
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+// Defense-in-depth: even if isPathOnly() is hypothetically bypassed, the
+// post-resolution guard alone must still reject a host mismatch. We exercise
+// resolveEndpoint() directly to lock that behavior.
+test('T-X10 (iter2): resolveEndpoint rejects host mismatch even without shape check', async () => {
+  const { resolveEndpoint } = await loadHandlers();
+  const gw = new URL('https://app.wasiai.io');
+  // Direct backslash variants — confirm post-resolution catches them all.
+  for (const bad of ['/\\evil.com/x', '/\\@evil.com', '/\\\\evil.com', '/\\/evil.com']) {
+    const r = resolveEndpoint(bad, gw);
+    assert.equal(r.ok, false, `expected reject for ${JSON.stringify(bad)}`);
+    assert.match(r.error, /host and protocol must match|could not be resolved/);
+  }
+  // Sanity: a valid path is accepted and resolves to the gateway host.
+  const ok = resolveEndpoint('/api/v1/compose', gw);
+  assert.equal(ok.ok, true);
+  assert.equal(new URL(ok.url).hostname, 'app.wasiai.io');
+});
+
+// MNR-iter2-1: chain-mismatch warn payload must NOT clobber `event` field.
+test('T-MNR-iter2-1: chain-mismatch log line keeps canonical event name', async () => {
+  // 402 challenge with mismatched network field.
+  const accepts = {
+    payTo: '0x' + '99'.repeat(20),
+    maxAmountRequired: '1000',
+    network: 'eip155:43114', // does not match cfg.chainId 2368 → triggers warn
+  };
+  const { fetchFn } = makeFetchFake([
+    { status: 402, body: { accepts: [accepts] } },
+    { status: 200, body: { kiteTxHash: '0xok' } },
+  ]);
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler({ endpoint: '/api/v1/x' }, fakeConfig());
+    assert.equal(r.ok, true, JSON.stringify(r));
+    // Find the chain-mismatch log line.
+    const mismatchLines = cap.lines
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((p) => p && p.event === 'tool.pay_x402.chain-mismatch');
+    assert.equal(mismatchLines.length, 1, 'expected exactly 1 chain-mismatch log line');
+    const ev = mismatchLines[0];
+    // Canonical event name preserved (no 'chain_mismatch' clobber).
+    assert.equal(ev.event, 'tool.pay_x402.chain-mismatch');
+    assert.notEqual(ev.event, 'chain_mismatch');
+    // Diagnostic fields still present.
+    assert.equal(ev.expected, 'eip155:2368');
+    assert.equal(ev.received, 'eip155:43114');
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
 // ── Bonus AC-10: signature/authorization in input ignored ──────────────────
 test('Bonus AC-10: pay_x402 ignores signature/authorization keys in input', async () => {
   const accepts = { payTo: '0x' + '99'.repeat(20), maxAmountRequired: '1000' };

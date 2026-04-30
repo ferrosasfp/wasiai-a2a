@@ -18,14 +18,24 @@ export class SSRFViolationError extends Error {
 
 // isPathOnly — strict path-only validator for tool endpoint inputs.
 //
-// Used by get_payment_quote / pay_x402 to reject absolute URLs and
-// protocol-relative URLs (`//host/path`) that would otherwise bypass the
-// gateway base in `new URL(endpoint, base)` and let an attacker capture a
-// signed envelope (BLQ-1 fix-pack iter 1, WKH-64).
+// Used by get_payment_quote / pay_x402 as defense-in-depth alongside the
+// post-resolution guard in src/index.mjs (BLQ-iter2-1). The post-resolution
+// guard is the authoritative SSRF defense; this function rejects shapes
+// early to short-circuit before `new URL(...)`.
+//
+// Rejects:
+//   - non-strings / empty strings
+//   - anything not starting with '/'
+//   - protocol-relative URLs (`//host/path`)
+//   - any string containing a backslash. The WHATWG URL parser treats `\`
+//     as `/` for special schemes (https:/http:), so `/\evil.com/x` would
+//     resolve to https://evil.com/x and bypass a naive "starts with /"
+//     check (BLQ-iter2-1 fix-pack iter 2, WKH-64).
 export function isPathOnly(endpoint) {
   if (typeof endpoint !== 'string' || endpoint.length === 0) return false;
   if (!endpoint.startsWith('/')) return false;
   if (endpoint.startsWith('//')) return false; // protocol-relative URL
+  if (endpoint.includes('\\')) return false;   // backslash-bypass class
   return true;
 }
 
