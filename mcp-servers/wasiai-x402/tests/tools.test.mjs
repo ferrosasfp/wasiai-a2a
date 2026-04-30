@@ -951,6 +951,255 @@ test('T-MNR-iter2-1: chain-mismatch log line keeps canonical event name', async 
   }
 });
 
+// ── BLQ-iter3-1: redirect:'error' on all fetch() calls ────────────────────
+//
+// The hostile gateway is allowed to authenticate the request via TLS host
+// pinning (it IS the configured gateway). But it can still reply 3xx with
+// `Location: https://evil.com/...`. WHATWG fetch only strips
+// Authorization/Cookie/Proxy-Authorization on cross-origin redirects;
+// custom headers like `payment-signature` carrying the EIP-3009 envelope
+// are FORWARDED. Without `redirect:'error'`, undici follows the redirect
+// and leaks the signed envelope to the attacker host, who can replay it
+// on the legitimate gateway and drain the operator wallet.
+//
+// We simulate the undici behavior: when `redirect:'error'` is set and the
+// upstream returns a 3xx, undici throws TypeError('fetch failed') with
+// `cause: Error('redirect mode is set to "error"')`. Our handlers must
+// detect this and surface a stable message (no leak of internals).
+
+// Helper: build a fetch fake that returns 3xx if `redirect` option is NOT
+// 'error', and throws an undici-shaped TypeError if it IS 'error'. This
+// captures whether we correctly opted into redirect:'error' AND whether
+// the error path produces the right user-facing response.
+function makeRedirectFetchFake({ when = () => true, status = 302, location = 'https://evil.com/x' } = {}) {
+  const calls = [];
+  let idx = 0;
+  const fetchFn = async (url, init = {}) => {
+    const callIdx = idx;
+    idx += 1;
+    const call = {
+      url: typeof url === 'string' ? url : url.toString(),
+      method: init.method ?? 'GET',
+      headers: { ...(init.headers ?? {}) },
+      body: init.body,
+      redirect: init.redirect,
+      callIdx,
+    };
+    calls.push(call);
+    if (when(call)) {
+      // Verify the handler opted into redirect:'error' for this call. If
+      // not, that's a regression: surface the 3xx Response, which would
+      // let undici follow → handler likely treats it as 200/4xx/5xx.
+      if (init.redirect !== 'error') {
+        return new Response('', {
+          status,
+          headers: { 'content-type': 'text/plain', location },
+        });
+      }
+      // Simulate undici's TypeError on redirect:'error'.
+      const err = new TypeError('fetch failed');
+      err.cause = new Error("redirect mode is set to 'error'");
+      throw err;
+    }
+    // Non-redirect call: behave as a benign 200.
+    return new Response(JSON.stringify({}), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  return { fetchFn, calls };
+}
+
+test('T-X11 (iter3): pay_x402 settle 302 → reject with stage:settle, no leak of attacker host', async () => {
+  // Probe returns 402 OK, then settle returns 302.
+  const accepts = { payTo: '0x' + '99'.repeat(20), maxAmountRequired: '1000' };
+  let callIdx = 0;
+  const calls = [];
+  const fetchFn = async (url, init = {}) => {
+    const i = callIdx;
+    callIdx += 1;
+    calls.push({
+      url: typeof url === 'string' ? url : url.toString(),
+      headers: { ...(init.headers ?? {}) },
+      redirect: init.redirect,
+      callIdx: i,
+    });
+    if (i === 0) {
+      // Probe: 402 challenge.
+      return new Response(JSON.stringify({ accepts: [accepts] }), {
+        status: 402,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    // Settle: hostile 302. If the handler did NOT opt into redirect:'error',
+    // returning the 302 here would let undici follow it (in real life). To
+    // surface the regression in the test, we throw if redirect !== 'error'.
+    if (init.redirect !== 'error') {
+      throw new Error('REGRESSION: settle fetch missing redirect:"error"');
+    }
+    // Simulate undici redirect-error throw.
+    const err = new TypeError('fetch failed');
+    err.cause = new Error("redirect mode is set to 'error'");
+    throw err;
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler({ endpoint: '/api/v1/orchestrate' }, fakeConfig());
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.equal(r.stage, 'settle');
+    assert.match(r.error, /redirect/i, `expected error to mention redirect, got: ${r.error}`);
+    // Stable message: no undici internals like "fetch failed" or "redirect mode is set to".
+    assert.ok(!/fetch failed/.test(r.error), `must not leak undici "fetch failed": ${r.error}`);
+    assert.ok(!/redirect mode is set/.test(r.error), `must not leak undici cause text: ${r.error}`);
+    // Two calls happened: probe + attempted settle. NO call to evil.com.
+    assert.equal(calls.length, 2, 'probe + attempted settle = 2 calls');
+    for (const c of calls) {
+      assert.ok(!c.url.includes('evil.com'), `call URL must stay on gateway, got ${c.url}`);
+    }
+    // Verify settle was the one that opted into redirect:'error'.
+    assert.equal(calls[1].redirect, 'error', 'settle fetch must opt into redirect:"error"');
+    // payment-signature header was prepared (we got past sign), but it never
+    // reached evil.com because undici threw on redirect.
+    assert.ok(calls[1].headers['payment-signature'], 'settle should carry payment-signature');
+    // No attacker host name in any log line.
+    const blob = cap.lines.join('\n');
+    assert.ok(!blob.includes('evil.com'), 'attacker host must not appear in stderr');
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('T-X12 (iter3): pay_x402 probe 302 → reject with stage:probe, never signs', async () => {
+  // Probe returns 302 directly. The handler must reject before sign.
+  let callIdx = 0;
+  const calls = [];
+  const fetchFn = async (url, init = {}) => {
+    const i = callIdx;
+    callIdx += 1;
+    calls.push({
+      url: typeof url === 'string' ? url : url.toString(),
+      headers: { ...(init.headers ?? {}) },
+      redirect: init.redirect,
+      callIdx: i,
+    });
+    // First call (probe) always: simulate 302 via redirect:'error' throw.
+    if (init.redirect !== 'error') {
+      throw new Error('REGRESSION: probe fetch missing redirect:"error"');
+    }
+    const err = new TypeError('fetch failed');
+    err.cause = new Error("redirect mode is set to 'error'");
+    throw err;
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler({ endpoint: '/api/v1/orchestrate' }, fakeConfig());
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'probe');
+    assert.match(r.error, /redirect/i);
+    // Only the probe call happened, no settle.
+    assert.equal(calls.length, 1, 'only probe should run; no signing, no settle');
+    assert.equal(calls[0].redirect, 'error');
+    // No payment-signature header on the probe call (it never gets that far,
+    // and even at the probe stage we never include it).
+    assert.ok(!calls[0].headers['payment-signature'], 'probe must NOT carry payment-signature');
+    // No "signed" log line — sign step must not have run.
+    const signedLines = cap.lines.filter(l => l.includes('tool.pay_x402.signed'));
+    assert.equal(signedLines.length, 0, 'sign step must NOT execute when probe rejects');
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('T-X13 (iter3): discover_agents gateway 302 → reject with stage:probe', async () => {
+  let callIdx = 0;
+  const calls = [];
+  const fetchFn = async (url, init = {}) => {
+    callIdx += 1;
+    calls.push({
+      url: typeof url === 'string' ? url : url.toString(),
+      redirect: init.redirect,
+    });
+    if (init.redirect !== 'error') {
+      throw new Error('REGRESSION: discover_agents fetch missing redirect:"error"');
+    }
+    const err = new TypeError('fetch failed');
+    err.cause = new Error("redirect mode is set to 'error'");
+    throw err;
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { discoverAgentsHandler } = await loadHandlers();
+    const r = await discoverAgentsHandler({ query: 'AVAX price' }, fakeConfig());
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'probe');
+    assert.match(r.error, /redirect/i);
+    assert.ok(!/fetch failed/.test(r.error), 'must not leak undici internals');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].redirect, 'error');
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('T-X14 (iter3): pay_x402 settle 301 (any 3xx) → reject', async () => {
+  // Same shape as T-X11 but with 301 to confirm the behavior is generic to
+  // any 3xx, not coupled to 302 specifically.
+  const accepts = { payTo: '0x' + '99'.repeat(20), maxAmountRequired: '1000' };
+  let callIdx = 0;
+  const fetchFn = async (url, init = {}) => {
+    const i = callIdx;
+    callIdx += 1;
+    if (i === 0) {
+      return new Response(JSON.stringify({ accepts: [accepts] }), {
+        status: 402,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    // Settle with any 3xx → undici raises the same redirect-error class.
+    if (init.redirect !== 'error') {
+      throw new Error('REGRESSION: settle fetch missing redirect:"error"');
+    }
+    const err = new TypeError('fetch failed');
+    err.cause = new Error("redirect mode is set to 'error'");
+    throw err;
+  };
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { payX402Handler } = await loadHandlers();
+    const r = await payX402Handler({ endpoint: '/api/v1/compose' }, fakeConfig());
+    assert.equal(r.ok, false);
+    assert.equal(r.stage, 'settle');
+    assert.match(r.error, /redirect/i);
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+// MNR-iter3-1: resolveEndpoint defensive type/empty guard.
+test('T-MNR-iter3-1: resolveEndpoint rejects non-string / empty inputs early', async () => {
+  const { resolveEndpoint } = await loadHandlers();
+  const gw = new URL('https://app.wasiai.io');
+  for (const bad of [null, undefined, '', 0, false, {}, [], 42]) {
+    const r = resolveEndpoint(bad, gw);
+    assert.equal(r.ok, false, `expected reject for ${JSON.stringify(bad)}`);
+    assert.match(r.error, /non-empty string/);
+  }
+});
+
 // ── Bonus AC-10: signature/authorization in input ignored ──────────────────
 test('Bonus AC-10: pay_x402 ignores signature/authorization keys in input', async () => {
   const accepts = { payTo: '0x' + '99'.repeat(20), maxAmountRequired: '1000' };

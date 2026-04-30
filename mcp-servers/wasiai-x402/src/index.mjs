@@ -45,6 +45,17 @@ export function sanitizeInput(toolName, input) {
 
 // ── SSRF guard: post-resolution endpoint validation (BLQ-iter2-1) ──────────
 //
+// resolveEndpoint validates that the resolved URL matches the configured
+// gateway (host + protocol) AFTER the WHATWG URL parser has handled any
+// tricks (backslash, encoded chars, etc.). Combined with `redirect:'error'`
+// in fetch() calls, this ensures the signed envelope cannot be redirected
+// cross-origin via a hostile gateway 3xx response.
+//
+// Defense-in-depth layers:
+//   1. isPathOnly() rejects absolute URLs and backslash chars early
+//   2. resolveEndpoint() validates target.host === gw.host post-parse
+//   3. fetch() with redirect:'error' rejects any 3xx (even legitimate)
+//
 // Why post-resolution: the WHATWG URL parser treats `\` as `/` for special
 // schemes (https:/http:), so endpoints like `/\evil.com/x`, `/\\evil.com`,
 // `/\@evil.com`, etc. resolve to https://evil.com/... when combined with
@@ -55,9 +66,21 @@ export function sanitizeInput(toolName, input) {
 // would actually call. If they don't match, reject before any network or
 // signing operation.
 //
+// Why redirect:'error' (BLQ-iter3-1): WHATWG fetch only strips
+// Authorization/Cookie/Proxy-Authorization on cross-origin redirects.
+// Custom headers like `payment-signature` (carrying the EIP-3009 envelope)
+// are FORWARDED to the redirect target. A hostile gateway responding with
+// `302 Location: https://evil.com/...` would leak the signed envelope to
+// the attacker host, which can be replayed to drain the operator wallet.
+// Rejecting any 3xx at fetch level closes that class entirely.
+//
 // Returns { ok: true, url: string } on success, { ok: false, error } on
 // rejection. Caller maps `ok:false` to the canonical validation response.
 export function resolveEndpoint(endpoint, gatewayUrl) {
+  // MNR-iter3-1: defensive type/empty check before URL parsing.
+  if (typeof endpoint !== 'string' || !endpoint.length) {
+    return { ok: false, error: 'endpoint must be a non-empty string' };
+  }
   // gatewayUrl is a URL instance (loadConfig returns it from validateGatewayUrl).
   // Defensive: accept a string too, in case a future caller passes a string.
   const gw = gatewayUrl instanceof URL ? gatewayUrl : new URL(gatewayUrl);
@@ -75,6 +98,21 @@ export function resolveEndpoint(endpoint, gatewayUrl) {
   }
   return { ok: true, url: target.toString() };
 }
+
+// ── Redirect-error detection (BLQ-iter3-1) ─────────────────────────────────
+//
+// fetch() with `redirect:'error'` throws TypeError('fetch failed') with
+// `cause` containing a message like "redirect mode is set to 'error'".
+// We detect this and surface a stable, non-leaky error string to the caller
+// instead of the raw undici internals.
+function isRedirectError(e) {
+  const msgs = [];
+  if (typeof e?.message === 'string') msgs.push(e.message);
+  if (typeof e?.cause?.message === 'string') msgs.push(e.cause.message);
+  return msgs.some(m => /redirect/i.test(m));
+}
+
+const REDIRECT_REFUSED_MSG = 'gateway responded with redirect; refusing to follow';
 
 // ── Cap guard resolver (AC-11, V6.2 priority per-call > env > undefined) ───
 export function resolveMaxAmountGuard(perCall, envDefault) {
@@ -106,8 +144,20 @@ export async function discoverAgentsHandler(rawInput, cfg) {
   // MNR-1: homologar try/catch con payX402Handler.
   let res;
   try {
-    res = await fetch(url.toString(), { signal: AbortSignal.timeout(cfg.payTimeoutMs) });
+    res = await fetch(url.toString(), {
+      signal: AbortSignal.timeout(cfg.payTimeoutMs),
+      // BLQ-iter3-1: never follow gateway redirects (envelope leak class).
+      redirect: 'error',
+    });
   } catch (e) {
+    // BLQ-iter3-1: translate undici redirect-error into a stable message.
+    if (isRedirectError(e)) {
+      log.warn('tool.discover_agents.redirect-refused', {
+        tool: 'discover_agents', stage: 'probe', gateway: cfg.gatewayUrl.toString(),
+        operator: cfg.operatorAddress, ok: false,
+      });
+      return { ok: false, stage: 'probe', error: REDIRECT_REFUSED_MSG };
+    }
     log.warn('tool.discover_agents.error', {
       tool: 'discover_agents', stage: 'fetch', gateway: cfg.gatewayUrl.toString(),
       operator: cfg.operatorAddress, ok: false, error: e.message,
@@ -140,10 +190,11 @@ export async function getPaymentQuoteHandler(rawInput, cfg) {
       error: 'endpoint must be a path starting with / (absolute URLs are rejected)',
     };
   }
-  // BLQ-iter2-1: authoritative SSRF guard. Even if a future regression makes
-  // isPathOnly() pass a malicious shape, the post-resolution check ensures
-  // the resolved URL's host+protocol match the configured gateway exactly,
-  // so the captured signed envelope can never be replayed off-gateway.
+  // BLQ-iter2-1 + BLQ-iter3-1: defense-in-depth SSRF guard. The
+  // post-resolution check ensures the resolved URL's host+protocol match
+  // the configured gateway, and `redirect:'error'` on fetch below blocks
+  // hostile 3xx responses that would otherwise leak the probe (or a future
+  // signed envelope) to an attacker host.
   const resolved = resolveEndpoint(endpoint, cfg.gatewayUrl);
   if (!resolved.ok) {
     return { ok: false, stage: 'validation', error: resolved.error };
@@ -166,8 +217,17 @@ export async function getPaymentQuoteHandler(rawInput, cfg) {
       headers,
       body: payload ? JSON.stringify(payload) : undefined,
       signal: AbortSignal.timeout(cfg.payTimeoutMs),
+      // BLQ-iter3-1: never follow gateway redirects.
+      redirect: 'error',
     });
   } catch (e) {
+    if (isRedirectError(e)) {
+      log.warn('tool.get_payment_quote.redirect-refused', {
+        tool: 'get_payment_quote', stage: 'probe', gateway: cfg.gatewayUrl.toString(),
+        operator: cfg.operatorAddress, ok: false,
+      });
+      return { ok: false, stage: 'probe', error: REDIRECT_REFUSED_MSG };
+    }
     log.warn('tool.get_payment_quote.probe-error', {
       tool: 'get_payment_quote', stage: 'probe', gateway: cfg.gatewayUrl.toString(),
       operator: cfg.operatorAddress, ok: false, error: e.message,
@@ -218,13 +278,16 @@ export async function payX402Handler(rawInput, cfg) {
       error: 'endpoint must be a path starting with / (absolute URLs are rejected)',
     };
   }
-  // BLQ-iter2-1: authoritative SSRF guard. The WHATWG URL parser treats
-  // `\` as `/` for special schemes, so without post-resolution validation
-  // an endpoint like `/\evil.com/x` would resolve to https://evil.com/x
-  // and the signed envelope would be replayed to an attacker host. By
-  // validating that the resolved URL's host+protocol match the gateway
-  // AFTER `new URL(endpoint, gateway)`, we close the backslash-bypass
-  // class even if isPathOnly() ever regresses.
+  // BLQ-iter2-1: authoritative SSRF guard at URL resolution time. The
+  // WHATWG URL parser treats `\` as `/` for special schemes, so without
+  // post-resolution validation an endpoint like `/\evil.com/x` would
+  // resolve to https://evil.com/x. By validating that the resolved URL's
+  // host+protocol match the gateway AFTER `new URL(endpoint, gateway)`,
+  // we close the backslash-bypass class even if isPathOnly() ever regresses.
+  // BLQ-iter3-1: complement with `redirect:'error'` on each fetch() so that
+  // a hostile gateway 3xx (Location: https://evil.com/...) cannot be used
+  // to leak the signed envelope cross-origin (custom headers like
+  // payment-signature are NOT stripped by WHATWG redirect-safe rules).
   const resolved = resolveEndpoint(endpoint, cfg.gatewayUrl);
   if (!resolved.ok) {
     return { ok: false, stage: 'validation', error: resolved.error };
@@ -239,8 +302,17 @@ export async function payX402Handler(rawInput, cfg) {
       headers: { 'Content-Type': 'application/json' },
       body: payload ? JSON.stringify(payload) : undefined,
       signal: AbortSignal.timeout(cfg.payTimeoutMs),
+      // BLQ-iter3-1: never follow gateway redirects.
+      redirect: 'error',
     });
   } catch (e) {
+    if (isRedirectError(e)) {
+      log.warn('tool.pay_x402.redirect-refused', {
+        tool: 'pay_x402', stage: 'probe', gateway: cfg.gatewayUrl.toString(),
+        operator: cfg.operatorAddress, ok: false,
+      });
+      return { ok: false, stage: 'probe', error: REDIRECT_REFUSED_MSG };
+    }
     log.warn('tool.pay_x402.probe-error', {
       tool: 'pay_x402', stage: 'probe', gateway: cfg.gatewayUrl.toString(),
       operator: cfg.operatorAddress, ok: false, error: e.message,
@@ -352,6 +424,12 @@ export async function payX402Handler(rawInput, cfg) {
   });
 
   // [4] Retry with payment-signature header
+  // BLQ-iter3-1: this is the CRITICAL fetch — it carries the signed EIP-3009
+  // envelope in `payment-signature`. WHATWG fetch does NOT strip custom
+  // headers on cross-origin redirects (only Authorization/Cookie/Proxy-
+  // Authorization), so without `redirect:'error'` a gateway responding 302
+  // would leak the envelope to the attacker host, who can replay it on the
+  // legitimate gateway and drain the operator wallet.
   let settleRes;
   try {
     settleRes = await fetch(url, {
@@ -362,8 +440,18 @@ export async function payX402Handler(rawInput, cfg) {
       },
       body: payload ? JSON.stringify(payload) : undefined,
       signal: AbortSignal.timeout(cfg.payTimeoutMs),
+      // BLQ-iter3-1: never follow gateway redirects. Even the legitimate
+      // gateway must answer settle directly (200/4xx/5xx).
+      redirect: 'error',
     });
   } catch (e) {
+    if (isRedirectError(e)) {
+      log.warn('tool.pay_x402.redirect-refused', {
+        tool: 'pay_x402', stage: 'settle', gateway: cfg.gatewayUrl.toString(),
+        operator: cfg.operatorAddress, ok: false,
+      });
+      return { ok: false, stage: 'settle', error: REDIRECT_REFUSED_MSG };
+    }
     log.warn('tool.pay_x402.settle-error', {
       tool: 'pay_x402', stage: 'settle', gateway: cfg.gatewayUrl.toString(),
       operator: cfg.operatorAddress, ok: false, error: e.message,

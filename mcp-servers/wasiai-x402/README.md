@@ -105,6 +105,22 @@ npm run test:tools    # 12+ tests (handlers, mocked fetch, concurrency)
 - **SSRF defense**: `WASIAI_GATEWAY_URL` is validated at startup (private-IP
   rejection, scheme allowlist, literal-host block). In `NODE_ENV=development`
   the rules are relaxed to allow `localhost`/`127.0.0.1`.
+  - **Set the gateway URL as origin-only** (e.g. `https://app.wasiai.io` or
+    `https://app.wasiai.io/`), NOT a path-prefix like `https://app.wasiai.io/x402/`.
+    Tool inputs (`endpoint`) are paths resolved against the configured gateway
+    via `new URL(endpoint, gateway)`. A path-bearing gateway changes how
+    relative resolution works and can shift the surface area of the
+    post-resolution host check (MNR-iter3-2, WKH-64).
+- **Redirect refusal (BLQ-iter3-1)**: every outgoing `fetch()` is set to
+  `redirect: 'error'`. WHATWG fetch only strips
+  `Authorization` / `Cookie` / `Proxy-Authorization` on cross-origin
+  redirects; **custom headers like `payment-signature` are FORWARDED**.
+  Without this guard, a hostile (or compromised) gateway answering
+  `302 Location: https://evil.com/...` to the settle call would leak the
+  signed EIP-3009 envelope to the attacker, who could replay it on the
+  legitimate gateway and drain the operator wallet. The guard rejects any
+  3xx (even legitimate); the legitimate gateway must answer
+  `200`/`4xx`/`5xx` directly.
 - **Prompt injection resistance**: input fields named `OPERATOR_PRIVATE_KEY`,
   `signature`, or `authorization` (top-level) are stripped silently and trigger
   a `warn-once` log. **Nested fields are NOT inspected** (out of scope for
