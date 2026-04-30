@@ -18,7 +18,7 @@
     "test:http": "node --test tests/http.test.mjs"
   },
   "engines": {
-    "node": ">=20.10.0"
+    "node": "22.x"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

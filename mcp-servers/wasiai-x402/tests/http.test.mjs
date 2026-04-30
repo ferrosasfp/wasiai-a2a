@@ -69,8 +69,13 @@ function jsonRpcRequest(body, { auth = `Bearer ${TEST_BEARER}`, method = 'POST',
 
 async function loadHandler() {
   // Reload module to pick up env-driven behavior on every test (cheap).
+  // Note: tests target the Web Standards `webHandler` named export (the
+  // pure (Request) => Promise<Response> shape). The `default` export is the
+  // Vercel Express-style adapter (req, res) which only matters at deploy
+  // time. Testing the inner handler is correct: the adapter is a thin
+  // shim with no business logic to validate.
   const mod = await import(`../api/mcp.mjs?t=${Date.now()}_${Math.random()}`);
-  return mod.default;
+  return mod.webHandler;
 }
 
 beforeEach(() => {

@@ -158,7 +158,12 @@ function buildServer(cfg) {
 //      then close transport + server in `finally` (MNR-CR-1).
 //   7. Echo Access-Control-Allow-Origin on the response if the request
 //      origin is in the allowlist (MNR-AR-2 — browsers need it on POST).
-export default async function handler(request) {
+// Web Standards handler — pure (Request) => Promise<Response>. The Vercel
+// adapter at the bottom of this file converts between Express-style (req, res)
+// and this Web Standards signature. We keep the core handler in this shape
+// to (a) match the test surface (tests/http.test.mjs expects (Request)→Response)
+// and (b) avoid leaking Node req/res specifics into the rest of the codebase.
+export async function webHandler(request) {
   // 1. CORS preflight (AC-9).
   if (request.method === 'OPTIONS') {
     return corsPreflightResponse(request);
@@ -260,4 +265,78 @@ export default async function handler(request) {
     response.headers.set('Vary', 'Origin');
   }
   return response;
+}
+
+// ── Vercel Express-style adapter ──────────────────────────────────────────
+//
+// Vercel Functions in /api default to `shouldAddHelpers: true`, which means
+// the runtime invokes the handler as `(req, res) => void` and waits for
+// `res.end()` before completing the response. Returning a Web Standards
+// `Response` from such a handler causes the function to hang until timeout
+// (witnessed during WKH-65 deploy validation: 60s timeout regardless of
+// auth state).
+//
+// This adapter converts:
+//   - Express IncomingMessage `req` ⇒ Web Standards `Request`
+//   - Web Standards `Response` ⇒ Express ServerResponse `res`
+//
+// Body handling: Vercel's body parser may have already populated `req.body`.
+// We serialize it back to JSON for the Web Standards Request body so the MCP
+// SDK transport can `await request.json()` as expected. For non-POST methods
+// the body is undefined.
+export default async function vercelHandler(req, res) {
+  try {
+    const protocol = req.headers['x-forwarded-proto'] || 'https';
+    const host = req.headers.host || 'wasiai-x402-mcp.vercel.app';
+    const url = new URL(req.url || '/', `${protocol}://${host}`);
+
+    // Build headers as Web Standards Headers
+    const headers = new Headers();
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (v === undefined) continue;
+      if (Array.isArray(v)) {
+        for (const vv of v) headers.append(k, vv);
+      } else {
+        headers.set(k, v);
+      }
+    }
+
+    // Body: only for methods that can carry one
+    let body;
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+      if (req.body !== undefined) {
+        // Vercel pre-parsed the body. Serialize back to JSON if object/array.
+        if (typeof req.body === 'string') {
+          body = req.body;
+        } else if (Buffer.isBuffer(req.body)) {
+          body = req.body;
+        } else {
+          body = JSON.stringify(req.body);
+        }
+      }
+    }
+
+    const webRequest = new Request(url, {
+      method: req.method,
+      headers,
+      body,
+    });
+
+    const response = await webHandler(webRequest);
+
+    // Pipe Response back to res
+    res.statusCode = response.status;
+    for (const [k, v] of response.headers) {
+      res.setHeader(k, v);
+    }
+    const text = await response.text();
+    res.end(text);
+  } catch (e) {
+    log.error('mcp.http.adapter-error', {
+      stage: 'adapter', ok: false, error: e.message,
+    });
+    res.statusCode = 500;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ error: 'internal' }));
+  }
 }
