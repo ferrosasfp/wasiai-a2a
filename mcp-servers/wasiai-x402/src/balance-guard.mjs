@@ -67,7 +67,16 @@ function _weiToUsdc(weiBigint) {
   return Number(whole) + Number(frac) / Number(USDC_DECIMALS_DIVISOR);
 }
 
-function _usdcToWei(usdcNumber) {
+/**
+ * Convert a USDC number (e.g. 0.5) into BigInt wei with USDC_DECIMALS (6).
+ *
+ * WKH-67 — Public export. The handler-level balance-gate validates inputs
+ * BEFORE calling this helper (CD-22): typeof === 'number', Number.isFinite,
+ * value > 0, value < 1_000_000. This function preserves backwards
+ * compatibility with internal call sites that pass already-validated numbers
+ * (e.g. the threshold parsed from env at line ~217).
+ */
+export function usdcToWei(usdcNumber) {
   // Convert via string to avoid float precision issues at 6 decimals.
   const fixed = Number(usdcNumber).toFixed(USDC_DECIMALS);
   const [whole, frac = ''] = fixed.split('.');
@@ -214,7 +223,7 @@ export async function checkBalanceWithClaim({
     return { ok: false, stage: 'balance-gate', error: 'operator balance below threshold' };
   }
 
-  const thresholdWei = _usdcToWei(threshold);
+  const thresholdWei = usdcToWei(threshold);
 
   // 4) Atomic claim. INCRBY is single-call atomic (V10.1.a).
   //    We THEN check if the post-increment total exceeds (balance - threshold)
@@ -261,4 +270,7 @@ export async function releaseClaim({ claimKey, requestedWei, kvClient }) {
 }
 
 // Test surface — used to exercise the wei↔usdc conversion in unit tests.
-export const _testHelpers = { _weiToUsdc, _usdcToWei };
+// WKH-67 — `_usdcToWei` is now a re-export of the public `usdcToWei` symbol
+// to preserve backwards-compat with existing tests that import it via
+// `_testHelpers._usdcToWei`.
+export const _testHelpers = { _weiToUsdc, _usdcToWei: usdcToWei };

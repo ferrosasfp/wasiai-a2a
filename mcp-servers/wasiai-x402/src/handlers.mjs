@@ -16,6 +16,13 @@ import { randomBytes } from 'node:crypto';
 import { signX402Envelope } from './sign.mjs';
 import { isPathOnly } from './url-validator.mjs';
 import * as log from './log.mjs';
+// WKH-67 — balance-gate moved INSIDE payX402Handler (post-probe, pre-cap-guard).
+// See doc/sdd/072-wkh-67-balance-gate-decimals/sdd.md §7. Decimals separation:
+//   - args.maxAmountWei (PYUSD 18d) is the INBOUND cap guard ([2]).
+//   - payload.maxBudget (USDC 6d) drives the OUTBOUND balance gate ([1.5]).
+import { checkBalanceWithClaim, releaseClaim, usdcToWei } from './balance-guard.mjs';
+import { getKvClient } from './kv-client.mjs';
+import { getAvaxClient } from './avax-client.mjs';
 
 // ── Top-level input sanitizer (AC-10, V5.4 explicit scope: top-level only) ─
 const FORBIDDEN_INPUT_KEYS = ['OPERATOR_PRIVATE_KEY', 'signature', 'authorization'];
@@ -356,129 +363,215 @@ export async function payX402Handler(rawInput, cfg) {
     });
   }
 
-  // [2] Cap guard (AC-11) BEFORE signing
-  let guard;
-  try {
-    guard = resolveMaxAmountGuard(maxAmountWei, cfg.maxAmountWeiDefault);
-  } catch (e) {
-    return { ok: false, stage: 'sign', error: e.message };
-  }
-  let requested;
-  try {
-    requested = BigInt(accepts.maxAmountRequired);
-  } catch {
-    return { ok: false, stage: 'probe', error: 'invalid 402: maxAmountRequired not BigInt-parseable', body: probeBody };
-  }
-  if (guard !== undefined && requested > guard) {
+  // [1.5] Balance-gate (WKH-67) — runs AFTER probe parsing, BEFORE cap guard.
+  //
+  // CD-20: payload.maxBudget (OUTBOUND USDC 6 decimals on Avalanche C-Chain
+  // mainnet) is the source-of-truth for the balance gate. NEVER use
+  // args.maxAmountWei here — that's the PYUSD 18-decimal INBOUND cap guard
+  // handled at [2]. The two guards operate on different chains and
+  // dimensions; reusing one input for both was the WKH-66 mainnet bug.
+  //
+  // CD-22: validate payload.maxBudget BEFORE conversion. typeof === 'number'
+  // is belt-and-suspenders alongside Number.isFinite (which already rejects
+  // NaN/Infinity but only accepts number primitives).
+  //
+  // V9 prototype-pollution defense: only OWN properties count. A payload
+  // built via `Object.create({ maxBudget: 0.5 })` would otherwise leak
+  // `maxBudget` from the prototype chain and bypass the gate.
+  const maxBudget =
+    payload != null && typeof payload === 'object' && Object.hasOwn(payload, 'maxBudget')
+      ? payload.maxBudget
+      : undefined;
+  if (typeof maxBudget !== 'number'
+      || !Number.isFinite(maxBudget)
+      || maxBudget <= 0
+      || maxBudget >= 1_000_000) {
     return {
       ok: false,
-      stage: 'sign',
-      error: 'amount exceeds maxAmountWei guard',
-      requested: requested.toString(),
-      max: guard.toString(),
+      stage: 'balance-gate',
+      error: 'invalid or missing payload.maxBudget',
     };
   }
 
-  // [3] Sign (AC-3, AC-5)
-  let envelope;
-  try {
-    const validBefore = BigInt(Math.floor(Date.now() / 1000) + 300);
-    const nonce = '0x' + randomBytes(32).toString('hex');
-    envelope = await signX402Envelope({
-      to: accepts.payTo,
-      value: requested,
-      validBefore,
-      nonce,
-      chainId: cfg.chainId,
-      contract: cfg.contract,
-      domainName: cfg.domainName,
-      domainVersion: cfg.domainVersion,
+  const operator = cfg.operatorAddress;
+  if (!operator) {
+    log.error('mcp.balance.operator-derive-failed', {
+      stage: 'balance-gate', error: 'cfg.operatorAddress missing',
     });
-  } catch (e) {
-    // AC-5: never expose PK in error message.
-    // BLQ-2: sanitize agent-facing error. viem's signTypedData throws verbose
-    // messages that expose internals; we keep them in stderr only.
-    log.error('tool.pay_x402.sign-error', {
-      tool: 'pay_x402', stage: 'sign', gateway: cfg.gatewayUrl.toString(),
-      operator: cfg.operatorAddress, ok: false, error: e.message,
-    });
-    // Allow our own well-known throw messages through so the agent can
-    // distinguish "config missing" from "signing failed". Anything else
-    // gets a stable, non-verbose label.
-    const isOurOwn = typeof e.message === 'string'
-      && e.message.includes('OPERATOR_PRIVATE_KEY missing at sign-time');
-    return {
-      ok: false,
-      stage: 'sign',
-      error: isOurOwn
-        ? `signing failed: ${e.message}`
-        : 'signing failed (see stderr logs)',
-    };
+    return { ok: false, stage: 'balance-gate', error: 'operator derivation failed' };
   }
 
-  log.info('tool.pay_x402.signed', {
-    tool: 'pay_x402', stage: 'sign-ok', gateway: cfg.gatewayUrl.toString(),
-    operator: cfg.operatorAddress, ok: true,
-    signature: envelope.signature,  // logger truncates to 10 chars
+  const balanceChainId = parseInt(process.env.MCP_OPERATOR_CHAIN_ID ?? '43114', 10);
+  const usdcAddress = process.env.AVALANCHE_USDC_ADDRESS
+    ?? '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E';
+  const rpcUrl = process.env.AVALANCHE_RPC_URL
+    ?? 'https://api.avax.network/ext/bc/C/rpc';
+
+  // MNR-AR-2 inherited from WKH-66: validate threshold env BEFORE use.
+  // parseFloat('abc') returns NaN, parseFloat('-1') returns -1 — both would
+  // silently bypass the gate (NaN comparisons always false; negative
+  // thresholds approve anything).
+  const thresholdRaw = process.env.MCP_BALANCE_THRESHOLD_USDC ?? '0.50';
+  const threshold = parseFloat(thresholdRaw);
+  if (!Number.isFinite(threshold) || threshold < 0) {
+    log.error('mcp.balance-gate.invalid-threshold', {
+      thresholdRaw, stage: 'config', ok: false,
+    });
+    return { ok: false, stage: 'balance-gate', error: 'invalid threshold config' };
+  }
+
+  // OUTBOUND USDC 6d wei (WKH-67). NOT to be confused with args.maxAmountWei
+  // (INBOUND PYUSD 18d, see [2]).
+  const requestedWei = usdcToWei(maxBudget);
+  const kv = getKvClient();
+  const publicClient = getAvaxClient(rpcUrl);
+
+  const gate = await checkBalanceWithClaim({
+    operator,
+    chainId: balanceChainId,
+    requestedWei,
+    threshold,
+    kvClient: kv,
+    publicClient,
+    usdcAddress,
   });
+  if (!gate.ok) return gate;
 
-  // [4] Retry with payment-signature header
-  // BLQ-iter3-1: this is the CRITICAL fetch — it carries the signed EIP-3009
-  // envelope in `payment-signature`. WHATWG fetch does NOT strip custom
-  // headers on cross-origin redirects (only Authorization/Cookie/Proxy-
-  // Authorization), so without `redirect:'error'` a gateway responding 302
-  // would leak the envelope to the attacker host, who can replay it on the
-  // legitimate gateway and drain the operator wallet.
-  let settleRes;
+  // CD-23: releaseClaim MUST run exactly-once on every path post-claim
+  // (cap-guard reject, sign error, settle error, redirect-refused, success).
+  // try/finally is the simplest way to guarantee that — JS native semantics.
   try {
-    settleRes = await fetch(url, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        'payment-signature': envelope.envelopeBase64,
-      },
-      body: payload ? JSON.stringify(payload) : undefined,
-      signal: AbortSignal.timeout(cfg.payTimeoutMs),
-      // BLQ-iter3-1: never follow gateway redirects. Even the legitimate
-      // gateway must answer settle directly (200/4xx/5xx).
-      redirect: 'error',
-    });
-  } catch (e) {
-    if (isRedirectError(e)) {
-      log.warn('tool.pay_x402.redirect-refused', {
-        tool: 'pay_x402', stage: 'settle', gateway: cfg.gatewayUrl.toString(),
-        operator: cfg.operatorAddress, ok: false,
-      });
-      return { ok: false, stage: 'settle', error: REDIRECT_REFUSED_MSG };
+    // [2] Cap guard (AC-11) BEFORE signing — INBOUND PYUSD 18d.
+    let guard;
+    try {
+      guard = resolveMaxAmountGuard(maxAmountWei, cfg.maxAmountWeiDefault);
+    } catch (e) {
+      return { ok: false, stage: 'sign', error: e.message };
     }
-    log.warn('tool.pay_x402.settle-error', {
-      tool: 'pay_x402', stage: 'settle', gateway: cfg.gatewayUrl.toString(),
-      operator: cfg.operatorAddress, ok: false, error: e.message,
+    let requested;
+    try {
+      requested = BigInt(accepts.maxAmountRequired);
+    } catch {
+      return { ok: false, stage: 'probe', error: 'invalid 402: maxAmountRequired not BigInt-parseable', body: probeBody };
+    }
+    if (guard !== undefined && requested > guard) {
+      return {
+        ok: false,
+        stage: 'sign',
+        error: 'amount exceeds maxAmountWei guard',
+        requested: requested.toString(),
+        max: guard.toString(),
+      };
+    }
+
+    // [3] Sign (AC-3, AC-5)
+    let envelope;
+    try {
+      const validBefore = BigInt(Math.floor(Date.now() / 1000) + 300);
+      const nonce = '0x' + randomBytes(32).toString('hex');
+      envelope = await signX402Envelope({
+        to: accepts.payTo,
+        value: requested,
+        validBefore,
+        nonce,
+        chainId: cfg.chainId,
+        contract: cfg.contract,
+        domainName: cfg.domainName,
+        domainVersion: cfg.domainVersion,
+      });
+    } catch (e) {
+      // AC-5: never expose PK in error message.
+      // BLQ-2: sanitize agent-facing error. viem's signTypedData throws verbose
+      // messages that expose internals; we keep them in stderr only.
+      log.error('tool.pay_x402.sign-error', {
+        tool: 'pay_x402', stage: 'sign', gateway: cfg.gatewayUrl.toString(),
+        operator: cfg.operatorAddress, ok: false, error: e.message,
+      });
+      // Allow our own well-known throw messages through so the agent can
+      // distinguish "config missing" from "signing failed". Anything else
+      // gets a stable, non-verbose label.
+      const isOurOwn = typeof e.message === 'string'
+        && e.message.includes('OPERATOR_PRIVATE_KEY missing at sign-time');
+      return {
+        ok: false,
+        stage: 'sign',
+        error: isOurOwn
+          ? `signing failed: ${e.message}`
+          : 'signing failed (see stderr logs)',
+      };
+    }
+
+    log.info('tool.pay_x402.signed', {
+      tool: 'pay_x402', stage: 'sign-ok', gateway: cfg.gatewayUrl.toString(),
+      operator: cfg.operatorAddress, ok: true,
+      signature: envelope.signature,  // logger truncates to 10 chars
     });
-    return { ok: false, stage: 'settle', error: `gateway settle failed: ${e.message}` };
+
+    // [4] Retry with payment-signature header
+    // BLQ-iter3-1: this is the CRITICAL fetch — it carries the signed EIP-3009
+    // envelope in `payment-signature`. WHATWG fetch does NOT strip custom
+    // headers on cross-origin redirects (only Authorization/Cookie/Proxy-
+    // Authorization), so without `redirect:'error'` a gateway responding 302
+    // would leak the envelope to the attacker host, who can replay it on the
+    // legitimate gateway and drain the operator wallet.
+    let settleRes;
+    try {
+      settleRes = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'payment-signature': envelope.envelopeBase64,
+        },
+        body: payload ? JSON.stringify(payload) : undefined,
+        signal: AbortSignal.timeout(cfg.payTimeoutMs),
+        // BLQ-iter3-1: never follow gateway redirects. Even the legitimate
+        // gateway must answer settle directly (200/4xx/5xx).
+        redirect: 'error',
+      });
+    } catch (e) {
+      if (isRedirectError(e)) {
+        log.warn('tool.pay_x402.redirect-refused', {
+          tool: 'pay_x402', stage: 'settle', gateway: cfg.gatewayUrl.toString(),
+          operator: cfg.operatorAddress, ok: false,
+        });
+        return { ok: false, stage: 'settle', error: REDIRECT_REFUSED_MSG };
+      }
+      log.warn('tool.pay_x402.settle-error', {
+        tool: 'pay_x402', stage: 'settle', gateway: cfg.gatewayUrl.toString(),
+        operator: cfg.operatorAddress, ok: false, error: e.message,
+      });
+      return { ok: false, stage: 'settle', error: `gateway settle failed: ${e.message}` };
+    }
+    const settleText = await settleRes.text();
+    let settleBody;
+    try { settleBody = JSON.parse(settleText); } catch { settleBody = { raw: settleText }; }
+
+    log.info('tool.pay_x402.settle', {
+      tool: 'pay_x402', stage: 'settle', gateway: cfg.gatewayUrl.toString(),
+      operator: cfg.operatorAddress, ok: settleRes.status === 200, status: settleRes.status,
+    });
+
+    if (settleRes.status !== 200) {
+      return { ok: false, stage: 'settle', status: settleRes.status, body: settleBody };
+    }
+
+    // V8.1: response NEVER includes signature/authorization plain.
+    return {
+      ok: true,
+      stage: 'settled',
+      status: 200,
+      result: settleBody,
+      kiteTxHash: settleBody?.kiteTxHash,
+      latencyMs: Date.now() - startedAt,
+    };
+  } finally {
+    // CD-23 — exactly-once release on every post-claim exit path.
+    await releaseClaim({
+      claimKey: gate.claimKey,
+      requestedWei,
+      kvClient: kv,
+    });
   }
-  const settleText = await settleRes.text();
-  let settleBody;
-  try { settleBody = JSON.parse(settleText); } catch { settleBody = { raw: settleText }; }
-
-  log.info('tool.pay_x402.settle', {
-    tool: 'pay_x402', stage: 'settle', gateway: cfg.gatewayUrl.toString(),
-    operator: cfg.operatorAddress, ok: settleRes.status === 200, status: settleRes.status,
-  });
-
-  if (settleRes.status !== 200) {
-    return { ok: false, stage: 'settle', status: settleRes.status, body: settleBody };
-  }
-
-  // V8.1: response NEVER includes signature/authorization plain.
-  return {
-    ok: true,
-    stage: 'settled',
-    status: 200,
-    result: settleBody,
-    kiteTxHash: settleBody?.kiteTxHash,
-    latencyMs: Date.now() - startedAt,
-  };
 }
 
 // ── Tool descriptors for MCP tools/list ────────────────────────────────────
@@ -512,16 +605,26 @@ export const TOOL_DESCRIPTORS = [
   },
   {
     name: 'pay_x402',
-    description: 'Execute a full x402 payment flow: probe → sign EIP-3009 → retry with payment-signature header.',
+    description: 'Execute a full x402 payment flow: probe → balance-gate (USDC outbound) → sign EIP-3009 → retry. Required: payload.maxBudget (USDC number, OUTBOUND budget cap). Optional: maxAmountWei (PYUSD wei BigInt-string, defensive cap on INBOUND challenge).',
     inputSchema: {
       type: 'object',
       properties: {
         endpoint: { type: 'string' },
         method: { type: 'string' },
-        payload: { type: 'object' },
+        payload: {
+          type: 'object',
+          description: 'Request body sent to the paid endpoint. Must include maxBudget when the endpoint requires payment.',
+          properties: {
+            maxBudget: {
+              type: 'number',
+              description: 'OUTBOUND budget cap in USDC (e.g. 0.5). Required when endpoint requires payment. Used by balance-gate to reserve a claim against operator wallet (Avalanche C-Chain mainnet, USDC 6 decimals).',
+            },
+          },
+          additionalProperties: true,
+        },
         maxAmountWei: {
           type: ['string', 'number'],
-          description: 'Per-call cap in wei (overrides MCP_MAX_AMOUNT_WEI_DEFAULT). Priority: per-call > env > undefined.',
+          description: 'Defensive cap on INBOUND challenge in wei (e.g. PYUSD 18 decimals on Kite testnet). Optional. Independent of payload.maxBudget — guards against anomalous 402 challenges. Priority: per-call > MCP_MAX_AMOUNT_WEI_DEFAULT > undefined.',
         },
       },
       required: ['endpoint'],

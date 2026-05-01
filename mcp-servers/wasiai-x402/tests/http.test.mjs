@@ -670,13 +670,26 @@ test('T-HTTP-14 (W2.6): balance gate rejects pay_x402 sub-threshold', async () =
   // RPC endpoint. The Avalanche RPC client uses globalThis.fetch under the
   // hood (viem http transport). We respond with a 0.4-USDC balance (below
   // 0.5 threshold).
+  //
+  // WKH-67: balance-gate now runs INSIDE payX402Handler post-probe, so the
+  // gateway probe ALSO needs a stubbed response — return a 402 challenge
+  // here so the handler reaches the balance-gate code path.
   const origFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
-    if (String(url).includes('avax.network')) {
+    const u = String(url);
+    if (u.includes('avax.network')) {
       // 0.4 USDC = 400_000 wei. Encode as 32-byte hex (eth_call return).
       const hex = '0x' + (400000).toString(16).padStart(64, '0');
       return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: hex }), {
         status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (u.includes('app.wasiai.io')) {
+      // Stubbed 402 challenge — handler must reach balance-gate, then reject.
+      const accepts = { payTo: '0x' + '99'.repeat(20), maxAmountRequired: '1000', network: 'eip155:2368' };
+      return new Response(JSON.stringify({ accepts: [accepts] }), {
+        status: 402,
         headers: { 'content-type': 'application/json' },
       });
     }
@@ -691,8 +704,10 @@ test('T-HTTP-14 (W2.6): balance gate rejects pay_x402 sub-threshold', async () =
       params: {
         name: 'pay_x402',
         arguments: {
-          endpoint: 'https://app.wasiai.io/api/v1/echo',
-          maxAmountWei: '100000', // 0.1 USDC
+          // WKH-67 — endpoint must be path-only (SSRF guard) AND payload must
+          // include maxBudget (USDC OUTBOUND, balance-gate source-of-truth).
+          endpoint: '/api/v1/echo',
+          payload: { maxBudget: 0.1 }, // 0.1 USDC OUTBOUND
         },
       },
     });
