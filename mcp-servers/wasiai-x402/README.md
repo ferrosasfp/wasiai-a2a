@@ -13,7 +13,39 @@ Tools:
 |------|---------|
 | `discover_agents` | GET `/api/v1/capabilities` passthrough with optional `query`, `maxPrice`, `capabilities[]` filters. |
 | `get_payment_quote` | POST a probe to a paid endpoint **without** a signature, parse the 402 challenge, return the quote. |
-| `pay_x402` | Full flow: probe → sign EIP-3009 `TransferWithAuthorization` (PYUSD on Kite) → retry with `payment-signature` header. |
+| `pay_x402` | Full flow: probe → balance-gate (USDC outbound) → sign EIP-3009 `TransferWithAuthorization` (PYUSD on Kite) → retry with `payment-signature` header. Requires `payload.maxBudget` (USDC). |
+
+### `pay_x402` inputs (WKH-67)
+
+`pay_x402` separates two independent caps over different chains and decimals:
+
+| Input | Dimension | Required? | What it gates |
+|-------|-----------|-----------|---------------|
+| `payload.maxBudget` | USDC number on Avalanche C-Chain mainnet (6 decimals, e.g. `0.5`) | **YES** when endpoint requires payment | OUTBOUND budget. Source-of-truth for the balance-gate that reserves a claim against the operator wallet. |
+| `args.maxAmountWei` | PYUSD wei on Kite testnet (18 decimals, e.g. `"1000000000000000000"`) | optional | Defensive cap on the INBOUND `accepts.maxAmountRequired` returned by the 402 challenge. Priority: per-call > `MCP_MAX_AMOUNT_WEI_DEFAULT` > undefined. |
+
+These two caps are **independent**. `maxBudget` always speaks USDC.
+`maxAmountWei` always speaks PYUSD wei. Confusing them is what WKH-66 broke
+in mainnet; the fix (WKH-67) keeps each guard on its own dimension.
+
+**Example 1 — caller declares OUTBOUND budget only (typical):**
+
+```json
+{
+  "endpoint": "/api/v1/orchestrate",
+  "payload": { "maxBudget": 0.5, "task": "..." }
+}
+```
+
+**Example 2 — caller also adds a defensive INBOUND cap:**
+
+```json
+{
+  "endpoint": "/api/v1/orchestrate",
+  "payload": { "maxBudget": 0.5, "task": "..." },
+  "maxAmountWei": "1000000000000000000"
+}
+```
 
 ---
 

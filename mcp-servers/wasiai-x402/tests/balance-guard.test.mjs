@@ -17,7 +17,8 @@ import {
   checkBalanceWithClaim,
   releaseClaim,
 } from '../src/balance-guard.mjs';
-import { runWithBalanceGate } from '../api/mcp.mjs';
+// WKH-67: runWithBalanceGate eliminated; threshold-validation coverage moved
+// to tests/handlers-balance-gate.test.mjs (T-FIX-10).
 import { createKvMock } from './_mocks/kv-mock.mjs';
 import { createRpcMock } from './_mocks/rpc-mock.mjs';
 
@@ -275,47 +276,6 @@ test('T-BG-10: fresh snapshot (<30s) → no RPC call', async () => {
   assert.equal(r.ok, true);
 });
 
-// ── MNR-AR-2: invalid threshold env → balance-gate rejects with clear error.
-//
-// parseFloat('abc') returns NaN → NaN comparisons are always false → the
-// gate would silently approve every call. parseFloat('-1') returns -1 →
-// any positive balance passes the threshold check. Both cases must produce
-// a structured rejection (NOT a 500) so callers see `stage:'balance-gate'`
-// and can act on it. The validation runs BEFORE kv/rpc are touched so this
-// test does not need any mocks.
-test('T-BG-11: invalid threshold env (NaN) → balance-gate rejects with clear error', async () => {
-  const prev = process.env.MCP_BALANCE_THRESHOLD_USDC;
-  process.env.MCP_BALANCE_THRESHOLD_USDC = 'abc';
-  try {
-    const cfg = { operatorAddress: OPERATOR };
-    const args = { maxAmountWei: '100000' };
-    let handlerCalled = false;
-    const result = await runWithBalanceGate(args, cfg, async () => {
-      handlerCalled = true;
-      return { ok: true };
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.stage, 'balance-gate');
-    assert.match(result.error, /invalid threshold/i);
-    assert.equal(handlerCalled, false, 'handler must NOT run when threshold is invalid');
-  } finally {
-    if (prev === undefined) delete process.env.MCP_BALANCE_THRESHOLD_USDC;
-    else process.env.MCP_BALANCE_THRESHOLD_USDC = prev;
-  }
-});
-
-test('T-BG-11b: negative threshold env → balance-gate rejects', async () => {
-  const prev = process.env.MCP_BALANCE_THRESHOLD_USDC;
-  process.env.MCP_BALANCE_THRESHOLD_USDC = '-1';
-  try {
-    const cfg = { operatorAddress: OPERATOR };
-    const args = { maxAmountWei: '100000' };
-    const result = await runWithBalanceGate(args, cfg, async () => ({ ok: true }));
-    assert.equal(result.ok, false);
-    assert.equal(result.stage, 'balance-gate');
-    assert.match(result.error, /invalid threshold/i);
-  } finally {
-    if (prev === undefined) delete process.env.MCP_BALANCE_THRESHOLD_USDC;
-    else process.env.MCP_BALANCE_THRESHOLD_USDC = prev;
-  }
-});
+// WKH-67: T-BG-11/T-BG-11b deleted. The MCP_BALANCE_THRESHOLD_USDC validation
+// is now exercised inside payX402Handler — see T-FIX-10 in
+// tests/handlers-balance-gate.test.mjs.

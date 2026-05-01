@@ -9,6 +9,13 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { resetWarnOnce } from '../src/log.mjs';
+// WKH-67: balance-gate now lives INSIDE payX402Handler. Existing pay_x402
+// tests need: (a) payload.maxBudget on inputs; (b) KV mock injected; (c)
+// fetch fake intercepts the Avalanche RPC eth_call. Helpers below wire all
+// of that without altering the existing per-test assertions.
+import { setKvClientForTesting, resetKvClient } from '../src/kv-client.mjs';
+import { _resetAvaxClient } from '../src/avax-client.mjs';
+import { createKvMock } from './_mocks/kv-mock.mjs';
 
 const TEST_PK = '0x' + 'DE'.repeat(32);          // 64 hex chars; uppercase substring 'DE'×32 distinct
 const TEST_PK_LC = '0x' + 'de'.repeat(32);       // lowercase variant
@@ -32,19 +39,35 @@ function fakeConfig(overrides = {}) {
 }
 
 // Programmable fetch fake: array of {status, body, captureRef?}.
-function makeFetchFake(responses) {
+//
+// WKH-67: also auto-intercepts Avalanche RPC eth_call (viem balanceOf). The
+// canned `responses` only describe gateway calls; RPC calls return a default
+// 1 USDC balance unless the test passes `rpcBalanceWei` to override.
+function makeFetchFake(responses, { rpcBalanceWei = 1_000_000n } = {}) {
   const calls = [];
   let idx = 0;
   const fetchFn = async (url, init = {}) => {
+    const u = typeof url === 'string' ? url : url.toString();
+    if (u.includes('avax.network')) {
+      // 32-byte hex eth_call return for ERC-20 balanceOf. We do NOT push the
+      // RPC call into `calls[]` — assertions in legacy tests count gateway
+      // calls only (probe / settle), and the RPC is an internal balance-gate
+      // detail invisible at the test surface.
+      const hex = '0x' + rpcBalanceWei.toString(16).padStart(64, '0');
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: hex }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     const call = {
-      url: typeof url === 'string' ? url : url.toString(),
+      url: u,
       method: init.method ?? 'GET',
       headers: { ...(init.headers ?? {}) },
       body: init.body,
     };
     calls.push(call);
     const r = responses[idx];
-    if (!r) throw new Error(`fake fetch: no canned response for call #${idx + 1} ${call.method} ${call.url}`);
+    if (!r) throw new Error(`fake fetch: no canned response for call #${idx + 1} ${call.method} ${u}`);
     idx += 1;
     if (r.throw) throw r.throw;
     const text = typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? {});
@@ -84,11 +107,24 @@ async function loadHandlers() {
 
 beforeEach(() => {
   process.env.OPERATOR_PRIVATE_KEY = TEST_PK_LC;  // lower-case to match viem's normalized output
+  // WKH-67 — default balance-gate environment for in-handler gate.
+  process.env.MCP_BALANCE_THRESHOLD_USDC = '0.50';
+  process.env.MCP_OPERATOR_CHAIN_ID = '43114';
+  process.env.AVALANCHE_RPC_URL = 'https://api.avax.network/ext/bc/C/rpc';
+  process.env.AVALANCHE_USDC_ADDRESS = '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E';
   resetWarnOnce();
+  resetKvClient();
+  _resetAvaxClient();
+  setKvClientForTesting(createKvMock());
 });
 
 afterEach(() => {
-  // No-op; per-test cleanup happens inline.
+  resetKvClient();
+  _resetAvaxClient();
+  delete process.env.MCP_BALANCE_THRESHOLD_USDC;
+  delete process.env.MCP_OPERATOR_CHAIN_ID;
+  delete process.env.AVALANCHE_RPC_URL;
+  delete process.env.AVALANCHE_USDC_ADDRESS;
 });
 
 // ── T25 (AC-1) ─────────────────────────────────────────────────────────────
@@ -183,7 +219,7 @@ test('T29 (AC-3): pay_x402 full flow probe→402→sign→retry→200', async ()
   const cap = captureStderr();
   try {
     const { payX402Handler } = await loadHandlers();
-    const r = await payX402Handler({ endpoint: '/api/v1/orchestrate', payload: { hello: 1 } }, fakeConfig());
+    const r = await payX402Handler({ endpoint: '/api/v1/orchestrate', payload: { hello: 1, maxBudget: 0.1 } }, fakeConfig());
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(r.stage, 'settled');
     assert.equal(r.kiteTxHash, '0xabc');
@@ -239,7 +275,7 @@ test('T31 (AC-4): pay_x402 retry 400 → {ok:false, stage:"settle", status:400}'
   const cap = captureStderr();
   try {
     const { payX402Handler } = await loadHandlers();
-    const r = await payX402Handler({ endpoint: '/api/v1/orchestrate' }, fakeConfig());
+    const r = await payX402Handler({ endpoint: '/api/v1/orchestrate', payload: { maxBudget: 0.1 } }, fakeConfig());
     assert.equal(r.ok, false);
     assert.equal(r.stage, 'settle');
     assert.equal(r.status, 400);
@@ -265,7 +301,7 @@ test('T32 (AC-5): pay_x402 sign throw → {ok:false, stage:"sign"}; PK never ech
   delete process.env.OPERATOR_PRIVATE_KEY;
   try {
     const { payX402Handler } = await loadHandlers();
-    const r = await payX402Handler({ endpoint: '/api/v1/orchestrate' }, fakeConfig());
+    const r = await payX402Handler({ endpoint: '/api/v1/orchestrate', payload: { maxBudget: 0.1 } }, fakeConfig());
     assert.equal(r.ok, false);
     assert.equal(r.stage, 'sign');
     assert.match(r.error, /signing failed/);
@@ -362,6 +398,7 @@ test('T34 (AC-10): pay_x402 ignores forbidden top-level keys + warn-once', async
     const r = await payX402Handler(
       {
         endpoint: '/api/v1/x',
+        payload: { maxBudget: 0.1 },
         OPERATOR_PRIVATE_KEY: INPUT_PK,
         signature: INPUT_SIG,
         authorization: { from: '0xattacker' },
@@ -400,7 +437,7 @@ test('T35 (AC-11): pay_x402 aborts pre-sign when maxAmountRequired exceeds env g
   try {
     const { payX402Handler } = await loadHandlers();
     const r = await payX402Handler(
-      { endpoint: '/api/v1/x' },
+      { endpoint: '/api/v1/x', payload: { maxBudget: 0.1 } },
       fakeConfig({ maxAmountWeiDefault: 1000n }),
     );
     assert.equal(r.ok, false);
@@ -425,7 +462,7 @@ test('T36 (AC-16): logs are JSON-line per event with canonical keys', async () =
   const cap = captureStderr();
   try {
     const { payX402Handler } = await loadHandlers();
-    await payX402Handler({ endpoint: '/api/v1/x' }, fakeConfig());
+    await payX402Handler({ endpoint: '/api/v1/x', payload: { maxBudget: 0.1 } }, fakeConfig());
     // Each line is JSON.parseable.
     let foundSigOk = false;
     for (const line of cap.lines) {
@@ -459,12 +496,21 @@ test('Bonus V7.1: 10 concurrent pay_x402 calls — distinct nonces, log lines al
   const calls = [];
   let settleCounter = 0;
   const fetchFn = async (url, init = {}) => {
+    const u = typeof url === 'string' ? url : url.toString();
+    // WKH-67: intercept Avalanche RPC silently — does NOT count against
+    // probe/settle assertions.
+    if (u.includes('avax.network')) {
+      const hex = '0x' + (10_000_000n).toString(16).padStart(64, '0'); // 10 USDC
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: hex }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    }
     const headers = { ...(init.headers ?? {}) };
     const lowerHeaders = Object.fromEntries(
       Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]),
     );
     calls.push({
-      url: typeof url === 'string' ? url : url.toString(),
+      url: u,
       method: init.method ?? 'GET',
       headers,
     });
@@ -486,7 +532,7 @@ test('Bonus V7.1: 10 concurrent pay_x402 calls — distinct nonces, log lines al
   try {
     const { payX402Handler } = await loadHandlers();
     const results = await Promise.all(
-      Array.from({ length: 10 }, () => payX402Handler({ endpoint: '/api/v1/x' }, fakeConfig())),
+      Array.from({ length: 10 }, () => payX402Handler({ endpoint: '/api/v1/x', payload: { maxBudget: 0.1 } }, fakeConfig())),
     );
     assert.equal(results.filter(r => r.ok).length, 10);
     // Extract nonces from any call that carried a payment-signature header
@@ -528,7 +574,7 @@ test('Bonus V6.2: per-call maxAmountWei wins over env default', async () => {
   try {
     const { payX402Handler } = await loadHandlers();
     const r = await payX402Handler(
-      { endpoint: '/api/v1/x', maxAmountWei: 100000000000n.toString() },
+      { endpoint: '/api/v1/x', payload: { maxBudget: 0.1 }, maxAmountWei: 100000000000n.toString() },
       fakeConfig({ maxAmountWeiDefault: 1000n }),
     );
     assert.equal(r.ok, true, JSON.stringify(r));
@@ -632,7 +678,7 @@ test('T-X4: pay_x402 accepts valid path-only endpoint /api/v1/compose', async ()
   try {
     const { payX402Handler } = await loadHandlers();
     const r = await payX402Handler(
-      { endpoint: '/api/v1/compose' },
+      { endpoint: '/api/v1/compose', payload: { maxBudget: 0.1 } },
       fakeConfig(),
     );
     assert.equal(r.ok, true, JSON.stringify(r));
@@ -687,7 +733,7 @@ test('T-Y1: pay_x402 sign throw via viem returns sanitized error (no internals)'
   process.env.OPERATOR_PRIVATE_KEY = '0xZZ' + 'ee'.repeat(31);
   try {
     const { payX402Handler } = await loadHandlers();
-    const r = await payX402Handler({ endpoint: '/api/v1/x' }, fakeConfig());
+    const r = await payX402Handler({ endpoint: '/api/v1/x', payload: { maxBudget: 0.1 } }, fakeConfig());
     assert.equal(r.ok, false);
     assert.equal(r.stage, 'sign');
     // Sanitized: stable label, NO viem internals leaked.
@@ -717,7 +763,7 @@ test('T-Z1: signature in stderr is truncated to 4 chars (no fingerprint correlat
         { status: 200, body: { kiteTxHash: `0x${i}` } },
       ]);
       globalThis.fetch = fetchFn;
-      const r = await payX402Handler({ endpoint: '/api/v1/x' }, fakeConfig());
+      const r = await payX402Handler({ endpoint: '/api/v1/x', payload: { maxBudget: 0.1 } }, fakeConfig());
       assert.equal(r.ok, true, JSON.stringify(r));
     }
     // Pull all signed-event log lines and assert truncation length.
@@ -844,7 +890,7 @@ test('T-X9 (iter2): pay_x402 still accepts valid /api/v1/compose (no regression)
   const cap = captureStderr();
   try {
     const { payX402Handler } = await loadHandlers();
-    const r = await payX402Handler({ endpoint: '/api/v1/compose' }, fakeConfig());
+    const r = await payX402Handler({ endpoint: '/api/v1/compose', payload: { maxBudget: 0.1 } }, fakeConfig());
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(calls.length, 2);
     const u = new URL(calls[0].url);
@@ -934,7 +980,7 @@ test('T-MNR-iter2-1: chain-mismatch log line keeps canonical event name', async 
   const cap = captureStderr();
   try {
     const { payX402Handler } = await loadHandlers();
-    const r = await payX402Handler({ endpoint: '/api/v1/x' }, fakeConfig());
+    const r = await payX402Handler({ endpoint: '/api/v1/x', payload: { maxBudget: 0.1 } }, fakeConfig());
     assert.equal(r.ok, true, JSON.stringify(r));
     // Find the chain-mismatch log line.
     const mismatchLines = cap.lines
@@ -1016,13 +1062,22 @@ function makeRedirectFetchFake({ when = () => true, status = 302, location = 'ht
 test('T-X11 (iter3): pay_x402 settle 302 → reject with stage:settle, no leak of attacker host', async () => {
   // Probe returns 402 OK, then settle returns 302.
   const accepts = { payTo: '0x' + '99'.repeat(20), maxAmountRequired: '1000' };
-  let callIdx = 0;
+  let gatewayIdx = 0;
   const calls = [];
   const fetchFn = async (url, init = {}) => {
-    const i = callIdx;
-    callIdx += 1;
+    const u = typeof url === 'string' ? url : url.toString();
+    // WKH-67: balance-gate uses Avalanche RPC. Intercept transparently
+    // (do NOT count against gateway probe/settle assertions).
+    if (u.includes('avax.network')) {
+      const hex = '0x' + (1_000_000n).toString(16).padStart(64, '0');
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: hex }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    }
+    const i = gatewayIdx;
+    gatewayIdx += 1;
     calls.push({
-      url: typeof url === 'string' ? url : url.toString(),
+      url: u,
       headers: { ...(init.headers ?? {}) },
       redirect: init.redirect,
       callIdx: i,
@@ -1050,7 +1105,7 @@ test('T-X11 (iter3): pay_x402 settle 302 → reject with stage:settle, no leak o
   const cap = captureStderr();
   try {
     const { payX402Handler } = await loadHandlers();
-    const r = await payX402Handler({ endpoint: '/api/v1/orchestrate' }, fakeConfig());
+    const r = await payX402Handler({ endpoint: '/api/v1/orchestrate', payload: { maxBudget: 0.1 } }, fakeConfig());
     assert.equal(r.ok, false, JSON.stringify(r));
     assert.equal(r.stage, 'settle');
     assert.match(r.error, /redirect/i, `expected error to mention redirect, got: ${r.error}`);
@@ -1161,6 +1216,14 @@ test('T-X14 (iter3): pay_x402 settle 301 (any 3xx) → reject', async () => {
   const accepts = { payTo: '0x' + '99'.repeat(20), maxAmountRequired: '1000' };
   let callIdx = 0;
   const fetchFn = async (url, init = {}) => {
+    const u = typeof url === 'string' ? url : url.toString();
+    // WKH-67: intercept Avalanche RPC silently.
+    if (u.includes('avax.network')) {
+      const hex = '0x' + (1_000_000n).toString(16).padStart(64, '0');
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: hex }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    }
     const i = callIdx;
     callIdx += 1;
     if (i === 0) {
@@ -1182,7 +1245,7 @@ test('T-X14 (iter3): pay_x402 settle 301 (any 3xx) → reject', async () => {
   const cap = captureStderr();
   try {
     const { payX402Handler } = await loadHandlers();
-    const r = await payX402Handler({ endpoint: '/api/v1/compose' }, fakeConfig());
+    const r = await payX402Handler({ endpoint: '/api/v1/compose', payload: { maxBudget: 0.1 } }, fakeConfig());
     assert.equal(r.ok, false);
     assert.equal(r.stage, 'settle');
     assert.match(r.error, /redirect/i);
@@ -1216,7 +1279,7 @@ test('Bonus AC-10: pay_x402 ignores signature/authorization keys in input', asyn
   try {
     const { payX402Handler } = await loadHandlers();
     const r = await payX402Handler(
-      { endpoint: '/api/v1/x', signature: '0xINJECT', authorization: { from: '0xINJECT' } },
+      { endpoint: '/api/v1/x', payload: { maxBudget: 0.1 }, signature: '0xINJECT', authorization: { from: '0xINJECT' } },
       fakeConfig(),
     );
     assert.equal(r.ok, true);
