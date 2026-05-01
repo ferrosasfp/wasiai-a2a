@@ -70,3 +70,76 @@ futuras HUs no repitan el mismo error.
   o cualquier librería HTTP que use `globalThis.fetch` por defecto. El
   patrón "intercept-by-URL-substring" es la única forma sin tocar el
   módulo singleton.
+
+---
+
+### [2026-04-30 — F4 QA] Lección arquitectónica — Decimals separation (AC-14, CD-25)
+
+> **Aplicado por**: QA F4. Esta lección no fue producida en F3 porque
+> el bug raíz ocurrió en WKH-66, no durante la implementación de WKH-67.
+> CD-25 delega explícitamente este cierre a F4.
+
+#### El error que origina esta HU (WKH-66 → WKH-67)
+
+WKH-66 montó el balance-gate del operator wallet en `api/mcp.mjs::runWithBalanceGate`
+reutilizando el argumento `args.maxAmountWei` como `requestedWei` del claim
+atómico. Pero `args.maxAmountWei` fue introducido en WKH-64 AC-11 para el
+**sign guard INBOUND PYUSD** (Kite testnet, 18 decimales). La reutilización
+silenciosa del mismo arg en dos guards con dimensiones radicalmente distintas
+(10^18 vs 10^6) produjo un bug matemáticamente irresoluble: no existe ningún
+valor numérico que satisfaga ambos checks.
+
+Resultado: 100% de los `pay_x402` calls rebotaban con `stage:'balance-gate'`
+en mainnet, deploy funcionalmente broken, rollback manual, cron-job.org
+disabled.
+
+#### Regla (para futuros SDDs y ARs)
+
+**"Params shared across guards must have same unit/decimals — distinct concerns
+get distinct args."**
+
+Concretamente:
+
+- Un argumento de entrada que representa un monto tiene una **dimensión**:
+  (cadena, token, decimales). Ejemplo: `maxAmountWei` es PYUSD-18d-Kite.
+- Si el mismo handler ejecuta DOS guards sobre dos cadenas/tokens con decimales
+  distintos, cada guard DEBE tener su propio argumento — o derivar su input
+  de una fuente dimensional correcta.
+- PROHIBIDO reutilizar el mismo argumento posicional/named como input de dos
+  guards que operen en dimensiones distintas (CD-20).
+
+#### Patrón AR/CR para detectar esta clase de bug
+
+Cuando un PR toca payment guards en `src/handlers.mjs` o `api/mcp.mjs`:
+
+1. **Grep `args.maxAmountWei`** — verificar que SÓLO aparece en el cap guard
+   PYUSD (sección `[2]` del handler). Si aparece en el balance-gate, BLOQUEANTE.
+2. **Grep `payload.maxBudget`** — verificar que SÓLO aparece en el balance-gate
+   (sección `[1.5]`). Si aparece en el sign/settle, BLOQUEANTE.
+3. **Grep cualquier argumento de tipo `wei`** que se pase a DOS llamadas de
+   check distintas. Buscar `checkBalanceWithClaim` y el cap guard, verificar
+   que sus inputs provienen de fuentes distintas.
+4. **Preguntar en cada guard**: ¿el input viene de la cadena correcta? ¿los
+   decimales coinciden con el contrato del módulo receptor?
+
+#### CD para futuros SDDs
+
+> **CD-DEC-01 (para propagar a SDDs futuros)**: PROHIBIDO usar el mismo
+> argumento (named param o positional) como input de dos guards/checks que
+> operen en cadenas, tokens o decimales distintos. Cada guard SHALL recibir
+> su input desde una source-of-truth dimensional consistente y DIFERENTE.
+> AR/CR DEBE grep cada guard y cruzar la fuente de su input con la dimensión
+> documentada del contrato receptor. Si hay cross-uso, el finding es
+> BLOQUEANTE.
+
+#### Cómo WKH-67 lo resuelve
+
+Approach A (cementado en F1): cada guard usa su propia dimensión:
+
+| Guard | Input | Fuente | Cadena | Decimales |
+|-------|-------|--------|--------|-----------|
+| Balance-gate [1.5] | `requestedWei` | `usdcToWei(payload.maxBudget)` | Avalanche C-Chain mainnet | USDC 6d |
+| Sign guard [2] | `guard` | `resolveMaxAmountGuard(maxAmountWei, ...)` | Kite testnet | PYUSD 18d |
+
+Grep de ambos en el PR confirma zero cross-uso (handlers.mjs verificado en
+F4 QA).
