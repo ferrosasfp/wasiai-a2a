@@ -48,6 +48,14 @@ import {
   getPaymentQuoteHandler,
   payX402Handler,
 } from '../src/handlers.mjs';
+// WKH-66 W2.5 (insert-only DT-J): rate limit + balance gate integration.
+import { getKvClient } from '../src/kv-client.mjs';
+import { checkRateLimit, hashBearer } from '../src/rate-limit.mjs';
+import {
+  checkBalanceWithClaim,
+  releaseClaim,
+} from '../src/balance-guard.mjs';
+import { getAvaxClient } from '../src/avax-client.mjs';
 
 // ── JSON helper for short error replies ────────────────────────────────────
 function jsonError(status, body) {
@@ -95,6 +103,96 @@ function asToolResult(value) {
   return { content: [{ type: 'text', text: JSON.stringify(value) }] };
 }
 
+// ── WKH-66 W2.5: balance gate wrapper for pay_x402 (DT-J §11) ─────────────
+//
+// Wraps payX402Handler with:
+//   1. Pre-call: checkBalanceWithClaim — fail-secure on KV/RPC down.
+//   2. try: invoke handler (untouched src/handlers.mjs).
+//   3. finally: releaseClaim (best-effort, never throws).
+//
+// The balance gate runs ONLY for pay_x402. discover_agents and
+// get_payment_quote bypass this wrapper (they don't sign).
+//
+// Inputs derived from cfg + env:
+//   - operator      : viem privateKeyToAccount(cfg.operatorPrivateKey).address
+//   - chainId       : MCP_OPERATOR_CHAIN_ID (default 43114 mainnet)
+//   - usdcAddress   : AVALANCHE_USDC_ADDRESS (default canonical Circle USDC)
+//   - rpcUrl        : AVALANCHE_RPC_URL
+//   - threshold     : MCP_BALANCE_THRESHOLD_USDC (default 0.50)
+//   - requestedWei  : args.maxAmountWei (cast to BigInt)
+export async function runWithBalanceGate(args, cfg, runHandler) {
+  // cfg.operatorAddress is already derived inside loadConfig (which has
+  // already run on every request — see step 5). We re-use it here so we
+  // never need to touch the PK in the balance-gate code path (defense in
+  // depth: the PK stays in process.env + sign.mjs only).
+  const operator = cfg.operatorAddress;
+  if (!operator) {
+    log.error('mcp.balance.operator-derive-failed', {
+      stage: 'balance-gate', error: 'cfg.operatorAddress missing',
+    });
+    return { ok: false, stage: 'balance-gate', error: 'operator derivation failed' };
+  }
+
+  const chainId = parseInt(process.env.MCP_OPERATOR_CHAIN_ID ?? '43114', 10);
+  const usdcAddress = process.env.AVALANCHE_USDC_ADDRESS
+    ?? '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E';
+  const rpcUrl = process.env.AVALANCHE_RPC_URL
+    ?? 'https://api.avax.network/ext/bc/C/rpc';
+
+  // MNR-AR-2: validate MCP_BALANCE_THRESHOLD_USDC before use. parseFloat('abc')
+  // returns NaN, parseFloat('-1') returns -1 — both would silently bypass the
+  // gate (NaN comparisons always false; negative thresholds approve anything).
+  const thresholdRaw = process.env.MCP_BALANCE_THRESHOLD_USDC ?? '0.50';
+  const threshold = parseFloat(thresholdRaw);
+  if (!Number.isFinite(threshold) || threshold < 0) {
+    log.error('mcp.balance-gate.invalid-threshold', {
+      thresholdRaw, stage: 'config', ok: false,
+    });
+    return { ok: false, stage: 'balance-gate', error: 'invalid threshold config' };
+  }
+
+  let requestedWei;
+  try {
+    if (args?.maxAmountWei == null) {
+      // No amount provided — we can't reserve a specific claim. Reject early
+      // rather than gate against a default that hides operator drain.
+      return {
+        ok: false, stage: 'balance-gate',
+        error: 'maxAmountWei required (balance gate cannot reserve a claim without it)',
+      };
+    }
+    requestedWei = BigInt(args.maxAmountWei);
+  } catch {
+    return { ok: false, stage: 'balance-gate', error: 'maxAmountWei must be a bigint-parseable string' };
+  }
+
+  const kv = getKvClient();
+  // MNR-CR-3 + MNR-CR-4: reuse the singleton viem PublicClient instead of
+  // instantiating one per request.
+  const publicClient = getAvaxClient(rpcUrl);
+
+  const gate = await checkBalanceWithClaim({
+    operator,
+    chainId,
+    requestedWei,
+    threshold,
+    kvClient: kv,
+    publicClient,
+    usdcAddress,
+  });
+  if (!gate.ok) return gate;
+
+  try {
+    return await runHandler();
+  } finally {
+    await releaseClaim({
+      claimKey: gate.claimKey,
+      requestedWei,
+      kvClient: kv,
+    });
+  }
+}
+
 // ── Build a fresh Server bound to the shared handlers ─────────────────────
 //
 // One Server instance per request (stateless, CD-8). The handlers below
@@ -122,8 +220,10 @@ function buildServer(cfg) {
           return asToolResult(r);
         }
         case 'pay_x402': {
-          const r = await payX402Handler(args, cfg);
-          return asToolResult(r);
+          // WKH-66 W2.5 — Balance gate + atomic claim wrapper (DT-J §11).
+          // Insert-only: payX402Handler itself stays untouched (CD-1).
+          const gateResult = await runWithBalanceGate(args, cfg, () => payX402Handler(args, cfg));
+          return asToolResult(gateResult);
         }
         default:
           return asToolResult({ ok: false, stage: 'input', error: `unknown tool: ${name}` });
@@ -212,7 +312,39 @@ export async function webHandler(request) {
     return jsonError(500, { error: 'server error' });
   }
 
-  // 4. Config (CD-7, AC-7) — only after auth so unauth callers never
+  // 4. WKH-66 W2.5 — Rate limit (DT-J §11). Runs AFTER bearer auth so an
+  //    unauthenticated caller never touches KV. Fail-open: KV down → allow,
+  //    so an Upstash outage doesn't take the MCP offline. The bearer hash
+  //    is sha256 trunc 16 (CD-14) so KV inspector can't enumerate bearers.
+  //
+  //    Defaults match .env.example: 5 req/min per bearer, 60s window.
+  try {
+    const kv = getKvClient();
+    const presented = (request.headers.get('authorization') ?? '').replace(/^Bearer\s+/, '');
+    const bearerHash16 = hashBearer(presented);
+    const perMin = parseInt(process.env.MCP_RATE_LIMIT_PER_MIN ?? '5', 10);
+    const windowSec = parseInt(process.env.MCP_RATE_LIMIT_WINDOW_SEC ?? '60', 10);
+    const rl = await checkRateLimit({ bearerHash16, kvClient: kv, perMin, windowSec });
+    if (!rl.ok) {
+      log.warn('mcp.http.rate-limited', { stage: 'rate-limit', retryAfter: rl.retryAfter });
+      return new Response(
+        JSON.stringify({ error: 'rate limit exceeded', retryAfter: rl.retryAfter }),
+        {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'Retry-After': String(rl.retryAfter),
+          },
+        },
+      );
+    }
+  } catch (e) {
+    // Defensive: rate-limit module is fail-open by design, but if anything
+    // upstream (getKvClient, hashBearer) throws we MUST NOT 500 the request.
+    log.warn('mcp.http.rate-limit-error', { stage: 'rate-limit', error: e?.message ?? 'unknown' });
+  }
+
+  // 5. Config (CD-7, AC-7) — only after auth so unauth callers never
   //    trigger DNS / SSRF validation work.
   let cfg;
   try {

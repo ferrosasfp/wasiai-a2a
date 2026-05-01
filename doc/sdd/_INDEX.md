@@ -57,3 +57,4 @@
 | 064 | 2026-04-28 | Forward-key middleware — llamadas internas v2 → wasiai-a2a (WKH-65) | security | FAST+AR | DONE | feat/064-wkh-65-a2a-forward-key ([done-report.md](064-wkh-65-a2a-forward-key/done-report.md)) |
 | 069 | 2026-04-30 | [MCP-X402] Build wasiai-x402 MCP server for Claude Console managed agents (WKH-64) | feature | QUALITY | DONE | feat/069-wkh-64-mcp-x402 ([done-report.md](069-wkh-64-mcp-x402/done-report.md)) |
 | 070 | 2026-04-30 | [MCP-VERCEL] HTTP transport for wasiai-x402 + Vercel remote deploy (WKH-65) | feature | FAST+AR | DONE | feat/070-wkh-65-mcp-vercel-deploy ([done-report.md](070-wkh-65-mcp-vercel-deploy/done-report.md)) |
+| 071 | 2026-04-29 | [PROD-HARDENING] wasiai-x402 MCP — concurrency + monitoring + chaos tests (WKH-66) | feature | QUALITY | DONE | feat/071-wkh-66-prod-hardening ([done-report.md](071-wkh-66-prod-hardening/done-report.md)) |

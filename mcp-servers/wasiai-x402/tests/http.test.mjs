@@ -619,3 +619,145 @@ test('T-FIX-3 (MNR-CR-6): 401 short-circuits BEFORE loadConfig (no DNS / SSRF va
     cap.restore();
   }
 });
+
+// ──────────────────────────────────────────────────────────────────────────
+// WKH-66 W2.6 — rate-limit + balance-gate integration (T-HTTP-13..15)
+// ──────────────────────────────────────────────────────────────────────────
+
+import { setKvClientForTesting, resetKvClient } from '../src/kv-client.mjs';
+import { createKvMock } from './_mocks/kv-mock.mjs';
+
+test('T-HTTP-13 (W2.6): rate limit fires after 5 req/min for same bearer', async () => {
+  const kv = createKvMock();
+  setKvClientForTesting(kv);
+  process.env.MCP_RATE_LIMIT_PER_MIN = '5';
+  process.env.MCP_RATE_LIMIT_WINDOW_SEC = '60';
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    // Fire 5 OK calls (tools/list — no fetch needed).
+    for (let i = 0; i < 5; i++) {
+      const req = jsonRpcRequest({ jsonrpc: '2.0', id: i + 1, method: 'tools/list', params: {} });
+      const res = await handler(req);
+      assert.equal(res.status, 200, `call ${i + 1}/5 should be 200`);
+    }
+    // 6th call → 429.
+    const req6 = jsonRpcRequest({ jsonrpc: '2.0', id: 6, method: 'tools/list', params: {} });
+    const res6 = await handler(req6);
+    assert.equal(res6.status, 429);
+    const body = await res6.json();
+    assert.equal(body.error, 'rate limit exceeded');
+    assert.ok(body.retryAfter > 0, `retryAfter must be > 0, got ${body.retryAfter}`);
+    assert.ok(res6.headers.get('retry-after'), 'Retry-After header must be set');
+  } finally {
+    resetKvClient();
+    delete process.env.MCP_RATE_LIMIT_PER_MIN;
+    delete process.env.MCP_RATE_LIMIT_WINDOW_SEC;
+    cap.restore();
+  }
+});
+
+test('T-HTTP-14 (W2.6): balance gate rejects pay_x402 sub-threshold', async () => {
+  // Mock everything to keep this in-process: KV + viem readContract.
+  const kv = createKvMock();
+  setKvClientForTesting(kv);
+  process.env.MCP_BALANCE_THRESHOLD_USDC = '0.5';
+  process.env.AVALANCHE_RPC_URL = 'https://api.avax.network/ext/bc/C/rpc';
+  process.env.AVALANCHE_USDC_ADDRESS = '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E';
+  process.env.MCP_OPERATOR_CHAIN_ID = '43114';
+
+  // Stub viem.createPublicClient.readContract by intercepting fetch to the
+  // RPC endpoint. The Avalanche RPC client uses globalThis.fetch under the
+  // hood (viem http transport). We respond with a 0.4-USDC balance (below
+  // 0.5 threshold).
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).includes('avax.network')) {
+      // 0.4 USDC = 400_000 wei. Encode as 32-byte hex (eth_call return).
+      const hex = '0x' + (400000).toString(16).padStart(64, '0');
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: hex }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return origFetch(url, init);
+  };
+
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    const req = jsonRpcRequest({
+      jsonrpc: '2.0', id: 99, method: 'tools/call',
+      params: {
+        name: 'pay_x402',
+        arguments: {
+          endpoint: 'https://app.wasiai.io/api/v1/echo',
+          maxAmountWei: '100000', // 0.1 USDC
+        },
+      },
+    });
+    const res = await handler(req);
+    assert.equal(res.status, 200);
+    const text = await res.text();
+    let payload;
+    try { payload = JSON.parse(text); }
+    catch {
+      const dataLine = text.split('\n').find(l => l.startsWith('data:'));
+      payload = JSON.parse(dataLine.slice(5).trim());
+    }
+    const inner = JSON.parse(payload.result.content[0].text);
+    assert.equal(inner.ok, false);
+    assert.equal(inner.stage, 'balance-gate');
+    assert.match(inner.error, /below threshold/);
+  } finally {
+    globalThis.fetch = origFetch;
+    resetKvClient();
+    delete process.env.MCP_BALANCE_THRESHOLD_USDC;
+    cap.restore();
+  }
+});
+
+test('T-HTTP-15 (W2.6): discover_agents NO pasa por balance gate', async () => {
+  // Even with balance=0 stubbed in RPC, discover_agents must succeed.
+  const kv = createKvMock();
+  setKvClientForTesting(kv);
+  process.env.MCP_BALANCE_THRESHOLD_USDC = '0.5';
+
+  const fetchCalls = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    fetchCalls.push({ url: String(url), init });
+    if (String(url).includes('avax.network')) {
+      // Should NOT be called for discover_agents — but answer 0n if it is.
+      const hex = '0x' + (0).toString(16).padStart(64, '0');
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: hex }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    // Gateway capabilities response.
+    return new Response(JSON.stringify({ agents: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    const req = jsonRpcRequest({
+      jsonrpc: '2.0', id: 100, method: 'tools/call',
+      params: { name: 'discover_agents', arguments: { query: 'echo' } },
+    });
+    const res = await handler(req);
+    assert.equal(res.status, 200);
+    // Sanity: discover_agents must NOT have triggered an RPC eth_call.
+    const rpcCalls = fetchCalls.filter((c) => c.url.includes('avax.network'));
+    assert.equal(rpcCalls.length, 0, 'discover_agents must not invoke balance RPC');
+  } finally {
+    globalThis.fetch = origFetch;
+    resetKvClient();
+    delete process.env.MCP_BALANCE_THRESHOLD_USDC;
+    cap.restore();
+  }
+});

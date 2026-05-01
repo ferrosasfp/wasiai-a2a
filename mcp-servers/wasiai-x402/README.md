@@ -235,6 +235,98 @@ dev and for the original "Deploy to Claude Console managed env" path above.
 
 ---
 
+## Operations runbook
+
+> Added in WKH-66. See `doc/sdd/071-wkh-66-prod-hardening/` for the full SDD
+> + Story File. All scripts here live under `mcp-servers/wasiai-x402/scripts/`.
+
+### (a) Rotar el bearer token (`MCP_BEARER_TOKEN`)
+
+```bash
+cd mcp-servers/wasiai-x402
+node scripts/rotate-bearer.mjs
+# Stdout: <new bearer hex 64 chars>
+# Stderr: instrucciones vercel env add/rm
+```
+
+Después de rotar:
+
+1. `vercel env rm MCP_BEARER_TOKEN production` (valor anterior)
+2. `vercel env add MCP_BEARER_TOKEN production` (paste nuevo)
+3. `vercel deploy --prod` (rollout)
+
+> El script refuses to print on a non-TTY. Si lo corrés desde CI, vas a ver
+> `Refusing to print bearer to non-TTY` y exit 1 — eso es by-design.
+
+### (b) Refrescar sesión MCP
+
+```bash
+MCP_BEARER_TOKEN=<token> MCP_DEPLOY_URL=https://wasiai-x402-mcp.vercel.app \
+  node scripts/refresh-session.mjs
+# Verifica que /api/mcp tools/list responde 200 con 3 tools.
+```
+
+Salida `{ "ok": true, "toolCount": 3 }` → el MCP está vivo. Cualquier otra
+salida + exit ≠ 0 → escalá.
+
+### (c) Alert webhook disparó — qué hacer
+
+El alert significa balance USDC < `MCP_BALANCE_THRESHOLD_USDC` (default 0.50)
+en mainnet operator wallet sobre Avalanche C-Chain.
+
+1. Verificar balance actual: `node scripts/refresh-session.mjs` (smoke).
+2. Rellenar wallet: enviar USDC a operator address from exchange/faucet.
+3. **NOTA CRÍTICA (CD-16)**: el alert mide SOLO USDC ERC-20. El operator
+   también necesita AVAX para gas (no monitoreado en esta HU). Verificar
+   manualmente con explorador.
+
+### (d) Deshabilitar cron temporariamente
+
+```bash
+# En cron-job.org dashboard → seleccionar job → Disable
+# O via API:
+curl -X PATCH https://api.cron-job.org/jobs/<jobId> \
+  -H "Authorization: Bearer $CRONJOB_ORG_API_TOKEN" \
+  -d '{"job": {"enabled": false}}'
+```
+
+### (e) Bearer TTL
+
+- Recomendado: rotar cada **90 días**.
+- Última rotación: <FECHA — actualizar manualmente cada vez>.
+
+### (f) Provisionar los 2 cron jobs (idempotente)
+
+```bash
+export CRONJOB_ORG_API_TOKEN="<token from cron-job.org account>"
+export MCP_DEPLOY_URL="https://wasiai-x402-mcp.vercel.app"
+export CRON_SECRET="<the secret used in Vercel env>"
+node scripts/setup-cronjob.mjs
+# Imprime 2 jobIds + nextExecution
+```
+
+Re-ejecutar el script no duplica jobs (idempotente por `title` — CD-20). Si
+ya existen, hace PATCH; si no existen, hace PUT.
+
+### (g) Verificar status de los jobs
+
+- Dashboard: https://cron-job.org → Jobs.
+- API:
+  ```bash
+  curl -H "Authorization: Bearer $CRONJOB_ORG_API_TOKEN" \
+       https://api.cron-job.org/jobs
+  ```
+
+### (h) Desactivar temporariamente via API
+
+```bash
+curl -X PATCH https://api.cron-job.org/jobs/<jobId> \
+  -H "Authorization: Bearer $CRONJOB_ORG_API_TOKEN" \
+  -d '{"job": {"enabled": false}}'
+```
+
+---
+
 ## License & reporting
 
 Internal — see repository root LICENSE.
