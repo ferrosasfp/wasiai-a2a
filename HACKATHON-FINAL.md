@@ -237,6 +237,83 @@ Rollback: revert env vars → automatic redeploy → back to testnet-only behavi
 
 ---
 
+## Relationship to Kite Passport — complementary layers, not alternatives
+
+After Kite mainnet launched as a sovereign Avalanche L1 ([Avalanche blog, 2026-04-28](https://www.avax.network/about/blog/1-9-billion-interactions-later-it-goes-live)), positioning matters: **WasiAI A2A is the agent-to-agent settlement router that complements Kite Passport's user-to-agent funding layer**.
+
+### What each layer owns
+
+| Concern | Kite Passport | WasiAI A2A (this submission) |
+|---------|---------------|------------------------------|
+| User-side wallet (passkey, identity) | ✅ Owns it | ❌ Not in scope |
+| Per-session sandbox (budget + TTL + tx limit) | ✅ Owns it | ❌ Server-side balance gate only |
+| User-approved spending | ✅ passkey signature | ❌ Operator-managed today |
+| Agent → Agent payment | ❌ Out of scope | ✅ x402 + EIP-3009 |
+| Multi-agent discovery (capabilities API) | ❌ Out of scope | ✅ 19 agents, `/api/v1/capabilities` |
+| Pipeline orchestration (compose) | ❌ Out of scope | ✅ `/compose` + `/orchestrate` |
+| Cross-chain settlement | ❌ Single-chain | ✅ Kite ↔ Avalanche |
+
+**Analogy**: Kite Passport is **Apple Pay** (user authorizes a card to spend at merchants). WasiAI A2A is **Stripe Connect for AI agents** (multi-merchant marketplace + routing + settlement).
+
+Neither replaces the other. Combined, they form the full **agent-first commerce stack**:
+
+```
+User (human)
+  ↓ creates Kite Passport session ($X budget, T TTL)        ← Kite Passport
+  ↓ funds the agent via session
+Agent (Sonnet 4.6 / Claude Console / custom)
+  ↓ pay_x402 (autonomous, within session constraints)        ← MCP wasiai-x402
+WasiAI A2A (this submission)                                  ← OUR LAYER
+  ↓ discovers + composes agents from registry
+  ↓ x402 settle on Kite (PYUSD/USDC.e)
+  ↓ dispatches USDC outbound to N agents on Avalanche/Kite
+N downstream agents (chainlink-price, sentiment, profiler, …)
+```
+
+### Why we built this layer separately
+
+- Kite Passport's session model assumes **1 agent → 1 merchant** (e.g., Bryan Johnson sleep stack → Amazon). Our use case is **1 agent → N agents** (multi-step pipeline with cross-chain micropayments).
+- Until you have an agent-to-agent settlement router (us), Kite Passport sessions can't compose multi-agent workflows.
+- Until you have user-side identity/sessions (Kite Passport), our `OPERATOR_PRIVATE_KEY` model is single-tenant.
+
+### Roadmap — Kite Passport integration spike
+
+Tracked as **WKH-68** ([Jira](https://ferrosasfp.atlassian.net/browse/WKH-68)). Goal: replace `OPERATOR_PRIVATE_KEY` with **per-user Kite Passport sessions** so each user funds their own agent budget. WasiAI A2A becomes a fully Kite-native marketplace router.
+
+---
+
+## Kite mainnet (Apr 28, 2026) — what it means for this stack
+
+Kite went mainnet 3 days before our hackathon submission. Quick read on what changes:
+
+| Hackathon-relevant fact | Source: Avalanche blog |
+|--------------------------|-----------------------|
+| Sovereign Avalanche L1 dedicada para agent commerce | sub-second finality, predictable fees under load |
+| 1.9 billion testnet interactions, peak 30M calls/day | Battle-tested at scale before mainnet flip |
+| $33M raised — PayPal Ventures + General Catalyst lead | + Coinbase Ventures, Avalanche Foundation |
+| **PayPal piloting** + **Shopify integrations** in progress | Real commerce partnerships |
+| Stablecoin-based settlement on Kite L1 | PYUSD canonical (matches our inbound) |
+
+### What this hackathon submission covers vs. the full Kite mainnet story
+
+✅ **Already aligned**:
+- We use **PYUSD** as inbound asset (canonical Kite stablecoin, PayPal-backed)
+- Code-only mainnet support already merged (PR #57 + #34, env-gated default OFF — see "Mainnet readiness" above)
+- Architecture mirrors Kite's "agent-first" thesis (autonomous agents, per-call settlement, no-human-in-the-loop)
+
+📋 **Decisions pending (post-hackathon roadmap)**:
+- Whether to keep cross-chain (Kite → Avalanche) for diversity OR migrate fully to Kite mainnet single-chain
+- Adopt Kite Passport for user-side authorization (replaces operator-managed model — see WKH-68 above)
+- Kite mainnet RPC SLA + monitoring (production grade requires paid RPC tier)
+
+### Why our work is the kind of usage Kite is selling to
+
+The blog highlights agent-driven economic behavior: per API call, accessing data, completing tasks that require settlement. Our demo (Sonnet 4.6 administered agent paying $0.061 USDC across 3 agents in one autonomous request) is **literally that pattern**, with anti-hallucination receipts proving it's not theatrical.
+
+This is not speculative — it's deployed, costs real money, and the operator wallet balance changes are verifiable on Snowtrace.
+
+---
+
 ## What's NOT in this hackathon submission
 
 - Mainnet activation (config staged but flag default OFF — needs funded wallets)
