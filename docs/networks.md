@@ -86,21 +86,29 @@ posts to its facilitator.
 
 ---
 
-## Discovery `chain` filter
+## Discovery and chain filtering
 
-`/discover` accepts an optional `chain` query parameter. The values that
-the service understands today (mirrored 1:1 from the upstream wasiai-v2
-schema) are:
+`/discover` does **not** accept a `chain` query parameter at the query
+layer — the supported query parameters are `q`, `capabilities`,
+`maxPrice`, `minReputation`, `limit`, `registry`, `verified` and
+`includeInactive` (see
+[api-reference.md](./api-reference.md#discovery)). The agent's
+`payment.chain` field on each result is **informational** — it indicates
+which chain the agent expects to be paid on, but the discovery service
+does not filter results by chain.
 
-- `kite-testnet` — agents priced on Kite testnet (chainId `2368`).
-- `kite-mainnet` — agents priced on Kite mainnet (chainId `2366`).
-- `avalanche-testnet` — agents priced on Avalanche Fuji (chainId `43113`).
-- `avalanche-mainnet` — agents priced on Avalanche C-Chain (chainId
-  `43114`).
+If you want chain-restricted results, the supported approaches today are:
+
+- **Filter by registry.** Use `?registry=<name>` to scope results to a
+  registry whose listed agents are all priced on the same chain (this is
+  registry-curation, not a chain-aware filter).
+- **Post-filter client-side.** Read each result's `payment.chain` field
+  (or the `payment.network` x402 tag) and drop rows that do not match
+  your wallet's funded chain.
 
 The downstream payment chain (Fuji vs C-Chain) is decided per-call by the
-gateway based on the operator env flags above; the discovery filter is
-informational and helps agents express their preferred settlement chain.
+gateway based on the operator env flags above and is independent of any
+discovery-side filtering.
 
 ---
 

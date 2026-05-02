@@ -40,6 +40,11 @@ the gateway debits your tracked budget and skips the 402 challenge.
 A2A keys give you a tracked budget, scoped permissions and a stable
 identity. The endpoint is rate-limited per IP.
 
+> **Note on token format.** The `wasi_a2a_` prefix on the issued token is
+> **case-sensitive** (lowercase only). The HTTP `Bearer` scheme keyword in
+> the `Authorization` header is **case-insensitive** (`Bearer`, `bearer`,
+> `BEARER` are all accepted by the middleware).
+
 ```bash
 curl -X POST <YOUR_GATEWAY_URL>/auth/agent-signup \
   -H 'content-type: application/json' \
@@ -186,20 +191,84 @@ response, do not hardcode. The fields you need to sign with are:
   [networks.md](./networks.md)).
 - `asset` → ERC-20 token contract address.
 - `payTo` → the operator wallet that will receive the funds.
-- `maxAmountRequired` → atomic units; for PYUSD/USDC (6 decimals) this
-  is `1000000` for 1.00 token. The default placeholder
-  `1000000000000000000` (18 decimals) is overridden per route by the
-  active payment adapter; trust the value you receive.
+- `maxAmountRequired` → atomic units of the token (string).
 - `maxTimeoutSeconds` → how many seconds your `validBefore` can sit
   in the future.
 
+> **WARNING — atomic units, NOT 18-decimal wei.**
+>
+> The `value` you sign in the EIP-712 message is **always atomic units of
+> the actual ERC-20 token**, which on this protocol's supported assets
+> (PYUSD on Kite testnet, USDC.e on Kite mainnet) means **6 decimals**:
+>
+> - `1.00 PYUSD` = `'1000000'` (six zeros).
+> - `0.5 USDC` = `'500000'` (NOT `'500000000000000000'`).
+> - `1.50 PYUSD` = `'1500000'`.
+>
+> If you sign 1 PYUSD as `'1000000000000000000'` (18 decimals, the ETH/wei
+> convention) you are authorizing **one trillion PYUSD** — the wallet
+> balance check will fail and the facilitator will reject with `402 /
+> insufficient balance`, but you should not be writing values that high in
+> the first place.
+>
+> **Known quirk.** The default placeholder you may see in the 402 payload
+> as `1000000000000000000` (18 zeros) is left over from the historical
+> wei-style env default in `KITE_PAYMENT_AMOUNT` — it does not reflect the
+> token's actual decimal count. The values you sign, and that the
+> facilitator validates, are still 6-decimal atomic units. Documented
+> alignment work is tracked separately; for now, **trust the token's
+> documented decimals (see [networks.md](./networks.md)), not the digit
+> count of `maxAmountRequired`**.
+
 ---
 
-## Step 4 — Sign EIP-3009 `TransferWithAuthorization`
+## Step 4 — Sign EIP-712
 
-Sign an EIP-712 typed message against the asset contract. The token
-domain (`name`, `version`) is part of the asset's ERC-20 implementation;
-for the assets WasiAI supports today see [networks.md](./networks.md).
+The EIP-712 typed message you sign depends on which **facilitator mode**
+the gateway you are calling is running. WasiAI supports two:
+
+| Mode | When | `primaryType` | `verifyingContract` |
+|------|------|---------------|---------------------|
+| `pieverse` | **Default in production today**, including `app.wasiai.io`. | `Authorization` | Pieverse facilitator contract `0x12343e649e6b2b2b77649DFAb88f103c02F3C78b` |
+| `x402` | Canonical x402 spec; opt-in via `KITE_FACILITATOR_MODE=x402` on the server. | `TransferWithAuthorization` | The asset's ERC-20 token contract (e.g. PYUSD / USDC.e) |
+
+Both modes sign the **same six fields** (`from`, `to`, `value`,
+`validAfter`, `validBefore`, `nonce`) and produce a `payment-signature`
+header in the same wire format. The differences are the EIP-712 domain
+and the `primaryType` — get those wrong and the facilitator returns
+`402 / signature invalid`.
+
+The reference implementation lives at
+`src/adapters/kite-ozone/payment.ts:62-64` (mode selector) and
+`payment.ts:353-401` (the two signing branches).
+
+### Detecting the active facilitator mode
+
+Today there is no dedicated discovery endpoint that tells you the mode —
+you infer it from environment knowledge or from the 402 response:
+
+- **Operator-side knowledge.** If you (or your platform) operates the
+  gateway, the active mode is whatever `KITE_FACILITATOR_MODE` evaluates
+  to at startup. Unset → `pieverse`. The hosted `app.wasiai.io` runs
+  `pieverse` by default at the time of writing; track changes via the
+  release notes or check the running service's env.
+- **Response shape.** The 402 `accepts[0]` payload is identical in both
+  modes (this is by design — clients should only need one parser), so it
+  alone does not disambiguate. The `description` field on `accepts[0]`
+  will not change between modes either. If you cannot ask the operator,
+  **try `pieverse` first** (today's prod default). If verification fails
+  with `signature invalid` and you've ruled out domain/value drift, retry
+  with the `x402` recipe below.
+- **Roadmap.** Adding an explicit `extra.facilitatorMode` field to the
+  `accepts[0]` payload is on the backlog; until then this disambiguation
+  is out-of-band.
+
+### 4A — `pieverse` mode (today's production default)
+
+Sign `primaryType: 'Authorization'` against the **Pieverse facilitator
+contract** (NOT the token contract). The domain `name`/`version` are the
+ERC-20 token's domain (`PYUSD`/`1` on Kite testnet, `USDC`/`2` on Kite
+mainnet — see [networks.md](./networks.md#eip-712-domain-inbound)).
 
 ```ts
 import { createWalletClient, http } from 'viem';
@@ -215,12 +284,14 @@ const wallet = createWalletClient({
 
 // Pull these from the 402 response you got in step 3:
 const accepts = /* parsed accepts[0] */ {
-  asset: '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9' as const,
+  asset: '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9' as const, // PYUSD testnet
   payTo: '0x0000000000000000000000000000000000000000' as const, // <- from 402
-  maxAmountRequired: '1000000', // 1.00 PYUSD (6 decimals)
+  maxAmountRequired: '1000000', // 1.00 PYUSD — 6 decimals (see WARNING above)
   maxTimeoutSeconds: 60,
   network: 'eip155:2368',
 };
+
+const PIEVERSE_FACILITATOR = '0x12343e649e6b2b2b77649DFAb88f103c02F3C78b' as const;
 
 const validAfter = 0n;
 const validBefore = BigInt(Math.floor(Date.now() / 1000) + accepts.maxTimeoutSeconds);
@@ -229,10 +300,46 @@ const nonce = `0x${crypto.getRandomValues(new Uint8Array(32))
 
 const signature = await wallet.signTypedData({
   domain: {
-    name: 'PYUSD',                 // asset EIP-712 domain name (testnet)
-    version: '1',                  // adapter default; check 402 payload if present
+    name: 'PYUSD',                       // token EIP-712 domain name (testnet)
+    version: '1',                        // token EIP-712 domain version (testnet)
     chainId: 2368,
-    verifyingContract: accepts.asset,
+    verifyingContract: PIEVERSE_FACILITATOR, // <- facilitator, NOT the token
+  },
+  types: {
+    Authorization: [
+      { name: 'from', type: 'address' },
+      { name: 'to', type: 'address' },
+      { name: 'value', type: 'uint256' },
+      { name: 'validAfter', type: 'uint256' },
+      { name: 'validBefore', type: 'uint256' },
+      { name: 'nonce', type: 'bytes32' },
+    ],
+  },
+  primaryType: 'Authorization',
+  message: {
+    from: account.address,
+    to: accepts.payTo,
+    value: BigInt(accepts.maxAmountRequired),
+    validAfter,
+    validBefore,
+    nonce,
+  },
+});
+```
+
+### 4B — `x402` mode (canonical spec; opt-in)
+
+Sign `primaryType: 'TransferWithAuthorization'` against the **asset's
+ERC-20 token contract** (whatever `accepts.asset` is). Identical struct
+fields, different domain and primaryType.
+
+```ts
+const signature = await wallet.signTypedData({
+  domain: {
+    name: 'PYUSD',
+    version: '1',
+    chainId: 2368,
+    verifyingContract: accepts.asset, // <- the token, NOT the facilitator
   },
   types: {
     TransferWithAuthorization: [
@@ -254,7 +361,16 @@ const signature = await wallet.signTypedData({
     nonce,
   },
 });
+```
 
+### Build the `payment-signature` header (both modes)
+
+The wire format the middleware expects is **base64(JSON)** with at
+minimum `{ authorization, signature }` and optionally `network` (the
+facilitator uses it to validate the chain match). The shape is identical
+across modes:
+
+```ts
 const paymentPayload = {
   authorization: {
     from: account.address,
@@ -270,13 +386,9 @@ const paymentPayload = {
 const paymentHeader = Buffer.from(JSON.stringify(paymentPayload)).toString('base64');
 ```
 
-The wire format the middleware expects is **base64(JSON)** with at
-minimum `{ authorization, signature }` and optionally `network` (which
-the facilitator uses to validate the chain match).
-
-Mainnet domain values differ — see [networks.md](./networks.md) for the
-USDC.e (Kite mainnet) domain (`name: 'USDC'`, `version: '2'`,
-`chainId: 2366`).
+Mainnet domain values differ — see
+[networks.md](./networks.md#eip-712-domain-inbound) for the USDC.e (Kite
+mainnet) domain (`name: 'USDC'`, `version: '2'`, `chainId: 2366`).
 
 ---
 
