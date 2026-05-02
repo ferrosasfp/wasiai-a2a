@@ -1,0 +1,127 @@
+# Networks Supported
+
+WasiAI A2A is **chain-adaptive**: a single deployment can settle inbound
+payments on one chain and outbound (downstream) payments to agents on a
+different chain. This page lists every chain, asset, contract address and
+explorer that the service knows about today.
+
+> **Status legend**
+> - **Active by default** — works out of the box, no env flags required.
+> - **Staged — requires operator funding** — code path implemented and
+>   tested, but the operator wallet must be funded with the listed asset on
+>   that chain and the relevant env flag flipped (`KITE_NETWORK=mainnet` or
+>   `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`). Until both are true
+>   these chains are not active.
+
+---
+
+## Inbound payments — Kite
+
+Inbound = the chain on which **you** (the developer / agent) pay WasiAI to
+unlock a `/compose` or `/orchestrate` call. The protocol uses x402 with
+EIP-712 signatures over EIP-3009 `TransferWithAuthorization`.
+
+| Chain | Chain ID | x402 network tag | Asset | Token contract | Explorer | Status |
+|-------|---------:|------------------|-------|----------------|----------|--------|
+| KiteAI Testnet | `2368` | `eip155:2368` | PYUSD (6 decimals) | `0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9` | https://testnet.kitescan.ai | Active by default |
+| KiteAI Mainnet | `2366` | `eip155:2366` | USDC.e (6 decimals) | `0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e` | https://kitescan.ai | Staged — requires operator funding |
+
+### Activation flags
+
+- **Default** — `KITE_NETWORK` unset (or any value other than `mainnet`)
+  selects testnet. PYUSD on chain `2368` is the asset accepted.
+- **Mainnet opt-in** — set `KITE_NETWORK=mainnet` on the gateway runtime
+  AND ensure the operator wallet has USDC.e on KiteAI mainnet. PYUSD does
+  not exist on mainnet; do not attempt to pay with it there.
+
+### EIP-712 domain (inbound)
+
+The x402 facilitator validates the signature against the domain returned
+by the active payment adapter. For the Kite adapter the domain fields are:
+
+| Network | `name` | `version` | `chainId` | `verifyingContract` |
+|---------|--------|-----------|-----------|---------------------|
+| Kite testnet | `PYUSD` | `1` | `2368` | PYUSD contract above |
+| Kite mainnet | `USDC` | `2` | `2366` | USDC.e contract above |
+
+Use the values from the live `accepts[0]` payload in the 402 response —
+do not hardcode them. See [getting-started.md](./getting-started.md) for
+the full client-side signing recipe.
+
+---
+
+## Outbound payments — Avalanche
+
+Outbound = the chain on which **WasiAI** pays the downstream agent
+(merchant) on your behalf when a `/compose` step is settled. The flag
+`WASIAI_DOWNSTREAM_X402` must be `true` for the downstream settle to fire.
+
+| Chain | Chain ID | x402 network tag | Asset | Default token contract | Explorer | Status |
+|-------|---------:|------------------|-------|------------------------|----------|--------|
+| Avalanche Fuji | `43113` | `eip155:43113` | USDC (6 decimals) | `0x5425890298aed601595a70AB815c96711a31Bc65` | https://testnet.snowtrace.io | Active by default |
+| Avalanche C-Chain | `43114` | `eip155:43114` | USDC (6 decimals) | `0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E` | https://snowtrace.io | Staged — requires operator funding |
+
+### Activation flags
+
+- **Default** — `WASIAI_DOWNSTREAM_NETWORK` unset (or any value other
+  than `avalanche-mainnet`) selects Fuji. The operator wallet pays in
+  Fuji USDC.
+- **Mainnet opt-in** — set `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`
+  AND fund the operator wallet with USDC on Avalanche C-Chain. The
+  pre-flight balance check returns `INSUFFICIENT_BALANCE` if the wallet
+  is empty; the request fails before any signing happens.
+
+### Custom token contracts
+
+You can override the default Circle USDC addresses via env:
+
+- `FUJI_USDC_ADDRESS` — overrides the Fuji default.
+- `AVALANCHE_USDC_ADDRESS` — overrides the C-Chain default.
+- `FUJI_USDC_EIP712_VERSION` / `AVALANCHE_USDC_EIP712_VERSION` — override
+  the EIP-712 domain version (default `2`).
+
+These are operator-side flags only. As a developer integrating with the
+hosted gateway you do not need to set them; they affect what the gateway
+posts to its facilitator.
+
+---
+
+## Discovery `chain` filter
+
+`/discover` accepts an optional `chain` query parameter. The values that
+the service understands today (mirrored 1:1 from the upstream wasiai-v2
+schema) are:
+
+- `kite-testnet` — agents priced on Kite testnet (chainId `2368`).
+- `kite-mainnet` — agents priced on Kite mainnet (chainId `2366`).
+- `avalanche-testnet` — agents priced on Avalanche Fuji (chainId `43113`).
+- `avalanche-mainnet` — agents priced on Avalanche C-Chain (chainId
+  `43114`).
+
+The downstream payment chain (Fuji vs C-Chain) is decided per-call by the
+gateway based on the operator env flags above; the discovery filter is
+informational and helps agents express their preferred settlement chain.
+
+---
+
+## Roadmap chains
+
+- **Kite Passport identity binding** — `[ROADMAP — WKH-69]`. When
+  shipped, A2A keys will optionally bind to a Kite Passport DID for
+  on-chain reputation. Today the `bindings.kite_passport` field on
+  `GET /auth/me` is always `null`.
+- Other EVM chains (Base, Optimism, Arbitrum) are tracked in the backlog
+  but not implemented; do not assume they work.
+
+---
+
+## Source of truth
+
+If anything on this page disagrees with the running service, the
+running service wins. The canonical sources inside the repo are:
+
+- `src/adapters/kite-ozone/chain.ts` — Kite chain definitions.
+- `src/adapters/kite-ozone/payment.ts` — inbound asset selection.
+- `src/lib/downstream-payment.ts` — outbound chain selection.
+
+Open a PR against `docs/networks.md` if you spot drift.
