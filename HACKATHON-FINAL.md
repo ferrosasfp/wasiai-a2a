@@ -10,7 +10,7 @@
 
 WasiAI A2A is an **agent-to-agent payment protocol** running on Kite. It enables clients to:
 
-1. Pay **once** with PYUSD on Kite testnet (or USDC.e on Kite mainnet)
+1. Pay **once** with PYUSD on Kite testnet (or USDC on Kite mainnet — confirmed canonical via WKH-68 spike against Kite Passport)
 2. Have an orchestrator (`wasiai-a2a`) **discover** + **compose** N agents from any registered marketplace (e.g. wasiai-v2)
 3. Settle each agent payment **on a different chain** (Avalanche Fuji USDC, mainnet-ready) via x402 protocol
 4. Get the aggregated output back
@@ -90,7 +90,7 @@ Proxy overhead vs directo Railway: **+3s p50** (24.2s vs 21.1s baseline).
 │                wasiai-a2a (Railway, Fastify)                        │
 │                                                                     │
 │  /compose, /orchestrate, /discover, /tasks, /agent-card, /mcp       │
-│  ├── x402 inbound (PYUSD Kite testnet ↔ USDC.e Kite mainnet)        │
+│  ├── x402 inbound (PYUSD Kite testnet ↔ USDC Kite mainnet)          │
 │  ├── LLM planner (Claude Haiku 4.5 default, Sonnet 4.6 opt-in)      │
 │  ├── A2A JSON-RPC 2.0 (Google A2A protocol)                         │
 │  └── Schema transforms cache (HMAC-signed L2 cache)                 │
@@ -134,7 +134,7 @@ ALL services share: caldzjhjgctpgodldqav (Supabase prod DB)
 | Database | Supabase (Postgres) |
 | LLM | Claude (Haiku 4.5 / Sonnet 4.6) via Anthropic SDK |
 | Payments | x402 v2 protocol, EIP-3009 TransferWithAuthorization, EIP-712 |
-| Chains | Kite testnet (PYUSD), Avalanche Fuji (USDC), Kite mainnet (USDC.e), Avalanche C-Chain (USDC) |
+| Chains | Kite testnet (PYUSD), Avalanche Fuji (USDC), Kite mainnet (USDC native), Avalanche C-Chain (USDC) |
 
 ---
 
@@ -265,7 +265,7 @@ Agent (Sonnet 4.6 / Claude Console / custom)
   ↓ pay_x402 (autonomous, within session constraints)        ← MCP wasiai-x402
 WasiAI A2A (this submission)                                  ← OUR LAYER
   ↓ discovers + composes agents from registry
-  ↓ x402 settle on Kite (PYUSD/USDC.e)
+  ↓ x402 settle on Kite (PYUSD testnet / USDC mainnet)
   ↓ dispatches USDC outbound to N agents on Avalanche/Kite
 N downstream agents (chainlink-price, sentiment, profiler, …)
 ```
@@ -292,12 +292,12 @@ Kite went mainnet 3 days before our hackathon submission. Quick read on what cha
 | 1.9 billion testnet interactions, peak 30M calls/day | Battle-tested at scale before mainnet flip |
 | $33M raised — PayPal Ventures + General Catalyst lead | + Coinbase Ventures, Avalanche Foundation |
 | **PayPal piloting** + **Shopify integrations** in progress | Real commerce partnerships |
-| Stablecoin-based settlement on Kite L1 | PYUSD canonical (matches our inbound) |
+| Stablecoin-based settlement on Kite L1 | USDC canonical on mainnet · PYUSD remains on testnet (confirmed via WKH-68 Passport spike) |
 
 ### What this hackathon submission covers vs. the full Kite mainnet story
 
 ✅ **Already aligned**:
-- We use **PYUSD** as inbound asset (canonical Kite stablecoin, PayPal-backed)
+- Inbound asset matches Kite canonical per environment: **PYUSD on testnet** (chain 2368, what this submission demos), **USDC on mainnet** (chain 2366, what Kite Passport surfaces). Both are USD-pegged; PYUSD ties to PayPal Ventures lead investor, USDC is the broader Avalanche ecosystem standard.
 - Code-only mainnet support already merged (PR #57 + #34, env-gated default OFF — see "Mainnet readiness" above)
 - Architecture mirrors Kite's "agent-first" thesis (autonomous agents, per-call settlement, no-human-in-the-loop)
 

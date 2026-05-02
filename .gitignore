@@ -40,3 +40,14 @@ supabase/.temp/
 .claude/settings.json
 .claude/settings.local.json
 .env.production
+
+.kite-passport/
+
+# Local DB backups — never commit prod data
+backups/
+
+# Vercel CLI auth (any subdir)
+.vercel/
+
+# Stale legacy duplicate of .nexus/project-context.md (CLAUDE.md → use .nexus/ as canonical)
+/project-context.md
