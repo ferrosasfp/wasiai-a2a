@@ -58,7 +58,7 @@ test('T-AL-01: sendAlert timeout 5s aborts via AbortSignal', async () => {
   assert.equal(r.reason, 'webhook fetch failed');
 });
 
-test('T-AL-02: sendAlert body whitelist enforced (CD-12)', async () => {
+test('T-AL-02: sendAlert body whitelist enforced (CD-12 + WKH-75 CD-11)', async () => {
   let captured;
   globalThis.fetch = async (url, init = {}) => {
     captured = JSON.parse(init.body);
@@ -72,7 +72,9 @@ test('T-AL-02: sendAlert body whitelist enforced (CD-12)', async () => {
       operator: '0xabc',
       balanceUsdc: 0.1,
       threshold: 0.5,
-      // Forbidden:
+      event: 'bearer-rotation-failed',
+      reason: 'failed to list Vercel envs',
+      rotatedAt: '2026-05-01T09:00:00.000Z',
       pk: 'pk-must-not-leak',
       bearer: 'bearer-must-not-leak',
       'error.message': 'sensitive backtrace',
@@ -83,12 +85,15 @@ test('T-AL-02: sendAlert body whitelist enforced (CD-12)', async () => {
     webhookUrl: 'https://hooks.example.com/x',
   });
 
-  assert.ok(captured, 'webhook fetch should have been called');
+  assert.ok(captured);
   assert.equal(captured.severity, 'critical');
   assert.equal(captured.chain, 'avax');
   assert.equal(captured.operator, '0xabc');
   assert.equal(captured.balanceUsdc, 0.1);
   assert.equal(captured.threshold, 0.5);
+  assert.equal(captured.event, 'bearer-rotation-failed');
+  assert.equal(captured.reason, 'failed to list Vercel envs');
+  assert.equal(captured.rotatedAt, '2026-05-01T09:00:00.000Z');
   assert.ok(!('pk' in captured));
   assert.ok(!('bearer' in captured));
   assert.ok(!('signature' in captured));
@@ -163,6 +168,48 @@ test('T-AL-04: sendAlert webhookUrl missing → warnOnce + no fetch', async () =
   } finally {
     cap.restore();
   }
+});
+
+test('T-AL-05: rotation-secret keys silently dropped (CD-11 deny-by-default)', async () => {
+  let captured;
+  globalThis.fetch = async (url, init = {}) => {
+    captured = JSON.parse(init.body);
+    return new Response('{}', { status: 200 });
+  };
+  const TEST_BEARER = 'cafebabe' + 'a'.repeat(56);
+  const TEST_VERCEL_TOKEN = 'vercel_test_token_must_not_leak_xxxxxxxxxxxxx';
+  const TEST_PREV = 'deadbeef' + 'b'.repeat(56);
+
+  await sendAlert({
+    severity: 'critical',
+    body: {
+      event: 'bearer-rotation-failed',
+      reason: 'failed to update current env (rolled back)',
+      rotatedAt: '2026-05-01T09:00:00.000Z',
+      bearer: TEST_BEARER,
+      vercelToken: TEST_VERCEL_TOKEN,
+      MCP_BEARER_TOKEN: TEST_BEARER,
+      MCP_BEARER_TOKEN_PREV: TEST_PREV,
+      VERCEL_TOKEN: TEST_VERCEL_TOKEN,
+      value: 'env-value-with-secret',
+    },
+    webhookUrl: 'https://hooks.example.com/x',
+  });
+
+  assert.ok(captured);
+  assert.equal(captured.event, 'bearer-rotation-failed');
+  assert.equal(captured.reason, 'failed to update current env (rolled back)');
+  assert.equal(captured.rotatedAt, '2026-05-01T09:00:00.000Z');
+  assert.ok(!('bearer' in captured));
+  assert.ok(!('vercelToken' in captured));
+  assert.ok(!('MCP_BEARER_TOKEN' in captured));
+  assert.ok(!('MCP_BEARER_TOKEN_PREV' in captured));
+  assert.ok(!('VERCEL_TOKEN' in captured));
+  assert.ok(!('value' in captured));
+  const serialized = JSON.stringify(captured);
+  assert.ok(!serialized.includes(TEST_BEARER));
+  assert.ok(!serialized.includes(TEST_VERCEL_TOKEN));
+  assert.ok(!serialized.includes(TEST_PREV));
 });
 
 test('T-AL-bonus: sanitizeAlertBody returns only whitelisted keys', () => {
