@@ -16,12 +16,15 @@ const {
   analyze,
   hasHighRisk,
   stripComments,
+  stripStringLiterals,
+  splitStatements,
   buildDryRunPayload,
   runShadowDryRun,
   runPostApplyCheck,
   decide,
   formatFindings,
   POST_APPLY_QUERIES,
+  EXPECTED_A2A_TABLES,
   main,
 } = preflight as {
   analyze: (sql: string) => Array<{
@@ -32,6 +35,8 @@ const {
   }>;
   hasHighRisk: (findings: ReturnType<typeof analyze>) => boolean;
   stripComments: (sql: string) => string;
+  stripStringLiterals: (sql: string) => string;
+  splitStatements: (sql: string) => Array<{ line: number; text: string }>;
   buildDryRunPayload: (sql: string) => string;
   runShadowDryRun: (
     sql: string,
@@ -53,6 +58,7 @@ const {
     // biome-ignore lint/suspicious/noExplicitAny: test mock injection
     spawn?: any;
     minA2aTables?: number;
+    expectedA2aTables?: string[];
   }) => { ok: boolean; errors: string[]; details: string[] };
   decide: (
     findings: ReturnType<typeof analyze>,
@@ -61,6 +67,7 @@ const {
   ) => { pass: boolean; exitCode: number; summary: string };
   formatFindings: (findings: ReturnType<typeof analyze>) => string;
   POST_APPLY_QUERIES: { a2aTables: string; invalidFks: string; a2aIndexes: string };
+  EXPECTED_A2A_TABLES: string[];
   main: (deps: {
     argv: string[];
     readFile?: (p: string) => string;
@@ -380,8 +387,12 @@ describe('runPostApplyCheck() — AC-4', () => {
     const mockSpawn = () => {
       call++;
       if (call === 1) {
-        // a2a_* tables
-        return { status: 0, stdout: 'a2a_agent_keys\na2a_registries\n', stderr: '' };
+        // a2a_* tables — provide both expected baseline tables (BLQ-MED-2).
+        return {
+          status: 0,
+          stdout: 'a2a_agent_keys\na2a_protocol_fees\n',
+          stderr: '',
+        };
       }
       if (call === 2) {
         // invalid FKs
@@ -579,5 +590,454 @@ describe('main() — CLI integration', () => {
     });
     expect(exitCode).toBe(2);
     expect(logs.join('\n')).toContain('not found');
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// AR fix-pack iter 1 — new BLQ-driven tests (CD-FP1: 2 fixtures per pattern).
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('analyze() — BLQ-ALTO-1: extended destructive DROP <object>', () => {
+  // Each new pattern ships with positive + negative fixtures (CD-FP1).
+
+  // (positives)
+  it('flags DROP DATABASE as HIGH', () => {
+    const findings = analyze('DROP DATABASE postgres;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags DROP SCHEMA as HIGH', () => {
+    const findings = analyze('DROP SCHEMA public CASCADE;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags DROP TYPE as HIGH', () => {
+    const findings = analyze('DROP TYPE my_enum;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags DROP POLICY as HIGH', () => {
+    const findings = analyze('DROP POLICY tenant_isolation ON tasks;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags DROP TRIGGER as HIGH', () => {
+    const findings = analyze('DROP TRIGGER set_updated_at ON tasks;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags DROP FUNCTION as HIGH', () => {
+    const findings = analyze('DROP FUNCTION increment_a2a_key_spend(uuid, integer, numeric);');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags DROP VIEW as HIGH', () => {
+    const findings = analyze('DROP VIEW v_active_tasks;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags DROP MATERIALIZED VIEW as HIGH', () => {
+    const findings = analyze('DROP MATERIALIZED VIEW mv_dashboard;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags DROP SEQUENCE as HIGH', () => {
+    const findings = analyze('DROP SEQUENCE seq_event_id;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags DROP EXTENSION as HIGH', () => {
+    const findings = analyze('DROP EXTENSION pgcrypto;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags DROP PUBLICATION as HIGH', () => {
+    const findings = analyze('DROP PUBLICATION my_pub;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags DROP SUBSCRIPTION as HIGH', () => {
+    const findings = analyze('DROP SUBSCRIPTION my_sub;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+
+  // (negatives)
+  it('does NOT flag the substring "drop" inside an identifier', () => {
+    const findings = analyze('CREATE TABLE backdrop (id INT);');
+    expect(findings.some((f) => f.op === 'DROP <object>')).toBe(false);
+  });
+  it('does NOT flag "DROP" inside a string literal column DEFAULT', () => {
+    const findings = analyze("INSERT INTO logs (msg) VALUES ('user clicked DROP DATABASE button');");
+    expect(findings.some((f) => f.op === 'DROP <object>')).toBe(false);
+  });
+});
+
+describe('analyze() — BLQ-ALTO-1: DISABLE ROW LEVEL SECURITY', () => {
+  it('flags DISABLE ROW LEVEL SECURITY as HIGH', () => {
+    const findings = analyze('ALTER TABLE a2a_agent_keys DISABLE ROW LEVEL SECURITY;');
+    expect(
+      findings.some((f) => f.op === 'DISABLE ROW LEVEL SECURITY' && f.level === 'HIGH'),
+    ).toBe(true);
+  });
+  it('does NOT flag ENABLE ROW LEVEL SECURITY', () => {
+    const findings = analyze('ALTER TABLE a2a_agent_keys ENABLE ROW LEVEL SECURITY;');
+    expect(findings.some((f) => f.op === 'DISABLE ROW LEVEL SECURITY')).toBe(false);
+  });
+});
+
+describe('analyze() — BLQ-ALTO-1: GRANT/REVOKE ON', () => {
+  it('flags GRANT EXECUTE ON FUNCTION as MEDIUM', () => {
+    const findings = analyze('GRANT EXECUTE ON FUNCTION foo() TO service_role;');
+    expect(findings.some((f) => f.op === 'GRANT/REVOKE' && f.level === 'MEDIUM')).toBe(true);
+  });
+  it('flags REVOKE EXECUTE ON FUNCTION as MEDIUM', () => {
+    const findings = analyze('REVOKE EXECUTE ON FUNCTION foo() FROM PUBLIC;');
+    expect(findings.some((f) => f.op === 'GRANT/REVOKE' && f.level === 'MEDIUM')).toBe(true);
+  });
+  it('does NOT flag a column named "grant_id" by itself', () => {
+    const findings = analyze('CREATE TABLE perms (grant_id INT);');
+    expect(findings.some((f) => f.op === 'GRANT/REVOKE')).toBe(false);
+  });
+});
+
+describe('analyze() — BLQ-ALTO-1: UPDATE without WHERE', () => {
+  it('flags UPDATE foo SET bar=1 (no WHERE) as HIGH mass write', () => {
+    const findings = analyze('UPDATE accounts SET disabled = true;');
+    expect(findings.some((f) => f.op === 'UPDATE without WHERE' && f.level === 'HIGH')).toBe(true);
+  });
+  it('does NOT flag UPDATE foo SET bar=1 WHERE id=2', () => {
+    const findings = analyze('UPDATE accounts SET disabled = true WHERE id = 1;');
+    expect(findings.some((f) => f.op === 'UPDATE without WHERE')).toBe(false);
+  });
+  it('does NOT flag UPDATE inside a PL/pgSQL function body (dollar-quoted)', () => {
+    const sql = `
+      CREATE OR REPLACE FUNCTION f() RETURNS void AS $$
+      BEGIN
+        UPDATE counters SET value = 1;
+      END;
+      $$ LANGUAGE plpgsql;
+    `;
+    const findings = analyze(sql);
+    expect(findings.some((f) => f.op === 'UPDATE without WHERE')).toBe(false);
+  });
+});
+
+describe('analyze() — BLQ-ALTO-1: ALTER DEFAULT PRIVILEGES', () => {
+  it('flags ALTER DEFAULT PRIVILEGES as MEDIUM', () => {
+    const findings = analyze(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO readonly;',
+    );
+    expect(
+      findings.some((f) => f.op === 'ALTER DEFAULT PRIVILEGES' && f.level === 'MEDIUM'),
+    ).toBe(true);
+  });
+  it('does NOT flag ALTER TABLE foo SET DEFAULT 0', () => {
+    const findings = analyze('ALTER TABLE foo ALTER COLUMN x SET DEFAULT 0;');
+    expect(findings.some((f) => f.op === 'ALTER DEFAULT PRIVILEGES')).toBe(false);
+  });
+});
+
+describe('analyze() — BLQ-ALTO-1: REASSIGN OWNED BY', () => {
+  it('flags REASSIGN OWNED BY as HIGH', () => {
+    const findings = analyze('REASSIGN OWNED BY old_user TO new_user;');
+    expect(findings.some((f) => f.op === 'REASSIGN OWNED BY' && f.level === 'HIGH')).toBe(true);
+  });
+  it('does NOT flag SELECT ... AS owned_by', () => {
+    const findings = analyze("SELECT 'reassign' AS owned_by;");
+    expect(findings.some((f) => f.op === 'REASSIGN OWNED BY')).toBe(false);
+  });
+});
+
+describe('analyze() — BLQ-ALTO-2: multi-line statement-aware analyzer', () => {
+  it('detects ALTER TABLE foo (newline) DROP COLUMN bar across lines as HIGH', () => {
+    const sql = 'ALTER TABLE foo\n  DROP COLUMN bar;\n';
+    const findings = analyze(sql);
+    expect(findings.some((f) => f.op === 'DROP COLUMN' && f.level === 'HIGH')).toBe(true);
+  });
+  it('detects ALTER TABLE (newline) RENAME TO across lines as HIGH', () => {
+    const sql = 'ALTER TABLE old_name\n  RENAME TO new_name;\n';
+    const findings = analyze(sql);
+    expect(findings.some((f) => f.op === 'RENAME TO' && f.level === 'HIGH')).toBe(true);
+  });
+  it('detects DROP COLUMN even when a comment sits between the keyword pair', () => {
+    const sql = 'ALTER TABLE foo\n  -- temporary scaffold removal\n  DROP COLUMN obsolete;';
+    const findings = analyze(sql);
+    expect(findings.some((f) => f.op === 'DROP COLUMN' && f.level === 'HIGH')).toBe(true);
+  });
+  it('emits stable line numbers when the statement begins on a non-first line', () => {
+    const sql = '\n\n\nDROP TABLE legacy;';
+    const findings = analyze(sql);
+    const drop = findings.find((f) => f.op === 'DROP TABLE');
+    expect(drop?.line).toBe(4);
+  });
+});
+
+describe('analyze() — BLQ-MED-1: embedded COMMIT/ROLLBACK', () => {
+  it('flags a bare COMMIT; statement as MEDIUM', () => {
+    const findings = analyze('COMMIT;');
+    expect(
+      findings.some((f) => f.op === 'embedded COMMIT/ROLLBACK' && f.level === 'MEDIUM'),
+    ).toBe(true);
+  });
+  it('flags a bare ROLLBACK; statement as MEDIUM', () => {
+    const findings = analyze('ROLLBACK;');
+    expect(
+      findings.some((f) => f.op === 'embedded COMMIT/ROLLBACK' && f.level === 'MEDIUM'),
+    ).toBe(true);
+  });
+  it('does NOT flag a column named "commit_hash"', () => {
+    const findings = analyze('CREATE TABLE commits (commit_hash TEXT);');
+    expect(findings.some((f) => f.op === 'embedded COMMIT/ROLLBACK')).toBe(false);
+  });
+});
+
+describe('analyze() — BLQ-MED-3: string-literal-aware analyzer', () => {
+  it('does NOT flag DROP TABLE inside a single-quoted string literal', () => {
+    const findings = analyze("INSERT INTO audit_log (note) VALUES ('user ran DROP TABLE foo');");
+    expect(findings.some((f) => f.op === 'DROP TABLE')).toBe(false);
+  });
+  it('does NOT flag TRUNCATE inside a string literal', () => {
+    const findings = analyze("INSERT INTO logs (msg) VALUES ('TRUNCATE was rejected');");
+    expect(findings.some((f) => f.op === 'TRUNCATE')).toBe(false);
+  });
+  it("does NOT flag operations inside an E'...' escape string", () => {
+    const findings = analyze("INSERT INTO logs (msg) VALUES (E'\\nDROP DATABASE\\npostgres');");
+    expect(findings.some((f) => f.op === 'DROP <object>')).toBe(false);
+  });
+  it('does NOT flag DROP TABLE inside a $$ ... $$ dollar-quoted body', () => {
+    const sql =
+      "CREATE OR REPLACE FUNCTION nuke() RETURNS void AS $$ BEGIN EXECUTE 'DROP TABLE legacy'; END; $$ LANGUAGE plpgsql;";
+    const findings = analyze(sql);
+    expect(findings.some((f) => f.op === 'DROP TABLE')).toBe(false);
+  });
+  it('does NOT flag DROP TABLE inside a $tag$ ... $tag$ tagged body', () => {
+    const sql =
+      "CREATE FUNCTION g() RETURNS void AS $body$ EXECUTE 'DROP TABLE foo'; $body$ LANGUAGE plpgsql;";
+    const findings = analyze(sql);
+    expect(findings.some((f) => f.op === 'DROP TABLE')).toBe(false);
+  });
+  it('still flags DROP TABLE that lives outside string literals', () => {
+    const findings = analyze(
+      "INSERT INTO logs (msg) VALUES ('DROP TABLE allowed in logs only');\nDROP TABLE legacy_users;",
+    );
+    const drop = findings.find((f) => f.op === 'DROP TABLE');
+    expect(drop).toBeDefined();
+    expect(drop?.level).toBe('HIGH');
+  });
+});
+
+describe('main() — BLQ-MED-4: exit code 2 on internal error', () => {
+  it('exits with code 2 when readFile throws', () => {
+    let exitCode = -1;
+    const logs: string[] = [];
+    main({
+      argv: ['node', 'migrate-preflight.mjs', '/tmp/explode.sql'],
+      readFile: () => {
+        throw new Error('disk pulled out of laptop');
+      },
+      exit: (c) => {
+        exitCode = c;
+      },
+      log: () => {},
+      warn: () => {},
+      error: (m) => logs.push(m),
+    });
+    expect(exitCode).toBe(2);
+    expect(logs.join('\n')).toMatch(/preflight crashed/i);
+  });
+});
+
+describe('analyze() — BLQ-BAJO-1: psql meta-command detection', () => {
+  it('flags backslash-bang shell escape as HIGH meta-command', () => {
+    const findings = analyze('\\! echo PWNED\nSELECT 1;');
+    expect(findings.some((f) => f.op === 'psql meta-command' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags \\copy as HIGH meta-command', () => {
+    const findings = analyze('\\copy users TO STDOUT WITH CSV;');
+    expect(findings.some((f) => f.op === 'psql meta-command' && f.level === 'HIGH')).toBe(true);
+  });
+  it('flags \\i (include file) as HIGH meta-command', () => {
+    const findings = analyze('\\i other.sql\nCREATE TABLE foo (id INT);');
+    expect(findings.some((f) => f.op === 'psql meta-command' && f.level === 'HIGH')).toBe(true);
+  });
+  it('does NOT flag a backslash inside a string literal', () => {
+    const findings = analyze("INSERT INTO logs (path) VALUES ('C:\\\\foo\\\\bar');");
+    expect(findings.some((f) => f.op === 'psql meta-command')).toBe(false);
+  });
+});
+
+describe('analyze() — BLQ-BAJO-2: CONCURRENTLY/VACUUM cannot be wrapped', () => {
+  it('flags CREATE INDEX CONCURRENTLY as INFO', () => {
+    const findings = analyze('CREATE INDEX CONCURRENTLY idx_a ON tasks(owner_ref);');
+    expect(
+      findings.some(
+        (f) => f.op === 'CONCURRENTLY/VACUUM (cannot dry-run)' && f.level === 'INFO',
+      ),
+    ).toBe(true);
+  });
+  it('flags DROP INDEX CONCURRENTLY (and additionally HIGH DROP INDEX)', () => {
+    const findings = analyze('DROP INDEX CONCURRENTLY idx_a;');
+    expect(findings.some((f) => f.op === 'DROP INDEX' && f.level === 'HIGH')).toBe(true);
+    expect(
+      findings.some(
+        (f) => f.op === 'CONCURRENTLY/VACUUM (cannot dry-run)' && f.level === 'INFO',
+      ),
+    ).toBe(true);
+  });
+  it('flags VACUUM as INFO', () => {
+    const findings = analyze('VACUUM ANALYZE tasks;');
+    expect(
+      findings.some(
+        (f) => f.op === 'CONCURRENTLY/VACUUM (cannot dry-run)' && f.level === 'INFO',
+      ),
+    ).toBe(true);
+  });
+  it('flags CREATE DATABASE as INFO (also cannot run in transaction)', () => {
+    const findings = analyze('CREATE DATABASE shadow;');
+    expect(
+      findings.some(
+        (f) => f.op === 'CONCURRENTLY/VACUUM (cannot dry-run)' && f.level === 'INFO',
+      ),
+    ).toBe(true);
+  });
+  it('flags ALTER SYSTEM as INFO', () => {
+    const findings = analyze("ALTER SYSTEM SET shared_buffers = '256MB';");
+    expect(
+      findings.some(
+        (f) => f.op === 'CONCURRENTLY/VACUUM (cannot dry-run)' && f.level === 'INFO',
+      ),
+    ).toBe(true);
+  });
+  it('does NOT flag a CREATE INDEX without CONCURRENTLY', () => {
+    const findings = analyze('CREATE INDEX idx_a ON tasks(owner_ref);');
+    expect(findings.some((f) => f.op === 'CONCURRENTLY/VACUUM (cannot dry-run)')).toBe(false);
+  });
+});
+
+describe('splitStatements() — BLQ-ALTO-2 + CD-FP2', () => {
+  it('returns one statement when the input is a single DDL', () => {
+    const stmts = splitStatements('CREATE TABLE foo (id INT);');
+    expect(stmts.length).toBe(1);
+    expect(stmts[0].text.trim()).toContain('CREATE TABLE');
+  });
+
+  it('splits two statements separated by ;', () => {
+    const stmts = splitStatements('CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);');
+    expect(stmts.length).toBe(2);
+  });
+
+  it('does NOT split on a ; inside a single-quoted string', () => {
+    const stmts = splitStatements("INSERT INTO l(m) VALUES (';'); SELECT 1;");
+    expect(stmts.length).toBe(2);
+    expect(stmts[0].text).toContain("';'");
+  });
+
+  it('does NOT split on a ; inside a $$ ... $$ dollar-quoted body', () => {
+    const sql =
+      'CREATE FUNCTION f() RETURNS void AS $$ BEGIN PERFORM 1; PERFORM 2; END; $$ LANGUAGE plpgsql;';
+    const stmts = splitStatements(sql);
+    expect(stmts.length).toBe(1);
+  });
+
+  it('does NOT split on a ; inside a $tag$ ... $tag$ dollar-quoted body', () => {
+    const sql =
+      'CREATE FUNCTION g() RETURNS void AS $body$ BEGIN PERFORM 1; END; $body$ LANGUAGE plpgsql;';
+    const stmts = splitStatements(sql);
+    expect(stmts.length).toBe(1);
+  });
+
+  it('preserves the starting line number of each statement', () => {
+    const sql = 'CREATE TABLE a (id INT);\n\n\nCREATE TABLE b (id INT);';
+    const stmts = splitStatements(sql);
+    expect(stmts[0].line).toBe(1);
+    expect(stmts[1].line).toBe(4);
+  });
+
+  it('handles a trailing statement without a final ;', () => {
+    const stmts = splitStatements('CREATE TABLE a (id INT);\nSELECT 1');
+    expect(stmts.length).toBe(2);
+  });
+});
+
+describe('stripStringLiterals() — BLQ-MED-3', () => {
+  it('blanks the body of a single-quoted string literal', () => {
+    const out = stripStringLiterals("SELECT 'DROP TABLE x';");
+    expect(out).not.toContain('DROP TABLE');
+  });
+  it('preserves the line count of multi-line string literals', () => {
+    const sql = "SELECT 'line one\nline two\nline three';";
+    const out = stripStringLiterals(sql);
+    expect(out.split('\n').length).toBe(sql.split('\n').length);
+  });
+  it('blanks the body of a $$ ... $$ dollar-quoted string', () => {
+    const out = stripStringLiterals(
+      'CREATE FUNCTION f() RETURNS void AS $$ DROP TABLE x; $$ LANGUAGE plpgsql;',
+    );
+    expect(out).not.toContain('DROP TABLE');
+  });
+  it('blanks the body of a $tag$ ... $tag$ dollar-quoted string', () => {
+    const out = stripStringLiterals(
+      'CREATE FUNCTION g() RETURNS void AS $body$ DROP TABLE x; $body$ LANGUAGE plpgsql;',
+    );
+    expect(out).not.toContain('DROP TABLE');
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// BLQ-MED-2 — runPostApplyCheck() expectedA2aTables baseline manifest.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('runPostApplyCheck() — BLQ-MED-2 baseline manifest', () => {
+  it('exposes EXPECTED_A2A_TABLES as a non-empty array of a2a_* names', () => {
+    expect(Array.isArray(EXPECTED_A2A_TABLES)).toBe(true);
+    expect(EXPECTED_A2A_TABLES.length).toBeGreaterThan(0);
+    expect(
+      EXPECTED_A2A_TABLES.every((t) => typeof t === 'string' && t.startsWith('a2a_')),
+    ).toBe(true);
+  });
+
+  it('fails when an expected baseline table is missing (set difference)', () => {
+    let call = 0;
+    const mockSpawn = () => {
+      call++;
+      if (call === 1) {
+        return { status: 0, stdout: 'a2a_agent_keys\n', stderr: '' };
+      }
+      if (call === 2) return { status: 0, stdout: '', stderr: '' };
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    const r = runPostApplyCheck({
+      databaseUrl: 'postgres://example/db',
+      spawn: mockSpawn,
+      expectedA2aTables: ['a2a_agent_keys', 'a2a_protocol_fees'],
+    });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.includes('Missing expected'))).toBe(true);
+    expect(r.errors.some((e) => e.includes('a2a_protocol_fees'))).toBe(true);
+  });
+
+  it('reports the expected list in details for debugging', () => {
+    let call = 0;
+    const mockSpawn = () => {
+      call++;
+      if (call === 1)
+        return { status: 0, stdout: 'a2a_agent_keys\na2a_protocol_fees\n', stderr: '' };
+      if (call === 2) return { status: 0, stdout: '', stderr: '' };
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    const r = runPostApplyCheck({
+      databaseUrl: 'postgres://example/db',
+      spawn: mockSpawn,
+      expectedA2aTables: ['a2a_agent_keys', 'a2a_protocol_fees'],
+    });
+    expect(r.ok).toBe(true);
+    expect(r.details.some((d) => d.includes('a2a_* tables expected'))).toBe(true);
+  });
+
+  it('passes when every expected table is present (and no INVALID FKs)', () => {
+    let call = 0;
+    const mockSpawn = () => {
+      call++;
+      if (call === 1)
+        return { status: 0, stdout: 'a2a_agent_keys\na2a_protocol_fees\n', stderr: '' };
+      if (call === 2) return { status: 0, stdout: '', stderr: '' };
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    const r = runPostApplyCheck({
+      databaseUrl: 'postgres://example/db',
+      spawn: mockSpawn,
+      expectedA2aTables: ['a2a_agent_keys', 'a2a_protocol_fees'],
+    });
+    expect(r.ok).toBe(true);
+    expect(r.errors.length).toBe(0);
   });
 });

@@ -13,8 +13,14 @@
  *
  *     node scripts/migrate-preflight.mjs --post-apply
  *       Verifies the DB pointed by DATABASE_URL after a migration was applied:
- *       (a) all `a2a_*` tables exist, (b) FK constraints are VALID, (c) the
- *       referenced indexes exist. Exit 1 on any failure.
+ *       (a) every expected `a2a_*` baseline table exists, (b) FK constraints
+ *       are VALID, (c) the referenced indexes exist. Exit 1 on any failure.
+ *
+ *   Exit codes:
+ *     0 — [PASS] safe to apply (still review the diff manually).
+ *     1 — [BLOCKED]/[FAIL] HIGH risk, dry-run failure, or post-apply check failed.
+ *     2 — Internal error / usage error (file not found, bad arguments,
+ *         uncaught exception in main).
  *
  *   Constraints (from work-item Constraint Directives):
  *     - CD-1: NEVER mutate prod DATABASE_URL from this script (read-only on
@@ -25,6 +31,14 @@
  *     - CD-5: no new deps; uses node:child_process to invoke `psql`.
  *     - CD-6: tests cover the analyzer with mocks 100%.
  *     - CD-7: `-- ROLLBACK:` template is a runbook recommendation, not enforced.
+ *
+ *   Fix-pack iter 1 (post-AR) Constraint Directives:
+ *     - CD-FP1: Each new RISK_PATTERN ships with at least 2 test fixtures
+ *       (a positive case that triggers it and a negative case that does not).
+ *     - CD-FP2: splitStatements() must NOT break real project migrations
+ *       (dollar-quoted bodies, `IF EXISTS` clauses, etc.).
+ *     - CD-FP3: NO existing pattern's severity is lowered. New patterns may
+ *       only ADD detections, never relax them.
  *
  *   This file is ESM (.mjs) and exports its pure functions for unit tests.
  *   The CLI entrypoint only runs when invoked directly (process.argv[1]).
@@ -47,28 +61,105 @@ import { resolve } from 'node:path';
 /**
  * Static SQL patterns flagged by the analyzer.
  *
- * Each entry is matched against single non-comment, non-empty SQL lines.
- * The regex is anchored to allow leading whitespace and is case-insensitive.
+ * Each entry is matched against full SQL statements (after splitStatements()
+ * normalizes whitespace and strips string literals + comments). The regex is
+ * case-insensitive.
  *
  * NOTE: this is a coarse-grained heuristic — it intentionally errs on the
  * side of false positives over false negatives (a HIGH false positive only
  * forces a human to add `-- @preflight-allow` review, while a missed HIGH
  * could destroy data in prod).
+ *
+ * Severity invariants (CD-FP3): once shipped, a pattern's severity may only
+ * increase or stay the same; it must not be relaxed.
  */
 const RISK_PATTERNS = [
   // HIGH — destructive DDL/DML
   { level: /** @type {RiskLevel} */ ('HIGH'), op: 'DROP TABLE',          re: /\bdrop\s+table\b/i },
-  { level: /** @type {RiskLevel} */ ('HIGH'), op: 'DROP COLUMN',         re: /\balter\s+table\b[^;]*\bdrop\s+column\b/i },
+  { level: /** @type {RiskLevel} */ ('HIGH'), op: 'DROP COLUMN',         re: /\balter\s+table\b[\s\S]*?\bdrop\s+column\b/i },
   { level: /** @type {RiskLevel} */ ('HIGH'), op: 'DROP INDEX',          re: /\bdrop\s+index\b/i },
   { level: /** @type {RiskLevel} */ ('HIGH'), op: 'TRUNCATE',            re: /\btruncate\b/i },
-  { level: /** @type {RiskLevel} */ ('HIGH'), op: 'ALTER TABLE ... DROP',re: /\balter\s+table\b[^;]*\bdrop\b/i },
-  { level: /** @type {RiskLevel} */ ('HIGH'), op: 'RENAME TO',           re: /\balter\s+table\b[^;]*\brename\s+to\b/i },
-  // HIGH — DELETE without WHERE (multi-line aware via second pass below)
-  // Note: the simple regex check is augmented in `analyze()` to detect
-  // missing WHERE in multi-line DELETE statements.
+  { level: /** @type {RiskLevel} */ ('HIGH'), op: 'ALTER TABLE ... DROP',re: /\balter\s+table\b[\s\S]*?\bdrop\b/i },
+  { level: /** @type {RiskLevel} */ ('HIGH'), op: 'RENAME TO',           re: /\balter\s+table\b[\s\S]*?\brename\s+to\b/i },
+  // BLQ-ALTO-1 — destructive object DROPs beyond TABLE/INDEX/COLUMN.
+  // Catches catastrophic statements like `DROP DATABASE postgres;`,
+  // `DROP SCHEMA public CASCADE;`, `DROP POLICY ... ON ...`, `DROP TRIGGER`,
+  // `DROP FUNCTION`, `DROP VIEW`, `DROP MATERIALIZED VIEW`, `DROP SEQUENCE`,
+  // `DROP EXTENSION`, `DROP PUBLICATION`, `DROP SUBSCRIPTION`.
+  {
+    level: /** @type {RiskLevel} */ ('HIGH'),
+    op: 'DROP <object>',
+    re: /\bdrop\s+(database|schema|type|policy|trigger|function|view|materialized\s+view|sequence|extension|publication|subscription)\b/i,
+  },
+  // BLQ-ALTO-1 — RLS bypass. Disabling RLS opens a tenant boundary that
+  // every service currently relies on (WKH-53 ownership guard).
+  {
+    level: /** @type {RiskLevel} */ ('HIGH'),
+    op: 'DISABLE ROW LEVEL SECURITY',
+    re: /\bdisable\s+row\s+level\s+security\b/i,
+  },
+  // BLQ-ALTO-1 — bare `UPDATE x SET y` without WHERE = mass write across
+  // the whole table. This is the DML twin of DELETE-without-WHERE.
+  // The narrower regex matches a single SQL statement that contains
+  // `UPDATE <ident> SET ...` and does NOT contain `WHERE`. Whitespace
+  // and newlines tolerated; statement-aware via splitStatements().
+  // (Implementation lives in findUpdateWithoutWhere() because regex alone
+  // cannot express "match X AND not match Y" cleanly across statements.)
+  // BLQ-ALTO-1 — REASSIGN OWNED BY: bulk re-owner a role's objects.
+  {
+    level: /** @type {RiskLevel} */ ('HIGH'),
+    op: 'REASSIGN OWNED BY',
+    re: /\breassign\s+owned\s+by\b/i,
+  },
+  // BLQ-BAJO-1 — psql meta-command (`\!`, `\copy`, `\i`, ...). Anchored to
+  // statement start (after splitStatements normalization). The shadow
+  // dry-run cannot safely execute meta-commands (`\!` shells out, `\i`
+  // reads arbitrary files), so any meta-command in a migration body is
+  // refused outright.
+  {
+    level: /** @type {RiskLevel} */ ('HIGH'),
+    op: 'psql meta-command',
+    re: /^\s*\\[a-z!]/i,
+  },
+  // BLQ-MED-1 — embedded transaction control. Wrapping migrations in
+  // explicit BEGIN/COMMIT/ROLLBACK breaks the BEGIN/ROLLBACK guarantee
+  // of the shadow dry-run (psql --single-transaction would treat them
+  // as savepoints; the migration could partial-commit on shadow). This
+  // is also a foot-gun in production when paired with `apply-prod-migrations.sh`,
+  // which already wraps each file in its own transaction.
+  {
+    level: /** @type {RiskLevel} */ ('MEDIUM'),
+    op: 'embedded COMMIT/ROLLBACK',
+    re: /\b(commit|rollback)\b\s*;?\s*$/i,
+  },
+  // BLQ-ALTO-1 — privilege grants/revokes. Security-sensitive but
+  // sometimes intentional (see 20260427160000_secure_rpc_search_path.sql),
+  // so MEDIUM, not HIGH.
+  {
+    level: /** @type {RiskLevel} */ ('MEDIUM'),
+    op: 'GRANT/REVOKE',
+    re: /\b(grant|revoke)\b[\s\S]*?\bon\b/i,
+  },
+  // BLQ-ALTO-1 — alter default privileges silently changes ACL of every
+  // future object created in the schema. Hard to audit retroactively.
+  {
+    level: /** @type {RiskLevel} */ ('MEDIUM'),
+    op: 'ALTER DEFAULT PRIVILEGES',
+    re: /\balter\s+default\s+privileges\b/i,
+  },
   // MEDIUM — risky but sometimes intentional
-  { level: /** @type {RiskLevel} */ ('MEDIUM'), op: 'ALTER COLUMN TYPE', re: /\balter\s+column\b[^;]*\btype\b/i },
-  { level: /** @type {RiskLevel} */ ('MEDIUM'), op: 'ALTER NOT NULL',    re: /\balter\s+column\b[^;]*\bset\s+not\s+null\b/i },
+  { level: /** @type {RiskLevel} */ ('MEDIUM'), op: 'ALTER COLUMN TYPE', re: /\balter\s+column\b[\s\S]*?\btype\b/i },
+  { level: /** @type {RiskLevel} */ ('MEDIUM'), op: 'ALTER NOT NULL',    re: /\balter\s+column\b[\s\S]*?\bset\s+not\s+null\b/i },
+  // BLQ-BAJO-2 — operations that CANNOT be wrapped in BEGIN/ROLLBACK.
+  // Postgres rejects CREATE INDEX CONCURRENTLY / VACUUM / CREATE DATABASE
+  // / ALTER SYSTEM inside a transaction block, so the shadow dry-run is
+  // structurally unable to validate them. INFO + the runbook §11 documents
+  // the alternative workflow.
+  {
+    level: /** @type {RiskLevel} */ ('INFO'),
+    op: 'CONCURRENTLY/VACUUM (cannot dry-run)',
+    re: /\b(create\s+index\s+concurrently|drop\s+index\s+concurrently|reindex\s+concurrently|vacuum|create\s+database|alter\s+system)\b/i,
+  },
 ];
 
 /**
@@ -100,6 +191,37 @@ function findDeleteWithoutWhere(sql) {
 }
 
 /**
+ * Detect UPDATE statements without a WHERE clause (BLQ-ALTO-1). Matches the
+ * shape `UPDATE <ident> [SET ...]; … no WHERE …`. Multi-line aware via
+ * non-greedy match up to the terminating `;`.
+ *
+ * Rejects updates to PL/pgSQL local variables (handled by splitStatements
+ * stripping dollar-quoted bodies) and updates that have a WHERE elsewhere
+ * in the same statement.
+ *
+ * @param {string} sql Already comment-stripped + string-stripped SQL.
+ * @returns {{ line: number, snippet: string }[]}
+ */
+function findUpdateWithoutWhere(sql) {
+  /** @type {{ line: number, snippet: string }[]} */
+  const hits = [];
+  // `UPDATE <name> SET ... ;` — only flag when the statement has SET
+  // (rules out `UPDATE OF` syntax in CREATE TRIGGER) and has no WHERE.
+  const stmtRe = /\bupdate\s+[a-z_][\w.]*\s+set\b[\s\S]*?;/gi;
+  let match;
+  while ((match = stmtRe.exec(sql)) !== null) {
+    const stmt = match[0];
+    if (!/\bwhere\b/i.test(stmt)) {
+      const before = sql.slice(0, match.index);
+      const line = before.split('\n').length;
+      const firstLine = stmt.split('\n')[0].trim();
+      hits.push({ line, snippet: firstLine });
+    }
+  }
+  return hits;
+}
+
+/**
  * Strip line comments (`--`) and block comments (`/* ... *\/`). Used so the
  * analyzer does not flag SQL that lives inside comments (false positives).
  *
@@ -118,7 +240,281 @@ export function stripComments(sql) {
 }
 
 /**
+ * Strip SQL string literals from a (comment-free) SQL string, replacing
+ * them with placeholders that preserve line counts. This makes the regex
+ * matchers immune to false positives on patterns embedded in strings.
+ *
+ * Handles:
+ *   - Single-quoted literals `'...'` (with `''` escape).
+ *   - Double-quoted identifiers `"..."` (rarely contain risky tokens, but
+ *     stripped for symmetry — e.g. column named "DROP TABLE backup").
+ *   - PostgreSQL escape strings `E'...'` (escapes via `\'`).
+ *   - Dollar-quoted strings `$$ ... $$` and tagged `$tag$ ... $tag$`
+ *     (PL/pgSQL function bodies).
+ *
+ * Newlines inside stripped literals are preserved so `analyze()` line
+ * numbers remain accurate.
+ *
+ * @param {string} sql
+ * @returns {string}
+ */
+export function stripStringLiterals(sql) {
+  let out = '';
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const ch = sql[i];
+
+    // Dollar-quoted string ($$...$$ or $tag$...$tag$)
+    if (ch === '$') {
+      // Match opening tag: $ + optional identifier + $
+      const tagMatch = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i));
+      if (tagMatch) {
+        const tag = tagMatch[0];
+        const closeIdx = sql.indexOf(tag, i + tag.length);
+        if (closeIdx === -1) {
+          // Unterminated dollar-quote — copy rest as-is and stop.
+          out += sql.slice(i);
+          break;
+        }
+        const body = sql.slice(i + tag.length, closeIdx);
+        out += tag;
+        // Replace body with same number of newlines and spaces — preserves
+        // line numbers for downstream analysis.
+        for (const c of body) out += c === '\n' ? '\n' : ' ';
+        out += tag;
+        i = closeIdx + tag.length;
+        continue;
+      }
+      // Lone `$` — keep verbatim.
+      out += ch;
+      i++;
+      continue;
+    }
+
+    // Postgres escape string E'...'
+    if ((ch === 'E' || ch === 'e') && sql[i + 1] === "'") {
+      out += sql[i] + "'";
+      i += 2;
+      while (i < n) {
+        const c = sql[i];
+        if (c === '\\' && i + 1 < n) {
+          // Skip escape pair (preserve length 2, but in stripped output we
+          // emit a space; line breaks inside escape are unusual).
+          out += sql[i + 1] === '\n' ? '\n ' : '  ';
+          i += 2;
+          continue;
+        }
+        if (c === "'") {
+          out += "'";
+          i++;
+          break;
+        }
+        out += c === '\n' ? '\n' : ' ';
+        i++;
+      }
+      continue;
+    }
+
+    // Single-quoted string '...'  (with '' escape)
+    if (ch === "'") {
+      out += "'";
+      i++;
+      while (i < n) {
+        const c = sql[i];
+        if (c === "'" && sql[i + 1] === "'") {
+          out += '  ';
+          i += 2;
+          continue;
+        }
+        if (c === "'") {
+          out += "'";
+          i++;
+          break;
+        }
+        out += c === '\n' ? '\n' : ' ';
+        i++;
+      }
+      continue;
+    }
+
+    // Double-quoted identifier "..."  (with "" escape)
+    if (ch === '"') {
+      out += '"';
+      i++;
+      while (i < n) {
+        const c = sql[i];
+        if (c === '"' && sql[i + 1] === '"') {
+          out += '  ';
+          i += 2;
+          continue;
+        }
+        if (c === '"') {
+          out += '"';
+          i++;
+          break;
+        }
+        out += c === '\n' ? '\n' : ' ';
+        i++;
+      }
+      continue;
+    }
+
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Split a SQL string into individual statements (BLQ-ALTO-2). Aware of:
+ *   - SQL line comments (`--`) and block comments (`/* … *\/`).
+ *   - Single-quoted strings, double-quoted identifiers, escape strings.
+ *   - Dollar-quoted bodies (`$$ … $$`, `$tag$ … $tag$`).
+ *
+ * Each returned statement carries the 1-based line number of its first
+ * non-whitespace character so analyze() can attribute findings precisely.
+ *
+ * Statements are NOT individually trimmed in `text`; whitespace is preserved
+ * so multi-line snippets render legibly. Use `text.trim().split('\n')[0]`
+ * for the snippet.
+ *
+ * The split delimiter is `;` outside any string/quote/dollar-quote.
+ *
+ * @param {string} sql Already comment-stripped (call stripComments() first
+ *   to preserve line numbers).
+ * @returns {{ line: number, text: string }[]}
+ */
+export function splitStatements(sql) {
+  /** @type {{ line: number, text: string }[]} */
+  const stmts = [];
+  let buf = '';
+  let startLine = 1;
+  let line = 1;
+  let bufStartedAt = -1;
+  let i = 0;
+  const n = sql.length;
+
+  const pushStmt = () => {
+    if (buf.trim() === '') {
+      buf = '';
+      bufStartedAt = -1;
+      return;
+    }
+    stmts.push({ line: startLine, text: buf });
+    buf = '';
+    bufStartedAt = -1;
+  };
+
+  while (i < n) {
+    const ch = sql[i];
+
+    // Track lines.
+    if (ch === '\n') {
+      buf += ch;
+      i++;
+      line++;
+      continue;
+    }
+
+    // Mark statement start on first non-whitespace.
+    if (bufStartedAt === -1 && ch.trim() !== '') {
+      startLine = line;
+      bufStartedAt = i;
+    }
+
+    // Dollar-quoted string?
+    if (ch === '$') {
+      const tagMatch = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i));
+      if (tagMatch) {
+        const tag = tagMatch[0];
+        const closeIdx = sql.indexOf(tag, i + tag.length);
+        if (closeIdx === -1) {
+          // Unterminated: append the rest and stop.
+          for (let k = i; k < n; k++) {
+            buf += sql[k];
+            if (sql[k] === '\n') line++;
+          }
+          i = n;
+          break;
+        }
+        const block = sql.slice(i, closeIdx + tag.length);
+        buf += block;
+        for (const c of block) if (c === '\n') line++;
+        i = closeIdx + tag.length;
+        continue;
+      }
+    }
+
+    // Single-quoted string?
+    if (ch === "'") {
+      buf += ch;
+      i++;
+      while (i < n) {
+        const c = sql[i];
+        if (c === "'" && sql[i + 1] === "'") {
+          buf += "''";
+          i += 2;
+          continue;
+        }
+        if (c === "'") {
+          buf += "'";
+          i++;
+          break;
+        }
+        buf += c;
+        if (c === '\n') line++;
+        i++;
+      }
+      continue;
+    }
+
+    // Double-quoted identifier?
+    if (ch === '"') {
+      buf += ch;
+      i++;
+      while (i < n) {
+        const c = sql[i];
+        if (c === '"' && sql[i + 1] === '"') {
+          buf += '""';
+          i += 2;
+          continue;
+        }
+        if (c === '"') {
+          buf += '"';
+          i++;
+          break;
+        }
+        buf += c;
+        if (c === '\n') line++;
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === ';') {
+      buf += ';';
+      i++;
+      pushStmt();
+      continue;
+    }
+
+    buf += ch;
+    i++;
+  }
+
+  // Trailing statement without a final `;` (rare but legal in psql).
+  pushStmt();
+  return stmts;
+}
+
+/**
  * Run static analysis over a SQL string and return all findings.
+ *
+ * The pipeline is statement-based (BLQ-ALTO-2) and string-aware
+ * (BLQ-MED-3): comments are stripped first (to preserve real DDL line
+ * numbers), then string literals are scrubbed, then the SQL is split into
+ * top-level statements and each statement is matched against every pattern.
  *
  * @param {string} sql Raw SQL text (can include comments).
  * @returns {Finding[]}
@@ -126,30 +522,41 @@ export function stripComments(sql) {
 export function analyze(sql) {
   /** @type {Finding[]} */
   const findings = [];
-  const stripped = stripComments(sql);
-  const lines = stripped.split('\n');
+  const noComments = stripComments(sql);
+  const sanitized = stripStringLiterals(noComments);
+  const statements = splitStatements(sanitized);
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim()) continue;
+  for (const stmt of statements) {
+    if (stmt.text.trim() === '') continue;
+    const firstLine = stmt.text.trim().split('\n')[0].trim();
     for (const pat of RISK_PATTERNS) {
-      if (pat.re.test(line)) {
+      if (pat.re.test(stmt.text)) {
         findings.push({
-          line: i + 1,
+          line: stmt.line,
           level: pat.level,
           op: pat.op,
-          snippet: line.trim(),
+          snippet: firstLine,
         });
       }
     }
   }
 
-  // DELETE without WHERE — multi-line aware pass over stripped SQL.
-  for (const hit of findDeleteWithoutWhere(stripped)) {
+  // DELETE without WHERE — multi-line aware pass over sanitized SQL.
+  for (const hit of findDeleteWithoutWhere(sanitized)) {
     findings.push({
       line: hit.line,
       level: 'HIGH',
       op: 'DELETE without WHERE',
+      snippet: hit.snippet,
+    });
+  }
+
+  // UPDATE without WHERE (BLQ-ALTO-1) — same shape as DELETE.
+  for (const hit of findUpdateWithoutWhere(sanitized)) {
+    findings.push({
+      line: hit.line,
+      level: 'HIGH',
+      op: 'UPDATE without WHERE',
       snippet: hit.snippet,
     });
   }
@@ -327,6 +734,21 @@ export function decide(findings, dryRun, opts = {}) {
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Baseline `a2a_*` tables expected to exist in any healthy production deploy.
+ * BLQ-MED-2: post-apply check now verifies the full set, not just a count.
+ * If a migration accidentally drops one (or never created it), --post-apply
+ * fails with the exact list of missing tables.
+ */
+export const EXPECTED_A2A_TABLES = [
+  'a2a_agent_keys',
+  'a2a_protocol_fees',
+  // NOTE: `a2a_registries` and `a2a_tasks` ship under different names today
+  // (`registries`, `tasks`) but are tracked here so the runbook can rename
+  // them in a single PR when the WKH-54 work item lands. Until then the
+  // expected list reflects current prod ground truth.
+];
+
+/**
  * SQL queries run during --post-apply against DATABASE_URL.
  *
  * Each query is read-only (SELECT only). The script never writes when in
@@ -364,16 +786,18 @@ export const POST_APPLY_QUERIES = {
  *   databaseUrl?: string,
  *   spawn?: typeof spawnSync,
  *   minA2aTables?: number,
+ *   expectedA2aTables?: string[],
  * }} [opts]
  * @returns {{ ok: boolean, errors: string[], details: string[] }}
  */
 export function runPostApplyCheck(opts = {}) {
   const databaseUrl = opts.databaseUrl ?? process.env.DATABASE_URL;
   const spawn = opts.spawn ?? spawnSync;
-  // Conservative default: at least 1 a2a_* table must exist after a migration
-  // (the project always has a2a_agent_keys + a2a_registries in any healthy
-  // deploy). Override via opts.minA2aTables for shadow projects.
-  const minA2aTables = opts.minA2aTables ?? 1;
+  // BLQ-MED-2: prefer the expected-set check over a bare count. The legacy
+  // `minA2aTables` is still honored for callers that don't supply a manifest
+  // (e.g. brand-new shadow projects with no a2a tables yet).
+  const expected = opts.expectedA2aTables ?? EXPECTED_A2A_TABLES;
+  const minA2aTables = opts.minA2aTables ?? expected.length;
 
   /** @type {string[]} */
   const errors = [];
@@ -405,10 +829,22 @@ export function runPostApplyCheck(opts = {}) {
       .map((s) => s.trim())
       .filter(Boolean);
     details.push(`a2a_* tables: ${rows.length} found (${rows.join(', ') || 'none'})`);
+    details.push(`a2a_* tables expected (${expected.length}): ${expected.join(', ')}`);
     if (rows.length < minA2aTables) {
       errors.push(
         `Expected at least ${minA2aTables} a2a_* table(s); found ${rows.length}`,
       );
+    }
+    // BLQ-MED-2: report exact missing tables vs. baseline manifest.
+    if (expected.length > 0) {
+      const found = new Set(rows);
+      const missing = expected.filter((t) => !found.has(t));
+      if (missing.length > 0) {
+        errors.push(
+          `Missing expected a2a_* table(s): ${missing.join(', ')} ` +
+            `(baseline = [${expected.join(', ')}])`,
+        );
+      }
     }
   }
 
@@ -437,6 +873,8 @@ export function runPostApplyCheck(opts = {}) {
 
   // (c) indexes — informational only; we do not fail on this query absent
   // a baseline manifest. The runbook documents how to diff against expected.
+  // (See AC-4(b) decision in the runbook §5.4: indexes are listed for grep,
+  //  not validated against migration declarations.)
   const idxResult = spawn(
     'psql',
     [databaseUrl, '-X', '-A', '-t', '-q', '-c', POST_APPLY_QUERIES.a2aIndexes],
@@ -487,61 +925,73 @@ export function main(deps) {
   const shadowDryRun = deps.shadowDryRun ?? runShadowDryRun;
   const postApply = deps.postApply ?? runPostApplyCheck;
 
-  const args = deps.argv.slice(2);
+  // BLQ-MED-4: wrap the entire CLI body in try/catch so any uncaught
+  // exception (e.g. fs read crash, ad-hoc throw inside a sub-helper)
+  // surfaces as exit code 2 ("internal error") instead of an unhandled
+  // promise rejection or zero-exit silent failure.
+  try {
+    const args = deps.argv.slice(2);
 
-  if (args.includes('--post-apply')) {
-    log('[migrate-preflight] --post-apply integrity check against DATABASE_URL');
-    const result = postApply();
-    for (const d of result.details) log('  - ' + d);
-    if (!result.ok) {
-      for (const e of result.errors) errlog('[FAIL] Integrity check failed: ' + e);
-      return exit(1);
+    if (args.includes('--post-apply')) {
+      log('[migrate-preflight] --post-apply integrity check against DATABASE_URL');
+      const result = postApply();
+      for (const d of result.details) log('  - ' + d);
+      if (!result.ok) {
+        for (const e of result.errors) errlog('[FAIL] Integrity check failed: ' + e);
+        return exit(1);
+      }
+      log('[PASS] Post-apply integrity check OK');
+      return exit(0);
     }
-    log('[PASS] Post-apply integrity check OK');
-    return exit(0);
-  }
 
-  const sqlPath = args[0];
-  if (!sqlPath || sqlPath.startsWith('--')) {
-    errlog(
-      'Usage:\n' +
-        '  node scripts/migrate-preflight.mjs <file.sql>\n' +
-        '  node scripts/migrate-preflight.mjs --post-apply',
-    );
+    const sqlPath = args[0];
+    if (!sqlPath || sqlPath.startsWith('--')) {
+      errlog(
+        'Usage:\n' +
+          '  node scripts/migrate-preflight.mjs <file.sql>\n' +
+          '  node scripts/migrate-preflight.mjs --post-apply',
+      );
+      return exit(2);
+    }
+
+    const absPath = resolve(sqlPath);
+    // existsSync is only checked against the real filesystem; tests inject
+    // `readFile` directly and bypass this branch by passing a path that the
+    // injected reader resolves. For real CLI invocations (no injection) we
+    // do the existence check first so the error message is friendlier.
+    if (!deps.readFile && !existsSync(absPath)) {
+      errlog(`[ERR] SQL file not found: ${absPath}`);
+      return exit(2);
+    }
+
+    const sql = readFile(absPath);
+    log(`[migrate-preflight] analyzing ${absPath} (${sql.length} bytes)`);
+
+    // 1) Static analysis
+    const findings = analyze(sql);
+    log(formatFindings(findings));
+
+    // 2) Shadow dry-run
+    const dryRun = shadowDryRun(sql);
+    if (dryRun.skipped) {
+      warn(`[WARN] ${dryRun.reason ?? 'shadow dry-run skipped'} — skipping shadow dry-run`);
+    } else if (dryRun.ok) {
+      log(`[OK] Shadow dry-run completed in ${dryRun.ms}ms (BEGIN + ROLLBACK)`);
+    } else {
+      errlog(`[FAIL] Shadow dry-run failed in ${dryRun.ms}ms: ${dryRun.error}`);
+    }
+
+    // 3) Decide
+    const decision = decide(findings, dryRun);
+    log(decision.summary);
+    return exit(decision.exitCode);
+  } catch (e) {
+    // BLQ-MED-4: structured internal-error path. Exit code 2 = "preflight
+    // crashed" so CI can distinguish a script bug from a [BLOCKED] verdict.
+    const msg = e instanceof Error ? e.message : String(e);
+    errlog(`[ERR] preflight crashed: ${msg}`);
     return exit(2);
   }
-
-  const absPath = resolve(sqlPath);
-  // existsSync is only checked against the real filesystem; tests inject
-  // `readFile` directly and bypass this branch by passing a path that the
-  // injected reader resolves. For real CLI invocations (no injection) we
-  // do the existence check first so the error message is friendlier.
-  if (!deps.readFile && !existsSync(absPath)) {
-    errlog(`[ERR] SQL file not found: ${absPath}`);
-    return exit(2);
-  }
-
-  const sql = readFile(absPath);
-  log(`[migrate-preflight] analyzing ${absPath} (${sql.length} bytes)`);
-
-  // 1) Static analysis
-  const findings = analyze(sql);
-  log(formatFindings(findings));
-
-  // 2) Shadow dry-run
-  const dryRun = shadowDryRun(sql);
-  if (dryRun.skipped) {
-    warn(`[WARN] ${dryRun.reason ?? 'shadow dry-run skipped'} — skipping shadow dry-run`);
-  } else if (dryRun.ok) {
-    log(`[OK] Shadow dry-run completed in ${dryRun.ms}ms (BEGIN + ROLLBACK)`);
-  } else {
-    errlog(`[FAIL] Shadow dry-run failed in ${dryRun.ms}ms: ${dryRun.error}`);
-  }
-
-  // 3) Decide
-  const decision = decide(findings, dryRun);
-  log(decision.summary);
-  return exit(decision.exitCode);
 }
 
 // Entrypoint — only runs when invoked directly, not when imported by tests.

@@ -113,7 +113,7 @@ Exit codes:
 |------|----------------------------------------------------------------|
 | 0    | `[PASS]` — safe to apply (still review the diff manually).     |
 | 1    | `[BLOCKED]` — HIGH risk or dry-run failure / too slow.         |
-| 2    | Usage error (no file argument, file not found, etc).           |
+| 2    | Internal error — usage error (no file argument, file not found), or any uncaught exception thrown by the script (`[ERR] preflight crashed: …`). CI MUST distinguish exit 2 from exit 1: 2 means "preflight itself broke", 1 means "preflight verdict is BLOCKED". |
 
 ### 3.2 Post-apply integrity check
 
@@ -144,17 +144,26 @@ The analyser is intentionally noisy: false positives only force a human
 review (cheap), while a missed `HIGH` could destroy production data
 (catastrophic).
 
-| Pattern                         | Level   | Why it's flagged                                         |
-|---------------------------------|---------|----------------------------------------------------------|
-| `DROP TABLE`                    | HIGH    | Permanent data loss.                                     |
-| `ALTER TABLE … DROP COLUMN`     | HIGH    | Permanent data loss; not reversible without backup.      |
-| `DROP INDEX`                    | HIGH    | Performance regression risk; hard to roll back online.   |
-| `TRUNCATE`                      | HIGH    | Permanent data loss; bypasses triggers, cascades.        |
-| `ALTER TABLE … DROP <anything>` | HIGH    | Catches DROP CONSTRAINT / DROP DEFAULT not covered above.|
-| `ALTER TABLE … RENAME TO`       | HIGH    | Application code expects the old name; breaks app.       |
-| `DELETE FROM` without `WHERE`   | HIGH    | Wipes the table; multi-line aware.                       |
-| `ALTER COLUMN … TYPE`           | MEDIUM  | Can silently change semantics; review numeric precision. |
-| `ALTER COLUMN … SET NOT NULL`   | MEDIUM  | Fails if any existing row has NULL; needs backfill plan. |
+| Pattern                                | Level   | Why it's flagged                                         |
+|----------------------------------------|---------|----------------------------------------------------------|
+| `DROP TABLE`                           | HIGH    | Permanent data loss.                                     |
+| `ALTER TABLE … DROP COLUMN`            | HIGH    | Permanent data loss; not reversible without backup.      |
+| `DROP INDEX`                           | HIGH    | Performance regression risk; hard to roll back online.   |
+| `TRUNCATE`                             | HIGH    | Permanent data loss; bypasses triggers, cascades.        |
+| `ALTER TABLE … DROP <anything>`        | HIGH    | Catches DROP CONSTRAINT / DROP DEFAULT not covered above.|
+| `ALTER TABLE … RENAME TO`              | HIGH    | Application code expects the old name; breaks app.       |
+| `DELETE FROM` without `WHERE`          | HIGH    | Wipes the table; multi-line aware.                       |
+| `UPDATE … SET …` without `WHERE`       | HIGH    | Mass write across the entire table; same blast radius as `DELETE` without `WHERE` (BLQ-ALTO-1). |
+| `DROP DATABASE`/`SCHEMA`/`TYPE`/…      | HIGH    | Catastrophic destructive DDL beyond TABLE/INDEX/COLUMN: covers DATABASE, SCHEMA, TYPE, POLICY, TRIGGER, FUNCTION, VIEW, MATERIALIZED VIEW, SEQUENCE, EXTENSION, PUBLICATION, SUBSCRIPTION (BLQ-ALTO-1). |
+| `DISABLE ROW LEVEL SECURITY`           | HIGH    | Disables the tenant boundary that every service relies on (WKH-53 ownership guard) (BLQ-ALTO-1). |
+| `REASSIGN OWNED BY`                    | HIGH    | Bulk-transfers every object owned by a role; downstream ACL surprises (BLQ-ALTO-1). |
+| `\!`, `\copy`, `\i`, `\<meta>`     | HIGH    | psql meta-command in migration body — refusing to dry-run (BLQ-BAJO-1). `\!` shells out to bash; `\i` includes arbitrary files; both bypass the BEGIN/ROLLBACK guarantee. |
+| `GRANT … ON …` / `REVOKE … ON …`       | MEDIUM  | Privilege grants/revokes are security-sensitive but sometimes intentional (e.g. `secure_rpc_search_path` migration) (BLQ-ALTO-1). |
+| `ALTER DEFAULT PRIVILEGES`             | MEDIUM  | Silently changes the ACL of every future object created in the schema; hard to audit retroactively (BLQ-ALTO-1). |
+| Embedded `COMMIT;`/`ROLLBACK;`         | MEDIUM  | Breaks the BEGIN/ROLLBACK wrap of the shadow dry-run; foot-gun when paired with `apply-prod-migrations.sh` which already wraps each file in its own transaction (BLQ-MED-1). See §9 for the exact `psql --single-transaction` semantics. |
+| `ALTER COLUMN … TYPE`                  | MEDIUM  | Can silently change semantics; review numeric precision. |
+| `ALTER COLUMN … SET NOT NULL`          | MEDIUM  | Fails if any existing row has NULL; needs backfill plan. |
+| `CREATE INDEX CONCURRENTLY` / `VACUUM` | INFO    | Cannot be wrapped in BEGIN/ROLLBACK; the shadow dry-run is structurally unable to validate them (BLQ-BAJO-2). See §11 for the alternative workflow. Also catches `DROP INDEX CONCURRENTLY`, `REINDEX CONCURRENTLY`, `CREATE DATABASE`, `ALTER SYSTEM`. |
 
 **False positive escape hatch**: if you legitimately need a HIGH operation
 (e.g. dropping a column that has been deprecated for two releases), do
@@ -203,6 +212,35 @@ Workflow:
 4. If the team agrees, the reviewer **manually overrides** by mentioning
    the override in the PR (`override-preflight: yes — reason: …`). The
    script does not auto-override; the override is in the human process.
+
+### 5.4 The `--post-apply` index report — AC-4(b) decision
+
+The post-apply check lists every index on `a2a_*` tables (query (c)) but
+**does not validate** that the listed indexes match what the migration
+declared. We considered two implementations:
+
+1. **Parser**: parse `CREATE INDEX <name>` from the migration file and
+   diff against `\dindex` per name. Rejected because (a) parsing CREATE
+   INDEX with all its variants (CONCURRENTLY, UNIQUE, partial WHERE,
+   expression-based, multi-column) is a SQL-engine-grade task, and (b)
+   the shadow dry-run already validates that the migration parses + runs
+   against Postgres.
+
+2. **Baseline-count delta**: track the `a2a_*` index count vs. baseline.
+   Rejected because index counts naturally grow with every migration —
+   a strict "must not decrease" rule would block legitimate `DROP INDEX
+   IF EXISTS` cleanup migrations.
+
+**Decision**: keep the index query as informational only. The output is
+printed to stdout for grep / human review, not validated. The runbook is
+honest about this:
+
+> indexes are listed for grep, not validated against migration declarations.
+
+If a future incident requires programmatic index validation, the right
+answer is to introduce a baseline manifest (`expectedIndexes: [...]`)
+similar to BLQ-MED-2's `EXPECTED_A2A_TABLES`. Until then, the human
+reviewing the migration PR is the gate.
 
 ---
 
@@ -335,10 +373,15 @@ unless the pre-flight ran.
 
 ## 9. Known limitations
 
-- **The analyser is line-based**. A multi-statement DDL spread across
-  comments and string literals can confuse it. The mitigation is the
-  shadow dry-run — if the SQL is too clever for the analyser, the
-  Postgres parser still catches it.
+- **The analyser is statement-based, not parser-based**. As of WKH-78
+  fix-pack iter 1, the analyser splits SQL into top-level statements
+  (BLQ-ALTO-2 fix) and is aware of single-quoted, double-quoted, escape,
+  and dollar-quoted strings (BLQ-MED-3 fix). It still cannot reason
+  about computed SQL inside `EXECUTE 'DROP TABLE ' || quote_ident(x)`
+  blocks — those live inside dollar-quoted PL/pgSQL bodies that the
+  analyser deliberately treats as opaque. The mitigation is the shadow
+  dry-run — if the SQL constructs DDL at runtime, Postgres will execute
+  it inside the wrapper transaction and ROLLBACK aborts it.
 - **The shadow DB is not a perfect mirror of prod**. Schema drift between
   dev and prod can mask real issues. Owners should periodically rebase
   dev from a prod snapshot — tracked separately.
@@ -349,6 +392,36 @@ unless the pre-flight ran.
 - **CD-1 is enforced only by convention**. The script cannot tell
   `bdwvrwzvsldephfibmuu` from `caldzjhjgctpgodldqav` from a connection
   string alone. The §2 sanity-check command above is the human gate.
+- **Embedded `COMMIT;` / `ROLLBACK;` semantics under `psql --single-transaction`**.
+  When the migration body itself contains explicit `COMMIT;` or
+  `ROLLBACK;`, the analyser flags it MEDIUM (BLQ-MED-1) but does not
+  refuse to dry-run. `psql --single-transaction` opens an outer
+  `BEGIN;` and treats the migration's embedded `COMMIT` as terminating
+  the *outer* transaction — meaning subsequent statements run outside
+  the rollback wrap and CAN partial-commit on the shadow project. The
+  outer `ROLLBACK;` we append is a no-op in that case. **Therefore**:
+  any migration that contains `COMMIT;` is structurally untrustworthy
+  for shadow validation. The runbook position is: rewrite the migration
+  to remove embedded transaction control, or accept the MEDIUM finding
+  and human-review the diff manually.
+- **psql meta-commands (`\!`, `\copy`, `\i`, …)** are flagged HIGH
+  (BLQ-BAJO-1) and refused. The shell-escape (`\!`) is the most
+  dangerous: it executes arbitrary commands on the host running psql,
+  bypassing every BEGIN/ROLLBACK guarantee. Even if a meta-command is
+  benign, the analyser refuses to dry-run because Postgres-side
+  execution is the only safe sandbox. **Known security limitation**:
+  the analyser cannot prove that a meta-command was deliberately
+  authored vs. injected via clipboard or copy-paste; the gate must be
+  the human reviewer.
+- **EXECUTE-string DDL inside PL/pgSQL bodies is invisible**. A
+  function body of the form `$$ EXECUTE 'DROP TABLE legacy'; $$` will
+  pass the analyser because dollar-quoted bodies are stripped during
+  string-literal-aware preprocessing (BLQ-MED-3). The shadow dry-run
+  still catches it (Postgres executes the DROP inside the wrapping
+  transaction and ROLLBACK aborts it), but the static report alone
+  will be silent. If you author such a function, either inline the
+  DDL outside the function body or add `-- @preflight-allow` review
+  notes to the PR.
 
 ---
 
@@ -357,19 +430,87 @@ unless the pre-flight ran.
 ```
 Static analyser exit codes:
   0 → [PASS]    safe to apply (still review the diff)
-  1 → [BLOCKED] HIGH risk or dry-run failure / > 30s
-  2 → usage error / file not found
+  1 → [BLOCKED] / [FAIL] HIGH risk, dry-run failure, dry-run > 30s, or post-apply integrity failure
+  2 → INTERNAL  usage error, file not found, or uncaught script exception
+                 (look for `[ERR] preflight crashed: …` in stderr)
 
 Pre-flight commands:
   npm run migrate:preflight -- supabase/migrations/<file>.sql
   DATABASE_URL='...' node scripts/migrate-preflight.mjs --post-apply
 
 Constraint Directives (from work-item):
-  CD-1  Never mutate prod from this script (read-only on --post-apply).
-  CD-2  Dry-run wraps in BEGIN + ROLLBACK; never COMMIT.
-  CD-3  No real connection strings in repo.
-  CD-4  HIGH risk OR dry-run failure → exit 1.
-  CD-5  No new deps; uses node:child_process + psql binary.
-  CD-6  Tests are mocks 100%, never connect to real Supabase.
-  CD-7  -- ROLLBACK template is recommendation, not enforcement.
+  CD-1   Never mutate prod from this script (read-only on --post-apply).
+  CD-2   Dry-run wraps in BEGIN + ROLLBACK; never COMMIT.
+  CD-3   No real connection strings in repo.
+  CD-4   HIGH risk OR dry-run failure → exit 1.
+  CD-5   No new deps; uses node:child_process + psql binary.
+  CD-6   Tests are mocks 100%, never connect to real Supabase.
+  CD-7   -- ROLLBACK template is recommendation, not enforcement.
+
+Fix-pack iter 1 CDs (post-AR):
+  CD-FP1 Each new RISK_PATTERN ships with at least 2 test fixtures
+         (positive + negative).
+  CD-FP2 splitStatements() must NOT break real project migrations
+         (dollar-quoted bodies, `IF EXISTS` clauses, etc.).
+  CD-FP3 No existing pattern's severity is lowered. New patterns may
+         only ADD detections, never relax them.
 ```
+
+---
+
+## 11. Migrations that bypass the shadow dry-run
+
+Some Postgres operations **cannot** run inside a `BEGIN; … ROLLBACK;`
+wrapper. The analyser flags them INFO (BLQ-BAJO-2) and the shadow
+dry-run will fail with a syntax error if you try anyway. They include:
+
+- `CREATE INDEX CONCURRENTLY` / `DROP INDEX CONCURRENTLY` / `REINDEX CONCURRENTLY`
+- `VACUUM`, `VACUUM ANALYZE`, `VACUUM FULL`
+- `CREATE DATABASE` / `DROP DATABASE`
+- `ALTER SYSTEM SET …`
+
+For these migrations, **do not use the standard pre-flight path**.
+Instead:
+
+1. Confirm the migration has zero non-CONCURRENTLY DDL — split the file
+   if it mixes wrappable and unwrappable statements. The convention is
+   one `_concurrent` migration per such operation.
+2. Run the static analyser **only**:
+
+   ```bash
+   node scripts/migrate-preflight.mjs supabase/migrations/<file>.sql
+   ```
+
+   The exit code will still be `0` (no HIGH findings — INFO doesn't
+   block) and the output will print the INFO lines so a reviewer sees
+   what's about to happen.
+3. Apply the migration to the **dev/shadow project first**, manually:
+
+   ```bash
+   psql "$SHADOW_DATABASE_URL" \
+     -v ON_ERROR_STOP=1 \
+     -X \
+     -f supabase/migrations/<file>.sql
+   ```
+
+   Note the **absence** of `--single-transaction` — that's the whole
+   point. If it fails on shadow, fix it on shadow first.
+4. After it succeeds on shadow, run the post-apply integrity check
+   against the shadow URL to confirm no FK invalidations:
+
+   ```bash
+   DATABASE_URL="$SHADOW_DATABASE_URL" \
+     node scripts/migrate-preflight.mjs --post-apply
+   ```
+
+5. Only after shadow validation, apply to prod via
+   `scripts/apply-prod-migrations.sh` (which itself does NOT add
+   `--single-transaction`, so CONCURRENTLY survives the prod run).
+6. Run `--post-apply` again against the prod `DATABASE_URL`.
+
+**Why this matters**: `CREATE INDEX CONCURRENTLY` takes minutes on
+multi-million-row tables, holds a `ShareUpdateExclusiveLock` (does NOT
+block reads or writes, but blocks other DDL), and is the only safe way
+to add an index to a busy table. Wrapping it in BEGIN/ROLLBACK would
+both fail at parse time AND defeat the entire purpose. The pre-flight
+script honors this constraint by flagging INFO and pointing here.
