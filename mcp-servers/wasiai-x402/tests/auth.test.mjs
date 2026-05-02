@@ -114,3 +114,67 @@ test('AUTH-09: AuthError has name "AuthError" and is instanceof Error', () => {
     assert.ok(e instanceof AuthError);
   }
 });
+
+// ──────────────────────────────────────────────────────────────────────────
+// WKH-75 W1 — dual-bearer overlap window (AC-4, AC-6)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// AUTH-10..AUTH-12: validateBearerToken accepts an optional third arg
+// `prevToken` that represents the bearer immediately prior to the most
+// recent rotation. During the 24h overlap window post-rotation, callers
+// must succeed when presenting EITHER the new (current) bearer or the prev.
+// CD-8: AUTH-01..AUTH-09 above must remain green (default '' ⇒ legacy).
+
+const PREV_TOKEN = 'c'.repeat(64);  // 64-char distinct from VALID/WRONG.
+
+test('AUTH-10 (WKH-75 AC-4): prev configured + presented matches PREV → returns true', () => {
+  // Overlap window scenario: caller still uses the bearer that was current
+  // before the most recent rotation.
+  const r = validateBearerToken(`Bearer ${PREV_TOKEN}`, VALID_TOKEN, PREV_TOKEN);
+  assert.equal(r, true);
+});
+
+test('AUTH-11 (WKH-75 AC-4): prev configured + presented matches CURRENT → returns true', () => {
+  // Overlap window scenario: caller already updated to the new bearer.
+  // The prev arg must NOT break the primary-current path.
+  const r = validateBearerToken(`Bearer ${VALID_TOKEN}`, VALID_TOKEN, PREV_TOKEN);
+  assert.equal(r, true);
+});
+
+test('AUTH-11b (WKH-75 AC-4): prev configured + presented matches NEITHER → 401', () => {
+  // Negative path: an arbitrary 64-char bearer is rejected even with prev set.
+  assert.throws(
+    () => validateBearerToken(`Bearer ${WRONG_TOKEN}`, VALID_TOKEN, PREV_TOKEN),
+    (err) => err instanceof AuthError && err.message === 'unauthorized',
+  );
+});
+
+test('AUTH-12 (WKH-75 AC-6): malformed prev (length !== 64) is silently ignored', () => {
+  // Operator might leave the env var blank, with a placeholder, or with a
+  // truncated value during deploys. We must NOT throw on those — only the
+  // current bearer is honored, behavior identical to no-prev case.
+  for (const malformedPrev of ['', 'short', 'a'.repeat(32), 'a'.repeat(63), 'a'.repeat(65)]) {
+    // The CURRENT bearer still works.
+    assert.equal(validateBearerToken(`Bearer ${VALID_TOKEN}`, VALID_TOKEN, malformedPrev), true);
+    // A wrong bearer still fails (no fallback to malformed prev).
+    assert.throws(
+      () => validateBearerToken(`Bearer ${WRONG_TOKEN}`, VALID_TOKEN, malformedPrev),
+      (err) => err instanceof AuthError && err.message === 'unauthorized',
+      `expected AuthError when prev is malformed=${JSON.stringify(malformedPrev)}`,
+    );
+  }
+});
+
+test('AUTH-12b (WKH-75 AC-6): non-string prev (null/undefined/number) ignored', () => {
+  // Defensive: validateBearerToken may receive non-string from a careless
+  // caller. We must NOT throw on that — only ignore the prev arg.
+  for (const bad of [null, undefined, 0, false, {}, []]) {
+    // CURRENT still works.
+    assert.equal(validateBearerToken(`Bearer ${VALID_TOKEN}`, VALID_TOKEN, bad), true);
+    // WRONG still fails.
+    assert.throws(
+      () => validateBearerToken(`Bearer ${WRONG_TOKEN}`, VALID_TOKEN, bad),
+      (err) => err instanceof AuthError && err.message === 'unauthorized',
+    );
+  }
+});
