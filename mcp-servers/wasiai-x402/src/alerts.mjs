@@ -61,6 +61,18 @@ const DISCORD_COLOR_DEFAULT = 3066993;
 // WKH-90 CD-WKH90-3: hardcoded, NOT env-configurable in this HU.
 const DISCORD_USERNAME = 'wasiai-alerts';
 
+// WKH-91 AC-1/2 + CD-WKH91-1: Discord embed length limits.
+//   title       → 256 chars max
+//   description → 4096 chars max
+// When the input exceeds the limit, `_truncate` slices to (max - 1) and
+// appends U+2026 ('…'), producing a final string of exactly `max` chars.
+const TITLE_MAX = 256;
+const DESCRIPTION_MAX = 4096;
+
+// WKH-91 AC-6: named constant replaces the inline 'unknown' magic string
+// previously at line :114. Used when severity is absent or non-string.
+const DEFAULT_SEVERITY_LABEL = 'unknown';
+
 // Keys that map to special embed slots and therefore are NOT duplicated as
 // fields. Everything else from the sanitized body becomes a `{name, value,
 // inline}` field entry.
@@ -72,6 +84,33 @@ const DISCORD_RESERVED_KEYS = new Set([
   'checkedAt',
 ]);
 
+/**
+ * @internal
+ * Truncate a string to `max` chars, appending U+2026 ('…') when sliced.
+ * Returns the input untouched if not a string or already within limit.
+ * Resulting string length equals `max` exactly when truncation happens
+ * (CD-WKH91-1: ellipsis at the very end via `slice(0, max - 1) + '…'`).
+ */
+function _truncate(s, max) {
+  if (typeof s !== 'string') return s;
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + '…';
+}
+
+/**
+ * @internal
+ * Return the first candidate that is neither undefined, null, nor empty
+ * string. Returns `undefined` if none qualify. Used to resolve the embed
+ * timestamp from a priority list (rotatedAt > checkedAt) without nested
+ * ternaries (WKH-91 AC-7).
+ */
+function _pickFirstNonEmpty(...candidates) {
+  for (const c of candidates) {
+    if (c !== undefined && c !== null && c !== '') return c;
+  }
+  return undefined;
+}
+
 export function sanitizeAlertBody(body) {
   if (!body || typeof body !== 'object') return {};
   const out = {};
@@ -82,7 +121,10 @@ export function sanitizeAlertBody(body) {
 }
 
 /**
+ * @internal
  * Build a Discord-webhook-compatible payload from a sanitized alert body.
+ * NOT for external consumers — use `sendAlert()` instead. Exposed only so
+ * the unit suite can assert the embed shape directly (T-AL-DISC-07).
  *
  * Shape (WKH-90 DT-3):
  *   {
@@ -95,6 +137,9 @@ export function sanitizeAlertBody(body) {
  *       fields: [{name, value: String(val), inline: true}, ...]
  *     }]
  *   }
+ *
+ * Title and description are truncated to Discord's hard limits (256 / 4096)
+ * with a trailing '…' (WKH-91 AC-1/2).
  *
  * NEVER throws. Inputs are already sanitized by sanitizeAlertBody().
  *
@@ -111,26 +156,25 @@ export function formatForDiscord({ severity, body }) {
     ? DISCORD_COLOR_BY_SEVERITY[sev]
     : DISCORD_COLOR_DEFAULT;
 
-  const sevLabel = sev || 'unknown';
+  const sevLabel = sev || DEFAULT_SEVERITY_LABEL;
   const event = typeof safeBody.event === 'string' ? safeBody.event : '';
-  const title = event ? `[${sevLabel}] ${event}` : `[${sevLabel}]`;
+  const rawTitle = event ? `[${sevLabel}] ${event}` : `[${sevLabel}]`;
 
   const embed = {
-    title,
+    title: _truncate(rawTitle, TITLE_MAX),
     color,
   };
 
   if (typeof safeBody.reason === 'string' && safeBody.reason.length > 0) {
-    embed.description = safeBody.reason;
+    embed.description = _truncate(safeBody.reason, DESCRIPTION_MAX);
   }
 
   // Prefer rotatedAt (rotation events) over checkedAt (balance-check events).
-  const ts =
-    typeof safeBody.rotatedAt === 'string' && safeBody.rotatedAt.length > 0
-      ? safeBody.rotatedAt
-      : typeof safeBody.checkedAt === 'string' && safeBody.checkedAt.length > 0
-        ? safeBody.checkedAt
-        : undefined;
+  // WKH-91 AC-7: nested ternary replaced with `_pickFirstNonEmpty` helper.
+  const ts = _pickFirstNonEmpty(
+    typeof safeBody.rotatedAt === 'string' ? safeBody.rotatedAt : '',
+    typeof safeBody.checkedAt === 'string' ? safeBody.checkedAt : '',
+  );
   if (ts) embed.timestamp = ts;
 
   const fields = [];
@@ -162,22 +206,31 @@ export async function sendAlert({ severity, body, webhookUrl, timeoutMs = 5000 }
     return { sent: false, reason: 'webhook not configured' };
   }
 
-  const sanitized = sanitizeAlertBody({ severity, ...body });
+  // WKH-91 MNR-CR-2 refactor: sanitize the body alone; severity is carried
+  // as a separate argument and re-attached in the raw-JSON path. This avoids
+  // splatting `body` into a synthetic envelope only to filter it back out,
+  // and keeps the contract of `sanitizeAlertBody` to "one body in, one body
+  // out". The `severity` key is in `ALLOWED_BODY_KEYS` so the raw shape is
+  // unchanged byte-for-byte (T-AL-02 / T-AL-DISC-05 still pass).
+  const sanitized = sanitizeAlertBody(body);
 
   // WKH-90: detect Discord host and reshape payload. CD-WKH90-2: any URL
   // parse failure falls back to raw-JSON path silently (no throw, no log of
   // the URL itself per CD-9).
+  // WKH-91 AC-3 / CD-WKH91-2: use `parsed.hostname` (port-stripped, already
+  // lowercased by URL) so a non-default port like
+  // `https://discord.com:8080/...` is still detected as a Discord host.
   let isDiscord = false;
   try {
     const parsed = new URL(webhookUrl);
-    isDiscord = DISCORD_HOSTS.has(parsed.host);
+    isDiscord = DISCORD_HOSTS.has(parsed.hostname.toLowerCase());
   } catch {
     isDiscord = false;
   }
 
   const payload = isDiscord
     ? formatForDiscord({ severity, body: sanitized })
-    : sanitized;
+    : { ...(severity !== undefined ? { severity } : {}), ...sanitized };
 
   let resp;
   try {

@@ -213,7 +213,7 @@ test('T-AL-05: rotation-secret keys silently dropped (CD-11 deny-by-default)', a
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WKH-90 — Discord-aware payload formatting tests (T-AL-DISC-01..04).
+// WKH-90 — Discord-aware payload formatting tests (T-AL-DISC-01..08).
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('T-AL-DISC-01: critical → Discord payload shape (username + red embed + fields)', async () => {
@@ -354,9 +354,15 @@ test('T-AL-DISC-05: backward compat — non-Discord host still gets raw JSON (AC
   assert.ok(!('embeds' in captured));
 });
 
-test('T-AL-DISC-06: malformed URL falls back to raw path, never throws (CD-WKH90-2)', async () => {
+test('T-AL-DISC-06: malformed URL falls back to raw path, never throws (CD-WKH90-2 / WKH-91 CD-WKH91-3)', async () => {
+  // WKH-91 AC-4 / CD-WKH91-3: assertions MUST run unconditionally — no
+  // `if (captured)` guard. We mock `fetch` to ALWAYS capture and return 200
+  // so the test deterministically reaches the body-shape assertions, even
+  // though `webhookUrl` is structurally invalid for `new URL()`.
   let captured;
+  let fetchCalls = 0;
   globalThis.fetch = async (url, init = {}) => {
+    fetchCalls += 1;
     captured = JSON.parse(init.body);
     return new Response('{}', { status: 200 });
   };
@@ -367,17 +373,20 @@ test('T-AL-DISC-06: malformed URL falls back to raw path, never throws (CD-WKH90
     webhookUrl: 'not-a-valid-url',
   });
 
-  // fetch is still attempted with the raw URL — Node fetch will reject it,
-  // but the URL parse failure itself must NOT throw inside sendAlert and
-  // must NOT reshape to Discord. We assert sendAlert returned a result
-  // object (no throw) regardless of fetch outcome.
+  // sendAlert must return a result object without throwing.
   assert.equal(typeof r, 'object');
   assert.ok('sent' in r);
-  // If fetch happened, the body MUST be raw (not Discord-shaped).
-  if (captured) {
-    assert.ok(!('username' in captured));
-    assert.ok(!('embeds' in captured));
-  }
+  // The URL-parse failure means the raw-JSON branch is taken; fetch must
+  // have been called once with the structurally-invalid URL.
+  assert.equal(fetchCalls, 1, 'fetch must be called exactly once');
+  assert.ok(captured, 'fetch body must be captured (mock always succeeds)');
+  // The body MUST be raw (NOT Discord-shaped) because URL-parse failed.
+  assert.ok(!('username' in captured), 'malformed URL must not reshape to Discord');
+  assert.ok(!('embeds' in captured), 'malformed URL must not reshape to Discord');
+  // Raw-shape sanity: severity / chain / operator must be top-level.
+  assert.equal(captured.severity, 'critical');
+  assert.equal(captured.chain, 'avax');
+  assert.equal(captured.operator, '0xabc');
 });
 
 test('T-AL-DISC-07: formatForDiscord pure function — direct shape assertion', () => {
@@ -399,6 +408,24 @@ test('T-AL-DISC-07: formatForDiscord pure function — direct shape assertion', 
   assert.equal(out.embeds[0].timestamp, '2026-05-01T09:00:00.000Z');
   const names = out.embeds[0].fields.map((f) => f.name).sort();
   assert.deepEqual(names, ['chain', 'operator']);
+});
+
+test('T-AL-DISC-08: HTTP 429 (rate-limited) → {sent:false, status:429, reason} no throw (WKH-91 AC-9)', async () => {
+  // WKH-91 AC-9: when the webhook responds with 429 (Discord rate-limit),
+  // sendAlert MUST return the exact triple shape without throwing.
+  globalThis.fetch = async () => new Response('Too Many Requests', { status: 429 });
+
+  const r = await sendAlert({
+    severity: 'critical',
+    body: { chain: 'avax', operator: '0xabc', balanceUsdc: 0.1 },
+    webhookUrl: 'https://discord.com/api/webhooks/123/abc',
+  });
+
+  assert.equal(r.sent, false);
+  assert.equal(r.status, 429);
+  assert.equal(r.reason, 'webhook status 429');
+  // Defensive: result keys are exactly {sent, status, reason} (no surprise extras).
+  assert.deepEqual(Object.keys(r).sort(), ['reason', 'sent', 'status']);
 });
 
 test('T-AL-bonus: sanitizeAlertBody returns only whitelisted keys', () => {
