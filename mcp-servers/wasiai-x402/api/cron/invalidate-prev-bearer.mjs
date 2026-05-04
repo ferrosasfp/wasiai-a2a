@@ -43,8 +43,7 @@ import * as log from '../../src/log.mjs';
 import { validateCronSecret, CronAuthError } from '../../src/cron-auth.mjs';
 import { listEnvs, deleteEnv, triggerRedeploy } from '../../src/vercel-env.mjs';
 import { getKvClient } from '../../src/kv-client.mjs';
-
-const KV_KEY = 'last-bearer-rotation';
+import { KV_KEYS } from '../../src/kv-keys.mjs';
 
 function _json(res, status, body) {
   res.statusCode = status;
@@ -61,6 +60,16 @@ function _readOwnString(obj, field) {
 }
 
 export default async function invalidatePrevBearerHandler(req, res) {
+  // 0. HTTP method gate (WKH-88, CD-WKH88-1). MUST run BEFORE auth so that
+  //    GET/PUT/DELETE/OPTIONS probes never produce an "unauthorized" log
+  //    line — semantics-correct (405 means wrong method, not auth failure)
+  //    and avoids spurious alerts on routine health-checks / preflights.
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
+    _json(res, 405, { error: 'method not allowed' });
+    return;
+  }
+
   // 1. Auth.
   try {
     validateCronSecret(req.headers?.authorization ?? '', process.env.CRON_SECRET);
@@ -102,7 +111,7 @@ export default async function invalidatePrevBearerHandler(req, res) {
 
   let raw;
   try {
-    raw = await kv.get(KV_KEY);
+    raw = await kv.get(KV_KEYS.LAST_ROTATION);
   } catch (err) {
     log.warn('mcp.cron.invalidate-prev-bearer.kv-read-failed', {
       stage: 'kv-read', error: err?.name ?? 'unknown',

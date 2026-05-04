@@ -38,6 +38,16 @@ function _json(res, status, body) {
 }
 
 export default async function rotateBearerHandler(req, res) {
+  // 0. HTTP method gate (WKH-88, CD-WKH88-1). MUST run BEFORE auth so that
+  //    GET/PUT/DELETE/OPTIONS probes never produce an "unauthorized" log
+  //    line — semantics-correct (405 means wrong method, not auth failure)
+  //    and avoids spurious alerts on routine health-checks / preflights.
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
+    _json(res, 405, { error: 'method not allowed' });
+    return;
+  }
+
   // 1. Auth.
   try {
     validateCronSecret(req.headers?.authorization ?? '', process.env.CRON_SECRET);

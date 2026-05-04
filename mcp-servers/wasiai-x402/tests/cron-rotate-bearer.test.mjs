@@ -266,6 +266,42 @@ test('T-CRO-04: rotate-bearer happy path → 200 + KV snapshot', async () => {
   }
 });
 
+test('T-MTHD-01 (WKH-88): rotate-bearer GET → 405, NO auth log, NO Vercel call', async () => {
+  // CD-WKH88-1: req.method check MUST run BEFORE validateCronSecret. Wrong-
+  // method probes (health-checks, GET preflights, browser fat-fingers) MUST
+  // NOT produce 'mcp.cron.unauthorized' log lines — that would generate
+  // spurious alerts. Behaviour: 405 + Allow:POST header + body
+  // {error:'method not allowed'}, no Vercel API call regardless of CRON_SECRET
+  // validity.
+  let fetchCalls = 0;
+  globalThis.fetch = async () => { fetchCalls += 1; return new Response('{}', { status: 200 }); };
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    // Use a valid CRON_SECRET — even with valid auth, GET MUST NOT proceed.
+    const req = { headers: { authorization: `Bearer ${TEST_SECRET}` }, method: 'GET' };
+    const res = makeRes();
+    await handler(req, res);
+    assert.equal(res.statusCode, 405);
+    assert.equal(res._headers['allow'], 'POST');
+    assert.equal(res._headers['content-type'], 'application/json');
+    const body = JSON.parse(res._body);
+    assert.deepEqual(body, { error: 'method not allowed' });
+    // CD-WKH88-1: NO auth-related log lines — neither success nor failure.
+    const blob = cap.lines.join('\n');
+    assert.ok(!/mcp\.cron\.unauthorized/.test(blob), 'must NOT log auth event on wrong method');
+    assert.ok(!/mcp\.cron\.rotate-bearer\.ok/.test(blob), 'must NOT log success event on wrong method');
+    assert.ok(!/mcp\.cron\.rotate-bearer\.failed/.test(blob), 'must NOT log failure event on wrong method');
+    // Method gate trips BEFORE any Vercel API call.
+    assert.equal(fetchCalls, 0, 'no Vercel call on wrong method');
+    // CD-9 still applies: secret must NEVER appear in stderr even on rejected
+    // requests (defence in depth).
+    assert.ok(!blob.includes(TEST_SECRET));
+  } finally {
+    cap.restore();
+  }
+});
+
 test('T-CRO-05: rotate-bearer rotation failure (listEnvs 500) → 500 + failure body', async () => {
   const kv = createKvMock();
   setKvClientForTesting(kv);

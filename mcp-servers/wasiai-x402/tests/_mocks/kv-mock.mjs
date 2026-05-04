@@ -70,6 +70,14 @@ export function createKvMock({ failNext = 0, slowMs = 0, staleData = null } = {}
     async set(key, value, opts = {}) {
       await _gate();
       // Upstash supports { ex: <seconds> } shorthand. We honour it.
+      // WKH-88: `nx:true` semantics — set only if the key does NOT already
+      // exist (post-purge). Returns null on collision, 'OK' on success.
+      // Used by `rotateBearer()` S0-pre mutex.
+      const nx = opts && typeof opts === 'object' && opts.nx === true;
+      if (nx) {
+        const existing = _purgeExpired(key);
+        if (existing) return null;
+      }
       let expiresAt = null;
       if (opts && typeof opts === 'object' && typeof opts.ex === 'number') {
         expiresAt = virtualNow() + opts.ex * 1000;
