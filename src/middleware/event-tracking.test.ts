@@ -226,4 +226,78 @@ describe('registerEventTracking middleware', () => {
     expect(mockTrack).toHaveBeenCalledTimes(1);
     expect(mockTrack.mock.calls[0][0].status).toBe('failed');
   });
+
+  // ── WKH-69 AC-4: payment_origin tagging ──
+
+  it('T-AC4-1: paymentOrigin=passport → metadata.payment_origin=passport', async () => {
+    // Inject the request and use a preHandler hook to set paymentOrigin
+    // before the route runs. We register a separate Fastify app to keep
+    // this isolated from the shared `app` (which has no preHandler).
+    const localApp = Fastify();
+    registerEventTracking(localApp);
+    localApp.addHook('preHandler', async (req: FastifyRequest) => {
+      req.paymentOrigin = 'passport';
+    });
+    localApp.post(
+      '/orchestrate',
+      async (_req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ ok: true }),
+    );
+    await localApp.ready();
+
+    try {
+      await localApp.inject({
+        method: 'POST',
+        url: '/orchestrate',
+        payload: {},
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(mockTrack).toHaveBeenCalledTimes(1);
+      const metadata = mockTrack.mock.calls[0][0].metadata;
+      expect(metadata.payment_origin).toBe('passport');
+    } finally {
+      await localApp.close();
+    }
+  });
+
+  it('T-AC4-2: paymentOrigin=eoa → metadata.payment_origin=eoa', async () => {
+    const localApp = Fastify();
+    registerEventTracking(localApp);
+    localApp.addHook('preHandler', async (req: FastifyRequest) => {
+      req.paymentOrigin = 'eoa';
+    });
+    localApp.post(
+      '/orchestrate',
+      async (_req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ ok: true }),
+    );
+    await localApp.ready();
+
+    try {
+      await localApp.inject({
+        method: 'POST',
+        url: '/orchestrate',
+        payload: {},
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(mockTrack).toHaveBeenCalledTimes(1);
+      const metadata = mockTrack.mock.calls[0][0].metadata;
+      expect(metadata.payment_origin).toBe('eoa');
+    } finally {
+      await localApp.close();
+    }
+  });
+
+  it('T-AC4-3: paymentOrigin undefined → metadata.payment_origin key ABSENT (forward-compat)', async () => {
+    // Use the shared app (no preHandler sets paymentOrigin → it stays undefined)
+    await app.inject({ method: 'POST', url: '/discover', payload: {} });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(mockTrack).toHaveBeenCalledTimes(1);
+    const metadata = mockTrack.mock.calls[0][0].metadata;
+    // Strict: key must be ABSENT, not present-with-undefined.
+    expect('payment_origin' in metadata).toBe(false);
+  });
 });
