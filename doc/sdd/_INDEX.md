@@ -68,3 +68,4 @@
 | 078 | 2026-05-03 | [WKH-90] Discord-aware payload formatting in alerts.mjs | patch | FAST+AR | DONE | feat/078-wkh-90-discord-alert-formatter ([done-report.md](078-wkh-90-discord-alert-formatter/done-report.md)) |
 | 079 | 2026-05-03 | [BUG-WKH75] setup-cronjob.mjs sends crontab strings to cron-job.org API (WKH-89) | bugfix | FAST+AR | DONE | feat/079-wkh-89-cronjob-schedule-fix ([done-report.md](079-wkh-89-cronjob-schedule-fix/done-report.md)) |
 | 080 | 2026-05-04 | [WKH-88] Bearer rotation refinements — HTTP method gate + JSDoc + KV mutex + tests | hardening | FAST+AR | DONE | feat/080-wkh-88-bearer-rotation-refinements ([done-report.md](080-wkh-88-bearer-rotation-refinements/done-report.md)) |
+| 081 | 2026-05-03 | [WKH-91] Discord formatter polish — truncate, hostname, test hardening | polish | FAST | DONE | feat/081-wkh-91-discord-formatter-polish ([done-report.md](081-wkh-91-discord-formatter-polish/done-report.md)) |
