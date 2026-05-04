@@ -373,9 +373,172 @@ they will keep working as today.
 
 ---
 
+## Versioning & Stability
+
+The public HTTP surface listed in this document is the **v1 contract**.
+All endpoints under the hosted base URL `https://app.wasiai.io/api/v1`
+follow the rules below.
+
+### What is stable in v1
+
+- Endpoint paths (e.g. `POST /compose`, `GET /discover`, `POST /mcp`).
+- Request body fields documented above (presence, type, validation
+  bounds).
+- Response top-level shape — successful response keys (`kiteTxHash`,
+  `pipeline`, `orchestrationId`, etc.) and the documented HTTP status
+  codes.
+- Authentication headers (`x-a2a-key`, `Authorization: Bearer
+  wasi_a2a_*`, `payment-signature`).
+- The x402 `accepts[0]` payload shape (`network`, `asset`, `payTo`,
+  `maxAmountRequired`, `maxTimeoutSeconds`, `extra`).
+
+### What is **not** part of v1
+
+- Endpoints listed under
+  [Endpoints intentionally NOT documented](#endpoints-intentionally-not-documented).
+  Operator-only / internal routes can change at any time without notice.
+- Internal field names inside response `data`/`details` blobs of error
+  envelopes (the envelope itself is stable; the diagnostics inside it
+  are best-effort).
+- Anything marked `[ROADMAP — WKH-NN]` in the docs.
+
+### Breaking change policy
+
+A breaking change is anything that requires a passing v1 client to
+modify its code:
+
+- Removing or renaming an endpoint, query parameter, or required body
+  field.
+- Tightening validation (e.g. lowering a `maxBudget` upper bound).
+- Changing a documented HTTP status code for an existing failure mode.
+- Reshaping a stable response key (changing type, removing it).
+
+Breaking changes ship under a **new major version** at a new base path
+(e.g. `/api/v2`); v1 continues to be served in parallel for the
+deprecation window.
+
+### Deprecation policy
+
+When v1 is scheduled for removal:
+
+1. A **90-day advance notice** is posted on the project's release
+   channel and pinned to the repo `README.md`. The countdown starts on
+   the date the notice goes out.
+2. During the deprecation window, `GET /health` includes a `deprecation`
+   field on its response with the planned `sunset` ISO date and a link
+   to the migration guide.
+3. After the window expires the v1 base path returns `410 Gone` with a
+   pointer to the latest version.
+
+Non-breaking additions (new optional fields, new endpoints, new error
+codes that surface previously-undefined failure modes) ship in v1
+without a version bump.
+
+### Detecting the running version
+
+Hit `GET /health` (no auth, no rate limit). The response carries:
+
+```json
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "uptime": 12345.67,
+  "timestamp": "2026-05-03T12:34:56.789Z"
+}
+```
+
+The `version` field is the semver of the deployed gateway (currently
+pre-1.0; the `/api/v1` path freeze is independent of the package
+version). When the deprecation timeline above is active, the response
+also carries an optional `deprecation` block — clients should treat its
+absence as "no scheduled sunset".
+
+---
+
+## Error response shapes
+
+The gateway returns two error envelopes depending on the protocol of
+the originating call: JSON-RPC 2.0 errors for `POST /mcp` (and any
+JSON-RPC method dispatcher), REST errors for everything else. Both are
+stable in v1.
+
+### JSON-RPC 2.0 error envelope (`POST /mcp`)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32602,
+    "message": "Invalid params",
+    "data": {
+      "errors": [
+        { "instancePath": "/budget", "message": "must be > 0" }
+      ]
+    }
+  }
+}
+```
+
+- `code` follows JSON-RPC 2.0 conventions: `-32700` parse error,
+  `-32600` invalid request, `-32601` method/tool not found, `-32602`
+  invalid params, `-32603` internal error. Tool execution failures
+  surface inside the `result` envelope with `isError: true` (see
+  [mcp-integration.md](./mcp-integration.md#output-envelope-both-surfaces)),
+  not as a JSON-RPC error.
+- `id` echoes the request `id`. For requests that failed before the id
+  could be parsed (e.g. malformed JSON), `id` is `null`.
+- `data` is best-effort diagnostics — its shape may differ between
+  error codes but its presence on validation errors (Ajv output) is
+  guaranteed.
+
+### REST error envelope (every other endpoint)
+
+The Fastify routes return a flat JSON object with `error` (human
+readable) plus an optional `code` (machine-readable token):
+
+```json
+{
+  "error": "A2A key required for this operation",
+  "code": "A2A_KEY_REQUIRED"
+}
+```
+
+Some routes additionally carry domain-specific context fields next to
+`error` / `code` — e.g. the x402 challenge response on `/compose` and
+`/orchestrate`:
+
+```json
+{
+  "error": "payment-signature header is required",
+  "x402Version": 2,
+  "accepts": [ /* ... see Step 3 in getting-started.md ... */ ]
+}
+```
+
+Common machine-readable codes used today (non-exhaustive — codes are
+add-only in v1):
+
+| Code | HTTP status | Meaning |
+|------|------------:|---------|
+| `A2A_KEY_REQUIRED` | `403` | Mutating call hit on the anonymous path. Send `x-a2a-key` or `Authorization: Bearer`. |
+| `SCOPE_DENIED` | `403` | Authenticated key's `allowed_*` filters reject the resolved agent / registry / category. |
+| `SSRF_BLOCKED` | `422` | A submitted URL resolves to a loopback / private / link-local host. |
+| `INSUFFICIENT_BALANCE` | `402` / `503` | Operator wallet balance pre-flight failed for the downstream chain. |
+| `not_implemented` | `501` | Endpoint is a documented placeholder (e.g. `POST /auth/bind/:chain`). |
+| `deposit_verification_pending` | `501` | `POST /auth/deposit` reservation. |
+
+When a route does not set a `code`, callers should treat the HTTP
+status code as the structured signal and the `error` string as a
+human-readable hint, not as a parse target.
+
+---
+
 ## Source of truth
 
-Routes are wired up in `src/index.ts` (lines 100–121). Each route module
-under `src/routes/` is the binding contract for the schema, status codes
-and validation rules. If this document drifts, the code wins — file a PR
-against `docs/api-reference.md`.
+Routes are wired up in `src/index.ts` under the `// Routes` comment
+block — the `await fastify.register(...)` calls beginning with
+`registriesRoutes` and ending with `mcpPlugin`. Each route module
+under `src/routes/` is the binding contract for the schema, status
+codes and validation rules. If this document drifts, the code wins —
+file a PR against `docs/api-reference.md`.

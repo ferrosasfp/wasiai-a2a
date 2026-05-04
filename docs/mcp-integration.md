@@ -95,6 +95,40 @@ curl -X POST <YOUR_GATEWAY_URL>/mcp \
   }'
 ```
 
+```ts
+// pay_x402 — self-hosted
+const res = await fetch('<YOUR_GATEWAY_URL>/mcp', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'pay_x402',
+      arguments: {
+        gatewayUrl: '<YOUR_GATEWAY_URL>',
+        endpoint: '/compose',
+        method: 'POST',
+        payload: {
+          steps: [
+            { agentSlug: 'example-summarizer', input: { text: 'Hello world' } },
+          ],
+          maxBudget: 0.5,
+        },
+        // NOTE: maxAmountWei is a per-call CAP on the auto-pay; values
+        // above are 18-digit defaults, NOT the asset's real decimals.
+        // See docs/getting-started.md WARNING block (atomic units, 6 decimals).
+        maxAmountWei: '1000000000000000000',
+      },
+    },
+  }),
+});
+const json = await res.json();
+// success path: result.content[0].text holds JSON-stringified tool output
+console.log(res.status, json);
+```
+
 ### `get_payment_quote` (self-hosted)
 
 Probe an endpoint to check if it is x402-gated and, if so, return the
@@ -117,6 +151,28 @@ curl -X POST <YOUR_GATEWAY_URL>/mcp \
       }
     }
   }'
+```
+
+```ts
+// get_payment_quote — self-hosted
+const res = await fetch('<YOUR_GATEWAY_URL>/mcp', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/call',
+    params: {
+      name: 'get_payment_quote',
+      arguments: {
+        gatewayUrl: '<YOUR_GATEWAY_URL>',
+        endpoint: '/orchestrate',
+      },
+    },
+  }),
+});
+const json = await res.json();
+console.log(res.status, json);
 ```
 
 ### `discover_agents` (self-hosted)
@@ -143,6 +199,30 @@ curl -X POST <YOUR_GATEWAY_URL>/mcp \
       }
     }
   }'
+```
+
+```ts
+// discover_agents — self-hosted
+const res = await fetch('<YOUR_GATEWAY_URL>/mcp', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    jsonrpc: '2.0',
+    id: 3,
+    method: 'tools/call',
+    params: {
+      name: 'discover_agents',
+      arguments: {
+        query: 'summarizer',
+        capabilities: ['text-summarization'],
+        maxPrice: 0.5,
+        limit: 5,
+      },
+    },
+  }),
+});
+const json = await res.json();
+console.log(res.status, json);
 ```
 
 ### `orchestrate` (self-hosted)
@@ -174,6 +254,32 @@ curl -X POST <YOUR_GATEWAY_URL>/mcp \
       }
     }
   }'
+```
+
+```ts
+// orchestrate — self-hosted
+const res = await fetch('<YOUR_GATEWAY_URL>/mcp', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    jsonrpc: '2.0',
+    id: 4,
+    method: 'tools/call',
+    params: {
+      name: 'orchestrate',
+      arguments: {
+        goal: 'Summarize this article and translate to French',
+        budget: 2.0,
+        preferCapabilities: ['text-summarization', 'translation'],
+        maxAgents: 5,
+        // a2aKey is optional — when omitted, falls back to anonymous x402.
+        a2aKey: '<YOUR_A2A_KEY>',
+      },
+    },
+  }),
+});
+const json = await res.json();
+console.log(res.status, json);
 ```
 
 > **No `orchestrate` on the hosted MCP.** The hosted Vercel deployment is
