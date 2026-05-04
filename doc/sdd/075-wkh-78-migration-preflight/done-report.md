@@ -16,7 +16,7 @@ WKH-78 delivers a **pre-flight validation script** (`scripts/migrate-preflight.m
 2. **Shadow dry-run** — executes migration in isolation (BEGIN/ROLLBACK) against the dev project
 3. **Post-apply integrity check** — verifies table existence, FK validity, indexes after apply
 
-All 9 Acceptance Criteria PASS. All 7 Constraint Directives PASS. 754/754 tests pass. Zero production surface changes. **Status: DONE. Ready for merge.**
+All 7 Acceptance Criteria PASS. All 7 Constraint Directives PASS. 754/754 tests pass. Zero production surface changes. **Status: DONE. Ready for merge.**
 
 ---
 

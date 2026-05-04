@@ -4,13 +4,84 @@
 [![Deploy](https://img.shields.io/badge/deploy-Railway-blueviolet)](https://wasiai-a2a-production.up.railway.app)
 [![A2A Protocol](https://img.shields.io/badge/protocol-Google%20A2A-blue)](https://google.github.io/A2A/)
 
-Chain-adaptive agent discovery, composition, and orchestration gateway -- built on [Google A2A Protocol](https://google.github.io/A2A/) with pluggable chain adapters, native identity, and x402 payments.
+Cross-chain agent-to-agent payment protocol — built on [Google A2A Protocol](https://google.github.io/A2A/) with pluggable chain adapters, native identity, and x402 settlement.
 
-**Live:** https://wasiai-a2a-production.up.railway.app
+**Pay once on Kite. Fan-out to N agents on Avalanche. Single HTTP request.**
+
+- **Live A2A gateway**: https://wasiai-a2a-production.up.railway.app
+- **Production app**: https://app.wasiai.io
+- **Pitch deck**: https://wasiai.io/pitch-v6
+- **Hackathon submission**: [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md)
+
+---
+
+## Production Status
+
+| Component | URL | Status |
+|-----------|-----|--------|
+| Marketplace UI + thin-proxy | https://app.wasiai.io | live (Vercel) |
+| A2A orchestrator (this repo) | https://wasiai-a2a-production.up.railway.app | live (Railway) |
+| Multi-chain x402 facilitator | https://wasiai-facilitator-production.up.railway.app | live (Railway) |
+
+Quality snapshot (sourced from [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md), as of hackathon submission):
+
+- TypeScript strict, zero `any` — `tsc --noEmit` clean
+- 644 tests passing in this repo (min, as of hackathon submission)
+- AR + CR + F4 QA gates green across the realignment pipeline
+- 37 onchain txs across 12 smoke batches, 100% success rate
+- **Mainnet hybrid mode active** since 2026-04-29: Kite testnet PYUSD inbound + Avalanche C-Chain mainnet USDC outbound, real-money smoke verified
+
+Mainnet proof — first cross-chain agent payment on real money:
+
+| Tx | Chain | Type | Explorer |
+|----|-------|------|----------|
+| `0x9fa6ff83…` | Avalanche C-Chain mainnet | USDC outbound (wasi-chainlink-price, $0.001) | [snowtrace](https://snowtrace.io/tx/0x9fa6ff83eb10e51685ce078e69f9c42fcbe3b138b5b8c3f32909c9fee279c6f1) |
+| `0xa22086d0…` | Avalanche C-Chain mainnet | USDC outbound (wasi-defi-sentiment, $0.010) | [snowtrace](https://snowtrace.io/tx/0xa22086d048b0222a8e08a5ca08997ae6c359e5ba674e63133a0ffbc463af16f9) |
+| `0xca10320c…` | Avalanche C-Chain mainnet | USDC outbound (wasi-wallet-profiler, $0.050) | [snowtrace](https://snowtrace.io/tx/0xca10320c24ff513d773ce65e0bd306d4acce3e4883180c9dca5573da6cf1dfdb) |
+| `0x6f406c08…` | Kite testnet | PYUSD inbound (1.0 PYUSD) | [kitescan](https://testnet.kitescan.ai/tx/0x6f406c08f6e59e3c5029f57ec3a84bb4596b94bb02568055ec4f9572981a1bf9) |
+
+Full proof set (testnet + mainnet) in [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md).
 
 ---
 
 ## Architecture
+
+### Production deployment topology
+
+The realignment pipeline (2026-04-28) cut over `compose`, `orchestrate`, and `capabilities` from the legacy v2 marketplace stack to the chain-adaptive a2a stack. Today three services share one Supabase production DB:
+
+```
++-------------------------------------------------------------+
+|  app.wasiai.io  (Vercel — thin-proxy + marketplace UI)      |
+|  /api/v1/{compose, orchestrate, capabilities, mcp}          |
++--------------------------+----------------------------------+
+                           | x-wasiai-forward-key (HMAC compare)
+                           v
++-------------------------------------------------------------+
+|  wasiai-a2a  (Railway — Fastify, this repo)                 |
+|  /compose, /orchestrate, /discover, /tasks, /mcp            |
+|  Kite testnet PYUSD inbound  /  USDC outbound (mainnet)     |
++--------------------------+----------------------------------+
+                           | x402 /verify, /settle (spec-literal)
+                           v
++-------------------------------------------------------------+
+|  wasiai-facilitator  (Railway — Fastify, multi-chain)       |
+|  Kite testnet (2368)  -- PYUSD                              |
+|  Kite mainnet (2366)  -- USDC.e        [staged, env-gated]  |
+|  Avalanche Fuji (43113) -- USDC                             |
+|  Avalanche C-Chain (43114) -- USDC      [active, mainnet]   |
++--------------------------+----------------------------------+
+                           | EIP-3009 TransferWithAuthorization
+                           v
+                  +------------------+
+                  | On-chain Kite +  |
+                  | Avalanche L1s    |
+                  +------------------+
+```
+
+Cross-chain flow: **Kite testnet PYUSD inbound** (or USDC on mainnet) → orchestrator fan-out → **Avalanche C-Chain USDC outbound** to N agents (mainnet hybrid mode).
+
+### Logical layers
 
 WasiAI A2A is a four-layer agentic economy gateway. Identity, budget, and authorization are owned off-chain (L3). On-chain settlement, attestation, and gasless execution are delegated to pluggable adapters (L2), selected at runtime via `WASIAI_A2A_CHAIN`.
 
@@ -37,17 +108,29 @@ WasiAI A2A is a four-layer agentic economy gateway. Identity, budget, and author
 |  +----------+--------------+----------+------------------+  |
 |  | Payment  | Attestation  | Gasless  | IdentityBinding  |  |
 |  +----------+--------------+----------+------------------+  |
-|  Currently implemented: kite-ozone (Kite Ozone testnet)     |
-|  Future: evm-generic, base, mock                            |
 +-----------------------------+-------------------------------+
                               | talks to
 +-----------------------------v-------------------------------+
 |  L1 -- Blockchain / Infra                                   |
-|  Kite Ozone testnet (2368) -- more chains planned           |
+|  Kite (testnet 2368, mainnet 2366) + Avalanche (Fuji 43113, |
+|  C-Chain 43114)                                             |
 +-------------------------------------------------------------+
 ```
 
 For the full architecture document, see [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md).
+
+### Adapter bundles
+
+The `WASIAI_A2A_CHAIN` env var selects which adapter bundle loads at startup. Mainnet bundles are env-gated and default OFF; flipping flags routes the same code to mainnet without redeploys.
+
+| Bundle | Status | Inbound asset | Outbound asset | Notes |
+|--------|--------|---------------|----------------|-------|
+| `kite-ozone-testnet` | active | PYUSD on Kite testnet (2368) | -- | Default `WASIAI_A2A_CHAIN`. Used in all hackathon demos. |
+| `kite-mainnet` | staged (env-gated) | USDC.e on Kite mainnet (2366) | -- | Flip via `KITE_NETWORK=mainnet` + `KITE_MAINNET_RPC_URL`. |
+| `avalanche-fuji` | active | -- | USDC testnet on Fuji (43113) | Default downstream when `WASIAI_DOWNSTREAM_X402=true`. |
+| `avalanche-mainnet` | active (mainnet hybrid) | -- | USDC mainnet on Avalanche C-Chain (43114) | Live since 2026-04-29 via `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`. |
+
+Adding a new chain: see the **Adapter Pattern** section below.
 
 ---
 
@@ -55,9 +138,9 @@ For the full architecture document, see [`doc/architecture/CHAIN-ADAPTIVE.md`](d
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 20 or newer (the dev setup; Railway/Vercel pin Node 22)
 - Supabase project (PostgreSQL persistence)
-- Kite Testnet wallet (for x402 payments)
+- Kite testnet wallet with some native KITE for gas (for x402 demos)
 
 ### Run locally
 
@@ -68,10 +151,14 @@ cd wasiai-a2a
 npm install
 
 cp .env.example .env
-# Edit .env with your credentials (see Environment Variables below)
+# Edit .env with your Supabase URL + service-role key, Anthropic API key,
+# Kite wallet address, and (optionally) operator private key for x402/gasless
 
 npm run dev
 # Server starts on http://localhost:3001
+
+npm test
+# Runs the full Vitest suite (644+ tests at hackathon submission)
 ```
 
 ### Build and start
@@ -81,18 +168,9 @@ npm run build
 npm start
 ```
 
-### Run tests
+### Hackathon E2E (PYUSD settlement on Kite testnet)
 
-```bash
-npm test
-```
-
-### Hackathon E2E (end-to-end PYUSD settlement on Kite)
-
-Reproducible proof of the full x402 + Kite PYUSD path against the live
-production endpoints — discovery, canonical x402 `/verify`, on-chain
-`/settle`, and receipt verification. Auto-mints PYUSD via the
-permissionless `claim()` on the token contract if the wallet is empty.
+Reproducible proof of the full x402 + Kite PYUSD path against the live production endpoints — discovery, canonical x402 `/verify`, on-chain `/settle`, and receipt verification. Auto-mints PYUSD via the permissionless `claim()` on the token contract if the wallet is empty.
 
 ```bash
 # requires OPERATOR_PRIVATE_KEY in .env (any wallet with some native KITE for gas)
@@ -104,8 +182,8 @@ Overrides (optional):
 | Env var | Default | Purpose |
 |---------|---------|---------|
 | `A2A_URL` | `https://wasiai-a2a-production.up.railway.app` | A2A gateway to hit |
-| `WASIAI_FACILITATOR_URL` | `https://wasiai-facilitator-production.up.railway.app` | Our canonical x402 facilitator (not Pieverse) |
-| `X402_PAYMENT_TOKEN` | `0x8E04D099…2ec9` | PYUSD contract address on Kite Testnet |
+| `WASIAI_FACILITATOR_URL` | `https://wasiai-facilitator-production.up.railway.app` | Canonical multi-chain x402 facilitator |
+| `X402_PAYMENT_TOKEN` | `0x8E04D099…2ec9` | PYUSD contract address on Kite testnet |
 | `KITE_TESTNET_RPC_URL` | `https://rpc-testnet.gokite.ai/` | Kite RPC endpoint |
 
 The script prints a tx hash + explorer URL on success.
@@ -124,22 +202,32 @@ All variables from `.env.example` with their defaults:
 | `SUPABASE_SERVICE_KEY` | Yes | -- | Supabase service_role key (not anon key) |
 | `KITE_RPC_URL` | No | `https://rpc-testnet.gokite.ai/` | Kite chain RPC endpoint |
 | `KITE_WALLET_ADDRESS` | Yes | -- | Wallet address that receives x402 payments |
-| `KITE_FACILITATOR_URL` | No | `https://facilitator.pieverse.io` | Pieverse x402 facilitator |
+| `KITE_FACILITATOR_URL` | No | `https://wasiai-facilitator-production.up.railway.app` | Canonical multi-chain x402 facilitator (set to `https://facilitator.pieverse.io` to use Pieverse legacy) |
+| `KITE_FACILITATOR_MODE` | No | `pieverse` | `pieverse` or `x402` (canonical spec via WasiAI facilitator) |
 | `KITE_PAYMENT_AMOUNT` | No | `1000000000000000000` (1 token in wei) | Payment amount override |
 | `KITE_MERCHANT_NAME` | No | `WasiAI` | Merchant name shown to paying agents |
 | `PAYMENT_WALLET_ADDRESS` | No | Falls back to `KITE_WALLET_ADDRESS` | Chain-agnostic alias for payment wallet |
 | `WASIAI_A2A_CHAIN` | No | `kite-ozone-testnet` | Selects the adapter bundle at startup |
+| `KITE_NETWORK` | No | `testnet` | `testnet` (chain 2368) or `mainnet` (chain 2366) |
+| `KITE_MAINNET_RPC_URL` | Conditional | -- | Required when `KITE_NETWORK=mainnet` |
+| `WASIAI_DOWNSTREAM_X402` | No | -- | Set to `true` to enable downstream USDC payouts to wasiai-v2 agents |
+| `WASIAI_DOWNSTREAM_NETWORK` | No | `fuji` | `fuji` (43113) or `avalanche-mainnet` (43114) |
+| `AVALANCHE_RPC_URL` | Conditional | -- | Required when `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` |
+| `FUJI_RPC_URL` | No | `https://api.avax-test.network/ext/bc/C/rpc` | Avalanche Fuji RPC |
 | `GASLESS_ENABLED` | No | `false` | Enable gasless EIP-3009 transfers |
-| `OPERATOR_PRIVATE_KEY` | Conditional | -- | Operator wallet private key (required when `GASLESS_ENABLED=true` or for x402 signing) |
+| `OPERATOR_PRIVATE_KEY` | Conditional | -- | Operator wallet private key (required when `GASLESS_ENABLED=true`, downstream x402, or x402 signing) |
+| `WASIAI_V2_FORWARD_KEY` | No | -- | HMAC shared secret for thin-proxy auth (defense in depth) |
 | `ANTHROPIC_API_KEY` | Yes | -- | Anthropic API key for LLM planning in `/orchestrate` |
 | `BASE_URL` | No | Auto-detected from request | Override the base URL for agent card generation |
 | `CHAIN_EXPLORER_URL` | No | Falls back to `KITE_EXPLORER_URL`, then `https://testnet.kitescan.ai` | Block explorer URL for dashboard links |
 | `KITE_EXPLORER_URL` | No | `https://testnet.kitescan.ai` | Kite-specific explorer URL (legacy alias) |
-| `RATE_LIMIT_MAX` | No | `10` | Max requests per IP per time window |
-| `RATE_LIMIT_WINDOW_MS` | No | `60000` | Rate limit time window in ms |
+| `RATE_LIMIT_MAX` | No | `60` | Global per-IP rate limit |
+| `RATE_LIMIT_ORCHESTRATE_MAX` | No | `10` | Heavy-route per-IP limit (`/orchestrate`, `/compose`) |
+| `RATE_LIMIT_SIGNUP_MAX` | No | `5` | Limit for `/auth/agent-signup` |
+| `RATE_LIMIT_WINDOW_MS` | No | `60000` | Rate limit window in ms |
 | `BACKPRESSURE_MAX` | No | `20` | Max concurrent in-flight `/orchestrate` requests |
 | `TIMEOUT_ORCHESTRATE_MS` | No | `120000` | Request timeout for `/orchestrate` |
-| `TIMEOUT_COMPOSE_MS` | No | `60000` | Request timeout for `/compose` |
+| `TIMEOUT_COMPOSE_MS` | No | `180000` | Request timeout for `/compose` (raised in WKH-65 to absorb the Vercel → Railway hop) |
 | `SHUTDOWN_GRACE_MS` | No | `30000` | Graceful shutdown timeout |
 | `CB_ANTHROPIC_FAILURES` | No | `5` | Anthropic circuit breaker failure threshold |
 | `CB_ANTHROPIC_WINDOW_MS` | No | `60000` | Anthropic circuit breaker window |
@@ -147,6 +235,8 @@ All variables from `.env.example` with their defaults:
 | `CB_REGISTRY_FAILURES` | No | `5` | Per-registry circuit breaker failure threshold |
 | `CB_REGISTRY_WINDOW_MS` | No | `60000` | Per-registry circuit breaker window |
 | `CB_REGISTRY_COOLDOWN_MS` | No | `30000` | Per-registry circuit breaker cooldown |
+
+See `.env.example` for the complete reference (MCP server, schema-transform HMAC, gasless pricing, protocol fee, SSRF allowlists, etc.).
 
 ---
 
@@ -343,12 +433,12 @@ The gateway decouples chain-specific logic via four adapter interfaces defined i
 
 ### Runtime Selection
 
-The `WASIAI_A2A_CHAIN` environment variable selects which adapter bundle to load at startup. Currently supported: `kite-ozone-testnet`.
+The `WASIAI_A2A_CHAIN` environment variable selects which adapter bundle to load at startup. See the **Adapter bundles** table above for the four current bundles (`kite-ozone-testnet`, `kite-mainnet`, `avalanche-fuji`, `avalanche-mainnet`).
 
 ```
 WASIAI_A2A_CHAIN=kite-ozone-testnet
   -> loads src/adapters/kite-ozone/
-  -> PaymentAdapter (x402 + Pieverse + Test USDT / PYUSD)
+  -> PaymentAdapter (x402 + Pieverse + PYUSD)
   -> AttestationAdapter (Kite Ozone native)
   -> GaslessAdapter (Kite AA + EIP-3009)
   -> IdentityBindingAdapter (not yet implemented for Kite)
@@ -367,11 +457,11 @@ See [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md) f
 
 ## Hardening
 
-The gateway includes several resilience mechanisms (WKH-18):
+The gateway includes several resilience mechanisms (WKH-18, hardened in WKH-66):
 
 ### Rate Limiting
 
-Global per-IP rate limiting via `@fastify/rate-limit`. Configurable via `RATE_LIMIT_MAX` (default 10) and `RATE_LIMIT_WINDOW_MS` (default 60s). Individual routes can opt out with `config: { rateLimit: false }`.
+Tiered per-IP rate limiting via `@fastify/rate-limit`. Default `RATE_LIMIT_MAX=60` for general routes, `RATE_LIMIT_ORCHESTRATE_MAX=10` for heavy paid routes (`/orchestrate`, `/compose`), `RATE_LIMIT_SIGNUP_MAX=5` for `/auth/agent-signup`. Health, discovery, and well-known endpoints are exempt.
 
 Response on limit exceeded:
 ```json
@@ -406,7 +496,7 @@ In-flight request counter for `/orchestrate` (default max 20 via `BACKPRESSURE_M
 Per-route configurable timeouts. Returns `504` with code `TIMEOUT`.
 
 - `/orchestrate`: `TIMEOUT_ORCHESTRATE_MS` (default 120s)
-- `/compose`: `TIMEOUT_COMPOSE_MS` (default 60s)
+- `/compose`: `TIMEOUT_COMPOSE_MS` (default 180s — raised in WKH-65 to absorb Vercel → Railway thin-proxy hop)
 
 ### Graceful Shutdown
 
@@ -450,7 +540,7 @@ See [`doc/kite-contracts.md`](doc/kite-contracts.md) for full contract details.
 npm test
 ```
 
-Runs all tests via Vitest. The test suite covers middleware (rate limit, timeout, backpressure, error boundary, a2a-key), services (identity, budget, authz, compose, orchestrate, task), adapters (payment, gasless contract tests), and routes.
+Runs all tests via Vitest. The suite covers middleware (rate limit, timeout, backpressure, error boundary, a2a-key, forward-key), services (identity, budget, authz, compose, orchestrate, task), adapters (payment, gasless contract tests), and routes. 644 tests passing as of hackathon submission.
 
 ### Smoke Test
 
@@ -500,7 +590,8 @@ At minimum, configure in your deployment environment:
 - `SUPABASE_URL` and `SUPABASE_SERVICE_KEY`
 - `KITE_WALLET_ADDRESS` (or `PAYMENT_WALLET_ADDRESS`)
 - `ANTHROPIC_API_KEY`
-- `OPERATOR_PRIVATE_KEY` (if gasless is enabled)
+- `OPERATOR_PRIVATE_KEY` (if gasless or downstream x402 are enabled)
+- `WASIAI_V2_FORWARD_KEY` (if accepting traffic from the Vercel thin-proxy)
 
 ---
 
@@ -508,16 +599,57 @@ At minimum, configure in your deployment environment:
 
 | Document | Description |
 |----------|-------------|
+| [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md) | Hackathon submission — live URLs, mainnet activation, on-chain proofs, Kite Passport positioning |
 | [`doc/INTEGRATION.md`](doc/INTEGRATION.md) | Marketplace integration guide — auth, onboarding, x402, end-to-end examples |
 | [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md) | Full L1-L4 architecture, adapter interfaces, migration roadmap |
 | [`doc/kite-contracts.md`](doc/kite-contracts.md) | Kite contract addresses, token specs, infrastructure endpoints |
-| [`doc/sdd/`](doc/sdd/) | NexusAgile methodology artifacts (SDDs, story files, reviews) |
+| [`doc/sdd/_INDEX.md`](doc/sdd/_INDEX.md) | NexusAgile methodology artifacts — every SDD, story file, AR/CR/QA report |
 
 ---
 
 ## For Marketplace Developers
 
 Integrating a third-party marketplace or agent with WasiAI A2A? Start with [`doc/INTEGRATION.md`](doc/INTEGRATION.md) — it covers server-to-server auth (the B2B default), the x402 payment flow, the full endpoint reference, error-code playbook, and copy-pasteable curl + fetch examples against the production gateway.
+
+---
+
+## Contributing
+
+WasiAI A2A is built using **NexusAgil**, a methodology with hard gates between roles (Analyst, Architect, Dev, Adversary, QA, Docs). Every change in this repo follows the pipeline:
+
+```
+F0 Codebase grounding   ->  F1 Work item + ACs (EARS)
+                            |
+                            v
+                       HU_APPROVED  (human gate)
+                            |
+                            v
+                  F2 SDD + Constraint Directives
+                            |
+                            v
+                       SPEC_APPROVED (human gate)
+                            |
+                            v
+                  F2.5 Story file (per HU)
+                            |
+                            v
+                  F3 Implementation (waves)
+                            |
+                            v
+                  AR  ->  CR  ->  F4 QA (drift detection)
+                            |
+                            v
+                       DONE + _INDEX.md update
+```
+
+Every artifact lives in `doc/sdd/NNN-titulo/`. Methodology details, role prompts, and inviolable rules are in [`CLAUDE.md`](CLAUDE.md). Browse past HUs (work items, SDDs, AR/CR/QA reports, done reports) via [`doc/sdd/_INDEX.md`](doc/sdd/_INDEX.md).
+
+When opening a PR:
+
+- Branch from `main` using `feat/NNN-wkh-XX-short-title` or `fix/NNN-wkh-XX-short-title`.
+- Reference the Jira HU (e.g. `WKH-79`) in the commit message.
+- Include `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` if Claude Code drafted the change.
+- Do not skip gates — Adversary Review and Code Review must run on every code-touching PR before F4 QA signs off.
 
 ---
 
