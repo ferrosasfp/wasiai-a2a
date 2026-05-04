@@ -263,6 +263,93 @@ test('T-CIN-03: invalidate-prev-bearer expiresAt past → DELETE + redeploy + 20
   }
 });
 
+test('T-MTHD-02 (WKH-88): invalidate-prev-bearer GET → 405, NO auth log, NO Vercel/KV touch', async () => {
+  // CD-WKH88-1: req.method check MUST run BEFORE validateCronSecret on this
+  // endpoint too. Behaviour: 405 + Allow:POST header + body
+  // {error:'method not allowed'}, no Vercel call AND no KV read regardless
+  // of CRON_SECRET validity.
+  const kv = createKvMock();
+  setKvClientForTesting(kv);
+  // Pre-seed an expired snapshot — handler must NOT read KV on wrong method.
+  await kv.set(
+    'last-bearer-rotation',
+    JSON.stringify({
+      rotatedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      expiresAt: new Date(Date.now() - 60 * 1000).toISOString(),
+    }),
+    { ex: 25 * 60 * 60 },
+  );
+  let fetchCalls = 0;
+  globalThis.fetch = async () => { fetchCalls += 1; return new Response('{}', { status: 200 }); };
+
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    const req = { headers: { authorization: `Bearer ${TEST_SECRET}` }, method: 'GET' };
+    const res = makeRes();
+    await handler(req, res);
+    assert.equal(res.statusCode, 405);
+    assert.equal(res._headers['allow'], 'POST');
+    const body = JSON.parse(res._body);
+    assert.deepEqual(body, { error: 'method not allowed' });
+    // CD-WKH88-1: NO auth log line on wrong method.
+    const blob = cap.lines.join('\n');
+    assert.ok(!/mcp\.cron\.unauthorized/.test(blob), 'must NOT log auth event on wrong method');
+    assert.ok(!/mcp\.cron\.invalidate-prev-bearer\.(ok|skipped|kv-read)/.test(blob),
+      'must NOT log invalidate events on wrong method');
+    // Method gate trips BEFORE any Vercel call.
+    assert.equal(fetchCalls, 0, 'no Vercel call on wrong method');
+    assert.ok(!blob.includes(TEST_SECRET));
+  } finally {
+    cap.restore();
+  }
+});
+
+test('T-CIN-05 (WKH-88): expiresAt unparseable → skipped, NO Vercel call', async () => {
+  // CD-WKH88-4: inject the corrupt `expiresAt: 'not-a-date'` value DIRECTLY
+  // into the KV mock's snapshot — no global Date monkey-patching. Validates
+  // CD-14 NaN guard (auto-blindaje WKH-66): Date.parse('not-a-date') returns
+  // NaN; the handler MUST refuse to invalidate on a NaN timestamp because
+  // `NaN <= Date.now()` is false but so is `NaN > Date.now()`, leaving the
+  // overlap-active skip check unable to distinguish "still active" from
+  // "corrupt".
+  const kv = createKvMock();
+  setKvClientForTesting(kv);
+  await kv.set(
+    'last-bearer-rotation',
+    JSON.stringify({
+      rotatedAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      expiresAt: 'not-a-date',
+    }),
+    { ex: 25 * 60 * 60 },
+  );
+  let fetchCalls = 0;
+  globalThis.fetch = async () => { fetchCalls += 1; return new Response('{}', { status: 200 }); };
+
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    const req = makeReq();
+    const res = makeRes();
+    await handler(req, res);
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res._body);
+    assert.equal(body.ok, true);
+    assert.equal(body.skipped, true);
+    assert.equal(body.reason, 'snapshot expiresAt unparseable');
+    // CD-14: handler MUST NOT proceed to Vercel API on NaN expiresAt.
+    assert.equal(fetchCalls, 0, 'no Vercel call on unparseable expiresAt');
+    // The bad-expires log line was emitted (auditable telemetry).
+    const blob = cap.lines.join('\n');
+    assert.match(blob, /mcp\.cron\.invalidate-prev-bearer\.snapshot-bad-expires/);
+    // CD-9: secret must NEVER appear in stderr.
+    assert.ok(!blob.includes(TEST_SECRET));
+    assert.ok(!blob.includes(TEST_VERCEL_TOKEN));
+  } finally {
+    cap.restore();
+  }
+});
+
 test('T-CIN-04: invalidate-prev-bearer no auth header → 401, NO Vercel/KV touch', async () => {
   const kv = createKvMock();
   setKvClientForTesting(kv);

@@ -67,3 +67,4 @@
 | 077 | 2026-05-01 | Public Docs & Onboarding — getting-started + API reference + MCP integration + networks (WKH-82) | doc | QUALITY | DONE | feat/077-wkh-82-public-docs-onboarding ([done-report.md](077-wkh-82-public-docs-onboarding/done-report.md)) |
 | 078 | 2026-05-03 | [WKH-90] Discord-aware payload formatting in alerts.mjs | patch | FAST+AR | DONE | feat/078-wkh-90-discord-alert-formatter ([done-report.md](078-wkh-90-discord-alert-formatter/done-report.md)) |
 | 079 | 2026-05-03 | [BUG-WKH75] setup-cronjob.mjs sends crontab strings to cron-job.org API (WKH-89) | bugfix | FAST+AR | DONE | feat/079-wkh-89-cronjob-schedule-fix ([done-report.md](079-wkh-89-cronjob-schedule-fix/done-report.md)) |
+| 080 | 2026-05-04 | [WKH-88] Bearer rotation refinements — HTTP method gate + JSDoc + KV mutex + tests | hardening | FAST+AR | DONE | feat/080-wkh-88-bearer-rotation-refinements ([done-report.md](080-wkh-88-bearer-rotation-refinements/done-report.md)) |

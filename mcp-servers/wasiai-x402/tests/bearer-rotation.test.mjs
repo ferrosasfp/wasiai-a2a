@@ -220,22 +220,86 @@ test('T-RB-07: triggerRedeploy failure (S5) → ok:true (best-effort), NO alert'
 });
 
 test('T-RB-08: KV write failure (S6) → ok:true (best-effort), NO alert', async () => {
+  // WKH-88: rotateBearer now performs an S0-pre `kvClient.set(MUTEX, ..., {nx:true})`
+  // BEFORE the S6 snapshot write. To exercise the S6 failure path we must let
+  // the mutex acquire succeed and force the SECOND `set()` (snapshot) to throw.
+  // The local makeKvMock does not honour nx semantics, so we mock the surface
+  // directly: first call resolves OK (mutex acquired), second throws (S6 KV
+  // write failure under test). All other calls are unreachable.
   const alertCalls = [];
   const mock = makeVercelMock({
     envs: [{ id: 'env_current', key: 'MCP_BEARER_TOKEN', value: FIXTURE_CURRENT_BEARER, target: ['production'], type: 'encrypted' }],
     alertCalls,
   });
-  const kv = makeKvMock({ failNext: 1 });
+  const setCalls = [];
+  const kv = {
+    async set(key, value, opts) {
+      setCalls.push({ key, value, opts });
+      if (setCalls.length === 1) return 'OK'; // mutex acquired
+      throw new Error('kv: simulated failure');  // S6 snapshot write fails
+    },
+  };
   const result = await rotateBearer({
     vercelToken: TEST_TOKEN, projectId: TEST_PROJECT,
     alertWebhookUrl: TEST_ALERT_URL, kvClient: kv,
   });
   assert.equal(result.ok, true);
-  assert.equal(kv._store.size, 0);
+  // Two set() attempts: mutex (S0-pre) + snapshot (S6).
+  assert.equal(setCalls.length, 2);
+  // First call was the mutex with nx flag.
+  assert.equal(setCalls[0].opts?.nx, true);
+  // Second call was the snapshot (no nx flag).
+  assert.equal(setCalls[1].opts?.nx, undefined);
   assert.equal(alertCalls.length, 0);
   const current = mock.state.envs.find((e) => e.key === 'MCP_BEARER_TOKEN');
   assert.notEqual(current.value, FIXTURE_CURRENT_BEARER);
   assert.ok(mock.calls.length >= 3);
+});
+
+test('T-MUTEX-01 (WKH-88): concurrent rotateBearer call → mutex skip, NO Vercel mutation', async () => {
+  // CD-WKH88-2: the S0-pre mutex MUST use NX-flagged set (atomic). When a
+  // prior rotation is in flight (mutex key already set), a concurrent call
+  // MUST early-return `{ok:false, stage:'mutex'}` and MUST NOT progress to
+  // any Vercel API call (no listEnvs, no createEnv, no updateEnv).
+  //
+  // CD-WKH88-4: the mock injects a deterministic mutex-busy state by having
+  // `kvClient.set(MUTEX, ..., {nx:true})` return null on the very first call
+  // (simulating "key already exists in KV"). This avoids any reliance on
+  // real concurrency / event-loop timing.
+  let vercelFetchCount = 0;
+  globalThis.fetch = async (url) => {
+    const u = typeof url === 'string' ? new URL(url) : new URL(url.toString());
+    if (u.host === 'api.vercel.com') vercelFetchCount += 1;
+    return new Response('{}', { status: 200 });
+  };
+  const setCalls = [];
+  const kv = {
+    async set(key, value, opts) {
+      setCalls.push({ key, value, opts });
+      // Simulate "mutex already taken" — Upstash NX returns null on collision.
+      if (opts?.nx === true) return null;
+      // Any non-mutex set is unreachable in this test; flag it loudly.
+      throw new Error('unexpected non-mutex set during mutex-busy path');
+    },
+  };
+  const result = await rotateBearer({
+    vercelToken: TEST_TOKEN,
+    projectId: TEST_PROJECT,
+    teamId: TEST_TEAM,
+    alertWebhookUrl: TEST_ALERT_URL,
+    kvClient: kv,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, 'mutex');
+  assert.equal(result.reason, STAGE_REASONS['mutex-busy']);
+  // Exactly one set() attempt — the mutex acquisition. Snapshot write is NOT
+  // reached.
+  assert.equal(setCalls.length, 1);
+  assert.equal(setCalls[0].opts.nx, true);
+  assert.ok(typeof setCalls[0].opts.ex === 'number' && setCalls[0].opts.ex > 0);
+  assert.ok(setCalls[0].opts.ex <= 10 * 60, 'CD-WKH88-6: mutex TTL <= 10 min');
+  // CD-WKH88-2: NO Vercel API call when mutex is busy.
+  assert.equal(vercelFetchCount, 0);
 });
 
 test('T-RB-MANUAL: VERCEL_TOKEN absent → manual mode preserved (AC-2)', () => {
