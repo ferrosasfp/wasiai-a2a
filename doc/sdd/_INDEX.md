@@ -65,3 +65,4 @@
 | 075 | 2026-05-01 | DB Migration Pre-flight Checks Runbook (WKH-78) | tooling | FAST+AR | DONE | feat/075-wkh-78-migration-preflight ([done-report.md](075-wkh-78-migration-preflight/done-report.md)) |
 | 076 | 2026-05-02 | [BEARER-ROTATION] Headless rotation cron + dual-bearer overlap + 24h invalidation (WKH-75) | feature | QUALITY | DONE | feat/076-wkh-75-bearer-rotation-cron ([done-report.md](076-wkh-75-bearer-rotation-cron/done-report.md)) |
 | 077 | 2026-05-01 | Public Docs & Onboarding — getting-started + API reference + MCP integration + networks (WKH-82) | doc | QUALITY | DONE | feat/077-wkh-82-public-docs-onboarding ([done-report.md](077-wkh-82-public-docs-onboarding/done-report.md)) |
+| 078 | 2026-05-03 | [WKH-90] Discord-aware payload formatting in alerts.mjs | patch | FAST+AR | DONE | feat/078-wkh-90-discord-alert-formatter ([done-report.md](078-wkh-90-discord-alert-formatter/done-report.md)) |
