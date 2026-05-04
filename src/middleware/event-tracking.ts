@@ -71,6 +71,12 @@ export function registerEventTracking(fastify: FastifyInstance): void {
             responseTimeMs: latencyMs,
             timestamp: new Date().toISOString(),
             requestId: request.id,
+            // WKH-69: tag inbound payment origin (set by x402.ts middleware
+            // when payment header parsed). Spread-conditional so legacy rows
+            // without paymentOrigin do NOT add a key with value undefined.
+            ...(request.paymentOrigin
+              ? { payment_origin: request.paymentOrigin }
+              : {}),
           },
         })
         .catch((err: unknown) => {
