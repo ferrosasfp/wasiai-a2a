@@ -5,8 +5,14 @@
 // Jobs registered (idempotent by title — CD-20):
 //   1. wasiai-x402-warmup                 — every 4 min  (warmup)
 //   2. wasiai-x402-balance-check          — every 15 min (balance gate)
-//   3. wasiai-x402-bearer-rotation        — every 30 days at 09:00 UTC (WKH-75)
-//   4. wasiai-x402-invalidate-prev-bearer — daily at 10:00 UTC          (WKH-75)
+//   3. wasiai-x402-bearer-rotation        — 1st of month at 09:00 UTC (WKH-75)
+//   4. wasiai-x402-invalidate-prev-bearer — daily at 10:00 UTC        (WKH-75)
+//
+// WKH-89: cron-job.org REST API requires INTEGER ARRAYS in `schedule.*`
+// (where -1 means "every"). Crontab strings like '*/4' or '*' are silently
+// rejected and the job is registered as "Jan 1 yearly" (effectively
+// disabled). We define the integer arrays inline (no helper expansion —
+// CD-2) so the values are auditable at a glance.
 //
 // Idempotent (CD-20): we lookup-by-title, then PATCH if the job already
 // exists, PUT if it doesn't. PROHIBITED to create duplicates.
@@ -40,23 +46,47 @@ const TARGET_JOBS = [
   {
     title: 'wasiai-x402-warmup',
     url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/warmup`,
-    schedule: { minutes: ['*/4'], hours: ['*'], mdays: ['*'], months: ['*'], wdays: ['*'] },
+    // WKH-89: every 4 min — explicit integer minute list (0,4,8,...,56).
+    // -1 in hours/mdays/months/wdays means "every" per cron-job.org schema.
+    schedule: {
+      minutes: [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56],
+      hours: [-1],
+      mdays: [-1],
+      months: [-1],
+      wdays: [-1],
+    },
     requestMethod: 1, // GET
     extendedData: { headers: { Authorization: `Bearer ${CRON_SECRET}` } },
   },
   {
     title: 'wasiai-x402-balance-check',
     url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/balance-check`,
-    schedule: { minutes: ['*/15'], hours: ['*'], mdays: ['*'], months: ['*'], wdays: ['*'] },
+    // WKH-89: every 15 min — minutes [0,15,30,45], -1 elsewhere.
+    schedule: {
+      minutes: [0, 15, 30, 45],
+      hours: [-1],
+      mdays: [-1],
+      months: [-1],
+      wdays: [-1],
+    },
     requestMethod: 1,
     extendedData: { headers: { Authorization: `Bearer ${CRON_SECRET}` } },
   },
-  // WKH-75 W4 — headless bearer rotation. Triggers rotateBearer() every 30 days
-  // at 09:00 UTC. POST because the cron endpoint mutates Vercel env state.
+  // WKH-75 W4 — headless bearer rotation. WKH-89: cron-job.org cannot express
+  // "every 30 days" with arbitrary offset, so we use mdays=[1] (1st of each
+  // month) at 09:00 UTC. CD-7: comment reflects the real semantics, not the
+  // original aspirational "every 30 days".
   {
     title: 'wasiai-x402-bearer-rotation',
     url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/rotate-bearer`,
-    schedule: { minutes: ['0'], hours: ['9'], mdays: ['*/30'], months: ['*'], wdays: ['*'] },
+    // 1st of every month at 09:00 UTC.
+    schedule: {
+      minutes: [0],
+      hours: [9],
+      mdays: [1],
+      months: [-1],
+      wdays: [-1],
+    },
     requestMethod: 2, // POST
     extendedData: { headers: { Authorization: `Bearer ${CRON_SECRET}` } },
   },
@@ -66,7 +96,14 @@ const TARGET_JOBS = [
   {
     title: 'wasiai-x402-invalidate-prev-bearer',
     url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/invalidate-prev-bearer`,
-    schedule: { minutes: ['0'], hours: ['10'], mdays: ['*'], months: ['*'], wdays: ['*'] },
+    // WKH-89: daily at 10:00 UTC.
+    schedule: {
+      minutes: [0],
+      hours: [10],
+      mdays: [-1],
+      months: [-1],
+      wdays: [-1],
+    },
     requestMethod: 2, // POST
     extendedData: { headers: { Authorization: `Bearer ${CRON_SECRET}` } },
   },
