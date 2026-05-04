@@ -22,3 +22,4 @@ coverage/
 *.swp
 .vscode/
 .idea/
+.env*.local
