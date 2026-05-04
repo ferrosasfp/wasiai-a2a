@@ -9,6 +9,12 @@
 //   warmup, balance-check, bearer-rotation, invalidate-prev-bearer.
 // T-SC-01..T-SC-03 updated accordingly. T-SC-04 (no secret leak)
 // unchanged. T-SC-05 / T-SC-06 added to verify the new W4 schedule contract.
+//
+// WKH-89: T-SC-06 updated to assert integer-array schedules (cron-job.org
+// REST API native types) instead of crontab strings. Added regression
+// guards T-CRJ-INT-01..05 which inspect the actual JSON body sent to
+// `fetch` for each of the 4 jobs and prove no crontab strings ever
+// reach the wire (CD-1, CD-4).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -201,7 +207,7 @@ test('T-SC-05: WKH-75 jobs are POST + auth-bearer + correct deploy URL', () => {
   );
 });
 
-test('T-SC-06: WKH-75 schedules — rotation every 30 days at 09:00, invalidate daily at 10:00', () => {
+test('T-SC-06: WKH-75 schedules — rotation 1st of month at 09:00, invalidate daily at 10:00 (integer arrays)', () => {
   const r = runScript({ existingJobs: [] });
   assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
 
@@ -209,21 +215,177 @@ test('T-SC-06: WKH-75 schedules — rotation every 30 days at 09:00, invalidate 
   const invalidate = r.finalState.jobs.find((j) => j.title === 'wasiai-x402-invalidate-prev-bearer');
   assert.ok(rotation && invalidate, 'WKH-75 jobs missing from final state');
 
-  // Bearer rotation: minutes ['0'], hours ['9'], mdays ['*/30'] — every 30
-  // days at 09:00 UTC. Matches SDD §3 DT-2 cadence.
-  assert.deepEqual(rotation.schedule.minutes, ['0']);
-  assert.deepEqual(rotation.schedule.hours, ['9']);
-  assert.deepEqual(rotation.schedule.mdays, ['*/30']);
-  assert.deepEqual(rotation.schedule.months, ['*']);
-  assert.deepEqual(rotation.schedule.wdays, ['*']);
+  // WKH-89: bearer-rotation now uses integer arrays (cron-job.org REST
+  // API native types). 1st of every month at 09:00 UTC. The original
+  // "every 30 days" semantic was unrepresentable in the cron-job.org
+  // schema — DT-3 in the work-item picks mdays=[1] as the closest
+  // monthly cadence.
+  assert.deepEqual(rotation.schedule.minutes, [0]);
+  assert.deepEqual(rotation.schedule.hours, [9]);
+  assert.deepEqual(rotation.schedule.mdays, [1]);
+  assert.deepEqual(rotation.schedule.months, [-1]);
+  assert.deepEqual(rotation.schedule.wdays, [-1]);
 
-  // Invalidate-prev-bearer: minutes ['0'], hours ['10'], mdays ['*'] — daily
-  // at 10:00 UTC, one hour after rotation, so within 24h overlap window the
-  // probe sees a stale snapshot and skips. Day after rotation it deletes
-  // PREV.
-  assert.deepEqual(invalidate.schedule.minutes, ['0']);
-  assert.deepEqual(invalidate.schedule.hours, ['10']);
-  assert.deepEqual(invalidate.schedule.mdays, ['*']);
-  assert.deepEqual(invalidate.schedule.months, ['*']);
-  assert.deepEqual(invalidate.schedule.wdays, ['*']);
+  // WKH-89: invalidate-prev-bearer uses integer arrays. Daily at 10:00 UTC,
+  // one hour after rotation — within 24h overlap window the probe sees a
+  // stale snapshot and skips; day after rotation it deletes PREV.
+  assert.deepEqual(invalidate.schedule.minutes, [0]);
+  assert.deepEqual(invalidate.schedule.hours, [10]);
+  assert.deepEqual(invalidate.schedule.mdays, [-1]);
+  assert.deepEqual(invalidate.schedule.months, [-1]);
+  assert.deepEqual(invalidate.schedule.wdays, [-1]);
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// WKH-89 — T-CRJ-INT-01..05: integer-array schedule regression guards.
+//
+// These tests inspect `init.body` of the actual `fetch` calls sent to
+// api.cron-job.org (CD-4). They do NOT trust the mock-side replayed state
+// — they parse the raw JSON the script puts on the wire, and assert that
+// every schedule field is an integer array matching the work-item DT-1..4
+// values byte-by-byte (AC-5 zero-drift guarantee).
+// ────────────────────────────────────────────────────────────────────────
+
+// Helper — extract the `job` payload sent to fetch for a given title.
+// Reads from `finalState.calls`, picks the PUT or PATCH whose body's
+// `job.title` matches. Returns the parsed `job` object or throws.
+function extractJobFromCalls(calls, title) {
+  for (const c of calls) {
+    if (c.method !== 'PUT' && c.method !== 'PATCH') continue;
+    if (!c.body) continue;
+    const parsed = JSON.parse(c.body);
+    if (parsed?.job?.title === title) return parsed.job;
+  }
+  throw new Error(`no PUT/PATCH call found for title=${title}`);
+}
+
+test('T-CRJ-INT-01: warmup body sends integer minute list [0,4,...,56] and -1 elsewhere', () => {
+  const r = runScript({ existingJobs: [] });
+  assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
+
+  const job = extractJobFromCalls(r.finalState.calls, 'wasiai-x402-warmup');
+  assert.deepEqual(
+    job.schedule.minutes,
+    [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56],
+    'warmup minutes must be integer multiples of 4 from 0 to 56 (DT-1)',
+  );
+  assert.deepEqual(job.schedule.hours, [-1], 'warmup hours must be [-1]');
+  assert.deepEqual(job.schedule.mdays, [-1], 'warmup mdays must be [-1]');
+  assert.deepEqual(job.schedule.months, [-1], 'warmup months must be [-1]');
+  assert.deepEqual(job.schedule.wdays, [-1], 'warmup wdays must be [-1]');
+
+  // Every value in every field must be a number (not a string).
+  for (const [field, arr] of Object.entries(job.schedule)) {
+    for (const v of arr) {
+      assert.equal(
+        typeof v, 'number',
+        `warmup.schedule.${field} contains non-integer ${JSON.stringify(v)}`,
+      );
+    }
+  }
+});
+
+test('T-CRJ-INT-02: balance-check body sends [0,15,30,45] minutes and -1 elsewhere', () => {
+  const r = runScript({ existingJobs: [] });
+  assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
+
+  const job = extractJobFromCalls(r.finalState.calls, 'wasiai-x402-balance-check');
+  assert.deepEqual(
+    job.schedule.minutes, [0, 15, 30, 45],
+    'balance-check minutes must be [0,15,30,45] (DT-2)',
+  );
+  assert.deepEqual(job.schedule.hours, [-1]);
+  assert.deepEqual(job.schedule.mdays, [-1]);
+  assert.deepEqual(job.schedule.months, [-1]);
+  assert.deepEqual(job.schedule.wdays, [-1]);
+
+  for (const [field, arr] of Object.entries(job.schedule)) {
+    for (const v of arr) {
+      assert.equal(
+        typeof v, 'number',
+        `balance-check.schedule.${field} contains non-integer ${JSON.stringify(v)}`,
+      );
+    }
+  }
+});
+
+test('T-CRJ-INT-03: bearer-rotation body sends 1st-of-month at 09:00 UTC as integer arrays', () => {
+  const r = runScript({ existingJobs: [] });
+  assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
+
+  const job = extractJobFromCalls(r.finalState.calls, 'wasiai-x402-bearer-rotation');
+  assert.deepEqual(job.schedule.minutes, [0], 'bearer-rotation minutes must be [0] (DT-3)');
+  assert.deepEqual(job.schedule.hours, [9], 'bearer-rotation hours must be [9]');
+  assert.deepEqual(job.schedule.mdays, [1], 'bearer-rotation mdays must be [1] (1st of month)');
+  assert.deepEqual(job.schedule.months, [-1]);
+  assert.deepEqual(job.schedule.wdays, [-1]);
+
+  for (const [field, arr] of Object.entries(job.schedule)) {
+    for (const v of arr) {
+      assert.equal(
+        typeof v, 'number',
+        `bearer-rotation.schedule.${field} contains non-integer ${JSON.stringify(v)}`,
+      );
+    }
+  }
+});
+
+test('T-CRJ-INT-04: invalidate-prev-bearer body sends daily 10:00 UTC as integer arrays', () => {
+  const r = runScript({ existingJobs: [] });
+  assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
+
+  const job = extractJobFromCalls(r.finalState.calls, 'wasiai-x402-invalidate-prev-bearer');
+  assert.deepEqual(job.schedule.minutes, [0], 'invalidate-prev-bearer minutes must be [0] (DT-4)');
+  assert.deepEqual(job.schedule.hours, [10], 'invalidate-prev-bearer hours must be [10]');
+  assert.deepEqual(job.schedule.mdays, [-1]);
+  assert.deepEqual(job.schedule.months, [-1]);
+  assert.deepEqual(job.schedule.wdays, [-1]);
+
+  for (const [field, arr] of Object.entries(job.schedule)) {
+    for (const v of arr) {
+      assert.equal(
+        typeof v, 'number',
+        `invalidate-prev-bearer.schedule.${field} contains non-integer ${JSON.stringify(v)}`,
+      );
+    }
+  }
+});
+
+test('T-CRJ-INT-05: regression guard — NO schedule value across any job is a string (AC-7)', () => {
+  const r = runScript({ existingJobs: [] });
+  assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
+
+  const titles = [
+    'wasiai-x402-warmup',
+    'wasiai-x402-balance-check',
+    'wasiai-x402-bearer-rotation',
+    'wasiai-x402-invalidate-prev-bearer',
+  ];
+
+  for (const title of titles) {
+    const job = extractJobFromCalls(r.finalState.calls, title);
+    for (const [field, arr] of Object.entries(job.schedule)) {
+      assert.ok(
+        Array.isArray(arr),
+        `${title}.schedule.${field} must be an array (got ${typeof arr})`,
+      );
+      for (const v of arr) {
+        // Crontab strings like '*/4', '*', '0' would slip past a naive
+        // mock. This guard fails loudly (AC-7) with the exact field path.
+        assert.notEqual(
+          typeof v, 'string',
+          `${title}.schedule.${field} contains string ${JSON.stringify(v)} ` +
+          `— cron-job.org REST API rejects strings; use integer arrays (-1 = "every")`,
+        );
+        assert.equal(
+          typeof v, 'number',
+          `${title}.schedule.${field} must be integer, got ${typeof v} ${JSON.stringify(v)}`,
+        );
+        assert.ok(
+          Number.isInteger(v),
+          `${title}.schedule.${field} value ${v} is not an integer`,
+        );
+      }
+    }
+  }
 });
