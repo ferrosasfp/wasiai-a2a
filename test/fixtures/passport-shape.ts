@@ -6,7 +6,8 @@
  * //     private key and derive an EVM address via viem's privateKeyToAccount
  * //     (secp256k1). The real Kite Passport session uses base58-encoded
  * //     ed25519-style public_key (see doc/sdd/spike-kite-passport/poc-results.md
- * //     line 91-92). The exact mapping ed25519 → EVM address inside Passport
+ * //     § Critical finding — `delegation` structure (the architectural heart)).
+ * //     The exact mapping ed25519 → EVM address inside Passport
  * //     is opaque to us until the post-merge smoke-test (DT-7 of SDD #084).
  * // (b) Test field correspondence:
  * //       authorization.from   ← would map to Passport `delegation.public_key`-derived address
@@ -24,6 +25,7 @@
  * test-only fabrication (well-known test private key from viem docs).
  */
 import { privateKeyToAccount } from 'viem/accounts';
+import { X_PASSPORT_SESSION_HEADER } from '../../src/middleware/x402.js';
 
 // Deterministic test-only secp256k1 private key. NOT a real Passport credential.
 // Same key used in src/adapters/__tests__/payment.contract.test.ts.
@@ -86,7 +88,7 @@ export function buildPassportPaymentHeader(opts: PassportShapeOpts = {}): {
   return {
     headers: {
       'payment-signature': base64,
-      'x-passport-session': 'true',
+      [X_PASSPORT_SESSION_HEADER]: 'true',
     },
     paymentRequest,
   };
@@ -113,6 +115,6 @@ export function buildEoaPaymentHeader(opts: PassportShapeOpts = {}): {
 } {
   const result = buildPassportPaymentHeader(opts);
   // Strip the Passport hint header.
-  const { 'x-passport-session': _omit, ...rest } = result.headers;
+  const { [X_PASSPORT_SESSION_HEADER]: _omit, ...rest } = result.headers;
   return { headers: rest, paymentRequest: result.paymentRequest };
 }

@@ -31,7 +31,13 @@ import type {
 const PASSPORT_REQUIRE_ENV = 'PASSPORT_REQUIRE_INBOUND';
 
 /**
- * requirePassport middleware factory.
+ * Factory for the requirePassport middleware.
+ *
+ * SECURITY CAVEAT: The `x-passport-session` header used internally is
+ * client-controlled — this middleware provides POLICY-DECLARATION only,
+ * not adversarial security. See doc/passport-onboarding.md § Security
+ * caveat for details. Real Passport-vs-EOA distinction is deferred to
+ * the smoke-test resolution.
  *
  * @returns array of zero or one preHandlers depending on env config.
  */

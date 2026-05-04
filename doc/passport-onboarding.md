@@ -121,6 +121,21 @@ GROUP BY 1;
 
 ## Opt-in Passport-only enforcement (`requirePassport`)
 
+> **Security caveat — read before mounting in production**
+>
+> The `requirePassport` middleware checks the `x-passport-session` header to distinguish Passport-funded requests from EOA-signed ones. **This header is client-controlled** — any attacker can spoof `x-passport-session: true` and bypass the guard while signing with a raw EOA.
+>
+> The guard therefore provides **policy-declaration only**, not adversarial security:
+> - Real Passport-vs-EOA distinction requires either:
+>   - (a) A Kite Passport session-address registry lookup (server-side verification of the signer wallet against Passport-issued addresses), or
+>   - (b) Signature-shape inference (ed25519 vs secp256k1 detection from the EIP-3009 signature bytes).
+> - Both options are **deferred to follow-up post-smoke-test** (when real Passport-funded transactions provide ground-truth shape data).
+>
+> Until then, true security still hangs on EIP-3009 signature verification (the adapter `verify()` checks `from` matches signer). Mounting `requirePassport` is useful for:
+> - Routing/observability (which routes prefer Passport flow)
+> - UX hints to clients (return 403 with descriptive error)
+> - **Not** for keeping EOA traffic out of a Passport-only endpoint
+
 WKH-69 exports a middleware factory `requirePassport()` from
 `src/middleware/passport.ts`. **This factory is NOT mounted by default**. To
 activate (per deployment, not per route):
@@ -191,7 +206,7 @@ to a human run because it requires real on-chain funds. Steps:
    - If HTTP `402` returned: signature shape mismatch. Capture the raw
      `payment-signature` header value (base64), open ticket WKH-XX with
      the decoded JSON. **This is the open question post-spike** — see
-     `doc/sdd/spike-kite-passport/decision-doc.md` line 168.
+     `doc/sdd/spike-kite-passport/decision-doc.md` § Open questions still unresolved.
 
 ## Environment variables reference
 

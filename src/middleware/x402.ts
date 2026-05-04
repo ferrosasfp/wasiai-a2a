@@ -15,6 +15,12 @@ import type {
   X402Response,
 } from '../types/index.js';
 
+/**
+ * Header used to mark a request as Passport-funded.
+ * Telemetry-only — see SECURITY CAVEAT in passport.ts and passport-onboarding.md.
+ */
+export const X_PASSPORT_SESSION_HEADER = 'x-passport-session';
+
 declare module 'fastify' {
   interface FastifyRequest {
     paymentTxHash?: string;
@@ -107,7 +113,7 @@ export function requirePayment(
     }
     // WKH-69: detect payment origin via header hint (telemetry-only).
     // Truthy values: 'true', '1', 'yes' (case-insensitive). Anything else (or absent) → 'eoa'.
-    const sessionHeader = request.headers['x-passport-session'];
+    const sessionHeader = request.headers[X_PASSPORT_SESSION_HEADER];
     const isPassportSession =
       typeof sessionHeader === 'string' &&
       ['true', '1', 'yes'].includes(sessionHeader.toLowerCase().trim());
