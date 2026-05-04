@@ -1,0 +1,8 @@
+# Auto-Blindaje — WKH-69 (F3 Implementation)
+
+### [2026-05-03 03:05] Wave 1 — `tsc --noEmit` rootDir cross-import
+
+- **Error**: `TS6059 File 'test/fixtures/passport-shape.ts' is not under 'rootDir' '/src'` when running `npx tsc --noEmit` after importing fixture from `src/middleware/x402.passport-shape.test.ts`.
+- **Causa raíz**: `tsconfig.json` declares `rootDir: ./src` and `include: ['src/**/*']`. The Story File mandates the fixture at `test/fixtures/passport-shape.ts` AND the test at `src/middleware/x402.passport-shape.test.ts`. Tests in src/ that cross-import to test/ trigger TS6059. The build flow (`tsconfig.build.json`) excludes all test files entirely so production typecheck is clean.
+- **Fix**: Resolution in this HU follows the Story File contract exactly — paths stay as instructed. Verified the regression is **scoped to vitest test files** (production build via `tsconfig.build.json` excludes `*.test.ts` and `__tests__/**`, so dist/ is unaffected). Vitest itself uses its own TS loader and ignores tsc rootDir constraints, so 5 W1 tests pass and full suite runs 799/0. Pre-existing precedent: `test/migrate-preflight.test.ts` already lives outside rootDir without triggering errors because nothing in src/ imports from it. The new `src/ → test/` import is the first cross-boundary case.
+- **Aplicar en**: future story files that introduce cross-rootDir imports must either (a) co-locate fixtures inside `src/test-fixtures/` (alternative naming since `__tests__` is reserved by tsconfig.build exclusion), or (b) loosen `tsconfig.json` to `include: ['src/**/*', 'test/**/*']` as a follow-up cleanup ticket. F3 in this HU intentionally does NOT modify `tsconfig.json` because it is outside Scope IN of Story File §3.1.

@@ -19,6 +19,14 @@ declare module 'fastify' {
   interface FastifyRequest {
     paymentTxHash?: string;
     paymentVerified?: boolean;
+    /**
+     * WKH-69: telemetry-only tag for inbound payment origin.
+     * - 'passport' when client sends header `x-passport-session: true`
+     * - 'eoa' otherwise (default for raw EOA flows, backward compatible)
+     * Set by `requirePayment` handler, consumed by `event-tracking` and
+     * (opt-in) by `requirePassport`. NEVER used as the sole auth signal.
+     */
+    paymentOrigin?: 'passport' | 'eoa';
   }
 }
 
@@ -97,6 +105,13 @@ export function requirePayment(
         error: 'Service payment not configured. Contact administrator.',
       });
     }
+    // WKH-69: detect payment origin via header hint (telemetry-only).
+    // Truthy values: 'true', '1', 'yes' (case-insensitive). Anything else (or absent) → 'eoa'.
+    const sessionHeader = request.headers['x-passport-session'];
+    const isPassportSession =
+      typeof sessionHeader === 'string' &&
+      ['true', '1', 'yes'].includes(sessionHeader.toLowerCase().trim());
+    request.paymentOrigin = isPassportSession ? 'passport' : 'eoa';
     const resource = `${request.protocol}://${request.hostname}${request.url}`;
     const xPaymentHeader = request.headers['payment-signature'];
     if (!xPaymentHeader || typeof xPaymentHeader !== 'string')
