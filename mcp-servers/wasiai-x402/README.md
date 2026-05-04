@@ -357,6 +357,67 @@ curl -X PATCH https://api.cron-job.org/jobs/<jobId> \
   -d '{"job": {"enabled": false}}'
 ```
 
+### (i) Alert webhook platforms (WKH-90)
+
+`sendAlert()` (in `src/alerts.mjs`) auto-detects the destination platform by
+parsing `new URL(MCP_ALERT_WEBHOOK_URL).host` and reshapes the payload only
+when needed. There are **no env vars** to toggle this — the host is the source
+of truth.
+
+| Host of `MCP_ALERT_WEBHOOK_URL` | Payload sent | Notes |
+|---|---|---|
+| `discord.com` | Discord embed (`{username, embeds[]}`) | reshape (WKH-90) |
+| `discordapp.com` | Discord embed (`{username, embeds[]}`) | reshape (WKH-90) |
+| any other host (Slack, Datadog, custom) | Raw sanitized JSON (one flat object) | backward compat |
+| invalid / unparseable URL | Raw sanitized JSON (no throw) | CD-WKH90-2 fall-safe |
+
+**Discord embed structure** (when host matches):
+
+```json
+{
+  "username": "wasiai-alerts",
+  "embeds": [{
+    "title": "[<severity>] <event>",
+    "description": "<body.reason if present>",
+    "color": 15158332,
+    "timestamp": "<body.rotatedAt or body.checkedAt, ISO-8601>",
+    "fields": [
+      { "name": "chain",       "value": "avax", "inline": true },
+      { "name": "operator",    "value": "0x…",  "inline": true },
+      { "name": "balanceUsdc", "value": "0.1",  "inline": true }
+    ]
+  }]
+}
+```
+
+**Color mapping by severity:**
+
+| `severity` | Color decimal | Hex | Meaning |
+|---|---|---|---|
+| `critical` | `15158332` | `#E74C3C` | red |
+| `warning` | `15844367` | `#F1C40F` | yellow |
+| `info` | `3066993` | `#2ECC71` | green |
+| anything else | `3066993` | `#2ECC71` | falls back to info (DT-4) |
+
+**What goes where in the embed:**
+
+- `severity` → embed `color` (not duplicated as a field)
+- `event` → embedded in `title` as `[<severity>] <event>`; if absent, title is just `[<severity>]`
+- `reason` → embed `description` (omitted if absent)
+- `rotatedAt` (preferred) or `checkedAt` → embed `timestamp` (omitted if neither)
+- every other whitelisted body key (`chain`, `operator`, `balanceUsdc`,
+  `threshold`, `blockNumber`, …) → one `fields[]` entry with `String(value)`
+  and `inline: true`
+
+**Why hardcoded `username` (no env var):** simplicity — there is one production
+sender. If multi-tenant routing is needed later, that is a separate HU
+(CD-WKH90-3).
+
+**Backward compat guarantee (AC-3):** Slack incoming webhooks, Datadog event
+intakes, PagerDuty Events V2, and any custom webhook keep receiving the same
+raw flat JSON they got before WKH-90. The reshape is **opt-in via host**, not
+opt-out.
+
 ---
 
 ## Bearer rotation runbook (WKH-75)

@@ -5,7 +5,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { sendAlert, sanitizeAlertBody } from '../src/alerts.mjs';
+import { sendAlert, sanitizeAlertBody, formatForDiscord } from '../src/alerts.mjs';
 import { resetWarnOnce } from '../src/log.mjs';
 
 let origFetch;
@@ -210,6 +210,195 @@ test('T-AL-05: rotation-secret keys silently dropped (CD-11 deny-by-default)', a
   assert.ok(!serialized.includes(TEST_BEARER));
   assert.ok(!serialized.includes(TEST_VERCEL_TOKEN));
   assert.ok(!serialized.includes(TEST_PREV));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WKH-90 — Discord-aware payload formatting tests (T-AL-DISC-01..04).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('T-AL-DISC-01: critical → Discord payload shape (username + red embed + fields)', async () => {
+  let captured;
+  let capturedUrl;
+  globalThis.fetch = async (url, init = {}) => {
+    capturedUrl = String(url);
+    captured = JSON.parse(init.body);
+    return new Response('{}', { status: 200 });
+  };
+
+  const r = await sendAlert({
+    severity: 'critical',
+    body: {
+      chain: 'avax',
+      operator: '0xabc',
+      balanceUsdc: 0.1,
+      threshold: 0.5,
+      event: 'bearer-rotation-failed',
+      reason: 'failed to update current env (rolled back)',
+      rotatedAt: '2026-05-01T09:00:00.000Z',
+      blockNumber: 42,
+    },
+    webhookUrl: 'https://discord.com/api/webhooks/123/abc',
+  });
+
+  assert.equal(r.sent, true);
+  assert.equal(capturedUrl, 'https://discord.com/api/webhooks/123/abc');
+  assert.ok(captured, 'fetch must be called with a JSON body');
+  // AC-1: top-level Discord shape
+  assert.equal(captured.username, 'wasiai-alerts');
+  assert.ok(Array.isArray(captured.embeds), 'embeds must be array');
+  assert.equal(captured.embeds.length, 1);
+  const e = captured.embeds[0];
+  // AC-2: critical → 0xE74C3C (15158332)
+  assert.equal(e.color, 15158332);
+  // DT-3: title format "[<severity>] <event>"
+  assert.equal(e.title, '[critical] bearer-rotation-failed');
+  // DT-3: reason → description
+  assert.equal(e.description, 'failed to update current env (rolled back)');
+  // DT-3: rotatedAt → timestamp
+  assert.equal(e.timestamp, '2026-05-01T09:00:00.000Z');
+  // DT-3: fields[] from whitelisted body keys (excluding severity/event/reason/rotatedAt/checkedAt)
+  assert.ok(Array.isArray(e.fields), 'fields must be array');
+  const fieldNames = e.fields.map((f) => f.name).sort();
+  assert.deepEqual(fieldNames, ['balanceUsdc', 'blockNumber', 'chain', 'operator', 'threshold']);
+  for (const f of e.fields) {
+    assert.equal(typeof f.value, 'string');
+    assert.equal(f.inline, true);
+  }
+  // Spot-check String() coercion of values
+  const balanceField = e.fields.find((f) => f.name === 'balanceUsdc');
+  assert.equal(balanceField.value, '0.1');
+});
+
+test('T-AL-DISC-02: warning → yellow color (15844367)', async () => {
+  let captured;
+  globalThis.fetch = async (url, init = {}) => {
+    captured = JSON.parse(init.body);
+    return new Response('{}', { status: 200 });
+  };
+
+  await sendAlert({
+    severity: 'warning',
+    body: { chain: 'avax', balanceUsdc: 0.4, threshold: 0.5 },
+    webhookUrl: 'https://discordapp.com/api/webhooks/9/xyz',
+  });
+
+  assert.ok(captured);
+  assert.equal(captured.username, 'wasiai-alerts');
+  assert.equal(captured.embeds[0].color, 15844367);
+  assert.equal(captured.embeds[0].title, '[warning]');
+});
+
+test('T-AL-DISC-03: info → green color (3066993) + unknown severity falls back to info color', async () => {
+  let captured;
+  globalThis.fetch = async (url, init = {}) => {
+    captured = JSON.parse(init.body);
+    return new Response('{}', { status: 200 });
+  };
+
+  // info → green
+  await sendAlert({
+    severity: 'info',
+    body: { event: 'bearer-rotated', rotatedAt: '2026-05-02T00:00:00.000Z' },
+    webhookUrl: 'https://discord.com/api/webhooks/1/info',
+  });
+  assert.ok(captured);
+  assert.equal(captured.embeds[0].color, 3066993);
+  assert.equal(captured.embeds[0].title, '[info] bearer-rotated');
+  assert.equal(captured.embeds[0].timestamp, '2026-05-02T00:00:00.000Z');
+
+  // DT-4: unknown severity → defaults to info color (3066993), no throw
+  captured = undefined;
+  const r = await sendAlert({
+    severity: 'banana',
+    body: { chain: 'avax' },
+    webhookUrl: 'https://discord.com/api/webhooks/1/u',
+  });
+  assert.equal(r.sent, true);
+  assert.ok(captured);
+  assert.equal(captured.embeds[0].color, 3066993);
+});
+
+test('T-AL-DISC-04: Discord HTTP 400 → {sent:false, status:400, reason} no throw (AC-4 / CD-12)', async () => {
+  globalThis.fetch = async () => new Response('Bad Request', { status: 400 });
+
+  const r = await sendAlert({
+    severity: 'critical',
+    body: { chain: 'avax', operator: '0xabc', balanceUsdc: 0.1 },
+    webhookUrl: 'https://discord.com/api/webhooks/123/abc',
+  });
+
+  assert.equal(r.sent, false);
+  assert.equal(r.status, 400);
+  assert.equal(r.reason, 'webhook status 400');
+});
+
+test('T-AL-DISC-05: backward compat — non-Discord host still gets raw JSON (AC-3)', async () => {
+  let captured;
+  globalThis.fetch = async (url, init = {}) => {
+    captured = JSON.parse(init.body);
+    return new Response('{}', { status: 200 });
+  };
+
+  await sendAlert({
+    severity: 'critical',
+    body: { chain: 'avax', operator: '0xabc', balanceUsdc: 0.1, threshold: 0.5 },
+    webhookUrl: 'https://hooks.slack.com/services/T/B/zzz',
+  });
+
+  assert.ok(captured);
+  // Raw shape: top-level severity/chain/etc., NO username, NO embeds.
+  assert.equal(captured.severity, 'critical');
+  assert.equal(captured.chain, 'avax');
+  assert.equal(captured.operator, '0xabc');
+  assert.ok(!('username' in captured), 'non-Discord host must NOT receive Discord shape');
+  assert.ok(!('embeds' in captured));
+});
+
+test('T-AL-DISC-06: malformed URL falls back to raw path, never throws (CD-WKH90-2)', async () => {
+  let captured;
+  globalThis.fetch = async (url, init = {}) => {
+    captured = JSON.parse(init.body);
+    return new Response('{}', { status: 200 });
+  };
+
+  const r = await sendAlert({
+    severity: 'critical',
+    body: { chain: 'avax', operator: '0xabc' },
+    webhookUrl: 'not-a-valid-url',
+  });
+
+  // fetch is still attempted with the raw URL — Node fetch will reject it,
+  // but the URL parse failure itself must NOT throw inside sendAlert and
+  // must NOT reshape to Discord. We assert sendAlert returned a result
+  // object (no throw) regardless of fetch outcome.
+  assert.equal(typeof r, 'object');
+  assert.ok('sent' in r);
+  // If fetch happened, the body MUST be raw (not Discord-shaped).
+  if (captured) {
+    assert.ok(!('username' in captured));
+    assert.ok(!('embeds' in captured));
+  }
+});
+
+test('T-AL-DISC-07: formatForDiscord pure function — direct shape assertion', () => {
+  const out = formatForDiscord({
+    severity: 'critical',
+    body: {
+      event: 'bearer-rotation-failed',
+      reason: 'rolled back',
+      rotatedAt: '2026-05-01T09:00:00.000Z',
+      chain: 'avax',
+      operator: '0xabc',
+    },
+  });
+  assert.equal(out.username, 'wasiai-alerts');
+  assert.equal(out.embeds.length, 1);
+  assert.equal(out.embeds[0].title, '[critical] bearer-rotation-failed');
+  assert.equal(out.embeds[0].description, 'rolled back');
+  assert.equal(out.embeds[0].color, 15158332);
+  assert.equal(out.embeds[0].timestamp, '2026-05-01T09:00:00.000Z');
+  const names = out.embeds[0].fields.map((f) => f.name).sort();
+  assert.deepEqual(names, ['chain', 'operator']);
 });
 
 test('T-AL-bonus: sanitizeAlertBody returns only whitelisted keys', () => {
