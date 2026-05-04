@@ -48,6 +48,74 @@ Use the values from the live `accepts[0]` payload in the 402 response —
 do not hardcode them. See [getting-started.md](./getting-started.md) for
 the full client-side signing recipe.
 
+### Inline `chain.ts` — copy-pasteable
+
+The TypeScript samples in [getting-started.md](./getting-started.md)
+import `kiteTestnet` from `./chain`. If you are not cloning the repo,
+drop the following file into your project as `chain.ts` — it mirrors
+`src/adapters/kite-ozone/chain.ts` at HEAD (`e448993`). When the source
+file is updated in a future HU, this block is updated in the same PR
+(see [CD-WKH87-4 in WKH-87](./getting-started.md)).
+
+```ts
+// chain.ts — mirror of src/adapters/kite-ozone/chain.ts
+import { defineChain } from 'viem';
+
+export const kiteTestnet = defineChain({
+  id: 2368,
+  name: 'KiteAI Testnet',
+  nativeCurrency: { decimals: 18, name: 'KITE', symbol: 'KITE' },
+  rpcUrls: {
+    default: { http: ['https://rpc-testnet.gokite.ai/'] },
+    public: { http: ['https://rpc-testnet.gokite.ai/'] },
+  },
+  blockExplorers: {
+    default: { name: 'KiteScan', url: 'https://testnet.kitescan.ai' },
+  },
+  testnet: true,
+});
+
+/**
+ * KiteAI Mainnet — chainId 2366. Stablecoin canonical es USDC.e
+ * (`0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e`); PYUSD NO existe en mainnet.
+ *
+ * Activación: setear `KITE_NETWORK=mainnet` en env. Default permanece
+ * `testnet` para preservar comportamiento existente (zero breaking change).
+ */
+export const kiteMainnet = defineChain({
+  id: 2366,
+  name: 'KiteAI Mainnet',
+  nativeCurrency: { decimals: 18, name: 'KITE', symbol: 'KITE' },
+  rpcUrls: {
+    default: { http: ['https://rpc.gokite.ai/'] },
+    public: { http: ['https://rpc.gokite.ai/'] },
+  },
+  blockExplorers: {
+    default: { name: 'KiteScan', url: 'https://kitescan.ai' },
+  },
+  testnet: false,
+});
+
+/**
+ * Selecciona Kite chain según `KITE_NETWORK`. Default `testnet`.
+ * Ningún otro valor está soportado; si se setea algo distinto a `mainnet`
+ * caemos a testnet (fail-safe — preserva el path probado).
+ */
+export type KiteNetwork = 'testnet' | 'mainnet';
+
+export function getKiteNetwork(): KiteNetwork {
+  return process.env.KITE_NETWORK === 'mainnet' ? 'mainnet' : 'testnet';
+}
+
+export function getKiteChain() {
+  return getKiteNetwork() === 'mainnet' ? kiteMainnet : kiteTestnet;
+}
+```
+
+The four exports (`kiteTestnet`, `kiteMainnet`, `getKiteNetwork`,
+`getKiteChain`) are the only public symbols of `chain.ts`; the
+`viem` peer dep is the only external import.
+
 ---
 
 ## Outbound payments — Avalanche

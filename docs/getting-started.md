@@ -20,7 +20,10 @@ the gateway debits your tracked budget and skips the 402 challenge.
 
 ## Prerequisites
 
-- Node.js 18+ (uses the global `fetch`).
+- **Node.js 20+** — required by `package.json` `engines` (`>=20.0.0`).
+  The Step 4 EIP-712 sample uses `crypto.getRandomValues` as a global,
+  which became available without an `import` only in Node 19+; Node 20+
+  covers it transparently and is the minimum we test against.
 - `viem` installed locally for EIP-712 signing if you want to use the
   TypeScript samples below: `npm install viem`.
 - A wallet private key with PYUSD on Kite testnet (chain `2368`) **or**
@@ -389,6 +392,86 @@ const paymentHeader = Buffer.from(JSON.stringify(paymentPayload)).toString('base
 Mainnet domain values differ — see
 [networks.md](./networks.md#eip-712-domain-inbound) for the USDC.e (Kite
 mainnet) domain (`name: 'USDC'`, `version: '2'`, `chainId: 2366`).
+
+### Bash / `node -e` equivalent (no build toolchain)
+
+If you are integrating from a non-TypeScript stack (CI shell, Go, Python)
+the EIP-712 hash + ECDSA signature still needs a cryptographic library —
+pure `curl` + `openssl` cannot produce a valid `payment-signature` header
+because EIP-712 requires structured-hash + secp256k1 signing, not a
+generic HMAC. The minimum-tooling path is a one-liner via `node -e` that
+shells out to `viem` (already a project dep, so available after
+`npm install viem`). It produces the same base64 header the TypeScript
+sample above does:
+
+```bash
+# Inputs — replace placeholders OR export as env vars.
+export OPERATOR_PRIVATE_KEY='<OPERATOR_PRIVATE_KEY>'         # 0x-prefixed 32-byte hex
+export ACCEPTS_ASSET='0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9'  # from accepts[0].asset
+export ACCEPTS_PAYTO='<PAYTO_FROM_402>'                      # from accepts[0].payTo
+export ACCEPTS_AMOUNT='1000000'                              # 1.00 PYUSD (6 decimals)
+export ACCEPTS_NETWORK='eip155:2368'                         # from accepts[0].network
+export ACCEPTS_TIMEOUT='60'                                  # from accepts[0].maxTimeoutSeconds
+export PIEVERSE_FACILITATOR='0x12343e649e6b2b2b77649DFAb88f103c02F3C78b'
+
+# Sign + emit the base64 header on stdout.
+PAYMENT_HEADER=$(node -e '
+  const { privateKeyToAccount } = require("viem/accounts");
+  const acct = privateKeyToAccount(process.env.OPERATOR_PRIVATE_KEY);
+  const validAfter = 0n;
+  const validBefore = BigInt(Math.floor(Date.now() / 1000) + Number(process.env.ACCEPTS_TIMEOUT));
+  const nonce = "0x" + [...require("crypto").randomBytes(32)]
+    .map(b => b.toString(16).padStart(2, "0")).join("");
+  acct.signTypedData({
+    domain: {
+      name: "PYUSD", version: "1", chainId: 2368,
+      verifyingContract: process.env.PIEVERSE_FACILITATOR,
+    },
+    types: { Authorization: [
+      { name: "from", type: "address" },
+      { name: "to", type: "address" },
+      { name: "value", type: "uint256" },
+      { name: "validAfter", type: "uint256" },
+      { name: "validBefore", type: "uint256" },
+      { name: "nonce", type: "bytes32" },
+    ]},
+    primaryType: "Authorization",
+    message: {
+      from: acct.address,
+      to: process.env.ACCEPTS_PAYTO,
+      value: BigInt(process.env.ACCEPTS_AMOUNT),
+      validAfter, validBefore, nonce,
+    },
+  }).then(signature => {
+    const payload = {
+      authorization: {
+        from: acct.address,
+        to: process.env.ACCEPTS_PAYTO,
+        value: process.env.ACCEPTS_AMOUNT,
+        validAfter: validAfter.toString(),
+        validBefore: validBefore.toString(),
+        nonce,
+      },
+      signature,
+      network: process.env.ACCEPTS_NETWORK,
+    };
+    process.stdout.write(Buffer.from(JSON.stringify(payload)).toString("base64"));
+  });
+')
+
+# Now you can plug $PAYMENT_HEADER into the curl in Step 5.
+echo "$PAYMENT_HEADER" | head -c 64; echo "..."
+```
+
+> **Note**: this is a portability convenience, not a security guideline.
+> In production, sign from a wallet library (`viem`, `ethers`, `web3.py`,
+> `go-ethereum`) inside your service, not from a shell. The `node -e`
+> form is documented here only so non-Node integrators can verify the
+> wire format end-to-end without a TypeScript build.
+
+For the `x402` mode (4B), swap the `domain.verifyingContract` to
+`$ACCEPTS_ASSET` and the `primaryType` + `types` key to
+`TransferWithAuthorization`.
 
 ---
 
