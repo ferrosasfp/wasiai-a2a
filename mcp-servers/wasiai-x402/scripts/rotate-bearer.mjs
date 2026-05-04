@@ -1,21 +1,46 @@
 #!/usr/bin/env node
-// scripts/rotate-bearer.mjs — generate a fresh MCP_BEARER_TOKEN (WKH-66 W4.1).
+// scripts/rotate-bearer.mjs — generate a fresh MCP_BEARER_TOKEN.
 //
-// Contract:
-//   - Stdout: ONE line, exactly the new bearer (64 hex chars + LF).
-//   - Stderr: human-readable instructions for `vercel env add/rm`.
+// WKH-66 W4.1 manual-only; WKH-75 W2 adds HEADLESS mode (cron / CI).
 //
-// Safety invariants (CD-6):
-//   - Refuse to print the bearer when stdout is NOT a TTY. Otherwise an
-//     accidental `node scripts/rotate-bearer.mjs > .env` would commit the
-//     secret to disk and possibly to git.
-//   - NEVER write to disk. NEVER mutate .env. The operator copies the
-//     stdout line manually into Vercel env via the CLI commands shown on
-//     stderr.
-//   - NEVER log the bearer to stderr (CD-10). Stderr is allowed to print
-//     the rotation runbook only.
+// CD-6 (manual): refuse non-TTY stdout. CD-9: never log bearer/token.
 
 import { randomBytes } from 'node:crypto';
+
+const HEADLESS = Boolean(process.env.VERCEL_TOKEN && process.env.VERCEL_PROJECT_ID);
+
+if (HEADLESS) {
+  const { rotateBearer } = await import('../src/bearer-rotation.mjs');
+  const { getKvClient } = await import('../src/kv-client.mjs');
+
+  let result;
+  try {
+    result = await rotateBearer({
+      vercelToken: process.env.VERCEL_TOKEN,
+      projectId: process.env.VERCEL_PROJECT_ID,
+      teamId: process.env.VERCEL_TEAM_ID,
+      alertWebhookUrl: process.env.MCP_ALERT_WEBHOOK_URL,
+      kvClient: getKvClient(),
+    });
+  } catch (err) {
+    process.stderr.write(`rotate-bearer: unexpected error (${err?.name ?? 'Error'})\n`);
+    process.exit(1);
+  }
+
+  if (result?.ok) {
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      rotatedAt: result.rotatedAt,
+      expiresAt: result.expiresAt,
+    }) + '\n');
+    process.exit(0);
+  }
+
+  process.stderr.write(
+    `rotate-bearer: rotation failed at stage="${result?.stage ?? 'unknown'}" reason="${result?.reason ?? 'unknown'}"\n`,
+  );
+  process.exit(1);
+}
 
 if (!process.stdout.isTTY) {
   process.stderr.write(
@@ -25,7 +50,7 @@ if (!process.stdout.isTTY) {
   process.exit(1);
 }
 
-const bearer = randomBytes(32).toString('hex'); // 64 hex chars
+const bearer = randomBytes(32).toString('hex');
 process.stdout.write(bearer + '\n');
 
 process.stderr.write([

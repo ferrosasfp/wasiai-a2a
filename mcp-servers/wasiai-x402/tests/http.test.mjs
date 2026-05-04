@@ -776,3 +776,117 @@ test('T-HTTP-15 (W2.6): discover_agents NO pasa por balance gate', async () => {
     cap.restore();
   }
 });
+
+// ──────────────────────────────────────────────────────────────────────────
+// WKH-75 W1 — dual-bearer overlap window (AC-4, AC-6) — HTTP-level
+// ──────────────────────────────────────────────────────────────────────────
+//
+// T-HTTP-30..T-HTTP-33: validate that api/mcp.mjs honors the third arg of
+// validateBearerToken when MCP_BEARER_TOKEN_PREV is set in the environment.
+// Coverage:
+//   T-HTTP-30 PREV configured + presented matches PREV ⇒ 200
+//   T-HTTP-31 PREV configured + presented matches NEITHER ⇒ 401
+//   T-HTTP-32 PREV NOT configured + presented matches arbitrary bearer ⇒ 401
+//             (regression guard for WKH-65 AC-5 — single-bearer behavior)
+//   T-HTTP-33 PREV malformed (length !== 64) ⇒ ignored, only current valid
+
+const PREV_BEARER = '1234567890' + 'c'.repeat(54); // 64 chars, distinct.
+
+test('T-HTTP-30 (WKH-75 AC-4): MCP_BEARER_TOKEN_PREV set + present prev bearer ⇒ 200', async () => {
+  process.env.MCP_BEARER_TOKEN_PREV = PREV_BEARER;
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    const req = jsonRpcRequest(
+      {
+        jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'overlap-test', version: '0.0.1' },
+        },
+      },
+      { auth: `Bearer ${PREV_BEARER}` },
+    );
+    const res = await handler(req);
+    assert.equal(res.status, 200, `expected 200 with prev bearer, got ${res.status}`);
+    // CD-9: the prev bearer MUST NOT appear in stderr.
+    const blob = cap.lines.join('\n');
+    assert.ok(!blob.includes(PREV_BEARER), 'prev bearer must not be logged');
+  } finally {
+    delete process.env.MCP_BEARER_TOKEN_PREV;
+    cap.restore();
+  }
+});
+
+test('T-HTTP-31 (WKH-75 AC-4): PREV set + arbitrary 64-hex bearer ⇒ 401', async () => {
+  process.env.MCP_BEARER_TOKEN_PREV = PREV_BEARER;
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    const req = jsonRpcRequest(
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} },
+      { auth: `Bearer ${WRONG_BEARER}` },
+    );
+    const res = await handler(req);
+    assert.equal(res.status, 401);
+    const body = await res.json();
+    assert.deepEqual(body, { error: 'unauthorized' });
+    const blob = cap.lines.join('\n');
+    assert.ok(!blob.includes(WRONG_BEARER), 'presented wrong bearer must not be logged');
+    assert.ok(!blob.includes(PREV_BEARER), 'prev bearer must not be logged');
+  } finally {
+    delete process.env.MCP_BEARER_TOKEN_PREV;
+    cap.restore();
+  }
+});
+
+test('T-HTTP-32 (WKH-75 AC-6 / WKH-65 AC-5 regression): no PREV + wrong bearer ⇒ 401', async () => {
+  // Regression: when MCP_BEARER_TOKEN_PREV is unset, the function MUST
+  // behave identically to the WKH-65 single-bearer flow.
+  delete process.env.MCP_BEARER_TOKEN_PREV;
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    const req = jsonRpcRequest(
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} },
+      { auth: `Bearer ${WRONG_BEARER}` },
+    );
+    const res = await handler(req);
+    assert.equal(res.status, 401);
+    const body = await res.json();
+    assert.deepEqual(body, { error: 'unauthorized' });
+  } finally {
+    cap.restore();
+  }
+});
+
+test('T-HTTP-33 (WKH-75 AC-6): PREV malformed (length 32) ignored ⇒ only current valid', async () => {
+  process.env.MCP_BEARER_TOKEN_PREV = 'a'.repeat(32); // length !== 64 ⇒ ignored
+  const handler = await loadHandler();
+  const cap = captureStderr();
+  try {
+    // Current bearer still works.
+    const reqOk = jsonRpcRequest({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 't', version: '0' },
+      },
+    });
+    const resOk = await handler(reqOk);
+    assert.equal(resOk.status, 200);
+
+    // The malformed PREV value is NOT honored as a bearer.
+    const reqBad = jsonRpcRequest(
+      { jsonrpc: '2.0', id: 2, method: 'initialize', params: {} },
+      { auth: `Bearer ${'a'.repeat(32)}` },
+    );
+    const resBad = await handler(reqBad);
+    assert.equal(resBad.status, 401);
+  } finally {
+    delete process.env.MCP_BEARER_TOKEN_PREV;
+    cap.restore();
+  }
+});

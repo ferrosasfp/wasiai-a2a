@@ -1,6 +1,12 @@
 #!/usr/bin/env node
-// scripts/setup-cronjob.mjs — provision the 2 cron jobs on cron-job.org
-// (WKH-66 W4.5).
+// scripts/setup-cronjob.mjs — provision the 4 cron jobs on cron-job.org
+// (WKH-66 W4.5 + WKH-75 W4).
+//
+// Jobs registered (idempotent by title — CD-20):
+//   1. wasiai-x402-warmup                 — every 4 min  (warmup)
+//   2. wasiai-x402-balance-check          — every 15 min (balance gate)
+//   3. wasiai-x402-bearer-rotation        — every 30 days at 09:00 UTC (WKH-75)
+//   4. wasiai-x402-invalidate-prev-bearer — daily at 10:00 UTC          (WKH-75)
 //
 // Idempotent (CD-20): we lookup-by-title, then PATCH if the job already
 // exists, PUT if it doesn't. PROHIBITED to create duplicates.
@@ -43,6 +49,25 @@ const TARGET_JOBS = [
     url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/balance-check`,
     schedule: { minutes: ['*/15'], hours: ['*'], mdays: ['*'], months: ['*'], wdays: ['*'] },
     requestMethod: 1,
+    extendedData: { headers: { Authorization: `Bearer ${CRON_SECRET}` } },
+  },
+  // WKH-75 W4 — headless bearer rotation. Triggers rotateBearer() every 30 days
+  // at 09:00 UTC. POST because the cron endpoint mutates Vercel env state.
+  {
+    title: 'wasiai-x402-bearer-rotation',
+    url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/rotate-bearer`,
+    schedule: { minutes: ['0'], hours: ['9'], mdays: ['*/30'], months: ['*'], wdays: ['*'] },
+    requestMethod: 2, // POST
+    extendedData: { headers: { Authorization: `Bearer ${CRON_SECRET}` } },
+  },
+  // WKH-75 W4 — daily probe that DELETEs MCP_BEARER_TOKEN_PREV once the 24h
+  // overlap window has expired. Idempotent: skips with reason when no
+  // snapshot exists OR the overlap is still active.
+  {
+    title: 'wasiai-x402-invalidate-prev-bearer',
+    url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/invalidate-prev-bearer`,
+    schedule: { minutes: ['0'], hours: ['10'], mdays: ['*'], months: ['*'], wdays: ['*'] },
+    requestMethod: 2, // POST
     extendedData: { headers: { Authorization: `Bearer ${CRON_SECRET}` } },
   },
 ];

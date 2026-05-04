@@ -359,6 +359,142 @@ curl -X PATCH https://api.cron-job.org/jobs/<jobId> \
 
 ---
 
+## Bearer rotation runbook (WKH-75)
+
+> Added in WKH-75. Replaces the manual `(a) Rotar el bearer token` flow with
+> an automated headless rotation backed by two cron-job.org jobs:
+> `bearer-rotation` (every 30 days) and `bearer-prev-cleanup` (24h after each
+> rotation). See `doc/sdd/076-wkh-75-bearer-rotation-cron/sdd.md` for the full
+> SDD.
+
+<!-- LAST_BEARER_ROTATION: YYYY-MM-DD -->
+
+> ⚠️ **Update the placeholder above manually after every successful rotation
+> (automatic or manual).** The line is the only durable on-repo timestamp;
+> Vercel env vars do not retain a "last set" timestamp visible from API.
+
+### (a) Cadencia recomendada
+
+- **Automático**: cron-job.org job `bearer-rotation` ejecuta `POST
+  /api/cron/rotate-bearer` cada **30 días**. Verificar último run en
+  https://cron-job.org → Jobs → `bearer-rotation` → History.
+- **Manual (incidente)**: ejecutar inmediatamente si hay sospecha de leak,
+  rotación de personal, o compromiso del entorno Vercel. No esperar al cron.
+
+### (b) Manual rotation
+
+Dos modos:
+
+**Modo headless (preferido — requiere `VERCEL_TOKEN` + `VERCEL_PROJECT_ID`):**
+
+```bash
+cd mcp-servers/wasiai-x402
+export VERCEL_TOKEN=<your vercel api token>
+export VERCEL_PROJECT_ID=<prj_xxx>
+# export VERCEL_TEAM_ID=<team_xxx>   # only if project is in a team
+node scripts/rotate-bearer.mjs --headless
+# Stderr: instrucciones de verificación + log JSON-line del flujo
+# Exit 0 → rotation completada (env vars actualizadas, redeploy disparado)
+```
+
+El modo headless replica exactamente lo que hace el cron `bearer-rotation`,
+pero ejecutado desde la laptop del operador. Útil para smoke-test del flujo
+o para forzar rotación pre-incidente.
+
+**Modo manual (fallback — sin `VERCEL_TOKEN`):**
+
+```bash
+cd mcp-servers/wasiai-x402
+node scripts/rotate-bearer.mjs
+# Stdout: <new bearer hex 64 chars>
+# Stderr: pasos manuales — vercel env add/rm + redeploy
+```
+
+Después seguir las instrucciones impresas en stderr (`vercel env rm` →
+`vercel env add` → `vercel deploy --prod`).
+
+### (c) Verificación post-rotation
+
+Inmediatamente después de cualquier rotation (automática o manual), validar
+con el bearer **nuevo**:
+
+```bash
+MCP_BEARER_TOKEN=<new bearer> \
+MCP_DEPLOY_URL=https://wasiai-x402-mcp.vercel.app \
+  node scripts/refresh-session.mjs
+# Esperado: { "ok": true, "toolCount": 3 }, exit 0
+```
+
+Cualquier respuesta distinta de `200` con `toolCount: 3` → escalar y
+considerar rollback (sección d).
+
+### (d) Rollback
+
+Si la rotation falló mid-flow (ej. `rotate-bearer` actualizó
+`MCP_BEARER_TOKEN_PREV` pero no `MCP_BEARER_TOKEN`, o el redeploy quedó en
+error), restaurar manualmente:
+
+1. **Identificar bearer anterior** desde Vercel dashboard (Project → Settings
+   → Environment Variables → History) o desde los logs estructurados del
+   cron-run que falló (stderr JSON contiene `previousBearerHash` para
+   correlación, **nunca el bearer en claro** — CD-9).
+2. `vercel env rm MCP_BEARER_TOKEN production` (el valor parcial/roto).
+3. `vercel env add MCP_BEARER_TOKEN production` y pegar el bearer anterior
+   desde el History de Vercel.
+4. `vercel env rm MCP_BEARER_TOKEN_PREV production` (si quedó set).
+5. `vercel deploy --prod` para forzar rollout con el bearer restaurado.
+6. Validar con `refresh-session.mjs` (sección c).
+7. Investigar la causa raíz desde Vercel Logs antes de re-intentar la
+   rotation.
+
+### (e) Verificación de overlap window (24h)
+
+Durante 24h post-rotation, **ambos bearers** son válidos (`MCP_BEARER_TOKEN`
+nuevo + `MCP_BEARER_TOKEN_PREV` antiguo). Esto asegura zero-downtime para
+clientes Claude Console que hayan cacheado el bearer anterior.
+
+Test:
+
+```bash
+# Bearer NUEVO debe funcionar:
+MCP_BEARER_TOKEN=<new> MCP_DEPLOY_URL=https://wasiai-x402-mcp.vercel.app \
+  node scripts/refresh-session.mjs
+# → { "ok": true, "toolCount": 3 }
+
+# Bearer ANTERIOR también debe funcionar durante 24h:
+MCP_BEARER_TOKEN=<previous> MCP_DEPLOY_URL=https://wasiai-x402-mcp.vercel.app \
+  node scripts/refresh-session.mjs
+# → { "ok": true, "toolCount": 3 }
+```
+
+Pasadas las 24h, el cron `bearer-prev-cleanup` ejecuta `POST
+/api/cron/invalidate-prev-bearer` y borra `MCP_BEARER_TOKEN_PREV`. A partir
+de ese punto el bearer anterior debe responder `401`.
+
+### (f) Last-rotation timestamp
+
+El comentario HTML al inicio de esta sección
+(`<!-- LAST_BEARER_ROTATION: YYYY-MM-DD -->`) es el único registro durable
+on-repo de la última rotation. **Actualizarlo manualmente después de cada
+rotation** — automática o manual. PR sugerido: bump del placeholder + nota
+en commit msg con el `previousBearerHash` (no el bearer en claro).
+
+### (g) Advertencia de seguridad
+
+- **NUNCA** compartir el bearer en chat (Slack, Discord, email), GitHub
+  issue/PR description, ni `.env` commiteado. El bearer es equivalente a
+  acceso completo a los 3 tools del MCP, incluyendo `pay_x402` que mueve
+  fondos reales.
+- **NUNCA** loguear el bearer en stdout/stderr/clipboard/screenshot. Los
+  scripts solo imprimen `bearerHash` (SHA-256) en logs estructurados —
+  verificado por tests `tests/bearer-rotation.test.mjs::T-AUDIT-*` y
+  `tests/cron-rotation.test.mjs::T-LEAK-*` (CD-9).
+- En caso de leak (sospecha o confirmado): rotar inmediatamente con (b) en
+  modo headless, validar con (c), revisar Vercel + cron-job.org access logs
+  por requests con el bearer comprometido.
+
+---
+
 ## License & reporting
 
 Internal — see repository root LICENSE.

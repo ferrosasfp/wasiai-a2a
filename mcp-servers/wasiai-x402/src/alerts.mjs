@@ -29,6 +29,12 @@ const ALLOWED_BODY_KEYS = new Set([
   'threshold',
   'checkedAt',
   'blockNumber',
+  // WKH-75 (CD-11): rotation-alert identifiers — discrete identifiers and
+  // timestamps that never carry secrets. PROHIBITED to add token/bearer/
+  // value/signature/privateKey-bearing keys here.
+  'event',
+  'reason',
+  'rotatedAt',
 ]);
 
 export function sanitizeAlertBody(body) {

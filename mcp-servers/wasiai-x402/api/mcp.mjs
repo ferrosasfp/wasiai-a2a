@@ -204,8 +204,16 @@ export async function webHandler(request) {
     });
     return jsonError(500, { error: 'server misconfigured' });
   }
+  // WKH-75 W1.4 — dual-bearer overlap window. During the 24h overlap after
+  // rotation, both MCP_BEARER_TOKEN (new) and MCP_BEARER_TOKEN_PREV (old)
+  // are accepted. Outside the overlap window the env var is unset and the
+  // function behaves identically to the WKH-65 single-bearer flow (CD-8).
+  // We do NOT change the order of operations (CORS → method → auth →
+  // rate-limit → config → dispatch — MNR-CR-6 invariant). CD-9: never log
+  // either token.
+  const prevToken = process.env.MCP_BEARER_TOKEN_PREV ?? '';
   try {
-    validateBearerToken(request.headers.get('authorization') ?? '', expectedToken);
+    validateBearerToken(request.headers.get('authorization') ?? '', expectedToken, prevToken);
   } catch (e) {
     if (e instanceof AuthError) {
       // CD-1 / CD-5: never log the presented header (could be the right
