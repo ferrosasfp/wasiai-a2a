@@ -132,6 +132,16 @@ const RISK_PATTERNS = [
     op: 'embedded COMMIT/ROLLBACK',
     re: /\b(commit|rollback)\b\s*;?\s*$/i,
   },
+  // BLQ-ALTO-1 — alter default privileges silently changes ACL of every
+  // future object created in the schema. Hard to audit retroactively.
+  // Listed BEFORE GRANT/REVOKE so that with WKH-86 AC-4 dedup the more
+  // specific finding (ALTER DEFAULT PRIVILEGES) wins when the statement
+  // contains both keywords (e.g. `ALTER DEFAULT PRIVILEGES … GRANT …`).
+  {
+    level: /** @type {RiskLevel} */ ('MEDIUM'),
+    op: 'ALTER DEFAULT PRIVILEGES',
+    re: /\balter\s+default\s+privileges\b/i,
+  },
   // BLQ-ALTO-1 — privilege grants/revokes. Security-sensitive but
   // sometimes intentional (see 20260427160000_secure_rpc_search_path.sql),
   // so MEDIUM, not HIGH.
@@ -139,13 +149,6 @@ const RISK_PATTERNS = [
     level: /** @type {RiskLevel} */ ('MEDIUM'),
     op: 'GRANT/REVOKE',
     re: /\b(grant|revoke)\b[\s\S]*?\bon\b/i,
-  },
-  // BLQ-ALTO-1 — alter default privileges silently changes ACL of every
-  // future object created in the schema. Hard to audit retroactively.
-  {
-    level: /** @type {RiskLevel} */ ('MEDIUM'),
-    op: 'ALTER DEFAULT PRIVILEGES',
-    re: /\balter\s+default\s+privileges\b/i,
   },
   // MEDIUM — risky but sometimes intentional
   { level: /** @type {RiskLevel} */ ('MEDIUM'), op: 'ALTER COLUMN TYPE', re: /\balter\s+column\b[\s\S]*?\btype\b/i },
@@ -167,21 +170,32 @@ const RISK_PATTERNS = [
  * regex tolerates whitespace/newlines between DELETE and the terminating `;`,
  * but flags HIGH only when no WHERE keyword appears in that statement.
  *
+ * WKH-86 AC-3 / CD-WKH86 / MNR-CR-2: this function defensively scrubs string
+ * literals before applying its regex. The pipeline in `analyze()` already
+ * passes a sanitized SQL string (post `stripStringLiterals()`), but direct
+ * callers (tests, future re-use) get the same guarantee here so the
+ * function is safe to call against raw SQL.
+ *
  * @param {string} sql
  * @returns {{ line: number, snippet: string }[]}
  */
-function findDeleteWithoutWhere(sql) {
+export function findDeleteWithoutWhere(sql) {
   /** @type {{ line: number, snippet: string }[]} */
   const hits = [];
+  // Defense in depth — strip string literals locally so the regex never
+  // matches `DELETE FROM` text embedded inside `'…'`, `"…"`, `E'…'`, or
+  // dollar-quoted bodies. Idempotent when the input is already sanitized.
+  const sanitized = stripStringLiterals(sql);
   // Find each DELETE FROM ... ; statement (greedy until ;)
   // Then check whether \bwhere\b appears inside that statement body.
   const stmtRe = /delete\s+from[\s\S]*?;/gi;
   let match;
-  while ((match = stmtRe.exec(sql)) !== null) {
+  while ((match = stmtRe.exec(sanitized)) !== null) {
     const stmt = match[0];
     if (!/\bwhere\b/i.test(stmt)) {
-      // Compute the line number where DELETE started.
-      const before = sql.slice(0, match.index);
+      // Compute the line number where DELETE started (using sanitized SQL,
+      // which preserves line counts via stripStringLiterals).
+      const before = sanitized.slice(0, match.index);
       const line = before.split('\n').length;
       const firstLine = stmt.split('\n')[0].trim();
       hits.push({ line, snippet: firstLine });
@@ -509,6 +523,23 @@ export function splitStatements(sql) {
 }
 
 /**
+ * Returns true if the given statement is an idempotent
+ * `DROP TRIGGER IF EXISTS <name>` or `DROP FUNCTION IF EXISTS <name>`.
+ *
+ * WKH-86 AC-2: these forms are canonical in our migrations (idempotent
+ * re-creation of triggers/functions on every run) and should not be
+ * surfaced as HIGH-risk findings. The `IF EXISTS` clause is what makes
+ * the operation safe — without it, the bare `DROP TRIGGER` / `DROP
+ * FUNCTION` still fires HIGH (CD-WKH78-FP3, CD-WKH86-4).
+ *
+ * @param {string} stmt SQL statement (already string-stripped + comment-stripped).
+ * @returns {boolean}
+ */
+export function isIdempotentDropTriggerOrFunction(stmt) {
+  return /\bdrop\s+(?:trigger|function)\s+if\s+exists\b/i.test(stmt);
+}
+
+/**
  * Run static analysis over a SQL string and return all findings.
  *
  * The pipeline is statement-based (BLQ-ALTO-2) and string-aware
@@ -531,6 +562,19 @@ export function analyze(sql) {
     const firstLine = stmt.text.trim().split('\n')[0].trim();
     for (const pat of RISK_PATTERNS) {
       if (pat.re.test(stmt.text)) {
+        // WKH-86 AC-2: `DROP TRIGGER IF EXISTS <name>` and
+        // `DROP FUNCTION IF EXISTS <name>` are canonical idempotent patterns
+        // in our migrations (5/13 files use them) and must NOT trigger the
+        // HIGH `DROP <object>` finding. CD-WKH86-4 keeps `DROP TABLE IF
+        // EXISTS` as HIGH (TABLE is in a different pattern, unaffected).
+        // CD-WKH78-FP3 is preserved: we are not relaxing the base pattern,
+        // we are adding a narrow conditional exclusion for IF EXISTS only.
+        if (
+          pat.op === 'DROP <object>' &&
+          isIdempotentDropTriggerOrFunction(stmt.text)
+        ) {
+          continue;
+        }
         findings.push({
           line: stmt.line,
           level: pat.level,
@@ -563,7 +607,39 @@ export function analyze(sql) {
 
   // Sort by line number for deterministic output.
   findings.sort((a, b) => a.line - b.line);
-  return findings;
+
+  // WKH-86 AC-4 / CD-WKH86-2: deduplicate findings by (line, level). Two
+  // patterns matching the same statement at the same severity collapse into
+  // a single finding (the first occurrence wins after sort, which is the
+  // earliest pattern in RISK_PATTERNS for HIGH/MEDIUM/INFO order). This
+  // prevents duplicate report rows like:
+  //   L7 [HIGH] DROP COLUMN
+  //   L7 [HIGH] ALTER TABLE ... DROP
+  // for the same `ALTER TABLE foo DROP COLUMN bar;` statement. Findings on
+  // the same line with DIFFERENT severities are preserved.
+  return dedupeByLineAndLevel(findings);
+}
+
+/**
+ * Deduplicate findings by `(line, level)`. Preserves order: the first
+ * occurrence per key wins. Findings with the same line but different
+ * severity (HIGH vs MEDIUM, etc.) are NOT collapsed — only exact
+ * `(line, level)` collisions are removed.
+ *
+ * @param {Finding[]} findings
+ * @returns {Finding[]}
+ */
+export function dedupeByLineAndLevel(findings) {
+  const seen = new Set();
+  /** @type {Finding[]} */
+  const out = [];
+  for (const f of findings) {
+    const key = `${f.line}|${f.level}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(f);
+  }
+  return out;
 }
 
 /**
@@ -605,6 +681,54 @@ export function buildDryRunPayload(migrationSql) {
 }
 
 /**
+ * Parse a Postgres connection URL into psql args + env vars so the password
+ * is passed via `PGPASSWORD` instead of the argv (where `ps aux` would leak
+ * it). WKH-86 AC-6 / CD-WKH86-1 / MNR-CR-1.
+ *
+ * Returns:
+ *   - `args`: the connection args to append to the psql argv. The form is
+ *     `['-h', host, '-p', port, '-U', user, '-d', dbname]` when the URL has
+ *     a password (so the password never appears in argv). When the URL has
+ *     no password (e.g. socket auth, .pgpass), we fall back to passing the
+ *     URL itself — that path was never a leak in the first place.
+ *   - `env`: the env block to merge into the spawn opts. Carries
+ *     `PGPASSWORD` only when the URL had an embedded password.
+ *
+ * Edge cases preserved:
+ *   - URL without scheme (e.g. plain hostname): treated as no-leak,
+ *     passed verbatim as the connection arg.
+ *   - URL parse failure: same fallback (verbatim arg). The spawn will fail
+ *     downstream with a meaningful psql error rather than crashing here.
+ *
+ * @param {string} url Postgres connection URL.
+ * @returns {{ args: string[], env: Record<string, string> }}
+ */
+export function buildPsqlConnectionEnv(url) {
+  /** @type {URL | null} */
+  let parsed = null;
+  try {
+    parsed = new URL(url);
+  } catch {
+    parsed = null;
+  }
+  // No scheme / unparseable / no password → argv was already safe.
+  // Pass verbatim and add no PGPASSWORD.
+  if (!parsed || !parsed.password) {
+    return { args: [url], env: {} };
+  }
+  const password = decodeURIComponent(parsed.password);
+  /** @type {string[]} */
+  const args = [];
+  if (parsed.hostname) args.push('-h', parsed.hostname);
+  if (parsed.port) args.push('-p', parsed.port);
+  if (parsed.username) args.push('-U', decodeURIComponent(parsed.username));
+  // pathname for postgres URLs is `/dbname` — strip the leading slash.
+  const dbname = parsed.pathname.replace(/^\/+/, '');
+  if (dbname) args.push('-d', dbname);
+  return { args, env: { PGPASSWORD: password } };
+}
+
+/**
  * Run the migration dry-run against SHADOW_DATABASE_URL.
  *
  * @param {string} migrationSql
@@ -628,11 +752,14 @@ export function runShadowDryRun(migrationSql, opts = {}) {
   const now = opts.nowMs ?? (() => Date.now());
 
   const payload = buildDryRunPayload(migrationSql);
+  // WKH-86 AC-6 / CD-WKH86-1: extract password from URL into PGPASSWORD env
+  // so it never appears in `ps aux` argv listing.
+  const conn = buildPsqlConnectionEnv(shadowUrl);
   const start = now();
   const result = spawn(
     'psql',
     [
-      shadowUrl,
+      ...conn.args,
       '-v', 'ON_ERROR_STOP=1',
       '--single-transaction',
       '-X',         // do not read .psqlrc
@@ -643,6 +770,7 @@ export function runShadowDryRun(migrationSql, opts = {}) {
       input: payload,
       encoding: 'utf-8',
       timeout: 60_000,
+      env: { ...process.env, ...conn.env },
     },
   );
   const ms = now() - start;
@@ -741,11 +869,15 @@ export function decide(findings, dryRun, opts = {}) {
  */
 export const EXPECTED_A2A_TABLES = [
   'a2a_agent_keys',
+  'a2a_events',
   'a2a_protocol_fees',
   // NOTE: `a2a_registries` and `a2a_tasks` ship under different names today
   // (`registries`, `tasks`) but are tracked here so the runbook can rename
   // them in a single PR when the WKH-54 work item lands. Until then the
   // expected list reflects current prod ground truth.
+  // WKH-86 AC-1: `a2a_events` baseline table is now part of the manifest so
+  // an accidental DROP is detected by --post-apply (it shipped with WKH-58
+  // but was missing from this list).
 ];
 
 /**
@@ -812,11 +944,17 @@ export function runPostApplyCheck(opts = {}) {
     };
   }
 
+  // WKH-86 AC-6 / CD-WKH86-1: extract password from DATABASE_URL into
+  // PGPASSWORD env so it never appears in `ps aux` argv listing for any
+  // of the three sub-queries below.
+  const conn = buildPsqlConnectionEnv(databaseUrl);
+  const psqlEnv = { ...process.env, ...conn.env };
+
   // (a) a2a_* tables
   const tablesResult = spawn(
     'psql',
-    [databaseUrl, '-X', '-A', '-t', '-q', '-c', POST_APPLY_QUERIES.a2aTables],
-    { encoding: 'utf-8', timeout: 30_000 },
+    [...conn.args, '-X', '-A', '-t', '-q', '-c', POST_APPLY_QUERIES.a2aTables],
+    { encoding: 'utf-8', timeout: 30_000, env: psqlEnv },
   );
   if (tablesResult.error || tablesResult.status !== 0) {
     errors.push(
@@ -851,8 +989,8 @@ export function runPostApplyCheck(opts = {}) {
   // (b) invalid FKs
   const fkResult = spawn(
     'psql',
-    [databaseUrl, '-X', '-A', '-t', '-q', '-c', POST_APPLY_QUERIES.invalidFks],
-    { encoding: 'utf-8', timeout: 30_000 },
+    [...conn.args, '-X', '-A', '-t', '-q', '-c', POST_APPLY_QUERIES.invalidFks],
+    { encoding: 'utf-8', timeout: 30_000, env: psqlEnv },
   );
   if (fkResult.error || fkResult.status !== 0) {
     errors.push(
@@ -877,8 +1015,8 @@ export function runPostApplyCheck(opts = {}) {
   //  not validated against migration declarations.)
   const idxResult = spawn(
     'psql',
-    [databaseUrl, '-X', '-A', '-t', '-q', '-c', POST_APPLY_QUERIES.a2aIndexes],
-    { encoding: 'utf-8', timeout: 30_000 },
+    [...conn.args, '-X', '-A', '-t', '-q', '-c', POST_APPLY_QUERIES.a2aIndexes],
+    { encoding: 'utf-8', timeout: 30_000, env: psqlEnv },
   );
   if (idxResult.error || idxResult.status !== 0) {
     errors.push(

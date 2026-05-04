@@ -1,24 +1,31 @@
+/// <reference path="./types/migrate-preflight.d.ts" />
 /**
- * Tests for scripts/migrate-preflight.mjs — WKH-78 (AC-6).
+ * Tests for scripts/migrate-preflight.mjs — WKH-78 (AC-6) + WKH-86.
  *
  * Pure unit tests with 100% mocks (CD-6). NEVER connects to a real Supabase
  * project (prod or shadow) — `spawnSync` is replaced via dependency injection
  * on `runShadowDryRun` / `runPostApplyCheck`, and `process.env` is restored
  * after each test.
+ *
+ * WKH-86 AC-7: the prior `// @ts-expect-error` was replaced by a typed
+ * module declaration shim at `test/types/migrate-preflight.d.ts`, loaded
+ * via the triple-slash reference directive above. This gives the test
+ * file proper types for the `.mjs` import without bypassing the type
+ * checker.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-// @ts-expect-error -- the script is .mjs ESM with JSDoc types; vitest resolves
-// it at runtime, but TypeScript has no resolver for it without a .d.ts.
-import * as preflight from '../scripts/migrate-preflight.mjs';
-
-const {
+import {
   analyze,
   hasHighRisk,
   stripComments,
   stripStringLiterals,
   splitStatements,
   buildDryRunPayload,
+  buildPsqlConnectionEnv,
+  isIdempotentDropTriggerOrFunction,
+  dedupeByLineAndLevel,
+  findDeleteWithoutWhere,
   runShadowDryRun,
   runPostApplyCheck,
   decide,
@@ -26,61 +33,7 @@ const {
   POST_APPLY_QUERIES,
   EXPECTED_A2A_TABLES,
   main,
-} = preflight as {
-  analyze: (sql: string) => Array<{
-    line: number;
-    level: 'HIGH' | 'MEDIUM' | 'INFO';
-    op: string;
-    snippet: string;
-  }>;
-  hasHighRisk: (findings: ReturnType<typeof analyze>) => boolean;
-  stripComments: (sql: string) => string;
-  stripStringLiterals: (sql: string) => string;
-  splitStatements: (sql: string) => Array<{ line: number; text: string }>;
-  buildDryRunPayload: (sql: string) => string;
-  runShadowDryRun: (
-    sql: string,
-    opts?: {
-      shadowUrl?: string;
-      // biome-ignore lint/suspicious/noExplicitAny: test mock injection
-      spawn?: any;
-      nowMs?: () => number;
-    },
-  ) => {
-    skipped: boolean;
-    reason?: string;
-    ok?: boolean;
-    ms?: number;
-    error?: string;
-  };
-  runPostApplyCheck: (opts?: {
-    databaseUrl?: string;
-    // biome-ignore lint/suspicious/noExplicitAny: test mock injection
-    spawn?: any;
-    minA2aTables?: number;
-    expectedA2aTables?: string[];
-  }) => { ok: boolean; errors: string[]; details: string[] };
-  decide: (
-    findings: ReturnType<typeof analyze>,
-    dryRun: ReturnType<typeof runShadowDryRun>,
-    opts?: { slowMs?: number },
-  ) => { pass: boolean; exitCode: number; summary: string };
-  formatFindings: (findings: ReturnType<typeof analyze>) => string;
-  POST_APPLY_QUERIES: { a2aTables: string; invalidFks: string; a2aIndexes: string };
-  EXPECTED_A2A_TABLES: string[];
-  main: (deps: {
-    argv: string[];
-    readFile?: (p: string) => string;
-    exit?: (c: number) => void;
-    log?: (m: string) => void;
-    warn?: (m: string) => void;
-    error?: (m: string) => void;
-    // biome-ignore lint/suspicious/noExplicitAny: test mock injection
-    shadowDryRun?: any;
-    // biome-ignore lint/suspicious/noExplicitAny: test mock injection
-    postApply?: any;
-  }) => void;
-};
+} from '../scripts/migrate-preflight.mjs';
 
 // ───────────────────────────────────────────────────────────────────────────
 // Static analysis (AC-1, AC-6)
@@ -387,10 +340,11 @@ describe('runPostApplyCheck() — AC-4', () => {
     const mockSpawn = () => {
       call++;
       if (call === 1) {
-        // a2a_* tables — provide both expected baseline tables (BLQ-MED-2).
+        // a2a_* tables — provide every expected baseline table (BLQ-MED-2,
+        // WKH-86 AC-1: a2a_events is now part of the manifest).
         return {
           status: 0,
-          stdout: 'a2a_agent_keys\na2a_protocol_fees\n',
+          stdout: 'a2a_agent_keys\na2a_events\na2a_protocol_fees\n',
           stderr: '',
         };
       }
@@ -1039,5 +993,432 @@ describe('runPostApplyCheck() — BLQ-MED-2 baseline manifest', () => {
     });
     expect(r.ok).toBe(true);
     expect(r.errors.length).toBe(0);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// WKH-86 AC-1 — `a2a_events` is part of the EXPECTED_A2A_TABLES manifest.
+// T-MPF-EVENTS
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('EXPECTED_A2A_TABLES — WKH-86 AC-1 (T-MPF-EVENTS)', () => {
+  it('includes a2a_events as a baseline manifest entry', () => {
+    expect(EXPECTED_A2A_TABLES).toContain('a2a_events');
+  });
+
+  it('fails post-apply when a2a_events is missing from the live DB', () => {
+    let call = 0;
+    const mockSpawn = () => {
+      call++;
+      if (call === 1) {
+        // Missing a2a_events — only the other two baseline tables exist.
+        return {
+          status: 0,
+          stdout: 'a2a_agent_keys\na2a_protocol_fees\n',
+          stderr: '',
+        };
+      }
+      if (call === 2) return { status: 0, stdout: '', stderr: '' };
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    const r = runPostApplyCheck({
+      databaseUrl: 'postgres://example/db',
+      spawn: mockSpawn,
+      // Use the default EXPECTED_A2A_TABLES (which now includes a2a_events).
+    });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.includes('a2a_events'))).toBe(true);
+    expect(r.errors.some((e) => e.includes('Missing expected'))).toBe(true);
+  });
+
+  it('passes post-apply when a2a_events is present in the live DB', () => {
+    let call = 0;
+    const mockSpawn = () => {
+      call++;
+      if (call === 1) {
+        return {
+          status: 0,
+          stdout: 'a2a_agent_keys\na2a_events\na2a_protocol_fees\n',
+          stderr: '',
+        };
+      }
+      if (call === 2) return { status: 0, stdout: '', stderr: '' };
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    const r = runPostApplyCheck({
+      databaseUrl: 'postgres://example/db',
+      spawn: mockSpawn,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.errors.length).toBe(0);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// WKH-86 AC-2 — DROP TRIGGER/FUNCTION IF EXISTS no longer flagged HIGH.
+// T-MPF-DROP-IF-EXISTS
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('analyze() — WKH-86 AC-2 idempotent DROPs (T-MPF-DROP-IF-EXISTS)', () => {
+  // CD-FP1: positives + negatives.
+
+  // (negatives — IF EXISTS variants must NOT be HIGH)
+  it('does NOT flag DROP TRIGGER IF EXISTS as HIGH', () => {
+    const findings = analyze('DROP TRIGGER IF EXISTS set_updated_at ON tasks;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(false);
+  });
+
+  it('does NOT flag DROP FUNCTION IF EXISTS as HIGH', () => {
+    const findings = analyze(
+      'DROP FUNCTION IF EXISTS increment_a2a_key_spend(uuid, integer, numeric);',
+    );
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(false);
+  });
+
+  it('does NOT flag DROP TRIGGER IF EXISTS in mixed-case', () => {
+    const findings = analyze('Drop Trigger If Exists my_trig ON foo;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(false);
+  });
+
+  it('does NOT flag DROP FUNCTION IF EXISTS with extra whitespace', () => {
+    const findings = analyze('DROP   FUNCTION   IF   EXISTS  my_fn();');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(false);
+  });
+
+  // (positives — bare DROP without IF EXISTS still HIGH; CD-WKH78-FP3)
+  it('still flags bare DROP TRIGGER as HIGH', () => {
+    const findings = analyze('DROP TRIGGER set_updated_at ON tasks;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+
+  it('still flags bare DROP FUNCTION as HIGH', () => {
+    const findings = analyze('DROP FUNCTION my_fn();');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+
+  // (CD-WKH86-4: DROP TABLE IF EXISTS must remain HIGH)
+  it('still flags DROP TABLE IF EXISTS as HIGH (CD-WKH86-4)', () => {
+    const findings = analyze('DROP TABLE IF EXISTS legacy_users;');
+    expect(findings.some((f) => f.op === 'DROP TABLE' && f.level === 'HIGH')).toBe(true);
+  });
+
+  // (other DROP <object> kinds keep HIGH even with IF EXISTS — only TRIGGER
+  // and FUNCTION were carved out per AC-2 wording.)
+  it('still flags DROP SCHEMA IF EXISTS as HIGH', () => {
+    const findings = analyze('DROP SCHEMA IF EXISTS old_schema CASCADE;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+
+  it('still flags DROP POLICY IF EXISTS as HIGH', () => {
+    const findings = analyze('DROP POLICY IF EXISTS tenant_isolation ON tasks;');
+    expect(findings.some((f) => f.op === 'DROP <object>' && f.level === 'HIGH')).toBe(true);
+  });
+});
+
+describe('isIdempotentDropTriggerOrFunction()', () => {
+  it('returns true for DROP TRIGGER IF EXISTS', () => {
+    expect(isIdempotentDropTriggerOrFunction('DROP TRIGGER IF EXISTS t ON x;')).toBe(true);
+  });
+  it('returns true for DROP FUNCTION IF EXISTS', () => {
+    expect(isIdempotentDropTriggerOrFunction('DROP FUNCTION IF EXISTS f();')).toBe(true);
+  });
+  it('returns false for bare DROP TRIGGER', () => {
+    expect(isIdempotentDropTriggerOrFunction('DROP TRIGGER t ON x;')).toBe(false);
+  });
+  it('returns false for DROP TABLE IF EXISTS', () => {
+    expect(isIdempotentDropTriggerOrFunction('DROP TABLE IF EXISTS x;')).toBe(false);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// WKH-86 AC-3 — findDeleteWithoutWhere skips string literals.
+// T-MPF-STRING-LITERAL
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('findDeleteWithoutWhere() — WKH-86 AC-3 (T-MPF-STRING-LITERAL)', () => {
+  it('does NOT flag DELETE FROM inside a single-quoted string literal', () => {
+    const sql = "INSERT INTO audit_log (note) VALUES ('user ran DELETE FROM old_table');";
+    expect(findDeleteWithoutWhere(sql).length).toBe(0);
+  });
+
+  it('does NOT flag DELETE FROM inside a $$ … $$ dollar-quoted body', () => {
+    const sql =
+      "CREATE FUNCTION nuke() RETURNS void AS $$ BEGIN EXECUTE 'DELETE FROM legacy'; END; $$ LANGUAGE plpgsql;";
+    expect(findDeleteWithoutWhere(sql).length).toBe(0);
+  });
+
+  it('still flags a real DELETE FROM without WHERE outside any string', () => {
+    const hits = findDeleteWithoutWhere('DELETE FROM events;');
+    expect(hits.length).toBe(1);
+  });
+
+  it('still flags multiple real DELETE FROM statements without WHERE', () => {
+    const sql = "DELETE FROM events;\nINSERT INTO foo VALUES ('DELETE FROM x');\nDELETE FROM logs;";
+    const hits = findDeleteWithoutWhere(sql);
+    expect(hits.length).toBe(2);
+  });
+
+  // analyze() is the public surface — it must agree with the helper.
+  it('analyze() does NOT flag DELETE FROM in string literal as HIGH', () => {
+    const findings = analyze(
+      "INSERT INTO audit_log (note) VALUES ('user ran DELETE FROM old_table');",
+    );
+    expect(findings.some((f) => f.op === 'DELETE without WHERE')).toBe(false);
+  });
+
+  it('analyze() still flags real DELETE FROM as HIGH', () => {
+    const findings = analyze('DELETE FROM events;');
+    expect(findings.some((f) => f.op === 'DELETE without WHERE' && f.level === 'HIGH')).toBe(true);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// WKH-86 AC-4 — findings deduplicated by (line, level).
+// T-MPF-DEDUP / CD-WKH86-2
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('analyze() — WKH-86 AC-4 dedup by (line, level) (T-MPF-DEDUP)', () => {
+  it('emits a single HIGH finding for ALTER TABLE … DROP COLUMN (no duplicate ALTER TABLE … DROP)', () => {
+    const sql = 'ALTER TABLE accounts DROP COLUMN legacy_field;';
+    const findings = analyze(sql);
+    const highSameLine = findings.filter((f) => f.line === 1 && f.level === 'HIGH');
+    expect(highSameLine.length).toBe(1);
+  });
+
+  it('preserves DIFFERENT severities on the same line', () => {
+    // DROP INDEX CONCURRENTLY triggers HIGH (DROP INDEX) + INFO
+    // (CONCURRENTLY/VACUUM cannot dry-run). Different severities → both
+    // findings preserved.
+    const findings = analyze('DROP INDEX CONCURRENTLY idx_a;');
+    const sameLine = findings.filter((f) => f.line === 1);
+    const levels = new Set(sameLine.map((f) => f.level));
+    expect(levels.has('HIGH')).toBe(true);
+    expect(levels.has('INFO')).toBe(true);
+  });
+
+  it('preserves order across distinct lines', () => {
+    const sql = 'DROP TABLE a;\nDROP TABLE b;\nDROP TABLE c;';
+    const findings = analyze(sql);
+    const lines = findings.filter((f) => f.op === 'DROP TABLE').map((f) => f.line);
+    expect(lines).toEqual([1, 2, 3]);
+  });
+});
+
+describe('dedupeByLineAndLevel()', () => {
+  it('removes duplicates with the same (line, level)', () => {
+    const out = dedupeByLineAndLevel([
+      { line: 5, level: 'HIGH', op: 'DROP TABLE', snippet: 'a' },
+      { line: 5, level: 'HIGH', op: 'ALTER TABLE … DROP', snippet: 'a' },
+      { line: 7, level: 'HIGH', op: 'TRUNCATE', snippet: 'b' },
+    ]);
+    expect(out.length).toBe(2);
+    expect(out[0].op).toBe('DROP TABLE'); // first wins
+    expect(out[1].line).toBe(7);
+  });
+
+  it('keeps findings with the same line but different level', () => {
+    const out = dedupeByLineAndLevel([
+      { line: 5, level: 'HIGH', op: 'DROP INDEX', snippet: 'a' },
+      { line: 5, level: 'INFO', op: 'CONCURRENTLY/VACUUM (cannot dry-run)', snippet: 'a' },
+    ]);
+    expect(out.length).toBe(2);
+  });
+
+  it('returns empty array on empty input', () => {
+    expect(dedupeByLineAndLevel([])).toEqual([]);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// WKH-86 AC-5 — runPostApplyCheck failures fail the gate (exit 1).
+// T-MPF-POSTCHECK-FAIL / CD-WKH86-3
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('main() --post-apply — WKH-86 AC-5 (T-MPF-POSTCHECK-FAIL)', () => {
+  it('exits 1 when a baseline a2a_* table is missing', () => {
+    let exitCode = -1;
+    const logs: string[] = [];
+    main({
+      argv: ['node', 'migrate-preflight.mjs', '--post-apply'],
+      exit: (c) => {
+        exitCode = c;
+      },
+      log: (m) => logs.push(m),
+      warn: (m) => logs.push(m),
+      error: (m) => logs.push(m),
+      postApply: () => ({
+        ok: false,
+        errors: ['Missing expected a2a_* table(s): a2a_events'],
+        details: [],
+      }),
+    });
+    expect(exitCode).toBe(1);
+    expect(logs.join('\n')).toContain('[FAIL]');
+    expect(logs.join('\n')).toContain('a2a_events');
+  });
+
+  it('exits 1 when an FK constraint is INVALID', () => {
+    let exitCode = -1;
+    main({
+      argv: ['node', 'migrate-preflight.mjs', '--post-apply'],
+      exit: (c) => {
+        exitCode = c;
+      },
+      log: () => {},
+      warn: () => {},
+      error: () => {},
+      postApply: () => ({
+        ok: false,
+        errors: ['Found 1 INVALID foreign key constraint(s): tasks_owner_fk|public.tasks'],
+        details: [],
+      }),
+    });
+    expect(exitCode).toBe(1);
+  });
+
+  it('exits 1 when a sub-query (psql) fails', () => {
+    let exitCode = -1;
+    main({
+      argv: ['node', 'migrate-preflight.mjs', '--post-apply'],
+      exit: (c) => {
+        exitCode = c;
+      },
+      log: () => {},
+      warn: () => {},
+      error: () => {},
+      postApply: () => ({
+        ok: false,
+        errors: ['index query failed: connection refused'],
+        details: [],
+      }),
+    });
+    expect(exitCode).toBe(1);
+  });
+
+  it('exits 0 only when ok=true (no errors anywhere)', () => {
+    let exitCode = -1;
+    main({
+      argv: ['node', 'migrate-preflight.mjs', '--post-apply'],
+      exit: (c) => {
+        exitCode = c;
+      },
+      log: () => {},
+      warn: () => {},
+      error: () => {},
+      postApply: () => ({
+        ok: true,
+        errors: [],
+        details: ['a2a_* tables: 3 found', 'FK constraints: all VALID'],
+      }),
+    });
+    expect(exitCode).toBe(0);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// WKH-86 AC-6 — psql connection URL never appears in argv.
+// T-MPF-PSQL-NO-LEAK / CD-WKH86-1
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('buildPsqlConnectionEnv() — WKH-86 AC-6 (T-MPF-PSQL-NO-LEAK)', () => {
+  it('parses a URL with password into args + PGPASSWORD env', () => {
+    const out = buildPsqlConnectionEnv('postgres://alice:s3cr3t@db.example.com:5433/mydb');
+    expect(out.args).toEqual(['-h', 'db.example.com', '-p', '5433', '-U', 'alice', '-d', 'mydb']);
+    expect(out.env.PGPASSWORD).toBe('s3cr3t');
+    // Critical: the password must NOT appear anywhere in args.
+    expect(out.args.some((a) => a.includes('s3cr3t'))).toBe(false);
+    expect(out.args.join(' ')).not.toContain('s3cr3t');
+  });
+
+  it('URL-decodes a percent-encoded password', () => {
+    const out = buildPsqlConnectionEnv('postgres://alice:p%40ss%21@host/db');
+    expect(out.env.PGPASSWORD).toBe('p@ss!');
+    expect(out.args.join(' ')).not.toContain('p%40ss');
+    expect(out.args.join(' ')).not.toContain('p@ss');
+  });
+
+  it('passes URL verbatim and adds NO PGPASSWORD when there is no password', () => {
+    const out = buildPsqlConnectionEnv('postgres://alice@host/db');
+    expect(out.args).toEqual(['postgres://alice@host/db']);
+    expect(out.env.PGPASSWORD).toBeUndefined();
+  });
+
+  it('handles an unparseable URL by passing it verbatim (no crash, no leak path)', () => {
+    const out = buildPsqlConnectionEnv('not-a-url');
+    expect(out.args).toEqual(['not-a-url']);
+    expect(out.env.PGPASSWORD).toBeUndefined();
+  });
+
+  it('handles a URL with no port (omits -p flag)', () => {
+    const out = buildPsqlConnectionEnv('postgres://alice:secret@host/db');
+    expect(out.args).toContain('-h');
+    expect(out.args).toContain('host');
+    expect(out.args).not.toContain('-p');
+    expect(out.env.PGPASSWORD).toBe('secret');
+  });
+});
+
+describe('runShadowDryRun() — WKH-86 AC-6 (T-MPF-PSQL-NO-LEAK)', () => {
+  it('passes password via PGPASSWORD env, never via argv', () => {
+    let captured: { args?: string[]; env?: Record<string, string> } = {};
+    const mockSpawn = (
+      _cmd: string,
+      args: string[],
+      opts: { env?: Record<string, string> },
+    ) => {
+      captured = { args, env: opts.env };
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    runShadowDryRun('SELECT 1;', {
+      shadowUrl: 'postgres://shadow:topsecret@shadow.example.com:5432/sdb',
+      spawn: mockSpawn,
+    });
+    // password must NOT be in argv anywhere
+    expect(captured.args?.join(' ')).not.toContain('topsecret');
+    // password must be in env via PGPASSWORD
+    expect(captured.env?.PGPASSWORD).toBe('topsecret');
+  });
+
+  it('still passes shadow URL verbatim when there is no password (no behavior regression)', () => {
+    let captured: { args?: string[]; env?: Record<string, string> } = {};
+    const mockSpawn = (
+      _cmd: string,
+      args: string[],
+      opts: { env?: Record<string, string> },
+    ) => {
+      captured = { args, env: opts.env };
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    runShadowDryRun('SELECT 1;', {
+      shadowUrl: 'postgres://shadow.example.com/sdb',
+      spawn: mockSpawn,
+    });
+    expect(captured.args?.[0]).toBe('postgres://shadow.example.com/sdb');
+    expect(captured.env?.PGPASSWORD).toBeUndefined();
+  });
+});
+
+describe('runPostApplyCheck() — WKH-86 AC-6 (T-MPF-PSQL-NO-LEAK)', () => {
+  it('passes DATABASE_URL password via PGPASSWORD env for every sub-query', () => {
+    /** @type {Array<{ args: string[]; env: Record<string,string> }>} */
+    const calls: Array<{ args: string[]; env?: Record<string, string> }> = [];
+    const mockSpawn = (
+      _cmd: string,
+      args: string[],
+      opts: { env?: Record<string, string> },
+    ) => {
+      calls.push({ args, env: opts.env });
+      return { status: 0, stdout: 'a2a_agent_keys\na2a_events\na2a_protocol_fees\n', stderr: '' };
+    };
+    runPostApplyCheck({
+      databaseUrl: 'postgres://prod:hunter2@db.prod.com:5432/proddb',
+      spawn: mockSpawn,
+    });
+    // All three sub-queries must keep the password out of argv.
+    expect(calls.length).toBe(3);
+    for (const c of calls) {
+      expect(c.args.join(' ')).not.toContain('hunter2');
+      expect(c.env?.PGPASSWORD).toBe('hunter2');
+    }
   });
 });
