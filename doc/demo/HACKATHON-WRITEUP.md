@@ -84,17 +84,23 @@ Captured live on 2026-05-04 against the Parallel x402 service — see `wire-evid
 
 After one passkey-approved 24h session, our `scripts/smoke-passport-autonomous.mjs` runs unattended in CI / cron — captures pre/post balance, executes against any x402 target, verifies onchain settlement, exits with structured JSON. Suitable for monitoring.
 
-### 4. Constructive feedback for Kite
+### 4. Catalog discovery & dialogue with Kite team
 
-During smoke testing, we discovered:
-- ksearch service catalog is centrally controlled (10 services in dev + prod, identical allowlists)
-- 6/10 services use a `tempo` payment_approach distinct from `x402`
+During smoke testing we discovered ksearch is **intentionally curated** — 10 services in dev + prod with identical allowlists, no self-service registration. We engaged the Kite team directly via Discord (public Q + 2 DMs).
 
-We've filed a public Discord question + 2 DMs to the Kite team requesting:
-- A self-service service registration flow (would unlock the long-tail of partners)
-- Public Tempo protocol docs (or clarification on x402 vs Tempo positioning)
+**Kite team confirmed officially (2026-05-06):**
 
-This is the kind of feedback Kite Passport needs at scale. Our submission documents this transparently as part of the hackathon deliverable.
+> "No self-service flow right now as they're keeping a close eye on catalog quality. That said, we're expanding ksearch and it's something we could look into down the line!"
+
+We respect that decision — **catalog quality is a thoughtful tradeoff**, not a gap. Curation is what makes Passport-funded execution safe by default.
+
+What we'd love to see as ksearch expands:
+
+- **Vetted-builder tier**: a registration path for hackathon graduates / verified builders to onboard their own services without compromising catalog quality
+- **Staging/testnet endpoint with broader access**: lets builders close their E2E loop pre-production
+- **Public Tempo docs**: 6/10 services in the catalog use a `tempo` payment_approach distinct from `x402` — clarifying whether Tempo is required vs optional would help builders pick the right rail
+
+We're a natural candidate for the expansion when it lands — `wasiai-a2a-production.up.railway.app` is shipped, hardened (816 tests, AR/CR pipelines), and ready to be reviewed.
 
 ---
 
@@ -113,9 +119,9 @@ This is the kind of feedback Kite Passport needs at scale. Our submission docume
 
 ## What's next
 
-- **Pending Kite team coordination**: registration of `wasiai-a2a-production.up.railway.app` in ksearch for full Passport-funded smoke against our gateway
+- **ksearch expansion follow-up**: stay in touch with Kite team — when ksearch opens to verified builders, `wasiai-a2a-production.up.railway.app` is ready for review. Until then, our smoke runner exercises Passport against catalog services (Parallel et al.), which is sufficient proof of integration.
 - **Production-100 backlog**: RLS hardening, rollback drill, on-call alerting, pricing decision (5 tickets remaining)
-- **Tempo adapter** (conditional): if Kite confirms `tempo` is required for ecosystem, we'll add a parallel adapter (~3-5 days)
+- **Tempo adapter** (conditional): if Kite confirms `tempo` is required for ecosystem coverage, we'll add a parallel adapter (~3-5 days)
 
 ---
 
@@ -146,4 +152,4 @@ scripts/smoke-passport-autonomous.mjs                    # CI-ready E2E runner
 **Builder**: Fernando Rosas (ferrosasfp@gmail.com)
 **Discord**: see Encode Club Kite hackathon channel
 
-We welcome collaboration with Kite team on ksearch registration + Tempo protocol clarification.
+Open to collaborate with the Kite team when ksearch expands to verified builders — and on Tempo protocol clarification along the way.

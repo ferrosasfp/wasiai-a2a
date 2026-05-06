@@ -174,29 +174,38 @@ Single agent.                N-agent fan-out.
 
 ---
 
-## Slide 9 — Constructive feedback for Kite
+## Slide 9 — Catalog dialogue with Kite team
 
 ```
-DURING SMOKE TESTING WE DISCOVERED:
+WE ENGAGED THE KITE TEAM DIRECTLY DURING THE BUILD:
 
-🚨 ksearch service catalog is centrally controlled
-   → 10 services allowlisted (Anthropic, Firecrawl, Nansen, etc.)
-   → dev + prod environments share IDENTICAL list
-   → no public self-service registration form
+🔎 Discovery (smoke testing):
+   → ksearch catalog has 10 allowlisted services
+   → dev + prod share identical list
+   → no public self-service registration
 
-🆕 Two payment_approach values in production:
-   → 6/10 services use "tempo" (Kite-internal protocol)
-   → 4/10 services use "x402" (open standard, our impl)
+💬 Filed: Discord public Q + 2 DMs
 
-OUR ASK:
-   1. Self-service ksearch registration would unlock long-tail partners
-   2. Public Tempo protocol docs (or clarification vs x402)
+✅ Kite team confirmed (2026-05-06):
+   "no self-service flow right now as they're keeping
+    a close eye on catalog quality. That said, we're
+    expanding ksearch and it's something we could look
+    into down the line!"
 
-Filed: Discord question + 2 DMs to Kite team
+OUR TAKE:
+   ➡️ Curation = quality. Respected design choice.
+   ➡️ As ksearch expands, we're a natural candidate:
+      hardened, tested, deployed.
+
+CONSTRUCTIVE PROPOSALS (for the expansion phase):
+   1. Vetted-builder tier (verified, hackathon graduates)
+   2. Staging endpoint with broader access for E2E loops
+   3. Public Tempo protocol docs
+      (6/10 services use 'tempo', distinct from x402)
 ```
 
 **Speaker (60s)**:
-> "Honest finding from smoke testing — important for the hackathon community. Kite Passport's ksearch service catalog has only 10 allowlisted services, identical in dev and prod, no public self-service registration. Also, 6 of those 10 use a 'tempo' payment_approach that isn't publicly documented — distinct from x402. We filed a public question and DM'd the Kite team. **Our ask is constructive**: a self-service flow would unlock the partner ecosystem at scale. We're documenting this transparently because Kite needs that feedback to grow."
+> "We engaged the Kite team directly while building. Discovered ksearch is curated — 10 services, no self-service. Filed a public Q on Discord plus DMs. The team responded officially: curation is intentional, for catalog quality, and they're expanding ksearch over time. **We respect that completely** — curation is what makes Passport-funded execution safe by default. Our service is hardened and ready for the expansion phase. As constructive input: a vetted-builder tier and public Tempo docs would help builders like us close the loop end-to-end."
 
 ---
 
@@ -280,10 +289,11 @@ LIVE IN PRODUCTION (verified runtime):
 ## Slide 13 — What's next
 
 ```
-IMMEDIATE (Kite team coordination):
-  □ ksearch registration of wasiai-a2a-production
-  □ Tempo adapter decision (if required)
-  → Unblocks: Passport-funded smoke against our gateway
+WHEN KSEARCH EXPANDS (per Kite team):
+  □ Submit wasiai-a2a-production for vetted listing
+  □ Tempo adapter (if required for ecosystem coverage)
+  → Until then: smoke runs Passport against catalog services
+                (Parallel et al.) — sufficient proof of integration
 
 PRODUCTION-100 ROADMAP:
   □ RLS hardening (Postgres-level row security)
@@ -295,7 +305,7 @@ PRODUCTION-100 ROADMAP:
 ```
 
 **Speaker (15s)**:
-> "What's left is mostly operations, not coding. We're production-100 on the engineering side."
+> "What's left is mostly operations, not coding. We're production-100 on the engineering side, and ready when ksearch opens up."
 
 ---
 
@@ -312,7 +322,7 @@ native Kite Passport multi-tenant funding.
   ✅ $0.061 mainnet + $0.01 Passport — onchain proof
   ✅ Cross-chain transparent (Kite → Base, captured live)
   ✅ Autonomous CI-ready smoke runner
-  ✅ Constructive Kite Passport feedback
+  ✅ Direct dialogue with Kite team on ksearch expansion
 
 Repo: github.com/ferrosasfp/wasiai-a2a
 Live: wasiai-a2a-production.up.railway.app
@@ -332,7 +342,8 @@ Thank you.
 | "Why Model B Hybrid not pure Passport?" | Outbound cross-chain to Avalanche needs operator key. Passport doesn't address multi-party fan-out yet. |
 | "How does Passport handle Kite→Base bridge?" | Passport's relayer infrastructure. Captured live in our wire evidence — chain_id 8453 returned despite our wallet on Kite mainnet 2366. |
 | "What if Kite says 'use Tempo not x402'?" | We'd add a parallel Tempo adapter (~3-5 days). Won't drop x402 — it's the open standard. |
-| "Does the Passport flow work today against your gateway?" | Architecturally yes, runtime gated by ksearch registration. We have onchain evidence Passport works against allowed services + 16 tests proving our verifier accepts the shape. |
+| "Does the Passport flow work today against your gateway?" | Architecturally yes, runtime gated by ksearch curation (Kite team confirmed catalog is intentionally curated, expanding over time). We have onchain evidence Passport works against allowed services + 16 tests proving our verifier accepts the Passport shape. We're queued for the expansion. |
+| "What did Kite say when you asked about ksearch?" | They confirmed curation is by design — catalog quality. They said ksearch is expanding "down the line". We respect that — we're hardened and ready when it opens. |
 | "Why 20 PRs in 6 days isn't tech debt?" | Each went through 8-phase pipeline with adversarial review. 6 of 20 had zero blockers. AR found 16+ real bugs. |
 | "What's the moat?" | Multi-marketplace consumer pattern (wasiai-v2, others) + Model B Hybrid + production discipline. Code is open source — moat is execution velocity + ecosystem position. |
 

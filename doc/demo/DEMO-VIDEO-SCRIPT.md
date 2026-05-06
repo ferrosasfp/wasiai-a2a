@@ -151,23 +151,18 @@ Then cut to terminal: `npm test 2>&1 | tail -3` showing `Tests 816 passed (816)`
 
 ---
 
-### SCENE 8 — Constructive feedback (2:35–2:50) | 15 seconds
+### SCENE 8 — Catalog dialogue with Kite team (2:35–2:50) | 15 seconds
 
 **Visual**:
-Show terminal:
-```bash
-ksearch services list
-```
+Split screen:
+- Left: terminal showing `ksearch services list` → highlighted output `10 service(s).`
+- Right: Discord screenshot with the **Kite team's official reply**, key sentence underlined:
+  > "no self-service flow right now as they're keeping a close eye on catalog quality... we're expanding ksearch."
 
-Output highlighted:
-```
-10 service(s).
-```
-
-Then cut to Discord — show the public question we filed.
+Lower-third overlay text: **"Curation = quality. Built ready for the expansion."**
 
 **Voiceover**:
-> "Honest finding: ksearch only allowlists 10 services, no public self-service. We filed a constructive ask: open the registration flow. This is feedback Kite needs at scale."
+> "ksearch is intentionally curated — Kite team confirmed it directly. We respect that. Catalog quality matters. Our service is hardened and ready when ksearch expands to verified builders."
 
 ---
 
@@ -213,7 +208,7 @@ Hold for 5 seconds. Fade.
 - **Practice the kpass execute timing**: it takes ~5-10 seconds. Don't rush voiceover during dead time — let the terminal output speak.
 - **Pre-script the smoke output**: if the live execute fails (network, allowlist, etc.), have a backup pre-recorded clip ready.
 - **Highlight chain IDs visually**: viewers won't catch "2366 vs 8453" by ear. Use circles/arrows in post.
-- **Don't apologize for ksearch finding**: frame it as professional feedback — judges will respect that more than hiding the gap.
+- **Frame the ksearch story as a dialogue, not a complaint**: Kite team confirmed curation is intentional. The narrative is "we engaged, they confirmed, we respect it, we're ready for expansion" — judges respect engineering maturity more than "we found a gap".
 - **Music**: subtle electronic/synth track (royalty-free), volume -25dB so voiceover dominates.
 
 ---
