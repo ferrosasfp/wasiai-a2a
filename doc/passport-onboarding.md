@@ -69,6 +69,15 @@ kpass agent:session create \
   --output json
 ```
 
+> **Heads-up — known Kite docs bug (verified 2026-05)**
+>
+> Do **NOT** add `--payment-approach x402_http` (as some Kite CLI examples
+> show). The supported value is `x402` (without `_http` suffix). Omitting
+> the flag entirely also works and is what we recommend — Passport defaults
+> to `["x402"]` for `allowed_payment_approaches`. Reported upstream; track
+> against https://docs.gokite.ai/kite-agent-passport/cli-reference for
+> resolution.
+
 Response includes `approval_url` (passkey-gated). Open in browser, approve via
 passkey. Then poll:
 
