@@ -2,7 +2,7 @@
 
 **Project**: WasiAI A2A Protocol
 **Tracks**: Kite Passport Integration + Cross-Chain Agent Payments
-**Submission date**: 2026-05-04
+**Submission date**: 2026-05-12 (updated)
 **Repo**: https://github.com/ferrosasfp/wasiai-a2a
 **Production**: https://wasiai-a2a-production.up.railway.app
 
@@ -56,7 +56,9 @@ WasiAI A2A solves all three.
 | **Kite Passport integration (Model B Hybrid)** | ✅ Live | PR #76 merged, 16 dedicated tests passing |
 | **Real Passport onchain payment** | ✅ Captured | $0.01 USDC via Passport→Parallel service, chain 8453 (PR #78 wire evidence) |
 | **Autonomous E2E smoke runner** | ✅ Live | `scripts/smoke-passport-autonomous.mjs` — no human at runtime (PR #79) |
-| **Production-grade quality** | ✅ Live | 816 tests passing, AR/CR pipelines, sub-agent orchestration |
+| **Operational sovereignty** (marketplace routed through own facilitator) | ✅ Live | WAS-V2-2 PR #6 merged 2026-05-11, tx `0xf94d4005` mainnet user-initiated through wasiai-facilitator |
+| **Multi-chain facilitator hardening** (DOMAIN_SEPARATOR boot check + CORS + fail-mode) | ✅ Live | WFAC-53 PR #35 merged 2026-05-11, 4 chains validated post-deploy |
+| **Production-grade quality** | ✅ Live | 1,660+ tests across 3 services, AR/CR pipelines, sub-agent orchestration |
 
 ---
 
@@ -84,7 +86,29 @@ Captured live on 2026-05-04 against the Parallel x402 service — see `wire-evid
 
 After one passkey-approved 24h session, our `scripts/smoke-passport-autonomous.mjs` runs unattended in CI / cron — captures pre/post balance, executes against any x402 target, verifies onchain settlement, exits with structured JSON. Suitable for monitoring.
 
-### 4. Catalog discovery & dialogue with Kite team
+### 4. Operational sovereignty proof (the strongest "wow")
+
+The marketplace backend now routes user-initiated agent payments through **our own facilitator** (`wasiai-facilitator` on Railway, operator wallet `0xf432baf1...`) instead of a third-party. The same flow, same client wallet, same recipient agent — different facilitator. Both transactions are public on Avalanche mainnet:
+
+```
+BEFORE (2026-05-11, pre-WAS-V2-2 flip):
+  Tx: 0x5fbf570b... — signer: 0x46140a86... (Ultravioleta DAO facilitator)
+  https://snowtrace.io/tx/0x5fbf570bbc64d477586bb7aeaa71d5e6a1b4f6c540419172ec5b43f2e77733f2
+
+AFTER (same day, post-WAS-V2-2 flip):
+  Tx: 0xf94d4005... — signer: 0xf432baf1... (our wasiai-facilitator)
+  https://snowtrace.io/tx/0xf94d4005e66b65ec6e34aa72b8b88966332f47859bb2038fb3f3d19ca04f614e
+
+Diff: PR #6 merged + WASIAI_FACILITATOR_AS_PRIMARY=true env flip.
+```
+
+The router includes idempotency guard (NONCE_ALREADY_USED → no fallback, prevents double-charge), fresh-AbortSignal per attempt, and automatic fallback to Ultravioleta DAO if our facilitator fails. Documented in `wasiai-v2/doc/sdd/073-wfac-53-post-review-hardening/` and `wasiai-v2/doc/sdd/wasiai-facilitator-primary/`.
+
+### 5. Facilitator hardened across 4 chains
+
+WFAC-53 (PR #35 wasiai-facilitator) shipped boot-time DOMAIN_SEPARATOR check for all 4 supported chains (Kite testnet 2368, Kite mainnet 2366 opt-in, Avalanche Fuji 43113, Avalanche mainnet 43114). Prevents silent EIP-712 signature breakage if a token contract upgrades. Plus CORS production-tightening (env-aware whitelist) and opt-in fail-closed mode for the daily settle cap. Post-merge smoke validated on Fuji (`0x93149974...`), Kite testnet (`0xb861b69b...`), and Avalanche mainnet (`/verify` HTTP 200, settle skipped to preserve funds).
+
+### 6. Catalog discovery & dialogue with Kite team
 
 During smoke testing we discovered ksearch is **intentionally curated** — 10 services in dev + prod with identical allowlists, no self-service registration. We engaged the Kite team directly via Discord (public Q + 2 DMs).
 
@@ -111,9 +135,10 @@ We're a natural candidate for the expansion when it lands — `wasiai-a2a-produc
 | Cross-chain | ✅ Kite + Base + Avalanche | ❌ Single chain |
 | Multi-tenant | ✅ Each user funds via Passport | ❌ One operator wallet |
 | LLM orchestration | ✅ Claude picks agents from goal | ❌ Hardcoded routes |
-| Production quality | ✅ 816 tests, sub-agent CR pipeline | ❌ Demo-grade |
-| Real onchain evidence | ✅ $0.061 mainnet + $0.01 Passport | ⚠️ Often testnet-only |
+| Production quality | ✅ 1,660+ tests across 3 services, sub-agent CR pipeline | ❌ Demo-grade |
+| Real onchain evidence | ✅ $0.061 mainnet (sprint) + $0.01 Passport + marketplace user tx via own facilitator | ⚠️ Often testnet-only |
 | Autonomous smoke | ✅ One bootstrap, 24h headless | ❌ Manual every time |
+| Operational sovereignty | ✅ Own facilitator infra (4 chains hardened with boot-time domain separator check) | ❌ Always third-party |
 
 ---
 

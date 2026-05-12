@@ -134,24 +134,60 @@ DEMO 2 — Passport→x402 onchain (2026-05-04)
 
 ---
 
+## Slide 6.5 — Live evidence: operational sovereignty (the strongest proof)
+
+```
+DEMO 3 — Same flow, same client wallet, different facilitator (2026-05-11)
+
+  BEFORE WAS-V2-2 flip (third-party Ultravioleta DAO):
+    Tx:     0x5fbf570b...
+    Signer: 0x46140a86... (Ultravioleta DAO operator)
+    https://snowtrace.io/tx/0x5fbf570bbc64d477586bb7aeaa71d5e6a1b4f6c540419172ec5b43f2e77733f2
+
+  AFTER WAS-V2-2 flip (our own infrastructure):
+    Tx:     0xf94d4005...
+    Signer: 0xf432baf1... (our wasiai-facilitator on Railway)
+    https://snowtrace.io/tx/0xf94d4005e66b65ec6e34aa72b8b88966332f47859bb2038fb3f3d19ca04f614e
+
+  Diff between the two:
+    1 PR merged (WAS-V2-2 PR #6) + 1 env var flipped
+    Same Avalanche mainnet (43114). Same demo client. Same agent.
+    Different facilitator = different gas payer = different operator wallet.
+```
+
+**Speaker (40s)**:
+> "Real onchain evidence #3 — same day, after we shipped WAS-V2-2 to production. Two transactions on Avalanche mainnet. Same flow, same user, same agent. Different facilitator. The only difference is one PR merged plus one environment variable flip. Before: gas paid by Ultravioleta DAO. After: gas paid by **our own facilitator wallet**. This is what operational sovereignty looks like — verifiable on snowtrace.io. We don't just consume x402 infrastructure, we operate it."
+
+---
+
 ## Slide 7 — Hackathon shipping velocity
 
 ```
-20 PRs MERGED IN 6 DAYS (2026-04-28 → 2026-05-04)
+24+ PRs MERGED ACROSS 3 REPOS (2026-04-28 → 2026-05-12)
 
-PR #59: 🔴 Mainnet hybrid mode activated
-PR #60-#64: MCP server for Claude Console + production hardening
-PR #65-#75: 5-HU sprint (cron rotation, docs, migration preflight)
-PR #76: 🎯 KITE PASSPORT HYBRID (the hackathon proof)
-PR #78: 🎯 SMOKE EVIDENCE (real onchain $0.01 captured)
-PR #79: 🎯 AUTONOMOUS RUNNER (CI-ready)
+wasiai-a2a:
+  PR #59: 🔴 Mainnet hybrid mode activated
+  PR #60-#75: MCP server + sprint hardening + 5-HU production sprint
+  PR #76: 🎯 KITE PASSPORT HYBRID (hackathon proof)
+  PR #78: 🎯 SMOKE EVIDENCE (real onchain $0.01 captured)
+  PR #79: 🎯 AUTONOMOUS RUNNER (CI-ready)
+  PR #77: Passport CLI docs warning
 
-816 tests passing. Zero regressions.
-6 of 20 PRs found ZERO blockers in Adversarial Review.
+wasiai-v2 (marketplace):
+  PR #6:  🎯 WAS-V2-2 router primary=wasiai-facilitator (mainnet live)
+
+wasiai-facilitator:
+  PR #34: Kite mainnet + Avalanche mainnet adapters
+  PR #35: 🎯 WFAC-53 multi-chain hardening (DOMAIN_SEPARATOR + CORS + fail-mode)
+  PR #10, #1, #2: Dependabot actions bumps merged
+
+1,660+ tests across 3 services. Zero regressions.
+2 PRs shipped TODAY (2026-05-11) via NexusAgil AUTO QUALITY pipeline:
+  marketplace router migration + facilitator hardening, both onchain-validated.
 ```
 
 **Speaker (30s)**:
-> "We didn't just ship code. We shipped through a structured 8-phase pipeline — analyst, architect, dev, adversary, QA, docs — all sub-agent orchestrated. 20 PRs in 6 days, 816 tests passing, ZERO blockers in 6 of those PRs. This is production-grade quality on hackathon timeline."
+> "We didn't just ship code — we shipped through a structured 8-phase pipeline (analyst → architect → dev → adversary → QA → docs), all sub-agent orchestrated. 24+ PRs across 3 repos, 1,660+ tests across the stack. Two production-grade PRs in a single day yesterday via NexusAgil AUTO QUALITY pipeline. This is production discipline on hackathon timeline."
 
 ---
 
@@ -315,12 +351,14 @@ PRODUCTION-100 ROADMAP:
 WASIAI A2A
 
 The first cross-chain agent payment protocol with
-native Kite Passport multi-tenant funding.
+native Kite Passport + operational sovereignty.
 
-  ✅ 20 PRs shipped in 6 days
-  ✅ 816 tests, 0 BLQs in 6 PRs
-  ✅ $0.061 mainnet + $0.01 Passport — onchain proof
+  ✅ 24+ PRs shipped across 3 repos
+  ✅ 1,660+ tests across the stack — production-grade
+  ✅ $0.061 mainnet + $0.01 Passport + marketplace user tx — onchain proof
   ✅ Cross-chain transparent (Kite → Base, captured live)
+  ✅ Operational sovereignty: same flow, own facilitator (verifiable diff)
+  ✅ 4 chains hardened: boot-time domain separator + CORS + fail-mode
   ✅ Autonomous CI-ready smoke runner
   ✅ Direct dialogue with Kite team on ksearch expansion
 
@@ -331,7 +369,7 @@ Thank you.
 ```
 
 **Speaker (15s)**:
-> "WasiAI A2A. Production-grade cross-chain agent payment with native Kite Passport. Code, tests, onchain proof, live deployments — all verifiable in the repo. Thank you."
+> "WasiAI A2A. Production-grade cross-chain agent payment with native Kite Passport, operational sovereignty over our own facilitator infrastructure, and four chains hardened at the protocol layer. Code, tests, onchain proof, live deployments — all verifiable in the repo. Thank you."
 
 ---
 
@@ -344,8 +382,9 @@ Thank you.
 | "What if Kite says 'use Tempo not x402'?" | We'd add a parallel Tempo adapter (~3-5 days). Won't drop x402 — it's the open standard. |
 | "Does the Passport flow work today against your gateway?" | Architecturally yes, runtime gated by ksearch curation (Kite team confirmed catalog is intentionally curated, expanding over time). We have onchain evidence Passport works against allowed services + 16 tests proving our verifier accepts the Passport shape. We're queued for the expansion. |
 | "What did Kite say when you asked about ksearch?" | They confirmed curation is by design — catalog quality. They said ksearch is expanding "down the line". We respect that — we're hardened and ready when it opens. |
-| "Why 20 PRs in 6 days isn't tech debt?" | Each went through 8-phase pipeline with adversarial review. 6 of 20 had zero blockers. AR found 16+ real bugs. |
-| "What's the moat?" | Multi-marketplace consumer pattern (wasiai-v2, others) + Model B Hybrid + production discipline. Code is open source — moat is execution velocity + ecosystem position. |
+| "Why 24+ PRs in 2 weeks isn't tech debt?" | Each went through 8-phase NexusAgil pipeline with adversarial review. AR found 16+ real bugs caught pre-merge. AUTO QUALITY pipeline ran 2 production-grade PRs in a single day yesterday. |
+| "What's the moat?" | Multi-marketplace consumer pattern (wasiai-v2, others) + Model B Hybrid + operational sovereignty (own facilitator on 4 chains) + production discipline. Code is open source — moat is execution velocity + ecosystem position + infra control. |
+| "What's operational sovereignty?" | The marketplace settles user payments through our own facilitator (`wasiai-facilitator` on Railway) instead of a third-party. Tx `0x5fbf570b` (pre-flip, via Ultravioleta DAO) vs tx `0xf94d4005` (post-flip, our infra) on snowtrace.io — same flow, different gas payer, verifiable by anyone. |
 
 ---
 

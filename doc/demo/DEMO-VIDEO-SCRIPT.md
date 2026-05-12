@@ -19,8 +19,10 @@
 - [ ] Verify wallet balance ≥ $0.20 USDC: `kpass wallet balance`
 - [ ] Open browser tabs in advance:
   - GitHub repo (https://github.com/ferrosasfp/wasiai-a2a)
-  - Snowtrace tx page (one of the mainnet hybrid txs from HACKATHON-FINAL.md)
-  - Discord #alerts channel (to show real alert)
+  - Snowtrace tx — **pre-flip** (Ultravioleta DAO): https://snowtrace.io/tx/0x5fbf570bbc64d477586bb7aeaa71d5e6a1b4f6c540419172ec5b43f2e77733f2
+  - Snowtrace tx — **post-flip** (wasiai-facilitator): https://snowtrace.io/tx/0xf94d4005e66b65ec6e34aa72b8b88966332f47859bb2038fb3f3d19ca04f614e
+  - Wire evidence Passport tx: HACKATHON-FINAL.md or wire-evidence/parallel-200-evidence.json
+  - Discord #alerts channel (to show real alert if relevant)
 - [ ] Open VS Code with these files visible:
   - `src/middleware/passport.ts`
   - `doc/sdd/084-wkh-69-passport-hybrid-inbound/smoke-test-findings.md`
@@ -115,7 +117,7 @@ Then the JSON output with `"status": "success"`.
 
 ---
 
-### SCENE 6 — The wow: cross-chain transparency (1:50–2:15) | 25 seconds
+### SCENE 6 — The wow: cross-chain transparency (1:50–2:10) | 20 seconds
 
 **Visual**:
 Highlight in the JSON output:
@@ -135,19 +137,47 @@ Then show side-by-side:
 Add overlay text: **"Cross-chain transparent: Kite → Base"**
 
 **Voiceover**:
-> "**This is the wow.** Our wallet is on Kite mainnet, chain 2366. The service got paid on Base mainnet, chain 8453. Passport handled the bridge silently. The user never saw it. The wallet just shows minus one cent. **This is what cross-chain UX should feel like.**"
+> "**Wow #1.** Our wallet is on Kite mainnet, chain 2366. The service got paid on Base mainnet, chain 8453. Passport handled the bridge silently. The user never saw it. The wallet just shows minus one cent."
 
 ---
 
-### SCENE 7 — Production-grade discipline (2:15–2:35) | 20 seconds
+### SCENE 6.5 — The bigger wow: operational sovereignty (2:10–2:35) | 25 seconds
 
 **Visual**:
-Cut to GitHub PRs page (filtered to merged PRs in main). Show the list of 20 PRs from PR #59 to PR #79 in date order. Highlight the WKH-69 PR (#76).
+Split screen showing 2 Snowtrace pages side-by-side:
 
-Then cut to terminal: `npm test 2>&1 | tail -3` showing `Tests 816 passed (816)`.
+```
+LEFT (older tab):                          RIGHT (newer tab):
+https://snowtrace.io/tx/0x5fbf570b...       https://snowtrace.io/tx/0xf94d4005...
+
+  Signer (gas paid by):                       Signer (gas paid by):
+  0x46140a86c01d930d2eaa9be7b4833d            0xf432baf1315ccDB23E683B95b03fD54
+  42b72c5f9b                                  Dd3e447Ba
+  ↓                                           ↓
+  Ultravioleta DAO operator                   OUR wasiai-facilitator operator
+```
+
+Lower-third overlay text: **"Same flow. Same wallet. Different facilitator. = Operational sovereignty."**
 
 **Voiceover**:
-> "Behind this: 20 PRs in 6 days. Every one through an 8-phase pipeline with sub-agent orchestration — analyst, architect, dev, adversary, QA, docs. Six PRs found zero blockers in adversarial review. 816 tests passing. Production discipline on hackathon timeline."
+> "**Wow #2 — the strongest one.** These are two real mainnet transactions on Avalanche. Same flow, same user wallet, same agent. The difference: who paid the gas. Left — Ultravioleta DAO facilitator, third-party. Right — OUR own wasiai-facilitator, operator wallet `0xf432baf1`. The diff between them is one PR merged plus one environment variable flip. **This is operational sovereignty achieved on production rails, verifiable on snowtrace right now.**"
+
+---
+
+### SCENE 7 — Production-grade discipline (2:35–2:50) | 15 seconds
+
+**Visual**:
+Cut to GitHub PRs page across 3 repos. Show recent merges:
+- wasiai-v2 PR #6 (WAS-V2-2)
+- wasiai-facilitator PR #35 (WFAC-53)
+- wasiai-a2a PR #76 (WKH-69 Passport)
+
+Then cut to terminal: `npm test 2>&1 | tail -3` on each of 3 repos showing test counts.
+
+Overlay: **"1,660+ tests across 3 services. 2 PRs shipped TODAY via NexusAgil AUTO QUALITY."**
+
+**Voiceover**:
+> "Behind this: 24+ PRs across 3 repos, 1,660+ tests across the stack. Two production-grade PRs shipped just today via AUTO QUALITY pipeline — analyst, architect, dev, adversary, QA, docs, all sub-agent orchestrated. Production discipline at hackathon speed."
 
 ---
 
@@ -187,7 +217,7 @@ Hold for 5 seconds. Fade.
 
 ---
 
-## Total breakdown
+## Total breakdown (updated with new scene 6.5)
 
 | Scene | Duration | Cumulative |
 |-------|----------|------------|
@@ -196,10 +226,13 @@ Hold for 5 seconds. Fade.
 | 3 — Architecture | 0:25 | 1:00 |
 | 4 — Pre-balance | 0:20 | 1:20 |
 | 5 — Execute | 0:30 | 1:50 |
-| 6 — Cross-chain wow | 0:25 | 2:15 |
-| 7 — Discipline | 0:20 | 2:35 |
-| 8 — Feedback | 0:15 | 2:50 |
-| 9 — Closing | 0:10 | 3:00 |
+| 6 — Cross-chain wow | 0:20 | 2:10 |
+| **6.5 — Operational sovereignty (NEW)** | **0:25** | **2:35** |
+| 7 — Discipline | 0:15 | 2:50 |
+| 8 — Feedback | 0:10 | 3:00 |
+| 9 — Closing | 0:00 (merged into 8 if needed) | 3:00 |
+
+**Note**: The script grew from 3:00 to 3:00 — same total runtime, but Scene 6.5 (the stronger wow) was added. Scenes 7-8-9 tightened. If you prefer 9 distinct scenes, expand total to 3:15.
 
 ---
 
@@ -208,6 +241,7 @@ Hold for 5 seconds. Fade.
 - **Practice the kpass execute timing**: it takes ~5-10 seconds. Don't rush voiceover during dead time — let the terminal output speak.
 - **Pre-script the smoke output**: if the live execute fails (network, allowlist, etc.), have a backup pre-recorded clip ready.
 - **Highlight chain IDs visually**: viewers won't catch "2366 vs 8453" by ear. Use circles/arrows in post.
+- **For Scene 6.5 (sovereignty)**: circle the `From` field in both Snowtrace pages. Use a thin line connecting tx hash to operator wallet on each. Color the Ultravioleta operator (`0x46140a86`) red, ours (`0xf432baf1`) green. The visual diff is the entire pitch in 5 seconds.
 - **Frame the ksearch story as a dialogue, not a complaint**: Kite team confirmed curation is intentional. The narrative is "we engaged, they confirmed, we respect it, we're ready for expansion" — judges respect engineering maturity more than "we found a gap".
 - **Music**: subtle electronic/synth track (royalty-free), volume -25dB so voiceover dominates.
 
