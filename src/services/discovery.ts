@@ -57,6 +57,9 @@ const ALLOWED_CHAIN_VALUES = new Set([
   'avalanche', // canonical (post-normalization)
   'avalanche-testnet', // wasiai-v2 valor cuando chain_id=43113
   'avalanche-mainnet', // wasiai-v2 valor cuando chain_id=43114
+  // WKH-AGENTSHOP-1: Kite Ozone for WasiAgentShop / Kite hackathon agents
+  'kite-ozone-testnet',
+  'kite-mainnet',
 ]);
 
 function readPayment(
@@ -91,9 +94,9 @@ function readPayment(
     return undefined;
   }
 
-  // Normalize chain: "avalanche-testnet" / "avalanche-mainnet" → "avalanche"
-  // (downstream guard expects canonical name; el discriminator de testnet vs
-  // mainnet vive a nivel de WASIAI_DOWNSTREAM_NETWORK).
+  // Normalize chain: collapse avalanche testnet/mainnet → 'avalanche' (downstream
+  // guard expects canonical). Kite slugs pass through unchanged so consumers can
+  // distinguish kite-ozone-testnet from kite-mainnet (different stablecoins).
   const chain =
     chainRaw === 'avalanche-testnet' || chainRaw === 'avalanche-mainnet'
       ? 'avalanche'

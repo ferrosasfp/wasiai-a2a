@@ -275,12 +275,11 @@ describe('discoveryService', () => {
       expect(result.agents[0].payment?.method).toBe('x402');
     });
 
-    it('returns payment: undefined for a Kite-paid agent (chain="kite-ozone-testnet" outside discovery allowlist)', async () => {
-      // Kite agents publish chain="kite-ozone-testnet". Discovery's allowlist (SEC-AR
-      // BLQ-MED-1) only accepts avalanche variants — Kite payment metadata is NOT
-      // exposed via /discover. This is by design: discovery's allowlist defends the
-      // downstream-payment guard, NOT the inbound /compose path (which uses the
-      // separate middleware chain resolver). Confirms the Kite path didn't regress.
+    it('exposes payment for a Kite-paid agent (chain="kite-ozone-testnet" in discovery allowlist after WKH-AGENTSHOP-1)', async () => {
+      // Post WKH-AGENTSHOP-1: Kite slugs added to ALLOWED_CHAIN_VALUES so the
+      // WasiAgentShop Kite hackathon agents (lendable-*, agentshop-*) can publish
+      // their payment metadata via /discover. Kite chain passes through unchanged
+      // (no avalanche-style collapse) so consumers can distinguish testnet/mainnet.
       setupRegistryResponse([
         makeRawAgent({
           id: 'a-kite',
@@ -298,10 +297,10 @@ describe('discoveryService', () => {
       const result = await discoveryService.discover({});
 
       expect(result.agents).toHaveLength(1);
-      // Kite chain not in discovery's allowlist → payment dropped (defense-in-depth).
-      // The agent itself is still returned; only payment metadata is filtered.
       expect(result.agents[0].slug).toBe('kite-pay-agent');
-      expect(result.agents[0].payment).toBeUndefined();
+      expect(result.agents[0].payment?.chain).toBe('kite-ozone-testnet');
+      expect(result.agents[0].payment?.asset).toBe('PYUSD');
+      expect(result.agents[0].payment?.method).toBe('x402');
     });
 
     it('returns payment: undefined for an agent without payment metadata in /discover output', async () => {
