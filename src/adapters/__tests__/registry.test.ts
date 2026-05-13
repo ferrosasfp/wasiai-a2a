@@ -15,18 +15,28 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock the kite-ozone factory to avoid real client init.
 // Shape matches the new AdaptersBundle interface.
+// W5: accepts `opts?: { network?: 'testnet' | 'mainnet' }` to mirror the real
+// factory signature. When `network === 'mainnet'`, returns the Kite mainnet
+// bundle (chainId 2366) so the registry dispatch test can verify wiring.
 vi.mock('../kite-ozone/index.js', () => ({
-  createKiteOzoneAdapters: vi.fn().mockResolvedValue({
-    payment: { name: 'kite-ozone', chainId: 2368 },
-    attestation: { name: 'kite-ozone', chainId: 2368 },
-    gasless: { name: 'kite-ozone', chainId: 2368 },
-    identity: null,
-    chainConfig: {
-      name: 'KiteAI Testnet',
-      chainId: 2368,
-      explorerUrl: 'https://testnet.kitescan.ai',
+  createKiteOzoneAdapters: vi.fn(
+    async (opts?: { network?: 'testnet' | 'mainnet' }) => {
+      const network = opts?.network ?? 'testnet';
+      const chainId = network === 'mainnet' ? 2366 : 2368;
+      const name = network === 'mainnet' ? 'KiteAI Mainnet' : 'KiteAI Testnet';
+      const explorerUrl =
+        network === 'mainnet'
+          ? 'https://kitescan.ai'
+          : 'https://testnet.kitescan.ai';
+      return {
+        payment: { name: 'kite-ozone', chainId },
+        attestation: { name: 'kite-ozone', chainId },
+        gasless: { name: 'kite-ozone', chainId },
+        identity: null,
+        chainConfig: { name, chainId, explorerUrl },
+      };
     },
-  }),
+  ),
 }));
 
 // Mock the avalanche factory — returns a fuji or mainnet bundle stub depending
@@ -299,6 +309,92 @@ describe('adapter registry', () => {
       const adapter = getPaymentAdapter('avalanche-fuji');
       expect(adapter.name).toBe('avalanche');
       expect(adapter.chainId).toBe(43113);
+    });
+  });
+
+  // ─── W5: mainnet wiring (kite-mainnet + avalanche-mainnet) ───
+  describe('W5 — mainnet wiring (kite-mainnet + avalanche-mainnet)', () => {
+    it('WASIAI_A2A_CHAINS=kite-mainnet → initialized with chainId 2366', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'kite-mainnet';
+      await initAdapters();
+
+      expect(getInitializedChainKeys()).toEqual(['kite-mainnet']);
+      expect(getDefaultChainKey()).toBe('kite-mainnet');
+
+      const config = getChainConfig();
+      expect(config).toEqual({
+        name: 'KiteAI Mainnet',
+        chainId: 2366,
+        explorerUrl: 'https://kitescan.ai',
+      });
+    });
+
+    it('CSV kite-mainnet,avalanche-mainnet → both bundles present, default = kite-mainnet', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'kite-mainnet,avalanche-mainnet';
+      await initAdapters();
+
+      expect(getInitializedChainKeys()).toEqual([
+        'kite-mainnet',
+        'avalanche-mainnet',
+      ]);
+      expect(getDefaultChainKey()).toBe('kite-mainnet');
+
+      const kite = getAdaptersBundle('kite-mainnet');
+      expect(kite?.chainConfig.chainId).toBe(2366);
+      expect(kite?.chainConfig.name).toBe('KiteAI Mainnet');
+
+      const avax = getAdaptersBundle('avalanche-mainnet');
+      expect(avax?.chainConfig.chainId).toBe(43114);
+      expect(avax?.chainConfig.name).toBe('Avalanche');
+    });
+
+    it('logs the canonical multi-chain init message with mainnet slugs', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      process.env.WASIAI_A2A_CHAINS = 'kite-mainnet,avalanche-mainnet';
+      await initAdapters();
+
+      expect(logSpy).toHaveBeenCalledWith(
+        '[Registry] Adapters initialized: kite-mainnet, avalanche-mainnet',
+      );
+    });
+
+    it('getPaymentAdapter("kite-mainnet") returns chainId 2366', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'kite-mainnet';
+      await initAdapters();
+
+      const adapter = getPaymentAdapter('kite-mainnet');
+      expect(adapter.name).toBe('kite-ozone');
+      expect(adapter.chainId).toBe(2366);
+    });
+
+    it('registry passes opts.network=mainnet to createKiteOzoneAdapters factory', async () => {
+      const factoryModule = await import('../kite-ozone/index.js');
+      const factorySpy = factoryModule.createKiteOzoneAdapters as ReturnType<
+        typeof vi.fn
+      >;
+      factorySpy.mockClear();
+
+      process.env.WASIAI_A2A_CHAINS = 'kite-mainnet';
+      await initAdapters();
+
+      expect(factorySpy).toHaveBeenCalledTimes(1);
+      expect(factorySpy).toHaveBeenCalledWith({ network: 'mainnet' });
+    });
+
+    it('registry calls createKiteOzoneAdapters without opts for legacy testnet (CD-2)', async () => {
+      const factoryModule = await import('../kite-ozone/index.js');
+      const factorySpy = factoryModule.createKiteOzoneAdapters as ReturnType<
+        typeof vi.fn
+      >;
+      factorySpy.mockClear();
+
+      process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet';
+      await initAdapters();
+
+      expect(factorySpy).toHaveBeenCalledTimes(1);
+      // The legacy testnet path MUST invoke the factory with no arguments,
+      // preserving the pre-W5 byte-identical contract.
+      expect(factorySpy).toHaveBeenCalledWith();
     });
   });
 });

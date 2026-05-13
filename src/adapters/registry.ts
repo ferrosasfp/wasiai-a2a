@@ -49,6 +49,20 @@ async function buildBundle(chainKey: ChainKey): Promise<AdaptersBundle> {
       chainConfig: adapters.chainConfig,
     };
   }
+  if (chainKey === 'kite-mainnet') {
+    // W5 wiring — `createKiteOzoneAdapters({ network: 'mainnet' })` activates
+    // the Kite mainnet path via DT-I (temporary `process.env.KITE_NETWORK`
+    // mutation inside the factory, restored in `finally`). See TD-NEW-KITE-PARAMS.
+    const { createKiteOzoneAdapters } = await import('./kite-ozone/index.js');
+    const adapters = await createKiteOzoneAdapters({ network: 'mainnet' });
+    return {
+      payment: adapters.payment,
+      attestation: adapters.attestation,
+      gasless: adapters.gasless,
+      identity: adapters.identity,
+      chainConfig: adapters.chainConfig,
+    };
+  }
   if (chainKey === 'avalanche-fuji') {
     const { createAvalancheAdapters } = await import('./avalanche/index.js');
     return createAvalancheAdapters({ network: 'fuji' });
@@ -57,7 +71,6 @@ async function buildBundle(chainKey: ChainKey): Promise<AdaptersBundle> {
     const { createAvalancheAdapters } = await import('./avalanche/index.js');
     return createAvalancheAdapters({ network: 'mainnet' });
   }
-  // kite-mainnet is wired in W5.
   throw new Error(
     `Unsupported chain '${chainKey}'. Supported: ${SUPPORTED_CHAINS.join(', ')}`,
   );
