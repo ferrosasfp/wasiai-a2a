@@ -29,6 +29,29 @@ vi.mock('../kite-ozone/index.js', () => ({
   }),
 }));
 
+// Mock the avalanche factory — returns a fuji or mainnet bundle stub depending
+// on `opts.network`. Real adapters covered by avalanche.test.ts.
+vi.mock('../avalanche/index.js', () => ({
+  createAvalancheAdapters: vi.fn(
+    async (opts?: { network?: 'fuji' | 'mainnet' }) => {
+      const network = opts?.network ?? 'fuji';
+      const chainId = network === 'mainnet' ? 43114 : 43113;
+      const name = network === 'mainnet' ? 'Avalanche' : 'Avalanche Fuji';
+      const explorerUrl =
+        network === 'mainnet'
+          ? 'https://snowtrace.io'
+          : 'https://testnet.snowtrace.io';
+      return {
+        payment: { name: 'avalanche', chainId },
+        attestation: { name: 'avalanche', chainId },
+        gasless: { name: 'avalanche', chainId },
+        identity: null,
+        chainConfig: { name, chainId, explorerUrl },
+      };
+    },
+  ),
+}));
+
 import {
   _resetRegistry,
   getAdaptersBundle,
@@ -221,6 +244,61 @@ describe('adapter registry', () => {
 
     it('getDefaultChainKey() returns null before init', () => {
       expect(getDefaultChainKey()).toBeNull();
+    });
+  });
+
+  // ─── W1: avalanche-fuji factory wiring ───
+  describe('W1 — avalanche-fuji factory dispatch', () => {
+    it('WASIAI_A2A_CHAINS=avalanche-fuji → initialized with chainId 43113', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'avalanche-fuji';
+      await initAdapters();
+
+      expect(getInitializedChainKeys()).toEqual(['avalanche-fuji']);
+      expect(getDefaultChainKey()).toBe('avalanche-fuji');
+
+      const config = getChainConfig();
+      expect(config).toEqual({
+        name: 'Avalanche Fuji',
+        chainId: 43113,
+        explorerUrl: 'https://testnet.snowtrace.io',
+      });
+    });
+
+    it('CSV kite-ozone-testnet,avalanche-fuji → both bundles present, default = first', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet,avalanche-fuji';
+      await initAdapters();
+
+      expect(getInitializedChainKeys()).toEqual([
+        'kite-ozone-testnet',
+        'avalanche-fuji',
+      ]);
+      expect(getDefaultChainKey()).toBe('kite-ozone-testnet');
+
+      const kite = getAdaptersBundle('kite-ozone-testnet');
+      expect(kite?.chainConfig.chainId).toBe(2368);
+
+      const fuji = getAdaptersBundle('avalanche-fuji');
+      expect(fuji?.chainConfig.chainId).toBe(43113);
+      expect(fuji?.chainConfig.name).toBe('Avalanche Fuji');
+    });
+
+    it('logs the canonical multi-chain init message with both slugs', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet,avalanche-fuji';
+      await initAdapters();
+
+      expect(logSpy).toHaveBeenCalledWith(
+        '[Registry] Adapters initialized: kite-ozone-testnet, avalanche-fuji',
+      );
+    });
+
+    it('getPaymentAdapter("avalanche-fuji") returns the avalanche payment adapter', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet,avalanche-fuji';
+      await initAdapters();
+
+      const adapter = getPaymentAdapter('avalanche-fuji');
+      expect(adapter.name).toBe('avalanche');
+      expect(adapter.chainId).toBe(43113);
     });
   });
 });

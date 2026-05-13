@@ -49,7 +49,15 @@ async function buildBundle(chainKey: ChainKey): Promise<AdaptersBundle> {
       chainConfig: adapters.chainConfig,
     };
   }
-  // kite-mainnet, avalanche-fuji, avalanche-mainnet are wired in later waves.
+  if (chainKey === 'avalanche-fuji') {
+    const { createAvalancheAdapters } = await import('./avalanche/index.js');
+    return createAvalancheAdapters({ network: 'fuji' });
+  }
+  if (chainKey === 'avalanche-mainnet') {
+    const { createAvalancheAdapters } = await import('./avalanche/index.js');
+    return createAvalancheAdapters({ network: 'mainnet' });
+  }
+  // kite-mainnet is wired in W5.
   throw new Error(
     `Unsupported chain '${chainKey}'. Supported: ${SUPPORTED_CHAINS.join(', ')}`,
   );
