@@ -760,6 +760,50 @@ describe('requirePaymentOrA2AKey middleware', () => {
       await appLog.close();
     });
 
+    // ── AC-9 / CD-5: single debit per request (no double-debit) ─
+
+    it('AC-9 / CD-5: single HTTP request → single debit call (no double-debit)', async () => {
+      // Architectural guarantee: the middleware is a Fastify preHandler hook
+      // that runs ONCE per HTTP request. A /compose request with multiple
+      // pipeline steps still triggers a single debit at the gateway boundary
+      // (steps are fan-out from the same request). This test pins that
+      // contract: even with overrides + multi-chain init, exactly ONE
+      // budgetService.debit call is observable per request.
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockDebit.mockResolvedValue({ success: true });
+      mockGetBalance.mockResolvedValue('9.000000');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: {
+          'x-a2a-key': TEST_KEY,
+          'x-payment-chain': 'avalanche-fuji',
+        },
+        // Simulate a compose-like body with multiple steps — middleware MUST
+        // ignore steps[] and debit once at the gateway. CD-7: middleware does
+        // not read request.body for chain decisions.
+        payload: {
+          steps: [
+            { agent: 'agent-a' },
+            { agent: 'agent-b' },
+            { agent: 'agent-c' },
+          ],
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      // CD-5: never two chains debited for the same request.
+      expect(mockDebit).toHaveBeenCalledTimes(1);
+      // Debit happened on the target chain only (43113), never on default 2368.
+      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 1.0);
+      expect(mockDebit).not.toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        2368,
+        expect.anything(),
+      );
+    });
+
     // ── AC-8 cross-chain: budget on chain X, request on chain Y ─
 
     it('AC-8: debit fails on target chain → 403 with chain <chainId> balance message', async () => {
