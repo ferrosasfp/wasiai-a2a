@@ -36,6 +36,89 @@ vi.mock('../services/budget.js', () => ({
   },
 }));
 
+// WKH-MULTICHAIN W2: registry mock exposes multi-chain Map + new getters.
+// `getAdaptersBundle(chainKey)` returns a per-chain bundle with chainConfig +
+// payment.supportedTokens, so the middleware can resolve the right chainId
+// and asset_symbol for structured logs (CD-7).
+type MockChainKey =
+  | 'kite-ozone-testnet'
+  | 'avalanche-fuji'
+  | 'avalanche-mainnet';
+
+type MockBundle = {
+  chainConfig: { name: string; chainId: number; explorerUrl: string };
+  payment: {
+    supportedTokens: ReadonlyArray<{
+      symbol: string;
+      address: `0x${string}`;
+      decimals: number;
+    }>;
+  };
+};
+
+const MOCK_BUNDLES: Record<MockChainKey, MockBundle> = {
+  'kite-ozone-testnet': {
+    chainConfig: {
+      name: 'eip155:2368',
+      chainId: 2368,
+      explorerUrl: 'https://explorer.test',
+    },
+    payment: {
+      supportedTokens: [
+        {
+          symbol: 'PYUSD',
+          address: '0x1111111111111111111111111111111111111111',
+          decimals: 6,
+        },
+      ],
+    },
+  },
+  'avalanche-fuji': {
+    chainConfig: {
+      name: 'eip155:43113',
+      chainId: 43113,
+      explorerUrl: 'https://testnet.snowtrace.io',
+    },
+    payment: {
+      supportedTokens: [
+        {
+          symbol: 'USDC',
+          address: '0x2222222222222222222222222222222222222222',
+          decimals: 6,
+        },
+      ],
+    },
+  },
+  'avalanche-mainnet': {
+    chainConfig: {
+      name: 'eip155:43114',
+      chainId: 43114,
+      explorerUrl: 'https://snowtrace.io',
+    },
+    payment: {
+      supportedTokens: [
+        {
+          symbol: 'USDC',
+          address: '0x3333333333333333333333333333333333333333',
+          decimals: 6,
+        },
+      ],
+    },
+  },
+};
+
+// Mutable test state — controlled per-test via `setMockRegistryState`.
+let mockInitializedChains: MockChainKey[] = ['kite-ozone-testnet'];
+let mockDefaultChain: MockChainKey | null = 'kite-ozone-testnet';
+
+function setMockRegistryState(
+  initialized: MockChainKey[],
+  defaultChain: MockChainKey | null = initialized[0] ?? null,
+): void {
+  mockInitializedChains = [...initialized];
+  mockDefaultChain = defaultChain;
+}
+
 vi.mock('../adapters/registry.js', () => ({
   getPaymentAdapter: vi.fn(() => ({
     name: 'mock',
@@ -65,6 +148,14 @@ vi.mock('../adapters/registry.js', () => ({
   getIdentityBindingAdapter: vi.fn(),
   initAdapters: vi.fn(),
   _resetRegistry: vi.fn(),
+  getAdaptersBundle: vi.fn((chainKey?: MockChainKey) => {
+    const key = chainKey ?? mockDefaultChain;
+    if (!key) return undefined;
+    if (!mockInitializedChains.includes(key)) return undefined;
+    return MOCK_BUNDLES[key];
+  }),
+  getInitializedChainKeys: vi.fn(() => [...mockInitializedChains]),
+  getDefaultChainKey: vi.fn(() => mockDefaultChain),
 }));
 
 import { budgetService } from '../services/budget.js';
@@ -140,6 +231,8 @@ describe('requirePaymentOrA2AKey middleware', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Reset registry mock to default single-chain state (CD-2 byte-identical).
+    setMockRegistryState(['kite-ozone-testnet'], 'kite-ozone-testnet');
   });
 
   // ── AC-1: Happy path ──────────────────────────────────────
@@ -268,6 +361,8 @@ describe('requirePaymentOrA2AKey middleware', () => {
       success: false,
       error: 'Insufficient budget',
     });
+    // AC-8 (W2): error path enriches message with target chainId + balance.
+    mockGetBalance.mockResolvedValue('0');
 
     const response = await app.inject({
       method: 'POST',
@@ -278,6 +373,8 @@ describe('requirePaymentOrA2AKey middleware', () => {
 
     expect(response.statusCode).toBe(403);
     expect(response.json().error_code).toBe('INSUFFICIENT_BUDGET');
+    // AC-8: message includes the target chainId.
+    expect(response.json().error).toBe('chain 2368 balance is 0');
   });
 
   it('REGRESSION-WKH-61: key with allowed_registries no longer 403s at middleware level', async () => {
@@ -434,6 +531,8 @@ describe('requirePaymentOrA2AKey middleware', () => {
       success: false,
       error: 'Budget debit failed',
     });
+    // AC-8 (W2): error path enriches message with target chainId + balance.
+    mockGetBalance.mockResolvedValue('0');
 
     const response = await app.inject({
       method: 'POST',
@@ -444,7 +543,10 @@ describe('requirePaymentOrA2AKey middleware', () => {
 
     expect(response.statusCode).toBe(403);
     expect(response.json().error_code).toBe('INSUFFICIENT_BUDGET');
-    expect(response.json().error).toContain('Budget debit failed');
+    // WKH-MULTICHAIN W2: message now includes target chainId (AC-8) instead of
+    // the raw PG error. The error is logged via request.log.warn but does not
+    // leak to the client.
+    expect(response.json().error).toBe('chain 2368 balance is 0');
   });
 
   // ── BLQ-3: lookupByHash throws → 503 ───────────────────────
@@ -478,6 +580,265 @@ describe('requirePaymentOrA2AKey middleware', () => {
 
     expect(response.statusCode).toBe(503);
     expect(response.json().error).toBe('SERVICE_ERROR');
+  });
+
+  // ── WKH-MULTICHAIN W2: chain resolver per-request ─────────────
+
+  describe('WKH-MULTICHAIN W2 — chain resolver per-request', () => {
+    beforeEach(() => {
+      // Multi-chain init: kite-ozone-testnet (default) + avalanche-fuji.
+      setMockRegistryState(
+        ['kite-ozone-testnet', 'avalanche-fuji'],
+        'kite-ozone-testnet',
+      );
+    });
+
+    // ── AC-4: header slug routes debit to target chain ─────────
+
+    it('AC-4: x-payment-chain: avalanche-fuji → debit on chainId 43113', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockDebit.mockResolvedValue({ success: true });
+      mockGetBalance.mockResolvedValue('5.000000');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: {
+          'x-a2a-key': TEST_KEY,
+          'x-payment-chain': 'avalanche-fuji',
+        },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 1.0);
+      expect(mockDebit).toHaveBeenCalledTimes(1);
+    });
+
+    // ── AC-4-bis: numeric chainId in header is normalised ───────
+
+    it('AC-4-bis: x-payment-chain: 43113 (numeric) → debit on chainId 43113', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockDebit.mockResolvedValue({ success: true });
+      mockGetBalance.mockResolvedValue('5.000000');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { 'x-a2a-key': TEST_KEY, 'x-payment-chain': '43113' },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 1.0);
+    });
+
+    // ── AC-5/AC-6: no header → registry default ────────────────
+
+    it('AC-5/AC-6: no x-payment-chain header → debit on default chain (kite-ozone-testnet)', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockDebit.mockResolvedValue({ success: true });
+      mockGetBalance.mockResolvedValue('9.000000');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { 'x-a2a-key': TEST_KEY },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(200);
+      // Default chain = kite-ozone-testnet → chainId 2368.
+      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    });
+
+    // ── AC-7: unrecognised slug → 400 CHAIN_NOT_SUPPORTED ──────
+
+    it('AC-7: x-payment-chain: ethereum-mainnet (unknown) → 400 CHAIN_NOT_SUPPORTED', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: {
+          'x-a2a-key': TEST_KEY,
+          'x-payment-chain': 'ethereum-mainnet',
+        },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error_code).toBe('CHAIN_NOT_SUPPORTED');
+      expect(response.json().error).toContain(
+        "is not a recognized slug or chainId",
+      );
+      // CD-5: no debit attempted when chain resolution fails.
+      expect(mockDebit).not.toHaveBeenCalled();
+    });
+
+    // ── AC-7-bis: recognised but not initialised → 400 with list ─
+
+    it('AC-7-bis: x-payment-chain: avalanche-mainnet but registry init only fuji → 400 with Initialized list (DT-C)', async () => {
+      // Override: only fuji + testnet initialised; avalanche-mainnet recognised
+      // by the resolver but missing from the Map.
+      setMockRegistryState(
+        ['kite-ozone-testnet', 'avalanche-fuji'],
+        'kite-ozone-testnet',
+      );
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: {
+          'x-a2a-key': TEST_KEY,
+          'x-payment-chain': 'avalanche-mainnet',
+        },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error_code).toBe('CHAIN_NOT_SUPPORTED');
+      expect(response.json().error).toContain('is not initialized');
+      expect(response.json().error).toContain(
+        'kite-ozone-testnet, avalanche-fuji',
+      );
+      expect(mockDebit).not.toHaveBeenCalled();
+    });
+
+    // ── AC-11: structured log shape on debit ───────────────────
+
+    it('AC-11: debit emits structured log with chainKey, chainId, asset_symbol', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockDebit.mockResolvedValue({ success: true });
+      mockGetBalance.mockResolvedValue('5.000000');
+
+      // Build a fresh app with a logger spy.
+      const appLog = Fastify();
+      const logInfoSpy = vi.fn();
+      appLog.addHook('preHandler', async (req: FastifyRequest) => {
+        req.log.info = logInfoSpy as unknown as FastifyRequest['log']['info'];
+      });
+      appLog.post(
+        '/test-log',
+        {
+          preHandler: requirePaymentOrA2AKey({
+            description: 'Log shape test',
+          }),
+        },
+        async (_req: FastifyRequest, reply: FastifyReply) =>
+          reply.send({ ok: true }),
+      );
+      await appLog.ready();
+
+      const response = await appLog.inject({
+        method: 'POST',
+        url: '/test-log',
+        headers: {
+          'x-a2a-key': TEST_KEY,
+          'x-payment-chain': 'avalanche-fuji',
+        },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(200);
+      // CD-7: log entry shape includes chainKey + chainId + asset_symbol.
+      const debitLogCall = logInfoSpy.mock.calls.find(
+        (c) => c[1] === 'a2a-key.debit',
+      );
+      expect(debitLogCall).toBeDefined();
+      const [logFields, logMsg] = debitLogCall ?? [];
+      expect(logMsg).toBe('a2a-key.debit');
+      expect(logFields).toMatchObject({
+        keyId: TEST_KEY_ID,
+        chainKey: 'avalanche-fuji',
+        chainId: 43113,
+        asset_symbol: 'USDC',
+        amountUsd: 1.0,
+      });
+
+      await appLog.close();
+    });
+
+    // ── AC-9 / CD-5: single debit per request (no double-debit) ─
+
+    it('AC-9 / CD-5: single HTTP request → single debit call (no double-debit)', async () => {
+      // Architectural guarantee: the middleware is a Fastify preHandler hook
+      // that runs ONCE per HTTP request. A /compose request with multiple
+      // pipeline steps still triggers a single debit at the gateway boundary
+      // (steps are fan-out from the same request). This test pins that
+      // contract: even with overrides + multi-chain init, exactly ONE
+      // budgetService.debit call is observable per request.
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockDebit.mockResolvedValue({ success: true });
+      mockGetBalance.mockResolvedValue('9.000000');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: {
+          'x-a2a-key': TEST_KEY,
+          'x-payment-chain': 'avalanche-fuji',
+        },
+        // Simulate a compose-like body with multiple steps — middleware MUST
+        // ignore steps[] and debit once at the gateway. CD-7: middleware does
+        // not read request.body for chain decisions.
+        payload: {
+          steps: [
+            { agent: 'agent-a' },
+            { agent: 'agent-b' },
+            { agent: 'agent-c' },
+          ],
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      // CD-5: never two chains debited for the same request.
+      expect(mockDebit).toHaveBeenCalledTimes(1);
+      // Debit happened on the target chain only (43113), never on default 2368.
+      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 1.0);
+      expect(mockDebit).not.toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        2368,
+        expect.anything(),
+      );
+    });
+
+    // ── AC-8 cross-chain: budget on chain X, request on chain Y ─
+
+    it('AC-8: debit fails on target chain → 403 with chain <chainId> balance message', async () => {
+      // Key has budget on 2368 (default chain) but request targets 43113.
+      mockLookupByHash.mockResolvedValue(
+        makeKeyRow({ budget: { '2368': '10.000000', '43113': '0' } }),
+      );
+      mockDebit.mockResolvedValue({
+        success: false,
+        error: 'Insufficient budget on chainId 43113',
+      });
+      mockGetBalance.mockResolvedValue('0');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: {
+          'x-a2a-key': TEST_KEY,
+          'x-payment-chain': 'avalanche-fuji',
+        },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json().error_code).toBe('INSUFFICIENT_BUDGET');
+      // AC-8: target chainId in the message (not the original 2368 default).
+      expect(response.json().error).toBe('chain 43113 balance is 0');
+      // CD-12: debit AND getBalance read chainId from the same bundle (43113).
+      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 1.0);
+      expect(mockGetBalance).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        43113,
+        'user-1',
+      );
+    });
   });
 
   // ── WKH-59: cost estimation injection ────────────────────────
@@ -524,6 +885,8 @@ describe('requirePaymentOrA2AKey middleware', () => {
 
     beforeEach(() => {
       vi.clearAllMocks();
+      // Reset registry mock to default single-chain state (CD-2).
+      setMockRegistryState(['kite-ozone-testnet'], 'kite-ozone-testnet');
     });
 
     it('T-MW-GASLESS-1: ruta legacy sin gaslessEstimatedCostUsd → debita $1 placeholder (regresión)', async () => {

@@ -130,6 +130,10 @@ The `WASIAI_A2A_CHAIN` env var selects which adapter bundle loads at startup. Ma
 | `avalanche-fuji` | active | -- | USDC testnet on Fuji (43113) | Default downstream when `WASIAI_DOWNSTREAM_X402=true`. |
 | `avalanche-mainnet` | active (mainnet hybrid) | -- | USDC mainnet on Avalanche C-Chain (43114) | Live since 2026-04-29 via `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`. |
 
+### Multi-chain support
+
+Since WKH-MULTICHAIN (086), `wasiai-a2a` runs all four bundles simultaneously within a single process. Chain selection per request is driven by the `x-payment-chain` header (accepts slug or chainId numeric — e.g. `avalanche-fuji` or `43113`) with fallback to the first entry of `WASIAI_A2A_CHAINS`. The legacy single-chain `WASIAI_A2A_CHAIN=<slug>` env var is preserved for backward-compat. See [`doc/architecture/MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) for the full model, alias table, and post-merge activation procedures.
+
 Adding a new chain: see the **Adapter Pattern** section below.
 
 ---
@@ -602,6 +606,7 @@ At minimum, configure in your deployment environment:
 | [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md) | Hackathon submission — live URLs, mainnet activation, on-chain proofs, Kite Passport positioning |
 | [`doc/INTEGRATION.md`](doc/INTEGRATION.md) | Marketplace integration guide — auth, onboarding, x402, end-to-end examples |
 | [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md) | Full L1-L4 architecture, adapter interfaces, migration roadmap |
+| [`doc/architecture/MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) | Multi-chain registry (WKH-MULTICHAIN / 086) — chain selection priority, alias table, deposit procedure, mainnet activation |
 | [`doc/kite-contracts.md`](doc/kite-contracts.md) | Kite contract addresses, token specs, infrastructure endpoints |
 | [`doc/sdd/_INDEX.md`](doc/sdd/_INDEX.md) | NexusAgile methodology artifacts — every SDD, story file, AR/CR/QA report |
 

@@ -245,6 +245,85 @@ describe('discoveryService', () => {
     });
   });
 
+  // ─── WKH-MULTICHAIN AC-10 (W4): payment.chain + payment.asset exposed in /discover ──
+  describe('WKH-MULTICHAIN AC-10: /discover exposes payment.chain and payment.asset', () => {
+    it('returns payment.chain ("avalanche") and payment.asset ("USDC") for an Avalanche-paid agent via discover()', async () => {
+      // Raw agent published with wasiai-v2 testnet shape: chain="avalanche-testnet"
+      // Discovery normalizes to canonical "avalanche" via the SEC-AR allowlist.
+      setupRegistryResponse([
+        makeRawAgent({
+          id: 'a-fuji',
+          slug: 'avax-pay-agent',
+          status: 'active',
+          payment: {
+            method: 'x402',
+            chain: 'avalanche-testnet',
+            asset: 'USDC',
+            contract: '0x000000000000000000000000000000000000aBcD',
+          },
+        }),
+      ]);
+
+      const result = await discoveryService.discover({});
+
+      expect(result.agents).toHaveLength(1);
+      expect(result.agents[0].payment).toBeDefined();
+      // Discovery normalizes avalanche-testnet → avalanche (canonical), independent
+      // of the middleware ChainKey normalizer (avalanche-fuji). See SDD R-8.
+      expect(result.agents[0].payment?.chain).toBe('avalanche');
+      expect(result.agents[0].payment?.asset).toBe('USDC');
+      expect(result.agents[0].payment?.method).toBe('x402');
+    });
+
+    it('returns payment: undefined for a Kite-paid agent (chain="kite-ozone-testnet" outside discovery allowlist)', async () => {
+      // Kite agents publish chain="kite-ozone-testnet". Discovery's allowlist (SEC-AR
+      // BLQ-MED-1) only accepts avalanche variants — Kite payment metadata is NOT
+      // exposed via /discover. This is by design: discovery's allowlist defends the
+      // downstream-payment guard, NOT the inbound /compose path (which uses the
+      // separate middleware chain resolver). Confirms the Kite path didn't regress.
+      setupRegistryResponse([
+        makeRawAgent({
+          id: 'a-kite',
+          slug: 'kite-pay-agent',
+          status: 'active',
+          payment: {
+            method: 'x402',
+            chain: 'kite-ozone-testnet',
+            asset: 'PYUSD',
+            contract: '0x000000000000000000000000000000000000bEeF',
+          },
+        }),
+      ]);
+
+      const result = await discoveryService.discover({});
+
+      expect(result.agents).toHaveLength(1);
+      // Kite chain not in discovery's allowlist → payment dropped (defense-in-depth).
+      // The agent itself is still returned; only payment metadata is filtered.
+      expect(result.agents[0].slug).toBe('kite-pay-agent');
+      expect(result.agents[0].payment).toBeUndefined();
+    });
+
+    it('returns payment: undefined for an agent without payment metadata in /discover output', async () => {
+      // Sanity check: agents that declare no payment block don't crash and surface
+      // payment: undefined cleanly in the /discover output (not a thrown error).
+      setupRegistryResponse([
+        makeRawAgent({
+          id: 'a-free',
+          slug: 'free-agent',
+          status: 'active',
+          // no `payment` field
+        }),
+      ]);
+
+      const result = await discoveryService.discover({});
+
+      expect(result.agents).toHaveLength(1);
+      expect(result.agents[0].slug).toBe('free-agent');
+      expect(result.agents[0].payment).toBeUndefined();
+    });
+  });
+
   describe('AC-9: verified + includeInactive combine with AND logic', () => {
     it('returns only verified agents of all statuses', async () => {
       setupRegistryResponse([

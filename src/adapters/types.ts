@@ -111,3 +111,33 @@ export interface IdentityBindingAdapter {
   ): Promise<BindResult>;
   verify(keyId: string): Promise<BindVerification>;
 }
+
+/**
+ * Multi-chain registry (WKH-MULTICHAIN / 086).
+ *
+ * `ChainKey` is the canonical slug identifier for a chain bundle. Immutable —
+ * adding a new chain requires extending this union AND updating the registry
+ * factory dispatcher in `registry.ts`.
+ */
+export type ChainKey =
+  | 'kite-ozone-testnet'
+  | 'kite-mainnet'
+  | 'avalanche-fuji'
+  | 'avalanche-mainnet';
+
+/**
+ * `AdaptersBundle` groups all chain-specific adapter instances + chain config
+ * for a single chain. Stored in `Map<ChainKey, AdaptersBundle>` inside the
+ * registry. Treat as immutable from call-sites (CD-18).
+ */
+export interface AdaptersBundle {
+  payment: PaymentAdapter;
+  attestation: AttestationAdapter;
+  gasless: GaslessAdapter;
+  identity: IdentityBindingAdapter | null;
+  chainConfig: {
+    name: string;
+    chainId: number;
+    explorerUrl: string;
+  };
+}

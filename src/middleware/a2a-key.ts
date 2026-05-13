@@ -11,7 +11,12 @@ import type {
   FastifyRequest,
   preHandlerAsyncHookHandler,
 } from 'fastify';
-import { getChainConfig } from '../adapters/registry.js';
+import { resolveChainKey } from '../adapters/chain-resolver.js';
+import {
+  getAdaptersBundle,
+  getDefaultChainKey,
+  getInitializedChainKeys,
+} from '../adapters/registry.js';
 import { budgetService } from '../services/budget.js';
 import { identityService } from '../services/identity.js';
 import type { A2AAgentKeyRow } from '../types/index.js';
@@ -33,7 +38,8 @@ type A2AKeyMiddlewareErrorCode =
   | 'KEY_INACTIVE'
   | 'DAILY_LIMIT'
   | 'INSUFFICIENT_BUDGET'
-  | 'PER_CALL_LIMIT';
+  | 'PER_CALL_LIMIT'
+  | 'CHAIN_NOT_SUPPORTED';
 // TD-sprint-security WKH-61 MNR-2: 'SCOPE_DENIED' removed from this union.
 // Scope enforcement moved to composeService.compose post-resolveAgent
 // (see doc/sdd/059-wkh-61-sec-scope-1/); the middleware never emits it.
@@ -171,30 +177,100 @@ export function requirePaymentOrA2AKey(
         }
       }
 
-      // 6. Optimistic debit BEFORE execution (BLQ-1/2/3/4 fix)
+      // 6. Resolve target chain per-request (WKH-MULTICHAIN W2)
+      // Priority: explicit `x-payment-chain` header > registry default.
+      // CD-16: NO discovery calls here (manifest fallback is delegated to
+      // the upstream caller, wasiai-v2 propagates the header).
+      // CD-6: resolver is a pure in-memory function — no I/O.
+      const headerRaw = request.headers['x-payment-chain'];
+      const headerOverride =
+        typeof headerRaw === 'string' ? headerRaw : undefined;
+      const defaultChainKey = getDefaultChainKey();
+
+      let chainKey = resolveChainKey({ headerOverride });
+      if (!chainKey) {
+        if (headerOverride !== undefined) {
+          // CD-14: header present but unrecognised → 400, never silent default.
+          return reply.status(400).send({
+            error_code: 'CHAIN_NOT_SUPPORTED',
+            error: `Chain '${headerOverride}' is not a recognized slug or chainId`,
+          });
+        }
+        // Header absent → fall back to registry default.
+        chainKey = defaultChainKey ?? undefined;
+        if (!chainKey) {
+          return reply.status(500).send({
+            error_code: 'REGISTRY_NOT_INITIALIZED',
+            error: 'No chains initialized in registry',
+          });
+        }
+      }
+
+      const bundle = getAdaptersBundle(chainKey);
+      if (!bundle) {
+        // DT-C: recognised slug but not present in the initialised registry.
+        return reply.status(400).send({
+          error_code: 'CHAIN_NOT_SUPPORTED',
+          error: `Chain '${chainKey}' is not initialized. Initialized: ${getInitializedChainKeys().join(', ')}`,
+        });
+      }
+
+      // CD-12: chainId for debit AND for post-debit getBalance MUST come from
+      // the SAME bundle. Do NOT read from getChainConfig() anywhere below.
+      const chainId = bundle.chainConfig.chainId;
+      const assetSymbol = bundle.payment.supportedTokens[0]?.symbol ?? 'UNKNOWN';
+
+      // 7. Optimistic debit BEFORE execution (BLQ-1/2/3/4 fix)
       // Like Stripe/AWS: charge first, deliver after.
       // The PG function increment_a2a_key_spend is atomic with FOR UPDATE,
       // so this eliminates the race condition (BLQ-4) and ensures failed
       // requests are charged (BLQ-1), debit failures are surfaced (BLQ-2),
       // and service errors return 503 (BLQ-3).
-      const chainId = getChainConfig().chainId;
+      request.log.info(
+        {
+          keyId: keyRow.id,
+          chainKey,
+          chainId,
+          asset_symbol: assetSymbol,
+          amountUsd: estimatedCostUsd,
+        },
+        'a2a-key.debit',
+      );
       const debitResult = await budgetService.debit(
         keyRow.id,
         chainId,
         estimatedCostUsd,
       );
       if (!debitResult.success) {
+        // AC-8: error message MUST include the target chainId so callers can
+        // distinguish cross-chain confusion from generic insufficient-budget.
+        // Cold path: extra getBalance call is acceptable (CD-6 only constrains
+        // the happy path).
+        const balance = await budgetService
+          .getBalance(keyRow.id, chainId, keyRow.owner_ref)
+          .catch(() => '0');
+        request.log.warn(
+          {
+            keyId: keyRow.id,
+            chainKey,
+            chainId,
+            asset_symbol: assetSymbol,
+            balance,
+          },
+          'a2a-key.insufficient-budget',
+        );
         return send403(
           reply,
           'INSUFFICIENT_BUDGET',
-          debitResult.error ?? 'Budget debit failed',
+          `chain ${chainId} balance is ${balance}`,
         );
       }
 
-      // 7. Augment request (AC-4)
+      // 8. Augment request (AC-4)
       request.a2aKeyRow = keyRow;
 
-      // 8. Set remaining budget header (AC-1) — read balance AFTER debit
+      // 9. Set remaining budget header (AC-1) — read balance AFTER debit
+      // CD-12: uses the SAME chainId resolved from the bundle above.
       const postDebitBalance = await budgetService.getBalance(
         keyRow.id,
         chainId,
