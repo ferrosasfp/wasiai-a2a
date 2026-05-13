@@ -49,39 +49,63 @@ vi.mock('../services/budget.js', () => ({
 const mockGaslessTransfer = vi.fn();
 const mockGaslessStatus = vi.fn();
 
-vi.mock('../adapters/registry.js', () => ({
-  getGaslessAdapter: vi.fn(() => ({
-    status: mockGaslessStatus,
-    transfer: mockGaslessTransfer,
-  })),
-  getPaymentAdapter: vi.fn(() => ({
-    name: 'mock',
-    chainId: 2368,
-    supportedTokens: [],
-    getScheme: () => 'exact',
-    getNetwork: () => 'eip155:2368',
-    getToken: () => '0x0000000000000000000000000000000000000000' as const,
-    getMaxTimeoutSeconds: () => 60,
-    getMerchantName: () => 'WasiAI Test',
-    settle: vi.fn(),
-    verify: vi.fn(),
-    quote: vi.fn().mockResolvedValue({
-      amountWei: '1000000',
-      token: { symbol: 'PYUSD', address: '0x0', decimals: 6 },
-      facilitatorUrl: '',
-    }),
-    sign: vi.fn(),
-  })),
-  getChainConfig: vi.fn(() => ({
-    name: 'eip155:2368',
-    chainId: 2368,
-    explorerUrl: 'https://explorer.test',
-  })),
-  getAttestationAdapter: vi.fn(),
-  getIdentityBindingAdapter: vi.fn(),
-  initAdapters: vi.fn(),
-  _resetRegistry: vi.fn(),
-}));
+vi.mock('../adapters/registry.js', () => {
+  // WKH-MULTICHAIN W2: middleware uses getAdaptersBundle/getDefaultChainKey to
+  // resolve chainId per-request. Default chain = kite-ozone-testnet (2368).
+  const kiteBundle = {
+    chainConfig: {
+      name: 'eip155:2368',
+      chainId: 2368,
+      explorerUrl: 'https://explorer.test',
+    },
+    payment: {
+      supportedTokens: [
+        {
+          symbol: 'PYUSD',
+          address:
+            '0x0000000000000000000000000000000000000000' as `0x${string}`,
+          decimals: 6,
+        },
+      ],
+    },
+  };
+  return {
+    getGaslessAdapter: vi.fn(() => ({
+      status: mockGaslessStatus,
+      transfer: mockGaslessTransfer,
+    })),
+    getPaymentAdapter: vi.fn(() => ({
+      name: 'mock',
+      chainId: 2368,
+      supportedTokens: [],
+      getScheme: () => 'exact',
+      getNetwork: () => 'eip155:2368',
+      getToken: () => '0x0000000000000000000000000000000000000000' as const,
+      getMaxTimeoutSeconds: () => 60,
+      getMerchantName: () => 'WasiAI Test',
+      settle: vi.fn(),
+      verify: vi.fn(),
+      quote: vi.fn().mockResolvedValue({
+        amountWei: '1000000',
+        token: { symbol: 'PYUSD', address: '0x0', decimals: 6 },
+        facilitatorUrl: '',
+      }),
+      sign: vi.fn(),
+    })),
+    getChainConfig: vi.fn(() => ({
+      name: 'eip155:2368',
+      chainId: 2368,
+      explorerUrl: 'https://explorer.test',
+    })),
+    getAttestationAdapter: vi.fn(),
+    getIdentityBindingAdapter: vi.fn(),
+    initAdapters: vi.fn(),
+    _resetRegistry: vi.fn(),
+    getAdaptersBundle: vi.fn(() => kiteBundle),
+    getInitializedChainKeys: vi.fn(() => ['kite-ozone-testnet']),
+    getDefaultChainKey: vi.fn(() => 'kite-ozone-testnet'),
+  };
+});
 
 import { budgetService } from '../services/budget.js';
 import { identityService } from '../services/identity.js';
