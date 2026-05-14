@@ -45,16 +45,17 @@ To prove the stack works end-to-end (gateway + marketplace + self-hosted facilit
 | Marketplace UI + thin-proxy | https://app.wasiai.io | live (Vercel) |
 | A2A orchestrator (this repo) | https://wasiai-a2a-production.up.railway.app | live (Railway) |
 | Multi-chain x402 facilitator | https://wasiai-facilitator-production.up.railway.app | live (Railway) |
+| WasiAgentShop demo (use case) | https://wasiai-agentshop.vercel.app | live (Vercel) |
 
-Quality snapshot (sourced from [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md), as of hackathon submission):
+Quality snapshot:
 
 - TypeScript strict, zero `any` — `tsc --noEmit` clean
-- 644 tests passing in this repo (min, as of hackathon submission)
-- AR + CR + F4 QA gates green across the realignment pipeline
-- 37 onchain txs across 12 smoke batches, 100% success rate
-- **Mainnet hybrid mode active** since 2026-04-29: Kite testnet PYUSD inbound + Avalanche C-Chain mainnet USDC outbound, real-money smoke verified
+- 1,660+ tests green across the a2a + marketplace + facilitator stack
+- Adversarial review, code review, and QA gates green on every shipped feature
+- Multi-chain live on 4 chains simultaneously: Kite Ozone testnet, Kite mainnet, Avalanche Fuji, Avalanche mainnet
+- Mainnet hybrid mode active: Kite testnet PYUSD inbound + Avalanche C-Chain mainnet USDC outbound, real-money smoke verified
 
-Mainnet proof — first cross-chain agent payment on real money:
+Mainnet proof — real cross-chain agent payments on production money:
 
 | Tx | Chain | Type | Explorer |
 |----|-------|------|----------|
@@ -62,8 +63,7 @@ Mainnet proof — first cross-chain agent payment on real money:
 | `0xa22086d0…` | Avalanche C-Chain mainnet | USDC outbound (wasi-defi-sentiment, $0.010) | [snowtrace](https://snowtrace.io/tx/0xa22086d048b0222a8e08a5ca08997ae6c359e5ba674e63133a0ffbc463af16f9) |
 | `0xca10320c…` | Avalanche C-Chain mainnet | USDC outbound (wasi-wallet-profiler, $0.050) | [snowtrace](https://snowtrace.io/tx/0xca10320c24ff513d773ce65e0bd306d4acce3e4883180c9dca5573da6cf1dfdb) |
 | `0x6f406c08…` | Kite testnet | PYUSD inbound (1.0 PYUSD) | [kitescan](https://testnet.kitescan.ai/tx/0x6f406c08f6e59e3c5029f57ec3a84bb4596b94bb02568055ec4f9572981a1bf9) |
-
-Full proof set (testnet + mainnet) in [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md).
+| `0xf3eaa00a…` | Kite Ozone testnet | PYUSD settle from WasiAgentShop demo | [kitescan](https://testnet.kitescan.ai/tx/0xf3eaa00a7e83c41b2b9d8247e39d32f564b36cd8745f91e3c080ff23f0f1d674) |
 
 ---
 
