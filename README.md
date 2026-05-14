@@ -11,7 +11,30 @@ Cross-chain agent-to-agent payment protocol — built on [Google A2A Protocol](h
 - **Live A2A gateway**: https://wasiai-a2a-production.up.railway.app
 - **Production app**: https://app.wasiai.io
 - **Pitch deck**: https://wasiai.io/pitch-v6
-- **Hackathon submission**: [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md)
+- **Kite Hackathon 2026 submission**: see the [block below](#-kite-hackathon-2026-submission)
+- **Prior submission archive**: [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md) *(historical)*
+
+---
+
+## 🏆 Kite Hackathon 2026 submission
+
+**Project name**: WasiAI A2A Gateway for the Agentic Economy
+
+For this hackathon we built **WasiAI A2A** (this repo) — the commerce layer for the agentic economy. AI agents discover, invoke, and pay each other autonomously through x402 micropayments. Humans and agents use the same HTTP protocol, the same agent cards, the same payment rails.
+
+To prove the stack works end-to-end (gateway + marketplace + self-hosted facilitator wired together), we built **[WasiAgentShop](https://github.com/ferrosasfp/wasiai-agentshop)** as a real use case on top: cross-border LATAM remittances, settled in PYUSD on Kite Ozone. Three autonomous agents shop the marketplace, score corridors with live FX, and reserve the last-mile partner. Total agent fee: $0.061. End-to-end: under 30 seconds.
+
+| Resource | Link |
+|---|---|
+| 🌐 **Live demo** | https://wasiai-agentshop.vercel.app/ |
+| 🔗 **Sample on-chain tx** | [`0xf3eaa00a…0f1d674`](https://testnet.kitescan.ai/tx/0xf3eaa00a7e83c41b2b9d8247e39d32f564b36cd8745f91e3c080ff23f0f1d674) on KiteScan |
+| 📦 **Use case repo (WasiAgentShop)** | https://github.com/ferrosasfp/wasiai-agentshop |
+| 📋 **Judge walkthrough (5-min pass)** | [SUBMISSION.md](https://github.com/ferrosasfp/wasiai-agentshop/blob/main/SUBMISSION.md) |
+| ⚙️ **Self-hosted x402 facilitator** | https://github.com/ferrosasfp/wasiai-facilitator |
+| 🎤 **Pitch deck** | https://wasiai.io/pitch-v6/ |
+| 🎬 **Demo video** | *(coming soon — YouTube unlisted)* |
+
+**Built by Fernando Rosas and Elizabeth Palacios.** We are WasiAI · [wasiai.io](https://wasiai.io)
 
 ---
 
