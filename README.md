@@ -32,7 +32,7 @@ To prove the stack works end-to-end (gateway + marketplace + self-hosted facilit
 | 📋 **Judge walkthrough (5-min pass)** | [SUBMISSION.md](https://github.com/ferrosasfp/wasiai-agentshop/blob/main/SUBMISSION.md) |
 | ⚙️ **Self-hosted x402 facilitator** | https://github.com/ferrosasfp/wasiai-facilitator |
 | 🎤 **Pitch deck** | https://wasiai.io/pitch-v6/ |
-| 🎬 **Demo video** | *(coming soon — YouTube unlisted)* |
+| 🎬 **Demo video** | https://www.youtube.com/watch?v=Ydh_sEJXgt4 |
 
 **Built by Fernando Rosas and Elizabeth Palacios.** We are WasiAI · [wasiai.io](https://wasiai.io)
 
