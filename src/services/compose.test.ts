@@ -12,6 +12,15 @@ import type {
 } from '../types/index.js';
 
 vi.mock('./registry.js', () => ({ registryService: { getEnabled: vi.fn() } }));
+// WKH-59 (real-price-debit): mock budget service for per-step debit tests.
+// CD-14: tests below use mockResolvedValueOnce, not failNext.
+vi.mock('./budget.js', () => ({
+  budgetService: {
+    debit: vi.fn(),
+    getBalance: vi.fn(),
+    registerDeposit: vi.fn(),
+  },
+}));
 const mockSign = vi.fn();
 const mockSettle = vi.fn();
 vi.mock('../adapters/registry.js', () => ({
@@ -39,6 +48,7 @@ vi.mock('../lib/downstream-payment.js', () => ({
 }));
 
 import { signAndSettleDownstream } from '../lib/downstream-payment.js';
+import { budgetService } from './budget.js';
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
@@ -46,6 +56,7 @@ import { maybeTransform } from './llm/transform.js';
 import { registryService } from './registry.js';
 
 const mockDownstream = vi.mocked(signAndSettleDownstream);
+const mockDebit = vi.mocked(budgetService.debit);
 
 function makeAgent(o: Partial<Agent> = {}): Agent {
   return {
@@ -79,9 +90,7 @@ function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig {
 }
 // WKH-61: helper local de keyRow para tests de scoping (no compartido con
 // middleware/a2a-key.test.ts; cada archivo mantiene su propio fixture).
-function makeKeyRow(
-  overrides: Partial<A2AAgentKeyRow> = {},
-): A2AAgentKeyRow {
+function makeKeyRow(overrides: Partial<A2AAgentKeyRow> = {}): A2AAgentKeyRow {
   return {
     id: 'key-id-test',
     owner_ref: 'owner-test',
@@ -132,6 +141,8 @@ beforeEach(() => {
   });
   // WKH-55: default downstream mock = null (no-op)
   mockDownstream.mockResolvedValue(null);
+  // WKH-59: default debit success (each per-step debit test overrides).
+  mockDebit.mockResolvedValue({ success: true });
 });
 
 describe('composeService.invokeAgent', () => {
@@ -363,7 +374,11 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
     mockDownstream.mockResolvedValue(null);
     const agent = makeAgent({ priceUsdc: 0, payment: undefined });
     mockFetchOk();
-    const result = await composeService.invokeAgent(agent, { foo: 'bar' }, 'k1');
+    const result = await composeService.invokeAgent(
+      agent,
+      { foo: 'bar' },
+      'k1',
+    );
     expect(result.downstream).toBeUndefined();
   });
 
@@ -592,7 +607,7 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
         tokensIn: 250,
         tokensOut: 60,
         retries: 0,
-        costUsd: 0.000_440, // 250/1M*0.8 + 60/1M*4.0
+        costUsd: 0.000_44, // 250/1M*0.8 + 60/1M*4.0
       },
     });
 
@@ -632,7 +647,7 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
     const meta1 = firstStepCall?.[0].metadata;
     expect(meta1?.bridge_type).toBe('LLM');
     expect(typeof meta1?.bridge_latency_ms).toBe('number');
-    expect(meta1?.bridge_cost_usd).toBeCloseTo(0.000_440, 6);
+    expect(meta1?.bridge_cost_usd).toBeCloseTo(0.000_44, 6);
     expect(meta1?.llm_model).toBe('claude-haiku-4-5-20251001');
     expect(meta1?.llm_tokens_in).toBe(250);
     expect(meta1?.llm_tokens_out).toBe(60);
@@ -676,9 +691,7 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
       ],
     });
 
-    const skipStepCall = trackSpy.mock.calls.find(
-      (c) => c[0].agentId === 'b1',
-    );
+    const skipStepCall = trackSpy.mock.calls.find((c) => c[0].agentId === 'b1');
     expect(skipStepCall).toBeDefined();
     const meta2 = skipStepCall?.[0].metadata;
     expect(meta2?.bridge_type).toBe('SKIPPED');
@@ -1048,5 +1061,340 @@ describe('composeService.compose — WKH-61 scoping per step', () => {
     expect(result.success).toBe(true);
     expect(result.errorCode).toBeUndefined();
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// WKH-59 (real-price-debit) AC-2: multi-step debit for steps 2..N
+// CD-11: guard `i > 0` is the ONLY defense against double-debiting step 0
+//   (step 0 is debited by the middleware via composeEstimatedCostUsd).
+// CD-14: NO failNext — only mockResolvedValueOnce chained.
+// ─────────────────────────────────────────────────────────────────────
+
+describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
+  // Helper: route discoveryService.getAgent by slug for deterministic
+  // resolveAgent + lookahead behavior in multi-step pipelines.
+  function mockAgentsBySlug(agents: Record<string, Agent>) {
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug: string, _registry?: string) => agents[slug] ?? null,
+    );
+  }
+
+  it('T-COMPOSE-DEBIT-1 should debit step 1 (i=1) via budgetService.debit', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({
+      slug: 'corridor',
+      priceUsdc: 0.05,
+      id: 'agent-2',
+    });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk({ result: 'r1' });
+    mockFetchOk({ result: 'r2' });
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    // Only step 1 is debited via service (step 0 is the middleware's job).
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 0.05);
+  });
+
+  it('T-COMPOSE-DEBIT-2 should debit steps 1 and 2 in a 3-step pipeline', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({
+      slug: 'corridor',
+      priceUsdc: 0.05,
+      id: 'agent-2',
+    });
+    const a3 = makeAgent({
+      slug: 'cashout',
+      priceUsdc: 0.01,
+      id: 'agent-3',
+    });
+    mockAgentsBySlug({ kyc: a1, corridor: a2, cashout: a3 });
+    mockFetchOk();
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+        { agent: 'cashout', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    expect(mockDebit).toHaveBeenNthCalledWith(1, 'k1', 2368, 0.05);
+    expect(mockDebit).toHaveBeenNthCalledWith(2, 'k1', 2368, 0.01);
+  });
+
+  it('T-COMPOSE-DEBIT-3 should abort pipeline when step 1 debit fails (insufficient)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({
+      slug: 'corridor',
+      priceUsdc: 0.05,
+      id: 'agent-2',
+    });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk({ result: 'r1' });
+    // Override default: first debit fails.
+    mockDebit.mockReset();
+    mockDebit.mockResolvedValueOnce({
+      success: false,
+      error: 'insufficient',
+    });
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Step 1 debit failed');
+    expect(result.error).toContain('insufficient');
+    // step 0 fetch occurred, step 1 fetch did NOT (debit aborted pre-invoke).
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // DT-H: NOT a SCOPE_DENIED error.
+    expect(result.errorCode).toBeUndefined();
+  });
+
+  it('T-COMPOSE-DEBIT-4 should skip debit when scopingKeyRow is undefined (x402 path)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({
+      slug: 'corridor',
+      priceUsdc: 0.05,
+      id: 'agent-2',
+    });
+    const a3 = makeAgent({
+      slug: 'cashout',
+      priceUsdc: 0.01,
+      id: 'agent-3',
+    });
+    mockAgentsBySlug({ kyc: a1, corridor: a2, cashout: a3 });
+    mockFetchOk();
+    mockFetchOk();
+    mockFetchOk();
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+        { agent: 'cashout', input: {} },
+      ],
+      // No scopingKeyRow → x402 path → per-step debit MUST be skipped.
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  it('T-COMPOSE-DEBIT-5 should skip debit when chainId is undefined', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({
+      slug: 'corridor',
+      priceUsdc: 0.05,
+      id: 'agent-2',
+    });
+    const a3 = makeAgent({
+      slug: 'cashout',
+      priceUsdc: 0.01,
+      id: 'agent-3',
+    });
+    mockAgentsBySlug({ kyc: a1, corridor: a2, cashout: a3 });
+    mockFetchOk();
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+        { agent: 'cashout', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      // chainId intentionally omitted → defensive skip.
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  it('T-COMPOSE-DEBIT-6 should NOT debit step 0 in service (anti-double-debit guard)', async () => {
+    // CD-11: el step 0 NUNCA es debitado por el service — el middleware
+    // ya lo debitó vía request.composeEstimatedCostUsd.
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({
+      slug: 'corridor',
+      priceUsdc: 0.05,
+      id: 'agent-2',
+    });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+
+    await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    // Verify NO debit call carries step 0's priceUsdc (0.001) — that's the
+    // middleware's responsibility. Service-level debits MUST be steps 1..N.
+    for (const call of mockDebit.mock.calls) {
+      expect(call[2]).not.toBe(0.001);
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // BLQ-MED-1 fix: fallback honesto para priceUsdc=0/null en steps 2..N.
+  // AC-4 / CD-4. Mismo patrón que el preHandler de step 0
+  // (src/routes/compose.ts:63-77), replicado en el service.
+  // ─────────────────────────────────────────────────────────────────────
+
+  it('T-COMPOSE-DEBIT-7 should debit step 1 with $1.00 fallback when priceUsdc===0 (BLQ-MED-1)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    // step 1 agent has priceUsdc=0 (registry config error or "free" agent).
+    // Service MUST fallback to $1.00 (NOT debit $0).
+    const a2 = makeAgent({
+      slug: 'free-bug',
+      priceUsdc: 0,
+      id: 'agent-2',
+    });
+    mockAgentsBySlug({ kyc: a1, 'free-bug': a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'free-bug', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    // amount === 1.0 (fallback), NOT 0
+    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 1.0);
+  });
+
+  it('T-COMPOSE-DEBIT-8 should emit warn log with reason=registry-miss when priceUsdc===0 (BLQ-MED-1)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({
+      slug: 'free-bug',
+      priceUsdc: 0,
+      id: 'agent-2',
+    });
+    mockAgentsBySlug({ kyc: a1, 'free-bug': a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+    // Inject DownstreamLogger-compatible logger (Pino shape).
+    const warnSpy = vi.fn();
+    const logger = { warn: warnSpy, info: vi.fn() };
+
+    await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'free-bug', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      logger,
+    });
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'registry-miss',
+        slug: 'free-bug',
+        step: 1,
+      }),
+      'compose-price.fallback per-step',
+    );
+  });
+
+  it('T-COMPOSE-DEBIT-9 should apply same fallback when priceUsdc is null/non-number (BLQ-MED-1)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    // priceUsdc=null is invalid per Agent type, but defensive code must
+    // handle it (registry returns malformed data). Cast via unknown to
+    // bypass TS guard for this defensive scenario.
+    const a2 = makeAgent({
+      slug: 'null-price',
+      id: 'agent-2',
+    });
+    (a2 as unknown as { priceUsdc: number | null }).priceUsdc = null;
+    mockAgentsBySlug({ kyc: a1, 'null-price': a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+    const warnSpy = vi.fn();
+    const logger = { warn: warnSpy, info: vi.fn() };
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'null-price', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      logger,
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    // typeof null !== 'number' → fallback $1
+    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 1.0);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'registry-miss',
+        slug: 'null-price',
+        step: 1,
+      }),
+      'compose-price.fallback per-step',
+    );
   });
 });

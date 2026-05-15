@@ -183,6 +183,22 @@ export interface ComposeRequest {
    * Cuando es undefined (path x402), el check no se ejecuta.
    */
   scopingKeyRow?: A2AAgentKeyRow;
+  /**
+   * WKH-59 (real-price-debit) DT-D: chainId resuelto por el middleware
+   * (request.resolvedChainId). composeService lo usa para debit per-step
+   * (steps 2..N) via budgetService.debit. Cuando undefined (path x402 o
+   * defensive skip), el debit per-step se omite.
+   */
+  chainId?: number;
+  /**
+   * WKH-59 (real-price-debit) BLQ-MED-1 fix: logger opcional para emitir
+   * `compose-price.fallback per-step` warn cuando priceUsdc=0/null en
+   * steps 2..N (CD-4 fallback honesto). El service NO se acopla a Fastify
+   * — se reusa el shape `DownstreamLogger` que ya consume WKH-55. La ruta
+   * `/compose` pasa `request.log` (Pino), que es estructuralmente
+   * compatible. Cuando undefined → fallback a `console.warn`.
+   */
+  logger?: DownstreamLogger;
 }
 
 export interface ComposeResult {

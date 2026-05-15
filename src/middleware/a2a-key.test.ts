@@ -670,7 +670,7 @@ describe('requirePaymentOrA2AKey middleware', () => {
       expect(response.statusCode).toBe(400);
       expect(response.json().error_code).toBe('CHAIN_NOT_SUPPORTED');
       expect(response.json().error).toContain(
-        "is not a recognized slug or chainId",
+        'is not a recognized slug or chainId',
       );
       // CD-5: no debit attempted when chain resolution fails.
       expect(mockDebit).not.toHaveBeenCalled();
@@ -833,11 +833,7 @@ describe('requirePaymentOrA2AKey middleware', () => {
       expect(response.json().error).toBe('chain 43113 balance is 0');
       // CD-12: debit AND getBalance read chainId from the same bundle (43113).
       expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 1.0);
-      expect(mockGetBalance).toHaveBeenCalledWith(
-        TEST_KEY_ID,
-        43113,
-        'user-1',
-      );
+      expect(mockGetBalance).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 'user-1');
     });
   });
 
@@ -921,6 +917,146 @@ describe('requirePaymentOrA2AKey middleware', () => {
       expect(response.statusCode).toBe(200);
       // El middleware lee request.gaslessEstimatedCostUsd y lo usa en debit.
       expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 5);
+    });
+  });
+
+  // ── WKH-59 (real-price-debit): compose cost estimation injection ──
+  // CD-7: middleware solo lee campos augmentados, no request.body.
+  // CD-9: composeEstimatedCostUsd y gaslessEstimatedCostUsd son distintos.
+  // CD-14: NO usar failNext. Usar mockResolvedValueOnce chained.
+
+  describe('WKH-59 compose cost estimation injection', () => {
+    let appC: ReturnType<typeof Fastify>;
+
+    beforeAll(async () => {
+      appC = Fastify();
+
+      // Ruta CON preHandler upstream que inyecta composeEstimatedCostUsd=0.001.
+      appC.post(
+        '/test-compose-mw',
+        {
+          preHandler: [
+            async (req: FastifyRequest) => {
+              req.composeEstimatedCostUsd = 0.001;
+            },
+            ...requirePaymentOrA2AKey({
+              description: 'compose route with cost injection',
+            }),
+          ],
+        },
+        async (req: FastifyRequest, reply: FastifyReply) =>
+          reply.send({
+            ok: true,
+            resolvedChainId: req.resolvedChainId ?? null,
+          }),
+      );
+
+      // Ruta con AMBOS campos inyectados — precedence test.
+      appC.post(
+        '/test-both-mw',
+        {
+          preHandler: [
+            async (req: FastifyRequest) => {
+              req.composeEstimatedCostUsd = 0.05;
+              req.gaslessEstimatedCostUsd = 10;
+            },
+            ...requirePaymentOrA2AKey({
+              description: 'route with both costs injected',
+            }),
+          ],
+        },
+        async (_req: FastifyRequest, reply: FastifyReply) =>
+          reply.send({ ok: true }),
+      );
+
+      // Ruta SIN inyección — placeholder fallback.
+      appC.post(
+        '/test-no-injection',
+        {
+          preHandler: requirePaymentOrA2AKey({
+            description: 'route without any injection',
+          }),
+        },
+        async (_req: FastifyRequest, reply: FastifyReply) =>
+          reply.send({ ok: true }),
+      );
+
+      await appC.ready();
+    });
+
+    afterAll(() => appC.close());
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      setMockRegistryState(['kite-ozone-testnet'], 'kite-ozone-testnet');
+    });
+
+    it('T-MW-COMPOSE-1 should debit composeEstimatedCostUsd when set', async () => {
+      mockLookupByHash.mockResolvedValueOnce(makeKeyRow());
+      mockDebit.mockResolvedValueOnce({ success: true });
+      mockGetBalance.mockResolvedValueOnce('9.999000');
+
+      const response = await appC.inject({
+        method: 'POST',
+        url: '/test-compose-mw',
+        headers: { 'x-a2a-key': TEST_KEY },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(200);
+      // AC-1: debit usa el valor real inyectado, NO el placeholder $1.
+      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 0.001);
+    });
+
+    it('T-MW-COMPOSE-2 should prefer composeEstimatedCostUsd over gaslessEstimatedCostUsd when both set', async () => {
+      mockLookupByHash.mockResolvedValueOnce(makeKeyRow());
+      mockDebit.mockResolvedValueOnce({ success: true });
+      mockGetBalance.mockResolvedValueOnce('9.950000');
+
+      const response = await appC.inject({
+        method: 'POST',
+        url: '/test-both-mw',
+        headers: { 'x-a2a-key': TEST_KEY },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(200);
+      // DT-F: compose-first precedence. 0.05 wins over 10.
+      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 0.05);
+    });
+
+    it('T-MW-COMPOSE-3 should fall back to $1 placeholder when neither field is set', async () => {
+      mockLookupByHash.mockResolvedValueOnce(makeKeyRow());
+      mockDebit.mockResolvedValueOnce({ success: true });
+      mockGetBalance.mockResolvedValueOnce('9.000000');
+
+      const response = await appC.inject({
+        method: 'POST',
+        url: '/test-no-injection',
+        headers: { 'x-a2a-key': TEST_KEY },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(200);
+      // AC-7: backward-compat placeholder $1 cuando ningún campo está seteado.
+      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    });
+
+    it('T-MW-COMPOSE-4 should augment request.resolvedChainId after bundle resolution', async () => {
+      mockLookupByHash.mockResolvedValueOnce(makeKeyRow());
+      mockDebit.mockResolvedValueOnce({ success: true });
+      mockGetBalance.mockResolvedValueOnce('9.999000');
+
+      const response = await appC.inject({
+        method: 'POST',
+        url: '/test-compose-mw',
+        headers: { 'x-a2a-key': TEST_KEY },
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(200);
+      // DT-D: el route handler ve el chainId del bundle (CD-12: 2368 default).
+      expect(response.json().resolvedChainId).toBe(2368);
     });
   });
 });

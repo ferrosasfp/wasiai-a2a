@@ -22,6 +22,7 @@ import type {
 } from '../types/index.js';
 import { extractA2APayload, isA2AMessage } from './a2a-protocol.js';
 import { authzService } from './authz.js';
+import { budgetService } from './budget.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
 import { maybeTransform } from './llm/transform.js';
@@ -56,7 +57,8 @@ function readCategory(agent: Agent): string | undefined {
 
 export const composeService = {
   async compose(request: ComposeRequest): Promise<ComposeResult> {
-    const { steps, maxBudget, a2aKey, scopingKeyRow } = request;
+    const { steps, maxBudget, a2aKey, scopingKeyRow, chainId, logger } =
+      request;
     const results: StepResult[] = [];
     let totalCost = 0;
     let totalLatency = 0;
@@ -95,7 +97,9 @@ export const composeService = {
             scopeDeniedTarget: {
               registry: agent.registry,
               agent_slug: agent.slug,
-              ...(target.category !== undefined && { category: target.category }),
+              ...(target.category !== undefined && {
+                category: target.category,
+              }),
             },
           };
         }
@@ -109,6 +113,65 @@ export const composeService = {
           totalLatencyMs: totalLatency,
           error: `Budget exceeded: would need ${totalCost + agent.priceUsdc}, max is ${maxBudget}`,
         };
+      // WKH-59 (real-price-debit) AC-2: steps 2..N debit atómico via
+      // budgetService.debit (PG function increment_a2a_key_spend — CD-2).
+      //
+      // CD-11: guard `i > 0` es la ÚNICA defensa contra double-debit del
+      // step 0 (que ya fue debitado por el middleware via
+      // request.composeEstimatedCostUsd). NO REMOVER. AR/CR debe verificar
+      // que esta línea sobrevive en futuras HUs.
+      //
+      // Skip defensivo: si no hay scopingKeyRow (path x402) o chainId
+      // (defensive), el debit per-step no aplica. Comportamiento de
+      // "fee-on-attempt" consistente con gasless (debit antes de
+      // invokeAgent).
+      if (i > 0 && scopingKeyRow && chainId !== undefined) {
+        // WKH-59 BLQ-MED-1 fix (CD-4 / AC-4): fallback honesto si priceUsdc
+        // del agente es 0, null, NaN, o no es un number (config error en el
+        // registry). Mismo patrón que el preHandler de step 0 en
+        // `src/routes/compose.ts:63-77`, replicado per-step.
+        // NOTA OPERACIONAL: NO podemos setear el header
+        // `x-debit-fallback: registry-miss` acá — la response ya está en
+        // pipeline (los steps 0 corrieron). Esa señal queda exclusiva del
+        // preHandler de step 0; en steps 2..N la observabilidad vive en el
+        // warn log estructurado (reason='registry-miss', slug, step=i).
+        const isInvalid =
+          typeof agent.priceUsdc !== 'number' ||
+          agent.priceUsdc === 0 ||
+          Number.isNaN(agent.priceUsdc);
+        const debitAmount = isInvalid ? 1.0 : agent.priceUsdc;
+
+        if (isInvalid) {
+          const warn = logger?.warn?.bind(logger) ?? console.warn;
+          warn(
+            {
+              reason: 'registry-miss',
+              slug: agent.slug,
+              step: i,
+            },
+            'compose-price.fallback per-step',
+          );
+        }
+
+        const debitResult = await budgetService.debit(
+          scopingKeyRow.id,
+          chainId,
+          debitAmount,
+        );
+        if (!debitResult.success) {
+          // DT-H: mid-pipeline debit failure → ComposeResult.error.
+          // NO setear errorCode='SCOPE_DENIED' (eso es 403). Route handler
+          // mapea a 400 (default), no a 402/403.
+          return {
+            success: false,
+            output: null,
+            steps: results,
+            totalCostUsdc: totalCost,
+            totalLatencyMs: totalLatency,
+            error: `Step ${i} debit failed: ${debitResult.error ?? 'insufficient budget'}`,
+          };
+        }
+      }
       const input =
         step.passOutput && lastOutput
           ? { ...step.input, previousOutput: lastOutput }

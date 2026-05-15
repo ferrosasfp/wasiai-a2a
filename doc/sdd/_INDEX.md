@@ -74,3 +74,4 @@
 | 084 | 2026-05-04 | [KITE-PASSPORT] Model B Hybrid — Passport inbound + operator outbound cross-chain (WKH-69) | feature | QUALITY | DONE | feat/084-wkh-69-passport-hybrid-inbound ([done-report.md](084-wkh-69-passport-hybrid-inbound/done-report.md)) |
 | 085 | 2026-05-03 | [WKH-92] Autonomous Passport x402 smoke runner | tooling | FAST | DONE | feat/085-wkh-92-passport-smoke-autonomous ([done-report.md](085-wkh-92-passport-smoke-autonomous/done-report.md)) |
 | 086 | 2026-05-13 | [WKH-MULTICHAIN] Multi-chain support — Avalanche Fuji/mainnet + Kite testnet/mainnet | feature | QUALITY | DONE | feat/086-wkh-multichain-a2a ([done-report.md](086-wkh-multichain-a2a/done-report.md)) |
+| 087 | 2026-05-14 | [WKH-59] Middleware /compose debit reads real agent price from registry (real-price-debit) | feature | QUALITY | DONE | feat/087-wkh-59-real-agent-price-debit ([done-report.md](087-wkh-59-real-agent-price-debit/done-report.md)) |

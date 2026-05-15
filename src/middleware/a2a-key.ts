@@ -28,6 +28,8 @@ declare module 'fastify' {
   interface FastifyRequest {
     a2aKeyRow?: A2AAgentKeyRow;
     gaslessEstimatedCostUsd?: number; // WKH-59
+    composeEstimatedCostUsd?: number; // WKH-59 (real-price-debit) — CD-9
+    resolvedChainId?: number; // WKH-59 (real-price-debit) DT-D
   }
 }
 
@@ -122,12 +124,18 @@ export function requirePaymentOrA2AKey(
 
     // WKH-59: rutas que mueven valor on-chain (POST /gasless/transfer) inyectan
     // el costo real vía request.gaslessEstimatedCostUsd desde un preHandler
-    // upstream. El resto de las rutas siguen con $1 placeholder (backward-compat).
-    // CD-7: el middleware NO lee request.body — solo el campo augmentado.
+    // upstream. WKH-59 (real-price-debit): /compose inyecta el precio real del
+    // primer step vía request.composeEstimatedCostUsd. El resto de las rutas
+    // siguen con $1 placeholder (backward-compat).
+    // CD-7: el middleware NO lee request.body — solo campos augmentados.
+    // CD-9: composeEstimatedCostUsd y gaslessEstimatedCostUsd son distintos.
+    // DT-F: orden compose-first (rutas mutuamente excluyentes, sin colisión real).
     const estimatedCostUsd =
-      typeof request.gaslessEstimatedCostUsd === 'number'
-        ? request.gaslessEstimatedCostUsd
-        : 1.0;
+      typeof request.composeEstimatedCostUsd === 'number'
+        ? request.composeEstimatedCostUsd
+        : typeof request.gaslessEstimatedCostUsd === 'number'
+          ? request.gaslessEstimatedCostUsd
+          : 1.0;
 
     let keyRow: A2AAgentKeyRow | null = null;
 
@@ -218,7 +226,13 @@ export function requirePaymentOrA2AKey(
       // CD-12: chainId for debit AND for post-debit getBalance MUST come from
       // the SAME bundle. Do NOT read from getChainConfig() anywhere below.
       const chainId = bundle.chainConfig.chainId;
-      const assetSymbol = bundle.payment.supportedTokens[0]?.symbol ?? 'UNKNOWN';
+      const assetSymbol =
+        bundle.payment.supportedTokens[0]?.symbol ?? 'UNKNOWN';
+
+      // WKH-59 (real-price-debit) DT-D / CD-12: propagar al route handler para
+      // que composeService haga debit per-step (steps 2..N) con el MISMO chainId
+      // del bundle. NO re-resolver en el service (race latente).
+      request.resolvedChainId = chainId;
 
       // 7. Optimistic debit BEFORE execution (BLQ-1/2/3/4 fix)
       // Like Stripe/AWS: charge first, deliver after.
