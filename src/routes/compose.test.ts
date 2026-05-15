@@ -57,10 +57,17 @@ vi.mock('../services/compose.js', () => ({
   },
 }));
 
+// ── Mock agent-price service (WKH-59) ───────────────────────
+vi.mock('../services/agent-price.js', () => ({
+  resolveAgentPriceUsdc: vi.fn(),
+}));
+
+import { resolveAgentPriceUsdc } from '../services/agent-price.js';
 import { composeService } from '../services/compose.js';
 import composeRoutes from './compose.js';
 
 const mockCompose = vi.mocked(composeService.compose);
+const mockResolvePrice = vi.mocked(resolveAgentPriceUsdc);
 
 // ── Setup ───────────────────────────────────────────────────
 
@@ -78,6 +85,10 @@ describe('compose routes — WKH-61 scope mapping', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+    // WKH-59: default price resolution succeeds so existing route tests
+    // (T-ROUTE-1/1b/1c) don't 404 on the new preHandler. Each WKH-59-specific
+    // test below overrides via mockResolvedValueOnce / mockRejectedValueOnce.
+    mockResolvePrice.mockResolvedValue(0.001);
   });
 
   it('T-ROUTE-1 (AC-2 e2e): errorCode=SCOPE_DENIED → 403 con scopeDeniedTarget', async () => {
@@ -167,5 +178,114 @@ describe('compose routes — WKH-61 scope mapping', () => {
         scopingKeyRow: expect.objectContaining({ id: 'k1', owner_ref: 'o1' }),
       }),
     );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// WKH-59 (real-price-debit): preHandler tests + E2E
+// ─────────────────────────────────────────────────────────────────────
+
+describe('compose preHandler — WKH-59 real-price-debit', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    app = Fastify();
+    await app.register(composeRoutes, { prefix: '/compose' });
+    await app.ready();
+  });
+
+  afterAll(() => app.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+    // Default success path (each test overrides via mockResolvedValueOnce /
+    // mockRejectedValueOnce). composeService default returns success.
+    mockCompose.mockResolvedValue({
+      success: true,
+      output: 'ok',
+      steps: [],
+      totalCostUsdc: 0,
+      totalLatencyMs: 1,
+    });
+  });
+
+  it('T-ROUTE-PRICE-1 preHandler injects composeEstimatedCostUsd on happy path', async () => {
+    mockResolvePrice.mockResolvedValueOnce(0.001);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockResolvePrice).toHaveBeenCalledWith('kyc', undefined);
+    // route handler still called → middleware short-circuit didn't happen.
+    expect(mockCompose).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-ROUTE-PRICE-2 should return 404 AGENT_NOT_FOUND when agent missing', async () => {
+    mockResolvePrice.mockResolvedValueOnce(null);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'ghost', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error_code).toBe('AGENT_NOT_FOUND');
+    // CD-10: route handler NEVER called (middleware short-circuited by reply.sent).
+    expect(mockCompose).not.toHaveBeenCalled();
+  });
+
+  it('T-ROUTE-PRICE-3 should fallback to $1 + header when priceUsdc is 0', async () => {
+    mockResolvePrice.mockResolvedValueOnce(0);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'broken-agent', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    // CD-4: header presente para que el caller sepa que fue fallback.
+    expect(res.headers['x-debit-fallback']).toBe('registry-miss');
+    // Route handler corre normalmente.
+    expect(mockCompose).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-ROUTE-PRICE-4 should return 503 REGISTRY_UNAVAILABLE when discovery throws', async () => {
+    mockResolvePrice.mockRejectedValueOnce(new Error('PGRST connection lost'));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error_code).toBe('REGISTRY_UNAVAILABLE');
+    expect(mockCompose).not.toHaveBeenCalled();
+  });
+
+  it('T-ROUTE-PRICE-5 preHandler is a no-op for empty steps body (route handler responds 400)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [] },
+    });
+
+    expect(res.statusCode).toBe(400);
+    // CD-15: preHandler de price NO valida shape — el route handler lo hace.
+    // Por eso resolveAgentPriceUsdc nunca debe ser llamado.
+    expect(mockResolvePrice).not.toHaveBeenCalled();
+    expect(mockCompose).not.toHaveBeenCalled();
   });
 });
