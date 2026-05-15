@@ -71,7 +71,7 @@ Mainnet proof — real cross-chain agent payments on production money:
 
 ### Production deployment topology
 
-The realignment pipeline (2026-04-28) cut over `compose`, `orchestrate`, and `capabilities` from the legacy v2 marketplace stack to the chain-adaptive a2a stack. Today three services share one Supabase production DB:
+During the Kite Hackathon, we cut over `compose`, `orchestrate`, and `capabilities` from the pre-hackathon v2-coupled stack to this chain-adaptive a2a gateway, and added a self-hosted multi-chain facilitator alongside. Today three services share one Supabase production DB:
 
 ```
 +-------------------------------------------------------------+
@@ -185,7 +185,7 @@ npm run dev
 # Server starts on http://localhost:3001
 
 npm test
-# Runs the full Vitest suite (644+ tests at hackathon submission)
+# Runs the full Vitest suite (644+ tests in this repo; 1,660+ across the a2a + marketplace + facilitator stack)
 ```
 
 ### Build and start
