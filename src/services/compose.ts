@@ -57,7 +57,8 @@ function readCategory(agent: Agent): string | undefined {
 
 export const composeService = {
   async compose(request: ComposeRequest): Promise<ComposeResult> {
-    const { steps, maxBudget, a2aKey, scopingKeyRow, chainId } = request;
+    const { steps, maxBudget, a2aKey, scopingKeyRow, chainId, logger } =
+      request;
     const results: StepResult[] = [];
     let totalCost = 0;
     let totalLatency = 0;
@@ -125,10 +126,37 @@ export const composeService = {
       // "fee-on-attempt" consistente con gasless (debit antes de
       // invokeAgent).
       if (i > 0 && scopingKeyRow && chainId !== undefined) {
+        // WKH-59 BLQ-MED-1 fix (CD-4 / AC-4): fallback honesto si priceUsdc
+        // del agente es 0, null, NaN, o no es un number (config error en el
+        // registry). Mismo patrón que el preHandler de step 0 en
+        // `src/routes/compose.ts:63-77`, replicado per-step.
+        // NOTA OPERACIONAL: NO podemos setear el header
+        // `x-debit-fallback: registry-miss` acá — la response ya está en
+        // pipeline (los steps 0 corrieron). Esa señal queda exclusiva del
+        // preHandler de step 0; en steps 2..N la observabilidad vive en el
+        // warn log estructurado (reason='registry-miss', slug, step=i).
+        const isInvalid =
+          typeof agent.priceUsdc !== 'number' ||
+          agent.priceUsdc === 0 ||
+          Number.isNaN(agent.priceUsdc);
+        const debitAmount = isInvalid ? 1.0 : agent.priceUsdc;
+
+        if (isInvalid) {
+          const warn = logger?.warn?.bind(logger) ?? console.warn;
+          warn(
+            {
+              reason: 'registry-miss',
+              slug: agent.slug,
+              step: i,
+            },
+            'compose-price.fallback per-step',
+          );
+        }
+
         const debitResult = await budgetService.debit(
           scopingKeyRow.id,
           chainId,
-          agent.priceUsdc,
+          debitAmount,
         );
         if (!debitResult.success) {
           // DT-H: mid-pipeline debit failure → ComposeResult.error.

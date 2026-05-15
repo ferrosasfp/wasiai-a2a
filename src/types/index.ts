@@ -190,6 +190,15 @@ export interface ComposeRequest {
    * defensive skip), el debit per-step se omite.
    */
   chainId?: number;
+  /**
+   * WKH-59 (real-price-debit) BLQ-MED-1 fix: logger opcional para emitir
+   * `compose-price.fallback per-step` warn cuando priceUsdc=0/null en
+   * steps 2..N (CD-4 fallback honesto). El service NO se acopla a Fastify
+   * — se reusa el shape `DownstreamLogger` que ya consume WKH-55. La ruta
+   * `/compose` pasa `request.log` (Pino), que es estructuralmente
+   * compatible. Cuando undefined → fallback a `console.warn`.
+   */
+  logger?: DownstreamLogger;
 }
 
 export interface ComposeResult {

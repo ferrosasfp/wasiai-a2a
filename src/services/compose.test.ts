@@ -1279,4 +1279,122 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       expect(call[2]).not.toBe(0.001);
     }
   });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // BLQ-MED-1 fix: fallback honesto para priceUsdc=0/null en steps 2..N.
+  // AC-4 / CD-4. Mismo patrón que el preHandler de step 0
+  // (src/routes/compose.ts:63-77), replicado en el service.
+  // ─────────────────────────────────────────────────────────────────────
+
+  it('T-COMPOSE-DEBIT-7 should debit step 1 with $1.00 fallback when priceUsdc===0 (BLQ-MED-1)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    // step 1 agent has priceUsdc=0 (registry config error or "free" agent).
+    // Service MUST fallback to $1.00 (NOT debit $0).
+    const a2 = makeAgent({
+      slug: 'free-bug',
+      priceUsdc: 0,
+      id: 'agent-2',
+    });
+    mockAgentsBySlug({ kyc: a1, 'free-bug': a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'free-bug', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    // amount === 1.0 (fallback), NOT 0
+    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 1.0);
+  });
+
+  it('T-COMPOSE-DEBIT-8 should emit warn log with reason=registry-miss when priceUsdc===0 (BLQ-MED-1)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({
+      slug: 'free-bug',
+      priceUsdc: 0,
+      id: 'agent-2',
+    });
+    mockAgentsBySlug({ kyc: a1, 'free-bug': a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+    // Inject DownstreamLogger-compatible logger (Pino shape).
+    const warnSpy = vi.fn();
+    const logger = { warn: warnSpy, info: vi.fn() };
+
+    await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'free-bug', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      logger,
+    });
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'registry-miss',
+        slug: 'free-bug',
+        step: 1,
+      }),
+      'compose-price.fallback per-step',
+    );
+  });
+
+  it('T-COMPOSE-DEBIT-9 should apply same fallback when priceUsdc is null/non-number (BLQ-MED-1)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    // priceUsdc=null is invalid per Agent type, but defensive code must
+    // handle it (registry returns malformed data). Cast via unknown to
+    // bypass TS guard for this defensive scenario.
+    const a2 = makeAgent({
+      slug: 'null-price',
+      id: 'agent-2',
+    });
+    (a2 as unknown as { priceUsdc: number | null }).priceUsdc = null;
+    mockAgentsBySlug({ kyc: a1, 'null-price': a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+    const warnSpy = vi.fn();
+    const logger = { warn: warnSpy, info: vi.fn() };
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'null-price', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      logger,
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    // typeof null !== 'number' → fallback $1
+    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 1.0);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'registry-miss',
+        slug: 'null-price',
+        step: 1,
+      }),
+      'compose-price.fallback per-step',
+    );
+  });
 });

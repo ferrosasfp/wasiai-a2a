@@ -159,6 +159,11 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         // WKH-59 (real-price-debit) DT-D: chainId del MISMO bundle (CD-12)
         // para debit per-step (steps 2..N) atómico en composeService.
         chainId: request.resolvedChainId,
+        // WKH-59 BLQ-MED-1 fix: Pino logger es estructuralmente compatible
+        // con DownstreamLogger (warn/info con shape (obj, msg)). Permite que
+        // el warn `compose-price.fallback per-step` salga al pino transport
+        // configurado en server.ts (vs console.warn raw).
+        logger: request.log,
       });
 
       // BLQ-2: bail early if timeout fired during compose
