@@ -11,8 +11,8 @@ vi.mock('./discovery.js', () => ({
   },
 }));
 
-import { discoveryService } from './discovery.js';
 import { _resetAgentPriceCache, resolveAgentPriceUsdc } from './agent-price.js';
+import { discoveryService } from './discovery.js';
 
 const mockGetAgent = vi.mocked(discoveryService.getAgent);
 

@@ -96,7 +96,9 @@ export const composeService = {
             scopeDeniedTarget: {
               registry: agent.registry,
               agent_slug: agent.slug,
-              ...(target.category !== undefined && { category: target.category }),
+              ...(target.category !== undefined && {
+                category: target.category,
+              }),
             },
           };
         }

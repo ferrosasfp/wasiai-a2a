@@ -3,11 +3,7 @@
  * WKH-18: Timeout preHandler, error boundary integration.
  */
 
-import type {
-  FastifyPluginAsync,
-  FastifyReply,
-  FastifyRequest,
-} from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';

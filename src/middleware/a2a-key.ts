@@ -226,7 +226,8 @@ export function requirePaymentOrA2AKey(
       // CD-12: chainId for debit AND for post-debit getBalance MUST come from
       // the SAME bundle. Do NOT read from getChainConfig() anywhere below.
       const chainId = bundle.chainConfig.chainId;
-      const assetSymbol = bundle.payment.supportedTokens[0]?.symbol ?? 'UNKNOWN';
+      const assetSymbol =
+        bundle.payment.supportedTokens[0]?.symbol ?? 'UNKNOWN';
 
       // WKH-59 (real-price-debit) DT-D / CD-12: propagar al route handler para
       // que composeService haga debit per-step (steps 2..N) con el MISMO chainId

@@ -670,7 +670,7 @@ describe('requirePaymentOrA2AKey middleware', () => {
       expect(response.statusCode).toBe(400);
       expect(response.json().error_code).toBe('CHAIN_NOT_SUPPORTED');
       expect(response.json().error).toContain(
-        "is not a recognized slug or chainId",
+        'is not a recognized slug or chainId',
       );
       // CD-5: no debit attempted when chain resolution fails.
       expect(mockDebit).not.toHaveBeenCalled();
@@ -833,11 +833,7 @@ describe('requirePaymentOrA2AKey middleware', () => {
       expect(response.json().error).toBe('chain 43113 balance is 0');
       // CD-12: debit AND getBalance read chainId from the same bundle (43113).
       expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 1.0);
-      expect(mockGetBalance).toHaveBeenCalledWith(
-        TEST_KEY_ID,
-        43113,
-        'user-1',
-      );
+      expect(mockGetBalance).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 'user-1');
     });
   });
 
@@ -949,7 +945,10 @@ describe('requirePaymentOrA2AKey middleware', () => {
           ],
         },
         async (req: FastifyRequest, reply: FastifyReply) =>
-          reply.send({ ok: true, resolvedChainId: req.resolvedChainId ?? null }),
+          reply.send({
+            ok: true,
+            resolvedChainId: req.resolvedChainId ?? null,
+          }),
       );
 
       // Ruta con AMBOS campos inyectados — precedence test.

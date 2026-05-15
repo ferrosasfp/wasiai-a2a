@@ -90,9 +90,7 @@ function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig {
 }
 // WKH-61: helper local de keyRow para tests de scoping (no compartido con
 // middleware/a2a-key.test.ts; cada archivo mantiene su propio fixture).
-function makeKeyRow(
-  overrides: Partial<A2AAgentKeyRow> = {},
-): A2AAgentKeyRow {
+function makeKeyRow(overrides: Partial<A2AAgentKeyRow> = {}): A2AAgentKeyRow {
   return {
     id: 'key-id-test',
     owner_ref: 'owner-test',
@@ -376,7 +374,11 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
     mockDownstream.mockResolvedValue(null);
     const agent = makeAgent({ priceUsdc: 0, payment: undefined });
     mockFetchOk();
-    const result = await composeService.invokeAgent(agent, { foo: 'bar' }, 'k1');
+    const result = await composeService.invokeAgent(
+      agent,
+      { foo: 'bar' },
+      'k1',
+    );
     expect(result.downstream).toBeUndefined();
   });
 
@@ -605,7 +607,7 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
         tokensIn: 250,
         tokensOut: 60,
         retries: 0,
-        costUsd: 0.000_440, // 250/1M*0.8 + 60/1M*4.0
+        costUsd: 0.000_44, // 250/1M*0.8 + 60/1M*4.0
       },
     });
 
@@ -645,7 +647,7 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
     const meta1 = firstStepCall?.[0].metadata;
     expect(meta1?.bridge_type).toBe('LLM');
     expect(typeof meta1?.bridge_latency_ms).toBe('number');
-    expect(meta1?.bridge_cost_usd).toBeCloseTo(0.000_440, 6);
+    expect(meta1?.bridge_cost_usd).toBeCloseTo(0.000_44, 6);
     expect(meta1?.llm_model).toBe('claude-haiku-4-5-20251001');
     expect(meta1?.llm_tokens_in).toBe(250);
     expect(meta1?.llm_tokens_out).toBe(60);
@@ -689,9 +691,7 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
       ],
     });
 
-    const skipStepCall = trackSpy.mock.calls.find(
-      (c) => c[0].agentId === 'b1',
-    );
+    const skipStepCall = trackSpy.mock.calls.find((c) => c[0].agentId === 'b1');
     expect(skipStepCall).toBeDefined();
     const meta2 = skipStepCall?.[0].metadata;
     expect(meta2?.bridge_type).toBe('SKIPPED');
