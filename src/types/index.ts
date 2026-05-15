@@ -183,6 +183,13 @@ export interface ComposeRequest {
    * Cuando es undefined (path x402), el check no se ejecuta.
    */
   scopingKeyRow?: A2AAgentKeyRow;
+  /**
+   * WKH-59 (real-price-debit) DT-D: chainId resuelto por el middleware
+   * (request.resolvedChainId). composeService lo usa para debit per-step
+   * (steps 2..N) via budgetService.debit. Cuando undefined (path x402 o
+   * defensive skip), el debit per-step se omite.
+   */
+  chainId?: number;
 }
 
 export interface ComposeResult {
