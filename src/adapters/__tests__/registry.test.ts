@@ -62,6 +62,29 @@ vi.mock('../avalanche/index.js', () => ({
   ),
 }));
 
+// Mock the base factory — returns a testnet or mainnet bundle stub depending
+// on `opts.network`. Real adapters covered by base.test.ts.
+vi.mock('../base/index.js', () => ({
+  createBaseAdapters: vi.fn(
+    async (opts?: { network?: 'testnet' | 'mainnet' }) => {
+      const network = opts?.network ?? 'testnet';
+      const chainId = network === 'mainnet' ? 8453 : 84532;
+      const name = network === 'mainnet' ? 'Base' : 'Base Sepolia';
+      const explorerUrl =
+        network === 'mainnet'
+          ? 'https://basescan.org'
+          : 'https://sepolia.basescan.org';
+      return {
+        payment: { name: 'base', chainId },
+        attestation: { name: 'base', chainId },
+        gasless: { name: 'base', chainId },
+        identity: null,
+        chainConfig: { name, chainId, explorerUrl },
+      };
+    },
+  ),
+}));
+
 import {
   _resetRegistry,
   getAdaptersBundle,
@@ -97,7 +120,7 @@ describe('adapter registry', () => {
     process.env.WASIAI_A2A_CHAIN = 'ethereum-mainnet';
 
     await expect(initAdapters()).rejects.toThrow(
-      "Unsupported chain 'ethereum-mainnet'. Supported: kite-ozone-testnet, kite-mainnet, avalanche-fuji, avalanche-mainnet",
+      "Unsupported chain 'ethereum-mainnet'. Supported: kite-ozone-testnet, kite-mainnet, avalanche-fuji, avalanche-mainnet, base-sepolia, base-mainnet",
     );
   });
 
@@ -199,7 +222,7 @@ describe('adapter registry', () => {
     process.env.WASIAI_A2A_CHAINS = 'ethereum-mainnet';
 
     await expect(initAdapters()).rejects.toThrow(
-      "Unsupported chain 'ethereum-mainnet'. Supported: kite-ozone-testnet, kite-mainnet, avalanche-fuji, avalanche-mainnet",
+      "Unsupported chain 'ethereum-mainnet'. Supported: kite-ozone-testnet, kite-mainnet, avalanche-fuji, avalanche-mainnet, base-sepolia, base-mainnet",
     );
   });
 
@@ -395,6 +418,90 @@ describe('adapter registry', () => {
       // The legacy testnet path MUST invoke the factory with no arguments,
       // preserving the pre-W5 byte-identical contract.
       expect(factorySpy).toHaveBeenCalledWith();
+    });
+  });
+
+  // ─── WKH-104 / BASE-01: base-sepolia + base-mainnet factory dispatch ───
+  describe('WKH-104 — Base factory dispatch', () => {
+    it('AC-1 — WASIAI_A2A_CHAINS=base-sepolia → initialized with chainId 84532', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'base-sepolia';
+      await initAdapters();
+
+      expect(getInitializedChainKeys()).toEqual(['base-sepolia']);
+      expect(getDefaultChainKey()).toBe('base-sepolia');
+
+      const config = getChainConfig();
+      expect(config).toEqual({
+        name: 'Base Sepolia',
+        chainId: 84532,
+        explorerUrl: 'https://sepolia.basescan.org',
+      });
+    });
+
+    it('AC-2 — WASIAI_A2A_CHAINS=base-mainnet → initialized with chainId 8453', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'base-mainnet';
+      await initAdapters();
+
+      expect(getInitializedChainKeys()).toEqual(['base-mainnet']);
+      expect(getDefaultChainKey()).toBe('base-mainnet');
+
+      const config = getChainConfig();
+      expect(config).toEqual({
+        name: 'Base',
+        chainId: 8453,
+        explorerUrl: 'https://basescan.org',
+      });
+    });
+
+    it('registry passes opts.network=testnet to createBaseAdapters for base-sepolia', async () => {
+      const factoryModule = await import('../base/index.js');
+      const factorySpy = factoryModule.createBaseAdapters as ReturnType<
+        typeof vi.fn
+      >;
+      factorySpy.mockClear();
+
+      process.env.WASIAI_A2A_CHAINS = 'base-sepolia';
+      await initAdapters();
+
+      expect(factorySpy).toHaveBeenCalledTimes(1);
+      expect(factorySpy).toHaveBeenCalledWith({ network: 'testnet' });
+    });
+
+    it('registry passes opts.network=mainnet to createBaseAdapters for base-mainnet', async () => {
+      const factoryModule = await import('../base/index.js');
+      const factorySpy = factoryModule.createBaseAdapters as ReturnType<
+        typeof vi.fn
+      >;
+      factorySpy.mockClear();
+
+      process.env.WASIAI_A2A_CHAINS = 'base-mainnet';
+      await initAdapters();
+
+      expect(factorySpy).toHaveBeenCalledTimes(1);
+      expect(factorySpy).toHaveBeenCalledWith({ network: 'mainnet' });
+    });
+
+    it('CSV multi-chain con base-sepolia coexiste con kite + avalanche', async () => {
+      process.env.WASIAI_A2A_CHAINS =
+        'kite-ozone-testnet,avalanche-fuji,base-sepolia';
+      await initAdapters();
+
+      expect(getInitializedChainKeys()).toEqual([
+        'kite-ozone-testnet',
+        'avalanche-fuji',
+        'base-sepolia',
+      ]);
+      expect(getDefaultChainKey()).toBe('kite-ozone-testnet');
+
+      const base = getAdaptersBundle('base-sepolia');
+      expect(base?.chainConfig.chainId).toBe(84532);
+    });
+
+    it('AC-6 — unsupported slug "base-typo" throws with Base in supported list', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'base-typo';
+      await expect(initAdapters()).rejects.toThrow(
+        /Supported:.*base-sepolia, base-mainnet/,
+      );
     });
   });
 });

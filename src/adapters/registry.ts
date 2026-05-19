@@ -27,6 +27,8 @@ const SUPPORTED_CHAINS = [
   'kite-mainnet',
   'avalanche-fuji',
   'avalanche-mainnet',
+  'base-sepolia',
+  'base-mainnet',
 ] as const satisfies readonly ChainKey[];
 
 const _bundles = new Map<ChainKey, AdaptersBundle>();
@@ -70,6 +72,14 @@ async function buildBundle(chainKey: ChainKey): Promise<AdaptersBundle> {
   if (chainKey === 'avalanche-mainnet') {
     const { createAvalancheAdapters } = await import('./avalanche/index.js');
     return createAvalancheAdapters({ network: 'mainnet' });
+  }
+  if (chainKey === 'base-sepolia') {
+    const { createBaseAdapters } = await import('./base/index.js');
+    return createBaseAdapters({ network: 'testnet' });
+  }
+  if (chainKey === 'base-mainnet') {
+    const { createBaseAdapters } = await import('./base/index.js');
+    return createBaseAdapters({ network: 'mainnet' });
   }
   throw new Error(
     `Unsupported chain '${chainKey}'. Supported: ${SUPPORTED_CHAINS.join(', ')}`,
