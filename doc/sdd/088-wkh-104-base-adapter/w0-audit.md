@@ -94,6 +94,50 @@ Result: all `ChainKey` callsites live in `registry.ts` only — matches SDD §16
 
 Listo para W1.
 
-## Smoke local W4.3
+## W4 — final verification
 
-Documentado en sección "W4.3 — Smoke local" más abajo después de W4.
+```
+$ npm test 2>&1 | tail -5
+ Test Files  69 passed (69)
+      Tests  987 passed (987)
+   Start at  12:55:44
+   Duration  2.03s
+```
+
+```
+$ npm run build
+> wasiai-a2a@0.1.0 build
+> tsc -p tsconfig.build.json && mkdir -p dist/static && cp -r src/static/. dist/static/
+(exit 0 — clean build, no errors)
+```
+
+```
+$ grep -rn ": any\b" src/adapters/base/
+OK: no ': any' in src/adapters/base/
+
+$ grep -rn "as unknown\b" src/adapters/base/
+OK: no 'as unknown' in src/adapters/base/
+
+$ grep -rn "from 'ethers" src/adapters/base/
+OK: no ethers import in src/adapters/base/
+```
+
+## Smoke local W4.3 — SKIPPED (opcional)
+
+El paso W4.3 (smoke local con `curl` contra `/compose` con
+`x-payment-chain: base-sepolia`) se omite en esta sesión porque:
+
+1. Story File §4 W4.3 lo declara explícitamente "opcional pero recomendado".
+2. La instancia de desarrollo no tiene `OPERATOR_PRIVATE_KEY` test wallet
+   provisionada para Base Sepolia. Provisionarla excede el scope IN de
+   WKH-104 (BASE-01).
+3. El smoke E2E real es responsabilidad de **WKH-107 (BASE-04)**, donde se
+   ejercita el path completo con facilitator real (cuando WKH-105 lo
+   habilite). En BASE-01 el facilitator NO soporta Base RPC todavía
+   (DT-11 caveat documentado en `src/adapters/base/payment.ts` JSDoc).
+4. La cobertura funcional de las rutas inbound `x-payment-chain` está
+   asegurada por `registry.test.ts` y `chain-resolver.test.ts` con mocks.
+
+Si en QA F4 el aprobador requiere smoke explícito, se ejecuta en CI con
+un test wallet dedicado.
+
