@@ -123,7 +123,9 @@ export type ChainKey =
   | 'kite-ozone-testnet'
   | 'kite-mainnet'
   | 'avalanche-fuji'
-  | 'avalanche-mainnet';
+  | 'avalanche-mainnet'
+  | 'base-sepolia'
+  | 'base-mainnet';
 
 /**
  * `AdaptersBundle` groups all chain-specific adapter instances + chain config

@@ -63,6 +63,23 @@ describe('normalizeChainSlug', () => {
     expect(normalizeChainSlug('hasOwnProperty')).toBeUndefined();
   });
 
+  it('maps base aliases (base, base-testnet) per DT-7 convention', () => {
+    expect(normalizeChainSlug('base')).toBe('base-mainnet');
+    expect(normalizeChainSlug('base-mainnet')).toBe('base-mainnet');
+    expect(normalizeChainSlug('base-sepolia')).toBe('base-sepolia');
+    expect(normalizeChainSlug('base-testnet')).toBe('base-sepolia');
+  });
+
+  it('maps Base numeric chainIds to canonical slugs', () => {
+    expect(normalizeChainSlug('8453')).toBe('base-mainnet');
+    expect(normalizeChainSlug('84532')).toBe('base-sepolia');
+  });
+
+  it('lowercases and trims Base input', () => {
+    expect(normalizeChainSlug('  Base-Sepolia  ')).toBe('base-sepolia');
+    expect(normalizeChainSlug('BASE-MAINNET')).toBe('base-mainnet');
+  });
+
   it('returns undefined for non-string input (defensive cast)', () => {
     // Simulates careless callers passing through JSON-parsed values.
     // The TS type is `string`, but the runtime guard MUST cover non-strings
@@ -120,5 +137,13 @@ describe('resolveChainKey', () => {
     expect(
       resolveChainKey({ agentManifestChain: 'ethereum-mainnet' }),
     ).toBeUndefined();
+  });
+
+  it('header chainId 84532 numeric resolves to base-sepolia', () => {
+    expect(resolveChainKey({ headerOverride: '84532' })).toBe('base-sepolia');
+  });
+
+  it('header chainId 8453 numeric resolves to base-mainnet', () => {
+    expect(resolveChainKey({ headerOverride: '8453' })).toBe('base-mainnet');
   });
 });

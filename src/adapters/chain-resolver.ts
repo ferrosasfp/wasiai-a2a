@@ -39,6 +39,16 @@ const SLUG_ALIASES: Record<string, ChainKey> = Object.assign(
     // kite-mainnet aliases
     '2366': 'kite-mainnet',
     'kite-mainnet': 'kite-mainnet',
+
+    // base-mainnet aliases (DT-7: 'base' alone → mainnet, convención comunidad)
+    '8453': 'base-mainnet',
+    'base-mainnet': 'base-mainnet',
+    base: 'base-mainnet',
+
+    // base-sepolia aliases
+    '84532': 'base-sepolia',
+    'base-sepolia': 'base-sepolia',
+    'base-testnet': 'base-sepolia',
   } satisfies Record<string, ChainKey>,
 );
 
