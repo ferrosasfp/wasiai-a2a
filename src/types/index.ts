@@ -502,6 +502,23 @@ export interface AgentCard {
   };
   /** Explains that agent invocations must go through POST /compose or POST /orchestrate on the gateway */
   invocationNote?: string;
+  /**
+   * WKH-106 (BASE-03): JSON Schema describing the agent's input shape.
+   * Surfaced ONLY when `agent.metadata.discoverable === true` (CD-1 opt-in).
+   * Non-breaking extension — consumers that don't understand the field MUST
+   * ignore it (DT-6).
+   *
+   * Validated at build-time via `declareDiscoveryExtension` from
+   * `@x402/extensions/bazaar` + AJV `ajv.compile()` for syntactic JSON
+   * Schema correctness. If validation fails, the route handler MUST return
+   * HTTP 422 (CD-7).
+   */
+  inputSchema?: Record<string, unknown>;
+  /**
+   * WKH-106 (BASE-03): JSON Schema describing the agent's output shape.
+   * Same opt-in semantics and validation rules as `inputSchema`.
+   */
+  outputSchema?: Record<string, unknown>;
 }
 
 // ============================================================
