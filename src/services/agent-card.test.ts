@@ -138,6 +138,163 @@ describe('agentCardService', () => {
       );
       expect(card.capabilities.a2aCompliant).toBeUndefined();
     });
+
+    // ── WKH-106 (BASE-03) — discoverable opt-in + schema serialization ──
+
+    describe('WKH-106 — Bazaar discovery schemas', () => {
+      const validInputSchema = {
+        type: 'object',
+        properties: { query: { type: 'string' } },
+        required: ['query'],
+      };
+      const validOutputSchema = {
+        type: 'object',
+        properties: { result: { type: 'string' } },
+      };
+
+      it('AC-1: appends inputSchema/outputSchema when discoverable=true', () => {
+        const a: Agent = {
+          ...agent,
+          metadata: {
+            discoverable: true,
+            inputSchema: validInputSchema,
+            outputSchema: validOutputSchema,
+          },
+        };
+        const card = agentCardService.buildAgentCard(
+          a,
+          registryConfig,
+          baseUrl,
+        );
+        expect(card.inputSchema).toEqual(validInputSchema);
+        expect(card.outputSchema).toEqual(validOutputSchema);
+      });
+
+      it('AC-3 / CD-1: omits schemas when discoverable=false', () => {
+        const a: Agent = {
+          ...agent,
+          metadata: {
+            discoverable: false,
+            inputSchema: validInputSchema,
+            outputSchema: validOutputSchema,
+          },
+        };
+        const card = agentCardService.buildAgentCard(
+          a,
+          registryConfig,
+          baseUrl,
+        );
+        expect(card.inputSchema).toBeUndefined();
+        expect(card.outputSchema).toBeUndefined();
+      });
+
+      it('AC-3 / CD-1: omits schemas when discoverable is absent (default opt-out)', () => {
+        const a: Agent = {
+          ...agent,
+          metadata: {
+            inputSchema: validInputSchema,
+            outputSchema: validOutputSchema,
+          },
+        };
+        const card = agentCardService.buildAgentCard(
+          a,
+          registryConfig,
+          baseUrl,
+        );
+        expect(card.inputSchema).toBeUndefined();
+        expect(card.outputSchema).toBeUndefined();
+      });
+
+      it('CD-1: discoverable truthy values (string "true", 1) do NOT promote opt-in', () => {
+        for (const truthy of ['true', 1, 'yes']) {
+          const a: Agent = {
+            ...agent,
+            metadata: {
+              discoverable: truthy,
+              inputSchema: validInputSchema,
+            },
+          };
+          const card = agentCardService.buildAgentCard(
+            a,
+            registryConfig,
+            baseUrl,
+          );
+          expect(card.inputSchema).toBeUndefined();
+        }
+      });
+
+      it('appends only inputSchema when outputSchema absent (discoverable=true)', () => {
+        const a: Agent = {
+          ...agent,
+          metadata: {
+            discoverable: true,
+            inputSchema: validInputSchema,
+          },
+        };
+        const card = agentCardService.buildAgentCard(
+          a,
+          registryConfig,
+          baseUrl,
+        );
+        expect(card.inputSchema).toEqual(validInputSchema);
+        expect(card.outputSchema).toBeUndefined();
+      });
+
+      it('AC-4 / CD-7: throws BazaarSchemaError on malformed inputSchema', () => {
+        const a: Agent = {
+          ...agent,
+          metadata: {
+            discoverable: true,
+            inputSchema: { type: 'not-a-valid-type' },
+          },
+        };
+        expect(() =>
+          agentCardService.buildAgentCard(a, registryConfig, baseUrl),
+        ).toThrow(/inputSchema/);
+      });
+
+      it('AC-4 / CD-7: throws BazaarSchemaError on malformed outputSchema', () => {
+        const a: Agent = {
+          ...agent,
+          metadata: {
+            discoverable: true,
+            inputSchema: { type: 'object' },
+            outputSchema: { properties: 'not-an-object' },
+          },
+        };
+        expect(() =>
+          agentCardService.buildAgentCard(a, registryConfig, baseUrl),
+        ).toThrow(/outputSchema/);
+      });
+
+      it('AC-4 / CD-7: throws when schema is a primitive (string)', () => {
+        const a: Agent = {
+          ...agent,
+          metadata: {
+            discoverable: true,
+            inputSchema: 'not-a-schema',
+          },
+        };
+        expect(() =>
+          agentCardService.buildAgentCard(a, registryConfig, baseUrl),
+        ).toThrow(/inputSchema/);
+      });
+
+      it('AC-3: ignores malformed schemas when discoverable=false (no throw)', () => {
+        // Defense-in-depth: even if dev mis-declares schemas, opt-out
+        // means they NEVER trigger validation. The card builds cleanly.
+        const a: Agent = {
+          ...agent,
+          metadata: {
+            discoverable: false,
+            inputSchema: 'malformed',
+          },
+        };
+        expect(() =>
+          agentCardService.buildAgentCard(a, registryConfig, baseUrl),
+        ).not.toThrow();
+      });
+    });
   });
 
   // ---------- buildSelfAgentCard ----------

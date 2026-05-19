@@ -1,10 +1,37 @@
 import type { FastifyRequest } from 'fastify';
+import { validateAgentSchemas } from '../lib/bazaar.js';
 import type {
   Agent,
   AgentCard,
   AgentSkill,
   RegistryConfig,
 } from '../types/index.js';
+
+/**
+ * WKH-106 (BASE-03): read the agent's discoverable opt-in flag.
+ * Returns true ONLY when `metadata.discoverable === true` (strict literal).
+ * Truthy values like 'true' / 1 are NOT promoted — CD-1 demands explicit
+ * opt-in. Default (absent or false) → opt-out (no schemas surfaced).
+ */
+function isDiscoverable(agent: Agent): boolean {
+  return agent.metadata?.discoverable === true;
+}
+
+/**
+ * WKH-106: extract a JSON-Schema-like object from metadata. Returns
+ * `undefined` if the field is absent or not a plain object. AGGREGATE
+ * VALIDATION (compileability + schema-draft check) happens via
+ * `validateAgentSchemas` in `buildAgentCard`.
+ */
+function readSchemaField(
+  agent: Agent,
+  field: 'inputSchema' | 'outputSchema',
+): Record<string, unknown> | undefined {
+  const raw = agent.metadata?.[field];
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  return raw as Record<string, unknown>;
+}
 
 /**
  * Resolve the public base URL for the gateway.
@@ -47,6 +74,14 @@ export const agentCardService = {
 
   /**
    * Build an A2A Agent Card from an internal Agent + its registry config.
+   *
+   * WKH-106 (BASE-03): when `agent.metadata.discoverable === true`, the
+   * returned card includes the agent's `inputSchema` / `outputSchema`
+   * (AC-1 / AC-6). Schemas are validated via `validateAgentSchemas`
+   * BEFORE inclusion — if invalid, throws `BazaarSchemaError` which the
+   * route handler maps to HTTP 422 (AC-4 / CD-7). When `discoverable` is
+   * absent or false, the schemas are NEVER serialized regardless of
+   * whether the manifest declared them (AC-3 / CD-1 opt-out default).
    */
   buildAgentCard(
     agent: Agent,
@@ -58,6 +93,29 @@ export const agentCardService = {
       name: cap,
       description: cap,
     }));
+
+    // WKH-106: discoverable opt-in gate (CD-1). Even if the manifest
+    // declares schemas, they're ONLY surfaced when discoverable is true.
+    const discoverable = isDiscoverable(agent);
+
+    // CD-7 / AC-4: when discoverable=true, validate the RAW metadata
+    // fields (not just the well-typed ones) so primitive / invalid
+    // declarations also fail with BazaarSchemaError → route returns 422.
+    // When discoverable=false, skip validation entirely (opt-out gate).
+    let inputSchema: Record<string, unknown> | undefined;
+    let outputSchema: Record<string, unknown> | undefined;
+    if (discoverable) {
+      const rawInput = agent.metadata?.inputSchema;
+      const rawOutput = agent.metadata?.outputSchema;
+      validateAgentSchemas({
+        inputSchema: rawInput,
+        outputSchema: rawOutput,
+      });
+      // Validation passed → raw values are guaranteed to be plain objects.
+      // Use the typed reader to extract them with the correct type.
+      inputSchema = readSchemaField(agent, 'inputSchema');
+      outputSchema = readSchemaField(agent, 'outputSchema');
+    }
 
     return {
       name: agent.name,
@@ -80,6 +138,11 @@ export const agentCardService = {
       },
       invocationNote:
         'Do not call the agent URL directly. Invoke this agent through POST /compose or POST /orchestrate on the WasiAI A2A gateway.',
+      // WKH-106: append schemas only when discoverable=true AND the
+      // manifest declared them. Absent fields stay OMITTED (no null /
+      // empty-object placeholders) to preserve DT-6 non-breaking semantics.
+      ...(inputSchema !== undefined && { inputSchema }),
+      ...(outputSchema !== undefined && { outputSchema }),
     };
   },
 
