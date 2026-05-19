@@ -641,6 +641,52 @@ Integrating a third-party marketplace or agent with WasiAI A2A? Start with [`doc
 
 ---
 
+## Publishing your agent to Agentic.Market
+
+WasiAI A2A supports the [Coinbase Bazaar Discovery Extension](https://github.com/x402-foundation/x402) (`@x402/extensions/bazaar`). When your agent opts in, its Agent Card is enriched with `inputSchema` / `outputSchema` so Bazaar-aware facilitators (e.g. the CDP Facilitator at `https://x402.org/facilitator`) can index it after the first settle. **Opt-in is mandatory** (default `discoverable: false`) — no agent is published without explicit consent.
+
+**Three-step guide**:
+
+1. **Declare opt-in + schemas in your agent manifest**. In whichever registry hosts your agent, set `metadata.discoverable = true` and provide JSON Schema objects for `inputSchema` and `outputSchema`. Example registry row:
+
+   ```json
+   {
+     "slug": "weather-oracle",
+     "name": "Weather Oracle",
+     "priceUsdc": 0.01,
+     "payment": { "method": "x402", "chain": "base-mainnet", "contract": "0x..." },
+     "metadata": {
+       "discoverable": true,
+       "inputSchema": {
+         "type": "object",
+         "properties": { "city": { "type": "string" } },
+         "required": ["city"]
+       },
+       "outputSchema": {
+         "type": "object",
+         "properties": {
+           "temperature": { "type": "number" },
+           "humidity": { "type": "number" }
+         }
+       }
+     }
+   }
+   ```
+
+   `discoverable` must be the literal boolean `true` — truthy values like `"true"` or `1` do NOT trigger opt-in (defense-in-depth).
+
+2. **Verify the agent-card endpoint**. Hit `GET /agents/<slug>/agent-card` against the gateway and confirm `inputSchema` / `outputSchema` appear in the response body. If they don't, either the manifest opt-in flag is missing or the schemas failed validation — in the latter case you'll get an HTTP 422 with `error_code: "BAZAAR_SCHEMA_INVALID"` identifying which field is malformed.
+
+3. **Configure the CDP Facilitator on Base** (required for Bazaar indexing). Set the env var `CDP_FACILITATOR_URL=https://x402.org/facilitator` on the deployment that hosts the gateway. On the next `POST /compose` or `POST /orchestrate` settle that targets a Base chain (`base-mainnet` or `base-sepolia`), the gateway routes the settle call through the CDP Facilitator, which extracts the discovery extension and adds your agent to the Bazaar catalog. The selector is **Base-only**: Kite and Avalanche settles continue to use the wasiai-facilitator path unchanged.
+
+You can verify the selector's decision by grepping the compose logs for the line:
+
+```
+[Compose] Base settle facilitator selector — chainKey=base-mainnet selected=https://x402.org/facilitator cdpEnvSet=true
+```
+
+---
+
 ## Contributing
 
 WasiAI A2A is built using **NexusAgil**, a methodology with hard gates between roles (Analyst, Architect, Dev, Adversary, QA, Docs). Every change in this repo follows the pipeline:
