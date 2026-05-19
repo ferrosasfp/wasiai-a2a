@@ -38,6 +38,73 @@ To prove the stack works end-to-end (gateway + marketplace + self-hosted facilit
 
 ---
 
+## Base Support
+
+WasiAI A2A ships with first-class support for **Base Sepolia** (chainId `84532`) and **Base Mainnet** (chainId `8453`) via the WKH-103 chain adapter, sitting alongside Kite and Avalanche under the same multi-chain dispatch model. Inbound and outbound USDC settle via EIP-3009 `transferWithAuthorization`, with the EIP-712 domain (`name="USDC"`, `version="2"`) verified onchain.
+
+Full standalone guide: [`doc/integration-base.md`](doc/integration-base.md). Verifiable proof: [`doc/BASE-EVIDENCE.md`](doc/BASE-EVIDENCE.md) — three Base Sepolia `transferWithAuthorization` txs on 2026-05-19, total 0.016 USDC, all SUCCESS.
+
+### Quick Start (5 min)
+
+```bash
+# 1. Clone .env
+cp .env.example .env
+
+# 2. Set three Base env vars
+#    WASIAI_A2A_CHAINS=kite-ozone-testnet,base-sepolia
+#    BASE_NETWORK=testnet
+#    BASE_TESTNET_RPC_URL=https://sepolia.base.org
+
+# 3. Register a wasi_a2a key (one-time)
+curl -X POST https://wasiai-a2a-production.up.railway.app/auth/agent-signup \
+  -H "Content-Type: application/json" \
+  -d '{"owner_ref":"base-demo","display_name":"Base Demo"}'
+
+# 4. Call /compose with x-payment-chain: base-sepolia
+curl -X POST https://wasiai-a2a-production.up.railway.app/compose \
+  -H "Content-Type: application/json" \
+  -H "x-a2a-key: $A2A_KEY" \
+  -H "x-payment-chain: base-sepolia" \
+  -d '{"pipeline":[{"agentSlug":"example-agent","input":{"q":"hello"}}]}'
+# → HTTP 200 (key-funded) or HTTP 402 with accepts[].network = "eip155:84532"
+
+# 5. Grep the selector log line for chainKey=base-sepolia to confirm chain selection.
+```
+
+### Network Config
+
+| Network | chainId | USDC contract | Explorer |
+|---|---|---|---|
+| Base Sepolia | `84532` | [`0x036C…CF7e`](https://sepolia.basescan.org/address/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | https://sepolia.basescan.org |
+| Base Mainnet | `8453` | [`0x8335…2913`](https://basescan.org/address/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | https://basescan.org |
+
+Env vars (full block in `.env.example`): `BASE_NETWORK`, `BASE_TESTNET_RPC_URL`, `BASE_MAINNET_RPC_URL`, `BASE_SEPOLIA_USDC_ADDRESS`, `BASE_MAINNET_USDC_ADDRESS`, `BASE_FACILITATOR_URL`, `CDP_FACILITATOR_URL`.
+
+### Facilitator Options
+
+Two facilitators can verify+settle Base EIP-3009 envelopes. They are interchangeable from the protocol's perspective — pick by operational fit:
+
+- **CDP Facilitator** (`https://x402.org/facilitator`) — Coinbase-hosted, no self-custody of the settle path, **required for Agentic.Market discovery**. Set `CDP_FACILITATOR_URL` to enable; Base-only selector (Kite + Avalanche traffic unaffected).
+- **wasiai-facilitator** (self-hosted at `https://wasiai-facilitator-production.up.railway.app`) — self-custody, single-tenant latency, your `OPERATOR_PRIVATE_KEY` signs the settle tx, your operator wallet pays Base gas in ETH.
+
+Decision matrix with criteria (self-custody, mainnet readiness, cost per tx, latency, Bazaar discovery): [`doc/integration-base.md` §4](doc/integration-base.md#4-facilitator-selection-guide).
+
+### Bazaar Discovery (Agentic.Market)
+
+Agents with `metadata.discoverable: true` (literal boolean) and JSON Schema `inputSchema` + `outputSchema` are eligible for indexing in [Agentic.Market](https://agentic.market) via the [Coinbase Bazaar Discovery Extension](https://github.com/x402-foundation/x402). To activate:
+
+1. Opt in on the agent manifest (`discoverable: true`, declare schemas, set `payment.chain` to `base-mainnet` or `base-sepolia`).
+2. Verify schemas appear on `GET /agents/<slug>/agent-card`.
+3. Set `CDP_FACILITATOR_URL=https://x402.org/facilitator` on the gateway. On the next Base settle, CDP picks up the discovery extension and indexes the agent.
+
+Full three-step walkthrough scoped to Base: [`doc/integration-base.md` §5](doc/integration-base.md#5-appear-on-agenticmarket).
+
+### Comparison with general integration guide
+
+The general (chain-agnostic) marketplace integration guide lives at [`doc/INTEGRATION.md`](doc/INTEGRATION.md) — auth, onboarding, x402, error codes, end-to-end examples. The Base-specific guide ([`doc/integration-base.md`](doc/integration-base.md)) is the 5-minute on-ramp for the Coinbase ecosystem and covers Base-only integration patterns, the facilitator selection matrix, and the Bazaar discovery flow. Read the general guide first if your integration is multi-chain; read the Base guide first if your target is Agentic.Market or a Base-native marketplace.
+
+---
+
 ## Production Status
 
 | Component | URL | Status |
@@ -46,6 +113,8 @@ To prove the stack works end-to-end (gateway + marketplace + self-hosted facilit
 | A2A orchestrator (this repo) | https://wasiai-a2a-production.up.railway.app | live (Railway) |
 | Multi-chain x402 facilitator | https://wasiai-facilitator-production.up.railway.app | live (Railway) |
 | WasiAgentShop demo (use case) | https://wasiai-agentshop.vercel.app | live (Vercel) |
+| Base Sepolia adapter (84532) | [sepolia.basescan.org](https://sepolia.basescan.org) | staged — env-gated, WKH-103 in branch |
+| Base Mainnet adapter (8453) | [basescan.org](https://basescan.org) | staged — env-gated, WKH-103 in branch |
 
 Quality snapshot:
 
@@ -632,6 +701,8 @@ At minimum, configure in your deployment environment:
 |----------|-------------|
 | [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md) | Hackathon submission — live URLs, mainnet activation, on-chain proofs, Kite Passport positioning |
 | [`doc/INTEGRATION.md`](doc/INTEGRATION.md) | Marketplace integration guide — auth, onboarding, x402, end-to-end examples |
+| [`doc/integration-base.md`](doc/integration-base.md) | Base integration guide — 5-min quick start on Base Sepolia/Mainnet, facilitator selection, Agentic.Market discovery |
+| [`doc/BASE-EVIDENCE.md`](doc/BASE-EVIDENCE.md) | Onchain proof of the Base adapter — three Base Sepolia `transferWithAuthorization` txs with verifiable Basescan links |
 | [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md) | Full L1-L4 architecture, adapter interfaces, migration roadmap |
 | [`doc/architecture/MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) | Multi-chain registry (WKH-MULTICHAIN / 086) — chain selection priority, alias table, deposit procedure, mainnet activation |
 | [`doc/kite-contracts.md`](doc/kite-contracts.md) | Kite contract addresses, token specs, infrastructure endpoints |
