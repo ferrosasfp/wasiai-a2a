@@ -24,11 +24,28 @@
 
 import { Ajv } from 'ajv';
 import {
+  type DeclareBodyDiscoveryExtensionConfig,
+  type DeclareMcpDiscoveryExtensionConfig,
+  type DeclareQueryDiscoveryExtensionConfig,
   declareDiscoveryExtension,
-  type DeclareDiscoveryExtensionInput,
   type DiscoveryExtension,
   validateDiscoveryExtension,
 } from '@x402/extensions/bazaar';
+
+/**
+ * Input config for `buildBazaarDiscoveryExtension`.
+ *
+ * NOTE on SDK typing: the SDK's exported `DeclareDiscoveryExtensionInput`
+ * applies `DistributiveOmit<..., 'method'>` which strips the `method`
+ * discriminator from the type even though the runtime function REQUIRES
+ * `method` for HTTP configs (see SDK README examples). We re-export the
+ * underlying config types directly so callers can pass `method` without
+ * a type cast.
+ */
+export type BazaarDeclareConfig =
+  | DeclareQueryDiscoveryExtensionConfig
+  | DeclareBodyDiscoveryExtensionConfig
+  | DeclareMcpDiscoveryExtensionConfig;
 
 /**
  * Thrown when the agent's manifest declares `discoverable: true` but the
@@ -159,9 +176,13 @@ export function validateAgentSchemas(input: {
  * generated extension.
  */
 export function buildBazaarDiscoveryExtension(
-  config: DeclareDiscoveryExtensionInput,
+  config: BazaarDeclareConfig,
 ): Record<string, DiscoveryExtension> {
-  const extensionRecord = declareDiscoveryExtension(config);
+  // Cast to SDK's narrow input type (which omits `method` via DistributiveOmit).
+  // The runtime requires `method` for HTTP configs — see SDK examples.
+  const extensionRecord = declareDiscoveryExtension(
+    config as Parameters<typeof declareDiscoveryExtension>[0],
+  );
 
   // Each value in the record is a DiscoveryExtension; validate them all
   // before returning so consumers get a consistent fail-fast contract.

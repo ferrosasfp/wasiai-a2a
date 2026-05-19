@@ -3,7 +3,7 @@
  * 9 tests: T-1 through T-9
  */
 import crypto from 'node:crypto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   A2AAgentKeyRow,
   Agent,
@@ -1395,6 +1395,246 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
         step: 1,
       }),
       'compose-price.fallback per-step',
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// WKH-106 (BASE-03) — selector telemetry on Base settle path.
+//
+// The Base adapter itself already honors CDP_FACILITATOR_URL via its own
+// env-var fallback chain (src/adapters/base/payment.ts:163-170). The compose
+// integration logs the selector decision so AC-2 / AC-5 / AC-7 are
+// observable from the compose layer. These tests verify the log line
+// is emitted only when the agent's manifest declares a Base chain.
+// ─────────────────────────────────────────────────────────────────────────
+describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
+  const ORIGINAL_CDP_ENV = process.env.CDP_FACILITATOR_URL;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  function getLogLines(): string[] {
+    // logSpy.mock.calls is typed loosely as `unknown[][]`; we know each
+    // call is `(message: unknown, ...rest: unknown[])` so coerce to string.
+    return logSpy.mock.calls.map((c: unknown[]) => String(c[0]));
+  }
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    if (ORIGINAL_CDP_ENV === undefined) {
+      delete process.env.CDP_FACILITATOR_URL;
+    } else {
+      process.env.CDP_FACILITATOR_URL = ORIGINAL_CDP_ENV;
+    }
+  });
+
+  it('AC-2: logs CDP URL as selected when chain=base-mainnet and env is set', async () => {
+    process.env.CDP_FACILITATOR_URL = 'https://x402.org/facilitator';
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const mockPR: X402PaymentRequest = {
+      authorization: {
+        from: '0xAAA',
+        to: '0xBBB',
+        value: '1000000',
+        validAfter: '0',
+        validBefore: '9999999999',
+        nonce: '0x1234',
+      },
+      signature: '0xSIG',
+      network: 'eip155:8453',
+    };
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'base64mock',
+      paymentRequest: mockPR,
+    });
+    mockSettle.mockResolvedValue({ success: true, txHash: '0xDEADBEEF' });
+    const agent = makeAgent({
+      priceUsdc: 1.0,
+      metadata: { payTo: '0xBBB' },
+      payment: {
+        method: 'x402',
+        chain: 'base-mainnet',
+        contract: '0xBBB',
+      },
+    });
+    mockFetchOk();
+    await composeService.invokeAgent(agent, { q: 'hello' });
+
+    const logCalls = getLogLines();
+    const selectorLog = logCalls.find((l: string) =>
+      l.includes('Base settle facilitator selector'),
+    );
+    expect(selectorLog).toBeDefined();
+    expect(selectorLog).toContain('chainKey=base-mainnet');
+    expect(selectorLog).toContain('selected=https://x402.org/facilitator');
+    expect(selectorLog).toContain('cdpEnvSet=true');
+  });
+
+  it('AC-5: logs adapter-default fallback when env unset (base-sepolia)', async () => {
+    delete process.env.CDP_FACILITATOR_URL;
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const mockPR: X402PaymentRequest = {
+      authorization: {
+        from: '0xAAA',
+        to: '0xBBB',
+        value: '1000000',
+        validAfter: '0',
+        validBefore: '9999999999',
+        nonce: '0x1234',
+      },
+      signature: '0xSIG',
+      network: 'eip155:84532',
+    };
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'base64mock',
+      paymentRequest: mockPR,
+    });
+    mockSettle.mockResolvedValue({ success: true, txHash: '0xCAFE' });
+    const agent = makeAgent({
+      priceUsdc: 0.5,
+      metadata: { payTo: '0xBBB' },
+      payment: {
+        method: 'x402',
+        chain: 'base-sepolia',
+        contract: '0xBBB',
+      },
+    });
+    mockFetchOk();
+    await composeService.invokeAgent(agent, { q: 'hi' });
+
+    const logCalls = getLogLines();
+    const selectorLog = logCalls.find((l: string) =>
+      l.includes('Base settle facilitator selector'),
+    );
+    expect(selectorLog).toBeDefined();
+    expect(selectorLog).toContain('chainKey=base-sepolia');
+    expect(selectorLog).toContain('selected=<adapter-default>');
+    expect(selectorLog).toContain('cdpEnvSet=false');
+  });
+
+  it('AC-7 / CD-5: does NOT log selector when chain is Kite (unaffected)', async () => {
+    process.env.CDP_FACILITATOR_URL = 'https://x402.org/facilitator';
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const mockPR: X402PaymentRequest = {
+      authorization: {
+        from: '0xAAA',
+        to: '0xBBB',
+        value: '1000000',
+        validAfter: '0',
+        validBefore: '9999999999',
+        nonce: '0x1234',
+      },
+      signature: '0xSIG',
+      network: 'eip155:2368',
+    };
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'base64mock',
+      paymentRequest: mockPR,
+    });
+    mockSettle.mockResolvedValue({ success: true, txHash: '0xKITE' });
+    const agent = makeAgent({
+      priceUsdc: 0.1,
+      metadata: { payTo: '0xBBB' },
+      payment: {
+        method: 'x402',
+        chain: 'kite-testnet',
+        contract: '0xBBB',
+      },
+    });
+    mockFetchOk();
+    await composeService.invokeAgent(agent, { q: 'hi' });
+
+    const logCalls = getLogLines();
+    const selectorLog = logCalls.find((l: string) =>
+      l.includes('Base settle facilitator selector'),
+    );
+    expect(selectorLog).toBeUndefined();
+  });
+
+  it('AC-7 / CD-5: does NOT log selector when chain is Avalanche (unaffected)', async () => {
+    process.env.CDP_FACILITATOR_URL = 'https://x402.org/facilitator';
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const mockPR: X402PaymentRequest = {
+      authorization: {
+        from: '0xAAA',
+        to: '0xBBB',
+        value: '1000000',
+        validAfter: '0',
+        validBefore: '9999999999',
+        nonce: '0x1234',
+      },
+      signature: '0xSIG',
+      network: 'eip155:43113',
+    };
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'base64mock',
+      paymentRequest: mockPR,
+    });
+    mockSettle.mockResolvedValue({ success: true, txHash: '0xFUJI' });
+    const agent = makeAgent({
+      priceUsdc: 0.1,
+      metadata: { payTo: '0xBBB' },
+      payment: {
+        method: 'x402',
+        chain: 'avalanche-fuji',
+        contract: '0xBBB',
+      },
+    });
+    mockFetchOk();
+    await composeService.invokeAgent(agent, { q: 'hi' });
+
+    const logCalls = getLogLines();
+    const selectorLog = logCalls.find((l: string) =>
+      l.includes('Base settle facilitator selector'),
+    );
+    expect(selectorLog).toBeUndefined();
+  });
+
+  it('honors agent manifest facilitatorUrl when CDP env is absent', async () => {
+    delete process.env.CDP_FACILITATOR_URL;
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const mockPR: X402PaymentRequest = {
+      authorization: {
+        from: '0xAAA',
+        to: '0xBBB',
+        value: '1000000',
+        validAfter: '0',
+        validBefore: '9999999999',
+        nonce: '0x1234',
+      },
+      signature: '0xSIG',
+      network: 'eip155:8453',
+    };
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'base64mock',
+      paymentRequest: mockPR,
+    });
+    mockSettle.mockResolvedValue({ success: true, txHash: '0xMAN' });
+    const agent = makeAgent({
+      priceUsdc: 1.0,
+      metadata: {
+        payTo: '0xBBB',
+        facilitatorUrl: 'https://custom.facilitator.example.com',
+      },
+      payment: {
+        method: 'x402',
+        chain: 'base-mainnet',
+        contract: '0xBBB',
+      },
+    });
+    mockFetchOk();
+    await composeService.invokeAgent(agent, { q: 'hello' });
+
+    const logCalls = getLogLines();
+    const selectorLog = logCalls.find((l: string) =>
+      l.includes('Base settle facilitator selector'),
+    );
+    expect(selectorLog).toBeDefined();
+    expect(selectorLog).toContain(
+      'selected=https://custom.facilitator.example.com',
     );
   });
 });

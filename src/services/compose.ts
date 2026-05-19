@@ -2,7 +2,9 @@
  * Compose Service -- Execute multi-agent pipelines
  */
 
+import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { getPaymentAdapter } from '../adapters/registry.js';
+import { selectFacilitatorUrl } from '../lib/cdp-selector.js';
 import {
   type DownstreamLogger,
   type DownstreamResult,
@@ -401,6 +403,38 @@ export const composeService = {
     const output = data.result ?? data;
     let txHash: string | undefined;
     if (paymentRequest) {
+      // WKH-106 (BASE-03): emit selector decision telemetry when settle
+      // is on Base chain. The Base adapter itself already honors
+      // CDP_FACILITATOR_URL via its own env-var fallback chain (see
+      // src/adapters/base/payment.ts:163-170), but logging the selector
+      // result here gives observability for AC-2 / AC-5 / AC-7 and lets
+      // compose-layer integration tests assert the decision was taken.
+      //
+      // Selector is invoked ONLY when the agent's manifest declares a
+      // Base chain (CD-5 — Kite/Avalanche untouched). Pure function call:
+      // no env mutation, no I/O.
+      const manifestChain = agent.payment?.chain;
+      const chainKey = manifestChain
+        ? normalizeChainSlug(manifestChain)
+        : undefined;
+      if (chainKey?.startsWith('base-')) {
+        const meta = agent.metadata as Record<string, unknown> | undefined;
+        const manifestFacilitatorUrl =
+          typeof meta?.facilitatorUrl === 'string'
+            ? meta.facilitatorUrl
+            : undefined;
+        const selectedUrl = selectFacilitatorUrl({
+          chainKey,
+          cdpFacilitatorUrl: process.env.CDP_FACILITATOR_URL,
+          agentManifestFacilitatorUrl: manifestFacilitatorUrl,
+        });
+        // Structured log — easy to grep in production + drives smoke tests.
+        // Does NOT include the CDP key itself — only the URL host pattern.
+        console.log(
+          `[Compose] Base settle facilitator selector — chainKey=${chainKey} selected=${selectedUrl ?? '<adapter-default>'} cdpEnvSet=${typeof process.env.CDP_FACILITATOR_URL === 'string' && process.env.CDP_FACILITATOR_URL.length > 0}`,
+        );
+      }
+
       const settleResult = await getPaymentAdapter().settle({
         authorization: paymentRequest.authorization,
         signature: paymentRequest.signature,
