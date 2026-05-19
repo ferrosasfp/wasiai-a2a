@@ -65,6 +65,10 @@ Mainnet proof — real cross-chain agent payments on production money:
 | `0x6f406c08…` | Kite testnet | PYUSD inbound (1.0 PYUSD) | [kitescan](https://testnet.kitescan.ai/tx/0x6f406c08f6e59e3c5029f57ec3a84bb4596b94bb02568055ec4f9572981a1bf9) |
 | `0xf3eaa00a…` | Kite Ozone testnet | PYUSD settle from WasiAgentShop demo | [kitescan](https://testnet.kitescan.ai/tx/0xf3eaa00a7e83c41b2b9d8247e39d32f564b36cd8745f91e3c080ff23f0f1d674) |
 
+### Verifiable proof on Base Sepolia
+
+WKH-104 (Base adapter) + WKH-105 (facilitator Base) verified end-to-end with real `transferWithAuthorization` transactions on Base Sepolia. See [`doc/BASE-EVIDENCE.md`](doc/BASE-EVIDENCE.md) for tx hashes verifiable in [sepolia.basescan.org](https://sepolia.basescan.org).
+
 ---
 
 ## Architecture
