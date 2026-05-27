@@ -79,3 +79,4 @@
 | 090 | 2026-05-19 | [BASE-03] Bazaar Discovery Extension + Agent-Card Schemas (WKH-106) | feature | FAST+AR | DONE | feat/wkh-base-port-v1 ([done-report.md](090-wkh-106-bazaar-extension/done-report.md)) |
 | 091 | 2026-05-19 | [BASE-04] Smoke E2E Base Sepolia con tx hash real en Basescan (WKH-107) | test | FAST | DONE | feat/wkh-base-port-v1 ([done-report.md](091-wkh-107-smoke-base-sepolia/done-report.md)) |
 | 092 | 2026-05-19 | [BASE-05] README "Base Support" + integration guide Base (WKH-108) | doc | FAST | DONE | feat/wkh-base-port-v1 ([done-report.md](092-wkh-108-base-docs/done-report.md)) |
+| 093 | 2026-05-27 | [BASE-06] x402 payment path chain-aware — rutear verify/settle a x-payment-chain (WKH-111) | feature | QUALITY | DONE | feat/093-wkh-111-x402-chain-aware ([done-report.md](093-wkh-111-x402-chain-aware/done-report.md)) |
