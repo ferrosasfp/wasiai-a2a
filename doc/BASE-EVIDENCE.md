@@ -79,6 +79,28 @@ The full x402 v2 `/compose` flow through a deployed gateway is recommended for P
 - **Signature v/r/s**: v=28, r=`0xd4a7b221...`, s=`0x2bb327ca...`
 - **Status**: ✅ SUCCESS
 
+## Run 4 — full /compose gateway flow E2E (WKH-111 / BASE-06)
+
+> **First run through the COMPLETE gateway path** (Runs 1-3 were chain-layer only).
+> `POST /compose` → HTTP 402 challenge (Base) → EIP-3009 sign → retry with
+> `payment-signature` → gateway `verify`+`settle` via Base facilitator → HTTP 200 + tx hash.
+> Proves the x402 inbound path is now chain-aware (WKH-111): the 402 advertised
+> `network: eip155:84532` + `maxAmountRequired: 1000000` (1 USDC, 6-dec), NOT the Kite default 1e18.
+
+- **Date**: 2026-05-27T20:46:21.834Z
+- **Gateway**: https://wasiai-a2a-production.up.railway.app (prod) → facilitator Base prod
+- **Flow**: full `/compose` x402 v2 (402 → sign → settle)
+- **Tx hash**: [`0x89329e5a23f7470bdd470d7dd747f77414c6132cdb89b2fcb0f713e9292fec7e`](https://sepolia.basescan.org/tx/0x89329e5a23f7470bdd470d7dd747f77414c6132cdb89b2fcb0f713e9292fec7e)
+- **Basescan**: https://sepolia.basescan.org/tx/0x89329e5a23f7470bdd470d7dd747f77414c6132cdb89b2fcb0f713e9292fec7e
+- **Amount**: 1.000 USDC (1,000,000 micro-USDC)
+- **Block**: 42,072,222
+- **Gas used**: 75,632
+- **client / payTo**: `0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba` (self-transfer, MVP pattern)
+- **Nonce (EIP-3009)**: `0xfe37683a7556025faeb483fa8dbf9e13c14cd750ba96f838c77be1407a082279`
+- **Domain**: `{ name='USDC', version='2', chainId=84532 }`
+- **Onchain logs**: `Transfer` (1 USDC) + `AuthorizationUsed` (nonce consumed — anti-replay)
+- **Status**: ✅ SUCCESS (status `0x1`, verified via `eth_getTransactionReceipt`)
+
 ---
 
 ## How to verify
@@ -95,12 +117,13 @@ curl -X POST https://sepolia.base.org \
 
 The tx `input` field decodes to `transferWithAuthorization(...)` with the parameters listed above.
 
-## Next steps for full gateway E2E
+## Full gateway E2E — ✅ COMPLETED (Run 4, 2026-05-27)
 
-A future run with the full gateway flow (`POST /compose` → 402 challenge → signed retry → /settle via facilitator → tx hash) will be performed once:
+The full gateway flow (`POST /compose` → 402 challenge → signed retry → settle via
+facilitator → tx hash) was completed in **Run 4** above. Prerequisites met:
 
-1. WKH-104 + WKH-105 merged to `main`
-2. Railway production deployed with `WASIAI_A2A_CHAINS` including `base-sepolia`
-3. An agent registered in production marketplace with `payment.chain: base-sepolia`
+1. ✅ WKH-104 + WKH-105 merged to `main` (Base adapter + facilitator Base support)
+2. ✅ WKH-111 merged: x402 inbound path made chain-aware (challenge/verify/settle route to `x-payment-chain`)
+3. ✅ Railway prod deployed with `WASIAI_A2A_CHAINS` including `base-sepolia`; facilitator prod `/supported` lists `eip155:84532`
 
-That run will be appended below as "Run 4 — full /compose flow" with the same evidence format.
+Base Sepolia is now a fully operational payment chain in `wasiai-a2a` prod, end-to-end.
