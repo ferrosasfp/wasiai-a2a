@@ -169,6 +169,11 @@ vi.mock('../../adapters/registry.js', () => ({
   })),
   getAttestationAdapter: vi.fn(),
   getIdentityBindingAdapter: vi.fn(),
+  // WKH-111: x402 requirePayment now resolves a chainKey per-request. Advertise
+  // a single default chain so the no-header path stays at 402 (auth required).
+  getDefaultChainKey: vi.fn(() => 'kite-ozone-testnet'),
+  getAdaptersBundle: vi.fn(() => ({ chainConfig: { chainId: 2368 } })),
+  getInitializedChainKeys: vi.fn(() => ['kite-ozone-testnet']),
 }));
 
 // ── Layer 4: Anthropic SDK ────────────────────────────────────

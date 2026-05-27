@@ -73,6 +73,11 @@ vi.mock('../adapters/registry.js', () => ({
   getIdentityBindingAdapter: vi.fn(),
   initAdapters: vi.fn(),
   _resetRegistry: vi.fn(),
+  // WKH-111: x402 requirePayment now resolves a chainKey per-request. Advertise
+  // a single default chain so the no-header path resolves to 402 (auth required).
+  getDefaultChainKey: vi.fn(() => 'kite-ozone-testnet'),
+  getAdaptersBundle: vi.fn(() => ({ chainConfig: { chainId: 2368 } })),
+  getInitializedChainKeys: vi.fn(() => ['kite-ozone-testnet']),
 }));
 
 import { registryService } from '../services/registry.js';
