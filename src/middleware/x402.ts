@@ -8,7 +8,14 @@ import type {
   FastifyRequest,
   preHandlerHookHandler,
 } from 'fastify';
-import { getPaymentAdapter } from '../adapters/registry.js';
+import { resolveChainKey } from '../adapters/chain-resolver.js';
+import {
+  getAdaptersBundle,
+  getDefaultChainKey,
+  getInitializedChainKeys,
+  getPaymentAdapter,
+} from '../adapters/registry.js';
+import type { ChainKey } from '../adapters/types.js';
 import type {
   X402PaymentPayload,
   X402PaymentRequest,
@@ -41,15 +48,24 @@ export interface PaymentMiddlewareOptions {
   amount?: string;
 }
 
-export function buildX402Response(
+/**
+ * Argument passed to `adapter.quote()` to derive the default challenge amount.
+ * NOT a wei value — the adapter returns the dimensional `amountWei` for its
+ * chain (6-dec Base vs 18-dec Kite). CD-4 / CD-9.
+ */
+const DEFAULT_AMOUNT_USD = 1;
+
+export async function buildX402Response(
   opts: PaymentMiddlewareOptions,
   resource: string,
+  chainKey: ChainKey,
   errorMessage: string = 'payment-signature header is required',
-): X402Response {
-  const adapter = getPaymentAdapter();
+): Promise<X402Response> {
+  const adapter = getPaymentAdapter(chainKey);
   const walletAddress =
     process.env.PAYMENT_WALLET_ADDRESS || process.env.KITE_WALLET_ADDRESS || '';
-  const amount = opts.amount ?? '1000000000000000000';
+  const amount =
+    opts.amount ?? (await adapter.quote(DEFAULT_AMOUNT_USD)).amountWei;
   const merchantName = adapter.getMerchantName();
   const payload: X402PaymentPayload = {
     scheme: adapter.getScheme(),
@@ -119,9 +135,50 @@ export function requirePayment(
       ['true', '1', 'yes'].includes(sessionHeader.toLowerCase().trim());
     request.paymentOrigin = isPassportSession ? 'passport' : 'eoa';
     const resource = `${request.protocol}://${request.hostname}${request.url}`;
+
+    // Resolve target chain per-request (WKH-111 / BASE-06).
+    // Priority: explicit `x-payment-chain` header > registry default.
+    // CD-10: resolved BEFORE reading `payment-signature` so the 402 challenge
+    // is also chain-aware. CD-6: resolution happens exactly once per request.
+    // CD-11: resolver reads ONLY the header — never `request.body`.
+    const headerRaw = request.headers['x-payment-chain'];
+    const headerOverride =
+      typeof headerRaw === 'string' ? headerRaw : undefined;
+    const defaultChainKey = getDefaultChainKey();
+
+    let chainKey = resolveChainKey({ headerOverride });
+    if (!chainKey) {
+      if (headerOverride !== undefined) {
+        // CD-5: header present but unrecognised → 400, never silent default.
+        return reply.status(400).send({
+          error_code: 'CHAIN_NOT_SUPPORTED',
+          error: `Chain '${headerOverride}' is not a recognized slug or chainId`,
+        });
+      }
+      // Header absent → fall back to registry default.
+      chainKey = defaultChainKey ?? undefined;
+      if (!chainKey) {
+        return reply.status(500).send({
+          error_code: 'REGISTRY_NOT_INITIALIZED',
+          error: 'No chains initialized in registry',
+        });
+      }
+    }
+
+    const bundle = getAdaptersBundle(chainKey);
+    if (!bundle) {
+      // recognised slug but not present in the initialised registry.
+      return reply.status(400).send({
+        error_code: 'CHAIN_NOT_SUPPORTED',
+        error: `Chain '${chainKey}' is not initialized. Initialized: ${getInitializedChainKeys().join(', ')}`,
+      });
+    }
+
     const xPaymentHeader = request.headers['payment-signature'];
     if (!xPaymentHeader || typeof xPaymentHeader !== 'string')
-      return reply.status(402).send(buildX402Response(opts, resource));
+      return reply
+        .status(402)
+        .send(await buildX402Response(opts, resource, chainKey));
     let paymentPayload: X402PaymentRequest;
     try {
       paymentPayload = decodeXPayment(xPaymentHeader);
@@ -130,16 +187,17 @@ export function requirePayment(
       return reply
         .status(402)
         .send(
-          buildX402Response(
+          await buildX402Response(
             opts,
             resource,
+            chainKey,
             `Invalid payment-signature format: ${detail}`,
           ),
         );
     }
     let verifyResult: { valid: boolean; error?: string };
     try {
-      verifyResult = await getPaymentAdapter().verify({
+      verifyResult = await getPaymentAdapter(chainKey).verify({
         authorization: paymentPayload.authorization,
         signature: paymentPayload.signature,
         network: paymentPayload.network ?? '',
@@ -152,9 +210,10 @@ export function requirePayment(
       return reply
         .status(402)
         .send(
-          buildX402Response(
+          await buildX402Response(
             opts,
             resource,
+            chainKey,
             `Facilitator unavailable: ${detail}`,
           ),
         );
@@ -164,15 +223,16 @@ export function requirePayment(
       return reply
         .status(402)
         .send(
-          buildX402Response(
+          await buildX402Response(
             opts,
             resource,
+            chainKey,
             `Payment verification failed: ${verifyResult.error ?? 'unknown reason'}`,
           ),
         );
     let settleResult: { txHash: string; success: boolean; error?: string };
     try {
-      settleResult = await getPaymentAdapter().settle({
+      settleResult = await getPaymentAdapter(chainKey).settle({
         authorization: paymentPayload.authorization,
         signature: paymentPayload.signature,
         network: paymentPayload.network ?? '',
@@ -183,9 +243,10 @@ export function requirePayment(
       return reply
         .status(402)
         .send(
-          buildX402Response(
+          await buildX402Response(
             opts,
             resource,
+            chainKey,
             `Payment settlement failed: ${detail}`,
           ),
         );
@@ -195,9 +256,10 @@ export function requirePayment(
       return reply
         .status(402)
         .send(
-          buildX402Response(
+          await buildX402Response(
             opts,
             resource,
+            chainKey,
             `Payment settlement failed: ${settleResult.error ?? 'unknown reason'}`,
           ),
         );
