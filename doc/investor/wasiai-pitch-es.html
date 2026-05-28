@@ -744,6 +744,26 @@ footer b{color:#fafaf7}
   .marquee-track{animation:none}
   .cursor{animation:none}
 }
+
+.team-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+@media(max-width:768px){.team-grid{grid-template-columns:1fr}}
+.founder{background:var(--paper);border:1px solid var(--line);border-radius:18px;padding:32px;transition:transform .2s,box-shadow .2s;}
+.founder:hover{transform:translateY(-2px);box-shadow:0 14px 40px -16px rgba(0,0,0,0.18)}
+.founder-top{display:flex;align-items:flex-start;gap:18px;margin-bottom:18px}
+.founder-photo{width:72px;height:72px;border-radius:50%;object-fit:cover;background:var(--bg-2);border:1px solid var(--line);flex-shrink:0;}
+.founder-photo-fallback{display:grid;place-items:center;font:700 24px/1 'Inter';color:var(--fg);background:var(--bg-2);}
+.founder-name{font:700 1.25rem/1.2 'Inter';letter-spacing:-0.02em;color:var(--ink);margin-bottom:3px}
+.founder-role{font:500 12px/1.3 var(--mono);color:var(--fg-3);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px}
+.founder-li{display:inline-flex;align-items:center;gap:6px;font:600 12px/1 'Inter';color:var(--fg-2);padding:5px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);transition:all .15s;}
+.founder-li:hover{color:#0a66c2;border-color:#0a66c2;background:var(--paper)}
+.founder-li svg{width:14px;height:14px}
+.founder-hook{color:var(--fg-2);font-size:0.97rem;line-height:1.6;margin-bottom:14px}
+.founder-bio{color:var(--fg-2);font-size:0.88rem;line-height:1.6;max-height:0;overflow:hidden;transition:max-height .35s ease,margin-top .35s,opacity .25s;opacity:0;}
+.founder-bio.open{max-height:600px;opacity:1;margin-top:6px;padding-top:14px;border-top:1px solid var(--line)}
+.founder-toggle{font:600 12px/1 var(--mono);color:var(--ink);text-transform:uppercase;letter-spacing:0.1em;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all .15s;margin-top:14px;}
+.founder-toggle:hover{border-color:var(--ink);background:var(--paper)}
+.founder-toggle .ar{transition:transform .2s}
+.founder-toggle.open .ar{transform:rotate(180deg)}
 </style>
 </head>
 <body>
@@ -788,7 +808,7 @@ footer b{color:#fafaf7}
       <a href="#market" class="nav-link">Mercado</a>
       <a href="#revenue" class="nav-link">Modelo</a>
       <a href="#roadmap" class="nav-link">Roadmap</a>
-      <a href="#team" class="nav-link">Equipo</a>
+      <a href="#team" class="nav-link">Fundadores</a>
     </div>
     <a href="https://wasiai-a2a-production.up.railway.app" target="_blank" rel="noopener" class="nav-cta">Gateway en vivo <span class="arr">&rarr;</span></a>
     <div class="nav-progress" id="navProgress"></div>
@@ -1429,28 +1449,35 @@ footer b{color:#fafaf7}
 <section id="team" style="background:var(--bg-3);padding:120px 0;border-bottom:1px solid var(--line-2)">
   <div class="container">
     <div class="sec-head center reveal">
-      <div class="sec-eyebrow">Equipo y Ask</div>
-      <h2>El equipo que construye los <span class="sf">rieles</span>.</h2>
+      <div class="sec-eyebrow">Los fundadores</div>
+      <h2>Dos operadores. <span class="sf">Cuarenta y cinco años</span> entregando producto.</h2>
     </div>
-
-    <div class="market-grid">
-      <div class="market-card reveal">
-        <h4>Equipo</h4>
-        <p><span class="placeholder">[completar: founder, nombre, rol, ex-experiencia]</span></p>
-        <p><span class="placeholder">[completar: founder, CTO / co-founders]</span></p>
-        <p><span class="placeholder">[completar: founder, advisors si aplica]</span></p>
-        <p style="margin-top:14px">Lo que sí se puede afirmar hoy: el equipo entregó ~64 historias de usuario (mayoría QUALITY), ~1.649 tests verdes, y la stack está en producción en tres chains (testnet, mainnet-ready).</p>
-      </div>
-      <div class="market-card reveal d1">
-        <h4>Ask</h4>
-        <p><span class="placeholder">[completar: founder, monto de la ronda]</span></p>
-        <p style="margin-top:8px"><b>Uso de fondos (sugerido, ajustar):</b></p>
-        <div class="market-list" style="margin-top:12px">
-          <div class="market-pt"><div class="icn">40</div><p><b>Ingeniería</b>: escalar la capa A2A y agregar nuevas chains.</p></div>
-          <div class="market-pt"><div class="icn">25</div><p><b>Go-to-market B2B</b>: integraciones con marketplaces terceros.</p></div>
-          <div class="market-pt"><div class="icn">20</div><p><b>Seguridad</b>: auditorías formales onchain.</p></div>
-          <div class="market-pt"><div class="icn">15</div><p><b>Runway</b>: operación más grants matching.</p></div>
+    <div class="team-grid">
+      <div class="founder reveal">
+        <div class="founder-top">
+          <img src="https://wasiai.io/pitch-v6/fer.jpg" alt="Fernando Rosas" class="founder-photo" onerror="this.outerHTML='<div class=&quot;founder-photo founder-photo-fallback&quot;>FR</div>'" />
+          <div>
+            <div class="founder-name">Fernando Rosas</div>
+            <div class="founder-role">Co-fundador / CEO · Blockchain · DeFi</div>
+            <a href="https://www.linkedin.com/in/fernando-rosas/" target="_blank" rel="noopener" class="founder-li"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg> LinkedIn</a>
+          </div>
         </div>
+        <div class="founder-hook">25+ años construyendo tecnología en sistemas enterprise, protocolos descentralizados y productos de IA en producción. Solidity, arquitectura distribuida y productos de IA lanzados sobre Avalanche.</div>
+        <button class="founder-toggle" type="button" onclick="toggleBio(this)" data-show="Bio completa" data-hide="Ocultar bio"><span>Bio completa</span><svg class="ar" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="6 9 12 15 18 9"/></svg></button>
+        <div class="founder-bio">Builder serial con 25+ años entregando tecnología en sistemas enterprise, protocolos descentralizados y productos de IA. Experiencia profunda en smart contracts Solidity, arquitectura de sistemas distribuidos, data science y estrategia de producto. Co-fundador de Troker, una plataforma de trueque digital que explora nuevos modelos de economía colaborativa. Community builder en LATAM: organizó La Mañanera, una iniciativa de educación Web3 para la comunidad blockchain hispanohablante. Impulsa infraestructura de IA y Web3 para builders y startups de la región.</div>
+      </div>
+      <div class="founder reveal d1">
+        <div class="founder-top">
+          <img src="https://wasiai.io/pitch-v6/eli.jpg" alt="Elizabeth Palacios" class="founder-photo" onerror="this.outerHTML='<div class=&quot;founder-photo founder-photo-fallback&quot;>EP</div>'" />
+          <div>
+            <div class="founder-name">Elizabeth Palacios</div>
+            <div class="founder-role">Co-fundadora / COO · Data · AI</div>
+            <a href="https://www.linkedin.com/in/elizabeth-palacios-mendoza-4507962a/" target="_blank" rel="noopener" class="founder-li"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg> LinkedIn</a>
+          </div>
+        </div>
+        <div class="founder-hook">20+ años liderando transformaciones de datos e IA a escala enterprise. En WasiAI: scoring de performance, señales de reputación y la capa de analytics detrás de cada decisión de la plataforma.</div>
+        <button class="founder-toggle" type="button" onclick="toggleBio(this)" data-show="Bio completa" data-hide="Ocultar bio"><span>Bio completa</span><svg class="ar" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><polyline points="6 9 12 15 18 9"/></svg></button>
+        <div class="founder-bio">Ejecutiva estratégica con 20+ años liderando transformaciones data-driven. En WasiAI diseña la infraestructura de datos e IA que permite que los agentes aprendan, sean descubiertos y mejoren con el uso: la capa de inteligencia detrás de la plataforma. Construyó funciones de Data y Analytics desde cero dentro de corporaciones multi-negocio, evolucionando arquitecturas legacy hacia ecosistemas modernos y gobernados. Experta en identificar cuellos de botella operativos, rediseñar flujos de datos y traducir analytics en decisiones de negocio concretas.</div>
       </div>
     </div>
   </div>
@@ -1668,6 +1695,15 @@ document.querySelectorAll('a[href^="#"]').forEach(a => {
   });
   show('supported');
 })();
+</script>
+<script>
+function toggleBio(btn){
+  var bio=btn.parentElement.querySelector('.founder-bio');
+  var isOpen=bio.classList.toggle('open');
+  btn.classList.toggle('open',isOpen);
+  var s=btn.querySelector('span');
+  s.textContent=isOpen?(btn.dataset.hide||'Hide background'):(btn.dataset.show||'Full background');
+}
 </script>
 </body>
 </html>
