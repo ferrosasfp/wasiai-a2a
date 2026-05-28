@@ -21,11 +21,15 @@
 .reveal { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #e6edf3; }
 .reveal .slides { text-align: left; }
 .reveal section { padding: 0 2vw; }
+.reveal .slides > section { top: 0 !important; max-height: 94vh; overflow-y: auto; overflow-x: hidden; }
+.reveal .slides > section::-webkit-scrollbar { width: 8px; }
+.reveal .slides > section::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+.reveal .slides > section::-webkit-scrollbar-track { background: transparent; }
 .reveal h1, .reveal h2, .reveal h3, .reveal h4 { color: #f5f7fa; font-weight: 700; text-transform: none; letter-spacing: -0.01em; }
 .reveal h1 { font-size: 2.4em; line-height: 1.1; }
 .reveal h2 { font-size: 1.6em; line-height: 1.15; margin-bottom: 0.4em; }
 .reveal h3 { font-size: 1.15em; color: var(--accent); margin-bottom: 0.3em; }
-.reveal p, .reveal li { font-size: 0.78em; line-height: 1.45; }
+.reveal p, .reveal li { font-size: 0.7em; line-height: 1.4; }
 .reveal ul { margin-left: 1em; }
 .reveal li { margin-bottom: 0.35em; }
 .reveal a { color: var(--accent); text-decoration: none; border-bottom: 1px dashed var(--accent-soft); }
@@ -588,11 +592,12 @@ Reveal.initialize({
   progress: true,
   transition: 'fade',
   transitionSpeed: 'fast',
+  center: false,
   width: 1280,
   height: 800,
-  margin: 0.06,
-  minScale: 0.4,
-  maxScale: 1.4,
+  margin: 0.04,
+  minScale: 0.2,
+  maxScale: 1.5,
   plugins: [ RevealHighlight, RevealNotes ]
 });
 </script>
