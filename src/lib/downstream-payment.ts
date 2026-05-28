@@ -28,6 +28,15 @@ export type { DownstreamLogger };
 const DOWNSTREAM_FLAG = process.env.WASIAI_DOWNSTREAM_X402 === 'true';
 
 /**
+ * EIP-3009 authorization window (`validBefore`) in seconds, passed to
+ * `adapter.sign({ ..., timeoutSeconds })`. Reproduces the legacy
+ * `VALID_BEFORE_SECONDS = 300` so the Avalanche path keeps its observable 300s
+ * window (CD-1). The adapter default is 60s — omitting this regressed the
+ * window (AR BLQ-MED-1).
+ */
+const DOWNSTREAM_AUTH_WINDOW_SECONDS = 300;
+
+/**
  * Maps each `ChainKey` to the env-var NAME that holds its RPC URL (DT-3).
  * This is NOT a hardcode of chain (CD-3 tolerates env-var names): the actual
  * URL comes from the process env at runtime. The `Record<ChainKey, string>`
@@ -62,9 +71,7 @@ export type DownstreamSkipCode =
   | 'BALANCE_READ_FAILED'
   | 'SIGNING_FAILED'
   | 'VERIFY_FAILED'
-  | 'SETTLE_FAILED'
-  | 'NETWORK_ERROR'
-  | 'CONFIG_MISSING';
+  | 'SETTLE_FAILED';
 
 // ─── Internal helpers ───────────────────────────────────────────────
 
@@ -272,6 +279,8 @@ export async function signAndSettleDownstream(
       signed = await adapter.sign({
         to: payToCheck.addr,
         value: value.toString(),
+        // CD-1 / AR BLQ-MED-1: preserve the legacy 300s EIP-3009 window.
+        timeoutSeconds: DOWNSTREAM_AUTH_WINDOW_SECONDS,
       });
     } catch (e) {
       logger.warn(

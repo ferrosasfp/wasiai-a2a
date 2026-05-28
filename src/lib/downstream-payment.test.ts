@@ -573,6 +573,17 @@ describe('signAndSettleDownstream — chain-aware delegation', () => {
     );
   });
 
+  it('T-AuthWindow: adapter.sign receives timeoutSeconds=300 — legacy EIP-3009 window preserved (CD-1/AR BLQ-MED-1)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    // Default agent → chain=avalanche → resolves avalanche-fuji (the path the
+    // legacy VALID_BEFORE_SECONDS=300 window governed).
+    await signAndSettleDownstream(makeAgent(), makeLogger());
+    expect(mockFujiSign).toHaveBeenCalledTimes(1);
+    expect(mockFujiSign.mock.calls[0][0]).toMatchObject({
+      timeoutSeconds: 300,
+    });
+  });
+
   it('T-Balance-NoRpc: resolved chain without RPC env → fail-soft, continues to sign, info BALANCE_PRECHECK_SKIPPED (DT-3/CD-1)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     delete process.env.BASE_TESTNET_RPC_URL; // no RPC for base-sepolia
