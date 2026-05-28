@@ -327,13 +327,31 @@ export const composeService = {
   },
   async resolveAgent(step: ComposeStep): Promise<Agent | null> {
     // Try with registry hint first, then without (LLM may pass wrong case)
-    const agent = await discoveryService.getAgent(step.agent, step.registry);
-    if (agent) return agent;
-    const agentNoRegistry = await discoveryService.getAgent(step.agent);
-    if (agentNoRegistry) return agentNoRegistry;
-    // Fallback: fetch all agents and match by slug directly
-    const result = await discoveryService.discover({ limit: 50 });
-    return result.agents.find((a) => a.slug === step.agent) ?? null;
+    let agent = await discoveryService.getAgent(step.agent, step.registry);
+    if (!agent) agent = await discoveryService.getAgent(step.agent);
+
+    // WKH-113 (BASE-08): the real per-chain payment lives in the
+    // capabilities/discover path (getAgent v2 hardcodes chain=avalanche, H14;
+    // capabilities emits a.chain per-row, H15). Hydrate payment from discover
+    // so the real ChainKey survives to signAndSettleDownstream (CD-5/CD-10).
+    if (!agent) {
+      // Fallback: fetch all agents and match by slug directly. Resolved via
+      // discover → already carries the real chain. No re-query (anti latency).
+      const result = await discoveryService.discover({ limit: 50 });
+      return result.agents.find((a) => a.slug === step.agent) ?? null;
+    }
+
+    // Resolved via getAgent → hydrate payment.chain from the path with the
+    // real chain (only when it differs — no-op for Avalanche/Kite, CD-8).
+    // CD-10 fail-soft: if discover does not bring the agent, real?.payment is
+    // falsy → keep getAgent's payment (no Base assumption, no cross-chain).
+    const real = (await discoveryService.discover({ limit: 50 })).agents.find(
+      (a) => a.slug === agent.slug,
+    );
+    if (real?.payment?.chain && real.payment.chain !== agent.payment?.chain) {
+      agent.payment = real.payment; // adopt the full payment of the real-chain path
+    }
+    return agent;
   },
   async invokeAgent(
     agent: Agent,
