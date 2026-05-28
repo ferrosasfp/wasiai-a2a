@@ -80,3 +80,4 @@
 | 091 | 2026-05-19 | [BASE-04] Smoke E2E Base Sepolia con tx hash real en Basescan (WKH-107) | test | FAST | DONE | feat/wkh-base-port-v1 ([done-report.md](091-wkh-107-smoke-base-sepolia/done-report.md)) |
 | 092 | 2026-05-19 | [BASE-05] README "Base Support" + integration guide Base (WKH-108) | doc | FAST | DONE | feat/wkh-base-port-v1 ([done-report.md](092-wkh-108-base-docs/done-report.md)) |
 | 093 | 2026-05-27 | [BASE-06] x402 payment path chain-aware — rutear verify/settle a x-payment-chain (WKH-111) | feature | QUALITY | DONE | feat/093-wkh-111-x402-chain-aware ([done-report.md](093-wkh-111-x402-chain-aware/done-report.md)) |
+| 094 | 2026-05-27 | [BASE-07] outbound downstream payment chain-aware — settle a sub-agentes en Base/Kite (no solo Avalanche) (WKH-112) | feature | QUALITY | DONE | feat/094-wkh-112-downstream-chain-aware ([done-report.md](094-wkh-112-downstream-chain-aware/done-report.md)) |
