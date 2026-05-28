@@ -101,6 +101,27 @@ The full x402 v2 `/compose` flow through a deployed gateway is recommended for P
 - **Onchain logs**: `Transfer` (1 USDC) + `AuthorizationUsed` (nonce consumed — anti-replay)
 - **Status**: ✅ SUCCESS (status `0x1`, verified via `eth_getTransactionReceipt`)
 
+## Run 5 — OUTBOUND downstream settle on Base Sepolia (WKH-112 + WKH-113 / BASE-07 + BASE-08)
+
+> **First run of the gateway PAYING a downstream sub-agent OUTBOUND on Base.**
+> Runs 1-4 were INBOUND (gateway gets paid). This proves the other direction:
+> the gateway, during `/compose`, discovers a sub-agent that charges in Base Sepolia,
+> invokes it, and SETTLES the payment to it on Base via `signAndSettleDownstream`.
+> Closes the epic BASE port end-to-end: the gateway both COBRA (inbound) and PAGA
+> (outbound) on all 3 chains (Kite / Avalanche / Base).
+
+- **Date**: 2026-05-28T03:31:20Z
+- **Flow**: `POST /compose` (x-payment-chain: base-sepolia) → resolve agent → invoke → downstream settle
+- **Sub-agent**: `base-demo` (standalone service, own repo, `https://wasiai-base-demo-agent.vercel.app`), registered as registry `base-demo-agent`. Charges `0.001 USDC` on `base-sepolia`, `payment.contract` = operator wallet (self-pay).
+- **Tx hash**: [`0xedcbc86d43ac96521d6c9f25db1d3f56deb8beea44fefaf7f5134cae83f619a3`](https://sepolia.basescan.org/tx/0xedcbc86d43ac96521d6c9f25db1d3f56deb8beea44fefaf7f5134cae83f619a3)
+- **Basescan**: https://sepolia.basescan.org/tx/0xedcbc86d43ac96521d6c9f25db1d3f56deb8beea44fefaf7f5134cae83f619a3
+- **Amount**: 0.001 USDC (1,000 micro-USDC) — `downstreamSettledAmount: 1000`
+- **Block**: 42,085,397
+- **Gas used**: 75,628
+- **Onchain logs**: `Transfer` (USDC) + `AuthorizationUsed` (EIP-3009 anti-replay)
+- **Status**: ✅ SUCCESS (status `0x1`, verified via `eth_getTransactionReceipt`)
+- **Enabled by**: WKH-112 (downstream-payment chain-aware) + WKH-113 (discovery dynamic chain validation — without it, `readPayment` would have dropped `base-sepolia` before reaching the settle).
+
 ---
 
 ## How to verify
