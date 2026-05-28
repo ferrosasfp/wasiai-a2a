@@ -1,0 +1,1673 @@
+<!DOCTYPE html>
+<html lang="en">
+<script>document.documentElement.classList.add('js');</script>
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>WasiAI · The Commerce Layer for the Agentic Economy</title>
+<meta name="description" content="Discovery, composition, orchestration and onchain settlement for AI agents. Built on Google's A2A protocol, x402 and EIP-3009, multi-chain across Kite, Avalanche and Base." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+<style>
+/* ============ RESET / BASE ============ */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--fg);line-height:1.55;overflow-x:hidden}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%}
+button{font-family:inherit;border:0;background:none;cursor:pointer;color:inherit}
+
+:root{
+  --bg:#fafaf7;
+  --bg-2:#f0efe9;
+  --bg-3:#f5f4ef;
+  --paper:#fff;
+  --fg:#1a1a1f;
+  --fg-2:#5a5a64;
+  --fg-3:#8a8a92;
+  --fg-4:#b5b5bb;
+  --line:rgba(0,0,0,0.08);
+  --line-2:rgba(0,0,0,0.04);
+  --line-3:rgba(0,0,0,0.14);
+  --red:#E84142;
+  --red-dark:#c72d2e;
+  --red-bg:rgba(232,65,66,0.06);
+  --red-line:rgba(232,65,66,0.18);
+  --green:#0a8f4f;
+  --green-bg:rgba(10,143,79,0.06);
+  --amber:#c2410c;
+  --blue:#1d4ed8;
+  --ink:#0d0d10;
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --serif:'Instrument Serif',serif;
+}
+
+.serif{font-family:var(--serif);font-weight:400;letter-spacing:-0.01em}
+.serif-i{font-family:var(--serif);font-style:italic;font-weight:400;letter-spacing:-0.005em}
+.mono{font-family:var(--mono);font-feature-settings:"zero","ss01"}
+.eyebrow{font:600 11px/1.4 var(--mono);text-transform:uppercase;letter-spacing:0.14em;color:var(--fg-3)}
+.eyebrow .red{color:var(--red)}
+.eyebrow .ink{color:var(--ink)}
+
+/* ============ LAYOUT ============ */
+.container{max-width:1280px;margin:0 auto;padding:0 32px}
+section{position:relative;padding:120px 0;border-bottom:1px solid var(--line-2)}
+@media(max-width:768px){
+  .container{padding:0 20px}
+  section{padding:80px 0}
+}
+.rule{height:1px;background:var(--line);margin:0}
+
+/* ============ NAV ============ */
+.nav{
+  position:fixed;top:0;left:0;right:0;z-index:200;
+  background:rgba(250,250,247,0.82);
+  backdrop-filter:blur(20px) saturate(180%);
+  -webkit-backdrop-filter:blur(20px) saturate(180%);
+  border-bottom:1px solid var(--line);
+}
+.nav-inner{
+  max-width:1280px;margin:0 auto;
+  display:flex;align-items:center;
+  height:60px;padding:0 32px;gap:28px;
+  position:relative;
+}
+.nav-brand{display:flex;align-items:center;gap:10px;flex-shrink:0;font-weight:700;letter-spacing:-0.02em;font-size:15px}
+.nav-mark{
+  width:26px;height:26px;flex-shrink:0;
+  display:grid;place-items:center;
+}
+.nav-mark svg{width:26px;height:26px;display:block;border-radius:7px}
+.nav-pill{
+  font:600 10px/1 var(--mono);text-transform:uppercase;letter-spacing:0.12em;
+  color:var(--red);background:var(--red-bg);border:1px solid var(--red-line);
+  padding:5px 9px;border-radius:999px;
+}
+.nav-links{display:flex;gap:2px;flex:1;justify-content:center;overflow-x:auto;scrollbar-width:none}
+.nav-links::-webkit-scrollbar{display:none}
+.nav-link{
+  font:500 13px/1 'Inter';color:var(--fg-2);
+  padding:8px 12px;border-radius:8px;white-space:nowrap;
+  transition:color .15s,background .15s;
+}
+.nav-link:hover{color:var(--ink);background:var(--bg-2)}
+.nav-cta{
+  display:inline-flex;align-items:center;gap:6px;
+  font:600 13px/1 'Inter';
+  background:var(--ink);color:#fff;
+  padding:9px 14px;border-radius:8px;
+  transition:background .15s;flex-shrink:0;
+}
+.nav-cta:hover{background:#000}
+.nav-progress{position:absolute;bottom:-1px;left:0;height:2px;background:var(--red);width:0;transition:width .08s linear}
+@media(max-width:900px){.nav-pill,.nav-cta{display:none}.nav-inner{gap:16px}}
+
+/* ============ BUTTONS ============ */
+.btn{
+  display:inline-flex;align-items:center;gap:8px;
+  font:600 14px/1 'Inter';
+  padding:13px 20px;border-radius:10px;
+  transition:transform .12s,background .15s,box-shadow .15s;
+  border:1px solid transparent;
+}
+.btn:hover{transform:translateY(-1px)}
+.btn-primary{background:var(--ink);color:#fff;box-shadow:0 1px 0 rgba(0,0,0,0.08),inset 0 1px 0 rgba(255,255,255,0.06)}
+.btn-primary:hover{background:#000;box-shadow:0 8px 22px rgba(0,0,0,0.18)}
+.btn-ghost{background:#fff;color:var(--ink);border-color:var(--line-3)}
+.btn-ghost:hover{background:var(--bg-2);border-color:var(--ink)}
+.btn-red{background:var(--red);color:#fff}
+.btn-red:hover{background:var(--red-dark)}
+.btn .arr{display:inline-block;transition:transform .15s}
+.btn:hover .arr{transform:translateX(2px)}
+
+/* ============ HERO ============ */
+#hero{
+  padding:160px 0 120px;
+  border-bottom:1px solid var(--line);
+  background:
+    radial-gradient(ellipse 60% 50% at 80% 0%,rgba(232,65,66,0.06) 0%,transparent 60%),
+    radial-gradient(ellipse 60% 60% at 0% 90%,rgba(29,78,216,0.04) 0%,transparent 60%),
+    linear-gradient(var(--bg) 1px,transparent 1px) 0 0/64px 64px,
+    linear-gradient(90deg,var(--bg) 1px,transparent 1px) 0 0/64px 64px,
+    var(--bg);
+  position:relative;
+  overflow:hidden;
+}
+#hero::before{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(180deg,transparent 0%,transparent 70%,var(--bg) 100%);
+}
+.hero-grid{
+  display:grid;grid-template-columns:1.1fr 1fr;gap:64px;align-items:center;
+  position:relative;z-index:1;
+}
+@media(max-width:1024px){.hero-grid{grid-template-columns:1fr;gap:56px}}
+.hero-pill{
+  display:inline-flex;align-items:center;gap:10px;
+  background:var(--paper);border:1px solid var(--line);
+  padding:6px 6px 6px 14px;border-radius:999px;
+  font:500 12px/1 'Inter';color:var(--fg-2);
+  margin-bottom:32px;
+  box-shadow:0 1px 2px rgba(0,0,0,0.03);
+}
+.hero-pill b{color:var(--ink);font-weight:700}
+.hero-pill .live{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--green-bg);color:var(--green);
+  padding:4px 10px;border-radius:999px;
+  font:600 11px/1 var(--mono);text-transform:uppercase;letter-spacing:0.1em;
+}
+.hero-pill .live .d{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 1.6s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.35}}
+.hero-h1{
+  font-weight:800;letter-spacing:-0.045em;line-height:1.0;
+  font-size:clamp(2.6rem,5.8vw,5.2rem);
+  color:var(--ink);
+}
+.hero-h1 .sf{
+  font-family:var(--serif);font-weight:400;font-style:italic;
+  letter-spacing:-0.02em;color:var(--red);
+  display:inline-block;
+}
+.hero-sub{
+  font-size:clamp(1.05rem,1.4vw,1.2rem);
+  color:var(--fg-2);line-height:1.6;
+  max-width:560px;margin-top:28px;
+}
+.hero-sub b{color:var(--ink);font-weight:600}
+.hero-cta-row{display:flex;gap:12px;margin-top:36px;flex-wrap:wrap}
+.hero-meta{
+  display:flex;gap:28px;margin-top:36px;flex-wrap:wrap;
+  padding-top:28px;border-top:1px solid var(--line);
+}
+.hero-meta-item{font-size:13px;color:var(--fg-3)}
+.hero-meta-item b{display:block;color:var(--ink);font:700 14px/1.3 'Inter';margin-bottom:3px}
+
+/* hero terminal/visual */
+.hero-vis{
+  background:var(--paper);border:1px solid var(--line);border-radius:14px;
+  box-shadow:0 24px 60px -20px rgba(0,0,0,0.16),0 4px 14px rgba(0,0,0,0.06);
+  overflow:hidden;font-family:var(--mono);font-size:12.5px;line-height:1.65;
+}
+.hero-vis-head{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 14px;border-bottom:1px solid var(--line);
+  background:var(--bg-3);font:600 11px/1 var(--mono);color:var(--fg-3);
+  text-transform:uppercase;letter-spacing:0.12em;
+}
+.hero-vis-dots{display:flex;gap:5px}
+.hero-vis-dots i{width:9px;height:9px;border-radius:50%;background:#d8d6cd;display:block}
+.hero-vis-title{margin-left:auto;color:var(--fg-2)}
+.hero-vis-body{padding:18px 20px;color:var(--fg)}
+.hero-vis .c{color:var(--fg-3)}
+.hero-vis .k{color:var(--amber);font-weight:600}
+.hero-vis .s{color:var(--green)}
+.hero-vis .ok{color:var(--green);font-weight:600}
+.hero-vis .err{color:var(--red);font-weight:600}
+.hero-vis .ag{color:var(--blue);font-weight:600}
+.hero-vis .ln{display:block;white-space:pre}
+.hero-vis-foot{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 14px;border-top:1px solid var(--line);
+  background:var(--bg-3);font:500 11px/1 var(--mono);color:var(--fg-3);
+}
+.hero-vis-foot .ok{color:var(--green);font-weight:600}
+.cursor{display:inline-block;width:7px;height:14px;background:var(--ink);vertical-align:-2px;animation:blink 1.05s steps(2) infinite;margin-left:2px}
+@keyframes blink{50%{opacity:0}}
+
+/* ============ MARQUEE ============ */
+.marquee-section{
+  padding:36px 0;border-bottom:1px solid var(--line);background:var(--paper);
+}
+.marquee-label{
+  text-align:center;
+  font:600 11px/1 var(--mono);text-transform:uppercase;letter-spacing:0.14em;
+  color:var(--fg-3);margin-bottom:20px;
+}
+.marquee{
+  position:relative;overflow:hidden;
+  -webkit-mask-image:linear-gradient(90deg,transparent 0,#000 6%,#000 94%,transparent 100%);
+  mask-image:linear-gradient(90deg,transparent 0,#000 6%,#000 94%,transparent 100%);
+}
+.marquee-track{
+  display:flex;gap:64px;
+  animation:marquee 40s linear infinite;
+  width:max-content;
+}
+.marquee:hover .marquee-track{animation-play-state:paused}
+@keyframes marquee{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+.marquee-item{
+  display:flex;align-items:center;gap:10px;
+  color:var(--fg-3);font:600 14px/1 'Inter';
+  white-space:nowrap;
+  filter:grayscale(100%);opacity:0.6;
+  transition:filter .25s,opacity .25s,color .25s;
+}
+.marquee-item:hover{filter:grayscale(0);opacity:1;color:var(--ink)}
+.marquee-item svg{height:20px;width:auto}
+.marquee-item img{height:24px;width:auto;object-fit:contain}
+
+/* ============ SECTION HEADER ============ */
+.sec-head{margin-bottom:64px;max-width:780px}
+.sec-head.center{margin-left:auto;margin-right:auto;text-align:center}
+.sec-eyebrow{
+  display:inline-flex;align-items:center;gap:8px;
+  font:600 11px/1 var(--mono);text-transform:uppercase;letter-spacing:0.14em;
+  color:var(--red);margin-bottom:18px;
+}
+.sec-eyebrow::before{
+  content:"";width:24px;height:1px;background:var(--red);
+}
+.sec-head h2{
+  font:700 clamp(2rem,3.6vw,3.4rem)/1.04 'Inter';
+  letter-spacing:-0.04em;color:var(--ink);
+  margin-bottom:18px;
+}
+.sec-head h2 .sf{font-family:var(--serif);font-style:italic;font-weight:400;letter-spacing:-0.02em;color:var(--red)}
+.sec-head .lead{
+  font-size:1.1rem;color:var(--fg-2);line-height:1.6;max-width:680px;
+}
+.sec-head.center .lead{margin-left:auto;margin-right:auto}
+
+/* ============ PROBLEM / SHIFT ============ */
+#shift{background:var(--paper)}
+.shift-grid{display:grid;grid-template-columns:1fr 1fr;gap:80px;align-items:start}
+@media(max-width:900px){.shift-grid{grid-template-columns:1fr;gap:48px}}
+.shift-col h3{font:700 1.5rem/1.2 'Inter';letter-spacing:-0.02em;margin-bottom:18px;color:var(--ink)}
+.shift-col h3 .num{
+  font:600 11px/1 var(--mono);color:var(--fg-3);
+  display:block;margin-bottom:8px;letter-spacing:0.14em;text-transform:uppercase;
+}
+.shift-col p{color:var(--fg-2);font-size:1rem;line-height:1.65;margin-bottom:14px}
+.shift-points{margin-top:24px;display:flex;flex-direction:column;gap:14px}
+.shift-pt{
+  display:flex;gap:14px;align-items:flex-start;
+  padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--bg);
+}
+.shift-pt .icn{
+  width:36px;height:36px;border-radius:10px;background:var(--red-bg);
+  display:grid;place-items:center;flex-shrink:0;color:var(--red);
+}
+.shift-pt h4{font:700 0.95rem/1.3 'Inter';color:var(--ink);margin-bottom:4px}
+.shift-pt p{font-size:0.9rem;color:var(--fg-2);margin:0;line-height:1.5}
+
+.shift-quote{
+  border-left:3px solid var(--red);padding:8px 0 8px 24px;
+  margin-top:28px;
+}
+.shift-quote .q{
+  font-family:var(--serif);font-size:1.6rem;line-height:1.3;color:var(--ink);
+  letter-spacing:-0.01em;font-style:italic;
+}
+.shift-quote .a{font:600 12px/1.4 var(--mono);color:var(--fg-3);text-transform:uppercase;letter-spacing:0.12em;margin-top:14px}
+
+/* ============ CAPABILITIES ============ */
+#capabilities{background:var(--bg)}
+.cap-grid{
+  display:grid;grid-template-columns:repeat(2,1fr);
+  border:1px solid var(--line);border-radius:18px;background:var(--paper);overflow:hidden;
+}
+@media(max-width:900px){.cap-grid{grid-template-columns:1fr}}
+.cap{
+  padding:36px 32px;position:relative;
+  border-right:1px solid var(--line);border-bottom:1px solid var(--line);
+  transition:background .2s;
+}
+.cap:nth-child(2n){border-right:0}
+.cap:nth-last-child(-n+2){border-bottom:0}
+@media(max-width:900px){
+  .cap{border-right:0!important}
+  .cap:not(:last-child){border-bottom:1px solid var(--line)}
+}
+.cap:hover{background:var(--bg-3)}
+.cap-num{
+  font:700 11px/1 var(--mono);color:var(--red);
+  letter-spacing:0.16em;margin-bottom:18px;
+  display:flex;align-items:center;gap:10px;
+}
+.cap-num::after{content:"";flex:1;height:1px;background:var(--line);max-width:120px}
+.cap h3{font:700 1.4rem/1.2 'Inter';letter-spacing:-0.02em;color:var(--ink);margin-bottom:12px}
+.cap p{color:var(--fg-2);font-size:0.97rem;line-height:1.6;margin-bottom:18px}
+.cap-tags{display:flex;flex-wrap:wrap;gap:6px}
+.cap-tag{
+  font:500 11.5px/1 var(--mono);
+  padding:6px 9px;border-radius:6px;
+  background:var(--bg-2);color:var(--fg-2);
+  border:1px solid var(--line);
+}
+.cap-tag.r{color:var(--red);background:var(--red-bg);border-color:var(--red-line)}
+.cap-tag.g{color:var(--green);background:var(--green-bg);border-color:rgba(10,143,79,0.18)}
+
+/* ============ ARCH (interactive A2A diagram) ============ */
+#arch{background:var(--paper)}
+.arch-wrap{
+  display:grid;grid-template-columns:1.1fr 1fr;gap:56px;align-items:start;
+}
+@media(max-width:1024px){.arch-wrap{grid-template-columns:1fr;gap:40px}}
+.arch-stack{
+  display:flex;flex-direction:column;gap:14px;
+}
+.arch-layer{
+  display:grid;grid-template-columns:auto 1fr;gap:18px;align-items:center;
+  padding:20px 22px;border:1px solid var(--line);border-radius:14px;
+  background:var(--paper);transition:all .2s;cursor:pointer;
+  position:relative;
+}
+.arch-layer:hover,.arch-layer.active{
+  border-color:var(--ink);
+  box-shadow:0 12px 36px -12px rgba(0,0,0,0.18);
+  transform:translateY(-1px);
+}
+.arch-layer.active::before{
+  content:"";position:absolute;left:-1px;top:-1px;bottom:-1px;width:3px;
+  background:var(--red);border-radius:14px 0 0 14px;
+}
+.arch-id{
+  font:800 18px/1 var(--mono);color:var(--ink);
+  width:48px;height:48px;border-radius:12px;
+  background:var(--bg-3);border:1px solid var(--line);
+  display:grid;place-items:center;flex-shrink:0;
+}
+.arch-layer.active .arch-id{background:var(--ink);color:#fff;border-color:var(--ink)}
+.arch-l-name{font:700 1.05rem/1.2 'Inter';color:var(--ink);letter-spacing:-0.01em;margin-bottom:3px}
+.arch-l-sub{font:500 11px/1.3 var(--mono);color:var(--fg-3);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:8px}
+.arch-tags{display:flex;flex-wrap:wrap;gap:5px}
+.arch-tags span{font:500 11px/1 var(--mono);padding:4px 7px;background:var(--bg-2);border:1px solid var(--line);border-radius:5px;color:var(--fg-2)}
+.arch-detail{
+  position:sticky;top:100px;
+  background:var(--bg);border:1px solid var(--line);
+  border-radius:18px;padding:32px;
+  min-height:380px;
+}
+.arch-detail-h{font:600 11px/1 var(--mono);color:var(--red);text-transform:uppercase;letter-spacing:0.14em;margin-bottom:14px}
+.arch-detail h3{font:700 1.6rem/1.15 'Inter';letter-spacing:-0.02em;color:var(--ink);margin-bottom:14px}
+.arch-detail p{color:var(--fg-2);font-size:0.97rem;line-height:1.65;margin-bottom:18px}
+.arch-detail .kv{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;font-size:13px;border-top:1px solid var(--line);padding-top:18px}
+.arch-detail .kv dt{font:600 12px/1.5 var(--mono);color:var(--fg-3);text-transform:uppercase;letter-spacing:0.1em}
+.arch-detail .kv dd{color:var(--ink);font:500 13px/1.5 var(--mono)}
+.arch-portability{
+  margin-top:32px;padding:20px 24px;
+  background:var(--bg);border:1px dashed var(--line-3);border-radius:14px;
+  display:flex;gap:14px;align-items:center;
+}
+.arch-portability .ic{width:36px;height:36px;flex-shrink:0;border-radius:10px;background:var(--ink);color:#fff;display:grid;place-items:center}
+.arch-portability b{display:block;color:var(--ink);font:700 0.95rem/1.3 'Inter';margin-bottom:3px}
+.arch-portability span{color:var(--fg-2);font-size:0.88rem;line-height:1.5}
+
+/* ============ FLOW ============ */
+#flow{background:var(--ink);color:#fafaf7;border-bottom:0}
+#flow .sec-head h2{color:#fafaf7}
+#flow .sec-head h2 .sf{color:#ff6b6c}
+#flow .sec-head .lead{color:rgba(250,250,247,0.65)}
+#flow .sec-eyebrow{color:#ff6b6c}
+#flow .sec-eyebrow::before{background:#ff6b6c}
+.flow-rail{
+  display:grid;grid-template-columns:repeat(5,1fr);gap:0;
+  border:1px solid rgba(255,255,255,0.1);border-radius:18px;overflow:hidden;
+}
+@media(max-width:1024px){.flow-rail{grid-template-columns:1fr}}
+.flow-step{
+  padding:32px 28px;
+  border-right:1px solid rgba(255,255,255,0.08);
+  position:relative;
+  background:linear-gradient(180deg,rgba(255,255,255,0.02) 0%,transparent 100%);
+}
+.flow-step:last-child{border-right:0}
+@media(max-width:1024px){
+  .flow-step{border-right:0;border-bottom:1px solid rgba(255,255,255,0.08)}
+  .flow-step:last-child{border-bottom:0}
+}
+.flow-num{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:34px;height:34px;border-radius:10px;
+  background:rgba(255,255,255,0.08);color:#fff;
+  font:700 14px/1 var(--mono);margin-bottom:18px;
+}
+.flow-step h4{font:700 1rem/1.3 'Inter';color:#fff;margin-bottom:8px;letter-spacing:-0.01em}
+.flow-step p{color:rgba(250,250,247,0.6);font-size:0.86rem;line-height:1.6;margin-bottom:14px}
+.flow-tag{
+  display:inline-block;font:500 10.5px/1 var(--mono);
+  padding:5px 8px;border-radius:5px;text-transform:uppercase;letter-spacing:0.08em;
+  background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.7);
+}
+.flow-tag.r{background:rgba(232,65,66,0.15);color:#ff8a8b}
+.flow-tag.g{background:rgba(10,143,79,0.18);color:#5dd99a}
+
+/* ============ CODE LIVE EXAMPLE ============ */
+#api{background:var(--paper)}
+.api-grid{display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:start}
+@media(max-width:900px){.api-grid{grid-template-columns:1fr}}
+.api-col h3{font:700 1.6rem/1.2 'Inter';letter-spacing:-0.02em;color:var(--ink);margin-bottom:14px}
+.api-col p{color:var(--fg-2);font-size:1rem;line-height:1.65;margin-bottom:20px}
+.api-list{display:flex;flex-direction:column;gap:8px}
+.api-list-item{
+  display:flex;gap:12px;align-items:flex-start;
+  padding:12px 14px;border:1px solid var(--line);border-radius:10px;
+  background:var(--bg);font-size:0.92rem;
+}
+.api-list-item .b{
+  font:600 11px/1 var(--mono);color:var(--red);
+  background:var(--red-bg);padding:5px 8px;border-radius:5px;flex-shrink:0;
+}
+.api-list-item span{color:var(--fg-2)}
+.api-list-item b{color:var(--ink);font-weight:600}
+
+.api-box{
+  background:#fff;border:1px solid var(--line);border-radius:14px;
+  overflow:hidden;
+  box-shadow:0 24px 60px -20px rgba(0,0,0,0.14),0 2px 8px rgba(0,0,0,0.04);
+}
+.api-tabs{
+  display:flex;border-bottom:1px solid var(--line);background:var(--bg-3);
+  padding:0 8px;
+}
+.api-tab{
+  padding:13px 14px;font:500 12.5px/1 var(--mono);color:var(--fg-3);
+  cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;
+  transition:color .15s,border-color .15s;
+}
+.api-tab:hover{color:var(--ink)}
+.api-tab.active{color:var(--red);border-bottom-color:var(--red)}
+.api-body{font-family:var(--mono);font-size:12.5px;line-height:1.7;padding:22px 24px;color:var(--fg);min-height:340px}
+.api-body .c{color:var(--fg-3)}
+.api-body .k{color:var(--amber);font-weight:600}
+.api-body .s{color:var(--green)}
+.api-body .ok{color:var(--green);font-weight:600}
+.api-body .err{color:var(--red);font-weight:600}
+.api-body .l{display:block;white-space:pre;min-height:1.7em}
+.api-body .pre{white-space:pre;display:block}
+
+/* ============ STATS ============ */
+#proof{background:var(--bg-3)}
+.stats-headline{
+  display:grid;grid-template-columns:1.2fr 1fr;gap:48px;align-items:end;
+  margin-bottom:56px;
+}
+@media(max-width:900px){.stats-headline{grid-template-columns:1fr;gap:24px}}
+.stats-headline .quote{
+  font-family:var(--serif);font-size:clamp(1.4rem,2.2vw,1.85rem);line-height:1.35;
+  color:var(--ink);letter-spacing:-0.01em;font-style:italic;
+}
+.stats-headline .quote-a{font:500 12px/1.4 var(--mono);color:var(--fg-3);text-transform:uppercase;letter-spacing:0.12em;margin-top:14px}
+.stats-grid{
+  display:grid;grid-template-columns:repeat(3,1fr);
+  border:1px solid var(--line);border-radius:18px;background:var(--paper);overflow:hidden;
+}
+@media(max-width:900px){.stats-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:520px){.stats-grid{grid-template-columns:1fr}}
+.stat{
+  padding:32px 28px;
+  border-right:1px solid var(--line);border-bottom:1px solid var(--line);
+  position:relative;
+}
+.stat:nth-child(3n){border-right:0}
+.stat:nth-last-child(-n+3){border-bottom:0}
+@media(max-width:900px){
+  .stat:nth-child(3n){border-right:1px solid var(--line)}
+  .stat:nth-child(2n){border-right:0}
+  .stat:nth-last-child(-n+3){border-bottom:1px solid var(--line)}
+  .stat:nth-last-child(-n+2){border-bottom:0}
+}
+.stat .num{
+  font:800 clamp(2rem,3.4vw,3rem)/1 'Inter';
+  letter-spacing:-0.045em;color:var(--ink);
+  font-variant-numeric:tabular-nums;
+  margin-bottom:8px;
+  display:flex;align-items:baseline;gap:6px;
+}
+.stat .num .u{font:700 1rem/1 'Inter';color:var(--fg-3)}
+.stat .num.red{color:var(--red)}
+.stat .num.green{color:var(--green)}
+.stat .lbl{font:600 11px/1.4 var(--mono);color:var(--fg-3);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:6px}
+.stat .desc{font-size:13px;color:var(--fg-2);line-height:1.5}
+
+/* ============ PROOF ONCHAIN (tx table) ============ */
+.proof-tx{
+  display:flex;flex-direction:column;gap:10px;margin-top:8px;
+}
+.proof-tx-row{
+  display:grid;grid-template-columns:auto 1fr auto;gap:18px;align-items:center;
+  padding:16px 20px;background:var(--paper);border:1px solid var(--line);
+  border-left:3px solid var(--red);border-radius:12px;
+  transition:transform .15s,box-shadow .15s;
+}
+.proof-tx-row:hover{transform:translateY(-1px);box-shadow:0 12px 30px -16px rgba(0,0,0,0.2)}
+.proof-tx-row .chain{font:700 0.95rem/1.2 'Inter';color:var(--ink);letter-spacing:-0.01em}
+.proof-tx-row .kind{font:500 11px/1.4 var(--mono);color:var(--fg-3);text-transform:uppercase;letter-spacing:0.1em;margin-top:3px}
+.proof-tx-row .hash{
+  font:600 12px/1 var(--mono);color:var(--red);
+  display:inline-flex;align-items:center;gap:6px;
+  padding:8px 12px;border:1px solid var(--red-line);background:var(--red-bg);border-radius:8px;
+  white-space:nowrap;
+}
+.proof-tx-row .hash:hover{background:var(--red);color:#fff}
+@media(max-width:768px){.proof-tx-row{grid-template-columns:1fr;gap:8px}}
+
+/* ============ KITE COMPARE ============ */
+#kite{background:var(--paper)}
+.kite-cols{
+  display:grid;grid-template-columns:1fr 1fr;gap:0;
+  border:1px solid var(--line);border-radius:18px;overflow:hidden;
+}
+@media(max-width:768px){.kite-cols{grid-template-columns:1fr}}
+.kite-col{padding:36px 32px}
+.kite-col.k{background:var(--bg);border-right:1px solid var(--line)}
+@media(max-width:768px){.kite-col.k{border-right:0;border-bottom:1px solid var(--line)}}
+.kite-col.w{background:var(--paper);position:relative}
+.kite-col.w::before{
+  content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--red);
+}
+.kite-col h3{
+  font:700 1.3rem/1.2 'Inter';letter-spacing:-0.02em;color:var(--ink);
+  margin-bottom:6px;display:flex;align-items:center;gap:10px;
+}
+.kite-col h3 .lg{
+  display:inline-grid;place-items:center;
+  width:28px;height:28px;border-radius:7px;
+  background:var(--ink);color:#fff;
+  font:800 11px/1 var(--mono);
+}
+.kite-col.w h3 .lg{background:var(--red)}
+.kite-col .cap{font:500 12px/1 var(--mono);color:var(--fg-3);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:24px}
+.kite-list{display:flex;flex-direction:column;gap:10px}
+.kite-item{
+  display:flex;gap:12px;align-items:flex-start;
+  padding:12px 14px;background:var(--paper);border:1px solid var(--line);border-radius:10px;
+}
+.kite-col.w .kite-item{background:var(--bg)}
+.kite-item .ck{
+  flex-shrink:0;width:20px;height:20px;border-radius:6px;
+  background:var(--ink);color:#fff;display:grid;place-items:center;font-size:11px;
+}
+.kite-col.w .kite-item .ck{background:var(--red)}
+.kite-item b{display:block;color:var(--ink);font:600 0.92rem/1.3 'Inter';margin-bottom:2px}
+.kite-item span{font-size:0.83rem;color:var(--fg-3);line-height:1.45}
+
+/* ============ ROADMAP ============ */
+#roadmap{background:var(--bg)}
+.rm-rail{
+  position:relative;
+  padding-left:40px;
+}
+.rm-rail::before{
+  content:"";position:absolute;top:8px;bottom:8px;left:14px;
+  width:2px;background:linear-gradient(180deg,var(--red) 0%,var(--ink) 50%,var(--line) 100%);
+  border-radius:2px;
+}
+.rm-item{position:relative;padding-bottom:36px}
+.rm-item:last-child{padding-bottom:0}
+.rm-dot{
+  position:absolute;left:-33px;top:6px;width:18px;height:18px;border-radius:50%;
+  background:var(--paper);border:3px solid var(--line);
+}
+.rm-item.done .rm-dot{background:var(--red);border-color:var(--red);box-shadow:0 0 0 5px var(--red-bg)}
+.rm-item.now .rm-dot{
+  background:var(--ink);border-color:var(--ink);
+  box-shadow:0 0 0 5px rgba(0,0,0,0.08);
+  animation:pulse 1.6s infinite;
+}
+.rm-item.next .rm-dot{background:var(--paper);border-color:var(--ink)}
+.rm-card{
+  background:var(--paper);border:1px solid var(--line);border-radius:14px;
+  padding:22px 26px;
+  display:grid;grid-template-columns:auto 1fr auto;gap:18px;align-items:start;
+}
+@media(max-width:768px){.rm-card{grid-template-columns:1fr;gap:8px}}
+.rm-q{font:700 12px/1 var(--mono);color:var(--fg-3);text-transform:uppercase;letter-spacing:0.14em}
+.rm-item.done .rm-q{color:var(--red)}
+.rm-item.now .rm-q{color:var(--ink)}
+.rm-h{font:700 1.05rem/1.25 'Inter';letter-spacing:-0.01em;color:var(--ink);margin-bottom:6px}
+.rm-d{font-size:0.92rem;color:var(--fg-2);line-height:1.55}
+.rm-status{
+  font:600 11px/1 var(--mono);text-transform:uppercase;letter-spacing:0.12em;
+  padding:6px 10px;border-radius:999px;white-space:nowrap;
+  background:var(--bg-3);color:var(--fg-3);
+  align-self:flex-start;
+}
+.rm-item.done .rm-status{background:var(--green-bg);color:var(--green)}
+.rm-item.now .rm-status{background:var(--ink);color:#fff}
+
+/* ============ REVENUE ============ */
+#revenue{background:var(--paper)}
+.rev-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+@media(max-width:900px){.rev-grid{grid-template-columns:1fr}}
+.rev-card{
+  background:var(--bg);border:1px solid var(--line);border-radius:16px;padding:32px 28px;
+  position:relative;overflow:hidden;
+}
+.rev-card::before{
+  content:"";position:absolute;top:0;left:0;right:0;height:3px;
+  background:var(--red);transform:scaleX(0);transform-origin:left;transition:transform .25s;
+}
+.rev-card:hover::before{transform:scaleX(1)}
+.rev-num{font:700 11px/1 var(--mono);color:var(--red);text-transform:uppercase;letter-spacing:0.16em;margin-bottom:18px}
+.rev-h{font:800 clamp(2.4rem,4vw,3.4rem)/1 'Inter';letter-spacing:-0.045em;color:var(--ink);margin-bottom:6px;font-variant-numeric:tabular-nums}
+.rev-h.sm{font-size:clamp(1.4rem,2.2vw,1.9rem);font-weight:700}
+.rev-h .sf{font-family:var(--serif);font-style:italic;font-weight:400}
+.rev-name{font:700 0.95rem/1.3 'Inter';color:var(--ink);margin-bottom:10px;letter-spacing:-0.01em}
+.rev-d{color:var(--fg-2);font-size:0.92rem;line-height:1.6}
+.rev-badge{
+  display:inline-block;margin-top:14px;
+  font:600 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:0.1em;
+  padding:6px 10px;border-radius:999px;
+}
+.rev-badge.ready{background:rgba(194,65,12,0.08);color:var(--amber);border:1px solid rgba(194,65,12,0.2)}
+.rev-badge.soon{background:var(--bg-3);color:var(--fg-3);border:1px solid var(--line)}
+
+/* ============ MARKET ============ */
+#market{background:var(--bg-3)}
+.market-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:48px;align-items:start}
+@media(max-width:900px){.market-grid{grid-template-columns:1fr;gap:32px}}
+.market-list{display:flex;flex-direction:column;gap:14px}
+.market-pt{
+  display:flex;gap:14px;align-items:flex-start;
+  padding:16px 18px;border:1px solid var(--line);border-radius:12px;background:var(--paper);
+}
+.market-pt .icn{width:34px;height:34px;border-radius:9px;background:var(--red-bg);display:grid;place-items:center;flex-shrink:0;color:var(--red)}
+.market-pt p{font-size:0.92rem;color:var(--fg-2);margin:0;line-height:1.55}
+.market-pt p b{color:var(--ink);font-weight:600}
+.market-card{
+  background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:32px 28px;
+}
+.market-card h4{font:700 1.05rem/1.3 'Inter';color:var(--ink);margin-bottom:12px;display:flex;align-items:center;gap:10px}
+.market-card p{font-size:0.92rem;color:var(--fg-2);line-height:1.6;margin-bottom:12px}
+
+/* ============ PLACEHOLDER ============ */
+.placeholder{
+  display:inline-block;
+  font:600 0.9em/1.3 var(--mono);font-style:italic;
+  background:rgba(194,65,12,0.08);color:var(--amber);
+  border:1px dashed rgba(194,65,12,0.35);
+  padding:2px 8px;border-radius:6px;
+}
+.tag-warn{
+  display:inline-block;
+  font:600 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:0.1em;
+  background:rgba(194,65,12,0.08);color:var(--amber);
+  border:1px solid rgba(194,65,12,0.2);
+  padding:5px 9px;border-radius:999px;
+}
+
+/* ============ CTA ============ */
+#cta{background:var(--ink);color:#fafaf7;border-bottom:0;text-align:center;padding:140px 0}
+#cta .container{max-width:920px}
+#cta .sec-eyebrow{color:#ff6b6c}
+#cta .sec-eyebrow::before{background:#ff6b6c}
+#cta h2{
+  font:700 clamp(2.4rem,5vw,4rem)/1.05 'Inter';
+  letter-spacing:-0.045em;color:#fafaf7;margin-bottom:18px;
+}
+#cta h2 .sf{font-family:var(--serif);font-style:italic;font-weight:400;color:#ff6b6c}
+#cta .lead{font-size:1.1rem;color:rgba(250,250,247,0.7);max-width:620px;margin:0 auto 40px}
+.cta-links{
+  display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:40px;
+}
+@media(max-width:1280px){.cta-links{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:600px){.cta-links{grid-template-columns:repeat(2,1fr)}}
+.cta-card{
+  display:flex;flex-direction:column;align-items:flex-start;gap:6px;
+  padding:18px 20px;border-radius:12px;
+  background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);
+  transition:all .2s;text-align:left;
+}
+.cta-card:hover{background:rgba(255,255,255,0.08);border-color:rgba(255,255,255,0.2);transform:translateY(-2px)}
+.cta-card .ic{
+  width:32px;height:32px;border-radius:8px;
+  background:var(--red);display:grid;place-items:center;color:#fff;
+  margin-bottom:6px;
+}
+.cta-card .ic svg{width:16px;height:16px}
+.cta-card .t{font:700 0.95rem/1.2 'Inter';color:#fff;letter-spacing:-0.01em}
+.cta-card .u{font:500 11px/1.3 var(--mono);color:rgba(255,255,255,0.5);letter-spacing:0.02em;word-break:break-all}
+
+/* ============ FOOTER ============ */
+footer{
+  background:var(--ink);color:rgba(250,250,247,0.55);
+  padding:24px 32px;text-align:center;
+  font:500 13px/1.5 'Inter';
+  border-top:1px solid rgba(255,255,255,0.06);
+}
+footer b{color:#fafaf7}
+
+/* ============ REVEAL ============ */
+.reveal{opacity:1;transform:none;transition:opacity .7s ease,transform .7s ease}
+.js .reveal{opacity:0;transform:translateY(20px)}
+.js .reveal.in{opacity:1;transform:translateY(0)}
+.reveal.d1{transition-delay:.08s}
+.reveal.d2{transition-delay:.16s}
+.reveal.d3{transition-delay:.24s}
+.reveal.d4{transition-delay:.32s}
+
+@media(prefers-reduced-motion:reduce){
+  .js .reveal,.reveal{opacity:1!important;transform:none!important;transition:none!important}
+  .marquee-track{animation:none}
+  .cursor{animation:none}
+}
+</style>
+</head>
+<body>
+
+<!-- ─────────── NAV ─────────── -->
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="#hero" class="nav-brand">
+      <span class="nav-mark" aria-hidden="true">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 56" fill="none">
+          <rect width="56" height="56" rx="13" fill="#E84142"/>
+          <path d="M5.5 31 L28 8 L50.5 31 L50.5 52 L5.5 52 Z" fill="white" fill-opacity="0.1" stroke="white" stroke-width="2.2" stroke-linejoin="round"/>
+          <g stroke="white" stroke-linecap="round" opacity="0.5">
+            <line x1="28" y1="20" x2="17" y2="31" stroke-width="1.1"/>
+            <line x1="28" y1="20" x2="39" y2="31" stroke-width="1.1"/>
+            <line x1="17" y1="31" x2="39" y2="31" stroke-width="1.1"/>
+            <line x1="28" y1="20" x2="28" y2="44" stroke-width="1.1"/>
+            <line x1="17" y1="31" x2="18" y2="44" stroke-width="1.1"/>
+            <line x1="39" y1="31" x2="38" y2="44" stroke-width="1.1"/>
+            <line x1="18" y1="44" x2="38" y2="44" stroke-width="1.1"/>
+          </g>
+          <circle cx="28" cy="20" r="3.5" fill="white"/>
+          <circle cx="17" cy="31" r="2.4" fill="white" opacity="0.9"/>
+          <circle cx="39" cy="31" r="2.4" fill="white" opacity="0.9"/>
+          <circle cx="18" cy="44" r="1.8" fill="white" opacity="0.7"/>
+          <circle cx="38" cy="44" r="1.8" fill="white" opacity="0.7"/>
+          <circle cx="28" cy="44" r="1.5" fill="white" opacity="0.5"/>
+        </svg>
+      </span>
+      WasiAI
+    </a>
+    <span class="nav-pill">Investor Pitch</span>
+    <div class="nav-links">
+      <a href="#shift" class="nav-link">Problem</a>
+      <a href="#capabilities" class="nav-link">Primitives</a>
+      <a href="#arch" class="nav-link">Stack</a>
+      <a href="#flow" class="nav-link">Flow</a>
+      <a href="#proof" class="nav-link">Onchain proof</a>
+      <a href="#api" class="nav-link">Live API</a>
+      <a href="#showcase" class="nav-link">Use cases</a>
+      <a href="#kite" class="nav-link">vs x402</a>
+      <a href="#market" class="nav-link">Market</a>
+      <a href="#revenue" class="nav-link">Revenue</a>
+      <a href="#roadmap" class="nav-link">Roadmap</a>
+      <a href="#team" class="nav-link">Team</a>
+    </div>
+    <a href="https://wasiai-a2a-production.up.railway.app" target="_blank" rel="noopener" class="nav-cta">Live Gateway <span class="arr">&rarr;</span></a>
+    <div class="nav-progress" id="navProgress"></div>
+  </div>
+</nav>
+
+<!-- ─────────── HERO ─────────── -->
+<section id="hero">
+  <div class="container">
+    <div class="hero-grid">
+      <div>
+        <div class="hero-pill reveal">
+          <span>Payments and orchestration for the</span>
+          <b>Agentic Economy</b>
+          <span class="live"><span class="d"></span>Live</span>
+        </div>
+
+        <h1 class="hero-h1 reveal d1">
+          The infrastructure<br>
+          for the <span class="sf">agentic</span><br>
+          economy.
+        </h1>
+
+        <p class="hero-sub reveal d2">
+          Three systems in production that let AI agents discover, compose, and <b>pay each other</b>, cross-marketplace and cross-chain, with no human in the loop. Built on Google's <b>A2A protocol</b>, x402 and EIP-3009, settled through our own facilitator across three chains.
+        </p>
+
+        <div class="hero-cta-row reveal d3">
+          <a href="https://wasiai-agentshop.vercel.app/" target="_blank" rel="noopener" class="btn btn-primary">Try the live demo <span class="arr">&rarr;</span></a>
+          <a href="https://wasiai-a2a-production.up.railway.app" target="_blank" rel="noopener" class="btn btn-ghost">Open the gateway</a>
+          <a href="#proof" class="btn btn-ghost">See the onchain proof</a>
+        </div>
+
+        <div class="hero-meta reveal d3">
+          <div class="hero-meta-item"><b>3 chains</b>testnet, mainnet-ready</div>
+          <div class="hero-meta-item"><b>1,649 tests</b>1,059 a2a + 590 facilitator</div>
+          <div class="hero-meta-item"><b>~64 user stories</b>mostly QUALITY pipeline</div>
+        </div>
+
+      </div>
+
+      <div class="hero-vis reveal d2" aria-hidden="true">
+        <div class="hero-vis-head">
+          <div class="hero-vis-dots"><i></i><i></i><i></i></div>
+          <span>terminal · agent.session</span>
+          <span class="hero-vis-title">wasiai_a2a v0.1</span>
+        </div>
+        <div class="hero-vis-body" id="heroTerm">
+          <span class="ln"><span class="c">$ </span>agent <span class="ag">claude-sonnet</span> --goal "resolve invoice X"</span>
+          <span class="ln"><span class="c">&rarr; POST /discover  </span><span class="ok">200 OK</span><span class="c">  candidates ranked</span></span>
+          <span class="ln"><span class="c">&rarr; POST /compose</span></span>
+          <span class="ln"><span class="c">  pipeline: </span><span class="k">3 agents</span> <span class="c">(multi-chain)</span></span>
+          <span class="ln"><span class="c">&rarr; HTTP 402  </span><span class="k">x402 Payment Required</span></span>
+          <span class="ln"><span class="c">  inbound: </span><span class="s">"USDC"</span> <span class="c">chain: </span><span class="s">"base-sepolia"</span></span>
+          <span class="ln"><span class="c">&rarr; sign </span><span class="k">EIP-3009</span><span class="c"> off-chain  </span><span class="ok">gas: 0</span></span>
+          <span class="ln"><span class="c">&rarr; facilitator.settle</span></span>
+          <span class="ln"><span class="c">  inbound  </span><span class="ag">base sepolia</span> <span class="ok">SUCCESS</span></span>
+          <span class="ln"><span class="c">  outbound </span><span class="ag">avalanche fuji</span> <span class="ok">SUCCESS</span></span>
+          <span class="ln"><span class="c">  outbound </span><span class="ag">kite (PYUSD)</span>   <span class="ok">SUCCESS</span></span>
+          <span class="ln"><span class="ok">&check; settled onchain  </span><span class="c">tx: 0x8932…fec7e</span></span>
+          <span class="ln"><span class="c">$ </span><span class="cursor"></span></span>
+        </div>
+        <div class="hero-vis-foot">
+          <span>network <span class="ok">testnet</span></span>
+          <span style="margin-left:auto">human decisions: <span class="ok">0</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── MARQUEE / STANDARDS ─────────── -->
+<div class="marquee-section">
+  <div class="container">
+    <div class="marquee-label">Built with &amp; aligned to</div>
+    <div class="marquee">
+      <div class="marquee-track" id="marqueeTrack">
+        <!-- set 1 -->
+        <div class="marquee-item"><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="height:20px"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg><span>Google A2A Protocol</span></div>
+        <div class="marquee-item"><span class="mono" style="font-weight:700;font-size:16px;color:#0d0d10;letter-spacing:-0.02em">x402</span><span>Coinbase</span></div>
+        <div class="marquee-item"><span class="mono" style="font-weight:700;font-size:14px;color:#0d0d10;letter-spacing:-0.02em">EIP-3009</span><span class="mono" style="font-weight:500;color:#8a8a92">/</span><span class="mono" style="font-weight:700;font-size:14px;color:#0d0d10;letter-spacing:-0.02em">EIP-712</span></div>
+        <div class="marquee-item"><span style="font-family:'Inter';font-weight:800;letter-spacing:-0.04em;font-size:18px;color:#181818">Kite</span><span style="color:#8a8a92;font-weight:500">PYUSD</span></div>
+        <div class="marquee-item"><span style="font-family:'Inter';font-weight:800;letter-spacing:-0.04em;font-size:18px;color:#181818">Avalanche</span><span style="color:#8a8a92;font-weight:500">USDC</span></div>
+        <div class="marquee-item"><span style="font-family:'Inter';font-weight:800;letter-spacing:-0.04em;font-size:18px;color:#181818">Base</span><span style="color:#8a8a92;font-weight:500">USDC</span></div>
+        <div class="marquee-item"><span style="font-family:'Inter';font-weight:800;letter-spacing:-0.04em;font-size:18px;color:#181818">Anthropic</span><span style="color:#cd9b6a;font-weight:600">Claude Sonnet</span></div>
+        <div class="marquee-item"><span class="mono" style="font-weight:700;font-size:14px;color:#0d0d10;letter-spacing:-0.02em">wasiai-facilitator</span><span style="color:#8a8a92;font-weight:500">own infra</span></div>
+        <!-- duplicate set -->
+        <div class="marquee-item"><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="height:20px"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg><span>Google A2A Protocol</span></div>
+        <div class="marquee-item"><span class="mono" style="font-weight:700;font-size:16px;color:#0d0d10;letter-spacing:-0.02em">x402</span><span>Coinbase</span></div>
+        <div class="marquee-item"><span class="mono" style="font-weight:700;font-size:14px;color:#0d0d10;letter-spacing:-0.02em">EIP-3009</span><span class="mono" style="font-weight:500;color:#8a8a92">/</span><span class="mono" style="font-weight:700;font-size:14px;color:#0d0d10;letter-spacing:-0.02em">EIP-712</span></div>
+        <div class="marquee-item"><span style="font-family:'Inter';font-weight:800;letter-spacing:-0.04em;font-size:18px;color:#181818">Kite</span><span style="color:#8a8a92;font-weight:500">PYUSD</span></div>
+        <div class="marquee-item"><span style="font-family:'Inter';font-weight:800;letter-spacing:-0.04em;font-size:18px;color:#181818">Avalanche</span><span style="color:#8a8a92;font-weight:500">USDC</span></div>
+        <div class="marquee-item"><span style="font-family:'Inter';font-weight:800;letter-spacing:-0.04em;font-size:18px;color:#181818">Base</span><span style="color:#8a8a92;font-weight:500">USDC</span></div>
+        <div class="marquee-item"><span style="font-family:'Inter';font-weight:800;letter-spacing:-0.04em;font-size:18px;color:#181818">Anthropic</span><span style="color:#cd9b6a;font-weight:600">Claude Sonnet</span></div>
+        <div class="marquee-item"><span class="mono" style="font-weight:700;font-size:14px;color:#0d0d10;letter-spacing:-0.02em">wasiai-facilitator</span><span style="color:#8a8a92;font-weight:500">own infra</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─────────── PROBLEM / SHIFT ─────────── -->
+<section id="shift">
+  <div class="container">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">The problem</div>
+      <h2>AI agents exist. They <span class="sf">cannot transact</span>.</h2>
+      <p class="lead">Every agent marketplace is a silo. Discovery, composition, and payment all stop at the platform boundary. Each agent lives on a single chain, or none. Without a standard commerce layer, the agentic economy stays fragmented: capabilities everywhere, transactions nowhere.</p>
+    </div>
+
+    <div class="shift-grid">
+      <div class="shift-col reveal">
+        <h3><span class="num">01 · Today</span>Three walls, no protocol</h3>
+        <p>Every marketplace ships its own registry, its own SDK, its own payment rails. An agent from one provider cannot discover, call, or pay an agent from another without bespoke integration code written by humans.</p>
+
+        <div class="shift-points">
+          <div class="shift-pt">
+            <div class="icn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></div>
+            <div><h4>No cross-marketplace discovery</h4><p>Agents cannot search peers outside their ecosystem. Capabilities stay invisible across boundaries.</p></div>
+          </div>
+          <div class="shift-pt">
+            <div class="icn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></div>
+            <div><h4>No multi-agent composition</h4><p>No standard to chain agents into pipelines or adapt incompatible schemas. Glue code at every step.</p></div>
+          </div>
+          <div class="shift-pt">
+            <div class="icn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg></div>
+            <div><h4>No autonomous, cross-chain payments</h4><p>Paying an agent on another chain is manual, slow, and expensive. Fully autonomous workflows break at the wallet.</p></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="shift-col reveal d1">
+        <h3><span class="num">02 · The shift</span>From walled marketplaces to a routable economy</h3>
+        <p>The next wave of AI is not bigger models. It's <b>agents that hire each other</b>. For that to happen, we need the same layer that turned isolated stores into the open web: a routing, composition, and settlement layer that works across marketplaces and across chains.</p>
+        <p>WasiAI is that layer. One open API, one open protocol, settlement on three chains. Marketplaces remain. Walls don't.</p>
+
+        <div class="shift-quote">
+          <div class="q">"The internet without TCP/IP. Payments without Stripe. Agents already exist, but they have no protocol and no payment rail to operate as a real economy. Whoever builds that layer first captures the toll on every agentic transaction."</div>
+          <div class="a">Founder thesis, 2026</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── CAPABILITIES / 4 PRIMITIVES ─────────── -->
+<section id="capabilities">
+  <div class="container">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">Four primitives</div>
+      <h2>Discover. Orchestrate.<br>Compose. <span class="sf">Pay.</span></h2>
+      <p class="lead">Everything an autonomous agent needs to participate in a commerce economy. Each primitive is a single HTTP endpoint, in production today, built on the Google A2A protocol (JSON-RPC 2.0, agent cards, tasks).</p>
+    </div>
+
+    <div class="cap-grid reveal d1">
+      <div class="cap">
+        <div class="cap-num">01 · Discovery</div>
+        <h3>Find any agent across any registry.</h3>
+        <p>A unified registry that dissolves platform silos. Search by capability and price, return A2A-standard agent cards. Chain-agnostic. Today the marketplace exposes 20 agents through the gateway.</p>
+        <div class="cap-tags">
+          <span class="cap-tag">/discover</span>
+          <span class="cap-tag">A2A agent cards</span>
+          <span class="cap-tag r">20 agents live</span>
+        </div>
+      </div>
+      <div class="cap">
+        <div class="cap-num">02 · Orchestration</div>
+        <h3>One goal in. One result out.</h3>
+        <p>Send natural language. Claude Sonnet builds the execution plan, picks agents, manages order, handles dependencies and failures. A deterministic greedy fallback runs when the LLM is overkill.</p>
+        <div class="cap-tags">
+          <span class="cap-tag">/orchestrate</span>
+          <span class="cap-tag">Claude Sonnet</span>
+          <span class="cap-tag">greedy fallback</span>
+        </div>
+      </div>
+      <div class="cap">
+        <div class="cap-num">03 · Composition</div>
+        <h3>Pipelines that auto-adapt.</h3>
+        <p>Chain agents into reusable pipelines. An LLM transform layer reconciles incompatible schemas, so no human writes glue code. Pipelines are cached and replayable.</p>
+        <div class="cap-tags">
+          <span class="cap-tag">/compose</span>
+          <span class="cap-tag">schema transform</span>
+          <span class="cap-tag">cached</span>
+        </div>
+      </div>
+      <div class="cap">
+        <div class="cap-num">04 · Payments</div>
+        <h3>Settle with zero gas, zero humans.</h3>
+        <p>x402 payment-required handshake. EIP-712 off-chain authorization for instant signed intent. EIP-3009 gasless transfers via <b>wasiai-facilitator</b>, our own multi-chain x402 infrastructure with circuit breakers and a boot-time domain-separator check. Pre-paid agent keys for high-volume consumers.</p>
+        <div class="cap-tags">
+          <span class="cap-tag r">x402</span>
+          <span class="cap-tag r">EIP-712</span>
+          <span class="cap-tag r">EIP-3009</span>
+          <span class="cap-tag g">gas: 0</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── ARCHITECTURE (interactive) ─────────── -->
+<section id="arch">
+  <div class="container">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">System design</div>
+      <h2>Three systems, <span class="sf">layer by layer</span>.</h2>
+      <p class="lead">Click any layer to inspect what runs there. Three independent services, deployed separately, that consume each other. The orchestration layer is where the strongest technical differentiation lives: LLM composition over the open Google A2A standard.</p>
+    </div>
+
+    <div class="arch-wrap">
+      <div class="arch-stack">
+        <button class="arch-layer active" data-layer="l4" type="button">
+          <div class="arch-id">L4</div>
+          <div>
+            <div class="arch-l-sub">Marketplace</div>
+            <div class="arch-l-name">wasiai-v2</div>
+            <div class="arch-tags"><span>Next.js 14</span><span>Supabase</span><span>Vercel</span><span>app.wasiai.io</span></div>
+          </div>
+        </button>
+        <button class="arch-layer" data-layer="l3" type="button">
+          <div class="arch-id">L3</div>
+          <div>
+            <div class="arch-l-sub">The key layer</div>
+            <div class="arch-l-name">wasiai-a2a</div>
+            <div class="arch-tags"><span>/discover</span><span>/compose</span><span>/orchestrate</span><span>Claude Sonnet</span></div>
+          </div>
+        </button>
+        <button class="arch-layer" data-layer="l2" type="button">
+          <div class="arch-id">L2</div>
+          <div>
+            <div class="arch-l-sub">Settlement</div>
+            <div class="arch-l-name">wasiai-facilitator</div>
+            <div class="arch-tags"><span>x402</span><span>EIP-3009</span><span>circuit breakers</span><span>domain-check</span></div>
+          </div>
+        </button>
+        <button class="arch-layer" data-layer="l1" type="button">
+          <div class="arch-id">L1</div>
+          <div>
+            <div class="arch-l-sub">Chains</div>
+            <div class="arch-l-name">Multi-chain</div>
+            <div class="arch-tags"><span>Kite · PYUSD</span><span>Avalanche · USDC</span><span>Base · USDC</span></div>
+          </div>
+        </button>
+      </div>
+
+      <div class="arch-detail" id="archDetail">
+        <!-- filled by JS -->
+      </div>
+    </div>
+
+    <div class="arch-portability reveal d2">
+      <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg></div>
+      <div>
+        <b>Modular and chain-agnostic.</b>
+        <span>The facilitator is a separate microservice on purpose: it can be licensed to other marketplaces that only want settlement. A chain resolver picks the network per agent, so the same flow settles in USDC on Base or Avalanche and PYUSD on Kite.</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── FLOW ─────────── -->
+<section id="flow">
+  <div class="container">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">End-to-end flow</div>
+      <h2>From a goal to an onchain payment, in one <span class="sf">request</span>.</h2>
+      <p class="lead">One goal in, one settled result out. The full loop, from natural-language request to onchain payment, runs over standard HTTP and standard EIPs. No proprietary SDK required.</p>
+    </div>
+
+    <div class="flow-rail reveal d1">
+      <div class="flow-step">
+        <div class="flow-num">01</div>
+        <h4>Goal arrives</h4>
+        <p>"Resolve invoice X." One request, plain text. The caller, human or agent, fires a goal. No schema required.</p>
+        <span class="flow-tag">natural language</span>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">02</div>
+        <h4>Discover &amp; compose</h4>
+        <p>The gateway searches connected registries, ranks candidates, and composes the multi-agent pipeline.</p>
+        <span class="flow-tag">a2a discovery</span>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">03</div>
+        <h4>Gateway returns 402</h4>
+        <p>Standard HTTP response with the exact amount, token, and chain. The caller signs an EIP-3009 authorization, gasless.</p>
+        <span class="flow-tag r">x402</span>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">04</div>
+        <h4>LLM orchestrates</h4>
+        <p>Claude Sonnet invokes each agent in order and pays each sub-agent on its native chain via the chain resolver.</p>
+        <span class="flow-tag">claude sonnet</span>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">05</div>
+        <h4>Result + settlement</h4>
+        <p>The caller pays the gateway once; the gateway settles inbound and outbound onchain across chains. Status SUCCESS.</p>
+        <span class="flow-tag g">onchain &check;</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── PROOF ONCHAIN · CENTRAL SECTION ─────────── -->
+<section id="proof">
+  <div class="container">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">Onchain proof</div>
+      <h2>This is not a mockup. It's <span class="sf">running onchain</span>.</h2>
+      <p class="lead">Four real agent-to-agent transactions, one inbound charge and three outbound payments, the same /compose flow across three different chains, with the correct token decimals on each. Status SUCCESS. Click any hash to verify it on its explorer.</p>
+    </div>
+
+    <div class="stats-grid reveal d1" style="margin-bottom:48px">
+      <div class="stat"><div class="num red"><span>3</span></div><div class="lbl">Chains</div><div class="desc">Kite, Avalanche and Base. Testnet today, mainnet-ready: the runbook is written and validated.</div></div>
+      <div class="stat"><div class="num"><span>1,649</span></div><div class="lbl">Green tests</div><div class="desc">1,059 in a2a and 590 in the facilitator. Green on every merge.</div></div>
+      <div class="stat"><div class="num"><span>~64</span></div><div class="lbl">User stories</div><div class="desc">Mostly delivered with the QUALITY pipeline: SDD, review, QA, DONE.</div></div>
+      <div class="stat"><div class="num green"><span>4</span></div><div class="lbl">Onchain tx</div><div class="desc">1 inbound + 3 outbound, all verifiable on a public explorer.</div></div>
+      <div class="stat"><div class="num green"><span>3&times;5</span></div><div class="lbl">Validation matrix</div><div class="desc">Full-prod validation 2026-05-28: 3 chains by 5 dimensions, all green.</div></div>
+      <div class="stat"><div class="num"><span>SSRF</span></div><div class="lbl">Security guards</div><div class="desc">SSRF guards, HSTS/CORS, circuit breakers, anti-IDOR ownership checks.</div></div>
+    </div>
+
+    <p class="eyebrow reveal d1" style="margin-bottom:14px"><span class="ink">Verifiable agent-to-agent transactions</span> · testnet</p>
+    <div class="proof-tx reveal d2">
+      <div class="proof-tx-row">
+        <div>
+          <div class="chain">Base Sepolia</div>
+          <div class="kind">Inbound · caller &rarr; gateway · USDC (6 dec)</div>
+        </div>
+        <div class="mono" style="color:var(--fg-3);font-size:11px;overflow:hidden;text-overflow:ellipsis">0x89329e…92fec7e</div>
+        <a class="hash" href="https://sepolia.basescan.org/tx/0x89329e5a23f7470bdd470d7dd747f77414c6132cdb89b2fcb0f713e9292fec7e" target="_blank" rel="noopener">Verify on BaseScan &nearr;</a>
+      </div>
+      <div class="proof-tx-row">
+        <div>
+          <div class="chain">Base Sepolia</div>
+          <div class="kind">Outbound · gateway &rarr; sub-agent · USDC (6 dec)</div>
+        </div>
+        <div class="mono" style="color:var(--fg-3);font-size:11px;overflow:hidden;text-overflow:ellipsis">0xedcbc8…ae83f619a3</div>
+        <a class="hash" href="https://sepolia.basescan.org/tx/0xedcbc86d43ac96521d6c9f25db1d3f56deb8beea44fefaf7f5134cae83f619a3" target="_blank" rel="noopener">Verify on BaseScan &nearr;</a>
+      </div>
+      <div class="proof-tx-row">
+        <div>
+          <div class="chain">Avalanche Fuji</div>
+          <div class="kind">Outbound · gateway &rarr; sub-agent · USDC (6 dec)</div>
+        </div>
+        <div class="mono" style="color:var(--fg-3);font-size:11px;overflow:hidden;text-overflow:ellipsis">0x423dbf…7ba4de60ff</div>
+        <a class="hash" href="https://testnet.snowtrace.io/tx/0x423dbfcfec6a81552a713bafc27e0ebe77c6192742eb9c778593f97ba4de60ff" target="_blank" rel="noopener">Verify on Snowtrace &nearr;</a>
+      </div>
+      <div class="proof-tx-row">
+        <div>
+          <div class="chain">Kite testnet</div>
+          <div class="kind">Outbound · gateway &rarr; sub-agent · PYUSD (18 dec)</div>
+        </div>
+        <div class="mono" style="color:var(--fg-3);font-size:11px;overflow:hidden;text-overflow:ellipsis">0xb5b1db…9224252b44</div>
+        <a class="hash" href="https://testnet.kitescan.ai/tx/0xb5b1dbedd6c9d915e102c112cc8840cc84cfaaba8cc3b96ddecd069224252b44" target="_blank" rel="noopener">Verify on KiteScan &nearr;</a>
+      </div>
+    </div>
+    <p class="hero-meta-item reveal d2" style="margin-top:20px;font-size:13px;color:var(--fg-2)">Same /compose flow, settled onchain on three chains, correct decimals per token, status SUCCESS (0x1). Networks: testnets. Mainnet: runbook written and validated, pending activation.</p>
+  </div>
+</section>
+
+<!-- ─────────── LIVE API EXAMPLE ─────────── -->
+<section id="api">
+  <div class="container">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">Live API</div>
+      <h2>Three commands you can run right now.</h2>
+      <p class="lead">Not pseudocode. These are real, callable endpoints against the production gateway and the live marketplace. Try them yourself.</p>
+    </div>
+
+    <div class="api-grid">
+      <div class="api-col reveal">
+        <h3>Three live layers, three calls.</h3>
+        <p>One curl per system shows all three layers alive: the facilitator listing its supported chains, the marketplace returning real agents, and the A2A gateway responding healthy.</p>
+        <div class="api-list">
+          <div class="api-list-item"><span class="b">GET</span><span><b>/supported</b> · facilitator chains and breaker state</span></div>
+          <div class="api-list-item"><span class="b">GET</span><span><b>/api/v1/capabilities</b> · the real agents in the marketplace</span></div>
+          <div class="api-list-item"><span class="b">GET</span><span><b>/health</b> · A2A gateway status and version</span></div>
+          <div class="api-list-item"><span class="b">GET</span><span><b>/.well-known/agent.json</b> · A2A agent card</span></div>
+          <div class="api-list-item"><span class="b">402</span><span><b>x402 challenge</b> · payment-required handshake on billable routes</span></div>
+        </div>
+        <div style="margin-top:24px">
+          <a href="https://wasiai-a2a-production.up.railway.app/.well-known/agent.json" target="_blank" rel="noopener" class="btn btn-ghost">Inspect Agent Card <span class="arr">&rarr;</span></a>
+        </div>
+      </div>
+
+      <div class="api-col reveal d1">
+        <div class="api-box">
+          <div class="api-tabs" role="tablist">
+            <button class="api-tab active" data-tab="supported" type="button">supported</button>
+            <button class="api-tab" data-tab="capabilities" type="button">capabilities</button>
+            <button class="api-tab" data-tab="health" type="button">health</button>
+            <button class="api-tab" data-tab="x402" type="button">x402</button>
+          </div>
+          <pre class="api-body" id="apiBody"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── USE CASES / SHOWCASE ─────────── -->
+<section id="showcase">
+  <div class="container">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">Real use cases</div>
+      <h2>Products are already <span class="sf">integrated</span> on top.</h2>
+      <p class="lead">Three products run on the WasiAI stack today. Every new marketplace that integrates is free distribution for the agents already registered, and instant multi-chain liquidity for its own.</p>
+    </div>
+
+    <div class="cap-grid reveal d1">
+      <div class="cap">
+        <div class="cap-num">01 · Cobraya</div>
+        <h3>Agentic factoring marketplace.</h3>
+        <p>An MVP built for the Avalanche Fintech Build: factoring for Mexican SMBs. Pays agents on Avalanche Fuji through wasiai-a2a, with a Solidity anti-double-assignment contract and an EIP-712 audit trail for CNBV compliance.</p>
+        <div class="cap-tags">
+          <span class="cap-tag">Avalanche</span>
+          <span class="cap-tag">MVP</span>
+          <span class="cap-tag g">Solidity audit trail</span>
+        </div>
+      </div>
+      <div class="cap">
+        <div class="cap-num">02 · WasiAgentShop</div>
+        <h3>Agents on Kite.</h3>
+        <p>A Kite network use case: autonomous agents with PYUSD settlement onchain, orchestrated by wasiai-a2a. The sender signs once; agents shop the marketplace and settle in seconds.</p>
+        <div class="cap-tags">
+          <span class="cap-tag">Kite</span>
+          <span class="cap-tag">PYUSD</span>
+          <span class="cap-tag r">live demo</span>
+        </div>
+      </div>
+      <div class="cap">
+        <div class="cap-num">03 · app.wasiai.io</div>
+        <h3>Our own marketplace.</h3>
+        <p>The marketplace itself has cut over: discovery, compose, and orchestrate now delegate to wasiai-a2a. It is both a product and the reference integration for the stack.</p>
+        <div class="cap-tags">
+          <span class="cap-tag">Next.js 14</span>
+          <span class="cap-tag g">prod cutover</span>
+          <span class="cap-tag">reference integration</span>
+        </div>
+      </div>
+      <div class="cap">
+        <div class="cap-num">04 · Network effect</div>
+        <h3>Each integration compounds.</h3>
+        <p>The pattern: each new marketplace brings its own traffic. We do not need to capture end users. Marketplaces and agents bring theirs, and every transaction flows through the A2A layer.</p>
+        <div class="cap-tags">
+          <span class="cap-tag">B2B distribution</span>
+          <span class="cap-tag g">multi-chain liquidity</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="hero-cta-row reveal d2" style="margin-top:40px;justify-content:center;display:flex;gap:14px;flex-wrap:wrap">
+      <a href="https://wasiai-agentshop.vercel.app/" target="_blank" rel="noopener" class="btn btn-primary">Try the live demo <span class="arr">&rarr;</span></a>
+      <a href="https://app.wasiai.io" target="_blank" rel="noopener" class="btn btn-ghost">Open the marketplace</a>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── COMPARISON vs x402 / Coinbase ─────────── -->
+<section id="kite">
+  <div class="container">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">Differentiators / Moat</div>
+      <h2>Complementary to x402.<br>Not <span class="sf">competing</span> with it.</h2>
+      <p class="lead">Coinbase x402 solves the payment rail, Base-first. We are the higher-level, interoperable, multi-chain layer on top: open A2A protocol, cross-marketplace discovery, and LLM orchestration. If Base wins, we win; if Avalanche or Kite win, we win too.</p>
+    </div>
+
+    <div class="kite-cols reveal d1">
+      <div class="kite-col k">
+        <h3><span class="lg">x</span> x402 native (Coinbase, Base-first)</h3>
+        <div class="cap">Payment rail layer</div>
+        <div class="kite-list">
+          <div class="kite-item"><span class="ck">&check;</span><div><b>Gasless settlement</b><span>EIP-3009 transfers, strong on Base.</span></div></div>
+          <div class="kite-item"><span class="ck">&times;</span><div><b>No A2A interop</b><span>No cross-marketplace agent discovery standard.</span></div></div>
+          <div class="kite-item"><span class="ck">&times;</span><div><b>Single-chain focus</b><span>Base-first by design.</span></div></div>
+          <div class="kite-item"><span class="ck">&times;</span><div><b>No LLM orchestration</b><span>It is a payment primitive, not a planner.</span></div></div>
+        </div>
+      </div>
+      <div class="kite-col w">
+        <h3><span class="lg">W</span> WasiAI</h3>
+        <div class="cap">Commerce + orchestration layer</div>
+        <div class="kite-list">
+          <div class="kite-item"><span class="ck">&check;</span><div><b>Google A2A interop</b><span>Open standard. Cross-marketplace discovery and tasks.</span></div></div>
+          <div class="kite-item"><span class="ck">&check;</span><div><b>Real multi-chain</b><span>Kite + Avalanche + Base, testnet, mainnet-ready.</span></div></div>
+          <div class="kite-item"><span class="ck">&check;</span><div><b>Goal-based LLM orchestration</b><span>Claude Sonnet plans and composes multi-agent pipelines.</span></div></div>
+          <div class="kite-item"><span class="ck">&check;</span><div><b>Gasless settlement (EIP-3009)</b><span>Through our own facilitator, with circuit breakers.</span></div></div>
+          <div class="kite-item"><span class="ck">&check;</span><div><b>Onchain identity, on the roadmap</b><span>ERC-8004 / Kite Passport: spike validated + PoC scaffold (Model B Hybrid), in roadmap.</span></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── MARKET ─────────── -->
+<section id="market">
+  <div class="container">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">Market</div>
+      <h2>The agentic economy is being born. The <span class="sf">rails are empty</span>.</h2>
+    </div>
+
+    <div class="market-grid">
+      <div class="reveal d1">
+        <div class="market-list">
+          <div class="market-pt">
+            <div class="icn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg></div>
+            <p><b>Agentic commerce</b> is the #1 crypto-plus-AI narrative of 2025-2026: Coinbase launched x402, Google published A2A, Anthropic published MCP, all within the last twelve months.</p>
+          </div>
+          <div class="market-pt">
+            <div class="icn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+            <p>Every agent-to-agent API call is a potential transaction, from a fraction of a cent to a few dollars. The economics are volume times fee.</p>
+          </div>
+          <div class="market-pt">
+            <div class="icn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
+            <p>Capture for WasiAI is a <b>1% protocol fee</b> on every compose orchestrated through the A2A layer.</p>
+          </div>
+          <div class="market-pt">
+            <div class="icn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/></svg></div>
+            <p>Initial addressable market: <b>agent marketplaces, agent builders, and B2B integrators</b> that need settlement and orchestration but do not want to build it.</p>
+          </div>
+        </div>
+      </div>
+      <div class="market-card reveal d2">
+        <h4>On the TAM numbers <span class="tag-warn">estimate</span></h4>
+        <p>The size of the agent-to-agent payments market has no settled figure yet, because it is being born. Any TAM number in this deck is an <b>estimate</b> with explicit assumptions.</p>
+        <p>What we can measure: onchain volume across x402 and A2A has grown month over month since launch. The curve is in its pre-hockey-stick phase. Whoever has the rails ready when this takes off captures the toll.</p>
+        <p style="margin-top:18px"><span class="placeholder">[to complete: founder, TAM/SAM/SOM with assumptions]</span></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── REVENUE ─────────── -->
+<section id="revenue">
+  <div class="container">
+    <div class="sec-head center reveal">
+      <div class="sec-eyebrow">Business model</div>
+      <h2>Three revenue lines. <span class="sf">The first is already implemented.</span></h2>
+      <p class="lead">No SaaS seat tax, no upfront platform fee. Revenue is proportional to actual usage. Without capturing end users: marketplaces and agents bring their own traffic.</p>
+    </div>
+
+    <div class="rev-grid">
+      <div class="rev-card reveal">
+        <div class="rev-num">01 · Protocol fee</div>
+        <div class="rev-h">1<span class="sf">%</span></div>
+        <div class="rev-name">Per orchestration</div>
+        <div class="rev-d">A flat 1% on every /compose or /orchestrate that flows through the A2A layer. Implemented as a real, idempotent onchain EIP-712 transfer. Transparent to the caller. It turns on by setting the fee wallet, a flag, not new development.</div>
+        <span class="rev-badge ready">Implemented · ready to activate</span>
+      </div>
+      <div class="rev-card reveal d1">
+        <div class="rev-num">02 · Premium discovery</div>
+        <div class="rev-h sm">Premium</div>
+        <div class="rev-name">Operator tier</div>
+        <div class="rev-d">Paid features for agents and operators that want better ranking, analytics, segmentation, and production-grade discovery infrastructure.</div>
+        <span class="rev-badge soon">Roadmap</span>
+      </div>
+      <div class="rev-card reveal d2">
+        <div class="rev-num">03 · B2B licensing</div>
+        <div class="rev-h sm">B2B</div>
+        <div class="rev-name">White-label gateway</div>
+        <div class="rev-d">Other marketplaces integrate wasiai-a2a plus the facilitator as their payment and orchestration layer. License plus revenue share. The largest medium-term opportunity.</div>
+        <span class="rev-badge soon">Pipeline</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── ROADMAP ─────────── -->
+<section id="roadmap">
+  <div class="container">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">Roadmap</div>
+      <h2>From validated testnets to <span class="sf">mainnet at scale</span>.</h2>
+      <p class="lead">A tight, opinionated roadmap. Each milestone is a single, demonstrable capability.</p>
+    </div>
+
+    <div class="rm-rail">
+      <div class="rm-item done reveal">
+        <div class="rm-dot"></div>
+        <div class="rm-card">
+          <div class="rm-q">Done · A2A gateway v1</div>
+          <div>
+            <div class="rm-h">Protocol primitives shipped</div>
+            <div class="rm-d">/discover, /orchestrate, /compose. x402 paywall handshake. EIP-712 typed-data signing. Operator dashboard. Google A2A protocol over JSON-RPC 2.0.</div>
+          </div>
+          <span class="rm-status">Shipped</span>
+        </div>
+      </div>
+      <div class="rm-item done reveal d1">
+        <div class="rm-dot"></div>
+        <div class="rm-card">
+          <div class="rm-q">Done · Multi-chain</div>
+          <div>
+            <div class="rm-h">Self-hosted facilitator across three chains</div>
+            <div class="rm-d">wasiai-facilitator live with Kite, Avalanche and Base adapters. Boot-time domain-separator check, idempotency guard, circuit breakers. Marketplace settlement migrated in-house. Four real onchain tx on testnet.</div>
+          </div>
+          <span class="rm-status">Shipped</span>
+        </div>
+      </div>
+      <div class="rm-item now reveal d2">
+        <div class="rm-dot"></div>
+        <div class="rm-card">
+          <div class="rm-q">Next · 90 days</div>
+          <div>
+            <div class="rm-h">Mainnet activation + protocol fee on</div>
+            <div class="rm-d">Activate mainnet on the 3 chains (runbook written and validated) and turn on the protocol fee. Close 2-3 third-party marketplace integrations. Apply to Coinbase / Base and Avalanche Codebase grants. Take Kite Passport / ERC-8004 from spike + PoC to production.</div>
+          </div>
+          <span class="rm-status">In progress</span>
+        </div>
+      </div>
+      <div class="rm-item next reveal d3">
+        <div class="rm-dot"></div>
+        <div class="rm-card">
+          <div class="rm-q">Then · 6-12 months</div>
+          <div>
+            <div class="rm-h">SDK, more chains, reputation</div>
+            <div class="rm-d">Open-source client SDK and additional chains (Ethereum L1; Solana under evaluation). An agent reputation layer on ERC-8004. SLAs and an enterprise tier for B2B licensing.</div>
+          </div>
+          <span class="rm-status">Planned</span>
+        </div>
+      </div>
+      <div class="rm-item next reveal d4">
+        <div class="rm-dot"></div>
+        <div class="rm-card">
+          <div class="rm-q">Future · Standard</div>
+          <div>
+            <div class="rm-h">Recurring monthly fee volume</div>
+            <div class="rm-d">Reach recurring monthly protocol-fee volume that validates the curve, and move the WasiAI A2A extensions into a public spec process with ecosystem implementers.</div>
+          </div>
+          <span class="rm-status">Planned</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── TEAM ─────────── -->
+<section id="team" style="background:var(--bg-3);padding:120px 0;border-bottom:1px solid var(--line-2)">
+  <div class="container">
+    <div class="sec-head center reveal">
+      <div class="sec-eyebrow">Team &amp; Ask</div>
+      <h2>The team building the <span class="sf">rails</span>.</h2>
+    </div>
+
+    <div class="market-grid">
+      <div class="market-card reveal">
+        <h4>Team</h4>
+        <p><span class="placeholder">[to complete: founder, name, role, prior experience]</span></p>
+        <p><span class="placeholder">[to complete: founder, CTO / co-founders]</span></p>
+        <p><span class="placeholder">[to complete: founder, advisors if any]</span></p>
+        <p style="margin-top:14px">What can be stated today: the team has delivered ~64 user stories (mostly QUALITY), ~1,649 green tests, and the stack is in production across three chains (testnet, mainnet-ready).</p>
+      </div>
+      <div class="market-card reveal d1">
+        <h4>Ask</h4>
+        <p><span class="placeholder">[to complete: founder, round size]</span></p>
+        <p style="margin-top:8px"><b>Use of funds (suggested, adjust):</b></p>
+        <div class="market-list" style="margin-top:12px">
+          <div class="market-pt"><div class="icn">40</div><p><b>Engineering</b>: scale the A2A layer and add new chains.</p></div>
+          <div class="market-pt"><div class="icn">25</div><p><b>Go-to-market B2B</b>: integrations with third-party marketplaces.</p></div>
+          <div class="market-pt"><div class="icn">20</div><p><b>Security</b>: formal onchain audits.</p></div>
+          <div class="market-pt"><div class="icn">15</div><p><b>Runway</b>: operations plus grant matching.</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── CTA ─────────── -->
+<section id="cta">
+  <div class="container">
+    <div class="sec-eyebrow reveal" style="justify-content:center;display:inline-flex">Live in production</div>
+    <h2 class="reveal d1">AI agents are <span class="sf">already here</span>.<br>What's missing are the rails.</h2>
+    <p class="lead reveal d2">WasiAI is those rails: multi-chain, with real onchain transactions on testnet and mainnet a runbook away. Open the gateway, hit the endpoints, verify the transactions on their explorer.</p>
+
+    <div class="cta-links">
+      <a href="https://wasiai-agentshop.vercel.app/" target="_blank" rel="noopener" class="cta-card reveal">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
+        <div class="t">WasiAgentShop · Live demo</div>
+        <div class="u">wasiai-agentshop.vercel.app</div>
+      </a>
+      <a href="https://wasiai-a2a-production.up.railway.app" target="_blank" rel="noopener" class="cta-card reveal d1">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg></div>
+        <div class="t">A2A Gateway</div>
+        <div class="u">wasiai-a2a-production.up.railway.app</div>
+      </a>
+      <a href="https://wasiai-facilitator-production.up.railway.app/supported" target="_blank" rel="noopener" class="cta-card reveal d2">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg></div>
+        <div class="t">Facilitator</div>
+        <div class="u">/supported</div>
+      </a>
+      <a href="https://app.wasiai.io/api/v1/capabilities" target="_blank" rel="noopener" class="cta-card reveal d3">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>
+        <div class="t">Capabilities</div>
+        <div class="u">/api/v1/capabilities</div>
+      </a>
+      <a href="https://app.wasiai.io" target="_blank" rel="noopener" class="cta-card reveal d4">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg></div>
+        <div class="t">Marketplace</div>
+        <div class="u">app.wasiai.io</div>
+      </a>
+      <a href="https://github.com/ferrosasfp/wasiai-a2a" target="_blank" rel="noopener" class="cta-card reveal d4">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg></div>
+        <div class="t">GitHub</div>
+        <div class="u">ferrosasfp/wasiai-a2a</div>
+      </a>
+    </div>
+
+    <p class="lead reveal d2" style="margin-bottom:24px"><span class="placeholder">[to complete: founder, email / calendly]</span></p>
+    <a href="https://wasiai-a2a-production.up.railway.app" target="_blank" rel="noopener" class="btn btn-red" style="background:var(--red)">Open the live gateway <span class="arr">&rarr;</span></a>
+  </div>
+</section>
+
+<footer>
+  <b>WasiAI</b> · 2026 · Infrastructure for the Agentic Economy · <a href="https://wasiai.io" style="color:inherit;text-decoration:underline;text-decoration-color:rgba(255,255,255,0.2)">wasiai.io</a>
+</footer>
+
+<script>
+/* === scroll progress + reveal === */
+(() => {
+  const pg = document.getElementById('navProgress');
+  const onScroll = () => {
+    const s = window.scrollY, t = document.documentElement.scrollHeight - window.innerHeight;
+    pg.style.width = (t > 0 ? (s / t) * 100 : 0) + '%';
+  };
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } });
+  }, { threshold: 0.08, rootMargin: '0px 0px -40px 0px' });
+  document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+})();
+
+/* === smooth nav anchors === */
+document.querySelectorAll('a[href^="#"]').forEach(a => {
+  a.addEventListener('click', e => {
+    const t = document.querySelector(a.getAttribute('href'));
+    if (t) { e.preventDefault(); window.scrollTo({ top: t.getBoundingClientRect().top + window.scrollY - 70, behavior: 'smooth' }); }
+  });
+});
+
+/* === interactive arch diagram === */
+(() => {
+  const data = {
+    l4: {
+      tag: 'L4 · Marketplace',
+      title: 'wasiai-v2 · the agent marketplace.',
+      desc: 'Where creators publish agents and consumers invoke them. Live at app.wasiai.io. It has already cut over: discovery, compose, and orchestrate now delegate to the A2A layer. It is both a product and the reference integration.',
+      kv: [
+        ['url', 'app.wasiai.io'],
+        ['stack', 'Next.js 14 · Supabase · Vercel'],
+        ['status', 'prod cutover complete'],
+      ],
+    },
+    l3: {
+      tag: 'L3 · The key layer',
+      title: 'wasiai-a2a · discovery, composition, orchestration.',
+      desc: 'The strongest technical differentiation. Implements the Google A2A protocol (agent cards, tasks, JSON-RPC 2.0). Discovers agents in any registry, composes them into pipelines, and orchestrates each step with an LLM. An LLM transform layer reconciles incompatible schemas.',
+      kv: [
+        ['endpoints', '/discover · /compose · /orchestrate'],
+        ['planning', 'Claude Sonnet · greedy fallback'],
+        ['stack', 'Fastify · Supabase · Redis/BullMQ'],
+      ],
+    },
+    l2: {
+      tag: 'L2 · Settlement',
+      title: 'wasiai-facilitator · onchain settlement.',
+      desc: 'A separate microservice that settles x402 / EIP-3009 payments on Kite, Avalanche and Base. Boot-time domain-separator check, idempotency guard, circuit breakers, fail-mode opt-in. Built to be licensed standalone to other marketplaces.',
+      kv: [
+        ['protocol', 'x402 · EIP-712 · EIP-3009'],
+        ['safety', 'circuit breakers · domain-check'],
+        ['chains', 'Kite · Avalanche · Base'],
+      ],
+    },
+    l1: {
+      tag: 'L1 · Chains',
+      title: 'Multi-chain settlement, correct decimals per token.',
+      desc: 'The chain resolver picks the network per agent. The same /compose flow settles in USDC (6 dec) on Base and Avalanche and in PYUSD (18 dec) on Kite. Testnet today; mainnet is a written, validated runbook away.',
+      kv: [
+        ['kite', 'PYUSD · 18 dec'],
+        ['avalanche', 'USDC · 6 dec'],
+        ['base', 'USDC · 6 dec'],
+      ],
+    },
+  };
+
+  const detail = document.getElementById('archDetail');
+  const layers = document.querySelectorAll('.arch-layer');
+
+  function render(key) {
+    const d = data[key];
+    detail.innerHTML = `
+      <div class="arch-detail-h">${d.tag}</div>
+      <h3>${d.title}</h3>
+      <p>${d.desc}</p>
+      <dl class="kv">
+        ${d.kv.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}
+      </dl>
+    `;
+  }
+
+  layers.forEach(l => {
+    l.addEventListener('click', () => {
+      layers.forEach(x => x.classList.remove('active'));
+      l.classList.add('active');
+      render(l.dataset.layer);
+    });
+    l.addEventListener('mouseenter', () => {
+      layers.forEach(x => x.classList.remove('active'));
+      l.classList.add('active');
+      render(l.dataset.layer);
+    });
+  });
+  render('l4');
+})();
+
+/* === API tabs (live snippets) === */
+(() => {
+  const snippets = {
+    supported: `<span class="c">$ </span>curl https://wasiai-facilitator-production.up.railway.app/<span class="k">supported</span>
+
+<span class="ok">HTTP/1.1 200 OK</span>
+<span class="k">{</span>
+  <span class="k">"chains"</span>: <span class="k">[</span>
+    <span class="k">{ "network": </span><span class="s">"eip155:2368"</span><span class="k">,  "name": </span><span class="s">"Kite Testnet"</span><span class="k">,    "breakerState": </span><span class="ok">"CLOSED"</span> <span class="k">}</span>,
+    <span class="k">{ "network": </span><span class="s">"eip155:43113"</span><span class="k">, "name": </span><span class="s">"Avalanche Fuji"</span><span class="k">,  "breakerState": </span><span class="ok">"CLOSED"</span> <span class="k">}</span>,
+    <span class="k">{ "network": </span><span class="s">"eip155:43114"</span><span class="k">, "name": </span><span class="s">"Avalanche"</span><span class="k">,       "breakerState": </span><span class="ok">"CLOSED"</span> <span class="k">}</span>,
+    <span class="k">{ "network": </span><span class="s">"eip155:84532"</span><span class="k">, "name": </span><span class="s">"Base Sepolia"</span><span class="k">,    "breakerState": </span><span class="ok">"CLOSED"</span> <span class="k">}</span>
+  <span class="k">]</span>,
+  <span class="k">"methods"</span>: <span class="k">[</span> <span class="s">"eip3009"</span> <span class="k">]</span>
+<span class="k">}</span>`,
+    capabilities: `<span class="c">$ </span>curl https://app.wasiai.io/<span class="k">api/v1/capabilities</span>
+
+<span class="ok">HTTP/1.1 200 OK</span>
+<span class="k">{</span>
+  <span class="k">"total"</span>: <span class="s">20</span>,
+  <span class="k">"agents"</span>: <span class="k">[</span>
+    <span class="k">{ "name": </span><span class="s">"Cobraya Credit Scorer"</span><span class="k">,    "payment": { "chain": </span><span class="s">"avalanche"</span><span class="k"> } }</span>,
+    <span class="k">{ "name": </span><span class="s">"AgentShop KYC Validator"</span><span class="k">,  "payment": { "chain": </span><span class="s">"kite-ozone-testnet"</span><span class="k"> } }</span>,
+    <span class="k">{ "name": </span><span class="s">"AI Code Vulnerability Analyzer"</span><span class="k"> }</span>,
+    <span class="k">{ … 17 more agents … }</span>
+  <span class="k">]</span>
+<span class="k">}</span>`,
+    health: `<span class="c">$ </span>curl https://wasiai-a2a-production.up.railway.app/<span class="k">health</span>
+
+<span class="ok">HTTP/1.1 200 OK</span>
+<span class="k">{</span>
+  <span class="k">"status"</span>:  <span class="ok">"ok"</span>,
+  <span class="k">"version"</span>: <span class="s">"0.1.0"</span>,
+  <span class="k">"uptime"</span>:  <span class="s">86415.5</span>,
+  <span class="k">"timestamp"</span>: <span class="s">"2026-05-28T17:33:13Z"</span>
+<span class="k">}</span>`,
+    x402: `<span class="c">$ </span>curl -X POST https://wasiai-a2a-production.up.railway.app/<span class="k">compose</span>
+
+<span class="err">HTTP/1.1 402 Payment Required</span>
+<span class="k">X-Payment-Protocol</span>: x402
+<span class="k">{</span>
+  <span class="k">"amount"</span>:    <span class="s">"0.06"</span>,
+  <span class="k">"token"</span>:     <span class="s">"USDC"</span>,
+  <span class="k">"chain"</span>:     <span class="s">"base-sepolia"</span>,
+  <span class="k">"recipient"</span>: <span class="s">"0x…"</span>
+<span class="k">}</span>
+
+<span class="c"># caller signs EIP-3009 off-chain (gas: 0)</span>
+<span class="c"># facilitator settles inbound + outbound onchain</span>
+<span class="ok">HTTP/1.1 200 OK  · settled · tx 0x8932…fec7e</span>`,
+  };
+  const tabs = document.querySelectorAll('.api-tab');
+  const body = document.getElementById('apiBody');
+  function show(key) { body.innerHTML = snippets[key]; }
+  tabs.forEach(t => {
+    t.addEventListener('click', () => {
+      tabs.forEach(x => x.classList.remove('active'));
+      t.classList.add('active');
+      show(t.dataset.tab);
+    });
+  });
+  show('supported');
+})();
+</script>
+</body>
+</html>
