@@ -323,6 +323,147 @@ describe('discoveryService', () => {
     });
   });
 
+  // ─── WKH-113 (BASE-08): dynamic chain validation via normalizeChainSlug ──
+  // readPayment now derives accept/reject from the pure chain-resolver instead
+  // of a hardcoded ALLOWED_CHAIN_VALUES Set (CD-1/CD-9). Output string stays
+  // legacy (CD-7): avalanche-testnet/-mainnet → 'avalanche'; rest pass-through.
+  describe('WKH-113: readPayment dynamic chain validation', () => {
+    function makePaymentRaw(chain: string): Record<string, unknown> {
+      return {
+        id: '1',
+        slug: 'agent-1',
+        name: 'A1',
+        description: 'd',
+        capabilities: ['x'],
+        price: 0.5,
+        status: 'active',
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain,
+          contract: '0x000000000000000000000000000000000000aBcD',
+        },
+      };
+    }
+
+    it('T-AC1a: accepts chain="base-sepolia" (pass-through)', () => {
+      const agent = discoveryService.mapAgent(
+        makeRegistry(),
+        makePaymentRaw('base-sepolia'),
+      );
+      expect(agent.payment?.chain).toBe('base-sepolia');
+      expect(agent.payment?.method).toBe('x402');
+      expect(agent.payment?.asset).toBe('USDC');
+    });
+
+    it('T-AC1b: accepts chain="avalanche-fuji" and chainId "84532" (pass-through)', () => {
+      const fuji = discoveryService.mapAgent(
+        makeRegistry(),
+        makePaymentRaw('avalanche-fuji'),
+      );
+      // avalanche-fuji is NOT collapsed (only avalanche-testnet/-mainnet are).
+      expect(fuji.payment?.chain).toBe('avalanche-fuji');
+
+      const chainId = discoveryService.mapAgent(
+        makeRegistry(),
+        makePaymentRaw('84532'),
+      );
+      // chainId accepted (resolver knows 84532 → base-sepolia) and passed
+      // through as the raw string '84532' (no ChainKey leaked to output, CD-7).
+      expect(chainId.payment?.chain).toBe('84532');
+    });
+
+    it('T-AC2a: regression — avalanche variants collapse to "avalanche" (CD-7, NOT avalanche-fuji)', () => {
+      const plain = discoveryService.mapAgent(
+        makeRegistry(),
+        makePaymentRaw('avalanche'),
+      );
+      expect(plain.payment?.chain).toBe('avalanche');
+      expect(plain.payment?.chain).not.toBe('avalanche-fuji');
+
+      const testnet = discoveryService.mapAgent(
+        makeRegistry(),
+        makePaymentRaw('avalanche-testnet'),
+      );
+      expect(testnet.payment?.chain).toBe('avalanche');
+
+      const mainnet = discoveryService.mapAgent(
+        makeRegistry(),
+        makePaymentRaw('avalanche-mainnet'),
+      );
+      expect(mainnet.payment?.chain).toBe('avalanche');
+      expect(mainnet.payment?.chain).not.toBe('avalanche-fuji');
+    });
+
+    it('T-AC2b: regression — kite-ozone-testnet passes through unchanged (CD-7)', () => {
+      const agent = discoveryService.mapAgent(
+        makeRegistry(),
+        makePaymentRaw('kite-ozone-testnet'),
+      );
+      expect(agent.payment?.chain).toBe('kite-ozone-testnet');
+    });
+
+    it('T-AC5: unknown chain (polygon/solana) → payment undefined (defense preserved)', () => {
+      const polygon = discoveryService.mapAgent(
+        makeRegistry(),
+        makePaymentRaw('polygon'),
+      );
+      expect(polygon.payment).toBeUndefined();
+
+      const solana = discoveryService.mapAgent(
+        makeRegistry(),
+        makePaymentRaw('solana'),
+      );
+      expect(solana.payment).toBeUndefined();
+    });
+
+    it('T-AC1-discover: discover() exposes payment.chain="base-sepolia" end-to-end', async () => {
+      setupRegistryResponse([
+        makeRawAgent({
+          id: 'a-base',
+          slug: 'base-pay-agent',
+          status: 'active',
+          payment: {
+            method: 'x402',
+            chain: 'base-sepolia',
+            asset: 'USDC',
+            contract: '0x000000000000000000000000000000000000aBcD',
+          },
+        }),
+      ]);
+
+      const result = await discoveryService.discover({});
+
+      expect(result.agents).toHaveLength(1);
+      expect(result.agents[0].slug).toBe('base-pay-agent');
+      expect(result.agents[0].payment?.chain).toBe('base-sepolia');
+      expect(result.agents[0].payment?.asset).toBe('USDC');
+      expect(result.agents[0].payment?.method).toBe('x402');
+    });
+
+    it('T-AC7: avalanche-fuji agent now has payment populated (was payment=null pre-WKH-113)', async () => {
+      setupRegistryResponse([
+        makeRawAgent({
+          id: 'a-fuji',
+          slug: 'fuji-pay-agent',
+          status: 'active',
+          payment: {
+            method: 'x402',
+            chain: 'avalanche-fuji',
+            asset: 'USDC',
+            contract: '0x000000000000000000000000000000000000aBcD',
+          },
+        }),
+      ]);
+
+      const result = await discoveryService.discover({});
+
+      expect(result.agents).toHaveLength(1);
+      expect(result.agents[0].payment).toBeDefined();
+      expect(result.agents[0].payment?.chain).toBe('avalanche-fuji');
+    });
+  });
+
   describe('AC-9: verified + includeInactive combine with AND logic', () => {
     it('returns only verified agents of all statuses', async () => {
       setupRegistryResponse([

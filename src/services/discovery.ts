@@ -2,6 +2,7 @@
  * Discovery Service — Search agents across all registries
  */
 
+import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
 import {
   SSRFViolationError,
@@ -34,34 +35,30 @@ export function _resetFallbackWarnDedup(): void {
  *   - v2 expone `chain` top-level (e.g. "avalanche-testnet"), pero WKH-55 lo busca en payment.
  *   - WKH-55 guard chequea `chain === "avalanche"`; normalizamos solo testnet/mainnet → avalanche.
  *
- * SEC-AR-2026-04-28 BLQ-MED-1: chain allowlist explícita.
+ * SEC-AR-2026-04-28 BLQ-MED-1 (WKH-113 DT-4/DT-5): dynamic chain validation.
  * Registry comprometido podría exponer `chain: 'avalanche'` (literal) o variantes
  * exóticas para bypassear el guard del downstream-payment. La defensa-en-profundidad
- * es rechazar cualquier chain que no esté en la allowlist conocida.
+ * es rechazar cualquier chain que el resolver canónico no conozca.
  *
- * Allowlist actual:
- *   - `avalanche` (canonical, post-normalization)
- *   - `avalanche-testnet` (wasiai-v2 valor cuando `chain_id=43113`)
- *   - `avalanche-mainnet` (wasiai-v2 valor cuando `chain_id=43114`)
+ * Validación (CD-1/CD-9): en lugar de un `Set` hardcodeado de slugs, se deriva
+ * de `normalizeChainSlug` (el resolver puro de `../adapters/chain-resolver.js`,
+ * reutilizado inbound WKH-111 y downstream WKH-112). Acepta toda chain con
+ * adapter conocido (avalanche-*, kite-*, base-*, incl. chainIds numéricos);
+ * rechaza slugs desconocidos (polygon/solana → registry comprometido / chain
+ * exótica → undefined, defensa preservada).
+ *
+ * ⚠️ Salida (CD-7): la validación usa `normalizeChainSlug` SOLO para decidir
+ * aceptar/rechazar. El valor de `chain` de SALIDA conserva el string legacy:
+ * `avalanche-testnet`/`avalanche-mainnet` → `'avalanche'`; resto pass-through.
+ * NO se devuelve el `ChainKey` del resolver (devolvería `'avalanche-fuji'` para
+ * `'avalanche'`, rompiendo CD-2 y los tests existentes).
  *
  * El downstream pago real (Fuji vs C-Chain) se decide a nivel de
- * `downstream-payment.ts` mediante `WASIAI_DOWNSTREAM_NETWORK`. Esta
- * allowlist NO discrimina: ambas variantes son aceptadas y se normalizan
- * a `avalanche`. Si el operator NO tiene downstream-network seteado a
- * mainnet, los pagos contra agentes mainnet harán skip (CHAIN_NOT_SUPPORTED
- * en el path de pago, no en discovery).
+ * `downstream-payment.ts` mediante `WASIAI_DOWNSTREAM_NETWORK`.
  *
- * Retorna undefined si los campos críticos siguen ausentes O chain no permitida.
+ * Retorna undefined si los campos críticos siguen ausentes O la chain no la
+ * conoce el resolver.
  */
-const ALLOWED_CHAIN_VALUES = new Set([
-  'avalanche', // canonical (post-normalization)
-  'avalanche-testnet', // wasiai-v2 valor cuando chain_id=43113
-  'avalanche-mainnet', // wasiai-v2 valor cuando chain_id=43114
-  // WKH-AGENTSHOP-1: Kite Ozone for WasiAgentShop / Kite hackathon agents
-  'kite-ozone-testnet',
-  'kite-mainnet',
-]);
-
 function readPayment(
   raw: Record<string, unknown>,
 ): AgentPaymentSpec | undefined {
@@ -89,8 +86,11 @@ function readPayment(
     return undefined;
   }
 
-  // SEC-AR BLQ-MED-1: reject chain outside allowlist BEFORE normalization
-  if (!ALLOWED_CHAIN_VALUES.has(chainRaw)) {
+  // SEC-AR BLQ-MED-1 (WKH-113 DT-5): reject any chain the resolver does not
+  // know BEFORE normalization. Dynamic validation derived from the pure
+  // chain-resolver (no hardcoded slug allowlist — CD-1/CD-9). Unknown slug
+  // (registry comprometido / chain exótica) → undefined, defensa preservada.
+  if (normalizeChainSlug(chainRaw) === undefined) {
     return undefined;
   }
 
