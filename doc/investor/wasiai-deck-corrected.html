@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WasiAI — Infraestructura de la economía agéntica</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css" id="theme">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/monokai.css">
+<style>
+:root {
+  --accent: #00d4a8;
+  --accent-soft: #00d4a833;
+  --warn: #ffb547;
+  --muted: #9aa3b2;
+  --bg: #0d1117;
+  --bg-2: #161b22;
+  --line: #30363d;
+}
+.reveal { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #e6edf3; }
+.reveal .slides { text-align: left; }
+.reveal section { padding: 0 2vw; }
+.reveal h1, .reveal h2, .reveal h3, .reveal h4 { color: #f5f7fa; font-weight: 700; text-transform: none; letter-spacing: -0.01em; }
+.reveal h1 { font-size: 2.4em; line-height: 1.1; }
+.reveal h2 { font-size: 1.6em; line-height: 1.15; margin-bottom: 0.4em; }
+.reveal h3 { font-size: 1.15em; color: var(--accent); margin-bottom: 0.3em; }
+.reveal p, .reveal li { font-size: 0.78em; line-height: 1.45; }
+.reveal ul { margin-left: 1em; }
+.reveal li { margin-bottom: 0.35em; }
+.reveal a { color: var(--accent); text-decoration: none; border-bottom: 1px dashed var(--accent-soft); }
+.reveal a:hover { border-bottom-style: solid; }
+.reveal strong { color: #fff; }
+.reveal em { color: var(--accent); font-style: normal; font-weight: 600; }
+.reveal code { background: var(--bg-2); padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.85em; color: var(--accent); border: 1px solid var(--line); }
+.reveal pre { background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 0.6em 0.9em; font-size: 0.55em; line-height: 1.4; max-width: 100%; box-shadow: none; }
+.reveal pre code { background: transparent; border: none; padding: 0; color: #e6edf3; }
+.tag { display: inline-block; padding: 0.18em 0.6em; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 0.6em; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; margin-right: 0.4em; }
+.tag.warn { background: #ffb54722; color: var(--warn); }
+.tag.muted { background: #30363d; color: var(--muted); }
+.kicker { font-size: 0.6em; letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); font-weight: 600; margin-bottom: 0.6em; }
+.subtle { color: var(--muted); font-size: 0.7em; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2em; align-items: start; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1em; align-items: stretch; }
+.card { background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px; padding: 0.9em 1em; }
+.card h4 { color: var(--accent); margin: 0 0 0.4em 0; font-size: 0.95em; }
+.card p, .card li { font-size: 0.7em; margin-bottom: 0.3em; }
+.metric { font-size: 2em; font-weight: 800; color: var(--accent); line-height: 1; margin: 0.1em 0; }
+.metric-label { font-size: 0.65em; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; }
+.proof-row { display: flex; justify-content: space-between; align-items: center; padding: 0.6em 0.8em; background: var(--bg-2); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; margin-bottom: 0.5em; }
+.proof-row .chain { font-weight: 700; color: #fff; font-size: 0.8em; }
+.proof-row .kind { font-size: 0.6em; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }
+.proof-row .hash { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; font-size: 0.6em; color: var(--accent); }
+.flow { display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap; justify-content: center; margin: 0.8em 0; }
+.flow .step { background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px; padding: 0.5em 0.8em; font-size: 0.65em; }
+.flow .step strong { color: var(--accent); display: block; font-size: 0.9em; }
+.flow .arrow { color: var(--accent); font-size: 1.2em; }
+.layer { background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px; padding: 0.7em 1em; margin-bottom: 0.5em; border-left: 4px solid var(--accent); }
+.layer .layer-name { font-weight: 700; color: #fff; font-size: 0.85em; }
+.layer .layer-desc { font-size: 0.65em; color: var(--muted); margin-top: 0.2em; }
+.footer-meta { position: absolute; bottom: 1.2em; left: 2vw; right: 2vw; display: flex; justify-content: space-between; font-size: 0.4em; color: var(--muted); letter-spacing: 0.05em; }
+.reveal .slide-number { background: transparent; color: var(--muted); font-size: 0.7em; }
+.title-slide { text-align: center !important; }
+.title-slide h1 { font-size: 3.2em; background: linear-gradient(135deg, #00d4a8 0%, #4dabf7 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.2em; }
+.title-slide .tagline { font-size: 1.1em; color: #e6edf3; margin-bottom: 1.5em; }
+.title-slide .meta { color: var(--muted); font-size: 0.75em; letter-spacing: 0.08em; }
+.placeholder { background: #ffb54722; color: var(--warn); padding: 0.1em 0.4em; border-radius: 4px; font-size: 0.85em; font-style: italic; }
+.compare-table { width: 100%; border-collapse: collapse; font-size: 0.65em; margin-top: 0.5em; }
+.compare-table th, .compare-table td { padding: 0.5em 0.7em; text-align: left; border-bottom: 1px solid var(--line); }
+.compare-table th { color: var(--accent); font-weight: 600; }
+.compare-table .yes { color: var(--accent); font-weight: 700; }
+.compare-table .no { color: #ff6b6b; }
+.compare-table .partial { color: var(--warn); }
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- 1. PORTADA -->
+<section class="title-slide" data-background-color="#0d1117">
+  <div style="margin-top: 8vh;">
+    <h1>WasiAI</h1>
+    <p class="tagline">La infraestructura de pagos y orquestación<br>para la <em>economía agéntica</em>.</p>
+    <p class="subtle" style="margin-top: 2em; max-width: 720px; margin-left: auto; margin-right: auto; line-height: 1.5;">
+      Tres sistemas en producción que permiten que los agentes de IA se descubran,
+      compongan y <strong>se paguen entre sí</strong> — cross-marketplace, cross-chain,
+      sin humano en el loop.
+    </p>
+    <p class="meta" style="margin-top: 3em;">
+      Presentación a inversionista &nbsp;·&nbsp; <span class="placeholder">[completar: founder]</span> &nbsp;·&nbsp; Mayo 2026
+    </p>
+  </div>
+  <aside class="notes">
+    Saludo breve. "Soy [nombre]. En los próximos 8 minutos te voy a mostrar tres
+    sistemas que ya están en producción y que, juntos, son la capa de pagos +
+    orquestación que le falta a la economía agéntica. No es un mockup: hay
+    transacciones reales onchain entre agentes de IA en tres blockchains distintas
+    — hoy en testnet, con el runbook de mainnet escrito y validado — y te las voy
+    a mostrar verificables en su explorer."
+  </aside>
+</section>
+
+<!-- 2. EL PROBLEMA -->
+<section data-background-color="#0d1117">
+  <p class="kicker">El problema</p>
+  <h2>Los agentes de IA no se hablan, ni se pagan.</h2>
+  <div class="grid-2" style="margin-top: 1em;">
+    <div>
+      <ul>
+        <li>Cada marketplace de agentes es <strong>un silo</strong>: un agente de OpenAI no descubre a uno de Anthropic, ni a uno de un agente builder independiente.</li>
+        <li>Cada agente vive en <strong>una sola blockchain</strong> (o ninguna). Pagar a un agente en otra red es manual, lento y caro.</li>
+        <li>No existe una capa estándar de <em>discovery + composición + settlement</em> agente-a-agente.</li>
+        <li>Resultado: el grueso de la <strong>"agentic economy"</strong> sigue requiriendo humanos en el medio para pagar, conectar e integrar.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>La analogía</h4>
+      <p>Internet sin TCP/IP. Pagos sin Stripe. Los agentes ya existen, pero no tienen <strong>el protocolo</strong> ni <strong>el rail de pago</strong> que les permita operar como una economía real.</p>
+      <p class="subtle" style="margin-top: 0.6em;">Quien construya esa capa primero captura el peaje de cada transacción agéntica que ocurra encima.</p>
+    </div>
+  </div>
+  <aside class="notes">
+    "El mercado de agentes está fragmentado en silos. Cada marketplace es su propio
+    jardín cerrado, cada agente vive en una sola chain. Si querés que un agente
+    contrate a otro y le pague — sin un humano apretando 'OK' — hoy no se puede
+    hacer de manera estándar. Falta la capa TCP/IP + Stripe de los agentes.
+    Quien la construya primero, captura el peaje."
+  </aside>
+</section>
+
+<!-- 3. LA SOLUCIÓN -->
+<section data-background-color="#0d1117">
+  <p class="kicker">La solución</p>
+  <h2>WasiAI = 3 capas que se consumen entre sí.</h2>
+  <div class="layer">
+    <div class="layer-name">1. <code>wasiai-v2</code> — Marketplace de agentes</div>
+    <div class="layer-desc">Donde los creadores publican agentes y los consumidores los invocan. <code>app.wasiai.io</code>. Next.js 14 + Supabase + Vercel.</div>
+  </div>
+  <div class="layer" style="border-left-color: #4dabf7;">
+    <div class="layer-name">2. <code>wasiai-a2a</code> — Discovery + Composición + Orquestación <span class="tag">capa clave</span></div>
+    <div class="layer-desc">Implementa el <strong>Google A2A Protocol</strong> (agent cards + tasks + JSON-RPC). Descubre agentes en cualquier registry, los compone en pipelines y los orquesta con un LLM. Fastify + Supabase + Redis/BullMQ + Claude Sonnet.</div>
+  </div>
+  <div class="layer" style="border-left-color: #ffb547;">
+    <div class="layer-name">3. <code>wasiai-facilitator</code> — Settlement onchain</div>
+    <div class="layer-desc">Liquida los pagos x402 / EIP-3009 en <strong>Kite, Avalanche y Base</strong>. Circuit breakers, domain-check, multi-chain real.</div>
+  </div>
+  <p class="subtle" style="margin-top: 1em;">El insight: <em>zero human in the loop</em>, cross-marketplace, cross-chain.</p>
+  <aside class="notes">
+    "WasiAI son tres capas. Arriba, un marketplace de agentes — app.wasiai.io.
+    En el medio, la capa clave: wasiai-a2a, que implementa el Google A2A Protocol
+    — el estándar abierto de interoperabilidad de agentes — y resuelve discovery,
+    composición y orquestación con un LLM. Y abajo, el facilitator, que liquida
+    los pagos onchain en tres blockchains. Cada capa se vende sola, pero juntas
+    son el stack."
+  </aside>
+</section>
+
+<!-- 4. CÓMO FUNCIONA -->
+<section data-background-color="#0d1117">
+  <p class="kicker">Cómo funciona</p>
+  <h2>De un objetivo a un pago onchain — en un solo request.</h2>
+  <div class="flow">
+    <div class="step"><strong>1. Goal</strong>"resolver factura X"</div>
+    <div class="arrow">→</div>
+    <div class="step"><strong>2. Discover</strong>busca agentes en registries</div>
+    <div class="arrow">→</div>
+    <div class="step"><strong>3. Compose</strong>arma el pipeline multi-agente</div>
+    <div class="arrow">→</div>
+    <div class="step"><strong>4. Orchestrate</strong>invoca cada agente con LLM</div>
+    <div class="arrow">→</div>
+    <div class="step"><strong>5. Pay</strong>settle x402 / EIP-3009</div>
+  </div>
+  <div class="grid-2" style="margin-top: 1em;">
+    <div class="card">
+      <h4>Inbound — el gateway cobra</h4>
+      <p>El caller firma una autorización EIP-3009 (gasless). El facilitator la liquida onchain. <strong>1% protocol fee</strong> (implementado, listo para activar).</p>
+    </div>
+    <div class="card">
+      <h4>Outbound — el gateway paga</h4>
+      <p>El gateway paga a cada sub-agente <strong>en su chain nativa</strong> (USDC en Base/Avax, PYUSD en Kite). El chain resolver decide la red por agente.</p>
+    </div>
+  </div>
+  <p class="subtle" style="margin-top: 0.8em;">Estándares: <strong>Google A2A</strong> (JSON-RPC 2.0) · <strong>x402</strong> (Coinbase, HTTP 402) · <strong>EIP-3009</strong> (transfer gasless). &nbsp;Identidad: <strong>Kite Passport / ERC-8004</strong> <span class="tag warn">spike + PoC · roadmap</span></p>
+  <aside class="notes">
+    "Un caller — humano o agente — dispara un objetivo. wasiai-a2a hace discovery
+    en los registries conectados, arma el pipeline, orquesta cada paso con el LLM,
+    invoca cada agente downstream y le paga en su propia chain. El caller paga
+    una vez al gateway, el gateway distribuye en múltiples chains. Todo gasless
+    para el caller gracias a EIP-3009. El modelo de revenue es 1% de fee —
+    ya implementado como transfer onchain, listo para encender."
+  </aside>
+</section>
+
+<!-- 5. ARQUITECTURA -->
+<section data-background-color="#0d1117">
+  <p class="kicker">Arquitectura</p>
+  <h2>Modular, chain-agnostic, production-grade.</h2>
+  <pre><code class="language-text">
+                   Caller (humano o agente)
+                            │
+                            ▼
+   ┌──────────────────────────────────────────────────┐
+   │  wasiai-a2a   /discover  /compose  /orchestrate  │  ← capa clave
+   │   Fastify · Supabase · Redis/BullMQ · Claude     │
+   │   Google A2A Protocol (JSON-RPC 2.0)             │
+   └────────────┬─────────────────────┬───────────────┘
+                │                     │
+       Registries (incl. wasiai-v2)   Sub-agentes (cualquier marketplace)
+                │                     │
+                └──────────┬──────────┘
+                           ▼
+   ┌──────────────────────────────────────────────────┐
+   │  wasiai-facilitator   x402 + EIP-3009 settle     │
+   │  chains/{kite, avalanche, base}                  │
+   │  circuit-breaker · domain-check · multi-chain    │
+   └──────────────┬───────────────────────────────────┘
+                  ▼
+        Kite (PYUSD)  ·  Avalanche (USDC)  ·  Base (USDC)
+  </code></pre>
+  <p class="subtle" style="margin-top: 0.4em;">Stack: TypeScript strict · Next.js 14 · Fastify · viem · Railway + Vercel.</p>
+  <aside class="notes">
+    "Tres capas, tres servicios independientes, despliegues separados. El
+    facilitator es un microservicio aparte porque queremos poder licenciarlo
+    a otros marketplaces que solo quieran el settlement. La capa de orquestación
+    es donde está la diferenciación técnica más fuerte — composición con LLM
+    sobre el estándar Google A2A."
+  </aside>
+</section>
+
+<!-- 6. DIFERENCIADORES -->
+<section data-background-color="#0d1117">
+  <p class="kicker">Diferenciadores / Moat</p>
+  <h2>Estándar abierto + multi-chain + orquestación con LLM.</h2>
+  <table class="compare-table">
+    <thead>
+      <tr><th>Capacidad</th><th>WasiAI</th><th>x402 nativo (Coinbase, Base-first)</th><th>Marketplaces propietarios</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Google A2A Protocol (interop)</td><td class="yes">Sí</td><td class="no">No</td><td class="no">No</td></tr>
+      <tr><td>Multi-chain real (testnet, mainnet-ready)</td><td class="yes">Kite + Avax + Base</td><td class="partial">Base-first</td><td class="no">Ninguna o una</td></tr>
+      <tr><td>Discovery cross-marketplace</td><td class="yes">Sí</td><td class="no">No</td><td class="no">Silo</td></tr>
+      <tr><td>Orquestación goal-based con LLM</td><td class="yes">Sí (Claude Sonnet)</td><td class="no">No</td><td class="partial">Limitada</td></tr>
+      <tr><td>Settlement gasless (EIP-3009)</td><td class="yes">Sí</td><td class="yes">Sí</td><td class="no">No</td></tr>
+      <tr><td>Identidad onchain (ERC-8004 / Kite Passport)</td><td class="partial">Spike + PoC (roadmap)</td><td class="no">No</td><td class="no">No</td></tr>
+    </tbody>
+  </table>
+  <p class="subtle" style="margin-top: 0.8em;"><strong>Posicionamiento:</strong> complementario a Coinbase, no competencia. Nosotros somos la capa de mayor nivel — interop + multi-chain — encima de los rails que ellos están construyendo.</p>
+  <aside class="notes">
+    "La pregunta obvia es: ¿no hace esto Coinbase con x402 nativo? Respuesta corta:
+    ellos resuelven el rail de pago, fuerte en Base. Nosotros somos complementarios
+    y de mayor nivel. Aportamos tres cosas que ellos no: interoperabilidad
+    cross-marketplace vía Google A2A, multi-chain real, y orquestación con LLM.
+    La identidad onchain con Kite Passport / ERC-8004 la validamos en un spike y
+    tenemos el scaffold (PoC) — está en roadmap, no la vendo como terminada.
+    Y somos chain-agnostic: si Base gana, ganamos; si Avalanche o Kite ganan, también."
+  </aside>
+</section>
+
+<!-- 7. PRUEBA - SLIDE CENTRAL -->
+<section data-background-color="#0d1117">
+  <p class="kicker">Prueba</p>
+  <h2>Esto no es un mockup. Está <em>corriendo onchain</em>.</h2>
+  <div class="grid-3" style="margin-bottom: 0.8em;">
+    <div class="card" style="text-align: center;">
+      <div class="metric">3</div>
+      <div class="metric-label">chains (testnet, mainnet-ready)</div>
+      <p class="subtle" style="margin-top: 0.4em;">Kite · Avalanche · Base</p>
+    </div>
+    <div class="card" style="text-align: center;">
+      <div class="metric">1.649</div>
+      <div class="metric-label">tests verdes</div>
+      <p class="subtle" style="margin-top: 0.4em;">1.059 a2a · 590 facilitator</p>
+    </div>
+    <div class="card" style="text-align: center;">
+      <div class="metric">~64</div>
+      <div class="metric-label">historias de usuario (mayoría QUALITY)</div>
+      <p class="subtle" style="margin-top: 0.4em;">SDD + review + QA + DONE</p>
+    </div>
+  </div>
+  <p class="subtle" style="margin-bottom: 0.3em;"><strong>Transacciones agente-a-agente verificables onchain (testnet):</strong></p>
+  <div class="proof-row">
+    <span class="chain">Base Sepolia</span>
+    <span class="kind">Inbound · caller → gateway</span>
+    <a class="hash" href="https://sepolia.basescan.org/tx/0x89329e5a23f7470bdd470d7dd747f77414c6132cdb89b2fcb0f713e9292fec7e" target="_blank">0x8932…fec7e ↗</a>
+  </div>
+  <div class="proof-row">
+    <span class="chain">Base Sepolia</span>
+    <span class="kind">Outbound · gateway → sub-agente</span>
+    <a class="hash" href="https://sepolia.basescan.org/tx/0xedcbc86d43ac96521d6c9f25db1d3f56deb8beea44fefaf7f5134cae83f619a3" target="_blank">0xedcb…19a3 ↗</a>
+  </div>
+  <div class="proof-row">
+    <span class="chain">Avalanche Fuji</span>
+    <span class="kind">Outbound · USDC (6 dec)</span>
+    <a class="hash" href="https://testnet.snowtrace.io/tx/0x423dbfcfec6a81552a713bafc27e0ebe77c6192742eb9c778593f97ba4de60ff" target="_blank">0x423d…60ff ↗</a>
+  </div>
+  <div class="proof-row">
+    <span class="chain">Kite Ozone</span>
+    <span class="kind">Outbound · PYUSD (18 dec)</span>
+    <a class="hash" href="https://testnet.kitescan.ai/tx/0xb5b1dbedd6c9d915e102c112cc8840cc84cfaaba8cc3b96ddecd069224252b44" target="_blank">0xb5b1…2b44 ↗</a>
+  </div>
+  <p class="subtle" style="margin-top: 0.6em;">Mismo flujo <code>/compose</code>, settle onchain en 3 chains, decimales correctos por token. Status SUCCESS (<code>0x1</code>). <strong>Redes:</strong> testnets · <strong>mainnet:</strong> runbook escrito y validado, pendiente de activar.</p>
+  <aside class="notes">
+    "Esta es la slide que cierra la conversación. La mayoría de los proyectos
+    agénticos que vas a ver son demos. Esto está corriendo onchain. Cuatro
+    transacciones reales — un cobro inbound, tres pagos outbound — el mismo flujo
+    de compose en tres blockchains distintas. Clickeá cualquiera, las verificás en
+    su explorer. Seré claro: hoy es testnet — el código de mainnet está escrito y
+    validado, es un runbook de distancia. Atrás hay ~1.649 tests verdes y ~64
+    historias de usuario entregadas con metodología de calidad. Frase de mi equipo:
+    hacemos código para producción, no para hack."
+  </aside>
+</section>
+
+<!-- 8. DEMO -->
+<section data-background-color="#0d1117">
+  <p class="kicker">Demo en vivo (2 min)</p>
+  <h2>Tres comandos que podés correr ahora mismo.</h2>
+  <div style="margin-top: 0.8em;">
+    <p style="margin-bottom: 0.2em;"><strong>1. Las chains activas del facilitator</strong></p>
+    <pre><code class="language-bash">curl https://wasiai-facilitator-production.up.railway.app/supported</code></pre>
+    <p style="margin-bottom: 0.2em; margin-top: 0.6em;"><strong>2. Discovery — los agentes reales en el marketplace</strong></p>
+    <pre><code class="language-bash">curl https://app.wasiai.io/api/v1/capabilities</code></pre>
+    <p style="margin-bottom: 0.2em; margin-top: 0.6em;"><strong>3. Salud del gateway A2A</strong></p>
+    <pre><code class="language-bash">curl https://wasiai-a2a-production.up.railway.app/health</code></pre>
+  </div>
+  <p class="subtle" style="margin-top: 0.8em;">→ Después: abrir cualquiera de las tx de la slide anterior en su explorer.</p>
+  <aside class="notes">
+    "Si querés, ahora mismo abrimos una terminal. Tres curls te muestran las
+    tres capas vivas: el facilitator listando las cuatro redes activas, el
+    marketplace mostrando los agentes reales, y el gateway A2A respondiendo
+    healthy. Y después abrimos una de las tx en el explorer. Treinta segundos."
+  </aside>
+</section>
+
+<!-- 9. CASOS DE USO -->
+<section data-background-color="#0d1117">
+  <p class="kicker">Casos de uso reales</p>
+  <h2>Ya hay productos integrados sobre la plataforma.</h2>
+  <div class="grid-3" style="margin-top: 0.8em;">
+    <div class="card">
+      <h4>Cobraya</h4>
+      <p><strong>Marketplace agéntico de factoring</strong> para PyMEs mexicanas (MVP).</p>
+      <p>Paga agentes en Avalanche Fuji vía wasiai-a2a. Incluye contrato Solidity anti-doble-cesión y audit trail EIP-712 para CNBV.</p>
+      <p class="subtle">Construido encima del stack WasiAI (Avalanche Fintech Build).</p>
+    </div>
+    <div class="card">
+      <h4>WasiAgentShop</h4>
+      <p><strong>Agentes en Kite Ozone.</strong></p>
+      <p>Caso de uso de la red Kite con liquidación PYUSD onchain orquestada por wasiai-a2a.</p>
+    </div>
+    <div class="card">
+      <h4>app.wasiai.io</h4>
+      <p><strong>El marketplace propio</strong> ya en cutover delegando discovery/compose/orchestrate a wasiai-a2a.</p>
+      <p>Es a la vez producto y referencia de integración.</p>
+    </div>
+  </div>
+  <p class="subtle" style="margin-top: 1em;"><strong>Patrón:</strong> cada nuevo marketplace que se integra es <em>distribución gratis</em> para los agentes ya registrados, y <em>liquidez multi-chain</em> instantánea para el suyo.</p>
+  <aside class="notes">
+    "Tres productos ya integrados encima. Cobraya — factoring para PyMEs en México,
+    un MVP construido para el Avalanche Fintech Build, que paga agentes en Avalanche.
+    WasiAgentShop — agentes en Kite con pagos PYUSD. Y nuestro propio marketplace,
+    que ahora delega todo a la capa A2A. Cada marketplace nuevo es efecto de red:
+    liquidez multi-chain para ellos, distribución gratis para los agentes existentes."
+  </aside>
+</section>
+
+<!-- 10. MERCADO -->
+<section data-background-color="#0d1117">
+  <p class="kicker">Mercado</p>
+  <h2>La economía agéntica está naciendo. Los rails están vacíos.</h2>
+  <div class="grid-2">
+    <div>
+      <ul>
+        <li><strong>Agentic commerce</strong> es la narrativa #1 de cripto + IA en 2025-2026: Coinbase lanzó x402, Google publicó A2A, Anthropic publicó MCP.</li>
+        <li>Cada API call agente-a-agente es una potencial transacción <strong>de fracción de centavo a unos dólares</strong>. La economía es volumen × fee.</li>
+        <li>Captura para WasiAI = <strong>1% protocol fee</strong> sobre cada compose orquestado por la capa A2A.</li>
+        <li>Mercado direccionable inicial: <em>marketplaces de agentes + agent builders + integradores B2B</em> que necesitan settlement y orquestación pero no quieren construirla.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Sobre los números de TAM <span class="tag warn">estimación</span></h4>
+      <p>El tamaño del mercado de pagos agente-a-agente no tiene cifra cerrada todavía. Cualquier número TAM en este deck es <strong>estimación</strong> con supuestos explícitos.</p>
+      <p class="subtle" style="margin-top: 0.6em;">Lo que sí podemos medir: el volumen onchain de x402 + A2A está creciendo mes a mes desde su lanzamiento. La curva está en la fase pre-hockey-stick.</p>
+      <p class="subtle"><span class="placeholder">[completar: founder — TAM/SAM/SOM con supuestos]</span></p>
+    </div>
+  </div>
+  <aside class="notes">
+    "Sobre TAM voy a ser honesto: el mercado de pagos agente-a-agente no tiene
+    una cifra de consultora todavía, porque está naciendo. Lo que sí sabemos: tres
+    de las empresas más grandes del sector — Coinbase con x402, Google con A2A,
+    Anthropic con MCP — publicaron sus protocolos en los últimos doce meses. Es
+    el momento pre-hockey-stick. Quien tenga los rails listos cuando esto despegue
+    captura el peaje. Nosotros ya los tenemos probados en tres chains."
+  </aside>
+</section>
+
+<!-- 11. MODELO DE NEGOCIO -->
+<section data-background-color="#0d1117">
+  <p class="kicker">Modelo de negocio</p>
+  <h2>Tres revenue streams — el primero ya implementado.</h2>
+  <div class="grid-3" style="margin-top: 0.8em;">
+    <div class="card">
+      <h4>1. Protocol fee — 1%</h4>
+      <p>Sobre cada <code>/compose</code> u <code>/orchestrate</code> que pasa por la capa A2A.</p>
+      <p class="subtle">Transfer EIP-712 onchain idempotente. Transparente para el caller. Se enciende seteando el fee wallet.</p>
+      <p><span class="tag warn">implementado · listo para activar</span></p>
+    </div>
+    <div class="card">
+      <h4>2. Discovery premium</h4>
+      <p>Features pagos para agentes que quieren mejor ranking, analytics, segmentación, integraciones avanzadas.</p>
+      <p><span class="tag muted">roadmap</span></p>
+    </div>
+    <div class="card">
+      <h4>3. B2B licensing</h4>
+      <p>Otros marketplaces integran wasiai-a2a + facilitator como su capa de pagos/orquestación. Licencia + revenue share.</p>
+      <p><span class="tag muted">pipeline</span></p>
+    </div>
+  </div>
+  <p class="subtle" style="margin-top: 1em;">Unit economics: cada transacción agéntica que pase por la capa nos pagará el 1%. <strong>Sin captar usuarios finales</strong> — los marketplaces y agentes traen su propio tráfico.</p>
+  <aside class="notes">
+    "Modelo simple. Uno por ciento sobre cada compose orquestado. Y acá soy preciso:
+    el fee ya está implementado como un transfer onchain real e idempotente — se
+    enciende seteando la wallet de fee; es un flag, no desarrollo. Discovery premium
+    es features pagos para agentes que quieren visibilidad. Y la veta más grande de
+    mediano plazo: licenciar la stack a otros marketplaces. Lo bueno: no necesitamos
+    captar usuarios finales — cada marketplace integrado nos trae su tráfico."
+  </aside>
+</section>
+
+<!-- 12. ROADMAP -->
+<section data-background-color="#0d1117">
+  <p class="kicker">Roadmap</p>
+  <h2>De testnets validados a mainnet a escala.</h2>
+  <div class="grid-2">
+    <div>
+      <h3>Próximos 90 días</h3>
+      <ul>
+        <li>Activar <strong>mainnet</strong> en las 3 chains (runbook ya escrito y validado) + encender el protocol fee.</li>
+        <li>Cerrar 2-3 integraciones de <strong>marketplaces terceros</strong> sobre la stack A2A.</li>
+        <li>Aplicar a <strong>grants Coinbase / Base</strong> ecosystem y Avalanche Codebase.</li>
+        <li>Completar la integración <strong>Kite Passport / ERC-8004</strong> (del spike/PoC a producción).</li>
+      </ul>
+    </div>
+    <div>
+      <h3>6-12 meses</h3>
+      <ul>
+        <li>Open-source del SDK cliente + soporte de chains adicionales (Ethereum L1; Solana en evaluación).</li>
+        <li>Layer de <strong>reputación de agentes</strong> sobre ERC-8004.</li>
+        <li>SLAs y enterprise tier (B2B licensing).</li>
+        <li>Llegar a <strong>volumen de fee mensual recurrente</strong> que valide la curva.</li>
+      </ul>
+    </div>
+  </div>
+  <aside class="notes">
+    "Próximos 90 días: activar mainnet — el runbook ya existe y está validado
+    contra testnets — y encender el fee. Cerrar dos o tres integraciones de
+    marketplaces de terceros. Aplicar a grants de Coinbase, Base y Avalanche. Y
+    llevar Kite Passport del spike a producción. Año uno: SDK abierto, chains
+    adicionales, reputación onchain sobre ERC-8004, y enterprise tier."
+  </aside>
+</section>
+
+<!-- 13. EQUIPO + ASK -->
+<section data-background-color="#0d1117">
+  <p class="kicker">Equipo &amp; Ask</p>
+  <h2>El equipo que construye los rails.</h2>
+  <div class="grid-2">
+    <div>
+      <h3>Equipo</h3>
+      <p><span class="placeholder">[completar: founder — nombre, rol, ex-experiencia]</span></p>
+      <p><span class="placeholder">[completar: founder — CTO / co-founders]</span></p>
+      <p><span class="placeholder">[completar: founder — advisors si aplica]</span></p>
+      <p class="subtle" style="margin-top: 0.6em;">Lo que sí podés afirmar hoy: el equipo ya entregó ~64 HUs (mayoría QUALITY), ~1.649 tests verdes y la stack está en producción multi-chain (testnet, mainnet-ready).</p>
+    </div>
+    <div>
+      <h3>Ask</h3>
+      <p><span class="placeholder">[completar: founder — monto de la ronda]</span></p>
+      <p><strong>Uso de fondos (sugerido — ajustar):</strong></p>
+      <ul>
+        <li>40% Equipo de ingeniería (escalar capa A2A y nuevas chains).</li>
+        <li>25% Go-to-market B2B (integraciones con marketplaces terceros).</li>
+        <li>20% Seguridad + auditorías formales onchain.</li>
+        <li>15% Runway operativo + grants matching.</li>
+      </ul>
+    </div>
+  </div>
+  <aside class="notes">
+    "Equipo: [presentar fundador y co-founders aquí]. Lo concreto que ya
+    entregamos: ~64 historias de usuario con metodología de calidad, ~1.649
+    tests verdes, tres capas en producción multi-chain probadas onchain. Ask:
+    [monto]. La mayor parte va a ingeniería para escalar la capa A2A y agregar
+    chains, y a integraciones B2B para acelerar revenue."
+  </aside>
+</section>
+
+<!-- 14. CIERRE -->
+<section data-background-color="#0d1117">
+  <div style="text-align: center; margin-top: 6vh;">
+    <p class="kicker">Cierre</p>
+    <h1 style="font-size: 2.4em; margin-bottom: 0.5em;">
+      Los agentes de IA <em>ya están aquí</em>.<br>
+      Lo que falta son los rieles.
+    </h1>
+    <p class="tagline" style="max-width: 720px; margin: 1em auto; font-size: 0.85em; color: var(--muted);">
+      WasiAI son esos rieles — multi-chain, con transacciones reales onchain (testnet) y mainnet a un runbook de distancia.
+      Te invitamos a poner el peaje con nosotros.
+    </p>
+    <p class="subtle" style="margin-top: 2em;">
+      <a href="https://app.wasiai.io">app.wasiai.io</a>
+      &nbsp;·&nbsp;
+      <a href="https://wasiai-a2a-production.up.railway.app/health">wasiai-a2a (live)</a>
+      &nbsp;·&nbsp;
+      <a href="https://wasiai-facilitator-production.up.railway.app/supported">facilitator (live)</a>
+    </p>
+    <p class="subtle" style="margin-top: 1em;"><span class="placeholder">[completar: founder — email / calendly]</span></p>
+  </div>
+  <aside class="notes">
+    "Resumen en una frase: los agentes ya están aquí, lo que falta son los rieles.
+    WasiAI son esos rieles, ya probados onchain en tres chains, mainnet a un runbook
+    de distancia. Te invitamos a poner el peaje con nosotros. ¿Qué preguntas tenés?"
+  </aside>
+</section>
+
+<!-- 15. APÉNDICE -->
+<section data-background-color="#0d1117">
+  <p class="kicker">Apéndice técnico</p>
+  <h2>Para profundizar.</h2>
+  <div class="grid-2">
+    <div>
+      <h3>Endpoints en vivo</h3>
+      <ul>
+        <li><a href="https://app.wasiai.io">app.wasiai.io</a> — marketplace</li>
+        <li><a href="https://app.wasiai.io/api/v1/capabilities">/api/v1/capabilities</a> — listado de agentes</li>
+        <li><a href="https://wasiai-a2a-production.up.railway.app/health">a2a-production /health</a></li>
+        <li><a href="https://wasiai-facilitator-production.up.railway.app/supported">facilitator /supported</a></li>
+      </ul>
+      <h3 style="margin-top: 0.8em;">Tx hashes completos (testnet)</h3>
+      <ul style="font-family: ui-monospace, monospace; font-size: 0.55em;">
+        <li>Base SEP in:&nbsp;<a href="https://sepolia.basescan.org/tx/0x89329e5a23f7470bdd470d7dd747f77414c6132cdb89b2fcb0f713e9292fec7e">0x89329e5a23f7470bdd470d7dd747f77414c6132cdb89b2fcb0f713e9292fec7e</a></li>
+        <li>Base SEP out:&nbsp;<a href="https://sepolia.basescan.org/tx/0xedcbc86d43ac96521d6c9f25db1d3f56deb8beea44fefaf7f5134cae83f619a3">0xedcbc86d43ac96521d6c9f25db1d3f56deb8beea44fefaf7f5134cae83f619a3</a></li>
+        <li>Avax Fuji out:&nbsp;<a href="https://testnet.snowtrace.io/tx/0x423dbfcfec6a81552a713bafc27e0ebe77c6192742eb9c778593f97ba4de60ff">0x423dbfcfec6a81552a713bafc27e0ebe77c6192742eb9c778593f97ba4de60ff</a></li>
+        <li>Kite Ozone out:&nbsp;<a href="https://testnet.kitescan.ai/tx/0xb5b1dbedd6c9d915e102c112cc8840cc84cfaaba8cc3b96ddecd069224252b44">0xb5b1dbedd6c9d915e102c112cc8840cc84cfaaba8cc3b96ddecd069224252b44</a></li>
+      </ul>
+    </div>
+    <div>
+      <h3>Stack</h3>
+      <ul>
+        <li>Next.js 14 (App Router) · Fastify · TypeScript strict</li>
+        <li>Supabase (PostgreSQL) · Redis · BullMQ</li>
+        <li>viem · Claude Sonnet (orquestación)</li>
+        <li>Vercel · Railway</li>
+      </ul>
+      <h3 style="margin-top: 0.8em;">Estándares</h3>
+      <ul>
+        <li>Google A2A Protocol (JSON-RPC 2.0) — agent cards + tasks</li>
+        <li>Coinbase x402 (HTTP 402 micropagos)</li>
+        <li>EIP-3009 transferWithAuthorization (gasless)</li>
+        <li>ERC-8004 / Kite Passport (identidad — spike + PoC, en roadmap)</li>
+      </ul>
+      <h3 style="margin-top: 0.8em;">Calidad</h3>
+      <ul>
+        <li>~64 HUs (mayoría con metodología QUALITY: SDD + reviews + QA)</li>
+        <li>1.059 tests en a2a · 590 tests en facilitator</li>
+        <li>Validación full-prod 2026-05-28 — matriz 3 chains × 5 dimensiones, todo verde</li>
+        <li>SSRF guards · HSTS/CORS · circuit breakers · anti-IDOR</li>
+      </ul>
+    </div>
+  </div>
+  <aside class="notes">
+    "Apéndice. Acá tenés todos los endpoints en vivo, los tx hashes completos
+    para que verifiques en cualquier explorer (son testnet), el stack y los
+    estándares. Cualquier pregunta técnica que tengas, esto te da el punto de entrada."
+  </aside>
+</section>
+
+</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+<script>
+Reveal.initialize({
+  hash: true,
+  slideNumber: 'c/t',
+  controls: true,
+  progress: true,
+  transition: 'fade',
+  transitionSpeed: 'fast',
+  width: 1280,
+  height: 800,
+  margin: 0.06,
+  minScale: 0.4,
+  maxScale: 1.4,
+  plugins: [ RevealHighlight, RevealNotes ]
+});
+</script>
+</body>
+</html>
