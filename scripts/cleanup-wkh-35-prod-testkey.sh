@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# WKH-35 — Clean up the prod integration-test artifacts (caldzjhjgctpgodldqav).
-# Removes the throwaway key created by scripts/smoke-prod-deposit.mjs and its
-# deposit rows. Idempotent: re-running after success is a no-op.
-#   - a2a key id   = e4f81389-755c-4296-bf61-ab25cd341825
-#   - owner_ref    = wkh35-itest-1780082935982
-# Run with `!` after reviewing. Stops on first error.
+# WKH-35 — Sweep prod integration-test artifacts (caldzjhjgctpgodldqav).
+# Removes every throwaway key created by the WKH-35 test scripts and its
+# deposit rows. Keys are matched by their reserved owner_ref prefixes:
+#   - wkh35-itest-*  (scripts/smoke-prod-deposit.mjs)
+#   - wkh35-deep-*   (scripts/smoke-prod-deposit-deep.mjs)
+# These prefixes are test-only, so the sweep can never touch real keys.
+# Idempotent: re-running after success is a no-op. Run with `!` after reviewing.
 set -euo pipefail
 
 PROD_REF="caldzjhjgctpgodldqav"
 A2A_DIR="/home/ferdev/.openclaw/workspace/wasiai-a2a"
-KEY_ID="e4f81389-755c-4296-bf61-ab25cd341825"
-OWNER_REF="wkh35-itest-1780082935982"
+OWNER_LIKE="wkh35-%"
 
 PAT=$(grep "^SUPABASE_ACCESS_TOKEN=" "$A2A_DIR/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'")
 if [ -z "$PAT" ]; then
@@ -34,22 +34,22 @@ run_sql() {
 }
 
 echo "═══════════════════════════════════════════════════════"
-echo "  WKH-35 — pre-cleanup snapshot"
+echo "  WKH-35 — pre-cleanup snapshot (owner_ref LIKE '$OWNER_LIKE')"
 echo "═══════════════════════════════════════════════════════"
-run_sql "SELECT (SELECT count(*) FROM a2a_key_deposits WHERE key_id='$KEY_ID') AS deposit_rows, (SELECT count(*) FROM a2a_agent_keys WHERE id='$KEY_ID' AND owner_ref='$OWNER_REF') AS key_rows;" "snapshot"
+run_sql "SELECT (SELECT count(*) FROM a2a_key_deposits d JOIN a2a_agent_keys k ON k.id=d.key_id WHERE k.owner_ref LIKE '$OWNER_LIKE') AS deposit_rows, (SELECT count(*) FROM a2a_agent_keys WHERE owner_ref LIKE '$OWNER_LIKE') AS key_rows;" "snapshot"
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
-echo "  Delete (deposits first → key, FK-safe)"
+echo "  Delete (deposits first → keys, FK-safe)"
 echo "═══════════════════════════════════════════════════════"
-run_sql "DELETE FROM a2a_key_deposits WHERE key_id='$KEY_ID';" "delete deposit rows"
-run_sql "DELETE FROM a2a_agent_keys WHERE id='$KEY_ID' AND owner_ref='$OWNER_REF';" "delete test key"
+run_sql "DELETE FROM a2a_key_deposits WHERE key_id IN (SELECT id FROM a2a_agent_keys WHERE owner_ref LIKE '$OWNER_LIKE');" "delete deposit rows"
+run_sql "DELETE FROM a2a_agent_keys WHERE owner_ref LIKE '$OWNER_LIKE';" "delete test keys"
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
 echo "  Verify: both counts must be 0"
 echo "═══════════════════════════════════════════════════════"
-run_sql "SELECT (SELECT count(*) FROM a2a_key_deposits WHERE key_id='$KEY_ID') AS deposit_rows, (SELECT count(*) FROM a2a_agent_keys WHERE id='$KEY_ID') AS key_rows;" "post-cleanup verification"
+run_sql "SELECT (SELECT count(*) FROM a2a_key_deposits d JOIN a2a_agent_keys k ON k.id=d.key_id WHERE k.owner_ref LIKE '$OWNER_LIKE') AS deposit_rows, (SELECT count(*) FROM a2a_agent_keys WHERE owner_ref LIKE '$OWNER_LIKE') AS key_rows;" "post-cleanup verification"
 
 echo ""
 echo "✅ Cleanup done."
