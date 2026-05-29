@@ -6,6 +6,7 @@
 import { supabase } from '../lib/supabase.js';
 import type { A2AAgentKeyRow } from '../types/index.js';
 import {
+  DepositAlreadyCreditedError,
   logOwnershipMismatch,
   OwnershipMismatchError,
 } from './security/errors.js';
@@ -63,22 +64,42 @@ export const budgetService = {
   },
 
   /**
-   * Register a deposit: atomically increment budget for a chain.
-   * Uses Postgres function with FOR UPDATE to prevent race conditions (BLQ-4).
+   * Register a deposit: atomically increment budget for a chain (WKH-35 v2).
+   * Uses Postgres function register_a2a_key_deposit v2 with FOR UPDATE +
+   * UNIQUE(chain_id, tx_hash) for atomic anti-replay (CD-2) and a DB-level
+   * Ownership Guard (CD-1). The verified `amountUsd` (derived on-chain) is
+   * credited, never the caller-declared amount (CD-4 — enforced at call-site).
    * Returns the new balance as a string.
    */
   async registerDeposit(
     keyId: string,
     chainId: number,
     amountUsd: string,
+    ownerId: string,
+    txHash: string,
+    token?: string,
   ): Promise<string> {
     const { data, error } = await supabase.rpc('register_a2a_key_deposit', {
       p_key_id: keyId,
       p_chain_id: chainId,
       p_amount_usd: parseFloat(amountUsd),
+      p_owner_ref: ownerId,
+      p_tx_hash: txHash,
+      p_token: token ?? null,
     });
 
-    if (error) throw new Error(`Failed to register deposit: ${error.message}`);
+    if (error) {
+      // PG fn v2 mapea condiciones de negocio a RAISE EXCEPTION con prefijos
+      // estables; los traducimos a error classes tipadas (CD-2 / CD-1).
+      if (error.message.includes('DEPOSIT_ALREADY_CREDITED')) {
+        throw new DepositAlreadyCreditedError();
+      }
+      if (error.message.includes('OWNERSHIP_MISMATCH')) {
+        logOwnershipMismatch('getBalance', keyId, ownerId);
+        throw new OwnershipMismatchError();
+      }
+      throw new Error(`Failed to register deposit: ${error.message}`);
+    }
 
     return data as string;
   },

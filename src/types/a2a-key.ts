@@ -24,6 +24,7 @@ export interface A2AAgentKeyRow {
   erc8004_identity: Record<string, unknown> | null;
   kite_passport: Record<string, unknown> | null;
   agentkit_wallet: Record<string, unknown> | null;
+  funding_wallet: string | null; // WKH-35 FIX-1: bound depositor wallet (lowercase)
   metadata: Record<string, unknown>;
 }
 

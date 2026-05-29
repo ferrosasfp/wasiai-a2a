@@ -241,4 +241,89 @@ describe('identityService', () => {
       );
     });
   });
+
+  describe('bindFundingWallet (WKH-35 FIX-1)', () => {
+    it('updates funding_wallet lowercase filtered by id AND owner_ref (Ownership Guard)', async () => {
+      const mock = chainMock();
+      const mockUpdate = vi.fn().mockReturnValue(mock);
+      mock.update = mockUpdate;
+      mock.select = vi.fn().mockResolvedValue({
+        data: [{ id: 'key-id-1' }],
+        error: null,
+      });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+
+      const stored = await identityService.bindFundingWallet(
+        'key-id-1',
+        'user-A',
+        '0xABCDEF0000000000000000000000000000000001',
+      );
+
+      expect(stored).toBe('0xabcdef0000000000000000000000000000000001');
+      expect(mockUpdate).toHaveBeenCalledWith({
+        funding_wallet: '0xabcdef0000000000000000000000000000000001',
+      });
+      expect(mock.eq).toHaveBeenCalledWith('id', 'key-id-1');
+      expect(mock.eq).toHaveBeenCalledWith('owner_ref', 'user-A');
+    });
+
+    it('throws FundingWalletAlreadyBoundError on 23505 unique violation', async () => {
+      const mock = chainMock();
+      mock.update = vi.fn().mockReturnValue(mock);
+      mock.select = vi.fn().mockResolvedValue({
+        data: null,
+        error: { code: '23505', message: 'duplicate key' },
+      });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+
+      await expect(
+        identityService.bindFundingWallet(
+          'key-id-1',
+          'user-A',
+          '0x1111111111111111111111111111111111111111',
+        ),
+      ).rejects.toMatchObject({ code: 'FUNDING_WALLET_ALREADY_BOUND' });
+    });
+
+    it('throws OwnershipMismatchError when no row matches (id, owner_ref)', async () => {
+      const mock = chainMock();
+      mock.update = vi.fn().mockReturnValue(mock);
+      mock.select = vi.fn().mockResolvedValue({ data: [], error: null });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+
+      await expect(
+        identityService.bindFundingWallet(
+          'other-key',
+          'user-A',
+          '0x1111111111111111111111111111111111111111',
+        ),
+      ).rejects.toMatchObject({ code: 'OWNERSHIP_MISMATCH' });
+    });
+
+    it('throws on generic DB error', async () => {
+      const mock = chainMock();
+      mock.update = vi.fn().mockReturnValue(mock);
+      mock.select = vi.fn().mockResolvedValue({
+        data: null,
+        error: { message: 'fail' },
+      });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+
+      await expect(
+        identityService.bindFundingWallet(
+          'x',
+          'user-A',
+          '0x1111111111111111111111111111111111111111',
+        ),
+      ).rejects.toThrow('Failed to bind funding wallet: fail');
+    });
+  });
 });

@@ -202,7 +202,7 @@ describe('E2E', () => {
   // ── Identity -- deposit + bind (AC-11, AC-12) ──────────────
 
   describe('Identity -- deposit + bind', () => {
-    it('AC-11: POST /auth/deposit returns 501', async () => {
+    it('AC-11: POST /auth/deposit is live (no longer 501) — without auth returns 403 (WKH-35)', async () => {
       const res = await app.inject({
         method: 'POST',
         url: '/auth/deposit',
@@ -215,7 +215,9 @@ describe('E2E', () => {
         },
       });
 
-      expect(res.statusCode).toBe(501);
+      // WKH-35 re-enabled the endpoint; the old 501 contract is gone. With no
+      // x-a2a-key / Bearer header the request is unauthenticated → 403.
+      expect(res.statusCode).toBe(403);
     });
 
     it('AC-12: POST /auth/bind/kite returns 501', async () => {

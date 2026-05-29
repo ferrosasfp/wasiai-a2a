@@ -15,6 +15,65 @@ export class OwnershipMismatchError extends Error {
 }
 
 /**
+ * WKH-35 (CD-2): deposit replay guard. Lanzado por budgetService.registerDeposit
+ * cuando la PG fn v2 detecta unique_violation sobre (chain_id, tx_hash) y hace
+ * `RAISE EXCEPTION 'DEPOSIT_ALREADY_CREDITED'`. El mismo (chain, tx) jamás se
+ * acredita dos veces.
+ */
+export class DepositAlreadyCreditedError extends Error {
+  readonly code = 'DEPOSIT_ALREADY_CREDITED' as const;
+  constructor() {
+    super('Deposit already credited');
+    this.name = 'DepositAlreadyCreditedError';
+  }
+}
+
+/**
+ * WKH-35 FIX-1 (BLQ-MED-1): funding-wallet binding errors.
+ *
+ * The deposit treasury is shared, so validating only `Transfer.to` lets an
+ * attacker front-run another caller's txHash and claim the deposit. To close
+ * the hijack a caller must first bind a funding wallet (with proof of control)
+ * and every credited deposit must originate from that wallet.
+ */
+
+/** Signature did not recover to the claimed wallet → 403. */
+export class FundingWalletProofInvalidError extends Error {
+  readonly code = 'FUNDING_WALLET_PROOF_INVALID' as const;
+  constructor() {
+    super('Funding wallet proof of control is invalid');
+    this.name = 'FundingWalletProofInvalidError';
+  }
+}
+
+/** Wallet already bound to a (possibly other) key → 409. */
+export class FundingWalletAlreadyBoundError extends Error {
+  readonly code = 'FUNDING_WALLET_ALREADY_BOUND' as const;
+  constructor() {
+    super('Funding wallet is already bound to a key');
+    this.name = 'FundingWalletAlreadyBoundError';
+  }
+}
+
+/** /deposit attempted before binding a funding wallet → 403, cero crédito. */
+export class FundingWalletNotBoundError extends Error {
+  readonly code = 'FUNDING_WALLET_NOT_BOUND' as const;
+  constructor() {
+    super('No funding wallet bound to this key');
+    this.name = 'FundingWalletNotBoundError';
+  }
+}
+
+/** Depositor (Transfer.from) != bound funding wallet → 403, cero crédito. */
+export class FundingWalletMismatchError extends Error {
+  readonly code = 'FUNDING_WALLET_MISMATCH' as const;
+  constructor() {
+    super('Depositor does not match the bound funding wallet');
+    this.name = 'FundingWalletMismatchError';
+  }
+}
+
+/**
  * Operación que detectó el mismatch (PII-safe enum).
  * - `getBalance` / `deactivate`: ownership sobre `a2a_agent_keys` (WKH-53).
  * - `registryUpdate` / `registryDelete`: ownership sobre `registries` (WKH-63).

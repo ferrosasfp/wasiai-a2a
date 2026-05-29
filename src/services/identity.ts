@@ -11,6 +11,7 @@ import type {
   CreateKeyInput,
 } from '../types/index.js';
 import {
+  FundingWalletAlreadyBoundError,
   logOwnershipMismatch,
   OwnershipMismatchError,
 } from './security/errors.js';
@@ -94,5 +95,45 @@ export const identityService = {
       logOwnershipMismatch('deactivate', keyId, ownerId);
       throw new OwnershipMismatchError();
     }
+  },
+
+  /**
+   * Bind a funding wallet to a key (WKH-35 FIX-1). The caller proved control
+   * of `wallet` (signature verified at the route). Stored lowercase.
+   *
+   * Ownership Guard (CLAUDE.md): UPDATE filtered by id AND owner_ref so a
+   * caller can only bind a wallet to ITS OWN key. If no row matches the
+   * (id, owner_ref) pair → OwnershipMismatchError. If `wallet` is already
+   * bound to another key, the partial UNIQUE index raises 23505 →
+   * FundingWalletAlreadyBoundError. Returns the stored (lowercase) wallet.
+   */
+  async bindFundingWallet(
+    keyId: string,
+    ownerId: string,
+    wallet: string,
+  ): Promise<string> {
+    const normalized = wallet.toLowerCase();
+
+    const { data, error } = await supabase
+      .from('a2a_agent_keys')
+      .update({ funding_wallet: normalized })
+      .eq('id', keyId)
+      .eq('owner_ref', ownerId)
+      .select('id');
+
+    if (error) {
+      // Partial UNIQUE(funding_wallet) violation: wallet ya bound a otra key.
+      if (error.code === '23505') {
+        throw new FundingWalletAlreadyBoundError();
+      }
+      throw new Error(`Failed to bind funding wallet: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) {
+      logOwnershipMismatch('deactivate', keyId, ownerId);
+      throw new OwnershipMismatchError();
+    }
+
+    return normalized;
   },
 };
