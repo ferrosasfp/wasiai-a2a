@@ -26,9 +26,21 @@ import { eventService } from '../services/event.js';
  * the admin token. Length-normalized buffer comparison rejects
  * mismatched-length tokens before the constant-time check.
  */
-const requireAdminToken: preHandlerAsyncHookHandler = async (request, reply) => {
+const requireAdminToken: preHandlerAsyncHookHandler = async (
+  request,
+  reply,
+) => {
   const expected = process.env.DASHBOARD_ADMIN_TOKEN;
-  if (!expected) return; // not configured → allow (dev mode)
+  if (!expected) {
+    // AC-1/AC-2 (CD-1): fail-closed in production, passthrough in dev.
+    if (process.env.NODE_ENV === 'production') {
+      return reply.status(503).send({
+        error: 'service_unavailable',
+        message: 'Dashboard API not configured',
+      });
+    }
+    return; // not configured + non-prod → allow (dev mode)
+  }
   const provided = request.headers['x-admin-token'];
   if (typeof provided !== 'string') {
     return reply.status(401).send({
