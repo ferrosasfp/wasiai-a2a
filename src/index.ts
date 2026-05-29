@@ -105,7 +105,12 @@ await fastify.register(agentCardRoutes, { prefix: '/agents' });
 await fastify.register(wellKnownRoutes, { prefix: '/.well-known' });
 await fastify.register(tasksRoutes, { prefix: '/tasks' });
 await fastify.register(dashboardRoutes, { prefix: '/dashboard' });
-await fastify.register(mockRegistryRoutes, { prefix: '/mock-registry/agents' });
+// AC-6 (CD-3): mock-registry is dev-only; not mounted in production → 404.
+if (!isProduction) {
+  await fastify.register(mockRegistryRoutes, {
+    prefix: '/mock-registry/agents',
+  });
+}
 
 // DT-1 (WKH-38): always register gasless routes — /gasless/status must be
 // discoverable even when disabled; it returns funding_state for degradation info.
