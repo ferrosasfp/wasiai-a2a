@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>WasiAI · Pitch deck</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+<style>
+:root{
+  --bg:#fafaf7;--paper:#fff;--ink:#0d0d10;--fg-2:#5a5a64;--fg-3:#8a8a92;
+  --line:#e6e4dc;--red:#E84142;--green:#1a7f5a;
+  --serif:'Instrument Serif',Georgia,serif;--mono:'JetBrains Mono',ui-monospace,monospace;
+}
+.reveal-viewport{background:var(--bg)}
+.reveal{font-family:'Inter',system-ui,sans-serif;color:var(--ink);font-size:24px}
+.reveal .slides{text-align:left}
+.reveal .slides>section{padding:0!important;width:1280px!important;height:720px!important;left:0!important;top:0!important}
+.slide{box-sizing:border-box;width:1280px;height:720px;padding:42px 58px;display:flex;flex-direction:column;justify-content:center;overflow:hidden}
+.slide.center{justify-content:center}
+.slide.center .statrow{margin-top:34px}
+.slide>.grid{flex:1 1 auto;min-height:0}
+.slide:has(.tagline)>.grid,.slide:has(.statrow)>.grid,.slide>.grid.natural{flex:0 1 auto}
+.slide>.g2>div:not(.fdr){display:flex;flex-direction:column;justify-content:center}
+
+.eyebrow{font:600 13px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--red);margin-bottom:18px}
+.reveal h1{font:800 58px/1.04 'Inter';letter-spacing:-.03em;margin:0 0 20px;color:var(--ink)}
+.reveal h2{font:800 40px/1.08 'Inter';letter-spacing:-.025em;margin:0 0 16px;color:var(--ink);text-transform:none}
+.reveal h3{font:700 19px/1.25 'Inter';letter-spacing:-.01em;margin:0 0 9px;color:var(--ink)}
+.sf{font-family:var(--serif);font-weight:400;font-style:italic;color:var(--red)}
+.lead{font-size:20px;line-height:1.55;color:var(--fg-2);max-width:1000px;margin:0 0 28px}
+.reveal p{margin:0}
+.muted{color:var(--fg-2)} .small{font-size:14px;line-height:1.5;color:var(--fg-2)}
+
+.grid{display:grid;gap:18px}
+.g2{grid-template-columns:1fr 1fr;gap:26px}
+.g3{grid-template-columns:repeat(3,1fr)}
+.g4{grid-template-columns:repeat(4,1fr);gap:16px}
+
+.card{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:24px 24px;display:flex;flex-direction:column;justify-content:center;min-height:200px}
+.card .num{font:600 12px/1 var(--mono);letter-spacing:.08em;color:var(--red);text-transform:uppercase;margin-bottom:12px}
+.card p{font-size:15px;line-height:1.55;color:var(--fg-2)}
+.card.hot{border-color:var(--red);box-shadow:0 0 0 1px var(--red) inset}
+
+.badge{display:inline-block;align-self:flex-start;font:600 11px/1 var(--mono);text-transform:uppercase;letter-spacing:.07em;padding:6px 10px;border-radius:6px;margin-top:14px}
+.badge.ready{background:rgba(26,127,90,.10);color:var(--green);border:1px solid rgba(26,127,90,.25)}
+.badge.soon{background:var(--bg);color:var(--fg-3);border:1px solid var(--line)}
+
+.statrow{display:flex;gap:44px;margin-top:auto;padding-top:26px;border-top:1px solid var(--line)}
+.stat .n{font:800 32px/1 'Inter';letter-spacing:-.02em}
+.stat .n .sf{font-size:30px}
+.stat .l{font:500 12px/1.35 var(--mono);color:var(--fg-3);text-transform:uppercase;letter-spacing:.05em;margin-top:7px}
+
+.pill{display:inline-flex;align-items:center;gap:8px;font:600 12px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--green);background:rgba(26,127,90,.09);border:1px solid rgba(26,127,90,.25);padding:7px 12px;border-radius:99px}
+.pill .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+
+/* layer stack */
+.layer{display:flex;align-items:center;gap:18px;padding:14px 18px;border:1px solid var(--line);border-radius:11px;background:var(--paper);margin-bottom:10px}
+.layer.key{border-color:var(--red);background:#fff}
+.layer .tag{font:700 12px/1 var(--mono);color:var(--fg-3);width:34px;flex-shrink:0}
+.layer.key .tag{color:var(--red)}
+.layer .nm{font:700 16px/1.2 'Inter';flex-shrink:0;width:205px}
+.layer .mt{font:500 13px/1.3 var(--mono);color:var(--fg-3);text-align:right;margin-left:auto}
+
+/* flow steps */
+.step{display:flex;gap:14px;align-items:flex-start;margin-bottom:15px}
+.step .i{font:700 13px/1 var(--mono);color:#fff;background:var(--red);width:24px;height:24px;border-radius:50%;display:grid;place-items:center;flex-shrink:0;margin-top:2px}
+.step b{font:700 15px/1.35 'Inter'}
+.step span{font-size:13.5px;line-height:1.45;color:var(--fg-2)}
+
+/* tx cards */
+.tx{display:block;text-decoration:none;background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:22px 18px;min-height:150px;transition:border-color .15s,transform .15s}
+.tx:hover{border-color:var(--red);transform:translateY(-2px)}
+.tx .top{font:600 11px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--fg-3);margin-bottom:11px}
+.tx .top b{color:var(--ink)}
+.tx .hash{font:600 14px/1 var(--mono);color:var(--ink);word-break:break-all}
+.tx .ver{font:600 12px/1 var(--mono);color:var(--red);margin-top:11px;display:inline-block}
+
+/* competition columns */
+.vs{display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:stretch;flex:1 1 auto;min-height:0}
+.vs .col{border:1px solid var(--line);border-radius:14px;padding:24px 26px;background:var(--paper);display:flex;flex-direction:column;justify-content:center}
+.vs .col.win{border-color:var(--red)}
+.vs .col h3{font-size:17px;margin-bottom:16px;display:flex;align-items:center;gap:10px}
+.vs .col h3 .k{font:700 11px/1 var(--mono);text-transform:uppercase;letter-spacing:.08em;padding:5px 8px;border-radius:6px}
+.vs .x .k{background:var(--bg);color:var(--fg-3);border:1px solid var(--line)}
+.vs .win .k{background:var(--red);color:#fff}
+.vs li{list-style:none;font-size:13.5px;line-height:1.45;color:var(--fg-2);padding:9px 0;border-top:1px solid var(--line);display:flex;gap:10px}
+.vs li:first-of-type{border-top:none}
+.vs .mk{flex-shrink:0;font-weight:700}
+.vs .x .mk{color:var(--fg-3)} .vs .win .mk{color:var(--green)}
+.vs li b{color:var(--ink);font-weight:600}
+
+/* founders */
+.fdr{display:flex;gap:18px;align-items:center;background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:28px;min-height:300px}
+.fdr img,.fdr .ph{width:74px;height:74px;border-radius:50%;object-fit:cover;flex-shrink:0;border:1px solid var(--line)}
+.fdr .ph{display:grid;place-items:center;font:700 26px/1 'Inter';color:var(--fg-2);background:var(--bg)}
+.fdr .role{font:500 12px/1.3 var(--mono);color:var(--fg-3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}
+.fdr .bio{font-size:14.5px;line-height:1.55;color:var(--fg-2)}
+
+/* ask */
+.fund{list-style:none}
+.fund li{font-size:16px;line-height:1.5;color:var(--fg-2);padding:12px 0;border-top:1px solid var(--line);display:flex;gap:13px}
+.fund li:first-child{border-top:none}
+.fund .n{font:700 13px/1 var(--mono);color:var(--red);margin-top:3px;flex-shrink:0}
+.fund b{color:var(--ink);font-weight:600}
+.ph-fill{color:var(--red);border-bottom:1.5px dashed var(--red);font-style:italic;font-family:var(--serif);font-size:1.05em}
+
+.tagline{font-size:15px;line-height:1.55;color:var(--fg-3);margin-top:20px}
+.tag-mono{font:500 13px/1 var(--mono);color:var(--fg-3);letter-spacing:.04em}
+
+/* brand chrome */
+.brand-foot{position:fixed;bottom:16px;left:22px;z-index:40;font:800 15px/1 'Inter';letter-spacing:-.02em;color:var(--ink);opacity:.5;pointer-events:none}
+.reveal .progress{color:var(--red);height:3px}
+.reveal .slide-number{background:transparent;color:var(--fg-3);font-family:var(--mono);font-size:12px;right:18px;bottom:14px}
+.reveal .controls{color:var(--fg-3)}
+@media print{.brand-foot{position:absolute}}
+</style>
+</head>
+<body>
+<div class="brand-foot">Wasi<span class="sf">AI</span></div>
+<div class="reveal"><div class="slides">
+
+<!-- 01 COVER -->
+<section><div class="slide center">
+  <span class="pill" style="align-self:flex-start;margin-bottom:26px"><span class="dot"></span> En vivo · multi-chain</span>
+  <h1>La capa de pagos y comercio de la <span class="sf">economía agéntica</span>.</h1>
+  <p class="lead" style="font-size:22px;max-width:1000px">Tres sistemas en producción que permiten que los agentes de IA se descubran, se combinen y se paguen entre sí, entre distintos marketplaces y redes, sin que intervenga una persona.</p>
+  <div class="statrow">
+    <div class="stat"><div class="n">3</div><div class="l">Sistemas en producción<br>gateway · facilitator · marketplace</div></div>
+    <div class="stat"><div class="n">3</div><div class="l">Chains integradas<br>Avalanche en prod · Base y Kite testnet</div></div>
+    <div class="stat"><div class="n">3</div><div class="l">Productos integrados<br>Cobraya · WasiAgentShop · app.wasiai.io</div></div>
+    <div class="stat"><div class="n">1<span class="sf">%</span></div><div class="l">Fee implementado<br>listo para activar</div></div>
+  </div>
+</div></section>
+
+<!-- 02 PROBLEMA -->
+<section><div class="slide">
+  <span class="eyebrow">El problema</span>
+  <h2>Los agentes existen. <span class="sf">No pueden pagar ni cobrar entre sí.</span></h2>
+  <p class="lead">Cada marketplace de agentes es una isla cerrada. Discovery, composición y pago se detienen en el límite de la plataforma. Cada agente vive en una sola red, o en ninguna.</p>
+  <div class="grid g3" style="margin-top:8px">
+    <div class="card"><div class="num">Muro 1</div><h3>Sin búsqueda entre marketplaces</h3><p>Los agentes no pueden buscar pares fuera de su ecosistema. Las capacidades quedan invisibles entre fronteras.</p></div>
+    <div class="card"><div class="num">Muro 2</div><h3>Sin composición multi-agente</h3><p>No hay un estándar para encadenar agentes ni adaptar formatos incompatibles. Código de integración hecho a mano en cada paso.</p></div>
+    <div class="card"><div class="num">Muro 3</div><h3>Sin pagos autónomos entre redes</h3><p>Pagar a un agente en otra red es manual, lento y caro. Los flujos totalmente autónomos se rompen al momento de pagar.</p></div>
+  </div>
+  <p class="tagline">Resultado: capacidades en todas partes, transacciones en ninguna. La economía agéntica sigue fragmentada.</p>
+</div></section>
+
+<!-- 03 SOLUCION -->
+<section><div class="slide">
+  <span class="eyebrow">La solución</span>
+  <h2>Una capa de comercio: <span class="sf">descubrir, orquestar, componer, pagar.</span></h2>
+  <p class="lead">Todo lo que un agente autónomo necesita para participar en una economía de comercio. Cada una es un servicio en vivo hoy, sobre el protocolo abierto Google A2A.</p>
+  <div class="grid g4" style="margin-top:8px">
+    <div class="card"><div class="num">01 · Discover</div><h3>Encontrá cualquier agente</h3><p>Un registro unificado que une los marketplaces aislados. Buscás por capacidad y precio, recibís fichas de agente estándar A2A. Funciona en cualquier red.</p></div>
+    <div class="card"><div class="num">02 · Orquestar</div><h3>Un objetivo entra, un resultado sale</h3><p>Claude Sonnet arma el plan, elige agentes y maneja los errores. Si la IA no está disponible o falla, un planificador determinístico (greedy por presupuesto) lo resuelve.</p></div>
+    <div class="card"><div class="num">03 · Componer</div><h3>Procesos que se adaptan solos</h3><p>Cuando un agente no habla el formato A2A estándar, una capa de IA traduce el esquema al vuelo. Así nadie escribe código de integración a mano.</p></div>
+    <div class="card"><div class="num">04 · Pagar</div><h3>Pagos onchain sin comisión de red</h3><p>Dos modos: x402 por llamada (autorización EIP-3009, gasless) o agent keys prepagas con saldo por red, fondeadas con verificación on-chain. Liquidado en la red nativa de cada agente.</p></div>
+  </div>
+</div></section>
+
+<!-- 04 WHY NOW -->
+<section><div class="slide">
+  <span class="eyebrow">Why now</span>
+  <h2>Los rieles están vacíos. <span class="sf">La ola está llegando.</span></h2>
+  <p class="lead">Agentic commerce es la narrativa número uno de cripto más IA. Los tres estándares que la habilitan se publicaron en los últimos doce meses.</p>
+  <div class="grid g3" style="margin-top:4px">
+    <div class="card"><div class="num">Pago</div><h3>Coinbase x402</h3><p>El estándar HTTP 402 de micropagos para máquinas. Fuerte en Base.</p></div>
+    <div class="card"><div class="num">Interop</div><h3>Google A2A</h3><p>El protocolo de descubrimiento e invocación agente-a-agente. Es nuestra base.</p></div>
+    <div class="card"><div class="num">Tooling</div><h3>Anthropic MCP</h3><p>El estándar de contexto y herramientas para modelos. Adopción acelerando.</p></div>
+  </div>
+  <p class="tagline">Cada llamada entre agentes es una transacción potencial, de fracción de centavo a unos dólares. <b style="color:var(--ink)">Quien tenga los rieles listos cuando esto despegue, captura el peaje.</b></p>
+</div></section>
+
+<!-- 05 PRODUCTO -->
+<section><div class="slide">
+  <span class="eyebrow">Producto · cómo funciona</span>
+  <h2>Tres sistemas, <span class="sf">capa por capa.</span></h2>
+  <div class="grid g2" style="margin-top:6px">
+    <div>
+      <div class="layer"><span class="tag">L4</span><span class="nm">wasiai-v2</span><span class="mt">Marketplace · app.wasiai.io</span></div>
+      <div class="layer key"><span class="tag">L3</span><span class="nm">wasiai-a2a</span><span class="mt">/discover /compose /orchestrate</span></div>
+      <div class="layer"><span class="tag">L2</span><span class="nm">wasiai-facilitator</span><span class="mt">x402 · EIP-3009 · cortes de seguridad</span></div>
+      <div class="layer"><span class="tag">L1</span><span class="nm">Redes</span><span class="mt">Kite · Avalanche · Base</span></div>
+      <p class="small" style="margin-top:14px">El sistema de pagos es un servicio aparte a propósito: se puede <b style="color:var(--ink)">licenciar</b> a otros marketplaces que solo quieran la parte de pagos. Un selector de red elige la red de cada agente.</p>
+    </div>
+    <div>
+      <p class="tag-mono" style="margin-bottom:14px">FLUJO END-TO-END · 1 REQUEST</p>
+      <div class="step"><span class="i">1</span><div><b>Llega el objetivo</b><br><span>"Resolver factura X." Texto plano, sin esquema requerido.</span></div></div>
+      <div class="step"><span class="i">2</span><div><b>Busca y compone</b><br><span>El servicio busca en los registros conectados, ordena los candidatos y arma el plan.</span></div></div>
+      <div class="step"><span class="i">3</span><div><b>Responde 402</b><br><span>Monto, token y red exactos. Quien paga firma EIP-3009, sin comisión de red.</span></div></div>
+      <div class="step"><span class="i">4</span><div><b>La IA orquesta</b><br><span>Claude Sonnet invoca cada agente y le paga en su red nativa.</span></div></div>
+      <div class="step"><span class="i">5</span><div><b>Resultado y liquidación</b><br><span>Cobro y pagos liquidados onchain. Operación exitosa.</span></div></div>
+    </div>
+  </div>
+</div></section>
+
+<!-- 06 TRACCION / PRUEBA -->
+<section><div class="slide">
+  <span class="eyebrow">Tracción · prueba onchain</span>
+  <h2>Esto no es una maqueta. <span class="sf">Está corriendo onchain.</span></h2>
+  <p class="lead" style="margin-bottom:18px">Un solo /compose, tres redes: el cliente paga en Kite, y el gateway paga autónomamente a un agente en Avalanche y a otro en Base, cada uno en su red nativa. Tres transacciones reales, dos tokens, un flujo. Clickeá cualquier hash para verificarlo.</p>
+  <div class="grid g3" style="margin-bottom:18px">
+    <a class="tx" href="https://testnet.kitescan.ai/tx/0xbbc6dbf3d85d4d96ce910f8ce792fcf60abdc84ba83236411d01693e5521aef7" target="_blank" rel="noopener"><div class="top">Kite · <b>Inbound</b> · PYUSD</div><div class="hash">0xbbc6db…21aef7</div><span class="ver">Verificar en KiteScan ↗</span></a>
+    <a class="tx" href="https://testnet.snowtrace.io/tx/0x5532f80195dd13cbe71e0cfaf71c536cde66b6b1ac9691a7370618ee4e260868" target="_blank" rel="noopener"><div class="top">Avalanche · <b>Outbound</b> · USDC</div><div class="hash">0x5532f8…260868</div><span class="ver">Verificar en Snowtrace ↗</span></a>
+    <a class="tx" href="https://sepolia.basescan.org/tx/0x743ff36320b72083c3f7610415baa667a091f760689f6b5dbf3d21c809ff1b9f" target="_blank" rel="noopener"><div class="top">Base · <b>Outbound</b> · USDC</div><div class="hash">0x743ff3…ff1b9f</div><span class="ver">Verificar en BaseScan ↗</span></a>
+  </div>
+  <div class="statrow" style="margin-top:28px">
+    <div class="stat"><div class="n">3×5</div><div class="l">Matriz de validación<br>3 redes × 5 dimensiones, todo verde</div></div>
+    <div class="stat"><div class="n">1.649</div><div class="l">Tests verdes<br>en cada merge</div></div>
+    <div class="stat"><div class="n">~64</div><div class="l">Funciones entregadas<br>con diseño, revisión y QA</div></div>
+    <div class="stat"><div class="n">SSRF</div><div class="l">Controles de seguridad<br>HTTPS forzado · CORS · control de acceso por dueño</div></div>
+  </div>
+</div></section>
+
+<!-- 07 MERCADO -->
+<section><div class="slide">
+  <span class="eyebrow">Mercado</span>
+  <h2>La economía agéntica está naciendo. <span class="sf">Los rieles están vacíos.</span></h2>
+  <p class="lead">El negocio es volumen multiplicado por comisión: cada compose que pasa por la capa A2A deja una comisión del 1%. Nuestro mercado son los marketplaces de agentes, quienes construyen agentes y las empresas que integran (B2B) que necesitan pagos y orquestación pero no quieren construirlos.</p>
+  <div class="grid g3" style="margin-top:4px">
+    <div class="card hot"><div class="num">TAM</div><h3><span class="ph-fill">[completar]</span></h3><p>Tamaño total del mercado de pagos agente-a-agente. Estimación con supuestos explícitos.</p></div>
+    <div class="card"><div class="num">SAM</div><h3><span class="ph-fill">[completar]</span></h3><p>Marketplaces, equipos que construyen agentes y empresas que integran, alcanzables.</p></div>
+    <div class="card"><div class="num">SOM</div><h3><span class="ph-fill">[completar]</span></h3><p>Captura realista a 3 años por comisión, premium y licencias.</p></div>
+  </div>
+  <p class="tagline">Honestidad: el mercado no tiene una cifra cerrada todavía porque está naciendo. Lo medible: el volumen onchain de x402 y A2A crece mes a mes. La curva está justo antes del despegue.</p>
+</div></section>
+
+<!-- 08 MODELO -->
+<section><div class="slide">
+  <span class="eyebrow">Modelo de negocio</span>
+  <h2>Tres fuentes de ingreso. <span class="sf">La primera ya está implementada.</span></h2>
+  <p class="lead">Sin suscripción por usuario, sin comisión de plataforma por adelantado. El ingreso es proporcional al uso real. No captamos usuarios finales: los marketplaces y los agentes traen su propio tráfico.</p>
+  <div class="grid g3" style="margin-top:6px">
+    <div class="card hot"><div class="num">01 · Comisión de protocolo</div><h3>1% por orquestación</h3><p>Un 1% plano sobre cada /compose u /orchestrate que pasa por la capa A2A. Un cobro real en la blockchain, a prueba de duplicados. Se activa configurando la billetera de cobro: una configuración, no desarrollo nuevo.</p><span class="badge ready">Implementado · listo para activar</span></div>
+    <div class="card"><div class="num">02 · Búsqueda premium</div><h3>Plan para operadores</h3><p>Funciones pagas para agentes y operadores que quieren mejor ranking, análisis, segmentación e infraestructura de búsqueda de nivel profesional.</p><span class="badge soon">En el plan</span></div>
+    <div class="card"><div class="num">03 · Licencias a empresas</div><h3>Servicio de marca blanca</h3><p>Otros marketplaces integran wasiai-a2a más el sistema de pagos como su capa de pagos y orquestación. Licencia más reparto de ingresos. La veta más grande de mediano plazo.</p><span class="badge soon">En conversaciones</span></div>
+  </div>
+</div></section>
+
+<!-- 09 GO-TO-MARKET -->
+<section><div class="slide">
+  <span class="eyebrow">Go-to-market</span>
+  <h2>Tres canales, <span class="sf">un círculo virtuoso.</span></h2>
+  <p class="lead">No captamos usuarios finales. Crecemos de abajo hacia arriba con desarrolladores, B2B con marketplaces y montados sobre los ecosistemas donde ya estamos integrados. Arrancamos por LATAM y una vertical concreta de pagos agénticos.</p>
+  <div class="grid g3">
+    <div class="card"><div class="num">01 · Vía ecosistemas</div><h3>Fondos y co-marketing</h3><p>Listados como la capa A2A y x402 de Base, Avalanche y Kite, con fondos (grants) y co-marketing. Montamos la ola del comercio agéntico. Bajo costo, mucho retorno.</p><span class="badge ready">Activo</span></div>
+    <div class="card"><div class="num">02 · Desarrolladores</div><h3>SDK abierto, gratis para empezar</h3><p>SDK de código abierto, cero pago por adelantado (el 1% es por uso), documentación y API en vivo. Cada agente que se integra trae su propio volumen.</p><span class="badge soon">En curso</span></div>
+    <div class="card"><div class="num">03 · Alianzas con empresas</div><h3>Marca blanca</h3><p>Integramos otros marketplaces sobre nuestra capa más el sistema de pagos. Cada integración dispara el efecto de red.</p><span class="badge soon">En conversaciones</span></div>
+  </div>
+  <p class="tagline" style="font-weight:600;color:var(--ink)">Más marketplaces <span style="color:var(--red)">→</span> más agentes para descubrir <span style="color:var(--red)">→</span> más transacciones <span style="color:var(--red)">→</span> más comisión del 1% <span style="color:var(--red)">→</span> más integraciones.</p>
+</div></section>
+
+<!-- 10 COMPETENCIA / MOAT -->
+<section><div class="slide">
+  <span class="eyebrow">Diferenciadores · ventaja defensiva</span>
+  <h2>Complementario a x402. <span class="sf">No competimos con él.</span></h2>
+  <p class="lead" style="margin-bottom:18px">Coinbase x402 resuelve la vía de pago, fuerte en Base. Somos la capa de mayor nivel, interoperable y multi-chain encima. Si Base gana, ganamos; si Avalanche o Kite ganan, también.</p>
+  <div class="vs">
+    <div class="col x">
+      <h3><span class="k">x402</span> Vía de pago (Coinbase, Base primero)</h3>
+      <ul style="padding:0;margin:0">
+        <li><span class="mk">✓</span><span><b>Liquidación sin comisión de red.</b> Transferencias EIP-3009, fuerte en Base.</span></li>
+        <li><span class="mk">×</span><span><b>Sin interoperabilidad A2A.</b> No hay búsqueda de agentes entre marketplaces.</span></li>
+        <li><span class="mk">×</span><span><b>Foco en una sola red.</b> Base primero por diseño.</span></li>
+        <li><span class="mk">×</span><span><b>Sin orquestación con IA.</b> Es una pieza de pago, no un planificador.</span></li>
+      </ul>
+    </div>
+    <div class="col win">
+      <h3><span class="k">WasiAI</span> Capa de comercio + orquestación</h3>
+      <ul style="padding:0;margin:0">
+        <li><span class="mk">✓</span><span><b>Interoperabilidad Google A2A.</b> Estándar abierto, búsqueda entre marketplaces.</span></li>
+        <li><span class="mk">✓</span><span><b>Multi-chain real.</b> Kite + Avalanche + Base, en pruebas, listas para producción.</span></li>
+        <li><span class="mk">✓</span><span><b>Orquestación con IA.</b> Claude Sonnet planea y arma los procesos.</span></li>
+        <li><span class="mk">✓</span><span><b>Liquidación propia sin comisión de red.</b> Nuestro sistema de pagos, con cortes de seguridad automáticos.</span></li>
+        <li><span class="mk">→</span><span><b>Identidad onchain (en el plan).</b> ERC-8004 / Kite Passport: prueba de concepto inicial.</span></li>
+      </ul>
+    </div>
+  </div>
+</div></section>
+
+<!-- 11 FUNDADORES -->
+<section><div class="slide">
+  <span class="eyebrow">Los fundadores</span>
+  <h2>Dos creadores. <span class="sf">Cuarenta y cinco años</span> construyendo producto en producción.</h2>
+  <div class="grid g2 natural" style="margin-top:12px">
+    <div class="fdr">
+      <img src="https://wasiai.io/pitch-v6/fer.jpg" alt="Fernando Rosas" onerror="this.outerHTML='<div class=&quot;ph&quot;>FR</div>'" />
+      <div>
+        <h3>Fernando Rosas</h3>
+        <div class="role">Co-fundador / CEO · Blockchain · DeFi</div>
+        <p class="bio">25+ años construyendo tecnología en sistemas empresariales, protocolos descentralizados y productos de IA en producción. Solidity, arquitectura distribuida y productos lanzados sobre Avalanche.</p>
+      </div>
+    </div>
+    <div class="fdr">
+      <img src="https://wasiai.io/pitch-v6/eli.jpg" alt="Elizabeth Palacios" onerror="this.outerHTML='<div class=&quot;ph&quot;>EP</div>'" />
+      <div>
+        <h3>Elizabeth Palacios</h3>
+        <div class="role">Co-fundadora / COO · Data · AI</div>
+        <p class="bio">20+ años liderando transformaciones de datos e IA a escala corporativa. En WasiAI: medición de desempeño, señales de reputación y la capa de análisis de datos detrás de cada decisión de la plataforma.</p>
+      </div>
+    </div>
+  </div>
+  <p class="tagline">Creadores LATAM. Organizadores de La Mañanera, iniciativa de educación Web3 para la comunidad blockchain hispanohablante.</p>
+</div></section>
+
+<!-- 12 ASK -->
+<section><div class="slide">
+  <span class="eyebrow">El ask</span>
+  <h2>Levantamos US$500K para <span class="sf">activar mainnet y encender la comisión del 1%.</span></h2>
+  <div class="grid g2" style="margin-top:10px">
+    <div>
+      <p class="tag-mono" style="margin-bottom:14px">USO DE FONDOS · PRÓXIMOS 90 DÍAS</p>
+      <ul class="fund">
+        <li><span class="n">01</span><span><b>Activar mainnet en las 3 redes</b> y encender la comisión de protocolo (manual de operación escrito y probado).</span></li>
+        <li><span class="n">02</span><span><b>Cerrar 2-3 integraciones</b> de marketplaces terceros (licencias a empresas).</span></li>
+        <li><span class="n">03</span><span><b>Aplicar a fondos (grants)</b> de Coinbase / Base y Avalanche Codebase.</span></li>
+        <li><span class="n">04</span><span><b>Identidad onchain a producción:</b> Kite Passport / ERC-8004, de la prueba de concepto a producción.</span></li>
+      </ul>
+    </div>
+    <div>
+      <p class="tag-mono" style="margin-bottom:14px">DESPUÉS · 6-12 MESES</p>
+      <ul class="fund">
+        <li><span class="n">→</span><span><b>Liberar el SDK (código abierto)</b> cliente y redes adicionales (Ethereum L1; Solana en evaluación).</span></li>
+        <li><span class="n">→</span><span><b>Capa de reputación</b> y búsqueda premium.</span></li>
+      </ul>
+      <div class="card hot" style="margin-top:22px">
+        <p style="font-size:15px;color:var(--ink)">Hablemos.</p>
+        <p class="small" style="margin-top:8px"><a href="mailto:contacto@wasiai.io" style="color:var(--red);text-decoration:none">contacto@wasiai.io</a> · <a href="https://app.wasiai.io" target="_blank" rel="noopener" style="color:var(--red);text-decoration:none">app.wasiai.io</a></p>
+      </div>
+    </div>
+  </div>
+</div></section>
+
+</div></div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script>
+Reveal.initialize({
+  width:1280, height:720, margin:0.04, minScale:0.2, maxScale:1.4,
+  center:false, hash:true, progress:true, slideNumber:'c/t',
+  transition:'slide', transitionSpeed:'fast',
+  controls:true, controlsLayout:'edges'
+});
+</script>
+</body>
+</html>
