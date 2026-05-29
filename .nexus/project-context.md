@@ -255,7 +255,7 @@ NODE_ENV=development|production
 
 # Supabase (compartido con wasiai-v2 dev)
 SUPABASE_URL=https://bdwvrwzvsldephfibmuu.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=sb_secret_...
+SUPABASE_SERVICE_KEY=sb_secret_...
 DATABASE_URL=postgresql://postgres:[pwd]@db.bdwvrwzvsldephfibmuu.supabase.co:5432/postgres
 
 # Redis

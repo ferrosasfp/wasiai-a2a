@@ -137,7 +137,7 @@ Cada agente tiene su bloque `⛔ PROHIBIDO EN ESTA FASE` integrado en su system 
 **Regla obligatoria (WKH-53):** toda query o mutación sobre `a2a_agent_keys`
 hecha desde `src/services/` DEBE filtrar por `owner_ref` además del `id`.
 
-El cliente de Supabase usa `SUPABASE_SERVICE_ROLE_KEY`, que **bypassea RLS**.
+El cliente de Supabase usa `SUPABASE_SERVICE_KEY`, que **bypassea RLS**.
 Por eso el ownership check vive en la capa de aplicación: si un service hace
 `.eq('id', keyId)` sin cruzar con `.eq('owner_ref', callerOwnerRef)`, cualquier
 caller autenticado puede leer o modificar datos de otro owner (IDOR).
