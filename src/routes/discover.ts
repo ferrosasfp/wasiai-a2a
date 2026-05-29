@@ -20,7 +20,6 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    */
   fastify.get(
     '/',
-    { config: { rateLimit: false } },
     async (
       request: FastifyRequest<{
         Querystring: {
@@ -61,7 +60,6 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    */
   fastify.post(
     '/',
-    { config: { rateLimit: false } },
     async (
       request: FastifyRequest<{
         Body: {

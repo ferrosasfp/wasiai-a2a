@@ -6,7 +6,7 @@
  * - Global default: RATE_LIMIT_MAX (env, default 60/min)
  * - Per-route overrides via routeConfig for sensitive endpoints
  *
- * Endpoints exempt (rateLimit: false): /, /health, /discover, /gasless/status,
+ * Endpoints exempt (rateLimit: false): /, /health, /gasless/status,
  * /.well-known/agent.json — these are read-only and cheap to serve.
  *
  * Heavy endpoints (/orchestrate, /compose) get their own lower limits
