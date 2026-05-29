@@ -22,15 +22,15 @@
  *   - Provide a typed `BazaarSchemaError` callers can map to HTTP 422.
  */
 
-import { Ajv } from 'ajv';
 import {
   type DeclareBodyDiscoveryExtensionConfig,
   type DeclareMcpDiscoveryExtensionConfig,
   type DeclareQueryDiscoveryExtensionConfig,
-  declareDiscoveryExtension,
   type DiscoveryExtension,
+  declareDiscoveryExtension,
   validateDiscoveryExtension,
 } from '@x402/extensions/bazaar';
+import { Ajv } from 'ajv';
 
 /**
  * Input config for `buildBazaarDiscoveryExtension`.
@@ -85,9 +85,7 @@ const _ajv = new Ajv({ strict: false, allErrors: true });
  *
  * @returns array of human-readable errors. Empty array = schema is valid.
  */
-function compileOrCollectErrors(
-  schema: Record<string, unknown>,
-): string[] {
+function compileOrCollectErrors(schema: Record<string, unknown>): string[] {
   try {
     _ajv.compile(schema);
     return [];

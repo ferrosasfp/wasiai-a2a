@@ -211,7 +211,11 @@ export interface ComposeResult {
   /** WKH-61: discriminator para que el route handler mapee a 403. */
   errorCode?: 'SCOPE_DENIED';
   /** WKH-61: target denegado, para debugging. `category` se omite si el agent no la expone. */
-  scopeDeniedTarget?: { registry: string; agent_slug: string; category?: string };
+  scopeDeniedTarget?: {
+    registry: string;
+    agent_slug: string;
+    category?: string;
+  };
 }
 
 export interface StepResult {
