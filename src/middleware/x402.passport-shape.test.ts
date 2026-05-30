@@ -47,7 +47,7 @@ vi.mock('../adapters/registry.js', () => ({
 import {
   buildEoaPaymentHeader,
   buildPassportPaymentHeader,
-} from '../../test/fixtures/passport-shape.js';
+} from '../__tests__/fixtures/passport-shape.js';
 import { decodeXPayment, requirePayment } from './x402.js';
 
 describe('x402 middleware — Passport-shape acceptance (WKH-69)', () => {

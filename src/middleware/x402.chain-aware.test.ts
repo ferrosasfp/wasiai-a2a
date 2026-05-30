@@ -91,7 +91,7 @@ vi.mock('../adapters/registry.js', () => ({
   getDefaultChainKey: () => 'kite-ozone-testnet',
 }));
 
-import { buildEoaPaymentHeader } from '../../test/fixtures/passport-shape.js';
+import { buildEoaPaymentHeader } from '../__tests__/fixtures/passport-shape.js';
 import { requirePayment } from './x402.js';
 
 interface ChallengeBody {

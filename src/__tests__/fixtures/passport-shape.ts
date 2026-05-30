@@ -25,7 +25,7 @@
  * test-only fabrication (well-known test private key from viem docs).
  */
 import { privateKeyToAccount } from 'viem/accounts';
-import { X_PASSPORT_SESSION_HEADER } from '../../src/middleware/x402.js';
+import { X_PASSPORT_SESSION_HEADER } from '../../middleware/x402.js';
 
 // Deterministic test-only secp256k1 private key. NOT a real Passport credential.
 // Same key used in src/adapters/__tests__/payment.contract.test.ts.
