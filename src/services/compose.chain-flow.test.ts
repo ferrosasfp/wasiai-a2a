@@ -90,7 +90,11 @@ function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig {
 }
 
 function mockFetchOk(data: unknown = { result: 'ok' }) {
-  mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => data });
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    status: 200,
+    json: async () => data,
+  });
 }
 
 beforeEach(() => {

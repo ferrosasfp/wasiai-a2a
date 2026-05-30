@@ -19,9 +19,9 @@ vi.mock('../../adapters/registry.js', () => ({
 // BLQ-1: validateGatewayUrl uses node:dns; keep it permissive in tests.
 vi.mock('node:dns', () => ({
   promises: {
-    lookup: vi.fn().mockResolvedValue([
-      { address: '93.184.216.34', family: 4 },
-    ]),
+    lookup: vi
+      .fn()
+      .mockResolvedValue([{ address: '93.184.216.34', family: 4 }]),
   },
 }));
 

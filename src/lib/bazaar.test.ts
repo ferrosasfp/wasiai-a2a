@@ -41,9 +41,9 @@ describe('validateAgentSchemas', () => {
   });
 
   it('rejects inputSchema that is not an object (string)', () => {
-    expect(() =>
-      validateAgentSchemas({ inputSchema: 'not-a-schema' }),
-    ).toThrow(BazaarSchemaError);
+    expect(() => validateAgentSchemas({ inputSchema: 'not-a-schema' })).toThrow(
+      BazaarSchemaError,
+    );
   });
 
   it('rejects inputSchema that is an array', () => {

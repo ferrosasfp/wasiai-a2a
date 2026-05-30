@@ -145,9 +145,7 @@ export async function initAdapters(): Promise<void> {
   _defaultChainKey = chainKeys[0] ?? null;
   _initialized = true;
 
-  console.log(
-    `[Registry] Adapters initialized: ${chainKeys.join(', ')}`,
-  );
+  console.log(`[Registry] Adapters initialized: ${chainKeys.join(', ')}`);
 }
 
 function assertInitialized(): void {
@@ -173,9 +171,7 @@ export function getPaymentAdapter(chainKey?: ChainKey): PaymentAdapter {
   return resolveBundleOrThrow(chainKey).payment;
 }
 
-export function getAttestationAdapter(
-  chainKey?: ChainKey,
-): AttestationAdapter {
+export function getAttestationAdapter(chainKey?: ChainKey): AttestationAdapter {
   return resolveBundleOrThrow(chainKey).attestation;
 }
 

@@ -11,11 +11,11 @@
 import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { recoverMessageAddress } from 'viem';
-import { verifyDeposit } from '../adapters/deposit-verifier.js';
 import {
   normalizeChainSlug,
   resolveChainKey,
 } from '../adapters/chain-resolver.js';
+import { verifyDeposit } from '../adapters/deposit-verifier.js';
 import { getAdaptersBundle } from '../adapters/registry.js';
 import { authSignupRateLimit } from '../middleware/rate-limit.js';
 import { budgetService } from '../services/budget.js';
@@ -265,7 +265,11 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       txHash: txHash as `0x${string}`,
       expectedAmountUsd: body.amount,
     });
-    if (!result.ok || result.amountUsd === undefined || result.from === undefined) {
+    if (
+      !result.ok ||
+      result.amountUsd === undefined ||
+      result.from === undefined
+    ) {
       const status = result.reason === 'RPC_UNAVAILABLE' ? 503 : 400;
       return reply
         .status(status)

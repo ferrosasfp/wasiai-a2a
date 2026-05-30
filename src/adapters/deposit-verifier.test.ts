@@ -6,8 +6,9 @@
  * (exemplar: base.test.ts:21-30). The verifier reads `process.env` for RPC /
  * treasury / confirmations, so env is set/cleared per test + `_resetVerifier()`.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
 import { encodeAbiParameters, parseAbiParameters } from 'viem';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ─── Mocks ───────────────────────────────────────────────────────────────
 const mockGetReceipt = vi.fn();
@@ -26,17 +27,15 @@ vi.mock('viem', async (importOriginal) => {
   };
 });
 
+import { _resetVerifier, verifyDeposit } from './deposit-verifier.js';
 import type { AdaptersBundle, ChainKey, TokenSpec } from './types.js';
-import { verifyDeposit, _resetVerifier } from './deposit-verifier.js';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────
 const TREASURY = '0x1111111111111111111111111111111111111111' as const;
 const OTHER_ADDR = '0x2222222222222222222222222222222222222222' as const;
 const SENDER = '0x3333333333333333333333333333333333333333' as const;
-const KITE_USDC =
-  '0x4444444444444444444444444444444444444444' as `0x${string}`;
-const BASE_USDC =
-  '0x5555555555555555555555555555555555555555' as `0x${string}`;
+const KITE_USDC = '0x4444444444444444444444444444444444444444' as `0x${string}`;
+const BASE_USDC = '0x5555555555555555555555555555555555555555' as `0x${string}`;
 const OTHER_TOKEN =
   '0x6666666666666666666666666666666666666666' as `0x${string}`;
 
@@ -58,11 +57,11 @@ function transferLog(opts: {
 }) {
   return {
     address: opts.token,
-    topics: [
-      TRANSFER_TOPIC0,
-      topicAddr(SENDER),
-      topicAddr(opts.to),
-    ] as [`0x${string}`, `0x${string}`, `0x${string}`],
+    topics: [TRANSFER_TOPIC0, topicAddr(SENDER), topicAddr(opts.to)] as [
+      `0x${string}`,
+      `0x${string}`,
+      `0x${string}`,
+    ],
     data: encodeAbiParameters(parseAbiParameters('uint256'), [opts.value]),
   };
 }
@@ -134,7 +133,13 @@ describe('verifyDeposit', () => {
     mockGetReceipt.mockResolvedValue({
       status: 'success',
       blockNumber: 100n,
-      logs: [transferLog({ token: KITE_USDC, to: TREASURY, value: 10n * 10n ** 18n })],
+      logs: [
+        transferLog({
+          token: KITE_USDC,
+          to: TREASURY,
+          value: 10n * 10n ** 18n,
+        }),
+      ],
     });
 
     const res = await verifyDeposit({
@@ -158,7 +163,9 @@ describe('verifyDeposit', () => {
     mockGetReceipt.mockResolvedValue({
       status: 'success',
       blockNumber: 100n,
-      logs: [transferLog({ token: BASE_USDC, to: TREASURY, value: 10n * 10n ** 6n })],
+      logs: [
+        transferLog({ token: BASE_USDC, to: TREASURY, value: 10n * 10n ** 6n }),
+      ],
     });
 
     const res = await verifyDeposit({
@@ -210,7 +217,13 @@ describe('verifyDeposit', () => {
     mockGetReceipt.mockResolvedValue({
       status: 'success',
       blockNumber: 100n,
-      logs: [transferLog({ token: KITE_USDC, to: TREASURY, value: 10n * 10n ** 18n })],
+      logs: [
+        transferLog({
+          token: KITE_USDC,
+          to: TREASURY,
+          value: 10n * 10n ** 18n,
+        }),
+      ],
     });
 
     const res = await verifyDeposit({
@@ -230,7 +243,13 @@ describe('verifyDeposit', () => {
     mockGetReceipt.mockResolvedValue({
       status: 'success',
       blockNumber: 100n,
-      logs: [transferLog({ token: KITE_USDC, to: OTHER_ADDR, value: 10n * 10n ** 18n })],
+      logs: [
+        transferLog({
+          token: KITE_USDC,
+          to: OTHER_ADDR,
+          value: 10n * 10n ** 18n,
+        }),
+      ],
     });
 
     const res = await verifyDeposit({
@@ -249,7 +268,13 @@ describe('verifyDeposit', () => {
     mockGetReceipt.mockResolvedValue({
       status: 'success',
       blockNumber: 100n,
-      logs: [transferLog({ token: OTHER_TOKEN, to: TREASURY, value: 10n * 10n ** 18n })],
+      logs: [
+        transferLog({
+          token: OTHER_TOKEN,
+          to: TREASURY,
+          value: 10n * 10n ** 18n,
+        }),
+      ],
     });
 
     const res = await verifyDeposit({
@@ -268,7 +293,13 @@ describe('verifyDeposit', () => {
     mockGetReceipt.mockResolvedValue({
       status: 'success',
       blockNumber: 100n,
-      logs: [transferLog({ token: KITE_USDC, to: TREASURY, value: 10n * 10n ** 18n })],
+      logs: [
+        transferLog({
+          token: KITE_USDC,
+          to: TREASURY,
+          value: 10n * 10n ** 18n,
+        }),
+      ],
     });
 
     const res = await verifyDeposit({
@@ -289,7 +320,9 @@ describe('verifyDeposit', () => {
     mockGetReceipt.mockResolvedValue({
       status: 'success',
       blockNumber: 100n,
-      logs: [transferLog({ token: KITE_USDC, to: TREASURY, value: 10n ** 18n })],
+      logs: [
+        transferLog({ token: KITE_USDC, to: TREASURY, value: 10n ** 18n }),
+      ],
     });
 
     const res = await verifyDeposit({
@@ -311,7 +344,9 @@ describe('verifyDeposit', () => {
     mockGetReceipt.mockResolvedValue({
       status: 'success',
       blockNumber: 100n,
-      logs: [transferLog({ token: KITE_USDC, to: TREASURY, value: 10n ** 18n })],
+      logs: [
+        transferLog({ token: KITE_USDC, to: TREASURY, value: 10n ** 18n }),
+      ],
     });
 
     const res = await verifyDeposit({
@@ -332,7 +367,13 @@ describe('verifyDeposit', () => {
     mockGetReceipt.mockResolvedValue({
       status: 'success',
       blockNumber: 100n,
-      logs: [transferLog({ token: KITE_USDC, to: TREASURY, value: 15n * 10n ** 17n })],
+      logs: [
+        transferLog({
+          token: KITE_USDC,
+          to: TREASURY,
+          value: 15n * 10n ** 17n,
+        }),
+      ],
     });
     const kite = await verifyDeposit({
       chainKey: 'kite-ozone-testnet' as ChainKey,
@@ -349,7 +390,9 @@ describe('verifyDeposit', () => {
     mockGetReceipt.mockResolvedValue({
       status: 'success',
       blockNumber: 100n,
-      logs: [transferLog({ token: BASE_USDC, to: TREASURY, value: 2_500_000n })],
+      logs: [
+        transferLog({ token: BASE_USDC, to: TREASURY, value: 2_500_000n }),
+      ],
     });
     const base = await verifyDeposit({
       chainKey: 'base-sepolia' as ChainKey,
@@ -380,7 +423,13 @@ describe('verifyDeposit', () => {
     mockGetReceipt.mockResolvedValue({
       status: 'success',
       blockNumber: 100n,
-      logs: [transferLog({ token: KITE_USDC, to: TREASURY, value: 10n * 10n ** 18n })],
+      logs: [
+        transferLog({
+          token: KITE_USDC,
+          to: TREASURY,
+          value: 10n * 10n ** 18n,
+        }),
+      ],
     });
 
     const res = await verifyDeposit({

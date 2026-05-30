@@ -149,7 +149,8 @@ function getFacilitatorUrl(): string {
 }
 
 function getWalletClient(network: AvalancheNetwork) {
-  if (network === 'mainnet' && _walletClientMainnet) return _walletClientMainnet;
+  if (network === 'mainnet' && _walletClientMainnet)
+    return _walletClientMainnet;
   if (network === 'fuji' && _walletClientFuji) return _walletClientFuji;
   const pk = process.env.OPERATOR_PRIVATE_KEY;
   if (!pk) {
@@ -267,7 +268,11 @@ async function settleX402(
   network: AvalancheNetwork,
 ): Promise<SettleResult> {
   const facilitatorUrl = getFacilitatorUrl();
-  const body = buildX402CanonicalBody(req.authorization, req.signature, network);
+  const body = buildX402CanonicalBody(
+    req.authorization,
+    req.signature,
+    network,
+  );
   let response: Response;
   try {
     response = await fetch(`${facilitatorUrl}/settle`, {
@@ -311,7 +316,8 @@ export class AvalanchePaymentAdapter implements PaymentAdapter {
 
   constructor(opts: { network: AvalancheNetwork }) {
     this.network = opts.network;
-    this.chainId = opts.network === 'mainnet' ? AVALANCHE_CHAIN_ID : FUJI_CHAIN_ID;
+    this.chainId =
+      opts.network === 'mainnet' ? AVALANCHE_CHAIN_ID : FUJI_CHAIN_ID;
   }
 
   get supportedTokens(): TokenSpec[] {

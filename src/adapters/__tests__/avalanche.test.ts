@@ -31,11 +31,11 @@ vi.mock('viem', async (importOriginal) => {
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
+import { createAvalancheAdapters } from '../avalanche/index.js';
 import {
   _resetWalletClient,
   AvalanchePaymentAdapter,
 } from '../avalanche/payment.js';
-import { createAvalancheAdapters } from '../avalanche/index.js';
 
 const FUJI_USDC_DEFAULT = '0x5425890298aed601595a70AB815c96711a31Bc65';
 const AVALANCHE_USDC_DEFAULT = '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E';
@@ -54,9 +54,7 @@ describe('Avalanche adapter — factory shape', () => {
     const bundle = await createAvalancheAdapters();
     expect(bundle.chainConfig.chainId).toBe(43113);
     expect(bundle.chainConfig.name).toBe('Avalanche Fuji');
-    expect(bundle.chainConfig.explorerUrl).toBe(
-      'https://testnet.snowtrace.io',
-    );
+    expect(bundle.chainConfig.explorerUrl).toBe('https://testnet.snowtrace.io');
   });
 
   it('explicit fuji → chainId 43113', async () => {
@@ -207,7 +205,7 @@ describe('Avalanche payment adapter — contract', () => {
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
-        nonce: '0x' + 'a'.repeat(64),
+        nonce: `0x${'a'.repeat(64)}`,
       },
       signature: '0xSIG',
       network: 'eip155:43113',
@@ -240,7 +238,7 @@ describe('Avalanche payment adapter — contract', () => {
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
-        nonce: '0x' + 'a'.repeat(64),
+        nonce: `0x${'a'.repeat(64)}`,
       },
       signature: '0xSIG',
       network: 'eip155:43113',
@@ -266,7 +264,7 @@ describe('Avalanche payment adapter — contract', () => {
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
-        nonce: '0x' + 'a'.repeat(64),
+        nonce: `0x${'a'.repeat(64)}`,
       },
       signature: '0xSIG',
       network: 'eip155:43113',
@@ -283,7 +281,11 @@ describe('Avalanche payment adapter — contract', () => {
       status: 200,
       json: async () => ({
         settled: false,
-        error: { code: 'INSUFFICIENT_BALANCE', message: 'no balance', http: 400 },
+        error: {
+          code: 'INSUFFICIENT_BALANCE',
+          message: 'no balance',
+          http: 400,
+        },
       }),
     });
     const result = await adapter.settle({
@@ -293,7 +295,7 @@ describe('Avalanche payment adapter — contract', () => {
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
-        nonce: '0x' + 'a'.repeat(64),
+        nonce: `0x${'a'.repeat(64)}`,
       },
       signature: '0xSIG',
       network: 'eip155:43113',
@@ -316,7 +318,7 @@ describe('Avalanche payment adapter — contract', () => {
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
-        nonce: '0x' + 'a'.repeat(64),
+        nonce: `0x${'a'.repeat(64)}`,
       },
       signature: '0xSIG',
       network: 'eip155:43113',
@@ -340,7 +342,7 @@ describe('Avalanche payment adapter — contract', () => {
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
-        nonce: '0x' + 'a'.repeat(64),
+        nonce: `0x${'a'.repeat(64)}`,
       },
       signature: '0xSIG',
       network: 'eip155:43113',

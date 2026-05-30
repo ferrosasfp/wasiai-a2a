@@ -24,7 +24,9 @@ const mockSettle = vi
 const mockAdapter = {
   verify: (...args: unknown[]) => mockVerify(...args),
   settle: (...args: unknown[]) => mockSettle(...args),
-  getToken: vi.fn().mockReturnValue('0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e'),
+  getToken: vi
+    .fn()
+    .mockReturnValue('0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e'),
   getNetwork: vi.fn().mockReturnValue('kite-mainnet'),
   getScheme: vi.fn().mockReturnValue('exact'),
   getMerchantName: vi.fn().mockReturnValue('wasiai-a2a-test'),
@@ -42,8 +44,11 @@ vi.mock('../adapters/registry.js', () => ({
   getInitializedChainKeys: () => ['kite-ozone-testnet'],
 }));
 
+import {
+  buildEoaPaymentHeader,
+  buildPassportPaymentHeader,
+} from '../../test/fixtures/passport-shape.js';
 import { decodeXPayment, requirePayment } from './x402.js';
-import { buildPassportPaymentHeader, buildEoaPaymentHeader } from '../../test/fixtures/passport-shape.js';
 
 describe('x402 middleware — Passport-shape acceptance (WKH-69)', () => {
   const ORIGINAL_WALLET = process.env.KITE_WALLET_ADDRESS;
@@ -137,7 +142,9 @@ describe('x402 middleware — Passport-shape acceptance (WKH-69)', () => {
       const verifyArg = mockVerify.mock.calls[0][0] as {
         authorization: { from: string; value: string };
       };
-      expect(verifyArg.authorization.from).toBe(paymentRequest.authorization.from);
+      expect(verifyArg.authorization.from).toBe(
+        paymentRequest.authorization.from,
+      );
       expect(verifyArg.authorization.value).toBe('5000000');
     } finally {
       await app.close();

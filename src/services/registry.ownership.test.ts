@@ -18,8 +18,7 @@ vi.mock('../lib/supabase.js', () => ({
 // SSRF validator stubbed: every URL valid in this suite (the suite tests
 // ownership, not URL validation; URL flow is covered by registries.ssrf.test.ts).
 vi.mock('../lib/url-validator.js', async (orig) => {
-  const actual =
-    await orig<typeof import('../lib/url-validator.js')>();
+  const actual = await orig<typeof import('../lib/url-validator.js')>();
   return {
     ...actual,
     validateRegistryUrl: vi.fn().mockResolvedValue(undefined),
@@ -29,8 +28,8 @@ vi.mock('../lib/url-validator.js', async (orig) => {
 import { supabase } from '../lib/supabase.js';
 import {
   registryService,
-  SystemRegistryImmutableError,
   SYSTEM_OWNER_REF,
+  SystemRegistryImmutableError,
 } from './registry.js';
 import { OwnershipMismatchError } from './security/errors.js';
 
@@ -101,6 +100,7 @@ function chainMock(
       calls += 1;
       if (calls === 1) return chain;
       // 2nd select() is the terminal one — return an awaitable.
+      // biome-ignore lint/style/noNonNullAssertion: guarded by `if (overrides.selectFinal)` on L97; `?.` would change the test mock's semantics
       return overrides.selectFinal!();
     });
   }

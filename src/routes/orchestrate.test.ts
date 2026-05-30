@@ -95,7 +95,8 @@ describe('orchestrate routes — WKH-61 scope mapping', () => {
         steps: [],
         totalCostUsdc: 0,
         totalLatencyMs: 0,
-        error: 'Step 0 denied by scope: SCOPE_DENIED: category not in allowed list',
+        error:
+          'Step 0 denied by scope: SCOPE_DENIED: category not in allowed list',
         errorCode: 'SCOPE_DENIED',
         scopeDeniedTarget: {
           registry: 'wasiai',

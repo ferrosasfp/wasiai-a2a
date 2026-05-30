@@ -7,8 +7,8 @@
 
 import crypto from 'node:crypto';
 import rateLimit from '@fastify/rate-limit';
-import Fastify from 'fastify';
 import type { FastifyRequest } from 'fastify';
+import Fastify from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mcpRateLimitConfig } from './rate-limit.js';
 

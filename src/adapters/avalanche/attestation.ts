@@ -18,9 +18,7 @@ export class AvalancheAttestationAdapter implements AttestationAdapter {
   async attest(
     _event: AttestEvent,
   ): Promise<{ txHash: string; proofUrl: string }> {
-    console.warn(
-      '[avalanche] attestation stub — ERC-8004 not implemented',
-    );
+    console.warn('[avalanche] attestation stub — ERC-8004 not implemented');
     return { txHash: '0x0', proofUrl: '' };
   }
 

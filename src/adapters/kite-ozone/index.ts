@@ -35,19 +35,17 @@ export interface KiteOzoneAdapters {
  * the function behaves byte-identically to the pre-W5 implementation —
  * no env mutation, no try/finally side effects observable to the caller.
  */
-export async function createKiteOzoneAdapters(
-  opts?: { network?: 'testnet' | 'mainnet' },
-): Promise<KiteOzoneAdapters> {
+export async function createKiteOzoneAdapters(opts?: {
+  network?: 'testnet' | 'mainnet';
+}): Promise<KiteOzoneAdapters> {
   // DT-I: temporary mutation of KITE_NETWORK confined to this factory.
   // TD-NEW-KITE-PARAMS tracks cleanup (chain.ts/payment.ts should receive
   // `network` as an explicit parameter so env mutation can be removed).
-  const hadPrevNetwork = Object.prototype.hasOwnProperty.call(
-    process.env,
-    'KITE_NETWORK',
-  );
+  const hadPrevNetwork = Object.hasOwn(process.env, 'KITE_NETWORK');
   const prevNetwork = process.env.KITE_NETWORK;
   const shouldMutate = opts?.network !== undefined;
   if (shouldMutate) {
+    // biome-ignore lint/style/noNonNullAssertion: guarded by shouldMutate (opts?.network !== undefined on L46); replacing `!` with `?.` would change narrowing/behavior
     process.env.KITE_NETWORK = opts!.network;
   }
   try {

@@ -10,13 +10,13 @@
  */
 import { createPublicClient, erc20Abi, http, parseUnits } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import type { ChainKey } from '../adapters/types.js';
 import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import {
   getAdaptersBundle,
   getInitializedChainKeys,
   getPaymentAdapter,
 } from '../adapters/registry.js';
+import type { ChainKey } from '../adapters/types.js';
 import type { Agent, DownstreamLogger } from '../types/index.js';
 
 // Re-export for backward-compat: callers historically import

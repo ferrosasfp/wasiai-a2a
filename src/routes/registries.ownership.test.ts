@@ -36,9 +36,9 @@ import type { A2AAgentKeyRow } from '../types/index.js';
 vi.mock('../services/registry.js', async () => {
   // Preserve the real error class exports so the route handler's
   // `instanceof` checks fire when the mocked service throws.
-  const actual = await vi.importActual<typeof import('../services/registry.js')>(
-    '../services/registry.js',
-  );
+  const actual = await vi.importActual<
+    typeof import('../services/registry.js')
+  >('../services/registry.js');
   return {
     ...actual,
     registryService: {
@@ -54,9 +54,9 @@ vi.mock('../services/registry.js', async () => {
 
 // SSRF validator: pass everything (we test ownership, not SSRF).
 vi.mock('../lib/url-validator.js', async () => {
-  const actual = await vi.importActual<typeof import('../lib/url-validator.js')>(
-    '../lib/url-validator.js',
-  );
+  const actual = await vi.importActual<
+    typeof import('../lib/url-validator.js')
+  >('../lib/url-validator.js');
   return {
     ...actual,
     validateRegistryUrl: vi.fn().mockResolvedValue(undefined),
@@ -79,7 +79,10 @@ vi.mock('../middleware/a2a-key.js', () => ({
   ],
 }));
 
-import { registryService, SystemRegistryImmutableError } from '../services/registry.js';
+import {
+  registryService,
+  SystemRegistryImmutableError,
+} from '../services/registry.js';
 import { OwnershipMismatchError } from '../services/security/errors.js';
 import registriesRoutes from './registries.js';
 

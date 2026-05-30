@@ -87,8 +87,7 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         // WKH-61: pipeline.errorCode === 'SCOPE_DENIED' → 403 (legacy 200 path).
         // TD-WKH-61-2: la limpieza completa del mapeo `pipeline.success===false`
         // → 4xx queda fuera de scope; solo agregamos el branch SCOPE_DENIED.
-        const status =
-          result.pipeline.errorCode === 'SCOPE_DENIED' ? 403 : 200;
+        const status = result.pipeline.errorCode === 'SCOPE_DENIED' ? 403 : 200;
         return reply.status(status).send({ kiteTxHash, ...result });
       } catch (err) {
         const message =

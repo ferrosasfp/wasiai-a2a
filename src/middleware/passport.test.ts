@@ -150,7 +150,7 @@ describe('requirePassport middleware (WKH-69)', () => {
     expect(requirePassport()).toEqual([]);
   });
 
-  it("T-AC10-6c: env empty string → factory returns []", () => {
+  it('T-AC10-6c: env empty string → factory returns []', () => {
     process.env.PASSPORT_REQUIRE_INBOUND = '';
     expect(requirePassport()).toEqual([]);
   });

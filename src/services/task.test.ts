@@ -153,7 +153,10 @@ describe('taskService', () => {
     const chain = mockChain({ data: row, error: null });
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
-    const task = await taskService.get(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    const task = await taskService.get(
+      TEST_OWNER_REF,
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    );
     expect(task).toBeDefined();
     expect(task?.id).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
   });
@@ -162,7 +165,10 @@ describe('taskService', () => {
     const chain = mockChain({ data: null, error: null });
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
-    const task = await taskService.get(TEST_OWNER_REF, 'ffffffff-ffff-ffff-ffff-ffffffffffff');
+    const task = await taskService.get(
+      TEST_OWNER_REF,
+      'ffffffff-ffff-ffff-ffff-ffffffffffff',
+    );
     expect(task).toBeUndefined();
   });
 
@@ -236,7 +242,9 @@ describe('taskService', () => {
         updateChain as unknown as ReturnType<typeof mockFrom>,
       );
 
-    const task = await taskService.updateStatus(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    const task = await taskService.updateStatus(
+      TEST_OWNER_REF,
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       'working',
     );
     expect(task.status).toBe('working');
@@ -248,7 +256,9 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     await expect(
-      taskService.updateStatus(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      taskService.updateStatus(
+        TEST_OWNER_REF,
+        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         'working',
       ),
     ).rejects.toThrow(TerminalStateError);
@@ -260,7 +270,9 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     await expect(
-      taskService.updateStatus(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      taskService.updateStatus(
+        TEST_OWNER_REF,
+        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         'working',
       ),
     ).rejects.toThrow(TerminalStateError);
@@ -272,7 +284,9 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     await expect(
-      taskService.updateStatus(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      taskService.updateStatus(
+        TEST_OWNER_REF,
+        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         'working',
       ),
     ).rejects.toThrow(TerminalStateError);
@@ -283,7 +297,9 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     await expect(
-      taskService.updateStatus(TEST_OWNER_REF, 'ffffffff-ffff-ffff-ffff-ffffffffffff',
+      taskService.updateStatus(
+        TEST_OWNER_REF,
+        'ffffffff-ffff-ffff-ffff-ffffffffffff',
         'working',
       ),
     ).rejects.toThrow(TaskNotFoundError);
@@ -306,7 +322,10 @@ describe('taskService', () => {
         updateChain as unknown as ReturnType<typeof mockFrom>,
       );
 
-    const task = await taskService.append(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
+    const task = await taskService.append(
+      TEST_OWNER_REF,
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      {
         messages: [{ text: 'new' }],
       },
     );
@@ -328,7 +347,10 @@ describe('taskService', () => {
         updateChain as unknown as ReturnType<typeof mockFrom>,
       );
 
-    const task = await taskService.append(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
+    const task = await taskService.append(
+      TEST_OWNER_REF,
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      {
         artifacts: [{ url: 'b.txt' }],
       },
     );
@@ -354,7 +376,10 @@ describe('taskService', () => {
         updateChain as unknown as ReturnType<typeof mockFrom>,
       );
 
-    const task = await taskService.append(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
+    const task = await taskService.append(
+      TEST_OWNER_REF,
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      {
         messages: [{ text: 'b' }],
         artifacts: [{ url: 'y' }],
       },
@@ -369,9 +394,13 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     await expect(
-      taskService.append(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
-        messages: [{ text: 'x' }],
-      }),
+      taskService.append(
+        TEST_OWNER_REF,
+        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        {
+          messages: [{ text: 'x' }],
+        },
+      ),
     ).rejects.toThrow(TerminalStateError);
   });
 
@@ -380,9 +409,13 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     await expect(
-      taskService.append(TEST_OWNER_REF, 'ffffffff-ffff-ffff-ffff-ffffffffffff', {
-        messages: [{ text: 'x' }],
-      }),
+      taskService.append(
+        TEST_OWNER_REF,
+        'ffffffff-ffff-ffff-ffff-ffffffffffff',
+        {
+          messages: [{ text: 'x' }],
+        },
+      ),
     ).rejects.toThrow(TaskNotFoundError);
   });
 
@@ -401,7 +434,9 @@ describe('taskService', () => {
         updateChain as unknown as ReturnType<typeof mockFrom>,
       );
 
-    const task = await taskService.updateStatus(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    const task = await taskService.updateStatus(
+      TEST_OWNER_REF,
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       'working',
     );
     expect(task.status).toBe('working');
@@ -413,7 +448,10 @@ describe('taskService', () => {
     mockFrom.mockReturnValue(chain as unknown as ReturnType<typeof mockFrom>);
 
     // Should only call get(), no update
-    const task = await taskService.append(TEST_OWNER_REF, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {},
+    const task = await taskService.append(
+      TEST_OWNER_REF,
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      {},
     );
     expect(task.id).toBe(row.id);
     // Only one from() call (get), not two (get + update)

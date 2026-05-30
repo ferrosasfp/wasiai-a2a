@@ -27,7 +27,8 @@ import type { A2AMessage } from '../types/index.js';
 export function isA2AMessage(value: unknown): value is A2AMessage {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
-  if (v.role !== 'agent' && v.role !== 'user' && v.role !== 'tool') return false;
+  if (v.role !== 'agent' && v.role !== 'user' && v.role !== 'tool')
+    return false;
   if (!Array.isArray(v.parts) || v.parts.length === 0) return false;
   for (const p of v.parts) {
     if (typeof p !== 'object' || p === null) return false;

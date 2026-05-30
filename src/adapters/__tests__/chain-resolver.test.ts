@@ -7,16 +7,11 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import {
-  normalizeChainSlug,
-  resolveChainKey,
-} from '../chain-resolver.js';
+import { normalizeChainSlug, resolveChainKey } from '../chain-resolver.js';
 
 describe('normalizeChainSlug', () => {
   it('maps canonical slugs to themselves', () => {
-    expect(normalizeChainSlug('kite-ozone-testnet')).toBe(
-      'kite-ozone-testnet',
-    );
+    expect(normalizeChainSlug('kite-ozone-testnet')).toBe('kite-ozone-testnet');
     expect(normalizeChainSlug('kite-mainnet')).toBe('kite-mainnet');
     expect(normalizeChainSlug('avalanche-fuji')).toBe('avalanche-fuji');
     expect(normalizeChainSlug('avalanche-mainnet')).toBe('avalanche-mainnet');
@@ -84,9 +79,7 @@ describe('normalizeChainSlug', () => {
     // Simulates careless callers passing through JSON-parsed values.
     // The TS type is `string`, but the runtime guard MUST cover non-strings
     // because TS contract is erased at runtime (CD-19).
-    expect(
-      normalizeChainSlug(undefined as unknown as string),
-    ).toBeUndefined();
+    expect(normalizeChainSlug(undefined as unknown as string)).toBeUndefined();
     expect(normalizeChainSlug(null as unknown as string)).toBeUndefined();
     expect(normalizeChainSlug(43113 as unknown as string)).toBeUndefined();
   });
@@ -125,9 +118,7 @@ describe('resolveChainKey', () => {
   });
 
   it('header chainId numeric resolves to canonical slug', () => {
-    expect(resolveChainKey({ headerOverride: '43113' })).toBe(
-      'avalanche-fuji',
-    );
+    expect(resolveChainKey({ headerOverride: '43113' })).toBe('avalanche-fuji');
     expect(resolveChainKey({ headerOverride: '2368' })).toBe(
       'kite-ozone-testnet',
     );

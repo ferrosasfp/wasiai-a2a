@@ -6,6 +6,7 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import {
   TaskNotFoundError,
   TerminalStateError,
@@ -13,7 +14,6 @@ import {
 } from '../services/task.js';
 import type { TaskState } from '../types/index.js';
 import { TASK_STATES } from '../types/index.js';
-import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 
 // ── UUID validation helper ──────────────────────────────────
 const UUID_RE =
@@ -119,7 +119,10 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
       if (!isValidUUID(request.params.id)) {
         return reply.status(400).send({ error: 'Invalid UUID format' });
       }
-      const task = await taskService.get(getOwnerRef(request), request.params.id);
+      const task = await taskService.get(
+        getOwnerRef(request),
+        request.params.id,
+      );
       if (!task) {
         return reply.status(404).send({ error: 'Task not found' });
       }

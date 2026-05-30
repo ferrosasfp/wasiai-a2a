@@ -48,6 +48,7 @@ vi.mock('../adapters/registry.js', () => ({
 
 import { verifyDeposit } from '../adapters/deposit-verifier.js';
 import { getAdaptersBundle } from '../adapters/registry.js';
+import type { AdaptersBundle } from '../adapters/types.js';
 import { budgetService } from '../services/budget.js';
 import { identityService } from '../services/identity.js';
 import {
@@ -55,7 +56,6 @@ import {
   FundingWalletAlreadyBoundError,
   OwnershipMismatchError,
 } from '../services/security/errors.js';
-import type { AdaptersBundle } from '../adapters/types.js';
 
 const mockCreateKey = vi.mocked(identityService.createKey);
 const mockLookupByHash = vi.mocked(identityService.lookupByHash);
@@ -245,7 +245,10 @@ describe('auth routes', () => {
   it('POST /auth/deposit RPC down → 503 RPC_UNAVAILABLE (AC-2)', async () => {
     mockLookupByHash.mockResolvedValue(makeKeyRow());
     mockGetAdaptersBundle.mockReturnValue(makeBundle(2368));
-    mockVerifyDeposit.mockResolvedValue({ ok: false, reason: 'RPC_UNAVAILABLE' });
+    mockVerifyDeposit.mockResolvedValue({
+      ok: false,
+      reason: 'RPC_UNAVAILABLE',
+    });
 
     const res = await app.inject({
       method: 'POST',
@@ -567,9 +570,7 @@ describe('auth routes', () => {
   // ── POST /auth/deposit funding-wallet gate (WKH-35 FIX-1 — hijack closed) ──
 
   it('POST /auth/deposit key without funding_wallet → 403 FUNDING_WALLET_NOT_BOUND (FIX-1)', async () => {
-    mockLookupByHash.mockResolvedValue(
-      makeKeyRow({ funding_wallet: null }),
-    );
+    mockLookupByHash.mockResolvedValue(makeKeyRow({ funding_wallet: null }));
     mockGetAdaptersBundle.mockReturnValue(makeBundle(2368));
     mockVerifyDeposit.mockResolvedValue({
       ok: true,

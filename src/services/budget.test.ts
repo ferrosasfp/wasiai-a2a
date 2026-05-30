@@ -15,11 +15,11 @@ vi.mock('../lib/supabase.js', () => ({
 }));
 
 import { supabase } from '../lib/supabase.js';
+import { budgetService } from './budget.js';
 import {
   DepositAlreadyCreditedError,
   OwnershipMismatchError,
 } from './security/errors.js';
-import { budgetService } from './budget.js';
 
 const mockFrom = vi.mocked(supabase.from);
 const mockRpc = vi.mocked(supabase.rpc);
@@ -209,7 +209,8 @@ describe('budgetService', () => {
       mockRpc.mockResolvedValue({
         data: null,
         error: {
-          message: 'DEPOSIT_ALREADY_CREDITED: chain 2368 tx 0xabc already credited',
+          message:
+            'DEPOSIT_ALREADY_CREDITED: chain 2368 tx 0xabc already credited',
         },
       } as never);
 
@@ -228,7 +229,13 @@ describe('budgetService', () => {
       } as never);
 
       await expect(
-        budgetService.registerDeposit('key-1', 2368, '10', 'other-owner', '0xabc'),
+        budgetService.registerDeposit(
+          'key-1',
+          2368,
+          '10',
+          'other-owner',
+          '0xabc',
+        ),
       ).rejects.toBeInstanceOf(OwnershipMismatchError);
     });
 

@@ -12,17 +12,17 @@
 import type { Chain, PublicClient } from 'viem';
 import {
   createPublicClient,
-  http,
-  formatUnits,
-  parseUnits,
   decodeEventLog,
+  formatUnits,
+  http,
   parseAbiItem,
+  parseUnits,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import type { ChainKey, AdaptersBundle } from './types.js';
-import { getKiteChain } from './kite-ozone/chain.js';
-import { getBaseChain } from './base/chain.js';
 import { getAvalancheChain } from './avalanche/chain.js';
+import { getBaseChain } from './base/chain.js';
+import { getKiteChain } from './kite-ozone/chain.js';
+import type { AdaptersBundle, ChainKey } from './types.js';
 
 export type DepositVerificationReason =
   | 'TX_NOT_FOUND'

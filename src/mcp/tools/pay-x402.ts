@@ -101,7 +101,9 @@ export async function payX402(
         method,
         headers: baseHeaders,
         body:
-          input.payload !== undefined ? JSON.stringify(input.payload) : undefined,
+          input.payload !== undefined
+            ? JSON.stringify(input.payload)
+            : undefined,
         signal: controller.signal,
       },
       timeoutMs,
@@ -184,7 +186,9 @@ export async function payX402(
           'payment-signature': signResult.xPaymentHeader,
         },
         body:
-          input.payload !== undefined ? JSON.stringify(input.payload) : undefined,
+          input.payload !== undefined
+            ? JSON.stringify(input.payload)
+            : undefined,
         signal: controller.signal,
       },
       timeoutMs,

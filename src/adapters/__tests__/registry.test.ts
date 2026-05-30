@@ -168,9 +168,7 @@ describe('adapter registry', () => {
     });
 
     it('logs the canonical init message including the chain slug', async () => {
-      const logSpy = vi
-        .spyOn(console, 'log')
-        .mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       process.env.WASIAI_A2A_CHAIN = 'kite-ozone-testnet';
       await initAdapters();
 
@@ -205,9 +203,7 @@ describe('adapter registry', () => {
     });
 
     it('logs the canonical multi-chain init message', async () => {
-      const logSpy = vi
-        .spyOn(console, 'log')
-        .mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet';
       await initAdapters();
 
@@ -228,9 +224,7 @@ describe('adapter registry', () => {
 
   // ─── CD-13: conflict warning when both env vars are set ───
   it('CD-13 — when both env vars are set, logs WARNING and uses WASIAI_A2A_CHAINS', async () => {
-    const warnSpy = vi
-      .spyOn(console, 'warn')
-      .mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet';
     process.env.WASIAI_A2A_CHAIN = 'kite-ozone-testnet';
 

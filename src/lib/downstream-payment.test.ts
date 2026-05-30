@@ -301,21 +301,18 @@ describe('signAndSettleDownstream — skip codes', () => {
     ['-Infinity', Number.NEGATIVE_INFINITY],
     ['zero', 0],
     ['negative', -1],
-  ])(
-    'T-SkipInvalidPrice: priceUsdc=%s → null + INVALID_PRICE, sign NOT called',
-    async (_label, badPrice) => {
-      const { signAndSettleDownstream } = await importWithFlag(true);
-      const logger = makeLogger();
-      const agent = makeAgent({ priceUsdc: badPrice });
-      const result = await signAndSettleDownstream(agent, logger);
-      expect(result).toBeNull();
-      expect(logger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ code: 'INVALID_PRICE' }),
-        expect.any(String),
-      );
-      expect(mockFujiSign).not.toHaveBeenCalled();
-    },
-  );
+  ])('T-SkipInvalidPrice: priceUsdc=%s → null + INVALID_PRICE, sign NOT called', async (_label, badPrice) => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+    const agent = makeAgent({ priceUsdc: badPrice });
+    const result = await signAndSettleDownstream(agent, logger);
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'INVALID_PRICE' }),
+      expect.any(String),
+    );
+    expect(mockFujiSign).not.toHaveBeenCalled();
+  });
 
   it('T-Balance-Insufficient: RPC balance 0 → null + INSUFFICIENT_BALANCE, sign NOT called (CD-1)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);

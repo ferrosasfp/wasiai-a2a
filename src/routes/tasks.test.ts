@@ -18,7 +18,8 @@ import tasksRoutes from './tasks.js';
 
 // ── Mock auth middleware (WKH-54) — pass-through that populates a2aKeyRow
 vi.mock('../middleware/a2a-key.js', () => ({
-  requirePaymentOrA2AKey: () =>
+  requirePaymentOrA2AKey:
+    () =>
     async (
       request: import('fastify').FastifyRequest,
       _reply: import('fastify').FastifyReply,

@@ -310,7 +310,9 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
       expect(res.statusCode).toBe(400);
       const body = res.json() as ErrorBody;
       expect(body.error_code).toBe('CHAIN_NOT_SUPPORTED');
-      expect(body.error).toContain('Initialized: kite-ozone-testnet, base-sepolia');
+      expect(body.error).toContain(
+        'Initialized: kite-ozone-testnet, base-sepolia',
+      );
     } finally {
       await app.close();
     }
@@ -370,9 +372,7 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
       expect(res.statusCode).toBe(402);
       const body = res.json() as ChallengeBody;
       expect(body.accepts[0].maxAmountRequired).toBe('1000000');
-      expect(body.accepts[0].maxAmountRequired).not.toBe(
-        '1000000000000000000',
-      );
+      expect(body.accepts[0].maxAmountRequired).not.toBe('1000000000000000000');
     } finally {
       await app.close();
     }

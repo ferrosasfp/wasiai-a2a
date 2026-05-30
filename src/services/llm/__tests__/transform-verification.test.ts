@@ -33,8 +33,8 @@ vi.mock('@anthropic-ai/sdk', () => ({
 import { supabase } from '../../../lib/supabase.js';
 import { canonicalJson, schemaHash } from '../canonical-json.js';
 import {
-  PRICING_USD_PER_M_TOKENS,
   computeCostUsd,
+  PRICING_USD_PER_M_TOKENS,
   type PricedModel,
 } from '../pricing.js';
 import { selectModel } from '../select-model.js';
@@ -74,11 +74,7 @@ describe('WKH-57 W0 helpers — pricing', () => {
     expect(sonnetCost).toBeCloseTo(3.0 + 15.0, 10);
 
     // Half-rate sanity check
-    const half = computeCostUsd(
-      'claude-haiku-4-5-20251001',
-      500_000,
-      500_000,
-    );
+    const half = computeCostUsd('claude-haiku-4-5-20251001', 500_000, 500_000);
     expect(half).toBeCloseTo((1.0 + 5.0) / 2, 10);
   });
 });
@@ -284,11 +280,17 @@ function setupLLMResponse(
 
 /** Configures sequential LLM responses (attempt1, attempt2, ...). */
 function setupLLMResponseSequence(
-  responses: Array<{ transformFn: string; tokensIn?: number; tokensOut?: number }>,
+  responses: Array<{
+    transformFn: string;
+    tokensIn?: number;
+    tokensOut?: number;
+  }>,
 ): void {
   for (const r of responses) {
     mockCreate.mockResolvedValueOnce({
-      content: [{ type: 'text', text: JSON.stringify({ transformFn: r.transformFn }) }],
+      content: [
+        { type: 'text', text: JSON.stringify({ transformFn: r.transformFn }) },
+      ],
       usage: {
         input_tokens: r.tokensIn ?? 100,
         output_tokens: r.tokensOut ?? 50,
@@ -334,9 +336,7 @@ describe('WKH-57 maybeTransform — model selector (AC-1, AC-2)', () => {
   });
 
   it('T-VER-1b: schema with 4 required + missing fields invokes Anthropic with model=Haiku (AC-1)', async () => {
-    setupLLMResponse(
-      'return { a: 1, b: 2, c: 3, d: 4 };',
-    );
+    setupLLMResponse('return { a: 1, b: 2, c: 3, d: 4 };');
 
     const schema = {
       required: ['a', 'b', 'c', 'd'],
@@ -418,7 +418,11 @@ describe('WKH-57 maybeTransform — retry loop (AC-3)', () => {
       // Attempt 1: returns { wrong: 1 } — does NOT include `query` required
       { transformFn: 'return { wrong: 1 };', tokensIn: 100, tokensOut: 50 },
       // Attempt 2: returns { query: ... } — includes required field
-      { transformFn: 'return { query: output.text };', tokensIn: 80, tokensOut: 40 },
+      {
+        transformFn: 'return { query: output.text };',
+        tokensIn: 80,
+        tokensOut: 40,
+      },
     ]);
 
     const schema = {
@@ -548,7 +552,7 @@ describe('WKH-57 maybeTransform — result.llm shape (AC-5)', () => {
     expect(result.llm?.tokensIn).toBe(200);
     expect(result.llm?.tokensOut).toBe(75);
     expect(result.llm?.retries).toBe(0);
-    expect((result.llm?.costUsd ?? 0)).toBeGreaterThan(0);
+    expect(result.llm?.costUsd ?? 0).toBeGreaterThan(0);
   });
 
   it('T-VER-7a: result.llm is undefined for SKIPPED (compatible schema)', async () => {
