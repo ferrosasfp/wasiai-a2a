@@ -183,23 +183,26 @@ Identificados en security audit comprehensive del sprint 2026-04-27. Mitigations
 
 Items escalados como MENORES durante WKH-AUDIT-A2A (remediación auditoría profesional, status A− → A+).
 
-- [ ] **WKH-AUDIT-MINOR-001**: Centralizar `isProduction` en `src/lib/env.ts`
+- [x] **WKH-AUDIT-MINOR-001**: Centralizar `isProduction` en `src/lib/env.ts` → **RESUELTO por WKH-098**
   - **Descripción**: `process.env.NODE_ENV === 'production'` aparece en múltiples ubicaciones (dashboard.ts, index.ts). Crear constante exportada para reducir duplicación y mejorar testability.
-  - **Archivos**: `src/routes/dashboard.ts`, `src/index.ts`, (crear) `src/lib/env.ts`
+  - **Archivos**: `src/routes/dashboard.ts`, `src/index.ts`, (crear) `src/lib/env.ts` ✓
   - **Estimación**: S
   - **Prioridad**: BAJA (cosmética, refactor)
+  - **Cierre**: feat/098-a2a-cleanup-aplus commit 75626ac
 
-- [ ] **WKH-AUDIT-MINOR-002**: Normalizar `NODE_ENV` check pattern
+- [x] **WKH-AUDIT-MINOR-002**: Normalizar `NODE_ENV` check pattern → **RESUELTO por WKH-098**
   - **Descripción**: Código mezcla `NODE_ENV === 'production'` (afirmación) con `NODE_ENV !== 'production'` (negación). Estandarizar a un patrón y documentar en project-context + CLAUDE.md.
-  - **Archivos**: CLAUDE.md, `.nexus/project-context.md`, todos archivos que verifiquen NODE_ENV
+  - **Archivos**: CLAUDE.md, `.nexus/project-context.md`, todos archivos que verifiquen NODE_ENV ✓
   - **Estimación**: S
   - **Prioridad**: BAJA (documentación)
+  - **Cierre**: `isProduction()` centralizado en `src/lib/env.ts` con normalización `.trim().toLowerCase()` (AC-4)
 
-- [ ] **WKH-CLEANUP-LINT-001**: Resolver 42 lint pre-existentes en `src/adapters/` + test files
+- [x] **WKH-CLEANUP-LINT-001**: Resolver 42 lint pre-existentes en `src/adapters/` + test files → **RESUELTO por WKH-098**
   - **Descripción**: Biome reporta 42 errores en archivos excluidos de Scope IN (test fixtures, adapters). No introducidos por WKH-AUDIT-A2A; deuda técnica pre-existente.
-  - **Archivos**: `src/adapters/__tests__/`, `src/middleware/*.test.ts`, otros
+  - **Archivos**: `src/adapters/__tests__/`, `src/middleware/*.test.ts`, otros ✓
   - **Estimación**: M (bajo riesgo, cambios mecánicos)
   - **Prioridad**: BAJA (limpieza cosmética)
+  - **Cierre**: biome check --write + noConsole directives (AC-2, feat/098-a2a-cleanup-aplus commits df79ac8 + dc41ead)
 
 ---
 
