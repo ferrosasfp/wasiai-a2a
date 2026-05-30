@@ -8,6 +8,7 @@
 import cors, { type FastifyCorsOptions } from '@fastify/cors';
 import Fastify from 'fastify';
 import { getChainConfig, initAdapters } from './adapters/registry.js';
+import { isProduction } from './lib/env.js';
 import mcpPlugin from './mcp/index.js';
 import { registerErrorBoundary } from './middleware/error-boundary.js';
 import { registerEventTracking } from './middleware/event-tracking.js';
@@ -33,11 +34,11 @@ await initAdapters();
 const fastify = Fastify({ logger: true, genReqId });
 
 // CORS — env-aware (WKH-SEC-01 AC-4/AC-5/AC-6)
-const isProduction = process.env.NODE_ENV === 'production';
+const prod = isProduction();
 const originsEnv = process.env.CORS_ALLOWED_ORIGINS;
 
 let corsOptions: FastifyCorsOptions;
-if (!isProduction) {
+if (!prod) {
   corsOptions = { origin: '*' };
 } else {
   const origins = (originsEnv ?? '')
@@ -106,7 +107,7 @@ await fastify.register(wellKnownRoutes, { prefix: '/.well-known' });
 await fastify.register(tasksRoutes, { prefix: '/tasks' });
 await fastify.register(dashboardRoutes, { prefix: '/dashboard' });
 // AC-6 (CD-3): mock-registry is dev-only; not mounted in production → 404.
-if (!isProduction) {
+if (!prod) {
   await fastify.register(mockRegistryRoutes, {
     prefix: '/mock-registry/agents',
   });

@@ -16,6 +16,7 @@ import type {
   FastifyRequest,
   preHandlerAsyncHookHandler,
 } from 'fastify';
+import { isProduction } from '../lib/env.js';
 import { eventService } from '../services/event.js';
 
 /**
@@ -33,7 +34,7 @@ const requireAdminToken: preHandlerAsyncHookHandler = async (
   const expected = process.env.DASHBOARD_ADMIN_TOKEN;
   if (!expected) {
     // AC-1/AC-2 (CD-1): fail-closed in production, passthrough in dev.
-    if (process.env.NODE_ENV === 'production') {
+    if (isProduction()) {
       return reply.status(503).send({
         error: 'service_unavailable',
         message: 'Dashboard API not configured',
