@@ -15,8 +15,16 @@ import {
   normalizeChainSlug,
   resolveChainKey,
 } from '../adapters/chain-resolver.js';
-import { verifyDeposit } from '../adapters/deposit-verifier.js';
-import { getAdaptersBundle } from '../adapters/registry.js';
+import {
+  resolveChainFamilyEnvSuffix,
+  resolveMinConfirmations,
+  resolveTreasury,
+  verifyDeposit,
+} from '../adapters/deposit-verifier.js';
+import {
+  getAdaptersBundle,
+  getInitializedChainKeys,
+} from '../adapters/registry.js';
 import { authSignupRateLimit } from '../middleware/rate-limit.js';
 import { budgetService } from '../services/budget.js';
 import { identityService } from '../services/identity.js';
@@ -347,6 +355,46 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       created_at: callerKey.created_at,
     });
   });
+
+  /**
+   * GET /deposit-info — Public, read-only deposit configuration (WKH-DEPOSIT-INFO).
+   *
+   * Returns one entry per initialized chain with the data a dev needs to fund
+   * an Agent Key: treasury address, ERC-20 token (symbol/address/decimals) and
+   * minimum confirmations. No auth, no DB, no RPC — purely env + registry data.
+   *
+   * CD-1: treasury/min_confirmations come from `deposit-verifier.ts` helpers
+   * (single source of truth, no duplication).
+   * CD-2/AC-5: NEVER serialize `OPERATOR_PRIVATE_KEY` or any secret. `treasury`
+   * is only the resolved address (or `null`), never the private key.
+   */
+  fastify.get(
+    '/deposit-info',
+    async (_req: FastifyRequest, reply: FastifyReply) => {
+      const networks = getInitializedChainKeys()
+        .map((chainKey) => {
+          const bundle = getAdaptersBundle(chainKey);
+          if (!bundle) return null;
+          const token = bundle.payment.supportedTokens[0];
+          if (!token) return null; // CD-3: tolerate empty supportedTokens
+          return {
+            chain_id: bundle.chainConfig.chainId,
+            slug: chainKey,
+            family: resolveChainFamilyEnvSuffix(chainKey),
+            treasury: resolveTreasury(chainKey), // address | null (AC-4)
+            token: {
+              symbol: token.symbol,
+              address: token.address,
+              decimals: token.decimals,
+            },
+            min_confirmations: resolveMinConfirmations(chainKey),
+          };
+        })
+        .filter((entry) => entry !== null);
+
+      return reply.status(200).send({ networks });
+    },
+  );
 
   /**
    * POST /bind/:chain — Placeholder (AC-16)
