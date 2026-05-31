@@ -131,6 +131,7 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
     capabilities: ['x'],
     priceUsdc: 0.5,
     registry: 'wasiai-v2',
+    registry_id: 'wasiai-v2',
     invokeUrl: 'https://wasiai-v2.example/api/agents/agent-1/invoke',
     invocationNote: '',
     verified: true,

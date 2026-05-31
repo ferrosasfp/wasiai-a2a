@@ -623,7 +623,8 @@ presente en memoria. `token_id` se maneja como **string decimal** (CD-11, sin
 // Reverse-lookup PÚBLICO por token_id (dato verificable on-chain por cualquiera).
 // NO Ownership Guard (DT-19 sigue aplicando: no es IDOR — no hay keyId del caller,
 // solo se expone {token_id, chain_id, verified}, NUNCA budget/funding_wallet/PII).
-// Igualdad indexable por token_id (cierra MNR-1: no full-table scan por agente).
+// Fallback determinista en JS sobre candidatas activas con identity no-null
+// (DT-22.5 nota perf); NO usa `->>` por portabilidad de PostgREST.
 async resolveIdentityForToken(
   tokenId: string,
   chainId: number,
@@ -923,7 +924,7 @@ pendientes. Listo para clinical review SPEC_APPROVED.
 | Mecanismo bidireccional: resolución por `token_id` declarado on-chain por el agente | ✅ (DT-21.1/21.3/21.4) |
 | Campo de declaración en AgentCard — estándar `registrations` (A2A/ERC-8004) **no confirmable** → default seguro definido | ✅ (DT-21.2: sin vínculo verificable → SIN badge) |
 | `resolveIdentityForSlug` → `resolveIdentityForToken(tokenId, chainId)` | ✅ (DT-21.3) |
-| MNR-1 (perf): igualdad indexable por `token_id`, sin full-table scan, skip si no hay declaración | ✅ (DT-21.3, TD-ERC8004-03 reapuntado) |
+| MNR-1 (perf): fallback determinista en JS sobre candidatas activas con identity no-null (NO `->>` por portabilidad de PostgREST), skip si no hay declaración | ✅ (DT-22.5, TD-ERC8004-03 reapuntado) |
 | Unicidad `token_id ↔ una key activa` (pre-check app-layer + índice backlog) → 409 `ERC8004_TOKEN_ALREADY_BOUND` | ✅ (DT-21.6) |
 | `agent_slug` sin efecto en `verified` (hint informativo; sin migration) | ✅ (DT-21.7, AC-9/CD-9) |
 | CD-13/CD-2/CD-8/CD-3/CD-7/AC-9 preservados | ✅ (DT-21.8) |
@@ -1307,3 +1308,277 @@ COMMIT;
 
 **Readiness DT-22: PASS.** MNR-1 (vector inverso) cerrado por match bidireccional;
 MNR-2 cerrado por índice UNIQUE parcial. Listo para fix-pack v2 del Dev.
+
+---
+
+## 12 — ADDENDUM FIX v3 (re-AR v2 → BLQ-MED-1: badge spoofing por colisión de normalización de registry name)
+
+### 12.0 — Causa raíz (grounded archivo:línea)
+
+El match bidireccional de v2 (DT-22) ancla el lado-binder a **`(agent_registry, agent_slug)`**
+donde `agent_registry` == `Agent.registry` == **`registry.name`** (display name, mutable).
+Hay DOS normalizaciones que **divergen** sobre el mismo string:
+
+| Lugar | Operación | Archivo:línea |
+|---|---|---|
+| PK del registry (insert) | `config.name.toLowerCase().replace(/\s+/g, '-')` | `src/services/registry.ts:167` |
+| Match del badge (binder) | `agentRegistry.trim().toLowerCase()` | `src/services/identity.ts:270` y `:283` |
+
+`registry.name` se expone tal cual en el `Agent` (`src/services/discovery.ts:464` `registry: registry.name`).
+La PK colapsa whitespace **interno y de borde** a `-`; el match del badge solo recorta
+los **bordes** y NO toca el whitespace interno → **NO son inyectivas sobre el mismo
+dominio**.
+
+**Exploit concreto:**
+1. Existe `name="WasiAI"` → PK `wasiai`, badge-norm `wasiai`.
+2. Atacante `POST /registries` con `name="WasiAI "` (trailing space). PK = `wasiai-`
+   (≠ `wasiai`, **no colisiona** → INSERT OK; cualquier a2a-key autenticada puede,
+   `enabled:true` por default `src/routes/registries.ts:176`).
+3. Atacante sirve en su registry un agente `slug:"acme"` cuyo card **declara el token
+   de la víctima**.
+4. Atacante bindea su key con `agent_registry="WasiAI "`, `agent_slug="acme"`.
+5. `resolveIdentityForAgent("<tokenVíctima>", chain, "WasiAI ", "acme")`:
+   badge-norm de `"WasiAI "` → `wasiai` == badge-norm del binding del atacante `wasiai`
+   → **match** → badge `verified:true` con el token de la víctima.
+
+El bug es que el ancla es el **name display mutable + normalización no-inyectiva**, no un
+identificador único. El defecto análogo en `slug` (punto 5 del re-AR) se analiza en §12.4.
+
+### DT-23 — Anclar el match al PK `id` del registry (identificador estable + único)
+
+**Decisión raíz:** el match del lado-binder deja de cruzar el **name** (mutable, normalización
+divergente) y pasa a cruzar el **`registry.id`** (PK). El PK es **único por construcción**
+(un atacante no puede crear un segundo registry con el mismo `id` → `23505`,
+`registry.ts:179-181`) y **estable** (el id no cambia, `registry.ts:190` "ID cannot be changed").
+
+#### DT-23.1 — Exponer el `id` canónico del registry en `Agent`
+
+`src/types/index.ts` — agregar campo a `Agent` (NO se quita `registry`, que sigue siendo el
+display name para consumidores/UX, backward-compat):
+
+```ts
+export interface Agent {
+  // ...
+  registry: string;     // display name (sin cambios — backward-compat)
+  registry_id: string;  // WKH-100 FIX v3 (DT-23): PK canónico del registry. Ancla
+                         // ESTABLE Y ÚNICA del match de identidad. == registry.id.
+  // ...
+}
+```
+
+`src/services/discovery.ts` — `mapAgent` (`:438-470`) setea `registry_id: registry.id`
+(el PK ya viene en `RegistryConfig.id`, `rowToRegistry` `registry.ts:79`). NO se re-normaliza:
+es el valor exacto de la columna PK.
+
+```ts
+return {
+  // ...
+  registry: registry.name,
+  registry_id: registry.id,   // DT-23: PK canónico, sin re-normalizar
+  // ...
+};
+```
+
+#### DT-23.2 — `resolveIdentityForAgent` matchea por `registry_id` exacto (igualdad estricta, SIN normalizar)
+
+`src/services/identity.ts:256-292` — cambiar la firma y el match:
+
+- Param `agentRegistry: string` → **`agentRegistryId: string`** (semántica: PK del registry).
+- El binder guarda en el binding `agent_registry` = **el PK `id`** (no el name) — ver DT-23.3.
+- El match es **igualdad estricta de strings** (`b.agent_registry === agentRegistryId`),
+  **SIN `.trim().toLowerCase()`**, porque ambos lados son ya el PK canónico (mismo origen,
+  mismo casing — el PK ya viene lowercased + colapsado del insert). Normalizar de nuevo
+  re-introduciría no-inyectividad; igualdad estricta de un valor canónico es inyectiva.
+- `agent_slug` se mantiene como ancla secundaria. Su normalización se cierra en §12.4.
+
+```ts
+async resolveIdentityForAgent(
+  tokenId: string,
+  chainId: number,
+  agentRegistryId: string,   // DT-23: PK del registry, NO el display name
+  agentSlug: string,
+): Promise<AgentCardIdentity | null> {
+  // ... (SELECT sin cambios — CD-2/DT-19 intactos)
+  for (const row of data as Array<{ erc8004_identity: Erc8004IdentityBinding | null }>) {
+    const b = row.erc8004_identity;
+    if (!b) continue;
+    if (b.token_id !== tokenId || b.chain_id !== chainId) continue;
+    if (!b.agent_registry || !b.agent_slug) continue;
+    if (b.agent_registry !== agentRegistryId) continue;   // DT-23: igualdad ESTRICTA del PK
+    if (normalizeSlug(b.agent_slug) !== normalizeSlug(agentSlug)) continue; // ver §12.4
+    return { erc8004_token_id: b.token_id, chain_id: b.chain_id, verified: true };
+  }
+  return null;
+}
+```
+
+**Nota de semántica del campo JSONB:** `agent_registry` deja de contener el display name
+y pasa a contener el **PK `id`**. El nombre de la columna JSONB NO cambia (evita migration
+de schema). Lo que cambia es el VALOR que se persiste (DT-23.3) y el VALOR contra el que se
+cruza (este DT). Ver §12.3 (migración de datos: NO requerida).
+
+#### DT-23.3 — Bind: persistir y validar el `agent_registry` como PK
+
+`src/routes/auth.ts:485-496` — el handler de bind recibe `agent_registry` del payload. Hoy
+valida con `REGISTRY_RE` (permissive, pensado para names). Cambios:
+
+1. El semántica del input pasa a ser **el `id` del registry** (no el name). Validarlo contra
+   un patrón de PK (los PK son `[a-z0-9-]`, derivados de `toLowerCase().replace(/\s+/g,'-')`).
+   Reusar / definir un `REGISTRY_ID_RE = /^[a-z0-9][a-z0-9-]{0,127}$/` (idéntico a `SLUG_RE`
+   en forma — ambos son identificadores canónicos). `REGISTRY_RE` (permissive) se **elimina**
+   de este path (queda muerto; CD-15: grepear antes de borrar el símbolo).
+2. **Validación de existencia + coherencia (defensa en profundidad, NO bloqueante de trust):**
+   el bind NO necesita verificar que el registry exista (el match runtime ya exige que un
+   `Agent` real con ese `registry_id` declare el token — sin Agent no hay badge). Pero para
+   fallar temprano y evitar bindings basura, el handler PUEDE rechazar con 400 si
+   `registryService.get(agentRegistry)` no existe. **DECISIÓN:** SÍ validar existencia
+   (1 read, sin RPC, CD-8 OK — es lectura de `registries`, no on-chain) → 400
+   `INVALID_INPUT` si no existe. Esto cierra el binding a un PK arbitrario inexistente.
+3. El binding persiste `agent_registry: agentRegistry` (el PK) — `auth.ts:576-580` sin cambio
+   de forma, solo cambia la semántica del valor.
+
+#### DT-23.4 — Defensa en profundidad: `norm(name)` inyectivo en `POST /registries`
+
+Aun anclando al PK, hay que cerrar la puerta de **PK-collision-adjacent**: dos names que
+producen PKs distintos pero confundibles. La regla mínima inyectiva:
+
+**`src/services/registry.ts` `register` (`:149-186`)** — antes del insert, normalizar+validar
+el name de forma que `name → PK` sea **inyectivo y sin ambigüedad de whitespace**:
+
+1. **Rechazar whitespace de borde e interno colapsable ambiguo.** Regla mínima elegida:
+   `const trimmed = config.name.trim();` y rechazar (throw `Error('Invalid registry name')`,
+   → route 400) si `trimmed !== config.name` (whitespace de borde) **o** si
+   `/\s{2,}|^\s|\s$/.test(config.name)` o si el name contiene cualquier whitespace que no sea
+   un único espacio simple entre tokens. **DECISIÓN (mínima y groundeada):** validar contra
+   `REGISTRY_NAME_RE = /^\S(?:[^\s]| (?! ))*\S$|^\S$/` es frágil; en su lugar, regla simple y
+   robusta:
+   - `if (config.name !== config.name.trim()) throw` (sin whitespace de borde).
+   - `if (/\s\s/.test(config.name)) throw` (sin whitespace interno duplicado/colapsable).
+
+   Con esto, el `replace(/\s+/g,'-')` ya NO puede colapsar dos strings distintos al mismo
+   visual: cada espacio simple → un `-`, sin colapso de múltiples.
+2. **Rechazar colisión de PK explícita (existencia):** computar el PK candidato
+   `id = name.toLowerCase().replace(/\s+/g,'-')` y, antes del insert, `await this.get(id)`;
+   si existe → throw `Error('Registry '<id>' already exists')` (→ 400). Esto adelanta el
+   `23505` y, combinado con (1), garantiza que dos names visualmente "iguales módulo
+   whitespace" NO puedan coexistir con PKs distintos. (El `23505` se mantiene como
+   defensa final por race, `registry.ts:179`.)
+
+**Resultado:** `name → PK` es inyectivo en el namespace de names aceptados. Un atacante NO
+puede crear `"WasiAI "` (rechazado por whitespace de borde) ni `"WasiAI  X"` (whitespace
+interno doble). El único `"WasiAI"` posible mapea al único PK `wasiai`, ya ocupado → 400.
+
+### DT-23 — Manejo de slug (§12.4): cerrar la divergencia análoga
+
+Punto 5 del re-AR: `mapAgent` (`discovery.ts:441`) toma `slug` del payload upstream **sin
+aplicar `SLUG_RE`** (`String(getNestedValue(raw, mapping.slug ?? 'slug') ?? raw.id)`). El bind
+SÍ valida `agent_slug` con `SLUG_RE` (`auth.ts:479`). Divergencia análoga: el slug del binding
+está restringido a `[a-z0-9-]`, pero el slug del Agent puede traer mayúsculas/whitespace del
+upstream → el match `b.agent_slug.trim().toLowerCase() === agentSlug.trim().toLowerCase()`
+(identity.ts:284) hace `trim+lowercase` en AMBOS lados.
+
+**Análisis:** a diferencia del registry, **slug NO es PK** y NO hay un identificador único
+estable por agente cross-registry (el namespace de slug es por-registry). El ancla de
+unicidad real es la TUPLA `(registry_id, slug)`: con `registry_id` ya inyectivo (DT-23.4),
+basta con que el slug se compare de forma **consistente y determinista** entre bind y match.
+
+**Decisión:** introducir un helper único `normalizeSlug(s) = s.trim().toLowerCase()` y usarlo
+en **ambos** lados:
+- En `resolveIdentityForAgent`: `normalizeSlug(b.agent_slug) === normalizeSlug(agentSlug)`.
+- El `agentSlug` que llega es `Agent.slug` (de `mapAgent`, sin SLUG_RE) — la normalización
+  determinista lo canoniza al comparar.
+- El binding ya validó `SLUG_RE` al persistir, así que `b.agent_slug` ∈ `[a-z0-9-]` y
+  `normalizeSlug` es idempotente sobre él.
+
+**¿Por qué esto NO reabre el vector?** El vector de registry funcionaba porque el atacante
+podía **crear un registry distinto** (`"WasiAI "`) que normalizaba al mismo trust-anchor. Con
+slug NO puede: para colisionar por slug el atacante necesitaría servir un agente con
+`slug == slug-de-la-víctima` **bajo el `registry_id` de la víctima**, pero NO controla el
+registry de la víctima (es de otro owner, protegido por Ownership Guard `registry.ts:206-221`).
+Bajo SU propio `registry_id`, el binding del atacante declara `(registry_id_atacante, slug)`
+y el match exige `registry_id == registry_id_atacante`, que NO es el de la víctima → sin badge.
+El slug solo discrimina DENTRO de un registry, y el registry ya es inyectivo. **Cerrado.**
+
+(NO se cambia `mapAgent` para aplicar `SLUG_RE` al slug upstream — sería un cambio de
+comportamiento de discovery fuera de scope y podría romper slugs legítimos no-canónicos de
+otros marketplaces. La canonización determinista en el match es suficiente y default-safe.)
+
+### 12.3 — Migración de datos
+
+**NO requiere migración de datos.** Justificación grounded:
+- El cambio de semántica de `agent_registry` (name → PK `id`) afecta solo filas con
+  `erc8004_identity.agent_registry` no-null.
+- WKH-100 está en branch `feat/100-wasiai-agentkey` **sin deploy a prod**. El fix v2 (commit
+  `53a24fe`) introdujo `agent_registry`/`agent_slug` en el branch; no hay filas v2 en prod.
+- Bindings v1 (sin `agent_registry`/`agent_slug`) → ya resultan en SIN badge (AC-9, default
+  seguro) — sin cambio.
+- **Acción del Dev:** documentar en el commit que no hay back-fill. Si en el futuro hubiera
+  filas v2 con `agent_registry`=display-name, el badge simplemente no matchearía (default
+  seguro, sin badge) hasta re-bind — NO produce un badge incorrecto. Es fail-safe.
+
+### 12.4 — Análisis de cierre del bypass
+
+| Escenario | v2 (vulnerable) | v3 (fix) |
+|---|---|---|
+| Atacante crea `name="WasiAI "` (trailing space) | INSERT OK (PK `wasiai-`) | **400** — whitespace de borde rechazado (DT-23.4.1) |
+| Atacante crea `name="WasiAI  X"` (doble espacio) | INSERT OK | **400** — whitespace interno doble rechazado (DT-23.4.1) |
+| Atacante crea `name="WasiAI"` (idéntico, casing distinto p.ej. `"wasiai"`/`"WASIAI"`) | INSERT bloqueado por PK collision en algunos casos | **400** — `get(id)` adelanta colisión (DT-23.4.2) + `23505` |
+| Atacante bindea `agent_registry="WasiAI "` | match por badge-norm `wasiai` == víctima | **400 en bind** (whitespace no pasa `REGISTRY_ID_RE`) **y** aunque pasara, el match es `b.agent_registry === agentRegistryId` con PK exacto → atacante tiene su PK propio, no el de la víctima → **sin match** |
+| Atacante declara el token de la víctima en su card bajo su registry | badge (vector inverso v1) | sin badge (cerrado en v2 por bidireccional; reforzado: registry_id propio ≠ víctima) |
+| Caso legítimo: víctima bindea con su PK real y opera su agente | badge OK | badge OK (igualdad estricta de PK + slug determinista) |
+| Binding legacy v1 (sin anclas) | sin badge | sin badge (AC-9) |
+| Colisión análoga por slug | posible en teoría (slug upstream sin SLUG_RE) | cerrado: slug solo discrimina dentro de un `registry_id` ya inyectivo (§12.4 slug) |
+
+**Prueba de cierre del exploit original:** el atacante ya NO puede materializar el paso (2)
+(crear `"WasiAI "`): la regla anti-whitespace lo rechaza con 400. Aun si la regla fallara, el
+ancla del match es el **PK exacto** `b.agent_registry === agentRegistryId`: el atacante solo
+puede bindear contra su PROPIO `registry_id` (el de un registry que controla), nunca contra el
+PK de la víctima, que es único e inmutable. **Doble defensa: inyectividad del name + ancla en
+PK único.** BLQ-MED-1 cerrado.
+
+### 12.5 — MNR-1 drift (decisión, NO bloqueante)
+
+El SDD v2 (líneas ~626/926) describe la resolución como "igualdad indexable SQL", pero el
+código (`identity.ts:262-291`) hace **scan JS** (trae candidatas activas con identity no-null
+y cruza 4 campos en JS), justificado en el docstring (`identity.ts:249-254`) por la
+portabilidad del operador JSONB `->>` en la versión de PostgREST instalada.
+
+**Decisión:** mantener el **fallback JS** (no mover a SQL) y **corregir el SDD** para reflejar
+la realidad. Razón: (a) el pre-check de unicidad SÍ usa `->>` (`identity.ts:188-189`) pero ahí
+es un filtro de igualdad simple sobre el write-path; (b) el reverse-lookup público corre sobre
+keys activas con identity no-null (cardinalidad baja) y la robustez de portabilidad pesa más
+que el micro-perf; (c) cambiar a SQL ampliaría scope sin cerrar ningún vector de seguridad.
+**Acción del Dev:** ajustar el wording de sdd.md:626 y :926 a "fallback determinista en JS
+sobre candidatas activas (DT-22.5 nota perf), no SQL `->>`". Entra en el mismo pack (1 línea
+de doc cada uno). **NO bloqueante.**
+
+### 12.6 — CDs preservados (verificación AR/CR del fix v3)
+
+| CD | Cómo lo preserva el fix v3 |
+|---|---|
+| CD-13 (sin fetch serve-time) | `mapAgent` y `resolveIdentityForAgent` no agregan fetch; `registry_id` ya está en `RegistryConfig`. El read de `registryService.get` en bind (DT-23.3.2) es DB, no HTTP outbound, fuera del serve-time del badge. |
+| CD-2 (sin budget) | El SELECT de `resolveIdentityForAgent` sigue trayendo SOLO `erc8004_identity` (identity.ts:264). Sin cambio. |
+| CD-8 (read-only) | El bind agrega 1 read (`registries`), 0 writes nuevos, 0 RPC. |
+| CD-3 (Ownership Guard en bind) | `bindErc8004Identity` mantiene `.eq('owner_ref', ownerId)` (identity.ts:204). Sin cambio. El registry del atacante está protegido por el guard de `registry.update/delete`. |
+| AC-9 (sin match → sin badge, backward-compat) | Bindings sin anclas o con PK ≠ → null. `Agent.registry` (display) intacto para consumidores. |
+| CD-6 (sin `any`) | `registry_id: string`, `agentRegistryId: string`, `normalizeSlug(s: string): string`. Sin `any`. |
+| CD-15 (grep exports antes de renombrar) | Renombre de param y borrado de `REGISTRY_RE`: grepear usos antes (1 archivo). |
+
+### 12.7 — Readiness Check (FIX v3 / DT-23)
+
+| Ítem | Estado |
+|---|---|
+| Causa raíz grounded archivo:línea (PK norm vs badge norm divergen) | OK (`registry.ts:167` vs `identity.ts:270,283`) |
+| Ancla final = PK `id` (único + estable + inmutable) | OK (DT-23.2) |
+| `Agent.registry_id` expuesto en `mapAgent` sin re-normalizar | OK (DT-23.1, `discovery.ts:438-470`) |
+| 3 callers actualizados a `registry_id` | OK (`discovery.ts:342`, `:517`, `agent-card.ts:57`) |
+| Bind persiste/valida `agent_registry` = PK (`REGISTRY_ID_RE` + existencia) | OK (DT-23.3, `auth.ts:485-496,576-580`) |
+| Regla anti-colisión inyectiva en `POST /registries` (whitespace + existencia) | OK (DT-23.4, `registry.ts:149-186`) |
+| Slug análogo cerrado (determinista + registry_id inyectivo) | OK (§12.4) |
+| Migración de datos | NO requerida — branch sin deploy, fail-safe (§12.3) |
+| MNR-1 drift | Decisión: mantener JS + corregir SDD doc (§12.5), NO bloqueante |
+| CDs preservados (13/2/8/3/6/15 + AC-9) | OK (§12.6) |
+| `[NEEDS CLARIFICATION]` sin resolver | NINGUNO |
+
+**Readiness DT-23: PASS.** BLQ-MED-1 cerrado por doble defensa (name inyectivo + ancla en PK
+único). Listo para fix-pack v3 del Dev.

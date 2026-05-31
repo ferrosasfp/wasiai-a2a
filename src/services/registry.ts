@@ -164,7 +164,26 @@ export const registryService = {
       }
     }
 
+    // WKH-100 FIX v3 (DT-23.4 / BLQ-MED-1): name → PK debe ser inyectivo.
+    // El PK colapsa whitespace (`.replace(/\s+/g,'-')`) mientras el match
+    // histórico hacía `.trim()`; nombres con whitespace de borde o interno
+    // colapsable producían PKs distintos del esperado, habilitando colisión
+    // de normalización (badge spoofing). Rechazarlos en el origen.
+    if (config.name !== config.name.trim()) {
+      throw new Error('Invalid registry name: leading/trailing whitespace');
+    }
+    if (/\s\s/.test(config.name)) {
+      throw new Error('Invalid registry name: collapsible internal whitespace');
+    }
+
     const id = config.name.toLowerCase().replace(/\s+/g, '-');
+
+    // Pre-check de colisión de PK (DT-23.4): rechazar si ya existe. El `23505`
+    // del insert se mantiene como defensa final por race.
+    const clash = await this.get(id);
+    if (clash) {
+      throw new Error(`Registry '${id}' already exists`);
+    }
 
     const row = registryToRow({ ...config, ownerRef }, id);
 

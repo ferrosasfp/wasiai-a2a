@@ -19,6 +19,15 @@ import {
   OwnershipMismatchError,
 } from './security/errors.js';
 
+/**
+ * WKH-100 FIX v3 (DT-23 §12.4): canoniza slug de forma determinista en AMBOS
+ * lados del match. El binding ya validó SLUG_RE; el slug del Agent puede venir
+ * sin canonizar del upstream. Idempotente.
+ */
+function normalizeSlug(s: string): string {
+  return s.trim().toLowerCase();
+}
+
 // ── ERC-8004 identity helper (WKH-100, AC-6) ─────────────────
 
 /**
@@ -231,12 +240,22 @@ export const identityService = {
    *   (ii)  ese token está bindeado + `ownerOf`-verificado localmente al
    *         bindear (el verify on-chain ya ocurrió, auth.ts);
    *   (iii) ESE binding DECLARA operar ESTE agente vía
-   *         `(agent_registry, agent_slug)` == `(agentRegistry, agentSlug)`,
-   *         match case-insensitive + trim.
+   *         `(agent_registry, agent_slug)` == `(agentRegistryId, agentSlug)`.
    * Si falta CUALQUIER anclaje → null (SIN badge). Esto cierra el vector
    * inverso (MNR-1): un atacante que declara el token público de la víctima en
    * su propia card NO obtiene badge porque el binding de la víctima declara
    * operar (regVíctima, slugVíctima), no (regAtacante, slugAtacante).
+   *
+   * WKH-100 FIX v3 (DT-23 / BLQ-MED-1): el ancla del lado-binder es el **PK
+   * `id` del registry** (`agentRegistryId`), NO el display name. El match de
+   * registry es por **igualdad ESTRICTA** (`b.agent_registry === agentRegistryId`)
+   * SIN `.trim().toLowerCase()`: ambos lados ya son el PK canónico (único +
+   * inmutable), así que re-normalizar reintroduciría la no-inyectividad que
+   * permitía el badge spoofing por colisión de normalización del name
+   * (`"WasiAI "` y `"WasiAI"` colapsaban al mismo token tras `.trim()`). El
+   * slug SÍ se canoniza vía `normalizeSlug` en ambos lados (el slug upstream
+   * puede no venir canonizado), discriminando SOLO dentro de un mismo
+   * `registry_id`.
    *
    * Bindings legacy v1 (sin `agent_registry`/`agent_slug`) → null (default
    * seguro, AC-9). La key NO se degrada.
@@ -256,7 +275,7 @@ export const identityService = {
   async resolveIdentityForAgent(
     tokenId: string,
     chainId: number,
-    agentRegistry: string,
+    agentRegistryId: string,
     agentSlug: string,
   ): Promise<AgentCardIdentity | null> {
     const { data, error } = await supabase
@@ -267,8 +286,7 @@ export const identityService = {
 
     if (error || !data) return null;
 
-    const nReg = agentRegistry.trim().toLowerCase();
-    const nSlug = agentSlug.trim().toLowerCase();
+    const nSlug = normalizeSlug(agentSlug);
 
     for (const row of data as Array<{
       erc8004_identity: Erc8004IdentityBinding | null;
@@ -280,8 +298,9 @@ export const identityService = {
       // Lado binder: el binding debe declarar operar ESTE agente. Sin ancla
       // (binding v1) → sin badge (default seguro, AC-9).
       if (!b.agent_registry || !b.agent_slug) continue;
-      if (b.agent_registry.trim().toLowerCase() !== nReg) continue;
-      if (b.agent_slug.trim().toLowerCase() !== nSlug) continue;
+      // DT-23: igualdad ESTRICTA del PK (sin normalizar → inyectivo).
+      if (b.agent_registry !== agentRegistryId) continue;
+      if (normalizeSlug(b.agent_slug) !== nSlug) continue;
       return {
         erc8004_token_id: b.token_id,
         chain_id: b.chain_id,

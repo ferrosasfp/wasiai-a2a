@@ -25,6 +25,7 @@ function makeAgent(slug: string, priceUsdc: number) {
     capabilities: [],
     priceUsdc,
     registry: 'reg-test',
+    registry_id: 'reg-test',
     invokeUrl: 'https://example.com/invoke',
     invocationNote: 'gateway-only',
     verified: true,

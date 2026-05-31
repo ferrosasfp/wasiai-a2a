@@ -50,9 +50,19 @@ vi.mock('../services/budget.js', () => ({
   },
 }));
 
+// FIX v3 (DT-23.3.2): bind now validates the registry PK exists via
+// registryService.get (local read, no RPC). Mock it so the route never hits
+// supabase.
+vi.mock('../services/registry.js', () => ({
+  registryService: {
+    get: vi.fn(),
+  },
+}));
+
 import { getErc8004Reader } from '../adapters/erc8004-identity.js';
 import { budgetService } from '../services/budget.js';
 import { identityService } from '../services/identity.js';
+import { registryService } from '../services/registry.js';
 import {
   Erc8004TokenAlreadyBoundError,
   OwnershipMismatchError,
@@ -62,7 +72,14 @@ import authRoutes from './auth.js';
 
 const mockGetReader = vi.mocked(getErc8004Reader);
 const mockLookupByHash = vi.mocked(identityService.lookupByHash);
+const mockRegistryGet = vi.mocked(registryService.get);
 const mockBindErc8004 = vi.mocked(identityService.bindErc8004Identity);
+
+// FIX v3 (DT-23): a minimal existing registry the bind PK-existence check
+// resolves to. Only `id` is read by the route's validation path.
+const EXISTING_REGISTRY = {
+  id: 'wasiai',
+} as unknown as Awaited<ReturnType<typeof registryService.get>>;
 const mockRegisterDeposit = vi.mocked(budgetService.registerDeposit);
 const mockDebit = vi.mocked(budgetService.debit);
 
@@ -128,6 +145,8 @@ describe('auth ERC-8004 routes', () => {
       verifyOwnership: mockVerifyOwnership,
       resolve: mockResolve,
     });
+    // Default: the bound registry PK exists (FIX v3 existence pre-check).
+    mockRegistryGet.mockResolvedValue(EXISTING_REGISTRY);
   });
 
   // ── POST /auth/erc8004/bind ─────────────────────────────────
@@ -155,7 +174,7 @@ describe('auth ERC-8004 routes', () => {
         // FIX v2 (DT-22.7): anchors go TOGETHER or not at all.
         payload: {
           token_id: '42',
-          agent_registry: 'WasiAI',
+          agent_registry: 'wasiai',
           agent_slug: 'my-agent',
         },
       });
@@ -166,7 +185,7 @@ describe('auth ERC-8004 routes', () => {
       expect(binding.chain_id).toBe(84532);
       expect(binding.owner_address).toBe(FUNDING_WALLET.toLowerCase());
       expect(binding.agent_card_url).toBe('https://cards.example/a.json');
-      expect(binding.agent_registry).toBe('WasiAI');
+      expect(binding.agent_registry).toBe('wasiai');
       expect(binding.agent_slug).toBe('my-agent');
       expect(new Date(binding.verified_at).toISOString()).toBe(
         binding.verified_at,
@@ -474,14 +493,14 @@ describe('auth ERC-8004 routes', () => {
         headers: AUTH_HEADERS,
         payload: {
           token_id: '42',
-          agent_registry: 'WasiAI',
+          agent_registry: 'wasiai',
           agent_slug: 'my-agent',
         },
       });
 
       expect(res.statusCode).toBe(200);
       const binding = res.json().erc8004_identity as Erc8004IdentityBinding;
-      expect(binding.agent_registry).toBe('WasiAI');
+      expect(binding.agent_registry).toBe('wasiai');
       expect(binding.agent_slug).toBe('my-agent');
     });
 
@@ -504,7 +523,7 @@ describe('auth ERC-8004 routes', () => {
         method: 'POST',
         url: '/auth/erc8004/bind',
         headers: AUTH_HEADERS,
-        payload: { token_id: '1', agent_registry: 'WasiAI' },
+        payload: { token_id: '1', agent_registry: 'wasiai' },
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error_code).toBe('INVALID_INPUT');
@@ -539,7 +558,7 @@ describe('auth ERC-8004 routes', () => {
         method: 'POST',
         url: '/auth/erc8004/bind',
         headers: AUTH_HEADERS,
-        // Contains chars outside the permissive REGISTRY_RE (e.g. newline).
+        // Contains chars outside the PK shape REGISTRY_ID_RE (e.g. newline).
         payload: {
           token_id: '1',
           agent_registry: 'bad\nname',
@@ -548,6 +567,75 @@ describe('auth ERC-8004 routes', () => {
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error_code).toBe('INVALID_INPUT');
+    });
+
+    // ── FIX v3 (DT-23 / BLQ-MED-1): bind validates the registry PK ──────
+    it('SEC-BIND-PK: agent_registry with whitespace → 400 (fails REGISTRY_ID_RE)', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/erc8004/bind',
+        headers: AUTH_HEADERS,
+        // "WasiAI " is the v2 collision vector: trailing space + uppercase.
+        // The trim leaves "WasiAI" which still fails the lowercase PK pattern.
+        payload: {
+          token_id: '1',
+          agent_registry: 'WasiAI ',
+          agent_slug: 'my-agent',
+        },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error_code).toBe('INVALID_INPUT');
+      // Existence check is never reached when the pattern fails.
+      expect(mockRegistryGet).not.toHaveBeenCalled();
+      expect(mockVerifyOwnership).not.toHaveBeenCalled();
+    });
+
+    it('SEC-BIND-PK: non-existent registry PK → 400 (existence pre-check)', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockRegistryGet.mockResolvedValue(undefined); // PK does not exist
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/erc8004/bind',
+        headers: AUTH_HEADERS,
+        payload: {
+          token_id: '1',
+          agent_registry: 'no-existe',
+          agent_slug: 'my-agent',
+        },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error_code).toBe('INVALID_INPUT');
+      expect(mockRegistryGet).toHaveBeenCalledWith('no-existe');
+      expect(mockVerifyOwnership).not.toHaveBeenCalled();
+    });
+
+    it('SEC-BIND-PK: valid existing PK → 200 (binding persists the PK)', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockRegistryGet.mockResolvedValue(EXISTING_REGISTRY);
+      mockVerifyOwnership.mockResolvedValue({
+        ok: true,
+        owner: FUNDING_WALLET as `0x${string}`,
+        matches: true,
+        chainId: 84532,
+      });
+      mockResolve.mockResolvedValue({ ok: true, tokenUri: '', chainId: 84532 });
+      mockBindErc8004.mockImplementation(async (_k, _o, b) => b);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/erc8004/bind',
+        headers: AUTH_HEADERS,
+        payload: {
+          token_id: '42',
+          agent_registry: 'wasiai',
+          agent_slug: 'my-agent',
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const binding = res.json().erc8004_identity as Erc8004IdentityBinding;
+      expect(binding.agent_registry).toBe('wasiai');
+      expect(mockRegistryGet).toHaveBeenCalledWith('wasiai');
     });
 
     it('SEC-UNIQUE-DB (MNR-2): 2nd bind same token → service maps 23505 → 409, no write', async () => {
@@ -567,7 +655,7 @@ describe('auth ERC-8004 routes', () => {
         headers: AUTH_HEADERS,
         payload: {
           token_id: '42',
-          agent_registry: 'WasiAI',
+          agent_registry: 'wasiai',
           agent_slug: 'agent-b',
         },
       });

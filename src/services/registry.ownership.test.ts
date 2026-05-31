@@ -143,6 +143,68 @@ describe('registryService.register — owner_ref persisted (WKH-63)', () => {
     const insertedArg = insertSpy.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(insertedArg.owner_ref).toBe(OWNER_A);
   });
+
+  // ── FIX v3 (DT-23.4 / BLQ-MED-1): name → PK injective ──────
+  describe('SEC-COLLISION-REG: anti-collision rule', () => {
+    function registerName(name: string) {
+      return registryService.register(
+        {
+          name,
+          discoveryEndpoint: 'https://example.com/discover',
+          invokeEndpoint: 'https://example.com/invoke',
+          schema: { discovery: {}, invoke: { method: 'POST' } },
+          enabled: true,
+        },
+        OWNER_A,
+      );
+    }
+
+    it('rejects leading/trailing whitespace (the v2 collision vector "WasiAI ")', async () => {
+      const mock = chainMock();
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+      await expect(registerName('WasiAI ')).rejects.toThrow(
+        /leading\/trailing whitespace/,
+      );
+      // Never reaches the insert.
+      expect((mock.insert as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+        0,
+      );
+    });
+
+    it('rejects collapsible internal whitespace ("WasiAI  X")', async () => {
+      const mock = chainMock();
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+      await expect(registerName('WasiAI  X')).rejects.toThrow(
+        /collapsible internal whitespace/,
+      );
+      expect((mock.insert as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+        0,
+      );
+    });
+
+    it('rejects a name whose PK already exists (pre-check get(id))', async () => {
+      // get(id) → maybeSingle resolves an existing row → clash.
+      const mock = chainMock({
+        maybeSingle: vi.fn().mockResolvedValue({
+          data: rowOf({ id: 'wasiai', owner_ref: OWNER_B }),
+          error: null,
+        }),
+      });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+      await expect(registerName('WasiAI')).rejects.toThrow(
+        /Registry 'wasiai' already exists/,
+      );
+      expect((mock.insert as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+        0,
+      );
+    });
+  });
 });
 
 // ── Suite: update ───────────────────────────────────────────

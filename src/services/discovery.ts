@@ -342,7 +342,7 @@ export const discoveryService = {
           const identity = await identityService.resolveIdentityForAgent(
             decl.tokenId,
             decl.chainId,
-            a.registry,
+            a.registry_id,
             a.slug,
           );
           if (identity) a.identity = identity;
@@ -462,6 +462,9 @@ export const discoveryService = {
       ),
       status: toAgentStatus(getNestedValue(raw, mapping.status ?? 'status')),
       registry: registry.name,
+      // WKH-100 FIX v3 (DT-23): PK canónico del registry, sin re-normalizar.
+      // Ancla del match de identidad ERC-8004 (BLQ-MED-1).
+      registry_id: registry.id,
       invokeUrl,
       invocationNote:
         'The invokeUrl is an internal reference. To invoke this agent, use POST /compose or POST /orchestrate on the WasiAI A2A gateway.',
@@ -517,7 +520,7 @@ export const discoveryService = {
               const identity = await identityService.resolveIdentityForAgent(
                 decl.tokenId,
                 decl.chainId,
-                agent.registry,
+                agent.registry_id,
                 agent.slug,
               );
               if (identity) agent.identity = identity;

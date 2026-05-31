@@ -43,6 +43,7 @@ describe('agentCardService', () => {
       description: 'A test agent',
       capabilities: ['summarize', 'translate'],
       registry: 'my-registry',
+      registry_id: 'my-registry',
       id: 'test-1',
       priceUsdc: 0.01,
       invokeUrl: 'https://example.com/invoke',

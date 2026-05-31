@@ -66,3 +66,43 @@
   enviaban el shape viejo — fallan en runtime con 4xx, no en tsc. Buscar los
   `payload:` y los row-fixtures (`_storedBinding`, `makeKeyRow`) que toquen el
   shape afectado.
+
+### [2026-05-31] FIX-PACK v3 (BLQ-MED-1) — campo REQUERIDO nuevo en `Agent` rompe 24 fixtures en 9 files fuera del in-scope literal
+- **Error**: agregar `registry_id: string` (requerido) a `Agent` en
+  `src/types/index.ts` produjo 24 errores `tsc` (TS2345/TS2741/TS2322) en 9 test
+  files que construyen objetos `Agent` literales: `agent-price.test.ts`,
+  `agent-card.test.ts` (route+service), `orchestrate.test.ts`, `mcp/tools/orchestrate.test.ts`,
+  `compose.test.ts`, `compose.chain-flow.test.ts`, `discovery.test.ts`,
+  `downstream-payment.test.ts`. La lista de tests in-scope del Story v3 NO los
+  mencionaba.
+- **Causa raíz**: un campo NUEVO requerido en un tipo compartido obliga a todo
+  fixture que construya ese tipo. A diferencia de un campo opcional (`identity?`,
+  que el v1 agregó sin romper nada), `registry_id` se especificó requerido a
+  propósito (es el ancla del match — debe estar siempre presente). El impacto es
+  transversal y solo lo revela `tsc --noEmit` (build tsc pasa porque `mapAgent`
+  sí lo setea; rompen únicamente los fixtures de test).
+- **Fix**: agregar `registry_id: <value>` a cada fixture (mismo valor que
+  `registry` salvo en los enrich tests, donde debe ser el PK `id` del
+  `makeRegistry`, no el name). Desviación de scope justificada: el contrato del
+  tipo lo fuerza; no es expansión de alcance sino consecuencia mecánica.
+- **Aplicar en**: antes de agregar un campo REQUERIDO a un tipo compartido
+  (`Agent`, `RegistryConfig`, row types), correr `tsc --noEmit` (no solo el
+  build tsconfig) ANTES de cerrar la wave para enumerar TODOS los fixtures
+  impactados. Considerar opcional + default-seguro si el blast-radius es grande;
+  si requerido es intencional (como acá), presupuestar la actualización de
+  fixtures fuera del in-scope literal.
+
+### [2026-05-31] FIX-PACK v3 (DT-23.3.2) — nuevo import de service en un route obliga a mockearlo en tests del route
+- **Error**: el bind ahora hace `registryService.get(trimmed)` (existence
+  pre-check). `auth.erc8004.test.ts` no mockeaba `../services/registry.js` →
+  habría caído al supabase real (no determinista).
+- **Causa raíz**: agregar una dependencia de service a un handler hace que sus
+  tests de ruta arrastren el módulo real si no lo mockean. No falla en tsc; falla
+  (o pega a la red) en runtime.
+- **Fix**: `vi.mock('../services/registry.js', () => ({ registryService: { get: vi.fn() }}))`
+  + default `mockResolvedValue(EXISTING_REGISTRY)` en `beforeEach`, y override a
+  `undefined` para el caso "PK inexistente". En el e2e (que ya mockeaba
+  `registry.js` con `get`), bastó `mockResolvedValue(makeRegistry())`.
+- **Aplicar en**: al introducir una llamada a un nuevo service dentro de un
+  handler, grep los `*.test.ts` que registran ese route y agregar el mock del
+  service (con un default que cubra el happy-path) antes de correr la suite.

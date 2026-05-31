@@ -124,6 +124,13 @@ export interface Agent {
   priceUsdc: number;
   reputation?: number;
   registry: string;
+  /**
+   * WKH-100 FIX v3 (DT-23): PK canónico del registry (`registry.id`, inmutable
+   * y único). Ancla del match de identidad ERC-8004 — reemplaza el cruce por
+   * `registry` (display name, mutable) que sufría colisión de normalización
+   * (BLQ-MED-1). `registry` se mantiene para backward-compat / display.
+   */
+  registry_id: string;
   invokeUrl: string;
   /** Explains that invocation must go through POST /compose or POST /orchestrate on the gateway */
   invocationNote: string;

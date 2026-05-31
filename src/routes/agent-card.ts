@@ -57,7 +57,7 @@ const agentCardRoutes: FastifyPluginAsync = async (fastify) => {
         ? await identityService.resolveIdentityForAgent(
             decl.tokenId,
             decl.chainId,
-            agent.registry,
+            agent.registry_id,
             agent.slug,
           )
         : null;

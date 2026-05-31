@@ -149,9 +149,10 @@ const TEST_KEY_HASH = crypto
   .update(TEST_KEY)
   .digest('hex');
 const BOUND_SLUG = 'foo';
-// FIX v2 (MNR-1): the binding declares operating (registry, slug). Must equal
-// the Agent.registry produced by mapAgent (= makeRegistry().name).
-const BOUND_REGISTRY = 'test-registry';
+// FIX v3 (DT-23 / BLQ-MED-1): the binding declares operating (registry_id, slug).
+// The anchor is the registry PK `id` (immutable), NOT the display name. Must
+// equal the Agent.registry_id produced by mapAgent (= makeRegistry().id).
+const BOUND_REGISTRY = 'reg-1';
 const CARD_URL = 'https://cards.example/foo.json';
 
 function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig {
@@ -219,6 +220,8 @@ describe('ERC-8004 identity-unified bridge (e2e)', () => {
     mockVerifyOwnership.mockReset();
     mockResolve.mockReset();
     vi.mocked(registryService.getEnabled).mockResolvedValue([makeRegistry()]);
+    // FIX v3 (DT-23.3.2): bind's PK-existence pre-check reads registries.get(id).
+    vi.mocked(registryService.get).mockResolvedValue(makeRegistry());
     // Real identity.lookupByHash hits the mocked supabase (.eq.single → null),
     // so spy it to return the caller key row.
     vi.spyOn(identityService, 'lookupByHash').mockResolvedValue({

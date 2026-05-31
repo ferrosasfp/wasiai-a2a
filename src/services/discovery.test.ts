@@ -558,6 +558,7 @@ describe('discoveryService', () => {
       capabilities: [],
       priceUsdc: 0,
       registry: 'r',
+      registry_id: 'r',
       invokeUrl: 'https://x',
       invocationNote: '',
       verified: false,
@@ -679,17 +680,53 @@ describe('discoveryService', () => {
       });
     });
 
-    it('registry/slug match is case-insensitive + trimmed', async () => {
+    it('FIX v3 (DT-23): registry_id match is STRICT (PK), slug normalized', async () => {
+      // Binding stores the PK `wasiai` + slug `ACME`; the agent's registry_id is
+      // the same PK and the slug is normalized on both sides. Registry is NOT
+      // re-normalized (strict equality of the canonical PK → injective).
       setIdentityRows([
-        anchored({ agent_registry: 'WASIAI', agent_slug: 'ACME' }),
+        anchored({ agent_registry: 'wasiai', agent_slug: 'ACME' }),
       ]);
       const r = await identityService.resolveIdentityForAgent(
         '42',
         84532,
-        '  wasiai ',
+        'wasiai',
         ' Acme  ',
       );
       expect(r?.verified).toBe(true);
+    });
+
+    it('SEC-COLLISION-MATCH (BLQ-MED-1): collided PK "wasiai-" never matches "wasiai"', async () => {
+      // v2 attack: name "WasiAI " (trailing space) → PK `wasiai-`. The badge
+      // cross used `.trim().toLowerCase()` so it collapsed to `wasiai` and
+      // matched the victim agent (registry_id `wasiai`). With strict PK
+      // equality the divergent PKs no longer collide → no badge.
+      setIdentityRows([
+        anchored({ agent_registry: 'wasiai-', agent_slug: 'acme' }),
+      ]);
+      const r = await identityService.resolveIdentityForAgent(
+        '42',
+        84532,
+        'wasiai',
+        'acme',
+      );
+      expect(r).toBeNull();
+    });
+
+    it('SEC-SLUG-SCOPED: same slug under a different registry_id → no badge', async () => {
+      // Attacker controls registry_id `attacker-reg` and declares the victim's
+      // slug. The slug only discriminates WITHIN a registry_id; distinct PKs
+      // never match → no cross-registry badge inheritance.
+      setIdentityRows([
+        anchored({ agent_registry: 'attacker-reg', agent_slug: 'acme' }),
+      ]);
+      const r = await identityService.resolveIdentityForAgent(
+        '42',
+        84532,
+        'wasiai',
+        'acme',
+      );
+      expect(r).toBeNull();
     });
 
     it('SEC-INV (MNR-1): token matches but registry/slug differ → null (inverse vector fails)', async () => {
@@ -811,9 +848,10 @@ describe('discoveryService', () => {
   });
 
   describe('DT-22: discover()/getAgent() enrich by bidirectional match', () => {
-    // Agents from setupRegistryResponse() get registry: 'test-registry'
-    // (makeRegistry default name). The binding must declare operating
-    // (test-registry, <slug>) for the badge to surface (MNR-1).
+    // Agents from setupRegistryResponse() get registry_id: 'reg-1'
+    // (makeRegistry default id). FIX v3 (DT-23): the binding must declare
+    // operating (reg-1, <slug>) — the registry PK, not the display name —
+    // for the badge to surface (strict PK match).
     it('SEC-MATCH: discover() sets identity when binding declares THIS agent', async () => {
       setupRegistryResponse([
         makeRawAgent({
@@ -832,7 +870,7 @@ describe('discoveryService', () => {
             agent_card_url: '',
             owner_address: '0xabc',
             verified_at: '2026-05-10T00:00:00.000Z',
-            agent_registry: 'test-registry',
+            agent_registry: 'reg-1',
             agent_slug: 'bound-agent',
           },
         },
@@ -859,7 +897,7 @@ describe('discoveryService', () => {
             agent_card_url: '',
             owner_address: '0xabc',
             verified_at: '2026-05-10T00:00:00.000Z',
-            agent_registry: 'test-registry',
+            agent_registry: 'reg-1',
             agent_slug: 'plain-agent',
           },
         },
@@ -891,7 +929,7 @@ describe('discoveryService', () => {
             agent_card_url: '',
             owner_address: '0xvictim',
             verified_at: '2026-05-10T00:00:00.000Z',
-            agent_registry: 'test-registry',
+            agent_registry: 'reg-1',
             agent_slug: 'victim',
           },
         },
@@ -922,7 +960,7 @@ describe('discoveryService', () => {
             agent_card_url: '',
             owner_address: '0xattacker',
             verified_at: '2026-05-10T00:00:00.000Z',
-            agent_registry: 'test-registry',
+            agent_registry: 'reg-1',
             agent_slug: 'victim',
           },
         },
@@ -1001,7 +1039,7 @@ describe('discoveryService', () => {
             agent_card_url: '',
             owner_address: '0xabc',
             verified_at: '2026-05-10T00:00:00.000Z',
-            agent_registry: 'test-registry',
+            agent_registry: 'reg-1',
             agent_slug: 'bound-agent',
           },
         },

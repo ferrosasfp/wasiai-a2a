@@ -31,6 +31,7 @@ function makeAgent(slug: string): Agent {
     capabilities: [],
     priceUsdc: 1,
     registry: 'reg',
+    registry_id: 'reg',
     invokeUrl: 'https://x',
     invocationNote: '',
     verified: true,
