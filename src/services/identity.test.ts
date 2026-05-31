@@ -326,4 +326,124 @@ describe('identityService', () => {
       ).rejects.toThrow('Failed to bind funding wallet: fail');
     });
   });
+
+  // ── WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.6) — bindErc8004Identity ──
+  describe('bindErc8004Identity', () => {
+    const binding = {
+      token_id: '42',
+      chain_id: 84532,
+      agent_card_url: '',
+      owner_address: '0xabc',
+      verified_at: '2026-05-10T00:00:00.000Z',
+    };
+
+    /**
+     * The service calls supabase.from twice: (1) uniqueness pre-check (thenable
+     * chain `.select.eq.neq.eq.eq.limit`), (2) UPDATE (`.update.eq.eq.select`).
+     */
+    function setupBindMocks(opts: {
+      clash: Array<{ id: string }>;
+      clashError?: { message: string } | null;
+      updateData: Array<{ id: string }> | null;
+      updateError?: { code?: string; message: string } | null;
+    }) {
+      const preCheck: Record<string, unknown> = {
+        select: vi.fn().mockReturnThis(),
+        eq: vi.fn().mockReturnThis(),
+        neq: vi.fn().mockReturnThis(),
+        // thenable terminal: limit() resolves the candidates
+        limit: vi.fn().mockResolvedValue({
+          data: opts.clashError ? null : opts.clash,
+          error: opts.clashError ?? null,
+        }),
+      };
+      for (const k of ['select', 'eq', 'neq']) {
+        (preCheck[k] as ReturnType<typeof vi.fn>).mockReturnValue(preCheck);
+      }
+      const update: Record<string, unknown> = {
+        update: vi.fn().mockReturnThis(),
+        eq: vi.fn().mockReturnThis(),
+        select: vi.fn().mockResolvedValue({
+          data: opts.updateData,
+          error: opts.updateError ?? null,
+        }),
+      };
+      update.update = vi.fn().mockReturnValue(update);
+      update.eq = vi.fn().mockReturnValue(update);
+      let call = 0;
+      mockFrom.mockReset();
+      mockFrom.mockImplementation(() => {
+        call += 1;
+        return (call === 1 ? preCheck : update) as unknown as ReturnType<
+          typeof supabase.from
+        >;
+      });
+      return { preCheck, update };
+    }
+
+    it('binds when no clashing active key (Ownership Guard id+owner_ref)', async () => {
+      const { update } = setupBindMocks({
+        clash: [],
+        updateData: [{ id: 'key-1' }],
+      });
+      const result = await identityService.bindErc8004Identity(
+        'key-1',
+        'user-A',
+        binding,
+      );
+      expect(result).toEqual(binding);
+      expect(update.eq).toHaveBeenCalledWith('id', 'key-1');
+      expect(update.eq).toHaveBeenCalledWith('owner_ref', 'user-A');
+    });
+
+    it('pre-check SELECTs only id + filters is_active/token/chain excluding own key', async () => {
+      const { preCheck } = setupBindMocks({
+        clash: [],
+        updateData: [{ id: 'key-1' }],
+      });
+      await identityService.bindErc8004Identity('key-1', 'user-A', binding);
+      expect(preCheck.select).toHaveBeenCalledWith('id');
+      expect(preCheck.eq).toHaveBeenCalledWith('is_active', true);
+      expect(preCheck.neq).toHaveBeenCalledWith('id', 'key-1');
+      expect(preCheck.eq).toHaveBeenCalledWith(
+        'erc8004_identity->>token_id',
+        '42',
+      );
+      expect(preCheck.eq).toHaveBeenCalledWith(
+        'erc8004_identity->>chain_id',
+        '84532',
+      );
+    });
+
+    it('throws Erc8004TokenAlreadyBoundError when another active key has the token', async () => {
+      setupBindMocks({
+        clash: [{ id: 'other-key' }],
+        updateData: null,
+      });
+      await expect(
+        identityService.bindErc8004Identity('key-1', 'user-A', binding),
+      ).rejects.toMatchObject({ code: 'ERC8004_TOKEN_ALREADY_BOUND' });
+    });
+
+    it('maps 23505 on UPDATE to Erc8004TokenAlreadyBoundError (hardening)', async () => {
+      setupBindMocks({
+        clash: [],
+        updateData: null,
+        updateError: { code: '23505', message: 'duplicate' },
+      });
+      await expect(
+        identityService.bindErc8004Identity('key-1', 'user-A', binding),
+      ).rejects.toMatchObject({ code: 'ERC8004_TOKEN_ALREADY_BOUND' });
+    });
+
+    it('throws OwnershipMismatchError when UPDATE matches 0 rows', async () => {
+      setupBindMocks({
+        clash: [],
+        updateData: [],
+      });
+      await expect(
+        identityService.bindErc8004Identity('key-1', 'user-A', binding),
+      ).rejects.toMatchObject({ code: 'OWNERSHIP_MISMATCH' });
+    });
+  });
 });

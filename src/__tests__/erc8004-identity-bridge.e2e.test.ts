@@ -25,9 +25,13 @@ import {
 import type { Erc8004IdentityBinding, RegistryConfig } from '../types/index.js';
 
 // ── Stateful supabase mock ───────────────────────────────────
-// One row keyed by funding_wallet/owner. bindErc8004Identity does
-// `.update({ erc8004_identity }).eq('id').eq('owner_ref').select('id')`.
-// resolveIdentityForSlug does `.select('erc8004_identity').not(...).eq('is_active', true)`.
+// One row keyed by funding_wallet/owner. The service issues 3 query shapes:
+//   1. bindErc8004Identity uniqueness pre-check (DT-21.6):
+//        .select('id').eq('is_active',true).neq('id',k).eq(token).eq(chain).limit(1)
+//   2. bindErc8004Identity UPDATE:
+//        .update({ erc8004_identity }).eq('id').eq('owner_ref').select('id')
+//   3. resolveIdentityForToken:
+//        .select('erc8004_identity').eq('is_active',true).not(...)
 let _storedBinding: Erc8004IdentityBinding | null = null;
 
 vi.mock('../lib/supabase.js', () => {
@@ -35,6 +39,13 @@ vi.mock('../lib/supabase.js', () => {
     let pendingUpdate: { erc8004_identity?: Erc8004IdentityBinding } | null =
       null;
     let isSelectIdentity = false;
+    let isPreCheck = false;
+    const resolvePreCheck = (
+      resolve: (v: { data: unknown; error: unknown }) => void,
+    ) => {
+      // No other active key in this single-row mock → never a clash.
+      resolve({ data: [], error: null });
+    };
     const builder: Record<string, unknown> = {
       update(payload: { erc8004_identity?: Erc8004IdentityBinding }) {
         pendingUpdate = payload;
@@ -42,19 +53,37 @@ vi.mock('../lib/supabase.js', () => {
       },
       select(cols: string) {
         if (cols === 'erc8004_identity') isSelectIdentity = true;
+        if (cols === 'id') isPreCheck = true;
         return builder;
       },
       not() {
         return builder;
       },
+      neq() {
+        return builder;
+      },
       eq() {
         return builder;
+      },
+      limit(resolveValue: number) {
+        void resolveValue;
+        // Terminal for the uniqueness pre-check.
+        return {
+          // biome-ignore lint/suspicious/noThenProperty: mock mirrors PostgREST thenable
+          then(resolve: (v: { data: unknown; error: unknown }) => void) {
+            resolvePreCheck(resolve);
+          },
+        };
       },
       // biome-ignore lint/suspicious/noThenProperty: mock mirrors PostgREST thenable
       then(resolve: (v: { data: unknown; error: unknown }) => void) {
         if (pendingUpdate?.erc8004_identity) {
           _storedBinding = pendingUpdate.erc8004_identity;
           resolve({ data: [{ id: 'key-1' }], error: null });
+          return;
+        }
+        if (isPreCheck) {
+          resolvePreCheck(resolve);
           return;
         }
         if (isSelectIdentity) {
@@ -136,7 +165,12 @@ function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig {
   } as RegistryConfig;
 }
 
-function rawAgent(slug: string) {
+// rawAgent optionally DECLARES an ERC-8004 token via metadata.registrations
+// (CAIP-10) — the only thing that earns the verified badge (DT-21).
+function rawAgent(
+  slug: string,
+  declaredToken?: { tokenId: string; chainId: number },
+) {
   return {
     id: slug,
     slug,
@@ -145,8 +179,16 @@ function rawAgent(slug: string) {
     capabilities: ['test'],
     price: 0,
     status: 'active',
+    ...(declaredToken && {
+      registrations: [
+        {
+          agentId: `eip155:${declaredToken.chainId}:0x${'a'.repeat(40)}/${declaredToken.tokenId}`,
+        },
+      ],
+    }),
   };
 }
+const DECLARED_T = { tokenId: '42', chainId: 84532 };
 
 // ── App: real auth lookup via real identity service. We stub the
 // supabase lookupByHash chain by mocking identityService.lookupByHash
@@ -237,7 +279,7 @@ describe('ERC-8004 identity-unified bridge (e2e)', () => {
     };
     mockFetch.mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve(rawAgent(BOUND_SLUG)),
+      json: () => Promise.resolve(rawAgent(BOUND_SLUG, DECLARED_T)),
     });
 
     const res = await app.inject({
@@ -264,7 +306,7 @@ describe('ERC-8004 identity-unified bridge (e2e)', () => {
     };
     mockFetch.mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve([rawAgent(BOUND_SLUG)]),
+      json: () => Promise.resolve([rawAgent(BOUND_SLUG, DECLARED_T)]),
     });
 
     const getRes = await app.inject({ method: 'GET', url: '/discover' });
@@ -304,5 +346,33 @@ describe('ERC-8004 identity-unified bridge (e2e)', () => {
       .agents.find((a: { slug: string }) => a.slug === 'bar');
     expect(agent.identity).toBeUndefined();
     expect('identity' in agent).toBe(false);
+  });
+
+  it('5. SEC anti-spoof (BLQ-MED-1): victim card declares token V≠bound T → NO badge', async () => {
+    // Token 42 is bound (attacker proved ownerOf). The victim's card declares a
+    // DIFFERENT token (99). The verified badge must NOT appear on the victim.
+    _storedBinding = {
+      token_id: '42',
+      chain_id: 84532,
+      agent_card_url: CARD_URL,
+      owner_address: FUNDING_WALLET,
+      verified_at: '2026-05-10T00:00:00.000Z',
+      agent_slug: 'victim', // spoofed slug — must be IGNORED by the resolver
+    };
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          rawAgent('victim', { tokenId: '99', chainId: 84532 }),
+        ]),
+    });
+
+    const res = await app.inject({ method: 'GET', url: '/discover' });
+    expect(res.statusCode).toBe(200);
+    const victim = res
+      .json()
+      .agents.find((a: { slug: string }) => a.slug === 'victim');
+    expect(victim.identity).toBeUndefined();
+    expect('identity' in victim).toBe(false);
   });
 });

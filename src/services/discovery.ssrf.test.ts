@@ -35,11 +35,11 @@ vi.mock('./registry.js', () => ({
   },
 }));
 
-// WKH-100: discover()/getAgent() now reverse-lookup ERC-8004 identity. Mock it
-// so the SSRF tests don't hit supabase (which would trigger an extra fetch).
+// WKH-100: discover()/getAgent() now reverse-lookup ERC-8004 identity by the
+// token the agent declares. Mock it so the SSRF tests don't hit supabase.
 vi.mock('./identity.js', () => ({
   identityService: {
-    resolveIdentityForSlug: vi.fn().mockResolvedValue(null),
+    resolveIdentityForToken: vi.fn().mockResolvedValue(null),
   },
 }));
 

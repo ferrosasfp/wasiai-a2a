@@ -15,7 +15,12 @@ export interface Erc8004IdentityBinding {
   agent_card_url: string; // tokenURI resuelto; '' si resolve falló al bindear (DT-15)
   owner_address: string; // lowercase (== funding_wallet al momento del bind)
   verified_at: string; // ISO 8601 del verify server-side
-  agent_slug?: string; // AC-8 puente identidad-unificada. Opt-in (DT-20).
+  // WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.7): hint INFORMATIVO solamente. NO
+  // controla `verified`. El badge se resuelve por el token DECLARADO on-chain
+  // por el propio agente (extractDeclaredTokenId) cruzado con el bind verificado
+  // local, NO por este slug aseverado por el caller. Se conserva por
+  // backward-compat con bindings ya escritos (sin migration — AC-9/CD-9).
+  agent_slug?: string;
 }
 
 // --- DB Row ---

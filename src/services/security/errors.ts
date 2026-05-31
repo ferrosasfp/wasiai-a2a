@@ -118,6 +118,20 @@ export class IdentityOwnershipMismatchError extends Error {
 }
 
 /**
+ * WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.6): the same ERC-8004 `token_id`+`chain_id`
+ * is already bound to ANOTHER active key → 409. Closes the spoofing-by-poisoning
+ * residual: a token can back the verified badge of at most one active key.
+ * Same pattern as `FundingWalletAlreadyBoundError`.
+ */
+export class Erc8004TokenAlreadyBoundError extends Error {
+  readonly code = 'ERC8004_TOKEN_ALREADY_BOUND' as const;
+  constructor() {
+    super('ERC-8004 token already bound to another active key');
+    this.name = 'Erc8004TokenAlreadyBoundError';
+  }
+}
+
+/**
  * Operación que detectó el mismatch (PII-safe enum).
  * - `getBalance` / `deactivate`: ownership sobre `a2a_agent_keys` (WKH-53).
  * - `registryUpdate` / `registryDelete`: ownership sobre `registries` (WKH-63).

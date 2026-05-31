@@ -32,6 +32,7 @@ import { budgetService } from '../services/budget.js';
 import { identityService, isIdentityVerified } from '../services/identity.js';
 import {
   DepositAlreadyCreditedError,
+  Erc8004TokenAlreadyBoundError,
   FundingWalletAlreadyBoundError,
   OwnershipMismatchError,
 } from '../services/security/errors.js';
@@ -555,6 +556,13 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       } catch (err) {
         if (err instanceof OwnershipMismatchError) {
           return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+        }
+        // WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.6): same token already bound to
+        // another active key → 409, no write.
+        if (err instanceof Erc8004TokenAlreadyBoundError) {
+          return reply
+            .status(409)
+            .send({ error_code: 'ERC8004_TOKEN_ALREADY_BOUND' });
         }
         fastify.log.error(
           {

@@ -13,6 +13,7 @@ import type {
   Erc8004IdentityBinding,
 } from '../types/index.js';
 import {
+  Erc8004TokenAlreadyBoundError,
   FundingWalletAlreadyBoundError,
   logOwnershipMismatch,
   OwnershipMismatchError,
@@ -163,12 +164,39 @@ export const identityService = {
    * OwnershipMismatchError. This method NEVER touches `budget` /
    * `increment_a2a_key_spend` / `register_a2a_key_deposit` (CD-2/AC-12), and
    * does NOT re-check idempotency (that is the handler's job — DT-8).
+   *
+   * WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.6): UNICIDAD token↔key activa. Antes de
+   * persistir, pre-check app-layer: si OTRA key activa (`id != keyId`) ya tiene
+   * el mismo `token_id`+`chain_id` bindeado → `Erc8004TokenAlreadyBoundError`
+   * (handler → 409, sin write). El re-bind del MISMO owner sobre su MISMA key
+   * (idempotencia AC-5) NO colisiona porque se excluye `id == keyId`. El SELECT
+   * del pre-check trae SOLO `id`+`erc8004_identity` — NUNCA budget (CD-2). Si en
+   * el futuro se agrega el índice parcial UNIQUE, el `23505` también se mapea a
+   * este error (defensa en profundidad, igual que `bindFundingWallet`).
    */
   async bindErc8004Identity(
     keyId: string,
     ownerId: string,
     binding: Erc8004IdentityBinding,
   ): Promise<Erc8004IdentityBinding> {
+    // Pre-check de unicidad (DT-21.6): otra key activa con el mismo token+chain.
+    const { data: clashing, error: clashErr } = await supabase
+      .from('a2a_agent_keys')
+      .select('id') // SOLO id — NUNCA budget/funding_wallet (CD-2)
+      .eq('is_active', true)
+      .neq('id', keyId)
+      .eq('erc8004_identity->>token_id', binding.token_id)
+      .eq('erc8004_identity->>chain_id', String(binding.chain_id))
+      .limit(1);
+
+    if (clashErr)
+      throw new Error(
+        `Failed to check erc8004 token uniqueness: ${clashErr.message}`,
+      );
+    if (clashing && clashing.length > 0) {
+      throw new Erc8004TokenAlreadyBoundError();
+    }
+
     const { data, error } = await supabase
       .from('a2a_agent_keys')
       .update({ erc8004_identity: binding }) // escribe el JSONB completo; NO toca budget (CD-2)
@@ -176,8 +204,13 @@ export const identityService = {
       .eq('owner_ref', ownerId) // Ownership Guard COMPLETO (CD-3)
       .select('id');
 
-    if (error)
+    if (error) {
+      // Hardening: partial UNIQUE((token_id),(chain_id)) WHERE is_active → 23505.
+      if (error.code === '23505') {
+        throw new Erc8004TokenAlreadyBoundError();
+      }
       throw new Error(`Failed to bind erc8004 identity: ${error.message}`);
+    }
 
     if (!data || data.length === 0) {
       logOwnershipMismatch('deactivate', keyId, ownerId); // DT-13: reusa label existente
@@ -188,29 +221,35 @@ export const identityService = {
   },
 
   /**
-   * Reverse-lookup PÚBLICO de identidad por `agent_slug` (WKH-100, AC-8).
+   * Reverse-lookup PÚBLICO de identidad por `token_id`+`chain_id` (WKH-100
+   * FIX-PACK, BLQ-MED-1 / DT-21.3). SUPERSEDE `resolveIdentityForSlug`.
+   *
+   * El cruce es por el `token_id` que el AGENTE declara on-chain en su AgentCard
+   * (resuelto por `extractDeclaredTokenId` en discovery), NO por un `agent_slug`
+   * aseverado por el caller. El `verified:true` solo se surfacea si ESE token
+   * está bindeado + `ownerOf`-verificado localmente (el verify ya ocurrió al
+   * bindear, auth.ts:497-532) → badge trustless, spoofing cerrado de raíz.
    *
    * DT-19 / NOTA PARA AR-CR: este SELECT NO lleva `.eq('owner_ref', ...)` **a
-   * propósito**. Es una lectura PÚBLICA por `agent_slug` (no por `keyId` del
-   * caller) que devuelve SOLO `{ token_id, chain_id, verified }` — datos
-   * públicamente verificables on-chain. NUNCA trae `budget` / `funding_wallet`
-   * / PII (CD-2). NO es un IDOR; NO marcar como falso-positivo contra la regla
-   * de Ownership Guard de CLAUDE.md.
+   * propósito**. Es lectura PÚBLICA (no por `keyId` del caller) que devuelve
+   * SOLO `{ token_id, chain_id, verified }` — datos públicamente verificables
+   * on-chain. NUNCA trae `budget` / `funding_wallet` / PII (CD-2). NO es IDOR.
    *
-   * [VERIFY-AT-IMPL] (checklist §0): se usa el FALLBACK en JS documentado en el
-   * Story File — traer candidatas activas con identity no-null y filtrar
-   * `agent_slug === slug` en JS. Es determinista e independiente del soporte de
-   * operadores JSONB `->>` de la versión instalada de PostgREST, y la defensa
-   * de shape (`b.agent_slug === slug`) cubre el match.
+   * MNR-1 (perf): la igualdad por `token_id` es indexable (TD-ERC8004-03). Se
+   * usa el FALLBACK determinista en JS (independiente del soporte de operadores
+   * JSONB `->>` de la versión instalada de PostgREST): traer candidatas activas
+   * con identity no-null y cruzar `token_id`+`chain_id` en JS. La page de
+   * discover solo invoca esto para agentes con declaración válida (skip si no).
    */
-  async resolveIdentityForSlug(
-    slug: string,
+  async resolveIdentityForToken(
+    tokenId: string,
+    chainId: number,
   ): Promise<AgentCardIdentity | null> {
     const { data, error } = await supabase
       .from('a2a_agent_keys')
       .select('erc8004_identity') // SOLO esta columna — NUNCA budget (CD-2/DT-19)
-      .not('erc8004_identity', 'is', null)
-      .eq('is_active', true); // solo keys activas surfacean
+      .eq('is_active', true) // solo keys activas surfacean
+      .not('erc8004_identity', 'is', null);
 
     if (error || !data) return null;
 
@@ -218,12 +257,15 @@ export const identityService = {
       erc8004_identity: Erc8004IdentityBinding | null;
     }>) {
       const b = row.erc8004_identity;
-      if (!b?.agent_slug || b.agent_slug !== slug) continue; // defensa de shape
-      return {
-        erc8004_token_id: b.token_id,
-        chain_id: b.chain_id,
-        verified: true,
-      };
+      if (!b) continue;
+      // Cruce por token_id + chain_id (DT-21.3), NO por agent_slug aseverado.
+      if (b.token_id === tokenId && b.chain_id === chainId) {
+        return {
+          erc8004_token_id: b.token_id,
+          chain_id: b.chain_id,
+          verified: true,
+        };
+      }
     }
     return null;
   },

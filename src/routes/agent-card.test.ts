@@ -7,6 +7,10 @@ vi.mock('../services/discovery.js', () => ({
   discoveryService: {
     getAgent: vi.fn(),
   },
+  // WKH-100 FIX-PACK (DT-21.5): the route resolves identity by the token the
+  // agent declares. These test agents declare nothing → null → no badge, no
+  // identityService call (so identity.js stays unmocked here).
+  extractDeclaredTokenId: vi.fn(() => null),
 }));
 
 vi.mock('../services/registry.js', () => ({

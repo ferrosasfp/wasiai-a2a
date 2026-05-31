@@ -111,6 +111,109 @@ function readPayment(
   };
 }
 
+// ─── WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.2) ───────────────────────────
+// Base chains we accept for an ERC-8004 declaration (mainnet / sepolia).
+const ERC8004_ALLOWED_CHAINS: ReadonlySet<number> = new Set([8453, 84532]);
+const TOKEN_ID_RE = /^[0-9]+$/;
+// CAIP-10-like agentId: eip155:<chainId>:<registry>/<tokenId>
+const CAIP_AGENT_ID_RE = /^eip155:(\d+):0x[0-9a-fA-F]{40}\/([0-9]+)$/;
+
+/**
+ * Reads the ERC-8004 identity the AGENT itself DECLARES in its AgentCard
+ * (`agent.metadata` — the raw registry payload, discovery.ts mapAgent). The
+ * declaration is controlled by the agent, NEVER by the caller of /bind, which
+ * is what makes the badge trustless (DT-21.1). Memory-only — NO fetch / RPC
+ * (CD-13 / CD-8). DEFAULT SEGURO: nothing parseable → `null` → SIN badge.
+ *
+ * Resolution order (DT-21.2):
+ *   1. metadata.registrations[].agentId  CAIP-10 `eip155:<chainId>:<registry>/<tokenId>`
+ *   2. fallback metadata.erc8004 = { token_id|tokenId, chain_id|chainId }
+ *   3. fallback top-level metadata.erc8004_token_id + metadata.erc8004_chain_id
+ * The FIRST entry whose chainId ∈ {8453, 84532} wins. tokenId stays a decimal
+ * string (CD-11, never Number()). chainId outside the allow-set → ignored.
+ */
+export function extractDeclaredTokenId(
+  agent: Agent,
+): { tokenId: string; chainId: number } | null {
+  const meta = agent.metadata;
+  if (!meta || typeof meta !== 'object') return null;
+
+  // 1) Standard A2A/ERC-8004: metadata.registrations[].agentId (CAIP-10-like).
+  const registrations = (meta as Record<string, unknown>).registrations;
+  if (Array.isArray(registrations)) {
+    for (const entry of registrations) {
+      const decl = parseRegistrationEntry(entry);
+      if (decl) return decl;
+    }
+  }
+
+  // 2) Fallback: metadata.erc8004 = { token_id|tokenId, chain_id|chainId }.
+  const erc8004 = (meta as Record<string, unknown>).erc8004;
+  if (erc8004 && typeof erc8004 === 'object') {
+    const o = erc8004 as Record<string, unknown>;
+    const decl = buildDeclaration(
+      o.token_id ?? o.tokenId,
+      o.chain_id ?? o.chainId,
+    );
+    if (decl) return decl;
+  }
+
+  // 3) Fallback: top-level metadata.erc8004_token_id + erc8004_chain_id.
+  const topDecl = buildDeclaration(
+    (meta as Record<string, unknown>).erc8004_token_id,
+    (meta as Record<string, unknown>).erc8004_chain_id,
+  );
+  if (topDecl) return topDecl;
+
+  return null; // DEFAULT SEGURO — sin declaración válida, sin badge.
+}
+
+/** Parses one `registrations[]` entry (CAIP-10 agentId or destructured pair). */
+function parseRegistrationEntry(
+  entry: unknown,
+): { tokenId: string; chainId: number } | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const o = entry as Record<string, unknown>;
+
+  // 2a) CAIP-10-like agentId string.
+  if (typeof o.agentId === 'string') {
+    const m = CAIP_AGENT_ID_RE.exec(o.agentId);
+    if (m) {
+      const chainId = Number.parseInt(m[1], 10);
+      if (ERC8004_ALLOWED_CHAINS.has(chainId)) {
+        return { tokenId: m[2], chainId };
+      }
+    }
+  }
+
+  // 2b) Destructured pair some registries may expose.
+  return buildDeclaration(o.tokenId ?? o.token_id, o.chainId ?? o.chain_id);
+}
+
+/** Validates a (tokenId, chainId) pair into a safe declaration or null. */
+function buildDeclaration(
+  rawTokenId: unknown,
+  rawChainId: unknown,
+): { tokenId: string; chainId: number } | null {
+  const tokenId =
+    typeof rawTokenId === 'string'
+      ? rawTokenId.trim()
+      : typeof rawTokenId === 'number' && Number.isInteger(rawTokenId)
+        ? String(rawTokenId)
+        : null;
+  if (tokenId === null || !TOKEN_ID_RE.test(tokenId)) return null;
+
+  const chainId =
+    typeof rawChainId === 'number'
+      ? rawChainId
+      : typeof rawChainId === 'string' && /^[0-9]+$/.test(rawChainId.trim())
+        ? Number.parseInt(rawChainId.trim(), 10)
+        : null;
+  if (chainId === null || !ERC8004_ALLOWED_CHAINS.has(chainId)) return null;
+
+  return { tokenId, chainId };
+}
+
 export const discoveryService = {
   /**
    * Discover agents across all enabled registries
@@ -220,16 +323,25 @@ export const discoveryService = {
   },
 
   /**
-   * WKH-100 (AC-8/DT-18): attach verified ERC-8004 identity to each agent via
-   * the public reverse-lookup. A DB failure for one agent leaves that agent
-   * WITHOUT identity (omitted, not null — AC-9/CD-9) and NEVER breaks discover.
-   * No RPC here (CD-8): the on-chain verify happened at bind-time.
+   * WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.4): attach verified ERC-8004 identity by
+   * cruzando el `token_id` que CADA agente DECLARA en su AgentCard
+   * (`extractDeclaredTokenId`) contra el binding `ownerOf`-verificado en la DB
+   * (`resolveIdentityForToken`). Resolución por slug ELIMINADA (spoofing
+   * cerrado). Agentes sin declaración válida → skip sin query (MNR-1: menos
+   * round-trips). DB failure para un agente → ese agente SIN identity (omitido,
+   * no null — AC-9/CD-9), NUNCA rompe discover. No RPC aquí (CD-8): el verify
+   * on-chain ocurrió al bindear.
    */
   async attachIdentities(agents: Agent[]): Promise<Agent[]> {
     await Promise.all(
       agents.map(async (a) => {
+        const decl = extractDeclaredTokenId(a);
+        if (!decl) return; // sin declaración → skip (sin badge, sin query)
         try {
-          const identity = await identityService.resolveIdentityForSlug(a.slug);
+          const identity = await identityService.resolveIdentityForToken(
+            decl.tokenId,
+            decl.chainId,
+          );
           if (identity) a.identity = identity;
         } catch {
           /* falla DB → ese agent sin identity, NO rompe discover (DT-18) */
@@ -392,14 +504,19 @@ export const discoveryService = {
         if (response.ok) {
           const data = await response.json();
           const agent = this.mapAgent(registry, data);
-          // WKH-100 (AC-8): single reverse-lookup for the verified ERC-8004
-          // identity. DB failure → agent sin identity, NO rompe getAgent (DT-18).
-          try {
-            const identity = await identityService.resolveIdentityForSlug(
-              agent.slug,
-            );
-            if (identity) agent.identity = identity;
-          } catch {}
+          // WKH-100 FIX-PACK (DT-21.4): resolve identity by the token the agent
+          // DECLARES in its card (not agent.slug). Skip if no declaration. DB
+          // failure → agent sin identity, NO rompe getAgent (DT-18).
+          const decl = extractDeclaredTokenId(agent);
+          if (decl) {
+            try {
+              const identity = await identityService.resolveIdentityForToken(
+                decl.tokenId,
+                decl.chainId,
+              );
+              if (identity) agent.identity = identity;
+            } catch {}
+          }
           return agent;
         }
       } catch {}

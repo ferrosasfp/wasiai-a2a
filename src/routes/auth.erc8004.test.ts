@@ -36,7 +36,7 @@ vi.mock('../services/identity.js', () => ({
     deactivate: vi.fn(),
     bindFundingWallet: vi.fn(),
     bindErc8004Identity: vi.fn(),
-    resolveIdentityForSlug: vi.fn(),
+    resolveIdentityForToken: vi.fn(),
   },
   isIdentityVerified: (row: { erc8004_identity?: unknown } | null) =>
     row?.erc8004_identity != null,
@@ -53,7 +53,10 @@ vi.mock('../services/budget.js', () => ({
 import { getErc8004Reader } from '../adapters/erc8004-identity.js';
 import { budgetService } from '../services/budget.js';
 import { identityService } from '../services/identity.js';
-import { OwnershipMismatchError } from '../services/security/errors.js';
+import {
+  Erc8004TokenAlreadyBoundError,
+  OwnershipMismatchError,
+} from '../services/security/errors.js';
 import type { A2AAgentKeyRow, Erc8004IdentityBinding } from '../types/index.js';
 import authRoutes from './auth.js';
 
@@ -422,6 +425,28 @@ describe('auth ERC-8004 routes', () => {
         payload: { token_id: '1' },
       });
       expect(res.statusCode).toBe(200);
+    });
+
+    it('SEC unicidad (DT-21.6): token bound to another active key → 409 ERC8004_TOKEN_ALREADY_BOUND, no overwrite', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockVerifyOwnership.mockResolvedValue({
+        ok: true,
+        matches: true,
+        chainId: 84532,
+      });
+      mockResolve.mockResolvedValue({ ok: true, tokenUri: '', chainId: 84532 });
+      // The service pre-check finds the same token+chain on another active key.
+      mockBindErc8004.mockRejectedValue(new Erc8004TokenAlreadyBoundError());
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/erc8004/bind',
+        headers: AUTH_HEADERS,
+        payload: { token_id: '42' },
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error_code).toBe('ERC8004_TOKEN_ALREADY_BOUND');
     });
 
     it('CD-3: service throws OwnershipMismatchError → 403 OWNERSHIP_MISMATCH', async () => {
