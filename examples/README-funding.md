@@ -58,10 +58,10 @@ curl $A2A_BASE/auth/me -H "x-a2a-key: $KEY"     # ver budget por red
 `fund-agent-key.mjs` hace los 5 pasos end-to-end (incluye el transfer on-chain con viem):
 ```bash
 A2A_BASE=https://wasiai-a2a-production.up.railway.app \
-FUNDER_PK=0xTuPrivateKey TREASURY=0xTreasuryWasiAI \
-NETWORK=avalanche-fuji AMOUNT_USDC=1.0 \
+FUNDER_PK=0xTuPrivateKey NETWORK=avalanche-fuji AMOUNT=1.0 \
 node examples/fund-agent-key.mjs
 ```
+El script llama a `GET /auth/deposit-info` y toma `treasury`, `token` y `decimales` automáticamente (no necesitás pasar el treasury a mano; y usa los decimales reales de cada red, ej. Kite/PYUSD = 18).
 
 ## Variante frontend (humano con MetaMask)
 Mismo flujo, pero en vez de una private key usás la wallet conectada:
