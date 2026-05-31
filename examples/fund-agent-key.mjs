@@ -66,7 +66,9 @@ console.log(`0. deposit-info: treasury=${net.treasury} token=${net.token.symbol}
 
 const rpc = RPCS[NETWORK];
 if (!rpc) { console.error(`Sin RPC configurado para '${NETWORK}' en este ejemplo.`); process.exit(1); }
-const account = privateKeyToAccount(FUNDER_PK);
+// Acepta la PK con o sin '0x' / espacios; toma los últimos 64 hex.
+const normPk = (s) => `0x${(s || '').replace(/[^0-9a-fA-F]/g, '').slice(-64)}`;
+const account = privateKeyToAccount(normPk(FUNDER_PK));
 const wallet = createWalletClient({ account, chain: rpc.chain, transport: http(rpc.rpc) });
 const publicClient = createPublicClient({ chain: rpc.chain, transport: http(rpc.rpc) });
 console.log(`   funding wallet: ${account.address}`);
