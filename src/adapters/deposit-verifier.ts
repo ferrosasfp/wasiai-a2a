@@ -64,7 +64,7 @@ const TRANSFER_EVENT = parseAbiItem(
 
 type ChainFamily = 'KITE' | 'AVALANCHE' | 'BASE';
 
-function resolveChainFamilyEnvSuffix(chainKey: ChainKey): ChainFamily {
+export function resolveChainFamilyEnvSuffix(chainKey: ChainKey): ChainFamily {
   switch (chainKey) {
     case 'kite-ozone-testnet':
     case 'kite-mainnet':
@@ -83,7 +83,7 @@ function resolveChainFamilyEnvSuffix(chainKey: ChainKey): ChainFamily {
  * `A2A_DEPOSIT_MIN_CONFIRMATIONS_<FAMILY>` → global `A2A_DEPOSIT_MIN_CONFIRMATIONS`
  * → fallback 1. Validated `>= 1` (CD-11: afirmar, no asumir defaults silenciosos).
  */
-function resolveMinConfirmations(chainKey: ChainKey): number {
+export function resolveMinConfirmations(chainKey: ChainKey): number {
   const family = resolveChainFamilyEnvSuffix(chainKey);
   const perChain = process.env[`A2A_DEPOSIT_MIN_CONFIRMATIONS_${family}`];
   const global = process.env.A2A_DEPOSIT_MIN_CONFIRMATIONS;
@@ -100,7 +100,7 @@ function resolveMinConfirmations(chainKey: ChainKey): number {
  * `OPERATOR_PRIVATE_KEY`. Returns `null` if neither is available/valid
  * (fail-loud → RECIPIENT_MISMATCH, cero crédito).
  */
-function resolveTreasury(chainKey: ChainKey): `0x${string}` | null {
+export function resolveTreasury(chainKey: ChainKey): `0x${string}` | null {
   const family = resolveChainFamilyEnvSuffix(chainKey);
   const envTreasury = process.env[`A2A_DEPOSIT_TREASURY_${family}`];
   if (envTreasury && ADDRESS_RE.test(envTreasury)) {
