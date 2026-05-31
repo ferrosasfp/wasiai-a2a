@@ -1,5 +1,13 @@
 import Fastify from 'fastify';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import agentCardRoutes from './agent-card.js';
 import wellKnownRoutes from './well-known.js';
 
@@ -21,11 +29,40 @@ vi.mock('../services/registry.js', () => ({
   },
 }));
 
-import { discoveryService } from '../services/discovery.js';
+// WKH-103 (CD-15): the route resolves the off-chain score via
+// reputationService.computeReputationForAgent before building the card. Mock it
+// so the route runs deterministically without touching supabase.
+vi.mock('../services/reputation.js', () => ({
+  reputationService: {
+    computeReputationForAgent: vi.fn(),
+  },
+}));
+
+// WKH-103 W3 (CD-15): the route reads the OPTIONAL on-chain summary only when
+// env is configured AND the agent declares a token. Mock the reader + the
+// env-guard so we can exercise the hybrid path without a real RPC.
+vi.mock('../adapters/erc8004-reputation.js', () => ({
+  erc8004ReputationReader: { read: vi.fn() },
+  resolveReputationRegistryAddress: vi.fn(() => null),
+}));
+
+import {
+  erc8004ReputationReader,
+  resolveReputationRegistryAddress,
+} from '../adapters/erc8004-reputation.js';
+import {
+  discoveryService,
+  extractDeclaredTokenId,
+} from '../services/discovery.js';
 import { registryService } from '../services/registry.js';
+import { reputationService } from '../services/reputation.js';
 
 const mockGetAgent = vi.mocked(discoveryService.getAgent);
 const mockGetEnabled = vi.mocked(registryService.getEnabled);
+const mockComputeRep = vi.mocked(reputationService.computeReputationForAgent);
+const mockExtractDecl = vi.mocked(extractDeclaredTokenId);
+const mockOnchainRead = vi.mocked(erc8004ReputationReader.read);
+const mockResolveRepAddr = vi.mocked(resolveReputationRegistryAddress);
 
 describe('agent-card routes', () => {
   let app: ReturnType<typeof Fastify>;
@@ -38,6 +75,18 @@ describe('agent-card routes', () => {
   });
 
   afterAll(() => app.close());
+
+  beforeEach(() => {
+    // WKH-103 default: no computed reputation unless a test opts in.
+    mockComputeRep.mockReset();
+    mockComputeRep.mockResolvedValue(null);
+    // WKH-103 W3 default: on-chain inactive (no declared token, no env).
+    mockExtractDecl.mockReset();
+    mockExtractDecl.mockReturnValue(null);
+    mockResolveRepAddr.mockReset();
+    mockResolveRepAddr.mockReturnValue(null);
+    mockOnchainRead.mockReset();
+  });
 
   describe('GET /agents/:slug/agent-card', () => {
     it('returns 200 with valid AgentCard for existing agent', async () => {
@@ -105,6 +154,173 @@ describe('agent-card routes', () => {
       });
 
       expect(mockGetAgent).toHaveBeenCalledWith('x', 'my-reg');
+    });
+
+    // ── WKH-103 — computed reputation surfacing in the route ──
+
+    function mockBasicAgentAndRegistry(): void {
+      mockGetAgent.mockResolvedValue({
+        slug: 'rep-agent',
+        name: 'Rep Agent',
+        description: 'has reputation',
+        capabilities: ['chat'],
+        registry: 'test-registry',
+        registry_id: 'test-registry',
+        id: 'a1',
+        priceUsdc: 0,
+        invokeUrl: 'https://example.com',
+        invocationNote:
+          'Use POST /compose or POST /orchestrate on the gateway.',
+        verified: false,
+        status: 'active',
+      });
+      mockGetEnabled.mockResolvedValue([
+        {
+          name: 'test-registry',
+          id: 'r1',
+          auth: { type: 'bearer' as const, key: 'Authorization', value: 'x' },
+          discoveryEndpoint: '',
+          invokeEndpoint: '',
+          schema: { discovery: {}, invoke: { method: 'POST' as const } },
+          enabled: true,
+          createdAt: new Date(),
+          ownerRef: 'system',
+        },
+      ]);
+    }
+
+    it('T-AC5: surfaces computedReputation when the service returns a score', async () => {
+      mockBasicAgentAndRegistry();
+      mockComputeRep.mockResolvedValue({
+        score: 64,
+        tasks_settled: 32,
+        success_rate: 0.9,
+        total_volume_usdc: 8.4,
+        source: 'off-chain',
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/agents/rep-agent/agent-card',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().computedReputation.score).toBe(64);
+    });
+
+    it('T-AC3: omits computedReputation when the service returns null', async () => {
+      mockBasicAgentAndRegistry();
+      mockComputeRep.mockResolvedValue(null);
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/agents/rep-agent/agent-card',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect('computedReputation' in res.json()).toBe(false);
+    });
+
+    it('T-AC4: compute throwing → 200 without the field, never 5xx', async () => {
+      mockBasicAgentAndRegistry();
+      mockComputeRep.mockRejectedValue(new Error('db down'));
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/agents/rep-agent/agent-card',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect('computedReputation' in res.json()).toBe(false);
+    });
+
+    // ── WKH-103 W3 — optional on-chain enrichment (single-agent only) ──
+
+    it('T-AC7-on: env + declared token + reader OK → source=hybrid + onchain', async () => {
+      mockBasicAgentAndRegistry();
+      mockComputeRep.mockResolvedValue({
+        score: 64,
+        tasks_settled: 32,
+        success_rate: 0.9,
+        total_volume_usdc: 8.4,
+        source: 'off-chain',
+      });
+      mockExtractDecl.mockReturnValue({ tokenId: '7', chainId: 84532 });
+      mockResolveRepAddr.mockReturnValue(
+        '0x8004B663056A597Dffe9eCcC1965A193B7388713',
+      );
+      mockOnchainRead.mockResolvedValue({
+        ok: true,
+        value: '3:420:2',
+        chainId: 84532,
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/agents/rep-agent/agent-card',
+      });
+
+      const body = res.json();
+      expect(res.statusCode).toBe(200);
+      expect(body.computedReputation.source).toBe('hybrid');
+      expect(body.computedReputation.onchain).toEqual({
+        value: '3:420:2',
+        chain_id: 84532,
+      });
+      expect(body.computedReputation.score).toBe(64); // score NOT altered (DT-3.1)
+      expect(mockOnchainRead).toHaveBeenCalledWith({ agentId: 7n });
+    });
+
+    it('T-AC7-off: env unset → no on-chain read, stays off-chain', async () => {
+      mockBasicAgentAndRegistry();
+      mockComputeRep.mockResolvedValue({
+        score: 64,
+        tasks_settled: 32,
+        success_rate: 0.9,
+        total_volume_usdc: 8.4,
+        source: 'off-chain',
+      });
+      mockExtractDecl.mockReturnValue({ tokenId: '7', chainId: 84532 });
+      mockResolveRepAddr.mockReturnValue(null); // env not configured
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/agents/rep-agent/agent-card',
+      });
+
+      const body = res.json();
+      expect(body.computedReputation.source).toBe('off-chain');
+      expect('onchain' in body.computedReputation).toBe(false);
+      expect(mockOnchainRead).not.toHaveBeenCalled();
+    });
+
+    it('T-AC8: on-chain reader fails → off-chain score returned, no onchain, no 5xx', async () => {
+      mockBasicAgentAndRegistry();
+      mockComputeRep.mockResolvedValue({
+        score: 64,
+        tasks_settled: 32,
+        success_rate: 0.9,
+        total_volume_usdc: 8.4,
+        source: 'off-chain',
+      });
+      mockExtractDecl.mockReturnValue({ tokenId: '7', chainId: 84532 });
+      mockResolveRepAddr.mockReturnValue(
+        '0x8004B663056A597Dffe9eCcC1965A193B7388713',
+      );
+      mockOnchainRead.mockResolvedValue({
+        ok: false,
+        reason: 'RPC_UNAVAILABLE',
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/agents/rep-agent/agent-card',
+      });
+
+      const body = res.json();
+      expect(res.statusCode).toBe(200);
+      expect(body.computedReputation.source).toBe('off-chain');
+      expect('onchain' in body.computedReputation).toBe(false);
     });
 
     // ── WKH-106 (BASE-03) — Bazaar discovery + opt-in + 422 mapping ──

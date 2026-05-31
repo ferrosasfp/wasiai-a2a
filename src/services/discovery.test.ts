@@ -57,7 +57,19 @@ vi.mock('../lib/supabase.js', () => {
   return { supabase: { from: vi.fn(() => builder) } };
 });
 
-import type { Agent } from '../types/index.js';
+// WKH-103 (CD-15): discover() enriches computedReputation via the batch
+// service. Mock reputationService so the enrichment + sort run deterministically
+// without coupling to the supabase reduce. `setReputationBatch` controls the
+// Map the batch resolves to; `mockComputeBatch` lets tests assert no-N+1.
+const mockComputeBatch = vi.fn();
+vi.mock('./reputation.js', () => ({
+  reputationService: {
+    computeReputationBatch: (slugs: string[]) => mockComputeBatch(slugs),
+    computeReputationForAgent: vi.fn(),
+  },
+}));
+
+import type { Agent, AgentReputation } from '../types/index.js';
 import {
   _resetFallbackWarnDedup,
   discoveryService,
@@ -66,6 +78,22 @@ import {
 } from './discovery.js';
 import { identityService } from './identity.js';
 import { registryService } from './registry.js';
+
+function makeRep(o: Partial<AgentReputation> = {}): AgentReputation {
+  return {
+    score: 50,
+    tasks_settled: 10,
+    success_rate: 1,
+    total_volume_usdc: 10,
+    source: 'off-chain',
+    ...o,
+  };
+}
+function setReputationBatch(
+  entries: Array<[string, AgentReputation]> = [],
+): void {
+  mockComputeBatch.mockResolvedValue(new Map(entries));
+}
 
 function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig {
   return {
@@ -108,6 +136,7 @@ describe('discoveryService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setIdentityRows([]); // default: no bound identities
+    setReputationBatch([]); // WKH-103 default: no computed reputations
   });
 
   describe('AC-10: default status=active filter', () => {
@@ -1208,5 +1237,108 @@ describe('mapAgent — v2 schema drift fallback (WAS-V2-3-CLIENT)', () => {
     discoveryService.mapAgent(reg, raw);
     discoveryService.mapAgent(reg, raw);
     expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── WKH-103: reputation enrichment in /discover (W2 + W4) ──────────────────
+describe('discover — reputation enrichment (WKH-103)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setIdentityRows([]);
+    setReputationBatch([]);
+  });
+
+  // T-AC1: discover enriches computedReputation from the batch, no RPC.
+  it('T-AC1: enriches computedReputation from the batch (off-chain, no RPC)', async () => {
+    setupRegistryResponse([
+      makeRawAgent({ id: 'a1', slug: 'agent-1', status: 'active' }),
+    ]);
+    setReputationBatch([['agent-1', makeRep({ score: 77 })]]);
+
+    const result = await discoveryService.discover({});
+
+    expect(result.agents[0].computedReputation?.score).toBe(77);
+    expect(result.agents[0].computedReputation?.source).toBe('off-chain');
+  });
+
+  // T-AC6: sort uses computedReputation.score desc, falls back to upstream.
+  it('T-AC6: sort ranks by computedReputation.score desc within verified tier', async () => {
+    setupRegistryResponse([
+      makeRawAgent({
+        id: 'a1',
+        slug: 'low',
+        verified: true,
+        reputation: 99, // upstream high, but computed wins
+      }),
+      makeRawAgent({
+        id: 'a2',
+        slug: 'high',
+        verified: true,
+        reputation: 1,
+      }),
+    ]);
+    setReputationBatch([
+      ['low', makeRep({ score: 10 })],
+      ['high', makeRep({ score: 90 })],
+    ]);
+
+    const result = await discoveryService.discover({});
+
+    expect(result.agents[0].slug).toBe('high');
+    expect(result.agents[1].slug).toBe('low');
+  });
+
+  it('T-AC6 fallback: agents without computed score fall back to upstream reputation', async () => {
+    setupRegistryResponse([
+      makeRawAgent({ id: 'a1', slug: 'no-score', reputation: 80 }),
+      makeRawAgent({ id: 'a2', slug: 'has-score', reputation: 5 }),
+    ]);
+    // only has-score gets a computed score, below the upstream of no-score
+    setReputationBatch([['has-score', makeRep({ score: 10 })]]);
+
+    const result = await discoveryService.discover({});
+
+    // no-score uses upstream 80, beats has-score computed 10
+    expect(result.agents[0].slug).toBe('no-score');
+  });
+
+  // T-AC4: batch throws → discover responds without the field, no 5xx.
+  it('T-AC4: computeReputationBatch throwing does not break discover', async () => {
+    setupRegistryResponse([
+      makeRawAgent({ id: 'a1', slug: 'agent-1', status: 'active' }),
+    ]);
+    mockComputeBatch.mockRejectedValue(new Error('db down'));
+
+    const result = await discoveryService.discover({});
+
+    expect(result.agents).toHaveLength(1);
+    expect(result.agents[0].computedReputation).toBeUndefined();
+  });
+
+  // T-NO-N+1 (e2e): N agents → computeReputationBatch called ONCE with all slugs.
+  it('T-NO-N+1: batch is called exactly once with all slugs regardless of N', async () => {
+    setupRegistryResponse([
+      makeRawAgent({ id: 'a1', slug: 's1', status: 'active' }),
+      makeRawAgent({ id: 'a2', slug: 's2', status: 'active' }),
+      makeRawAgent({ id: 'a3', slug: 's3', status: 'active' }),
+    ]);
+    setReputationBatch([]);
+
+    await discoveryService.discover({});
+
+    expect(mockComputeBatch).toHaveBeenCalledTimes(1);
+    expect(mockComputeBatch).toHaveBeenCalledWith(['s1', 's2', 's3']);
+  });
+
+  // T-BACKWARD (e2e): no events → no computedReputation, shape intact.
+  it('T-BACKWARD: agents without reputation have no computedReputation key', async () => {
+    setupRegistryResponse([
+      makeRawAgent({ id: 'a1', slug: 'agent-1', status: 'active' }),
+    ]);
+    setReputationBatch([]);
+
+    const result = await discoveryService.discover({});
+
+    expect('computedReputation' in result.agents[0]).toBe(false);
   });
 });

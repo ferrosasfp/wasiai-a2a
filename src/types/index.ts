@@ -145,6 +145,35 @@ export interface Agent {
    * (backward-compat — AC-9/CD-9).
    */
   identity?: AgentCardIdentity;
+  /** WKH-103 (AC-1): score off-chain computado. Omitido si 0 tasks (CD-9). */
+  computedReputation?: AgentReputation;
+}
+
+/**
+ * WKH-103 (AC-5): score de reputación computado off-chain desde a2a_events
+ * (tasks liquidadas: status='success' AND cost_usdc>0, anti-sybil CD-1).
+ * Campo NUEVO — NO pisa Agent.reputation (upstream del registry). Surfacing
+ * SOLO en /discover (off-chain) y AgentCard (off-chain + on-chain opcional).
+ */
+export interface AgentReputation {
+  /** 0-100 entero, determinista (DT-2). */
+  score: number;
+  /** COUNT de eventos liquidados (status='success' AND cost_usdc>0). */
+  tasks_settled: number;
+  /** 0-1, 2 decimales — modulador success/(success+failed) (OBS-1). */
+  success_rate: number;
+  /** SUM(cost_usdc) liquidado, 6 decimales. */
+  total_volume_usdc: number;
+  /** AVG(latency_ms) entero — OMITIDO si no hay latency (no null). */
+  avg_latency_ms?: number;
+  /** 'hybrid' solo si AC-7 incorporó read on-chain OK; si no, 'off-chain'. */
+  source: 'off-chain' | 'hybrid';
+  /**
+   * Valor crudo verificado on-chain (AC-7). Shape [VERIFY-AT-IMPL] contra el
+   * repo oficial del ReputationRegistry. OMITIDO si no se leyó on-chain.
+   * NO altera `score` en v1 (additive, DT-3.1).
+   */
+  onchain?: { value: string; chain_id: number };
 }
 
 /**
@@ -581,6 +610,8 @@ export interface AgentCard {
    * extension — consumers that don't understand it MUST ignore it (DT-6).
    */
   identity?: AgentCardIdentity;
+  /** WKH-103 (AC-5): reputación computada. Non-breaking optional extension. */
+  computedReputation?: AgentReputation;
 }
 
 // ============================================================

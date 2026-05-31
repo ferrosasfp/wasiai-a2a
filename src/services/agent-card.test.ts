@@ -170,6 +170,48 @@ describe('agentCardService', () => {
       expect('identity' in card).toBe(false);
     });
 
+    // ── WKH-103 (AC-5) — computed reputation surfacing ──
+
+    const computedRep = {
+      score: 72,
+      tasks_settled: 36,
+      success_rate: 0.95,
+      total_volume_usdc: 12.5,
+      avg_latency_ms: 240,
+      source: 'off-chain' as const,
+    };
+
+    it('T-AC5: includes computedReputation when the 5th arg is provided', () => {
+      const card = agentCardService.buildAgentCard(
+        agent,
+        registryConfig,
+        baseUrl,
+        undefined,
+        computedRep,
+      );
+      expect(card.computedReputation).toEqual(computedRep);
+    });
+
+    it('T-AC3: omits computedReputation (no key) when the 5th arg is absent', () => {
+      const card = agentCardService.buildAgentCard(
+        agent,
+        registryConfig,
+        baseUrl,
+      );
+      expect(card.computedReputation).toBeUndefined();
+      expect('computedReputation' in card).toBe(false);
+    });
+
+    it('T-BACKWARD: legacy agent (no identity, no reputation) keeps prior shape', () => {
+      const card = agentCardService.buildAgentCard(
+        agent,
+        registryConfig,
+        baseUrl,
+      );
+      expect('identity' in card).toBe(false);
+      expect('computedReputation' in card).toBe(false);
+    });
+
     // ── WKH-106 (BASE-03) — discoverable opt-in + schema serialization ──
 
     describe('WKH-106 — Bazaar discovery schemas', () => {

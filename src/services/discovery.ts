@@ -18,6 +18,7 @@ import type {
 } from '../types/index.js';
 import { identityService } from './identity.js';
 import { registryService } from './registry.js';
+import { reputationService } from './reputation.js';
 
 // ─── WAS-V2-3-CLIENT (WKH-57) module-scoped warn dedup ────────────────
 // Set lives for process lifetime. Reset via `_resetFallbackWarnDedup()`
@@ -299,11 +300,20 @@ export const discoveryService = {
       allAgents = allAgents.filter((a) => a.priceUsdc <= maxPrice);
     }
 
-    // Sort: verified-first (AC-7), then reputation (desc), then price (asc)
+    // WKH-103 (DT-8/OBS-2): score batch pre-sort, 1 query (CD-12). Sin RPC
+    // on-chain (CD-13). Corre sobre allAgents (pre-limit) para que la página
+    // sea el top-N por reputación real.
+    await this.attachReputations(allAgents);
+
+    // Sort: verified-first (AC-7), then reputation (desc), then price (asc).
+    // WKH-103 (AC-6/CD-10): lee computedReputation.score con fallback al
+    // reputation upstream del registry (NO reasigna `reputation`).
+    const repValue = (x: Agent): number =>
+      x.computedReputation?.score ?? x.reputation ?? 0;
     allAgents.sort((a, b) => {
       const verifiedDiff = Number(b.verified) - Number(a.verified);
       if (verifiedDiff !== 0) return verifiedDiff;
-      const repDiff = (b.reputation ?? 0) - (a.reputation ?? 0);
+      const repDiff = repValue(b) - repValue(a);
       if (repDiff !== 0) return repDiff;
       return a.priceUsdc - b.priceUsdc;
     });
@@ -351,6 +361,25 @@ export const discoveryService = {
         }
       }),
     );
+    return agents;
+  },
+
+  /**
+   * WKH-103 (DT-8/DT-10): enriquece computedReputation en batch con UN solo
+   * query (CD-12). Sin RPC on-chain (CD-13). Fallo DB → agentes sin el campo,
+   * NUNCA rompe discover (AC-4/CD-5).
+   */
+  async attachReputations(agents: Agent[]): Promise<Agent[]> {
+    try {
+      const slugs = agents.map((a) => a.slug);
+      const repMap = await reputationService.computeReputationBatch(slugs);
+      for (const a of agents) {
+        const rep = repMap.get(a.slug);
+        if (rep) a.computedReputation = rep; // omitido si no hay (CD-9)
+      }
+    } catch {
+      /* DB fail → sin reputación, NO rompe discover (AC-4) */
+    }
     return agents;
   },
 

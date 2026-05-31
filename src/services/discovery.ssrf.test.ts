@@ -43,6 +43,16 @@ vi.mock('./identity.js', () => ({
   },
 }));
 
+// WKH-103 (CD-15): discover() now batch-computes reputation from a2a_events.
+// Mock it so the SSRF tests don't trigger a real supabase (PostgREST) fetch,
+// which would otherwise inflate the fetch call count.
+vi.mock('./reputation.js', () => ({
+  reputationService: {
+    computeReputationBatch: vi.fn().mockResolvedValue(new Map()),
+    computeReputationForAgent: vi.fn().mockResolvedValue(null),
+  },
+}));
+
 vi.mock('../lib/circuit-breaker.js', () => ({
   getRegistryCircuitBreaker: () => ({
     execute: (fn: () => Promise<Response>) => fn(),

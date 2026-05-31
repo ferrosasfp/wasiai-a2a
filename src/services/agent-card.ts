@@ -4,6 +4,7 @@ import type {
   Agent,
   AgentCard,
   AgentCardIdentity,
+  AgentReputation,
   AgentSkill,
   RegistryConfig,
 } from '../types/index.js';
@@ -89,6 +90,7 @@ export const agentCardService = {
     registryConfig: RegistryConfig,
     baseUrl: string,
     identity?: AgentCardIdentity, // WKH-100 AC-8 — resuelto por el route ANTES de llamar
+    computedReputation?: AgentReputation, // WKH-103 AC-5 — resuelto por el route ANTES de llamar
   ): AgentCard {
     const skills: AgentSkill[] = agent.capabilities.map((cap) => ({
       id: cap,
@@ -149,6 +151,9 @@ export const agentCardService = {
       // resolved. Absent → field OMITTED (no null) to preserve non-breaking
       // semantics for consumers validating exact shape (AC-9/CD-9).
       ...(identity !== undefined && { identity }),
+      // WKH-103 (AC-5/CD-9): surface computed reputation only when present
+      // (>0 settled tasks). Absent → field OMITTED (no null) — backward-compat.
+      ...(computedReputation !== undefined && { computedReputation }),
     };
   },
 
