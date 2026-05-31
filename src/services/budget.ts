@@ -8,7 +8,11 @@ import type { A2AAgentKeyRow, DelegationDebitContext } from '../types/index.js';
 import { delegationService, exceedsPerTxLimit } from './delegation.js';
 import {
   AgentKeyBudgetExhaustedError,
+  AgentKeyInactiveError,
+  AgentKeyNotFoundError,
+  DailyLimitExceededError,
   DelegationExpiredError,
+  DelegationNotFoundError,
   DelegationRevokedError,
   DelegationTotalLimitExceededError,
   DepositAlreadyCreditedError,
@@ -92,13 +96,30 @@ export const budgetService = {
         if (err instanceof DelegationExpiredError) {
           return { success: false, error: 'DELEGATION_EXPIRED' };
         }
+        // AR-MNR-1: límites de la parent key bajo delegación → code estable 403.
+        if (err instanceof DailyLimitExceededError) {
+          return { success: false, error: 'DAILY_LIMIT' };
+        }
+        if (err instanceof AgentKeyInactiveError) {
+          return { success: false, error: 'KEY_INACTIVE' };
+        }
+        if (err instanceof AgentKeyNotFoundError) {
+          return { success: false, error: 'KEY_NOT_FOUND' };
+        }
+        if (err instanceof DelegationNotFoundError) {
+          return { success: false, error: 'DELEGATION_NOT_FOUND' };
+        }
         if (err instanceof OwnershipMismatchError) {
           return { success: false, error: 'OWNERSHIP_MISMATCH' };
         }
-        return {
-          success: false,
-          error: err instanceof Error ? err.message : 'DELEGATION_DEBIT_FAILED',
-        };
+        // AR-MNR-2: NO propagar `err.message` (mensaje crudo de Postgres) al
+        // cliente. Devolver un error_code estable; el detalle va al log server.
+        console.error('[budget] delegation debit failed', {
+          keyId,
+          chainId,
+          detail: err instanceof Error ? err.message : 'unknown',
+        });
+        return { success: false, error: 'DELEGATION_DEBIT_FAILED' };
       }
     }
 

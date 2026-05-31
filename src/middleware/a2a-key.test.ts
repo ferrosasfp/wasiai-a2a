@@ -179,6 +179,7 @@ import {
 import { identityService } from '../services/identity.js';
 import {
   AgentKeyBudgetExhaustedError,
+  DailyLimitExceededError,
   DelegationTotalLimitExceededError,
 } from '../services/security/errors.js';
 import type { DelegationRow } from '../types/index.js';
@@ -1292,6 +1293,25 @@ describe('requirePaymentOrA2AKey — delegation branch (WKH-101)', () => {
     });
     expect(res.statusCode).toBe(403);
     expect(res.json().error_code).toBe('AGENT_KEY_BUDGET_EXHAUSTED');
+  });
+
+  // AR-MNR-1/AR-MNR-2 — parent DAILY_LIMIT under delegation → 403 (was 503),
+  // and the raw Postgres message must NEVER reach the client body.
+  it('AR-MNR-1: step-0 parent DAILY_LIMIT from RPC → 403 DAILY_LIMIT, no raw PG in body', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+    mockDebitDelegation.mockRejectedValue(new DailyLimitExceededError());
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('DAILY_LIMIT');
+    // No info-leak: el body NO contiene el detalle crudo del RAISE de Postgres.
+    expect(res.body).not.toContain('limit is');
+    expect(res.body).not.toContain('daily spend');
   });
 
   // T17 (DT-3) — allowed_chains restriction

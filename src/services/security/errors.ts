@@ -231,6 +231,50 @@ export class AgentKeyBudgetExhaustedError extends Error {
 }
 
 /**
+ * WKH-101 FIX-PACK (AR-MNR-1 / AR-MNR-2): error classes para los prefijos del
+ * RPC chain `debit_delegation_and_parent` → `increment_a2a_key_spend` que antes
+ * caían en el fallback `throw new Error('Failed to debit delegation: <raw PG>')`
+ * y resultaban en 503 + leak del mensaje crudo de Postgres al body del cliente.
+ * Todos mapean a 403 (límites de la parent key bajo delegación).
+ */
+
+/** RPC `DAILY_LIMIT` (parent key daily cap) bajo delegación → 403. */
+export class DailyLimitExceededError extends Error {
+  readonly code = 'DAILY_LIMIT' as const;
+  constructor() {
+    super('Daily spending limit exceeded');
+    this.name = 'DailyLimitExceededError';
+  }
+}
+
+/** RPC `KEY_INACTIVE` (parent key deactivated) bajo delegación → 403. */
+export class AgentKeyInactiveError extends Error {
+  readonly code = 'KEY_INACTIVE' as const;
+  constructor() {
+    super('Parent agent key is inactive');
+    this.name = 'AgentKeyInactiveError';
+  }
+}
+
+/** RPC `KEY_NOT_FOUND` (parent key inexistente) bajo delegación → 403. */
+export class AgentKeyNotFoundError extends Error {
+  readonly code = 'KEY_NOT_FOUND' as const;
+  constructor() {
+    super('Parent agent key not found');
+    this.name = 'AgentKeyNotFoundError';
+  }
+}
+
+/** RPC `DELEGATION_NOT_FOUND` (delegación inexistente bajo lock) → 403. */
+export class DelegationNotFoundError extends Error {
+  readonly code = 'DELEGATION_NOT_FOUND' as const;
+  constructor() {
+    super('Delegation not found');
+    this.name = 'DelegationNotFoundError';
+  }
+}
+
+/**
  * Operación que detectó el mismatch (PII-safe enum).
  * - `getBalance` / `deactivate`: ownership sobre `a2a_agent_keys` (WKH-53).
  * - `registryUpdate` / `registryDelete`: ownership sobre `registries` (WKH-63).

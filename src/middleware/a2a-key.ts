@@ -25,7 +25,11 @@ import {
 import { identityService, isIdentityVerified } from '../services/identity.js';
 import {
   AgentKeyBudgetExhaustedError,
+  AgentKeyInactiveError,
+  AgentKeyNotFoundError,
+  DailyLimitExceededError,
   DelegationExpiredError,
+  DelegationNotFoundError,
   DelegationRevokedError,
   DelegationTotalLimitExceededError,
   OwnershipMismatchError,
@@ -81,7 +85,11 @@ type DelegationMiddlewareErrorCode =
   | 'AGENT_KEY_BUDGET_EXHAUSTED'
   | 'DELEGATION_CHAIN_NOT_ALLOWED'
   | 'OWNERSHIP_MISMATCH'
-  | 'KEY_INACTIVE';
+  | 'KEY_INACTIVE'
+  // AR-MNR-1: límites del parent RPC bajo delegación (antes caían en 503).
+  | 'DAILY_LIMIT'
+  | 'KEY_NOT_FOUND'
+  | 'DELEGATION_NOT_FOUND';
 
 function send403delegation(
   reply: FastifyReply,
@@ -336,6 +344,36 @@ export function requirePaymentOrA2AKey(
               reply,
               'DELEGATION_EXPIRED',
               'Delegation has expired',
+            );
+          }
+          // AR-MNR-1: límites de la parent key bajo delegación → 403 semántico
+          // (antes caían en `throw debitErr` → outer catch → 503 + leak PG).
+          if (debitErr instanceof DailyLimitExceededError) {
+            return send403delegation(
+              reply,
+              'DAILY_LIMIT',
+              'Daily spending limit exceeded',
+            );
+          }
+          if (debitErr instanceof AgentKeyInactiveError) {
+            return send403delegation(
+              reply,
+              'KEY_INACTIVE',
+              'Parent agent key is inactive',
+            );
+          }
+          if (debitErr instanceof AgentKeyNotFoundError) {
+            return send403delegation(
+              reply,
+              'KEY_NOT_FOUND',
+              'Parent agent key not found',
+            );
+          }
+          if (debitErr instanceof DelegationNotFoundError) {
+            return send403delegation(
+              reply,
+              'DELEGATION_NOT_FOUND',
+              'Delegation not found',
             );
           }
           if (debitErr instanceof OwnershipMismatchError) {

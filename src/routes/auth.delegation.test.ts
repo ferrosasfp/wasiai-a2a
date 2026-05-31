@@ -245,6 +245,59 @@ describe('auth delegation endpoints', () => {
     expect(mockCreate).not.toHaveBeenCalled();
   });
 
+  // ── CR-MNR-1 (WKH-101): positive-decimal validation of policy amounts ──
+
+  it('CR-MNR-1: max_total_amount="-5" → 400 INVALID_INPUT, 0 creates', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    const bad = validBody();
+    bad.policy.max_total_amount = '-5';
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/delegation',
+      headers: { authorization: `Bearer ${MASTER_KEY}` },
+      payload: bad,
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('INVALID_INPUT');
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('CR-MNR-1: max_total_amount="abc" → 400 INVALID_INPUT, 0 creates', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    const bad = validBody();
+    bad.policy.max_total_amount = 'abc';
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/delegation',
+      headers: { authorization: `Bearer ${MASTER_KEY}` },
+      payload: bad,
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('INVALID_INPUT');
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('CR-MNR-1: max_amount_per_tx="0" (not > 0) → 400 INVALID_INPUT, 0 creates', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    const bad = validBody();
+    bad.policy.max_amount_per_tx = '0';
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/delegation',
+      headers: { authorization: `Bearer ${MASTER_KEY}` },
+      payload: bad,
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('INVALID_INPUT');
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
   // ── DELETE /auth/delegation/:id ──
 
   it('T11 (AC-10) DELETE revokes → 200 { revoked: true }', async () => {

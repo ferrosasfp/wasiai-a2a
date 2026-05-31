@@ -29,8 +29,12 @@ import type {
 } from '../types/index.js';
 import {
   AgentKeyBudgetExhaustedError,
+  AgentKeyInactiveError,
+  AgentKeyNotFoundError,
+  DailyLimitExceededError,
   DelegationExpiredError,
   DelegationNonceReplayError,
+  DelegationNotFoundError,
   DelegationRevokedError,
   DelegationSignerMismatchError,
   DelegationTotalLimitExceededError,
@@ -399,6 +403,21 @@ export const delegationService = {
       if (msg.includes('DELEGATION_EXPIRED')) {
         throw new DelegationExpiredError();
       }
+      // AR-MNR-1: prefijos del parent RPC (increment_a2a_key_spend) que llegan
+      // vía el PERFORM dentro de debit_delegation_and_parent. Antes caían en el
+      // fallback genérico → 503 + leak del mensaje crudo de PG. Todos → 403.
+      if (msg.includes('DAILY_LIMIT')) {
+        throw new DailyLimitExceededError();
+      }
+      if (msg.includes('KEY_INACTIVE')) {
+        throw new AgentKeyInactiveError();
+      }
+      if (msg.includes('KEY_NOT_FOUND')) {
+        throw new AgentKeyNotFoundError();
+      }
+      if (msg.includes('DELEGATION_NOT_FOUND')) {
+        throw new DelegationNotFoundError();
+      }
       if (msg.includes('OWNERSHIP_MISMATCH')) {
         logOwnershipMismatch({
           op: 'delegationRevoke',
@@ -407,7 +426,10 @@ export const delegationService = {
         });
         throw new OwnershipMismatchError();
       }
-      throw new Error(`Failed to debit delegation: ${msg}`);
+      // AR-MNR-2: fallback verdaderamente inesperado. El `msg` crudo NUNCA debe
+      // llegar al cliente — el caller (budget.ts / middleware) lo mapea a un
+      // error_code estable y loguea el detalle server-side.
+      throw new Error('DELEGATION_DEBIT_FAILED');
     }
 
     return String(data);

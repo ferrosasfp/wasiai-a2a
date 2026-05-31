@@ -31,8 +31,12 @@ import type {
 import { delegationService, exceedsPerTxLimit } from './delegation.js';
 import {
   AgentKeyBudgetExhaustedError,
+  AgentKeyInactiveError,
+  AgentKeyNotFoundError,
+  DailyLimitExceededError,
   DelegationExpiredError,
   DelegationNonceReplayError,
+  DelegationNotFoundError,
   DelegationRevokedError,
   DelegationSignerMismatchError,
   DelegationTotalLimitExceededError,
@@ -345,6 +349,73 @@ describe('debitDelegationAndParent', () => {
     await expect(
       delegationService.debitDelegationAndParent('del-1', 'evil', 'k', 1, 5),
     ).rejects.toBeInstanceOf(OwnershipMismatchError);
+  });
+
+  // ── AR-MNR-1/AR-MNR-2: prefijos del parent RPC bajo delegación ──
+
+  it('AR-MNR-1 DAILY_LIMIT (parent RPC) → DailyLimitExceededError (no raw PG)', async () => {
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: {
+        message: 'DAILY_LIMIT: daily spend would be 9 + 2 = 11, limit is 10',
+      },
+    } as never);
+    let thrown: unknown;
+    try {
+      await delegationService.debitDelegationAndParent('d', 'o', 'k', 1, 5);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(DailyLimitExceededError);
+    // El error class semántico NO acarrea el detalle crudo de Postgres.
+    expect((thrown as Error).message).not.toContain('limit is');
+    expect((thrown as Error).message).not.toContain('daily spend');
+  });
+
+  it('AR-MNR-1 KEY_INACTIVE (parent RPC) → AgentKeyInactiveError', async () => {
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: { message: 'KEY_INACTIVE: key_id k is deactivated' },
+    } as never);
+    await expect(
+      delegationService.debitDelegationAndParent('d', 'o', 'k', 1, 5),
+    ).rejects.toBeInstanceOf(AgentKeyInactiveError);
+  });
+
+  it('AR-MNR-1 KEY_NOT_FOUND (parent RPC) → AgentKeyNotFoundError', async () => {
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: { message: 'KEY_NOT_FOUND: key_id k does not exist' },
+    } as never);
+    await expect(
+      delegationService.debitDelegationAndParent('d', 'o', 'k', 1, 5),
+    ).rejects.toBeInstanceOf(AgentKeyNotFoundError);
+  });
+
+  it('AR-MNR-1 DELEGATION_NOT_FOUND → DelegationNotFoundError', async () => {
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: { message: 'DELEGATION_NOT_FOUND: del-1' },
+    } as never);
+    await expect(
+      delegationService.debitDelegationAndParent('del-1', 'o', 'k', 1, 5),
+    ).rejects.toBeInstanceOf(DelegationNotFoundError);
+  });
+
+  it('AR-MNR-2 unmapped RPC error → generic code, NO raw PG message leak', async () => {
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: { message: 'P0001: some internal postgres detail 0xdeadbeef' },
+    } as never);
+    let thrown: unknown;
+    try {
+      await delegationService.debitDelegationAndParent('d', 'o', 'k', 1, 5);
+    } catch (err) {
+      thrown = err;
+    }
+    expect((thrown as Error).message).toBe('DELEGATION_DEBIT_FAILED');
+    expect((thrown as Error).message).not.toContain('postgres');
+    expect((thrown as Error).message).not.toContain('0xdeadbeef');
   });
 });
 

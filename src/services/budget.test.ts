@@ -33,7 +33,11 @@ import { budgetService } from './budget.js';
 import { delegationService } from './delegation.js';
 import {
   AgentKeyBudgetExhaustedError,
+  AgentKeyInactiveError,
+  AgentKeyNotFoundError,
+  DailyLimitExceededError,
   DelegationExpiredError,
+  DelegationNotFoundError,
   DelegationRevokedError,
   DelegationTotalLimitExceededError,
   DepositAlreadyCreditedError,
@@ -289,6 +293,63 @@ describe('budgetService', () => {
         maxAmountPerTx: '100',
       });
       expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
+    });
+
+    // ── AR-MNR-1/AR-MNR-2: parent-RPC limits + no-raw-PG fallback ──
+
+    it('AR-MNR-1 maps DailyLimitExceededError → DAILY_LIMIT (no raw PG)', async () => {
+      mockDebitDelegation.mockRejectedValue(new DailyLimitExceededError());
+      const result = await budgetService.debit('key-1', 2368, 0.1, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '100',
+      });
+      expect(result).toEqual({ success: false, error: 'DAILY_LIMIT' });
+      expect(result.error).not.toContain('limit is');
+    });
+
+    it('AR-MNR-1 maps AgentKeyInactiveError → KEY_INACTIVE', async () => {
+      mockDebitDelegation.mockRejectedValue(new AgentKeyInactiveError());
+      const result = await budgetService.debit('key-1', 2368, 0.1, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '100',
+      });
+      expect(result).toEqual({ success: false, error: 'KEY_INACTIVE' });
+    });
+
+    it('AR-MNR-1 maps AgentKeyNotFoundError → KEY_NOT_FOUND', async () => {
+      mockDebitDelegation.mockRejectedValue(new AgentKeyNotFoundError());
+      const result = await budgetService.debit('key-1', 2368, 0.1, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '100',
+      });
+      expect(result).toEqual({ success: false, error: 'KEY_NOT_FOUND' });
+    });
+
+    it('AR-MNR-1 maps DelegationNotFoundError → DELEGATION_NOT_FOUND', async () => {
+      mockDebitDelegation.mockRejectedValue(new DelegationNotFoundError());
+      const result = await budgetService.debit('key-1', 2368, 0.1, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '100',
+      });
+      expect(result).toEqual({ success: false, error: 'DELEGATION_NOT_FOUND' });
+    });
+
+    it('AR-MNR-2 unmapped delegation error → DELEGATION_DEBIT_FAILED, no raw PG', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockDebitDelegation.mockRejectedValue(
+        new Error('P0001: raw postgres detail 0xdeadbeef'),
+      );
+      const result = await budgetService.debit('key-1', 2368, 0.1, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '100',
+      });
+      expect(result).toEqual({
+        success: false,
+        error: 'DELEGATION_DEBIT_FAILED',
+      });
+      expect(result.error).not.toContain('postgres');
+      expect(result.error).not.toContain('0xdeadbeef');
+      errSpy.mockRestore();
     });
   });
 

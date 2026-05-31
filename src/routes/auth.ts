@@ -156,6 +156,17 @@ function rawKeyFromRequest(request: FastifyRequest): string | undefined {
 
 const SESSION_TOKEN_PREFIX = 'wasi_a2a_session_';
 
+// CR-MNR-1 (WKH-101): los límites de la policy deben ser decimales positivos.
+// Sin esto, un "-5" o "abc" pasaba la validación de shape y producía una
+// delegación inútil que recién fallaba (503) en el débito. Se rechaza acá.
+const POSITIVE_DECIMAL_RE = /^\d+(\.\d+)?$/;
+
+/** `true` si `v` es un decimal `> 0` (string canónico, sin signo ni notación). */
+function isPositiveDecimalAmount(v: string): boolean {
+  if (!POSITIVE_DECIMAL_RE.test(v)) return false;
+  return Number.parseFloat(v) > 0;
+}
+
 /** Valida + tipa la policy del request. Devuelve null si el shape es inválido. */
 function parseDelegationPolicy(raw: unknown): DelegationPolicy | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -165,6 +176,13 @@ function parseDelegationPolicy(raw: unknown): DelegationPolicy | null {
     typeof p.max_total_amount !== 'string' ||
     typeof p.expires_at !== 'number' ||
     !Number.isFinite(p.expires_at)
+  ) {
+    return null;
+  }
+  // CR-MNR-1: max_amount_per_tx / max_total_amount deben ser decimales > 0.
+  if (
+    !isPositiveDecimalAmount(p.max_amount_per_tx) ||
+    !isPositiveDecimalAmount(p.max_total_amount)
   ) {
     return null;
   }
