@@ -933,3 +933,377 @@ pendientes. Listo para clinical review SPEC_APPROVED.
 | `[NEEDS CLARIFICATION]` sin resolver | NINGUNO (`registrations` marcado [VERIFY-AT-IMPL] con default seguro, no bloqueante) |
 
 **Readiness DT-21: PASS.** BLQ-MED-1 cerrado de raíz. Listo para fix-pack del Dev.
+
+---
+
+## 11. ADDENDUM POST-re-AR (FIX v2) — DT-22 (cierra MNR-1 + MNR-2)
+
+> Origen: re-Adversarial Review del fix-pack v1 (commit `6057d7e`) quedó
+> **APROBADO CON MENORES**. El humano decidió cerrar los 2 MENORES ahora (badge
+> trustless de verdad, "más pro que Kite"). Este addendum **refuerza** DT-21:
+> hace el vínculo identidad↔agente **bidireccional** (MNR-1) y agrega **unicidad
+> a nivel DB** (MNR-2). DT-21 NO se revierte; se completa. Donde DT-22 contradiga
+> a DT-21, **manda DT-22**.
+
+### DT-22.0 — Los 2 MENORES (grounded, archivo:línea)
+
+**MNR-1 (vector inverso — el importante).** El badge v1 surfacea `verified:true`
+en un agente A cuando: (a) el AgentCard de A declara token X
+(`extractDeclaredTokenId`, `src/services/discovery.ts:135-169`) **Y** (b) X está
+bindeado + `ownerOf`-verificado en nuestra DB (`resolveIdentityForToken`,
+`src/services/identity.ts:244-271`). **Falta probar que el operador de A sea el
+dueño de X.** Hoy `resolveIdentityForToken` cruza SOLO por `token_id`+`chain_id`
+(identity.ts:262) — NO mira a qué agente pertenece el binding. El bind escribe el
+binding en la key del owner que probó `ownerOf==funding_wallet`
+(`src/routes/auth.ts:498-547`), pero NO registra QUÉ agente opera ese owner.
+
+> **Ataque (vector inverso):** el atacante NO controla token alguno de la víctima.
+> Crea un agente A' en un registry (`metadata.registrations` declara el token V de
+> la víctima, que sí está bindeado por la víctima). `extractDeclaredTokenId(A')`
+> devuelve V; `resolveIdentityForToken(V, chainId)` encuentra el binding de la
+> víctima (porque cruza solo por token) → A' surfacea `verified:true` con la
+> identidad on-chain ajena. El AgentCard de A' es controlado por el atacante (su
+> registry); el token V es público y enumerable. **Rompe el contrato del badge.**
+
+**MNR-2 (race de unicidad).** La unicidad token↔key activa (DT-21.6) hoy es SOLO
+un pre-check app-layer (`src/services/identity.ts:182-198`): `SELECT id WHERE
+is_active AND token_id=X AND chain_id=C AND id != keyId` y, si hay fila, lanza
+`Erc8004TokenAlreadyBoundError`. Es check-then-write: dos binds concurrentes del
+mismo token a dos keys distintas pueden pasar ambos el pre-check antes de que
+cualquiera escriba → doble bind. Falta la barrera atómica a nivel DB.
+
+### DT-22.1 — Principio del fix MNR-1: MATCH BIDIRECCIONAL
+
+El badge debe exigir **AMBOS lados anclados**, donde el atacante **no controla
+ninguno del lado de la víctima**:
+
+1. **Lado agente (ya existe, DT-21):** el AgentCard del agente A declara token X
+   (`extractDeclaredTokenId(A)`). Controlado por el registry/agente.
+2. **Lado binder (NUEVO):** al bindear el token X, el owner declara **QUÉ agente
+   opera** — su identificador estable de discovery. Se guarda DENTRO del JSONB
+   `erc8004_identity`. Controlado por el owner que probó `ownerOf(X)==funding_wallet`.
+3. **Regla del badge:** surfacear `verified:true` en el agente A **solo si** A
+   declara token X **Y** el binding de X declara operar A (match del identificador
+   estable). Si no matchean → **SIN badge**.
+
+**El identificador estable de un `Agent` (grounded):** `mapAgent`
+(`src/services/discovery.ts:435-468`) deriva del payload del registry:
+`registry: registry.name` (l.461) y `slug` (l.438, `mapping.slug ?? 'slug' ?? raw.id`).
+NO existe un campo de URL canónica estable en `Agent` (`invokeUrl`, l.439-442/462,
+es un template `{slug}`/`{agentId}` derivado, NO un identificador de identidad).
+`Agent.id` (l.444) es el `id` crudo del registry (puede colisionar entre
+registries). El par **`(registry, slug)`** es el único identificador estable
+cross-source (confirmado en Context Map §0 l.38 y DT-12). Por eso el binder declara
+`(agent_registry, agent_slug)`, no solo `agent_slug` (resuelve colisiones de slug
+entre registries: dos registries pueden tener `slug:"acme"`).
+
+> **Match normalizado.** Tanto `registry` como `slug` se comparan
+> **case-insensitive y trimmed** (`registry.name` puede variar en casing; `slug`
+> ya viene lowercase de `SLUG_RE`, pero normalizamos defensivamente). El match es
+> `decl.token == binding.token && decl.chain == binding.chain &&
+> norm(binding.agent_registry) == norm(agent.registry) &&
+> norm(binding.agent_slug) == norm(agent.slug)`.
+
+### DT-22.2 — Análisis de cierre de AMBOS vectores (obligatorio)
+
+Sea V la víctima (agente `(regV, slugV)`, dueña del token V) y X el atacante
+(agente `(regX, slugX)`, dueño del token X, con `regX≠regV ∨ slugX≠slugV`).
+
+**Vector original (slug spoofing — ya cerrado por DT-21, re-verificado):** el
+atacante quiere que SU agente `(regX, slugX)` muestre la identidad de la víctima.
+Para surfacear badge en `(regX, slugX)`, el card de ese agente debe declarar un
+token T tal que el binding de T declare operar `(regX, slugX)`. El atacante puede
+declarar cualquier token en el card que controla (su registry), pero el binding de
+la víctima declara operar `(regV, slugV)≠(regX, slugX)` → no matchea. Y el atacante
+no puede crear un binding ownerOf-verificado del token de la víctima (no es dueño).
+→ **sin badge en el agente del atacante. Cerrado.**
+
+**Vector inverso (declarar token ajeno — el que cierra DT-22):** el atacante crea
+un agente A' cuyo card declara el token V de la víctima (V es público, ya bindeado
+por la víctima). `extractDeclaredTokenId(A')={tokenId:V, chainId:C}`.
+`resolveIdentityForToken(V, C, A'.registry, A'.slug)` busca un binding con
+`token_id=V ∧ chain_id=C ∧ agent_registry=A'.registry ∧ agent_slug=A'.slug`. El
+único binding de V es el de la víctima, que declara operar `(regV, slugV)`. Como
+`(A'.registry, A'.slug)=(regX, slugX)≠(regV, slugV)` → **no matchea → sin badge en
+A'. Cerrado.** El atacante no controla NINGUNO de los dos anclajes del lado de la
+víctima: ni el `ownerOf` on-chain (no es dueño de V), ni el `(agent_registry,
+agent_slug)` declarado por el binder (lo declaró la víctima al bindear).
+
+**Caso legítimo (debe seguir funcionando):** la víctima declara en el card de
+`(regV, slugV)` su token V; al bindear V declaró operar `(regV, slugV)`. Ambos
+lados anclados y matcheados → **badge en `(regV, slugV)`. OK.**
+
+**Binding viejo sin `agent_registry`/`agent_slug` (backward-compat AC-9):** un
+binding escrito por v1 puede no tener los nuevos campos. **DEFAULT SEGURO:** si el
+binding NO declara `(agent_registry, agent_slug)` → **NO matchea ningún agente →
+sin badge** (el badge nuevo es estricto). El binding sigue siendo válido como
+identidad (`/me`, `funding_wallet`-verified) y la key NO se degrada (autentica y
+debita igual — AC-9). Solo deja de surfacear el badge en discovery hasta que el
+owner re-bindee declarando su agente. Esto es **más seguro** que el v1 (que
+surfaceaba con cruce unilateral). Se documenta como cambio de comportamiento
+intencional del badge (AC-8 ajustado, ver §11.7).
+
+### DT-22.3 — Shape nuevo de `erc8004_identity` (qué declara el binder)
+
+`Erc8004IdentityBinding` (en `src/types/a2a-key.ts:12-24`) gana DOS campos
+opcionales que juntos forman el ancla del lado-binder:
+
+```ts
+export interface Erc8004IdentityBinding {
+  token_id: string;
+  chain_id: number;
+  agent_card_url: string;
+  owner_address: string;
+  verified_at: string;
+  // DT-22 (MNR-1) — ancla del LADO BINDER del match bidireccional. El owner
+  // declara QUÉ agente de discovery opera esta identidad. Identificador estable
+  // = (registry, slug) (discovery.ts mapAgent: registry.name + slug). El badge
+  // se surfacea SOLO si el agente A declara este token Y este binding declara
+  // operar (A.registry, A.slug). PROMOCIÓN de agent_slug: ahora es ancla de
+  // trust (cruzado con el token on-chain-poseído), ya NO un hint informativo.
+  agent_registry?: string;   // == Agent.registry (registry.name). Match case-insensitive.
+  agent_slug?: string;       // == Agent.slug. Match case-insensitive. Reusa SLUG_RE.
+}
+```
+
+- `agent_slug` **deja de ser** el "hint informativo sin efecto" de DT-21.7 y
+  **pasa a ser** el identificador del agente declarado por el binder, ahora SÍ
+  sólido **porque está cruzado con el token on-chain-poseído** (el binding solo
+  existe tras `ownerOf==funding_wallet`). Se añade `agent_registry` para resolver
+  colisiones de slug entre registries (DT-22.1).
+- **Sin columna nueva, sin migration de datos:** ambos campos viven en el JSONB
+  existente (AC-9/CD-9). Bindings v1 sin estos campos → sin badge (DEFAULT SEGURO,
+  DT-22.2).
+- **Backward-compat de bindings v1:** NO se migran datos. El owner re-bindea
+  (idempotente) declarando su agente para recuperar el badge.
+
+### DT-22.4 — Contrato del badge `verified:true` (documentar en `AgentCardIdentity`)
+
+En `src/types/index.ts:148-152` (comentario de `AgentCardIdentity`) se documenta
+QUÉ atesta exactamente `verified:true` para el consumidor:
+
+> `verified:true` atesta un **vínculo bidireccional probado**, NO la mera
+> existencia de un token:
+> 1. el AgentCard de este agente declara la identidad ERC-8004 `erc8004_token_id`
+>    en `chain_id` (lado agente, on-chain-referenciado);
+> 2. ese MISMO token está bindeado en una Agent Key cuyo `funding_wallet`
+>    coincide con `ownerOf(token_id)` on-chain (posesión probada, lado on-chain);
+> 3. ese binding declara operar ESTE agente `(registry, slug)` (lado binder).
+>
+> Los 3 anclajes deben coincidir. Si el card declara un token ajeno, o el binding
+> declara operar otro agente, o el token no está bindeado/poseído → el campo
+> `identity` se OMITE (no `verified:false`). El consumidor puede confiar en que
+> `verified:true` ⇒ el operador del agente es el dueño on-chain de la AgentID.
+
+### DT-22.5 — `resolveIdentityForToken` → `resolveIdentityForAgent` (match bidireccional)
+
+`resolveIdentityForToken(tokenId, chainId)` (`src/services/identity.ts:244-271`)
+se **reemplaza** por una firma que también recibe el identificador del agente que
+declara el token, para cruzar el lado-binder:
+
+```ts
+// Reverse-lookup PÚBLICO con MATCH BIDIRECCIONAL (DT-22.5). NO Ownership Guard
+// (DT-19 sigue: no es IDOR — sin keyId del caller; expone SOLO
+// {token_id, chain_id, verified}; .select('erc8004_identity') NUNCA budget/PII).
+// El badge requiere: el binding tiene este token+chain (lado on-chain/agente)
+// Y declara operar (agentRegistry, agentSlug) (lado binder). MNR-1 cerrado.
+async resolveIdentityForAgent(
+  tokenId: string,
+  chainId: number,
+  agentRegistry: string,
+  agentSlug: string,
+): Promise<AgentCardIdentity | null> {
+  // [VERIFY-AT-IMPL] preferir filtro server-side por igualdad indexable:
+  //   .eq('erc8004_identity->>token_id', tokenId)
+  //   .eq('erc8004_identity->>chain_id', String(chainId))
+  //   .eq('is_active', true)
+  // fallback JS (abajo) si PostgREST no lo soporta como se espera. El match de
+  // agent_registry/agent_slug se hace SIEMPRE en JS (normalizado case-insensitive).
+  const { data, error } = await supabase
+    .from('a2a_agent_keys')
+    .select('erc8004_identity')        // SOLO esta columna (CD-2/DT-19)
+    .eq('is_active', true)
+    .not('erc8004_identity', 'is', null);
+  if (error || !data) return null;
+  const nReg = agentRegistry.trim().toLowerCase();
+  const nSlug = agentSlug.trim().toLowerCase();
+  for (const row of data as Array<{ erc8004_identity: Erc8004IdentityBinding | null }>) {
+    const b = row.erc8004_identity;
+    if (!b) continue;
+    if (b.token_id !== tokenId || b.chain_id !== chainId) continue;  // lado token
+    // Lado binder (DT-22): el binding DEBE declarar operar ESTE agente.
+    if (!b.agent_registry || !b.agent_slug) continue;                // sin ancla → sin badge
+    if (b.agent_registry.trim().toLowerCase() !== nReg) continue;     // registry match
+    if (b.agent_slug.trim().toLowerCase() !== nSlug) continue;        // slug match
+    return { erc8004_token_id: b.token_id, chain_id: b.chain_id, verified: true };
+  }
+  return null;
+}
+```
+
+- **MNR-1 (perf) preservado:** el cruce sigue siendo por igualdad de `token_id`
+  (indexable, sin full-table scan por agente). El match de `(registry, slug)` es
+  un filtro adicional en JS sobre el (típicamente único) binding del token. Skip
+  si no hay declaración (`attachIdentities` no llama si `extractDeclaredTokenId`
+  devuelve null).
+- `resolveIdentityForToken` se elimina (o queda deprecated sin uso). **AUTO-BLINDAJE
+  (recurrente — 3 entradas en `auto-blindaje.md`):** renombrar/eliminar un export
+  rompe factory-mocks silenciosamente (TypeError en runtime, no en `tsc`). El Dev
+  DEBE `grep -rn "resolveIdentityForToken" src/` (callers + `vi.mock('../services/identity.js'`)
+  ANTES de renombrar, y actualizar TODOS los mocks. Ver §11.8 / CD-15.
+
+### DT-22.6 — Callers de discovery pasan `(registry, slug)` del agente
+
+- `attachIdentities` (`src/services/discovery.ts:335-352`): por cada agente,
+  `const decl = extractDeclaredTokenId(a)`; si `!decl` → skip; si no,
+  `resolveIdentityForAgent(decl.tokenId, decl.chainId, a.registry, a.slug)`. El
+  `a.registry`/`a.slug` ya están en el `Agent` (mapAgent l.461/446). Mantiene
+  `Promise.all` + degradación graciosa.
+- `getAgent` (`src/services/discovery.ts:507-519`): idéntico —
+  `resolveIdentityForAgent(decl.tokenId, decl.chainId, agent.registry, agent.slug)`.
+- `src/routes/agent-card.ts`: idem — resuelve `extractDeclaredTokenId(agent)` y
+  llama `resolveIdentityForAgent(decl.tokenId, decl.chainId, agent.registry,
+  agent.slug)` antes de `buildAgentCard` (firma de `buildAgentCard` NO cambia).
+
+### DT-22.7 — Bind: el handler persiste `(agent_registry, agent_slug)`
+
+`POST /auth/erc8004/bind` (`src/routes/auth.ts:464-547`):
+- `agent_slug` ya se valida (l.464-475, `SLUG_RE`). **NUEVO:** validar
+  `agent_registry` OPCIONAL del body con el mismo estilo: `string`, trim, no
+  vacío, longitud razonable (reusar un regex permisivo tipo
+  `^[\w][\w .:/-]{0,127}$` — el Dev confirma con los `registry.name` reales del
+  repo; default seguro: si inválido → 400 `INVALID_INPUT`).
+- **Regla de coherencia (DT-22):** para que el bind sea utilizable como ancla del
+  badge, el binder declara AMBOS `(agent_registry, agent_slug)` juntos. Si declara
+  uno sin el otro → **400 `INVALID_INPUT`** (un ancla incompleta no surfacea badge
+  y es señal de error del caller). Si NO declara ninguno → bind válido SIN ancla
+  de badge (backward-compat con flujo "solo identidad", DEFAULT SEGURO — no
+  surfacea en discovery). El binding sigue ownerOf-verified.
+- El binding (auth.ts:540-547) incluye `...(agentRegistry && agentSlug && {
+  agent_registry: agentRegistry, agent_slug: agentSlug })`.
+- El handler de error (auth.ts:556-573) ya mapea `Erc8004TokenAlreadyBoundError` →
+  409; **se mantiene** (cubre MNR-2 a nivel app + el `23505` del índice).
+
+### DT-22.8 — MNR-2: índice UNIQUE parcial en DB (migration aditiva)
+
+Migration **aditiva, NO destructiva** siguiendo la convención del repo
+(`supabase/migrations/`, ver `20260529000001_a2a_key_funding_wallet.sql`:
+`BEGIN`/`COMMIT`, `CREATE UNIQUE INDEX IF NOT EXISTS ... WHERE`, + `_down.sql`
+companion con `DROP INDEX IF EXISTS`):
+
+**Archivos (convención `YYYYMMDDHHMMSS_nombre.sql` + `_down.sql`):**
+- `supabase/migrations/20260531000000_erc8004_token_unique.sql`
+- `supabase/migrations/20260531000000_erc8004_token_unique_down.sql`
+
+**UP:**
+```sql
+BEGIN;
+-- WKH-100 FIX v2 (MNR-2): a lo sumo UNA key activa puede reclamar un mismo
+-- (token_id, chain_id) ERC-8004. Cierra la race del pre-check app-layer
+-- (check-then-write). Parcial: solo aplica a keys activas con identity bindeada.
+-- El código ya mapea 23505 → Erc8004TokenAlreadyBoundError (identity.ts:209).
+-- Aditivo + idempotente (IF NOT EXISTS). NO migra datos (AC-9/CD-9).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_a2a_agent_keys_erc8004_token
+  ON a2a_agent_keys (
+    (erc8004_identity->>'token_id'),
+    (erc8004_identity->>'chain_id')
+  )
+  WHERE is_active AND erc8004_identity IS NOT NULL;
+COMMIT;
+```
+**DOWN:**
+```sql
+BEGIN;
+DROP INDEX IF EXISTS uq_a2a_agent_keys_erc8004_token;
+COMMIT;
+```
+
+- **Doble función:** (1) MNR-2 — barrera atómica contra doble bind concurrente; el
+  2º `UPDATE` que intente escribir el mismo token a otra key activa falla con
+  `23505` → `Erc8004TokenAlreadyBoundError` → 409. (2) MNR-1 perf — el índice
+  funcional sobre `(token_id)` acelera el reverse-lookup (cubre TD-ERC8004-03).
+- **[VERIFY-AT-IMPL] Riesgo de datos existentes:** si en prod/dev ya hay ≥2 keys
+  activas con el mismo `token_id`+`chain_id` (posible por la race v1), el `CREATE
+  UNIQUE INDEX` falla. El Dev DEBE verificar con un `SELECT` previo (en el
+  comentario de la migration o como nota de deploy) que no hay duplicados; si los
+  hay, desactivar/limpiar las keys duplicadas ANTES de aplicar (el pre-check
+  app-layer minimiza esto, pero la migration debe documentarlo). No es bloqueante
+  para el diseño; es nota de operación.
+- El pre-check app-layer (identity.ts:182-198) **queda** como defensa en
+  profundidad (devuelve 409 sin tocar DB en el caso común, da error semántico
+  antes del `23505`).
+
+### DT-22.9 — CDs preservados (verificación AR/CR)
+
+| CD | Cómo lo preserva DT-22 |
+|---|---|
+| **CD-13** anti-SSRF | `extractDeclaredTokenId` sigue leyendo `metadata` en memoria; el match de `(registry, slug)` usa campos ya presentes en el `Agent`; sin fetch serve-time |
+| **CD-2** sin budget | `resolveIdentityForAgent` y el pre-check de unicidad hacen `.select('erc8004_identity')`/`.select('id')`; NUNCA budget |
+| **CD-8** read-only on-chain | sin RPC al servir discovery ni en el resolve; el match es 100% DB+memoria |
+| **CD-3** Ownership Guard | `bindErc8004Identity` mantiene `.eq('id').eq('owner_ref')` intacto; los campos nuevos van DENTRO del binding persistido, no relajan el Guard |
+| **AC-9 / CD-9** backward-compat | sin migration de datos; binding v1 sin `(agent_registry, agent_slug)` → sin badge (DEFAULT SEGURO) pero la key NO se degrada (autentica/debita igual); índice es aditivo |
+| **CD-6** sin `any` | firmas tipadas; `Erc8004IdentityBinding` extendido; sin `any` |
+| **CD-15 (nuevo)** | grep de exports antes de renombrar `resolveIdentityForToken` → `resolveIdentityForAgent` (auto-blindaje recurrente, §11.8) |
+
+### CD nuevo detectado por el Architect (v2)
+
+- **CD-15 — Renombrar/eliminar export consumido por factory-mocks.** OBLIGATORIO
+  `grep -rn "<símbolo viejo>" src/` (callers) **y** `grep -rn "vi.mock('<módulo>'"
+  src/` (factory-mocks que reemplazan el módulo entero) ANTES de renombrar o
+  eliminar un export. Los mocks factory rompen en runtime (TypeError), NO en
+  `tsc`. *Referencia: WKH-100 auto-blindaje (Wave 4 + 2 entradas del FIX-PACK
+  BLQ-MED-1).* Aplica a `resolveIdentityForToken` → `resolveIdentityForAgent`.
+
+### 11.7 — AC-8 ajustado al match bidireccional
+
+> **AC-8 (v2):** WHEN un agente A es servido por `/discover`, `/discover/:slug` o
+> `GET /agents/:slug/agent-card`, THE system SHALL surfacear
+> `identity:{erc8004_token_id, chain_id, verified:true}` **si y solo si**: (i) el
+> AgentCard de A declara una identidad ERC-8004 `(token_id, chain_id)` con
+> `chain_id ∈ {8453, 84532}` (`extractDeclaredTokenId`), **(ii)** ese token está
+> bindeado + `ownerOf`-verificado en una Agent Key activa, **Y (iii)** ese binding
+> declara operar A vía `(agent_registry, agent_slug)` (match case-insensitive con
+> `A.registry`/`A.slug`). Si falta cualquiera de los 3 → el campo `identity` se
+> OMITE (no `verified:false`). Bindings v1 sin `(agent_registry, agent_slug)` →
+> sin badge (DEFAULT SEGURO), la key NO se degrada (AC-9 intacto).
+
+### 11.8 — Test Plan v2 (tests de seguridad nuevos)
+
+| ID | Test | Archivo | Aserción |
+|---|---|---|---|
+| **SEC-INV** (MNR-1, vector inverso) | atacante declara token ajeno → SIN badge | `auth.erc8004.test.ts` / `discovery.test.ts` | víctima bindea V declarando `(regV, slugV)`; agente del atacante `(regX, slugX)` declara token V en su card → `resolveIdentityForAgent(V, C, regX, slugX)` → `null`; `/discover`+agent-card del atacante **SIN** `identity`. **El vector inverso falla.** |
+| **SEC-MATCH** (match correcto) | binder declara A + A declara token → badge | `discovery.test.ts` / e2e | binding de token T declara `(regA, slugA)`; agente `(regA, slugA)` declara T en su card → `resolveIdentityForAgent(T, C, regA, slugA)` → `{verified:true}`; badge presente |
+| **SEC-NOMATCH** (token en otro agente) | binder declara A, token aparece en card de B → sin badge en B | `discovery.test.ts` | binding de T declara `(regA, slugA)`; agente B `(regB, slugB)` declara T → `resolveIdentityForAgent(T, C, regB, slugB)` → `null`; B sin badge |
+| **SEC-ORIG** (vector original, re-verificado) | slug spoof clásico sigue cerrado | `auth.erc8004.test.ts` | atacante bindea su token X declarando `(regX, slugX)`; intenta que su agente muestre identidad de la víctima declarando token V → token de V no está bindeado por el atacante; binding de V declara `(regV, slugV)` → sin badge en el agente del atacante |
+| **SEC-LEGACY** (backward-compat) | binding v1 sin ancla → sin badge, key OK | `discovery.test.ts` / `auth.test.ts` | binding sin `agent_registry`/`agent_slug` → `resolveIdentityForAgent` → `null` (sin badge); la key autentica + debita igual (AC-9) |
+| **SEC-UNIQUE-DB** (MNR-2) | índice UNIQUE rechaza doble bind | `auth.erc8004.test.ts` (mock `23505`) o migration test | bind de T a key A OK; 2º bind del MISMO T+chain a key B activa → el `UPDATE` devuelve `error.code==='23505'` → `Erc8004TokenAlreadyBoundError` → **409 `ERC8004_TOKEN_ALREADY_BOUND`**, sin write. Re-bind de A sobre su misma key (AC-5) → OK |
+| **unit resolver v2** | `resolveIdentityForAgent` cruza 4 campos | `identity.test.ts` / `discovery.test.ts` | match SOLO si `token_id`+`chain_id`+`agent_registry`(ci)+`agent_slug`(ci); falta cualquiera → null; **SELECT solo `erc8004_identity`** (no budget) |
+| **mocks actualizados** (CD-15) | factory-mocks reflejan `resolveIdentityForAgent` | `auth.test.ts`, `a2a-key.test.ts`, `agent-card.test.ts`, e2e | grep `resolveIdentityForToken`/`resolveIdentityForSlug` en TODO el repo; reemplazar en cada `vi.mock` factory |
+
+> **AUTO-BLINDAJE supabase multi-query mock (recurrente):** el pre-check de unicidad
+> + el UPDATE de `bindErc8004Identity` hacen 2 llamadas a `supabase.from`. Mockear
+> con `mockImplementation` + contador local (NO `mockReturnValueOnce` encadenado) y
+> castear builders `as unknown as ReturnType<typeof supabase.from>`. Ref:
+> `auto-blindaje.md` entrada del 2026-05-31.
+
+### 11.9 — Readiness Check (FIX v2 / DT-22)
+
+| Ítem | Estado |
+|---|---|
+| MNR-1 (vector inverso) — causa raíz grounded archivo:línea | OK (`identity.ts:244-271` cruza solo token; bind no registra agente — `auth.ts:464-547`) |
+| Identificador estable del `Agent` confirmado: `(registry, slug)` | OK (`discovery.ts:435-468` mapAgent l.461/446; no hay URL canónica estable) |
+| Match bidireccional diseñado: lado agente (`extractDeclaredTokenId`) + lado binder (`agent_registry`+`agent_slug` en JSONB) | OK (DT-22.1/22.3/22.5) |
+| Análisis de cierre de AMBOS vectores (original + inverso) + caso legítimo + legacy | OK (DT-22.2) |
+| `resolveIdentityForToken` → `resolveIdentityForAgent` (4 args), callers actualizados | OK (DT-22.5/22.6) |
+| `agent_slug` promovido a ancla de trust (cruzado con token poseído) + `agent_registry` para colisión de slug | OK (DT-22.1/22.3) |
+| Contrato del badge documentado en `AgentCardIdentity` | OK (DT-22.4) |
+| MNR-2 — migration UNIQUE parcial aditiva + `_down`, convención del repo, idempotente | OK (DT-22.8) |
+| Mapeo `23505` → `Erc8004TokenAlreadyBoundError` ya existe (identity.ts:209) | OK |
+| Resolución por igualdad indexable preservada (no full-table scan) | OK (DT-22.5, índice funcional cubre TD-ERC8004-03) |
+| CD-13/CD-2/CD-8/CD-3/CD-6/AC-9 preservados | OK (DT-22.9) |
+| CD-15 nuevo (grep exports antes de renombrar) + supabase multi-query mock | OK (§11.8, auto-blindaje recurrente) |
+| Tests SEC nuevos: inverso, match, no-match, original, legacy, unique-db, unit resolver | OK (§11.8) |
+| `[NEEDS CLARIFICATION]` sin resolver | NINGUNO (`agent_registry` regex marcado [VERIFY-AT-IMPL] con default seguro 400; migration con nota de duplicados pre-existentes, no bloqueante) |
+
+**Readiness DT-22: PASS.** MNR-1 (vector inverso) cerrado por match bidireccional;
+MNR-2 cerrado por índice UNIQUE parcial. Listo para fix-pack v2 del Dev.

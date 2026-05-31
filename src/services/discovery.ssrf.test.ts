@@ -39,7 +39,7 @@ vi.mock('./registry.js', () => ({
 // token the agent declares. Mock it so the SSRF tests don't hit supabase.
 vi.mock('./identity.js', () => ({
   identityService: {
-    resolveIdentityForToken: vi.fn().mockResolvedValue(null),
+    resolveIdentityForAgent: vi.fn().mockResolvedValue(null),
   },
 }));
 

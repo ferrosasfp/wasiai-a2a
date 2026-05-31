@@ -49,3 +49,20 @@
 - **Aplicar en**: cuando un service hace N queries a supabase en una sola función,
   mockear con `mockImplementation`+contador local, NO con `mockReturnValueOnce`
   encadenado; y castear builders mock con `as unknown as` para evitar TS2352.
+
+### [2026-05-31] FIX-PACK v2 (MNR-1) — endurecer validación rompe test legacy de happy-path
+- **Error**: tras agregar la regla JUNTOS-o-NINGUNO en `auth.ts` (un `agent_slug`
+  sin `agent_registry` → 400 `INVALID_INPUT`), el test AC-1 (`auth.erc8004.test.ts`)
+  que enviaba `{ token_id, agent_slug }` pasó de 200 a 400. El test predataba el fix.
+- **Causa raíz**: el contrato del bind cambió: `agent_slug` dejó de ser opt-in
+  independiente y pasó a ser una mitad del ancla bidireccional `(registry, slug)`.
+  El payload happy-path del test enviaba solo una mitad → ahora es input inválido
+  por diseño (DT-22.7). No era bug del código; era un fixture desactualizado.
+- **Fix**: actualizar el payload del test AC-1 a `{ token_id, agent_registry,
+  agent_slug }` y assert sobre ambos campos persistidos. Idéntico criterio en el
+  e2e bridge (constante `BOUND_REGISTRY` + anclas en los `_storedBinding`).
+- **Aplicar en**: cuando un fix endurece la validación de un endpoint (nuevo
+  campo obligatorio condicional), revisar TODOS los fixtures de happy-path que
+  enviaban el shape viejo — fallan en runtime con 4xx, no en tsc. Buscar los
+  `payload:` y los row-fixtures (`_storedBinding`, `makeKeyRow`) que toquen el
+  shape afectado.

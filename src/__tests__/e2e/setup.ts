@@ -31,7 +31,7 @@ vi.mock('../../services/identity.js', () => ({
     lookupByHash: vi.fn(),
     deactivate: vi.fn(),
     bindErc8004Identity: vi.fn(),
-    resolveIdentityForToken: vi.fn(),
+    resolveIdentityForAgent: vi.fn(),
   },
   // WKH-100: auth/middleware import this derived helper (AC-6/DT-17).
   isIdentityVerified: (row: { erc8004_identity?: unknown } | null) =>

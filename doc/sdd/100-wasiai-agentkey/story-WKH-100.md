@@ -901,3 +901,225 @@ Opcional: documentar en el comentario del campo `agent_slug` (en `Erc8004Identit
 
 **FUERA de scope (sección original, NO tocar):** `src/adapters/base/identity.ts`, `src/adapters/base/index.ts`,
 `src/adapters/registry.ts`, `src/adapters/types.ts`, cualquier archivo de budget/pago.
+
+---
+
+# FIX-PACK v2 POST-re-AR — MNR-1 (match bidireccional) + MNR-2 (UNIQUE en DB) — DT-22
+
+> **CONTRATO DEL FIX v2. SUPERSEDE las partes del fix-pack v1 (DT-21) que resuelvan
+> el badge cruzando SOLO por `token_id`.** El re-AR del v1 (commit `6057d7e`) quedó
+> APROBADO CON MENORES; el humano decidió cerrar los 2 MENORES ahora (badge trustless
+> de verdad). Lee el ADDENDUM DT-22 del `sdd.md` (§11) para el detalle de diseño.
+> Ref completa: `sdd.md` DT-22.0..22.9.
+
+## FPv2.0 Los 2 MENORES (qué NO debe seguir pasando)
+
+- **MNR-1 (vector inverso — el importante):** `resolveIdentityForToken`
+  (`src/services/identity.ts:244-271`) surfacea `verified:true` cruzando SOLO por
+  `token_id`+`chain_id` (l.262). NO prueba que el operador del agente sea el dueño
+  del token. **Ataque:** el atacante crea un agente A' cuyo card declara el token V
+  de la víctima (público, ya bindeado por la víctima); `extractDeclaredTokenId(A')`
+  devuelve V; `resolveIdentityForToken(V, C)` encuentra el binding de la víctima →
+  A' surfacea `verified:true` con identidad ajena. **Debe quedar imposible.**
+- **MNR-2 (race de unicidad):** la unicidad token↔key activa hoy es SOLO un pre-check
+  app-layer (`src/services/identity.ts:182-198`, check-then-write). Dos binds
+  concurrentes del mismo token a keys distintas pueden pasar ambos el pre-check.
+  Falta la barrera atómica en DB.
+
+## FPv2.1 Anti-Hallucination del fix v2 (LEER, marcar antes de cerrar)
+
+- [ ] **Identificador estable del `Agent` = `(registry, slug)`** — NO inventes URL
+  canónica. `mapAgent` (`src/services/discovery.ts:435-468`) deriva `registry:
+  registry.name` (l.461) y `slug` (l.438/446). `invokeUrl` es un template, NO
+  identidad; `Agent.id` puede colisionar entre registries. El match usa `(registry,
+  slug)` **case-insensitive + trim** en ambos lados.
+- [ ] **[VERIFY-AT-IMPL] regex de `agent_registry`** — no hay un patrón canónico hoy;
+  usá uno permisivo (p.ej. `^[\w][\w .:/-]{0,127}$`) confirmando contra los
+  `registry.name` reales del repo. **DEFAULT SEGURO:** inválido → 400 `INVALID_INPUT`.
+- [ ] **CD-15 (auto-blindaje RECURRENTE — 3 entradas)** — renombrar
+  `resolveIdentityForToken` → `resolveIdentityForAgent` rompe factory-mocks
+  SILENCIOSAMENTE (TypeError en runtime, NO en `tsc`). ANTES de renombrar:
+  `grep -rn "resolveIdentityForToken" src/` (callers) **y**
+  `grep -rn "vi.mock('../services/identity.js'" src/` (y `../../services/identity.js`).
+  Actualizá TODOS los factory-mocks: `auth.test.ts`, `a2a-key.test.ts`,
+  `agent-card.test.ts` (mockea `discovery.js`), `erc8004-identity-bridge.e2e.test.ts`,
+  `discovery.test.ts`, `identity.test.ts` y cualquier otro que aparezca en el grep.
+- [ ] **`agent_registry`/`agent_slug` van JUNTOS o NINGUNO** — uno sin el otro → 400
+  `INVALID_INPUT`. Ninguno → bind válido SIN ancla de badge (backward-compat).
+- [ ] **`.select('erc8004_identity')` only** en el resolver; `.select('id')` en el
+  pre-check (CD-2: nunca budget/funding_wallet).
+- [ ] **Bindings v1 sin ancla → SIN badge (DEFAULT SEGURO)** — la key NO se degrada
+  (autentica/debita igual, AC-9). NO migrar datos.
+- [ ] **supabase multi-query mock (auto-blindaje recurrente)** — `bindErc8004Identity`
+  hace pre-check + UPDATE (2 `supabase.from`). Mockear con `mockImplementation` +
+  contador local (NO `mockReturnValueOnce` encadenado); castear builders
+  `as unknown as ReturnType<typeof supabase.from>`.
+
+## FPv2.2 `src/types/a2a-key.ts` — extender `Erc8004IdentityBinding` (W0)
+
+`agent_slug` deja de ser hint informativo (DT-21.7) y **pasa a ser ancla de trust**
+(ahora cruzado con el token on-chain-poseído). Se agrega `agent_registry` para
+resolver colisiones de slug entre registries. SIN columna nueva, SIN migration de datos.
+
+```ts
+export interface Erc8004IdentityBinding {
+  token_id: string;
+  chain_id: number;
+  agent_card_url: string;
+  owner_address: string;
+  verified_at: string;
+  // DT-22 (MNR-1) — ancla del LADO BINDER del match bidireccional. El owner declara
+  // QUÉ agente de discovery opera esta identidad: (registry, slug) (= mapAgent:
+  // registry.name + slug). El badge surfacea SOLO si el agente A declara este token
+  // Y este binding declara operar (A.registry, A.slug). Promoción de agent_slug a
+  // ancla de trust (cruzado con el token poseído on-chain). Van JUNTOS o NINGUNO.
+  agent_registry?: string;   // == Agent.registry. Match case-insensitive.
+  agent_slug?: string;       // == Agent.slug. Match case-insensitive.
+}
+```
+
+## FPv2.3 `src/types/index.ts` — documentar contrato del badge (W0)
+
+Actualizar el comentario de `AgentCardIdentity` (l.148-152) con QUÉ atesta
+`verified:true` (DT-22.4): vínculo bidireccional probado (3 anclajes: card declara
+token + token bindeado+`ownerOf`-verificado + binding declara operar este agente).
+Shape de `AgentCardIdentity` NO cambia.
+
+## FPv2.4 `src/services/identity.ts` — `resolveIdentityForToken` → `resolveIdentityForAgent` (W2)
+
+Reemplazar `resolveIdentityForToken(tokenId, chainId)` (l.244-271) por:
+
+```ts
+async resolveIdentityForAgent(
+  tokenId: string,
+  chainId: number,
+  agentRegistry: string,
+  agentSlug: string,
+): Promise<AgentCardIdentity | null> {
+  const { data, error } = await supabase
+    .from('a2a_agent_keys')
+    .select('erc8004_identity')        // SOLO esta columna (CD-2/DT-19)
+    .eq('is_active', true)
+    .not('erc8004_identity', 'is', null);
+  if (error || !data) return null;
+  const nReg = agentRegistry.trim().toLowerCase();
+  const nSlug = agentSlug.trim().toLowerCase();
+  for (const row of data as Array<{ erc8004_identity: Erc8004IdentityBinding | null }>) {
+    const b = row.erc8004_identity;
+    if (!b) continue;
+    if (b.token_id !== tokenId || b.chain_id !== chainId) continue;   // lado token/agente
+    if (!b.agent_registry || !b.agent_slug) continue;                 // sin ancla → sin badge
+    if (b.agent_registry.trim().toLowerCase() !== nReg) continue;      // lado binder: registry
+    if (b.agent_slug.trim().toLowerCase() !== nSlug) continue;         // lado binder: slug
+    return { erc8004_token_id: b.token_id, chain_id: b.chain_id, verified: true };
+  }
+  return null;
+}
+```
+- [VERIFY-AT-IMPL] podés intentar el filtro server-side por igualdad indexable de
+  `token_id`/`chain_id` (`.eq('erc8004_identity->>token_id', tokenId)` etc.); el match
+  de `(registry, slug)` se hace SIEMPRE en JS (case-insensitive). Fallback JS si
+  PostgREST no soporta el operador `->>` como esperás.
+- El pre-check de unicidad en `bindErc8004Identity` (l.182-198) **se mantiene**
+  (defensa en profundidad). El mapeo `error.code === '23505'` →
+  `Erc8004TokenAlreadyBoundError` (l.209) **se mantiene** (ahora respaldado por el
+  índice DB de FPv2.7).
+
+## FPv2.5 `src/services/discovery.ts` + `src/routes/agent-card.ts` — pasar `(registry, slug)` (W5)
+
+- `attachIdentities` (l.335-352): `resolveIdentityForAgent(decl.tokenId, decl.chainId,
+  a.registry, a.slug)` (en vez de `resolveIdentityForToken(decl.tokenId, decl.chainId)`).
+  Skip si `!decl`. Mantener `Promise.all` + degradación graciosa.
+- `getAgent` (l.507-519): `resolveIdentityForAgent(decl.tokenId, decl.chainId,
+  agent.registry, agent.slug)`.
+- `src/routes/agent-card.ts`: idem — `resolveIdentityForAgent(decl.tokenId,
+  decl.chainId, agent.registry, agent.slug)` antes de `buildAgentCard` (firma NO cambia).
+- `extractDeclaredTokenId` (l.135-169) NO cambia.
+
+## FPv2.6 `src/routes/auth.ts` — bind persiste `(agent_registry, agent_slug)` (W3)
+
+- Validar `agent_registry` OPCIONAL del body (igual estilo que `agent_slug`,
+  l.464-475): `string`, trim, regex permisivo (FPv2.1), no vacío → si inválido 400
+  `INVALID_INPUT`.
+- **Regla JUNTOS o NINGUNO (DT-22.7):** si llega `agent_slug` sin `agent_registry`
+  (o viceversa) → 400 `INVALID_INPUT`. Si llegan ambos → ancla válida. Si ninguno →
+  bind sin ancla (válido, sin badge).
+- El binding (l.540-547): `...(agentRegistry && agentSlug && { agent_registry:
+  agentRegistry, agent_slug: agentSlug })`.
+- El catch ya mapea `Erc8004TokenAlreadyBoundError` → 409 (l.562-566): **se mantiene**.
+
+## FPv2.7 MIGRATION — índice UNIQUE parcial (MNR-2) (nueva, aditiva)
+
+**Crear DOS archivos** (convención `supabase/migrations/`, calcada de
+`20260529000001_a2a_key_funding_wallet.sql` + su `_down`):
+
+`supabase/migrations/20260531000000_erc8004_token_unique.sql`:
+```sql
+BEGIN;
+-- WKH-100 FIX v2 (MNR-2): a lo sumo UNA key activa puede reclamar un mismo
+-- (token_id, chain_id) ERC-8004. Cierra la race del pre-check app-layer.
+-- El código mapea 23505 → Erc8004TokenAlreadyBoundError (identity.ts:209).
+-- Aditivo + idempotente. NO migra datos (AC-9/CD-9).
+-- NOTA DEPLOY: si ya existen >=2 keys activas con el mismo token_id+chain_id
+-- (race de v1), este CREATE falla. Verificá/limpiá duplicados antes:
+--   SELECT erc8004_identity->>'token_id', erc8004_identity->>'chain_id', count(*)
+--   FROM a2a_agent_keys WHERE is_active AND erc8004_identity IS NOT NULL
+--   GROUP BY 1,2 HAVING count(*) > 1;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_a2a_agent_keys_erc8004_token
+  ON a2a_agent_keys (
+    (erc8004_identity->>'token_id'),
+    (erc8004_identity->>'chain_id')
+  )
+  WHERE is_active AND erc8004_identity IS NOT NULL;
+COMMIT;
+```
+
+`supabase/migrations/20260531000000_erc8004_token_unique_down.sql`:
+```sql
+BEGIN;
+DROP INDEX IF EXISTS uq_a2a_agent_keys_erc8004_token;
+COMMIT;
+```
+- Doble función: barrera atómica (MNR-2) + índice funcional que acelera el
+  reverse-lookup (cubre TD-ERC8004-03).
+- Si hay un `test/migrate-preflight.test.ts` que valida pares up/down, confirmá que
+  el nuevo par no lo rompe (grep el patrón que valida).
+
+## FPv2.8 Tests del fix v2 (OBLIGATORIOS)
+
+| Test | Archivo | Aserción |
+|---|---|---|
+| **SEC-INV** (MNR-1 vector inverso) | `auth.erc8004.test.ts` / `discovery.test.ts` | víctima bindea V declarando `(regV, slugV)`; agente del atacante `(regX, slugX)` declara V en su card → `resolveIdentityForAgent(V, C, regX, slugX)` → `null`; discover+agent-card del atacante SIN `identity`. **El vector inverso falla.** |
+| **SEC-MATCH** | `discovery.test.ts` / e2e | binding de T declara `(regA, slugA)`; agente `(regA, slugA)` declara T → `{verified:true}`; badge presente |
+| **SEC-NOMATCH** | `discovery.test.ts` | binding de T declara `(regA, slugA)`; agente B `(regB, slugB)` declara T → `null`; B sin badge |
+| **SEC-ORIG** (vector original re-verificado) | `auth.erc8004.test.ts` | slug spoof clásico sigue cerrado (binding de V declara `(regV, slugV)` ≠ agente del atacante) |
+| **SEC-LEGACY** (AC-9) | `discovery.test.ts` / `auth.test.ts` | binding v1 sin `agent_registry`/`agent_slug` → `null` (sin badge); key autentica + debita igual |
+| **SEC-UNIQUE-DB** (MNR-2) | `auth.erc8004.test.ts` | 2º bind del MISMO T+chain a key B activa → `UPDATE` devuelve `23505` → `Erc8004TokenAlreadyBoundError` → 409, sin write. Re-bind de A sobre su misma key (AC-5) → OK |
+| **unit `resolveIdentityForAgent`** | `identity.test.ts` / `discovery.test.ts` | match SOLO si token+chain+registry(ci)+slug(ci); falta cualquiera → null; SELECT solo `erc8004_identity` |
+| **mocks actualizados (CD-15)** | `auth.test.ts`, `a2a-key.test.ts`, `agent-card.test.ts`, e2e | reemplazar `resolveIdentityForToken` por `resolveIdentityForAgent` en cada `vi.mock` factory de `identityService` |
+
+## FPv2.9 Done Definition del fix v2
+
+- [ ] **MNR-1 cerrado:** declarar el token de otro agente NO produce badge (SEC-INV
+      verde); el badge solo aparece con match bidireccional (card declara token ∧
+      binding declara operar este agente ∧ token bindeado+`ownerOf`-verificado).
+- [ ] **MNR-2 cerrado:** índice UNIQUE parcial aplicado; 2º bind concurrente del mismo
+      token a otra key activa → 409 vía `23505` (SEC-UNIQUE-DB verde).
+- [ ] Vector original (slug spoof) sigue cerrado (SEC-ORIG verde).
+- [ ] Backward-compat: binding v1 sin ancla → sin badge, key no degradada (SEC-LEGACY,
+      AC-9 verde).
+- [ ] `resolveIdentityForToken` ya no existe; todos los callers usan
+      `resolveIdentityForAgent`; **todos los factory-mocks actualizados (CD-15)**;
+      `npm test` verde.
+- [ ] Match `(registry, slug)` case-insensitive + trim; perf por igualdad de
+      `token_id` indexable (no full-table scan por agente).
+- [ ] CD-13/CD-2/CD-8/CD-3/CD-6/AC-9 intactos (grep de verificación).
+- [ ] `biome check --write` SOLO sobre archivos in-scope del fix v2 (CD-12).
+
+**Archivos in-scope del fix v2:** `src/types/a2a-key.ts`, `src/types/index.ts`
+(comentario), `src/services/identity.ts`, `src/services/discovery.ts`,
+`src/routes/agent-card.ts`, `src/routes/auth.ts`,
+`supabase/migrations/20260531000000_erc8004_token_unique.sql` (+ `_down.sql`), + tests
+(`auth.erc8004.test.ts`, `discovery.test.ts`, `identity.test.ts`,
+`agent-card.test.ts`, `erc8004-identity-bridge.e2e.test.ts`, `auth.test.ts`,
+`a2a-key.test.ts`). NO tocar el adapter `erc8004-identity.ts` ni archivos de budget.

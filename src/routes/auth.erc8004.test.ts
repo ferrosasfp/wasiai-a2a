@@ -36,7 +36,7 @@ vi.mock('../services/identity.js', () => ({
     deactivate: vi.fn(),
     bindFundingWallet: vi.fn(),
     bindErc8004Identity: vi.fn(),
-    resolveIdentityForToken: vi.fn(),
+    resolveIdentityForAgent: vi.fn(),
   },
   isIdentityVerified: (row: { erc8004_identity?: unknown } | null) =>
     row?.erc8004_identity != null,
@@ -152,7 +152,12 @@ describe('auth ERC-8004 routes', () => {
         method: 'POST',
         url: '/auth/erc8004/bind',
         headers: AUTH_HEADERS,
-        payload: { token_id: '42', agent_slug: 'my-agent' },
+        // FIX v2 (DT-22.7): anchors go TOGETHER or not at all.
+        payload: {
+          token_id: '42',
+          agent_registry: 'WasiAI',
+          agent_slug: 'my-agent',
+        },
       });
 
       expect(res.statusCode).toBe(200);
@@ -161,6 +166,7 @@ describe('auth ERC-8004 routes', () => {
       expect(binding.chain_id).toBe(84532);
       expect(binding.owner_address).toBe(FUNDING_WALLET.toLowerCase());
       expect(binding.agent_card_url).toBe('https://cards.example/a.json');
+      expect(binding.agent_registry).toBe('WasiAI');
       expect(binding.agent_slug).toBe('my-agent');
       expect(new Date(binding.verified_at).toISOString()).toBe(
         binding.verified_at,
@@ -443,6 +449,127 @@ describe('auth ERC-8004 routes', () => {
         url: '/auth/erc8004/bind',
         headers: AUTH_HEADERS,
         payload: { token_id: '42' },
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error_code).toBe('ERC8004_TOKEN_ALREADY_BOUND');
+    });
+
+    // ── FIX v2 (MNR-1 / MNR-2) ──────────────────────────────────
+
+    it('FPv2 (MNR-1): bind with (agent_registry, agent_slug) → persists BOTH anchors', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockVerifyOwnership.mockResolvedValue({
+        ok: true,
+        owner: FUNDING_WALLET as `0x${string}`,
+        matches: true,
+        chainId: 84532,
+      });
+      mockResolve.mockResolvedValue({ ok: true, tokenUri: '', chainId: 84532 });
+      mockBindErc8004.mockImplementation(async (_k, _o, b) => b);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/erc8004/bind',
+        headers: AUTH_HEADERS,
+        payload: {
+          token_id: '42',
+          agent_registry: 'WasiAI',
+          agent_slug: 'my-agent',
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const binding = res.json().erc8004_identity as Erc8004IdentityBinding;
+      expect(binding.agent_registry).toBe('WasiAI');
+      expect(binding.agent_slug).toBe('my-agent');
+    });
+
+    it('FPv2 (DT-22.7): agent_slug without agent_registry → 400 INVALID_INPUT (JUNTOS o NINGUNO)', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/erc8004/bind',
+        headers: AUTH_HEADERS,
+        payload: { token_id: '1', agent_slug: 'my-agent' },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error_code).toBe('INVALID_INPUT');
+      expect(mockVerifyOwnership).not.toHaveBeenCalled();
+    });
+
+    it('FPv2 (DT-22.7): agent_registry without agent_slug → 400 INVALID_INPUT', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/erc8004/bind',
+        headers: AUTH_HEADERS,
+        payload: { token_id: '1', agent_registry: 'WasiAI' },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error_code).toBe('INVALID_INPUT');
+    });
+
+    it('FPv2 (DT-22.7): neither anchor → bind valid WITHOUT badge anchor', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockVerifyOwnership.mockResolvedValue({
+        ok: true,
+        matches: true,
+        chainId: 84532,
+      });
+      mockResolve.mockResolvedValue({ ok: true, tokenUri: '', chainId: 84532 });
+      mockBindErc8004.mockImplementation(async (_k, _o, b) => b);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/erc8004/bind',
+        headers: AUTH_HEADERS,
+        payload: { token_id: '8' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const binding = res.json().erc8004_identity as Erc8004IdentityBinding;
+      expect(binding.agent_registry).toBeUndefined();
+      expect(binding.agent_slug).toBeUndefined();
+    });
+
+    it('FPv2 (DT-22.7): invalid agent_registry → 400 INVALID_INPUT', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/erc8004/bind',
+        headers: AUTH_HEADERS,
+        // Contains chars outside the permissive REGISTRY_RE (e.g. newline).
+        payload: {
+          token_id: '1',
+          agent_registry: 'bad\nname',
+          agent_slug: 'my-agent',
+        },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error_code).toBe('INVALID_INPUT');
+    });
+
+    it('SEC-UNIQUE-DB (MNR-2): 2nd bind same token → service maps 23505 → 409, no write', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      mockVerifyOwnership.mockResolvedValue({
+        ok: true,
+        matches: true,
+        chainId: 84532,
+      });
+      mockResolve.mockResolvedValue({ ok: true, tokenUri: '', chainId: 84532 });
+      // The DB partial UNIQUE index raises 23505 → service throws this error.
+      mockBindErc8004.mockRejectedValue(new Erc8004TokenAlreadyBoundError());
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/erc8004/bind',
+        headers: AUTH_HEADERS,
+        payload: {
+          token_id: '42',
+          agent_registry: 'WasiAI',
+          agent_slug: 'agent-b',
+        },
       });
 
       expect(res.statusCode).toBe(409);

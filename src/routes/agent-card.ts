@@ -47,14 +47,18 @@ const agentCardRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const baseUrl = resolveBaseUrl(request);
-      // WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.5): resolve the verified ERC-8004
-      // identity by the token the AGENT DECLARES in its card (not agent.slug).
-      // Public, no budget. No declaration → no badge (spoofing closed).
+      // WKH-100 FIX-PACK v2 (MNR-1 / DT-22.5): resolve the verified ERC-8004
+      // identity by the BIDIRECTIONAL match — the token the AGENT DECLARES in
+      // its card crossed with a binding that declares operating
+      // (agent.registry, agent.slug). Public, no budget. No declaration / no
+      // bidirectional match → no badge (inverse-vector spoofing closed).
       const decl = extractDeclaredTokenId(agent);
       const identity = decl
-        ? await identityService.resolveIdentityForToken(
+        ? await identityService.resolveIdentityForAgent(
             decl.tokenId,
             decl.chainId,
+            agent.registry,
+            agent.slug,
           )
         : null;
       try {

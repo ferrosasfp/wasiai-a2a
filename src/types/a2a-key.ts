@@ -15,12 +15,18 @@ export interface Erc8004IdentityBinding {
   agent_card_url: string; // tokenURI resuelto; '' si resolve falló al bindear (DT-15)
   owner_address: string; // lowercase (== funding_wallet al momento del bind)
   verified_at: string; // ISO 8601 del verify server-side
-  // WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.7): hint INFORMATIVO solamente. NO
-  // controla `verified`. El badge se resuelve por el token DECLARADO on-chain
-  // por el propio agente (extractDeclaredTokenId) cruzado con el bind verificado
-  // local, NO por este slug aseverado por el caller. Se conserva por
-  // backward-compat con bindings ya escritos (sin migration — AC-9/CD-9).
-  agent_slug?: string;
+  // WKH-100 FIX-PACK v2 (MNR-1 / DT-22): ancla del LADO BINDER del match
+  // bidireccional. El owner declara QUÉ agente de discovery opera esta identidad
+  // mediante (registry, slug) (= mapAgent: registry.name + slug). El badge
+  // `verified:true` surfacea SOLO si el agente A declara este token EN SU CARD
+  // (extractDeclaredTokenId) Y este binding declara operar (A.registry, A.slug).
+  // `agent_slug` deja de ser hint informativo (DT-21.7) y pasa a ser ancla de
+  // trust (ahora sólida porque se cruza con el token on-chain-poseído);
+  // `agent_registry` resuelve colisiones de slug entre registries. Match
+  // case-insensitive + trim. Van JUNTOS o NINGUNO. Bindings v1 sin estos campos
+  // → SIN badge (default seguro, AC-9/CD-9; sin migration de datos).
+  agent_registry?: string; // == Agent.registry. Match case-insensitive.
+  agent_slug?: string; // == Agent.slug. Match case-insensitive.
 }
 
 // --- DB Row ---

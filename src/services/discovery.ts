@@ -323,11 +323,12 @@ export const discoveryService = {
   },
 
   /**
-   * WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.4): attach verified ERC-8004 identity by
-   * cruzando el `token_id` que CADA agente DECLARA en su AgentCard
-   * (`extractDeclaredTokenId`) contra el binding `ownerOf`-verificado en la DB
-   * (`resolveIdentityForToken`). Resolución por slug ELIMINADA (spoofing
-   * cerrado). Agentes sin declaración válida → skip sin query (MNR-1: menos
+   * WKH-100 FIX-PACK v2 (MNR-1 / DT-22.5): attach verified ERC-8004 identity by
+   * the BIDIRECTIONAL match. Para cada agente: (i) `extractDeclaredTokenId(a)`
+   * extrae el token que el agente DECLARA en su card; (ii)
+   * `resolveIdentityForAgent(token, chain, a.registry, a.slug)` cruza ese token
+   * contra un binding `ownerOf`-verificado QUE ADEMÁS declare operar
+   * `(a.registry, a.slug)`. Sin declaración → skip sin query (MNR-1: menos
    * round-trips). DB failure para un agente → ese agente SIN identity (omitido,
    * no null — AC-9/CD-9), NUNCA rompe discover. No RPC aquí (CD-8): el verify
    * on-chain ocurrió al bindear.
@@ -338,9 +339,11 @@ export const discoveryService = {
         const decl = extractDeclaredTokenId(a);
         if (!decl) return; // sin declaración → skip (sin badge, sin query)
         try {
-          const identity = await identityService.resolveIdentityForToken(
+          const identity = await identityService.resolveIdentityForAgent(
             decl.tokenId,
             decl.chainId,
+            a.registry,
+            a.slug,
           );
           if (identity) a.identity = identity;
         } catch {
@@ -504,15 +507,18 @@ export const discoveryService = {
         if (response.ok) {
           const data = await response.json();
           const agent = this.mapAgent(registry, data);
-          // WKH-100 FIX-PACK (DT-21.4): resolve identity by the token the agent
-          // DECLARES in its card (not agent.slug). Skip if no declaration. DB
-          // failure → agent sin identity, NO rompe getAgent (DT-18).
+          // WKH-100 FIX-PACK v2 (DT-22.5): resolve identity by the BIDIRECTIONAL
+          // match — token the agent DECLARES crossed with a binding that
+          // declares operating (agent.registry, agent.slug). Skip if no
+          // declaration. DB failure → agent sin identity, NO rompe getAgent.
           const decl = extractDeclaredTokenId(agent);
           if (decl) {
             try {
-              const identity = await identityService.resolveIdentityForToken(
+              const identity = await identityService.resolveIdentityForAgent(
                 decl.tokenId,
                 decl.chainId,
+                agent.registry,
+                agent.slug,
               );
               if (identity) agent.identity = identity;
             } catch {}

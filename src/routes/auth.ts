@@ -85,6 +85,10 @@ function parseTokenId(raw: unknown): bigint | null {
 }
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,127}$/;
+// WKH-100 FIX v2 (MNR-1 / FPv2.1): permissive registry-name pattern. Matches
+// the real `registry.name` values in the repo (e.g. "wasiai", "WasiAI"). No
+// canonical standard exists today; default-safe: invalid → 400 INVALID_INPUT.
+const REGISTRY_RE = /^[\w][\w .:/-]{0,127}$/;
 
 // ── Helper: resolve caller key from x-a2a-key header ────────
 
@@ -454,14 +458,18 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
 
       // 2. Validate token_id (DT-14 / CD-11).
       const body = req.body as
-        | { token_id?: unknown; agent_slug?: unknown }
+        | {
+            token_id?: unknown;
+            agent_slug?: unknown;
+            agent_registry?: unknown;
+          }
         | undefined;
       const tokenId = parseTokenId(body?.token_id);
       if (tokenId === null) {
         return reply.status(400).send({ error_code: 'INVALID_INPUT' });
       }
 
-      // 2b. agent_slug OPCIONAL (DT-20).
+      // 2b. agent_slug OPCIONAL — ahora ancla de trust (MNR-1 / DT-22).
       let agentSlug: string | undefined;
       if (body?.agent_slug !== undefined) {
         if (typeof body.agent_slug !== 'string') {
@@ -472,6 +480,26 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
           return reply.status(400).send({ error_code: 'INVALID_INPUT' });
         }
         agentSlug = trimmed;
+      }
+
+      // 2c. agent_registry OPCIONAL — ancla del lado binder (MNR-1 / FPv2.6).
+      let agentRegistry: string | undefined;
+      if (body?.agent_registry !== undefined) {
+        if (typeof body.agent_registry !== 'string') {
+          return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+        }
+        const trimmed = body.agent_registry.trim();
+        if (!REGISTRY_RE.test(trimmed)) {
+          return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+        }
+        agentRegistry = trimmed;
+      }
+
+      // 2d. JUNTOS o NINGUNO (DT-22.7): el ancla de trust requiere AMBOS
+      // (registry, slug). Solo uno → 400. Ninguno → bind sin ancla (válido,
+      // sin badge, backward-compat AC-9).
+      if ((agentRegistry === undefined) !== (agentSlug === undefined)) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
       }
 
       // 3. funding_wallet must be bound first — NO RPC (AC-3).
@@ -543,7 +571,13 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         agent_card_url: agentCardUrl,
         owner_address: fundingWallet.toLowerCase(),
         verified_at: new Date().toISOString(),
-        ...(agentSlug && { agent_slug: agentSlug }), // AC-8 opt-in (DT-20)
+        // MNR-1 / DT-22: ancla de trust bidireccional. Van JUNTOS o NINGUNO
+        // (validado arriba). Sin ancla → bind válido sin badge (AC-9).
+        ...(agentRegistry &&
+          agentSlug && {
+            agent_registry: agentRegistry,
+            agent_slug: agentSlug,
+          }),
       };
 
       // 8. Persist (Ownership Guard in the service — CD-3).

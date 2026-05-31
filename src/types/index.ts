@@ -144,6 +144,17 @@ export interface Agent {
  * WKH-100 (AC-8): ERC-8004 verified identity surfaced in discovery.
  * `verified` is a literal `true` — the field is ONLY ever surfaced when the
  * binding was verified on-chain server-side (anti-spoof — CD-7).
+ *
+ * WKH-100 FIX-PACK v2 (MNR-1 / DT-22.4) — CONTRATO DEL BADGE. `verified:true`
+ * atesta un vínculo BIDIRECCIONAL probado por TRES anclajes simultáneos:
+ *   (i)   el AgentCard del agente DECLARA este token (extractDeclaredTokenId);
+ *   (ii)  ese token está bindeado a una Agent Key y fue `ownerOf`-verificado
+ *         on-chain al bindear (el caller poseía el token);
+ *   (iii) ese binding DECLARA operar ESTE agente vía (agent_registry,
+ *         agent_slug) (= Agent.registry + Agent.slug, case-insensitive).
+ * Si falta CUALQUIER anclaje → SIN badge. Esto cierra tanto el vector clásico
+ * (slug spoof) como el inverso (declarar el token público de otro agente).
+ * El shape de salida NO cambia: el fix es de mecanismo de resolución.
  */
 export interface AgentCardIdentity {
   erc8004_token_id: string; // = token_id del binding

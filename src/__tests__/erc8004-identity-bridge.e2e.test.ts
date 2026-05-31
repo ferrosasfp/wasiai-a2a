@@ -30,8 +30,9 @@ import type { Erc8004IdentityBinding, RegistryConfig } from '../types/index.js';
 //        .select('id').eq('is_active',true).neq('id',k).eq(token).eq(chain).limit(1)
 //   2. bindErc8004Identity UPDATE:
 //        .update({ erc8004_identity }).eq('id').eq('owner_ref').select('id')
-//   3. resolveIdentityForToken:
+//   3. resolveIdentityForAgent (FIX v2 / MNR-1):
 //        .select('erc8004_identity').eq('is_active',true).not(...)
+//      cross-matched in JS on token_id + chain_id + (agent_registry, agent_slug).
 let _storedBinding: Erc8004IdentityBinding | null = null;
 
 vi.mock('../lib/supabase.js', () => {
@@ -148,6 +149,9 @@ const TEST_KEY_HASH = crypto
   .update(TEST_KEY)
   .digest('hex');
 const BOUND_SLUG = 'foo';
+// FIX v2 (MNR-1): the binding declares operating (registry, slug). Must equal
+// the Agent.registry produced by mapAgent (= makeRegistry().name).
+const BOUND_REGISTRY = 'test-registry';
 const CARD_URL = 'https://cards.example/foo.json';
 
 function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig {
@@ -242,7 +246,7 @@ describe('ERC-8004 identity-unified bridge (e2e)', () => {
     });
   });
 
-  it('1. POST /auth/erc8004/bind with agent_slug → 200 + persists binding', async () => {
+  it('1. POST /auth/erc8004/bind with (agent_registry, agent_slug) → 200 + persists both anchors', async () => {
     mockVerifyOwnership.mockResolvedValue({
       ok: true,
       owner: FUNDING_WALLET as `0x${string}`,
@@ -259,10 +263,15 @@ describe('ERC-8004 identity-unified bridge (e2e)', () => {
       method: 'POST',
       url: '/auth/erc8004/bind',
       headers: { 'x-a2a-key': TEST_KEY },
-      payload: { token_id: '42', agent_slug: BOUND_SLUG },
+      payload: {
+        token_id: '42',
+        agent_registry: BOUND_REGISTRY,
+        agent_slug: BOUND_SLUG,
+      },
     });
 
     expect(res.statusCode).toBe(200);
+    expect(_storedBinding?.agent_registry).toBe(BOUND_REGISTRY);
     expect(_storedBinding?.agent_slug).toBe(BOUND_SLUG);
     expect(_storedBinding?.token_id).toBe('42');
     expect(_storedBinding?.chain_id).toBe(84532);
@@ -275,6 +284,7 @@ describe('ERC-8004 identity-unified bridge (e2e)', () => {
       agent_card_url: CARD_URL,
       owner_address: FUNDING_WALLET,
       verified_at: '2026-05-10T00:00:00.000Z',
+      agent_registry: BOUND_REGISTRY,
       agent_slug: BOUND_SLUG,
     };
     mockFetch.mockResolvedValue({
@@ -302,6 +312,7 @@ describe('ERC-8004 identity-unified bridge (e2e)', () => {
       agent_card_url: CARD_URL,
       owner_address: FUNDING_WALLET,
       verified_at: '2026-05-10T00:00:00.000Z',
+      agent_registry: BOUND_REGISTRY,
       agent_slug: BOUND_SLUG,
     };
     mockFetch.mockResolvedValue({
@@ -348,16 +359,17 @@ describe('ERC-8004 identity-unified bridge (e2e)', () => {
     expect('identity' in agent).toBe(false);
   });
 
-  it('5. SEC anti-spoof (BLQ-MED-1): victim card declares token V≠bound T → NO badge', async () => {
-    // Token 42 is bound (attacker proved ownerOf). The victim's card declares a
-    // DIFFERENT token (99). The verified badge must NOT appear on the victim.
+  it('5. SEC-ORIG (BLQ-MED-1): card declares token V≠bound T → NO badge', async () => {
+    // Token 42 is bound. The agent's card declares a DIFFERENT token (99). The
+    // verified badge must NOT appear (token mismatch — classic vector).
     _storedBinding = {
       token_id: '42',
       chain_id: 84532,
       agent_card_url: CARD_URL,
       owner_address: FUNDING_WALLET,
       verified_at: '2026-05-10T00:00:00.000Z',
-      agent_slug: 'victim', // spoofed slug — must be IGNORED by the resolver
+      agent_registry: BOUND_REGISTRY,
+      agent_slug: 'victim',
     };
     mockFetch.mockResolvedValue({
       ok: true,
@@ -374,5 +386,33 @@ describe('ERC-8004 identity-unified bridge (e2e)', () => {
       .agents.find((a: { slug: string }) => a.slug === 'victim');
     expect(victim.identity).toBeUndefined();
     expect('identity' in victim).toBe(false);
+  });
+
+  it('6. SEC-INV (MNR-1): attacker agent declares the VICTIM bound token → NO badge', async () => {
+    // The victim bound token 42 declaring it operates (test-registry, victim).
+    // The attacker controls a different agent (test-registry, attacker) and
+    // declares the victim's PUBLIC token 42 in its card. The bidirectional
+    // match fails (binding declares victim, not attacker) → no badge.
+    _storedBinding = {
+      token_id: '42',
+      chain_id: 84532,
+      agent_card_url: CARD_URL,
+      owner_address: FUNDING_WALLET,
+      verified_at: '2026-05-10T00:00:00.000Z',
+      agent_registry: BOUND_REGISTRY,
+      agent_slug: 'victim',
+    };
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve([rawAgent('attacker', DECLARED_T)]),
+    });
+
+    const res = await app.inject({ method: 'GET', url: '/discover' });
+    expect(res.statusCode).toBe(200);
+    const attacker = res
+      .json()
+      .agents.find((a: { slug: string }) => a.slug === 'attacker');
+    expect(attacker.identity).toBeUndefined();
+    expect('identity' in attacker).toBe(false);
   });
 });

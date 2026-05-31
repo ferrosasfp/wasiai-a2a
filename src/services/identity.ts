@@ -221,29 +221,43 @@ export const identityService = {
   },
 
   /**
-   * Reverse-lookup PÚBLICO de identidad por `token_id`+`chain_id` (WKH-100
-   * FIX-PACK, BLQ-MED-1 / DT-21.3). SUPERSEDE `resolveIdentityForSlug`.
+   * Reverse-lookup PÚBLICO de identidad por el match BIDIRECCIONAL completo
+   * (WKH-100 FIX-PACK v2, MNR-1 / DT-22). SUPERSEDE `resolveIdentityForToken`.
    *
-   * El cruce es por el `token_id` que el AGENTE declara on-chain en su AgentCard
-   * (resuelto por `extractDeclaredTokenId` en discovery), NO por un `agent_slug`
-   * aseverado por el caller. El `verified:true` solo se surfacea si ESE token
-   * está bindeado + `ownerOf`-verificado localmente (el verify ya ocurrió al
-   * bindear, auth.ts:497-532) → badge trustless, spoofing cerrado de raíz.
+   * El badge `verified:true` exige TRES anclajes simultáneos (ver
+   * `AgentCardIdentity` en types/index.ts):
+   *   (i)   el AgentCard del agente DECLARA este token (lo provee el caller vía
+   *         `extractDeclaredTokenId` en discovery → `tokenId`+`chainId`);
+   *   (ii)  ese token está bindeado + `ownerOf`-verificado localmente al
+   *         bindear (el verify on-chain ya ocurrió, auth.ts);
+   *   (iii) ESE binding DECLARA operar ESTE agente vía
+   *         `(agent_registry, agent_slug)` == `(agentRegistry, agentSlug)`,
+   *         match case-insensitive + trim.
+   * Si falta CUALQUIER anclaje → null (SIN badge). Esto cierra el vector
+   * inverso (MNR-1): un atacante que declara el token público de la víctima en
+   * su propia card NO obtiene badge porque el binding de la víctima declara
+   * operar (regVíctima, slugVíctima), no (regAtacante, slugAtacante).
+   *
+   * Bindings legacy v1 (sin `agent_registry`/`agent_slug`) → null (default
+   * seguro, AC-9). La key NO se degrada.
    *
    * DT-19 / NOTA PARA AR-CR: este SELECT NO lleva `.eq('owner_ref', ...)` **a
    * propósito**. Es lectura PÚBLICA (no por `keyId` del caller) que devuelve
    * SOLO `{ token_id, chain_id, verified }` — datos públicamente verificables
    * on-chain. NUNCA trae `budget` / `funding_wallet` / PII (CD-2). NO es IDOR.
    *
-   * MNR-1 (perf): la igualdad por `token_id` es indexable (TD-ERC8004-03). Se
-   * usa el FALLBACK determinista en JS (independiente del soporte de operadores
-   * JSONB `->>` de la versión instalada de PostgREST): traer candidatas activas
-   * con identity no-null y cruzar `token_id`+`chain_id` en JS. La page de
-   * discover solo invoca esto para agentes con declaración válida (skip si no).
+   * MNR-1 (perf): la igualdad por `token_id`+`chain_id` es indexable
+   * (uq_a2a_agent_keys_erc8004_token, FPv2.7). Se usa el FALLBACK determinista
+   * en JS (independiente del soporte de operadores JSONB `->>` de la versión
+   * instalada de PostgREST): traer candidatas activas con identity no-null y
+   * cruzar los 4 campos en JS. La page de discover solo invoca esto para
+   * agentes con declaración válida (skip si no).
    */
-  async resolveIdentityForToken(
+  async resolveIdentityForAgent(
     tokenId: string,
     chainId: number,
+    agentRegistry: string,
+    agentSlug: string,
   ): Promise<AgentCardIdentity | null> {
     const { data, error } = await supabase
       .from('a2a_agent_keys')
@@ -253,19 +267,26 @@ export const identityService = {
 
     if (error || !data) return null;
 
+    const nReg = agentRegistry.trim().toLowerCase();
+    const nSlug = agentSlug.trim().toLowerCase();
+
     for (const row of data as Array<{
       erc8004_identity: Erc8004IdentityBinding | null;
     }>) {
       const b = row.erc8004_identity;
       if (!b) continue;
-      // Cruce por token_id + chain_id (DT-21.3), NO por agent_slug aseverado.
-      if (b.token_id === tokenId && b.chain_id === chainId) {
-        return {
-          erc8004_token_id: b.token_id,
-          chain_id: b.chain_id,
-          verified: true,
-        };
-      }
+      // Lado token/agente: el token DECLARADO por el agente está bindeado.
+      if (b.token_id !== tokenId || b.chain_id !== chainId) continue;
+      // Lado binder: el binding debe declarar operar ESTE agente. Sin ancla
+      // (binding v1) → sin badge (default seguro, AC-9).
+      if (!b.agent_registry || !b.agent_slug) continue;
+      if (b.agent_registry.trim().toLowerCase() !== nReg) continue;
+      if (b.agent_slug.trim().toLowerCase() !== nSlug) continue;
+      return {
+        erc8004_token_id: b.token_id,
+        chain_id: b.chain_id,
+        verified: true,
+      };
     }
     return null;
   },
