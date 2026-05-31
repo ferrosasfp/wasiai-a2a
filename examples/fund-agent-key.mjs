@@ -86,7 +86,8 @@ console.log(`2. Funding wallet vinculada.`);
 const amount = parseUnits(AMOUNT, net.token.decimals); // decimales REALES de la red (Kite=18, USDC=6)
 const txHash = await wallet.writeContract({ address: net.token.address, abi: ERC20, functionName: 'transfer', args: [net.treasury, amount] });
 console.log(`3. ${AMOUNT} ${net.token.symbol} -> ${net.treasury}  tx=${txHash}`);
-await publicClient.waitForTransactionReceipt({ hash: txHash });
+console.log(`   esperando ${net.min_confirmations} confirmación(es)…`);
+await publicClient.waitForTransactionReceipt({ hash: txHash, confirmations: net.min_confirmations });
 console.log('   confirmada on-chain.');
 
 // ── 4. Declarar el depósito (WasiAI verifica on-chain antes de acreditar) ────
