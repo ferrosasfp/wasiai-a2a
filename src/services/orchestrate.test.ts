@@ -604,4 +604,103 @@ describe('orchestrateService', () => {
     // chargeProtocolFee NOT called (early return before compose).
     expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
   });
+
+  // ─── WKH-102 ─ chainId propagation to compose (DT-3 asserts) ───────────
+  // El bug: orchestrate.ts:416 pasaba `chainId: undefined` para master keys
+  // (sin delegationContext) → compose.ts:130 saltaba el débito de steps 1..N.
+  // El fix: propagar `request.chainId` SIEMPRE. Estos asserts verifican la
+  // propagación explícitamente (compose es mock acá; el conteo real de
+  // débitos se prueba en el bloque de integración con compose real más abajo).
+
+  function setLlmTwoAgents(): void {
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'wasiai',
+            input: { query: 'step0' },
+            reasoning: 'first',
+          },
+          {
+            slug: 'translator-v1',
+            registry: 'wasiai',
+            input: { query: 'step1' },
+            reasoning: 'second',
+          },
+        ],
+        reasoning: 'Two-step plan',
+      }),
+    );
+  }
+
+  // T-21 (WKH-102 AC-1): master path (no delegationContext) propaga chainId a
+  // compose. ANTES del fix esto era `undefined`.
+  it('T-21: master path propagates resolved chainId to compose', async () => {
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      { goal: 'master multi-step', budget: 5.0, chainId: 2368 },
+      'orch-21',
+    );
+
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
+    expect(composeCall.chainId).toBe(2368);
+    // master path → no delegationContext propagated.
+    expect(composeCall.delegationContext).toBeUndefined();
+  });
+
+  // T-22 (WKH-102 AC-1): el chainId pasado es exactamente request.chainId, no
+  // un hardcode ni derivado (CD-2). Un valor distinto se propaga tal cual.
+  it('T-22: compose receives exactly request.chainId (no hardcode)', async () => {
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      { goal: 'chain echo', budget: 5.0, chainId: 8453 },
+      'orch-22',
+    );
+
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
+    expect(composeCall.chainId).toBe(8453);
+  });
+
+  // T-23 (WKH-102 AC-5): path de delegación sin regresión — sigue propagando
+  // chainId Y delegationContext (rama que ya funcionaba antes del fix).
+  it('T-23: delegation path still propagates chainId and delegationContext', async () => {
+    setLlmTwoAgents();
+    const delegationContext = {
+      delegationId: 'del-1',
+      ownerRef: 'user-1',
+      keyId: 'k1',
+      maxAmountPerTx: '5.00',
+    };
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'delegated multi-step',
+        budget: 5.0,
+        chainId: 2368,
+        delegationContext,
+      },
+      'orch-23',
+    );
+
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
+    expect(composeCall.chainId).toBe(2368);
+    expect(composeCall.delegationContext).toEqual(delegationContext);
+  });
+
+  // T-24 (WKH-102): x402 path (no chainId resuelto) → compose recibe undefined,
+  // el skip defensivo per-step se mantiene (no regresión del caso x402).
+  it('T-24: x402 path (no chainId) propagates undefined to compose', async () => {
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      { goal: 'x402 no chain', budget: 5.0 },
+      'orch-24',
+    );
+
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
+    expect(composeCall.chainId).toBeUndefined();
+  });
 });
