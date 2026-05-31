@@ -38,16 +38,28 @@ vi.mock('../services/budget.js', () => ({
 }));
 
 // CD-8: el mock del verifier exporta `verifyDeposit` completo.
-vi.mock('../adapters/deposit-verifier.js', () => ({
-  verifyDeposit: vi.fn(),
-}));
+// WKH-DEPOSIT-INFO: los resolvers (treasury/min_confirmations/family) se usan
+// REALES en /deposit-info, así que se reexportan vía importActual (no mock).
+vi.mock('../adapters/deposit-verifier.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../adapters/deposit-verifier.js')
+  >('../adapters/deposit-verifier.js');
+  return {
+    ...actual,
+    verifyDeposit: vi.fn(),
+  };
+});
 
 vi.mock('../adapters/registry.js', () => ({
   getAdaptersBundle: vi.fn(),
+  getInitializedChainKeys: vi.fn(() => []),
 }));
 
 import { verifyDeposit } from '../adapters/deposit-verifier.js';
-import { getAdaptersBundle } from '../adapters/registry.js';
+import {
+  getAdaptersBundle,
+  getInitializedChainKeys,
+} from '../adapters/registry.js';
 import type { AdaptersBundle } from '../adapters/types.js';
 import { budgetService } from '../services/budget.js';
 import { identityService } from '../services/identity.js';
@@ -62,6 +74,7 @@ const mockLookupByHash = vi.mocked(identityService.lookupByHash);
 const mockBindFundingWallet = vi.mocked(identityService.bindFundingWallet);
 const mockVerifyDeposit = vi.mocked(verifyDeposit);
 const mockGetAdaptersBundle = vi.mocked(getAdaptersBundle);
+const mockGetInitializedChainKeys = vi.mocked(getInitializedChainKeys);
 const mockRegisterDeposit = vi.mocked(budgetService.registerDeposit);
 
 // WKH-35 FIX-1: bound funding wallet + matching depositor (Transfer.from).
@@ -792,6 +805,108 @@ describe('auth routes', () => {
     expect(res.statusCode).toBe(200);
     // Verify lookupByHash was called with the hash of TEST_KEY (x-a2a-key), not otherKey
     expect(mockLookupByHash).toHaveBeenCalledWith(TEST_KEY_HASH);
+  });
+
+  // ── GET /auth/deposit-info (WKH-DEPOSIT-INFO) ─────────────
+
+  // Bundle for avalanche-fuji with a single USDC token (decimals 6).
+  function makeDepositInfoBundle(): AdaptersBundle {
+    const bundle = makeBundle(43113);
+    return {
+      ...bundle,
+      payment: {
+        supportedTokens: [
+          {
+            symbol: 'USDC',
+            address: '0x5425890298aed601595a70AB815c96711a31Bc65',
+            decimals: 6,
+          },
+        ],
+      } as unknown as AdaptersBundle['payment'],
+    };
+  }
+
+  const FUJI_TREASURY = '0x9999999999999999999999999999999999999999';
+
+  it('GET /auth/deposit-info → 200 with one entry per initialized chain (AC-1, AC-2)', async () => {
+    process.env.A2A_DEPOSIT_TREASURY_AVALANCHE = FUJI_TREASURY;
+    process.env.A2A_DEPOSIT_MIN_CONFIRMATIONS_AVALANCHE = '3';
+    mockGetInitializedChainKeys.mockReturnValue(['avalanche-fuji']);
+    mockGetAdaptersBundle.mockReturnValue(makeDepositInfoBundle());
+
+    const res = await app.inject({ method: 'GET', url: '/auth/deposit-info' });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(Array.isArray(body.networks)).toBe(true);
+    expect(body.networks).toHaveLength(1);
+    const entry = body.networks[0];
+    expect(entry.chain_id).toBe(43113);
+    expect(entry.slug).toBe('avalanche-fuji');
+    expect(entry.family).toBe('AVALANCHE');
+    expect(entry.treasury).toBe(FUJI_TREASURY);
+    expect(entry.token).toEqual({
+      symbol: 'USDC',
+      address: '0x5425890298aed601595a70AB815c96711a31Bc65',
+      decimals: 6,
+    });
+    expect(entry.min_confirmations).toBe(3);
+
+    delete process.env.A2A_DEPOSIT_TREASURY_AVALANCHE;
+    delete process.env.A2A_DEPOSIT_MIN_CONFIRMATIONS_AVALANCHE;
+  });
+
+  it('GET /auth/deposit-info with zero initialized chains → 200 { networks: [] } (AC-3)', async () => {
+    mockGetInitializedChainKeys.mockReturnValue([]);
+
+    const res = await app.inject({ method: 'GET', url: '/auth/deposit-info' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ networks: [] });
+  });
+
+  it('GET /auth/deposit-info treasury unresolvable → entry with treasury: null (AC-4)', async () => {
+    delete process.env.A2A_DEPOSIT_TREASURY_AVALANCHE;
+    delete process.env.OPERATOR_PRIVATE_KEY;
+    mockGetInitializedChainKeys.mockReturnValue(['avalanche-fuji']);
+    mockGetAdaptersBundle.mockReturnValue(makeDepositInfoBundle());
+
+    const res = await app.inject({ method: 'GET', url: '/auth/deposit-info' });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.networks).toHaveLength(1);
+    expect(body.networks[0].treasury).toBeNull();
+  });
+
+  it('GET /auth/deposit-info NEVER exposes secrets (AC-5)', async () => {
+    process.env.OPERATOR_PRIVATE_KEY = `0x${'1'.repeat(64)}`;
+    process.env.A2A_DEPOSIT_TREASURY_AVALANCHE = FUJI_TREASURY;
+    mockGetInitializedChainKeys.mockReturnValue(['avalanche-fuji']);
+    mockGetAdaptersBundle.mockReturnValue(makeDepositInfoBundle());
+
+    const res = await app.inject({ method: 'GET', url: '/auth/deposit-info' });
+
+    expect(res.statusCode).toBe(200);
+    const raw = res.body; // raw response string
+    expect(raw).not.toContain('1'.repeat(64)); // private key material
+    expect(raw).not.toContain('OPERATOR_PRIVATE_KEY');
+    expect(raw).not.toMatch(/SUPABASE/i);
+    expect(raw).not.toMatch(/SECRET/i);
+    // "symbol" is allowed (token field); no other KEY-like leak.
+    expect(raw).not.toMatch(/private[_-]?key/i);
+
+    delete process.env.OPERATOR_PRIVATE_KEY;
+    delete process.env.A2A_DEPOSIT_TREASURY_AVALANCHE;
+  });
+
+  it('GET /auth/deposit-info requires NO auth header → 200 (public)', async () => {
+    mockGetInitializedChainKeys.mockReturnValue([]);
+
+    const res = await app.inject({ method: 'GET', url: '/auth/deposit-info' });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockLookupByHash).not.toHaveBeenCalled();
   });
 
   // ── POST /auth/bind/:chain (AC-16) ────────────────────────
