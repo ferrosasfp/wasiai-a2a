@@ -409,11 +409,15 @@ export const orchestrateService = {
       scopingKeyRow: request.scopingKeyRow,
       // WKH-101 (DT-11): contexto de delegación para el débito per-step.
       delegationContext: request.delegationContext,
-      // WKH-101 (DT-12, opción B): chainId SOLO bajo delegación. El path master
-      // de orchestrate queda INTACTO (CD-5); el under-charge preexistente de
-      // master-en-orchestrate (steps 2..N no debitan sin chainId) queda como
-      // deuda técnica TD-WKH-101-ORCH (NO se introduce ni se corrige acá).
-      chainId: request.delegationContext ? request.chainId : undefined,
+      // WKH-102 (DT-1/DT-2): chainId resuelto propagado SIEMPRE (single-chain
+      // semantics — todos los steps usan la chain del caller, modelo WKH-59).
+      // Antes (WKH-101 opción B) se pasaba SOLO bajo delegación; eso dejaba el
+      // path master con chainId=undefined → el guard `i>0 && chainId!==undefined`
+      // de compose.ts:130 saltaba el débito de steps 1..N (revenue leak
+      // TD-WKH-101-ORCH). Ahora master y delegación propagan el mismo chainId,
+      // y el débito per-step funciona en ambos paths. El guard `i>0` (CD-1)
+      // sigue intacto como única defensa anti-double-charge del step 0.
+      chainId: request.chainId,
     });
 
     // WKH-44 (AC-3): el fee ya fue calculado al inicio con `budget * feeRate`.

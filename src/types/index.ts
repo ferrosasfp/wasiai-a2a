@@ -356,11 +356,11 @@ export interface OrchestrateRequest {
   /** WKH-101 (DT-11): contexto de delegación propagado a composeService.compose. */
   delegationContext?: DelegationDebitContext;
   /**
-   * WKH-101 (DT-12): chainId resuelto (request.resolvedChainId), propagado a
-   * compose para que el débito per-step de steps 2..N funcione bajo delegación.
-   * HOY orchestrate NO pasa chainId a compose → steps 2..N no se debitan.
-   * Opción B (recomendada): solo se setea cuando hay delegationContext (path
-   * master de orchestrate queda intacto, CD-5).
+   * chainId resuelto (request.resolvedChainId), propagado a compose para que el
+   * débito per-step de steps 1..N funcione. WKH-102 (DT-1): se propaga SIEMPRE
+   * (master y delegación, single-chain semantics — modelo WKH-59), no solo bajo
+   * delegación. El guard `i>0` de compose.ts:130 protege el step 0 contra
+   * double-charge (CD-1, intacto).
    */
   chainId?: number;
 }
