@@ -39,6 +39,16 @@ vi.mock('../services/budget.js', () => ({
   },
 }));
 
+// WKH-101 (CD-AB-1): middleware now imports delegationService + exceedsPerTxLimit.
+vi.mock('../services/delegation.js', () => ({
+  delegationService: {
+    lookupByTokenHash: vi.fn(),
+    getParentKey: vi.fn(),
+    debitDelegationAndParent: vi.fn(),
+  },
+  exceedsPerTxLimit: vi.fn(),
+}));
+
 // WKH-MULTICHAIN W2: registry mock exposes multi-chain Map + new getters.
 // `getAdaptersBundle(chainKey)` returns a per-chain bundle with chainConfig +
 // payment.supportedTokens, so the middleware can resolve the right chainId
@@ -162,12 +172,27 @@ vi.mock('../adapters/registry.js', () => ({
 }));
 
 import { budgetService } from '../services/budget.js';
+import {
+  delegationService,
+  exceedsPerTxLimit,
+} from '../services/delegation.js';
 import { identityService } from '../services/identity.js';
+import {
+  AgentKeyBudgetExhaustedError,
+  DelegationTotalLimitExceededError,
+} from '../services/security/errors.js';
+import type { DelegationRow } from '../types/index.js';
 import { requirePaymentOrA2AKey } from './a2a-key.js';
 
 const mockLookupByHash = vi.mocked(identityService.lookupByHash);
 const mockGetBalance = vi.mocked(budgetService.getBalance);
 const mockDebit = vi.mocked(budgetService.debit);
+const mockLookupToken = vi.mocked(delegationService.lookupByTokenHash);
+const mockGetParentKey = vi.mocked(delegationService.getParentKey);
+const mockDebitDelegation = vi.mocked(
+  delegationService.debitDelegationAndParent,
+);
+const mockExceedsPerTx = vi.mocked(exceedsPerTxLimit);
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -1062,5 +1087,265 @@ describe('requirePaymentOrA2AKey middleware', () => {
       // DT-D: el route handler ve el chainId del bundle (CD-12: 2368 default).
       expect(response.json().resolvedChainId).toBe(2368);
     });
+  });
+});
+
+// ── WKH-101: BRANCH DELEGACIÓN (session token) ────────────────
+
+const SESSION_TOKEN = `wasi_a2a_session_${'b'.repeat(96)}`;
+const SESSION_HASH = crypto
+  .createHash('sha256')
+  .update(SESSION_TOKEN)
+  .digest('hex');
+
+function makeDelegationRow(
+  overrides: Partial<DelegationRow> = {},
+): DelegationRow {
+  const policy = {
+    max_amount_per_tx: '5.00',
+    max_total_amount: '100.00',
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+    allowed_chains: [] as number[],
+    allowed_agent_slugs: [] as string[],
+    allowed_registries: [] as string[],
+  };
+  return {
+    id: 'del-1',
+    key_id: TEST_KEY_ID,
+    owner_ref: 'user-1',
+    session_key_address: '0xdef0000000000000000000000000000000000002',
+    session_token_hash: SESSION_HASH,
+    policy,
+    total_spent: '0',
+    expires_at: new Date(Date.now() + 3600_000).toISOString(),
+    revoked_at: null,
+    typed_data_raw: {} as DelegationRow['typed_data_raw'],
+    nonce: `0x${'00'.repeat(32)}`,
+    created_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+describe('requirePaymentOrA2AKey — delegation branch (WKH-101)', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    app = Fastify();
+    app.post(
+      '/test',
+      { preHandler: requirePaymentOrA2AKey({ description: 'Test endpoint' }) },
+      async (request: FastifyRequest, reply: FastifyReply) => {
+        return reply.send({
+          ok: true,
+          a2aKeyId: request.a2aKeyRow?.id ?? null,
+          delegationId: request.delegationRow?.id ?? null,
+          hasDelegationContext: request.delegationContext !== undefined,
+        });
+      },
+    );
+    await app.ready();
+  });
+
+  afterAll(() => app.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMockRegistryState(['kite-ozone-testnet'], 'kite-ozone-testnet');
+    // exceedsPerTxLimit defaults to "not exceeded" unless a test overrides it.
+    mockExceedsPerTx.mockReturnValue(false);
+  });
+
+  // T5 (AC-5)
+  it('T5: valid session token → branch + augment + delegationContext set', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+    mockDebitDelegation.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('49.00');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.delegationId).toBe('del-1');
+    expect(body.hasDelegationContext).toBe(true);
+    expect(res.headers['x-a2a-remaining-budget']).toBe('49.00');
+    // step-0 debit went through the atomic delegation RPC, not master debit.
+    expect(mockDebitDelegation).toHaveBeenCalledWith(
+      'del-1',
+      'user-1',
+      TEST_KEY_ID,
+      2368,
+      1.0,
+    );
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  // T5 (AC-5) — unknown token
+  it('T5: unknown session token → 401 INVALID_SESSION_TOKEN', async () => {
+    mockLookupToken.mockResolvedValue(null);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('INVALID_SESSION_TOKEN');
+  });
+
+  // T6 (AC-6) — revoked
+  it('T6: revoked delegation → 403 DELEGATION_REVOKED (pre-debit)', async () => {
+    mockLookupToken.mockResolvedValue(
+      makeDelegationRow({ revoked_at: new Date().toISOString() }),
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('DELEGATION_REVOKED');
+    expect(mockDebitDelegation).not.toHaveBeenCalled();
+  });
+
+  // T6 (AC-6) — expired
+  it('T6: expired delegation → 403 DELEGATION_EXPIRED (pre-debit)', async () => {
+    mockLookupToken.mockResolvedValue(
+      makeDelegationRow({
+        expires_at: new Date(Date.now() - 1000).toISOString(),
+      }),
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('DELEGATION_EXPIRED');
+  });
+
+  // inactive parent key
+  it('inactive parent key → 403 KEY_INACTIVE', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow({ is_active: false }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('KEY_INACTIVE');
+  });
+
+  // T7 (AC-7) — step 0 per-tx
+  it('T7: step-0 cost > max_amount_per_tx → 403 DELEGATION_TX_LIMIT_EXCEEDED before debit', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+    mockExceedsPerTx.mockReturnValue(true);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('DELEGATION_TX_LIMIT_EXCEEDED');
+    expect(mockDebitDelegation).not.toHaveBeenCalled();
+  });
+
+  // T8 step-0 — total limit from RPC
+  it('T8: step-0 total limit from RPC → 403 DELEGATION_TOTAL_LIMIT_EXCEEDED', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+    mockDebitDelegation.mockRejectedValue(
+      new DelegationTotalLimitExceededError(),
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('DELEGATION_TOTAL_LIMIT_EXCEEDED');
+  });
+
+  // T9 step-0 — budget exhausted from RPC
+  it('T9: step-0 parent budget exhausted from RPC → 403 AGENT_KEY_BUDGET_EXHAUSTED', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+    mockDebitDelegation.mockRejectedValue(new AgentKeyBudgetExhaustedError());
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('AGENT_KEY_BUDGET_EXHAUSTED');
+  });
+
+  // T17 (DT-3) — allowed_chains restriction
+  it('T17: allowed_chains=[999] and resolved chain 2368 → 403 DELEGATION_CHAIN_NOT_ALLOWED', async () => {
+    mockLookupToken.mockResolvedValue(
+      makeDelegationRow({
+        policy: {
+          ...makeDelegationRow().policy,
+          allowed_chains: [999],
+        },
+      }),
+    );
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('DELEGATION_CHAIN_NOT_ALLOWED');
+    expect(mockDebitDelegation).not.toHaveBeenCalled();
+  });
+
+  // T17 (DT-3) — empty allowed_chains = no restriction
+  it('T17: allowed_chains=[] → no restriction (passes)', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow()); // allowed_chains []
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+    mockDebitDelegation.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('49.00');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  // T14 (AC-13) backward-compat — master key path untouched
+  it('T14: master key (no session prefix) → master debit path, no delegation calls', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('9.00');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().hasDelegationContext).toBe(false);
+    expect(mockLookupToken).not.toHaveBeenCalled();
+    expect(mockDebitDelegation).not.toHaveBeenCalled();
+    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
   });
 });

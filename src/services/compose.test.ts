@@ -1108,7 +1108,9 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     expect(result.success).toBe(true);
     // Only step 1 is debited via service (step 0 is the middleware's job).
     expect(mockDebit).toHaveBeenCalledTimes(1);
-    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 0.05);
+    // WKH-101 (DT-11): compose now passes request.delegationContext as the 4th
+    // arg; master-key path → undefined (CD-5 backward-compat).
+    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 0.05, undefined);
   });
 
   it('T-COMPOSE-DEBIT-2 should debit steps 1 and 2 in a 3-step pipeline', async () => {
@@ -1143,8 +1145,73 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
 
     expect(result.success).toBe(true);
     expect(mockDebit).toHaveBeenCalledTimes(2);
-    expect(mockDebit).toHaveBeenNthCalledWith(1, 'k1', 2368, 0.05);
-    expect(mockDebit).toHaveBeenNthCalledWith(2, 'k1', 2368, 0.01);
+    // WKH-101 (DT-11): 4th arg = request.delegationContext (undefined → master path).
+    expect(mockDebit).toHaveBeenNthCalledWith(1, 'k1', 2368, 0.05, undefined);
+    expect(mockDebit).toHaveBeenNthCalledWith(2, 'k1', 2368, 0.01, undefined);
+  });
+
+  // WKH-101 T8b (AC-8 MULTI-STEP): under delegation, the per-step debit routes
+  // the delegationContext as the 4th arg. When max_total is hit mid-pipeline,
+  // compose cuts AT THAT STEP — later steps are neither debited nor invoked.
+  it('T8b multi-step total limit under delegation cuts at the exceeding step', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    const a3 = makeAgent({ slug: 'cashout', priceUsdc: 0.01, id: 'agent-3' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2, cashout: a3 });
+    mockFetchOk(); // step 0 invoked
+    mockFetchOk(); // step 1 invoked (debit succeeds)
+    mockFetchOk(); // step 2 fetch — must NOT be consumed (cut before invoke)
+
+    const delegationContext = {
+      delegationId: 'del-1',
+      ownerRef: 'user-1',
+      keyId: 'k1',
+      maxAmountPerTx: '5.00',
+    };
+
+    // step 1 debit OK, step 2 debit hits the total limit (atomic RPC mapping).
+    mockDebit.mockReset();
+    mockDebit.mockResolvedValueOnce({ success: true }).mockResolvedValueOnce({
+      success: false,
+      error: 'DELEGATION_TOTAL_LIMIT_EXCEEDED',
+    });
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+        { agent: 'cashout', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      delegationContext,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('DELEGATION_TOTAL_LIMIT_EXCEEDED');
+    // Cut a mitad: solo 2 débitos (steps 1 y 2); el step 2 NO se ejecuta.
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    expect(mockDebit).toHaveBeenNthCalledWith(
+      1,
+      'k1',
+      2368,
+      0.05,
+      delegationContext,
+    );
+    expect(mockDebit).toHaveBeenNthCalledWith(
+      2,
+      'k1',
+      2368,
+      0.01,
+      delegationContext,
+    );
+    // step 0 + step 1 invoked (2 fetches); step 2 fetch NOT consumed.
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // results contiene solo los steps ejecutados (0 y 1).
+    expect(result.steps.length).toBe(2);
   });
 
   it('T-COMPOSE-DEBIT-3 should abort pipeline when step 1 debit fails (insufficient)', async () => {
@@ -1316,7 +1383,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     expect(result.success).toBe(true);
     expect(mockDebit).toHaveBeenCalledTimes(1);
     // amount === 1.0 (fallback), NOT 0
-    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 1.0);
+    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 1.0, undefined);
   });
 
   it('T-COMPOSE-DEBIT-8 should emit warn log with reason=registry-miss when priceUsdc===0 (BLQ-MED-1)', async () => {
@@ -1389,7 +1456,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     expect(result.success).toBe(true);
     expect(mockDebit).toHaveBeenCalledTimes(1);
     // typeof null !== 'number' → fallback $1
-    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 1.0);
+    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 1.0, undefined);
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         reason: 'registry-miss',

@@ -29,9 +29,12 @@ import {
 } from '../adapters/registry.js';
 import { authSignupRateLimit } from '../middleware/rate-limit.js';
 import { budgetService } from '../services/budget.js';
+import { delegationService } from '../services/delegation.js';
 import { identityService, isIdentityVerified } from '../services/identity.js';
 import { registryService } from '../services/registry.js';
 import {
+  DelegationNonceReplayError,
+  DelegationSignerMismatchError,
   DepositAlreadyCreditedError,
   Erc8004TokenAlreadyBoundError,
   FundingWalletAlreadyBoundError,
@@ -39,7 +42,10 @@ import {
 } from '../services/security/errors.js';
 import type {
   A2AAgentKeyRow,
+  CreateDelegationInput,
   CreateKeyInput,
+  DelegationPolicy,
+  DelegationTypedData,
   DepositInput,
   Erc8004IdentityBinding,
 } from '../types/index.js';
@@ -124,6 +130,114 @@ async function resolveCallerKey(
     callerKey.erc8004_verified = isIdentityVerified(callerKey);
   }
   return callerKey;
+}
+
+// ── Helper: extract the raw authenticator key from the request ──
+// WKH-101: same precedence as resolveCallerKey (x-a2a-key > Bearer wasi_a2a_*).
+// Used to detect a `wasi_a2a_session_*` authenticator (sub-delegation, AC-15)
+// BEFORE resolveCallerKey (which would return null for a session token, losing
+// the exact DELEGATION_NOT_ALLOWED code).
+function rawKeyFromRequest(request: FastifyRequest): string | undefined {
+  const headerValue = request.headers['x-a2a-key'];
+  if (headerValue && typeof headerValue === 'string') {
+    return headerValue;
+  }
+  const authHeader = request.headers.authorization;
+  if (authHeader && typeof authHeader === 'string') {
+    const match = /^bearer\s+(.+)$/i.exec(authHeader);
+    if (match?.[1].startsWith('wasi_a2a_')) {
+      return match[1];
+    }
+  }
+  return undefined;
+}
+
+// ── WKH-101: delegation input validation (DT-1, CD-3) ───────────
+
+const SESSION_TOKEN_PREFIX = 'wasi_a2a_session_';
+
+/** Valida + tipa la policy del request. Devuelve null si el shape es inválido. */
+function parseDelegationPolicy(raw: unknown): DelegationPolicy | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const p = raw as Record<string, unknown>;
+  if (
+    typeof p.max_amount_per_tx !== 'string' ||
+    typeof p.max_total_amount !== 'string' ||
+    typeof p.expires_at !== 'number' ||
+    !Number.isFinite(p.expires_at)
+  ) {
+    return null;
+  }
+  if (
+    !Array.isArray(p.allowed_chains) ||
+    !p.allowed_chains.every((c) => typeof c === 'number') ||
+    !Array.isArray(p.allowed_agent_slugs) ||
+    !p.allowed_agent_slugs.every((s) => typeof s === 'string') ||
+    !Array.isArray(p.allowed_registries) ||
+    !p.allowed_registries.every((s) => typeof s === 'string')
+  ) {
+    return null;
+  }
+  return {
+    max_amount_per_tx: p.max_amount_per_tx,
+    max_total_amount: p.max_total_amount,
+    expires_at: p.expires_at,
+    allowed_chains: p.allowed_chains as number[],
+    allowed_agent_slugs: p.allowed_agent_slugs as string[],
+    allowed_registries: p.allowed_registries as string[],
+  };
+}
+
+/** Valida + tipa el typed-data del request (primaryType==='Delegation'). */
+function parseDelegationTypedData(raw: unknown): DelegationTypedData | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const td = raw as Record<string, unknown>;
+  if (
+    typeof td.domain !== 'object' ||
+    td.domain === null ||
+    typeof td.types !== 'object' ||
+    td.types === null ||
+    td.primaryType !== 'Delegation' ||
+    typeof td.message !== 'object' ||
+    td.message === null
+  ) {
+    return null;
+  }
+  const domain = td.domain as Record<string, unknown>;
+  if (
+    typeof domain.name !== 'string' ||
+    typeof domain.version !== 'string' ||
+    typeof domain.chainId !== 'number'
+  ) {
+    return null;
+  }
+  const message = td.message as Record<string, unknown>;
+  if (
+    typeof message.session_key !== 'string' ||
+    !ADDRESS_RE.test(message.session_key) ||
+    typeof message.nonce !== 'string'
+  ) {
+    return null;
+  }
+  // La policy del message debe ser un objeto válido (la igualdad con
+  // input.policy la verifica el service vía policiesEqual, CD-3).
+  const msgPolicy = parseDelegationPolicy(message.policy);
+  if (!msgPolicy) return null;
+
+  return {
+    domain: {
+      name: domain.name,
+      version: domain.version,
+      chainId: domain.chainId,
+    },
+    types: td.types as DelegationTypedData['types'],
+    primaryType: 'Delegation',
+    message: {
+      session_key: message.session_key as `0x${string}`,
+      policy: msgPolicy,
+      nonce: message.nonce as `0x${string}`,
+    },
+  };
 }
 
 // ── Routes ──────────────────────────────────────────────────
@@ -685,6 +799,154 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         agent_card_url: tokenUri,
         scheme,
       });
+    },
+  );
+
+  /**
+   * POST /auth/delegation — Create an EIP-712 session-key delegation
+   * (WKH-101: AC-1/AC-2/AC-3/AC-4/AC-15).
+   *
+   * The owner (authenticated with its MASTER key) signs a typed-data with a
+   * spending policy that authorizes an ephemeral session key. The server
+   * recovers the signer with viem and requires it to equal the key's bound
+   * `funding_wallet` (CD-11) before persisting. The opaque session token is
+   * returned ONCE in the 201; only its SHA-256 hash is stored.
+   */
+  fastify.post(
+    '/delegation',
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      // CD-9/AC-15: sub-delegation forbidden. A session token authenticator →
+      // 403 DELEGATION_NOT_ALLOWED (detect the prefix BEFORE resolveCallerKey,
+      // which would return null and lose the exact code).
+      const rawKey = rawKeyFromRequest(req);
+      if (rawKey?.startsWith(SESSION_TOKEN_PREFIX)) {
+        return reply.status(403).send({ error_code: 'DELEGATION_NOT_ALLOWED' });
+      }
+
+      // Auth (master key).
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      // AC-2: funding_wallet must be bound first (reuse FUNDING_WALLET_NOT_BOUND).
+      if (!callerKey.funding_wallet) {
+        return reply
+          .status(403)
+          .send({ error_code: 'FUNDING_WALLET_NOT_BOUND' });
+      }
+
+      // Input validation (CD-3): policy + typed_data + signature + session_key.
+      const body = req.body as
+        | {
+            typed_data?: unknown;
+            signature?: unknown;
+            session_key_address?: unknown;
+            policy?: unknown;
+          }
+        | undefined;
+
+      const policy = parseDelegationPolicy(body?.policy);
+      if (!policy) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+      const typedData = parseDelegationTypedData(body?.typed_data);
+      if (!typedData) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+      if (typeof body?.signature !== 'string' || body.signature.length === 0) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+      if (
+        typeof body?.session_key_address !== 'string' ||
+        !ADDRESS_RE.test(body.session_key_address)
+      ) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+
+      const input: CreateDelegationInput = {
+        typed_data: typedData,
+        signature: body.signature,
+        session_key_address: body.session_key_address,
+        policy,
+      };
+
+      try {
+        const result = await delegationService.create(callerKey, input);
+        return reply.status(201).send(result);
+      } catch (err) {
+        if (err instanceof DelegationSignerMismatchError) {
+          return reply
+            .status(403)
+            .send({ error_code: 'DELEGATION_SIGNER_MISMATCH' });
+        }
+        if (err instanceof DelegationNonceReplayError) {
+          return reply
+            .status(409)
+            .send({ error_code: 'DELEGATION_NONCE_REPLAY' });
+        }
+        fastify.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'delegation create failed',
+        );
+        return reply
+          .status(500)
+          .send({ error_code: 'DELEGATION_CREATE_FAILED' });
+      }
+    },
+  );
+
+  /**
+   * DELETE /auth/delegation/:id — Revoke a delegation (WKH-101: AC-10/AC-12).
+   * Ownership Guard in the service (filtered by id AND owner_ref).
+   */
+  fastify.delete(
+    '/delegation/:id',
+    async (
+      req: FastifyRequest<{ Params: { id: string } }>,
+      reply: FastifyReply,
+    ) => {
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      try {
+        await delegationService.revoke(req.params.id, callerKey.owner_ref);
+        return reply.status(200).send({ revoked: true });
+      } catch (err) {
+        if (err instanceof OwnershipMismatchError) {
+          return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+        }
+        fastify.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'delegation revoke failed',
+        );
+        return reply
+          .status(500)
+          .send({ error_code: 'DELEGATION_REVOKE_FAILED' });
+      }
+    },
+  );
+
+  /**
+   * GET /auth/delegation — List the caller's delegations (WKH-101: AC-11).
+   * Ownership Guard in the service (filtered by owner_ref). Never returns tokens.
+   */
+  fastify.get(
+    '/delegation',
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      const items = await delegationService.list(callerKey.owner_ref);
+      return reply.status(200).send({ delegations: items });
     },
   );
 

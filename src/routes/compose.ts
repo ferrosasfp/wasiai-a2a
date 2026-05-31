@@ -156,6 +156,8 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         a2aKey,
         // WKH-61: propagar el row del caller para scoping per-step
         scopingKeyRow: request.a2aKeyRow,
+        // WKH-101 (DT-11): contexto de delegación para el débito per-step.
+        delegationContext: request.delegationContext,
         // WKH-59 (real-price-debit) DT-D: chainId del MISMO bundle (CD-12)
         // para debit per-step (steps 2..N) atómico en composeService.
         chainId: request.resolvedChainId,

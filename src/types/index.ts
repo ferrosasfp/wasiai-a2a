@@ -5,7 +5,7 @@
 // WKH-61: importamos A2AAgentKeyRow del subarchivo para tiparlo en
 // ComposeRequest / OrchestrateRequest. El re-export `export * from './a2a-key.js'`
 // del bottom mantiene la API pública intacta.
-import type { A2AAgentKeyRow } from './a2a-key.js';
+import type { A2AAgentKeyRow, DelegationDebitContext } from './a2a-key.js';
 
 // ============================================================
 // REGISTRY TYPES
@@ -234,6 +234,13 @@ export interface ComposeRequest {
    * compatible. Cuando undefined → fallback a `console.warn`.
    */
   logger?: DownstreamLogger;
+  /**
+   * WKH-101 (DT-11): contexto de delegación para el débito per-step (steps 2..N).
+   * Cuando está presente, budgetService.debit enruta al RPC atómico
+   * debit_delegation_and_parent (AC-7 per-step + AC-8/AC-9). undefined → master
+   * key (camino actual increment_a2a_key_spend, CD-5 intacto).
+   */
+  delegationContext?: DelegationDebitContext;
 }
 
 export interface ComposeResult {
@@ -346,6 +353,16 @@ export interface OrchestrateRequest {
   a2aKey?: string;
   /** WKH-61: row de a2a_agent_keys, propagado a composeService.compose. */
   scopingKeyRow?: A2AAgentKeyRow;
+  /** WKH-101 (DT-11): contexto de delegación propagado a composeService.compose. */
+  delegationContext?: DelegationDebitContext;
+  /**
+   * WKH-101 (DT-12): chainId resuelto (request.resolvedChainId), propagado a
+   * compose para que el débito per-step de steps 2..N funcione bajo delegación.
+   * HOY orchestrate NO pasa chainId a compose → steps 2..N no se debitan.
+   * Opción B (recomendada): solo se setea cuando hay delegationContext (path
+   * master de orchestrate queda intacto, CD-5).
+   */
+  chainId?: number;
 }
 
 export interface OrchestrateResult {

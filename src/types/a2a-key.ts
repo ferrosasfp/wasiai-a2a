@@ -141,3 +141,112 @@ export interface A2AKeyError {
   error: string;
   code: A2AKeyErrorCode;
 }
+
+// ============================================================
+// DELEGATION (WKH-101 — Fase 2: EIP-712 session keys)
+// ============================================================
+
+/** Policy de gasto serializada en el typed-data y en a2a_delegations.policy (JSONB). */
+export interface DelegationPolicy {
+  max_amount_per_tx: string; // USD decimal, p.ej. "0.50" (string, sin pérdida float — CD-AB-3)
+  max_total_amount: string; // USD decimal, p.ej. "100.00"
+  expires_at: number; // epoch seconds (uint64)
+  allowed_chains: number[]; // uint256[] — lista blanca; VACÍO = sin restricción (DT-3)
+  allowed_agent_slugs: string[];
+  allowed_registries: string[];
+}
+
+/** Mensaje EIP-712 (primaryType = "Delegation"). */
+export interface DelegationTypedDataMessage {
+  session_key: `0x${string}`;
+  policy: DelegationPolicy;
+  nonce: `0x${string}`; // bytes32 hex
+}
+
+/** Domain EIP-712 sin verifyingContract (NC-3). */
+export interface DelegationEip712Domain {
+  name: string;
+  version: string;
+  chainId: number;
+}
+
+/** typed-data completo recibido del cliente (auditoría → typed_data_raw). */
+export interface DelegationTypedData {
+  domain: DelegationEip712Domain;
+  types: Record<string, ReadonlyArray<{ name: string; type: string }>>;
+  primaryType: string; // debe ser 'Delegation'
+  message: DelegationTypedDataMessage;
+}
+
+export type DelegationStatus = 'active' | 'expired' | 'revoked';
+
+/** Row de a2a_delegations. */
+export interface DelegationRow {
+  id: string; // UUID
+  key_id: string; // UUID parent key
+  owner_ref: string; // desnormalizado (Ownership Guard, CD-2)
+  session_key_address: string; // lowercase
+  session_token_hash: string; // SHA-256(token)
+  policy: DelegationPolicy;
+  total_spent: string; // NUMERIC → string desde Supabase
+  expires_at: string; // ISO timestamp
+  revoked_at: string | null; // null = activa
+  typed_data_raw: DelegationTypedData;
+  nonce: string; // bytes32 hex
+  created_at: string;
+}
+
+/** Input del POST /auth/delegation. */
+export interface CreateDelegationInput {
+  typed_data: DelegationTypedData;
+  signature: string;
+  session_key_address: string;
+  policy: DelegationPolicy;
+}
+
+/** Respuesta 201 del POST /auth/delegation (token devuelto UNA vez). */
+export interface CreateDelegationResponse {
+  delegation_id: string;
+  session_token: string; // wasi_a2a_session_<random> — plano, solo en la 201
+  expires_at: string;
+  policy: DelegationPolicy;
+}
+
+/** Item del GET /auth/delegation (sin token, con status derivado). */
+export interface DelegationListItem {
+  delegation_id: string;
+  session_key_address: string;
+  policy: DelegationPolicy;
+  expires_at: string;
+  total_spent: string;
+  revoked_at: string | null;
+  status: DelegationStatus;
+}
+
+/**
+ * Contexto compacto de delegación que viaja por la request hasta el débito
+ * per-step (DT-11/DT-12). Lo setea el middleware (branch session, W3) en
+ * `request.delegationContext`; lo propagan las rutas a compose/orchestrate;
+ * lo consume `budgetService.debit` para enrutar al RPC atómico.
+ */
+export interface DelegationDebitContext {
+  delegationId: string; // a2a_delegations.id
+  ownerRef: string; // = parentKey.owner_ref (Ownership Guard DB-layer)
+  keyId: string; // = parentKey.id (cross-check con la delegación)
+  maxAmountPerTx: string; // policy.max_amount_per_tx — AC-7 per-step en budget.debit
+}
+
+/** Error codes de delegación (middleware + endpoints). */
+export type SessionKeyErrorCode =
+  | 'FUNDING_WALLET_NOT_BOUND'
+  | 'DELEGATION_SIGNER_MISMATCH'
+  | 'DELEGATION_NONCE_REPLAY'
+  | 'INVALID_SESSION_TOKEN'
+  | 'DELEGATION_REVOKED'
+  | 'DELEGATION_EXPIRED'
+  | 'DELEGATION_TX_LIMIT_EXCEEDED'
+  | 'DELEGATION_TOTAL_LIMIT_EXCEEDED'
+  | 'AGENT_KEY_BUDGET_EXHAUSTED'
+  | 'DELEGATION_CHAIN_NOT_ALLOWED'
+  | 'OWNERSHIP_MISMATCH'
+  | 'DELEGATION_NOT_ALLOWED';

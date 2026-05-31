@@ -4,8 +4,13 @@
  */
 
 import { supabase } from '../lib/supabase.js';
-import type { A2AAgentKeyRow } from '../types/index.js';
+import type { A2AAgentKeyRow, DelegationDebitContext } from '../types/index.js';
+import { delegationService, exceedsPerTxLimit } from './delegation.js';
 import {
+  AgentKeyBudgetExhaustedError,
+  DelegationExpiredError,
+  DelegationRevokedError,
+  DelegationTotalLimitExceededError,
   DepositAlreadyCreditedError,
   logOwnershipMismatch,
   OwnershipMismatchError,
@@ -44,12 +49,60 @@ export const budgetService = {
   /**
    * Debit budget by calling the Postgres function increment_a2a_key_spend.
    * Returns success/failure with error code parsed from the PG exception.
+   *
+   * WKH-101 (DT-11): delegation-aware. Si `delegationContext` está presente, el
+   * débito enruta al RPC atómico `debit_delegation_and_parent` (AC-7 per-step +
+   * AC-8/AC-9). Cuando es undefined (master key), el camino actual queda intacto
+   * (CD-5). El branch per-step (steps 2..N de compose) usa esta firma extendida.
    */
   async debit(
     keyId: string,
     chainId: number,
     amountUsd: number,
+    delegationContext?: DelegationDebitContext,
   ): Promise<{ success: boolean; error?: string }> {
+    // ── RUTA DELEGACIÓN (DT-11) ──
+    if (delegationContext) {
+      // AC-7 PER-STEP: per-tx ANTES del RPC (no necesita lock).
+      if (exceedsPerTxLimit(delegationContext.maxAmountPerTx, amountUsd)) {
+        return { success: false, error: 'DELEGATION_TX_LIMIT_EXCEEDED' };
+      }
+      // AC-8 + AC-9 ATÓMICO: el RPC chequea+debita total_spent y parent budget.
+      try {
+        await delegationService.debitDelegationAndParent(
+          delegationContext.delegationId,
+          delegationContext.ownerRef,
+          delegationContext.keyId,
+          chainId,
+          amountUsd,
+        );
+        return { success: true };
+      } catch (err) {
+        // Mapear a { success:false, error:<code> } para que compose corte el
+        // pipeline (mismo shape que la ruta master). NO re-lanzar.
+        if (err instanceof DelegationTotalLimitExceededError) {
+          return { success: false, error: 'DELEGATION_TOTAL_LIMIT_EXCEEDED' };
+        }
+        if (err instanceof AgentKeyBudgetExhaustedError) {
+          return { success: false, error: 'AGENT_KEY_BUDGET_EXHAUSTED' };
+        }
+        if (err instanceof DelegationRevokedError) {
+          return { success: false, error: 'DELEGATION_REVOKED' };
+        }
+        if (err instanceof DelegationExpiredError) {
+          return { success: false, error: 'DELEGATION_EXPIRED' };
+        }
+        if (err instanceof OwnershipMismatchError) {
+          return { success: false, error: 'OWNERSHIP_MISMATCH' };
+        }
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : 'DELEGATION_DEBIT_FAILED',
+        };
+      }
+    }
+
+    // ── RUTA MASTER KEY — INTACTA (camino actual, CD-5) ──
     const { error } = await supabase.rpc('increment_a2a_key_spend', {
       p_key_id: keyId,
       p_chain_id: chainId,

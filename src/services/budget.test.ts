@@ -14,15 +14,44 @@ vi.mock('../lib/supabase.js', () => ({
   },
 }));
 
+// WKH-101 (CD-AB-1): budget.ts now imports delegationService + exceedsPerTxLimit.
+// exceedsPerTxLimit must keep its REAL decimal-safe behaviour for T7b, so we
+// re-export the actual impl and only mock the service methods that hit the DB.
+vi.mock('./delegation.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('./delegation.js')>('./delegation.js');
+  return {
+    exceedsPerTxLimit: actual.exceedsPerTxLimit,
+    delegationService: {
+      debitDelegationAndParent: vi.fn(),
+    },
+  };
+});
+
 import { supabase } from '../lib/supabase.js';
 import { budgetService } from './budget.js';
+import { delegationService } from './delegation.js';
 import {
+  AgentKeyBudgetExhaustedError,
+  DelegationExpiredError,
+  DelegationRevokedError,
+  DelegationTotalLimitExceededError,
   DepositAlreadyCreditedError,
   OwnershipMismatchError,
 } from './security/errors.js';
 
 const mockFrom = vi.mocked(supabase.from);
 const mockRpc = vi.mocked(supabase.rpc);
+const mockDebitDelegation = vi.mocked(
+  delegationService.debitDelegationAndParent,
+);
+
+const DELEGATION_CTX = {
+  delegationId: 'del-1',
+  ownerRef: 'user-1',
+  keyId: 'key-1',
+  maxAmountPerTx: '0.50',
+};
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -155,6 +184,111 @@ describe('budgetService', () => {
         success: false,
         error: 'INSUFFICIENT_BUDGET: chain 2368 balance is 1, requested 5',
       });
+    });
+
+    // ── WKH-101 (DT-11): delegation-aware debit ──────────────
+
+    // T14 (AC-13): master key path — NO delegationContext → increment_a2a_key_spend,
+    // NEVER calls debitDelegationAndParent (backward-compat, CD-5).
+    it('T14 master key path uses increment_a2a_key_spend, not the delegation RPC (AC-13)', async () => {
+      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+
+      const result = await budgetService.debit('key-1', 2368, 1.5);
+
+      expect(mockRpc).toHaveBeenCalledWith('increment_a2a_key_spend', {
+        p_key_id: 'key-1',
+        p_chain_id: 2368,
+        p_amount_usd: 1.5,
+      });
+      expect(mockDebitDelegation).not.toHaveBeenCalled();
+      expect(result).toEqual({ success: true });
+    });
+
+    // T7b (AC-7 per-step): per-tx checked BEFORE the RPC; over-limit → fail,
+    // debitDelegationAndParent is NOT invoked.
+    it('T7b per-tx limit exceeded per-step blocks before the RPC (AC-7)', async () => {
+      const result = await budgetService.debit('key-1', 2368, 1.0, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '0.50',
+      });
+
+      expect(result).toEqual({
+        success: false,
+        error: 'DELEGATION_TX_LIMIT_EXCEEDED',
+      });
+      expect(mockDebitDelegation).not.toHaveBeenCalled();
+    });
+
+    it('delegation path within per-tx limit calls debitDelegationAndParent (AC-8/AC-9)', async () => {
+      mockDebitDelegation.mockResolvedValue('0.30');
+
+      const result = await budgetService.debit('key-1', 2368, 0.3, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '0.50',
+      });
+
+      expect(mockDebitDelegation).toHaveBeenCalledWith(
+        'del-1',
+        'user-1',
+        'key-1',
+        2368,
+        0.3,
+      );
+      expect(mockRpc).not.toHaveBeenCalled();
+      expect(result).toEqual({ success: true });
+    });
+
+    it('maps DelegationTotalLimitExceededError → DELEGATION_TOTAL_LIMIT_EXCEEDED (AC-8)', async () => {
+      mockDebitDelegation.mockRejectedValue(
+        new DelegationTotalLimitExceededError(),
+      );
+      const result = await budgetService.debit('key-1', 2368, 0.1, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '100',
+      });
+      expect(result).toEqual({
+        success: false,
+        error: 'DELEGATION_TOTAL_LIMIT_EXCEEDED',
+      });
+    });
+
+    it('maps AgentKeyBudgetExhaustedError → AGENT_KEY_BUDGET_EXHAUSTED (AC-9)', async () => {
+      mockDebitDelegation.mockRejectedValue(new AgentKeyBudgetExhaustedError());
+      const result = await budgetService.debit('key-1', 2368, 0.1, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '100',
+      });
+      expect(result).toEqual({
+        success: false,
+        error: 'AGENT_KEY_BUDGET_EXHAUSTED',
+      });
+    });
+
+    it('maps DelegationRevokedError → DELEGATION_REVOKED (TOCTOU)', async () => {
+      mockDebitDelegation.mockRejectedValue(new DelegationRevokedError());
+      const result = await budgetService.debit('key-1', 2368, 0.1, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '100',
+      });
+      expect(result).toEqual({ success: false, error: 'DELEGATION_REVOKED' });
+    });
+
+    it('maps DelegationExpiredError → DELEGATION_EXPIRED (TOCTOU)', async () => {
+      mockDebitDelegation.mockRejectedValue(new DelegationExpiredError());
+      const result = await budgetService.debit('key-1', 2368, 0.1, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '100',
+      });
+      expect(result).toEqual({ success: false, error: 'DELEGATION_EXPIRED' });
+    });
+
+    it('maps OwnershipMismatchError → OWNERSHIP_MISMATCH', async () => {
+      mockDebitDelegation.mockRejectedValue(new OwnershipMismatchError());
+      const result = await budgetService.debit('key-1', 2368, 0.1, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '100',
+      });
+      expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
     });
   });
 

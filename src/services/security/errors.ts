@@ -132,15 +132,117 @@ export class Erc8004TokenAlreadyBoundError extends Error {
 }
 
 /**
+ * WKH-101 (Fase 2): EIP-712 delegation / session-key errors.
+ *
+ * Mapeo error_code ↔ HTTP en routes/middleware (story §4). Las clases siguen el
+ * patrón `readonly code = '...' as const` + `name` para que el caller pueda
+ * mapear vía `instanceof` sin string-matching. `FundingWalletNotBoundError` YA
+ * existe (L59) y se reusa (AC-2) — no se duplica.
+ */
+
+/** recover != funding_wallet (case-insensitive), domain divergente o recover falla → 403. */
+export class DelegationSignerMismatchError extends Error {
+  readonly code = 'DELEGATION_SIGNER_MISMATCH' as const;
+  constructor() {
+    super('Delegation signer does not match funding wallet');
+    this.name = 'DelegationSignerMismatchError';
+  }
+}
+
+/** `(key_id, nonce)` ya existe → 409 (23505 mapeado). */
+export class DelegationNonceReplayError extends Error {
+  readonly code = 'DELEGATION_NONCE_REPLAY' as const;
+  constructor() {
+    super('Delegation nonce already used');
+    this.name = 'DelegationNonceReplayError';
+  }
+}
+
+/** `revoked_at IS NOT NULL` → 403. */
+export class DelegationRevokedError extends Error {
+  readonly code = 'DELEGATION_REVOKED' as const;
+  constructor() {
+    super('Delegation has been revoked');
+    this.name = 'DelegationRevokedError';
+  }
+}
+
+/** `now() >= expires_at` → 403. */
+export class DelegationExpiredError extends Error {
+  readonly code = 'DELEGATION_EXPIRED' as const;
+  constructor() {
+    super('Delegation has expired');
+    this.name = 'DelegationExpiredError';
+  }
+}
+
+/** `stepCost > max_amount_per_tx` POR STEP → 403. */
+export class DelegationTxLimitExceededError extends Error {
+  readonly code = 'DELEGATION_TX_LIMIT_EXCEEDED' as const;
+  constructor() {
+    super('Per-transaction limit exceeded');
+    this.name = 'DelegationTxLimitExceededError';
+  }
+}
+
+/** `total_spent + amount > max_total` → 403 (raised by RPC bajo lock). */
+export class DelegationTotalLimitExceededError extends Error {
+  readonly code = 'DELEGATION_TOTAL_LIMIT_EXCEEDED' as const;
+  constructor() {
+    super('Total delegation budget exceeded');
+    this.name = 'DelegationTotalLimitExceededError';
+  }
+}
+
+/** token autenticador es `wasi_a2a_session_*` → 403 (CD-9 sin sub-delegación). */
+export class DelegationNotAllowedError extends Error {
+  readonly code = 'DELEGATION_NOT_ALLOWED' as const;
+  constructor() {
+    super('Sub-delegation is not allowed');
+    this.name = 'DelegationNotAllowedError';
+  }
+}
+
+/** `lookupByTokenHash` → null → 401. */
+export class InvalidSessionTokenError extends Error {
+  readonly code = 'INVALID_SESSION_TOKEN' as const;
+  constructor() {
+    super('Session token not found');
+    this.name = 'InvalidSessionTokenError';
+  }
+}
+
+/** `allowed_chains` no vacío y `chainId ∉ allowed_chains` → 403 (DT-3). */
+export class DelegationChainNotAllowedError extends Error {
+  readonly code = 'DELEGATION_CHAIN_NOT_ALLOWED' as const;
+  constructor() {
+    super('Chain not in delegation allowed_chains');
+    this.name = 'DelegationChainNotAllowedError';
+  }
+}
+
+/** parent budget[chainId] insuficiente (INSUFFICIENT_BUDGET del RPC) → 403. */
+export class AgentKeyBudgetExhaustedError extends Error {
+  readonly code = 'AGENT_KEY_BUDGET_EXHAUSTED' as const;
+  constructor() {
+    super('Parent agent key budget exhausted');
+    this.name = 'AgentKeyBudgetExhaustedError';
+  }
+}
+
+/**
  * Operación que detectó el mismatch (PII-safe enum).
  * - `getBalance` / `deactivate`: ownership sobre `a2a_agent_keys` (WKH-53).
  * - `registryUpdate` / `registryDelete`: ownership sobre `registries` (WKH-63).
+ * - `delegationRevoke` / `delegationList`: ownership sobre `a2a_delegations` (WKH-101).
  */
 export type OwnershipOp =
   | 'getBalance'
   | 'deactivate'
   | 'registryUpdate'
-  | 'registryDelete';
+  | 'registryDelete'
+  | 'delegationRevoke'
+  | 'delegationList';
 
 /**
  * PII-safe logger para cross-owner attempts.

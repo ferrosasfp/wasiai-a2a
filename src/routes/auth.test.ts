@@ -42,6 +42,20 @@ vi.mock('../services/budget.js', () => ({
   },
 }));
 
+// WKH-101 (CD-AB-1): auth.ts now imports delegationService → mock all exports.
+vi.mock('../services/delegation.js', () => ({
+  delegationService: {
+    verifyTypedData: vi.fn(),
+    create: vi.fn(),
+    lookupByTokenHash: vi.fn(),
+    getParentKey: vi.fn(),
+    list: vi.fn(),
+    revoke: vi.fn(),
+    debitDelegationAndParent: vi.fn(),
+  },
+  exceedsPerTxLimit: vi.fn(),
+}));
+
 // CD-8: el mock del verifier exporta `verifyDeposit` completo.
 // WKH-DEPOSIT-INFO: los resolvers (treasury/min_confirmations/family) se usan
 // REALES en /deposit-info, así que se reexportan vía importActual (no mock).
