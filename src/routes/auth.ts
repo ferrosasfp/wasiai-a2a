@@ -11,6 +11,7 @@
 import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { recoverMessageAddress } from 'viem';
+import { getBaseNetwork } from '../adapters/base/chain.js';
 import {
   normalizeChainSlug,
   resolveChainKey,
@@ -21,13 +22,14 @@ import {
   resolveTreasury,
   verifyDeposit,
 } from '../adapters/deposit-verifier.js';
+import { getErc8004Reader } from '../adapters/erc8004-identity.js';
 import {
   getAdaptersBundle,
   getInitializedChainKeys,
 } from '../adapters/registry.js';
 import { authSignupRateLimit } from '../middleware/rate-limit.js';
 import { budgetService } from '../services/budget.js';
-import { identityService } from '../services/identity.js';
+import { identityService, isIdentityVerified } from '../services/identity.js';
 import {
   DepositAlreadyCreditedError,
   FundingWalletAlreadyBoundError,
@@ -37,6 +39,7 @@ import type {
   A2AAgentKeyRow,
   CreateKeyInput,
   DepositInput,
+  Erc8004IdentityBinding,
 } from '../types/index.js';
 
 // ── Funding-wallet binding (WKH-35 FIX-1) ───────────────────
@@ -51,6 +54,36 @@ const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 function fundingWalletBindMessage(keyId: string): string {
   return `WASIAI_BIND_FUNDING_WALLET:${keyId}`;
 }
+
+// ── ERC-8004 identity binding input validation (WKH-100, DT-14) ──────────────
+
+const TOKEN_ID_RE = /^[0-9]+$/;
+const UINT256_MAX = (1n << 256n) - 1n;
+
+/**
+ * Parse + validate a token_id into a `bigint` without precision loss (CD-11).
+ * Accepts a decimal string or a non-negative integer number; rejects empty,
+ * non-numeric, negative or `> 2^256-1`. Returns `null` on any rejection.
+ * NEVER uses `Number()` on the token_id (CD-11).
+ */
+function parseTokenId(raw: unknown): bigint | null {
+  let s: string;
+  if (typeof raw === 'string') s = raw.trim();
+  else if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 0)
+    s = String(raw);
+  else return null;
+  if (s === '' || !TOKEN_ID_RE.test(s)) return null;
+  let v: bigint;
+  try {
+    v = BigInt(s);
+  } catch {
+    return null;
+  }
+  if (v < 0n || v > UINT256_MAX) return null;
+  return v;
+}
+
+const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,127}$/;
 
 // ── Helper: resolve caller key from x-a2a-key header ────────
 
@@ -77,7 +110,12 @@ async function resolveCallerKey(
   if (!rawKey) return null;
 
   const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
-  return identityService.lookupByHash(keyHash);
+  const callerKey = await identityService.lookupByHash(keyHash);
+  if (callerKey) {
+    // WKH-100 (AC-6/DT-17): derived transient flag, no RPC.
+    callerKey.erc8004_verified = isIdentityVerified(callerKey);
+  }
+  return callerKey;
 }
 
 // ── Routes ──────────────────────────────────────────────────
@@ -393,6 +431,207 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         .filter((entry) => entry !== null);
 
       return reply.status(200).send({ networks });
+    },
+  );
+
+  /**
+   * POST /erc8004/bind — Bind an on-chain-verified ERC-8004 identity to the
+   * caller's Agent Key (WKH-100: AC-1/AC-3/AC-4/AC-5/AC-11/AC-12).
+   *
+   * The server READS the ERC-8004 IdentityRegistry (ERC-721) with viem and
+   * requires `ownerOf(token_id) == funding_wallet` (CD-7/CD-10) before writing
+   * the binding. It NEVER mints/signs (CD-8) and NEVER touches budget (CD-2/AC-12).
+   */
+  fastify.post(
+    '/erc8004/bind',
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      // 1. Auth.
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      // 2. Validate token_id (DT-14 / CD-11).
+      const body = req.body as
+        | { token_id?: unknown; agent_slug?: unknown }
+        | undefined;
+      const tokenId = parseTokenId(body?.token_id);
+      if (tokenId === null) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+
+      // 2b. agent_slug OPCIONAL (DT-20).
+      let agentSlug: string | undefined;
+      if (body?.agent_slug !== undefined) {
+        if (typeof body.agent_slug !== 'string') {
+          return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+        }
+        const trimmed = body.agent_slug.trim();
+        if (!SLUG_RE.test(trimmed)) {
+          return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+        }
+        agentSlug = trimmed;
+      }
+
+      // 3. funding_wallet must be bound first — NO RPC (AC-3).
+      if (!callerKey.funding_wallet) {
+        return reply
+          .status(400)
+          .send({ error_code: 'FUNDING_WALLET_NOT_BOUND' });
+      }
+      const fundingWallet = callerKey.funding_wallet;
+
+      const network = getBaseNetwork();
+      const expectedChainId = network === 'mainnet' ? 8453 : 84532;
+
+      // 4. Idempotencia (AC-5/DT-8) — SIN RPC, leyendo el row ya cargado.
+      const existing = callerKey.erc8004_identity;
+      if (
+        existing &&
+        existing.token_id === tokenId.toString() &&
+        existing.chain_id === expectedChainId
+      ) {
+        return reply.status(409).send({ error_code: 'ERC8004_ALREADY_BOUND' });
+      }
+
+      // 5. Verify ownership on-chain (read-only).
+      const reader = getErc8004Reader();
+      const v = await reader.verifyOwnership({
+        tokenId,
+        expectedOwner: fundingWallet,
+      });
+      if (!v.ok) {
+        switch (v.reason) {
+          case 'RPC_UNAVAILABLE':
+            return reply
+              .status(503)
+              .send({ ok: false, reason: 'RPC_UNAVAILABLE' });
+          case 'REGISTRY_NOT_CONFIGURED':
+            return reply
+              .status(503)
+              .send({ ok: false, reason: 'REGISTRY_NOT_CONFIGURED' });
+          case 'TOKEN_NOT_FOUND':
+            return reply
+              .status(404)
+              .send({ error_code: 'ERC8004_TOKEN_NOT_FOUND' });
+          case 'CHAIN_MISMATCH':
+            return reply
+              .status(502)
+              .send({ error_code: 'ERC8004_CHAIN_MISMATCH' });
+          default:
+            return reply
+              .status(503)
+              .send({ ok: false, reason: 'RPC_UNAVAILABLE' });
+        }
+      }
+      if (!v.matches) {
+        // AC-4 — SIN write.
+        return reply
+          .status(403)
+          .send({ error_code: 'IDENTITY_OWNERSHIP_MISMATCH' });
+      }
+
+      // 6. Resolve tokenURI (best-effort — DT-15: no bloquear bind si falla).
+      const r = await reader.resolve({ tokenId });
+      const agentCardUrl = r.ok && r.tokenUri ? r.tokenUri : '';
+
+      // 7. Build binding.
+      const binding: Erc8004IdentityBinding = {
+        token_id: tokenId.toString(), // string decimal (CD-11)
+        chain_id: expectedChainId,
+        agent_card_url: agentCardUrl,
+        owner_address: fundingWallet.toLowerCase(),
+        verified_at: new Date().toISOString(),
+        ...(agentSlug && { agent_slug: agentSlug }), // AC-8 opt-in (DT-20)
+      };
+
+      // 8. Persist (Ownership Guard in the service — CD-3).
+      try {
+        await identityService.bindErc8004Identity(
+          callerKey.id,
+          callerKey.owner_ref,
+          binding,
+        );
+      } catch (err) {
+        if (err instanceof OwnershipMismatchError) {
+          return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+        }
+        fastify.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'erc8004 bind failed',
+        );
+        return reply.status(500).send({ error_code: 'ERC8004_BIND_FAILED' });
+      }
+
+      // 9. Success.
+      return reply.status(200).send({ erc8004_identity: binding });
+    },
+  );
+
+  /**
+   * GET /erc8004/resolve/:token_id — Public, read-only tokenURI resolution
+   * (WKH-100: AC-2/AC-11). No auth (on-chain read, consistent with
+   * GET /deposit-info). NEVER fetches the tokenURI server-side (CD-13, anti-SSRF).
+   */
+  fastify.get(
+    '/erc8004/resolve/:token_id',
+    async (
+      req: FastifyRequest<{ Params: { token_id: string } }>,
+      reply: FastifyReply,
+    ) => {
+      const tokenId = parseTokenId(req.params.token_id);
+      if (tokenId === null) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+
+      const r = await getErc8004Reader().resolve({ tokenId });
+      if (!r.ok) {
+        switch (r.reason) {
+          case 'RPC_UNAVAILABLE':
+            return reply
+              .status(503)
+              .send({ ok: false, reason: 'RPC_UNAVAILABLE' });
+          case 'REGISTRY_NOT_CONFIGURED':
+            return reply
+              .status(503)
+              .send({ ok: false, reason: 'REGISTRY_NOT_CONFIGURED' });
+          case 'TOKEN_NOT_FOUND':
+            return reply
+              .status(404)
+              .send({ error_code: 'ERC8004_TOKEN_NOT_FOUND' });
+          case 'CHAIN_MISMATCH':
+            return reply
+              .status(502)
+              .send({ error_code: 'ERC8004_CHAIN_MISMATCH' });
+          default:
+            return reply
+              .status(503)
+              .send({ ok: false, reason: 'RPC_UNAVAILABLE' });
+        }
+      }
+
+      const tokenUri = r.tokenUri ?? '';
+      // Scheme handling WITHOUT fetch (CD-13/DT-16).
+      if (/^https?:\/\//i.test(tokenUri)) {
+        return reply.status(200).send({
+          token_id: tokenId.toString(),
+          chain_id: r.chainId,
+          agent_card_url: tokenUri,
+          url: tokenUri,
+          raw: null,
+        });
+      }
+      const scheme = tokenUri.includes(':')
+        ? tokenUri.slice(0, tokenUri.indexOf(':'))
+        : '';
+      return reply.status(200).send({
+        token_id: tokenId.toString(),
+        chain_id: r.chainId,
+        agent_card_url: tokenUri,
+        scheme,
+      });
     },
   );
 

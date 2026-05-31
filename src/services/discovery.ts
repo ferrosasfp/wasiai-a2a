@@ -16,6 +16,7 @@ import type {
   DiscoveryResult,
   RegistryConfig,
 } from '../types/index.js';
+import { identityService } from './identity.js';
 import { registryService } from './registry.js';
 
 // ─── WAS-V2-3-CLIENT (WKH-57) module-scoped warn dedup ────────────────
@@ -207,11 +208,35 @@ export const discoveryService = {
     // Apply limit
     const limited = query.limit ? allAgents.slice(0, query.limit) : allAgents;
 
+    // WKH-100 (AC-8/DT-18): enrich batch post-limit with verified ERC-8004
+    // identity. No RPC at serve-time — only the JSONB reverse-lookup (W2).
+    const enriched = await this.attachIdentities(limited);
+
     return {
-      agents: limited,
+      agents: enriched,
       total: allAgents.length,
       registries: registries.map((r) => r.name),
     };
+  },
+
+  /**
+   * WKH-100 (AC-8/DT-18): attach verified ERC-8004 identity to each agent via
+   * the public reverse-lookup. A DB failure for one agent leaves that agent
+   * WITHOUT identity (omitted, not null — AC-9/CD-9) and NEVER breaks discover.
+   * No RPC here (CD-8): the on-chain verify happened at bind-time.
+   */
+  async attachIdentities(agents: Agent[]): Promise<Agent[]> {
+    await Promise.all(
+      agents.map(async (a) => {
+        try {
+          const identity = await identityService.resolveIdentityForSlug(a.slug);
+          if (identity) a.identity = identity;
+        } catch {
+          /* falla DB → ese agent sin identity, NO rompe discover (DT-18) */
+        }
+      }),
+    );
+    return agents;
   },
 
   /**
@@ -366,7 +391,16 @@ export const discoveryService = {
 
         if (response.ok) {
           const data = await response.json();
-          return this.mapAgent(registry, data);
+          const agent = this.mapAgent(registry, data);
+          // WKH-100 (AC-8): single reverse-lookup for the verified ERC-8004
+          // identity. DB failure → agent sin identity, NO rompe getAgent (DT-18).
+          try {
+            const identity = await identityService.resolveIdentityForSlug(
+              agent.slug,
+            );
+            if (identity) agent.identity = identity;
+          } catch {}
+          return agent;
         }
       } catch {}
     }

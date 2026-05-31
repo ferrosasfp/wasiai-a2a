@@ -22,11 +22,45 @@ vi.mock('../lib/circuit-breaker.js', () => ({
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
+// WKH-100: discover()/getAgent() reverse-lookup ERC-8004 identity via supabase.
+// Mock the supabase client so the REAL resolveIdentityForSlug runs
+// deterministically (no network). `setIdentityRows` controls what the
+// `.select('erc8004_identity').not(...).eq('is_active', true)` chain resolves to.
+let _identityRows: Array<{ erc8004_identity: unknown }> = [];
+let _identityError: unknown = null;
+function setIdentityRows(rows: Array<{ erc8004_identity: unknown }>): void {
+  _identityRows = rows;
+  _identityError = null;
+}
+function setIdentityError(err: unknown): void {
+  _identityError = err;
+  _identityRows = [];
+}
+
+vi.mock('../lib/supabase.js', () => {
+  const builder = {
+    select: vi.fn(() => builder),
+    not: vi.fn(() => builder),
+    eq: vi.fn(() => builder),
+    // The real PostgREST query builder is a thenable (awaitable without a
+    // terminal call); we mimic that here intentionally.
+    // biome-ignore lint/suspicious/noThenProperty: mock mirrors PostgREST thenable
+    then: (resolve: (v: { data: unknown; error: unknown }) => void): void => {
+      resolve({
+        data: _identityError ? null : _identityRows,
+        error: _identityError,
+      });
+    },
+  };
+  return { supabase: { from: vi.fn(() => builder) } };
+});
+
 import {
   _resetFallbackWarnDedup,
   discoveryService,
   parsePriceSafe,
 } from './discovery.js';
+import { identityService } from './identity.js';
 import { registryService } from './registry.js';
 
 function makeRegistry(o: Partial<RegistryConfig> = {}): RegistryConfig {
@@ -69,6 +103,7 @@ function setupRegistryResponse(rawAgents: Record<string, unknown>[]) {
 describe('discoveryService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setIdentityRows([]); // default: no bound identities
   });
 
   describe('AC-10: default status=active filter', () => {
@@ -504,6 +539,167 @@ describe('discoveryService', () => {
         'active-verified',
         'inactive-verified',
       ]);
+    });
+  });
+
+  // ── WKH-100 (AC-8) — ERC-8004 identity resolver + enrich ──
+
+  describe('AC-8: resolveIdentityForSlug', () => {
+    it('match (agent_slug===slug, is_active) → { token_id, chain_id, verified:true }', async () => {
+      setIdentityRows([
+        {
+          erc8004_identity: {
+            token_id: '42',
+            chain_id: 84532,
+            agent_card_url: 'https://x',
+            owner_address: '0xabc',
+            verified_at: '2026-05-10T00:00:00.000Z',
+            agent_slug: 'wanted',
+          },
+        },
+      ]);
+
+      const r = await identityService.resolveIdentityForSlug('wanted');
+      expect(r).toEqual({
+        erc8004_token_id: '42',
+        chain_id: 84532,
+        verified: true,
+      });
+    });
+
+    it('no match (different agent_slug) → null', async () => {
+      setIdentityRows([
+        {
+          erc8004_identity: {
+            token_id: '1',
+            chain_id: 84532,
+            agent_card_url: '',
+            owner_address: '0xabc',
+            verified_at: '2026-05-10T00:00:00.000Z',
+            agent_slug: 'other',
+          },
+        },
+      ]);
+      expect(await identityService.resolveIdentityForSlug('wanted')).toBeNull();
+    });
+
+    it('binding without agent_slug → null (defensa de shape)', async () => {
+      setIdentityRows([
+        {
+          erc8004_identity: {
+            token_id: '1',
+            chain_id: 84532,
+            agent_card_url: '',
+            owner_address: '0xabc',
+            verified_at: '2026-05-10T00:00:00.000Z',
+          },
+        },
+      ]);
+      expect(await identityService.resolveIdentityForSlug('wanted')).toBeNull();
+    });
+
+    it('no rows (inactive filtered out upstream) → null', async () => {
+      setIdentityRows([]);
+      expect(await identityService.resolveIdentityForSlug('wanted')).toBeNull();
+    });
+
+    it('CD-2/DT-19: SELECT requests ONLY erc8004_identity (no budget/funding_wallet)', async () => {
+      const { supabase } = await import('../lib/supabase.js');
+      setIdentityRows([]);
+      await identityService.resolveIdentityForSlug('wanted');
+      const builder = vi.mocked(supabase.from).mock.results[0]?.value as {
+        select: ReturnType<typeof vi.fn>;
+      };
+      const selectArg = builder.select.mock.calls[0]?.[0] as string;
+      expect(selectArg).toBe('erc8004_identity');
+      expect(selectArg).not.toContain('budget');
+      expect(selectArg).not.toContain('funding_wallet');
+    });
+
+    it('DB error → null (graceful)', async () => {
+      setIdentityError(new Error('db down'));
+      expect(await identityService.resolveIdentityForSlug('wanted')).toBeNull();
+    });
+  });
+
+  describe('AC-8: discover()/getAgent() enrich', () => {
+    it('discover() sets Agent.identity when a match exists', async () => {
+      setupRegistryResponse([
+        makeRawAgent({ id: 'a1', slug: 'bound-agent', status: 'active' }),
+      ]);
+      setIdentityRows([
+        {
+          erc8004_identity: {
+            token_id: '42',
+            chain_id: 84532,
+            agent_card_url: '',
+            owner_address: '0xabc',
+            verified_at: '2026-05-10T00:00:00.000Z',
+            agent_slug: 'bound-agent',
+          },
+        },
+      ]);
+
+      const result = await discoveryService.discover({});
+      expect(result.agents[0].identity).toEqual({
+        erc8004_token_id: '42',
+        chain_id: 84532,
+        verified: true,
+      });
+    });
+
+    it('AC-9: discover() leaves identity absent when no match', async () => {
+      setupRegistryResponse([
+        makeRawAgent({ id: 'a1', slug: 'plain-agent', status: 'active' }),
+      ]);
+      setIdentityRows([]);
+
+      const result = await discoveryService.discover({});
+      expect(result.agents[0].identity).toBeUndefined();
+      expect('identity' in result.agents[0]).toBe(false);
+    });
+
+    it('DT-18: DB failure during enrich → agent without identity, discover NOT broken', async () => {
+      setupRegistryResponse([
+        makeRawAgent({ id: 'a1', slug: 'plain-agent', status: 'active' }),
+      ]);
+      setIdentityError(new Error('db blew up'));
+
+      const result = await discoveryService.discover({});
+      expect(result.agents).toHaveLength(1);
+      expect(result.agents[0].identity).toBeUndefined();
+    });
+
+    it('getAgent() sets identity when a match exists', async () => {
+      vi.mocked(registryService.getEnabled).mockResolvedValue([
+        makeRegistry({ agentEndpoint: 'https://example.com/agent/{slug}' }),
+      ]);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve(
+            makeRawAgent({ id: 'a1', slug: 'bound-agent', status: 'active' }),
+          ),
+      });
+      setIdentityRows([
+        {
+          erc8004_identity: {
+            token_id: '7',
+            chain_id: 84532,
+            agent_card_url: '',
+            owner_address: '0xabc',
+            verified_at: '2026-05-10T00:00:00.000Z',
+            agent_slug: 'bound-agent',
+          },
+        },
+      ]);
+
+      const agent = await discoveryService.getAgent('bound-agent');
+      expect(agent?.identity).toEqual({
+        erc8004_token_id: '7',
+        chain_id: 84532,
+        verified: true,
+      });
     });
   });
 });

@@ -132,6 +132,23 @@ export interface Agent {
   metadata?: Record<string, unknown>;
   /** Payment spec del agent card (WKH-55). Undefined si el registry no lo expone. */
   payment?: AgentPaymentSpec;
+  /**
+   * WKH-100 (AC-8): ERC-8004 verified identity surfaced from the agent's
+   * bound Agent Key. Omitted (not null) when the agent has no bound identity
+   * (backward-compat — AC-9/CD-9).
+   */
+  identity?: AgentCardIdentity;
+}
+
+/**
+ * WKH-100 (AC-8): ERC-8004 verified identity surfaced in discovery.
+ * `verified` is a literal `true` — the field is ONLY ever surfaced when the
+ * binding was verified on-chain server-side (anti-spoof — CD-7).
+ */
+export interface AgentCardIdentity {
+  erc8004_token_id: string; // = token_id del binding
+  chain_id: number; // 8453 | 84532
+  verified: true; // literal: solo se surfacea si verificado on-chain
 }
 
 // ============================================================
@@ -523,6 +540,12 @@ export interface AgentCard {
    * Same opt-in semantics and validation rules as `inputSchema`.
    */
   outputSchema?: Record<string, unknown>;
+  /**
+   * WKH-100 (AC-8): ERC-8004 verified identity. Surfaced ONLY when the agent
+   * has a bound, on-chain-verified Agent Key identity. Non-breaking optional
+   * extension — consumers that don't understand it MUST ignore it (DT-6).
+   */
+  identity?: AgentCardIdentity;
 }
 
 // ============================================================

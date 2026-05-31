@@ -18,7 +18,7 @@ import {
   getInitializedChainKeys,
 } from '../adapters/registry.js';
 import { budgetService } from '../services/budget.js';
-import { identityService } from '../services/identity.js';
+import { identityService, isIdentityVerified } from '../services/identity.js';
 import type { A2AAgentKeyRow } from '../types/index.js';
 import { type PaymentMiddlewareOptions, requirePayment } from './x402.js';
 
@@ -281,6 +281,7 @@ export function requirePaymentOrA2AKey(
       }
 
       // 8. Augment request (AC-4)
+      keyRow.erc8004_verified = isIdentityVerified(keyRow); // WKH-100 AC-6, derivado, sin RPC (DT-17)
       request.a2aKeyRow = keyRow;
 
       // 9. Set remaining budget header (AC-1) — read balance AFTER debit

@@ -35,6 +35,14 @@ vi.mock('./registry.js', () => ({
   },
 }));
 
+// WKH-100: discover()/getAgent() now reverse-lookup ERC-8004 identity. Mock it
+// so the SSRF tests don't hit supabase (which would trigger an extra fetch).
+vi.mock('./identity.js', () => ({
+  identityService: {
+    resolveIdentityForSlug: vi.fn().mockResolvedValue(null),
+  },
+}));
+
 vi.mock('../lib/circuit-breaker.js', () => ({
   getRegistryCircuitBreaker: () => ({
     execute: (fn: () => Promise<Response>) => fn(),

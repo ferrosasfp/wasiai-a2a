@@ -139,6 +139,36 @@ describe('agentCardService', () => {
       expect(card.capabilities.a2aCompliant).toBeUndefined();
     });
 
+    // ── WKH-100 (AC-8) — ERC-8004 identity surfacing ──
+
+    it('AC-8: includes identity when the 4th arg is provided', () => {
+      const card = agentCardService.buildAgentCard(
+        agent,
+        registryConfig,
+        baseUrl,
+        {
+          erc8004_token_id: '42',
+          chain_id: 84532,
+          verified: true,
+        },
+      );
+      expect(card.identity).toEqual({
+        erc8004_token_id: '42',
+        chain_id: 84532,
+        verified: true,
+      });
+    });
+
+    it('AC-9: omits identity (no field) when the 4th arg is absent', () => {
+      const card = agentCardService.buildAgentCard(
+        agent,
+        registryConfig,
+        baseUrl,
+      );
+      expect(card.identity).toBeUndefined();
+      expect('identity' in card).toBe(false);
+    });
+
     // ── WKH-106 (BASE-03) — discoverable opt-in + schema serialization ──
 
     describe('WKH-106 — Bazaar discovery schemas', () => {

@@ -36,6 +36,9 @@ vi.mock('../services/identity.js', () => ({
     lookupByHash: vi.fn(),
     deactivate: vi.fn(),
   },
+  // WKH-100: middleware imports this derived helper (AC-6/DT-17).
+  isIdentityVerified: (row: { erc8004_identity?: unknown } | null) =>
+    row?.erc8004_identity != null,
 }));
 
 vi.mock('../services/budget.js', () => ({

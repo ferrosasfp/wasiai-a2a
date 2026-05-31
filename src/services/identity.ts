@@ -7,14 +7,30 @@ import crypto from 'node:crypto';
 import { supabase } from '../lib/supabase.js';
 import type {
   A2AAgentKeyRow,
+  AgentCardIdentity,
   AgentSignupResponse,
   CreateKeyInput,
+  Erc8004IdentityBinding,
 } from '../types/index.js';
 import {
   FundingWalletAlreadyBoundError,
   logOwnershipMismatch,
   OwnershipMismatchError,
 } from './security/errors.js';
+
+// ── ERC-8004 identity helper (WKH-100, AC-6) ─────────────────
+
+/**
+ * Derived, pure check: a key has a verified ERC-8004 identity iff its
+ * `erc8004_identity` JSONB is non-null (DT-17). No RPC — the on-chain verify
+ * already happened at bind-time. Used by the middleware / resolveCallerKey to
+ * set the transient `erc8004_verified` flag.
+ */
+export function isIdentityVerified(
+  row: Pick<A2AAgentKeyRow, 'erc8004_identity'>,
+): boolean {
+  return row.erc8004_identity != null;
+}
 
 // ── Service ─────────────────────────────────────────────────
 
@@ -135,5 +151,80 @@ export const identityService = {
     }
 
     return normalized;
+  },
+
+  /**
+   * Bind an on-chain-verified ERC-8004 identity to a key (WKH-100, AC-1).
+   *
+   * The handler already verified `ownerOf(token_id) == funding_wallet`
+   * server-side (CD-7/CD-10) and built the `binding`. Here we only persist the
+   * JSONB. Ownership Guard (CLAUDE.md / CD-3): UPDATE filtered by id AND
+   * owner_ref so a caller can only bind identity to ITS OWN key; 0 rows →
+   * OwnershipMismatchError. This method NEVER touches `budget` /
+   * `increment_a2a_key_spend` / `register_a2a_key_deposit` (CD-2/AC-12), and
+   * does NOT re-check idempotency (that is the handler's job — DT-8).
+   */
+  async bindErc8004Identity(
+    keyId: string,
+    ownerId: string,
+    binding: Erc8004IdentityBinding,
+  ): Promise<Erc8004IdentityBinding> {
+    const { data, error } = await supabase
+      .from('a2a_agent_keys')
+      .update({ erc8004_identity: binding }) // escribe el JSONB completo; NO toca budget (CD-2)
+      .eq('id', keyId)
+      .eq('owner_ref', ownerId) // Ownership Guard COMPLETO (CD-3)
+      .select('id');
+
+    if (error)
+      throw new Error(`Failed to bind erc8004 identity: ${error.message}`);
+
+    if (!data || data.length === 0) {
+      logOwnershipMismatch('deactivate', keyId, ownerId); // DT-13: reusa label existente
+      throw new OwnershipMismatchError();
+    }
+
+    return binding;
+  },
+
+  /**
+   * Reverse-lookup PÚBLICO de identidad por `agent_slug` (WKH-100, AC-8).
+   *
+   * DT-19 / NOTA PARA AR-CR: este SELECT NO lleva `.eq('owner_ref', ...)` **a
+   * propósito**. Es una lectura PÚBLICA por `agent_slug` (no por `keyId` del
+   * caller) que devuelve SOLO `{ token_id, chain_id, verified }` — datos
+   * públicamente verificables on-chain. NUNCA trae `budget` / `funding_wallet`
+   * / PII (CD-2). NO es un IDOR; NO marcar como falso-positivo contra la regla
+   * de Ownership Guard de CLAUDE.md.
+   *
+   * [VERIFY-AT-IMPL] (checklist §0): se usa el FALLBACK en JS documentado en el
+   * Story File — traer candidatas activas con identity no-null y filtrar
+   * `agent_slug === slug` en JS. Es determinista e independiente del soporte de
+   * operadores JSONB `->>` de la versión instalada de PostgREST, y la defensa
+   * de shape (`b.agent_slug === slug`) cubre el match.
+   */
+  async resolveIdentityForSlug(
+    slug: string,
+  ): Promise<AgentCardIdentity | null> {
+    const { data, error } = await supabase
+      .from('a2a_agent_keys')
+      .select('erc8004_identity') // SOLO esta columna — NUNCA budget (CD-2/DT-19)
+      .not('erc8004_identity', 'is', null)
+      .eq('is_active', true); // solo keys activas surfacean
+
+    if (error || !data) return null;
+
+    for (const row of data as Array<{
+      erc8004_identity: Erc8004IdentityBinding | null;
+    }>) {
+      const b = row.erc8004_identity;
+      if (!b?.agent_slug || b.agent_slug !== slug) continue; // defensa de shape
+      return {
+        erc8004_token_id: b.token_id,
+        chain_id: b.chain_id,
+        verified: true,
+      };
+    }
+    return null;
   },
 };

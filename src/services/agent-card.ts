@@ -3,6 +3,7 @@ import { validateAgentSchemas } from '../lib/bazaar.js';
 import type {
   Agent,
   AgentCard,
+  AgentCardIdentity,
   AgentSkill,
   RegistryConfig,
 } from '../types/index.js';
@@ -87,6 +88,7 @@ export const agentCardService = {
     agent: Agent,
     registryConfig: RegistryConfig,
     baseUrl: string,
+    identity?: AgentCardIdentity, // WKH-100 AC-8 — resuelto por el route ANTES de llamar
   ): AgentCard {
     const skills: AgentSkill[] = agent.capabilities.map((cap) => ({
       id: cap,
@@ -143,6 +145,10 @@ export const agentCardService = {
       // empty-object placeholders) to preserve DT-6 non-breaking semantics.
       ...(inputSchema !== undefined && { inputSchema }),
       ...(outputSchema !== undefined && { outputSchema }),
+      // WKH-100 (AC-8/DT-6): surface verified ERC-8004 identity only when
+      // resolved. Absent → field OMITTED (no null) to preserve non-breaking
+      // semantics for consumers validating exact shape (AC-9/CD-9).
+      ...(identity !== undefined && { identity }),
     };
   },
 

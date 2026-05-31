@@ -2,6 +2,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { BazaarSchemaError } from '../lib/bazaar.js';
 import { agentCardService, resolveBaseUrl } from '../services/agent-card.js';
 import { discoveryService } from '../services/discovery.js';
+import { identityService } from '../services/identity.js';
 import { registryService } from '../services/registry.js';
 
 const agentCardRoutes: FastifyPluginAsync = async (fastify) => {
@@ -43,11 +44,15 @@ const agentCardRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const baseUrl = resolveBaseUrl(request);
+      // WKH-100 (AC-8): resolve the agent's verified ERC-8004 identity (if any)
+      // BEFORE building the card. Reverse-lookup by slug — public, no budget.
+      const identity = await identityService.resolveIdentityForSlug(agent.slug);
       try {
         const card = agentCardService.buildAgentCard(
           agent,
           registryConfig,
           baseUrl,
+          identity ?? undefined,
         );
 
         return reply.send(card);

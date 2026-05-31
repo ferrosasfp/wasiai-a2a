@@ -74,6 +74,50 @@ export class FundingWalletMismatchError extends Error {
 }
 
 /**
+ * WKH-100: ERC-8004 identity binding errors (Fase 1).
+ *
+ * Estas error classes son un vehículo opcional — el handler puede mapear los
+ * `reason` del reader directamente a status+error_code sin lanzarlas. Se crean
+ * para consistencia con el codebase y reuso en tests.
+ */
+
+/** El AgentID ya está bindeado para esta key/chain → 409. */
+export class Erc8004AlreadyBoundError extends Error {
+  readonly code = 'ERC8004_ALREADY_BOUND' as const;
+  constructor() {
+    super('ERC-8004 identity already bound');
+    this.name = 'Erc8004AlreadyBoundError';
+  }
+}
+
+/** `ownerOf`/`tokenURI` revierte (token inexistente) → 404. */
+export class Erc8004TokenNotFoundError extends Error {
+  readonly code = 'ERC8004_TOKEN_NOT_FOUND' as const;
+  constructor() {
+    super('ERC-8004 token not found');
+    this.name = 'Erc8004TokenNotFoundError';
+  }
+}
+
+/** `getChainId()` del RPC != chainId esperado de la red → 502. */
+export class Erc8004ChainMismatchError extends Error {
+  readonly code = 'ERC8004_CHAIN_MISMATCH' as const;
+  constructor() {
+    super('ERC-8004 chain mismatch');
+    this.name = 'Erc8004ChainMismatchError';
+  }
+}
+
+/** `ownerOf(tokenId) != funding_wallet` → 403, sin write. */
+export class IdentityOwnershipMismatchError extends Error {
+  readonly code = 'IDENTITY_OWNERSHIP_MISMATCH' as const;
+  constructor() {
+    super('ownerOf does not match funding_wallet');
+    this.name = 'IdentityOwnershipMismatchError';
+  }
+}
+
+/**
  * Operación que detectó el mismatch (PII-safe enum).
  * - `getBalance` / `deactivate`: ownership sobre `a2a_agent_keys` (WKH-53).
  * - `registryUpdate` / `registryDelete`: ownership sobre `registries` (WKH-63).
