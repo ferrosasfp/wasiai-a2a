@@ -85,3 +85,4 @@
 | 096 | 2026-05-29 | [WKH-35] Fondeo verificado on-chain de agent keys (budget prepago) — re-habilitar POST /deposit multi-chain (Kite/Avalanche/Base) | feature | QUALITY | DONE (implementado, no desplegado — pendiente aplicar 2 migraciones + env vars) | feat/wkh-base-port-v1 ([DONE.md](096-wkh-35-deposit-onchain/DONE.md)) |
 | 097 | 2026-05-29 | [WKH-AUDIT-A2A] Remediación Auditoría Profesional — Hardening + Hygiene | security | QUALITY | DONE | feat/097-wkh-audit-a2a-hardening ([done-report.md](097-remediacion-auditoria-a2a/done-report.md)) |
 | 098 | 2026-05-29 | [WKH-AUDIT-A2A-CLEANUP] Limpieza final — repo A+ (tsc + lint + isProduction) | hygiene | FAST+AR | DONE | feat/098-a2a-cleanup-aplus ([done-report.md](098-a2a-cleanup-aplus/done-report.md)) |
+| 099 | 2026-05-30 | [WKH-DEPOSIT-INFO] GET /auth/deposit-info — public endpoint with per-chain funding info | feature | FAST+AR | DONE | feat/099-deposit-info ([done-report.md](099-deposit-info/done-report.md)) |
