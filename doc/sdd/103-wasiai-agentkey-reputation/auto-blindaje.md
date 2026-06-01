@@ -93,8 +93,22 @@ Consolidación de lecciones del pipeline QUALITY: F0→F1→F2→F2.5→F3(W0-W4
 | 8 | Grounding | `[VERIFY-AT-IMPL]` contra repo oficial + JSDoc cita | WKH-101 carry | ✅ Aplicado |
 | 9 | Performance | Batch aggregate 1 query con `IN()` (anti-N+1) | WKH-100 carry | ✅ Aplicado |
 | 10 | Architecture | Batch score pre-sort (no post-limit) = page correcta | WKH-103 OBS-2 | ✅ Aplicado |
-| 11 | Security | Sybil resistance: cost real vs self-dealing. TD para v2 | WKH-103 nuevo | ✅ TD-WKH-103-SYBIL |
+| 11 | Security | Sybil resistance: cost real vs self-dealing. TD para v2 | WKH-103 nuevo | ✅ TD-WKH-103-SYBIL (RESUELTO WKH-104) |
 
 ---
 
 **Consolidación completada:** 2026-05-31 | **Commits abarcados:** 07c955b (F3) | **Tests:** 1324/1324 PASS | **tsc+biome:** 0 errores
+
+---
+
+## TD-WKH-103-SYBIL ✅ RESUELTO (WKH-104)
+
+**Estado anterior:** Sybil resistance v1 (cost real on-chain). La deuda abierta era que un operador pagándose a sí mismo N tasks desde N callers distintos puede escalar `tasks_settled` linealmente, un "self-dealing Sybil" inherente al sistema permissionless sin identidad/stake.
+
+**Estado nuevo (WKH-104):** 
+- `compose.ts` emite `caller_ref_hash` (HMAC-SHA256 del `owner_ref`, nunca raw) en metadata de `compose_step`.
+- `reputation.ts` capea por caller: cada `(agent_id, caller_ref_hash)` aporta `min(count, K)` tasks (K=`REPUTATION_MAX_TASKS_PER_CALLER`, default 5).
+- El residual **inherente** (atacante con N caller-keys distintas aún puede escalar linealmente) queda documentado en el done-report.md como "no deuda nueva", aceptado en backlog → **WKH-SEC-03** (identity-based Sybil post-WKH-54 RLS).
+
+**Verificación:** AC-9/AC-10/AC-11/AC-12 PASS. Helper `hashCallerRef()` implementado, tests 3 scenarios (owner_ref, null, fallback warn). Reputation capping verificado en tests (mínimo 5 tasks/caller, diferenciados).
+

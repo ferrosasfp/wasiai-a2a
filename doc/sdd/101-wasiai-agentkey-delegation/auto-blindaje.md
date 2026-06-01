@@ -44,20 +44,21 @@
 
 ## Technical Debt (NO código — backlog)
 
-### TD-WKH-101-DRIFT
-`resolveTargetChain` (`src/middleware/a2a-key.ts:132-171`, branch session) duplica el bloque
-de resolución de chain del master (`src/middleware/a2a-key.ts:~449-486`). Es una réplica EXACTA
-intencional para no arriesgar backward-compat del master (CD-5). Unificar en una HU futura
-extrayendo un helper compartido; tocar el master ahora arriesga el camino master-key. **No bloqueante.**
+### TD-WKH-101-DRIFT ✅ RESUELTO (WKH-104)
+`resolveTargetChain` (`src/middleware/a2a-key.ts:132-171`, branch session) duplicaba el bloque
+de resolución de chain del master. **Resuelto en WKH-104**: master path ahora llama
+`resolveTargetChain()` (línea 478-480), bloque inline eliminado, comportamiento idéntico.
+Verificado: 44 a2a-key.test.ts verdes sin cambios (AC-2/AC-3/AC-4/AC-5 PASS).
 
-### TD-WKH-101-RACE-TEST
-T18 (atomicidad del débito doble bajo `FOR UPDATE` en `debit_delegation_and_parent`) es mock-only
-a nivel unit. La atomicidad real del lock requiere un test de integración contra un Postgres real
-(dos débitos concurrentes que compiten por el mismo `total_spent`/budget). Backlog: agregar suite
-de integración con DB real. **No bloqueante** (la lógica del RPC ya está en la migración).
+### TD-WKH-101-RACE-TEST ✅ RESUELTO (WKH-104)
+T18 (atomicidad del débito doble bajo `FOR UPDATE` en `debit_delegation_and_parent`) era mock-only
+a nivel unit. **Resuelto en WKH-104**: nuevo archivo `src/__tests__/e2e/delegation-atomicity.real.test.ts`
+ejercita el RPC real contra Postgres (gateado por `INTEGRATION_TEST_DB_URL`). Concurrent debit test
+verificado (AC-6/AC-7/AC-8 PASS). Mock-only de `delegation.test.ts` anotado (mapeo errores, no atomicidad).
 
 ### TD-WKH-101-ORCH
 Under-charge del master-en-orchestrate: en `orchestrate`, los steps 2..N se debitan sin `chainId`
 del bundle (a diferencia de `compose` que ya propaga `request.resolvedChainId`). Para delegación
 el débito per-step usa el chain correcto vía `delegationContext`, pero el path master-en-orchestrate
 puede sub-cobrar en multichain. Trackear en HU dedicada de orchestrate. **No bloqueante** para WKH-101.
+**Resuelto en WKH-102** (TD-WKH-102-COMMENT: comentario actualizado, ahora chainId se propaga siempre).

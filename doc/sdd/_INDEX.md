@@ -90,3 +90,4 @@
 | 101 | 2026-05-31 | [WKH-101] wasiai-agentkey Fase 2: EIP-712 Delegation + Session Key + Server-Side Enforcement | feature | QUALITY | DONE | feat/101-wasiai-agentkey-delegation ([done-report.md](101-wasiai-agentkey-delegation/done-report.md)) |
 | 102 | 2026-05-31 | [WKH-102] Fix billing /orchestrate — debita steps 1..N de master keys (TD-WKH-101-ORCH) | bugfix | FAST+AR | DONE | feat/102-orchestrate-billing-fix ([done-report.md](102-orchestrate-billing-fix/done-report.md)) |
 | 103 | 2026-05-31 | [WKH-103] wasiai-agentkey Fase 3: Reputación ERC-8004 (off-chain + on-chain read opcional) | feature | QUALITY | DONE | feat/103-wasiai-agentkey-reputation ([done-report.md](103-wasiai-agentkey-reputation/done-report.md)) |
+| 104 | 2026-05-31 | [WKH-104] Tech Debt Closure — TDs WKH-101/102/103 (comment/drift/race-test/sybil) | tech-debt | QUALITY | DONE | feat/104-tech-debt-closure ([done-report.md](104-tech-debt-closure/done-report.md)) |
