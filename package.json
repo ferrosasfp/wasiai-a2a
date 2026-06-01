@@ -12,6 +12,7 @@
     "format": "biome format --write src/",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "smoke:downstream": "node scripts/smoke-downstream-x402.mjs",
     "migrate:preflight": "node scripts/migrate-preflight.mjs"
   },
   "dependencies": {
