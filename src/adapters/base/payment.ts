@@ -24,14 +24,15 @@ import { type BaseNetwork, getBaseChain } from './chain.js';
  * Sepolia testnet 84532) and POSTs canonical x402 v2 envelopes to the
  * facilitator.
  *
- * IMPORTANTE — BASE-01 caveat (DT-11): el facilitator actual (WasiAI o CDP)
- * NO soporta Base RPC en esta fase. WKH-105 (BASE-02) wirea el facilitator
- * real. Los tests de este archivo mockean `fetch`. Smoke real es WKH-107
- * (BASE-04). En BASE-01, una respuesta 4xx del facilitator es esperada y
- * NO falla el build.
+ * BASE-02 (WKH-106): el facilitator deployado settlea Base Sepolia real
+ * (EIP-3009 transferWithAuthorization vía viem) y EXIGE autenticación
+ * `Authorization: Bearer <key>` en /verify y /settle (requireFacilitatorKey,
+ * timing-safe, obligatorio fuera de NODE_ENV=test). Este adapter manda ese
+ * header cuando hay una API key configurada por env (BASE_FACILITATOR_API_KEY
+ * → FACILITATOR_API_KEY); sin key, omite el header (degradación segura para
+ * tests / entornos sin auth). Los tests mockean `fetch`. Smoke real: BASE-04.
  *
- * EIP-712 domain `name` difiere por network — verified onchain por WKH-105
- * (Sepolia="USDC", Mainnet="USD Coin"). Ver `w0-audit.md`.
+ * EIP-712 domain `name` difiere por network (Sepolia="USDC", Mainnet="USD Coin").
  */
 
 const BASE_SCHEME = 'exact' as const;
@@ -169,6 +170,14 @@ function getFacilitatorUrl(): string {
   );
 }
 
+function getFacilitatorApiKey(): string | undefined {
+  return (
+    process.env.BASE_FACILITATOR_API_KEY?.trim() ||
+    process.env.FACILITATOR_API_KEY?.trim() ||
+    undefined
+  );
+}
+
 function getWalletClient(network: BaseNetwork) {
   if (network === 'mainnet' && _walletClientMainnet)
     return _walletClientMainnet;
@@ -257,11 +266,16 @@ async function verifyX402(
     proof.signature,
     network,
   );
+  const apiKey = getFacilitatorApiKey();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   let response: Response;
   try {
     response = await fetch(`${facilitatorUrl}/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(FACILITATOR_TIMEOUT_MS),
     });
@@ -297,11 +311,16 @@ async function settleX402(
     req.signature,
     network,
   );
+  const apiKey = getFacilitatorApiKey();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   let response: Response;
   try {
     response = await fetch(`${facilitatorUrl}/settle`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(FACILITATOR_TIMEOUT_MS),
     });
