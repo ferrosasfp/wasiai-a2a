@@ -25,6 +25,14 @@ export interface WasiAgentConfig {
   // REINTENTOS además del intento inicial (total de intentos = max + 1).
   depositRetryMax?: number; // default 6
   depositRetryDelayMs?: number; // default 5000
+  // Retry del POST /auth/erc8004/bind ante errores TRANSITORIOS de visibilidad
+  // del token recién minteado (ERC8004_TOKEN_NOT_FOUND / RPC_UNAVAILABLE): el
+  // server chequea ownerOf(tokenId) con su propio RPC, que puede ir 1 bloque por
+  // detrás del cliente y todavía no ver el token recién minteado (mismo race que
+  // el deposit). Defaults: 6 reintentos × 5s ≈ 30s. identityBindRetryMax es el nº
+  // de REINTENTOS además del intento inicial (total de intentos = max + 1).
+  identityBindRetryMax?: number; // default 6
+  identityBindRetryDelayMs?: number; // default 5000
   // Inyectables para test (DT-11) — opcionales, defaults reales en el constructor:
   fetchImpl?: typeof fetch;
   walletClient?: WalletClient;

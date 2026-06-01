@@ -88,10 +88,25 @@ const DEPOSIT_ALREADY_CREDITED = 'DEPOSIT_ALREADY_CREDITED';
 const DEFAULT_DEPOSIT_RETRY_MAX = 6;
 const DEFAULT_DEPOSIT_RETRY_DELAY_MS = 5000;
 
+// ── Identity bind retry (WKH-105) ────────────────────────────────────────────
+// Solo estos error_code son TRANSITORIOS: el server chequea ownerOf(tokenId) con
+// su propio RPC y puede ir 1 bloque por detrás del cliente, todavía sin ver el
+// token recién minteado (ERC8004_TOKEN_NOT_FOUND) o con el RPC caído un instante
+// (RPC_UNAVAILABLE). Cualquier otro error_code (IDENTITY_OWNERSHIP_MISMATCH,
+// FUNDING_WALLET_NOT_BOUND, INVALID_INPUT, …) es real → fallar ya.
+const BIND_RETRYABLE_CODES = new Set([
+  'ERC8004_TOKEN_NOT_FOUND',
+  'RPC_UNAVAILABLE',
+]);
+// El token ya quedó bindeado en un intento previo (idempotente) → ÉXITO.
+const BIND_ALREADY_BOUND = 'ERC8004_ALREADY_BOUND';
+const DEFAULT_BIND_RETRY_MAX = 6;
+const DEFAULT_BIND_RETRY_DELAY_MS = 5000;
+
 // Lee el `error_code` del body crudo que el A2AClient guarda como `cause`
 // no-enumerable del OperationError. Devuelve undefined si no es legible (no
 // loguea ni expone el body; solo inspecciona el campo error_code).
-function depositErrorCode(err: unknown): string | undefined {
+function operationErrorCode(err: unknown): string | undefined {
   if (!(err instanceof OperationError)) return undefined;
   const cause = (err as { cause?: unknown }).cause;
   if (cause == null || typeof cause !== 'object') return undefined;
@@ -304,7 +319,7 @@ export class WasiAgent {
         );
         return dep.balance;
       } catch (err) {
-        const code = depositErrorCode(err);
+        const code = operationErrorCode(err);
 
         // Anti-replay: la MISMA tx ya está acreditada → éxito. Leemos el saldo
         // ya acreditado de /auth/me (budget[chainId], default '0').
@@ -408,18 +423,11 @@ export class WasiAgent {
       throw new IdentityMintError('mint', 'on-chain mint failed', err);
     }
 
-    // bind sin ancla (token_id solo — válido, src/routes/auth.ts:644).
-    // El bind verifica ownership + persiste en DB; NO escribe on-chain → no
-    // devuelve tx_hash. El único tx on-chain del flujo es el mint (arriba).
-    try {
-      await this.#client.request('/auth/erc8004/bind', {
-        method: 'POST',
-        key: this.#key,
-        body: { token_id: tokenId },
-      });
-    } catch (err) {
-      throw new IdentityMintError('bind', 'erc8004 bind failed', err);
-    }
+    // bind sin ancla (token_id solo — válido, src/routes/auth.ts:644), con retry
+    // ante errores TRANSITORIOS de visibilidad del token recién minteado
+    // (WKH-105). El bind verifica ownership + persiste en DB; NO escribe on-chain
+    // → no devuelve tx_hash. El único tx on-chain del flujo es el mint (arriba).
+    await this.#bindIdentityWithRetry(this.#key, tokenId);
 
     return {
       skipped: false,
@@ -428,6 +436,64 @@ export class WasiAgent {
       agentCardUri: agentURI,
       mintTxHash,
     };
+  }
+
+  /**
+   * POST /auth/erc8004/bind con retry/backoff ante errores TRANSITORIOS de
+   * visibilidad del token recién minteado (WKH-105). Reglas:
+   * - `ERC8004_TOKEN_NOT_FOUND` / `RPC_UNAVAILABLE` → reintentar (el RPC del
+   *   server aún no ve el token recién minteado; mismo race que el deposit).
+   * - `ERC8004_ALREADY_BOUND` → ÉXITO (idempotente: el token ya quedó bindeado en
+   *   un intento previo; no es error).
+   * - cualquier otro error_code (IDENTITY_OWNERSHIP_MISMATCH,
+   *   FUNDING_WALLET_NOT_BOUND, INVALID_INPUT, …) → fallar INMEDIATO (real).
+   * - agotados los reintentos con transitorio → `IdentityMintError('bind', …)`.
+   * NUNCA loguea `key`/PK/token (el retry solo inspecciona `error_code`).
+   */
+  async #bindIdentityWithRetry(key: string, tokenId: string): Promise<void> {
+    const maxRetries =
+      this.#config.identityBindRetryMax ?? DEFAULT_BIND_RETRY_MAX;
+    const delayMs =
+      this.#config.identityBindRetryDelayMs ?? DEFAULT_BIND_RETRY_DELAY_MS;
+    // total de intentos = 1 inicial + maxRetries reintentos
+    const totalAttempts = maxRetries + 1;
+
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < totalAttempts; attempt++) {
+      try {
+        await this.#client.request('/auth/erc8004/bind', {
+          method: 'POST',
+          key,
+          body: { token_id: tokenId },
+        });
+        return;
+      } catch (err) {
+        const code = operationErrorCode(err);
+
+        // Idempotente: el token ya quedó bindeado en un intento previo → éxito.
+        if (code === BIND_ALREADY_BOUND) {
+          return;
+        }
+
+        // No transitorio → error real, fallar inmediato (sin reintentar).
+        if (code === undefined || !BIND_RETRYABLE_CODES.has(code)) {
+          throw new IdentityMintError('bind', 'erc8004 bind failed', err);
+        }
+
+        // Transitorio → backoff y reintento (salvo que sea el último intento).
+        lastErr = err;
+        if (attempt < totalAttempts - 1) {
+          await sleep(delayMs);
+        }
+      }
+    }
+
+    // Agotados los reintentos siempre con un error transitorio.
+    throw new IdentityMintError(
+      'bind',
+      `identity not visible after ${totalAttempts} attempts`,
+      lastErr,
+    );
   }
 
   /**
