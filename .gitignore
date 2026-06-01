@@ -51,3 +51,12 @@ backups/
 
 # Stale legacy duplicate of .nexus/project-context.md (CLAUDE.md → use .nexus/ as canonical)
 /project-context.md
+
+# Local ops/smoke helpers — machine-specific (abs paths + dev-tokens.env), NOT for CI.
+# El settlement downstream x402 ya se validó on-chain (Base tx 0x9fb7…, Avax tx 0xb9cf…).
+/scripts/diag-base-settle.mjs
+/scripts/diag-base-settle-run.sh
+/scripts/smoke-base-downstream.mjs
+/scripts/smoke-base-downstream-run.sh
+/scripts/enable-base-downstream.sh
+/scripts/set-avax-facilitator-key.sh
