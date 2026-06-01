@@ -12,6 +12,7 @@
  * Mocks viem walletClient (so `sign()` does not require a real RPC) and global
  * fetch (so `verify()`/`settle()` do not hit a real facilitator).
  */
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ─── Mocks ───────────────────────────────────────────────────────────────
@@ -424,5 +425,173 @@ describe('Avalanche attestation adapter — stub', () => {
     expect(await bundle.attestation.verify({ txHash: '0xDEADBEEF' })).toBe(
       true,
     );
+  });
+});
+
+describe('Avalanche payment adapter — facilitator bearer auth (AVAX-BEARER)', () => {
+  let adapter: AvalanchePaymentAdapter;
+
+  const proofInput = {
+    authorization: {
+      from: '0x1111111111111111111111111111111111111111',
+      to: '0x2222222222222222222222222222222222222222',
+      value: '1000000',
+      validAfter: '0',
+      validBefore: '9999999999',
+      nonce: `0x${'a'.repeat(64)}`,
+    },
+    signature: '0xSIG',
+    network: 'eip155:43113' as const,
+  };
+
+  beforeEach(() => {
+    _resetWalletClient();
+    vi.clearAllMocks();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    delete process.env.AVALANCHE_FACILITATOR_API_KEY;
+    delete process.env.FACILITATOR_API_KEY;
+    process.env.OPERATOR_PRIVATE_KEY =
+      '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
+    adapter = new AvalanchePaymentAdapter({ network: 'fuji' });
+  });
+
+  afterEach(() => {
+    delete process.env.AVALANCHE_FACILITATOR_API_KEY;
+    delete process.env.FACILITATOR_API_KEY;
+    delete process.env.OPERATOR_PRIVATE_KEY;
+    delete process.env.AVALANCHE_FACILITATOR_URL;
+    delete process.env.WASIAI_FACILITATOR_URL;
+  });
+
+  // T-AC1 — verify con AVALANCHE_FACILITATOR_API_KEY → bearer en /verify
+  it('verify() sends Authorization: Bearer when AVALANCHE_FACILITATOR_API_KEY is set', async () => {
+    process.env.AVALANCHE_FACILITATOR_API_KEY = 'test-facilitator-key';
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ verified: true }),
+    });
+    await adapter.verify(proofInput);
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toMatch(/\/verify$/);
+    const headers = (init as { headers: Record<string, string> }).headers;
+    expect(headers.Authorization).toBe('Bearer test-facilitator-key');
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+
+  // T-AC2 — settle con AVALANCHE_FACILITATOR_API_KEY → bearer en /settle
+  it('settle() sends Authorization: Bearer when AVALANCHE_FACILITATOR_API_KEY is set', async () => {
+    process.env.AVALANCHE_FACILITATOR_API_KEY = 'test-facilitator-key';
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ settled: true, transactionHash: '0xDEADBEEF' }),
+    });
+    await adapter.settle(proofInput);
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toMatch(/\/settle$/);
+    const headers = (init as { headers: Record<string, string> }).headers;
+    expect(headers.Authorization).toBe('Bearer test-facilitator-key');
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+
+  // T-AC3a — fallback: solo FACILITATOR_API_KEY seteada
+  it('verify() falls back to FACILITATOR_API_KEY when AVALANCHE_FACILITATOR_API_KEY is unset', async () => {
+    process.env.FACILITATOR_API_KEY = 'shared-key';
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ verified: true }),
+    });
+    await adapter.verify(proofInput);
+    const [, init] = mockFetch.mock.calls[0];
+    const headers = (init as { headers: Record<string, string> }).headers;
+    expect(headers.Authorization).toBe('Bearer shared-key');
+  });
+
+  // T-AC3b — precedencia: ambas seteadas → gana AVALANCHE_*
+  it('verify() prefers AVALANCHE_FACILITATOR_API_KEY over FACILITATOR_API_KEY when both set', async () => {
+    process.env.AVALANCHE_FACILITATOR_API_KEY = 'avax-key';
+    process.env.FACILITATOR_API_KEY = 'shared-key';
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ verified: true }),
+    });
+    await adapter.verify(proofInput);
+    const [, init] = mockFetch.mock.calls[0];
+    const headers = (init as { headers: Record<string, string> }).headers;
+    expect(headers.Authorization).toBe('Bearer avax-key');
+  });
+
+  // T-AC4 — sin key → header ausente, fetch completa (verify y settle)
+  it('omits Authorization header and completes when no key is set (verify and settle)', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ verified: true }),
+    });
+    const verifyResult = await adapter.verify(proofInput);
+    expect(verifyResult.valid).toBe(true);
+    const [, verifyInit] = mockFetch.mock.calls[0];
+    expect(
+      (verifyInit as { headers: Record<string, string> }).headers.Authorization,
+    ).toBeUndefined();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ settled: true, transactionHash: '0xDEADBEEF' }),
+    });
+    const settleResult = await adapter.settle(proofInput);
+    expect(settleResult.success).toBe(true);
+    const [, settleInit] = mockFetch.mock.calls[1];
+    expect(
+      (settleInit as { headers: Record<string, string> }).headers.Authorization,
+    ).toBeUndefined();
+  });
+
+  // T-AC4-empty — key = whitespace → header omitido (no `Bearer `)
+  it('omits Authorization header when key is whitespace-only', async () => {
+    process.env.AVALANCHE_FACILITATOR_API_KEY = '   ';
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ verified: true }),
+    });
+    await adapter.verify(proofInput);
+    const [, init] = mockFetch.mock.calls[0];
+    expect(
+      (init as { headers: Record<string, string> }).headers.Authorization,
+    ).toBeUndefined();
+  });
+
+  // T-AC5 — la key NO aparece en body ni en result.error (path 5xx)
+  it('never leaks the key into the request body or the error result on 5xx', async () => {
+    process.env.AVALANCHE_FACILITATOR_API_KEY = 'test-facilitator-key';
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({
+        error: { code: 'INTERNAL', message: 'boom', http: 500 },
+      }),
+    });
+    const result = await adapter.verify(proofInput);
+    const [, init] = mockFetch.mock.calls[0];
+    const rawBody = (init as { body: string }).body;
+    expect(rawBody).not.toContain('test-facilitator-key');
+    expect(result.valid).toBe(false);
+    expect(result.error ?? '').not.toContain('test-facilitator-key');
+  });
+
+  // T-AC7 — .env.example documenta AVALANCHE_FACILITATOR_API_KEY
+  it('.env.example documents AVALANCHE_FACILITATOR_API_KEY with fallback and no-logs note', () => {
+    const src = readFileSync(
+      new URL('../../../.env.example', import.meta.url),
+      'utf8',
+    );
+    expect(src).toContain('AVALANCHE_FACILITATOR_API_KEY');
+    expect(src).toContain('FACILITATOR_API_KEY');
+    expect(src).toMatch(/logs/i);
   });
 });

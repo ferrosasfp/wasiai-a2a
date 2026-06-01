@@ -148,6 +148,14 @@ function getFacilitatorUrl(): string {
   );
 }
 
+function getFacilitatorApiKey(): string | undefined {
+  return (
+    process.env.AVALANCHE_FACILITATOR_API_KEY?.trim() ||
+    process.env.FACILITATOR_API_KEY?.trim() ||
+    undefined
+  );
+}
+
 function getWalletClient(network: AvalancheNetwork) {
   if (network === 'mainnet' && _walletClientMainnet)
     return _walletClientMainnet;
@@ -233,11 +241,16 @@ async function verifyX402(
     proof.signature,
     network,
   );
+  const apiKey = getFacilitatorApiKey();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   let response: Response;
   try {
     response = await fetch(`${facilitatorUrl}/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(FACILITATOR_TIMEOUT_MS),
     });
@@ -273,11 +286,16 @@ async function settleX402(
     req.signature,
     network,
   );
+  const apiKey = getFacilitatorApiKey();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   let response: Response;
   try {
     response = await fetch(`${facilitatorUrl}/settle`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(FACILITATOR_TIMEOUT_MS),
     });
