@@ -15,6 +15,8 @@
  *
  * Mocks viem walletClient + global fetch.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ─── Mocks ───────────────────────────────────────────────────────────────
@@ -521,5 +523,199 @@ describe('Base attestation adapter — stub', () => {
     expect(await bundle.attestation.verify({ txHash: '0xDEADBEEF' })).toBe(
       true,
     );
+  });
+});
+
+describe('Base payment adapter — facilitator bearer auth (BASE-02)', () => {
+  let adapter: BasePaymentAdapter;
+
+  const AUTHORIZATION = {
+    from: '0x1111111111111111111111111111111111111111',
+    to: '0x2222222222222222222222222222222222222222',
+    value: '1000000',
+    validAfter: '0',
+    validBefore: '9999999999',
+    nonce: `0x${'a'.repeat(64)}`,
+  } as const;
+
+  beforeEach(() => {
+    _resetWalletClient();
+    _resetBaseChain();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockFetch.mockReset();
+    delete process.env.BASE_FACILITATOR_API_KEY;
+    delete process.env.FACILITATOR_API_KEY;
+    process.env.OPERATOR_PRIVATE_KEY =
+      '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
+    adapter = new BasePaymentAdapter({ network: 'testnet' });
+  });
+
+  afterEach(() => {
+    delete process.env.BASE_FACILITATOR_API_KEY;
+    delete process.env.FACILITATOR_API_KEY;
+    delete process.env.OPERATOR_PRIVATE_KEY;
+  });
+
+  // T-AC1 — verify with BASE_FACILITATOR_API_KEY → bearer header (AC-1, AC-3, AC-6)
+  it('verify() sends Authorization: Bearer when BASE_FACILITATOR_API_KEY set', async () => {
+    process.env.BASE_FACILITATOR_API_KEY = 'test-facilitator-key';
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ verified: true }),
+    });
+    await adapter.verify({
+      authorization: AUTHORIZATION,
+      signature: '0xSIG',
+      network: 'eip155:84532',
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const headers = (init as { headers: Record<string, string> }).headers;
+    expect(headers.Authorization).toBe('Bearer test-facilitator-key');
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+
+  // T-AC2 — settle with BASE_FACILITATOR_API_KEY → bearer header (AC-2, AC-3, AC-6)
+  it('settle() sends Authorization: Bearer when BASE_FACILITATOR_API_KEY set', async () => {
+    process.env.BASE_FACILITATOR_API_KEY = 'test-facilitator-key';
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        settled: true,
+        transactionHash: '0xDEADBEEF',
+        blockNumber: 12345,
+      }),
+    });
+    await adapter.settle({
+      authorization: AUTHORIZATION,
+      signature: '0xSIG',
+      network: 'eip155:84532',
+    });
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toMatch(/\/settle$/);
+    const headers = (init as { headers: Record<string, string> }).headers;
+    expect(headers.Authorization).toBe('Bearer test-facilitator-key');
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+
+  // T-AC3a — fallback: only FACILITATOR_API_KEY set (AC-3)
+  it('uses FACILITATOR_API_KEY when BASE_FACILITATOR_API_KEY absent', async () => {
+    process.env.FACILITATOR_API_KEY = 'shared-key';
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ verified: true }),
+    });
+    await adapter.verify({
+      authorization: AUTHORIZATION,
+      signature: '0xSIG',
+      network: 'eip155:84532',
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const headers = (init as { headers: Record<string, string> }).headers;
+    expect(headers.Authorization).toBe('Bearer shared-key');
+  });
+
+  // T-AC3b — precedence: both set → BASE_* wins (AC-3)
+  it('prefers BASE_FACILITATOR_API_KEY over FACILITATOR_API_KEY when both set', async () => {
+    process.env.BASE_FACILITATOR_API_KEY = 'base-key';
+    process.env.FACILITATOR_API_KEY = 'shared-key';
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ verified: true }),
+    });
+    await adapter.verify({
+      authorization: AUTHORIZATION,
+      signature: '0xSIG',
+      network: 'eip155:84532',
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const headers = (init as { headers: Record<string, string> }).headers;
+    expect(headers.Authorization).toBe('Bearer base-key');
+  });
+
+  // T-AC4 — no key → header absent, verify + settle complete without throw (AC-4)
+  it('omits Authorization header when no key set (verify + settle complete)', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ verified: true }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ settled: true, transactionHash: '0xABC' }),
+    });
+    const verifyResult = await adapter.verify({
+      authorization: AUTHORIZATION,
+      signature: '0xSIG',
+      network: 'eip155:84532',
+    });
+    const settleResult = await adapter.settle({
+      authorization: AUTHORIZATION,
+      signature: '0xSIG',
+      network: 'eip155:84532',
+    });
+    expect(verifyResult.valid).toBe(true);
+    expect(settleResult.success).toBe(true);
+    const verifyHeaders = (
+      mockFetch.mock.calls[0][1] as { headers: Record<string, string> }
+    ).headers;
+    const settleHeaders = (
+      mockFetch.mock.calls[1][1] as { headers: Record<string, string> }
+    ).headers;
+    expect(verifyHeaders.Authorization).toBeUndefined();
+    expect(settleHeaders.Authorization).toBeUndefined();
+  });
+
+  // T-AC4-empty — empty-string key → header omitted (no `Bearer `) (AC-4, DT-6)
+  it('omits Authorization header when key is empty string', async () => {
+    process.env.BASE_FACILITATOR_API_KEY = '';
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ verified: true }),
+    });
+    await adapter.verify({
+      authorization: AUTHORIZATION,
+      signature: '0xSIG',
+      network: 'eip155:84532',
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const headers = (init as { headers: Record<string, string> }).headers;
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  // T-AC5 — key never leaks into body nor error (AC-5, CD-2)
+  it('never includes the key in the serialized body nor in error messages', async () => {
+    process.env.BASE_FACILITATOR_API_KEY = 'test-facilitator-key';
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({
+        error: { code: 'INTERNAL', message: 'boom', http: 500 },
+      }),
+    });
+    const result = await adapter.verify({
+      authorization: AUTHORIZATION,
+      signature: '0xSIG',
+      network: 'eip155:84532',
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const rawBody = (init as { body: string }).body;
+    expect(rawBody).not.toContain('test-facilitator-key');
+    expect(result.error ?? '').not.toContain('test-facilitator-key');
+  });
+
+  // T-AC7 — adapter source no longer carries the stale BASE-01 caveat (AC-7)
+  it('adapter source no longer contains the stale BASE-01 caveat', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('../base/payment.ts', import.meta.url)),
+      'utf-8',
+    );
+    expect(src).not.toContain('NO soporta Base RPC');
+    expect(src).not.toContain('DT-11');
   });
 });
