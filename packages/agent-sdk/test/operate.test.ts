@@ -54,8 +54,10 @@ function baseConfig(over: Partial<Parameters<typeof WasiAgent>[1]> = {}) {
 describe('operate()', () => {
   it('AC-6: primer agente dentro de budget → compose con steps[{agent,registry,input:{}}] → payload', async () => {
     let composeBody: unknown;
+    const headersByPath = new Map<string, Record<string, string>>();
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
       const path = new URL(url).pathname;
+      headersByPath.set(path, init?.headers as Record<string, string>);
       if (path === '/discover') return res(200, discoverBody());
       if (path === '/compose') {
         composeBody = JSON.parse(String(init?.body));
@@ -76,6 +78,14 @@ describe('operate()', () => {
     expect(composeBody).toEqual({
       steps: [{ agent: 'cheap', registry: 'reg-1', input: {} }],
     });
+    // WKH-105: /compose y /discover deben llevar x-payment-chain == config.network
+    // para que el server resolveTargetChain debite el budget de la red correcta.
+    expect(headersByPath.get('/compose')?.['x-payment-chain']).toBe(
+      'base-sepolia',
+    );
+    expect(headersByPath.get('/discover')?.['x-payment-chain']).toBe(
+      'base-sepolia',
+    );
   });
 
   it('AC-6: sin candidato en budget → {operated:false, NO_AGENT_IN_BUDGET}', async () => {

@@ -160,6 +160,7 @@ export class WasiAgent {
     this.#client = new A2AClient({
       baseUrl: config.a2aBase,
       fetchImpl: config.fetchImpl ?? globalThis.fetch,
+      network: config.network,
     });
   }
 

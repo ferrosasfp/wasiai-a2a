@@ -4,6 +4,7 @@ export interface A2AClientOptions {
   baseUrl: string;
   fetchImpl: typeof fetch;
   key?: string; // token wasi_a2a_* — interno, nunca logueado
+  network?: string; // slug de la red (ej. 'base-sepolia') → header x-payment-chain
 }
 
 export interface RequestOptions {
@@ -38,11 +39,13 @@ export class A2AClient {
   readonly #baseUrl: string;
   readonly #fetchImpl: typeof fetch;
   readonly #key?: string;
+  readonly #network?: string;
 
   constructor(opts: A2AClientOptions) {
     this.#baseUrl = opts.baseUrl;
     this.#fetchImpl = opts.fetchImpl;
     this.#key = opts.key;
+    this.#network = opts.network;
   }
 
   async request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -53,6 +56,13 @@ export class A2AClient {
     };
     if (key) {
       headers['x-a2a-key'] = key;
+    }
+    // WKH-105: el SDK opera en UNA red (config.network). El server
+    // resolveTargetChain (src/middleware/a2a-key.ts) resuelve la chain por
+    // este header; sin él cae al default chainKeys[0] y debita el budget
+    // equivocado → INSUFFICIENT_BUDGET espurio. Inocuo donde no aplica.
+    if (this.#network) {
+      headers['x-payment-chain'] = this.#network;
     }
     const res = await this.#fetchImpl(`${this.#baseUrl}${path}`, {
       method,
