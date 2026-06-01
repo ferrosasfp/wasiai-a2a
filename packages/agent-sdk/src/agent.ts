@@ -13,7 +13,7 @@ import {
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { A2AClient } from './client.js';
 import { resolveViemChain, validateConfig } from './config.js';
-import { IdentityMintError, ProvisionError } from './errors.js';
+import { IdentityMintError, OperationError, ProvisionError } from './errors.js';
 import { buildAgentCardUri, mintIdentityOnChain } from './identity.js';
 import type {
   AgentCard,
@@ -56,6 +56,9 @@ interface DepositResponse {
   balance: string;
   chain_id: number;
 }
+interface MeResponse {
+  budget?: Record<string, string>;
+}
 interface DiscoverResponse {
   agents: DiscoveredAgent[];
   total: number;
@@ -71,6 +74,49 @@ interface DelegationResponse {
 }
 interface AgentCardResponse {
   computedReputation?: AgentReputation;
+}
+
+// ── Deposit retry (WKH-105) ──────────────────────────────────────────────────
+// Solo estos error_code son TRANSITORIOS: el server cuenta confirmaciones con su
+// propio RPC y puede ir un bloque por detrás del cliente (race off-by-one) o no
+// ver la tx todavía (lag de RPC). Cualquier otro error_code es real → fallar ya.
+const DEPOSIT_RETRYABLE_CODES = new Set([
+  'INSUFFICIENT_CONFIRMATIONS',
+  'TX_NOT_FOUND',
+]);
+const DEPOSIT_ALREADY_CREDITED = 'DEPOSIT_ALREADY_CREDITED';
+const DEFAULT_DEPOSIT_RETRY_MAX = 6;
+const DEFAULT_DEPOSIT_RETRY_DELAY_MS = 5000;
+
+// Lee el `error_code` del body crudo que el A2AClient guarda como `cause`
+// no-enumerable del OperationError. Devuelve undefined si no es legible (no
+// loguea ni expone el body; solo inspecciona el campo error_code).
+function depositErrorCode(err: unknown): string | undefined {
+  if (!(err instanceof OperationError)) return undefined;
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause == null || typeof cause !== 'object') return undefined;
+  const code = (cause as { error_code?: unknown }).error_code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+// Sleep cancelable: limpia el timer si la señal aborta (sin fugas de handles).
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('aborted'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(new Error('aborted'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 export class WasiAgent {
@@ -203,18 +249,13 @@ export class WasiAgent {
       throw new ProvisionError('transfer', 'on-chain transfer failed', err);
     }
 
-    // 5. deposit (verify-before-credit server-side)
-    let balance: string;
-    try {
-      const dep = await this.#client.request<DepositResponse>('/auth/deposit', {
-        method: 'POST',
-        key,
-        body: { key_id: keyId, tx_hash: txHash, chain_id: chainId },
-      });
-      balance = dep.balance;
-    } catch (err) {
-      throw new ProvisionError('deposit', 'deposit declaration failed', err);
-    }
+    // 5. deposit (verify-before-credit server-side), con retry ante errores
+    // TRANSITORIOS de confirmación (WKH-105). El server cuenta confs con su
+    // propio RPC y puede ir 1 bloque por detrás del cliente → reintentamos con
+    // backoff fijo. DEPOSIT_ALREADY_CREDITED se trata como ÉXITO (anti-replay:
+    // re-declarar la MISMA tx ya acreditada; UNIQUE(chain_id,tx_hash) garantiza
+    // que no hay doble crédito → leemos el balance de /auth/me).
+    const balance = await this.#depositWithRetry(key, keyId, txHash, chainId);
 
     // 6. return — SIN key ni PK (CD-5)
     return {
@@ -224,6 +265,101 @@ export class WasiAgent {
       fundingWallet: this.#account.address,
       txHash,
     };
+  }
+
+  /**
+   * POST /auth/deposit con retry/backoff ante errores TRANSITORIOS de
+   * confirmación (WKH-105). Reglas:
+   * - `INSUFFICIENT_CONFIRMATIONS` / `TX_NOT_FOUND` → reintentar (lag RPC server).
+   * - `DEPOSIT_ALREADY_CREDITED` → ÉXITO (lee balance de /auth/me; sin doble
+   *   crédito por UNIQUE(chain_id,tx_hash)).
+   * - cualquier otro error_code (RECIPIENT_MISMATCH, AMOUNT_MISMATCH,
+   *   FUNDING_WALLET_MISMATCH, …) → fallar INMEDIATO (no es transitorio).
+   * - agotados los reintentos → `ProvisionError('deposit', …)`.
+   * NUNCA loguea `key`/PK/token (el retry solo inspecciona `error_code`).
+   */
+  async #depositWithRetry(
+    key: string,
+    keyId: string,
+    txHash: `0x${string}`,
+    chainId: number,
+  ): Promise<string> {
+    const maxRetries =
+      this.#config.depositRetryMax ?? DEFAULT_DEPOSIT_RETRY_MAX;
+    const delayMs =
+      this.#config.depositRetryDelayMs ?? DEFAULT_DEPOSIT_RETRY_DELAY_MS;
+    // total de intentos = 1 inicial + maxRetries reintentos
+    const totalAttempts = maxRetries + 1;
+
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < totalAttempts; attempt++) {
+      try {
+        const dep = await this.#client.request<DepositResponse>(
+          '/auth/deposit',
+          {
+            method: 'POST',
+            key,
+            body: { key_id: keyId, tx_hash: txHash, chain_id: chainId },
+          },
+        );
+        return dep.balance;
+      } catch (err) {
+        const code = depositErrorCode(err);
+
+        // Anti-replay: la MISMA tx ya está acreditada → éxito. Leemos el saldo
+        // ya acreditado de /auth/me (budget[chainId], default '0').
+        if (code === DEPOSIT_ALREADY_CREDITED) {
+          return this.#readCreditedBalance(key, chainId, err);
+        }
+
+        // No transitorio → error real, fallar inmediato (sin reintentar).
+        if (code === undefined || !DEPOSIT_RETRYABLE_CODES.has(code)) {
+          throw new ProvisionError(
+            'deposit',
+            'deposit declaration failed',
+            err,
+          );
+        }
+
+        // Transitorio → backoff y reintento (salvo que sea el último intento).
+        lastErr = err;
+        if (attempt < totalAttempts - 1) {
+          await sleep(delayMs);
+        }
+      }
+    }
+
+    // Agotados los reintentos siempre con un error transitorio.
+    throw new ProvisionError(
+      'deposit',
+      `deposit not confirmed after ${totalAttempts} attempts`,
+      lastErr,
+    );
+  }
+
+  /**
+   * Lee el balance ya acreditado tras DEPOSIT_ALREADY_CREDITED desde /auth/me.
+   * Si /auth/me falla, se propaga como ProvisionError('deposit') preservando el
+   * error original del deposit como cause.
+   */
+  async #readCreditedBalance(
+    key: string,
+    chainId: number,
+    depositErr: unknown,
+  ): Promise<string> {
+    try {
+      const me = await this.#client.request<MeResponse>('/auth/me', {
+        method: 'GET',
+        key,
+      });
+      return me.budget?.[String(chainId)] ?? '0';
+    } catch (_meErr) {
+      throw new ProvisionError(
+        'deposit',
+        'deposit already credited but balance read failed',
+        depositErr,
+      );
+    }
   }
 
   /**

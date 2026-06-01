@@ -18,6 +18,13 @@ export interface WasiAgentConfig {
   identityRegistryAddress?: `0x${string}`;
   enableIdentityMint?: boolean;
   maxAgentBudgetUsd?: number; // undefined = sin tope
+  // Retry del POST /auth/deposit ante errores TRANSITORIOS de confirmación
+  // (INSUFFICIENT_CONFIRMATIONS / TX_NOT_FOUND): el server cuenta confs con su
+  // propio RPC y puede ir 1 bloque por detrás del cliente (race off-by-one /
+  // lag de RPC). Defaults: 6 reintentos × 5s ≈ 30s. depositRetryMax es el nº de
+  // REINTENTOS además del intento inicial (total de intentos = max + 1).
+  depositRetryMax?: number; // default 6
+  depositRetryDelayMs?: number; // default 5000
   // Inyectables para test (DT-11) — opcionales, defaults reales en el constructor:
   fetchImpl?: typeof fetch;
   walletClient?: WalletClient;

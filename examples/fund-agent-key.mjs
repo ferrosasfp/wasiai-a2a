@@ -57,6 +57,37 @@ async function api(path, { method = 'POST', key, body } = {}) {
   return json;
 }
 
+// Retry del POST /auth/deposit (WKH-105). El server cuenta confirmaciones con su
+// propio RPC y puede ir 1 bloque por detrás del cliente (race off-by-one) o no
+// ver la tx todavía → reintentamos SOLO ante INSUFFICIENT_CONFIRMATIONS / TX_NOT_FOUND.
+// DEPOSIT_ALREADY_CREDITED se trata como éxito (anti-replay; sin doble crédito).
+// Cualquier otro error_code es real → fallar inmediato.
+const DEPOSIT_RETRYABLE = new Set(['INSUFFICIENT_CONFIRMATIONS', 'TX_NOT_FOUND']);
+const DEPOSIT_RETRY_MAX = Number(process.env.DEPOSIT_RETRY_MAX ?? 6);
+const DEPOSIT_RETRY_DELAY_MS = Number(process.env.DEPOSIT_RETRY_DELAY_MS ?? 5000);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function depositWithRetry({ key, key_id, tx_hash, chain_id }) {
+  const headers = { 'Content-Type': 'application/json', 'x-a2a-key': key };
+  const payload = JSON.stringify({ key_id, tx_hash, chain_id });
+  for (let attempt = 0; attempt <= DEPOSIT_RETRY_MAX; attempt++) {
+    const res = await fetch(`${A2A_BASE}/auth/deposit`, { method: 'POST', headers, body: payload });
+    const json = await res.json().catch(() => ({}));
+    if (res.ok) return json; // { balance, chain_id }
+    const code = json?.error_code;
+    if (code === 'DEPOSIT_ALREADY_CREDITED') {
+      // ya acreditada (re-declaración de la misma tx): leemos el saldo de /auth/me
+      const me = await api('/auth/me', { method: 'GET', key });
+      return { balance: me.budget?.[String(chain_id)] ?? '0', chain_id };
+    }
+    if (!DEPOSIT_RETRYABLE.has(code) || attempt === DEPOSIT_RETRY_MAX) {
+      throw new Error(`/auth/deposit -> ${res.status} ${JSON.stringify(json)}`);
+    }
+    console.log(`   deposit aún no confirmado (${code}); reintento ${attempt + 1}/${DEPOSIT_RETRY_MAX} en ${DEPOSIT_RETRY_DELAY_MS}ms…`);
+    await sleep(DEPOSIT_RETRY_DELAY_MS);
+  }
+}
+
 // ── 0. Config de fondeo (self-serve: a dónde mandar y qué token) ────────────
 const { networks } = await api('/auth/deposit-info', { method: 'GET' });
 const net = networks.find((n) => n.slug === NETWORK);
@@ -91,7 +122,7 @@ await publicClient.waitForTransactionReceipt({ hash: txHash, confirmations: net.
 console.log('   confirmada on-chain.');
 
 // ── 4. Declarar el depósito (WasiAI verifica on-chain antes de acreditar) ────
-const dep = await api('/auth/deposit', { key, body: { key_id, tx_hash: txHash, chain_id: net.chain_id } });
+const dep = await depositWithRetry({ key, key_id, tx_hash: txHash, chain_id: net.chain_id });
 console.log(`4. Acreditado: balance=${dep.balance} en chain ${dep.chain_id}`);
 
 // ── 5. Verificar saldo ──────────────────────────────────────────────────────
