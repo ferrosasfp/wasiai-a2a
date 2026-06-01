@@ -3,7 +3,7 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     include: ['src/**/*.test.ts', 'test/**/*.test.ts', 'test/**/*.test.mjs'],
-    exclude: ['dist/**', 'node_modules/**'],
+    exclude: ['dist/**', 'node_modules/**', 'packages/**'],
     env: {
       SUPABASE_URL: 'http://localhost:54321',
       SUPABASE_SERVICE_KEY: 'test-key-for-vitest',

@@ -1,0 +1,21 @@
+{
+  "name": "@wasiai/agent-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": "./dist/index.js" },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "lint": "biome check .",
+    "format": "biome check --write ."
+  },
+  "peerDependencies": { "viem": "^2.47.6" },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.11",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.4"
+  }
+}
