@@ -134,6 +134,34 @@ describe('mintIdentity() — bind retry (WKH-105)', () => {
     expect(mint.mintTxHash).toBe('0xmint');
   });
 
+  it('RPC_UNAVAILABLE bajo `reason` (forma REAL del server) x1 luego 200 → reintenta y resuelve (2 intentos)', async () => {
+    const bindCounter = { n: 0 };
+    const fetchImpl = makeFetch({
+      bindCounter,
+      bindHandler: (attempt) => {
+        // El bind path del server manda RPC_UNAVAILABLE bajo `reason` (no error_code).
+        if (attempt < 1)
+          return res(503, { ok: false, reason: 'RPC_UNAVAILABLE' });
+        return res(200, {});
+      },
+    });
+    const { walletClient, publicClient } = makeClients();
+    const agent = new WasiAgent(
+      testAccount,
+      baseConfig({ fetchImpl, walletClient, publicClient }),
+    );
+
+    await agent.provision({ ownerRef: 'o', amount: '1.0' });
+    const p = agent.mintIdentity();
+    await vi.runAllTimersAsync();
+    const mint = await p;
+
+    expect(bindCounter.n).toBe(2);
+    expect(mint.skipped).toBe(false);
+    expect(mint.tokenId).toBe('4242');
+    expect(mint.mintTxHash).toBe('0xmint');
+  });
+
   it('ERC8004_ALREADY_BOUND → éxito idempotente (1 intento, no lanza)', async () => {
     const bindCounter = { n: 0 };
     const fetchImpl = makeFetch({

@@ -116,6 +116,30 @@ describe('provision() — deposit retry (WKH-105)', () => {
     expect(result.chainId).toBe(84532);
   });
 
+  it('RPC_UNAVAILABLE (error_code) x1 luego 200 → reintenta y resuelve (2 intentos)', async () => {
+    const depositCounter = { n: 0 };
+    const fetchImpl = makeFetch({
+      depositCounter,
+      depositHandler: (attempt) => {
+        if (attempt < 1) return res(503, { error_code: 'RPC_UNAVAILABLE' });
+        return res(200, { balance: '3.0', chain_id: 84532 });
+      },
+    });
+    const { walletClient, publicClient } = makeClients();
+    const agent = new WasiAgent(
+      testAccount,
+      baseConfig({ fetchImpl, walletClient, publicClient }),
+    );
+
+    const p = agent.provision({ ownerRef: 'o', amount: '1.0' });
+    await vi.runAllTimersAsync();
+    const result = await p;
+
+    expect(depositCounter.n).toBe(2);
+    expect(result.balance).toBe('3.0');
+    expect(result.chainId).toBe(84532);
+  });
+
   it('DEPOSIT_ALREADY_CREDITED → resuelve OK leyendo balance de /auth/me (1 intento de deposit, no lanza)', async () => {
     const depositCounter = { n: 0 };
     const fetchImpl = makeFetch({

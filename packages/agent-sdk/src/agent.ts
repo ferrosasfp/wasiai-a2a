@@ -83,6 +83,7 @@ interface AgentCardResponse {
 const DEPOSIT_RETRYABLE_CODES = new Set([
   'INSUFFICIENT_CONFIRMATIONS',
   'TX_NOT_FOUND',
+  'RPC_UNAVAILABLE',
 ]);
 const DEPOSIT_ALREADY_CREDITED = 'DEPOSIT_ALREADY_CREDITED';
 const DEFAULT_DEPOSIT_RETRY_MAX = 6;
@@ -103,34 +104,25 @@ const BIND_ALREADY_BOUND = 'ERC8004_ALREADY_BOUND';
 const DEFAULT_BIND_RETRY_MAX = 6;
 const DEFAULT_BIND_RETRY_DELAY_MS = 5000;
 
-// Lee el `error_code` del body crudo que el A2AClient guarda como `cause`
-// no-enumerable del OperationError. Devuelve undefined si no es legible (no
-// loguea ni expone el body; solo inspecciona el campo error_code).
+// Lee el código de error del body crudo que el A2AClient guarda como `cause`
+// no-enumerable del OperationError. El server usa `error_code` en la mayoría de
+// los paths, pero algunos (p.ej. bind con RPC_UNAVAILABLE) lo mandan bajo
+// `reason`; por eso leemos `error_code ?? reason`. Devuelve undefined si no es
+// legible (no loguea ni expone el body; solo inspecciona esos dos campos).
 function operationErrorCode(err: unknown): string | undefined {
   if (!(err instanceof OperationError)) return undefined;
   const cause = (err as { cause?: unknown }).cause;
   if (cause == null || typeof cause !== 'object') return undefined;
-  const code = (cause as { error_code?: unknown }).error_code;
+  const code =
+    (cause as { error_code?: unknown }).error_code ??
+    (cause as { reason?: unknown }).reason;
   return typeof code === 'string' ? code : undefined;
 }
 
-// Sleep cancelable: limpia el timer si la señal aborta (sin fugas de handles).
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new Error('aborted'));
-      return;
-    }
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    const onAbort = (): void => {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-      reject(new Error('aborted'));
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
+// Pausa simple para el backoff entre reintentos.
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
   });
 }
 

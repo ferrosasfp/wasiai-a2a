@@ -59,10 +59,15 @@ async function api(path, { method = 'POST', key, body } = {}) {
 
 // Retry del POST /auth/deposit (WKH-105). El server cuenta confirmaciones con su
 // propio RPC y puede ir 1 bloque por detrás del cliente (race off-by-one) o no
-// ver la tx todavía → reintentamos SOLO ante INSUFFICIENT_CONFIRMATIONS / TX_NOT_FOUND.
+// ver la tx todavía → reintentamos ante INSUFFICIENT_CONFIRMATIONS / TX_NOT_FOUND /
+// RPC_UNAVAILABLE (blip transitorio del RPC del server).
 // DEPOSIT_ALREADY_CREDITED se trata como éxito (anti-replay; sin doble crédito).
 // Cualquier otro error_code es real → fallar inmediato.
-const DEPOSIT_RETRYABLE = new Set(['INSUFFICIENT_CONFIRMATIONS', 'TX_NOT_FOUND']);
+const DEPOSIT_RETRYABLE = new Set([
+  'INSUFFICIENT_CONFIRMATIONS',
+  'TX_NOT_FOUND',
+  'RPC_UNAVAILABLE',
+]);
 const DEPOSIT_RETRY_MAX = Number(process.env.DEPOSIT_RETRY_MAX ?? 6);
 const DEPOSIT_RETRY_DELAY_MS = Number(process.env.DEPOSIT_RETRY_DELAY_MS ?? 5000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
