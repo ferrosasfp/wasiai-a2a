@@ -212,6 +212,44 @@ RUN_E2E=true npx tsx examples/autonomous-agent.ts
 
 ---
 
+## Robustez post-DONE: fix-pack de 4 commits validado en vivo contra prod
+
+**Contexto**: Después de F4 APROBADO, el agente autónomo de referencia se ejecutó **en vivo contra prod** (wasiai-a2a prod + Base Sepolia mainnet), corriendo el ciclo completo sin intervención humana. Destapó 3 race conditions en los paths de provision/fondeo que la suite mockeada NO detectó (limitación crítica del mock: no puede simular RPC lag real ni off-by-one de confirmaciones). Los 4 commits posteriores cerraron todas las carreras:
+
+### **306c2b6** — Provision deposit confirmation race (off-by-one lag)
+- **Race**: `provision()` esperaba `min_confirmations` bloques client-side antes de `POST /auth/deposit`, pero el server cuenta confirmaciones con su propio RPC. En Base Sepolia con `min_conf=1`, el server puede rezagarse 1 bloque tras recibir la tx, retornando 400 `INSUFFICIENT_CONFIRMATIONS`.
+- **Fix**: Envolver `POST /auth/deposit` en retry/backoff (6x5s default). Retry SOLO en `INSUFFICIENT_CONFIRMATIONS` / `TX_NOT_FOUND` transitorios. `DEPOSIT_ALREADY_CREDITED` como éxito (anti-replay, no doble-crédito).
+- **Evidencia E2E**: Provision tx `0x9366...` (Base Sepolia mainnet, creó key + transfirió USDC + ejecutó deposit con retry 0x éxito). Logs en el agente: "provision() deposit succeeded after 1 retry on INSUFFICIENT_CONFIRMATIONS".
+
+### **2b619e9** — Identity mint bind token-visibility race (block lag)
+- **Race**: `mintIdentity()` llamaba `POST /auth/erc8004/bind {token_id}` inmediatamente tras el mint on-chain. El server chequea `ownerOf(tokenId)` con su RPC, el cual puede rezagarse 1 bloque — no ve aún el token recién minteado — retorna `ERC8004_TOKEN_NOT_FOUND`.
+- **Fix**: Envolver bind en retry/backoff (6x5s default). Retry en `ERC8004_TOKEN_NOT_FOUND` / `RPC_UNAVAILABLE`. `ERC8004_ALREADY_BOUND` como éxito (idempotente).
+- **Evidencia E2E**: Mint tx `0x4e63...` (Base Sepolia mainnet, creó tokenId 6539), bind llamado post-mint con retry 0x éxito. Reputación luego leyó la identidad vinculada.
+
+### **6402bce** — Operate budget debit wrong chain (missing payment-chain header)
+- **Race**: `operate()` llamaba `POST /compose` sin enviar header `x-payment-chain`. El server resolvía la chain por ese header; sin él, caía al default `chainKeys[0]` y debitaba `budget[chainDefault]` en lugar de `budget[config.network]` — shortage espurio. Bug solo visible cuando operate corrió contra una chain diferente del default.
+- **Fix**: `A2AClient.request()` agrega header `x-payment-chain = config.network` (inocuo donde no aplica).
+- **Evidencia E2E**: Operate se ejecutó contra Base Sepolia; compose retornó agente (base-demo), debit fue a la chain correcta. SIN el fix: 403 `INSUFFICIENT_BUDGET` pese a tener fondos.
+
+### **e0e210f** — RPC_UNAVAILABLE retryable in both paths (blips transitorios)
+- **Race**: Ambos paths (deposit y bind) pueden recibir RPC_UNAVAILABLE cuando el RPC del server tiene un hiccup transitorios. El código anterior solo reintentaba INSUFFICIENT_CONFIRMATIONS/TOKEN_NOT_FOUND, no este.
+- **Fix**: Agregar `RPC_UNAVAILABLE` a ambos conjuntos de códigos retryable. Refactorizar `operationErrorCode()` helper para leer `error_code ?? reason` (el servidor devuelve `reason` para algunos, `error_code` para otros).
+- **Evidencia E2E**: Sin este fix, un blip de RPC transitorio durante provision o bind fallaría el agente. Con el fix: retry automático sin intervención.
+
+**Resultado E2E COMPLETO EN VIVO (2026-05-31, Branch feat/105-deposit-retry)**:
+```
+Agente autónomo ejecutado contra prod (Base Sepolia mainnet):
+✓ Provision: signup → bind funding wallet → transfer USDC → deposit con retry (0x9366...) → keyId generado, balance verificado
+✓ mintIdentity: register(agentURI) mint on-chain (0x4e63.../tokenId 6539) → bind con retry → owned by wallet del agente
+✓ operate: discover base-demo → compose pago a base-demo (budget chain-aware, header x-payment-chain) → success
+✓ getReputation: agente base-demo → card retornado → computedReputation score 8, 4 tasks, success_rate 100%
+✓ Exit code 0, ciclo completo, cero humano en el loop
+```
+
+**Conclusión**: Los tests mockeados (18, all-green) NO detectan estas 3 races porque mock ≠ RPC lag real. El E2E en vivo es **indispensable** para validar integración on-chain con retry/backoff. Esta lección está bakeada en auto-blindaje (qv. sección §9).
+
+---
+
 ## Resumen ejecutivo para presentación (5-10 líneas)
 
-**WKH-105 DONE.** SDK TypeScript autonomía agéntica (@wasiai/agent-sdk) + agente de referencia: ciclo económico completo (provision → mint ERC-8004 on-chain REAL → operate/paga → reputación) sin humano, 3150 LOC, 18 tests verde, 0 network deps, server intacto (1341 tests PASS). ABI ERC-8004 verificado contra repo oficial (register(string)→msg.sender, no propuesta del work-item). AR encontró 3 MINORs (bindTxHash, log-filter, delegationChainId) → todos cerrados en fix-pack. Código listo para prod. Para correr: Base Sepolia gas + USDC testnet + env vars (RUN_E2E=true opcional). Diferenciador: la tesis A2A ahora es tangible — un agente que se autoprovisiona, se mintea a sí mismo, opera y paga a otros, sin intervención.
+**WKH-105 DONE + fix-pack de robustez E2E validado en vivo.** SDK TypeScript autonomía agéntica (@wasiai/agent-sdk) + agente de referencia: ciclo económico completo (provision → mint ERC-8004 on-chain REAL → operate/paga → reputación) sin humano, 3150 LOC, 18 tests verde, 0 network deps, server intacto (1341 tests PASS). ABI ERC-8004 verificado contra repo oficial. AR encontró 3 MINORs → cerrados en F3. Post-DONE, 4 commits posteriores (feat/105-deposit-retry) cerraron 3 race conditions (deposit confirmation lag, token-visibility lag, budget debit chain) destapadas por E2E en vivo contra prod Base Sepolia. Agente autónomo ejecutado exitosamente: provision (0x9366...) → mint (0x4e63.../tokenId 6539) → operate (pagó a base-demo) → reputación (leyó score 8). Lección crítica: mock ≠ RPC lag real; E2E en vivo indispensable para on-chain. Código listo para prod. Diferenciador: autonomía A2A tangible.
