@@ -127,3 +127,56 @@ describe('anti-leak + config (AC-10/AC-11)', () => {
     ).toThrowError(WasiAgentError);
   });
 });
+
+describe('delegate() — MNR-3 delegationChainId', () => {
+  interface DelegationBody {
+    typed_data: { domain: { chainId: number } };
+  }
+  // Captura el body del POST /auth/delegation y devuelve el typed_data.domain.
+  function captureDelegate(): {
+    fetchImpl: typeof fetch;
+    captured: () => DelegationBody | undefined;
+  } {
+    let body: DelegationBody | undefined;
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      const path = new URL(url).pathname;
+      if (path === '/auth/delegation') {
+        body = JSON.parse(String(init?.body)) as DelegationBody;
+        return res(200, { delegation_id: 'del-1' });
+      }
+      return res(404, {});
+    }) as unknown as typeof fetch;
+    return { fetchImpl, captured: () => body };
+  }
+
+  const policy = {
+    max_amount_per_tx: '1.0',
+    max_total_amount: '10.0',
+    expires_at: 9_999_999_999,
+    allowed_chains: [8453],
+    allowed_agent_slugs: ['a'],
+    allowed_registries: ['r'],
+  };
+
+  it('usa delegationChainId en el domain EIP-712 cuando difiere de chainId', async () => {
+    const { fetchImpl, captured } = captureDelegate();
+    const agent = new WasiAgent(
+      testAccount,
+      baseConfig({ fetchImpl, chainId: 84532, delegationChainId: 8453 }),
+    );
+    const out = await agent.delegate(policy);
+    expect(out.delegationId).toBe('del-1');
+    // domain.chainId === delegationChainId (8453), NO el chainId de pago (84532)
+    expect(captured()?.typed_data.domain.chainId).toBe(8453);
+  });
+
+  it('default: domain.chainId == chainId cuando delegationChainId se omite', async () => {
+    const { fetchImpl, captured } = captureDelegate();
+    const agent = new WasiAgent(
+      testAccount,
+      baseConfig({ fetchImpl, chainId: 84532 }),
+    );
+    await agent.delegate(policy);
+    expect(captured()?.typed_data.domain.chainId).toBe(84532);
+  });
+});

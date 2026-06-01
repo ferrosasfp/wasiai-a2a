@@ -73,6 +73,12 @@ export async function mintIdentityOnChain(
 
   // CD-13: parsear el log `Registered` del receipt → args.agentId (bigint).
   for (const log of receipt.logs) {
+    // MNR-2: defensa en profundidad — solo el registry canónico cuenta. Un
+    // contrato malicioso podría emitir un evento con la misma firma
+    // `Registered(uint256,string,address)`; lo ignoramos por emisor.
+    if (log.address.toLowerCase() !== input.registryAddress.toLowerCase()) {
+      continue;
+    }
     try {
       const decoded = decodeEventLog({
         abi: IDENTITY_REGISTRY_ABI,

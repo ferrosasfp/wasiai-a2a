@@ -10,7 +10,11 @@ export interface WasiAgentConfig {
   a2aBase: string; // ej. https://wasiai-a2a-production.up.railway.app
   network: string; // slug, matchea /auth/deposit-info (ej. 'base-sepolia')
   rpcUrl: string;
-  chainId: number; // domain EIP-712 + viem chain (debe == server)
+  chainId: number; // viem chain + chain de pago/funding (debe == server)
+  // chainId del domain EIP-712 de delegación. Puede diferir de `chainId` (la
+  // chain de delegación puede no ser la de pago). DEBE coincidir con el
+  // `KITE_CHAIN_ID` del server (default 8453). Si se omite → usa `chainId`.
+  delegationChainId?: number;
   identityRegistryAddress?: `0x${string}`;
   enableIdentityMint?: boolean;
   maxAgentBudgetUsd?: number; // undefined = sin tope
@@ -41,7 +45,9 @@ export interface MintResult {
   tokenId?: string;
   chainId?: number;
   agentCardUri?: string; // el data: URI minteado (público)
-  bindTxHash?: `0x${string}`;
+  // NOTA: el bind (`POST /auth/erc8004/bind`) es verificación de ownership +
+  // persist en DB, SIN write on-chain → no produce tx_hash. El único tx
+  // on-chain del flujo es el mint (`mintTxHash`). Por eso NO existe bindTxHash.
   mintTxHash?: `0x${string}`;
 }
 

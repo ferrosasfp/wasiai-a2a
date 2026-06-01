@@ -272,14 +272,15 @@ export class WasiAgent {
       throw new IdentityMintError('mint', 'on-chain mint failed', err);
     }
 
-    // bind sin ancla (token_id solo — válido, src/routes/auth.ts:644)
-    let bindTxHash: `0x${string}` | undefined;
+    // bind sin ancla (token_id solo — válido, src/routes/auth.ts:644).
+    // El bind verifica ownership + persiste en DB; NO escribe on-chain → no
+    // devuelve tx_hash. El único tx on-chain del flujo es el mint (arriba).
     try {
-      const bound = await this.#client.request<{ tx_hash?: `0x${string}` }>(
-        '/auth/erc8004/bind',
-        { method: 'POST', key: this.#key, body: { token_id: tokenId } },
-      );
-      bindTxHash = bound.tx_hash;
+      await this.#client.request('/auth/erc8004/bind', {
+        method: 'POST',
+        key: this.#key,
+        body: { token_id: tokenId },
+      });
     } catch (err) {
       throw new IdentityMintError('bind', 'erc8004 bind failed', err);
     }
@@ -290,7 +291,6 @@ export class WasiAgent {
       chainId: this.#config.chainId,
       agentCardUri: agentURI,
       mintTxHash,
-      bindTxHash,
     };
   }
 
@@ -360,10 +360,13 @@ export class WasiAgent {
   async delegate(policy: DelegationPolicy): Promise<DelegateResult> {
     const session = privateKeyToAccount(generatePrivateKey());
     const nonce = `0x${randomBytes(32).toString('hex')}` as `0x${string}`;
+    // MNR-3: el domain de delegación usa `delegationChainId` (chain de
+    // delegación, == KITE_CHAIN_ID del server), que puede diferir de
+    // `chainId` (chain de pago/funding). Default = chainId si no se setea.
     const domain: TypedDataDomain = {
       name: 'WasiAI-a2a Delegation',
       version: '1',
-      chainId: this.#config.chainId,
+      chainId: this.#config.delegationChainId ?? this.#config.chainId,
     };
     const types: TypedData = {
       Delegation: [

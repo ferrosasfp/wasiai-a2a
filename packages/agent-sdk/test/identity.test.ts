@@ -17,9 +17,14 @@ function res(status: number, body: unknown): JsonResponse {
 }
 
 // Construye un log `Registered` real (topics + data) con primitivas viem.
-function registeredLog(agentId: bigint, agentURI: string) {
+// `from` permite simular un emisor distinto al registry canónico (MNR-2).
+function registeredLog(
+  agentId: bigint,
+  agentURI: string,
+  from: `0x${string}` = REGISTRY,
+) {
   return {
-    address: REGISTRY,
+    address: from,
     topics: [
       toEventSelector('Registered(uint256,string,address)'),
       pad(toHex(agentId)),
@@ -104,7 +109,10 @@ describe('mintIdentity()', () => {
 
     expect(mint.skipped).toBe(false);
     expect(mint.tokenId).toBe('4242');
-    expect(mint.bindTxHash).toBe('0xbind');
+    // MNR-1: el bind NO produce tx on-chain → MintResult no expone bindTxHash.
+    // El único tx del flujo es el mint (mintTxHash === '0xmint').
+    expect(mint.mintTxHash).toBe('0xmint');
+    expect('bindTxHash' in mint).toBe(false);
     // register(string) — data: URI base64. (writeContract es compartido con el
     // transfer de provision; aislamos el call al mint por functionName.)
     const calls = writeContract.mock.calls.map(
@@ -113,6 +121,45 @@ describe('mintIdentity()', () => {
     const registerCall = calls.find((c) => c.functionName === 'register');
     expect(registerCall).toBeDefined();
     expect(registerCall?.args[0]).toMatch(/^data:application\/json;base64,/);
+  });
+
+  it('MNR-2: ignora un log Registered emitido por OTRO address; usa solo el del registry canónico', async () => {
+    const fetchImpl = provisionFetch((path) =>
+      path === '/auth/erc8004/bind' ? res(200, {}) : undefined,
+    );
+    const writeContract = vi.fn(async () => '0xmint' as `0x${string}`);
+    const walletClient = {
+      writeContract,
+      account: testAccount,
+      chain: undefined,
+    } as unknown as WalletClient;
+    // El receipt trae PRIMERO un log impostor (otro address, mismo evento) y
+    // DESPUÉS el log real del registry. El SDK debe saltar el impostor.
+    const IMPOSTOR = '0x9999999999999999999999999999999999999999' as const;
+    const publicClient = {
+      waitForTransactionReceipt: vi.fn(async () => ({
+        logs: [
+          registeredLog(666n, 'data:application/json;base64,evil', IMPOSTOR),
+          registeredLog(4242n, 'data:application/json;base64,real', REGISTRY),
+        ],
+      })),
+    } as unknown as PublicClient;
+
+    const agent = new WasiAgent(
+      testAccount,
+      baseConfig({
+        fetchImpl,
+        walletClient,
+        publicClient,
+        enableIdentityMint: true,
+        identityRegistryAddress: REGISTRY,
+      }),
+    );
+    await agent.provision({ ownerRef: 'o', amount: '1.0' });
+    const mint = await agent.mintIdentity();
+
+    // Toma el agentId del log del registry (4242), NO el del impostor (666).
+    expect(mint.tokenId).toBe('4242');
   });
 
   it('AC-5: gate OFF → {skipped:true} sin writeContract', async () => {
