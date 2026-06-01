@@ -281,6 +281,12 @@ describe('create', () => {
 
 // ── debitDelegationAndParent (RPC mapping: T8, T9, T10, T13, T19) ─
 
+// WKH-104 (CD-4): estos tests verifican el MAPEO de errores RPC → error classes
+// (DELEGATION_TOTAL_LIMIT_EXCEEDED, INSUFFICIENT_BUDGET, DELEGATION_REVOKED,
+// DELEGATION_EXPIRED, DAILY_LIMIT, KEY_INACTIVE, etc.), NO la atomicidad
+// FOR UPDATE de Postgres. La atomicidad real (no-double-spend bajo concurrencia)
+// se cubre en src/__tests__/e2e/delegation-atomicity.real.test.ts, gateado por
+// INTEGRATION_TEST_DB_URL. Son complementarios — NO borrar estos mocks.
 describe('debitDelegationAndParent', () => {
   it('T10 success: returns new total_spent (RPC RETURN)', async () => {
     mockRpc.mockResolvedValue({ data: '0.30', error: null } as never);

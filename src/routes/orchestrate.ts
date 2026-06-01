@@ -78,8 +78,10 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             scopingKeyRow: request.a2aKeyRow,
             // WKH-101 (DT-11): contexto de delegación propagado a compose.
             delegationContext: request.delegationContext,
-            // WKH-101 (DT-12, opción B): chainId resuelto, propagado SOLO para
-            // que el débito per-step de steps 2..N funcione bajo delegación.
+            // WKH-104 (TD-COMMENT): chainId resuelto y propagado para TODOS los
+            // callers (master keys y sesiones delegadas), para que el débito
+            // per-step de steps 1..N use el chainId del bundle resuelto en el
+            // middleware. Desde WKH-102 ya no es exclusivo de delegación.
             chainId: request.resolvedChainId,
           },
           orchestrationId,

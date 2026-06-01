@@ -4,6 +4,7 @@
 
 import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { getPaymentAdapter } from '../adapters/registry.js';
+import { hashCallerRef } from '../lib/caller-hash.js';
 import { selectFacilitatorUrl } from '../lib/cdp-selector.js';
 import {
   type DownstreamLogger,
@@ -180,6 +181,9 @@ export const composeService = {
           ? { ...step.input, previousOutput: lastOutput }
           : step.input;
       const startTime = Date.now();
+      // WKH-104 (TD-SYBIL): hash HMAC del caller para anti-sybil sin exponer
+      // el owner_ref crudo (CD-5/CD-6). null si caller anónimo (x402).
+      const callerRefHash = hashCallerRef(scopingKeyRow?.owner_ref);
       try {
         const { output, txHash, downstream } = await this.invokeAgent(
           agent,
@@ -289,6 +293,7 @@ export const composeService = {
               llm_model: llm?.model ?? null,
               llm_tokens_in: llm?.tokensIn ?? null,
               llm_tokens_out: llm?.tokensOut ?? null,
+              caller_ref_hash: callerRefHash,
             },
           })
           .catch((err) =>
@@ -304,6 +309,7 @@ export const composeService = {
             status: 'failed',
             latencyMs: Date.now() - startTime,
             costUsdc: 0,
+            metadata: { caller_ref_hash: callerRefHash },
           })
           .catch((trackErr) =>
             console.error('[Compose] event tracking failed:', trackErr),

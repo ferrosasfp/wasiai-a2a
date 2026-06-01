@@ -55,6 +55,7 @@ interface Row {
   status: string;
   cost_usdc: number | string | null;
   latency_ms: number | null;
+  metadata: Record<string, unknown> | null;
 }
 
 function row(o: Partial<Row> = {}): Row {
@@ -63,8 +64,15 @@ function row(o: Partial<Row> = {}): Row {
     status: 'success',
     cost_usdc: 1,
     latency_ms: 100,
+    metadata: null,
     ...o,
   };
+}
+
+// WKH-104: fila success con un caller_ref_hash explícito (distinto caller por
+// llamada → no colisiona con el cap por caller en los tests de escala/rate).
+function rowWithCaller(hash: string, o: Partial<Row> = {}): Row {
+  return row({ ...o, metadata: { caller_ref_hash: hash } });
 }
 
 const ORIGINAL_ENV = { ...process.env };
@@ -78,6 +86,8 @@ beforeEach(() => {
   process.env = { ...ORIGINAL_ENV };
   process.env.REPUTATION_SCALE_FACTOR = '50';
   delete process.env.REPUTATION_CACHE_TTL_MS;
+  // WKH-104: K por defecto para los tests del cap por caller.
+  process.env.REPUTATION_MAX_TASKS_PER_CALLER = '5';
 });
 
 describe('reputationService.computeReputationForAgent', () => {
@@ -136,8 +146,10 @@ describe('reputationService.computeReputationForAgent', () => {
 
   // T-FORMULA / DT-2: determinista; cambiar el factor cambia el score; clamp ≤ 100.
   it('T-FORMULA: deterministic, scale factor modulates, raw clamps score<=100', async () => {
-    const data = Array.from({ length: 100 }, () =>
-      row({ status: 'success', cost_usdc: 1 }),
+    // WKH-104: caller distinto por fila → 100 tasks liquidadas sin que el cap
+    // por caller las recorte (cada caller aporta 1 ≤ K).
+    const data = Array.from({ length: 100 }, (_v, idx) =>
+      rowWithCaller(`caller-${idx}`, { status: 'success', cost_usdc: 1 }),
     );
     // factor=50 → raw=min(100/50,1)=1 → score=100.
     process.env.REPUTATION_SCALE_FACTOR = '50';
@@ -156,9 +168,10 @@ describe('reputationService.computeReputationForAgent', () => {
   // T-SUCCESS-RATE / OBS-1: success+failed → success_rate<1 modula hacia abajo.
   it('T-SUCCESS-RATE: failures reduce the score via success_rate modulator', async () => {
     // 50 settled successes + 50 failed → success_rate=0.5, raw=min(50/50,1)=1.
+    // WKH-104: caller distinto por success → 50 tasks sin recorte del cap.
     const data = [
-      ...Array.from({ length: 50 }, () =>
-        row({ status: 'success', cost_usdc: 1 }),
+      ...Array.from({ length: 50 }, (_v, idx) =>
+        rowWithCaller(`caller-${idx}`, { status: 'success', cost_usdc: 1 }),
       ),
       ...Array.from({ length: 50 }, () =>
         row({ status: 'failed', cost_usdc: 0, latency_ms: null }),
@@ -281,6 +294,133 @@ describe('reputationService.computeReputationBatch', () => {
     ]);
     expect(map.has('has-score')).toBe(true);
     expect(map.has('no-score')).toBe(false);
+  });
+});
+
+// WKH-104 (TD-SYBIL): cap por caller en tasks_settled (CD-7/CD-8/CD-10).
+describe('reputationService — cap por caller anti-sybil (WKH-104)', () => {
+  // T-CAP-1 / AC-11 / CD-7: 1 caller × N tasks (N>K) → tasks_settled === K.
+  it('T-CAP-1: same caller N>K tasks → capped at K (autopago no infla)', async () => {
+    process.env.REPUTATION_MAX_TASKS_PER_CALLER = '5';
+    const data = Array.from({ length: 10 }, () =>
+      rowWithCaller('caller-self', { status: 'success', cost_usdc: 1 }),
+    );
+    setResults([{ data, error: null }]);
+    const rep = await reputationService.computeReputationForAgent('agent-a');
+    expect(rep?.tasks_settled).toBe(5); // min(10, K=5)
+  });
+
+  // T-CAP-2 / AC-11: M callers distintos × 1 task → tasks_settled === M.
+  it('T-CAP-2: M distinct callers × 1 task each → tasks_settled === M', async () => {
+    process.env.REPUTATION_MAX_TASKS_PER_CALLER = '5';
+    const data = Array.from({ length: 7 }, (_v, idx) =>
+      rowWithCaller(`caller-${idx}`, { status: 'success', cost_usdc: 1 }),
+    );
+    setResults([{ data, error: null }]);
+    const rep = await reputationService.computeReputationForAgent('agent-a');
+    expect(rep?.tasks_settled).toBe(7); // each caller contributes 1 (≤ K)
+  });
+
+  // T-CAP-3 / AC-11: caller A con N>K + caller B con 1 → tasks_settled === K+1.
+  it('T-CAP-3: mixed (A:N>K + B:1) → tasks_settled === K + 1', async () => {
+    process.env.REPUTATION_MAX_TASKS_PER_CALLER = '5';
+    const data = [
+      ...Array.from({ length: 8 }, () =>
+        rowWithCaller('caller-A', { status: 'success', cost_usdc: 1 }),
+      ),
+      rowWithCaller('caller-B', { status: 'success', cost_usdc: 1 }),
+    ];
+    setResults([{ data, error: null }]);
+    const rep = await reputationService.computeReputationForAgent('agent-a');
+    expect(rep?.tasks_settled).toBe(6); // min(8,5) + min(1,5) = 5 + 1
+  });
+
+  // T-CAP-4 / AC-12 / CD-8: eventos sin caller_ref_hash → bucket __anon__,
+  // capeado a K; score NO colapsa a null (≥1 task → score > 0).
+  it('T-CAP-4: anonymous bucket capped at K, does not collapse to null', async () => {
+    process.env.REPUTATION_MAX_TASKS_PER_CALLER = '5';
+    const data = Array.from(
+      { length: 9 },
+      () => row({ status: 'success', cost_usdc: 1 }), // metadata: null
+    );
+    setResults([{ data, error: null }]);
+    const rep = await reputationService.computeReputationForAgent('agent-a');
+    expect(rep).not.toBeNull();
+    expect(rep?.tasks_settled).toBe(5); // __anon__ capped at K
+    expect(rep?.score).toBeGreaterThan(0);
+  });
+
+  // T-CAP-5: histórico (sin hash → __anon__) + callers nuevos (con hash).
+  it('T-CAP-5: legacy (no metadata) + hashed callers sum correctly', async () => {
+    process.env.REPUTATION_MAX_TASKS_PER_CALLER = '5';
+    const data = [
+      // 8 legacy sin metadata → __anon__ capeado a 5
+      ...Array.from({ length: 8 }, () =>
+        row({ status: 'success', cost_usdc: 1 }),
+      ),
+      // 3 callers nuevos distintos → +3
+      rowWithCaller('new-1', { status: 'success', cost_usdc: 1 }),
+      rowWithCaller('new-2', { status: 'success', cost_usdc: 1 }),
+      rowWithCaller('new-3', { status: 'success', cost_usdc: 1 }),
+    ];
+    setResults([{ data, error: null }]);
+    const rep = await reputationService.computeReputationForAgent('agent-a');
+    expect(rep?.tasks_settled).toBe(8); // min(8,5)=5 (__anon__) + 3 (new callers)
+  });
+
+  // T-CAP-6: determinismo del cap — mismo input → mismo tasks_settled.
+  it('T-CAP-6: deterministic — same input yields same tasks_settled', async () => {
+    process.env.REPUTATION_MAX_TASKS_PER_CALLER = '5';
+    const build = () => [
+      ...Array.from({ length: 8 }, () =>
+        rowWithCaller('caller-A', { status: 'success', cost_usdc: 1 }),
+      ),
+      rowWithCaller('caller-B', { status: 'success', cost_usdc: 1 }),
+    ];
+    setResults([{ data: build(), error: null }]);
+    const a = await reputationService.computeReputationForAgent('agent-a');
+    _resetReputationCache();
+    setResults([{ data: build(), error: null }]);
+    const b = await reputationService.computeReputationForAgent('agent-a');
+    expect(a?.tasks_settled).toBe(b?.tasks_settled);
+    expect(a?.tasks_settled).toBe(6);
+  });
+
+  // T-CAP-7 / CD-10: batch sigue siendo 1 query (.in una sola vez) con el cap.
+  it('T-CAP-7: batch with per-caller cap still issues exactly 1 query', async () => {
+    process.env.REPUTATION_MAX_TASKS_PER_CALLER = '5';
+    const data = [
+      // s1: 1 caller × 10 → capeado a 5
+      ...Array.from({ length: 10 }, () =>
+        rowWithCaller('c-self', {
+          agent_id: 's1',
+          status: 'success',
+          cost_usdc: 1,
+        }),
+      ),
+      // s2: 3 callers distintos → 3
+      rowWithCaller('c1', { agent_id: 's2', status: 'success', cost_usdc: 1 }),
+      rowWithCaller('c2', { agent_id: 's2', status: 'success', cost_usdc: 1 }),
+      rowWithCaller('c3', { agent_id: 's2', status: 'success', cost_usdc: 1 }),
+    ];
+    setResults([{ data, error: null }]);
+    const map = await reputationService.computeReputationBatch(['s1', 's2']);
+    expect(mockFrom).toHaveBeenCalledTimes(1); // CD-10: 1 query, NOT per-caller
+    expect(_terminalCalls).toHaveLength(1);
+    expect(_terminalCalls[0].method).toBe('in');
+    expect(map.get('s1')?.tasks_settled).toBe(5);
+    expect(map.get('s2')?.tasks_settled).toBe(3);
+  });
+
+  // T-CAP-8 / Env: K inválido/ausente → default 5.
+  it('T-CAP-8: invalid/absent K falls back to default 5', async () => {
+    process.env.REPUTATION_MAX_TASKS_PER_CALLER = 'not-a-number';
+    const data = Array.from({ length: 10 }, () =>
+      rowWithCaller('caller-self', { status: 'success', cost_usdc: 1 }),
+    );
+    setResults([{ data, error: null }]);
+    const rep = await reputationService.computeReputationForAgent('agent-a');
+    expect(rep?.tasks_settled).toBe(5); // default K
   });
 });
 

@@ -479,53 +479,11 @@ export function requirePaymentOrA2AKey(
         }
       }
 
-      // 6. Resolve target chain per-request (WKH-MULTICHAIN W2)
-      // Priority: explicit `x-payment-chain` header > registry default.
-      // CD-16: NO discovery calls here (manifest fallback is delegated to
-      // the upstream caller, wasiai-v2 propagates the header).
-      // CD-6: resolver is a pure in-memory function — no I/O.
-      const headerRaw = request.headers['x-payment-chain'];
-      const headerOverride =
-        typeof headerRaw === 'string' ? headerRaw : undefined;
-      const defaultChainKey = getDefaultChainKey();
-
-      let chainKey = resolveChainKey({ headerOverride });
-      if (!chainKey) {
-        if (headerOverride !== undefined) {
-          // CD-14: header present but unrecognised → 400, never silent default.
-          return reply.status(400).send({
-            error_code: 'CHAIN_NOT_SUPPORTED',
-            error: `Chain '${headerOverride}' is not a recognized slug or chainId`,
-          });
-        }
-        // Header absent → fall back to registry default.
-        chainKey = defaultChainKey ?? undefined;
-        if (!chainKey) {
-          return reply.status(500).send({
-            error_code: 'REGISTRY_NOT_INITIALIZED',
-            error: 'No chains initialized in registry',
-          });
-        }
-      }
-
-      const bundle = getAdaptersBundle(chainKey);
-      if (!bundle) {
-        // DT-C: recognised slug but not present in the initialised registry.
-        return reply.status(400).send({
-          error_code: 'CHAIN_NOT_SUPPORTED',
-          error: `Chain '${chainKey}' is not initialized. Initialized: ${getInitializedChainKeys().join(', ')}`,
-        });
-      }
-
-      // CD-12: chainId for debit AND for post-debit getBalance MUST come from
-      // the SAME bundle. Do NOT read from getChainConfig() anywhere below.
-      const chainId = bundle.chainConfig.chainId;
-      const assetSymbol =
-        bundle.payment.supportedTokens[0]?.symbol ?? 'UNKNOWN';
-
-      // WKH-59 (real-price-debit) DT-D / CD-12: propagar al route handler para
-      // que composeService haga debit per-step (steps 2..N) con el MISMO chainId
-      // del bundle. NO re-resolver en el service (race latente).
+      // 6. Resolve target chain per-request — REUSO del helper resolveTargetChain
+      // (WKH-104 TD-DRIFT: deduplicación del bloque master, behavior idéntico CD-1).
+      const chain = resolveTargetChain(request, reply);
+      if (!chain) return; // resolveTargetChain ya envió la respuesta de error
+      const { chainId, chainKey, assetSymbol } = chain;
       request.resolvedChainId = chainId;
 
       // 7. Optimistic debit BEFORE execution (BLQ-1/2/3/4 fix)

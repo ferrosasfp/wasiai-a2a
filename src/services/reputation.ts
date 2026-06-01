@@ -5,6 +5,16 @@
  * liquidadas verificables (`status='success' AND cost_usdc>0`, anti-sybil
  * CD-1). Cero gas, cero escritura on-chain — lee SOLO `a2a_events`.
  *
+ * WKH-104 (TD-SYBIL): cap anti-sybil POR CALLER. `tasks_settled` ya no es el
+ * conteo crudo de tasks liquidadas: cada caller (`caller_ref_hash` del evento,
+ * o el bucket `'__anon__'` para históricos/anónimos) aporta a lo sumo K tasks
+ * (`REPUTATION_MAX_TASKS_PER_CALLER`, default 5). Así un único caller no puede
+ * inflar el score de un agente vía autopago repetido. El cap se aplica 100% en
+ * el reduce JS in-memory (1 query por path, anti-N+1 CD-10). `success_rate` y
+ * `total_volume_usdc` NO se capean (OBS-1). Efecto en históricos (CD-8): los
+ * eventos previos a WKH-104 no tienen `caller_ref_hash` → caen en `'__anon__'`
+ * capeado a K, por lo que scores inflados existentes pueden BAJAR (esperado).
+ *
  * `agent_id` en `a2a_events` = `agent.slug` (compose.ts:278), NO `agent.id`.
  * El service recibe el slug.
  *
@@ -24,6 +34,15 @@ function resolveScaleFactor(): number {
   const raw = process.env.REPUTATION_SCALE_FACTOR;
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
   return Number.isFinite(n) && n > 0 ? n : 50;
+}
+
+// WKH-104 (TD-SYBIL CD-7): K del cap por caller. Cada (agent, caller_ref_hash)
+// aporta a lo sumo K tasks liquidadas → un caller no puede inflar su propio
+// score con autopago. Default 5 si ausente/inválido. Patrón resolveScaleFactor.
+function resolveMaxTasksPerCaller(): number {
+  const raw = process.env.REPUTATION_MAX_TASKS_PER_CALLER;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? n : 5;
 }
 
 function resolveCacheTtlMs(): number {
@@ -48,8 +67,11 @@ export function _resetReputationCache(): void {
 // ── Acumulador interno del reduce JS (patrón agentMap, event.ts:134) ──
 
 interface RepAccumulator {
-  settledCount: number; // success AND cost_usdc>0
-  settledVolume: number; // SUM(cost_usdc) de los liquidados
+  // WKH-104 (TD-SYBIL CD-7): tasks liquidadas por caller. key =
+  // caller_ref_hash | '__anon__'. El cap por caller se aplica en
+  // computeFromAccumulator (reduce JS, anti-N+1 CD-10).
+  settledByCaller: Map<string, number>;
+  settledVolume: number; // SUM(cost_usdc) de los liquidados (sin cap, OBS-1)
   settledLatencySum: number; // SUM(latency_ms) de los liquidados (no null)
   settledLatencyCount: number;
   successCount: number; // status='success' (cualquier costo)
@@ -62,11 +84,13 @@ interface RepRow {
   status: string;
   cost_usdc: number | string | null;
   latency_ms: number | null;
+  // WKH-104 (CD-15): metadata para extraer caller_ref_hash. Sin `any`.
+  metadata: Record<string, unknown> | null;
 }
 
 function emptyAccumulator(): RepAccumulator {
   return {
-    settledCount: 0,
+    settledByCaller: new Map<string, number>(),
     settledVolume: 0,
     settledLatencySum: 0,
     settledLatencyCount: 0,
@@ -85,7 +109,13 @@ function accumulateRow(acc: RepAccumulator, row: RepRow): void {
     acc.successCount++;
     // tasks_settled exige success AND cost_usdc>0 (anti-sybil CD-1).
     if (Number.isFinite(cost) && cost > 0) {
-      acc.settledCount++;
+      // WKH-104 (CD-7/CD-8): contabilizar la task bajo su caller. Eventos sin
+      // caller_ref_hash (históricos o anónimos) caen en el bucket '__anon__'
+      // (capeado a K en computeFromAccumulator), NUNCA error ni colapso a null.
+      const hash =
+        (row.metadata?.['caller_ref_hash'] as string | null | undefined) ??
+        '__anon__';
+      acc.settledByCaller.set(hash, (acc.settledByCaller.get(hash) ?? 0) + 1);
       acc.settledVolume += cost;
       if (row.latency_ms != null) {
         acc.settledLatencySum += row.latency_ms;
@@ -103,7 +133,14 @@ function accumulateRow(acc: RepAccumulator, row: RepRow): void {
  * universo success+failed del slug (OBS-1).
  */
 function computeFromAccumulator(acc: RepAccumulator): AgentReputation | null {
-  const tasksSettled = acc.settledCount;
+  // WKH-104 (TD-SYBIL CD-7/CD-8): cap por caller. Cada caller (incl. el bucket
+  // '__anon__' de históricos/anónimos) aporta a lo sumo K tasks. Esto evita
+  // que un caller infle su propio score con autopago. Eventos legacy sin
+  // caller_ref_hash caen en '__anon__' → su contribución queda capeada a K,
+  // por lo que scores inflados pre-WKH-104 pueden BAJAR (esperado, no bug).
+  const K = resolveMaxTasksPerCaller();
+  let tasksSettled = 0;
+  for (const n of acc.settledByCaller.values()) tasksSettled += Math.min(n, K);
   if (tasksSettled === 0) return null;
 
   const totalVolumeUsdc = Number(acc.settledVolume.toFixed(6));
@@ -157,7 +194,7 @@ export const reputationService: ReputationService = {
 
     const { data, error } = await supabase
       .from('a2a_events')
-      .select('agent_id, status, cost_usdc, latency_ms')
+      .select('agent_id, status, cost_usdc, latency_ms, metadata')
       .eq('agent_id', slug);
 
     if (error) {
@@ -191,7 +228,7 @@ export const reputationService: ReputationService = {
     // necesitamos success+failed para success_rate (OBS-1).
     const { data, error } = await supabase
       .from('a2a_events')
-      .select('agent_id, status, cost_usdc, latency_ms')
+      .select('agent_id, status, cost_usdc, latency_ms, metadata')
       .in('agent_id', slugs);
 
     if (error) {

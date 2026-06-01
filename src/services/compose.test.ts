@@ -1707,3 +1707,107 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     );
   });
 });
+
+// ─── WKH-104 (TD-SYBIL): caller_ref_hash emission in compose_step ─────────
+describe('composeService.compose — caller_ref_hash emission (WKH-104)', () => {
+  const TEST_SECRET = 'wkh104-compose-test-secret';
+  let prevSecret: string | undefined;
+
+  beforeEach(() => {
+    prevSecret = process.env.REPUTATION_CALLER_HMAC_SECRET;
+    process.env.REPUTATION_CALLER_HMAC_SECRET = TEST_SECRET;
+  });
+  afterEach(() => {
+    if (prevSecret === undefined)
+      delete process.env.REPUTATION_CALLER_HMAC_SECRET;
+    else process.env.REPUTATION_CALLER_HMAC_SECRET = prevSecret;
+  });
+
+  function expectedHash(ownerRef: string): string {
+    return crypto
+      .createHmac('sha256', TEST_SECRET)
+      .update(ownerRef)
+      .digest('hex');
+  }
+
+  it('T-SYBIL-1: success compose_step → metadata.caller_ref_hash === HMAC(owner_ref) (AC-9)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const trackSpy = vi.mocked(eventService.track);
+    trackSpy.mockResolvedValue({} as never);
+    const agent = makeAgent({ slug: 's1', id: 'agent-s1', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 'ok' }),
+    });
+
+    await composeService.compose({
+      steps: [{ agent: 's1', input: {} }],
+      scopingKeyRow: makeKeyRow({ owner_ref: 'owner-sybil-A' }),
+    });
+
+    const call = trackSpy.mock.calls.find((c) => c[0].agentId === 's1');
+    expect(call).toBeDefined();
+    expect(call?.[0].status).toBe('success');
+    expect(call?.[0].metadata?.caller_ref_hash).toBe(
+      expectedHash('owner-sybil-A'),
+    );
+    // privacidad (CD-5): el owner_ref crudo NUNCA aparece en metadata.
+    expect(JSON.stringify(call?.[0].metadata)).not.toContain('owner-sybil-A');
+  });
+
+  it('T-SYBIL-2: failed compose_step → metadata.caller_ref_hash present (AC-9)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const trackSpy = vi.mocked(eventService.track);
+    trackSpy.mockResolvedValue({} as never);
+    const agent = makeAgent({ slug: 'f1', id: 'agent-f1', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    // Reset any queued once-values from prior tests; force every fetch to fail
+    // so invokeAgent throws → failed branch (no queue-pollution dependency).
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: 'fail' }),
+    });
+
+    await composeService.compose({
+      steps: [{ agent: 'f1', input: {} }],
+      scopingKeyRow: makeKeyRow({ owner_ref: 'owner-sybil-B' }),
+    });
+
+    const call = trackSpy.mock.calls.find(
+      (c) => c[0].agentId === 'f1' && c[0].status === 'failed',
+    );
+    expect(call).toBeDefined();
+    expect(call?.[0].metadata?.caller_ref_hash).toBe(
+      expectedHash('owner-sybil-B'),
+    );
+    expect(JSON.stringify(call?.[0].metadata)).not.toContain('owner-sybil-B');
+  });
+
+  it('T-SYBIL-3: anonymous (no scopingKeyRow) → caller_ref_hash null (AC-10/AC-12)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const trackSpy = vi.mocked(eventService.track);
+    trackSpy.mockResolvedValue({} as never);
+    const agent = makeAgent({ slug: 'x1', id: 'agent-x1', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 'ok' }),
+    });
+
+    await composeService.compose({
+      steps: [{ agent: 'x1', input: {} }],
+      // no scopingKeyRow → x402 anónimo
+    });
+
+    const call = trackSpy.mock.calls.find((c) => c[0].agentId === 'x1');
+    expect(call).toBeDefined();
+    expect(call?.[0].metadata?.caller_ref_hash).toBeNull();
+  });
+});
