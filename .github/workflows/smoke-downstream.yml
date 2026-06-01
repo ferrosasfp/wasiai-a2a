@@ -1,0 +1,36 @@
+name: smoke-downstream
+
+# Regression smoke for the OUTBOUND x402 downstream payout path (WKH-108).
+# Runs the SECRET-FREE light layer only: asserts the facilitator is up and that
+# Base Sepolia + Avalanche Fuji are supported with eip3009 + breaker CLOSED.
+# The E2E layer is NOT run here (it needs on-chain secrets/gas, absent in CI).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 7 * * *' # daily 07:00 UTC
+
+jobs:
+  light-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # On pull_request the smoke is INFORMATIVE only: a transient facilitator
+      # blip must not red-fail unrelated PRs. On push:main + schedule it is a
+      # HARD-FAIL gate — there a regression is real and must block (MNR-3).
+      - name: Run downstream x402 light smoke (no secrets)
+        run: npm run smoke:downstream
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
