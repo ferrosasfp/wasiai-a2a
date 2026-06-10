@@ -49,6 +49,13 @@ export interface A2AAgentKeyRow {
   created_at: string;
   updated_at: string;
   erc8004_identity: Erc8004IdentityBinding | null;
+  /**
+   * WKH-117 (AC-8/AC-9): bound Kite Agent Passport, shape
+   * `{ address: string (lowercase 0x..), bound_at: string (ISO) }`.
+   * Read-only on every auth/debit path — NEVER an auth signal (CD-4). Written
+   * only by `identityService.bindPassport` (ownership-guarded). Type kept as
+   * `Record<string, unknown> | null` (no schema-level change).
+   */
   kite_passport: Record<string, unknown> | null;
   agentkit_wallet: Record<string, unknown> | null;
   funding_wallet: string | null; // WKH-35 FIX-1: bound depositor wallet (lowercase)

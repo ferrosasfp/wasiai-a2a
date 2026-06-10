@@ -28,6 +28,12 @@ import type {
  */
 export const X_PASSPORT_SESSION_HEADER = 'x-passport-session';
 
+// Canonical x402 payment header (Kite Agent Passport). Fastify lowercasea los
+// nombres de header entrantes → 'x-payment' (no 'X-PAYMENT') es el lookup
+// correcto; AC-3 "case-insensitive" se cumple por la plataforma (DT-9).
+export const X_PAYMENT_HEADER = 'x-payment';
+export const PAYMENT_SIGNATURE_HEADER = 'payment-signature';
+
 declare module 'fastify' {
   interface FastifyRequest {
     paymentTxHash?: string;
@@ -174,7 +180,15 @@ export function requirePayment(
       });
     }
 
-    const xPaymentHeader = request.headers['payment-signature'];
+    // DT-2 / AC-4: canónico x402 (X-PAYMENT) gana sobre legacy (payment-signature).
+    // DT-10: .length > 0 evita que un X-PAYMENT vacío gane sobre un payment-signature válido.
+    // El typeof === 'string' filtra el caso header duplicado (Fastify → string[]).
+    const canonical = request.headers[X_PAYMENT_HEADER];
+    const legacy = request.headers[PAYMENT_SIGNATURE_HEADER];
+    const xPaymentHeader =
+      typeof canonical === 'string' && canonical.length > 0
+        ? canonical
+        : legacy;
     if (!xPaymentHeader || typeof xPaymentHeader !== 'string')
       return reply
         .status(402)

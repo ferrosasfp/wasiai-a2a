@@ -327,6 +327,75 @@ describe('identityService', () => {
     });
   });
 
+  describe('bindPassport (WKH-117 AC-8)', () => {
+    it('updates kite_passport lowercase filtered by id AND owner_ref (Ownership Guard)', async () => {
+      const mock = chainMock();
+      const mockUpdate = vi.fn().mockReturnValue(mock);
+      mock.update = mockUpdate;
+      mock.select = vi.fn().mockResolvedValue({
+        data: [{ id: 'key-id-1' }],
+        error: null,
+      });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+
+      const result = await identityService.bindPassport(
+        'key-id-1',
+        'user-A',
+        '0xABCDEF0000000000000000000000000000000001',
+      );
+
+      expect(result.address).toBe('0xabcdef0000000000000000000000000000000001');
+      expect(typeof result.bound_at).toBe('string');
+      expect(mockUpdate).toHaveBeenCalledWith({
+        kite_passport: {
+          address: '0xabcdef0000000000000000000000000000000001',
+          bound_at: result.bound_at,
+        },
+      });
+      expect(mock.eq).toHaveBeenCalledWith('id', 'key-id-1');
+      expect(mock.eq).toHaveBeenCalledWith('owner_ref', 'user-A');
+    });
+
+    it('throws OwnershipMismatchError when no row matches (id, owner_ref)', async () => {
+      const mock = chainMock();
+      mock.update = vi.fn().mockReturnValue(mock);
+      mock.select = vi.fn().mockResolvedValue({ data: [], error: null });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+
+      await expect(
+        identityService.bindPassport(
+          'other-key',
+          'user-A',
+          '0x1111111111111111111111111111111111111111',
+        ),
+      ).rejects.toMatchObject({ code: 'OWNERSHIP_MISMATCH' });
+    });
+
+    it('throws on generic DB error', async () => {
+      const mock = chainMock();
+      mock.update = vi.fn().mockReturnValue(mock);
+      mock.select = vi.fn().mockResolvedValue({
+        data: null,
+        error: { message: 'fail' },
+      });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+
+      await expect(
+        identityService.bindPassport(
+          'x',
+          'user-A',
+          '0x1111111111111111111111111111111111111111',
+        ),
+      ).rejects.toThrow('Failed to bind passport: fail');
+    });
+  });
+
   // ── WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.6) — bindErc8004Identity ──
   describe('bindErc8004Identity', () => {
     const binding = {

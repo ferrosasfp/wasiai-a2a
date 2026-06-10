@@ -171,6 +171,7 @@ vi.mock('../adapters/registry.js', () => ({
   getDefaultChainKey: vi.fn(() => mockDefaultChain),
 }));
 
+import { getPaymentAdapter } from '../adapters/registry.js';
 import { budgetService } from '../services/budget.js';
 import {
   delegationService,
@@ -194,6 +195,7 @@ const mockDebitDelegation = vi.mocked(
   delegationService.debitDelegationAndParent,
 );
 const mockExceedsPerTx = vi.mocked(exceedsPerTxLimit);
+const mockGetPaymentAdapter = vi.mocked(getPaymentAdapter);
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -311,6 +313,40 @@ describe('requirePaymentOrA2AKey middleware', () => {
     expect(response.statusCode).toBe(402);
 
     process.env.PAYMENT_WALLET_ADDRESS = prev;
+  });
+
+  // ── T-AK-COEX (AC-2): Agent Key wins when X-PAYMENT coexists ──
+
+  it('T-AK-COEX: x-a2a-key + X-PAYMENT simultaneous — Agent Key honored, x402 adapter never invoked', async () => {
+    const keyRow = makeKeyRow();
+    mockLookupByHash.mockResolvedValue(keyRow);
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('9.000000');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: {
+        'x-a2a-key': TEST_KEY,
+        // Canonical x402 payload present at the same time — must be ignored.
+        'x-payment': Buffer.from(
+          JSON.stringify({
+            authorization: { from: '0x1', to: '0x2', value: '1' },
+            signature: '0xabc',
+          }),
+          'utf8',
+        ).toString('base64'),
+      },
+      payload: {},
+    });
+
+    // Path Agent Key honored: 200, debit called, a2aKeyRow set.
+    expect(response.statusCode).toBe(200);
+    expect(response.json().a2aKeyId).toBe(TEST_KEY_ID);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    // x402 verify/settle path NEVER reached → registry payment adapter not used.
+    expect(mockGetPaymentAdapter).not.toHaveBeenCalled();
   });
 
   // ── AC-3: Error codes ─────────────────────────────────────

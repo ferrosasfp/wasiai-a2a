@@ -389,6 +389,70 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   /**
+   * POST /bind-passport — Bind a Kite Agent Passport address to the caller's
+   * key (WKH-117, AC-8). Gate-at-mount (DT-8): the route only exists when
+   * `PASSPORT_BINDING_ENABLED === 'true'`; otherwise callers get a natural 404
+   * (no exposed surface). The key_id + owner_ref come from the authenticated
+   * caller, NEVER the body (Ownership Guard / CD-3). `kite_passport` is stored
+   * as `{ address (lowercase), bound_at }` and stays read-only on every
+   * auth/debit path (AC-9).
+   */
+  if (process.env.PASSPORT_BINDING_ENABLED === 'true') {
+    fastify.post(
+      '/bind-passport',
+      async (req: FastifyRequest, reply: FastifyReply) => {
+        // 1. Auth — mismo helper que /me, /deposit y /funding-wallet.
+        const callerKey = await resolveCallerKey(req);
+        if (!callerKey?.is_active) {
+          return reply
+            .status(403)
+            .send({ error: 'Invalid or inactive API key' });
+        }
+
+        // 2. Validar input. key_id y owner_ref salen del caller, NUNCA del body.
+        const body = req.body as
+          | { passportAddress?: unknown; keyId?: unknown }
+          | undefined;
+        const passportAddress = body?.passportAddress;
+        if (
+          typeof passportAddress !== 'string' ||
+          !ADDRESS_RE.test(passportAddress)
+        ) {
+          return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+        }
+
+        // 2b. Defense-in-depth (CD-3): si el body trae keyId, debe ser el del
+        // caller autenticado. El keyId autoritativo es callerKey.id (no el body).
+        if (body?.keyId !== undefined && body.keyId !== callerKey.id) {
+          return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+        }
+
+        // 3. Persistir (UPDATE filtrado por id + owner_ref — Ownership Guard).
+        try {
+          const kitePassport = await identityService.bindPassport(
+            callerKey.id,
+            callerKey.owner_ref,
+            passportAddress,
+          );
+          return reply.status(200).send({ kite_passport: kitePassport });
+        } catch (err) {
+          if (err instanceof OwnershipMismatchError) {
+            return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+          }
+          fastify.log.error(
+            {
+              errorClass:
+                err instanceof Error ? err.constructor.name : 'unknown',
+            },
+            'bind-passport failed',
+          );
+          return reply.status(500).send({ error_code: 'PASSPORT_BIND_FAILED' });
+        }
+      },
+    );
+  }
+
+  /**
    * POST /deposit — Register a real, on-chain-verified deposit (AC-14, WKH-35).
    *
    * Verifies a confirmed ERC-20 deposit on-chain (verify-before-credit, CD-4)

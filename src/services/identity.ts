@@ -164,6 +164,45 @@ export const identityService = {
   },
 
   /**
+   * Bind a Kite Agent Passport address to a key (WKH-117, AC-8).
+   *
+   * Ownership Guard (CLAUDE.md / CD-3): UPDATE filtered by id AND owner_ref so
+   * a caller can only bind a passport to ITS OWN key. 0 rows matched →
+   * OwnershipMismatchError. `ownerId` is required (NEVER `string | undefined`).
+   * Stores `{ address (lowercase), bound_at (ISO) }` in the `kite_passport`
+   * JSONB. Read-only on every auth/debit path (AC-9) — never an auth signal.
+   */
+  async bindPassport(
+    keyId: string,
+    ownerId: string,
+    passportAddress: string,
+  ): Promise<{ address: string; bound_at: string }> {
+    const normalized = passportAddress.toLowerCase();
+    const boundAt = new Date().toISOString();
+
+    const { data, error } = await supabase
+      .from('a2a_agent_keys')
+      .update({ kite_passport: { address: normalized, bound_at: boundAt } })
+      .eq('id', keyId)
+      .eq('owner_ref', ownerId)
+      .select('id');
+
+    if (error) {
+      throw new Error(`Failed to bind passport: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) {
+      // Reusa la op 'deactivate' del overload posicional legacy, igual que
+      // bindFundingWallet (OwnershipOp no expone una op de passport y errors.ts
+      // está fuera de scope; el logger es PII-safe igual).
+      logOwnershipMismatch('deactivate', keyId, ownerId);
+      throw new OwnershipMismatchError();
+    }
+
+    return { address: normalized, bound_at: boundAt };
+  },
+
+  /**
    * Bind an on-chain-verified ERC-8004 identity to a key (WKH-100, AC-1).
    *
    * The handler already verified `ownerOf(token_id) == funding_wallet`

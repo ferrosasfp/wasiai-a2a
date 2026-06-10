@@ -27,6 +27,7 @@ vi.mock('../services/identity.js', () => ({
     deactivate: vi.fn(),
     bindFundingWallet: vi.fn(),
     bindErc8004Identity: vi.fn(),
+    bindPassport: vi.fn(),
     resolveIdentityForAgent: vi.fn(),
   },
   // WKH-100: auth.ts now imports this derived helper (AC-6/DT-17).
@@ -91,6 +92,7 @@ import {
 const mockCreateKey = vi.mocked(identityService.createKey);
 const mockLookupByHash = vi.mocked(identityService.lookupByHash);
 const mockBindFundingWallet = vi.mocked(identityService.bindFundingWallet);
+const mockBindPassport = vi.mocked(identityService.bindPassport);
 const mockVerifyDeposit = vi.mocked(verifyDeposit);
 const mockGetAdaptersBundle = vi.mocked(getAdaptersBundle);
 const mockGetInitializedChainKeys = vi.mocked(getInitializedChainKeys);
@@ -101,6 +103,8 @@ const FUNDING_WALLET = '0x1111111111111111111111111111111111111111';
 const DEPOSITOR = FUNDING_WALLET as `0x${string}`;
 const OTHER_WALLET =
   '0x2222222222222222222222222222222222222222' as `0x${string}`;
+// WKH-117: dirección de Kite Agent Passport para los tests de /bind-passport.
+const PASSPORT_ADDR = '0x3333333333333333333333333333333333333333';
 
 function makeBundle(chainId: number): AdaptersBundle {
   return {
@@ -926,6 +930,93 @@ describe('auth routes', () => {
 
     expect(res.statusCode).toBe(200);
     expect(mockLookupByHash).not.toHaveBeenCalled();
+  });
+
+  // ── POST /auth/bind-passport (WKH-117 AC-8 — gate-at-mount) ──
+
+  // PASSPORT_BINDING_ENABLED ausente en el app principal (beforeAll): la ruta
+  // NO se monta → 404 (gate-at-mount, DT-8). No exposed surface.
+  it('POST /auth/bind-passport when flag absent → 404 (gate-at-mount)', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/bind-passport',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: { passportAddress: PASSPORT_ADDR },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(mockBindPassport).not.toHaveBeenCalled();
+  });
+
+  // App SEPARADO montado con PASSPORT_BINDING_ENABLED='true' para que la ruta
+  // exista (gate-at-mount se evalúa al registrar el plugin).
+  describe('with PASSPORT_BINDING_ENABLED=true', () => {
+    let passportApp: ReturnType<typeof Fastify>;
+    const prevFlag = process.env.PASSPORT_BINDING_ENABLED;
+
+    beforeAll(async () => {
+      process.env.PASSPORT_BINDING_ENABLED = 'true';
+      passportApp = Fastify();
+      await passportApp.register(authRoutes, { prefix: '/auth' });
+      await passportApp.ready();
+    });
+
+    afterAll(async () => {
+      await passportApp.close();
+      if (prevFlag === undefined) {
+        delete process.env.PASSPORT_BINDING_ENABLED;
+      } else {
+        process.env.PASSPORT_BINDING_ENABLED = prevFlag;
+      }
+    });
+
+    it('POST /auth/bind-passport owner caller → 200 + {kite_passport}', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+      const boundAt = '2026-06-10T00:00:00.000Z';
+      mockBindPassport.mockResolvedValue({
+        address: PASSPORT_ADDR.toLowerCase(),
+        bound_at: boundAt,
+      });
+
+      const res = await passportApp.inject({
+        method: 'POST',
+        url: '/auth/bind-passport',
+        headers: { 'x-a2a-key': TEST_KEY },
+        payload: { passportAddress: PASSPORT_ADDR },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().kite_passport).toEqual({
+        address: PASSPORT_ADDR.toLowerCase(),
+        bound_at: boundAt,
+      });
+      // Ownership Guard: id + owner_ref del caller, NUNCA del body (CD-3).
+      expect(mockBindPassport).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        'user-1',
+        PASSPORT_ADDR,
+      );
+    });
+
+    it('POST /auth/bind-passport body.keyId != callerKey.id → 403 (defense-in-depth)', async () => {
+      mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+      const res = await passportApp.inject({
+        method: 'POST',
+        url: '/auth/bind-passport',
+        headers: { 'x-a2a-key': TEST_KEY },
+        payload: {
+          passportAddress: PASSPORT_ADDR,
+          keyId: 'ffffffff-0000-0000-0000-000000000000',
+        },
+      });
+
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error_code).toBe('OWNERSHIP_MISMATCH');
+      expect(mockBindPassport).not.toHaveBeenCalled();
+    });
   });
 
   // ── POST /auth/bind/:chain (AC-16) ────────────────────────
