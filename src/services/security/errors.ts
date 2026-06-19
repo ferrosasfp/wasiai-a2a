@@ -275,10 +275,55 @@ export class DelegationNotFoundError extends Error {
 }
 
 /**
+ * WKH-121 (Fase server-side): key-session errors (sin EIP-712).
+ *
+ * Mapeo error_code ↔ HTTP en routes/middleware (story §Contrato). Las clases
+ * siguen el patrón `readonly code = '...' as const` + `name`. `OwnershipMismatchError`
+ * (L9) y `AgentKey*`/`DailyLimitExceededError` (L225+) YA existen y se reusan.
+ */
+
+/** `lookupByTokenHash` → null, o RPC `SESSION_NOT_FOUND`/`SESSION_REVOKED` → 401/403. */
+export class SessionTokenInvalidError extends Error {
+  readonly code = 'SESSION_TOKEN_INVALID' as const;
+  constructor() {
+    super('Session token not found or invalid');
+    this.name = 'SessionTokenInvalidError';
+  }
+}
+
+/** `now() >= session.expires_at` → 403. */
+export class SessionExpiredError extends Error {
+  readonly code = 'SESSION_EXPIRED' as const;
+  constructor() {
+    super('Session has expired');
+    this.name = 'SessionExpiredError';
+  }
+}
+
+/** `spent + amount > max_budget_usd` → 403 (raised by RPC bajo lock). */
+export class SessionBudgetExhaustedError extends Error {
+  readonly code = 'SESSION_BUDGET_EXHAUSTED' as const;
+  constructor() {
+    super('Session budget exhausted');
+    this.name = 'SessionBudgetExhaustedError';
+  }
+}
+
+/** token autenticador es `wasi_a2a_sess_*` → 403 (CD sin sub-delegación, AC-12). */
+export class SessionNotAllowedError extends Error {
+  readonly code = 'SESSION_NOT_ALLOWED' as const;
+  constructor() {
+    super('Sub-delegation is not allowed');
+    this.name = 'SessionNotAllowedError';
+  }
+}
+
+/**
  * Operación que detectó el mismatch (PII-safe enum).
  * - `getBalance` / `deactivate`: ownership sobre `a2a_agent_keys` (WKH-53).
  * - `registryUpdate` / `registryDelete`: ownership sobre `registries` (WKH-63).
  * - `delegationRevoke` / `delegationList`: ownership sobre `a2a_delegations` (WKH-101).
+ * - `keySessionRevoke` / `keySessionList`: ownership sobre `a2a_key_sessions` (WKH-121).
  */
 export type OwnershipOp =
   | 'getBalance'
@@ -286,7 +331,9 @@ export type OwnershipOp =
   | 'registryUpdate'
   | 'registryDelete'
   | 'delegationRevoke'
-  | 'delegationList';
+  | 'delegationList'
+  | 'keySessionRevoke'
+  | 'keySessionList';
 
 /**
  * PII-safe logger para cross-owner attempts.

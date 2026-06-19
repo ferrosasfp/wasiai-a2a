@@ -49,6 +49,15 @@ vi.mock('../services/delegation.js', () => ({
   exceedsPerTxLimit: vi.fn(),
 }));
 
+// WKH-121: middleware now imports keySessionService for the wasi_a2a_sess_ branch.
+vi.mock('../services/key-session.js', () => ({
+  keySessionService: {
+    lookupByTokenHash: vi.fn(),
+    getParentKey: vi.fn(),
+    debitSessionAndParent: vi.fn(),
+  },
+}));
+
 // WKH-MULTICHAIN W2: registry mock exposes multi-chain Map + new getters.
 // `getAdaptersBundle(chainKey)` returns a per-chain bundle with chainConfig +
 // payment.supportedTokens, so the middleware can resolve the right chainId
@@ -178,12 +187,14 @@ import {
   exceedsPerTxLimit,
 } from '../services/delegation.js';
 import { identityService } from '../services/identity.js';
+import { keySessionService } from '../services/key-session.js';
 import {
   AgentKeyBudgetExhaustedError,
   DailyLimitExceededError,
   DelegationTotalLimitExceededError,
+  SessionBudgetExhaustedError,
 } from '../services/security/errors.js';
-import type { DelegationRow } from '../types/index.js';
+import type { DelegationRow, KeySessionRow } from '../types/index.js';
 import { requirePaymentOrA2AKey } from './a2a-key.js';
 
 const mockLookupByHash = vi.mocked(identityService.lookupByHash);
@@ -196,6 +207,9 @@ const mockDebitDelegation = vi.mocked(
 );
 const mockExceedsPerTx = vi.mocked(exceedsPerTxLimit);
 const mockGetPaymentAdapter = vi.mocked(getPaymentAdapter);
+const mockSessionLookup = vi.mocked(keySessionService.lookupByTokenHash);
+const mockSessionGetParent = vi.mocked(keySessionService.getParentKey);
+const mockSessionDebit = vi.mocked(keySessionService.debitSessionAndParent);
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -1403,5 +1417,263 @@ describe('requirePaymentOrA2AKey — delegation branch (WKH-101)', () => {
     expect(mockLookupToken).not.toHaveBeenCalled();
     expect(mockDebitDelegation).not.toHaveBeenCalled();
     expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+  });
+});
+
+// ── WKH-121: BRANCH KEY-SESSION (wasi_a2a_sess_ token) ────────
+
+const SESS_TOKEN = `wasi_a2a_sess_${'c'.repeat(96)}`;
+const SESS_HASH = crypto.createHash('sha256').update(SESS_TOKEN).digest('hex');
+
+function makeKeySessionRow(
+  overrides: Partial<KeySessionRow> = {},
+): KeySessionRow {
+  return {
+    id: 'sess-1',
+    key_id: TEST_KEY_ID,
+    owner_ref: 'user-1',
+    session_token_hash: SESS_HASH,
+    ttl_seconds: 3600,
+    expires_at: new Date(Date.now() + 3600_000).toISOString(),
+    max_budget_usd: '10.00',
+    spent_usd: '0',
+    allowed_registries: null,
+    allowed_agent_slugs: null,
+    allowed_categories: null,
+    derivation_mode: 'server',
+    revoked_at: null,
+    created_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+describe('requirePaymentOrA2AKey — key-session branch (WKH-121)', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    app = Fastify();
+    app.post(
+      '/test',
+      { preHandler: requirePaymentOrA2AKey({ description: 'Test endpoint' }) },
+      async (request: FastifyRequest, reply: FastifyReply) => {
+        return reply.send({
+          ok: true,
+          a2aKeyId: request.a2aKeyRow?.id ?? null,
+          keySessionId: request.keySessionRow?.id ?? null,
+          hasKeySessionContext: request.keySessionContext !== undefined,
+          effectiveRegistries: request.a2aKeyRow?.allowed_registries ?? null,
+        });
+      },
+    );
+    await app.ready();
+  });
+
+  afterAll(() => app.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMockRegistryState(['kite-ozone-testnet'], 'kite-ozone-testnet');
+  });
+
+  // T-MW-LOOKUP (AC-4)
+  it('T-MW-LOOKUP: valid session token → lookup by hash, augment, atomic session debit', async () => {
+    mockSessionLookup.mockResolvedValue(makeKeySessionRow());
+    mockSessionGetParent.mockResolvedValue(makeKeyRow());
+    mockSessionDebit.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('9.00');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.keySessionId).toBe('sess-1');
+    expect(body.hasKeySessionContext).toBe(true);
+    expect(res.headers['x-a2a-remaining-budget']).toBe('9.00');
+    // lookup uses the SHA-256 of the raw token.
+    expect(mockSessionLookup).toHaveBeenCalledWith(SESS_HASH);
+    // step-0 debit went through the atomic session RPC, not master debit.
+    expect(mockSessionDebit).toHaveBeenCalledWith(
+      'sess-1',
+      'user-1',
+      TEST_KEY_ID,
+      2368,
+      1.0,
+    );
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  // T-MW-INVALID (AC-5)
+  it('T-MW-INVALID: unknown session token → 401 SESSION_TOKEN_INVALID', async () => {
+    mockSessionLookup.mockResolvedValue(null);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('SESSION_TOKEN_INVALID');
+    expect(mockSessionDebit).not.toHaveBeenCalled();
+  });
+
+  // T-MW-EXPIRED (AC-6)
+  it('T-MW-EXPIRED: now >= expires_at → 403 SESSION_EXPIRED (pre-debit)', async () => {
+    mockSessionLookup.mockResolvedValue(
+      makeKeySessionRow({
+        expires_at: new Date(Date.now() - 1000).toISOString(),
+      }),
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('SESSION_EXPIRED');
+    expect(mockSessionDebit).not.toHaveBeenCalled();
+  });
+
+  // revoked session → SESSION_TOKEN_INVALID (pre-debit)
+  it('revoked session → 403 SESSION_TOKEN_INVALID (pre-debit)', async () => {
+    mockSessionLookup.mockResolvedValue(
+      makeKeySessionRow({ revoked_at: new Date().toISOString() }),
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('SESSION_TOKEN_INVALID');
+    expect(mockSessionDebit).not.toHaveBeenCalled();
+  });
+
+  // T-MW-KEYINACTIVE (AC-7)
+  it('T-MW-KEYINACTIVE: parent is_active=false → 403 KEY_INACTIVE', async () => {
+    mockSessionLookup.mockResolvedValue(makeKeySessionRow());
+    mockSessionGetParent.mockResolvedValue(makeKeyRow({ is_active: false }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('KEY_INACTIVE');
+  });
+
+  // session budget exhausted from RPC
+  it('session budget exhausted from RPC → 403 SESSION_BUDGET_EXHAUSTED', async () => {
+    mockSessionLookup.mockResolvedValue(makeKeySessionRow());
+    mockSessionGetParent.mockResolvedValue(makeKeyRow());
+    mockSessionDebit.mockRejectedValue(new SessionBudgetExhaustedError());
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('SESSION_BUDGET_EXHAUSTED');
+  });
+
+  // T-SCOPE-EFF (AC-10) — session list restricts within parent
+  it('T-SCOPE-EFF: session allowed_registries=[a] → effective [a] (not parent)', async () => {
+    mockSessionLookup.mockResolvedValue(
+      makeKeySessionRow({ allowed_registries: ['a'] }),
+    );
+    mockSessionGetParent.mockResolvedValue(
+      makeKeyRow({ allowed_registries: ['a', 'b'] }),
+    );
+    mockSessionDebit.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('9.00');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().effectiveRegistries).toEqual(['a']);
+  });
+
+  // T-SCOPE-EFF (AC-10) — session null inherits parent restriction
+  it('T-SCOPE-EFF: session null + parent [a,b] → effective [a,b] (inherits)', async () => {
+    mockSessionLookup.mockResolvedValue(
+      makeKeySessionRow({ allowed_registries: null }),
+    );
+    mockSessionGetParent.mockResolvedValue(
+      makeKeyRow({ allowed_registries: ['a', 'b'] }),
+    );
+    mockSessionDebit.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('9.00');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().effectiveRegistries).toEqual(['a', 'b']);
+  });
+
+  // T-BACKCOMPAT (AC-14) — master key path untouched
+  it('T-BACKCOMPAT: master key (no sess prefix) → master debit path, no session calls', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('9.00');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().hasKeySessionContext).toBe(false);
+    expect(mockSessionLookup).not.toHaveBeenCalled();
+    expect(mockSessionDebit).not.toHaveBeenCalled();
+    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+  });
+
+  // T-COEXIST (AC-15) — sess token routes to keySessionService, NOT delegationService
+  it('T-COEXIST: wasi_a2a_sess_ routes to keySessionService, not delegationService', async () => {
+    mockSessionLookup.mockResolvedValue(makeKeySessionRow());
+    mockSessionGetParent.mockResolvedValue(makeKeyRow());
+    mockSessionDebit.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('9.00');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(mockSessionLookup).toHaveBeenCalledWith(SESS_HASH);
+    // WKH-101 delegation service is NEVER touched by a sess token.
+    expect(mockLookupToken).not.toHaveBeenCalled();
+    expect(mockDebitDelegation).not.toHaveBeenCalled();
+  });
+
+  // T-COEXIST (AC-15) — session_ token routes to delegationService, NOT keySessionService
+  it('T-COEXIST: wasi_a2a_session_ routes to delegationService, not keySessionService', async () => {
+    mockLookupToken.mockResolvedValue(null); // delegation lookup → 401
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('INVALID_SESSION_TOKEN');
+    expect(mockLookupToken).toHaveBeenCalledWith(SESSION_HASH);
+    // WKH-121 session service is NEVER touched by a session_ token.
+    expect(mockSessionLookup).not.toHaveBeenCalled();
   });
 });

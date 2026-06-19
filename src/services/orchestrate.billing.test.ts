@@ -224,12 +224,14 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       CHAIN_ID,
       0.02,
       undefined,
+      undefined,
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
       2,
       'k1',
       CHAIN_ID,
       0.03,
+      undefined,
       undefined,
     );
   });
@@ -256,8 +258,20 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
 
     // Solo 1 débito (step 1). El precio del step 0 (0.07) NUNCA aparece.
     expect(mockDebit).toHaveBeenCalledTimes(1);
-    expect(mockDebit).toHaveBeenCalledWith('k1', CHAIN_ID, 0.02, undefined);
-    expect(mockDebit).not.toHaveBeenCalledWith('k1', CHAIN_ID, 0.07, undefined);
+    expect(mockDebit).toHaveBeenCalledWith(
+      'k1',
+      CHAIN_ID,
+      0.02,
+      undefined,
+      undefined,
+    );
+    expect(mockDebit).not.toHaveBeenCalledWith(
+      'k1',
+      CHAIN_ID,
+      0.07,
+      undefined,
+      undefined,
+    );
   });
 
   // T-BILL-3 (AC-3): budget insuficiente en step intermedio → corta el pipeline.

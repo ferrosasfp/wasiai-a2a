@@ -23,6 +23,7 @@ import {
   exceedsPerTxLimit,
 } from '../services/delegation.js';
 import { identityService, isIdentityVerified } from '../services/identity.js';
+import { keySessionService } from '../services/key-session.js';
 import {
   AgentKeyBudgetExhaustedError,
   AgentKeyInactiveError,
@@ -33,11 +34,16 @@ import {
   DelegationRevokedError,
   DelegationTotalLimitExceededError,
   OwnershipMismatchError,
+  SessionBudgetExhaustedError,
+  SessionExpiredError,
+  SessionTokenInvalidError,
 } from '../services/security/errors.js';
 import type {
   A2AAgentKeyRow,
   DelegationDebitContext,
   DelegationRow,
+  KeySessionDebitContext,
+  KeySessionRow,
 } from '../types/index.js';
 import { type PaymentMiddlewareOptions, requirePayment } from './x402.js';
 
@@ -51,6 +57,8 @@ declare module 'fastify' {
     resolvedChainId?: number; // WKH-59 (real-price-debit) DT-D
     delegationRow?: DelegationRow; // WKH-101
     delegationContext?: DelegationDebitContext; // WKH-101 DT-11 (débito per-step)
+    keySessionRow?: KeySessionRow; // WKH-121
+    keySessionContext?: KeySessionDebitContext; // WKH-121 (débito per-step)
   }
 }
 
@@ -94,6 +102,27 @@ type DelegationMiddlewareErrorCode =
 function send403delegation(
   reply: FastifyReply,
   code: DelegationMiddlewareErrorCode,
+  message: string,
+) {
+  return reply.status(403).send({ error: message, error_code: code });
+}
+
+// ── WKH-121: key-session 403 error codes (branch sess) ─────────
+
+type KeySessionMiddlewareErrorCode =
+  | 'SESSION_EXPIRED'
+  | 'KEY_INACTIVE'
+  | 'SESSION_BUDGET_EXHAUSTED'
+  | 'AGENT_KEY_BUDGET_EXHAUSTED'
+  | 'OWNERSHIP_MISMATCH'
+  | 'SESSION_TOKEN_INVALID'
+  // prefijos del parent RPC bajo sesión (increment_a2a_key_spend).
+  | 'DAILY_LIMIT'
+  | 'KEY_NOT_FOUND';
+
+function send403session(
+  reply: FastifyReply,
+  code: KeySessionMiddlewareErrorCode,
   message: string,
 ) {
   return reply.status(403).send({ error: message, error_code: code });
@@ -427,6 +456,175 @@ export function requirePaymentOrA2AKey(
         return reply.status(503).send({
           error: 'SERVICE_ERROR',
           message: 'Delegation service temporarily unavailable',
+        });
+      }
+    }
+
+    // ── BRANCH KEY-SESSION (WKH-121) ─────────────────────────
+    // Server-side session keys (SIN EIP-712). Va DESPUÉS del branch WKH-101
+    // (wasi_a2a_session_*) y ANTES del path master. Los prefijos son mutuamente
+    // exclusivos: 'wasi_a2a_session_x'.startsWith('wasi_a2a_sess_') === false.
+    if (rawKey.startsWith('wasi_a2a_sess_')) {
+      try {
+        // 1. lookup por hash O(1) (AC-4/AC-5).
+        const hash = crypto.createHash('sha256').update(rawKey).digest('hex');
+        const session = await keySessionService.lookupByTokenHash(hash);
+        if (!session) {
+          return reply.status(401).send({
+            error: 'Session token not found',
+            error_code: 'SESSION_TOKEN_INVALID',
+          });
+        }
+
+        // 2. revoked / expired (AC-6) — pre-debit (re-chequeado bajo lock, DT-3).
+        if (session.revoked_at !== null) {
+          return send403session(
+            reply,
+            'SESSION_TOKEN_INVALID',
+            'Session token has been revoked',
+          );
+        }
+        if (Date.now() >= new Date(session.expires_at).getTime()) {
+          return send403session(
+            reply,
+            'SESSION_EXPIRED',
+            'Session has expired',
+          );
+        }
+
+        // 3. cargar parent key y verificar is_active (AC-7).
+        const parentKey = await keySessionService.getParentKey(session.key_id);
+        if (!parentKey?.is_active) {
+          return send403session(
+            reply,
+            'KEY_INACTIVE',
+            'Parent agent key is inactive',
+          );
+        }
+
+        // 4. resolver chain/bundle → chainId (REUSO del bloque master).
+        const chain = resolveTargetChain(request, reply);
+        if (!chain) return; // resolveTargetChain ya envió la respuesta de error
+        const { chainId, chainKey, assetSymbol } = chain;
+        request.resolvedChainId = chainId;
+
+        // 5. AC-8/AC-9 débito ATÓMICO del STEP 0 (sesión + parent).
+        request.log.info(
+          { sessionId: session.id, chainKey, chainId, assetSymbol },
+          'a2a-key.session.debit',
+        );
+        try {
+          await keySessionService.debitSessionAndParent(
+            session.id,
+            parentKey.owner_ref,
+            parentKey.id,
+            chainId,
+            estimatedCostUsd,
+          );
+        } catch (debitErr) {
+          if (debitErr instanceof SessionBudgetExhaustedError) {
+            return send403session(
+              reply,
+              'SESSION_BUDGET_EXHAUSTED',
+              'Session budget exhausted',
+            );
+          }
+          if (debitErr instanceof SessionExpiredError) {
+            return send403session(
+              reply,
+              'SESSION_EXPIRED',
+              'Session has expired',
+            );
+          }
+          if (debitErr instanceof SessionTokenInvalidError) {
+            return send403session(
+              reply,
+              'SESSION_TOKEN_INVALID',
+              'Session token has been revoked',
+            );
+          }
+          if (debitErr instanceof AgentKeyBudgetExhaustedError) {
+            return send403session(
+              reply,
+              'AGENT_KEY_BUDGET_EXHAUSTED',
+              'Parent agent key budget exhausted',
+            );
+          }
+          if (debitErr instanceof DailyLimitExceededError) {
+            return send403session(
+              reply,
+              'DAILY_LIMIT',
+              'Daily spending limit exceeded',
+            );
+          }
+          if (debitErr instanceof AgentKeyInactiveError) {
+            return send403session(
+              reply,
+              'KEY_INACTIVE',
+              'Parent agent key is inactive',
+            );
+          }
+          if (debitErr instanceof AgentKeyNotFoundError) {
+            return send403session(
+              reply,
+              'KEY_NOT_FOUND',
+              'Parent agent key not found',
+            );
+          }
+          if (debitErr instanceof OwnershipMismatchError) {
+            return send403session(
+              reply,
+              'OWNERSHIP_MISMATCH',
+              'Session ownership mismatch',
+            );
+          }
+          throw debitErr; // unexpected → outer catch → 503
+        }
+
+        // 6. augment + SET keySessionContext (AC-4/AC-10/DT-4). effectiveRow
+        //    inyecta el scope efectivo de la sesión (intersección): por dimensión
+        //    `effective = (session === null) ? parent : session`. La sesión ya fue
+        //    validada ⊆ padre en creación (CD-4).
+        const effectiveRow: A2AAgentKeyRow = {
+          ...parentKey,
+          allowed_registries:
+            session.allowed_registries === null
+              ? parentKey.allowed_registries
+              : session.allowed_registries,
+          allowed_agent_slugs:
+            session.allowed_agent_slugs === null
+              ? parentKey.allowed_agent_slugs
+              : session.allowed_agent_slugs,
+          allowed_categories:
+            session.allowed_categories === null
+              ? parentKey.allowed_categories
+              : session.allowed_categories,
+        };
+        effectiveRow.erc8004_verified = isIdentityVerified(parentKey);
+        request.a2aKeyRow = effectiveRow;
+        request.keySessionRow = session;
+        request.keySessionContext = {
+          sessionId: session.id,
+          ownerRef: parentKey.owner_ref,
+          keyId: parentKey.id,
+        };
+
+        // 7. remaining budget header (mismo chainId del bundle).
+        const remaining = await budgetService.getBalance(
+          parentKey.id,
+          chainId,
+          parentKey.owner_ref,
+        );
+        reply.header('x-a2a-remaining-budget', remaining);
+        return; // fin del branch — NO seguir al flujo master key
+      } catch (err) {
+        request.log.error(
+          { err: err instanceof Error ? err.message : 'unknown' },
+          'a2a-key session branch error',
+        );
+        return reply.status(503).send({
+          error: 'SERVICE_ERROR',
+          message: 'Key-session service temporarily unavailable',
         });
       }
     }
