@@ -31,6 +31,11 @@ import { authSignupRateLimit } from '../middleware/rate-limit.js';
 import { budgetService } from '../services/budget.js';
 import { delegationService } from '../services/delegation.js';
 import { identityService, isIdentityVerified } from '../services/identity.js';
+import {
+  InvalidKeySessionInputError,
+  keySessionService,
+  ScopeExceedsParentError,
+} from '../services/key-session.js';
 import { registryService } from '../services/registry.js';
 import {
   DelegationNonceReplayError,
@@ -39,11 +44,13 @@ import {
   Erc8004TokenAlreadyBoundError,
   FundingWalletAlreadyBoundError,
   OwnershipMismatchError,
+  SessionNotAllowedError,
 } from '../services/security/errors.js';
 import type {
   A2AAgentKeyRow,
   CreateDelegationInput,
   CreateKeyInput,
+  CreateKeySessionInput,
   DelegationPolicy,
   DelegationTypedData,
   DepositInput,
@@ -256,6 +263,66 @@ function parseDelegationTypedData(raw: unknown): DelegationTypedData | null {
       nonce: message.nonce as `0x${string}`,
     },
   };
+}
+
+// ── WKH-121: key-session input validation (CD-AB-3) ─────────────
+
+const KEY_SESSION_TOKEN_PREFIX = 'wasi_a2a_sess_';
+
+/**
+ * Valida + tipa el body del POST /auth/key-session. Devuelve null si el shape o
+ * los tipos son inválidos. La validación semántica fina de rango (ttl/budget) y
+ * scope ⊆ padre la hace el service (mapea a INVALID_INPUT / SCOPE_EXCEEDS_PARENT).
+ * `max_budget_usd` se acepta como string o number y se normaliza a string canónico.
+ */
+function parseCreateKeySessionInput(
+  raw: unknown,
+): CreateKeySessionInput | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const b = raw as Record<string, unknown>;
+
+  // ttl_seconds: entero (la cota de rango la valida el service).
+  if (typeof b.ttl_seconds !== 'number' || !Number.isInteger(b.ttl_seconds)) {
+    return null;
+  }
+
+  // max_budget_usd: string o number → string (sin pérdida; el service valida > 0).
+  let maxBudget: string;
+  if (typeof b.max_budget_usd === 'string') {
+    maxBudget = b.max_budget_usd;
+  } else if (
+    typeof b.max_budget_usd === 'number' &&
+    Number.isFinite(b.max_budget_usd)
+  ) {
+    maxBudget = String(b.max_budget_usd);
+  } else {
+    return null;
+  }
+
+  // allowed_*: opcionales; si presentes, deben ser string[].
+  const parseList = (v: unknown): string[] | null | undefined => {
+    if (v === undefined) return undefined;
+    if (Array.isArray(v) && v.every((s) => typeof s === 'string')) {
+      return v as string[];
+    }
+    return null; // presente pero inválido
+  };
+
+  const registries = parseList(b.allowed_registries);
+  const slugs = parseList(b.allowed_agent_slugs);
+  const categories = parseList(b.allowed_categories);
+  if (registries === null || slugs === null || categories === null) {
+    return null;
+  }
+
+  const input: CreateKeySessionInput = {
+    ttl_seconds: b.ttl_seconds,
+    max_budget_usd: maxBudget,
+  };
+  if (registries !== undefined) input.allowed_registries = registries;
+  if (slugs !== undefined) input.allowed_agent_slugs = slugs;
+  if (categories !== undefined) input.allowed_categories = categories;
+  return input;
 }
 
 // ── Routes ──────────────────────────────────────────────────
@@ -1029,6 +1096,79 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
 
       const items = await delegationService.list(callerKey.owner_ref);
       return reply.status(200).send({ delegations: items });
+    },
+  );
+
+  /**
+   * POST /auth/key-session — Create a server-side session key (WKH-121).
+   * AC-1/AC-2/AC-3/AC-12. The owner (authenticated with its MASTER key) derives
+   * an ephemeral session key WITHOUT EVM signature. The opaque session token is
+   * returned ONCE in the 201; only its SHA-256 hash is stored.
+   */
+  fastify.post(
+    '/key-session',
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      // AC-12: sub-delegation forbidden. A session token authenticator →
+      // 403 SESSION_NOT_ALLOWED (detect the prefix BEFORE resolveCallerKey,
+      // which would return null and lose the exact code).
+      const rawKey = rawKeyFromRequest(req);
+      if (rawKey?.startsWith(KEY_SESSION_TOKEN_PREFIX)) {
+        // MNR-3: consumir la error class (consistencia con las demás; WKH-122
+        // reusa el gate). HTTP final intacto: 403 + error_code SESSION_NOT_ALLOWED.
+        const err = new SessionNotAllowedError();
+        return reply.status(403).send({ error_code: err.code });
+      }
+
+      // Auth (master key).
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      // Input shape validation (CD-AB-3). Rango/scope los valida el service.
+      const input = parseCreateKeySessionInput(req.body);
+      if (!input) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+
+      try {
+        const result = await keySessionService.create(callerKey, input);
+        return reply.status(201).send(result);
+      } catch (err) {
+        if (err instanceof InvalidKeySessionInputError) {
+          return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+        }
+        if (err instanceof ScopeExceedsParentError) {
+          return reply.status(400).send({ error_code: 'SCOPE_EXCEEDS_PARENT' });
+        }
+        fastify.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'key-session create failed',
+        );
+        return reply
+          .status(500)
+          .send({ error_code: 'KEY_SESSION_CREATE_FAILED' });
+      }
+    },
+  );
+
+  /**
+   * GET /auth/key-session — List the caller's key sessions (WKH-121: AC-13).
+   * Ownership Guard in the service (filtered by owner_ref). Never returns tokens.
+   */
+  fastify.get(
+    '/key-session',
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      // Contrato BLOQUEANTE: el body es un array plano de KeySessionListItem.
+      const items = await keySessionService.list(callerKey.owner_ref);
+      return reply.status(200).send(items);
     },
   );
 

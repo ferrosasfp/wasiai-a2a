@@ -161,6 +161,7 @@ export const composeService = {
           chainId,
           debitAmount,
           request.delegationContext, // WKH-101 (DT-11): enruta al RPC atómico bajo delegación
+          request.keySessionContext, // WKH-121 (BLQ-ALTO-1): enruta al RPC de sesión y respeta el cap per-step
         );
         if (!debitResult.success) {
           // DT-H: mid-pipeline debit failure → ComposeResult.error.

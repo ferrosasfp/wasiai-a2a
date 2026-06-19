@@ -257,3 +257,76 @@ export type SessionKeyErrorCode =
   | 'DELEGATION_CHAIN_NOT_ALLOWED'
   | 'OWNERSHIP_MISMATCH'
   | 'DELEGATION_NOT_ALLOWED';
+
+// ============================================================
+// KEY SESSIONS (WKH-121 — session keys server-side, SIN EIP-712)
+// ============================================================
+
+/** Estado derivado de una key session (no es columna; se computa en `list`). */
+export type KeySessionStatus = 'active' | 'expired' | 'revoked';
+
+/** Row de a2a_key_sessions. */
+export interface KeySessionRow {
+  id: string; // UUID
+  key_id: string; // UUID parent key
+  owner_ref: string; // desnormalizado (Ownership Guard, CD-2)
+  session_token_hash: string; // SHA-256(token)
+  ttl_seconds: number; // valor solicitado (auditoría)
+  expires_at: string; // ISO timestamp (now + ttl_seconds, server-side)
+  max_budget_usd: string; // NUMERIC → string desde Supabase
+  spent_usd: string; // NUMERIC → string desde Supabase
+  allowed_registries: string[] | null; // NULL = hereda restricción del padre
+  allowed_agent_slugs: string[] | null; // NULL = hereda restricción del padre
+  allowed_categories: string[] | null; // NULL = hereda restricción del padre
+  derivation_mode: string; // 'server'
+  revoked_at: string | null; // null = activa
+  created_at: string;
+}
+
+/** Input del POST /auth/key-session. */
+export interface CreateKeySessionInput {
+  ttl_seconds: number; // int > 0 y <= SESSION_MAX_TTL_SECONDS
+  max_budget_usd: string; // decimal > 0 (string, sin pérdida float)
+  allowed_registries?: string[]; // ausente = hereda restricción del padre
+  allowed_agent_slugs?: string[]; // ausente = hereda restricción del padre
+  allowed_categories?: string[]; // ausente = hereda restricción del padre
+}
+
+/** Respuesta 201 del POST /auth/key-session (token devuelto UNA vez). */
+export interface KeySessionResponse {
+  session_id: string;
+  session_token: string; // wasi_a2a_sess_<random> — plano, solo en la 201
+  expires_at: string;
+  scope: {
+    max_budget_usd: string;
+    allowed_registries: string[] | null;
+    allowed_agent_slugs: string[] | null;
+    allowed_categories: string[] | null;
+  };
+}
+
+/** Item del GET /auth/key-session (sin token, con status derivado). */
+export interface KeySessionListItem {
+  session_id: string;
+  expires_at: string;
+  max_budget_usd: string;
+  spent: string; // spent_usd
+  status: KeySessionStatus;
+  scope: {
+    allowed_registries: string[] | null;
+    allowed_agent_slugs: string[] | null;
+    allowed_categories: string[] | null;
+  };
+}
+
+/**
+ * Contexto compacto de la key session que viaja por la request hasta el débito
+ * (CD-2/DT-4). Lo setea el middleware (branch sess, W2) en
+ * `request.keySessionContext`; lo propaga budget.debit para enrutar al RPC
+ * atómico `debit_session_and_parent`.
+ */
+export interface KeySessionDebitContext {
+  sessionId: string; // a2a_key_sessions.id
+  ownerRef: string; // = parentKey.owner_ref (Ownership Guard DB-layer)
+  keyId: string; // = parentKey.id (cross-check con la sesión)
+}

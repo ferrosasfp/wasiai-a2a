@@ -5,7 +5,11 @@
 // WKH-61: importamos A2AAgentKeyRow del subarchivo para tiparlo en
 // ComposeRequest / OrchestrateRequest. El re-export `export * from './a2a-key.js'`
 // del bottom mantiene la API pública intacta.
-import type { A2AAgentKeyRow, DelegationDebitContext } from './a2a-key.js';
+import type {
+  A2AAgentKeyRow,
+  DelegationDebitContext,
+  KeySessionDebitContext,
+} from './a2a-key.js';
 
 // ============================================================
 // REGISTRY TYPES
@@ -270,6 +274,14 @@ export interface ComposeRequest {
    * key (camino actual increment_a2a_key_spend, CD-5 intacto).
    */
   delegationContext?: DelegationDebitContext;
+  /**
+   * WKH-121 (BLQ-ALTO-1): contexto de key-session para el débito per-step
+   * (steps 1..N). Cuando está presente, budgetService.debit enruta al RPC
+   * atómico debit_session_and_parent y respeta el cap max_budget_usd de la
+   * sesión (AC-8/AC-9). undefined → no es una sesión server-side. Espejo de
+   * `delegationContext`; mutuamente exclusivo con él en runtime.
+   */
+  keySessionContext?: KeySessionDebitContext;
 }
 
 export interface ComposeResult {
@@ -384,6 +396,12 @@ export interface OrchestrateRequest {
   scopingKeyRow?: A2AAgentKeyRow;
   /** WKH-101 (DT-11): contexto de delegación propagado a composeService.compose. */
   delegationContext?: DelegationDebitContext;
+  /**
+   * WKH-121 (BLQ-ALTO-1): contexto de key-session propagado a
+   * composeService.compose para que el cap de sesión se respete en los steps
+   * 1..N (AC-8/AC-9). Espejo de `delegationContext`.
+   */
+  keySessionContext?: KeySessionDebitContext;
   /**
    * chainId resuelto (request.resolvedChainId), propagado a compose para que el
    * débito per-step de steps 1..N funcione. WKH-102 (DT-1): se propaga SIEMPRE

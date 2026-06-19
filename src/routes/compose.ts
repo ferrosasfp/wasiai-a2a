@@ -158,6 +158,10 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         scopingKeyRow: request.a2aKeyRow,
         // WKH-101 (DT-11): contexto de delegación para el débito per-step.
         delegationContext: request.delegationContext,
+        // WKH-121 (BLQ-ALTO-1): contexto de key-session (poblado por el
+        // middleware en a2a-key.ts) para que el cap de sesión se respete en
+        // los steps 1..N. Espejo de delegationContext.
+        keySessionContext: request.keySessionContext,
         // WKH-59 (real-price-debit) DT-D: chainId del MISMO bundle (CD-12)
         // para debit per-step (steps 2..N) atómico en composeService.
         chainId: request.resolvedChainId,

@@ -409,6 +409,9 @@ export const orchestrateService = {
       scopingKeyRow: request.scopingKeyRow,
       // WKH-101 (DT-11): contexto de delegación para el débito per-step.
       delegationContext: request.delegationContext,
+      // WKH-121 (BLQ-ALTO-1): contexto de key-session propagado para que el cap
+      // de sesión se respete en los steps 1..N de compose. Espejo de delegationContext.
+      keySessionContext: request.keySessionContext,
       // WKH-102 (DT-1/DT-2): chainId resuelto propagado SIEMPRE (single-chain
       // semantics — todos los steps usan la chain del caller, modelo WKH-59).
       // Antes (WKH-101 opción B) se pasaba SOLO bajo delegación; eso dejaba el

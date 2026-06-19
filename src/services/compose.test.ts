@@ -1110,7 +1110,14 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     expect(mockDebit).toHaveBeenCalledTimes(1);
     // WKH-101 (DT-11): compose now passes request.delegationContext as the 4th
     // arg; master-key path → undefined (CD-5 backward-compat).
-    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 0.05, undefined);
+    // WKH-121 (BLQ-ALTO-1): 5th arg = request.keySessionContext (undefined → no session).
+    expect(mockDebit).toHaveBeenCalledWith(
+      'k1',
+      2368,
+      0.05,
+      undefined,
+      undefined,
+    );
   });
 
   it('T-COMPOSE-DEBIT-2 should debit steps 1 and 2 in a 3-step pipeline', async () => {
@@ -1146,8 +1153,23 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     expect(result.success).toBe(true);
     expect(mockDebit).toHaveBeenCalledTimes(2);
     // WKH-101 (DT-11): 4th arg = request.delegationContext (undefined → master path).
-    expect(mockDebit).toHaveBeenNthCalledWith(1, 'k1', 2368, 0.05, undefined);
-    expect(mockDebit).toHaveBeenNthCalledWith(2, 'k1', 2368, 0.01, undefined);
+    // WKH-121 (BLQ-ALTO-1): 5th arg = request.keySessionContext (undefined → no session).
+    expect(mockDebit).toHaveBeenNthCalledWith(
+      1,
+      'k1',
+      2368,
+      0.05,
+      undefined,
+      undefined,
+    );
+    expect(mockDebit).toHaveBeenNthCalledWith(
+      2,
+      'k1',
+      2368,
+      0.01,
+      undefined,
+      undefined,
+    );
   });
 
   // WKH-101 T8b (AC-8 MULTI-STEP): under delegation, the per-step debit routes
@@ -1200,6 +1222,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       2368,
       0.05,
       delegationContext,
+      undefined,
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
       2,
@@ -1207,6 +1230,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       2368,
       0.01,
       delegationContext,
+      undefined,
     );
     // step 0 + step 1 invoked (2 fetches); step 2 fetch NOT consumed.
     expect(mockFetch).toHaveBeenCalledTimes(2);
@@ -1383,7 +1407,13 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     expect(result.success).toBe(true);
     expect(mockDebit).toHaveBeenCalledTimes(1);
     // amount === 1.0 (fallback), NOT 0
-    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 1.0, undefined);
+    expect(mockDebit).toHaveBeenCalledWith(
+      'k1',
+      2368,
+      1.0,
+      undefined,
+      undefined,
+    );
   });
 
   it('T-COMPOSE-DEBIT-8 should emit warn log with reason=registry-miss when priceUsdc===0 (BLQ-MED-1)', async () => {
@@ -1456,7 +1486,13 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     expect(result.success).toBe(true);
     expect(mockDebit).toHaveBeenCalledTimes(1);
     // typeof null !== 'number' → fallback $1
-    expect(mockDebit).toHaveBeenCalledWith('k1', 2368, 1.0, undefined);
+    expect(mockDebit).toHaveBeenCalledWith(
+      'k1',
+      2368,
+      1.0,
+      undefined,
+      undefined,
+    );
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         reason: 'registry-miss',
@@ -1464,6 +1500,176 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
         step: 1,
       }),
       'compose-price.fallback per-step',
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// WKH-121 (BLQ-ALTO-1 / MNR-1): T-SESS-MULTISTEP
+// El cap max_budget_usd de la session key debe respetarse en TODOS los steps
+// del pipeline (1..N), no solo en el step 0 (que lo debita el middleware).
+// Antes del fix, compose pasaba el 5º arg keySessionContext como `undefined`
+// → budget.debit caía a la ruta master (increment_a2a_key_spend directo) →
+// el cap de la sesión se ignoraba y un token filtrado drenaba el parent vía
+// multi-step. Este UNIT prueba la propagación del 5º arg por la cadena.
+// ─────────────────────────────────────────────────────────────────────────
+describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULTISTEP)', () => {
+  function mockAgentsBySlug(agents: Record<string, Agent>) {
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug: string, _registry?: string) => agents[slug] ?? null,
+    );
+  }
+
+  const keySessionContext = {
+    sessionId: 'sess-1',
+    ownerRef: 'owner-test',
+    keyId: 'k1',
+  };
+
+  // (a) El cap de sesión se aplica en cada step i>0: budgetService.debit recibe
+  //     keySessionContext (NO undefined) como 5º arg para todos los steps.
+  it('T-SESS-MULTISTEP (a) propaga keySessionContext como 5º arg en cada step i>0', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    const a3 = makeAgent({ slug: 'cashout', priceUsdc: 0.01, id: 'agent-3' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2, cashout: a3 });
+    mockFetchOk();
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+        { agent: 'cashout', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      keySessionContext,
+    });
+
+    expect(result.success).toBe(true);
+    // step 0 lo debita el middleware; acá solo steps 1 y 2.
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    // 5º arg = keySessionContext (definido), NO undefined → ruta RPC de sesión.
+    expect(mockDebit).toHaveBeenNthCalledWith(
+      1,
+      'k1',
+      2368,
+      0.05,
+      undefined,
+      keySessionContext,
+    );
+    expect(mockDebit).toHaveBeenNthCalledWith(
+      2,
+      'k1',
+      2368,
+      0.01,
+      undefined,
+      keySessionContext,
+    );
+  });
+
+  // (b) Cap agotado a mitad de camino: compose corta en el step k y NO debita
+  //     ni invoca los steps > k.
+  it('T-SESS-MULTISTEP (b) corta el pipeline cuando el cap de sesión se agota a mitad', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    const a3 = makeAgent({ slug: 'cashout', priceUsdc: 0.01, id: 'agent-3' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2, cashout: a3 });
+    mockFetchOk(); // step 0 invoked
+    mockFetchOk(); // step 1 invoked (debit succeeds)
+    mockFetchOk(); // step 2 fetch — must NOT be consumed (cut before invoke)
+
+    // step 1 debit OK; step 2 debit agota el cap de la sesión (RPC mapping).
+    mockDebit.mockReset();
+    mockDebit.mockResolvedValueOnce({ success: true }).mockResolvedValueOnce({
+      success: false,
+      error: 'SESSION_BUDGET_EXHAUSTED',
+    });
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+        { agent: 'cashout', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      keySessionContext,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('SESSION_BUDGET_EXHAUSTED');
+    // Cut a mitad: solo 2 débitos (steps 1 y 2); step 2 NO se ejecuta.
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    expect(mockDebit).toHaveBeenNthCalledWith(
+      1,
+      'k1',
+      2368,
+      0.05,
+      undefined,
+      keySessionContext,
+    );
+    expect(mockDebit).toHaveBeenNthCalledWith(
+      2,
+      'k1',
+      2368,
+      0.01,
+      undefined,
+      keySessionContext,
+    );
+    // step 0 + step 1 invoked (2 fetches); step 2 fetch NOT consumed.
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(result.steps.length).toBe(2);
+  });
+
+  // (c) Anti-regresión WKH-101: bajo delegationContext (y keySessionContext
+  //     undefined) la cadena vieja sigue idéntica — 4º arg delegationContext,
+  //     5º arg undefined.
+  it('T-SESS-MULTISTEP (c) anti-regresión: delegationContext intacto, keySessionContext undefined', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const delegationContext = {
+      delegationId: 'del-1',
+      ownerRef: 'owner-test',
+      keyId: 'k1',
+      maxAmountPerTx: '5.00',
+    };
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      delegationContext,
+      // keySessionContext deliberadamente ausente (undefined).
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    // 4º arg = delegationContext (cadena WKH-101 intacta); 5º arg = undefined.
+    expect(mockDebit).toHaveBeenCalledWith(
+      'k1',
+      2368,
+      0.05,
+      delegationContext,
+      undefined,
     );
   });
 });

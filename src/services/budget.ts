@@ -4,8 +4,13 @@
  */
 
 import { supabase } from '../lib/supabase.js';
-import type { A2AAgentKeyRow, DelegationDebitContext } from '../types/index.js';
+import type {
+  A2AAgentKeyRow,
+  DelegationDebitContext,
+  KeySessionDebitContext,
+} from '../types/index.js';
 import { delegationService, exceedsPerTxLimit } from './delegation.js';
+import { keySessionService } from './key-session.js';
 import {
   AgentKeyBudgetExhaustedError,
   AgentKeyInactiveError,
@@ -18,6 +23,9 @@ import {
   DepositAlreadyCreditedError,
   logOwnershipMismatch,
   OwnershipMismatchError,
+  SessionBudgetExhaustedError,
+  SessionExpiredError,
+  SessionTokenInvalidError,
 } from './security/errors.js';
 
 // ── Service ─────────────────────────────────────────────────
@@ -64,7 +72,55 @@ export const budgetService = {
     chainId: number,
     amountUsd: number,
     delegationContext?: DelegationDebitContext,
+    keySessionContext?: KeySessionDebitContext,
   ): Promise<{ success: boolean; error?: string }> {
+    // ── RUTA KEY-SESSION (WKH-121) ──
+    // Espejo de la ruta delegación, sin per-tx limit (no aplica a sesiones).
+    if (keySessionContext) {
+      try {
+        await keySessionService.debitSessionAndParent(
+          keySessionContext.sessionId,
+          keySessionContext.ownerRef,
+          keySessionContext.keyId,
+          chainId,
+          amountUsd,
+        );
+        return { success: true };
+      } catch (err) {
+        if (err instanceof SessionBudgetExhaustedError) {
+          return { success: false, error: 'SESSION_BUDGET_EXHAUSTED' };
+        }
+        if (err instanceof SessionExpiredError) {
+          return { success: false, error: 'SESSION_EXPIRED' };
+        }
+        if (err instanceof SessionTokenInvalidError) {
+          return { success: false, error: 'SESSION_TOKEN_INVALID' };
+        }
+        if (err instanceof AgentKeyBudgetExhaustedError) {
+          return { success: false, error: 'AGENT_KEY_BUDGET_EXHAUSTED' };
+        }
+        if (err instanceof DailyLimitExceededError) {
+          return { success: false, error: 'DAILY_LIMIT' };
+        }
+        if (err instanceof AgentKeyInactiveError) {
+          return { success: false, error: 'KEY_INACTIVE' };
+        }
+        if (err instanceof AgentKeyNotFoundError) {
+          return { success: false, error: 'KEY_NOT_FOUND' };
+        }
+        if (err instanceof OwnershipMismatchError) {
+          return { success: false, error: 'OWNERSHIP_MISMATCH' };
+        }
+        // NO propagar `err.message` (mensaje crudo de Postgres) al cliente.
+        console.error('[budget] key-session debit failed', {
+          keyId,
+          chainId,
+          detail: err instanceof Error ? err.message : 'unknown',
+        });
+        return { success: false, error: 'SESSION_DEBIT_FAILED' };
+      }
+    }
+
     // ── RUTA DELEGACIÓN (DT-11) ──
     if (delegationContext) {
       // AC-7 PER-STEP: per-tx ANTES del RPC (no necesita lock).
