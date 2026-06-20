@@ -307,6 +307,55 @@ export interface CreateKeySessionInput {
   allowed_agent_slugs?: string[]; // ausente = hereda restricción del padre
   allowed_categories?: string[]; // ausente = hereda restricción del padre
   require_signature?: boolean; // WKH-123: opt-in HMAC; genera signing_secret
+  /**
+   * WKH-125 (AC-6): override de políticas de gasto por la vida de la sesión.
+   * `[TBD-FUTURO]`: el campo se acepta en el tipo pero su semántica de override
+   * NO se implementa en este MVP. La herencia automática de las políticas de la
+   * parent key vive en el RPC `debit_session_and_parent` (dispatch a
+   * `debit_with_dest_policy` cuando hay destino).
+   */
+  spend_policies?: SpendPolicyInput[];
+}
+
+// ============================================================
+// SPEND POLICIES (WKH-125 — caps de gasto por destino + ventanas)
+// ============================================================
+
+/** Tipo de ventana de una política de gasto por destino. */
+export type SpendPolicyWindowType = 'total' | 'rolling';
+
+/**
+ * Input del owner para fijar una política (PUT endpoint + override de sesión
+ * `[TBD-FUTURO]`). `destination` se normaliza en `spend-policy.ts`.
+ */
+export interface SpendPolicyInput {
+  destination: string; // se normaliza en spend-policy.ts (trim+lowercase)
+  max_usd: string; // NUMERIC → string (consistente con budget/amount)
+  window_type: SpendPolicyWindowType;
+  window_secs?: number | null; // null/ausente para 'total'; >0 para 'rolling'
+}
+
+/** Fila tal cual en `a2a_key_spend_policies`. */
+export interface SpendPolicyRow {
+  id: string;
+  key_id: string;
+  owner_ref: string;
+  destination: string;
+  max_usd: string; // NUMERIC → string
+  window_type: SpendPolicyWindowType;
+  window_secs: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Shape de respuesta (subset seguro para list/PUT 200). */
+export interface SpendPolicy {
+  destination: string;
+  max_usd: string;
+  window_type: SpendPolicyWindowType;
+  window_secs: number | null;
+  created_at: string;
+  updated_at: string;
 }
 
 /** Respuesta 201 del POST /auth/key-session (token devuelto UNA vez). */

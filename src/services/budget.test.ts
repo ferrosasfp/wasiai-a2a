@@ -60,6 +60,7 @@ import {
   DelegationRevokedError,
   DelegationTotalLimitExceededError,
   DepositAlreadyCreditedError,
+  DestCapExceededError,
   OwnershipMismatchError,
 } from './security/errors.js';
 
@@ -452,6 +453,217 @@ describe('budgetService', () => {
       expect(result.error).not.toContain('postgres');
       expect(result.error).not.toContain('0xdeadbeef');
       errSpy.mockRestore();
+    });
+
+    // ── WKH-125 (KEY-CONSTRAINTS): dest-aware master route ──────
+
+    /** Mock para el SELECT owner_ref cold-path de la ruta dest-aware. */
+    function mockOwnerSelect(ownerRef: string | null) {
+      const chain = chainMock();
+      chain.single = vi
+        .fn()
+        .mockResolvedValue(
+          ownerRef === null
+            ? { data: null, error: { code: 'PGRST116' } }
+            : { data: { owner_ref: ownerRef }, error: null },
+        );
+      mockFrom.mockReturnValue(
+        chain as unknown as ReturnType<typeof supabase.from>,
+      );
+    }
+
+    // AC-5 back-compat: SIN destino → increment_a2a_key_spend directo, sin
+    // tocar la tabla de keys ni el RPC dest-aware (byte-idéntico a hoy).
+    it('AC-5 back-compat: no destination → increment_a2a_key_spend directo', async () => {
+      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+
+      const result = await budgetService.debit('key-1', 2368, 1.5);
+
+      expect(mockRpc).toHaveBeenCalledWith('increment_a2a_key_spend', {
+        p_key_id: 'key-1',
+        p_chain_id: 2368,
+        p_amount_usd: 1.5,
+      });
+      expect(mockRpc).not.toHaveBeenCalledWith(
+        'debit_with_dest_policy',
+        expect.anything(),
+      );
+      expect(result).toEqual({ success: true });
+    });
+
+    // AC-2/AC-4/CD-1: con destino → debit_with_dest_policy (atómico). NO hay
+    // check de cap app-layer separado: el service sólo invoca el RPC.
+    it('AC-2/AC-4: with destination → debit_with_dest_policy (atomic RPC)', async () => {
+      mockOwnerSelect('user-1');
+      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1.5,
+        undefined,
+        undefined,
+        'kite/translator',
+      );
+
+      expect(mockRpc).toHaveBeenCalledWith('debit_with_dest_policy', {
+        p_key_id: 'key-1',
+        p_chain_id: 2368,
+        p_amount_usd: 1.5,
+        p_owner_ref: 'user-1',
+        p_destination: 'kite/translator',
+      });
+      expect(mockRpc).not.toHaveBeenCalledWith(
+        'increment_a2a_key_spend',
+        expect.anything(),
+      );
+      expect(result).toEqual({ success: true });
+    });
+
+    // AC-2: cap excedido → DEST_CAP_EXCEEDED (mapeado del prefijo del RPC),
+    // budget intacto (el rollback de la tx vive en el RPC).
+    it('AC-2: DEST_CAP_EXCEEDED prefix → error code DEST_CAP_EXCEEDED', async () => {
+      mockOwnerSelect('user-1');
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'DEST_CAP_EXCEEDED: dest x accum 1 + 1 > cap 1' },
+      } as never);
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1,
+        undefined,
+        undefined,
+        'kite/translator',
+      );
+
+      expect(result).toEqual({ success: false, error: 'DEST_CAP_EXCEEDED' });
+    });
+
+    // CD-B: prefijos heredados de increment_a2a_key_spend mapeados, sin leak PG.
+    it('maps INSUFFICIENT_BUDGET prefix → AGENT_KEY_BUDGET_EXHAUSTED', async () => {
+      mockOwnerSelect('user-1');
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'INSUFFICIENT_BUDGET: chain 2368 balance is 1' },
+      } as never);
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        5,
+        undefined,
+        undefined,
+        'kite/translator',
+      );
+
+      expect(result).toEqual({
+        success: false,
+        error: 'AGENT_KEY_BUDGET_EXHAUSTED',
+      });
+    });
+
+    // CD-B: error inesperado del RPC dest-aware → code estable, sin msg crudo PG.
+    it('unmapped dest-policy error → DEST_POLICY_DEBIT_FAILED, no raw PG', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockOwnerSelect('user-1');
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'P0001: raw postgres detail 0xdeadbeef' },
+      } as never);
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1,
+        undefined,
+        undefined,
+        'kite/translator',
+      );
+
+      expect(result).toEqual({
+        success: false,
+        error: 'DEST_POLICY_DEBIT_FAILED',
+      });
+      expect(result.error).not.toContain('postgres');
+      expect(result.error).not.toContain('0xdeadbeef');
+      errSpy.mockRestore();
+    });
+
+    // AC-6 herencia: con session ctx + destino, el destino se propaga al
+    // debitSessionAndParent (el RPC de sesión dispatcha a debit_with_dest_policy
+    // → la sesión aplica el cap por destino de la PARENT key).
+    it('AC-6: session + destination → debitSessionAndParent receives the destination', async () => {
+      mockDebitSession.mockResolvedValue('0.30');
+
+      await budgetService.debit(
+        'key-1',
+        2368,
+        0.3,
+        undefined,
+        KEY_SESSION_CTX,
+        'kite/translator',
+      );
+
+      expect(mockDebitSession).toHaveBeenCalledWith(
+        'sess-1',
+        'user-1',
+        'key-1',
+        2368,
+        0.3,
+        'kite/translator',
+      );
+    });
+
+    // AC-4 concurrencia: 2 débitos al mismo destino, cap=1, monto=1 c/u. El RPC
+    // `debit_with_dest_policy` serializa (FOR UPDATE) → exactamente 1 pasa y el
+    // otro recibe DEST_CAP_EXCEEDED. El service NO hace un check app-layer
+    // separado: ambas llamadas dispatchan al MISMO RPC (assert de dispatch). El
+    // ordenamiento de locks vive en el SQL (assert estructural en
+    // spend-policy.test.ts).
+    it('AC-4 concurrency: same destination cap=1 → exactly one passes (serialized by RPC)', async () => {
+      mockOwnerSelect('user-1');
+      // Simula la serialización del RPC: la 1ª llamada OK, la 2ª rechazada por el
+      // cap (el SUM bajo lock ya incluye el débito de la 1ª).
+      mockRpc
+        .mockResolvedValueOnce({ data: null, error: null } as never)
+        .mockResolvedValueOnce({
+          data: null,
+          error: { message: 'DEST_CAP_EXCEEDED: dest x accum 1 + 1 > cap 1' },
+        } as never);
+
+      const [r1, r2] = await Promise.all([
+        budgetService.debit('key-1', 2368, 1, undefined, undefined, 'kite/x'),
+        budgetService.debit('key-1', 2368, 1, undefined, undefined, 'kite/x'),
+      ]);
+
+      const passed = [r1, r2].filter((r) => r.success);
+      const rejected = [r1, r2].filter((r) => !r.success);
+      expect(passed).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].error).toBe('DEST_CAP_EXCEEDED');
+      // Dispatch al RPC atómico en AMBAS (sin check app-layer separado, CD-1).
+      const destCalls = mockRpc.mock.calls.filter(
+        (c) => c[0] === 'debit_with_dest_policy',
+      );
+      expect(destCalls).toHaveLength(2);
+    });
+
+    // AC-6 + AC-2: la sesión hereda el cap → DEST_CAP_EXCEEDED se mapea igual.
+    it('AC-6/AC-2: session inherits cap → DestCapExceededError maps to DEST_CAP_EXCEEDED', async () => {
+      mockDebitSession.mockRejectedValue(new DestCapExceededError());
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1,
+        undefined,
+        KEY_SESSION_CTX,
+        'kite/translator',
+      );
+
+      expect(result).toEqual({ success: false, error: 'DEST_CAP_EXCEEDED' });
     });
   });
 

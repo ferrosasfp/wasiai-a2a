@@ -8,9 +8,34 @@ import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';
 import { createTimeoutHandler } from '../middleware/timeout.js';
-import { resolveAgentPriceUsdc } from '../services/agent-price.js';
+import {
+  resolveAgentDestination,
+  resolveAgentPriceUsdc,
+} from '../services/agent-price.js';
 import { composeService } from '../services/compose.js';
+import { normalizeDestination } from '../services/spend-policy.js';
 import type { ComposeStep } from '../types/index.js';
+
+/**
+ * WKH-125 BLQ-ALTO-1 (fix-pack): deriva el destino `"<registry>/<slug>"` del
+ * step-0 a partir del AGENTE RESUELTO por discovery (`registry`/`slug`
+ * canónicos), NO de los campos crudos del body. Así step-0 keyea idéntico al
+ * per-step (`compose.ts:166` usa `normalizeDestination(${agent.registry}/${agent.slug})`)
+ * y el cap por destino se evalúa aunque el caller omita `registry`. Normaliza
+ * con el MISMO normalizador que la policy/ledger. Defensivo: si la normalización
+ * fallara (destino vacío), devuelve undefined (no augmenta `composeDestination`
+ * → step-0 sigue 3-arg, back-compat).
+ */
+function deriveComposeDestination(resolved: {
+  registry: string;
+  slug: string;
+}): string | undefined {
+  try {
+    return normalizeDestination(`${resolved.registry}/${resolved.slug}`);
+  } catch {
+    return undefined;
+  }
+}
 
 type ComposeBody = {
   steps: ComposeStep[];
@@ -60,6 +85,18 @@ async function resolveComposePriceHandler(
       return;
     }
 
+    // WKH-125 BLQ-ALTO-1 (fix-pack): resolver el destino canónico desde el
+    // AGENTE RESUELTO por discovery (no del body crudo). Espeja la resolución
+    // del per-step → step-0 keyea idéntico → el cap se evalúa aunque el caller
+    // omita `registry`. `price !== null` ya garantiza que el agente existe.
+    const resolved = await resolveAgentDestination(
+      firstStep.agent,
+      firstStep.registry,
+    );
+    const composeDestination = resolved
+      ? deriveComposeDestination(resolved)
+      : undefined;
+
     if (price === 0) {
       // AC-4 / DT-C: priceUsdc = 0 más probable config error que agente gratis.
       // CD-4: fallback honesto con warn + header.
@@ -73,11 +110,15 @@ async function resolveComposePriceHandler(
       );
       reply.header('x-debit-fallback', 'registry-miss');
       request.composeEstimatedCostUsd = 1.0;
+      // WKH-125: el destino del step-0 (el middleware no lee body, CD-7).
+      request.composeDestination = composeDestination;
       return;
     }
 
     // Happy path AC-1
     request.composeEstimatedCostUsd = price;
+    // WKH-125: el destino del step-0 (el middleware no lee body, CD-7).
+    request.composeDestination = composeDestination;
   } catch (err) {
     // AC-5: error de DB o discovery → 503 REGISTRY_UNAVAILABLE, NO debit.
     // CD-6: NO incluir owner_ref ni nada sensible en el log.
@@ -177,7 +218,14 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (!result.success) {
         // WKH-61: errorCode='SCOPE_DENIED' → 403; default 400 (preserva legacy).
-        const status = result.errorCode === 'SCOPE_DENIED' ? 403 : 400;
+        // WKH-125 (AC-2): errorCode='DEST_CAP_EXCEEDED' → 402 (cap por destino
+        // excedido mid-pipeline; el budget NO se decrementó).
+        let status = 400;
+        if (result.errorCode === 'SCOPE_DENIED') {
+          status = 403;
+        } else if (result.errorCode === 'DEST_CAP_EXCEEDED') {
+          status = 402;
+        }
         return reply.status(status).send({
           ...result,
           requestId: request.id,

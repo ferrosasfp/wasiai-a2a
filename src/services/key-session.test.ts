@@ -36,6 +36,7 @@ import {
   AgentKeyInactiveError,
   AgentKeyNotFoundError,
   DailyLimitExceededError,
+  DestCapExceededError,
   OwnershipMismatchError,
   SessionBudgetExhaustedError,
   SessionExpiredError,
@@ -384,6 +385,8 @@ describe('debitSessionAndParent', () => {
       p_key_id: 'key-1',
       p_chain_id: 2368,
       p_amount_usd: 0.3,
+      // WKH-125 (AC-6): sin destino → p_destination NULL (back-compat por DEFAULT).
+      p_destination: null,
     });
     expect(spent).toBe('0.30');
   });
@@ -396,6 +399,39 @@ describe('debitSessionAndParent', () => {
     await expect(
       keySessionService.debitSessionAndParent('s', 'o', 'k', 1, 5),
     ).rejects.toBeInstanceOf(SessionBudgetExhaustedError);
+  });
+
+  it('WKH-125 (AC-6) destination is forwarded as p_destination to the RPC', async () => {
+    mockRpc.mockResolvedValue({ data: '0.30', error: null } as never);
+    await keySessionService.debitSessionAndParent(
+      'sess-1',
+      'user-1',
+      'key-1',
+      2368,
+      0.3,
+      'kite/translator',
+    );
+    expect(mockRpc).toHaveBeenCalledWith(
+      'debit_session_and_parent',
+      expect.objectContaining({ p_destination: 'kite/translator' }),
+    );
+  });
+
+  it('WKH-125 (AC-6/AC-2) DEST_CAP_EXCEEDED → DestCapExceededError (inherited cap)', async () => {
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: { message: 'DEST_CAP_EXCEEDED: dest x accum 1 + 1 > cap 1' },
+    } as never);
+    await expect(
+      keySessionService.debitSessionAndParent(
+        's',
+        'o',
+        'k',
+        1,
+        1,
+        'kite/translator',
+      ),
+    ).rejects.toBeInstanceOf(DestCapExceededError);
   });
 
   it('CD-AB-1 SESSION_REVOKED → SessionTokenInvalidError', async () => {

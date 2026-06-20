@@ -58,6 +58,7 @@ declare module 'fastify' {
     a2aKeyRow?: A2AAgentKeyRow;
     gaslessEstimatedCostUsd?: number; // WKH-59
     composeEstimatedCostUsd?: number; // WKH-59 (real-price-debit) — CD-9
+    composeDestination?: string; // WKH-125 (cap por destino del step 0)
     resolvedChainId?: number; // WKH-59 (real-price-debit) DT-D
     delegationRow?: DelegationRow; // WKH-101
     delegationContext?: DelegationDebitContext; // WKH-101 DT-11 (débito per-step)
@@ -786,12 +787,30 @@ export function requirePaymentOrA2AKey(
         },
         'a2a-key.debit',
       );
-      const debitResult = await budgetService.debit(
-        keyRow.id,
-        chainId,
-        estimatedCostUsd,
-      );
+      // WKH-125: la llamada step-0 es compartida por master/gasless/x402/compose.
+      // CONDICIONAL (CD-8b): sólo cuando hay `composeDestination` (augmentado por
+      // routes/compose.ts:resolveComposePriceHandler) pasamos el 6º arg destino;
+      // si no, la llamada de 3 args queda INTACTA (no rompe las aserciones de
+      // 3-arg de master/gasless/x402, AC-5).
+      const debitResult = request.composeDestination
+        ? await budgetService.debit(
+            keyRow.id,
+            chainId,
+            estimatedCostUsd,
+            undefined,
+            undefined,
+            request.composeDestination,
+          )
+        : await budgetService.debit(keyRow.id, chainId, estimatedCostUsd);
       if (!debitResult.success) {
+        // WKH-125 (AC-2): cap por destino excedido → HTTP 402 (no 403/400). El
+        // budget NO se decrementó (rollback de la tx en el RPC).
+        if (debitResult.error === 'DEST_CAP_EXCEEDED') {
+          return reply.status(402).send({
+            error: `chain ${chainId} destination cap exceeded`,
+            error_code: 'DEST_CAP_EXCEEDED',
+          });
+        }
         // AC-8: error message MUST include the target chainId so callers can
         // distinguish cross-chain confusion from generic insufficient-budget.
         // Cold path: extra getBalance call is acceptable (CD-6 only constrains

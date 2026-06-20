@@ -226,6 +226,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       0.02,
       undefined,
       undefined,
+      'wasiai/a2',
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
       2,
@@ -234,6 +235,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       0.03,
       undefined,
       undefined,
+      'wasiai/a3',
     );
   });
 
@@ -265,6 +267,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       0.02,
       undefined,
       undefined,
+      'wasiai/a2',
     );
     expect(mockDebit).not.toHaveBeenCalledWith(
       'k1',
@@ -272,6 +275,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       0.07,
       undefined,
       undefined,
+      'wasiai/a1',
     );
   });
 
