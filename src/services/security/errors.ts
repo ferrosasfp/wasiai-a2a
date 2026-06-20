@@ -309,6 +309,19 @@ export class SessionBudgetExhaustedError extends Error {
   }
 }
 
+/**
+ * WKH-125 (AC-2): el acumulado por destino en la ventana + el monto excedería
+ * `max_usd` de la política → HTTP **402** (raised by RPC `debit_with_dest_policy`
+ * bajo lock). El budget de la key NO se decrementa (rollback de la tx).
+ */
+export class DestCapExceededError extends Error {
+  readonly code = 'DEST_CAP_EXCEEDED' as const;
+  constructor() {
+    super('Destination spend cap exceeded');
+    this.name = 'DestCapExceededError';
+  }
+}
+
 /** token autenticador es `wasi_a2a_sess_*` → 403 (CD sin sub-delegación, AC-12). */
 export class SessionNotAllowedError extends Error {
   readonly code = 'SESSION_NOT_ALLOWED' as const;
@@ -395,7 +408,10 @@ export type OwnershipOp =
   | 'delegationList'
   | 'keySessionRevoke'
   | 'keySessionList'
-  | 'requireSignature';
+  | 'requireSignature'
+  | 'spendPolicySet'
+  | 'spendPolicyList'
+  | 'spendPolicyDelete';
 
 /**
  * PII-safe logger para cross-owner attempts.

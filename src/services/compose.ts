@@ -30,6 +30,7 @@ import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
 import { maybeTransform } from './llm/transform.js';
 import { registryService } from './registry.js';
+import { normalizeDestination } from './spend-policy.js';
 
 function buildAuthHeaders(
   registry: RegistryConfig | undefined,
@@ -162,11 +163,14 @@ export const composeService = {
           debitAmount,
           request.delegationContext, // WKH-101 (DT-11): enruta al RPC atómico bajo delegación
           request.keySessionContext, // WKH-121 (BLQ-ALTO-1): enruta al RPC de sesión y respeta el cap per-step
+          normalizeDestination(`${agent.registry}/${agent.slug}`), // WKH-125: cap por destino (mismo normalizador que la policy)
         );
         if (!debitResult.success) {
           // DT-H: mid-pipeline debit failure → ComposeResult.error.
           // NO setear errorCode='SCOPE_DENIED' (eso es 403). Route handler
           // mapea a 400 (default), no a 402/403.
+          // WKH-125 (AC-2): salvo cap por destino → errorCode='DEST_CAP_EXCEEDED'
+          // para que el route lo mapee a 402 (no 400).
           return {
             success: false,
             output: null,
@@ -174,6 +178,9 @@ export const composeService = {
             totalCostUsdc: totalCost,
             totalLatencyMs: totalLatency,
             error: `Step ${i} debit failed: ${debitResult.error ?? 'insufficient budget'}`,
+            ...(debitResult.error === 'DEST_CAP_EXCEEDED'
+              ? { errorCode: 'DEST_CAP_EXCEEDED' as const }
+              : {}),
           };
         }
       }

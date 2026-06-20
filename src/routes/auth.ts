@@ -48,6 +48,10 @@ import {
   SessionNotFoundError,
   SigningSecretNotSetError,
 } from '../services/security/errors.js';
+import {
+  InvalidSpendPolicyInputError,
+  spendPolicyService,
+} from '../services/spend-policy.js';
 import type {
   A2AAgentKeyRow,
   CreateDelegationInput,
@@ -57,6 +61,8 @@ import type {
   DelegationTypedData,
   DepositInput,
   Erc8004IdentityBinding,
+  SpendPolicyInput,
+  SpendPolicyWindowType,
 } from '../types/index.js';
 
 // ── Funding-wallet binding (WKH-35 FIX-1) ───────────────────
@@ -335,6 +341,60 @@ function parseCreateKeySessionInput(
   if (b.require_signature !== undefined) {
     input.require_signature = b.require_signature;
   }
+  return input;
+}
+
+/**
+ * WKH-125: shape validation del body de PUT /auth/keys/me/spend-policies.
+ * Acepta `window` o `window_type` (alias) para el tipo de ventana. La
+ * normalización del destino + el invariante de ventana los valida el service
+ * (`spend-policy.ts`, CD-6). Acá sólo el shape (CD-AB-3).
+ */
+function parseSpendPolicyInput(raw: unknown): SpendPolicyInput | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const b = raw as Record<string, unknown>;
+
+  if (typeof b.destination !== 'string' || b.destination.trim() === '') {
+    return null;
+  }
+
+  // max_usd: string o number → string (sin pérdida; el service valida formato).
+  let maxUsd: string;
+  if (typeof b.max_usd === 'string') {
+    maxUsd = b.max_usd;
+  } else if (typeof b.max_usd === 'number' && Number.isFinite(b.max_usd)) {
+    maxUsd = String(b.max_usd);
+  } else {
+    return null;
+  }
+
+  // window_type (o alias `window`): 'total' | 'rolling'.
+  const rawWindow = b.window_type ?? b.window;
+  if (rawWindow !== 'total' && rawWindow !== 'rolling') {
+    return null;
+  }
+  const windowType = rawWindow as SpendPolicyWindowType;
+
+  // window_secs: opcional; si presente DEBE ser int (el service valida el
+  // invariante total⇒null / rolling⇒>0).
+  let windowSecs: number | null | undefined;
+  if (b.window_secs === undefined || b.window_secs === null) {
+    windowSecs = b.window_secs as null | undefined;
+  } else if (
+    typeof b.window_secs === 'number' &&
+    Number.isInteger(b.window_secs)
+  ) {
+    windowSecs = b.window_secs;
+  } else {
+    return null;
+  }
+
+  const input: SpendPolicyInput = {
+    destination: b.destination,
+    max_usd: maxUsd,
+    window_type: windowType,
+  };
+  if (windowSecs !== undefined) input.window_secs = windowSecs;
   return input;
 }
 
@@ -1228,6 +1288,132 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         return reply
           .status(500)
           .send({ error_code: 'KEY_SESSION_REVOKE_FAILED' });
+      }
+    },
+  );
+
+  /**
+   * PUT /auth/keys/me/spend-policies — Set (upsert) a destination spend cap for
+   * the caller's MASTER key (WKH-125, AC-1/AC-7). Authenticated with the master
+   * key (sub-session tokens forbidden as authenticators). Ownership Guard in the
+   * service (owner_ref/key_id taken from callerKey). Invalid input → 400; ok 200.
+   */
+  fastify.put(
+    '/keys/me/spend-policies',
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const rawKey = rawKeyFromRequest(req);
+      if (rawKey?.startsWith(KEY_SESSION_TOKEN_PREFIX)) {
+        const err = new SessionNotAllowedError();
+        return reply.status(403).send({ error_code: err.code });
+      }
+
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      const input = parseSpendPolicyInput(req.body);
+      if (!input) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+
+      try {
+        const policy = await spendPolicyService.set(callerKey, input);
+        return reply.status(200).send(policy);
+      } catch (err) {
+        if (err instanceof InvalidSpendPolicyInputError) {
+          return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+        }
+        if (err instanceof OwnershipMismatchError) {
+          return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+        }
+        fastify.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'spend-policy set failed',
+        );
+        return reply
+          .status(500)
+          .send({ error_code: 'SPEND_POLICY_SET_FAILED' });
+      }
+    },
+  );
+
+  /**
+   * GET /auth/keys/me/spend-policies — List the caller's destination spend caps
+   * (WKH-125, AC-7). Ownership Guard in the service (key_id + owner_ref).
+   */
+  fastify.get(
+    '/keys/me/spend-policies',
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const rawKey = rawKeyFromRequest(req);
+      if (rawKey?.startsWith(KEY_SESSION_TOKEN_PREFIX)) {
+        const err = new SessionNotAllowedError();
+        return reply.status(403).send({ error_code: err.code });
+      }
+
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      const policies = await spendPolicyService.list(
+        callerKey.id,
+        callerKey.owner_ref,
+      );
+      return reply.status(200).send(policies);
+    },
+  );
+
+  /**
+   * DELETE /auth/keys/me/spend-policies/:destination — Remove ONE destination
+   * spend cap (WKH-125, AC-7). Ownership Guard in the service. Unknown /
+   * cross-owner destination → 404 disclosure-safe.
+   */
+  fastify.delete(
+    '/keys/me/spend-policies/:destination',
+    async (
+      req: FastifyRequest<{ Params: { destination: string } }>,
+      reply: FastifyReply,
+    ) => {
+      const rawKey = rawKeyFromRequest(req);
+      if (rawKey?.startsWith(KEY_SESSION_TOKEN_PREFIX)) {
+        const err = new SessionNotAllowedError();
+        return reply.status(403).send({ error_code: err.code });
+      }
+
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      try {
+        await spendPolicyService.delete(
+          callerKey.id,
+          callerKey.owner_ref,
+          decodeURIComponent(req.params.destination),
+        );
+        return reply.status(200).send({ deleted: true });
+      } catch (err) {
+        if (err instanceof InvalidSpendPolicyInputError) {
+          return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+        }
+        if (err instanceof OwnershipMismatchError) {
+          // Disclosure-safe: NO revela si el destino existe para otro owner.
+          return reply
+            .status(404)
+            .send({ error_code: 'SPEND_POLICY_NOT_FOUND' });
+        }
+        fastify.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'spend-policy delete failed',
+        );
+        return reply
+          .status(500)
+          .send({ error_code: 'SPEND_POLICY_DELETE_FAILED' });
       }
     },
   );

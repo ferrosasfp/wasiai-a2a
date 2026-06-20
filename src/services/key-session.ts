@@ -30,6 +30,7 @@ import {
   AgentKeyInactiveError,
   AgentKeyNotFoundError,
   DailyLimitExceededError,
+  DestCapExceededError,
   logOwnershipMismatch,
   OwnershipMismatchError,
   SessionBudgetExhaustedError,
@@ -442,6 +443,7 @@ export const keySessionService = {
     keyId: string,
     chainId: number,
     amountUsd: number,
+    destination?: string,
   ): Promise<string> {
     const { data, error } = await supabase.rpc('debit_session_and_parent', {
       p_session_id: sessionId,
@@ -449,10 +451,16 @@ export const keySessionService = {
       p_key_id: keyId,
       p_chain_id: chainId,
       p_amount_usd: amountUsd,
+      p_destination: destination ?? null,
     });
 
     if (error) {
       const msg = error.message;
+      // WKH-125 (AC-6): la sesión hereda el cap por destino de la parent key;
+      // el RPC `debit_session_and_parent` dispatcha a `debit_with_dest_policy`.
+      if (msg.includes('DEST_CAP_EXCEEDED')) {
+        throw new DestCapExceededError();
+      }
       // Prefijos del RPC propio.
       if (msg.includes('SESSION_BUDGET_EXHAUSTED')) {
         throw new SessionBudgetExhaustedError();

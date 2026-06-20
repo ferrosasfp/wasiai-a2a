@@ -22,6 +22,7 @@ import {
   DelegationRevokedError,
   DelegationTotalLimitExceededError,
   DepositAlreadyCreditedError,
+  DestCapExceededError,
   logOwnershipMismatch,
   OwnershipMismatchError,
   SessionBudgetExhaustedError,
@@ -74,6 +75,7 @@ export const budgetService = {
     amountUsd: number,
     delegationContext?: DelegationDebitContext,
     keySessionContext?: KeySessionDebitContext,
+    destination?: string,
   ): Promise<{ success: boolean; error?: string }> {
     // ── RUTA KEY-SESSION (WKH-121) ──
     // Espejo de la ruta delegación, sin per-tx limit (no aplica a sesiones).
@@ -85,6 +87,7 @@ export const budgetService = {
           keySessionContext.keyId,
           chainId,
           amountUsd,
+          destination,
         );
         // WKH-124: emit budget_debit receipt (best-effort, fire-and-forget CD-B).
         // A failure here NEVER affects the debit result (CD-1).
@@ -109,6 +112,10 @@ export const budgetService = {
           );
         return { success: true };
       } catch (err) {
+        // WKH-125 (AC-6): la sesión hereda el cap por destino de la parent key.
+        if (err instanceof DestCapExceededError) {
+          return { success: false, error: 'DEST_CAP_EXCEEDED' };
+        }
         if (err instanceof SessionBudgetExhaustedError) {
           return { success: false, error: 'SESSION_BUDGET_EXHAUSTED' };
         }
@@ -220,6 +227,66 @@ export const budgetService = {
         });
         return { success: false, error: 'DELEGATION_DEBIT_FAILED' };
       }
+    }
+
+    // ── RUTA MASTER KEY DEST-AWARE (WKH-125) ──
+    // Sólo cuando hay `destination` (call-site de compose/step-0). El RPC
+    // `debit_with_dest_policy` es self-back-compat: si no hay política para el
+    // destino, degrada a `increment_a2a_key_spend` + 0 inserts (CD-5/AC-5). El
+    // check del cap + el debit + el INSERT del ledger ocurren en UNA tx con
+    // FOR UPDATE (CD-1/AC-4). Nunca propaga el msg crudo de PG al cliente (CD-B).
+    if (destination) {
+      // `debit()` no recibe `owner_ref` (CD-4: no se amplía la firma). El RPC
+      // valida ownership DB-layer contra el owner de la key; lo derivamos con un
+      // SELECT cold-path (sólo cuando hay destino) y se lo pasamos.
+      const { data: keyRow, error: ownerErr } = await supabase
+        .from('a2a_agent_keys')
+        .select('owner_ref')
+        .eq('id', keyId)
+        .single();
+      if (ownerErr || !keyRow) {
+        return { success: false, error: 'KEY_NOT_FOUND' };
+      }
+      const ownerRef = (keyRow as Pick<A2AAgentKeyRow, 'owner_ref'>).owner_ref;
+
+      const { error: destErr } = await supabase.rpc('debit_with_dest_policy', {
+        p_key_id: keyId,
+        p_chain_id: chainId,
+        p_amount_usd: amountUsd,
+        p_owner_ref: ownerRef,
+        p_destination: destination,
+      });
+
+      if (destErr) {
+        const msg = destErr.message;
+        if (msg.includes('DEST_CAP_EXCEEDED')) {
+          return { success: false, error: 'DEST_CAP_EXCEEDED' };
+        }
+        if (msg.includes('INSUFFICIENT_BUDGET')) {
+          return { success: false, error: 'AGENT_KEY_BUDGET_EXHAUSTED' };
+        }
+        if (msg.includes('DAILY_LIMIT')) {
+          return { success: false, error: 'DAILY_LIMIT' };
+        }
+        if (msg.includes('KEY_INACTIVE')) {
+          return { success: false, error: 'KEY_INACTIVE' };
+        }
+        if (msg.includes('KEY_NOT_FOUND')) {
+          return { success: false, error: 'KEY_NOT_FOUND' };
+        }
+        if (msg.includes('OWNERSHIP_MISMATCH')) {
+          return { success: false, error: 'OWNERSHIP_MISMATCH' };
+        }
+        // Fallback: el msg crudo de PG NUNCA llega al cliente (CD-B).
+        console.error('[budget] dest-policy debit failed', {
+          keyId,
+          chainId,
+          detail: msg,
+        });
+        return { success: false, error: 'DEST_POLICY_DEBIT_FAILED' };
+      }
+
+      return { success: true };
     }
 
     // ── RUTA MASTER KEY — INTACTA (camino actual, CD-5) ──

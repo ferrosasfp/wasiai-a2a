@@ -11,7 +11,11 @@ vi.mock('./discovery.js', () => ({
   },
 }));
 
-import { _resetAgentPriceCache, resolveAgentPriceUsdc } from './agent-price.js';
+import {
+  _resetAgentPriceCache,
+  resolveAgentDestination,
+  resolveAgentPriceUsdc,
+} from './agent-price.js';
 import { discoveryService } from './discovery.js';
 
 const mockGetAgent = vi.mocked(discoveryService.getAgent);
@@ -132,5 +136,81 @@ describe('resolveAgentPriceUsdc', () => {
     expect(mockGetAgent).toHaveBeenCalledTimes(2);
     expect(mockGetAgent).toHaveBeenNthCalledWith(1, 'kyc', 'reg-a');
     expect(mockGetAgent).toHaveBeenNthCalledWith(2, 'kyc', 'reg-b');
+  });
+});
+
+// WKH-125 BLQ-ALTO-1 (fix-pack): resolveAgentDestination devuelve el
+// registry/slug CANÓNICO del agente resuelto por discovery (no del body crudo).
+// Es lo que el step-0 usa para keyear el cap por destino → debe coincidir con
+// el per-step. Espeja el orden de resolución de `compose.resolveAgent`.
+describe('resolveAgentDestination', () => {
+  beforeEach(() => {
+    _resetAgentPriceCache();
+    vi.clearAllMocks();
+  });
+
+  function makeAgentWithRegistry(slug: string, registry: string) {
+    return {
+      id: `id-${slug}`,
+      name: `Agent ${slug}`,
+      slug,
+      description: 'test',
+      capabilities: [],
+      priceUsdc: 0.001,
+      registry,
+      registry_id: registry,
+      invokeUrl: 'https://example.com/invoke',
+      invocationNote: 'gateway-only',
+      verified: true,
+      status: 'active' as const,
+    };
+  }
+
+  it('T-DEST-1 returns canonical {registry, slug} from the resolved agent', async () => {
+    // Body slug "myagent", registry hint "wasiai" → discovery devuelve canónico.
+    mockGetAgent.mockResolvedValueOnce(
+      makeAgentWithRegistry('myagent', 'wasiai'),
+    );
+
+    const dest = await resolveAgentDestination('myagent', 'wasiai');
+
+    expect(dest).toEqual({ registry: 'wasiai', slug: 'myagent' });
+    expect(mockGetAgent).toHaveBeenCalledWith('myagent', 'wasiai');
+  });
+
+  it('T-DEST-2 (BLQ-ALTO-1): caller omits registry → canonical registry still resolved', async () => {
+    // Caller pasó registry=undefined; discovery resuelve igual el agente y su
+    // registry canónico "wasiai" → el destino NO degrada a slug-solo.
+    mockGetAgent.mockResolvedValueOnce(
+      makeAgentWithRegistry('myagent', 'wasiai'),
+    );
+
+    const dest = await resolveAgentDestination('myagent', undefined);
+
+    expect(dest).toEqual({ registry: 'wasiai', slug: 'myagent' });
+    expect(mockGetAgent).toHaveBeenNthCalledWith(1, 'myagent', undefined);
+  });
+
+  it('T-DEST-3 falls back to getAgent without registry when hint misses', async () => {
+    // 1er intento (con hint) → null; fallback sin hint → resuelve.
+    mockGetAgent.mockResolvedValueOnce(null);
+    mockGetAgent.mockResolvedValueOnce(
+      makeAgentWithRegistry('myagent', 'wasiai'),
+    );
+
+    const dest = await resolveAgentDestination('myagent', 'wrong-hint');
+
+    expect(dest).toEqual({ registry: 'wasiai', slug: 'myagent' });
+    expect(mockGetAgent).toHaveBeenNthCalledWith(1, 'myagent', 'wrong-hint');
+    // Fallback espeja compose.resolveAgent: getAgent(slug) sin 2º arg.
+    expect(mockGetAgent).toHaveBeenNthCalledWith(2, 'myagent');
+  });
+
+  it('T-DEST-4 returns null when the agent does not resolve at all', async () => {
+    mockGetAgent.mockResolvedValue(null);
+
+    const dest = await resolveAgentDestination('ghost', undefined);
+
+    expect(dest).toBeNull();
   });
 });

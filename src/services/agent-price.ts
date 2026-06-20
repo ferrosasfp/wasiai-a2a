@@ -63,6 +63,36 @@ export async function resolveAgentPriceUsdc(
 }
 
 /**
+ * WKH-125 BLQ-ALTO-1 (fix-pack): resuelve el destino canónico
+ * `"<registry>/<slug>"` del agente del step-0 a partir del AGENTE RESUELTO por
+ * discovery — NO de los campos crudos del body (`firstStep.agent` /
+ * `firstStep.registry`, con `registry` opcional). Espeja la resolución que usa
+ * el per-step (`compose.resolveAgent` → `discoveryService.getAgent(slug, registry)`
+ * con fallback `getAgent(slug)`), de modo que step-0 y per-step produzcan el
+ * MISMO string canónico (`agent.registry`/`agent.slug` de discovery) para el
+ * mismo agente. Sin esto, un caller que omite `registry` deriva un destino que
+ * no matchea la policy → el cap NUNCA se evalúa (cap bypass en la ruta de dinero).
+ *
+ * - Agente no existe (getAgent retorna null en ambos intentos): retorna null
+ *   (el caller NO augmenta `composeDestination` → step-0 sigue 3-arg, back-compat).
+ * - Discovery throws: propaga el error (el preHandler ya lo mapea a 503; este
+ *   resolver se llama dentro del mismo try del preHandler).
+ *
+ * @returns `{ registry, slug }` canónicos del agente resuelto, o null.
+ */
+export async function resolveAgentDestination(
+  agentSlug: string,
+  registryName?: string,
+): Promise<{ registry: string; slug: string } | null> {
+  // Mismo orden de resolución que compose.resolveAgent (registry hint primero,
+  // luego sin registry para tolerar case/registry omitido por el caller).
+  let agent = await discoveryService.getAgent(agentSlug, registryName);
+  if (!agent) agent = await discoveryService.getAgent(agentSlug);
+  if (!agent) return null;
+  return { registry: agent.registry, slug: agent.slug };
+}
+
+/**
  * TEST-ONLY: limpia el cache. NO importar en production code.
  * CD-13: patrón análogo a `_resetFallbackWarnDedup` en `discovery.ts:26`.
  */

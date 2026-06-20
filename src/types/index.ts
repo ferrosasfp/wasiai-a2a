@@ -291,8 +291,11 @@ export interface ComposeResult {
   totalCostUsdc: number;
   totalLatencyMs: number;
   error?: string;
-  /** WKH-61: discriminator para que el route handler mapee a 403. */
-  errorCode?: 'SCOPE_DENIED';
+  /**
+   * WKH-61: discriminator para que el route handler mapee a 403 (`SCOPE_DENIED`).
+   * WKH-125: `DEST_CAP_EXCEEDED` → 402 (cap por destino excedido mid-pipeline).
+   */
+  errorCode?: 'SCOPE_DENIED' | 'DEST_CAP_EXCEEDED';
   /** WKH-61: target denegado, para debugging. `category` se omite si el agent no la expone. */
   scopeDeniedTarget?: {
     registry: string;

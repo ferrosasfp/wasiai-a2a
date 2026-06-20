@@ -29,10 +29,18 @@ import type { A2AAgentKeyRow, ComposeResult } from '../types/index.js';
 // El handler pass-through setea `a2aKeyRow` para que el route lo propague a
 // composeService como `scopingKeyRow`.
 let nextKeyRow: Partial<A2AAgentKeyRow> | undefined;
+// WKH-125 BLQ-ALTO-1: capturamos el destino que el preHandler de price
+// augmentó en `request.composeDestination` (el middleware real corre DESPUÉS
+// del price handler en el orden de preHandlers). Es lo que el step-0 usaría
+// para keyear el cap por destino.
+let capturedComposeDestination: string | undefined;
 vi.mock('../middleware/a2a-key.js', () => ({
   requirePaymentOrA2AKey: () => [
     async (request: FastifyRequest, _reply: FastifyReply) => {
       (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = nextKeyRow;
+      capturedComposeDestination = (
+        request as unknown as { composeDestination?: string }
+      ).composeDestination;
     },
   ],
 }));
@@ -57,17 +65,22 @@ vi.mock('../services/compose.js', () => ({
   },
 }));
 
-// ── Mock agent-price service (WKH-59) ───────────────────────
+// ── Mock agent-price service (WKH-59 + WKH-125 BLQ-ALTO-1) ──
 vi.mock('../services/agent-price.js', () => ({
   resolveAgentPriceUsdc: vi.fn(),
+  resolveAgentDestination: vi.fn(),
 }));
 
-import { resolveAgentPriceUsdc } from '../services/agent-price.js';
+import {
+  resolveAgentDestination,
+  resolveAgentPriceUsdc,
+} from '../services/agent-price.js';
 import { composeService } from '../services/compose.js';
 import composeRoutes from './compose.js';
 
 const mockCompose = vi.mocked(composeService.compose);
 const mockResolvePrice = vi.mocked(resolveAgentPriceUsdc);
+const mockResolveDest = vi.mocked(resolveAgentDestination);
 
 // ── Setup ───────────────────────────────────────────────────
 
@@ -200,6 +213,7 @@ describe('compose preHandler — WKH-59 real-price-debit', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+    capturedComposeDestination = undefined;
     // Default success path (each test overrides via mockResolvedValueOnce /
     // mockRejectedValueOnce). composeService default returns success.
     mockCompose.mockResolvedValue({
@@ -273,6 +287,54 @@ describe('compose preHandler — WKH-59 real-price-debit', () => {
     expect(res.statusCode).toBe(503);
     expect(res.json().error_code).toBe('REGISTRY_UNAVAILABLE');
     expect(mockCompose).not.toHaveBeenCalled();
+  });
+
+  // WKH-125 BLQ-ALTO-1 (fix-pack): el destino del step-0 se deriva del AGENTE
+  // RESUELTO por discovery, NO de los campos crudos del body. Un caller que
+  // OMITE `registry` igual produce el destino canónico `"<registry>/<slug>"`
+  // → coincide con el que arma el per-step (`compose.ts:166`
+  // `normalizeDestination(${agent.registry}/${agent.slug})`) → el cap por
+  // destino se evalúa (no degrada a `increment` por mismatch de destino).
+  it('T-ROUTE-PRICE-DEST-1 (BLQ-ALTO-1): step-0 destino = agente resuelto aunque el body omita registry', async () => {
+    mockResolvePrice.mockResolvedValueOnce(0.001);
+    // Discovery resuelve el agente canónico: registry="wasiai", slug="myagent".
+    mockResolveDest.mockResolvedValueOnce({
+      registry: 'wasiai',
+      slug: 'myagent',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      // Body OMITE registry — el caller solo pasa el slug crudo.
+      payload: { steps: [{ agent: 'myagent', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    // El resolver se llamó con los crudos del body (slug + registry undefined).
+    expect(mockResolveDest).toHaveBeenCalledWith('myagent', undefined);
+    // CLAVE: el destino augmentado es el canónico del agente resuelto
+    // ("wasiai/myagent"), NO el crudo del body ("myagent"). Idéntico al que
+    // el per-step keyea → el cap NO se evade omitiendo registry.
+    expect(capturedComposeDestination).toBe('wasiai/myagent');
+  });
+
+  // WKH-125 BLQ-ALTO-1: si discovery no resuelve un agente canónico (null),
+  // NO se augmenta composeDestination → step-0 sigue 3-arg (back-compat).
+  it('T-ROUTE-PRICE-DEST-2 (BLQ-ALTO-1): sin agente resuelto → composeDestination undefined (3-arg)', async () => {
+    mockResolvePrice.mockResolvedValueOnce(0.001);
+    mockResolveDest.mockResolvedValueOnce(null);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(capturedComposeDestination).toBeUndefined();
   });
 
   it('T-ROUTE-PRICE-5 preHandler is a no-op for empty steps body (route handler responds 400)', async () => {

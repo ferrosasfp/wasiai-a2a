@@ -1118,6 +1118,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       0.05,
       undefined,
       undefined,
+      'test-registry/corridor',
     );
   });
 
@@ -1162,6 +1163,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       0.05,
       undefined,
       undefined,
+      'test-registry/corridor',
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
       2,
@@ -1170,6 +1172,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       0.01,
       undefined,
       undefined,
+      'test-registry/cashout',
     );
   });
 
@@ -1224,6 +1227,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       0.05,
       delegationContext,
       undefined,
+      'test-registry/corridor',
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
       2,
@@ -1232,6 +1236,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       0.01,
       delegationContext,
       undefined,
+      'test-registry/cashout',
     );
     // step 0 + step 1 invoked (2 fetches); step 2 fetch NOT consumed.
     expect(mockFetch).toHaveBeenCalledTimes(2);
@@ -1414,6 +1419,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       1.0,
       undefined,
       undefined,
+      'test-registry/free-bug',
     );
   });
 
@@ -1493,6 +1499,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       1.0,
       undefined,
       undefined,
+      'test-registry/null-price',
     );
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1563,6 +1570,7 @@ describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULT
       0.05,
       undefined,
       keySessionContext,
+      'test-registry/corridor',
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
       2,
@@ -1571,6 +1579,7 @@ describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULT
       0.01,
       undefined,
       keySessionContext,
+      'test-registry/cashout',
     );
   });
 
@@ -1617,6 +1626,7 @@ describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULT
       0.05,
       undefined,
       keySessionContext,
+      'test-registry/corridor',
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
       2,
@@ -1625,6 +1635,7 @@ describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULT
       0.01,
       undefined,
       keySessionContext,
+      'test-registry/cashout',
     );
     // step 0 + step 1 invoked (2 fetches); step 2 fetch NOT consumed.
     expect(mockFetch).toHaveBeenCalledTimes(2);
@@ -1671,6 +1682,7 @@ describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULT
       0.05,
       delegationContext,
       undefined,
+      'test-registry/corridor',
     );
   });
 });
