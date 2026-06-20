@@ -13,6 +13,11 @@ import {
   resolveAgentPriceUsdc,
 } from '../services/agent-price.js';
 import { composeService } from '../services/compose.js';
+import {
+  chargeProtocolFee,
+  getProtocolFeeRate,
+} from '../services/fee-charge.js';
+import { receiptService } from '../services/receipt.js';
 import { normalizeDestination } from '../services/spend-policy.js';
 import type { ComposeStep } from '../types/index.js';
 
@@ -230,6 +235,60 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
           ...result,
           requestId: request.id,
         });
+      }
+
+      // WKH-118: best-effort 1% protocol fee post-compose (espejo orchestrate.ts:437-482).
+      // Idempotencia por request.id; base = result.totalCostUsdc. NUNCA rompe el 200
+      // (CD-1): todo error queda en variables locales + console. El response NO cambia (CD-4).
+      // CD-4: feeChargeTxHash NO se declara — en compose (a diferencia de
+      // orchestrate) ningún campo de fee se serializa en el response, así que la
+      // variable quedaría asignada-pero-no-leída (biome noUnusedVariables). El
+      // txHash que necesita el recibo se lee de `feeResult.txHash` directamente.
+      let feeChargeError: string | undefined;
+      try {
+        const feeResult = await chargeProtocolFee({
+          orchestrationId: request.id,
+          budgetUsdc: result.totalCostUsdc,
+          feeRate: getProtocolFeeRate(),
+        });
+        if (feeResult.status === 'failed') {
+          feeChargeError = feeResult.error;
+          console.error('[Compose] fee charge failed:', feeResult.error);
+        } else if (
+          feeResult.status === 'charged' ||
+          feeResult.status === 'already-charged'
+        ) {
+          // WKH-124: emit protocol_fee receipt SOLO si charged + owner_ref presente.
+          // Fire-and-forget (CD-6/CD-7): su fallo/latencia NUNCA afecta el 200.
+          if (feeResult.status === 'charged' && request.a2aKeyRow?.owner_ref) {
+            receiptService
+              .emit({
+                ownerRef: request.a2aKeyRow.owner_ref,
+                agentKeyId: request.a2aKeyRow.id,
+                sessionId: null,
+                delegationId: null,
+                receiptType: 'protocol_fee',
+                amountUsd: feeResult.feeUsdc,
+                chainId: request.resolvedChainId ?? 0,
+                txHash: feeResult.txHash ?? null,
+                counterparty: process.env.WASIAI_PROTOCOL_FEE_WALLET ?? null,
+                orchestrationId: request.id,
+              })
+              .catch((e) =>
+                console.warn(
+                  '[receipts] emit failed',
+                  e instanceof Error ? e.message : e,
+                ),
+              );
+          }
+        }
+        // 'skipped' → ambos undefined (wallet unset) — sin error, sin recibo (AC-4).
+      } catch (e) {
+        // R-1: chargeProtocolFee puede throw ProtocolFeeError (feeUsdc > budget).
+        // Con feeRate ≤ 0.10 es prácticamente imposible, pero capturamos para
+        // blindar CD-1 al 100%. La respuesta 200 procede igual.
+        feeChargeError = e instanceof Error ? e.message : String(e);
+        console.error('[Compose] fee charge threw:', feeChargeError);
       }
 
       const kiteTxHash = request.paymentTxHash;
