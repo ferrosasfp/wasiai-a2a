@@ -34,6 +34,7 @@ import {
   DelegationNotFoundError,
   DelegationRevokedError,
   DelegationTotalLimitExceededError,
+  DestCapExceededError,
   OwnershipMismatchError,
   SessionBudgetExhaustedError,
   SessionExpiredError,
@@ -372,6 +373,9 @@ export function requirePaymentOrA2AKey(
           'a2a-key.delegation.debit',
         );
         try {
+          // TODO(WKH-125b): dest cap no aplica a delegaciones EIP-712. WKH-125
+          // dejó "Extender políticas a delegaciones EIP-712" fuera de scope, por
+          // eso el step-0 de delegación NO propaga `composeDestination` al RPC.
           await delegationService.debitDelegationAndParent(
             delegation.id,
             parentKey.owner_ref,
@@ -575,14 +579,44 @@ export function requirePaymentOrA2AKey(
           'a2a-key.session.debit',
         );
         try {
-          await keySessionService.debitSessionAndParent(
-            session.id,
-            parentKey.owner_ref,
-            parentKey.id,
-            chainId,
-            estimatedCostUsd,
-          );
+          // WKH-125 (AC-6 fix): la sesión hereda el cap por destino de la parent
+          // key. El step-0 de un compose DEBE propagar `composeDestination`
+          // (augmentado por routes/compose.ts:resolveComposePriceHandler) al RPC
+          // `debit_session_and_parent` → `debit_with_dest_policy`. Sin esto el RPC
+          // recibía `p_destination=NULL`, caía a `increment_a2a_key_spend` y el cap
+          // por destino se evadía por completo (bypass del cap con session key).
+          // CONDICIONAL (espeja el branch master, CD-8b): sólo cuando hay
+          // `composeDestination` pasamos el 6º arg destino; si no, la llamada de
+          // 5 args queda INTACTA (back-compat para callers sin destino/política,
+          // el RPC se comporta idéntico al pre-fix, AC-5).
+          if (request.composeDestination) {
+            await keySessionService.debitSessionAndParent(
+              session.id,
+              parentKey.owner_ref,
+              parentKey.id,
+              chainId,
+              estimatedCostUsd,
+              request.composeDestination,
+            );
+          } else {
+            await keySessionService.debitSessionAndParent(
+              session.id,
+              parentKey.owner_ref,
+              parentKey.id,
+              chainId,
+              estimatedCostUsd,
+            );
+          }
         } catch (debitErr) {
+          // WKH-125 (AC-2/AC-6): cap por destino excedido bajo session key → HTTP
+          // 402 (no 403), espejando el branch master. El budget NO se decrementó
+          // (rollback de la tx en el RPC).
+          if (debitErr instanceof DestCapExceededError) {
+            return reply.status(402).send({
+              error: `chain ${chainId} destination cap exceeded`,
+              error_code: 'DEST_CAP_EXCEEDED',
+            });
+          }
           if (debitErr instanceof SessionBudgetExhaustedError) {
             return send403session(
               reply,

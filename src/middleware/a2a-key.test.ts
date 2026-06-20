@@ -209,6 +209,7 @@ import {
   AgentKeyBudgetExhaustedError,
   DailyLimitExceededError,
   DelegationTotalLimitExceededError,
+  DestCapExceededError,
   SessionBudgetExhaustedError,
 } from '../services/security/errors.js';
 import { verifySignedAuth } from '../services/signed-auth.js';
@@ -1701,6 +1702,91 @@ describe('requirePaymentOrA2AKey — key-session branch (WKH-121)', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().effectiveRegistries).toEqual(['a', 'b']);
+  });
+
+  // ── WKH-125 (AC-6 fix): session key hereda el cap por destino ──────
+  // BLQ-MED (auditoría cross-HU): el step-0 de un compose de 1 step con una
+  // session key debe propagar `composeDestination` a debitSessionAndParent →
+  // RPC `debit_with_dest_policy`. Sin el fix el RPC recibía p_destination=NULL,
+  // caía a increment_a2a_key_spend y el cap por destino se evadía por completo.
+  describe('WKH-125 session dest-cap propagation', () => {
+    let appD: ReturnType<typeof Fastify>;
+    const DEST = '0xDEADBEEFdeadBEEFdeadBEEFdeadBEEFdeadBEEF';
+
+    beforeAll(async () => {
+      appD = Fastify();
+      // preHandler upstream que augmenta composeDestination (espeja lo que hace
+      // routes/compose.ts:resolveComposePriceHandler antes del middleware).
+      appD.post(
+        '/test-compose-dest',
+        {
+          preHandler: [
+            async (req: FastifyRequest) => {
+              req.composeDestination = DEST;
+            },
+            ...requirePaymentOrA2AKey({ description: 'compose w/ dest' }),
+          ],
+        },
+        async (_req: FastifyRequest, reply: FastifyReply) =>
+          reply.send({ ok: true }),
+      );
+      await appD.ready();
+    });
+
+    afterAll(() => appD.close());
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      setMockRegistryState(['kite-ozone-testnet'], 'kite-ozone-testnet');
+    });
+
+    // T-MW-SESS-DEST-1: el step-0 con session key + composeDestination llama a
+    // debitSessionAndParent CON el 6º arg destino → RPC va por debit_with_dest_policy
+    // (cap evaluado), NO por increment_a2a_key_spend. Reproduce el fix del bypass.
+    it('T-MW-SESS-DEST-1: session key + composeDestination → debitSessionAndParent called WITH destination', async () => {
+      mockSessionLookup.mockResolvedValue(makeKeySessionRow());
+      mockSessionGetParent.mockResolvedValue(makeKeyRow());
+      mockSessionDebit.mockResolvedValue('1.00');
+      mockGetBalance.mockResolvedValue('9.00');
+
+      const res = await appD.inject({
+        method: 'POST',
+        url: '/test-compose-dest',
+        headers: { authorization: `Bearer ${SESS_TOKEN}` },
+        payload: {},
+      });
+
+      expect(res.statusCode).toBe(200);
+      // el destino se PROPAGA como 6º arg (antes del fix faltaba → cap evadido).
+      expect(mockSessionDebit).toHaveBeenCalledWith(
+        'sess-1',
+        'user-1',
+        TEST_KEY_ID,
+        2368,
+        1.0,
+        DEST,
+      );
+      // master debit NO se usa en el branch session.
+      expect(mockDebit).not.toHaveBeenCalled();
+    });
+
+    // T-MW-SESS-DEST-2: cap por destino excedido bajo session key → HTTP 402
+    // DEST_CAP_EXCEEDED (espeja el branch master), no 403/genérico.
+    it('T-MW-SESS-DEST-2: dest cap exceeded under session key → 402 DEST_CAP_EXCEEDED', async () => {
+      mockSessionLookup.mockResolvedValue(makeKeySessionRow());
+      mockSessionGetParent.mockResolvedValue(makeKeyRow());
+      mockSessionDebit.mockRejectedValue(new DestCapExceededError());
+
+      const res = await appD.inject({
+        method: 'POST',
+        url: '/test-compose-dest',
+        headers: { authorization: `Bearer ${SESS_TOKEN}` },
+        payload: {},
+      });
+
+      expect(res.statusCode).toBe(402);
+      expect(res.json().error_code).toBe('DEST_CAP_EXCEEDED');
+    });
   });
 
   // T-BACKCOMPAT (AC-14) — master key path untouched
