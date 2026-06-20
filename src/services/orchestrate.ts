@@ -24,6 +24,7 @@ import {
   getProtocolFeeRate,
   ProtocolFeeError,
 } from './fee-charge.js';
+import { receiptService } from './receipt.js';
 
 const MODEL = 'claude-sonnet-4-20250514';
 const LLM_TIMEOUT_MS = 30_000;
@@ -447,6 +448,35 @@ export const orchestrateService = {
         feeResult.status === 'already-charged'
       ) {
         feeChargeTxHash = feeResult.txHash;
+        // WKH-124 (AC-1): emit protocol_fee receipt when the fee was charged.
+        // Lineage lives on the call-site row `request.scopingKeyRow` (owner_ref +
+        // id); the fee wallet is the counterparty (read from env here). Best-effort
+        // fire-and-forget (CD-B): a failure NEVER interrupts the orchestrate return
+        // (CD-1). Guard: without owner_ref → no emit (CD-D).
+        if (
+          feeResult.status === 'charged' &&
+          request.scopingKeyRow?.owner_ref
+        ) {
+          receiptService
+            .emit({
+              ownerRef: request.scopingKeyRow.owner_ref,
+              agentKeyId: request.scopingKeyRow.id,
+              sessionId: null,
+              delegationId: null,
+              receiptType: 'protocol_fee',
+              amountUsd: feeUsdc,
+              chainId: request.chainId ?? 0,
+              txHash: feeResult.txHash ?? null,
+              counterparty: process.env.WASIAI_PROTOCOL_FEE_WALLET ?? null,
+              orchestrationId,
+            })
+            .catch((e) =>
+              console.warn(
+                '[receipts] emit failed',
+                e instanceof Error ? e.message : e,
+              ),
+            );
+        }
       }
       // 'skipped' → no error, no txHash → ambos undefined (wallet unset).
     }

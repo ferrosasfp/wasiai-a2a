@@ -11,6 +11,7 @@ import type {
 } from '../types/index.js';
 import { delegationService, exceedsPerTxLimit } from './delegation.js';
 import { keySessionService } from './key-session.js';
+import { receiptService } from './receipt.js';
 import {
   AgentKeyBudgetExhaustedError,
   AgentKeyInactiveError,
@@ -85,6 +86,27 @@ export const budgetService = {
           chainId,
           amountUsd,
         );
+        // WKH-124: emit budget_debit receipt (best-effort, fire-and-forget CD-B).
+        // A failure here NEVER affects the debit result (CD-1).
+        receiptService
+          .emit({
+            ownerRef: keySessionContext.ownerRef,
+            agentKeyId: keySessionContext.keyId,
+            sessionId: keySessionContext.sessionId,
+            delegationId: null,
+            receiptType: 'budget_debit',
+            amountUsd,
+            chainId,
+            txHash: null,
+            counterparty: null,
+            orchestrationId: null,
+          })
+          .catch((e) =>
+            console.warn(
+              '[receipts] emit failed',
+              e instanceof Error ? e.message : e,
+            ),
+          );
         return { success: true };
       } catch (err) {
         if (err instanceof SessionBudgetExhaustedError) {
@@ -136,6 +158,27 @@ export const budgetService = {
           chainId,
           amountUsd,
         );
+        // WKH-124: emit budget_debit receipt (best-effort, fire-and-forget CD-B).
+        // A failure here NEVER affects the debit result (CD-1).
+        receiptService
+          .emit({
+            ownerRef: delegationContext.ownerRef,
+            agentKeyId: delegationContext.keyId,
+            sessionId: null,
+            delegationId: delegationContext.delegationId,
+            receiptType: 'budget_debit',
+            amountUsd,
+            chainId,
+            txHash: null,
+            counterparty: null,
+            orchestrationId: null,
+          })
+          .catch((e) =>
+            console.warn(
+              '[receipts] emit failed',
+              e instanceof Error ? e.message : e,
+            ),
+          );
         return { success: true };
       } catch (err) {
         // Mapear a { success:false, error:<code> } para que compose corte el

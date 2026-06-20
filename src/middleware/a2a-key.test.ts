@@ -66,6 +66,14 @@ vi.mock('../services/signed-auth.js', () => ({
   verifySignedAuth: vi.fn(),
 }));
 
+// WKH-124 (MNR-3): the master debit success path emits a budget_debit receipt
+// fire-and-forget (a2a-key.ts ~L816). Mock receiptService so we can assert the
+// master lineage (keyRow.owner_ref/id, receipt_type:'budget_debit') and so a
+// rejecting emit cannot interrupt the request (CD-1 / AC-6).
+vi.mock('../services/receipt.js', () => ({
+  receiptService: { emit: vi.fn() },
+}));
+
 // WKH-MULTICHAIN W2: registry mock exposes multi-chain Map + new getters.
 // `getAdaptersBundle(chainKey)` returns a per-chain bundle with chainConfig +
 // payment.supportedTokens, so the middleware can resolve the right chainId
@@ -196,6 +204,7 @@ import {
 } from '../services/delegation.js';
 import { identityService } from '../services/identity.js';
 import { keySessionService } from '../services/key-session.js';
+import { receiptService } from '../services/receipt.js';
 import {
   AgentKeyBudgetExhaustedError,
   DailyLimitExceededError,
@@ -220,6 +229,7 @@ const mockSessionLookup = vi.mocked(keySessionService.lookupByTokenHash);
 const mockSessionGetParent = vi.mocked(keySessionService.getParentKey);
 const mockSessionDebit = vi.mocked(keySessionService.debitSessionAndParent);
 const mockVerifySignedAuth = vi.mocked(verifySignedAuth);
+const mockReceiptEmit = vi.mocked(receiptService.emit);
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -290,6 +300,9 @@ describe('requirePaymentOrA2AKey middleware', () => {
     vi.clearAllMocks();
     // Reset registry mock to default single-chain state (CD-2 byte-identical).
     setMockRegistryState(['kite-ozone-testnet'], 'kite-ozone-testnet');
+    // WKH-124: emit is fire-and-forget (`.emit(...).catch(...)`); default it to a
+    // resolved promise so the `.catch` chain never sees `undefined`.
+    mockReceiptEmit.mockResolvedValue(undefined);
   });
 
   // ── AC-1: Happy path ──────────────────────────────────────
@@ -1428,6 +1441,55 @@ describe('requirePaymentOrA2AKey — delegation branch (WKH-101)', () => {
     expect(mockLookupToken).not.toHaveBeenCalled();
     expect(mockDebitDelegation).not.toHaveBeenCalled();
     expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+  });
+
+  // ── WKH-124 (AC-2, MNR-3): budget_debit receipt on the MASTER path ──
+  // Mirrors the delegation/key-session emit tests but for the master call-site
+  // (a2a-key.ts ~L816): asserts the master lineage (keyRow.owner_ref/id, no
+  // session/delegation) and budget_debit type without touching debit's signature.
+  it('WKH-124 (AC-2): master debit success emits budget_debit from the call-site', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('9.00');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    // CD-7: the debit signature assertion stays untouched.
+    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    expect(mockReceiptEmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ownerRef: 'user-1',
+        agentKeyId: TEST_KEY_ID,
+        sessionId: null,
+        delegationId: null,
+        receiptType: 'budget_debit',
+        amountUsd: 1.0,
+        chainId: 2368,
+      }),
+    );
+  });
+
+  it('WKH-124 (AC-2/AC-6): a rejecting emit does NOT break the master request', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('9.00');
+    mockReceiptEmit.mockRejectedValue(new Error('receipt down'));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().a2aKeyId).toBe(TEST_KEY_ID);
   });
 });
 

@@ -24,6 +24,7 @@ import {
 } from '../services/delegation.js';
 import { identityService, isIdentityVerified } from '../services/identity.js';
 import { keySessionService } from '../services/key-session.js';
+import { receiptService } from '../services/receipt.js';
 import {
   AgentKeyBudgetExhaustedError,
   AgentKeyInactiveError,
@@ -814,6 +815,28 @@ export function requirePaymentOrA2AKey(
           `chain ${chainId} balance is ${balance}`,
         );
       }
+
+      // WKH-124: emit budget_debit receipt for the MASTER debit (best-effort,
+      // fire-and-forget CD-B). A failure here NEVER interrupts the request (CD-1).
+      receiptService
+        .emit({
+          ownerRef: keyRow.owner_ref,
+          agentKeyId: keyRow.id,
+          sessionId: null,
+          delegationId: null,
+          receiptType: 'budget_debit',
+          amountUsd: estimatedCostUsd,
+          chainId,
+          txHash: null,
+          counterparty: null,
+          orchestrationId: null,
+        })
+        .catch((e) =>
+          console.warn(
+            '[receipts] emit failed',
+            e instanceof Error ? e.message : e,
+          ),
+        );
 
       // 8. Augment request (AC-4)
       keyRow.erc8004_verified = isIdentityVerified(keyRow); // WKH-100 AC-6, derivado, sin RPC (DT-17)

@@ -24,6 +24,7 @@ import gaslessRoutes from './routes/gasless.js';
 import metricsRoutes from './routes/metrics.js';
 import mockRegistryRoutes from './routes/mock-registry.js';
 import orchestrateRoutes from './routes/orchestrate.js';
+import receiptsRoutes from './routes/receipts.js';
 import registriesRoutes from './routes/registries.js';
 import tasksRoutes from './routes/tasks.js';
 import wellKnownRoutes from './routes/well-known.js';
@@ -119,6 +120,9 @@ await fastify.register(gaslessRoutes, { prefix: '/gasless' });
 
 // WKH-34: Auth routes (agent-signup, deposit, me, bind)
 await fastify.register(authRoutes, { prefix: '/auth' });
+
+// WKH-124: Receipts routes (list / get / verify HMAC-chained receipts)
+await fastify.register(receiptsRoutes, { prefix: '/receipts' });
 
 // Prometheus metrics (Doctor 4: APM)
 await fastify.register(metricsRoutes, { prefix: '/metrics' });
