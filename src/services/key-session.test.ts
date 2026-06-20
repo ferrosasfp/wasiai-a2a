@@ -38,6 +38,7 @@ import {
   OwnershipMismatchError,
   SessionBudgetExhaustedError,
   SessionExpiredError,
+  SessionNotFoundError,
   SessionTokenInvalidError,
 } from './security/errors.js';
 
@@ -458,5 +459,60 @@ describe('lookupByTokenHash', () => {
     // No owner gate: solo filtra por session_token_hash (NO es IDOR).
     expect(chain.eq).toHaveBeenCalledWith('session_token_hash', 'deadbeef');
     expect(chain.eq).not.toHaveBeenCalledWith('owner_ref', expect.anything());
+  });
+});
+
+// ── revoke (WKH-122: AC-1 / AC-3 / AC-4 / AC-7) ──────────────
+
+describe('revoke', () => {
+  it('T-SVC-OWNERSHIP (AC-1/AC-7): UPDATE owner-guarded por id + owner_ref', async () => {
+    const chain = chainMock();
+    // Terminal `.select('id')` resuelve con ≥1 row (revocación exitosa).
+    chain.select = vi
+      .fn()
+      .mockResolvedValue({ data: [{ id: 'sess-1' }], error: null });
+    mockFrom.mockReturnValue(
+      chain as unknown as ReturnType<typeof supabase.from>,
+    );
+
+    await keySessionService.revoke('sess-1', 'user-1');
+
+    expect(mockFrom).toHaveBeenCalledWith('a2a_key_sessions');
+    expect(chain.update).toHaveBeenCalledWith(
+      expect.objectContaining({ revoked_at: expect.any(String) }),
+    );
+    // Ownership Guard: ambos filtros antes de resolver (AC-7).
+    expect(chain.eq).toHaveBeenCalledWith('id', 'sess-1');
+    expect(chain.eq).toHaveBeenCalledWith('owner_ref', 'user-1');
+  });
+
+  it('T-IDEMPOTENT-SVC (AC-4): ≥1 row (ya revocada) → void sin lanzar', async () => {
+    const chain = chainMock();
+    chain.select = vi
+      .fn()
+      .mockResolvedValue({ data: [{ id: 'sess-1' }], error: null });
+    mockFrom.mockReturnValue(
+      chain as unknown as ReturnType<typeof supabase.from>,
+    );
+
+    await expect(
+      keySessionService.revoke('sess-1', 'user-1'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('T-NOTFOUND-SVC (AC-3): 0 rows → SessionNotFoundError', async () => {
+    const chain = chainMock();
+    chain.select = vi.fn().mockResolvedValue({ data: [], error: null });
+    mockFrom.mockReturnValue(
+      chain as unknown as ReturnType<typeof supabase.from>,
+    );
+
+    await expect(
+      keySessionService.revoke('sess-unknown', 'user-1'),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    // Disclosure-safe: NO OwnershipMismatchError (divergencia vs delegación, CD-6).
+    await expect(
+      keySessionService.revoke('sess-unknown', 'user-1'),
+    ).rejects.not.toBeInstanceOf(OwnershipMismatchError);
   });
 });

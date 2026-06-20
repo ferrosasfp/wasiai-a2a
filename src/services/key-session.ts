@@ -34,6 +34,7 @@ import {
   OwnershipMismatchError,
   SessionBudgetExhaustedError,
   SessionExpiredError,
+  SessionNotFoundError,
   SessionTokenInvalidError,
 } from './security/errors.js';
 
@@ -316,6 +317,36 @@ export const keySessionService = {
         },
       };
     });
+  },
+
+  /**
+   * Revoca UNA session key (WKH-122, AC-1/AC-3/AC-4/AC-7). Ownership Guard:
+   * UPDATE revoked_at=now() .eq('id', sessionId).eq('owner_ref', ownerId)
+   * .select('id'). 0 rows → logOwnershipMismatch + SessionNotFoundError
+   * (404 disclosure-safe; NO revela si el id existe para otro owner, CD-6).
+   * Idempotente: si ya estaba revocada, el UPDATE matchea igual el row del
+   * owner y refresca revoked_at → ≥1 row → OK sin error (AC-4).
+   */
+  async revoke(sessionId: string, ownerId: string): Promise<void> {
+    const { data, error } = await supabase
+      .from('a2a_key_sessions')
+      .update({ revoked_at: new Date().toISOString() })
+      .eq('id', sessionId)
+      .eq('owner_ref', ownerId)
+      .select('id');
+
+    if (error) {
+      throw new Error(`Failed to revoke key session: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) {
+      logOwnershipMismatch({
+        op: 'keySessionRevoke',
+        resourceId: sessionId,
+        callerOwnerRef: ownerId,
+      });
+      throw new SessionNotFoundError();
+    }
   },
 
   /**

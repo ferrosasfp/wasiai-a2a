@@ -1540,6 +1540,10 @@ describe('requirePaymentOrA2AKey — key-session branch (WKH-121)', () => {
   });
 
   // revoked session → SESSION_TOKEN_INVALID (pre-debit)
+  // T-MW-REVOKED — WKH-122 AC-2 (regresión): una sesión con revoked_at != null
+  // es rechazada inmediatamente por el middleware (sin caché, sin débito).
+  // El middleware NO se modifica en WKH-122; este test cubre el efecto inmediato
+  // de keySessionService.revoke. NO cambiar la lógica del test.
   it('revoked session → 403 SESSION_TOKEN_INVALID (pre-debit)', async () => {
     mockSessionLookup.mockResolvedValue(
       makeKeySessionRow({ revoked_at: new Date().toISOString() }),
