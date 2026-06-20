@@ -318,6 +318,15 @@ export class SessionNotAllowedError extends Error {
   }
 }
 
+/** session_id inexistente o de otro owner → 404 disclosure-safe (WKH-122, AC-3). */
+export class SessionNotFoundError extends Error {
+  readonly code = 'SESSION_NOT_FOUND' as const;
+  constructor() {
+    super('Key session not found');
+    this.name = 'SessionNotFoundError';
+  }
+}
+
 /**
  * Operación que detectó el mismatch (PII-safe enum).
  * - `getBalance` / `deactivate`: ownership sobre `a2a_agent_keys` (WKH-53).

@@ -45,6 +45,7 @@ import {
   FundingWalletAlreadyBoundError,
   OwnershipMismatchError,
   SessionNotAllowedError,
+  SessionNotFoundError,
 } from '../services/security/errors.js';
 import type {
   A2AAgentKeyRow,
@@ -1169,6 +1170,53 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       // Contrato BLOQUEANTE: el body es un array plano de KeySessionListItem.
       const items = await keySessionService.list(callerKey.owner_ref);
       return reply.status(200).send(items);
+    },
+  );
+
+  /**
+   * DELETE /auth/key-session/:id — Revoke ONE session key (WKH-122).
+   * AC-1/AC-3/AC-4/AC-5. Authenticated with the MASTER key. Sub-session tokens
+   * are forbidden as authenticators (gate BEFORE resolveCallerKey). Ownership
+   * mismatch / unknown id → 404 SESSION_NOT_FOUND (disclosure-safe, CD-6).
+   */
+  fastify.delete(
+    '/key-session/:id',
+    async (
+      req: FastifyRequest<{ Params: { id: string } }>,
+      reply: FastifyReply,
+    ) => {
+      // AC-5: sub-revocation forbidden. A session token authenticator →
+      // 403 SESSION_NOT_ALLOWED (detect the prefix BEFORE resolveCallerKey,
+      // which would return null and lose the exact code, CD-5).
+      const rawKey = rawKeyFromRequest(req);
+      if (rawKey?.startsWith(KEY_SESSION_TOKEN_PREFIX)) {
+        const err = new SessionNotAllowedError();
+        return reply.status(403).send({ error_code: err.code });
+      }
+
+      // Auth (master key).
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      try {
+        await keySessionService.revoke(req.params.id, callerKey.owner_ref);
+        return reply.status(200).send({ revoked: true });
+      } catch (err) {
+        if (err instanceof SessionNotFoundError) {
+          return reply.status(404).send({ error_code: 'SESSION_NOT_FOUND' });
+        }
+        fastify.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'key-session revoke failed',
+        );
+        return reply
+          .status(500)
+          .send({ error_code: 'KEY_SESSION_REVOKE_FAILED' });
+      }
     },
   );
 
