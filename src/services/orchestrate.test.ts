@@ -37,6 +37,15 @@ vi.mock('./event.js', () => ({
   },
 }));
 
+// WKH-124: orchestrate emits a protocol_fee receipt fire-and-forget when the fee
+// is charged. Mock the service so we can assert AC-1 without touching the payment
+// contract, and verify a rejecting emit never breaks the orchestrate result.
+vi.mock('./receipt.js', () => ({
+  receiptService: {
+    emit: vi.fn().mockResolvedValue(undefined),
+  },
+}));
+
 // WKH-44: mock fee-charge. Preservamos `ProtocolFeeError` (es una clase
 // real que el SUT usa en `instanceof`) y reemplazamos las funciones.
 vi.mock('./fee-charge.js', async () => {
@@ -64,6 +73,7 @@ import {
   ProtocolFeeError,
 } from './fee-charge.js';
 import { orchestrateService } from './orchestrate.js';
+import { receiptService } from './receipt.js';
 
 // ─── Fixtures ────────────────────────────────────────────────
 
@@ -702,5 +712,97 @@ describe('orchestrateService', () => {
 
     const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
     expect(composeCall.chainId).toBeUndefined();
+  });
+
+  // ─── WKH-124 ─ protocol_fee receipt emission (AC-1 / AC-6) ──────────────
+
+  function makeScopingKeyRow() {
+    // Minimal A2AAgentKeyRow lineage source available at the orchestrate
+    // call-site (request.scopingKeyRow). Only owner_ref + id are read by the
+    // receipt emission; the rest is unused here (cast to the type for the call).
+    return {
+      id: 'scoping-key-1',
+      owner_ref: 'owner-1',
+    } as unknown as import('../types/index.js').A2AAgentKeyRow;
+  }
+
+  // T-25 (WKH-124 AC-1): fee charged → emit protocol_fee with fee wallet counterparty.
+  it('T-25: charged fee emits protocol_fee receipt from scopingKeyRow lineage', async () => {
+    process.env.WASIAI_PROTOCOL_FEE_WALLET = '0xFEEWALLET';
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01);
+    vi.mocked(receiptService.emit).mockResolvedValue(undefined);
+    vi.mocked(chargeProtocolFee).mockResolvedValueOnce({
+      status: 'charged',
+      feeUsdc: 0.01,
+      txHash: '0xFEE',
+    });
+    setLlmOneAgent();
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'fee receipt',
+        budget: 1.0,
+        chainId: 2368,
+        scopingKeyRow: makeScopingKeyRow(),
+      },
+      'orch-25',
+    );
+
+    expect(vi.mocked(receiptService.emit)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ownerRef: 'owner-1',
+        agentKeyId: 'scoping-key-1',
+        receiptType: 'protocol_fee',
+        chainId: 2368,
+        txHash: '0xFEE',
+        counterparty: '0xFEEWALLET',
+        orchestrationId: 'orch-25',
+      }),
+    );
+    delete process.env.WASIAI_PROTOCOL_FEE_WALLET;
+  });
+
+  // T-26 (WKH-124 AC-6): a rejecting emit NEVER breaks the orchestrate result.
+  it('T-26: rejecting receipt emit does not interrupt the orchestrate return', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01);
+    vi.mocked(receiptService.emit).mockRejectedValue(new Error('receipt down'));
+    vi.mocked(chargeProtocolFee).mockResolvedValueOnce({
+      status: 'charged',
+      feeUsdc: 0.01,
+      txHash: '0xFEE',
+    });
+    setLlmOneAgent();
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'fee receipt fails',
+        budget: 1.0,
+        chainId: 2368,
+        scopingKeyRow: makeScopingKeyRow(),
+      },
+      'orch-26',
+    );
+
+    expect(result.feeChargeTxHash).toBe('0xFEE');
+    expect(result.answer).toBeDefined();
+  });
+
+  // T-27 (WKH-124 CD-D): without scopingKeyRow → no emit (no owner lineage).
+  it('T-27: no scopingKeyRow → protocol_fee receipt NOT emitted', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01);
+    vi.mocked(receiptService.emit).mockResolvedValue(undefined);
+    vi.mocked(chargeProtocolFee).mockResolvedValueOnce({
+      status: 'charged',
+      feeUsdc: 0.01,
+      txHash: '0xFEE',
+    });
+    setLlmOneAgent();
+
+    await orchestrateService.orchestrate(
+      { goal: 'no scoping key', budget: 1.0, chainId: 2368 },
+      'orch-27',
+    );
+
+    expect(vi.mocked(receiptService.emit)).not.toHaveBeenCalled();
   });
 });

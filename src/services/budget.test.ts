@@ -28,9 +28,28 @@ vi.mock('./delegation.js', async () => {
   };
 });
 
+// WKH-124: budget.ts now emits budget_debit receipts fire-and-forget on the
+// key-session / delegation success paths. Mock the service so we can assert the
+// emission shape WITHOUT touching the debit signature (CD-7) and so a rejecting
+// emit cannot affect the debit result (CD-1 / AC-6).
+vi.mock('./receipt.js', () => ({
+  receiptService: { emit: vi.fn() },
+}));
+
+// WKH-124 (MNR-3): exercise the key-session success path to assert its receipt
+// emission. budget.ts routes to keySessionService.debitSessionAndParent on that
+// path; mock it so we can drive a success without hitting the DB.
+vi.mock('./key-session.js', () => ({
+  keySessionService: {
+    debitSessionAndParent: vi.fn(),
+  },
+}));
+
 import { supabase } from '../lib/supabase.js';
 import { budgetService } from './budget.js';
 import { delegationService } from './delegation.js';
+import { keySessionService } from './key-session.js';
+import { receiptService } from './receipt.js';
 import {
   AgentKeyBudgetExhaustedError,
   AgentKeyInactiveError,
@@ -49,12 +68,21 @@ const mockRpc = vi.mocked(supabase.rpc);
 const mockDebitDelegation = vi.mocked(
   delegationService.debitDelegationAndParent,
 );
+const mockReceiptEmit = vi.mocked(receiptService.emit);
+const mockDebitSession = vi.mocked(keySessionService.debitSessionAndParent);
 
 const DELEGATION_CTX = {
   delegationId: 'del-1',
   ownerRef: 'user-1',
   keyId: 'key-1',
   maxAmountPerTx: '0.50',
+};
+
+// WKH-124 (MNR-3): key-session debit context (no per-tx limit field).
+const KEY_SESSION_CTX = {
+  sessionId: 'sess-1',
+  ownerRef: 'user-1',
+  keyId: 'key-1',
 };
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -80,6 +108,9 @@ function chainMock(overrides: Record<string, unknown> = {}) {
 describe('budgetService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // WKH-124: emit is fire-and-forget (`.emit(...).catch(...)`); default it to a
+    // resolved promise so the `.catch` chain never sees `undefined`.
+    mockReceiptEmit.mockResolvedValue(undefined);
   });
 
   describe('getBalance', () => {
@@ -239,6 +270,77 @@ describe('budgetService', () => {
         0.3,
       );
       expect(mockRpc).not.toHaveBeenCalled();
+      expect(result).toEqual({ success: true });
+    });
+
+    // ── WKH-124 (AC-2): budget_debit receipt on the delegation success path ──
+    it('WKH-124 (AC-2): delegation success emits budget_debit with delegation_id', async () => {
+      mockDebitDelegation.mockResolvedValue('0.30');
+
+      await budgetService.debit('key-1', 2368, 0.3, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '0.50',
+      });
+
+      expect(mockReceiptEmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ownerRef: 'user-1',
+          agentKeyId: 'key-1',
+          sessionId: null,
+          delegationId: 'del-1',
+          receiptType: 'budget_debit',
+          amountUsd: 0.3,
+          chainId: 2368,
+        }),
+      );
+    });
+
+    it('WKH-124 (AC-2/AC-6): a rejecting emit does NOT break the debit result', async () => {
+      mockDebitDelegation.mockResolvedValue('0.30');
+      mockReceiptEmit.mockRejectedValue(new Error('receipt down'));
+
+      const result = await budgetService.debit('key-1', 2368, 0.3, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '0.50',
+      });
+
+      expect(result).toEqual({ success: true });
+    });
+
+    // ── WKH-124 (AC-2, MNR-3): budget_debit receipt on the key-session path ──
+    // Mirrors the delegation receipt test but for the key-session call-site
+    // (budget.ts ~L88): asserts the session lineage (session_id + owner_ref +
+    // agent_key_id) and budget_debit type without touching the debit signature.
+    it('WKH-124 (AC-2): key-session success emits budget_debit with session_id', async () => {
+      mockDebitSession.mockResolvedValue('0.30');
+
+      await budgetService.debit('key-1', 2368, 0.3, undefined, KEY_SESSION_CTX);
+
+      expect(mockReceiptEmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ownerRef: 'user-1',
+          agentKeyId: 'key-1',
+          sessionId: 'sess-1',
+          delegationId: null,
+          receiptType: 'budget_debit',
+          amountUsd: 0.3,
+          chainId: 2368,
+        }),
+      );
+    });
+
+    it('WKH-124 (AC-2/AC-6): a rejecting emit does NOT break the key-session debit', async () => {
+      mockDebitSession.mockResolvedValue('0.30');
+      mockReceiptEmit.mockRejectedValue(new Error('receipt down'));
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.3,
+        undefined,
+        KEY_SESSION_CTX,
+      );
+
       expect(result).toEqual({ success: true });
     });
 
