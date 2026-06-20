@@ -36,6 +36,7 @@ import {
   SessionExpiredError,
   SessionNotFoundError,
   SessionTokenInvalidError,
+  SigningSecretNotSetError,
 } from './security/errors.js';
 
 const KEY_SESSION_TOKEN_PREFIX = 'wasi_a2a_sess_';
@@ -183,12 +184,27 @@ export const keySessionService = {
       .toString('hex')}`;
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
+    // 6b. WKH-123 (AC-11): si require_signature:true, generar signing_secret de
+    //     32 bytes y persistir SOLO su SHA-256 (= la HMAC key). El secret plano
+    //     se devuelve UNA vez en la 201 y NUNCA se persiste ni loguea (CD-5).
+    const requireSignature = input.require_signature === true;
+    let signingSecret: string | undefined;
+    let signingSecretHash: string | null = null;
+    if (requireSignature) {
+      signingSecret = crypto.randomBytes(32).toString('hex');
+      signingSecretHash = crypto
+        .createHash('sha256')
+        .update(signingSecret)
+        .digest('hex');
+    }
+
     // 7. Scope efectivo persistido (null = hereda restricción del padre, DT-4).
     const allowedRegistries = effectiveScope(input.allowed_registries);
     const allowedAgentSlugs = effectiveScope(input.allowed_agent_slugs);
     const allowedCategories = effectiveScope(input.allowed_categories);
 
-    // 8. INSERT. owner_ref/key_id desde parentKey (NUNCA del request).
+    // 8. INSERT. owner_ref/key_id desde parentKey (NUNCA del request). El INSERT
+    //    SOLO lleva signing_secret_hash — jamás el plano (CD-5).
     const row: Record<string, unknown> = {
       key_id: parentKey.id,
       owner_ref: parentKey.owner_ref,
@@ -199,6 +215,8 @@ export const keySessionService = {
       allowed_registries: allowedRegistries,
       allowed_agent_slugs: allowedAgentSlugs,
       allowed_categories: allowedCategories,
+      require_signature: requireSignature,
+      signing_secret_hash: signingSecretHash,
     };
 
     const { data, error } = await supabase
@@ -211,7 +229,7 @@ export const keySessionService = {
       throw new Error(`Failed to create key session: ${error.message}`);
     }
 
-    return {
+    const response: KeySessionResponse = {
       session_id: (data as { id: string }).id,
       session_token: token, // plano, SOLO acá (nunca se vuelve a exponer)
       expires_at: expiresAtIso,
@@ -222,6 +240,11 @@ export const keySessionService = {
         allowed_categories: allowedCategories,
       },
     };
+    // AC-11: el secret plano viaja UNA sola vez (solo si require_signature:true).
+    if (signingSecret !== undefined) {
+      response.signing_secret = signingSecret;
+    }
+    return response;
   },
 
   /**
@@ -344,6 +367,65 @@ export const keySessionService = {
         op: 'keySessionRevoke',
         resourceId: sessionId,
         callerOwnerRef: ownerId,
+      });
+      throw new SessionNotFoundError();
+    }
+  },
+
+  /**
+   * Toggle `require_signature` en una session key (WKH-123, AC-10). Ownership
+   * Guard disclosure-safe (igual que `revoke`): el row se ubica por id +
+   * owner_ref. Si no matchea (no existe o de otro owner) → SessionNotFoundError
+   * (404). Al ACTIVAR, la sesión DEBE tener `signing_secret_hash` (se setea solo
+   * al crear con require_signature:true, AC-11) → si no, SigningSecretNotSetError
+   * (400). `ownerRef` es requerido (NUNCA `string | undefined`, CD-4).
+   */
+  async setRequireSignature(
+    sessionId: string,
+    ownerRef: string,
+    value: boolean,
+  ): Promise<void> {
+    // 1. Localizar el row del owner (disclosure-safe) y leer el estado del secret.
+    const { data: rows, error: selErr } = await supabase
+      .from('a2a_key_sessions')
+      .select('id, signing_secret_hash')
+      .eq('id', sessionId)
+      .eq('owner_ref', ownerRef);
+
+    if (selErr) {
+      throw new Error(`Failed to load key session: ${selErr.message}`);
+    }
+    if (!rows || rows.length === 0) {
+      logOwnershipMismatch({
+        op: 'requireSignature',
+        resourceId: sessionId,
+        callerOwnerRef: ownerRef,
+      });
+      throw new SessionNotFoundError();
+    }
+
+    // 2. Al activar, exigir que el secret HMAC exista (AC-11/contrato).
+    const row = rows[0] as { id: string; signing_secret_hash: string | null };
+    if (value === true && row.signing_secret_hash === null) {
+      throw new SigningSecretNotSetError();
+    }
+
+    // 3. UPDATE guarded por id + owner_ref (Ownership Guard completo).
+    const { data, error } = await supabase
+      .from('a2a_key_sessions')
+      .update({ require_signature: value })
+      .eq('id', sessionId)
+      .eq('owner_ref', ownerRef)
+      .select('id');
+
+    if (error) {
+      throw new Error(`Failed to set require_signature: ${error.message}`);
+    }
+    if (!data || data.length === 0) {
+      logOwnershipMismatch({
+        op: 'requireSignature',
+        resourceId: sessionId,
+        callerOwnerRef: ownerRef,
       });
       throw new SessionNotFoundError();
     }

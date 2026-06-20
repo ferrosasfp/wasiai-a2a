@@ -265,6 +265,7 @@ export function makeKeyRow(
     agentkit_wallet: null,
     funding_wallet: null,
     metadata: {},
+    require_signature: false,
     ...overrides,
   };
 }

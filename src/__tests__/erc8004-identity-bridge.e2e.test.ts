@@ -246,6 +246,7 @@ describe('ERC-8004 identity-unified bridge (e2e)', () => {
       agentkit_wallet: null,
       funding_wallet: FUNDING_WALLET,
       metadata: {},
+      require_signature: false,
     });
   });
 

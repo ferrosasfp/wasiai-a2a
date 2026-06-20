@@ -61,6 +61,12 @@ export interface A2AAgentKeyRow {
   funding_wallet: string | null; // WKH-35 FIX-1: bound depositor wallet (lowercase)
   metadata: Record<string, unknown>;
   /**
+   * WKH-123: opt-in per-request signature auth (EIP-712, master keys). When
+   * `true` the middleware requires a valid `x-a2a-signature` recovering the
+   * bound `funding_wallet`. Default `false` = bearer puro (back-compat, CD-1).
+   */
+  require_signature: boolean;
+  /**
    * WKH-100 (DT-17): transient, in-memory derived flag — NOT a DB column.
    * Set by the middleware / resolveCallerKey from `erc8004_identity != null`.
    */
@@ -281,6 +287,16 @@ export interface KeySessionRow {
   derivation_mode: string; // 'server'
   revoked_at: string | null; // null = activa
   created_at: string;
+  /**
+   * WKH-123: opt-in per-request signature auth (HMAC-SHA256, session keys).
+   * Default `false` = bearer puro (back-compat, CD-1).
+   */
+  require_signature: boolean;
+  /**
+   * WKH-123: `SHA-256(signing_secret)` (= la HMAC key). NULL = sin secret
+   * (HMAC no disponible). El secret plano NUNCA se persiste (CD-5).
+   */
+  signing_secret_hash: string | null;
 }
 
 /** Input del POST /auth/key-session. */
@@ -290,6 +306,7 @@ export interface CreateKeySessionInput {
   allowed_registries?: string[]; // ausente = hereda restricción del padre
   allowed_agent_slugs?: string[]; // ausente = hereda restricción del padre
   allowed_categories?: string[]; // ausente = hereda restricción del padre
+  require_signature?: boolean; // WKH-123: opt-in HMAC; genera signing_secret
 }
 
 /** Respuesta 201 del POST /auth/key-session (token devuelto UNA vez). */
@@ -303,6 +320,12 @@ export interface KeySessionResponse {
     allowed_agent_slugs: string[] | null;
     allowed_categories: string[] | null;
   };
+  /**
+   * WKH-123 (AC-11): plano de 32 bytes hex (64 chars) devuelto UNA SOLA vez
+   * cuando la sesión se creó con `require_signature: true`. Nunca aparece en
+   * GET/list posteriores. El server persiste SOLO su SHA-256 (CD-5).
+   */
+  signing_secret?: string;
 }
 
 /** Item del GET /auth/key-session (sin token, con status derivado). */
@@ -329,4 +352,58 @@ export interface KeySessionDebitContext {
   sessionId: string; // a2a_key_sessions.id
   ownerRef: string; // = parentKey.owner_ref (Ownership Guard DB-layer)
   keyId: string; // = parentKey.id (cross-check con la sesión)
+}
+
+// ============================================================
+// SIGNED AUTH (WKH-123 — per-request signature, opt-in)
+// ============================================================
+
+/** Error codes del check de firma (middleware + service). */
+export type SignedAuthErrorCode =
+  | 'SIGNATURE_REQUIRED'
+  | 'SIGNATURE_INVALID'
+  | 'NONCE_REPLAY'
+  | 'TIMESTAMP_EXPIRED'
+  | 'FUNDING_WALLET_NOT_BOUND';
+
+/**
+ * Headers de firma extraídos del request (todos opcionales — ausencia =
+ * back-compat bearer). El middleware los obtiene con `extractSignedHeaders`.
+ */
+export interface SignedAuthHeaders {
+  signature?: string; // x-a2a-signature
+  nonce?: string; // x-a2a-nonce
+  timestamp?: string; // x-a2a-timestamp (epoch seconds, string)
+}
+
+/**
+ * Resultado discriminado del orquestador `verifySignedAuth`. `ok:true` →
+ * continuar al debit; `ok:false` → mapear `code` a HTTP en el middleware.
+ */
+export type SignedAuthResult =
+  | { ok: true }
+  | { ok: false; code: SignedAuthErrorCode };
+
+/** Row de a2a_signed_auth_nonces (anti-replay, UNIQUE(token_hash, nonce)). */
+export interface SignedAuthNonceRow {
+  token_hash: string;
+  nonce: string;
+  expires_at: string; // ISO timestamp (now + ttl)
+  created_at: string;
+}
+
+/** Domain EIP-712 del request (distinto del de delegación). */
+export interface RequestEip712Domain {
+  name: string;
+  version: string;
+  chainId: number;
+}
+
+/** Mensaje EIP-712 del request (primaryType = "Request"). */
+export interface RequestTypedDataMessage {
+  token_hash: `0x${string}`; // bytes32 (`0x${hash}` lowercase)
+  method: string;
+  path: string;
+  nonce: `0x${string}`; // bytes32 hex
+  timestamp: bigint; // uint64
 }
