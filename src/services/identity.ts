@@ -124,6 +124,39 @@ export const identityService = {
   },
 
   /**
+   * Toggle `require_signature` on a master key (WKH-123, AC-10). Ownership Guard
+   * (CLAUDE.md / CD-4): UPDATE filtered by id AND owner_ref so a caller can only
+   * flip ITS OWN key. `ownerRef` is required (NEVER `string | undefined`).
+   * 0 rows matched → logOwnershipMismatch + OwnershipMismatchError (403). The
+   * route validates `funding_wallet` is bound before enabling (AC-9 surface).
+   */
+  async setRequireSignature(
+    keyId: string,
+    ownerRef: string,
+    value: boolean,
+  ): Promise<void> {
+    const { data, error } = await supabase
+      .from('a2a_agent_keys')
+      .update({ require_signature: value })
+      .eq('id', keyId)
+      .eq('owner_ref', ownerRef)
+      .select('id');
+
+    if (error) {
+      throw new Error(`Failed to set require_signature: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) {
+      logOwnershipMismatch({
+        op: 'requireSignature',
+        resourceId: keyId,
+        callerOwnerRef: ownerRef,
+      });
+      throw new OwnershipMismatchError();
+    }
+  },
+
+  /**
    * Bind a funding wallet to a key (WKH-35 FIX-1). The caller proved control
    * of `wallet` (signature verified at the route). Stored lowercase.
    *

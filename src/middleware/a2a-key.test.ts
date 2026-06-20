@@ -58,6 +58,14 @@ vi.mock('../services/key-session.js', () => ({
   },
 }));
 
+// WKH-123: middleware imports verifySignedAuth for the per-request signature
+// check (master EIP-712 + session HMAC). Mocked so tests drive the result
+// without hitting supabase; the orchestrator's own logic is covered in
+// signed-auth.test.ts (unit, real crypto round-trip).
+vi.mock('../services/signed-auth.js', () => ({
+  verifySignedAuth: vi.fn(),
+}));
+
 // WKH-MULTICHAIN W2: registry mock exposes multi-chain Map + new getters.
 // `getAdaptersBundle(chainKey)` returns a per-chain bundle with chainConfig +
 // payment.supportedTokens, so the middleware can resolve the right chainId
@@ -194,6 +202,7 @@ import {
   DelegationTotalLimitExceededError,
   SessionBudgetExhaustedError,
 } from '../services/security/errors.js';
+import { verifySignedAuth } from '../services/signed-auth.js';
 import type { DelegationRow, KeySessionRow } from '../types/index.js';
 import { requirePaymentOrA2AKey } from './a2a-key.js';
 
@@ -210,6 +219,7 @@ const mockGetPaymentAdapter = vi.mocked(getPaymentAdapter);
 const mockSessionLookup = vi.mocked(keySessionService.lookupByTokenHash);
 const mockSessionGetParent = vi.mocked(keySessionService.getParentKey);
 const mockSessionDebit = vi.mocked(keySessionService.debitSessionAndParent);
+const mockVerifySignedAuth = vi.mocked(verifySignedAuth);
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -243,6 +253,7 @@ function makeKeyRow(overrides: Partial<A2AAgentKeyRow> = {}): A2AAgentKeyRow {
     agentkit_wallet: null,
     funding_wallet: null,
     metadata: {},
+    require_signature: false,
     ...overrides,
   };
 }
@@ -1443,6 +1454,8 @@ function makeKeySessionRow(
     derivation_mode: 'server',
     revoked_at: null,
     created_at: new Date().toISOString(),
+    require_signature: false,
+    signing_secret_hash: null,
     ...overrides,
   };
 }
@@ -1679,5 +1692,326 @@ describe('requirePaymentOrA2AKey — key-session branch (WKH-121)', () => {
     expect(mockLookupToken).toHaveBeenCalledWith(SESSION_HASH);
     // WKH-121 session service is NEVER touched by a session_ token.
     expect(mockSessionLookup).not.toHaveBeenCalled();
+  });
+});
+
+// ── WKH-123: SIGNED AUTH (per-request signature, opt-in) ─────────
+// verifySignedAuth está mockeado (su crypto se cubre en signed-auth.test.ts).
+// Acá probamos el cableado del middleware: cuándo se invoca, cómo se mapean los
+// error_codes a HTTP, y la back-compat absoluta (require_signature:false).
+
+describe('requirePaymentOrA2AKey — signed auth (WKH-123)', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    app = Fastify();
+    app.post(
+      '/test',
+      { preHandler: requirePaymentOrA2AKey({ description: 'Test endpoint' }) },
+      async (request: FastifyRequest, reply: FastifyReply) => {
+        return reply.send({
+          ok: true,
+          a2aKeyId: request.a2aKeyRow?.id ?? null,
+          keySessionId: request.keySessionRow?.id ?? null,
+        });
+      },
+    );
+    await app.ready();
+  });
+
+  afterAll(() => app.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMockRegistryState(['kite-ozone-testnet'], 'kite-ozone-testnet');
+  });
+
+  const SIG_HEADERS = {
+    'x-a2a-signature': '0xsig',
+    'x-a2a-nonce': `0x${'a'.repeat(64)}`,
+    'x-a2a-timestamp': String(Math.floor(Date.now() / 1000)),
+  };
+
+  // ── AC-1: master EIP-712 OK → debit ───────────────────────
+  it('AC-1: master require_signature + valid signature → 200, debit proceeds', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({
+        require_signature: true,
+        funding_wallet: '0x1111111111111111111111111111111111111111',
+      }),
+    );
+    mockVerifySignedAuth.mockResolvedValue({ ok: true });
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('9.00');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY, ...SIG_HEADERS },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockVerifySignedAuth).toHaveBeenCalledTimes(1);
+    // EIP-712 scheme with the bound funding_wallet, token_hash = keyHash (no 0x).
+    expect(mockVerifySignedAuth).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokenHashHex: TEST_KEY_HASH,
+        method: 'POST',
+        path: '/test',
+        scheme: {
+          kind: 'eip712',
+          fundingWallet: '0x1111111111111111111111111111111111111111',
+        },
+      }),
+    );
+    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+  });
+
+  // ── AC-2: session HMAC OK → debit ─────────────────────────
+  it('AC-2: session require_signature + valid HMAC → 200, atomic session debit', async () => {
+    mockSessionLookup.mockResolvedValue(
+      makeKeySessionRow({
+        require_signature: true,
+        signing_secret_hash: 'f'.repeat(64),
+      }),
+    );
+    mockSessionGetParent.mockResolvedValue(makeKeyRow());
+    mockVerifySignedAuth.mockResolvedValue({ ok: true });
+    mockSessionDebit.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('9.00');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}`, ...SIG_HEADERS },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockVerifySignedAuth).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokenHashHex: SESS_HASH,
+        scheme: { kind: 'hmac', signingSecretHash: 'f'.repeat(64) },
+      }),
+    );
+    expect(mockSessionDebit).toHaveBeenCalledTimes(1);
+  });
+
+  // ── AC-3: missing signature → 401 SIGNATURE_REQUIRED (master + session) ──
+  it('AC-3 master: require_signature but no x-a2a-signature → 401 SIGNATURE_REQUIRED, no debit', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({
+        require_signature: true,
+        funding_wallet: '0x1111111111111111111111111111111111111111',
+      }),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY }, // sin headers de firma
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('SIGNATURE_REQUIRED');
+    expect(mockVerifySignedAuth).not.toHaveBeenCalled();
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  it('AC-3 session: require_signature but no x-a2a-signature → 401 SIGNATURE_REQUIRED, no debit', async () => {
+    mockSessionLookup.mockResolvedValue(
+      makeKeySessionRow({
+        require_signature: true,
+        signing_secret_hash: 'f'.repeat(64),
+      }),
+    );
+    mockSessionGetParent.mockResolvedValue(makeKeyRow());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('SIGNATURE_REQUIRED');
+    expect(mockVerifySignedAuth).not.toHaveBeenCalled();
+    expect(mockSessionDebit).not.toHaveBeenCalled();
+  });
+
+  // ── AC-4: signature invalid → 401 SIGNATURE_INVALID ───────
+  it('AC-4 master: recover != funding_wallet → 401 SIGNATURE_INVALID, no debit', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({
+        require_signature: true,
+        funding_wallet: '0x1111111111111111111111111111111111111111',
+      }),
+    );
+    mockVerifySignedAuth.mockResolvedValue({
+      ok: false,
+      code: 'SIGNATURE_INVALID',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY, ...SIG_HEADERS },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('SIGNATURE_INVALID');
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  it('AC-4 session: HMAC mismatch → 401 SIGNATURE_INVALID, no debit', async () => {
+    mockSessionLookup.mockResolvedValue(
+      makeKeySessionRow({
+        require_signature: true,
+        signing_secret_hash: 'f'.repeat(64),
+      }),
+    );
+    mockSessionGetParent.mockResolvedValue(makeKeyRow());
+    mockVerifySignedAuth.mockResolvedValue({
+      ok: false,
+      code: 'SIGNATURE_INVALID',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}`, ...SIG_HEADERS },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('SIGNATURE_INVALID');
+    expect(mockSessionDebit).not.toHaveBeenCalled();
+  });
+
+  // ── AC-5: nonce replay → 401 NONCE_REPLAY (even with valid signature) ──
+  it('AC-5: replayed nonce → 401 NONCE_REPLAY, no debit', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({
+        require_signature: true,
+        funding_wallet: '0x1111111111111111111111111111111111111111',
+      }),
+    );
+    mockVerifySignedAuth.mockResolvedValue({ ok: false, code: 'NONCE_REPLAY' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY, ...SIG_HEADERS },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('NONCE_REPLAY');
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  // ── AC-6: timestamp out of window → 401 TIMESTAMP_EXPIRED ──
+  it('AC-6: timestamp out of window → 401 TIMESTAMP_EXPIRED, no debit', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({
+        require_signature: true,
+        funding_wallet: '0x1111111111111111111111111111111111111111',
+      }),
+    );
+    mockVerifySignedAuth.mockResolvedValue({
+      ok: false,
+      code: 'TIMESTAMP_EXPIRED',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY, ...SIG_HEADERS },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('TIMESTAMP_EXPIRED');
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  // ── AC-7: back-compat — require_signature:false → bearer puro ──
+  it('AC-7 master: require_signature false → bearer flow, signature check skipped even if headers present', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow()); // require_signature:false (default)
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('9.00');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY, ...SIG_HEADERS }, // headers presentes → IGNORADOS
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockVerifySignedAuth).not.toHaveBeenCalled();
+    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+  });
+
+  it('AC-7 session: require_signature false → bearer flow, signature check skipped', async () => {
+    mockSessionLookup.mockResolvedValue(makeKeySessionRow()); // require_signature:false
+    mockSessionGetParent.mockResolvedValue(makeKeyRow());
+    mockSessionDebit.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('9.00');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESS_TOKEN}`, ...SIG_HEADERS },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockVerifySignedAuth).not.toHaveBeenCalled();
+    expect(mockSessionDebit).toHaveBeenCalledTimes(1);
+  });
+
+  // ── AC-8: WKH-101 branch ignores the x-a2a-* headers entirely ──
+  it('AC-8: wasi_a2a_session_ (WKH-101) with signature headers → branch processes WITHOUT verifySignedAuth', async () => {
+    mockLookupToken.mockResolvedValue(null); // delegation lookup → 401 (branch reached)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}`, ...SIG_HEADERS },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('INVALID_SESSION_TOKEN');
+    // WKH-123 NUNCA toca el branch WKH-101.
+    expect(mockVerifySignedAuth).not.toHaveBeenCalled();
+    expect(mockLookupToken).toHaveBeenCalledWith(SESSION_HASH);
+  });
+
+  // ── AC-9: master require_signature:true + funding_wallet null → 403 ──
+  it('AC-9: master require_signature + funding_wallet null → 403 FUNDING_WALLET_NOT_BOUND, no debit', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({ require_signature: true, funding_wallet: null }),
+    );
+    mockVerifySignedAuth.mockResolvedValue({
+      ok: false,
+      code: 'FUNDING_WALLET_NOT_BOUND',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test',
+      headers: { 'x-a2a-key': TEST_KEY, ...SIG_HEADERS },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('FUNDING_WALLET_NOT_BOUND');
+    expect(mockDebit).not.toHaveBeenCalled();
   });
 });

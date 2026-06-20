@@ -6,6 +6,7 @@
  * AC-13 (status derivado), CD-AB-1 (mapeo completo de prefijos RPC, sin leak PG).
  */
 
+import crypto from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ── Mocks ──────────────────────────────────────────────────
@@ -40,6 +41,7 @@ import {
   SessionExpiredError,
   SessionNotFoundError,
   SessionTokenInvalidError,
+  SigningSecretNotSetError,
 } from './security/errors.js';
 
 const mockFrom = vi.mocked(supabase.from);
@@ -72,6 +74,7 @@ function makeParentKey(
     agentkit_wallet: null,
     funding_wallet: null,
     metadata: {},
+    require_signature: false,
     ...overrides,
   };
 }
@@ -231,6 +234,135 @@ describe('create', () => {
       makeInput(),
     );
     expect(result.scope.allowed_registries).toBeNull();
+  });
+
+  // ── WKH-123 (AC-11 / CD-5): signing_secret ────────────────
+  it('AC-11 require_signature:true → genera secret, persiste SOLO hash, devuelve plano una vez', async () => {
+    const insertChain = chainMock();
+    insertChain.single = vi
+      .fn()
+      .mockResolvedValue({ data: { id: 'sess-1' }, error: null });
+    mockFrom.mockReturnValue(
+      insertChain as unknown as ReturnType<typeof supabase.from>,
+    );
+
+    const result = await keySessionService.create(
+      makeParentKey(),
+      makeInput({ require_signature: true }),
+    );
+
+    // El plano viaja UNA vez, 32 bytes = 64 hex chars.
+    expect(result.signing_secret).toMatch(/^[0-9a-f]{64}$/);
+
+    const insertedRow = (insertChain.insert as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as Record<string, unknown>;
+    // CD-5: el INSERT lleva el HASH, NUNCA el plano.
+    expect(insertedRow.require_signature).toBe(true);
+    expect(insertedRow.signing_secret_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(insertedRow).not.toHaveProperty('signing_secret');
+    expect(JSON.stringify(insertedRow)).not.toContain(
+      result.signing_secret as string,
+    );
+    // El hash persistido === SHA-256 del secret plano devuelto.
+    const expectedHash = crypto
+      .createHash('sha256')
+      .update(result.signing_secret as string)
+      .digest('hex');
+    expect(insertedRow.signing_secret_hash).toBe(expectedHash);
+  });
+
+  it('require_signature ausente → no secret, hash null, sin signing_secret en la respuesta', async () => {
+    const insertChain = chainMock();
+    insertChain.single = vi
+      .fn()
+      .mockResolvedValue({ data: { id: 'sess-1' }, error: null });
+    mockFrom.mockReturnValue(
+      insertChain as unknown as ReturnType<typeof supabase.from>,
+    );
+
+    const result = await keySessionService.create(makeParentKey(), makeInput());
+
+    expect(result.signing_secret).toBeUndefined();
+    const insertedRow = (insertChain.insert as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as Record<string, unknown>;
+    expect(insertedRow.require_signature).toBe(false);
+    expect(insertedRow.signing_secret_hash).toBeNull();
+  });
+});
+
+// ── setRequireSignature (WKH-123, AC-10) ─────────────────────
+describe('setRequireSignature', () => {
+  /**
+   * Mock de una cadena `.select().eq().eq()` (SELECT del row) que resuelve en el
+   * SEGUNDO `.eq` (id + owner_ref).
+   */
+  function selectChain(result: { data: unknown; error: unknown }) {
+    return {
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnValueOnce({
+        eq: vi.fn().mockResolvedValue(result),
+      }),
+    };
+  }
+
+  /**
+   * Mock de una cadena `.update().eq().eq().select()` (UPDATE) que resuelve en
+   * `.select()`.
+   */
+  function updateChain(result: { data: unknown; error: unknown }) {
+    return {
+      update: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnValueOnce({
+        eq: vi.fn().mockReturnValueOnce({
+          select: vi.fn().mockResolvedValue(result),
+        }),
+      }),
+    };
+  }
+
+  it('enable on a session with secret → UPDATE guarded by id + owner_ref', async () => {
+    mockFrom
+      .mockReturnValueOnce(
+        selectChain({
+          data: [{ id: 'sess-1', signing_secret_hash: 'f'.repeat(64) }],
+          error: null,
+        }) as unknown as ReturnType<typeof supabase.from>,
+      )
+      .mockReturnValueOnce(
+        updateChain({
+          data: [{ id: 'sess-1' }],
+          error: null,
+        }) as unknown as ReturnType<typeof supabase.from>,
+      );
+
+    await expect(
+      keySessionService.setRequireSignature('sess-1', 'user-1', true),
+    ).resolves.toBeUndefined();
+  });
+
+  it('enable on a session WITHOUT secret → SigningSecretNotSetError', async () => {
+    mockFrom.mockReturnValue(
+      selectChain({
+        data: [{ id: 'sess-1', signing_secret_hash: null }],
+        error: null,
+      }) as unknown as ReturnType<typeof supabase.from>,
+    );
+
+    await expect(
+      keySessionService.setRequireSignature('sess-1', 'user-1', true),
+    ).rejects.toBeInstanceOf(SigningSecretNotSetError);
+  });
+
+  it('unknown session / other owner → SessionNotFoundError (disclosure-safe)', async () => {
+    mockFrom.mockReturnValue(
+      selectChain({ data: [], error: null }) as unknown as ReturnType<
+        typeof supabase.from
+      >,
+    );
+
+    await expect(
+      keySessionService.setRequireSignature('sess-x', 'user-1', true),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
   });
 });
 

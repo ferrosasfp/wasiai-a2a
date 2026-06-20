@@ -38,12 +38,15 @@ import {
   SessionExpiredError,
   SessionTokenInvalidError,
 } from '../services/security/errors.js';
+import { verifySignedAuth } from '../services/signed-auth.js';
 import type {
   A2AAgentKeyRow,
   DelegationDebitContext,
   DelegationRow,
   KeySessionDebitContext,
   KeySessionRow,
+  SignedAuthErrorCode,
+  SignedAuthHeaders,
 } from '../types/index.js';
 import { type PaymentMiddlewareOptions, requirePayment } from './x402.js';
 
@@ -126,6 +129,34 @@ function send403session(
   message: string,
 ) {
   return reply.status(403).send({ error: message, error_code: code });
+}
+
+// ── WKH-123: signed-auth helpers (per-request signature, opt-in) ─
+
+/**
+ * Mapea un `SignedAuthErrorCode` al HTTP correcto: 403 para
+ * `FUNDING_WALLET_NOT_BOUND` (AC-9), 401 para el resto (AC-3..AC-6).
+ */
+function sendSignedAuthError(
+  reply: FastifyReply,
+  code: SignedAuthErrorCode,
+): FastifyReply {
+  const status = code === 'FUNDING_WALLET_NOT_BOUND' ? 403 : 401;
+  return reply.status(status).send({ error_code: code });
+}
+
+/**
+ * Extrae los 3 headers de firma del request. NUNCA loguea sus valores (CD-5).
+ * Ausencia → campos undefined (back-compat bearer si require_signature:false).
+ */
+function extractSignedHeaders(request: FastifyRequest): SignedAuthHeaders {
+  const pick = (h: string | string[] | undefined): string | undefined =>
+    typeof h === 'string' ? h : undefined;
+  return {
+    signature: pick(request.headers['x-a2a-signature']),
+    nonce: pick(request.headers['x-a2a-nonce']),
+    timestamp: pick(request.headers['x-a2a-timestamp']),
+  };
 }
 
 // ── x402 delegation helper ─────────────────────────────────
@@ -502,6 +533,34 @@ export function requirePaymentOrA2AKey(
           );
         }
 
+        // 3b. WKH-123 (AC-2): per-request signature opt-in (HMAC-SHA256). Va
+        //     DESPUÉS del lookup+is_active y ANTES del debit (CD-11). Si la
+        //     sesión NO exige firma → flujo bearer idéntico al pre-WKH-123
+        //     (headers de firma ignorados, CD-1/AC-7). El `hash` (L~470) es el
+        //     token_hash; HMAC lo usa hex SIN 0x.
+        if (session.require_signature === true) {
+          const headers = extractSignedHeaders(request);
+          if (
+            typeof headers.signature !== 'string' ||
+            headers.signature.length === 0
+          ) {
+            return reply.status(401).send({ error_code: 'SIGNATURE_REQUIRED' });
+          }
+          const signedResult = await verifySignedAuth({
+            tokenHashHex: hash,
+            method: request.method.toUpperCase(),
+            path: request.url.split('?')[0],
+            headers,
+            scheme: {
+              kind: 'hmac',
+              signingSecretHash: session.signing_secret_hash,
+            },
+          });
+          if (!signedResult.ok) {
+            return sendSignedAuthError(reply, signedResult.code);
+          }
+        }
+
         // 4. resolver chain/bundle → chainId (REUSO del bloque master).
         const chain = resolveTargetChain(request, reply);
         if (!chain) return; // resolveTargetChain ya envió la respuesta de error
@@ -674,6 +733,32 @@ export function requirePaymentOrA2AKey(
             'PER_CALL_LIMIT',
             'Estimated cost exceeds per-call limit',
           );
+        }
+      }
+
+      // 5b. WKH-123 (AC-1): per-request signature opt-in (EIP-712). Va DESPUÉS
+      //     del lookup+is_active+limites y ANTES del debit (CD-11). Si la key NO
+      //     exige firma → flujo bearer idéntico al pre-WKH-123 (headers de firma
+      //     ignorados, CD-1/AC-7). El `keyHash` (L~636) es el token_hash; EIP-712
+      //     lo usa como `0x${keyHash}` (lo agrega el service). El server
+      //     reconstruye el typed-data; el caller manda SOLO la firma (CD-9).
+      if (keyRow.require_signature === true) {
+        const headers = extractSignedHeaders(request);
+        if (
+          typeof headers.signature !== 'string' ||
+          headers.signature.length === 0
+        ) {
+          return reply.status(401).send({ error_code: 'SIGNATURE_REQUIRED' });
+        }
+        const signedResult = await verifySignedAuth({
+          tokenHashHex: keyHash,
+          method: request.method.toUpperCase(),
+          path: request.url.split('?')[0],
+          headers,
+          scheme: { kind: 'eip712', fundingWallet: keyRow.funding_wallet },
+        });
+        if (!signedResult.ok) {
+          return sendSignedAuthError(reply, signedResult.code);
         }
       }
 

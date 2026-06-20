@@ -46,6 +46,7 @@ import {
   OwnershipMismatchError,
   SessionNotAllowedError,
   SessionNotFoundError,
+  SigningSecretNotSetError,
 } from '../services/security/errors.js';
 import type {
   A2AAgentKeyRow,
@@ -316,6 +317,14 @@ function parseCreateKeySessionInput(
     return null;
   }
 
+  // WKH-123: require_signature opcional; si presente DEBE ser boolean.
+  if (
+    b.require_signature !== undefined &&
+    typeof b.require_signature !== 'boolean'
+  ) {
+    return null;
+  }
+
   const input: CreateKeySessionInput = {
     ttl_seconds: b.ttl_seconds,
     max_budget_usd: maxBudget,
@@ -323,6 +332,9 @@ function parseCreateKeySessionInput(
   if (registries !== undefined) input.allowed_registries = registries;
   if (slugs !== undefined) input.allowed_agent_slugs = slugs;
   if (categories !== undefined) input.allowed_categories = categories;
+  if (b.require_signature !== undefined) {
+    input.require_signature = b.require_signature;
+  }
   return input;
 }
 
@@ -1216,6 +1228,135 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         return reply
           .status(500)
           .send({ error_code: 'KEY_SESSION_REVOKE_FAILED' });
+      }
+    },
+  );
+
+  /**
+   * PATCH /auth/agent-key/:id/require-signature — Toggle EIP-712 per-request
+   * signature on the caller's MASTER key (WKH-123, AC-10). Authenticated with
+   * the master key. `:id` must equal `callerKey.id` (defense-in-depth). Enabling
+   * requires a bound `funding_wallet` (AC-9 surface). Ownership Guard in the
+   * service (UPDATE filtered by id + owner_ref).
+   */
+  fastify.patch(
+    '/agent-key/:id/require-signature',
+    async (
+      req: FastifyRequest<{ Params: { id: string } }>,
+      reply: FastifyReply,
+    ) => {
+      // Sub-session/delegation tokens forbidden as authenticators.
+      const rawKey = rawKeyFromRequest(req);
+      if (
+        rawKey?.startsWith(KEY_SESSION_TOKEN_PREFIX) ||
+        rawKey?.startsWith(SESSION_TOKEN_PREFIX)
+      ) {
+        return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+      }
+
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      // Defense-in-depth: el id del path debe ser la key autenticada.
+      if (req.params.id !== callerKey.id) {
+        return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+      }
+
+      const body = req.body as { require_signature?: unknown } | undefined;
+      if (typeof body?.require_signature !== 'boolean') {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+      const value = body.require_signature;
+
+      // AC-9: activar firma requiere un funding_wallet bindeado.
+      if (value === true && !callerKey.funding_wallet) {
+        return reply
+          .status(400)
+          .send({ error_code: 'FUNDING_WALLET_NOT_BOUND' });
+      }
+
+      try {
+        await identityService.setRequireSignature(
+          callerKey.id,
+          callerKey.owner_ref,
+          value,
+        );
+        return reply.status(200).send({ ok: true, require_signature: value });
+      } catch (err) {
+        if (err instanceof OwnershipMismatchError) {
+          return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+        }
+        fastify.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'agent-key require-signature failed',
+        );
+        return reply
+          .status(500)
+          .send({ error_code: 'REQUIRE_SIGNATURE_FAILED' });
+      }
+    },
+  );
+
+  /**
+   * PATCH /auth/key-session/:id/require-signature — Toggle HMAC per-request
+   * signature on a session key (WKH-123, AC-10). Authenticated with the MASTER
+   * key. Enabling requires `signing_secret_hash` set (only at create-time with
+   * require_signature:true). Ownership mismatch / unknown id → 404
+   * SESSION_NOT_FOUND (disclosure-safe).
+   */
+  fastify.patch(
+    '/key-session/:id/require-signature',
+    async (
+      req: FastifyRequest<{ Params: { id: string } }>,
+      reply: FastifyReply,
+    ) => {
+      // Sub-session tokens forbidden as authenticators.
+      const rawKey = rawKeyFromRequest(req);
+      if (rawKey?.startsWith(KEY_SESSION_TOKEN_PREFIX)) {
+        const err = new SessionNotAllowedError();
+        return reply.status(403).send({ error_code: err.code });
+      }
+
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      const body = req.body as { require_signature?: unknown } | undefined;
+      if (typeof body?.require_signature !== 'boolean') {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+      const value = body.require_signature;
+
+      try {
+        await keySessionService.setRequireSignature(
+          req.params.id,
+          callerKey.owner_ref,
+          value,
+        );
+        return reply.status(200).send({ ok: true, require_signature: value });
+      } catch (err) {
+        if (err instanceof SigningSecretNotSetError) {
+          return reply
+            .status(400)
+            .send({ error_code: 'SIGNING_SECRET_NOT_SET' });
+        }
+        if (err instanceof SessionNotFoundError) {
+          return reply.status(404).send({ error_code: 'SESSION_NOT_FOUND' });
+        }
+        fastify.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'key-session require-signature failed',
+        );
+        return reply
+          .status(500)
+          .send({ error_code: 'REQUIRE_SIGNATURE_FAILED' });
       }
     },
   );

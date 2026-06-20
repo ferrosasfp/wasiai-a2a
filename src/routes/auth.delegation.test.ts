@@ -96,6 +96,7 @@ function makeKeyRow(overrides: Partial<A2AAgentKeyRow> = {}): A2AAgentKeyRow {
     agentkit_wallet: null,
     funding_wallet: FUNDING_WALLET,
     metadata: {},
+    require_signature: false,
     ...overrides,
   };
 }

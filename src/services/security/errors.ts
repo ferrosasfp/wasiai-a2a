@@ -328,11 +328,63 @@ export class SessionNotFoundError extends Error {
 }
 
 /**
+ * WKH-123 (signed auth): per-request signature errors. Mapeo error_code ↔ HTTP
+ * en el middleware (story §Contrato). Patrón `readonly code = '...' as const` +
+ * `name`. `FundingWalletNotBoundError` (L59) YA existe y se reusa (AC-9).
+ */
+
+/** `require_signature:true` y falta `x-a2a-signature` → 401. */
+export class SignatureRequiredError extends Error {
+  readonly code = 'SIGNATURE_REQUIRED' as const;
+  constructor() {
+    super('Request signature is required');
+    this.name = 'SignatureRequiredError';
+  }
+}
+
+/** firma presente pero recover≠funding_wallet (master) o HMAC no coincide → 401. */
+export class SignatureInvalidError extends Error {
+  readonly code = 'SIGNATURE_INVALID' as const;
+  constructor() {
+    super('Request signature is invalid');
+    this.name = 'SignatureInvalidError';
+  }
+}
+
+/** nonce ya visto para ese token dentro del TTL → 401. */
+export class NonceReplayError extends Error {
+  readonly code = 'NONCE_REPLAY' as const;
+  constructor() {
+    super('Signed-auth nonce already used');
+    this.name = 'NonceReplayError';
+  }
+}
+
+/** `x-a2a-timestamp` fuera de `±SIGNED_AUTH_CLOCK_SKEW_SECONDS` → 401. */
+export class TimestampExpiredError extends Error {
+  readonly code = 'TIMESTAMP_EXPIRED' as const;
+  constructor() {
+    super('Request timestamp expired or out of window');
+    this.name = 'TimestampExpiredError';
+  }
+}
+
+/** `require_signature:true` en una sesión sin `signing_secret_hash` → 400. */
+export class SigningSecretNotSetError extends Error {
+  readonly code = 'SIGNING_SECRET_NOT_SET' as const;
+  constructor() {
+    super('Signing secret is not set for this session');
+    this.name = 'SigningSecretNotSetError';
+  }
+}
+
+/**
  * Operación que detectó el mismatch (PII-safe enum).
  * - `getBalance` / `deactivate`: ownership sobre `a2a_agent_keys` (WKH-53).
  * - `registryUpdate` / `registryDelete`: ownership sobre `registries` (WKH-63).
  * - `delegationRevoke` / `delegationList`: ownership sobre `a2a_delegations` (WKH-101).
  * - `keySessionRevoke` / `keySessionList`: ownership sobre `a2a_key_sessions` (WKH-121).
+ * - `requireSignature`: ownership sobre `a2a_agent_keys`/`a2a_key_sessions` (WKH-123).
  */
 export type OwnershipOp =
   | 'getBalance'
@@ -342,7 +394,8 @@ export type OwnershipOp =
   | 'delegationRevoke'
   | 'delegationList'
   | 'keySessionRevoke'
-  | 'keySessionList';
+  | 'keySessionList'
+  | 'requireSignature';
 
 /**
  * PII-safe logger para cross-owner attempts.
