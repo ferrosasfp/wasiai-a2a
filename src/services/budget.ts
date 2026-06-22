@@ -294,14 +294,31 @@ export const budgetService = {
       return { success: true };
     }
 
-    // ── RUTA MASTER KEY — INTACTA (camino actual, CD-5) ──
+    // ── RUTA MASTER KEY — owner guard DB-level (WKH-SEC-02b) ──
+    // El RPC ahora exige p_owner_ref. Mismo SELECT cold-path que la ruta
+    // dest-aware (L247-255); solo esta ruta directa de baja frecuencia.
+    const { data: keyRow, error: ownerErr } = await supabase
+      .from('a2a_agent_keys')
+      .select('owner_ref')
+      .eq('id', keyId)
+      .single();
+    if (ownerErr || !keyRow) {
+      return { success: false, error: 'KEY_NOT_FOUND' };
+    }
+    const ownerRef = (keyRow as Pick<A2AAgentKeyRow, 'owner_ref'>).owner_ref;
+
     const { error } = await supabase.rpc('increment_a2a_key_spend', {
       p_key_id: keyId,
       p_chain_id: chainId,
       p_amount_usd: amountUsd,
+      p_owner_ref: ownerRef, // WKH-SEC-02b (AC-2)
     });
 
     if (error) {
+      // CD-3/AC-6: no propagar el msg crudo de PG para OWNERSHIP_MISMATCH.
+      if (error.message.includes('OWNERSHIP_MISMATCH')) {
+        return { success: false, error: 'OWNERSHIP_MISMATCH' };
+      }
       return { success: false, error: error.message };
     }
 
