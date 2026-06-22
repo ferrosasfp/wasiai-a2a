@@ -38,6 +38,7 @@ import {
   DelegationRevokedError,
   DelegationSignerMismatchError,
   DelegationTotalLimitExceededError,
+  DestCapExceededError,
   logOwnershipMismatch,
   OwnershipMismatchError,
 } from './security/errors.js';
@@ -380,6 +381,7 @@ export const delegationService = {
     keyId: string,
     chainId: number,
     amountUsd: number,
+    destination?: string,
   ): Promise<string> {
     const { data, error } = await supabase.rpc('debit_delegation_and_parent', {
       p_delegation_id: delegationId,
@@ -387,10 +389,17 @@ export const delegationService = {
       p_key_id: keyId,
       p_chain_id: chainId,
       p_amount_usd: amountUsd,
+      p_destination: destination ?? null,
     });
 
     if (error) {
       const msg = error.message;
+      // WKH-125b: la delegación hereda el cap por destino de la parent key; el RPC
+      // debit_delegation_and_parent dispatcha a debit_with_dest_policy. Mapear ANTES
+      // de los prefijos propios (CD-5: NUNCA propagar el msg crudo de PG).
+      if (msg.includes('DEST_CAP_EXCEEDED')) {
+        throw new DestCapExceededError();
+      }
       if (msg.includes('DELEGATION_TOTAL_LIMIT_EXCEEDED')) {
         throw new DelegationTotalLimitExceededError();
       }

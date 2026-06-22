@@ -373,17 +373,40 @@ export function requirePaymentOrA2AKey(
           'a2a-key.delegation.debit',
         );
         try {
-          // TODO(WKH-125b): dest cap no aplica a delegaciones EIP-712. WKH-125
-          // dejó "Extender políticas a delegaciones EIP-712" fuera de scope, por
-          // eso el step-0 de delegación NO propaga `composeDestination` al RPC.
-          await delegationService.debitDelegationAndParent(
-            delegation.id,
-            parentKey.owner_ref,
-            parentKey.id,
-            chainId,
-            estimatedCostUsd,
-          );
+          // WKH-125b: la delegación hereda el cap por destino de la parent key. El
+          // step-0 de un compose bajo delegación DEBE propagar `composeDestination`
+          // (canonicalizado por routes/compose.ts:resolveComposePriceHandler) al RPC
+          // debit_delegation_and_parent → debit_with_dest_policy. Sin esto el RPC
+          // recibía p_destination=NULL y el cap por destino se evadía (bypass).
+          // CONDICIONAL (espeja el branch session, CD-7): sólo con composeDestination
+          // pasamos el 6º arg; si no, la llamada de 5 args queda INTACTA (back-compat).
+          if (request.composeDestination) {
+            await delegationService.debitDelegationAndParent(
+              delegation.id,
+              parentKey.owner_ref,
+              parentKey.id,
+              chainId,
+              estimatedCostUsd,
+              request.composeDestination,
+            );
+          } else {
+            await delegationService.debitDelegationAndParent(
+              delegation.id,
+              parentKey.owner_ref,
+              parentKey.id,
+              chainId,
+              estimatedCostUsd,
+            );
+          }
         } catch (debitErr) {
+          // WKH-125b: cap por destino excedido bajo delegación → HTTP 402 (no 403),
+          // espejando el branch session. El budget NO se decrementó (rollback de la tx).
+          if (debitErr instanceof DestCapExceededError) {
+            return reply.status(402).send({
+              error: `chain ${chainId} destination cap exceeded`,
+              error_code: 'DEST_CAP_EXCEEDED',
+            });
+          }
           if (debitErr instanceof DelegationTotalLimitExceededError) {
             return send403delegation(
               reply,

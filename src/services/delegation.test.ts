@@ -40,6 +40,7 @@ import {
   DelegationRevokedError,
   DelegationSignerMismatchError,
   DelegationTotalLimitExceededError,
+  DestCapExceededError,
   OwnershipMismatchError,
 } from './security/errors.js';
 
@@ -304,6 +305,7 @@ describe('debitDelegationAndParent', () => {
       p_key_id: 'key-1',
       p_chain_id: 2368,
       p_amount_usd: 0.3,
+      p_destination: null,
     });
     expect(total).toBe('0.30');
   });
@@ -423,6 +425,64 @@ describe('debitDelegationAndParent', () => {
     expect((thrown as Error).message).toBe('DELEGATION_DEBIT_FAILED');
     expect((thrown as Error).message).not.toContain('postgres');
     expect((thrown as Error).message).not.toContain('0xdeadbeef');
+  });
+
+  // ── WKH-125b: cap por destino heredado vía delegación ──
+
+  it('WKH-125b destination is forwarded as p_destination to the RPC (AC-3)', async () => {
+    mockRpc.mockResolvedValue({ data: '0.30', error: null } as never);
+    await delegationService.debitDelegationAndParent(
+      'del-1',
+      'user-1',
+      'key-1',
+      2368,
+      0.3,
+      'kite/translator',
+    );
+    expect(mockRpc).toHaveBeenCalledWith(
+      'debit_delegation_and_parent',
+      expect.objectContaining({ p_destination: 'kite/translator' }),
+    );
+  });
+
+  it('WKH-125b DEST_CAP_EXCEEDED → DestCapExceededError (inherited cap) (AC-1)', async () => {
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: { message: 'DEST_CAP_EXCEEDED: dest x accum 1 + 1 > cap 1' },
+    } as never);
+    await expect(
+      delegationService.debitDelegationAndParent(
+        'd',
+        'o',
+        'k',
+        1,
+        1,
+        'kite/translator',
+      ),
+    ).rejects.toBeInstanceOf(DestCapExceededError);
+  });
+
+  it('WKH-125b DEST_CAP_EXCEEDED carries NO raw PG detail (AC-5)', async () => {
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: { message: 'DEST_CAP_EXCEEDED: dest x accum 1 + 1 > cap 1' },
+    } as never);
+    let thrown: unknown;
+    try {
+      await delegationService.debitDelegationAndParent(
+        'd',
+        'o',
+        'k',
+        1,
+        1,
+        'kite/translator',
+      );
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(DestCapExceededError);
+    expect((thrown as Error).message).not.toContain('accum');
+    expect((thrown as Error).message).not.toContain('cap 1');
   });
 });
 

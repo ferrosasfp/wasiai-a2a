@@ -143,5 +143,88 @@ describe.skipIf(!ENABLED)(
         .single();
       expect(Number(after?.total_spent)).toBe(M); // M, NO 2M (el 2º ROLLBACK)
     });
+
+    // WKH-125b (AC-4): un débito de delegación con destino que EXCEDE el cap por
+    // destino (a2a_key_spend_policies) hace ROLLBACK TOTAL de la tx: el parent
+    // budget no cambia, total_spent de la delegación no cambia, y NO se inserta
+    // ninguna fila en a2a_key_dest_spend_ledger. Espeja el no-double-spend: el RPC
+    // debit_delegation_and_parent dispatcha a debit_with_dest_policy → DEST_CAP_EXCEEDED.
+    it('WKH-125b: delegation debit over dest cap → ROLLBACK (budget, total_spent, ledger unchanged) (AC-4)', async () => {
+      const DEST = `${TEST_PREFIX}/translator`;
+      const DEST_CAP = 0.5; // M (1.0) > 0.5 → el débito con destino excede el cap
+
+      // Política 'total' de cap bajo para el destino sobre la PARENT key.
+      const { error: polErr } = await supabase
+        .from('a2a_key_spend_policies')
+        .insert({
+          key_id: keyId,
+          owner_ref: ownerRef,
+          destination: DEST,
+          max_usd: DEST_CAP,
+          window_type: 'total',
+          window_secs: null,
+        });
+      if (polErr) throw polErr;
+
+      // Snapshots pre-débito.
+      const { data: keyBefore } = await supabase
+        .from('a2a_agent_keys')
+        .select('budget')
+        .eq('id', keyId)
+        .single();
+      const { data: delBefore } = await supabase
+        .from('a2a_delegations')
+        .select('total_spent')
+        .eq('id', delegationId)
+        .single();
+
+      // Débito de delegación CON destino que excede el cap → debe RAISE.
+      const { error: debitErr } = await supabase.rpc(
+        'debit_delegation_and_parent',
+        {
+          p_delegation_id: delegationId,
+          p_owner_ref: ownerRef,
+          p_key_id: keyId,
+          p_chain_id: chainId,
+          p_amount_usd: M,
+          p_destination: DEST,
+        },
+      );
+      expect(debitErr).not.toBeNull();
+      expect(String(debitErr?.message)).toContain('DEST_CAP_EXCEEDED');
+
+      // ROLLBACK total: parent budget intacto.
+      const { data: keyAfter } = await supabase
+        .from('a2a_agent_keys')
+        .select('budget')
+        .eq('id', keyId)
+        .single();
+      expect(keyAfter?.budget).toEqual(keyBefore?.budget);
+
+      // total_spent de la delegación intacto.
+      const { data: delAfter } = await supabase
+        .from('a2a_delegations')
+        .select('total_spent')
+        .eq('id', delegationId)
+        .single();
+      expect(Number(delAfter?.total_spent)).toBe(
+        Number(delBefore?.total_spent),
+      );
+
+      // ledger sin INSERT nuevo para el destino.
+      const { data: ledgerRows } = await supabase
+        .from('a2a_key_dest_spend_ledger')
+        .select('id')
+        .eq('key_id', keyId)
+        .eq('destination', DEST);
+      expect(ledgerRows ?? []).toHaveLength(0);
+
+      // cleanup de la política (el ledger no recibió filas).
+      await supabase
+        .from('a2a_key_spend_policies')
+        .delete()
+        .eq('key_id', keyId)
+        .eq('destination', DEST);
+    });
   },
 );
