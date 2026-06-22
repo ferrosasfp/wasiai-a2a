@@ -164,6 +164,7 @@ export const budgetService = {
           delegationContext.keyId,
           chainId,
           amountUsd,
+          destination,
         );
         // WKH-124: emit budget_debit receipt (best-effort, fire-and-forget CD-B).
         // A failure here NEVER affects the debit result (CD-1).
@@ -190,6 +191,10 @@ export const budgetService = {
       } catch (err) {
         // Mapear a { success:false, error:<code> } para que compose corte el
         // pipeline (mismo shape que la ruta master). NO re-lanzar.
+        // WKH-125b: cap por destino excedido bajo delegación → code estable.
+        if (err instanceof DestCapExceededError) {
+          return { success: false, error: 'DEST_CAP_EXCEEDED' };
+        }
         if (err instanceof DelegationTotalLimitExceededError) {
           return { success: false, error: 'DELEGATION_TOTAL_LIMIT_EXCEEDED' };
         }

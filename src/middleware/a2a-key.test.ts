@@ -1494,6 +1494,124 @@ describe('requirePaymentOrA2AKey — delegation branch (WKH-101)', () => {
   });
 });
 
+// ── WKH-125b: delegación hereda el cap por destino de la parent key ──
+// El step-0 de un compose de 1 step bajo delegación EIP-712 debe propagar
+// `composeDestination` a debitDelegationAndParent → RPC debit_with_dest_policy.
+// Sin el fix el RPC recibía p_destination=NULL, caía a increment_a2a_key_spend
+// y el cap por destino se evadía por completo (bypass del cap con delegación).
+describe('requirePaymentOrA2AKey — WKH-125b delegation dest-cap propagation', () => {
+  let appD: ReturnType<typeof Fastify>;
+  const DEST = '0xDEADBEEFdeadBEEFdeadBEEFdeadBEEFdeadBEEF';
+
+  beforeAll(async () => {
+    appD = Fastify();
+    // preHandler upstream que augmenta composeDestination (espeja lo que hace
+    // routes/compose.ts:resolveComposePriceHandler antes del middleware).
+    appD.post(
+      '/test-compose-dest',
+      {
+        preHandler: [
+          async (req: FastifyRequest) => {
+            req.composeDestination = DEST;
+          },
+          ...requirePaymentOrA2AKey({ description: 'compose w/ dest' }),
+        ],
+      },
+      async (_req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ ok: true }),
+    );
+    await appD.ready();
+  });
+
+  afterAll(() => appD.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMockRegistryState(['kite-ozone-testnet'], 'kite-ozone-testnet');
+    mockExceedsPerTx.mockReturnValue(false);
+  });
+
+  // AC-1: cap por destino excedido bajo delegación → HTTP 402 DEST_CAP_EXCEEDED
+  // (espeja el branch session), no 403/genérico.
+  it('WKH-125b: dest cap exceeded under delegation → 402 DEST_CAP_EXCEEDED (AC-1)', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+    mockDebitDelegation.mockRejectedValue(new DestCapExceededError());
+
+    const res = await appD.inject({
+      method: 'POST',
+      url: '/test-compose-dest',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(402);
+    expect(res.json().error_code).toBe('DEST_CAP_EXCEEDED');
+  });
+
+  // AC-1: con composeDestination → debitDelegationAndParent recibe el 6º arg
+  // destino → RPC va por debit_with_dest_policy (cap evaluado). Reproduce el fix.
+  it('WKH-125b: composeDestination → debitDelegationAndParent called WITH destination (AC-1)', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+    mockDebitDelegation.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('9.00');
+
+    const res = await appD.inject({
+      method: 'POST',
+      url: '/test-compose-dest',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDebitDelegation).toHaveBeenCalledWith(
+      'del-1',
+      'user-1',
+      TEST_KEY_ID,
+      2368,
+      1.0,
+      DEST,
+    );
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  // AC-2: SIN composeDestination → la llamada de 5 args queda INTACTA (back-compat).
+  it('WKH-125b: no composeDestination → debitDelegationAndParent called with 5 args (AC-2)', async () => {
+    const appNoDest = Fastify();
+    appNoDest.post(
+      '/test-no-dest',
+      { preHandler: requirePaymentOrA2AKey({ description: 'no dest' }) },
+      async (_req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ ok: true }),
+    );
+    await appNoDest.ready();
+
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+    mockDebitDelegation.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('9.00');
+
+    const res = await appNoDest.inject({
+      method: 'POST',
+      url: '/test-no-dest',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    // 5 args exactos — el 6º (destino) NO se pasa cuando no hay composeDestination.
+    expect(mockDebitDelegation).toHaveBeenCalledWith(
+      'del-1',
+      'user-1',
+      TEST_KEY_ID,
+      2368,
+      1.0,
+    );
+    await appNoDest.close();
+  });
+});
+
 // ── WKH-121: BRANCH KEY-SESSION (wasi_a2a_sess_ token) ────────
 
 const SESS_TOKEN = `wasi_a2a_sess_${'c'.repeat(96)}`;

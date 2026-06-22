@@ -269,9 +269,22 @@ describe('budgetService', () => {
         'key-1',
         2368,
         0.3,
+        undefined,
       );
       expect(mockRpc).not.toHaveBeenCalled();
       expect(result).toEqual({ success: true });
+    });
+
+    // WKH-125b (AC-1): cap por destino excedido bajo delegación → success:false,
+    // budget no se decrementó (rollback de la tx en el RPC) → NO emite receipt.
+    it('WKH-125b delegation DEST_CAP_EXCEEDED → { success:false, error:DEST_CAP_EXCEEDED } (AC-1)', async () => {
+      mockDebitDelegation.mockRejectedValue(new DestCapExceededError());
+      const result = await budgetService.debit('key-1', 2368, 0.3, {
+        ...DELEGATION_CTX,
+        maxAmountPerTx: '0.50',
+      });
+      expect(result).toEqual({ success: false, error: 'DEST_CAP_EXCEEDED' });
+      expect(mockReceiptEmit).not.toHaveBeenCalled();
     });
 
     // ── WKH-124 (AC-2): budget_debit receipt on the delegation success path ──
