@@ -6,7 +6,12 @@
  * nullables como `T | null`. TS strict, sin `any`.
  */
 
-export type ReceiptType = 'protocol_fee' | 'budget_debit';
+// WKH-126b: 'deposit_verified' agregado para el recibo del depósito escrow
+// verificado on-chain (AC-11/DT-11). PROVISIONAL — VERIFY-AT-IMPL: confirmar que
+// la columna `receipt_type` / RPC `insert_receipt` lo acepta (posible CHECK
+// constraint en `a2a_receipts`). `emit` es best-effort → un rechazo degrada a
+// WARN sin romper el depósito (Story File §9 R-3).
+export type ReceiptType = 'protocol_fee' | 'budget_debit' | 'deposit_verified';
 
 /**
  * Modela EXACTO las columnas de `a2a_receipts`. `amount_usd` (NUMERIC) llega de

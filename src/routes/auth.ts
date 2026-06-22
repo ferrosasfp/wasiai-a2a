@@ -10,7 +10,7 @@
 
 import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { recoverMessageAddress } from 'viem';
+import { keccak256, recoverMessageAddress, stringToBytes } from 'viem';
 import { getBaseNetwork } from '../adapters/base/chain.js';
 import {
   normalizeChainSlug,
@@ -23,6 +23,7 @@ import {
   verifyDeposit,
 } from '../adapters/deposit-verifier.js';
 import { getErc8004Reader } from '../adapters/erc8004-identity.js';
+import { verifyEscrowDeposit } from '../adapters/escrow-verifier.js';
 import {
   getAdaptersBundle,
   getInitializedChainKeys,
@@ -36,6 +37,7 @@ import {
   keySessionService,
   ScopeExceedsParentError,
 } from '../services/key-session.js';
+import { receiptService } from '../services/receipt.js';
 import { registryService } from '../services/registry.js';
 import {
   DelegationNonceReplayError,
@@ -113,6 +115,16 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,127}$/;
 // SLUG_RE) so divergent normalizations can no longer collide into the same
 // token. Existence is re-checked against the `registries` table below.
 const REGISTRY_ID_RE = /^[a-z0-9][a-z0-9-]{0,127}$/;
+
+/**
+ * Flag opt-in del escrow no-custodial (WKH-126b, CD-11). Comparación de string
+ * ESTRICTA: solo `'true'` exacto activa el flujo escrow; cualquier otro valor
+ * (incl. `'1'`, `'TRUE'`, `''`, `undefined`) → flag OFF = treasury (default,
+ * fail-safe, AC-8). PROHIBIDO `Boolean(process.env.ESCROW_MODE_ENABLED)`.
+ */
+function escrowModeEnabled(): boolean {
+  return process.env.ESCROW_MODE_ENABLED === 'true';
+}
 
 // ── Helper: resolve caller key from x-a2a-key header ────────
 
@@ -648,22 +660,38 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(400).send({ error_code: 'CHAIN_MISMATCH' });
     }
 
-    // 5. Verificar on-chain ANTES de acreditar (AC-1 / CD-4).
-    const result = await verifyDeposit({
-      chainKey,
-      bundle,
-      txHash: txHash as `0x${string}`,
-      expectedAmountUsd: body.amount,
-    });
+    // 5. Verificar on-chain ANTES de acreditar (AC-1 / CD-4). Selector escrow vs
+    // treasury (DT-10): con ESCROW_MODE_ENABLED='true' (estricto, CD-11) se usa
+    // el verifier no-custodial; default = treasury intacto (AC-8).
+    const result = escrowModeEnabled()
+      ? await verifyEscrowDeposit({
+          chainKey,
+          bundle,
+          txHash: txHash as `0x${string}`,
+          keyIdHash: keccak256(stringToBytes(callerKey.id)), // §3, VERIFY-AT-IMPL con 126a
+          expectedAmountUsd: body.amount,
+        })
+      : await verifyDeposit({
+          chainKey,
+          bundle,
+          txHash: txHash as `0x${string}`,
+          expectedAmountUsd: body.amount,
+        });
     if (
       !result.ok ||
       result.amountUsd === undefined ||
       result.from === undefined
     ) {
-      const status = result.reason === 'RPC_UNAVAILABLE' ? 503 : 400;
+      // CD-10: RPC_UNAVAILABLE o ESCROW_CONTRACT_NOT_CONFIGURED → 503; resto → 400.
+      const reason = result.reason;
+      const status =
+        reason === 'RPC_UNAVAILABLE' ||
+        reason === 'ESCROW_CONTRACT_NOT_CONFIGURED'
+          ? 503
+          : 400;
       return reply
         .status(status)
-        .send({ error_code: result.reason ?? 'VERIFICATION_FAILED' });
+        .send({ error_code: reason ?? 'VERIFICATION_FAILED' });
     }
 
     // 5b. Funding-wallet gate (FIX-1, BLQ-MED-1). El treasury es compartido, así
@@ -687,6 +715,21 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         txHash,
         result.tokenSymbol,
       );
+      // 6b. Recibo deposit_verified (AC-11) — best-effort, NUNCA bloquea ni
+      // propaga (DT-11). Aplica a AMBOS caminos (no cambia shape ni status →
+      // cero regresión AC-8). `emit` es NUNCA-throw, por eso `void` sin await.
+      void receiptService.emit({
+        ownerRef,
+        agentKeyId: callerKey.id,
+        sessionId: null,
+        delegationId: null,
+        receiptType: 'deposit_verified',
+        amountUsd: result.amountUsd,
+        chainId,
+        txHash,
+        counterparty: null,
+        orchestrationId: null,
+      });
       // 7. Respuesta (DepositResponse).
       return reply.status(200).send({ balance, chain_id: chainId });
     } catch (err) {
