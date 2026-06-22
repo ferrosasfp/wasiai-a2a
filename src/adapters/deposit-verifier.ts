@@ -121,7 +121,7 @@ export function resolveTreasury(chainKey: ChainKey): `0x${string}` | null {
  * RPC URL per `ChainKey`, from the SAME env-resolution used by each adapter
  * (Story File §2). Returns `undefined` if not set → RPC_UNAVAILABLE.
  */
-function resolveRpcUrl(chainKey: ChainKey): string | undefined {
+export function resolveRpcUrl(chainKey: ChainKey): string | undefined {
   switch (chainKey) {
     case 'kite-ozone-testnet':
       return process.env.KITE_RPC_URL;
@@ -142,7 +142,7 @@ function resolveRpcUrl(chainKey: ChainKey): string | undefined {
  * viem `chain` object per `ChainKey` (TBD-2 resuelto). Reusa los helpers de
  * cada adapter — NO importa `viem/chains` directo para Kite (usa defineChain).
  */
-function resolveChainObject(chainKey: ChainKey): Chain {
+export function resolveChainObject(chainKey: ChainKey): Chain {
   switch (chainKey) {
     case 'kite-ozone-testnet':
     case 'kite-mainnet':
