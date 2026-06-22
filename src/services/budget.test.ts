@@ -178,6 +178,7 @@ describe('budgetService', () => {
 
   describe('debit', () => {
     it('calls supabase.rpc with correct params and returns success (AC-9)', async () => {
+      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({ data: null, error: null } as never);
 
       const result = await budgetService.debit('key-1', 2368, 1.5);
@@ -186,11 +187,13 @@ describe('budgetService', () => {
         p_key_id: 'key-1',
         p_chain_id: 2368,
         p_amount_usd: 1.5,
+        p_owner_ref: 'user-1',
       });
       expect(result).toEqual({ success: true });
     });
 
     it('returns failure with DAILY_LIMIT error from Postgres (AC-9)', async () => {
+      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({
         data: null,
         error: {
@@ -207,6 +210,7 @@ describe('budgetService', () => {
     });
 
     it('returns failure with INSUFFICIENT_BUDGET error from Postgres (AC-9)', async () => {
+      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({
         data: null,
         error: {
@@ -227,6 +231,7 @@ describe('budgetService', () => {
     // T14 (AC-13): master key path — NO delegationContext → increment_a2a_key_spend,
     // NEVER calls debitDelegationAndParent (backward-compat, CD-5).
     it('T14 master key path uses increment_a2a_key_spend, not the delegation RPC (AC-13)', async () => {
+      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({ data: null, error: null } as never);
 
       const result = await budgetService.debit('key-1', 2368, 1.5);
@@ -235,6 +240,7 @@ describe('budgetService', () => {
         p_key_id: 'key-1',
         p_chain_id: 2368,
         p_amount_usd: 1.5,
+        p_owner_ref: 'user-1',
       });
       expect(mockDebitDelegation).not.toHaveBeenCalled();
       expect(result).toEqual({ success: true });
@@ -485,9 +491,10 @@ describe('budgetService', () => {
       );
     }
 
-    // AC-5 back-compat: SIN destino → increment_a2a_key_spend directo, sin
-    // tocar la tabla de keys ni el RPC dest-aware (byte-idéntico a hoy).
-    it('AC-5 back-compat: no destination → increment_a2a_key_spend directo', async () => {
+    // ── WKH-SEC-02b: owner guard DB-level en la ruta master-no-dest ──
+
+    it('WKH-SEC-02b master: válido pasa p_owner_ref al RPC (AC-2)', async () => {
+      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({ data: null, error: null } as never);
 
       const result = await budgetService.debit('key-1', 2368, 1.5);
@@ -496,6 +503,45 @@ describe('budgetService', () => {
         p_key_id: 'key-1',
         p_chain_id: 2368,
         p_amount_usd: 1.5,
+        p_owner_ref: 'user-1',
+      });
+      expect(result).toEqual({ success: true });
+    });
+
+    it('WKH-SEC-02b master: OWNERSHIP_MISMATCH mapea a code estable (AC-1/AC-6)', async () => {
+      mockOwnerSelect('user-1');
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'OWNERSHIP_MISMATCH: key x not owned by caller' },
+      } as never);
+
+      const result = await budgetService.debit('key-1', 2368, 1.5);
+
+      expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
+    });
+
+    it('WKH-SEC-02b master: KEY_NOT_FOUND en SELECT cold-path no llama al RPC (AC-2)', async () => {
+      mockOwnerSelect(null);
+
+      const result = await budgetService.debit('key-1', 2368, 1.5);
+
+      expect(result).toEqual({ success: false, error: 'KEY_NOT_FOUND' });
+      expect(mockRpc).not.toHaveBeenCalled();
+    });
+
+    // AC-5 back-compat: SIN destino → increment_a2a_key_spend directo, sin
+    // tocar la tabla de keys ni el RPC dest-aware (byte-idéntico a hoy).
+    it('AC-5 back-compat: no destination → increment_a2a_key_spend directo', async () => {
+      mockOwnerSelect('user-1');
+      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+
+      const result = await budgetService.debit('key-1', 2368, 1.5);
+
+      expect(mockRpc).toHaveBeenCalledWith('increment_a2a_key_spend', {
+        p_key_id: 'key-1',
+        p_chain_id: 2368,
+        p_amount_usd: 1.5,
+        p_owner_ref: 'user-1',
       });
       expect(mockRpc).not.toHaveBeenCalledWith(
         'debit_with_dest_policy',
