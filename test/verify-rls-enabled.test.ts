@@ -14,8 +14,8 @@ import { RLS_TABLES, buildRlsQuery, evaluateRlsRows } from '../scripts/verify-rl
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = resolve(HERE, '..', 'supabase', 'migrations');
-const UP_PATH = resolve(MIGRATIONS, '20260607000000_wkh_sec02_rls.sql');
-const DOWN_PATH = resolve(MIGRATIONS, '20260607000000_wkh_sec02_rls_down.sql');
+const UP_PATH = resolve(MIGRATIONS, '20260610000000_wkh_sec02c_rls_registries.sql');
+const DOWN_PATH = resolve(MIGRATIONS, '20260610000000_wkh_sec02c_rls_registries_down.sql');
 
 const TABLES: string[] = RLS_TABLES;
 
@@ -28,7 +28,7 @@ function allEnabled(): Array<{ table_name: string; rls_enabled: boolean }> {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('evaluateRlsRows()', () => {
-  it('7/7 enabled → ok=true (exit 0)', () => {
+  it('9/9 enabled → ok=true (exit 0)', () => {
     const result = evaluateRlsRows(allEnabled());
     expect(result.ok).toBe(true);
     expect(result.missing).toEqual([]);
@@ -51,17 +51,19 @@ describe('evaluateRlsRows()', () => {
     expect(result.missing).toContain('a2a_receipts');
   });
 
-  it('tabla inesperada en el set → ok=false (exit 1)', () => {
-    const rows = [...allEnabled(), { table_name: 'registries', rls_enabled: true }];
+  it('tabla fuera del set canónico → ok=false, unexpected (exit 1)', () => {
+    // a2a_tasks NO tiene owner_ref → fuera del set de 9 (CD-8). registries ahora
+    // SÍ es esperada, por eso no puede usarse como "unexpected".
+    const rows = [...allEnabled(), { table_name: 'a2a_tasks', rls_enabled: true }];
     const result = evaluateRlsRows(rows);
     expect(result.ok).toBe(false);
-    expect(result.unexpected).toContain('registries');
+    expect(result.unexpected).toContain('a2a_tasks');
   });
 
-  it('respuesta vacía → ok=false, faltan las 7', () => {
+  it('respuesta vacía → ok=false, faltan las 9', () => {
     const result = evaluateRlsRows([]);
     expect(result.ok).toBe(false);
-    expect(result.missing).toHaveLength(7);
+    expect(result.missing).toHaveLength(9);
   });
 });
 
@@ -70,8 +72,8 @@ describe('evaluateRlsRows()', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('buildRlsQuery()', () => {
-  it('consulta exactamente las 7 tablas esperadas', () => {
-    expect(TABLES).toHaveLength(7);
+  it('consulta exactamente las 9 tablas esperadas', () => {
+    expect(TABLES).toHaveLength(9);
     const query = buildRlsQuery();
     for (const t of TABLES) {
       expect(query).toContain(`'${t}'`);
@@ -100,9 +102,9 @@ function countDdlStatements(sql: string, action: 'ENABLE' | 'DISABLE'): number {
 describe('SQL estructural — up migration', () => {
   const sql = readFileSync(UP_PATH, 'utf8');
 
-  it('tiene 7 ENABLE ROW LEVEL SECURITY, uno por tabla', () => {
-    expect(countDdlStatements(sql, 'ENABLE')).toBe(7);
-    for (const t of TABLES) {
+  it('tiene 2 ENABLE ROW LEVEL SECURITY, una por tabla (registries, kite_schema_transforms)', () => {
+    expect(countDdlStatements(sql, 'ENABLE')).toBe(2);
+    for (const t of ['registries', 'kite_schema_transforms']) {
       expect(sql).toContain(`ALTER TABLE public.${t}`);
       expect(sql).toMatch(new RegExp(`ALTER TABLE public\\.${t}\\s+ENABLE ROW LEVEL SECURITY;`));
     }
@@ -130,9 +132,9 @@ describe('SQL estructural — up migration', () => {
 describe('SQL estructural — down migration', () => {
   const sql = readFileSync(DOWN_PATH, 'utf8');
 
-  it('tiene 7 DISABLE ROW LEVEL SECURITY, uno por tabla', () => {
-    expect(countDdlStatements(sql, 'DISABLE')).toBe(7);
-    for (const t of TABLES) {
+  it('tiene 2 DISABLE ROW LEVEL SECURITY, una por tabla (registries, kite_schema_transforms)', () => {
+    expect(countDdlStatements(sql, 'DISABLE')).toBe(2);
+    for (const t of ['registries', 'kite_schema_transforms']) {
       expect(sql).toMatch(new RegExp(`ALTER TABLE public\\.${t}\\s+DISABLE ROW LEVEL SECURITY;`));
     }
   });

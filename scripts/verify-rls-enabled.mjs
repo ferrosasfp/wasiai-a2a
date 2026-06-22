@@ -16,8 +16,8 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-// Las 7 tablas EXACTAS con owner_ref (set canónico, WKH-SEC-02). Definidas una
-// sola vez y reusadas para construir el query y para validar el resultado.
+// Las 9 tablas EXACTAS con owner_ref (set canónico, WKH-SEC-02 + WKH-SEC-02c).
+// Definidas una sola vez y reusadas para construir el query y validar el resultado.
 export const RLS_TABLES = [
   'a2a_agent_keys',
   'a2a_key_sessions',
@@ -26,6 +26,8 @@ export const RLS_TABLES = [
   'a2a_receipts',
   'a2a_key_spend_policies',
   'a2a_key_dest_spend_ledger',
+  'registries',
+  'kite_schema_transforms',
 ];
 
 /**
