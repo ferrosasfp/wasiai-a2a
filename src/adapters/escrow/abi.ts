@@ -45,6 +45,7 @@ export const ESCROW_ABI = [
       { name: 'keyId', type: 'bytes32' },
       { name: 'amount', type: 'uint256' },
       { name: 'deadline', type: 'uint256' },
+      { name: 'nonce', type: 'uint256' }, // DT-14: converge con WKH-126a (debit 5 args)
       { name: 'signature', type: 'bytes' },
     ],
     outputs: [],
