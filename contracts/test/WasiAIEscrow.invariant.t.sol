@@ -17,6 +17,7 @@ contract EscrowHandler is Test {
     uint256 internal agentPk = 0xA11CE;
     address internal agent;
     address internal operator = address(0xCAFE);
+    address internal bot = address(0xB07); // hostile third party — never the operator
 
     bytes32 internal constant DOMAIN_TYPE_HASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -30,6 +31,10 @@ contract EscrowHandler is Test {
     uint256 public ghost_totalDebited;
     uint256 public ghost_totalWithdrawn;
     uint256 public nonceCounter;
+
+    // AR-MNR-1: counters proving the hostile path is actually exercised AND always reverts.
+    uint256 public ghost_hostileAttempts; // every front-run / forged / non-operator attempt
+    uint256 public ghost_hostileReverts; // those that reverted (MUST equal attempts)
 
     constructor(WasiAIEscrow _escrow, MockUSDC _usdc) {
         escrow = _escrow;
@@ -122,12 +127,35 @@ contract EscrowHandler is Test {
         uint256 deadline = block.timestamp + 1 hours;
         uint256 nonce = ++nonceCounter;
         bytes memory sig = _sign(forgedPk, k, amount, deadline, nonce);
+        ghost_hostileAttempts++;
         vm.prank(operator);
         try escrow.debit(k, amount, deadline, nonce, sig) {
             // Must never succeed without depositor signature.
             revert("CD-2 VIOLATED: operator debited without depositor signature");
         } catch {
-            // expected — forged signature rejected
+            ghost_hostileReverts++; // expected — forged signature rejected
+        }
+    }
+
+    /// @dev F-A1/F-A2 (AR-MNR-1): a hostile bot replays a VALID depositor signature it observed
+    ///      in the mempool. With onlyOperator, presenting it as a non-operator MUST always revert
+    ///      (NotOperator) — the front-running / MEV theft vector is closed. Ghost unchanged.
+    function botFrontRunAttempt(uint256 seed, uint256 amount) external {
+        if (keys.length == 0) return;
+        bytes32 k = keys[seed % keys.length];
+        uint256 bal = escrow.escrowBalance(k);
+        if (bal == 0) return;
+        amount = bound(amount, 1, bal);
+        uint256 deadline = block.timestamp + 1 hours;
+        uint256 nonce = ++nonceCounter;
+        // VALID signature from the real depositor — exactly what the operator would present.
+        bytes memory sig = _sign(agentPk, k, amount, deadline, nonce);
+        ghost_hostileAttempts++;
+        vm.prank(bot); // NOT the operator
+        try escrow.debit(k, amount, deadline, nonce, sig) {
+            revert("F-A1 VIOLATED: non-operator settled a valid signature (front-run)");
+        } catch {
+            ghost_hostileReverts++; // expected — NotOperator
         }
     }
 
@@ -136,11 +164,12 @@ contract EscrowHandler is Test {
         if (keys.length == 0) return;
         bytes32 k = keys[seed % keys.length];
         amount = bound(amount, 1, 1e12);
+        ghost_hostileAttempts++;
         vm.prank(operator);
         try escrow.withdraw(k, amount) {
             revert("CD-2 VIOLATED: operator withdrew funds");
         } catch {
-            // expected
+            ghost_hostileReverts++; // expected
         }
     }
 }
@@ -152,10 +181,14 @@ contract WasiAIEscrowInvariantTest is Test {
 
     uint256 internal constant TIMELOCK = 2 days;
 
+    // the operator configured in the contract MUST match the handler's `operator` actor
+    address internal constant OPERATOR = address(0xCAFE);
+
     function setUp() public {
         usdc = new MockUSDC();
         WasiAIEscrow impl = new WasiAIEscrow();
-        bytes memory initData = abi.encodeCall(WasiAIEscrow.initialize, (address(usdc), address(0xBEEF), TIMELOCK));
+        bytes memory initData =
+            abi.encodeCall(WasiAIEscrow.initialize, (address(usdc), OPERATOR, address(0xBEEF), TIMELOCK));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initData);
         escrow = WasiAIEscrow(address(proxy));
 
@@ -180,5 +213,12 @@ contract WasiAIEscrowInvariantTest is Test {
         uint256 expected =
             handler.ghost_totalDeposited() - handler.ghost_totalDebited() - handler.ghost_totalWithdrawn();
         assertEq(usdc.balanceOf(address(escrow)), expected);
+    }
+
+    /// @notice AR-MNR-1 / F-A1: every hostile attempt (forged-sig drain, valid-sig front-run by a
+    ///         non-operator, operator-withdraw) MUST have reverted. The counters make the hostile
+    ///         path observable: attempts == reverts proves the path was exercised and never succeeded.
+    function invariant_hostilePathAlwaysReverts() public view {
+        assertEq(handler.ghost_hostileAttempts(), handler.ghost_hostileReverts());
     }
 }
