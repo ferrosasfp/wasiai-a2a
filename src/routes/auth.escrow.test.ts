@@ -78,6 +78,7 @@ vi.mock('../adapters/deposit-verifier.js', async () => {
 
 vi.mock('../adapters/escrow-verifier.js', () => ({
   verifyEscrowDeposit: vi.fn(),
+  resolveEscrowContract: vi.fn(),
 }));
 
 vi.mock('../adapters/registry.js', () => ({
@@ -86,7 +87,10 @@ vi.mock('../adapters/registry.js', () => ({
 }));
 
 import { verifyDeposit } from '../adapters/deposit-verifier.js';
-import { verifyEscrowDeposit } from '../adapters/escrow-verifier.js';
+import {
+  resolveEscrowContract,
+  verifyEscrowDeposit,
+} from '../adapters/escrow-verifier.js';
 import { getAdaptersBundle } from '../adapters/registry.js';
 import type { AdaptersBundle } from '../adapters/types.js';
 import { budgetService } from '../services/budget.js';
@@ -100,6 +104,9 @@ import {
 const mockLookupByHash = vi.mocked(identityService.lookupByHash);
 const mockVerifyDeposit = vi.mocked(verifyDeposit);
 const mockVerifyEscrowDeposit = vi.mocked(verifyEscrowDeposit);
+const mockResolveEscrowContract = vi.mocked(resolveEscrowContract);
+const ESCROW_CONTRACT_ADDR =
+  '0x3333333333333333333333333333333333333333' as `0x${string}`;
 const mockGetAdaptersBundle = vi.mocked(getAdaptersBundle);
 const mockRegisterDeposit = vi.mocked(budgetService.registerDeposit);
 const mockEmit = vi.mocked(receiptService.emit);
@@ -184,6 +191,10 @@ describe('POST /auth/deposit — escrow routing (WKH-126b)', () => {
     vi.clearAllMocks();
     process.env = { ...ORIGINAL_ENV };
     delete process.env.ESCROW_MODE_ENABLED;
+    // Default: contrato configurado para la cadena (preserva el routing escrow
+    // de los casos WKH-126b cuyo flag está on). Casos WKH-126c que prueban el
+    // fallback per-chain sobrescriben este mock con `null`.
+    mockResolveEscrowContract.mockReturnValue(ESCROW_CONTRACT_ADDR);
   });
 
   afterEach(() => {
@@ -499,5 +510,87 @@ describe('POST /auth/deposit — escrow routing (WKH-126b)', () => {
 
     expect(mockVerifyEscrowDeposit).toHaveBeenCalledTimes(1);
     expect(mockVerifyDeposit).not.toHaveBeenCalled();
+  });
+
+  // ── WKH-126c — routing escrow POR-CADENA (fallback a treasury) ──
+
+  // AC-1 — cadena CON contrato + flag on → escrow.
+  it('flag on + contrato configurado para la cadena → verifyEscrowDeposit (AC-1)', async () => {
+    process.env.ESCROW_MODE_ENABLED = 'true';
+    mockResolveEscrowContract.mockReturnValue(ESCROW_CONTRACT_ADDR);
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockGetAdaptersBundle.mockReturnValue(makeBundle(2368));
+    mockVerifyEscrowDeposit.mockResolvedValue({
+      ok: true,
+      amountUsd: '10',
+      tokenSymbol: 'PYUSD',
+      from: DEPOSITOR,
+    });
+    mockRegisterDeposit.mockResolvedValue('10.000000');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/deposit',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: depositPayload(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().balance).toBe('10.000000');
+    expect(mockVerifyEscrowDeposit).toHaveBeenCalledTimes(1);
+    expect(mockVerifyDeposit).not.toHaveBeenCalled();
+  });
+
+  // AC-2 — cadena SIN contrato + flag on → treasury, NO 503.
+  it('flag on + contrato NO configurado para la cadena → verifyDeposit (treasury), no 503 (AC-2)', async () => {
+    process.env.ESCROW_MODE_ENABLED = 'true';
+    mockResolveEscrowContract.mockReturnValue(null);
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockGetAdaptersBundle.mockReturnValue(makeBundle(2368));
+    mockVerifyDeposit.mockResolvedValue({
+      ok: true,
+      amountUsd: '10',
+      tokenSymbol: 'PYUSD',
+      from: DEPOSITOR,
+    });
+    mockRegisterDeposit.mockResolvedValue('10.000000');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/deposit',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: depositPayload(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().error_code).toBeUndefined();
+    expect(mockVerifyDeposit).toHaveBeenCalledTimes(1);
+    expect(mockVerifyEscrowDeposit).not.toHaveBeenCalled();
+  });
+
+  // AC-3 — flag off + contrato configurado → treasury (CD-2).
+  it('flag off + contrato configurado para la cadena → verifyDeposit (treasury) (AC-3/CD-2)', async () => {
+    delete process.env.ESCROW_MODE_ENABLED;
+    mockResolveEscrowContract.mockReturnValue(ESCROW_CONTRACT_ADDR);
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockGetAdaptersBundle.mockReturnValue(makeBundle(2368));
+    mockVerifyDeposit.mockResolvedValue({
+      ok: true,
+      amountUsd: '10',
+      tokenSymbol: 'PYUSD',
+      from: DEPOSITOR,
+    });
+    mockRegisterDeposit.mockResolvedValue('10.000000');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/deposit',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: depositPayload(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockVerifyDeposit).toHaveBeenCalledTimes(1);
+    expect(mockVerifyEscrowDeposit).not.toHaveBeenCalled();
   });
 });
