@@ -48,6 +48,7 @@ describe('KiteOzonePaymentAdapter', () => {
     delete process.env.X402_EIP712_DOMAIN_NAME;
     delete process.env.X402_EIP712_DOMAIN_VERSION;
     delete process.env.X402_TOKEN_SYMBOL;
+    delete process.env.KITE_FACILITATOR_MODE;
   });
 
   it('implements PaymentAdapter with name "kite-ozone"', () => {
@@ -213,6 +214,69 @@ describe('KiteOzonePaymentAdapter', () => {
         }),
       }),
     );
+  });
+
+  it('AC-4 Pieverse: verify() body uses server paymentRequirements, not caller', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ valid: true }),
+    });
+    await adapter.verify({
+      authorization: {
+        from: '0x1111111111111111111111111111111111111111',
+        to: '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        value: '1',
+        validAfter: '0',
+        validBefore: '99',
+        nonce: `0x${'a'.repeat(64)}`,
+      },
+      signature: '0xSIG',
+      network: 'kite-testnet',
+      paymentRequirements: {
+        payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        maxAmountRequired: '1000000000000000000',
+      },
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse((init as { body: string }).body);
+    expect(body.paymentRequirements.payTo).toBe(
+      '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+    );
+    expect(body.paymentRequirements.maxAmountRequired).toBe(
+      '1000000000000000000',
+    );
+  });
+
+  it('AC-4 x402: verify() body uses server paymentRequirements, not caller', async () => {
+    process.env.KITE_FACILITATOR_MODE = 'x402';
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ verified: true }),
+    });
+    await adapter.verify({
+      authorization: {
+        from: '0x1111111111111111111111111111111111111111',
+        to: '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        value: '1',
+        validAfter: '0',
+        validBefore: '99',
+        nonce: `0x${'a'.repeat(64)}`,
+      },
+      signature: '0xSIG',
+      network: 'kite-testnet',
+      paymentRequirements: {
+        payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        maxAmountRequired: '1000000000000000000',
+      },
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse((init as { body: string }).body);
+    expect(body.accepted.payTo).toBe(
+      '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+    );
+    expect(body.accepted.amount).toBe('1000000000000000000');
+    delete process.env.KITE_FACILITATOR_MODE;
   });
 
   it('does not throw when env vars are absent (AC-6)', () => {

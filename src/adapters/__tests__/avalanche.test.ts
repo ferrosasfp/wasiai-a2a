@@ -224,6 +224,36 @@ describe('Avalanche payment adapter — contract', () => {
     expect(body.accepted.extra.assetTransferMethod).toBe('eip3009');
   });
 
+  it('AC-4: verify() body uses server paymentRequirements, not caller authorization', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ verified: true }),
+    });
+    await adapter.verify({
+      authorization: {
+        from: '0x1111111111111111111111111111111111111111',
+        to: '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        value: '1',
+        validAfter: '0',
+        validBefore: '9999999999',
+        nonce: `0x${'a'.repeat(64)}`,
+      },
+      signature: '0xSIG',
+      network: 'eip155:43113',
+      paymentRequirements: {
+        payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        maxAmountRequired: '1000000',
+      },
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse((init as { body: string }).body);
+    expect(body.accepted.payTo).toBe(
+      '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+    );
+    expect(body.accepted.amount).toBe('1000000');
+  });
+
   it('verify() returns valid=false on facilitator HTTP 5xx', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,

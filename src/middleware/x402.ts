@@ -61,6 +61,25 @@ export interface PaymentMiddlewareOptions {
  */
 const DEFAULT_AMOUNT_USD = 1;
 
+/**
+ * WKH-SEC-03: single source of truth for the server-side payment requirements
+ * (recipient wallet + required atomic amount). Reused by both the 402 challenge
+ * (`buildX402Response`) and the inbound binding check so they never drift
+ * (CD-7) and `quote()` is not called twice (DT-5). CD-5: the wallet resolution
+ * (`PAYMENT_WALLET_ADDRESS || KITE_WALLET_ADDRESS`) is reused, not changed.
+ */
+async function resolvePaymentRequirements(
+  opts: PaymentMiddlewareOptions,
+  chainKey: ChainKey,
+): Promise<{ payTo: string; requiredAmount: string }> {
+  const adapter = getPaymentAdapter(chainKey);
+  const payTo =
+    process.env.PAYMENT_WALLET_ADDRESS || process.env.KITE_WALLET_ADDRESS || '';
+  const requiredAmount =
+    opts.amount ?? (await adapter.quote(DEFAULT_AMOUNT_USD)).amountWei;
+  return { payTo, requiredAmount };
+}
+
 export async function buildX402Response(
   opts: PaymentMiddlewareOptions,
   resource: string,
@@ -68,10 +87,8 @@ export async function buildX402Response(
   errorMessage: string = 'payment-signature header is required',
 ): Promise<X402Response> {
   const adapter = getPaymentAdapter(chainKey);
-  const walletAddress =
-    process.env.PAYMENT_WALLET_ADDRESS || process.env.KITE_WALLET_ADDRESS || '';
-  const amount =
-    opts.amount ?? (await adapter.quote(DEFAULT_AMOUNT_USD)).amountWei;
+  const { payTo: walletAddress, requiredAmount: amount } =
+    await resolvePaymentRequirements(opts, chainKey);
   const merchantName = adapter.getMerchantName();
   const payload: X402PaymentPayload = {
     scheme: adapter.getScheme(),
@@ -209,12 +226,62 @@ export function requirePayment(
           ),
         );
     }
+    // ── WKH-SEC-03: binding check (to + value) BEFORE any network call. ──
+    // CD-1: reject before verify()/settle(). CD-8: reuse the resolved chainKey.
+    const { payTo, requiredAmount } = await resolvePaymentRequirements(
+      opts,
+      chainKey,
+    );
+    const auth = paymentPayload.authorization as {
+      to?: unknown;
+      value?: unknown;
+    };
+    let bindingOk = true;
+    // DT-7: defensive — to/value must be strings, BigInt(value) must not throw.
+    if (typeof auth.to !== 'string' || typeof auth.value !== 'string') {
+      bindingOk = false;
+    } else if (auth.to.toLowerCase() !== payTo.toLowerCase()) {
+      // DT-4 / CD-3: case-insensitive recipient comparison.
+      bindingOk = false;
+    } else {
+      try {
+        // DT-3 / CD-7: same atomic units as the challenge quote. No scaling.
+        if (BigInt(auth.value) < BigInt(requiredAmount)) bindingOk = false;
+      } catch {
+        bindingOk = false; // unparseable value → mismatch, not crash.
+      }
+    }
+    if (!bindingOk) {
+      // AC-6 / DT-6 / CD-2: full detail in the internal log, NOT in the body.
+      request.log.warn(
+        {
+          error_code: 'X402_BINDING_MISMATCH',
+          received: {
+            to: typeof auth.to === 'string' ? auth.to : null,
+            value: typeof auth.value === 'string' ? auth.value : null,
+          },
+          expected: { payTo, requiredAmount },
+        },
+        'x402 inbound payment rejected: recipient/amount binding mismatch',
+      );
+      return reply
+        .status(402)
+        .send(
+          await buildX402Response(
+            opts,
+            resource,
+            chainKey,
+            'Payment binding rejected: recipient or amount mismatch',
+          ),
+        );
+    }
     let verifyResult: { valid: boolean; error?: string };
     try {
       verifyResult = await getPaymentAdapter(chainKey).verify({
         authorization: paymentPayload.authorization,
         signature: paymentPayload.signature,
         network: paymentPayload.network ?? '',
+        paymentRequirements: { payTo, maxAmountRequired: requiredAmount },
       });
     } catch (err) {
       // Guard FST_ERR_REP_ALREADY_SENT: si timeout disparó 504 mientras
@@ -250,6 +317,7 @@ export function requirePayment(
         authorization: paymentPayload.authorization,
         signature: paymentPayload.signature,
         network: paymentPayload.network ?? '',
+        paymentRequirements: { payTo, maxAmountRequired: requiredAmount },
       });
     } catch (err) {
       if (reply.sent) return;

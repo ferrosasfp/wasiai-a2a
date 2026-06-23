@@ -12,6 +12,7 @@ export interface SettleRequest {
   authorization: X402PaymentRequest['authorization'];
   signature: string;
   network: string;
+  paymentRequirements?: { payTo: string; maxAmountRequired: string };
 }
 export interface SettleResult {
   txHash: string;
@@ -22,6 +23,7 @@ export interface X402Proof {
   authorization: X402PaymentRequest['authorization'];
   signature: string;
   network: string;
+  paymentRequirements?: { payTo: string; maxAmountRequired: string };
 }
 export interface VerifyResult {
   valid: boolean;

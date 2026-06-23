@@ -238,7 +238,13 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
     await app.ready();
 
     try {
-      const { headers } = buildEoaPaymentHeader();
+      // WKH-SEC-03: align value with the kite default quote (18-dec). The
+      // fixture default ('1000000', 6-dec) would now reject as underpay vs the
+      // kite 10^18 requirement — that is the CD-7 dimensional separation, not a
+      // regression. Routing here is the kite default, so use the 18-dec value.
+      const { headers } = buildEoaPaymentHeader({
+        value: '1000000000000000000',
+      });
       const res = await app.inject({
         method: 'POST',
         url: '/test',

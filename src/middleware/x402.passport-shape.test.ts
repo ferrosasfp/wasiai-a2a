@@ -31,6 +31,18 @@ const mockAdapter = {
   getScheme: vi.fn().mockReturnValue('exact'),
   getMerchantName: vi.fn().mockReturnValue('wasiai-a2a-test'),
   getMaxTimeoutSeconds: vi.fn().mockReturnValue(30),
+  // WKH-SEC-03: the inbound binding check resolves the required amount via
+  // quote() (opts.amount is unset here). 6-dec '1000000' matches the fixture
+  // default value so the happy-path tests still pass the to+value binding.
+  quote: vi.fn().mockResolvedValue({
+    amountWei: '1000000',
+    token: {
+      symbol: 'USDC',
+      address: '0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e',
+      decimals: 6,
+    },
+    facilitatorUrl: 'http://mock',
+  }),
 };
 
 vi.mock('../adapters/registry.js', () => ({

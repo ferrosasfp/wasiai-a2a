@@ -253,8 +253,10 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
         x402Version: 2,
         scheme: KITE_SCHEME,
         network,
-        maxAmountRequired: proof.authorization.value,
-        payTo: proof.authorization.to,
+        maxAmountRequired:
+          proof.paymentRequirements?.maxAmountRequired ??
+          proof.authorization.value,
+        payTo: proof.paymentRequirements?.payTo ?? proof.authorization.to,
         asset: token,
         extra: null,
       },
@@ -297,8 +299,9 @@ export class KiteOzonePaymentAdapter implements PaymentAdapter {
         x402Version: 2,
         scheme: KITE_SCHEME,
         network,
-        maxAmountRequired: req.authorization.value,
-        payTo: req.authorization.to,
+        maxAmountRequired:
+          req.paymentRequirements?.maxAmountRequired ?? req.authorization.value,
+        payTo: req.paymentRequirements?.payTo ?? req.authorization.to,
         asset: token,
         extra: null,
       },
@@ -440,6 +443,7 @@ interface X402SettleResponse {
 function buildX402CanonicalBody(
   authorization: X402PaymentRequest['authorization'],
   signature: string,
+  requirements?: { payTo: string; maxAmountRequired: string },
 ): unknown {
   const token = getPaymentToken();
   return {
@@ -450,9 +454,9 @@ function buildX402CanonicalBody(
     accepted: {
       scheme: KITE_SCHEME,
       network: getKiteNetworkTag(),
-      amount: authorization.value,
+      amount: requirements?.maxAmountRequired ?? authorization.value,
       asset: token,
-      payTo: authorization.to,
+      payTo: requirements?.payTo ?? authorization.to,
       maxTimeoutSeconds: KITE_MAX_TIMEOUT_SECONDS,
       extra: { assetTransferMethod: 'eip3009' },
     },
@@ -465,7 +469,11 @@ const X402_FACILITATOR_TIMEOUT_MS = 10_000;
 
 async function verifyX402(proof: X402Proof): Promise<VerifyResult> {
   const facilitatorUrl = getFacilitatorUrl();
-  const body = buildX402CanonicalBody(proof.authorization, proof.signature);
+  const body = buildX402CanonicalBody(
+    proof.authorization,
+    proof.signature,
+    proof.paymentRequirements,
+  );
   let response: Response;
   try {
     response = await fetch(`${facilitatorUrl}/verify`, {
@@ -498,7 +506,11 @@ async function verifyX402(proof: X402Proof): Promise<VerifyResult> {
 
 async function settleX402(req: SettleRequest): Promise<SettleResult> {
   const facilitatorUrl = getFacilitatorUrl();
-  const body = buildX402CanonicalBody(req.authorization, req.signature);
+  const body = buildX402CanonicalBody(
+    req.authorization,
+    req.signature,
+    req.paymentRequirements,
+  );
   let response: Response;
   try {
     response = await fetch(`${facilitatorUrl}/settle`, {
