@@ -1,0 +1,5 @@
+out/
+cache/
+broadcast/
+foundry.lock
+.env
