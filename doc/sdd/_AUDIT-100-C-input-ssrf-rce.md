@@ -1,0 +1,6 @@
+# AUDIT-100-C — Input / SSRF / RCE / Injection (2026-06-23)
+Veredicto: RECHAZADO — 1 BLQ-ALTO + 1 BLQ-MEDIO (SSRF). RCE-sandbox (WKH-60) SÓLIDO, SSRF-core (WKH-62) sólido en su dominio, SQL-injection/prototype-pollution OK.
+- BLQ-ALTO-1: SSRF por concat de endpoint en MCP tools. pay-x402.ts:82/88, get-payment-quote.ts:26/28, schemas.ts:29,45. Valida gatewayUrl pero fetchea gatewayUrl+endpoint (endpoint sin validar) → userinfo bypass (gatewayUrl=https://ok.com endpoint=@169.254.169.254/...) → fetch a metadata. Fix: validar la URL FINAL (new URL(endpoint,gatewayUrl)) + schema endpoint pattern '^/'.
+- BLQ-MEDIO-1: compose.invokeAgent (compose.ts:428) fetch(agent.invokeUrl) SIN revalidación SSRF runtime (a diferencia de discovery.ts:529 que sí revalida). TOCTOU/DNS-rebinding + leak de x-a2a-key al host. Fix: validateRegistryUrl(agent.invokeUrl) antes del fetch.
+- MNR-1: gasless `to` sin validar formato (gasless.ts:38). MNR-2: err.message crudo al cliente (registries.ts:186/264/308, orchestrate.ts:105, dashboard.ts). MNR-3: allowlist bypasea private-IP check (url-validator.ts:258, documentado).
+- OK: vm-runner sandbox (worker_threads+vm, codeGeneration off, HMAC, owner en cache key), url-validator core, erc8004 no fetchea tokenURI (CD-13), adapters de pago usan facilitatorUrl de env.

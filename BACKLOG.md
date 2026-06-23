@@ -157,20 +157,20 @@ Detalle preservado abajo para histórico.
 
 ---
 
-## E13: Security Hardening — POST-SPRINT 2026-04-27
+## E13: Security Hardening ✅ DONE (cerrado 2026-04-27..2026-06-20)
 
-Identificados en security audit comprehensive del sprint 2026-04-27. Mitigations parciales aplicadas en PR #36 (3 hot-fixes), pendientes mitigations completas en HUs dedicadas.
+Identificados en security audit comprehensive del sprint 2026-04-27. Todos los items BLQ-ALTO y BLQ-MED fueron resueltos en HUs dedicadas (SDD-058..062, SDD-116..119).
 
 ### BLQ-ALTO (alta prioridad)
-- [ ] **WKH-59 (SEC-DRAIN-1)**: `/gasless/transfer` permite drain del operator wallet con $1 budget — re-estimar `estimatedCostUsd` por value real, aplicar `max_spend_per_call_usd` cap. Estimación: M.
-- [ ] **WKH-60 (SEC-RCE-1)**: L2 transform cache poisoning + `new Function()` = RCE multi-tenant — reemplazar `new Function` por `node:vm` sandbox + HMAC sobre transform_fn + `owner_ref` en cache key. Estimación: L (HU dedicada).
-- [ ] **WKH-SEC-02 (BLQ-ALTO-3 partial)**: Mitigation completa de RPC schema hijacking — agregar `p_owner_ref` validation dentro de `increment_a2a_key_spend` y `register_a2a_key_deposit`. Mitigation parcial (`SET search_path` + `REVOKE anon`) en PR #36. Estimación: S.
+- [x] **WKH-59 (SEC-DRAIN-1)** → **DONE** (SDD-061, feat/061-wkh-59-sec-drain-1): `/gasless/transfer` permite drain del operator wallet con $1 budget — re-estimar `estimatedCostUsd` por value real, aplicar `max_spend_per_call_usd` cap. Estimación: M.
+- [x] **WKH-60 (SEC-RCE-1)** → **DONE** (SDD-062, feat/062-wkh-60-sec-rce-1): L2 transform cache poisoning + `new Function()` = RCE multi-tenant — reemplazar `new Function` por `node:vm` sandbox + HMAC sobre transform_fn + `owner_ref` en cache key. Estimación: L (HU dedicada).
+- [x] **WKH-SEC-02 (BLQ-ALTO-3)** → **DONE** (SDD-116/118/119, feat/116-wkh-sec-02-rls + SEC-02b + SEC-02c): Mitigation completa de RPC schema hijacking — agregar `p_owner_ref` validation dentro de `increment_a2a_key_spend` y `register_a2a_key_deposit`. Mitigation parcial (`SET search_path` + `REVOKE anon`) en PR #36. Estimación: S.
 
 ### BLQ-MED
-- [ ] **WKH-61 (SEC-SCOPE-1)**: `requirePaymentOrA2AKey` llama `checkScoping(target={})` — feature scoping completamente broken. Mover check al servicio post-resolución del agent. Estimación: M.
-- [ ] **WKH-62 (SEC-SSRF-1)**: `/discover` sin SSRF protection — aplicar `validateGatewayUrl` en `discoveryService.queryRegistry`. Estimación: S.
-- [ ] **WKH-63 (SEC-REG-1)**: registries CRUD sin ownership — agregar columna `registries.owner_ref` + filtros. Mitigation parcial (block update/delete `wasiai`) en PR #36. Estimación: M.
-- [ ] **BLQ-MED-5** (sin Jira aún): `budgetService.debit` sin `ownerId` — viola convención CLAUDE.md, falta defensa en profundidad. Estimación: XS.
+- [x] **WKH-61 (SEC-SCOPE-1)** → **DONE** (SDD-059, feat/059-wkh-61-sec-scope-1): `requirePaymentOrA2AKey` llama `checkScoping(target={})` — feature scoping completamente broken. Mover check al servicio post-resolución del agent. Estimación: M.
+- [x] **WKH-62 (SEC-SSRF-1)** → **DONE** (SDD-058, feat/058-wkh-62-sec-ssrf-1): `/discover` sin SSRF protection — aplicar `validateGatewayUrl` en `discoveryService.queryRegistry`. Estimación: S.
+- [x] **WKH-63 (SEC-REG-1)** → **DONE** (SDD-060, feat/060-wkh-63-sec-reg-1): registries CRUD sin ownership — agregar columna `registries.owner_ref` + filtros. Mitigation parcial (block update/delete `wasiai`) en PR #36. Estimación: M.
+- [x] **BLQ-MED-5** → **DONE** (resuelto como parte de WKH-53 ownership guards + WKH-SEC-02b) — viola convención CLAUDE.md, falta defensa en profundidad. Estimación: XS.
 
 ### BLQ-BAJO + MNR — backlog ordinario (ver sprint report)
 
@@ -206,4 +206,84 @@ Items escalados como MENORES durante WKH-AUDIT-A2A (remediación auditoría prof
 
 ---
 
-*Última actualización: 2026-05-29 (WKH-AUDIT-A2A remediación auditoría + escalados MENORES)*
+## E15: Pitch-prep findings — POST-HACKATHON 2026-06-14
+
+Detectados al auditar el material del pitch (deck + flashcards) contra el código, antes del pitch Kite del 16-jun. Capturados para revisar DESPUÉS del 16. Tocan capa de pago/identidad → ruta QUALITY.
+
+- [x] **WKH-118 (FEE-COMPOSE)**: Cobrar el protocol fee 1% también en `/compose` → **DONE** (SDD-115, feat/115-wkh-118-fee-compose, commit 78d91b9)
+  - **Descripción**: Hoy `chargeProtocolFee` (1%, `src/services/fee-charge.ts`, default 0.01, gated por env `WASIAI_PROTOCOL_FEE_WALLET`) se invoca SOLO en `src/services/orchestrate.ts`. `/compose` NO cobra fee. El demo usa `/compose`, así que no genera revenue, y el deck quedó honesto en "1% por orquestación". Decisión de producto (2026-06-14, Fernando): cobrar 1% en ambos modos.
+  - **Archivos**: `src/services/compose.ts` (replicar el patrón de `orchestrate.ts:~244-280`), `src/services/fee-charge.ts` (reusar `chargeProtocolFee`/`getProtocolFeeRate`), tests.
+  - **Riesgo**: toca la ruta de pago del demo (débito extra). Requiere re-test E2E del demo de AgentShop antes de prod.
+  - **Estimación**: M · **Prioridad**: MEDIA · **Ruta**: QUALITY (financiero)
+  - **Al cerrar**: revertir el deck a "1% por cada /compose u /orchestrate".
+
+- [ ] **WKH-119 (PASSPORT-AUTH)**: Identidad Passport-nativa end-to-end
+  - **Descripción**: Hoy el Kite Agent Passport es solo *binding* (`src/services/identity.ts:bindPassport`, gated por `PASSPORT_BINDING_ENABLED=false`); NO autentica el request. La auth real corre sobre la agent-key propia + identidad ERC-8004. Activar la autenticación Passport-nativa (firma/verify) cuando Kite nos liste en su discovery (el `payment_target_forbidden` se desbloquea con el listing).
+  - **Archivos**: `src/services/identity.ts`, `src/routes/auth.ts`, middleware de auth.
+  - **Dependencia externa**: listing de Kite (no lo controlamos).
+  - **Estimación**: L · **Prioridad**: MEDIA (desbloquea el claim "el Passport firma la identidad")
+
+- [ ] **WKH-120 (XCHAIN-WALLETS)**: Cross-chain con destinatarios distintos (no self-transfer)
+  - **Descripción**: Las 3 tx cross-chain del demo (Kite/Avalanche/Base, slide Built-on-Kite del deck) son self-transfers: `from == to == operator (0xf432baf…)`. Un jurado que clickee ve una wallet pagándose a sí misma. Regenerar con wallets de agente destino distintas (como ya hacen las 3 tx de AgentShop en Kite: `to=0x94dcdb…`).
+  - **Archivos**: scripts de generación de tx demo / config de wallets de agente por red.
+  - **Estimación**: S · **Prioridad**: BAJA (cosmético de evidencia; hoy mitigado con la frase "wallets de demo")
+
+> **Nota de negocio (NO es HU de código)**: cerrar un **partner de compliance/MTL regulado** para producción con dinero real (referenciado en flashcards P44/P52). Es legal/business, no ingeniería.
+
+---
+
+## E16: Agent Key robustness ✅ DONE (cerrado 2026-06-19..2026-06-21)
+
+Research en `doc/agent-key-vs-passport.md`. Todos los items WKH-121..125 entregados y mergeados. RLS Postgres-level (WKH-SEC-02/02b/02c) + escrow no-custodial (WKH-126a/b/c) también cerrados en este sprint.
+
+- [x] **WKH-121 (KEY-SESSIONS)** → **DONE** (SDD-110, feat/110-wkh-121-key-sessions): Jerarquía de claves + session keys (user → agent → session)
+  - **Gap**: hoy la Agent Key es un bearer `key_hash` único de larga vida (`src/types/a2a-key.ts`). El Passport usa 3 capas con **sesiones time-boxed** ("una sesión, una firma"), acotando el blast radius si una clave se filtra.
+  - **Scope**: derivar session keys efímeras de la agent key, con TTL + cuotas propias por sesión (budget/daily scope por sesión). Tabla `a2a_key_sessions` + middleware que valide la sesión.
+  - **Archivos**: `src/services/identity.ts`, `src/middleware/a2a-key.ts`, migración DB.
+  - **Estimación**: L · **Prioridad**: ALTA
+
+- [x] **WKH-122 (KEY-REVOKE)** → **DONE** (SDD-111, feat/111-wkh-122-session-revoke): Revocación granular e instantánea
+  - **Gap**: hoy solo `identity.deactivate(keyId)` apaga TODA la key (todo o nada). El Passport revoca una sesión sin tocar la key del agente/usuario.
+  - **Scope**: revocar por sesión/scope; lista de revocación con efecto inmediato en el middleware.
+  - **Archivos**: `src/services/identity.ts`, `src/middleware/a2a-key.ts`. (Depende de WKH-121.)
+  - **Estimación**: M · **Prioridad**: ALTA
+
+- [x] **WKH-123 (KEY-SIGNED-AUTH)** → **DONE** (SDD-112, feat/112-wkh-123-signed-auth): Auth por firma / passkey en vez de bearer secreto
+  - **Gap**: hoy se autentica con un secreto bearer (sha256 lookup). Si se filtra, se usa directo. El Passport aprueba sesiones con passkey/firma.
+  - **Scope**: request firmado (EIP-712 o WebAuthn/passkey) — una key filtrada no es usable sin la firma. Coexiste con el bearer para back-compat.
+  - **Archivos**: `src/middleware/a2a-key.ts`, `src/services/identity.ts`.
+  - **Estimación**: L · **Prioridad**: ALTA
+
+- [x] **WKH-124 (KEY-RECEIPTS)** → **DONE** (SDD-113, feat/113-wkh-124-receipts): Recibos inmutables + proof-chain (PoAI-style)
+  - **Gap**: hay eventos + settlement on-chain, pero no una cadena de prueba **session → agent → user** anclada para resolución de disputas (lo que el Passport llama Proof of AI).
+  - **Scope**: recibo inmutable por pago con el linaje session/agent/user, anclado on-chain o firmado; endpoint de verificación.
+  - **Archivos**: `src/services/event.ts`, `src/services/fee-charge.ts` / settlement, posible attestation on-chain.
+  - **Estimación**: L · **Prioridad**: MEDIA
+
+- [x] **WKH-125 (KEY-CONSTRAINTS)** → **DONE** (SDD-114, feat/114-wkh-125-constraints; fix WKH-125b SDD-120): Constraints programables más ricas (destino + velocidad)
+  - **Gap**: hoy hay `daily_limit` + `max_spend_per_call` + allowlists (qué agentes), pero no **cap por destino/vendor** ni **velocidad/ventana de tiempo** arbitraria. El Passport: "no gastar más de $50 con vendors aprobados".
+  - **Scope**: políticas por destino (cap por agente/vendor) + ventanas de tiempo (no solo daily).
+  - **Archivos**: `src/services/budget.ts`, `src/types/a2a-key.ts`, migración DB.
+  - **Estimación**: M · **Prioridad**: MEDIA
+
+> **Nota**: opcional, menor prioridad — **DID + auth que prueba sin revelar al usuario** (el Passport usa DIDs). Evaluar dentro de WKH-123 si aplica.
+
+---
+
+## E17: Post-E16 Closures ✅ DONE (2026-06-20..2026-06-22)
+
+Items cerrados después del sprint E16, en el mismo push hacia el cierre del hackathon.
+
+- [x] **WKH-SEC-02 (RLS Postgres-level)** → **DONE** — ENABLE ROW LEVEL SECURITY en 7 tablas con owner_ref (SDD-116, feat/116-wkh-sec-02-rls). Spinoffs: SEC-02b owner-ref en RPC `increment_a2a_key_spend` (SDD-119), SEC-02c RLS en `registries` + `kite_schema_transforms` (SDD-118).
+- [x] **WKH-126a (Escrow Solidity)** → **DONE** — `WasiAIEscrow.sol` (Foundry, UUPS): deposit/debit/debitBatch/withdraw + EIP-712. Deployado en Base Sepolia + Avalanche Fuji + Kite testnet (SDD-121, feat/121-wkh-126a-escrow-contract).
+- [x] **WKH-126b (Escrow TS integration)** → **DONE** — escrow-verifier + routing condicional /deposit + ABI EIP-712 + tests (SDD-117, feat/117-wkh-126-escrow-noncustodial).
+- [x] **WKH-126c (Escrow per-chain routing)** → **DONE** — `escrowEnabledForChain` helper + fallback a treasury en cadenas sin contrato (SDD-122, fix/122-wkh-126c-escrow-per-chain-routing).
+- [x] **WKH-118 (FEE-COMPOSE)** → **DONE** — 1% protocol fee también en /compose (SDD-115). Ver E15 arriba.
+
+**Estado al cierre (2026-06-23)**:
+- Tests: **1628 passing / 0 failing** (vitest run)
+- SDDs totales: 122 (todos DONE — 0 in-progress)
+- Chains live: Kite testnet + Avalanche Fuji + Base Sepolia (E2E verificado on-chain)
+- Escrow no-custodial: deployado en 3 cadenas, feature-gated (`ESCROW_ENABLED=false` por defecto)
+
+*Última actualización: 2026-06-23 (reconciliación tracking: 12 SDDs "in progress" → DONE; E13 + E16 cerrados; WKH-118/SEC-02/escrow WKH-126 DONE; 1628 tests verdes)*
