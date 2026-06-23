@@ -11,6 +11,10 @@ import {
   type DownstreamResult,
   signAndSettleDownstream,
 } from '../lib/downstream-payment.js';
+import {
+  SSRFViolationError,
+  validateRegistryUrl,
+} from '../lib/url-validator.js';
 import type {
   A2AMessage,
   Agent,
@@ -425,6 +429,29 @@ export const composeService = {
       headers['PAYMENT-SIGNATURE'] = result.xPaymentHeader;
       paymentRequest = result.paymentRequest;
     }
+    // WKH-SEC-04 (AC-3 / CD-2 / DT-2): runtime SSRF revalidation on
+    // invokeUrl before the outbound fetch — mirrors discovery.ts:529. The
+    // headers built above carry x-a2a-key / PAYMENT-SIGNATURE; we MUST NOT
+    // emit them to a host that resolves to a private/loopback/link-local IP
+    // (TOCTOU / DNS-rebinding). On SSRFViolationError, log and rethrow so the
+    // pipeline aborts this step (caught in execute()'s per-step catch) without
+    // leaking the invokeUrl to the client.
+    try {
+      await validateRegistryUrl(agent.invokeUrl);
+    } catch (err) {
+      if (err instanceof SSRFViolationError) {
+        const warn = logger?.warn?.bind(logger) ?? console.warn;
+        warn(
+          { agent: agent.slug, category: err.category },
+          '[Compose] SSRF guard blocked invokeUrl before fetch',
+        );
+        throw new Error(
+          `Agent ${agent.slug} invokeUrl blocked by SSRF guard (${err.category})`,
+        );
+      }
+      throw err;
+    }
+
     const response = await fetch(agent.invokeUrl, {
       method: 'POST',
       headers,

@@ -21,19 +21,19 @@
 | 020 | 2026-04-09 | Kite contracts source-of-truth doc + DEPRECATED banner in spike (WKH-36) | patch | FAST | DONE | main |
 | 021 | 2026-04-09 | Pitch Fase 0 — Passport drift fix + chain-adaptive framing + types cleanup (WKH-37) | patch | FAST | DONE | main + wasiai-landing |
 | 022 | 2026-04-06 | Gasless graceful degradation (WKH-38) | feature | FAST+AR | DONE | feat/022-gasless-degradation |
-| 025 | 2026-04-06 | A2A Key Middleware — requirePaymentOrA2AKey (WKH-34-W4) | feature | LAUNCH | in progress | feat/025-a2a-key-middleware |
-| 026 | 2026-04-06 | Hardening — Rate Limiting, Error Limiting, Circuit Breaker, Backpressure (WKH-18) | feature | QUALITY | in progress | feat/026-hardening |
+| 025 | 2026-04-06 | A2A Key Middleware — requirePaymentOrA2AKey (WKH-34-W4) | feature | LAUNCH | DONE | feat/025-a2a-key-middleware |
+| 026 | 2026-04-06 | Hardening — Rate Limiting, Error Limiting, Circuit Breaker, Backpressure (WKH-18) | feature | QUALITY | DONE | feat/026-hardening |
 | 027 | 2026-04-06 | Demo Script E2E — smoke test automatizado (WKH-30) | feature | FAST | DONE | feat/027-demo-script-e2e |
-| 028 | 2026-04-06 | README.md rewrite — reflect production architecture (WKH-17) | doc | FAST | in progress | feat/028-readme-rewrite |
-| 029 | 2026-04-06 | E2E Test Suite — full middleware chain + inject (WKH-E2E) | test | QUALITY | in progress | feat/029-e2e-tests |
-| 030 | 2026-04-06 | GET /health endpoint (WKH-HEALTH) | patch | FAST | in progress | main |
-| 031 | 2026-04-06 | POST /discover alias — fix 404 for POST callers (WKH-DISCOVER-POST) | bugfix | FAST | in progress | feat/031-discover-post |
-| 032 | 2026-04-06 | Bearer Auth — Authorization: Bearer as alternative to x-a2a-key (WKH-BEARER-AUTH) | feature | FAST+AR | in progress | feat/032-bearer-auth |
-| 033 | 2026-04-06 | Invoke docs — clarify proxy invocation in Agent Card + /discover (WKH-INVOKE-DOCS) | doc | FAST | in progress | feat/033-invoke-docs |
-| 034 | 2026-04-06 | Global Event Tracking — onResponse hook for all endpoints (WKH-EVENT-TRACKING) | feature | FAST+AR | in progress | feat/034-event-tracking |
-| 035 | 2026-04-06 | Bearer Auth Fix on /auth/* + Test Hardening (WKH-BEARER-FIX) | bugfix | FAST+AR | in progress | feat/035-bearer-fix |
-| 036 | 2026-04-06 | Sync .env.example + README.md with current features (WKH-DOCS-SYNC) | doc | FAST | in progress | feat/036-docs-sync |
-| 037 | 2026-04-06 | Migrate x402 from v1 to v2 — Pieverse format (WKH-X402-V2) | bugfix | QUALITY | in progress | feat/037-x402-v2 |
+| 028 | 2026-04-06 | README.md rewrite — reflect production architecture (WKH-17) | doc | FAST | DONE | feat/028-readme-rewrite |
+| 029 | 2026-04-06 | E2E Test Suite — full middleware chain + inject (WKH-E2E) | test | QUALITY | DONE | feat/029-e2e-tests |
+| 030 | 2026-04-06 | GET /health endpoint (WKH-HEALTH) | patch | FAST | DONE | main |
+| 031 | 2026-04-06 | POST /discover alias — fix 404 for POST callers (WKH-DISCOVER-POST) | bugfix | FAST | DONE | feat/031-discover-post |
+| 032 | 2026-04-06 | Bearer Auth — Authorization: Bearer as alternative to x-a2a-key (WKH-BEARER-AUTH) | feature | FAST+AR | DONE | feat/032-bearer-auth |
+| 033 | 2026-04-06 | Invoke docs — clarify proxy invocation in Agent Card + /discover (WKH-INVOKE-DOCS) | doc | FAST | DONE | feat/033-invoke-docs |
+| 034 | 2026-04-06 | Global Event Tracking — onResponse hook for all endpoints (WKH-EVENT-TRACKING) | feature | FAST+AR | DONE | feat/034-event-tracking |
+| 035 | 2026-04-06 | Bearer Auth Fix on /auth/* + Test Hardening (WKH-BEARER-FIX) | bugfix | FAST+AR | DONE | feat/035-bearer-fix |
+| 036 | 2026-04-06 | Sync .env.example + README.md with current features (WKH-DOCS-SYNC) | doc | FAST | DONE | feat/036-docs-sync |
+| 037 | 2026-04-06 | Migrate x402 from v1 to v2 — Pieverse format (WKH-X402-V2) | bugfix | QUALITY | DONE | feat/037-x402-v2 |
 | 038 | 2026-04-11 | Biome Linter + Formatter (WKH-QG-LINT) | tooling | FAST | DONE | feat/038-biome-linter |
 | 039 | 2026-04-11 | Security Headers — X-Content-Type-Options + X-Frame-Options (WKH-QG-HEADERS) | patch | FAST | DONE | feat/039-security-headers |
 | 040 | 2026-04-12 | Discover verified+status — filtro activos por defecto (WKH-DISCOVER-VERIFIED) | feature | FAST+AR | DONE | main (779f93a) |
@@ -109,3 +109,5 @@
 | 120 | 2026-06-22 | [WKH-125b] Cap de gasto por destino en delegaciones EIP-712 — espejo del fix de session keys (d076ea8) para el camino debit_delegation_and_parent | security | QUALITY | DONE | fix/120-wkh-125b-delegation-dest-cap ([report.md](120-wkh-125b-delegation-dest-cap/report.md)) |
 | 121 | 2026-06-22 | [WKH-126a] Contrato Solidity del Escrow No-Custodial — WasiAIEscrow.sol (Foundry): deposit/debit/debitBatch/withdraw + EIP-712 + UUPS upgradeable + deploy Base Sepolia testnet | feature/smart-contract | QUALITY | DONE | feat/121-wkh-126a-escrow-contract ([report.md](121-wkh-126a-escrow-contract/report.md)) |
 | 122 | 2026-06-22 | [WKH-126c] Routing de escrow POR-CADENA — fallback a treasury en cadenas sin contrato (`escrowEnabledForChain` helper) | bugfix | FAST+AR | DONE | fix/122-wkh-126c-escrow-per-chain-routing ([report.md](122-wkh-126c-escrow-per-chain-routing/report.md)) |
+| 123 | 2026-06-23 | [WKH-SEC-03] x402 inbound: ligar recipient + amount — binding `authorization.to`/`value` en middleware + adapters (bypass total del cobro x402 inbound, CRIT-1 auditoría) | security | QUALITY | in progress | fix/123-wkh-sec-03-x402-binding ([work-item.md](123-wkh-sec-03-x402-binding/work-item.md)) |
+| 124 | 2026-06-23 | [WKH-SEC-04] SSRF Hardening: URL final en MCP tools + revalidación invokeUrl en compose — userinfo bypass fix + endpoint path restriction + compose invokeUrl revalidation | security | QUALITY | DONE | feat/124-wkh-sec-04-ssrf-hardening ([report.md](124-wkh-sec-04-ssrf-hardening/report.md)) |

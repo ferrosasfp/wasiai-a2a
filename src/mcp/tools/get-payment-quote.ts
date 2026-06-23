@@ -21,11 +21,16 @@ export async function getPaymentQuote(
   input: GetPaymentQuoteInput,
   _ctx: ToolContext,
 ): Promise<GetPaymentQuoteOutput> {
-  // BLQ-1: SSRF guard — rejects non-http(s), private IPs, localhost,
-  // link-local, and hosts not in MCP_GATEWAY_ALLOWLIST (if configured).
+  // BLQ-1: SSRF guard (first defense) — rejects non-http(s), private IPs,
+  // localhost, link-local, and hosts not in MCP_GATEWAY_ALLOWLIST.
   await validateGatewayUrl(input.gatewayUrl);
 
-  const url = `${input.gatewayUrl}${input.endpoint}`;
+  // WKH-SEC-04 (CD-1 / DT-1): validate the FINAL URL (`gatewayUrl + endpoint`)
+  // built via `new URL(endpoint, gatewayUrl)`, which normalizes the userinfo
+  // bypass to its real host, before any fetch.
+  const url = new URL(input.endpoint, input.gatewayUrl).toString();
+  await validateGatewayUrl(url);
+
   const res = await fetch(url, { method: 'GET' });
 
   // AC-5: non-402 => no payment required.

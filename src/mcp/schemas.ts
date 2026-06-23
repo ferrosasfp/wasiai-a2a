@@ -26,7 +26,7 @@ export const INPUT_SCHEMAS: Record<ToolName, Record<string, unknown>> = {
     required: ['gatewayUrl', 'endpoint'],
     properties: {
       gatewayUrl: { type: 'string', format: 'uri' },
-      endpoint: { type: 'string', minLength: 1 },
+      endpoint: { type: 'string', minLength: 1, pattern: '^/' },
       method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE'] },
       payload: {},
       headers: {
@@ -42,7 +42,7 @@ export const INPUT_SCHEMAS: Record<ToolName, Record<string, unknown>> = {
     required: ['gatewayUrl', 'endpoint'],
     properties: {
       gatewayUrl: { type: 'string', format: 'uri' },
-      endpoint: { type: 'string', minLength: 1 },
+      endpoint: { type: 'string', minLength: 1, pattern: '^/' },
     },
   },
   discover_agents: {

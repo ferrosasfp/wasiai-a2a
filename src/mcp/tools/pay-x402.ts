@@ -77,15 +77,22 @@ export async function payX402(
   input: PayX402Input,
   _ctx: ToolContext,
 ): Promise<PayX402Output> {
-  // BLQ-1: SSRF guard — rejects non-http(s), private IPs, localhost,
-  // link-local, and hosts not in MCP_GATEWAY_ALLOWLIST (if configured).
+  // BLQ-1: SSRF guard (first defense) — rejects non-http(s), private IPs,
+  // localhost, link-local, and hosts not in MCP_GATEWAY_ALLOWLIST.
   await validateGatewayUrl(input.gatewayUrl);
+
+  // WKH-SEC-04 (CD-1 / DT-1): the actual fetch targets `gatewayUrl + endpoint`.
+  // Build the final URL with `new URL(endpoint, gatewayUrl)` so the userinfo
+  // bypass (e.g. endpoint `@169.254.169.254/foo`) is normalized to its real
+  // host, then validate THAT URL before any fetch. Validating only
+  // `gatewayUrl` is insufficient (the endpoint can re-target the host).
+  const url = new URL(input.endpoint, input.gatewayUrl).toString();
+  await validateGatewayUrl(url);
 
   const timeoutMs = parseInt(process.env.MCP_PAY_TIMEOUT_MS ?? '30000', 10);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const url = `${input.gatewayUrl}${input.endpoint}`;
   const method = input.method ?? 'POST';
   const baseHeaders: Record<string, string> = {
     'content-type': 'application/json',
