@@ -23,11 +23,15 @@ import {
   verifyDeposit,
 } from '../adapters/deposit-verifier.js';
 import { getErc8004Reader } from '../adapters/erc8004-identity.js';
-import { verifyEscrowDeposit } from '../adapters/escrow-verifier.js';
+import {
+  resolveEscrowContract,
+  verifyEscrowDeposit,
+} from '../adapters/escrow-verifier.js';
 import {
   getAdaptersBundle,
   getInitializedChainKeys,
 } from '../adapters/registry.js';
+import type { ChainKey } from '../adapters/types.js';
 import { authSignupRateLimit } from '../middleware/rate-limit.js';
 import { budgetService } from '../services/budget.js';
 import { delegationService } from '../services/delegation.js';
@@ -124,6 +128,18 @@ const REGISTRY_ID_RE = /^[a-z0-9][a-z0-9-]{0,127}$/;
  */
 function escrowModeEnabled(): boolean {
   return process.env.ESCROW_MODE_ENABLED === 'true';
+}
+
+/**
+ * Routing escrow POR-CADENA (WKH-126c). El contrato escrow es per-cadena
+ * (`A2A_ESCROW_CONTRACT_<FAMILY>`), pero el flag `ESCROW_MODE_ENABLED` es
+ * global. El escrow solo aplica si AMBOS se cumplen: flag global on Y contrato
+ * configurado para esa cadena. Cadenas sin contrato → fallback silencioso a
+ * treasury (no 503 ESCROW_CONTRACT_NOT_CONFIGURED). Flag off → false siempre
+ * (CD-2), preservando AC-8 de WKH-126b (treasury en el 100% de las cadenas).
+ */
+function escrowEnabledForChain(chainKey: ChainKey): boolean {
+  return escrowModeEnabled() && resolveEscrowContract(chainKey) !== null;
 }
 
 // ── Helper: resolve caller key from x-a2a-key header ────────
@@ -663,7 +679,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     // 5. Verificar on-chain ANTES de acreditar (AC-1 / CD-4). Selector escrow vs
     // treasury (DT-10): con ESCROW_MODE_ENABLED='true' (estricto, CD-11) se usa
     // el verifier no-custodial; default = treasury intacto (AC-8).
-    const result = escrowModeEnabled()
+    const result = escrowEnabledForChain(chainKey)
       ? await verifyEscrowDeposit({
           chainKey,
           bundle,
