@@ -459,7 +459,13 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
           max_spend_per_call_usd: body.max_spend_per_call_usd,
         });
 
-        return reply.status(201).send(result);
+        // key_id_hash: el bytes32 que el contrato escrow usa como keyId
+        // (keccak256(stringToBytes(key_id))). Lo exponemos para que el front
+        // pueda depositar al escrow sin re-implementar keccak en JS.
+        return reply.status(201).send({
+          ...result,
+          key_id_hash: keccak256(stringToBytes(result.key_id)),
+        });
       } catch (err) {
         fastify.log.error(
           {
@@ -776,6 +782,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
 
     return reply.status(200).send({
       key_id: callerKey.id,
+      key_id_hash: keccak256(stringToBytes(callerKey.id)),
       display_name: callerKey.display_name,
       budget: callerKey.budget,
       daily_limit_usd: callerKey.daily_limit_usd,
