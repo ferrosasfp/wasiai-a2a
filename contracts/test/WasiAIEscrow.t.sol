@@ -33,7 +33,8 @@ contract WasiAIEscrowTest is Test {
         usdc = new MockUSDC();
 
         WasiAIEscrow impl = new WasiAIEscrow();
-        bytes memory initData = abi.encodeCall(WasiAIEscrow.initialize, (address(usdc), multisig, TIMELOCK));
+        bytes memory initData =
+            abi.encodeCall(WasiAIEscrow.initialize, (address(usdc), operator, multisig, TIMELOCK));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initData);
         escrow = WasiAIEscrow(address(proxy));
 
@@ -340,8 +341,230 @@ contract WasiAIEscrowTest is Test {
     // ── ZeroAddress guard in initialize ──────────────────────────────────────
     function test_RevertWhen_InitializeZeroAddress() public {
         WasiAIEscrow impl = new WasiAIEscrow();
-        bytes memory initData = abi.encodeCall(WasiAIEscrow.initialize, (address(0), multisig, TIMELOCK));
+        bytes memory initData = abi.encodeCall(WasiAIEscrow.initialize, (address(0), operator, multisig, TIMELOCK));
         vm.expectRevert(IWasiAIEscrow.ZeroAddress.selector);
         new ERC1967Proxy(address(impl), initData);
+    }
+
+    function test_RevertWhen_InitializeZeroOperator() public {
+        WasiAIEscrow impl = new WasiAIEscrow();
+        bytes memory initData = abi.encodeCall(WasiAIEscrow.initialize, (address(usdc), address(0), multisig, TIMELOCK));
+        vm.expectRevert(IWasiAIEscrow.ZeroAddress.selector);
+        new ERC1967Proxy(address(impl), initData);
+    }
+
+    // ── F-A1/F-A2: only the configured operator can settle (front-run closed) ─
+    function test_RevertWhen_DebitByNonOperator_validSig() public {
+        _deposit(keyId, 100e6);
+        uint256 deadline = block.timestamp + 1 hours;
+        uint256 nonce = 1;
+        // VALID depositor signature, but a third party (the "MEV bot") presents it.
+        bytes memory sig = _signDebit(agentPk, keyId, 40e6, deadline, nonce);
+        address bot = address(0xB07);
+        vm.prank(bot);
+        vm.expectRevert(IWasiAIEscrow.NotOperator.selector);
+        escrow.debit(keyId, 40e6, deadline, nonce, sig);
+        // funds untouched, nonce NOT consumed
+        assertEq(escrow.escrowBalance(keyId), 100e6);
+        assertEq(usdc.balanceOf(bot), 0);
+        // operator can still settle the same authorization afterwards (nonce was not burned)
+        vm.prank(operator);
+        escrow.debit(keyId, 40e6, deadline, nonce, sig);
+        assertEq(usdc.balanceOf(operator), 40e6);
+    }
+
+    function test_RevertWhen_DebitBatchByNonOperator_validSig() public {
+        _deposit(keyId, 100e6);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32[] memory keys = new bytes32[](1);
+        uint256[] memory amts = new uint256[](1);
+        uint256[] memory nonces = new uint256[](1);
+        bytes[] memory sigs = new bytes[](1);
+        keys[0] = keyId;
+        amts[0] = 40e6;
+        nonces[0] = 1;
+        sigs[0] = _signDebit(agentPk, keyId, 40e6, deadline, 1);
+        vm.prank(address(0xB07));
+        vm.expectRevert(IWasiAIEscrow.NotOperator.selector);
+        escrow.debitBatch(keys, amts, deadline, nonces, sigs);
+        assertEq(escrow.escrowBalance(keyId), 100e6);
+    }
+
+    // ── F-A1/F-A2: setOperator rotation (onlyOwner + event + zero guard) ──────
+    function test_SetOperator_byOwner_rotates_emitsEvent() public {
+        address newOp = address(0x09E7);
+        vm.expectEmit(true, true, false, false, address(escrow));
+        emit IWasiAIEscrow.OperatorUpdated(operator, newOp);
+        vm.prank(multisig);
+        escrow.setOperator(newOp);
+        assertEq(escrow.operator(), newOp);
+
+        // old operator can no longer settle
+        _deposit(keyId, 100e6);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _signDebit(agentPk, keyId, 10e6, deadline, 1);
+        vm.prank(operator);
+        vm.expectRevert(IWasiAIEscrow.NotOperator.selector);
+        escrow.debit(keyId, 10e6, deadline, 1, sig);
+        // new operator can
+        vm.prank(newOp);
+        escrow.debit(keyId, 10e6, deadline, 1, sig);
+        assertEq(usdc.balanceOf(newOp), 10e6);
+    }
+
+    function test_RevertWhen_SetOperator_byNonOwner() public {
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operator));
+        escrow.setOperator(address(0x1234));
+    }
+
+    function test_RevertWhen_SetOperator_zeroAddress() public {
+        vm.prank(multisig);
+        vm.expectRevert(IWasiAIEscrow.ZeroAddress.selector);
+        escrow.setOperator(address(0));
+    }
+
+    // ── B-MED-1: initialize rejects timelock below MIN_TIMELOCK ───────────────
+    function test_RevertWhen_InitializeTimelockBelowMin() public {
+        WasiAIEscrow impl = new WasiAIEscrow();
+        uint256 tooShort = 2 days - 1;
+        bytes memory initData =
+            abi.encodeCall(WasiAIEscrow.initialize, (address(usdc), operator, multisig, tooShort));
+        vm.expectRevert(IWasiAIEscrow.InvalidTimelock.selector);
+        new ERC1967Proxy(address(impl), initData);
+    }
+
+    function test_Initialize_timelockAtMin_ok() public {
+        WasiAIEscrow impl = new WasiAIEscrow();
+        bytes memory initData =
+            abi.encodeCall(WasiAIEscrow.initialize, (address(usdc), operator, multisig, escrow.MIN_TIMELOCK()));
+        // exactly MIN_TIMELOCK must succeed
+        new ERC1967Proxy(address(impl), initData);
+    }
+
+    // ── B-MED-2: renounceOwnership is disabled (use renounceUpgrade) ──────────
+    function test_RevertWhen_RenounceOwnership() public {
+        vm.prank(multisig);
+        vm.expectRevert(IWasiAIEscrow.UseRenounceUpgrade.selector);
+        escrow.renounceOwnership();
+        // ownership intact
+        assertEq(escrow.owner(), multisig);
+    }
+
+    // ── B-MED-3: proposeUpgrade validation (zero / no-code) + event ───────────
+    function test_RevertWhen_ProposeUpgrade_zeroAddress() public {
+        vm.prank(multisig);
+        vm.expectRevert(IWasiAIEscrow.ZeroAddress.selector);
+        escrow.proposeUpgrade(address(0));
+    }
+
+    function test_RevertWhen_ProposeUpgrade_notAContract() public {
+        vm.prank(multisig);
+        vm.expectRevert(IWasiAIEscrow.NotAContract.selector);
+        escrow.proposeUpgrade(address(0xDEAD)); // EOA / no code
+    }
+
+    function test_ProposeUpgrade_emitsEvent() public {
+        WasiAIEscrow newImpl = new WasiAIEscrow();
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit IWasiAIEscrow.UpgradeProposed(address(newImpl), block.timestamp + TIMELOCK);
+        vm.prank(multisig);
+        escrow.proposeUpgrade(address(newImpl));
+    }
+
+    // ── C-MED-1: MAX_BATCH guard (empty + oversized) ──────────────────────────
+    function test_RevertWhen_DebitBatch_empty() public {
+        bytes32[] memory keys = new bytes32[](0);
+        uint256[] memory amts = new uint256[](0);
+        uint256[] memory nonces = new uint256[](0);
+        bytes[] memory sigs = new bytes[](0);
+        vm.prank(operator);
+        vm.expectRevert(IWasiAIEscrow.InvalidBatchSize.selector);
+        escrow.debitBatch(keys, amts, block.timestamp + 1 hours, nonces, sigs);
+    }
+
+    function test_RevertWhen_DebitBatch_exceedsMaxBatch() public {
+        uint256 n = escrow.MAX_BATCH() + 1;
+        bytes32[] memory keys = new bytes32[](n);
+        uint256[] memory amts = new uint256[](n);
+        uint256[] memory nonces = new uint256[](n);
+        bytes[] memory sigs = new bytes[](n);
+        vm.prank(operator);
+        vm.expectRevert(IWasiAIEscrow.InvalidBatchSize.selector);
+        escrow.debitBatch(keys, amts, block.timestamp + 1 hours, nonces, sigs);
+    }
+
+    // ── B-BAJO-1: cancelUpgrade + expiry window ───────────────────────────────
+    function test_CancelUpgrade_clearsProposal_emitsEvent() public {
+        WasiAIEscrow newImpl = new WasiAIEscrow();
+        vm.prank(multisig);
+        escrow.proposeUpgrade(address(newImpl));
+
+        vm.expectEmit(true, false, false, false, address(escrow));
+        emit IWasiAIEscrow.UpgradeCancelled(address(newImpl));
+        vm.prank(multisig);
+        escrow.cancelUpgrade(address(newImpl));
+
+        // after cancel, upgrade reverts even past the timelock
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.prank(multisig);
+        vm.expectRevert(IWasiAIEscrow.TimelockNotElapsed.selector);
+        escrow.upgradeToAndCall(address(newImpl), "");
+    }
+
+    function test_RevertWhen_CancelUpgrade_byNonOwner() public {
+        WasiAIEscrow newImpl = new WasiAIEscrow();
+        vm.prank(multisig);
+        escrow.proposeUpgrade(address(newImpl));
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operator));
+        escrow.cancelUpgrade(address(newImpl));
+    }
+
+    function test_RevertWhen_UpgradeAfterGraceExpired() public {
+        WasiAIEscrow newImpl = new WasiAIEscrow();
+        vm.prank(multisig);
+        escrow.proposeUpgrade(address(newImpl));
+        // warp past eta + UPGRADE_GRACE → proposal expired
+        vm.warp(block.timestamp + TIMELOCK + escrow.UPGRADE_GRACE() + 1);
+        vm.prank(multisig);
+        vm.expectRevert(IWasiAIEscrow.TimelockNotElapsed.selector);
+        escrow.upgradeToAndCall(address(newImpl), "");
+    }
+
+    function test_Upgrade_withinGraceWindow_ok_thenProposalConsumed() public {
+        WasiAIEscrow newImpl = new WasiAIEscrow();
+        vm.prank(multisig);
+        escrow.proposeUpgrade(address(newImpl));
+        // inside [eta, eta+GRACE]
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.prank(multisig);
+        escrow.upgradeToAndCall(address(newImpl), "");
+
+        // proposal was consumed: re-upgrading to the same impl now needs a fresh proposal
+        WasiAIEscrow newImpl2 = new WasiAIEscrow();
+        vm.prank(multisig);
+        vm.expectRevert(IWasiAIEscrow.TimelockNotElapsed.selector);
+        escrow.upgradeToAndCall(address(newImpl2), "");
+    }
+
+    // ── F-A4: deadline beyond MAX_DEADLINE_TTL is rejected ────────────────────
+    function test_RevertWhen_DeadlineTooFar() public {
+        _deposit(keyId, 100e6);
+        uint256 deadline = block.timestamp + escrow.MAX_DEADLINE_TTL() + 1;
+        bytes memory sig = _signDebit(agentPk, keyId, 40e6, deadline, 1);
+        vm.prank(operator);
+        vm.expectRevert(IWasiAIEscrow.DeadlineTooFar.selector);
+        escrow.debit(keyId, 40e6, deadline, 1, sig);
+        assertEq(escrow.escrowBalance(keyId), 100e6);
+    }
+
+    function test_Debit_deadlineAtMaxTtl_ok() public {
+        _deposit(keyId, 100e6);
+        uint256 deadline = block.timestamp + escrow.MAX_DEADLINE_TTL(); // exactly at the cap
+        bytes memory sig = _signDebit(agentPk, keyId, 40e6, deadline, 1);
+        vm.prank(operator);
+        escrow.debit(keyId, 40e6, deadline, 1, sig);
+        assertEq(escrow.escrowBalance(keyId), 60e6);
     }
 }
