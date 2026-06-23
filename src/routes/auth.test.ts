@@ -875,9 +875,33 @@ describe('auth routes', () => {
       decimals: 6,
     });
     expect(entry.min_confirmations).toBe(3);
+    // Escrow off por default → escrow_mode false, escrow_contract null.
+    expect(entry.escrow_mode).toBe(false);
+    expect(entry.escrow_contract).toBe(null);
 
     delete process.env.A2A_DEPOSIT_TREASURY_AVALANCHE;
     delete process.env.A2A_DEPOSIT_MIN_CONFIRMATIONS_AVALANCHE;
+  });
+
+  it('GET /auth/deposit-info → expone escrow_contract cuando el escrow está activo para la cadena', async () => {
+    process.env.A2A_DEPOSIT_TREASURY_AVALANCHE = FUJI_TREASURY;
+    process.env.ESCROW_MODE_ENABLED = 'true';
+    process.env.A2A_ESCROW_CONTRACT_AVALANCHE =
+      '0x463A03c07dC370690f94d09A60f2Bf22A966C5dE';
+    mockGetInitializedChainKeys.mockReturnValue(['avalanche-fuji']);
+    mockGetAdaptersBundle.mockReturnValue(makeDepositInfoBundle());
+
+    const res = await app.inject({ method: 'GET', url: '/auth/deposit-info' });
+    expect(res.statusCode).toBe(200);
+    const entry = res.json().networks[0];
+    expect(entry.escrow_mode).toBe(true);
+    expect(entry.escrow_contract).toBe(
+      '0x463A03c07dC370690f94d09A60f2Bf22A966C5dE',
+    );
+
+    delete process.env.A2A_DEPOSIT_TREASURY_AVALANCHE;
+    delete process.env.ESCROW_MODE_ENABLED;
+    delete process.env.A2A_ESCROW_CONTRACT_AVALANCHE;
   });
 
   it('GET /auth/deposit-info with zero initialized chains → 200 { networks: [] } (AC-3)', async () => {
