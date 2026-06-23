@@ -237,6 +237,7 @@ function buildX402CanonicalBody(
   authorization: X402PaymentRequest['authorization'],
   signature: string,
   network: BaseNetwork,
+  requirements?: { payTo: string; maxAmountRequired: string },
 ): unknown {
   return {
     x402Version: 2,
@@ -246,9 +247,9 @@ function buildX402CanonicalBody(
     accepted: {
       scheme: BASE_SCHEME,
       network: getNetworkTag(network),
-      amount: authorization.value,
+      amount: requirements?.maxAmountRequired ?? authorization.value,
       asset: getUsdcAddress(network),
-      payTo: authorization.to,
+      payTo: requirements?.payTo ?? authorization.to,
       maxTimeoutSeconds: BASE_MAX_TIMEOUT_SECONDS,
       extra: { assetTransferMethod: 'eip3009' },
     },
@@ -265,6 +266,7 @@ async function verifyX402(
     proof.authorization,
     proof.signature,
     network,
+    proof.paymentRequirements,
   );
   const apiKey = getFacilitatorApiKey();
   const headers: Record<string, string> = {
@@ -310,6 +312,7 @@ async function settleX402(
     req.authorization,
     req.signature,
     network,
+    req.paymentRequirements,
   );
   const apiKey = getFacilitatorApiKey();
   const headers: Record<string, string> = {
