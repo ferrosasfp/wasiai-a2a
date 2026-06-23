@@ -8,13 +8,19 @@
  *                              Guarda tu saldo budget[chainId].
  *   - Funding wallet         : TU wallet (esta private key). Tiene los USDC,
  *                              firma y paga el gas. WasiAI nunca la ve.
- *   - Treasury / Operator    : direcciones de WasiAI. El treasury RECIBE tu USDC.
+ *   - Escrow no-custodial    : contrato on-chain que CUSTODIA tu depósito. El
+ *                              operador NO puede mover los fondos sin tu firma
+ *                              (EIP-712). Es el modo por defecto en prod.
+ *                              (Fallback legacy: treasury de WasiAI, si la red no
+ *                              tiene escrow activo.)
  *
  * Flujo (verify-before-credit):
- *   0. Leer config de fondeo      GET  /auth/deposit-info   (treasury, token, decimales, chain_id)
+ *   0. Leer config de fondeo      GET  /auth/deposit-info   (escrow_contract/treasury, token, decimales)
  *   1. Crear Agent Key            POST /auth/agent-signup
  *   2. Vincular funding wallet    POST /auth/funding-wallet (firma, sin gas)
- *   3. Transferir token on-chain  ERC-20 transfer -> treasury (paga gas)
+ *   3. Depositar on-chain (paga gas):
+ *        · escrow:   approve(escrow, amount) + deposit(keyId, amount) -> contrato no-custodial
+ *        · treasury: ERC-20 transfer -> treasury (fallback si la red no tiene escrow)
  *   4. Declarar el depósito       POST /auth/deposit (tx_hash)
  *   5. Verificar saldo            GET  /auth/me
  *
@@ -22,14 +28,22 @@
  *   npm i viem
  *   - Una wallet con el token (USDC/PYUSD) + un poco de gas nativo en la red elegida.
  *
- * Uso (NO hace falta saber el treasury: lo trae /auth/deposit-info):
+ * Uso (NO hace falta saber a dónde mandar: lo trae /auth/deposit-info):
  *   A2A_BASE=https://wasiai-a2a-production.up.railway.app \
  *   FUNDER_PK=0xTU_PRIVATE_KEY NETWORK=avalanche-fuji AMOUNT=1.0 \
  *   node examples/fund-agent-key.mjs
  */
 import { privateKeyToAccount } from 'viem/accounts';
-import { createWalletClient, createPublicClient, http, parseUnits } from 'viem';
+import { createWalletClient, createPublicClient, http, parseUnits, keccak256, toBytes, defineChain } from 'viem';
 import { avalancheFuji, baseSepolia } from 'viem/chains';
+
+// Kite Ozone testnet (chain 2368) no viene en viem/chains; la definimos inline.
+const kiteOzoneTestnet = defineChain({
+  id: 2368,
+  name: 'Kite Ozone Testnet',
+  nativeCurrency: { name: 'KITE', symbol: 'KITE', decimals: 18 },
+  rpcUrls: { default: { http: ['https://rpc-testnet.gokite.ai/'] } },
+});
 
 const A2A_BASE = process.env.A2A_BASE ?? 'https://wasiai-a2a-production.up.railway.app';
 const FUNDER_PK = process.env.FUNDER_PK;                 // private key de TU funding wallet
@@ -39,12 +53,21 @@ const OWNER_REF = process.env.OWNER_REF ?? 'dev-demo';
 
 // RPC + viem chain por slug (deposit-info NO trae el RPC; lo ponés vos).
 const RPCS = {
-  'avalanche-fuji': { chain: avalancheFuji, rpc: process.env.RPC_URL ?? 'https://api.avax-test.network/ext/bc/C/rpc' },
-  'base-sepolia':   { chain: baseSepolia,   rpc: process.env.RPC_URL ?? 'https://sepolia.base.org' },
+  'avalanche-fuji':     { chain: avalancheFuji,    rpc: process.env.RPC_URL ?? 'https://api.avax-test.network/ext/bc/C/rpc' },
+  'base-sepolia':       { chain: baseSepolia,      rpc: process.env.RPC_URL ?? 'https://sepolia.base.org' },
+  'kite-ozone-testnet': { chain: kiteOzoneTestnet, rpc: process.env.KITE_RPC_URL ?? process.env.RPC_URL ?? 'https://rpc-testnet.gokite.ai/' },
 };
 
-const ERC20 = [{ name: 'transfer', type: 'function', stateMutability: 'nonpayable',
-  inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ type: 'bool' }] }];
+const ERC20 = [
+  { name: 'transfer', type: 'function', stateMutability: 'nonpayable',
+    inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ type: 'bool' }] },
+  { name: 'approve', type: 'function', stateMutability: 'nonpayable',
+    inputs: [{ name: 'spender', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ type: 'bool' }] },
+];
+
+// WasiAIEscrow.deposit(bytes32 keyId, uint256 amount). keyId = keccak256(utf8(key_id)).
+const ESCROW = [{ name: 'deposit', type: 'function', stateMutability: 'nonpayable',
+  inputs: [{ name: 'keyId', type: 'bytes32' }, { name: 'amount', type: 'uint256' }], outputs: [] }];
 
 if (!FUNDER_PK) { console.error('Falta FUNDER_PK (la private key de tu funding wallet).'); process.exit(1); }
 
@@ -97,8 +120,10 @@ async function depositWithRetry({ key, key_id, tx_hash, chain_id }) {
 const { networks } = await api('/auth/deposit-info', { method: 'GET' });
 const net = networks.find((n) => n.slug === NETWORK);
 if (!net) { console.error(`Red '${NETWORK}' no disponible. Opciones: ${networks.map(n => n.slug).join(', ')}`); process.exit(1); }
-if (!net.treasury) { console.error(`La red ${NETWORK} no tiene treasury configurado todavía.`); process.exit(1); }
-console.log(`0. deposit-info: treasury=${net.treasury} token=${net.token.symbol}(${net.token.decimals}d) chain_id=${net.chain_id} min_conf=${net.min_confirmations}`);
+const escrowActive = Boolean(net.escrow_mode && net.escrow_contract);
+if (!escrowActive && !net.treasury) { console.error(`La red ${NETWORK} no tiene escrow ni treasury configurado todavía.`); process.exit(1); }
+const dest = escrowActive ? `escrow=${net.escrow_contract} (no-custodial)` : `treasury=${net.treasury}`;
+console.log(`0. deposit-info: ${dest} token=${net.token.symbol}(${net.token.decimals}d) chain_id=${net.chain_id} min_conf=${net.min_confirmations}`);
 
 const rpc = RPCS[NETWORK];
 if (!rpc) { console.error(`Sin RPC configurado para '${NETWORK}' en este ejemplo.`); process.exit(1); }
@@ -118,10 +143,24 @@ const signature = await account.signMessage({ message: `WASIAI_BIND_FUNDING_WALL
 await api('/auth/funding-wallet', { key, body: { wallet: account.address, signature } });
 console.log(`2. Funding wallet vinculada.`);
 
-// ── 3. Transferir el token al treasury (tx real, paga gas) ──────────────────
-const amount = parseUnits(AMOUNT, net.token.decimals); // decimales REALES de la red (Kite=18, USDC=6)
-const txHash = await wallet.writeContract({ address: net.token.address, abi: ERC20, functionName: 'transfer', args: [net.treasury, amount] });
-console.log(`3. ${AMOUNT} ${net.token.symbol} -> ${net.treasury}  tx=${txHash}`);
+// ── 3. Depositar on-chain (tx real, paga gas) ───────────────────────────────
+// decimales REALES del token de la red (USDC/PYUSD=6); deposit-info es la fuente.
+const amount = parseUnits(AMOUNT, net.token.decimals);
+let txHash;
+if (escrowActive) {
+  // No-custodial: 3a approve(escrow, amount) → 3b deposit(keyId, amount) al contrato.
+  // keyId on-chain = keccak256(utf8(key_id)); el operador no puede mover sin tu firma.
+  const keyIdHash = keccak256(toBytes(key_id));
+  const approveTx = await wallet.writeContract({ address: net.token.address, abi: ERC20, functionName: 'approve', args: [net.escrow_contract, amount] });
+  console.log(`3a. approve ${AMOUNT} ${net.token.symbol} -> escrow ${net.escrow_contract}  tx=${approveTx}`);
+  await publicClient.waitForTransactionReceipt({ hash: approveTx, confirmations: 1 });
+  txHash = await wallet.writeContract({ address: net.escrow_contract, abi: ESCROW, functionName: 'deposit', args: [keyIdHash, amount] });
+  console.log(`3b. deposit ${AMOUNT} ${net.token.symbol} -> escrow (no-custodial)  tx=${txHash}`);
+} else {
+  // Fallback legacy: transfer directo al treasury (solo si la red no tiene escrow).
+  txHash = await wallet.writeContract({ address: net.token.address, abi: ERC20, functionName: 'transfer', args: [net.treasury, amount] });
+  console.log(`3. ${AMOUNT} ${net.token.symbol} -> ${net.treasury} (treasury)  tx=${txHash}`);
+}
 console.log(`   esperando ${net.min_confirmations} confirmación(es)…`);
 await publicClient.waitForTransactionReceipt({ hash: txHash, confirmations: net.min_confirmations });
 console.log('   confirmada on-chain.');
