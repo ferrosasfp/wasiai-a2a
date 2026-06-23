@@ -818,11 +818,17 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
           if (!bundle) return null;
           const token = bundle.payment.supportedTokens[0];
           if (!token) return null; // CD-3: tolerate empty supportedTokens
+          // Escrow no-custodial: cuando está activo para esta cadena, el caller
+          // deposita al CONTRATO (no a la treasury). Exponemos la dirección
+          // (pública, nunca un secreto) para que el front sepa a dónde fondear.
+          const escrowActive = escrowEnabledForChain(chainKey);
           return {
             chain_id: bundle.chainConfig.chainId,
             slug: chainKey,
             family: resolveChainFamilyEnvSuffix(chainKey),
             treasury: resolveTreasury(chainKey), // address | null (AC-4)
+            escrow_mode: escrowActive,
+            escrow_contract: escrowActive ? resolveEscrowContract(chainKey) : null,
             token: {
               symbol: token.symbol,
               address: token.address,
