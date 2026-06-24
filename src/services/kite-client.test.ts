@@ -13,11 +13,6 @@ vi.mock('viem', () => ({
 
 async function importKiteClient(rpcUrl: string | undefined) {
   vi.resetModules();
-  vi.mock('viem', () => ({
-    createPublicClient: vi.fn(() => ({ getChainId: mockGetChainId })),
-    http: vi.fn((url: string) => ({ type: 'http', url })),
-    defineChain: vi.fn((chain: unknown) => chain),
-  }));
   if (rpcUrl !== undefined) {
     process.env.KITE_RPC_URL = rpcUrl;
   } else {

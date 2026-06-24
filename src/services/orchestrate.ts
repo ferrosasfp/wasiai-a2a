@@ -280,7 +280,11 @@ export const orchestrateService = {
         request.chainId,
         billingKeyRow.owner_ref,
       );
-      if (Number(bal) <= 0) {
+      // AUDIT A3 (ALTA): `Number(bal)` de un budget JSONB no-numérico da NaN, y
+      // `NaN <= 0 === false` dejaba PASAR el early-fail (un balance corrupto se
+      // trataba como "con fondos"). Tratamos NaN/Infinity como saldo insuficiente.
+      const n = Number(bal);
+      if (!Number.isFinite(n) || n <= 0) {
         const noFundsResult: OrchestrateResult = {
           orchestrationId,
           answer: null,

@@ -835,7 +835,9 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
             family: resolveChainFamilyEnvSuffix(chainKey),
             treasury: resolveTreasury(chainKey), // address | null (AC-4)
             escrow_mode: escrowActive,
-            escrow_contract: escrowActive ? resolveEscrowContract(chainKey) : null,
+            escrow_contract: escrowActive
+              ? resolveEscrowContract(chainKey)
+              : null,
             token: {
               symbol: token.symbol,
               address: token.address,

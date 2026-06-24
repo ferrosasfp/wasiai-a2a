@@ -85,10 +85,7 @@ const MAX_DEPTH = 8;
  * profundidad del árbol parseado. Devuelve las keys con ≥1 mensaje, o `null`.
  * Depth-bounded (MAX_DEPTH) para no recorrer estructuras patológicas.
  */
-function findFieldErrorsDeep(
-  node: unknown,
-  depth: number,
-): string[] | null {
+function findFieldErrorsDeep(node: unknown, depth: number): string[] | null {
   if (depth > MAX_DEPTH || node === null || typeof node !== 'object') {
     return null;
   }
@@ -119,11 +116,7 @@ function findFieldErrorsDeep(
  * Recolecta RECURSIVAMENTE todos los string values del árbol (para el fallback
  * de texto libre, ej. `result.detail.error: "a, b required"`). Depth-bounded.
  */
-function collectStringsDeep(
-  node: unknown,
-  out: string[],
-  depth: number,
-): void {
+function collectStringsDeep(node: unknown, out: string[], depth: number): void {
   if (depth > MAX_DEPTH || node === null) return;
   if (typeof node === 'string') {
     out.push(node);

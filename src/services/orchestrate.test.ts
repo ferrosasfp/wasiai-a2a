@@ -868,6 +868,33 @@ describe('orchestrateService', () => {
     expect(debitCall[2]).not.toBeCloseTo(0.5, 6);
   });
 
+  // AUDIT A3 (ALTA): un budget JSONB corrupto (no-numérico) hacía que
+  // `Number(bal) <= 0` evaluara `NaN <= 0 === false` → el early-fail "sin
+  // fondos" NO disparaba (un balance corrupto se trataba como con fondos). El
+  // guard `!Number.isFinite(n) || n <= 0` lo trata como saldo insuficiente.
+  it('T-A3: corrupt non-numeric balance early-fails (NaN treated as insufficient)', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    setLlmTwoAgents();
+    // getBalance devuelve un valor no-numérico (budget JSONB corrupto).
+    vi.mocked(budgetService.getBalance).mockResolvedValueOnce('not-a-number');
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'corrupt balance',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-a3',
+    );
+
+    // Early-fail: no se debita, el pipeline no corre, reasoning de fondos.
+    expect(result.pipeline.success).toBe(false);
+    expect(result.reasoning).toBe('Insufficient budget for orchestration');
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
+  });
+
   // T-AC2 (AC-2): steps.length===0 (all over budget) → debit 0 calls.
   it('T-AC2: zero steps (all over budget) → no debit', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);

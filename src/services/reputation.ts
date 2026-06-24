@@ -113,7 +113,7 @@ function accumulateRow(acc: RepAccumulator, row: RepRow): void {
       // caller_ref_hash (históricos o anónimos) caen en el bucket '__anon__'
       // (capeado a K en computeFromAccumulator), NUNCA error ni colapso a null.
       const hash =
-        (row.metadata?.['caller_ref_hash'] as string | null | undefined) ??
+        (row.metadata?.caller_ref_hash as string | null | undefined) ??
         '__anon__';
       acc.settledByCaller.set(hash, (acc.settledByCaller.get(hash) ?? 0) + 1);
       acc.settledVolume += cost;

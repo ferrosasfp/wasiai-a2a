@@ -34,6 +34,12 @@ let nextKeyRow: Partial<A2AAgentKeyRow> | undefined;
 // del price handler en el orden de preHandlers). Es lo que el step-0 usaría
 // para keyear el cap por destino.
 let capturedComposeDestination: string | undefined;
+// AUDIT A1 (refund step-0): vars module-level que el mock del middleware inyecta
+// para simular el PRE-débito del path a2a-key. undefined por defecto → los tests
+// existentes no ven cambios (el route handler salta el refund sin estos campos).
+let nextEstimatedCostUsd: number | undefined;
+let nextResolvedChainId: number | undefined;
+let nextInjectedDestination: string | undefined;
 vi.mock('../middleware/a2a-key.js', () => ({
   requirePaymentOrA2AKey: () => [
     async (request: FastifyRequest, _reply: FastifyReply) => {
@@ -41,6 +47,21 @@ vi.mock('../middleware/a2a-key.js', () => ({
       capturedComposeDestination = (
         request as unknown as { composeDestination?: string }
       ).composeDestination;
+      // AUDIT A1: simula el débito del middleware (path a2a-key).
+      if (nextEstimatedCostUsd !== undefined) {
+        (
+          request as unknown as { composeEstimatedCostUsd?: number }
+        ).composeEstimatedCostUsd = nextEstimatedCostUsd;
+      }
+      if (nextResolvedChainId !== undefined) {
+        (request as unknown as { resolvedChainId?: number }).resolvedChainId =
+          nextResolvedChainId;
+      }
+      if (nextInjectedDestination !== undefined) {
+        (
+          request as unknown as { composeDestination?: string }
+        ).composeDestination = nextInjectedDestination;
+      }
     },
   ],
 }));
@@ -71,16 +92,27 @@ vi.mock('../services/agent-price.js', () => ({
   resolveAgentDestination: vi.fn(),
 }));
 
+// ── Mock budget service (AUDIT A1: refund step-0 en fallo) ──
+vi.mock('../services/budget.js', () => ({
+  budgetService: {
+    credit: vi.fn().mockResolvedValue({ success: true }),
+    creditWithDest: vi.fn().mockResolvedValue({ success: true }),
+  },
+}));
+
 import {
   resolveAgentDestination,
   resolveAgentPriceUsdc,
 } from '../services/agent-price.js';
+import { budgetService } from '../services/budget.js';
 import { composeService } from '../services/compose.js';
 import composeRoutes from './compose.js';
 
 const mockCompose = vi.mocked(composeService.compose);
 const mockResolvePrice = vi.mocked(resolveAgentPriceUsdc);
 const mockResolveDest = vi.mocked(resolveAgentDestination);
+const mockCredit = vi.mocked(budgetService.credit);
+const mockCreditWithDest = vi.mocked(budgetService.creditWithDest);
 
 // ── Setup ───────────────────────────────────────────────────
 
@@ -544,5 +576,187 @@ describe('compose E2E — WKH-59 real-price-debit pipeline', () => {
       'corridor',
       'wasiai-agentshop',
     );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// AUDIT A1 (ALTA, money-path) — /compose reembolsa el step-0 pre-debitado
+// por el middleware (path a2a-key) cuando el pipeline FALLA. Mirror exacto
+// de orchestrate.ts:644 — refundUsd = max(0, debited - totalCostUsdc).
+// ─────────────────────────────────────────────────────────────────────
+
+describe('compose route — AUDIT A1 step-0 refund on failure', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    app = Fastify();
+    await app.register(composeRoutes, { prefix: '/compose' });
+    await app.ready();
+  });
+
+  afterAll(() => app.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+    nextEstimatedCostUsd = undefined;
+    nextResolvedChainId = undefined;
+    nextInjectedDestination = undefined;
+    capturedComposeDestination = undefined;
+    mockResolvePrice.mockResolvedValue(0.001);
+    mockCredit.mockResolvedValue({ success: true });
+    mockCreditWithDest.mockResolvedValue({ success: true });
+  });
+
+  it('T-A1-1: step-0 falla (totalCostUsdc=0) → reembolsa el step-0 entero (creditWithDest)', async () => {
+    // Middleware debitó 0.30 con destino canónico (path dest-cap).
+    nextEstimatedCostUsd = 0.3;
+    nextResolvedChainId = 2368;
+    nextInjectedDestination = 'wasiai/kyc';
+    mockCompose.mockResolvedValueOnce({
+      success: false,
+      output: null,
+      steps: [],
+      totalCostUsdc: 0, // step-0 ni settleó
+      totalLatencyMs: 0,
+      error: 'Step 0 agent returned 500',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(400);
+    // Reembolsa EXACTAMENTE el step-0 (0.30) con el mismo destino del débito.
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
+    const call = mockCreditWithDest.mock.calls[0];
+    expect(call[0]).toBe('k1'); // keyId
+    expect(call[1]).toBe(2368); // chainId
+    expect(call[2]).toBeCloseTo(0.3, 6); // refundUsd = composeEstimatedCostUsd
+    expect(call[3]).toBe('o1'); // ownerRef
+    expect(call[4]).toBe('wasiai/kyc'); // destino canónico = el del débito
+    expect(mockCredit).not.toHaveBeenCalled();
+  });
+
+  it('T-A1-2: step-0 OK + step-2 falla → NO reembolsa el step-0 (clamp a 0)', async () => {
+    // Middleware debitó 0.30; el step-0 settleó (su precio ya está en totalCostUsdc).
+    nextEstimatedCostUsd = 0.3;
+    nextResolvedChainId = 2368;
+    nextInjectedDestination = 'wasiai/kyc';
+    mockCompose.mockResolvedValueOnce({
+      success: false,
+      output: null,
+      steps: [],
+      // totalCostUsdc incluye el step-0 (0.30) + lo que settleó antes del fallo.
+      totalCostUsdc: 0.35,
+      totalLatencyMs: 10,
+      error: 'Step 2 debit failed',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: {
+        steps: [
+          { agent: 'kyc', input: {} },
+          { agent: 'corridor', input: {} },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    // max(0, 0.30 - 0.35) = 0 → no refund del step-0 ya entregado.
+    expect(mockCreditWithDest).not.toHaveBeenCalled();
+    expect(mockCredit).not.toHaveBeenCalled();
+  });
+
+  it('T-A1-3: sin destino canónico → usa credit (sin dest-policy)', async () => {
+    nextEstimatedCostUsd = 0.3;
+    nextResolvedChainId = 2368;
+    nextInjectedDestination = undefined; // no hay destino fiable
+    mockCompose.mockResolvedValueOnce({
+      success: false,
+      output: null,
+      steps: [],
+      totalCostUsdc: 0,
+      totalLatencyMs: 0,
+      error: 'Step 0 agent returned 500',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(mockCredit).toHaveBeenCalledTimes(1);
+    const call = mockCredit.mock.calls[0];
+    expect(call[2]).toBeCloseTo(0.3, 6);
+    expect(mockCreditWithDest).not.toHaveBeenCalled();
+  });
+
+  it('T-A1-4: path x402 puro (sin a2aKeyRow ni débito) → NO reembolsa', async () => {
+    nextKeyRow = undefined; // x402: el middleware no debita budget
+    nextEstimatedCostUsd = undefined;
+    nextResolvedChainId = undefined;
+    mockCompose.mockResolvedValueOnce({
+      success: false,
+      output: null,
+      steps: [],
+      totalCostUsdc: 0,
+      totalLatencyMs: 0,
+      error: 'Step 0 agent returned 500',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(mockCredit).not.toHaveBeenCalled();
+    expect(mockCreditWithDest).not.toHaveBeenCalled();
+  });
+
+  it('T-A1-5: refund best-effort — credit falla → response NO cambia (sigue 400)', async () => {
+    nextEstimatedCostUsd = 0.3;
+    nextResolvedChainId = 2368;
+    nextInjectedDestination = 'wasiai/kyc';
+    mockCreditWithDest.mockResolvedValueOnce({
+      success: false,
+      error: 'REFUND_FAILED',
+    });
+    mockCompose.mockResolvedValueOnce({
+      success: false,
+      output: null,
+      steps: [],
+      totalCostUsdc: 0,
+      totalLatencyMs: 0,
+      error: 'Step 0 agent returned 500',
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
+    expect(errSpy).toHaveBeenCalledWith(
+      '[compose.refund-failed]',
+      expect.objectContaining({ keyId: 'k1', amountUsd: expect.any(Number) }),
+    );
+    errSpy.mockRestore();
   });
 });

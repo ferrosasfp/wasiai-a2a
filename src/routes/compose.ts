@@ -12,6 +12,7 @@ import {
   resolveAgentDestination,
   resolveAgentPriceUsdc,
 } from '../services/agent-price.js';
+import { budgetService } from '../services/budget.js';
 import { composeService } from '../services/compose.js';
 import {
   chargeProtocolFee,
@@ -222,6 +223,66 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       if (reply.sent) return;
 
       if (!result.success) {
+        // AUDIT A1 (ALTA, money-path): el middleware (path a2a-key) PRE-debitó el
+        // step-0 (`request.composeEstimatedCostUsd`), pero hasta ahora la rama de
+        // fallo devolvía el error SIN reembolsarlo (compose.ts:142 deja
+        // stepDebitedUsd=0 para i===0, así que el refund per-step del service es
+        // no-op para el step-0). Cobro sin contraprestación. Mirror EXACTO de
+        // orchestrate.ts:644 — refund best-effort que NUNCA rompe el response:
+        //   refundUsd = max(0, composeEstimatedCostUsd - result.totalCostUsdc)
+        //   - step-0 falló  → totalCostUsdc=0  → reembolsa el step-0 entero.
+        //   - step-0 settleó (su precio ya está en totalCostUsdc) → clamp a 0.
+        // Solo aplica al path a2a-key con débito real (x402 puro no debita budget).
+        const debitedUsd = request.composeEstimatedCostUsd;
+        const refundChainId = request.resolvedChainId;
+        if (
+          request.a2aKeyRow &&
+          typeof debitedUsd === 'number' &&
+          debitedUsd > 0 &&
+          refundChainId !== undefined
+        ) {
+          const refundUsd = Math.max(0, debitedUsd - result.totalCostUsdc);
+          if (refundUsd > 0) {
+            try {
+              // M3 (auditoría): el destino del refund DEBE matchear el del débito.
+              // El step-0 lo debitó el middleware con `request.composeDestination`
+              // (destino canónico resuelto por el preHandler). Reusamos ESE destino
+              // exacto vía creditWithDest (revierte también el dest-cap ledger). Si
+              // no hay destino fiable, usamos credit (sin dest-policy) para no romper
+              // el cap por destino.
+              const creditRes = request.composeDestination
+                ? await budgetService.creditWithDest(
+                    request.a2aKeyRow.id,
+                    refundChainId,
+                    refundUsd,
+                    request.a2aKeyRow.owner_ref,
+                    request.composeDestination,
+                  )
+                : await budgetService.credit(
+                    request.a2aKeyRow.id,
+                    refundChainId,
+                    refundUsd,
+                    request.a2aKeyRow.owner_ref,
+                  );
+              if (!creditRes.success) {
+                // CD-6: sin msg crudo de PG. No cambia el status code.
+                console.error('[compose.refund-failed]', {
+                  keyId: request.a2aKeyRow.id,
+                  chainId: refundChainId,
+                  amountUsd: refundUsd,
+                  requestId: request.id,
+                });
+              }
+            } catch (e) {
+              // Best-effort: el fallo del refund NUNCA rompe el response.
+              console.error(
+                '[compose.refund-threw]',
+                e instanceof Error ? e.message : String(e),
+              );
+            }
+          }
+        }
+
         // WKH-61: errorCode='SCOPE_DENIED' → 403; default 400 (preserva legacy).
         // WKH-125 (AC-2): errorCode='DEST_CAP_EXCEEDED' → 402 (cap por destino
         // excedido mid-pipeline; el budget NO se decrementó).
