@@ -27,7 +27,7 @@ import {
 } from './fee-charge.js';
 import { receiptService } from './receipt.js';
 
-const MODEL = 'claude-sonnet-4-20250514';
+const MODEL = 'claude-sonnet-4-6';
 const LLM_TIMEOUT_MS = 30_000;
 const MAX_AGENTS_IN_PROMPT = 10;
 // WKH-44 (CD-G): el PROTOCOL_FEE_RATE literal fue eliminado. Ahora se lee
