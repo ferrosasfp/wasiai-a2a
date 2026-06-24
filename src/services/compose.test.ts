@@ -17,6 +17,7 @@ vi.mock('./registry.js', () => ({ registryService: { getEnabled: vi.fn() } }));
 vi.mock('./budget.js', () => ({
   budgetService: {
     debit: vi.fn(),
+    credit: vi.fn(),
     getBalance: vi.fn(),
     registerDeposit: vi.fn(),
   },
@@ -57,6 +58,7 @@ import { registryService } from './registry.js';
 
 const mockDownstream = vi.mocked(signAndSettleDownstream);
 const mockDebit = vi.mocked(budgetService.debit);
+const mockCredit = vi.mocked(budgetService.credit);
 
 function makeAgent(o: Partial<Agent> = {}): Agent {
   return {
@@ -146,6 +148,8 @@ beforeEach(() => {
   mockDownstream.mockResolvedValue(null);
   // WKH-59: default debit success (each per-step debit test overrides).
   mockDebit.mockResolvedValue({ success: true });
+  // WKH-128: default credit (refund) success.
+  mockCredit.mockResolvedValue({ success: true });
 });
 
 describe('composeService.invokeAgent', () => {
@@ -1174,6 +1178,89 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       undefined,
       'test-registry/cashout',
     );
+  });
+
+  // WKH-128: si un step se debitó (fee-on-attempt) y luego falla la invocación,
+  // el débito per-step se reembolsa (el caller no pagó un step sin valor).
+  it('T-COMPOSE-REFUND-1 refunds the per-step debit when the step fails after debiting', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk(); // step 0 OK
+    mockFetchError(502); // step 1 falla la invocación
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Step 1 failed');
+    // se debitó el step 1 (0.05) y luego se reembolsó exactamente ese monto.
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockCredit).toHaveBeenCalledTimes(1);
+    expect(mockCredit).toHaveBeenCalledWith('k1', 2368, 0.05, 'owner-test');
+  });
+
+  // WKH-128: el step-0 NO lo debita compose (es del middleware/service), así que
+  // si el step-0 falla, compose NO reembolsa (no hay stepDebitedUsd>0).
+  it('T-COMPOSE-REFUND-2 does NOT refund when step 0 fails (compose never debited it)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    mockAgentsBySlug({ kyc: a1 });
+    mockFetchError(502); // step 0 falla
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'kyc', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    expect(mockDebit).not.toHaveBeenCalled();
+    expect(mockCredit).not.toHaveBeenCalled();
+  });
+
+  // WKH-128: bajo delegación, el refund per-step NO aplica (revertir contadores
+  // de delegación queda fuera de scope, igual que WKH-127). El débito ocurre vía
+  // el RPC de delegación; compose no llama credit() (evita revertir solo el budget
+  // master y dejar el contador de delegación inconsistente).
+  it('T-COMPOSE-REFUND-3 does NOT credit under delegation (out of scope)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk(); // step 0 OK
+    mockFetchError(502); // step 1 falla
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      delegationContext: {
+        delegationId: 'del-1',
+        ownerRef: 'owner-test',
+        keyId: 'k1',
+        maxAmountPerTx: '5.00',
+      },
+    });
+
+    expect(result.success).toBe(false);
+    expect(mockCredit).not.toHaveBeenCalled();
   });
 
   // WKH-101 T8b (AC-8 MULTI-STEP): under delegation, the per-step debit routes
