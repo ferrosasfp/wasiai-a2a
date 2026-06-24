@@ -44,6 +44,11 @@ vi.mock('./llm/transform.js', () => ({
     latencyMs: 0,
   }),
 }));
+// WKH-130: mock del helper LLM de retry. Default = null (no retry) salvo que el
+// test lo setee con mockResolvedValueOnce.
+vi.mock('./llm/input-retry.js', () => ({
+  regenerateInputFromErrors: vi.fn().mockResolvedValue(null),
+}));
 // WKH-55: mock del modulo downstream-payment (DT-K)
 vi.mock('../lib/downstream-payment.js', () => ({
   signAndSettleDownstream: vi.fn().mockResolvedValue(null),
@@ -54,6 +59,7 @@ import { budgetService } from './budget.js';
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
+import { regenerateInputFromErrors } from './llm/input-retry.js';
 import { maybeTransform } from './llm/transform.js';
 import { registryService } from './registry.js';
 
@@ -61,6 +67,7 @@ const mockDownstream = vi.mocked(signAndSettleDownstream);
 const mockDebit = vi.mocked(budgetService.debit);
 const mockCredit = vi.mocked(budgetService.credit);
 const mockCreditWithDest = vi.mocked(budgetService.creditWithDest); // WKH-129
+const mockRegen = vi.mocked(regenerateInputFromErrors); // WKH-130
 
 function makeAgent(o: Partial<Agent> = {}): Agent {
   return {
@@ -130,12 +137,15 @@ function mockFetchOk(data: unknown = { result: 'ok' }) {
     json: async () => data,
   });
 }
-function mockFetchError(status: number) {
+// WKH-130: body opcional (default = comportamiento actual). Los tests de retry
+// pasan el field-error body explícito; los existentes siguen llamando
+// mockFetchError(status) sin cambios.
+function mockFetchError(status: number, body = '{"error":"fail"}') {
   mockFetch.mockResolvedValueOnce({
     ok: false,
     status,
-    json: async () => ({ error: 'fail' }),
-    text: async () => '{"error":"fail"}',
+    json: async () => JSON.parse(body),
+    text: async () => body,
   });
 }
 
@@ -155,6 +165,8 @@ beforeEach(() => {
   mockCredit.mockResolvedValue({ success: true });
   // WKH-129: default credit-with-dest (refund) success.
   mockCreditWithDest.mockResolvedValue({ success: true });
+  // WKH-130: default regen = null (no retry) salvo override por test.
+  mockRegen.mockResolvedValue(null);
 });
 
 describe('composeService.invokeAgent', () => {
@@ -2163,5 +2175,400 @@ describe('composeService.compose — caller_ref_hash emission (WKH-104)', () => 
     const call = trackSpy.mock.calls.find((c) => c[0].agentId === 'x1');
     expect(call).toBeDefined();
     expect(call?.[0].metadata?.caller_ref_hash).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// WKH-130 (adaptive input-retry): el catch reintenta UNA vez cuando un step
+// (i>0, path master) falla con 4xx-con-field-errors parseables. Anti-doble
+// cobro: refund#1 SIEMPRE antes del re-debit (CD-1). Invariante neto (CD-13).
+// ─────────────────────────────────────────────────────────────────────────
+describe('composeService.compose — WKH-130 adaptive input-retry', () => {
+  function mockAgentsBySlug(agents: Record<string, Agent>) {
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug: string, _registry?: string) => agents[slug] ?? null,
+    );
+  }
+  // body 422 con field-errors Zod (parser → ['senderName']).
+  const FIELD_ERR_BODY =
+    '{"error":"invalid_input","details":{"fieldErrors":{"senderName":["Required"]}}}';
+
+  // Σdébitos − Σrefunds (incluye credit y creditWithDest).
+  function netSpend(): number {
+    const debits = mockDebit.mock.calls.reduce(
+      (s, c) => s + (c[2] as number),
+      0,
+    );
+    const refunds =
+      mockCreditWithDest.mock.calls.reduce((s, c) => s + (c[2] as number), 0) +
+      mockCredit.mock.calls.reduce((s, c) => s + (c[2] as number), 0);
+    return debits - refunds;
+  }
+
+  beforeEach(() => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+  });
+
+  // AC-5 / T-RETRY-HAPPY: path feliz → 0 LLM calls, 0 overhead.
+  it('T-RETRY-HAPPY: 2xx pipeline → regen NOT called', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockRegen).not.toHaveBeenCalled();
+  });
+
+  // AC-1 / T-RETRY-OK: retry exitoso → cobra 1 vez (neto = stepDebitedUsd).
+  it('T-RETRY-OK: 422+fields → regen → 200; charges once; net = stepDebitedUsd', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk(); // step 0 OK
+    mockFetchError(422, FIELD_ERR_BODY); // step 1 falla (4xx con fields)
+    mockFetchOk({ result: 'retry-done' }); // re-invoke 2xx
+    mockRegen.mockResolvedValueOnce({ q: 'x', senderName: 'Ana' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: { q: 'x' } },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockRegen).toHaveBeenCalledTimes(1);
+    // 2 débitos (1er intento + retry), 1 refund (del 1er débito).
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
+    expect(mockCredit).not.toHaveBeenCalled();
+    // CD-13: invariante neto = stepDebitedUsd (0.05).
+    expect(netSpend()).toBeCloseTo(0.05, 9);
+  });
+
+  // AC-6 / T-RETRY-ORDER: anti-doble-cobro — debit#1 < refund#1 < debit#2.
+  it('T-RETRY-ORDER: debit#1 < refund#1 < debit#2 (no two active debits)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchError(422, FIELD_ERR_BODY);
+    mockFetchOk({ result: 'retry-done' });
+    mockRegen.mockResolvedValueOnce({ q: 'x', senderName: 'Ana' });
+
+    await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: { q: 'x' } },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    const debit1 = mockDebit.mock.invocationCallOrder[0];
+    const refund1 = mockCreditWithDest.mock.invocationCallOrder[0];
+    const debit2 = mockDebit.mock.invocationCallOrder[1];
+    expect(debit1).toBeLessThan(refund1);
+    expect(refund1).toBeLessThan(debit2);
+  });
+
+  // AC-2 / T-RETRY-FAIL: retry falla → 2 débitos + 2 refunds, neto 0.
+  it('T-RETRY-FAIL: 422+fields → regen → 500; 2 debits + 2 refunds; net = 0', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchError(422, FIELD_ERR_BODY); // 1er intento falla
+    mockFetchError(500); // re-invoke falla
+    mockRegen.mockResolvedValueOnce({ q: 'x', senderName: 'Ana' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: { q: 'x' } },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('after retry');
+    expect(result.error).toContain('returned 422');
+    expect(result.error).toContain('returned 500');
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(2);
+    // CD-13: neto 0 (caller no paga nada).
+    expect(netSpend()).toBeCloseTo(0, 9);
+  });
+
+  // CD-1 fix-pack (AR/CR obs): si el refund#1 FALLA, el retry NO procede
+  // (no re-debit) → queda 1 solo débito, nunca 2 activos (peor caso pre-WKH-130).
+  it('T-RETRY-REFUND1-FAILS: refund#1 fails → no retry, no re-debit (single debit stands)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk(); // step 0 ok
+    mockFetchError(422, FIELD_ERR_BODY); // step 1 falla con field-errors
+    // el refund#1 del step 1 falla (credit RPC devuelve success:false)
+    mockCreditWithDest.mockResolvedValueOnce({
+      success: false,
+      error: 'REFUND_FAILED',
+    });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: { q: 'x' } },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    // Lo CRÍTICO: el retry NO procedió porque el refund#1 falló →
+    //   - regen NUNCA se llamó (no se intentó regenerar input),
+    //   - solo 1 débito (el original, NO se re-debitó) → nunca 2 débitos activos,
+    //   - 1 solo intento de refund.
+    // Peor caso real = 1 débito sin reembolso efectivo (= pre-WKH-130), nunca 2x.
+    // (netSpend() no aplica acá: cuenta la LLAMADA a credit como refund aunque el
+    //  RPC haya devuelto success:false — mide calls, no el movimiento real.)
+    expect(mockRegen).not.toHaveBeenCalled();
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
+  });
+
+  // AC-3 / T-5XX-NO-RETRY: 5xx no reintenta.
+  it('T-5XX-NO-RETRY: 500 → regen 0 calls; 1 refund; failure', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchError(500);
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    expect(mockRegen).not.toHaveBeenCalled();
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1); // refund WKH-129 existente
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+  });
+
+  // AC-4 / T-4XX-NOFIELDS: 4xx sin field-errors no reintenta.
+  it('T-4XX-NOFIELDS: 400 "Bad Request" → regen 0 calls', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchError(400, 'Bad Request');
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    expect(mockRegen).not.toHaveBeenCalled();
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1); // refund existente
+  });
+
+  // AC-7 / T-MAX-1: 2º 4xx tras retry no dispara un 3º.
+  it('T-MAX-1: 422 → regen → 422 again → only 1 regen, 1 re-invoke, failure', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk(); // step 0
+    mockFetchError(422, FIELD_ERR_BODY); // 1er intento
+    mockFetchError(422, FIELD_ERR_BODY); // re-invoke también 422 (no 3er intento)
+    mockRegen.mockResolvedValueOnce({ q: 'x', senderName: 'Ana' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: { q: 'x' } },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    // CD-2: una sola regeneración, un solo re-invoke.
+    expect(mockRegen).toHaveBeenCalledTimes(1);
+    // step0 fetch + 1er intento + 1 re-invoke = 3 fetches (no 4º).
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    // 2 débitos, 2 refunds (neto 0).
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(2);
+  });
+
+  // AC-8 / T-NON-4XX: error no-HTTP (SSRF/network) no entra al retry.
+  it('T-NON-4XX: SSRF/network error → regen 0 calls; refund existente', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk(); // step 0 OK
+    mockFetch.mockRejectedValueOnce(new Error('network ECONNRESET')); // step 1
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    expect(mockRegen).not.toHaveBeenCalled();
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
+  });
+
+  // AC-9 / T-OBS: telemetría — flags retried / retry_failed + log.
+  it('T-OBS: success → metadata.retried; fail → metadata.retry_failed + [compose.retry]', async () => {
+    const trackSpy = vi.mocked(eventService.track);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // (a) retry exitoso → metadata.retried:true en el evento success.
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchError(422, FIELD_ERR_BODY);
+    mockFetchOk({ result: 'retry-done' });
+    mockRegen.mockResolvedValueOnce({ q: 'x', senderName: 'Ana' });
+
+    await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: { q: 'x' } },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    const okEvent = trackSpy.mock.calls.find(
+      (c) => c[0].agentId === 'corridor' && c[0].status === 'success',
+    );
+    expect(okEvent?.[0].metadata?.retried).toBe(true);
+
+    // (b) retry fallido → metadata.retry_failed:true + log [compose.retry].
+    trackSpy.mockClear();
+    errSpy.mockClear();
+    mockFetchOk();
+    mockFetchError(422, FIELD_ERR_BODY);
+    mockFetchError(500);
+    mockRegen.mockResolvedValueOnce({ q: 'x', senderName: 'Ana' });
+
+    await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: { q: 'x' } },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    const failEvent = trackSpy.mock.calls.find(
+      (c) => c[0].status === 'failed' && c[0].metadata?.retry_failed === true,
+    );
+    expect(failEvent).toBeDefined();
+    const retryLog = errSpy.mock.calls.find((c) =>
+      String(c[0]).includes('[compose.retry]'),
+    );
+    expect(retryLog).toBeDefined();
+    errSpy.mockRestore();
+  });
+
+  // CD-6 / T-DELEG-NO-RETRY: bajo delegación/sesión no reintenta.
+  it('T-DELEG-NO-RETRY: delegationContext + 422+fields → regen 0 calls (no refund under delegation)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchError(422, FIELD_ERR_BODY);
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      delegationContext: {
+        delegationId: 'del-1',
+        ownerRef: 'owner-test',
+        keyId: 'k1',
+        maxAmountPerTx: '5.00',
+      },
+    });
+
+    expect(result.success).toBe(false);
+    // CD-6: delegación NUNCA reintenta.
+    expect(mockRegen).not.toHaveBeenCalled();
+    // WKH-128: bajo delegación no hay refund (out of scope).
+    expect(mockCredit).not.toHaveBeenCalled();
+    expect(mockCreditWithDest).not.toHaveBeenCalled();
+  });
+
+  it('T-SESS-NO-RETRY: keySessionContext + 422+fields → regen 0 calls', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchError(422, FIELD_ERR_BODY);
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      keySessionContext: {
+        sessionId: 'sess-1',
+        ownerRef: 'owner-test',
+        keyId: 'k1',
+      },
+    });
+
+    expect(result.success).toBe(false);
+    expect(mockRegen).not.toHaveBeenCalled();
   });
 });

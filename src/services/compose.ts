@@ -11,6 +11,7 @@ import {
   type DownstreamResult,
   signAndSettleDownstream,
 } from '../lib/downstream-payment.js';
+import { parseFieldErrors } from '../lib/field-error-parser.js';
 import {
   SSRFViolationError,
   validateRegistryUrl,
@@ -32,6 +33,7 @@ import { authzService } from './authz.js';
 import { budgetService } from './budget.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
+import { regenerateInputFromErrors } from './llm/input-retry.js';
 import { maybeTransform } from './llm/transform.js';
 import { registryService } from './registry.js';
 import { normalizeDestination } from './spend-policy.js';
@@ -207,145 +209,49 @@ export const composeService = {
           input,
           a2aKey,
         );
-        const latencyMs = Date.now() - startTime;
-        const result: StepResult = {
+        // CD-9: la cola de éxito (StepResult + agregados + bridge + evento)
+        // está COMPARTIDA con el retry-ok vía finishSuccessfulStep. No copiar.
+        const agg = await this.finishSuccessfulStep({
           agent,
           output,
-          costUsdc: agent.priceUsdc,
-          latencyMs,
           txHash,
-          ...(downstream && {
-            downstreamTxHash: downstream.txHash,
-            downstreamBlockNumber: downstream.blockNumber,
-            downstreamSettledAmount: downstream.settledAmount,
-          }),
-        };
-        results.push(result);
-        totalCost += agent.priceUsdc;
-        totalLatency += latencyMs;
-        lastOutput = output;
-        if (i < steps.length - 1) {
-          const nextStep = steps[i + 1];
-          const nextAgent = await this.resolveAgent(nextStep);
-          const inputSchema = nextAgent?.metadata?.inputSchema as
-            | Record<string, unknown>
-            | undefined;
-          // ── WKH-56: A2A fast-path bridge resolution ──
-          // DT-4: target a2aCompliant requires strict literal `true`
-          // (truthy values like 'yes' / 1 do NOT activate the fast-path).
-          const targetA2A = nextAgent?.metadata?.a2aCompliant === true;
-          const outputIsA2A = isA2AMessage(lastOutput);
-          const bridgeStart = Date.now();
-          try {
-            if (outputIsA2A && targetA2A) {
-              // AC-1: A2A → A2A passthrough. NO maybeTransform call.
-              result.bridgeType = 'A2A_PASSTHROUGH';
-              result.transformLatencyMs = Date.now() - bridgeStart;
-              // lastOutput UNCHANGED (CD-15: anti-mutation)
-            } else {
-              // AC-3 unwrap: A2A output but target is non-A2A → use parts[0].
-              // AC-2 fallback: non-A2A output → maybeTransform actual flow.
-              const payloadForTransform =
-                outputIsA2A && !targetA2A
-                  ? (extractA2APayload(lastOutput as A2AMessage)[0] ??
-                    lastOutput)
-                  : lastOutput;
-              if (inputSchema && nextAgent) {
-                // WKH-60: propagate caller's owner_ref so the L2 cache is
-                // scoped per-tenant (cross-tenant cache poisoning blocked).
-                // When the caller is anonymous (x402, no scopingKeyRow),
-                // ownerRef stays undefined and maybeTransform runs in
-                // never-cache mode for L2 (L1 still works in-process).
-                const ownerRef = scopingKeyRow?.owner_ref;
-                const tr = await maybeTransform(
-                  agent.id,
-                  nextAgent.id,
-                  payloadForTransform,
-                  inputSchema,
-                  ownerRef,
-                );
-                result.cacheHit = tr.cacheHit; // legacy, DT-3
-                result.bridgeType = tr.bridgeType; // nuevo, DT-3
-                result.transformLatencyMs = tr.latencyMs;
-                // WKH-57: telemetría LLM presente solo si bridgeType==='LLM'.
-                // CD-17: omitir el campo en non-LLM (no setear como null).
-                if (tr.llm) {
-                  result.transformLLM = tr.llm;
-                }
-                lastOutput = tr.transformedOutput;
-              } else if (outputIsA2A && !targetA2A) {
-                // Schema-less + A2A output unwrapped: surface unwrapped payload
-                // to next step but mark bridge as SKIPPED (no transform ran).
-                lastOutput = payloadForTransform;
-                result.bridgeType = 'SKIPPED';
-                result.transformLatencyMs = Date.now() - bridgeStart;
-              }
-            }
-          } catch (transformErr) {
-            console.error(
-              `[Compose] Transform failed at step ${i}:`,
-              transformErr,
-            );
-          }
-        }
-        // ── WKH-56 (W3): emit compose_step event AFTER bridge resolved.
-        // ── WKH-57 (W4): metadata extendida con 6 campos de telemetría
-        //    (bridge + LLM). Constructor explícito (AB-WKH-55-5), todos los
-        //    campos opcionales con `?? null` (AB-WKH-56-4 / CD-15).
-        const llm: LLMBridgeStats | undefined = result.transformLLM;
-        eventService
-          .track({
-            eventType: 'compose_step',
-            agentId: agent.slug,
-            agentName: agent.name,
-            registry: agent.registry,
-            status: 'success',
-            latencyMs,
-            costUsdc: agent.priceUsdc,
-            txHash,
-            metadata: {
-              bridge_type: result.bridgeType ?? null,
-              bridge_latency_ms: result.transformLatencyMs ?? null,
-              bridge_cost_usd: llm?.costUsd ?? null,
-              llm_model: llm?.model ?? null,
-              llm_tokens_in: llm?.tokensIn ?? null,
-              llm_tokens_out: llm?.tokensOut ?? null,
-              caller_ref_hash: callerRefHash,
-            },
-          })
-          .catch((err) =>
-            console.error('[Compose] event tracking failed:', err),
-          );
+          downstream,
+          startTime,
+          steps,
+          i,
+          results,
+          totalCost,
+          totalLatency,
+          scopingKeyRow,
+          callerRefHash,
+        });
+        totalCost = agg.totalCost;
+        totalLatency = agg.totalLatency;
+        lastOutput = agg.lastOutput;
       } catch (err) {
-        eventService
-          .track({
-            eventType: 'compose_step',
-            agentId: agent?.slug,
-            agentName: agent?.name,
-            registry: agent?.registry,
-            status: 'failed',
-            latencyMs: Date.now() - startTime,
-            costUsdc: 0,
-            metadata: { caller_ref_hash: callerRefHash },
-          })
-          .catch((trackErr) =>
-            console.error('[Compose] event tracking failed:', trackErr),
-          );
-        // WKH-128: el step se debitó (fee-on-attempt) pero falló la invocación
-        // → reembolsar el débito per-step (el caller no recibió valor). Solo
-        // path master (sin delegación/sesión, igual que WKH-127: revertir los
-        // contadores de delegación/sesión queda fuera de scope). Best-effort:
-        // un fallo del credit NO cambia el error que ve el caller.
-        if (
+        const firstError = err instanceof Error ? err.message : String(err);
+
+        // WKH-130: ¿este step es elegible para retry? path master = mismo
+        // guard que el refund WKH-128 (sin delegación/sesión, con débito
+        // per-step activo). CD-6: delegación/sesión NUNCA reintentan.
+        const isMasterPath =
           stepDebitedUsd > 0 &&
-          scopingKeyRow &&
+          !!scopingKeyRow &&
           chainId !== undefined &&
           !request.delegationContext &&
-          !request.keySessionContext
-        ) {
-          // WKH-129: el débito per-step SIEMPRE pasó destination (L174) → revertir el
-          // dest-cap además del budget/daily. Mismo normalizador/origen canónico que el
-          // débito (agent.registry/agent.slug, agente RESUELTO por discovery — CD-12/CD-13).
+          !request.keySessionContext;
+
+        // Refund best-effort del débito per-step (WKH-129: con destination si
+        // existe). Cerrado sobre las vars del step. Usado para el PASO 1
+        // (refund#1) y el PASO 6b (refund del retry-debit) — ambos revierten
+        // EXACTAMENTE `stepDebitedUsd` con el destination canónico del agente.
+        // Devuelve `true` si no había nada que reembolsar (no-master) o el refund
+        // tuvo éxito; `false` si el credit RPC falló. WKH-130 fix-pack (AR/CR
+        // obs): el retry SOLO procede si el refund#1 fue exitoso — si falla, no
+        // re-debitamos (queda 1 solo débito = peor caso pre-WKH-130, nunca 2x).
+        const refundStepDebit = async (): Promise<boolean> => {
+          if (!isMasterPath || !scopingKeyRow || chainId === undefined)
+            return true;
           const destination = normalizeDestination(
             `${agent.registry}/${agent.slug}`,
           );
@@ -372,14 +278,165 @@ export const composeService = {
               step: i,
             });
           }
+          return creditRes.success;
+        };
+
+        // ── PASO 2 (pre-evaluado): ¿hay field-errors parseables? Solo path
+        //    master (CD-6) y solo 4xx-con-field-errors (CD-3). Determina si la
+        //    telemetría del primer intento lleva metadata.retry_attempted.
+        const missingFields = isMasterPath
+          ? parseFieldErrors(firstError)
+          : null;
+        const willRetry = !!missingFields && missingFields.length > 0;
+
+        // Telemetría del primer intento fallido (sin cambios respecto a hoy,
+        // + DT-8 flag retry_attempted cuando vamos a reintentar).
+        eventService
+          .track({
+            eventType: 'compose_step',
+            agentId: agent?.slug,
+            agentName: agent?.name,
+            registry: agent?.registry,
+            status: 'failed',
+            latencyMs: Date.now() - startTime,
+            costUsdc: 0,
+            metadata: {
+              caller_ref_hash: callerRefHash,
+              ...(willRetry && { retry_attempted: true }),
+            },
+          })
+          .catch((trackErr) =>
+            console.error('[Compose] event tracking failed:', trackErr),
+          );
+
+        // ── PASO 1 (DT-5.1 / CD-1): refund del PRIMER débito — IDÉNTICO a hoy
+        //    (WKH-128/129). Incondicional para path master. Tras esto NO hay
+        //    débito activo para este step → el re-debit nunca coexiste con él.
+        const refund1ok = await refundStepDebit();
+
+        // ── PASO 2..6 (DT-5): retry adaptativo. Solo si hay field-errors Y el
+        //    refund#1 fue exitoso (CD-1 reforzado: si el refund falló, NO
+        //    re-debitamos → nunca 2 débitos activos; queda 1, peor caso
+        //    pre-WKH-130).
+        if (
+          refund1ok &&
+          willRetry &&
+          missingFields &&
+          scopingKeyRow &&
+          chainId !== undefined
+        ) {
+          // ── PASO 3 (DT-5.3 / CD-7): regenerar input via LLM (Haiku).
+          //    null = no retry (sin API key / circuit open / no-JSON).
+          const newInput = await regenerateInputFromErrors(
+            input,
+            missingFields,
+            agent.slug,
+            agent.description,
+          );
+          if (newInput) {
+            // ── PASO 4 (DT-5.4 / CD-1 / CD-8): RE-DEBIT. MISMO monto
+            //    stepDebitedUsd (NO recalcular priceUsdc), MISMA destination.
+            //    El primer débito YA fue reembolsado → un solo débito activo.
+            const retryDebit = await budgetService.debit(
+              scopingKeyRow.id,
+              chainId,
+              stepDebitedUsd,
+              request.delegationContext, // undefined en path master
+              request.keySessionContext, // undefined en path master
+              normalizeDestination(`${agent.registry}/${agent.slug}`), // CD-8
+            );
+            if (retryDebit.success) {
+              try {
+                // ── PASO 5 (DT-5.5): RE-INVOKE reusando invokeAgent.
+                const { output, txHash, downstream } = await this.invokeAgent(
+                  agent,
+                  newInput,
+                  a2aKey,
+                );
+                // ── PASO 6a: 2xx → éxito. El retry-debit SE QUEDA (caller
+                //    pagó 1 vez). CD-9: cola de éxito COMPARTIDA con happy-path.
+                const agg = await this.finishSuccessfulStep({
+                  agent,
+                  output,
+                  txHash,
+                  downstream,
+                  startTime,
+                  steps,
+                  i,
+                  results,
+                  totalCost,
+                  totalLatency,
+                  scopingKeyRow,
+                  callerRefHash,
+                  retried: true, // DT-8: metadata.retried
+                });
+                totalCost = agg.totalCost;
+                totalLatency = agg.totalLatency;
+                lastOutput = agg.lastOutput;
+                // CONTINÚA el pipeline (el loop sigue con i+1). NO return.
+                continue;
+              } catch (retryErr) {
+                const retryError =
+                  retryErr instanceof Error
+                    ? retryErr.message
+                    : String(retryErr);
+                // ── PASO 6b (CD-5): retry falló → reembolsar el RETRY débito
+                //    (best-effort). NO re-reintentar (CD-2).
+                await refundStepDebit();
+                eventService
+                  .track({
+                    eventType: 'compose_step',
+                    agentId: agent?.slug,
+                    agentName: agent?.name,
+                    registry: agent?.registry,
+                    status: 'failed',
+                    latencyMs: Date.now() - startTime,
+                    costUsdc: 0,
+                    metadata: {
+                      caller_ref_hash: callerRefHash,
+                      retry_failed: true, // DT-8
+                    },
+                  })
+                  .catch((trackErr) =>
+                    console.error('[Compose] event tracking failed:', trackErr),
+                  );
+                console.error('[compose.retry]', {
+                  step: i,
+                  agent: agent.slug,
+                  status: 'failed',
+                  firstError,
+                  retryError,
+                });
+                return {
+                  success: false,
+                  output: null,
+                  steps: results,
+                  totalCostUsdc: totalCost,
+                  totalLatencyMs: totalLatency,
+                  error: `Step ${i} failed after retry: ${firstError} | retry: ${retryError}`,
+                };
+              }
+            }
+            // retryDebit.success === false → nada se invocó, no hay débito que
+            // reembolsar (el debit falló) → caer al return de error normal.
+          }
         }
+
+        // ── PASO 0 (default): comportamiento actual (refund ya hecho en PASO 1)
+        //    → return error.
+        console.error('[compose.retry]', {
+          step: i,
+          agent: agent.slug,
+          status: 'no-retry',
+          firstError,
+        });
         return {
           success: false,
           output: null,
           steps: results,
           totalCostUsdc: totalCost,
           totalLatencyMs: totalLatency,
-          error: `Step ${i} failed: ${err instanceof Error ? err.message : String(err)}`,
+          error: `Step ${i} failed: ${firstError}`,
         };
       }
     }
@@ -390,6 +447,157 @@ export const composeService = {
       totalCostUsdc: totalCost,
       totalLatencyMs: totalLatency,
     };
+  },
+  /**
+   * WKH-130 (CD-9): cola de éxito de un step COMPARTIDA entre el happy-path y
+   * el retry-ok. Construye el StepResult, lo pushea, actualiza los agregados
+   * (totalCost/totalLatency/lastOutput), resuelve el bridge hacia el siguiente
+   * step (A2A passthrough / maybeTransform) y emite el evento `compose_step`
+   * success. `retried` agrega `metadata.retried:true` (DT-8) en el path retry.
+   *
+   * Devuelve los agregados actualizados para que el caller los reasigne
+   * (results se muta por referencia con el push).
+   */
+  async finishSuccessfulStep(ctx: {
+    agent: Agent;
+    output: unknown;
+    txHash?: string;
+    downstream?: DownstreamResult;
+    startTime: number;
+    steps: ComposeStep[];
+    i: number;
+    results: StepResult[];
+    totalCost: number;
+    totalLatency: number;
+    scopingKeyRow?: ComposeRequest['scopingKeyRow'];
+    callerRefHash: string | null;
+    retried?: boolean;
+  }): Promise<{
+    totalCost: number;
+    totalLatency: number;
+    lastOutput: unknown;
+  }> {
+    const {
+      agent,
+      output,
+      txHash,
+      downstream,
+      startTime,
+      steps,
+      i,
+      results,
+      scopingKeyRow,
+      callerRefHash,
+      retried,
+    } = ctx;
+    let { totalCost, totalLatency } = ctx;
+    let lastOutput: unknown = output;
+
+    const latencyMs = Date.now() - startTime;
+    const result: StepResult = {
+      agent,
+      output,
+      costUsdc: agent.priceUsdc,
+      latencyMs,
+      txHash,
+      ...(downstream && {
+        downstreamTxHash: downstream.txHash,
+        downstreamBlockNumber: downstream.blockNumber,
+        downstreamSettledAmount: downstream.settledAmount,
+      }),
+    };
+    results.push(result);
+    totalCost += agent.priceUsdc;
+    totalLatency += latencyMs;
+    if (i < steps.length - 1) {
+      const nextStep = steps[i + 1];
+      const nextAgent = await this.resolveAgent(nextStep);
+      const inputSchema = nextAgent?.metadata?.inputSchema as
+        | Record<string, unknown>
+        | undefined;
+      // ── WKH-56: A2A fast-path bridge resolution ──
+      // DT-4: target a2aCompliant requires strict literal `true`
+      // (truthy values like 'yes' / 1 do NOT activate the fast-path).
+      const targetA2A = nextAgent?.metadata?.a2aCompliant === true;
+      const outputIsA2A = isA2AMessage(lastOutput);
+      const bridgeStart = Date.now();
+      try {
+        if (outputIsA2A && targetA2A) {
+          // AC-1: A2A → A2A passthrough. NO maybeTransform call.
+          result.bridgeType = 'A2A_PASSTHROUGH';
+          result.transformLatencyMs = Date.now() - bridgeStart;
+          // lastOutput UNCHANGED (CD-15: anti-mutation)
+        } else {
+          // AC-3 unwrap: A2A output but target is non-A2A → use parts[0].
+          // AC-2 fallback: non-A2A output → maybeTransform actual flow.
+          const payloadForTransform =
+            outputIsA2A && !targetA2A
+              ? (extractA2APayload(lastOutput as A2AMessage)[0] ?? lastOutput)
+              : lastOutput;
+          if (inputSchema && nextAgent) {
+            // WKH-60: propagate caller's owner_ref so the L2 cache is
+            // scoped per-tenant (cross-tenant cache poisoning blocked).
+            // When the caller is anonymous (x402, no scopingKeyRow),
+            // ownerRef stays undefined and maybeTransform runs in
+            // never-cache mode for L2 (L1 still works in-process).
+            const ownerRef = scopingKeyRow?.owner_ref;
+            const tr = await maybeTransform(
+              agent.id,
+              nextAgent.id,
+              payloadForTransform,
+              inputSchema,
+              ownerRef,
+            );
+            result.cacheHit = tr.cacheHit; // legacy, DT-3
+            result.bridgeType = tr.bridgeType; // nuevo, DT-3
+            result.transformLatencyMs = tr.latencyMs;
+            // WKH-57: telemetría LLM presente solo si bridgeType==='LLM'.
+            // CD-17: omitir el campo en non-LLM (no setear como null).
+            if (tr.llm) {
+              result.transformLLM = tr.llm;
+            }
+            lastOutput = tr.transformedOutput;
+          } else if (outputIsA2A && !targetA2A) {
+            // Schema-less + A2A output unwrapped: surface unwrapped payload
+            // to next step but mark bridge as SKIPPED (no transform ran).
+            lastOutput = payloadForTransform;
+            result.bridgeType = 'SKIPPED';
+            result.transformLatencyMs = Date.now() - bridgeStart;
+          }
+        }
+      } catch (transformErr) {
+        console.error(`[Compose] Transform failed at step ${i}:`, transformErr);
+      }
+    }
+    // ── WKH-56 (W3): emit compose_step event AFTER bridge resolved.
+    // ── WKH-57 (W4): metadata extendida con 6 campos de telemetría
+    //    (bridge + LLM). Constructor explícito (AB-WKH-55-5), todos los
+    //    campos opcionales con `?? null` (AB-WKH-56-4 / CD-15).
+    const llm: LLMBridgeStats | undefined = result.transformLLM;
+    eventService
+      .track({
+        eventType: 'compose_step',
+        agentId: agent.slug,
+        agentName: agent.name,
+        registry: agent.registry,
+        status: 'success',
+        latencyMs,
+        costUsdc: agent.priceUsdc,
+        txHash,
+        metadata: {
+          bridge_type: result.bridgeType ?? null,
+          bridge_latency_ms: result.transformLatencyMs ?? null,
+          bridge_cost_usd: llm?.costUsd ?? null,
+          llm_model: llm?.model ?? null,
+          llm_tokens_in: llm?.tokensIn ?? null,
+          llm_tokens_out: llm?.tokensOut ?? null,
+          caller_ref_hash: callerRefHash,
+          ...(retried && { retried: true }), // DT-8
+        },
+      })
+      .catch((err) => console.error('[Compose] event tracking failed:', err));
+
+    return { totalCost, totalLatency, lastOutput };
   },
   async resolveAgent(step: ComposeStep): Promise<Agent | null> {
     // Try with registry hint first, then without (LLM may pass wrong case)
@@ -510,7 +718,10 @@ export const composeService = {
       // body no se puede leer (ej. response sin .text()).
       let detail = '';
       try {
-        detail = (await response.text()).slice(0, 300).replace(/\s+/g, ' ').trim();
+        detail = (await response.text())
+          .slice(0, 300)
+          .replace(/\s+/g, ' ')
+          .trim();
       } catch {
         /* body ilegible — degradar al status solo */
       }
