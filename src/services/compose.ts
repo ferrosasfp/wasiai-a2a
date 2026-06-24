@@ -504,8 +504,20 @@ export const composeService = {
       headers,
       body: JSON.stringify(input),
     });
-    if (!response.ok)
-      throw new Error(`Agent ${agent.slug} returned ${response.status}`);
+    if (!response.ok) {
+      // Surface the upstream agent's error body (truncated) for observability —
+      // un 502/4xx del agente sin el body es opaco para debug. Robusto si el
+      // body no se puede leer (ej. response sin .text()).
+      let detail = '';
+      try {
+        detail = (await response.text()).slice(0, 300).replace(/\s+/g, ' ').trim();
+      } catch {
+        /* body ilegible — degradar al status solo */
+      }
+      throw new Error(
+        `Agent ${agent.slug} returned ${response.status}${detail ? `: ${detail}` : ''}`,
+      );
+    }
     const data = (await response.json()) as Record<string, unknown>;
     const output = data.result ?? data;
     let txHash: string | undefined;
