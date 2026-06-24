@@ -343,17 +343,32 @@ export const composeService = {
           !request.delegationContext &&
           !request.keySessionContext
         ) {
-          const creditRes = await budgetService.credit(
-            scopingKeyRow.id,
-            chainId,
-            stepDebitedUsd,
-            scopingKeyRow.owner_ref,
+          // WKH-129: el débito per-step SIEMPRE pasó destination (L174) → revertir el
+          // dest-cap además del budget/daily. Mismo normalizador/origen canónico que el
+          // débito (agent.registry/agent.slug, agente RESUELTO por discovery — CD-12/CD-13).
+          const destination = normalizeDestination(
+            `${agent.registry}/${agent.slug}`,
           );
+          const creditRes = destination
+            ? await budgetService.creditWithDest(
+                scopingKeyRow.id,
+                chainId,
+                stepDebitedUsd,
+                scopingKeyRow.owner_ref,
+                destination,
+              )
+            : await budgetService.credit(
+                scopingKeyRow.id,
+                chainId,
+                stepDebitedUsd,
+                scopingKeyRow.owner_ref,
+              );
           if (!creditRes.success) {
             console.error('[compose.refund-failed]', {
               keyId: scopingKeyRow.id,
               chainId,
               amountUsd: stepDebitedUsd,
+              destination,
               step: i,
             });
           }

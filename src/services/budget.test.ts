@@ -818,4 +818,114 @@ describe('budgetService', () => {
       ).rejects.toThrow('Failed to register deposit: KEY_NOT_FOUND');
     });
   });
+
+  // WKH-129: credit() (4-arg, refund_a2a_key_spend) back-compat. NO debe romperse
+  // ni cambiar de RPC con la nueva creditWithDest (CD-6).
+  describe('credit', () => {
+    // T-NOREG-CREDIT (AC-7): credit 4-arg sigue llamando refund_a2a_key_spend,
+    // NO refund_with_dest_policy. Back-compat de orchestrate step-0 intacto.
+    it('T-NOREG-CREDIT credit 4-arg still calls refund_a2a_key_spend (AC-7)', async () => {
+      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+
+      const result = await budgetService.credit('k1', 84532, 0.05, 'owner');
+
+      expect(mockRpc).toHaveBeenCalledWith('refund_a2a_key_spend', {
+        p_key_id: 'k1',
+        p_chain_id: 84532,
+        p_amount_usd: 0.05,
+        p_owner_ref: 'owner',
+      });
+      expect(mockRpc).not.toHaveBeenCalledWith(
+        'refund_with_dest_policy',
+        expect.anything(),
+      );
+      expect(result).toEqual({ success: true });
+    });
+  });
+
+  // WKH-129 (AC-1/AC-2/AC-3): creditWithDest() — refund completo del dest-cap.
+  describe('creditWithDest', () => {
+    // T-CWD-1 (AC-1/AC-2): invoca refund_with_dest_policy con los 5 params snake_case
+    // exactos; RPC sin error → { success: true }.
+    it('T-CWD-1 calls refund_with_dest_policy with 5 params and returns success (AC-1/AC-2)', async () => {
+      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+
+      const result = await budgetService.creditWithDest(
+        'k1',
+        84532,
+        0.05,
+        'owner',
+        'wasiai/corridor',
+      );
+
+      expect(mockRpc).toHaveBeenCalledWith('refund_with_dest_policy', {
+        p_key_id: 'k1',
+        p_chain_id: 84532,
+        p_amount_usd: 0.05,
+        p_owner_ref: 'owner',
+        p_destination: 'wasiai/corridor',
+      });
+      expect(result).toEqual({ success: true });
+    });
+
+    // T-CWD-2 (AC-3): RPC OWNERSHIP_MISMATCH → no propaga el msg crudo de PG.
+    it('T-CWD-2 maps OWNERSHIP_MISMATCH without leaking raw PG message (AC-3)', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'OWNERSHIP_MISMATCH: key k1 not owned by caller' },
+      } as never);
+
+      const result = await budgetService.creditWithDest(
+        'k1',
+        84532,
+        0.05,
+        'other-owner',
+        'wasiai/corridor',
+      );
+
+      expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
+    });
+
+    // T-CWD-3 (AC-2): RPC error genérico → REFUND_FAILED + console.error con
+    // destination. KEY_NOT_FOUND → error: 'KEY_NOT_FOUND'.
+    it('T-CWD-3 maps generic RPC error to REFUND_FAILED and logs destination (AC-2)', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'some unexpected pg failure' },
+      } as never);
+
+      const result = await budgetService.creditWithDest(
+        'k1',
+        84532,
+        0.05,
+        'owner',
+        'wasiai/corridor',
+      );
+
+      expect(result).toEqual({ success: false, error: 'REFUND_FAILED' });
+      expect(errSpy).toHaveBeenCalledWith(
+        '[budget] refund-with-dest failed',
+        expect.objectContaining({ destination: 'wasiai/corridor' }),
+      );
+      errSpy.mockRestore();
+    });
+
+    it('T-CWD-3 maps KEY_NOT_FOUND rpc error to KEY_NOT_FOUND (AC-2)', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'KEY_NOT_FOUND: key_id k1 does not exist' },
+      } as never);
+
+      const result = await budgetService.creditWithDest(
+        'k1',
+        84532,
+        0.05,
+        'owner',
+        'wasiai/corridor',
+      );
+
+      expect(result).toEqual({ success: false, error: 'KEY_NOT_FOUND' });
+    });
+  });
 });

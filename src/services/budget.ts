@@ -366,6 +366,51 @@ export const budgetService = {
   },
 
   /**
+   * WKH-129 (AC-1/AC-2): credit-back atómico CON reversión del dest-cap. Espejo de
+   * credit() pero llama refund_with_dest_policy, que ADEMÁS de revertir budget +
+   * daily_spent inserta la fila compensatoria negativa en a2a_key_dest_spend_ledger
+   * (devuelve el headroom del cap por destino). Para el refund per-step de /compose
+   * cuando el débito original pasó por debit_with_dest_policy (tenía destination).
+   * CD-8: ownerRef explícito (string, NO undefined). destination YA normalizado por
+   * el caller (normalizeDestination(`${registry}/${slug}`)).
+   */
+  async creditWithDest(
+    keyId: string,
+    chainId: number,
+    amountUsd: number,
+    ownerRef: string,
+    destination: string,
+  ): Promise<{ success: boolean; error?: string }> {
+    const { error } = await supabase.rpc('refund_with_dest_policy', {
+      p_key_id: keyId,
+      p_chain_id: chainId,
+      p_amount_usd: amountUsd,
+      p_owner_ref: ownerRef, // CD-2/CD-8: ownership guard DB-level
+      p_destination: destination, // misma forma normalizada que el débito
+    });
+
+    if (error) {
+      // CD-7 (budget): no propagar msg crudo de PG al cliente.
+      if (error.message.includes('OWNERSHIP_MISMATCH')) {
+        return { success: false, error: 'OWNERSHIP_MISMATCH' };
+      }
+      if (error.message.includes('KEY_NOT_FOUND')) {
+        return { success: false, error: 'KEY_NOT_FOUND' };
+      }
+      console.error('[budget] refund-with-dest failed', {
+        keyId,
+        chainId,
+        amountUsd,
+        destination,
+        err: error.message,
+      });
+      return { success: false, error: 'REFUND_FAILED' };
+    }
+
+    return { success: true };
+  },
+
+  /**
    * Register a deposit: atomically increment budget for a chain (WKH-35 v2).
    * Uses Postgres function register_a2a_key_deposit v2 with FOR UPDATE +
    * UNIQUE(chain_id, tx_hash) for atomic anti-replay (CD-2) and a DB-level
