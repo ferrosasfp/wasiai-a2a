@@ -133,6 +133,10 @@ export const composeService = {
       // (defensive), el debit per-step no aplica. Comportamiento de
       // "fee-on-attempt" consistente con gasless (debit antes de
       // invokeAgent).
+      // WKH-128: monto efectivamente debitado en este step (0 si no se debitó).
+      // Lo usa el catch de abajo para reembolsar si el step FALLA tras el débito
+      // (fee-on-attempt → el caller no debe pagar un step que no entregó valor).
+      let stepDebitedUsd = 0;
       if (i > 0 && scopingKeyRow && chainId !== undefined) {
         // WKH-59 BLQ-MED-1 fix (CD-4 / AC-4): fallback honesto si priceUsdc
         // del agente es 0, null, NaN, o no es un number (config error en el
@@ -187,6 +191,7 @@ export const composeService = {
               : {}),
           };
         }
+        stepDebitedUsd = debitAmount;
       }
       const input =
         step.passOutput && lastOutput
@@ -326,6 +331,33 @@ export const composeService = {
           .catch((trackErr) =>
             console.error('[Compose] event tracking failed:', trackErr),
           );
+        // WKH-128: el step se debitó (fee-on-attempt) pero falló la invocación
+        // → reembolsar el débito per-step (el caller no recibió valor). Solo
+        // path master (sin delegación/sesión, igual que WKH-127: revertir los
+        // contadores de delegación/sesión queda fuera de scope). Best-effort:
+        // un fallo del credit NO cambia el error que ve el caller.
+        if (
+          stepDebitedUsd > 0 &&
+          scopingKeyRow &&
+          chainId !== undefined &&
+          !request.delegationContext &&
+          !request.keySessionContext
+        ) {
+          const creditRes = await budgetService.credit(
+            scopingKeyRow.id,
+            chainId,
+            stepDebitedUsd,
+            scopingKeyRow.owner_ref,
+          );
+          if (!creditRes.success) {
+            console.error('[compose.refund-failed]', {
+              keyId: scopingKeyRow.id,
+              chainId,
+              amountUsd: stepDebitedUsd,
+              step: i,
+            });
+          }
+        }
         return {
           success: false,
           output: null,
