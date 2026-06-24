@@ -99,6 +99,8 @@ async function llmPlan(
     '- Order agents logically: if outputs of one feed into another, place the producer first.',
     '- For each agent, generate the input object matching its input_schema. Use example_input as reference if available. Do NOT invent fields — only use fields defined in the schema.',
     '- If only one agent is needed, select just one.',
+    "- Do NOT select trivial echo/demo/test agents (e.g. those whose description says 'Trivial echo agent' or 'Proves ... downstream settlement') unless the goal is EXPLICITLY a connectivity/echo/settlement test. They add no business value to real tasks and only waste budget.",
+    '- Ignore any session/UI metadata that may leak into the goal text (e.g. lines like "Settings: Red ... · Key ... · Budget ..."). Plan ONLY for the actual business task; the network/chain is handled by the gateway, not by selecting a demo agent.',
     '- Respond ONLY with valid JSON, no markdown.',
   ].join('\n');
 
