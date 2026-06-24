@@ -78,4 +78,30 @@ describe('parseFieldErrors', () => {
       expect(parseFieldErrors(msg)).toBeNull();
     });
   });
+
+  // T-PARSE-WRAPPED: shape REAL que el gateway recibe en prod — el body del
+  // agente viene ENVUELTO por wasiai-v2 (fieldErrors anidado en
+  // result.detail.details.fieldErrors). El parser lo encuentra recursivamente.
+  describe('T-PARSE-WRAPPED: wasiai-v2 wrapped body (nested fieldErrors)', () => {
+    it('Zod fieldErrors nested under result.detail.details → keys', () => {
+      const msg =
+        'Agent cobraya-cfdi-validator returned 422: {"result":{"error":"Upstream 400","upstream_status":400,"detail":{"error":"invalid_input","details":{"formErrors":[],"fieldErrors":{"uuidCfdi":["Required"],"rfcEmisor":["Required"],"amountMXN":["Required"],"anchorBuyer":["Required"]}}}},"meta":{"model":"cobraya-cfdi-validator"}}';
+      expect(parseFieldErrors(msg)).toEqual([
+        'uuidCfdi',
+        'rfcEmisor',
+        'amountMXN',
+        'anchorBuyer',
+      ]);
+    });
+
+    it('free-text nested under result.detail.error → keys', () => {
+      const msg =
+        'Agent agentshop-kyc-validator returned 422: {"result":{"error":"Upstream 400","upstream_status":400,"detail":{"error":"senderName, amountUSD, receiverCountry required"}},"meta":{}}';
+      expect(parseFieldErrors(msg)).toEqual([
+        'senderName',
+        'amountUSD',
+        'receiverCountry',
+      ]);
+    });
+  });
 });
