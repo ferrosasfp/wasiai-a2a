@@ -61,10 +61,30 @@ vi.mock('../services/orchestrate.js', () => ({
   },
 }));
 
+import { registerErrorBoundary } from '../middleware/error-boundary.js';
+import { genReqId, registerRequestIdHook } from '../middleware/request-id.js';
 import { orchestrateService } from '../services/orchestrate.js';
 import orchestrateRoutes from './orchestrate.js';
 
 const mockOrchestrate = vi.mocked(orchestrateService.orchestrate);
+
+function okResult(over: Partial<OrchestrateResult> = {}): OrchestrateResult {
+  return {
+    orchestrationId: '33333333-3333-3333-3333-333333333333',
+    answer: 'done',
+    reasoning: 'ok',
+    pipeline: {
+      success: true,
+      output: 'done',
+      steps: [],
+      totalCostUsdc: 0.4,
+      totalLatencyMs: 50,
+    },
+    consideredAgents: [],
+    protocolFeeUsdc: 0.004,
+    ...over,
+  };
+}
 
 // ── Setup ───────────────────────────────────────────────────
 
@@ -163,5 +183,164 @@ describe('orchestrate routes — WKH-61 scope mapping', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().pipeline.success).toBe(true);
     expect(res.json().answer).toBe('final answer');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Audit 2026-06-24 (P1-5): headers (debitFallback, remainingBudgetUsd),
+// reply.sent early-return, and the catch wrapper preserving requestId.
+// ─────────────────────────────────────────────────────────────────────
+
+describe('orchestrate route — response headers (P1-5)', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    app = Fastify();
+    await app.register(orchestrateRoutes, { prefix: '/orchestrate' });
+    await app.ready();
+  });
+
+  afterAll(() => app.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+  });
+
+  it('P1-5: result.debitFallback=true → x-debit-fallback: registry-miss header', async () => {
+    mockOrchestrate.mockResolvedValue(okResult({ debitFallback: true }));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-debit-fallback']).toBe('registry-miss');
+  });
+
+  it('P1-5: result.debitFallback absent → NO x-debit-fallback header', async () => {
+    mockOrchestrate.mockResolvedValue(okResult());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-debit-fallback']).toBeUndefined();
+  });
+
+  it('P1-5: result.remainingBudgetUsd defined → x-a2a-remaining-budget header carries the value', async () => {
+    mockOrchestrate.mockResolvedValue(okResult({ remainingBudgetUsd: '9.6' }));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 10 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-a2a-remaining-budget']).toBe('9.6');
+  });
+
+  it('P1-5: remainingBudgetUsd decreases as cost is spent (header reflects service value)', async () => {
+    // budget 10, two calls reporting decreasing remaining budget.
+    mockOrchestrate.mockResolvedValueOnce(
+      okResult({ remainingBudgetUsd: '9.5' }),
+    );
+    const res1 = await app.inject({
+      method: 'POST',
+      url: '/orchestrate',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'first', budget: 10 },
+    });
+    mockOrchestrate.mockResolvedValueOnce(
+      okResult({ remainingBudgetUsd: '9.0' }),
+    );
+    const res2 = await app.inject({
+      method: 'POST',
+      url: '/orchestrate',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'second', budget: 10 },
+    });
+
+    const r1 = parseFloat(res1.headers['x-a2a-remaining-budget'] as string);
+    const r2 = parseFloat(res2.headers['x-a2a-remaining-budget'] as string);
+    expect(r2).toBeLessThan(r1);
+  });
+
+  it('P1-5: result.remainingBudgetUsd undefined → NO x-a2a-remaining-budget header', async () => {
+    mockOrchestrate.mockResolvedValue(okResult());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-a2a-remaining-budget']).toBeUndefined();
+  });
+});
+
+describe('orchestrate route — catch wrapper preserves requestId (P1-5)', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    app = Fastify({ genReqId });
+    registerRequestIdHook(app);
+    registerErrorBoundary(app);
+    await app.register(orchestrateRoutes, { prefix: '/orchestrate' });
+    await app.ready();
+  });
+
+  afterAll(() => app.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+  });
+
+  it('P1-5: service throws → 500 structured error with requestId + orchestrationId', async () => {
+    mockOrchestrate.mockRejectedValue(new Error('planner blew up'));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(500);
+    const body = res.json();
+    // The error-boundary attaches requestId, and the route's catch attaches
+    // the orchestrationId to the wrapped error so it survives to the response.
+    expect(body).toHaveProperty('requestId');
+    expect(typeof body.requestId).toBe('string');
+    expect(body).toHaveProperty('orchestrationId');
+    expect(typeof body.orchestrationId).toBe('string');
+  });
+
+  it('P1-5: a non-Error throw is wrapped and still yields a requestId-bearing 500', async () => {
+    mockOrchestrate.mockRejectedValue('string failure');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(500);
+    const body = res.json();
+    expect(body).toHaveProperty('requestId');
+    expect(body).toHaveProperty('orchestrationId');
   });
 });

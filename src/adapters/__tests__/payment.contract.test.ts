@@ -288,4 +288,67 @@ describe('KiteOzonePaymentAdapter', () => {
     expect(() => adapter.supportedTokens).not.toThrow();
     warnSpy.mockRestore();
   });
+
+  // ── Audit 2026-06-24 (P2-9): facilitator HTTP error propagation ──
+  // settle()/verify() in Pieverse mode must surface a typed Error (with the
+  // upstream status code) instead of silently returning a malformed result.
+
+  const SETTLE_REQ = {
+    authorization: {
+      from: '0x1',
+      to: '0x2',
+      value: '1',
+      validAfter: '0',
+      validBefore: '99',
+      nonce: '0x3',
+    },
+    signature: '0xSIG',
+    network: 'kite-testnet',
+  } as const;
+
+  it('P2-9: settle() throws with the HTTP status when facilitator returns 401', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({}),
+      text: async () => 'unauthorized',
+    });
+
+    await expect(adapter.settle({ ...SETTLE_REQ })).rejects.toThrow(
+      /Facilitator returned HTTP 401 on \/settle/,
+    );
+  });
+
+  it('P2-9: settle() throws with the HTTP status when facilitator returns 500', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({}),
+      text: async () => 'internal error',
+    });
+
+    await expect(adapter.settle({ ...SETTLE_REQ })).rejects.toThrow(
+      /Facilitator returned HTTP 500 on \/settle/,
+    );
+  });
+
+  it('P2-9: settle() wraps a network-level fetch failure into a typed error', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    await expect(adapter.settle({ ...SETTLE_REQ })).rejects.toThrow(
+      /Facilitator network error on settle: ECONNREFUSED/,
+    );
+  });
+
+  it('P2-9: verify() throws with the HTTP status when facilitator returns 500', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({}),
+    });
+
+    await expect(adapter.verify({ ...SETTLE_REQ })).rejects.toThrow(
+      /Facilitator returned HTTP 500 on \/verify/,
+    );
+  });
 });

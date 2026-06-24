@@ -205,6 +205,62 @@ describe('registryService.register — owner_ref persisted (WKH-63)', () => {
       );
     });
   });
+
+  // ── Audit 2026-06-24 (P2-10): insert-failure → typed error ───
+  describe('register insert failure (P2-10)', () => {
+    it('PK violation (23505) on insert → "already exists" (race defense)', async () => {
+      // get(id) → no clash (null), but the insert hits a concurrent 23505.
+      const mock = chainMock({
+        maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+        single: vi.fn().mockResolvedValue({
+          data: null,
+          error: { code: '23505', message: 'duplicate key value' },
+        }),
+      });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+
+      await expect(
+        registryService.register(
+          {
+            name: 'racy-reg',
+            discoveryEndpoint: 'https://example.com/discover',
+            invokeEndpoint: 'https://example.com/invoke',
+            schema: { discovery: {}, invoke: { method: 'POST' } },
+            enabled: true,
+          },
+          OWNER_A,
+        ),
+      ).rejects.toThrow(/Registry 'racy-reg' already exists/);
+    });
+
+    it('generic DB error on insert → "Failed to register: <msg>"', async () => {
+      const mock = chainMock({
+        maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+        single: vi.fn().mockResolvedValue({
+          data: null,
+          error: { code: '08006', message: 'connection failure' },
+        }),
+      });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+
+      await expect(
+        registryService.register(
+          {
+            name: 'broken-reg',
+            discoveryEndpoint: 'https://example.com/discover',
+            invokeEndpoint: 'https://example.com/invoke',
+            schema: { discovery: {}, invoke: { method: 'POST' } },
+            enabled: true,
+          },
+          OWNER_A,
+        ),
+      ).rejects.toThrow(/Failed to register: connection failure/);
+    });
+  });
 });
 
 // ── Suite: update ───────────────────────────────────────────

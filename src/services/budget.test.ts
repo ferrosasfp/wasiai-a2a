@@ -841,6 +841,54 @@ describe('budgetService', () => {
       );
       expect(result).toEqual({ success: true });
     });
+
+    // ── Audit 2026-06-24 (P2-8): credit() error-path mapping ─────
+    // El 4-arg credit() comparte el contrato disclosure-safe de creditWithDest:
+    // NUNCA propaga el mensaje crudo de Postgres al caller.
+
+    it('P2-8: RPC OWNERSHIP_MISMATCH → maps to OWNERSHIP_MISMATCH (no raw PG leak)', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: {
+          message: 'OWNERSHIP_MISMATCH: key k1 not owned by caller xyz',
+        },
+      } as never);
+
+      const result = await budgetService.credit('k1', 84532, 0.05, 'other');
+
+      expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
+      // The raw PG detail must NOT appear in the returned error.
+      expect(result.error).not.toContain('not owned by caller');
+    });
+
+    it('P2-8: RPC KEY_NOT_FOUND → maps to KEY_NOT_FOUND', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'KEY_NOT_FOUND: key_id k1 does not exist' },
+      } as never);
+
+      const result = await budgetService.credit('k1', 84532, 0.05, 'owner');
+
+      expect(result).toEqual({ success: false, error: 'KEY_NOT_FOUND' });
+    });
+
+    it('P2-8: generic RPC error → REFUND_FAILED + console.error, never leaks the raw message', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'deadlock detected on relation a2a_agent_keys' },
+      } as never);
+
+      const result = await budgetService.credit('k1', 84532, 0.05, 'owner');
+
+      expect(result).toEqual({ success: false, error: 'REFUND_FAILED' });
+      expect(result.error).not.toContain('deadlock');
+      expect(errSpy).toHaveBeenCalledWith(
+        '[budget] refund failed',
+        expect.objectContaining({ keyId: 'k1', chainId: 84532 }),
+      );
+      errSpy.mockRestore();
+    });
   });
 
   // WKH-129 (AC-1/AC-2/AC-3): creditWithDest() — refund completo del dest-cap.

@@ -33,7 +33,10 @@ vi.mock('../adapters/registry.js', () => ({
   }),
 }));
 
+import { discoveryService } from './../services/discovery.js';
 import mcpPlugin from './index.js';
+
+const mockDiscover = vi.mocked(discoveryService.discover);
 
 function sha256Hex(s: string): string {
   return crypto.createHash('sha256').update(s).digest('hex');
@@ -229,6 +232,130 @@ describe('MCP router', () => {
     expect(entry?.mcpToken).toBe(VALID.slice(0, 8));
     expect(typeof entry?.durationMs).toBe('number');
     expect(entry?.success).toBe(true);
+    await app.close();
+  });
+
+  // ── Audit 2026-06-24 (P1-6): JSON-RPC error-code dispatch ──────
+
+  it('P1-6: tools/call where the tool name is missing → -32601 (method not found)', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: { 'x-mcp-token': VALID, 'content-type': 'application/json' },
+      // params present but no `name` field → isToolName(undefined) === false.
+      payload: {
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        id: 21,
+        params: { arguments: {} },
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      id: number;
+      error: { code: number; message: string };
+    };
+    expect(body.id).toBe(21);
+    expect(body.error.code).toBe(-32601);
+    expect(body.error.message).toBe('Method not found');
+    await app.close();
+  });
+
+  it('P1-6: tools/call with schema-invalid args → -32602 (invalid params) with errors', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: { 'x-mcp-token': VALID, 'content-type': 'application/json' },
+      // discover_agents schema: maxPrice minimum 0 → -5 fails validation.
+      payload: {
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        id: 22,
+        params: { name: 'discover_agents', arguments: { maxPrice: -5 } },
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      id: number;
+      error: { code: number; message: string; data?: { errors?: unknown[] } };
+    };
+    expect(body.id).toBe(22);
+    expect(body.error.code).toBe(-32602);
+    expect(body.error.message).toBe('Invalid params');
+    // The Ajv validation errors are surfaced for the caller to debug.
+    expect(Array.isArray(body.error.data?.errors)).toBe(true);
+    await app.close();
+  });
+
+  it('P1-6: tools/call rejecting additionalProperties → -32602 (invalid params)', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: { 'x-mcp-token': VALID, 'content-type': 'application/json' },
+      payload: {
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        id: 23,
+        // discover_agents has additionalProperties:false.
+        params: { name: 'discover_agents', arguments: { unexpected: 'x' } },
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { error: { code: number } };
+    expect(body.error.code).toBe(-32602);
+    await app.close();
+  });
+
+  it('P1-6: tool handler throwing a generic error → -32001 (tool execution) preserving its message', async () => {
+    mockDiscover.mockRejectedValueOnce(
+      new Error('downstream registry exploded'),
+    );
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: { 'x-mcp-token': VALID, 'content-type': 'application/json' },
+      payload: {
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        id: 24,
+        params: { name: 'discover_agents', arguments: { query: 'kyc' } },
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      id: number;
+      error: { code: number; message: string };
+    };
+    expect(body.id).toBe(24);
+    // The dispatcher maps a generic thrown Error to TOOL_EXECUTION (-32001).
+    expect(body.error.code).toBe(-32001);
+    expect(body.error.message).toBe('downstream registry exploded');
+    await app.close();
+  });
+
+  it('P1-6: non-Error thrown from a tool handler → -32001 with generic message', async () => {
+    // discoveryService.discover rejecting with a non-Error value.
+    mockDiscover.mockRejectedValueOnce('string failure');
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: { 'x-mcp-token': VALID, 'content-type': 'application/json' },
+      payload: {
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        id: 25,
+        params: { name: 'discover_agents', arguments: { query: 'kyc' } },
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { error: { code: number; message: string } };
+    expect(body.error.code).toBe(-32001);
+    expect(body.error.message).toBe('Tool execution failed');
     await app.close();
   });
 });
