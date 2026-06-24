@@ -46,6 +46,16 @@ vi.mock('./receipt.js', () => ({
   },
 }));
 
+// WKH-127: mock del budget service para espiar débito/refund/balance del
+// path master post-plan. Defaults: budget alto, débito y credit OK.
+vi.mock('./budget.js', () => ({
+  budgetService: {
+    debit: vi.fn().mockResolvedValue({ success: true }),
+    credit: vi.fn().mockResolvedValue({ success: true }),
+    getBalance: vi.fn().mockResolvedValue('100'),
+  },
+}));
+
 // WKH-44: mock fee-charge. Preservamos `ProtocolFeeError` (es una clase
 // real que el SUT usa en `instanceof`) y reemplazamos las funciones.
 vi.mock('./fee-charge.js', async () => {
@@ -64,6 +74,7 @@ vi.mock('./fee-charge.js', async () => {
 
 // ─── Imports (after mocks) ───────────────────────────────────
 
+import { budgetService } from './budget.js';
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
@@ -150,6 +161,10 @@ describe('orchestrateService', () => {
     process.env.ANTHROPIC_API_KEY = 'test-key';
     vi.mocked(discoveryService.discover).mockResolvedValue(mockDiscoveryResult);
     vi.mocked(composeService.compose).mockResolvedValue(mockComposeResult);
+    // WKH-127: re-aplicar defaults del budget mock (clearAllMocks los borra).
+    vi.mocked(budgetService.debit).mockResolvedValue({ success: true });
+    vi.mocked(budgetService.credit).mockResolvedValue({ success: true });
+    vi.mocked(budgetService.getBalance).mockResolvedValue('100');
   });
 
   // T-1: LLM happy path — inputs dinamicos
@@ -804,5 +819,309 @@ describe('orchestrateService', () => {
     );
 
     expect(vi.mocked(receiptService.emit)).not.toHaveBeenCalled();
+  });
+
+  // ─── WKH-127 ─ Orchestrate billing (real price + refund) ───────────────
+
+  // Two agents priced 0.30 + 0.20. WKH-127 (BLQ-ALTO-1): el service debita SOLO
+  // el step-0 (0.30); el step 1 (0.20) lo debita compose (acá mockeado). El plan
+  // real cuesta 0.50, pero la base del débito step-0 del service es 0.30.
+  const wkh127Agents: Agent[] = [
+    { ...mockAgents[0], slug: 'summarizer-v1', priceUsdc: 0.3 },
+    { ...mockAgents[1], slug: 'translator-v1', priceUsdc: 0.2 },
+  ];
+  const wkh127Discovery: DiscoveryResult = {
+    agents: wkh127Agents,
+    total: 2,
+    registries: ['wasiai'],
+  };
+
+  function masterKeyRow() {
+    return {
+      id: 'master-key-1',
+      owner_ref: 'owner-127',
+    } as unknown as import('../types/index.js').A2AAgentKeyRow;
+  }
+
+  // T-AC1 (AC-1, BLQ-ALTO-1): plan 0.30+0.20 → el débito step-0 del service es
+  // el precio del step-0 (0.30), NO la suma del plan (0.50) ni el placeholder $1.
+  // Sumar el plan duplicaría el step 1 (0.20) que compose ya cobra → double-charge.
+  it('T-AC1: debits the step-0 price (0.30), not the plan sum or $1 placeholder', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'real price',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-ac1',
+    );
+
+    expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
+    const debitCall = vi.mocked(budgetService.debit).mock.calls[0];
+    expect(debitCall[2]).toBeCloseTo(0.3, 6);
+    expect(debitCall[2]).not.toBe(1);
+    // No es la suma del plan (eso sería el double-charge del BLQ-ALTO-1).
+    expect(debitCall[2]).not.toBeCloseTo(0.5, 6);
+  });
+
+  // T-AC2 (AC-2): steps.length===0 (all over budget) → debit 0 calls.
+  it('T-AC2: zero steps (all over budget) → no debit', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'tiny budget',
+        budget: 0.05,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-ac2',
+    );
+
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+  });
+
+  // T-AC3 (AC-3, BLQ-ALTO-1): el débito step-0 del service == precio del step-0
+  // (primer agente del plan = summarizer-v1 @ 0.30), NO la suma del plan ni un
+  // placeholder. Los steps 1..N los cobra compose por separado (sin duplicar).
+  it('T-AC3: debited amount equals the step-0 price (not the plan sum)', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'sum cost',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-ac3',
+    );
+
+    const debitCall = vi.mocked(budgetService.debit).mock.calls[0];
+    // precio del step-0 (summarizer-v1) = 0.30
+    expect(debitCall[2]).toBeCloseTo(0.3, 6);
+  });
+
+  // T-AC4 (AC-4): plan all priceUsdc===0 → debit with 1.0 + debitFallback flag + warn.
+  it('T-AC4: zero-cost plan applies $1 fallback and sets debitFallback', async () => {
+    const zeroPriceDiscovery: DiscoveryResult = {
+      agents: [
+        { ...mockAgents[0], slug: 'summarizer-v1', priceUsdc: 0 },
+        { ...mockAgents[1], slug: 'translator-v1', priceUsdc: 0 },
+      ],
+      total: 2,
+      registries: ['wasiai'],
+    };
+    vi.mocked(discoveryService.discover).mockResolvedValue(zeroPriceDiscovery);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setLlmTwoAgents();
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'zero cost plan',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-ac4',
+    );
+
+    const debitCall = vi.mocked(budgetService.debit).mock.calls[0];
+    expect(debitCall[2]).toBe(1.0);
+    expect(result.debitFallback).toBe(true);
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[orchestrate.price.fallback]',
+      expect.objectContaining({ reason: 'registry-miss' }),
+    );
+    warnSpy.mockRestore();
+  });
+
+  // T-AC5 (AC-5): total failure (totalCostUsdc:0) → credit called with debitedUsd.
+  it('T-AC5: total pipeline failure refunds the full debited amount', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    vi.mocked(composeService.compose).mockResolvedValue({
+      ...mockComposeResult,
+      success: false,
+      totalCostUsdc: 0,
+    });
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'total fail refund',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-ac5',
+    );
+
+    expect(vi.mocked(budgetService.credit)).toHaveBeenCalledTimes(1);
+    const creditCall = vi.mocked(budgetService.credit).mock.calls[0];
+    // BLQ-ALTO-1: debitedUsd = precio del step-0 = 0.30. Fallo total (totalCost
+    // 0 → el step-0 ni settleó) → se reembolsa el step-0 entero (incidente original).
+    expect(creditCall[2]).toBeCloseTo(0.3, 6);
+    expect(creditCall[3]).toBe('owner-127');
+  });
+
+  // T-AC6 (AC-6): partial failure → credit with (debited - consumed); >=debited → no credit.
+  it('T-AC6a: partial failure refunds the unconsumed remainder', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    vi.mocked(composeService.compose).mockResolvedValue({
+      ...mockComposeResult,
+      success: false,
+      totalCostUsdc: 0.2,
+    });
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'partial fail refund',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-ac6a',
+    );
+
+    expect(vi.mocked(budgetService.credit)).toHaveBeenCalledTimes(1);
+    const creditCall = vi.mocked(budgetService.credit).mock.calls[0];
+    // BLQ-ALTO-1: debitedUsd = step-0 = 0.30. Fórmula AC-6 parcial:
+    // max(0, debited 0.30 - consumed 0.20) = 0.10.
+    expect(creditCall[2]).toBeCloseTo(0.1, 6);
+  });
+
+  it('T-AC6b: consumed >= debited → no refund', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    vi.mocked(composeService.compose).mockResolvedValue({
+      ...mockComposeResult,
+      success: false,
+      totalCostUsdc: 0.5,
+    });
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'consumed equals debited',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-ac6b',
+    );
+
+    expect(vi.mocked(budgetService.credit)).not.toHaveBeenCalled();
+  });
+
+  // T-AC8 (AC-8): credit fails → console.error structured + refundError flag, no PG msg.
+  it('T-AC8: refund failure sets refundError and logs structured error', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    vi.mocked(composeService.compose).mockResolvedValue({
+      ...mockComposeResult,
+      success: false,
+      totalCostUsdc: 0,
+    });
+    vi.mocked(budgetService.credit).mockResolvedValue({
+      success: false,
+      error: 'REFUND_FAILED',
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    setLlmTwoAgents();
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'refund fails',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-ac8',
+    );
+
+    expect(result.refundError).toBe(true);
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[orchestrate.refund-failed]',
+      expect.objectContaining({
+        keyId: 'master-key-1',
+        chainId: 2368,
+        // BLQ-ALTO-1: refund = debitedUsd = precio del step-0 = 0.30.
+        amountUsd: 0.3,
+        orchestrationId: 'orch-ac8',
+      }),
+    );
+    errorSpy.mockRestore();
+  });
+
+  // T-AC9 (AC-9): x402 (no scopingKeyRow) → debit and credit 0 calls.
+  it('T-AC9: x402 path (no scopingKeyRow) → no debit, no credit', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    vi.mocked(composeService.compose).mockResolvedValue({
+      ...mockComposeResult,
+      success: false,
+      totalCostUsdc: 0,
+    });
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      { goal: 'x402 no key', budget: 5.0, chainId: 2368 },
+      'orch-ac9',
+    );
+
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(budgetService.credit)).not.toHaveBeenCalled();
+  });
+
+  // T-AC11 (AC-11): success with totalCostUsdc>0 → credit 0 calls (CD-2).
+  it('T-AC11: successful pipeline never refunds (CD-2)', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    vi.mocked(composeService.compose).mockResolvedValue({
+      ...mockComposeResult,
+      success: true,
+      totalCostUsdc: 0.5,
+    });
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'success no refund',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-ac11',
+    );
+
+    expect(vi.mocked(budgetService.credit)).not.toHaveBeenCalled();
+    // fee applied on success path.
+    expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledTimes(1);
+  });
+
+  // T-AC-DOUBLE (CD-11/§4.4): single orchestrate on total failure → credit exactly once.
+  it('T-AC-DOUBLE: total failure refunds exactly once (no double refund)', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    vi.mocked(composeService.compose).mockResolvedValue({
+      ...mockComposeResult,
+      success: false,
+      totalCostUsdc: 0,
+    });
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'single refund',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-double',
+    );
+
+    expect(vi.mocked(budgetService.credit)).toHaveBeenCalledTimes(1);
   });
 });

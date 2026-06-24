@@ -46,6 +46,8 @@ vi.mock('./discovery.js', () => ({
 vi.mock('./budget.js', () => ({
   budgetService: {
     debit: vi.fn(),
+    // WKH-127: el service hace credit-back si el pipeline falla (master path).
+    credit: vi.fn().mockResolvedValue({ success: true }),
     getBalance: vi.fn(),
     registerDeposit: vi.fn(),
   },
@@ -178,6 +180,11 @@ beforeEach(() => {
   // No API key → llmPlan() returns null → greedy fallback (deterministic order).
   delete process.env.ANTHROPIC_API_KEY;
   mockDebit.mockResolvedValue({ success: true });
+  // WKH-127: el service ahora hace pre-check de balance + débito step-0 master +
+  // re-lectura del saldo (remaining). getBalance debe devolver un saldo > 0 para
+  // que el pre-check pase y el flujo llegue a compose (per-step debits).
+  vi.mocked(budgetService.getBalance).mockResolvedValue('10');
+  vi.mocked(budgetService.credit).mockResolvedValue({ success: true });
   // resolveAgent fallback path: discover({limit:50}) inside compose returns the
   // same agent set so getAgent-miss is recovered by slug.
   vi.mocked(discoveryService.getAgent).mockResolvedValue(null);
@@ -217,10 +224,19 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
     );
 
     expect(result.pipeline.success).toBe(true);
-    // AC-1 + AC-2: exactamente 2 débitos (steps 1 y 2); el step 0 NO.
-    expect(mockDebit).toHaveBeenCalledTimes(2);
+    // WKH-127 (BLQ-ALTO-1): 3 débitos. El primero es el step-0 del SERVICE (3-arg,
+    // SOLO el precio del step-0 = 0.01, NO la suma del plan). Luego compose debita
+    // steps 1 y 2 (6-arg con destino). El step-0 ya NO lo debita el middleware.
+    expect(mockDebit).toHaveBeenCalledTimes(3);
+    // Débito step-0 del service: 3-arg, sin destino, = precio del step-0 (0.01).
+    const step0Call = mockDebit.mock.calls[0];
+    expect(step0Call[0]).toBe('k1');
+    expect(step0Call[1]).toBe(CHAIN_ID);
+    expect(step0Call[2]).toBeCloseTo(0.01, 6);
+    expect(step0Call[5]).toBeUndefined();
+    // Débitos per-step de compose (steps 1 y 2).
     expect(mockDebit).toHaveBeenNthCalledWith(
-      1,
+      2,
       'k1',
       CHAIN_ID,
       0.02,
@@ -229,7 +245,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       'wasiai/a2',
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
-      2,
+      3,
       'k1',
       CHAIN_ID,
       0.03,
@@ -237,6 +253,15 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       undefined,
       'wasiai/a3',
     );
+    // BLQ-ALTO-1 (REGRESIÓN): invariante anti-double-charge. La suma de TODOS
+    // los débitos (service step-0 + compose steps 1..N) == costo real del plan
+    // (0.01+0.02+0.03 = 0.06), con cada step cobrado UNA sola vez. Si plannedCost
+    // volviera a ser la suma del plan, este total sería 0.06+0.02+0.03 = 0.11.
+    const totalDebited = mockDebit.mock.calls.reduce(
+      (sum, c) => sum + (c[2] as number),
+      0,
+    );
+    expect(totalDebited).toBeCloseTo(0.06, 6);
   });
 
   // T-BILL-2 (AC-2): el step 0 nunca se debita en el service (guard i>0, CD-1).
@@ -259,8 +284,18 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       'orch-bill-2',
     );
 
-    // Solo 1 débito (step 1). El precio del step 0 (0.07) NUNCA aparece.
-    expect(mockDebit).toHaveBeenCalledTimes(1);
+    // WKH-127 (BLQ-ALTO-1): 2 débitos. El step-0 del service (3-arg, = precio del
+    // step-0 = 0.07, NO la suma 0.09) y el per-step de compose (step 1, 6-arg).
+    // El precio del step 0 NUNCA aparece como débito per-step con destino
+    // (guard i>0 de compose, CD-1).
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    // Débito step-0 del service: 3-arg, sin destino, = precio del step-0 (0.07).
+    const step0Call = mockDebit.mock.calls[0];
+    expect(step0Call[0]).toBe('k1');
+    expect(step0Call[1]).toBe(CHAIN_ID);
+    expect(step0Call[2]).toBeCloseTo(0.07, 6);
+    expect(step0Call[5]).toBeUndefined();
+    // Per-step (step 1) de compose: 6-arg con destino.
     expect(mockDebit).toHaveBeenCalledWith(
       'k1',
       CHAIN_ID,
@@ -269,6 +304,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       undefined,
       'wasiai/a2',
     );
+    // El step-0 (0.07) NO se debita per-step con destino (guard i>0).
     expect(mockDebit).not.toHaveBeenCalledWith(
       'k1',
       CHAIN_ID,
@@ -277,6 +313,13 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       undefined,
       'wasiai/a1',
     );
+    // BLQ-ALTO-1 (REGRESIÓN): total debitado == costo real del plan (0.07+0.02
+    // = 0.09), cada step UNA vez. Con el bug de la suma sería 0.09+0.02 = 0.11.
+    const totalDebited = mockDebit.mock.calls.reduce(
+      (sum, c) => sum + (c[2] as number),
+      0,
+    );
+    expect(totalDebited).toBeCloseTo(0.09, 6);
   });
 
   // T-BILL-3 (AC-3): budget insuficiente en step intermedio → corta el pipeline.
@@ -289,12 +332,14 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
     mockFetchOk(); // step 1 (debit fails before this is consumed)
     mockFetchOk(); // step 2 — must NOT be consumed
 
-    // step 1 debit falla con insufficient budget.
+    // WKH-127: el primer débito ahora es el step-0 del service → debe pasar para
+    // que el flujo llegue a compose; el SEGUNDO débito (step 1 de compose) falla.
     mockDebit.mockReset();
+    mockDebit.mockResolvedValueOnce({ success: true }); // step-0 service OK
     mockDebit.mockResolvedValueOnce({
       success: false,
       error: 'insufficient budget',
-    });
+    }); // step 1 compose falla
 
     const result = await orchestrateService.orchestrate(
       {
@@ -309,8 +354,9 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
 
     expect(result.pipeline.success).toBe(false);
     expect(result.pipeline.error).toContain('insufficient budget');
-    // Solo se intentó 1 débito (step 1); step 2 NO se debitó ni ejecutó.
-    expect(mockDebit).toHaveBeenCalledTimes(1);
+    // 2 débitos intentados: step-0 service (OK) + step 1 compose (falla). step 2
+    // NO se debitó ni ejecutó.
+    expect(mockDebit).toHaveBeenCalledTimes(2);
     // step 0 fetch + step 1 fetch attempt: step 1 cut BEFORE invoke → 1 fetch.
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
@@ -333,6 +379,21 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
     );
 
     expect(result.pipeline.success).toBe(true);
-    expect(mockDebit).not.toHaveBeenCalled();
+    // WKH-127 (BLQ-ALTO-1): EXACTAMENTE 1 débito: el step-0 del service (3-arg,
+    // = precio del step-0 = 0.05; con 1 solo step la suma del plan coincide con
+    // el step-0). Compose NO debita (guard i>0 → 1 solo step). El step-0 ya no lo
+    // cobra el middleware (skipMiddlewareDebit).
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    const step0Call = mockDebit.mock.calls[0];
+    expect(step0Call[0]).toBe('k1');
+    expect(step0Call[1]).toBe(CHAIN_ID);
+    expect(step0Call[2]).toBeCloseTo(0.05, 6);
+    expect(step0Call[5]).toBeUndefined();
+    // BLQ-ALTO-1 (REGRESIÓN): total debitado == costo real del plan (0.05).
+    const totalDebited = mockDebit.mock.calls.reduce(
+      (sum, c) => sum + (c[2] as number),
+      0,
+    );
+    expect(totalDebited).toBeCloseTo(0.05, 6);
   });
 });

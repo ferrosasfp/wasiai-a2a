@@ -65,6 +65,7 @@ declare module 'fastify' {
     delegationContext?: DelegationDebitContext; // WKH-101 DT-11 (débito per-step)
     keySessionRow?: KeySessionRow; // WKH-121
     keySessionContext?: KeySessionDebitContext; // WKH-121 (débito per-step)
+    skipMiddlewareDebit?: boolean; // WKH-127: orchestrate debita post-plan en el service
   }
 }
 
@@ -834,85 +835,91 @@ export function requirePaymentOrA2AKey(
       // so this eliminates the race condition (BLQ-4) and ensures failed
       // requests are charged (BLQ-1), debit failures are surfaced (BLQ-2),
       // and service errors return 503 (BLQ-3).
-      request.log.info(
-        {
-          keyId: keyRow.id,
-          chainKey,
-          chainId,
-          asset_symbol: assetSymbol,
-          amountUsd: estimatedCostUsd,
-        },
-        'a2a-key.debit',
-      );
-      // WKH-125: la llamada step-0 es compartida por master/gasless/x402/compose.
-      // CONDICIONAL (CD-8b): sólo cuando hay `composeDestination` (augmentado por
-      // routes/compose.ts:resolveComposePriceHandler) pasamos el 6º arg destino;
-      // si no, la llamada de 3 args queda INTACTA (no rompe las aserciones de
-      // 3-arg de master/gasless/x402, AC-5).
-      const debitResult = request.composeDestination
-        ? await budgetService.debit(
-            keyRow.id,
-            chainId,
-            estimatedCostUsd,
-            undefined,
-            undefined,
-            request.composeDestination,
-          )
-        : await budgetService.debit(keyRow.id, chainId, estimatedCostUsd);
-      if (!debitResult.success) {
-        // WKH-125 (AC-2): cap por destino excedido → HTTP 402 (no 403/400). El
-        // budget NO se decrementó (rollback de la tx en el RPC).
-        if (debitResult.error === 'DEST_CAP_EXCEEDED') {
-          return reply.status(402).send({
-            error: `chain ${chainId} destination cap exceeded`,
-            error_code: 'DEST_CAP_EXCEEDED',
-          });
-        }
-        // AC-8: error message MUST include the target chainId so callers can
-        // distinguish cross-chain confusion from generic insufficient-budget.
-        // Cold path: extra getBalance call is acceptable (CD-6 only constrains
-        // the happy path).
-        const balance = await budgetService
-          .getBalance(keyRow.id, chainId, keyRow.owner_ref)
-          .catch(() => '0');
-        request.log.warn(
+      // WKH-127 (CD-9/CD-11): el débito step-0 master se salta cuando orchestrate
+      // marcó `skipMiddlewareDebit` — el service debita el costo real post-plan
+      // (Opción B). El flag aplica SOLO a este path master; los branches
+      // deleg/session retornaron antes y lo IGNORAN.
+      if (!request.skipMiddlewareDebit) {
+        request.log.info(
           {
             keyId: keyRow.id,
             chainKey,
             chainId,
             asset_symbol: assetSymbol,
-            balance,
+            amountUsd: estimatedCostUsd,
           },
-          'a2a-key.insufficient-budget',
+          'a2a-key.debit',
         );
-        return send403(
-          reply,
-          'INSUFFICIENT_BUDGET',
-          `chain ${chainId} balance is ${balance}`,
-        );
-      }
+        // WKH-125: la llamada step-0 es compartida por master/gasless/x402/compose.
+        // CONDICIONAL (CD-8b): sólo cuando hay `composeDestination` (augmentado por
+        // routes/compose.ts:resolveComposePriceHandler) pasamos el 6º arg destino;
+        // si no, la llamada de 3 args queda INTACTA (no rompe las aserciones de
+        // 3-arg de master/gasless/x402, AC-5).
+        const debitResult = request.composeDestination
+          ? await budgetService.debit(
+              keyRow.id,
+              chainId,
+              estimatedCostUsd,
+              undefined,
+              undefined,
+              request.composeDestination,
+            )
+          : await budgetService.debit(keyRow.id, chainId, estimatedCostUsd);
+        if (!debitResult.success) {
+          // WKH-125 (AC-2): cap por destino excedido → HTTP 402 (no 403/400). El
+          // budget NO se decrementó (rollback de la tx en el RPC).
+          if (debitResult.error === 'DEST_CAP_EXCEEDED') {
+            return reply.status(402).send({
+              error: `chain ${chainId} destination cap exceeded`,
+              error_code: 'DEST_CAP_EXCEEDED',
+            });
+          }
+          // AC-8: error message MUST include the target chainId so callers can
+          // distinguish cross-chain confusion from generic insufficient-budget.
+          // Cold path: extra getBalance call is acceptable (CD-6 only constrains
+          // the happy path).
+          const balance = await budgetService
+            .getBalance(keyRow.id, chainId, keyRow.owner_ref)
+            .catch(() => '0');
+          request.log.warn(
+            {
+              keyId: keyRow.id,
+              chainKey,
+              chainId,
+              asset_symbol: assetSymbol,
+              balance,
+            },
+            'a2a-key.insufficient-budget',
+          );
+          return send403(
+            reply,
+            'INSUFFICIENT_BUDGET',
+            `chain ${chainId} balance is ${balance}`,
+          );
+        }
 
-      // WKH-124: emit budget_debit receipt for the MASTER debit (best-effort,
-      // fire-and-forget CD-B). A failure here NEVER interrupts the request (CD-1).
-      receiptService
-        .emit({
-          ownerRef: keyRow.owner_ref,
-          agentKeyId: keyRow.id,
-          sessionId: null,
-          delegationId: null,
-          receiptType: 'budget_debit',
-          amountUsd: estimatedCostUsd,
-          chainId,
-          txHash: null,
-          counterparty: null,
-          orchestrationId: null,
-        })
-        .catch((e) =>
-          console.warn(
-            '[receipts] emit failed',
-            e instanceof Error ? e.message : e,
-          ),
-        );
+        // WKH-124: emit budget_debit receipt for the MASTER debit (best-effort,
+        // fire-and-forget CD-B). A failure here NEVER interrupts the request (CD-1).
+        receiptService
+          .emit({
+            ownerRef: keyRow.owner_ref,
+            agentKeyId: keyRow.id,
+            sessionId: null,
+            delegationId: null,
+            receiptType: 'budget_debit',
+            amountUsd: estimatedCostUsd,
+            chainId,
+            txHash: null,
+            counterparty: null,
+            orchestrationId: null,
+          })
+          .catch((e) =>
+            console.warn(
+              '[receipts] emit failed',
+              e instanceof Error ? e.message : e,
+            ),
+          );
+      }
 
       // 8. Augment request (AC-4)
       keyRow.erc8004_verified = isIdentityVerified(keyRow); // WKH-100 AC-6, derivado, sin RPC (DT-17)
@@ -920,12 +927,17 @@ export function requirePaymentOrA2AKey(
 
       // 9. Set remaining budget header (AC-1) — read balance AFTER debit
       // CD-12: uses the SAME chainId resolved from the bundle above.
-      const postDebitBalance = await budgetService.getBalance(
-        keyRow.id,
-        chainId,
-        keyRow.owner_ref,
-      );
-      reply.header('x-a2a-remaining-budget', postDebitBalance);
+      // WKH-127: bajo `skipMiddlewareDebit` el middleware NO debitó, así que leer
+      // el balance acá daría un valor no-debitado; el route handler setea este
+      // header con el saldo post-débito real que expone el service.
+      if (!request.skipMiddlewareDebit) {
+        const postDebitBalance = await budgetService.getBalance(
+          keyRow.id,
+          chainId,
+          keyRow.owner_ref,
+        );
+        reply.header('x-a2a-remaining-budget', postDebitBalance);
+      }
     } catch (err) {
       request.log.error(
         {

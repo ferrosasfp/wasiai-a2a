@@ -427,6 +427,12 @@ export interface OrchestrateResult {
   feeChargeError?: string;
   /** WKH-44: tx hash del transfer EIP-712 del protocol fee (si tuvo éxito). */
   feeChargeTxHash?: string;
+  /** WKH-127 (AC-8): true si el credit-back falló; flag para reconciliación manual. */
+  refundError?: boolean;
+  /** WKH-127 (AC-4): true si se aplicó el fallback $1 por plannedCost===0; el route setea x-debit-fallback. */
+  debitFallback?: boolean;
+  /** WKH-127: saldo post-débito (y post-refund) real; el route lo escribe en x-a2a-remaining-budget. */
+  remainingBudgetUsd?: string;
 }
 
 // ============================================================

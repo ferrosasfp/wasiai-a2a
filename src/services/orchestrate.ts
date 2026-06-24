@@ -16,6 +16,7 @@ import type {
   OrchestrateRequest,
   OrchestrateResult,
 } from '../types/index.js';
+import { budgetService } from './budget.js';
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
@@ -191,7 +192,7 @@ function greedyPlan(
   agents: Agent[],
   budget: number,
   maxAgents: number,
-): { steps: ComposeStep[]; reasoning: string } {
+): { steps: ComposeStep[]; reasoning: string; cost: number } {
   const selected: Agent[] = [];
   let remaining = budget;
 
@@ -209,13 +210,22 @@ function greedyPlan(
     passOutput: index > 0,
   }));
 
+  // WKH-127 (BLQ-ALTO-1): el débito post-plan del service cubre SOLO el step-0
+  // (reemplaza el placeholder $1 del middleware). Los steps 1..N los sigue
+  // debitando compose (guard i>0). Por eso `cost` = precio del primer step, NO
+  // la suma del plan (sumarlo duplicaría 1..N → double-charge).
+  const step0Cost = selected.length > 0 ? selected[0].priceUsdc : 0;
+
+  // Suma total del plan: solo para el texto de reasoning (no es base del débito).
+  const totalEstimate = selected.reduce((sum, a) => sum + a.priceUsdc, 0);
+
   const reasoning =
     selected.length > 0
       ? `Selected ${selected.length} agents: ${selected.map((a) => a.name).join(', ')}. ` +
-        `Total estimated cost: ${selected.reduce((sum, a) => sum + a.priceUsdc, 0).toFixed(4)} USDC.`
+        `Total estimated cost: ${totalEstimate.toFixed(4)} USDC.`
       : 'No agents fit within budget.';
 
-  return { steps, reasoning };
+  return { steps, reasoning, cost: step0Cost };
 }
 
 // ─── Service ─────────────────────────────────────────────────
@@ -248,6 +258,58 @@ export const orchestrateService = {
       throw new ProtocolFeeError(
         `Protocol fee (${feeUsdc}) exceeds budget (${budget}) — check PROTOCOL_FEE_RATE env var.`,
       );
+    }
+
+    // WKH-127 (CD-9/CD-11/CD-15): el débito post-plan y el refund aplican SOLO al
+    // path master Agent Key SIN delegación/session. x402 → scopingKeyRow undefined
+    // → se salta TODO. Deleg/session debitan el step-0 en el middleware (no acá).
+    // `billingKeyRow` queda definido SOLO en el path master billable; gatear por él
+    // narrowea el row (sin non-null assertions, convención del codebase).
+    const billingKeyRow =
+      request.delegationContext || request.keySessionContext
+        ? undefined
+        : request.scopingKeyRow;
+
+    // WKH-127 (DT-1.1): early-fail sin gastar discovery/LLM si el caller master
+    // no tiene fondos. Solo path master (billingKeyRow); x402/deleg/session se saltan.
+    if (billingKeyRow && request.chainId !== undefined) {
+      const bal = await budgetService.getBalance(
+        billingKeyRow.id,
+        request.chainId,
+        billingKeyRow.owner_ref,
+      );
+      if (Number(bal) <= 0) {
+        const noFundsResult: OrchestrateResult = {
+          orchestrationId,
+          answer: null,
+          reasoning: 'Insufficient budget for orchestration',
+          pipeline: {
+            success: false,
+            output: null,
+            steps: [],
+            totalCostUsdc: 0,
+            totalLatencyMs: 0,
+          },
+          consideredAgents: [],
+          protocolFeeUsdc: 0,
+          remainingBudgetUsd: bal,
+        };
+
+        eventService
+          .track({
+            eventType: 'orchestrate_goal',
+            status: 'failed',
+            latencyMs: Date.now() - startTime,
+            costUsdc: 0,
+            goal,
+            metadata: { orchestrationId, agentCount: 0, fallback: false },
+          })
+          .catch((err) =>
+            console.error('[Orchestrate] event tracking failed:', err),
+          );
+
+        return noFundsResult;
+      }
     }
 
     // Step 1: Discover relevant agents
@@ -298,6 +360,11 @@ export const orchestrateService = {
     let steps: ComposeStep[];
     let reasoning: string;
     let usedFallback = false;
+    // WKH-127 (AC-1/AC-3, BLQ-ALTO-1): base del débito post-plan = precio del
+    // STEP-0 (reemplaza el placeholder $1 del middleware). NO la suma del plan:
+    // los steps 1..N los debita compose (guard i>0). Se asigna en cada rama que
+    // produce steps con el precio del primer step seleccionado.
+    let plannedCostUsd = 0;
 
     // AC8: Check if we still have time before compose
     const elapsedMs = Date.now() - startTime;
@@ -325,6 +392,7 @@ export const orchestrateService = {
         steps = fallback.steps;
         reasoning = `[FALLBACK] LLM selected agents not found in discovery. ${fallback.reasoning}`;
         usedFallback = true;
+        plannedCostUsd = fallback.cost;
       } else {
         // Verify budget
         let totalCost = 0;
@@ -345,6 +413,15 @@ export const orchestrateService = {
           passOutput: index > 0,
         }));
 
+        // WKH-127 (BLQ-ALTO-1): el débito post-plan del service cubre SOLO el
+        // step-0. Los steps 1..N los debita compose (guard i>0). Por eso la base
+        // del débito es el precio del primer agente budgeteado, NO `totalCost`
+        // (sumar el plan duplicaría 1..N → double-charge).
+        const step0Agent =
+          budgetedAgents.length > 0
+            ? discovered.agents.find((d) => d.slug === budgetedAgents[0].slug)
+            : undefined;
+        plannedCostUsd = step0Agent?.priceUsdc ?? 0;
         reasoning = plan.reasoning;
 
         if (validAgents.length > budgetedAgents.length) {
@@ -357,6 +434,7 @@ export const orchestrateService = {
       steps = fallback.steps;
       reasoning = `[FALLBACK] LLM planning failed. ${fallback.reasoning}`;
       usedFallback = true;
+      plannedCostUsd = fallback.cost;
     }
 
     if (steps.length === 0) {
@@ -398,6 +476,78 @@ export const orchestrateService = {
       throw new Error(
         `Orchestration timeout: discovery + planning took ${preComposeElapsed}ms (limit: ${PRE_COMPOSE_TIMEOUT_MS}ms)`,
       );
+    }
+
+    // WKH-127 (AC-4): plannedCost 0 (todos priceUsdc===0) → fallback $1 + warn + flag.
+    // El header x-debit-fallback lo setea el route leyendo result.debitFallback (CD-7).
+    let debitFallback = false;
+    if (billingKeyRow && plannedCostUsd === 0) {
+      console.warn('[orchestrate.price.fallback]', {
+        orchestrationId,
+        reason: 'registry-miss',
+      });
+      plannedCostUsd = 1.0;
+      debitFallback = true;
+    }
+
+    // WKH-127 (AC-1/AC-3, CD-11): débito post-plan del costo real. Sólo path master
+    // (billOnService); el middleware saltó el step-0 bajo skipMiddlewareDebit.
+    // `debitedUsd` es la ÚNICA fuente de verdad para el refund (AC-5/AC-6/AC-7).
+    let debitedUsd = 0;
+    if (billingKeyRow && request.chainId !== undefined) {
+      const debitRes = await budgetService.debit(
+        billingKeyRow.id,
+        request.chainId,
+        plannedCostUsd,
+      );
+      if (!debitRes.success) {
+        // Insufficient/owner mismatch → return graceful SIN ejecutar compose (§4.5).
+        const debitFailBal = await budgetService
+          .getBalance(
+            billingKeyRow.id,
+            request.chainId,
+            billingKeyRow.owner_ref,
+          )
+          .catch(() => undefined);
+        const debitFailResult: OrchestrateResult = {
+          orchestrationId,
+          answer: null,
+          reasoning: 'Insufficient budget for orchestration',
+          pipeline: {
+            success: false,
+            output: null,
+            steps: [],
+            totalCostUsdc: 0,
+            totalLatencyMs: 0,
+          },
+          consideredAgents: discovered.agents,
+          protocolFeeUsdc: 0,
+          ...(debitFallback && { debitFallback }),
+          ...(debitFailBal !== undefined && {
+            remainingBudgetUsd: debitFailBal,
+          }),
+        };
+
+        eventService
+          .track({
+            eventType: 'orchestrate_goal',
+            status: 'failed',
+            latencyMs: Date.now() - startTime,
+            costUsdc: 0,
+            goal,
+            metadata: {
+              orchestrationId,
+              agentCount: steps.length,
+              fallback: usedFallback,
+            },
+          })
+          .catch((err) =>
+            console.error('[Orchestrate] event tracking failed:', err),
+          );
+
+        return debitFailResult;
+      }
+      debitedUsd = plannedCostUsd; // ÚNICA fuente de verdad para el refund.
     }
 
     // Step 3: Execute pipeline. WKH-44 (AC-1): maxBudget deducido del fee.
@@ -481,6 +631,51 @@ export const orchestrateService = {
       // 'skipped' → no error, no txHash → ambos undefined (wallet unset).
     }
 
+    // WKH-127 (DT-3): credit-back post-compose. Solo master Agent Key (CD-9/CD-15:
+    // x402 y deleg/session no entran). CD-2: solo si el pipeline NO tuvo éxito —
+    // un pipeline exitoso NUNCA recibe refund (no revenue leak).
+    let refundError: boolean | undefined;
+    let remainingBudgetUsd: string | undefined;
+    if (billingKeyRow && request.chainId !== undefined) {
+      let refundUsd = 0;
+      if (!pipeline.success) {
+        if (pipeline.totalCostUsdc === 0) {
+          // AC-5 fallo total: el step-0 ni settleó → reembolsar el step-0 entero
+          // (debitedUsd = precio del step-0). Arregla el incidente original.
+          refundUsd = debitedUsd;
+        } else {
+          // AC-6 parcial (CD-14): si el step-0 settleó, totalCostUsdc ≥ debitedUsd
+          // (debitedUsd = precio del step-0, incluido en el costo real) → 0. No se
+          // reembolsa un step-0 ya entregado. Clamp a 0 por seguridad.
+          refundUsd = Math.max(0, debitedUsd - pipeline.totalCostUsdc);
+        }
+      }
+      if (refundUsd > 0) {
+        const creditRes = await budgetService.credit(
+          billingKeyRow.id,
+          request.chainId,
+          refundUsd,
+          billingKeyRow.owner_ref,
+        );
+        if (!creditRes.success) {
+          // AC-8: log estructurado + flag, sin msg crudo de PG (CD-6).
+          console.error('[orchestrate.refund-failed]', {
+            keyId: billingKeyRow.id,
+            chainId: request.chainId,
+            amountUsd: refundUsd,
+            orchestrationId,
+          });
+          refundError = true;
+        }
+      }
+
+      // WKH-127: saldo post-débito (y post-refund) real — se relee DESPUÉS del
+      // refund para reflejar el saldo final. El route lo escribe en el header.
+      remainingBudgetUsd = await budgetService
+        .getBalance(billingKeyRow.id, request.chainId, billingKeyRow.owner_ref)
+        .catch(() => undefined);
+    }
+
     const totalLatencyMs = Date.now() - startTime;
 
     // AC6: Track orchestrate_goal event (fire-and-forget)
@@ -512,6 +707,10 @@ export const orchestrateService = {
       // WKH-44: spread condicional — solo aparecen en el body si hay valor.
       ...(feeChargeError !== undefined && { feeChargeError }),
       ...(feeChargeTxHash !== undefined && { feeChargeTxHash }),
+      // WKH-127: refundError/debitFallback/remainingBudgetUsd condicionales.
+      ...(refundError !== undefined && { refundError }),
+      ...(debitFallback && { debitFallback }),
+      ...(remainingBudgetUsd !== undefined && { remainingBudgetUsd }),
     };
   },
 };

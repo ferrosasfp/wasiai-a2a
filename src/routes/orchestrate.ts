@@ -7,7 +7,7 @@
  */
 
 import crypto from 'node:crypto';
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import { createBackpressureHandler } from '../middleware/backpressure.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
@@ -21,6 +21,18 @@ type OrchestrateBody = {
   preferCapabilities?: string[];
   maxAgents?: number;
 };
+
+/**
+ * WKH-127 (CD-8): marca skip ANTES del middleware de débito. orchestrate debita
+ * el costo real post-plan en el service (Opción B); el middleware NO debe debitar
+ * el placeholder $1. El flag se respeta SOLO en el path master del middleware
+ * (deleg/session lo ignoran — CD-9).
+ */
+async function markSkipMiddlewareDebitHandler(
+  request: FastifyRequest,
+): Promise<void> {
+  request.skipMiddlewareDebit = true;
+}
 
 const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: OrchestrateBody }>(
@@ -51,6 +63,8 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         createTimeoutHandler(
           parseInt(process.env.TIMEOUT_ORCHESTRATE_MS ?? '120000', 10),
         ),
+        // WKH-127 (CD-8): marca skip ANTES del middleware de débito.
+        markSkipMiddlewareDebitHandler,
         ...requirePaymentOrA2AKey({
           description:
             'WasiAI Orchestration Service — Goal-based AI agent orchestration',
@@ -99,6 +113,16 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         // TD-WKH-61-2: la limpieza completa del mapeo `pipeline.success===false`
         // → 4xx queda fuera de scope; solo agregamos el branch SCOPE_DENIED.
         const status = result.pipeline.errorCode === 'SCOPE_DENIED' ? 403 : 200;
+        // WKH-127 (AC-4): el service decidió el fallback $1 → seteamos el header acá
+        // (el service no recibe reply, CD-7).
+        if (result.debitFallback) {
+          reply.header('x-debit-fallback', 'registry-miss');
+        }
+        // WKH-127: saldo post-débito (y post-refund) real — el middleware lo saltó
+        // bajo skipMiddlewareDebit, así que lo escribe el route con el valor del service.
+        if (result.remainingBudgetUsd !== undefined) {
+          reply.header('x-a2a-remaining-budget', result.remainingBudgetUsd);
+        }
         return reply.status(status).send({ kiteTxHash, ...result });
       } catch (err) {
         const message =
