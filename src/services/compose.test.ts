@@ -135,6 +135,7 @@ function mockFetchError(status: number) {
     ok: false,
     status,
     json: async () => ({ error: 'fail' }),
+    text: async () => '{"error":"fail"}',
   });
 }
 
