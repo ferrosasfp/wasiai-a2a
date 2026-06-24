@@ -18,6 +18,7 @@ vi.mock('./budget.js', () => ({
   budgetService: {
     debit: vi.fn(),
     credit: vi.fn(),
+    creditWithDest: vi.fn(), // WKH-129
     getBalance: vi.fn(),
     registerDeposit: vi.fn(),
   },
@@ -59,6 +60,7 @@ import { registryService } from './registry.js';
 const mockDownstream = vi.mocked(signAndSettleDownstream);
 const mockDebit = vi.mocked(budgetService.debit);
 const mockCredit = vi.mocked(budgetService.credit);
+const mockCreditWithDest = vi.mocked(budgetService.creditWithDest); // WKH-129
 
 function makeAgent(o: Partial<Agent> = {}): Agent {
   return {
@@ -150,6 +152,8 @@ beforeEach(() => {
   mockDebit.mockResolvedValue({ success: true });
   // WKH-128: default credit (refund) success.
   mockCredit.mockResolvedValue({ success: true });
+  // WKH-129: default credit-with-dest (refund) success.
+  mockCreditWithDest.mockResolvedValue({ success: true });
 });
 
 describe('composeService.invokeAgent', () => {
@@ -1203,10 +1207,51 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('Step 1 failed');
-    // se debitó el step 1 (0.05) y luego se reembolsó exactamente ese monto.
+    // WKH-129: se debitó el step 1 (0.05) vía debit_with_dest_policy (tenía destination)
+    // → se reembolsa vía creditWithDest con el MISMO destination canónico, MISMO monto.
     expect(mockDebit).toHaveBeenCalledTimes(1);
-    expect(mockCredit).toHaveBeenCalledTimes(1);
-    expect(mockCredit).toHaveBeenCalledWith('k1', 2368, 0.05, 'owner-test');
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
+    expect(mockCreditWithDest).toHaveBeenCalledWith(
+      'k1',
+      2368,
+      0.05,
+      'owner-test',
+      'test-registry/corridor', // normalizeDestination(`${registry}/${slug}`) del agente del step
+    );
+    // el path 4-arg (credit) NO se usa cuando hay destination.
+    expect(mockCredit).not.toHaveBeenCalled();
+  });
+
+  // WKH-129 (CD-10): invariante de no-pérdida — el refund per-step revierte EXACTAMENTE
+  // el monto debitado (ni más ni menos) y con el destination del débito.
+  it('T-COMPOSE-REFUND-DEST-2 refund amount equals debit amount for the same step', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk(); // step 0 OK
+    mockFetchError(502); // step 1 falla la invocación
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    // el monto debitado del step que falló == el monto refundado (3er arg de ambas calls).
+    const debitAmount = mockDebit.mock.calls[0][2];
+    const refundAmount = mockCreditWithDest.mock.calls[0][2];
+    expect(refundAmount).toBe(debitAmount);
+    expect(refundAmount).toBe(0.05);
+    // y mismo destination en débito (6º arg de debit) y refund (5º arg de creditWithDest).
+    expect(mockDebit.mock.calls[0][5]).toBe('test-registry/corridor');
+    expect(mockCreditWithDest.mock.calls[0][4]).toBe('test-registry/corridor');
   });
 
   // WKH-128: el step-0 NO lo debita compose (es del middleware/service), así que
@@ -1228,6 +1273,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     expect(result.success).toBe(false);
     expect(mockDebit).not.toHaveBeenCalled();
     expect(mockCredit).not.toHaveBeenCalled();
+    expect(mockCreditWithDest).not.toHaveBeenCalled(); // WKH-129
   });
 
   // WKH-128: bajo delegación, el refund per-step NO aplica (revertir contadores
@@ -1261,6 +1307,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
 
     expect(result.success).toBe(false);
     expect(mockCredit).not.toHaveBeenCalled();
+    expect(mockCreditWithDest).not.toHaveBeenCalled(); // WKH-129
   });
 
   // WKH-101 T8b (AC-8 MULTI-STEP): under delegation, the per-step debit routes
