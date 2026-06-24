@@ -53,7 +53,7 @@ curl -X POST $A2A_BASE/auth/deposit \
   -d '{"key_id":"<key_id>","tx_hash":"0x...","chain_id":43113}'
 # -> { "balance": "1", "chain_id": 43113 }
 ```
-Con escrow verificamos: status success, chainId match, confirmaciones (Avax 3 / Base 1 / Kite 1), evento `Deposited(keyId, from, amount)` del contrato con `keyId` esperado y `from==tu funding wallet`, anti-replay. Solo entonces acreditamos `budget[chainId]` con el monto real on-chain. (En modo treasury se valida el `Transfer` con `to==treasury` en vez del evento `Deposited`.)
+Con escrow verificamos: status success, chainId match, confirmaciones (Avax 3 / Base 1 / Kite 1), evento `Deposited(depositor, keyId, amount)` del contrato (depositor y keyId indexados) con `keyId` esperado y `depositor==tu funding wallet`, anti-replay. Solo entonces acreditamos `budget[chainId]` con el monto real on-chain. (En modo treasury se valida el `Transfer` con `to==treasury` en vez del evento `Deposited`.)
 
 ### 5. Usar el saldo
 ```bash
