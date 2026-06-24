@@ -2281,3 +2281,136 @@ describe('requirePaymentOrA2AKey — signed auth (WKH-123)', () => {
     expect(mockDebit).not.toHaveBeenCalled();
   });
 });
+
+// ── WKH-127: skipMiddlewareDebit — master skip, deleg ignora el flag ──
+describe('requirePaymentOrA2AKey — WKH-127 skipMiddlewareDebit', () => {
+  let appS: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    appS = Fastify();
+
+    // Ruta master CON skipMiddlewareDebit=true (simula orchestrate).
+    appS.post(
+      '/test-skip',
+      {
+        preHandler: [
+          async (req: FastifyRequest) => {
+            req.skipMiddlewareDebit = true;
+          },
+          ...requirePaymentOrA2AKey({ description: 'orchestrate-like skip' }),
+        ],
+      },
+      async (req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({
+          ok: true,
+          a2aKeyId: req.a2aKeyRow?.id ?? null,
+          resolvedChainId: req.resolvedChainId ?? null,
+        }),
+    );
+
+    // Ruta master SIN flag — debita el placeholder $1 como hoy.
+    appS.post(
+      '/test-no-skip',
+      {
+        preHandler: requirePaymentOrA2AKey({ description: 'legacy master' }),
+      },
+      async (_req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ ok: true }),
+    );
+
+    // Ruta delegación CON el flag seteado — debe IGNORARLO (CD-9).
+    appS.post(
+      '/test-skip-deleg',
+      {
+        preHandler: [
+          async (req: FastifyRequest) => {
+            req.skipMiddlewareDebit = true;
+          },
+          ...requirePaymentOrA2AKey({ description: 'deleg ignores skip' }),
+        ],
+      },
+      async (req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({
+          ok: true,
+          hasDelegationContext: req.delegationContext !== undefined,
+        }),
+    );
+
+    await appS.ready();
+  });
+
+  afterAll(() => appS.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMockRegistryState(['kite-ozone-testnet'], 'kite-ozone-testnet');
+    mockReceiptEmit.mockResolvedValue(undefined);
+    mockExceedsPerTx.mockReturnValue(false);
+  });
+
+  // T-MW-SKIP-on: master + skip flag → no middleware debit; a2aKeyRow + chainId augmented.
+  it('T-MW-SKIP-on: skip flag suppresses the master debit but still augments request', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+    const res = await appS.inject({
+      method: 'POST',
+      url: '/test-skip',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.a2aKeyId).toBe(TEST_KEY_ID);
+    expect(body.resolvedChainId).toBe(2368);
+    // débito step-0 NO ocurre en el middleware bajo skip.
+    expect(mockDebit).not.toHaveBeenCalled();
+    // header lo setea el route handler (no el middleware) bajo skip.
+    expect(res.headers['x-a2a-remaining-budget']).toBeUndefined();
+  });
+
+  // T-MW-SKIP-off: master without flag → debits $1 as today.
+  it('T-MW-SKIP-off: without the flag the master debit runs as today', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('9.000000');
+
+    const res = await appS.inject({
+      method: 'POST',
+      url: '/test-no-skip',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    expect(res.headers['x-a2a-remaining-budget']).toBe('9.000000');
+  });
+
+  // T-MW-SKIP-deleg-ignored: delegation branch IGNORES the flag → step-0 debits in middleware.
+  it('T-MW-SKIP-deleg-ignored: delegation path ignores the skip flag', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+    mockDebitDelegation.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('49.00');
+
+    const res = await appS.inject({
+      method: 'POST',
+      url: '/test-skip-deleg',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().hasDelegationContext).toBe(true);
+    // step-0 debit STILL happens in the middleware via the delegation RPC.
+    expect(mockDebitDelegation).toHaveBeenCalledWith(
+      'del-1',
+      'user-1',
+      TEST_KEY_ID,
+      2368,
+      1.0,
+    );
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+});

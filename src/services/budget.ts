@@ -326,6 +326,46 @@ export const budgetService = {
   },
 
   /**
+   * WKH-127 (AC-5/AC-6): credit-back atómico — refund del débito step-0 de
+   * /orchestrate cuando el pipeline falla. Espejo INVERSO de la ruta master de
+   * debit(): llama la RPC refund_a2a_key_spend (FOR UPDATE + ownership guard).
+   * CD-10: ownerRef explícito (string, NO undefined) — el caller orchestrate ya
+   * lo tiene en scopingKeyRow.owner_ref → evita el SELECT cold-path de debit().
+   */
+  async credit(
+    keyId: string,
+    chainId: number,
+    amountUsd: number,
+    ownerRef: string,
+  ): Promise<{ success: boolean; error?: string }> {
+    const { error } = await supabase.rpc('refund_a2a_key_spend', {
+      p_key_id: keyId,
+      p_chain_id: chainId,
+      p_amount_usd: amountUsd,
+      p_owner_ref: ownerRef, // CD-4: ownership guard DB-level
+    });
+
+    if (error) {
+      // CD-6: no propagar msg crudo de PG al cliente.
+      if (error.message.includes('OWNERSHIP_MISMATCH')) {
+        return { success: false, error: 'OWNERSHIP_MISMATCH' };
+      }
+      if (error.message.includes('KEY_NOT_FOUND')) {
+        return { success: false, error: 'KEY_NOT_FOUND' };
+      }
+      console.error('[budget] refund failed', {
+        keyId,
+        chainId,
+        amountUsd,
+        err: error.message,
+      });
+      return { success: false, error: 'REFUND_FAILED' };
+    }
+
+    return { success: true };
+  },
+
+  /**
    * Register a deposit: atomically increment budget for a chain (WKH-35 v2).
    * Uses Postgres function register_a2a_key_deposit v2 with FOR UPDATE +
    * UNIQUE(chain_id, tx_hash) for atomic anti-replay (CD-2) and a DB-level
