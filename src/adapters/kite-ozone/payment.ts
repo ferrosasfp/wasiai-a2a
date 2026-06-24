@@ -75,6 +75,18 @@ function getFacilitatorUrl(): string {
     : KITE_FACILITATOR_DEFAULT_URL;
 }
 
+// El facilitator propio (wasiai-facilitator) EXIGE `Authorization: Bearer <key>`
+// en /verify y /settle (requireFacilitatorKey). Espejo de base/avalanche
+// (WKH-106/107): KITE_ override → FACILITATOR_API_KEY genérico → sin header
+// (degradación segura para el facilitator de Pieverse, que no lo pide).
+function getFacilitatorApiKey(): string | undefined {
+  return (
+    process.env.KITE_FACILITATOR_API_KEY?.trim() ||
+    process.env.FACILITATOR_API_KEY?.trim() ||
+    undefined
+  );
+}
+
 // ── Defaults for env-driven configuration (CD-1: no hardcoded addresses in logic) ──
 //
 // Testnet defaults (chainId 2368): PYUSD — el path histórico WKH-29.
@@ -474,11 +486,16 @@ async function verifyX402(proof: X402Proof): Promise<VerifyResult> {
     proof.signature,
     proof.paymentRequirements,
   );
+  const verifyHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  const verifyApiKey = getFacilitatorApiKey();
+  if (verifyApiKey) verifyHeaders.Authorization = `Bearer ${verifyApiKey}`;
   let response: Response;
   try {
     response = await fetch(`${facilitatorUrl}/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: verifyHeaders,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(X402_FACILITATOR_TIMEOUT_MS),
     });
@@ -511,11 +528,16 @@ async function settleX402(req: SettleRequest): Promise<SettleResult> {
     req.signature,
     req.paymentRequirements,
   );
+  const settleHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  const settleApiKey = getFacilitatorApiKey();
+  if (settleApiKey) settleHeaders.Authorization = `Bearer ${settleApiKey}`;
   let response: Response;
   try {
     response = await fetch(`${facilitatorUrl}/settle`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: settleHeaders,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(X402_FACILITATOR_TIMEOUT_MS),
     });
