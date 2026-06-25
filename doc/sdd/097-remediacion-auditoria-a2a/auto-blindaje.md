@@ -31,3 +31,41 @@
   Los 9 archivos in-scope pasan `biome check` con 0 errores. No expandí scope para arreglar el resto.
 - TODOs (AC-7 sub-punto): `grep -rn "TODO\|FIXME\|XXX" src/` → 0 marcadores reales accionables;
   solo la palabra española "TODOS" en JSDoc (`registries.ts`, `price.ts`). No-op, no se tocó.
+
+### [2026-06-24 19:42] Wave 2b — `CREATE OR REPLACE FUNCTION` no puede cambiar el tipo de retorno
+- **Error**: las RPC `refund_a2a_key_spend`/`refund_with_dest_policy` pasaban de
+  `RETURNS void` a `RETURNS INT` (item A2). Un `CREATE OR REPLACE FUNCTION` directo
+  con distinto return type falla en Postgres (`cannot change return type of existing function`).
+- **Causa raíz**: Postgres trata el return type como parte de la identidad de la función;
+  `OR REPLACE` solo permite cambiar el cuerpo, no la firma de retorno.
+- **Fix**: `DROP FUNCTION IF EXISTS <firma exacta>` ANTES del `CREATE FUNCTION` con el nuevo
+  `RETURNS INT`. El down hace lo simétrico para restaurar `RETURNS void`.
+- **Aplicar en**: cualquier migración que cambie el tipo de retorno de una RPC existente —
+  siempre DROP+CREATE, nunca OR REPLACE.
+
+### [2026-06-24 19:42] Wave 2b — default mock de `creditWithDest` en compose.test sin `reverted` rompía el retry
+- **Error**: al gatear el re-debit del retry adaptativo en `creditRes.reverted === true`,
+  el default mock `mockCreditWithDest.mockResolvedValue({ success: true })` (sin `reverted`)
+  hacía que el gate evaluara `undefined === true` → false → el retry NO re-debitaba → el test
+  M3 (espera 2 débitos) habría fallado.
+- **Causa raíz**: agregué un campo nuevo (`reverted`) al contrato del service pero el fixture
+  default de los tests existentes no lo proveía. El gate estricto (`=== true`) lo trataba como
+  no-revertido.
+- **Fix**: actualicé el default mock a `{ success: true, reverted: true }` en `beforeEach`
+  (mockCredit y mockCreditWithDest). Los tests A2 nuevos overridean con `reverted: false`.
+- **Aplicar en**: al ampliar el shape de retorno de un service mockeado, actualizar SIEMPRE el
+  default `mockResolvedValue` del fixture, no solo los tests nuevos.
+
+### [2026-06-24 19:42] Wave 2b — supabase real (localhost:54321) en tests de middleware x402
+- **Error**: el nuevo INSERT anti-replay en `x402.ts` invoca `supabase.from('a2a_x402_nonces')`.
+  Los tests de middleware x402 (binding/chain-aware/...) NO mockeaban supabase → pegaban al
+  cliente real apuntando a `localhost:54321` (inalcanzable en CI).
+- **Causa raíz**: esos tests nacieron sin tocar la DB; mi cambio agregó una dependencia de DB
+  en el hot path del middleware. El fail-open conservador salvó el verde (connection-refused
+  → `unavailable` → settle procede), pero dependía de un side-effect frágil.
+- **Fix**: agregué un `vi.mock('../lib/supabase.js')` determinista en `x402.binding.test.ts`
+  (`mockNonceInsert` drive fresh/replay/db-error) y 3 tests M1 explícitos (fresh→settle,
+  replay→402 sin settle, db-error→fail-open→settle). Los otros 3 archivos x402 siguen verdes
+  por el fail-open (connection-refused rápido, no cuelga).
+- **Aplicar en**: al introducir una dependencia de DB en un middleware ya cubierto por tests,
+  mockear supabase explícitamente en esos archivos en vez de depender del connection-refused.

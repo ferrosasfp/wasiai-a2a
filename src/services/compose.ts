@@ -303,16 +303,26 @@ export const composeService = {
             scopingKeyRow.owner_ref,
             stepDestination,
           );
-          if (!creditRes.success) {
+          // A2 (audit 2026-06-24): el re-debit del retry adaptativo SOLO procede
+          // si el refund REVIRTIÓ DE VERDAD. `creditWithDest` ahora devuelve
+          // `success:true` únicamente cuando la RPC afectó >=1 fila (reversión
+          // real del dest-cap). Si afectó 0 filas (p. ej. mismatch de destino →
+          // la fila compensatoria no se insertó), devuelve `success:false` /
+          // `reverted:false` → NO re-debitamos (queda 1 solo débito = peor caso
+          // pre-WKH-130, nunca doble consumo del dest-cap).
+          const reverted = creditRes.reverted === true && creditRes.success;
+          if (!reverted) {
             console.error('[compose.refund-failed]', {
               keyId: scopingKeyRow.id,
               chainId,
               amountUsd: stepDebitedUsd,
               destination: stepDestination,
               step: i,
+              reverted: creditRes.reverted ?? false,
+              error: creditRes.error,
             });
           }
-          return creditRes.success;
+          return reverted;
         };
 
         // ── PASO 2 (pre-evaluado): ¿hay field-errors parseables? Solo path

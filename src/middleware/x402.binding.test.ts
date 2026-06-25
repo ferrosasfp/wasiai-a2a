@@ -102,6 +102,17 @@ const mockGetPaymentAdapter = vi.fn((chainKey?: string) => {
   return kiteAdapter;
 });
 
+// M1 (audit 2026-06-24): the middleware now records the inbound x402 nonce via
+// supabase before settle(). Mock it so the anti-replay path is deterministic
+// (no real localhost:54321 round-trip). `mockNonceInsert` drives fresh/replay.
+const mockNonceInsert = vi.fn().mockResolvedValue({ data: null, error: null });
+vi.mock('../lib/supabase.js', () => ({
+  supabase: {
+    from: vi.fn(() => ({ insert: (...a: unknown[]) => mockNonceInsert(...a) })),
+    rpc: vi.fn(),
+  },
+}));
+
 vi.mock('../adapters/registry.js', () => ({
   getPaymentAdapter: (chainKey?: string) => mockGetPaymentAdapter(chainKey),
   getAdaptersBundle: (chainKey?: string) => {
@@ -154,6 +165,7 @@ describe('x402 middleware — inbound binding (WKH-SEC-03)', () => {
     mockKiteSettle.mockResolvedValue({ txHash: '0xdeadbeef', success: true });
     mockAvaxVerify.mockResolvedValue({ valid: true });
     mockAvaxSettle.mockResolvedValue({ txHash: '0xa00a', success: true });
+    mockNonceInsert.mockResolvedValue({ data: null, error: null });
     process.env.KITE_WALLET_ADDRESS = SERVER_WALLET;
   });
 
@@ -232,6 +244,88 @@ describe('x402 middleware — inbound binding (WKH-SEC-03)', () => {
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ paid: true });
       expect(mockBaseVerify).toHaveBeenCalledTimes(1);
+      expect(mockBaseSettle).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── M1 (audit 2026-06-24): x402 INBOUND anti-replay ──
+
+  // Nonce nuevo (insert sin error) → settle se ejecuta. El INSERT registra el
+  // nonce con el network del adapter (eip155:84532 para base-sepolia).
+  it('M1: fresh nonce → records (network,nonce) and proceeds to settle', async () => {
+    const app = buildApp();
+    await app.ready();
+    try {
+      const { headers } = buildEoaPaymentHeader({
+        to: SERVER_WALLET,
+        value: '1000000',
+      });
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { ...headers, 'x-payment-chain': 'base-sepolia' },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(200);
+      expect(mockNonceInsert).toHaveBeenCalledTimes(1);
+      expect(mockNonceInsert.mock.calls[0][0]).toMatchObject({
+        network: 'eip155:84532',
+      });
+      expect(mockBaseSettle).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  // Nonce repetido (insert choca con 23505) → 402 X402_REPLAY, settle NO se llama.
+  it('M1: replayed nonce (23505) → 402 and settle NOT called', async () => {
+    mockNonceInsert.mockResolvedValue({
+      data: null,
+      error: { code: '23505', message: 'dup' },
+    });
+    const app = buildApp();
+    await app.ready();
+    try {
+      const { headers } = buildEoaPaymentHeader({
+        to: SERVER_WALLET,
+        value: '1000000',
+      });
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { ...headers, 'x-payment-chain': 'base-sepolia' },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(402);
+      expect(mockBaseSettle).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  // DB down (insert error no-23505) → fail-open CONSERVADOR: settle SÍ se ejecuta
+  // (el nonce EIP-3009 on-chain sigue siendo single-use; esto es defensa en prof.).
+  it('M1: nonce DB error (non-23505) → fail-open, settle still runs', async () => {
+    mockNonceInsert.mockResolvedValue({
+      data: null,
+      error: { code: '500', message: 'db down' },
+    });
+    const app = buildApp();
+    await app.ready();
+    try {
+      const { headers } = buildEoaPaymentHeader({
+        to: SERVER_WALLET,
+        value: '1000000',
+      });
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { ...headers, 'x-payment-chain': 'base-sepolia' },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(200);
       expect(mockBaseSettle).toHaveBeenCalledTimes(1);
     } finally {
       await app.close();

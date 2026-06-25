@@ -162,9 +162,11 @@ beforeEach(() => {
   // WKH-59: default debit success (each per-step debit test overrides).
   mockDebit.mockResolvedValue({ success: true });
   // WKH-128: default credit (refund) success.
-  mockCredit.mockResolvedValue({ success: true });
-  // WKH-129: default credit-with-dest (refund) success.
-  mockCreditWithDest.mockResolvedValue({ success: true });
+  // A2 (audit 2026-06-24): `reverted:true` = la RPC afectó >=1 fila (reversión
+  // real). El retry adaptativo SOLO re-debita si el refund#1 revirtió de verdad.
+  mockCredit.mockResolvedValue({ success: true, reverted: true });
+  // WKH-129: default credit-with-dest (refund) success + reverted real.
+  mockCreditWithDest.mockResolvedValue({ success: true, reverted: true });
   // WKH-130: default regen = null (no retry) salvo override por test.
   mockRegen.mockResolvedValue(null);
 });
@@ -1380,6 +1382,46 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     for (const call of mockCreditWithDest.mock.calls) {
       expect(call[4]).toBe('test-registry/corridor');
     }
+  });
+
+  // A2 (audit 2026-06-24): si el refund#1 NO revirtió de verdad (la RPC afectó 0
+  // filas → `reverted:false`), el retry adaptativo NO debe re-debitar. Asegura que
+  // hay UN SOLO débito (el original), nunca un segundo: evita el doble consumo del
+  // dest-cap. El step falla con el error original.
+  it('A2 adaptive retry does NOT re-debit when refund#1 did not revert (reverted:false)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk(); // step 0 OK
+    // step 1 falla con field-errors → sería elegible para retry.
+    mockFetchError(400, '{"error":"missing required field: amount"}');
+    // LLM regeneraría input (el retry path estaría habilitado SI el refund hubiera
+    // revertido). No debe llegar a re-invocar.
+    mockRegen.mockResolvedValue({ amount: 100 });
+    // El refund#1 corre pero NO revierte (0 filas → reverted:false).
+    mockCreditWithDest.mockResolvedValue({
+      success: false,
+      error: 'REFUND_NOT_REVERTED',
+      reverted: false,
+    });
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    // UN SOLO débito (el original del step 1). NUNCA un segundo (re-debit del retry).
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    // El LLM no debió siquiera invocarse (el gate refund1ok corta antes).
+    expect(mockRegen).not.toHaveBeenCalled();
   });
 
   // WKH-128: el step-0 NO lo debita compose (es del middleware/service), así que

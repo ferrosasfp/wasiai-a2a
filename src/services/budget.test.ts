@@ -859,7 +859,9 @@ describe('budgetService', () => {
     // T-NOREG-CREDIT (AC-7): credit 4-arg sigue llamando refund_a2a_key_spend,
     // NO refund_with_dest_policy. Back-compat de orchestrate step-0 intacto.
     it('T-NOREG-CREDIT credit 4-arg still calls refund_a2a_key_spend (AC-7)', async () => {
-      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+      // A2 (audit 2026-06-24): la RPC ahora devuelve el nº de filas revertidas.
+      // >=1 → reversión real → success.
+      mockRpc.mockResolvedValue({ data: 1, error: null } as never);
 
       const result = await budgetService.credit('k1', 84532, 0.05, 'owner');
 
@@ -873,7 +875,22 @@ describe('budgetService', () => {
         'refund_with_dest_policy',
         expect.anything(),
       );
-      expect(result).toEqual({ success: true });
+      expect(result).toEqual({ success: true, reverted: true });
+    });
+
+    // A2 (audit 2026-06-24): refund que afecta 0 filas → success:false / reverted:false.
+    it('A2: credit with 0 rows affected → success:false, reverted:false', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockRpc.mockResolvedValue({ data: 0, error: null } as never);
+
+      const result = await budgetService.credit('k1', 84532, 0.05, 'owner');
+
+      expect(result).toEqual({
+        success: false,
+        error: 'REFUND_NOT_REVERTED',
+        reverted: false,
+      });
+      errSpy.mockRestore();
     });
 
     // ── Audit 2026-06-24 (P2-8): credit() error-path mapping ─────
@@ -930,7 +947,8 @@ describe('budgetService', () => {
     // T-CWD-1 (AC-1/AC-2): invoca refund_with_dest_policy con los 5 params snake_case
     // exactos; RPC sin error → { success: true }.
     it('T-CWD-1 calls refund_with_dest_policy with 5 params and returns success (AC-1/AC-2)', async () => {
-      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+      // A2 (audit 2026-06-24): RPC devuelve nº de filas revertidas; >=1 → success.
+      mockRpc.mockResolvedValue({ data: 1, error: null } as never);
 
       const result = await budgetService.creditWithDest(
         'k1',
@@ -947,7 +965,34 @@ describe('budgetService', () => {
         p_owner_ref: 'owner',
         p_destination: 'wasiai/corridor',
       });
-      expect(result).toEqual({ success: true });
+      expect(result).toEqual({ success: true, reverted: true });
+    });
+
+    // A2 (audit 2026-06-24): refund-with-dest que afecta 0 filas (p. ej. mismatch
+    // de destino → la fila compensatoria del dest-cap NO se insertó) →
+    // success:false / reverted:false. El retry adaptativo NO debe re-debitar.
+    it('A2: creditWithDest with 0 rows affected → success:false, reverted:false', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      mockRpc.mockResolvedValue({ data: 0, error: null } as never);
+
+      const result = await budgetService.creditWithDest(
+        'k1',
+        84532,
+        0.05,
+        'owner',
+        'wasiai/corridor',
+      );
+
+      expect(result).toEqual({
+        success: false,
+        error: 'REFUND_NOT_REVERTED',
+        reverted: false,
+      });
+      expect(errSpy).toHaveBeenCalledWith(
+        '[budget] refund-with-dest NOT reverted (0 rows)',
+        expect.objectContaining({ destination: 'wasiai/corridor' }),
+      );
+      errSpy.mockRestore();
     });
 
     // T-CWD-2 (AC-3): RPC OWNERSHIP_MISMATCH → no propaga el msg crudo de PG.

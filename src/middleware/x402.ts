@@ -16,6 +16,7 @@ import {
   getPaymentAdapter,
 } from '../adapters/registry.js';
 import type { ChainKey } from '../adapters/types.js';
+import { checkAndRecordX402Nonce } from '../services/x402-nonce.js';
 import type {
   X402PaymentPayload,
   X402PaymentRequest,
@@ -311,6 +312,41 @@ export function requirePayment(
             `Payment verification failed: ${verifyResult.error ?? 'unknown reason'}`,
           ),
         );
+    // ── M1 (audit 2026-06-24): anti-replay INBOUND local ──
+    // Defensa en profundidad SOBRE el nonce on-chain EIP-3009: registramos el
+    // (network, authorization.nonce) ANTES de settle(). Si ya lo vimos → replay
+    // → rechazar con código estable X402_REPLAY (402). El `network` es el del
+    // adapter resuelto (estable, chain-specific), NO el del body. Fail-open
+    // CONSERVADOR ante DB-down (ver x402-nonce.ts): el nonce EIP-3009 ya es
+    // single-use a nivel token, así que esto nunca es la única defensa.
+    const inboundNonce = (paymentPayload.authorization as { nonce?: unknown })
+      .nonce;
+    if (typeof inboundNonce === 'string' && inboundNonce.length > 0) {
+      const nonceNetwork = getPaymentAdapter(chainKey).getNetwork();
+      const nonceResult = await checkAndRecordX402Nonce(
+        nonceNetwork,
+        inboundNonce,
+      );
+      if (reply.sent) return;
+      if (nonceResult.kind === 'replay') {
+        request.log.warn(
+          { error_code: 'X402_REPLAY', network: nonceNetwork },
+          'x402 inbound payment rejected: nonce replay (seen before)',
+        );
+        return reply
+          .status(402)
+          .send(
+            await buildX402Response(
+              opts,
+              resource,
+              chainKey,
+              'Payment rejected: authorization nonce already used (replay)',
+            ),
+          );
+      }
+      // 'fresh' → seguimos. 'unavailable' → fail-open (ya logueado en el service).
+    }
+
     let settleResult: { txHash: string; success: boolean; error?: string };
     try {
       settleResult = await getPaymentAdapter(chainKey).settle({

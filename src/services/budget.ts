@@ -359,8 +359,8 @@ export const budgetService = {
     chainId: number,
     amountUsd: number,
     ownerRef: string,
-  ): Promise<{ success: boolean; error?: string }> {
-    const { error } = await supabase.rpc('refund_a2a_key_spend', {
+  ): Promise<{ success: boolean; error?: string; reverted?: boolean }> {
+    const { data, error } = await supabase.rpc('refund_a2a_key_spend', {
       p_key_id: keyId,
       p_chain_id: chainId,
       p_amount_usd: amountUsd,
@@ -384,7 +384,17 @@ export const budgetService = {
       return { success: false, error: 'REFUND_FAILED' };
     }
 
-    return { success: true };
+    // A2 (audit 2026-06-24): la RPC ahora devuelve el nº de filas revertidas.
+    // 0 filas ⟹ el refund NO revirtió nada (no-op defensivo: amount <= 0). El
+    // caller (retry adaptativo de compose) NO debe re-debitar si esto es false,
+    // para no consumir budget dos veces. `success:true` + `reverted:true` solo
+    // cuando la reversión fue real (>=1 fila).
+    const reverted = typeof data === 'number' && data >= 1;
+    if (!reverted) {
+      return { success: false, error: 'REFUND_NOT_REVERTED', reverted: false };
+    }
+
+    return { success: true, reverted: true };
   },
 
   /**
@@ -402,8 +412,8 @@ export const budgetService = {
     amountUsd: number,
     ownerRef: string,
     destination: string,
-  ): Promise<{ success: boolean; error?: string }> {
-    const { error } = await supabase.rpc('refund_with_dest_policy', {
+  ): Promise<{ success: boolean; error?: string; reverted?: boolean }> {
+    const { data, error } = await supabase.rpc('refund_with_dest_policy', {
       p_key_id: keyId,
       p_chain_id: chainId,
       p_amount_usd: amountUsd,
@@ -429,7 +439,24 @@ export const budgetService = {
       return { success: false, error: 'REFUND_FAILED' };
     }
 
-    return { success: true };
+    // A2 (audit 2026-06-24): la RPC devuelve el nº de filas que efectivamente
+    // revirtieron el dest-cap (ROW_COUNT del INSERT compensatorio en el ledger;
+    // o del UPDATE del budget cuando NO hay política para el destino). 0 filas
+    // ⟹ NO se revirtió el headroom del cap por destino (p. ej. mismatch de
+    // destino → la fila compensatoria no se insertó). El retry adaptativo NO
+    // debe re-debitar en ese caso: re-debitar consumiría el dest-cap dos veces.
+    const reverted = typeof data === 'number' && data >= 1;
+    if (!reverted) {
+      console.error('[budget] refund-with-dest NOT reverted (0 rows)', {
+        keyId,
+        chainId,
+        amountUsd,
+        destination,
+      });
+      return { success: false, error: 'REFUND_NOT_REVERTED', reverted: false };
+    }
+
+    return { success: true, reverted: true };
   },
 
   /**
