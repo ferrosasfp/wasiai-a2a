@@ -1302,6 +1302,31 @@ describe('discover — reputation enrichment (WKH-103)', () => {
     expect(result.agents[0].slug).toBe('no-score');
   });
 
+  // B5 (audit 2026-06-24): un agente con reputation no numérica/ausente
+  // (Number(undefined)=NaN) NO debe romper el sort. `?? 0` no captura NaN;
+  // Number.isFinite sí → ese agente ordena como 0, detrás del que sí tiene rep.
+  it('B5: agent with non-numeric/absent reputation sorts as 0 without breaking the sort', async () => {
+    setupRegistryResponse([
+      // reputation ausente → mapAgent hace Number(undefined) = NaN
+      makeRawAgent({ id: 'a1', slug: 'nan-rep', reputation: undefined }),
+      makeRawAgent({ id: 'a2', slug: 'real-rep', reputation: 50 }),
+      // reputation string no parseable → NaN también
+      makeRawAgent({ id: 'a3', slug: 'str-rep', reputation: 'high' }),
+    ]);
+    setReputationBatch([]); // sin computed scores → cae al upstream reputation
+
+    const result = await discoveryService.discover({});
+
+    // El agente con reputation real (50) queda primero; los NaN ordenan como 0.
+    expect(result.agents[0].slug).toBe('real-rep');
+    // El sort no rompe: los 3 agentes están presentes.
+    expect(result.agents.map((a) => a.slug).sort()).toEqual([
+      'nan-rep',
+      'real-rep',
+      'str-rep',
+    ]);
+  });
+
   // T-AC4: batch throws → discover responds without the field, no 5xx.
   it('T-AC4: computeReputationBatch throwing does not break discover', async () => {
     setupRegistryResponse([

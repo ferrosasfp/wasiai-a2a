@@ -203,9 +203,11 @@ describe('budgetService', () => {
 
       const result = await budgetService.debit('key-1', 2368, 2);
 
+      // M5 (audit 2026-06-24): el msg crudo de PG NO se propaga — se mapea al
+      // código estable DAILY_LIMIT (espejo de la ruta dest-policy).
       expect(result).toEqual({
         success: false,
-        error: 'DAILY_LIMIT: daily spend would be 9 + 2 = 11, limit is 10',
+        error: 'DAILY_LIMIT',
       });
     });
 
@@ -220,10 +222,42 @@ describe('budgetService', () => {
 
       const result = await budgetService.debit('key-1', 2368, 5);
 
+      // M5 (audit 2026-06-24): el msg crudo de PG NO se propaga — se mapea al
+      // código estable AGENT_KEY_BUDGET_EXHAUSTED (espejo de la ruta dest-policy).
       expect(result).toEqual({
         success: false,
-        error: 'INSUFFICIENT_BUDGET: chain 2368 balance is 1, requested 5',
+        error: 'AGENT_KEY_BUDGET_EXHAUSTED',
       });
+    });
+
+    // M5 (audit 2026-06-24): un error PG genérico/inesperado en la ruta master
+    // NO debe filtrar el msg crudo (info disclosure) → código estable
+    // DEBIT_FAILED + log server-side. Espejo de la ruta dest-policy.
+    it('master debit maps a generic Postgres error to DEBIT_FAILED, never the raw message (M5)', async () => {
+      mockOwnerSelect('user-1');
+      const rawPgMsg =
+        'duplicate key value violates unique constraint "a2a_spend_pkey" DETAIL: Key (id)=(abc) already exists.';
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: rawPgMsg },
+      } as never);
+      const consoleSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+
+      const result = await budgetService.debit('key-1', 2368, 1);
+
+      expect(result).toEqual({ success: false, error: 'DEBIT_FAILED' });
+      // El msg crudo NUNCA llega al caller.
+      expect(JSON.stringify(result)).not.toContain('constraint');
+      expect(JSON.stringify(result)).not.toContain('a2a_spend_pkey');
+      // El detalle SÍ se loguea server-side.
+      expect(consoleSpy).toHaveBeenCalledWith(
+        '[budget] master debit failed',
+        expect.objectContaining({ detail: rawPgMsg }),
+      );
+
+      consoleSpy.mockRestore();
     });
 
     // ── WKH-101 (DT-11): delegation-aware debit ──────────────

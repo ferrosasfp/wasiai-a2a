@@ -4,6 +4,7 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';
@@ -115,7 +116,7 @@ async function resolveComposePriceHandler(
         'compose-price.fallback',
       );
       reply.header('x-debit-fallback', 'registry-miss');
-      request.composeEstimatedCostUsd = 1.0;
+      request.composeEstimatedCostUsd = PLACEHOLDER_FEE_USD;
       // WKH-125: el destino del step-0 (el middleware no lee body, CD-7).
       request.composeDestination = composeDestination;
       return;

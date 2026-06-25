@@ -50,6 +50,20 @@ describe('error-boundary middleware', () => {
       throw err;
     });
 
+    // B8: error carrying code + statusCode + retryAfterMs (exercises the
+    // `in`-narrowing read of extra props in toAppError).
+    app.get('/throw-rate-limit', async () => {
+      const err = new Error('Slow down') as Error & {
+        code: string;
+        statusCode: number;
+        retryAfterMs: number;
+      };
+      err.code = 'RATE_LIMITED';
+      err.statusCode = 429;
+      err.retryAfterMs = 1500;
+      throw err;
+    });
+
     await app.ready();
   });
 
@@ -106,6 +120,32 @@ describe('error-boundary middleware', () => {
   });
 
   // ── AC-4: Validation errors ───────────────────────────────────
+
+  // ── B8 (audit 2026-06-24): narrowing seguro de campos extra ──────
+
+  it('B8: plain Error without statusCode → 500 INTERNAL_ERROR (no extra fields leak)', async () => {
+    const response = await app.inject({ method: 'GET', url: '/throw-generic' });
+
+    expect(response.statusCode).toBe(500);
+    const body = response.json();
+    expect(body.code).toBe('INTERNAL_ERROR');
+    // No code/statusCode-derived fields beyond the default shape.
+    expect(body.retryAfterMs).toBeUndefined();
+  });
+
+  it('B8: Error carrying code + statusCode + retryAfterMs is read via narrowing', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/throw-rate-limit',
+    });
+
+    expect(response.statusCode).toBe(429);
+    const body = response.json();
+    expect(body.code).toBe('RATE_LIMITED');
+    expect(body.error).toBe('Slow down');
+    expect(body.retryAfterMs).toBe(1500);
+    expect(body.requestId).toBeDefined();
+  });
 
   it('AC-4: schema validation error returns 400 with VALIDATION_ERROR and details', async () => {
     const response = await app.inject({

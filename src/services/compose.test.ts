@@ -2572,3 +2572,41 @@ describe('composeService.compose — WKH-130 adaptive input-retry', () => {
     expect(mockRegen).not.toHaveBeenCalled();
   });
 });
+
+// B7 (audit 2026-06-24): discover() se cachea POR compose() — no se repite el
+// discovery completo en cada step. resolveAgent llama discover ~1 vez por step
+// (hidratación de payment); con N steps el loop hace ~2N-1 resolveAgent calls.
+// Con el cache compartido, discover se invoca UNA sola vez por pipeline.
+describe('composeService.compose — discover cache (B7)', () => {
+  it('calls discoveryService.discover once for a multi-step pipeline, not once per resolveAgent', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+
+    const agent1 = makeAgent({ slug: 'a1', priceUsdc: 0.1 });
+    const agent2 = makeAgent({ slug: 'a2', priceUsdc: 0.1 });
+    // resolveAgent se invoca 3x en un pipeline de 2 steps
+    // (step0 main, step0 lookahead, step1 main).
+    vi.mocked(discoveryService.getAgent)
+      .mockResolvedValueOnce(agent1)
+      .mockResolvedValueOnce(agent2)
+      .mockResolvedValueOnce(agent2);
+    // discover devuelve los agentes (path de hidratación de payment.chain).
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [agent1, agent2],
+      total: 2,
+      registries: [],
+    });
+    mockFetchOk({ result: 'step1' });
+    mockFetchOk({ result: 'step2' });
+
+    await composeService.compose({
+      steps: [
+        { agent: 'a1', input: {} },
+        { agent: 'a2', input: {} },
+      ],
+      maxBudget: 1.0,
+    });
+
+    // Sin cache serían 3 (una por resolveAgent). Con cache: 1.
+    expect(vi.mocked(discoveryService.discover)).toHaveBeenCalledTimes(1);
+  });
+});

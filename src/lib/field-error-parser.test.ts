@@ -104,4 +104,21 @@ describe('parseFieldErrors', () => {
       ]);
     });
   });
+
+  // B6 (audit 2026-06-24): "required" como substring fuera de contexto de error
+  // (ej. el flag JSON `"required": false`) NO debe extraer tokens espurios. El
+  // word-boundary `\brequired\b` + IDENTIFIER_RE filtran la basura → null.
+  describe('B6: "required" out of error context does not yield spurious fields', () => {
+    it('JSON flag `"required": false` with an unrelated error → null', () => {
+      const msg =
+        'Agent foo returned 429: {"required": false, "error": "rate limited"}';
+      expect(parseFieldErrors(msg)).toBeNull();
+    });
+
+    it('substring "required" inside a value/URL → null (no spurious tokens)', () => {
+      const msg =
+        'Agent foo returned 400: {"error":"see https://docs.example.com/required-fields for details"}';
+      expect(parseFieldErrors(msg)).toBeNull();
+    });
+  });
 });

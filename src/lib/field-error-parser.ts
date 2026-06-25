@@ -154,9 +154,14 @@ function extractFieldsFromText(text: string): string[] {
   }
 
   // List form: "<tokens> required". Take the segment before `required`.
-  const requiredIdx = text.toLowerCase().indexOf('required');
-  if (requiredIdx !== -1) {
-    const head = text.slice(0, requiredIdx);
+  // B6 (audit 2026-06-24): anclar `required` como PALABRA (\brequired\b) — el
+  // `indexOf('required')` previo matcheaba CUALQUIER substring (ej. `"required":
+  // false` en un body JSON, o una URL con esa palabra), produciendo el split de
+  // basura que se colaba como tokens espurios. El word-boundary exige que sea la
+  // palabra suelta; el IDENTIFIER_RE de abajo sigue filtrando el resto.
+  const requiredMatch = /\brequired\b/i.exec(text);
+  if (requiredMatch) {
+    const head = text.slice(0, requiredMatch.index);
     const tokens = head
       .split(/,|\band\b/i)
       .map((t) => t.trim())

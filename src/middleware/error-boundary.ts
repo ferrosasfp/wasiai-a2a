@@ -18,9 +18,52 @@ interface AppError {
   orchestrationId?: string;
 }
 
+// B8 (audit 2026-06-24): narrowing seguro en vez de `err as unknown as AppError`.
+// Leemos cada campo opcional con un type-guard, sin double-cast.
+// B8 (audit 2026-06-24): lectura de un campo extra de un Error vía `in`
+// narrowing — sin double-cast `as unknown as`. El `key in obj` estrecha el tipo
+// para que indexar `obj[key]` sea seguro.
+function readNumberProp(obj: object, key: string): number | undefined {
+  if (key in obj) {
+    const v = (obj as Record<string, unknown>)[key];
+    if (typeof v === 'number') return v;
+  }
+  return undefined;
+}
+
+function readStringProp(obj: object, key: string): string | undefined {
+  if (key in obj) {
+    const v = (obj as Record<string, unknown>)[key];
+    if (typeof v === 'string') return v;
+  }
+  return undefined;
+}
+
+function readArrayProp(obj: object, key: string): unknown[] | undefined {
+  if (key in obj) {
+    const v = (obj as Record<string, unknown>)[key];
+    if (Array.isArray(v)) return v;
+  }
+  return undefined;
+}
+
 function toAppError(err: unknown): AppError {
   if (err instanceof Error) {
-    return err as unknown as AppError;
+    // Leemos los campos extra (statusCode, code, …) que algunas clases de error
+    // adjuntan, con narrowing por `in` en vez del cast `as unknown as AppError`.
+    const result: AppError = { message: err.message };
+    if (err.stack !== undefined) result.stack = err.stack;
+    const statusCode = readNumberProp(err, 'statusCode');
+    if (statusCode !== undefined) result.statusCode = statusCode;
+    const code = readStringProp(err, 'code');
+    if (code !== undefined) result.code = code;
+    const validation = readArrayProp(err, 'validation');
+    if (validation !== undefined) result.validation = validation;
+    const retryAfterMs = readNumberProp(err, 'retryAfterMs');
+    if (retryAfterMs !== undefined) result.retryAfterMs = retryAfterMs;
+    const orchestrationId = readStringProp(err, 'orchestrationId');
+    if (orchestrationId !== undefined) result.orchestrationId = orchestrationId;
+    return result;
   }
   return { message: String(err) };
 }

@@ -89,7 +89,7 @@ export class TransformExecutionError extends Error {
   // without surprises. The constructor uses the second-arg `{ cause }`
   // form when supplied so the cause is also visible to native tooling
   // (util.inspect, error chaining, etc).
-  public readonly cause?: unknown;
+  public override readonly cause?: unknown;
 
   constructor(message: string, cause?: unknown) {
     super(message, cause !== undefined ? { cause } : undefined);

@@ -308,8 +308,14 @@ export const discoveryService = {
     // Sort: verified-first (AC-7), then reputation (desc), then price (asc).
     // WKH-103 (AC-6/CD-10): lee computedReputation.score con fallback al
     // reputation upstream del registry (NO reasigna `reputation`).
-    const repValue = (x: Agent): number =>
-      x.computedReputation?.score ?? x.reputation ?? 0;
+    // B5 (audit 2026-06-24): `?? 0` NO captura NaN (nullish solo cubre
+    // null/undefined), y `reputation` viene de `Number(...)` → puede ser NaN.
+    // Un NaN en la comparación deja el sort indefinido. Number.isFinite filtra
+    // NaN/Infinity además de null/undefined.
+    const repValue = (x: Agent): number => {
+      const rep = x.computedReputation?.score ?? x.reputation;
+      return Number.isFinite(rep) ? (rep as number) : 0;
+    };
     allAgents.sort((a, b) => {
       const verifiedDiff = Number(b.verified) - Number(a.verified);
       if (verifiedDiff !== 0) return verifiedDiff;
@@ -553,11 +559,17 @@ export const discoveryService = {
                 agent.slug,
               );
               if (identity) agent.identity = identity;
-            } catch {}
+            } catch {
+              // degradación (B6 audit): resolveIdentityForAgent falló (DB/red);
+              // devolvemos el agent sin identity en vez de romper getAgent.
+            }
           }
           return agent;
         }
-      } catch {}
+      } catch {
+        // degradación (B6 audit): este registry falló (fetch/SSRF/parse);
+        // seguimos al siguiente registry sin romper getAgent (skip-and-continue).
+      }
     }
 
     return null;

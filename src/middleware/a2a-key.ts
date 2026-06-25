@@ -17,6 +17,7 @@ import {
   getDefaultChainKey,
   getInitializedChainKeys,
 } from '../adapters/registry.js';
+import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { budgetService } from '../services/budget.js';
 import {
   delegationService,
@@ -289,7 +290,7 @@ export function requirePaymentOrA2AKey(
         ? request.composeEstimatedCostUsd
         : typeof request.gaslessEstimatedCostUsd === 'number'
           ? request.gaslessEstimatedCostUsd
-          : 1.0;
+          : PLACEHOLDER_FEE_USD;
 
     // ── BRANCH DELEGACIÓN (WKH-101) ──────────────────────────
     // El regex Bearer YA captura wasi_a2a_session_* (empieza con wasi_a2a_).

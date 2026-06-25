@@ -37,3 +37,47 @@ Origen: `doc/audit/2026-06-24-auditoria-profunda.md`.
 - **Fix**: eliminado el `vi.mock` duplicado interno; se conserva el top-level.
 - **Aplicar en**: `vi.mock` es hoisted al top del módulo — nunca duplicarlo dentro
   de funciones; el de top-level ya cubre todas las importaciones.
+
+### [2026-06-24] M5 — tests existentes esperaban el leak del msg PG crudo
+- **Error**: al sanitizar la ruta master de `debit()` a `DEBIT_FAILED`, dos tests
+  (`budget.test.ts` AC-9 DAILY_LIMIT / INSUFFICIENT_BUDGET) fallaron porque
+  asertaban el mensaje crudo de Postgres como `error` — exactamente el leak que
+  M5 corrige.
+- **Causa raíz**: la ruta master sólo mapeaba `OWNERSHIP_MISMATCH` y devolvía
+  `error.message` para todo lo demás (incluidos códigos de negocio conocidos).
+  Los tests congelaron ese comportamiento defectuoso.
+- **Fix**: la ruta master ahora espeja el mapeo de la ruta dest-policy
+  (INSUFFICIENT_BUDGET→AGENT_KEY_BUDGET_EXHAUSTED, DAILY_LIMIT, KEY_INACTIVE,
+  KEY_NOT_FOUND) y sólo cae a `DEBIT_FAILED` (+ `console.error`) para PG errors
+  inesperados. Los dos tests se actualizaron a los códigos estables.
+- **Aplicar en**: cuando sanitizás un leak, revisá que los tests no estén
+  congelando el comportamiento defectuoso — actualizalos al contrato correcto.
+
+### [2026-06-24] B8 — `err as Record<string, unknown>` no compila sobre Error
+- **Error**: al reemplazar el double-cast `as unknown as AppError`, intenté
+  `(err as Record<string, unknown>)[key]` directo sobre un `Error` → TS2352
+  (Error y Record no se solapan, falta index signature).
+- **Causa raíz**: `Error` es un tipo nominal sin index signature; castear a
+  `Record` directo lo rechaza el compilador (a diferencia de `object`).
+- **Fix**: narrowing por `key in obj` con helpers tipados `(obj: object, ...)`;
+  dentro del guard `(obj as Record<string, unknown>)[key]` SÍ es legal (object
+  sí se solapa con Record). Sin `as unknown as`.
+- **Aplicar en**: para leer props arbitrarias de un `Error`/clase nominal, usar
+  `'k' in obj` + cast desde `object` (no desde el tipo nominal).
+
+### [2026-06-24] B1 — `noImplicitOverride` exige `override` en `cause`
+- **Error**: activar `noImplicitOverride` rompió `vm-runner.ts:92` — la propiedad
+  `cause` de `TransformExecutionError` redeclara `Error.cause` sin `override`.
+- **Fix**: `public override readonly cause?: unknown;`.
+- **Aplicar en**: cualquier subclase de `Error` (u otra base) que redeclare un
+  miembro de la base necesita el modificador `override` bajo este flag.
+
+### [2026-06-24] B1 — `noUncheckedIndexedAccess` / `exactOptionalPropertyTypes` diferidos
+- **Hallazgo**: `noUncheckedIndexedAccess` generó 232 errores (162×TS2532 acceso
+  indexado, 43×TS18048, + mismatches en arrays de tests/adapters) y
+  `exactOptionalPropertyTypes` generó 52 (mayormente TS2375 en adapters de pago).
+  Ambos exceden el umbral seguro del wave y requieren cambios de tipos/lógica de
+  riesgo no acotado.
+- **Decisión**: REVERTIDOS. Quedaron activos sólo `noFallthroughCasesInSwitch` y
+  `noImplicitOverride` (low-noise, 1 hit arreglado). Los otros dos quedan como
+  deuda técnica para un wave dedicado con su propio SDD.

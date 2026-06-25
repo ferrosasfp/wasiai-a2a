@@ -12,6 +12,7 @@ import {
   signAndSettleDownstream,
 } from '../lib/downstream-payment.js';
 import { parseFieldErrors } from '../lib/field-error-parser.js';
+import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import {
   SSRFViolationError,
   validateRegistryUrl,
@@ -37,6 +38,28 @@ import { regenerateInputFromErrors } from './llm/input-retry.js';
 import { maybeTransform } from './llm/transform.js';
 import { registryService } from './registry.js';
 import { normalizeDestination } from './spend-policy.js';
+
+/**
+ * B7 (audit 2026-06-24): cache de discover() acotado a un solo compose().
+ * `all()` memoiza la MISMA Promise de `discover({limit:50})` — el resultado se
+ * comparte entre todos los steps (datos idénticos), sin re-disparar el discovery
+ * completo en cada step.
+ */
+interface DiscoverCache {
+  all(): Promise<Agent[]>;
+}
+
+function createDiscoverCache(): DiscoverCache {
+  let cached: Promise<Agent[]> | undefined;
+  return {
+    all() {
+      if (!cached) {
+        cached = discoveryService.discover({ limit: 50 }).then((r) => r.agents);
+      }
+      return cached;
+    },
+  };
+}
 
 function buildAuthHeaders(
   registry: RegistryConfig | undefined,
@@ -73,9 +96,11 @@ export const composeService = {
     let totalCost = 0;
     let totalLatency = 0;
     let lastOutput: unknown = null;
+    // B7 (audit 2026-06-24): un solo discover() compartido por todo el pipeline.
+    const discoverCache = createDiscoverCache();
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
-      const agent = await this.resolveAgent(step);
+      const agent = await this.resolveAgent(step, discoverCache);
       if (!agent)
         return {
           success: false,
@@ -153,7 +178,7 @@ export const composeService = {
           typeof agent.priceUsdc !== 'number' ||
           agent.priceUsdc === 0 ||
           Number.isNaN(agent.priceUsdc);
-        const debitAmount = isInvalid ? 1.0 : agent.priceUsdc;
+        const debitAmount = isInvalid ? PLACEHOLDER_FEE_USD : agent.priceUsdc;
 
         if (isInvalid) {
           const warn = logger?.warn?.bind(logger) ?? console.warn;
@@ -224,6 +249,7 @@ export const composeService = {
           totalLatency,
           scopingKeyRow,
           callerRefHash,
+          discoverCache,
         });
         totalCost = agg.totalCost;
         totalLatency = agg.totalLatency;
@@ -369,6 +395,7 @@ export const composeService = {
                   scopingKeyRow,
                   callerRefHash,
                   retried: true, // DT-8: metadata.retried
+                  discoverCache,
                 });
                 totalCost = agg.totalCost;
                 totalLatency = agg.totalLatency;
@@ -472,6 +499,7 @@ export const composeService = {
     scopingKeyRow?: ComposeRequest['scopingKeyRow'];
     callerRefHash: string | null;
     retried?: boolean;
+    discoverCache?: DiscoverCache; // B7: cache compartido del pipeline
   }): Promise<{
     totalCost: number;
     totalLatency: number;
@@ -489,6 +517,7 @@ export const composeService = {
       scopingKeyRow,
       callerRefHash,
       retried,
+      discoverCache,
     } = ctx;
     let { totalCost, totalLatency } = ctx;
     let lastOutput: unknown = output;
@@ -511,7 +540,8 @@ export const composeService = {
     totalLatency += latencyMs;
     if (i < steps.length - 1) {
       const nextStep = steps[i + 1];
-      const nextAgent = await this.resolveAgent(nextStep);
+      const nextAgent = await this.resolveAgent(nextStep, discoverCache);
+      // (discoverCache reused from compose() — B7)
       const inputSchema = nextAgent?.metadata?.inputSchema as
         | Record<string, unknown>
         | undefined;
@@ -599,7 +629,20 @@ export const composeService = {
 
     return { totalCost, totalLatency, lastOutput };
   },
-  async resolveAgent(step: ComposeStep): Promise<Agent | null> {
+  async resolveAgent(
+    step: ComposeStep,
+    discoverCache?: DiscoverCache,
+  ): Promise<Agent | null> {
+    // B7 (audit 2026-06-24): cache de discover({limit:50}) POR compose. Esta
+    // llamada es idéntica en todos los steps (mismos args); sin cache, un
+    // pipeline de N steps dispara hasta 4N discoveries completos. Memoizamos la
+    // MISMA Promise → misma data, misma semántica de `.find` por slug. Sin
+    // cache (caller no la pasa) cae al discover directo (backward-compat).
+    const discoverAll = (): Promise<Agent[]> =>
+      discoverCache
+        ? discoverCache.all()
+        : discoveryService.discover({ limit: 50 }).then((r) => r.agents);
+
     // Try with registry hint first, then without (LLM may pass wrong case)
     let agent = await discoveryService.getAgent(step.agent, step.registry);
     if (!agent) agent = await discoveryService.getAgent(step.agent);
@@ -611,17 +654,15 @@ export const composeService = {
     if (!agent) {
       // Fallback: fetch all agents and match by slug directly. Resolved via
       // discover → already carries the real chain. No re-query (anti latency).
-      const result = await discoveryService.discover({ limit: 50 });
-      return result.agents.find((a) => a.slug === step.agent) ?? null;
+      const agents = await discoverAll();
+      return agents.find((a) => a.slug === step.agent) ?? null;
     }
 
     // Resolved via getAgent → hydrate payment.chain from the path with the
     // real chain (only when it differs — no-op for Avalanche/Kite, CD-8).
     // CD-10 fail-soft: if discover does not bring the agent, real?.payment is
     // falsy → keep getAgent's payment (no Base assumption, no cross-chain).
-    const real = (await discoveryService.discover({ limit: 50 })).agents.find(
-      (a) => a.slug === agent.slug,
-    );
+    const real = (await discoverAll()).find((a) => a.slug === agent.slug);
     if (real?.payment?.chain && real.payment.chain !== agent.payment?.chain) {
       agent.payment = real.payment; // adopt the full payment of the real-chain path
     }

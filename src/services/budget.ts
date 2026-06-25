@@ -316,10 +316,32 @@ export const budgetService = {
 
     if (error) {
       // CD-3/AC-6: no propagar el msg crudo de PG para OWNERSHIP_MISMATCH.
-      if (error.message.includes('OWNERSHIP_MISMATCH')) {
+      // M5 (audit 2026-06-24): NUNCA propagar el msg crudo de PG al cliente
+      // (info disclosure). Espejo del patrón dest-policy (L266-291): mapear los
+      // códigos de negocio conocidos a códigos estables, y para cualquier otro
+      // error PG inesperado devolver DEBIT_FAILED + log server-side.
+      const msg = error.message;
+      if (msg.includes('OWNERSHIP_MISMATCH')) {
         return { success: false, error: 'OWNERSHIP_MISMATCH' };
       }
-      return { success: false, error: error.message };
+      if (msg.includes('INSUFFICIENT_BUDGET')) {
+        return { success: false, error: 'AGENT_KEY_BUDGET_EXHAUSTED' };
+      }
+      if (msg.includes('DAILY_LIMIT')) {
+        return { success: false, error: 'DAILY_LIMIT' };
+      }
+      if (msg.includes('KEY_INACTIVE')) {
+        return { success: false, error: 'KEY_INACTIVE' };
+      }
+      if (msg.includes('KEY_NOT_FOUND')) {
+        return { success: false, error: 'KEY_NOT_FOUND' };
+      }
+      console.error('[budget] master debit failed', {
+        keyId,
+        chainId,
+        detail: msg,
+      });
+      return { success: false, error: 'DEBIT_FAILED' };
     }
 
     return { success: true };

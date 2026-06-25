@@ -10,6 +10,7 @@ import {
   anthropicCircuitBreaker,
   CircuitOpenError,
 } from '../lib/circuit-breaker.js';
+import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import type {
   Agent,
   ComposeStep,
@@ -492,7 +493,7 @@ export const orchestrateService = {
         orchestrationId,
         reason: 'registry-miss',
       });
-      plannedCostUsd = 1.0;
+      plannedCostUsd = PLACEHOLDER_FEE_USD;
       debitFallback = true;
     }
 
