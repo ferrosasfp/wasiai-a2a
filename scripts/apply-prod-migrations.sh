@@ -3,6 +3,15 @@
 # Each migration runs as a single SQL transaction (Supabase Management API).
 # Idempotent: CREATE TABLE IF NOT EXISTS, ON CONFLICT DO NOTHING, ADD COLUMN IF NOT EXISTS.
 # Stop on first error.
+#
+# ⚠️ FOOTGUN (auditoría 2026-06-25): el gateway de PROD usa la DB
+# `caldzjhjgctpgodldqav` (a2a_agent_keys, budgets, RPC de refund). Pero el
+# `.env` local tiene `SUPABASE_URL` apuntando a `bdwvrwzvsldephfibmuu` (la DB
+# del catálogo de wasiai-v2, DB EQUIVOCADA para el money-path). Por eso este
+# script HARDCODEA `PROD_REF` (NO lo deriva de SUPABASE_URL) y abajo verifica
+# que el target es realmente la DB de dinero antes de aplicar nada. Si escribís
+# otro applier, NO derives el ref de SUPABASE_URL — hardcodeá caldz o reusá el
+# guard de abajo. Ver memoria `db-topology-caldz-bdwv`.
 
 set -euo pipefail
 
@@ -15,6 +24,25 @@ if [ -z "$PAT" ]; then
   echo "ERROR: SUPABASE_ACCESS_TOKEN not found in $A2A_DIR/.env" >&2
   exit 1
 fi
+
+# Pre-flight guard: confirmá que $PROD_REF ES la DB de dinero del gateway antes
+# de aplicar. Marcador distintivo: la RPC `refund_with_dest_policy` (WKH-129)
+# existe SOLO en caldz, no en bdwv. Si falta, abortamos: estamos apuntando a la
+# DB equivocada y aplicar migraciones de dinero ahí sería un desastre silencioso.
+echo "Pre-flight: verificando que $PROD_REF es la DB de dinero del gateway…"
+GUARD_PAYLOAD=$(python3 -c "import json; print(json.dumps({'query': \"SELECT count(*) AS n FROM pg_proc WHERE proname='refund_with_dest_policy';\"}))")
+GUARD=$(curl -s -H "Authorization: Bearer $PAT" -H "Content-Type: application/json" -X POST \
+  -d "$GUARD_PAYLOAD" "https://api.supabase.com/v1/projects/$PROD_REF/database/query" \
+  | python3 -c "import json,sys
+try:
+  d=json.load(sys.stdin); print(d[0]['n'] if isinstance(d,list) and d else 0)
+except Exception: print(0)")
+if [ "$GUARD" != "1" ]; then
+  echo "ABORT: $PROD_REF NO tiene refund_with_dest_policy → NO es la DB de dinero del gateway." >&2
+  echo "       Revisá PROD_REF. El gateway de prod usa caldzjhjgctpgodldqav (NO el SUPABASE_URL del .env)." >&2
+  exit 1
+fi
+echo "Pre-flight OK: $PROD_REF es la DB de dinero del gateway."
 
 # Ordered list — order matters (CREATE before ALTER, base before seeds)
 MIGS=(
