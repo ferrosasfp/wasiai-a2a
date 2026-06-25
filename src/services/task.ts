@@ -54,10 +54,10 @@ export const taskService = {
   async create(
     ownerRef: string,
     input: {
-      contextId?: string;
-      messages?: unknown[];
-      artifacts?: unknown[];
-      metadata?: Record<string, unknown>;
+      contextId?: string | undefined;
+      messages?: unknown[] | undefined;
+      artifacts?: unknown[] | undefined;
+      metadata?: Record<string, unknown> | undefined;
     },
   ): Promise<Task> {
     const row: Partial<TaskRow> = { owner_ref: ownerRef };
@@ -99,9 +99,9 @@ export const taskService = {
   async list(
     ownerRef: string,
     filters?: {
-      status?: TaskState;
-      contextId?: string;
-      limit?: number;
+      status?: TaskState | undefined;
+      contextId?: string | undefined;
+      limit?: number | undefined;
     },
   ): Promise<Task[]> {
     const limit = Math.min(Math.max(filters?.limit ?? 50, 1), 100);
@@ -169,7 +169,10 @@ export const taskService = {
   async append(
     ownerRef: string,
     id: string,
-    input: { messages?: unknown[]; artifacts?: unknown[] },
+    input: {
+      messages?: unknown[] | undefined;
+      artifacts?: unknown[] | undefined;
+    },
   ): Promise<Task> {
     const current = await this.get(ownerRef, id);
     if (!current) throw new TaskNotFoundError(id);

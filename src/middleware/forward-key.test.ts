@@ -201,7 +201,7 @@ describe('requireForwardKey middleware', () => {
   it('AC-6: x-wasiai-source logged via pino, no routing effect', async () => {
     process.env.WASIAI_V2_FORWARD_KEY = 'matching-secret-value-xyz';
 
-    const logs: Array<{ forwardSource?: string; msg: string }> = [];
+    const logs: Array<{ forwardSource?: string | undefined; msg: string }> = [];
     const app = Fastify({
       logger: {
         level: 'info',

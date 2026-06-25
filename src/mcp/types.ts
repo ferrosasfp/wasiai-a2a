@@ -93,18 +93,18 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
 export interface PayX402Input {
   gatewayUrl: string;
   endpoint: string;
-  method?: HttpMethod;
+  method?: HttpMethod | undefined;
   payload?: unknown;
-  headers?: Record<string, string>;
+  headers?: Record<string, string> | undefined;
   /** Optional guard: wei string. If gateway asks more than this -> error. */
-  maxAmountWei?: string;
+  maxAmountWei?: string | undefined;
 }
 
 export interface PayX402Output {
   status: number;
   result: unknown;
-  txHash?: string;
-  amountPaid?: string;
+  txHash?: string | undefined;
+  amountPaid?: string | undefined;
 }
 
 export interface GetPaymentQuoteInput {
@@ -121,10 +121,10 @@ export interface GetPaymentQuoteOutput {
 }
 
 export interface DiscoverAgentsInput {
-  query?: string;
-  maxPrice?: number;
-  capabilities?: string[];
-  limit?: number;
+  query?: string | undefined;
+  maxPrice?: number | undefined;
+  capabilities?: string[] | undefined;
+  limit?: number | undefined;
 }
 
 export type DiscoverAgentsOutput = DiscoveryResult;
@@ -132,10 +132,10 @@ export type DiscoverAgentsOutput = DiscoveryResult;
 export interface OrchestrateToolInput {
   goal: string;
   budget: number;
-  preferCapabilities?: string[];
-  maxAgents?: number;
+  preferCapabilities?: string[] | undefined;
+  maxAgents?: number | undefined;
   /** Propagated downstream as header x-a2a-key (AC-10) */
-  a2aKey?: string;
+  a2aKey?: string | undefined;
 }
 
 /**
@@ -150,14 +150,14 @@ export interface OrchestrateStepOutput {
   output: unknown;
   costUsdc: number;
   latencyMs: number;
-  txHash?: string;
+  txHash?: string | undefined;
 }
 
 export interface OrchestrateToolOutput {
   orchestrationId: string;
   steps: OrchestrateStepOutput[];
   result: unknown;
-  kiteTxHash?: string;
+  kiteTxHash?: string | undefined;
   reasoning: string;
   protocolFeeUsdc: number;
 }

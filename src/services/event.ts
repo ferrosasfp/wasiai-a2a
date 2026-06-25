@@ -50,16 +50,16 @@ export const eventService = {
    * Designed to be called fire-and-forget: caller uses .catch() to avoid unhandled rejections.
    */
   async track(input: {
-    eventType?: string;
-    agentId?: string;
-    agentName?: string;
-    registry?: string;
+    eventType?: string | undefined;
+    agentId?: string | undefined;
+    agentName?: string | undefined;
+    registry?: string | undefined;
     status: 'success' | 'failed';
-    latencyMs?: number;
-    costUsdc?: number;
-    txHash?: string;
-    goal?: string;
-    metadata?: Record<string, unknown>;
+    latencyMs?: number | undefined;
+    costUsdc?: number | undefined;
+    txHash?: string | undefined;
+    goal?: string | undefined;
+    metadata?: Record<string, unknown> | undefined;
   }): Promise<A2AEvent> {
     const row: Partial<EventRow> = {
       event_type: input.eventType ?? 'compose_step',

@@ -27,14 +27,14 @@ export interface SelectFacilitatorUrlInput {
   /** Resolved chain key. Selector only activates when `chainKey.startsWith('base-')`. */
   chainKey: ChainKey;
   /** Value of `process.env.CDP_FACILITATOR_URL`. Pass `undefined` or `''` when unset. */
-  cdpFacilitatorUrl?: string;
+  cdpFacilitatorUrl?: string | undefined;
   /**
    * Optional URL declared in the agent's manifest (`metadata.facilitatorUrl`)
    * or resolved upstream. When CDP override does NOT apply, the selector
    * returns this value as-is (may be `undefined`, in which case the caller
    * should fall back to the adapter default).
    */
-  agentManifestFacilitatorUrl?: string;
+  agentManifestFacilitatorUrl?: string | undefined;
 }
 
 /**

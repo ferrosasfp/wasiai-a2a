@@ -56,7 +56,7 @@ export interface ValidateOutboundOpts {
 // ─── Error class (domain wrapper for registry-side callers) ────────────
 
 export class SSRFViolationError extends Error {
-  public field?: string;
+  public field?: string | undefined;
   public readonly reason: string;
   public readonly category: SSRFCategory;
 

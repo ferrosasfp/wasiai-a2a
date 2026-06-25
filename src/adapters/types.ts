@@ -17,7 +17,7 @@ export interface SettleRequest {
 export interface SettleResult {
   txHash: string;
   success: boolean;
-  error?: string;
+  error?: string | undefined;
 }
 export interface X402Proof {
   authorization: X402PaymentRequest['authorization'];
@@ -27,7 +27,7 @@ export interface X402Proof {
 }
 export interface VerifyResult {
   valid: boolean;
-  error?: string;
+  error?: string | undefined;
 }
 export interface QuoteResult {
   amountWei: string;

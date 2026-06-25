@@ -50,7 +50,7 @@ export interface VerifyDepositArgs {
   chainKey: ChainKey;
   bundle: AdaptersBundle;
   txHash: `0x${string}`;
-  expectedAmountUsd?: string; // body.amount declarado (opcional; → AMOUNT_MISMATCH)
+  expectedAmountUsd?: string | undefined; // body.amount declarado (opcional; → AMOUNT_MISMATCH)
 }
 
 // ── Constants / helpers (no hardcodes — CD-3) ───────────────

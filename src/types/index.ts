@@ -29,13 +29,13 @@ export interface RegistryConfig {
   invokeEndpoint: string;
 
   /** Optional: Get single agent endpoint */
-  agentEndpoint?: string;
+  agentEndpoint?: string | undefined;
 
   /** Schema mapping for API compatibility */
   schema: RegistrySchema;
 
   /** Authentication config */
-  auth?: RegistryAuth;
+  auth?: RegistryAuth | undefined;
 
   /** Is this registry active? */
   enabled: boolean;
@@ -94,7 +94,7 @@ export interface AgentPaymentSpec {
   method: string; // e.g. 'x402'
   chain: string; // e.g. 'avalanche'
   contract: `0x${string}`; // payTo on-chain address
-  asset?: string; // e.g. 'USDC' (opcional, pass-through)
+  asset?: string | undefined; // e.g. 'USDC' (opcional, pass-through)
 }
 
 export interface AgentFieldMapping {
@@ -142,7 +142,7 @@ export interface Agent {
   status: AgentStatus;
   metadata?: Record<string, unknown>;
   /** Payment spec del agent card (WKH-55). Undefined si el registry no lo expone. */
-  payment?: AgentPaymentSpec;
+  payment?: AgentPaymentSpec | undefined;
   /**
    * WKH-100 (AC-8): ERC-8004 verified identity surfaced from the agent's
    * bound Agent Key. Omitted (not null) when the agent has no bound identity
@@ -207,14 +207,14 @@ export interface AgentCardIdentity {
 // ============================================================
 
 export interface DiscoveryQuery {
-  capabilities?: string[];
-  query?: string;
-  maxPrice?: number;
-  minReputation?: number;
-  limit?: number;
-  registry?: string; // Filter to specific registry
-  verified?: boolean;
-  includeInactive?: boolean;
+  capabilities?: string[] | undefined;
+  query?: string | undefined;
+  maxPrice?: number | undefined;
+  minReputation?: number | undefined;
+  limit?: number | undefined;
+  registry?: string | undefined; // Filter to specific registry
+  verified?: boolean | undefined;
+  includeInactive?: boolean | undefined;
 }
 
 export interface DiscoveryResult {
@@ -241,23 +241,23 @@ export interface ComposeStep {
 export interface ComposeRequest {
   steps: ComposeStep[];
   /** Max budget in USDC */
-  maxBudget?: number;
+  maxBudget?: number | undefined;
   /** Propagated to agent invocations as header `x-a2a-key` (WKH-MCP-X402) */
-  a2aKey?: string;
+  a2aKey?: string | undefined;
   /**
    * WKH-61: row de la a2a_agent_keys del caller, para scoping post-resolve.
    * Cuando está presente, composeService chequea allowed_registries /
    * allowed_agent_slugs / allowed_categories contra el Agent real de cada step.
    * Cuando es undefined (path x402), el check no se ejecuta.
    */
-  scopingKeyRow?: A2AAgentKeyRow;
+  scopingKeyRow?: A2AAgentKeyRow | undefined;
   /**
    * WKH-59 (real-price-debit) DT-D: chainId resuelto por el middleware
    * (request.resolvedChainId). composeService lo usa para debit per-step
    * (steps 2..N) via budgetService.debit. Cuando undefined (path x402 o
    * defensive skip), el debit per-step se omite.
    */
-  chainId?: number;
+  chainId?: number | undefined;
   /**
    * WKH-59 (real-price-debit) BLQ-MED-1 fix: logger opcional para emitir
    * `compose-price.fallback per-step` warn cuando priceUsdc=0/null en
@@ -266,14 +266,14 @@ export interface ComposeRequest {
    * `/compose` pasa `request.log` (Pino), que es estructuralmente
    * compatible. Cuando undefined → fallback a `console.warn`.
    */
-  logger?: DownstreamLogger;
+  logger?: DownstreamLogger | undefined;
   /**
    * WKH-101 (DT-11): contexto de delegación para el débito per-step (steps 2..N).
    * Cuando está presente, budgetService.debit enruta al RPC atómico
    * debit_delegation_and_parent (AC-7 per-step + AC-8/AC-9). undefined → master
    * key (camino actual increment_a2a_key_spend, CD-5 intacto).
    */
-  delegationContext?: DelegationDebitContext;
+  delegationContext?: DelegationDebitContext | undefined;
   /**
    * WKH-121 (BLQ-ALTO-1): contexto de key-session para el débito per-step
    * (steps 1..N). Cuando está presente, budgetService.debit enruta al RPC
@@ -281,7 +281,7 @@ export interface ComposeRequest {
    * sesión (AC-8/AC-9). undefined → no es una sesión server-side. Espejo de
    * `delegationContext`; mutuamente exclusivo con él en runtime.
    */
-  keySessionContext?: KeySessionDebitContext;
+  keySessionContext?: KeySessionDebitContext | undefined;
 }
 
 export interface ComposeResult {
@@ -309,13 +309,13 @@ export interface StepResult {
   output: unknown;
   costUsdc: number;
   latencyMs: number;
-  txHash?: string; // Hash de tx on-chain si hubo pago x402
+  txHash?: string | undefined; // Hash de tx on-chain si hubo pago x402
   /** @deprecated Use bridgeType. Kept for backward-compat (WKH-56 DT-3). */
   cacheHit?: boolean | 'SKIPPED';
   /** Latency of bridge resolution (ms). Includes A2A fast-path or maybeTransform. */
   transformLatencyMs?: number;
   /** Bridge type for the transition step→step+1. WKH-56. */
-  bridgeType?: BridgeType;
+  bridgeType?: BridgeType | undefined;
   /** Hash de la tx downstream Fuji USDC settle (WKH-55) */
   downstreamTxHash?: string;
   /** Block number en Fuji donde se confirmo el downstream settle (WKH-55) */
@@ -390,21 +390,21 @@ export interface OrchestrateRequest {
   /** Max budget in USDC */
   budget: number;
   /** Preferred capabilities (hints) */
-  preferCapabilities?: string[];
+  preferCapabilities?: string[] | undefined;
   /** Max agents to use */
-  maxAgents?: number;
+  maxAgents?: number | undefined;
   /** Propagated downstream to compose/invokeAgent as header `x-a2a-key` (WKH-MCP-X402) */
-  a2aKey?: string;
+  a2aKey?: string | undefined;
   /** WKH-61: row de a2a_agent_keys, propagado a composeService.compose. */
-  scopingKeyRow?: A2AAgentKeyRow;
+  scopingKeyRow?: A2AAgentKeyRow | undefined;
   /** WKH-101 (DT-11): contexto de delegación propagado a composeService.compose. */
-  delegationContext?: DelegationDebitContext;
+  delegationContext?: DelegationDebitContext | undefined;
   /**
    * WKH-121 (BLQ-ALTO-1): contexto de key-session propagado a
    * composeService.compose para que el cap de sesión se respete en los steps
    * 1..N (AC-8/AC-9). Espejo de `delegationContext`.
    */
-  keySessionContext?: KeySessionDebitContext;
+  keySessionContext?: KeySessionDebitContext | undefined;
   /**
    * chainId resuelto (request.resolvedChainId), propagado a compose para que el
    * débito per-step de steps 1..N funcione. WKH-102 (DT-1): se propaga SIEMPRE
@@ -412,7 +412,7 @@ export interface OrchestrateRequest {
    * delegación. El guard `i>0` de compose.ts:130 protege el step 0 contra
    * double-charge (CD-1, intacto).
    */
-  chainId?: number;
+  chainId?: number | undefined;
 }
 
 export interface OrchestrateResult {

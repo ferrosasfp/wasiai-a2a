@@ -75,8 +75,8 @@ export function normalizeChainSlug(raw: string): ChainKey | undefined {
  * fall through to the manifest or default).
  */
 export function resolveChainKey(input: {
-  headerOverride?: string;
-  agentManifestChain?: string;
+  headerOverride?: string | undefined;
+  agentManifestChain?: string | undefined;
 }): ChainKey | undefined {
   if (typeof input.headerOverride === 'string') {
     return normalizeChainSlug(input.headerOverride);

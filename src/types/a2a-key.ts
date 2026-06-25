@@ -77,12 +77,12 @@ export interface A2AAgentKeyRow {
 
 export interface CreateKeyInput {
   owner_ref: string;
-  display_name?: string;
-  daily_limit_usd?: number;
-  allowed_registries?: string[];
-  allowed_agent_slugs?: string[];
-  allowed_categories?: string[];
-  max_spend_per_call_usd?: number;
+  display_name?: string | undefined;
+  daily_limit_usd?: number | undefined;
+  allowed_registries?: string[] | undefined;
+  allowed_agent_slugs?: string[] | undefined;
+  allowed_categories?: string[] | undefined;
+  max_spend_per_call_usd?: number | undefined;
 }
 
 export interface DepositInput {
@@ -96,10 +96,10 @@ export interface DepositInput {
 // --- AuthzService ---
 
 export interface AuthzTarget {
-  registry?: string;
-  agent_slug?: string;
-  category?: string;
-  estimated_cost_usd?: number;
+  registry?: string | undefined;
+  agent_slug?: string | undefined;
+  category?: string | undefined;
+  estimated_cost_usd?: number | undefined;
 }
 
 export interface AuthzResult {
@@ -420,9 +420,9 @@ export type SignedAuthErrorCode =
  * back-compat bearer). El middleware los obtiene con `extractSignedHeaders`.
  */
 export interface SignedAuthHeaders {
-  signature?: string; // x-a2a-signature
-  nonce?: string; // x-a2a-nonce
-  timestamp?: string; // x-a2a-timestamp (epoch seconds, string)
+  signature?: string | undefined; // x-a2a-signature
+  nonce?: string | undefined; // x-a2a-nonce
+  timestamp?: string | undefined; // x-a2a-timestamp (epoch seconds, string)
 }
 
 /**

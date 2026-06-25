@@ -98,7 +98,6 @@ export async function buildX402Response(
     resource,
     description: opts.description,
     mimeType: 'application/json',
-    outputSchema: undefined,
     payTo: walletAddress,
     maxTimeoutSeconds: adapter.getMaxTimeoutSeconds(),
     asset: adapter.getToken(),
@@ -276,7 +275,7 @@ export function requirePayment(
           ),
         );
     }
-    let verifyResult: { valid: boolean; error?: string };
+    let verifyResult: { valid: boolean; error?: string | undefined };
     try {
       verifyResult = await getPaymentAdapter(chainKey).verify({
         authorization: paymentPayload.authorization,
@@ -347,7 +346,11 @@ export function requirePayment(
       // 'fresh' → seguimos. 'unavailable' → fail-open (ya logueado en el service).
     }
 
-    let settleResult: { txHash: string; success: boolean; error?: string };
+    let settleResult: {
+      txHash: string;
+      success: boolean;
+      error?: string | undefined;
+    };
     try {
       settleResult = await getPaymentAdapter(chainKey).settle({
         authorization: paymentPayload.authorization,

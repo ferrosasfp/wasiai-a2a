@@ -508,8 +508,8 @@ export const composeService = {
   async finishSuccessfulStep(ctx: {
     agent: Agent;
     output: unknown;
-    txHash?: string;
-    downstream?: DownstreamResult;
+    txHash?: string | undefined;
+    downstream?: DownstreamResult | undefined;
     startTime: number;
     steps: ComposeStep[];
     i: number;
@@ -518,8 +518,8 @@ export const composeService = {
     totalLatency: number;
     scopingKeyRow?: ComposeRequest['scopingKeyRow'];
     callerRefHash: string | null;
-    retried?: boolean;
-    discoverCache?: DiscoverCache; // B7: cache compartido del pipeline
+    retried?: boolean | undefined;
+    discoverCache?: DiscoverCache | undefined; // B7: cache compartido del pipeline
   }): Promise<{
     totalCost: number;
     totalLatency: number;
@@ -697,7 +697,7 @@ export const composeService = {
     logger?: DownstreamLogger,
   ): Promise<{
     output: unknown;
-    txHash?: string;
+    txHash?: string | undefined;
     downstream?: DownstreamResult;
   }> {
     const registries = await registryService.getEnabled();

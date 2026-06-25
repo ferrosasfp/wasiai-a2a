@@ -40,8 +40,8 @@ export type FeeChargeResult =
   | {
       status: 'already-charged';
       feeUsdc: number;
-      txHash?: string;
-      inProgress?: boolean;
+      txHash?: string | undefined;
+      inProgress?: boolean | undefined;
     }
   | { status: 'skipped'; feeUsdc: number; reason: 'WALLET_UNSET' }
   | { status: 'failed'; feeUsdc: number; error: string };

@@ -60,7 +60,7 @@ declare module 'fastify' {
     a2aKeyRow?: A2AAgentKeyRow;
     gaslessEstimatedCostUsd?: number; // WKH-59
     composeEstimatedCostUsd?: number; // WKH-59 (real-price-debit) — CD-9
-    composeDestination?: string; // WKH-125 (cap por destino del step 0)
+    composeDestination?: string | undefined; // WKH-125 (cap por destino del step 0)
     resolvedChainId?: number; // WKH-59 (real-price-debit) DT-D
     delegationRow?: DelegationRow; // WKH-101
     delegationContext?: DelegationDebitContext; // WKH-101 DT-11 (débito per-step)
