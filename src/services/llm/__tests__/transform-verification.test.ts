@@ -356,7 +356,7 @@ describe('WKH-57 maybeTransform — model selector (AC-1, AC-2)', () => {
     );
 
     expect(mockCreate).toHaveBeenCalledTimes(1);
-    const call = mockCreate.mock.calls[0][0];
+    const call = mockCreate.mock.calls[0]![0]!;
     expect(call.model).toBe('claude-haiku-4-5-20251001');
     expect(result.bridgeType).toBe('LLM');
     expect(result.llm?.model).toBe('claude-haiku-4-5-20251001');
@@ -378,7 +378,7 @@ describe('WKH-57 maybeTransform — model selector (AC-1, AC-2)', () => {
     const result = await maybeTransform('s', 't', { x: 'y' }, schema);
 
     expect(mockCreate).toHaveBeenCalledTimes(1);
-    expect(mockCreate.mock.calls[0][0].model).toBe('claude-sonnet-4-6');
+    expect(mockCreate.mock.calls[0]![0]!.model).toBe('claude-sonnet-4-6');
     expect(result.llm?.model).toBe('claude-sonnet-4-6');
   });
 
@@ -394,7 +394,7 @@ describe('WKH-57 maybeTransform — model selector (AC-1, AC-2)', () => {
     };
     const result = await maybeTransform('s', 't', { x: 'y' }, schema);
 
-    expect(mockCreate.mock.calls[0][0].model).toBe('claude-sonnet-4-6');
+    expect(mockCreate.mock.calls[0]![0]!.model).toBe('claude-sonnet-4-6');
     expect(result.llm?.model).toBe('claude-sonnet-4-6');
   });
 
@@ -407,7 +407,7 @@ describe('WKH-57 maybeTransform — model selector (AC-1, AC-2)', () => {
     };
     const result = await maybeTransform('s', 't', { x: 'y' }, schema);
 
-    expect(mockCreate.mock.calls[0][0].model).toBe('claude-sonnet-4-6');
+    expect(mockCreate.mock.calls[0]![0]!.model).toBe('claude-sonnet-4-6');
     expect(result.llm?.model).toBe('claude-sonnet-4-6');
   });
 });
@@ -444,7 +444,7 @@ describe('WKH-57 maybeTransform — retry loop (AC-3)', () => {
     expect(result.transformedOutput).toEqual({ query: 'hello' });
 
     // Second prompt MUST include the missing field name (CD-10).
-    const secondSystemPrompt = mockCreate.mock.calls[1][0].system as string;
+    const secondSystemPrompt = mockCreate.mock.calls[1]![0]!.system as string;
     expect(secondSystemPrompt).toMatch(/PREVIOUS ATTEMPT FAILED/);
     expect(secondSystemPrompt).toContain('query');
   });
@@ -523,8 +523,8 @@ describe('WKH-57 maybeTransform — cache key with schema_hash (AC-4)', () => {
     // The 3rd .eq() call (schema_hash filter) must receive 2 different values.
     const eq3Calls = eq3.mock.calls;
     expect(eq3Calls.length).toBeGreaterThanOrEqual(2);
-    const hashA = eq3Calls[0][1];
-    const hashB = eq3Calls[1][1];
+    const hashA = eq3Calls[0]![1];
+    const hashB = eq3Calls[1]![1];
     expect(hashA).not.toBe(hashB);
     expect(typeof hashA).toBe('string');
     expect(typeof hashB).toBe('string');

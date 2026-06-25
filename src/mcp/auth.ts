@@ -114,7 +114,7 @@ export function createMcpAuthHandler(): preHandlerAsyncHookHandler {
       const authHeader = request.headers.authorization;
       if (typeof authHeader === 'string') {
         const match = /^Bearer\s+(.+)$/i.exec(authHeader.trim());
-        if (match) token = match[1].trim();
+        if (match?.[1] !== undefined) token = match[1].trim();
       }
     }
     if (token.length === 0) {

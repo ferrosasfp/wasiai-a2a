@@ -61,22 +61,22 @@ describe('KiteOzonePaymentAdapter', () => {
 
   it('has supportedTokens with PYUSD by default', () => {
     expect(adapter.supportedTokens).toHaveLength(1);
-    expect(adapter.supportedTokens[0].symbol).toBe('PYUSD');
-    expect(adapter.supportedTokens[0].address).toBe(PYUSD_DEFAULT);
+    expect(adapter.supportedTokens[0]!.symbol).toBe('PYUSD');
+    expect(adapter.supportedTokens[0]!.address).toBe(PYUSD_DEFAULT);
   });
 
   it('reads token address from X402_PAYMENT_TOKEN env var', () => {
     const customToken = '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
     process.env.X402_PAYMENT_TOKEN = customToken;
     expect(adapter.getToken()).toBe(customToken);
-    expect(adapter.supportedTokens[0].address).toBe(customToken);
+    expect(adapter.supportedTokens[0]!.address).toBe(customToken);
   });
 
   it('respects env override even with legacy KXUSD address (backward-compat AC-5)', () => {
     const KXUSD_LEGACY = '0x1b7425d288ea676FCBc65c29711fccF0B6D5c293';
     process.env.X402_PAYMENT_TOKEN = KXUSD_LEGACY;
     expect(adapter.getToken()).toBe(KXUSD_LEGACY);
-    expect(adapter.supportedTokens[0].address).toBe(KXUSD_LEGACY);
+    expect(adapter.supportedTokens[0]!.address).toBe(KXUSD_LEGACY);
   });
 
   it('defaults to PYUSD when X402_PAYMENT_TOKEN is not set (warns once)', () => {
@@ -105,12 +105,12 @@ describe('KiteOzonePaymentAdapter', () => {
 
   it('reads token symbol from X402_TOKEN_SYMBOL env var', () => {
     process.env.X402_TOKEN_SYMBOL = 'CUSTOM';
-    expect(adapter.supportedTokens[0].symbol).toBe('CUSTOM');
+    expect(adapter.supportedTokens[0]!.symbol).toBe('CUSTOM');
   });
 
   it('defaults token symbol to PYUSD', () => {
     delete process.env.X402_TOKEN_SYMBOL;
-    expect(adapter.supportedTokens[0].symbol).toBe('PYUSD');
+    expect(adapter.supportedTokens[0]!.symbol).toBe('PYUSD');
   });
 
   it('settle() returns SettleResult shape', async () => {
@@ -201,7 +201,8 @@ describe('KiteOzonePaymentAdapter', () => {
 
     // createWalletClient was called; get the returned mock client
     const lastCallIndex = mockCreateWallet.mock.results.length - 1;
-    const walletClientMock = mockCreateWallet.mock.results[lastCallIndex].value;
+    const walletClientMock =
+      mockCreateWallet.mock.results[lastCallIndex]!.value;
     const signTypedDataMock = walletClientMock.signTypedData as ReturnType<
       typeof vi.fn
     >;
@@ -237,7 +238,7 @@ describe('KiteOzonePaymentAdapter', () => {
         maxAmountRequired: '1000000000000000000',
       },
     });
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     const body = JSON.parse((init as { body: string }).body);
     expect(body.paymentRequirements.payTo).toBe(
       '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
@@ -270,7 +271,7 @@ describe('KiteOzonePaymentAdapter', () => {
         maxAmountRequired: '1000000000000000000',
       },
     });
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     const body = JSON.parse((init as { body: string }).body);
     expect(body.accepted.payTo).toBe(
       '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',

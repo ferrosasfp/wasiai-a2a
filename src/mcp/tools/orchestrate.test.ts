@@ -132,10 +132,10 @@ describe('orchestrate tool', () => {
     mockOrchestrate.mockResolvedValueOnce(result);
 
     const out = await orchestrateTool({ goal: 'g', budget: 5 }, ctx);
-    expect(out.steps[0].txHash).toBe('0xdeadbeef');
-    expect(out.steps[0].costUsdc).toBe(2);
-    expect(out.steps[0].latencyMs).toBe(100);
-    expect(out.steps[0].output).toBe('ok');
+    expect(out.steps[0]!.txHash).toBe('0xdeadbeef');
+    expect(out.steps[0]!.costUsdc).toBe(2);
+    expect(out.steps[0]!.latencyMs).toBe(100);
+    expect(out.steps[0]!.output).toBe('ok');
   });
 
   it('AC-10: a2aKey is propagated to orchestrateService.orchestrate', async () => {

@@ -152,7 +152,7 @@ describe('x402 middleware — Dual payment-header (X-PAYMENT alias, WKH-117)', (
 
       expect(res.statusCode).toBe(200);
       expect(mockVerify).toHaveBeenCalledTimes(1);
-      const verifyArg = mockVerify.mock.calls[0][0] as {
+      const verifyArg = mockVerify.mock.calls[0]![0] as {
         authorization: { from: string };
       };
       expect(verifyArg.authorization.from).toBe(

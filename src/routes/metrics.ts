@@ -55,11 +55,12 @@ const metricsRoutes: FastifyPluginAsync = async (fastify) => {
       s.totalMs += durationMs;
       if (reply.statusCode >= 400) s.errors++;
 
-      // Fill histogram buckets
+      // Fill histogram buckets (getOrCreate seeds every bucket + '+Inf' to 0).
       for (const b of BUCKETS) {
-        if (durationMs <= b) s.buckets[String(b)]++;
+        const bk = String(b);
+        if (durationMs <= b) s.buckets[bk] = (s.buckets[bk] ?? 0) + 1;
       }
-      s.buckets['+Inf']++;
+      s.buckets['+Inf'] = (s.buckets['+Inf'] ?? 0) + 1;
     },
   );
 

@@ -735,7 +735,7 @@ describe('budgetService', () => {
       const rejected = [r1, r2].filter((r) => !r.success);
       expect(passed).toHaveLength(1);
       expect(rejected).toHaveLength(1);
-      expect(rejected[0].error).toBe('DEST_CAP_EXCEEDED');
+      expect(rejected[0]!.error).toBe('DEST_CAP_EXCEEDED');
       // Dispatch al RPC atómico en AMBAS (sin check app-layer separado, CD-1).
       const destCalls = mockRpc.mock.calls.filter(
         (c) => c[0] === 'debit_with_dest_policy',

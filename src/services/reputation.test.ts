@@ -247,7 +247,7 @@ describe('reputationService.computeReputationBatch', () => {
     ]);
     expect(mockFrom).toHaveBeenCalledTimes(1); // 1 query, NOT N
     expect(_terminalCalls).toHaveLength(1);
-    expect(_terminalCalls[0].method).toBe('in');
+    expect(_terminalCalls[0]!.method).toBe('in');
     expect(map.size).toBe(3);
   });
 
@@ -407,7 +407,7 @@ describe('reputationService — cap por caller anti-sybil (WKH-104)', () => {
     const map = await reputationService.computeReputationBatch(['s1', 's2']);
     expect(mockFrom).toHaveBeenCalledTimes(1); // CD-10: 1 query, NOT per-caller
     expect(_terminalCalls).toHaveLength(1);
-    expect(_terminalCalls[0].method).toBe('in');
+    expect(_terminalCalls[0]!.method).toBe('in');
     expect(map.get('s1')?.tasks_settled).toBe(5);
     expect(map.get('s2')?.tasks_settled).toBe(3);
   });

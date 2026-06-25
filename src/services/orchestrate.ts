@@ -217,7 +217,7 @@ function greedyPlan(
   // (reemplaza el placeholder $1 del middleware). Los steps 1..N los sigue
   // debitando compose (guard i>0). Por eso `cost` = precio del primer step, NO
   // la suma del plan (sumarlo duplicaría 1..N → double-charge).
-  const step0Cost = selected.length > 0 ? selected[0].priceUsdc : 0;
+  const step0Cost = selected[0]?.priceUsdc ?? 0;
 
   // Suma total del plan: solo para el texto de reasoning (no es base del débito).
   const totalEstimate = selected.reduce((sum, a) => sum + a.priceUsdc, 0);
@@ -424,9 +424,10 @@ export const orchestrateService = {
         // step-0. Los steps 1..N los debita compose (guard i>0). Por eso la base
         // del débito es el precio del primer agente budgeteado, NO `totalCost`
         // (sumar el plan duplicaría 1..N → double-charge).
+        const step0Slug = budgetedAgents[0]?.slug;
         const step0Agent =
-          budgetedAgents.length > 0
-            ? discovered.agents.find((d) => d.slug === budgetedAgents[0].slug)
+          step0Slug !== undefined
+            ? discovered.agents.find((d) => d.slug === step0Slug)
             : undefined;
         plannedCostUsd = step0Agent?.priceUsdc ?? 0;
         reasoning = plan.reasoning;

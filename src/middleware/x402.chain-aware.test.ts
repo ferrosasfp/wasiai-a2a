@@ -152,11 +152,11 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
 
       expect(res.statusCode).toBe(402);
       const body = res.json() as ChallengeBody;
-      expect(body.accepts[0].network).toBe('eip155:84532');
-      expect(body.accepts[0].asset).toBe(
+      expect(body.accepts[0]!.network).toBe('eip155:84532');
+      expect(body.accepts[0]!.asset).toBe(
         '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
       );
-      expect(body.accepts[0].maxAmountRequired).toBe('1000000');
+      expect(body.accepts[0]!.maxAmountRequired).toBe('1000000');
     } finally {
       await app.close();
     }
@@ -218,8 +218,8 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
 
       expect(res.statusCode).toBe(402);
       const body = res.json() as ChallengeBody;
-      expect(body.accepts[0].network).toBe('eip155:2368');
-      expect(body.accepts[0].maxAmountRequired).toBe('1000000000000000000');
+      expect(body.accepts[0]!.network).toBe('eip155:2368');
+      expect(body.accepts[0]!.maxAmountRequired).toBe('1000000000000000000');
     } finally {
       await app.close();
     }
@@ -377,8 +377,10 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
 
       expect(res.statusCode).toBe(402);
       const body = res.json() as ChallengeBody;
-      expect(body.accepts[0].maxAmountRequired).toBe('1000000');
-      expect(body.accepts[0].maxAmountRequired).not.toBe('1000000000000000000');
+      expect(body.accepts[0]!.maxAmountRequired).toBe('1000000');
+      expect(body.accepts[0]!.maxAmountRequired).not.toBe(
+        '1000000000000000000',
+      );
     } finally {
       await app.close();
     }
@@ -407,7 +409,7 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
       });
       expect(resBase.statusCode).toBe(402);
       const bodyBase = resBase.json() as ChallengeBody;
-      expect(bodyBase.accepts[0].maxAmountRequired).toBe('7777777');
+      expect(bodyBase.accepts[0]!.maxAmountRequired).toBe('7777777');
     } finally {
       await appBase.close();
     }
@@ -431,7 +433,7 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
       });
       expect(resDefault.statusCode).toBe(402);
       const bodyDefault = resDefault.json() as ChallengeBody;
-      expect(bodyDefault.accepts[0].maxAmountRequired).toBe('7777777');
+      expect(bodyDefault.accepts[0]!.maxAmountRequired).toBe('7777777');
     } finally {
       await appDefault.close();
     }

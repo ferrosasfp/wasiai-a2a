@@ -139,13 +139,13 @@ describe('set', () => {
     expect(result.destination).toBe('kite/translator');
     expect(result.max_usd).toBe('50.000000');
     const upsertRow = (chain.upsert as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as Record<string, unknown>;
+      .calls[0]![0] as Record<string, unknown>;
     // owner_ref/key_id desde callerKey, NUNCA del input (AC-7).
     expect(upsertRow.owner_ref).toBe('user-1');
     expect(upsertRow.key_id).toBe('key-1');
     expect(upsertRow.destination).toBe('kite/translator');
     const onConflict = (chain.upsert as ReturnType<typeof vi.fn>).mock
-      .calls[0][1] as Record<string, unknown>;
+      .calls[0]![1] as Record<string, unknown>;
     expect(onConflict.onConflict).toBe('key_id,destination');
   });
 
@@ -174,7 +174,7 @@ describe('set', () => {
       makeInput({ destination: '  KITE/Translator ' }),
     );
     const upsertRow = (chain.upsert as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as Record<string, unknown>;
+      .calls[0]![0] as Record<string, unknown>;
     expect(upsertRow.destination).toBe('kite/translator');
   });
 
@@ -245,7 +245,7 @@ describe('set', () => {
     expect(result.window_type).toBe('rolling');
     expect(result.window_secs).toBe(86400);
     const upsertRow = (chain.upsert as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as Record<string, unknown>;
+      .calls[0]![0] as Record<string, unknown>;
     expect(upsertRow.window_secs).toBe(86400);
   });
 
@@ -287,7 +287,7 @@ describe('list', () => {
 
     const result = await spendPolicyService.list('key-1', 'user-1');
     expect(result).toHaveLength(1);
-    expect(result[0].destination).toBe('kite/translator');
+    expect(result[0]!.destination).toBe('kite/translator');
     expect(chain.eq).toHaveBeenCalledWith('key_id', 'key-1');
     expect(chain.eq).toHaveBeenCalledWith('owner_ref', 'user-1');
   });

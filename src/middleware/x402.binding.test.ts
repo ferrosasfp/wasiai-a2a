@@ -270,7 +270,7 @@ describe('x402 middleware — inbound binding (WKH-SEC-03)', () => {
       });
       expect(res.statusCode).toBe(200);
       expect(mockNonceInsert).toHaveBeenCalledTimes(1);
-      expect(mockNonceInsert.mock.calls[0][0]).toMatchObject({
+      expect(mockNonceInsert.mock.calls[0]![0]).toMatchObject({
         network: 'eip155:84532',
       });
       expect(mockBaseSettle).toHaveBeenCalledTimes(1);
@@ -471,8 +471,8 @@ describe('x402 middleware — inbound binding (WKH-SEC-03)', () => {
       });
       expect(res.statusCode).toBe(402);
       const body = res.json() as ChallengeBody;
-      expect(body.accepts[0].payTo).toBe(SERVER_WALLET);
-      expect(body.accepts[0].maxAmountRequired).toBe('1000000');
+      expect(body.accepts[0]!.payTo).toBe(SERVER_WALLET);
+      expect(body.accepts[0]!.maxAmountRequired).toBe('1000000');
     } finally {
       await app.close();
     }

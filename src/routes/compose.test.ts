@@ -632,7 +632,7 @@ describe('compose route — AUDIT A1 step-0 refund on failure', () => {
     expect(res.statusCode).toBe(400);
     // Reembolsa EXACTAMENTE el step-0 (0.30) con el mismo destino del débito.
     expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
-    const call = mockCreditWithDest.mock.calls[0];
+    const call = mockCreditWithDest.mock.calls[0]!;
     expect(call[0]).toBe('k1'); // keyId
     expect(call[1]).toBe(2368); // chainId
     expect(call[2]).toBeCloseTo(0.3, 6); // refundUsd = composeEstimatedCostUsd
@@ -696,7 +696,7 @@ describe('compose route — AUDIT A1 step-0 refund on failure', () => {
 
     expect(res.statusCode).toBe(400);
     expect(mockCredit).toHaveBeenCalledTimes(1);
-    const call = mockCredit.mock.calls[0];
+    const call = mockCredit.mock.calls[0]!;
     expect(call[2]).toBeCloseTo(0.3, 6);
     expect(mockCreditWithDest).not.toHaveBeenCalled();
   });

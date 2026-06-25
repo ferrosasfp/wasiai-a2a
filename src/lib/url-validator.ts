@@ -85,7 +85,16 @@ function parseIPv4(ip: string): [number, number, number, number] | null {
     if (n < 0 || n > 255) return null;
     octets.push(n);
   }
-  return [octets[0], octets[1], octets[2], octets[3]];
+  const [a, b, c, d] = octets;
+  if (
+    a === undefined ||
+    b === undefined ||
+    c === undefined ||
+    d === undefined
+  ) {
+    return null;
+  }
+  return [a, b, c, d];
 }
 
 /**
@@ -135,7 +144,8 @@ function isPrivateIPv6(ip: string): boolean {
   // Unspecified
   if (lower === '::' || lower === '0:0:0:0:0:0:0:0') return true;
   // Strip zone id (e.g. "fe80::1%eth0")
-  const bare = lower.split('%')[0];
+  // split() on a non-empty string always yields ≥1 element, so [0] is defined.
+  const bare = lower.split('%')[0] ?? lower;
   // fc00::/7 — first byte 0xFC or 0xFD (first hex pair "fc" or "fd")
   if (/^fc[0-9a-f]{2}:/.test(bare) || /^fd[0-9a-f]{2}:/.test(bare)) return true;
   // fe80::/10 — first 10 bits are 1111 1110 10 — first hex pair starts with
@@ -145,10 +155,10 @@ function isPrivateIPv6(ip: string): boolean {
   // DT-B: IPv4-mapped IPv6 — bypass that the legacy MCP validator missed.
   // Case A: ::ffff:a.b.c.d (dotted form)
   const dotted = bare.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (dotted && isPrivateIPv4(dotted[1])) return true;
+  if (dotted?.[1] !== undefined && isPrivateIPv4(dotted[1])) return true;
   // Case B: ::ffff:abcd:efgh (hex compressed form)
   const hex = bare.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (hex) {
+  if (hex?.[1] !== undefined && hex[2] !== undefined) {
     const hi = parseInt(hex[1], 16);
     const lo = parseInt(hex[2], 16);
     const ipv4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${

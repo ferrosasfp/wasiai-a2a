@@ -137,7 +137,7 @@ describe('auth spend-policies endpoints', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual(POLICY);
     // AC-7: el service recibe el callerKey (owner_ref/key_id NUNCA del body).
-    const [callerKey, input] = mockSet.mock.calls[0];
+    const [callerKey, input] = mockSet.mock.calls[0]!;
     expect(callerKey.owner_ref).toBe('user-1');
     expect(callerKey.id).toBe('key-1');
     expect(input.destination).toBe('kite/translator');
@@ -165,7 +165,7 @@ describe('auth spend-policies endpoints', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    const [, input] = mockSet.mock.calls[0];
+    const [, input] = mockSet.mock.calls[0]!;
     expect(input.window_type).toBe('rolling');
     expect(input.window_secs).toBe(86400);
   });

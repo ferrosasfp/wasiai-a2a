@@ -232,6 +232,10 @@ export async function verifyDeposit(
 
   // 6. token + recipient + amount (AC-1).
   const token = bundle.payment.supportedTokens[0];
+  if (!token) {
+    // bundle sin token soportado → ningún Transfer puede matchear (TOKEN_MISMATCH).
+    return { ok: false, reason: 'TOKEN_MISMATCH', confirmations };
+  }
   const expectedTokenAddr = token.address.toLowerCase();
   const expectedTreasury = resolveTreasury(chainKey);
   if (!expectedTreasury) {

@@ -131,7 +131,7 @@ describe('logOwnershipMismatch — PII-safe (P2-7)', () => {
     }
 
     expect(warnings).toHaveLength(1);
-    const payload = warnings[0][1] as Record<string, unknown>;
+    const payload = warnings[0]![1] as Record<string, unknown>;
     expect(payload.op).toBe('getBalance');
     // El id/owner crudos NUNCA aparecen — solo su hash truncado.
     const serialized = JSON.stringify(payload);
@@ -158,7 +158,7 @@ describe('logOwnershipMismatch — PII-safe (P2-7)', () => {
       console.warn = orig;
     }
 
-    const payload = warnings[0][1] as Record<string, unknown>;
+    const payload = warnings[0]![1] as Record<string, unknown>;
     expect(payload.op).toBe('registryUpdate');
     const serialized = JSON.stringify(payload);
     expect(serialized).not.toContain('reg-secret');
@@ -185,7 +185,7 @@ describe('logOwnershipMismatch — PII-safe (P2-7)', () => {
       console.warn = orig;
     }
 
-    const payload = warnings[0][1] as Record<string, unknown>;
+    const payload = warnings[0]![1] as Record<string, unknown>;
     expect(payload).not.toHaveProperty('actualOwnerRefHash');
   });
 });

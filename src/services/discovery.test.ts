@@ -154,8 +154,8 @@ describe('discoveryService', () => {
       const result = await discoveryService.discover({});
 
       expect(result.agents).toHaveLength(1);
-      expect(result.agents[0].slug).toBe('active-1');
-      expect(result.agents[0].status).toBe('active');
+      expect(result.agents[0]!.slug).toBe('active-1');
+      expect(result.agents[0]!.status).toBe('active');
     });
   });
 
@@ -182,8 +182,8 @@ describe('discoveryService', () => {
       const result = await discoveryService.discover({ verified: true });
 
       expect(result.agents).toHaveLength(1);
-      expect(result.agents[0].slug).toBe('verified-1');
-      expect(result.agents[0].verified).toBe(true);
+      expect(result.agents[0]!.slug).toBe('verified-1');
+      expect(result.agents[0]!.verified).toBe(true);
     });
   });
 
@@ -193,8 +193,8 @@ describe('discoveryService', () => {
 
       const result = await discoveryService.discover({});
 
-      expect(result.agents[0].verified).toBe(false);
-      expect(result.agents[0].status).toBe('active');
+      expect(result.agents[0]!.verified).toBe(false);
+      expect(result.agents[0]!.status).toBe('active');
     });
   });
 
@@ -217,8 +217,8 @@ describe('discoveryService', () => {
 
       const result = await discoveryService.discover({});
 
-      expect(result.agents[0].slug).toBe('verified');
-      expect(result.agents[1].slug).toBe('unverified');
+      expect(result.agents[0]!.slug).toBe('verified');
+      expect(result.agents[1]!.slug).toBe('unverified');
     });
   });
 
@@ -335,12 +335,12 @@ describe('discoveryService', () => {
       const result = await discoveryService.discover({});
 
       expect(result.agents).toHaveLength(1);
-      expect(result.agents[0].payment).toBeDefined();
+      expect(result.agents[0]!.payment).toBeDefined();
       // Discovery normalizes avalanche-testnet → avalanche (canonical), independent
       // of the middleware ChainKey normalizer (avalanche-fuji). See SDD R-8.
-      expect(result.agents[0].payment?.chain).toBe('avalanche');
-      expect(result.agents[0].payment?.asset).toBe('USDC');
-      expect(result.agents[0].payment?.method).toBe('x402');
+      expect(result.agents[0]!.payment?.chain).toBe('avalanche');
+      expect(result.agents[0]!.payment?.asset).toBe('USDC');
+      expect(result.agents[0]!.payment?.method).toBe('x402');
     });
 
     it('exposes payment for a Kite-paid agent (chain="kite-ozone-testnet" in discovery allowlist after WKH-AGENTSHOP-1)', async () => {
@@ -365,10 +365,10 @@ describe('discoveryService', () => {
       const result = await discoveryService.discover({});
 
       expect(result.agents).toHaveLength(1);
-      expect(result.agents[0].slug).toBe('kite-pay-agent');
-      expect(result.agents[0].payment?.chain).toBe('kite-ozone-testnet');
-      expect(result.agents[0].payment?.asset).toBe('PYUSD');
-      expect(result.agents[0].payment?.method).toBe('x402');
+      expect(result.agents[0]!.slug).toBe('kite-pay-agent');
+      expect(result.agents[0]!.payment?.chain).toBe('kite-ozone-testnet');
+      expect(result.agents[0]!.payment?.asset).toBe('PYUSD');
+      expect(result.agents[0]!.payment?.method).toBe('x402');
     });
 
     it('returns payment: undefined for an agent without payment metadata in /discover output', async () => {
@@ -386,8 +386,8 @@ describe('discoveryService', () => {
       const result = await discoveryService.discover({});
 
       expect(result.agents).toHaveLength(1);
-      expect(result.agents[0].slug).toBe('free-agent');
-      expect(result.agents[0].payment).toBeUndefined();
+      expect(result.agents[0]!.slug).toBe('free-agent');
+      expect(result.agents[0]!.payment).toBeUndefined();
     });
   });
 
@@ -503,10 +503,10 @@ describe('discoveryService', () => {
       const result = await discoveryService.discover({});
 
       expect(result.agents).toHaveLength(1);
-      expect(result.agents[0].slug).toBe('base-pay-agent');
-      expect(result.agents[0].payment?.chain).toBe('base-sepolia');
-      expect(result.agents[0].payment?.asset).toBe('USDC');
-      expect(result.agents[0].payment?.method).toBe('x402');
+      expect(result.agents[0]!.slug).toBe('base-pay-agent');
+      expect(result.agents[0]!.payment?.chain).toBe('base-sepolia');
+      expect(result.agents[0]!.payment?.asset).toBe('USDC');
+      expect(result.agents[0]!.payment?.method).toBe('x402');
     });
 
     it('T-AC7: avalanche-fuji agent now has payment populated (was payment=null pre-WKH-113)', async () => {
@@ -527,8 +527,8 @@ describe('discoveryService', () => {
       const result = await discoveryService.discover({});
 
       expect(result.agents).toHaveLength(1);
-      expect(result.agents[0].payment).toBeDefined();
-      expect(result.agents[0].payment?.chain).toBe('avalanche-fuji');
+      expect(result.agents[0]!.payment).toBeDefined();
+      expect(result.agents[0]!.payment?.chain).toBe('avalanche-fuji');
     });
   });
 
@@ -906,7 +906,7 @@ describe('discoveryService', () => {
       ]);
 
       const result = await discoveryService.discover({});
-      expect(result.agents[0].identity).toEqual({
+      expect(result.agents[0]!.identity).toEqual({
         erc8004_token_id: '42',
         chain_id: 84532,
         verified: true,
@@ -933,8 +933,8 @@ describe('discoveryService', () => {
       ]);
 
       const result = await discoveryService.discover({});
-      expect(result.agents[0].identity).toBeUndefined();
-      expect('identity' in result.agents[0]).toBe(false);
+      expect(result.agents[0]!.identity).toBeUndefined();
+      expect('identity' in result.agents[0]!).toBe(false);
     });
 
     it('SEC-INV (MNR-1): attacker agent declares victim token V → no badge (inverse vector)', async () => {
@@ -965,7 +965,7 @@ describe('discoveryService', () => {
       ]);
 
       const result = await discoveryService.discover({});
-      expect(result.agents[0].identity).toBeUndefined();
+      expect(result.agents[0]!.identity).toBeUndefined();
     });
 
     it('SEC-ORIG: classic slug spoof stays closed (binding declares a different agent)', async () => {
@@ -996,7 +996,7 @@ describe('discoveryService', () => {
       ]);
 
       const result = await discoveryService.discover({});
-      expect(result.agents[0].identity).toBeUndefined();
+      expect(result.agents[0]!.identity).toBeUndefined();
     });
 
     it('SEC-LEGACY (AC-9): binding v1 without anchors → no badge in discover', async () => {
@@ -1023,7 +1023,7 @@ describe('discoveryService', () => {
       ]);
 
       const result = await discoveryService.discover({});
-      expect(result.agents[0].identity).toBeUndefined();
+      expect(result.agents[0]!.identity).toBeUndefined();
     });
 
     it('DT-18: DB failure during enrich → agent without identity, discover NOT broken', async () => {
@@ -1040,7 +1040,7 @@ describe('discoveryService', () => {
 
       const result = await discoveryService.discover({});
       expect(result.agents).toHaveLength(1);
-      expect(result.agents[0].identity).toBeUndefined();
+      expect(result.agents[0]!.identity).toBeUndefined();
     });
 
     it('SEC-MATCH: getAgent() sets identity when binding declares THIS agent', async () => {
@@ -1257,8 +1257,8 @@ describe('discover — reputation enrichment (WKH-103)', () => {
 
     const result = await discoveryService.discover({});
 
-    expect(result.agents[0].computedReputation?.score).toBe(77);
-    expect(result.agents[0].computedReputation?.source).toBe('off-chain');
+    expect(result.agents[0]!.computedReputation?.score).toBe(77);
+    expect(result.agents[0]!.computedReputation?.source).toBe('off-chain');
   });
 
   // T-AC6: sort uses computedReputation.score desc, falls back to upstream.
@@ -1284,8 +1284,8 @@ describe('discover — reputation enrichment (WKH-103)', () => {
 
     const result = await discoveryService.discover({});
 
-    expect(result.agents[0].slug).toBe('high');
-    expect(result.agents[1].slug).toBe('low');
+    expect(result.agents[0]!.slug).toBe('high');
+    expect(result.agents[1]!.slug).toBe('low');
   });
 
   it('T-AC6 fallback: agents without computed score fall back to upstream reputation', async () => {
@@ -1299,7 +1299,7 @@ describe('discover — reputation enrichment (WKH-103)', () => {
     const result = await discoveryService.discover({});
 
     // no-score uses upstream 80, beats has-score computed 10
-    expect(result.agents[0].slug).toBe('no-score');
+    expect(result.agents[0]!.slug).toBe('no-score');
   });
 
   // B5 (audit 2026-06-24): un agente con reputation no numérica/ausente
@@ -1318,7 +1318,7 @@ describe('discover — reputation enrichment (WKH-103)', () => {
     const result = await discoveryService.discover({});
 
     // El agente con reputation real (50) queda primero; los NaN ordenan como 0.
-    expect(result.agents[0].slug).toBe('real-rep');
+    expect(result.agents[0]!.slug).toBe('real-rep');
     // El sort no rompe: los 3 agentes están presentes.
     expect(result.agents.map((a) => a.slug).sort()).toEqual([
       'nan-rep',
@@ -1337,7 +1337,7 @@ describe('discover — reputation enrichment (WKH-103)', () => {
     const result = await discoveryService.discover({});
 
     expect(result.agents).toHaveLength(1);
-    expect(result.agents[0].computedReputation).toBeUndefined();
+    expect(result.agents[0]!.computedReputation).toBeUndefined();
   });
 
   // T-NO-N+1 (e2e): N agents → computeReputationBatch called ONCE with all slugs.
@@ -1364,6 +1364,6 @@ describe('discover — reputation enrichment (WKH-103)', () => {
 
     const result = await discoveryService.discover({});
 
-    expect('computedReputation' in result.agents[0]).toBe(false);
+    expect('computedReputation' in result.agents[0]!).toBe(false);
   });
 });

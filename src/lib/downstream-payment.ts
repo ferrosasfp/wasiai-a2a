@@ -197,7 +197,15 @@ export async function signAndSettleDownstream(
 
   // 8. Compute the atomic value with the ADAPTER's decimals (CD-8). Kite/PYUSD
   //    is 18-dec — using a fixed 6 would sign a 10^12× wrong value.
-  const decimals = adapter.supportedTokens[0].decimals;
+  const primaryToken = adapter.supportedTokens[0];
+  if (!primaryToken) {
+    logger.warn(
+      { agentSlug: agent.slug, code: 'INVALID_PRICE' },
+      '[Downstream] adapter has no supported tokens',
+    );
+    return null;
+  }
+  const decimals = primaryToken.decimals;
   let value: bigint;
   try {
     value = parseUnits(String(agent.priceUsdc), decimals);

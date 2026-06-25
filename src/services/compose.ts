@@ -101,6 +101,8 @@ export const composeService = {
     const discoverCache = createDiscoverCache();
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
+      // i < steps.length garantiza step definido; guard explícito para el tipo.
+      if (step === undefined) continue;
       const agent = await this.resolveAgent(step, discoverCache);
       if (!agent)
         return {
@@ -557,7 +559,9 @@ export const composeService = {
     totalCost += agent.priceUsdc;
     totalLatency += latencyMs;
     if (i < steps.length - 1) {
-      const nextStep = steps[i + 1];
+      // safe: el guard `i < steps.length - 1` garantiza i+1 < steps.length,
+      // por lo que steps[i + 1] nunca es undefined.
+      const nextStep = steps[i + 1]!;
       const nextAgent = await this.resolveAgent(nextStep, discoverCache);
       // (discoverCache reused from compose() — B7)
       const inputSchema = nextAgent?.metadata?.inputSchema as

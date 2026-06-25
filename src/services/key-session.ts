@@ -110,8 +110,9 @@ function parentAvailableBalance(budget: Record<string, string>): number {
   const funded = Object.entries(budget).filter(
     ([, bal]) => Number.parseFloat(bal) > 0,
   );
-  if (funded.length === 1) {
-    return Number.parseFloat(funded[0][1]);
+  const onlyFunded = funded[0];
+  if (funded.length === 1 && onlyFunded) {
+    return Number.parseFloat(onlyFunded[1]);
   }
   const defaultChainId = getAdaptersBundle()?.chainConfig.chainId;
   if (defaultChainId !== undefined) {

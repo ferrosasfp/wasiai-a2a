@@ -180,7 +180,7 @@ function parseRegistrationEntry(
   // 2a) CAIP-10-like agentId string.
   if (typeof o.agentId === 'string') {
     const m = CAIP_AGENT_ID_RE.exec(o.agentId);
-    if (m) {
+    if (m?.[1] !== undefined && m[2] !== undefined) {
       const chainId = Number.parseInt(m[1], 10);
       if (ERC8004_ALLOWED_CHAINS.has(chainId)) {
         return { tokenId: m[2], chainId };

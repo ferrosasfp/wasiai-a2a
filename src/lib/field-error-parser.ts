@@ -25,8 +25,9 @@ export function parseFieldErrors(errorMessage: string): string[] | null {
   try {
     // ── Step 1: status guard — only 4xx are retry-eligible.
     const statusMatch = /returned (\d{3})/.exec(errorMessage);
-    if (!statusMatch) return null;
-    const status = Number.parseInt(statusMatch[1], 10);
+    const statusDigits = statusMatch?.[1];
+    if (statusDigits === undefined) return null;
+    const status = Number.parseInt(statusDigits, 10);
     if (status < 400 || status >= 500) return null;
 
     // ── Step 2: extract the JSON object substring (first `{` … last `}`).

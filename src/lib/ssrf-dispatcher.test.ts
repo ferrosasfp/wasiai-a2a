@@ -56,7 +56,7 @@ describe('ssrfLookup — connect-time predicate', () => {
     const cb = vi.fn();
     ssrfLookup('evil.example', { all: true }, cb);
     expect(cb).toHaveBeenCalledTimes(1);
-    const err = cb.mock.calls[0][0];
+    const err = cb.mock.calls[0]![0];
     expect(err).toBeInstanceOf(SSRFConnectBlockedError);
     expect((err as SSRFConnectBlockedError).address).toBe('169.254.169.254');
   });
@@ -69,7 +69,7 @@ describe('ssrfLookup — connect-time predicate', () => {
     );
     const cb = vi.fn();
     ssrfLookup('evil.example', { all: true }, cb);
-    expect(cb.mock.calls[0][0]).toBeInstanceOf(SSRFConnectBlockedError);
+    expect(cb.mock.calls[0]![0]).toBeInstanceOf(SSRFConnectBlockedError);
   });
 
   it('rejects an IPv6 loopback (::1) result', () => {
@@ -80,7 +80,7 @@ describe('ssrfLookup — connect-time predicate', () => {
     );
     const cb = vi.fn();
     ssrfLookup('evil.example', { all: true }, cb);
-    expect(cb.mock.calls[0][0]).toBeInstanceOf(SSRFConnectBlockedError);
+    expect(cb.mock.calls[0]![0]).toBeInstanceOf(SSRFConnectBlockedError);
   });
 
   it('rejects when ANY address in a multi-A result is private (hidden behind a public one)', () => {
@@ -94,7 +94,7 @@ describe('ssrfLookup — connect-time predicate', () => {
     );
     const cb = vi.fn();
     ssrfLookup('mixed.example', { all: true }, cb);
-    expect(cb.mock.calls[0][0]).toBeInstanceOf(SSRFConnectBlockedError);
+    expect(cb.mock.calls[0]![0]).toBeInstanceOf(SSRFConnectBlockedError);
   });
 
   it('passes an all-public result through unchanged', () => {
@@ -107,8 +107,8 @@ describe('ssrfLookup — connect-time predicate', () => {
     const cb = vi.fn();
     ssrfLookup('public.example', { all: true }, cb);
     expect(cb).toHaveBeenCalledTimes(1);
-    expect(cb.mock.calls[0][0]).toBeNull();
-    expect(cb.mock.calls[0][1]).toEqual(addrs);
+    expect(cb.mock.calls[0]![0]).toBeNull();
+    expect(cb.mock.calls[0]![1]).toEqual(addrs);
   });
 
   it('propagates a DNS lookup error', () => {
@@ -120,7 +120,7 @@ describe('ssrfLookup — connect-time predicate', () => {
     );
     const cb = vi.fn();
     ssrfLookup('nx.example', { all: true }, cb);
-    expect(cb.mock.calls[0][0]).toBe(dnsErr);
+    expect(cb.mock.calls[0]![0]).toBe(dnsErr);
   });
 });
 
@@ -198,7 +198,7 @@ describe('ssrfFetch — connect-time enforcement (real undici Agent)', () => {
       expect(res).toBe(fakeResponse);
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       // The wrapper must attach a dispatcher (the SSRF Agent) to the init.
-      const init = fetchSpy.mock.calls[0][1] as Record<string, unknown>;
+      const init = fetchSpy.mock.calls[0]![1] as Record<string, unknown>;
       expect(init.dispatcher).toBeDefined();
       expect(init.method).toBe('GET');
     } finally {

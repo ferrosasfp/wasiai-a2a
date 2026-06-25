@@ -110,7 +110,7 @@ export async function resolveCallerKey(
     const authHeader = request.headers.authorization;
     if (authHeader && typeof authHeader === 'string') {
       const match = /^bearer\s+(.+)$/i.exec(authHeader);
-      if (match?.[1].startsWith('wasi_a2a_')) {
+      if (match?.[1]?.startsWith('wasi_a2a_')) {
         rawKey = match[1];
       }
     }
@@ -140,7 +140,7 @@ export function rawKeyFromRequest(request: FastifyRequest): string | undefined {
   const authHeader = request.headers.authorization;
   if (authHeader && typeof authHeader === 'string') {
     const match = /^bearer\s+(.+)$/i.exec(authHeader);
-    if (match?.[1].startsWith('wasi_a2a_')) {
+    if (match?.[1]?.startsWith('wasi_a2a_')) {
       return match[1];
     }
   }

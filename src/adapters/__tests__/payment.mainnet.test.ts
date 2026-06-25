@@ -68,7 +68,7 @@ describe('KiteOzonePaymentAdapter — KITE_NETWORK selection', () => {
 
     it('default symbol = PYUSD', () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      expect(adapter.supportedTokens[0].symbol).toBe('PYUSD');
+      expect(adapter.supportedTokens[0]!.symbol).toBe('PYUSD');
       warnSpy.mockRestore();
     });
   });
@@ -111,7 +111,7 @@ describe('KiteOzonePaymentAdapter — KITE_NETWORK selection', () => {
 
     it('default symbol = USDC.e', () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      expect(adapter.supportedTokens[0].symbol).toBe('USDC.e');
+      expect(adapter.supportedTokens[0]!.symbol).toBe('USDC.e');
       warnSpy.mockRestore();
     });
 
@@ -141,7 +141,7 @@ describe('KiteOzonePaymentAdapter — KITE_NETWORK selection', () => {
 
       const lastCallIndex = mockCreateWallet.mock.results.length - 1;
       const walletClientMock =
-        mockCreateWallet.mock.results[lastCallIndex].value;
+        mockCreateWallet.mock.results[lastCallIndex]!.value;
       const signTypedDataMock = walletClientMock.signTypedData as ReturnType<
         typeof vi.fn
       >;

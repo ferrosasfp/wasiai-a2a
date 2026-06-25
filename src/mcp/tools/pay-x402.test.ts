@@ -112,7 +112,7 @@ describe('payX402', () => {
       timeoutSeconds: 300,
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    const secondCall = fetchMock.mock.calls[1];
+    const secondCall = fetchMock.mock.calls[1]!;
     const secondInit = secondCall[1] as RequestInit;
     const secondHeaders = secondInit.headers as Record<string, string>;
     expect(secondHeaders['payment-signature']).toBe('base64-payload');

@@ -137,16 +137,16 @@ describe('Avalanche payment adapter — contract', () => {
 
   it('supportedTokens[0] → USDC, 6 decimals, Fuji default address', () => {
     expect(adapter.supportedTokens).toHaveLength(1);
-    expect(adapter.supportedTokens[0].symbol).toBe('USDC');
-    expect(adapter.supportedTokens[0].decimals).toBe(6);
-    expect(adapter.supportedTokens[0].address.toLowerCase()).toBe(
+    expect(adapter.supportedTokens[0]!.symbol).toBe('USDC');
+    expect(adapter.supportedTokens[0]!.decimals).toBe(6);
+    expect(adapter.supportedTokens[0]!.address.toLowerCase()).toBe(
       FUJI_USDC_DEFAULT.toLowerCase(),
     );
   });
 
   it('supportedTokens mainnet → Avalanche C-Chain USDC default', () => {
     const m = new AvalanchePaymentAdapter({ network: 'mainnet' });
-    expect(m.supportedTokens[0].address.toLowerCase()).toBe(
+    expect(m.supportedTokens[0]!.address.toLowerCase()).toBe(
       AVALANCHE_USDC_DEFAULT.toLowerCase(),
     );
   });
@@ -213,7 +213,7 @@ describe('Avalanche payment adapter — contract', () => {
     });
     expect(result.valid).toBe(true);
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    const [url, init] = mockFetch.mock.calls[0];
+    const [url, init] = mockFetch.mock.calls[0]!;
     expect(url).toMatch(/\/verify$/);
     expect((init as { method: string }).method).toBe('POST');
     const body = JSON.parse((init as { body: string }).body);
@@ -246,7 +246,7 @@ describe('Avalanche payment adapter — contract', () => {
         maxAmountRequired: '1000000',
       },
     });
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     const body = JSON.parse((init as { body: string }).body);
     expect(body.accepted.payTo).toBe(
       '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
@@ -302,7 +302,7 @@ describe('Avalanche payment adapter — contract', () => {
     });
     expect(result.success).toBe(true);
     expect(result.txHash).toBe('0xDEADBEEF');
-    const [url] = mockFetch.mock.calls[0];
+    const [url] = mockFetch.mock.calls[0]!;
     expect(url).toMatch(/\/settle$/);
   });
 
@@ -354,7 +354,7 @@ describe('Avalanche payment adapter — contract', () => {
       signature: '0xSIG',
       network: 'eip155:43113',
     });
-    const [url] = mockFetch.mock.calls[0];
+    const [url] = mockFetch.mock.calls[0]!;
     expect(url).toBe('https://custom-facilitator.test/verify');
   });
 
@@ -378,7 +378,7 @@ describe('Avalanche payment adapter — contract', () => {
       signature: '0xSIG',
       network: 'eip155:43113',
     });
-    const [url] = mockFetch.mock.calls[0];
+    const [url] = mockFetch.mock.calls[0]!;
     expect(url).toBe('https://shared-facilitator.test/verify');
   });
 
@@ -502,7 +502,7 @@ describe('Avalanche payment adapter — facilitator bearer auth (AVAX-BEARER)', 
       json: async () => ({ verified: true }),
     });
     await adapter.verify(proofInput);
-    const [url, init] = mockFetch.mock.calls[0];
+    const [url, init] = mockFetch.mock.calls[0]!;
     expect(url).toMatch(/\/verify$/);
     const headers = (init as { headers: Record<string, string> }).headers;
     expect(headers.Authorization).toBe('Bearer test-facilitator-key');
@@ -518,7 +518,7 @@ describe('Avalanche payment adapter — facilitator bearer auth (AVAX-BEARER)', 
       json: async () => ({ settled: true, transactionHash: '0xDEADBEEF' }),
     });
     await adapter.settle(proofInput);
-    const [url, init] = mockFetch.mock.calls[0];
+    const [url, init] = mockFetch.mock.calls[0]!;
     expect(url).toMatch(/\/settle$/);
     const headers = (init as { headers: Record<string, string> }).headers;
     expect(headers.Authorization).toBe('Bearer test-facilitator-key');
@@ -534,7 +534,7 @@ describe('Avalanche payment adapter — facilitator bearer auth (AVAX-BEARER)', 
       json: async () => ({ verified: true }),
     });
     await adapter.verify(proofInput);
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     const headers = (init as { headers: Record<string, string> }).headers;
     expect(headers.Authorization).toBe('Bearer shared-key');
   });
@@ -549,7 +549,7 @@ describe('Avalanche payment adapter — facilitator bearer auth (AVAX-BEARER)', 
       json: async () => ({ verified: true }),
     });
     await adapter.verify(proofInput);
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     const headers = (init as { headers: Record<string, string> }).headers;
     expect(headers.Authorization).toBe('Bearer avax-key');
   });
@@ -563,7 +563,7 @@ describe('Avalanche payment adapter — facilitator bearer auth (AVAX-BEARER)', 
     });
     const verifyResult = await adapter.verify(proofInput);
     expect(verifyResult.valid).toBe(true);
-    const [, verifyInit] = mockFetch.mock.calls[0];
+    const [, verifyInit] = mockFetch.mock.calls[0]!;
     expect(
       (verifyInit as { headers: Record<string, string> }).headers.Authorization,
     ).toBeUndefined();
@@ -575,7 +575,7 @@ describe('Avalanche payment adapter — facilitator bearer auth (AVAX-BEARER)', 
     });
     const settleResult = await adapter.settle(proofInput);
     expect(settleResult.success).toBe(true);
-    const [, settleInit] = mockFetch.mock.calls[1];
+    const [, settleInit] = mockFetch.mock.calls[1]!;
     expect(
       (settleInit as { headers: Record<string, string> }).headers.Authorization,
     ).toBeUndefined();
@@ -590,7 +590,7 @@ describe('Avalanche payment adapter — facilitator bearer auth (AVAX-BEARER)', 
       json: async () => ({ verified: true }),
     });
     await adapter.verify(proofInput);
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     expect(
       (init as { headers: Record<string, string> }).headers.Authorization,
     ).toBeUndefined();
@@ -607,7 +607,7 @@ describe('Avalanche payment adapter — facilitator bearer auth (AVAX-BEARER)', 
       }),
     });
     const result = await adapter.verify(proofInput);
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     const rawBody = (init as { body: string }).body;
     expect(rawBody).not.toContain('test-facilitator-key');
     expect(result.valid).toBe(false);

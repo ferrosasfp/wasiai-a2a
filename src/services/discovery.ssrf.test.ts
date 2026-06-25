@@ -138,7 +138,7 @@ describe('discoveryService — runtime SSRF guard (WKH-62 W1)', () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(agents).toHaveLength(1);
-    expect(agents[0].slug).toBe('a1');
+    expect(agents[0]!.slug).toBe('a1');
   });
 
   it('T-DISC-03: discover() — SSRF registry is dropped, sibling public registry still returns', async () => {
@@ -180,7 +180,7 @@ describe('discoveryService — runtime SSRF guard (WKH-62 W1)', () => {
     // The SSRF registry's queryRegistry throws; discover() catches in L70.
     // Only the good registry's agent surfaces.
     expect(result.agents).toHaveLength(1);
-    expect(result.agents[0].slug).toBe('g1');
+    expect(result.agents[0]!.slug).toBe('g1');
     // Only one fetch happened (for good registry).
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });

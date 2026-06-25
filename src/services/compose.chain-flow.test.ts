@@ -183,7 +183,7 @@ describe('WKH-113 chain-flow — discovery→compose (BASE-08)', () => {
 
     expect(result.success).toBe(true);
     expect(mockDownstream).toHaveBeenCalledTimes(1);
-    const agentAtSettle = mockDownstream.mock.calls[0][0] as Agent;
+    const agentAtSettle = mockDownstream.mock.calls[0]![0] as Agent;
     expect(agentAtSettle.payment?.chain).toBe('base-sepolia');
   });
 

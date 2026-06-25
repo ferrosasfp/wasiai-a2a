@@ -131,7 +131,7 @@ describe('create', () => {
     expect(result.session_id).toBe('sess-1');
     expect(result.session_token).toMatch(/^wasi_a2a_sess_[0-9a-f]{96}$/);
     const insertedRow = (insertChain.insert as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as Record<string, unknown>;
+      .calls[0]![0] as Record<string, unknown>;
     // DB guarda solo SHA-256(token), nunca el token plano (CD-3).
     expect(insertedRow.session_token_hash).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(insertedRow)).not.toContain(result.session_token);
@@ -218,7 +218,7 @@ describe('create', () => {
     );
     expect(result.scope.allowed_registries).toEqual(['a']);
     const insertedRow = (insertChain.insert as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as Record<string, unknown>;
+      .calls[0]![0] as Record<string, unknown>;
     expect(insertedRow.allowed_registries).toEqual(['a']);
   });
 
@@ -256,7 +256,7 @@ describe('create', () => {
     expect(result.signing_secret).toMatch(/^[0-9a-f]{64}$/);
 
     const insertedRow = (insertChain.insert as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as Record<string, unknown>;
+      .calls[0]![0] as Record<string, unknown>;
     // CD-5: el INSERT lleva el HASH, NUNCA el plano.
     expect(insertedRow.require_signature).toBe(true);
     expect(insertedRow.signing_secret_hash).toMatch(/^[0-9a-f]{64}$/);
@@ -285,7 +285,7 @@ describe('create', () => {
 
     expect(result.signing_secret).toBeUndefined();
     const insertedRow = (insertChain.insert as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as Record<string, unknown>;
+      .calls[0]![0] as Record<string, unknown>;
     expect(insertedRow.require_signature).toBe(false);
     expect(insertedRow.signing_secret_hash).toBeNull();
   });
@@ -605,9 +605,9 @@ describe('list', () => {
       'expired',
       'revoked',
     ]);
-    expect(items[0].session_id).toBe('s-active');
-    expect(items[0].spent).toBe('1.00');
-    expect(items[0].scope.allowed_registries).toEqual(['a']);
+    expect(items[0]!.session_id).toBe('s-active');
+    expect(items[0]!.spent).toBe('1.00');
+    expect(items[0]!.scope.allowed_registries).toEqual(['a']);
   });
 });
 

@@ -181,6 +181,14 @@ export async function verifyEscrowDeposit(
 
   // 7-8. Recorrer logs del CONTRATO ESCROW (no del token) y matchear keyId.
   const token = bundle.payment.supportedTokens[0];
+  if (!token) {
+    // bundle sin token soportado → no se puede derivar decimals/symbol (config inválida).
+    return {
+      ok: false,
+      reason: 'ESCROW_CONTRACT_NOT_CONFIGURED',
+      confirmations,
+    };
+  }
   let escrowEventSeen = false;
   let amountAtomic: bigint | undefined;
   let depositor: `0x${string}` | undefined;

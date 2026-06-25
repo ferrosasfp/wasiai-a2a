@@ -109,7 +109,7 @@ describe('Base adapter — factory shape', () => {
       String(args[0]).includes('BASE_NETWORK'),
     );
     expect(baseWarns.length).toBe(1);
-    expect(String(baseWarns[0][0])).toContain('devnet');
+    expect(String(baseWarns[0]![0])).toContain('devnet');
   });
 });
 
@@ -164,16 +164,16 @@ describe('Base payment adapter — contract', () => {
 
   it('supportedTokens[0] → USDC, 6 decimals, Base Sepolia default address', () => {
     expect(adapter.supportedTokens).toHaveLength(1);
-    expect(adapter.supportedTokens[0].symbol).toBe('USDC');
-    expect(adapter.supportedTokens[0].decimals).toBe(6);
-    expect(adapter.supportedTokens[0].address.toLowerCase()).toBe(
+    expect(adapter.supportedTokens[0]!.symbol).toBe('USDC');
+    expect(adapter.supportedTokens[0]!.decimals).toBe(6);
+    expect(adapter.supportedTokens[0]!.address.toLowerCase()).toBe(
       BASE_SEPOLIA_USDC_DEFAULT.toLowerCase(),
     );
   });
 
   it('supportedTokens mainnet → Base Mainnet USDC default', () => {
     const m = new BasePaymentAdapter({ network: 'mainnet' });
-    expect(m.supportedTokens[0].address.toLowerCase()).toBe(
+    expect(m.supportedTokens[0]!.address.toLowerCase()).toBe(
       BASE_MAINNET_USDC_DEFAULT.toLowerCase(),
     );
   });
@@ -279,7 +279,7 @@ describe('Base payment adapter — contract', () => {
     });
     expect(result.valid).toBe(true);
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    const [url, init] = mockFetch.mock.calls[0];
+    const [url, init] = mockFetch.mock.calls[0]!;
     expect(url).toMatch(/\/verify$/);
     expect((init as { method: string }).method).toBe('POST');
     const body = JSON.parse((init as { body: string }).body);
@@ -312,7 +312,7 @@ describe('Base payment adapter — contract', () => {
         maxAmountRequired: '1000000',
       },
     });
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     const body = JSON.parse((init as { body: string }).body);
     expect(body.accepted.payTo).toBe(
       '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
@@ -368,7 +368,7 @@ describe('Base payment adapter — contract', () => {
     });
     expect(result.success).toBe(true);
     expect(result.txHash).toBe('0xDEADBEEF');
-    const [url] = mockFetch.mock.calls[0];
+    const [url] = mockFetch.mock.calls[0]!;
     expect(url).toMatch(/\/settle$/);
   });
 
@@ -422,7 +422,7 @@ describe('Base payment adapter — contract', () => {
       signature: '0xSIG',
       network: 'eip155:84532',
     });
-    expect(mockFetch.mock.calls[0][0]).toBe(
+    expect(mockFetch.mock.calls[0]![0]).toBe(
       'https://base-facilitator.test/verify',
     );
   });
@@ -448,7 +448,7 @@ describe('Base payment adapter — contract', () => {
       signature: '0xSIG',
       network: 'eip155:84532',
     });
-    expect(mockFetch.mock.calls[0][0]).toBe(
+    expect(mockFetch.mock.calls[0]![0]).toBe(
       'https://cdp-facilitator.test/verify',
     );
   });
@@ -474,7 +474,7 @@ describe('Base payment adapter — contract', () => {
       signature: '0xSIG',
       network: 'eip155:84532',
     });
-    expect(mockFetch.mock.calls[0][0]).toBe(
+    expect(mockFetch.mock.calls[0]![0]).toBe(
       'https://shared-facilitator.test/verify',
     );
   });
@@ -599,7 +599,7 @@ describe('Base payment adapter — facilitator bearer auth (BASE-02)', () => {
       signature: '0xSIG',
       network: 'eip155:84532',
     });
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     const headers = (init as { headers: Record<string, string> }).headers;
     expect(headers.Authorization).toBe('Bearer test-facilitator-key');
     expect(headers['Content-Type']).toBe('application/json');
@@ -622,7 +622,7 @@ describe('Base payment adapter — facilitator bearer auth (BASE-02)', () => {
       signature: '0xSIG',
       network: 'eip155:84532',
     });
-    const [url, init] = mockFetch.mock.calls[0];
+    const [url, init] = mockFetch.mock.calls[0]!;
     expect(url).toMatch(/\/settle$/);
     const headers = (init as { headers: Record<string, string> }).headers;
     expect(headers.Authorization).toBe('Bearer test-facilitator-key');
@@ -642,7 +642,7 @@ describe('Base payment adapter — facilitator bearer auth (BASE-02)', () => {
       signature: '0xSIG',
       network: 'eip155:84532',
     });
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     const headers = (init as { headers: Record<string, string> }).headers;
     expect(headers.Authorization).toBe('Bearer shared-key');
   });
@@ -661,7 +661,7 @@ describe('Base payment adapter — facilitator bearer auth (BASE-02)', () => {
       signature: '0xSIG',
       network: 'eip155:84532',
     });
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     const headers = (init as { headers: Record<string, string> }).headers;
     expect(headers.Authorization).toBe('Bearer base-key');
   });
@@ -691,10 +691,10 @@ describe('Base payment adapter — facilitator bearer auth (BASE-02)', () => {
     expect(verifyResult.valid).toBe(true);
     expect(settleResult.success).toBe(true);
     const verifyHeaders = (
-      mockFetch.mock.calls[0][1] as { headers: Record<string, string> }
+      mockFetch.mock.calls[0]![1] as { headers: Record<string, string> }
     ).headers;
     const settleHeaders = (
-      mockFetch.mock.calls[1][1] as { headers: Record<string, string> }
+      mockFetch.mock.calls[1]![1] as { headers: Record<string, string> }
     ).headers;
     expect(verifyHeaders.Authorization).toBeUndefined();
     expect(settleHeaders.Authorization).toBeUndefined();
@@ -713,7 +713,7 @@ describe('Base payment adapter — facilitator bearer auth (BASE-02)', () => {
       signature: '0xSIG',
       network: 'eip155:84532',
     });
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     const headers = (init as { headers: Record<string, string> }).headers;
     expect(headers.Authorization).toBeUndefined();
   });
@@ -733,7 +733,7 @@ describe('Base payment adapter — facilitator bearer auth (BASE-02)', () => {
       signature: '0xSIG',
       network: 'eip155:84532',
     });
-    const [, init] = mockFetch.mock.calls[0];
+    const [, init] = mockFetch.mock.calls[0]!;
     const rawBody = (init as { body: string }).body;
     expect(rawBody).not.toContain('test-facilitator-key');
     expect(result.error ?? '').not.toContain('test-facilitator-key');

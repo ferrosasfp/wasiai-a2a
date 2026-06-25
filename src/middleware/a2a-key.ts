@@ -255,7 +255,7 @@ function extractRawKey(request: FastifyRequest): string | undefined {
   const authHeader = request.headers.authorization;
   if (authHeader && typeof authHeader === 'string') {
     const match = /^bearer\s+(.+)$/i.exec(authHeader);
-    if (match?.[1].startsWith('wasi_a2a_')) {
+    if (match?.[1]?.startsWith('wasi_a2a_')) {
       return match[1];
     }
   }
@@ -569,7 +569,7 @@ async function resolveKeySessionAuth(
       const signedResult = await verifySignedAuth({
         tokenHashHex: hash,
         method: request.method.toUpperCase(),
-        path: request.url.split('?')[0],
+        path: request.url.split('?')[0] ?? request.url,
         headers,
         scheme: {
           kind: 'hmac',
@@ -809,7 +809,7 @@ async function resolveMasterAuth(
       const signedResult = await verifySignedAuth({
         tokenHashHex: keyHash,
         method: request.method.toUpperCase(),
-        path: request.url.split('?')[0],
+        path: request.url.split('?')[0] ?? request.url,
         headers,
         scheme: { kind: 'eip712', fundingWallet: keyRow.funding_wallet },
       });

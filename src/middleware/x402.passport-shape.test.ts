@@ -85,7 +85,7 @@ describe('x402 middleware — Passport-shape acceptance (WKH-69)', () => {
 
   it('T-AC1-1: decodeXPayment parses Passport-shape header without throw', () => {
     const { headers } = buildPassportPaymentHeader();
-    const decoded = decodeXPayment(headers['payment-signature']);
+    const decoded = decodeXPayment(headers['payment-signature']!);
     expect(decoded.authorization).toBeDefined();
     expect(decoded.authorization.from).toMatch(/^0x[0-9a-fA-F]{40}$/);
     expect(typeof decoded.signature).toBe('string');
@@ -151,7 +151,7 @@ describe('x402 middleware — Passport-shape acceptance (WKH-69)', () => {
       expect(res.statusCode).toBe(200);
       // adapter.verify received the same authorization shape
       expect(mockVerify).toHaveBeenCalledTimes(1);
-      const verifyArg = mockVerify.mock.calls[0][0] as {
+      const verifyArg = mockVerify.mock.calls[0]![0] as {
         authorization: { from: string; value: string };
       };
       expect(verifyArg.authorization.from).toBe(

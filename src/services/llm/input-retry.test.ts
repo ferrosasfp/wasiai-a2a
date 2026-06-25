@@ -71,7 +71,9 @@ describe('regenerateInputFromErrors', () => {
     expect(result).toEqual({ query: 'hi', senderName: 'Ana', amountUSD: 100 });
     expect(mockCreate).toHaveBeenCalledTimes(1);
     // Haiku hardcoded.
-    expect(mockCreate.mock.calls[0][0].model).toBe('claude-haiku-4-5-20251001');
+    expect(mockCreate.mock.calls[0]![0]!.model).toBe(
+      'claude-haiku-4-5-20251001',
+    );
   });
 
   // T-LLM-2: non-object responses → null.

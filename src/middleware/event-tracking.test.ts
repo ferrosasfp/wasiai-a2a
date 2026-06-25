@@ -109,7 +109,7 @@ describe('registerEventTracking middleware', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(mockTrack).toHaveBeenCalledTimes(1);
-    const call = mockTrack.mock.calls[0][0];
+    const call = mockTrack.mock.calls[0]![0]!;
     expect(call.eventType).toBe('request:POST:/discover');
     expect(call.status).toBe('success');
     expect(call.metadata.endpoint).toBe('/discover');
@@ -124,7 +124,7 @@ describe('registerEventTracking middleware', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(mockTrack).toHaveBeenCalledTimes(1);
-    expect(mockTrack.mock.calls[0][0].eventType).toBe(
+    expect(mockTrack.mock.calls[0]![0]!.eventType).toBe(
       'request:POST:/orchestrate',
     );
   });
@@ -134,7 +134,9 @@ describe('registerEventTracking middleware', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(mockTrack).toHaveBeenCalledTimes(1);
-    expect(mockTrack.mock.calls[0][0].eventType).toBe('request:POST:/compose');
+    expect(mockTrack.mock.calls[0]![0]!.eventType).toBe(
+      'request:POST:/compose',
+    );
   });
 
   it('AC-1: POST /auth/agent-signup — tracked', async () => {
@@ -146,7 +148,7 @@ describe('registerEventTracking middleware', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(mockTrack).toHaveBeenCalledTimes(1);
-    expect(mockTrack.mock.calls[0][0].eventType).toBe(
+    expect(mockTrack.mock.calls[0]![0]!.eventType).toBe(
       'request:POST:/auth/agent-signup',
     );
   });
@@ -156,7 +158,7 @@ describe('registerEventTracking middleware', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(mockTrack).toHaveBeenCalledTimes(1);
-    expect(mockTrack.mock.calls[0][0].eventType).toBe(
+    expect(mockTrack.mock.calls[0]![0]!.eventType).toBe(
       'request:GET:/gasless/status',
     );
   });
@@ -167,7 +169,7 @@ describe('registerEventTracking middleware', () => {
     await app.inject({ method: 'POST', url: '/discover', payload: {} });
     await new Promise((r) => setTimeout(r, 50));
 
-    const call = mockTrack.mock.calls[0][0];
+    const call = mockTrack.mock.calls[0]![0]!;
     expect(typeof call.latencyMs).toBe('number');
     expect(call.latencyMs).toBeGreaterThanOrEqual(0);
     expect(call.metadata.responseTimeMs).toBe(call.latencyMs);
@@ -224,7 +226,7 @@ describe('registerEventTracking middleware', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(mockTrack).toHaveBeenCalledTimes(1);
-    expect(mockTrack.mock.calls[0][0].status).toBe('failed');
+    expect(mockTrack.mock.calls[0]![0]!.status).toBe('failed');
   });
 
   // ── WKH-69 AC-4: payment_origin tagging ──
@@ -254,7 +256,7 @@ describe('registerEventTracking middleware', () => {
       await new Promise((r) => setTimeout(r, 50));
 
       expect(mockTrack).toHaveBeenCalledTimes(1);
-      const metadata = mockTrack.mock.calls[0][0].metadata;
+      const metadata = mockTrack.mock.calls[0]![0]!.metadata;
       expect(metadata.payment_origin).toBe('passport');
     } finally {
       await localApp.close();
@@ -283,7 +285,7 @@ describe('registerEventTracking middleware', () => {
       await new Promise((r) => setTimeout(r, 50));
 
       expect(mockTrack).toHaveBeenCalledTimes(1);
-      const metadata = mockTrack.mock.calls[0][0].metadata;
+      const metadata = mockTrack.mock.calls[0]![0]!.metadata;
       expect(metadata.payment_origin).toBe('eoa');
     } finally {
       await localApp.close();
@@ -296,7 +298,7 @@ describe('registerEventTracking middleware', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(mockTrack).toHaveBeenCalledTimes(1);
-    const metadata = mockTrack.mock.calls[0][0].metadata;
+    const metadata = mockTrack.mock.calls[0]![0]!.metadata;
     // Strict: key must be ABSENT, not present-with-undefined.
     expect('payment_origin' in metadata).toBe(false);
   });

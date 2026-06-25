@@ -484,7 +484,7 @@ describe('signAndSettleDownstream — chain-aware delegation', () => {
     expect(mockKiteSign).toHaveBeenCalledWith(
       expect.objectContaining({ value: '500000000000000000' }),
     );
-    const signedValue = mockKiteSign.mock.calls[0][0].value as string;
+    const signedValue = mockKiteSign.mock.calls[0]![0]!.value as string;
     expect(signedValue).not.toBe('500000');
   });
 
@@ -563,7 +563,7 @@ describe('signAndSettleDownstream — chain-aware delegation', () => {
     await signAndSettleDownstream(agent, makeLogger());
     // `to` comes from agent.payment.contract (input), `value` from the adapter
     // decimals (6-dec → 500000), `network` from signed.paymentRequest.
-    const signArg = mockBaseSign.mock.calls[0][0];
+    const signArg = mockBaseSign.mock.calls[0]![0];
     expect(signArg.to).toBe(PAYTO_ADDR);
     expect(signArg.value).toBe('500000');
     expect(mockBaseSettle).toHaveBeenCalledWith(
@@ -577,7 +577,7 @@ describe('signAndSettleDownstream — chain-aware delegation', () => {
     // legacy VALID_BEFORE_SECONDS=300 window governed).
     await signAndSettleDownstream(makeAgent(), makeLogger());
     expect(mockFujiSign).toHaveBeenCalledTimes(1);
-    expect(mockFujiSign.mock.calls[0][0]).toMatchObject({
+    expect(mockFujiSign.mock.calls[0]![0]).toMatchObject({
       timeoutSeconds: 300,
     });
   });

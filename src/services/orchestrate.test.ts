@@ -132,7 +132,7 @@ const mockComposeResult: ComposeResult = {
   output: 'Final summarized output',
   steps: [
     {
-      agent: mockAgents[0],
+      agent: mockAgents[0]!,
       output: 'Summarized text',
       costUsdc: 0.5,
       latencyMs: 1200,
@@ -194,8 +194,8 @@ describe('orchestrateService', () => {
     expect(result.answer).toBeDefined();
 
     // Verify compose was called with dynamic input from LLM
-    const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
-    expect(composeCall.steps[0].input).toHaveProperty('query');
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps[0]!.input).toHaveProperty('query');
   });
 
   // T-2: Response includes orchestrationId + protocolFeeUsdc
@@ -284,9 +284,9 @@ describe('orchestrateService', () => {
     );
 
     // Should only have 1 step (the valid one)
-    const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
     expect(composeCall.steps).toHaveLength(1);
-    expect(composeCall.steps[0].agent).toBe('summarizer-v1');
+    expect(composeCall.steps[0]!.agent).toBe('summarizer-v1');
   });
 
   // T-6: Event tracking called with orchestrate_goal
@@ -442,7 +442,7 @@ describe('orchestrateService', () => {
       'orch-maxbudget',
     );
 
-    const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
     // budget 1.0 - fee 0.01 = 0.99
     expect(composeCall.maxBudget).toBeCloseTo(0.99, 6);
   });
@@ -669,7 +669,7 @@ describe('orchestrateService', () => {
       'orch-21',
     );
 
-    const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
     expect(composeCall.chainId).toBe(2368);
     // master path → no delegationContext propagated.
     expect(composeCall.delegationContext).toBeUndefined();
@@ -685,7 +685,7 @@ describe('orchestrateService', () => {
       'orch-22',
     );
 
-    const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
     expect(composeCall.chainId).toBe(8453);
   });
 
@@ -710,7 +710,7 @@ describe('orchestrateService', () => {
       'orch-23',
     );
 
-    const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
     expect(composeCall.chainId).toBe(2368);
     expect(composeCall.delegationContext).toEqual(delegationContext);
   });
@@ -725,7 +725,7 @@ describe('orchestrateService', () => {
       'orch-24',
     );
 
-    const composeCall = vi.mocked(composeService.compose).mock.calls[0][0];
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
     expect(composeCall.chainId).toBeUndefined();
   });
 
@@ -827,8 +827,8 @@ describe('orchestrateService', () => {
   // el step-0 (0.30); el step 1 (0.20) lo debita compose (acá mockeado). El plan
   // real cuesta 0.50, pero la base del débito step-0 del service es 0.30.
   const wkh127Agents: Agent[] = [
-    { ...mockAgents[0], slug: 'summarizer-v1', priceUsdc: 0.3 },
-    { ...mockAgents[1], slug: 'translator-v1', priceUsdc: 0.2 },
+    { ...mockAgents[0]!, slug: 'summarizer-v1', priceUsdc: 0.3 },
+    { ...mockAgents[1]!, slug: 'translator-v1', priceUsdc: 0.2 },
   ];
   const wkh127Discovery: DiscoveryResult = {
     agents: wkh127Agents,
@@ -861,7 +861,7 @@ describe('orchestrateService', () => {
     );
 
     expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
-    const debitCall = vi.mocked(budgetService.debit).mock.calls[0];
+    const debitCall = vi.mocked(budgetService.debit).mock.calls[0]!;
     expect(debitCall[2]).toBeCloseTo(0.3, 6);
     expect(debitCall[2]).not.toBe(1);
     // No es la suma del plan (eso sería el double-charge del BLQ-ALTO-1).
@@ -930,7 +930,7 @@ describe('orchestrateService', () => {
       'orch-ac3',
     );
 
-    const debitCall = vi.mocked(budgetService.debit).mock.calls[0];
+    const debitCall = vi.mocked(budgetService.debit).mock.calls[0]!;
     // precio del step-0 (summarizer-v1) = 0.30
     expect(debitCall[2]).toBeCloseTo(0.3, 6);
   });
@@ -939,8 +939,8 @@ describe('orchestrateService', () => {
   it('T-AC4: zero-cost plan applies $1 fallback and sets debitFallback', async () => {
     const zeroPriceDiscovery: DiscoveryResult = {
       agents: [
-        { ...mockAgents[0], slug: 'summarizer-v1', priceUsdc: 0 },
-        { ...mockAgents[1], slug: 'translator-v1', priceUsdc: 0 },
+        { ...mockAgents[0]!, slug: 'summarizer-v1', priceUsdc: 0 },
+        { ...mockAgents[1]!, slug: 'translator-v1', priceUsdc: 0 },
       ],
       total: 2,
       registries: ['wasiai'],
@@ -959,7 +959,7 @@ describe('orchestrateService', () => {
       'orch-ac4',
     );
 
-    const debitCall = vi.mocked(budgetService.debit).mock.calls[0];
+    const debitCall = vi.mocked(budgetService.debit).mock.calls[0]!;
     expect(debitCall[2]).toBe(1.0);
     expect(result.debitFallback).toBe(true);
     expect(warnSpy).toHaveBeenCalledWith(
@@ -990,7 +990,7 @@ describe('orchestrateService', () => {
     );
 
     expect(vi.mocked(budgetService.credit)).toHaveBeenCalledTimes(1);
-    const creditCall = vi.mocked(budgetService.credit).mock.calls[0];
+    const creditCall = vi.mocked(budgetService.credit).mock.calls[0]!;
     // BLQ-ALTO-1: debitedUsd = precio del step-0 = 0.30. Fallo total (totalCost
     // 0 → el step-0 ni settleó) → se reembolsa el step-0 entero (incidente original).
     expect(creditCall[2]).toBeCloseTo(0.3, 6);
@@ -1018,7 +1018,7 @@ describe('orchestrateService', () => {
     );
 
     expect(vi.mocked(budgetService.credit)).toHaveBeenCalledTimes(1);
-    const creditCall = vi.mocked(budgetService.credit).mock.calls[0];
+    const creditCall = vi.mocked(budgetService.credit).mock.calls[0]!;
     // BLQ-ALTO-1: debitedUsd = step-0 = 0.30. Fórmula AC-6 parcial:
     // max(0, debited 0.30 - consumed 0.20) = 0.10.
     expect(creditCall[2]).toBeCloseTo(0.1, 6);

@@ -53,7 +53,7 @@ describe('getPyusdUsdRate', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(getPyusdUsdRate()).toBe(1.0);
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0][0]).toContain('PYUSD_USD_RATE="abc"');
+    expect(warnSpy.mock.calls[0]![0]).toContain('PYUSD_USD_RATE="abc"');
     warnSpy.mockRestore();
   });
 
@@ -145,7 +145,7 @@ describe('getGaslessDefaultCapUsd', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(getGaslessDefaultCapUsd()).toBe(10);
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0][0]).toContain('GASLESS_DEFAULT_CAP_USD="0"');
+    expect(warnSpy.mock.calls[0]![0]).toContain('GASLESS_DEFAULT_CAP_USD="0"');
     warnSpy.mockRestore();
   });
 

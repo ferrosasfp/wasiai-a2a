@@ -180,7 +180,7 @@ describe('composeService.invokeAgent', () => {
     const agent = makeAgent({ priceUsdc: 0 });
     mockFetchOk();
     await composeService.invokeAgent(agent, { q: 'hello' });
-    const callHeaders = mockFetch.mock.calls[0][1].headers as Record<
+    const callHeaders = mockFetch.mock.calls[0]![1]!.headers as Record<
       string,
       string
     >;
@@ -196,7 +196,7 @@ describe('composeService.invokeAgent', () => {
     const agent = makeAgent({ priceUsdc: 0 });
     mockFetchOk();
     await composeService.invokeAgent(agent, { q: 'hello' });
-    const callHeaders = mockFetch.mock.calls[0][1].headers as Record<
+    const callHeaders = mockFetch.mock.calls[0]![1]!.headers as Record<
       string,
       string
     >;
@@ -225,7 +225,7 @@ describe('composeService.invokeAgent', () => {
     const agent = makeAgent({ priceUsdc: 1.0, metadata: { payTo: '0xBBB' } });
     mockFetchOk();
     const result = await composeService.invokeAgent(agent, { q: 'hello' });
-    const callHeaders = mockFetch.mock.calls[0][1].headers as Record<
+    const callHeaders = mockFetch.mock.calls[0]![1]!.headers as Record<
       string,
       string
     >;
@@ -294,7 +294,7 @@ describe('composeService.invokeAgent', () => {
     const agent = makeAgent({ priceUsdc: 0 });
     mockFetchOk();
     const result = await composeService.invokeAgent(agent, { q: 'hello' });
-    const callHeaders = mockFetch.mock.calls[0][1].headers as Record<
+    const callHeaders = mockFetch.mock.calls[0]![1]!.headers as Record<
       string,
       string
     >;
@@ -432,9 +432,9 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
     });
 
     expect(composeResult.success).toBe(true);
-    expect(composeResult.steps[0].downstreamTxHash).toBe('0xabc');
-    expect(composeResult.steps[0].downstreamBlockNumber).toBe(1);
-    expect(composeResult.steps[0].downstreamSettledAmount).toBe('500000');
+    expect(composeResult.steps[0]!.downstreamTxHash).toBe('0xabc');
+    expect(composeResult.steps[0]!.downstreamBlockNumber).toBe(1);
+    expect(composeResult.steps[0]!.downstreamSettledAmount).toBe('500000');
   });
 
   it('returns invoke result without downstreamTxHash when downstream fails (T-W3-03 / AC-4)', async () => {
@@ -457,7 +457,7 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
 
     // Sólo debería haber 1 llamada al marketplace (no facilitator porque downstream es no-op)
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    const [url, init] = mockFetch.mock.calls[0];
+    const [url, init] = mockFetch.mock.calls[0]!;
     expect(url).toBe(agent.invokeUrl);
     // AR-MNR-3: pin EXACT method + EXACT header key set when flag-off, en
     // lugar de un toMatchObject permisivo. Si compose agrega un header nuevo
@@ -515,8 +515,8 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
 
     expect(result.success).toBe(true);
     expect(transformMock).not.toHaveBeenCalled();
-    expect(result.steps[0].bridgeType).toBe('A2A_PASSTHROUGH');
-    expect(result.steps[0].transformLatencyMs).toBeLessThan(50);
+    expect(result.steps[0]!.bridgeType).toBe('A2A_PASSTHROUGH');
+    expect(result.steps[0]!.transformLatencyMs).toBeLessThan(50);
   });
 
   it('T-11: falls back to maybeTransform when isA2AMessage returns false (AC-2)', async () => {
@@ -561,7 +561,7 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
 
     expect(result.success).toBe(true);
     expect(transformMock).toHaveBeenCalledTimes(1);
-    expect(result.steps[0].bridgeType).toBe('SKIPPED');
+    expect(result.steps[0]!.bridgeType).toBe('SKIPPED');
   });
 
   it('T-12: unwraps parts[0] when output is A2A but target is non-a2aCompliant (AC-3)', async () => {
@@ -609,7 +609,7 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
     });
 
     expect(transformMock).toHaveBeenCalledTimes(1);
-    const callArgs = transformMock.mock.calls[0];
+    const callArgs = transformMock.mock.calls[0]!;
     // 3rd arg of maybeTransform(srcId, tgtId, output, schema) is the unwrapped payload
     expect(callArgs[2]).toEqual({ x: 1 });
   });
@@ -778,7 +778,7 @@ describe('composeService.compose — WKH-56 A2A fast-path bridge', () => {
     );
 
     // Event for last step → bridge_type === null (no bridge after last step)
-    const lastCall = trackSpy.mock.calls[trackSpy.mock.calls.length - 1];
+    const lastCall = trackSpy.mock.calls[trackSpy.mock.calls.length - 1]!;
     expect(lastCall[0].metadata?.bridge_type).toBeNull();
   });
 });
@@ -832,7 +832,7 @@ describe('composeService — WAS-V2-3-CLIENT integration (WKH-57)', () => {
     expect(result.success).toBe(true);
     // AC-4: downstream path executed (vs current bug where priceUsdc=0 skips it)
     expect(mockDownstream).toHaveBeenCalledTimes(1);
-    expect(result.steps[0].downstreamTxHash).toBe('0xfeeb');
+    expect(result.steps[0]!.downstreamTxHash).toBe('0xfeeb');
   });
 
   it('T-INT-02: payTo falls back to metadata.payment.contract when top-level payTo missing (WAS-V2-3-CLIENT-2)', async () => {
@@ -890,7 +890,7 @@ describe('composeService — WAS-V2-3-CLIENT integration (WKH-57)', () => {
     expect(result.success).toBe(true);
     // Downstream Fuji USDC settle fired end-to-end via fallback payTo
     expect(mockDownstream).toHaveBeenCalledTimes(1);
-    expect(result.steps[0].downstreamTxHash).toBe('0xfeeb');
+    expect(result.steps[0]!.downstreamTxHash).toBe('0xfeeb');
   });
 });
 
@@ -1260,13 +1260,13 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
 
     expect(result.success).toBe(false);
     // el monto debitado del step que falló == el monto refundado (3er arg de ambas calls).
-    const debitAmount = mockDebit.mock.calls[0][2];
-    const refundAmount = mockCreditWithDest.mock.calls[0][2];
+    const debitAmount = mockDebit.mock.calls[0]![2];
+    const refundAmount = mockCreditWithDest.mock.calls[0]![2];
     expect(refundAmount).toBe(debitAmount);
     expect(refundAmount).toBe(0.05);
     // y mismo destination en débito (6º arg de debit) y refund (5º arg de creditWithDest).
-    expect(mockDebit.mock.calls[0][5]).toBe('test-registry/corridor');
-    expect(mockCreditWithDest.mock.calls[0][4]).toBe('test-registry/corridor');
+    expect(mockDebit.mock.calls[0]![5]).toBe('test-registry/corridor');
+    expect(mockCreditWithDest.mock.calls[0]![4]).toBe('test-registry/corridor');
   });
 
   // M3 (audit 2026-06-24): el destino canónico del step se resuelve UNA sola vez
@@ -1295,8 +1295,8 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     expect(result.success).toBe(false);
     expect(mockDebit).toHaveBeenCalledTimes(1);
     expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
-    const debitDestination = mockDebit.mock.calls[0][5];
-    const refundDestination = mockCreditWithDest.mock.calls[0][4];
+    const debitDestination = mockDebit.mock.calls[0]![5];
+    const refundDestination = mockCreditWithDest.mock.calls[0]![4];
     // Identidad estricta: misma fuente única → mismo string byte a byte.
     expect(refundDestination).toBe(debitDestination);
     expect(debitDestination).toBe('test-registry/corridor');
@@ -1335,8 +1335,8 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     });
 
     expect(result.success).toBe(false);
-    const debitDestination = mockDebit.mock.calls[0][5];
-    const refundDestination = mockCreditWithDest.mock.calls[0][4];
+    const debitDestination = mockDebit.mock.calls[0]![5];
+    const refundDestination = mockCreditWithDest.mock.calls[0]![4];
     // El destino canónico es el del agente resuelto, no el hint 'wrong-hint'.
     expect(debitDestination).toBe('test-registry/corridor');
     expect(refundDestination).toBe(debitDestination);
@@ -1374,8 +1374,8 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     expect(result.success).toBe(false);
     // Dos débitos: el original (call 0) y el re-débito del retry (call 1).
     expect(mockDebit).toHaveBeenCalledTimes(2);
-    const originalDebitDest = mockDebit.mock.calls[0][5];
-    const retryDebitDest = mockDebit.mock.calls[1][5];
+    const originalDebitDest = mockDebit.mock.calls[0]![5];
+    const retryDebitDest = mockDebit.mock.calls[1]![5];
     expect(retryDebitDest).toBe(originalDebitDest);
     expect(originalDebitDest).toBe('test-registry/corridor');
     // Y cada refund usa ese mismo destino canónico.
@@ -2438,9 +2438,9 @@ describe('composeService.compose — WKH-130 adaptive input-retry', () => {
       a2aKey: 'wasi_a2a_test',
     });
 
-    const debit1 = mockDebit.mock.invocationCallOrder[0];
-    const refund1 = mockCreditWithDest.mock.invocationCallOrder[0];
-    const debit2 = mockDebit.mock.invocationCallOrder[1];
+    const debit1 = mockDebit.mock.invocationCallOrder[0]!;
+    const refund1 = mockCreditWithDest.mock.invocationCallOrder[0]!;
+    const debit2 = mockDebit.mock.invocationCallOrder[1]!;
     expect(debit1).toBeLessThan(refund1);
     expect(refund1).toBeLessThan(debit2);
   });

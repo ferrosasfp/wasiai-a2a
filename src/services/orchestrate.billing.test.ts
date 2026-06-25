@@ -229,7 +229,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
     // steps 1 y 2 (6-arg con destino). El step-0 ya NO lo debita el middleware.
     expect(mockDebit).toHaveBeenCalledTimes(3);
     // Débito step-0 del service: 3-arg, sin destino, = precio del step-0 (0.01).
-    const step0Call = mockDebit.mock.calls[0];
+    const step0Call = mockDebit.mock.calls[0]!;
     expect(step0Call[0]).toBe('k1');
     expect(step0Call[1]).toBe(CHAIN_ID);
     expect(step0Call[2]).toBeCloseTo(0.01, 6);
@@ -290,7 +290,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
     // (guard i>0 de compose, CD-1).
     expect(mockDebit).toHaveBeenCalledTimes(2);
     // Débito step-0 del service: 3-arg, sin destino, = precio del step-0 (0.07).
-    const step0Call = mockDebit.mock.calls[0];
+    const step0Call = mockDebit.mock.calls[0]!;
     expect(step0Call[0]).toBe('k1');
     expect(step0Call[1]).toBe(CHAIN_ID);
     expect(step0Call[2]).toBeCloseTo(0.07, 6);
@@ -384,7 +384,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
     // el step-0). Compose NO debita (guard i>0 → 1 solo step). El step-0 ya no lo
     // cobra el middleware (skipMiddlewareDebit).
     expect(mockDebit).toHaveBeenCalledTimes(1);
-    const step0Call = mockDebit.mock.calls[0];
+    const step0Call = mockDebit.mock.calls[0]!;
     expect(step0Call[0]).toBe('k1');
     expect(step0Call[1]).toBe(CHAIN_ID);
     expect(step0Call[2]).toBeCloseTo(0.05, 6);

@@ -224,7 +224,7 @@ describe('create', () => {
     expect(result.session_token).toMatch(/^wasi_a2a_session_[0-9a-f]{96}$/);
     // El INSERT recibió session_token_hash (no el token plano).
     const insertedRow = (insertChain.insert as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as Record<string, unknown>;
+      .calls[0]![0] as Record<string, unknown>;
     expect(insertedRow.session_token_hash).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(insertedRow)).not.toContain(result.session_token);
     // owner_ref/key_id desde parentKey, NUNCA del request.
@@ -560,7 +560,7 @@ describe('list', () => {
       'expired',
       'revoked',
     ]);
-    expect(items[0].delegation_id).toBe('d-active');
+    expect(items[0]!.delegation_id).toBe('d-active');
   });
 });
 
