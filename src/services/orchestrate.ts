@@ -510,7 +510,7 @@ export const orchestrateService = {
       // testnet / without env → identical to before. `debitedUsd` (price +
       // overhead) stays the single source of truth for the step-0 refund on
       // total failure, so a refunded step-0 returns price + gas.
-      const step0GasOverhead = getStepGasOverheadUsd(request.chainId);
+      const step0GasOverhead = await getStepGasOverheadUsd(request.chainId);
       const step0DebitUsd = plannedCostUsd + step0GasOverhead;
       const debitRes = await budgetService.debit(
         billingKeyRow.id,

@@ -150,7 +150,7 @@ export const composeService = {
       // default. Gated on chainId being resolved (same precondition as the
       // per-step debit below). NOT settled to the agent (gateway margin).
       const stepGasOverhead =
-        chainId !== undefined ? getStepGasOverheadUsd(chainId) : 0;
+        chainId !== undefined ? await getStepGasOverheadUsd(chainId) : 0;
       if (
         maxBudget &&
         totalCost + agent.priceUsdc + stepGasOverhead > maxBudget
