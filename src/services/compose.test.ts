@@ -1267,6 +1267,121 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     expect(mockCreditWithDest.mock.calls[0][4]).toBe('test-registry/corridor');
   });
 
+  // M3 (audit 2026-06-24): el destino canónico del step se resuelve UNA sola vez
+  // (`stepDestination`) y se propaga al débito Y a su refund. Asertamos que el arg
+  // `destination` del débito (6º de debit) y el del refund (5º de creditWithDest)
+  // son EXACTAMENTE el MISMO string — no dos derivaciones que podrían divergir.
+  it('M3 step 1..N that fails → débito and refund use the IDENTICAL destination string', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk(); // step 0 OK
+    mockFetchError(502); // step 1 falla la invocación tras debitar
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
+    const debitDestination = mockDebit.mock.calls[0][5];
+    const refundDestination = mockCreditWithDest.mock.calls[0][4];
+    // Identidad estricta: misma fuente única → mismo string byte a byte.
+    expect(refundDestination).toBe(debitDestination);
+    expect(debitDestination).toBe('test-registry/corridor');
+  });
+
+  // M3 (audit 2026-06-24): el destino sale del AGENTE RESUELTO (agent.registry/
+  // agent.slug), NO del registry hint del body. Si el caller pasa un hint que
+  // difiere pero resuelve al mismo agente, débito y refund DEBEN seguir usando
+  // el MISMO destino canónico (el del agente resuelto), nunca el hint.
+  it('M3 registry hint differs but resolves to same agent → débito and refund share the canonical destination', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    // El agente resuelto tiene registry canónico 'test-registry', distinto del
+    // hint 'wrong-hint' que pasa el caller. mockAgentsBySlug ignora el hint y
+    // devuelve el agente por slug (espeja la resolución real por slug).
+    const a2 = makeAgent({
+      slug: 'corridor',
+      priceUsdc: 0.05,
+      id: 'agent-2',
+      registry: 'test-registry',
+    });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk(); // step 0 OK
+    mockFetchError(502); // step 1 falla tras debitar
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        // hint divergente — NO debe filtrarse al destino del cap.
+        { agent: 'corridor', registry: 'wrong-hint', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    const debitDestination = mockDebit.mock.calls[0][5];
+    const refundDestination = mockCreditWithDest.mock.calls[0][4];
+    // El destino canónico es el del agente resuelto, no el hint 'wrong-hint'.
+    expect(debitDestination).toBe('test-registry/corridor');
+    expect(refundDestination).toBe(debitDestination);
+    expect(refundDestination).not.toContain('wrong-hint');
+  });
+
+  // M3 (audit 2026-06-24): retry adaptativo — el re-débito del retry usa el MISMO
+  // destino canónico que el débito original y su refund. Asegura que las 3 capas
+  // (débito, refund#1, re-débito del retry) comparten la única fuente.
+  it('M3 adaptive retry re-debit uses the same canonical destination as the original debit', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk(); // step 0 OK
+    // step 1 falla con field-errors → dispara el retry (4xx con missing fields).
+    mockFetchError(400, '{"error":"missing required field: amount"}');
+    // El re-invoke del retry también falla (no importa el resultado, solo el
+    // destino de los débitos).
+    mockFetchError(502);
+    // LLM regenera input → habilita el retry path.
+    mockRegen.mockResolvedValue({ amount: 100 });
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    // Dos débitos: el original (call 0) y el re-débito del retry (call 1).
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    const originalDebitDest = mockDebit.mock.calls[0][5];
+    const retryDebitDest = mockDebit.mock.calls[1][5];
+    expect(retryDebitDest).toBe(originalDebitDest);
+    expect(originalDebitDest).toBe('test-registry/corridor');
+    // Y cada refund usa ese mismo destino canónico.
+    for (const call of mockCreditWithDest.mock.calls) {
+      expect(call[4]).toBe('test-registry/corridor');
+    }
+  });
+
   // WKH-128: el step-0 NO lo debita compose (es del middleware/service), así que
   // si el step-0 falla, compose NO reembolsa (no hay stepDebitedUsd>0).
   it('T-COMPOSE-REFUND-2 does NOT refund when step 0 fails (compose never debited it)', async () => {

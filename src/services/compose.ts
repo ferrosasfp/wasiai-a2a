@@ -13,6 +13,7 @@ import {
 } from '../lib/downstream-payment.js';
 import { parseFieldErrors } from '../lib/field-error-parser.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
+import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 import {
   SSRFViolationError,
   validateRegistryUrl,
@@ -164,6 +165,17 @@ export const composeService = {
       // Lo usa el catch de abajo para reembolsar si el step FALLA tras el débito
       // (fee-on-attempt → el caller no debe pagar un step que no entregó valor).
       let stepDebitedUsd = 0;
+      // M3 (audit 2026-06-24): destino canónico del step resuelto UNA sola vez,
+      // a partir del agente YA resuelto (`agent.registry`/`agent.slug`). Esta
+      // ÚNICA fuente se propaga a TODOS los usos del step — el débito per-step,
+      // su refund best-effort, y el re-débito del retry adaptativo — para que el
+      // string del cap por destino coincida byte a byte entre débito y refund.
+      // Sin esto, re-derivar en cada capa permitía que el refund se insertara en
+      // otro destino y el cap del destino real nunca se liberara (cap leak).
+      // `normalizeDestination` es el MISMO normalizador que usa la policy/ledger.
+      const stepDestination = normalizeDestination(
+        `${agent.registry}/${agent.slug}`,
+      );
       if (i > 0 && scopingKeyRow && chainId !== undefined) {
         // WKH-59 BLQ-MED-1 fix (CD-4 / AC-4): fallback honesto si priceUsdc
         // del agente es 0, null, NaN, o no es un number (config error en el
@@ -198,7 +210,7 @@ export const composeService = {
           debitAmount,
           request.delegationContext, // WKH-101 (DT-11): enruta al RPC atómico bajo delegación
           request.keySessionContext, // WKH-121 (BLQ-ALTO-1): enruta al RPC de sesión y respeta el cap per-step
-          normalizeDestination(`${agent.registry}/${agent.slug}`), // WKH-125: cap por destino (mismo normalizador que la policy)
+          stepDestination, // M3 (audit): destino canónico único del step (WKH-125 cap por destino)
         );
         if (!debitResult.success) {
           // DT-H: mid-pipeline debit failure → ComposeResult.error.
@@ -278,29 +290,25 @@ export const composeService = {
         const refundStepDebit = async (): Promise<boolean> => {
           if (!isMasterPath || !scopingKeyRow || chainId === undefined)
             return true;
-          const destination = normalizeDestination(
-            `${agent.registry}/${agent.slug}`,
+          // M3 (audit 2026-06-24): el refund DEBE usar EXACTAMENTE el mismo
+          // destino canónico que el débito de este step (`stepDestination`,
+          // resuelto una sola vez arriba). Antes se re-derivaba acá — si el
+          // string divergía del débito, el credit compensatorio del dest-cap se
+          // insertaba en otro destino y el cap del destino real nunca se
+          // liberaba. Reusar la única fuente garantiza el match byte a byte.
+          const creditRes = await budgetService.creditWithDest(
+            scopingKeyRow.id,
+            chainId,
+            stepDebitedUsd,
+            scopingKeyRow.owner_ref,
+            stepDestination,
           );
-          const creditRes = destination
-            ? await budgetService.creditWithDest(
-                scopingKeyRow.id,
-                chainId,
-                stepDebitedUsd,
-                scopingKeyRow.owner_ref,
-                destination,
-              )
-            : await budgetService.credit(
-                scopingKeyRow.id,
-                chainId,
-                stepDebitedUsd,
-                scopingKeyRow.owner_ref,
-              );
           if (!creditRes.success) {
             console.error('[compose.refund-failed]', {
               keyId: scopingKeyRow.id,
               chainId,
               amountUsd: stepDebitedUsd,
-              destination,
+              destination: stepDestination,
               step: i,
             });
           }
@@ -369,7 +377,7 @@ export const composeService = {
               stepDebitedUsd,
               request.delegationContext, // undefined en path master
               request.keySessionContext, // undefined en path master
-              normalizeDestination(`${agent.registry}/${agent.slug}`), // CD-8
+              stepDestination, // M3 (audit): MISMO destino canónico que el débito original y su refund (CD-8)
             );
             if (retryDebit.success) {
               try {
@@ -748,7 +756,12 @@ export const composeService = {
       throw err;
     }
 
-    const response = await fetch(agent.invokeUrl, {
+    // M2 (audit 2026-06-24): connect-time SSRF guard on invokeUrl. The
+    // validateRegistryUrl check above runs at resolution-time, but plain fetch
+    // re-resolves DNS; `ssrfFetch` revalidates the SAME resolution the socket
+    // connects to so x-a2a-key / PAYMENT-SIGNATURE headers can never be emitted
+    // to a private/metadata IP (closes TOCTOU / DNS-rebinding).
+    const response = await ssrfFetch(agent.invokeUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify(input),

@@ -4,6 +4,7 @@
 
 import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
+import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 import {
   SSRFViolationError,
   validateRegistryUrl,
@@ -442,7 +443,11 @@ export const discoveryService = {
     const response = await cb.execute(() => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
-      return fetch(url.toString(), {
+      // M2 (audit 2026-06-24): connect-time SSRF guard. `validateRegistryUrl`
+      // above checks the IP at resolution-time, but plain `fetch` re-resolves
+      // DNS; `ssrfFetch` revalidates the SAME resolution the socket connects to
+      // (closes TOCTOU / DNS-rebinding without breaking TLS/SNI).
+      return ssrfFetch(url.toString(), {
         headers,
         signal: controller.signal,
       }).finally(() => clearTimeout(timer));
@@ -538,7 +543,9 @@ export const discoveryService = {
           throw err;
         }
 
-        const response = await fetch(url, {
+        // M2 (audit 2026-06-24): connect-time SSRF guard on agentEndpoint
+        // (re-validates the resolution the socket uses; closes TOCTOU).
+        const response = await ssrfFetch(url, {
           headers: { 'Content-Type': 'application/json' },
         });
 

@@ -159,6 +159,22 @@ function isPrivateIPv6(ip: string): boolean {
   return false;
 }
 
+/**
+ * M2 (audit 2026-06-24): single predicate reused by BOTH the write/read-time
+ * `validateOutboundUrl` (stage 5) AND the connect-time SSRF dispatcher
+ * (`ssrf-dispatcher.ts`). Returns `true` when `address` (an IP literal as
+ * returned by `dns.lookup`) belongs to a blocked private/loopback/link-local/
+ * metadata range for the given `family` (4 | 6). NOT duplicated — both call
+ * sites import this so the connect-time check and the pre-fetch check agree
+ * byte-for-byte (closes the TOCTOU / DNS-rebinding gap).
+ */
+export function isBlockedAddress(address: string, family: number): boolean {
+  if (family === 4) return isPrivateIPv4(address);
+  if (family === 6) return isPrivateIPv6(address);
+  // Unknown family → fail-closed: treat as blocked (defensive).
+  return true;
+}
+
 // ─── Hostname literal blocks ───────────────────────────────────────────
 
 /**
@@ -277,21 +293,15 @@ export async function validateOutboundUrl(
   }
 
   for (const { address, family } of addresses) {
-    if (family === 4 && isPrivateIPv4(address)) {
+    // M2 (audit 2026-06-24): use the shared `isBlockedAddress` predicate so
+    // this pre-fetch check and the connect-time dispatcher classify IPs
+    // identically (no divergence between TOCTOU layers).
+    if (isBlockedAddress(address, family)) {
       return {
         ok: false,
         error: {
           category: 'private-ip',
-          reason: `URL resolves to non-public IPv4: ${address}`,
-        },
-      };
-    }
-    if (family === 6 && isPrivateIPv6(address)) {
-      return {
-        ok: false,
-        error: {
-          category: 'private-ip',
-          reason: `URL resolves to non-public IPv6: ${address}`,
+          reason: `URL resolves to non-public IP: ${address}`,
         },
       };
     }
