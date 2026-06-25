@@ -100,7 +100,6 @@ function chainMock(
       calls += 1;
       if (calls === 1) return chain;
       // 2nd select() is the terminal one — return an awaitable.
-      // biome-ignore lint/style/noNonNullAssertion: guarded by `if (overrides.selectFinal)` on L97; `?.` would change the test mock's semantics
       return overrides.selectFinal!();
     });
   }

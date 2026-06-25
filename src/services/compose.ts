@@ -573,6 +573,7 @@ export const composeService = {
     if (i < steps.length - 1) {
       // safe: el guard `i < steps.length - 1` garantiza i+1 < steps.length,
       // por lo que steps[i + 1] nunca es undefined.
+      // biome-ignore lint/style/noNonNullAssertion: el guard `i < steps.length - 1` garantiza que steps[i + 1] siempre existe.
       const nextStep = steps[i + 1]!;
       const nextAgent = await this.resolveAgent(nextStep, discoverCache);
       // (discoverCache reused from compose() — B7)
