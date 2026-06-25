@@ -37,6 +37,7 @@ import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
 import { regenerateInputFromErrors } from './llm/input-retry.js';
 import { maybeTransform } from './llm/transform.js';
+import { refundOutbox } from './refund-outbox.js';
 import { registryService } from './registry.js';
 import { normalizeDestination } from './spend-policy.js';
 
@@ -322,6 +323,17 @@ export const composeService = {
               step: i,
               reverted: creditRes.reverted ?? false,
               error: creditRes.error,
+            });
+            // M6 (audit 2026-06-24): el refund NO revirtió (0 filas). Encolar para
+            // reintento confiable. Invariante anti-doble-refund: solo se encola
+            // cuando NADA se aplicó. Best-effort: no rompe el pipeline.
+            await refundOutbox.enqueueRefund({
+              keyId: scopingKeyRow.id,
+              chainId,
+              amountUsd: stepDebitedUsd,
+              ownerRef: scopingKeyRow.owner_ref,
+              destination: stepDestination,
+              reason: 'compose.refund-failed',
             });
           }
           return reverted;

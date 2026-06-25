@@ -27,6 +27,7 @@ import {
   ProtocolFeeError,
 } from './fee-charge.js';
 import { receiptService } from './receipt.js';
+import { refundOutbox } from './refund-outbox.js';
 
 const MODEL = 'claude-sonnet-4-6';
 const LLM_TIMEOUT_MS = 30_000;
@@ -674,6 +675,18 @@ export const orchestrateService = {
             orchestrationId,
           });
           refundError = true;
+          // M6 (audit 2026-06-24): el refund NO aplicó nada (success:false →
+          // reverted:false / 0 filas). Encolar para reintento confiable. La
+          // invariante anti-doble-refund se sostiene: solo se encola cuando NADA
+          // se aplicó; el retry re-credita y marca done solo si revierte de
+          // verdad. Best-effort: el enqueue NUNCA rompe el response.
+          await refundOutbox.enqueueRefund({
+            keyId: billingKeyRow.id,
+            chainId: request.chainId,
+            amountUsd: refundUsd,
+            ownerRef: billingKeyRow.owner_ref,
+            reason: 'orchestrate.refund-failed',
+          });
         }
       }
 

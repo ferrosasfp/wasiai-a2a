@@ -20,6 +20,7 @@ import {
   getProtocolFeeRate,
 } from '../services/fee-charge.js';
 import { receiptService } from '../services/receipt.js';
+import { refundOutbox } from '../services/refund-outbox.js';
 import { normalizeDestination } from '../services/spend-policy.js';
 import type { ComposeStep } from '../types/index.js';
 
@@ -273,6 +274,18 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
                   amountUsd: refundUsd,
                   requestId: request.id,
                 });
+                // M6 (audit 2026-06-24): success:false ⟹ reverted:false / 0
+                // filas (nada se aplicó). Encolar para reintento confiable.
+                // Invariante anti-doble-refund: solo se encola cuando NADA se
+                // aplicó. Best-effort: no rompe el response.
+                await refundOutbox.enqueueRefund({
+                  keyId: request.a2aKeyRow.id,
+                  chainId: refundChainId,
+                  amountUsd: refundUsd,
+                  ownerRef: request.a2aKeyRow.owner_ref,
+                  destination: request.composeDestination ?? null,
+                  reason: 'compose-route.refund-failed',
+                });
               }
             } catch (e) {
               // Best-effort: el fallo del refund NUNCA rompe el response.
@@ -280,6 +293,15 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
                 '[compose.refund-threw]',
                 e instanceof Error ? e.message : String(e),
               );
+              // M6: el credit tiró antes de aplicar nada → encolar para reintento.
+              await refundOutbox.enqueueRefund({
+                keyId: request.a2aKeyRow.id,
+                chainId: refundChainId,
+                amountUsd: refundUsd,
+                ownerRef: request.a2aKeyRow.owner_ref,
+                destination: request.composeDestination ?? null,
+                reason: 'compose-route.refund-threw',
+              });
             }
           }
         }

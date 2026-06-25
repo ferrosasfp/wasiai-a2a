@@ -28,6 +28,7 @@ import receiptsRoutes from './routes/receipts.js';
 import registriesRoutes from './routes/registries.js';
 import tasksRoutes from './routes/tasks.js';
 import wellKnownRoutes from './routes/well-known.js';
+import { refundOutbox } from './services/refund-outbox.js';
 
 // Initialize chain-adaptive adapters before server starts
 await initAdapters();
@@ -159,9 +160,24 @@ console.log(`
 
 await fastify.listen({ port, host: '0.0.0.0' });
 
+// M6 (audit 2026-06-24): sweep periódico del outbox de refunds. Reintenta los
+// refunds best-effort que NO aplicaron nada. processRefundOutbox NUNCA tira
+// (best-effort), pero atamos un .catch() por defensa en profundidad. .unref()
+// para no bloquear el shutdown del proceso; el interval se limpia explícitamente
+// en gracefulShutdown.
+const refundSweepMs = parseInt(
+  process.env.REFUND_OUTBOX_SWEEP_MS ?? '60000',
+  10,
+);
+const refundSweepTimer = setInterval(() => {
+  refundOutbox.processRefundOutbox().catch(() => {});
+}, refundSweepMs);
+refundSweepTimer.unref();
+
 // Graceful shutdown (AC-12)
 async function gracefulShutdown(signal: string) {
   fastify.log.info({ signal }, 'Received signal, starting graceful shutdown');
+  clearInterval(refundSweepTimer);
   const graceMs = parseInt(process.env.SHUTDOWN_GRACE_MS ?? '30000', 10);
   const forceTimer = setTimeout(() => {
     fastify.log.error('Graceful shutdown timed out, forcing exit');
