@@ -20,7 +20,7 @@
  *       lo cobró el middleware).
  */
 import crypto from 'node:crypto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { A2AAgentKeyRow, Agent } from '../types/index.js';
 
 // ── Anthropic mock (devuelve null client → fallback greedy planner) ──
@@ -395,5 +395,81 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       0,
     );
     expect(totalDebited).toBeCloseTo(0.05, 6);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Gas pass-through (audit 2026-06-25): orchestrate's step-0 debit must add the
+// per-step gas overhead ON MAINNET (consistent with compose's steps 1..N), and
+// must stay UNTOUCHED on testnet (the rest of this file already proves testnet
+// at CHAIN_ID=2368 with overhead disabled).
+// ─────────────────────────────────────────────────────────────────────
+describe('orchestrateService — gas overhead pass-through (step-0)', () => {
+  const BASE_MAINNET = 8453;
+  let savedFlat: string | undefined;
+
+  beforeEach(() => {
+    savedFlat = process.env.STEP_GAS_OVERHEAD_USD;
+    delete process.env.STEP_GAS_OVERHEAD_USD;
+  });
+  afterEach(() => {
+    if (savedFlat === undefined) delete process.env.STEP_GAS_OVERHEAD_USD;
+    else process.env.STEP_GAS_OVERHEAD_USD = savedFlat;
+  });
+
+  it('mainnet + env → step-0 debit = priceUsdc + overhead', async () => {
+    process.env.STEP_GAS_OVERHEAD_USD = '0.02';
+    const a1 = makeAgent({
+      slug: 'a1',
+      id: 'id1',
+      priceUsdc: 0.05,
+      registry: 'wasiai',
+    });
+    withAgents([a1]);
+    mockFetchOk();
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'single step mainnet',
+        budget: 5.0,
+        maxAgents: 1,
+        scopingKeyRow: makeKeyRow(),
+        chainId: BASE_MAINNET,
+      },
+      'orch-gas-1',
+    );
+
+    expect(result.pipeline.success).toBe(true);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    const step0Call = mockDebit.mock.calls[0]!;
+    expect(step0Call[1]).toBe(BASE_MAINNET);
+    // step-0 debit = price (0.05) + overhead (0.02) = 0.07.
+    expect(step0Call[2] as number).toBeCloseTo(0.07, 6);
+  });
+
+  it('mainnet without env → step-0 debit = priceUsdc only (default 0)', async () => {
+    const a1 = makeAgent({
+      slug: 'a1',
+      id: 'id1',
+      priceUsdc: 0.05,
+      registry: 'wasiai',
+    });
+    withAgents([a1]);
+    mockFetchOk();
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'single step mainnet no env',
+        budget: 5.0,
+        maxAgents: 1,
+        scopingKeyRow: makeKeyRow(),
+        chainId: BASE_MAINNET,
+      },
+      'orch-gas-2',
+    );
+
+    expect(result.pipeline.success).toBe(true);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockDebit.mock.calls[0]![2] as number).toBeCloseTo(0.05, 6);
   });
 });

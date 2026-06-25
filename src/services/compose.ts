@@ -12,6 +12,7 @@ import {
   signAndSettleDownstream,
 } from '../lib/downstream-payment.js';
 import { parseFieldErrors } from '../lib/field-error-parser.js';
+import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 import {
@@ -143,14 +144,24 @@ export const composeService = {
           };
         }
       }
-      if (maxBudget && totalCost + agent.priceUsdc > maxBudget)
+      // Gas pass-through (audit 2026-06-25): per-step gateway gas overhead the
+      // caller pays ON TOP of the agent price, to cover the downstream settle
+      // gas. ALWAYS 0 on testnet / without env config → no behaviour change by
+      // default. Gated on chainId being resolved (same precondition as the
+      // per-step debit below). NOT settled to the agent (gateway margin).
+      const stepGasOverhead =
+        chainId !== undefined ? getStepGasOverheadUsd(chainId) : 0;
+      if (
+        maxBudget &&
+        totalCost + agent.priceUsdc + stepGasOverhead > maxBudget
+      )
         return {
           success: false,
           output: null,
           steps: results,
           totalCostUsdc: totalCost,
           totalLatencyMs: totalLatency,
-          error: `Budget exceeded: would need ${totalCost + agent.priceUsdc}, max is ${maxBudget}`,
+          error: `Budget exceeded: would need ${totalCost + agent.priceUsdc + stepGasOverhead}, max is ${maxBudget}`,
         };
       // WKH-59 (real-price-debit) AC-2: steps 2..N debit atómico via
       // budgetService.debit (PG function increment_a2a_key_spend — CD-2).
@@ -193,7 +204,14 @@ export const composeService = {
           typeof agent.priceUsdc !== 'number' ||
           agent.priceUsdc === 0 ||
           Number.isNaN(agent.priceUsdc);
-        const debitAmount = isInvalid ? PLACEHOLDER_FEE_USD : agent.priceUsdc;
+        // Gas pass-through (audit 2026-06-25): the caller is debited the agent
+        // price PLUS the per-step gas overhead. `stepGasOverhead` is 0 on
+        // testnet / without env → identical to the previous amount. The agent
+        // still receives EXACTLY `agent.priceUsdc` downstream (invokeAgent /
+        // signAndSettleDownstream are unchanged) — the overhead is gateway
+        // margin and never settled to the agent.
+        const debitAmount =
+          (isInvalid ? PLACEHOLDER_FEE_USD : agent.priceUsdc) + stepGasOverhead;
 
         if (isInvalid) {
           const warn = logger?.warn?.bind(logger) ?? console.warn;

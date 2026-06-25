@@ -2767,3 +2767,170 @@ describe('composeService.compose — discover cache (B7)', () => {
     expect(vi.mocked(discoveryService.discover)).toHaveBeenCalledTimes(1);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// Gas pass-through (audit 2026-06-25): the per-step caller debit includes the
+// gateway gas overhead ON MAINNET, but the agent still receives EXACTLY
+// priceUsdc downstream. Testnet / no-env → identical behaviour.
+// ─────────────────────────────────────────────────────────────────────
+describe('composeService.compose — gas overhead pass-through', () => {
+  const BASE_MAINNET = 8453;
+  const KITE_TESTNET = 2368;
+  let savedFlat: string | undefined;
+
+  function mockAgentsBySlug(agents: Record<string, Agent>) {
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug: string, _registry?: string) => agents[slug] ?? null,
+    );
+  }
+
+  beforeEach(() => {
+    // global beforeEach clears mock implementations; restore the registry list
+    // explicitly so invokeAgent's registries.find never throws, and re-pin the
+    // retry-regen mock to null so no leaked field-error retry fires.
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockRegen.mockReset();
+    mockRegen.mockResolvedValue(null);
+    mockFetch.mockReset();
+    savedFlat = process.env.STEP_GAS_OVERHEAD_USD;
+    delete process.env.STEP_GAS_OVERHEAD_USD;
+  });
+  afterEach(() => {
+    if (savedFlat === undefined) delete process.env.STEP_GAS_OVERHEAD_USD;
+    else process.env.STEP_GAS_OVERHEAD_USD = savedFlat;
+  });
+
+  it('mainnet + env → step debits priceUsdc + overhead, agent settle gets only priceUsdc', async () => {
+    process.env.STEP_GAS_OVERHEAD_USD = '0.02';
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: BASE_MAINNET,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    // step 1 debited price (0.05) + overhead (0.02) = 0.07.
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockDebit).toHaveBeenCalledWith(
+      'k1',
+      BASE_MAINNET,
+      0.07,
+      undefined,
+      undefined,
+      'test-registry/corridor',
+    );
+    // CRITICAL: downstream settle still receives the corridor agent with
+    // priceUsdc=0.05 — NEVER the gas-inclusive 0.07 (the overhead is gateway
+    // margin, never settled to the agent).
+    const corridorCall = mockDownstream.mock.calls.find(
+      (c) => (c[0] as Agent).slug === 'corridor',
+    );
+    expect(corridorCall).toBeDefined();
+    expect((corridorCall![0] as Agent).priceUsdc).toBe(0.05);
+    for (const call of mockDownstream.mock.calls) {
+      // no downstream settle ever sees the gas-inclusive amount.
+      expect((call[0] as Agent).priceUsdc).not.toBe(0.07);
+    }
+  });
+
+  it('testnet + env → step debits only priceUsdc (overhead gated off)', async () => {
+    process.env.STEP_GAS_OVERHEAD_USD = '0.02';
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: KITE_TESTNET,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockDebit).toHaveBeenCalledWith(
+      'k1',
+      KITE_TESTNET,
+      0.05, // no overhead on testnet
+      undefined,
+      undefined,
+      'test-registry/corridor',
+    );
+  });
+
+  it('mainnet without env → step debits only priceUsdc (default 0)', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: BASE_MAINNET,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockDebit).toHaveBeenCalledWith(
+      'k1',
+      BASE_MAINNET,
+      0.05,
+      undefined,
+      undefined,
+      'test-registry/corridor',
+    );
+  });
+
+  it('mainnet step fails after debit → refund returns priceUsdc + overhead', async () => {
+    process.env.STEP_GAS_OVERHEAD_USD = '0.02';
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk(); // step 0 OK
+    mockFetchError(502); // step 1 fails after debit
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: BASE_MAINNET,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    // refund must return the FULL debited amount (price + overhead = 0.07).
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
+    expect(mockCreditWithDest).toHaveBeenCalledWith(
+      'k1',
+      BASE_MAINNET,
+      0.07,
+      'owner-test',
+      'test-registry/corridor',
+    );
+  });
+});

@@ -10,6 +10,7 @@ import {
   anthropicCircuitBreaker,
   CircuitOpenError,
 } from '../lib/circuit-breaker.js';
+import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import type {
   Agent,
@@ -504,10 +505,17 @@ export const orchestrateService = {
     // `debitedUsd` es la ÚNICA fuente de verdad para el refund (AC-5/AC-6/AC-7).
     let debitedUsd = 0;
     if (billingKeyRow && request.chainId !== undefined) {
+      // Gas pass-through (audit 2026-06-25): the step-0 debit must include the
+      // per-step gas overhead, consistent with compose's steps 1..N. 0 on
+      // testnet / without env → identical to before. `debitedUsd` (price +
+      // overhead) stays the single source of truth for the step-0 refund on
+      // total failure, so a refunded step-0 returns price + gas.
+      const step0GasOverhead = getStepGasOverheadUsd(request.chainId);
+      const step0DebitUsd = plannedCostUsd + step0GasOverhead;
       const debitRes = await budgetService.debit(
         billingKeyRow.id,
         request.chainId,
-        plannedCostUsd,
+        step0DebitUsd,
       );
       if (!debitRes.success) {
         // Insufficient/owner mismatch → return graceful SIN ejecutar compose (§4.5).
@@ -556,7 +564,7 @@ export const orchestrateService = {
 
         return debitFailResult;
       }
-      debitedUsd = plannedCostUsd; // ÚNICA fuente de verdad para el refund.
+      debitedUsd = step0DebitUsd; // ÚNICA fuente de verdad para el refund (incluye gas overhead).
     }
 
     // Step 3: Execute pipeline. WKH-44 (AC-1): maxBudget deducido del fee.
@@ -653,10 +661,14 @@ export const orchestrateService = {
           // (debitedUsd = precio del step-0). Arregla el incidente original.
           refundUsd = debitedUsd;
         } else {
-          // AC-6 parcial (CD-14): si el step-0 settleó, totalCostUsdc ≥ debitedUsd
-          // (debitedUsd = precio del step-0, incluido en el costo real) → 0. No se
-          // reembolsa un step-0 ya entregado. Clamp a 0 por seguridad.
-          refundUsd = Math.max(0, debitedUsd - pipeline.totalCostUsdc);
+          // AC-6 parcial (CD-14): el step-0 SÍ settleó (totalCostUsdc > 0). El
+          // costo real del pipeline (`totalCostUsdc`) se contabiliza SOLO con el
+          // precio del agente — NO incluye el gas overhead. Para no reembolsar
+          // de más, comparamos contra la porción de PRECIO del débito de step-0
+          // (`plannedCostUsd`), no contra `debitedUsd` (que incluye el gas). El
+          // gas overhead NO se reembolsa en un step-0 ya settleado: el gateway
+          // YA gastó ese gas on-chain. Audit 2026-06-25. Clamp a 0 por seguridad.
+          refundUsd = Math.max(0, plannedCostUsd - pipeline.totalCostUsdc);
         }
       }
       if (refundUsd > 0) {
