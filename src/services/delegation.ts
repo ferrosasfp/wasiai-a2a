@@ -17,6 +17,8 @@
 import crypto from 'node:crypto';
 import { recoverTypedDataAddress } from 'viem';
 import { supabase } from '../lib/supabase.js';
+import { asAgentKeyRow, asDelegationRow } from '../types/a2a-key.js';
+import type { Database, Json } from '../types/database.types.js';
 import type {
   A2AAgentKeyRow,
   CreateDelegationInput,
@@ -220,14 +222,17 @@ export const delegationService = {
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
     // 6. INSERT. owner_ref/key_id desde parentKey (NUNCA del request).
-    const row: Record<string, unknown> = {
+    // M9: tipado contra el Insert real; `policy`/`typed_data_raw` son jsonb
+    // (`Json`) cuyo shape de dominio (interfaces sin index signature) requiere un
+    // narrowing acotado a esos dos campos.
+    const row: Database['public']['Tables']['a2a_delegations']['Insert'] = {
       key_id: parentKey.id,
       owner_ref: parentKey.owner_ref,
       session_key_address: input.session_key_address.toLowerCase(),
       session_token_hash: tokenHash,
-      policy,
+      policy: policy as unknown as Json,
       expires_at: expiresAtIso,
-      typed_data_raw: input.typed_data,
+      typed_data_raw: input.typed_data as unknown as Json,
       nonce: input.typed_data.message.nonce,
     };
 
@@ -246,7 +251,7 @@ export const delegationService = {
     }
 
     return {
-      delegation_id: (data as { id: string }).id,
+      delegation_id: data.id, // M9: fila tipada (.select('id')), sin cast
       session_token: token, // plano, SOLO acá (nunca se vuelve a exponer)
       expires_at: expiresAtIso,
       policy,
@@ -272,7 +277,7 @@ export const delegationService = {
       throw new Error(`Failed to lookup delegation: ${error.message}`);
     }
 
-    return data as DelegationRow;
+    return asDelegationRow(data);
   },
 
   /**
@@ -294,7 +299,7 @@ export const delegationService = {
       throw new Error(`Failed to load parent key: ${error.message}`);
     }
 
-    return data as A2AAgentKeyRow;
+    return asAgentKeyRow(data);
   },
 
   /** Listado del owner con status derivado (AC-11). Ownership Guard: .eq('owner_ref', ownerRef). */
@@ -311,7 +316,9 @@ export const delegationService = {
       throw new Error(`Failed to list delegations: ${error.message}`);
     }
 
-    const rows = (data ?? []) as Array<
+    // M9: narrowing acotado. `policy` jsonb (shape DelegationPolicy) y
+    // `total_spent` NUMERIC (string en runtime, `number` en el tipo generado).
+    const rows = (data ?? []) as unknown as Array<
       Pick<
         DelegationRow,
         | 'session_key_address'
@@ -383,14 +390,22 @@ export const delegationService = {
     amountUsd: number,
     destination?: string,
   ): Promise<string> {
-    const { data, error } = await supabase.rpc('debit_delegation_and_parent', {
-      p_delegation_id: delegationId,
-      p_owner_ref: ownerRef,
-      p_key_id: keyId,
-      p_chain_id: chainId,
-      p_amount_usd: amountUsd,
-      p_destination: destination ?? null,
-    });
+    // M9: el tipo generado declara `p_destination?: string` (no captura el NULL
+    // que acepta la SQL fn). Narrowing acotado al objeto de args para preservar el
+    // envío explícito de `null` (contrato de test) sin alterar el payload.
+    const debitArgs: Database['public']['Functions']['debit_delegation_and_parent']['Args'] =
+      {
+        p_delegation_id: delegationId,
+        p_owner_ref: ownerRef,
+        p_key_id: keyId,
+        p_chain_id: chainId,
+        p_amount_usd: amountUsd,
+        p_destination: destination ?? null,
+      } as unknown as Database['public']['Functions']['debit_delegation_and_parent']['Args'];
+    const { data, error } = await supabase.rpc(
+      'debit_delegation_and_parent',
+      debitArgs,
+    );
 
     if (error) {
       const msg = error.message;

@@ -4,6 +4,7 @@
  */
 
 import { supabase } from '../lib/supabase.js';
+import type { Database, Json } from '../types/database.types.js';
 import type { A2AEvent, AgentSummary, DashboardStats } from '../types/index.js';
 
 // ── Tipo interno para filas de Supabase ─────────────────────
@@ -61,7 +62,9 @@ export const eventService = {
     goal?: string | undefined;
     metadata?: Record<string, unknown> | undefined;
   }): Promise<A2AEvent> {
-    const row: Partial<EventRow> = {
+    // M9: tipado contra el Insert real; `metadata` es jsonb (`Json`) →
+    // narrowing acotado a ese campo.
+    const row: Database['public']['Tables']['a2a_events']['Insert'] = {
       event_type: input.eventType ?? 'compose_step',
       agent_id: input.agentId ?? null,
       agent_name: input.agentName ?? null,
@@ -71,7 +74,7 @@ export const eventService = {
       cost_usdc: input.costUsdc ?? 0,
       tx_hash: input.txHash ?? null,
       goal: input.goal ?? null,
-      metadata: input.metadata ?? {},
+      metadata: (input.metadata ?? {}) as Json,
     };
 
     const { data, error } = await supabase
@@ -81,7 +84,8 @@ export const eventService = {
       .single();
 
     if (error) throw new Error(`Failed to track event: ${error.message}`);
-    return rowToEvent(data as EventRow);
+    // M9: narrowing acotado — `metadata` jsonb + `status` string→union de dominio.
+    return rowToEvent(data as unknown as EventRow);
   },
 
   /**
@@ -217,6 +221,7 @@ export const eventService = {
       .limit(safeLimit);
 
     if (error) throw new Error(`Failed to get recent events: ${error.message}`);
-    return (data as EventRow[]).map(rowToEvent);
+    // M9: narrowing acotado — `metadata` jsonb + `status` string→union de dominio.
+    return (data as unknown as EventRow[]).map(rowToEvent);
   },
 };

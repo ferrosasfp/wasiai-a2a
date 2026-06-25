@@ -18,6 +18,7 @@
  */
 
 import { supabase } from '../lib/supabase.js';
+import type { Database } from '../types/database.types.js';
 import type {
   A2AAgentKeyRow,
   SpendPolicy,
@@ -118,20 +119,21 @@ export const spendPolicyService = {
     }
     const windowSecs = validateWindow(input.window_type, input.window_secs);
 
+    const upsertRow: Database['public']['Tables']['a2a_key_spend_policies']['Insert'] =
+      {
+        key_id: callerKey.id,
+        owner_ref: callerKey.owner_ref,
+        destination,
+        // M9: `max_usd` es NUMERIC; la columna acepta el string decimal sin
+        // pérdida, el tipo generado lo declara `number` → narrowing acotado.
+        max_usd: input.max_usd as unknown as number,
+        window_type: input.window_type,
+        window_secs: windowSecs,
+        updated_at: new Date().toISOString(),
+      };
     const { data, error } = await supabase
       .from('a2a_key_spend_policies')
-      .upsert(
-        {
-          key_id: callerKey.id,
-          owner_ref: callerKey.owner_ref,
-          destination,
-          max_usd: input.max_usd,
-          window_type: input.window_type,
-          window_secs: windowSecs,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'key_id,destination' },
-      )
+      .upsert(upsertRow, { onConflict: 'key_id,destination' })
       .select(
         'id, key_id, owner_ref, destination, max_usd, window_type, window_secs, created_at, updated_at',
       )
@@ -143,7 +145,8 @@ export const spendPolicyService = {
       );
     }
 
-    return toResponse(data as SpendPolicyRow);
+    // M9: narrowing acotado — `max_usd` NUMERIC (string en runtime).
+    return toResponse(data as unknown as SpendPolicyRow);
   },
 
   /**
@@ -164,7 +167,8 @@ export const spendPolicyService = {
       throw new Error(`Failed to list spend policies: ${error.message}`);
     }
 
-    return ((data ?? []) as SpendPolicyRow[]).map(toResponse);
+    // M9: narrowing acotado — `max_usd` NUMERIC (string en runtime).
+    return ((data ?? []) as unknown as SpendPolicyRow[]).map(toResponse);
   },
 
   /**

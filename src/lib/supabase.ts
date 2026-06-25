@@ -6,8 +6,9 @@
  */
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import type { Database } from '../types/database.types.js';
 
-function createSupabaseClient(): SupabaseClient {
+function createSupabaseClient(): SupabaseClient<Database> {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_KEY;
 
@@ -26,7 +27,7 @@ function createSupabaseClient(): SupabaseClient {
     process.exit(1);
   }
 
-  return createClient(url, key, {
+  return createClient<Database>(url, key, {
     auth: {
       persistSession: false, // servidor: no persistir sesión de usuario
       autoRefreshToken: false,

@@ -5,6 +5,8 @@
 
 import crypto from 'node:crypto';
 import { supabase } from '../lib/supabase.js';
+import { asAgentKeyRow } from '../types/a2a-key.js';
+import type { Database, Json } from '../types/database.types.js';
 import type {
   A2AAgentKeyRow,
   AgentCardIdentity,
@@ -57,8 +59,8 @@ export const identityService = {
     // 2. Compute SHA-256 hash
     const keyHash = crypto.createHash('sha256').update(plaintext).digest('hex');
 
-    // 3. Insert row
-    const row: Record<string, unknown> = {
+    // 3. Insert row (tipado contra el Insert real de la tabla — M9)
+    const row: Database['public']['Tables']['a2a_agent_keys']['Insert'] = {
       key_hash: keyHash,
       owner_ref: input.owner_ref,
       display_name: input.display_name ?? null,
@@ -79,7 +81,7 @@ export const identityService = {
 
     return {
       key: plaintext,
-      key_id: (data as { id: string }).id,
+      key_id: data.id, // M9: fila tipada (.select('id')), sin cast
     };
   },
 
@@ -99,7 +101,7 @@ export const identityService = {
       throw new Error(`Failed to lookup agent key: ${error.message}`);
     }
 
-    return data as A2AAgentKeyRow;
+    return asAgentKeyRow(data);
   },
 
   /**
@@ -280,7 +282,9 @@ export const identityService = {
 
     const { data, error } = await supabase
       .from('a2a_agent_keys')
-      .update({ erc8004_identity: binding }) // escribe el JSONB completo; NO toca budget (CD-2)
+      // M9: narrowing acotado al campo jsonb. `Erc8004IdentityBinding` es una
+      // interface sin index signature → no asignable a `Json` directamente.
+      .update({ erc8004_identity: binding as unknown as Json }) // escribe el JSONB completo; NO toca budget (CD-2)
       .eq('id', keyId)
       .eq('owner_ref', ownerId) // Ownership Guard COMPLETO (CD-3)
       .select('id');
@@ -360,10 +364,10 @@ export const identityService = {
 
     const nSlug = normalizeSlug(agentSlug);
 
-    for (const row of data as Array<{
-      erc8004_identity: Erc8004IdentityBinding | null;
-    }>) {
-      const b = row.erc8004_identity;
+    for (const row of data) {
+      // M9: narrowing acotado del campo jsonb (DB lo tipa `Json`; el dominio
+      // modela el shape Erc8004IdentityBinding).
+      const b = row.erc8004_identity as Erc8004IdentityBinding | null;
       if (!b) continue;
       // Lado token/agente: el token DECLARADO por el agente está bindeado.
       if (b.token_id !== tokenId || b.chain_id !== chainId) continue;

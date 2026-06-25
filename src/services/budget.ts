@@ -4,6 +4,7 @@
  */
 
 import { supabase } from '../lib/supabase.js';
+import type { Database } from '../types/database.types.js';
 import type {
   A2AAgentKeyRow,
   DelegationDebitContext,
@@ -56,7 +57,9 @@ export const budgetService = {
       throw new Error(`Failed to get balance: ${error.message}`);
     }
 
-    const budget = (data as Pick<A2AAgentKeyRow, 'budget'>).budget;
+    // M9: `budget` es jsonb (`Json` en el cliente tipado); el dominio lo modela
+    // como `Record<string,string>`. Narrowing acotado SOLO al campo jsonb.
+    const budget = (data.budget ?? {}) as A2AAgentKeyRow['budget'];
     return budget[chainId.toString()] ?? '0';
   },
 
@@ -252,7 +255,7 @@ export const budgetService = {
       if (ownerErr || !keyRow) {
         return { success: false, error: 'KEY_NOT_FOUND' };
       }
-      const ownerRef = (keyRow as Pick<A2AAgentKeyRow, 'owner_ref'>).owner_ref;
+      const ownerRef = keyRow.owner_ref; // M9: fila tipada, sin cast
 
       const { error: destErr } = await supabase.rpc('debit_with_dest_policy', {
         p_key_id: keyId,
@@ -305,7 +308,7 @@ export const budgetService = {
     if (ownerErr || !keyRow) {
       return { success: false, error: 'KEY_NOT_FOUND' };
     }
-    const ownerRef = (keyRow as Pick<A2AAgentKeyRow, 'owner_ref'>).owner_ref;
+    const ownerRef = keyRow.owner_ref; // M9: fila tipada, sin cast
 
     const { error } = await supabase.rpc('increment_a2a_key_spend', {
       p_key_id: keyId,
@@ -475,14 +478,23 @@ export const budgetService = {
     txHash: string,
     token?: string,
   ): Promise<string> {
-    const { data, error } = await supabase.rpc('register_a2a_key_deposit', {
-      p_key_id: keyId,
-      p_chain_id: chainId,
-      p_amount_usd: parseFloat(amountUsd),
-      p_owner_ref: ownerId,
-      p_tx_hash: txHash,
-      p_token: token ?? null,
-    });
+    // M9: el tipo generado declara `p_token?: string` (no captura que la SQL fn
+    // acepta NULL — `p_token TEXT DEFAULT NULL`). Narrowing acotado al objeto de
+    // args para preservar el envío explícito de `null` (contrato AC-10) sin
+    // alterar el payload.
+    const depositArgs: Database['public']['Functions']['register_a2a_key_deposit']['Args'] =
+      {
+        p_key_id: keyId,
+        p_chain_id: chainId,
+        p_amount_usd: parseFloat(amountUsd),
+        p_owner_ref: ownerId,
+        p_tx_hash: txHash,
+        p_token: token ?? null,
+      } as unknown as Database['public']['Functions']['register_a2a_key_deposit']['Args'];
+    const { data, error } = await supabase.rpc(
+      'register_a2a_key_deposit',
+      depositArgs,
+    );
 
     if (error) {
       // PG fn v2 mapea condiciones de negocio a RAISE EXCEPTION con prefijos

@@ -99,6 +99,8 @@ export const refundOutbox = {
         console.error('[refund-outbox.claim-failed]', { error: error.message });
         return;
       }
+      // M9: el RPC `claim_refund_outbox` ahora devuelve filas tipadas; el cast
+      // acota al shape de dominio (subset de columnas consumidas).
       claimed = (data ?? []) as RefundOutboxRow[];
     } catch (e) {
       console.error(

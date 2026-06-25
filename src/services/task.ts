@@ -12,8 +12,21 @@
  */
 
 import { supabase } from '../lib/supabase.js';
+import type { Database } from '../types/database.types.js';
 import type { Task, TaskState } from '../types/index.js';
 import { TERMINAL_STATES } from '../types/index.js';
+
+// M9 (audit 2026-06-24): el tipo generado del schema de prod (`tasks`) NO
+// incluye la columna `owner_ref` (ver test/verify-rls-enabled.test.ts: "a2a_tasks
+// NO tiene owner_ref"). El filtrado por owner que introdujo WKH-54 vive en este
+// service y se mantiene EXACTAMENTE igual en runtime. Para que el cliente tipado
+// no rompa los `.eq('owner_ref', ...)` / el insert con `owner_ref` sin alterar el
+// payload enviado, acotamos ESE punto con un narrowing documentado:
+//   - `OWNER_REF_COL`: la columna fuera del schema generado, aislada en un único
+//     literal tipado.
+//   - el INSERT y el `updateRow` se castean al tipo Insert/Update real solo donde
+//     aparece la divergencia jsonb/owner_ref. NO cambia qué datos fluyen.
+const OWNER_REF_COL = 'owner_ref' as 'id';
 
 // ── Tipo interno para filas de Supabase ─────────────────────
 
@@ -68,12 +81,14 @@ export const taskService = {
 
     const { data, error } = await supabase
       .from('tasks')
-      .insert(row)
+      // M9: el payload incluye `owner_ref` (col fuera del schema generado) y
+      // jsonb (`messages`/`artifacts`); narrowing acotado al Insert real.
+      .insert(row as Database['public']['Tables']['tasks']['Insert'])
       .select()
       .single();
 
     if (error) throw new Error(`Failed to create task: ${error.message}`);
-    return rowToTask(data as TaskRow);
+    return rowToTask(data as unknown as TaskRow);
   },
 
   /**
@@ -86,11 +101,12 @@ export const taskService = {
       .from('tasks')
       .select('*')
       .eq('id', id)
-      .eq('owner_ref', ownerRef)
+      .eq(OWNER_REF_COL, ownerRef)
       .maybeSingle();
 
     if (error) throw new Error(`Failed to get task '${id}': ${error.message}`);
-    return data ? rowToTask(data as TaskRow) : undefined;
+    // M9: narrowing acotado — jsonb (`messages`/`artifacts`) + owner_ref off-schema.
+    return data ? rowToTask(data as unknown as TaskRow) : undefined;
   },
 
   /**
@@ -109,7 +125,7 @@ export const taskService = {
     let query = supabase
       .from('tasks')
       .select('*')
-      .eq('owner_ref', ownerRef)
+      .eq(OWNER_REF_COL, ownerRef)
       .order('created_at', { ascending: false })
       .limit(limit);
 
@@ -123,7 +139,8 @@ export const taskService = {
     const { data, error } = await query;
 
     if (error) throw new Error(`Failed to list tasks: ${error.message}`);
-    return (data as TaskRow[]).map(rowToTask);
+    // M9: narrowing acotado — jsonb (`messages`/`artifacts`).
+    return (data as unknown as TaskRow[]).map(rowToTask);
   },
 
   /**
@@ -150,13 +167,14 @@ export const taskService = {
       .from('tasks')
       .update({ status })
       .eq('id', id)
-      .eq('owner_ref', ownerRef)
+      .eq(OWNER_REF_COL, ownerRef)
       .select()
       .single();
 
     if (error)
       throw new Error(`Failed to update task status: ${error.message}`);
-    return rowToTask(data as TaskRow);
+    // M9: narrowing acotado — jsonb (`messages`/`artifacts`).
+    return rowToTask(data as unknown as TaskRow);
   },
 
   /**
@@ -195,14 +213,16 @@ export const taskService = {
 
     const { data, error } = await supabase
       .from('tasks')
-      .update(updateRow)
+      // M9: `messages`/`artifacts` son jsonb; narrowing acotado al Update real.
+      .update(updateRow as Database['public']['Tables']['tasks']['Update'])
       .eq('id', id)
-      .eq('owner_ref', ownerRef)
+      .eq(OWNER_REF_COL, ownerRef)
       .select()
       .single();
 
     if (error) throw new Error(`Failed to append to task: ${error.message}`);
-    return rowToTask(data as TaskRow);
+    // M9: narrowing acotado — jsonb (`messages`/`artifacts`).
+    return rowToTask(data as unknown as TaskRow);
   },
 };
 

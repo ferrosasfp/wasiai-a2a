@@ -21,6 +21,7 @@ import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
+import type { Database, Json } from '../types/database.types.js';
 import type {
   RegistryAuth,
   RegistryConfig,
@@ -94,15 +95,17 @@ function rowToRegistry(row: RegistryRow): RegistryConfig {
 function registryToRow(
   config: Omit<RegistryConfig, 'id' | 'createdAt'>,
   id: string,
-): Omit<RegistryRow, 'created_at'> & { id: string } {
+): Database['public']['Tables']['registries']['Insert'] {
   return {
     id,
     name: config.name,
     discovery_endpoint: config.discoveryEndpoint,
     invoke_endpoint: config.invokeEndpoint,
     agent_endpoint: config.agentEndpoint ?? null,
-    schema: config.schema,
-    auth: config.auth ?? null,
+    // M9: `schema`/`auth` son jsonb (`Json`); el dominio usa interfaces sin
+    // index signature → narrowing acotado a esos dos campos.
+    schema: config.schema as unknown as Json,
+    auth: (config.auth ?? null) as unknown as Json,
     enabled: config.enabled,
     owner_ref: config.ownerRef,
   };
@@ -122,7 +125,8 @@ export const registryService = {
 
     if (error) throw new Error(`Failed to list registries: ${error.message}`);
 
-    return (data as RegistryRow[]).map(rowToRegistry);
+    // M9: narrowing acotado — `schema`/`auth` jsonb (`Json`) → shapes de dominio.
+    return (data as unknown as RegistryRow[]).map(rowToRegistry);
   },
 
   /**
@@ -138,7 +142,8 @@ export const registryService = {
     if (error)
       throw new Error(`Failed to get registry '${id}': ${error.message}`);
 
-    return data ? rowToRegistry(data as RegistryRow) : undefined;
+    // M9: narrowing acotado — `schema`/`auth` jsonb → shapes de dominio.
+    return data ? rowToRegistry(data as unknown as RegistryRow) : undefined;
   },
 
   /**
@@ -201,7 +206,8 @@ export const registryService = {
       throw new Error(`Failed to register: ${error.message}`);
     }
 
-    return rowToRegistry(data as RegistryRow);
+    // M9: narrowing acotado — `schema`/`auth` jsonb → shapes de dominio.
+    return rowToRegistry(data as unknown as RegistryRow);
   },
 
   /**
@@ -265,8 +271,9 @@ export const registryService = {
       }
     }
 
-    // Construir objeto de actualización con snake_case
-    const updateRow: Partial<Omit<RegistryRow, 'id' | 'created_at'>> = {};
+    // Construir objeto de actualización con snake_case.
+    // M9: tipado contra el Update real; `schema`/`auth` jsonb → narrowing acotado.
+    const updateRow: Database['public']['Tables']['registries']['Update'] = {};
 
     if (updates.name !== undefined) updateRow.name = updates.name;
     if (updates.discoveryEndpoint !== undefined)
@@ -275,8 +282,10 @@ export const registryService = {
       updateRow.invoke_endpoint = updates.invokeEndpoint;
     if (updates.agentEndpoint !== undefined)
       updateRow.agent_endpoint = updates.agentEndpoint ?? null;
-    if (updates.schema !== undefined) updateRow.schema = updates.schema;
-    if (updates.auth !== undefined) updateRow.auth = updates.auth ?? null;
+    if (updates.schema !== undefined)
+      updateRow.schema = updates.schema as unknown as Json;
+    if (updates.auth !== undefined)
+      updateRow.auth = (updates.auth ?? null) as unknown as Json;
     if (updates.enabled !== undefined) updateRow.enabled = updates.enabled;
 
     // 5: UPDATE filtrado también por owner_ref como defense-in-depth
@@ -302,7 +311,8 @@ export const registryService = {
       throw new Error(`Failed to update registry '${id}': ${error.message}`);
     }
 
-    return rowToRegistry(data as RegistryRow);
+    // M9: narrowing acotado — `schema`/`auth` jsonb → shapes de dominio.
+    return rowToRegistry(data as unknown as RegistryRow);
   },
 
   /**
@@ -367,6 +377,7 @@ export const registryService = {
     if (error)
       throw new Error(`Failed to get enabled registries: ${error.message}`);
 
-    return (data as RegistryRow[]).map(rowToRegistry);
+    // M9: narrowing acotado — `schema`/`auth` jsonb → shapes de dominio.
+    return (data as unknown as RegistryRow[]).map(rowToRegistry);
   },
 };

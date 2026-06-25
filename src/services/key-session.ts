@@ -17,6 +17,8 @@
 import crypto from 'node:crypto';
 import { getAdaptersBundle } from '../adapters/registry.js';
 import { supabase } from '../lib/supabase.js';
+import { asAgentKeyRow, asKeySessionRow } from '../types/a2a-key.js';
+import type { Database } from '../types/database.types.js';
 import type {
   A2AAgentKeyRow,
   CreateKeySessionInput,
@@ -207,13 +209,16 @@ export const keySessionService = {
 
     // 8. INSERT. owner_ref/key_id desde parentKey (NUNCA del request). El INSERT
     //    SOLO lleva signing_secret_hash — jamás el plano (CD-5).
-    const row: Record<string, unknown> = {
+    // M9: tipado contra el Insert real de la tabla.
+    const row: Database['public']['Tables']['a2a_key_sessions']['Insert'] = {
       key_id: parentKey.id,
       owner_ref: parentKey.owner_ref,
       session_token_hash: tokenHash,
       ttl_seconds: input.ttl_seconds,
       expires_at: expiresAtIso,
-      max_budget_usd: input.max_budget_usd,
+      // max_budget_usd es NUMERIC: la columna acepta el string decimal sin
+      // pérdida; el tipo generado lo declara `number` → narrowing acotado.
+      max_budget_usd: input.max_budget_usd as unknown as number,
       allowed_registries: allowedRegistries,
       allowed_agent_slugs: allowedAgentSlugs,
       allowed_categories: allowedCategories,
@@ -232,7 +237,7 @@ export const keySessionService = {
     }
 
     const response: KeySessionResponse = {
-      session_id: (data as { id: string }).id,
+      session_id: data.id, // M9: fila tipada (.select('id')), sin cast
       session_token: token, // plano, SOLO acá (nunca se vuelve a exponer)
       expires_at: expiresAtIso,
       scope: {
@@ -267,7 +272,7 @@ export const keySessionService = {
       throw new Error(`Failed to lookup key session: ${error.message}`);
     }
 
-    return data as KeySessionRow;
+    return asKeySessionRow(data);
   },
 
   /**
@@ -287,7 +292,7 @@ export const keySessionService = {
       throw new Error(`Failed to load parent key: ${error.message}`);
     }
 
-    return data as A2AAgentKeyRow;
+    return asAgentKeyRow(data);
   },
 
   /**
@@ -307,7 +312,11 @@ export const keySessionService = {
       throw new Error(`Failed to list key sessions: ${error.message}`);
     }
 
-    const rows = (data ?? []) as Array<
+    // M9: narrowing acotado. Las columnas NUMERIC (max_budget_usd, spent_usd)
+    // llegan como string en runtime aunque el tipo generado las declare `number`;
+    // las jsonb (allowed_*) llegan como string[]. El puente reconcilia ese subset
+    // con el shape de dominio sin alterar los datos.
+    const rows = (data ?? []) as unknown as Array<
       Pick<
         KeySessionRow,
         | 'id'
@@ -446,14 +455,22 @@ export const keySessionService = {
     amountUsd: number,
     destination?: string,
   ): Promise<string> {
-    const { data, error } = await supabase.rpc('debit_session_and_parent', {
-      p_session_id: sessionId,
-      p_owner_ref: ownerId,
-      p_key_id: keyId,
-      p_chain_id: chainId,
-      p_amount_usd: amountUsd,
-      p_destination: destination ?? null,
-    });
+    // M9: el tipo generado declara `p_destination?: string` (no captura el NULL
+    // que acepta la SQL fn). Narrowing acotado al objeto de args para preservar el
+    // envío explícito de `null` (contrato de test) sin alterar el payload.
+    const debitArgs: Database['public']['Functions']['debit_session_and_parent']['Args'] =
+      {
+        p_session_id: sessionId,
+        p_owner_ref: ownerId,
+        p_key_id: keyId,
+        p_chain_id: chainId,
+        p_amount_usd: amountUsd,
+        p_destination: destination ?? null,
+      } as unknown as Database['public']['Functions']['debit_session_and_parent']['Args'];
+    const { data, error } = await supabase.rpc(
+      'debit_session_and_parent',
+      debitArgs,
+    );
 
     if (error) {
       const msg = error.message;

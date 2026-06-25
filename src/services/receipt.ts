@@ -14,6 +14,7 @@
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { supabase } from '../lib/supabase.js';
+import type { Database } from '../types/database.types.js';
 import type {
   EmitReceiptInput,
   ReceiptListItem,
@@ -119,21 +120,27 @@ export const receiptService = {
 
     try {
       // 2. RPC atómico: inserta con receipt_hash='' y devuelve id/prev/created_at.
-      const { data, error } = await supabase.rpc('insert_receipt', {
-        p_owner_ref: input.ownerRef,
-        p_agent_key_id: input.agentKeyId,
-        p_session_id: input.sessionId,
-        p_delegation_id: input.delegationId,
-        p_receipt_type: input.receiptType,
-        p_amount_usd:
-          typeof input.amountUsd === 'string'
-            ? Number(input.amountUsd)
-            : input.amountUsd,
-        p_chain_id: input.chainId,
-        p_tx_hash: input.txHash,
-        p_counterparty: input.counterparty,
-        p_orchestration_id: input.orchestrationId,
-      });
+      // M9: el tipo generado declara los FK opcionales como `string` (no captura
+      // nullability); la SQL fn `insert_receipt` los acepta NULL. Narrowing
+      // acotado al objeto de args para preservar el envío de NULL sin cambiar
+      // qué se inserta.
+      const insertArgs: Database['public']['Functions']['insert_receipt']['Args'] =
+        {
+          p_owner_ref: input.ownerRef,
+          p_agent_key_id: input.agentKeyId,
+          p_session_id: input.sessionId,
+          p_delegation_id: input.delegationId,
+          p_receipt_type: input.receiptType,
+          p_amount_usd:
+            typeof input.amountUsd === 'string'
+              ? Number(input.amountUsd)
+              : input.amountUsd,
+          p_chain_id: input.chainId,
+          p_tx_hash: input.txHash,
+          p_counterparty: input.counterparty,
+          p_orchestration_id: input.orchestrationId,
+        } as unknown as Database['public']['Functions']['insert_receipt']['Args'];
+      const { data, error } = await supabase.rpc('insert_receipt', insertArgs);
 
       if (error) {
         console.warn('[receipts] emit failed', error.message);
@@ -257,7 +264,9 @@ export const receiptService = {
       .order('created_at', { ascending: false });
 
     if (error) throw new Error(`Failed to list receipts: ${error.message}`);
-    return (data as ReceiptListItem[] | null) ?? [];
+    // M9: narrowing acotado — `amount_usd` es NUMERIC (string en runtime; el
+    // tipo generado lo declara `number`).
+    return (data as unknown as ReceiptListItem[] | null) ?? [];
   },
 
   /**
@@ -278,6 +287,7 @@ export const receiptService = {
       if (error.code === 'PGRST116') return null; // 0 rows → disclosure-safe null
       throw new Error(`Failed to get receipt: ${error.message}`);
     }
-    return data as ReceiptRow;
+    // M9: narrowing acotado — `amount_usd` es NUMERIC (string en runtime).
+    return data as unknown as ReceiptRow;
   },
 };

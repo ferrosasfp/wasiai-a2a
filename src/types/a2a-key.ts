@@ -1,6 +1,41 @@
+import type { Database } from './database.types.js';
+
 // ============================================================
 // A2A AGENT KEY TYPES (WKH-34 -- Agentic Economy L3)
 // ============================================================
+
+// --- M9: DB-row narrowing helpers (audit 2026-06-24) ---
+//
+// El cliente Supabase ahora está tipado con `Database` (schema real de prod).
+// Las columnas NUMERIC se introspectan como `number` en los tipos generados,
+// pero PostgREST las DEVUELVE como `string` en runtime (preserva precisión
+// decimal sin pérdida float — ver comentarios "NUMERIC comes as string" en los
+// Row de dominio). Igualmente, las columnas jsonb se generan como `Json` pero el
+// dominio las modela con shapes concretos (DelegationPolicy, budget map, etc.).
+//
+// Estos helpers concentran esa divergencia legítima en UN solo punto documentado
+// por tabla, en vez de un `as DomainRow` ciego repartido por cada call-site. El
+// puente `unknown` es deliberado y acotado a la frontera de mapeo: NO cambia qué
+// datos fluyen, solo reconcilia el tipo generado con la forma real de runtime.
+
+type DbAgentKeyRow = Database['public']['Tables']['a2a_agent_keys']['Row'];
+type DbDelegationRow = Database['public']['Tables']['a2a_delegations']['Row'];
+type DbKeySessionRow = Database['public']['Tables']['a2a_key_sessions']['Row'];
+
+/** Narrowing acotado fila a2a_agent_keys → dominio (NUMERIC→string, jsonb→shape). */
+export function asAgentKeyRow(row: DbAgentKeyRow): A2AAgentKeyRow {
+  return row as unknown as A2AAgentKeyRow;
+}
+
+/** Narrowing acotado fila a2a_delegations → dominio (NUMERIC→string, policy jsonb). */
+export function asDelegationRow(row: DbDelegationRow): DelegationRow {
+  return row as unknown as DelegationRow;
+}
+
+/** Narrowing acotado fila a2a_key_sessions → dominio (NUMERIC→string). */
+export function asKeySessionRow(row: DbKeySessionRow): KeySessionRow {
+  return row as unknown as KeySessionRow;
+}
 
 // --- ERC-8004 identity binding (WKH-100) ---
 

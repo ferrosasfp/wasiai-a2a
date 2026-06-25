@@ -208,6 +208,8 @@ export const reputationService: ReputationService = {
     }
 
     const acc = emptyAccumulator();
+    // M9: narrowing acotado — `metadata` jsonb (`Json|null`) → shape de dominio;
+    // se consume con guardas (`row.metadata?.caller_ref_hash`).
     for (const row of (data ?? []) as RepRow[]) {
       accumulateRow(acc, row);
     }
@@ -243,6 +245,7 @@ export const reputationService: ReputationService = {
 
     // Reduce JS por agent_id en Map<slug, RepAccumulator> (patrón agentMap).
     const accBySlug = new Map<string, RepAccumulator>();
+    // M9: narrowing acotado — `metadata` jsonb (`Json|null`) → shape de dominio.
     for (const row of (data ?? []) as RepRow[]) {
       const slug = row.agent_id;
       if (slug == null) continue; // .in por slugs ya excluye null, defensivo
