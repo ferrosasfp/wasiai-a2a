@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * WKH-SEC-02 — Verifica que ROW LEVEL SECURITY esté habilitada en las 7 tablas
+ * WKH-SEC-02 — Verifica que ROW LEVEL SECURITY esté habilitada en las 10 tablas
  * con owner_ref, consultando `pg_class.relrowsecurity` via Management API (PAT).
  *
- * Read-only. exit 0 si las 7 tablas existen y todas con rls_enabled === true.
+ * Read-only. exit 0 si las 10 tablas existen y todas con rls_enabled === true.
  * exit 1 si alguna está en false o falta. exit 3 si falta PAT/ref (config).
  *
  * Uso:
@@ -16,8 +16,9 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-// Las 9 tablas EXACTAS con owner_ref (set canónico, WKH-SEC-02 + WKH-SEC-02c).
-// Definidas una sola vez y reusadas para construir el query y validar el resultado.
+// Las 10 tablas EXACTAS con owner_ref (set canónico, WKH-SEC-02 + WKH-SEC-02c +
+// WKH-54 para `tasks`). Definidas una sola vez y reusadas para construir el query
+// y validar el resultado.
 export const RLS_TABLES = [
   'a2a_agent_keys',
   'a2a_key_sessions',
@@ -28,6 +29,7 @@ export const RLS_TABLES = [
   'a2a_key_dest_spend_ledger',
   'registries',
   'kite_schema_transforms',
+  'tasks',
 ];
 
 /**

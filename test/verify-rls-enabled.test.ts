@@ -28,7 +28,7 @@ function allEnabled(): Array<{ table_name: string; rls_enabled: boolean }> {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('evaluateRlsRows()', () => {
-  it('9/9 enabled → ok=true (exit 0)', () => {
+  it('10/10 enabled → ok=true (exit 0)', () => {
     const result = evaluateRlsRows(allEnabled());
     expect(result.ok).toBe(true);
     expect(result.missing).toEqual([]);
@@ -52,28 +52,37 @@ describe('evaluateRlsRows()', () => {
   });
 
   it('tabla fuera del set canónico → ok=false, unexpected (exit 1)', () => {
-    // a2a_tasks NO tiene owner_ref → fuera del set de 9 (CD-8). registries ahora
-    // SÍ es esperada, por eso no puede usarse como "unexpected".
-    const rows = [...allEnabled(), { table_name: 'a2a_tasks', rls_enabled: true }];
+    // `tasks` ahora SÍ tiene owner_ref + RLS (WKH-54) → es esperada, no sirve como
+    // "unexpected". Usamos una tabla sin owner_ref (`a2a_events`, telemetría global)
+    // como ejemplo fuera del set canónico (CD-8).
+    const rows = [...allEnabled(), { table_name: 'a2a_events', rls_enabled: true }];
     const result = evaluateRlsRows(rows);
     expect(result.ok).toBe(false);
-    expect(result.unexpected).toContain('a2a_tasks');
+    expect(result.unexpected).toContain('a2a_events');
   });
 
-  it('respuesta vacía → ok=false, faltan las 9', () => {
+  it('`tasks` está en el set canónico de owner_ref (WKH-54)', () => {
+    // WKH-54 agregó `owner_ref` (NOT NULL) + RLS a `tasks`; debe verificarse como
+    // las demás tablas con owner_ref. Espeja la cobertura de WKH-SEC-02.
+    expect(TABLES).toContain('tasks');
+    const result = evaluateRlsRows(allEnabled());
+    expect(result.ok).toBe(true);
+  });
+
+  it('respuesta vacía → ok=false, faltan las 10', () => {
     const result = evaluateRlsRows([]);
     expect(result.ok).toBe(false);
-    expect(result.missing).toHaveLength(9);
+    expect(result.missing).toHaveLength(10);
   });
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// buildRlsQuery() — consulta exactamente las 7 tablas esperadas (AC-1)
+// buildRlsQuery() — consulta exactamente las 10 tablas esperadas (AC-1)
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('buildRlsQuery()', () => {
-  it('consulta exactamente las 9 tablas esperadas', () => {
-    expect(TABLES).toHaveLength(9);
+  it('consulta exactamente las 10 tablas esperadas', () => {
+    expect(TABLES).toHaveLength(10);
     const query = buildRlsQuery();
     for (const t of TABLES) {
       expect(query).toContain(`'${t}'`);

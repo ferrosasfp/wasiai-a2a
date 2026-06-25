@@ -200,7 +200,7 @@ En cualquier PR que modifique `src/services/*.ts` y toque queries sobre
 | Tabla | Columna owner | Protegida en services |
 |-------|--------------|----------------------|
 | `a2a_agent_keys` | `owner_ref` | SI (WKH-53) |
-| `tasks` | — (no tiene, pending WKH-54) | no |
+| `tasks` | `owner_ref` | SI (WKH-54) |
 | `a2a_events` | — (telemetría global) | N/A |
 | `registries` | — (admin global) | N/A |
 
@@ -209,4 +209,7 @@ En cualquier PR que modifique `src/services/*.ts` y toque queries sobre
 Hoy la defensa es **solo app-layer**. El plan de `ALTER TABLE a2a_agent_keys
 ENABLE ROW LEVEL SECURITY` + `CREATE POLICY` está trackeado en **WKH-SEC-02**
 (TD-SEC-01). Hasta que se implemente, la app es la única línea de defensa.
-La **Fase B** (WKH-54) agrega `owner_ref` a `tasks` + RPC update.
+**WKH-54** (HECHO 2026-06-25): `tasks` ya tiene la columna `owner_ref` (NOT NULL)
++ índice `idx_tasks_owner_ref` + RLS habilitada en prod. El guard real sigue siendo
+el filtro app-layer `.eq('owner_ref', ...)` en `src/services/task.ts` (el cliente
+usa `SUPABASE_SERVICE_KEY` / BYPASSRLS); RLS es defensa en profundidad.

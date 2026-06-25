@@ -2053,6 +2053,7 @@ export type Database = {
           id: string;
           messages: Json;
           metadata: Json | null;
+          owner_ref: string;
           status: string;
           updated_at: string;
         };
@@ -2063,6 +2064,7 @@ export type Database = {
           id?: string;
           messages?: Json;
           metadata?: Json | null;
+          owner_ref: string;
           status?: string;
           updated_at?: string;
         };
@@ -2073,6 +2075,7 @@ export type Database = {
           id?: string;
           messages?: Json;
           metadata?: Json | null;
+          owner_ref?: string;
           status?: string;
           updated_at?: string;
         };
