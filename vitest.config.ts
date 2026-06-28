@@ -8,5 +8,17 @@ export default defineConfig({
       SUPABASE_URL: 'http://localhost:54321',
       SUPABASE_SERVICE_KEY: 'test-key-for-vitest',
     },
+    coverage: {
+      provider: 'v8',
+      // Thresholds set slightly below current measured coverage
+      // (statements 84.6 / branches 76.6 / functions 86.7 / lines 86.2)
+      // to act as a regression ratchet without failing the build today.
+      thresholds: {
+        statements: 80,
+        branches: 70,
+        functions: 80,
+        lines: 80,
+      },
+    },
   },
 })
