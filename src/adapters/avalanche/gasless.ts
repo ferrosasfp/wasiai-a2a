@@ -1,3 +1,4 @@
+import { GaslessNotSupportedError } from '../errors.js';
 import type {
   GaslessAdapter,
   GaslessAdapterResult,
@@ -26,7 +27,13 @@ export class AvalancheGaslessAdapter implements GaslessAdapter {
   async transfer(
     _req: GaslessTransferAdapterRequest,
   ): Promise<GaslessAdapterResult> {
-    throw new Error('Avalanche gasless not implemented (stub)');
+    // Fails cleanly: the error boundary maps statusCode/code → 501 JSON
+    // ({ error, code, requestId }) instead of an opaque 500. NOT implementing
+    // gasless here — intentional stub (a future HU may wire Biconomy/Gelato).
+    throw new GaslessNotSupportedError(
+      this.networkTag,
+      'Avalanche gasless not implemented (stub)',
+    );
   }
 
   async status(): Promise<GaslessAdapterStatus> {

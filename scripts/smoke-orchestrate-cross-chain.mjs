@@ -147,30 +147,57 @@ if (res.status !== 200) {
   process.exit(1);
 }
 
+// The /orchestrate result shape is { kiteTxHash, orchestrationId, answer,
+// reasoning, pipeline: { success, output, steps, totalCostUsdc, totalLatencyMs },
+// consideredAgents, protocolFeeUsdc }. There is NO `body.plan` — the planner's
+// rationale lives in `body.reasoning` and the executed plan in `body.pipeline.steps`.
+const steps = body.pipeline?.steps ?? [];
+if (typeof body.reasoning !== 'string' || body.reasoning.length === 0) {
+  console.error('  ✗ Expected non-empty body.reasoning (planner rationale)');
+  console.log(JSON.stringify(body, null, 2).slice(0, 2000));
+  process.exit(1);
+}
+if (!Array.isArray(steps)) {
+  console.error('  ✗ Expected body.pipeline.steps to be an array');
+  console.log(JSON.stringify(body, null, 2).slice(0, 2000));
+  process.exit(1);
+}
+
 console.log('\n✅ /orchestrate OK');
 console.log(`\n  Inbound Kite tx: ${body.kiteTxHash ?? '(none)'}`);
 if (body.kiteTxHash) console.log(`    ${KITE_EXPLORER}/${body.kiteTxHash}`);
 
-console.log(`  Plan: ${body.plan ? JSON.stringify(body.plan).slice(0, 200) : '(none)'}`);
+console.log(`\n  Reasoning (planner): ${body.reasoning}`);
+console.log(`  Answer: ${body.answer ?? '(none)'}`);
 console.log(`  Pipeline success: ${body.pipeline?.success ?? '?'}`);
+console.log(`  Considered agents: ${(body.consideredAgents ?? []).length}`);
+console.log(`  Plan steps: ${steps.length}`);
 console.log(`  Total cost: ${body.pipeline?.totalCostUsdc ?? '?'} USDC`);
 console.log(`  Total latency: ${body.pipeline?.totalLatencyMs ?? '?'}ms`);
 
-console.log('\n  Steps:');
+console.log('\n  Steps (executed plan):');
 const downstreamTxs = [];
-for (const s of body.pipeline?.steps ?? []) {
+steps.forEach((s, i) => {
   const slug = s.agent?.slug ?? s.agent ?? '?';
-  console.log(`    - ${slug}: cost=${s.costUsdc} USDC latency=${s.latencyMs}ms`);
+  console.log(`    ${i + 1}. ${slug}: cost=${s.costUsdc} USDC latency=${s.latencyMs}ms success=${s.success ?? '?'}`);
   if (s.downstreamTxHash) {
     downstreamTxs.push(s.downstreamTxHash);
     console.log(`      ✓ Fuji USDC tx: ${s.downstreamTxHash}`);
     console.log(`        ${FUJI_EXPLORER}/${s.downstreamTxHash}`);
   }
-}
+});
 
 console.log('\n═══════════════════════════════════════════════════════════════');
 console.log('  /orchestrate cross-chain — RESULT');
 console.log('═══════════════════════════════════════════════════════════════');
+console.log(`  ✓ Pipeline success: ${body.pipeline?.success === true ? 'yes' : 'no'}`);
 console.log(`  ✓ Kite inbound:   ${body.kiteTxHash ? '1 tx' : '0 txs'}`);
 console.log(`  ✓ Fuji downstream: ${downstreamTxs.length} txs`);
 console.log(`  Total: ${(body.kiteTxHash ? 1 : 0) + downstreamTxs.length} on-chain transactions`);
+
+// pipeline.success === false is a real orchestration failure (distinct from the
+// HTTP 200 envelope). Surface it as a non-zero exit so the smoke fails loudly.
+if (body.pipeline?.success !== true) {
+  console.error('\n✗ pipeline.success !== true — orchestration did not complete successfully');
+  process.exit(1);
+}

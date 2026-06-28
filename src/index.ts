@@ -17,6 +17,7 @@ import { genReqId, registerRequestIdHook } from './middleware/request-id.js';
 import { registerSecurityHeaders } from './middleware/security-headers.js';
 import agentCardRoutes from './routes/agent-card.js';
 import authRoutes from './routes/auth.js';
+import capabilitiesRoutes from './routes/capabilities.js';
 import composeRoutes from './routes/compose.js';
 import dashboardRoutes from './routes/dashboard.js';
 import discoverRoutes from './routes/discover.js';
@@ -76,6 +77,7 @@ fastify.get('/', { config: { rateLimit: false } }, async (_request, reply) => {
     endpoints: {
       registries: '/registries — Manage marketplace registrations',
       discover: '/discover — Search agents across all registries',
+      capabilities: '/capabilities — Read-only gateway capabilities summary',
       compose: '/compose — Execute multi-agent pipelines',
       orchestrate: '/orchestrate — Goal-based orchestration',
       agentCard: '/agents/:slug/agent-card — A2A Agent Card',
@@ -102,6 +104,7 @@ fastify.get(
 // Routes
 await fastify.register(registriesRoutes, { prefix: '/registries' });
 await fastify.register(discoverRoutes, { prefix: '/discover' });
+await fastify.register(capabilitiesRoutes, { prefix: '/capabilities' });
 await fastify.register(composeRoutes, { prefix: '/compose' });
 await fastify.register(orchestrateRoutes, { prefix: '/orchestrate' });
 await fastify.register(agentCardRoutes, { prefix: '/agents' });

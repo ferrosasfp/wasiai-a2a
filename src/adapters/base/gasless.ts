@@ -1,3 +1,4 @@
+import { GaslessNotSupportedError } from '../errors.js';
 import type {
   GaslessAdapter,
   GaslessAdapterResult,
@@ -25,7 +26,11 @@ export class BaseGaslessAdapter implements GaslessAdapter {
   async transfer(
     _req: GaslessTransferAdapterRequest,
   ): Promise<GaslessAdapterResult> {
-    throw new Error(
+    // Fails cleanly: the error boundary maps statusCode/code → 501 JSON
+    // ({ error, code, requestId }) instead of an opaque 500. NOT implementing
+    // gasless here — pending CDP paymaster (WKH-105).
+    throw new GaslessNotSupportedError(
+      this.networkTag,
       'Base gasless not implemented — pending CDP paymaster (WKH-105)',
     );
   }

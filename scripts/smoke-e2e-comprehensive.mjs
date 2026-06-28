@@ -31,7 +31,13 @@ const KITE_PYUSD = '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9';
 const FUJI_CHAIN_ID = 43113;
 const FUJI_USDC = '0x5425890298aed601595a70AB815c96711a31Bc65';
 const MARKETPLACE_FUJI = '0xC01DEF0ca66b86E9F8655dc202347F1cf104b7A7';
-const A2A_KEY = process.env.A2A_KEY ?? 'wasi_a2a_85e698642770088f4465d1689a722debe2abb030eab698070db0269a9505fc0e';
+// Phase A.3 (/compose) needs a *caldz-registered* A2A key. There is no safe
+// hardcoded default: the old literal (wasi_a2a_85e6…) is NOT in the caldz DB,
+// so leaving it here made A.3 look like schema drift when it was really an
+// auth failure. Provide a real key via `A2A_KEY=… node scripts/smoke-e2e-comprehensive.mjs`.
+// When absent, Phase A.3 is SKIPPED (with a loud warning) instead of failing
+// misleadingly.
+const A2A_KEY = process.env.A2A_KEY ?? null;
 
 const FIVE_AGENTS = [
   { slug: 'wasi-liquidity-analyzer', input: { token: 'USDC' }, price: 0.05 },
@@ -148,28 +154,39 @@ for (const a of discovered) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 section('PHASE A.3 — wasiai-a2a /compose 3-step pipeline');
-const composeBody = {
-  steps: [
-    { agent: 'wasi-chainlink-price', registry: 'wasiai', input: { token: 'AVAX' } },
-    { agent: 'wasi-defi-sentiment',  registry: 'wasiai', input: { token: 'AVAX' } },
-    { agent: 'wasi-wallet-profiler', registry: 'wasiai', input: { wallet: operator.address } },
-  ],
-  maxBudget: 1.0,
-};
-const composeStart = Date.now();
-const composeRes = await fetch(`${A2A_URL}/compose`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json', 'x-a2a-key': A2A_KEY },
-  body: JSON.stringify(composeBody),
-});
-const composeBody_ = await composeRes.json();
-const composeElapsed = ((Date.now() - composeStart) / 1000).toFixed(1);
-console.log(`  ✓ HTTP ${composeRes.status} (${composeElapsed}s) — ${composeBody_.steps?.length ?? 0}/3 steps executed`);
-for (const s of composeBody_.steps ?? []) {
-  console.log(`    - ${s.agent.slug.padEnd(28)} latency=${s.latencyMs}ms cost=${s.costUsdc} bridgeType=${s.bridgeType ?? '(end)'} cacheHit=${s.cacheHit ?? '(end)'}`);
+// Defaults so the FINAL REPORT can reference these even when A.3 is skipped.
+let composeRes = { status: 'SKIPPED' };
+let composeBody_ = { steps: [] };
+let composeSkipped = false;
+if (!A2A_KEY) {
+  composeSkipped = true;
+  console.log('  ⚠ SKIPPED — no A2A_KEY env var set.');
+  console.log('    Phase A.3 /compose requires a caldz-registered A2A key.');
+  console.log('    Re-run with:  A2A_KEY=wasi_a2a_… node scripts/smoke-e2e-comprehensive.mjs');
+} else {
+  const composeBody = {
+    steps: [
+      { agent: 'wasi-chainlink-price', registry: 'wasiai', input: { token: 'AVAX' } },
+      { agent: 'wasi-defi-sentiment',  registry: 'wasiai', input: { token: 'AVAX' } },
+      { agent: 'wasi-wallet-profiler', registry: 'wasiai', input: { wallet: operator.address } },
+    ],
+    maxBudget: 1.0,
+  };
+  const composeStart = Date.now();
+  composeRes = await fetch(`${A2A_URL}/compose`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-a2a-key': A2A_KEY },
+    body: JSON.stringify(composeBody),
+  });
+  composeBody_ = await composeRes.json();
+  const composeElapsed = ((Date.now() - composeStart) / 1000).toFixed(1);
+  console.log(`  ✓ HTTP ${composeRes.status} (${composeElapsed}s) — ${composeBody_.steps?.length ?? 0}/3 steps executed`);
+  for (const s of composeBody_.steps ?? []) {
+    console.log(`    - ${s.agent.slug.padEnd(28)} latency=${s.latencyMs}ms cost=${s.costUsdc} bridgeType=${s.bridgeType ?? '(end)'} cacheHit=${s.cacheHit ?? '(end)'}`);
+  }
+  console.log(`  Note: downstream Fuji settles=0 due to schema drift in v2 /agents/{slug} (priceUsdc resolves to 0).`);
+  console.log(`         Schema drift tracked as WAS-V2-3. Direct invoke proves cross-chain works (Phase B below).`);
 }
-console.log(`  Note: downstream Fuji settles=0 due to schema drift in v2 /agents/{slug} (priceUsdc resolves to 0).`);
-console.log(`         Schema drift tracked as WAS-V2-3. Direct invoke proves cross-chain works (Phase B below).`);
 
 // ─────────────────────────────────────────────────────────────────────────────
 section('PHASE B — Cross-chain Fuji USDC settle (5 agents, direct via v2 staging)');
@@ -233,7 +250,9 @@ console.log('  FINAL REPORT — Hackathon Kite close');
 console.log('═'.repeat(72));
 console.log(`  ✓ Phase A.1: PYUSD x402 inbound signature SIGNED on Kite testnet (chain 2368)`);
 console.log(`  ✓ Phase A.2: wasiai-a2a /discover returned ${discovered.length} target agents`);
-console.log(`  ✓ Phase A.3: wasiai-a2a /compose chained ${composeBody_.steps?.length ?? 0} agents (HTTP ${composeRes.status})`);
+console.log(composeSkipped
+  ? `  ⚠ Phase A.3: SKIPPED — set A2A_KEY (caldz-registered) to run /compose`
+  : `  ✓ Phase A.3: wasiai-a2a /compose chained ${composeBody_.steps?.length ?? 0} agents (HTTP ${composeRes.status})`);
 console.log(`  ✓ Phase B:   ${totalSettles}/5 cross-chain Fuji USDC settles, ${totalUsdc.toFixed(3)} USDC moved on-chain`);
 console.log(`  ✓ Phase C:   wasiai-a2a-prod live with WKH-56 (A2A fast-path) + WKH-57 (LLM Bridge Pro)`);
 console.log();
