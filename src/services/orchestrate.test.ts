@@ -1129,6 +1129,213 @@ describe('orchestrateService', () => {
     expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledTimes(1);
   });
 
+  // ─── WKH-128 ─ Planner candidate window + no-relevant-agent guard ───────
+
+  /** Build N demo echo agents to flood the discovery sort (verified-first). */
+  function makeDemoAgents(): Agent[] {
+    const slugs = ['base-demo', 'avax-demo', 'kite-demo'];
+    return slugs.map((slug, i) => ({
+      ...mockAgents[0]!,
+      id: `demo-${i}`,
+      name: `Demo ${slug}`,
+      slug,
+      description: 'Trivial echo agent',
+      priceUsdc: 0.01,
+      verified: true,
+    }));
+  }
+
+  /** Extract the JSON agent list the planner actually showed the LLM. */
+  function plannerPromptText(): string {
+    const call = mockCreate.mock.calls[0]![0]! as {
+      messages: { content: string }[];
+    };
+    return call.messages[0]!.content;
+  }
+
+  // T-W1 (WKH-128 change 1+2): demos are deprioritized so a genuinely relevant
+  // agent reaches the planner window AND is the one selected/settled — not the
+  // cheap demo. Discovery returns demos FIRST (mirrors prod verified-first sort),
+  // the orchestrate candidate reorder must push them to the back.
+  it('T-W1: relevant agent reaches the planner window over demo echo agents', async () => {
+    const realAgent: Agent = {
+      ...mockAgents[0]!,
+      id: 'real-1',
+      name: 'DeFi Sentiment',
+      slug: 'wasi-defi-sentiment',
+      description: 'Analyzes DeFi market sentiment',
+      priceUsdc: 0.5,
+      verified: false,
+    };
+    // Demos first (as prod sort would place them), real agent last.
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [...makeDemoAgents(), realAgent],
+      total: 4,
+      registries: ['wasiai'],
+    });
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'wasi-defi-sentiment',
+            registry: 'wasiai',
+            input: { query: 'sentiment' },
+            reasoning: 'real match',
+          },
+        ],
+        reasoning: 'Picked the relevant agent',
+      }),
+    );
+
+    await orchestrateService.orchestrate(
+      { goal: 'Analyze DeFi sentiment', budget: 5.0 },
+      'orch-w1',
+    );
+
+    // The relevant agent is visible to the LLM in the prompt.
+    expect(plannerPromptText()).toContain('wasi-defi-sentiment');
+    // And it is what compose actually executes (not a demo).
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps[0]!.agent).toBe('wasi-defi-sentiment');
+  });
+
+  // T-W2 (WKH-128 change 3): only demo agents available + LLM returns no usable
+  // plan → no-relevant-agent path. MUST NOT debit, MUST NOT call compose, returns
+  // pipeline.success:false with a no_relevant_agent reason. Money math is balanced
+  // by construction: nothing was debited so nothing needs refunding.
+  it('T-W2: only-demo candidates with no plan → no settle, no charge, no_relevant_agent', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: makeDemoAgents(),
+      total: 3,
+      registries: ['wasiai'],
+    });
+    // LLM returns nothing usable → triggers greedy over demos only.
+    setLlmError(new Error('API timeout'));
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'Build me a quantum trading bot',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-w2',
+    );
+
+    expect(result.pipeline.success).toBe(false);
+    expect(result.reasoning).toContain('no_relevant_agent');
+    expect(result.pipeline.steps).toHaveLength(0);
+    expect(result.protocolFeeUsdc).toBe(0);
+    // No money moved: no debit, no refund, no settlement.
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(budgetService.credit)).not.toHaveBeenCalled();
+    expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
+    expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
+  });
+
+  // T-W3 (WKH-128 change 3): the guard does NOT fire when a real agent exists.
+  // Demos present but a relevant agent is available → normal path settles.
+  it('T-W3: demos present but real agent available → normal settlement', async () => {
+    const realAgent: Agent = {
+      ...mockAgents[0]!,
+      id: 'real-2',
+      name: 'Chainlink Price',
+      slug: 'wasi-chainlink-price',
+      priceUsdc: 0.4,
+      verified: false,
+    };
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [...makeDemoAgents(), realAgent],
+      total: 4,
+      registries: ['wasiai'],
+    });
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'wasi-chainlink-price',
+            registry: 'wasiai',
+            input: { query: 'price' },
+            reasoning: 'real',
+          },
+        ],
+        reasoning: 'ok',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'Get the ETH price',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-w3',
+    );
+
+    expect(result.reasoning).not.toContain('no_relevant_agent');
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
+  });
+
+  // T-W4 (WKH-128 change 3, MNR-1): MIXED case — a real agent IS available but the
+  // planner picks ONLY a demo echo. The guard must key on the SELECTED PLAN, not the
+  // candidate set: even though hasRealCandidate is true, an all-demo plan returns
+  // no_relevant_agent BEFORE any debit. No settle, no charge. This is the exact bug
+  // AR reproduced (real agent available + LLM selects a demo → demo settles, caller
+  // charged for an irrelevant echo).
+  it('T-W4: real agent available but planner selects ONLY a demo → no_relevant_agent, no charge', async () => {
+    const realAgent: Agent = {
+      ...mockAgents[0]!,
+      id: 'real-3',
+      name: 'DeFi Sentiment',
+      slug: 'wasi-defi-sentiment',
+      description: 'Analyzes DeFi market sentiment',
+      priceUsdc: 0.5,
+      verified: false,
+    };
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [...makeDemoAgents(), realAgent],
+      total: 4,
+      registries: ['wasiai'],
+    });
+    // The LLM ignores the real agent and selects only a demo echo.
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'base-demo',
+            registry: 'wasiai',
+            input: { message: 'ping' },
+            reasoning: 'picked the cheap echo',
+          },
+        ],
+        reasoning: 'Selected base-demo',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'Analyze DeFi sentiment',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-w4',
+    );
+
+    // Guard fires on the all-demo PLAN despite a real candidate being present.
+    expect(result.pipeline.success).toBe(false);
+    expect(result.reasoning).toContain('no_relevant_agent');
+    expect(result.pipeline.steps).toHaveLength(0);
+    expect(result.protocolFeeUsdc).toBe(0);
+    // No money moved and no demo settled: nothing to refund by construction.
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(budgetService.credit)).not.toHaveBeenCalled();
+    expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
+    expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
+  });
+
   // T-AC-DOUBLE (CD-11/§4.4): single orchestrate on total failure → credit exactly once.
   it('T-AC-DOUBLE: total failure refunds exactly once (no double refund)', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);

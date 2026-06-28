@@ -32,7 +32,62 @@ import { refundOutbox } from './refund-outbox.js';
 
 const MODEL = 'claude-sonnet-4-6';
 const LLM_TIMEOUT_MS = 30_000;
-const MAX_AGENTS_IN_PROMPT = 10;
+// WKH-128: el planner ve hasta 30 agentes (antes 10). Con solo 3 demos echo
+// verificados en prod, un tope de 10 empujaba a los agentes relevantes fuera de
+// la ventana visible del LLM → plan vacío → fallback greedy a los demos baratos
+// → settlement de agentes irrelevantes. 30 entra cómodo en el prompt y deja ver
+// los agentes de negocio.
+const MAX_AGENTS_IN_PROMPT = 30;
+
+// WKH-128: agentes echo/demo triviales que NO aportan valor de negocio. En prod
+// son los únicos verificados, así que el sort verified-first de discovery los
+// pone arriba y desplazan a los agentes relevantes. Acá (SOLO en el candidate set
+// de orchestrate — NO se toca /discover ni discovery.ts) los mandamos al fondo de
+// la lista para que la ventana visible la ocupen agentes reales.
+//
+// Detección por slug porque no existe un flag de metadata "demo" en el Agent type
+// ni en el AGENT_BLOCKLIST (que excluiría del discover entero, no es lo que
+// queremos: los demos siguen siendo REACHABLE en el candidate set). Pero un plan
+// hecho ENTERAMENTE de demos echo se trata como `no_relevant_agent` y NO se cobra
+// (ver change 3 más abajo): nada se settlea para un echo irrelevante. Un test de
+// conectividad explícito sería un opt-in futuro separado (todavía no implementado).
+// Override vía env ORCHESTRATE_DEMO_SLUGS (CSV) para no hardcodear.
+const DEFAULT_DEMO_SLUGS = 'base-demo,avax-demo,kite-demo';
+
+/** Slugs de demos echo a deprioritizar en el candidate set de orchestrate. */
+function getDemoSlugs(): Set<string> {
+  return new Set(
+    (process.env.ORCHESTRATE_DEMO_SLUGS ?? DEFAULT_DEMO_SLUGS)
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+/** True si el agente es un demo echo trivial (por slug, case-insensitive). */
+function isDemoAgent(agent: Agent, demoSlugs: Set<string>): boolean {
+  return demoSlugs.has(agent.slug.toLowerCase());
+}
+
+/**
+ * WKH-128: reordena el candidate set de orchestrate poniendo los demos echo al
+ * FONDO (stable partition: conserva el orden relativo de discovery dentro de cada
+ * grupo). Así los agentes relevantes ocupan la ventana visible del LLM y los
+ * primeros candidatos del greedy. NO filtra: los demos siguen REACHABLE en el
+ * candidate set, pero un plan compuesto sólo por demos echo se trata como
+ * `no_relevant_agent` y NO se cobra (change 3). Un test de conectividad explícito
+ * sería un opt-in futuro separado (todavía no implementado).
+ */
+function deprioritizeDemoAgents(agents: Agent[]): Agent[] {
+  const demoSlugs = getDemoSlugs();
+  const real: Agent[] = [];
+  const demos: Agent[] = [];
+  for (const a of agents) {
+    if (isDemoAgent(a, demoSlugs)) demos.push(a);
+    else real.push(a);
+  }
+  return [...real, ...demos];
+}
 // WKH-44 (CD-G): el PROTOCOL_FEE_RATE literal fue eliminado. Ahora se lee
 // por request desde process.env vía getProtocolFeeRate() en ./fee-charge.ts.
 const PRE_COMPOSE_TIMEOUT_MS = 90_000;
@@ -325,10 +380,14 @@ export const orchestrateService = {
     // Note: do NOT pass goal as query — the text filter is too strict for
     // generic agents (e.g. "Bitcoin" won't match "BlexSignal Scanner").
     // The LLM planner handles relevance matching instead.
+    // WKH-128: ventana de candidatos generosa (50, espejo de compose.ts) en vez
+    // de `maxAgents * 2`. Con el sort verified-first de discovery, una ventana
+    // chica se llenaba de los 3 demos echo + agentshop y dejaba fuera a los
+    // agentes de negocio relevantes. El filtro maxPrice/budget se mantiene igual.
     const discovered = await discoveryService.discover({
       capabilities: preferCapabilities,
       maxPrice: budget / maxAgents,
-      limit: maxAgents * 2,
+      limit: 50,
     });
 
     // AC5: No agents found — return gracefully
@@ -365,6 +424,17 @@ export const orchestrateService = {
       return emptyResult;
     }
 
+    // WKH-128: candidate set para el planner (LLM + greedy) con demos echo al
+    // fondo. `discovered.agents` se conserva intacto para `consideredAgents`
+    // (reporte) y para los lookups por slug (Set/.find, order-independent).
+    const candidateAgents = deprioritizeDemoAgents(discovered.agents);
+    // WKH-128: para el no-relevant-agent fallback (change 3) necesitamos saber si
+    // TODOS los candidatos visibles son demos (no hay agente real para el goal).
+    const demoSlugs = getDemoSlugs();
+    const hasRealCandidate = candidateAgents.some(
+      (a) => !isDemoAgent(a, demoSlugs),
+    );
+
     // Step 2: LLM Planning (with fallback)
     let steps: ComposeStep[];
     let reasoning: string;
@@ -383,7 +453,7 @@ export const orchestrateService = {
       );
     }
 
-    const plan = await llmPlan(goal, budget, discovered.agents, maxAgents);
+    const plan = await llmPlan(goal, budget, candidateAgents, maxAgents);
 
     if (plan) {
       // Validate slugs against discovered agents
@@ -397,7 +467,7 @@ export const orchestrateService = {
         console.error(
           '[Orchestrate] All LLM-selected slugs are invalid — using fallback',
         );
-        const fallback = greedyPlan(goal, discovered.agents, budget, maxAgents);
+        const fallback = greedyPlan(goal, candidateAgents, budget, maxAgents);
         steps = fallback.steps;
         reasoning = `[FALLBACK] LLM selected agents not found in discovery. ${fallback.reasoning}`;
         usedFallback = true;
@@ -440,7 +510,7 @@ export const orchestrateService = {
       }
     } else {
       // AC7: LLM failed — fallback to greedy
-      const fallback = greedyPlan(goal, discovered.agents, budget, maxAgents);
+      const fallback = greedyPlan(goal, candidateAgents, budget, maxAgents);
       steps = fallback.steps;
       reasoning = `[FALLBACK] LLM planning failed. ${fallback.reasoning}`;
       usedFallback = true;
@@ -478,6 +548,61 @@ export const orchestrateService = {
         );
 
       return noBudgetResult;
+    }
+
+    // WKH-128 (change 3, MNR-1): no-relevant-agent guard. El gatillo es el PLAN
+    // SELECCIONADO, no el candidate set. Si TODOS los steps que el planner eligió
+    // son demos echo, no hay agente genuino ejecutándose para el goal —incluso si
+    // existía un candidato real (caso mixto: el LLM/greedy igual eligió solo
+    // demos). Históricamente esos demos baratos se settleaban on-chain (gasto
+    // real) para un goal que no podían cumplir → `pipeline.success:false` con
+    // dinero ya movido / caller cobrado por un echo irrelevante. Acá cortamos
+    // ANTES del débito/settlement: ni se debita ni se ejecuta compose, así el
+    // ledger (budget/daily/dest) queda intacto por construcción (no hubo débito
+    // que reembolsar). `hasRealCandidate` ya NO gatea el guard; sólo afina el
+    // mensaje (existía agente real vs sólo había demos disponibles).
+    const allStepsAreDemos =
+      steps.length > 0 &&
+      steps.every((s) => demoSlugs.has(s.agent.toLowerCase()));
+    if (allStepsAreDemos) {
+      const reasoning = hasRealCandidate
+        ? 'no_relevant_agent: the selected plan consists entirely of trivial echo/demo agents even though a real agent was available; no genuinely relevant agent was executed for this goal. No agent was executed and no payment was charged.'
+        : 'no_relevant_agent: no genuinely relevant agent was found for this goal (only trivial echo/demo agents are available). No agent was executed and no payment was charged.';
+      const noRelevantResult: OrchestrateResult = {
+        orchestrationId,
+        answer: null,
+        reasoning,
+        pipeline: {
+          success: false,
+          output: null,
+          steps: [],
+          totalCostUsdc: 0,
+          totalLatencyMs: 0,
+        },
+        consideredAgents: discovered.agents,
+        protocolFeeUsdc: 0,
+      };
+
+      eventService
+        .track({
+          eventType: 'orchestrate_goal',
+          status: 'failed',
+          latencyMs: Date.now() - startTime,
+          costUsdc: 0,
+          goal,
+          metadata: {
+            orchestrationId,
+            agentCount: 0,
+            fallback: usedFallback,
+            reason: 'no_relevant_agent',
+            hasRealCandidate,
+          },
+        })
+        .catch((err) =>
+          console.error('[Orchestrate] event tracking failed:', err),
+        );
+
+      return noRelevantResult;
     }
 
     // AC8: Check time again before compose
