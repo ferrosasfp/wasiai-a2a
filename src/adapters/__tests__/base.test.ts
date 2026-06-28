@@ -489,6 +489,37 @@ describe('Base payment adapter — contract', () => {
     expect(typeof result.amountWei).toBe('string');
     expect(typeof result.facilitatorUrl).toBe('string');
   });
+
+  // WKH money-path fix: quote() must HONOR its argument (6-dec USDC), not the
+  // old flat '1000000' hardcode.
+  it('quote(1) → 1000000 atomic (1 USDC, 6 decimals)', async () => {
+    expect((await adapter.quote(1)).amountWei).toBe('1000000');
+  });
+
+  it('quote(0.001) → 1000 atomic, NOT the old 1000000 hardcode', async () => {
+    const result = await adapter.quote(0.001);
+    expect(result.amountWei).toBe('1000');
+    expect(result.amountWei).not.toBe('1000000');
+  });
+
+  // MNR-1 fix: a tiny amount in scientific notation (String(1e-7) === '1e-7')
+  // used to throw inside parseUnits. toFixed(decimals) normalizes it to a plain
+  // decimal string first, so quote() never throws and floors to the 6-dec grid.
+  it('quote(1e-7) does NOT throw (was scientific-notation parseUnits crash)', async () => {
+    let result: Awaited<ReturnType<typeof adapter.quote>> | undefined;
+    await expect(
+      (async () => {
+        result = await adapter.quote(1e-7);
+      })(),
+    ).resolves.not.toThrow();
+    // 1e-7 USDC is below the 6-decimal grid → floors to 0 atomic (no crash).
+    expect(result?.amountWei).toBe('0');
+  });
+
+  it('quote(0.0000012) → 1 atomic (>=1, no throw)', async () => {
+    const result = await adapter.quote(0.0000012);
+    expect(result.amountWei).toBe('1');
+  });
 });
 
 describe('Base gasless adapter — stub', () => {

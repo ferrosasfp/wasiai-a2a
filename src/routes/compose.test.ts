@@ -34,6 +34,12 @@ let nextKeyRow: Partial<A2AAgentKeyRow> | undefined;
 // del price handler en el orden de preHandlers). Es lo que el step-0 usaría
 // para keyear el cap por destino.
 let capturedComposeDestination: string | undefined;
+// WKH money-path fix: capture the per-request x402 challenge amount + the
+// step-0 prepaid estimate the real `resolveComposePriceHandler` preHandler
+// augmented (the auth mock runs AFTER it), to assert the x402 challenge
+// reflects the full pipeline cost while the prepaid path stays step-0 only.
+let capturedX402ChallengeAmountUsd: number | undefined;
+let capturedComposeEstimatedCostUsd: number | undefined;
 // AUDIT A1 (refund step-0): vars module-level que el mock del middleware inyecta
 // para simular el PRE-débito del path a2a-key. undefined por defecto → los tests
 // existentes no ven cambios (el route handler salta el refund sin estos campos).
@@ -47,6 +53,12 @@ vi.mock('../middleware/a2a-key.js', () => ({
       capturedComposeDestination = (
         request as unknown as { composeDestination?: string }
       ).composeDestination;
+      capturedX402ChallengeAmountUsd = (
+        request as unknown as { x402ChallengeAmountUsd?: number }
+      ).x402ChallengeAmountUsd;
+      capturedComposeEstimatedCostUsd = (
+        request as unknown as { composeEstimatedCostUsd?: number }
+      ).composeEstimatedCostUsd;
       // AUDIT A1: simula el débito del middleware (path a2a-key).
       if (nextEstimatedCostUsd !== undefined) {
         (
@@ -246,6 +258,8 @@ describe('compose preHandler — WKH-59 real-price-debit', () => {
     vi.clearAllMocks();
     nextKeyRow = { id: 'k1', owner_ref: 'o1' };
     capturedComposeDestination = undefined;
+    capturedX402ChallengeAmountUsd = undefined;
+    capturedComposeEstimatedCostUsd = undefined;
     // Default success path (each test overrides via mockResolvedValueOnce /
     // mockRejectedValueOnce). composeService default returns success.
     mockCompose.mockResolvedValue({
@@ -382,6 +396,170 @@ describe('compose preHandler — WKH-59 real-price-debit', () => {
     // Por eso resolveAgentPriceUsdc nunca debe ser llamado.
     expect(mockResolvePrice).not.toHaveBeenCalled();
     expect(mockCompose).not.toHaveBeenCalled();
+  });
+
+  // ── WKH money-path fix: x402 challenge reflects REAL pipeline cost ──
+
+  it('T-ROUTE-X402-AMT-1: cheap single-step pipeline → x402ChallengeAmountUsd = price*(1+fee), NOT 1 USD', async () => {
+    // Persistent mock: both step-0 resolution AND the challenge augmentation
+    // (which re-resolves every step) see 0.001.
+    mockResolvePrice.mockResolvedValue(0.001);
+    const ORIGINAL_RATE = process.env.PROTOCOL_FEE_RATE;
+    process.env.PROTOCOL_FEE_RATE = '0.01';
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/compose',
+        // NO x-a2a-key → x402 path is the one that consumes the challenge amount,
+        // but the auth middleware is mocked pass-through so we just capture the
+        // augmented field the real price preHandler set.
+        payload: { steps: [{ agent: 'kyc', input: {} }] },
+      });
+      expect(res.statusCode).toBe(200);
+      // 0.001 * (1 + 0.01) = 0.00101 — the REAL cost, not the 1 USD default.
+      expect(capturedX402ChallengeAmountUsd).toBeCloseTo(0.00101, 8);
+      expect(capturedX402ChallengeAmountUsd).not.toBe(1);
+      // The prepaid step-0 estimate stays step-0 ONLY (unchanged by this fix).
+      expect(capturedComposeEstimatedCostUsd).toBe(0.001);
+    } finally {
+      if (ORIGINAL_RATE === undefined) delete process.env.PROTOCOL_FEE_RATE;
+      else process.env.PROTOCOL_FEE_RATE = ORIGINAL_RATE;
+    }
+  });
+
+  it('T-ROUTE-X402-AMT-2: multi-step pipeline → challenge sums ALL step prices + fee', async () => {
+    mockResolvePrice.mockResolvedValue(0.5); // every step resolves to 0.5
+    const ORIGINAL_RATE = process.env.PROTOCOL_FEE_RATE;
+    process.env.PROTOCOL_FEE_RATE = '0.01';
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/compose',
+        payload: {
+          steps: [
+            { agent: 'a1', input: {} },
+            { agent: 'a2', input: {} },
+            { agent: 'a3', input: {} },
+          ],
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      // (0.5 * 3) * 1.01 = 1.515 — sum of all steps, not just step-0, not 1 USD.
+      expect(capturedX402ChallengeAmountUsd).toBeCloseTo(1.515, 6);
+      // Prepaid step-0 estimate unaffected: still the step-0 price only.
+      expect(capturedComposeEstimatedCostUsd).toBe(0.5);
+    } finally {
+      if (ORIGINAL_RATE === undefined) delete process.env.PROTOCOL_FEE_RATE;
+      else process.env.PROTOCOL_FEE_RATE = ORIGINAL_RATE;
+    }
+  });
+
+  it('T-ROUTE-X402-AMT-3: x-a2a-key (prepaid) path unaffected — debit still uses step-0 estimate', async () => {
+    mockResolvePrice.mockResolvedValue(0.001);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: {
+        steps: [
+          { agent: 'a1', input: {} },
+          { agent: 'a2', input: {} },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    // Prepaid path keys off composeEstimatedCostUsd (step-0 ONLY) for its
+    // per-step debit — the challenge augmentation does NOT change it.
+    expect(capturedComposeEstimatedCostUsd).toBe(0.001);
+    expect(mockCompose).toHaveBeenCalledTimes(1);
+  });
+
+  // ── BLQ-MEDIO-1: malformed trailing step must NOT collapse the challenge ──
+
+  it('T-ROUTE-X402-AMT-4 (BLQ-MEDIO-1 layer 2): malformed trailing step (non-string agent) → 400, compose NEVER runs', async () => {
+    // step-0 resolves fine (so the price preHandler passes), but step-1 has a
+    // non-string `agent`. Pre-fix the route would have let composeService settle
+    // the step-0 prefix downstream while the x402 challenge fell back to 1 USD.
+    // Now the route hard-rejects with 400 BEFORE compose, so no prefix settles.
+    mockResolvePrice.mockResolvedValue(0.001);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      // x402 path (no x-a2a-key) — the one with no inbound refund.
+      payload: {
+        steps: [
+          { agent: 'a1', input: {} },
+          // biome-ignore lint/suspicious/noExplicitAny: intentional malformed input
+          { agent: 12345 as any, input: {} },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('VALIDATION_ERROR');
+    // The malformed pipeline NEVER reaches composeService → no partial prefix
+    // settles downstream.
+    expect(mockCompose).not.toHaveBeenCalled();
+  });
+
+  it('T-ROUTE-X402-AMT-5 (BLQ-MEDIO-1 layer 1, defense in depth): augmentX402ChallengeAmount OVER-estimates a malformed step instead of collapsing to 1 USD', async () => {
+    // Directly exercise the augmentation layer (the route 400 in layer 2 normally
+    // pre-empts this, but layer 1 must still be safe if ever reached). We capture
+    // the challenge the price preHandler set. To reach the augmentation with a
+    // malformed step, we drive it through resolveComposePriceHandler indirectly:
+    // step-0 valid (0.5), step-1 malformed. The augmentation must add
+    // PLACEHOLDER_FEE_USD for the malformed step (over-estimate), NOT bail to the
+    // 1 USD default. Because the route rejects with 400 first, we assert the
+    // captured challenge value the preHandler computed (captured by the auth
+    // mock, which runs AFTER the price preHandler but BEFORE the route handler).
+    mockResolvePrice.mockResolvedValue(0.5);
+    const ORIGINAL_RATE = process.env.PROTOCOL_FEE_RATE;
+    process.env.PROTOCOL_FEE_RATE = '0';
+    try {
+      capturedX402ChallengeAmountUsd = undefined;
+      await app.inject({
+        method: 'POST',
+        url: '/compose',
+        payload: {
+          steps: [
+            { agent: 'a1', input: {} },
+            // biome-ignore lint/suspicious/noExplicitAny: intentional malformed input
+            { agent: null as any, input: {} },
+          ],
+        },
+      });
+      // PLACEHOLDER_FEE_USD is the same over-estimate used for not-found prices.
+      // Challenge = step0(0.5) + placeholder(>0), fee rate 0 → > 0.5, and it is
+      // NEVER the flat 1 USD default while a real step (0.5) would settle.
+      expect(capturedX402ChallengeAmountUsd).toBeDefined();
+      // biome-ignore lint/style/noNonNullAssertion: asserted defined above
+      expect(capturedX402ChallengeAmountUsd!).toBeGreaterThan(0.5);
+      expect(capturedX402ChallengeAmountUsd).not.toBe(1);
+    } finally {
+      if (ORIGINAL_RATE === undefined) delete process.env.PROTOCOL_FEE_RATE;
+      else process.env.PROTOCOL_FEE_RATE = ORIGINAL_RATE;
+    }
+  });
+
+  it('T-ROUTE-X402-AMT-6 (MNR-2): sub-microdollar pipeline floors challenge to >= 1 atomic, never 0', async () => {
+    // A pipeline whose total rounds below 1 atomic unit (1e-6 USD) at 6dp must
+    // still advertise a positive challenge (floor to 1e-6), never 0.
+    mockResolvePrice.mockResolvedValue(0.0000001); // 1e-7, below 6dp grid
+    const ORIGINAL_RATE = process.env.PROTOCOL_FEE_RATE;
+    process.env.PROTOCOL_FEE_RATE = '0';
+    try {
+      capturedX402ChallengeAmountUsd = undefined;
+      const res = await app.inject({
+        method: 'POST',
+        url: '/compose',
+        payload: { steps: [{ agent: 'tiny', input: {} }] },
+      });
+      expect(res.statusCode).toBe(200);
+      // pipelineUsd = 1e-7 > 0 but rounds to 0 at 6dp → floored to 1e-6, NOT 0.
+      expect(capturedX402ChallengeAmountUsd).toBe(0.000001);
+    } finally {
+      if (ORIGINAL_RATE === undefined) delete process.env.PROTOCOL_FEE_RATE;
+      else process.env.PROTOCOL_FEE_RATE = ORIGINAL_RATE;
+    }
   });
 });
 

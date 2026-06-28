@@ -62,6 +62,84 @@ type ComposeBody = {
  * - priceUsdc === 0 o null: fallback $1 + warn + header (DT-C, CD-4).
  * - Happy path: inyecta `request.composeEstimatedCostUsd = price`.
  */
+/**
+ * WKH money-path fix: compute the REAL total an x402 caller owes for the whole
+ * pipeline and inject it as `request.x402ChallengeAmountUsd` so the 402
+ * challenge advertises it (instead of the flat 1 USD default). The figure is:
+ *
+ *   total = sum(stepPrice_i) * (1 + protocolFeeRate)
+ *
+ * - `stepPrice_i` reuses the SAME per-step price resolution / fallback as the
+ *   compose pipeline: invalid prices (0 / null / NaN) fall back to
+ *   `PLACEHOLDER_FEE_USD` (mirror of compose.ts service per-step + step-0
+ *   preHandler), so the challenge never under-charges a misconfigured agent.
+ * - the 1% protocol fee mirrors `chargeProtocolFee` (`fee = budget * rate`,
+ *   charged post-compose on `result.totalCostUsdc`), so the challenge reflects
+ *   the full amount the caller bears. No new fee math is invented.
+ *
+ * INVARIANT: the advertised challenge (and thus the caller's signed inbound
+ * authorization, which the middleware binding check forces to be `>=` the
+ * challenge, and which is what gets settled inbound) is `>= sum(stepPrice_i)`
+ * — it never under-charges relative to the pipeline value, and equals the real
+ * cost (no 1000x over-sign). The protocol-fee margin is additive and small
+ * (rate ≤ 0.10), keeping the challenge tight.
+ *
+ * Best-effort: throws are caught by the caller and leave the challenge at the
+ * 1 USD default (never blocks the request).
+ */
+async function augmentX402ChallengeAmount(
+  request: FastifyRequest,
+  steps: ComposeStep[],
+  step0Usd: number,
+): Promise<void> {
+  // step-0 price is already resolved by the caller (reused as-is, no extra
+  // discovery call → preserves the single-resolution contract for 1-step
+  // pipelines). Steps 1..N are resolved here.
+  let pipelineUsd = step0Usd;
+  for (let i = 1; i < steps.length; i++) {
+    const step = steps[i];
+    if (!step || typeof step.agent !== 'string') {
+      // BLQ-MEDIO-1 fix (layer 1 — defense in depth): a malformed step must NOT
+      // early-return. Early-returning left `x402ChallengeAmountUsd` unset, so the
+      // middleware fell back to quote(1) = 1 USDC. But composeService settles the
+      // 0..i-1 downstream prefix before failing on the not-found step, and the
+      // x402 path has no inbound refund (the refund block is gated on
+      // `request.a2aKeyRow`). Net: caller pays 1 USDC inbound while the gateway
+      // pays sum(prefix prices) downstream → gateway loss + undercharge. Instead
+      // we OVER-estimate the malformed step as PLACEHOLDER_FEE_USD (the same
+      // over-estimate already used for not-found / 0 / NaN prices) and keep
+      // summing, so the challenge ends >= the real pipeline cost. The route
+      // handler also hard-rejects such bodies with 400 (layer 2) so this path is
+      // only ever reached defensively.
+      pipelineUsd += PLACEHOLDER_FEE_USD;
+      continue;
+    }
+    const price = await resolveAgentPriceUsdc(step.agent, step.registry);
+    // Mirror the per-step fallback: agent-not-found / 0 / null / NaN → placeholder.
+    const stepUsd =
+      typeof price === 'number' && price > 0 && !Number.isNaN(price)
+        ? price
+        : PLACEHOLDER_FEE_USD;
+    pipelineUsd += stepUsd;
+  }
+  if (pipelineUsd <= 0) return;
+  // Add the 1% protocol fee the caller ultimately bears (mirror chargeProtocolFee).
+  const total = Number((pipelineUsd * (1 + getProtocolFeeRate())).toFixed(6));
+  // MNR-2 fix: guard on the FINAL atomic value, not the pre-fee `pipelineUsd`.
+  // `total` can round to 0 at 6dp even when `pipelineUsd > 0` (sub-microdollar
+  // pipeline). Never advertise 0: when `total > 0` rounds below 1 atomic unit,
+  // floor the challenge to >= 1 atomic (1e-6 USD) so the 402 always demands a
+  // positive amount and the never-undercharge invariant holds.
+  if (total <= 0) {
+    if (pipelineUsd > 0) {
+      // pipelineUsd > 0 but rounded to 0 at 6dp → floor to 1 atomic unit.
+      request.x402ChallengeAmountUsd = 0.000001;
+    }
+    return;
+  }
+  request.x402ChallengeAmountUsd = total;
+}
+
 async function resolveComposePriceHandler(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -120,6 +198,18 @@ async function resolveComposePriceHandler(
       request.composeEstimatedCostUsd = PLACEHOLDER_FEE_USD;
       // WKH-125: el destino del step-0 (el middleware no lee body, CD-7).
       request.composeDestination = composeDestination;
+      // WKH money-path fix: still advertise the real pipeline cost (step-0 used
+      // the placeholder; steps 1..N add their own prices).
+      await augmentX402ChallengeAmount(
+        request,
+        body.steps,
+        PLACEHOLDER_FEE_USD,
+      ).catch((e) => {
+        request.log.warn(
+          { err: e instanceof Error ? e.message : 'unknown' },
+          'compose.x402-challenge-amount.skip',
+        );
+      });
       return;
     }
 
@@ -127,6 +217,21 @@ async function resolveComposePriceHandler(
     request.composeEstimatedCostUsd = price;
     // WKH-125: el destino del step-0 (el middleware no lee body, CD-7).
     request.composeDestination = composeDestination;
+
+    // WKH money-path fix: compute the REAL total the x402 caller owes for the
+    // whole pipeline so the 402 challenge advertises it (vs the flat 1 USD
+    // default). This augmented field is consumed ONLY by the x402 fallback
+    // (middleware/x402.ts → x402ChallengeAmountUsd); the prepaid a2a-key path
+    // keeps using `composeEstimatedCostUsd` (step-0) for its per-step debit, so
+    // it is UNAFFECTED. Reuses the already-resolved step-0 `price` (no extra
+    // discovery call). Best-effort: any failure here leaves the challenge at the
+    // 1 USD default (never blocks the request, CD-15 shape rules unchanged).
+    await augmentX402ChallengeAmount(request, body.steps, price).catch((e) => {
+      request.log.warn(
+        { err: e instanceof Error ? e.message : 'unknown' },
+        'compose.x402-challenge-amount.skip',
+      );
+    });
   } catch (err) {
     // AC-5: error de DB o discovery → 503 REGISTRY_UNAVAILABLE, NO debit.
     // CD-6: NO incluir owner_ref ni nada sensible en el log.
@@ -185,6 +290,26 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       if (body.steps.length > 5) {
         return reply.status(400).send({
           error: 'Maximum 5 steps allowed per pipeline',
+          code: 'VALIDATION_ERROR',
+          requestId: request.id,
+        });
+      }
+
+      // BLQ-MEDIO-1 fix (layer 2 — close the unvalidated-input gap): reject the
+      // whole pipeline when ANY step lacks a string `agent`. Previously only
+      // step-0 was validated (by the price preHandler), so a malformed trailing
+      // step (e.g. non-string `agent`) reached composeService, which settles the
+      // valid 0..i-1 prefix downstream before failing on the bad step. On the
+      // x402 path there is no inbound refund, so the gateway eats the prefix cost.
+      // Rejecting up-front guarantees a malformed pipeline NEVER settles a partial
+      // prefix. This runs AFTER the payment middleware, but a 400 here is the
+      // failure mode we want (no compose call, no downstream settle).
+      const badStepIndex = body.steps.findIndex(
+        (s) => !s || typeof s.agent !== 'string',
+      );
+      if (badStepIndex !== -1) {
+        return reply.status(400).send({
+          error: `Step ${badStepIndex} is missing a string 'agent' field`,
           code: 'VALIDATION_ERROR',
           requestId: request.id,
         });

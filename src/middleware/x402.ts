@@ -47,12 +47,33 @@ declare module 'fastify' {
      * (opt-in) by `requirePassport`. NEVER used as the sole auth signal.
      */
     paymentOrigin?: 'passport' | 'eoa';
+    /**
+     * WKH money-path fix: per-request challenge amount in USD, injected by a
+     * route preHandler (e.g. /compose) so the x402 402-challenge advertises the
+     * REAL pipeline cost instead of the flat 1 USD default. Overrides
+     * `PaymentMiddlewareOptions.amountUsd` for THIS request only. The
+     * higher-precedence atomic `opts.amount` (if any) still wins.
+     */
+    x402ChallengeAmountUsd?: number;
   }
 }
 
 export interface PaymentMiddlewareOptions {
   description: string;
+  /**
+   * Pre-computed challenge amount in the chain's ATOMIC units (e.g. '7777777').
+   * Highest precedence — when set, used verbatim. Cannot be chain-decimal-aware
+   * from a route (the chain is resolved inside the middleware), so prefer
+   * `amountUsd` for per-request, chain-agnostic pricing.
+   */
   amount?: string;
+  /**
+   * Per-request challenge amount in USD. The resolved chain's adapter converts
+   * it to atomic units via `quote(amountUsd)` (honoring per-chain decimals).
+   * Lets a route advertise the REAL pipeline cost instead of the flat 1 USD
+   * default. Ignored when `amount` (atomic) is also set.
+   */
+  amountUsd?: number;
 }
 
 /**
@@ -76,8 +97,13 @@ async function resolvePaymentRequirements(
   const adapter = getPaymentAdapter(chainKey);
   const payTo =
     process.env.PAYMENT_WALLET_ADDRESS || process.env.KITE_WALLET_ADDRESS || '';
+  // Precedence: explicit atomic `amount` (back-compat) > per-request `amountUsd`
+  // converted by the resolved chain's adapter (honors per-chain decimals) >
+  // the flat 1 USD default. WKH money-path fix: passing `amountUsd` makes the
+  // 402 challenge reflect the REAL pipeline cost instead of a hardcoded 1 USDC.
   const requiredAmount =
-    opts.amount ?? (await adapter.quote(DEFAULT_AMOUNT_USD)).amountWei;
+    opts.amount ??
+    (await adapter.quote(opts.amountUsd ?? DEFAULT_AMOUNT_USD)).amountWei;
   return { payTo, requiredAmount };
 }
 
@@ -133,12 +159,21 @@ export function decodeXPayment(header: string): X402PaymentRequest {
 }
 
 export function requirePayment(
-  opts: PaymentMiddlewareOptions,
+  staticOpts: PaymentMiddlewareOptions,
 ): preHandlerHookHandler[] {
   const handler: preHandlerHookHandler = async (
     request: FastifyRequest,
     reply: FastifyReply,
   ) => {
+    // WKH money-path fix: merge the per-request challenge amount (injected by a
+    // route preHandler) over the static registration-time opts. Only the USD
+    // figure is overridable; the atomic `amount` (if set) keeps its precedence
+    // inside `resolvePaymentRequirements`. When neither is set, falls back to
+    // the flat 1 USD default (back-compat).
+    const opts: PaymentMiddlewareOptions =
+      typeof request.x402ChallengeAmountUsd === 'number'
+        ? { ...staticOpts, amountUsd: request.x402ChallengeAmountUsd }
+        : staticOpts;
     if (
       !process.env.PAYMENT_WALLET_ADDRESS &&
       !process.env.KITE_WALLET_ADDRESS

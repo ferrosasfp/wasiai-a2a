@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { createWalletClient, http } from 'viem';
+import { createWalletClient, http, parseUnits } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import type { X402PaymentRequest } from '../../types/index.js';
 import type {
@@ -379,11 +379,22 @@ export class AvalanchePaymentAdapter implements PaymentAdapter {
     return settleX402(req, this.network);
   }
 
-  async quote(_amountUsd: number): Promise<QuoteResult> {
+  async quote(amountUsd: number): Promise<QuoteResult> {
     const token = getUsdcAddress(this.network);
+    // WKH money-path fix: HONOR the requested USD amount instead of a flat
+    // 1 USDC hardcode (mirror of base/payment.ts). The previous constant
+    // ('1000000') made every x402 challenge advertise 1 USDC regardless of the
+    // real pipeline cost. USDC has 6 decimals on Avalanche; parseUnits scales
+    // the USD figure to atomic units exactly.
+    // MNR-1 fix: normalize via toFixed(decimals) BEFORE parseUnits so a tiny
+    // amount in scientific notation (e.g. 1e-7 → "1e-7") can never reach
+    // parseUnits (which throws on non-decimal strings). toFixed always emits a
+    // plain decimal string and floors sub-atomic precision to the token's grid.
     return {
-      // 1 USDC = 1_000_000 atomic (6 decimals). String for safety.
-      amountWei: '1000000',
+      amountWei: parseUnits(
+        amountUsd.toFixed(USDC_DECIMALS),
+        USDC_DECIMALS,
+      ).toString(),
       token: {
         symbol: USDC_SYMBOL,
         address: token,

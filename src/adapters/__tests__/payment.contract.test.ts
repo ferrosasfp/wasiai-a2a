@@ -171,6 +171,34 @@ describe('KiteOzonePaymentAdapter', () => {
     expect(result.token.address).toBe(PYUSD_DEFAULT);
   });
 
+  // WKH money-path fix: quote() must HONOR its argument (18-dec PYUSD), not the
+  // old flat '1000000000000000000' hardcode.
+  it('quote(1) → 1e18 atomic (1 PYUSD, 18 decimals)', async () => {
+    expect((await adapter.quote(1)).amountWei).toBe('1000000000000000000');
+  });
+
+  it('quote(0.001) → 1e15 atomic, NOT the old 1e18 hardcode', async () => {
+    const result = await adapter.quote(0.001);
+    expect(result.amountWei).toBe('1000000000000000');
+    expect(result.amountWei).not.toBe('1000000000000000000');
+  });
+
+  // MNR-1 fix: a tiny amount in scientific notation (String(1e-7) === '1e-7')
+  // used to throw inside parseUnits. toFixed(18) normalizes it to a plain
+  // decimal string first, so quote() never throws. With 18 decimals 1e-7 is
+  // well within the grid → 1e11 atomic (no crash, no 0).
+  it('quote(1e-7) does NOT throw and is >=1 atomic (was scientific-notation crash)', async () => {
+    let result: Awaited<ReturnType<typeof adapter.quote>> | undefined;
+    await expect(
+      (async () => {
+        result = await adapter.quote(1e-7);
+      })(),
+    ).resolves.not.toThrow();
+    // 1e-7 PYUSD = 1e11 atomic at 18 decimals.
+    expect(result?.amountWei).toBe('100000000000');
+    expect(BigInt(result?.amountWei ?? '0') >= 1n).toBe(true);
+  });
+
   it('sign() returns SignResult shape', async () => {
     const result = await adapter.sign({
       to: '0x000000000000000000000000000000000000dEaD' as `0x${string}`,

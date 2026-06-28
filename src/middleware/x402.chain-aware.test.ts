@@ -118,6 +118,27 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
     mockBaseSettle.mockResolvedValue({ txHash: '0xbeef', success: true });
     mockKiteVerify.mockResolvedValue({ valid: true });
     mockKiteSettle.mockResolvedValue({ txHash: '0xdeadbeef', success: true });
+    // vi.clearAllMocks() resets call history but NOT mockImplementation, so the
+    // per-test quote overrides (WKH money-path tests) would leak; restore the
+    // default flat-1-token quote here.
+    baseAdapter.quote.mockResolvedValue({
+      amountWei: '1000000',
+      token: {
+        symbol: 'USDC',
+        address: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+        decimals: 6,
+      },
+      facilitatorUrl: 'http://mock',
+    });
+    kiteAdapter.quote.mockResolvedValue({
+      amountWei: '1000000000000000000',
+      token: {
+        symbol: 'KITE',
+        address: '0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e',
+        decimals: 18,
+      },
+      facilitatorUrl: 'http://mock',
+    });
     process.env.KITE_WALLET_ADDRESS =
       '0x000000000000000000000000000000000000dEaD';
   });
@@ -436,6 +457,124 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
       expect(bodyDefault.accepts[0]!.maxAmountRequired).toBe('7777777');
     } finally {
       await appDefault.close();
+    }
+  });
+
+  // ── WKH money-path fix: per-request x402ChallengeAmountUsd injection ──
+  // A route preHandler (e.g. /compose) injects `request.x402ChallengeAmountUsd`
+  // so the 402 challenge advertises the REAL pipeline cost, converted to atomic
+  // units by the resolved chain's adapter (honoring per-chain decimals). The
+  // flat 1 USD default applies only when nothing is injected.
+
+  it('T-CHALLENGE-USD: injected x402ChallengeAmountUsd → adapter.quote called with it, challenge reflects it (Base 6-dec)', async () => {
+    // Base mock quote echoes the requested USD amount at 6 decimals so we can
+    // assert the real per-request figure flows end-to-end.
+    baseAdapter.quote.mockImplementation(async (usd: number) => ({
+      amountWei: String(Math.round(usd * 1e6)),
+      token: {
+        symbol: 'USDC',
+        address: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+        decimals: 6,
+      },
+      facilitatorUrl: 'http://mock',
+    }));
+
+    const app = Fastify();
+    // preHandler injects the per-request amount BEFORE the x402 challenge runs,
+    // mirroring routes/compose.ts:resolveComposePriceHandler.
+    app.post(
+      '/test',
+      {
+        preHandler: [
+          async (req: FastifyRequest) => {
+            (
+              req as unknown as { x402ChallengeAmountUsd?: number }
+            ).x402ChallengeAmountUsd = 0.00101; // cheap agent + 1% fee
+          },
+          ...requirePayment({ description: 'test' }),
+        ],
+      },
+      async (_req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ ok: true }),
+    );
+    await app.ready();
+
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { 'x-payment-chain': 'base-sepolia' },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(402);
+      // adapter.quote received the injected per-request USD figure, NOT the 1 USD default.
+      expect(baseAdapter.quote).toHaveBeenCalledWith(0.00101);
+      const body = res.json() as ChallengeBody;
+      // 0.00101 USDC at 6 decimals = 1010 atomic — the REAL cost, not 1000000.
+      expect(body.accepts[0]!.maxAmountRequired).toBe('1010');
+      expect(body.accepts[0]!.maxAmountRequired).not.toBe('1000000');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('T-CHALLENGE-USD-DEFAULT: NO injection → adapter.quote called with 1 (back-compat default)', async () => {
+    const app = Fastify();
+    app.post(
+      '/test',
+      { preHandler: requirePayment({ description: 'test' }) },
+      async (_req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ ok: true }),
+    );
+    await app.ready();
+
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { 'x-payment-chain': 'base-sepolia' },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(402);
+      expect(baseAdapter.quote).toHaveBeenCalledWith(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('T-CHALLENGE-USD-ATOMIC-WINS: opts.amount (atomic) beats injected amountUsd (quote not consulted)', async () => {
+    const app = Fastify();
+    app.post(
+      '/test',
+      {
+        preHandler: [
+          async (req: FastifyRequest) => {
+            (
+              req as unknown as { x402ChallengeAmountUsd?: number }
+            ).x402ChallengeAmountUsd = 0.5;
+          },
+          ...requirePayment({ description: 'test', amount: '7777777' }),
+        ],
+      },
+      async (_req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ ok: true }),
+    );
+    await app.ready();
+
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { 'x-payment-chain': 'base-sepolia' },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(402);
+      const body = res.json() as ChallengeBody;
+      expect(body.accepts[0]!.maxAmountRequired).toBe('7777777');
+      // atomic override short-circuits quote() entirely.
+      expect(baseAdapter.quote).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
     }
   });
 });
