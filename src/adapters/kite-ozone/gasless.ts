@@ -14,9 +14,17 @@ import type {
 import { kiteTestnet } from './chain.js';
 import { getClient, requireClient } from './client.js';
 
-const GASLESS_BASE_URL = 'https://gasless.gokite.ai';
-const GASLESS_SUBMIT_URL = `${GASLESS_BASE_URL}/testnet`;
-const GASLESS_TOKENS_URL = `${GASLESS_BASE_URL}/supported_tokens`;
+const DEFAULT_GASLESS_BASE_URL = 'https://gasless.gokite.ai';
+// Env override (KITE_GASLESS_URL) wins; sub-paths are derived from the base.
+function getGaslessBaseUrl(): string {
+  return process.env.KITE_GASLESS_URL ?? DEFAULT_GASLESS_BASE_URL;
+}
+function getGaslessSubmitUrl(): string {
+  return `${getGaslessBaseUrl()}/testnet`;
+}
+function getGaslessTokensUrl(): string {
+  return `${getGaslessBaseUrl()}/supported_tokens`;
+}
 const VALIDITY_WINDOW_SECONDS = 25n;
 const FALLBACK_TOKEN: GaslessSupportedToken = {
   network: 'testnet',
@@ -112,7 +120,7 @@ function parseTestnetToken(raw: unknown): GaslessSupportedToken | null {
 export async function getSupportedToken(): Promise<GaslessSupportedToken> {
   if (_tokenCache) return _tokenCache;
   try {
-    const res = await fetch(GASLESS_TOKENS_URL, {
+    const res = await fetch(getGaslessTokensUrl(), {
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) {
@@ -188,7 +196,7 @@ export async function submitGaslessTransfer(payload: {
 }): Promise<{ txHash: `0x${string}` }> {
   let res: Response;
   try {
-    res = await fetch(GASLESS_SUBMIT_URL, {
+    res = await fetch(getGaslessSubmitUrl(), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -265,7 +273,7 @@ export class KiteOzoneGaslessAdapter implements GaslessAdapter {
     const baseFields = {
       network: 'kite-testnet' as const,
       chain_id: kiteTestnet.id,
-      relayer: GASLESS_BASE_URL,
+      relayer: getGaslessBaseUrl(),
       documentation:
         'https://github.com/ferrosasfp/wasiai-a2a/blob/main/doc/architecture/CHAIN-ADAPTIVE.md',
     };

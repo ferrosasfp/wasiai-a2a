@@ -35,7 +35,7 @@ function getKiteNetworkTag(): KiteNetworkTag {
 
 const KITE_MAX_TIMEOUT_SECONDS = 300 as const;
 const KITE_FACILITATOR_DEFAULT_URL = 'https://facilitator.pieverse.io';
-const KITE_FACILITATOR_ADDRESS =
+const DEFAULT_KITE_FACILITATOR_ADDRESS =
   '0x12343e649e6b2b2b77649DFAb88f103c02F3C78b' as `0x${string}`;
 
 // WasiAI self-hosted facilitator (x402 canonical — fallback when Pieverse is
@@ -127,6 +127,27 @@ function getDefaultTokenSymbol(): string {
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 let _warnedDefaultToken = false;
+let _warnedDefaultFacilitatorAddress = false;
+
+// Pieverse facilitator contract used as EIP-712 `verifyingContract` in
+// pieverse mode. Env override (KITE_FACILITATOR_ADDRESS) wins; falls back to
+// the documented default with the same address-format validation as the
+// payment token (CD-1: no hardcoded addresses in logic).
+function getFacilitatorAddress(): `0x${string}` {
+  const addr = process.env.KITE_FACILITATOR_ADDRESS;
+  const fallback = DEFAULT_KITE_FACILITATOR_ADDRESS;
+  if (!addr) return fallback;
+  if (!ADDRESS_RE.test(addr)) {
+    if (!_warnedDefaultFacilitatorAddress) {
+      console.warn(
+        `KITE_FACILITATOR_ADDRESS has invalid format "${addr}" — defaulting to ${fallback}`,
+      );
+      _warnedDefaultFacilitatorAddress = true;
+    }
+    return fallback;
+  }
+  return addr as `0x${string}`;
+}
 
 function getPaymentToken(): `0x${string}` {
   const token = process.env.X402_PAYMENT_TOKEN;
@@ -163,7 +184,7 @@ function getEip712Domain() {
     version:
       process.env.X402_EIP712_DOMAIN_VERSION ?? DEFAULT_EIP712_DOMAIN_VERSION,
     chainId: getKiteChain().id,
-    verifyingContract: KITE_FACILITATOR_ADDRESS,
+    verifyingContract: getFacilitatorAddress(),
   } as const;
 }
 
@@ -578,4 +599,5 @@ async function settleX402(req: SettleRequest): Promise<SettleResult> {
 export function _resetWalletClient(): void {
   _walletClient = null;
   _warnedDefaultToken = false;
+  _warnedDefaultFacilitatorAddress = false;
 }
