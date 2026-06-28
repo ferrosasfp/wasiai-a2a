@@ -52,8 +52,16 @@ if (!prod) {
   if (origins.length > 0) {
     corsOptions = { origin: origins };
   } else {
+    // Behavior is UNCHANGED (origin: false). We do NOT flip prod to a
+    // permissive default — but we emit a loud, actionable startup warning so
+    // the operator knows cross-origin requests are being blocked because
+    // CORS_ALLOWED_ORIGINS is unset. Set it (comma-separated origin list,
+    // e.g. https://wasiai.io,https://www.wasiai.io) to allow your frontends.
+    // See .env.example for the recommended value.
     fastify.log.warn(
-      'CORS_ALLOWED_ORIGINS not set in production — blocking all cross-origin requests',
+      '⚠️  CORS_ALLOWED_ORIGINS is UNSET in production — ALL cross-origin requests are being BLOCKED. ' +
+        'Set CORS_ALLOWED_ORIGINS to a comma-separated origin list (e.g. https://wasiai.io,https://www.wasiai.io) ' +
+        'to allow your frontend(s). See .env.example.',
     );
     corsOptions = { origin: false };
   }
