@@ -11,6 +11,7 @@ import {
   CircuitOpenError,
 } from '../lib/circuit-breaker.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
+import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import type {
   Agent,
@@ -29,6 +30,8 @@ import {
 } from './fee-charge.js';
 import { receiptService } from './receipt.js';
 import { refundOutbox } from './refund-outbox.js';
+
+const log = getLogger('orchestrate');
 
 const MODEL = 'claude-sonnet-4-6';
 const LLM_TIMEOUT_MS = 30_000;
@@ -129,7 +132,7 @@ async function llmPlan(
 ): Promise<LlmPlanResponse | null> {
   const client = getAnthropicClient();
   if (!client) {
-    console.error(
+    log.error(
       '[Orchestrate] ANTHROPIC_API_KEY not configured — using fallback',
     );
     return null;
@@ -206,9 +209,7 @@ async function llmPlan(
     // Validate structure
     const selectedAgents = parsed.selectedAgents;
     if (!Array.isArray(selectedAgents) || selectedAgents.length === 0) {
-      console.error(
-        '[Orchestrate] LLM returned empty or invalid selectedAgents',
-      );
+      log.error('[Orchestrate] LLM returned empty or invalid selectedAgents');
       return null;
     }
 
@@ -224,7 +225,7 @@ async function llmPlan(
     ) as LlmPlanAgent[];
 
     if (validated.length === 0) {
-      console.error('[Orchestrate] LLM returned agents without valid slugs');
+      log.error('[Orchestrate] LLM returned agents without valid slugs');
       return null;
     }
 
@@ -235,9 +236,9 @@ async function llmPlan(
   } catch (err) {
     // Let CircuitOpenError propagate to error boundary
     if (err instanceof CircuitOpenError) throw err;
-    console.error(
-      '[Orchestrate] LLM planning failed:',
-      err instanceof Error ? err.message : err,
+    log.error(
+      { detail: err instanceof Error ? err.message : err },
+      '[Orchestrate] LLM planning failed',
     );
     return null;
   } finally {
@@ -369,7 +370,7 @@ export const orchestrateService = {
             metadata: { orchestrationId, agentCount: 0, fallback: false },
           })
           .catch((err) =>
-            console.error('[Orchestrate] event tracking failed:', err),
+            log.error({ err }, '[Orchestrate] event tracking failed'),
           );
 
         return noFundsResult;
@@ -418,7 +419,7 @@ export const orchestrateService = {
           metadata: { orchestrationId, agentCount: 0, fallback: false },
         })
         .catch((err) =>
-          console.error('[Orchestrate] event tracking failed:', err),
+          log.error({ err }, '[Orchestrate] event tracking failed'),
         );
 
       return emptyResult;
@@ -464,7 +465,7 @@ export const orchestrateService = {
 
       if (validAgents.length === 0) {
         // All LLM slugs invalid — fallback
-        console.error(
+        log.error(
           '[Orchestrate] All LLM-selected slugs are invalid — using fallback',
         );
         const fallback = greedyPlan(goal, candidateAgents, budget, maxAgents);
@@ -544,7 +545,7 @@ export const orchestrateService = {
           metadata: { orchestrationId, agentCount: 0, fallback: usedFallback },
         })
         .catch((err) =>
-          console.error('[Orchestrate] event tracking failed:', err),
+          log.error({ err }, '[Orchestrate] event tracking failed'),
         );
 
       return noBudgetResult;
@@ -599,7 +600,7 @@ export const orchestrateService = {
           },
         })
         .catch((err) =>
-          console.error('[Orchestrate] event tracking failed:', err),
+          log.error({ err }, '[Orchestrate] event tracking failed'),
         );
 
       return noRelevantResult;
@@ -617,10 +618,10 @@ export const orchestrateService = {
     // El header x-debit-fallback lo setea el route leyendo result.debitFallback (CD-7).
     let debitFallback = false;
     if (billingKeyRow && plannedCostUsd === 0) {
-      console.warn('[orchestrate.price.fallback]', {
-        orchestrationId,
-        reason: 'registry-miss',
-      });
+      log.warn(
+        { orchestrationId, reason: 'registry-miss' },
+        '[orchestrate.price.fallback]',
+      );
       plannedCostUsd = PLACEHOLDER_FEE_USD;
       debitFallback = true;
     }
@@ -684,7 +685,7 @@ export const orchestrateService = {
             },
           })
           .catch((err) =>
-            console.error('[Orchestrate] event tracking failed:', err),
+            log.error({ err }, '[Orchestrate] event tracking failed'),
           );
 
         return debitFailResult;
@@ -734,7 +735,10 @@ export const orchestrateService = {
       });
       if (feeResult.status === 'failed') {
         feeChargeError = feeResult.error;
-        console.error('[Orchestrate] fee charge failed:', feeResult.error);
+        log.error(
+          { detail: feeResult.error },
+          '[Orchestrate] fee charge failed',
+        );
       } else if (
         feeResult.status === 'charged' ||
         feeResult.status === 'already-charged'
@@ -763,9 +767,9 @@ export const orchestrateService = {
               orchestrationId,
             })
             .catch((e) =>
-              console.warn(
+              log.warn(
+                { detail: e instanceof Error ? e.message : e },
                 '[receipts] emit failed',
-                e instanceof Error ? e.message : e,
               ),
             );
         }
@@ -805,12 +809,15 @@ export const orchestrateService = {
         );
         if (!creditRes.success) {
           // AC-8: log estructurado + flag, sin msg crudo de PG (CD-6).
-          console.error('[orchestrate.refund-failed]', {
-            keyId: billingKeyRow.id,
-            chainId: request.chainId,
-            amountUsd: refundUsd,
-            orchestrationId,
-          });
+          log.error(
+            {
+              keyId: billingKeyRow.id,
+              chainId: request.chainId,
+              amountUsd: refundUsd,
+              orchestrationId,
+            },
+            '[orchestrate.refund-failed]',
+          );
           refundError = true;
           // M6 (audit 2026-06-24): el refund NO aplicó nada (success:false →
           // reverted:false / 0 filas). Encolar para reintento confiable. La
@@ -852,7 +859,7 @@ export const orchestrateService = {
         },
       })
       .catch((err) =>
-        console.error('[Orchestrate] event tracking failed:', err),
+        log.error({ err }, '[Orchestrate] event tracking failed'),
       );
 
     return {

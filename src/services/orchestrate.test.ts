@@ -6,6 +6,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Agent, ComposeResult, DiscoveryResult } from '../types/index.js';
 
+// ─── Structured logger mock ─────────────────────────────────
+// orchestrate.ts logs server-side via getLogger('orchestrate'). Mock it so
+// tests assert log emission (object-first / message-second) instead of spying
+// on console. hoisted so the factory can reference it.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 // ─── Shared mock for Anthropic ───────────────────────────────
 
 const mockCreate = vi.fn();
@@ -946,7 +959,6 @@ describe('orchestrateService', () => {
       registries: ['wasiai'],
     };
     vi.mocked(discoveryService.discover).mockResolvedValue(zeroPriceDiscovery);
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     setLlmTwoAgents();
 
     const result = await orchestrateService.orchestrate(
@@ -962,11 +974,10 @@ describe('orchestrateService', () => {
     const debitCall = vi.mocked(budgetService.debit).mock.calls[0]!;
     expect(debitCall[2]).toBe(1.0);
     expect(result.debitFallback).toBe(true);
-    expect(warnSpy).toHaveBeenCalledWith(
-      '[orchestrate.price.fallback]',
+    expect(logSpy.warn).toHaveBeenCalledWith(
       expect.objectContaining({ reason: 'registry-miss' }),
+      '[orchestrate.price.fallback]',
     );
-    warnSpy.mockRestore();
   });
 
   // T-AC5 (AC-5): total failure (totalCostUsdc:0) → credit called with debitedUsd.
@@ -1058,7 +1069,6 @@ describe('orchestrateService', () => {
       success: false,
       error: 'REFUND_FAILED',
     });
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     setLlmTwoAgents();
 
     const result = await orchestrateService.orchestrate(
@@ -1072,8 +1082,7 @@ describe('orchestrateService', () => {
     );
 
     expect(result.refundError).toBe(true);
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[orchestrate.refund-failed]',
+    expect(logSpy.error).toHaveBeenCalledWith(
       expect.objectContaining({
         keyId: 'master-key-1',
         chainId: 2368,
@@ -1081,8 +1090,8 @@ describe('orchestrateService', () => {
         amountUsd: 0.3,
         orchestrationId: 'orch-ac8',
       }),
+      '[orchestrate.refund-failed]',
     );
-    errorSpy.mockRestore();
   });
 
   // T-AC9 (AC-9): x402 (no scopingKeyRow) → debit and credit 0 calls.
