@@ -1,0 +1,37 @@
+name: ci
+
+# Real CI gate: enforces the full test suite, typecheck and lint on every PR
+# and on push to main. Runs WITHOUT secrets or a live database — the Postgres
+# *.real.test.ts integration tests are skipIf-gated on INTEGRATION_TEST_DB_URL,
+# which is intentionally absent here, so they are skipped (not failed).
+# This complements smoke-downstream.yml (network smoke), it does not replace it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc -p tsconfig.json --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
