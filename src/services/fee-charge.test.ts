@@ -7,6 +7,19 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// ─── Structured logger mock ─────────────────────────────────
+// fee-charge.ts logs server-side via getLogger('fee-charge'). Mock it so tests
+// assert log emission via logSpy (object-first / message-second) instead of
+// spying on console. hoisted so the factory can reference it.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 // ─── Mocks ──────────────────────────────────────────────────
 // Mock del payment adapter (patrón verificado en src/services/compose.test.ts:15-17)
 const mockSign = vi.fn();
@@ -84,6 +97,9 @@ describe('getProtocolFeeRate', () => {
   beforeEach(() => {
     delete process.env.PROTOCOL_FEE_RATE;
     vi.restoreAllMocks();
+    logSpy.error.mockClear();
+    logSpy.warn.mockClear();
+    logSpy.info.mockClear();
   });
 
   afterEach(() => {
@@ -96,9 +112,8 @@ describe('getProtocolFeeRate', () => {
 
   // FT-1 (AC-9): unset → 0.01
   it('FT-1: returns default 0.01 when env var is unset', () => {
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(getProtocolFeeRate()).toBe(0.01);
-    expect(errSpy).not.toHaveBeenCalled();
+    expect(logSpy.error).not.toHaveBeenCalled();
   });
 
   // FT-2 (AC-9): valid value parses cleanly
@@ -107,29 +122,28 @@ describe('getProtocolFeeRate', () => {
     expect(getProtocolFeeRate()).toBe(0.05);
   });
 
-  // FT-3 (AC-9, CD-E): NaN input → fallback + console.error
-  it('FT-3: falls back to 0.01 + console.error on NaN input ("abc")', () => {
+  // FT-3 (AC-9, CD-E): NaN input → fallback + log.error
+  it('FT-3: falls back to 0.01 + log.error on NaN input ("abc")', () => {
     process.env.PROTOCOL_FEE_RATE = 'abc';
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(getProtocolFeeRate()).toBe(0.01);
-    expect(errSpy).toHaveBeenCalledTimes(1);
-    expect(errSpy.mock.calls[0]?.[0]).toContain('Invalid PROTOCOL_FEE_RATE');
+    expect(logSpy.error).toHaveBeenCalledTimes(1);
+    expect(logSpy.error.mock.calls[0]?.[1]).toContain(
+      'Invalid PROTOCOL_FEE_RATE',
+    );
   });
 
-  // FT-4 (AC-9): negative value → fallback + console.error
-  it('FT-4: falls back to 0.01 + console.error on negative ("-0.01")', () => {
+  // FT-4 (AC-9): negative value → fallback + log.error
+  it('FT-4: falls back to 0.01 + log.error on negative ("-0.01")', () => {
     process.env.PROTOCOL_FEE_RATE = '-0.01';
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(getProtocolFeeRate()).toBe(0.01);
-    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(logSpy.error).toHaveBeenCalledTimes(1);
   });
 
-  // FT-5 (AC-9): > 0.10 → fallback + console.error
-  it('FT-5: falls back to 0.01 + console.error on > 0.10 ("0.5")', () => {
+  // FT-5 (AC-9): > 0.10 → fallback + log.error
+  it('FT-5: falls back to 0.01 + log.error on > 0.10 ("0.5")', () => {
     process.env.PROTOCOL_FEE_RATE = '0.5';
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(getProtocolFeeRate()).toBe(0.01);
-    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(logSpy.error).toHaveBeenCalledTimes(1);
   });
 
   // FT-6 (AC-10): no cache — cambiar env entre calls refleja el nuevo valor
@@ -147,33 +161,29 @@ describe('getProtocolFeeRate', () => {
   // FT-7 (AC-9 boundary): 0.10 exacto → aceptado
   it('FT-7: accepts upper boundary 0.10', () => {
     process.env.PROTOCOL_FEE_RATE = '0.10';
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(getProtocolFeeRate()).toBe(0.1);
-    expect(errSpy).not.toHaveBeenCalled();
+    expect(logSpy.error).not.toHaveBeenCalled();
   });
 
   // FT-8 (AC-9 boundary): 0.0 exacto → aceptado
   it('FT-8: accepts lower boundary 0.0', () => {
     process.env.PROTOCOL_FEE_RATE = '0.0';
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(getProtocolFeeRate()).toBe(0.0);
-    expect(errSpy).not.toHaveBeenCalled();
+    expect(logSpy.error).not.toHaveBeenCalled();
   });
 
   // Bonus (defensive): Infinity → fallback
   it('FT-8b (defensive): rejects Infinity → fallback 0.01', () => {
     process.env.PROTOCOL_FEE_RATE = 'Infinity';
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(getProtocolFeeRate()).toBe(0.01);
-    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(logSpy.error).toHaveBeenCalledTimes(1);
   });
 
   // Bonus (defensive): empty string → default (no error)
   it('FT-8c (defensive): empty string → default 0.01 without error', () => {
     process.env.PROTOCOL_FEE_RATE = '';
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(getProtocolFeeRate()).toBe(0.01);
-    expect(errSpy).not.toHaveBeenCalled();
+    expect(logSpy.error).not.toHaveBeenCalled();
   });
 });
 
@@ -184,6 +194,9 @@ describe('chargeProtocolFee', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    logSpy.error.mockClear();
+    logSpy.warn.mockClear();
+    logSpy.info.mockClear();
     mockSign.mockReset();
     mockSettle.mockReset();
     mockFrom.mockReset();
@@ -205,7 +218,6 @@ describe('chargeProtocolFee', () => {
 
   // FT-9 (AC-5, CD-2): wallet unset → skipped, DB not called
   it('FT-9: skips when WASIAI_PROTOCOL_FEE_WALLET unset', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const result = await chargeProtocolFee({
       orchestrationId: 'id-1',
       budgetUsdc: 1.0,
@@ -219,7 +231,7 @@ describe('chargeProtocolFee', () => {
     }
     expect(mockFrom).not.toHaveBeenCalled();
     expect(mockSign).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(logSpy.warn).toHaveBeenCalledTimes(1);
   });
 
   // FT-10 (AC-2): happy path — sign+settle OK, row charged, txHash propagated
@@ -330,7 +342,6 @@ describe('chargeProtocolFee', () => {
       error: 'network down',
     });
 
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const result = await chargeProtocolFee({
       orchestrationId: 'id-13',
       budgetUsdc: 1.0,
@@ -341,7 +352,7 @@ describe('chargeProtocolFee', () => {
     if (result.status === 'failed') {
       expect(result.error).toContain('network down');
     }
-    expect(errSpy).toHaveBeenCalled();
+    expect(logSpy.error).toHaveBeenCalled();
   });
 
   // FT-14 (AC-6): sign throws → failed
@@ -355,7 +366,6 @@ describe('chargeProtocolFee', () => {
 
     mockSign.mockRejectedValueOnce(new Error('sig failure'));
 
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const result = await chargeProtocolFee({
       orchestrationId: 'id-14',
       budgetUsdc: 1.0,
@@ -366,7 +376,7 @@ describe('chargeProtocolFee', () => {
     if (result.status === 'failed') {
       expect(result.error).toContain('sig failure');
     }
-    expect(errSpy).toHaveBeenCalled();
+    expect(logSpy.error).toHaveBeenCalled();
   });
 
   // FT-15 (CD-B): never rejects even on DB error
@@ -379,7 +389,6 @@ describe('chargeProtocolFee', () => {
       throw new Error('connection refused');
     });
 
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     await expect(
       chargeProtocolFee({
         orchestrationId: 'id-15',
@@ -387,7 +396,7 @@ describe('chargeProtocolFee', () => {
         feeRate: 0.01,
       }),
     ).resolves.toMatchObject({ status: 'failed' });
-    expect(errSpy).toHaveBeenCalled();
+    expect(logSpy.error).toHaveBeenCalled();
   });
 
   // FT-16 (DT-8): feeUsdc=0.01 → feeWei="10000000000000000" (1e16, 18 decimals)
