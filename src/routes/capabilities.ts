@@ -26,40 +26,37 @@ const capabilitiesRoutes: FastifyPluginAsync = async (fastify) => {
    * - chains: chains the adapter registry has initialized
    * - agents: live discovered agents (alias of /discover)
    */
-  fastify.get(
-    '/',
-    async (request: FastifyRequest, reply: FastifyReply) => {
-      const baseUrl = resolveBaseUrl(request);
-      const card = agentCardService.buildSelfAgentCard(baseUrl);
+  fastify.get('/', async (request: FastifyRequest, reply: FastifyReply) => {
+    const baseUrl = resolveBaseUrl(request);
+    const card = agentCardService.buildSelfAgentCard(baseUrl);
 
-      const chains = getInitializedChainKeys().map((key) => {
-        const config = getChainConfig(key);
-        return {
-          key,
-          name: config.name,
-          chainId: config.chainId,
-          isDefault: key === getDefaultChainKey(),
-        };
-      });
+    const chains = getInitializedChainKeys().map((key) => {
+      const config = getChainConfig(key);
+      return {
+        key,
+        name: config.name,
+        chainId: config.chainId,
+        isDefault: key === getDefaultChainKey(),
+      };
+    });
 
-      const discovered = await discoveryService.discover({});
+    const discovered = await discoveryService.discover({});
 
-      return reply.send({
-        name: card.name,
-        description: card.description,
-        url: card.url,
-        protocol: 'a2a',
-        capabilities: card.capabilities,
-        methods: card.skills,
-        inputModes: card.inputModes,
-        outputModes: card.outputModes,
-        chains,
-        agents: discovered.agents,
-        agentsTotal: discovered.total,
-        registries: discovered.registries,
-      });
-    },
-  );
+    return reply.send({
+      name: card.name,
+      description: card.description,
+      url: card.url,
+      protocol: 'a2a',
+      capabilities: card.capabilities,
+      methods: card.skills,
+      inputModes: card.inputModes,
+      outputModes: card.outputModes,
+      chains,
+      agents: discovered.agents,
+      agentsTotal: discovered.total,
+      registries: discovered.registries,
+    });
+  });
 };
 
 export default capabilitiesRoutes;

@@ -531,7 +531,6 @@ describe('compose preHandler — WKH-59 real-price-debit', () => {
       // Challenge = step0(0.5) + placeholder(>0), fee rate 0 → > 0.5, and it is
       // NEVER the flat 1 USD default while a real step (0.5) would settle.
       expect(capturedX402ChallengeAmountUsd).toBeDefined();
-      // biome-ignore lint/style/noNonNullAssertion: asserted defined above
       expect(capturedX402ChallengeAmountUsd!).toBeGreaterThan(0.5);
       expect(capturedX402ChallengeAmountUsd).not.toBe(1);
     } finally {
