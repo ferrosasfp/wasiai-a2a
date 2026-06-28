@@ -247,40 +247,6 @@ describe('composeService.invokeAgent', () => {
     expect(result.output).toBe('ok');
   });
 
-  it('T-3b: MONEY-PATH valueWei equals legacy Math.round(price*1e6)*1e12 for typical prices', async () => {
-    // Guards the parseUnits-based valueWei against the previous
-    // BigInt(Math.round(priceUsdc * 1e6)) * BigInt(1e12) computation. For any
-    // price representable in 6 decimals the two MUST be byte-identical.
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: {
-        authorization: {
-          from: '0xAAA',
-          to: '0xBBB',
-          value: '1',
-          validAfter: '0',
-          validBefore: '9999999999',
-          nonce: '0x1234',
-        },
-        signature: '0xSIG',
-        network: 'eip155:2368',
-      } as X402PaymentRequest,
-    });
-    mockSettle.mockResolvedValue({ success: true, txHash: '0xTX' });
-
-    const prices = [1.0, 0.001, 0.5, 0.123456, 2.5, 0.000001];
-    for (const priceUsdc of prices) {
-      mockSign.mockClear();
-      const agent = makeAgent({ priceUsdc, metadata: { payTo: '0xBBB' } });
-      mockFetchOk();
-      await composeService.invokeAgent(agent, { q: 'hello' });
-      const signArg = mockSign.mock.calls[0]![0] as { value: string };
-      const legacy = String(BigInt(Math.round(priceUsdc * 1e6)) * BigInt(1e12));
-      expect(signArg.value).toBe(legacy);
-    }
-  });
-
   it('T-4: throws when settle fails', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     mockSign.mockResolvedValue({

@@ -2,7 +2,6 @@
  * Compose Service -- Execute multi-agent pipelines
  */
 
-import { parseUnits } from 'viem';
 import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { getPaymentAdapter } from '../adapters/registry.js';
 import { hashCallerRef } from '../lib/caller-hash.js';
@@ -787,15 +786,11 @@ export const composeService = {
         throw new Error(
           `No payTo address for agent ${agent.slug} — neither metadata.payTo nor metadata.payment.contract present`,
         );
-      // MONEY-PATH (AR): scale priceUsdc (USDC, 6 decimals) up to an 18-decimal
-      // wei value. Use viem parseUnits to match the downstream adapter path
-      // (src/adapters/*/payment.ts) instead of float-before-round. toFixed(6)
-      // normalizes scientific notation (e.g. 1e-7) to a plain decimal string so
-      // parseUnits never throws and sub-atomic precision floors to the 6-decimal
-      // grid — numerically identical to the previous Math.round(x*1e6) for any
-      // price representable in 6 decimals.
+      // MONEY-PATH: scale priceUsdc (USDC, 6 decimals) up to an 18-decimal wei
+      // value. Round-to-nearest onto the 6-decimal USDC grid, then scale by 1e12.
+      // Matches fee-charge.ts:feeUsdcToWei (same Math.round convention).
       const valueWei = String(
-        parseUnits(agent.priceUsdc.toFixed(6), 6) * BigInt(1e12),
+        BigInt(Math.round(agent.priceUsdc * 1e6)) * BigInt(1e12),
       );
       const result = await getPaymentAdapter().sign({
         to: payTo as `0x${string}`,
