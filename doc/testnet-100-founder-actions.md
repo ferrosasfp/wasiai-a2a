@@ -103,6 +103,53 @@ export FUNDER_PK=0x<private_key_testnet_con_fondos>
 
 ---
 
+## 4. WKH-120 — settlements con destino distinto en Kite + Base (config registry)
+
+**Por que:** los 3 links de settlement del slide 5b del deck eran self-transfers
+(`from == to == operator`). En Avalanche/Fuji YA quedo limpio: el deck apunta a
+`0x789469fd...` (operator -> wasi-chainlink-price `0x9316...`, destino distinto
+verificado on-chain). Pero **Kite y Base solo tienen agentes demo registrados**
+cuyo `payment.payTo` es el propio operador -> en esas 2 cadenas el gateway solo
+puede producir self-transfers. NO es bug de codigo; es config del registry.
+
+**Que hace falta (por cada cadena, Kite y Base):** registrar al menos un agente
+con un `payment.payTo` que NO sea el operador y `payment.chain` = esa cadena, y
+despues correr un `/compose` contra ese agente para generar el settlement limpio.
+
+**Paso 1 — registrar un agente con payout propio en la cadena:**
+```bash
+# ejemplo para Base Sepolia; repetir con chain=kite-ozone-testnet para Kite
+curl -s -X POST https://wasiai-a2a-production.up.railway.app/registries/<registry>/agents \
+  -H 'content-type: application/json' -H 'x-a2a-key: wasi_a2a_<admin_key>' \
+  -d '{
+    "slug":"wasi-price-base",
+    "name":"Price feed (Base)",
+    "priceUsdc":0.001,
+    "payment":{"chain":"base-sepolia","payTo":"0x<wallet_de_payout_distinta>"}
+  }'
+```
+(El shape exacto del registro depende de tu API de registry; lo importante es
+`payment.payTo != operador` y `payment.chain` = la cadena objetivo.)
+
+**Paso 2 — generar el settlement limpio y capturar el hash:**
+```bash
+export A2A_KEY=wasi_a2a_<key_con_budget>
+node scripts/smoke-base-sepolia.mjs        # Base; usar el smoke de Kite para Kite
+# anota el tx hash outbound (gateway -> wallet de payout)
+```
+
+**Paso 3 — verificar destino distinto on-chain y actualizar el deck:**
+```bash
+# confirma que el recipient del Transfer != operador 0xf432...47Ba
+# luego reemplaza en deck-inversores-en/es.html (slide 5b) el href de Kite/Base
+```
+Cuando los 3 (Kite, Avalanche, Base) tengan destino distinto verificable, WKH-120
+queda cerrado y los 3 links del slide 5b son evidencia 100% limpia.
+
+> Avalanche ya esta cerrado en el deck (`0x789469fd...`). Faltan Kite y Base.
+
+---
+
 ## Checklist rapido
 
 - [ ] Key creada en caldz (`/auth/agent-signup`) + `key_id` guardado
@@ -110,6 +157,8 @@ export FUNDER_PK=0x<private_key_testnet_con_fondos>
 - [ ] Path prepago validado (`smoke-compose-pipeline.mjs` descuenta del budget)
 - [ ] Sesion kpass creada (passkey) + `smoke-passport-autonomous.mjs` verde
 - [ ] `FUNDER_PK` exportada + smokes de deposito verdes en las cadenas elegidas
+- [ ] WKH-120: agente con payout propio registrado en Kite + Base, settlements
+      limpios regenerados, deck slide 5b actualizado (Avalanche ya esta hecho)
 
 Cuando estos 5 esten en verde, el path prepago + Passport + deposito quedan
 probados en testnet y el ecosistema esta al 100% en testnet de punta a punta.
