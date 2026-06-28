@@ -11,6 +11,18 @@ import type {
   X402PaymentRequest,
 } from '../types/index.js';
 
+// compose.ts logs server-side via getLogger('compose'). Mock it so tests can
+// assert structured log emission (and the no-secret-leak invariant) without
+// spying on console. hoisted so the mock factory can reference it.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 vi.mock('./registry.js', () => ({ registryService: { getEnabled: vi.fn() } }));
 // WKH-59 (real-price-debit): mock budget service for per-step debit tests.
 // CD-14: tests below use mockResolvedValueOnce, not failNext.
@@ -390,8 +402,7 @@ describe('composeService.invokeAgent', () => {
     ).rejects.toThrow('No payTo address');
   });
 
-  it('T-9: console.log never receives private key or raw signature', async () => {
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  it('T-9: structured logs never receive private key or raw signature', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     mockSign.mockResolvedValue({
       xPaymentHeader: 'base64mock',
@@ -418,12 +429,16 @@ describe('composeService.invokeAgent', () => {
     } finally {
       process.env.OPERATOR_PRIVATE_KEY = originalPK;
     }
-    for (const call of logSpy.mock.calls) {
-      const logStr = call.join(' ');
+    const allCalls = [
+      ...logSpy.info.mock.calls,
+      ...logSpy.warn.mock.calls,
+      ...logSpy.error.mock.calls,
+    ];
+    for (const call of allCalls) {
+      const logStr = JSON.stringify(call);
       expect(logStr).not.toContain('DEAD_PRIVATE_KEY_NEVER_LOG');
       expect(logStr).not.toContain('SECRET_SIG_VALUE');
     }
-    logSpy.mockRestore();
   });
 });
 
@@ -2036,20 +2051,14 @@ describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULT
 // ─────────────────────────────────────────────────────────────────────────
 describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
   const ORIGINAL_CDP_ENV = process.env.CDP_FACILITATOR_URL;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-
-  beforeEach(() => {
-    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-  });
 
   function getLogLines(): string[] {
-    // logSpy.mock.calls is typed loosely as `unknown[][]`; we know each
-    // call is `(message: unknown, ...rest: unknown[])` so coerce to string.
-    return logSpy.mock.calls.map((c: unknown[]) => String(c[0]));
+    // The selector decision is emitted via log.info(message). Each call's
+    // first arg is the message string; coerce to string for substring checks.
+    return logSpy.info.mock.calls.map((c: unknown[]) => String(c[0]));
   }
 
   afterEach(() => {
-    logSpy.mockRestore();
     if (ORIGINAL_CDP_ENV === undefined) {
       delete process.env.CDP_FACILITATOR_URL;
     } else {
@@ -2650,7 +2659,6 @@ describe('composeService.compose — WKH-130 adaptive input-retry', () => {
   // AC-9 / T-OBS: telemetría — flags retried / retry_failed + log.
   it('T-OBS: success → metadata.retried; fail → metadata.retry_failed + [compose.retry]', async () => {
     const trackSpy = vi.mocked(eventService.track);
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     // (a) retry exitoso → metadata.retried:true en el evento success.
     const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
@@ -2678,7 +2686,7 @@ describe('composeService.compose — WKH-130 adaptive input-retry', () => {
 
     // (b) retry fallido → metadata.retry_failed:true + log [compose.retry].
     trackSpy.mockClear();
-    errSpy.mockClear();
+    logSpy.error.mockClear();
     mockFetchOk();
     mockFetchError(422, FIELD_ERR_BODY);
     mockFetchError(500);
@@ -2698,11 +2706,12 @@ describe('composeService.compose — WKH-130 adaptive input-retry', () => {
       (c) => c[0].status === 'failed' && c[0].metadata?.retry_failed === true,
     );
     expect(failEvent).toBeDefined();
-    const retryLog = errSpy.mock.calls.find((c) =>
-      String(c[0]).includes('[compose.retry]'),
+    // log.error is called object-first, message-second: the '[compose.retry]'
+    // marker is the second positional arg.
+    const retryLog = logSpy.error.mock.calls.find((c) =>
+      String(c[1]).includes('[compose.retry]'),
     );
     expect(retryLog).toBeDefined();
-    errSpy.mockRestore();
   });
 
   // CD-6 / T-DELEG-NO-RETRY: bajo delegación/sesión no reintenta.

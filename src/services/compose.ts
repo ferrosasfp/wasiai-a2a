@@ -14,6 +14,7 @@ import {
 } from '../lib/downstream-payment.js';
 import { parseFieldErrors } from '../lib/field-error-parser.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
+import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 import {
@@ -42,6 +43,8 @@ import { maybeTransform } from './llm/transform.js';
 import { refundOutbox } from './refund-outbox.js';
 import { registryService } from './registry.js';
 import { normalizeDestination } from './spend-policy.js';
+
+const log = getLogger('compose');
 
 /**
  * B7 (audit 2026-06-24): cache de discover() acotado a un solo compose().
@@ -215,7 +218,7 @@ export const composeService = {
           (isInvalid ? PLACEHOLDER_FEE_USD : agent.priceUsdc) + stepGasOverhead;
 
         if (isInvalid) {
-          const warn = logger?.warn?.bind(logger) ?? console.warn;
+          const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);
           warn(
             {
               reason: 'registry-miss',
@@ -334,15 +337,18 @@ export const composeService = {
           // pre-WKH-130, nunca doble consumo del dest-cap).
           const reverted = creditRes.reverted === true && creditRes.success;
           if (!reverted) {
-            console.error('[compose.refund-failed]', {
-              keyId: scopingKeyRow.id,
-              chainId,
-              amountUsd: stepDebitedUsd,
-              destination: stepDestination,
-              step: i,
-              reverted: creditRes.reverted ?? false,
-              error: creditRes.error,
-            });
+            log.error(
+              {
+                keyId: scopingKeyRow.id,
+                chainId,
+                amountUsd: stepDebitedUsd,
+                destination: stepDestination,
+                step: i,
+                reverted: creditRes.reverted ?? false,
+                error: creditRes.error,
+              },
+              '[compose.refund-failed]',
+            );
             // M6 (audit 2026-06-24): el refund NO revirtió (0 filas). Encolar para
             // reintento confiable. Invariante anti-doble-refund: solo se encola
             // cuando NADA se aplicó. Best-effort: no rompe el pipeline.
@@ -383,7 +389,7 @@ export const composeService = {
             },
           })
           .catch((trackErr) =>
-            console.error('[Compose] event tracking failed:', trackErr),
+            log.error({ err: trackErr }, '[Compose] event tracking failed'),
           );
 
         // ── PASO 1 (DT-5.1 / CD-1): refund del PRIMER débito — IDÉNTICO a hoy
@@ -476,15 +482,21 @@ export const composeService = {
                     },
                   })
                   .catch((trackErr) =>
-                    console.error('[Compose] event tracking failed:', trackErr),
+                    log.error(
+                      { err: trackErr },
+                      '[Compose] event tracking failed',
+                    ),
                   );
-                console.error('[compose.retry]', {
-                  step: i,
-                  agent: agent.slug,
-                  status: 'failed',
-                  firstError,
-                  retryError,
-                });
+                log.error(
+                  {
+                    step: i,
+                    agent: agent.slug,
+                    status: 'failed',
+                    firstError,
+                    retryError,
+                  },
+                  '[compose.retry]',
+                );
                 return {
                   success: false,
                   output: null,
@@ -502,12 +514,15 @@ export const composeService = {
 
         // ── PASO 0 (default): comportamiento actual (refund ya hecho en PASO 1)
         //    → return error.
-        console.error('[compose.retry]', {
-          step: i,
-          agent: agent.slug,
-          status: 'no-retry',
-          firstError,
-        });
+        log.error(
+          {
+            step: i,
+            agent: agent.slug,
+            status: 'no-retry',
+            firstError,
+          },
+          '[compose.retry]',
+        );
         return {
           success: false,
           output: null,
@@ -650,7 +665,10 @@ export const composeService = {
           }
         }
       } catch (transformErr) {
-        console.error(`[Compose] Transform failed at step ${i}:`, transformErr);
+        log.error(
+          { step: i, err: transformErr },
+          '[Compose] Transform failed at step',
+        );
       }
     }
     // ── WKH-56 (W3): emit compose_step event AFTER bridge resolved.
@@ -679,7 +697,7 @@ export const composeService = {
           ...(retried && { retried: true }), // DT-8
         },
       })
-      .catch((err) => console.error('[Compose] event tracking failed:', err));
+      .catch((err) => log.error({ err }, '[Compose] event tracking failed'));
 
     return { totalCost, totalLatency, lastOutput };
   },
@@ -797,7 +815,7 @@ export const composeService = {
       await validateRegistryUrl(agent.invokeUrl);
     } catch (err) {
       if (err instanceof SSRFViolationError) {
-        const warn = logger?.warn?.bind(logger) ?? console.warn;
+        const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);
         warn(
           { agent: agent.slug, category: err.category },
           '[Compose] SSRF guard blocked invokeUrl before fetch',
@@ -867,7 +885,7 @@ export const composeService = {
         });
         // Structured log — easy to grep in production + drives smoke tests.
         // Does NOT include the CDP key itself — only the URL host pattern.
-        console.log(
+        log.info(
           `[Compose] Base settle facilitator selector — chainKey=${chainKey} selected=${selectedUrl ?? '<adapter-default>'} cdpEnvSet=${typeof process.env.CDP_FACILITATOR_URL === 'string' && process.env.CDP_FACILITATOR_URL.length > 0}`,
         );
       }
@@ -882,16 +900,17 @@ export const composeService = {
           `x402 settle failed for ${agent.slug}: ${settleResult.error ?? 'unknown'}`,
         );
       txHash = settleResult.txHash;
-      console.log(
-        `[Compose] x402 settled for ${agent.slug} — txHash: ${txHash}`,
-      );
+      log.info(`[Compose] x402 settled for ${agent.slug} — txHash: ${txHash}`);
     }
 
     // ─── WKH-55: Downstream x402 hook (AC-1..AC-10) ──────────────────
-    // Defensive logger fallback: si el caller no pasó uno, usamos console.
+    // Defensive logger fallback: si el caller no pasó uno, usamos el logger
+    // estructurado (pino) en vez de console.
     const effectiveLogger: DownstreamLogger = logger ?? {
-      warn: (obj: unknown, _msg?: string) => console.warn('[Downstream]', obj),
-      info: (obj: unknown, _msg?: string) => console.log('[Downstream]', obj),
+      warn: (obj: unknown, msg?: string) =>
+        log.warn({ obj }, msg ?? '[Downstream]'),
+      info: (obj: unknown, msg?: string) =>
+        log.info({ obj }, msg ?? '[Downstream]'),
     };
     const downstream = await signAndSettleDownstream(agent, effectiveLogger);
 
