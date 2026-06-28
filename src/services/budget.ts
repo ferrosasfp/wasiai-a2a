@@ -3,6 +3,7 @@
  * WKH-34: Agentic Economy Primitives L3
  */
 
+import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
 import type { Database } from '../types/database.types.js';
 import type {
@@ -32,6 +33,8 @@ import {
 } from './security/errors.js';
 
 // ── Service ─────────────────────────────────────────────────
+
+const log = getLogger('budget');
 
 export const budgetService = {
   /**
@@ -108,9 +111,9 @@ export const budgetService = {
             orchestrationId: null,
           })
           .catch((e) =>
-            console.warn(
+            log.warn(
+              { detail: e instanceof Error ? e.message : e },
               '[receipts] emit failed',
-              e instanceof Error ? e.message : e,
             ),
           );
         return { success: true };
@@ -144,11 +147,14 @@ export const budgetService = {
           return { success: false, error: 'OWNERSHIP_MISMATCH' };
         }
         // NO propagar `err.message` (mensaje crudo de Postgres) al cliente.
-        console.error('[budget] key-session debit failed', {
-          keyId,
-          chainId,
-          detail: err instanceof Error ? err.message : 'unknown',
-        });
+        log.error(
+          {
+            keyId,
+            chainId,
+            detail: err instanceof Error ? err.message : 'unknown',
+          },
+          'key-session debit failed',
+        );
         return { success: false, error: 'SESSION_DEBIT_FAILED' };
       }
     }
@@ -185,9 +191,9 @@ export const budgetService = {
             orchestrationId: null,
           })
           .catch((e) =>
-            console.warn(
+            log.warn(
+              { detail: e instanceof Error ? e.message : e },
               '[receipts] emit failed',
-              e instanceof Error ? e.message : e,
             ),
           );
         return { success: true };
@@ -228,11 +234,14 @@ export const budgetService = {
         }
         // AR-MNR-2: NO propagar `err.message` (mensaje crudo de Postgres) al
         // cliente. Devolver un error_code estable; el detalle va al log server.
-        console.error('[budget] delegation debit failed', {
-          keyId,
-          chainId,
-          detail: err instanceof Error ? err.message : 'unknown',
-        });
+        log.error(
+          {
+            keyId,
+            chainId,
+            detail: err instanceof Error ? err.message : 'unknown',
+          },
+          'delegation debit failed',
+        );
         return { success: false, error: 'DELEGATION_DEBIT_FAILED' };
       }
     }
@@ -286,11 +295,7 @@ export const budgetService = {
           return { success: false, error: 'OWNERSHIP_MISMATCH' };
         }
         // Fallback: el msg crudo de PG NUNCA llega al cliente (CD-B).
-        console.error('[budget] dest-policy debit failed', {
-          keyId,
-          chainId,
-          detail: msg,
-        });
+        log.error({ keyId, chainId, detail: msg }, 'dest-policy debit failed');
         return { success: false, error: 'DEST_POLICY_DEBIT_FAILED' };
       }
 
@@ -339,11 +344,7 @@ export const budgetService = {
       if (msg.includes('KEY_NOT_FOUND')) {
         return { success: false, error: 'KEY_NOT_FOUND' };
       }
-      console.error('[budget] master debit failed', {
-        keyId,
-        chainId,
-        detail: msg,
-      });
+      log.error({ keyId, chainId, detail: msg }, 'master debit failed');
       return { success: false, error: 'DEBIT_FAILED' };
     }
 
@@ -378,12 +379,10 @@ export const budgetService = {
       if (error.message.includes('KEY_NOT_FOUND')) {
         return { success: false, error: 'KEY_NOT_FOUND' };
       }
-      console.error('[budget] refund failed', {
-        keyId,
-        chainId,
-        amountUsd,
-        err: error.message,
-      });
+      log.error(
+        { keyId, chainId, amountUsd, err: error.message },
+        'refund failed',
+      );
       return { success: false, error: 'REFUND_FAILED' };
     }
 
@@ -432,13 +431,10 @@ export const budgetService = {
       if (error.message.includes('KEY_NOT_FOUND')) {
         return { success: false, error: 'KEY_NOT_FOUND' };
       }
-      console.error('[budget] refund-with-dest failed', {
-        keyId,
-        chainId,
-        amountUsd,
-        destination,
-        err: error.message,
-      });
+      log.error(
+        { keyId, chainId, amountUsd, destination, err: error.message },
+        'refund-with-dest failed',
+      );
       return { success: false, error: 'REFUND_FAILED' };
     }
 
@@ -450,12 +446,10 @@ export const budgetService = {
     // debe re-debitar en ese caso: re-debitar consumiría el dest-cap dos veces.
     const reverted = typeof data === 'number' && data >= 1;
     if (!reverted) {
-      console.error('[budget] refund-with-dest NOT reverted (0 rows)', {
-        keyId,
-        chainId,
-        amountUsd,
-        destination,
-      });
+      log.error(
+        { keyId, chainId, amountUsd, destination },
+        'refund-with-dest NOT reverted (0 rows)',
+      );
       return { success: false, error: 'REFUND_NOT_REVERTED', reverted: false };
     }
 
