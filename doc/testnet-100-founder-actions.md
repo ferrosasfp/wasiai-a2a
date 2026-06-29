@@ -47,7 +47,7 @@ para fondear el escrow en vivo.)
 ```bash
 export A2A_KEY=wasi_a2a_<la_key>
 node scripts/smoke-e16-agent-key.mjs        # superficie de gestion de la key
-node scripts/smoke-compose-pipeline.mjs     # /compose pagando con x-a2a-key (prepago)
+node scripts/smoke-agentkey-compose.mjs     # /compose pagando con x-a2a-key (prepago)
 ```
 Exito = compose/orchestrate descuentan del budget de la key (no x402 por-llamada)
 y el ledger (budget + daily + dest-cap) cierra.
@@ -154,7 +154,7 @@ queda cerrado y los 3 links del slide 5b son evidencia 100% limpia.
 
 - [ ] Key creada en caldz (`/auth/agent-signup`) + `key_id` guardado
 - [ ] Budget fondeado via escrow (`smoke-prod-deposit.mjs` o widget wasiai.io/a2a)
-- [ ] Path prepago validado (`smoke-compose-pipeline.mjs` descuenta del budget)
+- [ ] Path prepago validado (`smoke-agentkey-compose.mjs` descuenta del budget)
 - [ ] Sesion kpass creada (passkey) + `smoke-passport-autonomous.mjs` verde
 - [ ] `FUNDER_PK` exportada + smokes de deposito verdes en las cadenas elegidas
 - [ ] WKH-120: agente con payout propio registrado en Kite + Base, settlements
