@@ -1,4 +1,7 @@
+import { getLogger } from '../../lib/logger.js';
 import type { AttestationAdapter, AttestEvent, AttestRef } from '../types.js';
+
+const log = getLogger('kite-ozone');
 
 export class KiteOzoneAttestationAdapter implements AttestationAdapter {
   readonly name = 'kite-ozone';
@@ -7,7 +10,7 @@ export class KiteOzoneAttestationAdapter implements AttestationAdapter {
   async attest(
     _event: AttestEvent,
   ): Promise<{ txHash: string; proofUrl: string }> {
-    console.warn('Attestation not yet implemented for kite-ozone');
+    log.warn('Attestation not yet implemented for kite-ozone');
     return { txHash: '0x0', proofUrl: '' };
   }
 

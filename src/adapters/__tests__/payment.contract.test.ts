@@ -6,6 +6,20 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// ─── Structured logger mock ─────────────────────────────────
+// kite-ozone/payment.ts logs the token/facilitator env fallbacks via
+// getLogger('kite-ozone'). Mock it so tests assert log emission (object-first /
+// message-second) instead of spying on console. hoisted so the factory can
+// reference it.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 // Mock viem for wallet client
 vi.mock('viem', async (importOriginal) => {
   const actual = await importOriginal<typeof import('viem')>();
@@ -81,26 +95,29 @@ describe('KiteOzonePaymentAdapter', () => {
 
   it('defaults to PYUSD when X402_PAYMENT_TOKEN is not set (warns once)', () => {
     delete process.env.X402_PAYMENT_TOKEN;
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     expect(adapter.getToken()).toBe(PYUSD_DEFAULT);
     expect(warnSpy).toHaveBeenCalledTimes(1);
+    // object-first / message-second: the human message is the second arg.
     expect(warnSpy).toHaveBeenCalledWith(
+      expect.anything(),
       expect.stringContaining('X402_PAYMENT_TOKEN not set'),
     );
     // Second call should NOT warn again
     adapter.getToken();
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    warnSpy.mockRestore();
   });
 
   it('falls back to default when X402_PAYMENT_TOKEN has invalid format', () => {
     process.env.X402_PAYMENT_TOKEN = 'not-an-address';
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     expect(adapter.getToken()).toBe(PYUSD_DEFAULT);
     expect(warnSpy).toHaveBeenCalledWith(
+      expect.anything(),
       expect.stringContaining('invalid format'),
     );
-    warnSpy.mockRestore();
   });
 
   it('reads token symbol from X402_TOKEN_SYMBOL env var', () => {
@@ -312,10 +329,9 @@ describe('KiteOzonePaymentAdapter', () => {
     delete process.env.X402_PAYMENT_TOKEN;
     delete process.env.X402_EIP712_DOMAIN_NAME;
     delete process.env.X402_EIP712_DOMAIN_VERSION;
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    logSpy.warn.mockClear();
     expect(() => adapter.getToken()).not.toThrow();
     expect(() => adapter.supportedTokens).not.toThrow();
-    warnSpy.mockRestore();
   });
 
   // ── Audit 2026-06-24 (P2-9): facilitator HTTP error propagation ──

@@ -448,10 +448,7 @@ export async function maybeTransform(
   );
 
   // CD-14: log NO leak raw output/schema. Solo nombres de campos + count + model.
-  log.error(
-    { missing, model },
-    'retry attempt 1: missing fields',
-  );
+  log.error({ missing, model }, 'retry attempt 1: missing fields');
 
   const attempt2 = await generateTransformFn(output, schema, model, missing);
   const transformed2 = await applyTransformFn(attempt2.fn, output);

@@ -1,6 +1,9 @@
 import type { PublicClient } from 'viem';
 import { createPublicClient, http } from 'viem';
+import { getLogger } from '../../lib/logger.js';
 import { kiteTestnet } from './chain.js';
+
+const log = getLogger('kite-ozone');
 
 let _client: PublicClient | null = null;
 let _initialized = false;
@@ -9,7 +12,7 @@ export async function initClient(
   rpcUrl: string | undefined = process.env.KITE_RPC_URL,
 ): Promise<void> {
   if (!rpcUrl) {
-    console.warn('KITE_RPC_URL not set — Kite features disabled');
+    log.warn('KITE_RPC_URL not set — Kite features disabled');
     _initialized = true;
     return;
   }
@@ -19,10 +22,10 @@ export async function initClient(
       transport: http(rpcUrl),
     });
     const chainId = await client.getChainId();
-    console.log(`Kite Ozone Testnet connected | chainId: ${chainId}`);
+    log.info({ chainId }, 'Kite Ozone Testnet connected');
     _client = client;
   } catch (err) {
-    console.error('Kite client init failed:', err);
+    log.error({ err }, 'Kite client init failed');
     _client = null;
   }
   _initialized = true;

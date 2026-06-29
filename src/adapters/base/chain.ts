@@ -1,4 +1,7 @@
 import { base, baseSepolia } from 'viem/chains';
+import { getLogger } from '../../lib/logger.js';
+
+const log = getLogger('base');
 
 /**
  * Base chain registration (WKH-104 / BASE-01).
@@ -35,8 +38,9 @@ export function getBaseNetwork(opts?: { network?: BaseNetwork }): BaseNetwork {
     !_warnedBaseNetwork
   ) {
     _warnedBaseNetwork = true;
-    console.warn(
-      `[base] BASE_NETWORK="${env}" is not 'mainnet' or 'testnet' — defaulting to 'testnet'`,
+    log.warn(
+      { env },
+      "BASE_NETWORK is not 'mainnet' or 'testnet' — defaulting to 'testnet'",
     );
   }
   return 'testnet';

@@ -3,6 +3,20 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// ─── Structured logger mock ─────────────────────────────────
+// kite-ozone/client.ts logs connect/warn/error via getLogger('kite-ozone').
+// Mock it so tests assert log emission (object-first / message-second) instead
+// of spying on console. hoisted so the factory can reference it; survives the
+// vi.resetModules() in importKiteClient (module mock registry is not reset).
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 const mockGetChainId = vi.fn();
 
 vi.mock('viem', () => ({
@@ -32,9 +46,6 @@ describe('kite-client', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -61,18 +72,20 @@ describe('kite-client', () => {
     expect(mod1.kiteClient).toBe(mod2.getClient());
   });
 
-  it('AC-3: loguea "Kite Ozone Testnet connected | chainId: 2368" cuando conecta', async () => {
+  it('AC-3: loguea "Kite Ozone Testnet connected" con chainId 2368 cuando conecta', async () => {
     mockGetChainId.mockResolvedValue(2368);
     await importKiteClient('https://rpc-testnet.gokite.ai/');
-    expect(console.log).toHaveBeenCalledWith(
-      'Kite Ozone Testnet connected | chainId: 2368',
+    // object-first / message-second: chainId lives in the structured context.
+    expect(logSpy.info).toHaveBeenCalledWith(
+      { chainId: 2368 },
+      'Kite Ozone Testnet connected',
     );
   });
 
   it('AC-4: kiteClient es null y loguea warning cuando KITE_RPC_URL no esta configurado', async () => {
     const { kiteClient } = await importKiteClient(undefined);
     expect(kiteClient).toBeNull();
-    expect(console.warn).toHaveBeenCalledWith(
+    expect(logSpy.warn).toHaveBeenCalledWith(
       'KITE_RPC_URL not set — Kite features disabled',
     );
   });
@@ -84,9 +97,10 @@ describe('kite-client', () => {
       'https://rpc-testnet.gokite.ai/',
     );
     expect(kiteClient).toBeNull();
-    expect(console.error).toHaveBeenCalledWith(
-      'Kite client init failed:',
-      rpcError,
+    // object-first / message-second: the error lives in the structured context.
+    expect(logSpy.error).toHaveBeenCalledWith(
+      { err: rpcError },
+      'Kite client init failed',
     );
   });
 

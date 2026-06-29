@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { createWalletClient, http, parseUnits } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import { getLogger } from '../../lib/logger.js';
 import type { X402PaymentRequest } from '../../types/index.js';
 import type {
   PaymentAdapter,
@@ -61,6 +62,8 @@ const FACILITATOR_TIMEOUT_MS = 10_000;
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
+const log = getLogger('avalanche');
+
 const EIP3009_TYPES = {
   TransferWithAuthorization: [
     { name: 'from', type: 'address' },
@@ -93,15 +96,17 @@ function getUsdcAddress(network: AvalancheNetwork): `0x${string}` {
     if (network === 'mainnet') {
       if (!_warnedDefaultTokenMainnet) {
         _warnedDefaultTokenMainnet = true;
-        console.warn(
-          `[avalanche] AVALANCHE_USDC_ADDRESS not set — defaulting to USDC (${fallback})`,
+        log.warn(
+          { fallback },
+          'AVALANCHE_USDC_ADDRESS not set — defaulting to USDC',
         );
       }
     } else {
       if (!_warnedDefaultTokenFuji) {
         _warnedDefaultTokenFuji = true;
-        console.warn(
-          `[avalanche] FUJI_USDC_ADDRESS not set — defaulting to USDC (${fallback})`,
+        log.warn(
+          { fallback },
+          'FUJI_USDC_ADDRESS not set — defaulting to USDC',
         );
       }
     }
@@ -111,15 +116,17 @@ function getUsdcAddress(network: AvalancheNetwork): `0x${string}` {
     if (network === 'mainnet') {
       if (!_warnedDefaultTokenMainnet) {
         _warnedDefaultTokenMainnet = true;
-        console.warn(
-          `[avalanche] AVALANCHE_USDC_ADDRESS has invalid format "${env}" — defaulting to USDC (${fallback})`,
+        log.warn(
+          { env, fallback },
+          'AVALANCHE_USDC_ADDRESS has invalid format — defaulting to USDC',
         );
       }
     } else {
       if (!_warnedDefaultTokenFuji) {
         _warnedDefaultTokenFuji = true;
-        console.warn(
-          `[avalanche] FUJI_USDC_ADDRESS has invalid format "${env}" — defaulting to USDC (${fallback})`,
+        log.warn(
+          { env, fallback },
+          'FUJI_USDC_ADDRESS has invalid format — defaulting to USDC',
         );
       }
     }

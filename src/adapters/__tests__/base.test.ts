@@ -19,6 +19,19 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// ─── Structured logger mock ─────────────────────────────────
+// base/chain.ts + base/payment.ts + base/attestation.ts log env fallbacks /
+// the attestation stub via getLogger('base'). Mock it so tests assert log
+// emission (object-first / message-second) instead of spying on console.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 // ─── Mocks ───────────────────────────────────────────────────────────────
 vi.mock('viem', async (importOriginal) => {
   const actual = await importOriginal<typeof import('viem')>();
@@ -46,7 +59,6 @@ describe('Base adapter — factory shape', () => {
     _resetWalletClient();
     _resetBaseChain();
     vi.clearAllMocks();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     delete process.env.BASE_NETWORK;
     delete process.env.BASE_SEPOLIA_USDC_ADDRESS;
     delete process.env.BASE_MAINNET_USDC_ADDRESS;
@@ -95,7 +107,8 @@ describe('Base adapter — factory shape', () => {
   });
 
   it("CD-11 — BASE_NETWORK='devnet' → testnet + console.warn called once (AC-5b)", async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     process.env.BASE_NETWORK = 'devnet';
 
     const b1 = await createBaseAdapters();
@@ -105,11 +118,15 @@ describe('Base adapter — factory shape', () => {
     const b2 = await createBaseAdapters();
     expect(b2.chainConfig.chainId).toBe(84532);
 
+    // object-first / message-second: the human message (arg[1]) mentions
+    // BASE_NETWORK; the offending value lives in the structured ctx (arg[0]).
     const baseWarns = warnSpy.mock.calls.filter((args) =>
-      String(args[0]).includes('BASE_NETWORK'),
+      String(args[1]).includes('BASE_NETWORK'),
     );
     expect(baseWarns.length).toBe(1);
-    expect(String(baseWarns[0]![0])).toContain('devnet');
+    expect(baseWarns[0]![0]).toEqual(
+      expect.objectContaining({ env: 'devnet' }),
+    );
   });
 });
 
@@ -120,7 +137,6 @@ describe('Base payment adapter — contract', () => {
     _resetWalletClient();
     _resetBaseChain();
     vi.clearAllMocks();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     delete process.env.BASE_SEPOLIA_USDC_ADDRESS;
     delete process.env.BASE_MAINNET_USDC_ADDRESS;
     process.env.OPERATOR_PRIVATE_KEY =
@@ -565,7 +581,8 @@ describe('Base attestation adapter — stub', () => {
   });
 
   it('attest() returns stub txHash + proofUrl and warns', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     const bundle = await createBaseAdapters({ network: 'testnet' });
     const result = await bundle.attestation.attest({
       type: 'unit-test',
@@ -576,7 +593,6 @@ describe('Base attestation adapter — stub', () => {
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('attestation stub'),
     );
-    warnSpy.mockRestore();
   });
 
   it('verify() returns true (stub)', async () => {
@@ -602,7 +618,7 @@ describe('Base payment adapter — facilitator bearer auth (BASE-02)', () => {
   beforeEach(() => {
     _resetWalletClient();
     _resetBaseChain();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    logSpy.warn.mockClear();
     mockFetch.mockReset();
     delete process.env.BASE_FACILITATOR_API_KEY;
     delete process.env.FACILITATOR_API_KEY;

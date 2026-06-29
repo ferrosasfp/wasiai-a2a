@@ -1,4 +1,7 @@
+import { getLogger } from '../../lib/logger.js';
 import type { AttestationAdapter, AttestEvent, AttestRef } from '../types.js';
+
+const log = getLogger('base');
 
 /**
  * Base attestation stub (WKH-104 / BASE-01).
@@ -18,7 +21,7 @@ export class BaseAttestationAdapter implements AttestationAdapter {
   async attest(
     _event: AttestEvent,
   ): Promise<{ txHash: string; proofUrl: string }> {
-    console.warn('[base] attestation stub — ERC-8004 not implemented');
+    log.warn('attestation stub — ERC-8004 not implemented');
     return { txHash: '0x0', proofUrl: '' };
   }
 

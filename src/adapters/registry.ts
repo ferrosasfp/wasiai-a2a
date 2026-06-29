@@ -1,3 +1,4 @@
+import { getLogger } from '../lib/logger.js';
 import type {
   AdaptersBundle,
   AttestationAdapter,
@@ -6,6 +7,8 @@ import type {
   IdentityBindingAdapter,
   PaymentAdapter,
 } from './types.js';
+
+const log = getLogger('registry');
 
 /**
  * Multi-chain registry (WKH-MULTICHAIN / 086).
@@ -97,8 +100,9 @@ export async function initAdapters(): Promise<void> {
     typeof legacyRaw === 'string' &&
     legacyRaw.length > 0
   ) {
-    console.warn(
-      `[Registry] WARNING: both WASIAI_A2A_CHAINS and WASIAI_A2A_CHAIN are set. Using WASIAI_A2A_CHAINS=${csvRaw} (singular ignored)`,
+    log.warn(
+      { chains: csvRaw },
+      'both WASIAI_A2A_CHAINS and WASIAI_A2A_CHAIN are set. Using WASIAI_A2A_CHAINS (singular ignored)',
     );
   }
 
@@ -145,7 +149,7 @@ export async function initAdapters(): Promise<void> {
   _defaultChainKey = chainKeys[0] ?? null;
   _initialized = true;
 
-  console.log(`[Registry] Adapters initialized: ${chainKeys.join(', ')}`);
+  log.info({ chainKeys }, 'Adapters initialized');
 }
 
 function assertInitialized(): void {
