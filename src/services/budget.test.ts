@@ -5,6 +5,19 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// ── Mock structured logger ──────────────────────────────────
+// budget.ts logs server-side via getLogger('budget'). Mock it so tests can
+// assert the (object, message) shape — including the security invariant that
+// the raw Postgres message is logged server-side but NEVER leaked to the caller.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 // ── Mock supabase ───────────────────────────────────────────
 
 vi.mock('../lib/supabase.js', () => ({
@@ -241,10 +254,6 @@ describe('budgetService', () => {
         data: null,
         error: { message: rawPgMsg },
       } as never);
-      const consoleSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
-
       const result = await budgetService.debit('key-1', 2368, 1);
 
       expect(result).toEqual({ success: false, error: 'DEBIT_FAILED' });
@@ -252,12 +261,10 @@ describe('budgetService', () => {
       expect(JSON.stringify(result)).not.toContain('constraint');
       expect(JSON.stringify(result)).not.toContain('a2a_spend_pkey');
       // El detalle SÍ se loguea server-side.
-      expect(consoleSpy).toHaveBeenCalledWith(
-        '[budget] master debit failed',
+      expect(logSpy.error).toHaveBeenCalledWith(
         expect.objectContaining({ detail: rawPgMsg }),
+        'master debit failed',
       );
-
-      consoleSpy.mockRestore();
     });
 
     // ── WKH-101 (DT-11): delegation-aware debit ──────────────
@@ -923,8 +930,7 @@ describe('budgetService', () => {
       expect(result).toEqual({ success: false, error: 'KEY_NOT_FOUND' });
     });
 
-    it('P2-8: generic RPC error → REFUND_FAILED + console.error, never leaks the raw message', async () => {
-      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    it('P2-8: generic RPC error → REFUND_FAILED + logged, never leaks the raw message', async () => {
       mockRpc.mockResolvedValue({
         data: null,
         error: { message: 'deadlock detected on relation a2a_agent_keys' },
@@ -934,11 +940,10 @@ describe('budgetService', () => {
 
       expect(result).toEqual({ success: false, error: 'REFUND_FAILED' });
       expect(result.error).not.toContain('deadlock');
-      expect(errSpy).toHaveBeenCalledWith(
-        '[budget] refund failed',
+      expect(logSpy.error).toHaveBeenCalledWith(
         expect.objectContaining({ keyId: 'k1', chainId: 84532 }),
+        'refund failed',
       );
-      errSpy.mockRestore();
     });
   });
 
@@ -972,7 +977,6 @@ describe('budgetService', () => {
     // de destino → la fila compensatoria del dest-cap NO se insertó) →
     // success:false / reverted:false. El retry adaptativo NO debe re-debitar.
     it('A2: creditWithDest with 0 rows affected → success:false, reverted:false', async () => {
-      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockRpc.mockResolvedValue({ data: 0, error: null } as never);
 
       const result = await budgetService.creditWithDest(
@@ -988,11 +992,10 @@ describe('budgetService', () => {
         error: 'REFUND_NOT_REVERTED',
         reverted: false,
       });
-      expect(errSpy).toHaveBeenCalledWith(
-        '[budget] refund-with-dest NOT reverted (0 rows)',
+      expect(logSpy.error).toHaveBeenCalledWith(
         expect.objectContaining({ destination: 'wasiai/corridor' }),
+        'refund-with-dest NOT reverted (0 rows)',
       );
-      errSpy.mockRestore();
     });
 
     // T-CWD-2 (AC-3): RPC OWNERSHIP_MISMATCH → no propaga el msg crudo de PG.
@@ -1016,7 +1019,6 @@ describe('budgetService', () => {
     // T-CWD-3 (AC-2): RPC error genérico → REFUND_FAILED + console.error con
     // destination. KEY_NOT_FOUND → error: 'KEY_NOT_FOUND'.
     it('T-CWD-3 maps generic RPC error to REFUND_FAILED and logs destination (AC-2)', async () => {
-      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockRpc.mockResolvedValue({
         data: null,
         error: { message: 'some unexpected pg failure' },
@@ -1031,11 +1033,10 @@ describe('budgetService', () => {
       );
 
       expect(result).toEqual({ success: false, error: 'REFUND_FAILED' });
-      expect(errSpy).toHaveBeenCalledWith(
-        '[budget] refund-with-dest failed',
+      expect(logSpy.error).toHaveBeenCalledWith(
         expect.objectContaining({ destination: 'wasiai/corridor' }),
+        'refund-with-dest failed',
       );
-      errSpy.mockRestore();
     });
 
     it('T-CWD-3 maps KEY_NOT_FOUND rpc error to KEY_NOT_FOUND (AC-2)', async () => {

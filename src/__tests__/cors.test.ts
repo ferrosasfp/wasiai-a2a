@@ -54,8 +54,13 @@ describe('CORS env-aware configuration (WKH-SEC-01)', () => {
     if (origins.length > 0) {
       return { origin: origins };
     }
+    // Mirror of src/index.ts: loud, actionable warn; behavior unchanged
+    // (origin: false). Kept in sync so the AC-6 assertion exercises the
+    // production message shape.
     warn(
-      'CORS_ALLOWED_ORIGINS not set in production — blocking all cross-origin requests',
+      '⚠️  CORS_ALLOWED_ORIGINS is UNSET in production — ALL cross-origin requests are being BLOCKED. ' +
+        'Set CORS_ALLOWED_ORIGINS to a comma-separated origin list (e.g. https://wasiai.io,https://www.wasiai.io) ' +
+        'to allow your frontend(s). See .env.example.',
     );
     return { origin: false };
   }

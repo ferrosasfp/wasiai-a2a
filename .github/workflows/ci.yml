@@ -35,3 +35,25 @@ jobs:
 
       - name: Test
         run: npm test
+
+  coverage:
+    runs-on: ubuntu-latest
+    # Coverage runs the same suite with v8 coverage + thresholds. The Postgres
+    # *.real.test.ts integration tests stay skipIf-gated on
+    # INTEGRATION_TEST_DB_URL (absent here), so coverage reflects the unit
+    # suite only and does not block on a live database.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test with coverage
+        run: npm run test:coverage

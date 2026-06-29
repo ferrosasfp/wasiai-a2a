@@ -21,7 +21,10 @@
 
 import { getPaymentAdapter } from '../adapters/registry.js';
 import type { SignResult } from '../adapters/types.js';
+import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
+
+const log = getLogger('fee-charge');
 
 // ─── Tipos públicos ─────────────────────────────────────────
 
@@ -83,7 +86,7 @@ interface SupabaseError {
  * Lee `PROTOCOL_FEE_RATE` de `process.env` por request. Sin cache (CD-G).
  *
  * Rango válido: [0.0, 0.10]. Fuera de rango / no parseable / NaN /
- * Infinity → fallback `0.01` + `console.error`.
+ * Infinity → fallback `0.01` + structured `log.error`.
  *
  * @returns el rate aplicable (0.01 por default)
  */
@@ -100,8 +103,9 @@ export function getProtocolFeeRate(): number {
     parsed < MIN_FEE_RATE ||
     parsed > MAX_FEE_RATE
   ) {
-    console.error(
-      `[FeeCharge] Invalid PROTOCOL_FEE_RATE="${raw}" (must be finite number in [${MIN_FEE_RATE}, ${MAX_FEE_RATE}]); falling back to ${DEFAULT_FEE_RATE}`,
+    log.error(
+      { raw, min: MIN_FEE_RATE, max: MAX_FEE_RATE, fallback: DEFAULT_FEE_RATE },
+      'Invalid PROTOCOL_FEE_RATE (must be finite number in range); falling back to default',
     );
     return DEFAULT_FEE_RATE;
   }
@@ -168,9 +172,7 @@ export async function chargeProtocolFee(
   // Paso 1 (CD-2): wallet vacía → skip silencioso. NO tocamos DB.
   const walletAddress = process.env.WASIAI_PROTOCOL_FEE_WALLET;
   if (!walletAddress || walletAddress === '') {
-    console.warn(
-      '[FeeCharge] WASIAI_PROTOCOL_FEE_WALLET not set, skipping fee transfer',
-    );
+    log.warn('WASIAI_PROTOCOL_FEE_WALLET not set, skipping fee transfer');
     return { status: 'skipped', feeUsdc, reason: 'WALLET_UNSET' };
   }
 
@@ -187,9 +189,9 @@ export async function chargeProtocolFee(
     };
 
     if (selectErr) {
-      console.error(
-        `[FeeCharge] DB select error for ${orchestrationId}:`,
-        selectErr.message,
+      log.error(
+        { orchestrationId, detail: selectErr.message },
+        'DB select error',
       );
       return {
         status: 'failed',
@@ -233,9 +235,9 @@ export async function chargeProtocolFee(
         return { status: 'already-charged', feeUsdc, inProgress: true };
       }
       // Otro error de DB → failed (CD-B, nunca rechazar).
-      console.error(
-        `[FeeCharge] DB insert error for ${orchestrationId}:`,
-        insertErr.message,
+      log.error(
+        { orchestrationId, detail: insertErr.message },
+        'DB insert error',
       );
       return {
         status: 'failed',
@@ -253,7 +255,7 @@ export async function chargeProtocolFee(
       });
     } catch (signErr) {
       const msg = signErr instanceof Error ? signErr.message : String(signErr);
-      console.error(`[FeeCharge] sign() failed for ${orchestrationId}:`, msg);
+      log.error({ orchestrationId, detail: msg }, 'sign() failed');
       await markFailed(orchestrationId, msg);
       return { status: 'failed', feeUsdc, error: msg };
     }
@@ -268,7 +270,10 @@ export async function chargeProtocolFee(
 
       if (!settleResult.success) {
         const errMsg = `settle failed: ${settleResult.error ?? 'unknown'}`;
-        console.error(`[FeeCharge] ${errMsg} for ${orchestrationId}`);
+        log.error(
+          { orchestrationId, detail: errMsg },
+          'settle reported failure',
+        );
         await markFailed(orchestrationId, errMsg);
         return { status: 'failed', feeUsdc, error: errMsg };
       }
@@ -288,9 +293,9 @@ export async function chargeProtocolFee(
       if (updateErr) {
         // El transfer salió OK pero la DB no se actualizó. Igual retornamos
         // charged — el fee se cobró; el row queda en 'pending' (auditable).
-        console.error(
-          `[FeeCharge] DB update-charged error for ${orchestrationId}:`,
-          updateErr.message,
+        log.error(
+          { orchestrationId, detail: updateErr.message },
+          'DB update-charged error',
         );
       }
 
@@ -298,7 +303,7 @@ export async function chargeProtocolFee(
     } catch (settleErr) {
       const msg =
         settleErr instanceof Error ? settleErr.message : String(settleErr);
-      console.error(`[FeeCharge] settle() threw for ${orchestrationId}:`, msg);
+      log.error({ orchestrationId, detail: msg }, 'settle() threw');
       await markFailed(orchestrationId, msg);
       return { status: 'failed', feeUsdc, error: msg };
     }
@@ -307,7 +312,7 @@ export async function chargeProtocolFee(
     // cliente de supabase lanza al construir el builder). CD-B: jamás
     // rechazar la promise.
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[FeeCharge] Unexpected error for ${orchestrationId}:`, msg);
+    log.error({ orchestrationId, detail: msg }, 'Unexpected error');
     return { status: 'failed', feeUsdc, error: `DB_ERROR: ${msg}` };
   }
 }
@@ -329,9 +334,6 @@ async function markFailed(
       .eq('orchestration_id', orchestrationId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(
-      `[FeeCharge] failed to mark row as failed for ${orchestrationId}:`,
-      msg,
-    );
+    log.error({ orchestrationId, detail: msg }, 'failed to mark row as failed');
   }
 }
