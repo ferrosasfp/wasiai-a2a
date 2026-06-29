@@ -12,7 +12,22 @@
  * NO tautológicos: si alguien renombra un `code` o quita `extends Error`, el
  * test rompe (es exactamente el invariante que el codebase asume).
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// ─── Structured logger mock ─────────────────────────────────
+// errors.ts logs the (PII-safe, hashed) ownership mismatch via
+// getLogger('security'). Mock it so the PII-safe assertions run against the
+// structured payload (object-first / message-second) instead of spying on
+// console. hoisted so the factory can reference it.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 import * as errors from './errors.js';
 import { logOwnershipMismatch } from './errors.js';
 
@@ -119,19 +134,12 @@ describe('security error classes — contract (P2-7)', () => {
 // ── logOwnershipMismatch — PII-safe logging (no leak en claro) ──
 describe('logOwnershipMismatch — PII-safe (P2-7)', () => {
   it('positional form (legacy WKH-53) hashes keyId + ownerId, never logs raw', () => {
-    const warnings: unknown[][] = [];
-    const orig = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args);
-    };
-    try {
-      logOwnershipMismatch('getBalance', 'secret-key-id', 'secret-owner');
-    } finally {
-      console.warn = orig;
-    }
+    logSpy.warn.mockClear();
+    logOwnershipMismatch('getBalance', 'secret-key-id', 'secret-owner');
 
-    expect(warnings).toHaveLength(1);
-    const payload = warnings[0]![1] as Record<string, unknown>;
+    expect(logSpy.warn).toHaveBeenCalledTimes(1);
+    // object-first / message-second: the (hashed) payload is the first arg.
+    const payload = logSpy.warn.mock.calls[0]![0] as Record<string, unknown>;
     expect(payload.op).toBe('getBalance');
     // El id/owner crudos NUNCA aparecen — solo su hash truncado.
     const serialized = JSON.stringify(payload);
@@ -142,23 +150,15 @@ describe('logOwnershipMismatch — PII-safe (P2-7)', () => {
   });
 
   it('object form (WKH-63) hashes resource + caller, includes actualOwnerRef hash when given', () => {
-    const warnings: unknown[][] = [];
-    const orig = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args);
-    };
-    try {
-      logOwnershipMismatch({
-        op: 'registryUpdate',
-        resourceId: 'reg-secret',
-        callerOwnerRef: 'caller-secret',
-        actualOwnerRef: 'actual-secret',
-      });
-    } finally {
-      console.warn = orig;
-    }
+    logSpy.warn.mockClear();
+    logOwnershipMismatch({
+      op: 'registryUpdate',
+      resourceId: 'reg-secret',
+      callerOwnerRef: 'caller-secret',
+      actualOwnerRef: 'actual-secret',
+    });
 
-    const payload = warnings[0]![1] as Record<string, unknown>;
+    const payload = logSpy.warn.mock.calls[0]![0] as Record<string, unknown>;
     expect(payload.op).toBe('registryUpdate');
     const serialized = JSON.stringify(payload);
     expect(serialized).not.toContain('reg-secret');
@@ -170,22 +170,14 @@ describe('logOwnershipMismatch — PII-safe (P2-7)', () => {
   });
 
   it('object form omits actualOwnerRefHash when actualOwnerRef is absent', () => {
-    const warnings: unknown[][] = [];
-    const orig = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args);
-    };
-    try {
-      logOwnershipMismatch({
-        op: 'delegationRevoke',
-        resourceId: 'del-1',
-        callerOwnerRef: 'owner-1',
-      });
-    } finally {
-      console.warn = orig;
-    }
+    logSpy.warn.mockClear();
+    logOwnershipMismatch({
+      op: 'delegationRevoke',
+      resourceId: 'del-1',
+      callerOwnerRef: 'owner-1',
+    });
 
-    const payload = warnings[0]![1] as Record<string, unknown>;
+    const payload = logSpy.warn.mock.calls[0]![0] as Record<string, unknown>;
     expect(payload).not.toHaveProperty('actualOwnerRefHash');
   });
 });

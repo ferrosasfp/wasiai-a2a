@@ -16,6 +16,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getLogger } from '../../lib/logger.js';
 import { supabase } from '../../lib/supabase.js';
 import type { TransformResult } from '../../types/index.js';
 import { schemaHash } from './canonical-json.js';
@@ -27,6 +28,8 @@ import {
   TransformExecutionError,
   TransformTimeoutError,
 } from './vm-runner.js';
+
+const log = getLogger('transform');
 
 const TIMEOUT_MS = 30_000;
 // Sandboxed transform execution budget. 1s is generous for legitimate
@@ -46,8 +49,8 @@ function getHmacKey(): string | undefined {
   if (typeof k === 'string' && k.length > 0) return k;
   if (!hmacWarnEmitted) {
     hmacWarnEmitted = true;
-    console.warn(
-      '[Transform] SCHEMA_TRANSFORM_HMAC_KEY not configured — running in degraded mode (cached transformFn integrity NOT verified). Set the env var in production.',
+    log.warn(
+      'SCHEMA_TRANSFORM_HMAC_KEY not configured — running in degraded mode (cached transformFn integrity NOT verified). Set the env var in production.',
     );
   }
   return undefined;
@@ -223,14 +226,20 @@ async function getFromL2(
   const hmacKey = getHmacKey();
   if (hmacKey !== undefined) {
     if (typeof sig !== 'string' || sig.length === 0) {
-      console.warn(
-        `[Transform] L2 row missing transform_fn_sig (key=${sourceAgentId}:${targetAgentId}:${schemaHashValue.slice(0, 8)}…) — treating as cache miss`,
+      log.warn(
+        {
+          key: `${sourceAgentId}:${targetAgentId}:${schemaHashValue.slice(0, 8)}…`,
+        },
+        'L2 row missing transform_fn_sig — treating as cache miss',
       );
       return null;
     }
     if (!verifyTransformFn(transformFn, sig, hmacKey)) {
-      console.warn(
-        `[Transform] L2 HMAC verify FAILED (key=${sourceAgentId}:${targetAgentId}:${schemaHashValue.slice(0, 8)}…) — treating as cache miss`,
+      log.warn(
+        {
+          key: `${sourceAgentId}:${targetAgentId}:${schemaHashValue.slice(0, 8)}…`,
+        },
+        'L2 HMAC verify FAILED — treating as cache miss',
       );
       return null;
     }
@@ -413,10 +422,7 @@ export async function maybeTransform(
         attempt1.fn,
         ownerId,
       ).catch((err: unknown) => {
-        console.error(
-          `[Transform] Failed to persist to L2 for ${cacheKey}:`,
-          err,
-        );
+        log.error({ cacheKey, err }, 'Failed to persist to L2');
       });
       l1Cache.set(cacheKey, attempt1.fn);
     }
@@ -442,10 +448,9 @@ export async function maybeTransform(
   );
 
   // CD-14: log NO leak raw output/schema. Solo nombres de campos + count + model.
-  console.error(
-    `[Transform] retry attempt 1: missing fields [${missing.join(
-      ', ',
-    )}] (model=${model})`,
+  log.error(
+    { missing, model },
+    'retry attempt 1: missing fields',
   );
 
   const attempt2 = await generateTransformFn(output, schema, model, missing);
@@ -464,10 +469,7 @@ export async function maybeTransform(
         attempt2.fn,
         ownerId,
       ).catch((err: unknown) => {
-        console.error(
-          `[Transform] Failed to persist to L2 for ${cacheKey}:`,
-          err,
-        );
+        log.error({ cacheKey, err }, 'Failed to persist to L2');
       });
       l1Cache.set(cacheKey, attempt2.fn);
     }

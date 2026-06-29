@@ -13,7 +13,10 @@
  * tumbar pagos legítimos. El evento se loguea para visibilidad.
  */
 
+import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
+
+const log = getLogger('x402-nonce');
 
 export type X402NonceResult =
   | { kind: 'fresh' } // nonce nuevo, registrado → seguir con settle()
@@ -37,10 +40,13 @@ export async function checkAndRecordX402Nonce(
     if (error.code === '23505') return { kind: 'replay' };
     // Fail-open conservador: log + seguir. El nonce EIP-3009 on-chain sigue
     // siendo single-use; esta tabla es solo defensa en profundidad.
-    console.warn('[x402-nonce] record failed, failing open', {
-      network,
-      detail: error.message,
-    });
+    log.warn(
+      {
+        network,
+        detail: error.message,
+      },
+      'record failed, failing open',
+    );
     return { kind: 'unavailable' };
   }
   return { kind: 'fresh' };

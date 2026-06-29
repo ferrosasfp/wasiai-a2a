@@ -9,6 +9,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ── Mocks ──────────────────────────────────────────────────
+// Structured logger mock: x402-nonce.ts logs the fail-open via
+// getLogger('x402-nonce'). Mock it so the test asserts log emission
+// (object-first / message-second) instead of spying on console. hoisted so
+// the factory can reference it.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 vi.mock('../lib/supabase.js', () => ({
   supabase: {
     from: vi.fn(),
@@ -84,7 +97,8 @@ describe('checkAndRecordX402Nonce', () => {
   });
 
   it('otro error de DB → fail-open (unavailable), NUNCA throw', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     const { chain } = insertMock({ code: '500', message: 'db down' });
     mockFrom.mockReturnValue(
       chain as unknown as ReturnType<typeof supabase.from>,
@@ -93,10 +107,10 @@ describe('checkAndRecordX402Nonce', () => {
     const res = await checkAndRecordX402Nonce('base-sepolia', '0xabc');
 
     expect(res).toEqual({ kind: 'unavailable' });
+    // object-first / message-second: network lives in the structured context.
     expect(warnSpy).toHaveBeenCalledWith(
-      '[x402-nonce] record failed, failing open',
       expect.objectContaining({ network: 'base-sepolia' }),
+      'record failed, failing open',
     );
-    warnSpy.mockRestore();
   });
 });

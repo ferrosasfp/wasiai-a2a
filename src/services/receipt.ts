@@ -13,6 +13,7 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
 import type { Database } from '../types/database.types.js';
 import type {
@@ -24,6 +25,8 @@ import type {
 
 // hex de 64 chars (32 bytes) — un HMAC-SHA256.
 const HMAC_HEX_RE = /^[0-9a-f]{64}$/;
+
+const log = getLogger('receipts');
 
 /**
  * Campos que entran al canonical payload. Un superset de las columnas firmables;
@@ -110,11 +113,11 @@ export const receiptService = {
   async emit(input: EmitReceiptInput): Promise<void> {
     // 1. Guards previos (CD-D, DT-6).
     if (!input.ownerRef) {
-      console.warn('[receipts] skip: no ownerRef');
+      log.warn('skip: no ownerRef');
       return;
     }
     if (!process.env.RECEIPT_SIGNING_SECRET) {
-      console.warn('[receipts] skip: RECEIPT_SIGNING_SECRET unset');
+      log.warn('skip: RECEIPT_SIGNING_SECRET unset');
       return;
     }
 
@@ -143,14 +146,14 @@ export const receiptService = {
       const { data, error } = await supabase.rpc('insert_receipt', insertArgs);
 
       if (error) {
-        console.warn('[receipts] emit failed', error.message);
+        log.warn({ detail: error.message }, 'emit failed');
         return;
       }
 
       // El RPC RETURNS TABLE → Supabase devuelve un array de filas.
       const inserted = Array.isArray(data) ? data[0] : data;
       if (!inserted?.id) {
-        console.warn('[receipts] emit failed: no row returned');
+        log.warn('emit failed: no row returned');
         return;
       }
 
@@ -173,7 +176,7 @@ export const receiptService = {
       const hash = computeReceiptHash(canonical);
       if (!hash) {
         // Secret desapareció entre el guard y aquí: dejar UNSIGNED (placeholder).
-        console.warn('[receipts] emit: hash unavailable, left unsigned');
+        log.warn('emit: hash unavailable, left unsigned');
         return;
       }
 
@@ -184,12 +187,12 @@ export const receiptService = {
         .eq('id', inserted.id)
         .eq('receipt_hash', '');
       if (updErr) {
-        console.warn('[receipts] emit hash update failed', updErr.message);
+        log.warn({ detail: updErr.message }, 'emit hash update failed');
       }
     } catch (err) {
-      console.warn(
-        '[receipts] emit failed',
-        err instanceof Error ? err.message : err,
+      log.warn(
+        { detail: err instanceof Error ? err.message : err },
+        'emit failed',
       );
     }
   },

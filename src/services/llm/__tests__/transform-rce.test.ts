@@ -21,6 +21,18 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// Structured logger mock: transform.ts logs HMAC/cache warnings via
+// getLogger('transform'). Mock it so tests assert the (object-first /
+// message-second) emission instead of spying on console.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../../../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 vi.mock('../../../lib/supabase.js', () => {
   const mockFrom = vi.fn();
   return { supabase: { from: mockFrom } };
@@ -453,7 +465,7 @@ describe('WKH-60 HMAC integrity', () => {
     // upsert resolving. setupSupabaseHit returns an upsert that resolves
     // {error: null}, which is fine here.
 
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    logSpy.warn.mockClear();
     const result = await maybeTransform(
       'src',
       'tgt',
@@ -461,7 +473,6 @@ describe('WKH-60 HMAC integrity', () => {
       { required: ['k'], properties: { k: { type: 'string' } } },
       'tenant-1',
     );
-    warnSpy.mockRestore();
 
     // Verify failed → fallback to LLM, NOT served from cache.
     expect(result.bridgeType).toBe('LLM');
@@ -475,7 +486,7 @@ describe('WKH-60 HMAC integrity', () => {
     setupSupabaseHit('return { k: output.x };', null); // no sig
     setupLLMResponse('return { k: output.x };');
 
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    logSpy.warn.mockClear();
     const result = await maybeTransform(
       'src',
       'tgt',
@@ -488,10 +499,10 @@ describe('WKH-60 HMAC integrity', () => {
     expect(result.bridgeType).toBe('LLM');
     expect(mockCreate).toHaveBeenCalledTimes(1);
 
-    // The warn must mention "missing transform_fn_sig".
-    const warns = warnSpy.mock.calls.map((c) => c.join(' '));
+    // The warn message must mention "missing transform_fn_sig" (object-first /
+    // message-second — the human message is the second arg).
+    const warns = logSpy.warn.mock.calls.map((c) => String(c[1]));
     expect(warns.some((w) => /missing transform_fn_sig/i.test(w))).toBe(true);
-    warnSpy.mockRestore();
   });
 
   it('T-VER-RCE-12: HMAC enabled + valid sig → cache hit', async () => {

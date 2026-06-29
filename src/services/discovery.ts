@@ -4,6 +4,7 @@
 
 import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
+import { getLogger } from '../lib/logger.js';
 import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 import {
   SSRFViolationError,
@@ -20,6 +21,8 @@ import type {
 import { identityService } from './identity.js';
 import { registryService } from './registry.js';
 import { reputationService } from './reputation.js';
+
+const log = getLogger('discovery');
 
 // ─── WAS-V2-3-CLIENT (WKH-57) module-scoped warn dedup ────────────────
 // Set lives for process lifetime. Reset via `_resetFallbackWarnDedup()`
@@ -239,14 +242,18 @@ export const discoveryService = {
           // not transient errors — log them with a distinct prefix so
           // operators can grep for misconfigured registry endpoints.
           if (err instanceof SSRFViolationError) {
-            console.error(
-              `[Discovery] SSRF blocked for ${registry.name} (${err.category}):`,
-              err.reason,
+            log.error(
+              {
+                registry: registry.name,
+                category: err.category,
+                reason: err.reason,
+              },
+              'SSRF blocked',
             );
           } else {
-            console.error(
-              `[Discovery] Error querying ${registry.name}:`,
-              err.message,
+            log.error(
+              { registry: registry.name, detail: err.message },
+              'Error querying registry',
             );
           }
           return [] as Agent[];
@@ -664,8 +671,9 @@ function resolvePriceWithFallback(
   if (fallback === null || fallback === undefined) return 0;
   if (!_warnedFallbackSlugs.has(slug)) {
     _warnedFallbackSlugs.add(slug);
-    console.warn(
-      `[Discovery] price_per_call_usdc is null for agent "${slug}" — using fallback "price_per_call"`,
+    log.warn(
+      { slug },
+      'price_per_call_usdc is null for agent — using fallback "price_per_call"',
     );
   }
   return parsePriceSafe(fallback);

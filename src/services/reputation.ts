@@ -25,8 +25,11 @@
  * la función devuelve `null` (single) o `Map` vacío (batch). NUNCA se propaga
  * `error.message` crudo al caller. NO toca `a2a_agent_keys` (CD-2/CD-3).
  */
+import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
 import type { AgentReputation } from '../types/index.js';
+
+const log = getLogger('reputation');
 
 // ── Env helpers (patrón resolveTimeoutMs, erc8004-identity.ts:89-93) ──
 
@@ -200,10 +203,13 @@ export const reputationService: ReputationService = {
     if (error) {
       // CD-18: log server-side, NUNCA propagar error.message al caller.
       // NO cachear el fallo (AC-4/CD-5).
-      console.error('[Reputation] computeReputationForAgent query failed', {
-        slug,
-        code: error.code,
-      });
+      log.error(
+        {
+          slug,
+          code: error.code,
+        },
+        'computeReputationForAgent query failed',
+      );
       return null;
     }
 
@@ -236,10 +242,13 @@ export const reputationService: ReputationService = {
     if (error) {
       // CD-18: log server-side, NUNCA propagar error.message. Batch falla →
       // Map vacío (caller deja a los agentes sin el campo, AC-4).
-      console.error('[Reputation] computeReputationBatch query failed', {
-        count: slugs.length,
-        code: error.code,
-      });
+      log.error(
+        {
+          count: slugs.length,
+          code: error.code,
+        },
+        'computeReputationBatch query failed',
+      );
       return out;
     }
 

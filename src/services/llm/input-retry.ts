@@ -16,6 +16,9 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropicCircuitBreaker } from '../../lib/circuit-breaker.js';
+import { getLogger } from '../../lib/logger.js';
+
+const log = getLogger('input-retry');
 
 // DT-3: Haiku is hardcoded. The master path has NO input_schema, so selectModel
 // (which reads a schema) is not applicable here.
@@ -108,11 +111,14 @@ export async function regenerateInputFromErrors(
     return parsed as Record<string, unknown>;
   } catch {
     // CD-11: CircuitOpenError, timeout (abort), API error, JSON parse → null.
-    console.error('[input-retry]', {
-      agentSlug,
-      missingFields,
-      status: 'regenerate-failed',
-    });
+    log.error(
+      {
+        agentSlug,
+        missingFields,
+        status: 'regenerate-failed',
+      },
+      'regenerate-failed',
+    );
     return null;
   } finally {
     clearTimeout(timeoutId);

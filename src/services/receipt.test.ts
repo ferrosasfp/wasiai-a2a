@@ -7,6 +7,19 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// ─── Structured logger mock ─────────────────────────────────
+// receipt.ts logs best-effort warnings via getLogger('receipts'). Mock it so
+// tests assert log emission (object-first / message-second) instead of spying
+// on console. hoisted so the factory can reference it.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 vi.mock('../lib/supabase.js', () => ({
   supabase: {
     from: vi.fn(),
@@ -209,7 +222,8 @@ describe('verify (AC-4 / AC-5)', () => {
 describe('emit (AC-6 / best-effort)', () => {
   it('RECEIPT_SIGNING_SECRET unset → does NOT insert, WARN, no throw', async () => {
     delete process.env.RECEIPT_SIGNING_SECRET;
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = logSpy.warn;
+    warn.mockClear();
 
     await expect(
       receiptService.emit({
@@ -228,11 +242,11 @@ describe('emit (AC-6 / best-effort)', () => {
 
     expect(mockRpc).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
   });
 
   it('empty ownerRef → skip, no insert (CD-D)', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = logSpy.warn;
+    warn.mockClear();
     await receiptService.emit({
       ownerRef: '',
       agentKeyId: null,
@@ -246,12 +260,12 @@ describe('emit (AC-6 / best-effort)', () => {
       orchestrationId: null,
     });
     expect(mockRpc).not.toHaveBeenCalled();
-    expect(warn).toHaveBeenCalledWith('[receipts] skip: no ownerRef');
-    warn.mockRestore();
+    expect(warn).toHaveBeenCalledWith('skip: no ownerRef');
   });
 
   it('RPC rejects → .catch absorbs, no throw (best-effort CD-1)', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = logSpy.warn;
+    warn.mockClear();
     mockRpc.mockRejectedValue(new Error('db down') as never);
 
     await expect(
@@ -270,11 +284,11 @@ describe('emit (AC-6 / best-effort)', () => {
     ).resolves.toBeUndefined();
 
     expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
   });
 
   it('RPC returns error → WARN, no throw, no UPDATE', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = logSpy.warn;
+    warn.mockClear();
     mockRpc.mockResolvedValue({
       data: null,
       error: { message: 'boom' },
@@ -295,7 +309,6 @@ describe('emit (AC-6 / best-effort)', () => {
 
     expect(mockFrom).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
   });
 
   it("happy path → RPC insert then UPDATE-once on receipt_hash='' (CD-2)", async () => {
