@@ -7,6 +7,19 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// ─── Structured logger mock ─────────────────────────────────
+// kite-ozone/payment.ts logs the token env fallback via getLogger('kite-ozone').
+// Mock it so tests assert log emission (object-first / message-second) instead
+// of spying on console. hoisted so the factory can reference it.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 vi.mock('viem', async (importOriginal) => {
   const actual = await importOriginal<typeof import('viem')>();
   return {
@@ -61,15 +74,15 @@ describe('KiteOzonePaymentAdapter — KITE_NETWORK selection', () => {
     });
 
     it('default token = PYUSD testnet', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const warnSpy = logSpy.warn;
+      warnSpy.mockClear();
       expect(adapter.getToken()).toBe(PYUSD_TESTNET);
-      warnSpy.mockRestore();
     });
 
     it('default symbol = PYUSD', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const warnSpy = logSpy.warn;
+      warnSpy.mockClear();
       expect(adapter.supportedTokens[0]!.symbol).toBe('PYUSD');
-      warnSpy.mockRestore();
     });
   });
 
@@ -83,9 +96,9 @@ describe('KiteOzonePaymentAdapter — KITE_NETWORK selection', () => {
     });
 
     it('default token = PYUSD testnet', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const warnSpy = logSpy.warn;
+      warnSpy.mockClear();
       expect(adapter.getToken()).toBe(PYUSD_TESTNET);
-      warnSpy.mockRestore();
     });
   });
 
@@ -104,22 +117,27 @@ describe('KiteOzonePaymentAdapter — KITE_NETWORK selection', () => {
     });
 
     it('default token = USDC.e mainnet', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const warnSpy = logSpy.warn;
+      warnSpy.mockClear();
       expect(adapter.getToken()).toBe(USDC_E_MAINNET);
-      warnSpy.mockRestore();
     });
 
     it('default symbol = USDC.e', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const warnSpy = logSpy.warn;
+      warnSpy.mockClear();
       expect(adapter.supportedTokens[0]!.symbol).toBe('USDC.e');
-      warnSpy.mockRestore();
     });
 
     it('warn message refers to USDC.e fallback when env-var absent', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const warnSpy = logSpy.warn;
+      warnSpy.mockClear();
       adapter.getToken();
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('USDC.e'));
-      warnSpy.mockRestore();
+      // object-first / message-second: the default symbol (USDC.e) lives in the
+      // structured context now, not interpolated into the message string.
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ symbol: 'USDC.e' }),
+        expect.stringContaining('X402_PAYMENT_TOKEN not set'),
+      );
     });
 
     it('respects X402_PAYMENT_TOKEN override on mainnet', () => {

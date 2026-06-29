@@ -7,6 +7,9 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { Database } from '../types/database.types.js';
+import { getLogger } from './logger.js';
+
+const log = getLogger('supabase');
 
 function createSupabaseClient(): SupabaseClient<Database> {
   const url = process.env.SUPABASE_URL;
@@ -20,9 +23,9 @@ function createSupabaseClient(): SupabaseClient<Database> {
       .filter(Boolean)
       .join(', ');
 
-    console.error(`[FATAL] Missing required environment variables: ${missing}`);
-    console.error(
-      'Set these variables in your .env file. See .env.example for reference.',
+    log.error(
+      { missing },
+      'FATAL: missing required environment variables. Set these in your .env file. See .env.example for reference.',
     );
     process.exit(1);
   }

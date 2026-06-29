@@ -6,12 +6,24 @@
  *   T-PRICE-6..T-PRICE-8  → pyusdWeiToUsd (conversion + overflow)
  *   T-PRICE-9..T-PRICE-10 → getGaslessDefaultCapUsd
  *
- * AB-WKH-57: usar `vi.spyOn(console, 'warn').mockImplementation(() => {})`
- * para verificar warnings sin contaminar stderr global. NO usar `vi.mock`
- * sobre console.
+ * price.ts emite los warnings de fallback vía getLogger('price'). El logger se
+ * mockea (object-first / message-second) para verificar las advertencias sin
+ * contaminar stderr global.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// ─── Structured logger mock ─────────────────────────────────
+// hoisted so the factory can reference it before the price.js import resolves.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('./logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 import {
   getGaslessDefaultCapUsd,
   getPyusdUsdRate,
@@ -34,43 +46,47 @@ describe('getPyusdUsdRate', () => {
   });
 
   it('T-PRICE-1: env unset → returns 1.0 silently', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     expect(getPyusdUsdRate()).toBe(1.0);
     expect(warnSpy).not.toHaveBeenCalled();
-    warnSpy.mockRestore();
   });
 
   it('T-PRICE-2: env empty string → returns 1.0 silently', () => {
     process.env.PYUSD_USD_RATE = '';
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     expect(getPyusdUsdRate()).toBe(1.0);
     expect(warnSpy).not.toHaveBeenCalled();
-    warnSpy.mockRestore();
   });
 
   it('T-PRICE-3: env "abc" (non-numeric) → fallback 1.0 + warns', () => {
     process.env.PYUSD_USD_RATE = 'abc';
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     expect(getPyusdUsdRate()).toBe(1.0);
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0]![0]).toContain('PYUSD_USD_RATE="abc"');
-    warnSpy.mockRestore();
+    // object-first / message-second: the raw value lives in the structured ctx.
+    expect(warnSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({ raw: 'abc' }),
+    );
+    expect(String(warnSpy.mock.calls[0]![1])).toContain('PYUSD_USD_RATE');
   });
 
   it('T-PRICE-4: env "200" (out of range) → fallback 1.0 + warns', () => {
     process.env.PYUSD_USD_RATE = '200';
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     expect(getPyusdUsdRate()).toBe(1.0);
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    warnSpy.mockRestore();
   });
 
   it('T-PRICE-5: env "0.95" (depeg) → returns 0.95', () => {
     process.env.PYUSD_USD_RATE = '0.95';
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     expect(getPyusdUsdRate()).toBeCloseTo(0.95, 10);
     expect(warnSpy).not.toHaveBeenCalled();
-    warnSpy.mockRestore();
   });
 });
 
@@ -129,10 +145,10 @@ describe('getGaslessDefaultCapUsd', () => {
   });
 
   it('T-PRICE-9: env unset → returns 10 silently', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     expect(getGaslessDefaultCapUsd()).toBe(10);
     expect(warnSpy).not.toHaveBeenCalled();
-    warnSpy.mockRestore();
   });
 
   it('T-PRICE-9b: env "25" → returns 25', () => {
@@ -142,18 +158,24 @@ describe('getGaslessDefaultCapUsd', () => {
 
   it('T-PRICE-10: env "0" (≤ lower bound) → fallback 10 + warns', () => {
     process.env.GASLESS_DEFAULT_CAP_USD = '0';
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     expect(getGaslessDefaultCapUsd()).toBe(10);
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0]![0]).toContain('GASLESS_DEFAULT_CAP_USD="0"');
-    warnSpy.mockRestore();
+    // object-first / message-second: the raw value lives in the structured ctx.
+    expect(warnSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({ raw: '0' }),
+    );
+    expect(String(warnSpy.mock.calls[0]![1])).toContain(
+      'GASLESS_DEFAULT_CAP_USD',
+    );
   });
 
   it('T-PRICE-10b: env "20000" (> upper bound) → fallback 10 + warns', () => {
     process.env.GASLESS_DEFAULT_CAP_USD = '20000';
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     expect(getGaslessDefaultCapUsd()).toBe(10);
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    warnSpy.mockRestore();
   });
 });

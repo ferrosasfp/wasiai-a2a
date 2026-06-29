@@ -5,6 +5,9 @@
  * PROHIBIDO lanzar new Error('...') genérico en paths de ownership (CD-A2).
  */
 import crypto from 'node:crypto';
+import { getLogger } from '../../lib/logger.js';
+
+const log = getLogger('security');
 
 export class OwnershipMismatchError extends Error {
   readonly code = 'OWNERSHIP_MISMATCH' as const;
@@ -450,12 +453,15 @@ export function logOwnershipMismatch(
 
   if (typeof opOrArgs === 'string') {
     // Legacy positional form (WKH-53).
-    console.warn('[security] ownership mismatch', {
-      op: opOrArgs,
-      keyIdHash: hash(keyId ?? ''),
-      ownerIdHash: hash(ownerId ?? ''),
-      ts: new Date().toISOString(),
-    });
+    log.warn(
+      {
+        op: opOrArgs,
+        keyIdHash: hash(keyId ?? ''),
+        ownerIdHash: hash(ownerId ?? ''),
+        ts: new Date().toISOString(),
+      },
+      'ownership mismatch',
+    );
     return;
   }
 
@@ -469,5 +475,5 @@ export function logOwnershipMismatch(
   if (opOrArgs.actualOwnerRef !== undefined) {
     payload.actualOwnerRefHash = hash(opOrArgs.actualOwnerRef);
   }
-  console.warn('[security] ownership mismatch', payload);
+  log.warn(payload, 'ownership mismatch');
 }

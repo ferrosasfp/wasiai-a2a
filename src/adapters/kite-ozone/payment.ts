@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { createWalletClient, http, parseUnits } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import { getLogger } from '../../lib/logger.js';
 import type {
   PieverseSettleRequest,
   PieverseSettleResult,
@@ -126,6 +127,7 @@ function getDefaultTokenSymbol(): string {
 // ── Lazy env-var readers (DT-2: read at call time, not module load) ──
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const log = getLogger('kite-ozone');
 let _warnedDefaultToken = false;
 let _warnedDefaultFacilitatorAddress = false;
 
@@ -139,8 +141,9 @@ function getFacilitatorAddress(): `0x${string}` {
   if (!addr) return fallback;
   if (!ADDRESS_RE.test(addr)) {
     if (!_warnedDefaultFacilitatorAddress) {
-      console.warn(
-        `KITE_FACILITATOR_ADDRESS has invalid format "${addr}" — defaulting to ${fallback}`,
+      log.warn(
+        { addr, fallback },
+        'KITE_FACILITATOR_ADDRESS has invalid format — defaulting to fallback',
       );
       _warnedDefaultFacilitatorAddress = true;
     }
@@ -154,8 +157,9 @@ function getPaymentToken(): `0x${string}` {
   const fallback = getDefaultPaymentToken();
   if (!token) {
     if (!_warnedDefaultToken) {
-      console.warn(
-        `X402_PAYMENT_TOKEN not set — defaulting to ${getDefaultTokenSymbol()} (${fallback})`,
+      log.warn(
+        { symbol: getDefaultTokenSymbol(), fallback },
+        'X402_PAYMENT_TOKEN not set — defaulting to default token',
       );
       _warnedDefaultToken = true;
     }
@@ -163,8 +167,9 @@ function getPaymentToken(): `0x${string}` {
   }
   if (!ADDRESS_RE.test(token)) {
     if (!_warnedDefaultToken) {
-      console.warn(
-        `X402_PAYMENT_TOKEN has invalid format "${token}" — defaulting to ${getDefaultTokenSymbol()} (${fallback})`,
+      log.warn(
+        { token, symbol: getDefaultTokenSymbol(), fallback },
+        'X402_PAYMENT_TOKEN has invalid format — defaulting to default token',
       );
       _warnedDefaultToken = true;
     }

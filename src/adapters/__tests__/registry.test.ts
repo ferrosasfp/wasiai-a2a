@@ -13,6 +13,20 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// ─── Structured logger mock ─────────────────────────────────
+// registry.ts logs the init message + the CD-13 conflict warning via
+// getLogger('registry'). Mock it so tests assert log emission (object-first /
+// message-second) instead of spying on console. Named `loggerSpy` to avoid
+// colliding with the local `logSpy` (console.log spy) some tests still declare.
+const loggerSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../../lib/logger.js', () => ({
+  getLogger: () => loggerSpy,
+}));
+
 // Mock the kite-ozone factory to avoid real client init.
 // Shape matches the new AdaptersBundle interface.
 // W5: accepts `opts?: { network?: 'testnet' | 'mainnet' }` to mirror the real
@@ -102,8 +116,6 @@ describe('adapter registry', () => {
   beforeEach(() => {
     _resetRegistry();
     vi.clearAllMocks();
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     delete process.env.WASIAI_A2A_CHAIN;
     delete process.env.WASIAI_A2A_CHAINS;
   });
@@ -168,12 +180,14 @@ describe('adapter registry', () => {
     });
 
     it('logs the canonical init message including the chain slug', async () => {
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      loggerSpy.info.mockClear();
       process.env.WASIAI_A2A_CHAIN = 'kite-ozone-testnet';
       await initAdapters();
 
-      expect(logSpy).toHaveBeenCalledWith(
-        '[Registry] Adapters initialized: kite-ozone-testnet',
+      // object-first / message-second: the chain keys live in the structured ctx.
+      expect(loggerSpy.info).toHaveBeenCalledWith(
+        { chainKeys: ['kite-ozone-testnet'] },
+        'Adapters initialized',
       );
     });
   });
@@ -203,12 +217,13 @@ describe('adapter registry', () => {
     });
 
     it('logs the canonical multi-chain init message', async () => {
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      loggerSpy.info.mockClear();
       process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet';
       await initAdapters();
 
-      expect(logSpy).toHaveBeenCalledWith(
-        '[Registry] Adapters initialized: kite-ozone-testnet',
+      expect(loggerSpy.info).toHaveBeenCalledWith(
+        { chainKeys: ['kite-ozone-testnet'] },
+        'Adapters initialized',
       );
     });
   });
@@ -224,14 +239,16 @@ describe('adapter registry', () => {
 
   // ─── CD-13: conflict warning when both env vars are set ───
   it('CD-13 — when both env vars are set, logs WARNING and uses WASIAI_A2A_CHAINS', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    loggerSpy.warn.mockClear();
     process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet';
     process.env.WASIAI_A2A_CHAIN = 'kite-ozone-testnet';
 
     await initAdapters();
 
-    expect(warnSpy).toHaveBeenCalledWith(
-      '[Registry] WARNING: both WASIAI_A2A_CHAINS and WASIAI_A2A_CHAIN are set. Using WASIAI_A2A_CHAINS=kite-ozone-testnet (singular ignored)',
+    // object-first / message-second: the chosen CSV value is in the structured ctx.
+    expect(loggerSpy.warn).toHaveBeenCalledWith(
+      { chains: 'kite-ozone-testnet' },
+      'both WASIAI_A2A_CHAINS and WASIAI_A2A_CHAIN are set. Using WASIAI_A2A_CHAINS (singular ignored)',
     );
     expect(getDefaultChainKey()).toBe('kite-ozone-testnet');
   });
@@ -310,12 +327,13 @@ describe('adapter registry', () => {
     });
 
     it('logs the canonical multi-chain init message with both slugs', async () => {
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      loggerSpy.info.mockClear();
       process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet,avalanche-fuji';
       await initAdapters();
 
-      expect(logSpy).toHaveBeenCalledWith(
-        '[Registry] Adapters initialized: kite-ozone-testnet, avalanche-fuji',
+      expect(loggerSpy.info).toHaveBeenCalledWith(
+        { chainKeys: ['kite-ozone-testnet', 'avalanche-fuji'] },
+        'Adapters initialized',
       );
     });
 
@@ -366,12 +384,13 @@ describe('adapter registry', () => {
     });
 
     it('logs the canonical multi-chain init message with mainnet slugs', async () => {
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      loggerSpy.info.mockClear();
       process.env.WASIAI_A2A_CHAINS = 'kite-mainnet,avalanche-mainnet';
       await initAdapters();
 
-      expect(logSpy).toHaveBeenCalledWith(
-        '[Registry] Adapters initialized: kite-mainnet, avalanche-mainnet',
+      expect(loggerSpy.info).toHaveBeenCalledWith(
+        { chainKeys: ['kite-mainnet', 'avalanche-mainnet'] },
+        'Adapters initialized',
       );
     });
 

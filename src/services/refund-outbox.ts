@@ -20,8 +20,11 @@
  * response del caller NO se rompe; el sweep no encuentra nada.
  */
 
+import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
 import { budgetService } from './budget.js';
+
+const log = getLogger('refund-outbox');
 
 /** Máximo de intentos antes de marcar un entry como `dead` (revisión manual). */
 export const MAX_REFUND_ATTEMPTS = 5;
@@ -66,18 +69,21 @@ export const refundOutbox = {
         reason: entry.reason,
       });
       if (error) {
-        console.error('[refund-outbox.enqueue-failed]', {
-          keyId: entry.keyId,
-          chainId: entry.chainId,
-          amountUsd: entry.amountUsd,
-          reason: entry.reason,
-          error: error.message,
-        });
+        log.error(
+          {
+            keyId: entry.keyId,
+            chainId: entry.chainId,
+            amountUsd: entry.amountUsd,
+            reason: entry.reason,
+            error: error.message,
+          },
+          '[refund-outbox.enqueue-failed]',
+        );
       }
     } catch (e) {
-      console.error(
+      log.error(
+        { detail: e instanceof Error ? e.message : String(e) },
         '[refund-outbox.enqueue-threw]',
-        e instanceof Error ? e.message : String(e),
       );
     }
   },
@@ -96,16 +102,16 @@ export const refundOutbox = {
         p_limit: limit,
       });
       if (error) {
-        console.error('[refund-outbox.claim-failed]', { error: error.message });
+        log.error({ error: error.message }, '[refund-outbox.claim-failed]');
         return;
       }
       // M9: el RPC `claim_refund_outbox` ahora devuelve filas tipadas; el cast
       // acota al shape de dominio (subset de columnas consumidas).
       claimed = (data ?? []) as RefundOutboxRow[];
     } catch (e) {
-      console.error(
+      log.error(
+        { detail: e instanceof Error ? e.message : String(e) },
         '[refund-outbox.claim-threw]',
-        e instanceof Error ? e.message : String(e),
       );
       return;
     }
@@ -167,15 +173,18 @@ async function markDone(id: string): Promise<void> {
       })
       .eq('id', id);
     if (error) {
-      console.error('[refund-outbox.mark-done-failed]', {
-        id,
-        error: error.message,
-      });
+      log.error(
+        {
+          id,
+          error: error.message,
+        },
+        '[refund-outbox.mark-done-failed]',
+      );
     }
   } catch (e) {
-    console.error(
+    log.error(
+      { detail: e instanceof Error ? e.message : String(e) },
       '[refund-outbox.mark-done-threw]',
-      e instanceof Error ? e.message : String(e),
     );
   }
 }
@@ -201,15 +210,18 @@ async function bumpAttempt(
       })
       .eq('id', row.id);
     if (error) {
-      console.error('[refund-outbox.bump-attempt-failed]', {
-        id: row.id,
-        error: error.message,
-      });
+      log.error(
+        {
+          id: row.id,
+          error: error.message,
+        },
+        '[refund-outbox.bump-attempt-failed]',
+      );
     }
   } catch (e) {
-    console.error(
+    log.error(
+      { detail: e instanceof Error ? e.message : String(e) },
       '[refund-outbox.bump-attempt-threw]',
-      e instanceof Error ? e.message : String(e),
     );
   }
 }

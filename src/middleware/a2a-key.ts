@@ -17,6 +17,7 @@ import {
   getDefaultChainKey,
   getInitializedChainKeys,
 } from '../adapters/registry.js';
+import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { budgetService } from '../services/budget.js';
 import {
@@ -52,6 +53,8 @@ import type {
   SignedAuthHeaders,
 } from '../types/index.js';
 import { type PaymentMiddlewareOptions, requirePayment } from './x402.js';
+
+const log = getLogger('a2a-key');
 
 // ── Fastify augmentation (CD-2: no any) ────────────────────
 
@@ -910,9 +913,9 @@ async function resolveMasterAuth(
           orchestrationId: null,
         })
         .catch((e) =>
-          console.warn(
+          log.warn(
+            { detail: e instanceof Error ? e.message : e },
             '[receipts] emit failed',
-            e instanceof Error ? e.message : e,
           ),
         );
     }

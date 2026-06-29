@@ -27,6 +27,9 @@ import type {
   FastifyRequest,
   preHandlerAsyncHookHandler,
 } from 'fastify';
+import { getLogger } from '../lib/logger.js';
+
+const log = getLogger('forward-key');
 
 const FORWARD_KEY_HEADER = 'x-wasiai-forward-key';
 const FORWARD_SOURCE_HEADER = 'x-wasiai-source';
@@ -70,9 +73,8 @@ export function requireForwardKey(): preHandlerAsyncHookHandler[] {
 
   if (!expected || expected.length < FORWARD_KEY_MIN_LENGTH) {
     if (expected && expected.length > 0) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        '[forward-key] WASIAI_V2_FORWARD_KEY too short or whitespace-only; middleware NOT mounted',
+      log.warn(
+        'WASIAI_V2_FORWARD_KEY too short or whitespace-only; middleware NOT mounted',
       );
     }
     return [];

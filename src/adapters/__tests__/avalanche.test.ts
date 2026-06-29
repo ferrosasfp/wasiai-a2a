@@ -15,6 +15,19 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// ─── Structured logger mock ─────────────────────────────────
+// avalanche/payment.ts + avalanche/attestation.ts log env fallbacks / the
+// attestation stub via getLogger('avalanche'). Mock it so tests assert log
+// emission (object-first / message-second) instead of spying on console.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 // ─── Mocks ───────────────────────────────────────────────────────────────
 // `viem` partial mock — only `createWalletClient` is replaced (preserves
 // real exports like `http`, `parseUnits`, etc).
@@ -45,7 +58,6 @@ describe('Avalanche adapter — factory shape', () => {
   beforeEach(() => {
     _resetWalletClient();
     vi.clearAllMocks();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     delete process.env.AVALANCHE_NETWORK;
     delete process.env.FUJI_USDC_ADDRESS;
     delete process.env.AVALANCHE_USDC_ADDRESS;
@@ -94,7 +106,6 @@ describe('Avalanche payment adapter — contract', () => {
   beforeEach(() => {
     _resetWalletClient();
     vi.clearAllMocks();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     delete process.env.FUJI_USDC_ADDRESS;
     delete process.env.AVALANCHE_USDC_ADDRESS;
     process.env.OPERATOR_PRIVATE_KEY =
@@ -466,7 +477,8 @@ describe('Avalanche attestation adapter — stub', () => {
   });
 
   it('attest() returns stub txHash + proofUrl and warns', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     const bundle = await createAvalancheAdapters({ network: 'fuji' });
     const result = await bundle.attestation.attest({
       type: 'unit-test',
@@ -477,7 +489,6 @@ describe('Avalanche attestation adapter — stub', () => {
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('attestation stub'),
     );
-    warnSpy.mockRestore();
   });
 
   it('verify() returns true (stub)', async () => {
@@ -507,7 +518,6 @@ describe('Avalanche payment adapter — facilitator bearer auth (AVAX-BEARER)', 
   beforeEach(() => {
     _resetWalletClient();
     vi.clearAllMocks();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     delete process.env.AVALANCHE_FACILITATOR_API_KEY;
     delete process.env.FACILITATOR_API_KEY;
     process.env.OPERATOR_PRIVATE_KEY =

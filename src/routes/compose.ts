@@ -4,6 +4,7 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
@@ -23,6 +24,8 @@ import { receiptService } from '../services/receipt.js';
 import { refundOutbox } from '../services/refund-outbox.js';
 import { normalizeDestination } from '../services/spend-policy.js';
 import type { ComposeStep } from '../types/index.js';
+
+const log = getLogger('compose');
 
 /**
  * WKH-125 BLQ-ALTO-1 (fix-pack): deriva el destino `"<registry>/<slug>"` del
@@ -393,12 +396,15 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
                   );
               if (!creditRes.success) {
                 // CD-6: sin msg crudo de PG. No cambia el status code.
-                console.error('[compose.refund-failed]', {
-                  keyId: request.a2aKeyRow.id,
-                  chainId: refundChainId,
-                  amountUsd: refundUsd,
-                  requestId: request.id,
-                });
+                log.error(
+                  {
+                    keyId: request.a2aKeyRow.id,
+                    chainId: refundChainId,
+                    amountUsd: refundUsd,
+                    requestId: request.id,
+                  },
+                  '[compose.refund-failed]',
+                );
                 // M6 (audit 2026-06-24): success:false ⟹ reverted:false / 0
                 // filas (nada se aplicó). Encolar para reintento confiable.
                 // Invariante anti-doble-refund: solo se encola cuando NADA se
@@ -414,9 +420,9 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
               }
             } catch (e) {
               // Best-effort: el fallo del refund NUNCA rompe el response.
-              console.error(
+              log.error(
+                { detail: e instanceof Error ? e.message : String(e) },
                 '[compose.refund-threw]',
-                e instanceof Error ? e.message : String(e),
               );
               // M6: el credit tiró antes de aplicar nada → encolar para reintento.
               await refundOutbox.enqueueRefund({
@@ -462,7 +468,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         });
         if (feeResult.status === 'failed') {
           feeChargeError = feeResult.error;
-          console.error('[Compose] fee charge failed:', feeResult.error);
+          log.error({ detail: feeResult.error }, 'fee charge failed');
         } else if (
           feeResult.status === 'charged' ||
           feeResult.status === 'already-charged'
@@ -484,9 +490,9 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
                 orchestrationId: request.id,
               })
               .catch((e) =>
-                console.warn(
+                log.warn(
+                  { detail: e instanceof Error ? e.message : e },
                   '[receipts] emit failed',
-                  e instanceof Error ? e.message : e,
                 ),
               );
           }
@@ -497,7 +503,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         // Con feeRate ≤ 0.10 es prácticamente imposible, pero capturamos para
         // blindar CD-1 al 100%. La respuesta 200 procede igual.
         feeChargeError = e instanceof Error ? e.message : String(e);
-        console.error('[Compose] fee charge threw:', feeChargeError);
+        log.error({ detail: feeChargeError }, 'fee charge threw');
       }
 
       const kiteTxHash = request.paymentTxHash;

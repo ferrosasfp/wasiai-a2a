@@ -1,4 +1,7 @@
+import { getLogger } from '../../lib/logger.js';
 import type { AttestationAdapter, AttestEvent, AttestRef } from '../types.js';
+
+const log = getLogger('avalanche');
 
 /**
  * Avalanche attestation stub (WKH-MULTICHAIN / 086 W1).
@@ -18,7 +21,7 @@ export class AvalancheAttestationAdapter implements AttestationAdapter {
   async attest(
     _event: AttestEvent,
   ): Promise<{ txHash: string; proofUrl: string }> {
-    console.warn('[avalanche] attestation stub — ERC-8004 not implemented');
+    log.warn('attestation stub — ERC-8004 not implemented');
     return { txHash: '0x0', proofUrl: '' };
   }
 

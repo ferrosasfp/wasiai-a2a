@@ -12,6 +12,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // Mocks (must be at top-level, hoisted before imports)
 // ──────────────────────────────────────────────────────────────
 
+// Structured logger mock: transform.ts logs the retry (PII-safe) via
+// getLogger('transform'). Mock it so the CD-14 leak assertions run against the
+// structured (object-first / message-second) call instead of console.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../../../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 vi.mock('../../../lib/supabase.js', () => {
   const mockFrom = vi.fn();
   return {
@@ -630,9 +642,9 @@ describe('WKH-57 maybeTransform — result.llm shape (AC-5)', () => {
   });
 });
 
-describe('WKH-57 maybeTransform — console.error on retry (AC-7)', () => {
-  it('T-VER-8: console.error is called when retries>0, with field name + retry mention, no PII', async () => {
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+describe('WKH-57 maybeTransform — log.error on retry (AC-7)', () => {
+  it('T-VER-8: log.error is called when retries>0, with field name + retry mention, no PII', async () => {
+    logSpy.error.mockClear();
     setupLLMResponseSequence([
       { transformFn: 'return { wrong: 1 };' },
       { transformFn: 'return { query: output.text };' },
@@ -647,18 +659,20 @@ describe('WKH-57 maybeTransform — console.error on retry (AC-7)', () => {
     };
     await maybeTransform('src-l8', 'tgt-l8', sensitivePayload, schema);
 
-    // Must have called console.error at least once with the retry log
-    const calls = errSpy.mock.calls.map((c) => c.join(' '));
-    const retryLog = calls.find((s) => s.includes('retry attempt'));
-    expect(retryLog).toBeDefined();
-    expect(retryLog).toContain('query'); // field name present
-    expect(retryLog).toContain('claude-haiku-4-5-20251001'); // model name present
+    // Must have logged at least once with the retry log (object-first /
+    // message-second: structured fields in arg[0], human message in arg[1]).
+    const retryCall = logSpy.error.mock.calls.find((c) =>
+      String(c[1]).includes('retry attempt'),
+    );
+    expect(retryCall).toBeDefined();
+    const ctx = retryCall![0] as { missing?: unknown; model?: unknown };
+    expect(ctx.missing).toContain('query'); // field name present
+    expect(ctx.model).toBe('claude-haiku-4-5-20251001'); // model name present
 
-    // CD-14: must NOT leak raw payload PII
-    for (const c of calls) {
-      expect(c).not.toContain('SECRET-USER-PII-NEVER-LOG-THIS');
+    // CD-14: must NOT leak raw payload PII in any structured field or message.
+    for (const c of logSpy.error.mock.calls) {
+      const serialized = JSON.stringify(c);
+      expect(serialized).not.toContain('SECRET-USER-PII-NEVER-LOG-THIS');
     }
-
-    errSpy.mockRestore();
   });
 });

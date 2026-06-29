@@ -1,4 +1,7 @@
 import { createHmac } from 'node:crypto';
+import { getLogger } from './logger.js';
+
+const log = getLogger('caller-hash');
 
 const DEV_FALLBACK_SECRET = 'wasiai-dev-caller-hmac-v1';
 let _warnedMissingSecret = false;
@@ -12,8 +15,8 @@ function resolveCallerHashSecret(): string {
   const secret = process.env.REPUTATION_CALLER_HMAC_SECRET;
   if (secret && secret.length > 0) return secret;
   if (!_warnedMissingSecret) {
-    console.warn(
-      '[caller-hash] REPUTATION_CALLER_HMAC_SECRET ausente — usando fallback de dev. Setear el secret real en prod.',
+    log.warn(
+      'REPUTATION_CALLER_HMAC_SECRET ausente — usando fallback de dev. Setear el secret real en prod.',
     );
     _warnedMissingSecret = true;
   }

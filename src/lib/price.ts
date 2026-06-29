@@ -9,6 +9,10 @@
  * un restart basta para aplicar un nuevo valor.
  */
 
+import { getLogger } from './logger.js';
+
+const log = getLogger('price');
+
 // ── Constants ──────────────────────────────────────────────
 
 /**
@@ -64,8 +68,9 @@ export function getPyusdUsdRate(): number {
     parsed < MIN_PYUSD_RATE ||
     parsed > MAX_PYUSD_RATE
   ) {
-    console.warn(
-      `[Price] Invalid PYUSD_USD_RATE="${raw}" (must be finite number in [${MIN_PYUSD_RATE}, ${MAX_PYUSD_RATE}]); falling back to ${DEFAULT_PYUSD_RATE}`,
+    log.warn(
+      { raw, min: MIN_PYUSD_RATE, max: MAX_PYUSD_RATE },
+      `Invalid PYUSD_USD_RATE (must be finite number in [${MIN_PYUSD_RATE}, ${MAX_PYUSD_RATE}]); falling back to ${DEFAULT_PYUSD_RATE}`,
     );
     return DEFAULT_PYUSD_RATE;
   }
@@ -120,8 +125,9 @@ export function getGaslessDefaultCapUsd(): number {
     parsed <= MIN_GASLESS_CAP_USD ||
     parsed > MAX_GASLESS_CAP_USD
   ) {
-    console.warn(
-      `[Price] Invalid GASLESS_DEFAULT_CAP_USD="${raw}" (must be finite number in (${MIN_GASLESS_CAP_USD}, ${MAX_GASLESS_CAP_USD}]); falling back to ${DEFAULT_GASLESS_CAP_USD}`,
+    log.warn(
+      { raw, min: MIN_GASLESS_CAP_USD, max: MAX_GASLESS_CAP_USD },
+      `Invalid GASLESS_DEFAULT_CAP_USD (must be finite number in (${MIN_GASLESS_CAP_USD}, ${MAX_GASLESS_CAP_USD}]); falling back to ${DEFAULT_GASLESS_CAP_USD}`,
     );
     return DEFAULT_GASLESS_CAP_USD;
   }

@@ -4,6 +4,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RegistryConfig } from '../types/index.js';
 
+// ─── Structured logger mock ─────────────────────────────────
+// discovery.ts logs server-side via getLogger('discovery'). Mock it so tests
+// assert log emission (object-first / message-second) instead of spying on
+// console. hoisted so the factory can reference it.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 // Mock registry service
 vi.mock('./registry.js', () => ({
   registryService: {
@@ -1136,13 +1149,13 @@ function makeV2Registry(): RegistryConfig {
 }
 
 describe('mapAgent — v2 schema drift fallback (WAS-V2-3-CLIENT)', () => {
-  let warnSpy: ReturnType<typeof vi.spyOn>;
+  const warnSpy = logSpy.warn;
   beforeEach(() => {
     _resetFallbackWarnDedup(); // CD-11: reset Set per test
-    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    warnSpy.mockClear();
   });
   afterEach(() => {
-    warnSpy.mockRestore();
+    warnSpy.mockClear();
   });
 
   it('T-fallback-numeric: takes price_per_call when canonical is null (AC-1)', () => {
@@ -1223,9 +1236,12 @@ describe('mapAgent — v2 schema drift fallback (WAS-V2-3-CLIENT)', () => {
     });
     discoveryService.mapAgent(reg, raw);
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    const msg = String(warnSpy.mock.calls[0][0]);
-    expect(msg).toContain('v2-agent');
-    expect(msg).toContain('fallback');
+    // object-first / message-second: slug lives in the structured context,
+    // the human message references the fallback.
+    expect(warnSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({ slug: 'v2-agent' }),
+    );
+    expect(String(warnSpy.mock.calls[0]![1])).toContain('fallback');
   });
 
   it('T-warn-once-per-slug: same slug fallback called twice → 1 warn (AC-6 dedup)', () => {
