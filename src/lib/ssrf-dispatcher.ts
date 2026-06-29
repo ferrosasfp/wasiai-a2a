@@ -44,7 +44,7 @@ import {
   type LookupAddress,
   type LookupOptions,
 } from 'node:dns';
-import { Agent, type Dispatcher } from 'undici';
+import { Agent, type Dispatcher, fetch as undiciFetch } from 'undici';
 import { isBlockedAddress } from './url-validator.js';
 
 /**
@@ -127,11 +127,18 @@ export function getSsrfDispatcher(): Dispatcher {
  * `fetch` wrapper that attaches the connect-time SSRF dispatcher. Use this for
  * EVERY outbound request to an attacker-influenceable URL.
  *
- * The Node global `fetch` accepts a `dispatcher` in its init at runtime, but the
- * DOM `RequestInit` type (TS lib) does not declare it. We centralize the single
- * required cast here so call sites stay clean and type-safe (no scattered
- * `as` casts). The cast is sound: Node 22's undici-backed fetch honors
- * `dispatcher`.
+ * undici-8 migration (Dependabot #124): this calls undici's OWN `fetch` (not
+ * Node's bundled global `fetch`) so the `dispatcher` (an undici-8 `Agent`) and
+ * the `fetch` implementation are the SAME undici version. Handing an undici-8
+ * Agent to Node's (different-version) global fetch throws `InvalidArgumentError`
+ * because undici stores its global dispatcher under a version-scoped symbol and
+ * the handler API differs across majors — that mismatch silently disables the
+ * SSRF guard. Pinning both to undici 8 closes that gap.
+ *
+ * The public signature (DOM `string | URL` / `RequestInit` / `Response`) is
+ * preserved for callers (compose downstream, discovery). undici's `fetch` uses
+ * structurally-equivalent web types and natively declares `dispatcher` in its
+ * init; we centralize the single boundary cast here so call sites stay clean.
  */
 export function ssrfFetch(
   input: string | URL,
@@ -140,8 +147,11 @@ export function ssrfFetch(
   const withDispatcher = {
     ...init,
     dispatcher: getSsrfDispatcher(),
-  } as RequestInit;
-  return fetch(input, withDispatcher);
+  };
+  return undiciFetch(
+    input as Parameters<typeof undiciFetch>[0],
+    withDispatcher as Parameters<typeof undiciFetch>[1],
+  ) as unknown as Promise<Response>;
 }
 
 /**
