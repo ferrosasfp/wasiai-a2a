@@ -113,9 +113,12 @@ describe('money-path FUZZ — parseUnits per-chain atomic scaling (6 vs 18 dec)'
     for (let i = 0; i < ITERATIONS; i++) {
       // mix of dust, normal, large, and high-precision prices.
       const bucket = i % 4;
-      if (bucket === 0) samples.push(randPrice(rng, 0, 1e-6, 12)); // dust
-      else if (bucket === 1) samples.push(randPrice(rng, 1e-6, 10, 12)); // normal hi-prec
-      else if (bucket === 2) samples.push(randPrice(rng, 10, 1_000_000, 6)); // large
+      if (bucket === 0)
+        samples.push(randPrice(rng, 0, 1e-6, 12)); // dust
+      else if (bucket === 1)
+        samples.push(randPrice(rng, 1e-6, 10, 12)); // normal hi-prec
+      else if (bucket === 2)
+        samples.push(randPrice(rng, 10, 1_000_000, 6)); // large
       else samples.push(rng() * 1e-7); // raw sub-atomic (sci-notation prone)
     }
 
@@ -179,7 +182,8 @@ describe('money-path FUZZ — 18-dec scaling (compose valueWei / feeUsdcToWei)',
     const rng = mulberry32(SEED ^ 0x33);
     let prev = -1n;
     const sorted: number[] = [];
-    for (let i = 0; i < ITERATIONS; i++) sorted.push(randPrice(rng, 0, 1000, 6));
+    for (let i = 0; i < ITERATIONS; i++)
+      sorted.push(randPrice(rng, 0, 1000, 6));
     sorted.sort((a, b) => a - b);
 
     for (const usd of sorted) {
@@ -198,7 +202,8 @@ describe('money-path FUZZ — 18-dec scaling (compose valueWei / feeUsdcToWei)',
   it('compose valueWei == fee-charge feeUsdcToWei for the same amount (single convention)', () => {
     const rng = mulberry32(SEED ^ 0x44);
     const samples = [...BOUNDARY_PRICES.filter((p) => p <= 1_000_000)];
-    for (let i = 0; i < ITERATIONS; i++) samples.push(randPrice(rng, 0, 1000, 9));
+    for (let i = 0; i < ITERATIONS; i++)
+      samples.push(randPrice(rng, 0, 1000, 9));
     for (const usd of samples) {
       // compose.ts:792 and fee-charge.ts:126 MUST agree byte-for-byte.
       const composeWei = String(usdcToWei18(usd));
