@@ -24,6 +24,19 @@ import {
 } from 'vitest';
 import type { A2AAgentKeyRow, ComposeResult } from '../types/index.js';
 
+// ── Structured logger mock ──────────────────────────────────
+// compose.ts logs the best-effort refund/fee failures via getLogger('compose').
+// Mock it so tests assert log emission (object-first / message-second) instead
+// of spying on console. hoisted so the factory can reference it.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../lib/logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 // ── Mock auth middleware (W4 pattern, mirroring tasks.test.ts) ──
 // Devuelve un array porque routes/compose.ts hace `...requirePaymentOrA2AKey(...)`.
 // El handler pass-through setea `a2aKeyRow` para que el route lo propague a
@@ -919,7 +932,7 @@ describe('compose route — AUDIT A1 step-0 refund on failure', () => {
       totalLatencyMs: 0,
       error: 'Step 0 agent returned 500',
     });
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    logSpy.error.mockClear();
 
     const res = await app.inject({
       method: 'POST',
@@ -930,10 +943,10 @@ describe('compose route — AUDIT A1 step-0 refund on failure', () => {
 
     expect(res.statusCode).toBe(400);
     expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
-    expect(errSpy).toHaveBeenCalledWith(
-      '[compose.refund-failed]',
+    // object-first / message-second: structured context in arg[0], tag in arg[1].
+    expect(logSpy.error).toHaveBeenCalledWith(
       expect.objectContaining({ keyId: 'k1', amountUsd: expect.any(Number) }),
+      '[compose.refund-failed]',
     );
-    errSpy.mockRestore();
   });
 });

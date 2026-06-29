@@ -4,6 +4,20 @@
  */
 import { createHmac } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// ─── Structured logger mock ─────────────────────────────────
+// caller-hash.ts logs the missing-secret fallback (warn-once) via
+// getLogger('caller-hash'). Mock it so the test asserts log emission instead of
+// spying on console. hoisted so the factory can reference it.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('./logger.js', () => ({
+  getLogger: () => logSpy,
+}));
+
 import { _resetCallerHashWarn, hashCallerRef } from './caller-hash.js';
 
 const FIXED_SECRET = 'test-secret-A';
@@ -57,10 +71,11 @@ describe('hashCallerRef', () => {
     expect(hashCallerRef('')).toBeNull();
   });
 
-  it('fallback warn: sin env, console.warn se llama 1 sola vez', () => {
+  it('fallback warn: sin env, log.warn se llama 1 sola vez', () => {
     delete process.env.REPUTATION_CALLER_HMAC_SECRET;
     _resetCallerHashWarn();
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = logSpy.warn;
+    warnSpy.mockClear();
     hashCallerRef('owner-A');
     hashCallerRef('owner-B');
     hashCallerRef('owner-C');
