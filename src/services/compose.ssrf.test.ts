@@ -44,8 +44,17 @@ vi.mock('../lib/downstream-payment.js', () => ({
   signAndSettleDownstream: vi.fn().mockResolvedValue(null),
 }));
 
-const mockFetch = vi.fn();
+// undici-8 migration (#124): `ssrfFetch` calls undici's OWN `fetch` (not the
+// Node global) so the undici-8 Agent and the fetch implementation share a
+// version. We route BOTH the global stub and undici's `fetch` to the same
+// `mockFetch` so positive-path assertions ("fetch IS called") hold while the
+// real undici `Agent` (and its connect-time SSRF lookup) stays intact.
+const { mockFetch } = vi.hoisted(() => ({ mockFetch: vi.fn() }));
 vi.stubGlobal('fetch', mockFetch);
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('undici')>();
+  return { ...actual, fetch: mockFetch };
+});
 
 import { SSRFViolationError } from '../lib/url-validator.js';
 import { composeService } from './compose.js';

@@ -32,8 +32,17 @@ vi.mock('../lib/circuit-breaker.js', () => ({
   }),
 }));
 
-const mockFetch = vi.fn();
+// undici-8 migration (#124): `ssrfFetch` calls undici's OWN `fetch` (not
+// the Node global) so the undici-8 Agent and the fetch implementation share a
+// version. Route BOTH the global stub and undici's `fetch` to the same
+// `mockFetch` so the outbound-call assertions still intercept while the real
+// undici `Agent` (connect-time SSRF lookup) stays intact.
+const { mockFetch } = vi.hoisted(() => ({ mockFetch: vi.fn() }));
 vi.stubGlobal('fetch', mockFetch);
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('undici')>();
+  return { ...actual, fetch: mockFetch };
+});
 
 // WKH-100 FIX-PACK v2: discover()/getAgent() reverse-lookup ERC-8004 identity by
 // the bidirectional match (declared token crossed with a binding that declares
