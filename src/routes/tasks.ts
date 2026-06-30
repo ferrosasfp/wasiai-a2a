@@ -165,7 +165,11 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
           return reply.status(404).send({ error: 'Task not found' });
         }
         if (err instanceof TerminalStateError) {
-          return reply.status(409).send({ error: err.message });
+          // F-05 (audit 2026-06-29): static client message — the 409 already
+          // conveys the terminal-state condition; no raw err.message.
+          return reply.status(409).send({
+            error: 'Task is in a terminal state and cannot be updated',
+          });
         }
         throw err;
       }
@@ -208,7 +212,11 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
           return reply.status(404).send({ error: 'Task not found' });
         }
         if (err instanceof TerminalStateError) {
-          return reply.status(409).send({ error: err.message });
+          // F-05 (audit 2026-06-29): static client message — the 409 already
+          // conveys the terminal-state condition; no raw err.message.
+          return reply.status(409).send({
+            error: 'Task is in a terminal state and cannot be updated',
+          });
         }
         throw err;
       }

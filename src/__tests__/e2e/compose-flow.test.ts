@@ -286,6 +286,7 @@ describe('compose HTTP e2e flow (P0)', () => {
       undefined,
       undefined,
       'wasiai/corridor',
+      'o1', // F-04 (audit): threaded caller owner_ref
     );
     // Happy path → no refund.
     expect(mockCreditWithDest).not.toHaveBeenCalled();

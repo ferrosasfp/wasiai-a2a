@@ -82,6 +82,14 @@ export const budgetService = {
     delegationContext?: DelegationDebitContext,
     keySessionContext?: KeySessionDebitContext,
     destination?: string,
+    // F-04 (audit 2026-06-29): owner_ref of the AUTHENTICATED caller, threaded
+    // from the call site (compose/orchestrate/middleware). When present it is
+    // fed to the dest-aware / master RPCs as the ownership guard datum INSTEAD
+    // of re-deriving it from the target row — the previous cold-path SELECT
+    // (WHERE id=keyId, no owner_ref filter) made the DB guard tautological
+    // because the row supplied its OWN owner_ref. Optional for back-compat with
+    // legacy callers/tests; the cold-path SELECT remains a fallback when unset.
+    ownerRef?: string,
   ): Promise<{ success: boolean; error?: string }> {
     // ── RUTA KEY-SESSION (WKH-121) ──
     // Espejo de la ruta delegación, sin per-tx limit (no aplica a sesiones).
@@ -253,24 +261,31 @@ export const budgetService = {
     // check del cap + el debit + el INSERT del ledger ocurren en UNA tx con
     // FOR UPDATE (CD-1/AC-4). Nunca propaga el msg crudo de PG al cliente (CD-B).
     if (destination) {
-      // `debit()` no recibe `owner_ref` (CD-4: no se amplía la firma). El RPC
-      // valida ownership DB-layer contra el owner de la key; lo derivamos con un
-      // SELECT cold-path (sólo cuando hay destino) y se lo pasamos.
-      const { data: keyRow, error: ownerErr } = await supabase
-        .from('a2a_agent_keys')
-        .select('owner_ref')
-        .eq('id', keyId)
-        .single();
-      if (ownerErr || !keyRow) {
-        return { success: false, error: 'KEY_NOT_FOUND' };
+      // F-04 (audit 2026-06-29): the RPC validates ownership DB-layer against
+      // `p_owner_ref`. We MUST pass the AUTHENTICATED caller's owner_ref so the
+      // guard compares against the caller, not the target row. When the caller
+      // threads `ownerRef`, use it directly. Legacy callers (no ownerRef) fall
+      // back to the cold-path SELECT — tautological, but preserves back-compat.
+      let effectiveOwnerRef: string;
+      if (ownerRef !== undefined) {
+        effectiveOwnerRef = ownerRef;
+      } else {
+        const { data: keyRow, error: ownerErr } = await supabase
+          .from('a2a_agent_keys')
+          .select('owner_ref')
+          .eq('id', keyId)
+          .single();
+        if (ownerErr || !keyRow) {
+          return { success: false, error: 'KEY_NOT_FOUND' };
+        }
+        effectiveOwnerRef = keyRow.owner_ref; // M9: fila tipada, sin cast
       }
-      const ownerRef = keyRow.owner_ref; // M9: fila tipada, sin cast
 
       const { error: destErr } = await supabase.rpc('debit_with_dest_policy', {
         p_key_id: keyId,
         p_chain_id: chainId,
         p_amount_usd: amountUsd,
-        p_owner_ref: ownerRef,
+        p_owner_ref: effectiveOwnerRef,
         p_destination: destination,
       });
 
@@ -303,23 +318,30 @@ export const budgetService = {
     }
 
     // ── RUTA MASTER KEY — owner guard DB-level (WKH-SEC-02b) ──
-    // El RPC ahora exige p_owner_ref. Mismo SELECT cold-path que la ruta
-    // dest-aware (L247-255); solo esta ruta directa de baja frecuencia.
-    const { data: keyRow, error: ownerErr } = await supabase
-      .from('a2a_agent_keys')
-      .select('owner_ref')
-      .eq('id', keyId)
-      .single();
-    if (ownerErr || !keyRow) {
-      return { success: false, error: 'KEY_NOT_FOUND' };
+    // El RPC exige p_owner_ref. F-04 (audit 2026-06-29): preferimos el
+    // owner_ref del caller AUTENTICADO (threaded) para que el guard compare
+    // contra el caller y no contra la fila objetivo. Fallback al SELECT
+    // cold-path (tautológico) sólo para callers legacy sin ownerRef.
+    let masterOwnerRef: string;
+    if (ownerRef !== undefined) {
+      masterOwnerRef = ownerRef;
+    } else {
+      const { data: keyRow, error: ownerErr } = await supabase
+        .from('a2a_agent_keys')
+        .select('owner_ref')
+        .eq('id', keyId)
+        .single();
+      if (ownerErr || !keyRow) {
+        return { success: false, error: 'KEY_NOT_FOUND' };
+      }
+      masterOwnerRef = keyRow.owner_ref; // M9: fila tipada, sin cast
     }
-    const ownerRef = keyRow.owner_ref; // M9: fila tipada, sin cast
 
     const { error } = await supabase.rpc('increment_a2a_key_spend', {
       p_key_id: keyId,
       p_chain_id: chainId,
       p_amount_usd: amountUsd,
-      p_owner_ref: ownerRef, // WKH-SEC-02b (AC-2)
+      p_owner_ref: masterOwnerRef, // WKH-SEC-02b (AC-2) / F-04
     });
 
     if (error) {

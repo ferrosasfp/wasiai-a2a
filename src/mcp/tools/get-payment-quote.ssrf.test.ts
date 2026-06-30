@@ -22,6 +22,14 @@ vi.mock('node:dns', () => ({
   },
 }));
 
+// F-02 (audit 2026-06-29): the tool fetches via `ssrfFetch`; delegate to the
+// stubbed global `fetch` so the "fetch NOT called on SSRF block" assertions
+// keep observing the same mock.
+vi.mock('../../lib/ssrf-dispatcher.js', () => ({
+  ssrfFetch: (input: string | URL, init?: RequestInit) =>
+    (globalThis.fetch as typeof fetch)(input, init),
+}));
+
 import { getPaymentQuote } from './get-payment-quote.js';
 
 const ctx: ToolContext = {

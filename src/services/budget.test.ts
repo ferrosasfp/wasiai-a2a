@@ -570,6 +570,63 @@ describe('budgetService', () => {
       expect(mockRpc).not.toHaveBeenCalled();
     });
 
+    // ── F-04 (audit 2026-06-29): threaded caller owner_ref ──────
+    // The fix removes the tautological self-derivation: when the AUTHENTICATED
+    // caller's owner_ref is threaded, it is fed to the RPC AS-IS and the
+    // cold-path SELECT (supabase.from) is NEVER executed. This proves the guard
+    // compares against the caller, not the target row.
+    it('F-04 master: threaded ownerRef goes to p_owner_ref WITHOUT a cold-path SELECT', async () => {
+      // No mockOwnerSelect — if the code SELECTs owner_ref, supabase.from is
+      // unmocked and the call would blow up. We assert it is never touched.
+      mockFrom.mockClear();
+      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1.5,
+        undefined,
+        undefined,
+        undefined,
+        'caller-owner', // F-04: authenticated caller's owner_ref
+      );
+
+      expect(mockRpc).toHaveBeenCalledWith('increment_a2a_key_spend', {
+        p_key_id: 'key-1',
+        p_chain_id: 2368,
+        p_amount_usd: 1.5,
+        p_owner_ref: 'caller-owner', // the CALLER's owner, not a re-derived one
+      });
+      // No cold-path SELECT was performed (the security point of F-04).
+      expect(mockFrom).not.toHaveBeenCalled();
+      expect(result).toEqual({ success: true });
+    });
+
+    it('F-04 dest-aware: threaded ownerRef goes to p_owner_ref WITHOUT a cold-path SELECT', async () => {
+      mockFrom.mockClear();
+      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1.5,
+        undefined,
+        undefined,
+        'kite/translator',
+        'caller-owner', // F-04: authenticated caller's owner_ref
+      );
+
+      expect(mockRpc).toHaveBeenCalledWith('debit_with_dest_policy', {
+        p_key_id: 'key-1',
+        p_chain_id: 2368,
+        p_amount_usd: 1.5,
+        p_owner_ref: 'caller-owner',
+        p_destination: 'kite/translator',
+      });
+      expect(mockFrom).not.toHaveBeenCalled();
+      expect(result).toEqual({ success: true });
+    });
+
     // AC-5 back-compat: SIN destino → increment_a2a_key_spend directo, sin
     // tocar la tabla de keys ni el RPC dest-aware (byte-idéntico a hoy).
     it('AC-5 back-compat: no destination → increment_a2a_key_spend directo', async () => {

@@ -14,6 +14,7 @@
 
 import { getPaymentAdapter } from '../../adapters/registry.js';
 import type { SignResult } from '../../adapters/types.js';
+import { ssrfFetch } from '../../lib/ssrf-dispatcher.js';
 import type { X402Response } from '../../types/index.js';
 import {
   MCP_ERRORS,
@@ -48,7 +49,10 @@ async function fetchWithTimeoutMapping(
   timeoutMs: number,
 ): Promise<Response> {
   try {
-    return await fetch(url, init);
+    // F-02 (audit 2026-06-29): route through ssrfFetch so the MCP outbound
+    // payment fetches inherit the connect-time SSRF guard + the H-1 manual
+    // redirect re-validation (was bypassing the dispatcher via global fetch).
+    return await ssrfFetch(url, init);
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       throw new MCPToolError(

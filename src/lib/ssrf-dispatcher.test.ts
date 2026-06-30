@@ -28,12 +28,39 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // ── Mock node:dns (callback `lookup`) BEFORE importing the module ─────
 const mockLookup = vi.fn();
+// H-1 (audit 2026-06-29): `ssrfFetch` now also re-validates each URL/redirect
+// hop via `validateOutboundUrl`, which uses the PROMISE form (`dns.promises.
+// lookup`). We back it by the SAME `mockLookup` (adapting the callback contract
+// to a promise) so a single mock governs BOTH the connector lookup and the
+// pre-fetch validator — tests stay one source of truth for what a host resolves
+// to.
+function promiseLookup(
+  hostname: string,
+  options?: unknown,
+): Promise<Array<{ address: string; family: number }>> {
+  return new Promise((resolve, reject) => {
+    mockLookup(
+      hostname,
+      options ?? { all: true },
+      (err: unknown, addresses: unknown) => {
+        if (err) reject(err);
+        else resolve(addresses as Array<{ address: string; family: number }>);
+      },
+    );
+  });
+}
 vi.mock('node:dns', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:dns')>();
+  const promises = { ...actual.promises, lookup: promiseLookup };
   return {
     ...actual,
     lookup: (...args: unknown[]) => mockLookup(...args),
-    default: { ...actual, lookup: (...args: unknown[]) => mockLookup(...args) },
+    promises,
+    default: {
+      ...actual,
+      lookup: (...args: unknown[]) => mockLookup(...args),
+      promises,
+    },
   };
 });
 
@@ -57,6 +84,7 @@ vi.mock('undici', async (importOriginal) => {
 import {
   _resetSsrfDispatcher,
   SSRFConnectBlockedError,
+  SSRFRedirectBlockedError,
   ssrfFetch,
   ssrfLookup,
 } from './ssrf-dispatcher.js';
@@ -161,19 +189,13 @@ describe('ssrfFetch — connect-time enforcement (real undici Agent)', () => {
       },
     );
 
+    // H-1 (audit 2026-06-29): `ssrfFetch` now re-validates the URL via
+    // `validateOutboundUrl` BEFORE opening the socket, so a host resolving to
+    // the metadata IP is rejected at the pre-fetch layer (SSRFRedirectBlocked)
+    // rather than reaching the connect-time guard. Either way: no socket opens.
     await expect(
       ssrfFetch('http://rebind.attacker.example/latest/meta-data/'),
-    ).rejects.toThrow();
-
-    // The error chain carries our connect-block cause.
-    let caught: unknown;
-    try {
-      await ssrfFetch('http://rebind.attacker.example/latest/meta-data/');
-    } catch (e) {
-      caught = e;
-    }
-    const cause = (caught as { cause?: unknown })?.cause;
-    expect(cause).toBeInstanceOf(SSRFConnectBlockedError);
+    ).rejects.toBeInstanceOf(SSRFRedirectBlockedError);
   });
 
   it('BLOCKS a fetch whose DNS rebinds to loopback (127.0.0.1) before reaching a real local server', async () => {
@@ -192,14 +214,12 @@ describe('ssrfFetch — connect-time enforcement (real undici Agent)', () => {
           cb(null, [{ address: '127.0.0.1', family: 4 }]);
         },
       );
-      let caught: unknown;
-      try {
-        await ssrfFetch(`http://loopback.rebind.example:${port}/`);
-      } catch (e) {
-        caught = e;
-      }
-      const cause = (caught as { cause?: unknown })?.cause;
-      expect(cause).toBeInstanceOf(SSRFConnectBlockedError);
+      // H-1: the pre-fetch URL re-validation rejects the loopback resolution
+      // before any socket is opened (SSRFRedirectBlockedError). The real local
+      // server is never reached.
+      await expect(
+        ssrfFetch(`http://loopback.rebind.example:${port}/`),
+      ).rejects.toBeInstanceOf(SSRFRedirectBlockedError);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -310,6 +330,13 @@ describe('ssrfFetch — connect-time enforcement (real undici Agent)', () => {
     const fakeResponse = new Response(JSON.stringify({ ok: true }), {
       status: 200,
     });
+    // H-1: the pre-fetch validator (`validateOutboundUrl`) must see a PUBLIC IP
+    // for this host or it would block before fetching. Resolve to a public IP.
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: '93.184.216.34', family: 4 }]);
+      },
+    );
     // Override the default (real-fetch-delegating) mock for this test only.
     mockUndiciFetch.mockResolvedValueOnce(fakeResponse);
     const res = await ssrfFetch('http://public.example/path', {
@@ -321,5 +348,291 @@ describe('ssrfFetch — connect-time enforcement (real undici Agent)', () => {
     const init = mockUndiciFetch.mock.calls[0]![1] as Record<string, unknown>;
     expect(init.dispatcher).toBeDefined();
     expect(init.method).toBe('GET');
+    // H-1: redirects are handled manually so each hop can be re-validated.
+    expect(init.redirect).toBe('manual');
+  });
+});
+
+// ─── H-1: manual redirect re-validation + credential stripping ──────────
+
+describe('ssrfFetch — H-1 manual redirect SSRF re-validation (audit 2026-06-29)', () => {
+  // The initial (public) host resolves to a public IP; the redirect target is a
+  // literal metadata IP. `assertUrlAllowed` must reject the hop-2 URL BEFORE a
+  // second fetch is issued, and the credential headers must never be re-sent.
+  const PUBLIC_IP = '93.184.216.34';
+
+  it('T-H1-REDIRECT-LITERAL: 302 → http://169.254.169.254/ is BLOCKED before the next hop', async () => {
+    // hop-1 host resolves public; the literal-IP redirect target is caught by
+    // the literal-IP guard (the connector lookup never sees literals).
+    mockLookup.mockImplementation(
+      (h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        if (h === 'public.start.example') {
+          cb(null, [{ address: PUBLIC_IP, family: 4 }]);
+          return;
+        }
+        cb(Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' }), []);
+      },
+    );
+
+    // hop-1 returns a 302 to the cloud-metadata literal IP.
+    mockUndiciFetch.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'http://169.254.169.254/latest/meta-data/' },
+      }),
+    );
+
+    await expect(
+      ssrfFetch('http://public.start.example/start', {
+        method: 'GET',
+        headers: {
+          'x-a2a-key': 'SECRET-KEY',
+          'payment-signature': 'SECRET-SIG',
+        },
+      }),
+    ).rejects.toBeInstanceOf(SSRFRedirectBlockedError);
+
+    // The internal target was NEVER fetched: only the hop-1 request was issued.
+    expect(mockUndiciFetch).toHaveBeenCalledTimes(1);
+    // And the hop-1 request carried the credentials (hop-1 is the legit host),
+    // proving the block happens BEFORE re-sending them to the internal host.
+    const hop1Init = mockUndiciFetch.mock.calls[0]![1] as {
+      headers?: Record<string, string>;
+    };
+    // Sanity: credentials were present on hop-1 (they just never reach hop-2).
+    expect(JSON.stringify(hop1Init.headers)).toContain('SECRET-KEY');
+  });
+
+  it('T-H1-REDIRECT-PRIVATE-HOST: 302 → host resolving to 127.0.0.1 is BLOCKED', async () => {
+    mockLookup.mockImplementation(
+      (h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        if (h === 'public.start.example') {
+          cb(null, [{ address: PUBLIC_IP, family: 4 }]);
+          return;
+        }
+        if (h === 'internal.target.example') {
+          cb(null, [{ address: '127.0.0.1', family: 4 }]);
+          return;
+        }
+        cb(Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' }), []);
+      },
+    );
+    mockUndiciFetch.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'http://internal.target.example/admin' },
+      }),
+    );
+
+    await expect(
+      ssrfFetch('http://public.start.example/start', {
+        headers: { authorization: 'Bearer SECRET' },
+      }),
+    ).rejects.toBeInstanceOf(SSRFRedirectBlockedError);
+    // hop-2 never issued — the private-IP-resolving target was blocked.
+    expect(mockUndiciFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-H1-REDIRECT-CROSSORIGIN: credential headers are STRIPPED on a cross-origin redirect', async () => {
+    // hop-1 (public.a.example) 302 → another PUBLIC host (public.b.example).
+    // The redirect is allowed (both public), but being cross-origin the
+    // credential headers must be dropped on hop-2.
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: PUBLIC_IP, family: 4 }]);
+      },
+    );
+    mockUndiciFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'http://public.b.example/next' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    const res = await ssrfFetch('http://public.a.example/start', {
+      method: 'GET',
+      headers: {
+        'x-a2a-key': 'SECRET-KEY',
+        'payment-signature': 'SECRET-SIG',
+        authorization: 'Bearer SECRET',
+        'x-payment': 'SECRET-PAY',
+        'x-keep': 'visible',
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(mockUndiciFetch).toHaveBeenCalledTimes(2);
+
+    // hop-2 headers: every credential header stripped; non-credential preserved.
+    const hop2Init = mockUndiciFetch.mock.calls[1]![1] as {
+      headers?: Record<string, string>;
+    };
+    const hop2HeaderJson = JSON.stringify(hop2Init.headers);
+    expect(hop2HeaderJson).not.toContain('SECRET-KEY');
+    expect(hop2HeaderJson).not.toContain('SECRET-SIG');
+    expect(hop2HeaderJson).not.toContain('SECRET');
+    expect(hop2HeaderJson).not.toContain('SECRET-PAY');
+    expect(hop2HeaderJson).toContain('visible');
+  });
+
+  it('T-H1-REDIRECT-UPGRADE: same-host http→https upgrade RETAINS credentials', async () => {
+    // hop-1 http://secure.example 301 → https://secure.example (same host).
+    // A scheme UPGRADE to the SAME host is same-origin for credential purposes,
+    // so the credential headers must ride along to hop-2.
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: PUBLIC_IP, family: 4 }]);
+      },
+    );
+    mockUndiciFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 301,
+          headers: { location: 'https://secure.example/start' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    const res = await ssrfFetch('http://secure.example/start', {
+      method: 'GET',
+      headers: {
+        'x-a2a-key': 'SECRET-KEY',
+        'payment-signature': 'SECRET-SIG',
+        'x-keep': 'visible',
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(mockUndiciFetch).toHaveBeenCalledTimes(2);
+
+    // hop-2 headers: credentials RETAINED on the same-host upgrade.
+    const hop2Init = mockUndiciFetch.mock.calls[1]![1] as {
+      headers?: Record<string, string>;
+    };
+    const hop2HeaderJson = JSON.stringify(hop2Init.headers);
+    expect(hop2HeaderJson).toContain('SECRET-KEY');
+    expect(hop2HeaderJson).toContain('SECRET-SIG');
+    expect(hop2HeaderJson).toContain('visible');
+  });
+
+  it('T-H1-REDIRECT-DOWNGRADE: same-host https→http downgrade STILL strips credentials', async () => {
+    // A scheme DOWNGRADE (https → http) to the same host must NOT retain creds.
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: PUBLIC_IP, family: 4 }]);
+      },
+    );
+    mockUndiciFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 301,
+          headers: { location: 'http://secure.example/start' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    const res = await ssrfFetch('https://secure.example/start', {
+      method: 'GET',
+      headers: {
+        'x-a2a-key': 'SECRET-KEY',
+        'x-keep': 'visible',
+      },
+    });
+    expect(res.status).toBe(200);
+    const hop2Init = mockUndiciFetch.mock.calls[1]![1] as {
+      headers?: Record<string, string>;
+    };
+    const hop2HeaderJson = JSON.stringify(hop2Init.headers);
+    expect(hop2HeaderJson).not.toContain('SECRET-KEY');
+    expect(hop2HeaderJson).toContain('visible');
+  });
+
+  it('T-H1-REDIRECT-UPGRADE-HOSTCHANGE: http→https with a HOST change STILL strips credentials', async () => {
+    // Even a scheme upgrade is cross-origin when the host differs.
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: PUBLIC_IP, family: 4 }]);
+      },
+    );
+    mockUndiciFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 301,
+          headers: { location: 'https://other.example/start' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    const res = await ssrfFetch('http://secure.example/start', {
+      method: 'GET',
+      headers: {
+        'x-a2a-key': 'SECRET-KEY',
+        'x-keep': 'visible',
+      },
+    });
+    expect(res.status).toBe(200);
+    const hop2Init = mockUndiciFetch.mock.calls[1]![1] as {
+      headers?: Record<string, string>;
+    };
+    const hop2HeaderJson = JSON.stringify(hop2Init.headers);
+    expect(hop2HeaderJson).not.toContain('SECRET-KEY');
+    expect(hop2HeaderJson).toContain('visible');
+  });
+
+  it('T-H1-REDIRECT-UPGRADE-PORTCHANGE: http→https with a PORT change STILL strips credentials', async () => {
+    // Same host + scheme upgrade but a non-default port change is cross-origin.
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: PUBLIC_IP, family: 4 }]);
+      },
+    );
+    mockUndiciFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 301,
+          headers: { location: 'https://secure.example:8443/start' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    const res = await ssrfFetch('http://secure.example/start', {
+      method: 'GET',
+      headers: {
+        'x-a2a-key': 'SECRET-KEY',
+        'x-keep': 'visible',
+      },
+    });
+    expect(res.status).toBe(200);
+    const hop2Init = mockUndiciFetch.mock.calls[1]![1] as {
+      headers?: Record<string, string>;
+    };
+    const hop2HeaderJson = JSON.stringify(hop2Init.headers);
+    expect(hop2HeaderJson).not.toContain('SECRET-KEY');
+    expect(hop2HeaderJson).toContain('visible');
+  });
+
+  it('T-H1-REDIRECT-CAP: a redirect loop is bounded (too-many-redirects)', async () => {
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: PUBLIC_IP, family: 4 }]);
+      },
+    );
+    // Always redirect to a fresh public host → forces the hop cap to trip.
+    let n = 0;
+    mockUndiciFetch.mockImplementation(() => {
+      n += 1;
+      return Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: { location: `http://public.hop${n}.example/next` },
+        }),
+      );
+    });
+
+    await expect(
+      ssrfFetch('http://public.start.example/start'),
+    ).rejects.toBeInstanceOf(SSRFRedirectBlockedError);
+    // Bounded: at most MAX_REDIRECT_HOPS (5) + the initial hop = 6 fetches.
+    expect(mockUndiciFetch.mock.calls.length).toBeLessThanOrEqual(6);
   });
 });

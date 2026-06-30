@@ -862,8 +862,17 @@ async function resolveMasterAuth(
             undefined,
             undefined,
             request.composeDestination,
+            keyRow.owner_ref, // F-04 (audit): owner_ref del caller autenticado
           )
-        : await budgetService.debit(keyRow.id, chainId, estimatedCostUsd);
+        : await budgetService.debit(
+            keyRow.id,
+            chainId,
+            estimatedCostUsd,
+            undefined,
+            undefined,
+            undefined,
+            keyRow.owner_ref, // F-04 (audit): owner_ref del caller autenticado
+          );
       if (!debitResult.success) {
         // WKH-125 (AC-2): cap por destino excedido → HTTP 402 (no 403/400). El
         // budget NO se decrementó (rollback de la tx en el RPC).

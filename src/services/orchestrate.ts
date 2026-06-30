@@ -642,6 +642,10 @@ export const orchestrateService = {
         billingKeyRow.id,
         request.chainId,
         step0DebitUsd,
+        undefined, // delegationContext (master path)
+        undefined, // keySessionContext (master path)
+        undefined, // destination
+        billingKeyRow.owner_ref, // F-04 (audit): owner_ref del caller autenticado
       );
       if (!debitRes.success) {
         // Insufficient/owner mismatch → return graceful SIN ejecutar compose (§4.5).

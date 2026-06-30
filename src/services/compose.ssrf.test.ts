@@ -147,7 +147,10 @@ describe('composeService.invokeAgent — runtime SSRF guard (WKH-SEC-04)', () =>
 
   it('AC-4: invokeUrl on a public host is NOT broken — fetch IS called', async () => {
     const agent = makeAgent({ invokeUrl: 'https://public.example/invoke' });
-    mockLookup.mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }]);
+    // H-1 (audit 2026-06-29): the public host is now resolved TWICE — once by the
+    // pre-fetch `validateRegistryUrl` (compose.ts) and once by `ssrfFetch`'s
+    // per-hop `validateOutboundUrl`. Use a persistent mock so both see a public IP.
+    mockLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,

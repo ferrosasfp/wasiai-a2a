@@ -6,8 +6,50 @@
  * Zero external dependencies — uses Fastify hooks + in-memory counters.
  */
 
+import { timingSafeEqual } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { renderMcpMetrics } from '../mcp/metrics.js';
+
+/**
+ * F-07 (audit 2026-06-29): optional bearer/header auth for /metrics. When the
+ * `METRICS_TOKEN` env var is set, the endpoint requires a matching token (via
+ * `Authorization: Bearer <token>` or the `x-metrics-token` header). When unset,
+ * the endpoint stays OPEN (backward-compatible — existing scrapers keep working
+ * until an operator opts in). Returns null when authorized, or a sent 401 reply.
+ */
+function enforceMetricsToken(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): FastifyReply | null {
+  const expected = process.env.METRICS_TOKEN?.trim();
+  if (!expected) return null; // open when unset (backward-compatible)
+
+  const authHeader = request.headers.authorization;
+  const bearer = authHeader?.startsWith('Bearer ')
+    ? authHeader.slice('Bearer '.length).trim()
+    : undefined;
+  const headerToken = request.headers['x-metrics-token'];
+  const provided =
+    bearer ??
+    (typeof headerToken === 'string' ? headerToken.trim() : undefined);
+
+  if (provided === undefined || !constantTimeEquals(provided, expected)) {
+    return reply.status(401).send({ error: 'Unauthorized' });
+  }
+  return null;
+}
+
+/**
+ * Constant-time string comparison — avoids leaking the token length/prefix via
+ * response timing. Returns false immediately on length mismatch (lengths are not
+ * secret) and uses `timingSafeEqual` for equal-length inputs.
+ */
+function constantTimeEquals(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
 
 // ── Metric storage ───────────────────────────────────────────
 interface RouteStat {
@@ -70,7 +112,11 @@ const metricsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/',
     { config: { rateLimit: false } },
-    async (_request: FastifyRequest, reply: FastifyReply) => {
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      // F-07: gate on METRICS_TOKEN when configured (open when unset).
+      const unauthorized = enforceMetricsToken(request, reply);
+      if (unauthorized) return unauthorized;
+
       const lines: string[] = [];
 
       // Uptime

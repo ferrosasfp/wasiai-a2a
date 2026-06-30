@@ -283,7 +283,10 @@ describe('registries routes — ownership integration (WKH-63 W3)', () => {
       url: '/registries/anything',
     });
     expect(r3.statusCode).toBe(400);
-    expect(r3.json().error).toBe('database down');
+    // F-05 (audit 2026-06-29): the raw error message MUST NOT leak to the client
+    // — a static message is returned instead (the detail is logged server-side).
+    expect(r3.json().error).toBe('Failed to delete registry');
+    expect(r3.json().error).not.toContain('database down');
   });
 
   // ── BLQ-ALTO-1 fix-pack: x402-anonymous read-only ──────────────

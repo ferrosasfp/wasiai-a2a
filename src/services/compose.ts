@@ -235,6 +235,7 @@ export const composeService = {
           request.delegationContext, // WKH-101 (DT-11): enruta al RPC atómico bajo delegación
           request.keySessionContext, // WKH-121 (BLQ-ALTO-1): enruta al RPC de sesión y respeta el cap per-step
           stepDestination, // M3 (audit): destino canónico único del step (WKH-125 cap por destino)
+          scopingKeyRow.owner_ref, // F-04 (audit): owner_ref del caller autenticado (no re-derivar de la fila)
         );
         if (!debitResult.success) {
           // DT-H: mid-pipeline debit failure → ComposeResult.error.
@@ -426,6 +427,7 @@ export const composeService = {
               request.delegationContext, // undefined en path master
               request.keySessionContext, // undefined en path master
               stepDestination, // M3 (audit): MISMO destino canónico que el débito original y su refund (CD-8)
+              scopingKeyRow.owner_ref, // F-04 (audit): owner_ref del caller autenticado
             );
             if (retryDebit.success) {
               try {
