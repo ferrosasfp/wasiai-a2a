@@ -305,13 +305,24 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
       ],
     },
     async (request, reply: FastifyReply) => {
-      // orchestrationId lo reenvía el cliente (NO se genera uno nuevo).
-      const orchestrationId = request.body.orchestrationId;
+      // BLQ-MED-1 (AR fix): el orchestrationId interno (clave de idempotencia del
+      // fee, de débito y de telemetría) se GENERA server-side, igual que el
+      // atómico (L90) y /plan (L197). NUNCA se usa el id que manda el cliente como
+      // clave de billing: reusarlo permitiría replay del pipeline real cobrando el
+      // protocol fee una sola vez (chargeProtocolFee → already-charged) → revenue
+      // leak. Cada llamada a /execute produce un id único → cada ejecución cobra
+      // su fee. El id del plan que envía el cliente queda SOLO como correlación.
+      const orchestrationId = crypto.randomUUID();
+      // Correlación plan→execute para analytics (NO se usa para billing/fee/idempotencia).
+      const planId = request.body.orchestrationId;
 
       try {
         const body = request.body;
 
-        request.log.info({ orchestrationId }, 'Orchestration execute started');
+        request.log.info(
+          { orchestrationId, planId },
+          'Orchestration execute started',
+        );
 
         // BLQ-2: bail early if timeout already sent 504
         if (reply.sent) return;
@@ -347,6 +358,7 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             : request.a2aKeyRow;
 
         const plan: OrchestratePlanResult = {
+          // server-side execution-id (clave de idempotencia/fee/débito).
           orchestrationId,
           planStatus: 'ready',
           steps,
@@ -406,7 +418,7 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         const message =
           err instanceof Error ? err.message : 'Orchestration execute failed';
         request.log.error(
-          { orchestrationId, err: message },
+          { orchestrationId, planId, err: message },
           'Orchestration execute failed',
         );
         const wrappedErr = err instanceof Error ? err : new Error(message);

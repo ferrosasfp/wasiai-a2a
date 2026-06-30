@@ -568,4 +568,57 @@ describe('orchestrate routes — WKH-131 /plan + /execute', () => {
     expect(body.currentCostUsdc).toBe(0.9);
     expect(body.maxQuotedCostUsdc).toBe(0.1);
   });
+
+  // T-EXEC-9 (BLQ-MED-1, AR fix): anti-replay del fee/billing. Dos llamadas a
+  // /execute con el MISMO orchestrationId de CLIENTE deben producir DOS
+  // execution-ids server-side DISTINTOS pasados a executeApprovedPlan (clave de
+  // idempotencia del protocol fee + del débito). Si el route reusara el id del
+  // cliente (código viejo), ambos serían iguales → el 2do compose movería fondos
+  // reales pero chargeProtocolFee devolvería already-charged → fee 0% → revenue
+  // leak. Con el fix cada ejecución cobra su fee. Asserta el conteo de ids
+  // server-side únicos, no el del cliente.
+  it('T-EXEC-9: replay del orchestrationId de cliente → execution-id server-side único por llamada', async () => {
+    mockExecute.mockResolvedValue(okResult());
+
+    const clientPlanId = 'replayed-client-plan-id';
+    const payload = {
+      orchestrationId: clientPlanId,
+      steps: [{ agent: 'a1', registry: 'wasiai', input: { q: 0 } }],
+      maxQuotedCostUsdc: 1.0,
+      budget: 1.0,
+    };
+
+    const res1 = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload,
+    });
+    const res2 = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload,
+    });
+
+    expect(res1.statusCode).toBe(200);
+    expect(res2.statusCode).toBe(200);
+    expect(mockExecute).toHaveBeenCalledTimes(2);
+
+    // 3er arg de executeApprovedPlan = clave de idempotencia del fee/débito.
+    const execId1 = mockExecute.mock.calls[0]![2];
+    const execId2 = mockExecute.mock.calls[1]![2];
+
+    // NINGUNO usa el id del cliente como clave de billing (sino sería replayable).
+    expect(execId1).not.toBe(clientPlanId);
+    expect(execId2).not.toBe(clientPlanId);
+    // Cada ejecución produce un id ÚNICO → cada una cobra su fee (no already-charged).
+    expect(execId1).not.toBe(execId2);
+
+    // El plan.orchestrationId (2do arg) también es el id server-side, no el del cliente.
+    expect(
+      (mockExecute.mock.calls[0]![1] as { orchestrationId: string })
+        .orchestrationId,
+    ).toBe(execId1);
+  });
 });
