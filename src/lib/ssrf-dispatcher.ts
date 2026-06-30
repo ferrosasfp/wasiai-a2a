@@ -173,7 +173,11 @@ async function assertUrlAllowed(rawUrl: string): Promise<void> {
   } catch {
     throw new SSRFRedirectBlockedError(rawUrl, 'invalid-url');
   }
-  // URL.hostname strips brackets from IPv6 literals; isIP returns 4|6|0.
+  // NOTE: on Node 22 `URL.hostname` RETAINS the square brackets around an IPv6
+  // literal (e.g. `[::1]`), so `isIP('[::1]')` returns 0 and this Layer-1
+  // literal-IP guard does NOT fire for bracketed IPv6. The real defense for
+  // such literals is Layer-2 below: `validateOutboundUrl` performs a DNS lookup
+  // that fails closed for an unroutable/blocked literal. `isIP` returns 4|6|0.
   const family = isIP(parsed.hostname);
   if (family !== 0 && isBlockedAddress(parsed.hostname, family)) {
     throw new SSRFRedirectBlockedError(rawUrl, 'private-ip-literal');
@@ -228,18 +232,60 @@ function stripCredentialHeaders(
 }
 
 /**
- * True when two URLs differ in protocol, host, or port (cross-origin). Used to
- * decide whether credential headers must be stripped on a redirect hop.
+ * True when two URLs are cross-origin for the purpose of credential retention.
+ *
+ * Strict same-origin (same protocol + host) is obviously same-origin. As a
+ * narrow, security-neutral exception we ALSO treat a same-HOST `http: → https:`
+ * upgrade as same-origin so credential headers survive a legitimate scheme
+ * upgrade (a 301 from `http://host` to `https://host` is extremely common). The
+ * exception is intentionally one-directional and host-pinned:
+ *   - hostname MUST be identical,
+ *   - port MUST be identical (effective port, after default-scheme resolution),
+ *   - the only permitted scheme change is `http: → https:` (an UPGRADE).
+ * Any host change, port change, or downgrade (`https: → http:`) is STILL
+ * cross-origin and strips credentials. The per-hop `assertUrlAllowed` SSRF
+ * validation is unaffected — it runs independently on every hop.
  */
 function isCrossOrigin(a: string, b: string): boolean {
   try {
     const ua = new URL(a);
     const ub = new URL(b);
-    return ua.protocol !== ub.protocol || ua.host !== ub.host;
+    // Exact same-origin (protocol + host, where `host` includes any explicit
+    // port) → never cross-origin.
+    if (ua.protocol === ub.protocol && ua.host === ub.host) return false;
+    // Same-host http → https UPGRADE: retain credentials. Compare on hostname +
+    // NON-DEFAULT port so the scheme's own default-port shift (http :80 →
+    // https :443) is NOT seen as a port change, while a real explicit port move
+    // (`http://h:8080` → `https://h:8443`) still strips credentials.
+    const httpToHttpsUpgrade =
+      ua.protocol === 'http:' && ub.protocol === 'https:';
+    if (
+      httpToHttpsUpgrade &&
+      ua.hostname === ub.hostname &&
+      nonDefaultPort(ua) === nonDefaultPort(ub)
+    ) {
+      return false;
+    }
+    return true;
   } catch {
     // If either URL fails to parse, treat as cross-origin (fail-closed).
     return true;
   }
+}
+
+/**
+ * The URL's port ONLY when it is non-default for the scheme, else `''`. This
+ * normalizes away the http(80)/https(443) default-port difference so a clean
+ * `http://h` → `https://h` upgrade compares equal (`'' === ''`), while an
+ * explicit non-default port on either side (e.g. `:8080`, `:8443`) is surfaced
+ * and forces a cross-origin classification.
+ */
+function nonDefaultPort(u: URL): string {
+  if (!u.port) return '';
+  const isDefault =
+    (u.protocol === 'http:' && u.port === '80') ||
+    (u.protocol === 'https:' && u.port === '443');
+  return isDefault ? '' : u.port;
 }
 
 /**

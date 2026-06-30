@@ -69,3 +69,18 @@
   por el fail-open (connection-refused rápido, no cuelga).
 - **Aplicar en**: al introducir una dependencia de DB en un middleware ya cubierto por tests,
   mockear supabase explícitamente en esos archivos en vez de depender del connection-refused.
+
+### [2026-06-30 02:09] MNR-1 fix — comparación de puerto efectivo invirtió el upgrade http→https
+- **Error**: al permitir que un upgrade same-host `http:→https:` retenga credenciales,
+  mi primer `isCrossOrigin` comparaba el "puerto efectivo" resolviendo el default del scheme
+  (`http`→80, `https`→443). Para `http://h` → `https://h` eso daba `'80' !== '443'` → lo
+  clasificó cross-origin y siguió stripeando las credenciales. El test
+  `T-H1-REDIRECT-UPGRADE` falló (creds ausentes en hop-2).
+- **Causa raíz**: al "normalizar" puertos resolví el default de CADA scheme por separado, pero
+  el cambio de default (80↔443) es exactamente la diferencia que el upgrade introduce y que NO
+  debe contar como cambio de puerto.
+- **Fix**: reemplacé `effectivePort` por `nonDefaultPort`, que devuelve el puerto solo si es
+  NO-default para su scheme, sino `''`. Así `http://h` y `https://h` comparan `'' === ''`
+  (same-origin) y un puerto explícito no-default (`:8080`/`:8443`) sí fuerza cross-origin.
+- **Aplicar en**: cuando compares "mismo origen" cruzando schemes con defaults distintos,
+  normalizá a "puerto explícito no-default" en vez de resolver el default por scheme.

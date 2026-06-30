@@ -476,6 +476,141 @@ describe('ssrfFetch — H-1 manual redirect SSRF re-validation (audit 2026-06-29
     expect(hop2HeaderJson).toContain('visible');
   });
 
+  it('T-H1-REDIRECT-UPGRADE: same-host http→https upgrade RETAINS credentials', async () => {
+    // hop-1 http://secure.example 301 → https://secure.example (same host).
+    // A scheme UPGRADE to the SAME host is same-origin for credential purposes,
+    // so the credential headers must ride along to hop-2.
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: PUBLIC_IP, family: 4 }]);
+      },
+    );
+    mockUndiciFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 301,
+          headers: { location: 'https://secure.example/start' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    const res = await ssrfFetch('http://secure.example/start', {
+      method: 'GET',
+      headers: {
+        'x-a2a-key': 'SECRET-KEY',
+        'payment-signature': 'SECRET-SIG',
+        'x-keep': 'visible',
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(mockUndiciFetch).toHaveBeenCalledTimes(2);
+
+    // hop-2 headers: credentials RETAINED on the same-host upgrade.
+    const hop2Init = mockUndiciFetch.mock.calls[1]![1] as {
+      headers?: Record<string, string>;
+    };
+    const hop2HeaderJson = JSON.stringify(hop2Init.headers);
+    expect(hop2HeaderJson).toContain('SECRET-KEY');
+    expect(hop2HeaderJson).toContain('SECRET-SIG');
+    expect(hop2HeaderJson).toContain('visible');
+  });
+
+  it('T-H1-REDIRECT-DOWNGRADE: same-host https→http downgrade STILL strips credentials', async () => {
+    // A scheme DOWNGRADE (https → http) to the same host must NOT retain creds.
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: PUBLIC_IP, family: 4 }]);
+      },
+    );
+    mockUndiciFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 301,
+          headers: { location: 'http://secure.example/start' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    const res = await ssrfFetch('https://secure.example/start', {
+      method: 'GET',
+      headers: {
+        'x-a2a-key': 'SECRET-KEY',
+        'x-keep': 'visible',
+      },
+    });
+    expect(res.status).toBe(200);
+    const hop2Init = mockUndiciFetch.mock.calls[1]![1] as {
+      headers?: Record<string, string>;
+    };
+    const hop2HeaderJson = JSON.stringify(hop2Init.headers);
+    expect(hop2HeaderJson).not.toContain('SECRET-KEY');
+    expect(hop2HeaderJson).toContain('visible');
+  });
+
+  it('T-H1-REDIRECT-UPGRADE-HOSTCHANGE: http→https with a HOST change STILL strips credentials', async () => {
+    // Even a scheme upgrade is cross-origin when the host differs.
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: PUBLIC_IP, family: 4 }]);
+      },
+    );
+    mockUndiciFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 301,
+          headers: { location: 'https://other.example/start' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    const res = await ssrfFetch('http://secure.example/start', {
+      method: 'GET',
+      headers: {
+        'x-a2a-key': 'SECRET-KEY',
+        'x-keep': 'visible',
+      },
+    });
+    expect(res.status).toBe(200);
+    const hop2Init = mockUndiciFetch.mock.calls[1]![1] as {
+      headers?: Record<string, string>;
+    };
+    const hop2HeaderJson = JSON.stringify(hop2Init.headers);
+    expect(hop2HeaderJson).not.toContain('SECRET-KEY');
+    expect(hop2HeaderJson).toContain('visible');
+  });
+
+  it('T-H1-REDIRECT-UPGRADE-PORTCHANGE: http→https with a PORT change STILL strips credentials', async () => {
+    // Same host + scheme upgrade but a non-default port change is cross-origin.
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: PUBLIC_IP, family: 4 }]);
+      },
+    );
+    mockUndiciFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 301,
+          headers: { location: 'https://secure.example:8443/start' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+    const res = await ssrfFetch('http://secure.example/start', {
+      method: 'GET',
+      headers: {
+        'x-a2a-key': 'SECRET-KEY',
+        'x-keep': 'visible',
+      },
+    });
+    expect(res.status).toBe(200);
+    const hop2Init = mockUndiciFetch.mock.calls[1]![1] as {
+      headers?: Record<string, string>;
+    };
+    const hop2HeaderJson = JSON.stringify(hop2Init.headers);
+    expect(hop2HeaderJson).not.toContain('SECRET-KEY');
+    expect(hop2HeaderJson).toContain('visible');
+  });
+
   it('T-H1-REDIRECT-CAP: a redirect loop is bounded (too-many-redirects)', async () => {
     mockLookup.mockImplementation(
       (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
