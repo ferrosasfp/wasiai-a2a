@@ -14,11 +14,11 @@ import {
   createPublicClient,
   decodeEventLog,
   formatUnits,
-  http,
   parseAbiItem,
   parseUnits,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import { buildRpcTransport } from '../lib/rpc-transport.js';
 import { getAvalancheChain } from './avalanche/chain.js';
 import { getBaseChain } from './base/chain.js';
 import { getKiteChain } from './kite-ozone/chain.js';
@@ -139,6 +139,27 @@ export function resolveRpcUrl(chainKey: ChainKey): string | undefined {
 }
 
 /**
+ * OP-04 (audit 2026-06-30): name of the optional `<CHAIN>_RPC_URL_FALLBACK` env
+ * for each `ChainKey`, mirroring the primary env names in `resolveRpcUrl`.
+ */
+export function resolveRpcFallbackEnv(chainKey: ChainKey): string {
+  switch (chainKey) {
+    case 'kite-ozone-testnet':
+      return 'KITE_RPC_URL_FALLBACK';
+    case 'kite-mainnet':
+      return 'KITE_MAINNET_RPC_URL_FALLBACK';
+    case 'avalanche-mainnet':
+      return 'AVALANCHE_RPC_URL_FALLBACK';
+    case 'avalanche-fuji':
+      return 'FUJI_RPC_URL_FALLBACK';
+    case 'base-mainnet':
+      return 'BASE_MAINNET_RPC_URL_FALLBACK';
+    case 'base-sepolia':
+      return 'BASE_TESTNET_RPC_URL_FALLBACK';
+  }
+}
+
+/**
  * viem `chain` object per `ChainKey` (TBD-2 resuelto). Reusa los helpers de
  * cada adapter — NO importa `viem/chains` directo para Kite (usa defineChain).
  */
@@ -167,9 +188,16 @@ function getVerifierClient(chainKey: ChainKey): PublicClient | null {
   if (cached) return cached;
   const rpcUrl = resolveRpcUrl(chainKey);
   if (!rpcUrl) return null;
+  const chain = resolveChainObject(chainKey);
   const client = createPublicClient({
-    chain: resolveChainObject(chainKey),
-    transport: http(rpcUrl),
+    chain,
+    // OP-04 (audit 2026-06-30): RPC fallback — primary env > *_RPC_URL_FALLBACK
+    // > public default. A single provider outage no longer fails verification.
+    transport: buildRpcTransport({
+      primary: rpcUrl,
+      fallbackEnv: resolveRpcFallbackEnv(chainKey),
+      chainId: chain.id,
+    }),
   }) as PublicClient;
   _clients.set(chainKey, client);
   return client;

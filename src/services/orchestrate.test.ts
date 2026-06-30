@@ -32,6 +32,20 @@ vi.mock('@anthropic-ai/sdk', () => {
   };
 });
 
+// R-3 / OP-10: control the Anthropic circuit breaker so a test can force an
+// OPEN breaker (CircuitOpenError) while preserving the REAL `CircuitOpenError`
+// class (orchestrate uses `instanceof`). Default: passthrough (run the fn).
+const mockBreakerExecute = vi.hoisted(() => vi.fn((fn: () => unknown) => fn()));
+vi.mock('../lib/circuit-breaker.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../lib/circuit-breaker.js')
+  >('../lib/circuit-breaker.js');
+  return {
+    ...actual,
+    anthropicCircuitBreaker: { execute: mockBreakerExecute },
+  };
+});
+
 vi.mock('./discovery.js', () => ({
   discoveryService: {
     discover: vi.fn(),
@@ -178,6 +192,8 @@ describe('orchestrateService', () => {
     vi.mocked(budgetService.debit).mockResolvedValue({ success: true });
     vi.mocked(budgetService.credit).mockResolvedValue({ success: true });
     vi.mocked(budgetService.getBalance).mockResolvedValue('100');
+    // R-3 / OP-10: default breaker passthrough (clearAllMocks wiped it).
+    mockBreakerExecute.mockImplementation((fn: () => unknown) => fn());
   });
 
   // T-1: LLM happy path — inputs dinamicos
@@ -267,6 +283,26 @@ describe('orchestrateService', () => {
 
     expect(result.reasoning).toContain('[FALLBACK]');
     expect(result.answer).toBeDefined();
+  });
+
+  // R-3 / OP-10: an OPEN planner circuit must degrade to greedy, NOT 503.
+  it('R-3/OP-10: CircuitOpenError → greedy fallback (no re-throw / no 503)', async () => {
+    const { CircuitOpenError } = await vi.importActual<
+      typeof import('../lib/circuit-breaker.js')
+    >('../lib/circuit-breaker.js');
+    // Force the breaker OPEN: execute() rejects with the real CircuitOpenError.
+    mockBreakerExecute.mockRejectedValue(new CircuitOpenError('anthropic'));
+
+    // Should NOT throw (would map to 503 at the boundary) — degrades to greedy.
+    const result = await orchestrateService.orchestrate(
+      { goal: 'test circuit open', budget: 5.0 },
+      'orch-circuit-open',
+    );
+
+    expect(result.reasoning).toContain('[FALLBACK]');
+    expect(result.answer).toBeDefined();
+    // A greedy plan was produced and executed via compose (degraded-but-up).
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalled();
   });
 
   // T-5: LLM returns invalid slug -> discard, keep valid

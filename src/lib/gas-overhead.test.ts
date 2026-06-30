@@ -22,6 +22,8 @@ vi.mock('viem', async (importOriginal) => {
 
 import {
   _resetGasOverheadCache,
+  assertGasOverheadConfigured,
+  GasOverheadUnavailableError,
   getStepGasOverheadUsd,
 } from './gas-overhead.js';
 
@@ -247,5 +249,100 @@ describe('getStepGasOverheadUsd', () => {
   it('Kite mainnet with env override → uses the env (no live calc)', async () => {
     process.env[`STEP_GAS_OVERHEAD_USD_${KITE_MAINNET}`] = '0.07';
     expect(await getStepGasOverheadUsd(KITE_MAINNET)).toBe(0.07);
+  });
+});
+
+// ── G-02 fail-closed in production / G-01 boot assertion ────────────────────
+
+describe('G-02 fail-closed (production) + G-01 boot assertion', () => {
+  const SAVE_KEYS = [
+    'NODE_ENV',
+    'STEP_GAS_OVERHEAD_USD',
+    `STEP_GAS_OVERHEAD_USD_${AVAX_MAINNET}`,
+    `STEP_GAS_OVERHEAD_USD_${BASE_MAINNET}`,
+    `STEP_GAS_OVERHEAD_USD_${KITE_MAINNET}`,
+    'AVALANCHE_RPC_URL',
+    'AVAX_USD_FALLBACK',
+  ];
+  const saved: Record<string, string | undefined> = {};
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    for (const k of SAVE_KEYS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    vi.clearAllMocks();
+    _resetGasOverheadCache();
+    mockGetGasPrice.mockResolvedValue(BigInt(25_000_000_000));
+  });
+  afterEach(() => {
+    for (const k of SAVE_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    global.fetch = realFetch;
+  });
+
+  it('mainnet + production + unresolvable → THROWS GasOverheadUnavailableError (fail-closed)', async () => {
+    process.env.NODE_ENV = 'production';
+    // No env pin, no RPC → live calc cannot run → fail-closed in prod.
+    await expect(getStepGasOverheadUsd(AVAX_MAINNET)).rejects.toBeInstanceOf(
+      GasOverheadUnavailableError,
+    );
+  });
+
+  it('mainnet + production + env pin set → returns the pin (no throw)', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.STEP_GAS_OVERHEAD_USD = '0.03';
+    expect(await getStepGasOverheadUsd(AVAX_MAINNET)).toBe(0.03);
+  });
+
+  it('testnet + production + unresolvable → 0 (never throws on testnet)', async () => {
+    process.env.NODE_ENV = 'production';
+    expect(await getStepGasOverheadUsd(FUJI)).toBe(0);
+  });
+
+  it('mainnet + NON-production + unresolvable → fail-open 0 (legacy)', async () => {
+    delete process.env.NODE_ENV;
+    expect(await getStepGasOverheadUsd(AVAX_MAINNET)).toBe(0);
+  });
+
+  it('assertGasOverheadConfigured: production + missing mainnet pin → throws listing the chain', () => {
+    process.env.NODE_ENV = 'production';
+    expect(() =>
+      assertGasOverheadConfigured([AVAX_MAINNET, KITE_MAINNET]),
+    ).toThrow(/2366/);
+  });
+
+  it('assertGasOverheadConfigured: production + flat pin covers all mainnet chains → no throw', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.STEP_GAS_OVERHEAD_USD = '0.02';
+    expect(() =>
+      assertGasOverheadConfigured([AVAX_MAINNET, BASE_MAINNET, KITE_MAINNET]),
+    ).not.toThrow();
+  });
+
+  it('assertGasOverheadConfigured: per-chain pins cover each mainnet chain → no throw', () => {
+    process.env.NODE_ENV = 'production';
+    process.env[`STEP_GAS_OVERHEAD_USD_${AVAX_MAINNET}`] = '0.02';
+    process.env[`STEP_GAS_OVERHEAD_USD_${KITE_MAINNET}`] = '0.07';
+    expect(() =>
+      assertGasOverheadConfigured([AVAX_MAINNET, KITE_MAINNET]),
+    ).not.toThrow();
+  });
+
+  it('assertGasOverheadConfigured: testnet-only chains → no throw even unset', () => {
+    process.env.NODE_ENV = 'production';
+    expect(() =>
+      assertGasOverheadConfigured([FUJI, BASE_SEPOLIA, KITE_TESTNET]),
+    ).not.toThrow();
+  });
+
+  it('assertGasOverheadConfigured: NON-production → no-op (never throws)', () => {
+    delete process.env.NODE_ENV;
+    expect(() =>
+      assertGasOverheadConfigured([AVAX_MAINNET, KITE_MAINNET]),
+    ).not.toThrow();
   });
 });

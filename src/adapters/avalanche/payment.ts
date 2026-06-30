@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
-import { createWalletClient, http, parseUnits } from 'viem';
+import { createWalletClient, parseUnits } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { getLogger } from '../../lib/logger.js';
+import { buildRpcTransport } from '../../lib/rpc-transport.js';
 import type { X402PaymentRequest } from '../../types/index.js';
 import type {
   PaymentAdapter,
@@ -174,10 +175,20 @@ function getWalletClient(network: AvalancheNetwork) {
     );
   }
   const account = privateKeyToAccount(pk as `0x${string}`);
+  const avalancheChain = getAvalancheChain(network);
   const client = createWalletClient({
     account,
-    chain: getAvalancheChain(network),
-    transport: http(getRpcUrl(network)),
+    chain: avalancheChain,
+    // OP-04 (audit 2026-06-30): RPC fallback — primary env > *_RPC_URL_FALLBACK
+    // > public default. Single-provider outage no longer breaks the money-path.
+    transport: buildRpcTransport({
+      primary: getRpcUrl(network),
+      fallbackEnv:
+        network === 'mainnet'
+          ? 'AVALANCHE_RPC_URL_FALLBACK'
+          : 'FUJI_RPC_URL_FALLBACK',
+      chainId: avalancheChain.id,
+    }),
   });
   if (network === 'mainnet') {
     _walletClientMainnet = client;

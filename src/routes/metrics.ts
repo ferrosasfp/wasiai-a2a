@@ -8,21 +8,38 @@
 
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { isMainnetDeployment } from '../lib/env.js';
 import { renderMcpMetrics } from '../mcp/metrics.js';
 
 /**
- * F-07 (audit 2026-06-29): optional bearer/header auth for /metrics. When the
- * `METRICS_TOKEN` env var is set, the endpoint requires a matching token (via
- * `Authorization: Bearer <token>` or the `x-metrics-token` header). When unset,
- * the endpoint stays OPEN (backward-compatible — existing scrapers keep working
- * until an operator opts in). Returns null when authorized, or a sent 401 reply.
+ * F-07 (audit 2026-06-29) + OP-09 (audit 2026-06-30): bearer/header auth for
+ * /metrics. When `METRICS_TOKEN` is set, the endpoint requires a matching token
+ * (via `Authorization: Bearer <token>` or the `x-metrics-token` header).
+ *
+ * OP-09 fail-closed: when `METRICS_TOKEN` is UNSET, the endpoint is fail-CLOSED
+ * only on a MAINNET deployment (503 — mainnet metrics may leak route/error/
+ * latency internals) and stays OPEN on testnet/dev for frictionless scraping.
+ * The intent is to protect mainnet metrics WITHOUT breaking the testnet demo,
+ * which runs `NODE_ENV=production` but settles on testnet chains (so gating on
+ * `isProduction()` would 503 the testnet scraper). Mirrors the dashboard
+ * admin-token pattern (`routes/dashboard.ts:requireAdminToken`). Returns null
+ * when authorized, or a sent 401/503 reply otherwise.
  */
 function enforceMetricsToken(
   request: FastifyRequest,
   reply: FastifyReply,
 ): FastifyReply | null {
   const expected = process.env.METRICS_TOKEN?.trim();
-  if (!expected) return null; // open when unset (backward-compatible)
+  if (!expected) {
+    // OP-09: fail-closed on mainnet, passthrough on testnet/dev.
+    if (isMainnetDeployment()) {
+      return reply.status(503).send({
+        error: 'service_unavailable',
+        message: 'Metrics endpoint not configured',
+      });
+    }
+    return null; // not configured + non-mainnet → open (testnet/dev mode)
+  }
 
   const authHeader = request.headers.authorization;
   const bearer = authHeader?.startsWith('Bearer ')

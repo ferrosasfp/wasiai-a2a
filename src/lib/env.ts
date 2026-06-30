@@ -10,6 +10,12 @@
  * request/registration time, not at import time.
  */
 
+import {
+  getChainConfig,
+  getInitializedChainKeys,
+} from '../adapters/registry.js';
+import { MAINNET_CHAIN_IDS } from './gas-overhead.js';
+
 /**
  * Returns true when the process is running in production.
  *
@@ -19,6 +25,29 @@
  */
 export function isProduction(): boolean {
   return process.env.NODE_ENV?.trim().toLowerCase() === 'production';
+}
+
+/**
+ * OP-09 (audit 2026-06-30): returns true when this process is serving a
+ * MAINNET deployment — i.e. at least one initialized chain settles on a
+ * canonical mainnet chain ID (avalanche 43114, base 8453, kite 2366).
+ *
+ * Used to gate fail-closed protections (e.g. /metrics token requirement) on
+ * mainnet WITHOUT breaking testnet deploys that run `NODE_ENV=production` for
+ * the demo. A testnet-only deploy (fuji / base-sepolia / kite-ozone) returns
+ * false even under `NODE_ENV=production`.
+ *
+ * Reads the live adapter registry (initialized at boot, before any route
+ * serves a request). When the registry is not yet initialized — e.g. a unit
+ * test with a bare Fastify, or pre-boot — returns false (testnet/dev default):
+ * mainnet deploys ALWAYS initialize the registry before binding, so a false
+ * here can only mean "not a mainnet deployment".
+ */
+export function isMainnetDeployment(): boolean {
+  for (const key of getInitializedChainKeys()) {
+    if (MAINNET_CHAIN_IDS.has(getChainConfig(key).chainId)) return true;
+  }
+  return false;
 }
 
 /**

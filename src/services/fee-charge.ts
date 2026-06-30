@@ -20,6 +20,7 @@
  */
 
 import { getPaymentAdapter } from '../adapters/registry.js';
+import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import type { SignResult } from '../adapters/types.js';
 import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
@@ -273,6 +274,35 @@ export async function chargeProtocolFee(
         log.error(
           { orchestrationId, detail: errMsg },
           'settle reported failure',
+        );
+        await markFailed(orchestrationId, errMsg);
+        return { status: 'failed', feeUsdc, error: errMsg };
+      }
+
+      // TB-01 (audit 2026-06-30): re-verify the fee settle on-chain BEFORE
+      // marking it charged. Re-read the returned tx and confirm it really moved
+      // `>= feeWei` of the token to the fee wallet. A forged/insufficient settle
+      // is treated as a failed charge (row marked failed, not charged). Gated
+      // behind SETTLE_VERIFY_ONCHAIN (default ON); no-op when OFF.
+      const feeReVerified = await verifyDefaultChainSettle({
+        txHash: settleResult.txHash,
+        payTo: walletAddress,
+        requiredAmountAtomic: BigInt(feeWei),
+      });
+      // MNR-1: RPC_UNAVAILABLE (a2a couldn't independently check) → ALLOW the
+      // charge (facilitator already confirmed it) but log a clear warning.
+      if (feeReVerified.warn) {
+        log.warn(
+          { orchestrationId, reason: feeReVerified.reason },
+          'settle on-chain re-verify unavailable, trusting facilitator confirmation',
+        );
+      }
+      // A DEFINITIVE contradiction (forged/insufficient settle) → failed charge.
+      if (!feeReVerified.ok) {
+        const errMsg = `settle on-chain re-verification failed: ${feeReVerified.reason ?? 'unknown'}`;
+        log.error(
+          { orchestrationId, detail: errMsg },
+          'settle re-verification failed',
         );
         await markFailed(orchestrationId, errMsg);
         return { status: 'failed', feeUsdc, error: errMsg };

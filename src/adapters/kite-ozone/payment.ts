@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
-import { createWalletClient, http, parseUnits } from 'viem';
+import { createWalletClient, parseUnits } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { getLogger } from '../../lib/logger.js';
+import { buildRpcTransport } from '../../lib/rpc-transport.js';
 import type {
   PieverseSettleRequest,
   PieverseSettleResult,
@@ -226,10 +227,20 @@ function getWalletClient() {
       'OPERATOR_PRIVATE_KEY not set — x402 client signing disabled',
     );
   const account = privateKeyToAccount(pk as `0x${string}`);
+  const kiteChain = getKiteChain();
   _walletClient = createWalletClient({
     account,
-    chain: getKiteChain(),
-    transport: http(getKiteRpcUrl()),
+    chain: kiteChain,
+    // OP-04 (audit 2026-06-30): RPC fallback — primary env > *_RPC_URL_FALLBACK
+    // > public default. Single-provider outage no longer breaks the money-path.
+    transport: buildRpcTransport({
+      primary: getKiteRpcUrl(),
+      fallbackEnv:
+        getKiteNetwork() === 'mainnet'
+          ? 'KITE_MAINNET_RPC_URL_FALLBACK'
+          : 'KITE_RPC_URL_FALLBACK',
+      chainId: kiteChain.id,
+    }),
   });
   return _walletClient;
 }

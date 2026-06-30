@@ -34,10 +34,11 @@
  *  - `<SYM>_USD_FALLBACK` (e.g. `AVAX_USD_FALLBACK`) — last-resort native price.
  */
 import type { Chain, PublicClient } from 'viem';
-import { createPublicClient, http } from 'viem';
+import { createPublicClient } from 'viem';
 import { getAvalancheChain } from '../adapters/avalanche/chain.js';
 import { getBaseChain } from '../adapters/base/chain.js';
 import { getKiteChain } from '../adapters/kite-ozone/chain.js';
+import { buildRpcTransport } from './rpc-transport.js';
 
 /**
  * Canonical mainnet chain IDs the gateway settles on. Mirrors the mainnet
@@ -45,7 +46,9 @@ import { getKiteChain } from '../adapters/kite-ozone/chain.js';
  * 2366 kite-mainnet). Testnet IDs (43113 fuji, 84532 base-sepolia, 2368
  * kite-ozone) are intentionally absent → they resolve to 0 overhead.
  */
-const MAINNET_CHAIN_IDS: ReadonlySet<number> = new Set([43114, 8453, 2366]);
+export const MAINNET_CHAIN_IDS: ReadonlySet<number> = new Set([
+  43114, 8453, 2366,
+]);
 
 /**
  * Sanity clamp for the per-step overhead. A per-step settlement gas cost above
@@ -147,6 +150,23 @@ function resolveMainnetRpcUrl(chainId: number): string | undefined {
   }
 }
 
+/**
+ * OP-04 (audit 2026-06-30): `<CHAIN>_RPC_URL_FALLBACK` env name per mainnet
+ * chainId, mirroring `resolveMainnetRpcUrl`'s primary env names.
+ */
+function resolveMainnetRpcFallbackEnv(chainId: number): string {
+  switch (chainId) {
+    case 43114:
+      return 'AVALANCHE_RPC_URL_FALLBACK';
+    case 8453:
+      return 'BASE_MAINNET_RPC_URL_FALLBACK';
+    case 2366:
+      return 'KITE_MAINNET_RPC_URL_FALLBACK';
+    default:
+      return '';
+  }
+}
+
 /** viem `chain` object per mainnet chainId (reuses adapter chain helpers). */
 function resolveMainnetChainObject(chainId: number): Chain | undefined {
   switch (chainId) {
@@ -173,7 +193,12 @@ function getPublicClient(chainId: number): PublicClient | null {
   if (!rpcUrl || !chain) return null;
   const client = createPublicClient({
     chain,
-    transport: http(rpcUrl),
+    // OP-04 (audit 2026-06-30): RPC fallback (primary > env fallback > public).
+    transport: buildRpcTransport({
+      primary: rpcUrl,
+      fallbackEnv: resolveMainnetRpcFallbackEnv(chainId),
+      chainId,
+    }),
   }) as PublicClient;
   _clients.set(chainId, client);
   return client;
@@ -255,16 +280,40 @@ async function calcLiveOverhead(chainId: number): Promise<number> {
 // ── Public API ──────────────────────────────────────────────────
 
 /**
- * Per-step gas overhead (USD) charged to the caller on top of the agent price,
- * to cover the gateway's downstream settlement gas.
- *
- * @param chainId numeric chain id of the settlement chain (the same one used to
- *   debit the caller per step).
- * @returns the overhead in USD; ALWAYS 0 on testnet / unknown chain. On mainnet:
- *   operator env pin if set, else a live gas estimate (cached ~60s), else the
- *   static env fallback, else 0. NEVER throws (fail-open to env/0).
+ * G-02 (audit 2026-06-30): raised when the per-step gas overhead CANNOT be
+ * resolved on a MAINNET chain (no operator env pin AND the live gas calc failed
+ * / timed out). On mainnet the gateway loses real money if it settles a step
+ * without charging this overhead, so the safe behaviour is to FAIL CLOSED —
+ * reject the settle — instead of silently degrading to 0. Carries a stable
+ * `code` so callers can surface it without leaking internals.
  */
-export async function getStepGasOverheadUsd(chainId: number): Promise<number> {
+export class GasOverheadUnavailableError extends Error {
+  readonly code = 'GAS_OVERHEAD_UNAVAILABLE';
+  readonly chainId: number;
+  constructor(chainId: number) {
+    super(
+      `Mainnet gas overhead unavailable for chain ${chainId} ` +
+        `(no STEP_GAS_OVERHEAD_USD[_${chainId}] env pin and live gas calc failed). ` +
+        'Refusing to settle to avoid an uncovered-gas loss (fail-closed).',
+    );
+    this.name = 'GasOverheadUnavailableError';
+    this.chainId = chainId;
+  }
+}
+
+/** Returns true when this process is running in production. */
+function isProductionEnv(): boolean {
+  return process.env.NODE_ENV?.trim().toLowerCase() === 'production';
+}
+
+/**
+ * Shared resolver. Returns the overhead in USD, or `undefined` when it could not
+ * be resolved on a mainnet chain (caller decides fail-open vs fail-closed).
+ * Testnet / unknown chains always resolve to 0.
+ */
+async function resolveStepGasOverhead(
+  chainId: number,
+): Promise<number | undefined> {
   // Gate: only mainnet chains incur the overhead. Everything else → 0.
   if (!MAINNET_CHAIN_IDS.has(chainId)) return 0;
 
@@ -277,8 +326,7 @@ export async function getStepGasOverheadUsd(chainId: number): Promise<number> {
   const cached = _cache.get(chainId);
   if (cached && cached.expiresAt > now) return cached.value;
 
-  // Live calc with timeout + fail-open. Any failure → 0 (no static env here:
-  // resolveStaticEnvOverhead already returned above if one was configured).
+  // Live calc with timeout. Failure → undefined (caller decides).
   try {
     const value = await Promise.race([
       calcLiveOverhead(chainId),
@@ -292,8 +340,60 @@ export async function getStepGasOverheadUsd(chainId: number): Promise<number> {
     _cache.set(chainId, { value, expiresAt: now + CACHE_TTL_MS });
     return value;
   } catch {
-    // Fail-open: a transient RPC/price error must never break billing. 0 is the
-    // safe value (caller pays only the agent price, as before live calc).
-    return 0;
+    return undefined;
+  }
+}
+
+/**
+ * Per-step gas overhead (USD) charged to the caller on top of the agent price,
+ * to cover the gateway's downstream settlement gas.
+ *
+ * @param chainId numeric chain id of the settlement chain (the same one used to
+ *   debit the caller per step).
+ * @returns the overhead in USD; ALWAYS 0 on testnet / unknown chain. On mainnet:
+ *   operator env pin if set, else a live gas estimate (cached ~60s).
+ *
+ * G-02 fail-closed: on a MAINNET chain, if neither an env pin nor a live gas
+ * estimate is available IN PRODUCTION, this THROWS `GasOverheadUnavailableError`
+ * so the caller rejects the settle (a 0 overhead on mainnet = uncovered-gas
+ * loss). Outside production (dev/test) it preserves the legacy fail-open to 0 so
+ * local runs stay frictionless. Testnet always returns 0 and never throws.
+ */
+export async function getStepGasOverheadUsd(chainId: number): Promise<number> {
+  const value = await resolveStepGasOverhead(chainId);
+  if (value !== undefined) return value;
+  // Unresolvable on mainnet. Fail closed in production; fail open elsewhere.
+  if (isProductionEnv()) {
+    throw new GasOverheadUnavailableError(chainId);
+  }
+  return 0;
+}
+
+/**
+ * G-01 (audit 2026-06-30): boot-time assertion that EVERY configured mainnet
+ * chain has a usable per-step gas overhead — either a per-chain
+ * `STEP_GAS_OVERHEAD_USD_<chainId>` or the flat `STEP_GAS_OVERHEAD_USD` env.
+ * Without this, a mainnet deploy that forgot to set the overhead would silently
+ * lose gas on every settled step (the live calc is a best-effort fallback, not a
+ * guarantee). No-op outside production. No-op for testnet chainIds.
+ *
+ * Throws an `Error` listing ALL misconfigured mainnet chains so the operator
+ * fixes the env in one pass. Call ONCE at boot, AFTER adapters init (so the
+ * configured chain set is known).
+ */
+export function assertGasOverheadConfigured(chainIds: readonly number[]): void {
+  if (!isProductionEnv()) return;
+  const missing = chainIds.filter(
+    (id) =>
+      MAINNET_CHAIN_IDS.has(id) && resolveStaticEnvOverhead(id) === undefined,
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing per-step gas overhead config for mainnet chain(s): ${missing.join(
+        ', ',
+      )}. Set STEP_GAS_OVERHEAD_USD (flat) or STEP_GAS_OVERHEAD_USD_<chainId> ` +
+        'per chain (e.g. STEP_GAS_OVERHEAD_USD_2366 for Kite). ' +
+        'Refusing to boot to avoid an uncovered-gas loss on mainnet.',
+    );
   }
 }

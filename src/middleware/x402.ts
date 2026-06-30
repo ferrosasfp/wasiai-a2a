@@ -15,6 +15,7 @@ import {
   getInitializedChainKeys,
   getPaymentAdapter,
 } from '../adapters/registry.js';
+import { verifySettledTx } from '../adapters/settle-verifier.js';
 import type { ChainKey } from '../adapters/types.js';
 import { checkAndRecordX402Nonce } from '../services/x402-nonce.js';
 import type {
@@ -419,6 +420,72 @@ export function requirePayment(
             `Payment settlement failed: ${settleResult.error ?? 'unknown reason'}`,
           ),
         );
+    // ── TB-01 (audit 2026-06-30): independent on-chain re-verification ──
+    // The facilitator just reported `{ success, txHash }`. BEFORE we grant
+    // access, re-read that tx hash on-chain and confirm it really settled
+    // `>= requiredAmount` of the chain token to `payTo`. A forged/buggy/replayed
+    // settle JSON (fake hash) is rejected here → 402, no access granted. Gated
+    // behind SETTLE_VERIFY_ONCHAIN (default ON): when OFF this is a no-op.
+    const settleToken = bundle.payment?.supportedTokens?.[0];
+    if (
+      typeof settleResult.txHash === 'string' &&
+      settleResult.txHash.startsWith('0x') &&
+      settleToken
+    ) {
+      let reVerified: Awaited<ReturnType<typeof verifySettledTx>>;
+      try {
+        reVerified = await verifySettledTx({
+          chainKey,
+          chainId: bundle.chainConfig.chainId,
+          txHash: settleResult.txHash as `0x${string}`,
+          payTo,
+          tokenAddress: settleToken.address,
+          requiredAmountAtomic: BigInt(requiredAmount),
+        });
+      } catch (err) {
+        // Verifier never throws by contract; this is pure defense in depth.
+        // MNR-1: a thrown error means "couldn't check" → fail-OPEN (allow+warn).
+        reVerified = { ok: true, reason: 'RPC_UNAVAILABLE', warn: true };
+        request.log.error(
+          { detail: err instanceof Error ? err.message : String(err) },
+          'x402 settle re-verification threw',
+        );
+      }
+      if (reply.sent) return;
+      // MNR-1: RPC_UNAVAILABLE (couldn't independently check) → ALLOW the settle
+      // but log a clear warning. The facilitator already broadcast + receipt-
+      // checked it; we only degrade to trusted-infra when a2a can't reach a node.
+      if (reVerified.warn) {
+        request.log.warn(
+          {
+            error_code: 'X402_SETTLE_ONCHAIN_UNVERIFIED',
+            reason: reVerified.reason,
+            txHash: settleResult.txHash,
+          },
+          'settle on-chain re-verify unavailable, trusting facilitator confirmation',
+        );
+      }
+      if (!reVerified.ok) {
+        request.log.warn(
+          {
+            error_code: 'X402_SETTLE_ONCHAIN_MISMATCH',
+            reason: reVerified.reason,
+            txHash: settleResult.txHash,
+          },
+          'x402 settle rejected: on-chain re-verification failed',
+        );
+        return reply
+          .status(402)
+          .send(
+            await buildX402Response(
+              opts,
+              resource,
+              chainKey,
+              `Payment settlement could not be verified on-chain (${reVerified.reason ?? 'unknown'})`,
+            ),
+          );
+      }
+    }
     request.paymentTxHash = settleResult.txHash;
     request.paymentVerified = true;
     if (!reply.sent) reply.header('payment-response', settleResult.txHash);
