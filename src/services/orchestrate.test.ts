@@ -49,6 +49,11 @@ vi.mock('../lib/circuit-breaker.js', async () => {
 vi.mock('./discovery.js', () => ({
   discoveryService: {
     discover: vi.fn(),
+    // WKH-131: planOrchestration ahora resuelve costPerStep/maxQuotedCostUsdc
+    // server-side vía resolveAgentPriceUsdc → discoveryService.getAgent. Mockeado
+    // acá para que el path atómico (que NO usa esos campos en sus aserciones)
+    // resuelva sin pegarle a la DB real.
+    getAgent: vi.fn(),
   },
 }));
 
@@ -101,6 +106,7 @@ vi.mock('./fee-charge.js', async () => {
 
 // ─── Imports (after mocks) ───────────────────────────────────
 
+import { _resetAgentPriceCache } from './agent-price.js';
 import { budgetService } from './budget.js';
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
@@ -185,8 +191,17 @@ function setLlmError(error: Error) {
 describe('orchestrateService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // WKH-131: el cache de resolveAgentPriceUsdc es module-level → reset para
+    // que cada test resuelva precios con el mock recién configurado (no bleed).
+    _resetAgentPriceCache();
     process.env.ANTHROPIC_API_KEY = 'test-key';
     vi.mocked(discoveryService.discover).mockResolvedValue(mockDiscoveryResult);
+    // WKH-131: getAgent por slug contra el set de discovery activo, para que
+    // resolveAgentPriceUsdc devuelva el precio real del step (costPerStep /
+    // maxQuotedCostUsdc). Default: busca en mockAgents; null si no matchea.
+    vi.mocked(discoveryService.getAgent).mockImplementation(async (slug) => {
+      return mockAgents.find((a) => a.slug === slug) ?? null;
+    });
     vi.mocked(composeService.compose).mockResolvedValue(mockComposeResult);
     // WKH-127: re-aplicar defaults del budget mock (clearAllMocks los borra).
     vi.mocked(budgetService.debit).mockResolvedValue({ success: true });
@@ -1402,5 +1417,247 @@ describe('orchestrateService', () => {
     );
 
     expect(vi.mocked(budgetService.credit)).toHaveBeenCalledTimes(1);
+  });
+
+  // ─── WKH-131 (HU-128): /orchestrate/plan + /orchestrate/execute ────────
+
+  function setLlmSummarizer(): void {
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'wasiai',
+            input: { query: 'plan it' },
+            reasoning: 'best match',
+          },
+        ],
+        reasoning: 'plan reasoning',
+      }),
+    );
+  }
+
+  // T-PLAN-1 (AC-1/AC-13): /plan happy → planStatus 'ready' + campos completos,
+  // CERO budgetService.debit (read-only path).
+  it('T-PLAN-1: planOrchestration ready → full plan + zero debit', async () => {
+    setLlmSummarizer();
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'plan a summary', budget: 5.0 },
+      'plan-1',
+    );
+
+    expect(plan.planStatus).toBe('ready');
+    expect(plan.orchestrationId).toBe('plan-1');
+    expect(plan.steps.length).toBeGreaterThan(0);
+    expect(plan.costPerStep.length).toBe(plan.steps.length);
+    expect(plan.maxQuotedCostUsdc).toBeGreaterThan(0);
+    expect(plan.protocolFeeUsdc).toBeCloseTo(5.0 * 0.01, 6);
+    expect(plan.consideredAgents.length).toBeGreaterThan(0);
+    // CD-1/AC-13: plan NUNCA debita ni ejecuta compose.
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
+  });
+
+  // T-PLAN-2 (AC-2): maxQuotedCostUsdc == sum(resolveAgentPriceUsdc)*(1+rate),
+  // mismo número que augmentX402ChallengeAmount produciría para los mismos steps.
+  it('T-PLAN-2: maxQuotedCostUsdc mirrors augmentX402ChallengeAmount math', async () => {
+    setLlmSummarizer();
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'quote it', budget: 5.0 },
+      'plan-2',
+    );
+
+    // summarizer-v1 priceUsdc=0.5; un solo step. rate por defecto 0.01.
+    const rate = getProtocolFeeRate();
+    const expected = Number((0.5 * (1 + rate)).toFixed(6));
+    expect(plan.maxQuotedCostUsdc).toBeCloseTo(expected, 6);
+
+    // Y el espejo directo via quoteMaxCostUsdc sobre los mismos steps.
+    const quoted = await orchestrateService.quoteMaxCostUsdc(plan.steps, false);
+    expect(quoted).toBeCloseTo(expected, 6);
+  });
+
+  // T-PLAN-3 (AC-6): no-funds → planStatus 'insufficient_funds' + track disparado.
+  it('T-PLAN-3: no-funds → insufficient_funds + track', async () => {
+    vi.mocked(budgetService.getBalance).mockResolvedValue('0');
+
+    const plan = await orchestrateService.planOrchestration(
+      {
+        goal: 'broke',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'plan-3',
+    );
+
+    expect(plan.planStatus).toBe('insufficient_funds');
+    expect(plan.remainingBudgetUsd).toBe('0');
+    expect(vi.mocked(eventService.track)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(eventService.track)).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'failed' }),
+    );
+  });
+
+  // T-PLAN-4 (AC-6): no-agents → planStatus 'no_agents' + track.
+  it('T-PLAN-4: no-agents → no_agents + track', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+    });
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'nothing', budget: 5.0 },
+      'plan-4',
+    );
+
+    expect(plan.planStatus).toBe('no_agents');
+    expect(vi.mocked(eventService.track)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(eventService.track)).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'success' }),
+    );
+  });
+
+  // T-PLAN-5 (AC-6): no-budget-fit → planStatus 'budget_exhausted' + track.
+  it('T-PLAN-5: no-budget-fit → budget_exhausted + track', async () => {
+    // Agentes que no caben: precio > budget/maxAgents. discover ya filtra por
+    // maxPrice=budget/maxAgents, así que un budget chico deja el plan vacío.
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [{ ...mockAgents[0]!, priceUsdc: 0.5 }],
+      total: 1,
+      registries: ['wasiai'],
+    });
+    // LLM elige el agente pero el budget-fit lo trunca (budget < precio).
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'wasiai',
+            input: { query: 'x' },
+            reasoning: 'r',
+          },
+        ],
+        reasoning: 'r',
+      }),
+    );
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'too pricey', budget: 0.1 },
+      'plan-5',
+    );
+
+    expect(plan.planStatus).toBe('budget_exhausted');
+    expect(vi.mocked(eventService.track)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(eventService.track)).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'success' }),
+    );
+  });
+
+  // T-PLAN-6 (AC-6): all-demos → planStatus 'no_relevant_agent' + track con
+  // metadata reason/hasRealCandidate.
+  it('T-PLAN-6: all-demos → no_relevant_agent + track metadata', async () => {
+    const demoAgent: Agent = {
+      ...mockAgents[0]!,
+      slug: 'base-demo',
+      name: 'Base Demo',
+      priceUsdc: 0.01,
+    };
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [demoAgent],
+      total: 1,
+      registries: ['wasiai'],
+    });
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'base-demo',
+            registry: 'wasiai',
+            input: { query: 'x' },
+            reasoning: 'r',
+          },
+        ],
+        reasoning: 'r',
+      }),
+    );
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'only demos', budget: 5.0 },
+      'plan-6',
+    );
+
+    expect(plan.planStatus).toBe('no_relevant_agent');
+    expect(vi.mocked(eventService.track)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(eventService.track)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'failed',
+        metadata: expect.objectContaining({
+          reason: 'no_relevant_agent',
+          hasRealCandidate: false,
+        }),
+      }),
+    );
+  });
+
+  // T-PLAN-7 (CD-5): conteo total de call-sites de eventService.track == atómico.
+  // Cada early-return dispara su track exactamente UNA vez (ni perdido ni duplicado).
+  it('T-PLAN-7: each plan early-return fires exactly one track', async () => {
+    // no-agents path: exactamente 1 track en plan, 0 en el atómico extra.
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+    });
+    await orchestrateService.orchestrate({ goal: 'x', budget: 5.0 }, 'plan-7a');
+    // orchestrate() → planOrchestration (track) + mapPlanEarlyReturn (NO track).
+    expect(vi.mocked(eventService.track)).toHaveBeenCalledTimes(1);
+  });
+
+  // T-EXEC-2 (AC-3/AC-5, mock side): currentCostUsdc > maxQuotedCostUsdc →
+  // __quoteStale, CERO debit/compose.
+  it('T-EXEC-2: cap breach → __quoteStale, zero debit/compose', async () => {
+    const plan: import('../types/index.js').OrchestratePlanResult = {
+      orchestrationId: 'exec-2',
+      planStatus: 'ready',
+      steps: [{ agent: 'summarizer-v1', registry: 'wasiai', input: { q: 1 } }],
+      costPerStep: [0.5],
+      totalCostUsdc: 0.5,
+      protocolFeeUsdc: 0.05,
+      maxQuotedCostUsdc: 0.505,
+      reasoning: 'r',
+      consideredAgents: [],
+      plannedCostUsd: 0.5,
+      feeUsdc: 0.05,
+      usedFallback: false,
+      debitFallback: false,
+      billingKeyRow: masterKeyRow(),
+      discoveredAgents: [],
+    };
+
+    // El cap aprobado por el cliente es absurdamente bajo → drift detectado.
+    const res = await orchestrateService.executeApprovedPlan(
+      {
+        goal: '',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+        maxQuotedCostUsdc: 0.0001,
+      },
+      plan,
+      'exec-2',
+    );
+
+    expect('__quoteStale' in res).toBe(true);
+    if ('__quoteStale' in res) {
+      expect(res.maxQuotedCostUsdc).toBe(0.0001);
+      expect(res.currentCostUsdc).toBeGreaterThan(0.0001);
+    }
+    // CD-NEW-3: gate corre ANTES de cualquier débito o compose.
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
   });
 });

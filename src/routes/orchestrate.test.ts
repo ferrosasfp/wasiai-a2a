@@ -25,12 +25,39 @@ import type { A2AAgentKeyRow, OrchestrateResult } from '../types/index.js';
 
 // ── Mock auth middleware ─────────────────────────────────────
 let nextKeyRow: Partial<A2AAgentKeyRow> | undefined;
+// WKH-131: rechazo de auth simulable para T-ROUTE-PLAN (401/402).
+let authRejectStatus: number | undefined;
+// WKH-131: captura del flag skipMiddlewareDebit visto por el middleware de pago
+// (lo setea markSkipMiddlewareDebitHandler ANTES, T-EXEC-8).
+let lastSkipMiddlewareDebit: boolean | undefined;
 vi.mock('../middleware/a2a-key.js', () => ({
   requirePaymentOrA2AKey: () => [
-    async (request: FastifyRequest, _reply: FastifyReply) => {
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      lastSkipMiddlewareDebit = (
+        request as unknown as { skipMiddlewareDebit?: boolean }
+      ).skipMiddlewareDebit;
+      if (authRejectStatus !== undefined) {
+        await reply.status(authRejectStatus).send({ error: 'unauthorized' });
+        return;
+      }
       (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = nextKeyRow;
     },
   ],
+}));
+
+// ── Mock forward-key middleware (no-op spread) ──────────────
+vi.mock('../middleware/forward-key.js', () => ({
+  requireForwardKey: () => [],
+}));
+
+// ── WKH-131: mock agent-price (route /execute re-resuelve server-side) ──
+vi.mock('../services/agent-price.js', () => ({
+  resolveAgentPriceUsdc: vi.fn().mockResolvedValue(0.05),
+}));
+
+// ── WKH-131: mock fee-charge (route /execute lee getProtocolFeeRate) ──
+vi.mock('../services/fee-charge.js', () => ({
+  getProtocolFeeRate: vi.fn().mockReturnValue(0.01),
 }));
 
 // ── Mock timeout middleware ─────────────────────────────────
@@ -58,6 +85,8 @@ vi.mock('../middleware/backpressure.js', () => ({
 vi.mock('../services/orchestrate.js', () => ({
   orchestrateService: {
     orchestrate: vi.fn(),
+    planOrchestration: vi.fn(),
+    executeApprovedPlan: vi.fn(),
   },
 }));
 
@@ -67,6 +96,8 @@ import { orchestrateService } from '../services/orchestrate.js';
 import orchestrateRoutes from './orchestrate.js';
 
 const mockOrchestrate = vi.mocked(orchestrateService.orchestrate);
+const mockPlan = vi.mocked(orchestrateService.planOrchestration);
+const mockExecute = vi.mocked(orchestrateService.executeApprovedPlan);
 
 function okResult(over: Partial<OrchestrateResult> = {}): OrchestrateResult {
   return {
@@ -102,6 +133,8 @@ describe('orchestrate routes — WKH-61 scope mapping', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+    authRejectStatus = undefined;
+    lastSkipMiddlewareDebit = undefined;
   });
 
   it('T-ROUTE-2 (AC-4 e2e): pipeline.errorCode=SCOPE_DENIED → 403', async () => {
@@ -205,6 +238,8 @@ describe('orchestrate route — response headers (P1-5)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+    authRejectStatus = undefined;
+    lastSkipMiddlewareDebit = undefined;
   });
 
   it('P1-5: result.debitFallback=true → x-debit-fallback: registry-miss header', async () => {
@@ -306,6 +341,8 @@ describe('orchestrate route — catch wrapper preserves requestId (P1-5)', () =>
   beforeEach(() => {
     vi.clearAllMocks();
     nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+    authRejectStatus = undefined;
+    lastSkipMiddlewareDebit = undefined;
   });
 
   it('P1-5: service throws → 500 structured error with requestId + orchestrationId', async () => {
@@ -342,5 +379,193 @@ describe('orchestrate route — catch wrapper preserves requestId (P1-5)', () =>
     const body = res.json();
     expect(body).toHaveProperty('requestId');
     expect(body).toHaveProperty('orchestrationId');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// WKH-131 (HU-128): /orchestrate/plan + /orchestrate/execute routes.
+// ─────────────────────────────────────────────────────────────────────
+
+import type { OrchestratePlanResult } from '../types/index.js';
+
+function readyPlan(
+  over: Partial<OrchestratePlanResult> = {},
+): OrchestratePlanResult {
+  return {
+    orchestrationId: 'plan-route-1',
+    planStatus: 'ready',
+    steps: [{ agent: 'a1', registry: 'wasiai', input: { q: 0 } }],
+    costPerStep: [0.5],
+    totalCostUsdc: 0.5,
+    protocolFeeUsdc: 0.05,
+    maxQuotedCostUsdc: 0.505,
+    reasoning: 'plan ok',
+    consideredAgents: [],
+    plannedCostUsd: 0.5,
+    feeUsdc: 0.05,
+    usedFallback: false,
+    debitFallback: false,
+    billingKeyRow: undefined,
+    discoveredAgents: [],
+    ...over,
+  };
+}
+
+describe('orchestrate routes — WKH-131 /plan + /execute', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    app = Fastify();
+    await app.register(orchestrateRoutes, { prefix: '/orchestrate' });
+    await app.ready();
+  });
+
+  afterAll(() => app.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+    authRejectStatus = undefined;
+    lastSkipMiddlewareDebit = undefined;
+  });
+
+  // T-ROUTE-PLAN (AC-12/CD-7): /plan sin auth → el middleware rechaza (401/402).
+  it('T-ROUTE-PLAN: /plan unauthorized → 401 (auth middleware rejects)', async () => {
+    authRejectStatus = 401;
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/plan',
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(401);
+    // El service NUNCA se llamó (auth cortó antes).
+    expect(mockPlan).not.toHaveBeenCalled();
+  });
+
+  // T-ROUTE-PLAN happy: /plan → 200 con SOLO los campos públicos (sin internos).
+  it('T-ROUTE-PLAN: /plan happy → 200 public fields only, no debit header', async () => {
+    mockPlan.mockResolvedValue(readyPlan());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/plan',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.planStatus).toBe('ready');
+    expect(body.maxQuotedCostUsdc).toBe(0.505);
+    // Internos NO serializados (CD: solo públicos).
+    expect(body.plannedCostUsd).toBeUndefined();
+    expect(body.billingKeyRow).toBeUndefined();
+    expect(body.feeUsdc).toBeUndefined();
+    // Sin débito → sin header de saldo.
+    expect(res.headers['x-a2a-remaining-budget']).toBeUndefined();
+  });
+
+  // T-EXEC-8 (RIESGO-4/CD-NEW-5): markSkipMiddlewareDebit presente en /execute →
+  // el middleware ve skipMiddlewareDebit=true (no debita placeholder $1).
+  it('T-EXEC-8: /execute sets skipMiddlewareDebit before payment middleware', async () => {
+    mockExecute.mockResolvedValue(okResult());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: {
+        orchestrationId: 'o-exec-8',
+        steps: [{ agent: 'a1', registry: 'wasiai', input: { q: 0 } }],
+        maxQuotedCostUsdc: 1.0,
+        budget: 1.0,
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    // El flag lo vio el middleware de pago (lo seteó markSkipMiddlewareDebitHandler).
+    expect(lastSkipMiddlewareDebit).toBe(true);
+  });
+
+  // T-ROUTE-EXEC (AC-10/CD-6): SCOPE_DENIED → 403; headers x-debit-fallback /
+  // x-a2a-remaining-budget reflejan el result del service.
+  it('T-ROUTE-EXEC: SCOPE_DENIED → 403', async () => {
+    mockExecute.mockResolvedValue(
+      okResult({
+        pipeline: {
+          success: false,
+          output: null,
+          steps: [],
+          totalCostUsdc: 0,
+          totalLatencyMs: 0,
+          errorCode: 'SCOPE_DENIED',
+        },
+      }),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: {
+        orchestrationId: 'o-exec-scope',
+        steps: [{ agent: 'a1', registry: 'wasiai', input: { q: 0 } }],
+        maxQuotedCostUsdc: 1.0,
+        budget: 1.0,
+      },
+    });
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('T-ROUTE-EXEC: headers reflect debitFallback + remainingBudgetUsd', async () => {
+    mockExecute.mockResolvedValue(
+      okResult({ debitFallback: true, remainingBudgetUsd: '9.4' }),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: {
+        orchestrationId: 'o-exec-headers',
+        steps: [{ agent: 'a1', registry: 'wasiai', input: { q: 0 } }],
+        maxQuotedCostUsdc: 1.0,
+        budget: 10,
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-debit-fallback']).toBe('registry-miss');
+    expect(res.headers['x-a2a-remaining-budget']).toBe('9.4');
+  });
+
+  // AC-3/AC-5: __quoteStale → 409 QUOTE_STALE.
+  it('T-ROUTE-EXEC: __quoteStale → 409 QUOTE_STALE body', async () => {
+    mockExecute.mockResolvedValue({
+      __quoteStale: true,
+      currentCostUsdc: 0.9,
+      maxQuotedCostUsdc: 0.1,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: {
+        orchestrationId: 'o-exec-stale',
+        steps: [{ agent: 'a1', registry: 'wasiai', input: { q: 0 } }],
+        maxQuotedCostUsdc: 0.1,
+        budget: 1.0,
+      },
+    });
+
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.error_code).toBe('QUOTE_STALE');
+    expect(body.currentCostUsdc).toBe(0.9);
+    expect(body.maxQuotedCostUsdc).toBe(0.1);
   });
 });
