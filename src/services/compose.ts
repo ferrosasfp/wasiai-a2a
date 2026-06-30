@@ -4,6 +4,7 @@
 
 import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { getPaymentAdapter } from '../adapters/registry.js';
+import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import { hashCallerRef } from '../lib/caller-hash.js';
 import { selectFacilitatorUrl } from '../lib/cdp-selector.js';
 import {
@@ -896,6 +897,39 @@ export const composeService = {
         throw new Error(
           `x402 settle failed for ${agent.slug}: ${settleResult.error ?? 'unknown'}`,
         );
+      // TB-01 (audit 2026-06-30): re-verify the settle on-chain BEFORE trusting
+      // it. The facilitator just returned `{ success, txHash }`; we independently
+      // re-read that tx and confirm it really moved `>= value` of the token to
+      // the agent's payTo. A forged/replayed/insufficient settle is rejected here
+      // → the step throws → the pipeline aborts (caller is refunded upstream).
+      // Gated behind SETTLE_VERIFY_ONCHAIN (default ON); no-op when OFF.
+      const settleAuth = paymentRequest.authorization as {
+        to?: unknown;
+        value?: unknown;
+      };
+      const settlePayTo =
+        typeof settleAuth.to === 'string' ? settleAuth.to : undefined;
+      let settleValueAtomic: bigint | undefined;
+      try {
+        settleValueAtomic =
+          typeof settleAuth.value === 'string'
+            ? BigInt(settleAuth.value)
+            : undefined;
+      } catch {
+        settleValueAtomic = undefined;
+      }
+      if (settlePayTo && settleValueAtomic !== undefined) {
+        const reVerified = await verifyDefaultChainSettle({
+          txHash: settleResult.txHash,
+          payTo: settlePayTo,
+          requiredAmountAtomic: settleValueAtomic,
+        });
+        if (!reVerified.ok) {
+          throw new Error(
+            `x402 settle on-chain re-verification failed for ${agent.slug}: ${reVerified.reason ?? 'unknown'}`,
+          );
+        }
+      }
       txHash = settleResult.txHash;
       log.info(`[Compose] x402 settled for ${agent.slug} — txHash: ${txHash}`);
     }

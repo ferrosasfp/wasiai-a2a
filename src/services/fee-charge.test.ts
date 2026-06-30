@@ -28,6 +28,15 @@ vi.mock('../adapters/registry.js', () => ({
   getPaymentAdapter: () => ({ sign: mockSign, settle: mockSettle }),
 }));
 
+// TB-01 (audit 2026-06-30): chargeProtocolFee now re-verifies the settle
+// on-chain before marking it charged. Mock it to a pass so the existing
+// happy-path tests stay focused on the fee bookkeeping; `mockVerifySettle`
+// lets a test force a mismatch (re-verification covered in settle-verifier.test).
+const mockVerifySettle = vi.fn().mockResolvedValue({ ok: true });
+vi.mock('../adapters/settle-verifier.js', () => ({
+  verifyDefaultChainSettle: (...a: unknown[]) => mockVerifySettle(...a),
+}));
+
 // Mock del cliente supabase — exponemos `from` con builder chainable.
 const mockMaybeSingle = vi.fn();
 const mockSelect = vi.fn();
@@ -205,6 +214,9 @@ describe('chargeProtocolFee', () => {
     mockInsert.mockReset();
     mockUpdate.mockReset();
     mockMaybeSingle.mockReset();
+    // TB-01: default settle re-verification = pass.
+    mockVerifySettle.mockReset();
+    mockVerifySettle.mockResolvedValue({ ok: true });
     delete process.env.WASIAI_PROTOCOL_FEE_WALLET;
   });
 
@@ -272,6 +284,41 @@ describe('chargeProtocolFee', () => {
     }
     expect(mockSign).toHaveBeenCalledTimes(1);
     expect(mockSettle).toHaveBeenCalledTimes(1);
+  });
+
+  // TB-01 (audit 2026-06-30): a settle reported success but failing on-chain
+  // re-verification must be treated as failed (row NOT marked charged).
+  it('TB-01: settle re-verification failure → status failed (not charged)', async () => {
+    process.env.WASIAI_PROTOCOL_FEE_WALLET =
+      '0x1111111111111111111111111111111111111111';
+    stubSelect({ data: null });
+    stubInsert({});
+    stubUpdate({});
+    mockSign.mockResolvedValueOnce({
+      xPaymentHeader: 'base64-header',
+      paymentRequest: {
+        authorization: { value: '10000000000000000' },
+        signature: '0xsig',
+        network: 'kite',
+      },
+    });
+    mockSettle.mockResolvedValueOnce({ txHash: '0xFAKE', success: true });
+    // Forge: facilitator says success, on-chain re-read says mismatch.
+    mockVerifySettle.mockResolvedValueOnce({
+      ok: false,
+      reason: 'AMOUNT_MISMATCH',
+    });
+
+    const result = await chargeProtocolFee({
+      orchestrationId: 'id-tb01',
+      budgetUsdc: 1.0,
+      feeRate: 0.01,
+    });
+
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('re-verification');
+    }
   });
 
   // FT-11 (AC-8 idempotent): second call finds charged row → skip sign

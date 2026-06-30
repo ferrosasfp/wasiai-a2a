@@ -100,8 +100,13 @@ vi.mock('../../services/registry.js', () => ({
 }));
 
 // ── payment adapter (sign is unused on a2a-key path) ────────
+// G-03 (audit 2026-06-30): the compose route now resolves the step-0 gas
+// overhead via getDefaultChainKey + getAdaptersBundle (testnet chainId 2368 →
+// overhead 0). Provide them so the price preHandler does not 503.
 vi.mock('../../adapters/registry.js', () => ({
   getPaymentAdapter: () => ({ sign: vi.fn(), settle: vi.fn() }),
+  getDefaultChainKey: () => 'kite-ozone-testnet',
+  getAdaptersBundle: () => ({ chainConfig: { chainId: 2368 } }),
 }));
 
 // ── fee-charge (best-effort; skip so it's a no-op) ──────────

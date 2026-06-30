@@ -7,8 +7,13 @@
 
 import cors, { type FastifyCorsOptions } from '@fastify/cors';
 import Fastify from 'fastify';
-import { getChainConfig, initAdapters } from './adapters/registry.js';
+import {
+  getChainConfig,
+  getInitializedChainKeys,
+  initAdapters,
+} from './adapters/registry.js';
 import { assertRequiredEnv, isProduction } from './lib/env.js';
+import { assertGasOverheadConfigured } from './lib/gas-overhead.js';
 import { REDACT_PATHS } from './lib/logger.js';
 import mcpPlugin from './mcp/index.js';
 import { registerErrorBoundary } from './middleware/error-boundary.js';
@@ -38,6 +43,14 @@ assertRequiredEnv();
 
 // Initialize chain-adaptive adapters before server starts
 await initAdapters();
+
+// G-01 (audit 2026-06-30): in production, refuse to boot if any configured
+// MAINNET chain lacks a per-step gas overhead env pin — otherwise the gateway
+// silently loses gas on every settled mainnet step. No-op in dev/test and for
+// testnet-only deploys. Runs AFTER initAdapters so the chain set is known.
+assertGasOverheadConfigured(
+  getInitializedChainKeys().map((key) => getChainConfig(key).chainId),
+);
 
 const fastify = Fastify({
   // F-06 (audit 2026-06-29): redact credential-bearing fields from request logs

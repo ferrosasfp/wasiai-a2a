@@ -454,7 +454,26 @@ export const orchestrateService = {
       );
     }
 
-    const plan = await llmPlan(goal, budget, candidateAgents, maxAgents);
+    // R-3 / OP-10 (audit 2026-06-30): when the Anthropic circuit breaker is OPEN,
+    // `llmPlan` re-throws `CircuitOpenError` (which the error boundary maps to a
+    // hard 503). Orchestrate already has a deterministic `greedyPlan` fallback
+    // for the "LLM failed/returned null" case; an open breaker is the SAME
+    // degraded-but-up situation. Catch it here and route to the greedy fallback
+    // (`plan = null`) so orchestrate stays available instead of 503-ing.
+    let plan: Awaited<ReturnType<typeof llmPlan>>;
+    try {
+      plan = await llmPlan(goal, budget, candidateAgents, maxAgents);
+    } catch (err) {
+      if (err instanceof CircuitOpenError) {
+        log.warn(
+          { orchestrationId },
+          '[Orchestrate] planner circuit open — using greedy fallback',
+        );
+        plan = null;
+      } else {
+        throw err;
+      }
+    }
 
     if (plan) {
       // Validate slugs against discovered agents

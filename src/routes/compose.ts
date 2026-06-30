@@ -4,6 +4,9 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { resolveChainKey } from '../adapters/chain-resolver.js';
+import { getAdaptersBundle, getDefaultChainKey } from '../adapters/registry.js';
+import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
@@ -46,6 +49,37 @@ function deriveComposeDestination(resolved: {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * G-03 (audit 2026-06-30): per-step gas overhead for the COMPOSE STEP-0.
+ *
+ * Steps 1..N already add the gateway's downstream-settle gas overhead in
+ * `composeService` (compose.ts:155). Step-0 is debited by the a2a-key middleware
+ * from `request.composeEstimatedCostUsd` — set HERE — and previously that figure
+ * was the agent price WITHOUT the gas overhead, so the gateway under-recovered
+ * its step-0 settle gas on mainnet. We resolve the SAME chainId the payment
+ * middleware will resolve (header `x-payment-chain` > registry default) and add
+ * the overhead to `composeEstimatedCostUsd`. Because the route refund
+ * (compose.ts handler) reads the SAME `composeEstimatedCostUsd`, a refunded
+ * step-0 returns price + gas (single source of truth preserved across all auth
+ * paths). Testnet / unconfigured → 0 (identical to before).
+ *
+ * On mainnet WITHOUT a configured overhead in production, `getStepGasOverheadUsd`
+ * throws `GasOverheadUnavailableError` (G-02 fail-closed); we let it propagate so
+ * the price preHandler returns 503 (handled by the surrounding try/catch) rather
+ * than silently settling step-0 with uncovered gas.
+ */
+async function resolveStep0GasOverheadUsd(
+  request: FastifyRequest,
+): Promise<number> {
+  const headerRaw = request.headers['x-payment-chain'];
+  const headerOverride = typeof headerRaw === 'string' ? headerRaw : undefined;
+  const chainKey = resolveChainKey({ headerOverride }) ?? getDefaultChainKey();
+  if (!chainKey) return 0;
+  const bundle = getAdaptersBundle(chainKey);
+  if (!bundle) return 0;
+  return getStepGasOverheadUsd(bundle.chainConfig.chainId);
 }
 
 type ComposeBody = {
@@ -198,7 +232,11 @@ async function resolveComposePriceHandler(
         'compose-price.fallback',
       );
       reply.header('x-debit-fallback', 'registry-miss');
-      request.composeEstimatedCostUsd = PLACEHOLDER_FEE_USD;
+      // G-03 (audit 2026-06-30): step-0 debit must include the per-step gas
+      // overhead (consistent with steps 1..N and orchestrate step-0). 0 on
+      // testnet / without env. Same chain the payment middleware resolves.
+      const step0GasOverhead = await resolveStep0GasOverheadUsd(request);
+      request.composeEstimatedCostUsd = PLACEHOLDER_FEE_USD + step0GasOverhead;
       // WKH-125: el destino del step-0 (el middleware no lee body, CD-7).
       request.composeDestination = composeDestination;
       // WKH money-path fix: still advertise the real pipeline cost (step-0 used
@@ -216,8 +254,12 @@ async function resolveComposePriceHandler(
       return;
     }
 
-    // Happy path AC-1
-    request.composeEstimatedCostUsd = price;
+    // Happy path AC-1. G-03 (audit 2026-06-30): add the step-0 per-step gas
+    // overhead (consistent with steps 1..N / orchestrate step-0). 0 on testnet /
+    // without env → identical to before. Same chain the payment middleware
+    // resolves; refund reads the SAME field → price + gas refunded on failure.
+    const step0GasOverhead = await resolveStep0GasOverheadUsd(request);
+    request.composeEstimatedCostUsd = price + step0GasOverhead;
     // WKH-125: el destino del step-0 (el middleware no lee body, CD-7).
     request.composeDestination = composeDestination;
 

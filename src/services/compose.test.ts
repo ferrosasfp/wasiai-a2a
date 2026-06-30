@@ -40,6 +40,14 @@ const mockSettle = vi.fn();
 vi.mock('../adapters/registry.js', () => ({
   getPaymentAdapter: () => ({ sign: mockSign, settle: mockSettle }),
 }));
+// TB-01 (audit 2026-06-30): compose now re-verifies the settle on-chain via
+// settle-verifier. Mock it to a pass so these tests stay focused on compose
+// orchestration (the on-chain re-verification logic is covered in
+// settle-verifier.test.ts). `mockVerifySettle` lets a test force a mismatch.
+const mockVerifySettle = vi.fn().mockResolvedValue({ ok: true });
+vi.mock('../adapters/settle-verifier.js', () => ({
+  verifyDefaultChainSettle: (...a: unknown[]) => mockVerifySettle(...a),
+}));
 vi.mock('./discovery.js', () => ({
   discoveryService: { getAgent: vi.fn(), discover: vi.fn() },
 }));
@@ -172,6 +180,8 @@ function mockFetchError(status: number, body = '{"error":"fail"}') {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // TB-01: default settle re-verification = pass (clearAllMocks wiped it).
+  mockVerifySettle.mockResolvedValue({ ok: true });
   vi.mocked(discoveryService.getAgent).mockResolvedValue(null);
   vi.mocked(discoveryService.discover).mockResolvedValue({
     agents: [],
@@ -283,6 +293,39 @@ describe('composeService.invokeAgent', () => {
     await expect(
       composeService.invokeAgent(agent, { q: 'hello' }),
     ).rejects.toThrow('x402 settle failed');
+  });
+
+  // TB-01 (audit 2026-06-30): a settle the facilitator reports as success but
+  // that FAILS on-chain re-verification must abort the step (no trust of the
+  // facilitator JSON alone).
+  it('TB-01: settle on-chain re-verification failure aborts the step', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'base64mock',
+      paymentRequest: {
+        authorization: {
+          from: '0xAAA',
+          to: '0xBBB',
+          value: '1000000000000000000',
+          validAfter: '0',
+          validBefore: '9999999999',
+          nonce: '0x1234',
+        },
+        signature: '0xSIG',
+        network: 'eip155:2368',
+      },
+    });
+    mockSettle.mockResolvedValue({ success: true, txHash: '0xFAKE' });
+    // Forge: facilitator says success, on-chain re-read says mismatch.
+    mockVerifySettle.mockResolvedValueOnce({
+      ok: false,
+      reason: 'AMOUNT_MISMATCH',
+    });
+    const agent = makeAgent({ priceUsdc: 1.0, metadata: { payTo: '0xBBB' } });
+    mockFetchOk();
+    await expect(
+      composeService.invokeAgent(agent, { q: 'hello' }),
+    ).rejects.toThrow('on-chain re-verification failed');
   });
 
   it('T-5: does not settle when agent returns non-2xx', async () => {

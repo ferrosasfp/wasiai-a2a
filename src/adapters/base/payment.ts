@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
-import { createWalletClient, http, parseUnits } from 'viem';
+import { createWalletClient, parseUnits } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { getLogger } from '../../lib/logger.js';
+import { buildRpcTransport } from '../../lib/rpc-transport.js';
 import type { X402PaymentRequest } from '../../types/index.js';
 import type {
   PaymentAdapter,
@@ -197,10 +198,20 @@ function getWalletClient(network: BaseNetwork) {
     );
   }
   const account = privateKeyToAccount(pk as `0x${string}`);
+  const baseChain = getBaseChain(network);
   const client = createWalletClient({
     account,
-    chain: getBaseChain(network),
-    transport: http(getRpcUrl(network)),
+    chain: baseChain,
+    // OP-04 (audit 2026-06-30): RPC fallback — primary env > *_RPC_URL_FALLBACK
+    // > public default. Single-provider outage no longer breaks the money-path.
+    transport: buildRpcTransport({
+      primary: getRpcUrl(network),
+      fallbackEnv:
+        network === 'mainnet'
+          ? 'BASE_MAINNET_RPC_URL_FALLBACK'
+          : 'BASE_TESTNET_RPC_URL_FALLBACK',
+      chainId: baseChain.id,
+    }),
   });
   if (network === 'mainnet') {
     _walletClientMainnet = client;

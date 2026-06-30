@@ -50,6 +50,25 @@ function resolveLevel(): string {
   return 'info';
 }
 
+/**
+ * OP-11 (audit 2026-06-30): pino `redact` only masks known OBJECT PATHS — it
+ * cannot catch a secret that ends up INSIDE a free-form log message string
+ * (e.g. `log.info('settled tx 0x<64-hex>…')` or an error message that inlined a
+ * private key / signature). This regex masks any 0x-prefixed 64-hex-char run
+ * (the shape of an ECDSA signature half, a private key, or a 32-byte hash/nonce)
+ * appearing in a STRING argument. Tx hashes share that shape and get masked too;
+ * that is acceptable — tx hashes are also carried as structured fields elsewhere
+ * (e.g. `txHash`/`tx_hash`) which remain visible for debugging.
+ */
+const SECRET_HEX_RE = /0x[0-9a-fA-F]{64}/g;
+const SECRET_MASK = '0x[REDACTED-HEX64]';
+
+/** Masks 0x64-hex secret patterns inside a string. Non-strings pass through. */
+export function scrubSecretHex<T>(value: T): T {
+  if (typeof value !== 'string') return value;
+  return value.replace(SECRET_HEX_RE, SECRET_MASK) as unknown as T;
+}
+
 const rootLogger: Logger = pino({
   level: resolveLevel(),
   // Keep timestamps and standard serializers; pino serializes Error objects
@@ -57,6 +76,15 @@ const rootLogger: Logger = pino({
   base: { service: 'wasiai-a2a' },
   // F-06: redact credential-bearing fields (see REDACT_PATHS rationale).
   redact: REDACT_PATHS,
+  // OP-11: scrub 0x64-hex secret patterns from free-form string args (message +
+  // any string positional arg) BEFORE they are written. `redact` (above) only
+  // covers known object paths; this closes the message-string gap.
+  hooks: {
+    logMethod(args, method) {
+      const scrubbed = args.map((a) => scrubSecretHex(a)) as typeof args;
+      return method.apply(this, scrubbed);
+    },
+  },
 });
 
 /**
