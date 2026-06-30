@@ -924,6 +924,14 @@ export const composeService = {
           payTo: settlePayTo,
           requiredAmountAtomic: settleValueAtomic,
         });
+        // MNR-1: RPC_UNAVAILABLE (a2a couldn't independently check) → ALLOW the
+        // settle (facilitator already confirmed it) but log a clear warning.
+        if (reVerified.warn) {
+          log.warn(
+            `[Compose] settle on-chain re-verify unavailable for ${agent.slug} (${reVerified.reason ?? 'unknown'}), trusting facilitator confirmation`,
+          );
+        }
+        // A DEFINITIVE contradiction (forged/insufficient/wrong tx) → reject.
         if (!reVerified.ok) {
           throw new Error(
             `x402 settle on-chain re-verification failed for ${agent.slug}: ${reVerified.reason ?? 'unknown'}`,

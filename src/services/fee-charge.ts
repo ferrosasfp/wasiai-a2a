@@ -289,6 +289,15 @@ export async function chargeProtocolFee(
         payTo: walletAddress,
         requiredAmountAtomic: BigInt(feeWei),
       });
+      // MNR-1: RPC_UNAVAILABLE (a2a couldn't independently check) → ALLOW the
+      // charge (facilitator already confirmed it) but log a clear warning.
+      if (feeReVerified.warn) {
+        log.warn(
+          { orchestrationId, reason: feeReVerified.reason },
+          'settle on-chain re-verify unavailable, trusting facilitator confirmation',
+        );
+      }
+      // A DEFINITIVE contradiction (forged/insufficient settle) → failed charge.
       if (!feeReVerified.ok) {
         const errMsg = `settle on-chain re-verification failed: ${feeReVerified.reason ?? 'unknown'}`;
         log.error(

@@ -7,7 +7,12 @@
  * deposit-verifier.test.ts). `SETTLE_VERIFY_CONFIRM_WAIT_MS=0` keeps tests fast.
  */
 
-import { encodeAbiParameters, parseAbiParameters } from 'viem';
+import {
+  encodeAbiParameters,
+  HttpRequestError,
+  parseAbiParameters,
+  TransactionReceiptNotFoundError,
+} from 'viem';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockGetReceipt = vi.fn();
@@ -115,11 +120,47 @@ describe('verifySettledTx (TB-01)', () => {
     expect(res.ok).toBe(true);
   });
 
-  it('REJECTS a forged hash whose tx is not on-chain (TX_NOT_FOUND)', async () => {
-    mockGetReceipt.mockRejectedValue(new Error('not found'));
+  it('REJECTS a forged hash the node DEFINITIVELY has no receipt for (TX_NOT_FOUND, fail-CLOSED)', async () => {
+    // viem throws TransactionReceiptNotFoundError when the node answered and the
+    // tx simply isn't on chain — the TB-01 forgery signal. Both attempts throw it.
+    const notFound = new TransactionReceiptNotFoundError({ hash: FAKE_TX });
+    mockGetReceipt.mockRejectedValue(notFound);
     const res = await verifySettledTx(baseArgs({ txHash: FAKE_TX }));
     expect(res.ok).toBe(false);
     expect(res.reason).toBe('TX_NOT_FOUND');
+    expect(res.warn).toBeFalsy();
+  });
+
+  it('ALLOWS + WARNS on a TRANSPORT error (RPC unreachable) — fail-OPEN (MNR-1)', async () => {
+    // a2a literally couldn't reach a node (HTTP/network error). The facilitator
+    // already broadcast + receipt-checked the tx → trust it, do not reject.
+    const transportErr = new HttpRequestError({
+      url: 'https://rpc.kite.test',
+      status: 503,
+    });
+    mockGetReceipt.mockRejectedValue(transportErr);
+    const res = await verifySettledTx(baseArgs());
+    expect(res.ok).toBe(true);
+    expect(res.reason).toBe('RPC_UNAVAILABLE');
+    expect(res.warn).toBe(true);
+  });
+
+  it('ALLOWS + WARNS on a generic network error (fetch failed) — fail-OPEN (MNR-1)', async () => {
+    mockGetReceipt.mockRejectedValue(new Error('fetch failed'));
+    const res = await verifySettledTx(baseArgs());
+    expect(res.ok).toBe(true);
+    expect(res.reason).toBe('RPC_UNAVAILABLE');
+    expect(res.warn).toBe(true);
+  });
+
+  it('retries once then ALLOWS+WARNS if the retry is also a transport error (MNR-1)', async () => {
+    mockGetReceipt
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    const res = await verifySettledTx(baseArgs());
+    expect(res.ok).toBe(true);
+    expect(res.reason).toBe('RPC_UNAVAILABLE');
+    expect(mockGetReceipt).toHaveBeenCalledTimes(2);
   });
 
   it('REJECTS a reverted tx (TX_REVERTED)', async () => {
@@ -178,13 +219,28 @@ describe('verifySettledTx (TB-01)', () => {
     expect(res.reason).toBe('AMOUNT_MISMATCH');
   });
 
-  it('REJECTS when the RPC URL is unset (RPC_UNAVAILABLE)', async () => {
+  it('ALLOWS + WARNS when the RPC URL is unset (RPC_UNAVAILABLE) — fail-OPEN (MNR-1)', async () => {
+    // No RPC configured → a2a cannot independently check → trust facilitator.
     delete process.env.KITE_MAINNET_RPC_URL;
     delete process.env.KITE_RPC_URL;
     _resetSettleVerifier();
     const res = await verifySettledTx(baseArgs());
-    expect(res.ok).toBe(false);
+    expect(res.ok).toBe(true);
     expect(res.reason).toBe('RPC_UNAVAILABLE');
+    expect(res.warn).toBe(true);
+  });
+
+  it('ALLOWS + WARNS when getChainId throws a transport error — fail-OPEN (MNR-1)', async () => {
+    mockGetReceipt.mockResolvedValue({
+      status: 'success',
+      blockNumber: 100n,
+      logs: [transferLog({ token: TOKEN, to: PAY_TO, value: REQUIRED })],
+    });
+    mockGetChainId.mockRejectedValue(new Error('fetch failed'));
+    const res = await verifySettledTx(baseArgs());
+    expect(res.ok).toBe(true);
+    expect(res.reason).toBe('RPC_UNAVAILABLE');
+    expect(res.warn).toBe(true);
   });
 
   it('kill-switch OFF → no-op pass (DISABLED), never reads chain', async () => {

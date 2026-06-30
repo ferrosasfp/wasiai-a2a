@@ -16,10 +16,35 @@ vi.mock('../mcp/metrics.js', () => ({
   renderMcpMetrics: () => '# mcp metrics',
 }));
 
+// OP-09 (audit 2026-06-30): the /metrics fail-closed gate now keys off
+// `isMainnetDeployment()` (mainnet chain in the registry), NOT `NODE_ENV`.
+// Mock the registry so each test can drive the deployment network: a mainnet
+// chainId (8453 = base-mainnet) vs a testnet chainId (84532 = base-sepolia).
+const mockChainKeys = vi.fn<() => string[]>(() => []);
+const mockChainConfig = vi.fn<(key?: string) => { chainId: number }>(() => ({
+  chainId: 84532,
+}));
+vi.mock('../adapters/registry.js', () => ({
+  getInitializedChainKeys: () => mockChainKeys(),
+  getChainConfig: (key?: string) => mockChainConfig(key),
+}));
+
 import metricsRoutes from './metrics.js';
 
 const ORIGINAL_METRICS_TOKEN = process.env.METRICS_TOKEN;
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
+
+/** Drives `isMainnetDeployment()` to true (a mainnet chain in the registry). */
+function deployMainnet() {
+  mockChainKeys.mockReturnValue(['base-mainnet']);
+  mockChainConfig.mockReturnValue({ chainId: 8453 });
+}
+
+/** Drives `isMainnetDeployment()` to false (testnet-only registry). */
+function deployTestnet() {
+  mockChainKeys.mockReturnValue(['base-sepolia']);
+  mockChainConfig.mockReturnValue({ chainId: 84532 });
+}
 
 async function buildApp() {
   const app = Fastify();
@@ -30,8 +55,10 @@ async function buildApp() {
 
 beforeEach(() => {
   delete process.env.METRICS_TOKEN;
-  // F-07 tests assume the dev (open-when-unset) behaviour; force non-prod.
+  // Default: testnet deployment (open-when-unset). NODE_ENV is irrelevant to
+  // the gate now, but cleared to keep F-07 dev assumptions intact.
   delete process.env.NODE_ENV;
+  deployTestnet();
 });
 
 afterEach(() => {
@@ -111,9 +138,9 @@ describe('GET /metrics — F-07 optional auth', () => {
   });
 });
 
-describe('GET /metrics — OP-09 fail-closed in production', () => {
-  it('returns 503 when METRICS_TOKEN is unset AND NODE_ENV=production', async () => {
-    process.env.NODE_ENV = 'production';
+describe('GET /metrics — OP-09 fail-closed on MAINNET (not NODE_ENV)', () => {
+  it('returns 503 when METRICS_TOKEN is unset AND the deployment is MAINNET', async () => {
+    deployMainnet();
     delete process.env.METRICS_TOKEN;
     const app = await buildApp();
     try {
@@ -124,8 +151,11 @@ describe('GET /metrics — OP-09 fail-closed in production', () => {
     }
   });
 
-  it('stays OPEN (200) when METRICS_TOKEN unset AND NOT production', async () => {
-    delete process.env.NODE_ENV;
+  it('stays OPEN (200) when METRICS_TOKEN unset on a TESTNET deploy (even NODE_ENV=production)', async () => {
+    // Testnet demo runs NODE_ENV=production but settles on testnet chains —
+    // OP-09 must NOT 503 the testnet scraper. This is the MNR-2 regression.
+    process.env.NODE_ENV = 'production';
+    deployTestnet();
     delete process.env.METRICS_TOKEN;
     const app = await buildApp();
     try {
@@ -136,8 +166,8 @@ describe('GET /metrics — OP-09 fail-closed in production', () => {
     }
   });
 
-  it('production + METRICS_TOKEN set + correct token → 200', async () => {
-    process.env.NODE_ENV = 'production';
+  it('mainnet + METRICS_TOKEN set + correct token → 200', async () => {
+    deployMainnet();
     process.env.METRICS_TOKEN = 'secret-token';
     const app = await buildApp();
     try {

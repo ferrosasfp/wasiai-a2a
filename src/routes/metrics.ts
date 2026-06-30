@@ -8,7 +8,7 @@
 
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { isProduction } from '../lib/env.js';
+import { isMainnetDeployment } from '../lib/env.js';
 import { renderMcpMetrics } from '../mcp/metrics.js';
 
 /**
@@ -17,10 +17,13 @@ import { renderMcpMetrics } from '../mcp/metrics.js';
  * (via `Authorization: Bearer <token>` or the `x-metrics-token` header).
  *
  * OP-09 fail-closed: when `METRICS_TOKEN` is UNSET, the endpoint is fail-CLOSED
- * IN PRODUCTION (503 — metrics may leak route/error/latency internals) and stays
- * OPEN in dev for frictionless local scraping. Mirrors the dashboard admin-token
- * pattern (`routes/dashboard.ts:requireAdminToken`). Returns null when
- * authorized, or a sent 401/503 reply otherwise.
+ * only on a MAINNET deployment (503 — mainnet metrics may leak route/error/
+ * latency internals) and stays OPEN on testnet/dev for frictionless scraping.
+ * The intent is to protect mainnet metrics WITHOUT breaking the testnet demo,
+ * which runs `NODE_ENV=production` but settles on testnet chains (so gating on
+ * `isProduction()` would 503 the testnet scraper). Mirrors the dashboard
+ * admin-token pattern (`routes/dashboard.ts:requireAdminToken`). Returns null
+ * when authorized, or a sent 401/503 reply otherwise.
  */
 function enforceMetricsToken(
   request: FastifyRequest,
@@ -28,14 +31,14 @@ function enforceMetricsToken(
 ): FastifyReply | null {
   const expected = process.env.METRICS_TOKEN?.trim();
   if (!expected) {
-    // OP-09: fail-closed in production, passthrough in dev (mirrors dashboard).
-    if (isProduction()) {
+    // OP-09: fail-closed on mainnet, passthrough on testnet/dev.
+    if (isMainnetDeployment()) {
       return reply.status(503).send({
         error: 'service_unavailable',
         message: 'Metrics endpoint not configured',
       });
     }
-    return null; // not configured + non-prod → open (dev mode)
+    return null; // not configured + non-mainnet → open (testnet/dev mode)
   }
 
   const authHeader = request.headers.authorization;

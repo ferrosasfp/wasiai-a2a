@@ -444,13 +444,27 @@ export function requirePayment(
         });
       } catch (err) {
         // Verifier never throws by contract; this is pure defense in depth.
-        reVerified = { ok: false, reason: 'RPC_UNAVAILABLE' };
+        // MNR-1: a thrown error means "couldn't check" → fail-OPEN (allow+warn).
+        reVerified = { ok: true, reason: 'RPC_UNAVAILABLE', warn: true };
         request.log.error(
           { detail: err instanceof Error ? err.message : String(err) },
           'x402 settle re-verification threw',
         );
       }
       if (reply.sent) return;
+      // MNR-1: RPC_UNAVAILABLE (couldn't independently check) → ALLOW the settle
+      // but log a clear warning. The facilitator already broadcast + receipt-
+      // checked it; we only degrade to trusted-infra when a2a can't reach a node.
+      if (reVerified.warn) {
+        request.log.warn(
+          {
+            error_code: 'X402_SETTLE_ONCHAIN_UNVERIFIED',
+            reason: reVerified.reason,
+            txHash: settleResult.txHash,
+          },
+          'settle on-chain re-verify unavailable, trusting facilitator confirmation',
+        );
+      }
       if (!reVerified.ok) {
         request.log.warn(
           {

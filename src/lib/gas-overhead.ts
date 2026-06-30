@@ -46,7 +46,9 @@ import { buildRpcTransport } from './rpc-transport.js';
  * 2366 kite-mainnet). Testnet IDs (43113 fuji, 84532 base-sepolia, 2368
  * kite-ozone) are intentionally absent → they resolve to 0 overhead.
  */
-const MAINNET_CHAIN_IDS: ReadonlySet<number> = new Set([43114, 8453, 2366]);
+export const MAINNET_CHAIN_IDS: ReadonlySet<number> = new Set([
+  43114, 8453, 2366,
+]);
 
 /**
  * Sanity clamp for the per-step overhead. A per-step settlement gas cost above
