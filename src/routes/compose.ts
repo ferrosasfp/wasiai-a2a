@@ -223,9 +223,36 @@ async function resolveComposePriceHandler(
       ? deriveComposeDestination(resolved)
       : undefined;
 
+    if (price === 0 && resolved === null) {
+      // MONEY-PATH FIX (compose-404-budget-drain): `resolveAgentPriceUsdc`
+      // returns 0 (NOT null) for a slug whose lenient `getAgent` lookup yields a
+      // ghost agent (empty/200 body → priceUsdc parsed as 0), so the
+      // `price === null → 404` guard above is BYPASSED and the registry-miss
+      // placeholder branch below would debit PLACEHOLDER_FEE_USD ($1) for an
+      // agent that does NOT exist. The handler (composeService.resolveAgent) then
+      // 404s — leaving the caller charged $1 for a 404 (self-overcharge / budget
+      // drain). The authoritative existence signal is `resolved`
+      // (`resolveAgentDestination`), which mirrors the SAME
+      // `getAgent(slug,registry) → getAgent(slug)` chain the pipeline uses to
+      // decide existence: `resolved === null` ⟺ the pipeline would 404. So when
+      // the price is 0 AND the agent does not resolve, we 404 HERE — BEFORE the
+      // debit middleware — instead of taking the placeholder fallback. The
+      // placeholder fallback below is preserved ONLY for `price === 0 &&
+      // resolved !== null` (a genuine EXISTING agent with a misconfigured price
+      // 0 — CD-4 registry-miss honest fallback). `return reply...` aborts the
+      // preHandler chain before `requirePaymentOrA2AKey` (same Fastify-5 idiom
+      // as the `price === null` and 503 paths above/below → NO debit).
+      return reply.status(404).send({
+        error: `Agent not found: ${firstStep.agent}`,
+        error_code: 'AGENT_NOT_FOUND',
+      });
+    }
+
     if (price === 0) {
       // AC-4 / DT-C: priceUsdc = 0 más probable config error que agente gratis.
-      // CD-4: fallback honesto con warn + header.
+      // CD-4: fallback honesto con warn + header. Llegamos acá SOLO con
+      // `resolved !== null` (el guard de arriba ya 404eó el caso ghost), i.e.
+      // un agente que EXISTE pero tiene el precio mal configurado en 0.
       request.log.warn(
         {
           reason: 'registry-miss',

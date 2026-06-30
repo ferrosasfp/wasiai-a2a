@@ -145,12 +145,16 @@ vi.mock('../middleware/rate-limit.js', () => ({
   orchestrateRateLimit: () => false,
 }));
 
-import { resolveAgentPriceUsdc } from '../services/agent-price.js';
+import {
+  resolveAgentDestination,
+  resolveAgentPriceUsdc,
+} from '../services/agent-price.js';
 import { composeService } from '../services/compose.js';
 // NOTE: requirePaymentOrA2AKey is NOT mocked — the REAL middleware runs.
 import composeRoutes from './compose.js';
 
 const mockResolvePrice = vi.mocked(resolveAgentPriceUsdc);
+const mockResolveDest = vi.mocked(resolveAgentDestination);
 const mockCompose = vi.mocked(composeService.compose);
 
 describe('compose route — NO debit when price preHandler short-circuits', () => {
@@ -167,6 +171,11 @@ describe('compose route — NO debit when price preHandler short-circuits', () =
   beforeEach(() => {
     vi.clearAllMocks();
     budgetState.balance = 10;
+    // vi.clearAllMocks() wipes the module-mock default (mockResolvedValue(null)),
+    // so re-establish it: default to "agent does not resolve" unless a test
+    // overrides it. Mirrors the real `resolveAgentDestination` returning null
+    // for a non-existent agent.
+    mockResolveDest.mockResolvedValue(null);
   });
 
   it('T-NO-DEBIT-404: non-existent agent → 404, prepaid budget UNCHANGED (no placeholder drain)', async () => {
@@ -188,6 +197,73 @@ describe('compose route — NO debit when price preHandler short-circuits', () =
     expect(budgetState.balance).toBe(10);
     // And the pipeline never executed.
     expect(mockCompose).not.toHaveBeenCalled();
+  });
+
+  it('T-NO-DEBIT-GHOST-PRICE0: non-existent agent resolving to price 0 → 404, budget UNCHANGED (placeholder drain regression)', async () => {
+    // THE CONFIRMED LIVE BUG (reproduced on prod): a NON-EXISTENT agent makes
+    // the lenient `getAgent` lookup return a ghost row, so
+    // `resolveAgentPriceUsdc` yields 0 (NOT null) → the `price === null → 404`
+    // guard is BYPASSED → the registry-miss placeholder branch debits
+    // PLACEHOLDER_FEE_USD ($1) → the handler then 404s WITHOUT refunding. The
+    // distinguishing live signal is `resolveAgentDestination === null` (the
+    // agent does NOT actually resolve / the pipeline would 404). This test
+    // reproduces EXACTLY that combination (price 0 + dest null) and asserts the
+    // request 404s BEFORE the debit. It FAILS on the pre-fix code (which debits
+    // $1) and PASSES on the fix (the price-0 + dest-null guard 404s pre-debit).
+    mockResolvePrice.mockResolvedValueOnce(0);
+    mockResolveDest.mockResolvedValueOnce(null);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_funded_master_key' },
+      payload: { steps: [{ agent: 'ghost-agent-price-zero', input: {} }] },
+    });
+
+    // THE REGRESSION ASSERTIONS FIRST (the money): no $1 placeholder drained
+    // from the funded key. On the pre-fix code these FAIL (budget 10 → 9, debit
+    // called once) — the assertion points straight at the financial bug.
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBe(10);
+    // And the request 404s before the debit, pipeline never executed.
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error_code).toBe('AGENT_NOT_FOUND');
+    expect(mockCompose).not.toHaveBeenCalled();
+  });
+
+  it('T-DEBIT-EXISTING-PRICE0: EXISTING agent with misconfigured price 0 → placeholder fallback STILL debits (legit CD-4 fallback intact)', async () => {
+    // GUARDRAIL against over-correction: an agent that ACTUALLY EXISTS but has a
+    // misconfigured price of 0 must STILL take the registry-miss placeholder
+    // fallback (debit PLACEHOLDER_FEE_USD and run the pipeline) — this is the
+    // intended CD-4 honest fallback. The distinguisher is `resolveAgentDestination
+    // !== null` (the agent resolves). The fix must NOT 404 this case.
+    mockResolvePrice.mockResolvedValueOnce(0);
+    mockResolveDest.mockResolvedValueOnce({
+      registry: 'wasiai',
+      slug: 'free-but-real',
+    });
+    mockCompose.mockResolvedValueOnce({
+      success: true,
+      output: 'ok',
+      steps: [],
+      totalCostUsdc: 1.0,
+      totalLatencyMs: 1,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_funded_master_key' },
+      payload: { steps: [{ agent: 'free-but-real', input: {} }] },
+    });
+
+    // NOT a 404: the existing-agent placeholder fallback proceeds to the debit
+    // middleware and the pipeline.
+    expect(res.statusCode).toBe(200);
+    // The placeholder fallback debit ran (the legit CD-4 behaviour is intact).
+    expect(debitMock).toHaveBeenCalledTimes(1);
+    expect(budgetState.balance).toBeLessThan(10);
+    expect(mockCompose).toHaveBeenCalledTimes(1);
   });
 
   it('T-NO-DEBIT-503: discovery throws → 503, prepaid budget UNCHANGED', async () => {
