@@ -485,3 +485,289 @@ describe('orchestrateService — gas overhead pass-through (step-0)', () => {
     expect(mockDebit.mock.calls[0]![2] as number).toBeCloseTo(0.05, 6);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// WKH-131 (HU-128): executeApprovedPlan — /execute path (compose REAL).
+// Valida el money-path disjunto + cap gate + credit-back + fee con compose real.
+// ─────────────────────────────────────────────────────────────────────
+import type { ComposeStep, OrchestratePlanResult } from '../types/index.js';
+
+describe('orchestrateService — WKH-131 executeApprovedPlan (real compose)', () => {
+  /** Construye un OrchestratePlanResult "aprobado" re-derivando plannedCostUsd
+   *  SERVER-SIDE (resolveAgentPriceUsdc del step-0 vía getAgent), igual que el
+   *  route de /execute (CD-NEW-6). */
+  function approvedPlan(
+    steps: ComposeStep[],
+    plannedCostUsd: number,
+    overrides: Partial<OrchestratePlanResult> = {},
+  ): OrchestratePlanResult {
+    return {
+      orchestrationId: 'exec-plan',
+      planStatus: 'ready',
+      steps,
+      costPerStep: steps.map(() => plannedCostUsd),
+      totalCostUsdc: plannedCostUsd,
+      protocolFeeUsdc: 0.05,
+      maxQuotedCostUsdc: 100,
+      reasoning: 'execute re-derived',
+      consideredAgents: [],
+      plannedCostUsd,
+      feeUsdc: 0.05,
+      usedFallback: false,
+      debitFallback: false,
+      billingKeyRow: makeKeyRow(),
+      discoveredAgents: [],
+      ...overrides,
+    };
+  }
+
+  /** getAgent resuelto por slug contra un set (server-side resolution real). */
+  function getAgentBySlug(agents: Agent[]): void {
+    vi.mocked(discoveryService.getAgent).mockImplementation(async (slug) => {
+      return agents.find((a) => a.slug === slug) ?? null;
+    });
+  }
+
+  // T-EXEC-1 (AC-3 pass / AC-7): /execute happy → debit step-0 + compose, 200.
+  it('T-EXEC-1: execute happy path debits step-0 + compose steps', async () => {
+    const a1 = makeAgent({ slug: 'a1', id: 'id1', priceUsdc: 0.01 });
+    const a2 = makeAgent({ slug: 'a2', id: 'id2', priceUsdc: 0.02 });
+    withAgents([a1, a2]);
+    getAgentBySlug([a1, a2]); // server-side resolve por slug
+    mockFetchOk();
+    mockFetchOk();
+
+    const steps: ComposeStep[] = [
+      { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
+      { agent: 'a2', registry: 'wasiai', input: { q: 1 }, passOutput: true },
+    ];
+
+    const res = await orchestrateService.executeApprovedPlan(
+      {
+        goal: '',
+        budget: 5.0,
+        scopingKeyRow: makeKeyRow(),
+        chainId: CHAIN_ID,
+        maxQuotedCostUsdc: 100, // cap holgado → gate pasa
+      },
+      approvedPlan(steps, 0.01),
+      'orch-exec-1',
+    );
+
+    expect('__quoteStale' in res).toBe(false);
+    if ('__quoteStale' in res) throw new Error('unexpected stale');
+    expect(res.pipeline.success).toBe(true);
+    // step-0 del service (0.01) + step 1 de compose (0.02).
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    expect(mockDebit.mock.calls[0]![2]).toBeCloseTo(0.01, 6);
+  });
+
+  // T-EXEC-3 (AC-4): precios del cliente IGNORADOS — el cobro usa plannedCostUsd
+  // re-derivado server-side, no el costo (falso) que mandó el cliente.
+  it('T-EXEC-3: client prices ignored — debit uses server-side plannedCostUsd', async () => {
+    const a1 = makeAgent({ slug: 'a1', id: 'id1', priceUsdc: 0.07 });
+    withAgents([a1]);
+    vi.mocked(discoveryService.getAgent).mockResolvedValue(a1);
+    mockFetchOk();
+
+    const steps: ComposeStep[] = [
+      { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
+    ];
+    // El cliente "mandó" un costo falso (0.000001) en costPerStep/totalCostUsdc,
+    // pero plannedCostUsd se re-derivó server-side al precio REAL (0.07).
+    const plan = approvedPlan(steps, 0.07, {
+      costPerStep: [0.000001],
+      totalCostUsdc: 0.000001,
+    });
+
+    await orchestrateService.executeApprovedPlan(
+      {
+        goal: '',
+        budget: 5.0,
+        scopingKeyRow: makeKeyRow(),
+        chainId: CHAIN_ID,
+        maxQuotedCostUsdc: 100,
+      },
+      plan,
+      'orch-exec-3',
+    );
+
+    // El débito step-0 == precio real server-side (0.07), NO el costo falso del cliente.
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockDebit.mock.calls[0]![2]).toBeCloseTo(0.07, 6);
+    expect(mockDebit.mock.calls[0]![2]).not.toBeCloseTo(0.000001, 6);
+  });
+
+  // T-EXEC-4 (AC-7/CD-NEW-2): invariante total — Σ(service step-0 + compose 1..N)
+  // == costo real, cada step UNA vez.
+  it('T-EXEC-4: disjoint debits sum to real cost, each step once', async () => {
+    const a1 = makeAgent({ slug: 'a1', id: 'id1', priceUsdc: 0.01 });
+    const a2 = makeAgent({ slug: 'a2', id: 'id2', priceUsdc: 0.02 });
+    const a3 = makeAgent({ slug: 'a3', id: 'id3', priceUsdc: 0.03 });
+    withAgents([a1, a2, a3]);
+    getAgentBySlug([a1, a2, a3]);
+    mockFetchOk();
+    mockFetchOk();
+    mockFetchOk();
+
+    const steps: ComposeStep[] = [
+      { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
+      { agent: 'a2', registry: 'wasiai', input: { q: 1 }, passOutput: true },
+      { agent: 'a3', registry: 'wasiai', input: { q: 2 }, passOutput: true },
+    ];
+
+    await orchestrateService.executeApprovedPlan(
+      {
+        goal: '',
+        budget: 5.0,
+        scopingKeyRow: makeKeyRow(),
+        chainId: CHAIN_ID,
+        maxQuotedCostUsdc: 100,
+      },
+      approvedPlan(steps, 0.01),
+      'orch-exec-4',
+    );
+
+    expect(mockDebit).toHaveBeenCalledTimes(3);
+    const total = mockDebit.mock.calls.reduce(
+      (sum, c) => sum + (c[2] as number),
+      0,
+    );
+    expect(total).toBeCloseTo(0.06, 6); // 0.01 + 0.02 + 0.03, cada step una vez
+  });
+
+  // T-EXEC-5 (AC-8): pipeline.success===false → credit-back. Fallo total
+  // (totalCostUsdc===0) → reembolso del step-0 entero.
+  it('T-EXEC-5: failed pipeline → credit-back of step-0', async () => {
+    // invokeUrl loopback → el SSRF guard de compose bloquea el step-0 ANTES de
+    // settlear (throw → pipeline.success false, totalCostUsdc 0). step-0 (i=0) no
+    // tiene débito per-step (guard i>0) → sin retry/refund de compose; el
+    // credit-back del step-0 lo hace la capa orchestrate (lo que probamos).
+    const a1 = makeAgent({
+      slug: 'a1',
+      id: 'id1',
+      priceUsdc: 0.05,
+      invokeUrl: 'http://127.0.0.1:9/invoke/a1',
+    });
+    withAgents([a1]);
+    vi.mocked(discoveryService.getAgent).mockResolvedValue(a1);
+
+    const steps: ComposeStep[] = [
+      { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
+    ];
+
+    const res = await orchestrateService.executeApprovedPlan(
+      {
+        goal: '',
+        budget: 5.0,
+        scopingKeyRow: makeKeyRow(),
+        chainId: CHAIN_ID,
+        maxQuotedCostUsdc: 100,
+      },
+      approvedPlan(steps, 0.05),
+      'orch-exec-5',
+    );
+
+    if ('__quoteStale' in res) throw new Error('unexpected stale');
+    expect(res.pipeline.success).toBe(false);
+    // credit-back del step-0 (0.05).
+    expect(vi.mocked(budgetService.credit)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(budgetService.credit).mock.calls[0]![2]).toBeCloseTo(
+      0.05,
+      6,
+    );
+  });
+
+  // T-EXEC-6 (AC-9): pipeline.success===true → chargeProtocolFee + protocolFeeUsdc.
+  it('T-EXEC-6: success → chargeProtocolFee called + protocolFeeUsdc set', async () => {
+    const { chargeProtocolFee } = await import('./fee-charge.js');
+    const a1 = makeAgent({ slug: 'a1', id: 'id1', priceUsdc: 0.05 });
+    withAgents([a1]);
+    vi.mocked(discoveryService.getAgent).mockResolvedValue(a1);
+    mockFetchOk();
+
+    const steps: ComposeStep[] = [
+      { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
+    ];
+
+    const res = await orchestrateService.executeApprovedPlan(
+      {
+        goal: '',
+        budget: 5.0,
+        scopingKeyRow: makeKeyRow(),
+        chainId: CHAIN_ID,
+        maxQuotedCostUsdc: 100,
+      },
+      approvedPlan(steps, 0.05, { feeUsdc: 0.05 }),
+      'orch-exec-6',
+    );
+
+    if ('__quoteStale' in res) throw new Error('unexpected stale');
+    expect(res.pipeline.success).toBe(true);
+    expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledWith(
+      expect.objectContaining({ orchestrationId: 'orch-exec-6' }),
+    );
+    expect(res.protocolFeeUsdc).toBeCloseTo(0.05, 6);
+  });
+
+  // T-EXEC-7 (AC-11): debit step-0 incluye getStepGasOverheadUsd(chainId).
+  it('T-EXEC-7: step-0 debit includes gas overhead on mainnet', async () => {
+    const saved = process.env.STEP_GAS_OVERHEAD_USD;
+    process.env.STEP_GAS_OVERHEAD_USD = '0.02';
+    try {
+      const a1 = makeAgent({ slug: 'a1', id: 'id1', priceUsdc: 0.05 });
+      withAgents([a1]);
+      vi.mocked(discoveryService.getAgent).mockResolvedValue(a1);
+      mockFetchOk();
+
+      const steps: ComposeStep[] = [
+        { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
+      ];
+
+      await orchestrateService.executeApprovedPlan(
+        {
+          goal: '',
+          budget: 5.0,
+          scopingKeyRow: makeKeyRow(),
+          chainId: 8453, // mainnet
+          maxQuotedCostUsdc: 100,
+        },
+        approvedPlan(steps, 0.05),
+        'orch-exec-7',
+      );
+
+      // step-0 debit = price (0.05) + overhead (0.02) = 0.07.
+      expect(mockDebit.mock.calls[0]![2]).toBeCloseTo(0.07, 6);
+    } finally {
+      if (saved === undefined) delete process.env.STEP_GAS_OVERHEAD_USD;
+      else process.env.STEP_GAS_OVERHEAD_USD = saved;
+    }
+  });
+
+  // T-EXEC-2 (AC-3/AC-5, real side): cap breach → __quoteStale, cero debit.
+  it('T-EXEC-2: cap breach → __quoteStale before any debit/compose', async () => {
+    const a1 = makeAgent({ slug: 'a1', id: 'id1', priceUsdc: 0.5 });
+    withAgents([a1]);
+    vi.mocked(discoveryService.getAgent).mockResolvedValue(a1);
+
+    const steps: ComposeStep[] = [
+      { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
+    ];
+
+    const res = await orchestrateService.executeApprovedPlan(
+      {
+        goal: '',
+        budget: 5.0,
+        scopingKeyRow: makeKeyRow(),
+        chainId: CHAIN_ID,
+        maxQuotedCostUsdc: 0.0001, // cap absurdamente bajo → drift
+      },
+      approvedPlan(steps, 0.5),
+      'orch-exec-2',
+    );
+
+    expect('__quoteStale' in res).toBe(true);
+    expect(mockDebit).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});

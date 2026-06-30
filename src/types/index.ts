@@ -435,6 +435,56 @@ export interface OrchestrateResult {
   remainingBudgetUsd?: string;
 }
 
+// WKH-131 (HU-128): /orchestrate/plan + /orchestrate/execute split.
+export type OrchestratePlanStatus =
+  | 'ready'
+  | 'insufficient_funds'
+  | 'no_agents'
+  | 'budget_exhausted'
+  | 'no_relevant_agent';
+// circuit_open: DIFERIDO (DT-3). NO agregar en esta HU.
+
+export interface OrchestratePlanResult {
+  orchestrationId: string;
+  planStatus: OrchestratePlanStatus;
+  /** Steps del plan ejecutable; [] en early-returns. */
+  steps: ComposeStep[];
+  /** Precio resuelto server-side por step; [] en early-returns. */
+  costPerStep: number[];
+  /** sum(costPerStep) — informativo, NO base del débito. */
+  totalCostUsdc: number;
+  /** feeUsdc = budget * rate (espejo del atómico). */
+  protocolFeeUsdc: number;
+  /** Cap del execute (§4.3.4 SDD); espejo de augmentX402ChallengeAmount. */
+  maxQuotedCostUsdc: number;
+  reasoning: string;
+  consideredAgents: Agent[];
+  // Internos que executeApprovedPlan necesita del plan (el route NO los serializa
+  // al cliente; el route hace pick de los públicos). Ver §6.
+  plannedCostUsd: number;
+  feeUsdc: number;
+  usedFallback: boolean;
+  debitFallback: boolean;
+  /** Row billable del path master (undefined si deleg/session/x402). */
+  billingKeyRow: A2AAgentKeyRow | undefined;
+  /** discovered.agents — necesario para consideredAgents en execute. */
+  discoveredAgents: Agent[];
+  /**
+   * Interno: balance leído en el no-funds early-return (read-only getBalance,
+   * CD-1). Lo usa SOLO mapPlanEarlyReturnToOrchestrateResult para reconstruir
+   * `remainingBudgetUsd` byte-idéntico al atómico. No se serializa al cliente.
+   */
+  remainingBudgetUsd?: string;
+}
+
+export interface OrchestrateExecuteRequest extends OrchestrateRequest {
+  /** El plan aprobado por el cliente (steps re-resueltos server-side, AC-4). */
+  orchestrationId: string;
+  steps: ComposeStep[];
+  /** Cap aprobado por el cliente; gate AC-3. */
+  maxQuotedCostUsdc: number;
+}
+
 // ============================================================
 // DOWNSTREAM PAYMENT LOGGER (WKH-55)
 // ============================================================

@@ -35,20 +35,26 @@ function cacheKey(slug: string, registryName?: string): string {
  *
  * @param agentSlug - el slug del agente (e.g. 'kyc', 'corridor')
  * @param registryName - opcional, si no se da busca en todos los registries
+ * @param forceRefresh - WKH-131 (RIESGO-2 opción a): si true, saltea el cache
+ *   hit y re-fetchea (re-cachea con TTL fresco). Aditivo, default false → los
+ *   callers existentes no cambian de comportamiento. Solo afecta ESTE lookup;
+ *   no limpia otras entradas (compose concurrente intacto).
  * @returns el precio en USD o null si el agente no existe
  */
 export async function resolveAgentPriceUsdc(
   agentSlug: string,
   registryName?: string,
+  forceRefresh = false,
 ): Promise<number | null> {
   const key = cacheKey(agentSlug, registryName);
   const now = Date.now();
   const entry = cache.get(key);
 
-  if (entry && entry.expiresAt > now) {
+  if (!forceRefresh && entry && entry.expiresAt > now) {
     return entry.price; // cache hit (AC-8: < 5ms)
   }
 
+  // forceRefresh === true → saltea el cache hit y re-fetchea (re-cachea abajo).
   // Cache miss o TTL expirado → re-fetch (AC-9)
   const agent = await discoveryService.getAgent(agentSlug, registryName);
   if (!agent) {
