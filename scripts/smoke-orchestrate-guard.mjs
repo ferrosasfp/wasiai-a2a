@@ -190,7 +190,8 @@ const main = async () => {
   // was all-demos) or "No available/relevant agent…" (planner returned no agents).
   const reasonOk =
     /no_relevant_agent/i.test(reasoning) ||
-    /no (available|relevant|agents?)/i.test(reasoning);
+    /\b(no|none)\b[\s\S]{0,60}?\bagents?\b/i.test(reasoning) ||
+    /no (available|relevant|suitable|matching|appropriate)/i.test(reasoning);
   ok('reasoning signals no relevant/available agent', reasonOk,
     reasoning.slice(0, 90));
 

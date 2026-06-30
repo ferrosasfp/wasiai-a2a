@@ -131,8 +131,13 @@ console.log(`  wasiai-a2a:      ${A2A_URL}`);
 console.log(`  Pipeline:        ${PIPELINE.map(s => s.agent).join(' → ')}`);
 console.log();
 
-// AUTH: a2a-key creado pre-smoke (POST /auth/agent-signup)
-const A2A_KEY = process.env.A2A_KEY ?? 'wasi_a2a_85e698642770088f4465d1689a722debe2abb030eab698070db0269a9505fc0e';
+// AUTH: a2a-key prepago. Se pasa por env (NUNCA hardcodear una key — las keys
+// se hashean en caldz y una hardcodeada queda stale → KEY_NOT_FOUND).
+const A2A_KEY = process.env.A2A_KEY;
+if (!A2A_KEY) {
+  console.log('\n  ⏭️  SKIPPED: exportá A2A_KEY=wasi_a2a_... (una key prepaga FUNDED de caldz) para correr el e2e final.\n');
+  process.exit(0);
+}
 
 // Step 1: discover agents via /discover (POST)
 console.log('▶ Step 1: POST /discover (resolver agents + precios)');
