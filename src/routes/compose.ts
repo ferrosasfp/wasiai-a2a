@@ -201,11 +201,14 @@ async function resolveComposePriceHandler(
 
     if (price === null) {
       // AC-3: agente no existe → 404, NO debit. CD-10: middleware short-circuited.
-      reply.status(404).send({
+      // Fastify 5 idiom: `return reply...` para abortar el preHandler lifecycle
+      // ANTES del middleware de debit (requirePaymentOrA2AKey). El `return reply`
+      // explícito hace que el código matchee el comentario "NO debit / middleware
+      // short-circuited" sin depender del bare-return.
+      return reply.status(404).send({
         error: `Agent not found: ${firstStep.agent}`,
         error_code: 'AGENT_NOT_FOUND',
       });
-      return;
     }
 
     // WKH-125 BLQ-ALTO-1 (fix-pack): resolver el destino canónico desde el
@@ -287,11 +290,12 @@ async function resolveComposePriceHandler(
       },
       'compose-price.registry-unavailable',
     );
-    reply.status(503).send({
+    // Fastify 5 idiom: `return reply...` aborta el preHandler lifecycle ANTES
+    // del middleware de debit (mismo motivo que el path 404).
+    return reply.status(503).send({
       error: 'Registry temporarily unavailable',
       error_code: 'REGISTRY_UNAVAILABLE',
     });
-    return;
   }
 }
 
