@@ -210,7 +210,15 @@ describe('POST /gasless/transfer (WKH-59 SEC-DRAIN-1)', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().txHash).toBe('0xabc123');
     // AC-1 — debit usa el valor REAL ($5), NO el placeholder $1.
-    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 5);
+    expect(mockDebit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      2368,
+      5,
+      undefined,
+      undefined,
+      undefined,
+      'user-1', // F-04 (audit): threaded caller owner_ref
+    );
     expect(mockGaslessTransfer).toHaveBeenCalledTimes(1);
   });
 
@@ -255,7 +263,15 @@ describe('POST /gasless/transfer (WKH-59 SEC-DRAIN-1)', () => {
     expect(response.statusCode).toBe(403);
     expect(response.json().error_code).toBe('INSUFFICIENT_BUDGET');
     // El debit se intentó con el valor real ($5), no con $1.
-    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 5);
+    expect(mockDebit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      2368,
+      5,
+      undefined,
+      undefined,
+      undefined,
+      'user-1', // F-04 (audit): threaded caller owner_ref
+    );
     // DT-F: NO se llama al adapter post-debit-fail.
     expect(mockGaslessTransfer).not.toHaveBeenCalled();
   });
@@ -360,6 +376,14 @@ describe('POST /gasless/transfer (WKH-59 SEC-DRAIN-1)', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 10);
+    expect(mockDebit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      2368,
+      10,
+      undefined,
+      undefined,
+      undefined,
+      'user-1', // F-04 (audit): threaded caller owner_ref
+    );
   });
 });

@@ -252,6 +252,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       undefined,
       undefined,
       'wasiai/a2',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
       3,
@@ -261,6 +262,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       undefined,
       undefined,
       'wasiai/a3',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
     // BLQ-ALTO-1 (REGRESIÓN): invariante anti-double-charge. La suma de TODOS
     // los débitos (service step-0 + compose steps 1..N) == costo real del plan
@@ -304,7 +306,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
     expect(step0Call[1]).toBe(CHAIN_ID);
     expect(step0Call[2]).toBeCloseTo(0.07, 6);
     expect(step0Call[5]).toBeUndefined();
-    // Per-step (step 1) de compose: 6-arg con destino.
+    // Per-step (step 1) de compose: con destino + owner_ref (F-04).
     expect(mockDebit).toHaveBeenCalledWith(
       'k1',
       CHAIN_ID,
@@ -312,6 +314,7 @@ describe('orchestrateService — WKH-102 master-path billing (real compose)', ()
       undefined,
       undefined,
       'wasiai/a2',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
     // El step-0 (0.07) NO se debita per-step con destino (guard i>0).
     expect(mockDebit).not.toHaveBeenCalledWith(

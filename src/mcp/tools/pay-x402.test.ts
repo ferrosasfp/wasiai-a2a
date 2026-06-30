@@ -25,6 +25,14 @@ vi.mock('node:dns', () => ({
   },
 }));
 
+// F-02 (audit 2026-06-29): the tool now fetches via `ssrfFetch`. Mock the
+// dispatcher boundary to delegate to the stubbed global `fetch` so these tests
+// keep asserting the tool's request/response behaviour.
+vi.mock('../../lib/ssrf-dispatcher.js', () => ({
+  ssrfFetch: (input: string | URL, init?: RequestInit) =>
+    (globalThis.fetch as typeof fetch)(input, init),
+}));
+
 import { MCPToolError } from '../types.js';
 import { payX402 } from './pay-x402.js';
 

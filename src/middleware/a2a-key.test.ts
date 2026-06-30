@@ -329,7 +329,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
     expect(response.headers['x-a2a-remaining-budget']).toBe('9.000000');
 
     // BLQ-1/2: debit happens BEFORE response, not fire-and-forget on close
-    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    expect(mockDebit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      2368,
+      1.0,
+      undefined,
+      undefined,
+      undefined,
+      'user-1', // F-04 (audit): threaded caller owner_ref
+    );
     expect(mockDebit).toHaveBeenCalledTimes(1);
   });
 
@@ -383,7 +391,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().a2aKeyId).toBe(TEST_KEY_ID);
     expect(mockDebit).toHaveBeenCalledTimes(1);
-    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    expect(mockDebit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      2368,
+      1.0,
+      undefined,
+      undefined,
+      undefined,
+      'user-1', // F-04 (audit): threaded caller owner_ref
+    );
     // x402 verify/settle path NEVER reached → registry payment adapter not used.
     expect(mockGetPaymentAdapter).not.toHaveBeenCalled();
   });
@@ -716,7 +732,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
       });
 
       expect(response.statusCode).toBe(200);
-      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 1.0);
+      expect(mockDebit).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        43113,
+        1.0,
+        undefined,
+        undefined,
+        undefined,
+        'user-1', // F-04 (audit): threaded caller owner_ref
+      );
       expect(mockDebit).toHaveBeenCalledTimes(1);
     });
 
@@ -735,7 +759,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
       });
 
       expect(response.statusCode).toBe(200);
-      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 1.0);
+      expect(mockDebit).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        43113,
+        1.0,
+        undefined,
+        undefined,
+        undefined,
+        'user-1', // F-04 (audit): threaded caller owner_ref
+      );
     });
 
     // ── AC-5/AC-6: no header → registry default ────────────────
@@ -754,7 +786,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
 
       expect(response.statusCode).toBe(200);
       // Default chain = kite-ozone-testnet → chainId 2368.
-      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+      expect(mockDebit).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        2368,
+        1.0,
+        undefined,
+        undefined,
+        undefined,
+        'user-1', // F-04 (audit): threaded caller owner_ref
+      );
     });
 
     // ── AC-7: unrecognised slug → 400 CHAIN_NOT_SUPPORTED ──────
@@ -901,7 +941,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
       // CD-5: never two chains debited for the same request.
       expect(mockDebit).toHaveBeenCalledTimes(1);
       // Debit happened on the target chain only (43113), never on default 2368.
-      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 1.0);
+      expect(mockDebit).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        43113,
+        1.0,
+        undefined,
+        undefined,
+        undefined,
+        'user-1', // F-04 (audit): threaded caller owner_ref
+      );
       expect(mockDebit).not.toHaveBeenCalledWith(
         TEST_KEY_ID,
         2368,
@@ -937,7 +985,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
       // AC-8: target chainId in the message (not the original 2368 default).
       expect(response.json().error).toBe('chain 43113 balance is 0');
       // CD-12: debit AND getBalance read chainId from the same bundle (43113).
-      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 1.0);
+      expect(mockDebit).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        43113,
+        1.0,
+        undefined,
+        undefined,
+        undefined,
+        'user-1', // F-04 (audit): threaded caller owner_ref
+      );
       expect(mockGetBalance).toHaveBeenCalledWith(TEST_KEY_ID, 43113, 'user-1');
     });
   });
@@ -1004,7 +1060,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
 
       expect(response.statusCode).toBe(200);
       // CD-3 backward-compat: debit con placeholder $1.
-      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+      expect(mockDebit).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        2368,
+        1.0,
+        undefined,
+        undefined,
+        undefined,
+        'user-1', // F-04 (audit): threaded caller owner_ref
+      );
     });
 
     it('T-MW-GASLESS-2: con gaslessEstimatedCostUsd=5 inyectado → debita $5', async () => {
@@ -1021,7 +1085,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
 
       expect(response.statusCode).toBe(200);
       // El middleware lee request.gaslessEstimatedCostUsd y lo usa en debit.
-      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 5);
+      expect(mockDebit).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        2368,
+        5,
+        undefined,
+        undefined,
+        undefined,
+        'user-1', // F-04 (audit): threaded caller owner_ref
+      );
     });
   });
 
@@ -1110,7 +1182,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
 
       expect(response.statusCode).toBe(200);
       // AC-1: debit usa el valor real inyectado, NO el placeholder $1.
-      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 0.001);
+      expect(mockDebit).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        2368,
+        0.001,
+        undefined,
+        undefined,
+        undefined,
+        'user-1', // F-04 (audit): threaded caller owner_ref
+      );
     });
 
     it('T-MW-COMPOSE-2 should prefer composeEstimatedCostUsd over gaslessEstimatedCostUsd when both set', async () => {
@@ -1127,7 +1207,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
 
       expect(response.statusCode).toBe(200);
       // DT-F: compose-first precedence. 0.05 wins over 10.
-      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 0.05);
+      expect(mockDebit).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        2368,
+        0.05,
+        undefined,
+        undefined,
+        undefined,
+        'user-1', // F-04 (audit): threaded caller owner_ref
+      );
     });
 
     it('T-MW-COMPOSE-3 should fall back to $1 placeholder when neither field is set', async () => {
@@ -1144,7 +1232,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
 
       expect(response.statusCode).toBe(200);
       // AC-7: backward-compat placeholder $1 cuando ningún campo está seteado.
-      expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+      expect(mockDebit).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        2368,
+        1.0,
+        undefined,
+        undefined,
+        undefined,
+        'user-1', // F-04 (audit): threaded caller owner_ref
+      );
     });
 
     it('T-MW-COMPOSE-4 should augment request.resolvedChainId after bundle resolution', async () => {
@@ -1441,7 +1537,15 @@ describe('requirePaymentOrA2AKey — delegation branch (WKH-101)', () => {
     expect(res.json().hasDelegationContext).toBe(false);
     expect(mockLookupToken).not.toHaveBeenCalled();
     expect(mockDebitDelegation).not.toHaveBeenCalled();
-    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    expect(mockDebit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      2368,
+      1.0,
+      undefined,
+      undefined,
+      undefined,
+      'user-1', // F-04 (audit): threaded caller owner_ref
+    );
   });
 
   // ── WKH-124 (AC-2, MNR-3): budget_debit receipt on the MASTER path ──
@@ -1462,7 +1566,15 @@ describe('requirePaymentOrA2AKey — delegation branch (WKH-101)', () => {
 
     expect(res.statusCode).toBe(200);
     // CD-7: the debit signature assertion stays untouched.
-    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    expect(mockDebit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      2368,
+      1.0,
+      undefined,
+      undefined,
+      undefined,
+      'user-1', // F-04 (audit): threaded caller owner_ref
+    );
     expect(mockReceiptEmit).toHaveBeenCalledWith(
       expect.objectContaining({
         ownerRef: 'user-1',
@@ -1922,7 +2034,15 @@ describe('requirePaymentOrA2AKey — key-session branch (WKH-121)', () => {
     expect(res.json().hasKeySessionContext).toBe(false);
     expect(mockSessionLookup).not.toHaveBeenCalled();
     expect(mockSessionDebit).not.toHaveBeenCalled();
-    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    expect(mockDebit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      2368,
+      1.0,
+      undefined,
+      undefined,
+      undefined,
+      'user-1', // F-04 (audit): threaded caller owner_ref
+    );
   });
 
   // T-COEXIST (AC-15) — sess token routes to keySessionService, NOT delegationService
@@ -2031,7 +2151,15 @@ describe('requirePaymentOrA2AKey — signed auth (WKH-123)', () => {
         },
       }),
     );
-    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    expect(mockDebit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      2368,
+      1.0,
+      undefined,
+      undefined,
+      undefined,
+      'user-1', // F-04 (audit): threaded caller owner_ref
+    );
   });
 
   // ── AC-2: session HMAC OK → debit ─────────────────────────
@@ -2220,7 +2348,15 @@ describe('requirePaymentOrA2AKey — signed auth (WKH-123)', () => {
 
     expect(res.statusCode).toBe(200);
     expect(mockVerifySignedAuth).not.toHaveBeenCalled();
-    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    expect(mockDebit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      2368,
+      1.0,
+      undefined,
+      undefined,
+      undefined,
+      'user-1', // F-04 (audit): threaded caller owner_ref
+    );
   });
 
   it('AC-7 session: require_signature false → bearer flow, signature check skipped', async () => {
@@ -2383,7 +2519,15 @@ describe('requirePaymentOrA2AKey — WKH-127 skipMiddlewareDebit', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(mockDebit).toHaveBeenCalledWith(TEST_KEY_ID, 2368, 1.0);
+    expect(mockDebit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      2368,
+      1.0,
+      undefined,
+      undefined,
+      undefined,
+      'user-1', // F-04 (audit): threaded caller owner_ref
+    );
     expect(res.headers['x-a2a-remaining-budget']).toBe('9.000000');
   });
 

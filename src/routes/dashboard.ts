@@ -94,7 +94,7 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/api/stats',
     { config: { rateLimit: false }, preHandler: requireAdminToken },
-    async (_request: FastifyRequest, reply: FastifyReply) => {
+    async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         const now = Date.now();
         if (statsCache && now < statsCache.expiresAt) {
@@ -104,9 +104,12 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
         statsCache = { data: stats, expiresAt: now + STATS_CACHE_TTL_MS };
         return reply.send(stats);
       } catch (err) {
-        return reply.status(500).send({
-          error: err instanceof Error ? err.message : 'Failed to get stats',
-        });
+        // F-05 (audit 2026-06-29): static client message; detail logged server-side.
+        request.log.error(
+          { detail: err instanceof Error ? err.message : 'unknown' },
+          'dashboard stats failed',
+        );
+        return reply.status(500).send({ error: 'Failed to get stats' });
       }
     },
   );
@@ -125,9 +128,12 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
         const events = await eventService.recent(limit);
         return reply.send({ events, total: events.length });
       } catch (err) {
-        return reply.status(500).send({
-          error: err instanceof Error ? err.message : 'Failed to get events',
-        });
+        // F-05 (audit 2026-06-29): static client message; detail logged server-side.
+        request.log.error(
+          { detail: err instanceof Error ? err.message : 'unknown' },
+          'dashboard events failed',
+        );
+        return reply.status(500).send({ error: 'Failed to get events' });
       }
     },
   );

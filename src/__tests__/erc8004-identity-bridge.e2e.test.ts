@@ -128,8 +128,16 @@ vi.mock('../lib/circuit-breaker.js', () => ({
 }));
 
 // ── SSRF validator (let everything through in the test) ──────
+// F-02/H-1 (audit 2026-06-29): `ssrfFetch` now also imports `validateOutboundUrl`
+// (per-hop re-validation) and `isBlockedAddress`. Provide both so the mock keeps
+// the module's full surface — otherwise `validateOutboundUrl` is undefined and
+// every outbound fetch throws.
 vi.mock('../lib/url-validator.js', () => ({
   validateRegistryUrl: vi.fn().mockResolvedValue(undefined),
+  validateOutboundUrl: vi
+    .fn()
+    .mockResolvedValue({ ok: true, value: new URL('http://public.example/') }),
+  isBlockedAddress: vi.fn().mockReturnValue(false),
   SSRFViolationError: class SSRFViolationError extends Error {},
 }));
 

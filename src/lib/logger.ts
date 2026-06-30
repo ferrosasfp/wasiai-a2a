@@ -25,6 +25,23 @@
 
 import pino, { type Logger } from 'pino';
 
+/**
+ * F-06 (audit 2026-06-29): redaction paths shared by BOTH the service-layer
+ * pino logger (below) and the Fastify request logger (`src/index.ts`). Without
+ * these, a logged request (`req.headers`) or any object carrying a secret field
+ * would emit credentials in plaintext. Pino replaces matched paths with
+ * `[Redacted]`. Exported so the Fastify logger reuses the SAME list (no drift).
+ */
+export const REDACT_PATHS = [
+  'req.headers.authorization',
+  'req.headers["x-payment"]',
+  'req.headers["x-a2a-key"]',
+  '*.privateKey',
+  '*.serviceKey',
+  '*.secret',
+  '*.signature',
+];
+
 function resolveLevel(): string {
   const explicit = process.env.LOG_LEVEL?.trim();
   if (explicit) return explicit;
@@ -38,6 +55,8 @@ const rootLogger: Logger = pino({
   // Keep timestamps and standard serializers; pino serializes Error objects
   // passed as `err` into `{ type, message, stack }`, preserving error context.
   base: { service: 'wasiai-a2a' },
+  // F-06: redact credential-bearing fields (see REDACT_PATHS rationale).
+  redact: REDACT_PATHS,
 });
 
 /**

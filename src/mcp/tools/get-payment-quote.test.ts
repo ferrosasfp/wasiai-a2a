@@ -15,6 +15,15 @@ vi.mock('node:dns', () => ({
   },
 }));
 
+// F-02 (audit 2026-06-29): the tool now fetches via `ssrfFetch` (undici + the
+// SSRF dispatcher) instead of global fetch. Mock the dispatcher boundary to
+// delegate to the stubbed global `fetch` so these tests keep asserting the
+// tool's URL/GET/response behaviour without a real socket.
+vi.mock('../../lib/ssrf-dispatcher.js', () => ({
+  ssrfFetch: (input: string | URL, init?: RequestInit) =>
+    (globalThis.fetch as typeof fetch)(input, init),
+}));
+
 import { getPaymentQuote } from './get-payment-quote.js';
 
 const ctx: ToolContext = {

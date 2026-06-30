@@ -163,10 +163,17 @@ describe('discoveryService — runtime SSRF guard (WKH-62 W1)', () => {
     });
     vi.mocked(registryService.getEnabled).mockResolvedValue([ssrfReg, goodReg]);
 
-    // ssrf registry → 10.0.0.1 (private), good registry → public
-    mockLookup
-      .mockResolvedValueOnce([{ address: '10.0.0.1', family: 4 }])
-      .mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }]);
+    // ssrf registry → 10.0.0.1 (private), good registry → public.
+    // H-1 (audit 2026-06-29): each URL is now resolved TWICE (the pre-fetch
+    // `validateRegistryUrl` AND `ssrfFetch`'s per-hop `validateOutboundUrl`), so
+    // a per-call-count mock would starve the second lookup. Resolve by hostname
+    // (persistent) so both lookups for the SAME host return the same address.
+    mockLookup.mockImplementation((hostname: string) => {
+      if (hostname === 'internal.attacker.example') {
+        return Promise.resolve([{ address: '10.0.0.1', family: 4 }]);
+      }
+      return Promise.resolve([{ address: '93.184.216.34', family: 4 }]);
+    });
 
     mockFetch.mockResolvedValueOnce({
       ok: true,

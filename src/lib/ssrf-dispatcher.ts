@@ -44,8 +44,9 @@ import {
   type LookupAddress,
   type LookupOptions,
 } from 'node:dns';
+import { isIP } from 'node:net';
 import { Agent, type Dispatcher, fetch as undiciFetch } from 'undici';
-import { isBlockedAddress } from './url-validator.js';
+import { isBlockedAddress, validateOutboundUrl } from './url-validator.js';
 
 /**
  * Error surfaced when the connect-time SSRF check rejects a resolved address.
@@ -124,6 +125,124 @@ export function getSsrfDispatcher(): Dispatcher {
 }
 
 /**
+ * H-1 (audit 2026-06-29): error surfaced when a redirect `Location` (or the
+ * initial URL) is rejected by the per-hop SSRF re-validation in `ssrfFetch`.
+ * Distinct from `SSRFConnectBlockedError` (connect-time) — this fires at the
+ * fetch layer BEFORE the next hop's socket is opened.
+ */
+export class SSRFRedirectBlockedError extends Error {
+  public readonly url: string;
+  public readonly category: string;
+
+  constructor(url: string, category: string) {
+    super(`SSRF guard blocked redirect/URL: ${url} (${category})`);
+    this.name = 'SSRFRedirectBlockedError';
+    this.url = url;
+    this.category = category;
+  }
+}
+
+/**
+ * Max redirect hops `ssrfFetch` will follow before aborting. Bounds the loop so
+ * a redirect chain cannot be used to spin the process.
+ */
+const MAX_REDIRECT_HOPS = 5;
+
+/**
+ * H-1: validates a single URL (initial or redirect target) before its socket is
+ * opened. Two layers, both fail-closed:
+ *
+ *  1. LITERAL-IP guard — `validateOutboundUrl`'s DNS path is the primary defense
+ *     for hostnames, but the connect-time `lookup` hook can be skipped by undici
+ *     for literal-IP hosts (`http://169.254.169.254/`). So when the host is an
+ *     IP literal we classify it directly with `isBlockedAddress` (the SAME
+ *     predicate the connector uses) and reject blocked ranges.
+ *  2. FULL validator — `validateOutboundUrl` re-runs the protocol / blocked-
+ *     literal / private-IP (DNS-resolved) checks for EVERY hop, so a 3xx to an
+ *     internal host is rejected before the credential headers are re-sent.
+ *
+ * Throws `SSRFRedirectBlockedError` on any violation. Uses the registry
+ * allowlist env var so allowlisted internal hosts keep working (parity with
+ * `validateRegistryUrl`).
+ */
+async function assertUrlAllowed(rawUrl: string): Promise<void> {
+  // Layer 1: literal-IP guard (the connector lookup can't see literals).
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new SSRFRedirectBlockedError(rawUrl, 'invalid-url');
+  }
+  // URL.hostname strips brackets from IPv6 literals; isIP returns 4|6|0.
+  const family = isIP(parsed.hostname);
+  if (family !== 0 && isBlockedAddress(parsed.hostname, family)) {
+    throw new SSRFRedirectBlockedError(rawUrl, 'private-ip-literal');
+  }
+
+  // Layer 2: full validator (protocol / blocked-literal / DNS-resolved private).
+  const result = await validateOutboundUrl(rawUrl, {
+    allowlistEnvVar: 'DISCOVERY_SSRF_ALLOWLIST',
+  });
+  if (!result.ok) {
+    throw new SSRFRedirectBlockedError(rawUrl, result.error.category);
+  }
+}
+
+/**
+ * Headers whose value is a credential and MUST NOT be re-sent to a different
+ * origin after a redirect (defense-in-depth — even though `assertUrlAllowed`
+ * already blocks internal targets, a cross-origin PUBLIC redirect should not
+ * silently forward the caller's payment/auth secrets).
+ */
+const CREDENTIAL_HEADERS = [
+  'authorization',
+  'x-a2a-key',
+  'payment-signature',
+  'x-payment',
+];
+
+/**
+ * Returns a shallow copy of `headers` with credential headers stripped. Handles
+ * the Headers instance / record / array tuple shapes `RequestInit.headers` can
+ * take.
+ */
+function stripCredentialHeaders(
+  headers: RequestInit['headers'],
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  const blocked = new Set(CREDENTIAL_HEADERS);
+  const copy = (k: string, v: string) => {
+    if (!blocked.has(k.toLowerCase())) out[k] = v;
+  };
+  if (!headers) return out;
+  if (headers instanceof Headers) {
+    headers.forEach((v, k) => {
+      copy(k, v);
+    });
+  } else if (Array.isArray(headers)) {
+    for (const [k, v] of headers) copy(k, v);
+  } else {
+    for (const [k, v] of Object.entries(headers)) copy(k, String(v));
+  }
+  return out;
+}
+
+/**
+ * True when two URLs differ in protocol, host, or port (cross-origin). Used to
+ * decide whether credential headers must be stripped on a redirect hop.
+ */
+function isCrossOrigin(a: string, b: string): boolean {
+  try {
+    const ua = new URL(a);
+    const ub = new URL(b);
+    return ua.protocol !== ub.protocol || ua.host !== ub.host;
+  } catch {
+    // If either URL fails to parse, treat as cross-origin (fail-closed).
+    return true;
+  }
+}
+
+/**
  * `fetch` wrapper that attaches the connect-time SSRF dispatcher. Use this for
  * EVERY outbound request to an attacker-influenceable URL.
  *
@@ -135,23 +254,91 @@ export function getSsrfDispatcher(): Dispatcher {
  * the handler API differs across majors — that mismatch silently disables the
  * SSRF guard. Pinning both to undici 8 closes that gap.
  *
+ * H-1 (audit 2026-06-29): redirects are followed MANUALLY (`redirect:'manual'`)
+ * through a bounded loop. For EACH 3xx `Location` we run `assertUrlAllowed`
+ * (literal-IP guard + full SSRF validator) BEFORE opening the next socket, so a
+ * 302 → http://169.254.169.254/ or http://127.0.0.1/ is BLOCKED and the
+ * credential headers (x-a2a-key / payment-signature) are never re-sent to the
+ * internal host. Cross-origin redirects additionally have credential headers
+ * stripped (defense-in-depth). The connect-time dispatcher still governs every
+ * socket as a second layer.
+ *
  * The public signature (DOM `string | URL` / `RequestInit` / `Response`) is
- * preserved for callers (compose downstream, discovery). undici's `fetch` uses
- * structurally-equivalent web types and natively declares `dispatcher` in its
- * init; we centralize the single boundary cast here so call sites stay clean.
+ * preserved for callers (compose downstream, discovery).
  */
-export function ssrfFetch(
+export async function ssrfFetch(
   input: string | URL,
   init?: RequestInit,
 ): Promise<Response> {
-  const withDispatcher = {
-    ...init,
-    dispatcher: getSsrfDispatcher(),
-  };
-  return undiciFetch(
-    input as Parameters<typeof undiciFetch>[0],
-    withDispatcher as Parameters<typeof undiciFetch>[1],
-  ) as unknown as Promise<Response>;
+  const dispatcher = getSsrfDispatcher();
+  let currentUrl = typeof input === 'string' ? input : input.toString();
+  let currentHeaders = init?.headers;
+  let currentBody = init?.body;
+  let currentMethod = init?.method;
+
+  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+    // Re-validate the URL we are ABOUT to fetch on every hop (the initial URL is
+    // hop 0 — defense-in-depth, callers already validate it, but a redirect
+    // target reaching this loop has NOT been validated by the caller).
+    await assertUrlAllowed(currentUrl);
+
+    const withDispatcher = {
+      ...init,
+      method: currentMethod,
+      headers: currentHeaders,
+      body: currentBody,
+      // Never let undici auto-follow: each hop must pass assertUrlAllowed first.
+      redirect: 'manual' as const,
+      dispatcher,
+    };
+    const response = (await undiciFetch(
+      currentUrl as Parameters<typeof undiciFetch>[0],
+      withDispatcher as Parameters<typeof undiciFetch>[1],
+    )) as unknown as Response;
+
+    // Not a redirect → return as-is (the common case).
+    const status = response.status;
+    const isRedirect =
+      status === 301 ||
+      status === 302 ||
+      status === 303 ||
+      status === 307 ||
+      status === 308;
+    // Defensive: a real undici Response always exposes `.headers.get`, but be
+    // tolerant of response shapes lacking it (only relevant when not a redirect).
+    const location =
+      isRedirect && typeof response.headers?.get === 'function'
+        ? response.headers.get('location')
+        : null;
+    if (!isRedirect || !location) {
+      return response;
+    }
+
+    if (hop === MAX_REDIRECT_HOPS) {
+      throw new SSRFRedirectBlockedError(currentUrl, 'too-many-redirects');
+    }
+
+    // Resolve the (possibly relative) Location against the current URL.
+    const nextUrl = new URL(location, currentUrl).toString();
+
+    // Strip credential headers on cross-origin redirects (defense-in-depth).
+    if (isCrossOrigin(currentUrl, nextUrl)) {
+      currentHeaders = stripCredentialHeaders(currentHeaders);
+    }
+
+    // Per HTTP semantics, 303 (and 301/302 in practice) downgrade to GET and
+    // drop the body. 307/308 preserve method + body.
+    if (status === 303 || status === 301 || status === 302) {
+      currentMethod = 'GET';
+      currentBody = undefined;
+    }
+
+    currentUrl = nextUrl;
+  }
+
+  // Loop bound is inclusive of MAX_REDIRECT_HOPS; the in-loop guard returns or
+  // throws before falling through, so this is unreachable.
+  throw new SSRFRedirectBlockedError(currentUrl, 'too-many-redirects');
 }
 
 /**

@@ -182,9 +182,14 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
       } catch (err) {
         const mapped = mapOwnershipError(err, reply);
         if (mapped) return mapped;
-        return reply.status(400).send({
-          error: err instanceof Error ? err.message : 'Failed to register',
-        });
+        // F-05 (audit 2026-06-29): static client message — never leak the raw
+        // err.message (may carry internal hosts / SQL / SSRF datum). Detail is
+        // logged server-side.
+        request.log.warn(
+          { detail: err instanceof Error ? err.message : 'unknown' },
+          'registry register failed',
+        );
+        return reply.status(400).send({ error: 'Failed to register registry' });
       }
     },
   );
@@ -260,9 +265,12 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
       } catch (err) {
         const mapped = mapOwnershipError(err, reply);
         if (mapped) return mapped;
-        return reply.status(400).send({
-          error: err instanceof Error ? err.message : 'Failed to update',
-        });
+        // F-05 (audit 2026-06-29): static client message; detail logged server-side.
+        request.log.warn(
+          { detail: err instanceof Error ? err.message : 'unknown' },
+          'registry update failed',
+        );
+        return reply.status(400).send({ error: 'Failed to update registry' });
       }
     },
   );
@@ -304,9 +312,12 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
       } catch (err) {
         const mapped = mapOwnershipError(err, reply);
         if (mapped) return mapped;
-        return reply.status(400).send({
-          error: err instanceof Error ? err.message : 'Failed to delete',
-        });
+        // F-05 (audit 2026-06-29): static client message; detail logged server-side.
+        request.log.warn(
+          { detail: err instanceof Error ? err.message : 'unknown' },
+          'registry delete failed',
+        );
+        return reply.status(400).send({ error: 'Failed to delete registry' });
       }
     },
   );

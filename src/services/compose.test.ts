@@ -1166,6 +1166,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       undefined,
       undefined,
       'test-registry/corridor',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
   });
 
@@ -1211,6 +1212,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       undefined,
       undefined,
       'test-registry/corridor',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
       2,
@@ -1220,6 +1222,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       undefined,
       undefined,
       'test-registry/cashout',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
   });
 
@@ -1556,6 +1559,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       delegationContext,
       undefined,
       'test-registry/corridor',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
       2,
@@ -1565,6 +1569,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       delegationContext,
       undefined,
       'test-registry/cashout',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
     // step 0 + step 1 invoked (2 fetches); step 2 fetch NOT consumed.
     expect(mockFetch).toHaveBeenCalledTimes(2);
@@ -1748,6 +1753,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       undefined,
       undefined,
       'test-registry/free-bug',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
   });
 
@@ -1828,6 +1834,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       undefined,
       undefined,
       'test-registry/null-price',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1899,6 +1906,7 @@ describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULT
       undefined,
       keySessionContext,
       'test-registry/corridor',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
       2,
@@ -1908,6 +1916,7 @@ describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULT
       undefined,
       keySessionContext,
       'test-registry/cashout',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
   });
 
@@ -1955,6 +1964,7 @@ describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULT
       undefined,
       keySessionContext,
       'test-registry/corridor',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
     expect(mockDebit).toHaveBeenNthCalledWith(
       2,
@@ -1964,6 +1974,7 @@ describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULT
       undefined,
       keySessionContext,
       'test-registry/cashout',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
     // step 0 + step 1 invoked (2 fetches); step 2 fetch NOT consumed.
     expect(mockFetch).toHaveBeenCalledTimes(2);
@@ -2011,6 +2022,7 @@ describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULT
       delegationContext,
       undefined,
       'test-registry/corridor',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
   });
 });
@@ -2847,6 +2859,7 @@ describe('composeService.compose — gas overhead pass-through', () => {
       undefined,
       undefined,
       'test-registry/corridor',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
     // CRITICAL: downstream settle still receives the corridor agent with
     // priceUsdc=0.05 — NEVER the gas-inclusive 0.07 (the overhead is gateway
@@ -2889,6 +2902,7 @@ describe('composeService.compose — gas overhead pass-through', () => {
       undefined,
       undefined,
       'test-registry/corridor',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
   });
 
@@ -2918,6 +2932,7 @@ describe('composeService.compose — gas overhead pass-through', () => {
       undefined,
       undefined,
       'test-registry/corridor',
+      'owner-test', // F-04 (audit): threaded caller owner_ref
     );
   });
 

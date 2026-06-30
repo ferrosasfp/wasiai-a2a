@@ -7,6 +7,7 @@
  * outbound fetch to prevent SSRF.
  */
 
+import { ssrfFetch } from '../../lib/ssrf-dispatcher.js';
 import type { X402Response } from '../../types/index.js';
 import {
   type GetPaymentQuoteInput,
@@ -31,7 +32,10 @@ export async function getPaymentQuote(
   const url = new URL(input.endpoint, input.gatewayUrl).toString();
   await validateGatewayUrl(url);
 
-  const res = await fetch(url, { method: 'GET' });
+  // F-02 (audit 2026-06-29): route through ssrfFetch so this MCP probe inherits
+  // the connect-time SSRF guard + the H-1 manual redirect re-validation (was
+  // bypassing the dispatcher via global fetch).
+  const res = await ssrfFetch(url, { method: 'GET' });
 
   // AC-5: non-402 => no payment required.
   if (res.status !== 402) {

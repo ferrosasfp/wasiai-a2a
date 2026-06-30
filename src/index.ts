@@ -8,7 +8,8 @@
 import cors, { type FastifyCorsOptions } from '@fastify/cors';
 import Fastify from 'fastify';
 import { getChainConfig, initAdapters } from './adapters/registry.js';
-import { isProduction } from './lib/env.js';
+import { assertRequiredEnv, isProduction } from './lib/env.js';
+import { REDACT_PATHS } from './lib/logger.js';
 import mcpPlugin from './mcp/index.js';
 import { registerErrorBoundary } from './middleware/error-boundary.js';
 import { registerEventTracking } from './middleware/event-tracking.js';
@@ -31,10 +32,19 @@ import tasksRoutes from './routes/tasks.js';
 import wellKnownRoutes from './routes/well-known.js';
 import { refundOutbox } from './services/refund-outbox.js';
 
+// F-08 (audit 2026-06-29): fail loudly at boot if required secrets are missing
+// in production (before any adapter init or server bind).
+assertRequiredEnv();
+
 // Initialize chain-adaptive adapters before server starts
 await initAdapters();
 
-const fastify = Fastify({ logger: true, genReqId });
+const fastify = Fastify({
+  // F-06 (audit 2026-06-29): redact credential-bearing fields from request logs
+  // (Authorization / x-payment / x-a2a-key headers + any *.secret/*.signature).
+  logger: { redact: REDACT_PATHS },
+  genReqId,
+});
 
 // CORS — env-aware (WKH-SEC-01 AC-4/AC-5/AC-6)
 const prod = isProduction();
