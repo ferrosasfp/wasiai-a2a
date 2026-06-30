@@ -35,9 +35,13 @@ async function gaslessCostEstimatorPreHandler(
   const body = request.body as { to?: string; value?: string } | undefined;
 
   // AC-6: shape validation antes de tocar bigint.
+  // Fastify 5 idiom: `return reply...` aborta el preHandler lifecycle ANTES del
+  // middleware de debit (requirePaymentOrA2AKey, Stage B). El bare-return dejaba
+  // que el siguiente preHandler corriera y debitara el placeholder al rechazar.
   if (!body || typeof body.to !== 'string' || typeof body.value !== 'string') {
-    reply.status(400).send({ error: 'missing required fields: to, value' });
-    return;
+    return reply
+      .status(400)
+      .send({ error: 'missing required fields: to, value' });
   }
 
   // AC-6: parse wei → bigint (BigInt() throws SyntaxError sobre input inválido).
@@ -45,8 +49,9 @@ async function gaslessCostEstimatorPreHandler(
   try {
     valueWei = BigInt(body.value);
   } catch {
-    reply.status(400).send({ error: 'invalid value: must be a bigint string' });
-    return;
+    return reply
+      .status(400)
+      .send({ error: 'invalid value: must be a bigint string' });
   }
 
   // CD-10: pyusdWeiToUsd retorna Infinity sobre overflow, NO throws.
@@ -54,8 +59,10 @@ async function gaslessCostEstimatorPreHandler(
   const cap = getGaslessDefaultCapUsd();
 
   // AC-2: cap check (Infinity > cap siempre).
+  // Fastify 5 idiom: `return reply...` aborta el preHandler lifecycle ANTES del
+  // middleware de debit (mismo motivo que los rechazos de shape arriba).
   if (!Number.isFinite(estimatedCostUsd) || estimatedCostUsd > cap) {
-    reply.status(403).send({
+    return reply.status(403).send({
       error: 'Transfer exceeds gasless cap',
       error_code: 'PER_CALL_LIMIT',
       cap_usd: cap,
@@ -63,7 +70,6 @@ async function gaslessCostEstimatorPreHandler(
         ? estimatedCostUsd
         : null,
     });
-    return;
   }
 
   // DT-C/DT-D: inyectar para Stage B (requirePaymentOrA2AKey).
