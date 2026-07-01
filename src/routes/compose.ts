@@ -536,7 +536,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       try {
         const feeResult = await chargeProtocolFee({
           orchestrationId: request.id,
-          budgetUsdc: result.totalCostUsdc,
+          feeBaseUsdc: result.totalCostUsdc,
           feeRate: getProtocolFeeRate(),
         });
         if (feeResult.status === 'failed') {

@@ -966,7 +966,7 @@ export const orchestrateService = {
     if (pipeline.success) {
       const feeResult = await chargeProtocolFee({
         orchestrationId,
-        budgetUsdc: pipeline.totalCostUsdc, // WKH-132/DT-1: espejo compose.ts:539
+        feeBaseUsdc: pipeline.totalCostUsdc, // WKH-132/DT-1: espejo compose.ts:539
         feeRate,
       });
       if (feeResult.status === 'failed') {

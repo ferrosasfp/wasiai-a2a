@@ -232,7 +232,7 @@ describe('chargeProtocolFee', () => {
   it('FT-9: skips when WASIAI_PROTOCOL_FEE_WALLET unset', async () => {
     const result = await chargeProtocolFee({
       orchestrationId: 'id-1',
-      budgetUsdc: 1.0,
+      feeBaseUsdc: 1.0,
       feeRate: 0.01,
     });
 
@@ -273,7 +273,7 @@ describe('chargeProtocolFee', () => {
 
     const result = await chargeProtocolFee({
       orchestrationId: 'id-10',
-      budgetUsdc: 1.0,
+      feeBaseUsdc: 1.0,
       feeRate: 0.01,
     });
 
@@ -311,7 +311,7 @@ describe('chargeProtocolFee', () => {
 
     const result = await chargeProtocolFee({
       orchestrationId: 'id-tb01',
-      budgetUsdc: 1.0,
+      feeBaseUsdc: 1.0,
       feeRate: 0.01,
     });
 
@@ -332,7 +332,7 @@ describe('chargeProtocolFee', () => {
 
     const result = await chargeProtocolFee({
       orchestrationId: 'id-11',
-      budgetUsdc: 1.0,
+      feeBaseUsdc: 1.0,
       feeRate: 0.01,
     });
 
@@ -355,7 +355,7 @@ describe('chargeProtocolFee', () => {
 
     const result = await chargeProtocolFee({
       orchestrationId: 'id-12',
-      budgetUsdc: 1.0,
+      feeBaseUsdc: 1.0,
       feeRate: 0.01,
     });
 
@@ -391,7 +391,7 @@ describe('chargeProtocolFee', () => {
 
     const result = await chargeProtocolFee({
       orchestrationId: 'id-13',
-      budgetUsdc: 1.0,
+      feeBaseUsdc: 1.0,
       feeRate: 0.01,
     });
 
@@ -415,7 +415,7 @@ describe('chargeProtocolFee', () => {
 
     const result = await chargeProtocolFee({
       orchestrationId: 'id-14',
-      budgetUsdc: 1.0,
+      feeBaseUsdc: 1.0,
       feeRate: 0.01,
     });
 
@@ -439,7 +439,7 @@ describe('chargeProtocolFee', () => {
     await expect(
       chargeProtocolFee({
         orchestrationId: 'id-15',
-        budgetUsdc: 1.0,
+        feeBaseUsdc: 1.0,
         feeRate: 0.01,
       }),
     ).resolves.toMatchObject({ status: 'failed' });
@@ -470,7 +470,7 @@ describe('chargeProtocolFee', () => {
 
     await chargeProtocolFee({
       orchestrationId: 'id-16',
-      budgetUsdc: 1.0,
+      feeBaseUsdc: 1.0,
       feeRate: 0.01,
     });
 
@@ -491,7 +491,7 @@ describe('chargeProtocolFee', () => {
     await expect(
       chargeProtocolFee({
         orchestrationId: 'id-guard',
-        budgetUsdc: 1.0,
+        feeBaseUsdc: 1.0,
         feeRate: 1.5, // fee > budget
       }),
     ).rejects.toBeInstanceOf(ProtocolFeeError);
