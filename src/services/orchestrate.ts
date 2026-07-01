@@ -26,13 +26,15 @@ import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
 import { chargeProtocolFee, getProtocolFeeRate } from './fee-charge.js';
+import {
+  getLlmTimeoutMs,
+  getPlannerMaxTokens,
+  getPlannerModel,
+} from './llm/models.js';
 import { receiptService } from './receipt.js';
 import { refundOutbox } from './refund-outbox.js';
 
 const log = getLogger('orchestrate');
-
-const MODEL = 'claude-sonnet-5';
-const LLM_TIMEOUT_MS = 30_000;
 // WKH-128: el planner ve hasta 30 agentes (antes 10). Con solo 3 demos echo
 // verificados en prod, un tope de 10 empujaba a los agentes relevantes fuera de
 // la ventana visible del LLM → plan vacío → fallback greedy a los demos baratos
@@ -182,14 +184,14 @@ async function llmPlan(
   ].join('\n');
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), getLlmTimeoutMs());
 
   try {
     const response = await anthropicCircuitBreaker.execute(() =>
       client.messages.create(
         {
-          model: MODEL,
-          max_tokens: 1024,
+          model: getPlannerModel(),
+          max_tokens: getPlannerMaxTokens(),
           // WKH-134: Sonnet 5 runs adaptive thinking by default when `thinking`
           // is omitted (4.6 ran thinking-off). With max_tokens=1024 and a
           // JSON-only contract, adaptive thinking can consume the budget and
