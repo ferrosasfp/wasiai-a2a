@@ -704,10 +704,18 @@ describe('orchestrateService — WKH-131 executeApprovedPlan (real compose)', ()
 
     if ('__quoteStale' in res) throw new Error('unexpected stale');
     expect(res.pipeline.success).toBe(true);
+    // WKH-132 (AC-3): la base del charge = pipeline.totalCostUsdc (0.05, costo real
+    // ejecutado), NO el budget (5.0). Espejo de compose.ts:539.
     expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledWith(
-      expect.objectContaining({ orchestrationId: 'orch-exec-6' }),
+      expect.objectContaining({
+        orchestrationId: 'orch-exec-6',
+        budgetUsdc: res.pipeline.totalCostUsdc,
+      }),
     );
-    expect(res.protocolFeeUsdc).toBeCloseTo(0.05, 6);
+    expect(res.pipeline.totalCostUsdc).toBeCloseTo(0.05, 6);
+    // WKH-132: protocolFeeUsdc reportado = cost-based (0.05 * 0.01 = 0.0005),
+    // NO el feeUsdc budget-based del plan (0.05).
+    expect(res.protocolFeeUsdc).toBeCloseTo(0.0005, 6);
   });
 
   // T-EXEC-7 (AC-11): debit step-0 incluye getStepGasOverheadUsd(chainId).

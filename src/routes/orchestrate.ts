@@ -330,7 +330,8 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         // Re-derivación del plan server-side (CD-2/CD-NEW-6): los precios del
         // cliente se IGNORAN. costPerStep se re-resuelve con resolveAgentPriceUsdc;
         // plannedCostUsd (base del débito step-0) = precio de steps[0] server-side
-        // (NUNCA de costPerStep del cliente). feeUsdc = budget * rate.
+        // (NUNCA de costPerStep del cliente). WKH-132: feeUsdc = totalCostUsdc * rate
+        // (cost-based); sólo seedea la reserva maxBudget, no el fee cobrado.
         const steps = body.steps;
         const costPerStep: number[] = [];
         for (const step of steps) {
@@ -347,8 +348,11 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           : null;
         const plannedCostUsd = typeof step0Price === 'number' ? step0Price : 0;
         const feeRate = getProtocolFeeRate();
-        const feeUsdc = Number((body.budget * feeRate).toFixed(6));
         const totalCostUsdc = costPerStep.reduce((sum, c) => sum + c, 0);
+        // WKH-132: base del fee = costo real resuelto server-side, NO budget.
+        // Sólo seedea plan.feeUsdc (reserva maxBudget); el fee REALMENTE cobrado
+        // se deriva de pipeline.totalCostUsdc dentro de executeApprovedPlan.
+        const feeUsdc = Number((totalCostUsdc * feeRate).toFixed(6));
 
         // WKH-127 (CD-9/CD-11/CD-15): billingKeyRow solo en el path master Agent Key
         // SIN delegación/session (espejo del atómico).

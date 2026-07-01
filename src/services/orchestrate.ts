@@ -25,11 +25,7 @@ import { budgetService } from './budget.js';
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
-import {
-  chargeProtocolFee,
-  getProtocolFeeRate,
-  ProtocolFeeError,
-} from './fee-charge.js';
+import { chargeProtocolFee, getProtocolFeeRate } from './fee-charge.js';
 import { receiptService } from './receipt.js';
 import { refundOutbox } from './refund-outbox.js';
 
@@ -374,20 +370,12 @@ export const orchestrateService = {
     const startTime = Date.now();
     const { goal, budget, preferCapabilities, maxAgents = 5 } = request;
 
-    // WKH-44: leer el rate por request (CD-G) y calcular el fee sobre el
-    // budget ANTES de cualquier otro trabajo. Esto garantiza que:
-    //   (a) AC-7 — si rate corrupto hace feeUsdc > budget, abortamos antes
-    //       de gastar tiempo en discovery/LLM (safety guard → HTTP 400).
-    //   (b) AC-1 — `maxBudget` que ve compose se deduce del fee.
-    //   (c) AC-3 — el protocolFeeUsdc reportado en el result es el fee real
-    //       aplicable al budget (no un cálculo sobre el costo ya gastado).
-    const feeRate = getProtocolFeeRate();
-    const feeUsdc = Number((budget * feeRate).toFixed(6));
-    if (feeUsdc > budget) {
-      throw new ProtocolFeeError(
-        `Protocol fee (${feeUsdc}) exceeds budget (${budget}) — check PROTOCOL_FEE_RATE env var.`,
-      );
-    }
+    // WKH-132 (DT-3): el fee ya NO se calcula sobre el budget. El guard previo
+    // `feeUsdc > budget` (⟺ rate > 1) era INALCANZABLE: getProtocolFeeRate()
+    // clampa el rate a [0, 0.10] (fee-charge.ts:102-112), su clamp+log.error ES
+    // el fail-fast real contra un PROTOCOL_FEE_RATE corrupto. El fee real se
+    // deriva post-planning del costo resuelto (AC-1); el guard cost-vs-cost
+    // sobrevive en chargeProtocolFee (fee-charge.ts:167), igual que /compose.
 
     // WKH-127 (CD-9/CD-11/CD-15): el débito post-plan y el refund aplican SOLO al
     // path master Agent Key SIN delegación/session. x402 → scopingKeyRow undefined
@@ -423,7 +411,7 @@ export const orchestrateService = {
           reasoning: 'Insufficient budget for orchestration',
           consideredAgents: [],
           plannedCostUsd: 0,
-          feeUsdc,
+          feeUsdc: 0, // WKH-132: sin steps ⇒ sin costo ⇒ sin fee
           usedFallback: false,
           debitFallback: false,
           billingKeyRow,
@@ -475,7 +463,7 @@ export const orchestrateService = {
         reasoning: `No agents found for goal: "${goal}". Try broadening your search or increasing budget.`,
         consideredAgents: [],
         plannedCostUsd: 0,
-        feeUsdc,
+        feeUsdc: 0, // WKH-132: sin steps ⇒ sin costo ⇒ sin fee
         usedFallback: false,
         debitFallback: false,
         billingKeyRow,
@@ -624,7 +612,7 @@ export const orchestrateService = {
         reasoning: `No agents fit within budget of ${budget} USDC. Try increasing your budget.`,
         consideredAgents: discovered.agents,
         plannedCostUsd: 0,
-        feeUsdc,
+        feeUsdc: 0, // WKH-132: sin steps ⇒ sin costo ⇒ sin fee
         usedFallback,
         debitFallback: false,
         billingKeyRow,
@@ -676,7 +664,7 @@ export const orchestrateService = {
         reasoning,
         consideredAgents: discovered.agents,
         plannedCostUsd: 0,
-        feeUsdc,
+        feeUsdc: 0, // WKH-132: sin steps ⇒ sin costo ⇒ sin fee
         usedFallback,
         debitFallback: false,
         billingKeyRow,
@@ -726,6 +714,21 @@ export const orchestrateService = {
     }
     const totalCostUsdc = costPerStep.reduce((sum, c) => sum + c, 0);
     const maxQuotedCostUsdc = await this.quoteMaxCostUsdc(steps, false);
+    // WKH-132 (DT-2): fee = residual del quote sobre el costo real → garantiza
+    // maxQuotedCostUsdc == totalCostUsdc + protocolFeeUsdc por construcción (AC-2).
+    // Reusa la MISMA resolución de precios que maxQuotedCostUsdc (AC-1). Budget-
+    // independent (AC-9). Math.max(0,…): defensa de redondeo (maxQuoted ≥ total).
+    const protocolFeeUsdc = Number(
+      Math.max(0, maxQuotedCostUsdc - totalCostUsdc).toFixed(6),
+    );
+    // WKH-132 (BLQ-BAJO-1): la reserva INTERNA de maxBudget debe ser cost-based
+    // (igual que /execute en routes/orchestrate.ts:355), NO el residual del quote.
+    // El residual puede inflarse por PLACEHOLDER_FEE_USD en steps con price 0 →
+    // maxBudget negativo → falso "Budget exceeded". Desacoplar reserva de reportado
+    // elimina la asimetría con el path /execute. El protocolFeeUsdc REPORTADO sigue
+    // siendo el residual (CD-8/CD-9, caller-favorable, AC-2).
+    const feeRate = getProtocolFeeRate();
+    const feeReserveUsdc = Number((totalCostUsdc * feeRate).toFixed(6));
 
     return {
       orchestrationId,
@@ -733,12 +736,12 @@ export const orchestrateService = {
       steps,
       costPerStep,
       totalCostUsdc,
-      protocolFeeUsdc: feeUsdc,
+      protocolFeeUsdc,
       maxQuotedCostUsdc,
       reasoning,
       consideredAgents: discovered.agents,
       plannedCostUsd,
-      feeUsdc,
+      feeUsdc: feeReserveUsdc, // interno: reserva cost-based para maxBudget (DT-4 / BLQ-BAJO-1)
       usedFallback,
       debitFallback: false,
       billingKeyRow,
@@ -928,7 +931,7 @@ export const orchestrateService = {
     // pipeline aplique el check de scope contra el Agent real post-resolve.
     const pipeline = await composeService.compose({
       steps,
-      maxBudget: budget - feeUsdc,
+      maxBudget: budget - feeUsdc, // WKH-132: feeUsdc = reserva COST-BASED (no budget*rate)
       a2aKey: request.a2aKey,
       scopingKeyRow: request.scopingKeyRow,
       // WKH-101 (DT-11): contexto de delegación para el débito per-step.
@@ -947,10 +950,13 @@ export const orchestrateService = {
       chainId: request.chainId,
     });
 
-    // WKH-44 (AC-3): el fee ya fue calculado al inicio con `budget * feeRate`.
-    // `protocolFeeUsdc` expuesto en el result refleja ese valor (no el
-    // totalCostUsdc del pipeline como era antes).
-    const protocolFeeUsdc = feeUsdc;
+    // WKH-132 (AC-1/DT-1): protocolFeeUsdc reportado = rate sobre el COSTO REAL
+    // ejecutado (pipeline.totalCostUsdc), no el budget. Igual al fee cotizado en
+    // /plan cuando el pipeline tuvo éxito total y el quote se honró (CD-6); el
+    // charge de abajo está gateado por pipeline.success.
+    const protocolFeeUsdc = Number(
+      (pipeline.totalCostUsdc * feeRate).toFixed(6),
+    );
 
     // Step 4: WKH-44 — best-effort transfer del fee post-compose si el
     // pipeline ejecutó OK. Cualquier fallo queda en `feeChargeError` y NO
@@ -960,7 +966,7 @@ export const orchestrateService = {
     if (pipeline.success) {
       const feeResult = await chargeProtocolFee({
         orchestrationId,
-        budgetUsdc: budget,
+        budgetUsdc: pipeline.totalCostUsdc, // WKH-132/DT-1: espejo compose.ts:539
         feeRate,
       });
       if (feeResult.status === 'failed') {
@@ -990,7 +996,7 @@ export const orchestrateService = {
               sessionId: null,
               delegationId: null,
               receiptType: 'protocol_fee',
-              amountUsd: feeUsdc,
+              amountUsd: feeResult.feeUsdc, // WKH-132: espejo compose.ts:559
               chainId: request.chainId ?? 0,
               txHash: feeResult.txHash ?? null,
               counterparty: process.env.WASIAI_PROTOCOL_FEE_WALLET ?? null,
