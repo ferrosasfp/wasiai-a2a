@@ -337,8 +337,8 @@ export interface StepResult {
  * costUsd se computa con PRICING_USD_PER_M_TOKENS centralizado (CD-6).
  */
 export interface LLMBridgeStats {
-  /** Modelo Anthropic invocado (string literal del SDK). */
-  model: 'claude-haiku-4-5-20251001' | 'claude-sonnet-5';
+  /** Modelo Anthropic invocado (env-driven vía llm/models.ts; WKH-135). */
+  model: string;
   /** Total tokens de input cobrados por Anthropic (suma de attempts si hubo retry). */
   tokensIn: number;
   /** Total tokens de output cobrados por Anthropic. */

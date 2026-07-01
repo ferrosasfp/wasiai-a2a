@@ -17,13 +17,17 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropicCircuitBreaker } from '../../lib/circuit-breaker.js';
 import { getLogger } from '../../lib/logger.js';
+import {
+  getInputRetryMaxTokens,
+  getInputRetryModel,
+  getLlmTimeoutMs,
+} from './models.js';
 
 const log = getLogger('input-retry');
 
-// DT-3: Haiku is hardcoded. The master path has NO input_schema, so selectModel
+// DT-3: input-retry uses a fixed model (env-driven default Haiku via
+// llm/models.ts; WKH-135). The master path has NO input_schema, so selectModel
 // (which reads a schema) is not applicable here.
-const MODEL = 'claude-haiku-4-5-20251001';
-const TIMEOUT_MS = 30_000;
 
 /** Lazily-initialized Anthropic client (singleton for connection reuse). */
 let _anthropicClient: Anthropic | null = null;
@@ -79,14 +83,14 @@ export async function regenerateInputFromErrors(
   ].join('\n');
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), getLlmTimeoutMs());
 
   try {
     const response = await anthropicCircuitBreaker.execute(() =>
       client.messages.create(
         {
-          model: MODEL,
-          max_tokens: 1024,
+          model: getInputRetryModel(),
+          max_tokens: getInputRetryMaxTokens(),
           system: SYSTEM_PROMPT,
           messages: [{ role: 'user', content: userPrompt }],
         },

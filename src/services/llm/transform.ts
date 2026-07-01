@@ -20,7 +20,8 @@ import { getLogger } from '../../lib/logger.js';
 import { supabase } from '../../lib/supabase.js';
 import type { TransformResult } from '../../types/index.js';
 import { schemaHash } from './canonical-json.js';
-import { computeCostUsd, type PricedModel } from './pricing.js';
+import { getLlmTimeoutMs, getTransformMaxTokens } from './models.js';
+import { computeCostUsd } from './pricing.js';
 import { selectModel } from './select-model.js';
 import { signTransformFn, verifyTransformFn } from './transform-hmac.js';
 import {
@@ -31,7 +32,6 @@ import {
 
 const log = getLogger('transform');
 
-const TIMEOUT_MS = 30_000;
 // Sandboxed transform execution budget. 1s is generous for legitimate
 // JSON-shape transforms; an infinite loop or runaway recursion is killed
 // by node:vm before user-visible latency degrades.
@@ -118,7 +118,7 @@ async function applyTransformFn(
 async function generateTransformFn(
   output: unknown,
   inputSchema: Record<string, unknown>,
-  model: PricedModel,
+  model: string,
   missingFields: string[],
 ): Promise<{ fn: string; tokensIn: number; tokensOut: number }> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -157,13 +157,13 @@ Ejemplo válido de transformFn:
 `;
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), getLlmTimeoutMs());
 
   try {
     const response = await client.messages.create(
       {
         model,
-        max_tokens: 512,
+        max_tokens: getTransformMaxTokens(),
         // WKH-134: Sonnet 5 runs adaptive thinking by default when `thinking`
         // is omitted (4.6 ran thinking-off). With max_tokens=512 and a JSON-only
         // contract, adaptive thinking can consume the budget and truncate the
@@ -306,7 +306,7 @@ async function persistToL2(
  */
 function buildLLMResult(
   transformedOutput: unknown,
-  model: PricedModel,
+  model: string,
   tokensIn: number,
   tokensOut: number,
   retries: 0 | 1,

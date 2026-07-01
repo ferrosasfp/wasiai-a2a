@@ -1,24 +1,27 @@
-import type { PricedModel } from './pricing.js';
+import { getComplexModel, getTrivialModel } from './models.js';
 
 /**
  * WKH-57 DT-A: selector cost-aware.
- * - 'claude-haiku-4-5-20251001' for trivial schemas.
- * - 'claude-sonnet-5'           for complex schemas (>=5 required, nested object, oneOf/anyOf/allOf).
+ * - trivial model (default 'claude-haiku-4-5-20251001') for trivial schemas.
+ * - complex model (default 'claude-sonnet-5')           for complex schemas (>=5 required, nested object, oneOf/anyOf/allOf).
+ *
+ * WKH-135: model IDs are env-driven (llm/models.ts); the branching thresholds
+ * (WKH-57) are unchanged — only the returned literals became getters.
  *
  * Pure. Never throws for any input shape (defensive). (CD-10/CD-12, AB-WKH-55-4.)
  */
 export function selectModel(
   schema: Record<string, unknown> | undefined,
-): PricedModel {
+): string {
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
-    return 'claude-haiku-4-5-20251001';
+    return getTrivialModel();
   }
 
   const required = Array.isArray(schema.required) ? schema.required : [];
-  if (required.length >= 5) return 'claude-sonnet-5';
+  if (required.length >= 5) return getComplexModel();
 
   if ('oneOf' in schema || 'anyOf' in schema || 'allOf' in schema) {
-    return 'claude-sonnet-5';
+    return getComplexModel();
   }
 
   const props = schema.properties;
@@ -29,10 +32,10 @@ export function selectModel(
         typeof v === 'object' &&
         (v as Record<string, unknown>).type === 'object'
       ) {
-        return 'claude-sonnet-5';
+        return getComplexModel();
       }
     }
   }
 
-  return 'claude-haiku-4-5-20251001';
+  return getTrivialModel();
 }
