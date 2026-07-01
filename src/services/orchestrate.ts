@@ -31,7 +31,7 @@ import { refundOutbox } from './refund-outbox.js';
 
 const log = getLogger('orchestrate');
 
-const MODEL = 'claude-sonnet-4-6';
+const MODEL = 'claude-sonnet-5';
 const LLM_TIMEOUT_MS = 30_000;
 // WKH-128: el planner ve hasta 30 agentes (antes 10). Con solo 3 demos echo
 // verificados en prod, un tope de 10 empujaba a los agentes relevantes fuera de
@@ -190,6 +190,11 @@ async function llmPlan(
         {
           model: MODEL,
           max_tokens: 1024,
+          // WKH-134: Sonnet 5 runs adaptive thinking by default when `thinking`
+          // is omitted (4.6 ran thinking-off). With max_tokens=1024 and a
+          // JSON-only contract, adaptive thinking can consume the budget and
+          // truncate the plan JSON. Pin thinking-off to preserve 4.6 behavior.
+          thinking: { type: 'disabled' },
           system: systemPrompt,
           messages: [{ role: 'user', content: userPrompt }],
         },

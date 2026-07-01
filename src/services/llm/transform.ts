@@ -164,6 +164,12 @@ Ejemplo válido de transformFn:
       {
         model,
         max_tokens: 512,
+        // WKH-134: Sonnet 5 runs adaptive thinking by default when `thinking`
+        // is omitted (4.6 ran thinking-off). With max_tokens=512 and a JSON-only
+        // contract, adaptive thinking can consume the budget and truncate the
+        // transformFn JSON. `disabled` is valid for both Haiku 4.5 and Sonnet 5
+        // (the two models selectModel returns) and preserves 4.6 behavior.
+        thinking: { type: 'disabled' },
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }],
       },

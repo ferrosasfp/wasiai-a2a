@@ -14,7 +14,7 @@ describe('PRICING_USD_PER_M_TOKENS (P2-11)', () => {
       input: 1.0,
       output: 5.0,
     });
-    expect(PRICING_USD_PER_M_TOKENS['claude-sonnet-4-6']).toEqual({
+    expect(PRICING_USD_PER_M_TOKENS['claude-sonnet-5']).toEqual({
       input: 3.0,
       output: 15.0,
     });
@@ -33,9 +33,10 @@ describe('computeCostUsd (P2-11)', () => {
   });
 
   it('computes sonnet cost: 1M in + 1M out = $3 + $15 = $18', () => {
-    expect(
-      computeCostUsd('claude-sonnet-4-6', 1_000_000, 1_000_000),
-    ).toBeCloseTo(18.0, 6);
+    expect(computeCostUsd('claude-sonnet-5', 1_000_000, 1_000_000)).toBeCloseTo(
+      18.0,
+      6,
+    );
   });
 
   it('scales linearly with token count (500k in haiku = $0.50)', () => {
@@ -46,8 +47,8 @@ describe('computeCostUsd (P2-11)', () => {
   });
 
   it('keeps input and output rates distinct (output is more expensive)', () => {
-    const inputOnly = computeCostUsd('claude-sonnet-4-6', 1_000_000, 0);
-    const outputOnly = computeCostUsd('claude-sonnet-4-6', 0, 1_000_000);
+    const inputOnly = computeCostUsd('claude-sonnet-5', 1_000_000, 0);
+    const outputOnly = computeCostUsd('claude-sonnet-5', 0, 1_000_000);
     expect(inputOnly).toBeCloseTo(3.0, 6);
     expect(outputOnly).toBeCloseTo(15.0, 6);
     expect(outputOnly).toBeGreaterThan(inputOnly);

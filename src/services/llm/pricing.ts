@@ -8,10 +8,11 @@
 
 // PRICING — validated 2026-04-28 against https://platform.claude.com/docs/en/about-claude/pricing
 // Haiku 4.5: $1/MTok input, $5/MTok output (NOT $0.80/$4.00 — those are Haiku 3.5 values)
-// Sonnet 4.6: $3/MTok input, $15/MTok output
+// Sonnet 5: $3/MTok input, $15/MTok output (sticker). Intro promo $2/$10 in effect
+// until 2026-08-31; we keep the $3/$15 sticker convention here.
 export const PRICING_USD_PER_M_TOKENS = {
   'claude-haiku-4-5-20251001': { input: 1.0, output: 5.0 },
-  'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
+  'claude-sonnet-5': { input: 3.0, output: 15.0 },
 } as const;
 
 export type PricedModel = keyof typeof PRICING_USD_PER_M_TOKENS;
