@@ -153,7 +153,7 @@ describe('compose routes — WKH-118 protocol fee', () => {
     expect(mockChargeFee).toHaveBeenCalledTimes(1);
     expect(mockChargeFee).toHaveBeenCalledWith(
       expect.objectContaining({
-        budgetUsdc: 0.5,
+        feeBaseUsdc: 0.5,
         feeRate: 0.01,
         orchestrationId: expect.any(String),
       }),

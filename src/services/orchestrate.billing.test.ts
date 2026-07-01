@@ -709,7 +709,7 @@ describe('orchestrateService — WKH-131 executeApprovedPlan (real compose)', ()
     expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledWith(
       expect.objectContaining({
         orchestrationId: 'orch-exec-6',
-        budgetUsdc: res.pipeline.totalCostUsdc,
+        feeBaseUsdc: res.pipeline.totalCostUsdc,
       }),
     );
     expect(res.pipeline.totalCostUsdc).toBeCloseTo(0.05, 6);

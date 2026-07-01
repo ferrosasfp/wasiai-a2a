@@ -530,7 +530,7 @@ describe('orchestrateService', () => {
     // budget (1.0). Espejo de compose.ts:539.
     expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledWith({
       orchestrationId: 'orch-12',
-      budgetUsdc: 0.5,
+      feeBaseUsdc: 0.5,
       feeRate: 0.01,
     });
     expect(result.feeChargeTxHash).toBe('0xFEE');
