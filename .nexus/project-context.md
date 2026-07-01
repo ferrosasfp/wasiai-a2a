@@ -13,7 +13,7 @@ Servicio de discovery, composición y orquestación de agentes autónomos. Imple
 
 **Repo:** github.com/ferrosasfp/wasiai-a2a
 **Puerto:** 3001 (default)
-**Stack:** Fastify + Supabase PostgreSQL + Redis + BullMQ + Claude Sonnet + TypeScript
+**Stack:** Fastify + Supabase PostgreSQL + Redis + BullMQ + Claude (Sonnet 5 / Haiku 4.5) + TypeScript
 
 ---
 
@@ -59,7 +59,7 @@ Kite L1 (x402 + Agent Passport)
 - **DB:** Supabase PostgreSQL (`bdwvrwzvsldephfibmuu`) — compartido con wasiai-v2 dev, tablas con prefijo `a2a_`
 - **Queue:** Redis + BullMQ — pipelines async, no bloquear requests
 - **Cache:** Redis — cache de discovery, schemas inferidos, transformaciones
-- **LLM:** Claude Sonnet (`claude-sonnet-4-20250514`) — transform y orchestrate
+- **LLM:** Claude (planner/orchestrate + transform = Sonnet `claude-sonnet-5`; input-retry + schemas triviales = Haiku `claude-haiku-4-5-20251001`). Model IDs, timeout y max_tokens centralizados y override-ables por env en `src/services/llm/models.ts` (WKH-135)
 - **Protocol:** Google A2A (JSON-RPC 2.0) — estándar abierto
 - **Runtime:** Node.js 20+
 - **Lenguaje:** TypeScript strict — sin `any` explícito en producción
@@ -261,8 +261,11 @@ DATABASE_URL=postgresql://postgres:[pwd]@db.bdwvrwzvsldephfibmuu.supabase.co:543
 # Redis
 REDIS_URL=redis://...
 
-# LLM (Claude Sonnet via Anthropic)
+# LLM (Claude via Anthropic)
 ANTHROPIC_API_KEY=...  # Mismo token de OpenClaw
+# Opcionales (default = valor actual): centralizados en src/services/llm/models.ts (WKH-135)
+# LLM_PLANNER_MODEL / LLM_COMPLEX_MODEL / LLM_TRIVIAL_MODEL / LLM_INPUT_RETRY_MODEL
+# LLM_TIMEOUT_MS / LLM_PLANNER_MAX_TOKENS / LLM_TRANSFORM_MAX_TOKENS / LLM_INPUT_RETRY_MAX_TOKENS
 
 # Kite (blockchain)
 KITE_RPC_URL=https://rpc-testnet.gokite.ai/
