@@ -1479,6 +1479,49 @@ describe('orchestrateService', () => {
     expect(quoted).toBeCloseTo(expected, 6);
   });
 
+  // T-PLAN-2b (registry-price-resolution fix): reproduce el bug live de WKH-131.
+  // El planner emite `step.registry` como DISPLAY-name ("WasiAI"), pero
+  // `getAgent(slug, registryId)` espera el ID ("wasiai"). Con el mock que
+  // devuelve null para el display-name y el agente real sin registry (= el
+  // comportamiento real de discovery), el quote resolvía costPerStep=[0] y
+  // maxQuotedCostUsdc=placeholder ($1). Con el fallback registry-agnóstico,
+  // resuelve el precio real (0.5). FALLA en el código viejo, PASA en el fix.
+  it('T-PLAN-2b: display-name registry hint → quote resolves REAL price (not placeholder)', async () => {
+    // getAgent(slug, "WasiAI") → null (display-name != registry id "wasiai");
+    // getAgent(slug) sin registry → resuelve el agente real (como discovery).
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug, registryId) => {
+        if (registryId !== undefined) return null; // hint por display-name miss
+        return mockAgents.find((a) => a.slug === slug) ?? null;
+      },
+    );
+    // El planner selecciona summarizer-v1 con registry DISPLAY-name "WasiAI".
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'WasiAI',
+            input: { query: 'plan it' },
+            reasoning: 'best match',
+          },
+        ],
+        reasoning: 'plan reasoning',
+      }),
+    );
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'quote with display-name registry', budget: 5.0 },
+      'plan-2b',
+    );
+
+    const rate = getProtocolFeeRate();
+    const expected = Number((0.5 * (1 + rate)).toFixed(6));
+    // Precio real resuelto vía fallback, NO placeholder.
+    expect(plan.costPerStep).toEqual([0.5]);
+    expect(plan.maxQuotedCostUsdc).toBeCloseTo(expected, 6);
+  });
+
   // T-PLAN-3 (AC-6): no-funds → planStatus 'insufficient_funds' + track disparado.
   it('T-PLAN-3: no-funds → insufficient_funds + track', async () => {
     vi.mocked(budgetService.getBalance).mockResolvedValue('0');

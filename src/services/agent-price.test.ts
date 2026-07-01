@@ -137,6 +137,67 @@ describe('resolveAgentPriceUsdc', () => {
     expect(mockGetAgent).toHaveBeenNthCalledWith(1, 'kyc', 'reg-a');
     expect(mockGetAgent).toHaveBeenNthCalledWith(2, 'kyc', 'reg-b');
   });
+
+  // registry-price-resolution fix: el planner (WKH-131) emite `step.registry`
+  // como DISPLAY-name ("WasiAI"), pero `getAgent(slug, hint)` espera el ID del
+  // registry ("wasiai"). El lookup con hint falla → antes devolvía null → el
+  // quote/execute trataba el step como placeholder ($1). Ahora, si el hint
+  // falla Y fue provisto, hay fallback registry-agnóstico por slug.
+  it('T-PRICE-9 should fall back to registry-agnostic lookup when the registry hint misses', async () => {
+    // getAgent(slug, "WasiAI") → null (display-name != registry id)
+    mockGetAgent.mockResolvedValueOnce(null);
+    // getAgent(slug) sin hint → resuelve el agente con su precio real
+    mockGetAgent.mockResolvedValueOnce(makeAgent('kyc', 0.001));
+
+    const price = await resolveAgentPriceUsdc('kyc', 'WasiAI');
+
+    // Precio real, NO null, NO placeholder.
+    expect(price).toBe(0.001);
+    expect(mockGetAgent).toHaveBeenCalledTimes(2);
+    expect(mockGetAgent).toHaveBeenNthCalledWith(1, 'kyc', 'WasiAI');
+    // Fallback espeja resolveAgentDestination: getAgent(slug) sin 2º arg.
+    expect(mockGetAgent).toHaveBeenNthCalledWith(2, 'kyc');
+  });
+
+  it('T-PRICE-10 should cache the fallback result under the original hint key', async () => {
+    mockGetAgent.mockResolvedValueOnce(null);
+    mockGetAgent.mockResolvedValueOnce(makeAgent('kyc', 0.001));
+
+    const first = await resolveAgentPriceUsdc('kyc', 'WasiAI');
+    const second = await resolveAgentPriceUsdc('kyc', 'WasiAI');
+
+    expect(first).toBe(0.001);
+    expect(second).toBe(0.001);
+    // Segunda llamada = cache hit bajo `kyc::WasiAI` → NO re-fetchea.
+    expect(mockGetAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('T-PRICE-11 (404-drain guard): returns null when agent exists in NO registry — both lookups miss', async () => {
+    // hint miss + registry-agnostic miss → null → el guard 404 (bug 404-drain)
+    // se preserva: el step-0 sigue null → 404, sin débito.
+    mockGetAgent.mockResolvedValueOnce(null);
+    mockGetAgent.mockResolvedValueOnce(null);
+
+    const price = await resolveAgentPriceUsdc('ghost', 'WasiAI');
+
+    expect(price).toBeNull();
+    expect(mockGetAgent).toHaveBeenCalledTimes(2);
+    expect(mockGetAgent).toHaveBeenNthCalledWith(1, 'ghost', 'WasiAI');
+    expect(mockGetAgent).toHaveBeenNthCalledWith(2, 'ghost');
+    // DT-G: null NO se cachea.
+  });
+
+  it('T-PRICE-12 (404-drain guard): no fallback re-query when registry hint is undefined', async () => {
+    // Sin hint el 1er lookup ya busca en todos los registries → NO hay 2º
+    // intento (evita doble-query redundante). Preserva 404-drain: null → null.
+    mockGetAgent.mockResolvedValueOnce(null);
+
+    const price = await resolveAgentPriceUsdc('ghost', undefined);
+
+    expect(price).toBeNull();
+    expect(mockGetAgent).toHaveBeenCalledTimes(1);
+    expect(mockGetAgent).toHaveBeenCalledWith('ghost', undefined);
+  });
 });
 
 // WKH-125 BLQ-ALTO-1 (fix-pack): resolveAgentDestination devuelve el

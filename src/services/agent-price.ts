@@ -56,7 +56,21 @@ export async function resolveAgentPriceUsdc(
 
   // forceRefresh === true → saltea el cache hit y re-fetchea (re-cachea abajo).
   // Cache miss o TTL expirado → re-fetch (AC-9)
-  const agent = await discoveryService.getAgent(agentSlug, registryName);
+  let agent = await discoveryService.getAgent(agentSlug, registryName);
+
+  // registry-price-resolution fix: `getAgent(slug, registryName)` hace
+  // `registryService.get(registryName)`, que espera el ID del registry
+  // (e.g. "wasiai"). El planner (WKH-131) emite en `step.registry` el
+  // DISPLAY-name (e.g. "WasiAI") → el lookup con hint falla y devolvía null
+  // → el quote/execute trataba el step como placeholder ($1). Espeja el
+  // fallback registry-agnóstico de `resolveAgentDestination`: si el hint
+  // falla Y fue provisto, reintentá sin registry (busca en TODOS los
+  // registries enabled por slug). Preserva el guard 404 intacto: si el
+  // agente no existe en NINGÚN registry, ambos lookups → null → null.
+  if (!agent && registryName !== undefined) {
+    agent = await discoveryService.getAgent(agentSlug);
+  }
+
   if (!agent) {
     // DT-G: no cachear negativos. Si el agente se registra después,
     // el próximo lookup lo encuentra sin esperar el TTL.
@@ -64,6 +78,8 @@ export async function resolveAgentPriceUsdc(
   }
 
   const price = agent.priceUsdc;
+  // Cacheá bajo la key ORIGINAL (`slug::registryName`) para no re-fetchear
+  // el fallback en llamadas subsecuentes con el mismo hint.
   cache.set(key, { price, expiresAt: now + CACHE_TTL_MS });
   return price;
 }
