@@ -453,7 +453,8 @@ export interface OrchestratePlanResult {
   costPerStep: number[];
   /** sum(costPerStep) — informativo, NO base del débito. */
   totalCostUsdc: number;
-  /** feeUsdc = budget * rate (espejo del atómico). */
+  /** WKH-132: fee cost-based = maxQuotedCostUsdc − totalCostUsdc (residual);
+   *  == totalCostUsdc + protocolFeeUsdc por construcción (AC-2). 0 en early-returns. */
   protocolFeeUsdc: number;
   /** Cap del execute (§4.3.4 SDD); espejo de augmentX402ChallengeAmount. */
   maxQuotedCostUsdc: number;

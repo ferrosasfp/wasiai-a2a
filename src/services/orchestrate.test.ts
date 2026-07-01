@@ -111,11 +111,7 @@ import { budgetService } from './budget.js';
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
-import {
-  chargeProtocolFee,
-  getProtocolFeeRate,
-  ProtocolFeeError,
-} from './fee-charge.js';
+import { chargeProtocolFee, getProtocolFeeRate } from './fee-charge.js';
 import { orchestrateService } from './orchestrate.js';
 import { receiptService } from './receipt.js';
 
@@ -264,9 +260,10 @@ describe('orchestrateService', () => {
     );
 
     expect(result.orchestrationId).toBe('orch-id-abc');
-    // WKH-44: fee ahora se calcula sobre el budget (5.0), no sobre el
-    // totalCostUsdc del pipeline. Budget 5.0 * 0.01 = 0.05.
-    expect(result.protocolFeeUsdc).toBeCloseTo(5.0 * 0.01, 6);
+    // WKH-132: fee COST-BASED. El atómico reporta rate sobre el costo REAL del
+    // pipeline (mockComposeResult.totalCostUsdc=0.5), NO sobre el budget (5.0).
+    // 0.5 * 0.01 = 0.005 (antes budget-based daba 0.05).
+    expect(result.protocolFeeUsdc).toBeCloseTo(0.5 * 0.01, 6);
   });
 
   // T-3: No agents found returns answer:null
@@ -386,10 +383,10 @@ describe('orchestrateService', () => {
     );
   });
 
-  // T-7: protocolFeeUsdc = budget * 0.01
-  // WKH-44: semántica cambiada — antes era totalCostUsdc * 0.01, ahora
-  // es budget * rate (el fee se calcula UP-FRONT sobre el budget).
-  it('T-7: protocolFeeUsdc is 1% of budget', async () => {
+  // T-7: protocolFeeUsdc = pipeline.totalCostUsdc * 0.01 (WKH-132 cost-based).
+  // WKH-132: revertido a cost-based — el fee reportado escala con el costo REAL
+  // ejecutado (customCompose.totalCostUsdc=10), NO con el budget declarado (20).
+  it('T-7: protocolFeeUsdc is 1% of pipeline cost', async () => {
     const customCompose: ComposeResult = {
       ...mockComposeResult,
       totalCostUsdc: 10.0,
@@ -415,8 +412,8 @@ describe('orchestrateService', () => {
       'orch-fee',
     );
 
-    // WKH-44: budget 20 * 0.01 = 0.2 (antes era 0.1 sobre totalCost=10)
-    expect(result.protocolFeeUsdc).toBeCloseTo(0.2, 6);
+    // WKH-132: pipeline cost 10 * 0.01 = 0.1 (cost-based, NO budget 20 * 0.01).
+    expect(result.protocolFeeUsdc).toBeCloseTo(0.1, 6);
   });
   // T-8: LLM returns malformed JSON -> fallback (AR fix M-1)
   it('T-8: LLM malformed JSON triggers fallback', async () => {
@@ -507,8 +504,10 @@ describe('orchestrateService', () => {
     );
 
     const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
-    // budget 1.0 - fee 0.01 = 0.99
-    expect(composeCall.maxBudget).toBeCloseTo(0.99, 6);
+    // WKH-132: maxBudget = budget − feeUsdc (WKH-44 invariante conservada), pero
+    // feeUsdc ahora es COST-BASED (residual del quote): summarizer-v1 (0.5) →
+    // maxQuoted 0.505 − total 0.5 = 0.005. maxBudget = 1.0 − 0.005 = 0.995.
+    expect(composeCall.maxBudget).toBeCloseTo(0.995, 6);
   });
 
   // T-12 (AC-2): chargeProtocolFee invoked when pipeline.success=true
@@ -527,9 +526,11 @@ describe('orchestrateService', () => {
     );
 
     expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledTimes(1);
+    // WKH-132 (AC-3): la base del charge es pipeline.totalCostUsdc (0.5), NO el
+    // budget (1.0). Espejo de compose.ts:539.
     expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledWith({
       orchestrationId: 'orch-12',
-      budgetUsdc: 1.0,
+      budgetUsdc: 0.5,
       feeRate: 0.01,
     });
     expect(result.feeChargeTxHash).toBe('0xFEE');
@@ -572,7 +573,8 @@ describe('orchestrateService', () => {
 
     expect(result.feeChargeError).toBeUndefined();
     expect(result.feeChargeTxHash).toBeUndefined();
-    expect(result.protocolFeeUsdc).toBeCloseTo(0.01, 6);
+    // WKH-132: reportado cost-based (pipeline 0.5 * 0.01 = 0.005), NO budget-based.
+    expect(result.protocolFeeUsdc).toBeCloseTo(0.005, 6);
   });
 
   // T-15 (AC-6): fee charge fails → feeChargeError set, HTTP 200 (no throw)
@@ -596,19 +598,24 @@ describe('orchestrateService', () => {
     expect(result.answer).toBeDefined();
   });
 
-  // T-16 (AC-7): throws ProtocolFeeError when feeUsdc > budget (before discovery)
-  it('T-16: throws ProtocolFeeError 400 when feeUsdc > budget', async () => {
-    vi.mocked(getProtocolFeeRate).mockReturnValue(1.5); // corrupt rate
+  // T-16 (AC-4, WKH-132): el guard pre-planning `feeUsdc > budget` fue ELIMINADO
+  // (era inalcanzable: getProtocolFeeRate clampa a [0,0.10]). Con un rate en rango
+  // NO hay throw pre-planning y el planning corre normal. El safety guard real
+  // (cost-vs-cost) sobrevive en chargeProtocolFee (ver fee-charge.test.ts).
+  it('T-16: no ProtocolFeeError pre-planning with in-range rate — planning runs', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.05);
+    setLlmOneAgent();
 
-    await expect(
-      orchestrateService.orchestrate(
-        { goal: 'broken rate', budget: 1.0 },
-        'orch-16',
-      ),
-    ).rejects.toBeInstanceOf(ProtocolFeeError);
+    const result = await orchestrateService.orchestrate(
+      { goal: 'in-range rate', budget: 1.0 },
+      'orch-16',
+    );
 
-    // Discovery NOT called — safety guard aborts early.
-    expect(vi.mocked(discoveryService.discover)).not.toHaveBeenCalled();
+    // Sin throw: discovery corrió y el pipeline se ejecutó.
+    expect(vi.mocked(discoveryService.discover)).toHaveBeenCalled();
+    expect(result.answer).toBeDefined();
+    // Fee reportado cost-based (pipeline 0.5 * 0.05 = 0.025), nunca budget*rate.
+    expect(result.protocolFeeUsdc).toBeCloseTo(0.5 * 0.05, 6);
   });
 
   // T-17 (AC-8): second call with same orchestrationId returns already-charged
@@ -642,23 +649,25 @@ describe('orchestrateService', () => {
     expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledTimes(2);
   });
 
-  // T-18 (AC-10): rate change reflected in next orchestrate call (no cache)
+  // T-18 (AC-10): rate change reflected in next orchestrate call (no cache).
+  // WKH-132: fee cost-based → pipeline 0.5 * rate. Cambiar el rate cambia el fee
+  // en la llamada siguiente (sin cache).
   it('T-18: PROTOCOL_FEE_RATE change reflected in next call', async () => {
-    vi.mocked(getProtocolFeeRate).mockReturnValueOnce(0.01);
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01);
     setLlmOneAgent();
     const r1 = await orchestrateService.orchestrate(
       { goal: 'first rate', budget: 1.0 },
       'orch-18a',
     );
-    expect(r1.protocolFeeUsdc).toBeCloseTo(0.01, 6);
+    expect(r1.protocolFeeUsdc).toBeCloseTo(0.5 * 0.01, 6);
 
-    vi.mocked(getProtocolFeeRate).mockReturnValueOnce(0.02);
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.02);
     setLlmOneAgent();
     const r2 = await orchestrateService.orchestrate(
       { goal: 'second rate', budget: 1.0 },
       'orch-18b',
     );
-    expect(r2.protocolFeeUsdc).toBeCloseTo(0.02, 6);
+    expect(r2.protocolFeeUsdc).toBeCloseTo(0.5 * 0.02, 6);
   });
 
   // T-19 (AC-9): fee calculated with default 0.01 when env unset
@@ -671,7 +680,8 @@ describe('orchestrateService', () => {
       'orch-19',
     );
 
-    expect(result.protocolFeeUsdc).toBeCloseTo(0.1, 6);
+    // WKH-132: cost-based (pipeline 0.5 * 0.01 = 0.005), NO budget 10 * 0.01.
+    expect(result.protocolFeeUsdc).toBeCloseTo(0.005, 6);
   });
 
   // T-20 (CD-D): early-return no-agents keeps protocolFeeUsdc=0
@@ -1452,7 +1462,13 @@ describe('orchestrateService', () => {
     expect(plan.steps.length).toBeGreaterThan(0);
     expect(plan.costPerStep.length).toBe(plan.steps.length);
     expect(plan.maxQuotedCostUsdc).toBeGreaterThan(0);
-    expect(plan.protocolFeeUsdc).toBeCloseTo(5.0 * 0.01, 6);
+    // WKH-132: fee residual = maxQuoted − total (cost-based), NO budget * rate.
+    // summarizer-v1 (0.5) → maxQuoted 0.505 − total 0.5 = 0.005.
+    expect(plan.protocolFeeUsdc).toBeCloseTo(
+      plan.maxQuotedCostUsdc - plan.totalCostUsdc,
+      6,
+    );
+    expect(plan.protocolFeeUsdc).toBeCloseTo(0.005, 6);
     expect(plan.consideredAgents.length).toBeGreaterThan(0);
     // CD-1/AC-13: plan NUNCA debita ni ejecuta compose.
     expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
@@ -1520,6 +1536,179 @@ describe('orchestrateService', () => {
     // Precio real resuelto vía fallback, NO placeholder.
     expect(plan.costPerStep).toEqual([0.5]);
     expect(plan.maxQuotedCostUsdc).toBeCloseTo(expected, 6);
+  });
+
+  // ─── WKH-132 ─ Fee cost-based (proporcional al costo REAL del pipeline) ─────
+  //
+  // AC-1/AC-2/AC-9: el protocolFeeUsdc del plan 'ready' es el RESIDUAL del quote
+  // sobre el costo real (maxQuotedCostUsdc − totalCostUsdc), independiente del
+  // budget declarado. getAgent se mockea POR SLUG (CD-13) para que cada step
+  // resuelva su precio real; _resetAgentPriceCache ya corre en beforeEach (CD-14).
+
+  /** Agente resoluble por slug con un precio arbitrario (sin non-null — CD-15). */
+  function priceAgent(slug: string, priceUsdc: number): Agent {
+    return {
+      id: `id-${slug}`,
+      name: slug,
+      slug,
+      description: `agent ${slug}`,
+      capabilities: ['test'],
+      priceUsdc,
+      reputation: 80,
+      registry: 'wasiai',
+      registry_id: 'wasiai',
+      invokeUrl: `https://example.com/invoke/${slug}`,
+      invocationNote: 'Use POST /compose or POST /orchestrate on the gateway.',
+      verified: false,
+      status: 'active',
+    };
+  }
+
+  /** discovery + getAgent(slug) + LLM que selecciona TODOS los agentes dados. */
+  function setPipeline(agents: Agent[]): void {
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents,
+      total: agents.length,
+      registries: ['wasiai'],
+    });
+    vi.mocked(discoveryService.getAgent).mockImplementation(async (slug) => {
+      return agents.find((a) => a.slug === slug) ?? null;
+    });
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: agents.map((a, i) => ({
+          slug: a.slug,
+          registry: 'wasiai',
+          input: { q: i },
+          reasoning: 'r',
+        })),
+        reasoning: 'multi-step plan',
+      }),
+    );
+  }
+
+  // AC-1: plan ready → protocolFeeUsdc = residual del quote sobre el costo REAL.
+  it('AC-1: plan ready → protocolFeeUsdc derives from real pipeline cost', async () => {
+    // Pipeline de 3 steps totalizando 0.061.
+    setPipeline([
+      priceAgent('p1', 0.02),
+      priceAgent('p2', 0.02),
+      priceAgent('p3', 0.021),
+    ]);
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'multi-step cost', budget: 1.0 },
+      'ac1',
+    );
+
+    expect(plan.planStatus).toBe('ready');
+    expect(plan.totalCostUsdc).toBeCloseTo(0.061, 6);
+    // fee == residual (maxQuoted − total), NUNCA budget * rate.
+    const residual = Number(
+      Math.max(0, plan.maxQuotedCostUsdc - plan.totalCostUsdc).toFixed(6),
+    );
+    expect(plan.protocolFeeUsdc).toBeCloseTo(residual, 6);
+    expect(plan.protocolFeeUsdc).toBeCloseTo(0.00061, 6);
+    // El código viejo (budget * rate = 1.0 * 0.01 = 0.01) quedaría muy por encima.
+    expect(plan.protocolFeeUsdc).not.toBeCloseTo(1.0 * 0.01, 4);
+  });
+
+  // AC-2: maxQuoted == total + fee por construcción (varios pipelines).
+  it('AC-2: maxQuoted == total + fee across pipelines (incl. placeholder)', async () => {
+    // Caso A: 1 step 0.02.
+    setPipeline([priceAgent('a1', 0.02)]);
+    const pA = await orchestrateService.planOrchestration(
+      { goal: 'g', budget: 1.0 },
+      'ac2-a',
+    );
+    expect(pA.planStatus).toBe('ready');
+    expect(
+      Math.abs(pA.maxQuotedCostUsdc - (pA.totalCostUsdc + pA.protocolFeeUsdc)),
+    ).toBeLessThanOrEqual(1e-6);
+
+    // Caso B: 3 steps 0.061.
+    setPipeline([
+      priceAgent('b1', 0.02),
+      priceAgent('b2', 0.02),
+      priceAgent('b3', 0.021),
+    ]);
+    const pB = await orchestrateService.planOrchestration(
+      { goal: 'g', budget: 1.0 },
+      'ac2-b',
+    );
+    expect(pB.planStatus).toBe('ready');
+    expect(
+      Math.abs(pB.maxQuotedCostUsdc - (pB.totalCostUsdc + pB.protocolFeeUsdc)),
+    ).toBeLessThanOrEqual(1e-6);
+
+    // Caso C: step precio 0 → placeholder en el quote, total 0. Invariante igual.
+    setPipeline([priceAgent('c1', 0)]);
+    const pC = await orchestrateService.planOrchestration(
+      { goal: 'g', budget: 5.0 },
+      'ac2-c',
+    );
+    expect(pC.planStatus).toBe('ready');
+    expect(pC.totalCostUsdc).toBe(0);
+    expect(
+      Math.abs(pC.maxQuotedCostUsdc - (pC.totalCostUsdc + pC.protocolFeeUsdc)),
+    ).toBeLessThanOrEqual(1e-6);
+  });
+
+  // AC-9 (TEST CLAVE): mismo pipeline, budget 1.0 vs 5.0 → mismo protocolFeeUsdc.
+  it('AC-9: same pipeline (0.061), budget 1.0 vs 5.0 → identical fee', async () => {
+    setPipeline([
+      priceAgent('s1', 0.02),
+      priceAgent('s2', 0.02),
+      priceAgent('s3', 0.021),
+    ]);
+
+    const p1 = await orchestrateService.planOrchestration(
+      { goal: 'g', budget: 1.0 },
+      'ac9-a',
+    );
+    const p2 = await orchestrateService.planOrchestration(
+      { goal: 'g', budget: 5.0 },
+      'ac9-b',
+    );
+
+    expect(p1.planStatus).toBe('ready');
+    expect(p2.planStatus).toBe('ready');
+    // Mismo pipeline ⇒ mismo fee, independiente del budget (~0.00061).
+    expect(p1.protocolFeeUsdc).toBeCloseTo(p2.protocolFeeUsdc, 6);
+    expect(p1.protocolFeeUsdc).toBeCloseTo(0.00061, 6);
+    // El código viejo (budget-based) habría dado 0.01 y 0.05 respectivamente.
+    expect(p1.protocolFeeUsdc).not.toBeCloseTo(1.0 * 0.01, 4);
+    expect(p2.protocolFeeUsdc).not.toBeCloseTo(5.0 * 0.01, 4);
+  });
+
+  // BLQ-BAJO-1 (regresión de disponibilidad): la reserva INTERNA de maxBudget
+  // (plan.feeUsdc) DEBE ser cost-based (totalCostUsdc * feeRate), NO el residual
+  // del quote. Con un agente priceUsdc=0 el residual se infla a ~1.01 (placeholder
+  // PLACEHOLDER_FEE_USD) mientras el costo real es 0 → si feeUsdc == residual,
+  // maxBudget = budget − 1.01 puede ser NEGATIVO → compose "Budget exceeded" y una
+  // orquestación atómica que antes funcionaba falla. El fix desacopla la reserva
+  // (feeUsdc, cost-based, == /execute routes/orchestrate.ts:355) del valor REPORTADO
+  // (protocolFeeUsdc, residual, CD-8/CD-9). Nota: compose está mockeado en esta
+  // suite, por lo que se asertan directamente los campos del plan que alimentan
+  // maxBudget — la causa raíz (feeUsdc == residual) se pinnea sin des-mockear compose.
+  it('BLQ-BAJO-1: free agent (price 0) → feeUsdc reserve is cost-based (0), NOT residual', async () => {
+    setPipeline([priceAgent('free1', 0)]);
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'free agent', budget: 1.0 },
+      'blq-bajo-1',
+    );
+
+    expect(plan.planStatus).toBe('ready');
+    expect(plan.totalCostUsdc).toBe(0);
+    // Reserva INTERNA cost-based: totalCostUsdc (0) * feeRate = 0. Con feeUsdc == 0
+    // maxBudget = budget − 0 = 1.0 → compose OK (elimina la asimetría con /execute).
+    expect(plan.feeUsdc).toBe(0);
+    // El valor REPORTADO sigue siendo el residual (~1.01: placeholder * (1+rate)),
+    // inmutable (CD-8, caller-favorable). El desacople queda pinneado.
+    expect(plan.protocolFeeUsdc).toBeCloseTo(1.01, 6);
+    // Regresión: si feeUsdc quedara igual al residual, maxBudget = 1.0 − 1.01 < 0.
+    expect(plan.feeUsdc).not.toBeCloseTo(plan.protocolFeeUsdc, 4);
   });
 
   // T-PLAN-3 (AC-6): no-funds → planStatus 'insufficient_funds' + track disparado.

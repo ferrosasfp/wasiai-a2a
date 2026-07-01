@@ -31,6 +31,13 @@ const log = getLogger('fee-charge');
 
 export interface FeeChargeParams {
   orchestrationId: string;
+  /**
+   * WKH-132: base sobre la que se aplica el rate. NO es "el budget declarado":
+   * es el COSTO REAL del pipeline (compose.ts:539 y orchestrate execute pasan
+   * result/pipeline.totalCostUsdc). El guard interno `feeUsdc > budgetUsdc`
+   * (línea 167) es entonces cost-vs-cost (⟺ rate>1), el safety guard del fee.
+   * (rename budgetUsdc→feeBaseUsdc DIFERIDO: cambiaría compose.ts:539 = Scope OUT.)
+   */
   budgetUsdc: number;
   feeRate: number;
 }

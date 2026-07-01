@@ -621,4 +621,36 @@ describe('orchestrate routes — WKH-131 /plan + /execute', () => {
         .orchestrationId,
     ).toBe(execId1);
   });
+
+  // T-EXEC-10 (AC-3, WKH-132): el /execute re-deriva el plan.feeUsdc COST-BASED
+  // (totalCostUsdc * rate), NO budget * rate. resolveAgentPriceUsdc está mockeado
+  // a 0.05 y feeRate a 0.01 → 1 step ⇒ totalCostUsdc 0.05, feeUsdc 0.0005.
+  it('T-EXEC-10: /execute seeds plan.feeUsdc from cost (0.05*0.01), not budget', async () => {
+    mockExecute.mockResolvedValue(okResult());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: {
+        orchestrationId: 'o-exec-10',
+        steps: [{ agent: 'a1', registry: 'wasiai', input: { q: 0 } }],
+        maxQuotedCostUsdc: 1.0,
+        budget: 5.0, // budget alto: si fuera budget-based el fee sería 0.05.
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const plan = mockExecute.mock.calls[0]![1] as {
+      feeUsdc: number;
+      protocolFeeUsdc: number;
+      totalCostUsdc: number;
+    };
+    // Cost-based: 1 step * 0.05 = 0.05 total; fee = 0.05 * 0.01 = 0.0005.
+    expect(plan.totalCostUsdc).toBeCloseTo(0.05, 6);
+    expect(plan.feeUsdc).toBeCloseTo(0.0005, 6);
+    expect(plan.protocolFeeUsdc).toBeCloseTo(0.0005, 6);
+    // NO budget-based (5.0 * 0.01 = 0.05).
+    expect(plan.feeUsdc).not.toBeCloseTo(5.0 * 0.01, 5);
+  });
 });
