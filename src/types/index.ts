@@ -338,7 +338,7 @@ export interface StepResult {
  */
 export interface LLMBridgeStats {
   /** Modelo Anthropic invocado (string literal del SDK). */
-  model: 'claude-haiku-4-5-20251001' | 'claude-sonnet-4-6';
+  model: 'claude-haiku-4-5-20251001' | 'claude-sonnet-5';
   /** Total tokens de input cobrados por Anthropic (suma de attempts si hubo retry). */
   tokensIn: number;
   /** Total tokens de output cobrados por Anthropic. */

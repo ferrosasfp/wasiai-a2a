@@ -59,7 +59,7 @@ import { _clearL1Cache, maybeTransform } from '../transform.js';
 describe('WKH-57 W0 helpers — pricing', () => {
   it('T-Wp1: PRICING_USD_PER_M_TOKENS exposes Haiku and Sonnet entries with input/output rates', () => {
     const haiku: PricedModel = 'claude-haiku-4-5-20251001';
-    const sonnet: PricedModel = 'claude-sonnet-4-6';
+    const sonnet: PricedModel = 'claude-sonnet-5';
     expect(PRICING_USD_PER_M_TOKENS[haiku]).toEqual({
       input: 1.0,
       output: 5.0,
@@ -78,11 +78,7 @@ describe('WKH-57 W0 helpers — pricing', () => {
     );
     expect(haikuCost).toBeCloseTo(1.0 + 5.0, 10);
 
-    const sonnetCost = computeCostUsd(
-      'claude-sonnet-4-6',
-      1_000_000,
-      1_000_000,
-    );
+    const sonnetCost = computeCostUsd('claude-sonnet-5', 1_000_000, 1_000_000);
     expect(sonnetCost).toBeCloseTo(3.0 + 15.0, 10);
 
     // Half-rate sanity check
@@ -158,18 +154,18 @@ describe('WKH-57 W0 helpers — selectModel', () => {
         e: { type: 'string' },
       },
     };
-    expect(selectModel(schema)).toBe('claude-sonnet-4-6');
+    expect(selectModel(schema)).toBe('claude-sonnet-5');
   });
 
   it('T-Ws5: schema with oneOf|anyOf|allOf -> Sonnet', () => {
     expect(selectModel({ oneOf: [{ type: 'string' }] })).toBe(
-      'claude-sonnet-4-6',
+      'claude-sonnet-5',
     );
     expect(selectModel({ anyOf: [{ type: 'number' }] })).toBe(
-      'claude-sonnet-4-6',
+      'claude-sonnet-5',
     );
     expect(selectModel({ allOf: [{ type: 'object' }] })).toBe(
-      'claude-sonnet-4-6',
+      'claude-sonnet-5',
     );
   });
 
@@ -181,7 +177,7 @@ describe('WKH-57 W0 helpers — selectModel', () => {
         nested: { type: 'object', properties: {} },
       },
     };
-    expect(selectModel(schema)).toBe('claude-sonnet-4-6');
+    expect(selectModel(schema)).toBe('claude-sonnet-5');
   });
 
   it('T-Ws7: defensive guards — non-object inputs fall back to Haiku (CD-12)', () => {
@@ -390,8 +386,8 @@ describe('WKH-57 maybeTransform — model selector (AC-1, AC-2)', () => {
     const result = await maybeTransform('s', 't', { x: 'y' }, schema);
 
     expect(mockCreate).toHaveBeenCalledTimes(1);
-    expect(mockCreate.mock.calls[0]![0]!.model).toBe('claude-sonnet-4-6');
-    expect(result.llm?.model).toBe('claude-sonnet-4-6');
+    expect(mockCreate.mock.calls[0]![0]!.model).toBe('claude-sonnet-5');
+    expect(result.llm?.model).toBe('claude-sonnet-5');
   });
 
   it('T-VER-2b: nested object property selects Sonnet (AC-2)', async () => {
@@ -406,8 +402,8 @@ describe('WKH-57 maybeTransform — model selector (AC-1, AC-2)', () => {
     };
     const result = await maybeTransform('s', 't', { x: 'y' }, schema);
 
-    expect(mockCreate.mock.calls[0]![0]!.model).toBe('claude-sonnet-4-6');
-    expect(result.llm?.model).toBe('claude-sonnet-4-6');
+    expect(mockCreate.mock.calls[0]![0]!.model).toBe('claude-sonnet-5');
+    expect(result.llm?.model).toBe('claude-sonnet-5');
   });
 
   it('T-VER-2c: oneOf selects Sonnet (AC-2)', async () => {
@@ -419,8 +415,8 @@ describe('WKH-57 maybeTransform — model selector (AC-1, AC-2)', () => {
     };
     const result = await maybeTransform('s', 't', { x: 'y' }, schema);
 
-    expect(mockCreate.mock.calls[0]![0]!.model).toBe('claude-sonnet-4-6');
-    expect(result.llm?.model).toBe('claude-sonnet-4-6');
+    expect(mockCreate.mock.calls[0]![0]!.model).toBe('claude-sonnet-5');
+    expect(result.llm?.model).toBe('claude-sonnet-5');
   });
 });
 

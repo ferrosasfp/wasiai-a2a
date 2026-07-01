@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { selectModel } from './select-model.js';
 
 const HAIKU = 'claude-haiku-4-5-20251001';
-const SONNET = 'claude-sonnet-4-6';
+const SONNET = 'claude-sonnet-5';
 
 describe('selectModel (P2-11)', () => {
   // ── Trivial → haiku ──────────────────────────────────────
