@@ -305,7 +305,17 @@ describe('R1 budget race — atomic decrement caps total spend at budget', () =>
     db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '5' } });
 
     const results = await Promise.all(
-      Array.from({ length: 10 }, () => budgetService.debit(KEY, CHAIN, 1)),
+      Array.from({ length: 10 }, () =>
+        budgetService.debit(
+          KEY,
+          CHAIN,
+          1,
+          undefined,
+          undefined,
+          undefined,
+          OWNER,
+        ),
+      ),
     );
 
     const ok = results.filter((r) => r.success).length;
@@ -323,9 +333,33 @@ describe('R1 budget race — atomic decrement caps total spend at budget', () =>
     db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '1.00' } });
 
     const results = await Promise.all([
-      budgetService.debit(KEY, CHAIN, 0.4),
-      budgetService.debit(KEY, CHAIN, 0.4),
-      budgetService.debit(KEY, CHAIN, 0.4),
+      budgetService.debit(
+        KEY,
+        CHAIN,
+        0.4,
+        undefined,
+        undefined,
+        undefined,
+        OWNER,
+      ),
+      budgetService.debit(
+        KEY,
+        CHAIN,
+        0.4,
+        undefined,
+        undefined,
+        undefined,
+        OWNER,
+      ),
+      budgetService.debit(
+        KEY,
+        CHAIN,
+        0.4,
+        undefined,
+        undefined,
+        undefined,
+        OWNER,
+      ),
     ]);
 
     const ok = results.filter((r) => r.success).length;
@@ -338,12 +372,69 @@ describe('R1 budget race — atomic decrement caps total spend at budget', () =>
     db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '1.00' } });
 
     const results = await Promise.all(
-      Array.from({ length: 50 }, () => budgetService.debit(KEY, CHAIN, 0.1)),
+      Array.from({ length: 50 }, () =>
+        budgetService.debit(
+          KEY,
+          CHAIN,
+          0.1,
+          undefined,
+          undefined,
+          undefined,
+          OWNER,
+        ),
+      ),
     );
 
     const ok = results.filter((r) => r.success).length;
     expect(ok).toBe(10);
     expect(db.balance(KEY, CHAIN)).toBeCloseTo(0, 10);
+  });
+});
+
+// ════════════════════════════════════════════════════════════
+// N5 (audit 2026-07-02): OWNERSHIP GUARD is REAL, not tautological.
+//
+// The removed cold-path re-derived the target row's OWN owner_ref and fed THAT
+// to the RPC, so `p_owner_ref` always equalled the row's owner → the DB
+// OWNERSHIP_MISMATCH guard could NEVER fire. Now `ownerRef` is a REQUIRED arg
+// threaded from the authenticated caller. This test seeds a key owned by OWNER
+// and debits with a DIFFERENT caller owner_ref: the guard (modelled faithfully
+// in the increment mock: `k.owner_ref !== p_owner_ref → OWNERSHIP_MISMATCH`)
+// MUST reject it and leave the balance untouched.
+// ════════════════════════════════════════════════════════════
+describe('N5 ownership guard is real (not tautological)', () => {
+  it('debit with a caller owner_ref that does NOT match the key owner → OWNERSHIP_MISMATCH, balance untouched', async () => {
+    db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '5' } });
+
+    const result = await budgetService.debit(
+      KEY,
+      CHAIN,
+      1,
+      undefined,
+      undefined,
+      undefined,
+      'not-the-owner',
+    );
+
+    expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
+    expect(db.balance(KEY, CHAIN)).toBe(5); // guard rejected → no debit
+  });
+
+  it('the SAME debit with the correct caller owner_ref succeeds (control)', async () => {
+    db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '5' } });
+
+    const result = await budgetService.debit(
+      KEY,
+      CHAIN,
+      1,
+      undefined,
+      undefined,
+      undefined,
+      OWNER,
+    );
+
+    expect(result).toEqual({ success: true });
+    expect(db.balance(KEY, CHAIN)).toBe(4);
   });
 });
 
@@ -359,7 +450,15 @@ describe('R2 double-settle / idempotency under concurrency', () => {
     const n = await checkAndRecordX402Nonce(network, nonce);
     if (n.kind === 'replay')
       return { settled: false as const, reason: 'replay' };
-    const d = await budgetService.debit(KEY, CHAIN, amount);
+    const d = await budgetService.debit(
+      KEY,
+      CHAIN,
+      amount,
+      undefined,
+      undefined,
+      undefined,
+      OWNER,
+    );
     return d.success
       ? { settled: true as const, reason: 'ok' }
       : { settled: false as const, reason: d.error ?? 'debit-failed' };
@@ -490,7 +589,15 @@ describe('R5 interleaved debit + refund — balance is conserved', () => {
     // impossible since refund also runs; concretely debit denied only if it saw
     // <$1, which cannot happen here) → balance 2. Either way: never negative.
     const [debitRes, creditRes] = await Promise.all([
-      budgetService.debit(KEY, CHAIN, 1),
+      budgetService.debit(
+        KEY,
+        CHAIN,
+        1,
+        undefined,
+        undefined,
+        undefined,
+        OWNER,
+      ),
       budgetService.credit(KEY, CHAIN, 1, OWNER),
     ]);
 
@@ -512,11 +619,13 @@ describe('R5 interleaved debit + refund — balance is conserved', () => {
     }>[] = [];
     for (let i = 0; i < 8; i++) {
       ops.push(
-        budgetService.debit(KEY, CHAIN, AMOUNT).then((r) => ({
-          kind: 'debit' as const,
-          ok: r.success,
-          amount: AMOUNT,
-        })),
+        budgetService
+          .debit(KEY, CHAIN, AMOUNT, undefined, undefined, undefined, OWNER)
+          .then((r) => ({
+            kind: 'debit' as const,
+            ok: r.success,
+            amount: AMOUNT,
+          })),
       );
       ops.push(
         budgetService.credit(KEY, CHAIN, AMOUNT, OWNER).then((r) => ({
