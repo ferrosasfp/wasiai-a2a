@@ -191,10 +191,17 @@ describe('budgetService', () => {
 
   describe('debit', () => {
     it('calls supabase.rpc with correct params and returns success (AC-9)', async () => {
-      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({ data: null, error: null } as never);
 
-      const result = await budgetService.debit('key-1', 2368, 1.5);
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1.5,
+        undefined,
+        undefined,
+        undefined,
+        'user-1',
+      );
 
       expect(mockRpc).toHaveBeenCalledWith('increment_a2a_key_spend', {
         p_key_id: 'key-1',
@@ -206,7 +213,6 @@ describe('budgetService', () => {
     });
 
     it('returns failure with DAILY_LIMIT error from Postgres (AC-9)', async () => {
-      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({
         data: null,
         error: {
@@ -214,7 +220,15 @@ describe('budgetService', () => {
         },
       } as never);
 
-      const result = await budgetService.debit('key-1', 2368, 2);
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        2,
+        undefined,
+        undefined,
+        undefined,
+        'user-1',
+      );
 
       // M5 (audit 2026-06-24): el msg crudo de PG NO se propaga — se mapea al
       // código estable DAILY_LIMIT (espejo de la ruta dest-policy).
@@ -225,7 +239,6 @@ describe('budgetService', () => {
     });
 
     it('returns failure with INSUFFICIENT_BUDGET error from Postgres (AC-9)', async () => {
-      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({
         data: null,
         error: {
@@ -233,7 +246,15 @@ describe('budgetService', () => {
         },
       } as never);
 
-      const result = await budgetService.debit('key-1', 2368, 5);
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        5,
+        undefined,
+        undefined,
+        undefined,
+        'user-1',
+      );
 
       // M5 (audit 2026-06-24): el msg crudo de PG NO se propaga — se mapea al
       // código estable AGENT_KEY_BUDGET_EXHAUSTED (espejo de la ruta dest-policy).
@@ -247,14 +268,21 @@ describe('budgetService', () => {
     // NO debe filtrar el msg crudo (info disclosure) → código estable
     // DEBIT_FAILED + log server-side. Espejo de la ruta dest-policy.
     it('master debit maps a generic Postgres error to DEBIT_FAILED, never the raw message (M5)', async () => {
-      mockOwnerSelect('user-1');
       const rawPgMsg =
         'duplicate key value violates unique constraint "a2a_spend_pkey" DETAIL: Key (id)=(abc) already exists.';
       mockRpc.mockResolvedValue({
         data: null,
         error: { message: rawPgMsg },
       } as never);
-      const result = await budgetService.debit('key-1', 2368, 1);
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1,
+        undefined,
+        undefined,
+        undefined,
+        'user-1',
+      );
 
       expect(result).toEqual({ success: false, error: 'DEBIT_FAILED' });
       // El msg crudo NUNCA llega al caller.
@@ -272,10 +300,17 @@ describe('budgetService', () => {
     // T14 (AC-13): master key path — NO delegationContext → increment_a2a_key_spend,
     // NEVER calls debitDelegationAndParent (backward-compat, CD-5).
     it('T14 master key path uses increment_a2a_key_spend, not the delegation RPC (AC-13)', async () => {
-      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({ data: null, error: null } as never);
 
-      const result = await budgetService.debit('key-1', 2368, 1.5);
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1.5,
+        undefined,
+        undefined,
+        undefined,
+        'user-1',
+      );
 
       expect(mockRpc).toHaveBeenCalledWith('increment_a2a_key_spend', {
         p_key_id: 'key-1',
@@ -290,10 +325,18 @@ describe('budgetService', () => {
     // T7b (AC-7 per-step): per-tx checked BEFORE the RPC; over-limit → fail,
     // debitDelegationAndParent is NOT invoked.
     it('T7b per-tx limit exceeded per-step blocks before the RPC (AC-7)', async () => {
-      const result = await budgetService.debit('key-1', 2368, 1.0, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '0.50',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1.0,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '0.50',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
 
       expect(result).toEqual({
         success: false,
@@ -305,10 +348,18 @@ describe('budgetService', () => {
     it('delegation path within per-tx limit calls debitDelegationAndParent (AC-8/AC-9)', async () => {
       mockDebitDelegation.mockResolvedValue('0.30');
 
-      const result = await budgetService.debit('key-1', 2368, 0.3, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '0.50',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.3,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '0.50',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
 
       expect(mockDebitDelegation).toHaveBeenCalledWith(
         'del-1',
@@ -326,10 +377,18 @@ describe('budgetService', () => {
     // budget no se decrementó (rollback de la tx en el RPC) → NO emite receipt.
     it('WKH-125b delegation DEST_CAP_EXCEEDED → { success:false, error:DEST_CAP_EXCEEDED } (AC-1)', async () => {
       mockDebitDelegation.mockRejectedValue(new DestCapExceededError());
-      const result = await budgetService.debit('key-1', 2368, 0.3, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '0.50',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.3,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '0.50',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
       expect(result).toEqual({ success: false, error: 'DEST_CAP_EXCEEDED' });
       expect(mockReceiptEmit).not.toHaveBeenCalled();
     });
@@ -338,10 +397,18 @@ describe('budgetService', () => {
     it('WKH-124 (AC-2): delegation success emits budget_debit with delegation_id', async () => {
       mockDebitDelegation.mockResolvedValue('0.30');
 
-      await budgetService.debit('key-1', 2368, 0.3, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '0.50',
-      });
+      await budgetService.debit(
+        'key-1',
+        2368,
+        0.3,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '0.50',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
 
       expect(mockReceiptEmit).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -360,10 +427,18 @@ describe('budgetService', () => {
       mockDebitDelegation.mockResolvedValue('0.30');
       mockReceiptEmit.mockRejectedValue(new Error('receipt down'));
 
-      const result = await budgetService.debit('key-1', 2368, 0.3, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '0.50',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.3,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '0.50',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
 
       expect(result).toEqual({ success: true });
     });
@@ -375,7 +450,15 @@ describe('budgetService', () => {
     it('WKH-124 (AC-2): key-session success emits budget_debit with session_id', async () => {
       mockDebitSession.mockResolvedValue('0.30');
 
-      await budgetService.debit('key-1', 2368, 0.3, undefined, KEY_SESSION_CTX);
+      await budgetService.debit(
+        'key-1',
+        2368,
+        0.3,
+        undefined,
+        KEY_SESSION_CTX,
+        undefined,
+        'user-1',
+      );
 
       expect(mockReceiptEmit).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -400,6 +483,8 @@ describe('budgetService', () => {
         0.3,
         undefined,
         KEY_SESSION_CTX,
+        undefined,
+        'user-1',
       );
 
       expect(result).toEqual({ success: true });
@@ -409,10 +494,18 @@ describe('budgetService', () => {
       mockDebitDelegation.mockRejectedValue(
         new DelegationTotalLimitExceededError(),
       );
-      const result = await budgetService.debit('key-1', 2368, 0.1, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '100',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.1,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '100',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
       expect(result).toEqual({
         success: false,
         error: 'DELEGATION_TOTAL_LIMIT_EXCEEDED',
@@ -421,10 +514,18 @@ describe('budgetService', () => {
 
     it('maps AgentKeyBudgetExhaustedError → AGENT_KEY_BUDGET_EXHAUSTED (AC-9)', async () => {
       mockDebitDelegation.mockRejectedValue(new AgentKeyBudgetExhaustedError());
-      const result = await budgetService.debit('key-1', 2368, 0.1, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '100',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.1,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '100',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
       expect(result).toEqual({
         success: false,
         error: 'AGENT_KEY_BUDGET_EXHAUSTED',
@@ -433,28 +534,52 @@ describe('budgetService', () => {
 
     it('maps DelegationRevokedError → DELEGATION_REVOKED (TOCTOU)', async () => {
       mockDebitDelegation.mockRejectedValue(new DelegationRevokedError());
-      const result = await budgetService.debit('key-1', 2368, 0.1, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '100',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.1,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '100',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
       expect(result).toEqual({ success: false, error: 'DELEGATION_REVOKED' });
     });
 
     it('maps DelegationExpiredError → DELEGATION_EXPIRED (TOCTOU)', async () => {
       mockDebitDelegation.mockRejectedValue(new DelegationExpiredError());
-      const result = await budgetService.debit('key-1', 2368, 0.1, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '100',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.1,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '100',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
       expect(result).toEqual({ success: false, error: 'DELEGATION_EXPIRED' });
     });
 
     it('maps OwnershipMismatchError → OWNERSHIP_MISMATCH', async () => {
       mockDebitDelegation.mockRejectedValue(new OwnershipMismatchError());
-      const result = await budgetService.debit('key-1', 2368, 0.1, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '100',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.1,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '100',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
       expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
     });
 
@@ -462,38 +587,70 @@ describe('budgetService', () => {
 
     it('AR-MNR-1 maps DailyLimitExceededError → DAILY_LIMIT (no raw PG)', async () => {
       mockDebitDelegation.mockRejectedValue(new DailyLimitExceededError());
-      const result = await budgetService.debit('key-1', 2368, 0.1, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '100',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.1,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '100',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
       expect(result).toEqual({ success: false, error: 'DAILY_LIMIT' });
       expect(result.error).not.toContain('limit is');
     });
 
     it('AR-MNR-1 maps AgentKeyInactiveError → KEY_INACTIVE', async () => {
       mockDebitDelegation.mockRejectedValue(new AgentKeyInactiveError());
-      const result = await budgetService.debit('key-1', 2368, 0.1, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '100',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.1,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '100',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
       expect(result).toEqual({ success: false, error: 'KEY_INACTIVE' });
     });
 
     it('AR-MNR-1 maps AgentKeyNotFoundError → KEY_NOT_FOUND', async () => {
       mockDebitDelegation.mockRejectedValue(new AgentKeyNotFoundError());
-      const result = await budgetService.debit('key-1', 2368, 0.1, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '100',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.1,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '100',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
       expect(result).toEqual({ success: false, error: 'KEY_NOT_FOUND' });
     });
 
     it('AR-MNR-1 maps DelegationNotFoundError → DELEGATION_NOT_FOUND', async () => {
       mockDebitDelegation.mockRejectedValue(new DelegationNotFoundError());
-      const result = await budgetService.debit('key-1', 2368, 0.1, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '100',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.1,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '100',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
       expect(result).toEqual({ success: false, error: 'DELEGATION_NOT_FOUND' });
     });
 
@@ -502,10 +659,18 @@ describe('budgetService', () => {
       mockDebitDelegation.mockRejectedValue(
         new Error('P0001: raw postgres detail 0xdeadbeef'),
       );
-      const result = await budgetService.debit('key-1', 2368, 0.1, {
-        ...DELEGATION_CTX,
-        maxAmountPerTx: '100',
-      });
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.1,
+        {
+          ...DELEGATION_CTX,
+          maxAmountPerTx: '100',
+        },
+        undefined,
+        undefined,
+        'user-1',
+      );
       expect(result).toEqual({
         success: false,
         error: 'DELEGATION_DEBIT_FAILED',
@@ -516,29 +681,25 @@ describe('budgetService', () => {
     });
 
     // ── WKH-125 (KEY-CONSTRAINTS): dest-aware master route ──────
-
-    /** Mock para el SELECT owner_ref cold-path de la ruta dest-aware. */
-    function mockOwnerSelect(ownerRef: string | null) {
-      const chain = chainMock();
-      chain.single = vi
-        .fn()
-        .mockResolvedValue(
-          ownerRef === null
-            ? { data: null, error: { code: 'PGRST116' } }
-            : { data: { owner_ref: ownerRef }, error: null },
-        );
-      mockFrom.mockReturnValue(
-        chain as unknown as ReturnType<typeof supabase.from>,
-      );
-    }
+    // N5 (audit 2026-07-02): the `mockOwnerSelect` helper (which mocked the
+    // now-removed owner_ref cold-path SELECT) was deleted along with the SELECT.
+    // With `ownerRef` a REQUIRED arg, every debit test threads a caller owner_ref
+    // straight to the RPC — no cold-path to stub.
 
     // ── WKH-SEC-02b: owner guard DB-level en la ruta master-no-dest ──
 
     it('WKH-SEC-02b master: válido pasa p_owner_ref al RPC (AC-2)', async () => {
-      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({ data: null, error: null } as never);
 
-      const result = await budgetService.debit('key-1', 2368, 1.5);
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1.5,
+        undefined,
+        undefined,
+        undefined,
+        'user-1',
+      );
 
       expect(mockRpc).toHaveBeenCalledWith('increment_a2a_key_spend', {
         p_key_id: 'key-1',
@@ -550,24 +711,22 @@ describe('budgetService', () => {
     });
 
     it('WKH-SEC-02b master: OWNERSHIP_MISMATCH mapea a code estable (AC-1/AC-6)', async () => {
-      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({
         data: null,
         error: { message: 'OWNERSHIP_MISMATCH: key x not owned by caller' },
       } as never);
 
-      const result = await budgetService.debit('key-1', 2368, 1.5);
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1.5,
+        undefined,
+        undefined,
+        undefined,
+        'user-1',
+      );
 
       expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
-    });
-
-    it('WKH-SEC-02b master: KEY_NOT_FOUND en SELECT cold-path no llama al RPC (AC-2)', async () => {
-      mockOwnerSelect(null);
-
-      const result = await budgetService.debit('key-1', 2368, 1.5);
-
-      expect(result).toEqual({ success: false, error: 'KEY_NOT_FOUND' });
-      expect(mockRpc).not.toHaveBeenCalled();
     });
 
     // ── F-04 (audit 2026-06-29): threaded caller owner_ref ──────
@@ -630,10 +789,17 @@ describe('budgetService', () => {
     // AC-5 back-compat: SIN destino → increment_a2a_key_spend directo, sin
     // tocar la tabla de keys ni el RPC dest-aware (byte-idéntico a hoy).
     it('AC-5 back-compat: no destination → increment_a2a_key_spend directo', async () => {
-      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({ data: null, error: null } as never);
 
-      const result = await budgetService.debit('key-1', 2368, 1.5);
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1.5,
+        undefined,
+        undefined,
+        undefined,
+        'user-1',
+      );
 
       expect(mockRpc).toHaveBeenCalledWith('increment_a2a_key_spend', {
         p_key_id: 'key-1',
@@ -651,7 +817,6 @@ describe('budgetService', () => {
     // AC-2/AC-4/CD-1: con destino → debit_with_dest_policy (atómico). NO hay
     // check de cap app-layer separado: el service sólo invoca el RPC.
     it('AC-2/AC-4: with destination → debit_with_dest_policy (atomic RPC)', async () => {
-      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({ data: null, error: null } as never);
 
       const result = await budgetService.debit(
@@ -661,6 +826,7 @@ describe('budgetService', () => {
         undefined,
         undefined,
         'kite/translator',
+        'user-1',
       );
 
       expect(mockRpc).toHaveBeenCalledWith('debit_with_dest_policy', {
@@ -680,7 +846,6 @@ describe('budgetService', () => {
     // AC-2: cap excedido → DEST_CAP_EXCEEDED (mapeado del prefijo del RPC),
     // budget intacto (el rollback de la tx vive en el RPC).
     it('AC-2: DEST_CAP_EXCEEDED prefix → error code DEST_CAP_EXCEEDED', async () => {
-      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({
         data: null,
         error: { message: 'DEST_CAP_EXCEEDED: dest x accum 1 + 1 > cap 1' },
@@ -693,6 +858,7 @@ describe('budgetService', () => {
         undefined,
         undefined,
         'kite/translator',
+        'user-1',
       );
 
       expect(result).toEqual({ success: false, error: 'DEST_CAP_EXCEEDED' });
@@ -700,7 +866,6 @@ describe('budgetService', () => {
 
     // CD-B: prefijos heredados de increment_a2a_key_spend mapeados, sin leak PG.
     it('maps INSUFFICIENT_BUDGET prefix → AGENT_KEY_BUDGET_EXHAUSTED', async () => {
-      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({
         data: null,
         error: { message: 'INSUFFICIENT_BUDGET: chain 2368 balance is 1' },
@@ -713,6 +878,7 @@ describe('budgetService', () => {
         undefined,
         undefined,
         'kite/translator',
+        'user-1',
       );
 
       expect(result).toEqual({
@@ -724,7 +890,6 @@ describe('budgetService', () => {
     // CD-B: error inesperado del RPC dest-aware → code estable, sin msg crudo PG.
     it('unmapped dest-policy error → DEST_POLICY_DEBIT_FAILED, no raw PG', async () => {
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      mockOwnerSelect('user-1');
       mockRpc.mockResolvedValue({
         data: null,
         error: { message: 'P0001: raw postgres detail 0xdeadbeef' },
@@ -737,6 +902,7 @@ describe('budgetService', () => {
         undefined,
         undefined,
         'kite/translator',
+        'user-1',
       );
 
       expect(result).toEqual({
@@ -761,6 +927,7 @@ describe('budgetService', () => {
         undefined,
         KEY_SESSION_CTX,
         'kite/translator',
+        'user-1',
       );
 
       expect(mockDebitSession).toHaveBeenCalledWith(
@@ -780,7 +947,6 @@ describe('budgetService', () => {
     // ordenamiento de locks vive en el SQL (assert estructural en
     // spend-policy.test.ts).
     it('AC-4 concurrency: same destination cap=1 → exactly one passes (serialized by RPC)', async () => {
-      mockOwnerSelect('user-1');
       // Simula la serialización del RPC: la 1ª llamada OK, la 2ª rechazada por el
       // cap (el SUM bajo lock ya incluye el débito de la 1ª).
       mockRpc
@@ -791,8 +957,24 @@ describe('budgetService', () => {
         } as never);
 
       const [r1, r2] = await Promise.all([
-        budgetService.debit('key-1', 2368, 1, undefined, undefined, 'kite/x'),
-        budgetService.debit('key-1', 2368, 1, undefined, undefined, 'kite/x'),
+        budgetService.debit(
+          'key-1',
+          2368,
+          1,
+          undefined,
+          undefined,
+          'kite/x',
+          'user-1',
+        ),
+        budgetService.debit(
+          'key-1',
+          2368,
+          1,
+          undefined,
+          undefined,
+          'kite/x',
+          'user-1',
+        ),
       ]);
 
       const passed = [r1, r2].filter((r) => r.success);
@@ -818,6 +1000,7 @@ describe('budgetService', () => {
         undefined,
         KEY_SESSION_CTX,
         'kite/translator',
+        'user-1',
       );
 
       expect(result).toEqual({ success: false, error: 'DEST_CAP_EXCEEDED' });

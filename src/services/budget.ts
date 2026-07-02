@@ -79,17 +79,26 @@ export const budgetService = {
     keyId: string,
     chainId: number,
     amountUsd: number,
-    delegationContext?: DelegationDebitContext,
-    keySessionContext?: KeySessionDebitContext,
-    destination?: string,
-    // F-04 (audit 2026-06-29): owner_ref of the AUTHENTICATED caller, threaded
-    // from the call site (compose/orchestrate/middleware). When present it is
-    // fed to the dest-aware / master RPCs as the ownership guard datum INSTEAD
-    // of re-deriving it from the target row — the previous cold-path SELECT
-    // (WHERE id=keyId, no owner_ref filter) made the DB guard tautological
-    // because the row supplied its OWN owner_ref. Optional for back-compat with
-    // legacy callers/tests; the cold-path SELECT remains a fallback when unset.
-    ownerRef?: string,
+    // N5 (audit 2026-07-02): these three are now REQUIRED-but-nullable
+    // (`T | undefined`, no `?`). TS forbids a required param after an optional
+    // one (ts1016), and `ownerRef` MUST be required (below) — so callers pass
+    // an explicit `undefined` here. Every production call-site already threads
+    // all four positional args, so this is byte-compatible with prod.
+    delegationContext: DelegationDebitContext | undefined,
+    keySessionContext: KeySessionDebitContext | undefined,
+    destination: string | undefined,
+    // F-04 (audit 2026-06-29) / N5 (audit 2026-07-02): owner_ref of the
+    // AUTHENTICATED caller, threaded from the call site
+    // (compose/orchestrate/middleware). It is fed to the dest-aware / master
+    // RPCs as the ownership guard datum. It is now REQUIRED (`string`, not
+    // `string | undefined`): the previous optional signature carried a cold-path
+    // SELECT (WHERE id=keyId, no owner_ref filter) that re-derived the target
+    // row's OWN owner_ref and fed THAT to the RPC, making the OWNERSHIP_MISMATCH
+    // guard tautological (owner compared against itself → never fails). Making
+    // it required turns the type-checker into the safety net: any future
+    // call-site that forgets to thread a real caller owner_ref FAILS tsc instead
+    // of silently disabling the ownership guard.
+    ownerRef: string,
   ): Promise<{ success: boolean; error?: string }> {
     // ── RUTA KEY-SESSION (WKH-121) ──
     // Espejo de la ruta delegación, sin per-tx limit (no aplica a sesiones).
@@ -261,31 +270,17 @@ export const budgetService = {
     // check del cap + el debit + el INSERT del ledger ocurren en UNA tx con
     // FOR UPDATE (CD-1/AC-4). Nunca propaga el msg crudo de PG al cliente (CD-B).
     if (destination) {
-      // F-04 (audit 2026-06-29): the RPC validates ownership DB-layer against
-      // `p_owner_ref`. We MUST pass the AUTHENTICATED caller's owner_ref so the
-      // guard compares against the caller, not the target row. When the caller
-      // threads `ownerRef`, use it directly. Legacy callers (no ownerRef) fall
-      // back to the cold-path SELECT — tautological, but preserves back-compat.
-      let effectiveOwnerRef: string;
-      if (ownerRef !== undefined) {
-        effectiveOwnerRef = ownerRef;
-      } else {
-        const { data: keyRow, error: ownerErr } = await supabase
-          .from('a2a_agent_keys')
-          .select('owner_ref')
-          .eq('id', keyId)
-          .single();
-        if (ownerErr || !keyRow) {
-          return { success: false, error: 'KEY_NOT_FOUND' };
-        }
-        effectiveOwnerRef = keyRow.owner_ref; // M9: fila tipada, sin cast
-      }
-
+      // F-04 (audit 2026-06-29) / N5 (audit 2026-07-02): the RPC validates
+      // ownership DB-layer against `p_owner_ref`. We pass the AUTHENTICATED
+      // caller's owner_ref (now a REQUIRED arg) directly so the guard compares
+      // against the caller, not the target row. The former cold-path SELECT
+      // (WHERE id=keyId, no owner_ref filter) was tautological and has been
+      // removed — with `ownerRef` required it was unreachable dead code.
       const { error: destErr } = await supabase.rpc('debit_with_dest_policy', {
         p_key_id: keyId,
         p_chain_id: chainId,
         p_amount_usd: amountUsd,
-        p_owner_ref: effectiveOwnerRef,
+        p_owner_ref: ownerRef,
         p_destination: destination,
       });
 
@@ -318,30 +313,16 @@ export const budgetService = {
     }
 
     // ── RUTA MASTER KEY — owner guard DB-level (WKH-SEC-02b) ──
-    // El RPC exige p_owner_ref. F-04 (audit 2026-06-29): preferimos el
-    // owner_ref del caller AUTENTICADO (threaded) para que el guard compare
-    // contra el caller y no contra la fila objetivo. Fallback al SELECT
-    // cold-path (tautológico) sólo para callers legacy sin ownerRef.
-    let masterOwnerRef: string;
-    if (ownerRef !== undefined) {
-      masterOwnerRef = ownerRef;
-    } else {
-      const { data: keyRow, error: ownerErr } = await supabase
-        .from('a2a_agent_keys')
-        .select('owner_ref')
-        .eq('id', keyId)
-        .single();
-      if (ownerErr || !keyRow) {
-        return { success: false, error: 'KEY_NOT_FOUND' };
-      }
-      masterOwnerRef = keyRow.owner_ref; // M9: fila tipada, sin cast
-    }
-
+    // El RPC exige p_owner_ref. F-04 (audit 2026-06-29) / N5 (audit 2026-07-02):
+    // usamos el owner_ref del caller AUTENTICADO (threaded, ahora REQUERIDO) para
+    // que el guard compare contra el caller y no contra la fila objetivo. El
+    // SELECT cold-path (tautológico) se eliminó — con `ownerRef` requerido era
+    // dead code inalcanzable.
     const { error } = await supabase.rpc('increment_a2a_key_spend', {
       p_key_id: keyId,
       p_chain_id: chainId,
       p_amount_usd: amountUsd,
-      p_owner_ref: masterOwnerRef, // WKH-SEC-02b (AC-2) / F-04
+      p_owner_ref: ownerRef, // WKH-SEC-02b (AC-2) / F-04 / N5
     });
 
     if (error) {
