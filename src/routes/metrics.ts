@@ -8,22 +8,27 @@
 
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { isMainnetDeployment } from '../lib/env.js';
+import { isProduction } from '../lib/env.js';
 import { renderMcpMetrics } from '../mcp/metrics.js';
 
 /**
- * F-07 (audit 2026-06-29) + OP-09 (audit 2026-06-30): bearer/header auth for
+ * F-07 (audit 2026-06-29) + N11 (audit 2026-07-01): bearer/header auth for
  * /metrics. When `METRICS_TOKEN` is set, the endpoint requires a matching token
  * (via `Authorization: Bearer <token>` or the `x-metrics-token` header).
  *
- * OP-09 fail-closed: when `METRICS_TOKEN` is UNSET, the endpoint is fail-CLOSED
- * only on a MAINNET deployment (503 — mainnet metrics may leak route/error/
- * latency internals) and stays OPEN on testnet/dev for frictionless scraping.
- * The intent is to protect mainnet metrics WITHOUT breaking the testnet demo,
- * which runs `NODE_ENV=production` but settles on testnet chains (so gating on
- * `isProduction()` would 503 the testnet scraper). Mirrors the dashboard
- * admin-token pattern (`routes/dashboard.ts:requireAdminToken`). Returns null
- * when authorized, or a sent 401/503 reply otherwise.
+ * N11 fail-closed: when `METRICS_TOKEN` is UNSET, the endpoint is fail-CLOSED
+ * in production (503 — Prometheus aggregates leak uptime / circuit-breaker /
+ * route / error / latency internals) and stays OPEN on non-prod (dev) for
+ * frictionless local scraping. This aligns /metrics with the dashboard
+ * admin-token pattern (`routes/dashboard.ts:requireAdminToken`), which is
+ * fail-CLOSED in production. Returns null when authorized, or a sent 401/503
+ * reply otherwise.
+ *
+ * OPERATIONAL NOTE: this makes /metrics REQUIRE `METRICS_TOKEN` in production
+ * (incl. the testnet demo, which runs `NODE_ENV=production`). Any Prometheus
+ * scraper pointed at /metrics in prod MUST set `METRICS_TOKEN` and send it via
+ * `Authorization: Bearer <token>` (or `x-metrics-token`). With the token unset,
+ * /metrics is CLOSED (503) in prod until configured.
  */
 function enforceMetricsToken(
   request: FastifyRequest,
@@ -31,14 +36,14 @@ function enforceMetricsToken(
 ): FastifyReply | null {
   const expected = process.env.METRICS_TOKEN?.trim();
   if (!expected) {
-    // OP-09: fail-closed on mainnet, passthrough on testnet/dev.
-    if (isMainnetDeployment()) {
+    // N11: fail-closed in production, passthrough in dev.
+    if (isProduction()) {
       return reply.status(503).send({
         error: 'service_unavailable',
         message: 'Metrics endpoint not configured',
       });
     }
-    return null; // not configured + non-mainnet → open (testnet/dev mode)
+    return null; // not configured + non-prod → open (dev mode)
   }
 
   const authHeader = request.headers.authorization;
@@ -130,7 +135,8 @@ const metricsRoutes: FastifyPluginAsync = async (fastify) => {
     '/',
     { config: { rateLimit: false } },
     async (request: FastifyRequest, reply: FastifyReply) => {
-      // F-07: gate on METRICS_TOKEN when configured (open when unset).
+      // F-07 + N11: gate on METRICS_TOKEN when configured; fail-closed (503) in
+      // production when unset, open in dev.
       const unauthorized = enforceMetricsToken(request, reply);
       if (unauthorized) return unauthorized;
 
