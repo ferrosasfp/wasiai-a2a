@@ -691,28 +691,29 @@ export const orchestrateService = {
       steps.every((s) => demoSlugs.has(s.agent.toLowerCase()));
 
     // Relevance guard para el fallback greedy (ver helper `tokenizeForRelevance`).
-    // Gatilla SOLO cuando usedFallback === true Y NINGÚN agente que greedy eligió
-    // comparte al menos 1 token con el goal (name + description + capabilities).
+    // Gatilla SOLO cuando usedFallback === true Y (el goal no tiene NINGÚN token
+    // evaluable ≥3 chars — señal cero ⇒ no relevante — O NINGÚN agente que greedy
+    // eligió comparte al menos 1 token con el goal, name + description + capabilities).
     // Mismo remedio que allStepsAreDemos: forzar no_relevant_agent ANTES de
     // cualquier débito/settlement. NO aplica al path normal del LLM
     // (usedFallback === false), que ya juzga relevancia con su propio criterio.
     const goalTokens = tokenizeForRelevance(goal);
     const fallbackNoRelevance =
       usedFallback &&
-      goalTokens.size > 0 &&
-      !steps.some((s) => {
-        const agent = discovered.agents.find(
-          (a) => a.slug === s.agent && a.registry === s.registry,
-        );
-        if (!agent) return false;
-        const agentTokens = tokenizeForRelevance(
-          `${agent.name} ${agent.description} ${agent.capabilities.join(' ')}`,
-        );
-        for (const token of goalTokens) {
-          if (agentTokens.has(token)) return true;
-        }
-        return false;
-      });
+      (goalTokens.size === 0 ||
+        !steps.some((s) => {
+          const agent = discovered.agents.find(
+            (a) => a.slug === s.agent && a.registry === s.registry,
+          );
+          if (!agent) return false;
+          const agentTokens = tokenizeForRelevance(
+            `${agent.name} ${agent.description} ${agent.capabilities.join(' ')}`,
+          );
+          for (const token of goalTokens) {
+            if (agentTokens.has(token)) return true;
+          }
+          return false;
+        }));
 
     if (allStepsAreDemos || fallbackNoRelevance) {
       let reasoning: string;
