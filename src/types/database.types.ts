@@ -2520,6 +2520,28 @@ export type Database = {
         };
         Returns: number;
       };
+      refund_delegation_and_parent: {
+        Args: {
+          p_amount_usd: number;
+          p_chain_id: number;
+          p_delegation_id: string;
+          p_destination?: string;
+          p_key_id: string;
+          p_owner_ref: string;
+        };
+        Returns: number;
+      };
+      refund_session_and_parent: {
+        Args: {
+          p_amount_usd: number;
+          p_chain_id: number;
+          p_destination?: string;
+          p_key_id: string;
+          p_owner_ref: string;
+          p_session_id: string;
+        };
+        Returns: number;
+      };
       refund_key_balance: {
         Args: {
           p_amount: number;

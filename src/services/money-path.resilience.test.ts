@@ -75,6 +75,7 @@ vi.mock('./fee-charge.js', async () => {
 
 vi.mock('./registry.js', () => ({
   registryService: { getEnabled: vi.fn().mockResolvedValue([]) },
+  SYSTEM_OWNER_REF: 'system',
 }));
 
 vi.mock('../lib/downstream-payment.js', () => ({

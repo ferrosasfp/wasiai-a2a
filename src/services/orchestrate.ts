@@ -585,12 +585,24 @@ export const orchestrateService = {
         // step-0. Los steps 1..N los debita compose (guard i>0). Por eso la base
         // del débito es el precio del primer agente budgeteado, NO `totalCost`
         // (sumar el plan duplicaría 1..N → double-charge).
+        // P1 (audit 2026-07-01): resolve the step-0 price with the SAME
+        // registry-aware resolver used by the /execute cap-gate and quote
+        // (`resolveAgentPriceUsdc(slug, registry)`), NOT a slug-only
+        // `discovered.agents.find(d => d.slug === slug)`. The slug-only lookup
+        // over the un-deduped enabled-registries list could match a decoy agent
+        // registered under a DIFFERENT registry with the same slug (verified /
+        // reputation / price-ascending sort lets a $0.000001 decoy win the
+        // `.find`), so the step-0 debit was priced off the decoy while
+        // `resolveAgent` invoked the real (registry-scoped) agent —
+        // quote/débito inconsistency. Keying by (slug, registry) makes the
+        // billed price match the agent actually invoked.
         const step0Slug = budgetedAgents[0]?.slug;
-        const step0Agent =
+        const step0Registry = budgetedAgents[0]?.registry;
+        const step0Price =
           step0Slug !== undefined
-            ? discovered.agents.find((d) => d.slug === step0Slug)
-            : undefined;
-        plannedCostUsd = step0Agent?.priceUsdc ?? 0;
+            ? await resolveAgentPriceUsdc(step0Slug, step0Registry)
+            : null;
+        plannedCostUsd = step0Price ?? 0;
         reasoning = plan.reasoning;
 
         if (validAgents.length > budgetedAgents.length) {
@@ -827,10 +839,29 @@ export const orchestrateService = {
   > {
     const startTime = Date.now();
     const { goal, budget } = request;
-    const { steps, billingKeyRow, usedFallback, feeUsdc } = plan;
+    const { steps, usedFallback, feeUsdc } = plan;
     const reasoning = plan.reasoning;
     let plannedCostUsd = plan.plannedCostUsd;
     const feeRate = getProtocolFeeRate();
+
+    // H1 (audit 2026-07-01): step-0 billing target. The service bills the plan's
+    // step-0 post-plan for BOTH the master path AND delegation/session — compose
+    // bills steps 1..N (guard i>0). `request.scopingKeyRow` is the caller's row
+    // in every billable path: it equals `plan.billingKeyRow` for master, and the
+    // delegation/session parent (`effectiveRow`) for delegated callers (middleware
+    // a2a-key.ts:512/753). x402 has no scopingKeyRow → bills nothing.
+    //
+    // Before this fix the delegation/session step-0 was billed by NEITHER layer
+    // on `/orchestrate*` (the middleware skips it under `skipMiddlewareDebit`, and
+    // this service previously gated the post-plan debit on `plan.billingKeyRow`,
+    // which is `undefined` for delegation/session) → a delegation/session caller
+    // orchestrating a single-step pipeline paid $0 while the operator settled the
+    // downstream agent on-chain: a repeatable money-path leak. We now debit the
+    // step-0 through the DUAL-LEDGER RPC (parent budget + delegation.total_spent /
+    // session.spent_usd) with a symmetric credit-back on failure, mirroring master.
+    // `billsStep0` truthiness matches master's previous `billingKeyRow` gate
+    // (scopingKeyRow present ⟺ master OR delegation/session; absent ⟺ x402).
+    const billsStep0 = request.scopingKeyRow !== undefined;
 
     // Cap gate (AC-3/AC-4/AC-5) — ANTES del price-fallback y de cualquier
     // budgetService.debit o composeService.compose.
@@ -853,7 +884,7 @@ export const orchestrateService = {
     // WKH-127 (AC-4): plannedCost 0 (todos priceUsdc===0) → fallback $1 + warn + flag.
     // El header x-debit-fallback lo setea el route leyendo result.debitFallback (CD-7).
     let debitFallback = false;
-    if (billingKeyRow && plannedCostUsd === 0) {
+    if (billsStep0 && plannedCostUsd === 0) {
       log.warn(
         { orchestrationId, reason: 'registry-miss' },
         '[orchestrate.price.fallback]',
@@ -866,7 +897,7 @@ export const orchestrateService = {
     // (billOnService); el middleware saltó el step-0 bajo skipMiddlewareDebit.
     // `debitedUsd` es la ÚNICA fuente de verdad para el refund (AC-5/AC-6/AC-7).
     let debitedUsd = 0;
-    if (billingKeyRow && request.chainId !== undefined) {
+    if (billsStep0 && request.scopingKeyRow && request.chainId !== undefined) {
       // Gas pass-through (audit 2026-06-25): the step-0 debit must include the
       // per-step gas overhead, consistent with compose's steps 1..N. 0 on
       // testnet / without env → identical to before. `debitedUsd` (price +
@@ -874,22 +905,30 @@ export const orchestrateService = {
       // total failure, so a refunded step-0 returns price + gas.
       const step0GasOverhead = await getStepGasOverheadUsd(request.chainId);
       const step0DebitUsd = plannedCostUsd + step0GasOverhead;
+      // H1 (audit 2026-07-01): route the step-0 debit through the SAME
+      // `budgetService.debit` dispatcher compose uses per-step. Passing the
+      // delegation/session context enrolls the DUAL-LEDGER RPC
+      // (debit_delegation_and_parent / debit_session_and_parent → parent budget +
+      // total_spent/spent_usd); when both contexts are undefined (master) it
+      // routes to the master RPC exactly as before. `undefined` destination
+      // mirrors the master step-0 (no dest-cap on step-0; steps 1..N carry it in
+      // compose). owner_ref is the authenticated caller's (= parent for deleg/session).
       const debitRes = await budgetService.debit(
-        billingKeyRow.id,
+        request.scopingKeyRow.id,
         request.chainId,
         step0DebitUsd,
-        undefined, // delegationContext (master path)
-        undefined, // keySessionContext (master path)
+        request.delegationContext, // deleg → dual-ledger RPC; undefined (master) → master RPC
+        request.keySessionContext, // session → dual-ledger RPC; undefined (master) → master RPC
         undefined, // destination
-        billingKeyRow.owner_ref, // F-04 (audit): owner_ref del caller autenticado
+        request.scopingKeyRow.owner_ref, // F-04 (audit): owner_ref del caller autenticado
       );
       if (!debitRes.success) {
         // Insufficient/owner mismatch → return graceful SIN ejecutar compose (§4.5).
         const debitFailBal = await budgetService
           .getBalance(
-            billingKeyRow.id,
+            request.scopingKeyRow.id,
             request.chainId,
-            billingKeyRow.owner_ref,
+            request.scopingKeyRow.owner_ref,
           )
           .catch(() => undefined);
         const debitFailResult: OrchestrateResult = {
@@ -1025,7 +1064,7 @@ export const orchestrateService = {
     // un pipeline exitoso NUNCA recibe refund (no revenue leak).
     let refundError: boolean | undefined;
     let remainingBudgetUsd: string | undefined;
-    if (billingKeyRow && request.chainId !== undefined) {
+    if (billsStep0 && request.scopingKeyRow && request.chainId !== undefined) {
       let refundUsd = 0;
       if (!pipeline.success) {
         if (pipeline.totalCostUsdc === 0) {
@@ -1044,17 +1083,38 @@ export const orchestrateService = {
         }
       }
       if (refundUsd > 0) {
-        const creditRes = await budgetService.credit(
-          billingKeyRow.id,
-          request.chainId,
-          refundUsd,
-          billingKeyRow.owner_ref,
-        );
+        // H1 (audit 2026-07-01): SYMMETRIC credit-back to the step-0 debit above.
+        // delegation/session must revert the DUAL ledger (parent budget +
+        // total_spent/spent_usd) via creditDelegation/creditSession — a plain
+        // master credit() would refund the parent but leave total_spent/spent_usd
+        // inflated (the M1 self-DoS). No `destination` (mirror of the step-0 debit).
+        const creditRes = request.delegationContext
+          ? await budgetService.creditDelegation(
+              request.delegationContext.delegationId,
+              request.delegationContext.ownerRef,
+              request.delegationContext.keyId,
+              request.chainId,
+              refundUsd,
+            )
+          : request.keySessionContext
+            ? await budgetService.creditSession(
+                request.keySessionContext.sessionId,
+                request.keySessionContext.ownerRef,
+                request.keySessionContext.keyId,
+                request.chainId,
+                refundUsd,
+              )
+            : await budgetService.credit(
+                request.scopingKeyRow.id,
+                request.chainId,
+                refundUsd,
+                request.scopingKeyRow.owner_ref,
+              );
         if (!creditRes.success) {
           // AC-8: log estructurado + flag, sin msg crudo de PG (CD-6).
           log.error(
             {
-              keyId: billingKeyRow.id,
+              keyId: request.scopingKeyRow.id,
               chainId: request.chainId,
               amountUsd: refundUsd,
               orchestrationId,
@@ -1067,20 +1127,32 @@ export const orchestrateService = {
           // invariante anti-doble-refund se sostiene: solo se encola cuando NADA
           // se aplicó; el retry re-credita y marca done solo si revierte de
           // verdad. Best-effort: el enqueue NUNCA rompe el response.
-          await refundOutbox.enqueueRefund({
-            keyId: billingKeyRow.id,
-            chainId: request.chainId,
-            amountUsd: refundUsd,
-            ownerRef: billingKeyRow.owner_ref,
-            reason: 'orchestrate.refund-failed',
-          });
+          // H1 (audit 2026-07-01): SOLO master. El refund-outbox acredita el
+          // ledger master (parent budget) únicamente; encolar un refund de
+          // delegation/session ahí NO decrementaría total_spent/spent_usd →
+          // reintroduciría el skew dual-ledger (M1). Para deleg/session el flag
+          // refundError + el log estructurado son la señal (best-effort), sin
+          // outbox de ledger equivocado.
+          if (!request.delegationContext && !request.keySessionContext) {
+            await refundOutbox.enqueueRefund({
+              keyId: request.scopingKeyRow.id,
+              chainId: request.chainId,
+              amountUsd: refundUsd,
+              ownerRef: request.scopingKeyRow.owner_ref,
+              reason: 'orchestrate.refund-failed',
+            });
+          }
         }
       }
 
       // WKH-127: saldo post-débito (y post-refund) real — se relee DESPUÉS del
       // refund para reflejar el saldo final. El route lo escribe en el header.
       remainingBudgetUsd = await budgetService
-        .getBalance(billingKeyRow.id, request.chainId, billingKeyRow.owner_ref)
+        .getBalance(
+          request.scopingKeyRow.id,
+          request.chainId,
+          request.scopingKeyRow.owner_ref,
+        )
         .catch(() => undefined);
     }
 

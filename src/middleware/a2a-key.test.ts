@@ -2454,7 +2454,8 @@ describe('requirePaymentOrA2AKey — WKH-127 skipMiddlewareDebit', () => {
         reply.send({ ok: true }),
     );
 
-    // Ruta delegación CON el flag seteado — debe IGNORARLO (CD-9).
+    // Ruta delegación CON el flag seteado — H1 (audit 2026-07-01): ahora lo
+    // RESPETA (como master) → sin débito de middleware, pero augmenta el contexto.
     appS.post(
       '/test-skip-deleg',
       {
@@ -2462,7 +2463,7 @@ describe('requirePaymentOrA2AKey — WKH-127 skipMiddlewareDebit', () => {
           async (req: FastifyRequest) => {
             req.skipMiddlewareDebit = true;
           },
-          ...requirePaymentOrA2AKey({ description: 'deleg ignores skip' }),
+          ...requirePaymentOrA2AKey({ description: 'deleg respects skip' }),
         ],
       },
       async (req: FastifyRequest, reply: FastifyReply) =>
@@ -2531,8 +2532,13 @@ describe('requirePaymentOrA2AKey — WKH-127 skipMiddlewareDebit', () => {
     expect(res.headers['x-a2a-remaining-budget']).toBe('9.000000');
   });
 
-  // T-MW-SKIP-deleg-ignored: delegation branch IGNORES the flag → step-0 debits in middleware.
-  it('T-MW-SKIP-deleg-ignored: delegation path ignores the skip flag', async () => {
+  // T-MW-SKIP-deleg-respected (H1 audit 2026-07-01): delegation branch now
+  // RESPECTS the flag (like master) → NO middleware step-0 debit, but the
+  // request is still augmented with the delegation context so downstream
+  // (compose steps 1..N) can bill via delegationContext. This closes the H1
+  // vector where delegation callers were charged a flat $1 on every
+  // /orchestrate* call (including the zero-debit /plan quote) and never refunded.
+  it('T-MW-SKIP-deleg-respected: delegation path respects the skip flag (no middleware debit)', async () => {
     mockLookupToken.mockResolvedValue(makeDelegationRow());
     mockGetParentKey.mockResolvedValue(makeKeyRow());
     mockDebitDelegation.mockResolvedValue('1.00');
@@ -2546,15 +2552,10 @@ describe('requirePaymentOrA2AKey — WKH-127 skipMiddlewareDebit', () => {
     });
 
     expect(res.statusCode).toBe(200);
+    // The delegation context IS still augmented (steps 1..N bill via compose).
     expect(res.json().hasDelegationContext).toBe(true);
-    // step-0 debit STILL happens in the middleware via the delegation RPC.
-    expect(mockDebitDelegation).toHaveBeenCalledWith(
-      'del-1',
-      'user-1',
-      TEST_KEY_ID,
-      2368,
-      1.0,
-    );
+    // H1: step-0 debit is SKIPPED in the middleware under skipMiddlewareDebit.
+    expect(mockDebitDelegation).not.toHaveBeenCalled();
     expect(mockDebit).not.toHaveBeenCalled();
   });
 });

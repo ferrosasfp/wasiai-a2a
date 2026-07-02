@@ -23,7 +23,12 @@ vi.mock('../lib/logger.js', () => ({
   getLogger: () => logSpy,
 }));
 
-vi.mock('./registry.js', () => ({ registryService: { getEnabled: vi.fn() } }));
+vi.mock('./registry.js', () => ({
+  registryService: { getEnabled: vi.fn() },
+  // C1 (audit 2026-07-01): compose.ts imports SYSTEM_OWNER_REF to gate the
+  // x-a2a-key forward to system-trusted registries only.
+  SYSTEM_OWNER_REF: 'system',
+}));
 // WKH-59 (real-price-debit): mock budget service for per-step debit tests.
 // CD-14: tests below use mockResolvedValueOnce, not failNext.
 vi.mock('./budget.js', () => ({
@@ -234,7 +239,7 @@ describe('composeService.invokeAgent', () => {
     expect(callHeaders['X-API-Key']).toBe('abc123');
   });
 
-  it('T-3: generates X-Payment header and settles on success', async () => {
+  it('T-3 (C2 audit 2026-07-01): a2a signs+settles the x402 payment WITHOUT leaking the redeemable EIP-3009 to the agent', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     const mockPR: X402PaymentRequest = {
       authorization: {
@@ -260,7 +265,12 @@ describe('composeService.invokeAgent', () => {
       string,
       string
     >;
-    expect(callHeaders['PAYMENT-SIGNATURE']).toBe('base64mock');
+    // C2 (audit 2026-07-01): the freshly-signed, permissionlessly-redeemable
+    // EIP-3009 authorization is NO LONGER forwarded to the agent's invokeUrl —
+    // that leak let a malicious agent front-run a2a's settle and drain the
+    // operator wallet. a2a still signs and settles the payment itself, so the
+    // agent's payTo is still paid on-chain (result.txHash present).
+    expect(callHeaders['PAYMENT-SIGNATURE']).toBeUndefined();
     expect(mockSettle).toHaveBeenCalled();
     expect(result.txHash).toBe('0xDEADBEEF');
     expect(result.output).toBe('ok');
@@ -514,8 +524,15 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
     expect(result.downstream).toBeUndefined();
   });
 
-  it('sends bit-exact same fetch body as baseline when flag off (T-W3-04 / AC-12)', async () => {
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+  it('C1 (audit 2026-07-01): forwards x-a2a-key ONLY to a SYSTEM-trusted registry (WKH-58 contract, now conditional)', async () => {
+    // The agent belongs to a system-trusted registry (ownerRef === 'system').
+    // Its invokeUrl is platform-controlled, so forwarding the caller's bearer is
+    // safe — this is the legitimate Pieverse/system path.
+    const systemRegistry = makeRegistry({
+      name: 'test-registry',
+      ownerRef: 'system',
+    });
+    vi.mocked(registryService.getEnabled).mockResolvedValue([systemRegistry]);
     mockDownstream.mockResolvedValue(null); // simula flag off / no-op
     const agent = makeAgent({ priceUsdc: 0, payment: undefined });
     const input = { task: 'translate', text: 'hola' };
@@ -526,9 +543,8 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const [url, init] = mockFetch.mock.calls[0]!;
     expect(url).toBe(agent.invokeUrl);
-    // AR-MNR-3: pin EXACT method + EXACT header key set when flag-off, en
-    // lugar de un toMatchObject permisivo. Si compose agrega un header nuevo
-    // sin actualizar este snapshot, el test falla.
+    // AR-MNR-3: pin EXACT method + EXACT header key set. C1 (audit): the bearer
+    // is forwarded here because the registry is system-trusted.
     expect(init.method).toBe('POST');
     expect(Object.keys(init.headers).sort()).toEqual(
       ['Content-Type', 'x-a2a-key'].sort(),
@@ -536,6 +552,43 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
     expect(init.headers['Content-Type']).toBe('application/json');
     expect(init.headers['x-a2a-key']).toBe('a2a-key-1');
     expect(init.body).toBe(JSON.stringify(input));
+  });
+
+  it('C1 (audit 2026-07-01): does NOT forward x-a2a-key to a NON-system (auto-registered) registry — closes the credential-theft vector', async () => {
+    // An attacker self-registers a registry (ownerRef = their own owner_ref, not
+    // 'system') with an invokeUrl to their server. The caller's raw bearer must
+    // NEVER reach it.
+    const attackerRegistry = makeRegistry({
+      name: 'test-registry',
+      ownerRef: 'attacker-owner-ref',
+    });
+    vi.mocked(registryService.getEnabled).mockResolvedValue([attackerRegistry]);
+    mockDownstream.mockResolvedValue(null);
+    const agent = makeAgent({ priceUsdc: 0, payment: undefined });
+    const input = { task: 'translate', text: 'hola' };
+    mockFetchOk();
+    await composeService.invokeAgent(agent, input, 'victim-a2a-key');
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [, init] = mockFetch.mock.calls[0]!;
+    // The bearer is ABSENT — the attacker's server never receives the victim key.
+    expect(init.headers['x-a2a-key']).toBeUndefined();
+    expect(Object.keys(init.headers).sort()).toEqual(['Content-Type'].sort());
+    expect(init.body).toBe(JSON.stringify(input));
+  });
+
+  it('C1 (audit 2026-07-01): does NOT forward x-a2a-key when the registry is unknown (no matching enabled registry)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockDownstream.mockResolvedValue(null);
+    const agent = makeAgent({ priceUsdc: 0, payment: undefined });
+    const input = { task: 'translate', text: 'hola' };
+    mockFetchOk();
+    await composeService.invokeAgent(agent, input, 'a2a-key-1');
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [, init] = mockFetch.mock.calls[0]!;
+    expect(init.headers['x-a2a-key']).toBeUndefined();
+    expect(Object.keys(init.headers).sort()).toEqual(['Content-Type'].sort());
   });
 });
 

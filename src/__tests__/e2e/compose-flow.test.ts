@@ -38,6 +38,17 @@ let nextEstimatedCostUsd: number | undefined;
 let nextResolvedChainId: number | undefined;
 let nextInjectedDestination: string | undefined;
 vi.mock('../../middleware/a2a-key.js', () => ({
+  // C2 (audit 2026-07-01): routes/compose.ts imports extractRawKey.
+  extractRawKey: (request: FastifyRequest) => {
+    const headerKey = request.headers['x-a2a-key'];
+    if (typeof headerKey === 'string') return headerKey;
+    const auth = request.headers.authorization;
+    if (typeof auth === 'string') {
+      const m = /^bearer\s+(.+)$/i.exec(auth);
+      if (m?.[1]?.startsWith('wasi_a2a_')) return m[1];
+    }
+    return undefined;
+  },
   requirePaymentOrA2AKey: () => [
     async (request: FastifyRequest, _reply: FastifyReply) => {
       (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = nextKeyRow;
@@ -97,6 +108,7 @@ vi.mock('../../services/discovery.js', () => ({
 // ── registry (invokeAgent → getEnabled) ─────────────────────
 vi.mock('../../services/registry.js', () => ({
   registryService: { getEnabled: vi.fn().mockResolvedValue([]) },
+  SYSTEM_OWNER_REF: 'system',
 }));
 
 // ── payment adapter (sign is unused on a2a-key path) ────────

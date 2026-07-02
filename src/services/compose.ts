@@ -41,7 +41,7 @@ import { eventService } from './event.js';
 import { regenerateInputFromErrors } from './llm/input-retry.js';
 import { maybeTransform } from './llm/transform.js';
 import { refundOutbox } from './refund-outbox.js';
-import { registryService } from './registry.js';
+import { registryService, SYSTEM_OWNER_REF } from './registry.js';
 import { normalizeDestination } from './spend-policy.js';
 
 const log = getLogger('compose');
@@ -762,7 +762,21 @@ export const composeService = {
       'Content-Type': 'application/json',
       ...authHeaders,
     };
-    if (a2aKey) {
+    // C1 (audit 2026-07-01): NEVER forward the caller's raw, long-lived
+    // `x-a2a-key` bearer to an `invokeUrl` of a THIRD-PARTY (auto-registered)
+    // registry. `agent.invokeUrl` derives from `registry.invokeEndpoint`, a
+    // value any authenticated caller can set via `POST /registries` (no vetting),
+    // and the SSRF guard only blocks private IPs — an attacker's PUBLIC domain
+    // passes. Forwarding the bearer there let the attacker harvest and replay
+    // the victim's key (full budget drain / account takeover).
+    //
+    // Only registries with an explicit system-trust tier (`ownerRef ===
+    // SYSTEM_OWNER_REF`) — whose invokeUrl is platform-controlled, not
+    // caller-supplied — receive the bearer. This preserves the legitimate
+    // path (the canonical `wasiai` / Pieverse system registry is owner_ref
+    // 'system') while closing the forward to every auto-registered registry.
+    const registryIsSystemTrusted = registry?.ownerRef === SYSTEM_OWNER_REF;
+    if (a2aKey && registryIsSystemTrusted) {
       headers['x-a2a-key'] = a2aKey;
     }
     // WKH-58: only sign inbound x402 when caller paid via x402 (no a2aKey).
@@ -799,7 +813,20 @@ export const composeService = {
         to: payTo as `0x${string}`,
         value: valueWei,
       });
-      headers['PAYMENT-SIGNATURE'] = result.xPaymentHeader;
+      // C2 (audit 2026-07-01): DO NOT forward the freshly-signed EIP-3009
+      // authorization to the downstream agent. An EIP-3009
+      // `transferWithAuthorization` is redeemable permissionlessly by anyone who
+      // holds it: emitting `PAYMENT-SIGNATURE` to `agent.invokeUrl` (a URL the
+      // agent's registrant controls) let the agent redeem it directly against
+      // the token contract and pull `priceUsdc` from the a2a OPERATOR wallet
+      // BEFORE a2a's own settle() ran — then a2a's redundant settle on the same
+      // (now-consumed) nonce reverted, throwing `x402 settle failed`, and the
+      // per-step catch refunded the caller (operator-wallet drain, repeatable).
+      // a2a still settles the authorization itself below (paying the agent's
+      // payTo on-chain) — the agent simply never receives a redeemable copy, so
+      // there is nothing to front-run. The legacy Pieverse inbound x402 path
+      // (broken HTTP 500 since 2026-04-13) is the only thing that consumed this
+      // header, so removing it breaks no working flow.
       paymentRequest = result.paymentRequest;
     }
     // WKH-SEC-04 (AC-3 / CD-2 / DT-2): runtime SSRF revalidation on

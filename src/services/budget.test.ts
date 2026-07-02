@@ -1113,4 +1113,125 @@ describe('budgetService', () => {
       expect(result).toEqual({ success: false, error: 'KEY_NOT_FOUND' });
     });
   });
+
+  // M1 (audit 2026-07-01): dual-ledger credit-back. creditDelegation /
+  // creditSession call the delegation/session-aware refund RPCs so a step-0
+  // refund decrements a2a_delegations.total_spent / a2a_key_sessions.spent_usd
+  // ALONGSIDE the parent budget (mirror of the dual-ledger debit).
+  describe('creditDelegation / creditSession (M1 dual-ledger refund)', () => {
+    it('creditDelegation calls refund_delegation_and_parent with 6 snake_case params and returns reverted (with destination)', async () => {
+      mockRpc.mockResolvedValue({ data: 1, error: null } as never);
+
+      const result = await budgetService.creditDelegation(
+        'del-1',
+        'owner-1',
+        'k1',
+        84532,
+        0.05,
+        'wasiai/corridor',
+      );
+
+      expect(mockRpc).toHaveBeenCalledWith('refund_delegation_and_parent', {
+        p_delegation_id: 'del-1',
+        p_owner_ref: 'owner-1',
+        p_key_id: 'k1',
+        p_chain_id: 84532,
+        p_amount_usd: 0.05,
+        p_destination: 'wasiai/corridor',
+      });
+      expect(result).toEqual({ success: true, reverted: true });
+    });
+
+    it('creditDelegation omits p_destination when no destination (SQL DEFAULT NULL, master-like dispatch)', async () => {
+      mockRpc.mockResolvedValue({ data: 1, error: null } as never);
+
+      await budgetService.creditDelegation('del-1', 'owner-1', 'k1', 2368, 0.3);
+
+      // CR NIT-1: without a destination the key is OMITTED (no `as unknown as`
+      // cast); the SQL `p_destination TEXT DEFAULT NULL` supplies NULL — the
+      // dest-agnostic dispatch is byte-identical to the old explicit `null`.
+      expect(mockRpc).toHaveBeenCalledWith('refund_delegation_and_parent', {
+        p_delegation_id: 'del-1',
+        p_owner_ref: 'owner-1',
+        p_key_id: 'k1',
+        p_chain_id: 2368,
+        p_amount_usd: 0.3,
+      });
+    });
+
+    it('creditDelegation with 0 rows reverted → success:false / reverted:false', async () => {
+      mockRpc.mockResolvedValue({ data: 0, error: null } as never);
+
+      const result = await budgetService.creditDelegation(
+        'del-1',
+        'owner-1',
+        'k1',
+        2368,
+        0.3,
+      );
+
+      expect(result).toEqual({
+        success: false,
+        error: 'REFUND_NOT_REVERTED',
+        reverted: false,
+      });
+    });
+
+    it('creditDelegation maps OWNERSHIP_MISMATCH without leaking raw PG message', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'OWNERSHIP_MISMATCH: delegation del-1 not owned' },
+      } as never);
+
+      const result = await budgetService.creditDelegation(
+        'del-1',
+        'other-owner',
+        'k1',
+        2368,
+        0.3,
+      );
+
+      expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
+    });
+
+    it('creditSession calls refund_session_and_parent with 6 snake_case params and returns reverted', async () => {
+      mockRpc.mockResolvedValue({ data: 1, error: null } as never);
+
+      const result = await budgetService.creditSession(
+        'sess-1',
+        'owner-1',
+        'k1',
+        84532,
+        0.05,
+        'wasiai/corridor',
+      );
+
+      expect(mockRpc).toHaveBeenCalledWith('refund_session_and_parent', {
+        p_session_id: 'sess-1',
+        p_owner_ref: 'owner-1',
+        p_key_id: 'k1',
+        p_chain_id: 84532,
+        p_amount_usd: 0.05,
+        p_destination: 'wasiai/corridor',
+      });
+      expect(result).toEqual({ success: true, reverted: true });
+    });
+
+    it('creditSession maps SESSION_NOT_FOUND to KEY_NOT_FOUND (no raw PG leak)', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'SESSION_NOT_FOUND: sess-1' },
+      } as never);
+
+      const result = await budgetService.creditSession(
+        'sess-1',
+        'owner-1',
+        'k1',
+        2368,
+        0.3,
+      );
+
+      expect(result).toEqual({ success: false, error: 'KEY_NOT_FOUND' });
+    });
+  });
 });

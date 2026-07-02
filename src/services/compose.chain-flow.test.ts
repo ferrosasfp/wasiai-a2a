@@ -15,7 +15,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Agent, RegistryConfig } from '../types/index.js';
 
-vi.mock('./registry.js', () => ({ registryService: { getEnabled: vi.fn() } }));
+vi.mock('./registry.js', () => ({
+  registryService: { getEnabled: vi.fn() },
+  SYSTEM_OWNER_REF: 'system',
+}));
 vi.mock('./budget.js', () => ({
   budgetService: {
     debit: vi.fn(),

@@ -26,6 +26,7 @@ vi.mock('node:dns', () => ({
 
 vi.mock('./registry.js', () => ({
   registryService: { getEnabled: vi.fn() },
+  SYSTEM_OWNER_REF: 'system',
 }));
 
 vi.mock('../adapters/registry.js', () => ({
