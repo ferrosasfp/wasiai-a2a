@@ -1754,6 +1754,59 @@ describe('orchestrateService', () => {
     expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
   });
 
+  // T-W5b (money-path fallback relevance guard — short-circuit bug): a goal with
+  // ZERO evaluable tokens (nothing ≥3 chars after tokenizing, e.g. "a") that forces
+  // the greedy fallback must be treated as the CLEAREST case of "no relevance", NOT
+  // exempted from the guard. Before the fix, `goalTokens.size > 0 && !steps.some(...)`
+  // short-circuited to false for an empty token set, letting a chargeable 'ready'
+  // plan of irrelevant agents through. Now `goalTokens.size === 0` FORCES
+  // no_relevant_agent BEFORE any debit/settle — nothing is charged.
+  it('T-W5b: zero-token goal + greedy fallback → no_relevant_agent, no charge', async () => {
+    setLlmError(new Error('API timeout'));
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'a',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-w5b',
+    );
+
+    expect(result.pipeline.success).toBe(false);
+    expect(result.reasoning).toContain('no_relevant_agent');
+    expect(result.reasoning).toContain('emergency fallback');
+    expect(result.pipeline.steps).toHaveLength(0);
+    expect(result.protocolFeeUsdc).toBe(0);
+    // No money moved and no agent settled: nothing to refund by construction.
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(budgetService.credit)).not.toHaveBeenCalled();
+    expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
+    expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
+  });
+
+  // T-W5c (regression): the zero-token fix must NOT over-fire. A goal with mostly
+  // short tokens but AT LEAST ONE evaluable token ≥3 chars that overlaps a real
+  // agent (here "text" ↔ Summarizer/Translator) still yields a legit greedy plan →
+  // planStatus 'ready', agent executed, normally charged. The size===0 branch only
+  // fires when there is NO signal at all.
+  it('T-W5c: short-but-relevant goal + greedy fallback → ready, agent executed', async () => {
+    setLlmError(new Error('API timeout'));
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'do a text', budget: 5.0 },
+      'orch-w5c',
+    );
+
+    expect(result.reasoning).toContain('[FALLBACK]');
+    expect(result.reasoning).not.toContain('no_relevant_agent');
+    expect(result.answer).toBeDefined();
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps.length).toBeGreaterThan(0);
+  });
+
   // T-W6 (regression): the fallback relevance guard must NOT break a legitimate
   // greedy fallback. When the LLM fails but the goal DOES share a token with a
   // real agent (here "text" ↔ Summarizer/Translator descriptions), the greedy
