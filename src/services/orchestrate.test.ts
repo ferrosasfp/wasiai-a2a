@@ -1540,6 +1540,47 @@ describe('orchestrateService', () => {
     return call.messages[0]!.content;
   }
 
+  /** Extract the systemPrompt (planning rules) sent to the LLM. */
+  function plannerSystemPrompt(): string {
+    const call = mockCreate.mock.calls[0]![0]! as { system: string };
+    return call.system;
+  }
+
+  // T-ORDER-1 (precondition-gate ordering rule): the systemPrompt MUST instruct
+  // the LLM to place verification/eligibility/compliance/authorization "gate"
+  // agents EARLY in the pipeline, even without a direct data dependency. This is
+  // a prompt-CONTENT assertion — the rule is generic (no domain/slug hardcode)
+  // and cannot be behaviorally tested without a real Anthropic call. The existing
+  // data-dependency rule must survive alongside it (additive, not a replacement).
+  it('T-ORDER-1: systemPrompt tells the LLM to place precondition-gate agents early', async () => {
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'wasiai',
+            input: { query: 'x' },
+            reasoning: 'ok',
+          },
+        ],
+        reasoning: 'ok',
+      }),
+    );
+
+    await orchestrateService.orchestrate(
+      { goal: 'order rule check', budget: 5.0 },
+      'orch-order-1',
+    );
+
+    const system = plannerSystemPrompt();
+    // The new precondition-gate ordering rule is present, generic (no slug/domain).
+    expect(system).toContain('precondition gate');
+    expect(system).toContain('verification, eligibility, compliance');
+    expect(system).toContain('placing it EARLY');
+    // The pre-existing data-dependency ordering rule still coexists (additive).
+    expect(system).toContain('place the producer first');
+  });
+
   // T-W1 (WKH-128 change 1+2): demos are deprioritized so a genuinely relevant
   // agent reaches the planner window AND is the one selected/settled — not the
   // cheap demo. Discovery returns demos FIRST (mirrors prod verified-first sort),
