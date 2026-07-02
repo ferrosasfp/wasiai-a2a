@@ -145,8 +145,12 @@ function makeAgent(o: Partial<Agent> = {}): Agent {
     id: 'agent-x',
     name: 'Agent X',
     slug: 'agent-x',
-    description: 'desc',
-    capabilities: ['test'],
+    // Suite B forces greedy (no API key). The money-path fallback relevance guard
+    // needs a token overlap with the Suite B goals ("single step…", "refund…",
+    // "budget…") so the guard stays inert and these refund/settle-failure paths
+    // are exercised. Compose tests (Suite A) ignore these fields.
+    description: 'single step refund budget settle agent',
+    capabilities: ['step', 'refund', 'budget', 'test'],
     priceUsdc: 0.05,
     reputation: 80,
     registry: 'wasiai',

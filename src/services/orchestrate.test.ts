@@ -304,7 +304,10 @@ describe('orchestrateService', () => {
     setLlmError(new Error('API timeout'));
 
     const result = await orchestrateService.orchestrate(
-      { goal: 'test fallback', budget: 5.0 },
+      // goal shares the token "text" with the mock agents so the fallback
+      // relevance guard (WKH: money-path) does NOT force no_relevant_agent —
+      // this test asserts the greedy fallback mechanics, not relevance.
+      { goal: 'summarize the text fallback', budget: 5.0 },
       'orch-fallback',
     );
 
@@ -322,7 +325,9 @@ describe('orchestrateService', () => {
 
     // Should NOT throw (would map to 503 at the boundary) — degrades to greedy.
     const result = await orchestrateService.orchestrate(
-      { goal: 'test circuit open', budget: 5.0 },
+      // "text" overlaps the mock agents → relevance guard stays inert; this
+      // asserts the OPEN-breaker → greedy degradation, not relevance.
+      { goal: 'summarize text on circuit open', budget: 5.0 },
       'orch-circuit-open',
     );
 
@@ -435,7 +440,9 @@ describe('orchestrateService', () => {
     setLlmResponse('Sure! Here is the plan:\n\n```json\n{"bad"}\n```');
 
     const result = await orchestrateService.orchestrate(
-      { goal: 'malformed test', budget: 5.0 },
+      // "text" overlaps the mock agents → relevance guard inert (asserts
+      // malformed-JSON → fallback mechanics).
+      { goal: 'summarize text malformed', budget: 5.0 },
       'orch-malformed',
     );
 
@@ -466,7 +473,9 @@ describe('orchestrateService', () => {
     );
 
     const result = await orchestrateService.orchestrate(
-      { goal: 'all invalid slugs', budget: 5.0 },
+      // "text" overlaps the mock agents → relevance guard inert (asserts the
+      // all-invalid-slugs → full greedy fallback branch).
+      { goal: 'summarize text invalid slugs', budget: 5.0 },
       'orch-all-invalid',
     );
 
@@ -480,7 +489,9 @@ describe('orchestrateService', () => {
     delete process.env.ANTHROPIC_API_KEY;
 
     const result = await orchestrateService.orchestrate(
-      { goal: 'no key test', budget: 5.0 },
+      // "text" overlaps the mock agents → relevance guard inert (asserts the
+      // missing-API-key → fallback branch).
+      { goal: 'summarize text no key', budget: 5.0 },
       'orch-no-key',
     );
 
@@ -1710,6 +1721,57 @@ describe('orchestrateService', () => {
     expect(vi.mocked(budgetService.credit)).not.toHaveBeenCalled();
     expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
     expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
+  });
+
+  // T-W5 (money-path fallback relevance guard): a NONSENSE goal that forces the
+  // greedy fallback (LLM failed) must NOT yield a chargeable 'ready' plan of
+  // budget-fit-but-irrelevant REAL agents. With zero token overlap between the
+  // goal and any greedy-selected agent, the guard forces no_relevant_agent BEFORE
+  // any debit/settle — nothing is charged.
+  it('T-W5: nonsense goal + greedy fallback → no_relevant_agent, no charge', async () => {
+    // Real (non-demo) agents fit the budget but share NO token with the goal.
+    setLlmError(new Error('API timeout'));
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'asdfqwerty12345',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-w5',
+    );
+
+    expect(result.pipeline.success).toBe(false);
+    expect(result.reasoning).toContain('no_relevant_agent');
+    expect(result.reasoning).toContain('emergency fallback');
+    expect(result.pipeline.steps).toHaveLength(0);
+    expect(result.protocolFeeUsdc).toBe(0);
+    // No money moved and no agent settled: nothing to refund by construction.
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(budgetService.credit)).not.toHaveBeenCalled();
+    expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
+    expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
+  });
+
+  // T-W6 (regression): the fallback relevance guard must NOT break a legitimate
+  // greedy fallback. When the LLM fails but the goal DOES share a token with a
+  // real agent (here "text" ↔ Summarizer/Translator descriptions), the greedy
+  // plan is still valid → planStatus 'ready', agent executed, normally charged.
+  it('T-W6: relevant goal + greedy fallback → ready, agent executed (not blocked)', async () => {
+    setLlmError(new Error('API timeout'));
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'summarize this text document', budget: 5.0 },
+      'orch-w6',
+    );
+
+    expect(result.reasoning).toContain('[FALLBACK]');
+    expect(result.reasoning).not.toContain('no_relevant_agent');
+    expect(result.answer).toBeDefined();
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps.length).toBeGreaterThan(0);
   });
 
   // T-AC-DOUBLE (CD-11/§4.4): single orchestrate on total failure → credit exactly once.
