@@ -132,8 +132,12 @@ function makeAgent(o: Partial<Agent> = {}): Agent {
     id: 'agent-x',
     name: 'Agent X',
     slug: 'agent-x',
-    description: 'desc',
-    capabilities: ['test'],
+    // "step"/"pipeline" give the greedy fallback relevance guard (money-path) a
+    // token to overlap with these billing goals (all "…step…"/"…pipeline…").
+    // These tests force greedy (no API key) and assert billing mechanics, not
+    // relevance — the fixture just needs a shared token so the guard stays inert.
+    description: 'multi-step pipeline agent',
+    capabilities: ['step', 'pipeline', 'test'],
     priceUsdc: 0.05,
     reputation: 80,
     registry: 'wasiai',

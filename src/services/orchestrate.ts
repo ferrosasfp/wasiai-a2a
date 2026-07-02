@@ -295,6 +295,27 @@ function greedyPlan(
   return { steps, reasoning, cost: step0Cost };
 }
 
+// ─── Fallback Relevance Guard (money-path) ───────────────────
+//
+// El fallback greedy (activo SOLO cuando el LLM planner falló / devolvió null /
+// circuit breaker abierto) selecciona agentes por PRESUPUESTO ÚNICAMENTE — cero
+// relevancia con el goal. Un goal sin sentido produce así un plan 'ready' de
+// agentes REALES (no-demo) que sólo entran en budget, cobrable si un cliente
+// ingenuo lo ejecuta sin revisar. Este chequeo de overlap de keywords barato
+// (en memoria, SIN LLM, SIN llamadas externas) corre SOLO en el path de fallback
+// (usedFallback === true) — el path normal del LLM ya juzga relevancia con su
+// propio criterio semántico y NO debe duplicarse ni endurecerse acá.
+
+/** Lowercase, split por no-alfanuméricos, descarta tokens < 3 chars. */
+function tokenizeForRelevance(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 3),
+  );
+}
+
 // ─── Plan early-return → OrchestrateResult mapper (WKH-131) ──
 //
 // Reconstruye el OrchestrateResult EXACTO que cada early-return del orchestrate
@@ -668,10 +689,41 @@ export const orchestrateService = {
     const allStepsAreDemos =
       steps.length > 0 &&
       steps.every((s) => demoSlugs.has(s.agent.toLowerCase()));
-    if (allStepsAreDemos) {
-      const reasoning = hasRealCandidate
-        ? 'no_relevant_agent: the selected plan consists entirely of trivial echo/demo agents even though a real agent was available; no genuinely relevant agent was executed for this goal. No agent was executed and no payment was charged.'
-        : 'no_relevant_agent: no genuinely relevant agent was found for this goal (only trivial echo/demo agents are available). No agent was executed and no payment was charged.';
+
+    // Relevance guard para el fallback greedy (ver helper `tokenizeForRelevance`).
+    // Gatilla SOLO cuando usedFallback === true Y NINGÚN agente que greedy eligió
+    // comparte al menos 1 token con el goal (name + description + capabilities).
+    // Mismo remedio que allStepsAreDemos: forzar no_relevant_agent ANTES de
+    // cualquier débito/settlement. NO aplica al path normal del LLM
+    // (usedFallback === false), que ya juzga relevancia con su propio criterio.
+    const goalTokens = tokenizeForRelevance(goal);
+    const fallbackNoRelevance =
+      usedFallback &&
+      goalTokens.size > 0 &&
+      !steps.some((s) => {
+        const agent = discovered.agents.find(
+          (a) => a.slug === s.agent && a.registry === s.registry,
+        );
+        if (!agent) return false;
+        const agentTokens = tokenizeForRelevance(
+          `${agent.name} ${agent.description} ${agent.capabilities.join(' ')}`,
+        );
+        for (const token of goalTokens) {
+          if (agentTokens.has(token)) return true;
+        }
+        return false;
+      });
+
+    if (allStepsAreDemos || fallbackNoRelevance) {
+      let reasoning: string;
+      if (allStepsAreDemos) {
+        reasoning = hasRealCandidate
+          ? 'no_relevant_agent: the selected plan consists entirely of trivial echo/demo agents even though a real agent was available; no genuinely relevant agent was executed for this goal. No agent was executed and no payment was charged.'
+          : 'no_relevant_agent: no genuinely relevant agent was found for this goal (only trivial echo/demo agents are available). No agent was executed and no payment was charged.';
+      } else {
+        reasoning =
+          'no_relevant_agent: the LLM planner failed and the emergency fallback found no agent with any relevance to the goal — no agent was executed and no payment was charged.';
+      }
       const noRelevantResult: OrchestratePlanResult = {
         orchestrationId,
         planStatus: 'no_relevant_agent',
