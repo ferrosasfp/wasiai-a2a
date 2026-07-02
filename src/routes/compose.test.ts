@@ -60,6 +60,19 @@ let nextEstimatedCostUsd: number | undefined;
 let nextResolvedChainId: number | undefined;
 let nextInjectedDestination: string | undefined;
 vi.mock('../middleware/a2a-key.js', () => ({
+  // C2 (audit 2026-07-01): routes/compose.ts imports extractRawKey to derive the
+  // a2a credential the same way the middleware does (x-a2a-key OR Bearer
+  // wasi_a2a_*). Mirror that logic in the mock.
+  extractRawKey: (request: FastifyRequest) => {
+    const headerKey = request.headers['x-a2a-key'];
+    if (typeof headerKey === 'string') return headerKey;
+    const auth = request.headers.authorization;
+    if (typeof auth === 'string') {
+      const m = /^bearer\s+(.+)$/i.exec(auth);
+      if (m?.[1]?.startsWith('wasi_a2a_')) return m[1];
+    }
+    return undefined;
+  },
   requirePaymentOrA2AKey: () => [
     async (request: FastifyRequest, _reply: FastifyReply) => {
       (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = nextKeyRow;
@@ -248,6 +261,53 @@ describe('compose routes — WKH-61 scope mapping', () => {
         steps: expect.any(Array),
         scopingKeyRow: expect.objectContaining({ id: 'k1', owner_ref: 'o1' }),
       }),
+    );
+  });
+
+  // C2 (audit 2026-07-01): the route derives a2aKey with extractRawKey
+  // (x-a2a-key OR Bearer wasi_a2a_*). A Bearer-authenticated caller MUST reach
+  // compose with a2aKey SET, so invokeAgent stays on the prepaid path and never
+  // takes the operator-signed EIP-3009 branch (the C2 operator-wallet drain).
+  it('T-ROUTE-C2 (audit): Bearer wasi_a2a_* caller → compose receives a2aKey set (no operator-sign path)', async () => {
+    mockCompose.mockResolvedValue({
+      success: true,
+      output: 'final',
+      steps: [],
+      totalCostUsdc: 0,
+      totalLatencyMs: 1,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { authorization: 'Bearer wasi_a2a_bearer_caller' },
+      payload: { steps: [{ agent: 'a1', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockCompose).toHaveBeenCalledWith(
+      expect.objectContaining({ a2aKey: 'wasi_a2a_bearer_caller' }),
+    );
+  });
+
+  it('T-ROUTE-C2b (audit): x402 caller (no a2a credential) → compose receives a2aKey undefined', async () => {
+    mockCompose.mockResolvedValue({
+      success: true,
+      output: 'final',
+      steps: [],
+      totalCostUsdc: 0,
+      totalLatencyMs: 1,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      payload: { steps: [{ agent: 'a1', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockCompose).toHaveBeenCalledWith(
+      expect.objectContaining({ a2aKey: undefined }),
     );
   });
 });

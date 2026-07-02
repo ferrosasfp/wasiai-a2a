@@ -12,7 +12,7 @@ import {
   getInitializedChainKeys,
   initAdapters,
 } from './adapters/registry.js';
-import { assertRequiredEnv, isProduction } from './lib/env.js';
+import { assertRequiredEnv, isProduction, parseTrustProxy } from './lib/env.js';
 import { assertGasOverheadConfigured } from './lib/gas-overhead.js';
 import { REDACT_PATHS } from './lib/logger.js';
 import mcpPlugin from './mcp/index.js';
@@ -57,6 +57,12 @@ const fastify = Fastify({
   // (Authorization / x-payment / x-a2a-key headers + any *.secret/*.signature).
   logger: { redact: REDACT_PATHS },
   genReqId,
+  // H3 (audit 2026-07-01): resolve `request.ip` from X-Forwarded-For when behind
+  // a trusted proxy (Railway edge). Env-driven (TRUST_PROXY) so the per-IP
+  // rate-limiters bucket per real client instead of one shared proxy bucket.
+  // Default (unset) is `false` → unchanged behavior. MUST be set BEFORE
+  // registerRateLimit()/routes (Fastify reads it at instance construction).
+  trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
 });
 
 // CORS — env-aware (WKH-SEC-01 AC-4/AC-5/AC-6)

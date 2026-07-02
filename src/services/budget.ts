@@ -479,6 +479,120 @@ export const budgetService = {
   },
 
   /**
+   * M1 (audit 2026-07-01): DUAL-LEDGER credit-back bajo DELEGACIÓN. Espejo
+   * INVERSO de `debitDelegationAndParent`: llama la RPC
+   * `refund_delegation_and_parent`, que en UNA transacción (a) revierte el
+   * parent (budget + daily_spent, y el dest-cap ledger si hubo destination con
+   * política) y (b) decrementa `a2a_delegations.total_spent` (clamp a 0). Sin
+   * esto, refundear vía `credit()`/`creditWithDest()` sólo tocaba el parent →
+   * `total_spent` quedaba inflado con dinero reembolsado (self-DoS de la
+   * delegación). Mismo contrato de retorno que `credit()`:
+   * `reverted = data >= 1` ⟺ el refund del parent afectó filas.
+   * `destination` es OPCIONAL — cuando está, debe ser la MISMA forma normalizada
+   * que usó el débito (dispatch dest-aware simétrico).
+   */
+  async creditDelegation(
+    delegationId: string,
+    ownerRef: string,
+    keyId: string,
+    chainId: number,
+    amountUsd: number,
+    destination?: string,
+  ): Promise<{ success: boolean; error?: string; reverted?: boolean }> {
+    // CR NIT-1: `p_destination?: string` (SQL `DEFAULT NULL`). Under
+    // exactOptionalPropertyTypes the key must be OMITTED (not set to undefined)
+    // when absent → the SQL default (NULL) applies, equivalent to the old
+    // explicit `null` — without the `as unknown as` double cast.
+    const args: Database['public']['Functions']['refund_delegation_and_parent']['Args'] =
+      {
+        p_delegation_id: delegationId,
+        p_owner_ref: ownerRef,
+        p_key_id: keyId,
+        p_chain_id: chainId,
+        p_amount_usd: amountUsd,
+        ...(destination !== undefined && { p_destination: destination }),
+      };
+    const { data, error } = await supabase.rpc(
+      'refund_delegation_and_parent',
+      args,
+    );
+    if (error) {
+      if (error.message.includes('OWNERSHIP_MISMATCH')) {
+        return { success: false, error: 'OWNERSHIP_MISMATCH' };
+      }
+      if (
+        error.message.includes('KEY_NOT_FOUND') ||
+        error.message.includes('DELEGATION_NOT_FOUND')
+      ) {
+        return { success: false, error: 'KEY_NOT_FOUND' };
+      }
+      log.error(
+        { keyId, chainId, amountUsd, delegationId, err: error.message },
+        'delegation refund failed',
+      );
+      return { success: false, error: 'REFUND_FAILED' };
+    }
+    const reverted = typeof data === 'number' && data >= 1;
+    if (!reverted) {
+      return { success: false, error: 'REFUND_NOT_REVERTED', reverted: false };
+    }
+    return { success: true, reverted: true };
+  },
+
+  /**
+   * M1 (audit 2026-07-01): DUAL-LEDGER credit-back bajo KEY-SESSION. Espejo de
+   * `creditDelegation` pero contra `a2a_key_sessions.spent_usd` vía la RPC
+   * `refund_session_and_parent`. Mismo contrato de retorno / dispatch dest-aware.
+   */
+  async creditSession(
+    sessionId: string,
+    ownerRef: string,
+    keyId: string,
+    chainId: number,
+    amountUsd: number,
+    destination?: string,
+  ): Promise<{ success: boolean; error?: string; reverted?: boolean }> {
+    // CR NIT-1: `p_destination?: string` (SQL `DEFAULT NULL`). Under
+    // exactOptionalPropertyTypes the key must be OMITTED (not set to undefined)
+    // when absent → the SQL default (NULL) applies, equivalent to the old
+    // explicit `null` — without the `as unknown as` double cast.
+    const args: Database['public']['Functions']['refund_session_and_parent']['Args'] =
+      {
+        p_session_id: sessionId,
+        p_owner_ref: ownerRef,
+        p_key_id: keyId,
+        p_chain_id: chainId,
+        p_amount_usd: amountUsd,
+        ...(destination !== undefined && { p_destination: destination }),
+      };
+    const { data, error } = await supabase.rpc(
+      'refund_session_and_parent',
+      args,
+    );
+    if (error) {
+      if (error.message.includes('OWNERSHIP_MISMATCH')) {
+        return { success: false, error: 'OWNERSHIP_MISMATCH' };
+      }
+      if (
+        error.message.includes('KEY_NOT_FOUND') ||
+        error.message.includes('SESSION_NOT_FOUND')
+      ) {
+        return { success: false, error: 'KEY_NOT_FOUND' };
+      }
+      log.error(
+        { keyId, chainId, amountUsd, sessionId, err: error.message },
+        'session refund failed',
+      );
+      return { success: false, error: 'REFUND_FAILED' };
+    }
+    const reverted = typeof data === 'number' && data >= 1;
+    if (!reverted) {
+      return { success: false, error: 'REFUND_NOT_REVERTED', reverted: false };
+    }
+    return { success: true, reverted: true };
+  },
+
+  /**
    * Register a deposit: atomically increment budget for a chain (WKH-35 v2).
    * Uses Postgres function register_a2a_key_deposit v2 with FOR UPDATE +
    * UNIQUE(chain_id, tx_hash) for atomic anti-replay (CD-2) and a DB-level

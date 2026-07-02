@@ -35,6 +35,17 @@ import type { A2AAgentKeyRow, ComposeResult } from '../types/index.js';
 // nextKeyRow controla owner_ref/id por test; undefined = x402 puro.
 let nextKeyRow: Partial<A2AAgentKeyRow> | undefined;
 vi.mock('../middleware/a2a-key.js', () => ({
+  // C2 (audit 2026-07-01): routes/compose.ts imports extractRawKey.
+  extractRawKey: (request: FastifyRequest) => {
+    const headerKey = request.headers['x-a2a-key'];
+    if (typeof headerKey === 'string') return headerKey;
+    const auth = request.headers.authorization;
+    if (typeof auth === 'string') {
+      const m = /^bearer\s+(.+)$/i.exec(auth);
+      if (m?.[1]?.startsWith('wasi_a2a_')) return m[1];
+    }
+    return undefined;
+  },
   requirePaymentOrA2AKey: () => [
     async (request: FastifyRequest, _reply: FastifyReply) => {
       (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = nextKeyRow;

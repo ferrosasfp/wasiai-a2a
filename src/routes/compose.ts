@@ -9,7 +9,10 @@ import { getAdaptersBundle, getDefaultChainKey } from '../adapters/registry.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
-import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
+import {
+  extractRawKey,
+  requirePaymentOrA2AKey,
+} from '../middleware/a2a-key.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';
 import { createTimeoutHandler } from '../middleware/timeout.js';
@@ -394,12 +397,19 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       // BLQ-2: bail early if timeout already sent 504
       if (reply.sent) return;
 
-      // WKH-58 fix-pack: propagate x-a2a-key header to service so compose
+      // WKH-58 fix-pack: propagate the a2a credential to the service so compose
       // can skip Pieverse inbound x402 (broken upstream WKH-45) when caller
       // already paid via a2a-key (middleware debited budget per-call).
-      const a2aKeyHeader = request.headers['x-a2a-key'];
-      const a2aKey =
-        typeof a2aKeyHeader === 'string' ? a2aKeyHeader : undefined;
+      //
+      // C2 (audit 2026-07-01): derive the a2a key with the SAME extraction the
+      // auth middleware uses (x-a2a-key OR `Authorization: Bearer wasi_a2a_*`).
+      // Previously this read ONLY `x-a2a-key`, so a caller authenticated via
+      // `Authorization: Bearer` (whose budget WAS debited, scopingKeyRow set)
+      // looked un-keyed to compose → `invokeAgent` took the operator-signed
+      // EIP-3009 branch (`!a2aKey`) and leaked a redeemable authorization to the
+      // downstream agent. Deriving consistently with the real auth keeps such a
+      // caller on the prepaid path (no operator signature).
+      const a2aKey = extractRawKey(request);
       const result = await composeService.compose({
         steps: body.steps,
         maxBudget: body.maxBudget,
@@ -453,20 +463,47 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
               // exacto vía creditWithDest (revierte también el dest-cap ledger). Si
               // no hay destino fiable, usamos credit (sin dest-policy) para no romper
               // el cap por destino.
-              const creditRes = request.composeDestination
-                ? await budgetService.creditWithDest(
-                    request.a2aKeyRow.id,
+              //
+              // M1 (audit 2026-07-01): el débito step-0 bajo delegación/sesión es
+              // DUAL-LEDGER (debit_delegation_and_parent / debit_session_and_parent
+              // incrementan `total_spent`/`spent_usd` ADEMÁS del parent). Este
+              // bloque NO estaba gateado por contexto → refundeaba sólo el parent
+              // (credit/creditWithDest) y dejaba `total_spent`/`spent_usd` inflado
+              // (self-DoS de la credencial). Ahora enrutamos al refund DUAL-LEDGER
+              // simétrico al débito cuando hay delegación/sesión; el path master
+              // (sin contexto) conserva credit/creditWithDest INTACTO.
+              const creditRes = request.delegationContext
+                ? await budgetService.creditDelegation(
+                    request.delegationContext.delegationId,
+                    request.delegationContext.ownerRef,
+                    request.delegationContext.keyId,
                     refundChainId,
                     refundUsd,
-                    request.a2aKeyRow.owner_ref,
                     request.composeDestination,
                   )
-                : await budgetService.credit(
-                    request.a2aKeyRow.id,
-                    refundChainId,
-                    refundUsd,
-                    request.a2aKeyRow.owner_ref,
-                  );
+                : request.keySessionContext
+                  ? await budgetService.creditSession(
+                      request.keySessionContext.sessionId,
+                      request.keySessionContext.ownerRef,
+                      request.keySessionContext.keyId,
+                      refundChainId,
+                      refundUsd,
+                      request.composeDestination,
+                    )
+                  : request.composeDestination
+                    ? await budgetService.creditWithDest(
+                        request.a2aKeyRow.id,
+                        refundChainId,
+                        refundUsd,
+                        request.a2aKeyRow.owner_ref,
+                        request.composeDestination,
+                      )
+                    : await budgetService.credit(
+                        request.a2aKeyRow.id,
+                        refundChainId,
+                        refundUsd,
+                        request.a2aKeyRow.owner_ref,
+                      );
               if (!creditRes.success) {
                 // CD-6: sin msg crudo de PG. No cambia el status code.
                 log.error(

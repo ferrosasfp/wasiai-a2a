@@ -249,7 +249,12 @@ function resolveTargetChain(
 // ── Auth credential extraction ──────────────────────────────
 // DT-2 (WKH-BEARER-AUTH): Priority order: x-a2a-key > Bearer wasi_a2a_* > x402.
 // Devuelve el raw token a2a o undefined (→ fallback x402). Sin side effects.
-function extractRawKey(request: FastifyRequest): string | undefined {
+// C2 (audit 2026-07-01): exported so route handlers derive the a2a credential
+// with the SAME logic the auth middleware uses (x-a2a-key OR Bearer
+// wasi_a2a_*). Reading only `x-a2a-key` at the route made a Bearer-authenticated
+// caller look un-keyed to compose (a2aKey=undefined), wrongly triggering the
+// operator-signed EIP-3009 branch (C2 operator-wallet drain).
+export function extractRawKey(request: FastifyRequest): string | undefined {
   const headerKey = request.headers['x-a2a-key'];
   if (headerKey && typeof headerKey === 'string') {
     return headerKey;
@@ -348,123 +353,145 @@ async function resolveDelegationAuth(
       );
     }
 
-    // 6. AC-7 per-tx del STEP 0 (antes de debitar).
-    if (
-      exceedsPerTxLimit(delegation.policy.max_amount_per_tx, estimatedCostUsd)
-    ) {
-      return send403delegation(
-        reply,
-        'DELEGATION_TX_LIMIT_EXCEEDED',
-        'Estimated cost exceeds per-transaction limit',
-      );
-    }
+    // H1 (audit 2026-07-01): respect `skipMiddlewareDebit` exactly like the
+    // master path (resolveMasterAuth §7). Routes that bill the REAL cost
+    // post-plan in the service (all `/orchestrate*` routes set the flag) MUST
+    // NOT be charged the flat `PLACEHOLDER_FEE_USD` ($1) step-0 debit here.
+    // Before this fix, delegation callers were debited $1 unconditionally on
+    // EVERY `/orchestrate`, `/orchestrate/plan` (a documented zero-debit quote)
+    // and `/orchestrate/execute` and NEVER refunded on `no_agents` /
+    // `no_relevant_agent` / `insufficient_funds` / pipeline failure — a
+    // guaranteed, repeatable $1/call drain of the parent budget + delegation
+    // `total_spent`.
+    //
+    // TRADE-OFF (documented for review): with the flag set, the delegation
+    // step-0 is not billed by ANY layer for `/orchestrate*` (the service's
+    // post-plan debit is gated on `billingKeyRow`, which excludes
+    // delegation/session), so orchestrate step-0 becomes non-billed for
+    // delegation callers (steps 1..N are still billed by compose via
+    // `delegationContext`). This fails SAFE (never over-charges) and mirrors the
+    // `/orchestrate/plan` zero-debit contract. Extending the service to bill
+    // delegation/session step-0 post-plan is left as a follow-up. On `/compose`
+    // (flag unset) the real-price step-0 debit + refund path is unchanged.
+    if (!request.skipMiddlewareDebit) {
+      // 6. AC-7 per-tx del STEP 0 (antes de debitar).
+      if (
+        exceedsPerTxLimit(delegation.policy.max_amount_per_tx, estimatedCostUsd)
+      ) {
+        return send403delegation(
+          reply,
+          'DELEGATION_TX_LIMIT_EXCEEDED',
+          'Estimated cost exceeds per-transaction limit',
+        );
+      }
 
-    // 7. AC-8/AC-9 débito ATÓMICO del STEP 0 (CD-12).
-    request.log.info(
-      { delegationId: delegation.id, chainKey, chainId, assetSymbol },
-      'a2a-key.delegation.debit',
-    );
-    try {
-      // WKH-125b: la delegación hereda el cap por destino de la parent key. El
-      // step-0 de un compose bajo delegación DEBE propagar `composeDestination`
-      // (canonicalizado por routes/compose.ts:resolveComposePriceHandler) al RPC
-      // debit_delegation_and_parent → debit_with_dest_policy. Sin esto el RPC
-      // recibía p_destination=NULL y el cap por destino se evadía (bypass).
-      // CONDICIONAL (espeja el branch session, CD-7): sólo con composeDestination
-      // pasamos el 6º arg; si no, la llamada de 5 args queda INTACTA (back-compat).
-      if (request.composeDestination) {
-        await delegationService.debitDelegationAndParent(
-          delegation.id,
-          parentKey.owner_ref,
-          parentKey.id,
-          chainId,
-          estimatedCostUsd,
-          request.composeDestination,
-        );
-      } else {
-        await delegationService.debitDelegationAndParent(
-          delegation.id,
-          parentKey.owner_ref,
-          parentKey.id,
-          chainId,
-          estimatedCostUsd,
-        );
+      // 7. AC-8/AC-9 débito ATÓMICO del STEP 0 (CD-12).
+      request.log.info(
+        { delegationId: delegation.id, chainKey, chainId, assetSymbol },
+        'a2a-key.delegation.debit',
+      );
+      try {
+        // WKH-125b: la delegación hereda el cap por destino de la parent key. El
+        // step-0 de un compose bajo delegación DEBE propagar `composeDestination`
+        // (canonicalizado por routes/compose.ts:resolveComposePriceHandler) al RPC
+        // debit_delegation_and_parent → debit_with_dest_policy. Sin esto el RPC
+        // recibía p_destination=NULL y el cap por destino se evadía (bypass).
+        // CONDICIONAL (espeja el branch session, CD-7): sólo con composeDestination
+        // pasamos el 6º arg; si no, la llamada de 5 args queda INTACTA (back-compat).
+        if (request.composeDestination) {
+          await delegationService.debitDelegationAndParent(
+            delegation.id,
+            parentKey.owner_ref,
+            parentKey.id,
+            chainId,
+            estimatedCostUsd,
+            request.composeDestination,
+          );
+        } else {
+          await delegationService.debitDelegationAndParent(
+            delegation.id,
+            parentKey.owner_ref,
+            parentKey.id,
+            chainId,
+            estimatedCostUsd,
+          );
+        }
+      } catch (debitErr) {
+        // WKH-125b: cap por destino excedido bajo delegación → HTTP 402 (no 403),
+        // espejando el branch session. El budget NO se decrementó (rollback de la tx).
+        if (debitErr instanceof DestCapExceededError) {
+          return reply.status(402).send({
+            error: `chain ${chainId} destination cap exceeded`,
+            error_code: 'DEST_CAP_EXCEEDED',
+          });
+        }
+        if (debitErr instanceof DelegationTotalLimitExceededError) {
+          return send403delegation(
+            reply,
+            'DELEGATION_TOTAL_LIMIT_EXCEEDED',
+            'Total delegation budget exceeded',
+          );
+        }
+        if (debitErr instanceof AgentKeyBudgetExhaustedError) {
+          return send403delegation(
+            reply,
+            'AGENT_KEY_BUDGET_EXHAUSTED',
+            'Parent agent key budget exhausted',
+          );
+        }
+        if (debitErr instanceof DelegationRevokedError) {
+          return send403delegation(
+            reply,
+            'DELEGATION_REVOKED',
+            'Delegation has been revoked',
+          );
+        }
+        if (debitErr instanceof DelegationExpiredError) {
+          return send403delegation(
+            reply,
+            'DELEGATION_EXPIRED',
+            'Delegation has expired',
+          );
+        }
+        // AR-MNR-1: límites de la parent key bajo delegación → 403 semántico
+        // (antes caían en `throw debitErr` → outer catch → 503 + leak PG).
+        if (debitErr instanceof DailyLimitExceededError) {
+          return send403delegation(
+            reply,
+            'DAILY_LIMIT',
+            'Daily spending limit exceeded',
+          );
+        }
+        if (debitErr instanceof AgentKeyInactiveError) {
+          return send403delegation(
+            reply,
+            'KEY_INACTIVE',
+            'Parent agent key is inactive',
+          );
+        }
+        if (debitErr instanceof AgentKeyNotFoundError) {
+          return send403delegation(
+            reply,
+            'KEY_NOT_FOUND',
+            'Parent agent key not found',
+          );
+        }
+        if (debitErr instanceof DelegationNotFoundError) {
+          return send403delegation(
+            reply,
+            'DELEGATION_NOT_FOUND',
+            'Delegation not found',
+          );
+        }
+        if (debitErr instanceof OwnershipMismatchError) {
+          return send403delegation(
+            reply,
+            'OWNERSHIP_MISMATCH',
+            'Delegation ownership mismatch',
+          );
+        }
+        throw debitErr; // unexpected → outer catch → 503
       }
-    } catch (debitErr) {
-      // WKH-125b: cap por destino excedido bajo delegación → HTTP 402 (no 403),
-      // espejando el branch session. El budget NO se decrementó (rollback de la tx).
-      if (debitErr instanceof DestCapExceededError) {
-        return reply.status(402).send({
-          error: `chain ${chainId} destination cap exceeded`,
-          error_code: 'DEST_CAP_EXCEEDED',
-        });
-      }
-      if (debitErr instanceof DelegationTotalLimitExceededError) {
-        return send403delegation(
-          reply,
-          'DELEGATION_TOTAL_LIMIT_EXCEEDED',
-          'Total delegation budget exceeded',
-        );
-      }
-      if (debitErr instanceof AgentKeyBudgetExhaustedError) {
-        return send403delegation(
-          reply,
-          'AGENT_KEY_BUDGET_EXHAUSTED',
-          'Parent agent key budget exhausted',
-        );
-      }
-      if (debitErr instanceof DelegationRevokedError) {
-        return send403delegation(
-          reply,
-          'DELEGATION_REVOKED',
-          'Delegation has been revoked',
-        );
-      }
-      if (debitErr instanceof DelegationExpiredError) {
-        return send403delegation(
-          reply,
-          'DELEGATION_EXPIRED',
-          'Delegation has expired',
-        );
-      }
-      // AR-MNR-1: límites de la parent key bajo delegación → 403 semántico
-      // (antes caían en `throw debitErr` → outer catch → 503 + leak PG).
-      if (debitErr instanceof DailyLimitExceededError) {
-        return send403delegation(
-          reply,
-          'DAILY_LIMIT',
-          'Daily spending limit exceeded',
-        );
-      }
-      if (debitErr instanceof AgentKeyInactiveError) {
-        return send403delegation(
-          reply,
-          'KEY_INACTIVE',
-          'Parent agent key is inactive',
-        );
-      }
-      if (debitErr instanceof AgentKeyNotFoundError) {
-        return send403delegation(
-          reply,
-          'KEY_NOT_FOUND',
-          'Parent agent key not found',
-        );
-      }
-      if (debitErr instanceof DelegationNotFoundError) {
-        return send403delegation(
-          reply,
-          'DELEGATION_NOT_FOUND',
-          'Delegation not found',
-        );
-      }
-      if (debitErr instanceof OwnershipMismatchError) {
-        return send403delegation(
-          reply,
-          'OWNERSHIP_MISMATCH',
-          'Delegation ownership mismatch',
-        );
-      }
-      throw debitErr; // unexpected → outer catch → 503
     }
 
     // 8. augment + SET delegationContext para los steps 2..N (DT-11/DT-7).
@@ -591,102 +618,116 @@ async function resolveKeySessionAuth(
     request.resolvedChainId = chainId;
 
     // 5. AC-8/AC-9 débito ATÓMICO del STEP 0 (sesión + parent).
-    request.log.info(
-      { sessionId: session.id, chainKey, chainId, assetSymbol },
-      'a2a-key.session.debit',
-    );
-    try {
-      // WKH-125 (AC-6 fix): la sesión hereda el cap por destino de la parent
-      // key. El step-0 de un compose DEBE propagar `composeDestination`
-      // (augmentado por routes/compose.ts:resolveComposePriceHandler) al RPC
-      // `debit_session_and_parent` → `debit_with_dest_policy`. Sin esto el RPC
-      // recibía `p_destination=NULL`, caía a `increment_a2a_key_spend` y el cap
-      // por destino se evadía por completo (bypass del cap con session key).
-      // CONDICIONAL (espeja el branch master, CD-8b): sólo cuando hay
-      // `composeDestination` pasamos el 6º arg destino; si no, la llamada de
-      // 5 args queda INTACTA (back-compat para callers sin destino/política,
-      // el RPC se comporta idéntico al pre-fix, AC-5).
-      if (request.composeDestination) {
-        await keySessionService.debitSessionAndParent(
-          session.id,
-          parentKey.owner_ref,
-          parentKey.id,
-          chainId,
-          estimatedCostUsd,
-          request.composeDestination,
-        );
-      } else {
-        await keySessionService.debitSessionAndParent(
-          session.id,
-          parentKey.owner_ref,
-          parentKey.id,
-          chainId,
-          estimatedCostUsd,
-        );
+    // H1 (audit 2026-07-01): respect `skipMiddlewareDebit` like resolveMasterAuth
+    // §7. `/orchestrate*` routes bill the real cost post-plan in the service, so
+    // the flat $1 placeholder step-0 debit here must be skipped — otherwise a
+    // key-session caller was charged $1 on every orchestrate call (including the
+    // zero-debit `/orchestrate/plan` quote) and never refunded. Same documented
+    // trade-off as the delegation branch (orchestrate step-0 becomes non-billed
+    // for session callers; steps 1..N still billed by compose via
+    // `keySessionContext`; `/compose` real-price debit+refund unchanged).
+    if (!request.skipMiddlewareDebit) {
+      request.log.info(
+        { sessionId: session.id, chainKey, chainId, assetSymbol },
+        'a2a-key.session.debit',
+      );
+      try {
+        // WKH-125 (AC-6 fix): la sesión hereda el cap por destino de la parent
+        // key. El step-0 de un compose DEBE propagar `composeDestination`
+        // (augmentado por routes/compose.ts:resolveComposePriceHandler) al RPC
+        // `debit_session_and_parent` → `debit_with_dest_policy`. Sin esto el RPC
+        // recibía `p_destination=NULL`, caía a `increment_a2a_key_spend` y el cap
+        // por destino se evadía por completo (bypass del cap con session key).
+        // CONDICIONAL (espeja el branch master, CD-8b): sólo cuando hay
+        // `composeDestination` pasamos el 6º arg destino; si no, la llamada de
+        // 5 args queda INTACTA (back-compat para callers sin destino/política,
+        // el RPC se comporta idéntico al pre-fix, AC-5).
+        if (request.composeDestination) {
+          await keySessionService.debitSessionAndParent(
+            session.id,
+            parentKey.owner_ref,
+            parentKey.id,
+            chainId,
+            estimatedCostUsd,
+            request.composeDestination,
+          );
+        } else {
+          await keySessionService.debitSessionAndParent(
+            session.id,
+            parentKey.owner_ref,
+            parentKey.id,
+            chainId,
+            estimatedCostUsd,
+          );
+        }
+      } catch (debitErr) {
+        // WKH-125 (AC-2/AC-6): cap por destino excedido bajo session key → HTTP
+        // 402 (no 403), espejando el branch master. El budget NO se decrementó
+        // (rollback de la tx en el RPC).
+        if (debitErr instanceof DestCapExceededError) {
+          return reply.status(402).send({
+            error: `chain ${chainId} destination cap exceeded`,
+            error_code: 'DEST_CAP_EXCEEDED',
+          });
+        }
+        if (debitErr instanceof SessionBudgetExhaustedError) {
+          return send403session(
+            reply,
+            'SESSION_BUDGET_EXHAUSTED',
+            'Session budget exhausted',
+          );
+        }
+        if (debitErr instanceof SessionExpiredError) {
+          return send403session(
+            reply,
+            'SESSION_EXPIRED',
+            'Session has expired',
+          );
+        }
+        if (debitErr instanceof SessionTokenInvalidError) {
+          return send403session(
+            reply,
+            'SESSION_TOKEN_INVALID',
+            'Session token has been revoked',
+          );
+        }
+        if (debitErr instanceof AgentKeyBudgetExhaustedError) {
+          return send403session(
+            reply,
+            'AGENT_KEY_BUDGET_EXHAUSTED',
+            'Parent agent key budget exhausted',
+          );
+        }
+        if (debitErr instanceof DailyLimitExceededError) {
+          return send403session(
+            reply,
+            'DAILY_LIMIT',
+            'Daily spending limit exceeded',
+          );
+        }
+        if (debitErr instanceof AgentKeyInactiveError) {
+          return send403session(
+            reply,
+            'KEY_INACTIVE',
+            'Parent agent key is inactive',
+          );
+        }
+        if (debitErr instanceof AgentKeyNotFoundError) {
+          return send403session(
+            reply,
+            'KEY_NOT_FOUND',
+            'Parent agent key not found',
+          );
+        }
+        if (debitErr instanceof OwnershipMismatchError) {
+          return send403session(
+            reply,
+            'OWNERSHIP_MISMATCH',
+            'Session ownership mismatch',
+          );
+        }
+        throw debitErr; // unexpected → outer catch → 503
       }
-    } catch (debitErr) {
-      // WKH-125 (AC-2/AC-6): cap por destino excedido bajo session key → HTTP
-      // 402 (no 403), espejando el branch master. El budget NO se decrementó
-      // (rollback de la tx en el RPC).
-      if (debitErr instanceof DestCapExceededError) {
-        return reply.status(402).send({
-          error: `chain ${chainId} destination cap exceeded`,
-          error_code: 'DEST_CAP_EXCEEDED',
-        });
-      }
-      if (debitErr instanceof SessionBudgetExhaustedError) {
-        return send403session(
-          reply,
-          'SESSION_BUDGET_EXHAUSTED',
-          'Session budget exhausted',
-        );
-      }
-      if (debitErr instanceof SessionExpiredError) {
-        return send403session(reply, 'SESSION_EXPIRED', 'Session has expired');
-      }
-      if (debitErr instanceof SessionTokenInvalidError) {
-        return send403session(
-          reply,
-          'SESSION_TOKEN_INVALID',
-          'Session token has been revoked',
-        );
-      }
-      if (debitErr instanceof AgentKeyBudgetExhaustedError) {
-        return send403session(
-          reply,
-          'AGENT_KEY_BUDGET_EXHAUSTED',
-          'Parent agent key budget exhausted',
-        );
-      }
-      if (debitErr instanceof DailyLimitExceededError) {
-        return send403session(
-          reply,
-          'DAILY_LIMIT',
-          'Daily spending limit exceeded',
-        );
-      }
-      if (debitErr instanceof AgentKeyInactiveError) {
-        return send403session(
-          reply,
-          'KEY_INACTIVE',
-          'Parent agent key is inactive',
-        );
-      }
-      if (debitErr instanceof AgentKeyNotFoundError) {
-        return send403session(
-          reply,
-          'KEY_NOT_FOUND',
-          'Parent agent key not found',
-        );
-      }
-      if (debitErr instanceof OwnershipMismatchError) {
-        return send403session(
-          reply,
-          'OWNERSHIP_MISMATCH',
-          'Session ownership mismatch',
-        );
-      }
-      throw debitErr; // unexpected → outer catch → 503
     }
 
     // 6. augment + SET keySessionContext (AC-4/AC-10/DT-4). effectiveRow
