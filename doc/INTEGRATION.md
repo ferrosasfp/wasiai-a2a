@@ -184,6 +184,43 @@ Notes:
 - For `POST /registries`, `POST /compose`, and `POST /orchestrate` the server returns `402 Payment Required` with an `accepts[]` array when no auth is provided. See [Section 4](#4-x402-payment-flow).
 - A2A Protocol interactions (tasks, agent cards, well-known) follow the [Google A2A](https://google.github.io/A2A/) specification. JSON-RPC 2.0 is used inside the MCP surface (`/mcp`).
 
+### Protocol fee (pricing)
+
+WasiAI charges a **protocol fee** on orchestrated pipelines and publishes it in
+the response, so you never have to guess the take rate.
+
+- **Default rate: 1%.** This is the documented default. The operator can override
+  it via the `PROTOCOL_FEE_RATE` env var (a fraction, e.g. `0.01` = 1%), clamped
+  to `[0, 0.10]`; invalid values fall back to `0.01`. Do not hardcode the rate in
+  your client — read it from the quote instead (see below).
+- **Base: the real executed cost of the pipeline**, not your declared `budget`.
+  A larger `budget` does not increase the fee.
+
+Two fields carry the fee. `POST /orchestrate/plan` (the quote) returns **both**:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `protocolFeeUsdc` | number (USDC) | The fee **amount** for this specific plan. Also returned by `POST /orchestrate` and `POST /orchestrate/execute`. |
+| `feeRatePercent` | number (percent) | The effective fee **rate** as a percent (e.g. `1` for 1%). Returned by `POST /orchestrate/plan`. This is the runtime source of truth for the rate, reflecting the operator's effective value after the clamp. |
+
+Consistency guarantee: `protocolFeeUsdc ≈ totalCostUsdc × (feeRatePercent / 100)`
+within rounding tolerance. `protocolFeeUsdc` is the **real cost-based fee**, so it
+reconciles with `feeRatePercent` by construction.
+
+`maxQuotedCostUsdc` (also in the quote) is a **safety ceiling** the `execute` call
+enforces, not `totalCostUsdc + protocolFeeUsdc`. The invariant is
+`maxQuotedCostUsdc ≥ totalCostUsdc + protocolFeeUsdc`: the ceiling **can exceed**
+cost + fee when an agent has not yet quoted a price (a placeholder headroom is added
+so the pre-authorized cap never underestimates). Do not derive the fee from
+`maxQuotedCostUsdc − totalCostUsdc`; read `protocolFeeUsdc` / `feeRatePercent`.
+
+On non-`ready` plan outcomes (`no_agents`, `budget_exhausted`,
+`insufficient_funds`, `no_relevant_agent`) there is no pipeline, so
+`protocolFeeUsdc` is `0` and `feeRatePercent` is omitted — no misleading
+"charged" fee is reported when nothing ran. `POST /orchestrate` and
+`POST /orchestrate/execute` return the amount (`protocolFeeUsdc`) but not
+`feeRatePercent`; use `POST /orchestrate/plan` to read the rate before executing.
+
 ---
 
 ## 4. x402 Payment Flow
