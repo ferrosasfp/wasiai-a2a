@@ -220,9 +220,23 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
 
         if (reply.sent) return;
 
+        // WKH-132 (fee transparency, AC-1/DT-2): tasa explícita del protocol fee,
+        // derivada de la ÚNICA fuente de verdad getProtocolFeeRate() (fee-charge.ts)
+        // — la MISMA que produce protocolFeeUsdc, nunca recalculada ni hardcodeada
+        // (CD-1). Se expresa en porcentaje (getProtocolFeeRate() * 100, ej. 1 = 1%).
+        // Refleja el rate EFECTIVO post-clamp del env (AC-5), nunca el crudo inválido.
+        // Solo en planStatus 'ready' (hubo pipeline con fee); en los early-returns
+        // protocolFeeUsdc es 0 y feeRatePercent se OMITE para no reportar un fee
+        // "cobrado" engañoso sin pipeline (AC-2). Aditivo, no rompe compat (CD-4).
+        const feeRatePercent =
+          plan.planStatus === 'ready'
+            ? Number((getProtocolFeeRate() * 100).toFixed(6))
+            : undefined;
+
         // Solo los campos PÚBLICOS del OrchestratePlanResult (pick). Los internos
         // (plannedCostUsd, feeUsdc, billingKeyRow, discoveredAgents, etc.) NO se
         // serializan al cliente. Sin débito → sin header x-a2a-remaining-budget.
+        // feeRatePercent undefined → JSON.stringify lo omite (AC-2).
         return reply.status(200).send({
           orchestrationId: plan.orchestrationId,
           planStatus: plan.planStatus,
@@ -230,6 +244,7 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           costPerStep: plan.costPerStep,
           totalCostUsdc: plan.totalCostUsdc,
           protocolFeeUsdc: plan.protocolFeeUsdc,
+          feeRatePercent,
           maxQuotedCostUsdc: plan.maxQuotedCostUsdc,
           reasoning: plan.reasoning,
           consideredAgents: plan.consideredAgents,

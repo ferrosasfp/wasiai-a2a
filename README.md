@@ -520,6 +520,42 @@ The middleware hashes the key, validates budget/scoping/limits, performs an opti
 
 ---
 
+## Protocol Fee (transparent)
+
+The gateway charges a **protocol fee** on orchestrated pipelines. Unlike closed
+brokers that keep their take rate opaque, WasiAI publishes it:
+
+- **Default rate: 1%.** This is the shipped default, not necessarily the value
+  a given operator runs — always read the effective rate from the quote (below).
+- **Base: the real executed cost of the pipeline**, not the declared `budget`.
+  The fee is a fraction of what the composed agents actually cost, so a large
+  `budget` does not inflate it. (Cost-based fee, `fix/129-wkh-132-orchestrate-fee-on-cost`.)
+- **Configurable** by the operator via the `PROTOCOL_FEE_RATE` env var, a
+  fraction (e.g. `0.01` = 1%) clamped to the range `[0, 0.10]`. Out-of-range or
+  non-numeric values fall back to the `0.01` default. The current env value is
+  intentionally not hardcoded here so this doc never goes stale.
+
+### Reading the effective fee at runtime
+
+`POST /orchestrate/plan` returns the fee in the quote so a caller can inspect it
+before executing, without reading the source:
+
+- `protocolFeeUsdc` — the fee **amount** (USDC) for this specific plan.
+- `feeRatePercent` — the effective fee **rate** as a percent (e.g. `1` for 1%),
+  derived from the same source that computes the amount. This reflects the
+  operator's effective rate *after* the clamp, never a raw/invalid env value.
+
+The `feeRatePercent` field is the **runtime source of truth** for the rate; the
+`1%` above is only the documented default. On non-`ready` plan outcomes
+(`no_agents`, `budget_exhausted`, `insufficient_funds`, `no_relevant_agent`)
+there is no pipeline, so `protocolFeeUsdc` is `0` and `feeRatePercent` is omitted.
+
+By construction `protocolFeeUsdc ≈ totalCostUsdc × (feeRatePercent / 100)`
+(within rounding). See [`doc/INTEGRATION.md`](doc/INTEGRATION.md) for the field
+reference.
+
+---
+
 ## Adapter Pattern
 
 The gateway decouples chain-specific logic via four adapter interfaces defined in `src/adapters/types.ts`:
