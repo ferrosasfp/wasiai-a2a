@@ -515,4 +515,121 @@ describe('identityService', () => {
       ).rejects.toMatchObject({ code: 'OWNERSHIP_MISMATCH' });
     });
   });
+
+  // ── WKH-133 (DT-6 / CD-9) — resolveErc8004AgentId ────────────────
+  describe('resolveErc8004AgentId', () => {
+    // Chain terminal: .select(col).eq('is_active',true).not(...) → resolved.
+    function setupResolveMock(
+      data: Array<{ erc8004_identity: unknown }> | null,
+      error: unknown = null,
+    ) {
+      const mock: Record<string, unknown> = {
+        select: vi.fn().mockReturnThis(),
+        eq: vi.fn().mockReturnThis(),
+        not: vi.fn().mockResolvedValue({ data, error }),
+      };
+      for (const k of ['select', 'eq']) {
+        (mock[k] as ReturnType<typeof vi.fn>).mockReturnValue(mock);
+      }
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+      return mock;
+    }
+
+    it('T-CD9: returns the token_id (bigint) for exactly 1 slug+chain match', async () => {
+      setupResolveMock([
+        {
+          erc8004_identity: {
+            token_id: '99',
+            chain_id: 84532,
+            agent_slug: 'Weather-Agent',
+          },
+        },
+      ]);
+      const res = await identityService.resolveErc8004AgentId(
+        'weather-agent',
+        84532,
+      );
+      expect(res).toBe(99n);
+    });
+
+    it('T-CD9: no matching binding → null (skip)', async () => {
+      setupResolveMock([
+        {
+          erc8004_identity: {
+            token_id: '99',
+            chain_id: 84532,
+            agent_slug: 'other-agent',
+          },
+        },
+      ]);
+      const res = await identityService.resolveErc8004AgentId(
+        'weather-agent',
+        84532,
+      );
+      expect(res).toBeNull();
+    });
+
+    it('T-CD9: >1 match (slug collision across registries) → null (fail-safe)', async () => {
+      setupResolveMock([
+        {
+          erc8004_identity: {
+            token_id: '1',
+            chain_id: 84532,
+            agent_slug: 'weather-agent',
+          },
+        },
+        {
+          erc8004_identity: {
+            token_id: '2',
+            chain_id: 84532,
+            agent_slug: 'weather-agent',
+          },
+        },
+      ]);
+      const res = await identityService.resolveErc8004AgentId(
+        'weather-agent',
+        84532,
+      );
+      expect(res).toBeNull();
+    });
+
+    it('T-CD9: v1 binding without agent_slug ancla → skip → null', async () => {
+      setupResolveMock([
+        { erc8004_identity: { token_id: '5', chain_id: 84532 } },
+      ]);
+      const res = await identityService.resolveErc8004AgentId(
+        'weather-agent',
+        84532,
+      );
+      expect(res).toBeNull();
+    });
+
+    it('chain mismatch (right slug, wrong chain) → null', async () => {
+      setupResolveMock([
+        {
+          erc8004_identity: {
+            token_id: '5',
+            chain_id: 8453,
+            agent_slug: 'weather-agent',
+          },
+        },
+      ]);
+      const res = await identityService.resolveErc8004AgentId(
+        'weather-agent',
+        84532,
+      );
+      expect(res).toBeNull();
+    });
+
+    it('DB error → null (fail-safe, no throw)', async () => {
+      setupResolveMock(null, { message: 'boom' });
+      const res = await identityService.resolveErc8004AgentId(
+        'weather-agent',
+        84532,
+      );
+      expect(res).toBeNull();
+    });
+  });
 });
