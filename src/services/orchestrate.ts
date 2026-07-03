@@ -787,21 +787,19 @@ export const orchestrateService = {
     }
     const totalCostUsdc = costPerStep.reduce((sum, c) => sum + c, 0);
     const maxQuotedCostUsdc = await this.quoteMaxCostUsdc(steps, false);
-    // WKH-132 (DT-2): fee = residual del quote sobre el costo real → garantiza
-    // maxQuotedCostUsdc == totalCostUsdc + protocolFeeUsdc por construcción (AC-2).
-    // Reusa la MISMA resolución de precios que maxQuotedCostUsdc (AC-1). Budget-
-    // independent (AC-9). Math.max(0,…): defensa de redondeo (maxQuoted ≥ total).
-    const protocolFeeUsdc = Number(
-      Math.max(0, maxQuotedCostUsdc - totalCostUsdc).toFixed(6),
-    );
-    // WKH-132 (BLQ-BAJO-1): la reserva INTERNA de maxBudget debe ser cost-based
-    // (igual que /execute en routes/orchestrate.ts:355), NO el residual del quote.
-    // El residual puede inflarse por PLACEHOLDER_FEE_USD en steps con price 0 →
-    // maxBudget negativo → falso "Budget exceeded". Desacoplar reserva de reportado
-    // elimina la asimetría con el path /execute. El protocolFeeUsdc REPORTADO sigue
-    // siendo el residual (CD-8/CD-9, caller-favorable, AC-2).
+    // WKH-132 (BLQ-MED-1 fix): protocolFeeUsdc = fee REAL cost-based =
+    // round(totalCostUsdc × getProtocolFeeRate()). Reconcilia con feeRatePercent
+    // por construcción (routes/orchestrate.ts). ANTES era el residual del techo
+    // (maxQuotedCostUsdc − totalCostUsdc), que se inflaba por PLACEHOLDER_FEE_USD
+    // en steps con price 0/no-resoluble → NO reconciliaba con feeRatePercent.
+    // maxQuotedCostUsdc queda como el TECHO/cap del /execute (puede exceder
+    // total+fee por el placeholder headroom). Invariante del quote (ya NO ==):
+    //   maxQuotedCostUsdc ≥ totalCostUsdc + protocolFeeUsdc.
+    // Budget-independent (AC-9). NO es el fee COBRADO: el charge real se deriva de
+    // pipeline.totalCostUsdc dentro de executeApprovedPlan (money-path intacto).
+    // El MISMO valor cost-based sirve de reserva de maxBudget en /execute (feeUsdc).
     const feeRate = getProtocolFeeRate();
-    const feeReserveUsdc = Number((totalCostUsdc * feeRate).toFixed(6));
+    const protocolFeeUsdc = Number((totalCostUsdc * feeRate).toFixed(6));
 
     return {
       orchestrationId,
@@ -814,7 +812,7 @@ export const orchestrateService = {
       reasoning,
       consideredAgents: discovered.agents,
       plannedCostUsd,
-      feeUsdc: feeReserveUsdc, // interno: reserva cost-based para maxBudget (DT-4 / BLQ-BAJO-1)
+      feeUsdc: protocolFeeUsdc, // interno: reserva cost-based para maxBudget (DT-4)
       usedFallback,
       debitFallback: false,
       billingKeyRow,
