@@ -385,4 +385,56 @@ export const identityService = {
     }
     return null;
   },
+
+  /**
+   * WKH-133 (DT-6): resuelve el `agentId` on-chain ERC-8004 (token_id) de un
+   * agente de discovery por su `slug` + `chainId`, SOLO vía binding verificado.
+   *
+   * Devuelve el token_id como `bigint` SOLO si hay EXACTAMENTE 1 binding activo
+   * cuyo `agent_slug` (canonizado) coincide con `slug` en la `chainId` dada. Con
+   * 0 o >1 matches → `null` (fail-safe CD-9: nunca se escribe feedback al agente
+   * equivocado; una colisión de slug entre registries es ambigua → skip). Los
+   * bindings v1 sin `agent_slug` (ancla) → skip.
+   *
+   * DT-19 / NOTA PARA AR-CR: este SELECT trae SOLO `erc8004_identity` — NUNCA
+   * `budget`/`funding_wallet`/PII (CD-2). No es lectura por `keyId` del caller ni
+   * expone nada por ruta HTTP; NO es IDOR. Sin throw: ante error de DB → null.
+   */
+  async resolveErc8004AgentId(
+    slug: string,
+    chainId: number,
+  ): Promise<bigint | null> {
+    const { data, error } = await supabase
+      .from('a2a_agent_keys')
+      .select('erc8004_identity') // SOLO esta columna — NUNCA budget (CD-2/DT-19)
+      .eq('is_active', true)
+      .not('erc8004_identity', 'is', null);
+    if (error || !data) return null;
+
+    const nSlug = normalizeSlug(slug);
+    const matches: bigint[] = [];
+    for (const row of data) {
+      const b = row.erc8004_identity as Erc8004IdentityBinding | null;
+      if (!b) continue;
+      if (!b.agent_slug) continue; // binding v1 sin ancla → skip (CD-9)
+      if (normalizeSlug(b.agent_slug) !== nSlug) continue;
+      if (b.chain_id !== chainId) continue;
+      // AR MNR-1: `BigInt(...)` lanza (SyntaxError) ante un token_id no-numérico
+      // (binding corrupto). Fail-safe CD-9: skip ese binding, NUNCA throw.
+      let tokenId: bigint;
+      try {
+        tokenId = BigInt(b.token_id); // token_id: string decimal (anti-precision-loss)
+      } catch {
+        continue;
+      }
+      matches.push(tokenId);
+    }
+    // Exactamente 1 → escribir. 0 o >1 → null (fail-safe, CD-9).
+    if (matches.length === 1) {
+      const only = matches[0];
+      if (only === undefined) return null; // CD-11: guard explícito, sin `!`
+      return only;
+    }
+    return null;
+  },
 };
