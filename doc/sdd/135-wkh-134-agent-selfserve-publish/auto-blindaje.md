@@ -32,3 +32,46 @@ Objetivo: que futuras HUs no repitan el mismo tropiezo.
 - **Aplicar en**: cualquier nueva dependencia de servicio agregada a
   `discover()`/`getAgent()` debe mockearse en TODOS los tests de discovery que
   stubean `fetch`/supabase, o el conteo de fetches se desincroniza.
+
+### [2026-07-03 17:15] FIX-PACK (AR) BLQ-ALTO-1 — `priceUsdc` sin validar en el write-boundary (money-path)
+- **Error**: `POST /agents` y `PATCH /agents/:slug` aceptaban cualquier `number`
+  como `priceUsdc` (incl. negativo). Un agente publicado con `priceUsdc: -1000`
+  terminaba inflando el budget prepago del caller vía `/compose` +
+  `increment_a2a_key_spend`. Además `mapRowToAgent`/`mapRowToRecord` sólo hacían
+  `typeof === 'number' ? v : 0`, sin clampear negativos/no-finitos ya en DB.
+- **Causa raíz**: el precio es money-path pero se trataba como campo cosmético.
+  El único safeguard (`parsePriceSafe`) vivía en `discovery.ts` (path registries)
+  y no se reusaba en el path self-published.
+- **Fix**:
+  1. Write-boundary (rechazo → 422): `isValidPriceUsdc` en `routes/agents.ts`
+     (POST y PATCH) + `assertValidPriceUsdc` como defense-in-depth en el service
+     (`publish`/`update`). Sólo se acepta `number` finito `>= 0`.
+  2. Read-boundary (clamp): se movió `parsePriceSafe` a `lib/price.ts` (helper
+     puro, sin ciclo de imports con `services/agent.ts`), re-exportado desde
+     `discovery.ts` para no romper imports existentes. `mapRowToAgent` y
+     `mapRowToRecord` ahora enrutan `row.price_usdc` por `parsePriceSafe` →
+     cualquier negativo/no-finito ya persistido se clampea a 0.
+- **Aplicar en**: TODO campo money-path (precio, budget, montos) debe validarse
+  en el write-boundary (rechazo explícito) Y clamparse en el read-boundary
+  (defensa para datos legacy). Reusar el mismo safeguard, no clones paralelos.
+
+### FOLLOW-UP (fuera de scope WKH-134) — guard profundo en el RPC de débito
+- El fix de esta HU blinda el write/read-boundary de `a2a_agents`. NO toca el RPC
+  `increment_a2a_key_spend` ni `compose.isInvalid`. Un guard profundo que rechace
+  un `amount`/precio negativo o no-finito EN el punto de débito (defensa final,
+  independiente de cómo llegó el precio) queda como **follow-up de seguridad
+  SEPARADO**. Trackearlo como TD/HU propia (money-invariant en el settlement),
+  fuera de esta branch.
+
+### [2026-07-03 17:16] FIX-PACK (AR) MNR-1 / MNR-2 — validación de `capabilities` y `name` en PATCH
+- **Error**: PATCH no validaba `capabilities` (podía setear `[]` o `"x"`); POST
+  no filtraba elementos no-string; PATCH de `name` no aplicaba los guards de
+  whitespace de `publish`.
+- **Fix**: `stringCapabilities` filtra a strings en POST (línea de input) y valida
+  `length >= 1` en POST/PATCH (422 en PATCH, 400 missing en POST). `sanitizeCapabilities`
+  en el service (publish/update). `assertValidName` reusa los guards de whitespace
+  en `update`. Documentado: el `slug` es PK INMUTABLE → PATCH de `name` NO
+  re-deriva el slug; `name` y `slug` pueden divergir tras un PATCH (elegido por
+  simplicidad/honestidad, sin rechazar el cambio de name).
+- **Aplicar en**: PATCH parcial debe reusar EXACTAMENTE los mismos guards que el
+  create; no asumir que "es sólo un update" exime de validar.

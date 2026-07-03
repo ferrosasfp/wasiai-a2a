@@ -16,6 +16,7 @@
  * El slug (PK) se deriva server-side del `name` (CD-5). NUNCA se acepta del body.
  */
 
+import { parsePriceSafe } from '../lib/price.js';
 import { supabase } from '../lib/supabase.js';
 import {
   SSRFViolationError,
@@ -110,7 +111,10 @@ function mapRowToAgent(row: AgentRow): Agent {
     slug: row.slug,
     description: row.description,
     capabilities: readCapabilities(row.capabilities),
-    priceUsdc: typeof row.price_usdc === 'number' ? row.price_usdc : 0,
+    // Read-boundary safeguard (WKH-134 BLQ-1): clampea negativos/no-finitos
+    // ya persistidos en DB — mismo safeguard que la ruta de registries. Evita
+    // que un price_usdc negativo se propague al débito prepago vía /compose.
+    priceUsdc: parsePriceSafe(row.price_usdc),
     registry: SELF_PUBLISHED_REGISTRY_NAME,
     registry_id: SELF_PUBLISHED_REGISTRY_ID,
     invokeUrl: row.agent_url,
@@ -132,7 +136,8 @@ function mapRowToRecord(row: AgentRow): PublishedAgentRecord {
     description: row.description,
     agentUrl: row.agent_url,
     capabilities: readCapabilities(row.capabilities),
-    priceUsdc: typeof row.price_usdc === 'number' ? row.price_usdc : 0,
+    // Mismo clamp de read-boundary que mapRowToAgent (WKH-134 BLQ-1).
+    priceUsdc: parsePriceSafe(row.price_usdc),
     enabled: row.enabled,
     discoverable: meta.discoverable === true,
     createdAt: row.created_at,
@@ -158,6 +163,52 @@ function buildMetadata(source: {
   if (source.discoverable !== undefined)
     meta.discoverable = source.discoverable;
   return Object.keys(meta).length > 0 ? meta : null;
+}
+
+// ── Write-boundary guards (WKH-134 BLQ-1 / MNR-1 / MNR-2) ────
+
+/**
+ * Write-boundary guard de precio (money-path). A diferencia de
+ * `parsePriceSafe` (que clampea en el READ boundary), acá se RECHAZA: un
+ * precio presente que no sea un `number` finito `>= 0` es un input inválido
+ * que NO debe persistirse (un negativo inflaría el débito prepago vía
+ * /compose + increment_a2a_key_spend). Defense-in-depth: el route ya devolvió
+ * 422 antes.
+ */
+function assertValidPriceUsdc(value: unknown): void {
+  if (value === undefined) return;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error('Invalid priceUsdc: must be a finite number >= 0');
+  }
+}
+
+/**
+ * Guards de whitespace del `name` — idénticos a `publish` (WKH-100 colisión de
+ * normalización). En PATCH el `slug` (PK) es INMUTABLE: actualizar `name` NO
+ * re-deriva el slug, así que `name` y `slug` pueden DIVERGIR tras un PATCH.
+ * Igual se validan los mismos guards para mantener el `name` limpio.
+ */
+function assertValidName(name: string): void {
+  if (name !== name.trim()) {
+    throw new Error('Invalid agent name: leading/trailing whitespace');
+  }
+  if (/\s\s/.test(name)) {
+    throw new Error('Invalid agent name: collapsible internal whitespace');
+  }
+}
+
+/**
+ * Filtra `capabilities` a elementos string y exige `length >= 1`. Devuelve el
+ * array saneado. Lanza si no queda ningún string (MNR-1).
+ */
+function sanitizeCapabilities(raw: unknown): string[] {
+  const arr = Array.isArray(raw)
+    ? raw.filter((c) => typeof c === 'string')
+    : [];
+  if (arr.length < 1) {
+    throw new Error('Invalid capabilities: expected a non-empty string[]');
+  }
+  return arr as string[];
 }
 
 // ── Service ─────────────────────────────────────────────────
@@ -208,14 +259,14 @@ export const publishedAgentService = {
       throw new Error('Missing required fields: name, agentUrl, capabilities');
     }
 
+    // Write-boundary guards (WKH-134 BLQ-1 / MNR-1): rechazar precio inválido
+    // y saneá capabilities a string[] no vacío ANTES de persistir.
+    assertValidPriceUsdc(input.priceUsdc);
+    const capabilities = sanitizeCapabilities(input.capabilities);
+
     // Slug server-side (CD-5): guards de whitespace idénticos a
     // registryService.register (WKH-100 colisión de normalización).
-    if (input.name !== input.name.trim()) {
-      throw new Error('Invalid agent name: leading/trailing whitespace');
-    }
-    if (/\s\s/.test(input.name)) {
-      throw new Error('Invalid agent name: collapsible internal whitespace');
-    }
+    assertValidName(input.name);
     const slug = input.name.toLowerCase().replace(/\s+/g, '-');
 
     // Pre-check de colisión de PK (cualquier owner). El 23505 del insert es
@@ -230,8 +281,8 @@ export const publishedAgentService = {
       slug,
       name: input.name,
       description: input.description ?? '',
-      // CD-8: narrowing acotado — JSONB en el borde Supabase.
-      capabilities: input.capabilities as unknown as Json,
+      // CD-8: narrowing acotado — JSONB en el borde Supabase (ya saneado).
+      capabilities: capabilities as unknown as Json,
       agent_url: input.agentUrl,
       price_usdc: input.priceUsdc ?? 0,
       metadata: (metadata ?? null) as unknown as Json,
@@ -353,12 +404,22 @@ export const publishedAgentService = {
       }
     }
 
+    // Write-boundary guards (WKH-134 BLQ-1 / MNR-1 / MNR-2). El slug (PK) NO
+    // cambia aunque cambie el `name` — name/slug pueden divergir tras el PATCH.
+    if (updates.priceUsdc !== undefined)
+      assertValidPriceUsdc(updates.priceUsdc);
+
     const updateRow: Database['public']['Tables']['a2a_agents']['Update'] = {};
-    if (updates.name !== undefined) updateRow.name = updates.name;
+    if (updates.name !== undefined) {
+      assertValidName(updates.name);
+      updateRow.name = updates.name;
+    }
     if (updates.description !== undefined)
       updateRow.description = updates.description;
     if (updates.capabilities !== undefined)
-      updateRow.capabilities = updates.capabilities as unknown as Json;
+      updateRow.capabilities = sanitizeCapabilities(
+        updates.capabilities,
+      ) as unknown as Json;
     if (updates.agentUrl !== undefined) updateRow.agent_url = updates.agentUrl;
     if (updates.priceUsdc !== undefined)
       updateRow.price_usdc = updates.priceUsdc;

@@ -56,6 +56,22 @@ function a2aKeyRequired(reply: FastifyReply): FastifyReply {
   });
 }
 
+/**
+ * Write-boundary guard de precio (WKH-134 BLQ-1, money-path). Un `priceUsdc`
+ * negativo/no-finito publicado inflaría el débito prepago del caller vía
+ * /compose + increment_a2a_key_spend. Solo se acepta un `number` finito `>= 0`.
+ */
+function isValidPriceUsdc(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0;
+}
+
+/** Filtra `capabilities` a elementos string (WKH-134 MNR-1). */
+function stringCapabilities(raw: unknown): string[] {
+  return Array.isArray(raw)
+    ? raw.filter((c): c is string => typeof c === 'string')
+    : [];
+}
+
 const agentsRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * POST /agents — publicar un agente (AC-1).
@@ -110,17 +126,34 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
         }
 
         // Validar mínimos → 400 con la lista de campos faltantes (AC-6).
+        // MNR-1: `capabilities` se filtra a elementos string; si tras filtrar
+        // queda vacío, cuenta como faltante (rechaza p.ej. `[123]`).
+        const validCaps = stringCapabilities(body.capabilities);
         const missing: string[] = [];
         if (typeof body.name !== 'string' || body.name.trim() === '')
           missing.push('name');
         if (typeof body.agentUrl !== 'string' || body.agentUrl.trim() === '')
           missing.push('agentUrl');
-        if (!Array.isArray(body.capabilities) || body.capabilities.length < 1)
-          missing.push('capabilities');
+        if (validCaps.length < 1) missing.push('capabilities');
         if (missing.length > 0) {
           return reply.status(400).send({
             error: 'Missing required fields',
             missing,
+          });
+        }
+
+        // BLQ-1 (money-path): rechazar `priceUsdc` presente pero inválido
+        // (negativo / NaN / Infinity / no-number) → 422. Un default ausente
+        // se resuelve a 0 en el service.
+        if (body.priceUsdc !== undefined && !isValidPriceUsdc(body.priceUsdc)) {
+          request.log.warn(
+            { field: 'priceUsdc' },
+            'agent publish rejected: invalid priceUsdc',
+          );
+          return reply.status(422).send({
+            error: 'Invalid priceUsdc',
+            field: 'priceUsdc',
+            reason: 'priceUsdc must be a finite number >= 0',
           });
         }
 
@@ -130,7 +163,7 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
         const input: PublishAgentInput = {
           name: body.name as string,
           agentUrl: body.agentUrl as string,
-          capabilities: body.capabilities as string[],
+          capabilities: validCaps,
         };
         if (typeof body.description === 'string')
           input.description = body.description;
@@ -226,6 +259,35 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
         const keyRow = request.a2aKeyRow;
         if (!keyRow) {
           return a2aKeyRequired(reply);
+        }
+
+        // BLQ-1 (money-path): rechazar `priceUsdc` presente pero inválido → 422.
+        if (body.priceUsdc !== undefined && !isValidPriceUsdc(body.priceUsdc)) {
+          request.log.warn(
+            { field: 'priceUsdc' },
+            'agent update rejected: invalid priceUsdc',
+          );
+          return reply.status(422).send({
+            error: 'Invalid priceUsdc',
+            field: 'priceUsdc',
+            reason: 'priceUsdc must be a finite number >= 0',
+          });
+        }
+
+        // MNR-1: si `capabilities` viene, debe ser un array con >= 1 string.
+        if (
+          body.capabilities !== undefined &&
+          stringCapabilities(body.capabilities).length < 1
+        ) {
+          request.log.warn(
+            { field: 'capabilities' },
+            'agent update rejected: invalid capabilities',
+          );
+          return reply.status(422).send({
+            error: 'Invalid capabilities',
+            field: 'capabilities',
+            reason: 'capabilities must be a non-empty array of strings',
+          });
         }
 
         const record = await publishedAgentService.update(

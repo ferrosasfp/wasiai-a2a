@@ -5,6 +5,7 @@
 import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
 import { getLogger } from '../lib/logger.js';
+import { parsePriceSafe } from '../lib/price.js';
 import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 import {
   SSRFViolationError,
@@ -663,25 +664,13 @@ function toArray(value: unknown): string[] {
 const V2_PRICE_FALLBACK_FIELD = 'price_per_call' as const;
 
 /**
- * Parses a raw value (number | string | null | undefined) into a finite,
- * non-negative number. Returns 0 for any of: null, undefined, NaN, Infinity,
- * negative number, non-parseable string, empty string.
- *
- * Pattern: mirrors `getProtocolFeeRate` in fee-charge.ts (Number.parseFloat
- * + Number.isFinite). CD-7 safe floor applies — never inflate via fallback.
+ * `parsePriceSafe` — safe floor de precios (WKH-57). Definición canónica en
+ * `../lib/price.js` (helper puro, sin deps de servicios) para poder reusarla
+ * en `services/agent.ts` sin ciclo de imports. Se re-exporta acá para no
+ * romper los imports existentes (`discovery.test.ts`) ni el patrón de
+ * registries. CD-7 safe floor: nunca infla vía fallback.
  */
-export function parsePriceSafe(raw: unknown): number {
-  if (raw === null || raw === undefined) return 0;
-  if (typeof raw === 'number') {
-    return Number.isFinite(raw) && raw >= 0 ? raw : 0;
-  }
-  if (typeof raw === 'string') {
-    if (raw === '') return 0;
-    const parsed = Number.parseFloat(raw);
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
-  }
-  return 0;
-}
+export { parsePriceSafe };
 
 /**
  * Resolves agent.priceUsdc from a raw response, with v2 schema-drift fallback.

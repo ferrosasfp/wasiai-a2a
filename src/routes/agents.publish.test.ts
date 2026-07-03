@@ -87,6 +87,7 @@ import { publishedAgentService } from '../services/agent.js';
 import agentsRoutes from './agents.js';
 
 const mockPublish = vi.mocked(publishedAgentService.publish);
+const mockUpdate = vi.mocked(publishedAgentService.update);
 
 const PUBLIC_IP = [{ address: '93.184.216.34', family: 4 }];
 
@@ -328,5 +329,83 @@ describe('agents routes — publish flow (WKH-134)', () => {
     // El route NO reenvía `slug` al service — se deriva del `name`.
     expect(forwardedInput).not.toHaveProperty('slug');
     expect(forwardedInput?.name).toBe('My Weather Agent');
+  });
+
+  // ── T-PUB-15 (BLQ-1 money-path) ──────────────────────────────────
+  it('T-PUB-15: POST priceUsdc negative → 422, publish NOT called (BLQ-1)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: { ...VALID_BODY, priceUsdc: -1000 },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe('Invalid priceUsdc');
+    expect(res.json().field).toBe('priceUsdc');
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
+  // ── T-PUB-16 (MNR-1) ─────────────────────────────────────────────
+  it('T-PUB-16: POST capabilities with only non-strings ([123]) → 400 capabilities, publish NOT called (MNR-1)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: { ...VALID_BODY, capabilities: [123] },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().missing).toContain('capabilities');
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
+  // ── T-PUB-17 (MNR-1 filtering) ───────────────────────────────────
+  it('T-PUB-17: POST capabilities mixes strings+non-strings → forwarded filtered to strings only (MNR-1)', async () => {
+    mockPublish.mockResolvedValueOnce(RECORD_RESPONSE);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: { ...VALID_BODY, capabilities: ['weather', 123, 'geo', null] },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(mockPublish).toHaveBeenCalledTimes(1);
+    expect(mockPublish.mock.calls[0]?.[0]?.capabilities).toEqual([
+      'weather',
+      'geo',
+    ]);
+  });
+
+  // ── T-PUB-18 (BLQ-1 PATCH money-path) ────────────────────────────
+  it('T-PUB-18: PATCH priceUsdc negative → 422, update NOT called (BLQ-1)', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/agents/my-weather-agent',
+      payload: { priceUsdc: -1000 },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe('Invalid priceUsdc');
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  // ── T-PUB-19 (MNR-1 PATCH) ───────────────────────────────────────
+  it('T-PUB-19: PATCH invalid capabilities ([] or non-array) → 422, update NOT called (MNR-1)', async () => {
+    const empty = await app.inject({
+      method: 'PATCH',
+      url: '/agents/my-weather-agent',
+      payload: { capabilities: [] },
+    });
+    expect(empty.statusCode).toBe(422);
+    expect(empty.json().error).toBe('Invalid capabilities');
+
+    const notArray = await app.inject({
+      method: 'PATCH',
+      url: '/agents/my-weather-agent',
+      payload: { capabilities: 'x' },
+    });
+    expect(notArray.statusCode).toBe(422);
+
+    expect(mockUpdate).not.toHaveBeenCalled();
   });
 });
