@@ -18,6 +18,8 @@ import type {
   DiscoveryResult,
   RegistryConfig,
 } from '../types/index.js';
+import { SELF_PUBLISHED_REGISTRY_NAME } from '../types/index.js';
+import { publishedAgentService } from './agent.js';
 import { identityService } from './identity.js';
 import { registryService } from './registry.js';
 import { reputationService } from './reputation.js';
@@ -230,7 +232,25 @@ export const discoveryService = {
         ) as RegistryConfig[])
       : await registryService.getEnabled();
 
-    if (registries.length === 0) {
+    // WKH-134: self-published agents merged con un SELECT local (sin fetch
+    // outbound, sin self-fetch). Aditivo/degradable (CD-9): si el SELECT falla,
+    // discover() sigue devolviendo los agentes de registries. Se incluyen solo
+    // si no se filtró a otro registry (respeta `query.registry`).
+    let localAgents: Agent[] = [];
+    if (!query.registry || query.registry === SELF_PUBLISHED_REGISTRY_NAME) {
+      try {
+        localAgents = await publishedAgentService.listAsAgents();
+      } catch (err) {
+        log.error(
+          { detail: err instanceof Error ? err.message : 'unknown' },
+          'self-published agents merge failed',
+        );
+        localAgents = [];
+      }
+    }
+
+    // NO early-return si solo hay locales (sin registries habilitados).
+    if (registries.length === 0 && localAgents.length === 0) {
       return { agents: [], total: 0, registries: [] };
     }
 
@@ -261,8 +281,9 @@ export const discoveryService = {
       ),
     );
 
-    // Merge results
-    let allAgents = results.flat();
+    // Merge results — los locales entran ANTES del pipeline común
+    // (status/verified/caps/price/rep/sort/limit) → mismo shape (CD-6).
+    let allAgents = [...results.flat(), ...localAgents];
 
     // Blocklist: exclude known-broken or mock agents (env-configurable)
     const blocklist = (process.env.AGENT_BLOCKLIST ?? '')
@@ -339,10 +360,15 @@ export const discoveryService = {
     // identity. No RPC at serve-time — only the JSONB reverse-lookup (W2).
     const enriched = await this.attachIdentities(limited);
 
+    const contributingRegistries = registries.map((r) => r.name);
+    if (localAgents.length > 0) {
+      contributingRegistries.push(SELF_PUBLISHED_REGISTRY_NAME);
+    }
+
     return {
       agents: enriched,
       total: allAgents.length,
-      registries: registries.map((r) => r.name),
+      registries: contributingRegistries,
     };
   },
 
@@ -524,6 +550,18 @@ export const discoveryService = {
    * Get a specific agent by slug
    */
   async getAgent(slug: string, registryId?: string): Promise<Agent | null> {
+    // WKH-134: local-first — resolver un agente self-published sin fetch
+    // outbound. Degradable (CD-9): si el SELECT falla, seguimos con el fetch
+    // de registries. Se intenta solo si no se filtró a otro registry.
+    if (!registryId || registryId === SELF_PUBLISHED_REGISTRY_NAME) {
+      try {
+        const local = await publishedAgentService.getBySlugAsAgent(slug);
+        if (local) return local;
+      } catch {
+        /* degradación: SELECT local falló → seguir con registries */
+      }
+    }
+
     const registries = registryId
       ? ([await registryService.get(registryId)].filter(
           Boolean,

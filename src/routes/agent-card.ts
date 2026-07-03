@@ -13,7 +13,8 @@ import {
 import { identityService } from '../services/identity.js';
 import { registryService } from '../services/registry.js';
 import { reputationService } from '../services/reputation.js';
-import type { AgentReputation } from '../types/index.js';
+import type { AgentReputation, RegistryConfig } from '../types/index.js';
+import { SELF_PUBLISHED_REGISTRY_ID } from '../types/index.js';
 
 const agentCardRoutes: FastifyPluginAsync = async (fastify) => {
   /**
@@ -45,9 +46,27 @@ const agentCardRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(404).send({ error: 'Agent not found' });
       }
 
-      // ⚠️ CD-9: Agent.registry = name, NOT id. Match by name.
-      const registries = await registryService.getEnabled();
-      const registryConfig = registries.find((r) => r.name === agent.registry);
+      // WKH-134 (DT-5): self-published agents no tienen fila en `registries`.
+      // Se construye un RegistryConfig sintético en memoria (auth vacío →
+      // `resolveAuthSchemes` devuelve []). Los demás campos no se usan para
+      // este card (agentUrl real vive en agent.invokeUrl).
+      let registryConfig: RegistryConfig | undefined;
+      if (agent.registry_id === SELF_PUBLISHED_REGISTRY_ID) {
+        registryConfig = {
+          id: SELF_PUBLISHED_REGISTRY_ID,
+          name: agent.registry,
+          discoveryEndpoint: '',
+          invokeEndpoint: agent.invokeUrl,
+          schema: { discovery: {}, invoke: { method: 'POST' } },
+          enabled: true,
+          createdAt: new Date(),
+          ownerRef: 'system',
+        };
+      } else {
+        // ⚠️ CD-9: Agent.registry = name, NOT id. Match by name.
+        const registries = await registryService.getEnabled();
+        registryConfig = registries.find((r) => r.name === agent.registry);
+      }
 
       if (!registryConfig) {
         return reply.status(404).send({ error: 'Agent not found' });
