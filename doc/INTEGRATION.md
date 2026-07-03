@@ -204,7 +204,15 @@ Two fields carry the fee. `POST /orchestrate/plan` (the quote) returns **both**:
 | `feeRatePercent` | number (percent) | The effective fee **rate** as a percent (e.g. `1` for 1%). Returned by `POST /orchestrate/plan`. This is the runtime source of truth for the rate, reflecting the operator's effective value after the clamp. |
 
 Consistency guarantee: `protocolFeeUsdc ≈ totalCostUsdc × (feeRatePercent / 100)`
-within rounding tolerance.
+within rounding tolerance. `protocolFeeUsdc` is the **real cost-based fee**, so it
+reconciles with `feeRatePercent` by construction.
+
+`maxQuotedCostUsdc` (also in the quote) is a **safety ceiling** the `execute` call
+enforces, not `totalCostUsdc + protocolFeeUsdc`. The invariant is
+`maxQuotedCostUsdc ≥ totalCostUsdc + protocolFeeUsdc`: the ceiling **can exceed**
+cost + fee when an agent has not yet quoted a price (a placeholder headroom is added
+so the pre-authorized cap never underestimates). Do not derive the fee from
+`maxQuotedCostUsdc − totalCostUsdc`; read `protocolFeeUsdc` / `feeRatePercent`.
 
 On non-`ready` plan outcomes (`no_agents`, `budget_exhausted`,
 `insufficient_funds`, `no_relevant_agent`) there is no pipeline, so

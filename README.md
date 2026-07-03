@@ -551,8 +551,12 @@ The `feeRatePercent` field is the **runtime source of truth** for the rate; the
 there is no pipeline, so `protocolFeeUsdc` is `0` and `feeRatePercent` is omitted.
 
 By construction `protocolFeeUsdc ≈ totalCostUsdc × (feeRatePercent / 100)`
-(within rounding). See [`doc/INTEGRATION.md`](doc/INTEGRATION.md) for the field
-reference.
+(within rounding) — it is the real cost-based fee, so it always reconciles with
+`feeRatePercent`. The plan's `maxQuotedCostUsdc` is a **safety ceiling** the
+`execute` call enforces, with invariant `maxQuotedCostUsdc ≥ totalCostUsdc +
+protocolFeeUsdc`; it can be **greater** than cost + fee when an agent has not yet
+quoted a price (placeholder headroom keeps the pre-authorized cap safe). See
+[`doc/INTEGRATION.md`](doc/INTEGRATION.md) for the field reference.
 
 ---
 

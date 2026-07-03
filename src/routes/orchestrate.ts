@@ -233,6 +233,21 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             ? Number((getProtocolFeeRate() * 100).toFixed(6))
             : undefined;
 
+        // WKH-132 (BLQ-MED-1 fix): protocolFeeUsdc REPORTADO = fee real cost-based =
+        // round(totalCostUsdc × getProtocolFeeRate()), derivado de la MISMA fuente que
+        // feeRatePercent → reconcilia por construcción (protocolFeeUsdc ==
+        // totalCostUsdc × feeRatePercent/100). ANTES se reportaba el residual del techo
+        // (maxQuotedCostUsdc − totalCostUsdc), inflado por PLACEHOLDER_FEE_USD en steps
+        // sin precio → NO reconciliaba. maxQuotedCostUsdc queda como el TECHO/cap del
+        // /execute (invariante: maxQuotedCostUsdc ≥ totalCostUsdc + protocolFeeUsdc).
+        // Este valor es SOLO el reportado en el quote: NO cambia el cobro real de
+        // /execute (pipeline.totalCostUsdc × rate) ni el cap que enforcea (money-path
+        // intacto). En early-returns (planStatus != 'ready') el fee reportado es 0.
+        const protocolFeeUsdc =
+          plan.planStatus === 'ready'
+            ? Number((plan.totalCostUsdc * getProtocolFeeRate()).toFixed(6))
+            : plan.protocolFeeUsdc;
+
         // Solo los campos PÚBLICOS del OrchestratePlanResult (pick). Los internos
         // (plannedCostUsd, feeUsdc, billingKeyRow, discoveredAgents, etc.) NO se
         // serializan al cliente. Sin débito → sin header x-a2a-remaining-budget.
@@ -243,7 +258,7 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           steps: plan.steps,
           costPerStep: plan.costPerStep,
           totalCostUsdc: plan.totalCostUsdc,
-          protocolFeeUsdc: plan.protocolFeeUsdc,
+          protocolFeeUsdc,
           feeRatePercent,
           maxQuotedCostUsdc: plan.maxQuotedCostUsdc,
           reasoning: plan.reasoning,

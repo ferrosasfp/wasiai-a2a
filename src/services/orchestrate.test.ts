@@ -1930,13 +1930,18 @@ describe('orchestrateService', () => {
     expect(plan.steps.length).toBeGreaterThan(0);
     expect(plan.costPerStep.length).toBe(plan.steps.length);
     expect(plan.maxQuotedCostUsdc).toBeGreaterThan(0);
-    // WKH-132: fee residual = maxQuoted − total (cost-based), NO budget * rate.
-    // summarizer-v1 (0.5) → maxQuoted 0.505 − total 0.5 = 0.005.
+    // WKH-132 (BLQ-MED-1): fee real cost-based = totalCostUsdc * rate, NO residual.
+    // summarizer-v1 (0.5) precio real → fee 0.5 * 0.01 = 0.005; maxQuoted 0.505 es el
+    // techo (== total + fee acá porque el precio se resolvió, sin placeholder).
     expect(plan.protocolFeeUsdc).toBeCloseTo(
-      plan.maxQuotedCostUsdc - plan.totalCostUsdc,
+      plan.totalCostUsdc * getProtocolFeeRate(),
       6,
     );
     expect(plan.protocolFeeUsdc).toBeCloseTo(0.005, 6);
+    // Invariante del quote: techo ≥ total + fee.
+    expect(plan.maxQuotedCostUsdc).toBeGreaterThanOrEqual(
+      plan.totalCostUsdc + plan.protocolFeeUsdc - 1e-9,
+    );
     expect(plan.consideredAgents.length).toBeGreaterThan(0);
     // CD-1/AC-13: plan NUNCA debita ni ejecuta compose.
     expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
@@ -2008,10 +2013,11 @@ describe('orchestrateService', () => {
 
   // ─── WKH-132 ─ Fee cost-based (proporcional al costo REAL del pipeline) ─────
   //
-  // AC-1/AC-2/AC-9: el protocolFeeUsdc del plan 'ready' es el RESIDUAL del quote
-  // sobre el costo real (maxQuotedCostUsdc − totalCostUsdc), independiente del
-  // budget declarado. getAgent se mockea POR SLUG (CD-13) para que cada step
-  // resuelva su precio real; _resetAgentPriceCache ya corre en beforeEach (CD-14).
+  // AC-1/AC-2/AC-9 (BLQ-MED-1 fix): el protocolFeeUsdc del plan 'ready' es el fee
+  // REAL cost-based = round(totalCostUsdc × getProtocolFeeRate()), independiente del
+  // budget declarado y del techo (maxQuotedCostUsdc). Reconcilia con feeRatePercent.
+  // getAgent se mockea POR SLUG (CD-13) para que cada step resuelva su precio real;
+  // _resetAgentPriceCache ya corre en beforeEach (CD-14).
 
   /** Agente resoluble por slug con un precio arbitrario (sin non-null — CD-15). */
   function priceAgent(slug: string, priceUsdc: number): Agent {
@@ -2055,7 +2061,7 @@ describe('orchestrateService', () => {
     );
   }
 
-  // AC-1: plan ready → protocolFeeUsdc = residual del quote sobre el costo REAL.
+  // AC-1: plan ready → protocolFeeUsdc = fee cost-based sobre el costo REAL.
   it('AC-1: plan ready → protocolFeeUsdc derives from real pipeline cost', async () => {
     // Pipeline de 3 steps totalizando 0.061.
     setPipeline([
@@ -2071,30 +2077,40 @@ describe('orchestrateService', () => {
 
     expect(plan.planStatus).toBe('ready');
     expect(plan.totalCostUsdc).toBeCloseTo(0.061, 6);
-    // fee == residual (maxQuoted − total), NUNCA budget * rate.
-    const residual = Number(
-      Math.max(0, plan.maxQuotedCostUsdc - plan.totalCostUsdc).toFixed(6),
-    );
-    expect(plan.protocolFeeUsdc).toBeCloseTo(residual, 6);
+    // fee == round(totalCostUsdc × rate), NUNCA budget * rate ni el residual del techo.
+    const rate = getProtocolFeeRate();
+    const expectedFee = Number((plan.totalCostUsdc * rate).toFixed(6));
+    expect(plan.protocolFeeUsdc).toBe(expectedFee);
     expect(plan.protocolFeeUsdc).toBeCloseTo(0.00061, 6);
     // El código viejo (budget * rate = 1.0 * 0.01 = 0.01) quedaría muy por encima.
     expect(plan.protocolFeeUsdc).not.toBeCloseTo(1.0 * 0.01, 4);
+    // Techo ≥ total + fee (acá == porque todos los precios se resolvieron).
+    expect(plan.maxQuotedCostUsdc).toBeGreaterThanOrEqual(
+      plan.totalCostUsdc + plan.protocolFeeUsdc - 1e-9,
+    );
   });
 
-  // AC-2: maxQuoted == total + fee por construcción (varios pipelines).
-  it('AC-2: maxQuoted == total + fee across pipelines (incl. placeholder)', async () => {
-    // Caso A: 1 step 0.02.
+  // AC-2 (BLQ-MED-1): invariante del quote maxQuoted ≥ total + fee (ya NO ==,
+  // porque el techo puede exceder por PLACEHOLDER_FEE_USD en steps sin precio).
+  // En todos los casos el fee == round(total × rate) y reconcilia con feeRatePercent.
+  it('AC-2: maxQuoted ≥ total + fee across pipelines (incl. placeholder)', async () => {
+    const rate = getProtocolFeeRate();
+
+    // Caso A: 1 step 0.02 (precio real → techo == total + fee).
     setPipeline([priceAgent('a1', 0.02)]);
     const pA = await orchestrateService.planOrchestration(
       { goal: 'g', budget: 1.0 },
       'ac2-a',
     );
     expect(pA.planStatus).toBe('ready');
-    expect(
-      Math.abs(pA.maxQuotedCostUsdc - (pA.totalCostUsdc + pA.protocolFeeUsdc)),
-    ).toBeLessThanOrEqual(1e-6);
+    expect(pA.protocolFeeUsdc).toBe(
+      Number((pA.totalCostUsdc * rate).toFixed(6)),
+    );
+    expect(pA.maxQuotedCostUsdc).toBeGreaterThanOrEqual(
+      pA.totalCostUsdc + pA.protocolFeeUsdc - 1e-9,
+    );
 
-    // Caso B: 3 steps 0.061.
+    // Caso B: 3 steps 0.061 (precios reales → techo == total + fee).
     setPipeline([
       priceAgent('b1', 0.02),
       priceAgent('b2', 0.02),
@@ -2105,11 +2121,17 @@ describe('orchestrateService', () => {
       'ac2-b',
     );
     expect(pB.planStatus).toBe('ready');
-    expect(
-      Math.abs(pB.maxQuotedCostUsdc - (pB.totalCostUsdc + pB.protocolFeeUsdc)),
-    ).toBeLessThanOrEqual(1e-6);
+    expect(pB.protocolFeeUsdc).toBe(
+      Number((pB.totalCostUsdc * rate).toFixed(6)),
+    );
+    expect(pB.maxQuotedCostUsdc).toBeGreaterThanOrEqual(
+      pB.totalCostUsdc + pB.protocolFeeUsdc - 1e-9,
+    );
 
-    // Caso C: step precio 0 → placeholder en el quote, total 0. Invariante igual.
+    // Caso C (MNR-1): step precio 0 → PLACEHOLDER_FEE_USD headroom en el techo,
+    // total 0 ⇒ fee cost-based 0. El techo EXCEDE estrictamente total + fee: es
+    // justo el caso que el residual inflaba (~1.01) y donde el invariante pasa de
+    // == a ≥. protocolFeeUsdc == round(0 × rate) == 0, reconcilia con feeRatePercent.
     setPipeline([priceAgent('c1', 0)]);
     const pC = await orchestrateService.planOrchestration(
       { goal: 'g', budget: 5.0 },
@@ -2117,9 +2139,50 @@ describe('orchestrateService', () => {
     );
     expect(pC.planStatus).toBe('ready');
     expect(pC.totalCostUsdc).toBe(0);
-    expect(
-      Math.abs(pC.maxQuotedCostUsdc - (pC.totalCostUsdc + pC.protocolFeeUsdc)),
-    ).toBeLessThanOrEqual(1e-6);
+    expect(pC.protocolFeeUsdc).toBe(0);
+    // Techo con placeholder headroom > total + fee (0) → ≥ estricto.
+    expect(pC.maxQuotedCostUsdc).toBeGreaterThan(
+      pC.totalCostUsdc + pC.protocolFeeUsdc,
+    );
+    expect(pC.maxQuotedCostUsdc).toBeGreaterThanOrEqual(
+      pC.totalCostUsdc + pC.protocolFeeUsdc,
+    );
+  });
+
+  // MNR-1 (BLQ-MED-1 real-calc): pipeline MIXTO — un step con precio real (0.04) y
+  // un step precio 0/placeholder. Ejercita el cálculo REAL (sin mock del service):
+  // protocolFeeUsdc == round(totalCostUsdc × rate), reconcilia con feeRatePercent
+  // (== total × feeRatePercent/100), y maxQuotedCostUsdc ≥ total + fee (el techo
+  // suma el placeholder del step sin precio).
+  it('MNR-1: mixed real+placeholder pipeline → fee cost-based, techo ≥ total+fee', async () => {
+    setPipeline([priceAgent('m1', 0.04), priceAgent('m2', 0)]);
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'mixed', budget: 5.0 },
+      'mnr-1',
+    );
+
+    expect(plan.planStatus).toBe('ready');
+    // total = 0.04 + 0 = 0.04 (el step precio 0 no aporta costo real).
+    expect(plan.totalCostUsdc).toBeCloseTo(0.04, 6);
+
+    const rate = getProtocolFeeRate();
+    // Fee real cost-based (NO el residual del techo, que incluye el placeholder).
+    expect(plan.protocolFeeUsdc).toBe(
+      Number((plan.totalCostUsdc * rate).toFixed(6)),
+    );
+    // Reconcilia con feeRatePercent (= rate*100): fee == total × feeRatePercent/100.
+    const feeRatePercent = Number((rate * 100).toFixed(6));
+    expect(plan.protocolFeeUsdc).toBeCloseTo(
+      plan.totalCostUsdc * (feeRatePercent / 100),
+      6,
+    );
+    // Techo INCLUYE el placeholder del step sin precio → excede estrictamente total+fee.
+    expect(plan.maxQuotedCostUsdc).toBeGreaterThan(
+      plan.totalCostUsdc + plan.protocolFeeUsdc,
+    );
+    // Reserva interna de maxBudget == fee cost-based (no el techo inflado).
+    expect(plan.feeUsdc).toBe(plan.protocolFeeUsdc);
   });
 
   // AC-9 (TEST CLAVE): mismo pipeline, budget 1.0 vs 5.0 → mismo protocolFeeUsdc.
@@ -2150,16 +2213,16 @@ describe('orchestrateService', () => {
   });
 
   // BLQ-BAJO-1 (regresión de disponibilidad): la reserva INTERNA de maxBudget
-  // (plan.feeUsdc) DEBE ser cost-based (totalCostUsdc * feeRate), NO el residual
-  // del quote. Con un agente priceUsdc=0 el residual se infla a ~1.01 (placeholder
-  // PLACEHOLDER_FEE_USD) mientras el costo real es 0 → si feeUsdc == residual,
-  // maxBudget = budget − 1.01 puede ser NEGATIVO → compose "Budget exceeded" y una
-  // orquestación atómica que antes funcionaba falla. El fix desacopla la reserva
-  // (feeUsdc, cost-based, == /execute routes/orchestrate.ts:355) del valor REPORTADO
-  // (protocolFeeUsdc, residual, CD-8/CD-9). Nota: compose está mockeado en esta
+  // (plan.feeUsdc) DEBE ser cost-based (totalCostUsdc * feeRate), NO el techo del
+  // quote. Con un agente priceUsdc=0 el TECHO (maxQuotedCostUsdc) se infla a ~1.01
+  // (placeholder PLACEHOLDER_FEE_USD) mientras el costo real es 0 → si la reserva
+  // usara el techo, maxBudget = budget − 1.01 sería NEGATIVO → compose "Budget
+  // exceeded" y una orquestación atómica que antes funcionaba falla. Con el fix
+  // BLQ-MED-1 tanto la reserva (feeUsdc) como el fee REPORTADO (protocolFeeUsdc) son
+  // cost-based (0 acá), desacoplados del techo. Nota: compose está mockeado en esta
   // suite, por lo que se asertan directamente los campos del plan que alimentan
-  // maxBudget — la causa raíz (feeUsdc == residual) se pinnea sin des-mockear compose.
-  it('BLQ-BAJO-1: free agent (price 0) → feeUsdc reserve is cost-based (0), NOT residual', async () => {
+  // maxBudget. maxQuotedCostUsdc conserva el placeholder headroom (invariante ≥).
+  it('BLQ-BAJO-1: free agent (price 0) → feeUsdc + protocolFeeUsdc cost-based (0), techo con headroom', async () => {
     setPipeline([priceAgent('free1', 0)]);
 
     const plan = await orchestrateService.planOrchestration(
@@ -2172,11 +2235,15 @@ describe('orchestrateService', () => {
     // Reserva INTERNA cost-based: totalCostUsdc (0) * feeRate = 0. Con feeUsdc == 0
     // maxBudget = budget − 0 = 1.0 → compose OK (elimina la asimetría con /execute).
     expect(plan.feeUsdc).toBe(0);
-    // El valor REPORTADO sigue siendo el residual (~1.01: placeholder * (1+rate)),
-    // inmutable (CD-8, caller-favorable). El desacople queda pinneado.
-    expect(plan.protocolFeeUsdc).toBeCloseTo(1.01, 6);
-    // Regresión: si feeUsdc quedara igual al residual, maxBudget = 1.0 − 1.01 < 0.
-    expect(plan.feeUsdc).not.toBeCloseTo(plan.protocolFeeUsdc, 4);
+    // Fee REPORTADO cost-based (0), NO el techo inflado. Reconcilia con feeRatePercent.
+    expect(plan.protocolFeeUsdc).toBe(0);
+    // El TECHO conserva el placeholder headroom (~1.01) → invariante ≥ estricto.
+    expect(plan.maxQuotedCostUsdc).toBeCloseTo(1.01, 6);
+    expect(plan.maxQuotedCostUsdc).toBeGreaterThan(
+      plan.totalCostUsdc + plan.protocolFeeUsdc,
+    );
+    // Regresión: la reserva NO debe seguir al techo inflado.
+    expect(plan.feeUsdc).not.toBeCloseTo(plan.maxQuotedCostUsdc, 4);
   });
 
   // T-PLAN-3 (AC-6): no-funds → planStatus 'insufficient_funds' + track disparado.
