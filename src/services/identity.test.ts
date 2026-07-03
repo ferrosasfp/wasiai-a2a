@@ -631,5 +631,24 @@ describe('identityService', () => {
       );
       expect(res).toBeNull();
     });
+
+    // AR MNR-1: token_id no-numérico (binding corrupto) → BigInt(...) lanzaría;
+    // el guard hace skip → null SIN throw (fail-safe CD-9).
+    it('AR-MNR1: non-numeric token_id → null without throw', async () => {
+      setupResolveMock([
+        {
+          erc8004_identity: {
+            token_id: 'not-a-number',
+            chain_id: 84532,
+            agent_slug: 'weather-agent',
+          },
+        },
+      ]);
+      const res = await identityService.resolveErc8004AgentId(
+        'weather-agent',
+        84532,
+      );
+      expect(res).toBeNull();
+    });
   });
 });

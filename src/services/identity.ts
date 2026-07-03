@@ -419,7 +419,15 @@ export const identityService = {
       if (!b.agent_slug) continue; // binding v1 sin ancla → skip (CD-9)
       if (normalizeSlug(b.agent_slug) !== nSlug) continue;
       if (b.chain_id !== chainId) continue;
-      matches.push(BigInt(b.token_id)); // token_id: string decimal (anti-precision-loss)
+      // AR MNR-1: `BigInt(...)` lanza (SyntaxError) ante un token_id no-numérico
+      // (binding corrupto). Fail-safe CD-9: skip ese binding, NUNCA throw.
+      let tokenId: bigint;
+      try {
+        tokenId = BigInt(b.token_id); // token_id: string decimal (anti-precision-loss)
+      } catch {
+        continue;
+      }
+      matches.push(tokenId);
     }
     // Exactamente 1 → escribir. 0 o >1 → null (fail-safe, CD-9).
     if (matches.length === 1) {

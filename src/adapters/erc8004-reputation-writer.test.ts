@@ -28,7 +28,7 @@ vi.mock('viem', async (importOriginal) => {
   };
 });
 
-import { zeroHash } from 'viem';
+import { WaitForTransactionReceiptTimeoutError, zeroHash } from 'viem';
 import {
   _resetErc8004ReputationWriter,
   erc8004ReputationWriter,
@@ -168,6 +168,67 @@ describe('erc8004ReputationWriter.giveFeedback', () => {
 
     expect(res).toEqual({ ok: false, reason: 'CHAIN_MISMATCH' });
     expect(mockWriteContract).not.toHaveBeenCalled();
+  });
+
+  // T-REVERTED (CR-MNR): receipt minado pero fallido → REVERTED (no throw).
+  it('T-REVERTED: waitForTransactionReceipt status reverted → REVERTED', async () => {
+    setTestnetConfigured();
+    mockGetChainId.mockResolvedValue(84532);
+    mockWriteContract.mockResolvedValue('0xabc123');
+    mockWaitForReceipt.mockResolvedValue({ status: 'reverted' });
+
+    const res = await erc8004ReputationWriter.giveFeedback({
+      agentId: 7n,
+      value: 100n,
+      valueDecimals: 0,
+      tag1: 'wasiai',
+      tag2: 'compose_step',
+    });
+
+    expect(res).toEqual({ ok: false, reason: 'REVERTED' });
+    expect(mockWriteContract).toHaveBeenCalledTimes(1);
+  });
+
+  // T-RECEIPT-TIMEOUT (CR-MNR): timeout del receipt THROWS en viem → RECEIPT_TIMEOUT.
+  it('T-RECEIPT-TIMEOUT: waitForTransactionReceipt timeout error → RECEIPT_TIMEOUT', async () => {
+    setTestnetConfigured();
+    mockGetChainId.mockResolvedValue(84532);
+    mockWriteContract.mockResolvedValue('0xabc123');
+    mockWaitForReceipt.mockRejectedValue(
+      new WaitForTransactionReceiptTimeoutError({ hash: '0xabc123' }),
+    );
+
+    const res = await erc8004ReputationWriter.giveFeedback({
+      agentId: 7n,
+      value: 100n,
+      valueDecimals: 0,
+      tag1: 'wasiai',
+      tag2: 'compose_step',
+    });
+
+    expect(res).toEqual({ ok: false, reason: 'RECEIPT_TIMEOUT' });
+    expect(mockWriteContract).toHaveBeenCalledTimes(1);
+  });
+
+  // T-RPC-UNAVAILABLE (CR-MNR): writeContract rechaza con error genérico de
+  // transporte (no ContractFunctionExecutionError) → RPC_UNAVAILABLE vía
+  // classifyWriteError; el receipt NUNCA se espera.
+  it('T-RPC-UNAVAILABLE: writeContract transport error → RPC_UNAVAILABLE, no receipt wait', async () => {
+    setTestnetConfigured();
+    mockGetChainId.mockResolvedValue(84532);
+    mockWriteContract.mockRejectedValue(new Error('socket hang up'));
+
+    const res = await erc8004ReputationWriter.giveFeedback({
+      agentId: 7n,
+      value: 100n,
+      valueDecimals: 0,
+      tag1: 'wasiai',
+      tag2: 'compose_step',
+    });
+
+    expect(res).toEqual({ ok: false, reason: 'RPC_UNAVAILABLE' });
+    expect(mockWriteContract).toHaveBeenCalledTimes(1);
+    expect(mockWaitForReceipt).not.toHaveBeenCalled();
   });
 
   it('registry not configured → REGISTRY_NOT_CONFIGURED, no RPC', async () => {

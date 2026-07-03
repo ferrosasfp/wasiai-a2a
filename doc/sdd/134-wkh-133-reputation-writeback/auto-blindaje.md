@@ -19,3 +19,13 @@ Registro de errores cometidos durante F3 y su corrección, para blindar HUs futu
 - **Causa raíz**: la API distingue timeout de espera (throw) vs revert on-chain (receipt.status='reverted').
 - **Fix**: `try { receipt = await waitForTransactionReceipt(...) } catch (err) { if (err instanceof WaitForTransactionReceiptTimeoutError) return RECEIPT_TIMEOUT; return classifyWriteError(err); }` y `if (receipt.status !== 'success') return REVERTED`. Verificado en `node_modules/viem/_types/actions/public/waitForTransactionReceipt.d.ts` (param `timeout?: number`, receipt `status: 'success' | 'reverted'`).
 - **Aplicar en**: todo await de `waitForTransactionReceipt`: envolver en try/catch y separar timeout (throw) de revert (status).
+
+### [2026-07-03] Fix-pack MENORES — AR MNR-1 `BigInt(token_id)` puede lanzar (RESUELTO)
+- **Error potencial**: `resolveErc8004AgentId` (identity.ts) hacía `BigInt(b.token_id)` sin guard. `token_id` es un `string` (tipo `Erc8004IdentityBinding.token_id`); un binding corrupto con valor no-numérico haría que `BigInt(...)` lance `SyntaxError`, violando el contrato "ante error → null" (fail-safe CD-9).
+- **Fix**: `try { tokenId = BigInt(b.token_id) } catch { continue }` — el binding corrupto se saltea, la función retorna `null` sin throw. Test: `AR-MNR1: non-numeric token_id → null without throw` (identity.test.ts).
+- **Aplicar en**: cualquier `BigInt(x)` sobre valor proveniente de DB/JSON no validado — siempre envolver en try/catch cuando el contrato exige no-throw.
+
+### [2026-07-03] FOLLOW-UP BACKLOG — AR MNR-2 (NO implementado en este fix-pack)
+- **Hallazgo AR MNR-2**: mover el check de RPC/signer al gate ANTES de reclamar el evento (claim), para no consumir el claim si el signer/RPC no está disponible.
+- **Decisión**: NO se implementa acá. Reordenar el ordering claim/tx/gate toca el money-path y solo aporta valor para una feature futura (sweeper/reintento de eventos reclamados). Fuera del scope de este fix-pack (hardening + tests, sin cambios de lógica money-path).
+- **Estado**: FOLLOW-UP de backlog. Retomar cuando exista el sweeper que re-procese eventos reclamados-sin-tx; ahí el reorder evita "quemar" el claim de un evento reintentar-able.
