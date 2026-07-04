@@ -42,8 +42,8 @@ vi.mock('../lib/supabase.js', () => {
     eq: () => builder,
     order: () => Promise.resolve({ data: [], error: null }),
     maybeSingle: () => Promise.resolve({ data: null, error: null }),
-    insert: () => {
-      mockInsert();
+    insert: (...args: unknown[]) => {
+      mockInsert(...args);
       return builder;
     },
     single: () => Promise.resolve({ data: {}, error: null }),
@@ -407,5 +407,102 @@ describe('agents routes — publish flow (WKH-134)', () => {
     expect(notArray.statusCode).toBe(422);
 
     expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  // ── WKH-143b ──────────────────────────────────────────────────────
+  const VALID_WALLET = '0x1111111111111111111111111111111111111111';
+
+  // T-143B-01 (AC-1) — real service persists payout_wallet in the insert row.
+  it('T-143B-01: POST payoutWallet valid → persisted in a2a_agents.payout_wallet (AC-1)', async () => {
+    const { publishedAgentService: realSvc } = await vi.importActual<
+      typeof import('../services/agent.js')
+    >('../services/agent.js');
+
+    await realSvc.publish(
+      {
+        name: 'Payout Agent',
+        agentUrl: 'https://api.example/agent',
+        capabilities: ['x'],
+        payoutWallet: VALID_WALLET,
+      },
+      'tenant-A',
+    );
+
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    const row = mockInsert.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(row.payout_wallet).toBe(VALID_WALLET);
+  });
+
+  // T-143B-02 (AC-4) — referrerRef persisted trimmed.
+  it('T-143B-02: POST referrerRef with whitespace → persisted trimmed (AC-4)', async () => {
+    const { publishedAgentService: realSvc } = await vi.importActual<
+      typeof import('../services/agent.js')
+    >('../services/agent.js');
+
+    await realSvc.publish(
+      {
+        name: 'Ref Agent',
+        agentUrl: 'https://api.example/agent',
+        capabilities: ['x'],
+        referrerRef: '  ref-abc  ',
+      },
+      'tenant-A',
+    );
+
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    const row = mockInsert.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(row.referrer_ref).toBe('ref-abc');
+  });
+
+  // T-143B-03 (AC-3/CD-5/DT-3) — invalid payoutWallet → 422, no publish.
+  it('T-143B-03: POST payoutWallet invalid ("", "0xshort", non-string) → 422, publish NOT called (AC-3/DT-3)', async () => {
+    for (const bad of ['', '0xshort', 12345]) {
+      vi.clearAllMocks();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/agents',
+        payload: { ...VALID_BODY, payoutWallet: bad },
+      });
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe('Invalid payoutWallet');
+      expect(res.json().field).toBe('payoutWallet');
+      expect(mockPublish).not.toHaveBeenCalled();
+      expect(mockInsert).not.toHaveBeenCalled();
+    }
+  });
+
+  // T-143B-04 (AC-4/DT-2) — invalid referrerRef → 422, no publish.
+  it('T-143B-04: POST referrerRef invalid (whitespace-only, >200 chars) → 422, publish NOT called (AC-4/DT-2)', async () => {
+    for (const bad of ['   ', 'x'.repeat(201)]) {
+      vi.clearAllMocks();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/agents',
+        payload: { ...VALID_BODY, referrerRef: bad },
+      });
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe('Invalid referrerRef');
+      expect(res.json().field).toBe('referrerRef');
+      expect(mockPublish).not.toHaveBeenCalled();
+      expect(mockInsert).not.toHaveBeenCalled();
+    }
+  });
+
+  // T-143B-05 (AC-8/CD-3 anti-leak) — 201 body never exposes the new columns.
+  it('T-143B-05: 201 body never contains payout_wallet/referrer_ref (anti-leak, AC-8/CD-3)', async () => {
+    mockPublish.mockResolvedValueOnce(RECORD_RESPONSE);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: { ...VALID_BODY, payoutWallet: VALID_WALLET, referrerRef: 'r1' },
+    });
+
+    expect(res.statusCode).toBe(201);
+    const raw = JSON.stringify(res.json());
+    expect(raw).not.toContain('payout_wallet');
+    expect(raw).not.toContain('referrer_ref');
+    expect(raw).not.toContain('payoutWallet');
+    expect(raw).not.toContain('referrerRef');
   });
 });
