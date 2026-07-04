@@ -2,6 +2,60 @@
 
 Registro de errores/tensiones detectados y resueltos durante F3, para blindar HUs futuras.
 
+### [2026-07-04] FIX-PACK — BLQ-MED-1: `SplitConfigError` tumbaba `/orchestrate/execute` ya cobrado (money-path)
+
+- **Error**: `getSplitConfig()` (`split-config.ts`) lanzaba `SplitConfigError` en
+  config inválida (Σ≠10000 / bps fuera de rango), y esa llamada corría FUERA del
+  try/catch de CD-B en `chargeProtocolFee` (`fee-charge.ts`, antes de la línea
+  198). `/compose` envuelve la llamada en try/catch (`compose.ts:611`) → responde
+  200 con `feeChargeError`; pero `/orchestrate/execute` (`orchestrate.ts:1065`) NO
+  tiene try/catch → el throw propagaba a `routes/orchestrate.ts:451-461` y el
+  caller recibía un ERROR en vez de su resultado ya pagado (el pipeline ya había
+  tenido éxito y el caller ya estaba debitado). Asimetría entre call-sites +
+  violación del invariante "un fallo del fee NUNCA rompe la respuesta 200"
+  (`orchestrate.ts:1061-1063`).
+- **Causa raíz**: se replicó el patrón de `ProtocolFeeError` (throw fuera del
+  try/catch, "espejo") sin notar que el ÚNICO call-site que lo blindaba era
+  `/compose` (que envuelve en try/catch). `/orchestrate/execute` nunca envolvió la
+  llamada porque confiaba en el contrato CD-B ("`chargeProtocolFee` JAMÁS rechaza
+  la promise") — contrato que el throw pre-transfer rompía.
+- **Fix**: capturar `SplitConfigError` DENTRO de `chargeProtocolFee`
+  (`fee-charge.ts`, `let splitConfig: SplitConfig; try { getSplitConfig() } catch`)
+  y devolverla como el shape CD-B `{status:'failed', feeUsdc, error}` — igual que
+  todo otro fallo de fee. Ambos call-sites ahora se comportan igual: fee NO
+  cobrado (fail-CLOSED intacto: cero sign/settle, cero cobro parcial), pero la
+  orquestación exitosa se responde 200. Solo cambió el MECANISMO de propagación
+  (return failed en vez de throw), NO la semántica de seguridad. NO se tocó la
+  firma (CD-P1) ni `orchestrate.ts`/`compose.ts`. Test T-SUM actualizado:
+  `.rejects.toBeInstanceOf(SplitConfigError)` → `result.status === 'failed'` +
+  cero sign/settle (simétrico con /compose).
+- **Aplicar en**: cualquier helper best-effort con contrato "nunca rechaza"
+  (CD-B) que tenga MÚLTIPLES call-sites. Un `throw` pre-guarda (validación antes
+  del try/catch interno) rompe el contrato SOLO en los call-sites que no lo
+  envuelven. Regla: si el contrato dice "nunca rechaza", TODA ruta de salida
+  (incl. validaciones tempranas) debe devolver el shape de error, no throw —
+  salvo el 1 caso deliberadamente reservado a HTTP 400 (`ProtocolFeeError`,
+  feeUsdc>budget) que AMBOS call-sites ya blindan explícitamente.
+
+### [2026-07-04] FIX-PACK — Notas seam documentadas (MNR-2, MNR-3, inalcanzables en v1)
+
+- **MNR-2** (`fee-split.test.ts` T-REV): `reverseFeeSplits` revierte SOLO los
+  legs de `a2a_fee_splits` (creator/referral). El leg de PLATAFORMA vive en
+  `a2a_protocol_fees` (PK orchestration_id) y su reverse es responsabilidad del
+  path de reversal de esa tabla (WKH-129), NO de `reverseFeeSplits`. AC-4 completo
+  = `reverseFeeSplits` (splits) + reversal de `a2a_protocol_fees` (plataforma).
+  El comentario del T-REV se ajustó: las `rows` incluyen una fila 'platform' SOLO
+  para probar que el iterador CD-4 revierte TODAS las filas que recibe (no se
+  corta en la primera), NO porque en prod la plataforma se persista en
+  `a2a_fee_splits`.
+- **MNR-3** (`fee-charge.ts`): `extrasFailed` hoy SOLO se evalúa en el path de
+  éxito post-settle. Los returns TEMPRANOS (`already-charged` charged/in-progress
+  + 23505 unique_violation) NO lo consultan. Inalcanzable en v1 (default sin
+  extras; creator/referral se re-rutan a plataforma → skipped, no falla el leg).
+  Al cablear el seam (recipients reales que SÍ pueden fallar), esos returns
+  tempranos DEBEN también degradar a 'failed' cuando `extrasFailed`. Nota TODO
+  dejada en el código junto al cómputo de `extrasFailed`.
+
 ### [2026-07-03] Wave 2 — Tensión "todos los legs en a2a_fee_splits" vs test out-of-scope
 
 - **Error**: El diseño literal del SDD sugería rutear TODOS los legs (incl.

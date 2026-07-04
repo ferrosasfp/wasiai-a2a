@@ -22,7 +22,11 @@
 import { getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import type { SignResult } from '../adapters/types.js';
-import { getSplitConfig } from '../config/split-config.js';
+import {
+  getSplitConfig,
+  type SplitConfig,
+  SplitConfigError,
+} from '../config/split-config.js';
 import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
 import {
@@ -191,11 +195,35 @@ export async function chargeProtocolFee(
     );
   }
 
-  // WKH-136 (CD-1/AC-2): config de splits fail-CLOSED ANTES de cualquier
-  // transfer. Una config corrupta (Σ≠10000 / bps inválido) lanza
-  // `SplitConfigError` (HTTP 400) — NO se propaga al try/catch de CD-B (igual
-  // que `ProtocolFeeError`): rechaza el cobro entero, cero cobro parcial.
-  const splitConfig = getSplitConfig();
+  // WKH-136 (CD-1/AC-2) + BLQ-MED-1: config de splits fail-CLOSED ANTES de
+  // cualquier transfer. Una config corrupta (Σ≠10000 / bps inválido) es
+  // `SplitConfigError`. Semántica: NO se cobra nada (fail-CLOSED — cero cobro
+  // parcial, nunca a la wallet equivocada).
+  //
+  // MECANISMO de propagación (BLQ-MED-1): NO se hace `throw`. Se captura acá y
+  // se devuelve como el shape CD-B `{status:'failed', ...}` — idéntico a los
+  // demás fallos de fee. Rationale: `chargeProtocolFee` corre DESPUÉS de que el
+  // pipeline tuvo éxito y el caller ya fue debitado. `/compose` envuelve la
+  // llamada en try/catch (compose.ts:611) y responde 200 con `feeChargeError`,
+  // pero `/orchestrate/execute` (orchestrate.ts:1065) NO tiene try/catch → un
+  // throw acá propagaba hasta routes/orchestrate.ts:451-461 y el caller recibía
+  // un error EN VEZ de su resultado ya pagado. Devolver `failed` en lugar de
+  // throw hace que AMBOS call-sites se comporten igual: fee no cobrado, pero la
+  // orquestación exitosa se responde 200 (invariante orchestrate.ts:1061-1063).
+  // CD-P1: la firma pública NO cambia.
+  let splitConfig: SplitConfig;
+  try {
+    splitConfig = getSplitConfig();
+  } catch (cfgErr) {
+    if (cfgErr instanceof SplitConfigError) {
+      log.error(
+        { orchestrationId, detail: cfgErr.message },
+        'invalid split config; fee NOT charged (fail-CLOSED)',
+      );
+      return { status: 'failed', feeUsdc, error: cfgErr.message };
+    }
+    throw cfgErr;
+  }
 
   // Paso 1 (CD-2): wallet vacía → skip silencioso. NO tocamos DB.
   const walletAddress = process.env.WASIAI_PROTOCOL_FEE_WALLET;
@@ -237,6 +265,16 @@ export async function chargeProtocolFee(
       if (extra.status === 'failed')
         extrasFailed = extra.error ?? 'split leg failed';
     }
+
+    // MNR-3 (seam v1, inalcanzable hasta cablear creator/referral reales): hoy
+    // `extrasFailed` SOLO se evalúa en el path de éxito (post-settle, línea ~479
+    // → status 'failed' si un leg obligatorio falló). Los returns TEMPRANOS de
+    // abajo (`already-charged` charged/in-progress + 23505 unique_violation) NO
+    // lo consultan. En v1 es inalcanzable: con la config default no hay extras,
+    // y creator/referral se re-rutan a plataforma (skipped, no falla el leg). Al
+    // cablear el seam (recipients reales que SÍ pueden fallar), estos returns
+    // tempranos DEBEN también degradar a 'failed' cuando `extrasFailed`, para no
+    // reportar 'already-charged' con un split adicional roto. TODO al cablear.
 
     // Construye el array de splits: leg de plataforma (a2a_protocol_fees, CD-2:
     // NO reusa esa PK para >1 recipient) + los legs adicionales.

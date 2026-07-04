@@ -103,7 +103,6 @@ vi.mock('../lib/supabase.js', () => {
 });
 
 // ─── Imports (tras mocks) ───────────────────────────────────
-import { SplitConfigError } from '../config/split-config.js';
 import {
   chargeProtocolFee,
   type FeeChargeParams,
@@ -190,19 +189,32 @@ afterEach(() => {
 
 // ─── T-SUM (AC-1/AC-2/CD-1) ─────────────────────────────────
 describe('T-SUM — Σbps validation (fail-CLOSED)', () => {
-  it('rejects Σ ≠ 10000 (5000/3000/1000) → SplitConfigError, cero sign/settle', async () => {
+  // BLQ-MED-1: config inválida ⇒ fail-CLOSED, pero el MECANISMO es
+  // `return {status:'failed'}` (CD-B), NO `throw`. Así ambos call-sites se
+  // comportan igual: /compose (try/catch) y /orchestrate/execute (SIN try/catch)
+  // responden 200 con `feeChargeError` en vez de tumbar una orquestación exitosa
+  // ya cobrada. Semántica de seguridad intacta: cero sign/settle, cero cobro.
+  it('Σ ≠ 10000 (5000/3000/1000) → status failed (no throw), cero sign/settle', async () => {
     process.env.SPLIT_BPS_PLATFORM = '5000';
     process.env.SPLIT_BPS_CREATOR = '3000';
     process.env.SPLIT_BPS_REFERRAL = '1000';
 
-    await expect(
-      chargeProtocolFee({
-        orchestrationId: 'orch-sum',
-        feeBaseUsdc: 1.0,
-        feeRate: 0.01,
-      }),
-    ).rejects.toBeInstanceOf(SplitConfigError);
+    const result = await chargeProtocolFee({
+      orchestrationId: 'orch-sum',
+      feeBaseUsdc: 1.0,
+      feeRate: 0.01,
+    });
 
+    // fail-CLOSED vía return failed (simétrico con /compose): NO rechaza la
+    // promise → /orchestrate/execute NO se rompe.
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('10000');
+      // El total reportado al caller NO cambia (1.0 × 0.01), aunque no se cobre.
+      expect(result.feeUsdc).toBeCloseTo(0.01, 6);
+    }
+
+    // Seguridad: config corrupta NUNCA dispara un transfer.
     expect(mockSign).not.toHaveBeenCalled();
     expect(mockSettle).not.toHaveBeenCalled();
   });
@@ -374,6 +386,17 @@ describe('T-FALLBACK — recipient inválido → re-ruta a platform, skipped', (
 });
 
 // ─── T-REV (AC-4/CD-4) ──────────────────────────────────────
+// MNR-2 (seam v1, inalcanzable hasta cablear creator/referral reales):
+// `reverseFeeSplits` revierte SOLO los legs de `a2a_fee_splits`
+// (creator/referral). El leg de PLATAFORMA NO vive en `a2a_fee_splits` sino en
+// `a2a_protocol_fees` (PK orchestration_id, escrito por chargeProtocolFee), y su
+// reverse es responsabilidad del path de reversal de `a2a_protocol_fees`
+// (WKH-129), NO de esta función. AC-4 completo = reverseFeeSplits (splits) +
+// reversal de a2a_protocol_fees (plataforma) — dos legs de settlement, dos
+// paths de reverse. Las `rows` de abajo INCLUYEN una fila 'platform' a propósito
+// SOLO para probar que el iterador CD-4 revierte TODAS las filas que recibe (no
+// se corta en la primera); no implica que en prod la plataforma se persista en
+// a2a_fee_splits.
 describe('T-REV — reverseFeeSplits itera TODOS los legs charged', () => {
   const rows = (owner: string) => [
     {
