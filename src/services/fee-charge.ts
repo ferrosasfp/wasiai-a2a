@@ -22,8 +22,15 @@
 import { getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import type { SignResult } from '../adapters/types.js';
+import { getSplitConfig } from '../config/split-config.js';
 import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
+import {
+  computeSplits,
+  resolveRecipients,
+  type SplitLeg,
+  settleFeeSplits,
+} from './fee-split.js';
 
 const log = getLogger('fee-charge');
 
@@ -46,15 +53,21 @@ export interface FeeChargeParams {
  * caller hace `switch`/`if` sobre `result.status` para narrowing seguro.
  */
 export type FeeChargeResult =
-  | { status: 'charged'; feeUsdc: number; txHash: string }
+  | { status: 'charged'; feeUsdc: number; txHash: string; splits?: SplitLeg[] }
   | {
       status: 'already-charged';
       feeUsdc: number;
       txHash?: string | undefined;
       inProgress?: boolean | undefined;
+      splits?: SplitLeg[] | undefined;
     }
-  | { status: 'skipped'; feeUsdc: number; reason: 'WALLET_UNSET' }
-  | { status: 'failed'; feeUsdc: number; error: string };
+  | {
+      status: 'skipped';
+      feeUsdc: number;
+      reason: 'WALLET_UNSET';
+      splits?: SplitLeg[] | undefined;
+    }
+  | { status: 'failed'; feeUsdc: number; error: string; splits?: SplitLeg[] };
 
 /**
  * Error de validación (rate > budget u otro caso irrecuperable antes del
@@ -130,7 +143,7 @@ export function getProtocolFeeRate(): number {
  * Rationale: USDC tiene 6 decimals lógicos; 1e12 escala a 18 decimals para
  * el token PYUSD.
  */
-function feeUsdcToWei(feeUsdc: number): string {
+export function feeUsdcToWei(feeUsdc: number): string {
   return String(BigInt(Math.round(feeUsdc * 1e6)) * BigInt(1e12));
 }
 
@@ -165,7 +178,9 @@ export async function chargeProtocolFee(
 ): Promise<FeeChargeResult> {
   const { orchestrationId, feeBaseUsdc, feeRate } = params;
 
-  // Paso 2 parcial: cálculo del fee (siempre retornado en el shape).
+  // Paso 2 parcial: cálculo del fee TOTAL (siempre retornado en el shape). Es la
+  // magnitud que WKH-132/133 reporta al caller; los splits la SUBDIVIDEN, NUNCA
+  // la cambian (CD-5/CD-P4/AC-5).
   const feeUsdc = Number((feeBaseUsdc * feeRate).toFixed(6));
 
   // Safety guard (CD-3): si el fee supera el budget, esto no se cobra; es
@@ -176,6 +191,12 @@ export async function chargeProtocolFee(
     );
   }
 
+  // WKH-136 (CD-1/AC-2): config de splits fail-CLOSED ANTES de cualquier
+  // transfer. Una config corrupta (Σ≠10000 / bps inválido) lanza
+  // `SplitConfigError` (HTTP 400) — NO se propaga al try/catch de CD-B (igual
+  // que `ProtocolFeeError`): rechaza el cobro entero, cero cobro parcial.
+  const splitConfig = getSplitConfig();
+
   // Paso 1 (CD-2): wallet vacía → skip silencioso. NO tocamos DB.
   const walletAddress = process.env.WASIAI_PROTOCOL_FEE_WALLET;
   if (!walletAddress || walletAddress === '') {
@@ -183,9 +204,61 @@ export async function chargeProtocolFee(
     return { status: 'skipped', feeUsdc, reason: 'WALLET_UNSET' };
   }
 
+  // WKH-136 (CD-6): recipients resueltos SOLO server-side. La firma pública de
+  // `chargeProtocolFee` (CD-P1) NO transporta el agente primario, así que en v1
+  // creator/referral se resuelven a ausente → su bps se re-ruta a plataforma
+  // (fila `skipped`, SG-6). Con la config default 10000/0/0 hay UN solo
+  // recipient (plataforma) con amount==feeUsdc ⇒ byte-idéntico a WKH-44/132.
+  const resolution = resolveRecipients(splitConfig, {
+    platformWallet: walletAddress,
+  });
+  const amounts = computeSplits(feeUsdc, resolution.effectiveBps);
+  const platformAmount = amounts.platform;
+  const platformBpsEff = resolution.effectiveBps.platform;
+  const extraRecipients = resolution.recipients
+    .filter((r) => r.role !== 'platform')
+    .map((r) => ({ ...r, amountUsdc: amounts[r.role] }))
+    .filter((r) => r.amountUsdc > 0);
+
   // A partir de acá todo va wrappeado en try/catch (CD-B: jamás rechazar).
   try {
-    // Paso 3: idempotency query.
+    // Legs ADICIONALES (creador/referral) + filas `skipped` → `a2a_fee_splits`
+    // (CD-2, engine idempotente por recipient). En default NO hay extras ni
+    // skipped ⇒ NO se invoca ⇒ cero writes a `a2a_fee_splits` ⇒ byte-idéntico.
+    let extraLegs: SplitLeg[] = [];
+    let extrasFailed: string | undefined;
+    if (extraRecipients.length > 0 || resolution.skipped.length > 0) {
+      const extra = await settleFeeSplits({
+        orchestrationId,
+        recipients: extraRecipients,
+        skipped: resolution.skipped,
+      });
+      extraLegs = extra.legs;
+      if (extra.status === 'failed')
+        extrasFailed = extra.error ?? 'split leg failed';
+    }
+
+    // Construye el array de splits: leg de plataforma (a2a_protocol_fees, CD-2:
+    // NO reusa esa PK para >1 recipient) + los legs adicionales.
+    const buildSplits = (
+      status: SplitLeg['status'],
+      txHash?: string,
+      error?: string,
+    ): SplitLeg[] => {
+      const platformLeg: SplitLeg = {
+        role: 'platform',
+        wallet: walletAddress,
+        ownerRef: 'platform',
+        bps: platformBpsEff,
+        amountUsdc: platformAmount,
+        status,
+      };
+      if (txHash !== undefined) platformLeg.txHash = txHash;
+      if (error !== undefined) platformLeg.error = error;
+      return [platformLeg, ...extraLegs];
+    };
+
+    // Paso 3: idempotency query (leg de plataforma).
     const { data: existing, error: selectErr } = (await supabase
       .from(FEES_TABLE)
       .select('status, tx_hash')
@@ -204,6 +277,11 @@ export async function chargeProtocolFee(
         status: 'failed',
         feeUsdc,
         error: `DB_ERROR: ${selectErr.message ?? 'unknown'}`,
+        splits: buildSplits(
+          'failed',
+          undefined,
+          `DB_ERROR: ${selectErr.message ?? 'unknown'}`,
+        ),
       };
     }
 
@@ -213,24 +291,32 @@ export async function chargeProtocolFee(
           status: 'already-charged',
           feeUsdc,
           txHash: existing.tx_hash ?? undefined,
+          splits: buildSplits('already-charged', existing.tx_hash ?? undefined),
         };
       }
       if (existing.status === 'pending') {
         // Otra request activa — evita race en retries.
-        return { status: 'already-charged', feeUsdc, inProgress: true };
+        return {
+          status: 'already-charged',
+          feeUsdc,
+          inProgress: true,
+          splits: buildSplits('in-progress'),
+        };
       }
       // 'failed' | 'skipped' → permitimos retry (cae al insert de abajo).
       // En 'failed' el insert chocará con unique_violation; lo capturamos
       // igual que el path de race.
     }
 
-    // Paso 4: INSERT pending (ON CONFLICT DO NOTHING via unique_violation).
-    const feeWei = feeUsdcToWei(feeUsdc);
+    // Paso 4: INSERT pending (ON CONFLICT DO NOTHING via unique_violation). El
+    // leg de plataforma transfiere SU share (`platformAmount`); en default ==
+    // feeUsdc (byte-idéntico).
+    const feeWei = feeUsdcToWei(platformAmount);
     const { error: insertErr } = (await supabase.from(FEES_TABLE).insert({
       orchestration_id: orchestrationId,
       budget_usdc: feeBaseUsdc,
       fee_rate: feeRate,
-      fee_usdc: feeUsdc,
+      fee_usdc: platformAmount,
       fee_wallet: walletAddress,
       status: 'pending',
     })) as { error: SupabaseError | null };
@@ -239,7 +325,12 @@ export async function chargeProtocolFee(
       if (insertErr.code === PG_UNIQUE_VIOLATION) {
         // Race condition — otro request insertó primero. Retornamos
         // already-charged inProgress; el otro worker se encargará.
-        return { status: 'already-charged', feeUsdc, inProgress: true };
+        return {
+          status: 'already-charged',
+          feeUsdc,
+          inProgress: true,
+          splits: buildSplits('in-progress'),
+        };
       }
       // Otro error de DB → failed (CD-B, nunca rechazar).
       log.error(
@@ -250,6 +341,11 @@ export async function chargeProtocolFee(
         status: 'failed',
         feeUsdc,
         error: `DB_ERROR: ${insertErr.message ?? 'unknown'}`,
+        splits: buildSplits(
+          'failed',
+          undefined,
+          `DB_ERROR: ${insertErr.message ?? 'unknown'}`,
+        ),
       };
     }
 
@@ -264,7 +360,12 @@ export async function chargeProtocolFee(
       const msg = signErr instanceof Error ? signErr.message : String(signErr);
       log.error({ orchestrationId, detail: msg }, 'sign() failed');
       await markFailed(orchestrationId, msg);
-      return { status: 'failed', feeUsdc, error: msg };
+      return {
+        status: 'failed',
+        feeUsdc,
+        error: msg,
+        splits: buildSplits('failed', undefined, msg),
+      };
     }
 
     const { paymentRequest } = signResult;
@@ -282,7 +383,12 @@ export async function chargeProtocolFee(
           'settle reported failure',
         );
         await markFailed(orchestrationId, errMsg);
-        return { status: 'failed', feeUsdc, error: errMsg };
+        return {
+          status: 'failed',
+          feeUsdc,
+          error: errMsg,
+          splits: buildSplits('failed', undefined, errMsg),
+        };
       }
 
       // TB-01 (audit 2026-06-30): re-verify the fee settle on-chain BEFORE
@@ -311,7 +417,12 @@ export async function chargeProtocolFee(
           'settle re-verification failed',
         );
         await markFailed(orchestrationId, errMsg);
-        return { status: 'failed', feeUsdc, error: errMsg };
+        return {
+          status: 'failed',
+          feeUsdc,
+          error: errMsg,
+          splits: buildSplits('failed', undefined, errMsg),
+        };
       }
 
       // Paso 6: UPDATE charged.
@@ -335,13 +446,34 @@ export async function chargeProtocolFee(
         );
       }
 
-      return { status: 'charged', feeUsdc, txHash };
+      // AC-3: si un leg ADICIONAL obligatorio falló, el agregado NUNCA es
+      // `charged` — la plataforma cobró pero el settlement está incompleto.
+      if (extrasFailed !== undefined) {
+        return {
+          status: 'failed',
+          feeUsdc,
+          error: extrasFailed,
+          splits: buildSplits('charged', txHash),
+        };
+      }
+
+      return {
+        status: 'charged',
+        feeUsdc,
+        txHash,
+        splits: buildSplits('charged', txHash),
+      };
     } catch (settleErr) {
       const msg =
         settleErr instanceof Error ? settleErr.message : String(settleErr);
       log.error({ orchestrationId, detail: msg }, 'settle() threw');
       await markFailed(orchestrationId, msg);
-      return { status: 'failed', feeUsdc, error: msg };
+      return {
+        status: 'failed',
+        feeUsdc,
+        error: msg,
+        splits: buildSplits('failed', undefined, msg),
+      };
     }
   } catch (err) {
     // Captura cualquier excepción sincrónica / async no prevista (ej. el
