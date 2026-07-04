@@ -35,6 +35,17 @@ vi.mock('./registry.js', () => ({
   },
 }));
 
+// WKH-134: discover()/getAgent() now merge self-published agents via a local
+// SELECT (publishedAgentService). Mock it so the SSRF tests don't hit supabase,
+// which would otherwise consume the `fetch` stub and starve the registry-fetch
+// assertions (same rationale as the identity/reputation mocks below).
+vi.mock('./agent.js', () => ({
+  publishedAgentService: {
+    listAsAgents: vi.fn().mockResolvedValue([]),
+    getBySlugAsAgent: vi.fn().mockResolvedValue(null),
+  },
+}));
+
 // WKH-100: discover()/getAgent() now reverse-lookup ERC-8004 identity by the
 // token the agent declares. Mock it so the SSRF tests don't hit supabase.
 vi.mock('./identity.js', () => ({

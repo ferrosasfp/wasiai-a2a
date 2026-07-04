@@ -398,6 +398,7 @@ export class SigningSecretNotSetError extends Error {
  * Operación que detectó el mismatch (PII-safe enum).
  * - `getBalance` / `deactivate`: ownership sobre `a2a_agent_keys` (WKH-53).
  * - `registryUpdate` / `registryDelete`: ownership sobre `registries` (WKH-63).
+ * - `agentPublishUpdate` / `agentPublishDelete`: ownership sobre `a2a_agents` (WKH-134).
  * - `delegationRevoke` / `delegationList`: ownership sobre `a2a_delegations` (WKH-101).
  * - `keySessionRevoke` / `keySessionList`: ownership sobre `a2a_key_sessions` (WKH-121).
  * - `requireSignature`: ownership sobre `a2a_agent_keys`/`a2a_key_sessions` (WKH-123).
@@ -407,6 +408,8 @@ export type OwnershipOp =
   | 'deactivate'
   | 'registryUpdate'
   | 'registryDelete'
+  | 'agentPublishUpdate'
+  | 'agentPublishDelete'
   | 'delegationRevoke'
   | 'delegationList'
   | 'keySessionRevoke'

@@ -102,6 +102,29 @@ export function pyusdWeiToUsd(valueWei: bigint): number {
 }
 
 /**
+ * Parsea un valor crudo (number | string | null | undefined) a un número
+ * finito y no-negativo. Retorna 0 para cualquiera de: null, undefined, NaN,
+ * Infinity, número negativo, string no parseable, string vacío.
+ *
+ * Safe floor de precios (WKH-57): NUNCA infla vía fallback. Es el único
+ * safeguard de clamp de precios; lo reusan `discovery.ts` (registries) y
+ * `services/agent.ts` (self-published, WKH-134) para blindar el read-boundary
+ * contra valores negativos/no-finitos ya persistidos en DB.
+ */
+export function parsePriceSafe(raw: unknown): number {
+  if (raw === null || raw === undefined) return 0;
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) && raw >= 0 ? raw : 0;
+  }
+  if (typeof raw === 'string') {
+    if (raw === '') return 0;
+    const parsed = Number.parseFloat(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  }
+  return 0;
+}
+
+/**
  * Lee `GASLESS_DEFAULT_CAP_USD` del env y retorna el cap global aplicable
  * a POST /gasless/transfer. Sin cache, igual que `getPyusdUsdRate`.
  *

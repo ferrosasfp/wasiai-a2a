@@ -14,6 +14,45 @@ export type Database = {
   };
   public: {
     Tables: {
+      a2a_agents: {
+        Row: {
+          agent_url: string;
+          capabilities: Json;
+          created_at: string;
+          description: string;
+          enabled: boolean;
+          metadata: Json | null;
+          name: string;
+          owner_ref: string;
+          price_usdc: number;
+          slug: string;
+        };
+        Insert: {
+          agent_url: string;
+          capabilities: Json;
+          created_at?: string;
+          description?: string;
+          enabled?: boolean;
+          metadata?: Json | null;
+          name: string;
+          owner_ref: string;
+          price_usdc?: number;
+          slug: string;
+        };
+        Update: {
+          agent_url?: string;
+          capabilities?: Json;
+          created_at?: string;
+          description?: string;
+          enabled?: boolean;
+          metadata?: Json | null;
+          name?: string;
+          owner_ref?: string;
+          price_usdc?: number;
+          slug?: string;
+        };
+        Relationships: [];
+      };
       a2a_agent_keys: {
         Row: {
           agentkit_wallet: Json | null;

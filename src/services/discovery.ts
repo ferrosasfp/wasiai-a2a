@@ -5,6 +5,7 @@
 import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
 import { getLogger } from '../lib/logger.js';
+import { parsePriceSafe } from '../lib/price.js';
 import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 import {
   SSRFViolationError,
@@ -18,6 +19,8 @@ import type {
   DiscoveryResult,
   RegistryConfig,
 } from '../types/index.js';
+import { SELF_PUBLISHED_REGISTRY_NAME } from '../types/index.js';
+import { publishedAgentService } from './agent.js';
 import { identityService } from './identity.js';
 import { registryService } from './registry.js';
 import { reputationService } from './reputation.js';
@@ -230,7 +233,25 @@ export const discoveryService = {
         ) as RegistryConfig[])
       : await registryService.getEnabled();
 
-    if (registries.length === 0) {
+    // WKH-134: self-published agents merged con un SELECT local (sin fetch
+    // outbound, sin self-fetch). Aditivo/degradable (CD-9): si el SELECT falla,
+    // discover() sigue devolviendo los agentes de registries. Se incluyen solo
+    // si no se filtró a otro registry (respeta `query.registry`).
+    let localAgents: Agent[] = [];
+    if (!query.registry || query.registry === SELF_PUBLISHED_REGISTRY_NAME) {
+      try {
+        localAgents = await publishedAgentService.listAsAgents();
+      } catch (err) {
+        log.error(
+          { detail: err instanceof Error ? err.message : 'unknown' },
+          'self-published agents merge failed',
+        );
+        localAgents = [];
+      }
+    }
+
+    // NO early-return si solo hay locales (sin registries habilitados).
+    if (registries.length === 0 && localAgents.length === 0) {
       return { agents: [], total: 0, registries: [] };
     }
 
@@ -261,8 +282,9 @@ export const discoveryService = {
       ),
     );
 
-    // Merge results
-    let allAgents = results.flat();
+    // Merge results — los locales entran ANTES del pipeline común
+    // (status/verified/caps/price/rep/sort/limit) → mismo shape (CD-6).
+    let allAgents = [...results.flat(), ...localAgents];
 
     // Blocklist: exclude known-broken or mock agents (env-configurable)
     const blocklist = (process.env.AGENT_BLOCKLIST ?? '')
@@ -339,10 +361,15 @@ export const discoveryService = {
     // identity. No RPC at serve-time — only the JSONB reverse-lookup (W2).
     const enriched = await this.attachIdentities(limited);
 
+    const contributingRegistries = registries.map((r) => r.name);
+    if (localAgents.length > 0) {
+      contributingRegistries.push(SELF_PUBLISHED_REGISTRY_NAME);
+    }
+
     return {
       agents: enriched,
       total: allAgents.length,
-      registries: registries.map((r) => r.name),
+      registries: contributingRegistries,
     };
   },
 
@@ -524,6 +551,18 @@ export const discoveryService = {
    * Get a specific agent by slug
    */
   async getAgent(slug: string, registryId?: string): Promise<Agent | null> {
+    // WKH-134: local-first — resolver un agente self-published sin fetch
+    // outbound. Degradable (CD-9): si el SELECT falla, seguimos con el fetch
+    // de registries. Se intenta solo si no se filtró a otro registry.
+    if (!registryId || registryId === SELF_PUBLISHED_REGISTRY_NAME) {
+      try {
+        const local = await publishedAgentService.getBySlugAsAgent(slug);
+        if (local) return local;
+      } catch {
+        /* degradación: SELECT local falló → seguir con registries */
+      }
+    }
+
     const registries = registryId
       ? ([await registryService.get(registryId)].filter(
           Boolean,
@@ -625,25 +664,13 @@ function toArray(value: unknown): string[] {
 const V2_PRICE_FALLBACK_FIELD = 'price_per_call' as const;
 
 /**
- * Parses a raw value (number | string | null | undefined) into a finite,
- * non-negative number. Returns 0 for any of: null, undefined, NaN, Infinity,
- * negative number, non-parseable string, empty string.
- *
- * Pattern: mirrors `getProtocolFeeRate` in fee-charge.ts (Number.parseFloat
- * + Number.isFinite). CD-7 safe floor applies — never inflate via fallback.
+ * `parsePriceSafe` — safe floor de precios (WKH-57). Definición canónica en
+ * `../lib/price.js` (helper puro, sin deps de servicios) para poder reusarla
+ * en `services/agent.ts` sin ciclo de imports. Se re-exporta acá para no
+ * romper los imports existentes (`discovery.test.ts`) ni el patrón de
+ * registries. CD-7 safe floor: nunca infla vía fallback.
  */
-export function parsePriceSafe(raw: unknown): number {
-  if (raw === null || raw === undefined) return 0;
-  if (typeof raw === 'number') {
-    return Number.isFinite(raw) && raw >= 0 ? raw : 0;
-  }
-  if (typeof raw === 'string') {
-    if (raw === '') return 0;
-    const parsed = Number.parseFloat(raw);
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
-  }
-  return 0;
-}
+export { parsePriceSafe };
 
 /**
  * Resolves agent.priceUsdc from a raw response, with v2 schema-drift fallback.

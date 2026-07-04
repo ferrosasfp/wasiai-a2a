@@ -22,6 +22,7 @@ import { registerRateLimit } from './middleware/rate-limit.js';
 import { genReqId, registerRequestIdHook } from './middleware/request-id.js';
 import { registerSecurityHeaders } from './middleware/security-headers.js';
 import agentCardRoutes from './routes/agent-card.js';
+import agentsRoutes from './routes/agents.js';
 import authRoutes from './routes/auth.js';
 import capabilitiesRoutes from './routes/capabilities.js';
 import composeRoutes from './routes/compose.js';
@@ -145,6 +146,10 @@ await fastify.register(capabilitiesRoutes, { prefix: '/capabilities' });
 await fastify.register(composeRoutes, { prefix: '/compose' });
 await fastify.register(orchestrateRoutes, { prefix: '/orchestrate' });
 await fastify.register(agentCardRoutes, { prefix: '/agents' });
+// WKH-134: self-serve agent publishing (POST/PATCH/DELETE/GET /agents). Mismo
+// prefijo que agentCardRoutes (Fastify soporta varios plugins por prefijo);
+// no colisiona con GET /agents/:slug/agent-card (método+path distintos).
+await fastify.register(agentsRoutes, { prefix: '/agents' });
 await fastify.register(wellKnownRoutes, { prefix: '/.well-known' });
 await fastify.register(tasksRoutes, { prefix: '/tasks' });
 await fastify.register(dashboardRoutes, { prefix: '/dashboard' });

@@ -97,6 +97,58 @@ export interface AgentPaymentSpec {
   asset?: string | undefined; // e.g. 'USDC' (opcional, pass-through)
 }
 
+// ============================================================
+// SELF-PUBLISHED AGENT TYPES (WKH-134)
+// ============================================================
+
+/**
+ * Registry id/name sintético para agentes self-published (WKH-134). NO existe
+ * como fila en `registries` — se usa como ancla en `Agent.registry`/
+ * `registry_id` para que el pipeline de discovery los trate uniformemente y el
+ * route `agent-card.ts` construya un `RegistryConfig` sintético (DT-5).
+ */
+export const SELF_PUBLISHED_REGISTRY_ID = 'self-published';
+export const SELF_PUBLISHED_REGISTRY_NAME = 'self-published';
+
+/**
+ * Payload de `POST /agents` (WKH-134). El gateway ensambla el Agent Card A2A
+ * de salida — NO se pide un Agent Card completo de entrada. El `slug` se deriva
+ * server-side del `name` (CD-5); NUNCA se acepta del body.
+ */
+export interface PublishAgentInput {
+  /** Nombre humano — deriva el slug server-side. */
+  name: string;
+  /** URL real del agente (invokeUrl). SSRF-validada antes de persistir. */
+  agentUrl: string;
+  /** Capabilities → skills[]. Al menos 1. */
+  capabilities: string[];
+  /** Descripción opcional (default ''). */
+  description?: string;
+  /** Precio por invocación en USDC (default 0). */
+  priceUsdc?: number;
+  /** WKH-106: JSON-Schema de entrada (opt-in discoverable). */
+  inputSchema?: Record<string, unknown>;
+  /** WKH-106: JSON-Schema de salida (opt-in discoverable). */
+  outputSchema?: Record<string, unknown>;
+  /** Opt-in para exponer input/outputSchema en el AgentCard. */
+  discoverable?: boolean;
+}
+
+/**
+ * Subconjunto mutable de `PublishAgentInput` para `PATCH /agents/:slug`
+ * (WKH-134). Todos los campos opcionales; el `slug` (PK) NO cambia.
+ */
+export interface UpdateAgentInput {
+  name?: string;
+  agentUrl?: string;
+  capabilities?: string[];
+  description?: string;
+  priceUsdc?: number;
+  inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  discoverable?: boolean;
+}
+
 export interface AgentFieldMapping {
   id?: string;
   name?: string;
