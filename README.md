@@ -558,6 +558,24 @@ protocolFeeUsdc`; it can be **greater** than cost + fee when an agent has not ye
 quoted a price (placeholder headroom keeps the pre-authorized cap safe). See
 [`doc/INTEGRATION.md`](doc/INTEGRATION.md) for the field reference.
 
+### Service payment vs protocol fee (two separate flows)
+
+Every `/compose` or `/orchestrate` with N agents moves money on two independent tracks:
+
+1. **Service payment.** Each of the N agents charges its own price (`stepPrice_i`) for the work it does. This is not a percentage: it is the full price that agent set, and all N working agents get paid.
+2. **Protocol fee (1%).** On top of the service payments, WasiAI charges 1% on the total, once. That 1% is WasiAI's revenue, and it is the only thing that gets split.
+
+The split divides the **1% fee**, not the total payment.
+
+### Fee split (platform / creator / referral)
+
+The 1% fee is subdivided into three legs via env (basis points, must sum to `10000`). Current production config: platform 80% (`8000`), creator 15% (`1500`), referral 5% (`500`). Default is `10000/0/0` (all to platform).
+
+- The **creator** and **referral** legs resolve only on the pipeline's primary agent (`steps[0]`), not on all N agents. The other agents still collect their service price (flow 1 above), but they do not receive a creator leg of the fee.
+- **Fail-safe:** if the primary agent has no `payout_wallet` declared, its creator leg re-routes to platform (same for an unresolved referral). Today on testnet, where almost no agent has declared a wallet, the fee still routes ~100% to platform. Setting the split turns the mechanism on and signals the model; it does not move money to creators until there is adoption (agents that declared a wallet).
+
+Full model, worked example, and env reference: [`doc/architecture/FEE-MODEL.md`](doc/architecture/FEE-MODEL.md).
+
 ---
 
 ## Adapter Pattern

@@ -240,9 +240,19 @@ Agente B (input adaptado)
 
 | Revenue Stream | Cómo funciona |
 |----------------|---------------|
-| 1% protocol fee | Por cada compose/orchestrate |
+| 1% protocol fee | Fee de protocolo del 1% sobre el costo real ejecutado de cada compose/orchestrate. NO es el pago de servicio: cada agente cobra su propio precio aparte. |
 | Discovery premium | Features avanzados |
 | B2B licensing | Otros marketplaces integran |
+
+### Fee del 1% y split (resumen — fuente de verdad: `doc/architecture/FEE-MODEL.md`)
+
+Dos flujos de plata separados por request: (1) el **pago de servicio** de cada uno de los N agentes (su precio completo, no un porcentaje), y (2) el **fee de protocolo del 1%** sobre el total, cobrado una vez. **El split reparte solo el 1%, no el pago total.**
+
+- El 1% se subdivide en tres patas por env (bps, Σ=10000): plataforma `8000` / creator `1500` / referral `500` (config prod actual). Default `10000/0/0` = todo a plataforma.
+- Las patas de **creator y referral se resuelven solo sobre el agente primario del pipeline (`steps[0]`)**, no sobre los N. Los demás agentes cobran su precio de servicio pero no reciben pata de creator.
+- Fail-safe: pata sin `payout_wallet` declarada se re-rutea a plataforma. Hoy en testnet (casi ningún agente declaró wallet) el fee va ~100% a plataforma; el split señaliza el modelo y no mueve plata a creators hasta que haya adopción.
+
+Detalle completo, ejemplo trabajado y env: `doc/architecture/FEE-MODEL.md`.
 
 ---
 
@@ -335,7 +345,7 @@ a2a_transform_cache (
 | # | Deuda | Impacto | Estado |
 |---|-------|---------|--------|
 | 1 | Discovery sin API Kite | No podemos descubrir en Kite | Bloqueado por Kite |
-| 2 | Pagos no implementados | No cobra 1% fee | Pendiente integración x402 |
+| 2 | Split no paga a creators aún | El fee del 1% se cobra y se puede splittear (WKH-136/143), pero casi ningún agente declaró `payout_wallet` → hoy en testnet el fee va ~100% a plataforma | Depende de adopción (agentes con wallet). Ver `doc/architecture/FEE-MODEL.md` |
 
 ---
 

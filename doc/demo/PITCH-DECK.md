@@ -335,7 +335,7 @@ PRODUCTION-100 ROADMAP:
   □ RLS hardening (Postgres-level row security)
   □ Rollback drill (DR readiness)
   □ On-call alerting wiring (PagerDuty / Opsgenie)
-  □ Pricing tiers decision (current: 1% flat fee)
+  □ Pricing tiers decision (current: 1% protocol fee, split platform/creator/referral)
 
   ➡️ All 5 remaining tickets are non-coding (operations + business)
 ```
@@ -385,6 +385,8 @@ Thank you.
 | "Why 24+ PRs in 2 weeks isn't tech debt?" | Each went through 8-phase NexusAgil pipeline with adversarial review. AR found 16+ real bugs caught pre-merge. AUTO QUALITY pipeline ran 2 production-grade PRs in a single day yesterday. |
 | "What's the moat?" | Multi-marketplace consumer pattern (wasiai-v2, others) + Model B Hybrid + operational sovereignty (own facilitator on 4 chains) + production discipline. Code is open source — moat is execution velocity + ecosystem position + infra control. |
 | "What's operational sovereignty?" | The marketplace settles user payments through our own facilitator (`wasiai-facilitator` on Railway) instead of a third-party. Tx `0x5fbf570b` (pre-flip, via Ultravioleta DAO) vs tx `0xf94d4005` (post-flip, our infra) on snowtrace.io — same flow, different gas payer, verifiable by anyone. |
+| "How does the 1% fee work, and does it cut into agent revenue?" | Two separate flows. Each agent charges its own service price (the full price it set), and the agents keep 100% of that. On top, the protocol takes 1% of the total, once. The 1% (not the service payment) is what we split three ways: platform 80%, creator 15%, referral 5%. Creator and referral resolve only on the pipeline's primary agent (`steps[0]`) and only if it declared a payout wallet. Honest testnet state: almost no agent has declared a wallet yet, so today the 1% routes ~100% to platform. Setting the split turns the incentive mechanism on and signals the model; it does not yet pay creators (no mainnet revenue claim). Source of truth: `doc/architecture/FEE-MODEL.md`. |
+| "Why is 1% enough for creators?" | On a fine 1% fee, the creator leg (15% of 1%) is small in absolute terms, so today its role is to signal the model and align incentives, not to be a creator's main income. The real lever to pay creators meaningfully is raising the base fee where the value justifies it, not carving up a thin 1%. |
 
 ---
 

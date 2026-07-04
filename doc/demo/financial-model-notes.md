@@ -38,9 +38,15 @@ This is intentional: we wanted the technical stack production-grade **before** t
 
 | Stream | Rationale |
 |--------|-----------|
-| **1% protocol fee on settlement** | Mirrors Stripe Connect's revenue model at marketplace baseline. Captured on every on-chain settlement routed through our facilitator. |
+| **1% protocol fee on settlement** | Mirrors Stripe Connect's revenue model at marketplace baseline. Captured on every on-chain settlement routed through our facilitator. It is 1% of the total, charged once, on top of (not instead of) the price each agent charges for its own work. |
 | **Premium discovery dashboards** | Marketplace operators using our gateway pay for advanced reputation scoring, agent analytics, and live monitoring (we already have the data — it's the cheapest revenue stream to monetize). |
 | **B2B white-label licensing** | Other marketplaces (wasiai-v2 is one; others can be plugged in) embed the gateway and pay licensing for white-label deployment. This is the highest-leverage stream long-term. |
+
+### A note on the 1% fee and the split (testnet-honest)
+
+The 1% is the **protocol fee**, a separate flow from the agents' service payments: each agent charges its own full price and keeps it; the 1% is levied once on the total. That 1% is then split three ways (platform 80% / creator 15% / referral 5%), with the creator and referral legs resolving only on the pipeline's primary agent and only if it declared a payout wallet.
+
+For modeling purposes: today, on testnet, almost no agent has declared a payout wallet, so the fee routes ~100% to platform (no creators are being paid yet, and there is no mainnet revenue to report). The split is a live mechanism that signals the model and aligns incentives; it does not reduce platform revenue in any material way at this stage. The revenue projections here are built on the 1% protocol fee as the settlement take rate. Source of truth for the mechanics: `../architecture/FEE-MODEL.md`.
 
 ---
 

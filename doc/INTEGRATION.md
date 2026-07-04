@@ -221,6 +221,16 @@ On non-`ready` plan outcomes (`no_agents`, `budget_exhausted`,
 `POST /orchestrate/execute` return the amount (`protocolFeeUsdc`) but not
 `feeRatePercent`; use `POST /orchestrate/plan` to read the rate before executing.
 
+**Fee vs service price.** The `protocolFeeUsdc` is separate from what the
+composed agents cost. Each agent charges its own service price (`stepPrice_i`)
+for the work it does; those prices are the bulk of `totalCostUsdc`. The 1%
+protocol fee is levied once on top of that total. So a caller pays
+`totalCostUsdc + protocolFeeUsdc`: the agents' prices plus a 1% protocol fee, not
+1% total. How WasiAI internally distributes that 1% (a platform / creator /
+referral split, resolved on the pipeline's primary agent) does not change what
+you pay and is documented in
+[`doc/architecture/FEE-MODEL.md`](architecture/FEE-MODEL.md).
+
 ---
 
 ## 4. x402 Payment Flow

@@ -59,9 +59,11 @@ WasiAI A2A es a los agentes lo que Stripe es a los pagos: una capa invisible que
 
 | Revenue stream | Como funciona | Estado |
 |----------------|---------------|--------|
-| **Protocol fee (1%)** | Comision sobre cada orquestacion/composicion ejecutada | Conceptual — settlement real pendiente |
+| **Protocol fee (1%)** | Fee del 1% sobre el costo real ejecutado de cada orquestacion/composicion. Es el ingreso del protocolo, aparte del pago de servicio que cobra cada agente. | Vivo en testnet: el fee se cobra y se puede splittear; hoy va ~100% a plataforma (ver nota abajo) |
 | **Discovery premium** | Features avanzados de busqueda y ranking para operadores | Futuro |
 | **B2B licensing** | Otros marketplaces integran el protocolo en su plataforma | Futuro |
+
+**Dos flujos de plata (no confundir):** por cada request hay (1) el **pago de servicio** de cada uno de los N agentes (su precio completo, no un porcentaje) y (2) el **fee de protocolo del 1%** sobre el total. El split reparte solo el 1%, no el pago total. El 1% se divide en plataforma / creator / referral, pero las patas de creator y referral se resuelven solo sobre el agente primario (`steps[0]`) y solo si declaro `payout_wallet`; hoy en testnet, sin wallets declaradas, el fee va ~100% a plataforma (todavia no cobran creators). Fuente de verdad: `doc/architecture/FEE-MODEL.md`.
 
 ## Restricciones de negocio
 
