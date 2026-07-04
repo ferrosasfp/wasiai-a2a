@@ -140,4 +140,52 @@ describe('resolveAgentSplitContext', () => {
     );
     expect(ctx.referral).toBeNull();
   });
+
+  // ── WKH-143b — write-path integration over the read-side ────────────
+
+  // T-143B-CREATOR (AC-7) — the payout_wallet the write-path persists resolves
+  // to a real, non-null creator leg (creator cobra, sin código nuevo de cobro).
+  it('T-143B-CREATOR: write-path payoutWallet → resolveAgentSplitContext builds a non-null creator with that wallet (AC-7)', async () => {
+    // Exactly the shape getSplitContextRow returns once the write-path persisted
+    // payout_wallet (referrer opaque, inert).
+    mockGetSplitContextRow.mockResolvedValue({
+      ownerRef: 'owner-xyz',
+      payoutWallet: PAYOUT,
+      referrerRef: 'ref-opaque',
+    });
+
+    const ctx = await resolveAgentSplitContext(
+      agent({ registry_id: SELF_PUBLISHED_REGISTRY_ID, slug: 'paid-agent' }),
+    );
+
+    expect(mockGetSplitContextRow).toHaveBeenCalledWith('paid-agent');
+    expect(ctx.creator).toEqual({ wallet: PAYOUT, ownerRef: 'owner-xyz' });
+    // Referral persisted opaque but INERT (WKH-143c) — never resolved here.
+    expect(ctx.referral).toBeNull();
+  });
+
+  // T-143B-BYTEID (DT-4/CD-6 + CD-8/AC-5) — referral inert + byte-identical default.
+  it('T-143B-BYTEID: referrerRef set stays referral:null (inert); payout_wallet null → creator:null (byte-identical default)', async () => {
+    // (a) referral inert even with referrer_ref present.
+    mockGetSplitContextRow.mockResolvedValueOnce({
+      ownerRef: 'owner-xyz',
+      payoutWallet: PAYOUT,
+      referrerRef: 'ref-abc',
+    });
+    const withRef = await resolveAgentSplitContext(
+      agent({ registry_id: SELF_PUBLISHED_REGISTRY_ID, slug: 'a1' }),
+    );
+    expect(withRef.referral).toBeNull();
+
+    // (b) default (no write-path): payout_wallet null → no creator → byte-identical.
+    mockGetSplitContextRow.mockResolvedValueOnce({
+      ownerRef: 'owner-xyz',
+      payoutWallet: null,
+      referrerRef: null,
+    });
+    const defaultCtx = await resolveAgentSplitContext(
+      agent({ registry_id: SELF_PUBLISHED_REGISTRY_ID, slug: 'a2' }),
+    );
+    expect(defaultCtx).toEqual({ creator: null, referral: null });
+  });
 });

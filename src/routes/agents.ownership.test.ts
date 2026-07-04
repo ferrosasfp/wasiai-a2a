@@ -24,6 +24,7 @@ const { state, mockLog } = vi.hoisted(() => ({
   state: {
     row: null as Record<string, unknown> | null,
     updateCalled: false,
+    updateArg: null as Record<string, unknown> | null,
     deleteCalled: false,
     eqCalls: [] as Array<[string, unknown]>,
   },
@@ -35,8 +36,9 @@ vi.mock('../lib/supabase.js', () => {
   Object.assign(builder, {
     select: () => builder,
     insert: () => builder,
-    update: () => {
+    update: (arg: Record<string, unknown>) => {
       state.updateCalled = true;
+      state.updateArg = arg;
       return builder;
     },
     delete: () => {
@@ -105,6 +107,7 @@ describe('agents routes — ownership / anti-IDOR (WKH-134)', () => {
     currentOwner = 'tenant-B';
     state.row = { ...OWNER_A_ROW };
     state.updateCalled = false;
+    state.updateArg = null;
     state.deleteCalled = false;
     state.eqCalls = [];
   });
@@ -149,5 +152,65 @@ describe('agents routes — ownership / anti-IDOR (WKH-134)', () => {
       actualOwnerRef: 'tenant-A',
     });
     expect(state.deleteCalled).toBe(false);
+  });
+
+  // ── WKH-143b ──────────────────────────────────────────────────────
+  const VALID_WALLET = '0x1111111111111111111111111111111111111111';
+
+  // T-143B-06 (AC-2) — owner PATCHes own slug with payoutWallet → 200, guarded.
+  it('T-143B-06: owner PATCH own slug with payoutWallet → 200, UPDATE ran under owner_ref guard, only payout_wallet touched (AC-2)', async () => {
+    currentOwner = 'tenant-A'; // matches OWNER_A_ROW.owner_ref
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/agents/a-owned-agent',
+      payload: { payoutWallet: VALID_WALLET },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(state.updateCalled).toBe(true);
+    // Ownership guard aplicado: el UPDATE filtró por owner_ref del caller.
+    expect(state.eqCalls).toContainEqual(['owner_ref', 'tenant-A']);
+    // Solo el campo del body entró al updateRow — nada más se tocó.
+    expect(state.updateArg).toEqual({ payout_wallet: VALID_WALLET });
+    expect(mockLog).not.toHaveBeenCalled();
+  });
+
+  // T-143B-07 (AC-3/CD-5) — owner PATCH with invalid payoutWallet → 422.
+  it('T-143B-07: owner PATCH invalid payoutWallet → 422, UPDATE not run (AC-3/CD-5)', async () => {
+    currentOwner = 'tenant-A';
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/agents/a-owned-agent',
+      payload: { payoutWallet: '0xshort' },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe('Invalid payoutWallet');
+    expect(state.updateCalled).toBe(false);
+  });
+
+  // T-143B-08 (AC-6/CD-2) — owner B PATCH slug of owner A with payout/referrer → 404.
+  it('T-143B-08: owner B PATCH slug of owner A with payoutWallet/referrerRef → 404, no mutation, logOwnershipMismatch (AC-6/CD-2)', async () => {
+    currentOwner = 'tenant-B';
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/agents/a-owned-agent',
+      payload: { payoutWallet: VALID_WALLET, referrerRef: 'r-abc' },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'Agent not found' });
+    expect(state.updateCalled).toBe(false);
+    expect(state.updateArg).toBeNull();
+    expect(mockLog).toHaveBeenCalledTimes(1);
+    expect(mockLog.mock.calls[0]?.[0]).toMatchObject({
+      op: 'agentPublishUpdate',
+      resourceId: 'a-owned-agent',
+      callerOwnerRef: 'tenant-B',
+      actualOwnerRef: 'tenant-A',
+    });
   });
 });

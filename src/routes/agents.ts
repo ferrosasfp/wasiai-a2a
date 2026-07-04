@@ -26,6 +26,7 @@ import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
+import { isValidWallet } from '../lib/wallet-format.js';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import { publishedAgentService } from '../services/agent.js';
 import { OwnershipMismatchError } from '../services/security/errors.js';
@@ -63,6 +64,25 @@ function a2aKeyRequired(reply: FastifyReply): FastifyReply {
  */
 function isValidPriceUsdc(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0;
+}
+
+/**
+ * Write-boundary guard de `payoutWallet` (WKH-143b, money-path input). Valida
+ * con EXACTAMENTE el mismo `isValidWallet` que usa `resolveRecipients` (CD-1).
+ * `''` / no-EVM / no-string → inválido → 422 (DT-3: NO es "unset").
+ */
+function isValidPayoutWallet(v: unknown): v is string {
+  return typeof v === 'string' && isValidWallet(v);
+}
+
+/**
+ * Write-boundary guard de `referrerRef` (WKH-143b). String no-vacío tras `trim()`
+ * y `<= 200` chars. El valor persistido es el trimmeado (DT-2). Opaco/inerte.
+ */
+function isValidReferrerRef(v: unknown): v is string {
+  return (
+    typeof v === 'string' && v.trim().length >= 1 && v.trim().length <= 200
+  );
 }
 
 /** Filtra `capabilities` a elementos string (WKH-134 MNR-1). */
@@ -157,6 +177,38 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
           });
         }
 
+        // WKH-143b (money-path input): rechazar `payoutWallet` presente pero
+        // inválido → 422 (mismo criterio EVM que resolveRecipients, CD-1/CD-5).
+        if (
+          body.payoutWallet !== undefined &&
+          !isValidPayoutWallet(body.payoutWallet)
+        ) {
+          request.log.warn(
+            { field: 'payoutWallet' },
+            'agent publish rejected: invalid payoutWallet',
+          );
+          return reply.status(422).send({
+            error: 'Invalid payoutWallet',
+            field: 'payoutWallet',
+            reason: 'payoutWallet must be a valid EVM address',
+          });
+        }
+        // WKH-143b: rechazar `referrerRef` presente pero inválido → 422.
+        if (
+          body.referrerRef !== undefined &&
+          !isValidReferrerRef(body.referrerRef)
+        ) {
+          request.log.warn(
+            { field: 'referrerRef' },
+            'agent publish rejected: invalid referrerRef',
+          );
+          return reply.status(422).send({
+            error: 'Invalid referrerRef',
+            field: 'referrerRef',
+            reason: 'referrerRef must be a non-empty string of <= 200 chars',
+          });
+        }
+
         // CD-5: el slug se deriva server-side del `name` — cualquier `slug`
         // del body se ignora (no se pasa al service). Se arma el input SOLO
         // con los campos presentes (exactOptionalPropertyTypes: sin `undefined`).
@@ -183,6 +235,12 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
           input.outputSchema = body.outputSchema as Record<string, unknown>;
         if (typeof body.discoverable === 'boolean')
           input.discoverable = body.discoverable;
+        // WKH-143b: captura condicional (exactOptionalPropertyTypes, CD-4).
+        // referrerRef se persiste TRIMMEADO (DT-2).
+        if (typeof body.payoutWallet === 'string')
+          input.payoutWallet = body.payoutWallet;
+        if (typeof body.referrerRef === 'string')
+          input.referrerRef = body.referrerRef.trim();
 
         const record = await publishedAgentService.publish(
           input,
@@ -271,6 +329,38 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
             error: 'Invalid priceUsdc',
             field: 'priceUsdc',
             reason: 'priceUsdc must be a finite number >= 0',
+          });
+        }
+
+        // WKH-143b (money-path input): mismos guards espejo que POST. El `body`
+        // crudo fluye a update() (que persiste + trimea referrerRef); acá solo
+        // se rechaza presente-inválido → 422 (CD-1/CD-5/DT-2/DT-3).
+        if (
+          body.payoutWallet !== undefined &&
+          !isValidPayoutWallet(body.payoutWallet)
+        ) {
+          request.log.warn(
+            { field: 'payoutWallet' },
+            'agent update rejected: invalid payoutWallet',
+          );
+          return reply.status(422).send({
+            error: 'Invalid payoutWallet',
+            field: 'payoutWallet',
+            reason: 'payoutWallet must be a valid EVM address',
+          });
+        }
+        if (
+          body.referrerRef !== undefined &&
+          !isValidReferrerRef(body.referrerRef)
+        ) {
+          request.log.warn(
+            { field: 'referrerRef' },
+            'agent update rejected: invalid referrerRef',
+          );
+          return reply.status(422).send({
+            error: 'Invalid referrerRef',
+            field: 'referrerRef',
+            reason: 'referrerRef must be a non-empty string of <= 200 chars',
           });
         }
 

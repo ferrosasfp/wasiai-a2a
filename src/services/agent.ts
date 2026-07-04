@@ -22,6 +22,7 @@ import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
+import { isValidWallet } from '../lib/wallet-format.js';
 import type { Database, Json } from '../types/database.types.js';
 import type {
   Agent,
@@ -183,6 +184,35 @@ function assertValidPriceUsdc(value: unknown): void {
 }
 
 /**
+ * Write-boundary guard de `payoutWallet` (WKH-143b, money-path). Defense-in-depth:
+ * el route ya devolvió 422. Valida con EXACTAMENTE el mismo `isValidWallet` que
+ * `resolveRecipients` (CD-1). Un valor inválido persistido rompería el settle.
+ */
+function assertValidPayoutWallet(value: unknown): void {
+  if (value === undefined) return;
+  if (!(typeof value === 'string' && isValidWallet(value))) {
+    throw new Error('Invalid payoutWallet');
+  }
+}
+
+/**
+ * Write-boundary guard de `referrerRef` (WKH-143b). String no-vacío tras `trim()`
+ * y `<= 200` chars. Defense-in-depth (el route ya devolvió 422).
+ */
+function assertValidReferrerRef(value: unknown): void {
+  if (value === undefined) return;
+  if (
+    !(
+      typeof value === 'string' &&
+      value.trim().length >= 1 &&
+      value.trim().length <= 200
+    )
+  ) {
+    throw new Error('Invalid referrerRef');
+  }
+}
+
+/**
  * Guards de whitespace del `name` — idénticos a `publish` (WKH-100 colisión de
  * normalización). En PATCH el `slug` (PK) es INMUTABLE: actualizar `name` NO
  * re-deriva el slug, así que `name` y `slug` pueden DIVERGIR tras un PATCH.
@@ -295,6 +325,10 @@ export const publishedAgentService = {
     // Write-boundary guards (WKH-134 BLQ-1 / MNR-1): rechazar precio inválido
     // y saneá capabilities a string[] no vacío ANTES de persistir.
     assertValidPriceUsdc(input.priceUsdc);
+    // WKH-143b: defense-in-depth de los inputs money-path (el route ya devolvió
+    // 422). Ausentes → no-op → columnas NULL (AC-5).
+    assertValidPayoutWallet(input.payoutWallet);
+    assertValidReferrerRef(input.referrerRef);
     const capabilities = sanitizeCapabilities(input.capabilities);
 
     // Slug server-side (CD-5): guards de whitespace idénticos a
@@ -322,6 +356,12 @@ export const publishedAgentService = {
       enabled: true,
       owner_ref: ownerRef,
     };
+    // WKH-143b: persistencia condicional (exactOptionalPropertyTypes, CD-4).
+    // Ausente → columna NULL (AC-5). referrerRef re-trimeado (idempotente).
+    if (input.payoutWallet !== undefined)
+      row.payout_wallet = input.payoutWallet;
+    if (input.referrerRef !== undefined)
+      row.referrer_ref = input.referrerRef.trim();
 
     const { data, error } = await supabase
       .from('a2a_agents')
@@ -441,6 +481,12 @@ export const publishedAgentService = {
     // cambia aunque cambie el `name` — name/slug pueden divergir tras el PATCH.
     if (updates.priceUsdc !== undefined)
       assertValidPriceUsdc(updates.priceUsdc);
+    // WKH-143b: defense-in-depth de los inputs money-path (el route ya devolvió
+    // 422). Corre DESPUÉS del guard de ownership de arriba.
+    if (updates.payoutWallet !== undefined)
+      assertValidPayoutWallet(updates.payoutWallet);
+    if (updates.referrerRef !== undefined)
+      assertValidReferrerRef(updates.referrerRef);
 
     const updateRow: Database['public']['Tables']['a2a_agents']['Update'] = {};
     if (updates.name !== undefined) {
@@ -456,6 +502,13 @@ export const publishedAgentService = {
     if (updates.agentUrl !== undefined) updateRow.agent_url = updates.agentUrl;
     if (updates.priceUsdc !== undefined)
       updateRow.price_usdc = updates.priceUsdc;
+    // WKH-143b: persistencia condicional. El UPDATE final ya filtra por
+    // `.eq('slug', slug).eq('owner_ref', ownerRef)` → heredan el ownership guard
+    // sin código nuevo (AC-2/AC-6/CD-2). referrerRef persistido trimeado (DT-2).
+    if (updates.payoutWallet !== undefined)
+      updateRow.payout_wallet = updates.payoutWallet;
+    if (updates.referrerRef !== undefined)
+      updateRow.referrer_ref = updates.referrerRef.trim();
 
     // Merge de metadata (inputSchema/outputSchema/discoverable) sobre lo
     // existente — el patch parcial no debe borrar los campos no provistos.

@@ -132,6 +132,10 @@ export interface PublishAgentInput {
   outputSchema?: Record<string, unknown>;
   /** Opt-in para exponer input/outputSchema en el AgentCard. */
   discoverable?: boolean;
+  /** WKH-143b: wallet EVM del creator para el creator-split (money-path input). */
+  payoutWallet?: string;
+  /** WKH-143b: referrer opaco (persistido trimmeado; inerte hasta WKH-143c). */
+  referrerRef?: string;
 }
 
 /**
@@ -147,6 +151,10 @@ export interface UpdateAgentInput {
   inputSchema?: Record<string, unknown>;
   outputSchema?: Record<string, unknown>;
   discoverable?: boolean;
+  /** WKH-143b: wallet EVM del creator para el creator-split (money-path input). */
+  payoutWallet?: string;
+  /** WKH-143b: referrer opaco (persistido trimmeado; inerte hasta WKH-143c). */
+  referrerRef?: string;
 }
 
 export interface AgentFieldMapping {

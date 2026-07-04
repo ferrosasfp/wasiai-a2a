@@ -28,6 +28,7 @@ import type { SignResult } from '../adapters/types.js';
 import type { SplitConfig } from '../config/split-config.js';
 import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
+import { isValidWallet } from '../lib/wallet-format.js';
 import { feeUsdcToWei } from './fee-charge.js';
 
 const log = getLogger('fee-split');
@@ -35,10 +36,6 @@ const log = getLogger('fee-split');
 const SPLITS_TABLE = 'a2a_fee_splits';
 const PG_UNIQUE_VIOLATION = '23505';
 const TOTAL_BPS = 10000;
-
-// Sentinel address regex (mirror settle-verifier.ts:82 ADDRESS_RE): un recipient
-// con wallet fuera de este formato se trata como inválido (AC-6).
-const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
 // ─── Tipos públicos ─────────────────────────────────────────
 
@@ -159,10 +156,6 @@ interface SupabaseError {
 
 function truncateError(msg: string): string {
   return msg.length > 180 ? `${msg.slice(0, 177)}...` : msg;
-}
-
-function isValidWallet(wallet: string | null | undefined): wallet is string {
-  return typeof wallet === 'string' && ADDRESS_RE.test(wallet);
 }
 
 // ─── computeSplits (Exemplar 3 — micro-USD entero, dust → platform) ─────────
