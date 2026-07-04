@@ -108,3 +108,29 @@ export function getSplitConfig(): SplitConfig {
 
   return { platformBps, creatorBps, referralBps };
 }
+
+/**
+ * WKH-143 (DT-2/CD-9) — Gate NO-throw para el byte-idéntico estructural.
+ *
+ * Peek tolerante de `SPLIT_BPS_CREATOR`/`SPLIT_BPS_REFERRAL`: devuelve `true`
+ * SOLO si alguno parsea a un entero `> 0`. Cualquier valor ausente / vacío /
+ * NaN / basura / no-entero → `false`. NUNCA throwea (a diferencia de
+ * `getSplitConfig`, que valida la suma fail-CLOSED).
+ *
+ * Uso: los call-sites (`orchestrate.ts`/`compose.ts`) resuelven el contexto de
+ * creator/referral SOLO cuando este gate es `true`. Con el default `10000/0/0`
+ * (o env ausente) el gate es `false` → cero query extra → el objeto de params
+ * queda idéntico al actual (CD-1/CD-1b). PROHIBIDO llamar `getSplitConfig()` en
+ * el call-site (throwea `SplitConfigError` → reintroduciría BLQ-MED-1, CD-9).
+ */
+export function splitsActive(): boolean {
+  const peek = (raw: string | undefined): boolean => {
+    if (raw === undefined || raw === '') return false;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isInteger(parsed) && parsed > 0;
+  };
+
+  return (
+    peek(process.env.SPLIT_BPS_CREATOR) || peek(process.env.SPLIT_BPS_REFERRAL)
+  );
+}

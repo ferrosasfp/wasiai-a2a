@@ -32,7 +32,9 @@ import { supabase } from '../lib/supabase.js';
 import {
   computeSplits,
   resolveRecipients,
+  type SplitContext,
   type SplitLeg,
+  type SplitPartyRef,
   settleFeeSplits,
 } from './fee-split.js';
 
@@ -50,6 +52,17 @@ export interface FeeChargeParams {
    */
   feeBaseUsdc: number;
   feeRate: number;
+  /**
+   * WKH-143 (DT-1) — contexto YA resuelto del creador del pipeline primario.
+   * Aditivo: un caller que NO lo pase se comporta idéntico a hoy (creator se
+   * re-ruta a plataforma vía SG-6). Resuelto SOLO server-side (CD-4).
+   */
+  creator?: SplitPartyRef | null;
+  /**
+   * WKH-143 (DT-1/DT-6) — contexto de referral. El seam queda cableado, pero el
+   * call-site lo resuelve `null` siempre en v1 (Scope OUT).
+   */
+  referral?: SplitPartyRef | null;
 }
 
 /**
@@ -232,14 +245,20 @@ export async function chargeProtocolFee(
     return { status: 'skipped', feeUsdc, reason: 'WALLET_UNSET' };
   }
 
-  // WKH-136 (CD-6): recipients resueltos SOLO server-side. La firma pública de
-  // `chargeProtocolFee` (CD-P1) NO transporta el agente primario, así que en v1
-  // creator/referral se resuelven a ausente → su bps se re-ruta a plataforma
-  // (fila `skipped`, SG-6). Con la config default 10000/0/0 hay UN solo
-  // recipient (plataforma) con amount==feeUsdc ⇒ byte-idéntico a WKH-44/132.
-  const resolution = resolveRecipients(splitConfig, {
-    platformWallet: walletAddress,
-  });
+  // WKH-136/WKH-143 (CD-6/CD-4): recipients resueltos SOLO server-side. El
+  // contexto de creator/referral ya viene resuelto por el call-site (helper
+  // `resolveAgentSplitContext`) y se transporta vía `params`. Si el caller NO lo
+  // pasa (o el gate `splitsActive()` estaba en `false`), creator/referral quedan
+  // ausentes → su bps se re-ruta a plataforma (fila `skipped`, SG-6). Con la
+  // config default 10000/0/0 hay UN solo recipient (plataforma) con
+  // amount==feeUsdc ⇒ byte-idéntico a WKH-44/132.
+  //
+  // CD-8 (exactOptionalPropertyTypes): asignación condicional — NUNCA
+  // `creator: cond ? v : undefined`.
+  const ctx: SplitContext = { platformWallet: walletAddress };
+  if (params.creator) ctx.creator = params.creator;
+  if (params.referral) ctx.referral = params.referral;
+  const resolution = resolveRecipients(splitConfig, ctx);
   const amounts = computeSplits(feeUsdc, resolution.effectiveBps);
   const platformAmount = amounts.platform;
   const platformBpsEff = resolution.effectiveBps.platform;
@@ -266,15 +285,13 @@ export async function chargeProtocolFee(
         extrasFailed = extra.error ?? 'split leg failed';
     }
 
-    // MNR-3 (seam v1, inalcanzable hasta cablear creator/referral reales): hoy
-    // `extrasFailed` SOLO se evalúa en el path de éxito (post-settle, línea ~479
-    // → status 'failed' si un leg obligatorio falló). Los returns TEMPRANOS de
-    // abajo (`already-charged` charged/in-progress + 23505 unique_violation) NO
-    // lo consultan. En v1 es inalcanzable: con la config default no hay extras,
-    // y creator/referral se re-rutan a plataforma (skipped, no falla el leg). Al
-    // cablear el seam (recipients reales que SÍ pueden fallar), estos returns
-    // tempranos DEBEN también degradar a 'failed' cuando `extrasFailed`, para no
-    // reportar 'already-charged' con un split adicional roto. TODO al cablear.
+    // MNR-3 (WKH-143 / AC-6 / DT-7 — cerrado): con el seam cableado, un leg
+    // ADICIONAL (creator/referral) puede fallar su settle. `extrasFailed` ya está
+    // calculado (arriba) ANTES de los returns tempranos, así que cada uno de
+    // ellos (`already-charged` charged/in-progress + 23505 unique_violation)
+    // TAMBIÉN lo consulta y degrada el agregado a 'failed' — para no reportar
+    // 'already-charged' cuando un split adicional obligatorio quedó roto.
+    // Simétrico al path de éxito (:~489).
 
     // Construye el array de splits: leg de plataforma (a2a_protocol_fees, CD-2:
     // NO reusa esa PK para >1 recipient) + los legs adicionales.
@@ -325,6 +342,19 @@ export async function chargeProtocolFee(
 
     if (existing) {
       if (existing.status === 'charged') {
+        // MNR-3 (AC-6): un leg adicional obligatorio falló → agregado 'failed'
+        // aunque el leg de plataforma esté already-charged.
+        if (extrasFailed !== undefined) {
+          return {
+            status: 'failed',
+            feeUsdc,
+            error: extrasFailed,
+            splits: buildSplits(
+              'already-charged',
+              existing.tx_hash ?? undefined,
+            ),
+          };
+        }
         return {
           status: 'already-charged',
           feeUsdc,
@@ -333,6 +363,16 @@ export async function chargeProtocolFee(
         };
       }
       if (existing.status === 'pending') {
+        // MNR-3 (AC-6): leg adicional falló → 'failed' aunque el leg de
+        // plataforma esté in-progress.
+        if (extrasFailed !== undefined) {
+          return {
+            status: 'failed',
+            feeUsdc,
+            error: extrasFailed,
+            splits: buildSplits('in-progress'),
+          };
+        }
         // Otra request activa — evita race en retries.
         return {
           status: 'already-charged',
@@ -361,6 +401,16 @@ export async function chargeProtocolFee(
 
     if (insertErr) {
       if (insertErr.code === PG_UNIQUE_VIOLATION) {
+        // MNR-3 (AC-6): leg adicional falló → 'failed' aunque el leg de
+        // plataforma esté in-progress (race).
+        if (extrasFailed !== undefined) {
+          return {
+            status: 'failed',
+            feeUsdc,
+            error: extrasFailed,
+            splits: buildSplits('in-progress'),
+          };
+        }
         // Race condition — otro request insertó primero. Retornamos
         // already-charged inProgress; el otro worker se encargará.
         return {

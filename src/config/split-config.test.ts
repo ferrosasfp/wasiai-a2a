@@ -7,7 +7,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getSplitConfig, SplitConfigError } from './split-config.js';
+import {
+  getSplitConfig,
+  SplitConfigError,
+  splitsActive,
+} from './split-config.js';
 
 describe('getSplitConfig', () => {
   const KEYS = [
@@ -130,5 +134,72 @@ describe('getSplitConfig', () => {
       creatorBps: 2000,
       referralBps: 0,
     });
+  });
+});
+
+// WKH-143 (DT-2/CD-9) — gate NO-throw para el byte-idéntico.
+describe('splitsActive', () => {
+  const KEYS = ['SPLIT_BPS_CREATOR', 'SPLIT_BPS_REFERRAL'] as const;
+  const original: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of KEYS) {
+      original[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (original[k] === undefined) delete process.env[k];
+      else process.env[k] = original[k];
+    }
+  });
+
+  // T-GATE-1: env ausente → false (default 10000/0/0 byte-idéntico).
+  it('T-GATE-1: returns false when creator/referral env are unset', () => {
+    expect(splitsActive()).toBe(false);
+  });
+
+  // T-GATE-1: 0/0 explícito → false.
+  it('T-GATE-1: returns false for explicit 0/0', () => {
+    process.env.SPLIT_BPS_CREATOR = '0';
+    process.env.SPLIT_BPS_REFERRAL = '0';
+    expect(splitsActive()).toBe(false);
+  });
+
+  // T-GATE-1: empty string → false.
+  it('T-GATE-1: returns false for empty strings', () => {
+    process.env.SPLIT_BPS_CREATOR = '';
+    process.env.SPLIT_BPS_REFERRAL = '';
+    expect(splitsActive()).toBe(false);
+  });
+
+  // T-GATE-2: SPLIT_BPS_CREATOR > 0 → true.
+  it('T-GATE-2: returns true when SPLIT_BPS_CREATOR > 0', () => {
+    process.env.SPLIT_BPS_CREATOR = '1000';
+    expect(splitsActive()).toBe(true);
+  });
+
+  // T-GATE-2: SPLIT_BPS_REFERRAL > 0 → true.
+  it('T-GATE-2: returns true when SPLIT_BPS_REFERRAL > 0', () => {
+    process.env.SPLIT_BPS_REFERRAL = '500';
+    expect(splitsActive()).toBe(true);
+  });
+
+  // T-GATE-2: basura (abc) → false, SIN throw (peek tolerante, NO valida suma).
+  it('T-GATE-2: returns false for garbage input without throwing', () => {
+    process.env.SPLIT_BPS_CREATOR = 'abc';
+    process.env.SPLIT_BPS_REFERRAL = 'xyz';
+    expect(() => splitsActive()).not.toThrow();
+    expect(splitsActive()).toBe(false);
+  });
+
+  // NO-throw incluso con config que rompería getSplitConfig (Σ ≠ 10000).
+  it('does not throw even when the split would not sum to 10000', () => {
+    process.env.SPLIT_BPS_CREATOR = '9999';
+    process.env.SPLIT_BPS_REFERRAL = '9999';
+    expect(() => splitsActive()).not.toThrow();
+    expect(splitsActive()).toBe(true);
   });
 });
