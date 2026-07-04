@@ -915,6 +915,136 @@ export type BridgeType =
   | 'LLM';
 
 // ============================================================
+// PAYMENT INTENTS (WKH-135) — `session` (metered) + `upto` (dual-signed cap)
+// ============================================================
+
+/** Row de a2a_payment_intents (dominio). NUMERIC → number desde el RPC. */
+export interface PaymentIntentRow {
+  id: string;
+  intent_type: 'session' | 'upto';
+  owner_ref: string;
+  key_id: string;
+  buyer_wallet: string | null;
+  seller_ref: string;
+  pay_to: string;
+  chain_id: number;
+  authorized_usd: number;
+  consumed_usd: number;
+  cap_signature: string | null;
+  cap_nonce: string | null;
+  status: 'open' | 'closing' | 'settled' | 'refunded' | 'expired' | 'failed';
+  settle_tx_hash: string | null;
+  residual_usd: number | null;
+  expires_at: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Row de a2a_payment_vouchers (ledger append-only, solo session). */
+export interface PaymentVoucherRow {
+  id: string;
+  intent_id: string;
+  owner_ref: string;
+  voucher_id: string;
+  amount_usd: number;
+  voucher_signature: string | null;
+  created_at: string;
+}
+
+/** Domain EIP-712 del cap `upto` (mirror de DelegationEip712Domain). */
+export interface UptoEip712Domain {
+  name: string;
+  version: string;
+  chainId: number;
+}
+
+/** Mensaje EIP-712 del cap (primaryType = "UptoCap"). */
+export interface UptoCapMessage {
+  seller_ref: string;
+  cap: string; // decimal USD como string (sin float64)
+  chain_id: number; // uint256
+  nonce: `0x${string}`; // bytes32 hex
+  expires_at: number; // uint64 epoch seconds
+}
+
+/** typed-data completo del cap `upto` recibido del cliente. */
+export interface UptoCapTypedData {
+  domain: UptoEip712Domain;
+  types: Record<string, ReadonlyArray<{ name: string; type: string }>>;
+  primaryType: string; // debe ser 'UptoCap'
+  message: UptoCapMessage;
+}
+
+/** Input de openSession (paymentIntentService). intentId server-side (CD-1). */
+export interface OpenSessionInput {
+  intentId: string;
+  keyId: string;
+  ownerRef: string;
+  buyerWallet: string | null;
+  sellerRef: string;
+  payTo: string;
+  chainId: number;
+  depositUsd: number;
+  ttlSeconds?: number;
+}
+
+/** Input de addVoucher (idempotente por voucherId). */
+export interface AddVoucherInput {
+  intentId: string;
+  ownerRef: string;
+  voucherId: string;
+  amountUsd: number;
+}
+
+/** Input de createUpto (cap dual-firmado, NO reserva). */
+export interface CreateUptoInput {
+  intentId: string;
+  keyId: string;
+  ownerRef: string;
+  buyerWallet: string; // funding_wallet (ancla de la firma, no-null)
+  sellerRef: string;
+  payTo: string;
+  chainId: number;
+  capUsd: number;
+  capSignature: string;
+  capNonce: string;
+  typedData: UptoCapTypedData;
+}
+
+/**
+ * Resultado del settle on-chain (seam WKH-136). `finalAmountUsd` = el monto
+ * cobrado al seller. Los campos session (consumed/residual) y upto (cappedAt)
+ * los completa closeSession/settleUpto respectivamente. CD-7: nunca throw.
+ */
+export interface SettleOutcome {
+  /**
+   * 'in_progress' (BLQ-MED-1): un close/settle concurrente aterrizó sobre un intent
+   * 'closing' cuyo veredicto AÚN no se persistió (settle_outcome=NULL) = otro caller
+   * está settleando in-flight. NO se finaliza ni se mueve dinero; el caller in-flight
+   * (o expireStale tras CLOSING_STALE_SECONDS) lo completa con el veredicto real.
+   */
+  status: 'settled' | 'failed' | 'in_progress';
+  txHash: string | null;
+  finalAmountUsd: number;
+  consumedUsd?: number | undefined;
+  residualUsd?: number | undefined;
+  cappedAt?: boolean | undefined;
+  error?: string | undefined;
+  /**
+   * Sólo definido cuando status==='failed'. Discrimina el subcaso money-path
+   * (BLQ-ALTO-1) para decidir si el débito/deposit se puede refundar:
+   *   - 'unequivocal': ninguna tx se envió/confirmó (el sign() lanzó o
+   *     settle.success===false) → es CIERTO que NO hubo transfer → refund seguro
+   *     (invariante budget_post == budget_pre).
+   *   - 'ambiguous': el transfer PUDO ocurrir on-chain (el settle() lanzó tras un
+   *     posible broadcast, o verifyDefaultChainSettle contradijo el settle) → NO
+   *     refundar (evita doble-gasto); el caller lo marca reconciliable + log.warn.
+   */
+  failureKind?: 'unequivocal' | 'ambiguous' | undefined;
+}
+
+// ============================================================
 // A2A AGENT KEY TYPES (WKH-34)
 // ============================================================
 
