@@ -49,6 +49,14 @@ const SLUG_ALIASES: Record<string, ChainKey> = Object.assign(
     '84532': 'base-sepolia',
     'base-sepolia': 'base-sepolia',
     'base-testnet': 'base-sepolia',
+
+    // tempo-testnet aliases (WKH-090) — estáticos (el resolver es puro, NO lee
+    // el flag; CD-7). Conocer el slug NO expone el rail con flag OFF: el bundle
+    // no existe → getAdaptersBundle('tempo-testnet') = undefined → guard (2)
+    // devuelve CHAIN_NOT_SUPPORTED.
+    '42429': 'tempo-testnet', // V1 — chainId de Tempo testnet "Moderato"
+    'tempo-testnet': 'tempo-testnet',
+    tempo: 'tempo-testnet',
   } satisfies Record<string, ChainKey>,
 );
 

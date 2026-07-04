@@ -22,6 +22,7 @@ import { buildRpcTransport } from '../lib/rpc-transport.js';
 import { getAvalancheChain } from './avalanche/chain.js';
 import { getBaseChain } from './base/chain.js';
 import { getKiteChain } from './kite-ozone/chain.js';
+import { getTempoChain } from './tempo/chain.js';
 import type { AdaptersBundle, ChainKey } from './types.js';
 
 export type DepositVerificationReason =
@@ -62,7 +63,7 @@ const TRANSFER_EVENT = parseAbiItem(
   'event Transfer(address indexed from, address indexed to, uint256 value)',
 );
 
-type ChainFamily = 'KITE' | 'AVALANCHE' | 'BASE';
+type ChainFamily = 'KITE' | 'AVALANCHE' | 'BASE' | 'TEMPO';
 
 export function resolveChainFamilyEnvSuffix(chainKey: ChainKey): ChainFamily {
   switch (chainKey) {
@@ -75,6 +76,9 @@ export function resolveChainFamilyEnvSuffix(chainKey: ChainKey): ChainFamily {
     case 'base-sepolia':
     case 'base-mainnet':
       return 'BASE';
+    // WKH-090 — cuarto rail (testnet-only, flag-gated OFF).
+    case 'tempo-testnet':
+      return 'TEMPO';
   }
 }
 
@@ -135,6 +139,9 @@ export function resolveRpcUrl(chainKey: ChainKey): string | undefined {
       return process.env.BASE_MAINNET_RPC_URL;
     case 'base-sepolia':
       return process.env.BASE_TESTNET_RPC_URL;
+    // WKH-090 — cuarto rail (testnet-only, flag-gated OFF).
+    case 'tempo-testnet':
+      return process.env.TEMPO_TESTNET_RPC_URL;
   }
 }
 
@@ -156,6 +163,9 @@ export function resolveRpcFallbackEnv(chainKey: ChainKey): string {
       return 'BASE_MAINNET_RPC_URL_FALLBACK';
     case 'base-sepolia':
       return 'BASE_TESTNET_RPC_URL_FALLBACK';
+    // WKH-090 — cuarto rail (testnet-only, flag-gated OFF).
+    case 'tempo-testnet':
+      return 'TEMPO_TESTNET_RPC_URL_FALLBACK';
   }
 }
 
@@ -176,6 +186,9 @@ export function resolveChainObject(chainKey: ChainKey): Chain {
       return getBaseChain('mainnet');
     case 'base-sepolia':
       return getBaseChain('testnet');
+    // WKH-090 — cuarto rail (testnet-only, flag-gated OFF).
+    case 'tempo-testnet':
+      return getTempoChain('testnet');
   }
 }
 

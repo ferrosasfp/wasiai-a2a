@@ -50,6 +50,10 @@ const RPC_ENV_BY_CHAIN: Record<ChainKey, string> = {
   'base-mainnet': 'BASE_MAINNET_RPC_URL',
   'kite-ozone-testnet': 'KITE_RPC_URL',
   'kite-mainnet': 'KITE_MAINNET_RPC_URL',
+  // WKH-090 — cuarto rail (testnet-only, flag-gated OFF). Requerido para
+  // exhaustividad del Record<ChainKey, string>; dead code con el flag OFF (el
+  // rail nunca inicializa un bundle → CHAIN_NOT_SUPPORTED antes de llegar acá).
+  'tempo-testnet': 'TEMPO_TESTNET_RPC_URL',
 };
 
 // ─── Public types ───────────────────────────────────────────────────
