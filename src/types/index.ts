@@ -542,6 +542,86 @@ export interface OrchestrateExecuteRequest extends OrchestrateRequest {
 }
 
 // ============================================================
+// AGENT LINK TYPES (WKH-137 — invocation links)
+// ============================================================
+
+/**
+ * Row de `a2a_agent_links`. Las columnas NUMERIC (`max_price_usdc`,
+ * `consumed_cost_usdc`) llegan como `string` en runtime desde Supabase, aunque
+ * el tipo generado las declare `number` (mismo criterio que KeySessionRow).
+ */
+export interface AgentLinkRow {
+  id: string;
+  token_hash: string;
+  owner_ref: string;
+  key_id: string;
+  slug: string;
+  registry: string | null;
+  max_price_usdc: string;
+  chain_id: number;
+  status: 'open' | 'redeeming' | 'redeemed' | 'failed';
+  redeemed_at: string | null;
+  settle_tx_hash: string | null;
+  consumed_cost_usdc: string | null;
+  expires_at: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Body del `POST /agents/:slug/link` (mint). `slug` sale del path, NUNCA de acá. */
+export interface CreateAgentLinkInput {
+  /** Cap de precio server-side (decimal > 0). */
+  maxPriceUsdc: string;
+  /** TTL en segundos (entero > 0, <= LINK_MAX_TTL_SECONDS). Opcional. */
+  ttlSeconds?: number;
+}
+
+/** Response 201 del mint. El `token` viaja UNA sola vez (nunca recuperable). */
+export interface MintAgentLinkResponse {
+  link_id: string;
+  token: string;
+  slug: string;
+  max_price_usdc: string;
+  expires_at: string;
+}
+
+/**
+ * Shape PÚBLICO del redeem (WKH-137, BLQ-1). El redeem es público (auth por
+ * posesión del token); el redeemer es un tercero, NO el owner del link. Por eso
+ * NO se le devuelve el `OrchestrateResult` completo — ese arrastra telemetría de
+ * billing del owner (`remainingBudgetUsd`, `feeChargeError`, `feeChargeTxHash`,
+ * `refundError`, `debitFallback`) que filtraría el saldo financiero de un tenant
+ * ajeno (viola AC-7 / cross-tenant leak). Este shape acotado expone SOLO lo que
+ * el canal externo necesita: id de orquestación, la respuesta del agente, el fee
+ * de protocolo y el resultado (success + output) del pipeline.
+ */
+export interface RedeemResult {
+  orchestrationId: string;
+  /** Respuesta del agente (equivalente a OrchestrateResult.answer). */
+  answer: unknown;
+  /** Fee de protocolo cobrado por esta invocación (informativo). */
+  protocolFeeUsdc: number;
+  /** Resultado acotado del pipeline: éxito + output del agente. SIN steps/txHash
+   *  ni telemetría de billing del owner. */
+  pipeline: {
+    success: boolean;
+    output: unknown;
+  };
+}
+
+/** Fila del link devuelta por el RPC `claim_agent_link` (open→redeeming). */
+export interface AgentLinkClaim {
+  id: string;
+  owner_ref: string;
+  key_id: string;
+  slug: string;
+  registry: string | null;
+  max_price_usdc: string;
+  chain_id: number;
+}
+
+// ============================================================
 // DOWNSTREAM PAYMENT LOGGER (WKH-55)
 // ============================================================
 

@@ -392,6 +392,71 @@ export type Database = {
           },
         ];
       };
+      a2a_agent_links: {
+        Row: {
+          chain_id: number;
+          consumed_cost_usdc: number | null;
+          created_at: string;
+          error_message: string | null;
+          expires_at: string;
+          id: string;
+          key_id: string;
+          max_price_usdc: number;
+          owner_ref: string;
+          redeemed_at: string | null;
+          registry: string | null;
+          settle_tx_hash: string | null;
+          slug: string;
+          status: string;
+          token_hash: string;
+          updated_at: string;
+        };
+        Insert: {
+          chain_id: number;
+          consumed_cost_usdc?: number | null;
+          created_at?: string;
+          error_message?: string | null;
+          expires_at: string;
+          id?: string;
+          key_id: string;
+          max_price_usdc: number;
+          owner_ref: string;
+          redeemed_at?: string | null;
+          registry?: string | null;
+          settle_tx_hash?: string | null;
+          slug: string;
+          status?: string;
+          token_hash: string;
+          updated_at?: string;
+        };
+        Update: {
+          chain_id?: number;
+          consumed_cost_usdc?: number | null;
+          created_at?: string;
+          error_message?: string | null;
+          expires_at?: string;
+          id?: string;
+          key_id?: string;
+          max_price_usdc?: number;
+          owner_ref?: string;
+          redeemed_at?: string | null;
+          registry?: string | null;
+          settle_tx_hash?: string | null;
+          slug?: string;
+          status?: string;
+          token_hash?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'a2a_agent_links_key_id_fkey';
+            columns: ['key_id'];
+            isOneToOne: false;
+            referencedRelation: 'a2a_agent_keys';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
       a2a_key_sessions: {
         Row: {
           allowed_agent_slugs: Json | null;
@@ -2476,6 +2541,29 @@ export type Database = {
       };
     };
     Functions: {
+      claim_agent_link: {
+        Args: { p_token_hash: string };
+        Returns: {
+          id: string;
+          owner_ref: string;
+          key_id: string;
+          slug: string;
+          registry: string | null;
+          max_price_usdc: number;
+          chain_id: number;
+        }[];
+      };
+      settle_agent_link: {
+        Args: {
+          p_id: string;
+          p_owner_ref: string;
+          p_outcome: string;
+          p_tx_hash: string | null;
+          p_cost: number | null;
+          p_error: string | null;
+        };
+        Returns: undefined;
+      };
       accumulate_payment_voucher: {
         Args: {
           p_intent_id: string;
