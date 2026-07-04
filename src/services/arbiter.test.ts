@@ -62,7 +62,7 @@ vi.mock('../routes/auth/parsers.js', () => ({
 
 import { supabase } from '../lib/supabase.js';
 import { paymentsRoutes } from '../routes/payments.js';
-import type { DisputeEvidence } from '../types/arbiter.js';
+import { ArbiterError, type DisputeEvidence } from '../types/arbiter.js';
 import { arbiterService } from './arbiter.js';
 import { paymentIntentService } from './payment-intent.js';
 
@@ -110,6 +110,7 @@ function makeEvidence(over: Partial<DisputeEvidence>): DisputeEvidence {
 interface FakeRow {
   status: string;
   intent_type: 'session';
+  owner_ref: string;
   authorized_usd: number;
   consumed_usd: number;
   chain_id: number;
@@ -127,6 +128,7 @@ function makeArbDb(init: {
   consumed_usd?: number;
   status?: string;
   chain_id?: number;
+  owner_ref?: string;
 }): {
   row: FakeRow;
   refunds: number[];
@@ -138,6 +140,7 @@ function makeArbDb(init: {
   const row: FakeRow = {
     status: init.status ?? 'open',
     intent_type: 'session',
+    owner_ref: init.owner_ref ?? OWNER,
     authorized_usd: init.authorized_usd,
     consumed_usd: init.consumed_usd ?? 0,
     chain_id: init.chain_id ?? 2368,
@@ -266,20 +269,26 @@ function makeArbDb(init: {
     },
   };
 
-  // from() fiel para el arb_hold update + a2a_arbitrations upsert.
+  // from() fiel para el pre-check select + arb_hold update + a2a_arbitrations upsert.
   const fromImpl = (table: string) => {
     const b: {
       _op: string | null;
       _vals: Record<string, unknown> | null;
       _conds: Record<string, unknown>;
+      select: (cols: string) => typeof b;
       update: (v: Record<string, unknown>) => typeof b;
       upsert: (v: Record<string, unknown>) => typeof b;
       eq: (c: string, v: unknown) => typeof b;
+      maybeSingle: () => Promise<{ data: unknown; error: unknown }>;
       then: (resolve: (r: { error: null }) => void) => void;
     } = {
       _op: null,
       _vals: null,
       _conds: {},
+      select() {
+        b._op = 'select';
+        return b;
+      },
       update(v) {
         b._op = 'update';
         b._vals = v;
@@ -293,6 +302,18 @@ function makeArbDb(init: {
       eq(c, v) {
         b._conds[c] = v;
         return b;
+      },
+      // Pre-check openDispute: SELECT owner_ref, chain_id FROM a2a_payment_intents
+      // WHERE id = ?. Devuelve la fila autoritativa (owner-check en app). null si el id
+      // no matchea el de la db (intent inexistente → INTENT_NOT_FOUND).
+      maybeSingle() {
+        if (table === 'a2a_payment_intents' && b._conds.id !== 'i1') {
+          return Promise.resolve({ data: null, error: null });
+        }
+        return Promise.resolve({
+          data: { owner_ref: row.owner_ref, chain_id: row.chain_id },
+          error: null,
+        });
       },
       // biome-ignore lint/suspicious/noThenProperty: awaitable supabase builder test double
       then(resolve) {
@@ -692,6 +713,55 @@ describe('AC-5 testnet-only (fail-closed)', () => {
     );
     const r = await arbiterService.openDispute('i1', OWNER);
     expect(r.status).toBe('executed'); // refund total, sin chain rejection
+  });
+});
+
+// ── BLQ-BAJO-1: 'disputed' ya no es una trampa terminal irrecuperable ──
+describe('BLQ-BAJO-1 disputed no-brick', () => {
+  it('(a) dispute mainnet → CHAIN_NOT_SUPPORTED SIN transicionar; sigue open y closeSession normal funciona', async () => {
+    happySettle();
+    const db = makeArbDb({
+      authorized_usd: 10,
+      consumed_usd: 4,
+      chain_id: 43114,
+    });
+    wireDb(db);
+    mockReadEvidence.mockResolvedValue(makeEvidence({ chainId: 43114 }));
+
+    await expect(arbiterService.openDispute('i1', OWNER)).rejects.toMatchObject(
+      { code: 'CHAIN_NOT_SUPPORTED' },
+    );
+    // Pre-check ANTES de transicionar: el intent NUNCA pasó a 'disputed'.
+    expect(db.row.status).toBe('open');
+    expect(mockSettle).not.toHaveBeenCalled();
+    expect(db.refunds).toEqual([]);
+
+    // No bricked: el settlement normal sigue disponible.
+    const r = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r.status).toBe('settled');
+    expect(mockSettle).toHaveBeenCalledTimes(1);
+    expect(db.refunds).toEqual([6]); // residual 10-4 al buyer
+  });
+
+  it('(b) throw post-transición (readEvidence tira) → revierte disputed→open; closeSession normal funciona', async () => {
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 4 });
+    wireDb(db);
+    mockReadEvidence.mockRejectedValue(new ArbiterError('INTERNAL'));
+
+    await expect(arbiterService.openDispute('i1', OWNER)).rejects.toMatchObject(
+      { code: 'INTERNAL' },
+    );
+    // Rollback best-effort: NO quedó bricked en 'disputed'.
+    expect(db.row.status).toBe('open');
+    expect(mockSettle).not.toHaveBeenCalled();
+    expect(db.refunds).toEqual([]);
+
+    // No bricked: closeSession normal procede tras el rollback.
+    const r = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r.status).toBe('settled');
+    expect(mockSettle).toHaveBeenCalledTimes(1);
+    expect(db.refunds).toEqual([6]);
   });
 });
 

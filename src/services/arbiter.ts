@@ -268,13 +268,42 @@ interface ArbCloseRow {
 
 export const arbiterService = {
   /**
-   * Abre una disputa y la resuelve autónomamente. Gate anti-race (open_dispute)
-   * + testnet guard (fail-closed) + rules→llm→cap → execute/hold.
+   * Abre una disputa y la resuelve autónomamente. Pre-check chain/ownership
+   * (fail-closed, ANTES de transicionar) → gate anti-race (open_dispute) →
+   * rules→llm→cap → execute/hold, con rollback disputed→open si algo tira antes
+   * de arb_closing/arb_hold.
    */
   async openDispute(
     intentId: string,
     ownerRef: string,
   ): Promise<ArbiterOutcome> {
+    // 0. BLQ-BAJO-1 (fix primario): validar chain + ownership ANTES de transicionar.
+    //    Un intent mainnet (o inexistente / de otro owner) se rechaza SIN tocar el
+    //    status → jamás queda bricked en 'disputed' (el settlement normal sigue
+    //    disponible). Read money-free; el gate anti-race real sigue siendo open_dispute
+    //    (SELECT ... FOR UPDATE) abajo. Owner-check en app (no owner-guarded SELECT)
+    //    para preservar OWNERSHIP_MISMATCH vs INTENT_NOT_FOUND — espejo del RPC.
+    const pre = await supabase
+      .from('a2a_payment_intents')
+      .select('owner_ref, chain_id')
+      .eq('id', intentId)
+      .maybeSingle();
+    if (pre.error) {
+      log.error(
+        { intentId, detail: pre.error.message },
+        'dispute pre-check query failed',
+      );
+      throw new ArbiterError('INTERNAL');
+    }
+    if (!pre.data) throw new ArbiterError('INTENT_NOT_FOUND');
+    if (pre.data.owner_ref !== ownerRef) {
+      throw new ArbiterError('OWNERSHIP_MISMATCH');
+    }
+    // Testnet guard (AC-5/CD-5, fail-closed) ANTES de la transición (BLQ-BAJO-1).
+    if (!TESTNET_CHAIN_IDS.has(pre.data.chain_id)) {
+      throw new ArbiterError('CHAIN_NOT_SUPPORTED');
+    }
+
     // 1. Transición atómica open→disputed (gate anti-race, AC-4).
     const { data, error } = await supabase.rpc('open_dispute', {
       p_intent_id: intentId,
@@ -284,11 +313,30 @@ export const arbiterService = {
     const row = (data as OpenDisputeRow[] | null)?.[0];
     if (!row) throw new ArbiterError('INTENT_NOT_FOUND');
 
-    // 2. Testnet guard (AC-5/CD-5, fail-closed) ANTES de tocar fondos.
-    if (!TESTNET_CHAIN_IDS.has(row.chain_id)) {
-      throw new ArbiterError('CHAIN_NOT_SUPPORTED');
+    // BLQ-BAJO-1 (robustez): a partir de acá el intent está 'disputed'. Si CUALQUIER
+    // paso tira ANTES de transicionar a arb_closing/arb_hold, revertir disputed→open
+    // (best-effort, money-free) para no dejarlo bricked. Una transición YA aplicada a
+    // arb_closing (recuperable) / arb_hold (terminal held) NO se revierte: el revert
+    // es status-gated en 'disputed'.
+    try {
+      return await this.resolveDispute(intentId, ownerRef, row);
+    } catch (err) {
+      await this.revertDisputeToOpen(intentId, ownerRef);
+      throw err;
     }
+  },
 
+  /**
+   * Resuelve la disputa sobre un intent YA transicionado a 'disputed': evidencia →
+   * rules-first → LLM acotado si ambiguo → cap gate → execute/HOLD. Separado de
+   * openDispute para que el rollback disputed→open (BLQ-BAJO-1) envuelva SÓLO los
+   * pasos post-transición.
+   */
+  async resolveDispute(
+    intentId: string,
+    ownerRef: string,
+    row: OpenDisputeRow,
+  ): Promise<ArbiterOutcome> {
     const depositUsd = numericToMicro(row.authorized_usd) / 1_000_000;
 
     // 3. Evidencia determinística on-chain/DB.
@@ -642,6 +690,35 @@ export const arbiterService = {
       recoveryMeta,
       allowStaleRecovery,
     );
+  },
+
+  /**
+   * BLQ-BAJO-1: revierte disputed→open (best-effort, owner+status-guarded, money-free)
+   * para desbrickear un intent si algo tiró tras open_dispute pero ANTES de
+   * arb_closing/arb_hold. El guard `status='disputed'` garantiza que NO toca una
+   * transición ya aplicada (arb_closing recuperable, arb_hold terminal held) ni mueve
+   * fondos. Usado por openDispute (rollback) y expireStale (barrido defensivo).
+   */
+  async revertDisputeToOpen(intentId: string, ownerRef: string): Promise<void> {
+    try {
+      const { error } = await supabase
+        .from('a2a_payment_intents')
+        .update({ status: 'open' })
+        .eq('id', intentId)
+        .eq('owner_ref', ownerRef)
+        .eq('status', 'disputed');
+      if (error) {
+        log.error(
+          { intentId, detail: error.message },
+          'dispute rollback disputed→open failed (lo barrerá expireStale)',
+        );
+      }
+    } catch (err) {
+      log.error(
+        { intentId, detail: err instanceof Error ? err.message : String(err) },
+        'dispute rollback threw',
+      );
+    }
   },
 
   /**

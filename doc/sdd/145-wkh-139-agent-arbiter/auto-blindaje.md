@@ -49,6 +49,26 @@ entrada protege futuras HUs del mismo error.
 - **Aplicar en**: test doubles awaitables de builders (supabase/postgrest) →
   suprimir la regla puntualmente, no reescribir la cadena.
 
+### [2026-07-04 FIX-PACK] `disputed` era trampa terminal irrecuperable (BLQ-BAJO-1)
+- **Error**: `openDispute` transicionaba `open→disputed` (RPC `open_dispute`) y
+  RECIÉN DESPUÉS corría el testnet guard y `readEvidence`. Si algo tiraba post
+  transición (intent mainnet → `CHAIN_NOT_SUPPORTED`, o `readEvidence` → `INTERNAL`),
+  el intent quedaba permanentemente `disputed`: `closeSession` daba `INTENT_NOT_OPEN`,
+  `expireStale` no lo barría y `open_dispute` exige `open` → settlement inhabilitado
+  sin recovery.
+- **Causa raíz**: efecto secundario irreversible (la transición de estado) ejecutado
+  ANTES de las validaciones que pueden fallar. Orden invertido: validar → mutar.
+- **Fix (3 capas)**: (1) PRIMARIO — pre-check owner+chain money-free ANTES de
+  `open_dispute` (mainnet se rechaza sin transicionar); (2) ROBUSTEZ — `try/catch`
+  alrededor de `resolveDispute`: si tira mientras sigue `disputed`, `revertDisputeToOpen`
+  (update owner+status-guarded `status='disputed'`→`'open'`, money-free); (3) DEFENSA
+  EN PROFUNDIDAD — `expireStale` barre `disputed` stale revirtiéndolos a `open`.
+- **Aplicar en**: cualquier flujo money-path que transicione estado ANTES de validar
+  precondiciones (chain, evidencia, cap). Regla: validá TODO lo que pueda fail-closed
+  ANTES de la mutación irreversible; envolvé el resto en rollback status-gated; agregá
+  un sweep como red de defensa. El rollback NUNCA mueve fondos y va gated al estado
+  exacto del que revierte (no toca `arb_closing`/`arb_hold`).
+
 ### [2026-07-04 W0] Validación de migración en Postgres efímero: rollback por rows huérfanas
 - **Error**: la 1ª corrida del `_down` en el Postgres efímero falló al restaurar el
   `status` CHECK porque el smoke test había dejado filas en `arb_closing`/`disputed`.

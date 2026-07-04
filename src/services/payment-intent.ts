@@ -1182,12 +1182,29 @@ export const paymentIntentService = {
         'expireStale arb_closing query failed',
       );
     }
+    // WKH-139 BLQ-BAJO-1 (defensa en profundidad): barrer intents 'disputed' huérfanos
+    // (un openDispute que transicionó open→disputed pero murió antes de resolver/rollback).
+    // Revertir →open (money-free, owner+status-guarded) los desbrickea → el settlement
+    // normal (closeSession/expiry) vuelve a estar disponible. Mismo patrón que arb_closing.
+    const disputedRes = await supabase
+      .from('a2a_payment_intents')
+      .select('id, owner_ref')
+      .eq('status', 'disputed')
+      .lt('updated_at', staleIso);
+    if (disputedRes.error) {
+      log.error(
+        { detail: disputedRes.error.message },
+        'expireStale disputed query failed',
+      );
+    }
     // Import dinámico: arbiter.ts importa settlePaymentIntentOnChain de este módulo;
     // un import estático de arbiterService acá crearía un ciclo. El import dinámico
     // dentro del sweep lo rompe (se resuelve en runtime, no en el grafo de módulos).
-    if ((arbClosingRes.data ?? []).length > 0) {
+    const arbClosingStale = arbClosingRes.data ?? [];
+    const disputedStale = disputedRes.data ?? [];
+    if (arbClosingStale.length > 0 || disputedStale.length > 0) {
       const { arbiterService } = await import('./arbiter.js');
-      for (const stale of arbClosingRes.data ?? []) {
+      for (const stale of arbClosingStale) {
         try {
           await arbiterService.recoverArbClosing(
             stale.id,
@@ -1201,6 +1218,19 @@ export const paymentIntentService = {
               detail: err instanceof Error ? err.message : String(err),
             },
             'expireStale arb_closing recovery failed for intent',
+          );
+        }
+      }
+      for (const stale of disputedStale) {
+        try {
+          await arbiterService.revertDisputeToOpen(stale.id, stale.owner_ref);
+        } catch (err) {
+          log.warn(
+            {
+              intentId: stale.id,
+              detail: err instanceof Error ? err.message : String(err),
+            },
+            'expireStale disputed revert failed for intent',
           );
         }
       }
