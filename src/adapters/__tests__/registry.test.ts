@@ -11,7 +11,7 @@
  * Wave 0 only wires `kite-ozone-testnet`. Avalanche / mainnet branches are
  * exercised in Wave 1 / Wave 5 tests.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ─── Structured logger mock ─────────────────────────────────
 // registry.ts logs the init message + the CD-13 conflict warning via
@@ -99,6 +99,25 @@ vi.mock('../base/index.js', () => ({
   ),
 }));
 
+// Mock the tempo factory — returns a testnet bundle stub (WKH-090). Real
+// adapters covered by tempo.payment.contract.test.ts. Mirrors kite/base/avax.
+vi.mock('../tempo/index.js', () => ({
+  createTempoAdapters: vi.fn(async (_opts?: { network?: 'testnet' }) => {
+    const chainId = 42429;
+    return {
+      payment: { name: 'tempo', chainId },
+      attestation: { name: 'tempo', chainId },
+      gasless: { name: 'tempo', chainId },
+      identity: null,
+      chainConfig: {
+        name: 'Tempo Testnet',
+        chainId,
+        explorerUrl: 'https://explore.tempo.xyz',
+      },
+    };
+  }),
+}));
+
 import {
   _resetRegistry,
   getAdaptersBundle,
@@ -118,6 +137,8 @@ describe('adapter registry', () => {
     vi.clearAllMocks();
     delete process.env.WASIAI_A2A_CHAIN;
     delete process.env.WASIAI_A2A_CHAINS;
+    // WKH-090 — CD-1: flag default OFF en cada test (byte-idéntico baseline).
+    delete process.env.TEMPO_ADAPTER_ENABLED;
   });
 
   it('default WASIAI_A2A_CHAIN resolves to kite-ozone adapters', async () => {
@@ -514,6 +535,113 @@ describe('adapter registry', () => {
       process.env.WASIAI_A2A_CHAINS = 'base-typo';
       await expect(initAdapters()).rejects.toThrow(
         /Supported:.*base-sepolia, base-mainnet/,
+      );
+    });
+  });
+
+  // ─── WKH-090 / HU-090: Tempo rail behind TEMPO_ADAPTER_ENABLED (default OFF) ───
+  describe('WKH-090 — Tempo rail (flag-gated)', () => {
+    afterEach(() => {
+      delete process.env.TEMPO_ADAPTER_ENABLED;
+    });
+
+    // ── AC-1: flag ON + CSV incluye tempo-testnet → bundle completo, coexiste ──
+    it('AC-1 — flag ON + WASIAI_A2A_CHAINS includes tempo-testnet → full bundle', async () => {
+      process.env.TEMPO_ADAPTER_ENABLED = 'true';
+      process.env.WASIAI_A2A_CHAINS = 'base-sepolia,tempo-testnet';
+      await initAdapters();
+
+      expect(getInitializedChainKeys()).toEqual([
+        'base-sepolia',
+        'tempo-testnet',
+      ]);
+
+      const tempo = getAdaptersBundle('tempo-testnet');
+      expect(tempo).toBeDefined();
+      expect(tempo?.payment.name).toBe('tempo');
+      expect(tempo?.attestation.name).toBe('tempo');
+      expect(tempo?.gasless.name).toBe('tempo');
+      expect(tempo?.chainConfig.chainId).toBe(42429);
+
+      // Los rails existentes quedan intactos (CD-6).
+      const base = getAdaptersBundle('base-sepolia');
+      expect(base?.chainConfig.chainId).toBe(84532);
+      expect(base?.payment.name).toBe('base');
+    });
+
+    it('AC-1 — registry passes opts.network=testnet to createTempoAdapters', async () => {
+      process.env.TEMPO_ADAPTER_ENABLED = 'true';
+      const factoryModule = await import('../tempo/index.js');
+      const factorySpy = factoryModule.createTempoAdapters as ReturnType<
+        typeof vi.fn
+      >;
+      factorySpy.mockClear();
+
+      process.env.WASIAI_A2A_CHAINS = 'tempo-testnet';
+      await initAdapters();
+
+      expect(factorySpy).toHaveBeenCalledTimes(1);
+      expect(factorySpy).toHaveBeenCalledWith({ network: 'testnet' });
+    });
+
+    // ── AC-2: no-op byte-idéntico con flag OFF ──
+    it('AC-2 — flag OFF: 6-rail CSV initializes identical to baseline; no tempo bundle', async () => {
+      // Baseline: los 6 rails sin el flag.
+      process.env.WASIAI_A2A_CHAINS =
+        'kite-ozone-testnet,kite-mainnet,avalanche-fuji,avalanche-mainnet,base-sepolia,base-mainnet';
+      await initAdapters();
+
+      expect(getInitializedChainKeys()).toEqual([
+        'kite-ozone-testnet',
+        'kite-mainnet',
+        'avalanche-fuji',
+        'avalanche-mainnet',
+        'base-sepolia',
+        'base-mainnet',
+      ]);
+      // Tempo NO se importa ni inicializa con flag OFF.
+      expect(getAdaptersBundle('tempo-testnet')).toBeUndefined();
+    });
+
+    it('AC-2 — flag OFF: createTempoAdapters is never invoked', async () => {
+      const factoryModule = await import('../tempo/index.js');
+      const factorySpy = factoryModule.createTempoAdapters as ReturnType<
+        typeof vi.fn
+      >;
+      factorySpy.mockClear();
+
+      process.env.WASIAI_A2A_CHAINS = 'base-sepolia';
+      await initAdapters();
+
+      expect(factorySpy).not.toHaveBeenCalled();
+    });
+
+    // ── AC-5: flag OFF fuerza CHAIN_NOT_SUPPORTED (double-guard) ──
+    it('AC-5 — flag OFF + tempo-testnet in CSV → fail-fast boot (Unsupported chain)', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'tempo-testnet';
+      await expect(initAdapters()).rejects.toThrow(
+        /Unsupported chain 'tempo-testnet'/,
+      );
+    });
+
+    it('AC-5 — flag OFF: getAdaptersBundle(tempo-testnet) is undefined (guard 2)', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'base-sepolia';
+      await initAdapters();
+      expect(getAdaptersBundle('tempo-testnet')).toBeUndefined();
+    });
+
+    it('AC-5 — flag OFF error message lists exactly the 6 baseline rails (CD-6)', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'tempo-testnet';
+      await expect(initAdapters()).rejects.toThrow(
+        "Unsupported chain 'tempo-testnet'. Supported: kite-ozone-testnet, kite-mainnet, avalanche-fuji, avalanche-mainnet, base-sepolia, base-mainnet",
+      );
+    });
+
+    it('flag ON error message includes tempo-testnet in the supported list', async () => {
+      process.env.TEMPO_ADAPTER_ENABLED = 'true';
+      process.env.WASIAI_A2A_CHAINS = 'nonexistent-chain';
+      await expect(initAdapters()).rejects.toThrow(
+        /Supported:.*base-mainnet, tempo-testnet/,
       );
     });
   });

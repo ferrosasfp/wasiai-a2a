@@ -38,8 +38,27 @@ const _bundles = new Map<ChainKey, AdaptersBundle>();
 let _defaultChainKey: ChainKey | null = null;
 let _initialized = false;
 
+/**
+ * WKH-090 — feature-flag del cuarto rail (Tempo/MPP), default OFF (CD-1).
+ * Convención `=== 'true'` (mirror `GASLESS_ENABLED`). CD-7: este es el ÚNICO
+ * choke-point del gate — el resolver y el adapter NO leen esta env var.
+ */
+function isTempoEnabled(): boolean {
+  return process.env.TEMPO_ADAPTER_ENABLED === 'true';
+}
+
+/**
+ * Set de chains soportadas flag-aware. Con `TEMPO_ADAPTER_ENABLED != 'true'`
+ * retorna EXACTAMENTE los 6 slugs actuales → byte-idéntico (CD-6).
+ */
+function getSupportedChains(): readonly ChainKey[] {
+  return isTempoEnabled()
+    ? [...SUPPORTED_CHAINS, 'tempo-testnet']
+    : SUPPORTED_CHAINS;
+}
+
 function isSupportedChain(slug: string): slug is ChainKey {
-  return (SUPPORTED_CHAINS as readonly string[]).includes(slug);
+  return (getSupportedChains() as readonly string[]).includes(slug);
 }
 
 async function buildBundle(chainKey: ChainKey): Promise<AdaptersBundle> {
@@ -84,8 +103,13 @@ async function buildBundle(chainKey: ChainKey): Promise<AdaptersBundle> {
     const { createBaseAdapters } = await import('./base/index.js');
     return createBaseAdapters({ network: 'mainnet' });
   }
+  if (chainKey === 'tempo-testnet') {
+    // WKH-090 — cuarto rail (testnet-only, flag-gated en getSupportedChains()).
+    const { createTempoAdapters } = await import('./tempo/index.js');
+    return createTempoAdapters({ network: 'testnet' });
+  }
   throw new Error(
-    `Unsupported chain '${chainKey}'. Supported: ${SUPPORTED_CHAINS.join(', ')}`,
+    `Unsupported chain '${chainKey}'. Supported: ${getSupportedChains().join(', ')}`,
   );
 }
 
@@ -120,7 +144,7 @@ export async function initAdapters(): Promise<void> {
 
   if (slugs.length === 0) {
     throw new Error(
-      `Unsupported chain ''. Supported: ${SUPPORTED_CHAINS.join(', ')}`,
+      `Unsupported chain ''. Supported: ${getSupportedChains().join(', ')}`,
     );
   }
 
@@ -128,7 +152,7 @@ export async function initAdapters(): Promise<void> {
   for (const slug of slugs) {
     if (!isSupportedChain(slug)) {
       throw new Error(
-        `Unsupported chain '${slug}'. Supported: ${SUPPORTED_CHAINS.join(', ')}`,
+        `Unsupported chain '${slug}'. Supported: ${getSupportedChains().join(', ')}`,
       );
     }
   }

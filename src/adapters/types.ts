@@ -127,7 +127,8 @@ export type ChainKey =
   | 'avalanche-fuji'
   | 'avalanche-mainnet'
   | 'base-sepolia'
-  | 'base-mainnet';
+  | 'base-mainnet'
+  | 'tempo-testnet'; // WKH-090 — cuarto rail (testnet-only, CD-2 → sin mainnet)
 
 /**
  * `AdaptersBundle` groups all chain-specific adapter instances + chain config
