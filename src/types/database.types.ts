@@ -450,6 +450,118 @@ export type Database = {
           },
         ];
       };
+      a2a_payment_intents: {
+        Row: {
+          authorized_usd: number;
+          buyer_wallet: string | null;
+          cap_nonce: string | null;
+          cap_signature: string | null;
+          chain_id: number;
+          consumed_usd: number;
+          created_at: string;
+          error_message: string | null;
+          expires_at: string;
+          id: string;
+          intent_type: string;
+          key_id: string;
+          owner_ref: string;
+          pay_to: string;
+          residual_usd: number | null;
+          seller_ref: string;
+          settle_tx_hash: string | null;
+          status: string;
+          updated_at: string;
+        };
+        Insert: {
+          authorized_usd: number;
+          buyer_wallet?: string | null;
+          cap_nonce?: string | null;
+          cap_signature?: string | null;
+          chain_id: number;
+          consumed_usd?: number;
+          created_at?: string;
+          error_message?: string | null;
+          expires_at: string;
+          id?: string;
+          intent_type: string;
+          key_id: string;
+          owner_ref: string;
+          pay_to: string;
+          residual_usd?: number | null;
+          seller_ref: string;
+          settle_tx_hash?: string | null;
+          status?: string;
+          updated_at?: string;
+        };
+        Update: {
+          authorized_usd?: number;
+          buyer_wallet?: string | null;
+          cap_nonce?: string | null;
+          cap_signature?: string | null;
+          chain_id?: number;
+          consumed_usd?: number;
+          created_at?: string;
+          error_message?: string | null;
+          expires_at?: string;
+          id?: string;
+          intent_type?: string;
+          key_id?: string;
+          owner_ref?: string;
+          pay_to?: string;
+          residual_usd?: number | null;
+          seller_ref?: string;
+          settle_tx_hash?: string | null;
+          status?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'a2a_payment_intents_key_id_fkey';
+            columns: ['key_id'];
+            isOneToOne: false;
+            referencedRelation: 'a2a_agent_keys';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
+      a2a_payment_vouchers: {
+        Row: {
+          amount_usd: number;
+          created_at: string;
+          id: string;
+          intent_id: string;
+          owner_ref: string;
+          voucher_id: string;
+          voucher_signature: string | null;
+        };
+        Insert: {
+          amount_usd: number;
+          created_at?: string;
+          id?: string;
+          intent_id: string;
+          owner_ref: string;
+          voucher_id: string;
+          voucher_signature?: string | null;
+        };
+        Update: {
+          amount_usd?: number;
+          created_at?: string;
+          id?: string;
+          intent_id?: string;
+          owner_ref?: string;
+          voucher_id?: string;
+          voucher_signature?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'a2a_payment_vouchers_intent_id_fkey';
+            columns: ['intent_id'];
+            isOneToOne: false;
+            referencedRelation: 'a2a_payment_intents';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
       a2a_protocol_fees: {
         Row: {
           budget_usdc: number;
@@ -2310,6 +2422,62 @@ export type Database = {
       };
     };
     Functions: {
+      accumulate_payment_voucher: {
+        Args: {
+          p_intent_id: string;
+          p_owner_ref: string;
+          p_voucher_id: string;
+          p_amount: number;
+        };
+        Returns: { consumed: number; is_duplicate: boolean }[];
+      };
+      close_payment_intent_for_settle: {
+        Args: {
+          p_intent_id: string;
+          p_owner_ref: string;
+          p_reported_usage: number;
+        };
+        Returns: {
+          final_amount: number;
+          prev_status: string;
+          intent_type: string;
+          key_id: string;
+          chain_id: number;
+          pay_to: string;
+          authorized_usd: number;
+          consumed_usd: number;
+          settle_tx_hash: string | null;
+        }[];
+      };
+      finalize_payment_intent: {
+        Args: {
+          p_intent_id: string;
+          p_owner_ref: string;
+          p_tx_hash: string | null;
+          p_final_amount: number;
+          p_residual: number | null;
+          p_success: boolean;
+          p_error: string | null;
+        };
+        Returns: undefined;
+      };
+      open_payment_intent: {
+        Args: {
+          p_id: string;
+          p_intent_type: string;
+          p_owner_ref: string;
+          p_key_id: string;
+          p_buyer_wallet: string | null;
+          p_seller_ref: string;
+          p_pay_to: string;
+          p_chain_id: number;
+          p_authorized_usd: number;
+          p_cap_signature: string | null;
+          p_cap_nonce: string | null;
+          p_expires_at: string;
+        };
+        Returns: undefined;
+      };
       append_step_output: {
         Args: {
           p_agent_slug: string;

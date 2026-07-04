@@ -32,6 +32,7 @@ import gaslessRoutes from './routes/gasless.js';
 import metricsRoutes from './routes/metrics.js';
 import mockRegistryRoutes from './routes/mock-registry.js';
 import orchestrateRoutes from './routes/orchestrate.js';
+import paymentsRoutes from './routes/payments.js';
 import receiptsRoutes from './routes/receipts.js';
 import registriesRoutes from './routes/registries.js';
 import tasksRoutes from './routes/tasks.js';
@@ -145,6 +146,8 @@ await fastify.register(discoverRoutes, { prefix: '/discover' });
 await fastify.register(capabilitiesRoutes, { prefix: '/capabilities' });
 await fastify.register(composeRoutes, { prefix: '/compose' });
 await fastify.register(orchestrateRoutes, { prefix: '/orchestrate' });
+// WKH-135: payment intents (session metered + upto cap dual-firmado). Aditivo.
+await fastify.register(paymentsRoutes, { prefix: '/payments' });
 await fastify.register(agentCardRoutes, { prefix: '/agents' });
 // WKH-134: self-serve agent publishing (POST/PATCH/DELETE/GET /agents). Mismo
 // prefijo que agentCardRoutes (Fastify soporta varios plugins por prefijo);
