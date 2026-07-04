@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   getSplitConfig,
+  referralActive,
   SplitConfigError,
   splitsActive,
 } from './split-config.js';
@@ -201,5 +202,61 @@ describe('splitsActive', () => {
     process.env.SPLIT_BPS_REFERRAL = '9999';
     expect(() => splitsActive()).not.toThrow();
     expect(splitsActive()).toBe(true);
+  });
+});
+
+// WKH-143c (CD-B4) — gate FINO NO-throw específico del referral.
+describe('referralActive', () => {
+  const KEYS = ['SPLIT_BPS_REFERRAL'] as const;
+  const original: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of KEYS) {
+      original[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (original[k] === undefined) delete process.env[k];
+      else process.env[k] = original[k];
+    }
+  });
+
+  // T-REFACTIVE: SPLIT_BPS_REFERRAL > 0 → true.
+  it('T-REFACTIVE: returns true when SPLIT_BPS_REFERRAL > 0', () => {
+    process.env.SPLIT_BPS_REFERRAL = '500';
+    expect(referralActive()).toBe(true);
+  });
+
+  // T-REFACTIVE: unset → false.
+  it('T-REFACTIVE: returns false when SPLIT_BPS_REFERRAL is unset', () => {
+    expect(referralActive()).toBe(false);
+  });
+
+  // T-REFACTIVE: empty string → false.
+  it('T-REFACTIVE: returns false for empty string', () => {
+    process.env.SPLIT_BPS_REFERRAL = '';
+    expect(referralActive()).toBe(false);
+  });
+
+  // T-REFACTIVE: explicit '0' → false.
+  it('T-REFACTIVE: returns false for explicit 0', () => {
+    process.env.SPLIT_BPS_REFERRAL = '0';
+    expect(referralActive()).toBe(false);
+  });
+
+  // T-REFACTIVE: garbage → false, SIN throw.
+  it('T-REFACTIVE: returns false for garbage without throwing', () => {
+    process.env.SPLIT_BPS_REFERRAL = 'abc';
+    expect(() => referralActive()).not.toThrow();
+    expect(referralActive()).toBe(false);
+  });
+
+  // T-REFACTIVE: non-integer '12.5' → false.
+  it('T-REFACTIVE: returns false for a non-integer ("12.5")', () => {
+    process.env.SPLIT_BPS_REFERRAL = '12.5';
+    expect(referralActive()).toBe(false);
   });
 });

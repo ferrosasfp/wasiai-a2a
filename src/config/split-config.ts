@@ -134,3 +134,30 @@ export function splitsActive(): boolean {
     peek(process.env.SPLIT_BPS_CREATOR) || peek(process.env.SPLIT_BPS_REFERRAL)
   );
 }
+
+/**
+ * WKH-143c — Gate FINO NO-throw específico del referral.
+ *
+ * Peek tolerante de SOLO `SPLIT_BPS_REFERRAL`: devuelve `true` únicamente si
+ * parsea a un entero `> 0`. Ausente / vacío / NaN / basura / no-entero / `'0'`
+ * → `false`. NUNCA throwea (a diferencia de `getSplitConfig`).
+ *
+ * A diferencia de `splitsActive()` (que es `true` con `SPLIT_BPS_CREATOR>0`
+ * aunque el referral esté en 0), este gate aísla el referral: con
+ * `SPLIT_BPS_CREATOR>0` pero `SPLIT_BPS_REFERRAL=0`, `splitsActive()` es `true`
+ * pero el lookup del referrer NO debe correr → cero query extra (CD-B4).
+ * PROHIBIDO llamar `getSplitConfig()` acá (throwea `SplitConfigError`).
+ */
+export function referralActive(): boolean {
+  const peek = (raw: string | undefined): boolean => {
+    if (raw === undefined || raw === '') return false;
+    const parsed = Number.parseInt(raw, 10);
+    // `Number.parseInt('12.5')` → 12 (trunca); comparamos contra el string
+    // original (trim) para rechazar no-enteros/basura → false, nunca throw.
+    return (
+      Number.isInteger(parsed) && parsed > 0 && String(parsed) === raw.trim()
+    );
+  };
+
+  return peek(process.env.SPLIT_BPS_REFERRAL);
+}

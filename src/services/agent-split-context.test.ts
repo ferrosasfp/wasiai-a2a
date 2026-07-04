@@ -10,7 +10,7 @@
  *   T-CTX-REF-NULL DT-6    — referral SIEMPRE null en v1.
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ─── Structured logger mock ─────────────────────────────────
 const logSpy = vi.hoisted(() => ({
@@ -35,12 +35,27 @@ import { resolveAgentSplitContext } from './agent-split-context.js';
 
 // ─── Fixtures ───────────────────────────────────────────────
 const PAYOUT = '0x2222222222222222222222222222222222222222';
+// Referrer payout wallet (WKH-143c), distinto del creator.
+const W_REF = '0x3333333333333333333333333333333333333333';
 
 function agent(partial: Partial<Agent>): Agent {
   return { registry_id: 'kite', slug: 'some-agent', ...partial } as Agent;
 }
 
+// WKH-143c: aislar `SPLIT_BPS_REFERRAL` para que la suite existente
+// (T-CTX-*/T-143B-*) corra con referral OFF (byte-idéntico) y cada test de
+// referral setee su propio valor (patrón split-config.test.ts:145-157).
+const originalReferralBps = { value: undefined as string | undefined };
+
+beforeEach(() => {
+  originalReferralBps.value = process.env.SPLIT_BPS_REFERRAL;
+  delete process.env.SPLIT_BPS_REFERRAL;
+});
+
 afterEach(() => {
+  if (originalReferralBps.value === undefined)
+    delete process.env.SPLIT_BPS_REFERRAL;
+  else process.env.SPLIT_BPS_REFERRAL = originalReferralBps.value;
   vi.clearAllMocks();
 });
 
@@ -187,5 +202,127 @@ describe('resolveAgentSplitContext', () => {
       agent({ registry_id: SELF_PUBLISHED_REGISTRY_ID, slug: 'a2' }),
     );
     expect(defaultCtx).toEqual({ creator: null, referral: null });
+  });
+
+  // ── WKH-143c — referral real (Opción B) ─────────────────────────────
+
+  // T-REF-RESOLVE (AC-6, CD-B1) — referrer resuelve a payout_wallet real ≠ creator.
+  it('T-REF-RESOLVE: referrer_ref resolves to a real payout_wallet → referral leg', async () => {
+    process.env.SPLIT_BPS_REFERRAL = '500';
+    mockGetSplitContextRow
+      .mockResolvedValueOnce({
+        ownerRef: 'owner-A',
+        payoutWallet: PAYOUT,
+        referrerRef: 'B',
+      })
+      .mockResolvedValueOnce({
+        ownerRef: 'owner-B',
+        payoutWallet: W_REF,
+        referrerRef: null,
+      });
+
+    const ctx = await resolveAgentSplitContext(
+      agent({ registry_id: SELF_PUBLISHED_REGISTRY_ID, slug: 'A' }),
+    );
+
+    expect(ctx.creator).toEqual({ wallet: PAYOUT, ownerRef: 'owner-A' });
+    expect(ctx.referral).toEqual({ wallet: W_REF, ownerRef: 'owner-B' });
+    expect(mockGetSplitContextRow).toHaveBeenCalledWith('A');
+    expect(mockGetSplitContextRow).toHaveBeenCalledWith('B');
+  });
+
+  // T-REF-INVALID (AC-2) — referrer row invalid (null payout) → referral null.
+  it('T-REF-INVALID: referrer without payout_wallet → referral null, creator intact', async () => {
+    process.env.SPLIT_BPS_REFERRAL = '500';
+    mockGetSplitContextRow
+      .mockResolvedValueOnce({
+        ownerRef: 'owner-A',
+        payoutWallet: PAYOUT,
+        referrerRef: 'B',
+      })
+      .mockResolvedValueOnce(null);
+
+    const ctx = await resolveAgentSplitContext(
+      agent({ registry_id: SELF_PUBLISHED_REGISTRY_ID, slug: 'A' }),
+    );
+
+    expect(ctx.referral).toBeNull();
+    expect(ctx.creator).toEqual({ wallet: PAYOUT, ownerRef: 'owner-A' });
+  });
+
+  // T-REF-SELF-DEDUP (AC-7, CD-B2) — referrer wallet == creator (distinto casing) → null.
+  it('T-REF-SELF-DEDUP: referrer wallet equals creator (case-insensitive) → referral null', async () => {
+    process.env.SPLIT_BPS_REFERRAL = '500';
+    mockGetSplitContextRow
+      .mockResolvedValueOnce({
+        ownerRef: 'owner-A',
+        payoutWallet: PAYOUT,
+        referrerRef: 'B',
+      })
+      .mockResolvedValueOnce({
+        ownerRef: 'owner-B',
+        payoutWallet: PAYOUT.toUpperCase(),
+        referrerRef: null,
+      });
+
+    const ctx = await resolveAgentSplitContext(
+      agent({ registry_id: SELF_PUBLISHED_REGISTRY_ID, slug: 'A' }),
+    );
+
+    expect(ctx.referral).toBeNull();
+    expect(ctx.creator).toEqual({ wallet: PAYOUT, ownerRef: 'owner-A' });
+  });
+
+  // T-REF-BPS-OFF (AC-1, CD-B4/CD-P3) — referral OFF → cero 2ª query.
+  it('T-REF-BPS-OFF: SPLIT_BPS_REFERRAL unset → referral null and only one lookup', async () => {
+    mockGetSplitContextRow.mockResolvedValue({
+      ownerRef: 'owner-A',
+      payoutWallet: PAYOUT,
+      referrerRef: 'B',
+    });
+
+    const ctx = await resolveAgentSplitContext(
+      agent({ registry_id: SELF_PUBLISHED_REGISTRY_ID, slug: 'A' }),
+    );
+
+    expect(ctx.referral).toBeNull();
+    expect(mockGetSplitContextRow).toHaveBeenCalledTimes(1);
+  });
+
+  // T-REF-NO-REFERRER (AC-3) — referralActive but no referrer_ref → cero 2ª query.
+  it('T-REF-NO-REFERRER: referrer_ref null → referral null and only one lookup', async () => {
+    process.env.SPLIT_BPS_REFERRAL = '500';
+    mockGetSplitContextRow.mockResolvedValue({
+      ownerRef: 'owner-A',
+      payoutWallet: PAYOUT,
+      referrerRef: null,
+    });
+
+    const ctx = await resolveAgentSplitContext(
+      agent({ registry_id: SELF_PUBLISHED_REGISTRY_ID, slug: 'A' }),
+    );
+
+    expect(ctx.referral).toBeNull();
+    expect(mockGetSplitContextRow).toHaveBeenCalledTimes(1);
+  });
+
+  // T-REF-THROW (AC-5, CD-B3) — 2ª query rechaza → referral null, creator preservado.
+  it('T-REF-THROW: referrer lookup rejects → referral null, creator preserved, logged', async () => {
+    process.env.SPLIT_BPS_REFERRAL = '500';
+    mockGetSplitContextRow
+      .mockResolvedValueOnce({
+        ownerRef: 'owner-A',
+        payoutWallet: PAYOUT,
+        referrerRef: 'B',
+      })
+      .mockRejectedValueOnce(new Error('DB down'));
+
+    const ctx = await resolveAgentSplitContext(
+      agent({ registry_id: SELF_PUBLISHED_REGISTRY_ID, slug: 'A' }),
+    );
+
+    expect(ctx.referral).toBeNull();
+    expect(ctx.creator).toEqual({ wallet: PAYOUT, ownerRef: 'owner-A' });
+    expect(logSpy.error).toHaveBeenCalled();
   });
 });
