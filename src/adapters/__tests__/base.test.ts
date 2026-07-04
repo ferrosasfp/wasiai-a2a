@@ -33,13 +33,29 @@ vi.mock('../../lib/logger.js', () => ({
 }));
 
 // ─── Mocks ───────────────────────────────────────────────────────────────
+// `viem` partial mock — replaces `createWalletClient` + `createPublicClient`
+// (preserves `parseSignature`, `WaitForTransactionReceiptTimeoutError`, etc).
+// The `mock`-prefixed hoisted fns drive the WKH-138 gasless transfer/status.
+const mockWriteContract = vi.fn();
+const mockWaitForReceipt = vi.fn();
+const mockReadContract = vi.fn();
+// Valid 65-byte EIP-3009 signature (parseSignature-compatible, v=0x1b=27).
+const mockSignTypedData = vi
+  .fn()
+  .mockResolvedValue(`0x${'11'.repeat(32)}${'22'.repeat(32)}1b`);
+
 vi.mock('viem', async (importOriginal) => {
   const actual = await importOriginal<typeof import('viem')>();
   return {
     ...actual,
     createWalletClient: vi.fn(() => ({
       account: { address: '0x1234567890123456789012345678901234567890' },
-      signTypedData: vi.fn().mockResolvedValue(`0x${'ab'.repeat(65)}`),
+      signTypedData: mockSignTypedData,
+      writeContract: mockWriteContract,
+    })),
+    createPublicClient: vi.fn(() => ({
+      waitForTransactionReceipt: mockWaitForReceipt,
+      readContract: mockReadContract,
     })),
   };
 });
@@ -47,12 +63,23 @@ vi.mock('viem', async (importOriginal) => {
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
+import { WaitForTransactionReceiptTimeoutError } from 'viem';
 import { _resetBaseChain } from '../base/chain.js';
+import { _resetBaseGasless, BaseGaslessAdapter } from '../base/gasless.js';
 import { createBaseAdapters } from '../base/index.js';
 import { _resetWalletClient, BasePaymentAdapter } from '../base/payment.js';
+import { GaslessTransferError } from '../errors.js';
 
 const BASE_SEPOLIA_USDC_DEFAULT = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const BASE_MAINNET_USDC_DEFAULT = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+
+// Valid EIP-3009 signature the mocked signTypedData resolves to.
+const VALID_SIG = `0x${'11'.repeat(32)}${'22'.repeat(32)}1b`;
+// hardhat account #0 pubkey — NOT a secret; only used to configure the signer.
+const TEST_PK =
+  '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+// The mocked createWalletClient always returns this operator address.
+const MOCK_OPERATOR = '0x1234567890123456789012345678901234567890';
 
 describe('Base adapter — factory shape', () => {
   beforeEach(() => {
@@ -538,16 +565,124 @@ describe('Base payment adapter — contract', () => {
   });
 });
 
-describe('Base gasless adapter — stub', () => {
+describe('Base gasless adapter — EIP-3009 operator-relayed (WKH-138)', () => {
+  const TO = '0x000000000000000000000000000000000000dEaD' as `0x${string}`;
+  const TX_HASH = `0x${'ab'.repeat(32)}` as `0x${string}`;
+
   beforeEach(() => {
     _resetWalletClient();
     _resetBaseChain();
-    vi.clearAllMocks();
+    _resetBaseGasless();
+    mockWriteContract.mockReset();
+    mockWaitForReceipt.mockReset();
+    mockReadContract.mockReset();
+    mockSignTypedData.mockReset();
+    mockSignTypedData.mockResolvedValue(VALID_SIG);
+    delete process.env.GASLESS_ENABLED;
+    delete process.env.USDC_USD_RATE;
+    delete process.env.GASLESS_DEFAULT_CAP_USD;
+    delete process.env.BASE_SEPOLIA_USDC_ADDRESS;
+    delete process.env.BASE_MAINNET_USDC_ADDRESS;
+    process.env.OPERATOR_PRIVATE_KEY = TEST_PK;
   });
 
-  it('status() returns disabled on testnet', async () => {
-    const bundle = await createBaseAdapters({ network: 'testnet' });
-    const status = await bundle.gasless.status();
+  afterEach(() => {
+    delete process.env.OPERATOR_PRIVATE_KEY;
+    delete process.env.GASLESS_ENABLED;
+    delete process.env.USDC_USD_RATE;
+    delete process.env.GASLESS_DEFAULT_CAP_USD;
+  });
+
+  // ── T-AC1: sign + writeContract + receipt success → { txHash } ────────────
+  it('T-AC1: transfer() signs, submits via writeContract and returns { txHash }', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success' });
+
+    const adapter = new BaseGaslessAdapter(84532);
+    const result = await adapter.transfer({ to: TO, value: 1_000_000n }); // $1 < cap $10
+
+    expect(result).toEqual({ txHash: TX_HASH });
+    expect(mockWriteContract).toHaveBeenCalledTimes(1);
+    // CD-6: from == operator address (the caller never controls `from`).
+    const args = mockWriteContract.mock.calls[0]![0].args;
+    expect(args[0]).toBe(MOCK_OPERATOR); // from
+    expect(args[1]).toBe(TO); // to
+    expect(args[2]).toBe(1_000_000n); // value
+    expect(mockWriteContract.mock.calls[0]![0].functionName).toBe(
+      'transferWithAuthorization',
+    );
+  });
+
+  // ── T-SIGN: EIP-712 name differs per network (Sepolia "USDC") ─────────────
+  it('T-AC1: sign domain uses network-specific EIP-712 name (Sepolia = "USDC")', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success' });
+    const adapter = new BaseGaslessAdapter(84532);
+    await adapter.transfer({ to: TO, value: 1_000_000n });
+    expect(mockSignTypedData.mock.calls[0]![0].domain.name).toBe('USDC');
+  });
+
+  it('T-AC1: sign domain uses network-specific EIP-712 name (Mainnet = "USD Coin")', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success' });
+    const adapter = new BaseGaslessAdapter(8453);
+    await adapter.transfer({ to: TO, value: 1_000_000n });
+    expect(mockSignTypedData.mock.calls[0]![0].domain.name).toBe('USD Coin');
+  });
+
+  // ── T-DRAIN-CAP (adapter-level, CD-5): value > cap → throw BEFORE submit ──
+  it('T-DRAIN-CAP: value over per-call cap throws before writeContract', async () => {
+    process.env.GASLESS_DEFAULT_CAP_USD = '10';
+    const adapter = new BaseGaslessAdapter(84532);
+    await expect(
+      adapter.transfer({ to: TO, value: 50_000_000n }), // $50 > $10
+    ).rejects.toBeInstanceOf(GaslessTransferError);
+    expect(mockWriteContract).not.toHaveBeenCalled();
+    expect(mockSignTypedData).not.toHaveBeenCalled();
+  });
+
+  it('T-DRAIN-CAP: overflow value (fail-closed +Infinity) throws before submit', async () => {
+    const adapter = new BaseGaslessAdapter(84532);
+    await expect(
+      adapter.transfer({ to: TO, value: 2n ** 60n }),
+    ).rejects.toBeInstanceOf(GaslessTransferError);
+    expect(mockWriteContract).not.toHaveBeenCalled();
+  });
+
+  // ── T-SIGN-INVALID (CD-8): writeContract reject / revert / timeout ────────
+  it('T-SIGN-INVALID: writeContract reject → GaslessTransferError, no txHash fabricated', async () => {
+    mockWriteContract.mockRejectedValue(new Error('nonce already used'));
+    const adapter = new BaseGaslessAdapter(84532);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toBeInstanceOf(GaslessTransferError);
+    expect(mockWaitForReceipt).not.toHaveBeenCalled();
+  });
+
+  it('T-SIGN-INVALID: receipt status reverted → GaslessTransferError', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'reverted' });
+    const adapter = new BaseGaslessAdapter(84532);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toThrow(/reverted/);
+  });
+
+  it('T-SIGN-INVALID: receipt timeout (WaitForTransactionReceiptTimeoutError) → GaslessTransferError', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockRejectedValue(
+      new WaitForTransactionReceiptTimeoutError({ hash: TX_HASH }),
+    );
+    const adapter = new BaseGaslessAdapter(84532);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toThrow(/timeout/);
+  });
+
+  // ── T-AC3: status() funding_state per enabled/pk/balance ──────────────────
+  it('T-AC3: status() → disabled when GASLESS_ENABLED != true', async () => {
+    const adapter = new BaseGaslessAdapter(84532);
+    const status = await adapter.status();
     expect(status.enabled).toBe(false);
     expect(status.funding_state).toBe('disabled');
     expect(status.network).toBe('base-sepolia');
@@ -556,22 +691,79 @@ describe('Base gasless adapter — stub', () => {
     expect(status.operatorAddress).toBeNull();
   });
 
-  it('status() returns disabled on mainnet', async () => {
-    const bundle = await createBaseAdapters({ network: 'mainnet' });
-    const status = await bundle.gasless.status();
-    expect(status.enabled).toBe(false);
-    expect(status.network).toBe('base-mainnet');
-    expect(status.chain_id).toBe(8453);
+  it('T-AC3: status() → unconfigured when enabled but no OPERATOR_PRIVATE_KEY', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    delete process.env.OPERATOR_PRIVATE_KEY;
+    const adapter = new BaseGaslessAdapter(84532);
+    const status = await adapter.status();
+    expect(status.enabled).toBe(true);
+    expect(status.operatorAddress).toBeNull();
+    expect(status.funding_state).toBe('unconfigured');
   });
 
-  it('transfer() throws (not implemented — pending CDP)', async () => {
-    const bundle = await createBaseAdapters({ network: 'testnet' });
-    await expect(
-      bundle.gasless.transfer({
-        to: '0x000000000000000000000000000000000000dEaD' as `0x${string}`,
-        value: 1000000n,
-      }),
-    ).rejects.toThrow('Base gasless not implemented');
+  it('T-AC3: status() → unfunded when balance 0n', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    mockReadContract.mockResolvedValue(0n);
+    const adapter = new BaseGaslessAdapter(84532);
+    const status = await adapter.status();
+    expect(status.funding_state).toBe('unfunded');
+    expect(status.operatorAddress).not.toBeNull();
+  });
+
+  it('T-AC3: status() → unfunded when balanceOf RPC fails (fail-closed)', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    mockReadContract.mockRejectedValue(new Error('RPC down'));
+    const adapter = new BaseGaslessAdapter(84532);
+    const status = await adapter.status();
+    expect(status.funding_state).toBe('unfunded');
+  });
+
+  it('T-AC3: status() → ready when balance > 0', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    mockReadContract.mockResolvedValue(5_000_000n);
+    const adapter = new BaseGaslessAdapter(84532);
+    const status = await adapter.status();
+    expect(status.funding_state).toBe('ready');
+  });
+
+  // ── T-AC4: status() reports real USDC supportedToken ──────────────────────
+  it('T-AC4: status() reports USDC supportedToken (6 decimals, real address)', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    mockReadContract.mockResolvedValue(5_000_000n);
+    const adapter = new BaseGaslessAdapter(84532);
+    const status = await adapter.status();
+    expect(status.supportedToken).not.toBeNull();
+    expect(status.supportedToken!.symbol).toBe('USDC');
+    expect(status.supportedToken!.decimals).toBe(6);
+    expect(status.supportedToken!.eip712Name).toBe('USDC'); // Sepolia
+  });
+
+  // ── T-DEC (CD-2): gasless token == payment adapter token, same network ────
+  it('T-DEC: gasless supportedToken address/decimals == payment adapter (sepolia)', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    mockReadContract.mockResolvedValue(1n);
+    const gasless = new BaseGaslessAdapter(84532);
+    const payment = new BasePaymentAdapter({ network: 'testnet' });
+    const status = await gasless.status();
+    expect(status.supportedToken!.address.toLowerCase()).toBe(
+      payment.getToken().toLowerCase(),
+    );
+    expect(status.supportedToken!.decimals).toBe(
+      payment.supportedTokens[0]!.decimals,
+    );
+  });
+
+  it('T-DEC: gasless supportedToken address/decimals == payment adapter (mainnet)', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    mockReadContract.mockResolvedValue(1n);
+    const gasless = new BaseGaslessAdapter(8453);
+    const payment = new BasePaymentAdapter({ network: 'mainnet' });
+    const status = await gasless.status();
+    expect(status.network).toBe('base-mainnet');
+    expect(status.supportedToken!.address.toLowerCase()).toBe(
+      payment.getToken().toLowerCase(),
+    );
+    expect(status.supportedToken!.decimals).toBe(6);
   });
 });
 
