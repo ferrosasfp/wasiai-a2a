@@ -101,7 +101,18 @@ describe('SQL estructural — up migration (WKH-142 negative amount guard)', () 
 
   it('T6 (AC-5): declara el CHECK (price_usdc >= 0)', () => {
     expect(sql).toContain(
-      'ADD CONSTRAINT a2a_agents_price_usdc_nonneg CHECK (price_usdc >= 0)',
+      'ADD CONSTRAINT a2a_agents_price_usdc_nonneg CHECK (price_usdc >= 0',
+    );
+  });
+
+  it("MNR-1: el CHECK rechaza NaN (<> 'NaN'::numeric) — simetría con el guard RPC", () => {
+    // En Postgres 'NaN' >= 0 es true, así que el CHECK debe excluir NaN explícito.
+    expect(sql).toContain(
+      "ADD CONSTRAINT a2a_agents_price_usdc_nonneg CHECK (price_usdc >= 0 AND price_usdc <> 'NaN'::numeric)",
+    );
+    // El clamp también limpia NaN preexistente antes del constraint.
+    expect(sql).toContain(
+      "UPDATE public.a2a_agents SET price_usdc = 0 WHERE price_usdc < 0 OR price_usdc = 'NaN'::numeric",
     );
   });
 });

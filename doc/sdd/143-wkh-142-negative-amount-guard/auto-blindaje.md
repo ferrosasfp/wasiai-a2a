@@ -1,5 +1,11 @@
 # Auto-Blindaje — WKH-142 (negative amount guard)
 
+### [2026-07-04] Fix-pack MENOR — el CHECK con `toContain` de substring exacto rompe al extender el CHECK
+- **Error**: al pasar el CHECK de `(price_usdc >= 0)` a `(price_usdc >= 0 AND price_usdc <> 'NaN'::numeric)`, el test T6 falló porque asertaba el substring `CHECK (price_usdc >= 0)` con el paréntesis de cierre, que ya no existe (ahora hay ` AND ...)`).
+- **Causa raíz**: `toContain` con un fragmento SQL que incluye el `)` de cierre acopla el test al final exacto del predicado; cualquier extensión del CHECK lo rompe.
+- **Fix**: aflojé el assert a `CHECK (price_usdc >= 0` (sin paréntesis de cierre) y agregué un test dedicado (MNR-1) que valida el predicado NaN completo por separado.
+- **Aplicar en**: al asertar cláusulas SQL extensibles (CHECK, WHERE), no incluir el delimitador de cierre en el substring salvo que se quiera fijar el predicado completo.
+
 ### [2026-07-04] Wave 3 — El comentario del SQL rompió el conteo "INVALID_AMOUNT exactamente 1 vez"
 - **Error**: T3 (choke-point) contó 2 ocurrencias de `INVALID_AMOUNT` en el UP y falló; la migración down contenía `INVALID_AMOUNT` en un comentario y rompió el assert "down NO contiene INVALID_AMOUNT".
 - **Causa raíz**: usé el literal `INVALID_AMOUNT` dentro de comentarios (`-- CD-7: INVALID_AMOUNT ...` en el UP y `-- ... SIN el guard INVALID_AMOUNT` en el down). El test estructural (y el `git grep` de la Done Definition) cuentan TODAS las apariciones del token, no solo el `RAISE EXCEPTION`.

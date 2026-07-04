@@ -11,8 +11,8 @@
 --   1. DB choke-point: guard NULL / < 0 / NaN dentro de increment_a2a_key_spend
 --      (los 4 RPC de débito la atraviesan vía PERFORM → un IF cierra las 4
 --      rutas, sin duplicar). CD-7: el prefijo del guard aparece UNA sola vez.
---   2. Clamp de datos preexistentes (price_usdc < 0 → 0) ANTES del constraint.
---   3. CHECK (price_usdc >= 0) en a2a_agents.
+--   2. Clamp de datos preexistentes (price_usdc < 0 OR NaN → 0) ANTES del constraint.
+--   3. CHECK (price_usdc >= 0 AND <> NaN) en a2a_agents (simetría con el guard RPC).
 --
 -- CD-1: la firma de increment_a2a_key_spend NO cambia (uuid, integer, numeric,
 --       text). Solo se inserta el IF. NO se hace DROP (la aridad no cambia).
@@ -120,13 +120,17 @@ GRANT EXECUTE ON FUNCTION public.increment_a2a_key_spend(uuid, integer, numeric,
 
 -- ------------------------------------------------------------
 -- (2) Clamp de datos preexistentes ANTES del constraint (CD-3, misma tx).
+-- Incluye NaN: en Postgres 'NaN' >= 0 es true, así que WHERE price_usdc < 0 NO lo
+-- limpia. Se clampea explícitamente para que el constraint no falle sobre una fila
+-- NaN preexistente.
 -- ------------------------------------------------------------
-UPDATE public.a2a_agents SET price_usdc = 0 WHERE price_usdc < 0;
+UPDATE public.a2a_agents SET price_usdc = 0 WHERE price_usdc < 0 OR price_usdc = 'NaN'::numeric;
 
 -- ------------------------------------------------------------
--- (3) Constraint no-negativo (después del clamp, misma tx).
+-- (3) Constraint no-negativo (después del clamp, misma tx). Rechaza también NaN
+-- (en Postgres 'NaN' >= 0 es true) → simetría con el guard del RPC.
 -- ------------------------------------------------------------
 ALTER TABLE public.a2a_agents
-  ADD CONSTRAINT a2a_agents_price_usdc_nonneg CHECK (price_usdc >= 0);
+  ADD CONSTRAINT a2a_agents_price_usdc_nonneg CHECK (price_usdc >= 0 AND price_usdc <> 'NaN'::numeric);
 
 COMMIT;
