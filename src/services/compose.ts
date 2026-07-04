@@ -207,6 +207,7 @@ export const composeService = {
         const isInvalid =
           typeof agent.priceUsdc !== 'number' ||
           agent.priceUsdc === 0 ||
+          agent.priceUsdc < 0 ||
           Number.isNaN(agent.priceUsdc);
         // Gas pass-through (audit 2026-06-25): the caller is debited the agent
         // price PLUS the per-step gas overhead. `stepGasOverhead` is 0 on

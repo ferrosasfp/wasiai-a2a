@@ -233,6 +233,15 @@ export class AgentKeyBudgetExhaustedError extends Error {
   }
 }
 
+/** RPC `INVALID_AMOUNT` (importe de débito NULL / negativo / NaN) → 400/input error. */
+export class InvalidDebitAmountError extends Error {
+  readonly code = 'DEBIT_INVALID_AMOUNT' as const;
+  constructor() {
+    super('Debit amount must be a non-negative number');
+    this.name = 'InvalidDebitAmountError';
+  }
+}
+
 /**
  * WKH-101 FIX-PACK (AR-MNR-1 / AR-MNR-2): error classes para los prefijos del
  * RPC chain `debit_delegation_and_parent` → `increment_a2a_key_spend` que antes

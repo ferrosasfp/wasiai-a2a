@@ -1941,6 +1941,103 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       'compose-price.fallback per-step',
     );
   });
+
+  // WKH-142 (T4 / AC-3): per-step con priceUsdc negativo → mismo fallback honesto
+  // (PLACEHOLDER_FEE_USD, NUNCA un débito negativo) + warn reason='registry-miss'.
+  it('T4 (AC-3) per-step negative priceUsdc → fallback debit (never negative) + registry-miss warn', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({
+      slug: 'neg-price',
+      priceUsdc: -1,
+      id: 'agent-2',
+    });
+    mockAgentsBySlug({ kyc: a1, 'neg-price': a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+    const warnSpy = vi.fn();
+    const logger = { warn: warnSpy, info: vi.fn() };
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'neg-price', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      logger,
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    // priceUsdc < 0 → isInvalid → fallback $1 (NUNCA el -1 negativo).
+    expect(mockDebit).toHaveBeenCalledWith(
+      'k1',
+      2368,
+      1.0,
+      undefined,
+      undefined,
+      'test-registry/neg-price',
+      'owner-test',
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'registry-miss',
+        slug: 'neg-price',
+        step: 1,
+      }),
+      'compose-price.fallback per-step',
+    );
+  });
+
+  // WKH-142 (T9 / no-regresión): per-step con priceUsdc POSITIVO legítimo sigue
+  // debitando el precio real (no el fallback) y NO emite el warn registry-miss.
+  it('T9 no-regression: positive per-step priceUsdc debits the real price, no fallback', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({
+      slug: 'paid',
+      priceUsdc: 1.0,
+      id: 'agent-2',
+    });
+    mockAgentsBySlug({ kyc: a1, paid: a2 });
+    mockFetchOk();
+    mockFetchOk();
+
+    const keyRow = makeKeyRow({ id: 'k1' });
+    const warnSpy = vi.fn();
+    const logger = { warn: warnSpy, info: vi.fn() };
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'paid', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+      logger,
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    // priceUsdc 1.0 válido → debita el precio real (no el fallback).
+    expect(mockDebit).toHaveBeenCalledWith(
+      'k1',
+      2368,
+      1.0,
+      undefined,
+      undefined,
+      'test-registry/paid',
+      'owner-test',
+    );
+    // NO se emite el warn registry-miss para un precio válido.
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'registry-miss' }),
+      'compose-price.fallback per-step',
+    );
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
