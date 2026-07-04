@@ -468,6 +468,7 @@ export type Database = {
           pay_to: string;
           residual_usd: number | null;
           seller_ref: string;
+          settle_outcome: string | null;
           settle_tx_hash: string | null;
           status: string;
           updated_at: string;
@@ -489,6 +490,7 @@ export type Database = {
           pay_to: string;
           residual_usd?: number | null;
           seller_ref: string;
+          settle_outcome?: string | null;
           settle_tx_hash?: string | null;
           status?: string;
           updated_at?: string;
@@ -510,6 +512,7 @@ export type Database = {
           pay_to?: string;
           residual_usd?: number | null;
           seller_ref?: string;
+          settle_outcome?: string | null;
           settle_tx_hash?: string | null;
           status?: string;
           updated_at?: string;
@@ -2447,7 +2450,19 @@ export type Database = {
           authorized_usd: number;
           consumed_usd: number;
           settle_tx_hash: string | null;
+          settle_outcome: string | null;
         }[];
+      };
+      record_settle_outcome: {
+        Args: {
+          p_intent_id: string;
+          p_owner_ref: string;
+          p_outcome: string;
+          p_tx_hash: string | null;
+          p_residual: number | null;
+          p_error: string | null;
+        };
+        Returns: undefined;
       };
       finalize_payment_intent: {
         Args: {
@@ -2456,7 +2471,7 @@ export type Database = {
           p_tx_hash: string | null;
           p_final_amount: number;
           p_residual: number | null;
-          p_success: boolean;
+          p_outcome: string;
           p_error: string | null;
         };
         Returns: undefined;

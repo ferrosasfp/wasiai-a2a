@@ -203,13 +203,66 @@ function mapPgError(error: PgError, ctx: string, nonceContext: boolean): never {
 }
 
 /**
- * finalize best-effort (CD-7): tras un settle on-chain exitoso NUNCA re-lanzamos
- * — el dinero ya se movió; un fallo del UPDATE/refund se loguea y se resuelve por
- * expiry/retry. Idempotente (el RPC solo actúa mientras status='closing').
+ * BLQ-DR (money-path): veredicto persistido del settle. El refund vive AHORA dentro
+ * de finalize_payment_intent (misma tx que el status flip, status-gated), y la
+ * recovery LEE este veredicto en vez de asumir éxito.
+ */
+export type SettleVerdict =
+  | 'settled'
+  | 'failed_unequivocal'
+  | 'failed_ambiguous';
+
+/**
+ * BLQ-DR: persiste el VEREDICTO del settle (money-free) mientras el intent está en
+ * 'closing', ANTES de invocar finalize (que mueve el refund). Si finalize falla, la
+ * recovery lee este veredicto y aplica la acción CORRECTA — nunca asume éxito.
  *
- * BLQ-2: devuelve `true` sólo si el RPC corrió sin error (la fila quedó
- * finalizada o ya no estaba en 'closing'). `false` si el RPC falló/lanzó → el
- * intent sigue 'closing' huérfano y el caller NO debe reportar `settled` a ciegas.
+ * Best-effort (idempotente en el RPC): un fallo del write se loguea pero NO aborta —
+ * finalize re-afirma settle_outcome dentro de su propia tx. La única ventana residual
+ * (record Y finalize fallan ambos) es money-safe: la recovery cae a 'failed_ambiguous'
+ * (NO refund, reconcile), nunca a un doble-refund.
+ */
+async function recordSettleOutcome(
+  intentId: string,
+  ownerRef: string,
+  outcome: SettleVerdict,
+  txHash: string | null,
+  residual: number | null,
+  errorMessage: string | null,
+): Promise<void> {
+  try {
+    const { error } = await supabase.rpc('record_settle_outcome', {
+      p_intent_id: intentId,
+      p_owner_ref: ownerRef,
+      p_outcome: outcome,
+      p_tx_hash: txHash,
+      p_residual: residual,
+      p_error: errorMessage,
+    });
+    if (error) {
+      log.error(
+        { intentId, detail: error.message },
+        'record_settle_outcome failed (finalize re-afirmará el veredicto)',
+      );
+    }
+  } catch (err) {
+    log.error(
+      { intentId, detail: err instanceof Error ? err.message : String(err) },
+      'record_settle_outcome threw',
+    );
+  }
+}
+
+/**
+ * finalize (CD-7 + BLQ-DR): aplica el veredicto del settle ATÓMICAMENTE — money
+ * (refund) + status flip en la MISMA tx, status-gated en 'closing'. Re-invocar
+ * cuando ya es terminal = no-op ⇒ el refund se aplica EXACTAMENTE UNA VEZ bajo
+ * cualquier retry/expireStale (era la causa raíz del double-refund: el refund
+ * estaba FUERA de la tx del status).
+ *
+ * Devuelve `true` sólo si el RPC corrió sin error (la fila quedó finalizada o ya no
+ * estaba en 'closing'). `false` si falló/lanzó → el intent sigue 'closing' con el
+ * veredicto persistido (por recordSettleOutcome) → la recovery lo re-aplica.
  */
 async function finalizePaymentIntent(
   intentId: string,
@@ -217,7 +270,7 @@ async function finalizePaymentIntent(
   txHash: string | null,
   finalAmount: number,
   residual: number | null,
-  success: boolean,
+  outcome: SettleVerdict,
   errorMessage: string | null,
 ): Promise<boolean> {
   try {
@@ -227,7 +280,7 @@ async function finalizePaymentIntent(
       p_tx_hash: txHash,
       p_final_amount: finalAmount,
       p_residual: residual,
-      p_success: success,
+      p_outcome: outcome,
       p_error: errorMessage,
     });
     if (error) {
@@ -268,35 +321,16 @@ async function debitBuyer(
 }
 
 /**
- * BLQ-1: reembolsa un débito YA aplicado (refund_a2a_key_spend, espejo inverso).
- * Best-effort: un fallo se loguea para reconciliación (NO re-lanza — el settle ya
- * resuelve `failed`; re-lanzar dejaría la promise rechazando contra CD-7).
+ * BLQ-DR: normaliza el `settle_outcome` persistido a un veredicto. NULL/desconocido
+ * → 'failed_ambiguous' (money-safe): sin veredicto NO asumimos éxito ni refund; se
+ * marca reconciliable. NUNCA default a 'settled' (esa asunción era la causa raíz).
  */
-async function refundBuyer(
-  keyId: string,
-  chainId: number,
-  amountUsd: number,
-  ownerRef: string,
-): Promise<void> {
-  try {
-    const { error } = await supabase.rpc('refund_a2a_key_spend', {
-      p_key_id: keyId,
-      p_chain_id: chainId,
-      p_amount_usd: amountUsd,
-      p_owner_ref: ownerRef,
-    });
-    if (error) {
-      log.error(
-        { keyId, detail: error.message },
-        'refund_a2a_key_spend failed (needs reconcile)',
-      );
-    }
-  } catch (err) {
-    log.error(
-      { keyId, detail: err instanceof Error ? err.message : String(err) },
-      'refund_a2a_key_spend threw (needs reconcile)',
-    );
-  }
+function normalizeVerdict(raw: string | null | undefined): SettleVerdict {
+  return raw === 'settled' ||
+    raw === 'failed_unequivocal' ||
+    raw === 'failed_ambiguous'
+    ? raw
+    : 'failed_ambiguous';
 }
 
 // ── SEAM WKH-136: settle on-chain compartido (SP-1/SP-2) ────────
@@ -543,47 +577,63 @@ export const paymentIntentService = {
     const consumedMicro = numericToMicro(row.consumed_usd);
     const consumedUsd = consumedMicro / 1_000_000;
 
-    // Idempotencia (AC-1) + BLQ-2 recovery: el intent ya NO está 'open'.
+    // Idempotencia (AC-1) + BLQ-DR recovery: el intent ya NO está 'open'.
     if (row.prev_status !== 'open') {
       const settledMicro = Math.min(consumedMicro, depositMicro);
       const residualMicro = Math.max(0, depositMicro - settledMicro);
-      // BLQ-2: un huérfano en 'closing' (settle on-chain OK pero finalize falló)
-      // NO puede reportarse `settled` a ciegas — el refund del residual quedaría
-      // perdido. Re-invocamos finalize idempotente (solo actúa mientras
-      // status='closing'; sin doble-refund). Si finalize sigue fallando, NO
-      // mentimos: propagamos INTERNAL para que el retry/sweep lo reintente.
+      const settledUsd = settledMicro / 1_000_000;
+      const residualUsd = residualMicro / 1_000_000;
+
+      // BLQ-DR: huérfano en 'closing' (finalize falló DESPUÉS de conocerse el
+      // veredicto). Re-aplicamos el veredicto PERSISTIDO (settle_outcome) — el refund
+      // vive dentro de finalize (status-gated) ⇒ exactamente una vez. NUNCA asumimos
+      // éxito: sin veredicto (NULL) → 'failed_ambiguous' (NO refund, reconcile).
       if (row.prev_status === 'closing') {
-        // MENOR-1: recovery bajo asunción de settle exitoso. Logueamos el txHash
-        // ANTES de finalize (si finalize vuelve a fallar, el hash queda en el log
-        // para reconciliación) + warn explícito que dispara la verificación.
+        const verdict = normalizeVerdict(row.settle_outcome);
         log.warn(
-          { intentId, txHash: row.settle_tx_hash },
-          'finalizando intent en closing bajo asunción de settle exitoso; verificar on-chain',
+          { intentId, txHash: row.settle_tx_hash, verdict },
+          'recuperando intent en closing con el veredicto persistido del settle',
         );
         const finalized = await finalizePaymentIntent(
           intentId,
           ownerRef,
-          row.settle_tx_hash,
-          settledMicro / 1_000_000,
-          residualMicro / 1_000_000,
-          true,
-          null,
+          verdict === 'settled' ? row.settle_tx_hash : null,
+          settledUsd,
+          verdict === 'settled' ? residualUsd : null,
+          verdict,
+          verdict === 'failed_ambiguous' && !row.settle_outcome
+            ? 'RECONCILE: closing sin veredicto persistido'
+            : null, // el detalle persistido sobrevive por COALESCE en el RPC
         );
         if (!finalized) throw new PaymentIntentError('INTERNAL');
+        if (verdict === 'settled') {
+          return {
+            status: 'settled',
+            txHash: row.settle_tx_hash,
+            finalAmountUsd: settledUsd,
+            consumedUsd,
+            residualUsd,
+          };
+        }
         return {
-          status: 'settled',
-          txHash: row.settle_tx_hash,
-          finalAmountUsd: settledMicro / 1_000_000,
+          status: 'failed',
+          txHash: null,
+          finalAmountUsd: settledUsd,
           consumedUsd,
-          residualUsd: residualMicro / 1_000_000,
+          // unequívoco → deposit COMPLETO reembolsado (dentro de finalize); ambiguo → 0.
+          residualUsd:
+            verdict === 'failed_unequivocal' ? depositMicro / 1_000_000 : 0,
         };
       }
       return {
-        status: row.prev_status === 'failed' ? 'failed' : 'settled',
+        status:
+          row.prev_status === 'failed' || row.prev_status === 'refunded'
+            ? 'failed'
+            : 'settled',
         txHash: row.settle_tx_hash,
-        finalAmountUsd: settledMicro / 1_000_000,
+        finalAmountUsd: settledUsd,
         consumedUsd,
-        residualUsd: residualMicro / 1_000_000,
+        residualUsd,
       };
     }
 
@@ -595,13 +645,22 @@ export const paymentIntentService = {
 
     // Σvouchers = 0 → nada que cobrar al seller: full refund, sin tx on-chain.
     if (finalMicro <= 0) {
+      // BLQ-DR: persistir veredicto ANTES de finalize (recovery-safe si finalize blip).
+      await recordSettleOutcome(
+        intentId,
+        ownerRef,
+        'settled',
+        null,
+        residualUsd,
+        null,
+      );
       await finalizePaymentIntent(
         intentId,
         ownerRef,
         null,
         finalUsd,
         residualUsd,
-        true,
+        'settled',
         null,
       );
       return {
@@ -622,13 +681,23 @@ export const paymentIntentService = {
     });
 
     if (outcome.status === 'settled') {
+      // BLQ-DR: veredicto persistido ANTES del finalize. Si finalize blip, el intent
+      // queda 'closing' con settle_outcome='settled' → recovery acredita el residual.
+      await recordSettleOutcome(
+        intentId,
+        ownerRef,
+        'settled',
+        outcome.txHash,
+        residualUsd,
+        null,
+      );
       await finalizePaymentIntent(
         intentId,
         ownerRef,
         outcome.txHash,
         finalUsd,
         residualUsd,
-        true,
+        'settled',
         null,
       );
       return {
@@ -640,28 +709,34 @@ export const paymentIntentService = {
       };
     }
 
-    // BLQ-ALTO-1 (money-path CRÍTICO): openSession debitó el deposit COMPLETO
-    // (authorized_usd) contra el budget prepago. Si el settle falla NO podemos
-    // dejarlo 'failed' sin más: el buyer perdería el deposit entero y el seller
-    // no cobró. La acción depende del subcaso (inequívoco vs ambiguo):
+    // BLQ-ALTO-1 / BLQ-DR (money-path CRÍTICO): openSession debitó el deposit COMPLETO
+    // (authorized_usd) contra el budget prepago. Si el settle falla, el refund se
+    // aplica DENTRO de finalize (misma tx que el status flip, status-gated) ⇒ jamás
+    // dos veces. La acción depende del subcaso (inequívoco vs ambiguo):
     if (outcome.failureKind === 'unequivocal') {
-      // sign() lanzó / settle.success===false → CIERTO que NO hubo transfer:
-      // refund del deposit COMPLETO (invariante budget_post == budget_pre).
-      await refundBuyer(
-        row.key_id,
-        row.chain_id,
-        depositMicro / 1_000_000,
+      // sign() lanzó / settle.success===false → CIERTO que NO hubo transfer: refund del
+      // deposit COMPLETO (authorized_usd) dentro de finalize (budget_post==budget_pre).
+      const errMsg = outcome.error ?? 'settle failed';
+      await recordSettleOutcome(
+        intentId,
         ownerRef,
+        'failed_unequivocal',
+        null,
+        null,
+        errMsg,
       );
-      await finalizePaymentIntent(
+      const finalized = await finalizePaymentIntent(
         intentId,
         ownerRef,
         null,
         finalUsd,
         null,
-        false,
-        outcome.error ?? 'settle failed',
+        'failed_unequivocal',
+        errMsg,
       );
+      // El refund vive en finalize: si falló, NO afirmamos que reembolsamos →
+      // INTERNAL para que el retry/expireStale re-aplique el veredicto persistido.
+      if (!finalized) throw new PaymentIntentError('INTERNAL');
       return {
         status: 'failed',
         txHash: null,
@@ -680,15 +755,25 @@ export const paymentIntentService = {
       { intentId, detail: outcome.error },
       'settle ambiguo (session): deposit NO reembolsado, requiere reconciliación manual',
     );
-    await finalizePaymentIntent(
+    const ambiguousErr = `RECONCILE: ${outcome.error ?? 'settle ambiguous'}`;
+    await recordSettleOutcome(
+      intentId,
+      ownerRef,
+      'failed_ambiguous',
+      null,
+      null,
+      ambiguousErr,
+    );
+    const finalizedAmbiguous = await finalizePaymentIntent(
       intentId,
       ownerRef,
       null,
       finalUsd,
       null,
-      false,
-      `RECONCILE: ${outcome.error ?? 'settle ambiguous'}`,
+      'failed_ambiguous',
+      ambiguousErr,
     );
+    if (!finalizedAmbiguous) throw new PaymentIntentError('INTERNAL');
     return {
       status: 'failed',
       txHash: null,
@@ -789,44 +874,56 @@ export const paymentIntentService = {
       );
     }
 
-    // Idempotencia (AC-1) + MNR-2 + BLQ-2: el intent ya NO está 'open'.
+    // Idempotencia (AC-1) + MNR-2 + BLQ-DR: el intent ya NO está 'open'.
     if (row.prev_status !== 'open') {
       // MNR-2: reportar el monto REALMENTE settleado (persistido en consumed_usd
       // por el close RPC al transicionar), NO un recompute con el reportedUsage
       // del request actual (que en un retry/sweep puede diferir del original).
       const settledMicro = numericToMicro(row.consumed_usd);
-      // BLQ-2: huérfano en 'closing' → completar finalize idempotente. Para upto
-      // NO hay residual (el débito == monto exacto), pero el status flip debe
-      // correr para no reportar `settled` con un intent aún en 'closing'.
+      const settledUsd = settledMicro / 1_000_000;
+      // BLQ-DR: huérfano en 'closing' → re-aplicar el veredicto PERSISTIDO. upto NO
+      // refunda residual; en 'failed_unequivocal' finalize reembolsa el débito
+      // (consumed_usd) dentro de su tx status-gated ⇒ una sola vez. NUNCA asume éxito.
       if (row.prev_status === 'closing') {
-        // MENOR-1: recovery bajo asunción de settle exitoso. Logueamos el txHash
-        // ANTES de finalize (si finalize vuelve a fallar, el hash queda en el log
-        // para reconciliación) + warn explícito que dispara la verificación.
+        const verdict = normalizeVerdict(row.settle_outcome);
         log.warn(
-          { intentId, txHash: row.settle_tx_hash },
-          'finalizando intent en closing bajo asunción de settle exitoso; verificar on-chain',
+          { intentId, txHash: row.settle_tx_hash, verdict },
+          'recuperando intent upto en closing con el veredicto persistido del settle',
         );
         const finalized = await finalizePaymentIntent(
           intentId,
           ownerRef,
-          row.settle_tx_hash,
-          settledMicro / 1_000_000,
+          verdict === 'settled' ? row.settle_tx_hash : null,
+          settledUsd,
           null,
-          true,
-          null,
+          verdict,
+          verdict === 'failed_ambiguous' && !row.settle_outcome
+            ? 'RECONCILE: closing sin veredicto persistido'
+            : null,
         );
         if (!finalized) throw new PaymentIntentError('INTERNAL');
+        if (verdict === 'settled') {
+          return {
+            status: 'settled',
+            txHash: row.settle_tx_hash,
+            finalAmountUsd: settledUsd,
+            cappedAt,
+          };
+        }
         return {
-          status: 'settled',
-          txHash: row.settle_tx_hash,
-          finalAmountUsd: settledMicro / 1_000_000,
+          status: 'failed',
+          txHash: null,
+          finalAmountUsd: settledUsd,
           cappedAt,
         };
       }
       return {
-        status: row.prev_status === 'failed' ? 'failed' : 'settled',
+        status:
+          row.prev_status === 'failed' || row.prev_status === 'refunded'
+            ? 'failed'
+            : 'settled',
         txHash: row.settle_tx_hash,
-        finalAmountUsd: settledMicro / 1_000_000,
+        finalAmountUsd: settledUsd,
         cappedAt,
       };
     }
@@ -836,13 +933,21 @@ export const paymentIntentService = {
 
     // uso 0 → nada que cobrar: mark settled sin tx (upto NO refunda).
     if (finalMicro <= 0) {
+      await recordSettleOutcome(
+        intentId,
+        ownerRef,
+        'settled',
+        null,
+        null,
+        null,
+      );
       await finalizePaymentIntent(
         intentId,
         ownerRef,
         null,
         finalUsd,
         null,
-        true,
+        'settled',
         null,
       );
       return { status: 'settled', txHash: null, finalAmountUsd: 0, cappedAt };
@@ -859,13 +964,15 @@ export const paymentIntentService = {
     } catch (debitErr) {
       const code =
         debitErr instanceof PaymentIntentError ? debitErr.code : 'INTERNAL';
+      // debit falló → NADA se debitó → NO refund. 'failed_ambiguous' marca failed sin
+      // reembolsar (usar 'failed_unequivocal' aquí reembolsaría un débito inexistente).
       await finalizePaymentIntent(
         intentId,
         ownerRef,
         null,
         finalUsd,
         null,
-        false,
+        'failed_ambiguous',
         `buyer debit failed: ${code}`,
       );
       throw debitErr;
@@ -880,13 +987,21 @@ export const paymentIntentService = {
     });
 
     if (outcome.status === 'settled') {
+      await recordSettleOutcome(
+        intentId,
+        ownerRef,
+        'settled',
+        outcome.txHash,
+        null,
+        null,
+      );
       await finalizePaymentIntent(
         intentId,
         ownerRef,
         outcome.txHash,
         finalUsd,
         null,
-        true,
+        'settled',
         null,
       );
       return {
@@ -897,21 +1012,31 @@ export const paymentIntentService = {
       };
     }
 
-    // BLQ-1 + BLQ-ALTO-1 (atomicidad): el transfer on-chain falló DESPUÉS del
-    // débito. Refundar SOLO cuando es CIERTO que no hubo transfer (inequívoco);
-    // en el caso ambiguo el transfer PUDO ocurrir → refundar sería doble-gasto.
+    // BLQ-1 + BLQ-ALTO-1 + BLQ-DR (atomicidad): el transfer on-chain falló DESPUÉS
+    // del débito. El refund del débito vive DENTRO de finalize (misma tx que el
+    // status flip, status-gated) ⇒ exactamente una vez. Solo en el caso inequívoco;
+    // el ambiguo PUDO transferir → NO refundar (doble-gasto).
     if (outcome.failureKind === 'unequivocal') {
       // sign() lanzó / settle.success===false → no hubo transfer: buyer whole.
-      await refundBuyer(row.key_id, row.chain_id, finalUsd, ownerRef);
-      await finalizePaymentIntent(
+      const errMsg = outcome.error ?? 'settle failed';
+      await recordSettleOutcome(
+        intentId,
+        ownerRef,
+        'failed_unequivocal',
+        null,
+        null,
+        errMsg,
+      );
+      const finalized = await finalizePaymentIntent(
         intentId,
         ownerRef,
         null,
         finalUsd,
         null,
-        false,
-        outcome.error ?? 'settle failed',
+        'failed_unequivocal',
+        errMsg,
       );
+      if (!finalized) throw new PaymentIntentError('INTERNAL');
       return {
         status: 'failed',
         txHash: null,
@@ -927,15 +1052,25 @@ export const paymentIntentService = {
       { intentId, detail: outcome.error },
       'settle ambiguo (upto): débito NO reembolsado, requiere reconciliación manual',
     );
-    await finalizePaymentIntent(
+    const ambiguousErr = `RECONCILE: ${outcome.error ?? 'settle ambiguous'}`;
+    await recordSettleOutcome(
+      intentId,
+      ownerRef,
+      'failed_ambiguous',
+      null,
+      null,
+      ambiguousErr,
+    );
+    const finalizedAmbiguous = await finalizePaymentIntent(
       intentId,
       ownerRef,
       null,
       finalUsd,
       null,
-      false,
-      `RECONCILE: ${outcome.error ?? 'settle ambiguous'}`,
+      'failed_ambiguous',
+      ambiguousErr,
     );
+    if (!finalizedAmbiguous) throw new PaymentIntentError('INTERNAL');
     return {
       status: 'failed',
       txHash: null,
@@ -965,9 +1100,10 @@ export const paymentIntentService = {
         'expireStale open query failed',
       );
     }
-    // 2. BLQ-2: intents 'closing' huérfanos (settle on-chain OK pero finalize
-    //    falló) con updated_at viejo. Re-invocar close/settle: el short-circuit
-    //    de 'closing' re-ejecuta finalize idempotente (residual sin doble-refund).
+    // 2. BLQ-DR: intents 'closing' huérfanos (finalize falló tras conocerse el
+    //    veredicto) con updated_at viejo. Re-invocar close/settle: el short-circuit
+    //    de 'closing' re-aplica el veredicto PERSISTIDO (settle_outcome) vía finalize
+    //    idempotente (refund status-gated ⇒ exactamente una vez, jamás doble).
     const staleIso = new Date(
       Date.now() - resolveClosingStaleMs(),
     ).toISOString();

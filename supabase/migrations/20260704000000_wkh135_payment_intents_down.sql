@@ -5,7 +5,8 @@
 -- ============================================================
 
 BEGIN;
-DROP FUNCTION IF EXISTS finalize_payment_intent(uuid, text, text, numeric, numeric, boolean, text);
+DROP FUNCTION IF EXISTS finalize_payment_intent(uuid, text, text, numeric, numeric, text, text);
+DROP FUNCTION IF EXISTS record_settle_outcome(uuid, text, text, text, numeric, text);
 DROP FUNCTION IF EXISTS close_payment_intent_for_settle(uuid, text, numeric);
 DROP FUNCTION IF EXISTS accumulate_payment_voucher(uuid, text, text, numeric);
 DROP FUNCTION IF EXISTS open_payment_intent(uuid, text, text, uuid, text, text, text, integer, numeric, text, text, timestamptz);

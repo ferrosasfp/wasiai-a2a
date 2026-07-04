@@ -32,6 +32,14 @@ CREATE TABLE IF NOT EXISTS a2a_payment_intents (
   cap_nonce      TEXT,                             -- upto (anti-replay)
   status         TEXT NOT NULL DEFAULT 'open'
                  CHECK (status IN ('open','closing','settled','refunded','expired','failed')),
+  -- BLQ-DR (money-path): veredicto persistido del settle. Se escribe money-free
+  -- mientras el intent está en 'closing' (record_settle_outcome) ANTES de que el
+  -- finalize (que mueve el refund) pueda fallar. La recovery LEE este valor y aplica
+  -- la acción CORRECTA — nunca asume éxito. NULL = veredicto aún no conocido.
+  settle_outcome TEXT CHECK (
+    settle_outcome IS NULL OR
+    settle_outcome IN ('settled','failed_unequivocal','failed_ambiguous')
+  ),
   settle_tx_hash TEXT UNIQUE,                      -- anti doble-settle a nivel row
   residual_usd   NUMERIC(20,8),                    -- session post-close
   expires_at     TIMESTAMPTZ NOT NULL,             -- AC-6
@@ -218,7 +226,8 @@ CREATE OR REPLACE FUNCTION close_payment_intent_for_settle(
   pay_to         TEXT,
   authorized_usd NUMERIC,
   consumed_usd   NUMERIC,
-  settle_tx_hash TEXT
+  settle_tx_hash TEXT,
+  settle_outcome TEXT
 ) AS $$
 DECLARE
   v_owner    TEXT;
@@ -230,12 +239,14 @@ DECLARE
   v_auth     NUMERIC;
   v_consumed NUMERIC;
   v_tx       TEXT;
+  v_outcome  TEXT;
   v_final    NUMERIC;
 BEGIN
   SELECT pi.owner_ref, pi.status, pi.intent_type, pi.key_id, pi.chain_id,
-         pi.pay_to, pi.authorized_usd, pi.consumed_usd, pi.settle_tx_hash
+         pi.pay_to, pi.authorized_usd, pi.consumed_usd, pi.settle_tx_hash,
+         pi.settle_outcome
     INTO v_owner, v_status, v_type, v_key, v_chain,
-         v_payto, v_auth, v_consumed, v_tx
+         v_payto, v_auth, v_consumed, v_tx, v_outcome
     FROM a2a_payment_intents pi
     WHERE pi.id = p_intent_id
     FOR UPDATE;
@@ -277,6 +288,7 @@ BEGIN
   authorized_usd := v_auth;
   consumed_usd   := v_consumed;
   settle_tx_hash := v_tx;
+  settle_outcome := v_outcome;
   RETURN NEXT;
   RETURN;
 END;
@@ -290,30 +302,28 @@ GRANT EXECUTE ON FUNCTION public.close_payment_intent_for_settle(uuid, text, num
   TO service_role;
 
 -- ============================================================
--- RPC 4: finalize_payment_intent
--- Idempotente: solo actúa mientras status='closing'. Éxito → settled + tx_hash +
--- residual; para session con residual>0 → refund_a2a_key_spend (credit-back del
--- residual, AC-2) en la MISMA tx. upto NO refunda (no reservó). Fallo → failed +
--- error_message, NO refund, NO settle_tx_hash.
+-- RPC 4: record_settle_outcome (BLQ-DR money-path)
+-- Persiste el VEREDICTO del settle (settled / failed_unequivocal / failed_ambiguous)
+-- + tx_hash + residual + error, money-free, mientras el intent está en 'closing'.
+-- Corre ANTES del finalize (que sí mueve el refund). Así, si el finalize falla, la
+-- recovery LEE settle_outcome y aplica la acción CORRECTA — nunca asume éxito.
+-- Idempotente: una vez terminal (status <> 'closing') NO re-escribe (no-op).
+-- NO cambia status ni mueve dinero: solo anota.
 -- ============================================================
-CREATE OR REPLACE FUNCTION finalize_payment_intent(
+CREATE OR REPLACE FUNCTION record_settle_outcome(
   p_intent_id    UUID,
   p_owner_ref    TEXT,
+  p_outcome      TEXT,
   p_tx_hash      TEXT,
-  p_final_amount NUMERIC,
   p_residual     NUMERIC,
-  p_success      BOOLEAN,
   p_error        TEXT
 ) RETURNS void AS $$
 DECLARE
   v_owner  TEXT;
   v_status TEXT;
-  v_type   TEXT;
-  v_key    UUID;
-  v_chain  INT;
 BEGIN
-  SELECT owner_ref, status, intent_type, key_id, chain_id
-    INTO v_owner, v_status, v_type, v_key, v_chain
+  SELECT owner_ref, status
+    INTO v_owner, v_status
     FROM a2a_payment_intents
     WHERE id = p_intent_id
     FOR UPDATE;
@@ -324,30 +334,121 @@ BEGIN
     RAISE EXCEPTION 'OWNERSHIP_MISMATCH: intent % not owned by caller', p_intent_id;
   END IF;
 
-  -- Idempotencia del settle (AC-1): solo se finaliza una transición 'closing'.
+  -- Solo anota mientras sigue en 'closing' (money-free, idempotente).
   IF v_status <> 'closing' THEN
     RETURN;
   END IF;
 
-  IF p_success THEN
+  UPDATE a2a_payment_intents
+    SET settle_outcome = p_outcome,
+        settle_tx_hash = COALESCE(p_tx_hash, settle_tx_hash),
+        residual_usd   = p_residual,
+        error_message  = p_error
+    WHERE id = p_intent_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+ALTER FUNCTION public.record_settle_outcome(uuid, text, text, text, numeric, text)
+  SET search_path = public, pg_temp;
+REVOKE EXECUTE ON FUNCTION public.record_settle_outcome(uuid, text, text, text, numeric, text)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.record_settle_outcome(uuid, text, text, text, numeric, text)
+  TO service_role;
+
+-- ============================================================
+-- RPC 5: finalize_payment_intent
+-- Idempotente + ATÓMICO (money + status en la MISMA tx): solo actúa mientras
+-- status='closing'; re-invocar cuando ya es terminal = no-op ⇒ el refund se aplica
+-- EXACTAMENTE UNA VEZ bajo cualquier secuencia de retry/expireStale (BLQ-DR).
+--
+--   p_outcome = 'settled'            → settled + tx_hash + residual; session con
+--                                      residual>0 → refund_a2a_key_spend(residual).
+--   p_outcome = 'failed_unequivocal' → NO hubo transfer on-chain → el buyer queda
+--                                      entero: session refund del deposit COMPLETO
+--                                      (authorized_usd, reservado en open); upto
+--                                      refund del monto debitado (consumed_usd).
+--   p_outcome = <otro>               → failed_ambiguous / debit-fail: status failed,
+--                                      NO refund (el transfer PUDO ocurrir).
+--
+-- El refund vive DENTRO de esta tx status-gated (era la causa raíz del double-refund:
+-- estaba fuera de la tx del status). settle_outcome se re-afirma acá para auditoría.
+-- ============================================================
+CREATE OR REPLACE FUNCTION finalize_payment_intent(
+  p_intent_id    UUID,
+  p_owner_ref    TEXT,
+  p_tx_hash      TEXT,
+  p_final_amount NUMERIC,
+  p_residual     NUMERIC,
+  p_outcome      TEXT,
+  p_error        TEXT
+) RETURNS void AS $$
+DECLARE
+  v_owner    TEXT;
+  v_status   TEXT;
+  v_type     TEXT;
+  v_key      UUID;
+  v_chain    INT;
+  v_auth     NUMERIC;
+  v_consumed NUMERIC;
+BEGIN
+  SELECT owner_ref, status, intent_type, key_id, chain_id, authorized_usd, consumed_usd
+    INTO v_owner, v_status, v_type, v_key, v_chain, v_auth, v_consumed
+    FROM a2a_payment_intents
+    WHERE id = p_intent_id
+    FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'INTENT_NOT_FOUND: %', p_intent_id;
+  END IF;
+  IF v_owner IS DISTINCT FROM p_owner_ref THEN
+    RAISE EXCEPTION 'OWNERSHIP_MISMATCH: intent % not owned by caller', p_intent_id;
+  END IF;
+
+  -- Idempotencia + atomicidad money+status: solo se finaliza una transición
+  -- 'closing'. Re-invocar sobre un intent terminal = no-op ⇒ refund UNA sola vez.
+  IF v_status <> 'closing' THEN
+    RETURN;
+  END IF;
+
+  IF p_outcome = 'settled' THEN
     UPDATE a2a_payment_intents
-      SET status = 'settled', settle_tx_hash = p_tx_hash, residual_usd = p_residual
+      SET status = 'settled', settle_tx_hash = p_tx_hash,
+          residual_usd = p_residual, settle_outcome = 'settled'
       WHERE id = p_intent_id;
     -- credit-back del residual (session, AC-2). upto NO reservó → NO refunda.
     IF v_type = 'session' AND p_residual IS NOT NULL AND p_residual > 0 THEN
       PERFORM refund_a2a_key_spend(v_key, v_chain, p_residual, p_owner_ref);
     END IF;
-  ELSE
+
+  ELSIF p_outcome = 'failed_unequivocal' THEN
+    -- settle NO ocurrió on-chain → refund del monto reservado/debitado del buyer,
+    -- en la MISMA tx que el status flip (status-gated ⇒ exactamente una vez).
     UPDATE a2a_payment_intents
-      SET status = 'failed', error_message = p_error
+      SET status = 'refunded', settle_outcome = 'failed_unequivocal',
+          error_message = COALESCE(p_error, error_message)  -- recovery: preserva el detalle persistido
+      WHERE id = p_intent_id;
+    IF v_type = 'session' THEN
+      IF v_auth IS NOT NULL AND v_auth > 0 THEN
+        PERFORM refund_a2a_key_spend(v_key, v_chain, v_auth, p_owner_ref);
+      END IF;
+    ELSE
+      IF v_consumed IS NOT NULL AND v_consumed > 0 THEN
+        PERFORM refund_a2a_key_spend(v_key, v_chain, v_consumed, p_owner_ref);
+      END IF;
+    END IF;
+
+  ELSE
+    -- failed_ambiguous / debit-fail: status failed, NO refund (evita doble-gasto).
+    UPDATE a2a_payment_intents
+      SET status = 'failed', settle_outcome = 'failed_ambiguous',
+          error_message = COALESCE(p_error, error_message)  -- recovery: preserva el RECONCILE persistido
       WHERE id = p_intent_id;
   END IF;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
-ALTER FUNCTION public.finalize_payment_intent(uuid, text, text, numeric, numeric, boolean, text)
+ALTER FUNCTION public.finalize_payment_intent(uuid, text, text, numeric, numeric, text, text)
   SET search_path = public, pg_temp;
-REVOKE EXECUTE ON FUNCTION public.finalize_payment_intent(uuid, text, text, numeric, numeric, boolean, text)
+REVOKE EXECUTE ON FUNCTION public.finalize_payment_intent(uuid, text, text, numeric, numeric, text, text)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.finalize_payment_intent(uuid, text, text, numeric, numeric, boolean, text)
+GRANT EXECUTE ON FUNCTION public.finalize_payment_intent(uuid, text, text, numeric, numeric, text, text)
   TO service_role;

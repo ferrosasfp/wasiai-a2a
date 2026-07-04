@@ -1,5 +1,46 @@
 # Auto-Blindaje — WKH-135 (payment intents session + upto)
 
+### [2026-07-04 21:30] FIX-PACK it.3 — BLQ-DR: double-refund por estado `closing` sobrecargado (F4 QA)
+- **Error**: el F4 QA reprodujo un doble-refund (16 USD sobre un deposit de 10). En un
+  settle inequívocamente fallido, `closeSession` hacía `refundBuyer(deposit)` FUERA de la
+  tx del status y luego `finalize(success=false)` sin chequear el retorno. Si ese finalize
+  fallaba (blip DB), el intent quedaba en `closing` **con el deposit ya reembolsado** y sin
+  ninguna señal que lo distinguiera de "settle exitoso, finalize pendiente". El retry /
+  `expireStale` entraba a la recovery de `closing` que **asumía éxito** (`success=true`
+  hardcodeado) y **re-acreditaba el residual** → segundo refund. Análogo en `settleUpto`.
+- **Causa raíz**: (1) el refund vivía FUERA de la tx del status (no atómico con el flip);
+  (2) el estado `closing` estaba SOBRECARGADO — no había veredicto persistido que la
+  recovery pudiera leer, así que asumía siempre "settle exitoso".
+- **Fix de raíz** (3 invariantes garantizados por mecanismo, no por parche):
+  (1) **Refund DENTRO de `finalize_payment_intent`** (RPC), en la MISMA tx que el status
+  flip y **status-gated en `closing`** → re-invocar cuando ya es terminal = no-op ⇒ el
+  refund se aplica EXACTAMENTE UNA VEZ bajo cualquier retry/`expireStale`. Se eliminó
+  `refundBuyer` (el refund fuera-de-tx era la causa raíz). `p_success BOOLEAN` →
+  `p_outcome TEXT` (`settled` | `failed_unequivocal` | `failed_ambiguous`).
+  (2) **Veredicto persistido**: nueva columna `settle_outcome` + RPC `record_settle_outcome`
+  (money-free, status-gated) que anota el veredicto ANTES de que finalize pueda fallar. La
+  recovery LEE `settle_outcome` (devuelto por `close_payment_intent_for_settle`) y aplica la
+  acción CORRECTA — nunca asume éxito. `normalizeVerdict(NULL) = 'failed_ambiguous'`
+  (money-safe: sin veredicto NO refunda, reconcilia).
+  (3) **Chequeo del retorno de finalize en las ramas de fallo** (`unequivocal`/`ambiguous`
+  y recovery): si falla → `INTERNAL` (no afirma un refund que no ocurrió); el veredicto
+  persistido deja que el retry lo re-aplique una sola vez.
+- **Evidencia**: 4 tests nuevos runtime-real (`payment-intent.test.ts`, describe
+  `BLQ-DR compound-failure`) con un DB in-memory fiel (status-gate + refund-inside): fallo
+  inequívoco→finalize falla→retry→refund 1 vez (`budget_post==budget_pre`); éxito→finalize
+  falla→residual 1 vez; ambiguo→finalize falla→NO refund; upto vía `expireStale`. + prueba
+  a nivel Postgres 15 (efímero): `finalize` invocado 3× (una con la asunción vieja
+  `settled`) → `refund_log` = exactamente 1 fila (10). `_down` + `database.types.ts`
+  coherentes. `npm test` 2360 pass / `tsc` limpio / `biome` limpio.
+- **Ventana residual documentada**: si `record_settle_outcome` Y `finalize` fallan AMBOS
+  (doble-fault de DB), la recovery cae a `failed_ambiguous` (NO refund, reconcile) — nunca
+  a doble-refund. Es money-conservador (jamás sobre-acredita); el `RECONCILE:` en
+  `error_message` lo flaggea para reconciliación manual.
+- **Aplicar en**: cualquier efecto de dinero acoplado a una transición de estado → el money
+  DEBE vivir dentro de la misma tx status-gated que la transición (nunca fuera), y todo
+  estado intermedio recuperable DEBE tener su veredicto/outcome PERSISTIDO para que la
+  recovery aplique la acción correcta en vez de asumir un resultado.
+
 ### [2026-07-04 22:30] FIX-PACK it.2 — BLQ-ALTO-1: `session` perdía el deposit en settle fallido
 - **Error**: en `closeSession`, si `settlePaymentIntentOnChain` devolvía `failed` se
   llamaba `finalize(success=false)` sin refund. El deposit COMPLETO ya se debitó en

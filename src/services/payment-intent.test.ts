@@ -86,6 +86,136 @@ beforeEach(() => {
   delete process.env.UPTO_EIP712_VERSION;
 });
 
+// ── Faithful in-memory DB for the 3 money-path RPCs (BLQ-DR) ─────
+// Modela close/record/finalize con las MISMAS semánticas que el SQL:
+//  - close: open→closing (persiste consumed para upto), idempotente.
+//  - record_settle_outcome: anota settle_outcome money-free mientras 'closing'.
+//  - finalize: money (refund) + status flip en la MISMA "tx", status-gated en
+//    'closing'; re-invocar terminal = no-op. `failFinalize` simula blips atómicos
+//    (rollback: NO muta). `refunds` prueba el invariante "refund exactamente 1 vez".
+interface FakeRow {
+  status: string;
+  intent_type: 'session' | 'upto';
+  authorized_usd: number;
+  consumed_usd: number;
+  settle_tx_hash: string | null;
+  settle_outcome: string | null;
+  error_message: string | null;
+  key_id: string;
+  chain_id: number;
+  pay_to: string;
+}
+function makeIntentDb(init: {
+  intent_type: 'session' | 'upto';
+  authorized_usd: number;
+  consumed_usd: number;
+  status?: string;
+}): {
+  row: FakeRow;
+  refunds: number[];
+  state: { failFinalize: number };
+  handlers: Record<string, RpcHandler>;
+} {
+  const row: FakeRow = {
+    status: init.status ?? 'open',
+    intent_type: init.intent_type,
+    authorized_usd: init.authorized_usd,
+    consumed_usd: init.consumed_usd,
+    settle_tx_hash: null,
+    settle_outcome: null,
+    error_message: null,
+    key_id: 'k1',
+    chain_id: 2368,
+    pay_to: PAYTO,
+  };
+  const refunds: number[] = [];
+  const state = { failFinalize: 0 };
+
+  const snapshot = (prev: string, final: number) => ({
+    data: [
+      {
+        final_amount: final,
+        prev_status: prev,
+        intent_type: row.intent_type,
+        key_id: row.key_id,
+        chain_id: row.chain_id,
+        pay_to: row.pay_to,
+        authorized_usd: row.authorized_usd,
+        consumed_usd: row.consumed_usd,
+        settle_tx_hash: row.settle_tx_hash,
+        settle_outcome: row.settle_outcome,
+      },
+    ],
+    error: null,
+  });
+
+  const handlers: Record<string, RpcHandler> = {
+    close_payment_intent_for_settle: (args) => {
+      const prev = row.status;
+      let final = 0;
+      if (row.status === 'open') {
+        if (row.intent_type === 'session') {
+          final = Math.min(row.consumed_usd, row.authorized_usd);
+        } else {
+          final = Math.min(
+            row.authorized_usd,
+            Number(args.p_reported_usage) || 0,
+          );
+          row.consumed_usd = final; // persistido al transicionar (MNR-2)
+        }
+        row.status = 'closing';
+      }
+      return snapshot(prev, final);
+    },
+    record_settle_outcome: (args) => {
+      // money-free + status-gated: solo anota mientras 'closing'.
+      if (row.status === 'closing') {
+        row.settle_outcome = String(args.p_outcome);
+        if (args.p_tx_hash != null) row.settle_tx_hash = String(args.p_tx_hash);
+        row.error_message = (args.p_error as string) ?? row.error_message;
+      }
+      return { error: null };
+    },
+    finalize_payment_intent: (args) => {
+      if (state.failFinalize > 0) {
+        state.failFinalize -= 1;
+        return { error: { message: 'db blip' } }; // rollback atómico: NADA muta
+      }
+      if (row.status !== 'closing') return { error: null }; // idempotente no-op
+      const outcome = String(args.p_outcome);
+      if (outcome === 'settled') {
+        row.status = 'settled';
+        row.settle_outcome = 'settled';
+        if (args.p_tx_hash != null) row.settle_tx_hash = String(args.p_tx_hash);
+        // credit-back del residual (session). upto NO reservó → NO refunda.
+        if (
+          row.intent_type === 'session' &&
+          args.p_residual != null &&
+          Number(args.p_residual) > 0
+        ) {
+          refunds.push(Number(args.p_residual));
+        }
+      } else if (outcome === 'failed_unequivocal') {
+        row.status = 'refunded';
+        row.settle_outcome = 'failed_unequivocal';
+        row.error_message = (args.p_error as string) ?? row.error_message;
+        // refund del monto reservado/debitado, DENTRO de la tx status-gated.
+        if (row.intent_type === 'session') {
+          if (row.authorized_usd > 0) refunds.push(row.authorized_usd);
+        } else if (row.consumed_usd > 0) {
+          refunds.push(row.consumed_usd);
+        }
+      } else {
+        row.status = 'failed';
+        row.settle_outcome = 'failed_ambiguous';
+        row.error_message = (args.p_error as string) ?? row.error_message;
+      }
+      return { error: null };
+    },
+  };
+  return { row, refunds, state, handlers };
+}
+
 // ── T-AC1: idempotencia del close (settle 1 sola vez) ───────────
 describe('T-AC1 close idempotente', () => {
   it('2 closes del mismo intent → settle() 1 sola vez', async () => {
@@ -106,6 +236,7 @@ describe('T-AC1 close idempotente', () => {
               authorized_usd: 10,
               consumed_usd: closeCalls === 1 ? 3.7 : 3.7,
               settle_tx_hash: closeCalls === 1 ? null : '0xTX',
+              settle_outcome: closeCalls === 1 ? null : 'settled',
             },
           ],
           error: null,
@@ -157,7 +288,7 @@ describe('T-AC2 refund residual', () => {
     expect(r.residualUsd).toBeCloseTo(6.3, 8);
     expect(finalizeArgs[0]?.p_final_amount).toBeCloseTo(3.7, 8);
     expect(finalizeArgs[0]?.p_residual).toBeCloseTo(6.3, 8);
-    expect(finalizeArgs[0]?.p_success).toBe(true);
+    expect(finalizeArgs[0]?.p_outcome).toBe('settled');
   });
 
   it('T-AC2b: consumed==deposit → residual 0; consumed>deposit → residual nunca negativo', async () => {
@@ -303,7 +434,7 @@ describe('T-AC6 expiry', () => {
     await paymentIntentService.expireStale();
     expect(mockSettle).toHaveBeenCalledTimes(1);
     expect(finalizeArgs[0]?.p_residual).toBeCloseTo(8, 8); // 10 - 2 refund
-    expect(finalizeArgs[0]?.p_success).toBe(true);
+    expect(finalizeArgs[0]?.p_outcome).toBe('settled');
   });
 });
 
@@ -493,8 +624,8 @@ describe('T-VERIFY settle on-chain', () => {
     expect(r.status).toBe('failed');
     // Caso AMBIGUO: NO se refunda (el deposit PUDO haberse transferido on-chain).
     expect(refunds).toEqual([]);
-    // Reconciliable: finalize con p_success=false + flag RECONCILE en error_message.
-    expect(finalizeArgs[0]?.p_success).toBe(false);
+    // Reconciliable: finalize con outcome ambiguo + flag RECONCILE en error_message.
+    expect(finalizeArgs[0]?.p_outcome).toBe('failed_ambiguous');
     expect(finalizeArgs[0]?.p_residual).toBeNull();
     expect(String(finalizeArgs[0]?.p_error)).toMatch(/^RECONCILE:/);
     // Señal de reconciliación explícita (nunca perder la señal).
@@ -577,41 +708,21 @@ describe('BLQ-ALTO-1 session deposit on settle failure', () => {
     mockSettle.mockResolvedValue({ txHash: '', success: false, error: 'boom' });
     mockVerify.mockResolvedValue({ ok: true });
 
-    const budgetPre = 100;
-    // El deposit (10) ya se debitó en openSession contra el budget prepago.
-    let budget = budgetPre - 10;
-    const refunds: number[] = [];
-    routeRpc({
-      close_payment_intent_for_settle: () => ({
-        data: [
-          {
-            final_amount: 4,
-            prev_status: 'open',
-            intent_type: 'session',
-            key_id: 'k1',
-            chain_id: 2368,
-            pay_to: PAYTO,
-            authorized_usd: 10,
-            consumed_usd: 4,
-            settle_tx_hash: null,
-          },
-        ],
-        error: null,
-      }),
-      refund_a2a_key_spend: (args) => {
-        refunds.push(Number(args.p_amount_usd));
-        budget += Number(args.p_amount_usd);
-        return { data: 1, error: null };
-      },
-      finalize_payment_intent: () => ({ error: null }),
+    const budgetPre = 100; // openSession ya debitó el deposit (10) → budget 90.
+    const db = makeIntentDb({
+      intent_type: 'session',
+      authorized_usd: 10,
+      consumed_usd: 4,
     });
+    routeRpc(db.handlers);
 
     const r = await paymentIntentService.closeSession('i1', OWNER);
     expect(r.status).toBe('failed');
-    // Refund del deposit COMPLETO (10), NO sólo del residual (6).
-    expect(refunds).toEqual([10]);
+    // Refund del deposit COMPLETO (10), DENTRO de finalize (status-gated), NO 6.
+    expect(db.refunds).toEqual([10]);
     // Invariante money-path: budget restaurado a su valor previo.
-    expect(budget).toBe(budgetPre);
+    const budgetPost = budgetPre - 10 + db.refunds.reduce((a, b) => a + b, 0);
+    expect(budgetPost).toBe(budgetPre);
     expect(r.residualUsd).toBe(10);
   });
 
@@ -658,33 +769,15 @@ describe('BLQ-ALTO-1 session deposit on settle failure', () => {
 
   it('sign() throws (INEQUÍVOCO) → refund del deposit COMPLETO', async () => {
     mockSign.mockRejectedValue(new Error('sig down'));
-    const refunds: number[] = [];
-    routeRpc({
-      close_payment_intent_for_settle: () => ({
-        data: [
-          {
-            final_amount: 4,
-            prev_status: 'open',
-            intent_type: 'session',
-            key_id: 'k1',
-            chain_id: 2368,
-            pay_to: PAYTO,
-            authorized_usd: 10,
-            consumed_usd: 4,
-            settle_tx_hash: null,
-          },
-        ],
-        error: null,
-      }),
-      refund_a2a_key_spend: (args) => {
-        refunds.push(Number(args.p_amount_usd));
-        return { data: 1, error: null };
-      },
-      finalize_payment_intent: () => ({ error: null }),
+    const db = makeIntentDb({
+      intent_type: 'session',
+      authorized_usd: 10,
+      consumed_usd: 4,
     });
+    routeRpc(db.handlers);
     const r = await paymentIntentService.closeSession('i1', OWNER);
     expect(r.status).toBe('failed');
-    expect(refunds).toEqual([10]); // deposit completo reembolsado
+    expect(db.refunds).toEqual([10]); // deposit completo reembolsado, 1 vez
   });
 });
 
@@ -805,39 +898,24 @@ describe('BLQ-1 upto debit-before-transfer', () => {
     mockSettle.mockResolvedValue({ txHash: '', success: false, error: 'boom' });
     mockVerify.mockResolvedValue({ ok: true });
     let budget = 10;
-    const refunds: number[] = [];
+    const db = makeIntentDb({
+      intent_type: 'upto',
+      authorized_usd: 5,
+      consumed_usd: 0,
+    });
     routeRpc({
-      close_payment_intent_for_settle: () => ({
-        data: [
-          {
-            final_amount: 5,
-            prev_status: 'open',
-            intent_type: 'upto',
-            key_id: 'k1',
-            chain_id: 2368,
-            pay_to: PAYTO,
-            authorized_usd: 5,
-            consumed_usd: 5,
-            settle_tx_hash: null,
-          },
-        ],
-        error: null,
-      }),
+      ...db.handlers,
       increment_a2a_key_spend: (args) => {
         budget -= Number(args.p_amount_usd);
         return { data: null, error: null };
       },
-      refund_a2a_key_spend: (args) => {
-        refunds.push(Number(args.p_amount_usd));
-        budget += Number(args.p_amount_usd);
-        return { data: 1, error: null };
-      },
-      finalize_payment_intent: () => ({ error: null }),
     });
 
     const r = await paymentIntentService.settleUpto('i1', OWNER, 5);
     expect(r.status).toBe('failed');
-    expect(refunds).toEqual([5]); // se reembolsó el débito
+    // El refund del débito vive DENTRO de finalize (status-gated), no un RPC aparte.
+    expect(db.refunds).toEqual([5]);
+    budget += db.refunds.reduce((a, b) => a + b, 0);
     expect(budget).toBe(10); // buyer made whole
   });
 
@@ -873,54 +951,24 @@ describe('BLQ-1 upto debit-before-transfer', () => {
 describe('BLQ-2 closing orphan recovery', () => {
   it('session close con finalize fallando 1ª vez → recuperable en el retry, residual refundado 1 sola vez', async () => {
     happySettle();
-    let status = 'open';
-    let finalizeCalls = 0;
-    const refunds: number[] = [];
-    routeRpc({
-      close_payment_intent_for_settle: () => {
-        const prev = status;
-        if (status === 'open') status = 'closing';
-        return {
-          data: [
-            {
-              final_amount: prev === 'open' ? 4 : 0,
-              prev_status: prev,
-              intent_type: 'session',
-              key_id: 'k1',
-              chain_id: 2368,
-              pay_to: PAYTO,
-              authorized_usd: 10,
-              consumed_usd: 4,
-              settle_tx_hash: null,
-            },
-          ],
-          error: null,
-        };
-      },
-      finalize_payment_intent: (args) => {
-        finalizeCalls += 1;
-        // El 1er finalize falla (blip DB) → el intent queda 'closing' huérfano.
-        if (finalizeCalls === 1) return { error: { message: 'db blip' } };
-        // Recovery: sólo actúa mientras 'closing' (idempotente, sin doble-refund).
-        if (status === 'closing') {
-          if (args.p_success && args.p_residual) {
-            refunds.push(Number(args.p_residual));
-          }
-          status = 'settled';
-        }
-        return { error: null };
-      },
+    const db = makeIntentDb({
+      intent_type: 'session',
+      authorized_usd: 10,
+      consumed_usd: 4,
     });
+    db.state.failFinalize = 1; // el 1er finalize hace blip → huérfano 'closing'
+    routeRpc(db.handlers);
 
     // 1er close: settle on-chain OK, finalize FALLA → huérfano en 'closing'.
     const r1 = await paymentIntentService.closeSession('i1', OWNER);
     expect(r1.status).toBe('settled'); // el dinero se movió on-chain
-    expect(refunds).toEqual([]); // residual AÚN no acreditado
+    expect(db.refunds).toEqual([]); // residual AÚN no acreditado
+    expect(db.row.settle_outcome).toBe('settled'); // veredicto persistido (record)
 
-    // retry: ve 'closing' → re-ejecuta finalize idempotente → acredita residual.
+    // retry: ve 'closing' con veredicto 'settled' → finalize idempotente → residual.
     const r2 = await paymentIntentService.closeSession('i1', OWNER);
     expect(r2.status).toBe('settled');
-    expect(refunds).toEqual([6]); // residual 10-4 acreditado EXACTAMENTE una vez
+    expect(db.refunds).toEqual([6]); // residual 10-4 acreditado EXACTAMENTE una vez
     expect(mockSettle).toHaveBeenCalledTimes(1); // NO re-settle en el retry
   });
 
@@ -985,6 +1033,7 @@ describe('BLQ-2 closing orphan recovery', () => {
             authorized_usd: 10,
             consumed_usd: 4,
             settle_tx_hash: '0xTX',
+            settle_outcome: 'settled',
           },
         ],
         error: null,
@@ -996,10 +1045,181 @@ describe('BLQ-2 closing orphan recovery', () => {
     });
 
     await paymentIntentService.expireStale();
-    // El huérfano 'closing' disparó un finalize con el residual recomputado (6).
+    // El huérfano 'closing' con veredicto 'settled' → finalize con residual (6).
     expect(finalizeArgs).toHaveLength(1);
     expect(finalizeArgs[0]?.p_residual).toBeCloseTo(6, 8);
     expect(mockSettle).not.toHaveBeenCalled(); // NO re-settle
+  });
+});
+
+// ── BLQ-DR: doble-fallo compuesto (fix de raíz del double-refund) ─
+// Repro exacto del F4 QA: el settle resuelve un veredicto, PERO el finalize que
+// aplica el refund + status flip falla (blip DB). El retry/expireStale re-aplica el
+// veredicto PERSISTIDO — el refund vive dentro de finalize (status-gated) ⇒ se aplica
+// EXACTAMENTE UNA VEZ, jamás dos. Servicio real; el finalize se modela con las mismas
+// semánticas del RPC (status-gate + refund-inside), NO como un no-op que oculte el bug.
+describe('BLQ-DR compound-failure (double-refund root fix)', () => {
+  it('session fallo INEQUÍVOCO → finalize falla → retry → refund del deposit EXACTAMENTE una vez (budget_post == budget_pre)', async () => {
+    // settle inequívoco: settle.success===false → NO hubo transfer on-chain.
+    mockSign.mockResolvedValue({
+      paymentRequest: {
+        authorization: { value: '1' },
+        signature: '0xsig',
+        network: 'kite',
+      },
+    });
+    mockSettle.mockResolvedValue({ txHash: '', success: false, error: 'boom' });
+    mockVerify.mockResolvedValue({ ok: true });
+
+    const db = makeIntentDb({
+      intent_type: 'session',
+      authorized_usd: 10,
+      consumed_usd: 4,
+    });
+    db.state.failFinalize = 1; // el finalize del 1er intento hace blip
+    routeRpc(db.handlers);
+
+    const budgetPre = 100; // openSession ya debitó el deposit (10) → 90.
+
+    // 1er close: settle inequívoco falla → record(unequivocal) OK → finalize BLIP.
+    // El refund vive en finalize → NO se aplicó; el servicio propaga INTERNAL.
+    await expect(
+      paymentIntentService.closeSession('i1', OWNER),
+    ).rejects.toMatchObject({ code: 'INTERNAL' });
+    expect(db.refunds).toEqual([]); // NADA reembolsado aún
+    expect(db.row.status).toBe('closing'); // huérfano recuperable
+    expect(db.row.settle_outcome).toBe('failed_unequivocal'); // veredicto persistido
+
+    // retry: recovery lee 'failed_unequivocal' → finalize → refund del deposit 1 vez.
+    const r2 = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r2.status).toBe('failed');
+    expect(db.refunds).toEqual([10]); // deposit COMPLETO, exactamente una vez
+
+    // 3er retry (terminal): no-op, refunds intactos (jamás 16 sobre 10).
+    const r3 = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r3.status).toBe('failed');
+    expect(db.refunds).toEqual([10]);
+
+    const budgetPost = budgetPre - 10 + db.refunds.reduce((a, b) => a + b, 0);
+    expect(budgetPost).toBe(budgetPre); // invariante restaurado (no +6 de más)
+    expect(mockSettle).toHaveBeenCalledTimes(1); // NO re-settle en los retries
+  });
+
+  it('session ÉXITO → finalize falla → recovery re-acredita el residual EXACTAMENTE una vez', async () => {
+    happySettle();
+    const db = makeIntentDb({
+      intent_type: 'session',
+      authorized_usd: 10,
+      consumed_usd: 4,
+    });
+    db.state.failFinalize = 1;
+    routeRpc(db.handlers);
+
+    // 1er close: settle OK, record('settled') OK, finalize BLIP (success NO throw).
+    const r1 = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r1.status).toBe('settled'); // el dinero se movió on-chain
+    expect(db.refunds).toEqual([]); // residual AÚN no acreditado
+    expect(db.row.settle_outcome).toBe('settled');
+
+    // retry: recovery lee 'settled' → acredita residual (10-4=6) una sola vez.
+    const r2 = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r2.status).toBe('settled');
+    expect(db.refunds).toEqual([6]);
+
+    const r3 = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r3.status).toBe('settled');
+    expect(db.refunds).toEqual([6]); // residual jamás doble
+    expect(mockSettle).toHaveBeenCalledTimes(1);
+  });
+
+  it('session fallo AMBIGUO → finalize falla → recovery NO refunda (sigue reconcile)', async () => {
+    happySettle();
+    mockVerify.mockResolvedValue({ ok: false, reason: 'AMOUNT_MISMATCH' }); // ambiguo
+    const db = makeIntentDb({
+      intent_type: 'session',
+      authorized_usd: 10,
+      consumed_usd: 4,
+    });
+    db.state.failFinalize = 1;
+    routeRpc(db.handlers);
+
+    await expect(
+      paymentIntentService.closeSession('i1', OWNER),
+    ).rejects.toMatchObject({ code: 'INTERNAL' });
+    expect(db.refunds).toEqual([]);
+    expect(db.row.settle_outcome).toBe('failed_ambiguous');
+
+    // retry: recovery lee 'failed_ambiguous' → finalize → status failed, NO refund.
+    const r2 = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r2.status).toBe('failed');
+    expect(db.refunds).toEqual([]); // ambiguo → NUNCA refunda (evita doble-gasto)
+    expect(db.row.status).toBe('failed');
+    expect(String(db.row.error_message)).toMatch(/^RECONCILE:/);
+  });
+
+  it('upto fallo INEQUÍVOCO → finalize falla → retry vía expireStale → refund del débito una sola vez', async () => {
+    mockSign.mockResolvedValue({
+      paymentRequest: {
+        authorization: { value: '1' },
+        signature: '0xsig',
+        network: 'kite',
+      },
+    });
+    mockSettle.mockResolvedValue({ txHash: '', success: false, error: 'boom' });
+    mockVerify.mockResolvedValue({ ok: true });
+
+    const db = makeIntentDb({
+      intent_type: 'upto',
+      authorized_usd: 5,
+      consumed_usd: 0,
+    });
+    db.state.failFinalize = 1;
+    let budget = 10;
+    routeRpc({
+      ...db.handlers,
+      increment_a2a_key_spend: (args) => {
+        budget -= Number(args.p_amount_usd);
+        return { data: null, error: null };
+      },
+    });
+
+    // 1er settle: debita 5 (10→5), settle inequívoco falla, finalize BLIP → INTERNAL.
+    await expect(
+      paymentIntentService.settleUpto('i1', OWNER, 8),
+    ).rejects.toMatchObject({ code: 'INTERNAL' });
+    expect(db.refunds).toEqual([]);
+    expect(db.row.settle_outcome).toBe('failed_unequivocal');
+    expect(budget).toBe(5); // debitado, aún no reembolsado
+
+    // expireStale barre el 'closing' huérfano → recovery refunda el débito (5) 1 vez.
+    const builder = {
+      _status: undefined as string | undefined,
+      select: () => builder,
+      eq: (col: string, val: string) => {
+        if (col === 'status') builder._status = val;
+        return builder;
+      },
+      lt: () =>
+        Promise.resolve({
+          data:
+            builder._status === 'closing'
+              ? [{ id: 'i1', owner_ref: OWNER, intent_type: 'upto' }]
+              : [],
+          error: null,
+        }),
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    mockFrom.mockReturnValue(builder as any);
+
+    await paymentIntentService.expireStale();
+    expect(db.refunds).toEqual([5]); // débito reembolsado exactamente una vez
+    budget += db.refunds.reduce((a, b) => a + b, 0);
+    expect(budget).toBe(10); // buyer made whole
+
+    // otra pasada: terminal → sin doble-refund.
+    await paymentIntentService.expireStale();
+    expect(db.refunds).toEqual([5]);
+    expect(mockSettle).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1024,6 +1244,7 @@ describe('T-CONC concurrencia', () => {
               authorized_usd: 10,
               consumed_usd: 4,
               settle_tx_hash: first ? null : '0xTX',
+              settle_outcome: first ? null : 'settled',
             },
           ],
           error: null,
