@@ -367,7 +367,8 @@ describe('debitDelegationAndParent', () => {
     mockRpc.mockResolvedValue({
       data: null,
       error: {
-        message: 'INVALID_AMOUNT: p_amount_usd -1 must be a non-negative number',
+        message:
+          'INVALID_AMOUNT: p_amount_usd -1 must be a non-negative number',
       },
     } as never);
     await expect(
