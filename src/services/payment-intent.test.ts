@@ -37,6 +37,22 @@ vi.mock('../lib/supabase.js', () => ({
   supabase: { rpc: vi.fn(), from: vi.fn() },
 }));
 
+// WKH-139: expireStale importa dinámicamente arbiterService para barrer huérfanos
+// 'arb_closing' (recoverArbClosing) y 'disputed' (revertDisputeToOpen). Mock del
+// módulo para verificar el CABLEADO (import dinámico + iteración) sin cargar el real.
+const mockRecoverArbClosing = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(undefined),
+);
+const mockRevertDisputeToOpen = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(undefined),
+);
+vi.mock('./arbiter.js', () => ({
+  arbiterService: {
+    recoverArbClosing: (...a: unknown[]) => mockRecoverArbClosing(...a),
+    revertDisputeToOpen: (...a: unknown[]) => mockRevertDisputeToOpen(...a),
+  },
+}));
+
 import { supabase } from '../lib/supabase.js';
 import type { CreateUptoInput } from '../types/index.js';
 import {
@@ -1054,6 +1070,60 @@ describe('BLQ-2 closing orphan recovery', () => {
     expect(finalizeArgs).toHaveLength(1);
     expect(finalizeArgs[0]?.p_residual).toBeCloseTo(6, 8);
     expect(mockSettle).not.toHaveBeenCalled(); // NO re-settle
+  });
+
+  it('MNR-2: siembra arb_closing stale → recoverArbClosing corre 1× (import dinámico + query)', async () => {
+    const builder = {
+      _status: undefined as string | undefined,
+      select: () => builder,
+      eq: (col: string, val: string) => {
+        if (col === 'status') builder._status = val;
+        return builder;
+      },
+      lt: () =>
+        Promise.resolve({
+          data:
+            builder._status === 'arb_closing'
+              ? [{ id: 'iA', owner_ref: OWNER }]
+              : [],
+          error: null,
+        }),
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    mockFrom.mockReturnValue(builder as any);
+    routeRpc({});
+
+    await paymentIntentService.expireStale();
+    expect(mockRecoverArbClosing).toHaveBeenCalledTimes(1);
+    expect(mockRecoverArbClosing).toHaveBeenCalledWith('iA', OWNER, true);
+    expect(mockRevertDisputeToOpen).not.toHaveBeenCalled();
+  });
+
+  it('BLQ-BAJO-1 (c): siembra disputed stale → revertDisputeToOpen corre 1× (desbrickea)', async () => {
+    const builder = {
+      _status: undefined as string | undefined,
+      select: () => builder,
+      eq: (col: string, val: string) => {
+        if (col === 'status') builder._status = val;
+        return builder;
+      },
+      lt: () =>
+        Promise.resolve({
+          data:
+            builder._status === 'disputed'
+              ? [{ id: 'iD', owner_ref: OWNER }]
+              : [],
+          error: null,
+        }),
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    mockFrom.mockReturnValue(builder as any);
+    routeRpc({});
+
+    await paymentIntentService.expireStale();
+    expect(mockRevertDisputeToOpen).toHaveBeenCalledTimes(1);
+    expect(mockRevertDisputeToOpen).toHaveBeenCalledWith('iD', OWNER);
+    expect(mockRecoverArbClosing).not.toHaveBeenCalled();
   });
 });
 

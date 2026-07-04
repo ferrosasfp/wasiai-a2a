@@ -59,6 +59,59 @@ export type Database = {
         };
         Relationships: [];
       };
+      a2a_arbitrations: {
+        Row: {
+          ambiguity_reason: string | null;
+          at_stake_usd: number;
+          created_at: string;
+          decision: string;
+          evidence_digest: string | null;
+          id: string;
+          intent_id: string;
+          llm_reasoning: string | null;
+          method: string;
+          owner_ref: string;
+          settle_usd: number;
+          status: string;
+        };
+        Insert: {
+          ambiguity_reason?: string | null;
+          at_stake_usd: number;
+          created_at?: string;
+          decision: string;
+          evidence_digest?: string | null;
+          id?: string;
+          intent_id: string;
+          llm_reasoning?: string | null;
+          method: string;
+          owner_ref: string;
+          settle_usd?: number;
+          status: string;
+        };
+        Update: {
+          ambiguity_reason?: string | null;
+          at_stake_usd?: number;
+          created_at?: string;
+          decision?: string;
+          evidence_digest?: string | null;
+          id?: string;
+          intent_id?: string;
+          llm_reasoning?: string | null;
+          method?: string;
+          owner_ref?: string;
+          settle_usd?: number;
+          status?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'a2a_arbitrations_intent_id_fkey';
+            columns: ['intent_id'];
+            isOneToOne: false;
+            referencedRelation: 'a2a_payment_intents';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
       a2a_fee_splits: {
         Row: {
           amount_usdc: number;
@@ -2631,6 +2684,41 @@ export type Database = {
           p_expires_at: string;
         };
         Returns: undefined;
+      };
+      open_dispute: {
+        Args: {
+          p_intent_id: string;
+          p_owner_ref: string;
+        };
+        Returns: {
+          intent_type: string;
+          key_id: string;
+          chain_id: number;
+          pay_to: string;
+          seller_ref: string;
+          authorized_usd: number;
+          consumed_usd: number;
+          expires_at: string;
+        }[];
+      };
+      close_payment_intent_for_arbitration: {
+        Args: {
+          p_intent_id: string;
+          p_owner_ref: string;
+          p_arb_amount: number;
+        };
+        Returns: {
+          final_amount: number;
+          prev_status: string;
+          intent_type: string;
+          key_id: string;
+          chain_id: number;
+          pay_to: string;
+          authorized_usd: number;
+          consumed_usd: number;
+          settle_tx_hash: string | null;
+          settle_outcome: string | null;
+        }[];
       };
       append_step_output: {
         Args: {
