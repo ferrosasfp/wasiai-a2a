@@ -24,7 +24,9 @@ export type Database = {
           metadata: Json | null;
           name: string;
           owner_ref: string;
+          payout_wallet: string | null;
           price_usdc: number;
+          referrer_ref: string | null;
           slug: string;
         };
         Insert: {
@@ -36,7 +38,9 @@ export type Database = {
           metadata?: Json | null;
           name: string;
           owner_ref: string;
+          payout_wallet?: string | null;
           price_usdc?: number;
+          referrer_ref?: string | null;
           slug: string;
         };
         Update: {
@@ -48,8 +52,55 @@ export type Database = {
           metadata?: Json | null;
           name?: string;
           owner_ref?: string;
+          payout_wallet?: string | null;
           price_usdc?: number;
+          referrer_ref?: string | null;
           slug?: string;
+        };
+        Relationships: [];
+      };
+      a2a_fee_splits: {
+        Row: {
+          amount_usdc: number;
+          bps: number;
+          created_at: string;
+          error_message: string | null;
+          id: string;
+          orchestration_id: string;
+          owner_ref: string;
+          recipient_role: string;
+          recipient_wallet: string;
+          status: string;
+          tx_hash: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          amount_usdc: number;
+          bps: number;
+          created_at?: string;
+          error_message?: string | null;
+          id?: string;
+          orchestration_id: string;
+          owner_ref: string;
+          recipient_role: string;
+          recipient_wallet: string;
+          status?: string;
+          tx_hash?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          amount_usdc?: number;
+          bps?: number;
+          created_at?: string;
+          error_message?: string | null;
+          id?: string;
+          orchestration_id?: string;
+          owner_ref?: string;
+          recipient_role?: string;
+          recipient_wallet?: string;
+          status?: string;
+          tx_hash?: string | null;
+          updated_at?: string;
         };
         Relationships: [];
       };
