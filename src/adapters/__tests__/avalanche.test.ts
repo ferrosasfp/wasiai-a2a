@@ -29,15 +29,32 @@ vi.mock('../../lib/logger.js', () => ({
 }));
 
 // ─── Mocks ───────────────────────────────────────────────────────────────
-// `viem` partial mock — only `createWalletClient` is replaced (preserves
-// real exports like `http`, `parseUnits`, etc).
+// `viem` partial mock — replaces `createWalletClient` + `createPublicClient`
+// (preserves real exports like `http`, `parseUnits`, `parseSignature`,
+// `WaitForTransactionReceiptTimeoutError`, etc). The `mock`-prefixed hoisted
+// fns let the WKH-138 gasless tests drive writeContract/receipt/balanceOf.
+const mockWriteContract = vi.fn();
+const mockWaitForReceipt = vi.fn();
+const mockReadContract = vi.fn();
+// Valid 65-byte EIP-3009 signature (parseSignature-compatible, v=0x1b=27).
+// The old `0x${'ab'.repeat(65)}` throws "Invalid yParityOrV" in parseSignature,
+// which the gasless transfer() path exercises (payment sign() does not).
+const mockSignTypedData = vi
+  .fn()
+  .mockResolvedValue(`0x${'11'.repeat(32)}${'22'.repeat(32)}1b`);
+
 vi.mock('viem', async (importOriginal) => {
   const actual = await importOriginal<typeof import('viem')>();
   return {
     ...actual,
     createWalletClient: vi.fn(() => ({
       account: { address: '0x1234567890123456789012345678901234567890' },
-      signTypedData: vi.fn().mockResolvedValue(`0x${'ab'.repeat(65)}`),
+      signTypedData: mockSignTypedData,
+      writeContract: mockWriteContract,
+    })),
+    createPublicClient: vi.fn(() => ({
+      waitForTransactionReceipt: mockWaitForReceipt,
+      readContract: mockReadContract,
     })),
   };
 });
@@ -45,11 +62,25 @@ vi.mock('viem', async (importOriginal) => {
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
+import { WaitForTransactionReceiptTimeoutError } from 'viem';
+import {
+  _resetAvalancheGasless,
+  AvalancheGaslessAdapter,
+} from '../avalanche/gasless.js';
 import { createAvalancheAdapters } from '../avalanche/index.js';
 import {
   _resetWalletClient,
   AvalanchePaymentAdapter,
 } from '../avalanche/payment.js';
+import { GaslessTransferError } from '../errors.js';
+
+// Valid EIP-3009 signature the mocked signTypedData resolves to.
+const VALID_SIG = `0x${'11'.repeat(32)}${'22'.repeat(32)}1b`;
+// hardhat account #0 pubkey — NOT a secret; only used to configure the signer.
+const TEST_PK =
+  '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+// The mocked createWalletClient always returns this operator address.
+const MOCK_OPERATOR = '0x1234567890123456789012345678901234567890';
 
 const FUJI_USDC_DEFAULT = '0x5425890298aed601595a70AB815c96711a31Bc65';
 const AVALANCHE_USDC_DEFAULT = '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E';
@@ -435,15 +466,106 @@ describe('Avalanche payment adapter — contract', () => {
   });
 });
 
-describe('Avalanche gasless adapter — stub', () => {
+describe('Avalanche gasless adapter — EIP-3009 operator-relayed (WKH-138)', () => {
+  const TO = '0x000000000000000000000000000000000000dEaD' as `0x${string}`;
+  const TX_HASH = `0x${'ab'.repeat(32)}` as `0x${string}`;
+
   beforeEach(() => {
     _resetWalletClient();
-    vi.clearAllMocks();
+    _resetAvalancheGasless();
+    mockWriteContract.mockReset();
+    mockWaitForReceipt.mockReset();
+    mockReadContract.mockReset();
+    mockSignTypedData.mockReset();
+    mockSignTypedData.mockResolvedValue(VALID_SIG);
+    delete process.env.GASLESS_ENABLED;
+    delete process.env.USDC_USD_RATE;
+    delete process.env.GASLESS_DEFAULT_CAP_USD;
+    delete process.env.FUJI_USDC_ADDRESS;
+    delete process.env.AVALANCHE_USDC_ADDRESS;
+    process.env.OPERATOR_PRIVATE_KEY = TEST_PK;
   });
 
-  it('status() returns disabled on fuji', async () => {
-    const bundle = await createAvalancheAdapters({ network: 'fuji' });
-    const status = await bundle.gasless.status();
+  afterEach(() => {
+    delete process.env.OPERATOR_PRIVATE_KEY;
+    delete process.env.GASLESS_ENABLED;
+    delete process.env.USDC_USD_RATE;
+    delete process.env.GASLESS_DEFAULT_CAP_USD;
+  });
+
+  // ── T-AC1: sign + writeContract + receipt success → { txHash } ────────────
+  it('T-AC1: transfer() signs, submits via writeContract and returns { txHash }', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'success' });
+
+    const adapter = new AvalancheGaslessAdapter(43113);
+    const result = await adapter.transfer({ to: TO, value: 1_000_000n }); // $1 < cap $10
+
+    expect(result).toEqual({ txHash: TX_HASH });
+    expect(mockWriteContract).toHaveBeenCalledTimes(1);
+    // CD-6: from == operator address (the caller never controls `from`).
+    const args = mockWriteContract.mock.calls[0]![0].args;
+    expect(args[0]).toBe(MOCK_OPERATOR); // from
+    expect(args[1]).toBe(TO); // to
+    expect(args[2]).toBe(1_000_000n); // value
+    expect(mockWriteContract.mock.calls[0]![0].functionName).toBe(
+      'transferWithAuthorization',
+    );
+  });
+
+  // ── T-DRAIN-CAP (adapter-level, CD-5): value > cap → throw BEFORE submit ──
+  it('T-DRAIN-CAP: value over per-call cap throws before writeContract', async () => {
+    process.env.GASLESS_DEFAULT_CAP_USD = '10';
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 50_000_000n }), // $50 > $10
+    ).rejects.toBeInstanceOf(GaslessTransferError);
+    expect(mockWriteContract).not.toHaveBeenCalled();
+    expect(mockSignTypedData).not.toHaveBeenCalled();
+  });
+
+  it('T-DRAIN-CAP: overflow value (fail-closed +Infinity) throws before submit', async () => {
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 2n ** 60n }),
+    ).rejects.toBeInstanceOf(GaslessTransferError);
+    expect(mockWriteContract).not.toHaveBeenCalled();
+  });
+
+  // ── T-SIGN-INVALID (CD-8): writeContract reject / revert / timeout ────────
+  it('T-SIGN-INVALID: writeContract reject → GaslessTransferError, no txHash fabricated', async () => {
+    mockWriteContract.mockRejectedValue(new Error('nonce already used'));
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toBeInstanceOf(GaslessTransferError);
+    expect(mockWaitForReceipt).not.toHaveBeenCalled();
+  });
+
+  it('T-SIGN-INVALID: receipt status reverted → GaslessTransferError', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'reverted' });
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toThrow(/reverted/);
+  });
+
+  it('T-SIGN-INVALID: receipt timeout (WaitForTransactionReceiptTimeoutError) → GaslessTransferError', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockRejectedValue(
+      new WaitForTransactionReceiptTimeoutError({ hash: TX_HASH }),
+    );
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toThrow(/timeout/);
+  });
+
+  // ── T-AC3: status() funding_state per enabled/pk/balance ──────────────────
+  it('T-AC3: status() → disabled when GASLESS_ENABLED != true', async () => {
+    const adapter = new AvalancheGaslessAdapter(43113);
+    const status = await adapter.status();
     expect(status.enabled).toBe(false);
     expect(status.funding_state).toBe('disabled');
     expect(status.network).toBe('avalanche-fuji');
@@ -452,22 +574,79 @@ describe('Avalanche gasless adapter — stub', () => {
     expect(status.operatorAddress).toBeNull();
   });
 
-  it('status() returns disabled on mainnet', async () => {
-    const bundle = await createAvalancheAdapters({ network: 'mainnet' });
-    const status = await bundle.gasless.status();
-    expect(status.enabled).toBe(false);
-    expect(status.network).toBe('avalanche-mainnet');
-    expect(status.chain_id).toBe(43114);
+  it('T-AC3: status() → unconfigured when enabled but no OPERATOR_PRIVATE_KEY', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    delete process.env.OPERATOR_PRIVATE_KEY;
+    const adapter = new AvalancheGaslessAdapter(43113);
+    const status = await adapter.status();
+    expect(status.enabled).toBe(true);
+    expect(status.operatorAddress).toBeNull();
+    expect(status.funding_state).toBe('unconfigured');
   });
 
-  it('transfer() throws (not implemented)', async () => {
-    const bundle = await createAvalancheAdapters({ network: 'fuji' });
-    await expect(
-      bundle.gasless.transfer({
-        to: '0x000000000000000000000000000000000000dEaD' as `0x${string}`,
-        value: 1000000n,
-      }),
-    ).rejects.toThrow('Avalanche gasless not implemented');
+  it('T-AC3: status() → unfunded when balance 0n', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    mockReadContract.mockResolvedValue(0n);
+    const adapter = new AvalancheGaslessAdapter(43113);
+    const status = await adapter.status();
+    expect(status.funding_state).toBe('unfunded');
+    expect(status.operatorAddress).not.toBeNull();
+  });
+
+  it('T-AC3: status() → unfunded when balanceOf RPC fails (fail-closed)', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    mockReadContract.mockRejectedValue(new Error('RPC down'));
+    const adapter = new AvalancheGaslessAdapter(43113);
+    const status = await adapter.status();
+    expect(status.funding_state).toBe('unfunded');
+  });
+
+  it('T-AC3: status() → ready when balance > 0', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    mockReadContract.mockResolvedValue(5_000_000n);
+    const adapter = new AvalancheGaslessAdapter(43113);
+    const status = await adapter.status();
+    expect(status.funding_state).toBe('ready');
+  });
+
+  // ── T-AC4: status() reports real USDC supportedToken ──────────────────────
+  it('T-AC4: status() reports USDC supportedToken (6 decimals, real address)', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    mockReadContract.mockResolvedValue(5_000_000n);
+    const adapter = new AvalancheGaslessAdapter(43113);
+    const status = await adapter.status();
+    expect(status.supportedToken).not.toBeNull();
+    expect(status.supportedToken!.symbol).toBe('USDC');
+    expect(status.supportedToken!.decimals).toBe(6);
+    expect(status.supportedToken!.eip712Name).toBe('USD Coin');
+  });
+
+  // ── T-DEC (CD-2): gasless token == payment adapter token, same network ────
+  it('T-DEC: gasless supportedToken address/decimals == payment adapter (fuji)', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    mockReadContract.mockResolvedValue(1n);
+    const gasless = new AvalancheGaslessAdapter(43113);
+    const payment = new AvalanchePaymentAdapter({ network: 'fuji' });
+    const status = await gasless.status();
+    expect(status.supportedToken!.address.toLowerCase()).toBe(
+      payment.getToken().toLowerCase(),
+    );
+    expect(status.supportedToken!.decimals).toBe(
+      payment.supportedTokens[0]!.decimals,
+    );
+  });
+
+  it('T-DEC: gasless supportedToken address/decimals == payment adapter (mainnet)', async () => {
+    process.env.GASLESS_ENABLED = 'true';
+    mockReadContract.mockResolvedValue(1n);
+    const gasless = new AvalancheGaslessAdapter(43114);
+    const payment = new AvalanchePaymentAdapter({ network: 'mainnet' });
+    const status = await gasless.status();
+    expect(status.network).toBe('avalanche-mainnet');
+    expect(status.supportedToken!.address.toLowerCase()).toBe(
+      payment.getToken().toLowerCase(),
+    );
+    expect(status.supportedToken!.decimals).toBe(6);
   });
 });
 

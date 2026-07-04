@@ -53,23 +53,74 @@ const mockGaslessTransfer = vi.fn();
 const mockGaslessStatus = vi.fn();
 
 vi.mock('../adapters/registry.js', () => {
-  // WKH-MULTICHAIN W2: middleware uses getAdaptersBundle/getDefaultChainKey to
-  // resolve chainId per-request. Default chain = kite-ozone-testnet (2368).
-  const kiteBundle = {
-    chainConfig: {
-      name: 'eip155:2368',
-      chainId: 2368,
-      explorerUrl: 'https://explorer.test',
+  // WKH-MULTICHAIN W2 + WKH-138: middleware AND the route use
+  // getAdaptersBundle/getDefaultChainKey/getInitializedChainKeys to resolve the
+  // chain per-request. Default chain = kite-ozone-testnet (2368). The registry
+  // is chain-aware: only these three keys are "initialized"; any other valid
+  // slug (e.g. base-mainnet) → undefined bundle → 400 CHAIN_NOT_SUPPORTED.
+  const bundles: Record<
+    string,
+    {
+      chainConfig: { name: string; chainId: number; explorerUrl: string };
+      payment: {
+        supportedTokens: {
+          symbol: string;
+          address: `0x${string}`;
+          decimals: number;
+        }[];
+      };
+    }
+  > = {
+    'kite-ozone-testnet': {
+      chainConfig: {
+        name: 'eip155:2368',
+        chainId: 2368,
+        explorerUrl: 'https://explorer.test',
+      },
+      payment: {
+        supportedTokens: [
+          {
+            symbol: 'PYUSD',
+            address:
+              '0x0000000000000000000000000000000000000000' as `0x${string}`,
+            decimals: 6,
+          },
+        ],
+      },
     },
-    payment: {
-      supportedTokens: [
-        {
-          symbol: 'PYUSD',
-          address:
-            '0x0000000000000000000000000000000000000000' as `0x${string}`,
-          decimals: 6,
-        },
-      ],
+    'avalanche-fuji': {
+      chainConfig: {
+        name: 'Avalanche Fuji',
+        chainId: 43113,
+        explorerUrl: 'https://testnet.snowtrace.io',
+      },
+      payment: {
+        supportedTokens: [
+          {
+            symbol: 'USDC',
+            address:
+              '0x5425890298aed601595a70AB815c96711a31Bc65' as `0x${string}`,
+            decimals: 6,
+          },
+        ],
+      },
+    },
+    'base-sepolia': {
+      chainConfig: {
+        name: 'Base Sepolia',
+        chainId: 84532,
+        explorerUrl: 'https://sepolia.basescan.org',
+      },
+      payment: {
+        supportedTokens: [
+          {
+            symbol: 'USDC',
+            address:
+              '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`,
+            decimals: 6,
+          },
+        ],
+      },
     },
   };
   return {
@@ -104,12 +155,15 @@ vi.mock('../adapters/registry.js', () => {
     getIdentityBindingAdapter: vi.fn(),
     initAdapters: vi.fn(),
     _resetRegistry: vi.fn(),
-    getAdaptersBundle: vi.fn(() => kiteBundle),
-    getInitializedChainKeys: vi.fn(() => ['kite-ozone-testnet']),
+    getAdaptersBundle: vi.fn(
+      (key?: string) => bundles[key ?? 'kite-ozone-testnet'],
+    ),
+    getInitializedChainKeys: vi.fn(() => Object.keys(bundles)),
     getDefaultChainKey: vi.fn(() => 'kite-ozone-testnet'),
   };
 });
 
+import { getGaslessAdapter } from '../adapters/registry.js';
 import { budgetService } from '../services/budget.js';
 import { identityService } from '../services/identity.js';
 import gaslessRoutes from './gasless.js';
@@ -117,6 +171,7 @@ import gaslessRoutes from './gasless.js';
 const mockLookupByHash = vi.mocked(identityService.lookupByHash);
 const mockGetBalance = vi.mocked(budgetService.getBalance);
 const mockDebit = vi.mocked(budgetService.debit);
+const mockGetGaslessAdapter = vi.mocked(getGaslessAdapter);
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -385,5 +440,227 @@ describe('POST /gasless/transfer (WKH-59 SEC-DRAIN-1)', () => {
       undefined,
       'user-1', // F-04 (audit): threaded caller owner_ref
     );
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// WKH-138 — chain-aware routing (x-payment-chain → Avalanche/Base gasless)
+// ══════════════════════════════════════════════════════════════════════════
+
+describe('POST /gasless/transfer — chain-aware (WKH-138)', () => {
+  let app: ReturnType<typeof Fastify>;
+  let originalCap: string | undefined;
+  let originalPyusd: string | undefined;
+  let originalUsdc: string | undefined;
+
+  beforeAll(async () => {
+    originalCap = process.env.GASLESS_DEFAULT_CAP_USD;
+    originalPyusd = process.env.PYUSD_USD_RATE;
+    originalUsdc = process.env.USDC_USD_RATE;
+    process.env.GASLESS_DEFAULT_CAP_USD = '10';
+    process.env.PYUSD_USD_RATE = '1.0';
+    process.env.USDC_USD_RATE = '1.0';
+
+    app = Fastify();
+    await app.register(gaslessRoutes, { prefix: '/gasless' });
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    if (originalCap === undefined) delete process.env.GASLESS_DEFAULT_CAP_USD;
+    else process.env.GASLESS_DEFAULT_CAP_USD = originalCap;
+    if (originalPyusd === undefined) delete process.env.PYUSD_USD_RATE;
+    else process.env.PYUSD_USD_RATE = originalPyusd;
+    if (originalUsdc === undefined) delete process.env.USDC_USD_RATE;
+    else process.env.USDC_USD_RATE = originalUsdc;
+    await app.close();
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGaslessStatus.mockResolvedValue({ funding_state: 'ready' });
+    mockGaslessTransfer.mockResolvedValue({ txHash: '0xavax01' });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // ── T-AC1-ROUTE: x-payment-chain avalanche-fuji → 200 { txHash } ──────────
+  it('T-AC1-ROUTE: header avalanche-fuji → 200, routes to that chain adapter', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({ budget: { '43113': '100.000000' } }),
+    );
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('95.000000');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/gasless/transfer',
+      headers: { 'x-a2a-key': TEST_KEY, 'x-payment-chain': 'avalanche-fuji' },
+      payload: { to: TEST_TO, value: '5000000' }, // 5 USDC = $5 < cap $10
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().txHash).toBe('0xavax01');
+    // CD-3: the handler resolved + used the avalanche-fuji chainKey.
+    expect(mockGetGaslessAdapter).toHaveBeenCalledWith('avalanche-fuji');
+    expect(mockGaslessTransfer).toHaveBeenCalledTimes(1);
+  });
+
+  // ── T-AC2-ROUTE: value > cap on USDC chain → 403 PER_CALL_LIMIT, no debit ──
+  it('T-AC2-ROUTE: avalanche-fuji value $50 > cap $10 → 403 PER_CALL_LIMIT, no transfer', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/gasless/transfer',
+      headers: { 'x-a2a-key': TEST_KEY, 'x-payment-chain': 'avalanche-fuji' },
+      payload: { to: TEST_TO, value: '50000000' }, // $50
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error_code).toBe('PER_CALL_LIMIT');
+    expect(response.json().requested_usd).toBe(50);
+    expect(mockLookupByHash).not.toHaveBeenCalled();
+    expect(mockDebit).not.toHaveBeenCalled();
+    expect(mockGaslessTransfer).not.toHaveBeenCalled();
+  });
+
+  // ── T-AC3-ROUTE: funding_state != ready → 503 gasless_not_operational ─────
+  it('T-AC3-ROUTE: base-sepolia funding_state unfunded → 503', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({ budget: { '84532': '100.000000' } }),
+    );
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('95.000000');
+    mockGaslessStatus.mockResolvedValue({ funding_state: 'unfunded' });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/gasless/transfer',
+      headers: { 'x-a2a-key': TEST_KEY, 'x-payment-chain': 'base-sepolia' },
+      payload: { to: TEST_TO, value: '5000000' },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json().error).toBe('gasless_not_operational');
+    expect(mockGaslessTransfer).not.toHaveBeenCalled();
+  });
+
+  // ── T-CHAIN-BAD: unrecognized slug → 400 CHAIN_NOT_SUPPORTED ──────────────
+  it('T-CHAIN-BAD: x-payment-chain solana → 400 CHAIN_NOT_SUPPORTED', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/gasless/transfer',
+      headers: { 'x-a2a-key': TEST_KEY, 'x-payment-chain': 'solana' },
+      payload: { to: TEST_TO, value: '5000000' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error_code).toBe('CHAIN_NOT_SUPPORTED');
+    expect(mockLookupByHash).not.toHaveBeenCalled();
+    expect(mockGaslessTransfer).not.toHaveBeenCalled();
+  });
+
+  // ── T-CHAIN-BAD: valid slug but not initialized → 400 + initialized list ──
+  it('T-CHAIN-BAD: base-mainnet valid slug but not initialized → 400 + list', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/gasless/transfer',
+      headers: { 'x-a2a-key': TEST_KEY, 'x-payment-chain': 'base-mainnet' },
+      payload: { to: TEST_TO, value: '5000000' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error_code).toBe('CHAIN_NOT_SUPPORTED');
+    expect(response.json().error).toContain('is not initialized');
+    expect(mockGaslessTransfer).not.toHaveBeenCalled();
+  });
+
+  // ── T-REGR-ROUTE: no header → Kite default byte-identical ─────────────────
+  it('T-REGR-ROUTE: no header → routes to Kite default (byte-identical), 200', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('95.000000');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/gasless/transfer',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: { to: TEST_TO, value: '5000000' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    // CD-4: default chain = kite-ozone-testnet.
+    expect(mockGetGaslessAdapter).toHaveBeenCalledWith('kite-ozone-testnet');
+  });
+});
+
+// ── GET /gasless/status — chain-aware (WKH-138) ────────────────────────────
+
+describe('GET /gasless/status — chain-aware (WKH-138)', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    app = Fastify();
+    await app.register(gaslessRoutes, { prefix: '/gasless' });
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // ── T-AC4-ROUTE: GET status with header → status of that chain ────────────
+  it('T-AC4-ROUTE: header avalanche-fuji → status of that chain', async () => {
+    mockGaslessStatus.mockResolvedValue({
+      enabled: true,
+      network: 'avalanche-fuji',
+      funding_state: 'ready',
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/gasless/status',
+      headers: { 'x-payment-chain': 'avalanche-fuji' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().network).toBe('avalanche-fuji');
+    expect(mockGetGaslessAdapter).toHaveBeenCalledWith('avalanche-fuji');
+  });
+
+  it('T-AC4-ROUTE: no header → status of Kite default', async () => {
+    mockGaslessStatus.mockResolvedValue({
+      enabled: false,
+      network: 'kite-testnet',
+      funding_state: 'disabled',
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/gasless/status',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(mockGetGaslessAdapter).toHaveBeenCalledWith('kite-ozone-testnet');
+  });
+
+  it('T-CHAIN-BAD: GET status with solana → 400 CHAIN_NOT_SUPPORTED', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/gasless/status',
+      headers: { 'x-payment-chain': 'solana' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error_code).toBe('CHAIN_NOT_SUPPORTED');
   });
 });

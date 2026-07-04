@@ -17,6 +17,7 @@ import {
   getDefaultChainKey,
   getInitializedChainKeys,
 } from '../adapters/registry.js';
+import type { ChainKey } from '../adapters/types.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { budgetService } from '../services/budget.js';
@@ -62,6 +63,8 @@ declare module 'fastify' {
   interface FastifyRequest {
     a2aKeyRow?: A2AAgentKeyRow;
     gaslessEstimatedCostUsd?: number; // WKH-59
+    gaslessChainKey?: ChainKey; // WKH-138 (gasless multichain) — resuelto una vez en preHandler A
+
     composeEstimatedCostUsd?: number; // WKH-59 (real-price-debit) — CD-9
     composeDestination?: string | undefined; // WKH-125 (cap por destino del step 0)
     resolvedChainId?: number; // WKH-59 (real-price-debit) DT-D

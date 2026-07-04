@@ -12,32 +12,100 @@
  *         transfer on-chain. Si el adapter falla DESPUÉS del debit, el debit
  *         queda — comportamiento "fee-on-attempt" deliberado, igual que el
  *         resto del middleware (Stripe-style: charge first, deliver after).
+ *
+ * WKH-138 (gasless multichain): la chain se resuelve UNA vez en el preHandler A
+ *         vía el header `x-payment-chain` (mirror EXACTO de x402.ts:198-234) y
+ *         se persiste en `request.gaslessChainKey`. El cost estimator, el gate
+ *         `funding_state` y el handler usan ESA chainKey (anti-TOCTOU, CD-3).
+ *         El estimador es chain-aware: Kite → PYUSD, Avalanche/Base → USDC
+ *         6-dec (CD-1). Sin header, el flujo Kite (default) es byte-idéntico
+ *         (CD-4).
  */
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { getGaslessAdapter } from '../adapters/registry.js';
-import { getGaslessDefaultCapUsd, pyusdWeiToUsd } from '../lib/price.js';
+import { resolveChainKey } from '../adapters/chain-resolver.js';
+import {
+  getAdaptersBundle,
+  getDefaultChainKey,
+  getGaslessAdapter,
+  getInitializedChainKeys,
+} from '../adapters/registry.js';
+import type { ChainKey } from '../adapters/types.js';
+import {
+  estimateGaslessValueUsd,
+  getGaslessDefaultCapUsd,
+} from '../lib/price.js';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 
 /**
- * preHandler Stage A (WKH-59): valida shape, parsea wei → bigint, computa
- * estimatedCostUsd y aplica el cap global. Inyecta el resultado en
- * `request.gaslessEstimatedCostUsd` para que requirePaymentOrA2AKey
- * (Stage B) lo use en el debit en lugar del placeholder $1.
+ * Resuelve la chain destino a partir SOLO del header `x-payment-chain`
+ * (mirror EXACTO de x402.ts:198-234). NUNCA lee `request.body` (CD-3).
  *
- * AC-2: bloquea con 403 PER_CALL_LIMIT si el monto excede el cap.
- * AC-6: bloquea con 400 si el body no tiene shape válido o `value` no
- *       es un bigint string.
+ * Devuelve la `ChainKey` resuelta, o `undefined` tras haber enviado la reply de
+ * error (400 CHAIN_NOT_SUPPORTED / 500 REGISTRY_NOT_INITIALIZED). El caller
+ * DEBE cortar el lifecycle (`return`) si recibe `undefined`.
+ */
+function resolveGaslessChainKey(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): ChainKey | undefined {
+  const headerRaw = request.headers['x-payment-chain'];
+  const headerOverride = typeof headerRaw === 'string' ? headerRaw : undefined;
+
+  let chainKey = resolveChainKey({ headerOverride });
+  if (!chainKey) {
+    if (headerOverride !== undefined) {
+      // Header present but unrecognised → 400, never silent default.
+      reply.status(400).send({
+        error_code: 'CHAIN_NOT_SUPPORTED',
+        error: `Chain '${headerOverride}' is not a recognized slug or chainId`,
+      });
+      return undefined;
+    }
+    // Header absent → fall back to registry default (hoy Kite).
+    chainKey = getDefaultChainKey() ?? undefined;
+    if (!chainKey) {
+      reply.status(500).send({
+        error_code: 'REGISTRY_NOT_INITIALIZED',
+        error: 'No chains initialized in registry',
+      });
+      return undefined;
+    }
+  }
+
+  if (!getAdaptersBundle(chainKey)) {
+    // recognised slug but not present in the initialised registry.
+    reply.status(400).send({
+      error_code: 'CHAIN_NOT_SUPPORTED',
+      error: `Chain '${chainKey}' is not initialized. Initialized: ${getInitializedChainKeys().join(', ')}`,
+    });
+    return undefined;
+  }
+
+  return chainKey;
+}
+
+/**
+ * preHandler Stage A (WKH-59 + WKH-138): resuelve la chain (mirror x402),
+ * valida shape, parsea wei → bigint, computa estimatedCostUsd chain-aware y
+ * aplica el cap global. Persiste `request.gaslessChainKey` y
+ * `request.gaslessEstimatedCostUsd` para Stage B (requirePaymentOrA2AKey) y el
+ * handler.
+ *
+ * AC-2: bloquea con 403 PER_CALL_LIMIT si el monto excede el cap (o es !finite).
+ * AC-6: bloquea con 400 si el body no tiene shape válido o `value` no es bigint.
  */
 async function gaslessCostEstimatorPreHandler(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
+  // CD-3: resolver la chain UNA vez, SOLO desde el header, y persistir.
+  const chainKey = resolveGaslessChainKey(request, reply);
+  if (!chainKey) return; // reply ya enviada (400/500).
+  request.gaslessChainKey = chainKey;
+
   const body = request.body as { to?: string; value?: string } | undefined;
 
   // AC-6: shape validation antes de tocar bigint.
-  // Fastify 5 idiom: `return reply...` aborta el preHandler lifecycle ANTES del
-  // middleware de debit (requirePaymentOrA2AKey, Stage B). El bare-return dejaba
-  // que el siguiente preHandler corriera y debitara el placeholder al rechazar.
   if (!body || typeof body.to !== 'string' || typeof body.value !== 'string') {
     return reply
       .status(400)
@@ -54,13 +122,11 @@ async function gaslessCostEstimatorPreHandler(
       .send({ error: 'invalid value: must be a bigint string' });
   }
 
-  // CD-10: pyusdWeiToUsd retorna Infinity sobre overflow, NO throws.
-  const estimatedCostUsd = pyusdWeiToUsd(valueWei);
+  // CD-1: estimador chain-aware. Retorna +Infinity fail-closed (NO throws).
+  const estimatedCostUsd = estimateGaslessValueUsd(chainKey, valueWei);
   const cap = getGaslessDefaultCapUsd();
 
   // AC-2: cap check (Infinity > cap siempre).
-  // Fastify 5 idiom: `return reply...` aborta el preHandler lifecycle ANTES del
-  // middleware de debit (mismo motivo que los rechazos de shape arriba).
   if (!Number.isFinite(estimatedCostUsd) || estimatedCostUsd > cap) {
     return reply.status(403).send({
       error: 'Transfer exceeds gasless cap',
@@ -80,14 +146,18 @@ const gaslessRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/status',
     { config: { rateLimit: false } },
-    async (_req: FastifyRequest, reply: FastifyReply) => {
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      // WKH-138: chain-aware. Resuelve la chain SOLO desde el header.
+      const chainKey = resolveGaslessChainKey(req, reply);
+      if (!chainKey) return; // reply ya enviada (400/500).
       try {
-        const status = await getGaslessAdapter().status();
+        const status = await getGaslessAdapter(chainKey).status();
         return reply.send(status);
       } catch (err) {
         fastify.log.error(
           {
             errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+            chainKey,
           },
           'gasless status failed',
         );
@@ -108,7 +178,9 @@ const gaslessRoutes: FastifyPluginAsync = async (fastify) => {
       ],
     },
     async (req: FastifyRequest, reply: FastifyReply) => {
-      const status = await getGaslessAdapter().status();
+      // CD-3: usar la chainKey resuelta+persistida en el preHandler A.
+      const chainKey = req.gaslessChainKey;
+      const status = await getGaslessAdapter(chainKey).status();
       if (status.funding_state !== 'ready') {
         return reply.status(503).send({
           error: 'gasless_not_operational',
@@ -120,7 +192,7 @@ const gaslessRoutes: FastifyPluginAsync = async (fastify) => {
       // body shape ya fue validado por gaslessCostEstimatorPreHandler.
       const body = req.body as { to: string; value: string };
       try {
-        const result = await getGaslessAdapter().transfer({
+        const result = await getGaslessAdapter(chainKey).transfer({
           to: body.to as `0x${string}`,
           value: BigInt(body.value),
         });
@@ -129,6 +201,7 @@ const gaslessRoutes: FastifyPluginAsync = async (fastify) => {
         req.log.info(
           {
             keyId: req.a2aKeyRow?.id ?? null,
+            chainKey: chainKey ?? null,
             estimatedCostUsd: req.gaslessEstimatedCostUsd ?? null,
             actualValueWei: body.value,
             to: body.to,
@@ -142,6 +215,7 @@ const gaslessRoutes: FastifyPluginAsync = async (fastify) => {
         fastify.log.error(
           {
             errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+            chainKey,
           },
           'gasless transfer failed',
         );
