@@ -16,10 +16,13 @@
 import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { getChainConfig } from '../adapters/registry.js';
+import { supabase } from '../lib/supabase.js';
+import { arbiterService, isArbiterEnabled } from '../services/arbiter.js';
 import {
   PaymentIntentError,
   paymentIntentService,
 } from '../services/payment-intent.js';
+import { ArbiterError } from '../types/arbiter.js';
 import type { UptoCapTypedData } from '../types/index.js';
 import { resolveCallerKey } from './auth/parsers.js';
 
@@ -66,6 +69,33 @@ function sendPaymentError(reply: FastifyReply, err: unknown): FastifyReply {
   }
   // Nunca propagar el mensaje crudo (disclosure-safe).
   return reply.status(500).send({ error_code: 'PAYMENT_INTENT_FAILED' });
+}
+
+/**
+ * WKH-139: mapea ArbiterError.code → HTTP (disclosure-safe). También maneja
+ * PaymentIntentError por si burbujea. Nunca propaga el mensaje crudo.
+ */
+function sendArbiterError(reply: FastifyReply, err: unknown): FastifyReply {
+  if (err instanceof ArbiterError) {
+    switch (err.code) {
+      case 'INVALID_INPUT':
+        return reply.status(422).send({ error_code: 'INVALID_INPUT' });
+      case 'OWNERSHIP_MISMATCH':
+        return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+      case 'INTENT_NOT_FOUND':
+        return reply.status(404).send({ error_code: 'INTENT_NOT_FOUND' });
+      case 'INTENT_NOT_OPEN':
+        return reply.status(409).send({ error_code: 'INTENT_NOT_OPEN' });
+      case 'CHAIN_NOT_SUPPORTED':
+        return reply.status(422).send({ error_code: 'CHAIN_NOT_SUPPORTED' });
+      case 'ARBITER_DISABLED':
+        return reply.status(404).send({ error_code: 'NOT_FOUND' });
+      default:
+        return reply.status(500).send({ error_code: 'ARBITER_FAILED' });
+    }
+  }
+  if (err instanceof PaymentIntentError) return sendPaymentError(reply, err);
+  return reply.status(500).send({ error_code: 'ARBITER_FAILED' });
 }
 
 /** Valida + tipa el typed-data del cap upto (primaryType==='UptoCap'). null si inválido. */
@@ -249,6 +279,95 @@ export const paymentsRoutes: FastifyPluginAsync = async (fastify) => {
           'closeSession failed',
         );
         return sendPaymentError(reply, err);
+      }
+    },
+  );
+
+  // ── POST /session/:id/dispute — abre + resuelve una disputa (WKH-139) ──
+  // Gated por ARBITER_ENABLED: con flag OFF la ruta responde 404 (byte-idéntico:
+  // "no existe", AC-7). El gate es lo PRIMERO, antes de auth/parsing (CD-11).
+  fastify.post(
+    '/session/:id/dispute',
+    async (
+      req: FastifyRequest<{ Params: { id: string } }>,
+      reply: FastifyReply,
+    ) => {
+      if (!isArbiterEnabled()) {
+        return reply.status(404).send({ error_code: 'NOT_FOUND' });
+      }
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+      try {
+        const outcome = await arbiterService.openDispute(
+          req.params.id,
+          callerKey.owner_ref,
+        );
+        return reply.status(200).send({
+          decision: outcome.decision,
+          method: outcome.method,
+          status: outcome.status,
+          settleUsd: outcome.settleUsd,
+          residualUsd: outcome.residualUsd,
+          txHash: outcome.txHash,
+        });
+      } catch (err) {
+        fastify.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'openDispute failed',
+        );
+        return sendArbiterError(reply, err);
+      }
+    },
+  );
+
+  // ── GET /session/:id/dispute — estado de la disputa (owner-guarded, WKH-139) ──
+  fastify.get(
+    '/session/:id/dispute',
+    async (
+      req: FastifyRequest<{ Params: { id: string } }>,
+      reply: FastifyReply,
+    ) => {
+      if (!isArbiterEnabled()) {
+        return reply.status(404).send({ error_code: 'NOT_FOUND' });
+      }
+      const callerKey = await resolveCallerKey(req);
+      if (!callerKey?.is_active) {
+        return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+      try {
+        const { data, error } = await supabase
+          .from('a2a_arbitrations')
+          .select(
+            'decision, method, status, settle_usd, at_stake_usd, ambiguity_reason, created_at',
+          )
+          .eq('intent_id', req.params.id)
+          .eq('owner_ref', callerKey.owner_ref)
+          .maybeSingle();
+        // null / otro owner → 404 disclosure-safe (no revela existencia ajena).
+        if (error || !data) {
+          return reply.status(404).send({ error_code: 'NOT_FOUND' });
+        }
+        return reply.status(200).send({
+          decision: data.decision,
+          method: data.method,
+          status: data.status,
+          settleUsd: data.settle_usd,
+          atStakeUsd: data.at_stake_usd,
+          ambiguityReason: data.ambiguity_reason,
+          createdAt: data.created_at,
+        });
+      } catch (err) {
+        fastify.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'getDispute failed',
+        );
+        return sendArbiterError(reply, err);
       }
     },
   );

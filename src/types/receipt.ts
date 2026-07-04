@@ -11,7 +11,18 @@
 // la columna `receipt_type` / RPC `insert_receipt` lo acepta (posible CHECK
 // constraint en `a2a_receipts`). `emit` es best-effort → un rechazo degrada a
 // WARN sin romper el depósito (Story File §9 R-3).
-export type ReceiptType = 'protocol_fee' | 'budget_debit' | 'deposit_verified';
+// WKH-139: 4 tipos de recibo del árbitro autónomo (release/refund/split/hold).
+// El CHECK de `a2a_receipts.receipt_type` se amplía en la migración
+// 20260704100000_wkh139_arbiter.sql; `emit` es best-effort (un rechazo degrada a
+// WARN sin romper el arbitraje).
+export type ReceiptType =
+  | 'protocol_fee'
+  | 'budget_debit'
+  | 'deposit_verified'
+  | 'arbitration_release'
+  | 'arbitration_refund'
+  | 'arbitration_split'
+  | 'arbitration_hold';
 
 /**
  * Modela EXACTO las columnas de `a2a_receipts`. `amount_usd` (NUMERIC) llega de
