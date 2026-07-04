@@ -18,6 +18,7 @@ import { createTimeoutHandler } from '../middleware/timeout.js';
 import {
   AGENT_LINK_TOKEN_PREFIX,
   AgentLinkAlreadyUsedError,
+  AgentLinkExecutionUnavailableError,
   AgentLinkExpiredError,
   AgentLinkNotFoundError,
   AgentNotFoundError,
@@ -176,6 +177,13 @@ const agentLinkRoutes: FastifyPluginAsync = async (fastify) => {
         }
         if (err instanceof AgentNotFoundError) {
           return reply.status(404).send({ error_code: 'AGENT_NOT_FOUND' });
+        }
+        // MNR-a: execute sin cargo (fondos insuficientes / net-zero). El link se
+        // reabrió (cero débito) → error claro retryable, NO un 200 ambiguo.
+        if (err instanceof AgentLinkExecutionUnavailableError) {
+          return reply
+            .status(503)
+            .send({ error_code: 'LINK_EXECUTION_UNAVAILABLE' });
         }
         fastify.log.error(
           {

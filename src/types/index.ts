@@ -586,6 +586,30 @@ export interface MintAgentLinkResponse {
   expires_at: string;
 }
 
+/**
+ * Shape PÚBLICO del redeem (WKH-137, BLQ-1). El redeem es público (auth por
+ * posesión del token); el redeemer es un tercero, NO el owner del link. Por eso
+ * NO se le devuelve el `OrchestrateResult` completo — ese arrastra telemetría de
+ * billing del owner (`remainingBudgetUsd`, `feeChargeError`, `feeChargeTxHash`,
+ * `refundError`, `debitFallback`) que filtraría el saldo financiero de un tenant
+ * ajeno (viola AC-7 / cross-tenant leak). Este shape acotado expone SOLO lo que
+ * el canal externo necesita: id de orquestación, la respuesta del agente, el fee
+ * de protocolo y el resultado (success + output) del pipeline.
+ */
+export interface RedeemResult {
+  orchestrationId: string;
+  /** Respuesta del agente (equivalente a OrchestrateResult.answer). */
+  answer: unknown;
+  /** Fee de protocolo cobrado por esta invocación (informativo). */
+  protocolFeeUsdc: number;
+  /** Resultado acotado del pipeline: éxito + output del agente. SIN steps/txHash
+   *  ni telemetría de billing del owner. */
+  pipeline: {
+    success: boolean;
+    output: unknown;
+  };
+}
+
 /** Fila del link devuelta por el RPC `claim_agent_link` (open→redeeming). */
 export interface AgentLinkClaim {
   id: string;

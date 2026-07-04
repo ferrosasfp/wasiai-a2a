@@ -29,6 +29,7 @@ import { supabase } from '../lib/supabase.js';
 import type { A2AAgentKeyRow, OrchestrateResult } from '../types/index.js';
 import {
   AgentLinkAlreadyUsedError,
+  AgentLinkExecutionUnavailableError,
   AgentLinkExpiredError,
   AgentNotFoundError,
   agentLinkService,
@@ -331,6 +332,88 @@ describe('redeem (AC-2/AC-3/AC-4/CD-4/CD-8)', () => {
     expect(settleCalls.filter((c) => c.p_outcome === 'redeemed')).toHaveLength(
       1,
     );
+  });
+
+  // BLQ-1 — el redeem público NO filtra saldo/telemetría de billing del owner.
+  it('BLQ-1: redeem NO devuelve remainingBudgetUsd ni telemetría de billing del owner', async () => {
+    linksSingle = { data: openLinkRow(), error: null };
+    keysSingle = { data: { id: KEY_ID, owner_ref: OWNER }, error: null };
+    mockPrice.mockResolvedValue(0.05);
+    // El OrchestrateResult interno arrastra el saldo del owner + telemetría.
+    const leaky: OrchestrateResult = {
+      ...okResult(),
+      remainingBudgetUsd: '999.99',
+      feeChargeError: 'fee boom',
+      feeChargeTxHash: '0xfeetx',
+      refundError: true,
+      debitFallback: true,
+    };
+    mockExecute.mockResolvedValue(leaky);
+
+    const res = await agentLinkService.redeem('wasi_a2a_link_tok', {});
+    const keys = Object.keys(res);
+    expect(keys).not.toContain('remainingBudgetUsd');
+    expect(keys).not.toContain('feeChargeError');
+    expect(keys).not.toContain('feeChargeTxHash');
+    expect(keys).not.toContain('refundError');
+    expect(keys).not.toContain('debitFallback');
+    // El saldo del owner NO aparece por ningún lado del body.
+    expect(JSON.stringify(res)).not.toContain('999.99');
+    // Sí devuelve lo público que el canal externo necesita.
+    expect(res.orchestrationId).toBe('orch-1');
+    expect(res.protocolFeeUsdc).toBe(0.0005);
+    expect(res.pipeline.success).toBe(true);
+    expect(res.pipeline.output).toBe('done');
+  });
+
+  // MNR-a — execute sin cargo (fondos insuficientes / net-zero) → reopen, error claro.
+  it('MNR-a: execute success=false + cero débito → reopen + error claro (link NO redeemed)', async () => {
+    linksSingle = { data: openLinkRow(), error: null };
+    keysSingle = { data: { id: KEY_ID, owner_ref: OWNER }, error: null };
+    mockPrice.mockResolvedValue(0.05);
+    // Espejo del debitFailResult de orchestrate.ts:986 (fondos insuficientes).
+    mockExecute.mockResolvedValue({
+      orchestrationId: 'orch-nf',
+      answer: null,
+      reasoning: 'Insufficient budget for orchestration',
+      pipeline: {
+        success: false,
+        output: null,
+        steps: [],
+        totalCostUsdc: 0,
+        totalLatencyMs: 0,
+      },
+      consideredAgents: [],
+      protocolFeeUsdc: 0,
+    });
+
+    await expect(
+      agentLinkService.redeem('wasi_a2a_link_tok', {}),
+    ).rejects.toBeInstanceOf(AgentLinkExecutionUnavailableError);
+    // El link se REABRE (cero débito), NO se consume como redeemed/failed.
+    expect(settleCalls).toHaveLength(1);
+    expect(settleCalls[0]?.p_outcome).toBe('reopen');
+  });
+
+  // MNR-b — settle(redeemed) falla DESPUÉS del débito → devolver result, NO 502.
+  it('MNR-b: settle(redeemed) falla post-débito → devuelve result (NO throw), log reconciliación', async () => {
+    linksSingle = { data: openLinkRow(), error: null };
+    keysSingle = { data: { id: KEY_ID, owner_ref: OWNER }, error: null };
+    mockPrice.mockResolvedValue(0.05);
+    mockExecute.mockResolvedValue(okResult());
+    // El RPC settle cae DESPUÉS de que execute ya debitó.
+    settleResult = {
+      data: null,
+      error: { message: 'AGENT_LINK_SETTLE_FAILED transient' },
+    };
+
+    const res = await agentLinkService.redeem('wasi_a2a_link_tok', {});
+    // El dinero ya se movió → devolvemos el result igual (no degradar a 502).
+    expect(res.orchestrationId).toBe('orch-1');
+    expect(res.pipeline.success).toBe(true);
+    // Se intentó el settle redeemed (falló) — no reopen, no failed.
+    expect(settleCalls).toHaveLength(1);
+    expect(settleCalls[0]?.p_outcome).toBe('redeemed');
   });
 
   // T13 — execute throw → link failed terminal, NO reopen, NO doble-cobro retry.

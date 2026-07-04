@@ -67,7 +67,10 @@ vi.mock('../services/agent-link.js', async (importActual) => {
   };
 });
 
-import { AgentLinkNotFoundError } from '../services/agent-link.js';
+import {
+  AgentLinkExecutionUnavailableError,
+  AgentLinkNotFoundError,
+} from '../services/agent-link.js';
 import agentLinkRoutes from './agent-links.js';
 
 let app: ReturnType<typeof Fastify>;
@@ -123,6 +126,18 @@ describe('redeem HTTP mapping (AC-4)', () => {
     });
     expect(res.statusCode).toBe(404);
     expect(res.json().error_code).toBe('LINK_NOT_FOUND');
+  });
+
+  // MNR-a — execute sin cargo → 503 claro, NO 200 con answer:null.
+  it('MNR-a: execute sin cargo → 503 LINK_EXECUTION_UNAVAILABLE (no 200 ambiguo)', async () => {
+    mockRedeem.mockRejectedValue(new AgentLinkExecutionUnavailableError());
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents/links/sometoken/redeem',
+      payload: { input: {} },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error_code).toBe('LINK_EXECUTION_UNAVAILABLE');
   });
 });
 

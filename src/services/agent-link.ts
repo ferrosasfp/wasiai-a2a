@@ -15,6 +15,7 @@
  */
 
 import crypto from 'node:crypto';
+import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
 import { asAgentKeyRow } from '../types/a2a-key.js';
 import type { Database } from '../types/database.types.js';
@@ -26,11 +27,14 @@ import type {
   MintAgentLinkResponse,
   OrchestratePlanResult,
   OrchestrateResult,
+  RedeemResult,
 } from '../types/index.js';
 import { resolveAgentPriceUsdc } from './agent-price.js';
 import { getProtocolFeeRate } from './fee-charge.js';
 import { orchestrateService } from './orchestrate.js';
 import { OwnershipMismatchError } from './security/errors.js';
+
+const log = getLogger('agent-link');
 
 /** Prefijo del token opaco de invocation link (CD-OBL-1). */
 export const AGENT_LINK_TOKEN_PREFIX = 'wasi_a2a_link_';
@@ -104,6 +108,33 @@ export class AgentNotFoundError extends Error {
     super('Agent not found');
     this.name = 'AgentNotFoundError';
   }
+}
+
+/**
+ * MNR-a: el execute retornó gracefully con `pipeline.success===false` y CERO
+ * débito (fondos insuficientes del owner / net-zero). El link NO se consume: se
+ * hace `reopen` (vuelve a 'open', como __quoteStale) y se devuelve un error claro
+ * en vez de un 200 ambiguo con `answer:null`. Retryable → 503. */
+export class AgentLinkExecutionUnavailableError extends Error {
+  readonly code = 'LINK_EXECUTION_UNAVAILABLE' as const;
+  constructor() {
+    super('Link execution unavailable (no funds / net-zero)');
+    this.name = 'AgentLinkExecutionUnavailableError';
+  }
+}
+
+/** Mapea el `OrchestrateResult` interno al shape público acotado del redeem
+ *  (BLQ-1). Elimina toda telemetría de billing del owner. */
+function toRedeemResult(result: OrchestrateResult): RedeemResult {
+  return {
+    orchestrationId: result.orchestrationId,
+    answer: result.answer,
+    protocolFeeUsdc: result.protocolFeeUsdc,
+    pipeline: {
+      success: result.pipeline.success,
+      output: result.pipeline.output,
+    },
+  };
 }
 
 /**
@@ -258,7 +289,7 @@ export const agentLinkService = {
   async redeem(
     token: string,
     redeemInput: Record<string, unknown>,
-  ): Promise<OrchestrateResult> {
+  ): Promise<RedeemResult> {
     const hash = crypto.createHash('sha256').update(token).digest('hex');
 
     // 1. Pre-claim fast-fail (cero DB write, AC-4).
@@ -356,23 +387,68 @@ export const agentLinkService = {
         throw new PriceExceedsLinkCapError();
       }
 
+      // MNR-a: execute retornó gracefully con `pipeline.success===false` y CERO
+      // débito (fondos insuficientes del owner / net-zero, orchestrate.ts:986 →
+      // debitFailResult con totalCostUsdc:0). NO consumir el link como 'redeemed'
+      // con 200 ambiguo: reopen (cero débito garantizado, como __quoteStale) y
+      // devolver un error claro. Se distingue de "ejecutó y falló CON cargo"
+      // (totalCostUsdc>0 → redeemed) que sí consume el link.
+      if (
+        result.pipeline.success === false &&
+        (result.pipeline.totalCostUsdc ?? 0) === 0
+      ) {
+        await this.settle(
+          claim.id,
+          claim.owner_ref,
+          'reopen',
+          null,
+          null,
+          null,
+        );
+        throw new AgentLinkExecutionUnavailableError();
+      }
+
       // OK: settle redeemed exactly-once. tx_hash/cost informativos (VERIFY-AT-IMPL).
       const settleTxHash =
         result.pipeline.steps[0]?.txHash ?? result.feeChargeTxHash ?? null;
       const consumedCost = result.pipeline.totalCostUsdc ?? price;
-      await this.settle(
-        claim.id,
-        claim.owner_ref,
-        'redeemed',
-        settleTxHash,
-        consumedCost,
-        null,
-      );
-      return result;
+      // MNR-b: el débito YA ocurrió dentro de execute. Si el bookkeeping del
+      // settle('redeemed') falla acá (RPC caído), el dinero ya se movió y el
+      // agente ya corrió: NO degradar a 502. Logueamos para reconciliación y
+      // devolvemos el result igual. Un retry cae en LINK_ALREADY_USED (el link
+      // quedó en 'redeeming'), así que no hay doble-cobro.
+      try {
+        await this.settle(
+          claim.id,
+          claim.owner_ref,
+          'redeemed',
+          settleTxHash,
+          consumedCost,
+          null,
+        );
+      } catch (settleErr) {
+        log.error(
+          {
+            linkId: claim.id,
+            orchestrationId: result.orchestrationId,
+            settleTxHash,
+            consumedCost,
+            errorClass:
+              settleErr instanceof Error
+                ? settleErr.constructor.name
+                : 'unknown',
+          },
+          'agent-link settle(redeemed) failed post-debit — RECONCILE (money moved, returning result)',
+        );
+      }
+      return toRedeemResult(result);
     } catch (err) {
       // reopen ya settleó (cero débito) → re-throw sin marcar failed (idempotente
       // igual: el status-gate del RPC ignora un 2º settle sobre 'open').
-      if (err instanceof PriceExceedsLinkCapError) {
+      if (
+        err instanceof PriceExceedsLinkCapError ||
+        err instanceof AgentLinkExecutionUnavailableError
+      ) {
         throw err;
       }
       // execute throw (débito ambiguo) o key faltante → link 'failed' terminal
