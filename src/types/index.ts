@@ -1018,7 +1018,13 @@ export interface CreateUptoInput {
  * los completa closeSession/settleUpto respectivamente. CD-7: nunca throw.
  */
 export interface SettleOutcome {
-  status: 'settled' | 'failed';
+  /**
+   * 'in_progress' (BLQ-MED-1): un close/settle concurrente aterrizó sobre un intent
+   * 'closing' cuyo veredicto AÚN no se persistió (settle_outcome=NULL) = otro caller
+   * está settleando in-flight. NO se finaliza ni se mueve dinero; el caller in-flight
+   * (o expireStale tras CLOSING_STALE_SECONDS) lo completa con el veredicto real.
+   */
+  status: 'settled' | 'failed' | 'in_progress';
   txHash: string | null;
   finalAmountUsd: number;
   consumedUsd?: number | undefined;

@@ -564,6 +564,7 @@ export const paymentIntentService = {
   async closeSession(
     intentId: string,
     ownerRef: string,
+    allowStaleRecovery = false,
   ): Promise<SettleOutcome> {
     const { data, error } = await supabase.rpc(
       'close_payment_intent_for_settle',
@@ -589,6 +590,26 @@ export const paymentIntentService = {
       // vive dentro de finalize (status-gated) ⇒ exactamente una vez. NUNCA asumimos
       // éxito: sin veredicto (NULL) → 'failed_ambiguous' (NO refund, reconcile).
       if (row.prev_status === 'closing') {
+        // BLQ-MED-1 (race): un 'closing' FRESCO con settle_outcome=NULL NO es huérfano
+        // — es otro caller settleando in-flight (aún no llamó record_settle_outcome).
+        // Tratarlo como huérfano lo finalizaría 'failed_ambiguous' y DESCARTARÍA el
+        // veredicto real (refund-cero / inconsistencia on-chain). NO finalizar, NO mover
+        // estado ni dinero: devolver 'in_progress' y dejar que el caller in-flight lo
+        // complete (o expireStale, allowStaleRecovery=true, tras CLOSING_STALE_SECONDS,
+        // cuando el NULL SÍ es un huérfano genuino → 'failed_ambiguous' reconciliable).
+        if (!row.settle_outcome && !allowStaleRecovery) {
+          log.warn(
+            { intentId, txHash: row.settle_tx_hash },
+            'close concurrente sobre closing sin veredicto (settle in-flight): no-op, lo completa el caller in-flight/expireStale',
+          );
+          return {
+            status: 'in_progress',
+            txHash: row.settle_tx_hash,
+            finalAmountUsd: settledUsd,
+            consumedUsd,
+            residualUsd: 0,
+          };
+        }
         const verdict = normalizeVerdict(row.settle_outcome);
         log.warn(
           { intentId, txHash: row.settle_tx_hash, verdict },
@@ -846,6 +867,7 @@ export const paymentIntentService = {
     intentId: string,
     ownerRef: string,
     reportedUsageUsd: number,
+    allowStaleRecovery = false,
   ): Promise<SettleOutcome> {
     const { data, error } = await supabase.rpc(
       'close_payment_intent_for_settle',
@@ -885,6 +907,21 @@ export const paymentIntentService = {
       // refunda residual; en 'failed_unequivocal' finalize reembolsa el débito
       // (consumed_usd) dentro de su tx status-gated ⇒ una sola vez. NUNCA asume éxito.
       if (row.prev_status === 'closing') {
+        // BLQ-MED-1 (race): 'closing' FRESCO + settle_outcome=NULL = otro caller
+        // settleando in-flight, NO huérfano. NO finalizar ni mover dinero → 'in_progress';
+        // el caller in-flight (o expireStale, allowStaleRecovery=true) lo completa.
+        if (!row.settle_outcome && !allowStaleRecovery) {
+          log.warn(
+            { intentId, txHash: row.settle_tx_hash },
+            'settle upto concurrente sobre closing sin veredicto (in-flight): no-op, lo completa el caller in-flight/expireStale',
+          );
+          return {
+            status: 'in_progress',
+            txHash: row.settle_tx_hash,
+            finalAmountUsd: settledUsd,
+            cappedAt,
+          };
+        }
         const verdict = normalizeVerdict(row.settle_outcome);
         log.warn(
           { intentId, txHash: row.settle_tx_hash, verdict },
@@ -1121,10 +1158,14 @@ export const paymentIntentService = {
     const rows = [...(openRes.data ?? []), ...(closingRes.data ?? [])];
     for (const stale of rows) {
       try {
+        // BLQ-MED-1: allowStaleRecovery=true — estas filas YA se filtraron por
+        // updated_at < staleIso, así que un settle_outcome=NULL acá SÍ es un huérfano
+        // genuino (el settler murió) y debe finalizarse ('failed_ambiguous' reconcile),
+        // a diferencia del path directo/concurrente donde el NULL es un settle in-flight.
         if (stale.intent_type === 'session') {
-          await this.closeSession(stale.id, stale.owner_ref);
+          await this.closeSession(stale.id, stale.owner_ref, true);
         } else {
-          await this.settleUpto(stale.id, stale.owner_ref, 0);
+          await this.settleUpto(stale.id, stale.owner_ref, 0, true);
         }
       } catch (err) {
         log.warn(

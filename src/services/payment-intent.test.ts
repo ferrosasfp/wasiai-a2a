@@ -972,8 +972,12 @@ describe('BLQ-2 closing orphan recovery', () => {
     expect(mockSettle).toHaveBeenCalledTimes(1); // NO re-settle en el retry
   });
 
-  it('retry de closing con finalize aún fallando → NO reporta settled (INTERNAL para reintentar)', async () => {
+  it('retry de closing con veredicto persistido y finalize aún fallando → NO reporta settled (INTERNAL para reintentar)', async () => {
     happySettle();
+    // Huérfano GENUINO: veredicto ya persistido ('settled') pero el finalize sigue
+    // caído. La recovery re-aplica el veredicto conocido; si finalize falla → INTERNAL
+    // (que el retry/expireStale reintente). BLQ-MED-1: sólo con veredicto conocido se
+    // finaliza en el path directo — un 'closing' con settle_outcome=NULL es in-flight.
     routeRpc({
       close_payment_intent_for_settle: () => ({
         data: [
@@ -986,7 +990,8 @@ describe('BLQ-2 closing orphan recovery', () => {
             pay_to: PAYTO,
             authorized_usd: 10,
             consumed_usd: 4,
-            settle_tx_hash: null,
+            settle_tx_hash: '0xTX',
+            settle_outcome: 'settled',
           },
         ],
         error: null,
@@ -1225,13 +1230,17 @@ describe('BLQ-DR compound-failure (double-refund root fix)', () => {
 
 // ── T-CONC: concurrencia (serializado por FOR UPDATE) ───────────
 describe('T-CONC concurrencia', () => {
-  it('2 closes concurrentes → settle 1 vez (2º ve closing)', async () => {
+  it('2 closes concurrentes → settle 1 vez; el 2º ve closing sin veredicto (in-flight) → in_progress', async () => {
     happySettle();
     let seen = 0;
     routeRpc({
       close_payment_intent_for_settle: () => {
         seen += 1;
         const first = seen === 1;
+        // BLQ-MED-1: durante el settle in-flight del 1º, el 2º close serializa por el
+        // row-lock y ve 'closing' con settle_outcome=NULL (record_settle_outcome AÚN no
+        // corrió). Modela la race REAL — antes hardcodeaba 'settled', lo que ocultaba el
+        // bug: el 2º NO debe finalizar/mover dinero, debe devolver 'in_progress'.
         return {
           data: [
             {
@@ -1243,8 +1252,8 @@ describe('T-CONC concurrencia', () => {
               pay_to: PAYTO,
               authorized_usd: 10,
               consumed_usd: 4,
-              settle_tx_hash: first ? null : '0xTX',
-              settle_outcome: first ? null : 'settled',
+              settle_tx_hash: null,
+              settle_outcome: null,
             },
           ],
           error: null,
@@ -1256,7 +1265,60 @@ describe('T-CONC concurrencia', () => {
       paymentIntentService.closeSession('i1', OWNER),
       paymentIntentService.closeSession('i1', OWNER),
     ]);
-    expect([a.status, b.status]).toContain('settled');
+    // exactamente uno settlea (el que ganó open→closing); el otro es no-op in_progress.
+    expect([a.status, b.status].sort()).toEqual(['in_progress', 'settled']);
+    expect(mockSettle).toHaveBeenCalledTimes(1);
+  });
+
+  // BLQ-MED-1: la race completa con la DB fiel — un 2º close aterriza DURANTE el settle
+  // in-flight del 1º (settle_outcome=NULL) → NO finaliza ni mueve dinero; el 1º completa
+  // con el veredicto real → residual reembolsado EXACTAMENTE UNA vez.
+  it('close concurrente durante settle in-flight → no-op; el in-flight refunda 1 vez', async () => {
+    const db = makeIntentDb({
+      intent_type: 'session',
+      authorized_usd: 10,
+      consumed_usd: 4,
+    });
+    routeRpc(db.handlers);
+
+    // sign feliz; settle GATEADO → el 1º close queda in-flight (row 'closing', outcome NULL).
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'h',
+      paymentRequest: {
+        authorization: { value: '1' },
+        signature: '0xsig',
+        network: 'kite',
+      },
+    });
+    mockVerify.mockResolvedValue({ ok: true });
+    let releaseSettle: (v: { txHash: string; success: boolean }) => void =
+      () => {
+        /* set below */
+      };
+    const gate = new Promise<{ txHash: string; success: boolean }>((res) => {
+      releaseSettle = res;
+    });
+    mockSettle.mockReturnValue(gate);
+
+    // 1º close: transiciona open→closing y se BLOQUEA en el settle gateado.
+    const p1 = paymentIntentService.closeSession('i1', OWNER);
+    // dejar que p1 avance hasta el gate (row ya 'closing', settle_outcome NULL).
+    await new Promise((r) => setTimeout(r, 0));
+    expect(db.row.status).toBe('closing');
+    expect(db.row.settle_outcome).toBeNull();
+
+    // 2º close CONCURRENTE dentro de la ventana in-flight → no-op in_progress.
+    const r2 = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r2.status).toBe('in_progress');
+    expect(db.refunds).toEqual([]); // NO movió dinero
+    expect(db.row.status).toBe('closing'); // NO finalizó (no 'failed')
+
+    // el 1º (in-flight) termina con éxito → record 'settled' + finalize → refunda residual.
+    releaseSettle({ txHash: '0xTX', success: true });
+    const r1 = await p1;
+    expect(r1.status).toBe('settled');
+    expect(db.row.status).toBe('settled');
+    expect(db.refunds).toEqual([6]); // residual (10-4) reembolsado EXACTAMENTE una vez
     expect(mockSettle).toHaveBeenCalledTimes(1);
   });
 });

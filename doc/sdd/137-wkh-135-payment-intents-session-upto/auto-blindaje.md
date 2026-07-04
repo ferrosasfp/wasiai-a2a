@@ -1,5 +1,39 @@
 # Auto-Blindaje — WKH-135 (payment intents session + upto)
 
+### [2026-07-05 12:20] FIX-PACK it.4 (FINAL) — BLQ-MED-1: race refund-cero por `closing` fresco tratado como huérfano (re-AR)
+- **Error**: dos `close`/`settle` concurrentes sobre un intent `open`. Call1 transiciona
+  `open→closing` y entra al settle on-chain (segundos de I/O). Call2, dentro de esa ventana,
+  serializa por el row-lock, ve `closing` con `settle_outcome=NULL` (Call1 aún no llamó
+  `record_settle_outcome`) y la rama de recovery directa hacía
+  `normalizeVerdict(NULL) → failed_ambiguous → finalize` → marcaba `failed` y DESCARTABA el
+  veredicto real. Cuando Call1 terminaba, `record_settle_outcome`/`finalize` ya eran no-op
+  (status terminal): si el settle real fue éxito → residual no acreditado + transfer on-chain
+  hecho pero DB dice `failed` (inconsistencia); si fue fallo inequívoco → deposit no reembolsado.
+- **Causa raíz**: la rama de recovery directa de `closeSession`/`settleUpto` NO distinguía
+  **veredicto-desconocido (in-flight)** de **huérfano-genuino**. `expireStale` SÍ tenía guarda
+  de staleness (`updated_at < staleIso`) antes de recuperar; el path directo/concurrente no.
+  Un `closing` FRESCO con `settle_outcome=NULL` es un settle in-flight, no un huérfano.
+- **Fix**: guarda en la rama de recovery — si `settle_outcome=NULL` y NO es recovery de
+  staleness (`allowStaleRecovery=false`, el default del path directo/ruta) → NO finalizar, NO
+  mover estado ni dinero → retornar `status:'in_progress'` (nuevo valor en `SettleOutcome`) y
+  dejar que el caller in-flight lo complete (o `expireStale` tras `CLOSING_STALE_SECONDS`, que
+  pasa `allowStaleRecovery=true` porque ahí el NULL SÍ es huérfano genuino). Con
+  `settle_outcome` conocido → huérfano genuino → finalize con ese veredicto (sin cambios). El
+  refund sigue DENTRO de finalize (status-gated) ⇒ no se reintroduce la ventana del double-refund.
+- **Discriminador in-flight vs huérfano**: `settle_outcome` (NULL=in-flight) + el flag
+  `allowStaleRecovery` (solo `expireStale`, que pre-filtra por `updated_at` viejo, lo pasa true).
+  No se tocó el RPC/migración: el snapshot ya exponía `settle_outcome`.
+- **Tests**: `T-CONC` corregido (el 2º close concurrente devuelve `settle_outcome=NULL`, no
+  `settled` — antes mentía y ocultaba el bug; ahora un settled + un in_progress) + nuevo test de
+  la race con la DB fiel (settle gateado: 2º close in-flight → in_progress, no mueve dinero, no
+  finaliza; el 1º completa → residual refundado EXACTAMENTE una vez). El test BLQ-2
+  "finalize aún fallando → INTERNAL" se actualizó a huérfano con veredicto PERSISTIDO (`settled`),
+  que es donde ese invariante sigue vigente en el path directo.
+- **Aplicar en**: cualquier máquina de estados con un estado intermedio (`closing`) compartido
+  entre "trabajo in-flight" y "huérfano recuperable" — el discriminador debe ser un dato
+  persistido (veredicto) + la staleness temporal, NUNCA asumir que el estado intermedio sin
+  resultado es recuperable de inmediato desde un caller concurrente.
+
 ### [2026-07-04 21:30] FIX-PACK it.3 — BLQ-DR: double-refund por estado `closing` sobrecargado (F4 QA)
 - **Error**: el F4 QA reprodujo un doble-refund (16 USD sobre un deposit de 10). En un
   settle inequívocamente fallido, `closeSession` hacía `refundBuyer(deposit)` FUERA de la
