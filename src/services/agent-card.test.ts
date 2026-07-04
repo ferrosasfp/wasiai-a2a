@@ -1,5 +1,5 @@
 import type { FastifyRequest } from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Agent, RegistryConfig } from '../types/index.js';
 import { agentCardService, resolveBaseUrl } from './agent-card.js';
 
@@ -368,6 +368,117 @@ describe('agentCardService', () => {
         ).not.toThrow();
       });
     });
+
+    // ── WKH-141 — APP bridge payment intents (flag + per-agent opt-in) ──
+
+    describe('WKH-141 — APP payment intents declaration', () => {
+      const ORIGINAL_FLAG = process.env.APP_BRIDGE_ENABLED;
+
+      beforeEach(() => {
+        delete process.env.APP_BRIDGE_ENABLED;
+      });
+
+      afterEach(() => {
+        if (ORIGINAL_FLAG === undefined) {
+          delete process.env.APP_BRIDGE_ENABLED;
+        } else {
+          process.env.APP_BRIDGE_ENABLED = ORIGINAL_FLAG;
+        }
+      });
+
+      it('AC-4/CD-4: flag OFF → no paymentIntents key (byte-idéntico)', () => {
+        const a: Agent = { ...agent, metadata: { appPaymentIntents: true } };
+        const card = agentCardService.buildAgentCard(
+          a,
+          registryConfig,
+          baseUrl,
+        );
+        expect('paymentIntents' in card).toBe(false);
+      });
+
+      it('AC-1: flag ON + opt-in true → paymentIntents present with app vocabulary', () => {
+        process.env.APP_BRIDGE_ENABLED = 'true';
+        const a: Agent = { ...agent, metadata: { appPaymentIntents: true } };
+        const card = agentCardService.buildAgentCard(
+          a,
+          registryConfig,
+          baseUrl,
+        );
+        expect(card.paymentIntents).toBeDefined();
+        expect(card.paymentIntents?.vocabulary).toBe('app');
+        expect(card.paymentIntents?.supported).toEqual([
+          'charge',
+          'session',
+          'upto',
+        ]);
+        expect(card.paymentIntents?.alignment).toBe('conceptual');
+        expect(card.paymentIntents?.disclaimer.length).toBeGreaterThan(0);
+        // CD-8: escrow never declared.
+        expect(card.paymentIntents?.supported).not.toContain('escrow');
+      });
+
+      it('AC-4/Missing#5: flag ON but opt-in absent → field ABSENT', () => {
+        process.env.APP_BRIDGE_ENABLED = 'true';
+        const card = agentCardService.buildAgentCard(
+          agent,
+          registryConfig,
+          baseUrl,
+        );
+        expect('paymentIntents' in card).toBe(false);
+      });
+
+      it('AC-4/Missing#5: flag ON + opt-in truthy-no-literal → field ABSENT', () => {
+        process.env.APP_BRIDGE_ENABLED = 'true';
+        for (const truthy of ['true', 1, 'yes', false]) {
+          const a: Agent = {
+            ...agent,
+            metadata: { appPaymentIntents: truthy },
+          };
+          const card = agentCardService.buildAgentCard(
+            a,
+            registryConfig,
+            baseUrl,
+          );
+          expect('paymentIntents' in card).toBe(false);
+        }
+      });
+
+      it('AC-4/CD-4: flag truthy-no-literal (string, 1) does NOT enable', () => {
+        const a: Agent = { ...agent, metadata: { appPaymentIntents: true } };
+        for (const truthy of ['1', 'TRUE', 'yes']) {
+          process.env.APP_BRIDGE_ENABLED = truthy;
+          const card = agentCardService.buildAgentCard(
+            a,
+            registryConfig,
+            baseUrl,
+          );
+          expect('paymentIntents' in card).toBe(false);
+        }
+      });
+
+      it('AC-5/CD-2: with feature active, existing fields stay intact', () => {
+        const baseline = agentCardService.buildAgentCard(
+          agent,
+          registryConfig,
+          baseUrl,
+        );
+        process.env.APP_BRIDGE_ENABLED = 'true';
+        const a: Agent = { ...agent, metadata: { appPaymentIntents: true } };
+        const card = agentCardService.buildAgentCard(
+          a,
+          registryConfig,
+          baseUrl,
+        );
+        expect(card.name).toBe(baseline.name);
+        expect(card.url).toBe(baseline.url);
+        expect(card.capabilities).toEqual(baseline.capabilities);
+        expect(card.skills).toEqual(baseline.skills);
+        expect(card.authentication).toEqual(baseline.authentication);
+        expect(card.inputModes).toEqual(baseline.inputModes);
+        expect(card.outputModes).toEqual(baseline.outputModes);
+        expect(card.invocationNote).toBe(baseline.invocationNote);
+      });
+    });
   });
 
   // ---------- buildSelfAgentCard ----------
@@ -395,6 +506,44 @@ describe('agentCardService', () => {
     it('uses baseUrl as url', () => {
       const card = agentCardService.buildSelfAgentCard('https://gw.wasiai.io');
       expect(card.url).toBe('https://gw.wasiai.io');
+    });
+
+    // ── WKH-141 — self-card gated ONLY by the global flag ──
+
+    describe('WKH-141 — APP payment intents on self-card', () => {
+      const ORIGINAL_FLAG = process.env.APP_BRIDGE_ENABLED;
+
+      afterEach(() => {
+        if (ORIGINAL_FLAG === undefined) {
+          delete process.env.APP_BRIDGE_ENABLED;
+        } else {
+          process.env.APP_BRIDGE_ENABLED = ORIGINAL_FLAG;
+        }
+      });
+
+      it('AC-4: flag OFF → self-card has no paymentIntents', () => {
+        delete process.env.APP_BRIDGE_ENABLED;
+        const card = agentCardService.buildSelfAgentCard(
+          'https://gw.wasiai.io',
+        );
+        expect('paymentIntents' in card).toBe(false);
+      });
+
+      it('AC-1: flag ON → self-card declares paymentIntents (no metadata needed)', () => {
+        process.env.APP_BRIDGE_ENABLED = 'true';
+        const card = agentCardService.buildSelfAgentCard(
+          'https://gw.wasiai.io',
+        );
+        expect(card.paymentIntents).toBeDefined();
+        expect(card.paymentIntents?.vocabulary).toBe('app');
+        expect(card.paymentIntents?.supported).toEqual([
+          'charge',
+          'session',
+          'upto',
+        ]);
+        expect(card.paymentIntents?.alignment).toBe('conceptual');
+        expect(card.paymentIntents?.disclaimer.length).toBeGreaterThan(0);
+      });
     });
   });
 });

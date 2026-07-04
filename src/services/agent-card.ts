@@ -1,4 +1,8 @@
 import type { FastifyRequest } from 'fastify';
+import {
+  APP_ALIGNMENT_DISCLAIMER,
+  getSupportedAppIntents,
+} from '../adapters/app-intent-mapper.js';
 import { validateAgentSchemas } from '../lib/bazaar.js';
 import type {
   Agent,
@@ -17,6 +21,23 @@ import type {
  */
 function isDiscoverable(agent: Agent): boolean {
   return agent.metadata?.discoverable === true;
+}
+
+/**
+ * WKH-141 (CD-4): global feature flag for the APP bridge. ON only with the exact
+ * literal 'true' (patrón WKH-133 `isWritebackEnabled`). Default OFF → con flag OFF
+ * el Agent Card es byte-idéntico al estado pre-HU.
+ */
+function isAppBridgeEnabled(): boolean {
+  return process.env.APP_BRIDGE_ENABLED === 'true';
+}
+
+/**
+ * WKH-141: per-agent opt-in estricto. Sólo `metadata.appPaymentIntents === true`
+ * (mismo patrón que `isDiscoverable`). Truthy no-literal (p.ej. 'true'/1) NO promueve.
+ */
+function appPaymentIntentsOptIn(agent: Agent): boolean {
+  return agent.metadata?.appPaymentIntents === true;
 }
 
 /**
@@ -154,6 +175,19 @@ export const agentCardService = {
       // WKH-103 (AC-5/CD-9): surface computed reputation only when present
       // (>0 settled tasks). Absent → field OMITTED (no null) — backward-compat.
       ...(computedReputation !== undefined && { computedReputation }),
+      // WKH-141 (AC-1/CD-4): declare APP-compatible payment intents ONLY when the
+      // global flag is ON AND the agent opted in (double gate). Otherwise the key
+      // is OMITTED entirely (CD-4 byte-idéntico). alignment/disclaimer horneados
+      // (CD-3); supported deriva de getSupportedAppIntents() (sin `escrow`, CD-8).
+      ...(isAppBridgeEnabled() &&
+        appPaymentIntentsOptIn(agent) && {
+          paymentIntents: {
+            vocabulary: 'app' as const,
+            supported: getSupportedAppIntents().map((d) => d.intent),
+            alignment: 'conceptual' as const,
+            disclaimer: APP_ALIGNMENT_DISCLAIMER,
+          },
+        }),
     };
   },
 
@@ -196,6 +230,17 @@ export const agentCardService = {
       },
       invocationNote:
         'Agent invocations must go through POST /compose or POST /orchestrate on this gateway, not directly to external agent hosts.',
+      // WKH-141 (AC-1/AC-4/CD-4): the self-card declares APP-compatible payment
+      // intents gated ONLY by the global flag (no per-agent metadata here). Flag
+      // OFF → key OMITTED (byte-idéntico). alignment/disclaimer horneados (CD-3).
+      ...(isAppBridgeEnabled() && {
+        paymentIntents: {
+          vocabulary: 'app' as const,
+          supported: getSupportedAppIntents().map((d) => d.intent),
+          alignment: 'conceptual' as const,
+          disclaimer: APP_ALIGNMENT_DISCLAIMER,
+        },
+      }),
     };
   },
 };

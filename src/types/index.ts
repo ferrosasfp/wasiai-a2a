@@ -825,6 +825,88 @@ export interface AgentCard {
   identity?: AgentCardIdentity;
   /** WKH-103 (AC-5): reputación computada. Non-breaking optional extension. */
   computedReputation?: AgentReputation;
+  /**
+   * WKH-141: APP-compatible payment intents declaration. Non-breaking optional
+   * extension — consumers que no la entienden la ignoran (DT-6). alignment/disclaimer
+   * NO opcionales: honestidad horneada (AC-6/CD-3).
+   */
+  paymentIntents?: {
+    vocabulary: 'app';
+    supported: AppIntentName[];
+    alignment: 'conceptual';
+    disclaimer: string;
+  };
+}
+
+// ============================================================
+// APP BRIDGE TYPES (WKH-141) — outbound declaration + internal mapping
+// ============================================================
+
+/**
+ * WKH-141: vocabulary de intents de APP (OKX Agent Payments Protocol) que el
+ * gateway puede settlear. SOLO estos 3 (CD-8: `escrow` NUNCA se declara).
+ */
+export type AppIntentName = 'charge' | 'session' | 'upto';
+
+/**
+ * WKH-141: sobre versionado con vocabulario APP producido por el mapper interno
+ * puro. `vocabulary`/`envelopeVersion`/`intent`/`alignment`/`disclaimer` NO son
+ * opcionales — la honestidad del alineamiento conceptual está horneada en el tipo
+ * (AC-6/CD-3). Los opcionales se ASIGNAN condicionalmente (CD-7).
+ */
+export interface AppIntentEnvelope {
+  vocabulary: 'app';
+  envelopeVersion: string;
+  intent: AppIntentName;
+  alignment: 'conceptual';
+  status?: 'settled' | 'failed' | 'in_progress' | 'challenge' | undefined;
+  amountUsd?: number | undefined;
+  chainId?: number | undefined;
+  txHash?: string | null | undefined;
+  expiresAt?: string | undefined;
+  disclaimer: string;
+}
+
+/**
+ * WKH-141: descriptor estático de un intent soportado, para poblar el Agent Card.
+ */
+export interface AppIntentDescriptor {
+  intent: AppIntentName;
+  alignment: 'conceptual';
+}
+
+/**
+ * WKH-141: input allow-listed para `mapChargeToApp`. SOLO campos no sensibles —
+ * NUNCA ownerRef/buyerWallet/keyId/sellerRef/payTo/capSignature/funding_wallet/
+ * typedData/budget/error interno (CD-6).
+ */
+export interface ChargeMapInput {
+  status?: 'settled' | 'failed' | 'in_progress' | 'challenge' | undefined;
+  amountUsd?: number | undefined;
+  chainId?: number | undefined;
+  txHash?: string | null | undefined;
+}
+
+/**
+ * WKH-141: input allow-listed para `mapSessionToApp` (CD-6).
+ */
+export interface SessionMapInput {
+  status?: 'settled' | 'failed' | 'in_progress' | 'challenge' | undefined;
+  amountUsd?: number | undefined;
+  chainId?: number | undefined;
+  txHash?: string | null | undefined;
+  expiresAt?: string | undefined;
+}
+
+/**
+ * WKH-141: input allow-listed para `mapUptoToApp` (CD-6).
+ */
+export interface UptoMapInput {
+  status?: 'settled' | 'failed' | 'in_progress' | 'challenge' | undefined;
+  amountUsd?: number | undefined;
+  chainId?: number | undefined;
+  txHash?: string | null | undefined;
+  expiresAt?: string | undefined;
 }
 
 // ============================================================
