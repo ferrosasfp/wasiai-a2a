@@ -22,6 +22,7 @@ import { registerRateLimit } from './middleware/rate-limit.js';
 import { genReqId, registerRequestIdHook } from './middleware/request-id.js';
 import { registerSecurityHeaders } from './middleware/security-headers.js';
 import agentCardRoutes from './routes/agent-card.js';
+import agentLinkRoutes from './routes/agent-links.js';
 import agentsRoutes from './routes/agents.js';
 import authRoutes from './routes/auth.js';
 import capabilitiesRoutes from './routes/capabilities.js';
@@ -153,6 +154,10 @@ await fastify.register(agentCardRoutes, { prefix: '/agents' });
 // prefijo que agentCardRoutes (Fastify soporta varios plugins por prefijo);
 // no colisiona con GET /agents/:slug/agent-card (método+path distintos).
 await fastify.register(agentsRoutes, { prefix: '/agents' });
+// WKH-137: invocation links (mint + redeem). Mismo prefijo /agents (Fastify
+// soporta varios plugins por prefijo). POST /agents/:slug/link (mint, master
+// key) + POST /agents/links/:token/redeem (público). Aditivo.
+await fastify.register(agentLinkRoutes, { prefix: '/agents' });
 await fastify.register(wellKnownRoutes, { prefix: '/.well-known' });
 await fastify.register(tasksRoutes, { prefix: '/tasks' });
 await fastify.register(dashboardRoutes, { prefix: '/dashboard' });
