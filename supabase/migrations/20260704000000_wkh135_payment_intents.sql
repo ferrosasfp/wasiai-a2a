@@ -249,11 +249,19 @@ BEGIN
   IF v_status = 'open' THEN
     IF v_type = 'session' THEN
       v_final := LEAST(v_consumed, v_auth);
+      -- Transición idempotente: solo el primer close mueve open→closing.
+      UPDATE a2a_payment_intents SET status = 'closing' WHERE id = p_intent_id;
     ELSE
+      -- upto: el monto a cobrar = LEAST(cap, uso). Se PERSISTE en consumed_usd al
+      -- transicionar para que (a) el path idempotente/recovery en 'closing' (BLQ-2)
+      -- y (b) el reporte del retry (MNR-2) lean el monto realmente settleado desde
+      -- la fila, en vez de recomputarlo con el reportedUsage del request actual.
       v_final := LEAST(v_auth, COALESCE(p_reported_usage, 0));
+      v_consumed := v_final;
+      UPDATE a2a_payment_intents
+        SET status = 'closing', consumed_usd = v_final
+        WHERE id = p_intent_id;
     END IF;
-    -- Transición idempotente: solo el primer close mueve open→closing.
-    UPDATE a2a_payment_intents SET status = 'closing' WHERE id = p_intent_id;
   ELSE
     -- Ya cerrado/settled/failed/expired: NO re-transiciona (AC-1). El service
     -- lee prev_status <> 'open' y NO re-settlea → final_amount es irrelevante.

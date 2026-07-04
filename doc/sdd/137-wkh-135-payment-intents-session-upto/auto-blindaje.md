@@ -21,6 +21,51 @@
 - **Aplicar en**: todo RPC nuevo con `RETURNS TABLE` — calificar columnas con alias y/o
   nombrar los OUT distinto de las columnas fuente.
 
+### [2026-07-04 21:10] FIX-PACK — BLQ-1: `upto` no debitaba al buyer (gateway pagaba de su bolsillo)
+- **Error**: `settleUpto` transfería `min(cap,uso)` on-chain al seller desde la wallet
+  del gateway, pero NUNCA debitaba el budget prepago del buyer → fund-loss del gateway.
+- **Causa raíz**: `upto` no reserva en el open (a diferencia de `session`), y el débito
+  no se hacía en ningún punto del settle. `finalize` sólo refunda residual de `session`.
+- **Fix**: `settleUpto` ahora debita al buyer (`increment_a2a_key_spend`, 4-arg con
+  `p_owner_ref`) ANTES de la transferencia on-chain. Fail-closed: budget insuficiente →
+  `INSUFFICIENT_BUDGET`, NO transfer, mark failed. Atomicidad: si el transfer falla
+  DESPUÉS del débito → `refund_a2a_key_spend` (buyer made whole). Invariante testeado:
+  `budget_post == budget_pre − min(cap,uso)` + orden `['debit','transfer']`.
+- **Aplicar en**: todo settle donde el buyer NO reservó en el open — el débito debe
+  preceder la transferencia y refundarse si la transferencia falla; NUNCA debitar en
+  `finalize` (corre DESPUÉS del transfer → seguiría drenando el gateway).
+
+### [2026-07-04 21:12] FIX-PACK — BLQ-2: intent huérfano en `closing` si `finalize` falla
+- **Error**: si el settle on-chain de `session` tenía éxito pero `finalize_payment_intent`
+  fallaba (blip DB), el intent quedaba `closing` para siempre: el refund del residual
+  nunca corría, el retry reportaba `settled` con `txHash=null`, y `expireStale` sólo
+  barría `open`.
+- **Causa raíz**: `finalize` best-effort (traga el error) + short-circuit del retry
+  reportaba `settled` a ciegas cuando `prev_status='closing'` + sweep incompleto.
+- **Fix**: (1) `finalizePaymentIntent` devuelve `boolean` (corrió o no). (2) El
+  short-circuit de `closing` RE-INVOCA `finalize` idempotente (residual recomputado
+  de la fila, sin doble-refund); si sigue fallando → `INTERNAL` (no miente `settled`).
+  (3) `expireStale` ahora barre TAMBIÉN `status='closing'` con `updated_at` viejo
+  (umbral `PAYMENT_INTENT_CLOSING_STALE_SECONDS`, default 300s) y los re-procesa.
+- **Limitación v1 documentada**: la recovery de un `closing` asume que el settle on-chain
+  tuvo éxito (escenario BLQ-2). Las ventanas de crash "entre transición y débito/transfer"
+  quedan flageadas por log para reconciliación manual (no hay fund-loss del gateway).
+- **Aplicar en**: todo flujo con un estado intermedio (`closing`) entre un efecto on-chain
+  y su finalización DB → el sweep debe cubrir ese estado y la finalización debe ser
+  idempotente y re-ejecutable.
+
+### [2026-07-04 21:14] FIX-PACK — MNR-1 + MNR-2
+- **MNR-1**: `payments.ts` aceptaba cualquier `chainId` pero el settle usa siempre la
+  default chain (adapter/verifier sin `chainKey`) → riesgo de settlear en la cadena
+  equivocada. Fix: validar `chainId === getChainConfig().chainId` en el write-boundary
+  de `/session` y `/upto` → 422 `CHAIN_NOT_SUPPORTED` (fail-closed).
+- **MNR-2**: la rama idempotente de `settleUpto` recomputaba el monto con el
+  `reportedUsage` del request actual (mentía en un retry). Fix: el close RPC PERSISTE
+  `LEAST(cap,uso)` en `consumed_usd` al transicionar; el retry lee ese valor real.
+- **Aplicar en**: (MNR-1) todo write-boundary money-path multi-chain con settle
+  single-chain — validar la cadena explícitamente. (MNR-2) los reportes idempotentes
+  deben leer el valor persistido, nunca recomputar de un input que puede variar.
+
 ### [2026-07-04 19:55] Wave 3 — Import no usado en el test del servicio
 - **Error**: `PaymentIntentError` importado en `payment-intent.test.ts` pero nunca referenciado
   (los asserts usan `.rejects.toMatchObject({ code })`), → biome `noUnusedImports` (warning).

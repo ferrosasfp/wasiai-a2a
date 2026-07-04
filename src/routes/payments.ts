@@ -15,6 +15,7 @@
 
 import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { getChainConfig } from '../adapters/registry.js';
 import {
   PaymentIntentError,
   paymentIntentService,
@@ -27,6 +28,16 @@ import { resolveCallerKey } from './auth/parsers.js';
 /** CD-12: monto money-path válido = number finito >= 0 (rechaza NaN/Infinity). */
 function isFiniteNonNegative(x: unknown): x is number {
   return typeof x === 'number' && Number.isFinite(x) && x >= 0;
+}
+
+/**
+ * MNR-1: v1 sólo settlea/verifica en la default chain — el settle usa el adapter
+ * y el settle-verifier de la default chain (sin `chainKey`). Aceptar un chainId
+ * no-default settlearia/verificaria en la cadena EQUIVOCADA, así que se rechaza
+ * en el write-boundary (fail-closed).
+ */
+function isDefaultChain(chainId: number): boolean {
+  return chainId === getChainConfig().chainId;
 }
 
 function isNonEmptyString(x: unknown): x is string {
@@ -130,6 +141,10 @@ export const paymentsRoutes: FastifyPluginAsync = async (fastify) => {
       !isFiniteNonNegative(b.depositUsd)
     ) {
       return reply.status(422).send({ error_code: 'INVALID_INPUT' });
+    }
+    // MNR-1: sólo la default chain (evita settlear/verificar en la equivocada).
+    if (!isDefaultChain(b.chainId)) {
+      return reply.status(422).send({ error_code: 'CHAIN_NOT_SUPPORTED' });
     }
     let ttlSeconds: number | undefined;
     if (b.ttlSeconds !== undefined) {
@@ -258,6 +273,10 @@ export const paymentsRoutes: FastifyPluginAsync = async (fastify) => {
       !isNonEmptyString(b.capNonce)
     ) {
       return reply.status(422).send({ error_code: 'INVALID_INPUT' });
+    }
+    // MNR-1: sólo la default chain (evita settlear/verificar en la equivocada).
+    if (!isDefaultChain(b.chainId)) {
+      return reply.status(422).send({ error_code: 'CHAIN_NOT_SUPPORTED' });
     }
     const typedData = parseUptoTypedData(b.typedData);
     if (!typedData) {

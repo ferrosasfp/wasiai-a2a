@@ -255,13 +255,22 @@ describe('T-AC4 owner guard', () => {
 describe('T-AC6 expiry', () => {
   it('intent vencido → expireStale auto-settlea consumido + refund', async () => {
     happySettle();
-    // supabase.from(...).select().eq().lt() → stale session intents.
+    // expireStale hace DOS queries: status='open' (vencidos) y status='closing'
+    // (huérfanos, BLQ-2). El builder trackea el .eq('status', ...) y sólo devuelve
+    // el intent 'open'; 'closing' → vacío (no hay huérfanos en este caso).
     const builder = {
+      _status: undefined as string | undefined,
       select: () => builder,
-      eq: () => builder,
+      eq: (col: string, val: string) => {
+        if (col === 'status') builder._status = val;
+        return builder;
+      },
       lt: () =>
         Promise.resolve({
-          data: [{ id: 'i1', owner_ref: OWNER, intent_type: 'session' }],
+          data:
+            builder._status === 'open'
+              ? [{ id: 'i1', owner_ref: OWNER, intent_type: 'session' }]
+              : [],
           error: null,
         }),
     };
@@ -484,6 +493,321 @@ describe('T-VERIFY settle on-chain', () => {
     });
     expect(r.status).toBe('failed');
     expect(r.txHash).toBeNull();
+  });
+});
+
+// ── BLQ-1: upto debita al buyer ANTES de transferir (money-path) ──
+describe('BLQ-1 upto debit-before-transfer', () => {
+  function uptoOpenClose(final: number): void {
+    routeRpc({
+      close_payment_intent_for_settle: () => ({
+        data: [
+          {
+            final_amount: final,
+            prev_status: 'open',
+            intent_type: 'upto',
+            key_id: 'k1',
+            chain_id: 2368,
+            pay_to: PAYTO,
+            authorized_usd: 5,
+            consumed_usd: final,
+            settle_tx_hash: null,
+          },
+        ],
+        error: null,
+      }),
+      finalize_payment_intent: () => ({ error: null }),
+    });
+  }
+
+  it('success → debita min(cap,uso) ANTES del transfer; budget_post == budget_pre − charged', async () => {
+    happySettle();
+    let budget = 10;
+    const budgetPre = budget;
+    const order: string[] = [];
+    // El settle empuja 'transfer' al orden.
+    mockSettle.mockImplementation(async () => {
+      order.push('transfer');
+      return { txHash: '0xTX', success: true };
+    });
+    routeRpc({
+      close_payment_intent_for_settle: () => ({
+        data: [
+          {
+            final_amount: 5,
+            prev_status: 'open',
+            intent_type: 'upto',
+            key_id: 'k1',
+            chain_id: 2368,
+            pay_to: PAYTO,
+            authorized_usd: 5,
+            consumed_usd: 5,
+            settle_tx_hash: null,
+          },
+        ],
+        error: null,
+      }),
+      increment_a2a_key_spend: (args) => {
+        order.push('debit');
+        const amt = Number(args.p_amount_usd);
+        if (amt > budget) {
+          return { data: null, error: { message: 'INSUFFICIENT_BUDGET' } };
+        }
+        budget -= amt;
+        return { data: null, error: null };
+      },
+      finalize_payment_intent: () => ({ error: null }),
+    });
+
+    const r = await paymentIntentService.settleUpto('i1', OWNER, 8); // uso 8 > cap 5
+    expect(r.status).toBe('settled');
+    expect(r.finalAmountUsd).toBe(5); // clamp al cap
+    // Invariante money-path: se debitó exactamente min(cap,uso)=5.
+    expect(budget).toBe(budgetPre - 5);
+    // Y el débito ocurrió ANTES de la transferencia on-chain.
+    expect(order).toEqual(['debit', 'transfer']);
+  });
+
+  it('budget insuficiente → settle FALLA sin transferir (fail-closed)', async () => {
+    happySettle();
+    uptoOpenClose(5);
+    routeRpc({
+      close_payment_intent_for_settle: () => ({
+        data: [
+          {
+            final_amount: 5,
+            prev_status: 'open',
+            intent_type: 'upto',
+            key_id: 'k1',
+            chain_id: 2368,
+            pay_to: PAYTO,
+            authorized_usd: 5,
+            consumed_usd: 5,
+            settle_tx_hash: null,
+          },
+        ],
+        error: null,
+      }),
+      increment_a2a_key_spend: () => ({
+        data: null,
+        error: { message: 'INSUFFICIENT_BUDGET: chain 2368 balance is 1' },
+      }),
+      finalize_payment_intent: () => ({ error: null }),
+    });
+
+    await expect(
+      paymentIntentService.settleUpto('i1', OWNER, 5),
+    ).rejects.toMatchObject({ code: 'INSUFFICIENT_BUDGET' });
+    // NUNCA se transfirió al seller.
+    expect(mockSettle).not.toHaveBeenCalled();
+  });
+
+  it('transfer on-chain falla DESPUÉS del débito → refund del débito (buyer made whole)', async () => {
+    mockSign.mockResolvedValue({
+      paymentRequest: {
+        authorization: { value: '1' },
+        signature: '0xsig',
+        network: 'kite',
+      },
+    });
+    mockSettle.mockResolvedValue({ txHash: '', success: false, error: 'boom' });
+    mockVerify.mockResolvedValue({ ok: true });
+    let budget = 10;
+    const refunds: number[] = [];
+    routeRpc({
+      close_payment_intent_for_settle: () => ({
+        data: [
+          {
+            final_amount: 5,
+            prev_status: 'open',
+            intent_type: 'upto',
+            key_id: 'k1',
+            chain_id: 2368,
+            pay_to: PAYTO,
+            authorized_usd: 5,
+            consumed_usd: 5,
+            settle_tx_hash: null,
+          },
+        ],
+        error: null,
+      }),
+      increment_a2a_key_spend: (args) => {
+        budget -= Number(args.p_amount_usd);
+        return { data: null, error: null };
+      },
+      refund_a2a_key_spend: (args) => {
+        refunds.push(Number(args.p_amount_usd));
+        budget += Number(args.p_amount_usd);
+        return { data: 1, error: null };
+      },
+      finalize_payment_intent: () => ({ error: null }),
+    });
+
+    const r = await paymentIntentService.settleUpto('i1', OWNER, 5);
+    expect(r.status).toBe('failed');
+    expect(refunds).toEqual([5]); // se reembolsó el débito
+    expect(budget).toBe(10); // buyer made whole
+  });
+
+  it('MNR-2: retry idempotente reporta el monto settleado real (consumed_usd), no el reportedUsage del request', async () => {
+    happySettle();
+    routeRpc({
+      close_payment_intent_for_settle: () => ({
+        data: [
+          {
+            final_amount: 0,
+            prev_status: 'settled', // ya settleado
+            intent_type: 'upto',
+            key_id: 'k1',
+            chain_id: 2368,
+            pay_to: PAYTO,
+            authorized_usd: 5,
+            consumed_usd: 3, // monto REALMENTE settleado (persistido)
+            settle_tx_hash: '0xTX',
+          },
+        ],
+        error: null,
+      }),
+    });
+    // El retry pasa reportedUsage=5, pero debe reportar el settleado real = 3.
+    const r = await paymentIntentService.settleUpto('i1', OWNER, 5);
+    expect(r.status).toBe('settled');
+    expect(r.finalAmountUsd).toBe(3);
+    expect(mockSettle).not.toHaveBeenCalled();
+  });
+});
+
+// ── BLQ-2: huérfano en 'closing' recuperable (finalize falló) ────
+describe('BLQ-2 closing orphan recovery', () => {
+  it('session close con finalize fallando 1ª vez → recuperable en el retry, residual refundado 1 sola vez', async () => {
+    happySettle();
+    let status = 'open';
+    let finalizeCalls = 0;
+    const refunds: number[] = [];
+    routeRpc({
+      close_payment_intent_for_settle: () => {
+        const prev = status;
+        if (status === 'open') status = 'closing';
+        return {
+          data: [
+            {
+              final_amount: prev === 'open' ? 4 : 0,
+              prev_status: prev,
+              intent_type: 'session',
+              key_id: 'k1',
+              chain_id: 2368,
+              pay_to: PAYTO,
+              authorized_usd: 10,
+              consumed_usd: 4,
+              settle_tx_hash: null,
+            },
+          ],
+          error: null,
+        };
+      },
+      finalize_payment_intent: (args) => {
+        finalizeCalls += 1;
+        // El 1er finalize falla (blip DB) → el intent queda 'closing' huérfano.
+        if (finalizeCalls === 1) return { error: { message: 'db blip' } };
+        // Recovery: sólo actúa mientras 'closing' (idempotente, sin doble-refund).
+        if (status === 'closing') {
+          if (args.p_success && args.p_residual) {
+            refunds.push(Number(args.p_residual));
+          }
+          status = 'settled';
+        }
+        return { error: null };
+      },
+    });
+
+    // 1er close: settle on-chain OK, finalize FALLA → huérfano en 'closing'.
+    const r1 = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r1.status).toBe('settled'); // el dinero se movió on-chain
+    expect(refunds).toEqual([]); // residual AÚN no acreditado
+
+    // retry: ve 'closing' → re-ejecuta finalize idempotente → acredita residual.
+    const r2 = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r2.status).toBe('settled');
+    expect(refunds).toEqual([6]); // residual 10-4 acreditado EXACTAMENTE una vez
+    expect(mockSettle).toHaveBeenCalledTimes(1); // NO re-settle en el retry
+  });
+
+  it('retry de closing con finalize aún fallando → NO reporta settled (INTERNAL para reintentar)', async () => {
+    happySettle();
+    routeRpc({
+      close_payment_intent_for_settle: () => ({
+        data: [
+          {
+            final_amount: 0,
+            prev_status: 'closing',
+            intent_type: 'session',
+            key_id: 'k1',
+            chain_id: 2368,
+            pay_to: PAYTO,
+            authorized_usd: 10,
+            consumed_usd: 4,
+            settle_tx_hash: null,
+          },
+        ],
+        error: null,
+      }),
+      finalize_payment_intent: () => ({ error: { message: 'still down' } }),
+    });
+    await expect(
+      paymentIntentService.closeSession('i1', OWNER),
+    ).rejects.toMatchObject({ code: 'INTERNAL' });
+    expect(mockSettle).not.toHaveBeenCalled();
+  });
+
+  it('expireStale barre huérfanos en closing y re-ejecuta finalize', async () => {
+    happySettle();
+    const builder = {
+      _status: undefined as string | undefined,
+      select: () => builder,
+      eq: (col: string, val: string) => {
+        if (col === 'status') builder._status = val;
+        return builder;
+      },
+      lt: () =>
+        Promise.resolve({
+          data:
+            builder._status === 'closing'
+              ? [{ id: 'i9', owner_ref: OWNER, intent_type: 'session' }]
+              : [],
+          error: null,
+        }),
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    mockFrom.mockReturnValue(builder as any);
+    const finalizeArgs: Record<string, unknown>[] = [];
+    routeRpc({
+      close_payment_intent_for_settle: () => ({
+        data: [
+          {
+            final_amount: 0,
+            prev_status: 'closing',
+            intent_type: 'session',
+            key_id: 'k1',
+            chain_id: 2368,
+            pay_to: PAYTO,
+            authorized_usd: 10,
+            consumed_usd: 4,
+            settle_tx_hash: '0xTX',
+          },
+        ],
+        error: null,
+      }),
+      finalize_payment_intent: (args) => {
+        finalizeArgs.push(args);
+        return { error: null };
+      },
+    });
+
+    await paymentIntentService.expireStale();
+    // El huérfano 'closing' disparó un finalize con el residual recomputado (6).
+    expect(finalizeArgs).toHaveLength(1);
+    expect(finalizeArgs[0]?.p_residual).toBeCloseTo(6, 8);
+    expect(mockSettle).not.toHaveBeenCalled(); // NO re-settle
   });
 });
 

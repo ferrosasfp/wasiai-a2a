@@ -44,6 +44,10 @@ const log = getLogger('payment-intent');
 
 const PG_UNIQUE_VIOLATION = '23505';
 const DEFAULT_TTL_SECONDS = 3600;
+// BLQ-2: cuánto debe llevar un intent en 'closing' antes de que expireStale lo
+// trate como huérfano (settle on-chain OK pero finalize falló). Ventana amplia
+// para no correr contra un settle in-flight.
+const DEFAULT_CLOSING_STALE_SECONDS = 300;
 
 // ── Error de negocio (self-contained: NO se puede tocar security/errors.js) ──
 
@@ -147,6 +151,15 @@ function resolveTtlSeconds(): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_TTL_SECONDS;
 }
 
+/** BLQ-2: umbral (ms) para barrer intents 'closing' huérfanos en expireStale. */
+function resolveClosingStaleMs(): number {
+  const raw = process.env.PAYMENT_INTENT_CLOSING_STALE_SECONDS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return (
+    (Number.isFinite(n) && n > 0 ? n : DEFAULT_CLOSING_STALE_SECONDS) * 1000
+  );
+}
+
 interface PgError {
   code?: string;
   message?: string;
@@ -193,6 +206,10 @@ function mapPgError(error: PgError, ctx: string, nonceContext: boolean): never {
  * finalize best-effort (CD-7): tras un settle on-chain exitoso NUNCA re-lanzamos
  * — el dinero ya se movió; un fallo del UPDATE/refund se loguea y se resuelve por
  * expiry/retry. Idempotente (el RPC solo actúa mientras status='closing').
+ *
+ * BLQ-2: devuelve `true` sólo si el RPC corrió sin error (la fila quedó
+ * finalizada o ya no estaba en 'closing'). `false` si el RPC falló/lanzó → el
+ * intent sigue 'closing' huérfano y el caller NO debe reportar `settled` a ciegas.
  */
 async function finalizePaymentIntent(
   intentId: string,
@@ -202,7 +219,7 @@ async function finalizePaymentIntent(
   residual: number | null,
   success: boolean,
   errorMessage: string | null,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const { error } = await supabase.rpc('finalize_payment_intent', {
       p_intent_id: intentId,
@@ -218,11 +235,66 @@ async function finalizePaymentIntent(
         { intentId, detail: error.message },
         'finalize_payment_intent failed',
       );
+      return false;
     }
+    return true;
   } catch (err) {
     log.error(
       { intentId, detail: err instanceof Error ? err.message : String(err) },
       'finalize_payment_intent threw',
+    );
+    return false;
+  }
+}
+
+/**
+ * BLQ-1: debita el budget prepago del buyer (increment_a2a_key_spend, 4-arg con
+ * Ownership Guard `p_owner_ref`). Insuficiente / ownership / key inactiva →
+ * PaymentIntentError (fail-closed): el caller aborta ANTES de transferir al seller.
+ */
+async function debitBuyer(
+  keyId: string,
+  chainId: number,
+  amountUsd: number,
+  ownerRef: string,
+): Promise<void> {
+  const { error } = await supabase.rpc('increment_a2a_key_spend', {
+    p_key_id: keyId,
+    p_chain_id: chainId,
+    p_amount_usd: amountUsd,
+    p_owner_ref: ownerRef,
+  });
+  if (error) mapPgError(error, 'upto-debit', false);
+}
+
+/**
+ * BLQ-1: reembolsa un débito YA aplicado (refund_a2a_key_spend, espejo inverso).
+ * Best-effort: un fallo se loguea para reconciliación (NO re-lanza — el settle ya
+ * resuelve `failed`; re-lanzar dejaría la promise rechazando contra CD-7).
+ */
+async function refundBuyer(
+  keyId: string,
+  chainId: number,
+  amountUsd: number,
+  ownerRef: string,
+): Promise<void> {
+  try {
+    const { error } = await supabase.rpc('refund_a2a_key_spend', {
+      p_key_id: keyId,
+      p_chain_id: chainId,
+      p_amount_usd: amountUsd,
+      p_owner_ref: ownerRef,
+    });
+    if (error) {
+      log.error(
+        { keyId, detail: error.message },
+        'refund_a2a_key_spend failed (needs reconcile)',
+      );
+    }
+  } catch (err) {
+    log.error(
+      { keyId, detail: err instanceof Error ? err.message : String(err) },
+      'refund_a2a_key_spend threw (needs reconcile)',
     );
   }
 }
@@ -437,10 +509,34 @@ export const paymentIntentService = {
     const consumedMicro = numericToMicro(row.consumed_usd);
     const consumedUsd = consumedMicro / 1_000_000;
 
-    // Idempotencia (AC-1): ya cerrado/settled/failed → NO re-settlea.
+    // Idempotencia (AC-1) + BLQ-2 recovery: el intent ya NO está 'open'.
     if (row.prev_status !== 'open') {
       const settledMicro = Math.min(consumedMicro, depositMicro);
       const residualMicro = Math.max(0, depositMicro - settledMicro);
+      // BLQ-2: un huérfano en 'closing' (settle on-chain OK pero finalize falló)
+      // NO puede reportarse `settled` a ciegas — el refund del residual quedaría
+      // perdido. Re-invocamos finalize idempotente (solo actúa mientras
+      // status='closing'; sin doble-refund). Si finalize sigue fallando, NO
+      // mentimos: propagamos INTERNAL para que el retry/sweep lo reintente.
+      if (row.prev_status === 'closing') {
+        const finalized = await finalizePaymentIntent(
+          intentId,
+          ownerRef,
+          row.settle_tx_hash,
+          settledMicro / 1_000_000,
+          residualMicro / 1_000_000,
+          true,
+          null,
+        );
+        if (!finalized) throw new PaymentIntentError('INTERNAL');
+        return {
+          status: 'settled',
+          txHash: row.settle_tx_hash,
+          finalAmountUsd: settledMicro / 1_000_000,
+          consumedUsd,
+          residualUsd: residualMicro / 1_000_000,
+        };
+      }
       return {
         status: row.prev_status === 'failed' ? 'failed' : 'settled',
         txHash: row.settle_tx_hash,
@@ -613,9 +709,33 @@ export const paymentIntentService = {
       );
     }
 
-    // Idempotencia (AC-1): ya settleado → NO re-cobra.
+    // Idempotencia (AC-1) + MNR-2 + BLQ-2: el intent ya NO está 'open'.
     if (row.prev_status !== 'open') {
-      const settledMicro = Math.min(capMicro, reportedMicro);
+      // MNR-2: reportar el monto REALMENTE settleado (persistido en consumed_usd
+      // por el close RPC al transicionar), NO un recompute con el reportedUsage
+      // del request actual (que en un retry/sweep puede diferir del original).
+      const settledMicro = numericToMicro(row.consumed_usd);
+      // BLQ-2: huérfano en 'closing' → completar finalize idempotente. Para upto
+      // NO hay residual (el débito == monto exacto), pero el status flip debe
+      // correr para no reportar `settled` con un intent aún en 'closing'.
+      if (row.prev_status === 'closing') {
+        const finalized = await finalizePaymentIntent(
+          intentId,
+          ownerRef,
+          row.settle_tx_hash,
+          settledMicro / 1_000_000,
+          null,
+          true,
+          null,
+        );
+        if (!finalized) throw new PaymentIntentError('INTERNAL');
+        return {
+          status: 'settled',
+          txHash: row.settle_tx_hash,
+          finalAmountUsd: settledMicro / 1_000_000,
+          cappedAt,
+        };
+      }
       return {
         status: row.prev_status === 'failed' ? 'failed' : 'settled',
         txHash: row.settle_tx_hash,
@@ -639,6 +759,29 @@ export const paymentIntentService = {
         null,
       );
       return { status: 'settled', txHash: null, finalAmountUsd: 0, cappedAt };
+    }
+
+    // BLQ-1 (invariante money-path): DEBITAR el budget prepago del buyer por
+    // min(cap,uso) ANTES de la transferencia on-chain al seller. upto NO reservó
+    // en el open, así que el débito ocurre acá (NO en finalize, que corre DESPUÉS
+    // del transfer → seguiría drenando el gateway). Fail-closed: si el budget es
+    // insuficiente → NO se transfiere, NO se marca settled; se marca failed y se
+    // propaga INSUFFICIENT_BUDGET (política v1 documentada).
+    try {
+      await debitBuyer(row.key_id, row.chain_id, finalUsd, ownerRef);
+    } catch (debitErr) {
+      const code =
+        debitErr instanceof PaymentIntentError ? debitErr.code : 'INTERNAL';
+      await finalizePaymentIntent(
+        intentId,
+        ownerRef,
+        null,
+        finalUsd,
+        null,
+        false,
+        `buyer debit failed: ${code}`,
+      );
+      throw debitErr;
     }
 
     const outcome = await settlePaymentIntentOnChain({
@@ -667,6 +810,9 @@ export const paymentIntentService = {
       };
     }
 
+    // BLQ-1 (atomicidad): el transfer on-chain falló DESPUÉS del débito → reembolsar
+    // el débito para NO dejar al buyer debitado sin que el seller cobre.
+    await refundBuyer(row.key_id, row.chain_id, finalUsd, ownerRef);
     await finalizePaymentIntent(
       intentId,
       ownerRef,
@@ -693,16 +839,37 @@ export const paymentIntentService = {
    */
   async expireStale(): Promise<void> {
     const nowIso = new Date().toISOString();
-    const { data, error } = await supabase
+    // 1. Intents 'open' vencidos (AC-6): auto-settle determinístico.
+    const openRes = await supabase
       .from('a2a_payment_intents')
       .select('id, owner_ref, intent_type')
       .eq('status', 'open')
       .lt('expires_at', nowIso);
-    if (error) {
-      log.error({ detail: error.message }, 'expireStale query failed');
-      return;
+    if (openRes.error) {
+      log.error(
+        { detail: openRes.error.message },
+        'expireStale open query failed',
+      );
     }
-    for (const stale of data ?? []) {
+    // 2. BLQ-2: intents 'closing' huérfanos (settle on-chain OK pero finalize
+    //    falló) con updated_at viejo. Re-invocar close/settle: el short-circuit
+    //    de 'closing' re-ejecuta finalize idempotente (residual sin doble-refund).
+    const staleIso = new Date(
+      Date.now() - resolveClosingStaleMs(),
+    ).toISOString();
+    const closingRes = await supabase
+      .from('a2a_payment_intents')
+      .select('id, owner_ref, intent_type')
+      .eq('status', 'closing')
+      .lt('updated_at', staleIso);
+    if (closingRes.error) {
+      log.error(
+        { detail: closingRes.error.message },
+        'expireStale closing query failed',
+      );
+    }
+    const rows = [...(openRes.data ?? []), ...(closingRes.data ?? [])];
+    for (const stale of rows) {
       try {
         if (stale.intent_type === 'session') {
           await this.closeSession(stale.id, stale.owner_ref);

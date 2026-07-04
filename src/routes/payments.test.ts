@@ -32,6 +32,11 @@ vi.mock('./auth/parsers.js', () => ({
   resolveCallerKey: mockResolveCallerKey,
 }));
 
+// MNR-1: la default chain del registry es 2368 (kite) en estos tests.
+vi.mock('../adapters/registry.js', () => ({
+  getChainConfig: () => ({ name: 'kite', chainId: 2368, explorerUrl: '' }),
+}));
+
 import { PaymentIntentError } from '../services/payment-intent.js';
 import { paymentsRoutes } from './payments.js';
 
@@ -210,6 +215,49 @@ describe('T-WRITE guard money-path (CD-12)', () => {
       },
     });
     expect(res.statusCode).toBe(422);
+    expect(mockService.createUpto).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('MNR-1: chainId no-default → 422 CHAIN_NOT_SUPPORTED, service NO llamado', async () => {
+    activeKey();
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/payments/session',
+      payload: {
+        keyId: 'k1',
+        sellerRef: 'reg/agent',
+        payTo: PAYTO,
+        chainId: 8453, // != default (2368)
+        depositUsd: 10,
+      },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error_code).toBe('CHAIN_NOT_SUPPORTED');
+    expect(mockService.openSession).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('MNR-1: chainId no-default → 422 CHAIN_NOT_SUPPORTED en upto', async () => {
+    activeKey();
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/payments/upto',
+      payload: {
+        keyId: 'k1',
+        sellerRef: 'reg/agent',
+        payTo: PAYTO,
+        chainId: 8453, // != default (2368)
+        capUsd: 5,
+        capSignature: `0x${'22'.repeat(65)}`,
+        capNonce: `0x${'11'.repeat(32)}`,
+        typedData: typedData(),
+      },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error_code).toBe('CHAIN_NOT_SUPPORTED');
     expect(mockService.createUpto).not.toHaveBeenCalled();
     await app.close();
   });
