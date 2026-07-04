@@ -328,7 +328,14 @@ export async function settlePaymentIntentOnChain(params: {
       const detail =
         signErr instanceof Error ? signErr.message : String(signErr);
       log.error({ intentId, detail }, 'settle sign() failed');
-      return { status: 'failed', txHash: null, finalAmountUsd, error: detail };
+      // INEQUÍVOCO: el sign() lanzó ANTES de cualquier broadcast → no hubo tx.
+      return {
+        status: 'failed',
+        txHash: null,
+        finalAmountUsd,
+        error: detail,
+        failureKind: 'unequivocal',
+      };
     }
 
     // 2. settle (try/catch propio → failed).
@@ -343,11 +350,14 @@ export async function settlePaymentIntentOnChain(params: {
       if (!settleResult.success) {
         const detail = `settle failed: ${settleResult.error ?? 'unknown'}`;
         log.error({ intentId, detail }, 'settle reported failure');
+        // INEQUÍVOCO: el facilitator confirmó que el settle NO se ejecutó → no
+        // se movieron fondos → refund seguro del deposit/débito.
         return {
           status: 'failed',
           txHash: null,
           finalAmountUsd,
           error: detail,
+          failureKind: 'unequivocal',
         };
       }
       settleTxHash = settleResult.txHash;
@@ -355,7 +365,15 @@ export async function settlePaymentIntentOnChain(params: {
       const detail =
         settleErr instanceof Error ? settleErr.message : String(settleErr);
       log.error({ intentId, detail }, 'settle() threw');
-      return { status: 'failed', txHash: null, finalAmountUsd, error: detail };
+      // AMBIGUO: el settle() lanzó pero la tx PUDO haberse broadcasteado antes
+      // del throw → NO sabemos si los fondos se movieron → NO refundar.
+      return {
+        status: 'failed',
+        txHash: null,
+        finalAmountUsd,
+        error: detail,
+        failureKind: 'ambiguous',
+      };
     }
 
     // 3. re-verify on-chain ANTES de marcar settled (CD-5).
@@ -375,7 +393,15 @@ export async function settlePaymentIntentOnChain(params: {
       // contradicción definitiva → fail-CLOSED. NO settled, NO refund.
       const detail = `settle re-verification failed: ${verified.reason ?? 'unknown'}`;
       log.error({ intentId, detail }, 'settle re-verification failed');
-      return { status: 'failed', txHash: null, finalAmountUsd, error: detail };
+      // AMBIGUO: la tx se envió (settleTxHash existe) pero la re-verificación la
+      // contradijo → los fondos PUDIERON moverse on-chain → NO refundar.
+      return {
+        status: 'failed',
+        txHash: null,
+        finalAmountUsd,
+        error: detail,
+        failureKind: 'ambiguous',
+      };
     }
 
     return { status: 'settled', txHash: settleTxHash, finalAmountUsd };
@@ -386,7 +412,15 @@ export async function settlePaymentIntentOnChain(params: {
       { intentId, detail },
       'settlePaymentIntentOnChain unexpected error',
     );
-    return { status: 'failed', txHash: null, finalAmountUsd, error: detail };
+    // AMBIGUO por seguridad: no podemos garantizar en qué punto lanzó (pudo ser
+    // después del broadcast) → NO refundar, reconciliar (evita doble-gasto).
+    return {
+      status: 'failed',
+      txHash: null,
+      finalAmountUsd,
+      error: detail,
+      failureKind: 'ambiguous',
+    };
   }
 }
 
@@ -519,6 +553,13 @@ export const paymentIntentService = {
       // status='closing'; sin doble-refund). Si finalize sigue fallando, NO
       // mentimos: propagamos INTERNAL para que el retry/sweep lo reintente.
       if (row.prev_status === 'closing') {
+        // MENOR-1: recovery bajo asunción de settle exitoso. Logueamos el txHash
+        // ANTES de finalize (si finalize vuelve a fallar, el hash queda en el log
+        // para reconciliación) + warn explícito que dispara la verificación.
+        log.warn(
+          { intentId, txHash: row.settle_tx_hash },
+          'finalizando intent en closing bajo asunción de settle exitoso; verificar on-chain',
+        );
         const finalized = await finalizePaymentIntent(
           intentId,
           ownerRef,
@@ -599,7 +640,46 @@ export const paymentIntentService = {
       };
     }
 
-    // Fallo del settle → failed, NO refund, NO tx (SG/finalize contract).
+    // BLQ-ALTO-1 (money-path CRÍTICO): openSession debitó el deposit COMPLETO
+    // (authorized_usd) contra el budget prepago. Si el settle falla NO podemos
+    // dejarlo 'failed' sin más: el buyer perdería el deposit entero y el seller
+    // no cobró. La acción depende del subcaso (inequívoco vs ambiguo):
+    if (outcome.failureKind === 'unequivocal') {
+      // sign() lanzó / settle.success===false → CIERTO que NO hubo transfer:
+      // refund del deposit COMPLETO (invariante budget_post == budget_pre).
+      await refundBuyer(
+        row.key_id,
+        row.chain_id,
+        depositMicro / 1_000_000,
+        ownerRef,
+      );
+      await finalizePaymentIntent(
+        intentId,
+        ownerRef,
+        null,
+        finalUsd,
+        null,
+        false,
+        outcome.error ?? 'settle failed',
+      );
+      return {
+        status: 'failed',
+        txHash: null,
+        finalAmountUsd: finalUsd,
+        consumedUsd,
+        residualUsd: depositMicro / 1_000_000,
+        error: outcome.error,
+      };
+    }
+
+    // AMBIGUO (verify contradijo / settle lanzó tras posible broadcast): el
+    // transfer PUDO ocurrir on-chain → NO refundar (evitar doble-gasto). Pero NO
+    // lo dejamos terminal silencioso: flag RECONCILE en error_message + log.warn
+    // explícito para que la reconciliación manual verifique on-chain.
+    log.warn(
+      { intentId, detail: outcome.error },
+      'settle ambiguo (session): deposit NO reembolsado, requiere reconciliación manual',
+    );
     await finalizePaymentIntent(
       intentId,
       ownerRef,
@@ -607,7 +687,7 @@ export const paymentIntentService = {
       finalUsd,
       null,
       false,
-      outcome.error ?? 'settle failed',
+      `RECONCILE: ${outcome.error ?? 'settle ambiguous'}`,
     );
     return {
       status: 'failed',
@@ -719,6 +799,13 @@ export const paymentIntentService = {
       // NO hay residual (el débito == monto exacto), pero el status flip debe
       // correr para no reportar `settled` con un intent aún en 'closing'.
       if (row.prev_status === 'closing') {
+        // MENOR-1: recovery bajo asunción de settle exitoso. Logueamos el txHash
+        // ANTES de finalize (si finalize vuelve a fallar, el hash queda en el log
+        // para reconciliación) + warn explícito que dispara la verificación.
+        log.warn(
+          { intentId, txHash: row.settle_tx_hash },
+          'finalizando intent en closing bajo asunción de settle exitoso; verificar on-chain',
+        );
         const finalized = await finalizePaymentIntent(
           intentId,
           ownerRef,
@@ -810,9 +897,36 @@ export const paymentIntentService = {
       };
     }
 
-    // BLQ-1 (atomicidad): el transfer on-chain falló DESPUÉS del débito → reembolsar
-    // el débito para NO dejar al buyer debitado sin que el seller cobre.
-    await refundBuyer(row.key_id, row.chain_id, finalUsd, ownerRef);
+    // BLQ-1 + BLQ-ALTO-1 (atomicidad): el transfer on-chain falló DESPUÉS del
+    // débito. Refundar SOLO cuando es CIERTO que no hubo transfer (inequívoco);
+    // en el caso ambiguo el transfer PUDO ocurrir → refundar sería doble-gasto.
+    if (outcome.failureKind === 'unequivocal') {
+      // sign() lanzó / settle.success===false → no hubo transfer: buyer whole.
+      await refundBuyer(row.key_id, row.chain_id, finalUsd, ownerRef);
+      await finalizePaymentIntent(
+        intentId,
+        ownerRef,
+        null,
+        finalUsd,
+        null,
+        false,
+        outcome.error ?? 'settle failed',
+      );
+      return {
+        status: 'failed',
+        txHash: null,
+        finalAmountUsd: finalUsd,
+        cappedAt,
+        error: outcome.error,
+      };
+    }
+
+    // AMBIGUO: NO refundar (evita doble-gasto). Flag RECONCILE + log.warn para
+    // reconciliación manual (verificar on-chain si el transfer se ejecutó).
+    log.warn(
+      { intentId, detail: outcome.error },
+      'settle ambiguo (upto): débito NO reembolsado, requiere reconciliación manual',
+    );
     await finalizePaymentIntent(
       intentId,
       ownerRef,
@@ -820,7 +934,7 @@ export const paymentIntentService = {
       finalUsd,
       null,
       false,
-      outcome.error ?? 'settle failed',
+      `RECONCILE: ${outcome.error ?? 'settle ambiguous'}`,
     );
     return {
       status: 'failed',

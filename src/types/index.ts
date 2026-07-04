@@ -1025,6 +1025,17 @@ export interface SettleOutcome {
   residualUsd?: number | undefined;
   cappedAt?: boolean | undefined;
   error?: string | undefined;
+  /**
+   * Sólo definido cuando status==='failed'. Discrimina el subcaso money-path
+   * (BLQ-ALTO-1) para decidir si el débito/deposit se puede refundar:
+   *   - 'unequivocal': ninguna tx se envió/confirmó (el sign() lanzó o
+   *     settle.success===false) → es CIERTO que NO hubo transfer → refund seguro
+   *     (invariante budget_post == budget_pre).
+   *   - 'ambiguous': el transfer PUDO ocurrir on-chain (el settle() lanzó tras un
+   *     posible broadcast, o verifyDefaultChainSettle contradijo el settle) → NO
+   *     refundar (evita doble-gasto); el caller lo marca reconciliable + log.warn.
+   */
+  failureKind?: 'unequivocal' | 'ambiguous' | undefined;
 }
 
 // ============================================================

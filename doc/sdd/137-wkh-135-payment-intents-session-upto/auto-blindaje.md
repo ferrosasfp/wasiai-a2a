@@ -1,5 +1,37 @@
 # Auto-Blindaje — WKH-135 (payment intents session + upto)
 
+### [2026-07-04 22:30] FIX-PACK it.2 — BLQ-ALTO-1: `session` perdía el deposit en settle fallido
+- **Error**: en `closeSession`, si `settlePaymentIntentOnChain` devolvía `failed` se
+  llamaba `finalize(success=false)` sin refund. El deposit COMPLETO ya se debitó en
+  `openSession` (`open_payment_intent` → `increment_a2a_key_spend`), así que el buyer
+  perdía el deposit entero y el seller no cobraba. Asimetría con `upto` (que sí refunda).
+- **Causa raíz**: el seam `settlePaymentIntentOnChain` colapsaba TODOS los subcasos de
+  falla en un único `{ status:'failed' }` sin distinguir si hubo o no transferencia
+  on-chain. Sin esa distinción no se puede decidir refund vs reconcile.
+- **Fix**: agregué `failureKind: 'unequivocal' | 'ambiguous'` a `SettleOutcome`. El seam
+  lo etiqueta: `sign() throw` / `settle.success===false` → `unequivocal` (CIERTO que no
+  hubo tx); `settle() throw` / `verify contradiction` / catch inesperado → `ambiguous`
+  (el transfer PUDO ocurrir). `closeSession` (y `settleUpto`) refundan SOLO en el caso
+  inequívoco (session: deposit COMPLETO; upto: el débito). En el ambiguo NO refundan
+  (evita doble-gasto) y marcan reconciliable: `error_message` con prefijo `RECONCILE:`
+  + `log.warn` explícito. `RPC_UNAVAILABLE` sigue fail-OPEN (intacto).
+- **Aplicar en**: cualquier money-path con debit-antes-de-transfer. NUNCA colapsar
+  "settle falló" en una sola rama: distinguir "no hubo transfer" (refund seguro) de
+  "pudo haber transfer" (reconciliar, jamás refundar a ciegas → doble-gasto).
+
+### [2026-07-04 22:30] FIX-PACK it.2 — MENOR-1: recovery de `closing` sin log ni txHash
+- **Error**: la rama `prev_status==='closing'` (session + upto) re-invocaba
+  `finalize(success=true)` asumiendo settle exitoso sin `log.warn`; si el finalize
+  original falló, el `settle_tx_hash` quedaba null y se perdía la señal de reconciliación.
+- **Causa raíz**: la "limitación v1" estaba documentada pero no cableada (sin log que
+  disparara la reconciliación manual).
+- **Fix**: `log.warn({ intentId, txHash: row.settle_tx_hash }, 'finalizando intent en
+  closing bajo asunción de settle exitoso; verificar on-chain')` ANTES de `finalize`, en
+  ambas ramas de recovery (session + upto).
+- **Aplicar en**: toda rama de recovery que asume un efecto externo (settle on-chain)
+  exitoso debe emitir una señal persistente (log + identificador de la tx) ANTES del
+  paso que puede volver a fallar.
+
 ### [2026-07-04 19:40] Wave 0 — Placeholder SQL inválido en close RPC
 - **Error**: en la rama `ELSE` (intent ya no-open) de `close_payment_intent_for_settle`
   escribí una línea placeholder sin sentido: `v_final := COALESCE(v_tx,'')::TEXT IS NOT

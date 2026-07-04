@@ -456,17 +456,49 @@ describe('T-VERIFY settle on-chain', () => {
     });
   }
 
-  it('verify.ok===false → failed, NO settled, NO refund', async () => {
+  it('verify.ok===false (AMBIGUO) → failed reconciliable, NO refund (evita doble-gasto) + warn', async () => {
     happySettle();
+    // settle OK on-chain pero la re-verificación lo contradice → el transfer PUDO
+    // haber ocurrido → NO refundar (doble-gasto), pero marcar reconciliable.
     mockVerify.mockResolvedValue({ ok: false, reason: 'AMOUNT_MISMATCH' });
-    openSessionClose();
+    const refunds: number[] = [];
+    const finalizeArgs: Record<string, unknown>[] = [];
+    routeRpc({
+      close_payment_intent_for_settle: () => ({
+        data: [
+          {
+            final_amount: 5,
+            prev_status: 'open',
+            intent_type: 'session',
+            key_id: 'k1',
+            chain_id: 2368,
+            pay_to: PAYTO,
+            authorized_usd: 10,
+            consumed_usd: 5,
+            settle_tx_hash: null,
+          },
+        ],
+        error: null,
+      }),
+      refund_a2a_key_spend: (args) => {
+        refunds.push(Number(args.p_amount_usd));
+        return { data: 1, error: null };
+      },
+      finalize_payment_intent: (args) => {
+        finalizeArgs.push(args);
+        return { error: null };
+      },
+    });
     const r = await paymentIntentService.closeSession('i1', OWNER);
     expect(r.status).toBe('failed');
-    // finalize se llamó con p_success=false y sin refund (p_residual null).
-    expect(mockRpc).toHaveBeenCalledWith(
-      'finalize_payment_intent',
-      expect.objectContaining({ p_success: false, p_residual: null }),
-    );
+    // Caso AMBIGUO: NO se refunda (el deposit PUDO haberse transferido on-chain).
+    expect(refunds).toEqual([]);
+    // Reconciliable: finalize con p_success=false + flag RECONCILE en error_message.
+    expect(finalizeArgs[0]?.p_success).toBe(false);
+    expect(finalizeArgs[0]?.p_residual).toBeNull();
+    expect(String(finalizeArgs[0]?.p_error)).toMatch(/^RECONCILE:/);
+    // Señal de reconciliación explícita (nunca perder la señal).
+    expect(logSpy.warn).toHaveBeenCalled();
   });
 
   it('verify.warn===true (RPC_UNAVAILABLE) → fail-OPEN settled + warn', async () => {
@@ -493,6 +525,166 @@ describe('T-VERIFY settle on-chain', () => {
     });
     expect(r.status).toBe('failed');
     expect(r.txHash).toBeNull();
+    expect(r.failureKind).toBe('unequivocal'); // no hubo transfer
+  });
+
+  it('settlePaymentIntentOnChain: settle.success===false → failed inequívoco', async () => {
+    mockSign.mockResolvedValue({
+      paymentRequest: {
+        authorization: { value: '1' },
+        signature: '0xsig',
+        network: 'kite',
+      },
+    });
+    mockSettle.mockResolvedValue({ txHash: '', success: false, error: 'boom' });
+    const r = await settlePaymentIntentOnChain({
+      intentId: 'i1',
+      ownerRef: OWNER,
+      payTo: PAYTO,
+      finalAmountUsd: 5,
+      chainId: 2368,
+    });
+    expect(r.status).toBe('failed');
+    expect(r.failureKind).toBe('unequivocal');
+  });
+
+  it('settlePaymentIntentOnChain: verify contradiction → failed AMBIGUO', async () => {
+    happySettle();
+    mockVerify.mockResolvedValue({ ok: false, reason: 'AMOUNT_MISMATCH' });
+    const r = await settlePaymentIntentOnChain({
+      intentId: 'i1',
+      ownerRef: OWNER,
+      payTo: PAYTO,
+      finalAmountUsd: 5,
+      chainId: 2368,
+    });
+    expect(r.status).toBe('failed');
+    expect(r.failureKind).toBe('ambiguous'); // el transfer PUDO ocurrir
+  });
+});
+
+// ── BLQ-ALTO-1: session no pierde el deposit en settle fallido ────
+describe('BLQ-ALTO-1 session deposit on settle failure', () => {
+  it('settle.success===false (INEQUÍVOCO) → refund del deposit COMPLETO, seller NO cobró (budget_post == budget_pre)', async () => {
+    // sign OK, settle reporta success:false → NO se envió ninguna tx.
+    mockSign.mockResolvedValue({
+      paymentRequest: {
+        authorization: { value: '1' },
+        signature: '0xsig',
+        network: 'kite',
+      },
+    });
+    mockSettle.mockResolvedValue({ txHash: '', success: false, error: 'boom' });
+    mockVerify.mockResolvedValue({ ok: true });
+
+    const budgetPre = 100;
+    // El deposit (10) ya se debitó en openSession contra el budget prepago.
+    let budget = budgetPre - 10;
+    const refunds: number[] = [];
+    routeRpc({
+      close_payment_intent_for_settle: () => ({
+        data: [
+          {
+            final_amount: 4,
+            prev_status: 'open',
+            intent_type: 'session',
+            key_id: 'k1',
+            chain_id: 2368,
+            pay_to: PAYTO,
+            authorized_usd: 10,
+            consumed_usd: 4,
+            settle_tx_hash: null,
+          },
+        ],
+        error: null,
+      }),
+      refund_a2a_key_spend: (args) => {
+        refunds.push(Number(args.p_amount_usd));
+        budget += Number(args.p_amount_usd);
+        return { data: 1, error: null };
+      },
+      finalize_payment_intent: () => ({ error: null }),
+    });
+
+    const r = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r.status).toBe('failed');
+    // Refund del deposit COMPLETO (10), NO sólo del residual (6).
+    expect(refunds).toEqual([10]);
+    // Invariante money-path: budget restaurado a su valor previo.
+    expect(budget).toBe(budgetPre);
+    expect(r.residualUsd).toBe(10);
+  });
+
+  it('verify contradiction (AMBIGUO) → NO refund + estado reconciliable + log.warn', async () => {
+    happySettle();
+    mockVerify.mockResolvedValue({ ok: false, reason: 'AMOUNT_MISMATCH' });
+    const refunds: number[] = [];
+    const finalizeArgs: Record<string, unknown>[] = [];
+    routeRpc({
+      close_payment_intent_for_settle: () => ({
+        data: [
+          {
+            final_amount: 4,
+            prev_status: 'open',
+            intent_type: 'session',
+            key_id: 'k1',
+            chain_id: 2368,
+            pay_to: PAYTO,
+            authorized_usd: 10,
+            consumed_usd: 4,
+            settle_tx_hash: null,
+          },
+        ],
+        error: null,
+      }),
+      refund_a2a_key_spend: (args) => {
+        refunds.push(Number(args.p_amount_usd));
+        return { data: 1, error: null };
+      },
+      finalize_payment_intent: (args) => {
+        finalizeArgs.push(args);
+        return { error: null };
+      },
+    });
+
+    const r = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r.status).toBe('failed');
+    // Caso AMBIGUO: el transfer PUDO haberse ejecutado on-chain → NO refundar.
+    expect(refunds).toEqual([]);
+    // Reconciliable: flag RECONCILE en error_message + señal log.warn explícita.
+    expect(String(finalizeArgs[0]?.p_error)).toMatch(/^RECONCILE:/);
+    expect(logSpy.warn).toHaveBeenCalled();
+  });
+
+  it('sign() throws (INEQUÍVOCO) → refund del deposit COMPLETO', async () => {
+    mockSign.mockRejectedValue(new Error('sig down'));
+    const refunds: number[] = [];
+    routeRpc({
+      close_payment_intent_for_settle: () => ({
+        data: [
+          {
+            final_amount: 4,
+            prev_status: 'open',
+            intent_type: 'session',
+            key_id: 'k1',
+            chain_id: 2368,
+            pay_to: PAYTO,
+            authorized_usd: 10,
+            consumed_usd: 4,
+            settle_tx_hash: null,
+          },
+        ],
+        error: null,
+      }),
+      refund_a2a_key_spend: (args) => {
+        refunds.push(Number(args.p_amount_usd));
+        return { data: 1, error: null };
+      },
+      finalize_payment_intent: () => ({ error: null }),
+    });
+    const r = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r.status).toBe('failed');
+    expect(refunds).toEqual([10]); // deposit completo reembolsado
   });
 });
 
