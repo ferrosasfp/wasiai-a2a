@@ -6,6 +6,7 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { resolveChainKey } from '../adapters/chain-resolver.js';
 import { getAdaptersBundle, getDefaultChainKey } from '../adapters/registry.js';
+import { splitsActive } from '../config/split-config.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
@@ -20,12 +21,15 @@ import {
   resolveAgentDestination,
   resolveAgentPriceUsdc,
 } from '../services/agent-price.js';
+import { resolveAgentSplitContext } from '../services/agent-split-context.js';
 import { budgetService } from '../services/budget.js';
 import { composeService } from '../services/compose.js';
 import {
   chargeProtocolFee,
+  type FeeChargeParams,
   getProtocolFeeRate,
 } from '../services/fee-charge.js';
+import type { SplitPartyRef } from '../services/fee-split.js';
 import { receiptService } from '../services/receipt.js';
 import { refundOutbox } from '../services/refund-outbox.js';
 import { normalizeDestination } from '../services/spend-policy.js';
@@ -571,11 +575,28 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       // txHash que necesita el recibo se lee de `feeResult.txHash` directamente.
       let feeChargeError: string | undefined;
       try {
-        const feeResult = await chargeProtocolFee({
+        // WKH-143 (DT-2/DT-5/CD-9/CD-1b): resolvemos el creator del agente
+        // primario SOLO cuando `splitsActive()` (gate NO-throw). Con el default
+        // 10000/0/0 el gate es `false` → cero query extra y `feeParams` idéntico
+        // al actual (byte-idéntico).
+        let creator: SplitPartyRef | null = null;
+        let referral: SplitPartyRef | null = null;
+        if (splitsActive()) {
+          const splitCtx = await resolveAgentSplitContext(
+            result.steps[0]?.agent,
+          );
+          creator = splitCtx.creator;
+          referral = splitCtx.referral;
+        }
+        // CD-8: asignación condicional (exactOptionalPropertyTypes).
+        const feeParams: FeeChargeParams = {
           orchestrationId: request.id,
           feeBaseUsdc: result.totalCostUsdc,
           feeRate: getProtocolFeeRate(),
-        });
+        };
+        if (creator) feeParams.creator = creator;
+        if (referral) feeParams.referral = referral;
+        const feeResult = await chargeProtocolFee(feeParams);
         if (feeResult.status === 'failed') {
           feeChargeError = feeResult.error;
           log.error({ detail: feeResult.error }, 'fee charge failed');

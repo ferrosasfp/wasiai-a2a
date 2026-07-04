@@ -231,6 +231,39 @@ export const publishedAgentService = {
   },
 
   /**
+   * WKH-143 (DT-4/CD-5) — lee SOLO las columnas de ownership/payout de un agente
+   * self-published, para resolver su leg de creator en los splits. Query espejo
+   * de `getRow` pero seleccionando EXCLUSIVAMENTE `owner_ref, payout_wallet,
+   * referrer_ref` — esas columnas JAMÁS entran a `AgentRow` ni a un shape público
+   * (`mapRowToAgent`/`mapRowToRecord`), preservando CD-5. Uso server-side
+   * exclusivo desde `resolveAgentSplitContext`.
+   */
+  async getSplitContextRow(slug: string): Promise<{
+    ownerRef: string;
+    payoutWallet: string | null;
+    referrerRef: string | null;
+  } | null> {
+    const { data, error } = await supabase
+      .from('a2a_agents')
+      .select('owner_ref, payout_wallet, referrer_ref')
+      .eq('slug', slug)
+      .maybeSingle();
+
+    if (error)
+      throw new Error(
+        `Failed to get split context for agent '${slug}': ${error.message}`,
+      );
+
+    return data
+      ? {
+          ownerRef: data.owner_ref,
+          payoutWallet: data.payout_wallet,
+          referrerRef: data.referrer_ref,
+        }
+      : null;
+  },
+
+  /**
    * Publish a new self-served agent. `ownerRef` proviene del route handler
    * (`request.a2aKeyRow.owner_ref`).
    */

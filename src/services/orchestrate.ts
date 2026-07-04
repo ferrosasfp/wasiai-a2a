@@ -6,6 +6,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { splitsActive } from '../config/split-config.js';
 import {
   anthropicCircuitBreaker,
   CircuitOpenError,
@@ -21,11 +22,17 @@ import type {
   OrchestrateResult,
 } from '../types/index.js';
 import { resolveAgentPriceUsdc } from './agent-price.js';
+import { resolveAgentSplitContext } from './agent-split-context.js';
 import { budgetService } from './budget.js';
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
-import { chargeProtocolFee, getProtocolFeeRate } from './fee-charge.js';
+import {
+  chargeProtocolFee,
+  type FeeChargeParams,
+  getProtocolFeeRate,
+} from './fee-charge.js';
+import type { SplitPartyRef } from './fee-split.js';
 import {
   getLlmTimeoutMs,
   getPlannerMaxTokens,
@@ -1062,11 +1069,29 @@ export const orchestrateService = {
     let feeChargeError: string | undefined;
     let feeChargeTxHash: string | undefined;
     if (pipeline.success) {
-      const feeResult = await chargeProtocolFee({
+      // WKH-143 (DT-2/DT-5/CD-9/CD-1b): resolvemos el contexto de creator del
+      // agente primario SOLO cuando `splitsActive()` (gate NO-throw). Con el
+      // default 10000/0/0 el gate es `false` → el helper NO corre, cero query
+      // extra, y `feeParams` queda EXACTAMENTE `{orchestrationId, feeBaseUsdc,
+      // feeRate}` → byte-idéntico (orchestrate.test.ts:557 exact-match).
+      let creator: SplitPartyRef | null = null;
+      let referral: SplitPartyRef | null = null;
+      if (splitsActive()) {
+        const splitCtx = await resolveAgentSplitContext(
+          pipeline.steps[0]?.agent,
+        );
+        creator = splitCtx.creator;
+        referral = splitCtx.referral;
+      }
+      // CD-8: asignación condicional (exactOptionalPropertyTypes).
+      const feeParams: FeeChargeParams = {
         orchestrationId,
         feeBaseUsdc: pipeline.totalCostUsdc, // WKH-132/DT-1: espejo compose.ts:539
         feeRate,
-      });
+      };
+      if (creator) feeParams.creator = creator;
+      if (referral) feeParams.referral = referral;
+      const feeResult = await chargeProtocolFee(feeParams);
       if (feeResult.status === 'failed') {
         feeChargeError = feeResult.error;
         log.error(
