@@ -41,6 +41,7 @@ import {
   DelegationSignerMismatchError,
   DelegationTotalLimitExceededError,
   DestCapExceededError,
+  InvalidDebitAmountError,
   logOwnershipMismatch,
   OwnershipMismatchError,
 } from './security/errors.js';
@@ -432,6 +433,10 @@ export const delegationService = {
       // fallback genérico → 503 + leak del mensaje crudo de PG. Todos → 403.
       if (msg.includes('DAILY_LIMIT')) {
         throw new DailyLimitExceededError();
+      }
+      // WKH-142: importe NULL / negativo / NaN (guard del parent RPC) → code estable.
+      if (msg.includes('INVALID_AMOUNT')) {
+        throw new InvalidDebitAmountError();
       }
       if (msg.includes('KEY_INACTIVE')) {
         throw new AgentKeyInactiveError();

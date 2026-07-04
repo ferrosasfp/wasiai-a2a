@@ -41,6 +41,7 @@ import {
   DelegationSignerMismatchError,
   DelegationTotalLimitExceededError,
   DestCapExceededError,
+  InvalidDebitAmountError,
   OwnershipMismatchError,
 } from './security/errors.js';
 
@@ -358,6 +359,21 @@ describe('debitDelegationAndParent', () => {
     await expect(
       delegationService.debitDelegationAndParent('del-1', 'evil', 'k', 1, 5),
     ).rejects.toBeInstanceOf(OwnershipMismatchError);
+  });
+
+  // WKH-142 (T8): el prefijo INVALID_AMOUNT del parent RPC (guard NULL/<0/NaN)
+  // vía el PERFORM → InvalidDebitAmountError, sin filtrar el msg crudo de PG.
+  it('WKH-142 INVALID_AMOUNT (parent RPC) → InvalidDebitAmountError', async () => {
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: {
+        message:
+          'INVALID_AMOUNT: p_amount_usd -1 must be a non-negative number',
+      },
+    } as never);
+    await expect(
+      delegationService.debitDelegationAndParent('del-1', 'o', 'k', 1, -1),
+    ).rejects.toBeInstanceOf(InvalidDebitAmountError);
   });
 
   // ── AR-MNR-1/AR-MNR-2: prefijos del parent RPC bajo delegación ──

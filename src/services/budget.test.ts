@@ -74,6 +74,7 @@ import {
   DelegationTotalLimitExceededError,
   DepositAlreadyCreditedError,
   DestCapExceededError,
+  InvalidDebitAmountError,
   OwnershipMismatchError,
 } from './security/errors.js';
 
@@ -293,6 +294,118 @@ describe('budgetService', () => {
         expect.objectContaining({ detail: rawPgMsg }),
         'master debit failed',
       );
+    });
+
+    // ── WKH-142: guard de importe negativo → code estable DEBIT_INVALID_AMOUNT ──
+
+    // T7 (master route): el prefijo INVALID_AMOUNT del RPC (guard NULL/<0/NaN) se
+    // mapea al code estable DEBIT_INVALID_AMOUNT, sin filtrar el msg crudo de PG.
+    it('T7 master route maps INVALID_AMOUNT → DEBIT_INVALID_AMOUNT (CD-8)', async () => {
+      const rawPgMsg =
+        'INVALID_AMOUNT: p_amount_usd -1 must be a non-negative number';
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: rawPgMsg },
+      } as never);
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        -1,
+        undefined,
+        undefined,
+        undefined,
+        'user-1',
+      );
+
+      expect(result).toEqual({ success: false, error: 'DEBIT_INVALID_AMOUNT' });
+      // El msg crudo de PG NUNCA llega al caller.
+      expect(JSON.stringify(result)).not.toContain('p_amount_usd');
+    });
+
+    // T7 (master-dest route): mismo mapeo bajo debit_with_dest_policy.
+    it('T7 master-dest route maps INVALID_AMOUNT → DEBIT_INVALID_AMOUNT (CD-8)', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: {
+          message:
+            'INVALID_AMOUNT: p_amount_usd -1 must be a non-negative number',
+        },
+      } as never);
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        -1,
+        undefined,
+        undefined,
+        'kite/translator',
+        'user-1',
+      );
+
+      expect(result).toEqual({ success: false, error: 'DEBIT_INVALID_AMOUNT' });
+    });
+
+    // T8 (session route): el service key-session lanza InvalidDebitAmountError;
+    // budget.ts lo mapea al code estable DEBIT_INVALID_AMOUNT.
+    it('T8 session route maps InvalidDebitAmountError → DEBIT_INVALID_AMOUNT (CD-8)', async () => {
+      mockDebitSession.mockRejectedValue(new InvalidDebitAmountError());
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        -1,
+        undefined,
+        KEY_SESSION_CTX,
+        undefined,
+        'user-1',
+      );
+
+      expect(result).toEqual({ success: false, error: 'DEBIT_INVALID_AMOUNT' });
+      // No emite receipt en el path de fallo.
+      expect(mockReceiptEmit).not.toHaveBeenCalled();
+    });
+
+    // T8 (delegation route): el service delegation lanza InvalidDebitAmountError;
+    // budget.ts lo mapea al code estable DEBIT_INVALID_AMOUNT.
+    it('T8 delegation route maps InvalidDebitAmountError → DEBIT_INVALID_AMOUNT (CD-8)', async () => {
+      mockDebitDelegation.mockRejectedValue(new InvalidDebitAmountError());
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        0.3,
+        DELEGATION_CTX,
+        undefined,
+        undefined,
+        'user-1',
+      );
+
+      expect(result).toEqual({ success: false, error: 'DEBIT_INVALID_AMOUNT' });
+      expect(mockReceiptEmit).not.toHaveBeenCalled();
+    });
+
+    // T9 (no-regresión): un débito POSITIVO legítimo sigue funcionando (master).
+    it('T9 no-regression: positive debit still succeeds (master route)', async () => {
+      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+
+      const result = await budgetService.debit(
+        'key-1',
+        2368,
+        1.0,
+        undefined,
+        undefined,
+        undefined,
+        'user-1',
+      );
+
+      expect(mockRpc).toHaveBeenCalledWith('increment_a2a_key_spend', {
+        p_key_id: 'key-1',
+        p_chain_id: 2368,
+        p_amount_usd: 1.0,
+        p_owner_ref: 'user-1',
+      });
+      expect(result).toEqual({ success: true });
     });
 
     // ── WKH-101 (DT-11): delegation-aware debit ──────────────

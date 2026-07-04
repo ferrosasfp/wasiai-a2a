@@ -25,6 +25,7 @@ import {
   DelegationTotalLimitExceededError,
   DepositAlreadyCreditedError,
   DestCapExceededError,
+  InvalidDebitAmountError,
   logOwnershipMismatch,
   OwnershipMismatchError,
   SessionBudgetExhaustedError,
@@ -163,6 +164,10 @@ export const budgetService = {
         if (err instanceof OwnershipMismatchError) {
           return { success: false, error: 'OWNERSHIP_MISMATCH' };
         }
+        // WKH-142 (CD-8): importe NULL / negativo / NaN → code estable.
+        if (err instanceof InvalidDebitAmountError) {
+          return { success: false, error: 'DEBIT_INVALID_AMOUNT' };
+        }
         // NO propagar `err.message` (mensaje crudo de Postgres) al cliente.
         log.error(
           {
@@ -249,6 +254,10 @@ export const budgetService = {
         if (err instanceof OwnershipMismatchError) {
           return { success: false, error: 'OWNERSHIP_MISMATCH' };
         }
+        // WKH-142 (CD-8): importe NULL / negativo / NaN → code estable.
+        if (err instanceof InvalidDebitAmountError) {
+          return { success: false, error: 'DEBIT_INVALID_AMOUNT' };
+        }
         // AR-MNR-2: NO propagar `err.message` (mensaje crudo de Postgres) al
         // cliente. Devolver un error_code estable; el detalle va al log server.
         log.error(
@@ -304,6 +313,10 @@ export const budgetService = {
         if (msg.includes('OWNERSHIP_MISMATCH')) {
           return { success: false, error: 'OWNERSHIP_MISMATCH' };
         }
+        // WKH-142 (CD-8): importe NULL / negativo / NaN → code estable.
+        if (msg.includes('INVALID_AMOUNT')) {
+          return { success: false, error: 'DEBIT_INVALID_AMOUNT' };
+        }
         // Fallback: el msg crudo de PG NUNCA llega al cliente (CD-B).
         log.error({ keyId, chainId, detail: msg }, 'dest-policy debit failed');
         return { success: false, error: 'DEST_POLICY_DEBIT_FAILED' };
@@ -346,6 +359,10 @@ export const budgetService = {
       }
       if (msg.includes('KEY_NOT_FOUND')) {
         return { success: false, error: 'KEY_NOT_FOUND' };
+      }
+      // WKH-142 (CD-8): importe NULL / negativo / NaN → code estable.
+      if (msg.includes('INVALID_AMOUNT')) {
+        return { success: false, error: 'DEBIT_INVALID_AMOUNT' };
       }
       log.error({ keyId, chainId, detail: msg }, 'master debit failed');
       return { success: false, error: 'DEBIT_FAILED' };

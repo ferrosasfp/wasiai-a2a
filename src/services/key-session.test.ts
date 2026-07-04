@@ -37,6 +37,7 @@ import {
   AgentKeyNotFoundError,
   DailyLimitExceededError,
   DestCapExceededError,
+  InvalidDebitAmountError,
   OwnershipMismatchError,
   SessionBudgetExhaustedError,
   SessionExpiredError,
@@ -517,6 +518,21 @@ describe('debitSessionAndParent', () => {
     await expect(
       keySessionService.debitSessionAndParent('sess-1', 'evil', 'k', 1, 5),
     ).rejects.toBeInstanceOf(OwnershipMismatchError);
+  });
+
+  // WKH-142 (T8): el prefijo INVALID_AMOUNT del parent RPC (guard NULL/<0/NaN)
+  // vía el PERFORM → InvalidDebitAmountError, sin filtrar el msg crudo de PG.
+  it('WKH-142 INVALID_AMOUNT (parent RPC) → InvalidDebitAmountError', async () => {
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: {
+        message:
+          'INVALID_AMOUNT: p_amount_usd -1 must be a non-negative number',
+      },
+    } as never);
+    await expect(
+      keySessionService.debitSessionAndParent('sess-1', 'o', 'k', 1, -1),
+    ).rejects.toBeInstanceOf(InvalidDebitAmountError);
   });
 
   it('CD-AB-1 unmapped RPC error → SESSION_DEBIT_FAILED, NO raw PG leak', async () => {

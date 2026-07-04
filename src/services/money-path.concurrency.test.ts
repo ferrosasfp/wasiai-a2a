@@ -146,6 +146,14 @@ vi.mock('../lib/supabase.js', () => {
     if (!k) return { error: { message: 'KEY_NOT_FOUND' } };
     if (k.owner_ref !== args.p_owner_ref)
       return { error: { message: 'OWNERSHIP_MISMATCH' } };
+    // WKH-142: guard NULL / < 0 / NaN ANTES de tocar el budget (mirrors the real
+    // RPC: the check sits between the ownership guard and the is_active check).
+    if (
+      args.p_amount_usd == null ||
+      args.p_amount_usd < 0 ||
+      Number.isNaN(args.p_amount_usd)
+    )
+      return { error: { message: 'INVALID_AMOUNT' } };
     if (!k.is_active) return { error: { message: 'KEY_INACTIVE' } };
     const chainKey = String(args.p_chain_id);
     const bal = Number.parseFloat(k.budget[chainKey] ?? '0');
@@ -295,6 +303,30 @@ const CHAIN = 8453;
 beforeEach(() => {
   vi.clearAllMocks();
   db.reset();
+});
+
+// ════════════════════════════════════════════════════════════
+// WKH-142 (T2 / AC-1). NEGATIVE AMOUNT GUARD — a negative debit is rejected
+// with INVALID_AMOUNT and the balance is NOT mutated (never SUMs to budget).
+// ════════════════════════════════════════════════════════════
+describe('T2 (AC-1) negative amount guard — debit is rejected, balance unchanged', () => {
+  it('negative amount → DEBIT_INVALID_AMOUNT, budget untouched (never credited)', async () => {
+    db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '5' } });
+
+    const result = await budgetService.debit(
+      KEY,
+      CHAIN,
+      -3,
+      undefined,
+      undefined,
+      undefined,
+      OWNER,
+    );
+
+    expect(result).toEqual({ success: false, error: 'DEBIT_INVALID_AMOUNT' });
+    // El balance NO cambia: sin el guard, new_bal = 5 - (-3) = 8 (SUMA al budget).
+    expect(db.balance(KEY, CHAIN)).toBe(5);
+  });
 });
 
 // ════════════════════════════════════════════════════════════

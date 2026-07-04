@@ -55,6 +55,7 @@ const ERROR_CONTRACT: ReadonlyArray<[string, string]> = [
   ['InvalidSessionTokenError', 'INVALID_SESSION_TOKEN'],
   ['DelegationChainNotAllowedError', 'DELEGATION_CHAIN_NOT_ALLOWED'],
   ['AgentKeyBudgetExhaustedError', 'AGENT_KEY_BUDGET_EXHAUSTED'],
+  ['InvalidDebitAmountError', 'DEBIT_INVALID_AMOUNT'],
   ['DailyLimitExceededError', 'DAILY_LIMIT'],
   ['AgentKeyInactiveError', 'KEY_INACTIVE'],
   ['AgentKeyNotFoundError', 'KEY_NOT_FOUND'],

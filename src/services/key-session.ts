@@ -33,6 +33,7 @@ import {
   AgentKeyNotFoundError,
   DailyLimitExceededError,
   DestCapExceededError,
+  InvalidDebitAmountError,
   logOwnershipMismatch,
   OwnershipMismatchError,
   SessionBudgetExhaustedError,
@@ -498,6 +499,10 @@ export const keySessionService = {
       }
       if (msg.includes('DAILY_LIMIT')) {
         throw new DailyLimitExceededError();
+      }
+      // WKH-142: importe NULL / negativo / NaN (guard del parent RPC) → code estable.
+      if (msg.includes('INVALID_AMOUNT')) {
+        throw new InvalidDebitAmountError();
       }
       if (msg.includes('KEY_INACTIVE')) {
         throw new AgentKeyInactiveError();
