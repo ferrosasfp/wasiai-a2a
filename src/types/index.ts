@@ -505,10 +505,13 @@ export interface OrchestratePlanResult {
   costPerStep: number[];
   /** sum(costPerStep) — informativo, NO base del débito. */
   totalCostUsdc: number;
-  /** WKH-132: fee cost-based = maxQuotedCostUsdc − totalCostUsdc (residual);
-   *  == totalCostUsdc + protocolFeeUsdc por construcción (AC-2). 0 en early-returns. */
+  /** WKH-132: fee REAL cost-based = round(totalCostUsdc × getProtocolFeeRate()).
+   *  Reconcilia con feeRatePercent por construcción. NO es el residual del techo.
+   *  0 en early-returns. */
   protocolFeeUsdc: number;
-  /** Cap del execute (§4.3.4 SDD); espejo de augmentX402ChallengeAmount. */
+  /** Cap del execute (§4.3.4 SDD); espejo de augmentX402ChallengeAmount. TECHO de
+   *  seguridad: maxQuotedCostUsdc ≥ totalCostUsdc + protocolFeeUsdc (puede exceder
+   *  cuando algún step aún no cotizó precio → PLACEHOLDER_FEE_USD headroom). */
   maxQuotedCostUsdc: number;
   reasoning: string;
   consideredAgents: Agent[];

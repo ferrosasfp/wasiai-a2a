@@ -397,12 +397,14 @@ function readyPlan(
     steps: [{ agent: 'a1', registry: 'wasiai', input: { q: 0 } }],
     costPerStep: [0.5],
     totalCostUsdc: 0.5,
-    protocolFeeUsdc: 0.05,
+    // WKH-132 (BLQ-MED-1): par coherente con rate mock 0.01 → fee = 0.5 * 0.01 = 0.005;
+    // techo 0.505 == total 0.5 + fee 0.005 (precio resuelto, sin placeholder).
+    protocolFeeUsdc: 0.005,
     maxQuotedCostUsdc: 0.505,
     reasoning: 'plan ok',
     consideredAgents: [],
     plannedCostUsd: 0.5,
-    feeUsdc: 0.05,
+    feeUsdc: 0.005,
     usedFallback: false,
     debitFallback: false,
     billingKeyRow: undefined,
@@ -465,6 +467,103 @@ describe('orchestrate routes — WKH-131 /plan + /execute', () => {
     expect(body.feeUsdc).toBeUndefined();
     // Sin débito → sin header de saldo.
     expect(res.headers['x-a2a-remaining-budget']).toBeUndefined();
+  });
+
+  // T-ROUTE-PLAN-FEE (WKH-132 AC-1/DT-2/CD-1): /plan ready → feeRatePercent
+  // derivado de getProtocolFeeRate() * 100 (mock 0.01 → 1). Campo aditivo:
+  // los existentes (protocolFeeUsdc, totalCostUsdc, maxQuotedCostUsdc) intactos.
+  it('T-ROUTE-PLAN-FEE (AC-1): /plan ready → feeRatePercent = rate*100 (1), derived from getProtocolFeeRate', async () => {
+    mockPlan.mockResolvedValue(readyPlan());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/plan',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // getProtocolFeeRate mockeado a 0.01 → feeRatePercent 1.
+    expect(body.feeRatePercent).toBe(1);
+    // WKH-132 (BLQ-MED-1): fee cost-based derivado a nivel respuesta = total * rate =
+    // 0.5 * 0.01 = 0.005. CD-4: totalCostUsdc/maxQuotedCostUsdc intactos (aditivo).
+    expect(body.protocolFeeUsdc).toBe(0.005);
+    expect(body.totalCostUsdc).toBe(0.5);
+    expect(body.maxQuotedCostUsdc).toBe(0.505);
+  });
+
+  // T-ROUTE-PLAN-FEE (WKH-132 CD-3 / BLQ-MED-1 fix): la ruta DERIVA protocolFeeUsdc
+  // cost-based (= totalCostUsdc × getProtocolFeeRate()) a nivel respuesta; NO ecoa
+  // el protocolFeeUsdc que venga del plan. Para probar el cálculo REAL (no un fixture
+  // cocinado), el mock devuelve un protocolFeeUsdc INCONSISTENTE (el residual inflado
+  // del techo, ~1.01, con maxQuotedCostUsdc 1.02) y se aserta que la ruta lo IGNORA y
+  // reporta el fee cost-based que reconcilia con feeRatePercent por construcción.
+  it('T-ROUTE-PLAN-FEE (CD-3): route derives cost-based protocolFeeUsdc, ignores stale plan residual', async () => {
+    // totalCostUsdc 0.5; el plan trae un residual inflado (1.01) y techo 1.02.
+    mockPlan.mockResolvedValue(
+      readyPlan({
+        totalCostUsdc: 0.5,
+        protocolFeeUsdc: 1.01,
+        maxQuotedCostUsdc: 1.02,
+      }),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/plan',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // rate mock 0.01 → feeRatePercent 1; fee cost-based = 0.5 * 0.01 = 0.005.
+    expect(body.feeRatePercent).toBe(1);
+    expect(body.protocolFeeUsdc).toBeCloseTo(0.005, 6);
+    // La ruta NO ecoa el residual cocinado del plan (1.01).
+    expect(body.protocolFeeUsdc).not.toBeCloseTo(1.01, 4);
+    // Reconcilia por construcción: fee == total × feeRatePercent/100.
+    const expectedFee = body.totalCostUsdc * (body.feeRatePercent / 100);
+    expect(body.protocolFeeUsdc).toBeCloseTo(expectedFee, 6);
+    // Invariante del quote: el techo es ≥ total + fee (1.02 ≥ 0.505).
+    expect(body.maxQuotedCostUsdc).toBeGreaterThanOrEqual(
+      body.totalCostUsdc + body.protocolFeeUsdc,
+    );
+  });
+
+  // T-ROUTE-PLAN-FEE (WKH-132 AC-2): planStatus != 'ready' → feeRatePercent
+  // OMITIDO (no fee "cobrado" engañoso sin pipeline) y protocolFeeUsdc 0.
+  it.each([
+    'no_agents',
+    'budget_exhausted',
+    'insufficient_funds',
+    'no_relevant_agent',
+  ] as const)('T-ROUTE-PLAN-FEE (AC-2): /plan %s → protocolFeeUsdc 0 and feeRatePercent omitted', async (planStatus) => {
+    mockPlan.mockResolvedValue(
+      readyPlan({
+        planStatus,
+        steps: [],
+        costPerStep: [],
+        totalCostUsdc: 0,
+        protocolFeeUsdc: 0,
+        maxQuotedCostUsdc: 0,
+      }),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/plan',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.planStatus).toBe(planStatus);
+    expect(body.protocolFeeUsdc).toBe(0);
+    // AC-2: omitido (no un fee cobrado engañoso sin pipeline).
+    expect(body).not.toHaveProperty('feeRatePercent');
   });
 
   // T-EXEC-8 (RIESGO-4/CD-NEW-5): markSkipMiddlewareDebit presente en /execute →

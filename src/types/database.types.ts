@@ -226,6 +226,45 @@ export type Database = {
         };
         Relationships: [];
       };
+      a2a_reputation_writebacks: {
+        Row: {
+          agent_slug: string;
+          chain_id: number;
+          created_at: string;
+          error_code: string | null;
+          event_id: string;
+          id: string;
+          onchain_agent_id: string;
+          status: string;
+          tx_hash: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          agent_slug: string;
+          chain_id: number;
+          created_at?: string;
+          error_code?: string | null;
+          event_id: string;
+          id?: string;
+          onchain_agent_id: string;
+          status: string;
+          tx_hash?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          agent_slug?: string;
+          chain_id?: number;
+          created_at?: string;
+          error_code?: string | null;
+          event_id?: string;
+          id?: string;
+          onchain_agent_id?: string;
+          status?: string;
+          tx_hash?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       a2a_key_deposits: {
         Row: {
           amount_usd: number;

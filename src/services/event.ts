@@ -3,9 +3,11 @@
  * WKH-27: Dashboard Analytics
  */
 
+import { isWritebackEnabled } from '../adapters/erc8004-reputation-writer.js';
 import { supabase } from '../lib/supabase.js';
 import type { Database, Json } from '../types/database.types.js';
 import type { A2AEvent, AgentSummary, DashboardStats } from '../types/index.js';
+import { reputationWritebackService } from './reputation-writeback.js';
 
 // ── Tipo interno para filas de Supabase ─────────────────────
 
@@ -85,7 +87,27 @@ export const eventService = {
 
     if (error) throw new Error(`Failed to track event: ${error.message}`);
     // M9: narrowing acotado — `metadata` jsonb + `status` string→union de dominio.
-    return rowToEvent(data as unknown as EventRow);
+    const mapped = rowToEvent(data as unknown as EventRow);
+
+    // WKH-133: write-back de reputación on-chain — fire-and-forget, gated OFF por
+    // default. NO awaited: track() retorna apenas termina el insert (CD-1/AC-7 —
+    // no aumenta el p95 del hot-path). El gate acá evita construir la promesa con
+    // el flag OFF (doble barrera con el gate interno del service — CD-5).
+    if (isWritebackEnabled()) {
+      void reputationWritebackService
+        .onSettledEvent({
+          id: mapped.id,
+          eventType: mapped.eventType,
+          agentId: mapped.agentId,
+          status: mapped.status,
+          costUsdc: mapped.costUsdc,
+        })
+        .catch(() => {
+          /* fail-open: nunca romper track() (CD-3) */
+        });
+    }
+
+    return mapped;
   },
 
   /**
