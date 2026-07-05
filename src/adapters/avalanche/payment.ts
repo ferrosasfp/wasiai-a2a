@@ -59,7 +59,13 @@ const WASIAI_FACILITATOR_DEFAULT_URL =
   'https://wasiai-facilitator-production.up.railway.app';
 
 // SEC-AR-2026-04-28 MNR-8: bound facilitator hangs.
-const FACILITATOR_TIMEOUT_MS = 10_000;
+// 30s (not 10s): the settle authorizes the facilitator up to
+// AVALANCHE_MAX_TIMEOUT_SECONDS (60s) on-chain, but a 10s HTTP abort here dropped
+// legitimate settles that wait for Fuji confirmation (~12s under load) → step
+// failed with "operation aborted due to timeout" → 0 steps / $0. Kept below the
+// 60s authorization so the gateway still bounds a truly hung facilitator; the
+// budget credit-back on failure means an abort never phantom-charges the caller.
+const FACILITATOR_TIMEOUT_MS = 30_000;
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 

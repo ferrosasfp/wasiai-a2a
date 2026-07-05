@@ -522,7 +522,9 @@ function buildX402CanonicalBody(
 }
 
 // SEC-AR-2026-04-28 MNR-8: bound facilitator hangs symmetric to downstream-payment.ts
-const X402_FACILITATOR_TIMEOUT_MS = 10_000;
+// 30s (not 10s): match the on-chain settle window the gateway authorizes without
+// aborting a legit settle that waits for confirmation. See avalanche/payment.ts.
+const X402_FACILITATOR_TIMEOUT_MS = 30_000;
 
 async function verifyX402(proof: X402Proof): Promise<VerifyResult> {
   const facilitatorUrl = getFacilitatorUrl();

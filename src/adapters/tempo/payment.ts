@@ -66,7 +66,9 @@ const WASIAI_FACILITATOR_DEFAULT_URL =
   'https://wasiai-facilitator-production.up.railway.app';
 
 // SEC-AR-2026-04-28 MNR-8: bound facilitator hangs.
-const FACILITATOR_TIMEOUT_MS = 10_000;
+// 30s (not 10s): match the on-chain settle window the gateway authorizes without
+// aborting a legit settle that waits for confirmation. See avalanche/payment.ts.
+const FACILITATOR_TIMEOUT_MS = 30_000;
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
