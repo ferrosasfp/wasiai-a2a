@@ -36,6 +36,9 @@ const TEST_SECRET = 'test-cron-secret-bbbbbbbbbbbbbbbbbbbbb';
 const EXPECTED_TITLES = [
   'wasiai-x402-balance-check',
   'wasiai-x402-bearer-rotation',
+  // WKH-71: native-gas monitor job (alphabetical between bearer-rotation and
+  // invalidate-prev-bearer).
+  'wasiai-x402-gas-balance-check',
   'wasiai-x402-invalidate-prev-bearer',
   'wasiai-x402-warmup',
 ];
@@ -109,57 +112,59 @@ function runScript({ existingJobs = [] } = {}) {
   return { ...r, finalState };
 }
 
-test('T-SC-01: create all 4 jobs (no existing)', () => {
+test('T-SC-01: create all 5 jobs (no existing)', () => {
   const r = runScript({ existingJobs: [] });
   assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
-  // 4 jobs final (W4: warmup + balance-check + bearer-rotation + invalidate-prev-bearer).
-  assert.equal(r.finalState.jobs.length, 4);
-  // Calls: 1 GET + 4 PUT.
+  // 5 jobs final (W4 + WKH-71: warmup + balance-check + bearer-rotation +
+  // invalidate-prev-bearer + gas-balance-check).
+  assert.equal(r.finalState.jobs.length, 5);
+  // Calls: 1 GET + 5 PUT.
   const puts = r.finalState.calls.filter((c) => c.method === 'PUT');
   const gets = r.finalState.calls.filter((c) => c.method === 'GET');
   assert.equal(gets.length, 1);
-  assert.equal(puts.length, 4);
-  // stdout has 4 jobId lines.
+  assert.equal(puts.length, 5);
+  // stdout has 5 jobId lines.
   const stdoutLines = r.stdout.trim().split('\n').filter(Boolean);
-  assert.equal(stdoutLines.length, 4);
+  assert.equal(stdoutLines.length, 5);
   for (const line of stdoutLines) {
     assert.match(line, /jobId=\d+/);
     assert.match(line, /nextExecution=/);
   }
 });
 
-test('T-SC-02: update existing (idempotent by title) — 1 PATCH + 3 PUT', () => {
+test('T-SC-02: update existing (idempotent by title) — 1 PATCH + 4 PUT', () => {
   // Only warmup is pre-existing → script should PATCH it and PUT the
-  // remaining three (balance-check, bearer-rotation, invalidate-prev-bearer).
+  // remaining four (balance-check, bearer-rotation, invalidate-prev-bearer,
+  // gas-balance-check).
   const existingJobs = [
     { title: 'wasiai-x402-warmup', jobId: 50, nextExecution: 1690000000 },
   ];
   const r = runScript({ existingJobs });
   assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
-  // Final state: 4 jobs, no duplicates.
+  // Final state: 5 jobs, no duplicates.
   const titles = r.finalState.jobs.map((j) => j.title).sort();
   assert.deepEqual(titles, EXPECTED_TITLES);
   const patches = r.finalState.calls.filter((c) => c.method === 'PATCH');
   const puts = r.finalState.calls.filter((c) => c.method === 'PUT');
   assert.equal(patches.length, 1);
-  assert.equal(puts.length, 3);
+  assert.equal(puts.length, 4);
 });
 
-test('T-SC-03: idempotent re-run (run twice, end state still 4 jobs)', () => {
+test('T-SC-03: idempotent re-run (run twice, end state still 5 jobs)', () => {
   // First run.
   const r1 = runScript({ existingJobs: [] });
   assert.equal(r1.status, 0);
   // Second run with the result of the first as starting state.
   const r2 = runScript({ existingJobs: r1.finalState.jobs });
   assert.equal(r2.status, 0);
-  assert.equal(r2.finalState.jobs.length, 4);
+  assert.equal(r2.finalState.jobs.length, 5);
   // No duplicates in titles.
   const titles = r2.finalState.jobs.map((j) => j.title);
   const set = new Set(titles);
   assert.equal(set.size, titles.length);
-  // 4 PATCH on the second run (all 4 already exist).
+  // 5 PATCH on the second run (all 5 already exist).
   const r2patches = r2.finalState.calls.filter((c) => c.method === 'PATCH');
-  assert.equal(r2patches.length, 4);
+  assert.equal(r2patches.length, 5);
 });
 
 test('T-SC-04: token + secret never appear in stdout/stderr', () => {
@@ -351,6 +356,37 @@ test('T-CRJ-INT-04: invalidate-prev-bearer body sends daily 10:00 UTC as integer
   }
 });
 
+test('T-CRJ-INT-06: WKH-71 gas-balance-check — GET, 15-min integer schedule, deploy URL + bearer', () => {
+  const r = runScript({ existingJobs: [] });
+  assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
+
+  const job = extractJobFromCalls(r.finalState.calls, 'wasiai-x402-gas-balance-check');
+  // DT-4: reuse the 15-min cadence (same schema as balance-check).
+  assert.deepEqual(job.schedule.minutes, [0, 15, 30, 45]);
+  assert.deepEqual(job.schedule.hours, [-1]);
+  assert.deepEqual(job.schedule.mdays, [-1]);
+  assert.deepEqual(job.schedule.months, [-1]);
+  assert.deepEqual(job.schedule.wdays, [-1]);
+  // Read-only monitor endpoint is a GET (requestMethod=1).
+  assert.equal(job.requestMethod, 1, 'gas-balance-check must be GET');
+  assert.equal(job.url, `${TEST_DEPLOY}/api/cron/gas-balance-check`);
+  // CD-4: cron-job.org must present CRON_SECRET so src/cron-auth.mjs validates.
+  assert.equal(
+    job.extendedData?.headers?.Authorization,
+    `Bearer ${TEST_SECRET}`,
+    'gas-balance-check missing CRON_SECRET auth header',
+  );
+  // WKH-89: no crontab strings.
+  for (const [field, arr] of Object.entries(job.schedule)) {
+    for (const v of arr) {
+      assert.equal(
+        typeof v, 'number',
+        `gas-balance-check.schedule.${field} contains non-integer ${JSON.stringify(v)}`,
+      );
+    }
+  }
+});
+
 test('T-CRJ-INT-05: regression guard — NO schedule value across any job is a string (AC-7)', () => {
   const r = runScript({ existingJobs: [] });
   assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
@@ -360,6 +396,7 @@ test('T-CRJ-INT-05: regression guard — NO schedule value across any job is a s
     'wasiai-x402-balance-check',
     'wasiai-x402-bearer-rotation',
     'wasiai-x402-invalidate-prev-bearer',
+    'wasiai-x402-gas-balance-check',
   ];
 
   for (const title of titles) {

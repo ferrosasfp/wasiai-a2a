@@ -28,6 +28,7 @@ import {
   SplitConfigError,
 } from '../config/split-config.js';
 import { getLogger } from '../lib/logger.js';
+import { classifyOperatorError } from '../lib/operator-funding.js';
 import { supabase } from '../lib/supabase.js';
 import {
   computeSplits,
@@ -445,8 +446,13 @@ export async function chargeProtocolFee(
         value: feeWei,
       });
     } catch (signErr) {
-      const msg = signErr instanceof Error ? signErr.message : String(signErr);
-      log.error({ orchestrationId, detail: msg }, 'sign() failed');
+      // WKH-71 AC-3: relabel an operator-gas-funding failure (CD-5: message/log
+      // only, still returns failed without rejecting).
+      const { message: msg, reason } = describeChargeError(signErr);
+      log.error(
+        { orchestrationId, detail: msg, ...(reason ? { reason } : {}) },
+        'sign() failed',
+      );
       await markFailed(orchestrationId, msg);
       return {
         status: 'failed',
@@ -465,9 +471,13 @@ export async function chargeProtocolFee(
       });
 
       if (!settleResult.success) {
-        const errMsg = `settle failed: ${settleResult.error ?? 'unknown'}`;
+        // WKH-71 AC-3: relabel operator-gas-funding failures surfaced by the
+        // settle adapter (CD-5: message/log only).
+        const { message: errMsg, reason } = describeChargeError(
+          `settle failed: ${settleResult.error ?? 'unknown'}`,
+        );
         log.error(
-          { orchestrationId, detail: errMsg },
+          { orchestrationId, detail: errMsg, ...(reason ? { reason } : {}) },
           'settle reported failure',
         );
         await markFailed(orchestrationId, errMsg);
@@ -552,9 +562,13 @@ export async function chargeProtocolFee(
         splits: buildSplits('charged', txHash),
       };
     } catch (settleErr) {
-      const msg =
-        settleErr instanceof Error ? settleErr.message : String(settleErr);
-      log.error({ orchestrationId, detail: msg }, 'settle() threw');
+      // WKH-71 AC-3: relabel operator-gas-funding failures (CD-5: message/log
+      // only, still returns failed without rejecting).
+      const { message: msg, reason } = describeChargeError(settleErr);
+      log.error(
+        { orchestrationId, detail: msg, ...(reason ? { reason } : {}) },
+        'settle() threw',
+      );
       await markFailed(orchestrationId, msg);
       return {
         status: 'failed',
@@ -571,6 +585,24 @@ export async function chargeProtocolFee(
     log.error({ orchestrationId, detail: msg }, 'Unexpected error');
     return { status: 'failed', feeUsdc, error: `DB_ERROR: ${msg}` };
   }
+}
+
+/**
+ * WKH-71 (AC-3): relabel a raw sign/settle failure. When the underlying viem/
+ * RPC error is an operator-gas-funding failure ("insufficient funds for gas"),
+ * the returned `message` is prefixed with the stable `operator-funding-low`
+ * reason and `reason` is set, so logs (the ops signal) can identify it instead
+ * of surfacing an anonymous RPC string. CD-5: this ONLY changes the
+ * message/log — the caller's control flow (never rejects the promise, always
+ * returns `{status:'failed'}`) is unchanged. Non-funding errors pass through
+ * untouched (original message preserved).
+ */
+function describeChargeError(raw: unknown): {
+  message: string;
+  reason: string | null;
+} {
+  const c = classifyOperatorError(raw);
+  return { message: c.message, reason: c.reason };
 }
 
 /**
