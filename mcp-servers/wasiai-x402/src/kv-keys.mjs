@@ -40,4 +40,15 @@ export const KV_KEYS = Object.freeze({
    * permanently (CD-WKH88-6).
    */
   ROTATION_MUTEX: 'bearer-rotation-mutex',
+
+  /**
+   * WKH-74 (capa D, DT-3): last-known gateway deploy identifier (Railway
+   * deployment id) the synthetic real-tx probe already validated. Written by
+   * `checkSyntheticTx()` ONLY after a real-tx synthetic passes; read every hour
+   * by `api/cron/synthetic-tx-check.mjs` to gate the spend — a real-tx runs
+   * ONLY when the current deploy id differs from this stored value (AC-5, CD-5).
+   * No TTL: the value must survive indefinitely so a deploy is validated exactly
+   * once. Plain string (the raw deployment id) — NEVER a secret.
+   */
+  SYNTH_LAST_DEPLOY: 'synthetic-last-deploy-id',
 });

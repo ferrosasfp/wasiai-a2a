@@ -23,3 +23,6 @@ coverage/
 .vscode/
 .idea/
 .env*.local
+.vercel
+# Keep .env.example tracked (CD-8) — never let a broad glob swallow it.
+!.env.example

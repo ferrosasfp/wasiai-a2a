@@ -42,6 +42,9 @@ const EXPECTED_TITLES = [
   // WKH-77: ecosystem health monitor job.
   'wasiai-x402-health-check',
   'wasiai-x402-invalidate-prev-bearer',
+  // WKH-74: synthetic payment-path monitor jobs (capa A free + capa D real-tx).
+  'wasiai-x402-synthetic-payment-check',
+  'wasiai-x402-synthetic-tx-check',
   'wasiai-x402-warmup',
 ];
 
@@ -114,59 +117,60 @@ function runScript({ existingJobs = [] } = {}) {
   return { ...r, finalState };
 }
 
-test('T-SC-01: create all 6 jobs (no existing)', () => {
+test('T-SC-01: create all 8 jobs (no existing)', () => {
   const r = runScript({ existingJobs: [] });
   assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
-  // 6 jobs final (W4 + WKH-71 + WKH-77: warmup + balance-check +
-  // bearer-rotation + invalidate-prev-bearer + gas-balance-check + health-check).
-  assert.equal(r.finalState.jobs.length, 6);
-  // Calls: 1 GET + 6 PUT.
+  // 8 jobs final (W4 + WKH-71 + WKH-77 + WKH-74: warmup + balance-check +
+  // bearer-rotation + invalidate-prev-bearer + gas-balance-check + health-check +
+  // synthetic-payment-check + synthetic-tx-check).
+  assert.equal(r.finalState.jobs.length, 8);
+  // Calls: 1 GET + 8 PUT.
   const puts = r.finalState.calls.filter((c) => c.method === 'PUT');
   const gets = r.finalState.calls.filter((c) => c.method === 'GET');
   assert.equal(gets.length, 1);
-  assert.equal(puts.length, 6);
-  // stdout has 6 jobId lines.
+  assert.equal(puts.length, 8);
+  // stdout has 8 jobId lines.
   const stdoutLines = r.stdout.trim().split('\n').filter(Boolean);
-  assert.equal(stdoutLines.length, 6);
+  assert.equal(stdoutLines.length, 8);
   for (const line of stdoutLines) {
     assert.match(line, /jobId=\d+/);
     assert.match(line, /nextExecution=/);
   }
 });
 
-test('T-SC-02: update existing (idempotent by title) — 1 PATCH + 5 PUT', () => {
+test('T-SC-02: update existing (idempotent by title) — 1 PATCH + 7 PUT', () => {
   // Only warmup is pre-existing → script should PATCH it and PUT the
-  // remaining five (balance-check, bearer-rotation, invalidate-prev-bearer,
-  // gas-balance-check, health-check).
+  // remaining seven (balance-check, bearer-rotation, invalidate-prev-bearer,
+  // gas-balance-check, health-check, synthetic-payment-check, synthetic-tx-check).
   const existingJobs = [
     { title: 'wasiai-x402-warmup', jobId: 50, nextExecution: 1690000000 },
   ];
   const r = runScript({ existingJobs });
   assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
-  // Final state: 6 jobs, no duplicates.
+  // Final state: 8 jobs, no duplicates.
   const titles = r.finalState.jobs.map((j) => j.title).sort();
   assert.deepEqual(titles, EXPECTED_TITLES);
   const patches = r.finalState.calls.filter((c) => c.method === 'PATCH');
   const puts = r.finalState.calls.filter((c) => c.method === 'PUT');
   assert.equal(patches.length, 1);
-  assert.equal(puts.length, 5);
+  assert.equal(puts.length, 7);
 });
 
-test('T-SC-03: idempotent re-run (run twice, end state still 6 jobs)', () => {
+test('T-SC-03: idempotent re-run (run twice, end state still 8 jobs)', () => {
   // First run.
   const r1 = runScript({ existingJobs: [] });
   assert.equal(r1.status, 0);
   // Second run with the result of the first as starting state.
   const r2 = runScript({ existingJobs: r1.finalState.jobs });
   assert.equal(r2.status, 0);
-  assert.equal(r2.finalState.jobs.length, 6);
+  assert.equal(r2.finalState.jobs.length, 8);
   // No duplicates in titles.
   const titles = r2.finalState.jobs.map((j) => j.title);
   const set = new Set(titles);
   assert.equal(set.size, titles.length);
-  // 6 PATCH on the second run (all 6 already exist).
+  // 8 PATCH on the second run (all 8 already exist).
   const r2patches = r2.finalState.calls.filter((c) => c.method === 'PATCH');
-  assert.equal(r2patches.length, 6);
+  assert.equal(r2patches.length, 8);
 });
 
 test('T-SC-07: foreign jobs (other projects) are left untouched', () => {
@@ -175,8 +179,8 @@ test('T-SC-07: foreign jobs (other projects) are left untouched', () => {
   const foreign = { title: 'some-other-project-job', jobId: 777, nextExecution: 1690000000 };
   const r = runScript({ existingJobs: [foreign] });
   assert.equal(r.status, 0, `exit ${r.status}, stderr: ${r.stderr}`);
-  // 6 ours + 1 foreign = 7 total, foreign unchanged.
-  assert.equal(r.finalState.jobs.length, 7);
+  // 8 ours + 1 foreign = 9 total, foreign unchanged.
+  assert.equal(r.finalState.jobs.length, 9);
   const stillThere = r.finalState.jobs.find((j) => j.jobId === 777);
   assert.ok(stillThere, 'foreign job must survive');
   assert.equal(stillThere.title, 'some-other-project-job');
