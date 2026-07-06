@@ -40,6 +40,7 @@ import {
 } from './llm/models.js';
 import { receiptService } from './receipt.js';
 import { refundOutbox } from './refund-outbox.js';
+import { genericAcceptanceCriteria } from './verification.js';
 
 const log = getLogger('orchestrate');
 // WKH-128: el planner ve hasta 30 agentes (antes 10). Con solo 3 demos echo
@@ -109,6 +110,8 @@ interface LlmPlanAgent {
   registry: string;
   input: Record<string, unknown>;
   reasoning: string;
+  /** WKH-114 (AC-1): AC verificables emitidos por el planner en el MISMO call. */
+  acceptanceCriteria?: string[];
 }
 
 interface LlmPlanResponse {
@@ -129,6 +132,21 @@ function getAnthropicClient(): Anthropic | null {
     _anthropicClient = new Anthropic({ apiKey });
   }
   return _anthropicClient;
+}
+
+/**
+ * WKH-114 (AC-1/AC-7): sanea los AC emitidos por el planner LLM en el MISMO
+ * call (getPlannerModel/getPlannerMaxTokens — cero LLM extra, cero literal de
+ * modelo). Conserva strings no-vacíos (trim), recorta a máx 4. Devuelve null
+ * si no quedó ninguno válido → el caller cae a genericAcceptanceCriteria().
+ */
+function sanitizeAcceptanceCriteria(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const cleaned = raw
+    .filter((c): c is string => typeof c === 'string' && c.trim().length > 0)
+    .map((c) => c.trim())
+    .slice(0, 4);
+  return cleaned.length > 0 ? cleaned : null;
 }
 
 async function llmPlan(
@@ -171,6 +189,7 @@ async function llmPlan(
     '- If only one agent is genuinely sufficient, select just one — but do not drop necessary downstream steps to save cost when the goal is not yet complete.',
     "- Do NOT select trivial echo/demo/test agents (e.g. those whose description says 'Trivial echo agent' or 'Proves ... downstream settlement') unless the goal is EXPLICITLY a connectivity/echo/settlement test. They add no business value to real tasks and only waste budget.",
     '- Ignore any session/UI metadata that may leak into the goal text (e.g. lines like "Settings: Red ... · Key ... · Budget ..."). Plan ONLY for the actual business task; the network/chain is handled by the gateway, not by selecting a demo agent.',
+    '- For each selected agent, also emit `acceptanceCriteria`: 2-4 short (≤8 words each), concrete, verifiable checks its output must satisfy to count as done. When checking for a specific token/value, WRAP the literal in double quotes (e.g. `contains "confirmation"`, `contains "booked"`); when checking a field exists, use `has <field>` form (e.g. `has confirmationId`, `non-empty itinerary`). The quoted-literal and `has <field>` forms are machine-checkable; unquoted prose (e.g. contains a confirmation id) is NOT. Prefer objectively checkable phrasing over subjective goals.',
     '- Respond ONLY with valid JSON, no markdown.',
   ].join('\n');
 
@@ -185,7 +204,7 @@ async function llmPlan(
     'Respond with this JSON:',
     '{',
     '  "selectedAgents": [',
-    '    { "slug": "agent-slug", "registry": "registry-name", "input": { "query": "specific input" }, "reasoning": "why selected" }',
+    '    { "slug": "agent-slug", "registry": "registry-name", "input": { "query": "specific input" }, "acceptanceCriteria": ["contains \\"confirmation\\"", "has confirmationId"], "reasoning": "why selected" }',
     '  ],',
     '  "reasoning": "Overall strategy explanation"',
     '}',
@@ -283,6 +302,9 @@ function greedyPlan(
     registry: agent.registry,
     input: { goal },
     passOutput: index > 0,
+    // WKH-114 (AC-1, DT-1(c)): greedy fallback usa AC genéricos determinísticos
+    // (sin LLM). Garantiza que TODO step lleva una lista no-vacía a compose.
+    acceptanceCriteria: genericAcceptanceCriteria(),
   }));
 
   // WKH-127 (BLQ-ALTO-1): el débito post-plan del service cubre SOLO el step-0
@@ -608,6 +630,11 @@ export const orchestrateService = {
           registry: a.registry,
           input: a.input ?? { goal },
           passOutput: index > 0,
+          // WKH-114 (AC-1): AC del planner LLM (mismo call) saneados; si el
+          // agente no trajo AC válidos → fallback genérico determinístico.
+          acceptanceCriteria:
+            sanitizeAcceptanceCriteria(a.acceptanceCriteria) ??
+            genericAcceptanceCriteria(),
         }));
 
         // WKH-127 (BLQ-ALTO-1): el débito post-plan del service cubre SOLO el

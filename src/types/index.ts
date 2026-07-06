@@ -287,6 +287,26 @@ export interface DiscoveryResult {
 // COMPOSE TYPES
 // ============================================================
 
+/** WKH-114: veredicto de verificación de completitud por step. */
+export type StepVerdict = 'pass' | 'fail' | 'unverified';
+/** WKH-114 (DT-5, análogo a ArbiterMethod): origen del veredicto. */
+export type VerificationMethod = 'rules' | 'llm' | 'none';
+/** WKH-114: completitud a nivel pipeline, DISTINTA de `success`. */
+export type PipelineVerificationStatus =
+  | 'verified'
+  | 'incomplete'
+  | 'unverified';
+
+/** WKH-114: resultado de evaluar el output de un step contra sus AC. */
+export interface StepAcceptance {
+  /** Los AC efectivamente evaluados (post-substitución de default si el step no traía). */
+  criteria: string[];
+  verdict: StepVerdict;
+  method: VerificationMethod;
+  /** Presente SOLO cuando verdict === 'fail'. Subconjunto de `criteria`. */
+  failedCriteria?: string[];
+}
+
 export interface ComposeStep {
   /** Agent ID or slug */
   agent: string;
@@ -296,6 +316,8 @@ export interface ComposeStep {
   input: Record<string, unknown>;
   /** Use output from previous step */
   passOutput?: boolean;
+  /** WKH-114: AC adjuntos en plan-time o por el caller. */
+  acceptanceCriteria?: string[];
 }
 
 export interface ComposeRequest {
@@ -362,6 +384,8 @@ export interface ComposeResult {
     agent_slug: string;
     category?: string;
   };
+  /** WKH-114: completitud a nivel pipeline (AC-5), DISTINTA de success. */
+  verificationStatus?: PipelineVerificationStatus;
 }
 
 export interface StepResult {
@@ -384,6 +408,8 @@ export interface StepResult {
   downstreamSettledAmount?: string;
   /** WKH-57: telemetry del bridge LLM. Presente solo si bridgeType==='LLM'. */
   transformLLM?: LLMBridgeStats;
+  /** WKH-114: veredicto evaluado (AC-4). */
+  acceptance?: StepAcceptance;
 }
 
 // ============================================================

@@ -43,6 +43,10 @@ import { maybeTransform } from './llm/transform.js';
 import { refundOutbox } from './refund-outbox.js';
 import { registryService, SYSTEM_OWNER_REF } from './registry.js';
 import { normalizeDestination } from './spend-policy.js';
+import {
+  summarizePipelineVerification,
+  verifyStepOutput,
+} from './verification.js';
 
 const log = getLogger('compose');
 
@@ -542,6 +546,8 @@ export const composeService = {
       steps: results,
       totalCostUsdc: totalCost,
       totalLatencyMs: totalLatency,
+      // WKH-114 (AC-5): completitud a nivel pipeline, ADITIVA y distinta de success.
+      verificationStatus: summarizePipelineVerification(results),
     };
   },
   /**
@@ -604,6 +610,9 @@ export const composeService = {
         downstreamSettledAmount: downstream.settledAmount,
       }),
     };
+    // WKH-114 (AC-2/AC-3/AC-4): veredicto de completitud por step. Puro,
+    // sync, never-throw (CD-8); NO re-invoca (CD-5) ni toca billing (CD-1/CD-4).
+    result.acceptance = verifyStepOutput(output, steps[i]?.acceptanceCriteria);
     results.push(result);
     totalCost += agent.priceUsdc;
     totalLatency += latencyMs;
