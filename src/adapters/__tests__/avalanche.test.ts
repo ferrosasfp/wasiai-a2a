@@ -542,6 +542,20 @@ describe('Avalanche gasless adapter — EIP-3009 operator-relayed (WKH-138)', ()
     expect(mockWaitForReceipt).not.toHaveBeenCalled();
   });
 
+  // NIT-2 (AC-3 wiring): the operator wallet pays its OWN gas via writeContract,
+  // so a dry wallet surfaces here as viem "insufficient funds for gas". The
+  // catch relabels it `operator funding low` instead of an anonymous RPC string.
+  it('NIT-2: writeContract insufficient-funds → error relabeled "operator funding low"', async () => {
+    mockWriteContract.mockRejectedValue(
+      new Error('insufficient funds for gas * price + value'),
+    );
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toThrow(/operator funding low/);
+    expect(mockWaitForReceipt).not.toHaveBeenCalled();
+  });
+
   it('T-SIGN-INVALID: receipt status reverted → GaslessTransferError', async () => {
     mockWriteContract.mockResolvedValue(TX_HASH);
     mockWaitForReceipt.mockResolvedValue({ status: 'reverted' });

@@ -1,12 +1,14 @@
 #!/usr/bin/env node
-// scripts/setup-cronjob.mjs — provision the 4 cron jobs on cron-job.org
-// (WKH-66 W4.5 + WKH-75 W4).
+// scripts/setup-cronjob.mjs — provision the 5 cron jobs on cron-job.org
+// (WKH-66 W4.5 + WKH-75 W4 + WKH-71).
 //
 // Jobs registered (idempotent by title — CD-20):
 //   1. wasiai-x402-warmup                 — every 4 min  (warmup)
-//   2. wasiai-x402-balance-check          — every 15 min (balance gate)
+//   2. wasiai-x402-balance-check          — every 15 min (USDC balance gate)
 //   3. wasiai-x402-bearer-rotation        — 1st of month at 09:00 UTC (WKH-75)
 //   4. wasiai-x402-invalidate-prev-bearer — daily at 10:00 UTC        (WKH-75)
+//   5. wasiai-x402-gas-balance-check      — every 15 min (WKH-71 native-gas
+//                                           monitor; DT-4 reuses 15-min cadence)
 //
 // WKH-89: cron-job.org REST API requires INTEGER ARRAYS in `schedule.*`
 // (where -1 means "every"). Crontab strings like '*/4' or '*' are silently
@@ -105,6 +107,22 @@ const TARGET_JOBS = [
       wdays: [-1],
     },
     requestMethod: 2, // POST
+    extendedData: { headers: { Authorization: `Bearer ${CRON_SECRET}` } },
+  },
+  // WKH-71 — native-gas monitor for operator/relayer wallets. DT-4: reuse the
+  // 15-min cadence (same schema as balance-check). WKH-89: integer minute array
+  // [0,15,30,45], -1 elsewhere — NOT a crontab string.
+  {
+    title: 'wasiai-x402-gas-balance-check',
+    url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/gas-balance-check`,
+    schedule: {
+      minutes: [0, 15, 30, 45],
+      hours: [-1],
+      mdays: [-1],
+      months: [-1],
+      wdays: [-1],
+    },
+    requestMethod: 1, // GET
     extendedData: { headers: { Authorization: `Bearer ${CRON_SECRET}` } },
   },
 ];

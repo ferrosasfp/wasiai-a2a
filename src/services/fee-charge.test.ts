@@ -426,6 +426,70 @@ describe('chargeProtocolFee', () => {
     expect(logSpy.error).toHaveBeenCalled();
   });
 
+  // NIT-2 (AC-3 wiring): sign() throwing a viem "insufficient funds for gas"
+  // is relabeled `operator-funding-low` (message + structured log reason) yet
+  // the control flow is unchanged — still {status:'failed'}, never rejects
+  // (CD-5).
+  it('NIT-2: sign() insufficient-funds → relabeled operator-funding-low, still failed', async () => {
+    process.env.WASIAI_PROTOCOL_FEE_WALLET =
+      '0x1111111111111111111111111111111111111111';
+    stubSelect({ data: null });
+    stubInsert({});
+    stubUpdate({});
+    mockSign.mockRejectedValueOnce(
+      new Error('insufficient funds for gas * price + value'),
+    );
+
+    const result = await chargeProtocolFee({
+      orchestrationId: 'id-nit2-sign',
+      feeBaseUsdc: 1.0,
+      feeRate: 0.01,
+    });
+
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('operator funding low');
+    }
+    // CD-5: reason surfaced in the log, but no new control-flow branch.
+    expect(
+      logSpy.error.mock.calls.some(
+        (c) => (c[0] as { reason?: string })?.reason === 'operator-funding-low',
+      ),
+    ).toBe(true);
+  });
+
+  // NIT-2 (AC-3 wiring): settle() throwing insufficient-funds → same relabel,
+  // still failed, never rejects.
+  it('NIT-2: settle() insufficient-funds → relabeled operator-funding-low, still failed', async () => {
+    process.env.WASIAI_PROTOCOL_FEE_WALLET =
+      '0x1111111111111111111111111111111111111111';
+    stubSelect({ data: null });
+    stubInsert({});
+    stubUpdate({});
+    mockSign.mockResolvedValueOnce({
+      xPaymentHeader: 'base64-header',
+      paymentRequest: {
+        authorization: { value: '10000000000000000' },
+        signature: '0xsig',
+        network: 'kite',
+      },
+    });
+    mockSettle.mockRejectedValueOnce(
+      new Error('insufficient funds for gas * price + value'),
+    );
+
+    const result = await chargeProtocolFee({
+      orchestrationId: 'id-nit2-settle',
+      feeBaseUsdc: 1.0,
+      feeRate: 0.01,
+    });
+
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('operator funding low');
+    }
+  });
+
   // FT-15 (CD-B): never rejects even on DB error
   it('FT-15: never rejects even if DB throws on select', async () => {
     process.env.WASIAI_PROTOCOL_FEE_WALLET =

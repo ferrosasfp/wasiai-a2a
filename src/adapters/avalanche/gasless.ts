@@ -8,6 +8,7 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { getLogger } from '../../lib/logger.js';
+import { classifyOperatorError } from '../../lib/operator-funding.js';
 import {
   estimateGaslessValueUsd,
   getGaslessDefaultCapUsd,
@@ -436,9 +437,14 @@ export class AvalancheGaslessAdapter implements GaslessAdapter {
         account: walletClient.account ?? null,
       });
     } catch (err) {
+      // WKH-71 AC-3: the operator wallet pays its OWN gas via writeContract, so
+      // a dry wallet surfaces here as viem "insufficient funds for gas".
+      // Relabel it with the stable `operator-funding-low` reason instead of an
+      // anonymous RPC string (message still sanitized/truncated).
+      const { message } = classifyOperatorError(err);
       throw new GaslessTransferError(
         this.networkTag,
-        `submit failed: ${sanitizeError(err)}`,
+        `submit failed: ${message.substring(0, 160)}`,
       );
     }
 

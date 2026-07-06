@@ -40,6 +40,14 @@ const ALLOWED_BODY_KEYS = new Set([
   'event',
   'reason',
   'rotatedAt',
+  // WKH-71 (CD-2): native-gas monitor identifiers — all non-secret. `label` is
+  // an operator-chosen wallet nickname, `chainId`/`symbol` are public chain
+  // metadata, `balanceNative` is a public on-chain balance (decimal string).
+  // PROHIBITED, same as above, to add any key that could carry a secret.
+  'label',
+  'chainId',
+  'balanceNative',
+  'symbol',
 ]);
 
 // WKH-90 DT-2: exact host match — no startsWith, no regex, no subdomain
