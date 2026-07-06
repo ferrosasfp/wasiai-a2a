@@ -1,16 +1,20 @@
 #!/usr/bin/env node
-// scripts/setup-cronjob.mjs — provision the 6 cron jobs on cron-job.org
-// (WKH-66 W4.5 + WKH-75 W4 + WKH-71 + WKH-77).
+// scripts/setup-cronjob.mjs — provision the 8 cron jobs on cron-job.org
+// (WKH-66 W4.5 + WKH-75 W4 + WKH-71 + WKH-77 + WKH-74).
 //
 // Jobs registered (idempotent by title — CD-20):
-//   1. wasiai-x402-warmup                 — every 4 min  (warmup)
-//   2. wasiai-x402-balance-check          — every 15 min (USDC balance gate)
-//   3. wasiai-x402-bearer-rotation        — 1st of month at 09:00 UTC (WKH-75)
-//   4. wasiai-x402-invalidate-prev-bearer — daily at 10:00 UTC        (WKH-75)
-//   5. wasiai-x402-gas-balance-check      — every 15 min (WKH-71 native-gas
-//                                           monitor; DT-4 reuses 15-min cadence)
-//   6. wasiai-x402-health-check           — every 4 min  (WKH-77 ecosystem
-//                                           health/uptime monitor; DT-2 cadence)
+//   1. wasiai-x402-warmup                    — every 4 min  (warmup)
+//   2. wasiai-x402-balance-check             — every 15 min (USDC balance gate)
+//   3. wasiai-x402-bearer-rotation           — 1st of month at 09:00 UTC (WKH-75)
+//   4. wasiai-x402-invalidate-prev-bearer    — daily at 10:00 UTC        (WKH-75)
+//   5. wasiai-x402-gas-balance-check         — every 15 min (WKH-71 native-gas
+//                                              monitor; DT-4 reuses 15-min cadence)
+//   6. wasiai-x402-health-check              — every 4 min  (WKH-77 ecosystem
+//                                              health/uptime monitor; DT-2 cadence)
+//   7. wasiai-x402-synthetic-payment-check   — every 15 min (WKH-74 capa A free
+//                                              payment-path probe; DT-5 cadence)
+//   8. wasiai-x402-synthetic-tx-check        — hourly       (WKH-74 capa D real-tx
+//                                              probe, gated by deploy id; DT-5)
 //
 // NOTE: this account also hosts UNRELATED cron jobs for other projects. The
 // provisioning below matches ONLY by the titles in TARGET_JOBS (lookup-by-title)
@@ -141,6 +145,39 @@ const TARGET_JOBS = [
     url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/health-check`,
     schedule: {
       minutes: [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56],
+      hours: [-1],
+      mdays: [-1],
+      months: [-1],
+      wdays: [-1],
+    },
+    requestMethod: 1, // GET
+    extendedData: { headers: { Authorization: `Bearer ${CRON_SECRET}` } },
+  },
+  // WKH-74 capa A — free synthetic payment-path probe ($0). DT-5: 15-min cadence
+  // (same schema as balance-check / gas-balance-check). WKH-89: explicit integer
+  // minute array [0,15,30,45], -1 elsewhere — NOT a crontab string.
+  {
+    title: 'wasiai-x402-synthetic-payment-check',
+    url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/synthetic-payment-check`,
+    schedule: {
+      minutes: [0, 15, 30, 45],
+      hours: [-1],
+      mdays: [-1],
+      months: [-1],
+      wdays: [-1],
+    },
+    requestMethod: 1, // GET
+    extendedData: { headers: { Authorization: `Bearer ${CRON_SECRET}` } },
+  },
+  // WKH-74 capa D — real-tx synthetic probe, gated by the gateway deploy id so it
+  // spends ≈1 tx per deploy (CD-5), not per tick. DT-5: hourly cadence — minute
+  // [0] at every hour. WKH-89: integer arrays only (a '0 * * * *' string is
+  // silently rejected → "Jan 1 yearly").
+  {
+    title: 'wasiai-x402-synthetic-tx-check',
+    url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/synthetic-tx-check`,
+    schedule: {
+      minutes: [0],
       hours: [-1],
       mdays: [-1],
       months: [-1],
