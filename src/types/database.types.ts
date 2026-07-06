@@ -510,6 +510,51 @@ export type Database = {
           },
         ];
       };
+      a2a_inbound_tasks: {
+        Row: {
+          budget_usdc: number | null;
+          constraints: Json;
+          created_at: string;
+          error_reason: string | null;
+          external_ref: string | null;
+          goal: string;
+          id: string;
+          orchestration_id: string | null;
+          owner_ref: string;
+          source: string;
+          status: string;
+          updated_at: string;
+        };
+        Insert: {
+          budget_usdc?: number | null;
+          constraints?: Json;
+          created_at?: string;
+          error_reason?: string | null;
+          external_ref?: string | null;
+          goal: string;
+          id?: string;
+          orchestration_id?: string | null;
+          owner_ref: string;
+          source: string;
+          status?: string;
+          updated_at?: string;
+        };
+        Update: {
+          budget_usdc?: number | null;
+          constraints?: Json;
+          created_at?: string;
+          error_reason?: string | null;
+          external_ref?: string | null;
+          goal?: string;
+          id?: string;
+          orchestration_id?: string | null;
+          owner_ref?: string;
+          source?: string;
+          status?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       a2a_key_sessions: {
         Row: {
           allowed_agent_slugs: Json | null;
