@@ -3,6 +3,9 @@
   "functions": {
     "api/mcp.mjs": {
       "maxDuration": 60
+    },
+    "api/cron/health-check.mjs": {
+      "maxDuration": 30
     }
   },
   "regions": ["iad1"]
