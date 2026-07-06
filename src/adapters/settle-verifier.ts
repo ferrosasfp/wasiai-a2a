@@ -34,7 +34,8 @@ import type { ChainKey } from './types.js';
 
 export type SettleVerificationReason =
   | 'DISABLED' // kill-switch off — treated as ok (never blocks)
-  | 'RPC_UNAVAILABLE' // a2a couldn't independently check — fail-OPEN (allowed)
+  | 'RPC_UNAVAILABLE' // a2a couldn't independently check on TESTNET — fail-OPEN (allowed)
+  | 'RPC_UNAVAILABLE_MAINNET_FAILCLOSED' // WKH-144: couldn't check on MAINNET — fail-CLOSED (blocked)
   | 'TX_NOT_FOUND' // node DEFINITIVELY reports no such tx — fail-CLOSED
   | 'TX_REVERTED'
   | 'CHAIN_MISMATCH'
@@ -51,18 +52,27 @@ export interface SettleVerification {
    *  - DISABLED (kill-switch off) → ok:true.
    *  - VERIFIED (tx really settled >= required to payTo) → ok:true.
    *  - RPC_UNAVAILABLE ("I couldn't check": RPC unreachable / timeout / network
-   *    error / provider 5xx) → ok:true + `warn:true`. The facilitator already
-   *    broadcast + receipt-checked the tx; a2a degrades to the prior trusted
-   *    behaviour only when it literally cannot reach a node.
+   *    error / provider 5xx) on TESTNET → ok:true + `warn:true`. The facilitator
+   *    already broadcast + receipt-checked the tx; a2a degrades to the prior
+   *    trusted behaviour only when it literally cannot reach a node.
+   *  - WKH-144: the SAME "I couldn't check" on MAINNET
+   *    (RPC_UNAVAILABLE_MAINNET_FAILCLOSED) → ok:false + `warn:true`. With real
+   *    money on the line, a2a will NOT trust the facilitator blind; the
+   *    `warn:true` marks it as an RPC outage (recoverable) so an operator can
+   *    tell it apart from a DEFINITIVE contradiction (possible forgery).
    *  - Any DEFINITIVE on-chain contradiction (reverted, recipient/token/amount
-   *    mismatch, or the node DEFINITIVELY reports no such tx) → ok:false. This
-   *    is the forgery signal TB-01 exists to catch.
+   *    mismatch, or the node DEFINITIVELY reports no such tx) → ok:false with no
+   *    `warn`. This is the forgery signal TB-01 exists to catch.
    */
   ok: boolean;
   reason?: SettleVerificationReason;
   /**
-   * True only for the fail-OPEN allow (RPC_UNAVAILABLE): the settle was allowed
-   * WITHOUT an independent on-chain confirmation. Callers SHOULD log a WARNING.
+   * True for either "couldn't independently check on-chain" outcome:
+   *  - testnet RPC_UNAVAILABLE (ok:true, fail-OPEN), or
+   *  - mainnet RPC_UNAVAILABLE_MAINNET_FAILCLOSED (ok:false, fail-CLOSED, WKH-144).
+   * In BOTH cases the settle was decided WITHOUT an independent on-chain
+   * confirmation — callers SHOULD log a WARNING. `warn:true` with `ok:false`
+   * distinguishes an RPC outage from a definitive on-chain contradiction.
    */
   warn?: boolean;
 }
@@ -178,6 +188,36 @@ function classifyReceiptError(
 }
 
 /**
+ * WKH-144: canonical mainnet detection for the settle re-verify gate. The
+ * `ChainKey` string IS the source of truth (DT-1): the three (and only three)
+ * mainnet slugs — `kite-mainnet` / `avalanche-mainnet` / `base-mainnet` — all
+ * end in `-mainnet`; every testnet slug (`kite-ozone-testnet`, `avalanche-fuji`,
+ * `base-sepolia`, `tempo-testnet`) does NOT. Single choke-point (CD-7).
+ */
+function isMainnetChainKey(chainKey: ChainKey): boolean {
+  return chainKey.endsWith('-mainnet');
+}
+
+/**
+ * WKH-144: single decision point for a "couldn't independently check on-chain"
+ * (RPC_UNAVAILABLE) outcome. On TESTNET this preserves the historical fail-OPEN
+ * byte-for-byte (`{ ok:true, reason:'RPC_UNAVAILABLE', warn:true }`, CD-1). On
+ * MAINNET it flips to fail-CLOSED (`ok:false`) with a distinguishable reason so
+ * an operator can tell an RPC outage apart from a definitive contradiction
+ * (AC-5). Never throws (CD-4).
+ */
+export function rpcUnavailableResult(chainKey: ChainKey): SettleVerification {
+  if (isMainnetChainKey(chainKey)) {
+    return {
+      ok: false,
+      reason: 'RPC_UNAVAILABLE_MAINNET_FAILCLOSED',
+      warn: true,
+    };
+  }
+  return { ok: true, reason: 'RPC_UNAVAILABLE', warn: true };
+}
+
+/**
  * Re-reads `txHash` on-chain and asserts it really settled `>= requiredAmount`
  * of `tokenAddress` to `payTo` on `chainId`. Returns `{ ok: false, reason }` on
  * a DEFINITIVE on-chain contradiction (reverted / wrong recipient / wrong token
@@ -216,8 +256,9 @@ export async function verifySettledTx(
 
   const client = getClient(chainKey);
   // No RPC configured for this chain → a2a cannot independently check.
-  // MNR-1: this is "couldn't check", NOT a forgery → fail-OPEN (allow + warn).
-  if (!client) return { ok: true, reason: 'RPC_UNAVAILABLE', warn: true };
+  // MNR-1: this is "couldn't check", NOT a forgery. WKH-144: fail-OPEN on
+  // testnet, fail-CLOSED on mainnet (decided in one place by rpcUnavailableResult).
+  if (!client) return rpcUnavailableResult(chainKey);
 
   // Short confirmation wait — a just-settled tx may need a block to be visible.
   const waitMs = resolveConfirmWaitMs();
@@ -241,7 +282,8 @@ export async function verifySettledTx(
       if (reason === 'TX_NOT_FOUND') {
         return { ok: false, reason: 'TX_NOT_FOUND' };
       }
-      return { ok: true, reason: 'RPC_UNAVAILABLE', warn: true };
+      // WKH-144: fail-OPEN on testnet, fail-CLOSED on mainnet (single choke-point).
+      return rpcUnavailableResult(chainKey);
     }
   }
 
@@ -253,8 +295,9 @@ export async function verifySettledTx(
   try {
     onchainChainId = await client.getChainId();
   } catch {
-    // Transport failure reading chain id → couldn't check → fail-OPEN.
-    return { ok: true, reason: 'RPC_UNAVAILABLE', warn: true };
+    // Transport failure reading chain id → couldn't check. WKH-144: fail-OPEN
+    // on testnet, fail-CLOSED on mainnet (single choke-point).
+    return rpcUnavailableResult(chainKey);
   }
   if (onchainChainId !== chainId) {
     return { ok: false, reason: 'CHAIN_MISMATCH' };
@@ -304,10 +347,12 @@ export async function verifySettledTx(
  * settle, protocol-fee transfer) that call `getPaymentAdapter()` (no explicit
  * chainKey). Resolves the default bundle's chainKey / chainId / token and
  * delegates to `verifySettledTx`. Returns `{ ok: true, reason: 'DISABLED' }`
- * when the kill-switch is off, and `{ ok: true }` (non-blocking) when the
- * default bundle cannot be resolved (registry not initialized in a test) — the
- * verification is defense-in-depth, never the sole guard, so a missing bundle
- * must not break the settle path.
+ * when the kill-switch is off. When the default bundle cannot be resolved
+ * (registry not initialized in a test) a2a cannot independently check —
+ * WKH-144 (MNR-1): this is gated exactly like every other "couldn't check"
+ * outcome via `rpcUnavailableResult` (fail-OPEN on testnet byte-identical,
+ * fail-CLOSED on mainnet). Reachable only with a mis-initialized registry, but
+ * closed for consistency so no verifier fallback fails-open with real money.
  */
 export async function verifyDefaultChainSettle(args: {
   txHash: string;
@@ -320,8 +365,10 @@ export async function verifyDefaultChainSettle(args: {
   const bundle = chainKey ? getAdaptersBundle(chainKey) : undefined;
   const token = bundle?.payment.supportedTokens[0];
   if (!chainKey || !bundle || !token) {
-    // Registry not initialized (e.g. unit test) — cannot verify; do not block.
-    return { ok: true };
+    // Registry not initialized (e.g. unit test) — cannot independently check.
+    // WKH-144: testnet fail-OPEN, mainnet fail-CLOSED (single choke-point). When
+    // the chainKey itself is unresolvable, default to the historical fail-OPEN.
+    return chainKey ? rpcUnavailableResult(chainKey) : { ok: true };
   }
   if (!args.txHash.startsWith('0x')) {
     return { ok: false, reason: 'TX_NOT_FOUND' };

@@ -15,7 +15,10 @@ import {
   getInitializedChainKeys,
   getPaymentAdapter,
 } from '../adapters/registry.js';
-import { verifySettledTx } from '../adapters/settle-verifier.js';
+import {
+  rpcUnavailableResult,
+  verifySettledTx,
+} from '../adapters/settle-verifier.js';
 import type { ChainKey } from '../adapters/types.js';
 import { checkAndRecordX402Nonce } from '../services/x402-nonce.js';
 import type {
@@ -444,8 +447,13 @@ export function requirePayment(
         });
       } catch (err) {
         // Verifier never throws by contract; this is pure defense in depth.
-        // MNR-1: a thrown error means "couldn't check" → fail-OPEN (allow+warn).
-        reVerified = { ok: true, reason: 'RPC_UNAVAILABLE', warn: true };
+        // MNR-1 / WKH-144: a thrown error means "couldn't check". Gate it exactly
+        // like the verifier's own RPC_UNAVAILABLE outcomes — testnet fail-OPEN
+        // (allow+warn, byte-identical), MAINNET fail-CLOSED (block+warn) so a
+        // throw in the try (e.g. malformed BigInt) never blindly grants access
+        // with real money on the line. `chainKey` is the same resolved key used
+        // by verifySettledTx above (in scope for the whole handler).
+        reVerified = rpcUnavailableResult(chainKey);
         request.log.error(
           { detail: err instanceof Error ? err.message : String(err) },
           'x402 settle re-verification threw',
