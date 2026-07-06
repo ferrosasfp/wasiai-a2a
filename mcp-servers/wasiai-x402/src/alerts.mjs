@@ -48,6 +48,14 @@ const ALLOWED_BODY_KEYS = new Set([
   'chainId',
   'balanceNative',
   'symbol',
+  // WKH-77 (CD-4 / DT-5): health-monitor identifiers — all strictly non-secret.
+  // `service` is the monitored service label, `url`/`logsUrl` are PUBLIC URLs
+  // (health endpoint / logs dashboard), `httpStatus` is a public HTTP status
+  // code. PROHIBITED, same as above, to add any key that could carry a secret.
+  'service',
+  'url',
+  'logsUrl',
+  'httpStatus',
 ]);
 
 // WKH-90 DT-2: exact host match — no startsWith, no regex, no subdomain
@@ -68,6 +76,13 @@ const DISCORD_COLOR_DEFAULT = 3066993;
 
 // WKH-90 CD-WKH90-3: hardcoded, NOT env-configurable in this HU.
 const DISCORD_USERNAME = 'wasiai-alerts';
+
+// WKH-77: generic push text appended to the ONCALL mention on critical (P0)
+// alerts. Deliberately generic (no service/reason interpolation) — the details
+// live in the embed; this line only exists so the root-level `content` field
+// fires a Discord push notification. NEVER put a secret here.
+const CRITICAL_PUSH_TEXT =
+  'P0 alert — a monitored service needs immediate attention (see embed).';
 
 // WKH-91 AC-1/2 + CD-WKH91-1: Discord embed length limits.
 //   title       → 256 chars max
@@ -91,6 +106,33 @@ const DISCORD_RESERVED_KEYS = new Set([
   'rotatedAt',
   'checkedAt',
 ]);
+
+/**
+ * @internal
+ * Resolve a safe Discord push mention. Returns the trimmed mention when it is a
+ * usable token, or '' when it must be ignored.
+ *
+ * MNR-4: a misconfigured `ONCALL_MENTION` of `@everyone` / `@here` (or any value
+ * containing them) would fan a P0 push out to the entire server on every
+ * critical alert. Treat such values as "no mention" (graceful, embed-only) so a
+ * config typo can never trigger a mass ping. A valid `<@USER_ID>` /
+ * `<@&ROLE_ID>` passes through untouched.
+ */
+function _resolveSafeMention(mention) {
+  if (typeof mention !== 'string') return '';
+  const trimmed = mention.trim();
+  if (trimmed.length === 0) return '';
+  const lowered = trimmed.toLowerCase();
+  if (lowered.includes('@everyone') || lowered.includes('@here')) {
+    log.warnOnce(
+      'alert-dangerous-mention',
+      'mcp.alert.dangerous-mention-ignored',
+      { stage: 'alert' },
+    );
+    return '';
+  }
+  return trimmed;
+}
 
 /**
  * @internal
@@ -151,10 +193,16 @@ export function sanitizeAlertBody(body) {
  *
  * NEVER throws. Inputs are already sanitized by sanitizeAlertBody().
  *
- * @param {{severity?: string, body: Record<string, unknown>}} args
- * @returns {{username: string, embeds: Array<object>}}
+ * WKH-77: when `severity === 'critical'` AND a non-empty `mention` is supplied
+ * (`<@USER_ID>` / `<@&ROLE_ID>`), a root-level `content` field is added so the
+ * webhook actually fires a Discord PUSH notification (embeds alone do NOT
+ * notify). Warning/info never get `content`. When `mention` is absent the
+ * payload is byte-for-byte the pre-WKH-77 shape (graceful, no push).
+ *
+ * @param {{severity?: string, body: Record<string, unknown>, mention?: string}} args
+ * @returns {{username: string, embeds: Array<object>, content?: string}}
  */
-export function formatForDiscord({ severity, body }) {
+export function formatForDiscord({ severity, body, mention }) {
   const safeBody = body && typeof body === 'object' ? body : {};
   const sev = typeof severity === 'string' ? severity : '';
   const color = Object.prototype.hasOwnProperty.call(
@@ -193,10 +241,22 @@ export function formatForDiscord({ severity, body }) {
   }
   embed.fields = fields;
 
-  return {
+  const out = {
     username: DISCORD_USERNAME,
     embeds: [embed],
   };
+
+  // WKH-77: root-level `content` is the ONLY thing that triggers a Discord push
+  // notification. Add it ONLY for critical + a configured mention. The mention
+  // is a structural Discord token (NOT a whitelisted body key) so no secret can
+  // flow here — only the mention + a generic text constant.
+  // MNR-4: `@everyone` / `@here` are rejected upstream (mass-ping guard).
+  const safeMention = _resolveSafeMention(mention);
+  if (sev === 'critical' && safeMention.length > 0) {
+    out.content = `${safeMention} ${CRITICAL_PUSH_TEXT}`;
+  }
+
+  return out;
 }
 
 /**
@@ -204,7 +264,7 @@ export function formatForDiscord({ severity, body }) {
  *
  * @returns {{sent: boolean, reason?: string, status?: number}}
  */
-export async function sendAlert({ severity, body, webhookUrl, timeoutMs = 5000 }) {
+export async function sendAlert({ severity, body, webhookUrl, timeoutMs = 5000, mention }) {
   if (!webhookUrl) {
     log.warnOnce(
       'alert-webhook-not-configured',
@@ -237,7 +297,7 @@ export async function sendAlert({ severity, body, webhookUrl, timeoutMs = 5000 }
   }
 
   const payload = isDiscord
-    ? formatForDiscord({ severity, body: sanitized })
+    ? formatForDiscord({ severity, body: sanitized, mention })
     : { ...(severity !== undefined ? { severity } : {}), ...sanitized };
 
   let resp;

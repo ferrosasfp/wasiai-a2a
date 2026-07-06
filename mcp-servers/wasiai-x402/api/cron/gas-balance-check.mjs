@@ -86,6 +86,9 @@ export default async function gasBalanceCheckHandler(req, res) {
       readBalance: readNativeBalance,
       sendAlert,
       webhookUrl: process.env.MCP_ALERT_WEBHOOK_URL,
+      // NIT-1: propagate ONCALL_MENTION so critical gas alerts push to on-call
+      // (sendAlert gates the push to critical-only). Undefined → embed-only.
+      mention: process.env.ONCALL_MENTION,
     });
   } catch (e) {
     // Defensive — the core is designed never to throw, but the cron must stay

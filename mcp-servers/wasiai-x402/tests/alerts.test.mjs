@@ -428,6 +428,145 @@ test('T-AL-DISC-08: HTTP 429 (rate-limited) → {sent:false, status:429, reason}
   assert.deepEqual(Object.keys(r).sort(), ['reason', 'sent', 'status']);
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WKH-77 — P0 push mention: root-level `content` fires a Discord push
+// notification, but ONLY for critical + a configured ONCALL mention.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('T-AL-PUSH-01: critical + mention → root-level content present (Discord push)', async () => {
+  let captured;
+  globalThis.fetch = async (url, init = {}) => {
+    captured = JSON.parse(init.body);
+    return new Response('{}', { status: 200 });
+  };
+  await sendAlert({
+    severity: 'critical',
+    body: { service: 'gateway-a2a', reason: 'health-http-error', httpStatus: 503 },
+    webhookUrl: 'https://discord.com/api/webhooks/1/abc',
+    mention: '<@123456789012345678>',
+  });
+  assert.ok(captured);
+  assert.equal(typeof captured.content, 'string');
+  assert.ok(captured.content.startsWith('<@123456789012345678> '));
+  // Embed still present alongside the content.
+  assert.equal(captured.username, 'wasiai-alerts');
+  assert.ok(Array.isArray(captured.embeds));
+  // No secret ever leaks into content (generic text only).
+  assert.ok(!/[0-9a-fA-F]{64}/.test(captured.content));
+});
+
+test('T-AL-PUSH-02: critical WITHOUT mention → NO content field (graceful, embed-only)', async () => {
+  let captured;
+  globalThis.fetch = async (url, init = {}) => {
+    captured = JSON.parse(init.body);
+    return new Response('{}', { status: 200 });
+  };
+  await sendAlert({
+    severity: 'critical',
+    body: { service: 'gateway-a2a', reason: 'health-http-error' },
+    webhookUrl: 'https://discord.com/api/webhooks/1/abc',
+    // no mention
+  });
+  assert.ok(captured);
+  assert.ok(!('content' in captured), 'no mention → no push content');
+});
+
+test('T-AL-PUSH-03: warning + mention → NEVER content (push is critical-only)', async () => {
+  let captured;
+  globalThis.fetch = async (url, init = {}) => {
+    captured = JSON.parse(init.body);
+    return new Response('{}', { status: 200 });
+  };
+  await sendAlert({
+    severity: 'warning',
+    body: { service: 'app-wasiai', reason: 'health-degraded' },
+    webhookUrl: 'https://discord.com/api/webhooks/1/abc',
+    mention: '<@123456789012345678>',
+  });
+  assert.ok(captured);
+  assert.ok(!('content' in captured), 'warning must never get push content');
+});
+
+test('T-AL-PUSH-04: empty/whitespace mention → NO content (graceful)', async () => {
+  let captured;
+  globalThis.fetch = async (url, init = {}) => {
+    captured = JSON.parse(init.body);
+    return new Response('{}', { status: 200 });
+  };
+  await sendAlert({
+    severity: 'critical',
+    body: { service: 'gateway-a2a' },
+    webhookUrl: 'https://discord.com/api/webhooks/1/abc',
+    mention: '   ',
+  });
+  assert.ok(captured);
+  assert.ok(!('content' in captured), 'whitespace mention must not add content');
+});
+
+test('T-AL-PUSH-05: non-Discord host + mention → raw JSON, no content field', async () => {
+  let captured;
+  globalThis.fetch = async (url, init = {}) => {
+    captured = JSON.parse(init.body);
+    return new Response('{}', { status: 200 });
+  };
+  await sendAlert({
+    severity: 'critical',
+    body: { service: 'gateway-a2a', reason: 'health-http-error' },
+    webhookUrl: 'https://hooks.slack.com/services/T/B/zzz',
+    mention: '<@123456789012345678>',
+  });
+  assert.ok(captured);
+  // Raw path: content is a Discord-only concept — must not appear.
+  assert.ok(!('content' in captured));
+  assert.ok(!('username' in captured));
+  assert.equal(captured.severity, 'critical');
+});
+
+test('T-AL-PUSH-06: MNR-4 — @everyone / @here mention is rejected (no mass-ping push)', async () => {
+  let captured;
+  globalThis.fetch = async (url, init = {}) => {
+    captured = JSON.parse(init.body);
+    return new Response('{}', { status: 200 });
+  };
+  const cap = captureStderr();
+  try {
+    // @everyone → treated as no mention (embed-only, graceful).
+    await sendAlert({
+      severity: 'critical',
+      body: { service: 'gateway-a2a', reason: 'health-http-error' },
+      webhookUrl: 'https://discord.com/api/webhooks/1/abc',
+      mention: '@everyone',
+    });
+    assert.ok(captured);
+    assert.ok(!('content' in captured), '@everyone must NOT become a push mention');
+
+    // A value merely CONTAINING @here is also rejected.
+    captured = undefined;
+    await sendAlert({
+      severity: 'critical',
+      body: { service: 'gateway-a2a', reason: 'health-http-error' },
+      webhookUrl: 'https://discord.com/api/webhooks/1/abc',
+      mention: 'oncall @here now',
+    });
+    assert.ok(captured);
+    assert.ok(!('content' in captured), '@here must NOT become a push mention');
+
+    // A valid <@ROLE_ID> still pushes.
+    captured = undefined;
+    await sendAlert({
+      severity: 'critical',
+      body: { service: 'gateway-a2a', reason: 'health-http-error' },
+      webhookUrl: 'https://discord.com/api/webhooks/1/abc',
+      mention: '<@&123456789012345678>',
+    });
+    assert.ok(captured);
+    assert.equal(typeof captured.content, 'string');
+    assert.ok(captured.content.startsWith('<@&123456789012345678> '));
+  } finally {
+    cap.restore();
+  }
+});
+
 test('T-AL-bonus: sanitizeAlertBody returns only whitelisted keys', () => {
   const out = sanitizeAlertBody({
     severity: 'critical',
@@ -443,4 +582,26 @@ test('T-AL-bonus: sanitizeAlertBody returns only whitelisted keys', () => {
   assert.deepEqual(Object.keys(out).sort(), [
     'balanceUsdc', 'blockNumber', 'chain', 'checkedAt', 'operator', 'severity', 'threshold',
   ]);
+});
+
+test('T-AL-WKH77: health-monitor keys are whitelisted; secrets still dropped', () => {
+  const out = sanitizeAlertBody({
+    severity: 'critical',
+    event: 'health-check',
+    reason: 'health-http-error',
+    service: 'gateway-a2a',
+    label: 'gateway-a2a',
+    url: 'https://wasiai-a2a-production.up.railway.app/health',
+    logsUrl: 'https://railway.app/project/wasiai-a2a',
+    httpStatus: 503,
+    checkedAt: '2026-07-05T00:00:00.000Z',
+    CRON_SECRET: 'must-drop',
+    pk: 'must-drop',
+  });
+  assert.equal(out.service, 'gateway-a2a');
+  assert.equal(out.url, 'https://wasiai-a2a-production.up.railway.app/health');
+  assert.equal(out.logsUrl, 'https://railway.app/project/wasiai-a2a');
+  assert.equal(out.httpStatus, 503);
+  assert.ok(!('CRON_SECRET' in out));
+  assert.ok(!('pk' in out));
 });

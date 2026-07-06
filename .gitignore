@@ -60,3 +60,5 @@ backups/
 /scripts/smoke-base-downstream-run.sh
 /scripts/enable-base-downstream.sh
 /scripts/set-avax-facilitator-key.sh
+.vercel
+.env*

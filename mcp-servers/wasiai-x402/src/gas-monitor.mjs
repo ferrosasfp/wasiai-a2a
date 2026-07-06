@@ -221,6 +221,7 @@ export function evaluateSeverity(balanceWei, { warningWei, criticalWei }) {
  * @param {(chainId:number, address:string, rpcUrl:string)=>Promise<bigint>} deps.readBalance
  * @param {(args:object)=>Promise<unknown>} deps.sendAlert
  * @param {string|undefined} deps.webhookUrl
+ * @param {string|undefined} [deps.mention]
  * @param {()=>string} [deps.now]
  * @returns {Promise<Array<object>>} per-combo results
  */
@@ -230,6 +231,7 @@ export async function checkGasBalances({
   readBalance,
   sendAlert,
   webhookUrl,
+  mention,
   now = () => new Date().toISOString(),
 }) {
   const results = [];
@@ -287,6 +289,11 @@ export async function checkGasBalances({
           await sendAlert({
             severity,
             webhookUrl,
+            // NIT-1: forward the ONCALL mention so a `critical` gas alert ALSO
+            // fires a Discord push — matching the runbook / .env.example claim
+            // that ONCALL_MENTION applies to every critical (health + gas).
+            // sendAlert only turns it into a push on `severity === 'critical'`.
+            mention,
             body: {
               severity,
               reason:

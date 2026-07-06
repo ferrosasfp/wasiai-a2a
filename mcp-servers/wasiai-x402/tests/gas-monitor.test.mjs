@@ -175,6 +175,30 @@ test('T-GM-06: critical balance fires severity=critical alert with public body o
   }
 });
 
+test('T-GM-06b: NIT-1 — ONCALL mention forwarded to sendAlert on a critical gas alert', async () => {
+  const alert = makeAlertSpy();
+  const targets = parseTargets(
+    JSON.stringify([{ label: 'facilitator', address: WALLET_A, chainIds: [43113] }]),
+  );
+  const cap = captureStderr();
+  try {
+    await checkGasBalances({
+      targets,
+      env: {},
+      readBalance: async () => parseEther('0.05'), // below critical
+      sendAlert: alert.fn,
+      webhookUrl: 'https://hooks.example.com/x',
+      mention: '<@123456789012345678>',
+    });
+    assert.equal(alert.calls.length, 1);
+    assert.equal(alert.calls[0].severity, 'critical');
+    // The mention flows through so alerts.mjs can turn it into a Discord push.
+    assert.equal(alert.calls[0].mention, '<@123456789012345678>');
+  } finally {
+    cap.restore();
+  }
+});
+
 test('T-GM-07: warning-tier balance fires severity=warning', async () => {
   const alert = makeAlertSpy();
   const targets = parseTargets(

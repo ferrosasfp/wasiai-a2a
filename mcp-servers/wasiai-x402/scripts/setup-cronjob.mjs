@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// scripts/setup-cronjob.mjs — provision the 5 cron jobs on cron-job.org
-// (WKH-66 W4.5 + WKH-75 W4 + WKH-71).
+// scripts/setup-cronjob.mjs — provision the 6 cron jobs on cron-job.org
+// (WKH-66 W4.5 + WKH-75 W4 + WKH-71 + WKH-77).
 //
 // Jobs registered (idempotent by title — CD-20):
 //   1. wasiai-x402-warmup                 — every 4 min  (warmup)
@@ -9,6 +9,13 @@
 //   4. wasiai-x402-invalidate-prev-bearer — daily at 10:00 UTC        (WKH-75)
 //   5. wasiai-x402-gas-balance-check      — every 15 min (WKH-71 native-gas
 //                                           monitor; DT-4 reuses 15-min cadence)
+//   6. wasiai-x402-health-check           — every 4 min  (WKH-77 ecosystem
+//                                           health/uptime monitor; DT-2 cadence)
+//
+// NOTE: this account also hosts UNRELATED cron jobs for other projects. The
+// provisioning below matches ONLY by the titles in TARGET_JOBS (lookup-by-title)
+// and never touches a job whose title is not in this list — foreign jobs are
+// left untouched.
 //
 // WKH-89: cron-job.org REST API requires INTEGER ARRAYS in `schedule.*`
 // (where -1 means "every"). Crontab strings like '*/4' or '*' are silently
@@ -117,6 +124,23 @@ const TARGET_JOBS = [
     url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/gas-balance-check`,
     schedule: {
       minutes: [0, 15, 30, 45],
+      hours: [-1],
+      mdays: [-1],
+      months: [-1],
+      wdays: [-1],
+    },
+    requestMethod: 1, // GET
+    extendedData: { headers: { Authorization: `Bearer ${CRON_SECRET}` } },
+  },
+  // WKH-77 — ecosystem health/uptime monitor. DT-2: 4-min cadence (reuses the
+  // warmup minute pattern — the most frequent job cron-job.org free tier runs
+  // reliably). WKH-89: explicit integer minute list [0,4,...,56], -1 elsewhere —
+  // NOT a crontab string (a '*/4' string is silently rejected → "Jan 1 yearly").
+  {
+    title: 'wasiai-x402-health-check',
+    url: `${DEPLOY_URL.replace(/\/$/, '')}/api/cron/health-check`,
+    schedule: {
+      minutes: [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56],
       hours: [-1],
       mdays: [-1],
       months: [-1],
