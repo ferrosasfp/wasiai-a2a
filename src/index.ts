@@ -30,6 +30,7 @@ import composeRoutes from './routes/compose.js';
 import dashboardRoutes from './routes/dashboard.js';
 import discoverRoutes from './routes/discover.js';
 import gaslessRoutes from './routes/gasless.js';
+import inboundRoutes from './routes/inbound.js';
 import metricsRoutes from './routes/metrics.js';
 import mockRegistryRoutes from './routes/mock-registry.js';
 import orchestrateRoutes from './routes/orchestrate.js';
@@ -158,6 +159,9 @@ await fastify.register(agentsRoutes, { prefix: '/agents' });
 // soporta varios plugins por prefijo). POST /agents/:slug/link (mint, master
 // key) + POST /agents/links/:token/redeem (público). Aditivo.
 await fastify.register(agentLinkRoutes, { prefix: '/agents' });
+// WKH-115: inbound adapter (push/webhook de tareas externas → orchestrate
+// in-process). Parser raw-body ENCAPSULADO al plugin (additive-only). Aditivo.
+await fastify.register(inboundRoutes, { prefix: '/inbound' });
 await fastify.register(wellKnownRoutes, { prefix: '/.well-known' });
 await fastify.register(tasksRoutes, { prefix: '/tasks' });
 await fastify.register(dashboardRoutes, { prefix: '/dashboard' });
