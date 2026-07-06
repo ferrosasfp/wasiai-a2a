@@ -118,6 +118,7 @@ import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
 import { chargeProtocolFee, getProtocolFeeRate } from './fee-charge.js';
+import { getPlannerMaxTokens, getPlannerModel } from './llm/models.js';
 import { orchestrateService } from './orchestrate.js';
 import { receiptService } from './receipt.js';
 
@@ -2426,5 +2427,102 @@ describe('orchestrateService', () => {
     // CD-NEW-3: gate corre ANTES de cualquier débito o compose.
     expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
     expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
+  });
+
+  // ─── WKH-114: plan-time acceptance criteria (AC-1/AC-7, CD-2/CD-3) ────
+
+  // Test 15 (AC-1): el planner LLM adjunta AC no-vacíos por step.
+  it('WKH-114: llmPlan attaches non-empty acceptanceCriteria per step (AC-1)', async () => {
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'wasiai',
+            input: { q: 'x' },
+            acceptanceCriteria: [
+              'output contains a summary',
+              'non-empty summary field',
+            ],
+            reasoning: 'ok',
+          },
+        ],
+        reasoning: 'ok',
+      }),
+    );
+
+    await orchestrateService.orchestrate(
+      { goal: 'summarize text', budget: 5.0 },
+      'orch-114-15',
+    );
+
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    const step = composeCall.steps[0]!;
+    expect(step.acceptanceCriteria).toBeDefined();
+    expect(step.acceptanceCriteria!.length).toBeGreaterThan(0);
+    expect(step.acceptanceCriteria).toContain('output contains a summary');
+  });
+
+  // Test 16 (AC-1): el greedy fallback (sin LLM) adjunta AC genéricos no-vacíos.
+  it('WKH-114: greedy fallback attaches generic acceptanceCriteria (AC-1)', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+
+    await orchestrateService.orchestrate(
+      { goal: 'summarize text no key', budget: 5.0 },
+      'orch-114-16',
+    );
+
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps.length).toBeGreaterThan(0);
+    for (const step of composeCall.steps) {
+      expect(step.acceptanceCriteria).toBeDefined();
+      expect(step.acceptanceCriteria!.length).toBeGreaterThan(0);
+    }
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  // Test 17 (AC-4/AC-6/CD-3): additive-only — el exact-match del fee y el shape
+  // de pipeline.success NO cambian (regresión :557).
+  it('WKH-114: chargeProtocolFee exact-match params unchanged (CD-3 regression)', async () => {
+    vi.mocked(getProtocolFeeRate).mockReturnValue(0.01);
+    vi.mocked(chargeProtocolFee).mockResolvedValueOnce({
+      status: 'charged',
+      feeUsdc: 0.01,
+      txHash: '0xFEE',
+    });
+    setLlmOneAgent();
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'happy path', budget: 1.0 },
+      'orch-114-17',
+    );
+
+    expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalledWith({
+      orchestrationId: 'orch-114-17',
+      feeBaseUsdc: 0.5,
+      feeRate: 0.01,
+    });
+    expect(result.answer).toBeDefined();
+  });
+
+  // Test 18 (AC-7/CD-2): los AC viajan en el ÚNICO call del planner, con
+  // model/max_tokens de los getters centralizados (cero hardcode, cero LLM extra).
+  it('WKH-114: AC ride the existing planner call via centralized model getters (AC-7/CD-2)', async () => {
+    setLlmOneAgent();
+
+    await orchestrateService.orchestrate(
+      { goal: 'summarize text', budget: 5.0 },
+      'orch-114-18',
+    );
+
+    expect(mockCreate).toHaveBeenCalledTimes(1); // cero LLM extra por los AC
+    const callArgs = mockCreate.mock.calls[0]![0] as {
+      model: string;
+      max_tokens: number;
+      system: string;
+    };
+    expect(callArgs.model).toBe(getPlannerModel());
+    expect(callArgs.max_tokens).toBe(getPlannerMaxTokens());
+    expect(callArgs.system).toContain('acceptanceCriteria');
   });
 });

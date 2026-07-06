@@ -3160,3 +3160,138 @@ describe('composeService.compose — gas overhead pass-through', () => {
     );
   });
 });
+
+// ─── WKH-114: step verification wiring (AC-2/3/4/5/6, CD-1/CD-4/CD-8) ────
+describe('composeService — WKH-114 step verification', () => {
+  // Test 11 (AC-4): acceptance es aditivo; el shape base del StepResult no cambia.
+  it('adds StepResult.acceptance without altering the base shape', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const agent = makeAgent({ slug: 'v-agent', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk({ result: 'work-done' });
+
+    const result = await composeService.compose({
+      steps: [{ agent: agent.slug, input: {} }],
+    });
+
+    expect(result.success).toBe(true);
+    const step = result.steps[0]!;
+    // Base shape intacto (AC-4): campos existentes sin cambios.
+    expect(step.agent).toBe(agent);
+    expect(step.output).toBe('work-done');
+    expect(step.costUsdc).toBe(0);
+    expect(typeof step.latencyMs).toBe('number');
+    // Campo aditivo presente con veredicto.
+    expect(step.acceptance).toBeDefined();
+    expect(step.acceptance?.verdict).toBe('pass');
+    expect(step.acceptance?.method).toBe('rules');
+  });
+
+  // Test 12 (AC-5): verificationStatus aditivo y distinto de success.
+  it('exposes pipeline verificationStatus additive & distinct from success', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const agent = makeAgent({ slug: 'v-agent-2', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk({ result: { status: 'ok', value: 42 } });
+
+    const result = await composeService.compose({
+      steps: [{ agent: agent.slug, input: {} }],
+    });
+
+    expect(result.success).toBe(true); // sigue boolean idéntico
+    expect(result.verificationStatus).toBe('verified'); // todos pass
+  });
+
+  // Test 13 (AC-6, CD-1): un AC-fail NO altera billing (sin refund por AC).
+  it('AC-fail step does NOT alter billing (no refund, cost intact)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const agent = makeAgent({ slug: 'v-agent-3', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    // 2xx pero el body evidencia error → verdict fail (Chaski-$0, CD-7).
+    mockFetchOk({ result: { error: 'agent said no work done' } });
+
+    const result = await composeService.compose({
+      steps: [{ agent: agent.slug, input: {} }],
+    });
+
+    // El step invocó 2xx: el pipeline sigue success; el AC-fail es señal.
+    expect(result.success).toBe(true);
+    expect(result.steps[0]!.acceptance?.verdict).toBe('fail');
+    expect(result.verificationStatus).toBe('incomplete');
+    // CD-1/AC-6: el veredicto NO disparó refund ni cambió el costo.
+    expect(mockCredit).not.toHaveBeenCalled();
+    expect(mockCreditWithDest).not.toHaveBeenCalled();
+    expect(result.totalCostUsdc).toBe(0);
+  });
+
+  // Test 14 (CD-4, CD-8): verificación no-pass NO aborta el pipeline ni refunda.
+  it('non-pass verdict (unverified) does not abort pipeline nor trigger refund', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const agent = makeAgent({ slug: 'v-agent-4', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk({ result: { ok: true } });
+
+    const result = await composeService.compose({
+      // Criterio semántico no estructurable → verdict 'unverified' (CD-8).
+      steps: [
+        {
+          agent: agent.slug,
+          input: {},
+          acceptanceCriteria: ['the flight was actually booked'],
+        },
+      ],
+    });
+
+    expect(result.success).toBe(true); // pipeline no abortado
+    expect(result.steps[0]!.acceptance?.verdict).toBe('unverified');
+    expect(mockCredit).not.toHaveBeenCalled();
+  });
+
+  // Test 15 (BLQ-ALTO-1): un `acceptanceCriteria` MALFORMADO (`{length:1}` —
+  // objeto truthy no-iterable, JSON válido NO validado por /compose ni
+  // /orchestrate/execute) en un step DEBITADO (i>=1) que respondió 2xx + settleó
+  // NO debe reventar el verificador. Pre-fix `[...criteria]` lanzaba TypeError
+  // FUERA del try → propagaba a finishSuccessfulStep → catch del money-path
+  // (compose.ts:300) → refundStepDebit() (compose.ts:404) reembolsaba un step
+  // ya settleado (drain: mockCreditWithDest). Post-fix: Array.isArray descarta
+  // el input malformado → DEFAULT_AC, sin throw, sin refund.
+  it('malformed acceptanceCriteria on a settled DEBITED step does NOT abort nor refund (drain closed)', async () => {
+    // 8453 = Base mainnet: activa el débito per-step del servicio (steps 1..N).
+    const CHAIN_ID = 8453;
+    const a1 = makeAgent({ slug: 'step0', priceUsdc: 0 });
+    const a2 = makeAgent({ slug: 'step1', priceUsdc: 0.05, id: 'agent-2' });
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug: string) =>
+        slug === 'step0' ? a1 : slug === 'step1' ? a2 : null,
+    );
+    mockFetchOk({ result: 'step0-done' }); // step 0: 2xx + settle OK
+    mockFetchOk({ result: 'step1-done' }); // step 1: 2xx + settle OK (debited)
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'step0', input: {} },
+        // `acceptanceCriteria` con shape inválido (cast: emula el body crudo del
+        // caller — el tipo dice string[] pero el runtime no lo garantiza).
+        {
+          agent: 'step1',
+          input: {},
+          acceptanceCriteria: { length: 1 } as unknown as string[],
+        },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: CHAIN_ID,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    // El pipeline NO abortó por el verificador.
+    expect(result.success).toBe(true);
+    // El step debitado settleó y su campo aditivo quedó presente
+    // (evaluado contra DEFAULT_AC, no un throw).
+    expect(result.steps[1]!.acceptance).toBeDefined();
+    // CD-1: el verificador NO disparó refund del step ya settleado (drain
+    // cerrado). Pre-fix esto era `toHaveBeenCalled` = reembolso indebido.
+    expect(mockCredit).not.toHaveBeenCalled();
+    expect(mockCreditWithDest).not.toHaveBeenCalled();
+  });
+});
