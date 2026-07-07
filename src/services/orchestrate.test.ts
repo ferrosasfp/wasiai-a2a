@@ -119,7 +119,7 @@ import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
 import { chargeProtocolFee, getProtocolFeeRate } from './fee-charge.js';
 import { getPlannerMaxTokens, getPlannerModel } from './llm/models.js';
-import { orchestrateService } from './orchestrate.js';
+import { orchestrateService, textOverlapsGoal } from './orchestrate.js';
 import { receiptService } from './receipt.js';
 
 // ─── Fixtures ────────────────────────────────────────────────
@@ -1976,6 +1976,459 @@ describe('orchestrateService', () => {
     expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
     const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
     expect(composeCall.steps.length).toBeGreaterThan(0);
+  });
+
+  // ─── WKH-152 ─ Planner LLM per-step relevance backstop (money-path) ─────
+
+  // A relevant agent (shares tokens with the goal) + a REAL, non-demo agent that
+  // is lexically disjoint from the goal in name/description/capabilities AND input.
+  const wkh152Agents: Agent[] = [
+    {
+      ...mockAgents[0]!,
+      id: 'wkh152-weather',
+      name: 'Weather Oracle',
+      slug: 'weather-v1',
+      description: 'Provides weather forecasts',
+      capabilities: ['weather', 'forecast'],
+      priceUsdc: 0.4,
+      registry: 'wasiai',
+      verified: false,
+    },
+    {
+      ...mockAgents[0]!,
+      id: 'wkh152-defi',
+      name: 'DeFi Sentiment',
+      slug: 'defi-sentiment-v1',
+      description: 'Analyzes DeFi market sentiment',
+      capabilities: ['defi', 'sentiment'],
+      priceUsdc: 0.7,
+      registry: 'wasiai',
+      verified: false,
+    },
+  ];
+  const wkh152Discovery: DiscoveryResult = {
+    agents: wkh152Agents,
+    total: 2,
+    registries: ['wasiai'],
+  };
+
+  /** Keep getAgent consistent with the wkh152 discover set (step-0 recompute). */
+  function wkh152GetAgent(): void {
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug) => wkh152Agents.find((a) => a.slug === slug) ?? null,
+    );
+  }
+
+  // T-152-1 (AC-1, CD-2/CD-6): mixed LLM plan (relevant + real-irrelevant) →
+  // the irrelevant agent is dropped BEFORE debit/compose; the relevant one runs.
+  it('T-152-1: mixed plan drops the irrelevant agent, charges only the relevant', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh152Discovery);
+    wkh152GetAgent();
+    // LLM selects BOTH; the irrelevant agent gets a disjoint tailored input.
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'weather-v1',
+            registry: 'wasiai',
+            input: { location: 'lima' },
+            reasoning: 'weather match',
+          },
+          {
+            slug: 'defi-sentiment-v1',
+            registry: 'wasiai',
+            input: { topic: 'ethereum liquidity' },
+            reasoning: 'off-topic',
+          },
+        ],
+        reasoning: 'Two-agent plan',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'What is the weather forecast today',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-152-1',
+    );
+
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    const composedSlugs = composeCall.steps.map((s) => s.agent);
+    expect(composedSlugs).toContain('weather-v1');
+    expect(composedSlugs).not.toContain('defi-sentiment-v1');
+    expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
+    expect(result.reasoning).toContain('dropped');
+  });
+
+  // T-152-2 (AC-2, DT-7/CD-15): MIXED-PLAN-ONLY — an LLM plan where EVERY step is
+  // lexically disjoint from the goal must be CONSERVED IN FULL (no-op), NOT routed to
+  // no_relevant_agent. The filter never empties a plan; with zero matches the most
+  // likely cause is cross-vocabulary (multilingual), not irrelevance. Billing must be
+  // byte-identical to the no-filter run (steps intact, original order, step-0 debit
+  // unchanged, no 'dropped', no 'no_relevant_agent').
+  it('T-152-2: all-disjoint LLM plan → conserve ALL (no drop, no no_relevant_agent)', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh152Discovery);
+    wkh152GetAgent();
+    // Goal disjoint from BOTH agents (weather-v1, defi-sentiment-v1). LLM selects both
+    // real (non-demo) agents; the filter would drop both → relevantSteps.length === 0
+    // → applyDrop === false → conserve all.
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'weather-v1',
+            registry: 'wasiai',
+            input: { location: 'lima' },
+            reasoning: 'step one',
+          },
+          {
+            slug: 'defi-sentiment-v1',
+            registry: 'wasiai',
+            input: { topic: 'ethereum liquidity' },
+            reasoning: 'step two',
+          },
+        ],
+        reasoning: 'Two-agent plan',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'translate this document into french',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-152-2',
+    );
+
+    // Conserve ALL: no rejection, steps = original complete plan in original order.
+    expect(result.reasoning).not.toContain('no_relevant_agent');
+    expect(result.reasoning).not.toContain('dropped');
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps.map((s) => s.agent)).toEqual([
+      'weather-v1',
+      'defi-sentiment-v1',
+    ]);
+    // Billing byte-identical to sin-filtro: step-0 debit = original head price (0.4),
+    // debit/compose/fee all fired as they would without the filter.
+    expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(budgetService.debit).mock.calls[0]![2]).toBeCloseTo(
+      0.4,
+      6,
+    );
+    expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalled();
+  });
+
+  // T-152-2b (AC-2, DT-7/CD-15): MULTILINGUAL false-negative lock. A Spanish goal +
+  // RELEVANT agents described in English share ZERO lexical tokens → the filter would
+  // drop every step. MIXED-PLAN-ONLY conserves ALL (no drop, no no_relevant_agent),
+  // billing byte-identical. This is the exact case that motivated the amendment and
+  // broke 35 money-path tests under the original (all-disjoint ⇒ no_relevant_agent).
+  it('T-152-2b: multilingual all-disjoint plan → conserve ALL (no false-negative)', async () => {
+    const mlWeather: Agent = {
+      ...mockAgents[0]!,
+      id: 'wkh152-ml-weather',
+      name: 'Weather Forecast',
+      slug: 'weather-en-v1',
+      description: 'weather forecast service',
+      capabilities: ['weather', 'forecast'],
+      priceUsdc: 0.4,
+      registry: 'wasiai',
+      verified: false,
+    };
+    const mlFx: Agent = {
+      ...mockAgents[0]!,
+      id: 'wkh152-ml-fx',
+      name: 'FX Rate Quote',
+      slug: 'fx-en-v1',
+      description: 'fx rate quote for currency conversion',
+      capabilities: ['fx', 'rate'],
+      priceUsdc: 0.5,
+      registry: 'wasiai',
+      verified: false,
+    };
+    const mlAgents = [mlWeather, mlFx];
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: mlAgents,
+      total: 2,
+      registries: ['wasiai'],
+    });
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug) => mlAgents.find((a) => a.slug === slug) ?? null,
+    );
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'weather-en-v1',
+            registry: 'wasiai',
+            input: { location: 'lima' },
+            reasoning: 'weather step',
+          },
+          {
+            slug: 'fx-en-v1',
+            registry: 'wasiai',
+            input: { pair: 'usd' },
+            reasoning: 'fx step',
+          },
+        ],
+        reasoning: 'Weather + FX plan',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      {
+        // Spanish goal — 0 lexical overlap with the English agent corpora.
+        goal: 'cotiza el clima y el precio del dolar',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-152-2b',
+    );
+
+    // Filter would drop both (0 overlap) → conserve ALL, NO false-negative.
+    expect(result.reasoning).not.toContain('no_relevant_agent');
+    expect(result.reasoning).not.toContain('dropped');
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps.map((s) => s.agent)).toEqual([
+      'weather-en-v1',
+      'fx-en-v1',
+    ]);
+    // Billing byte-identical: step-0 debit = original head price (0.4), unchanged.
+    expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(budgetService.debit).mock.calls[0]![2]).toBeCloseTo(
+      0.4,
+      6,
+    );
+    expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalled();
+  });
+
+  // T-152-3 (AC-3, CD-3): 100%-relevant LLM plan → executes/charges IDENTICAL to
+  // today. No 'dropped', no 'no_relevant_agent', both steps in original order.
+  it('T-152-3: all-relevant plan → zero regression, no drop', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(mockDiscoveryResult);
+    setLlmTwoAgents();
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'summarize and translate this text',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-152-3',
+    );
+
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps.map((s) => s.agent)).toEqual([
+      'summarizer-v1',
+      'translator-v1',
+    ]);
+    expect(result.reasoning).not.toContain('dropped');
+    expect(result.reasoning).not.toContain('no_relevant_agent');
+  });
+
+  // T-152-4 (AC-4, CD-5/CD-8): step-0 original = irrelevant; the SURVIVING 2nd step
+  // (different price) must reprice the step-0 debit and become the new head.
+  it('T-152-4: dropped step-0 → debit repriced to the surviving head', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh152Discovery);
+    wkh152GetAgent();
+    // Irrelevant agent FIRST (step-0), relevant agent SECOND — with distinct price.
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'defi-sentiment-v1',
+            registry: 'wasiai',
+            input: { topic: 'ethereum liquidity' },
+            reasoning: 'off-topic head',
+          },
+          {
+            slug: 'weather-v1',
+            registry: 'wasiai',
+            input: { location: 'lima' },
+            reasoning: 'weather match',
+          },
+        ],
+        reasoning: 'Two-agent plan',
+      }),
+    );
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'What is the weather forecast today',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-152-4',
+    );
+
+    // Debit repriced to the survivor (0.4), NOT the dropped head (0.7).
+    expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
+    const debitAmount = vi.mocked(budgetService.debit).mock.calls[0]![2];
+    expect(debitAmount).toBeCloseTo(0.4, 6);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps[0]!.agent).toBe('weather-v1');
+    expect(composeCall.steps[0]!.passOutput).toBe(false);
+  });
+
+  // T-152-5 (FALSE-NEGATIVE, DT-1): a genuinely relevant agent whose name/desc are
+  // disjoint from the goal but whose tailored INPUT overlaps ≥1 token must NOT be
+  // dropped. Adding `input` to the corpus is strictly conservative.
+  it('T-152-5: relevance from input tokens alone → step NOT dropped', async () => {
+    const opaqueAgent: Agent = {
+      ...mockAgents[0]!,
+      id: 'wkh152-opaque',
+      name: 'Zeta Bot',
+      slug: 'zeta-v1',
+      description: 'multipurpose helper',
+      capabilities: ['general'],
+      priceUsdc: 0.3,
+      registry: 'wasiai',
+      verified: false,
+    };
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [opaqueAgent],
+      total: 1,
+      registries: ['wasiai'],
+    });
+    vi.mocked(discoveryService.getAgent).mockImplementation(async (slug) =>
+      slug === 'zeta-v1' ? opaqueAgent : null,
+    );
+    // name/desc/caps share NOTHING with the goal; only the input does ("weather").
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'zeta-v1',
+            registry: 'wasiai',
+            input: { query: 'weather in lima' },
+            reasoning: 'handles it',
+          },
+        ],
+        reasoning: 'Opaque agent plan',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'weather forecast lima',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-152-5',
+    );
+
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps.map((s) => s.agent)).toContain('zeta-v1');
+    expect(result.reasoning).not.toContain('dropped');
+    expect(result.reasoning).not.toContain('no_relevant_agent');
+  });
+
+  // T-152-5b (CD-14): a goal with ZERO evaluable tokens (all <3 chars) in the LLM
+  // path ⇒ the filter is SKIPPED entirely, every step conserved (never empty a LLM
+  // plan on a goal without lexical signal).
+  it('T-152-5b: zero-token goal (LLM path) → filter skipped, step conserved', async () => {
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'wasiai',
+            input: { query: 'do it' },
+            reasoning: 'ok',
+          },
+        ],
+        reasoning: 'Single-agent plan',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'a b c',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-152-5b',
+    );
+
+    expect(result.reasoning).not.toContain('no_relevant_agent');
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps.map((s) => s.agent)).toContain('summarizer-v1');
+  });
+
+  // T-152-6 (AC-6, CD-7): an all-demo LLM plan still returns no_relevant_agent via
+  // the `allStepsAreDemos` branch — the new per-step filter does NOT run redundant.
+  it('T-152-6: all-demo LLM plan → no_relevant_agent (unchanged), no charge', async () => {
+    const realAgent: Agent = {
+      ...mockAgents[0]!,
+      id: 'real-152-6',
+      name: 'DeFi Sentiment',
+      slug: 'wasi-defi-sentiment',
+      description: 'Analyzes DeFi market sentiment',
+      priceUsdc: 0.5,
+      verified: false,
+    };
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [...makeDemoAgents(), realAgent],
+      total: 4,
+      registries: ['wasiai'],
+    });
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'base-demo',
+            registry: 'wasiai',
+            input: { message: 'ping' },
+            reasoning: 'picked the cheap echo',
+          },
+        ],
+        reasoning: 'Selected base-demo',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'Analyze DeFi sentiment',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-152-6',
+    );
+
+    expect(result.reasoning).toContain('no_relevant_agent');
+    expect(result.reasoning).not.toContain('dropped');
+    expect(result.pipeline.steps).toHaveLength(0);
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
+  });
+
+  // T-152-8 (DT-2): pure helper. overlap ⇒ true; no overlap ⇒ false; empty
+  // goalTokens ⇒ false; case-insensitive; tokens <3 chars ignored.
+  it('T-152-8: textOverlapsGoal pure semantics', () => {
+    const goalTokens = new Set(['weather', 'forecast']);
+    expect(textOverlapsGoal('daily WEATHER report', goalTokens)).toBe(true);
+    expect(textOverlapsGoal('defi market sentiment', goalTokens)).toBe(false);
+    // empty goalTokens ⇒ false (caller handles the empty case, CD-14).
+    expect(textOverlapsGoal('weather forecast', new Set())).toBe(false);
+    // tokens <3 chars are ignored by the tokenizer.
+    expect(textOverlapsGoal('to be at', new Set(['to', 'be']))).toBe(false);
   });
 
   // T-AC-DOUBLE (CD-11/§4.4): single orchestrate on total failure → credit exactly once.
