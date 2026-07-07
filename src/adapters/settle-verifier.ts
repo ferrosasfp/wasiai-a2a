@@ -193,8 +193,11 @@ function classifyReceiptError(
  * mainnet slugs — `kite-mainnet` / `avalanche-mainnet` / `base-mainnet` — all
  * end in `-mainnet`; every testnet slug (`kite-ozone-testnet`, `avalanche-fuji`,
  * `base-sepolia`, `tempo-testnet`) does NOT. Single choke-point (CD-7).
+ *
+ * Exported (WKH-150) solely so the naming-invariant guard test can cross-check
+ * it against the independent viem `Chain.testnet` boolean; the body is unchanged.
  */
-function isMainnetChainKey(chainKey: ChainKey): boolean {
+export function isMainnetChainKey(chainKey: ChainKey): boolean {
   return chainKey.endsWith('-mainnet');
 }
 

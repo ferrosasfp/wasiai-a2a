@@ -40,12 +40,23 @@ vi.mock('./registry.js', () => ({
   getAdaptersBundle: (k?: string) => mockGetAdaptersBundle(k),
 }));
 
+// WKH-150 AC-2b: independent source of "is this chain mainnet?" — the viem
+// `Chain.testnet` boolean of each adapter chain object, imported DIRECTLY from
+// each `chain.ts` (NOT derived from the `-mainnet` suffix → non-tautological,
+// CD-3). avalanche/base come from the external `viem/chains` library.
+import type { Chain } from 'viem';
+import { avalanche, avalancheFuji } from './avalanche/chain.js';
+import { base, baseSepolia } from './base/chain.js';
+import { kiteMainnet, kiteTestnet } from './kite-ozone/chain.js';
 import {
   _resetSettleVerifier,
+  isMainnetChainKey,
   isSettleVerifyEnabled,
   verifyDefaultChainSettle,
   verifySettledTx,
 } from './settle-verifier.js';
+import { tempoTestnet } from './tempo/chain.js';
+import type { ChainKey } from './types.js';
 
 const PAY_TO = '0x1111111111111111111111111111111111111111';
 const OTHER = '0x2222222222222222222222222222222222222222';
@@ -497,5 +508,52 @@ describe('isSettleVerifyEnabled', () => {
       process.env.SETTLE_VERIFY_ONCHAIN = v;
       expect(isSettleVerifyEnabled()).toBe(false);
     }
+  });
+});
+
+// WKH-150 AC-2b/2c: guards the `-mainnet` naming invariant that
+// `isMainnetChainKey()` — and therefore the WKH-144 fail-CLOSED settle gate —
+// depends on. The map is typed `Record<ChainKey, Chain>`, so it is EXHAUSTIVE
+// at compile time: adding a new `ChainKey` to the union without a mapping here
+// fails `tsc` (AC-2c / CD-4 — no silent skip). The "is mainnet?" truth comes
+// from each chain's INDEPENDENT viem `Chain.testnet` boolean (CD-3: NOT the
+// `-mainnet` suffix). `avalanche`/`avalancheFuji`/`base`/`baseSepolia` are viem
+// library objects (`.testnet` undefined=mainnet / `true`=testnet). This covers
+// every `ChainKey` in the union — a superset of `SUPPORTED_CHAINS` (which adds
+// `tempo-testnet` via a flag).
+describe('ChainKey `-mainnet` naming invariant (WKH-150 AC-2)', () => {
+  const CHAIN_KEY_TO_VIEM: Record<ChainKey, Chain> = {
+    'kite-ozone-testnet': kiteTestnet,
+    'kite-mainnet': kiteMainnet,
+    'avalanche-fuji': avalancheFuji,
+    'avalanche-mainnet': avalanche,
+    'base-sepolia': baseSepolia,
+    'base-mainnet': base,
+    'tempo-testnet': tempoTestnet,
+  };
+
+  const cases = Object.entries(CHAIN_KEY_TO_VIEM) as Array<[ChainKey, Chain]>;
+
+  it.each(
+    cases,
+  )('isMainnetChainKey(%s) === !chain.testnet', (chainKey, chain) => {
+    expect(isMainnetChainKey(chainKey)).toBe(!chain.testnet);
+  });
+
+  it('the three mainnet slugs are exactly the ones with a mainnet (non-testnet) chain', () => {
+    const mainnetByGate = cases
+      .filter(([key]) => isMainnetChainKey(key))
+      .map(([key]) => key)
+      .sort();
+    const mainnetByViem = cases
+      .filter(([, chain]) => !chain.testnet)
+      .map(([key]) => key)
+      .sort();
+    expect(mainnetByGate).toEqual(mainnetByViem);
+    expect(mainnetByGate).toEqual([
+      'avalanche-mainnet',
+      'base-mainnet',
+      'kite-mainnet',
+    ]);
   });
 });

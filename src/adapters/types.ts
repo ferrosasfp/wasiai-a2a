@@ -120,6 +120,17 @@ export interface IdentityBindingAdapter {
  * `ChainKey` is the canonical slug identifier for a chain bundle. Immutable —
  * adding a new chain requires extending this union AND updating the registry
  * factory dispatcher in `registry.ts`.
+ *
+ * ⚠️ SECURITY INVARIANT (WKH-150 / WKH-144): every MAINNET slug MUST end in the
+ * literal suffix `-mainnet`, and every testnet slug MUST NOT. `isMainnetChainKey()`
+ * (`settle-verifier.ts`) classifies mainnet purely via `.endsWith('-mainnet')`,
+ * and that classification drives the WKH-144 fail-CLOSED settle re-verify gate:
+ * a mainnet chain is BLOCKED when a2a cannot independently re-read the tx, while a
+ * testnet chain fails OPEN. If a new mainnet chain is added here WITHOUT the
+ * `-mainnet` suffix, `isMainnetChainKey()` will silently treat it as testnet →
+ * fail-OPEN with real money at stake (reopens WKH-144). The invariant is guarded
+ * by a test in `settle-verifier.test.ts` that cross-checks each `ChainKey` against
+ * the independent viem `Chain.testnet` boolean of its adapter chain object.
  */
 export type ChainKey =
   | 'kite-ozone-testnet'
