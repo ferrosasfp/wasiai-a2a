@@ -3298,4 +3298,289 @@ describe('orchestrateService', () => {
     expect(callArgs.max_tokens).toBe(getPlannerMaxTokens());
     expect(callArgs.system).toContain('acceptanceCriteria');
   });
+
+  // ─── WKH-158 ─ LLM planner retry-on-transient-failure (money-safe) ──────
+
+  // Palanca base "1er intento falla (transitorio), 2do OK": el breaker mock es
+  // passthrough (fn => fn()) → cada llmPlan = 1 mockCreate.
+  function setLlmTransientThen(planText: string) {
+    mockCreate
+      .mockRejectedValueOnce(new Error('API timeout'))
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: planText }],
+      });
+  }
+
+  // T-158-1 (AC-1, AC-2): un fallo TRANSITORIO en el 1er intento se reintenta 1
+  // vez; el retry produce el plan LLM (no cae a greedy).
+  it('T-158-1: transient failure → retry → LLM plan (not greedy)', async () => {
+    setLlmTransientThen(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'wasiai',
+            input: { query: 'summarize the doc' },
+            reasoning: 'best match',
+          },
+        ],
+        reasoning: 'Selected summarizer after transient retry',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'summarize a document', budget: 5.0 },
+      'orch-158-1',
+    );
+
+    // Plan LLM real: reasoning sin [FALLBACK] (usedFallback === false).
+    expect(result.reasoning).not.toContain('[FALLBACK]');
+    expect(result.answer).toBeDefined();
+    // Exactamente 2 invocaciones: intento original + 1 retry.
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps[0]!.agent).toBe('summarizer-v1');
+  });
+
+  // T-158-2 (AC-3): si el retry TAMBIÉN falla (ambos transitorios) → greedy,
+  // idéntico al actual (usedFallback === true).
+  it('T-158-2: retry also fails → greedy fallback', async () => {
+    mockCreate.mockRejectedValue(new Error('API timeout'));
+
+    const result = await orchestrateService.orchestrate(
+      // "text" overlapea los agentes mock → el relevance guard queda inerte;
+      // este test asserta el retry→greedy, no la relevancia.
+      { goal: 'summarize the text after retry', budget: 5.0 },
+      'orch-158-2',
+    );
+
+    expect(result.reasoning).toContain('[FALLBACK] LLM planning failed');
+    expect(result.answer).toBeDefined();
+    // Ambos intentos consumidos antes de greedy.
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalled();
+  });
+
+  // T-158-3 (AC-7, CD-2): fallo PERMANENTE `!client` (sin ANTHROPIC_API_KEY) →
+  // NO retry → greedy directo. Ni intento ni retry pegan al LLM.
+  it('T-158-3: !client (no API key) → NO retry → greedy', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'summarize the text no key', budget: 5.0 },
+      'orch-158-3',
+    );
+
+    expect(result.reasoning).toContain('[FALLBACK]');
+    expect(result.answer).toBeDefined();
+    // Sin client configurado: 0 llamadas (ni intento ni retry).
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  // T-158-4 (AC-3, DT-4): CircuitOpenError (breaker abierto) → NO retry → greedy.
+  // No re-throw (no 503) y el breaker se invoca 1 sola vez (no se reintenta un
+  // breaker abierto).
+  it('T-158-4: CircuitOpenError → NO retry → greedy (breaker called once)', async () => {
+    const { CircuitOpenError } = await vi.importActual<
+      typeof import('../lib/circuit-breaker.js')
+    >('../lib/circuit-breaker.js');
+    mockBreakerExecute.mockRejectedValue(new CircuitOpenError('anthropic'));
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'summarize the text circuit open', budget: 5.0 },
+      'orch-158-4',
+    );
+
+    expect(result.reasoning).toContain('[FALLBACK]');
+    expect(result.answer).toBeDefined();
+    // Breaker abierto NO se reintenta: 1 sola invocación.
+    expect(mockBreakerExecute).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalled();
+  });
+
+  // T-158-5 (AC-4): repro multilingüe. Goal ES falla transitorio en el 1er
+  // intento; el retry produce el plan LLM (wasi-chainlink-price) en vez de
+  // degradar a greedy + fallbackNoRelevance.
+  it('T-158-5: multilingual goal + transient retry → LLM plan (not fallbackNoRelevance)', async () => {
+    const priceAgent: Agent = {
+      ...mockAgents[0]!,
+      id: 'real-price',
+      name: 'Chainlink Price',
+      slug: 'wasi-chainlink-price',
+      description: 'Provides on-chain price feeds',
+      capabilities: ['price', 'oracle'],
+      priceUsdc: 0.4,
+      verified: false,
+    };
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [...mockAgents, priceAgent],
+      total: 3,
+      registries: ['wasiai'],
+    });
+    vi.mocked(discoveryService.getAgent).mockImplementation(async (slug) => {
+      return [...mockAgents, priceAgent].find((a) => a.slug === slug) ?? null;
+    });
+    setLlmTransientThen(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'wasi-chainlink-price',
+            registry: 'wasiai',
+            input: { query: 'precio del dolar' },
+            reasoning: 'price feed',
+          },
+        ],
+        reasoning: 'Selected price feed after transient retry',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'cotiza el precio del dolar', budget: 5.0 },
+      'orch-158-5',
+    );
+
+    expect(result.reasoning).not.toContain('[FALLBACK]');
+    expect(result.reasoning).not.toContain('no_relevant_agent');
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps[0]!.agent).toBe('wasi-chainlink-price');
+  });
+
+  // T-158-6 (AC-5): bounded — con fallo transitorio persistente el retry corre
+  // EXACTAMENTE 1 vez (máx 2 invocaciones de llmPlan), nunca 3+, sin colgar.
+  it('T-158-6: max 1 retry — bounded to exactly 2 llmPlan invocations', async () => {
+    mockCreate.mockRejectedValue(new Error('API timeout'));
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'summarize the text bounded retry', budget: 5.0 },
+      'orch-158-6',
+    );
+
+    // Exactamente 2, NO 3+.
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(result.answer).toBeDefined();
+    expect(result.reasoning).toContain('[FALLBACK]');
+  });
+
+  // T-158-7 (AC-6, CD-11): éxito al 1er intento → cero latencia/llamada extra.
+  it('T-158-7: success on first attempt → no extra LLM call', async () => {
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'wasiai',
+            input: { query: 'summarize' },
+            reasoning: 'ok',
+          },
+        ],
+        reasoning: 'happy path plan',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      { goal: 'summarize a paper on quantum', budget: 5.0 },
+      'orch-158-7',
+    );
+
+    // Exactamente 1 invocación: sin retry en el happy path.
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(result.reasoning).not.toContain('[FALLBACK]');
+    expect(result.answer).toBeDefined();
+  });
+
+  // T-158-8 (AC-8, AC-9): un `no_relevant_agent` legítimo queda intacto vía el
+  // path GREEDY. Ambos intentos del LLM fallan (transitorio) → 2 invocaciones →
+  // greedy → `fallbackNoRelevance` (goal sin overlap). Downstream money-safe:
+  // no debit / no compose / no fee. (El caso LLM-SUCCESS all-demos lo cubre
+  // T-158-8b: ahí el retry NO dispara porque `plan !== null`.)
+  it('T-158-8: legitimate no_relevant_agent stays intact via greedy path (downstream identical)', async () => {
+    setLlmError(new Error('API timeout'));
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'asdfqwerty12345',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-158-8',
+    );
+
+    expect(result.pipeline.success).toBe(false);
+    expect(result.reasoning).toContain('no_relevant_agent');
+    expect(result.pipeline.steps).toHaveLength(0);
+    expect(result.protocolFeeUsdc).toBe(0);
+    // Con el retry: ambos intentos fallan → 2 invocaciones antes del greedy.
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    // Downstream money-safe idéntico: nada se movió.
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
+    expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
+  });
+
+  // T-158-8b (AC-8 ESTRICTO): el LLM RESPONDE con ÉXITO (mock resuelto, NO
+  // reject) un plan compuesto SÓLO de demos echo → `plan !== null` ⇒ el retry
+  // NO dispara (mockCreate 1×, prueba que el reintento vive sólo en el path
+  // `plan === null`, no cuando el LLM devuelve un plan aunque sea no-cobrable) →
+  // cae a `no_relevant_agent` por `allStepsAreDemos` (orchestrate.ts:830), sin
+  // débito/compose/fee. Complementa T-158-8 (que ejercita el path greedy vía
+  // doble fallo transitorio, mockCreate 2×). Demos por slug exacto
+  // (`base-demo`, orchestrate.ts:66).
+  it('T-158-8b: LLM-success all-demos plan → NO retry (1×) → no_relevant_agent, money-safe', async () => {
+    const demoAgent: Agent = {
+      ...mockAgents[0]!,
+      id: 'demo-base',
+      name: 'Base Demo Echo',
+      slug: 'base-demo',
+      description: 'Trivial echo agent',
+      capabilities: ['echo'],
+      priceUsdc: 0.01,
+      verified: true,
+    };
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [demoAgent],
+      total: 1,
+      registries: ['wasiai'],
+    });
+    vi.mocked(discoveryService.getAgent).mockImplementation(async (slug) =>
+      slug === 'base-demo' ? demoAgent : null,
+    );
+    // El LLM RESPONDE con éxito (resuelto, NO reject) un plan de sólo demos.
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'base-demo',
+            registry: 'wasiai',
+            input: { text: 'ping' },
+            reasoning: 'only demo available',
+          },
+        ],
+        reasoning: 'Selected demo echo',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'summarize a research paper',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-158-8b',
+    );
+
+    // AC-8 estricto: `plan !== null` ⇒ el retry NO dispara → exactamente 1×.
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    // all-demos ⇒ no_relevant_agent (backstop), pipeline sin éxito, cero fee.
+    expect(result.pipeline.success).toBe(false);
+    expect(result.reasoning).toContain('no_relevant_agent');
+    expect(result.pipeline.steps).toHaveLength(0);
+    expect(result.protocolFeeUsdc).toBe(0);
+    // Money-safe: nada se movió.
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
+    expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
+  });
 });

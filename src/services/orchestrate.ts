@@ -135,6 +135,16 @@ function getAnthropicClient(): Anthropic | null {
 }
 
 /**
+ * WKH-158: true iff the LLM planner is configured (Anthropic client available,
+ * i.e. `ANTHROPIC_API_KEY` present). Thin proxy over `getAnthropicClient()` used
+ * to discriminate a transient `llmPlan` failure (retry-able) from a permanent
+ * `!client` config-absent failure (NOT retry-able → greedy directo).
+ */
+function plannerConfigured(): boolean {
+  return getAnthropicClient() !== null;
+}
+
+/**
  * WKH-114 (AC-1/AC-7): sanea los AC emitidos por el planner LLM en el MISMO
  * call (getPlannerModel/getPlannerMaxTokens — cero LLM extra, cero literal de
  * modelo). Conserva strings no-vacíos (trim), recorta a máx 4. Devuelve null
@@ -653,19 +663,36 @@ export const orchestrateService = {
     // for the "LLM failed/returned null" case; an open breaker is the SAME
     // degraded-but-up situation. Catch it here and route to the greedy fallback
     // (`plan = null`) so orchestrate stays available instead of 503-ing.
-    let plan: Awaited<ReturnType<typeof llmPlan>>;
-    try {
-      plan = await llmPlan(goal, budget, candidateAgents, maxAgents);
-    } catch (err) {
-      if (err instanceof CircuitOpenError) {
-        log.warn(
-          { orchestrationId },
-          '[Orchestrate] planner circuit open — using greedy fallback',
-        );
-        plan = null;
-      } else {
-        throw err;
+    // WKH-158: retry `llmPlan` EXACTLY once on a TRANSIENT failure (timeout /
+    // net / 5xx / 429 / bad JSON / empty selectedAgents → `plan === null`) before
+    // falling to greedy. A PERMANENT failure is NOT retried: `!client` (no
+    // ANTHROPIC_API_KEY → `plannerConfigured() === false`) and `CircuitOpenError`
+    // (breaker open → `circuitOpen === true`) both break immediately to greedy.
+    // Bounded to `attempt <= 1` (max 2 `llmPlan` invocations). The single `plan`
+    // var carries the FINAL value into the untouched `if (plan)` below — no
+    // debit/compose runs inside the loop, so no double-plan / double-charge.
+    let plan: Awaited<ReturnType<typeof llmPlan>> = null;
+    for (let attempt = 0; attempt <= 1; attempt++) {
+      let circuitOpen = false;
+      try {
+        plan = await llmPlan(goal, budget, candidateAgents, maxAgents);
+      } catch (err) {
+        if (err instanceof CircuitOpenError) {
+          log.warn(
+            { orchestrationId },
+            '[Orchestrate] planner circuit open — using greedy fallback',
+          );
+          plan = null;
+          circuitOpen = true;
+        } else {
+          throw err;
+        }
       }
+
+      if (plan) break; // success (1st or retry) — no extra latency
+      if (circuitOpen) break; // breaker open — no retry, greedy directo
+      if (!plannerConfigured()) break; // !client (no API key) — no retry, greedy
+      // else: transient `plan === null` with client configured — retry once
     }
 
     if (plan) {
