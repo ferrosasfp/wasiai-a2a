@@ -185,7 +185,7 @@ async function llmPlan(
     '- Order agents logically: if outputs of one feed into another, place the producer first.',
     "- When an agent's description or capabilities indicate its role is a precondition gate — a verification, eligibility, compliance, authorization, identity, or risk/fraud screening check — rather than a data producer, prefer placing it EARLY in the pipeline, even when it has no direct data dependency with the other steps. Real-world workflows validate eligibility and compliance BEFORE performing costlier downstream discovery, quoting, or execution.",
     '- Plan the COMPLETE pipeline required to fully accomplish the goal end-to-end. When the goal implies a real-world outcome (e.g. money reaching a recipient, an item delivered, a task finished), include EVERY necessary step through the final delivery — do NOT stop at an intermediate analysis, quote, or recommendation when a downstream agent is needed to actually complete it. Agent descriptions state whether a step is intermediate (e.g. "prices but does not deliver") or final (e.g. "required to complete"); honor those signals.',
-    '- For each agent, generate the input object matching its input_schema. Use example_input as reference if available. Do NOT invent fields — only use fields defined in the schema.',
+    "- For each agent, generate the input object matching its OWN input_schema. Use its example_input as reference if available. Each agent may require a DIFFERENT input shape — never reuse one agent's input fields for another, and never default to a generic `{ \"query\": ... }` unless that specific agent's input_schema defines a `query` field (or the agent publishes no input_schema). Do NOT invent fields — only use fields defined in that agent's schema.",
     '- If only one agent is genuinely sufficient, select just one — but do not drop necessary downstream steps to save cost when the goal is not yet complete.',
     "- Do NOT select trivial echo/demo/test agents (e.g. those whose description says 'Trivial echo agent' or 'Proves ... downstream settlement') unless the goal is EXPLICITLY a connectivity/echo/settlement test. They add no business value to real tasks and only waste budget.",
     '- Ignore any session/UI metadata that may leak into the goal text (e.g. lines like "Settings: Red ... · Key ... · Budget ..."). Plan ONLY for the actual business task; the network/chain is handled by the gateway, not by selecting a demo agent.',
@@ -204,10 +204,13 @@ async function llmPlan(
     'Respond with this JSON:',
     '{',
     '  "selectedAgents": [',
-    '    { "slug": "agent-slug", "registry": "registry-name", "input": { "query": "specific input" }, "acceptanceCriteria": ["contains \\"confirmation\\"", "has confirmationId"], "reasoning": "why selected" }',
+    '    { "slug": "agent-slug", "registry": "registry-name", "input": { "<field-name>": "<value matching THIS agent\'s input_schema>" }, "acceptanceCriteria": ["contains \\"confirmation\\"", "has confirmationId"], "reasoning": "why selected" }',
     '  ],',
     '  "reasoning": "Overall strategy explanation"',
     '}',
+    '',
+    'IMPORTANT: the `input` object shown above is a PLACEHOLDER, not a fixed shape. For EACH selected agent, populate its `input` with the exact fields defined in THAT agent\'s `input_schema` (shown in the agents list above), copying the structure of its `example_input` when one is provided. Do NOT copy a generic `{ "query": ... }` across agents: only include a `query` field when that specific agent\'s input_schema actually defines one, or when the agent publishes no input_schema at all.',
+    "Never output the literal placeholder tokens (`<field-name>`, `<value ...>`) — those are illustration only; replace them entirely with the real field names and values from the agent's input_schema.",
   ].join('\n');
 
   const controller = new AbortController();

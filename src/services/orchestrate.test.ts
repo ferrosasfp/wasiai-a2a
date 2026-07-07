@@ -1582,6 +1582,115 @@ describe('orchestrateService', () => {
     expect(system).toContain('place the producer first');
   });
 
+  // ─── WKH-153 ─ Planner input derived from per-agent input_schema ────────
+
+  // T-INPUT-1 (AC-1/AC-3): the userPrompt output example MUST NOT hardcode the
+  // biased `"input": { "query": "specific input" }` as the single shape, AND
+  // MUST instruct the LLM to derive `input` from each agent's own input_schema.
+  // Prompt-CONTENT assertion — the real LLM behavior is not testable in CI
+  // (non-deterministic); we assert the string that primes it.
+  it('T-INPUT-1: userPrompt drops the biased {query} example and points at input_schema', async () => {
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'wasiai',
+            input: { query: 'x' },
+            reasoning: 'ok',
+          },
+        ],
+        reasoning: 'ok',
+      }),
+    );
+
+    await orchestrateService.orchestrate(
+      { goal: 'input schema check', budget: 5.0 },
+      'orch-input-1',
+    );
+
+    const prompt = plannerPromptText();
+    // AC-3: the old single biased example is gone from the format block.
+    expect(prompt).not.toContain('"input": { "query": "specific input" }');
+    // AC-1: the prompt now flags the example as a placeholder and points the
+    // LLM at each agent's own input_schema.
+    expect(prompt).toContain('PLACEHOLDER');
+    expect(prompt).toContain('input_schema');
+    expect(prompt).toContain('example_input');
+    // Anchor exclusively to the NOTE text (these phrases cannot appear in the
+    // agentList JSON), so the assertions can't pass on incidental token matches.
+    expect(prompt).toContain('is a PLACEHOLDER, not a fixed shape');
+    // AR MNR-1: the note explicitly forbids emitting the literal placeholder tokens.
+    expect(prompt).toContain('Never output the literal placeholder');
+    // The systemPrompt reinforces per-agent derivation (no cross-agent reuse).
+    const system = plannerSystemPrompt();
+    expect(system).toContain('OWN input_schema');
+    expect(system).toContain('never reuse');
+  });
+
+  // T-INPUT-2 (AC-4): when the LLM returns a STRUCTURED input (not {query}) for
+  // an agent whose schema defines it, llmPlan/planOrchestration propagates it
+  // intact to the step — no mutation, no forcing to {query}. Read-only /plan
+  // path so no compose/debit noise.
+  it('T-INPUT-2: structured input from the LLM propagates intact to the step', async () => {
+    const structured = {
+      amountUSD: 400,
+      receiverCountry: 'PE',
+      senderName: 'Ada',
+    };
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'wasiai',
+            input: structured,
+            reasoning: 'remittance shape',
+          },
+        ],
+        reasoning: 'ok',
+      }),
+    );
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'send 400 USD to Peru', budget: 5.0 },
+      'plan-input-2',
+    );
+
+    expect(plan.steps.length).toBe(1);
+    // Propagated verbatim — not coerced to { query: ... } anywhere downstream.
+    expect(plan.steps[0]!.input).toEqual(structured);
+    expect(plan.steps[0]!.input).not.toHaveProperty('query');
+  });
+
+  // T-INPUT-3 (AC-2/CD-3): agents whose input IS { query } are NOT broken. The
+  // LLM returns a {query} input (valid for a free-form / schema-less agent) and
+  // it must still flow through unchanged.
+  it('T-INPUT-3: {query} input stays valid for free-form / schema-less agents', async () => {
+    const queryInput = { query: 'summarize this' };
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'summarizer-v1',
+            registry: 'wasiai',
+            input: queryInput,
+            reasoning: 'free-form agent',
+          },
+        ],
+        reasoning: 'ok',
+      }),
+    );
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'summarize a doc', budget: 5.0 },
+      'plan-input-3',
+    );
+
+    expect(plan.steps.length).toBe(1);
+    expect(plan.steps[0]!.input).toEqual(queryInput);
+  });
+
   // T-W1 (WKH-128 change 1+2): demos are deprioritized so a genuinely relevant
   // agent reaches the planner window AND is the one selected/settled — not the
   // cheap demo. Discovery returns demos FIRST (mirrors prod verified-first sort),
