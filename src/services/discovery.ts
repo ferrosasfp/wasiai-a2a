@@ -255,10 +255,57 @@ export const discoveryService = {
       return { agents: [], total: 0, registries: [] };
     }
 
+    // First attempt: forward query.query upstream (existing behavior — DT-1).
+    let result = await this.runDiscoveryPipeline(
+      query,
+      registries,
+      localAgents,
+      false,
+    );
+
+    // WKH-157 broaden-retry: a registry's own strict search backend can drop
+    // free-text (`q`) matches BEFORE our permissive local substring filter ever
+    // runs. If the full pipeline yields 0 agents AND a free-text query was
+    // provided, retry ONCE without forwarding `q` upstream so the local filter
+    // (name/description/capabilities substring) runs over the complete set.
+    // Gate is `total === 0 && query.query` truthy → the planner path
+    // (orchestrate.ts:520-524, capabilities-only, no `query`) NEVER triggers
+    // this (money-path safe, DT-2 mirror of WKH-151). Single retry, no loop
+    // (CD-3). Additive/degradable: the pipeline swallows per-registry errors
+    // (CD-4), so the retry can only ever return more or the same 0.
+    if (result.total === 0 && query.query) {
+      log.info(
+        { query: query.query },
+        'discover free-text 0 results — broaden retry without upstream q',
+      );
+      result = await this.runDiscoveryPipeline(
+        query,
+        registries,
+        localAgents,
+        true,
+      );
+    }
+
+    return result;
+  },
+
+  /**
+   * WKH-157: the shared discover pipeline (fanout → merge → filters → sort →
+   * limit → enrich). Extracted from `discover()` so it can run twice for the
+   * free-text broaden-retry. `skipUpstreamQuery=true` omits forwarding `q` to
+   * the registries (the local substring filter still runs). `localAgents` is
+   * the already-fetched self-published set (no re-fetch across attempts).
+   */
+  async runDiscoveryPipeline(
+    query: DiscoveryQuery,
+    registries: RegistryConfig[],
+    localAgents: Agent[],
+    skipUpstreamQuery: boolean,
+  ): Promise<DiscoveryResult> {
     // Query all registries in parallel
     const results = await Promise.all(
       registries.map((registry) =>
-        this.queryRegistry(registry, query).catch((err) => {
+        this.queryRegistry(registry, query, skipUpstreamQuery).catch((err) => {
           // TD-sprint-security MNR-5: SSRF violations are config issues,
           // not transient errors — log them with a distinct prefix so
           // operators can grep for misconfigured registry endpoints.
@@ -430,6 +477,7 @@ export const discoveryService = {
   async queryRegistry(
     registry: RegistryConfig,
     query: DiscoveryQuery,
+    skipUpstreamQuery = false,
   ): Promise<Agent[]> {
     // SSRF guard (WKH-62) — validate before any fetch (CD-A3: outside
     // circuit breaker scope so SSRF attempts don't pollute breaker stats).
@@ -447,7 +495,10 @@ export const discoveryService = {
         query.capabilities.join(','),
       );
     }
-    if (query.query && schema.queryParam) {
+    // WKH-157: on the broaden-retry (skipUpstreamQuery) we deliberately do NOT
+    // forward `q` upstream — the local substring filter in the pipeline runs
+    // over the full registry set instead.
+    if (query.query && schema.queryParam && !skipUpstreamQuery) {
       url.searchParams.set(schema.queryParam, query.query);
     }
     if (query.limit && schema.limitParam) {
