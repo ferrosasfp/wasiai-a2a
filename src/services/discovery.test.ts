@@ -1392,3 +1392,179 @@ describe('discover — reputation enrichment (WKH-103)', () => {
     expect('computedReputation' in result.agents[0]!).toBe(false);
   });
 });
+
+// ── WKH-157: free-text (q) broaden-retry ───────────────────────────────
+// When a registry forwards `q` to its own strict search backend, relevant
+// agents can be dropped before the permissive local substring filter runs.
+// discover() retries ONCE without forwarding q upstream — gated on
+// `total === 0 && query.query` truthy so the planner path (capabilities-only,
+// no `query`) never triggers it (money-path safe, mirror of WKH-151).
+describe('discover — free-text broaden-retry (WKH-157)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setIdentityRows([]);
+    setReputationBatch([]);
+  });
+
+  // Registry whose schema forwards `q` upstream (queryParam configured), so the
+  // first attempt actually appends `q` to the fetch URL.
+  function makeSearchRegistry(): RegistryConfig {
+    return makeRegistry({
+      schema: {
+        discovery: { queryParam: 'q' },
+        invoke: { method: 'POST' },
+      },
+    });
+  }
+
+  function urlHasQ(input: unknown): boolean {
+    return new URL(String(input)).searchParams.has('q');
+  }
+
+  it('AC-1: 0 upstream with q but a local substring match → retry without upstream q recovers the agent; queryRegistry called 2x (2nd without q)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeSearchRegistry(),
+    ]);
+    const spy = vi.spyOn(discoveryService, 'queryRegistry');
+    // Fetch branches on whether `q` was forwarded: with q the registry's strict
+    // backend drops everything; without q it returns the full set, which the
+    // local substring filter then narrows to the sentiment match.
+    mockFetch.mockImplementation((input: unknown) => {
+      if (urlHasQ(input)) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            makeRawAgent({
+              id: 's1',
+              slug: 'sentiment-analyzer',
+              name: 'Sentiment Analyzer',
+              capabilities: ['sentiment'],
+              status: 'active',
+            }),
+            makeRawAgent({
+              id: 'o1',
+              slug: 'weather-bot',
+              name: 'Weather Bot',
+              capabilities: ['weather'],
+              status: 'active',
+            }),
+          ]),
+      });
+    });
+
+    const result = await discoveryService.discover({ query: 'sentiment' });
+
+    expect(result.agents).toHaveLength(1);
+    expect(result.agents[0]!.slug).toBe('sentiment-analyzer');
+    // 1 registry × 2 attempts = 2 queryRegistry calls; the retry passes
+    // skipUpstreamQuery=true.
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy.mock.calls[0]![2]).toBe(false);
+    expect(spy.mock.calls[1]![2]).toBe(true);
+    // The second fetch omits the q param entirely.
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(urlHasQ(mockFetch.mock.calls[0]![0])).toBe(true);
+    expect(urlHasQ(mockFetch.mock.calls[1]![0])).toBe(false);
+    // Retry telemetry (AC-7).
+    expect(logSpy.info).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC-2: q returns ≥1 agent on the first attempt → NO retry (1 queryRegistry call)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeSearchRegistry(),
+    ]);
+    const spy = vi.spyOn(discoveryService, 'queryRegistry');
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          makeRawAgent({
+            id: 's1',
+            slug: 'sentiment-analyzer',
+            name: 'Sentiment Analyzer',
+            capabilities: ['sentiment'],
+            status: 'active',
+          }),
+        ]),
+    });
+
+    const result = await discoveryService.discover({ query: 'sentiment' });
+
+    expect(result.agents).toHaveLength(1);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(logSpy.info).not.toHaveBeenCalled();
+  });
+
+  it('AC-4 (planner path): discover({capabilities,maxPrice,limit}) with 0 result does NOT retry (no query.query)', async () => {
+    // Exactly the shape orchestrate.ts:520-524 passes — no `query` field.
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeSearchRegistry(),
+    ]);
+    const spy = vi.spyOn(discoveryService, 'queryRegistry');
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          makeRawAgent({
+            id: 't1',
+            slug: 'translator',
+            name: 'Translator',
+            capabilities: ['translation'],
+            status: 'active',
+          }),
+        ]),
+    });
+
+    const result = await discoveryService.discover({
+      capabilities: ['image-generation'],
+      maxPrice: 1,
+      limit: 5,
+    });
+
+    expect(result.agents).toHaveLength(0);
+    // No query.query → gate never fires, even though the result is 0.
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(logSpy.info).not.toHaveBeenCalled();
+  });
+
+  it('AC-3: retry also 0 → returns the empty result (agents:[], total:0) with exactly one retry (no loop)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeSearchRegistry(),
+    ]);
+    const spy = vi.spyOn(discoveryService, 'queryRegistry');
+    mockFetch.mockImplementation((input: unknown) => {
+      if (urlHasQ(input)) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+      }
+      // Retry: registry returns agents, but none match the free-text.
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            makeRawAgent({
+              id: 'w1',
+              slug: 'weather-bot',
+              name: 'Weather Bot',
+              capabilities: ['weather'],
+              status: 'active',
+            }),
+          ]),
+      });
+    });
+
+    const result = await discoveryService.discover({
+      query: 'nonexistent-capability',
+    });
+
+    expect(result.agents).toHaveLength(0);
+    expect(result.total).toBe(0);
+    // Exactly one retry — CD-3: no loop.
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(logSpy.info).toHaveBeenCalledTimes(1);
+  });
+});
