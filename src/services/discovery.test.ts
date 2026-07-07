@@ -1567,4 +1567,92 @@ describe('discover — free-text broaden-retry (WKH-157)', () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(logSpy.info).toHaveBeenCalledTimes(1);
   });
+
+  // NIT-2 (CR): AC-1 above returns a single agent, so the verified-first →
+  // reputation → price sort is never exercised ON the retried path (only on the
+  // direct path via the WKH-103 sort tests). This asserts the sort — the same
+  // extracted block — actually runs INSIDE runDiscoveryPipeline when called with
+  // skipUpstreamQuery=true. Genuinely discriminant: the expected order is the
+  // INVERSE of both insertion order and price, so a no-op/trivial sort would
+  // fail. price is inversely correlated with verified (the verified agents are
+  // the pricey ones) → the only thing that can produce the asserted order is the
+  // verified-first → reputation(desc) → price sort running on the retry result.
+  it('NIT-2: retry path applies verified-first → reputation → price sort (≥2 agents, order inverse to insertion/price)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeSearchRegistry(),
+    ]);
+    const spy = vi.spyOn(discoveryService, 'queryRegistry');
+    // First attempt (q forwarded) → strict backend drops everything. Retry
+    // (no q) → returns the full set in an order that is WRONG for the sort:
+    // the cheapest, highest-reputation agent is unverified and listed first.
+    mockFetch.mockImplementation((input: unknown) => {
+      if (urlHasQ(input)) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            // Insertion-first, cheapest, best upstream rep — but UNVERIFIED,
+            // so the sort must push it LAST.
+            makeRawAgent({
+              id: 'u1',
+              slug: 'budget-unverified',
+              name: 'Budget Payments',
+              capabilities: ['payments'],
+              status: 'active',
+              verified: false,
+              price: 1,
+              reputation: 99,
+            }),
+            // Verified but LOWER reputation → must land 2nd (behind the
+            // higher-rep verified agent) despite equal price.
+            makeRawAgent({
+              id: 'v2',
+              slug: 'premium-lowrep',
+              name: 'Premium Payments B',
+              capabilities: ['payments'],
+              status: 'active',
+              verified: true,
+              price: 100,
+              reputation: 10,
+            }),
+            // Verified + HIGHEST reputation → must land 1st despite being the
+            // priciest and listed last.
+            makeRawAgent({
+              id: 'v1',
+              slug: 'premium-hirep',
+              name: 'Premium Payments A',
+              capabilities: ['payments'],
+              status: 'active',
+              verified: true,
+              price: 100,
+              reputation: 80,
+            }),
+          ]),
+      });
+    });
+
+    const result = await discoveryService.discover({ query: 'pay' });
+
+    // Retry fired: 2 queryRegistry calls, 2nd with skipUpstreamQuery=true; the
+    // 2nd fetch omits q.
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy.mock.calls[0]![2]).toBe(false);
+    expect(spy.mock.calls[1]![2]).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(urlHasQ(mockFetch.mock.calls[1]![0])).toBe(false);
+    expect(logSpy.info).toHaveBeenCalledTimes(1);
+
+    // The sort ran INSIDE the retried runDiscoveryPipeline: verified-first, then
+    // reputation desc, then price asc — the exact inverse of insertion order.
+    expect(result.agents).toHaveLength(3);
+    expect(result.agents.map((a) => a.slug)).toEqual([
+      'premium-hirep', // verified + rep 80
+      'premium-lowrep', // verified + rep 10
+      'budget-unverified', // unverified (last despite cheapest + rep 99)
+    ]);
+    expect(result.agents[0]!.verified).toBe(true);
+    expect(result.agents[2]!.verified).toBe(false);
+  });
 });
