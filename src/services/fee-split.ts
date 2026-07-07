@@ -453,9 +453,16 @@ async function chargeLeg(
       requiredAmountAtomic: BigInt(wei),
     });
     if (reVerified.warn) {
+      // WKH-150 AC-1a/1c: the message must reflect the actual outcome. On
+      // TESTNET (fail-OPEN, `ok:true`) we preserve the historical text
+      // byte-for-byte. On MAINNET (fail-CLOSED, `ok:false`, WKH-144) we say
+      // REJECTING — the leg is failed in the `!reVerified.ok` block below, so
+      // "trusting facilitator" would be contradictory. No logic changes here.
       log.warn(
         { orchestrationId, role, reason: reVerified.reason },
-        'split leg settle re-verify unavailable, trusting facilitator',
+        reVerified.ok
+          ? 'split leg settle re-verify unavailable, trusting facilitator'
+          : 'split leg settle re-verify unavailable — REJECTING facilitator response (fail-closed mainnet)',
       );
     }
     if (!reVerified.ok) {

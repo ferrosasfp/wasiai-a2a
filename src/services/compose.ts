@@ -964,8 +964,15 @@ export const composeService = {
         // MNR-1: RPC_UNAVAILABLE (a2a couldn't independently check) → ALLOW the
         // settle (facilitator already confirmed it) but log a clear warning.
         if (reVerified.warn) {
+          // WKH-150 AC-1b/1c: message reflects the outcome. TESTNET (fail-OPEN,
+          // `ok:true`) preserves the historical text byte-for-byte; MAINNET
+          // (fail-CLOSED, `ok:false`, WKH-144) says REJECTING — the settle is
+          // thrown below in the `!reVerified.ok` block, so "trusting" would be
+          // contradictory. No decision logic changes here.
           log.warn(
-            `[Compose] settle on-chain re-verify unavailable for ${agent.slug} (${reVerified.reason ?? 'unknown'}), trusting facilitator confirmation`,
+            reVerified.ok
+              ? `[Compose] settle on-chain re-verify unavailable for ${agent.slug} (${reVerified.reason ?? 'unknown'}), trusting facilitator confirmation`
+              : `[Compose] settle on-chain re-verify unavailable for ${agent.slug} (${reVerified.reason ?? 'unknown'}) — REJECTING facilitator confirmation (fail-closed mainnet)`,
           );
         }
         // A DEFINITIVE contradiction (forged/insufficient/wrong tx) → reject.
