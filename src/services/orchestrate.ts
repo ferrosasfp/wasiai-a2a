@@ -484,7 +484,14 @@ export const orchestrateService = {
             latencyMs: Date.now() - startTime,
             costUsdc: 0,
             goal,
-            metadata: { orchestrationId, agentCount: 0, fallback: false },
+            // WKH-151: pre-discovery early-return ⇒ el retry nunca pudo disparar.
+            metadata: {
+              orchestrationId,
+              agentCount: 0,
+              fallback: false,
+              broadenRetryUsed: false,
+              retryAgentCount: null,
+            },
           })
           .catch((err) =>
             log.error({ err }, '[Orchestrate] event tracking failed'),
@@ -502,11 +509,47 @@ export const orchestrateService = {
     // de `maxAgents * 2`. Con el sort verified-first de discovery, una ventana
     // chica se llenaba de los 3 demos echo + agentshop y dejaba fuera a los
     // agentes de negocio relevantes. El filtro maxPrice/budget se mantiene igual.
-    const discovered = await discoveryService.discover({
+    // WKH-151 (telemetría additive): marcadores del broaden-retry para el evento
+    // `orchestrate_goal`. broadenRetryUsed=true sólo si el retry sin-caps disparó;
+    // retryAgentCount = cuántos agentes trajo el retry (null si no hubo retry).
+    let broadenRetryUsed = false;
+    let retryAgentCount: number | null = null;
+    let discovered = await discoveryService.discover({
       capabilities: preferCapabilities,
       maxPrice: budget / maxAgents,
       limit: 50,
     });
+
+    // WKH-151 (AC-1/AC-7): broaden-retry. Cuando el caller manda
+    // `preferCapabilities` que no matchean el nombre EXACTO de las capabilities
+    // publicadas por los agentes relevantes (p.ej. Chaski vs `remit.*` en bdwv),
+    // el primer discovery vuelve vacío y el early-return `no_agents` de abajo
+    // corta ANTES de que el LLM planner —que hace el matching de relevancia real—
+    // vea ningún candidato. Un ÚNICO retry (CD-3) sin el filtro de capabilities
+    // (DT-2: `capabilities` omitido = el mismo camino que un caller que nunca
+    // mandó caps, discovery.ts:311) repuebla el candidate set. CD-2: `maxPrice`
+    // y `limit` se preservan idénticos — solo se remueve el filtro de caps, no se
+    // relaja el precio. AC-7/CD-5: solo se reintenta si había un filtro de caps
+    // que remover; si `preferCapabilities` ya venía vacío/undefined el retry sería
+    // idéntico al primero → no se ejecuta (cero llamadas extra en ese caso y en el
+    // happy path donde el primer discovery ya trajo agentes).
+    if (discovered.agents.length === 0 && preferCapabilities?.length) {
+      discovered = await discoveryService.discover({
+        maxPrice: budget / maxAgents,
+        limit: 50,
+      });
+      broadenRetryUsed = true;
+      retryAgentCount = discovered.agents.length;
+      log.info(
+        {
+          orchestrationId,
+          firstPassCaps: preferCapabilities.length,
+          retriedWithoutCaps: true,
+          retryAgentCount: discovered.agents.length,
+        },
+        '[Orchestrate] discovery retry without capability filter',
+      );
+    }
 
     // AC5: No agents found — return gracefully
     if (discovered.agents.length === 0) {
@@ -536,7 +579,13 @@ export const orchestrateService = {
           latencyMs: Date.now() - startTime,
           costUsdc: 0,
           goal,
-          metadata: { orchestrationId, agentCount: 0, fallback: false },
+          metadata: {
+            orchestrationId,
+            agentCount: 0,
+            fallback: false,
+            broadenRetryUsed,
+            retryAgentCount,
+          },
         })
         .catch((err) =>
           log.error({ err }, '[Orchestrate] event tracking failed'),
@@ -701,7 +750,13 @@ export const orchestrateService = {
           latencyMs: Date.now() - startTime,
           costUsdc: 0,
           goal,
-          metadata: { orchestrationId, agentCount: 0, fallback: usedFallback },
+          metadata: {
+            orchestrationId,
+            agentCount: 0,
+            fallback: usedFallback,
+            broadenRetryUsed,
+            retryAgentCount,
+          },
         })
         .catch((err) =>
           log.error({ err }, '[Orchestrate] event tracking failed'),
@@ -791,6 +846,8 @@ export const orchestrateService = {
             fallback: usedFallback,
             reason: 'no_relevant_agent',
             hasRealCandidate,
+            broadenRetryUsed,
+            retryAgentCount,
           },
         })
         .catch((err) =>
@@ -851,6 +908,9 @@ export const orchestrateService = {
       debitFallback: false,
       billingKeyRow,
       discoveredAgents: discovered.agents,
+      // WKH-151: viajan a executeApprovedPlan para marcar el evento de éxito.
+      broadenRetryUsed,
+      retryAgentCount,
     };
   },
 
@@ -1047,6 +1107,8 @@ export const orchestrateService = {
               orchestrationId,
               agentCount: steps.length,
               fallback: usedFallback,
+              broadenRetryUsed: plan.broadenRetryUsed ?? false,
+              retryAgentCount: plan.retryAgentCount ?? null,
             },
           })
           .catch((err) =>
@@ -1275,6 +1337,9 @@ export const orchestrateService = {
           agentCount: steps.length,
           fallback: usedFallback,
           protocolFeeUsdc,
+          // WKH-151: confirma en bdwv que el broaden-retry resolvió el $0.
+          broadenRetryUsed: plan.broadenRetryUsed ?? false,
+          retryAgentCount: plan.retryAgentCount ?? null,
         },
       })
       .catch((err) =>

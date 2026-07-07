@@ -565,6 +565,18 @@ export interface OrchestratePlanResult {
    * `remainingBudgetUsd` byte-idéntico al atómico. No se serializa al cliente.
    */
   remainingBudgetUsd?: string;
+  /**
+   * WKH-151 (telemetría additive): true si el broaden-retry sin-caps disparó en
+   * planOrchestration. Viaja a executeApprovedPlan para marcar el evento
+   * `orchestrate_goal` (confirma en bdwv que el retry resolvió el $0). Interno;
+   * el route NO lo serializa al cliente.
+   */
+  broadenRetryUsed?: boolean;
+  /**
+   * WKH-151 (telemetría additive): agentes que trajo el retry sin-caps (null si
+   * no hubo retry). Interno; NO se serializa al cliente.
+   */
+  retryAgentCount?: number | null;
 }
 
 export interface OrchestrateExecuteRequest extends OrchestrateRequest {

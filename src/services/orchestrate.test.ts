@@ -2385,6 +2385,217 @@ describe('orchestrateService', () => {
     expect(vi.mocked(eventService.track)).toHaveBeenCalledTimes(1);
   });
 
+  // ─── WKH-151 ─ Discovery broaden-retry (fix plan vacío intermitente) ────────
+  //
+  // Cuando el caller manda `preferCapabilities` que no matchean el nombre exacto
+  // de las capabilities publicadas, el primer discovery da 0 agentes. Un ÚNICO
+  // retry sin el filtro de capabilities (mismo maxPrice/limit — CD-2) repuebla el
+  // candidate set para que el LLM planner haga el matching de relevancia real.
+
+  // T-WKH151-1 (AC-1/AC-2): 1er discover (con caps) vacío → retry sin caps trae
+  // agentes → discover se llamó 2x, el 2º SIN capabilities y con el MISMO maxPrice
+  // (CD-2), y el flujo sigue al planner (planStatus 'ready', NO early-return).
+  it('T-WKH151-1: caps-empty first pass → retry without caps, 2 discover calls, flow reaches planner', async () => {
+    setLlmSummarizer();
+    // 1er call (con caps) → vacío; 2º call (sin caps) → los agentes reales.
+    vi.mocked(discoveryService.discover)
+      .mockResolvedValueOnce({ agents: [], total: 0, registries: [] })
+      .mockResolvedValueOnce(mockDiscoveryResult);
+
+    const plan = await orchestrateService.planOrchestration(
+      {
+        goal: 'send remittance',
+        budget: 5.0,
+        preferCapabilities: ['remit.corridor-discovery'],
+      },
+      'wkh151-1',
+    );
+
+    // El retry ocurrió: exactamente 2 llamadas a discover.
+    expect(vi.mocked(discoveryService.discover)).toHaveBeenCalledTimes(2);
+    const firstArg = vi.mocked(discoveryService.discover).mock.calls[0]![0];
+    const secondArg = vi.mocked(discoveryService.discover).mock.calls[1]![0];
+    // 1er intento: CON el filtro de capabilities.
+    expect(firstArg.capabilities).toEqual(['remit.corridor-discovery']);
+    // 2º intento (retry): SIN capabilities.
+    expect(secondArg.capabilities).toBeUndefined();
+    // CD-2: maxPrice NO se relaja — idéntico (budget/maxAgents = 5.0/5 = 1.0) y
+    // limit se mantiene (50) en el retry.
+    expect(firstArg.maxPrice).toBe(1.0);
+    expect(secondArg.maxPrice).toBe(1.0);
+    expect(secondArg.limit).toBe(50);
+    // AC-2: el flujo siguió al planner con los agentes del retry (no early-return).
+    expect(plan.planStatus).toBe('ready');
+    expect(plan.steps.length).toBeGreaterThan(0);
+    // WKH-151 (telemetría additive): el plan lleva los marcadores del broaden-retry
+    // (viajan a executeApprovedPlan → evento `orchestrate_goal` de éxito en bdwv).
+    expect(plan.broadenRetryUsed).toBe(true);
+    expect(plan.retryAgentCount).toBe(mockDiscoveryResult.agents.length);
+    // AC-6: log estructurado del retry, sin secrets.
+    expect(vi.mocked(logSpy.info)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orchestrationId: 'wkh151-1',
+        retriedWithoutCaps: true,
+        firstPassCaps: 1,
+        retryAgentCount: mockDiscoveryResult.agents.length,
+      }),
+      expect.stringContaining('discovery retry without capability filter'),
+    );
+  });
+
+  // T-WKH151-2 (AC-3/CD-5): el primer discovery YA trae agentes → NO retry.
+  // discover se llama 1 sola vez (cero overhead en el happy path).
+  it('T-WKH151-2: first discovery has agents → no retry (1 discover call)', async () => {
+    setLlmSummarizer();
+    // beforeEach ya deja discover → mockDiscoveryResult (2 agentes) por default.
+
+    const plan = await orchestrateService.planOrchestration(
+      {
+        goal: 'send remittance',
+        budget: 5.0,
+        preferCapabilities: ['remit.corridor-discovery'],
+      },
+      'wkh151-2',
+    );
+
+    expect(vi.mocked(discoveryService.discover)).toHaveBeenCalledTimes(1);
+    expect(plan.planStatus).toBe('ready');
+    // WKH-151: sin retry ⇒ marcadores en falso/null (happy path, cero overhead).
+    expect(plan.broadenRetryUsed).toBe(false);
+    expect(plan.retryAgentCount).toBeNull();
+    // Sin retry ⇒ sin log de broaden-retry.
+    expect(vi.mocked(logSpy.info)).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('discovery retry without capability filter'),
+    );
+  });
+
+  // T-WKH151-3 (AC-7): preferCapabilities vacío/undefined + 1er discover vacío →
+  // NO retry (el retry sería idéntico al primero) → no_agents directo, 1 discover.
+  it('T-WKH151-3: no preferCapabilities + empty discovery → no retry, no_agents', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+    });
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'nothing', budget: 5.0 },
+      'wkh151-3',
+    );
+
+    // AC-7: sin caps que remover ⇒ sin retry ⇒ una sola llamada a discover.
+    expect(vi.mocked(discoveryService.discover)).toHaveBeenCalledTimes(1);
+    expect(plan.planStatus).toBe('no_agents');
+    expect(vi.mocked(logSpy.info)).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('discovery retry without capability filter'),
+    );
+  });
+
+  // T-WKH151-3b (AC-7): preferCapabilities === [] (array vacío) → tampoco reintenta
+  // (`preferCapabilities?.length` es falsy) → no_agents con una sola llamada.
+  it('T-WKH151-3b: empty-array preferCapabilities + empty discovery → no retry', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+    });
+
+    const plan = await orchestrateService.planOrchestration(
+      { goal: 'nothing', budget: 5.0, preferCapabilities: [] },
+      'wkh151-3b',
+    );
+
+    expect(vi.mocked(discoveryService.discover)).toHaveBeenCalledTimes(1);
+    expect(plan.planStatus).toBe('no_agents');
+  });
+
+  // T-WKH151-4 (AC-4): 1er discover (con caps) vacío Y el retry sin caps TAMBIÉN
+  // vacío → no_agents genuino (como hoy), tras exactamente 2 discover calls, sin
+  // loop (CD-3).
+  it('T-WKH151-4: both passes empty → genuine no_agents (2 discover calls, no loop)', async () => {
+    vi.mocked(discoveryService.discover)
+      .mockResolvedValueOnce({ agents: [], total: 0, registries: [] })
+      .mockResolvedValueOnce({ agents: [], total: 0, registries: [] });
+
+    const plan = await orchestrateService.planOrchestration(
+      {
+        goal: 'send remittance',
+        budget: 5.0,
+        preferCapabilities: ['remit.corridor-discovery'],
+      },
+      'wkh151-4',
+    );
+
+    expect(vi.mocked(discoveryService.discover)).toHaveBeenCalledTimes(2);
+    expect(plan.planStatus).toBe('no_agents');
+    expect(vi.mocked(eventService.track)).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'success' }),
+    );
+  });
+
+  // T-WKH151-5 (AC-5/CD-4): con el fix activo (1er discover vacío → retry trae un
+  // agente demo), un plan 100% demo SIGUE devolviendo no_relevant_agent sin débito.
+  // El guard `allStepsAreDemos` corre igual sobre el candidate-set AMPLIADO.
+  it('T-WKH151-5: broadened candidate-set all-demos → still no_relevant_agent, no debit', async () => {
+    const demoAgent: Agent = {
+      ...mockAgents[0]!,
+      slug: 'base-demo',
+      name: 'Base Demo',
+      priceUsdc: 0.01,
+    };
+    // 1er discover (con caps) vacío → retry sin caps trae SOLO un demo.
+    vi.mocked(discoveryService.discover)
+      .mockResolvedValueOnce({ agents: [], total: 0, registries: [] })
+      .mockResolvedValueOnce({
+        agents: [demoAgent],
+        total: 1,
+        registries: ['wasiai'],
+      });
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'base-demo',
+            registry: 'wasiai',
+            input: { query: 'x' },
+            reasoning: 'r',
+          },
+        ],
+        reasoning: 'r',
+      }),
+    );
+
+    const plan = await orchestrateService.planOrchestration(
+      {
+        goal: 'only demos after broaden',
+        budget: 5.0,
+        preferCapabilities: ['x'],
+      },
+      'wkh151-5',
+    );
+
+    // El retry ocurrió (2 calls) pero el guard demo-only siguió bloqueando.
+    expect(vi.mocked(discoveryService.discover)).toHaveBeenCalledTimes(2);
+    expect(plan.planStatus).toBe('no_relevant_agent');
+    // planOrchestration es read-only: nunca debita (guard intacto, sin billing).
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    // WKH-151 (telemetría additive): el evento `orchestrate_goal` del early-return
+    // lleva los marcadores del retry (retry disparó y trajo 1 demo) — mide el
+    // residual de MNR-1 (retry corrió pero sólo había demos).
+    expect(vi.mocked(eventService.track)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'orchestrate_goal',
+        metadata: expect.objectContaining({
+          reason: 'no_relevant_agent',
+          broadenRetryUsed: true,
+          retryAgentCount: 1,
+        }),
+      }),
+    );
+  });
+
   // T-EXEC-2 (AC-3/AC-5, mock side): currentCostUsdc > maxQuotedCostUsdc →
   // __quoteStale, CERO debit/compose.
   it('T-EXEC-2: cap breach → __quoteStale, zero debit/compose', async () => {
