@@ -284,6 +284,14 @@ describe('chargeProtocolFee', () => {
     }
     expect(mockSign).toHaveBeenCalledTimes(1);
     expect(mockSettle).toHaveBeenCalledTimes(1);
+    // WKH-167: default 10000/0/0 → pata plataforma == total. Ambos campos se
+    // persisten y coinciden con feeUsdc (= budget×rate).
+    const insertPayload = mockInsert.mock.calls[0]?.[0] as {
+      fee_usdc: number;
+      fee_total_usdc: number;
+    };
+    expect(insertPayload.fee_usdc).toBeCloseTo(0.01, 6);
+    expect(insertPayload.fee_total_usdc).toBeCloseTo(0.01, 6);
   });
 
   // TB-01 (audit 2026-06-30): a settle reported success but failing on-chain

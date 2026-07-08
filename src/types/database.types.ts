@@ -785,6 +785,7 @@ export type Database = {
           created_at: string;
           error_message: string | null;
           fee_rate: number;
+          fee_total_usdc: number | null;
           fee_usdc: number;
           fee_wallet: string;
           orchestration_id: string;
@@ -797,6 +798,7 @@ export type Database = {
           created_at?: string;
           error_message?: string | null;
           fee_rate: number;
+          fee_total_usdc?: number | null;
           fee_usdc: number;
           fee_wallet: string;
           orchestration_id: string;
@@ -809,6 +811,7 @@ export type Database = {
           created_at?: string;
           error_message?: string | null;
           fee_rate?: number;
+          fee_total_usdc?: number | null;
           fee_usdc?: number;
           fee_wallet?: string;
           orchestration_id?: string;
