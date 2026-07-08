@@ -912,8 +912,26 @@ export const orchestrateService = {
           ? 'no_relevant_agent: the selected plan consists entirely of trivial echo/demo agents even though a real agent was available; no genuinely relevant agent was executed for this goal. No agent was executed and no payment was charged.'
           : 'no_relevant_agent: no genuinely relevant agent was found for this goal (only trivial echo/demo agents are available). No agent was executed and no payment was charged.';
       } else {
+        // WKH-159 (cosmetic hardening — NO logic/billing change): enrich the
+        // guidance text ONLY. `fallbackNoRelevance` fires inside the greedy path,
+        // where the candidate set is ALWAYS non-empty (an empty discovery already
+        // returned `no_agents` earlier). So we distinguish, using data already in
+        // scope, the two shapes of this rejection:
+        //   - goalTokens.size > 0: the goal HAD matchable keywords AND candidate
+        //     agents were discovered, but no greedy-selected agent shared a single
+        //     token with it. This is the classic vocabulary/LANGUAGE mismatch
+        //     (e.g. a Spanish goal vs English-documented agents) — relevant agents
+        //     may well exist, so point the caller at `consideredAgents` and the
+        //     manual /plan + /execute flow.
+        //   - goalTokens.size === 0: the goal carried no matchable keyword at all,
+        //     so there is no relevance signal to evaluate — do NOT imply a language
+        //     mismatch here.
+        // Neither branch alters planStatus, steps, or any billing field: still
+        // `no_relevant_agent`, no debit, no compose (AC-5 / CD-1..CD-4).
         reasoning =
-          'no_relevant_agent: the LLM planner failed and the emergency fallback found no agent with any relevance to the goal — no agent was executed and no payment was charged.';
+          goalTokens.size > 0
+            ? "no_relevant_agent: the LLM planner failed and the emergency fallback found no agent whose description lexically matched the goal's keywords. This can happen with non-English or differently-worded goals even when relevant agents exist — review consideredAgents and use /orchestrate/plan + /orchestrate/execute to select an agent manually. No agent was executed and no payment was charged."
+            : 'no_relevant_agent: the LLM planner failed and the emergency fallback found the goal carried no matchable keyword to evaluate relevance — no agent was executed and no payment was charged.';
       }
       const noRelevantResult: OrchestratePlanResult = {
         orchestrationId,
