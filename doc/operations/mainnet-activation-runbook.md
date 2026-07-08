@@ -39,6 +39,25 @@ El DROP de las 4 columnas legacy de `creator_profiles` (`total_earnings`, `pendi
 
 ---
 
+## ⛔ Blocking prerequisite — Relevancia semántica del money-path (WKH-160)
+
+**NO se pasa a mainnet sin esto** (decisión del founder, 2026-07-09).
+
+La relevancia del money-path (discovery de agentes + drop del plan) usa matching **léxico** (overlap de palabras), intrínsecamente frágil — rompió el flujo estrella de remesas 2 veces (WKH-163 por el número "400"; WKH-166 por la palabra "best"). En WKH-166 se **neutralizó el drop léxico** (el plan del LLM es autoritativo) como parche money-safe, pero eso **expande la superficie de over-charge**: el caller paga el plan completo del LLM aunque incluya un agente poco relevante. En testnet es tolerable; en **mainnet con dinero real, NO**.
+
+WKH-160 reemplaza el matching léxico por **semántico (embeddings)** → un drop CONFIABLE de vuelta (sabe que KYC es relevante a una remesa y que un agente de clima no lo es) + cruza idiomas (goal ES ↔ agente EN).
+
+| Item | Qué | Estado |
+|------|-----|--------|
+| Fase 1 shadow-mode | correr el scorer semántico en paralelo, medir calidad con tráfico real sin actuar | ⬜ pendiente |
+| Voyage (embeddings) | modelo de embeddings — API con costo por llamada (cacheable) | ⬜ pendiente (setear API key) |
+| pgvector (Supabase) | almacenar vectores + búsqueda por similitud coseno | ⬜ pendiente |
+| Re-enganche del drop | re-habilitar el smart-drop en el hook `tokenizeForRelevance`/`textOverlapsGoal` (dejado inerte en WKH-166) | ⬜ pendiente |
+
+SDD ya existe: `doc/sdd/163-wkh-160-semantic-embeddings-relevance/`. WKH-160 rebasa sobre el estado post-WKH-166. Detalle completo en WKH-160.
+
+---
+
 ## Prerequisites
 
 ### 1. **Accesos y credenciales**
