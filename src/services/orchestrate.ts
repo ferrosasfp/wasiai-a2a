@@ -849,6 +849,14 @@ export const orchestrateService = {
     // con el goal, dejando intacto lo que el LLM sí acertó. NO es un segundo juicio
     // semántico: es una red de seguridad léxica barata contra el over-charge.
     const goalTokens = tokenizeForRelevance(goal);
+    // WKH-163: tokens de relevancia para el backstop LLM SIN los puramente numéricos.
+    // Un monto (p.ej. "400") es señal de relevancia casi universal en agentes financieros
+    // y su echo en el input tailoreado dropeaba injustamente la pata de entrega
+    // (agentshop-cashout-matcher) del plan insignia de remesas. goalTokens (greedy +
+    // reasoning no_relevant_agent) queda INTACTO; el cambio se aísla al path LLM.
+    const llmGoalTokens = new Set(
+      [...goalTokens].filter((t) => !/^\d+$/.test(t)),
+    );
     const fallbackNoRelevance =
       usedFallback &&
       (goalTokens.size === 0 ||
@@ -883,7 +891,7 @@ export const orchestrateService = {
     // irrelevancia; vaciarlo sería un false-negative catastrófico. El early-return
     // no_relevant_agent (abajo) queda EXCLUSIVO de all-demos/greedy.
     const llmFilterApplies =
-      !usedFallback && !allStepsAreDemos && goalTokens.size > 0;
+      !usedFallback && !allStepsAreDemos && llmGoalTokens.size > 0; // WKH-163: llmGoalTokens (era goalTokens)
 
     let relevantSteps = steps;
     if (llmFilterApplies) {
@@ -893,8 +901,29 @@ export const orchestrateService = {
         );
         if (!agent) return true; // no resuelto ⇒ CONSERVAR (§5 defensivo)
         const corpus = `${agent.name} ${agent.description} ${agent.capabilities.join(' ')} ${JSON.stringify(s.input)}`;
-        return textOverlapsGoal(corpus, goalTokens);
+        return textOverlapsGoal(corpus, llmGoalTokens); // WKH-163: llmGoalTokens (era goalTokens); corpus INTACTO (CD-11)
       });
+    }
+    // WKH-163 (terminal delivery guard, defense-in-depth): si el backstop dropearía el
+    // step TERMINAL (la pata de entrega) Y ≥2 steps quedan disjuntos (señal de desajuste
+    // de vocabulario multi-leg, no de un único add-on spurious), se RESCATA el terminal.
+    // Con UN solo disjunto (T-152-1) NO se protege → el drop del mixto genuino queda intacto (CD-4).
+    if (
+      llmFilterApplies &&
+      relevantSteps.length > 0 &&
+      relevantSteps.length < steps.length
+    ) {
+      const droppedCount = steps.length - relevantSteps.length;
+      const terminal = steps[steps.length - 1]; // CD-8: ComposeStep | undefined
+      const terminalDropped =
+        terminal !== undefined && !relevantSteps.includes(terminal);
+      if (droppedCount >= 2 && terminalDropped) {
+        // Re-incluir el terminal preservando el orden original (los demás disjuntos
+        // siguen dropeados). relevantSteps referencia objetos del MISMO array steps.
+        relevantSteps = steps.filter(
+          (s) => relevantSteps.includes(s) || s === terminal,
+        );
+      }
     }
     // CD-15 (MIXED-PLAN-ONLY): dropear SOLO si ≥1 relevante sobrevive Y ≥1 se dropea.
     // relevantSteps.length === 0 (todos disjuntos) ⇒ applyDrop=false ⇒ conservar todos.
