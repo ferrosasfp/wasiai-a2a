@@ -2116,6 +2116,8 @@ describe('orchestrateService', () => {
 
   // T-152-1 (AC-1, CD-2/CD-6): mixed LLM plan (relevant + real-irrelevant) →
   // the irrelevant agent is dropped BEFORE debit/compose; the relevant one runs.
+  // Also pins the WKH-163 terminal-guard threshold (droppedCount >= 2): here
+  // defi-sentiment-v1 is terminal with droppedCount=1, so it is NOT rescued.
   it('T-152-1: mixed plan drops the irrelevant agent, charges only the relevant', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValue(wkh152Discovery);
     wkh152GetAgent();
@@ -2524,6 +2526,285 @@ describe('orchestrateService', () => {
     expect(textOverlapsGoal('weather forecast', new Set())).toBe(false);
     // tokens <3 chars are ignored by the tokenizer.
     expect(textOverlapsGoal('to be at', new Set(['to', 'be']))).toBe(false);
+  });
+
+  // ─── WKH-163 ─ cashout-matcher relevance fix (money-path insignia) ──────
+
+  // 3 real remittance agents (non-demo) described in English WITHOUT the goal
+  // tokens send/mom/peru (EN) or enviar/dolares/mama (ES). The delivery leg
+  // (agentshop-cashout-matcher) carries NO numeric echo → under WKH-152 it was
+  // dropped while kyc/corridor survived via the "400" echo. WKH-163 excludes the
+  // pure-numeric token from the LLM backstop → all-disjoint → CD-15 conserves 3.
+  const wkh163Agents: Agent[] = [
+    {
+      ...mockAgents[0]!,
+      id: 'wkh163-kyc',
+      name: 'Identity Validator',
+      slug: 'agentshop-kyc-validator',
+      description: 'Validates customer identity documents for compliance',
+      capabilities: ['kyc', 'compliance'],
+      priceUsdc: 0.5,
+      registry: 'wasiai',
+      verified: false,
+    },
+    {
+      ...mockAgents[0]!,
+      id: 'wkh163-corridor',
+      name: 'Corridor Discoverer',
+      slug: 'agentshop-corridor-discoverer',
+      description: 'Finds optimal transfer corridors between countries',
+      capabilities: ['corridor', 'routing'],
+      priceUsdc: 0.6,
+      registry: 'wasiai',
+      verified: false,
+    },
+    {
+      ...mockAgents[0]!,
+      id: 'wkh163-cashout',
+      name: 'Cashout Matcher',
+      slug: 'agentshop-cashout-matcher',
+      description: 'Matches payout methods for recipients',
+      capabilities: ['cashout', 'payout'],
+      priceUsdc: 0.7,
+      registry: 'wasiai',
+      verified: false,
+    },
+  ];
+  const wkh163Discovery: DiscoveryResult = {
+    agents: wkh163Agents,
+    total: 3,
+    registries: ['wasiai'],
+  };
+  /** Keep getAgent consistent with the wkh163 discover set (step-0 recompute). */
+  function wkh163GetAgent(): void {
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug) => wkh163Agents.find((a) => a.slug === slug) ?? null,
+    );
+  }
+  /** LLM selects the 3-agent remittance plan with the tailored (echoed) inputs. */
+  function setWkh163RemittancePlan(): void {
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'agentshop-kyc-validator',
+            registry: 'wasiai',
+            input: { amountUSD: 400 },
+            reasoning: 'verify identity',
+          },
+          {
+            slug: 'agentshop-corridor-discoverer',
+            registry: 'wasiai',
+            input: { amountUSD: 400, receiverCountry: 'PE' },
+            reasoning: 'find corridor',
+          },
+          {
+            slug: 'agentshop-cashout-matcher',
+            registry: 'wasiai',
+            input: { receiverCountry: 'PE', preference: 'bank deposit' },
+            reasoning: 'deliver funds',
+          },
+        ],
+        reasoning: 'Three-agent remittance plan',
+      }),
+    );
+  }
+
+  // T-163-1 (AC-1, AC-7): flagship EN remittance plan → the 3 steps stay intact,
+  // the delivery leg (agentshop-cashout-matcher) is NOT dropped, debit = step-0
+  // (kyc) price once. Without Snippets A/B/C this would drop cashout.
+  it('T-163-1: EN badge remittance plan keeps all 3 steps (cashout not dropped)', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh163Discovery);
+    wkh163GetAgent();
+    setWkh163RemittancePlan();
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'Send $400 to my mom in Peru',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-163-1',
+    );
+
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    const composedSlugs = composeCall.steps.map((s) => s.agent);
+    expect(composedSlugs).toContain('agentshop-kyc-validator');
+    expect(composedSlugs).toContain('agentshop-corridor-discoverer');
+    expect(composedSlugs).toContain('agentshop-cashout-matcher');
+    expect(result.reasoning).not.toContain('dropped');
+    expect(result.reasoning).not.toContain('no_relevant_agent');
+    expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(budgetService.debit).mock.calls[0]![2]).toBeCloseTo(
+      0.5,
+      6,
+    );
+  });
+
+  // T-163-2 (AC-2): same fixture, Spanish goal → 3 steps intact, language-independent
+  // (llmGoalTokens = {enviar, dolares, mama, peru} vs English agents → all-disjoint).
+  it('T-163-2: ES badge remittance plan keeps all 3 steps (language-independent)', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh163Discovery);
+    wkh163GetAgent();
+    setWkh163RemittancePlan();
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'Enviar 400 dolares a mi mama en Peru',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-163-2',
+    );
+
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    const composedSlugs = composeCall.steps.map((s) => s.agent);
+    expect(composedSlugs).toContain('agentshop-kyc-validator');
+    expect(composedSlugs).toContain('agentshop-corridor-discoverer');
+    expect(composedSlugs).toContain('agentshop-cashout-matcher');
+    expect(result.reasoning).not.toContain('dropped');
+    expect(result.reasoning).not.toContain('no_relevant_agent');
+    expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(budgetService.debit).mock.calls[0]![2]).toBeCloseTo(
+      0.5,
+      6,
+    );
+  });
+
+  // T-163-3 (AC-1, CD-14 refined): a purely-numeric goal → llmGoalTokens empty →
+  // the LLM backstop is skipped → every step conserved, no drop.
+  it('T-163-3: numeric-only goal skips the LLM backstop (all steps conserved)', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh163Discovery);
+    wkh163GetAgent();
+    setWkh163RemittancePlan();
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: '400 500 600',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-163-3',
+    );
+
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps.map((s) => s.agent)).toEqual([
+      'agentshop-kyc-validator',
+      'agentshop-corridor-discoverer',
+      'agentshop-cashout-matcher',
+    ]);
+    expect(result.reasoning).not.toContain('dropped');
+  });
+
+  // Terminal-guard fixture: A matches 1 NON-numeric token (weather/forecast),
+  // B and C are lexically disjoint, C is the terminal (delivery) leg.
+  const wkh163TerminalAgents: Agent[] = [
+    {
+      ...mockAgents[0]!,
+      id: 'wkh163-t-weather',
+      name: 'Weather Oracle',
+      slug: 'wkh163-weather',
+      description: 'Provides weather forecasts',
+      capabilities: ['weather', 'forecast'],
+      priceUsdc: 0.4,
+      registry: 'wasiai',
+      verified: false,
+    },
+    {
+      ...mockAgents[0]!,
+      id: 'wkh163-t-defi',
+      name: 'DeFi Sentiment',
+      slug: 'wkh163-defi',
+      description: 'Analyzes DeFi market sentiment',
+      capabilities: ['defi', 'sentiment'],
+      priceUsdc: 0.5,
+      registry: 'wasiai',
+      verified: false,
+    },
+    {
+      ...mockAgents[0]!,
+      id: 'wkh163-t-translator',
+      name: 'Translator',
+      slug: 'wkh163-translator',
+      description: 'Translates documents between languages',
+      capabilities: ['translation', 'nlp'],
+      priceUsdc: 0.6,
+      registry: 'wasiai',
+      verified: false,
+    },
+  ];
+  const wkh163TerminalDiscovery: DiscoveryResult = {
+    agents: wkh163TerminalAgents,
+    total: 3,
+    registries: ['wasiai'],
+  };
+
+  // T-163-4 (Snippet D): a multi-leg plan where the backstop would drop B AND the
+  // terminal C (2 disjoint) while only A matches. The terminal delivery guard
+  // rescues C (droppedCount >= 2 && terminalDropped) → conserved plan = [A, C],
+  // B dropped, llmDropped = 1, debit = A (head, passOutput:false).
+  it('T-163-4: terminal delivery guard rescues the dropped terminal step', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(
+      wkh163TerminalDiscovery,
+    );
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug) => wkh163TerminalAgents.find((a) => a.slug === slug) ?? null,
+    );
+    setLlmResponse(
+      JSON.stringify({
+        selectedAgents: [
+          {
+            slug: 'wkh163-weather',
+            registry: 'wasiai',
+            input: { location: 'lima' },
+            reasoning: 'weather match',
+          },
+          {
+            slug: 'wkh163-defi',
+            registry: 'wasiai',
+            input: { topic: 'ethereum' },
+            reasoning: 'off-topic',
+          },
+          {
+            slug: 'wkh163-translator',
+            registry: 'wasiai',
+            input: { text: 'convert this' },
+            reasoning: 'delivery leg',
+          },
+        ],
+        reasoning: 'Three-agent plan',
+      }),
+    );
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'weather forecast today',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-163-4',
+    );
+
+    expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
+    const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
+    expect(composeCall.steps.map((s) => s.agent)).toEqual([
+      'wkh163-weather',
+      'wkh163-translator',
+    ]);
+    expect(result.reasoning).toContain('dropped');
+    expect(result.reasoning).toContain('1 off-topic');
+    expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(budgetService.debit).mock.calls[0]![2]).toBeCloseTo(
+      0.4,
+      6,
+    );
   });
 
   // T-AC-DOUBLE (CD-11/§4.4): single orchestrate on total failure → credit exactly once.
