@@ -1978,6 +1978,101 @@ describe('orchestrateService', () => {
     expect(composeCall.steps.length).toBeGreaterThan(0);
   });
 
+  // ─── WKH-159 ─ no_relevant_agent guidance (cosmetic, money-safe) ────────
+
+  // T-W159a: a Spanish goal against the English-documented mockAgents forces the
+  // greedy fallback (LLM down) with zero lexical overlap → the guard fires with
+  // goalTokens.size > 0 (candidate agents existed). The reasoning must surface the
+  // language/vocabulary-mismatch signal and point the caller at consideredAgents,
+  // which must travel non-empty. planStatus stays no_relevant_agent; nothing is
+  // debited or composed (byte-identical money-safe path).
+  it('T-W159a: multilingual greedy no_relevant_agent → language-mismatch reasoning + consideredAgents', async () => {
+    setLlmError(new Error('API timeout'));
+
+    const goal = 'resumir un documento largo en español';
+
+    // planOrchestration confirms planStatus stays no_relevant_agent (quote-only).
+    const plan = await orchestrateService.planOrchestration(
+      { goal, budget: 5.0, chainId: 2368, scopingKeyRow: masterKeyRow() },
+      'orch-w159a-plan',
+    );
+    expect(plan.planStatus).toBe('no_relevant_agent');
+    expect(plan.consideredAgents.length).toBeGreaterThan(0);
+
+    // Atomic path: reasoning carries the mismatch signal, consideredAgents travels
+    // non-empty, and no money moves.
+    const result = await orchestrateService.orchestrate(
+      { goal, budget: 5.0, chainId: 2368, scopingKeyRow: masterKeyRow() },
+      'orch-w159a',
+    );
+
+    expect(result.reasoning).toContain('no_relevant_agent');
+    expect(result.reasoning).toContain('non-English or differently-worded');
+    expect(result.reasoning).toContain('consideredAgents');
+    expect(result.consideredAgents.length).toBeGreaterThan(0);
+    expect(result.pipeline.success).toBe(false);
+    expect(result.pipeline.steps).toHaveLength(0);
+    expect(result.protocolFeeUsdc).toBe(0);
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(budgetService.credit)).not.toHaveBeenCalled();
+    expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
+    expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
+  });
+
+  // T-W159b: a goal with NO matchable keyword (all tokens < 3 chars) that forces
+  // the greedy fallback → goalTokens.size === 0 branch. The reasoning must NOT
+  // imply a language mismatch (there is no relevance signal to evaluate), while
+  // still returning no_relevant_agent without charging.
+  it('T-W159b: zero-keyword greedy no_relevant_agent → reasoning without language mention', async () => {
+    setLlmError(new Error('API timeout'));
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'a b c',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-w159b',
+    );
+
+    expect(result.reasoning).toContain('no_relevant_agent');
+    expect(result.reasoning).toContain('no matchable keyword');
+    expect(result.reasoning).not.toContain('non-English');
+    expect(result.reasoning).not.toContain('consideredAgents');
+    expect(result.pipeline.steps).toHaveLength(0);
+    expect(result.protocolFeeUsdc).toBe(0);
+    expect(vi.mocked(budgetService.debit)).not.toHaveBeenCalled();
+    expect(vi.mocked(composeService.compose)).not.toHaveBeenCalled();
+    expect(vi.mocked(chargeProtocolFee)).not.toHaveBeenCalled();
+  });
+
+  // T-W159c: genuinely no agents discovered (empty discovery) → no_agents path,
+  // which must NOT mention language either (there were no candidates to mismatch).
+  // Confirms the language signal is scoped strictly to the greedy candidate-set case.
+  it('T-W159c: empty discovery → no_agents reasoning without language mention', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+    });
+
+    const plan = await orchestrateService.planOrchestration(
+      {
+        goal: 'resumir un documento en español',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-w159c',
+    );
+
+    expect(plan.planStatus).toBe('no_agents');
+    expect(plan.reasoning).not.toContain('non-English');
+    expect(plan.reasoning).not.toContain('consideredAgents');
+    expect(plan.consideredAgents).toHaveLength(0);
+  });
+
   // ─── WKH-152 ─ Planner LLM per-step relevance backstop (money-path) ─────
 
   // A relevant agent (shares tokens with the goal) + a REAL, non-demo agent that
