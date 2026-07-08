@@ -34,6 +34,9 @@ Decisión del founder (2026-07-08, ver WKH-130): el `WasiAIMarketplace` (custodi
 
 **Contratos que NO se tocan:** `WasiAIEscrow.sol` (repo a2a, cross-chain), `CobrayaInvoiceCommitments.sol` (Cobraya). Diferido hasta que el foco pase de "a2a como cerebro" a la activación mainnet del marketplace. Detalle completo + scope en WKH-130.
 
+### DB cleanup pre-mainnet (WKH-147)
+El DROP de las 4 columnas legacy de `creator_profiles` (`total_earnings`, `pending_earnings_usdc`, `account_status`, `email_domain` — post WKH-SEC-03) YA se aplicó a **bdwv** (2026-07-08, verificado). Falta aplicarlo a **caldz** (mainnet) — misma migración, project ref `caldzjhjgctpgodldqav`. SQL en `wasiai-v2/supabase/migrations/20260708000000_wkh147_drop_creator_profiles_legacy_columns.sql`. Verificación pre-DROP dio GO (0 usos en código). Correr como parte de esta activación.
+
 ---
 
 ## Prerequisites
