@@ -386,3 +386,68 @@ Every run prints tx hashes with explorer links so you can verify on KiteScan + S
 ---
 
 *Built with Claude Code on the Kite Hackathon — 2026-04-28*
+
+---
+---
+
+# Post-submission engineering log — 2026-07-07
+
+> Addendum al submission original. Jornada de hardening + fixes post-hackathon sobre el ecosistema completo (a2a gateway + facilitator + wasiai-v2 + Chaski/yarvis + cobraya/lendable). Todo por pipeline **NexusAgil** (QUALITY money-path o FAST+AR, con **AR+CR adversarial** obligatorio en cada fix que toca plata). ~12 tickets a DONE, ~55 sub-agentes, cero regresiones.
+
+## 1. El "$0" de Chaski — 4 causas encadenadas, resuelto
+El síntoma "Done · $0 · sin agentes" en `chaski-ai.vercel.app` era **cuatro bugs distintos**, cada uno tapando al siguiente:
+
+| # | Causa | Fix |
+|---|-------|-----|
+| 1 | **WKH-151** — el pre-filtro de `capabilities` de discovery vaciaba el candidate-set antes del planner | broaden-retry sin caps (deployed) |
+| 2 | **WKH-153** — el planner mandaba `{query}` genérico en vez del `input_schema` real → agentes daban HTTP 400 | few-shot schema-driven en el prompt (deployed) |
+| 3 | **WKH-154** — el circuit-breaker del facilitator contaba la contención de simulate como chain-outage y tiraba carga buena | clasificador `transport`/`business` (`error-classifier.ts`, merge `9cd1b3c`) |
+| 4 | **⛽ Gas KITE del relayer** — 0xf432 sin gas en **KITE** (el settle de agentes Fuji igual liquida en Kite por `wasiai-native`) | fondeo del relayer |
+
+**Verificado:** Chaski **cobra de verdad** — `protocolFeeUsdc=0.00061`, settles minando on-chain (nonce 631→748+).
+Lección registrada: el diagnóstico previo (gas-limit / colisión de nonce) fue refutado en secuencia con verificación on-chain — **no asumir, verificar**.
+
+## 2. Auditoría e2e integral (6 agentes paralelos) — 100% corregida
+Reporte: `doc/audit/e2e-integral-2026-07-07.md`. Veredicto: **core sólido** (money-path sano, sin IDOR, x402 correcto). Hallazgos cerrados:
+
+| Hallazgo | Sev | Cierre |
+|----------|-----|--------|
+| **WKH-155** — `facilitator_settlements`/`_audit_log`/`a2a_events` con RLS abierta (anon leía el ledger + PII) | 🔴 ALTO | `ENABLE RLS` + `REVOKE anon` (verificado: read anon → `[]`) |
+| **WKH-156** — 12/32 agentes cobrables rotos vía proxy | 🟠 MEDIO | 10 marcados `inactive` + sentiment; catálogo 32→**21 usables** |
+| **WKH-115** — `a2a_inbound_tasks` no migrada a bdwv | 🟡 ops | migración aplicada (rls=True + índices) |
+| **WKH-157** — `/discover` free-text débil (0 resultados multilingües) | 🟡 BAJO | broaden-retry (merge `da1c45e`) + test de sort en el retry |
+| PWA manifest / proxy 404→422 | 🟡 LOW | manifest yarvis→Chaski / moot (agentes inactive) |
+
+## 3. Deuda técnica — cadena de defensa multilingüe (money-path QUALITY)
+Descubierta al validar el money-path en vivo: el matching de relevancia **léxico** es incompatible con un producto **LATAM/multilingüe** (goal ES vs agente EN = 0 overlap → false-negative).
+
+| Ticket | Fix | Merge |
+|--------|-----|-------|
+| **WKH-152** | guard de relevancia del planner LLM — **mixed-plan-only** (nunca vacía un plan; conserva ante all-disjoint) | `d5d6ebd` — validado en vivo |
+| **WKH-158** | **retry del LLM** ante fallo transitorio antes de caer a greedy (ataca la raíz) | `40c9c8d` — validado en vivo (goal ES 4/4 por el path LLM) |
+| **WKH-159** | greedy multilingüe **honesto** (mensaje + `consideredAgents`, sin auto-cobrar a ciegas) | `634fb4b` |
+| **WKH-160** | relevancia semántica por **embeddings** (fix de fondo) | ⏸️ **parkeado** en backlog (revisitar si la telemetría lo justifica, o como capacidad estratégica) |
+
+Nota de proceso: el diseño inicial de WKH-152 rompía 35 tests money-path por false-negatives multilingües — el dev lo **bounceó** en vez de esconderlo, el humano decidió mixed-plan-only, y los 35 tests volvieron a verde **por construcción**. Débito==ejecución verificado byte-a-byte por AR en cada uno.
+
+## 4. Seguridad — 3 tickets, live y verificados en prod
+| Ticket | Qué cerró | Merge / estado |
+|--------|-----------|----------------|
+| **WKH-148** | error explícito `OPERATOR_FUNDING_LOW` (503) en el settle del facilitator cuando el relayer se queda sin gas — fin del RPC críptico que causó el $0 | `487dc16` (facilitator) live |
+| **WKH-146** | guard **shared-secret fail-closed** en `/api/settle` de cobraya — cerró un POST **público** que firmaba EIP-3009 real (gas-drain/abuse) | `bda9e0d` (cobraya) live |
+| **WKH-161** | **Server Action** server-side que inyecta el Bearer — el secret nunca toca el browser; + activación en Vercel | `e42adcd` (cobraya) — **activado + verificado en vivo** |
+
+Verificación live (`wasiai-cobraya.vercel.app`): sin Bearer→401, con Bearer→settle real testnet (`0x4bbf30…`), inválido→401, sin Deployment Protection. La demo Cobraya volvió a andar **con** el hueco de seguridad cerrado.
+
+## 5. Backlog triageado
+- **WKH-160** (embeddings) → parkeado; gatillo: telemetría de false-negatives o inversión estratégica.
+- **WKH-128** (reconciliador ledger↔on-chain) + **WKH-76** (PITR restore drill) → **diferidos a mainnet** (apuntan a `caldz`, hoy archivado; el ecosistema corre en testnet+bdwv).
+- Pendientes que requieren infra/on-chain del founder: **WKH-127** (llaves por rol + Safe multisig), **WKH-129** (Redis HA + fail-modes).
+
+## Métricas de la jornada
+- **~12 tickets a DONE**, todos mergeados + deployados + (donde aplica) verificados en prod.
+- Pipeline NexusAgil en cada uno; **AR+CR adversarial** en todo lo money-path; **cero regresiones**.
+- **6 escalaciones** al humano en decisiones genuinas de producto/plata (mixed-plan-only, LLM-retry, greedy-cosmético, park-embeddings, shared-secret, full-fix-vs-revert).
+- Cadena de commits en `main`: a2a (`e345340`→`da1c45e`→`d5d6ebd`→`40c9c8d`→`634fb4b`…), facilitator (`9cd1b3c`→`487dc16`), cobraya (`bda9e0d`→`e42adcd`), yarvis (`faa7fc7`).
+
+*Post-submission hardening con Claude Code — 2026-07-07*
