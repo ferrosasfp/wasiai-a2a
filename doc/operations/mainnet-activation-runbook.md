@@ -19,6 +19,23 @@
 
 ---
 
+## ⛔ Blocking prerequisite — Marketplace contract upgradeability (WKH-130)
+
+**Esto DEBE estar hecho ANTES de activar mainnet en serio. No es un toggle de Day-1: es una migración de contrato.**
+
+Decisión del founder (2026-07-08, ver WKH-130): el `WasiAIMarketplace` (custodial, no-upgradeable hoy) se migra a **UUPS (upgradeable proxy)** antes de crecer TVL en mainnet. Razón: hoy cada fix del marketplace = redeploy + migración de estado + address-drift (lo que arreglamos parcialmente en WKH-162). Con TVL mainnet creciendo, quedar en un contrato custodial no-upgradeable es una trampa.
+
+| Item | Qué | Repo | Estado |
+|------|-----|------|--------|
+| Rewrite `WasiAIMarketplace.sol` → UUPS | initializer + `_authorizeUpgrade` (multisig+timelock) + storage layout congelado | wasiai-v2 | ⬜ pendiente (QUALITY + AR + auditoría externa recomendada) |
+| Redeploy `WasiEscrow.sol` → proxy nuevo | su `immutable marketplace` queda stale (opción A: repoint, no UUPS) | wasiai-v2 | ⬜ pendiente |
+| Migración one-time de estado mainnet | mover earnings + keyBalances de los 8 agentes del marketplace viejo → proxy (SDD de migración propio) | wasiai-v2 | ⬜ pendiente |
+| Update env vars al proxy nuevo | `MARKETPLACE_CONTRACT_ADDRESS` + `NEXT_PUBLIC_MARKETPLACE_ADDRESS_*` (el assert de coherencia de WKH-162 los blinda contra drift) | wasiai-v2 | ⬜ pendiente |
+
+**Contratos que NO se tocan:** `WasiAIEscrow.sol` (repo a2a, cross-chain), `CobrayaInvoiceCommitments.sol` (Cobraya). Diferido hasta que el foco pase de "a2a como cerebro" a la activación mainnet del marketplace. Detalle completo + scope en WKH-130.
+
+---
+
 ## Prerequisites
 
 ### 1. **Accesos y credenciales**
