@@ -309,6 +309,39 @@ describe('chargeProtocolFee — creator/referral seam (WKH-143)', () => {
     expect(result.status).toBe('failed');
   });
 
+  // T-FEE-TOTAL (WKH-167 AC-1/AC-2) — el INSERT a a2a_protocol_fees persiste
+  // fee_total_usdc = fee TOTAL (feeUsdc = budget×rate) Y fee_usdc = pata
+  // plataforma post-split. Con 8000/2000/0 ambos DIFIEREN (total 0.01 vs
+  // plataforma 0.008), así el assert prueba que no son el mismo valor.
+  it('T-FEE-TOTAL: persists fee_total_usdc (total) and fee_usdc (platform leg) — both correct', async () => {
+    setSplit('8000', '2000', '0');
+    mockState.selectQ = [
+      { data: null, error: null },
+      { data: null, error: null },
+    ];
+    mockState.insertQ = [{ error: null }, { error: null }];
+    mockState.updateQ = [{ error: null }, { error: null }];
+
+    const result = await chargeProtocolFee({
+      ...BASE,
+      creator: { wallet: CREATOR_WALLET, ownerRef: 'creator-owner' },
+    });
+
+    expect(result.status).toBe('charged');
+    // El INSERT a a2a_protocol_fees es el leg de plataforma (tiene fee_wallet;
+    // los legs de a2a_fee_splits usan recipient_wallet).
+    const feesInsert = mockState.inserts.find(
+      (r) => r.fee_wallet !== undefined,
+    );
+    expect(feesInsert).toBeDefined();
+    // fee_usdc = pata plataforma post-split (8000 bps de 0.01 = 0.008) — intacto.
+    expect(feesInsert?.fee_usdc).toBe(0.008);
+    // fee_total_usdc = fee TOTAL (feeUsdc = budget×rate = 0.01) — aditivo WKH-167.
+    expect(feesInsert?.fee_total_usdc).toBe(0.01);
+    // El total retornado al caller coincide con fee_total_usdc persistido.
+    expect(feesInsert?.fee_total_usdc).toBe(result.feeUsdc);
+  });
+
   // T-BYTEID (AC-5/CD-1)
   it('T-BYTEID: default 10000/0/0 → single platform leg, no a2a_fee_splits writes', async () => {
     // No SPLIT_BPS_* env set → default 10000/0/0.

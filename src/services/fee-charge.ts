@@ -396,6 +396,10 @@ export async function chargeProtocolFee(
       budget_usdc: feeBaseUsdc,
       fee_rate: feeRate,
       fee_usdc: platformAmount,
+      // WKH-167: fee TOTAL del protocolo (= budget × rate = protocolFeeUsdc del
+      // quote), aditivo. `fee_usdc` sigue siendo SOLO la pata de plataforma
+      // post-split (WKH-136) — money-path invariante, sin tocar.
+      fee_total_usdc: feeUsdc,
       fee_wallet: walletAddress,
       status: 'pending',
     })) as { error: SupabaseError | null };
