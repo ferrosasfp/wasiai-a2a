@@ -2073,7 +2073,7 @@ describe('orchestrateService', () => {
     expect(plan.consideredAgents).toHaveLength(0);
   });
 
-  // ─── WKH-152 ─ Planner LLM per-step relevance backstop (money-path) ─────
+  // ─── WKH-152/166 ─ LLM plan authoritative on the money-path (no lexical drop) ─
 
   // A relevant agent (shares tokens with the goal) + a REAL, non-demo agent that
   // is lexically disjoint from the goal in name/description/capabilities AND input.
@@ -2114,11 +2114,11 @@ describe('orchestrateService', () => {
     );
   }
 
-  // T-152-1 (AC-1, CD-2/CD-6): mixed LLM plan (relevant + real-irrelevant) →
-  // the irrelevant agent is dropped BEFORE debit/compose; the relevant one runs.
-  // Also pins the WKH-163 terminal-guard threshold (droppedCount >= 2): here
-  // defi-sentiment-v1 is terminal with droppedCount=1, so it is NOT rescued.
-  it('T-152-1: mixed plan drops the irrelevant agent, charges only the relevant', async () => {
+  // T-152-1 (AC-1/AC-3/AC-8, WKH-166): mixed LLM plan (relevant + real-irrelevant)
+  // → CONDUCTA NUEVA: el plan del LLM es AUTORITATIVO. El backstop léxico PER-STEP
+  // fue removido, así que ambos steps se conservan y ejecutan; el débito es el
+  // precio del step-0 ORIGINAL (weather = 0.4), sin drop ni reprice.
+  it('T-152-1: mixed plan is conserved in full — LLM plan is authoritative (WKH-166)', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValue(wkh152Discovery);
     wkh152GetAgent();
     // LLM selects BOTH; the irrelevant agent gets a disjoint tailored input.
@@ -2154,25 +2154,29 @@ describe('orchestrateService', () => {
 
     expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
     const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
-    const composedSlugs = composeCall.steps.map((s) => s.agent);
-    expect(composedSlugs).toContain('weather-v1');
-    expect(composedSlugs).not.toContain('defi-sentiment-v1');
+    expect(composeCall.steps.map((s) => s.agent)).toEqual([
+      'weather-v1',
+      'defi-sentiment-v1',
+    ]);
+    // Débito == step-0 ORIGINAL del LLM (weather = 0.4), sin reprice.
     expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
-    expect(result.reasoning).toContain('dropped');
+    expect(vi.mocked(budgetService.debit).mock.calls[0]![2]).toBeCloseTo(
+      0.4,
+      6,
+    );
+    expect(result.reasoning).not.toContain('dropped');
   });
 
-  // T-152-2 (AC-2, DT-7/CD-15): MIXED-PLAN-ONLY — an LLM plan where EVERY step is
-  // lexically disjoint from the goal must be CONSERVED IN FULL (no-op), NOT routed to
-  // no_relevant_agent. The filter never empties a plan; with zero matches the most
-  // likely cause is cross-vocabulary (multilingual), not irrelevance. Billing must be
-  // byte-identical to the no-filter run (steps intact, original order, step-0 debit
-  // unchanged, no 'dropped', no 'no_relevant_agent').
-  it('T-152-2: all-disjoint LLM plan → conserve ALL (no drop, no no_relevant_agent)', async () => {
+  // T-152-2 (AC-2, WKH-166): an LLM plan where EVERY step is lexically disjoint from
+  // the goal is CONSERVED IN FULL (no-op), NOT routed to no_relevant_agent. Since the
+  // lexical backstop was removed the LLM plan is authoritative: steps stay intact in
+  // original order, step-0 debit unchanged, no 'dropped', no 'no_relevant_agent'.
+  it('T-152-2: all-disjoint LLM plan → conserved in full (LLM authoritative)', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValue(wkh152Discovery);
     wkh152GetAgent();
     // Goal disjoint from BOTH agents (weather-v1, defi-sentiment-v1). LLM selects both
-    // real (non-demo) agents; the filter would drop both → relevantSteps.length === 0
-    // → applyDrop === false → conserve all.
+    // real (non-demo) agents; with no lexical backstop the plan is authoritative and
+    // both steps are conserved (WKH-166).
     setLlmResponse(
       JSON.stringify({
         selectedAgents: [
@@ -2212,8 +2216,8 @@ describe('orchestrateService', () => {
       'weather-v1',
       'defi-sentiment-v1',
     ]);
-    // Billing byte-identical to sin-filtro: step-0 debit = original head price (0.4),
-    // debit/compose/fee all fired as they would without the filter.
+    // Billing follows the LLM plan verbatim: step-0 debit = original head price (0.4),
+    // debit/compose/fee all fired for the conserved plan (WKH-166).
     expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(budgetService.debit).mock.calls[0]![2]).toBeCloseTo(
       0.4,
@@ -2222,11 +2226,11 @@ describe('orchestrateService', () => {
     expect(vi.mocked(chargeProtocolFee)).toHaveBeenCalled();
   });
 
-  // T-152-2b (AC-2, DT-7/CD-15): MULTILINGUAL false-negative lock. A Spanish goal +
-  // RELEVANT agents described in English share ZERO lexical tokens → the filter would
-  // drop every step. MIXED-PLAN-ONLY conserves ALL (no drop, no no_relevant_agent),
-  // billing byte-identical. This is the exact case that motivated the amendment and
-  // broke 35 money-path tests under the original (all-disjoint ⇒ no_relevant_agent).
+  // T-152-2b (AC-2, WKH-166): MULTILINGUAL lock. A Spanish goal + RELEVANT agents
+  // described in English share ZERO lexical tokens. With the lexical backstop removed
+  // the LLM plan is authoritative: all steps conserved (no 'dropped', no
+  // no_relevant_agent), billing intact. This multilingual case is exactly why a
+  // lexical filter on the money-path was unsafe in the first place.
   it('T-152-2b: multilingual all-disjoint plan → conserve ALL (no false-negative)', async () => {
     const mlWeather: Agent = {
       ...mockAgents[0]!,
@@ -2290,7 +2294,7 @@ describe('orchestrateService', () => {
       'orch-152-2b',
     );
 
-    // Filter would drop both (0 overlap) → conserve ALL, NO false-negative.
+    // Zero lexical overlap, yet the LLM plan is authoritative → conserve ALL, NO false-negative (WKH-166).
     expect(result.reasoning).not.toContain('no_relevant_agent');
     expect(result.reasoning).not.toContain('dropped');
     expect(vi.mocked(composeService.compose)).toHaveBeenCalledTimes(1);
@@ -2310,7 +2314,7 @@ describe('orchestrateService', () => {
 
   // T-152-3 (AC-3, CD-3): 100%-relevant LLM plan → executes/charges IDENTICAL to
   // today. No 'dropped', no 'no_relevant_agent', both steps in original order.
-  it('T-152-3: all-relevant plan → zero regression, no drop', async () => {
+  it('T-152-3: all-relevant plan → executes/charges in full (zero regression)', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValue(mockDiscoveryResult);
     setLlmTwoAgents();
 
@@ -2334,9 +2338,10 @@ describe('orchestrateService', () => {
     expect(result.reasoning).not.toContain('no_relevant_agent');
   });
 
-  // T-152-4 (AC-4, CD-5/CD-8): step-0 original = irrelevant; the SURVIVING 2nd step
-  // (different price) must reprice the step-0 debit and become the new head.
-  it('T-152-4: dropped step-0 → debit repriced to the surviving head', async () => {
+  // T-152-4 (AC-6, WKH-166): step-0 original = léxicamente irrelevante (defi, 0.7)
+  // pero el plan del LLM es AUTORITATIVO → NO hay drop ni reprice. El débito es el
+  // precio del step-0 ORIGINAL (defi = 0.7) y defi queda de head con passOutput:false.
+  it('T-152-4: step-0 debit == original LLM head price regardless of lexical relevance (WKH-166)', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValue(wkh152Discovery);
     wkh152GetAgent();
     // Irrelevant agent FIRST (step-0), relevant agent SECOND — with distinct price.
@@ -2370,19 +2375,23 @@ describe('orchestrateService', () => {
       'orch-152-4',
     );
 
-    // Debit repriced to the survivor (0.4), NOT the dropped head (0.7).
+    // Débito == precio del step-0 ORIGINAL del LLM (defi-sentiment-v1 = 0.7), SIN reprice.
     expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
     const debitAmount = vi.mocked(budgetService.debit).mock.calls[0]![2];
-    expect(debitAmount).toBeCloseTo(0.4, 6);
+    expect(debitAmount).toBeCloseTo(0.7, 6);
     const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
-    expect(composeCall.steps[0]!.agent).toBe('weather-v1');
+    expect(composeCall.steps.map((s) => s.agent)).toEqual([
+      'defi-sentiment-v1',
+      'weather-v1',
+    ]);
+    expect(composeCall.steps[0]!.agent).toBe('defi-sentiment-v1');
     expect(composeCall.steps[0]!.passOutput).toBe(false);
   });
 
-  // T-152-5 (FALSE-NEGATIVE, DT-1): a genuinely relevant agent whose name/desc are
-  // disjoint from the goal but whose tailored INPUT overlaps ≥1 token must NOT be
-  // dropped. Adding `input` to the corpus is strictly conservative.
-  it('T-152-5: relevance from input tokens alone → step NOT dropped', async () => {
+  // T-152-5 (WKH-166): an agent whose name/desc are disjoint from the goal but whose
+  // tailored INPUT overlaps the goal. With no lexical backstop the LLM plan is
+  // authoritative and the step is conserved regardless of where the overlap lives.
+  it('T-152-5: opaque agent selected by the LLM → step conserved', async () => {
     const opaqueAgent: Agent = {
       ...mockAgents[0]!,
       id: 'wkh152-opaque',
@@ -2434,10 +2443,10 @@ describe('orchestrateService', () => {
     expect(result.reasoning).not.toContain('no_relevant_agent');
   });
 
-  // T-152-5b (CD-14): a goal with ZERO evaluable tokens (all <3 chars) in the LLM
-  // path ⇒ the filter is SKIPPED entirely, every step conserved (never empty a LLM
-  // plan on a goal without lexical signal).
-  it('T-152-5b: zero-token goal (LLM path) → filter skipped, step conserved', async () => {
+  // T-152-5b (WKH-166): a goal with ZERO evaluable tokens (all <3 chars). With no
+  // lexical backstop the LLM plan is authoritative, so every step is conserved (a plan
+  // is never emptied on a goal without lexical signal).
+  it('T-152-5b: zero-token goal (LLM path) → plan conserved in full', async () => {
     setLlmResponse(
       JSON.stringify({
         selectedAgents: [
@@ -2469,7 +2478,8 @@ describe('orchestrateService', () => {
   });
 
   // T-152-6 (AC-6, CD-7): an all-demo LLM plan still returns no_relevant_agent via
-  // the `allStepsAreDemos` branch — the new per-step filter does NOT run redundant.
+  // the `allStepsAreDemos` branch — the demo guard is independent of any lexical
+  // backstop (removed in WKH-166).
   it('T-152-6: all-demo LLM plan → no_relevant_agent (unchanged), no charge', async () => {
     const realAgent: Agent = {
       ...mockAgents[0]!,
@@ -2532,9 +2542,8 @@ describe('orchestrateService', () => {
 
   // 3 real remittance agents (non-demo) described in English WITHOUT the goal
   // tokens send/mom/peru (EN) or enviar/dolares/mama (ES). The delivery leg
-  // (agentshop-cashout-matcher) carries NO numeric echo → under WKH-152 it was
-  // dropped while kyc/corridor survived via the "400" echo. WKH-163 excludes the
-  // pure-numeric token from the LLM backstop → all-disjoint → CD-15 conserves 3.
+  // (agentshop-cashout-matcher) is lexically disjoint from the goal. With the lexical
+  // backstop removed (WKH-166) the LLM plan is authoritative → all 3 steps conserved.
   const wkh163Agents: Agent[] = [
     {
       ...mockAgents[0]!,
@@ -2610,10 +2619,10 @@ describe('orchestrateService', () => {
     );
   }
 
-  // T-163-1 (AC-1, AC-7): flagship EN remittance plan → the 3 steps stay intact,
-  // the delivery leg (agentshop-cashout-matcher) is NOT dropped, debit = step-0
-  // (kyc) price once. Without Snippets A/B/C this would drop cashout.
-  it('T-163-1: EN badge remittance plan keeps all 3 steps (cashout not dropped)', async () => {
+  // T-163-1 (AC-1, AC-7): flagship EN remittance plan → the 3 steps stay intact and
+  // the delivery leg (agentshop-cashout-matcher) is conserved, debit = step-0 (kyc)
+  // price once. With no lexical backstop the LLM plan is authoritative (WKH-166).
+  it('T-163-1: EN badge remittance plan keeps all 3 steps (LLM authoritative)', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValue(wkh163Discovery);
     wkh163GetAgent();
     setWkh163RemittancePlan();
@@ -2643,8 +2652,9 @@ describe('orchestrateService', () => {
     );
   });
 
-  // T-163-2 (AC-2): same fixture, Spanish goal → 3 steps intact, language-independent
-  // (llmGoalTokens = {enviar, dolares, mama, peru} vs English agents → all-disjoint).
+  // T-163-2 (AC-2): same fixture, Spanish goal → 3 steps intact, language-independent.
+  // The ES goal is lexically disjoint from the English agents, but with no lexical
+  // backstop the LLM plan is authoritative and every step is conserved (WKH-166).
   it('T-163-2: ES badge remittance plan keeps all 3 steps (language-independent)', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValue(wkh163Discovery);
     wkh163GetAgent();
@@ -2675,9 +2685,9 @@ describe('orchestrateService', () => {
     );
   });
 
-  // T-163-3 (AC-1, CD-14 refined): a purely-numeric goal → llmGoalTokens empty →
-  // the LLM backstop is skipped → every step conserved, no drop.
-  it('T-163-3: numeric-only goal skips the LLM backstop (all steps conserved)', async () => {
+  // T-163-3 (AC-1): a purely-numeric goal carries no lexical signal. With no lexical
+  // backstop the LLM plan is authoritative → every step conserved, no drop (WKH-166).
+  it('T-163-3: numeric-only goal → plan conserved in full (LLM authoritative)', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValue(wkh163Discovery);
     wkh163GetAgent();
     setWkh163RemittancePlan();
@@ -2702,8 +2712,9 @@ describe('orchestrateService', () => {
     expect(result.reasoning).not.toContain('dropped');
   });
 
-  // Terminal-guard fixture: A matches 1 NON-numeric token (weather/forecast),
-  // B and C are lexically disjoint, C is the terminal (delivery) leg.
+  // Fixture for the ex terminal-guard case (guard removed in WKH-166): A matches 1
+  // NON-numeric token (weather/forecast), B and C are lexically disjoint, C is the
+  // terminal (delivery) leg. The whole plan is now conserved regardless.
   const wkh163TerminalAgents: Agent[] = [
     {
       ...mockAgents[0]!,
@@ -2745,11 +2756,12 @@ describe('orchestrateService', () => {
     registries: ['wasiai'],
   };
 
-  // T-163-4 (Snippet D): a multi-leg plan where the backstop would drop B AND the
-  // terminal C (2 disjoint) while only A matches. The terminal delivery guard
-  // rescues C (droppedCount >= 2 && terminalDropped) → conserved plan = [A, C],
-  // B dropped, llmDropped = 1, debit = A (head, passOutput:false).
-  it('T-163-4: terminal delivery guard rescues the dropped terminal step', async () => {
+  // T-163-4 (AC-3/AC-8, WKH-166): multi-leg LLM plan de 3 steps donde solo A (weather)
+  // matchea léxicamente y B/C son disjuntos. CONDUCTA NUEVA: el plan del LLM es
+  // AUTORITATIVO — el terminal-guard y el backstop léxico fueron removidos, así que los
+  // 3 steps se conservan en orden, sin drop, débito = step-0 (weather = 0.4). Pinnea la
+  // forma ≥3-step que T-152-1 (2 steps) no cubre.
+  it('T-163-4: multi-leg LLM plan conserved in full (terminal-guard removed — WKH-166)', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValue(
       wkh163TerminalDiscovery,
     );
@@ -2796,10 +2808,11 @@ describe('orchestrateService', () => {
     const composeCall = vi.mocked(composeService.compose).mock.calls[0]![0]!;
     expect(composeCall.steps.map((s) => s.agent)).toEqual([
       'wkh163-weather',
+      'wkh163-defi',
       'wkh163-translator',
     ]);
-    expect(result.reasoning).toContain('dropped');
-    expect(result.reasoning).toContain('1 off-topic');
+    expect(result.reasoning).not.toContain('dropped');
+    // Débito == step-0 original (weather = 0.4).
     expect(vi.mocked(budgetService.debit)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(budgetService.debit).mock.calls[0]![2]).toBeCloseTo(
       0.4,

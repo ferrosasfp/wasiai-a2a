@@ -346,11 +346,11 @@ function greedyPlan(
 // agentes REALES (no-demo) que sólo entran en budget, cobrable si un cliente
 // ingenuo lo ejecuta sin revisar. Este chequeo de overlap de keywords barato
 // (en memoria, SIN LLM, SIN llamadas externas) corre SOLO en el path de fallback
-// (usedFallback === true). El path normal del LLM ya juzga relevancia con su
-// propio criterio semántico, pero desde WKH-152 tiene además un backstop léxico
-// determinístico PER-STEP (MIXED-PLAN-ONLY) sobre el plan del LLM — ver `:872` y
-// el comentario de diseño de `:806-819` — que dropea sólo los steps sin overlap
-// alguno con el goal, sin re-juzgar semánticamente lo que el LLM sí acertó.
+// (usedFallback === true). El path normal del LLM juzga relevancia con su propio
+// criterio semántico y su plan es AUTORITATIVO: se ejecuta tal cual (WKH-166
+// removió el backstop léxico determinístico PER-STEP que corría sobre el plan del
+// LLM y dropeaba steps con buen juicio del planner). El smart-drop semántico por
+// embeddings vuelve con WKH-160, re-enganchando en el mismo hook point.
 
 /** Lowercase, split por no-alfanuméricos, descarta tokens < 3 chars. */
 function tokenizeForRelevance(text: string): Set<string> {
@@ -364,10 +364,10 @@ function tokenizeForRelevance(text: string): Set<string> {
 
 /**
  * WKH-152: true si `text` comparte ≥1 token evaluable (≥3 chars) con
- * `goalTokens`. `goalTokens` vacío ⇒ false (el caller decide la semántica del
- * caso vacío: el path LLM cortocircuita ANTES con el guard CD-14 y NO delega el
- * caso vacío acá). Determinístico, en memoria, sin LLM/red. Mismo tokenizador y
- * umbral (overlap ≥1) que `fallbackNoRelevance`.
+ * `goalTokens`. `goalTokens` vacío ⇒ false. Determinístico, en memoria, sin
+ * LLM/red. Mismo tokenizador y umbral (overlap ≥1) que `fallbackNoRelevance`.
+ * INERTE respecto al path LLM desde WKH-166 (el plan del LLM es autoritativo);
+ * queda viva + exportada como hook para WKH-160 y consumida por T-152-8.
  */
 export function textOverlapsGoal(
   text: string,
@@ -839,24 +839,13 @@ export const orchestrateService = {
     // cualquier débito/settlement. Este guard greedy es TODO-O-NADA y NO aplica al
     // path del LLM (usedFallback === false).
     //
-    // WKH-152 (auditoría 2026-07-06/07): el path del LLM NO queda sin defensa. La
-    // nota original ("el LLM ya juzga relevancia con su propio criterio, no
-    // duplicar ni endurecer acá") asumía que el planner nunca metía agentes fuera
-    // de tema; en la práctica un plan MIXTO (relevante + real-irrelevante) llegaba
-    // a 'ready' y cobraba ambos. Por eso, abajo, se agrega un backstop
-    // determinístico PER-STEP (no todo-o-nada) — conservador (bias-to-conserve,
-    // false-negative-safe) — que dropea sólo los steps sin overlap léxico alguno
-    // con el goal, dejando intacto lo que el LLM sí acertó. NO es un segundo juicio
-    // semántico: es una red de seguridad léxica barata contra el over-charge.
+    // WKH-166: `fallbackNoRelevance` es el ÚNICO guard de relevancia (greedy-only,
+    // todo-o-nada). El plan del LLM es AUTORITATIVO — se ejecuta tal cual tras los
+    // guards que NO son de relevancia léxica (slug-existe + budget-fit +
+    // allStepsAreDemos). El backstop léxico PER-STEP que WKH-152/158/159/163 corrían
+    // sobre el plan del LLM fue removido (dropeaba steps bien elegidos por overlap
+    // léxico y rompía el flujo de remesas). El smart-drop semántico vuelve con WKH-160.
     const goalTokens = tokenizeForRelevance(goal);
-    // WKH-163: tokens de relevancia para el backstop LLM SIN los puramente numéricos.
-    // Un monto (p.ej. "400") es señal de relevancia casi universal en agentes financieros
-    // y su echo en el input tailoreado dropeaba injustamente la pata de entrega
-    // (agentshop-cashout-matcher) del plan insignia de remesas. goalTokens (greedy +
-    // reasoning no_relevant_agent) queda INTACTO; el cambio se aísla al path LLM.
-    const llmGoalTokens = new Set(
-      [...goalTokens].filter((t) => !/^\d+$/.test(t)),
-    );
     const fallbackNoRelevance =
       usedFallback &&
       (goalTokens.size === 0 ||
@@ -873,66 +862,6 @@ export const orchestrateService = {
           }
           return false;
         }));
-
-    // WKH-152 (MIXED-PLAN-ONLY, enmienda 2026-07-07): per-step relevance backstop
-    // para el PLAN DEL LLM. `fallbackNoRelevance` (arriba) cubre SOLO el greedy
-    // (usedFallback === true) y `allStepsAreDemos` sólo dispara si TODOS los steps son
-    // demos. Un plan MIXTO del LLM (1 agente relevante + 1 agente real-irrelevante)
-    // escapaba ambos y AMBOS se debitaban/ejecutaban (auditoría 2026-07-06/07). Acá
-    // dropeamos per-step los steps CLARAMENTE irrelevantes ANTES de cualquier
-    // débito/compose, reusando el mismo tokenizador/umbral (overlap ≥1). Bias-to-
-    // conserve: agente no resuelto o cualquier señal léxica ⇒ CONSERVAR. Corre SOLO si
-    // usedFallback === false Y ¬allStepsAreDemos Y goalTokens.size > 0 (CD-13 + CD-14).
-    // MIXED-PLAN-ONLY (CD-15): el filtro NUNCA vacía un plan. El drop se aplica
-    // si-y-solo-si 0 < relevantSteps.length < steps.length (plan mixto = ≥1 relevante
-    // sobrevive). Si relevantSteps.length === 0 (TODOS disjuntos del goal) ⇒ CONSERVAR
-    // TODOS (no-op) — un plan donde NINGÚN step matchea léxicamente es señal de
-    // multilingüismo/vocabulario distinto (goal español vs. agente inglés), no de
-    // irrelevancia; vaciarlo sería un false-negative catastrófico. El early-return
-    // no_relevant_agent (abajo) queda EXCLUSIVO de all-demos/greedy.
-    const llmFilterApplies =
-      !usedFallback && !allStepsAreDemos && llmGoalTokens.size > 0; // WKH-163: llmGoalTokens (era goalTokens)
-
-    let relevantSteps = steps;
-    if (llmFilterApplies) {
-      relevantSteps = steps.filter((s) => {
-        const agent = discovered.agents.find(
-          (a) => a.slug === s.agent && a.registry === s.registry,
-        );
-        if (!agent) return true; // no resuelto ⇒ CONSERVAR (§5 defensivo)
-        const corpus = `${agent.name} ${agent.description} ${agent.capabilities.join(' ')} ${JSON.stringify(s.input)}`;
-        return textOverlapsGoal(corpus, llmGoalTokens); // WKH-163: llmGoalTokens (era goalTokens); corpus INTACTO (CD-11)
-      });
-    }
-    // WKH-163 (terminal delivery guard, defense-in-depth): si el backstop dropearía el
-    // step TERMINAL (la pata de entrega) Y ≥2 steps quedan disjuntos (señal de desajuste
-    // de vocabulario multi-leg, no de un único add-on spurious), se RESCATA el terminal.
-    // Con UN solo disjunto (T-152-1) NO se protege → el drop del mixto genuino queda intacto (CD-4).
-    if (
-      llmFilterApplies &&
-      relevantSteps.length > 0 &&
-      relevantSteps.length < steps.length
-    ) {
-      const droppedCount = steps.length - relevantSteps.length;
-      const terminal = steps[steps.length - 1]; // CD-8: ComposeStep | undefined
-      const terminalDropped =
-        terminal !== undefined && !relevantSteps.includes(terminal);
-      if (droppedCount >= 2 && terminalDropped) {
-        // Re-incluir el terminal preservando el orden original (los demás disjuntos
-        // siguen dropeados). relevantSteps referencia objetos del MISMO array steps.
-        relevantSteps = steps.filter(
-          (s) => relevantSteps.includes(s) || s === terminal,
-        );
-      }
-    }
-    // CD-15 (MIXED-PLAN-ONLY): dropear SOLO si ≥1 relevante sobrevive Y ≥1 se dropea.
-    // relevantSteps.length === 0 (todos disjuntos) ⇒ applyDrop=false ⇒ conservar todos.
-    // relevantSteps.length === steps.length (todos relevantes) ⇒ applyDrop=false ⇒ no-op.
-    const applyDrop =
-      llmFilterApplies &&
-      relevantSteps.length > 0 &&
-      relevantSteps.length < steps.length;
-    const llmDropped = applyDrop ? steps.length - relevantSteps.length : 0;
 
     if (allStepsAreDemos || fallbackNoRelevance) {
       let reasoning: string;
@@ -1002,25 +931,6 @@ export const orchestrateService = {
         );
 
       return noRelevantResult;
-    }
-
-    // WKH-152 (MIXED-PLAN-ONLY): caso MIXTO — sobrevivió un subset
-    // (0 < relevantSteps.length < steps.length ⇒ applyDrop). Reasignamos `steps`
-    // reindexando `passOutput` por construcción (el primer sobreviviente pasa a
-    // passOutput:false → usa su propio input; sin cirugía de off-by-one) y
-    // recomputamos plannedCostUsd/step-0 con el MISMO resolver registry-aware de
-    // :707-713 para que débito == ejecución (AC-4). El billing 1..N
-    // (costPerStep/totalCostUsdc/protocolFeeUsdc) se recalcula abajo POR CONSTRUCCIÓN
-    // sobre el `steps` reasignado. applyDrop === false (todo-relevante O todo-disjunto)
-    // ⇒ no-op → `steps` intacto → billing byte-idéntico a sin-filtro (AC-2/AC-3).
-    if (applyDrop) {
-      steps = relevantSteps.map((s, i) => ({ ...s, passOutput: i > 0 }));
-      const step0 = steps[0]; // CD-8: ComposeStep | undefined
-      const step0Price = step0
-        ? await resolveAgentPriceUsdc(step0.agent, step0.registry)
-        : null;
-      plannedCostUsd = step0Price ?? 0;
-      reasoning += ` (${llmDropped} off-topic agent(s) dropped by relevance backstop)`;
     }
 
     // AC8: Check time again before compose
