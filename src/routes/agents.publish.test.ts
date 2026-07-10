@@ -75,7 +75,7 @@ vi.mock('../services/agent.js', async () => {
 // auth middleware — inyecta a2aKeyRow (o simula ausencia con currentOwner=null).
 let currentOwner: string | null = 'tenant-A';
 vi.mock('../middleware/a2a-key.js', () => ({
-  requirePaymentOrA2AKey: () => [
+  requireA2AKey: () => [
     async (request: { a2aKeyRow?: { id: string; owner_ref: string } }) => {
       if (currentOwner === null) return;
       request.a2aKeyRow = { id: 'fake-key-id', owner_ref: currentOwner };

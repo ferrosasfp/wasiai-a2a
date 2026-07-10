@@ -16,8 +16,9 @@
  * Seguridad reusada (NO reinventar):
  *   - SSRF: `validateRegistryUrl` write-time (CD-1). PATCH re-valida agentUrl.
  *   - Ownership/anti-IDOR: `OwnershipMismatchError` → 404 disclosure-safe (CD-3).
- *   - Auth: `requirePaymentOrA2AKey` + guard `A2A_KEY_REQUIRED` (CD-2). Publicar
- *     es GRATIS con a2a-key (sin fee/budget).
+ *   - Auth: `requireA2AKey` (auth-only — sin fee/débito/x402) + guard
+ *     `A2A_KEY_REQUIRED`. Publicar/actualizar/borrar/listar es GRATIS: el
+ *     middleware autentica la a2a-key y NUNCA invoca pago (WKH-173).
  *   - Error estático al cliente (CD-10): el detalle va a `request.log.warn`.
  */
 
@@ -27,7 +28,7 @@ import {
   validateRegistryUrl,
 } from '../lib/url-validator.js';
 import { isValidWallet } from '../lib/wallet-format.js';
-import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
+import { requireA2AKey } from '../middleware/a2a-key.js';
 import { publishedAgentService } from '../services/agent.js';
 import { OwnershipMismatchError } from '../services/security/errors.js';
 import type { PublishAgentInput } from '../types/index.js';
@@ -99,11 +100,7 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: Partial<PublishAgentInput> & Record<string, unknown> }>(
     '/',
     {
-      preHandler: [
-        ...requirePaymentOrA2AKey({
-          description: 'WasiAI Agent Publishing — Publish agent',
-        }),
-      ],
+      preHandler: [...requireA2AKey()],
     },
     async (request, reply: FastifyReply) => {
       try {
@@ -274,11 +271,7 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
   }>(
     '/:slug',
     {
-      preHandler: [
-        ...requirePaymentOrA2AKey({
-          description: 'WasiAI Agent Publishing — Update agent',
-        }),
-      ],
+      preHandler: [...requireA2AKey()],
     },
     async (request, reply: FastifyReply) => {
       try {
@@ -405,11 +398,7 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.delete<{ Params: { slug: string } }>(
     '/:slug',
     {
-      preHandler: [
-        ...requirePaymentOrA2AKey({
-          description: 'WasiAI Agent Publishing — Delete agent',
-        }),
-      ],
+      preHandler: [...requireA2AKey()],
     },
     async (request, reply: FastifyReply) => {
       try {
@@ -450,11 +439,7 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/',
     {
-      preHandler: [
-        ...requirePaymentOrA2AKey({
-          description: 'WasiAI Agent Publishing — List own agents',
-        }),
-      ],
+      preHandler: [...requireA2AKey()],
     },
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {

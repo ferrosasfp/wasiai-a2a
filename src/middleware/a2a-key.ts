@@ -170,6 +170,105 @@ function extractSignedHeaders(request: FastifyRequest): SignedAuthHeaders {
   };
 }
 
+/**
+ * WKH-173 (MNR-1): fuente única de la verificación de firma opt-in. Reemplaza
+ * el bloque duplicado verbatim en los 4 call-sites (master/session ×
+ * pago/auth-only). Encapsula: si `require` → extractSignedHeaders → falta firma
+ * `401 SIGNATURE_REQUIRED` → verifySignedAuth → mapeo del SignedAuthErrorCode
+ * vía sendSignedAuthError. Comportamiento byte-idéntico al inline previo (mismos
+ * status/códigos, mismo orden).
+ *
+ * Devuelve `true` sii YA envió una respuesta de error (el caller DEBE cortar con
+ * `return`), `false` para continuar. NO devuelve el FastifyReply: `reply` es
+ * thenable, así que `await` sobre un valor-reply lo desenvuelve a `undefined`
+ * (falsy) y el early-return del caller se pierde → seguía debitando (bug del
+ * fix-pack, ver auto-blindaje). El boolean es a prueba de ese footgun.
+ */
+async function verifyOptInSignature(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  opts: {
+    require: boolean;
+    tokenHashHex: string;
+    scheme:
+      | { kind: 'eip712'; fundingWallet: string | null }
+      | { kind: 'hmac'; signingSecretHash: string | null };
+  },
+): Promise<boolean> {
+  if (opts.require !== true) {
+    return false;
+  }
+  const headers = extractSignedHeaders(request);
+  if (typeof headers.signature !== 'string' || headers.signature.length === 0) {
+    reply.status(401).send({ error_code: 'SIGNATURE_REQUIRED' });
+    return true;
+  }
+  const signedResult = await verifySignedAuth({
+    tokenHashHex: opts.tokenHashHex,
+    method: request.method.toUpperCase(),
+    path: request.url.split('?')[0] ?? request.url,
+    headers,
+    scheme: opts.scheme,
+  });
+  if (!signedResult.ok) {
+    sendSignedAuthError(reply, signedResult.code);
+    return true;
+  }
+  return false;
+}
+
+// ── WKH-173: shared effectiveRow builders (DT-B) ───────────────
+
+/**
+ * WKH-173 (DT-B): builder puro del effectiveRow de delegación. Fuente única
+ * compartida por resolveDelegationAuth (path pago) y authenticateDelegation
+ * (auth-only). Réplica EXACTA de a2a-key.ts:503-513 (sin erc8004_verified, que
+ * se setea en el call-site). Behavior-preserving (cubierto por la suite WKH-101).
+ */
+export function buildDelegationEffectiveRow(
+  parentKey: A2AAgentKeyRow,
+  delegation: DelegationRow,
+): A2AAgentKeyRow {
+  return {
+    ...parentKey,
+    allowed_registries:
+      delegation.policy.allowed_registries.length > 0
+        ? delegation.policy.allowed_registries
+        : null,
+    allowed_agent_slugs:
+      delegation.policy.allowed_agent_slugs.length > 0
+        ? delegation.policy.allowed_agent_slugs
+        : null,
+  };
+}
+
+/**
+ * WKH-173 (DT-B): builder puro del effectiveRow de key-session. Fuente única
+ * compartida por resolveKeySessionAuth (path pago) y authenticateKeySession
+ * (auth-only). Réplica EXACTA de a2a-key.ts:740-754 (sin erc8004_verified).
+ * Behavior-preserving (cubierto por la suite WKH-121).
+ */
+export function buildSessionEffectiveRow(
+  parentKey: A2AAgentKeyRow,
+  session: KeySessionRow,
+): A2AAgentKeyRow {
+  return {
+    ...parentKey,
+    allowed_registries:
+      session.allowed_registries === null
+        ? parentKey.allowed_registries
+        : session.allowed_registries,
+    allowed_agent_slugs:
+      session.allowed_agent_slugs === null
+        ? parentKey.allowed_agent_slugs
+        : session.allowed_agent_slugs,
+    allowed_categories:
+      session.allowed_categories === null
+        ? parentKey.allowed_categories
+        : session.allowed_categories,
+  };
+}
+
 // ── x402 delegation helper ─────────────────────────────────
 
 async function runX402Fallback(
@@ -500,17 +599,7 @@ async function resolveDelegationAuth(
     // 8. augment + SET delegationContext para los steps 2..N (DT-11/DT-7).
     //    effectiveRow inyecta el scoping de la policy (allowed_*) para que
     //    composeService.compose aplique checkScoping sin tocar compose/authz.
-    const effectiveRow: A2AAgentKeyRow = {
-      ...parentKey,
-      allowed_registries:
-        delegation.policy.allowed_registries.length > 0
-          ? delegation.policy.allowed_registries
-          : null,
-      allowed_agent_slugs:
-        delegation.policy.allowed_agent_slugs.length > 0
-          ? delegation.policy.allowed_agent_slugs
-          : null,
-    };
+    const effectiveRow = buildDelegationEffectiveRow(parentKey, delegation);
     effectiveRow.erc8004_verified = isIdentityVerified(parentKey);
     request.a2aKeyRow = effectiveRow;
     request.delegationRow = delegation;
@@ -591,27 +680,13 @@ async function resolveKeySessionAuth(
     //     sesión NO exige firma → flujo bearer idéntico al pre-WKH-123
     //     (headers de firma ignorados, CD-1/AC-7). El `hash` (L~470) es el
     //     token_hash; HMAC lo usa hex SIN 0x.
-    if (session.require_signature === true) {
-      const headers = extractSignedHeaders(request);
-      if (
-        typeof headers.signature !== 'string' ||
-        headers.signature.length === 0
-      ) {
-        return reply.status(401).send({ error_code: 'SIGNATURE_REQUIRED' });
-      }
-      const signedResult = await verifySignedAuth({
-        tokenHashHex: hash,
-        method: request.method.toUpperCase(),
-        path: request.url.split('?')[0] ?? request.url,
-        headers,
-        scheme: {
-          kind: 'hmac',
-          signingSecretHash: session.signing_secret_hash,
-        },
-      });
-      if (!signedResult.ok) {
-        return sendSignedAuthError(reply, signedResult.code);
-      }
+    const sigHandled = await verifyOptInSignature(request, reply, {
+      require: session.require_signature === true,
+      tokenHashHex: hash,
+      scheme: { kind: 'hmac', signingSecretHash: session.signing_secret_hash },
+    });
+    if (sigHandled) {
+      return;
     }
 
     // 4. resolver chain/bundle → chainId (REUSO del bloque master).
@@ -737,21 +812,7 @@ async function resolveKeySessionAuth(
     //    inyecta el scope efectivo de la sesión (intersección): por dimensión
     //    `effective = (session === null) ? parent : session`. La sesión ya fue
     //    validada ⊆ padre en creación (CD-4).
-    const effectiveRow: A2AAgentKeyRow = {
-      ...parentKey,
-      allowed_registries:
-        session.allowed_registries === null
-          ? parentKey.allowed_registries
-          : session.allowed_registries,
-      allowed_agent_slugs:
-        session.allowed_agent_slugs === null
-          ? parentKey.allowed_agent_slugs
-          : session.allowed_agent_slugs,
-      allowed_categories:
-        session.allowed_categories === null
-          ? parentKey.allowed_categories
-          : session.allowed_categories,
-    };
+    const effectiveRow = buildSessionEffectiveRow(parentKey, session);
     effectiveRow.erc8004_verified = isIdentityVerified(parentKey);
     request.a2aKeyRow = effectiveRow;
     request.keySessionRow = session;
@@ -845,24 +906,13 @@ async function resolveMasterAuth(
     //     ignorados, CD-1/AC-7). El `keyHash` (L~636) es el token_hash; EIP-712
     //     lo usa como `0x${keyHash}` (lo agrega el service). El server
     //     reconstruye el typed-data; el caller manda SOLO la firma (CD-9).
-    if (keyRow.require_signature === true) {
-      const headers = extractSignedHeaders(request);
-      if (
-        typeof headers.signature !== 'string' ||
-        headers.signature.length === 0
-      ) {
-        return reply.status(401).send({ error_code: 'SIGNATURE_REQUIRED' });
-      }
-      const signedResult = await verifySignedAuth({
-        tokenHashHex: keyHash,
-        method: request.method.toUpperCase(),
-        path: request.url.split('?')[0] ?? request.url,
-        headers,
-        scheme: { kind: 'eip712', fundingWallet: keyRow.funding_wallet },
-      });
-      if (!signedResult.ok) {
-        return sendSignedAuthError(reply, signedResult.code);
-      }
+    const sigHandled = await verifyOptInSignature(request, reply, {
+      require: keyRow.require_signature === true,
+      tokenHashHex: keyHash,
+      scheme: { kind: 'eip712', fundingWallet: keyRow.funding_wallet },
+    });
+    if (sigHandled) {
+      return;
     }
 
     // 6. Resolve target chain per-request — REUSO del helper resolveTargetChain
@@ -1003,6 +1053,211 @@ async function resolveMasterAuth(
       message: 'Budget service temporarily unavailable',
     });
   }
+}
+
+// ── WKH-173: auth-only resolvers (publish/patch/delete/list) ───
+// Autentican la a2a-key y setean request.a2aKeyRow SIN chain/débito/limits/x402
+// (CD-2/DT-C/DT-G). Cada código + helper es EL MISMO que emite el resolver pago
+// en su paso de auth; la única diferencia es que estos NO ejecutan
+// chain/limits/débito.
+
+// Master key (auth-only). Subconjunto de resolveMasterAuth: hash → lookup →
+// is_active → firma opt-in → augment. SIN limits/chain/débito/budget header.
+async function authenticateMasterKey(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  rawKey: string,
+): Promise<unknown> {
+  let keyRow: A2AAgentKeyRow | null = null;
+
+  try {
+    const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
+
+    keyRow = await identityService.lookupByHash(keyHash);
+    if (!keyRow) {
+      return send403(reply, 'KEY_NOT_FOUND', 'A2A key not found');
+    }
+
+    if (!keyRow.is_active) {
+      return send403(reply, 'KEY_INACTIVE', 'A2A key is inactive');
+    }
+
+    const sigHandled = await verifyOptInSignature(request, reply, {
+      require: keyRow.require_signature === true,
+      tokenHashHex: keyHash,
+      scheme: { kind: 'eip712', fundingWallet: keyRow.funding_wallet },
+    });
+    if (sigHandled) {
+      return;
+    }
+
+    keyRow.erc8004_verified = isIdentityVerified(keyRow);
+    request.a2aKeyRow = keyRow;
+  } catch (err) {
+    request.log.error(
+      {
+        err: err instanceof Error ? err.message : 'unknown',
+        keyId: keyRow?.id,
+      },
+      'a2a-key middleware error',
+    );
+    // MNR-2 (WKH-173 CR): auth-only NO toca el budget service; el mensaje
+    // preciso es de autenticación (el path pago conserva su mensaje de budget).
+    return reply.status(503).send({
+      error: 'SERVICE_ERROR',
+      message: 'Authentication service temporarily unavailable',
+    });
+  }
+}
+
+// Delegación (auth-only). Subconjunto de resolveDelegationAuth: lookup →
+// revoked/expired → parent is_active → effectiveRow. SIN chain/allowed_chains/
+// per-tx/débito/context/budget header.
+async function authenticateDelegation(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  rawKey: string,
+): Promise<unknown> {
+  try {
+    const hash = crypto.createHash('sha256').update(rawKey).digest('hex');
+    const delegation = await delegationService.lookupByTokenHash(hash);
+    if (!delegation) {
+      return reply.status(401).send({
+        error: 'Session token not found',
+        error_code: 'INVALID_SESSION_TOKEN',
+      });
+    }
+
+    if (delegation.revoked_at !== null) {
+      return send403delegation(
+        reply,
+        'DELEGATION_REVOKED',
+        'Delegation has been revoked',
+      );
+    }
+    if (Date.now() >= new Date(delegation.expires_at).getTime()) {
+      return send403delegation(
+        reply,
+        'DELEGATION_EXPIRED',
+        'Delegation has expired',
+      );
+    }
+
+    const parentKey = await delegationService.getParentKey(delegation.key_id);
+    if (!parentKey?.is_active) {
+      return send403delegation(
+        reply,
+        'KEY_INACTIVE',
+        'Parent agent key is inactive',
+      );
+    }
+
+    const effectiveRow = buildDelegationEffectiveRow(parentKey, delegation);
+    effectiveRow.erc8004_verified = isIdentityVerified(parentKey);
+    request.a2aKeyRow = effectiveRow;
+    request.delegationRow = delegation;
+  } catch (err) {
+    request.log.error(
+      { err: err instanceof Error ? err.message : 'unknown' },
+      'a2a-key delegation branch error',
+    );
+    return reply.status(503).send({
+      error: 'SERVICE_ERROR',
+      message: 'Delegation service temporarily unavailable',
+    });
+  }
+}
+
+// Key-session (auth-only). Subconjunto de resolveKeySessionAuth: lookup →
+// revoked/expired → parent is_active → firma HMAC opt-in → effectiveRow. SIN
+// chain/débito/context/budget header.
+async function authenticateKeySession(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  rawKey: string,
+): Promise<unknown> {
+  try {
+    const hash = crypto.createHash('sha256').update(rawKey).digest('hex');
+    const session = await keySessionService.lookupByTokenHash(hash);
+    if (!session) {
+      return reply.status(401).send({
+        error: 'Session token not found',
+        error_code: 'SESSION_TOKEN_INVALID',
+      });
+    }
+
+    if (session.revoked_at !== null) {
+      return send403session(
+        reply,
+        'SESSION_TOKEN_INVALID',
+        'Session token has been revoked',
+      );
+    }
+    if (Date.now() >= new Date(session.expires_at).getTime()) {
+      return send403session(reply, 'SESSION_EXPIRED', 'Session has expired');
+    }
+
+    const parentKey = await keySessionService.getParentKey(session.key_id);
+    if (!parentKey?.is_active) {
+      return send403session(
+        reply,
+        'KEY_INACTIVE',
+        'Parent agent key is inactive',
+      );
+    }
+
+    const sigHandled = await verifyOptInSignature(request, reply, {
+      require: session.require_signature === true,
+      tokenHashHex: hash,
+      scheme: { kind: 'hmac', signingSecretHash: session.signing_secret_hash },
+    });
+    if (sigHandled) {
+      return;
+    }
+
+    const effectiveRow = buildSessionEffectiveRow(parentKey, session);
+    effectiveRow.erc8004_verified = isIdentityVerified(parentKey);
+    request.a2aKeyRow = effectiveRow;
+    request.keySessionRow = session;
+  } catch (err) {
+    request.log.error(
+      { err: err instanceof Error ? err.message : 'unknown' },
+      'a2a-key session branch error',
+    );
+    return reply.status(503).send({
+      error: 'SERVICE_ERROR',
+      message: 'Key-session service temporarily unavailable',
+    });
+  }
+}
+
+/**
+ * WKH-173: middleware auth-only para publish/patch/delete/list de agentes.
+ * Autentica la a2a-key (master/delegación/sesión) y setea request.a2aKeyRow
+ * SIN chain-resolution, SIN débito, SIN spend-limits, SIN x402 (CD-2/DT-C/DT-G).
+ * Ausencia de credencial → 403 A2A_KEY_REQUIRED directo (AC-3).
+ * Devuelve un array de 1 handler para preservar la ergonomía `...requireA2AKey()`.
+ */
+export function requireA2AKey(): preHandlerAsyncHookHandler[] {
+  const handler: preHandlerAsyncHookHandler = async (request, reply) => {
+    const rawKey = extractRawKey(request);
+    if (!rawKey) {
+      return reply.status(403).send({
+        error: 'a2a-key required',
+        error_code: 'A2A_KEY_REQUIRED',
+        message:
+          'Publishing requires an authenticated a2a-key. The x402 anonymous path cannot publish (no tenant identity).',
+      });
+    }
+    if (rawKey.startsWith('wasi_a2a_session_')) {
+      return authenticateDelegation(request, reply, rawKey);
+    }
+    if (rawKey.startsWith('wasi_a2a_sess_')) {
+      return authenticateKeySession(request, reply, rawKey);
+    }
+    return authenticateMasterKey(request, reply, rawKey);
+  };
+  return [handler];
 }
 
 // ── Middleware factory (dispatcher) ──────────────────────────

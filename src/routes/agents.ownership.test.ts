@@ -66,7 +66,7 @@ vi.mock('../services/security/errors.js', async () => {
 
 let currentOwner: string | null = 'tenant-B';
 vi.mock('../middleware/a2a-key.js', () => ({
-  requirePaymentOrA2AKey: () => [
+  requireA2AKey: () => [
     async (request: { a2aKeyRow?: { id: string; owner_ref: string } }) => {
       if (currentOwner === null) return;
       request.a2aKeyRow = { id: 'fake-key-id', owner_ref: currentOwner };

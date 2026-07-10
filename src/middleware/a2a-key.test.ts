@@ -214,7 +214,12 @@ import {
 } from '../services/security/errors.js';
 import { verifySignedAuth } from '../services/signed-auth.js';
 import type { DelegationRow, KeySessionRow } from '../types/index.js';
-import { requirePaymentOrA2AKey } from './a2a-key.js';
+import {
+  buildDelegationEffectiveRow,
+  buildSessionEffectiveRow,
+  requireA2AKey,
+  requirePaymentOrA2AKey,
+} from './a2a-key.js';
 
 const mockLookupByHash = vi.mocked(identityService.lookupByHash);
 const mockGetBalance = vi.mocked(budgetService.getBalance);
@@ -2557,5 +2562,398 @@ describe('requirePaymentOrA2AKey — WKH-127 skipMiddlewareDebit', () => {
     // H1: step-0 debit is SKIPPED in the middleware under skipMiddlewareDebit.
     expect(mockDebitDelegation).not.toHaveBeenCalled();
     expect(mockDebit).not.toHaveBeenCalled();
+  });
+});
+
+// ── WKH-173: requireA2AKey auth-only ─────────────────────────
+
+describe('requireA2AKey — auth-only (WKH-173)', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    app = Fastify();
+    app.post(
+      '/test-free',
+      { preHandler: requireA2AKey() },
+      async (request: FastifyRequest, reply: FastifyReply) =>
+        reply.send({
+          ok: true,
+          a2aKeyId: request.a2aKeyRow?.id ?? null,
+          ownerRef: request.a2aKeyRow?.owner_ref ?? null,
+          allowedSlugs: request.a2aKeyRow?.allowed_agent_slugs ?? null,
+        }),
+    );
+    await app.ready();
+  });
+
+  afterAll(() => app.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMockRegistryState(['kite-ozone-testnet'], 'kite-ozone-testnet');
+    mockExceedsPerTx.mockReturnValue(false);
+  });
+
+  const SIG_HEADERS = {
+    'x-a2a-signature': '0xsig',
+    'x-a2a-nonce': `0x${'a'.repeat(64)}`,
+    'x-a2a-timestamp': String(Math.floor(Date.now() / 1000)),
+  };
+
+  // ── T-RA-01 (AC-1): master key auth-only → 200, NO debit, NO budget header ──
+  it('T-RA-01: valid master key → 200 augmented, no debit, no remaining-budget header', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().a2aKeyId).toBe(TEST_KEY_ID);
+    expect(mockDebit).not.toHaveBeenCalled();
+    expect(response.headers['x-a2a-remaining-budget']).toBeUndefined();
+  });
+
+  // ── T-RA-02 (AC-1): delegation auth-only → 200, NO debit ──
+  it('T-RA-02: valid delegation token → 200, no delegation debit, no master debit', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().ownerRef).toBe('user-1');
+    expect(mockDebitDelegation).not.toHaveBeenCalled();
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  // ── T-RA-03 (AC-1): key-session auth-only → 200, NO debit ──
+  it('T-RA-03: valid key-session token → 200, no session debit, no master debit', async () => {
+    mockSessionLookup.mockResolvedValue(makeKeySessionRow());
+    mockSessionGetParent.mockResolvedValue(makeKeyRow());
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().a2aKeyId).toBe(TEST_KEY_ID);
+    expect(mockSessionDebit).not.toHaveBeenCalled();
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  // ── T-RA-04 (AC-2): auth failures preserve status + error_code, never debit ──
+  it('T-RA-04a master: lookup null → 403 KEY_NOT_FOUND', async () => {
+    mockLookupByHash.mockResolvedValue(null);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('KEY_NOT_FOUND');
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  it('T-RA-04b master: inactive key → 403 KEY_INACTIVE', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow({ is_active: false }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('KEY_INACTIVE');
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  it('T-RA-04c delegation: lookup null → 401 INVALID_SESSION_TOKEN', async () => {
+    mockLookupToken.mockResolvedValue(null);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('INVALID_SESSION_TOKEN');
+    expect(mockDebitDelegation).not.toHaveBeenCalled();
+  });
+
+  it('T-RA-04d delegation: revoked → 403 DELEGATION_REVOKED', async () => {
+    mockLookupToken.mockResolvedValue(
+      makeDelegationRow({ revoked_at: new Date().toISOString() }),
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('DELEGATION_REVOKED');
+    expect(mockDebitDelegation).not.toHaveBeenCalled();
+  });
+
+  it('T-RA-04e delegation: expired → 403 DELEGATION_EXPIRED', async () => {
+    mockLookupToken.mockResolvedValue(
+      makeDelegationRow({
+        expires_at: new Date(Date.now() - 1000).toISOString(),
+      }),
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('DELEGATION_EXPIRED');
+    expect(mockDebitDelegation).not.toHaveBeenCalled();
+  });
+
+  it('T-RA-04f delegation: parent inactive → 403 KEY_INACTIVE', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow({ is_active: false }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('KEY_INACTIVE');
+    expect(mockDebitDelegation).not.toHaveBeenCalled();
+  });
+
+  it('T-RA-04g session: lookup null → 401 SESSION_TOKEN_INVALID', async () => {
+    mockSessionLookup.mockResolvedValue(null);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('SESSION_TOKEN_INVALID');
+    expect(mockSessionDebit).not.toHaveBeenCalled();
+  });
+
+  it('T-RA-04h session: expired → 403 SESSION_EXPIRED', async () => {
+    mockSessionLookup.mockResolvedValue(
+      makeKeySessionRow({
+        expires_at: new Date(Date.now() - 1000).toISOString(),
+      }),
+    );
+    mockSessionGetParent.mockResolvedValue(makeKeyRow());
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('SESSION_EXPIRED');
+    expect(mockSessionDebit).not.toHaveBeenCalled();
+  });
+
+  it('T-RA-04i session: parent inactive → 403 KEY_INACTIVE', async () => {
+    mockSessionLookup.mockResolvedValue(makeKeySessionRow());
+    mockSessionGetParent.mockResolvedValue(makeKeyRow({ is_active: false }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('KEY_INACTIVE');
+    expect(mockSessionDebit).not.toHaveBeenCalled();
+  });
+
+  // ── T-RA-05 (AC-3): no credential → 403 A2A_KEY_REQUIRED, x402 never touched ──
+  it('T-RA-05a: no a2a-key / no authorization → 403 A2A_KEY_REQUIRED, x402 untouched', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('A2A_KEY_REQUIRED');
+    expect(mockGetPaymentAdapter).not.toHaveBeenCalled();
+  });
+
+  it('T-RA-05b: x-payment present but no a2a-key → 403 A2A_KEY_REQUIRED, x402 untouched', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: {
+        'x-payment': Buffer.from(
+          JSON.stringify({ scheme: 'exact', payload: {} }),
+        ).toString('base64'),
+      },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('A2A_KEY_REQUIRED');
+    expect(mockGetPaymentAdapter).not.toHaveBeenCalled();
+  });
+
+  // ── T-RA-06 (AC-4): shared builder produces delegation scoping ──
+  it('T-RA-06: delegation with allowed_agent_slugs → effectiveRow scoping propagated', async () => {
+    mockLookupToken.mockResolvedValue(
+      makeDelegationRow({
+        policy: {
+          max_amount_per_tx: '5.00',
+          max_total_amount: '100.00',
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          allowed_chains: [],
+          allowed_agent_slugs: ['my-weather-agent'],
+          allowed_registries: [],
+        },
+      }),
+    );
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().allowedSlugs).toEqual(['my-weather-agent']);
+    expect(res.json().ownerRef).toBe('user-1');
+  });
+
+  // ── T-RA-07 (AC-7): per-request signature honored (opt-in) ──
+  it('T-RA-07a master: require_signature + no signature → 401 SIGNATURE_REQUIRED', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({
+        require_signature: true,
+        funding_wallet: '0x1111111111111111111111111111111111111111',
+      }),
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('SIGNATURE_REQUIRED');
+    expect(mockVerifySignedAuth).not.toHaveBeenCalled();
+  });
+
+  it('T-RA-07b master: require_signature + valid signature → 200', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({
+        require_signature: true,
+        funding_wallet: '0x1111111111111111111111111111111111111111',
+      }),
+    );
+    mockVerifySignedAuth.mockResolvedValue({ ok: true });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { 'x-a2a-key': TEST_KEY, ...SIG_HEADERS },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(mockVerifySignedAuth).toHaveBeenCalledTimes(1);
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  it('T-RA-07c session: require_signature + no signature → 401 SIGNATURE_REQUIRED', async () => {
+    mockSessionLookup.mockResolvedValue(
+      makeKeySessionRow({
+        require_signature: true,
+        signing_secret_hash: 'f'.repeat(64),
+      }),
+    );
+    mockSessionGetParent.mockResolvedValue(makeKeyRow());
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { authorization: `Bearer ${SESS_TOKEN}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error_code).toBe('SIGNATURE_REQUIRED');
+    expect(mockVerifySignedAuth).not.toHaveBeenCalled();
+  });
+
+  // ── T-RA-08 (AC-8/DT-C): spend-limits NOT checked in auth-only path ──
+  it('T-RA-08: exhausted daily limit → still 200 (auth-only ignores spend-limits), no debit', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({
+        daily_limit_usd: '10.000000',
+        daily_spent_usd: '10.000000',
+        daily_reset_at: new Date(Date.now() + 86400000).toISOString(),
+        max_spend_per_call_usd: '0.01',
+      }),
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-free',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().a2aKeyId).toBe(TEST_KEY_ID);
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  // ── T-RA-BLD: builder contract anchors (DT-B) ──
+  it('T-RA-BLD: buildDelegationEffectiveRow maps policy scoping', () => {
+    const parent = makeKeyRow({
+      allowed_registries: ['parent-reg'],
+      allowed_agent_slugs: ['parent-slug'],
+    });
+    const del = makeDelegationRow({
+      policy: {
+        max_amount_per_tx: '5.00',
+        max_total_amount: '100.00',
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        allowed_chains: [],
+        allowed_agent_slugs: ['deleg-slug'],
+        allowed_registries: [],
+      },
+    });
+    const row = buildDelegationEffectiveRow(parent, del);
+    expect(row.allowed_agent_slugs).toEqual(['deleg-slug']);
+    expect(row.allowed_registries).toBeNull();
+    expect(row.owner_ref).toBe(parent.owner_ref);
+  });
+
+  it('T-RA-BLD: buildSessionEffectiveRow inherits parent on null dimensions', () => {
+    const parent = makeKeyRow({
+      allowed_registries: ['parent-reg'],
+      allowed_agent_slugs: ['parent-slug'],
+      allowed_categories: ['parent-cat'],
+    });
+    const session = makeKeySessionRow({
+      allowed_registries: null,
+      allowed_agent_slugs: ['sess-slug'],
+      allowed_categories: null,
+    });
+    const row = buildSessionEffectiveRow(parent, session);
+    expect(row.allowed_registries).toEqual(['parent-reg']);
+    expect(row.allowed_agent_slugs).toEqual(['sess-slug']);
+    expect(row.allowed_categories).toEqual(['parent-cat']);
   });
 });
