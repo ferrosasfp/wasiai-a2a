@@ -40,6 +40,8 @@ import { supabase } from '../../lib/supabase.js';
 import {
   captureDebitSignature,
   captureDebitSignatureBestEffort,
+  isEscrowSettleEnabled,
+  readValidDebitSignature,
 } from './debit-capture.js';
 import { buildDebitDomain, DEBIT_AUTHORIZATION_TYPES } from './eip712.js';
 
@@ -374,4 +376,170 @@ describe('T-9 decimals Base Sepolia (DT-2/MI-1)', () => {
     expect(args.p_amount_atomic).toBe('1500000');
     expect(args.p_amount_atomic).not.toBe('1500000000000000000');
   });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// WKH-191b — reader de la firma `valid` para el two-hop settle
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Fila `valid` mínima leída por `readValidDebitSignature` (subset tipado). */
+function validRow(overrides: Record<string, unknown> = {}) {
+  return {
+    debit_signature: '0xsig',
+    debit_amount_atomic: '1500000',
+    debit_deadline: Number(nowSec() + 1800n),
+    debit_nonce: '7',
+    debit_key_id_hash: KEY_ID_HASH,
+    debit_hop1_tx_hash: null,
+    debit_settle_status: null,
+    ...overrides,
+  };
+}
+
+/** Builder-double que registra la cadena select/eq/order/limit/maybeSingle. */
+function stubReaderRow(row: unknown) {
+  const calls = {
+    eq: [] as Array<[string, unknown]>,
+    order: [] as Array<[string, unknown]>,
+    limit: [] as number[],
+  };
+  const builder = {
+    select: vi.fn(() => builder),
+    eq: vi.fn((k: string, v: unknown) => {
+      calls.eq.push([k, v]);
+      return builder;
+    }),
+    order: vi.fn((k: string, o: unknown) => {
+      calls.order.push([k, o]);
+      return builder;
+    }),
+    limit: vi.fn((n: number) => {
+      calls.limit.push(n);
+      return builder;
+    }),
+    maybeSingle: vi.fn(() => Promise.resolve({ data: row, error: null })),
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: supabase builder test double
+  mockFrom.mockReturnValue(builder as any);
+  return { builder, calls };
+}
+
+// ── isEscrowSettleEnabled — AND de ambos flags (CD-1) ──
+describe('isEscrowSettleEnabled (CD-1)', () => {
+  it('ambos flags ON → true; cualquiera OFF → false', () => {
+    process.env.ESCROW_SETTLE_ENABLED = 'true';
+    process.env.ESCROW_DEBIT_CAPTURE_ENABLED = 'true';
+    expect(isEscrowSettleEnabled()).toBe(true);
+
+    process.env.ESCROW_DEBIT_CAPTURE_ENABLED = 'false';
+    expect(isEscrowSettleEnabled()).toBe(false);
+
+    process.env.ESCROW_SETTLE_ENABLED = 'false';
+    process.env.ESCROW_DEBIT_CAPTURE_ENABLED = 'true';
+    expect(isEscrowSettleEnabled()).toBe(false);
+
+    delete process.env.ESCROW_SETTLE_ENABLED;
+    delete process.env.ESCROW_DEBIT_CAPTURE_ENABLED;
+    expect(isEscrowSettleEnabled()).toBe(false);
+  });
+});
+
+// ── T-2b: sin firma `valid` → null (fallback) ──
+describe('T-2b reader sin firma valid (AC-2/191b)', () => {
+  it('maybeSingle → data:null → readValidDebitSignature devuelve null', async () => {
+    stubReaderRow(null);
+    const r = await readValidDebitSignature({
+      intentId: INTENT_ID,
+      ownerRef: OWNER,
+      chainKey: 'base-sepolia',
+      finalAmountUsd: 1.5,
+    });
+    expect(r).toBeNull();
+  });
+
+  it('error del data-layer → null (nunca lanza, CD-S5)', async () => {
+    const builder = {
+      select: () => builder,
+      eq: () => builder,
+      order: () => builder,
+      limit: () => builder,
+      maybeSingle: () =>
+        Promise.resolve({ data: null, error: { message: 'boom' } }),
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: supabase builder test double
+    mockFrom.mockReturnValue(builder as any);
+    await expect(
+      readValidDebitSignature({
+        intentId: INTENT_ID,
+        ownerRef: OWNER,
+        chainKey: 'base-sepolia',
+        finalAmountUsd: 1.5,
+      }),
+    ).resolves.toBeNull();
+  });
+});
+
+// ── T-2c: amount firmado != monto server-computado → null (AC-2/AC-7) ──
+describe('T-2c reader amount mismatch (AC-2/AC-7/191b)', () => {
+  it('debit_amount_atomic=1000000 vs finalUsd=1.5·6d=1500000 → null (jamás debita)', async () => {
+    stubReaderRow(validRow({ debit_amount_atomic: '1000000' }));
+    const r = await readValidDebitSignature({
+      intentId: INTENT_ID,
+      ownerRef: OWNER,
+      chainKey: 'base-sepolia',
+      finalAmountUsd: 1.5,
+    });
+    expect(r).toBeNull();
+  });
+
+  it('deadline en el pasado → null; deadline > now+3600 → null (ventana CD-S3)', async () => {
+    stubReaderRow(validRow({ debit_deadline: Number(nowSec() - 100n) }));
+    expect(
+      await readValidDebitSignature({
+        intentId: INTENT_ID,
+        ownerRef: OWNER,
+        chainKey: 'base-sepolia',
+        finalAmountUsd: 1.5,
+      }),
+    ).toBeNull();
+
+    stubReaderRow(validRow({ debit_deadline: Number(nowSec() + 7200n) }));
+    expect(
+      await readValidDebitSignature({
+        intentId: INTENT_ID,
+        ownerRef: OWNER,
+        chainKey: 'base-sepolia',
+        finalAmountUsd: 1.5,
+      }),
+    ).toBeNull();
+  });
+});
+
+// ── T-7: query shape (most-recent valid, owner-guarded) + idempotencia RPC ──
+describe('T-7 reader query owner-guarded + most-recent (AC-7/191b)', () => {
+  it('WHERE valid ORDER BY captured_at DESC LIMIT 1 + eq(owner_ref); amount OK → devuelve la fila', async () => {
+    const { calls } = stubReaderRow(validRow());
+    const r = await readValidDebitSignature({
+      intentId: INTENT_ID,
+      ownerRef: OWNER,
+      chainKey: 'base-sepolia',
+      finalAmountUsd: 1.5,
+    });
+
+    expect(r).not.toBeNull();
+    expect(r?.debit_nonce).toBe('7');
+    // owner-guard + filtro valid (AC-7/CD-6).
+    expect(calls.eq).toContainEqual(['intent_id', INTENT_ID]);
+    expect(calls.eq).toContainEqual(['owner_ref', OWNER]);
+    expect(calls.eq).toContainEqual(['debit_validation_status', 'valid']);
+    // most-recent: ORDER BY captured_at DESC LIMIT 1.
+    expect(calls.order).toContainEqual(['captured_at', { ascending: false }]);
+    expect(calls.limit).toContain(1);
+  });
+
+  // Idempotencia RPC record_debit_hop1: el COALESCE de la migración (la 1ª escritura
+  // gana) es semántica SQL = test de integración Postgres, verificada en la migración
+  // 20260713000001_wkh191b_debit_hop1.sql (como T-10 ownership). NO se simula acá de
+  // forma tautológica. El WRAPPER `recordDebitHop1` (args al RPC + propagación del
+  // hash efectivo) SÍ tiene test vivo en debit-executor.test.ts.
 });

@@ -35,7 +35,7 @@ vi.mock('../adapters/registry.js', () => ({
 // WKH-191a (T-8): resolveEscrowContract del path real de captura. Truthy → el
 // gate escrow pasa y la captura llega al RPC capture_debit_signature.
 const mockResolveEscrowContract = vi.fn(
-  () => '0x1111111111111111111111111111111111111111',
+  (): string | null => '0x1111111111111111111111111111111111111111',
 );
 vi.mock('../adapters/escrow-verifier.js', () => ({
   resolveEscrowContract: () => mockResolveEscrowContract(),
@@ -77,10 +77,48 @@ vi.mock('./arbiter.js', () => ({
   },
 }));
 
+// WKH-191b: gate + reader del two-hop settle. Partial mock de debit-capture.js
+// para preservar `captureDebitSignatureBestEffort` REAL (T-8 lo ejercita) y sólo
+// overridear el gate + reader. Default `isEscrowSettleEnabled` = false → todos los
+// tests heredados corren el path operator-custodial byte-idéntico (flag OFF).
+const mockIsEscrowSettleEnabled = vi.hoisted(() => vi.fn(() => false));
+const mockReadValidDebitSignature = vi.hoisted(() =>
+  vi.fn((_args: unknown) => undefined as unknown),
+);
+vi.mock('../adapters/escrow/debit-capture.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../adapters/escrow/debit-capture.js')
+    >();
+  return {
+    ...actual,
+    isEscrowSettleEnabled: () => mockIsEscrowSettleEnabled(),
+    readValidDebitSignature: (args: unknown) =>
+      mockReadValidDebitSignature(args),
+  };
+});
+
+// WKH-191b: ejecutor hop 1 + wrappers RPC (mock completo — el módulo real es on-chain).
+const mockExecuteDebitHop1 = vi.hoisted(() =>
+  vi.fn((_args: unknown) => undefined as unknown),
+);
+const mockRecordDebitHop1 = vi.hoisted(() =>
+  vi.fn(async (_args: unknown) => '0xhop1' as string | null),
+);
+const mockRecordDebitSettleStatus = vi.hoisted(() =>
+  vi.fn(async (_args: unknown) => undefined),
+);
+vi.mock('../adapters/escrow/debit-executor.js', () => ({
+  executeDebitHop1: (args: unknown) => mockExecuteDebitHop1(args),
+  recordDebitHop1: (args: unknown) => mockRecordDebitHop1(args),
+  recordDebitSettleStatus: (args: unknown) => mockRecordDebitSettleStatus(args),
+}));
+
 import { supabase } from '../lib/supabase.js';
 import type { CreateUptoInput } from '../types/index.js';
 import {
   paymentIntentService,
+  settleEscrowAware,
   settlePaymentIntentOnChain,
 } from './payment-intent.js';
 
@@ -1498,6 +1536,246 @@ describe('T-8 captura best-effort no rompe el settle', () => {
       mockRpc.mock.calls.some((c) => c[0] === 'capture_debit_signature'),
     ).toBe(true);
     expect(logSpy.warn).toHaveBeenCalled();
+    expect(db.row.status).toBe('settled');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// WKH-191b — settleEscrowAware (two-hop, flag-gated). Reader/executor/RPC
+// mockeados; el SEAM (settlePaymentIntentOnChain) es REAL y se controla vía el
+// payment adapter (mockSign/mockSettle/mockVerify). Debe ir AL FINAL del archivo:
+// deja `isEscrowSettleEnabled` en ON dentro del describe y lo restaura por
+// afterEach (los tests heredados corren antes, con el default OFF).
+// ════════════════════════════════════════════════════════════════════════════
+describe('WKH-191b settleEscrowAware (two-hop)', () => {
+  const ESCROW = '0x1111111111111111111111111111111111111111';
+
+  function baseEscrowRow(overrides: Record<string, unknown> = {}) {
+    return {
+      debit_signature: `0x${'ab'.repeat(65)}`,
+      debit_amount_atomic: '3700000',
+      debit_deadline: 9_999_999_999,
+      debit_nonce: '7',
+      debit_key_id_hash: '0xkeyhash',
+      debit_hop1_tx_hash: null,
+      debit_settle_status: null,
+      ...overrides,
+    };
+  }
+
+  function callEscrow(overrides: Record<string, unknown> = {}) {
+    return settleEscrowAware({
+      intentId: 'i1',
+      ownerRef: OWNER,
+      payTo: PAYTO,
+      finalAmountUsd: 3.7,
+      chainId: 2368,
+      keyId: 'k1',
+      ...overrides,
+    });
+  }
+
+  // seam → failed_unequivocal (sign ok, settle.success===false, ANTES de verify).
+  function failSettleUnequivocal(): void {
+    mockSign.mockResolvedValue({
+      paymentRequest: {
+        authorization: { value: '1' },
+        signature: '0xsig',
+        network: 'kite',
+      },
+    });
+    mockSettle.mockResolvedValue({ success: false, error: 'settle failed' });
+  }
+
+  beforeEach(() => {
+    mockIsEscrowSettleEnabled.mockReturnValue(true);
+    mockResolveEscrowContract.mockReturnValue(ESCROW);
+    mockGetDefaultChainKey.mockReturnValue('kite');
+    mockReadValidDebitSignature.mockResolvedValue(baseEscrowRow());
+    mockExecuteDebitHop1.mockResolvedValue({
+      kind: 'confirmed',
+      txHash: '0xhop1',
+      blockNumber: 1n,
+    });
+    mockRecordDebitHop1.mockResolvedValue('0xhop1');
+    mockRecordDebitSettleStatus.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    // Restaurar el default OFF (clearAllMocks NO resetea implementaciones).
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
+    mockResolveEscrowContract.mockReturnValue(ESCROW);
+  });
+
+  // ── T-1: happy path — hop1 confirmed → recordDebitHop1 ANTES de hop2 → settled ──
+  it('T-1 (AC-1): confirmed → recordDebitHop1 antes del seam; settled con txHash del hop2', async () => {
+    happySettle(); // seam → { settled, txHash: '0xTX' }
+
+    const outcome = await callEscrow();
+
+    expect(mockExecuteDebitHop1).toHaveBeenCalledTimes(1);
+    // BLQ-DR/CD-3: recordDebitHop1 ANTES del seam (mockSign es el 1er paso del seam).
+    expect(mockRecordDebitHop1).toHaveBeenCalled();
+    const hop1Order = mockRecordDebitHop1.mock.invocationCallOrder[0] as number;
+    const signOrder = mockSign.mock.invocationCallOrder[0] as number;
+    expect(hop1Order).toBeLessThan(signOrder);
+    expect(mockRecordDebitSettleStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'settled' }),
+    );
+    expect(outcome.status).toBe('settled');
+    expect(outcome.txHash).toBe('0xTX');
+  });
+
+  // ── T-2: flag OFF → seam en la 1ª línea, cero lecturas ──
+  it('T-2 (AC-2): flag OFF → seam byte-idéntico; reader/executor NUNCA llamados', async () => {
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
+    happySettle();
+
+    const outcome = await callEscrow();
+
+    expect(mockReadValidDebitSignature).not.toHaveBeenCalled();
+    expect(mockExecuteDebitHop1).not.toHaveBeenCalled();
+    expect(outcome.status).toBe('settled');
+    expect(outcome.txHash).toBe('0xTX');
+  });
+
+  // ── T-2b: flag ON pero sin firma valid → fallback al seam ──
+  it('T-2b (AC-2): readValidDebitSignature → null → seam; executor nunca llamado', async () => {
+    mockReadValidDebitSignature.mockResolvedValue(null);
+    happySettle();
+
+    const outcome = await callEscrow();
+
+    expect(mockExecuteDebitHop1).not.toHaveBeenCalled();
+    expect(outcome.status).toBe('settled');
+    expect(outcome.txHash).toBe('0xTX');
+  });
+
+  // ── T-3: hop1 not_moved → fallback operador-custodial, cero evidencia ──
+  it('T-3 (AC-3): hop1 not_moved → seam; record* NUNCA llamados; settle completa', async () => {
+    mockExecuteDebitHop1.mockResolvedValue({
+      kind: 'not_moved',
+      reason: 'REVERTED',
+    });
+    happySettle();
+
+    const outcome = await callEscrow();
+
+    expect(outcome.status).toBe('settled');
+    expect(outcome.txHash).toBe('0xTX');
+    expect(mockRecordDebitHop1).not.toHaveBeenCalled();
+    expect(mockRecordDebitSettleStatus).not.toHaveBeenCalled();
+  });
+
+  // ── T-4: hop1 confirmed + hop2 fail → reconcile + remap unequivocal→ambiguous ──
+  it('T-4 (AC-4): hop2 failed_unequivocal → remap ambiguous + reconciliation_pending', async () => {
+    failSettleUnequivocal(); // seam → failed_unequivocal
+
+    const outcome = await callEscrow();
+
+    expect(outcome.status).toBe('failed');
+    expect(outcome.failureKind).toBe('ambiguous'); // REMAP (CD-S4)
+    expect(outcome.error).toMatch(/^RECONCILE-ESCROW:/);
+    expect(mockRecordDebitSettleStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'reconciliation_pending' }),
+    );
+  });
+
+  // ── T-4 (caller): closeSession con hop2 fail → finalize failed_ambiguous, NO refund ──
+  it('T-4 caller: closeSession hop2-fail → finalize failed_ambiguous, NO refund', async () => {
+    const db = makeIntentDb({
+      intent_type: 'session',
+      authorized_usd: 10,
+      consumed_usd: 4, // finalMicro>0 → llega al settle
+    });
+    routeRpc(db.handlers);
+    failSettleUnequivocal();
+
+    const r = await paymentIntentService.closeSession('i1', OWNER);
+
+    expect(r.status).toBe('failed');
+    expect(r.error).toMatch(/^RECONCILE-ESCROW:/);
+    // remap → failed_ambiguous → NO refund (los fondos del buyer ya salieron en hop1).
+    expect(db.row.settle_outcome).toBe('failed_ambiguous');
+    expect(db.refunds).toEqual([]);
+  });
+
+  // ── T-4b: hop1 ambiguous → reconcile SIN hop2 SIN refund ──
+  it('T-4b (AC-4): hop1 ambiguous → seam NUNCA llamado; reconciliation_pending; sin refund', async () => {
+    mockExecuteDebitHop1.mockResolvedValue({
+      kind: 'ambiguous',
+      reason: 'RECEIPT_TIMEOUT',
+      txHash: '0xhop1',
+    });
+
+    const outcome = await callEscrow();
+
+    expect(mockSign).not.toHaveBeenCalled(); // hop 2 (seam) nunca corrió
+    expect(mockRecordDebitHop1).toHaveBeenCalledWith(
+      expect.objectContaining({ txHash: '0xhop1' }),
+    );
+    expect(mockRecordDebitSettleStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'reconciliation_pending' }),
+    );
+    expect(outcome.status).toBe('failed');
+    expect(outcome.failureKind).toBe('ambiguous');
+    expect(outcome.error).toBe(
+      'RECONCILE-ESCROW: hop1 ambiguous (RECEIPT_TIMEOUT)',
+    );
+  });
+
+  // ── T-5: exactly-once — hop1 tx ya persistido → skip hop1, ir directo a hop2 ──
+  it('T-5 (AC-5): debit_hop1_tx_hash seteado → executeDebitHop1 NUNCA; seam corre; settled', async () => {
+    mockReadValidDebitSignature.mockResolvedValue(
+      baseEscrowRow({ debit_hop1_tx_hash: '0xhop1prev' }),
+    );
+    happySettle();
+
+    const outcome = await callEscrow();
+
+    expect(mockExecuteDebitHop1).not.toHaveBeenCalled();
+    expect(mockSign).toHaveBeenCalled(); // seam (hop 2) corrió
+    expect(mockRecordDebitSettleStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'settled' }),
+    );
+    expect(outcome.status).toBe('settled');
+  });
+
+  // ── T-6: chain sin escrow → fallback al seam, cero hop1 ──
+  it('T-6 (AC-6): resolveEscrowContract=null → seam; reader/executor nunca llamados', async () => {
+    mockResolveEscrowContract.mockReturnValue(null);
+    happySettle();
+
+    const outcome = await callEscrow();
+
+    expect(mockReadValidDebitSignature).not.toHaveBeenCalled();
+    expect(mockExecuteDebitHop1).not.toHaveBeenCalled();
+    expect(outcome.status).toBe('settled');
+    expect(outcome.txHash).toBe('0xTX');
+  });
+
+  // ── T-9: reader/executor lanza → settleEscrowAware NO rechaza, cae al seam ──
+  it('T-9 (CD-S5): readValidDebitSignature lanza → fallback al seam, no rechaza', async () => {
+    mockReadValidDebitSignature.mockRejectedValue(new Error('reader boom'));
+    happySettle();
+
+    const outcome = await callEscrow();
+    expect(outcome.status).toBe('settled');
+    expect(outcome.txHash).toBe('0xTX');
+  });
+
+  it('T-9 (CD-S5): executeDebitHop1 lanza → fallback al seam; closeSession normal', async () => {
+    mockExecuteDebitHop1.mockRejectedValue(new Error('executor boom'));
+    const db = makeIntentDb({
+      intent_type: 'session',
+      authorized_usd: 10,
+      consumed_usd: 4,
+    });
+    routeRpc(db.handlers);
+    happySettle();
+
+    const r = await paymentIntentService.closeSession('i1', OWNER);
+    expect(r.status).toBe('settled'); // el seam corrió byte-idéntico
     expect(db.row.status).toBe('settled');
   });
 });

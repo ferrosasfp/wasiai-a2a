@@ -22,6 +22,7 @@ import { getLogger } from '../../lib/logger.js';
 import { supabase } from '../../lib/supabase.js';
 import { resolveEscrowContract } from '../escrow-verifier.js';
 import { getAdaptersBundle, getDefaultChainKey } from '../registry.js';
+import type { ChainKey } from '../types.js';
 import { buildDebitDomain, recoverDebitAuthorization } from './eip712.js';
 
 const log = getLogger('debit-capture');
@@ -56,6 +57,89 @@ const MAX_DEADLINE_TTL_SECONDS = 3600n;
 
 export function isDebitCaptureEnabled(): boolean {
   return process.env.ESCROW_DEBIT_CAPTURE_ENABLED === 'true';
+}
+
+// ── WKH-191b: reader de la firma `valid` para el two-hop settle ──────────────
+
+/**
+ * Gate del rewire escrow-aware (191b). AMBOS flags deben estar ON (CD-1): el
+ * settle solo dispara el hop 1 on-chain cuando la captura (191a) TAMBIÉN está
+ * habilitada. Default/unset → path operator-custodial de HOY (byte-idéntico).
+ */
+export function isEscrowSettleEnabled(): boolean {
+  return (
+    process.env.ESCROW_SETTLE_ENABLED === 'true' && isDebitCaptureEnabled()
+  );
+}
+
+/**
+ * Vista tipada a mano del subset leído por `readValidDebitSignature` (CD-S2:
+ * select tipado a mano → cast). `debit_amount_atomic`/`debit_nonce` son NUMERIC
+ * uint256 → `string` (BigInt, nunca Number). `debit_deadline` es BIGINT → number.
+ */
+export interface ValidDebitRow {
+  debit_signature: string;
+  debit_amount_atomic: string;
+  debit_deadline: number;
+  debit_nonce: string;
+  debit_key_id_hash: string;
+  debit_hop1_tx_hash: string | null;
+  debit_settle_status: string | null;
+}
+
+/**
+ * Lee la firma `DebitAuthorization` `valid` MÁS RECIENTE para `(intent_id,
+ * owner_ref)` (191a la persistió) y la re-valida contra el monto server-computado
+ * y la ventana de `deadline` ANTES de que el caller la use en un `writeContract`
+ * (CD-S3, money-path: no confiar en el revert del contrato como 1ª baranda).
+ *
+ * Devuelve la fila o `null` (→ fallback al path operator-custodial) si: no hay
+ * firma `valid`, el amount firmado != `parseUnits(finalAmountUsd, decimals)`, o el
+ * `deadline` cayó fuera de la ventana `[now, now + MAX_DEADLINE_TTL]`.
+ *
+ * NUNCA lanza (CD-S5, defensa en profundidad): cualquier error → `null`. El anti-
+ * replay lo garantiza el índice único parcial de 191a (AC-7), no se duplica acá.
+ */
+export async function readValidDebitSignature(args: {
+  intentId: string;
+  ownerRef: string;
+  chainKey: ChainKey;
+  finalAmountUsd: number;
+}): Promise<ValidDebitRow | null> {
+  const { intentId, ownerRef, chainKey, finalAmountUsd } = args;
+  try {
+    // 1. Firma `valid` más reciente, owner-guarded (Exemplar 3 / CD-6/AC-7).
+    const { data, error } = await supabase
+      .from('a2a_payment_intent_debit_signatures')
+      .select(
+        'debit_signature, debit_amount_atomic, debit_deadline, debit_nonce, debit_key_id_hash, debit_hop1_tx_hash, debit_settle_status',
+      )
+      .eq('intent_id', intentId)
+      .eq('owner_ref', ownerRef)
+      .eq('debit_validation_status', 'valid')
+      .order('captured_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) return null;
+    // CD-S2: select tipado a mano → cast.
+    const row = data as unknown as ValidDebitRow | null;
+    if (!row) return null;
+
+    // 2. Re-validar amount (CD-S3): espejo EXACTO de captureDebitSignature (:88-89).
+    const token = getAdaptersBundle(chainKey)?.payment.supportedTokens[0];
+    if (!token) return null;
+    const serverAtomic = parseUnits(finalAmountUsd.toString(), token.decimals);
+    if (BigInt(row.debit_amount_atomic) !== serverAtomic) return null;
+
+    // 3. Re-validar deadline (CD-S3): espejo de captureDebitSignature (:141-149).
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const dl = BigInt(row.debit_deadline);
+    if (now > dl || dl > now + MAX_DEADLINE_TTL_SECONDS) return null;
+
+    return row;
+  } catch {
+    return null;
+  }
 }
 
 /**

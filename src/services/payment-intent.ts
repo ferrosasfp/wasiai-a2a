@@ -29,8 +29,16 @@ import { recoverTypedDataAddress } from 'viem';
 import {
   captureDebitSignatureBestEffort,
   type DebitCaptureInput,
+  isEscrowSettleEnabled,
+  readValidDebitSignature,
 } from '../adapters/escrow/debit-capture.js';
-import { getPaymentAdapter } from '../adapters/registry.js';
+import {
+  executeDebitHop1,
+  recordDebitHop1,
+  recordDebitSettleStatus,
+} from '../adapters/escrow/debit-executor.js';
+import { resolveEscrowContract } from '../adapters/escrow-verifier.js';
+import { getDefaultChainKey, getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import type { SignResult } from '../adapters/types.js';
 import { getLogger } from '../lib/logger.js';
@@ -462,6 +470,155 @@ export async function settlePaymentIntentOnChain(params: {
   }
 }
 
+// ── WKH-191b: wrapper escrow-aware del settle (two-hop, flag-gated) ──────────
+
+/**
+ * Envuelve el seam WKH-136 (`settlePaymentIntentOnChain`, byte-idéntico) con el
+ * two-hop non-custodial: (hop 1) `escrow.debit()` mueve fondos del buyer del
+ * escrow al operador; (hop 2) el operador reenvía al seller vía el seam SIN cambios.
+ *
+ * Con el flag OFF (default), sin firma `valid`, sin escrow en la chain, o si hop 1
+ * `not_moved`, delega en el seam con los MISMOS params → comportamiento byte-idéntico
+ * al path operator-custodial de HOY (CD-2). NUNCA rechaza la promise (CD-S5): cualquier
+ * throw inesperado (reader/executor/RPC) → fallback al seam.
+ *
+ * Money-safety (CD-3/CD-4/CD-S4): tras un hop 1 `confirmed` se persiste el tx hash
+ * ANTES de hop 2; si hop 2 falla, se marca reconciliation-pending y se REMAPEA el
+ * `failureKind` a `ambiguous` (los fondos del buyer ya salieron on-chain → un refund
+ * off-chain sería doble-crédito). reconciliation-pending NUNCA reembolsa.
+ */
+export async function settleEscrowAware(params: {
+  intentId: string;
+  ownerRef: string;
+  payTo: string;
+  finalAmountUsd: number;
+  chainId: number;
+  keyId: string;
+}): Promise<SettleOutcome> {
+  const { intentId, ownerRef, payTo, finalAmountUsd, chainId, keyId } = params;
+  const base = { intentId, ownerRef, payTo, finalAmountUsd, chainId };
+  try {
+    // 0. Flag OFF (default) → fast-path byte-idéntico (CD-1/CD-2/AC-2), 1ª línea:
+    //    cero lecturas DB / on-chain.
+    if (!isEscrowSettleEnabled()) return settlePaymentIntentOnChain(base);
+
+    // 1. Escrow configurado en la default chain (AC-6). Sin chain/escrow → seam.
+    const chainKey = getDefaultChainKey();
+    if (!chainKey) return settlePaymentIntentOnChain(base);
+    const escrowContract = resolveEscrowContract(chainKey);
+    if (!escrowContract) return settlePaymentIntentOnChain(base);
+
+    // 2. Firma `valid` persistida por 191a (el reader ya re-validó amount/deadline).
+    //    Sin firma → path operator-custodial (AC-2/AC-7).
+    const row = await readValidDebitSignature({
+      intentId,
+      ownerRef,
+      chainKey,
+      finalAmountUsd,
+    });
+    if (!row) return settlePaymentIntentOnChain(base);
+
+    // 3. Exactly-once (AC-5/CD-3): hop 1 YA ejecutado (tx persistido) → skip a hop 2.
+    let hop1TxHash = row.debit_hop1_tx_hash;
+    if (!hop1TxHash) {
+      // 4. Hop 1: mover fondos del buyer del escrow al operador.
+      const o1 = await executeDebitHop1({
+        chainKey,
+        escrowContract,
+        keyIdHash: row.debit_key_id_hash,
+        amount: BigInt(row.debit_amount_atomic),
+        deadline: BigInt(row.debit_deadline),
+        nonce: BigInt(row.debit_nonce),
+        signature: row.debit_signature,
+      });
+
+      if (o1.kind === 'not_moved') {
+        // AC-3: cero evidencia de movimiento → fallback operador-custodial (hop 2 solo).
+        return settlePaymentIntentOnChain(base);
+      }
+
+      if (o1.kind === 'ambiguous') {
+        // CD-4: la tx PUDO minarse → NO hop 2, NO refund → reconciliation-pending.
+        if (o1.txHash) {
+          await recordDebitHop1({
+            intentId,
+            ownerRef,
+            keyId,
+            nonce: row.debit_nonce,
+            txHash: o1.txHash,
+          });
+        }
+        await recordDebitSettleStatus({
+          intentId,
+          ownerRef,
+          keyId,
+          nonce: row.debit_nonce,
+          status: 'reconciliation_pending',
+        });
+        return {
+          status: 'failed',
+          txHash: null,
+          finalAmountUsd,
+          failureKind: 'ambiguous',
+          error: `RECONCILE-ESCROW: hop1 ambiguous (${o1.reason})`,
+        };
+      }
+
+      // o1.kind === 'confirmed': persistir el tx hash ANTES de hop 2 (BLQ-DR/CD-3).
+      const persisted = await recordDebitHop1({
+        intentId,
+        ownerRef,
+        keyId,
+        nonce: row.debit_nonce,
+        txHash: o1.txHash,
+      });
+      hop1TxHash = persisted ?? o1.txHash;
+    }
+
+    // 5. Hop 2: el seam WKH-136 SIN cambios (operador → seller).
+    const o2 = await settlePaymentIntentOnChain(base);
+    if (o2.status === 'settled') {
+      await recordDebitSettleStatus({
+        intentId,
+        ownerRef,
+        keyId,
+        nonce: row.debit_nonce,
+        status: 'settled',
+      });
+      return o2;
+    }
+    if (o2.status === 'failed') {
+      // CD-S4: hop 1 ya movió fondos on-chain → remap unequivocal→ambiguous (jamás
+      // refund off-chain = doble-crédito) + reconciliation-pending.
+      await recordDebitSettleStatus({
+        intentId,
+        ownerRef,
+        keyId,
+        nonce: row.debit_nonce,
+        status: 'reconciliation_pending',
+      });
+      return {
+        status: 'failed',
+        txHash: null,
+        finalAmountUsd,
+        failureKind: 'ambiguous',
+        error: `RECONCILE-ESCROW: hop1=${hop1TxHash} hop2-failed: ${o2.error ?? 'unknown'}`,
+      };
+    }
+    // in_progress (no ocurre en el settle real) → devolver sin marcar reconcile.
+    return o2;
+  } catch (err) {
+    // CD-S5: cualquier throw inesperado (reader/executor/RPC) → fallback al seam.
+    // NUNCA rechazar la promise (espejo del contrato del seam).
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn(
+      { intentId, detail },
+      'settleEscrowAware fell back to seam (unexpected error)',
+    );
+    return settlePaymentIntentOnChain(base);
+  }
+}
+
 // ── Service ─────────────────────────────────────────────────────
 
 export const paymentIntentService = {
@@ -724,12 +881,13 @@ export const paymentIntentService = {
       };
     }
 
-    const outcome = await settlePaymentIntentOnChain({
+    const outcome = await settleEscrowAware({
       intentId,
       ownerRef,
       payTo: row.pay_to,
       finalAmountUsd: finalUsd,
       chainId: row.chain_id,
+      keyId: row.key_id,
     });
 
     if (outcome.status === 'settled') {
@@ -1060,12 +1218,13 @@ export const paymentIntentService = {
       throw debitErr;
     }
 
-    const outcome = await settlePaymentIntentOnChain({
+    const outcome = await settleEscrowAware({
       intentId,
       ownerRef,
       payTo: row.pay_to,
       finalAmountUsd: finalUsd,
       chainId: row.chain_id,
+      keyId: row.key_id,
     });
 
     if (outcome.status === 'settled') {

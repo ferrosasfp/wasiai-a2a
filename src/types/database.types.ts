@@ -748,9 +748,12 @@ export type Database = {
           // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
           debit_amount_atomic: string;
           debit_deadline: number;
+          debit_hop1_confirmed_at: string | null;
+          debit_hop1_tx_hash: string | null;
           debit_key_id_hash: string;
           // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
           debit_nonce: string;
+          debit_settle_status: string | null;
           debit_signature: string;
           debit_signer_recovered: string | null;
           debit_validation_reason: string | null;
@@ -766,9 +769,12 @@ export type Database = {
           // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
           debit_amount_atomic: string;
           debit_deadline: number;
+          debit_hop1_confirmed_at?: string | null;
+          debit_hop1_tx_hash?: string | null;
           debit_key_id_hash: string;
           // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
           debit_nonce: string;
+          debit_settle_status?: string | null;
           debit_signature: string;
           debit_signer_recovered?: string | null;
           debit_validation_reason?: string | null;
@@ -784,9 +790,12 @@ export type Database = {
           // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
           debit_amount_atomic?: string;
           debit_deadline?: number;
+          debit_hop1_confirmed_at?: string | null;
+          debit_hop1_tx_hash?: string | null;
           debit_key_id_hash?: string;
           // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
           debit_nonce?: string;
+          debit_settle_status?: string | null;
           debit_signature?: string;
           debit_signer_recovered?: string | null;
           debit_validation_reason?: string | null;
@@ -2758,6 +2767,30 @@ export type Database = {
           persisted_status: string;
           persisted_reason: string | null;
         }[];
+      };
+      record_debit_hop1: {
+        Args: {
+          p_intent_id: string;
+          p_owner_ref: string;
+          p_key_id: string;
+          // NUMERIC uint256 → string (evita pérdida de precisión > 2^53).
+          p_nonce: string;
+          p_tx_hash: string;
+        };
+        Returns: {
+          persisted_tx_hash: string | null;
+        }[];
+      };
+      record_debit_settle_status: {
+        Args: {
+          p_intent_id: string;
+          p_owner_ref: string;
+          p_key_id: string;
+          // NUMERIC uint256 → string (evita pérdida de precisión > 2^53).
+          p_nonce: string;
+          p_status: string;
+        };
+        Returns: undefined;
       };
       close_payment_intent_for_settle: {
         Args: {

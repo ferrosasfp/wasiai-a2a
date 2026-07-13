@@ -28,6 +28,17 @@ export const ESCROW_ABI = [
     anonymous: false,
   },
   {
+    type: 'event',
+    name: 'Debited',
+    inputs: [
+      { name: 'keyId', type: 'bytes32', indexed: true },
+      { name: 'operator', type: 'address', indexed: true },
+      { name: 'amount', type: 'uint256', indexed: false },
+      { name: 'nonce', type: 'uint256', indexed: false },
+    ],
+    anonymous: false,
+  },
+  {
     type: 'function',
     name: 'deposit',
     stateMutability: 'nonpayable',
