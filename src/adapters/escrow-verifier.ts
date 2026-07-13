@@ -38,6 +38,7 @@ import {
   resolveMinConfirmations,
   resolveRpcUrl,
 } from './deposit-verifier.js';
+import { ESCROW_ABI } from './escrow/abi.js';
 import type { AdaptersBundle, ChainKey } from './types.js';
 
 // ── Tipos (W0) ──────────────────────────────────────────────
@@ -120,6 +121,33 @@ function getEscrowClient(chainKey: ChainKey): PublicClient | null {
 /** TEST-ONLY — clears the escrow publicClient cache (patrón _resetVerifier). */
 export function _resetEscrowVerifier(): void {
   _clients.clear();
+}
+
+/**
+ * Lee `arbitrationConsent(keyId)` del escrow (WKH-191g, CD-7). Consulta pura, no
+ * muta estado. CUALQUIER error / contrato-null / RPC-null → `false` silencioso: es
+ * el estado ESPERADO hasta la HU de captura de consentimiento; jamás bloquea ni
+ * emite warning ruidoso (el gate del árbitro cae al fallback operator-custodial).
+ */
+export async function readArbitrationConsent(
+  chainKey: ChainKey,
+  keyIdHash: string,
+): Promise<boolean> {
+  try {
+    const escrowContract = resolveEscrowContract(chainKey);
+    if (!escrowContract) return false;
+    const client = getEscrowClient(chainKey);
+    if (!client) return false;
+    const consent = await client.readContract({
+      address: escrowContract,
+      abi: ESCROW_ABI,
+      functionName: 'arbitrationConsent',
+      args: [keyIdHash as `0x${string}`],
+    });
+    return consent === true;
+  } catch {
+    return false;
+  }
 }
 
 // ── Public API ──────────────────────────────────────────────

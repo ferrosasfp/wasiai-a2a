@@ -28,9 +28,47 @@ vi.mock('../lib/logger.js', () => ({ getLogger: () => logSpy }));
 
 const mockSign = vi.fn();
 const mockSettle = vi.fn();
+// WKH-191g: getDefaultChainKey/getAdaptersBundle sólo se consultan con el flag ON;
+// con el flag OFF (default de la suite) el árbitro jamás los invoca (byte-idéntico).
+const mockGetDefaultChainKey = vi.hoisted(() =>
+  vi.fn((..._a: unknown[]): string | null => 'kite'),
+);
+const mockGetAdaptersBundle = vi.hoisted(() =>
+  vi.fn((..._a: unknown[]) => ({
+    payment: { supportedTokens: [{ decimals: 6 }] },
+  })),
+);
 vi.mock('../adapters/registry.js', () => ({
   getPaymentAdapter: () => ({ sign: mockSign, settle: mockSettle }),
   getChainConfig: () => ({ name: 'kite', chainId: 2368, explorerUrl: '' }),
+  getDefaultChainKey: (...a: unknown[]) => mockGetDefaultChainKey(...a),
+  getAdaptersBundle: (...a: unknown[]) => mockGetAdaptersBundle(...a),
+}));
+
+// WKH-191g: escrow-verifier (readArbitrationConsent/resolveEscrowContract) — sólo
+// consultados con el flag ON. deriveArbiterNonce del executor se preserva REAL.
+const mockReadConsent = vi.hoisted(() =>
+  vi.fn((..._a: unknown[]): Promise<boolean> => Promise.resolve(false)),
+);
+const mockResolveEscrow = vi.hoisted(() =>
+  vi.fn((..._a: unknown[]): string | null => null),
+);
+vi.mock('../adapters/escrow-verifier.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../adapters/escrow-verifier.js')>()),
+  readArbitrationConsent: (...a: unknown[]) => mockReadConsent(...a),
+  resolveEscrowContract: (...a: unknown[]) => mockResolveEscrow(...a),
+}));
+
+const mockExecResolve = vi.hoisted(() => vi.fn());
+const mockExecLock = vi.hoisted(() => vi.fn());
+const mockExecRelease = vi.hoisted(() => vi.fn());
+vi.mock('../adapters/escrow/arbiter-executor.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../adapters/escrow/arbiter-executor.js')
+  >()),
+  executeResolveDispute: (...a: unknown[]) => mockExecResolve(...a),
+  executeLockForDispute: (...a: unknown[]) => mockExecLock(...a),
+  executeReleaseDispute: (...a: unknown[]) => mockExecRelease(...a),
 }));
 
 const mockVerify = vi.fn().mockResolvedValue({ ok: true });
@@ -62,11 +100,16 @@ vi.mock('../routes/auth/parsers.js', () => ({
   resolveCallerKey: mockResolveCallerKey,
 }));
 
+import { keccak256, parseUnits, stringToBytes } from 'viem';
+import { deriveArbiterNonce } from '../adapters/escrow/arbiter-executor.js';
 import { supabase } from '../lib/supabase.js';
 import { paymentsRoutes } from '../routes/payments.js';
 import { ArbiterError, type DisputeEvidence } from '../types/arbiter.js';
 import { arbiterService } from './arbiter.js';
 import { paymentIntentService } from './payment-intent.js';
+
+const ESCROW_ADDR =
+  '0x7777777777777777777777777777777777777777' as `0x${string}`;
 
 const mockRpc = vi.mocked(supabase.rpc);
 const mockFrom = vi.mocked(supabase.from);
@@ -378,6 +421,29 @@ beforeEach(() => {
   mockEmit.mockResolvedValue(undefined);
   process.env.ARBITER_ENABLED = 'true';
   delete process.env.ARBITER_AUTO_CAP_USD;
+  // WKH-191g: flag OFF por defecto → árbitro byte-idéntico al de hoy.
+  delete process.env.ESCROW_ARBITER_ENABLED;
+  mockGetDefaultChainKey.mockReturnValue('kite');
+  mockGetAdaptersBundle.mockReturnValue({
+    payment: { supportedTokens: [{ decimals: 6 }] },
+  });
+  mockResolveEscrow.mockReturnValue(null);
+  mockReadConsent.mockResolvedValue(false);
+  mockExecResolve.mockResolvedValue({
+    kind: 'confirmed',
+    txHash: '0xESCROWTX',
+    blockNumber: 1n,
+  });
+  mockExecLock.mockResolvedValue({
+    kind: 'confirmed',
+    txHash: '0xLOCKTX',
+    blockNumber: 1n,
+  });
+  mockExecRelease.mockResolvedValue({
+    kind: 'confirmed',
+    txHash: '0xRELEASETX',
+    blockNumber: 1n,
+  });
 });
 
 // ── AC-1: rules inequívoco (consumed==0 → refund, SIN LLM) ──────
@@ -1279,5 +1345,243 @@ describe('WKH-189 T-11 migration SQL structure (up + down)', () => {
     expect(downSql).toContain('DROP COLUMN IF EXISTS resolved_by');
     expect(downSql).toContain('DROP COLUMN IF EXISTS resolved_at');
     expect(downSql).toContain('DROP COLUMN IF EXISTS resolution_note');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// WKH-191g — wire on-chain del árbitro al escrow (flag-gated, aditivo).
+// key_id de makeArbDb = 'k1'; el nonce esperado deriva de keccak256('k1') + 'i1'.
+// ────────────────────────────────────────────────────────────────────────────
+const EXPECTED_KEY_HASH = keccak256(stringToBytes('k1'));
+const EXPECTED_NONCE = deriveArbiterNonce(EXPECTED_KEY_HASH, 'i1');
+
+describe('WKH-191g wire — flag OFF (default) → byte-idéntico, cero on-chain', () => {
+  it('AC-1/AC-7: release con flag OFF → settlePaymentIntentOnChain, executeResolveDispute NO llamado', async () => {
+    delete process.env.ESCROW_ARBITER_ENABLED;
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+    mockReadEvidence.mockResolvedValue(
+      makeEvidence({
+        authorizedUsd: 10,
+        consumedUsd: 10,
+        voucherCount: 2,
+        vouchersTotalUsd: 10,
+      }),
+    );
+
+    const r = await arbiterService.openDispute('i1', OWNER);
+
+    expect(r.decision).toBe('release');
+    expect(mockExecResolve).not.toHaveBeenCalled();
+    expect(mockExecLock).not.toHaveBeenCalled();
+    expect(mockSettle).toHaveBeenCalled(); // path operator-custodial de hoy
+    expect(db.row.status).toBe('settled');
+  });
+});
+
+describe('WKH-191g wire — triple gate → fallback', () => {
+  it('AC-1: flag ON pero escrow NO configurado (resolveEscrowContract null) → fallback, sin executeResolveDispute', async () => {
+    process.env.ESCROW_ARBITER_ENABLED = 'true';
+    mockResolveEscrow.mockReturnValue(null);
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+    mockReadEvidence.mockResolvedValue(
+      makeEvidence({
+        authorizedUsd: 10,
+        consumedUsd: 10,
+        voucherCount: 2,
+        vouchersTotalUsd: 10,
+      }),
+    );
+
+    const r = await arbiterService.openDispute('i1', OWNER);
+
+    expect(r.decision).toBe('release');
+    expect(mockExecResolve).not.toHaveBeenCalled();
+    expect(mockExecLock).not.toHaveBeenCalled();
+    expect(mockSettle).toHaveBeenCalled();
+  });
+
+  it('AC-2/CD-7: flag ON + escrow + consent=false → fallback, sin executeResolveDispute ni lock', async () => {
+    process.env.ESCROW_ARBITER_ENABLED = 'true';
+    mockResolveEscrow.mockReturnValue(ESCROW_ADDR);
+    mockReadConsent.mockResolvedValue(false);
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+    mockReadEvidence.mockResolvedValue(
+      makeEvidence({
+        authorizedUsd: 10,
+        consumedUsd: 10,
+        voucherCount: 2,
+        vouchersTotalUsd: 10,
+      }),
+    );
+
+    const r = await arbiterService.openDispute('i1', OWNER);
+
+    expect(r.decision).toBe('release');
+    expect(mockExecResolve).not.toHaveBeenCalled();
+    expect(mockExecLock).not.toHaveBeenCalled();
+    expect(mockSettle).toHaveBeenCalled();
+  });
+});
+
+describe('WKH-191g wire — flag ON + escrow + consent=true', () => {
+  function armOnChain(): void {
+    process.env.ESCROW_ARBITER_ENABLED = 'true';
+    mockResolveEscrow.mockReturnValue(ESCROW_ADDR);
+    mockReadConsent.mockResolvedValue(true);
+  }
+
+  it('AC-4: release/split → executeResolveDispute(seller=pay_to, sellerAmount, nonce derivado), sin seam operador', async () => {
+    armOnChain();
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+    mockReadEvidence.mockResolvedValue(
+      makeEvidence({
+        authorizedUsd: 10,
+        consumedUsd: 10,
+        voucherCount: 2,
+        vouchersTotalUsd: 10,
+      }),
+    );
+
+    const r = await arbiterService.openDispute('i1', OWNER);
+
+    expect(r.decision).toBe('release');
+    expect(mockExecResolve).toHaveBeenCalledTimes(1);
+    expect(mockExecResolve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        escrowContract: ESCROW_ADDR,
+        keyIdHash: EXPECTED_KEY_HASH,
+        seller: PAYTO,
+        sellerAmount: parseUnits('10', 6),
+        nonce: EXPECTED_NONCE,
+      }),
+    );
+    expect(mockSettle).not.toHaveBeenCalled(); // escrow path, no operador
+    expect(r.txHash).toBe('0xESCROWTX');
+    expect(db.row.status).toBe('settled');
+  });
+
+  it('AC-3: transición a disputed → executeLockForDispute UNA vez por deposit total', async () => {
+    armOnChain();
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+    mockReadEvidence.mockResolvedValue(
+      makeEvidence({
+        authorizedUsd: 10,
+        consumedUsd: 10,
+        voucherCount: 2,
+        vouchersTotalUsd: 10,
+      }),
+    );
+
+    await arbiterService.openDispute('i1', OWNER);
+
+    expect(mockExecLock).toHaveBeenCalledTimes(1);
+    expect(mockExecLock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        escrowContract: ESCROW_ADDR,
+        keyIdHash: EXPECTED_KEY_HASH,
+        amount: parseUnits('10', 6), // deposit TOTAL (authorized_usd), no settleUsd
+      }),
+    );
+  });
+
+  it('AC-5: refund (arbMicro<=0) → executeReleaseDispute, NO executeResolveDispute', async () => {
+    armOnChain();
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 0 });
+    wireDb(db);
+    mockReadEvidence.mockResolvedValue(
+      makeEvidence({ authorizedUsd: 10, consumedUsd: 0 }),
+    );
+
+    const r = await arbiterService.openDispute('i1', OWNER);
+
+    expect(r.decision).toBe('refund');
+    expect(mockExecRelease).toHaveBeenCalledTimes(1);
+    expect(mockExecRelease).toHaveBeenCalledWith(
+      expect.objectContaining({
+        escrowContract: ESCROW_ADDR,
+        keyIdHash: EXPECTED_KEY_HASH,
+      }),
+    );
+    expect(mockExecResolve).not.toHaveBeenCalled();
+    expect(db.refunds).toEqual([10]); // refund off-chain de hoy intacto
+  });
+
+  it('CD-6: lock/release fallan (throw / not_moved) → logueado, la resolución NO se rompe', async () => {
+    armOnChain();
+    mockExecLock.mockRejectedValue(new Error('lock boom'));
+    mockExecRelease.mockResolvedValue({
+      kind: 'not_moved',
+      reason: 'REVERTED',
+    });
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 0 });
+    wireDb(db);
+    mockReadEvidence.mockResolvedValue(
+      makeEvidence({ authorizedUsd: 10, consumedUsd: 0 }),
+    );
+
+    const r = await arbiterService.openDispute('i1', OWNER);
+
+    // Idéntico al happy off-chain: refund ejecutado, deposit al buyer.
+    expect(r.decision).toBe('refund');
+    expect(r.status).toBe('executed');
+    expect(db.refunds).toEqual([10]);
+  });
+
+  it('AC-6: resolveDispute on-chain not_moved → failureKind unequivocal → refund deposit COMPLETO', async () => {
+    armOnChain();
+    mockExecResolve.mockResolvedValue({
+      kind: 'not_moved',
+      reason: 'REVERTED',
+    });
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+    mockReadEvidence.mockResolvedValue(
+      makeEvidence({
+        authorizedUsd: 10,
+        consumedUsd: 10,
+        voucherCount: 2,
+        vouchersTotalUsd: 10,
+      }),
+    );
+
+    const r = await arbiterService.openDispute('i1', OWNER);
+
+    expect(r.decision).toBe('release');
+    expect(mockSettle).not.toHaveBeenCalled();
+    expect(db.row.status).toBe('refunded'); // rama unequivocal → refund del deposit
+    expect(db.refunds).toEqual([10]);
+  });
+
+  it('AC-6: resolveDispute on-chain ambiguous → failed_ambiguous + RECONCILE (NO refund)', async () => {
+    armOnChain();
+    mockExecResolve.mockResolvedValue({
+      kind: 'ambiguous',
+      reason: 'RECEIPT_TIMEOUT',
+    });
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+    mockReadEvidence.mockResolvedValue(
+      makeEvidence({
+        authorizedUsd: 10,
+        consumedUsd: 10,
+        voucherCount: 2,
+        vouchersTotalUsd: 10,
+      }),
+    );
+
+    const r = await arbiterService.openDispute('i1', OWNER);
+
+    expect(r.decision).toBe('release');
+    expect(mockSettle).not.toHaveBeenCalled();
+    expect(db.row.status).toBe('failed'); // rama ambiguo: NO refund, requiere reconcile
+    expect(db.refunds).toEqual([]);
   });
 });

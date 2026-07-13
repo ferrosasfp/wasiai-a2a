@@ -19,6 +19,18 @@
  */
 
 import { createHash } from 'node:crypto';
+import { keccak256, parseUnits, stringToBytes } from 'viem';
+import {
+  deriveArbiterNonce,
+  executeLockForDispute,
+  executeReleaseDispute,
+  executeResolveDispute,
+} from '../adapters/escrow/arbiter-executor.js';
+import {
+  readArbitrationConsent,
+  resolveEscrowContract,
+} from '../adapters/escrow-verifier.js';
+import { getAdaptersBundle, getDefaultChainKey } from '../adapters/registry.js';
 import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
 import {
@@ -28,6 +40,7 @@ import {
   type ArbiterOutcome,
   type DisputeEvidence,
 } from '../types/arbiter.js';
+import type { SettleOutcome } from '../types/index.js';
 import type { ReceiptType } from '../types/receipt.js';
 import { readEvidence } from './arbiter/evidence.js';
 import { classifyAmbiguous } from './arbiter/llm-classifier.js';
@@ -64,6 +77,165 @@ export function getArbiterAutoCapUsd(): number {
 /** Flag maestro. Default OFF: sólo `'true'` exacto activa el arbitraje (CD-11). */
 export function isArbiterEnabled(): boolean {
   return process.env.ARBITER_ENABLED === 'true';
+}
+
+/**
+ * Gate del wire on-chain del árbitro (WKH-191g, CD-1). Default OFF: sólo `'true'`
+ * exacto activa el camino escrow (`resolveDispute`/`lockForDispute`/`releaseDispute`).
+ * OFF → el árbitro settlea EXACTAMENTE como hoy (settlePaymentIntentOnChain).
+ */
+export function isEscrowArbiterEnabled(): boolean {
+  return process.env.ESCROW_ARBITER_ENABLED === 'true';
+}
+
+/**
+ * Seam del settle release/split del árbitro (WKH-191g). Espejo de `settleEscrowAware`
+ * (payment-intent.ts:500): triple gate en cascada (CD-1) → `resolveDispute` on-chain
+ * escrow-custodial; faltando cualquier condición o ante CUALQUIER throw →
+ * `settlePaymentIntentOnChain(base)` BYTE-IDÉNTICO al path operator-custodial de hoy
+ * (CD-2/CD-7). Devuelve `SettleOutcome`, la MISMA forma que consume
+ * `executeArbitration` → las ramas settled/unequivocal/ambiguous no cambian.
+ */
+export async function settleArbitrationOnChain(params: {
+  intentId: string;
+  ownerRef: string;
+  payTo: string;
+  finalAmountUsd: number;
+  chainId: number;
+  keyId: string;
+}): Promise<SettleOutcome> {
+  const { intentId, ownerRef, payTo, finalAmountUsd, chainId, keyId } = params;
+  const base = { intentId, ownerRef, payTo, finalAmountUsd, chainId };
+  try {
+    // 0. Flag OFF (default) → fast-path byte-idéntico (AC-1), cero on-chain.
+    if (!isEscrowArbiterEnabled()) return settlePaymentIntentOnChain(base);
+
+    // 1. Escrow configurado en la default chain (AC-1). Sin chain/escrow → seam.
+    const chainKey = getDefaultChainKey();
+    if (!chainKey) return settlePaymentIntentOnChain(base);
+    const escrowContract = resolveEscrowContract(chainKey);
+    if (!escrowContract) return settlePaymentIntentOnChain(base);
+
+    // 2. Consentimiento on-chain del depositor (AC-2/CD-7). false → seam silencioso.
+    const keyIdHash = keccak256(stringToBytes(keyId));
+    if (!(await readArbitrationConsent(chainKey, keyIdHash))) {
+      return settlePaymentIntentOnChain(base);
+    }
+
+    // 3. Monto atómico + nonce disjunto determinista (CD-3). Sin decimals → seam.
+    const decimals =
+      getAdaptersBundle(chainKey)?.payment.supportedTokens[0]?.decimals;
+    if (decimals == null) return settlePaymentIntentOnChain(base);
+    const sellerAmount = parseUnits(finalAmountUsd.toString(), decimals);
+    const nonce = deriveArbiterNonce(keyIdHash, intentId);
+
+    // 4. resolveDispute escrow-custodial: libera sellerAmount al seller (AC-4/AC-6).
+    const o = await executeResolveDispute({
+      chainKey,
+      escrowContract,
+      keyIdHash,
+      seller: payTo,
+      sellerAmount,
+      nonce,
+    });
+    if (o.kind === 'confirmed') {
+      return { status: 'settled', txHash: o.txHash, finalAmountUsd };
+    }
+    if (o.kind === 'not_moved') {
+      return {
+        status: 'failed',
+        txHash: null,
+        finalAmountUsd,
+        error: o.reason,
+        failureKind: 'unequivocal',
+      };
+    }
+    // ambiguous: el transfer PUDO ocurrir → NO asumir movido (AC-6).
+    return {
+      status: 'failed',
+      txHash: null,
+      finalAmountUsd,
+      error: o.reason,
+      failureKind: 'ambiguous',
+    };
+  } catch {
+    // CD-7: el wire jamás rompe el flujo del árbitro → fallback operator-custodial.
+    return settlePaymentIntentOnChain(base);
+  }
+}
+
+/**
+ * Congela el deposit total del keyId bajo el rol arbiter al transicionar a
+ * `disputed` (WKH-191g, W2.2). Best-effort (CD-6): triple gate CD-1; un throw NUNCA
+ * aborta la resolución. `amount` = deposit TOTAL (`authorized_usd`), no `settleUsd`.
+ */
+async function bestEffortLockForDispute(
+  intentId: string,
+  keyId: string,
+  authorizedUsd: number,
+): Promise<void> {
+  try {
+    if (!isEscrowArbiterEnabled()) return;
+    const chainKey = getDefaultChainKey();
+    if (!chainKey) return;
+    const escrowContract = resolveEscrowContract(chainKey);
+    if (!escrowContract) return;
+    const keyIdHash = keccak256(stringToBytes(keyId));
+    if (!(await readArbitrationConsent(chainKey, keyIdHash))) return;
+    const decimals =
+      getAdaptersBundle(chainKey)?.payment.supportedTokens[0]?.decimals;
+    if (decimals == null) return;
+    const amount = parseUnits(authorizedUsd.toString(), decimals);
+    const o = await executeLockForDispute({
+      chainKey,
+      escrowContract,
+      keyIdHash,
+      amount,
+    });
+    log.info(
+      { intentId, kind: o.kind, reason: 'reason' in o ? o.reason : undefined },
+      'arbiter lockForDispute outcome',
+    );
+  } catch (err) {
+    log.warn(
+      { intentId, detail: err instanceof Error ? err.message : String(err) },
+      'arbiter lockForDispute threw (best-effort, ignored)',
+    );
+  }
+}
+
+/**
+ * Libera el lock del keyId en la rama refund del árbitro (WKH-191g, W2.3).
+ * Best-effort (CD-6): mismo triple gate; un fallo se loguea y NO altera el refund
+ * off-chain de hoy.
+ */
+async function bestEffortReleaseDispute(
+  intentId: string,
+  keyId: string,
+): Promise<void> {
+  try {
+    if (!isEscrowArbiterEnabled()) return;
+    const chainKey = getDefaultChainKey();
+    if (!chainKey) return;
+    const escrowContract = resolveEscrowContract(chainKey);
+    if (!escrowContract) return;
+    const keyIdHash = keccak256(stringToBytes(keyId));
+    if (!(await readArbitrationConsent(chainKey, keyIdHash))) return;
+    const o = await executeReleaseDispute({
+      chainKey,
+      escrowContract,
+      keyIdHash,
+    });
+    log.info(
+      { intentId, kind: o.kind, reason: 'reason' in o ? o.reason : undefined },
+      'arbiter releaseDispute outcome',
+    );
+  } catch (err) {
+    log.warn(
+      { intentId, detail: err instanceof Error ? err.message : String(err) },
+      'arbiter releaseDispute threw (best-effort, ignored)',
+    );
+  }
 }
 
 // ── Helpers money-path (replicados de payment-intent.ts, CD-6) ──
@@ -395,6 +567,11 @@ export const arbiterService = {
   ): Promise<ArbiterOutcome> {
     const depositUsd = numericToMicro(row.authorized_usd) / 1_000_000;
 
+    // WKH-191g (W2.2): best-effort lockForDispute por el deposit TOTAL en la
+    // transición a 'disputed'. Único funnel post-transición para auto-resolve Y
+    // arb_hold. Triple-gated CD-1; un fallo NUNCA aborta la resolución (CD-6).
+    await bestEffortLockForDispute(intentId, row.key_id, row.authorized_usd);
+
     // 3. Evidencia determinística on-chain/DB.
     const evidence = await readEvidence(intentId, ownerRef);
     const digest = evidenceDigest(evidence);
@@ -521,6 +698,9 @@ export const arbiterService = {
 
     // ── refund total (arbAmount <= 0): sin tx on-chain, refund al Buyer ──
     if (arbMicro <= 0) {
+      // WKH-191g (W2.3): best-effort releaseDispute (libera el lock del keyId).
+      // Triple-gated CD-1; un fallo se loguea y NO altera el refund off-chain (CD-6).
+      await bestEffortReleaseDispute(intentId, row.key_id);
       await recordSettleOutcome(
         intentId,
         ownerRef,
@@ -543,12 +723,15 @@ export const arbiterService = {
     }
 
     // ── release/split (arbAmount > 0): settle forzado on-chain al Seller ──
-    const settle = await settlePaymentIntentOnChain({
+    // WKH-191g: triple-gated escrow resolveDispute; flag OFF / sin consent → seam
+    // operator-custodial byte-idéntico. MISMO SettleOutcome → ramas de abajo intactas.
+    const settle = await settleArbitrationOnChain({
       intentId,
       ownerRef,
       payTo: row.pay_to,
       finalAmountUsd: arbUsd,
       chainId: row.chain_id,
+      keyId: row.key_id,
     });
 
     if (settle.status === 'settled') {

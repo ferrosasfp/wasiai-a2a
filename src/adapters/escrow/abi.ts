@@ -68,4 +68,82 @@ export const ESCROW_ABI = [
     inputs: [{ name: 'keyId', type: 'bytes32' }],
     outputs: [{ name: '', type: 'uint256' }],
   },
+  // ── 191g: arbiter / dispute events (byte-a-byte con IWasiAIEscrow.sol:24-28) ──
+  {
+    type: 'event',
+    name: 'DisputeLocked',
+    inputs: [
+      { name: 'keyId', type: 'bytes32', indexed: true },
+      { name: 'arbiter', type: 'address', indexed: true },
+      { name: 'amount', type: 'uint256', indexed: false },
+      { name: 'totalLocked', type: 'uint256', indexed: false },
+    ],
+    anonymous: false,
+  },
+  {
+    type: 'event',
+    name: 'DisputeResolved',
+    inputs: [
+      { name: 'keyId', type: 'bytes32', indexed: true },
+      { name: 'arbiter', type: 'address', indexed: true },
+      { name: 'seller', type: 'address', indexed: true },
+      { name: 'sellerAmount', type: 'uint256', indexed: false },
+      { name: 'nonce', type: 'uint256', indexed: false },
+    ],
+    anonymous: false,
+  },
+  {
+    type: 'event',
+    name: 'DisputeReleased',
+    inputs: [
+      { name: 'keyId', type: 'bytes32', indexed: true },
+      { name: 'arbiter', type: 'address', indexed: true },
+      { name: 'releasedAmount', type: 'uint256', indexed: false },
+    ],
+    anonymous: false,
+  },
+  // ── 191g: arbiter / dispute functions (byte-a-byte con IWasiAIEscrow.sol:84-94) ──
+  {
+    type: 'function',
+    name: 'lockForDispute',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'keyId', type: 'bytes32' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'resolveDispute',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'keyId', type: 'bytes32' },
+      { name: 'seller', type: 'address' },
+      { name: 'sellerAmount', type: 'uint256' },
+      { name: 'nonce', type: 'uint256' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'releaseDispute',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'keyId', type: 'bytes32' }],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'arbitrationConsent',
+    stateMutability: 'view',
+    inputs: [{ name: 'keyId', type: 'bytes32' }],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  {
+    type: 'function',
+    name: 'lockedAmount',
+    stateMutability: 'view',
+    inputs: [{ name: 'keyId', type: 'bytes32' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
 ] as const;
