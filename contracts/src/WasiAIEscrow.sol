@@ -56,7 +56,11 @@ contract WasiAIEscrow is
     mapping(bytes32 => uint256) internal _upgradeProposedAt; // keccak(newImpl) => proposal ts (DT-12)
     address internal _operator; // F-A1/F-A2: the only address allowed to settle debits
 
-    uint256[43] private __gap; // OZ upgradeability reserve (was 44; -1 for _operator, CD-9)
+    // ── 191f: arbiter role + consent (consume 2 slots of __gap; CD-1) ─────────
+    address internal _arbiter;                            // NEW — was __gap[0]
+    mapping(bytes32 => bool) internal _arbitrationConsent; // NEW — was __gap[1]
+
+    uint256[41] private __gap; // was 43; -2 for _arbiter + _arbitrationConsent (191f, CD-1)
 
     // ── Auxiliary event (auditability) ──────────────────────────────────────
     event Debited(bytes32 indexed keyId, address indexed operator, uint256 amount, uint256 nonce);
@@ -95,6 +99,43 @@ contract WasiAIEscrow is
         address old = _operator;
         _operator = newOperator;
         emit OperatorUpdated(old, newOperator);
+    }
+
+    // ── 191f: arbiter role (rotable by owner) ────────────────────────────────
+    /// @dev Every arbiter action requires msg.sender == _arbiter (CD-2). Until the owner
+    ///      calls setArbiter() post-upgrade (191h), _arbiter == address(0) and onlyArbiter
+    ///      reverts on every call, leaving the 3 arbiter functions inert.
+    modifier onlyArbiter() {
+        if (msg.sender != _arbiter) revert NotArbiter();
+        _;
+    }
+
+    /// @notice The address currently allowed to act as the dispute arbiter (191f).
+    function arbiter() external view returns (address) {
+        return _arbiter;
+    }
+
+    /// @notice Rotate the dispute arbiter. Only owner. AC-8.
+    function setArbiter(address newArbiter) external onlyOwner {
+        if (newArbiter == address(0)) revert ZeroAddress();
+        address old = _arbiter;
+        _arbiter = newArbiter;
+        emit ArbiterUpdated(old, newArbiter);
+    }
+
+    // ── 191f: arbitration consent (monotonic / irrevocable opt-in) ───────────
+    /// @notice Whether the depositor of `keyId` has opted in to arbitration (191f). AC-1.
+    function arbitrationConsent(bytes32 keyId) external view returns (bool) {
+        return _arbitrationConsent[keyId];
+    }
+
+    /// @notice Depositor opts in to arbitration for `keyId`. Monotonic: cannot be revoked. AC-1/AC-13.
+    function setArbitrationConsent(bytes32 keyId, bool consent) external {
+        if (msg.sender != _depositor[keyId]) revert Unauthorized(); // keyId sin depósito ⇒ _depositor==0 ⇒ revert
+        if (!consent) revert ConsentIrrevocable(); // nunca puede pasar a false
+        if (_arbitrationConsent[keyId]) return; // idempotente true→true (no-op, sin evento)
+        _arbitrationConsent[keyId] = true;
+        emit ArbitrationConsentSet(keyId, msg.sender);
     }
 
     // ── Deposit (CEI + nonReentrant + SafeERC20 + DT-10) ────────────────────
@@ -191,6 +232,59 @@ contract WasiAIEscrow is
         if (amount > available) revert InsufficientBalance(); // AC-7
         _balances[keyId] -= amount; // Effects
         _usdc.safeTransfer(msg.sender, amount); // Interactions
+    }
+
+    // ── 191f: dispute lock (arbiter freezes consented funds) ─────────────────
+    /// @notice Amount of `keyId` currently locked for a dispute (191f). AC-10/AC-12.
+    function lockedAmount(bytes32 keyId) external view returns (uint256) {
+        return _lockedAmount[keyId];
+    }
+
+    /// @notice Arbiter freezes `amount` of a consented key for a dispute. Incremental. AC-10.
+    /// @dev Requires msg.sender==_arbiter (CD-2) AND consent (CD-2). Keeps lock <= balance (CD-5/CD-8).
+    function lockForDispute(bytes32 keyId, uint256 amount) external onlyArbiter {
+        if (!_arbitrationConsent[keyId]) revert ArbitrationNotConsented();
+        if (amount == 0) revert ZeroAmount();
+        uint256 newLocked = _lockedAmount[keyId] + amount;
+        if (newLocked > _balances[keyId]) revert InsufficientBalance();
+        _lockedAmount[keyId] = newLocked; // incremental (top-up de la misma disputa)
+        emit DisputeLocked(keyId, msg.sender, amount, newLocked);
+    }
+
+    /// @notice Arbiter releases the lock without paying (buyer wins). AC-12.
+    function releaseDispute(bytes32 keyId) external onlyArbiter {
+        uint256 locked = _lockedAmount[keyId];
+        if (locked == 0) revert ZeroAmount();
+        _lockedAmount[keyId] = 0;
+        emit DisputeReleased(keyId, msg.sender, locked);
+    }
+
+    // ── 191f: resolveDispute (arbiter pays the seller from locked funds) ─────
+    /// @notice Arbiter pays `sellerAmount` USDC to `seller` out of the locked funds of a
+    ///         consented key, releasing the residual back to the buyer. AC-3/CD-2/CD-3/CD-4/CD-8/CD-9.
+    /// @dev CEI strict: nonce + balance + lock mutated BEFORE the transfer. Pays the SELLER
+    ///      (param), NOT msg.sender. nonReentrant + SafeERC20.
+    function resolveDispute(bytes32 keyId, address seller, uint256 sellerAmount, uint256 nonce)
+        external
+        onlyArbiter
+        nonReentrant
+    {
+        // Checks
+        if (!_arbitrationConsent[keyId]) revert ArbitrationNotConsented(); // CD-2
+        if (seller == address(0)) revert ZeroAddress();
+        if (sellerAmount == 0) revert ZeroAmount();
+        if (_usedNonces[keyId][nonce]) revert NonceAlreadyUsed(); // CD-4
+        uint256 locked = _lockedAmount[keyId];
+        if (sellerAmount > locked) revert ExceedsLockedAmount(); // CD-8
+        uint256 bal = _balances[keyId];
+        if (sellerAmount > bal) revert InsufficientBalance(); // CD-8
+        // Effects (todo ANTES del transfer — CD-3)
+        _usedNonces[keyId][nonce] = true;
+        _balances[keyId] = bal - sellerAmount;
+        _lockedAmount[keyId] = 0; // libera el residual al buyer
+        // Interactions
+        _usdc.safeTransfer(seller, sellerAmount); // paga al SELLER (no a msg.sender) — CD-9
+        emit DisputeResolved(keyId, msg.sender, seller, sellerAmount, nonce);
     }
 
     // ── UUPS + owner multisig + timelock + renounce (AC-12) ─────────────────

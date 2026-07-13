@@ -18,6 +18,15 @@ interface IWasiAIEscrow {
     /// @dev Emitted when upgradeability is permanently renounced (MNR-2).
     event UpgradeRenouncedEvent();
 
+    // ── 191f: arbiter / dispute events ────────────────────────────────────────
+    event ArbiterUpdated(address indexed oldArbiter, address indexed newArbiter);
+    event ArbitrationConsentSet(bytes32 indexed keyId, address indexed depositor);
+    event DisputeLocked(bytes32 indexed keyId, address indexed arbiter, uint256 amount, uint256 totalLocked);
+    event DisputeResolved(
+        bytes32 indexed keyId, address indexed arbiter, address indexed seller, uint256 sellerAmount, uint256 nonce
+    );
+    event DisputeReleased(bytes32 indexed keyId, address indexed arbiter, uint256 releasedAmount);
+
     // ── Custom errors ───────────────────────────────────────────────────────
     error ZeroAmount();
     error DepositorMismatch();
@@ -37,6 +46,11 @@ interface IWasiAIEscrow {
     error NotAContract(); // B-MED-3: proposed impl has no code
     error InvalidBatchSize(); // C-MED-1: batch empty or > MAX_BATCH
     error DeadlineTooFar(); // F-A4: deadline beyond MAX_DEADLINE_TTL window
+    // ── 191f: arbiter / dispute errors ────────────────────────────────────────
+    error NotArbiter(); // AC-4: caller is not the configured arbiter
+    error ArbitrationNotConsented(); // AC-2 / CD-2: keyId has no persisted consent
+    error ConsentIrrevocable(); // AC-13: consent is monotonic, cannot be revoked
+    error ExceedsLockedAmount(); // AC-3: sellerAmount > _lockedAmount[keyId]
 
     // ── Functions ───────────────────────────────────────────────────────────
     function deposit(bytes32 keyId, uint256 amount) external;
@@ -61,4 +75,21 @@ interface IWasiAIEscrow {
 
     /// @dev Cancel a pending upgrade proposal (onlyOwner). B-BAJO-1.
     function cancelUpgrade(address impl) external;
+
+    // ── 191f: arbiter role + dispute lock/resolve ─────────────────────────────
+    function arbiter() external view returns (address);
+
+    function setArbiter(address newArbiter) external;
+
+    function arbitrationConsent(bytes32 keyId) external view returns (bool);
+
+    function setArbitrationConsent(bytes32 keyId, bool consent) external;
+
+    function lockedAmount(bytes32 keyId) external view returns (uint256);
+
+    function lockForDispute(bytes32 keyId, uint256 amount) external;
+
+    function resolveDispute(bytes32 keyId, address seller, uint256 sellerAmount, uint256 nonce) external;
+
+    function releaseDispute(bytes32 keyId) external;
 }

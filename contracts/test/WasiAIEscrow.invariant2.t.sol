@@ -39,6 +39,8 @@ contract EscrowHandler2 is Test {
     address public operatorAddr; // the configured operator (may rotate)
     address internal owner; // the proxy owner (multisig stand-in)
     address internal bot = address(0xB0B); // hostile non-operator / non-depositor
+    address internal arbiter = address(0xA5B1); // 191f: dispute arbiter (no depositor pk)
+    address internal disputeSeller = address(0x5E11E7); // 191f: dispute payee
 
     bytes32 internal constant DOMAIN_TYPE_HASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -84,6 +86,19 @@ contract EscrowHandler2 is Test {
     // The contract MUST reject these (InsufficientBalance); we never let the mirror go negative.
     uint256 public ghost_overDebitAttempts;
     uint256 public ghost_overDebitReverts;
+
+    // ── 191f: arbiter accounting ─────────────────────────────────────────────
+    uint256 public ghost_totalArbiterResolved; // subtracted from the conservation identity
+    mapping(bytes32 => bool) internal consented; // keys opted in to arbitration
+
+    // ledger of resolved (keyId, sellerAmount, nonce) to attempt replays
+    struct ResolvedAuth {
+        bytes32 keyId;
+        uint256 sellerAmount;
+        uint256 nonce;
+    }
+
+    ResolvedAuth[] internal resolvedAuths;
 
     constructor(WasiAIEscrow _escrow, MockUSDC _usdc, address _operator, address _owner) {
         escrow = _escrow;
@@ -160,26 +175,29 @@ contract EscrowHandler2 is Test {
         bytes32 k = keys[seed % keys.length];
         uint256 ownerIdx = keyOwnerIdx[k];
         uint256 bal = escrow.escrowBalance(k);
-        if (bal == 0) return;
-        amount = bound(amount, 1, bal);
+        uint256 locked = escrow.lockedAmount(k); // 191f: only the free part is withdrawable
+        if (bal <= locked) return;
+        amount = bound(amount, 1, bal - locked);
         vm.prank(depositors[ownerIdx]);
         escrow.withdraw(k, amount);
         ghost_totalWithdrawn += amount;
         ghost_keyBalance[k] -= amount;
     }
 
-    /// @notice Withdraw the FULL remaining balance — exercises "a user can always withdraw exactly
-    ///         their remaining balance" (withdraw-safety AC). Must succeed and zero the key.
+    /// @notice Withdraw the FULL FREE (unlocked) balance — exercises "a user can always withdraw
+    ///         exactly their free remaining balance" (withdraw-safety AC). 191f: locked funds stay.
     function withdrawAll(uint256 seed) external {
         if (keys.length == 0) return;
         bytes32 k = keys[seed % keys.length];
         uint256 ownerIdx = keyOwnerIdx[k];
         uint256 bal = escrow.escrowBalance(k);
-        if (bal == 0) return;
+        uint256 locked = escrow.lockedAmount(k);
+        if (bal <= locked) return;
+        uint256 free = bal - locked;
         vm.prank(depositors[ownerIdx]);
-        escrow.withdraw(k, bal); // exactly the remaining balance
-        ghost_totalWithdrawn += bal;
-        ghost_keyBalance[k] -= bal;
+        escrow.withdraw(k, free); // exactly the free (unlocked) balance
+        ghost_totalWithdrawn += free;
+        ghost_keyBalance[k] -= free;
     }
 
     /// @notice Operator settles a single VALID signed debit (legitimate path).
@@ -188,8 +206,9 @@ contract EscrowHandler2 is Test {
         bytes32 k = keys[seed % keys.length];
         uint256 ownerIdx = keyOwnerIdx[k];
         uint256 bal = escrow.escrowBalance(k);
-        if (bal == 0) return;
-        amount = bound(amount, 1, bal);
+        uint256 locked = escrow.lockedAmount(k); // 191f: cooperative operator does not debit locked funds
+        if (bal <= locked) return;
+        amount = bound(amount, 1, bal - locked);
         uint256 deadline = block.timestamp + 1 hours;
         uint256 nonce = ++nonceCounter;
         bytes memory sig = _sign(depositorPks[ownerIdx], k, amount, deadline, nonce);
@@ -207,8 +226,9 @@ contract EscrowHandler2 is Test {
         bytes32 k1 = keys[seed % keys.length];
         bytes32 k2 = keys[(seed + 1) % keys.length];
         if (k1 == k2) return;
-        uint256 b1 = escrow.escrowBalance(k1);
-        uint256 b2 = escrow.escrowBalance(k2);
+        // 191f: debit only the FREE (unlocked) part of each key so the lock invariant holds.
+        uint256 b1 = escrow.escrowBalance(k1) - escrow.lockedAmount(k1);
+        uint256 b2 = escrow.escrowBalance(k2) - escrow.lockedAmount(k2);
         if (b1 == 0 || b2 == 0) return;
         _settleBatchOfTwo(k1, k2, b1 / 2 == 0 ? b1 : b1 / 2, b2 / 2 == 0 ? b2 : b2 / 2);
     }
@@ -412,6 +432,157 @@ contract EscrowHandler2 is Test {
             ghost_hostileReverts++; // expected — OwnableUnauthorizedAccount
         }
     }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  191f — LEGITIMATE arbiter actions (update ghosts + mirror)
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// @dev The key's depositor opts in to arbitration (monotonic).
+    function consentByDepositor(uint256 seed) external {
+        if (keys.length == 0) return;
+        bytes32 k = keys[seed % keys.length];
+        if (consented[k]) return;
+        vm.prank(depositors[keyOwnerIdx[k]]);
+        escrow.setArbitrationConsent(k, true);
+        consented[k] = true;
+    }
+
+    /// @dev Arbiter freezes `amount <= balance-locked` on a consented key.
+    function lockByArbiter(uint256 seed, uint256 amount) external {
+        if (keys.length == 0) return;
+        bytes32 k = keys[seed % keys.length];
+        if (!consented[k]) return;
+        uint256 bal = escrow.escrowBalance(k);
+        uint256 locked = escrow.lockedAmount(k);
+        if (bal <= locked) return;
+        amount = bound(amount, 1, bal - locked);
+        vm.prank(arbiter);
+        escrow.lockForDispute(k, amount);
+    }
+
+    /// @dev Arbiter pays `sellerAmount <= locked` to the seller; mirror descuenta sellerAmount.
+    function resolveByArbiter(uint256 seed, uint256 sellerAmount) external {
+        if (keys.length == 0) return;
+        bytes32 k = keys[seed % keys.length];
+        if (!consented[k]) return;
+        uint256 locked = escrow.lockedAmount(k);
+        uint256 bal = escrow.escrowBalance(k);
+        if (locked == 0 || bal == 0) return;
+        uint256 cap = locked < bal ? locked : bal;
+        sellerAmount = bound(sellerAmount, 1, cap);
+        uint256 nonce = ++nonceCounter;
+        vm.prank(arbiter);
+        escrow.resolveDispute(k, disputeSeller, sellerAmount, nonce);
+        ghost_totalArbiterResolved += sellerAmount;
+        ghost_keyBalance[k] -= sellerAmount; // mirror: resolve drains the key by sellerAmount
+        resolvedAuths.push(ResolvedAuth(k, sellerAmount, nonce));
+    }
+
+    /// @dev Arbiter releases the lock without paying (buyer wins) — balance/mirror unchanged.
+    function releaseByArbiter(uint256 seed) external {
+        if (keys.length == 0) return;
+        bytes32 k = keys[seed % keys.length];
+        if (escrow.lockedAmount(k) == 0) return;
+        vm.prank(arbiter);
+        escrow.releaseDispute(k);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  191f — HOSTILE arbiter-path actions (each MUST revert)
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// @dev A non-arbiter (bot) tries to resolve — MUST revert NotArbiter.
+    function resolveByNonArbiter(uint256 seed, uint256 sellerAmount) external {
+        if (keys.length == 0) return;
+        bytes32 k = keys[seed % keys.length];
+        sellerAmount = bound(sellerAmount, 1, 1e12);
+        uint256 nonce = ++nonceCounter;
+        ghost_hostileAttempts++;
+        vm.prank(bot);
+        try escrow.resolveDispute(k, disputeSeller, sellerAmount, nonce) {
+            revert("191f VIOLATED: non-arbiter resolved a dispute");
+        } catch {
+            ghost_hostileReverts++; // expected — NotArbiter
+        }
+    }
+
+    /// @dev Arbiter resolves a key WITHOUT consent — MUST revert ArbitrationNotConsented.
+    function resolveWithoutConsent(uint256 seed, uint256 sellerAmount) external {
+        if (keys.length == 0) return;
+        bytes32 k = keys[seed % keys.length];
+        if (consented[k]) return; // only exercise the not-consented path
+        sellerAmount = bound(sellerAmount, 1, 1e12);
+        uint256 nonce = ++nonceCounter;
+        ghost_hostileAttempts++;
+        vm.prank(arbiter);
+        try escrow.resolveDispute(k, disputeSeller, sellerAmount, nonce) {
+            revert("191f VIOLATED: resolved without consent");
+        } catch {
+            ghost_hostileReverts++; // expected — ArbitrationNotConsented
+        }
+    }
+
+    /// @dev Arbiter resolves with sellerAmount > locked — MUST revert ExceedsLockedAmount.
+    function resolveOverLocked(uint256 seed, uint256 over) external {
+        if (keys.length == 0) return;
+        bytes32 k = keys[seed % keys.length];
+        if (!consented[k]) return;
+        uint256 locked = escrow.lockedAmount(k);
+        over = bound(over, 1, 1e12);
+        uint256 sellerAmount = locked + over; // strictly greater than locked
+        uint256 nonce = ++nonceCounter;
+        ghost_hostileAttempts++;
+        vm.prank(arbiter);
+        try escrow.resolveDispute(k, disputeSeller, sellerAmount, nonce) {
+            revert("191f VIOLATED: resolved above locked");
+        } catch {
+            ghost_hostileReverts++; // expected — ExceedsLockedAmount
+        }
+    }
+
+    /// @dev Replay a consumed (keyId, nonce) resolve — MUST revert NonceAlreadyUsed.
+    function resolveReplay(uint256 seed) external {
+        if (resolvedAuths.length == 0) return;
+        ResolvedAuth memory a = resolvedAuths[seed % resolvedAuths.length];
+        ghost_replayAttempts++;
+        vm.prank(arbiter);
+        try escrow.resolveDispute(a.keyId, disputeSeller, a.sellerAmount, a.nonce) {
+            revert("191f VIOLATED: consumed resolve nonce re-used");
+        } catch {
+            ghost_replayReverts++; // expected — NonceAlreadyUsed
+        }
+    }
+
+    /// @dev A non-arbiter (bot) tries to lock — MUST revert NotArbiter.
+    function lockByNonArbiter(uint256 seed, uint256 amount) external {
+        if (keys.length == 0) return;
+        bytes32 k = keys[seed % keys.length];
+        amount = bound(amount, 1, 1e12);
+        ghost_hostileAttempts++;
+        vm.prank(bot);
+        try escrow.lockForDispute(k, amount) {
+            revert("191f VIOLATED: non-arbiter locked funds");
+        } catch {
+            ghost_hostileReverts++; // expected — NotArbiter
+        }
+    }
+
+    /// @dev Depositor tries to withdraw more than balance-locked — MUST revert InsufficientBalance.
+    function withdrawOverLock(uint256 seed) external {
+        if (keys.length == 0) return;
+        bytes32 k = keys[seed % keys.length];
+        uint256 bal = escrow.escrowBalance(k);
+        uint256 locked = escrow.lockedAmount(k);
+        if (locked == 0 || bal < locked) return;
+        uint256 amount = (bal - locked) + 1; // one wei over the free part
+        ghost_overDebitAttempts++;
+        vm.prank(depositors[keyOwnerIdx[k]]);
+        try escrow.withdraw(k, amount) {
+            revert("191f VIOLATED: withdraw exceeded free (unlocked) balance");
+        } catch {
+            ghost_overDebitReverts++; // expected — InsufficientBalance
+        }
+    }
 }
 
 /// @notice Invariant test wiring: deploys behind an ERC1967 proxy and binds the handler.
@@ -423,6 +594,8 @@ contract WasiAIEscrowInvariant2Test is Test {
     uint256 internal constant TIMELOCK = 2 days;
     address internal constant OPERATOR = address(0xCAFE);
     address internal constant OWNER = address(0xBEEF);
+    // 191f: MUST match EscrowHandler2.arbiter
+    address internal constant ARBITER = address(0xA5B1);
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -430,6 +603,10 @@ contract WasiAIEscrowInvariant2Test is Test {
         bytes memory initData = abi.encodeCall(WasiAIEscrow.initialize, (address(usdc), OPERATOR, OWNER, TIMELOCK));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initData);
         escrow = WasiAIEscrow(address(proxy));
+
+        // 191f: configure the arbiter (owner-only), matching the handler actor.
+        vm.prank(OWNER);
+        escrow.setArbiter(ARBITER);
 
         handler = new EscrowHandler2(escrow, usdc, OPERATOR, OWNER);
         targetContract(address(handler));
@@ -451,8 +628,8 @@ contract WasiAIEscrowInvariant2Test is Test {
     /// @notice total deposited == total in budgets + total withdrawn + total debited/settled.
     ///         No funds created or lost. Equivalently: escrowUSDC == deposited - debited - withdrawn.
     function invariant_conservation() public view {
-        uint256 expected =
-            handler.ghost_totalDeposited() - handler.ghost_totalDebited() - handler.ghost_totalWithdrawn();
+        uint256 expected = handler.ghost_totalDeposited() - handler.ghost_totalDebited()
+            - handler.ghost_totalWithdrawn() - handler.ghost_totalArbiterResolved(); // 191f: arbiter payouts
         assertEq(usdc.balanceOf(address(escrow)), expected, "conservation: escrow balance != ghost identity");
     }
 
@@ -494,5 +671,17 @@ contract WasiAIEscrowInvariant2Test is Test {
             handler.ghost_overDebitReverts(),
             "underflow: a debit/withdraw exceeded the balance"
         );
+    }
+
+    /// @notice 191f (CD-5/CD-8): the dispute lock never exceeds the on-chain balance for any key.
+    function invariant_lockNeverExceedsBalance() public view {
+        bytes32[] memory keys = handler.trackedKeys();
+        for (uint256 i = 0; i < keys.length; i++) {
+            assertLe(
+                escrow.lockedAmount(keys[i]),
+                escrow.escrowBalance(keys[i]),
+                "191f: locked amount exceeds key balance"
+            );
+        }
     }
 }

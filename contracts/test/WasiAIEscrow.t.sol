@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
@@ -9,6 +10,7 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 import {WasiAIEscrow} from "../src/WasiAIEscrow.sol";
 import {IWasiAIEscrow} from "../src/interfaces/IWasiAIEscrow.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
+import {ReentrantUSDC} from "./mocks/ReentrantUSDC.sol";
 
 contract WasiAIEscrowTest is Test {
     WasiAIEscrow internal escrow;
@@ -21,6 +23,8 @@ contract WasiAIEscrowTest is Test {
     address internal agent;
     address internal operator = address(0xCAFE);
     address internal multisig = address(0xBEEF);
+    address internal arbiter = address(0xA5B1); // 191f: dispute arbiter (no depositor pk)
+    address internal seller = address(0x5E11E7); // 191f: dispute payee
 
     bytes32 internal keyId = keccak256("key-1");
 
@@ -42,6 +46,10 @@ contract WasiAIEscrowTest is Test {
         usdc.mint(agent, 1_000_000e6);
         vm.prank(agent);
         usdc.approve(address(escrow), type(uint256).max);
+
+        // 191f: configure the dispute arbiter (owner-only)
+        vm.prank(multisig);
+        escrow.setArbiter(arbiter);
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────
@@ -566,5 +574,319 @@ contract WasiAIEscrowTest is Test {
         vm.prank(operator);
         escrow.debit(keyId, 40e6, deadline, 1, sig);
         assertEq(escrow.escrowBalance(keyId), 60e6);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  191f: arbiter role + consent + lock + resolveDispute
+    // ════════════════════════════════════════════════════════════════════════
+
+    // helper: depositor opts in to arbitration for `keyId`
+    function _consent(bytes32 kId) internal {
+        vm.prank(agent);
+        escrow.setArbitrationConsent(kId, true);
+    }
+
+    // ── AC-8: setArbiter (onlyOwner + event + zero guard) ─────────────────────
+    function test_SetArbiter_byOwner_rotates_emitsEvent() public {
+        address newArb = address(0xA5B2);
+        vm.expectEmit(true, true, false, false, address(escrow));
+        emit IWasiAIEscrow.ArbiterUpdated(arbiter, newArb);
+        vm.prank(multisig);
+        escrow.setArbiter(newArb);
+        assertEq(escrow.arbiter(), newArb);
+    }
+
+    function test_RevertWhen_SetArbiter_byNonOwner() public {
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operator));
+        escrow.setArbiter(address(0x1234));
+    }
+
+    function test_RevertWhen_SetArbiter_zeroAddress() public {
+        vm.prank(multisig);
+        vm.expectRevert(IWasiAIEscrow.ZeroAddress.selector);
+        escrow.setArbiter(address(0));
+    }
+
+    // ── AC-1 / AC-13: setArbitrationConsent (monotonic opt-in) ────────────────
+    function test_SetArbitrationConsent_byDepositor_persists_emitsEvent() public {
+        _deposit(keyId, 100e6);
+        vm.expectEmit(true, true, false, false, address(escrow));
+        emit IWasiAIEscrow.ArbitrationConsentSet(keyId, agent);
+        vm.prank(agent);
+        escrow.setArbitrationConsent(keyId, true);
+        assertTrue(escrow.arbitrationConsent(keyId));
+    }
+
+    function test_RevertWhen_Consent_byNonDepositor() public {
+        _deposit(keyId, 100e6);
+        vm.prank(operator); // not the depositor
+        vm.expectRevert(IWasiAIEscrow.Unauthorized.selector);
+        escrow.setArbitrationConsent(keyId, true);
+    }
+
+    function test_RevertWhen_Consent_revoke() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(agent);
+        vm.expectRevert(IWasiAIEscrow.ConsentIrrevocable.selector);
+        escrow.setArbitrationConsent(keyId, false);
+        assertTrue(escrow.arbitrationConsent(keyId)); // still consented
+    }
+
+    function test_Consent_idempotent_trueTwice_noEvent() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        // second true is a no-op: it must NOT revert and MUST NOT emit.
+        vm.recordLogs();
+        vm.prank(agent);
+        escrow.setArbitrationConsent(keyId, true);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 0);
+        assertTrue(escrow.arbitrationConsent(keyId));
+    }
+
+    // ── AC-10 / AC-4 / AC-2: lockForDispute ───────────────────────────────────
+    function test_LockForDispute_byArbiter_locks_emitsEvent() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit IWasiAIEscrow.DisputeLocked(keyId, arbiter, 60e6, 60e6);
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 60e6);
+        assertEq(escrow.lockedAmount(keyId), 60e6);
+        // incremental top-up of the same dispute
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 10e6);
+        assertEq(escrow.lockedAmount(keyId), 70e6);
+    }
+
+    function test_RevertWhen_Lock_byNonArbiter() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(operator);
+        vm.expectRevert(IWasiAIEscrow.NotArbiter.selector);
+        escrow.lockForDispute(keyId, 10e6);
+    }
+
+    function test_RevertWhen_Lock_withoutConsent() public {
+        _deposit(keyId, 100e6);
+        // no consent
+        vm.prank(arbiter);
+        vm.expectRevert(IWasiAIEscrow.ArbitrationNotConsented.selector);
+        escrow.lockForDispute(keyId, 10e6);
+    }
+
+    function test_RevertWhen_Lock_exceedsBalance() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(arbiter);
+        vm.expectRevert(IWasiAIEscrow.InsufficientBalance.selector);
+        escrow.lockForDispute(keyId, 101e6);
+    }
+
+    function test_RevertWhen_Lock_zeroAmount() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(arbiter);
+        vm.expectRevert(IWasiAIEscrow.ZeroAmount.selector);
+        escrow.lockForDispute(keyId, 0);
+    }
+
+    // ── AC-11: withdraw blocked by the lock (withdraw code untouched) ──────────
+    function test_Withdraw_blockedByLock() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 60e6); // available = 40
+        // withdraw 41 > available (40) → revert
+        vm.prank(agent);
+        vm.expectRevert(IWasiAIEscrow.InsufficientBalance.selector);
+        escrow.withdraw(keyId, 41e6);
+        // withdraw 40 (exactly the free part) → OK
+        vm.prank(agent);
+        escrow.withdraw(keyId, 40e6);
+        assertEq(escrow.escrowBalance(keyId), 60e6);
+        assertEq(escrow.lockedAmount(keyId), 60e6);
+    }
+
+    // ── AC-3 / AC-12: resolveDispute happy path ───────────────────────────────
+    function test_ResolveDispute_happy_paysSeller_zeroesLock() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 60e6);
+
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit IWasiAIEscrow.DisputeResolved(keyId, arbiter, seller, 60e6, 1);
+        vm.prank(arbiter);
+        escrow.resolveDispute(keyId, seller, 60e6, 1);
+
+        assertEq(usdc.balanceOf(seller), 60e6);
+        assertEq(escrow.escrowBalance(keyId), 40e6);
+        assertEq(escrow.lockedAmount(keyId), 0);
+        // nonce consumed: a replay reverts
+        vm.prank(arbiter);
+        vm.expectRevert(IWasiAIEscrow.NonceAlreadyUsed.selector);
+        escrow.resolveDispute(keyId, seller, 10e6, 1);
+    }
+
+    function test_ResolveDispute_residual_withdrawableByBuyer() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 60e6);
+        vm.prank(arbiter);
+        escrow.resolveDispute(keyId, seller, 60e6, 1);
+        // buyer withdraws the residual (40)
+        uint256 before = usdc.balanceOf(agent);
+        vm.prank(agent);
+        escrow.withdraw(keyId, 40e6);
+        assertEq(usdc.balanceOf(agent), before + 40e6);
+        assertEq(escrow.escrowBalance(keyId), 0);
+    }
+
+    function test_RevertWhen_Resolve_byNonArbiter() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 60e6);
+        // even with consent + lock, a non-arbiter reverts NotArbiter
+        vm.prank(operator);
+        vm.expectRevert(IWasiAIEscrow.NotArbiter.selector);
+        escrow.resolveDispute(keyId, seller, 60e6, 1);
+    }
+
+    function test_RevertWhen_Resolve_withoutConsent() public {
+        _deposit(keyId, 100e6);
+        // no consent → lock is impossible, so resolve reverts on the consent gate
+        vm.prank(arbiter);
+        vm.expectRevert(IWasiAIEscrow.ArbitrationNotConsented.selector);
+        escrow.resolveDispute(keyId, seller, 10e6, 1);
+    }
+
+    function test_RevertWhen_Resolve_overLocked() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 60e6);
+        // sellerAmount (61) > locked (60) → ExceedsLockedAmount
+        vm.prank(arbiter);
+        vm.expectRevert(IWasiAIEscrow.ExceedsLockedAmount.selector);
+        escrow.resolveDispute(keyId, seller, 61e6, 1);
+    }
+
+    function test_RevertWhen_Resolve_exceedsBalance() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        // lock the full balance, then debit it down so lock > balance (edge lock >= balance).
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 100e6);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _signDebit(agentPk, keyId, 50e6, deadline, 9);
+        vm.prank(operator);
+        escrow.debit(keyId, 50e6, deadline, 9, sig); // balance now 50, locked still 100
+        // sellerAmount (60) <= locked (100) but > balance (50) → InsufficientBalance
+        vm.prank(arbiter);
+        vm.expectRevert(IWasiAIEscrow.InsufficientBalance.selector);
+        escrow.resolveDispute(keyId, seller, 60e6, 1);
+    }
+
+    function test_RevertWhen_Resolve_zeroSellerAmount() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 60e6);
+        vm.prank(arbiter);
+        vm.expectRevert(IWasiAIEscrow.ZeroAmount.selector);
+        escrow.resolveDispute(keyId, seller, 0, 1);
+    }
+
+    function test_RevertWhen_Resolve_zeroSeller() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 60e6);
+        vm.prank(arbiter);
+        vm.expectRevert(IWasiAIEscrow.ZeroAddress.selector);
+        escrow.resolveDispute(keyId, address(0), 60e6, 1);
+    }
+
+    function test_RevertWhen_Resolve_nonceReplay() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 60e6);
+        vm.prank(arbiter);
+        escrow.resolveDispute(keyId, seller, 30e6, 5);
+        // re-lock (lock was zeroed) then replay the same nonce → NonceAlreadyUsed
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 20e6);
+        vm.prank(arbiter);
+        vm.expectRevert(IWasiAIEscrow.NonceAlreadyUsed.selector);
+        escrow.resolveDispute(keyId, seller, 10e6, 5);
+    }
+
+    // ── AC-12: releaseDispute (buyer wins, no payment) ────────────────────────
+    function test_ReleaseDispute_buyerWins_unlocks() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 60e6);
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit IWasiAIEscrow.DisputeReleased(keyId, arbiter, 60e6);
+        vm.prank(arbiter);
+        escrow.releaseDispute(keyId);
+        assertEq(escrow.lockedAmount(keyId), 0);
+        // buyer can now withdraw everything
+        vm.prank(agent);
+        escrow.withdraw(keyId, 100e6);
+        assertEq(escrow.escrowBalance(keyId), 0);
+    }
+
+    function test_RevertWhen_Release_byNonArbiter() public {
+        _deposit(keyId, 100e6);
+        _consent(keyId);
+        vm.prank(arbiter);
+        escrow.lockForDispute(keyId, 60e6);
+        vm.prank(operator);
+        vm.expectRevert(IWasiAIEscrow.NotArbiter.selector);
+        escrow.releaseDispute(keyId);
+    }
+
+    // ── CD-3: re-entrancy guard on resolveDispute ─────────────────────────────
+    function test_ResolveDispute_reentrancy_guarded() public {
+        // Fresh escrow whose token is the malicious ReentrantUSDC; the arbiter IS the token so
+        // the re-entrant call clears onlyArbiter and actually exercises the nonReentrant guard.
+        ReentrantUSDC rusdc = new ReentrantUSDC();
+        WasiAIEscrow impl = new WasiAIEscrow();
+        bytes memory initData =
+            abi.encodeCall(WasiAIEscrow.initialize, (address(rusdc), operator, multisig, TIMELOCK));
+        ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initData);
+        WasiAIEscrow esc = WasiAIEscrow(address(proxy));
+
+        vm.prank(multisig);
+        esc.setArbiter(address(rusdc)); // the token is the arbiter
+
+        rusdc.mint(agent, 1_000e6);
+        vm.prank(agent);
+        rusdc.approve(address(esc), type(uint256).max);
+        vm.prank(agent);
+        esc.deposit(keyId, 100e6);
+        vm.prank(agent);
+        esc.setArbitrationConsent(keyId, true);
+        vm.prank(address(rusdc));
+        esc.lockForDispute(keyId, 60e6);
+
+        // arm the re-entry with the SAME (keyId, nonce) and fire the outer resolve
+        rusdc.arm(address(esc), keyId, seller, 60e6, 1);
+        vm.prank(address(rusdc));
+        vm.expectRevert(); // nonReentrant bubbles up → outer resolve reverts
+        esc.resolveDispute(keyId, seller, 60e6, 1);
+
+        // funds intact: nothing moved, lock untouched
+        assertEq(esc.escrowBalance(keyId), 100e6);
+        assertEq(esc.lockedAmount(keyId), 60e6);
+        assertEq(rusdc.balanceOf(seller), 0);
     }
 }

@@ -1,0 +1,15 @@
+# Auto-Blindaje — WKH-191f (Escrow arbiter contract)
+
+Registro de errores/interacciones no obvias detectadas durante F3 y cómo se blindaron.
+
+### [2026-07-13] Wave 3 — `invariant_lockNeverExceedsBalance` choca con R-1 (debit no respeta el lock)
+- **Error (anticipado, evitado antes de correr)**: la nueva invariante `invariant_lockNeverExceedsBalance` (`escrow.lockedAmount(k) <= escrow.escrowBalance(k)`) FALLA si los handlers legítimos `debitByOperator` / `withdrawByAgent` / `withdrawByDepositor` / `withdrawAll` / `debitBatchByOperator` siguen acotando el `amount` a `[1, balance]`. Un `debit` sobre una key lockeada puede bajar `_balances` por debajo de `_lockedAmount` (exactamente el riesgo aceptado R-1 del SDD §4.4), rompiendo la invariante.
+- **Causa raíz**: el contrato NO enforcea el lock dentro de `debit` (CD-7 prohíbe tocar `debit`). El lock solo lo respeta `withdraw` (`available = _balances - _lockedAmount`). Por diseño, el operador es un actor cooperativo que no debita fondos congelados durante una disputa; esa disciplina vive en la capa app/operacional, no en el bytecode.
+- **Fix**: en AMBAS suites de invariantes, acotar los handlers LEGÍTIMOS de debit/withdraw a la parte LIBRE (`balance - locked`) y `return` temprano si `balance <= locked`. Así la invariante prueba que, bajo acciones bien comportadas + el mecanismo de lock (`lockForDispute` valida `newLocked <= balance`; `resolve`/`release` ponen `locked = 0`; `withdraw` ya resta el lock), `locked <= balance` se mantiene siempre. Los handlers HOSTILES (`withdrawOverLock`) siguen probando que el intento de cruzar el lock revierte `InsufficientBalance`.
+- **Aplicar en**: cualquier HU futura que agregue una invariante sobre `_lockedAmount` vs `_balances`, o que toque `debit`. NO "arreglar" R-1 tocando `debit` (CD-7 / R-1); la baranda on-chain es el guard `sellerAmount > bal` en `resolveDispute`, no un lock-check en `debit`.
+
+### [2026-07-13] Wave 3 — re-entrancy test: el caller re-entrante es el token, no el árbitro
+- **Error (anticipado)**: si el árbitro es una EOA normal y el token malicioso re-entra `resolveDispute`, `msg.sender` de la re-entrada es la dirección DEL TOKEN, no el árbitro → revierte por `onlyArbiter` (`NotArbiter`) ANTES de llegar al guard `nonReentrant`. El test "pasaría" pero NO ejercería el `nonReentrant` (falso positivo).
+- **Causa raíz**: orden de modifiers `onlyArbiter nonReentrant`; `onlyArbiter` corre primero y usa el `msg.sender` de la re-entrada (el contrato token).
+- **Fix**: en `test_ResolveDispute_reentrancy_guarded`, configurar el árbitro = `address(rusdc)` (el token ES el árbitro). Así la re-entrada limpia `onlyArbiter` (msg.sender == arbiter == token) y golpea de verdad el `nonReentrant` (`ReentrancyGuardReentrantCall`), que burbujea y revierte el `resolveDispute` externo. Assert de fondos intactos + lock intacto.
+- **Aplicar en**: cualquier test de re-entrancy sobre funciones con un access-guard antes del `nonReentrant`. El actor re-entrante debe pasar el access-guard para ejercer genuinamente el guard de re-entrada.
