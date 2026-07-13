@@ -129,6 +129,17 @@
     <div class="empty-state">No events recorded yet</div>
   </div>
 
+  <!-- Disputas en revision (WKH-189, admin-gated) -->
+  <h3 class="section-title">Disputas en revision</h3>
+  <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center; margin-bottom:0.75rem;">
+    <input id="admin-token" placeholder="X-Admin-Token" type="password" style="max-width:260px; margin:0;">
+    <input id="resolved-by" placeholder="Tu nombre (auditoria)" type="text" style="max-width:220px; margin:0;">
+    <button id="load-holds-btn" type="button" style="margin:0; width:auto;">Cargar holds</button>
+  </div>
+  <div id="holds-table">
+    <div class="empty-state">Ingresa el token admin y carga los holds</div>
+  </div>
+
   <footer style="text-align:center; margin-top:2rem; font-size:0.75rem; color:var(--pico-muted-color);">
     WasiAI A2A Protocol v0.1.0 | Chain-Adaptive Gateway | Auto-refresh: 5s
   </footer>
@@ -268,7 +279,130 @@
       await Promise.all([loadStats(), loadRegistries(), loadTasks(), loadEvents()]);
     }
 
+    // ── WKH-189: panel de override admin de disputas en arb_hold ──
+    // Token persistido en localStorage (NO se envia en el auto-refresh de 5s).
+    var TOKEN_KEY = 'wasiai_admin_token';
+
+    function initAdminToken() {
+      var input = document.getElementById('admin-token');
+      var saved = window.localStorage.getItem(TOKEN_KEY);
+      if (saved) input.value = saved;
+      input.addEventListener('input', function() {
+        window.localStorage.setItem(TOKEN_KEY, input.value);
+      });
+    }
+
+    function adminFetch(url, opts) {
+      opts = opts || {};
+      var headers = opts.headers || {};
+      headers['X-Admin-Token'] = document.getElementById('admin-token').value;
+      opts.headers = headers;
+      return fetch(url, opts);
+    }
+
+    async function loadHolds() {
+      var el = document.getElementById('holds-table');
+      var res;
+      try {
+        res = await adminFetch(BASE + '/dashboard/api/arbitrations/holds');
+      } catch (err) {
+        el.innerHTML = '<div class="empty-state">Error de red al cargar holds</div>';
+        return;
+      }
+      if (res.status === 404) {
+        el.innerHTML = '<div class="empty-state">Arbitraje deshabilitado o sin holds</div>';
+        return;
+      }
+      if (res.status === 401) {
+        el.innerHTML = '<div class="empty-state">Token invalido o ausente</div>';
+        return;
+      }
+      if (!res.ok) {
+        el.innerHTML = '<div class="empty-state">No se pudieron cargar los holds</div>';
+        return;
+      }
+      var data = await res.json();
+      var holds = (data && data.holds) || [];
+      if (holds.length === 0) {
+        el.innerHTML = '<div class="empty-state">No hay disputas en revision</div>';
+        return;
+      }
+      var html = '<table><thead><tr><th>Intent</th><th>Chain</th><th>En juego (USD)</th><th>Motivo</th><th>Metodo</th><th>Acciones</th></tr></thead><tbody>';
+      holds.forEach(function(h) {
+        var id8 = String(h.intentId || '').slice(0, 8);
+        html += '<tr>';
+        html += '<td style="font-family:monospace;font-size:0.75rem">' + esc(id8) + '...</td>';
+        html += '<td>' + esc(h.chainId) + '</td>';
+        html += '<td>' + esc(h.atStakeUsd) + '</td>';
+        html += '<td style="font-size:0.8rem">' + esc(h.ambiguityReason || '-') + '</td>';
+        html += '<td>' + esc(h.method || '-') + '</td>';
+        html += '<td>';
+        var rowId = 'hold-row-' + esc(h.intentId);
+        html += '<button type="button" data-hold-row="' + rowId + '" style="width:auto;margin:0 0.25rem 0 0;padding:0.25rem 0.5rem" onclick="resolveHoldUI(\'' + esc(h.intentId) + '\',\'release\')">Liberar</button>';
+        html += '<button type="button" data-hold-row="' + rowId + '" style="width:auto;margin:0 0.25rem 0 0;padding:0.25rem 0.5rem" onclick="resolveHoldUI(\'' + esc(h.intentId) + '\',\'refund\')">Reembolsar</button>';
+        html += '<button type="button" data-hold-row="' + rowId + '" style="width:auto;margin:0;padding:0.25rem 0.5rem" onclick="resolveHoldUI(\'' + esc(h.intentId) + '\',\'split\')">Dividir</button>';
+        html += '</td></tr>';
+      });
+      html += '</tbody></table>';
+      el.innerHTML = html;
+    }
+
+    async function resolveHoldUI(intentId, decision) {
+      var id8 = String(intentId).slice(0, 8);
+      if (!window.confirm('Confirmas ' + decision + ' sobre el intent ' + id8 + '? Esto mueve fondos y es irreversible.')) {
+        return;
+      }
+      var payload = { decision: decision };
+      if (decision === 'split') {
+        var raw = window.prompt('Porcentaje al Seller (0-100)');
+        if (raw === null) return;
+        var pct = Number(raw);
+        if (!isFinite(pct) || pct < 0 || pct > 100) {
+          window.alert('Porcentaje invalido');
+          return;
+        }
+        payload.splitPct = pct;
+      }
+      var resolvedBy = document.getElementById('resolved-by').value;
+      if (resolvedBy) payload.resolvedBy = resolvedBy;
+      // Deshabilitar los botones de la fila mientras el POST está en vuelo (evita
+      // el doble submit por doble-click). Se re-habilitan en el finally.
+      var rowId = 'hold-row-' + intentId;
+      var rowBtns = document.querySelectorAll('[data-hold-row="' + rowId + '"]');
+      var i;
+      for (i = 0; i < rowBtns.length; i++) rowBtns[i].disabled = true;
+      try {
+        var res;
+        try {
+          res = await adminFetch(BASE + '/dashboard/api/arbitrations/' + intentId + '/resolve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+        } catch (err) {
+          window.alert('Error de red al resolver');
+          return;
+        }
+        if (res.ok) {
+          await loadHolds();
+          return;
+        }
+        var code = 'error';
+        try {
+          var body = await res.json();
+          code = (body && body.error_code) || ('HTTP ' + res.status);
+        } catch (e) {
+          code = 'HTTP ' + res.status;
+        }
+        window.alert('No se pudo resolver: ' + code);
+      } finally {
+        for (i = 0; i < rowBtns.length; i++) rowBtns[i].disabled = false;
+      }
+    }
+
     // Initial load
+    initAdminToken();
+    document.getElementById('load-holds-btn').addEventListener('click', loadHolds);
     refreshAll();
 
     // Auto-refresh every 5s

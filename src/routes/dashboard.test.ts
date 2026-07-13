@@ -27,6 +27,18 @@ vi.mock('../services/event.js', () => ({
   },
 }));
 
+// ── WKH-189: mock arbiter service (evita cargar supabase/adapters) ──
+const mockListHolds = vi.hoisted(() => vi.fn());
+const mockResolveHold = vi.hoisted(() => vi.fn());
+const mockIsArbiterEnabled = vi.hoisted(() => vi.fn(() => true));
+vi.mock('../services/arbiter.js', () => ({
+  arbiterService: {
+    listHolds: (...a: unknown[]) => mockListHolds(...a),
+    resolveHold: (...a: unknown[]) => mockResolveHold(...a),
+  },
+  isArbiterEnabled: () => mockIsArbiterEnabled(),
+}));
+
 import dashboardRoutes from './dashboard.js';
 
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
@@ -134,5 +146,110 @@ describe('AC-3/AC-4: env + docs naming drift', () => {
   it('AC-4: CLAUDE.md runtime var reference uses SUPABASE_SERVICE_KEY', () => {
     const claude = readFileSync(resolve(root, 'CLAUDE.md'), 'utf-8');
     expect(claude).toContain('SUPABASE_SERVICE_KEY');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// WKH-189 · Rutas admin de override de arb_hold (holds + resolve)
+// ════════════════════════════════════════════════════════════════════
+describe('WKH-189 admin arbitration routes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsArbiterEnabled.mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    delete process.env.NODE_ENV;
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+  });
+
+  // ── T-1 (AC-1): GET holds cross-tenant con token válido ──
+  it('T-1: GET holds con token válido lista holds cross-tenant (2 owners) + total', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockListHolds.mockResolvedValue([
+      {
+        intentId: 'aaaaaaaa-0000-0000-0000-000000000001',
+        chainId: 2368,
+        atStakeUsd: 10,
+        decision: 'hold',
+        method: 'hold',
+        ambiguityReason: 'proof_chain_tamper',
+        createdAt: '2026-07-11T00:00:00.000Z',
+      },
+      {
+        intentId: 'bbbbbbbb-0000-0000-0000-000000000002',
+        chainId: 43113,
+        atStakeUsd: 20,
+        decision: 'hold',
+        method: 'hold',
+        ambiguityReason: 'over_cap',
+        createdAt: '2026-07-11T01:00:00.000Z',
+      },
+    ]);
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/arbitrations/holds',
+      headers: { 'x-admin-token': 'secret' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.total).toBe(2);
+    expect(body.holds).toHaveLength(2);
+    const ids = body.holds.map((h: { intentId: string }) => h.intentId);
+    expect(ids).toContain('aaaaaaaa-0000-0000-0000-000000000001');
+    expect(ids).toContain('bbbbbbbb-0000-0000-0000-000000000002');
+    await app.close();
+  });
+
+  // ── T-5 (AC-5): sin X-Admin-Token → 401; servicios NO invocados ──
+  it('T-5: GET/POST sin X-Admin-Token (con token configurado) → 401, servicios no invocados', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    const app = await buildApp();
+
+    const getRes = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/arbitrations/holds',
+    });
+    expect(getRes.statusCode).toBe(401);
+
+    const postRes = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/arbitrations/i1/resolve',
+      payload: { decision: 'release' },
+    });
+    expect(postRes.statusCode).toBe(401);
+
+    expect(mockListHolds).not.toHaveBeenCalled();
+    expect(mockResolveHold).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  // ── T-9 (AC-8/CD-7): flag OFF → 404 NOT_FOUND byte-idéntico, aún con token ──
+  it('T-9: ARBITER_ENABLED != true → GET/POST 404 {error_code:NOT_FOUND}, incluso con token válido', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockIsArbiterEnabled.mockReturnValue(false);
+    const app = await buildApp();
+
+    const getRes = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/arbitrations/holds',
+      headers: { 'x-admin-token': 'secret' },
+    });
+    expect(getRes.statusCode).toBe(404);
+    expect(getRes.json()).toEqual({ error_code: 'NOT_FOUND' });
+
+    const postRes = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/arbitrations/i1/resolve',
+      headers: { 'x-admin-token': 'secret' },
+      payload: { decision: 'release' },
+    });
+    expect(postRes.statusCode).toBe(404);
+    expect(postRes.json()).toEqual({ error_code: 'NOT_FOUND' });
+
+    expect(mockListHolds).not.toHaveBeenCalled();
+    expect(mockResolveHold).not.toHaveBeenCalled();
+    await app.close();
   });
 });

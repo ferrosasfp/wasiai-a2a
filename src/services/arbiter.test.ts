@@ -13,6 +13,8 @@
  * readEvidence + classifyAmbiguous + receiptService + adapters mockeados.
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import Fastify from 'fastify';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -202,7 +204,9 @@ function makeArbDb(init: {
     close_payment_intent_for_arbitration: (args) => {
       const prev = row.status;
       let final = 0;
-      if (row.status === 'disputed') {
+      // WKH-189: predicado ensanchado (FIEL a la migración) — arb_hold entra por la
+      // MISMA rama que disputed (transición a arb_closing persistiendo el monto).
+      if (row.status === 'disputed' || row.status === 'arb_hold') {
         const arb = Math.max(
           0,
           Math.min(row.authorized_usd, Number(args.p_arb_amount) || 0),
@@ -310,8 +314,31 @@ function makeArbDb(init: {
         if (table === 'a2a_payment_intents' && b._conds.id !== 'i1') {
           return Promise.resolve({ data: null, error: null });
         }
+        // WKH-189: resolveHold lee la fila a2a_arbitrations original (best-effort)
+        // para preservar ambiguity_reason/llm_reasoning. Devolvemos el último upsert
+        // (o null si no hay arbitraje persistido).
+        if (table === 'a2a_arbitrations') {
+          const last = arbRows[arbRows.length - 1];
+          return Promise.resolve({
+            data: last
+              ? {
+                  ambiguity_reason: (last.ambiguity_reason as string) ?? null,
+                  llm_reasoning: (last.llm_reasoning as string) ?? null,
+                }
+              : null,
+            error: null,
+          });
+        }
+        // a2a_payment_intents: fila autoritativa (openDispute pre-check lee
+        // owner_ref/chain_id; resolveHold lee además status/authorized_usd/seller_ref).
         return Promise.resolve({
-          data: { owner_ref: row.owner_ref, chain_id: row.chain_id },
+          data: {
+            owner_ref: row.owner_ref,
+            chain_id: row.chain_id,
+            status: row.status,
+            authorized_usd: row.authorized_usd,
+            seller_ref: row.seller_ref,
+          },
           error: null,
         });
       },
@@ -882,5 +909,375 @@ describe('route dispute (flag ON)', () => {
     expect(res.statusCode).toBe(409);
     expect(res.json().error_code).toBe('INTENT_NOT_OPEN');
     await app.close();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// WKH-189 · Override humano admin-gated de intents en arb_hold (resolveHold)
+// ════════════════════════════════════════════════════════════════════
+
+// ── T-2 (AC-2): resolveHold(release) sobre arb_hold → settle al seller ──
+describe('WKH-189 T-2 resolveHold(release) money-path', () => {
+  it('release sobre arb_hold → settlea deposit al seller, arb_hold→arb_closing→settled', async () => {
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 10, status: 'arb_hold' });
+    wireDb(db);
+
+    const r = await arbiterService.resolveHold('i1', {
+      decision: 'release',
+      resolvedBy: 'admin-jane',
+      note: null,
+    });
+
+    expect(r.status).toBe('executed');
+    expect(r.decision).toBe('release');
+    expect(r.method).toBe('admin_override');
+    expect(r.settleUsd).toBe(10);
+    expect(r.residualUsd).toBe(0);
+    expect(r.txHash).toBe('0xTX');
+    expect(mockSettle).toHaveBeenCalledTimes(1);
+    expect(db.refunds).toEqual([]); // residual 0 → sin refund
+    expect(db.row.status).toBe('settled');
+    expect(mockEmit).toHaveBeenCalledWith(
+      expect.objectContaining({ receiptType: 'arbitration_release' }),
+    );
+  });
+});
+
+// ── T-3 (AC-3): persiste admin_override + auditoría, preserva evidencia ──
+describe('WKH-189 T-3 persistencia de auditoría + preservación de evidencia', () => {
+  it('override(split) persiste method/resolved_* y PRESERVA ambiguity/llm del hold original; recibo por decision', async () => {
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 10, status: 'arb_hold' });
+    // Fila de arbitraje original del hold (evidencia a preservar).
+    db.arbRows.push({
+      ambiguity_reason: 'proof_chain_tamper',
+      llm_reasoning: 'seed reasoning',
+      method: 'hold',
+      status: 'held',
+    });
+    wireDb(db);
+
+    const r = await arbiterService.resolveHold('i1', {
+      decision: 'split',
+      splitPct: 50,
+      resolvedBy: 'admin-jane',
+      note: 'revisado manualmente',
+    });
+
+    expect(r.decision).toBe('split');
+    expect(r.method).toBe('admin_override');
+    expect(r.settleUsd).toBe(5); // 10 * 50%
+
+    // El upsert nuevo es el último arbRow.
+    const upserted = db.arbRows[db.arbRows.length - 1] as Record<
+      string,
+      unknown
+    >;
+    expect(upserted).toMatchObject({
+      method: 'admin_override',
+      decision: 'split',
+      resolved_by: 'admin-jane',
+      resolution_note: 'revisado manualmente',
+      ambiguity_reason: 'proof_chain_tamper', // preservado del hold original
+      llm_reasoning: 'seed reasoning', // preservado del hold original
+      status: 'executed',
+    });
+    expect(typeof upserted.resolved_at).toBe('string');
+    expect(mockEmit).toHaveBeenCalledWith(
+      expect.objectContaining({ receiptType: 'arbitration_split' }),
+    );
+  });
+});
+
+// ── T-4 (AC-4): intent inexistente / no-hold → error, cero settle ──
+describe('WKH-189 T-4 guardas de estado', () => {
+  it('intent inexistente → INTENT_NOT_FOUND, cero settle', async () => {
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 10, status: 'arb_hold' });
+    wireDb(db);
+    await expect(
+      arbiterService.resolveHold('no-existe', {
+        decision: 'release',
+        resolvedBy: null,
+        note: null,
+      }),
+    ).rejects.toMatchObject({ code: 'INTENT_NOT_FOUND' });
+    expect(mockSettle).not.toHaveBeenCalled();
+  });
+
+  it('intent settled (no arb_hold) → INTENT_NOT_OPEN, cero settle', async () => {
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 10, status: 'settled' });
+    wireDb(db);
+    await expect(
+      arbiterService.resolveHold('i1', {
+        decision: 'release',
+        resolvedBy: null,
+        note: null,
+      }),
+    ).rejects.toMatchObject({ code: 'INTENT_NOT_OPEN' });
+    expect(mockSettle).not.toHaveBeenCalled();
+  });
+
+  it('intent open (no arb_hold) → INTENT_NOT_OPEN, cero settle', async () => {
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 10, status: 'open' });
+    wireDb(db);
+    await expect(
+      arbiterService.resolveHold('i1', {
+        decision: 'refund',
+        resolvedBy: null,
+        note: null,
+      }),
+    ).rejects.toMatchObject({ code: 'INTENT_NOT_OPEN' });
+    expect(mockSettle).not.toHaveBeenCalled();
+  });
+});
+
+// ── T-6 (AC-6): chain mainnet → CHAIN_NOT_SUPPORTED, cero fondos ──
+describe('WKH-189 T-6 testnet-guard fail-closed', () => {
+  it('arb_hold en chain mainnet → CHAIN_NOT_SUPPORTED, sin mover fondos', async () => {
+    happySettle();
+    const db = makeArbDb({
+      authorized_usd: 10,
+      status: 'arb_hold',
+      chain_id: 1,
+    });
+    wireDb(db);
+    await expect(
+      arbiterService.resolveHold('i1', {
+        decision: 'release',
+        resolvedBy: null,
+        note: null,
+      }),
+    ).rejects.toMatchObject({ code: 'CHAIN_NOT_SUPPORTED' });
+    expect(mockSettle).not.toHaveBeenCalled();
+    expect(db.refunds).toEqual([]);
+  });
+});
+
+// ── T-7 (AC-7/CD-9): SIN cap; clamp settleUsd a [0,deposit] ──
+describe('WKH-189 T-7 sin cap (CD-9) + clamp [0,deposit]', () => {
+  it('deposit 1000 > ARBITER_AUTO_CAP_USD=25 → ejecuta igual (sin cap), split clampa a [0,deposit]', async () => {
+    happySettle();
+    process.env.ARBITER_AUTO_CAP_USD = '25';
+    const db = makeArbDb({ authorized_usd: 1000, status: 'arb_hold' });
+    wireDb(db);
+
+    const r = await arbiterService.resolveHold('i1', {
+      decision: 'split',
+      splitPct: 50,
+      resolvedBy: null,
+      note: null,
+    });
+    expect(r.status).toBe('executed'); // NO held pese a deposit >> cap
+    expect(r.settleUsd).toBe(500); // 1000 * 50%, dentro de [0,deposit]
+    expect(mockSettle).toHaveBeenCalledTimes(1);
+  });
+
+  it('splitPct > 100 → INVALID_INPUT (T-7/AC-7, NO clamp silencioso), sin mover fondos', async () => {
+    happySettle();
+    process.env.ARBITER_AUTO_CAP_USD = '25';
+    const db = makeArbDb({ authorized_usd: 1000, status: 'arb_hold' });
+    wireDb(db);
+
+    await expect(
+      arbiterService.resolveHold('i1', {
+        decision: 'split',
+        splitPct: 500,
+        resolvedBy: null,
+        note: null,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(mockSettle).not.toHaveBeenCalled();
+    expect(db.refunds).toEqual([]);
+  });
+
+  it('splitPct < 0 → INVALID_INPUT, sin mover fondos', async () => {
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 1000, status: 'arb_hold' });
+    wireDb(db);
+
+    await expect(
+      arbiterService.resolveHold('i1', {
+        decision: 'split',
+        splitPct: -5,
+        resolvedBy: null,
+        note: null,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(mockSettle).not.toHaveBeenCalled();
+    expect(db.refunds).toEqual([]);
+  });
+
+  it('splitPct en borde (0 y 100) es válido y settleUsd nunca excede deposit (2da baranda del clamp)', async () => {
+    happySettle();
+    const db0 = makeArbDb({ authorized_usd: 1000, status: 'arb_hold' });
+    wireDb(db0);
+    const r0 = await arbiterService.resolveHold('i1', {
+      decision: 'split',
+      splitPct: 0,
+      resolvedBy: null,
+      note: null,
+    });
+    expect(r0.settleUsd).toBe(0);
+
+    happySettle();
+    const db100 = makeArbDb({ authorized_usd: 1000, status: 'arb_hold' });
+    wireDb(db100);
+    const r100 = await arbiterService.resolveHold('i1', {
+      decision: 'split',
+      splitPct: 100,
+      resolvedBy: null,
+      note: null,
+    });
+    expect(r100.settleUsd).toBe(1000); // = deposit, nunca lo excede (clamp vivo)
+    expect(r100.residualUsd).toBe(0);
+  });
+
+  it('release de deposit grande no excede deposit', async () => {
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 1000, status: 'arb_hold' });
+    wireDb(db);
+
+    const r = await arbiterService.resolveHold('i1', {
+      decision: 'release',
+      resolvedBy: null,
+      note: null,
+    });
+    expect(r.settleUsd).toBe(1000);
+    expect(r.residualUsd).toBe(0);
+  });
+});
+
+// ── T-8 (AC-2/CD-10): override in-flight (arb_closing sin veredicto) = no-op ──
+describe('WKH-189 T-8 idempotencia / no-op in-flight (CD-10)', () => {
+  it('override que cae en rama recovery arb_closing con settle_outcome=NULL → no-op, sin double-settle', async () => {
+    happySettle();
+    // El advisory read ve arb_hold (race: otro override ya transicionó); el RPC ve
+    // arb_closing sin veredicto persistido (in-flight).
+    const db = makeArbDb({
+      authorized_usd: 10,
+      status: 'arb_hold',
+      consumed_usd: 4,
+    });
+    db.handlers.close_payment_intent_for_arbitration = () => ({
+      data: [
+        {
+          final_amount: 4,
+          prev_status: 'arb_closing',
+          intent_type: 'session',
+          key_id: 'k1',
+          chain_id: 2368,
+          pay_to: PAYTO,
+          authorized_usd: 10,
+          consumed_usd: 4,
+          settle_tx_hash: null,
+          settle_outcome: null, // in-flight: sin veredicto
+        },
+      ],
+      error: null,
+    });
+    wireDb(db);
+
+    const r = await arbiterService.resolveHold('i1', {
+      decision: 'split',
+      splitPct: 40,
+      resolvedBy: null,
+      note: null,
+    });
+
+    expect(r.status).toBe('executed');
+    expect(mockSettle).not.toHaveBeenCalled(); // no double-settle
+    expect(db.refunds).toEqual([]); // no-op in-flight: cero movimiento
+  });
+});
+
+// ── T-10 (CD-8/R-1): el invariante que hace seguro el ensanche ──
+describe('WKH-189 T-10 invariante CD-8 (arb_hold nunca al recovery)', () => {
+  it('(a) expireStale NO selecciona arb_hold (solo arb_closing + disputed)', () => {
+    const src = readFileSync(
+      join(process.cwd(), 'src/services/payment-intent.ts'),
+      'utf8',
+    );
+    expect(src).toContain(".eq('status', 'arb_closing')");
+    expect(src).toContain(".eq('status', 'disputed')");
+    // El hazard: barrer arb_hold hacia recoverArbClosing. NUNCA debe existir.
+    expect(src).not.toContain(".eq('status', 'arb_hold')");
+  });
+
+  it('(b) recoverArbClosing forzado sobre arb_hold NO reembolsa el deposit (guard prev_status)', async () => {
+    happySettle();
+    const db = makeArbDb({
+      authorized_usd: 10,
+      status: 'arb_hold',
+      consumed_usd: 0,
+    });
+    wireDb(db);
+
+    // Aunque el RPC ensanchado transicione arb_hold→arb_closing, el guard
+    // `prev_status !== 'arb_closing'` de recoverArbClosing corta antes de refundar.
+    await arbiterService.recoverArbClosing('i1', OWNER, true);
+    expect(db.refunds).toEqual([]); // deposit NO reembolsado
+    expect(mockSettle).not.toHaveBeenCalled();
+  });
+});
+
+// ── T-11: assert estructural sobre el SQL de la migración (up + down) ──
+describe('WKH-189 T-11 migration SQL structure (up + down)', () => {
+  const upSql = readFileSync(
+    join(
+      process.cwd(),
+      'supabase/migrations/20260712000000_wkh189_arb_hold_override.sql',
+    ),
+    'utf8',
+  );
+  const downSql = readFileSync(
+    join(
+      process.cwd(),
+      'supabase/migrations/20260712000000_wkh189_arb_hold_override_down.sql',
+    ),
+    'utf8',
+  );
+
+  it('UP: predicado ensanchado EXACTAMENTE una vez (sentencia completa, no substring)', () => {
+    expect(
+      upSql.split("IF v_status IN ('disputed','arb_hold') THEN").length - 1,
+    ).toBe(1);
+    // El predicado angosto original NO debe existir como sentencia en el up.
+    expect(upSql).not.toContain("IF v_status = 'disputed' THEN");
+  });
+
+  it('UP: CHECK method con admin_override (sentencia completa)', () => {
+    expect(upSql).toContain(
+      "CHECK (method IN ('rules','llm','hold','admin_override'))",
+    );
+  });
+
+  it('UP: las 3 columnas de auditoría (ADD COLUMN)', () => {
+    expect(upSql).toContain('ADD COLUMN IF NOT EXISTS resolved_by');
+    expect(upSql).toContain('ADD COLUMN IF NOT EXISTS resolved_at');
+    expect(upSql).toContain('ADD COLUMN IF NOT EXISTS resolution_note');
+  });
+
+  it("DOWN: restaura el predicado a = 'disputed' y NO contiene el ensanchado", () => {
+    expect(downSql).toContain("IF v_status = 'disputed' THEN");
+    expect(
+      downSql.split("IF v_status IN ('disputed','arb_hold') THEN").length - 1,
+    ).toBe(0);
+  });
+
+  it('DOWN: CHECK method sin admin_override (sentencia completa)', () => {
+    expect(downSql).toContain("CHECK (method IN ('rules','llm','hold'))");
+    expect(downSql).not.toContain(
+      "CHECK (method IN ('rules','llm','hold','admin_override'))",
+    );
+  });
+
+  it('DOWN: dropea las 3 columnas de auditoría (DROP COLUMN)', () => {
+    expect(downSql).toContain('DROP COLUMN IF EXISTS resolved_by');
+    expect(downSql).toContain('DROP COLUMN IF EXISTS resolved_at');
+    expect(downSql).toContain('DROP COLUMN IF EXISTS resolution_note');
   });
 });

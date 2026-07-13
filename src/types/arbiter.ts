@@ -13,8 +13,8 @@
 /** Desenlace de una disputa. `hold` = congelado, sin movimiento de fondos. */
 export type ArbiterDecision = 'release' | 'refund' | 'split' | 'hold';
 
-/** Cómo se decidió: `rules` (determinístico), `llm` (asistido), `hold` (frozen). */
-export type ArbiterMethod = 'rules' | 'llm' | 'hold';
+/** Cómo se decidió: `rules` (determinístico), `llm` (asistido), `hold` (frozen), `admin_override` (resuelto por humano admin, WKH-189). */
+export type ArbiterMethod = 'rules' | 'llm' | 'hold' | 'admin_override';
 
 /** Códigos estables mapeados a HTTP en el route (disclosure-safe). */
 export type ArbiterErrorCode =

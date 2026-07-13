@@ -198,6 +198,59 @@ interface ArbMeta {
   llmReasoning: string | null;
   evidenceDigest: string | null;
   sellerRef: string;
+  resolvedBy: string | null; // WKH-189
+  resolvedAt: string | null; // WKH-189 (ISO)
+  resolutionNote: string | null; // WKH-189
+}
+
+/**
+ * Item de un hold pendiente de revisión humana (WKH-189). Se expone al panel admin
+ * vía `listHolds` (cross-tenant deliberado, CD-5).
+ */
+export interface AdminHoldItem {
+  intentId: string;
+  chainId: number;
+  atStakeUsd: number;
+  decision: string | null;
+  method: string | null;
+  ambiguityReason: string | null;
+  createdAt: string;
+}
+
+/** Fila cruda del embed PostgREST de a2a_arbitrations en listHolds. */
+interface HoldArbEmbed {
+  decision: string | null;
+  method: string | null;
+  ambiguity_reason: string | null;
+  at_stake_usd: number | null;
+  created_at: string | null;
+}
+interface HoldIntentRow {
+  id: string;
+  chain_id: number;
+  authorized_usd: number;
+  created_at: string;
+  a2a_arbitrations: HoldArbEmbed[] | null;
+}
+
+/**
+ * Aplana el embed a2a_arbitrations (PostgREST devuelve array 0-1 por el FK
+ * intent_id → a2a_payment_intents(id)). Embed vacío (upsert falló, R-4) → defaults
+ * desde el intent.
+ */
+function toAdminHoldItem(row: HoldIntentRow): AdminHoldItem {
+  const arb = row.a2a_arbitrations?.[0] ?? null;
+  return {
+    intentId: row.id,
+    chainId: row.chain_id,
+    atStakeUsd: arb
+      ? (arb.at_stake_usd ?? row.authorized_usd)
+      : row.authorized_usd,
+    decision: arb ? arb.decision : null,
+    method: arb ? arb.method : null,
+    ambiguityReason: arb ? arb.ambiguity_reason : null,
+    createdAt: row.created_at,
+  };
 }
 
 /**
@@ -224,6 +277,9 @@ async function upsertArbitrationRow(
         ambiguity_reason: meta.ambiguityReason,
         llm_reasoning: meta.llmReasoning,
         evidence_digest: meta.evidenceDigest,
+        resolved_by: meta.resolvedBy,
+        resolved_at: meta.resolvedAt,
+        resolution_note: meta.resolutionNote,
         status,
       },
       { onConflict: 'intent_id' },
@@ -372,6 +428,9 @@ export const arbiterService = {
           llmReasoning: null,
           evidenceDigest: digest,
           sellerRef: row.seller_ref,
+          resolvedBy: null,
+          resolvedAt: null,
+          resolutionNote: null,
         });
       }
       method = 'llm';
@@ -401,6 +460,9 @@ export const arbiterService = {
       llmReasoning,
       evidenceDigest: digest,
       sellerRef: row.seller_ref,
+      resolvedBy: null,
+      resolvedAt: null,
+      resolutionNote: null,
     };
     if (atStakeUsd > getArbiterAutoCapUsd()) {
       // Sobre el tope → HOLD (aún con decisión rules inequívoca).
@@ -680,6 +742,9 @@ export const arbiterService = {
       llmReasoning: null,
       evidenceDigest: null,
       sellerRef: '',
+      resolvedBy: null,
+      resolvedAt: null,
+      resolutionNote: null,
     };
     await this.applyRecovery(
       intentId,
@@ -800,5 +865,149 @@ export const arbiterService = {
       ambiguityReason: meta.ambiguityReason,
       llmReasoning: meta.llmReasoning,
     };
+  },
+
+  /**
+   * WKH-189 · Lista los intents en `arb_hold` con su evidencia para la revisión
+   * humana admin.
+   *
+   * CD-5: cross-tenant DELIBERADO — devuelve holds de TODOS los owners, SIN filtro
+   * `owner_ref`. Es una excepción consciente al Ownership Guard estándar, superficie
+   * de ALTO PRIVILEGIO gateada SÓLO por `requireAdminToken` en la ruta. NO reutilizar
+   * fuera del panel admin.
+   */
+  async listHolds(): Promise<AdminHoldItem[]> {
+    const { data, error } = await supabase
+      .from('a2a_payment_intents')
+      .select(
+        'id, chain_id, authorized_usd, created_at, ' +
+          'a2a_arbitrations(decision, method, ambiguity_reason, at_stake_usd, created_at)',
+      )
+      .eq('status', 'arb_hold')
+      .order('created_at', { ascending: true });
+    if (error) {
+      log.error({ detail: error.message }, 'listHolds query failed');
+      throw new ArbiterError('INTERNAL');
+    }
+    return ((data as unknown as HoldIntentRow[] | null) ?? []).map(
+      toAdminHoldItem,
+    );
+  },
+
+  /**
+   * WKH-189 · Override humano admin-gated de un intent en `arb_hold`. Reusa el ÚNICO
+   * choke-point de settle/refund del árbitro (`executeArbitration`, CD-1) — NO clona
+   * money-path. Sin cap (CD-9): el humano ya está en el loop, el único límite es el
+   * clamp [0, deposit]. Exactly-once vía el status-gate DB del RPC (CD-3): no hace
+   * ningún UPDATE de status en la app.
+   */
+  async resolveHold(
+    intentId: string,
+    opts: {
+      decision: 'release' | 'refund' | 'split';
+      splitPct?: number;
+      resolvedBy: string | null;
+      note: string | null;
+    },
+  ): Promise<ArbiterOutcome> {
+    // a. Validar input (autoritativo en el servicio).
+    if (
+      opts.decision !== 'release' &&
+      opts.decision !== 'refund' &&
+      opts.decision !== 'split'
+    ) {
+      throw new ArbiterError('INVALID_INPUT');
+    }
+    // T-7/AC-7 (§6.4): para 'split', splitPct DEBE ser finito y estar en [0,100]
+    // inclusive. Fuera de rango (o no-numérico) → INVALID_INPUT: un splitPct=500 por
+    // typo de admin (via API directa) NO debe liberar el depósito completo en silencio.
+    // El clamp [0, deposit] de settleUsd (abajo) queda como SEGUNDA baranda / defensa en
+    // profundidad, NO como validación primaria. CD-9 gobierna el auto-cap, no este rango.
+    if (
+      opts.decision === 'split' &&
+      (opts.splitPct === undefined ||
+        !Number.isFinite(opts.splitPct) ||
+        opts.splitPct < 0 ||
+        opts.splitPct > 100)
+    ) {
+      throw new ArbiterError('INVALID_INPUT');
+    }
+
+    // b. Leer el row REAL del intent (owner_ref/chain autoritativos, CD-4). El
+    //    status-check es ADVISORY/fail-fast; el gate autoritativo es el RPC bajo
+    //    FOR UPDATE (CD-3). NO se hace UPDATE de status acá.
+    const { data, error } = await supabase
+      .from('a2a_payment_intents')
+      .select('owner_ref, chain_id, status, authorized_usd, seller_ref')
+      .eq('id', intentId)
+      .maybeSingle();
+    if (error) {
+      log.error({ intentId, detail: error.message }, 'resolveHold read failed');
+      throw new ArbiterError('INTERNAL');
+    }
+    if (!data) throw new ArbiterError('INTENT_NOT_FOUND');
+    const intentRow = data as {
+      owner_ref: string;
+      chain_id: number;
+      status: string;
+      authorized_usd: number;
+      seller_ref: string;
+    };
+    if (intentRow.status !== 'arb_hold') {
+      throw new ArbiterError('INTENT_NOT_OPEN');
+    }
+
+    // c. Testnet guard fail-closed (AC-6) — replica arbiter.ts openDispute.
+    if (!TESTNET_CHAIN_IDS.has(intentRow.chain_id)) {
+      throw new ArbiterError('CHAIN_NOT_SUPPORTED');
+    }
+
+    const ownerRef = intentRow.owner_ref;
+    const depositUsd = numericToMicro(intentRow.authorized_usd) / 1_000_000;
+
+    // d. Leer la fila a2a_arbitrations original (best-effort) para preservar la
+    //    evidencia del hold (ambiguity_reason / llm_reasoning). Fallo/no-existe → null.
+    let ambiguityReason: string | null = null;
+    let llmReasoning: string | null = null;
+    const arbRes = await supabase
+      .from('a2a_arbitrations')
+      .select('ambiguity_reason, llm_reasoning')
+      .eq('intent_id', intentId)
+      .maybeSingle();
+    if (!arbRes.error && arbRes.data) {
+      const arb = arbRes.data as {
+        ambiguity_reason: string | null;
+        llm_reasoning: string | null;
+      };
+      ambiguityReason = arb.ambiguity_reason;
+      llmReasoning = arb.llm_reasoning;
+    }
+
+    // e. Computar settleUsd SIN cap (CD-9), clamp [0, deposit].
+    const rawUsd =
+      opts.decision === 'release'
+        ? depositUsd
+        : opts.decision === 'refund'
+          ? 0
+          : (depositUsd * (opts.splitPct ?? 0)) / 100;
+    const settleUsd = Math.min(Math.max(0, rawUsd), depositUsd);
+
+    // f. ArbMeta del override humano (method='admin_override', WKH-189).
+    const meta: ArbMeta = {
+      decision: opts.decision,
+      method: 'admin_override',
+      atStakeUsd: depositUsd,
+      ambiguityReason,
+      llmReasoning,
+      evidenceDigest: null,
+      sellerRef: intentRow.seller_ref,
+      resolvedBy: opts.resolvedBy,
+      resolvedAt: new Date().toISOString(),
+      resolutionNote: opts.note,
+    };
+
+    // g. Reusar el seam (CD-1). ownerRef del row real (CD-4). allowStaleRecovery
+    //    queda en false por default (CD-10, NO pasar el 5º arg).
+    return this.executeArbitration(intentId, ownerRef, settleUsd, meta);
   },
 };

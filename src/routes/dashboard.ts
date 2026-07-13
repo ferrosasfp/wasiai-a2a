@@ -17,7 +17,36 @@ import type {
   preHandlerAsyncHookHandler,
 } from 'fastify';
 import { isProduction } from '../lib/env.js';
+import { arbiterService, isArbiterEnabled } from '../services/arbiter.js';
 import { eventService } from '../services/event.js';
+import { ArbiterError } from '../types/arbiter.js';
+
+/**
+ * WKH-189: mapea ArbiterError.code → HTTP (disclosure-safe). Espejo local de
+ * `sendArbiterError` de payments.ts (privado de ese módulo, no se importa).
+ */
+function sendArbiterAdminError(
+  reply: FastifyReply,
+  err: unknown,
+): FastifyReply {
+  if (err instanceof ArbiterError) {
+    switch (err.code) {
+      case 'INVALID_INPUT':
+        return reply.status(422).send({ error_code: 'INVALID_INPUT' });
+      case 'OWNERSHIP_MISMATCH':
+        return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+      case 'INTENT_NOT_FOUND':
+        return reply.status(404).send({ error_code: 'INTENT_NOT_FOUND' });
+      case 'INTENT_NOT_OPEN':
+        return reply.status(409).send({ error_code: 'INTENT_NOT_OPEN' });
+      case 'CHAIN_NOT_SUPPORTED':
+        return reply.status(422).send({ error_code: 'CHAIN_NOT_SUPPORTED' });
+      default:
+        return reply.status(500).send({ error_code: 'ARBITER_FAILED' });
+    }
+  }
+  return reply.status(500).send({ error_code: 'ARBITER_FAILED' });
+}
 
 /**
  * Admin-token preHandler. Opt-in: only active when DASHBOARD_ADMIN_TOKEN
@@ -134,6 +163,88 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
           'dashboard events failed',
         );
         return reply.status(500).send({ error: 'Failed to get events' });
+      }
+    },
+  );
+
+  /**
+   * GET /dashboard/api/arbitrations/holds
+   * WKH-189: lista los intents en `arb_hold` para la revisión humana admin.
+   * CD-5: cross-tenant DELIBERADO (admin ve holds de TODOS los owners). Superficie
+   * de ALTO PRIVILEGIO, gateada por requireAdminToken + isArbiterEnabled.
+   */
+  fastify.get(
+    '/api/arbitrations/holds',
+    { config: { rateLimit: false }, preHandler: requireAdminToken },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      if (!isArbiterEnabled()) {
+        return reply.status(404).send({ error_code: 'NOT_FOUND' }); // AC-8/CD-7
+      }
+      try {
+        const holds = await arbiterService.listHolds();
+        return reply.send({ holds, total: holds.length });
+      } catch (err) {
+        request.log.error(
+          { detail: err instanceof Error ? err.message : 'unknown' },
+          'list holds failed',
+        );
+        return sendArbiterAdminError(reply, err);
+      }
+    },
+  );
+
+  /**
+   * POST /dashboard/api/arbitrations/:intentId/resolve
+   * WKH-189: override humano (release/refund/split) de un intent en `arb_hold`.
+   * Gateado por requireAdminToken + isArbiterEnabled. La validación autoritativa
+   * vive en arbiterService.resolveHold; acá sólo un shape-check defensivo.
+   */
+  fastify.post<{ Params: { intentId: string } }>(
+    '/api/arbitrations/:intentId/resolve',
+    { config: { rateLimit: false }, preHandler: requireAdminToken },
+    async (request, reply: FastifyReply) => {
+      if (!isArbiterEnabled()) {
+        return reply.status(404).send({ error_code: 'NOT_FOUND' }); // AC-8/CD-7
+      }
+      const body = (request.body ?? {}) as {
+        decision?: string;
+        splitPct?: number;
+        resolvedBy?: string;
+        note?: string;
+      };
+      if (
+        body.decision !== 'release' &&
+        body.decision !== 'refund' &&
+        body.decision !== 'split'
+      ) {
+        return reply.status(422).send({ error_code: 'INVALID_INPUT' });
+      }
+      try {
+        const outcome = await arbiterService.resolveHold(
+          request.params.intentId,
+          {
+            decision: body.decision,
+            ...(body.splitPct !== undefined ? { splitPct: body.splitPct } : {}),
+            resolvedBy: body.resolvedBy ?? null,
+            note: body.note ?? null,
+          },
+        );
+        return reply.status(200).send({
+          decision: outcome.decision,
+          method: outcome.method,
+          status: outcome.status,
+          settleUsd: outcome.settleUsd,
+          residualUsd: outcome.residualUsd,
+          txHash: outcome.txHash,
+        });
+      } catch (err) {
+        request.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'resolveHold failed',
+        );
+        return sendArbiterAdminError(reply, err);
       }
     },
   );
