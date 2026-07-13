@@ -42,8 +42,20 @@ vi.mock('./budget.js', () => ({
 }));
 const mockSign = vi.fn();
 const mockSettle = vi.fn();
+// WKH-195: supportedTokens seteable por test para variar los decimals del default
+// chain (patrón WKH-192 payment-intent.test.ts:29-44). Default 18d modela el
+// default chain Kite de HOY → la suite preexistente queda byte-idéntica (CD-4).
+const mockSupportedTokens = vi.hoisted(() => ({
+  current: [{ symbol: 'PYUSD', address: '0x0', decimals: 18 }] as
+    | { symbol: string; address: string; decimals: number }[]
+    | undefined,
+}));
 vi.mock('../adapters/registry.js', () => ({
-  getPaymentAdapter: () => ({ sign: mockSign, settle: mockSettle }),
+  getPaymentAdapter: (..._a: unknown[]) => ({
+    sign: mockSign,
+    settle: mockSettle,
+    supportedTokens: mockSupportedTokens.current,
+  }),
 }));
 // TB-01 (audit 2026-06-30): compose now re-verifies the settle on-chain via
 // settle-verifier. Mock it to a pass so these tests stay focused on compose
@@ -3293,5 +3305,118 @@ describe('composeService — WKH-114 step verification', () => {
     // cerrado). Pre-fix esto era `toHaveBeenCalled` = reembolso indebido.
     expect(mockCredit).not.toHaveBeenCalled();
     expect(mockCreditWithDest).not.toHaveBeenCalled();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// WKH-195 — compose inbound x402 decimals-aware. Seam #2: el pago inbound a un
+// agente (agent.priceUsdc > 0 && !a2aKey) escalaba con `× 1e12` hardcodeado; ahora
+// deriva decimals del default-chain adapter y delega en usdToAtomic (WKH-192).
+// Legacy = BigInt(round(usd*1e6)) * BigInt(1e12). En Kite 18d es byte-idéntico.
+// ════════════════════════════════════════════════════════════════════════════
+describe('WKH-195 compose inbound decimals-aware', () => {
+  const legacyWei = (usd: number): string =>
+    String(BigInt(Math.round(usd * 1_000_000)) * BigInt(1_000_000_000_000));
+  // usdToAtomic(usd, 6) === micro-USD entero (10^0). Local para no importar.
+  const atomic6 = (usd: number): string =>
+    String(BigInt(Math.round(usd * 1_000_000)));
+
+  // Re-prima sign/settle/verify tras un reset dentro de un loop.
+  const primeInbound = () => {
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'base64mock',
+      paymentRequest: {
+        authorization: {
+          from: '0xAAA',
+          to: '0xBBB',
+          value: '0',
+          validAfter: '0',
+          validBefore: '9999999999',
+          nonce: '0x1234',
+        },
+        signature: '0xSIG',
+        network: 'eip155:2368',
+      },
+    });
+    mockSettle.mockResolvedValue({ success: true, txHash: '0xTX' });
+    mockVerifySettle.mockResolvedValue({ ok: true });
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockFetchOk();
+  };
+
+  afterEach(() => {
+    // Restaurar el default 18d para no filtrar a suites posteriores.
+    mockSupportedTokens.current = [
+      { symbol: 'PYUSD', address: '0x0', decimals: 18 },
+    ];
+  });
+
+  // T2-A (AC-2, AC-3, CD-2): convergencia byte-idéntica Kite 18d, ≥3 precios.
+  it('T2-A: Kite 18d → value firmado === legacy para ≥3 precios', async () => {
+    mockSupportedTokens.current = [
+      { symbol: 'PYUSD', address: '0x0', decimals: 18 },
+    ];
+    for (const price of [1.0, 0.5, 0.001, 0.000001]) {
+      mockSign.mockReset();
+      mockSettle.mockReset();
+      mockFetch.mockReset();
+      primeInbound();
+      const agent = makeAgent({
+        priceUsdc: price,
+        metadata: { payTo: '0xBBB' },
+      });
+      await composeService.invokeAgent(agent, { q: 'hello' });
+      expect(mockSign.mock.calls[0]?.[0]?.value).toBe(legacyWei(price));
+    }
+  });
+
+  // T2-B (AC-2, CD-5): Base 6d divergente — el value firmado es el atómico 6d.
+  it('T2-B: Base 6d → value firmado === atómico 6d y DIVERGE del legacy 18d', async () => {
+    mockSupportedTokens.current = [
+      { symbol: 'USDC', address: '0x0', decimals: 6 },
+    ];
+    const price = 1.5;
+    primeInbound();
+    const agent = makeAgent({ priceUsdc: price, metadata: { payTo: '0xBBB' } });
+    await composeService.invokeAgent(agent, { q: 'hello' });
+    const signed = mockSign.mock.calls[0]?.[0]?.value as string;
+    expect(signed).toBe(atomic6(price));
+    expect(signed).not.toBe(legacyWei(price));
+    expect(BigInt(signed) * 10n ** 12n).toBe(BigInt(legacyWei(price)));
+  });
+
+  // T2-C (AC-4, CD-4): fallback undefined/[] → 18d (legacy), sin fallar por ESTO.
+  it('T2-C: supportedTokens undefined/[] → value firmado === legacy 18d, sin throw', async () => {
+    for (const tokens of [
+      undefined,
+      [] as { symbol: string; address: string; decimals: number }[],
+    ]) {
+      mockSign.mockReset();
+      mockSettle.mockReset();
+      mockFetch.mockReset();
+      mockSupportedTokens.current = tokens;
+      primeInbound();
+      const price = 0.05;
+      const agent = makeAgent({
+        priceUsdc: price,
+        metadata: { payTo: '0xBBB' },
+      });
+      const result = await composeService.invokeAgent(agent, { q: 'hello' });
+      expect(mockSign.mock.calls[0]?.[0]?.value).toBe(legacyWei(price));
+      expect(result.output).toBe('ok');
+    }
+  });
+
+  // T2-D (AC-2): tras el sign, el settle de :928 sigue corriendo y el step completa.
+  it('T2-D: tras sign el settle se invoca y el step completa (path :928 intacto)', async () => {
+    mockSupportedTokens.current = [
+      { symbol: 'PYUSD', address: '0x0', decimals: 18 },
+    ];
+    primeInbound();
+    const agent = makeAgent({ priceUsdc: 1.0, metadata: { payTo: '0xBBB' } });
+    const result = await composeService.invokeAgent(agent, { q: 'hello' });
+    expect(mockSettle).toHaveBeenCalledTimes(1);
+    expect(result.txHash).toBe('0xTX');
+    expect(result.output).toBe('ok');
   });
 });

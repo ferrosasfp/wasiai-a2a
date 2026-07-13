@@ -30,8 +30,20 @@ vi.mock('../lib/logger.js', () => ({ getLogger: () => logSpy }));
 // ─── Payment adapter + settle-verifier mocks (patrón fee-charge.test.ts) ────
 const mockSign = vi.fn();
 const mockSettle = vi.fn();
+// WKH-195: supportedTokens seteable por test para variar los decimals del default
+// chain (patrón WKH-192 payment-intent.test.ts:29-44). Default 18d modela el
+// default chain Kite de HOY → la suite preexistente queda byte-idéntica (CD-4).
+const mockSupportedTokens = vi.hoisted(() => ({
+  current: [{ symbol: 'PYUSD', address: '0x0', decimals: 18 }] as
+    | { symbol: string; address: string; decimals: number }[]
+    | undefined,
+}));
 vi.mock('../adapters/registry.js', () => ({
-  getPaymentAdapter: () => ({ sign: mockSign, settle: mockSettle }),
+  getPaymentAdapter: (..._a: unknown[]) => ({
+    sign: mockSign,
+    settle: mockSettle,
+    supportedTokens: mockSupportedTokens.current,
+  }),
 }));
 
 const mockVerifySettle = vi.fn();
@@ -568,5 +580,44 @@ describe('resolveRecipients — default 10000/0/0 → 1 leg platform', () => {
     expect(res.recipients[0]?.role).toBe('platform');
     expect(res.recipients[0]?.bps).toBe(10000);
     expect(res.skipped).toHaveLength(0);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// WKH-195 — fee-split hereda el fix decimals-aware SIN cambios de código.
+// settleFeeSplits importa feeUsdcToWei de fee-charge.ts (mismo default-chain
+// adapter). Al volverse feeUsdcToWei decimals-aware, fee-split hereda el fix por
+// firma (AC-6/CD-3). En Kite 18d el value firmado es byte-idéntico al legacy.
+// ════════════════════════════════════════════════════════════════════════════
+describe('WKH-195 fee-split hereda el fix', () => {
+  const legacyWei = (usd: number): string =>
+    String(BigInt(Math.round(usd * 1_000_000)) * BigInt(1_000_000_000_000));
+
+  afterEach(() => {
+    mockSupportedTokens.current = [
+      { symbol: 'PYUSD', address: '0x0', decimals: 18 },
+    ];
+  });
+
+  // T3 (AC-6, CD-3): config default (10000/0/0 → plataforma) con Kite 18d → el
+  // value firmado del leg === feeUsdcToWei(amount) === legacy. Confirma que
+  // fee-split.ts (SIN cambios de código) hereda el fix sin drift en Kite.
+  it('T3: settleFeeSplits leg plataforma firma el value byte-idéntico al legacy en Kite 18d', async () => {
+    mockSupportedTokens.current = [
+      { symbol: 'PYUSD', address: '0x0', decimals: 18 },
+    ];
+    const amount = 0.01;
+    const recipients = [recipient('platform', PLATFORM, 10000, amount)];
+
+    const result = await settleFeeSplits({
+      orchestrationId: 'orch-195-t3',
+      recipients,
+    });
+
+    expect(result.status).toBe('charged');
+    expect(mockSign).toHaveBeenCalledTimes(1);
+    const signArg = mockSign.mock.calls[0]?.[0] as { value: string };
+    expect(signArg.value).toBe(feeUsdcToWei(amount));
+    expect(signArg.value).toBe(legacyWei(amount));
   });
 });

@@ -40,6 +40,7 @@ import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
 import { regenerateInputFromErrors } from './llm/input-retry.js';
 import { maybeTransform } from './llm/transform.js';
+import { usdToAtomic } from './payment-intent.js';
 import { refundOutbox } from './refund-outbox.js';
 import { registryService, SYSTEM_OWNER_REF } from './registry.js';
 import { normalizeDestination } from './spend-policy.js';
@@ -813,13 +814,16 @@ export const composeService = {
         throw new Error(
           `No payTo address for agent ${agent.slug} — neither metadata.payTo nor metadata.payment.contract present`,
         );
-      // MONEY-PATH: scale priceUsdc (USDC, 6 decimals) up to an 18-decimal wei
-      // value. Round-to-nearest onto the 6-decimal USDC grid, then scale by 1e12.
-      // Matches fee-charge.ts:feeUsdcToWei (same Math.round convention).
-      const valueWei = String(
-        BigInt(Math.round(agent.priceUsdc * 1e6)) * BigInt(1e12),
-      );
-      const result = await getPaymentAdapter().sign({
+      // WKH-195 MONEY-PATH: decimals-aware. Una sola resolución del
+      // default-chain adapter reusada para derivar decimals + firmar (DT-2
+      // WKH-192). El settle de :928 resuelve el MISMO singleton determinístico
+      // (registry.ts:185-200) → byte-equivalente, por eso no se toca. Delega en
+      // usdToAtomic (byte-idéntico al legado `× 1e12` en Kite 18d por
+      // construcción, correcto en Base 6d). Fallback `?? 18` sin throw.
+      const adapter = getPaymentAdapter();
+      const decimals = adapter.supportedTokens?.[0]?.decimals ?? 18; // CD-4
+      const valueWei = usdToAtomic(agent.priceUsdc, decimals); // CD-1
+      const result = await adapter.sign({
         to: payTo as `0x${string}`,
         value: valueWei,
       });

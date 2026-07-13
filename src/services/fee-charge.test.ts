@@ -24,8 +24,20 @@ vi.mock('../lib/logger.js', () => ({
 // Mock del payment adapter (patrón verificado en src/services/compose.test.ts:15-17)
 const mockSign = vi.fn();
 const mockSettle = vi.fn();
+// WKH-195: supportedTokens seteable por test para variar los decimals del default
+// chain (patrón WKH-192 payment-intent.test.ts:29-44). Default 18d modela el
+// default chain Kite de HOY → la suite preexistente queda byte-idéntica (CD-4).
+const mockSupportedTokens = vi.hoisted(() => ({
+  current: [{ symbol: 'PYUSD', address: '0x0', decimals: 18 }] as
+    | { symbol: string; address: string; decimals: number }[]
+    | undefined,
+}));
 vi.mock('../adapters/registry.js', () => ({
-  getPaymentAdapter: () => ({ sign: mockSign, settle: mockSettle }),
+  getPaymentAdapter: (..._a: unknown[]) => ({
+    sign: mockSign,
+    settle: mockSettle,
+    supportedTokens: mockSupportedTokens.current,
+  }),
 }));
 
 // TB-01 (audit 2026-06-30): chargeProtocolFee now re-verifies the settle
@@ -55,6 +67,7 @@ vi.mock('../lib/supabase.js', () => ({
 
 import {
   chargeProtocolFee,
+  feeUsdcToWei,
   getProtocolFeeRate,
   ProtocolFeeError,
 } from './fee-charge.js';
@@ -567,5 +580,124 @@ describe('chargeProtocolFee', () => {
         feeRate: 1.5, // fee > budget
       }),
     ).rejects.toBeInstanceOf(ProtocolFeeError);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// WKH-195 — fee-charge decimals-aware (feeUsdcToWei reusa usdToAtomic de
+// WKH-192). Seam #1: alimenta el leg de plataforma de chargeProtocolFee y (por
+// import de firma) los legs creator/referral de fee-split.settleFeeSplits.
+// Legacy = BigInt(round(usd*1e6)) * BigInt(1e12) (asumía 18d hardcodeado).
+// ════════════════════════════════════════════════════════════════════════════
+describe('WKH-195 fee-charge decimals-aware', () => {
+  // Fórmula legacy inline (18d) para la convergencia byte-idéntica (CD-2/CD-5).
+  const legacyWei = (usd: number): string =>
+    String(BigInt(Math.round(usd * 1_000_000)) * BigInt(1_000_000_000_000));
+
+  const originalWallet = process.env.WASIAI_PROTOCOL_FEE_WALLET;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockSign.mockReset();
+    mockSettle.mockReset();
+    mockFrom.mockReset();
+    mockSelect.mockReset();
+    mockEq.mockReset();
+    mockInsert.mockReset();
+    mockUpdate.mockReset();
+    mockMaybeSingle.mockReset();
+    mockVerifySettle.mockReset();
+    mockVerifySettle.mockResolvedValue({ ok: true });
+    // Reset al default chain de HOY (Kite/PYUSD 18d) — cada test que necesite
+    // otro decimals lo sobreescribe explícitamente.
+    mockSupportedTokens.current = [
+      { symbol: 'PYUSD', address: '0x0', decimals: 18 },
+    ];
+  });
+
+  afterEach(() => {
+    // Restaurar el default 18d para no filtrar a suites posteriores.
+    mockSupportedTokens.current = [
+      { symbol: 'PYUSD', address: '0x0', decimals: 18 },
+    ];
+    if (originalWallet === undefined) {
+      delete process.env.WASIAI_PROTOCOL_FEE_WALLET;
+    } else {
+      process.env.WASIAI_PROTOCOL_FEE_WALLET = originalWallet;
+    }
+  });
+
+  // T1-A (AC-1, AC-3, CD-2): convergencia byte-idéntica Kite 18d, ≥3 valores
+  // incluyendo precisión de 6 decimales.
+  it('T1-A: feeUsdcToWei(usd) === legacy en Kite 18d (byte-a-byte, ≥3 valores)', () => {
+    mockSupportedTokens.current = [
+      { symbol: 'PYUSD', address: '0x0', decimals: 18 },
+    ];
+    for (const usd of [1.5, 0.333333, 100, 0.000001]) {
+      expect(feeUsdcToWei(usd)).toBe(legacyWei(usd));
+    }
+  });
+
+  // T1-B (AC-1, CD-5): Base 6d divergente — el atómico 6d es 10¹² menor que 18d.
+  it('T1-B: feeUsdcToWei en Base 6d es el atómico 6d y DIVERGE del legacy 18d', () => {
+    mockSupportedTokens.current = [
+      { symbol: 'USDC', address: '0x0', decimals: 6 },
+    ];
+    expect(feeUsdcToWei(1.5)).toBe('1500000');
+    expect(feeUsdcToWei(1.5)).not.toBe(legacyWei(1.5));
+    for (const x of [1.5, 0.333333, 100, 0.000001, 42.42]) {
+      expect(BigInt(feeUsdcToWei(x)) * 10n ** 12n).toBe(BigInt(legacyWei(x)));
+    }
+  });
+
+  // T1-C (AC-4, CD-4): fallback undefined/[] → 18d, sin throw.
+  it('T1-C: supportedTokens undefined/[] → fallback 18d (legacy) sin throw', () => {
+    for (const tokens of [
+      undefined,
+      [] as { symbol: string; address: string; decimals: number }[],
+    ]) {
+      mockSupportedTokens.current = tokens;
+      for (const usd of [1.5, 100, 0.000001]) {
+        expect(() => feeUsdcToWei(usd)).not.toThrow();
+        expect(feeUsdcToWei(usd)).toBe(legacyWei(usd));
+      }
+    }
+  });
+
+  // T1-D (AC-1, AC-4): el leg de plataforma de chargeProtocolFee no se rompe;
+  // firma el value byte-idéntico al legacy y JAMÁS rechaza la promise.
+  it('T1-D: chargeProtocolFee happy path → sign(value)===legacy, status charged', async () => {
+    process.env.WASIAI_PROTOCOL_FEE_WALLET =
+      '0x1111111111111111111111111111111111111111';
+    mockSupportedTokens.current = [
+      { symbol: 'PYUSD', address: '0x0', decimals: 18 },
+    ];
+    stubSelect({ data: null });
+    stubInsert({});
+    stubUpdate({});
+    mockSign.mockResolvedValueOnce({
+      xPaymentHeader: 'base64-header',
+      paymentRequest: {
+        authorization: { value: '10000000000000000' },
+        signature: '0xsig',
+        network: 'kite',
+      },
+    });
+    mockSettle.mockResolvedValueOnce({ txHash: '0xABC', success: true });
+
+    // feeBaseUsdc=1.0 × rate 0.01 = 0.01; default splits 10000/0/0 → plataforma
+    // recibe el total 0.01.
+    const platformAmount = 0.01;
+    const result = await chargeProtocolFee({
+      orchestrationId: 'id-195-t1d',
+      feeBaseUsdc: 1.0,
+      feeRate: 0.01,
+    });
+
+    expect(result.status).toBe('charged');
+    expect(mockSign).toHaveBeenCalledTimes(1);
+    const signArg = mockSign.mock.calls[0]?.[0] as { value: string };
+    expect(signArg.value).toBe(feeUsdcToWei(platformAmount));
+    expect(signArg.value).toBe(legacyWei(platformAmount));
   });
 });

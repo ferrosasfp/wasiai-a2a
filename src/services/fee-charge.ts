@@ -38,6 +38,7 @@ import {
   type SplitPartyRef,
   settleFeeSplits,
 } from './fee-split.js';
+import { usdToAtomic } from './payment-intent.js';
 
 const log = getLogger('fee-charge');
 
@@ -154,15 +155,24 @@ export function getProtocolFeeRate(): number {
 // ─── chargeProtocolFee ──────────────────────────────────────
 
 /**
- * Convierte feeUsdc a wei (18 decimals). Patrón idéntico a
- * `src/services/compose.ts:188-190`:
- *   BigInt(Math.round(usdc * 1e6)) * BigInt(1e12)
+ * Convierte feeUsdc al valor atómico del token de la default chain (WKH-195).
  *
- * Rationale: USDC tiene 6 decimals lógicos; 1e12 escala a 18 decimals para
- * el token PYUSD.
+ * Deriva los decimales del `getPaymentAdapter()` SIN `chainKey`: el registry
+ * devuelve el mismo default-chain singleton determinístico (registry.ts:185-200)
+ * que usan el sign/settle de `chargeProtocolFee` (:448/:471) y de `settleFeeSplits`
+ * (fee-split.ts:417/432) → los decimales acá son los MISMOS que firman/settlean,
+ * sin drift. Delega la conversión en `usdToAtomic` (WKH-192, reuse DRY), que es
+ * byte-idéntico al legado `× 1e12` cuando `decimals === 18` (Kite/PYUSD) por
+ * construcción, y correcto para 6d (Base/USDC).
+ *
+ * Fallback `?? 18` sin throw: si el adapter no expone `supportedTokens` (vacío o
+ * undefined), cae a 18d — preserva la garantía CD-B de que `chargeProtocolFee`
+ * jamás rechaza la promise.
  */
 export function feeUsdcToWei(feeUsdc: number): string {
-  return String(BigInt(Math.round(feeUsdc * 1e6)) * BigInt(1e12));
+  const adapter = getPaymentAdapter();
+  const decimals = adapter.supportedTokens?.[0]?.decimals ?? 18; // CD-4
+  return usdToAtomic(feeUsdc, decimals); // CD-1 (reuse WKH-192)
 }
 
 /**
