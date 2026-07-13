@@ -39,6 +39,35 @@ vi.mock('../services/arbiter.js', () => ({
   isArbiterEnabled: () => mockIsArbiterEnabled(),
 }));
 
+// ── WKH-191c: mock reconciliation service + flag (evita cargar supabase/adapters) ──
+const mockListPending = vi.hoisted(() => vi.fn());
+const mockDriftCheck = vi.hoisted(() => vi.fn());
+const mockResolveIntent = vi.hoisted(() => vi.fn());
+const MockReconciliationError = vi.hoisted(() => {
+  class ReconciliationError extends Error {
+    code: string;
+    constructor(code: string) {
+      super(code);
+      this.name = 'ReconciliationError';
+      this.code = code;
+    }
+  }
+  return ReconciliationError;
+});
+vi.mock('../services/reconciliation.js', () => ({
+  reconciliationService: {
+    listPending: (...a: unknown[]) => mockListPending(...a),
+    driftCheck: (...a: unknown[]) => mockDriftCheck(...a),
+    resolveIntent: (...a: unknown[]) => mockResolveIntent(...a),
+  },
+  ReconciliationError: MockReconciliationError,
+}));
+
+const mockIsEscrowSettleEnabled = vi.hoisted(() => vi.fn(() => false));
+vi.mock('../adapters/escrow/debit-capture.js', () => ({
+  isEscrowSettleEnabled: () => mockIsEscrowSettleEnabled(),
+}));
+
 import dashboardRoutes from './dashboard.js';
 
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
@@ -250,6 +279,126 @@ describe('WKH-189 admin arbitration routes', () => {
 
     expect(mockListHolds).not.toHaveBeenCalled();
     expect(mockResolveHold).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// WKH-191c · Rutas admin del motor de reconciliación (GET read-only + POST resolve)
+// ════════════════════════════════════════════════════════════════════
+describe('WKH-191c reconciliation admin routes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    delete process.env.NODE_ENV;
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+  });
+
+  // ── T-13 (AC-1/AC-8): GET read-only lista pending + drift, corre con flag OFF ──
+  it('T-13: GET /api/reconciliation con token → pending + drift + flagEnabled:false (flag OFF)', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
+    mockListPending.mockResolvedValue([
+      {
+        intent_id: 'i1',
+        key_id: 'k1',
+        nonce: '7',
+        debit_hop1_tx_hash: '0xabc',
+        finalAmountUsd: '2.0',
+        owner_ref: 'tenant-A',
+        debit_settle_status: 'reconciliation_pending',
+      },
+    ]);
+    mockDriftCheck.mockResolvedValue([
+      {
+        key_id: 'k1',
+        sumDebitedAtomic: '3000000',
+        escrowBalanceAtomic: '3500000',
+        budgetUsd: '5.0',
+        deltaAtomic: '500000',
+        exceedsThreshold: true,
+      },
+    ]);
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/reconciliation',
+      headers: { 'x-admin-token': 'secret' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.flagEnabled).toBe(false); // read-only corre con flag OFF
+    expect(body.pending).toHaveLength(1);
+    expect(body.drift).toHaveLength(1);
+    expect(body.drift[0].exceedsThreshold).toBe(true);
+    await app.close();
+  });
+
+  // ── T-14 (AC-9/CD-7): POST fail-closed (503 sin env), 401 sin header, delega con token ──
+  it('T-14a: POST resolve sin DASHBOARD_ADMIN_TOKEN → 503 (fail-closed, dev Y prod)', async () => {
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/resolve',
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toBe('service_unavailable');
+    expect(mockResolveIntent).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('T-14b: POST resolve con env SET pero sin X-Admin-Token → 401, servicio no invocado', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/resolve',
+    });
+    expect(res.statusCode).toBe(401);
+    expect(mockResolveIntent).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('T-14c: POST resolve con token válido → delega a resolveIntent y devuelve outcome', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockResolveIntent.mockResolvedValue({
+      status: 'settled',
+      side: 'settle',
+      txHash: '0xsettletx',
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/resolve',
+      headers: { 'x-admin-token': 'secret' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      status: 'settled',
+      side: 'settle',
+      txHash: '0xsettletx',
+    });
+    expect(mockResolveIntent).toHaveBeenCalledWith('i1');
+    await app.close();
+  });
+
+  it('T-14d: POST resolve token válido, ReconciliationError(NOT_PENDING) → 409', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockResolveIntent.mockRejectedValue(
+      new MockReconciliationError('NOT_PENDING'),
+    );
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/resolve',
+      headers: { 'x-admin-token': 'secret' },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error_code: 'NOT_PENDING' });
     await app.close();
   });
 });

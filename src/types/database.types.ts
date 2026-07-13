@@ -753,6 +753,8 @@ export type Database = {
           debit_key_id_hash: string;
           // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
           debit_nonce: string;
+          debit_resolution_tx_hash: string | null;
+          debit_resolved_at: string | null;
           debit_settle_status: string | null;
           debit_signature: string;
           debit_signer_recovered: string | null;
@@ -774,6 +776,8 @@ export type Database = {
           debit_key_id_hash: string;
           // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
           debit_nonce: string;
+          debit_resolution_tx_hash?: string | null;
+          debit_resolved_at?: string | null;
           debit_settle_status?: string | null;
           debit_signature: string;
           debit_signer_recovered?: string | null;
@@ -795,6 +799,8 @@ export type Database = {
           debit_key_id_hash?: string;
           // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
           debit_nonce?: string;
+          debit_resolution_tx_hash?: string | null;
+          debit_resolved_at?: string | null;
           debit_settle_status?: string | null;
           debit_signature?: string;
           debit_signer_recovered?: string | null;
@@ -2791,6 +2797,37 @@ export type Database = {
           p_status: string;
         };
         Returns: undefined;
+      };
+      claim_reconciliation: {
+        Args: {
+          p_intent_id: string;
+          p_owner_ref: string;
+          p_key_id: string;
+          // NUMERIC uint256 → string (precisión > 2^53).
+          p_nonce: string;
+          p_side: string; // 'settle' | 'refund'
+        };
+        Returns: {
+          claimed: boolean;
+          resolution_tx_hash: string | null;
+          amount_atomic: string | null;
+        }[];
+      };
+      record_reconciliation_resolution: {
+        Args: {
+          p_intent_id: string;
+          p_owner_ref: string;
+          p_key_id: string;
+          // NUMERIC uint256 → string.
+          p_nonce: string;
+          p_terminal_status: string; // 'resolved_settled' | 'resolved_refunded'
+          p_tx_hash: string | null;
+          p_chain_id: number;
+          p_refund_amount_usd: number | null;
+        };
+        Returns: {
+          applied: boolean;
+        }[];
       };
       close_payment_intent_for_settle: {
         Args: {

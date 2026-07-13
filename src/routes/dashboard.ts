@@ -16,10 +16,43 @@ import type {
   FastifyRequest,
   preHandlerAsyncHookHandler,
 } from 'fastify';
+import { isEscrowSettleEnabled } from '../adapters/escrow/debit-capture.js';
 import { isProduction } from '../lib/env.js';
 import { arbiterService, isArbiterEnabled } from '../services/arbiter.js';
 import { eventService } from '../services/event.js';
+import {
+  ReconciliationError,
+  reconciliationService,
+} from '../services/reconciliation.js';
 import { ArbiterError } from '../types/arbiter.js';
+
+/**
+ * WKH-191c: mapea ReconciliationError.code → HTTP (disclosure-safe, patrón
+ * `sendArbiterAdminError`). `INDETERMINATE`/`SETTLE_FAILED`/`FLAG_OFF` normalmente
+ * llegan como outcome del service (200); acá sólo si se lanzaran como error.
+ */
+function sendReconciliationError(
+  reply: FastifyReply,
+  err: unknown,
+): FastifyReply {
+  if (err instanceof ReconciliationError) {
+    switch (err.code) {
+      case 'NOT_PENDING':
+        return reply.status(409).send({ error_code: 'NOT_PENDING' });
+      case 'INTENT_NOT_FOUND':
+        return reply.status(404).send({ error_code: 'INTENT_NOT_FOUND' });
+      case 'FLAG_OFF':
+        return reply.status(409).send({ error_code: 'FLAG_OFF' });
+      case 'INDETERMINATE':
+        return reply.status(200).send({ status: 'indeterminate' });
+      case 'SETTLE_FAILED':
+        return reply.status(200).send({ status: 'settle_failed' });
+      default:
+        return reply.status(500).send({ error_code: 'RECONCILIATION_FAILED' });
+    }
+  }
+  return reply.status(500).send({ error_code: 'RECONCILIATION_FAILED' });
+}
 
 /**
  * WKH-189: mapea ArbiterError.code → HTTP (disclosure-safe). Espejo local de
@@ -84,6 +117,41 @@ const requireAdminToken: preHandlerAsyncHookHandler = async (
     return reply.status(401).send({
       error: 'unauthorized',
       message: 'X-Admin-Token header required for dashboard API',
+    });
+  }
+};
+
+/**
+ * WKH-191c: admin-token preHandler FAIL-CLOSED (CD-7). A diferencia del opt-in
+ * `requireAdminToken`, este SIEMPRE exige el token: si `DASHBOARD_ADMIN_TOKEN` no está
+ * configurado responde 503 en dev Y prod (este `POST` mueve dinero — nunca abierto).
+ * Comparación timing-safe (reusa el patrón de `requireAdminToken`).
+ */
+const requireAdminTokenStrict: preHandlerAsyncHookHandler = async (
+  request,
+  reply,
+) => {
+  const expected = process.env.DASHBOARD_ADMIN_TOKEN;
+  if (!expected) {
+    // CD-7: fail-closed SIEMPRE (dev Y prod) — money-moving endpoint.
+    return reply.status(503).send({
+      error: 'service_unavailable',
+      message: 'Reconciliation API not configured',
+    });
+  }
+  const provided = request.headers['x-admin-token'];
+  if (typeof provided !== 'string') {
+    return reply.status(401).send({
+      error: 'unauthorized',
+      message: 'X-Admin-Token header required for reconciliation API',
+    });
+  }
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    return reply.status(401).send({
+      error: 'unauthorized',
+      message: 'X-Admin-Token header required for reconciliation API',
     });
   }
 };
@@ -245,6 +313,67 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
           'resolveHold failed',
         );
         return sendArbiterAdminError(reply, err);
+      }
+    },
+  );
+
+  /**
+   * GET /dashboard/api/reconciliation
+   * WKH-191c: surface read-only del motor de reconciliación (AC-1/AC-7). Lista los
+   * intents pending + el drift budget-vs-escrow. Corre con el flag OFF (solo lectura).
+   * Opt-in `requireAdminToken` (cross-tenant admin, ALTO PRIVILEGIO).
+   */
+  fastify.get(
+    '/api/reconciliation',
+    { config: { rateLimit: false }, preHandler: requireAdminToken },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const [pending, drift] = await Promise.all([
+          reconciliationService.listPending(),
+          reconciliationService.driftCheck(),
+        ]);
+        return reply.send({
+          pending,
+          drift,
+          flagEnabled: isEscrowSettleEnabled(),
+        });
+      } catch (err) {
+        request.log.error(
+          { detail: err instanceof Error ? err.message : 'unknown' },
+          'reconciliation read failed',
+        );
+        return reply.status(500).send({ error_code: 'RECONCILIATION_FAILED' });
+      }
+    },
+  );
+
+  /**
+   * POST /dashboard/api/reconciliation/:intentId/resolve
+   * WKH-191c: resuelve exactly-one-side un intent pending (money-moving). FAIL-CLOSED
+   * (`requireAdminTokenStrict`, CD-7). El gate del flag `ESCROW_SETTLE_ENABLED` vive
+   * DENTRO del service (AC-8). Mapea ReconciliationError.code → HTTP (disclosure-safe).
+   */
+  fastify.post<{ Params: { intentId: string } }>(
+    '/api/reconciliation/:intentId/resolve',
+    { config: { rateLimit: false }, preHandler: requireAdminTokenStrict },
+    async (request, reply: FastifyReply) => {
+      try {
+        const outcome = await reconciliationService.resolveIntent(
+          request.params.intentId,
+        );
+        return reply.status(200).send({
+          status: outcome.status,
+          ...(outcome.side !== undefined ? { side: outcome.side } : {}),
+          ...(outcome.txHash !== undefined ? { txHash: outcome.txHash } : {}),
+        });
+      } catch (err) {
+        request.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'resolveIntent failed',
+        );
+        return sendReconciliationError(reply, err);
       }
     },
   );
