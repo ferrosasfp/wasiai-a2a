@@ -26,8 +26,19 @@ const mockGetDefaultChainKey = vi.fn(() => 'kite');
 const mockGetAdaptersBundle = vi.fn(() => ({
   payment: { supportedTokens: [{ decimals: 6, symbol: 'USDC' }] },
 }));
+// WKH-192: supportedTokens seteable por test para variar decimals del default chain.
+// Default 18d = modela el default chain Kite de HOY → la suite preexistente byte-idéntica.
+const mockSupportedTokens = vi.hoisted(() => ({
+  current: [{ decimals: 18, symbol: 'PYUSD' }] as
+    | { decimals: number; symbol: string }[]
+    | undefined,
+}));
 vi.mock('../adapters/registry.js', () => ({
-  getPaymentAdapter: () => ({ sign: mockSign, settle: mockSettle }),
+  getPaymentAdapter: () => ({
+    sign: mockSign,
+    settle: mockSettle,
+    supportedTokens: mockSupportedTokens.current,
+  }),
   getDefaultChainKey: () => mockGetDefaultChainKey(),
   getAdaptersBundle: () => mockGetAdaptersBundle(),
 }));
@@ -120,6 +131,7 @@ import {
   paymentIntentService,
   settleEscrowAware,
   settlePaymentIntentOnChain,
+  usdToAtomic,
 } from './payment-intent.js';
 
 const mockRpc = vi.mocked(supabase.rpc);
@@ -159,6 +171,8 @@ function happySettle(): void {
 beforeEach(() => {
   vi.clearAllMocks();
   mockVerify.mockResolvedValue({ ok: true });
+  // WKH-192: reset a 18d (default chain Kite) → suite preexistente byte-idéntica.
+  mockSupportedTokens.current = [{ decimals: 18, symbol: 'PYUSD' }];
   process.env.KITE_CHAIN_ID = '2368';
   delete process.env.UPTO_EIP712_NAME;
   delete process.env.UPTO_EIP712_VERSION;
@@ -1777,5 +1791,142 @@ describe('WKH-191b settleEscrowAware (two-hop)', () => {
     const r = await paymentIntentService.closeSession('i1', OWNER);
     expect(r.status).toBe('settled'); // el seam corrió byte-idéntico
     expect(db.row.status).toBe('settled');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// WKH-192 — settle decimals-aware (usdToAtomic + wiring del seam).
+// T-1/T-2 unit puros (import directo). T-3/T-4/T-5 ejercitan el SEAM
+// (settlePaymentIntentOnChain) variando mockSupportedTokens.current. T-6 hereda
+// vía settleEscrowAware (two-hop). Legacy = BigInt(round(usd*1e6))*BigInt(1e12).
+// ════════════════════════════════════════════════════════════════════════════
+describe('WKH-192 settle decimals-aware', () => {
+  // Fórmula legacy inline (18d) para la convergencia byte-idéntica (CD-2/CD-AB3).
+  const legacyWei = (usd: number): string =>
+    String(BigInt(Math.round(usd * 1_000_000)) * BigInt(1_000_000_000_000));
+
+  // ── T-1 (AC-2, AC-6, CD-2): convergencia byte-idéntica Kite 18d ──
+  it('T-1: usdToAtomic(usd,18) === legacy usdToWei byte-a-byte (incl. 6d de precisión)', () => {
+    for (const usd of [1.5, 0.333333, 100, 0.000001]) {
+      expect(usdToAtomic(usd, 18)).toBe(legacyWei(usd));
+    }
+  });
+
+  // ── T-2 (AC-1, AC-6): Base 6d atómico correcto (10¹² menos que 18d) ──
+  it('T-2: usdToAtomic(usd,6) es el atómico 6d; == 10¹² menos que 18d', () => {
+    expect(usdToAtomic(1.5, 6)).toBe('1500000');
+    for (const x of [1.5, 0.333333, 100, 0.000001, 42.42]) {
+      expect(BigInt(usdToAtomic(x, 6)) * 10n ** 12n).toBe(
+        BigInt(usdToAtomic(x, 18)),
+      );
+    }
+  });
+
+  // ── T-3 (AC-3, CD-7): fallback ?? 18 sin token → nunca throw, byte-idéntico ──
+  it('T-3: supportedTokens undefined/[] → fallback 18d (legacy), settled, sin throw', async () => {
+    const usd = 5;
+    for (const tokens of [
+      undefined,
+      [] as { decimals: number; symbol: string }[],
+    ]) {
+      vi.clearAllMocks();
+      mockSupportedTokens.current = tokens;
+      happySettle();
+      const r = await settlePaymentIntentOnChain({
+        intentId: 'i1',
+        ownerRef: OWNER,
+        payTo: PAYTO,
+        finalAmountUsd: usd,
+        chainId: 2368,
+      });
+      expect(r.status).toBe('settled');
+      expect(mockSign.mock.calls[0]?.[0]).toMatchObject({
+        value: usdToAtomic(usd, 18),
+      });
+      expect(usdToAtomic(usd, 18)).toBe(legacyWei(usd));
+    }
+  });
+
+  // ── T-4 (AC-1, AC-4): Base 6d → sign y verify reciben el MISMO atómico 6d ──
+  it('T-4: default 6d → sign(value) y verify(requiredAmountAtomic) convergen en 6d', async () => {
+    const usd = 5;
+    mockSupportedTokens.current = [{ decimals: 6, symbol: 'USDC' }];
+    happySettle();
+    const r = await settlePaymentIntentOnChain({
+      intentId: 'i1',
+      ownerRef: OWNER,
+      payTo: PAYTO,
+      finalAmountUsd: usd,
+      chainId: 2368,
+    });
+    expect(r.status).toBe('settled');
+    // sign firma el atómico 6d, NO el 18d (falsificable: si el wiring hardcodeara
+    // 18, este value sería 10¹² mayor y el assert fallaría).
+    expect(mockSign.mock.calls[0]?.[0]).toMatchObject({
+      value: usdToAtomic(usd, 6),
+    });
+    expect(mockSign.mock.calls[0]?.[0]?.value).not.toBe(usdToAtomic(usd, 18));
+    // verify recibe el MISMO atómico derivado (no diverge).
+    expect(mockVerify.mock.calls[0]?.[0]).toMatchObject({
+      requiredAmountAtomic: BigInt(usdToAtomic(usd, 6)),
+    });
+  });
+
+  // ── T-5 (AC-2): operator-custodial Kite 18d intacto (byte-idéntico al legacy) ──
+  it('T-5: default 18d (escrow OFF) → sign recibe el value byte-idéntico al legacy; settled', async () => {
+    const usd = 5;
+    // default beforeEach: supportedTokens 18d, isEscrowSettleEnabled OFF.
+    happySettle();
+    const r = await settlePaymentIntentOnChain({
+      intentId: 'i1',
+      ownerRef: OWNER,
+      payTo: PAYTO,
+      finalAmountUsd: usd,
+      chainId: 2368,
+    });
+    expect(r.status).toBe('settled');
+    expect(mockSign.mock.calls[0]?.[0]?.value).toBe(legacyWei(usd));
+  });
+
+  // ── T-6 (AC-5): herencia transparente two-hop (191b) en 6d ──
+  it('T-6: settleEscrowAware two-hop 6d → hop2 firma el mismo atómico que el hop1', async () => {
+    const ESCROW = '0x1111111111111111111111111111111111111111';
+    const usd = 3.7;
+    const atomic6 = usdToAtomic(usd, 6); // '3700000'
+    mockSupportedTokens.current = [{ decimals: 6, symbol: 'USDC' }];
+    mockIsEscrowSettleEnabled.mockReturnValue(true);
+    mockResolveEscrowContract.mockReturnValue(ESCROW);
+    mockGetDefaultChainKey.mockReturnValue('kite');
+    mockReadValidDebitSignature.mockResolvedValue({
+      debit_signature: `0x${'ab'.repeat(65)}`,
+      debit_amount_atomic: atomic6, // hop 1 atómico 6d
+      debit_deadline: 9_999_999_999,
+      debit_nonce: '7',
+      debit_key_id_hash: '0xkeyhash',
+      debit_hop1_tx_hash: null,
+      debit_settle_status: null,
+    });
+    mockExecuteDebitHop1.mockResolvedValue({
+      kind: 'confirmed',
+      txHash: '0xhop1',
+      blockNumber: 1n,
+    });
+    mockRecordDebitHop1.mockResolvedValue('0xhop1');
+    mockRecordDebitSettleStatus.mockResolvedValue(undefined);
+    happySettle();
+
+    const outcome = await settleEscrowAware({
+      intentId: 'i1',
+      ownerRef: OWNER,
+      payTo: PAYTO,
+      finalAmountUsd: usd,
+      chainId: 2368,
+      keyId: 'k1',
+    });
+
+    expect(outcome.status).toBe('settled');
+    // el hop 2 (seam, SIN líneas nuevas) firma el atómico 6d que converge con el hop1.
+    expect(mockSign.mock.calls[0]?.[0]?.value).toBe(atomic6);
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
   });
 });

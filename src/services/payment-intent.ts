@@ -145,14 +145,22 @@ function numericToUsd(v: number | string | null | undefined): number {
 }
 
 /**
- * USD → wei (18 decimals). Patrón idéntico a fee-charge.ts:133-135 y
- * compose.ts:188 (R-3): `BigInt(Math.round(usd*1e6)) * BigInt(1e12)`. El token
- * del default chain (kite/PYUSD) es 18 decimals; la verificación on-chain compara
- * el mismo atomic.
+ * USD → unidad atómica del token, decimals-aware (WKH-192).
+ *
+ * `micro` = micro-USD entero (6 decimales), IDÉNTICO al legacy `usdToWei`.
+ * Escala por `10^(decimals-6)` con BigInt entero puro (sin float64 nuevo, sin
+ * parseUnits, sin toFixed). Byte-idéntico al legacy cuando `decimals === 18`
+ * (mismo `micro`, `10^12`) POR CONSTRUCCIÓN — no por muestreo.
+ * Rama `< 6` decimales: floor defensivo, hoy inalcanzable (ningún token < 6d).
+ *
+ * @internal exported ONLY for byte-identical convergence tests (WKH-192).
  */
-function usdToWei(usd: number): string {
+export function usdToAtomic(usd: number, decimals: number): string {
+  const micro = BigInt(Math.round(usd * 1_000_000));
   return String(
-    BigInt(Math.round(usd * 1_000_000)) * BigInt(1_000_000_000_000),
+    decimals >= 6
+      ? micro * 10n ** BigInt(decimals - 6)
+      : micro / 10n ** BigInt(6 - decimals),
   );
 }
 
@@ -361,12 +369,14 @@ export async function settlePaymentIntentOnChain(params: {
 }): Promise<SettleOutcome> {
   const { intentId, payTo, finalAmountUsd } = params;
   try {
-    const wei = usdToWei(finalAmountUsd);
+    const adapter = getPaymentAdapter();
+    const decimals = adapter.supportedTokens?.[0]?.decimals ?? 18;
+    const wei = usdToAtomic(finalAmountUsd, decimals);
 
     // 1. sign (try/catch propio → failed).
     let signResult: SignResult;
     try {
-      signResult = await getPaymentAdapter().sign({
+      signResult = await adapter.sign({
         to: payTo as `0x${string}`,
         value: wei,
       });
@@ -388,7 +398,7 @@ export async function settlePaymentIntentOnChain(params: {
     const { paymentRequest } = signResult;
     let settleTxHash: string;
     try {
-      const settleResult = await getPaymentAdapter().settle({
+      const settleResult = await adapter.settle({
         authorization: paymentRequest.authorization,
         signature: paymentRequest.signature,
         network: paymentRequest.network ?? '',
