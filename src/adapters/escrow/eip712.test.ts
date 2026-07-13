@@ -15,6 +15,7 @@ import {
   buildDebitDomain,
   DEBIT_AUTHORIZATION_TYPES,
   hashDebitAuthorization,
+  recoverDebitAuthorization,
 } from './eip712.js';
 
 const SIGNER_PK = `0x${'1'.repeat(64)}` as `0x${string}`;
@@ -146,5 +147,48 @@ describe('buildDebitAuthorization', () => {
       verifyingContract: VERIFYING_CONTRACT,
     });
     expect(h3).not.toBe(h1);
+  });
+});
+
+// ── T-10 (§3 convergencia): recoverDebitAuthorization ──
+describe('recoverDebitAuthorization (WKH-191a captura)', () => {
+  it('recupera exactamente signer.address sobre una firma DebitAuthorization válida', async () => {
+    const signer = privateKeyToAccount(SIGNER_PK);
+    const domain = buildDebitDomain(CHAIN_ID, VERIFYING_CONTRACT);
+    const message = {
+      keyId: KEY_ID,
+      amount: 1_500_000n,
+      deadline: 9_999_999_999n,
+      nonce: 7n,
+    };
+    const signature = await signer.signTypedData({
+      domain,
+      types: DEBIT_AUTHORIZATION_TYPES,
+      primaryType: 'DebitAuthorization',
+      message,
+    });
+
+    const recovered = await recoverDebitAuthorization({
+      message,
+      domain,
+      signature,
+    });
+    expect(recovered).not.toBeNull();
+    expect(recovered?.toLowerCase()).toBe(signer.address.toLowerCase());
+  });
+
+  it('firma malformada → null (no lanza)', async () => {
+    const domain = buildDebitDomain(CHAIN_ID, VERIFYING_CONTRACT);
+    const recovered = await recoverDebitAuthorization({
+      message: {
+        keyId: KEY_ID,
+        amount: 1_000_000n,
+        deadline: 9_999_999_999n,
+        nonce: 1n,
+      },
+      domain,
+      signature: '0xdeadbeef',
+    });
+    expect(recovered).toBeNull();
   });
 });

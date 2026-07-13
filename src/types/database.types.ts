@@ -741,6 +741,71 @@ export type Database = {
           },
         ];
       };
+      a2a_payment_intent_debit_signatures: {
+        Row: {
+          captured_at: string;
+          created_at: string;
+          // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
+          debit_amount_atomic: string;
+          debit_deadline: number;
+          debit_key_id_hash: string;
+          // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
+          debit_nonce: string;
+          debit_signature: string;
+          debit_signer_recovered: string | null;
+          debit_validation_reason: string | null;
+          debit_validation_status: string;
+          id: string;
+          intent_id: string;
+          key_id: string;
+          owner_ref: string;
+        };
+        Insert: {
+          captured_at?: string;
+          created_at?: string;
+          // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
+          debit_amount_atomic: string;
+          debit_deadline: number;
+          debit_key_id_hash: string;
+          // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
+          debit_nonce: string;
+          debit_signature: string;
+          debit_signer_recovered?: string | null;
+          debit_validation_reason?: string | null;
+          debit_validation_status: string;
+          id?: string;
+          intent_id: string;
+          key_id: string;
+          owner_ref: string;
+        };
+        Update: {
+          captured_at?: string;
+          created_at?: string;
+          // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
+          debit_amount_atomic?: string;
+          debit_deadline?: number;
+          debit_key_id_hash?: string;
+          // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
+          debit_nonce?: string;
+          debit_signature?: string;
+          debit_signer_recovered?: string | null;
+          debit_validation_reason?: string | null;
+          debit_validation_status?: string;
+          id?: string;
+          intent_id?: string;
+          key_id?: string;
+          owner_ref?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'a2a_payment_intent_debit_signatures_intent_id_fkey';
+            columns: ['intent_id'];
+            isOneToOne: false;
+            referencedRelation: 'a2a_payment_intents';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
       a2a_payment_vouchers: {
         Row: {
           amount_usd: number;
@@ -2673,6 +2738,26 @@ export type Database = {
           p_amount: number;
         };
         Returns: { consumed: number; is_duplicate: boolean }[];
+      };
+      capture_debit_signature: {
+        Args: {
+          p_intent_id: string;
+          p_owner_ref: string;
+          p_key_id: string;
+          p_key_id_hash: string;
+          // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
+          p_amount_atomic: string;
+          p_deadline: number;
+          p_nonce: string;
+          p_signature: string;
+          p_recovered: string | null;
+          p_status: string;
+          p_reason: string | null;
+        };
+        Returns: {
+          persisted_status: string;
+          persisted_reason: string | null;
+        }[];
       };
       close_payment_intent_for_settle: {
         Args: {

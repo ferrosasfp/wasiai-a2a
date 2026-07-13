@@ -147,6 +147,36 @@ export async function buildDebitAuthorization(
   return { signature, recovered, presentable };
 }
 
+export interface RecoverDebitAuthorizationParams {
+  message: DebitAuthorizationMessage;
+  domain: DebitEip712Domain;
+  signature: string;
+}
+
+/**
+ * Recupera el firmante de una firma `DebitAuthorization` YA recibida del cliente
+ * (191a captura). Espejo off-chain de `ECDSA.recover` en
+ * `WasiAIEscrow._verifyAndConsume`. Reusa `DEBIT_AUTHORIZATION_TYPES` (CD-5).
+ * Helper PURO: no toca DB ni red, NUNCA ejecuta `writeContract` (CD-7).
+ * Devuelve `null` si el recover lanza (firma malformada) — el caller lo trata
+ * como SIGNER_MISMATCH.
+ */
+export async function recoverDebitAuthorization(
+  params: RecoverDebitAuthorizationParams,
+): Promise<`0x${string}` | null> {
+  try {
+    return await recoverTypedDataAddress({
+      domain: params.domain,
+      types: DEBIT_AUTHORIZATION_TYPES,
+      primaryType: 'DebitAuthorization',
+      message: params.message,
+      signature: params.signature as `0x${string}`,
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Hash EIP-712 de la autorización (para tests/auditoría). Typehash derivado por
  * viem (CD-3). PROVISIONAL — VERIFY-AT-IMPL con WKH-126a.

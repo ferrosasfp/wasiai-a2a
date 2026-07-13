@@ -7,7 +7,7 @@
  * (concurrencia). supabase.rpc + adapter + verifier + viem mockeados.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ── Mocks (hoisted logger) ──────────────────────────────────────
 const logSpy = vi.hoisted(() => ({
@@ -19,8 +19,26 @@ vi.mock('../lib/logger.js', () => ({ getLogger: () => logSpy }));
 
 const mockSign = vi.fn();
 const mockSettle = vi.fn();
+// WKH-191a (T-8): la captura real (debit-capture.ts) consume getDefaultChainKey +
+// getAdaptersBundle del registry. Se stubean para que el path real llegue al RPC
+// (mock aditivo: el resto de la suite NO los usa).
+const mockGetDefaultChainKey = vi.fn(() => 'kite');
+const mockGetAdaptersBundle = vi.fn(() => ({
+  payment: { supportedTokens: [{ decimals: 6, symbol: 'USDC' }] },
+}));
 vi.mock('../adapters/registry.js', () => ({
   getPaymentAdapter: () => ({ sign: mockSign, settle: mockSettle }),
+  getDefaultChainKey: () => mockGetDefaultChainKey(),
+  getAdaptersBundle: () => mockGetAdaptersBundle(),
+}));
+
+// WKH-191a (T-8): resolveEscrowContract del path real de captura. Truthy → el
+// gate escrow pasa y la captura llega al RPC capture_debit_signature.
+const mockResolveEscrowContract = vi.fn(
+  () => '0x1111111111111111111111111111111111111111',
+);
+vi.mock('../adapters/escrow-verifier.js', () => ({
+  resolveEscrowContract: () => mockResolveEscrowContract(),
 }));
 
 const mockVerify = vi.fn().mockResolvedValue({ ok: true });
@@ -29,9 +47,15 @@ vi.mock('../adapters/settle-verifier.js', () => ({
 }));
 
 const mockRecover = vi.fn();
-vi.mock('viem', () => ({
-  recoverTypedDataAddress: (...a: unknown[]) => mockRecover(...a),
-}));
+// WKH-191a (T-8): la captura real usa keccak256/parseUnits/stringToBytes de viem
+// → se preserva el módulo real y sólo se overridea recoverTypedDataAddress.
+vi.mock('viem', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('viem')>();
+  return {
+    ...actual,
+    recoverTypedDataAddress: (...a: unknown[]) => mockRecover(...a),
+  };
+});
 
 vi.mock('../lib/supabase.js', () => ({
   supabase: { rpc: vi.fn(), from: vi.fn() },
@@ -1390,5 +1414,90 @@ describe('T-CONC concurrencia', () => {
     expect(db.row.status).toBe('settled');
     expect(db.refunds).toEqual([6]); // residual (10-4) reembolsado EXACTAMENTE una vez
     expect(mockSettle).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── T-8: captura best-effort NUNCA rompe el settle (CD-2/DT-4/R-4) ──
+// INTEGRACIÓN: se ejercita el `captureDebitSignatureBestEffort` REAL (NO se mockea
+// el wrapper). El RPC subyacente `capture_debit_signature` throwea (data-layer error)
+// → el wrapper real lo atrapa (no-throw, CD-2) y el settle sigue byte-idéntico. El
+// no-throw del wrapper en aislamiento lo cubre T-7 (debit-capture.test.ts); acá se
+// valida que la integración settle↔captura no se rompe aunque la captura falle.
+describe('T-8 captura best-effort no rompe el settle', () => {
+  // Flag ON: el gate secundario del wrapper real deja correr la captura.
+  beforeEach(() => {
+    process.env.ESCROW_DEBIT_CAPTURE_ENABLED = 'true';
+    // buyer_wallet owner-guarded que lee el path real de captura (paso 5).
+    const builder = {
+      select: () => builder,
+      eq: () => builder,
+      maybeSingle: () =>
+        Promise.resolve({
+          data: { buyer_wallet: '0xabc0000000000000000000000000000000000001' },
+          error: null,
+        }),
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: supabase builder test double
+    mockFrom.mockReturnValue(builder as any);
+    mockRecover.mockResolvedValue('0xabc0000000000000000000000000000000000001');
+  });
+
+  afterEach(() => {
+    delete process.env.ESCROW_DEBIT_CAPTURE_ENABLED;
+  });
+
+  // El RPC de captura throwea (error del data-layer) → persist() re-lanza → el
+  // wrapper real lo traga. Se compone con los handlers money-path del fake DB.
+  const explodingCapture: RpcHandler = () => ({
+    data: null,
+    error: { message: 'db boom (capture)' },
+  });
+
+  it('closeSession: el RPC de captura throwea → SettleOutcome normal, sin propagar', async () => {
+    const db = makeIntentDb({
+      intent_type: 'session',
+      authorized_usd: 10,
+      consumed_usd: 0, // finalMicro<=0 → settled sin on-chain (la captura corre igual)
+    });
+    routeRpc({ ...db.handlers, capture_debit_signature: explodingCapture });
+
+    const r = await paymentIntentService.closeSession('i1', OWNER, false, {
+      signature: '0xdeadbeef',
+      nonce: '1',
+      deadline: 9_999_999_999,
+      amount: '1000000',
+    });
+
+    expect(r.status).toBe('settled');
+    // el path REAL de captura llegó al RPC (no un stub del wrapper)…
+    expect(
+      mockRpc.mock.calls.some((c) => c[0] === 'capture_debit_signature'),
+    ).toBe(true);
+    // …y su error fue tragado por el wrapper real (best-effort no-throw).
+    expect(logSpy.warn).toHaveBeenCalled();
+    expect(db.row.status).toBe('settled'); // settle byte-idéntico pese al throw
+  });
+
+  it('settleUpto: el RPC de captura throwea → SettleOutcome normal, sin propagar', async () => {
+    const db = makeIntentDb({
+      intent_type: 'upto',
+      authorized_usd: 5,
+      consumed_usd: 0,
+    });
+    routeRpc({ ...db.handlers, capture_debit_signature: explodingCapture });
+
+    const r = await paymentIntentService.settleUpto('i1', OWNER, 0, false, {
+      signature: '0xdeadbeef',
+      nonce: '1',
+      deadline: 9_999_999_999,
+      amount: '1000000',
+    });
+
+    expect(r.status).toBe('settled');
+    expect(
+      mockRpc.mock.calls.some((c) => c[0] === 'capture_debit_signature'),
+    ).toBe(true);
+    expect(logSpy.warn).toHaveBeenCalled();
+    expect(db.row.status).toBe('settled');
   });
 });

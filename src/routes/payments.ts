@@ -15,6 +15,10 @@
 
 import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import {
+  type DebitCaptureInput,
+  isDebitCaptureEnabled,
+} from '../adapters/escrow/debit-capture.js';
 import { getChainConfig } from '../adapters/registry.js';
 import { supabase } from '../lib/supabase.js';
 import { arbiterService, isArbiterEnabled } from '../services/arbiter.js';
@@ -45,6 +49,33 @@ function isDefaultChain(chainId: number): boolean {
 
 function isNonEmptyString(x: unknown): x is string {
   return typeof x === 'string' && x.length > 0;
+}
+
+/**
+ * WKH-191a: gate primario del flag (CD-1/AC-3). Con `ESCROW_DEBIT_CAPTURE_ENABLED`
+ * OFF → NO lee los campos `debit*` → devuelve `undefined` → close/settle byte-idéntico.
+ * Con flag ON → construye `DebitCaptureInput` SOLO si `debitSignature` es 0x-hex no
+ * vacío; el helper valida/marca invalid best-effort (el route NO rechaza por `debit*`
+ * malformado, CD-S5).
+ */
+function extractDebitCapture(
+  body: Record<string, unknown>,
+): DebitCaptureInput | undefined {
+  if (!isDebitCaptureEnabled()) return undefined; // gate primario (CD-1/AC-3)
+  const sig = body.debitSignature;
+  if (typeof sig !== 'string' || !sig.startsWith('0x') || sig.length < 4) {
+    return undefined; // sin firma → no se intenta captura (not_provided, no se persiste)
+  }
+  return {
+    signature: sig,
+    ...(typeof body.debitNonce === 'string' ? { nonce: body.debitNonce } : {}),
+    ...(typeof body.debitDeadline === 'number'
+      ? { deadline: body.debitDeadline }
+      : {}),
+    ...(typeof body.debitAmount === 'string'
+      ? { amount: body.debitAmount }
+      : {}),
+  };
 }
 
 /** Mapea PaymentIntentError.code → HTTP (tabla de errores del Story File). */
@@ -260,10 +291,15 @@ export const paymentsRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(403).send({ error: 'Invalid or inactive API key' });
       }
 
+      const b = (req.body ?? {}) as Record<string, unknown>;
+      const debitCapture = extractDebitCapture(b);
+
       try {
         const outcome = await paymentIntentService.closeSession(
           req.params.id,
           callerKey.owner_ref,
+          false, // allowStaleRecovery (default explícito)
+          debitCapture,
         );
         return reply.status(200).send({
           status: outcome.status,
@@ -451,12 +487,15 @@ export const paymentsRoutes: FastifyPluginAsync = async (fastify) => {
       if (!isFiniteNonNegative(b.reportedUsageUsd)) {
         return reply.status(422).send({ error_code: 'INVALID_INPUT' });
       }
+      const debitCapture = extractDebitCapture(b);
 
       try {
         const outcome = await paymentIntentService.settleUpto(
           req.params.id,
           callerKey.owner_ref,
           b.reportedUsageUsd,
+          false, // allowStaleRecovery
+          debitCapture,
         );
         return reply.status(200).send({
           status: outcome.status,

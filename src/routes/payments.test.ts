@@ -37,8 +37,19 @@ vi.mock('../adapters/registry.js', () => ({
   getChainConfig: () => ({ name: 'kite', chainId: 2368, explorerUrl: '' }),
 }));
 
+// WKH-191a (T-3/CR-MNR-2): spy sobre la capa de persistencia real. Con el flag OFF,
+// `extractDebitCapture` (real, importado por el route) corta antes de tocar supabase
+// → el RPC `capture_debit_signature` NUNCA se invoca. Prueba no-tautológica de que
+// no se parsea/persiste la firma con el flag apagado.
+vi.mock('../lib/supabase.js', () => ({
+  supabase: { rpc: vi.fn(), from: vi.fn() },
+}));
+
+import { supabase } from '../lib/supabase.js';
 import { PaymentIntentError } from '../services/payment-intent.js';
 import { paymentsRoutes } from './payments.js';
+
+const mockRpc = vi.mocked(supabase.rpc);
 
 const FUNDING = '0xabc0000000000000000000000000000000000001';
 const PAYTO = '0x2222222222222222222222222222222222222222';
@@ -272,6 +283,85 @@ describe('T-WRITE guard money-path (CD-12)', () => {
     });
     expect(res.statusCode).toBe(422);
     expect(mockService.settleUpto).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
+
+// ── T-3: AC-3 flag OFF → byte-idéntico, captura ignorada (WKH-191a) ──
+describe('T-3 flag OFF byte-idéntico (AC-3)', () => {
+  it('close con campos debit* + flag OFF → service recibe debitCapture=undefined', async () => {
+    delete process.env.ESCROW_DEBIT_CAPTURE_ENABLED;
+    activeKey();
+    mockService.closeSession.mockResolvedValue({
+      status: 'settled',
+      txHash: null,
+      consumedUsd: 0,
+      residualUsd: 0,
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/payments/session/i1/close',
+      payload: {
+        debitSignature: `0x${'ab'.repeat(65)}`,
+        debitNonce: '1',
+        debitDeadline: 9_999_999_999,
+        debitAmount: '1500000',
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe('settled');
+    // 4º arg (debitCapture) === undefined → llamada byte-idéntica (pese a que el
+    // body SÍ trae campos debit*, el gate del flag OFF los descarta en el route).
+    expect(mockService.closeSession).toHaveBeenCalledWith(
+      'i1',
+      'tenant-A',
+      false,
+      undefined,
+    );
+    expect(mockService.closeSession.mock.calls[0]?.[3]).toBeUndefined();
+    // no-tautológico: cero persistencia — el RPC de captura NUNCA se invoca.
+    expect(
+      mockRpc.mock.calls.some((c) => c[0] === 'capture_debit_signature'),
+    ).toBe(false);
+    await app.close();
+  });
+
+  it('settle upto con campos debit* + flag OFF → service recibe debitCapture=undefined', async () => {
+    delete process.env.ESCROW_DEBIT_CAPTURE_ENABLED;
+    activeKey();
+    mockService.settleUpto.mockResolvedValue({
+      status: 'settled',
+      txHash: null,
+      finalAmountUsd: 0,
+      cappedAt: false,
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/payments/upto/i1/settle',
+      payload: {
+        reportedUsageUsd: 2,
+        debitSignature: `0x${'ab'.repeat(65)}`,
+        debitNonce: '1',
+        debitDeadline: 9_999_999_999,
+        debitAmount: '1500000',
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    // 5º arg (debitCapture) === undefined (body con debit* + flag OFF → descartado).
+    expect(mockService.settleUpto).toHaveBeenCalledWith(
+      'i1',
+      'tenant-A',
+      2,
+      false,
+      undefined,
+    );
+    expect(mockService.settleUpto.mock.calls[0]?.[4]).toBeUndefined();
+    // no-tautológico: cero persistencia — el RPC de captura NUNCA se invoca.
+    expect(
+      mockRpc.mock.calls.some((c) => c[0] === 'capture_debit_signature'),
+    ).toBe(false);
     await app.close();
   });
 });

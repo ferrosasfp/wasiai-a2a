@@ -26,6 +26,10 @@
  */
 
 import { recoverTypedDataAddress } from 'viem';
+import {
+  captureDebitSignatureBestEffort,
+  type DebitCaptureInput,
+} from '../adapters/escrow/debit-capture.js';
 import { getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import type { SignResult } from '../adapters/types.js';
@@ -565,6 +569,7 @@ export const paymentIntentService = {
     intentId: string,
     ownerRef: string,
     allowStaleRecovery = false,
+    debitCapture?: DebitCaptureInput,
   ): Promise<SettleOutcome> {
     const { data, error } = await supabase.rpc(
       'close_payment_intent_for_settle',
@@ -676,6 +681,19 @@ export const paymentIntentService = {
     const residualMicro = Math.max(0, depositMicro - finalMicro); // AC-2, nunca negativo
     const finalUsd = finalMicro / 1_000_000;
     const residualUsd = residualMicro / 1_000_000;
+
+    // WKH-191a: captura INERTE de la firma DebitAuthorization (best-effort, no-throw,
+    // NO altera el settle; cero on-chain). Solo cuando el flag ON pasó la firma.
+    if (debitCapture) {
+      await captureDebitSignatureBestEffort({
+        intentId,
+        ownerRef,
+        keyId: row.key_id,
+        chainId: row.chain_id,
+        finalAmountUsd: finalUsd,
+        capture: debitCapture,
+      });
+    }
 
     // Σvouchers = 0 → nada que cobrar al seller: full refund, sin tx on-chain.
     if (finalMicro <= 0) {
@@ -881,6 +899,7 @@ export const paymentIntentService = {
     ownerRef: string,
     reportedUsageUsd: number,
     allowStaleRecovery = false,
+    debitCapture?: DebitCaptureInput,
   ): Promise<SettleOutcome> {
     const { data, error } = await supabase.rpc(
       'close_payment_intent_for_settle',
@@ -980,6 +999,19 @@ export const paymentIntentService = {
 
     const finalMicro = Math.min(capMicro, reportedMicro); // = row.final_amount (AC-3)
     const finalUsd = finalMicro / 1_000_000;
+
+    // WKH-191a: captura INERTE de la firma DebitAuthorization (best-effort, no-throw,
+    // NO altera el settle; cero on-chain). Solo cuando el flag ON pasó la firma.
+    if (debitCapture) {
+      await captureDebitSignatureBestEffort({
+        intentId,
+        ownerRef,
+        keyId: row.key_id,
+        chainId: row.chain_id,
+        finalAmountUsd: finalUsd,
+        capture: debitCapture,
+      });
+    }
 
     // uso 0 → nada que cobrar: mark settled sin tx (upto NO refunda).
     if (finalMicro <= 0) {
