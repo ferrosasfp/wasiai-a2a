@@ -404,7 +404,7 @@ function stubReaderRow(row: unknown) {
     limit: [] as number[],
   };
   const builder = {
-    select: vi.fn(() => builder),
+    select: vi.fn((_cols?: string) => builder),
     eq: vi.fn((k: string, v: unknown) => {
       calls.eq.push([k, v]);
       return builder;
@@ -558,7 +558,7 @@ describe('T-NEW-1 reader cast-presence (AC-1/AC-2/AC-6, WKH-196)', () => {
       chainKey: 'base-sepolia',
       finalAmountUsd: 1.5,
     });
-    const selectArg = builder.select.mock.calls[0]?.[0] as string;
+    const selectArg = builder.select.mock.calls[0]?.[0] as string | undefined;
     expect(selectArg).toContain('debit_nonce::text');
     expect(selectArg).toContain('debit_amount_atomic::text');
     // debit_deadline es BIGINT epoch (< 2^53) → NO se castea (CD-6).
