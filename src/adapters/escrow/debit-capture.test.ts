@@ -404,7 +404,7 @@ function stubReaderRow(row: unknown) {
     limit: [] as number[],
   };
   const builder = {
-    select: vi.fn(() => builder),
+    select: vi.fn((_cols?: string) => builder),
     eq: vi.fn((k: string, v: unknown) => {
       calls.eq.push([k, v]);
       return builder;
@@ -542,4 +542,65 @@ describe('T-7 reader query owner-guarded + most-recent (AC-7/191b)', () => {
   // 20260713000001_wkh191b_debit_hop1.sql (como T-10 ownership). NO se simula acá de
   // forma tautológica. El WRAPPER `recordDebitHop1` (args al RPC + propagación del
   // hash efectivo) SÍ tiene test vivo en debit-executor.test.ts.
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// WKH-196 — pérdida de precisión uint256 al leer NUMERIC(78,0) sin cast `::text`
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── T-NEW-1: el select castea debit_nonce/debit_amount_atomic a ::text, no debit_deadline ──
+describe('T-NEW-1 reader cast-presence (AC-1/AC-2/AC-6, WKH-196)', () => {
+  it('select() castea debit_nonce::text y debit_amount_atomic::text, NO debit_deadline', async () => {
+    const { builder } = stubReaderRow(validRow());
+    await readValidDebitSignature({
+      intentId: INTENT_ID,
+      ownerRef: OWNER,
+      chainKey: 'base-sepolia',
+      finalAmountUsd: 1.5,
+    });
+    const selectArg = builder.select.mock.calls[0]?.[0] as string | undefined;
+    expect(selectArg).toContain('debit_nonce::text');
+    expect(selectArg).toContain('debit_amount_atomic::text');
+    // debit_deadline es BIGINT epoch (< 2^53) → NO se castea (CD-6).
+    expect(selectArg).not.toContain('debit_deadline::text');
+  });
+});
+
+// ── T-NEW-2: round-trip del nonce del incidente (> 2^53) sobrevive exacto ──
+describe('T-NEW-2 reader round-trip nonce (AC-1, WKH-196)', () => {
+  it('debit_nonce="4312989337224638380" sobrevive string exacto y BigInt exacto', async () => {
+    stubReaderRow(
+      validRow({
+        debit_nonce: '4312989337224638380',
+        debit_amount_atomic: '1500000',
+      }),
+    );
+    const r = await readValidDebitSignature({
+      intentId: INTENT_ID,
+      ownerRef: OWNER,
+      chainKey: 'base-sepolia',
+      finalAmountUsd: 1.5,
+    });
+    expect(r).not.toBeNull();
+    expect(r?.debit_nonce).toBe('4312989337224638380');
+    // el bug era: Number → 4312989337224638464n. Con ::text el string exacto
+    // reconstruye el bigint sin corrupción.
+    expect(BigInt(r?.debit_nonce as string)).toBe(4312989337224638380n);
+  });
+});
+
+// ── T-NEW-3: valor safe (< 2^53) byte-idéntico con/sin fix (CD-1) ──
+describe('T-NEW-3 reader safe byte-idéntico (AC-5/CD-1, WKH-196)', () => {
+  it('debit_nonce="7" idéntico al comportamiento previo', async () => {
+    stubReaderRow(validRow({ debit_nonce: '7' }));
+    const r = await readValidDebitSignature({
+      intentId: INTENT_ID,
+      ownerRef: OWNER,
+      chainKey: 'base-sepolia',
+      finalAmountUsd: 1.5,
+    });
+    expect(r).not.toBeNull();
+    expect(r?.debit_nonce).toBe('7');
+    expect(BigInt(r?.debit_nonce as string)).toBe(7n);
+  });
 });

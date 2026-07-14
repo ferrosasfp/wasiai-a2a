@@ -179,6 +179,8 @@ function makeArbDb(init: {
   status?: string;
   chain_id?: number;
   owner_ref?: string;
+  // WKH-196 T-NEW-5: preset del nonce ya persistido (read-first HIT directo).
+  nonceStore?: string;
 }): {
   row: FakeRow;
   refunds: number[];
@@ -186,6 +188,8 @@ function makeArbDb(init: {
   state: { failFinalize: number };
   handlers: Record<string, RpcHandler>;
   fromImpl: (table: string) => unknown;
+  // WKH-196 T-NEW-4: cols pasadas al .select() de a2a_arbiter_nonces (capturable).
+  nonceSelectCols: () => string | null;
 } {
   const row: FakeRow = {
     status: init.status ?? 'open',
@@ -206,7 +210,11 @@ function makeArbDb(init: {
   const arbRows: Record<string, unknown>[] = [];
   const state = { failFinalize: 0 };
   // WKH-194: store del nonce persistido (first-writer-wins). null = miss.
-  let nonceStore: { nonce: string } | null = null;
+  let nonceStore: { nonce: string } | null =
+    init.nonceStore != null ? { nonce: init.nonceStore } : null;
+  // WKH-196: cols capturadas del .select() sobre a2a_arbiter_nonces (dentro del
+  // closure — sin símbolo top-level nuevo consumido por la factory vi.mock, CD-8).
+  let nonceSelectCols: string | null = null;
 
   const snapshot = (prev: string, final: number) => ({
     data: [
@@ -346,8 +354,10 @@ function makeArbDb(init: {
       _op: null,
       _vals: null,
       _conds: {},
-      select() {
+      select(cols) {
         b._op = 'select';
+        // WKH-196: capturá el arg del select del read-first del nonce (CD-8).
+        if (table === 'a2a_arbiter_nonces') nonceSelectCols = cols;
         return b;
       },
       update(v) {
@@ -419,7 +429,15 @@ function makeArbDb(init: {
     return b;
   };
 
-  return { row, refunds, arbRows, state, handlers, fromImpl };
+  return {
+    row,
+    refunds,
+    arbRows,
+    state,
+    handlers,
+    fromImpl,
+    nonceSelectCols: () => nonceSelectCols,
+  };
 }
 
 function wireDb(db: ReturnType<typeof makeArbDb>): void {
@@ -1672,6 +1690,38 @@ describe('WKH-194 exactly-once + no-adivinable + defensa', () => {
     const nonce2 = resolveNonceArg(1);
     expect(nonce2).toBe(nonce1); // read-first hit → mismo nonce persistido
     expect(nonceRpcCalls()).toBe(rpcAfterFirst); // 2ª pasada NO llamó al RPC
+  });
+
+  // T-NEW-4 · cast-presence read-first (AC-3/AC-6, WKH-196): el .select() del
+  // read-first sobre a2a_arbiter_nonces castea la columna NUMERIC(78,0) a ::text.
+  it('T-NEW-4: read-first del nonce castea select("nonce::text")', async () => {
+    armEscrow();
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+
+    const r = await settleArbitrationOnChain(SETTLE_PARAMS);
+    expect(r.status).toBe('settled');
+    expect(db.nonceSelectCols()).toBe('nonce::text');
+  });
+
+  // T-NEW-5 · round-trip read-first HIT (AC-3, WKH-196): un nonce uint256 > 2^53 ya
+  // persistido sobrevive EXACTO el SELECT directo de la tabla (no solo el RPC), y el
+  // HIT no recomputa vía RPC.
+  it('T-NEW-5: read-first HIT con nonce > 2^53 → bigint exacto, RPC no llamado', async () => {
+    armEscrow();
+    const db = makeArbDb({
+      authorized_usd: 10,
+      consumed_usd: 10,
+      nonceStore: '4312989337224638380',
+    });
+    wireDb(db);
+
+    const r = await settleArbitrationOnChain(SETTLE_PARAMS);
+    expect(r.status).toBe('settled');
+    // el bug era Number → 4312989337224638464n; con ::text el string exacto
+    // reconstruye el bigint sin corrupción.
+    expect(resolveNonceArg(0)).toBe(4312989337224638380n);
+    expect(nonceRpcCalls()).toBe(0); // read-first HIT → NO recomputa vía RPC
   });
 
   // T5 · fallback secreto ausente → operator-custodial (AC-3/CD-3/CD-5).

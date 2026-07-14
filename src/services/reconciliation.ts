@@ -182,7 +182,7 @@ export const reconciliationService = {
     const { data, error } = await supabase
       .from('a2a_payment_intent_debit_signatures')
       .select(
-        'intent_id, key_id, debit_nonce, debit_amount_atomic, debit_hop1_tx_hash, ' +
+        'intent_id, key_id, debit_nonce::text, debit_amount_atomic::text, debit_hop1_tx_hash, ' +
           'debit_settle_status, owner_ref',
       )
       .eq('debit_validation_status', 'valid')
@@ -220,7 +220,7 @@ export const reconciliationService = {
     const { data, error } = await supabase
       .from('a2a_payment_intent_debit_signatures')
       .select(
-        'intent_id, key_id, debit_key_id_hash, debit_nonce, debit_amount_atomic, ' +
+        'intent_id, key_id, debit_key_id_hash, debit_nonce::text, debit_amount_atomic::text, ' +
           'debit_hop1_tx_hash, debit_settle_status, owner_ref, ' +
           'a2a_payment_intents!inner(pay_to, chain_id, owner_ref)',
       )
@@ -404,7 +404,7 @@ export const reconciliationService = {
     const { data, error } = await supabase
       .from('a2a_payment_intent_debit_signatures')
       .select(
-        'key_id, debit_key_id_hash, debit_amount_atomic, owner_ref, ' +
+        'key_id, debit_key_id_hash, debit_amount_atomic::text, owner_ref, ' +
           'a2a_payment_intents!inner(chain_id)',
       )
       .eq('debit_validation_status', 'valid')

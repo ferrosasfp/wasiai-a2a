@@ -74,8 +74,10 @@ export function isEscrowSettleEnabled(): boolean {
 
 /**
  * Vista tipada a mano del subset leído por `readValidDebitSignature` (CD-S2:
- * select tipado a mano → cast). `debit_amount_atomic`/`debit_nonce` son NUMERIC
- * uint256 → `string` (BigInt, nunca Number). `debit_deadline` es BIGINT → number.
+ * select tipado a mano → cast). `debit_amount_atomic`/`debit_nonce` son NUMERIC(78,0)
+ * uint256: el `string` en runtime DEPENDE del cast `::text` en el `.select()` — sin él
+ * PostgREST serializa NUMERIC como número JSON y JSON.parse redondea > 2^53 (WKH-196).
+ * `debit_deadline` es BIGINT epoch (< 2^53) → number, NO se castea.
  */
 export interface ValidDebitRow {
   debit_signature: string;
@@ -112,7 +114,7 @@ export async function readValidDebitSignature(args: {
     const { data, error } = await supabase
       .from('a2a_payment_intent_debit_signatures')
       .select(
-        'debit_signature, debit_amount_atomic, debit_deadline, debit_nonce, debit_key_id_hash, debit_hop1_tx_hash, debit_settle_status',
+        'debit_signature, debit_amount_atomic::text, debit_deadline, debit_nonce::text, debit_key_id_hash, debit_hop1_tx_hash, debit_settle_status',
       )
       .eq('intent_id', intentId)
       .eq('owner_ref', ownerRef)
