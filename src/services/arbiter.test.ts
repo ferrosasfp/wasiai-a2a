@@ -105,11 +105,16 @@ import { deriveArbiterNonce } from '../adapters/escrow/arbiter-executor.js';
 import { supabase } from '../lib/supabase.js';
 import { paymentsRoutes } from '../routes/payments.js';
 import { ArbiterError, type DisputeEvidence } from '../types/arbiter.js';
-import { arbiterService } from './arbiter.js';
+import { arbiterService, settleArbitrationOnChain } from './arbiter.js';
 import { paymentIntentService } from './payment-intent.js';
 
 const ESCROW_ADDR =
   '0x7777777777777777777777777777777777777777' as `0x${string}`;
+
+// WKH-194: secreto de test (≥32 chars) para el nonce del árbitro.
+// Alta entropía (≥16 caracteres únicos) para pasar el guard de entropía de
+// getArbiterNonceSecret (AR MNR-1): espeja `openssl rand -hex 32` (64 hex chars).
+const TEST_SECRET = '0123456789abcdef'.repeat(4);
 
 const mockRpc = vi.mocked(supabase.rpc);
 const mockFrom = vi.mocked(supabase.from);
@@ -200,6 +205,8 @@ function makeArbDb(init: {
   const refunds: number[] = [];
   const arbRows: Record<string, unknown>[] = [];
   const state = { failFinalize: 0 };
+  // WKH-194: store del nonce persistido (first-writer-wins). null = miss.
+  let nonceStore: { nonce: string } | null = null;
 
   const snapshot = (prev: string, final: number) => ({
     data: [
@@ -220,6 +227,13 @@ function makeArbDb(init: {
   });
 
   const handlers: Record<string, RpcHandler> = {
+    // WKH-194: get_or_create_arbiter_nonce first-writer-wins. El PRIMER writer
+    // persiste su candidate; un writer posterior lee el ya persistido (idéntico al
+    // ON CONFLICT DO NOTHING + re-SELECT del RPC real).
+    get_or_create_arbiter_nonce: (args) => {
+      if (nonceStore === null) nonceStore = { nonce: String(args.p_nonce) };
+      return { data: [{ persisted_nonce: nonceStore.nonce }], error: null };
+    },
     open_dispute: () => {
       if (row.status !== 'open') {
         return {
@@ -354,6 +368,10 @@ function makeArbDb(init: {
       // WHERE id = ?. Devuelve la fila autoritativa (owner-check en app). null si el id
       // no matchea el de la db (intent inexistente → INTENT_NOT_FOUND).
       maybeSingle() {
+        // WKH-194: read-first del nonce persistido (owner-guarded). null = miss.
+        if (table === 'a2a_arbiter_nonces') {
+          return Promise.resolve({ data: nonceStore, error: null });
+        }
         if (table === 'a2a_payment_intents' && b._conds.id !== 'i1') {
           return Promise.resolve({ data: null, error: null });
         }
@@ -423,6 +441,8 @@ beforeEach(() => {
   delete process.env.ARBITER_AUTO_CAP_USD;
   // WKH-191g: flag OFF por defecto → árbitro byte-idéntico al de hoy.
   delete process.env.ESCROW_ARBITER_ENABLED;
+  // WKH-194: sin secreto por defecto (fail-closed). Los tests ON lo setean.
+  delete process.env.ARBITER_NONCE_SECRET;
   mockGetDefaultChainKey.mockReturnValue('kite');
   mockGetAdaptersBundle.mockReturnValue({
     payment: { supportedTokens: [{ decimals: 6 }] },
@@ -1353,7 +1373,7 @@ describe('WKH-189 T-11 migration SQL structure (up + down)', () => {
 // key_id de makeArbDb = 'k1'; el nonce esperado deriva de keccak256('k1') + 'i1'.
 // ────────────────────────────────────────────────────────────────────────────
 const EXPECTED_KEY_HASH = keccak256(stringToBytes('k1'));
-const EXPECTED_NONCE = deriveArbiterNonce(EXPECTED_KEY_HASH, 'i1');
+const EXPECTED_NONCE = deriveArbiterNonce(EXPECTED_KEY_HASH, 'i1', TEST_SECRET);
 
 describe('WKH-191g wire — flag OFF (default) → byte-idéntico, cero on-chain', () => {
   it('AC-1/AC-7: release con flag OFF → settlePaymentIntentOnChain, executeResolveDispute NO llamado', async () => {
@@ -1432,6 +1452,8 @@ describe('WKH-191g wire — triple gate → fallback', () => {
 describe('WKH-191g wire — flag ON + escrow + consent=true', () => {
   function armOnChain(): void {
     process.env.ESCROW_ARBITER_ENABLED = 'true';
+    // WKH-194: secreto presente y fuerte → nonce derivable server-side (no fallback).
+    process.env.ARBITER_NONCE_SECRET = TEST_SECRET;
     mockResolveEscrow.mockReturnValue(ESCROW_ADDR);
     mockReadConsent.mockResolvedValue(true);
   }
@@ -1583,5 +1605,171 @@ describe('WKH-191g wire — flag ON + escrow + consent=true', () => {
     expect(mockSettle).not.toHaveBeenCalled();
     expect(db.row.status).toBe('failed'); // rama ambiguo: NO refund, requiere reconcile
     expect(db.refunds).toEqual([]);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// WKH-194 — nonce del árbitro exactly-once + no-adivinable + defensa colisión.
+// ────────────────────────────────────────────────────────────────────────────
+function releaseEvidence() {
+  mockReadEvidence.mockResolvedValue(
+    makeEvidence({
+      authorizedUsd: 10,
+      consumedUsd: 10,
+      voucherCount: 2,
+      vouchersTotalUsd: 10,
+    }),
+  );
+}
+
+function nonceRpcCalls(): number {
+  return mockRpc.mock.calls.filter(
+    (c) => c[0] === 'get_or_create_arbiter_nonce',
+  ).length;
+}
+
+/** El `nonce` pasado a executeResolveDispute en la llamada `idx`. */
+function resolveNonceArg(idx: number): bigint {
+  const call = mockExecResolve.mock.calls[idx];
+  return (call?.[0] as { nonce: bigint }).nonce;
+}
+
+const SETTLE_PARAMS = {
+  intentId: 'i1',
+  ownerRef: OWNER,
+  payTo: PAYTO,
+  finalAmountUsd: 5,
+  chainId: 2368,
+  keyId: 'k1',
+};
+
+describe('WKH-194 exactly-once + no-adivinable + defensa', () => {
+  function armEscrow(): void {
+    process.env.ESCROW_ARBITER_ENABLED = 'true';
+    process.env.ARBITER_NONCE_SECRET = TEST_SECRET;
+    mockResolveEscrow.mockReturnValue(ESCROW_ADDR);
+    mockReadConsent.mockResolvedValue(true);
+  }
+
+  // T4 · exactly-once persistencia (AC-1/AC-2/CD-1): la 2ª pasada lee el nonce
+  // persistido y NO recomputa (mismo nonce pese a rotar el secreto; RPC no re-llamado).
+  it('T4: read-first exactly-once — 2ª call NO recomputa (RPC no re-llamado, mismo nonce)', async () => {
+    armEscrow();
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+
+    const r1 = await settleArbitrationOnChain(SETTLE_PARAMS);
+    expect(r1.status).toBe('settled');
+    const nonce1 = resolveNonceArg(0);
+    expect(nonce1).toBe(EXPECTED_NONCE);
+    const rpcAfterFirst = nonceRpcCalls();
+    expect(rpcAfterFirst).toBe(1); // 1ª pasada: miss → RPC persiste
+
+    // Rotamos el secreto: si recomputara, el nonce cambiaría. NO debe.
+    process.env.ARBITER_NONCE_SECRET = 'y'.repeat(64);
+    const r2 = await settleArbitrationOnChain(SETTLE_PARAMS);
+    expect(r2.status).toBe('settled');
+    const nonce2 = resolveNonceArg(1);
+    expect(nonce2).toBe(nonce1); // read-first hit → mismo nonce persistido
+    expect(nonceRpcCalls()).toBe(rpcAfterFirst); // 2ª pasada NO llamó al RPC
+  });
+
+  // T5 · fallback secreto ausente → operator-custodial (AC-3/CD-3/CD-5).
+  it('T5: secreto ausente → fallback custodial, executeResolveDispute NO invocado', async () => {
+    process.env.ESCROW_ARBITER_ENABLED = 'true';
+    delete process.env.ARBITER_NONCE_SECRET; // sin secreto → fail-closed
+    mockResolveEscrow.mockReturnValue(ESCROW_ADDR);
+    mockReadConsent.mockResolvedValue(true);
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+
+    const r = await settleArbitrationOnChain(SETTLE_PARAMS);
+
+    expect(r.status).toBe('settled');
+    expect(mockExecResolve).not.toHaveBeenCalled(); // NO escrow path
+    expect(mockSettle).toHaveBeenCalled(); // operator-custodial
+    expect(nonceRpcCalls()).toBe(0); // miss → secreto null → ni siquiera persiste
+  });
+
+  // T6 · flag OFF inerte (AC-6/CD-5): ni RPC ni lectura de a2a_arbiter_nonces.
+  it('T6: flag OFF → inerte, ni RPC nonce ni from(a2a_arbiter_nonces)', async () => {
+    delete process.env.ESCROW_ARBITER_ENABLED;
+    process.env.ARBITER_NONCE_SECRET = TEST_SECRET;
+    happySettle();
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+
+    const r = await settleArbitrationOnChain(SETTLE_PARAMS);
+
+    expect(r.status).toBe('settled');
+    expect(mockExecResolve).not.toHaveBeenCalled();
+    expect(nonceRpcCalls()).toBe(0);
+    expect(
+      mockFrom.mock.calls.filter(
+        (c) => (c[0] as string) === 'a2a_arbiter_nonces',
+      ).length,
+    ).toBe(0);
+  });
+
+  // T8 · defensa no-refund (AC-7): colisión NONCE_ALREADY_USED → failed_ambiguous,
+  // NO refund. Contraste: REVERTED (no colisión) → failed_unequivocal + refund completo.
+  it('T8: colisión de nonce → failed_ambiguous + RECONCILE, db.refunds vacío (NO refund)', async () => {
+    armEscrow();
+    mockExecResolve.mockResolvedValue({
+      kind: 'not_moved',
+      reason: 'NONCE_ALREADY_USED',
+    });
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+    releaseEvidence();
+
+    const r = await arbiterService.openDispute('i1', OWNER);
+
+    expect(r.decision).toBe('release');
+    expect(db.row.settle_outcome).toBe('failed_ambiguous');
+    expect(db.refunds).toEqual([]); // premio del griefing eliminado
+    expect(db.row.status).toBe('failed');
+    expect(String(db.row.error_message)).toContain(
+      'RECONCILE: NONCE_COLLISION',
+    );
+  });
+
+  it('T8-contraste: not_moved REVERTED (no colisión) → failed_unequivocal + refund COMPLETO', async () => {
+    armEscrow();
+    mockExecResolve.mockResolvedValue({
+      kind: 'not_moved',
+      reason: 'REVERTED',
+    });
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    wireDb(db);
+    releaseEvidence();
+
+    await arbiterService.openDispute('i1', OWNER);
+
+    expect(db.row.settle_outcome).toBe('failed_unequivocal');
+    expect(db.refunds).toEqual([10]); // deposit completo al buyer (byte-idéntico a hoy)
+    expect(db.row.status).toBe('refunded');
+  });
+
+  // T9 · atomicidad first-writer (AC-1/DT-3): el RPC devuelve el persisted_nonce
+  // GANADOR aunque difiera del candidate local → se usa SIEMPRE el del RPC.
+  it('T9: getOrCreateArbiterNonce usa el persisted_nonce del RPC, no el candidate local', async () => {
+    armEscrow();
+    const db = makeArbDb({ authorized_usd: 10, consumed_usd: 10 });
+    // El RPC (ganador atómico de otro writer) devuelve un nonce DISTINTO al candidate.
+    const winner = ((1n << 255n) | 424242n).toString();
+    db.handlers.get_or_create_arbiter_nonce = () => ({
+      data: [{ persisted_nonce: winner }],
+      error: null,
+    });
+    wireDb(db);
+
+    const r = await settleArbitrationOnChain(SETTLE_PARAMS);
+
+    expect(r.status).toBe('settled');
+    const nonceUsed = resolveNonceArg(0);
+    expect(nonceUsed).toBe(BigInt(winner)); // el ganador del RPC, NO EXPECTED_NONCE
+    expect(nonceUsed).not.toBe(EXPECTED_NONCE);
   });
 });

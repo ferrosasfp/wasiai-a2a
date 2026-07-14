@@ -20,7 +20,9 @@
  */
 
 import {
+  BaseError,
   type Chain,
+  ContractFunctionRevertedError,
   createPublicClient,
   createWalletClient,
   decodeEventLog,
@@ -64,23 +66,86 @@ const ARBITER_NONCE_FLAG = 1n << 255n;
 const ARBITER_NONCE_LOW_MASK = (1n << 255n) - 1n;
 
 /**
- * Nonce determinista para el `resolveDispute` del árbitro. Bit 255 SIEMPRE seteado
- * → rango `[2^255, 2^256)`, disjunto del nonce de `debit()`. Determinista en
- * `(keyIdHash, intentId)` ⇒ retry produce el MISMO nonce ⇒ el guard
- * `NonceAlreadyUsed` hace el doble-resolve `not_moved` (exactly-once). Función pura.
+ * Nonce del `resolveDispute` del árbitro. Bit 255 SIEMPRE seteado → rango
+ * `[2^255, 2^256)`, disjunto del nonce de `debit()`. WKH-194: incorpora el
+ * `secret` server-side al digest → el nonce deja de ser re-derivable por el buyer
+ * (anti-griefing MNR-1/R-3). Pura dado el secreto: mismo secreto+inputs → mismo
+ * nonce; secreto distinto → nonce distinto. Bit-255 intacto (byte-compat con el
+ * contrato). El secret NO reemplaza los inputs públicos, se AGREGA.
  */
 export function deriveArbiterNonce(
   keyIdHash: string,
   intentId: string,
+  secret: string,
 ): bigint {
   const digest = keccak256(
     encodePacked(
-      ['string', 'bytes32', 'string'],
-      ['WasiAIEscrow.arbiter-dispute.v1', keyIdHash as `0x${string}`, intentId],
+      ['string', 'bytes32', 'string', 'string'],
+      [
+        'WasiAIEscrow.arbiter-dispute.v1',
+        keyIdHash as `0x${string}`,
+        intentId,
+        secret,
+      ],
     ),
   );
   return ARBITER_NONCE_FLAG | (BigInt(digest) & ARBITER_NONCE_LOW_MASK);
 }
+
+const ARBITER_NONCE_SECRET_MIN_LEN = 32;
+/**
+ * Mínimo de caracteres ÚNICOS exigido (WKH-194 · AR MNR-1). La fuerza del secreto
+ * depende de su ENTROPÍA, no sólo del largo: el `nonce` se vuelve PÚBLICO al viajar
+ * como arg on-chain de `resolveDispute`, así que un secreto ≥32 chars pero de baja
+ * entropía (p. ej. `'a'*32`, `'12'*16`) es crackeable offline desde un nonce observado
+ * → reabre el griefing R-3. Umbral 16: un `openssl rand -hex 32` (64 hex chars) usa
+ * el alfabeto [0-9a-f] (16 símbolos) → con altísima probabilidad exhibe los 16 →
+ * PASA; los patrones triviales (todos iguales, secuencia repetida corta) NO llegan a 16.
+ */
+const ARBITER_NONCE_SECRET_MIN_UNIQUE = 16;
+
+/**
+ * Lee `ARBITER_NONCE_SECRET` (WKH-194). Fail-closed (AC-3 / AR MNR-1): devuelve
+ * null (→ el caller cae al path operator-custodial en vez de usar una fórmula
+ * adivinable) si el secreto es undefined/''/whitespace, o < 32 chars, o de BAJA
+ * ENTROPÍA (< 16 caracteres únicos). El chequeo de entropía es imprescindible porque
+ * el nonce derivado se publica on-chain: un secreto largo pero trivial es brute-forceable.
+ * Nunca lanza. NUNCA loguea el valor del secreto (CD-2): sólo flags booleanos
+ * present/weak (jamás el largo real ni el conteo de únicos, para no filtrar entropía).
+ */
+export function getArbiterNonceSecret(): string | null {
+  const raw = process.env.ARBITER_NONCE_SECRET;
+  if (raw === undefined || raw.trim() === '') {
+    log.warn(
+      { present: false },
+      'ARBITER_NONCE_SECRET ausente; arbiter cae a operator-custodial',
+    );
+    return null;
+  }
+  const secret = raw.trim();
+  if (secret.length < ARBITER_NONCE_SECRET_MIN_LEN) {
+    log.warn(
+      { present: true, weak: true },
+      'ARBITER_NONCE_SECRET débil (<32 chars); fallback fail-closed',
+    );
+    return null;
+  }
+  // Entropía (AR MNR-1): rechazar secretos de baja entropía aunque cumplan el largo.
+  // Heurística defendible: exigir ≥16 caracteres únicos. Descarta patrones triviales
+  // ('a'*32 → 1 único; '12'*16 → 2 únicos) sin rechazar CSPRNG hex ('openssl rand -hex 32').
+  const uniqueChars = new Set(secret).size;
+  if (uniqueChars < ARBITER_NONCE_SECRET_MIN_UNIQUE) {
+    log.warn(
+      { present: true, weak: true },
+      'ARBITER_NONCE_SECRET de baja entropía; fallback fail-closed (usar `openssl rand -hex 32`)',
+    );
+    return null;
+  }
+  return secret;
+}
+
+/** Razón canónica de colisión de nonce (comparación sin magic-string en arbiter.ts). */
+export const ARBITER_NONCE_COLLISION_REASON = 'NONCE_ALREADY_USED';
 
 // ── Outcome (misma forma que Hop1Outcome — debit-executor.ts:57-60) ──
 
@@ -304,6 +369,42 @@ export async function executeResolveDispute(args: {
   }
 
   if (receipt.status !== 'success') {
+    // WKH-194: best-effort — ¿el revert fue por colisión de nonce (pre-consumo/griefing)?
+    // El simulate corre a estado 'latest' donde el nonce YA está consumido → reproduce
+    // NonceAlreadyUsed. Cualquier fallo del simulate / otra causa → 'REVERTED' (conservador,
+    // comportamiento de hoy). Nunca lanza.
+    try {
+      await publicClient.simulateContract({
+        address: escrowContract,
+        abi: ESCROW_ABI,
+        functionName: 'resolveDispute',
+        args: [
+          keyIdHash as `0x${string}`,
+          seller as `0x${string}`,
+          sellerAmount,
+          nonce,
+        ],
+        account: wallet.account ?? undefined,
+      });
+    } catch (simErr) {
+      if (
+        simErr instanceof BaseError &&
+        simErr.walk(
+          (e) => e instanceof ContractFunctionRevertedError,
+        ) instanceof ContractFunctionRevertedError
+      ) {
+        const revert = simErr.walk(
+          (e) => e instanceof ContractFunctionRevertedError,
+        ) as ContractFunctionRevertedError;
+        if (revert.data?.errorName === 'NonceAlreadyUsed') {
+          return {
+            kind: 'not_moved',
+            reason: ARBITER_NONCE_COLLISION_REASON,
+            txHash,
+          };
+        }
+      }
+    }
     return { kind: 'not_moved', reason: 'REVERTED', txHash };
   }
 

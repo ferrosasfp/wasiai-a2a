@@ -146,4 +146,10 @@ export const ESCROW_ABI = [
     inputs: [{ name: 'keyId', type: 'bytes32' }],
     outputs: [{ name: '', type: 'uint256' }],
   },
+  // ── 194: custom error decodable por simulateContract (anti-griefing) ──
+  {
+    type: 'error',
+    name: 'NonceAlreadyUsed',
+    inputs: [],
+  },
 ] as const;

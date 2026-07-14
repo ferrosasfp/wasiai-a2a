@@ -21,10 +21,12 @@
 import { createHash } from 'node:crypto';
 import { keccak256, parseUnits, stringToBytes } from 'viem';
 import {
+  ARBITER_NONCE_COLLISION_REASON,
   deriveArbiterNonce,
   executeLockForDispute,
   executeReleaseDispute,
   executeResolveDispute,
+  getArbiterNonceSecret,
 } from '../adapters/escrow/arbiter-executor.js';
 import {
   readArbitrationConsent,
@@ -89,6 +91,80 @@ export function isEscrowArbiterEnabled(): boolean {
 }
 
 /**
+ * Nonce del árbitro exactly-once (WKH-194). Read-first (CD-1): si ya hay un nonce
+ * persistido para el intentId → lo devuelve SIN recomputar deriveArbiterNonce (AC-2).
+ * Miss → secreto (AC-3, null si ausente/débil) → deriva → RPC first-writer-wins → ganador.
+ * Devuelve null ante secreto ausente/débil o fallo de persistencia → el caller cae a
+ * operator-custodial (fail-closed, money-safe). Ownership Guard (WKH-53).
+ */
+async function getOrCreateArbiterNonce(
+  intentId: string,
+  ownerRef: string,
+  keyIdHash: string,
+): Promise<bigint | null> {
+  // 1. Read-first owner-guarded (CD-1/CD-OWNERSHIP): si existe, NO recomputar.
+  const { data: existing, error: readErr } = await supabase
+    .from('a2a_arbiter_nonces')
+    .select('nonce')
+    .eq('intent_id', intentId)
+    .eq('owner_ref', ownerRef)
+    .maybeSingle();
+  // CR MNR-1: observabilidad — si el SELECT falla (DB blip) el flujo sigue igual
+  // (cae al RPC idempotente ON CONFLICT, que preserva exactly-once), pero sin este
+  // warn se perdía la señal del error de lectura. NO altera el control-flow.
+  if (readErr) {
+    log.warn(
+      { intentId, detail: readErr.message },
+      'arbiter nonce read-first failed → se recurre al RPC first-writer-wins',
+    );
+  }
+  if (existing?.nonce != null) return BigInt(String(existing.nonce));
+
+  // 2. Miss → secreto (AC-3). null → fallback (NO fórmula pública, CD-3).
+  const secret = getArbiterNonceSecret();
+  if (secret === null) return null;
+
+  // 3. Deriva el candidate (pura dado el secreto).
+  const candidate = deriveArbiterNonce(keyIdHash, intentId, secret);
+
+  // 4. RPC first-writer-wins (DT-3). Error/no-row → null (money-safe → fallback).
+  try {
+    const { data, error } = await supabase.rpc('get_or_create_arbiter_nonce', {
+      p_intent_id: intentId,
+      p_owner_ref: ownerRef,
+      p_key_id_hash: keyIdHash,
+      p_nonce: candidate.toString(),
+    });
+    if (error) {
+      log.error(
+        { intentId, detail: error.message },
+        'get_or_create_arbiter_nonce failed → fallback',
+      );
+      return null;
+    }
+    const persisted = (data as { persisted_nonce: string }[] | null)?.[0]
+      ?.persisted_nonce;
+    if (persisted == null) {
+      log.error(
+        { intentId },
+        'get_or_create_arbiter_nonce devolvió sin fila → fallback',
+      );
+      return null;
+    }
+    return BigInt(String(persisted)); // el GANADOR atómico
+  } catch (err) {
+    log.error(
+      {
+        intentId,
+        detail: err instanceof Error ? err.message : String(err),
+      },
+      'arbiter nonce persist threw → fallback',
+    );
+    return null;
+  }
+}
+
+/**
  * Seam del settle release/split del árbitro (WKH-191g). Espejo de `settleEscrowAware`
  * (payment-intent.ts:500): triple gate en cascada (CD-1) → `resolveDispute` on-chain
  * escrow-custodial; faltando cualquier condición o ante CUALQUIER throw →
@@ -127,7 +203,10 @@ export async function settleArbitrationOnChain(params: {
       getAdaptersBundle(chainKey)?.payment.supportedTokens[0]?.decimals;
     if (decimals == null) return settlePaymentIntentOnChain(base);
     const sellerAmount = parseUnits(finalAmountUsd.toString(), decimals);
-    const nonce = deriveArbiterNonce(keyIdHash, intentId);
+    // WKH-194: nonce exactly-once persistido (read-first). null (secreto ausente/débil
+    // o persist falló) → fallback operator-custodial (AC-3/CD-3, fail-closed).
+    const nonce = await getOrCreateArbiterNonce(intentId, ownerRef, keyIdHash);
+    if (nonce === null) return settlePaymentIntentOnChain(base);
 
     // 4. resolveDispute escrow-custodial: libera sellerAmount al seller (AC-4/AC-6).
     const o = await executeResolveDispute({
@@ -761,6 +840,41 @@ export const arbiterService = {
         row,
       );
       return this.outcome(meta, arbUsd, residualUsd, 'executed', settle.txHash);
+    }
+
+    // WKH-194: colisión de nonce (pre-consumo/griefing) → NO auto-refundar (premiaría el ataque).
+    // Misma SEMÁNTICA no-refund que la rama ambiguous (terminal probado), con causa desambiguada
+    // para el reconcile.
+    if (
+      settle.failureKind === 'unequivocal' &&
+      settle.error === ARBITER_NONCE_COLLISION_REASON
+    ) {
+      const collisionErr =
+        'RECONCILE: NONCE_COLLISION (posible pre-consumo/griefing) — revisión manual';
+      log.warn(
+        { intentId, detail: settle.error },
+        'arbitration nonce collision: deposit NO reembolsado, reconcile manual',
+      );
+      await recordSettleOutcome(
+        intentId,
+        ownerRef,
+        'failed_ambiguous',
+        null,
+        null,
+        collisionErr,
+      );
+      const okCol = await finalizePaymentIntent(
+        intentId,
+        ownerRef,
+        null,
+        arbUsd,
+        null,
+        'failed_ambiguous',
+        collisionErr,
+      );
+      if (!okCol) throw new ArbiterError('INTERNAL');
+      await this.emitAndRecord(intentId, ownerRef, meta, arbUsd, null, row);
+      return this.outcome(meta, arbUsd, 0, 'executed', null); // residual 0 → NO refund
     }
 
     // Settle falló. INEQUÍVOCO → refund del deposit COMPLETO (herencia BLQ-ALTO-1).

@@ -14,6 +14,41 @@ export type Database = {
   };
   public: {
     Tables: {
+      a2a_arbiter_nonces: {
+        Row: {
+          created_at: string;
+          intent_id: string;
+          key_id_hash: string;
+          // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
+          nonce: string;
+          owner_ref: string;
+        };
+        Insert: {
+          created_at?: string;
+          intent_id: string;
+          key_id_hash: string;
+          // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
+          nonce: string;
+          owner_ref: string;
+        };
+        Update: {
+          created_at?: string;
+          intent_id?: string;
+          key_id_hash?: string;
+          // NUMERIC(78,0) uint256 → string (evita pérdida de precisión > 2^53).
+          nonce?: string;
+          owner_ref?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'a2a_arbiter_nonces_intent_id_fkey';
+            columns: ['intent_id'];
+            isOneToOne: true;
+            referencedRelation: 'a2a_payment_intents';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
       a2a_agents: {
         Row: {
           agent_url: string;
@@ -2772,6 +2807,18 @@ export type Database = {
         Returns: {
           persisted_status: string;
           persisted_reason: string | null;
+        }[];
+      };
+      get_or_create_arbiter_nonce: {
+        Args: {
+          p_intent_id: string;
+          p_owner_ref: string;
+          p_key_id_hash: string;
+          // NUMERIC uint256 → string (evita pérdida de precisión > 2^53).
+          p_nonce: string;
+        };
+        Returns: {
+          persisted_nonce: string;
         }[];
       };
       record_debit_hop1: {
