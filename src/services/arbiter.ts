@@ -105,7 +105,7 @@ async function getOrCreateArbiterNonce(
   // 1. Read-first owner-guarded (CD-1/CD-OWNERSHIP): si existe, NO recomputar.
   const { data: existing, error: readErr } = await supabase
     .from('a2a_arbiter_nonces')
-    .select('nonce')
+    .select('nonce::text')
     .eq('intent_id', intentId)
     .eq('owner_ref', ownerRef)
     .maybeSingle();

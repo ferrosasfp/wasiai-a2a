@@ -114,10 +114,18 @@ function wireFrom(opts: {
 }) {
   const sigResult = opts.sigResult ?? { data: null, error: null };
   const keyResult = opts.keyResult ?? { data: null, error: null };
+  // WKH-196: cols capturadas del .select() sobre la tabla de firmas (dentro del
+  // closure — sin símbolo top-level nuevo consumido por la factory vi.mock, CD-8).
+  let sigSelectCols: string | null = null;
   mockFrom.mockImplementation(((table: string) => {
     const result = table === 'a2a_agent_keys' ? keyResult : sigResult;
     const b: Record<string, unknown> = {
-      select: () => b,
+      select: (cols?: string) => {
+        if (table === 'a2a_payment_intent_debit_signatures') {
+          sigSelectCols = cols ?? null;
+        }
+        return b;
+      },
       update: () => b,
       eq: () => b,
       in: () => b,
@@ -128,6 +136,7 @@ function wireFrom(opts: {
     return b;
     // biome-ignore lint/suspicious/noExplicitAny: test double for supabase builder
   }) as any);
+  return { sigSelectCols: () => sigSelectCols };
 }
 
 /** Configura supabase.rpc por nombre (claim_reconciliation / record_reconciliation_resolution). */
@@ -493,6 +502,128 @@ describe('T-12 driftCheck report-only', () => {
       deltaAtomic: null,
       exceedsThreshold: false,
     });
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// WKH-196 — pérdida de precisión uint256 al leer NUMERIC(78,0) sin cast `::text`
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── T-NEW-6: resolveIntent cast-presence + round-trip del nonce del incidente ──
+describe('T-NEW-6 resolveIntent cast-presence + round-trip nonce (AC-4/AC-6, WKH-196)', () => {
+  it('select castea nonce/amount ::text y el nonce > 2^53 sobrevive exacto a claim/reverify', async () => {
+    mockReverify.mockResolvedValue('confirmed');
+    const wired = wireFrom({
+      sigResult: {
+        data: sigRow({ debit_nonce: '4312989337224638380' }),
+        error: null,
+      },
+    });
+    wireRpc({
+      claim: {
+        data: [
+          {
+            claimed: true,
+            resolution_tx_hash: null,
+            amount_atomic: AMOUNT_ATOMIC,
+          },
+        ],
+        error: null,
+      },
+    });
+    mockSettleSeam.mockResolvedValue({
+      status: 'settled',
+      txHash: '0xsettletx',
+      finalAmountUsd: 2,
+    });
+
+    await reconciliationService.resolveIntent(INTENT_ID);
+
+    // (a) cast-presence: el select castea ambas columnas NUMERIC(78,0).
+    const cols = wired.sigSelectCols();
+    expect(cols).toContain('debit_nonce::text');
+    expect(cols).toContain('debit_amount_atomic::text');
+    // (b) round-trip: claim_reconciliation recibe el nonce string EXACTO.
+    const claimCall = mockRpc.mock.calls.find(
+      (c) => c[0] === 'claim_reconciliation',
+    );
+    expect(claimCall?.[1]).toMatchObject({ p_nonce: '4312989337224638380' });
+    // reverify recibe el nonce reconstruido como bigint EXACTO (bug: 4312989337224638464n).
+    expect(mockReverify).toHaveBeenCalledWith(
+      expect.objectContaining({ nonce: 4312989337224638380n }),
+    );
+  });
+});
+
+// ── T-NEW-7: listPending mapea el nonce > 2^53 string exacto ──
+describe('T-NEW-7 listPending round-trip nonce (AC-4, WKH-196)', () => {
+  it('el item del output preserva nonce="4312989337224638380" exacto', async () => {
+    wireFrom({
+      sigResult: {
+        data: [sigRow({ debit_nonce: '4312989337224638380' })],
+        error: null,
+      },
+    });
+    const rows = await reconciliationService.listPending();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.nonce).toBe('4312989337224638380');
+  });
+});
+
+// ── T-NEW-8: driftCheck round-trip amount > 2^53 + cast-presence (SOLO amount, CD-6) ──
+describe('T-NEW-8 driftCheck round-trip amount + cast-presence (AC-2/AC-4/CD-6, WKH-196)', () => {
+  it('sumDebitedAtomic exacto y el select castea SOLO debit_amount_atomic::text', async () => {
+    const wired = wireFrom({
+      sigResult: {
+        data: [
+          {
+            key_id: KEY_ID,
+            debit_key_id_hash: KEY_ID_HASH,
+            debit_amount_atomic: '4312989337224638380',
+            owner_ref: OWNER,
+            a2a_payment_intents: { chain_id: CHAIN_ID },
+          },
+        ],
+        error: null,
+      },
+      keyResult: { data: null, error: null },
+    });
+    mockReadEscrowBalance.mockResolvedValue(null);
+
+    const rows = await reconciliationService.driftCheck();
+
+    // round-trip: la suma bigint del amount NUMERIC(78,0) es EXACTA.
+    expect(rows[0]?.sumDebitedAtomic).toBe('4312989337224638380');
+    // cast-presence: driftCheck NO trae debit_nonce → castea SOLO el amount (CD-6).
+    const cols = wired.sigSelectCols();
+    expect(cols).toContain('debit_amount_atomic::text');
+    expect(cols).not.toContain('debit_nonce::text');
+  });
+});
+
+// ── T-NEW-9: driftCheck amount safe (< 2^53) byte-idéntico (CD-1) ──
+describe('T-NEW-9 driftCheck safe amount byte-idéntico (AC-5/CD-1, WKH-196)', () => {
+  it('debit_amount_atomic="3000000000000000000" → sumDebitedAtomic idéntico', async () => {
+    wireFrom({
+      sigResult: {
+        data: [
+          {
+            key_id: KEY_ID,
+            debit_key_id_hash: KEY_ID_HASH,
+            debit_amount_atomic: '3000000000000000000',
+            owner_ref: OWNER,
+            a2a_payment_intents: { chain_id: CHAIN_ID },
+          },
+        ],
+        error: null,
+      },
+      keyResult: { data: null, error: null },
+    });
+    mockReadEscrowBalance.mockResolvedValue(null);
+
+    const rows = await reconciliationService.driftCheck();
+
+    expect(rows[0]?.sumDebitedAtomic).toBe('3000000000000000000');
   });
 });
 
