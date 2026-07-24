@@ -17,12 +17,9 @@ import {
   getPaymentAdapter,
   getPaymentAdapterOrUnion,
 } from '../adapters/registry.js';
-import type {
-  ChainKey,
-  SolanaPaymentAdapter,
-} from '../adapters/types.js';
-import { isValidSolanaAddress } from './wallet-format.js';
+import type { ChainKey, SolanaPaymentAdapter } from '../adapters/types.js';
 import type { Agent, DownstreamLogger } from '../types/index.js';
+import { isValidSolanaAddress } from './wallet-format.js';
 
 // Re-export for backward-compat: callers historically import
 // `DownstreamLogger` from this module (e.g. compose.ts). The canonical
@@ -72,6 +69,10 @@ export interface DownstreamResult {
   txHash: string;
   blockNumber?: number; // opcional — el adapter SettleResult no lo expone (TD-WKH-112-01)
   settledAmount: string; // atomic units; = value.toString()
+  // WKH-234 fix-pack AR-BLQ-1: CAIP-2 del leg cuando el settle fue Solana
+  // (`solana:<cluster>`). Presente SOLO en la rama Solana → `compose` lo usa
+  // para registrar el CAIP-2 + firma en el ledger (AC-8). Ausente en legs EVM.
+  settleCaip2?: string;
 }
 
 export type DownstreamSkipCode =
@@ -111,9 +112,14 @@ function validatePayTo(
 /**
  * WKH-234 — settle de UN leg Solana (settle-only, operator-signed). Espejo
  * funcional de la rama EVM pero SIN el dance sign→verify→settle: el adapter
- * Solana hace build+sign+broadcast+confirm + verify-before-trust internamente
- * (idempotente por `intentId`, AC-7). NEVER-throws (CD-10): retorna `null` +
- * skip-code, nunca lanza. Monto atómico decimals-aware desde el adapter (CD-9).
+ * Solana hace build+sign+broadcast+confirm (idempotente por `intentId`, AC-7).
+ * NEVER-throws (CD-10): retorna `null` + skip-code, nunca lanza. Monto atómico
+ * decimals-aware desde el adapter (CD-9).
+ *
+ * NOTA (fix-pack AR-MNR-2): el settle FRESCO confía en la confirmación de
+ * `sendAndConfirmTransaction` (commitment configurado); el `verify()` on-chain
+ * del adapter sólo corre en el camino idempotente-hit (re-lee una firma previa
+ * antes de reusarla). Este helper NO invoca verify() en el settle fresco.
  */
 async function settleSolanaLeg(
   agent: Agent,
@@ -134,7 +140,11 @@ async function settleSolanaLeg(
   // priceUsdc guard (mismo criterio que la rama EVM).
   if (!Number.isFinite(agent.priceUsdc) || agent.priceUsdc <= 0) {
     logger.warn(
-      { agentSlug: agent.slug, code: 'INVALID_PRICE', priceUsdc: agent.priceUsdc },
+      {
+        agentSlug: agent.slug,
+        code: 'INVALID_PRICE',
+        priceUsdc: agent.priceUsdc,
+      },
       '[Downstream] priceUsdc must be a finite positive number',
     );
     return null;
@@ -151,7 +161,10 @@ async function settleSolanaLeg(
   }
   let amountAtomic: string;
   try {
-    amountAtomic = parseUnits(String(agent.priceUsdc), token.decimals).toString();
+    amountAtomic = parseUnits(
+      String(agent.priceUsdc),
+      token.decimals,
+    ).toString();
   } catch (e) {
     logger.warn(
       { agentSlug: agent.slug, code: 'INVALID_PRICE', detail: String(e) },
@@ -190,6 +203,9 @@ async function settleSolanaLeg(
   return {
     txHash: settleRes.txHash, // firma base58 del SPL-transfer
     settledAmount: amountAtomic,
+    // Fix-pack AR-BLQ-1: propaga el CAIP-2 del adapter para que compose registre
+    // el leg Solana en el ledger (AC-8 — settle_caip2 + settle_signature).
+    settleCaip2: adapter.caip2ChainId,
   };
 }
 
@@ -476,7 +492,9 @@ export async function signAndSettleDownstream(
     // 13. Success. blockNumber is OMITTED — SettleResult does not expose it
     //     (DT-1 opción C / TD-WKH-112-01). txHash intact.
     return {
-      txHash: settleRes.txHash as `0x${string}`,
+      // Fix-pack CR-MNR-1: sin cast — `txHash` es `string` (aloja firmas base58
+      // y hashes 0x). El campo ya es del tipo correcto.
+      txHash: settleRes.txHash,
       settledAmount: value.toString(),
     };
   } catch (e) {

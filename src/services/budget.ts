@@ -39,10 +39,17 @@ const log = getLogger('budget');
 
 /**
  * WKH-234 (AC-8) — registro ADITIVO del CAIP-2 / firma del leg Solana en el
- * ledger de recibos. Best-effort, fire-and-forget (NUNCA afecta el resultado del
- * debit). REUSA el `ownerRef` del caller autenticado (CD-1/AC-9) — no abre
- * ninguna query sobre `a2a_agent_keys`. Solo se invoca cuando el leg es Solana
- * (settleCaip2 presente) → sin efecto para legs EVM (byte-idéntico).
+ * ledger de recibos. Best-effort, fire-and-forget (NUNCA afecta el flujo).
+ * REUSA el `ownerRef` del caller autenticado (CD-1/AC-9) — no abre ninguna query
+ * sobre `a2a_agent_keys`. Solo se invoca cuando el leg es Solana → sin efecto
+ * para legs EVM (byte-idéntico).
+ *
+ * Fix-pack AR-BLQ-1 (2026-07-24): este emit se dispara POST-settle desde
+ * `compose` (vía `budgetService.recordSolanaSettleReceipt`), NO desde `debit`.
+ * Razón temporal: el `debit` per-step es fee-on-attempt (precede a
+ * `invokeAgent`), pero la firma base58 del SPL-transfer sólo existe DESPUÉS del
+ * settle downstream. Threadear la firma al `debit` pre-settle era imposible
+ * (era la causa del falso-verde AC-8 detectado por el AR).
  */
 function emitSolanaSettleReceipt(args: {
   keyId: string;
@@ -138,14 +145,6 @@ export const budgetService = {
     // call-site that forgets to thread a real caller owner_ref FAILS tsc instead
     // of silently disabling the ownership guard.
     ownerRef: string,
-    // WKH-234 (AC-8): registro ADITIVO del leg Solana. Cuando se pasan (settle
-    // en `solana-devnet`), tras un debit EXITOSO se emite un recibo best-effort
-    // con `settle_caip2`/`settle_signature`. Ausentes → sin emit extra → EVM
-    // byte-idéntico. NO se toca el RPC atómico de debit (CD money-path). El
-    // `ownerRef` REQUERIDO de arriba se REUSA (CD-1/AC-9): sin queries nuevas
-    // sobre a2a_agent_keys.
-    settleCaip2?: string,
-    settleSignature?: string,
   ): Promise<{ success: boolean; error?: string }> {
     // ── RUTA KEY-SESSION (WKH-121) ──
     // Espejo de la ruta delegación, sin per-tx limit (no aplica a sesiones).
@@ -368,17 +367,6 @@ export const budgetService = {
         return { success: false, error: 'DEST_POLICY_DEBIT_FAILED' };
       }
 
-      // WKH-234 (AC-8): leg Solana → registro aditivo del CAIP-2/firma.
-      if (settleCaip2) {
-        emitSolanaSettleReceipt({
-          keyId,
-          ownerRef,
-          chainId,
-          amountUsd,
-          settleCaip2,
-          settleSignature,
-        });
-      }
       return { success: true };
     }
 
@@ -425,18 +413,26 @@ export const budgetService = {
       return { success: false, error: 'DEBIT_FAILED' };
     }
 
-    // WKH-234 (AC-8): leg Solana → registro aditivo del CAIP-2/firma.
-    if (settleCaip2) {
-      emitSolanaSettleReceipt({
-        keyId,
-        ownerRef,
-        chainId,
-        amountUsd,
-        settleCaip2,
-        settleSignature,
-      });
-    }
     return { success: true };
+  },
+
+  /**
+   * WKH-234 (AC-8) fix-pack AR-BLQ-1 — registra el CAIP-2 + firma base58 del leg
+   * Solana en el ledger de recibos, de forma ADITIVA y best-effort. Lo invoca
+   * `compose` DESPUÉS de un settle downstream Solana exitoso (cuando la firma ya
+   * existe), reusando el `ownerRef` REQUERIDO del caller autenticado (CD-1/AC-9)
+   * — sin abrir ninguna query sobre `a2a_agent_keys`. Para legs EVM `compose`
+   * simplemente NO lo llama → columna NULL → byte-idéntico.
+   */
+  recordSolanaSettleReceipt(args: {
+    keyId: string;
+    ownerRef: string;
+    chainId: number;
+    amountUsd: number;
+    settleCaip2: string;
+    settleSignature: string | undefined;
+  }): void {
+    emitSolanaSettleReceipt(args);
   },
 
   /**

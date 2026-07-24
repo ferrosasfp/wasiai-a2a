@@ -213,34 +213,28 @@ describe('budgetService', () => {
       expect(result).toEqual({ success: true });
     });
 
-    // ── WKH-234 (W5): CAIP-2 aditivo + ownership guard ──────────────────
+    // ── WKH-234 (W5) fix-pack AR-BLQ-1: CAIP-2 aditivo + ownership guard ──
+    // Nota: el registro del leg Solana NO se hace ya dentro de `debit` (el
+    // débito per-step es fee-on-attempt y precede al settle downstream donde
+    // nace la firma). Se hace vía `recordSolanaSettleReceipt`, invocado por
+    // `compose` DESPUÉS del settle. El threading end-to-end compose→receipt se
+    // valida en compose.test.ts (T-234-AC8-INTEG). Estos units cubren el emit.
     const SOL_CAIP2 = 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1';
     const SOL_SIG = '5'.repeat(64);
 
-    it('T-234-AC8: solana leg debit (sentinel chainId + settleCaip2) → emits receipt with settle_caip2/settle_signature; reuses ownerRef', async () => {
-      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+    it('T-234-AC8: recordSolanaSettleReceipt emits receipt with settle_caip2/settle_signature; reuses ownerRef (no a2a_agent_keys query)', () => {
       mockReceiptEmit.mockClear();
+      mockRpc.mockClear();
 
-      const result = await budgetService.debit(
-        'key-1',
-        900001, // sentinel DT-8
-        0.5,
-        undefined,
-        undefined,
-        undefined,
-        'user-1',
-        SOL_CAIP2,
-        SOL_SIG,
-      );
-
-      expect(result).toEqual({ success: true });
-      // The atomic debit RPC is NOT altered — same increment_a2a_key_spend call.
-      expect(mockRpc).toHaveBeenCalledWith('increment_a2a_key_spend', {
-        p_key_id: 'key-1',
-        p_chain_id: 900001,
-        p_amount_usd: 0.5,
-        p_owner_ref: 'user-1',
+      budgetService.recordSolanaSettleReceipt({
+        keyId: 'key-1',
+        ownerRef: 'user-1',
+        chainId: 900001, // sentinel DT-8
+        amountUsd: 0.5,
+        settleCaip2: SOL_CAIP2,
+        settleSignature: SOL_SIG,
       });
+
       // Additive Solana settle receipt carries the CAIP-2 + base58 signature,
       // reusing the caller's ownerRef (CD-1/AC-9 — no new a2a_agent_keys query).
       expect(mockReceiptEmit).toHaveBeenCalledWith(
@@ -252,9 +246,11 @@ describe('budgetService', () => {
           settleSignature: SOL_SIG,
         }),
       );
+      // No RPC over a2a_agent_keys is opened by the receipt path (CD-1/AC-9).
+      expect(mockRpc).not.toHaveBeenCalled();
     });
 
-    it('T-234-AC8b: EVM leg debit (no settleCaip2) → NO solana settle receipt (column stays NULL, byte-identical)', async () => {
+    it('T-234-AC8b: EVM leg debit does NOT emit a solana settle receipt (column stays NULL, byte-identical)', async () => {
       mockRpc.mockResolvedValue({ data: null, error: null } as never);
       mockReceiptEmit.mockClear();
 
@@ -274,34 +270,22 @@ describe('budgetService', () => {
       expect(solanaEmit).toBeUndefined();
     });
 
-    it('T-234-AC9: solana debit OWNERSHIP_MISMATCH → mapped code + NO settle receipt (guard preserved, ownerRef threaded)', async () => {
-      mockRpc.mockResolvedValue({
-        data: null,
-        error: {
-          message: 'OWNERSHIP_MISMATCH: key key-1 not owned by attacker',
-        },
-      } as never);
+    it('T-234-AC9: recordSolanaSettleReceipt threads the caller ownerRef verbatim into the receipt (ownership guard datum reused)', () => {
       mockReceiptEmit.mockClear();
 
-      const result = await budgetService.debit(
-        'key-1',
-        900001,
-        0.5,
-        undefined,
-        undefined,
-        undefined,
-        'attacker',
-        SOL_CAIP2,
-        SOL_SIG,
-      );
+      budgetService.recordSolanaSettleReceipt({
+        keyId: 'key-1',
+        ownerRef: 'owner-A',
+        chainId: 900001,
+        amountUsd: 0.5,
+        settleCaip2: SOL_CAIP2,
+        settleSignature: SOL_SIG,
+      });
 
-      expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
-      // A rejected (ownership-guarded) debit MUST NOT emit a settle receipt.
-      expect(mockReceiptEmit).not.toHaveBeenCalled();
-      // The RPC received the AUTHENTICATED caller's owner_ref as the guard datum.
-      expect(mockRpc).toHaveBeenCalledWith(
-        'increment_a2a_key_spend',
-        expect.objectContaining({ p_owner_ref: 'attacker' }),
+      // The receipt carries the AUTHENTICATED caller's owner_ref (reused, not
+      // re-derived from the target row) — no cross-tenant leak (CD-1/AC-9).
+      expect(mockReceiptEmit).toHaveBeenCalledWith(
+        expect.objectContaining({ ownerRef: 'owner-A', agentKeyId: 'key-1' }),
       );
     });
 

@@ -278,6 +278,25 @@ export const composeService = {
       // WKH-104 (TD-SYBIL): hash HMAC del caller para anti-sybil sin exponer
       // el owner_ref crudo (CD-5/CD-6). null si caller anónimo (x402).
       const callerRefHash = hashCallerRef(scopingKeyRow?.owner_ref);
+      // WKH-234 fix-pack AR-BLQ-1: cuando el settle downstream de ESTE step fue
+      // en Solana (`downstream.settleCaip2` presente) y hubo un débito de budget
+      // del caller autenticado, registrar el CAIP-2 + firma base58 en el ledger
+      // (AC-8), REUSANDO el `owner_ref` del caller (CD-1/AC-9 — sin queries
+      // nuevas sobre a2a_agent_keys). Legs EVM (settleCaip2 undefined) → NO se
+      // invoca → columna NULL → byte-idéntico (AC-4). Compartido entre el
+      // happy-path y el retry-ok. Best-effort (el emit interno es fire-and-forget).
+      const recordSolanaLegIfAny = (ds: DownstreamResult | undefined): void => {
+        if (ds?.settleCaip2 && scopingKeyRow && chainId !== undefined) {
+          budgetService.recordSolanaSettleReceipt({
+            keyId: scopingKeyRow.id,
+            ownerRef: scopingKeyRow.owner_ref,
+            chainId,
+            amountUsd: stepDebitedUsd,
+            settleCaip2: ds.settleCaip2,
+            settleSignature: ds.txHash,
+          });
+        }
+      };
       try {
         const { output, txHash, downstream } = await this.invokeAgent(
           agent,
@@ -286,6 +305,8 @@ export const composeService = {
           undefined,
           `${composeRunId}:${i}`, // WKH-234 intentId (leg Solana, AC-7)
         );
+        // WKH-234 (AC-8): si el settle downstream fue Solana, anota el ledger.
+        recordSolanaLegIfAny(downstream);
         // CD-9: la cola de éxito (StepResult + agregados + bridge + evento)
         // está COMPARTIDA con el retry-ok vía finishSuccessfulStep. No copiar.
         const agg = await this.finishSuccessfulStep({
@@ -454,6 +475,8 @@ export const composeService = {
                   undefined,
                   `${composeRunId}:${i}`, // WKH-234 intentId — MISMO que el master (AC-7 idempotente)
                 );
+                // WKH-234 (AC-8): retry-ok — anota el ledger si fue Solana.
+                recordSolanaLegIfAny(downstream);
                 // ── PASO 6a: 2xx → éxito. El retry-debit SE QUEDA (caller
                 //    pagó 1 vez). CD-9: cola de éxito COMPARTIDA con happy-path.
                 const agg = await this.finishSuccessfulStep({
