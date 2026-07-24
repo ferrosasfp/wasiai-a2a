@@ -93,7 +93,10 @@ export type AgentStatus = 'active' | 'inactive' | 'unreachable';
 export interface AgentPaymentSpec {
   method: string; // e.g. 'x402'
   chain: string; // e.g. 'avalanche'
-  contract: `0x${string}`; // payTo on-chain address
+  // WKH-234: namespace-aware payTo. EVM = `0x${string}`; Solana = base58 mint/
+  // owner pubkey (string). La validación de FORMA vive en `wallet-format`
+  // (`isValidPayoutWallet`) / `validatePayTo` — este tipo solo relaja la forma.
+  contract: `0x${string}` | string; // payTo on-chain address
   asset?: string | undefined; // e.g. 'USDC' (opcional, pass-through)
 }
 
@@ -136,6 +139,12 @@ export interface PublishAgentInput {
   payoutWallet?: string;
   /** WKH-143b: referrer opaco (persistido trimmeado; inerte hasta WKH-143c). */
   referrerRef?: string;
+  /**
+   * WKH-234: contexto de familia del `payoutWallet` para el guard de publish
+   * (namespace-aware). Slug de chain (ej. `solana-devnet`). Ausente → familia
+   * `'evm'` → comportamiento byte-idéntico.
+   */
+  payoutChain?: string;
 }
 
 /**
@@ -155,6 +164,8 @@ export interface UpdateAgentInput {
   payoutWallet?: string;
   /** WKH-143b: referrer opaco (persistido trimmeado; inerte hasta WKH-143c). */
   referrerRef?: string;
+  /** WKH-234: contexto de familia del `payoutWallet` (namespace-aware). Ausente → EVM. */
+  payoutChain?: string;
 }
 
 export interface AgentFieldMapping {

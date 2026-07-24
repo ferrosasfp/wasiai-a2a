@@ -493,18 +493,22 @@ describe('discoveryService', () => {
       expect(agent.payment?.chain).toBe('kite-ozone-testnet');
     });
 
-    it('T-AC5: unknown chain (polygon/solana) → payment undefined (defense preserved)', () => {
+    // WKH-234: `solana` is now a recognized slug (→ solana-devnet), so the
+    // "unknown chain" defense uses `solana-mainnet` — NOT recognized
+    // (devnet-only, CD-4). A recognized Solana agent passing discovery is
+    // covered by the positive W2 test.
+    it('T-AC5: unknown chain (polygon/solana-mainnet) → payment undefined (defense preserved)', () => {
       const polygon = discoveryService.mapAgent(
         makeRegistry(),
         makePaymentRaw('polygon'),
       );
       expect(polygon.payment).toBeUndefined();
 
-      const solana = discoveryService.mapAgent(
+      const solanaMainnet = discoveryService.mapAgent(
         makeRegistry(),
-        makePaymentRaw('solana'),
+        makePaymentRaw('solana-mainnet'),
       );
-      expect(solana.payment).toBeUndefined();
+      expect(solanaMainnet.payment).toBeUndefined();
     });
 
     it('T-AC1-discover: discover() exposes payment.chain="base-sepolia" end-to-end', async () => {

@@ -172,7 +172,8 @@ export type ChainKey =
   | 'avalanche-mainnet'
   | 'base-sepolia'
   | 'base-mainnet'
-  | 'tempo-testnet'; // WKH-090 — cuarto rail (testnet-only, CD-2 → sin mainnet)
+  | 'tempo-testnet' // WKH-090 — cuarto rail (testnet-only, CD-2 → sin mainnet)
+  | 'solana-devnet'; // WKH-234 — rail Solana (devnet-only, CD-4 → SIN sufijo -mainnet)
 
 /**
  * `AdaptersBundle` groups all chain-specific adapter instances + chain config

@@ -522,7 +522,13 @@ describe('isSettleVerifyEnabled', () => {
 // every `ChainKey` in the union — a superset of `SUPPORTED_CHAINS` (which adds
 // `tempo-testnet` via a flag).
 describe('ChainKey `-mainnet` naming invariant (WKH-150 AC-2)', () => {
-  const CHAIN_KEY_TO_VIEM: Record<ChainKey, Chain> = {
+  // WKH-234: the `-mainnet` invariant is EVM-only. Solana (`solana-devnet`) has
+  // NO viem `Chain` object, so it is excluded from the DOMAIN via
+  // `Exclude<ChainKey, 'solana-devnet'>`. This still keeps the map EXHAUSTIVE for
+  // every EVM `ChainKey` (adding a new EVM slug without a mapping fails tsc —
+  // AC-2c/CD-4 intact); only the non-viem family is skipped. NO EVM expectation
+  // changes → AC-4 byte-identical.
+  const CHAIN_KEY_TO_VIEM: Record<Exclude<ChainKey, 'solana-devnet'>, Chain> = {
     'kite-ozone-testnet': kiteTestnet,
     'kite-mainnet': kiteMainnet,
     'avalanche-fuji': avalancheFuji,

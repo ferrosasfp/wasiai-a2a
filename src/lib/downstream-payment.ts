@@ -54,6 +54,10 @@ const RPC_ENV_BY_CHAIN: Record<ChainKey, string> = {
   // exhaustividad del Record<ChainKey, string>; dead code con el flag OFF (el
   // rail nunca inicializa un bundle → CHAIN_NOT_SUPPORTED antes de llegar acá).
   'tempo-testnet': 'TEMPO_TESTNET_RPC_URL',
+  // WKH-234 — Solana rail. Requerido para exhaustividad del Record<ChainKey>;
+  // el settle Solana no usa este env viem-oriented (usa SOLANA_RPC_URL vía el
+  // adapter), pero el nombre canónico coincide.
+  'solana-devnet': 'SOLANA_RPC_URL',
 };
 
 // ─── Public types ───────────────────────────────────────────────────

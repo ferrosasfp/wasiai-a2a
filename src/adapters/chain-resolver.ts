@@ -57,6 +57,13 @@ const SLUG_ALIASES: Record<string, ChainKey> = Object.assign(
     '42429': 'tempo-testnet', // V1 — chainId de Tempo testnet "Moderato"
     'tempo-testnet': 'tempo-testnet',
     tempo: 'tempo-testnet',
+
+    // solana-devnet aliases (WKH-234) — estáticos (resolver puro, NO lee el
+    // flag; CD-7/CD-8). Conocer el slug NO expone el rail con flag OFF: el
+    // bundle no existe → getAdaptersBundle('solana-devnet') = undefined →
+    // CHAIN_NOT_SUPPORTED. Devnet-only (CD-4): sin `solana-mainnet`.
+    'solana-devnet': 'solana-devnet',
+    solana: 'solana-devnet',
   } satisfies Record<string, ChainKey>,
 );
 

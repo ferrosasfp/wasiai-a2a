@@ -21,3 +21,19 @@ Errores/decisiones defensivas registradas durante F3. Cada entrada protege HUs f
 - **Error potencial**: el Story File dice `class SolanaPaymentAdapter implements SolanaPaymentAdapter`; declarar clase e importar la interfaz homónima en el mismo módulo colisiona (duplicate identifier).
 - **Fix**: importar la interfaz con alias `import type { SolanaPaymentAdapter as ISolanaPaymentAdapter }` y `class SolanaPaymentAdapter implements ISolanaPaymentAdapter`.
 - **Aplicar en**: cualquier adapter nuevo cuyo nombre de clase coincida con su interfaz de contrato.
+
+### [2026-07-24 16:00] Wave 1 — DESVIACIÓN de Scope IN: el guard de publish vive TAMBIÉN en `routes/agents.ts`
+- **Error**: el Story File lista solo `src/services/agent.ts` para el guard namespace-aware de publish, pero el rechazo real de `payoutWallet` inválido ocurre PRIMERO en `routes/agents.ts` (422 antes de llegar al service). Con el guard EVM-only del route, AC-1 (publicar wallet base58) era IMPOSIBLE end-to-end.
+- **Causa raíz**: Scope IN incompleto — no incluyó `routes/agents.ts` pese a ser la puerta de entrada del publish y a que AC-1 es un gate de W1.
+- **Fix**: se hizo el route guard namespace-aware (mirror mínimo del service): `isValidPayoutWalletForChain(v, payoutChain)` resuelve la familia vía `normalizeChainSlug` (ausente→EVM byte-idéntico; solana-devnet→base58; desconocida→422 AC-6). Se preservó el `reason` EVM 'must be a valid EVM address' byte-idéntico. Se thread `input.payoutChain`.
+- **Aplicar en**: FLAG PARA AR/CR — desviación consciente de Scope IN, justificada por AC-1. Revisar que el route guard no relaje la validación EVM (solo agrega la rama Solana cuando payoutChain lo indica).
+
+### [2026-07-24 16:05] Wave 1 — Ordering: `chain-resolver` (W2) debía adelantarse a W1
+- **Error**: `agent.ts` (W1) resuelve la familia vía `normalizeChainSlug`, pero los aliases Solana estaban planificados para W2. Sin ellos, AC-1 (payoutChain:'solana-devnet') se rechazaría como chain desconocida.
+- **Fix**: se adelantaron los aliases Solana de `SLUG_ALIASES` a W1 (el resolver es puro y flag-independiente → seguro). W2 solo agrega el test de discovery.
+- **Aplicar en**: al derivar familia desde slug en una wave, el resolver que la reconoce debe estar listo en la MISMA o anterior wave.
+
+### [2026-07-24 16:11] Wave 1 — Tests preexistentes usaban 'solana' como chain DESCONOCIDA
+- **Error**: 2 tests (`x402.chain-aware.test.ts` T-AC4a, `discovery.test.ts` T-AC5) usaban el slug `'solana'` como ejemplo de chain no reconocida. Al hacerse reconocida (feature), rompieron.
+- **Fix**: cambiar el ejemplo a `'solana-mainnet'` (NO reconocido, devnet-only CD-4). Se preservó la aserción y la intención del test (chain desconocida → CHAIN_NOT_SUPPORTED / payment undefined). NO es cambio de expectativa: el input dejó de ser válido para el caso "unknown".
+- **Aplicar en**: al agregar un slug al resolver, `grep` los tests que lo usaban como stand-in de "desconocido" y reapuntarlos a un slug aún inválido.
