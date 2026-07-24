@@ -118,6 +118,26 @@ vi.mock('../tempo/index.js', () => ({
   }),
 }));
 
+// Mock the solana factory — returns a devnet bundle stub (WKH-234). Real
+// adapters covered by solana/payment.test.ts. Mirrors kite/base/avax/tempo.
+vi.mock('../solana/index.js', () => ({
+  createSolanaAdapters: vi.fn(async (_opts?: { network?: 'devnet' }) => ({
+    payment: {
+      name: 'solana',
+      vmFamily: 'solana',
+      caip2ChainId: 'solana:test',
+    },
+    attestation: { name: 'solana', chainId: 900001 },
+    gasless: { name: 'solana', chainId: 900001 },
+    identity: null,
+    chainConfig: {
+      name: 'Solana Devnet',
+      chainId: 900001,
+      explorerUrl: 'https://explorer.solana.com?cluster=devnet',
+    },
+  })),
+}));
+
 import {
   _resetRegistry,
   getAdaptersBundle,
@@ -642,6 +662,70 @@ describe('adapter registry', () => {
       process.env.WASIAI_A2A_CHAINS = 'nonexistent-chain';
       await expect(initAdapters()).rejects.toThrow(
         /Supported:.*base-mainnet, tempo-testnet/,
+      );
+    });
+  });
+
+  // ─── WKH-234: Solana rail behind SOLANA_ADAPTER_ENABLED (default OFF) ───
+  describe('WKH-234 — Solana rail (flag-gated)', () => {
+    afterEach(() => {
+      delete process.env.SOLANA_ADAPTER_ENABLED;
+    });
+
+    // ── AC-4: flag OFF → byte-idéntico, sin solana-devnet en el set soportado ──
+    it('AC-4 — flag OFF: getSupportedChains excludes solana-devnet (error lists exactly the 6 baseline rails)', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'solana-devnet';
+      await expect(initAdapters()).rejects.toThrow(
+        "Unsupported chain 'solana-devnet'. Supported: kite-ozone-testnet, kite-mainnet, avalanche-fuji, avalanche-mainnet, base-sepolia, base-mainnet",
+      );
+    });
+
+    it('AC-4 — flag OFF: getAdaptersBundle(solana-devnet) is undefined; createSolanaAdapters never invoked', async () => {
+      const factoryModule = await import('../solana/index.js');
+      const factorySpy = factoryModule.createSolanaAdapters as ReturnType<
+        typeof vi.fn
+      >;
+      factorySpy.mockClear();
+
+      process.env.WASIAI_A2A_CHAINS = 'base-sepolia';
+      await initAdapters();
+
+      expect(getAdaptersBundle('solana-devnet')).toBeUndefined();
+      expect(factorySpy).not.toHaveBeenCalled();
+    });
+
+    // ── flag ON → bundle Solana coexiste, factory recibe network=devnet ──
+    it('flag ON + WASIAI_A2A_CHAINS includes solana-devnet → full bundle, coexists with EVM', async () => {
+      process.env.SOLANA_ADAPTER_ENABLED = 'true';
+      const factoryModule = await import('../solana/index.js');
+      const factorySpy = factoryModule.createSolanaAdapters as ReturnType<
+        typeof vi.fn
+      >;
+      factorySpy.mockClear();
+
+      process.env.WASIAI_A2A_CHAINS = 'base-sepolia,solana-devnet';
+      await initAdapters();
+
+      expect(getInitializedChainKeys()).toEqual([
+        'base-sepolia',
+        'solana-devnet',
+      ]);
+      const solana = getAdaptersBundle('solana-devnet');
+      expect(solana).toBeDefined();
+      expect(solana?.payment.name).toBe('solana');
+      expect(solana?.chainConfig.chainId).toBe(900001);
+      expect(factorySpy).toHaveBeenCalledWith({ network: 'devnet' });
+
+      // EVM rail intacto (AC-4 byte-idéntico).
+      const base = getAdaptersBundle('base-sepolia');
+      expect(base?.chainConfig.chainId).toBe(84532);
+    });
+
+    it('flag ON error message includes solana-devnet in the supported list', async () => {
+      process.env.SOLANA_ADAPTER_ENABLED = 'true';
+      process.env.WASIAI_A2A_CHAINS = 'nonexistent-chain';
+      await expect(initAdapters()).rejects.toThrow(
+        /Supported:.*base-mainnet.*solana-devnet/,
       );
     });
   });

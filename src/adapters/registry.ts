@@ -49,13 +49,23 @@ function isTempoEnabled(): boolean {
 }
 
 /**
- * Set de chains soportadas flag-aware. Con `TEMPO_ADAPTER_ENABLED != 'true'`
- * retorna EXACTAMENTE los 6 slugs actuales → byte-idéntico (CD-6).
+ * WKH-234 — feature-flag del rail Solana, default OFF (CD-8). Convención
+ * `=== 'true'` (mirror `isTempoEnabled`). Único choke-point del gate: el resolver
+ * y el adapter NO leen esta env var.
+ */
+function isSolanaEnabled(): boolean {
+  return process.env.SOLANA_ADAPTER_ENABLED === 'true';
+}
+
+/**
+ * Set de chains soportadas flag-aware. Con `SOLANA_ADAPTER_ENABLED != 'true'`
+ * NO agrega `solana-devnet` → byte-idéntico (CD-8). Idéntica defensa para Tempo.
  */
 function getSupportedChains(): readonly ChainKey[] {
-  return isTempoEnabled()
+  const withTempo: readonly ChainKey[] = isTempoEnabled()
     ? [...SUPPORTED_CHAINS, 'tempo-testnet']
     : SUPPORTED_CHAINS;
+  return isSolanaEnabled() ? [...withTempo, 'solana-devnet'] : withTempo;
 }
 
 function isSupportedChain(slug: string): slug is ChainKey {
@@ -108,6 +118,13 @@ async function buildBundle(chainKey: ChainKey): Promise<AdaptersBundle> {
     // WKH-090 — cuarto rail (testnet-only, flag-gated en getSupportedChains()).
     const { createTempoAdapters } = await import('./tempo/index.js');
     return createTempoAdapters({ network: 'testnet' });
+  }
+  if (chainKey === 'solana-devnet') {
+    // WKH-234 — rail Solana (devnet-only, flag-gated en getSupportedChains()).
+    // Con flag OFF el slug nunca pasa el fail-fast de initAdapters → el bundle
+    // no se construye → CHAIN_NOT_SUPPORTED (defensa idéntica a Tempo).
+    const { createSolanaAdapters } = await import('./solana/index.js');
+    return createSolanaAdapters({ network: 'devnet' });
   }
   throw new Error(
     `Unsupported chain '${chainKey}'. Supported: ${getSupportedChains().join(', ')}`,
