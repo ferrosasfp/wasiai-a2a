@@ -511,6 +511,38 @@ describe('discoveryService', () => {
       expect(solanaMainnet.payment).toBeUndefined();
     });
 
+    // WKH-234 (W2, AC-6 inverso / ruta feliz): un agente Solana-native pasa el
+    // filtro de discovery una vez el resolver reconoce el slug. La lógica de
+    // discovery NO cambió — solo el resolver aprendió `solana-devnet`/`solana`.
+    it('T-234-W2: accepts a Solana-native agent (chain solana-devnet / solana → payment defined)', () => {
+      const SOL_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
+      const raw = (chain: string): Record<string, unknown> => ({
+        id: '1',
+        slug: 'sol-agent',
+        name: 'SolAgent',
+        description: 'd',
+        capabilities: ['x'],
+        price: 0.5,
+        status: 'active',
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain,
+          contract: SOL_MINT, // base58 SPL mint (no 0x)
+        },
+      });
+
+      const devnet = discoveryService.mapAgent(makeRegistry(), raw('solana-devnet'));
+      expect(devnet.payment).toBeDefined();
+      expect(devnet.payment?.chain).toBe('solana-devnet');
+      expect(devnet.payment?.contract).toBe(SOL_MINT);
+
+      // `solana` alias also passes (chain string preserved as-is, CD-7).
+      const alias = discoveryService.mapAgent(makeRegistry(), raw('solana'));
+      expect(alias.payment).toBeDefined();
+      expect(alias.payment?.chain).toBe('solana');
+    });
+
     it('T-AC1-discover: discover() exposes payment.chain="base-sepolia" end-to-end', async () => {
       setupRegistryResponse([
         makeRawAgent({
