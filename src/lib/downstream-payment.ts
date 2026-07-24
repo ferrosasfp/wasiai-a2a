@@ -15,8 +15,13 @@ import {
   getAdaptersBundle,
   getInitializedChainKeys,
   getPaymentAdapter,
+  getPaymentAdapterOrUnion,
 } from '../adapters/registry.js';
-import type { ChainKey } from '../adapters/types.js';
+import type {
+  ChainKey,
+  SolanaPaymentAdapter,
+} from '../adapters/types.js';
+import { isValidSolanaAddress } from './wallet-format.js';
 import type { Agent, DownstreamLogger } from '../types/index.js';
 
 // Re-export for backward-compat: callers historically import
@@ -62,7 +67,9 @@ const RPC_ENV_BY_CHAIN: Record<ChainKey, string> = {
 
 // ─── Public types ───────────────────────────────────────────────────
 export interface DownstreamResult {
-  txHash: `0x${string}`;
+  // WKH-234: namespace-aware. EVM = `0x${string}` (tx hash); Solana = firma
+  // base58 del SPL-transfer. Widened a `string` para alojar ambas familias.
+  txHash: string;
   blockNumber?: number; // opcional — el adapter SettleResult no lo expone (TD-WKH-112-01)
   settledAmount: string; // atomic units; = value.toString()
 }
@@ -101,6 +108,91 @@ function validatePayTo(
   return { ok: true, addr: contract as `0x${string}` };
 }
 
+/**
+ * WKH-234 — settle de UN leg Solana (settle-only, operator-signed). Espejo
+ * funcional de la rama EVM pero SIN el dance sign→verify→settle: el adapter
+ * Solana hace build+sign+broadcast+confirm + verify-before-trust internamente
+ * (idempotente por `intentId`, AC-7). NEVER-throws (CD-10): retorna `null` +
+ * skip-code, nunca lanza. Monto atómico decimals-aware desde el adapter (CD-9).
+ */
+async function settleSolanaLeg(
+  agent: Agent,
+  adapter: SolanaPaymentAdapter,
+  logger: DownstreamLogger,
+  intentId?: string,
+): Promise<DownstreamResult | null> {
+  // payTo base58 (CD-9) — NO 0x. Validador puro (sin web3.js).
+  const payTo = agent.payment?.contract ?? '';
+  if (!isValidSolanaAddress(payTo)) {
+    logger.warn(
+      { agentSlug: agent.slug, code: 'INVALID_PAY_TO_FORMAT' },
+      '[Downstream] solana payTo is not a valid base58 pubkey',
+    );
+    return null;
+  }
+
+  // priceUsdc guard (mismo criterio que la rama EVM).
+  if (!Number.isFinite(agent.priceUsdc) || agent.priceUsdc <= 0) {
+    logger.warn(
+      { agentSlug: agent.slug, code: 'INVALID_PRICE', priceUsdc: agent.priceUsdc },
+      '[Downstream] priceUsdc must be a finite positive number',
+    );
+    return null;
+  }
+
+  // Monto atómico decimals-aware desde el mint del adapter (CD-9, nunca 1e6/1e18).
+  const token = adapter.supportedTokens[0];
+  if (!token) {
+    logger.warn(
+      { agentSlug: agent.slug, code: 'INVALID_PRICE' },
+      '[Downstream] solana adapter has no supported tokens',
+    );
+    return null;
+  }
+  let amountAtomic: string;
+  try {
+    amountAtomic = parseUnits(String(agent.priceUsdc), token.decimals).toString();
+  } catch (e) {
+    logger.warn(
+      { agentSlug: agent.slug, code: 'INVALID_PRICE', detail: String(e) },
+      '[Downstream] parseUnits failed (solana)',
+    );
+    return null;
+  }
+
+  // Idempotency key determinístico del leg (AC-7). Fallback si el caller no lo
+  // pasó: `<slug>:<payTo>` (estable por leg). Canónico: `contextId:stepIndex:payTo`.
+  const legIntentId = intentId ?? `${agent.slug}:${payTo}`;
+
+  // settle: build+sign+broadcast+confirm + verify-before-trust interno.
+  let settleRes: Awaited<ReturnType<typeof adapter.settle>>;
+  try {
+    settleRes = await adapter.settle({
+      payTo,
+      amountAtomic,
+      intentId: legIntentId,
+    });
+  } catch (e) {
+    logger.warn(
+      { agentSlug: agent.slug, code: 'SETTLE_FAILED', detail: String(e) },
+      '[Downstream] solana adapter.settle threw',
+    );
+    return null;
+  }
+  if (!settleRes.success || !settleRes.txHash) {
+    logger.warn(
+      { agentSlug: agent.slug, code: 'SETTLE_FAILED', error: settleRes.error },
+      '[Downstream] solana adapter.settle returned success=false',
+    );
+    return null;
+  }
+
+  return {
+    txHash: settleRes.txHash, // firma base58 del SPL-transfer
+    settledAmount: amountAtomic,
+  };
+}
+
 // ─── Public API (SINGLE functional export) ──────────────────────────
 
 /**
@@ -125,6 +217,10 @@ function validatePayTo(
 export async function signAndSettleDownstream(
   agent: Agent,
   logger: DownstreamLogger,
+  // WKH-234: idempotency key para el leg Solana (AC-7). Solo lo consume la rama
+  // Solana; la rama EVM lo ignora (usa el nonce EIP-3009). Ausente → derivado
+  // del leg (agent.slug:payTo). Formato canónico: `contextId:stepIndex:payTo`.
+  intentId?: string,
 ): Promise<DownstreamResult | null> {
   // 1. Flag check (zero overhead when off)
   if (!DOWNSTREAM_FLAG) {
@@ -169,6 +265,20 @@ export async function signAndSettleDownstream(
       `[Downstream] chain=${agent.payment.chain} not supported/initialized — skipped`,
     );
     return null;
+  }
+
+  // 4b. WKH-234 — narrow por vmFamily. El leg Solana es settle-only (SPL
+  //     transfer operator-signed): NO el dance EVM sign→verify→settle. Tiene su
+  //     propia validación base58 + atómico decimals-aware. La rama EVM (pasos
+  //     5-13) queda INTACTA byte-idéntica (AC-4). NEVER-throws preservado (CD-10).
+  const adapterUnion = getPaymentAdapterOrUnion(chainKey);
+  if (adapterUnion.vmFamily === 'solana') {
+    return settleSolanaLeg(agent, adapterUnion, logger, intentId);
+  }
+  if (adapterUnion.vmFamily !== 'evm') {
+    // Exhaustividad (CD-5): unión discriminada agotada.
+    const _never: never = adapterUnion;
+    return _never;
   }
 
   // 5. payTo validation (R-1)

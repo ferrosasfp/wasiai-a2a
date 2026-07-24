@@ -33,6 +33,7 @@ const mockKiteVerify = vi.fn();
 const mockKiteSettle = vi.fn();
 
 const baseAdapter = {
+  vmFamily: 'evm' as const, // WKH-234: discriminante para el narrowing downstream
   sign: (...a: unknown[]) => mockBaseSign(...a),
   verify: (...a: unknown[]) => mockBaseVerify(...a),
   settle: (...a: unknown[]) => mockBaseSettle(...a),
@@ -42,6 +43,7 @@ const baseAdapter = {
 };
 
 const fujiAdapter = {
+  vmFamily: 'evm' as const,
   sign: (...a: unknown[]) => mockFujiSign(...a),
   verify: (...a: unknown[]) => mockFujiVerify(...a),
   settle: (...a: unknown[]) => mockFujiSettle(...a),
@@ -51,6 +53,7 @@ const fujiAdapter = {
 };
 
 const kiteAdapter = {
+  vmFamily: 'evm' as const,
   sign: (...a: unknown[]) => mockKiteSign(...a),
   verify: (...a: unknown[]) => mockKiteVerify(...a),
   settle: (...a: unknown[]) => mockKiteSettle(...a),
@@ -59,21 +62,38 @@ const kiteAdapter = {
   getNetwork: vi.fn().mockReturnValue('eip155:2368'),
 };
 
+// WKH-234: Solana adapter mock (settle-only, base58). vmFamily discriminante.
+const SOL_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
+const SOL_PAYTO = 'So11111111111111111111111111111111111111112';
+const SOL_SIG = '5'.repeat(64); // firma base58 (no 0x)
+const mockSolanaSettle = vi.fn();
+const solanaAdapter = {
+  vmFamily: 'solana' as const,
+  settle: (...a: unknown[]) => mockSolanaSettle(...a),
+  verify: vi.fn(),
+  supportedTokens: [{ symbol: 'USDC', mint: SOL_MINT, decimals: 6 }],
+  getMint: vi.fn().mockReturnValue(SOL_MINT),
+  getNetwork: vi.fn().mockReturnValue('solana:test'),
+};
+
 // chainId per bundle (used by the ephemeral public client in the balance check)
 const CHAIN_IDS: Record<string, number> = {
   'base-sepolia': 84532,
   'avalanche-fuji': 43113,
   'kite-ozone-testnet': 2368,
+  'solana-devnet': 900001, // WKH-234 sentinel (DT-8)
 };
 const CHAIN_NAMES: Record<string, string> = {
   'base-sepolia': 'Base Sepolia',
   'avalanche-fuji': 'Avalanche Fuji',
   'kite-ozone-testnet': 'Kite Ozone Testnet',
+  'solana-devnet': 'Solana Devnet',
 };
 
 const mockGetPaymentAdapter = vi.fn((chainKey?: string) => {
   if (chainKey === 'base-sepolia') return baseAdapter;
   if (chainKey === 'kite-ozone-testnet') return kiteAdapter;
+  if (chainKey === 'solana-devnet') return solanaAdapter; // WKH-234
   return fujiAdapter; // avalanche-fuji (and any default)
 });
 
@@ -96,11 +116,14 @@ const mockGetAdaptersBundle = vi.fn((chainKey?: string) => {
 
 vi.mock('../adapters/registry.js', () => ({
   getPaymentAdapter: (chainKey?: string) => mockGetPaymentAdapter(chainKey),
+  getPaymentAdapterOrUnion: (chainKey?: string) =>
+    mockGetPaymentAdapter(chainKey),
   getAdaptersBundle: (chainKey?: string) => mockGetAdaptersBundle(chainKey),
   getInitializedChainKeys: () => [
     'avalanche-fuji',
     'base-sepolia',
     'kite-ozone-testnet',
+    'solana-devnet',
   ],
 }));
 
@@ -185,6 +208,9 @@ function setHappyDefaults() {
   });
   mockKiteVerify.mockResolvedValue({ valid: true });
   mockKiteSettle.mockResolvedValue({ txHash: '0xKITE', success: true });
+
+  // WKH-234: Solana leg settle default (base58 signature).
+  mockSolanaSettle.mockResolvedValue({ txHash: SOL_SIG, success: true });
 }
 
 // Import the module under test with the flag set (read at module load).
@@ -488,10 +514,16 @@ describe('signAndSettleDownstream — chain-aware delegation', () => {
     expect(signedValue).not.toBe('500000');
   });
 
-  it('T-AC4a: chain=solana (normalizeChainSlug→undefined) → null + CHAIN_NOT_SUPPORTED, sign NOT called (AC-4/CD-4)', async () => {
+  // WKH-234: `solana` now resolves (→ solana-devnet), so this "unrecognized"
+  // test uses `solana-mainnet` — NOT recognized (devnet-only, CD-4).
+  it('T-AC4a: chain=solana-mainnet (normalizeChainSlug→undefined) → null + CHAIN_NOT_SUPPORTED, sign NOT called (AC-4/CD-4)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const agent = makeAgent({
-      payment: { method: 'x402', chain: 'solana', contract: PAYTO_ADDR },
+      payment: {
+        method: 'x402',
+        chain: 'solana-mainnet',
+        contract: PAYTO_ADDR,
+      },
     });
     const logger = makeLogger();
     const result = await signAndSettleDownstream(agent, logger);
@@ -520,7 +552,13 @@ describe('signAndSettleDownstream — chain-aware delegation', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         code: 'CHAIN_NOT_SUPPORTED',
-        initialized: ['avalanche-fuji', 'base-sepolia', 'kite-ozone-testnet'],
+        // WKH-234: mock now also initializes the solana-devnet rail.
+        initialized: [
+          'avalanche-fuji',
+          'base-sepolia',
+          'kite-ozone-testnet',
+          'solana-devnet',
+        ],
       }),
       expect.any(String),
     );
@@ -601,5 +639,102 @@ describe('signAndSettleDownstream — chain-aware delegation', () => {
     );
     expect(mockReadContract).not.toHaveBeenCalled();
     expect(mockBaseSign).toHaveBeenCalled();
+  });
+});
+
+// ─── WKH-234: per-leg multichain (AC-3) ──────────────────────────────
+describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
+  const PAYTO_ADDR = '0x1111111111111111111111111111111111111111' as const;
+
+  it('T-234-AC3a: solana-devnet leg → settles via Solana adapter (settle-only), returns base58 txHash', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const agent = makeAgent({
+      priceUsdc: 0.5,
+      payment: {
+        method: 'x402',
+        asset: 'USDC',
+        chain: 'solana-devnet',
+        contract: SOL_PAYTO,
+      },
+    });
+    const result = await signAndSettleDownstream(agent, makeLogger());
+
+    expect(result).not.toBeNull();
+    expect(result?.txHash).toBe(SOL_SIG); // base58, not 0x
+    // decimals-aware atomic from the adapter mint (6-dec): 0.5 → 500000.
+    expect(result?.settledAmount).toBe('500000');
+    // Solana leg is settle-only: adapter.settle called, NO EVM sign/verify.
+    expect(mockSolanaSettle).toHaveBeenCalledTimes(1);
+    const settleArg = mockSolanaSettle.mock.calls[0]?.[0] as {
+      payTo: string;
+      amountAtomic: string;
+      intentId: string;
+    };
+    expect(settleArg.payTo).toBe(SOL_PAYTO);
+    expect(settleArg.amountAtomic).toBe('500000');
+    expect(typeof settleArg.intentId).toBe('string');
+    // EVM adapters untouched for the Solana leg.
+    expect(mockFujiSign).not.toHaveBeenCalled();
+    expect(mockBaseSign).not.toHaveBeenCalled();
+  });
+
+  it('T-234-AC3b: mixed pipeline — avalanche-fuji leg byte-identical, solana leg via its adapter', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+
+    // EVM leg (avalanche-fuji) — byte-identical to the pre-WKH-234 path.
+    const evm = await signAndSettleDownstream(
+      makeAgent({
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain: 'avalanche-fuji',
+          contract: PAYTO_ADDR,
+        },
+      }),
+      makeLogger(),
+    );
+    expect(evm?.txHash).toBe('0xFUJI');
+    expect(mockFujiSign).toHaveBeenCalledTimes(1);
+    expect(mockFujiSettle).toHaveBeenCalledTimes(1);
+    expect(mockSolanaSettle).not.toHaveBeenCalled();
+
+    // Solana leg — settled via the Solana adapter, distinct rail.
+    const sol = await signAndSettleDownstream(
+      makeAgent({
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain: 'solana-devnet',
+          contract: SOL_PAYTO,
+        },
+      }),
+      makeLogger(),
+    );
+    expect(sol?.txHash).toBe(SOL_SIG);
+    expect(mockSolanaSettle).toHaveBeenCalledTimes(1);
+    // EVM leg adapter not re-invoked by the Solana leg.
+    expect(mockFujiSign).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-234-AC3c: solana leg with invalid base58 payTo → null + INVALID_PAY_TO_FORMAT (NEVER throws)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+    const result = await signAndSettleDownstream(
+      makeAgent({
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain: 'solana-devnet',
+          contract: '0xnotBase58', // EVM-shaped → invalid for Solana
+        },
+      }),
+      logger,
+    );
+    expect(result).toBeNull();
+    expect(mockSolanaSettle).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'INVALID_PAY_TO_FORMAT' }),
+      expect.any(String),
+    );
   });
 });

@@ -37,3 +37,14 @@ Errores/decisiones defensivas registradas durante F3. Cada entrada protege HUs f
 - **Error**: 2 tests (`x402.chain-aware.test.ts` T-AC4a, `discovery.test.ts` T-AC5) usaban el slug `'solana'` como ejemplo de chain no reconocida. Al hacerse reconocida (feature), rompieron.
 - **Fix**: cambiar el ejemplo a `'solana-mainnet'` (NO reconocido, devnet-only CD-4). Se preservó la aserción y la intención del test (chain desconocida → CHAIN_NOT_SUPPORTED / payment undefined). NO es cambio de expectativa: el input dejó de ser válido para el caso "unknown".
 - **Aplicar en**: al agregar un slug al resolver, `grep` los tests que lo usaban como stand-in de "desconocido" y reapuntarlos a un slug aún inválido.
+
+### [2026-07-24 16:30] Wave 4 — DESVIACIÓN: compose inbound se deja EVM-only (NO se agrega rama Solana inbound)
+- **Contexto**: el Story File W4 pide una "rama inbound Solana" en compose (:798-991). Pero esa rama es el pago INBOUND (caller→gateway) que firma EIP-3009 sobre la DEFAULT chain, y §1 dice explícitamente "el caller NO posee wallet Solana" → inbound-Solana es semánticamente imposible.
+- **Problema**: cablear `getPaymentAdapterOrUnion()` en compose inbound forzaba actualizar ~34 mocks de `registry.js` en toda la suite (blast radius enorme, riesgo money-path).
+- **Decisión**: compose inbound se deja usando `getPaymentAdapter()` (narrowa a EvmPaymentAdapter, fail-loud si la default fuera Solana — config no soportada, correcto). El settle Solana REAL vive en el DOWNSTREAM (`signAndSettleDownstream`, settle-only operator-signed), que ES la ruta del fee del agente Solana. Solo se agregó el threading de `intentId` en compose (invokeAgent + call sites) — inocuo para los mocks.
+- **Aplicar en**: FLAG PARA AR/CR — desviación consciente. La justificación (§1 caller sin wallet Solana + downstream es la ruta real) debe validarse. El único mock tocado fue `downstream-payment.test.ts` (getPaymentAdapterOrUnion + vmFamily:'evm').
+
+### [2026-07-24 16:32] Wave 4 — intentId idempotente: `composeRunId:stepIndex` (no Date.now)
+- **Error potencial**: derivar el intentId del leg Solana de `Date.now()` haría que el retry (que re-invoca) genere un intentId distinto → re-emitiría un settle ya confirmado (AC-7 violado / doble pago).
+- **Fix**: `const composeRunId = randomUUID()` una vez por ejecución de compose(); intentId = `${composeRunId}:${i}`. Estable entre master+retry del MISMO step (idempotente AC-7), distinto entre ejecuciones (no dedup cross-run). El almacén real (persistencia cross-proceso) se cierra en W5 (ledger settle_signature); el seam W3/W4 es in-memory.
+- **Aplicar en**: cualquier clave de idempotencia debe ser estable a través de los reintentos del MISMO trabajo lógico y única entre trabajos distintos — nunca `Date.now()` por-intento.
