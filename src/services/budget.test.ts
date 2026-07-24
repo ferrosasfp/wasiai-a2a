@@ -213,6 +213,98 @@ describe('budgetService', () => {
       expect(result).toEqual({ success: true });
     });
 
+    // ── WKH-234 (W5): CAIP-2 aditivo + ownership guard ──────────────────
+    const SOL_CAIP2 = 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1';
+    const SOL_SIG = '5'.repeat(64);
+
+    it('T-234-AC8: solana leg debit (sentinel chainId + settleCaip2) → emits receipt with settle_caip2/settle_signature; reuses ownerRef', async () => {
+      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+      mockReceiptEmit.mockClear();
+
+      const result = await budgetService.debit(
+        'key-1',
+        900001, // sentinel DT-8
+        0.5,
+        undefined,
+        undefined,
+        undefined,
+        'user-1',
+        SOL_CAIP2,
+        SOL_SIG,
+      );
+
+      expect(result).toEqual({ success: true });
+      // The atomic debit RPC is NOT altered — same increment_a2a_key_spend call.
+      expect(mockRpc).toHaveBeenCalledWith('increment_a2a_key_spend', {
+        p_key_id: 'key-1',
+        p_chain_id: 900001,
+        p_amount_usd: 0.5,
+        p_owner_ref: 'user-1',
+      });
+      // Additive Solana settle receipt carries the CAIP-2 + base58 signature,
+      // reusing the caller's ownerRef (CD-1/AC-9 — no new a2a_agent_keys query).
+      expect(mockReceiptEmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ownerRef: 'user-1',
+          agentKeyId: 'key-1',
+          chainId: 900001,
+          settleCaip2: SOL_CAIP2,
+          settleSignature: SOL_SIG,
+        }),
+      );
+    });
+
+    it('T-234-AC8b: EVM leg debit (no settleCaip2) → NO solana settle receipt (column stays NULL, byte-identical)', async () => {
+      mockRpc.mockResolvedValue({ data: null, error: null } as never);
+      mockReceiptEmit.mockClear();
+
+      await budgetService.debit(
+        'key-1',
+        2368,
+        1.5,
+        undefined,
+        undefined,
+        undefined,
+        'user-1',
+      );
+
+      const solanaEmit = mockReceiptEmit.mock.calls.find(
+        (c) => (c[0] as { settleCaip2?: string }).settleCaip2 !== undefined,
+      );
+      expect(solanaEmit).toBeUndefined();
+    });
+
+    it('T-234-AC9: solana debit OWNERSHIP_MISMATCH → mapped code + NO settle receipt (guard preserved, ownerRef threaded)', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: {
+          message: 'OWNERSHIP_MISMATCH: key key-1 not owned by attacker',
+        },
+      } as never);
+      mockReceiptEmit.mockClear();
+
+      const result = await budgetService.debit(
+        'key-1',
+        900001,
+        0.5,
+        undefined,
+        undefined,
+        undefined,
+        'attacker',
+        SOL_CAIP2,
+        SOL_SIG,
+      );
+
+      expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
+      // A rejected (ownership-guarded) debit MUST NOT emit a settle receipt.
+      expect(mockReceiptEmit).not.toHaveBeenCalled();
+      // The RPC received the AUTHENTICATED caller's owner_ref as the guard datum.
+      expect(mockRpc).toHaveBeenCalledWith(
+        'increment_a2a_key_spend',
+        expect.objectContaining({ p_owner_ref: 'attacker' }),
+      );
+    });
+
     it('returns failure with DAILY_LIMIT error from Postgres (AC-9)', async () => {
       mockRpc.mockResolvedValue({
         data: null,
