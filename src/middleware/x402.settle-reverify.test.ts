@@ -39,7 +39,10 @@ const kiteAdapter = {
 function bundleFor(chainId: number) {
   return {
     chainConfig: { chainId },
-    payment: { supportedTokens: [{ address: KITE_TOKEN, decimals: 18 }] },
+    payment: {
+      vmFamily: 'evm',
+      supportedTokens: [{ address: KITE_TOKEN, decimals: 18 }],
+    },
   };
 }
 

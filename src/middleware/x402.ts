@@ -429,7 +429,14 @@ export function requirePayment(
     // `>= requiredAmount` of the chain token to `payTo`. A forged/buggy/replayed
     // settle JSON (fake hash) is rejected here → 402, no access granted. Gated
     // behind SETTLE_VERIFY_ONCHAIN (default ON): when OFF this is a no-op.
-    const settleToken = bundle.payment?.supportedTokens?.[0];
+    // WKH-234: narrow the `PaymentAdapter` union via `vmFamily`. The x402
+    // settle re-verify is EVM-only (viem); non-EVM → undefined → the existing
+    // `settleToken` guard skips re-verify (unreachable for EVM chains).
+    const settlePayment = bundle.payment;
+    const settleToken =
+      settlePayment?.vmFamily === 'evm'
+        ? settlePayment.supportedTokens?.[0]
+        : undefined;
     if (
       typeof settleResult.txHash === 'string' &&
       settleResult.txHash.startsWith('0x') &&

@@ -77,20 +77,53 @@ export interface BindVerification {
   chainAddress?: string;
   verifiedAt?: string;
 }
-export interface PaymentAdapter {
+// ── Superficie COMÚN, VM-agnóstica (lo que el wiring puede leer SIN narrowing) ──
+export interface PaymentAdapterCommon {
   readonly name: string;
-  readonly chainId: number;
-  readonly supportedTokens: TokenSpec[];
-  settle(req: SettleRequest): Promise<SettleResult>;
-  verify(proof: X402Proof): Promise<VerifyResult>;
   quote(amountUsd: number): Promise<QuoteResult>;
-  sign(opts: SignRequest): Promise<SignResult>;
   getScheme(): string;
   getNetwork(): string;
-  getToken(): `0x${string}`;
   getMaxTimeoutSeconds(): number;
   getMerchantName(): string;
 }
+
+// ── EVM (cuerpo actual de PaymentAdapter, INTACTO + discriminante) ──
+export interface EvmPaymentAdapter extends PaymentAdapterCommon {
+  readonly vmFamily: 'evm'; // ← ÚNICO campo nuevo
+  readonly chainId: number;
+  readonly supportedTokens: TokenSpec[]; // TokenSpec.address: `0x${string}` (INTACTO)
+  settle(req: SettleRequest): Promise<SettleResult>;
+  verify(proof: X402Proof): Promise<VerifyResult>;
+  sign(opts: SignRequest): Promise<SignResult>;
+  getToken(): `0x${string}`;
+}
+
+// ── Solana (superficie honesta; NADA de 0x / EIP-3009) ──
+export interface SolanaTokenSpec {
+  symbol: string;
+  mint: string; // base58 SPL mint
+  decimals: number; // MISMO nombre que TokenSpec.decimals → lectura genérica de decimals homogénea
+}
+export interface SolanaSettleRequest {
+  payTo: string; // base58 owner pubkey del agente (payout_wallet)
+  amountAtomic: string; // unidades atómicas del mint (decimals-aware)
+  intentId: string; // clave de idempotencia (AC-7) — leg/step id determinístico
+}
+export interface SolanaSettleProof {
+  signature: string; // firma/txid base58 del SPL-transfer
+  payTo: string;
+  amountAtomic: string;
+}
+export interface SolanaPaymentAdapter extends PaymentAdapterCommon {
+  readonly vmFamily: 'solana';
+  readonly caip2ChainId: string; // DT-1: `solana:<genesis-prefix>` (NO chainId:number)
+  readonly supportedTokens: SolanaTokenSpec[];
+  settle(req: SolanaSettleRequest): Promise<SettleResult>; // build+sign+broadcast+confirm, idempotente (AC-7)
+  verify(proof: SolanaSettleProof): Promise<VerifyResult>; // getSignatureStatus/getParsedTransaction (verify-before-trust)
+  getMint(): string; // base58 (análogo VM-agnóstico de getToken)
+}
+
+export type PaymentAdapter = EvmPaymentAdapter | SolanaPaymentAdapter;
 export interface AttestationAdapter {
   readonly name: string;
   readonly chainId: number;

@@ -272,7 +272,13 @@ export async function verifyDeposit(
   }
 
   // 6. token + recipient + amount (AC-1).
-  const token = bundle.payment.supportedTokens[0];
+  // WKH-234: `bundle.payment` is now a `PaymentAdapter` union. Deposit is an
+  // EVM-only path (Solana deposit = Scope OUT); narrow via `vmFamily` so the
+  // EVM `TokenSpec.address` read stays byte-identical. Non-EVM → undefined →
+  // the existing TOKEN_MISMATCH guard (unreachable for EVM chains).
+  const payment = bundle.payment;
+  const token =
+    payment.vmFamily === 'evm' ? payment.supportedTokens[0] : undefined;
   if (!token) {
     // bundle sin token soportado → ningún Transfer puede matchear (TOKEN_MISMATCH).
     return { ok: false, reason: 'TOKEN_MISMATCH', confirmations };

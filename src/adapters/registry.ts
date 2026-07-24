@@ -3,6 +3,7 @@ import type {
   AdaptersBundle,
   AttestationAdapter,
   ChainKey,
+  EvmPaymentAdapter,
   GaslessAdapter,
   IdentityBindingAdapter,
   PaymentAdapter,
@@ -195,7 +196,36 @@ function resolveBundleOrThrow(chainKey?: ChainKey): AdaptersBundle {
   return bundle;
 }
 
-export function getPaymentAdapter(chainKey?: ChainKey): PaymentAdapter {
+/**
+ * EVM-only payment accessor (WKH-234). The overwhelming majority of call-sites
+ * (x402 middleware, fee-*, payment-intent, deposit route, sign flows) are
+ * EVM-exclusive and read EVM-only surface (`getToken`, `sign`, `chainId`).
+ *
+ * Post WKH-234 `PaymentAdapter` is a discriminated union
+ * (`EvmPaymentAdapter | SolanaPaymentAdapter`). This accessor narrows via the
+ * `vmFamily` discriminant and returns the EVM surface — byte-identical for the
+ * 7 EVM chains (the throw branch is unreachable for them). The Solana rail is
+ * reached via `getPaymentAdapterOrUnion()` and narrowed at the two settle
+ * choke-points (downstream-payment / compose, W4).
+ */
+export function getPaymentAdapter(chainKey?: ChainKey): EvmPaymentAdapter {
+  const payment = resolveBundleOrThrow(chainKey).payment;
+  if (payment.vmFamily !== 'evm') {
+    throw new Error(
+      `getPaymentAdapter: resolved a non-EVM (${payment.vmFamily}) adapter — use the vmFamily-aware settle path`,
+    );
+  }
+  return payment;
+}
+
+/**
+ * VM-agnostic payment accessor (WKH-234) — returns the discriminated union so
+ * the caller can narrow by `vmFamily`. Used only by the settle choke-points
+ * that must handle both EVM and Solana legs (downstream-payment / compose).
+ */
+export function getPaymentAdapterOrUnion(
+  chainKey?: ChainKey,
+): PaymentAdapter {
   return resolveBundleOrThrow(chainKey).payment;
 }
 

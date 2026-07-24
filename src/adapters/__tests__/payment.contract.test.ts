@@ -40,12 +40,15 @@ import {
   _resetWalletClient,
   KiteOzonePaymentAdapter,
 } from '../../adapters/kite-ozone/payment.js';
-import type { PaymentAdapter } from '../../adapters/types.js';
+// WKH-234: `PaymentAdapter` is now a discriminated union; this suite exercises
+// the EVM contract, so it types the adapter as `EvmPaymentAdapter` (type-only
+// change — no assertion is modified, AC-4 byte-identical).
+import type { EvmPaymentAdapter } from '../../adapters/types.js';
 
 const PYUSD_DEFAULT = '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9';
 
 describe('KiteOzonePaymentAdapter', () => {
-  let adapter: PaymentAdapter;
+  let adapter: EvmPaymentAdapter;
 
   beforeEach(() => {
     adapter = new KiteOzonePaymentAdapter();

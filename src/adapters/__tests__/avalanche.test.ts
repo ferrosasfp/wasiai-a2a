@@ -104,7 +104,11 @@ describe('Avalanche adapter — factory shape', () => {
   it('explicit fuji → chainId 43113', async () => {
     const bundle = await createAvalancheAdapters({ network: 'fuji' });
     expect(bundle.chainConfig.chainId).toBe(43113);
-    expect(bundle.payment.chainId).toBe(43113);
+    // WKH-234: narrow the `PaymentAdapter` union via `vmFamily` (type-only;
+    // assertion value unchanged, AC-4 byte-identical).
+    const payment = bundle.payment;
+    if (payment.vmFamily !== 'evm') throw new Error('expected EVM payment');
+    expect(payment.chainId).toBe(43113);
     expect(bundle.attestation.chainId).toBe(43113);
     expect(bundle.gasless.chainId).toBe(43113);
   });
@@ -114,7 +118,10 @@ describe('Avalanche adapter — factory shape', () => {
     expect(bundle.chainConfig.chainId).toBe(43114);
     expect(bundle.chainConfig.name).toBe('Avalanche');
     expect(bundle.chainConfig.explorerUrl).toBe('https://snowtrace.io');
-    expect(bundle.payment.chainId).toBe(43114);
+    // WKH-234: narrow the `PaymentAdapter` union via `vmFamily`.
+    const payment = bundle.payment;
+    if (payment.vmFamily !== 'evm') throw new Error('expected EVM payment');
+    expect(payment.chainId).toBe(43114);
     expect(bundle.attestation.chainId).toBe(43114);
     expect(bundle.gasless.chainId).toBe(43114);
   });

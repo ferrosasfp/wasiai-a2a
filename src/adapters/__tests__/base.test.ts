@@ -101,7 +101,11 @@ describe('Base adapter — factory shape', () => {
   it('explicit testnet → chainId 84532 + CD-12 consistency', async () => {
     const bundle = await createBaseAdapters({ network: 'testnet' });
     expect(bundle.chainConfig.chainId).toBe(84532);
-    expect(bundle.payment.chainId).toBe(84532);
+    // WKH-234: narrow the `PaymentAdapter` union via `vmFamily` (type-only;
+    // assertion value unchanged, AC-4 byte-identical).
+    const payment = bundle.payment;
+    if (payment.vmFamily !== 'evm') throw new Error('expected EVM payment');
+    expect(payment.chainId).toBe(84532);
     expect(bundle.attestation.chainId).toBe(84532);
     expect(bundle.gasless.chainId).toBe(84532);
   });
@@ -111,7 +115,10 @@ describe('Base adapter — factory shape', () => {
     expect(bundle.chainConfig.chainId).toBe(8453);
     expect(bundle.chainConfig.name).toBe('Base');
     expect(bundle.chainConfig.explorerUrl).toBe('https://basescan.org');
-    expect(bundle.payment.chainId).toBe(8453);
+    // WKH-234: narrow the `PaymentAdapter` union via `vmFamily`.
+    const payment = bundle.payment;
+    if (payment.vmFamily !== 'evm') throw new Error('expected EVM payment');
+    expect(payment.chainId).toBe(8453);
     expect(bundle.attestation.chainId).toBe(8453);
     expect(bundle.gasless.chainId).toBe(8453);
   });

@@ -11,7 +11,7 @@ import type {
   X402PaymentRequest,
 } from '../../types/index.js';
 import type {
-  PaymentAdapter,
+  EvmPaymentAdapter,
   QuoteResult,
   SettleRequest,
   SettleResult,
@@ -245,7 +245,8 @@ function getWalletClient() {
   return _walletClient;
 }
 
-export class KiteOzonePaymentAdapter implements PaymentAdapter {
+export class KiteOzonePaymentAdapter implements EvmPaymentAdapter {
+  readonly vmFamily = 'evm' as const;
   readonly name = 'kite-ozone';
 
   /**

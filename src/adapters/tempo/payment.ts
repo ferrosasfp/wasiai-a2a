@@ -5,7 +5,7 @@ import { getLogger } from '../../lib/logger.js';
 import { buildRpcTransport } from '../../lib/rpc-transport.js';
 import type { X402PaymentRequest } from '../../types/index.js';
 import type {
-  PaymentAdapter,
+  EvmPaymentAdapter,
   QuoteResult,
   SettleRequest,
   SettleResult,
@@ -307,7 +307,8 @@ async function settleX402(req: SettleRequest): Promise<SettleResult> {
 
 // ─── Adapter class ──────────────────────────────────────────────────────
 
-export class TempoPaymentAdapter implements PaymentAdapter {
+export class TempoPaymentAdapter implements EvmPaymentAdapter {
+  readonly vmFamily = 'evm' as const;
   readonly name = 'tempo';
   readonly chainId: number = TEMPO_CHAIN_ID;
   private readonly network: TempoNetwork;

@@ -200,7 +200,12 @@ export const depositRoutes: FastifyPluginAsync = async (fastify) => {
         .map((chainKey) => {
           const bundle = getAdaptersBundle(chainKey);
           if (!bundle) return null;
-          const token = bundle.payment.supportedTokens[0];
+          // WKH-234: deposit-info is an EVM-only listing (Solana deposit =
+          // Scope OUT — no viem treasury/token address). Narrow via `vmFamily`;
+          // a non-EVM chain is skipped. Byte-identical for the EVM chains.
+          const payment = bundle.payment;
+          if (payment.vmFamily !== 'evm') return null;
+          const token = payment.supportedTokens[0];
           if (!token) return null; // CD-3: tolerate empty supportedTokens
           // Escrow no-custodial: cuando está activo para esta cadena, el caller
           // deposita al CONTRATO (no a la treasury). Exponemos la dirección

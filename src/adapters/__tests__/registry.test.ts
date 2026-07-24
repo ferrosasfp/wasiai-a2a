@@ -43,7 +43,7 @@ vi.mock('../kite-ozone/index.js', () => ({
           ? 'https://kitescan.ai'
           : 'https://testnet.kitescan.ai';
       return {
-        payment: { name: 'kite-ozone', chainId },
+        payment: { name: 'kite-ozone', chainId, vmFamily: 'evm' },
         attestation: { name: 'kite-ozone', chainId },
         gasless: { name: 'kite-ozone', chainId },
         identity: null,
@@ -66,7 +66,7 @@ vi.mock('../avalanche/index.js', () => ({
           ? 'https://snowtrace.io'
           : 'https://testnet.snowtrace.io';
       return {
-        payment: { name: 'avalanche', chainId },
+        payment: { name: 'avalanche', chainId, vmFamily: 'evm' },
         attestation: { name: 'avalanche', chainId },
         gasless: { name: 'avalanche', chainId },
         identity: null,
@@ -89,7 +89,7 @@ vi.mock('../base/index.js', () => ({
           ? 'https://basescan.org'
           : 'https://sepolia.basescan.org';
       return {
-        payment: { name: 'base', chainId },
+        payment: { name: 'base', chainId, vmFamily: 'evm' },
         attestation: { name: 'base', chainId },
         gasless: { name: 'base', chainId },
         identity: null,
@@ -105,7 +105,7 @@ vi.mock('../tempo/index.js', () => ({
   createTempoAdapters: vi.fn(async (_opts?: { network?: 'testnet' }) => {
     const chainId = 42429;
     return {
-      payment: { name: 'tempo', chainId },
+      payment: { name: 'tempo', chainId, vmFamily: 'evm' },
       attestation: { name: 'tempo', chainId },
       gasless: { name: 'tempo', chainId },
       identity: null,
