@@ -10,9 +10,9 @@ import {
 import { parseUnits } from 'viem';
 import { getLogger } from '../../lib/logger.js';
 import type {
+  SolanaPaymentAdapter as ISolanaPaymentAdapter,
   QuoteResult,
   SettleResult,
-  SolanaPaymentAdapter as ISolanaPaymentAdapter,
   SolanaSettleProof,
   SolanaSettleRequest,
   SolanaTokenSpec,
@@ -96,7 +96,10 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     const decimals = getSolanaUsdcDecimals();
     // Mirror del patrón avalanche: toFixed(decimals) antes de parseUnits para
     // aterrizar notación científica / sub-atómica a la grilla del token.
-    const amountWei = parseUnits(amountUsd.toFixed(decimals), decimals).toString();
+    const amountWei = parseUnits(
+      amountUsd.toFixed(decimals),
+      decimals,
+    ).toString();
     return {
       amountWei,
       token: {
@@ -158,9 +161,14 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     );
     const tx = new Transaction().add(ix);
 
-    const signature = await sendAndConfirmTransaction(connection, tx, [operator], {
-      commitment: getSolanaCommitment(),
-    });
+    const signature = await sendAndConfirmTransaction(
+      connection,
+      tx,
+      [operator],
+      {
+        commitment: getSolanaCommitment(),
+      },
+    );
 
     // Persist-before-return del seam de idempotencia (W5 lo respalda en ledger).
     _intentSignatures.set(req.intentId, signature);
@@ -177,8 +185,11 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       commitment: 'confirmed',
       maxSupportedTransactionVersion: 0,
     });
-    if (!parsed || !parsed.meta || parsed.meta.err) {
-      return { valid: false, error: 'transaction not found or failed on-chain' };
+    if (!parsed?.meta || parsed.meta.err) {
+      return {
+        valid: false,
+        error: 'transaction not found or failed on-chain',
+      };
     }
 
     const mint = getSolanaUsdcMint();
@@ -189,9 +200,7 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     const pre = parsed.meta.preTokenBalances ?? [];
     const post = parsed.meta.postTokenBalances ?? [];
 
-    const balanceFor = (
-      list: typeof post,
-    ): bigint => {
+    const balanceFor = (list: typeof post): bigint => {
       const entry = list.find(
         (b) => b.owner === proof.payTo && b.mint === mint,
       );

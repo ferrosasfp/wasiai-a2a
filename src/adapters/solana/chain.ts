@@ -17,8 +17,7 @@ export type SolanaNetwork = 'devnet';
 
 // ── Defaults documentados (mirror del bloque .env.example, CD-3) ──────────
 const DEFAULT_RPC_URL = 'https://api.devnet.solana.com';
-const DEFAULT_USDC_MINT_DEVNET =
-  '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
+const DEFAULT_USDC_MINT_DEVNET = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
 const DEFAULT_USDC_DECIMALS = 6;
 const DEFAULT_COMMITMENT = 'confirmed';
 const DEFAULT_CAIP2_CHAIN_ID = 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1';
@@ -56,7 +55,9 @@ export function getSolanaUsdcDecimals(): number {
   const raw = process.env.SOLANA_USDC_DECIMALS;
   if (raw === undefined || raw === '') return DEFAULT_USDC_DECIMALS;
   const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_USDC_DECIMALS;
+  return Number.isFinite(parsed) && parsed >= 0
+    ? parsed
+    : DEFAULT_USDC_DECIMALS;
 }
 
 export function getSolanaCaip2(): string {
@@ -118,7 +119,10 @@ export function getSolanaOperatorKeypair(): Keypair {
   const secret = base58DecodeToBytes(raw.trim());
   const keypair = Keypair.fromSecretKey(secret);
   _operator = keypair;
-  log.info({ operator: keypair.publicKey.toBase58() }, 'solana operator loaded');
+  log.info(
+    { operator: keypair.publicKey.toBase58() },
+    'solana operator loaded',
+  );
   return keypair;
 }
 

@@ -19,8 +19,8 @@ const FAKE_SIG = '5'.repeat(64);
 
 // ── Mock the network boundary (chain.ts) ─────────────────────────────────
 const fakeConnection = {
-  getParsedTransaction: vi.fn((..._a: unknown[]): Promise<unknown> =>
-    Promise.resolve(null),
+  getParsedTransaction: vi.fn(
+    (..._a: unknown[]): Promise<unknown> => Promise.resolve(null),
   ),
 };
 vi.mock('./chain.js', () => ({
@@ -45,12 +45,15 @@ const mockCreateTransferIx = vi.fn((..._a: unknown[]) => ({
   data: Buffer.alloc(0),
 }));
 vi.mock('@solana/spl-token', () => ({
-  getOrCreateAssociatedTokenAccount: (...a: unknown[]) => mockGetOrCreateAta(...a),
+  getOrCreateAssociatedTokenAccount: (...a: unknown[]) =>
+    mockGetOrCreateAta(...a),
   createTransferInstruction: (...a: unknown[]) => mockCreateTransferIx(...a),
 }));
 
 // ── Mock sendAndConfirmTransaction (keep PublicKey/Transaction real) ──────
-const mockSendAndConfirm = vi.fn((..._a: unknown[]) => Promise.resolve(FAKE_SIG));
+const mockSendAndConfirm = vi.fn((..._a: unknown[]) =>
+  Promise.resolve(FAKE_SIG),
+);
 vi.mock('@solana/web3.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@solana/web3.js')>();
   return {
@@ -177,9 +180,8 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
 const E2E = process.env.SOLANA_DEVNET_E2E === '1';
 describe.runIf(E2E)('SolanaPaymentAdapter — devnet e2e (gated)', () => {
   it('settles a real SPL transfer on devnet', async () => {
-    const actual = await vi.importActual<typeof import('./payment.js')>(
-      './payment.js',
-    );
+    const actual =
+      await vi.importActual<typeof import('./payment.js')>('./payment.js');
     const adapter = new actual.SolanaPaymentAdapter();
     const res = await adapter.settle({
       payTo: process.env.SOLANA_E2E_PAYTO as string,

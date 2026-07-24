@@ -16,13 +16,13 @@
  * El slug (PK) se deriva server-side del `name` (CD-5). NUNCA se acepta del body.
  */
 
+import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { parsePriceSafe } from '../lib/price.js';
 import { supabase } from '../lib/supabase.js';
 import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
-import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import {
   isValidPayoutWallet,
   type WalletNamespace,

@@ -67,9 +67,7 @@ describe('isValidSolanaAddress (WKH-234, AC-5)', () => {
     expect(
       isValidSolanaAddress('So11111111111111111111111111111111111111112'),
     ).toBe(true);
-    expect(
-      isValidSolanaAddress('11111111111111111111111111111111'),
-    ).toBe(true);
+    expect(isValidSolanaAddress('11111111111111111111111111111111')).toBe(true);
   });
 
   it('rejects invalid charset (0/O/I/l, punctuation), an EVM 0x address, and empty', () => {

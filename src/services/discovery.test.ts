@@ -532,7 +532,10 @@ describe('discoveryService', () => {
         },
       });
 
-      const devnet = discoveryService.mapAgent(makeRegistry(), raw('solana-devnet'));
+      const devnet = discoveryService.mapAgent(
+        makeRegistry(),
+        raw('solana-devnet'),
+      );
       expect(devnet.payment).toBeDefined();
       expect(devnet.payment?.chain).toBe('solana-devnet');
       expect(devnet.payment?.contract).toBe(SOL_MINT);

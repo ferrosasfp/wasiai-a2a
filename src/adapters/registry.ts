@@ -240,9 +240,7 @@ export function getPaymentAdapter(chainKey?: ChainKey): EvmPaymentAdapter {
  * the caller can narrow by `vmFamily`. Used only by the settle choke-points
  * that must handle both EVM and Solana legs (downstream-payment / compose).
  */
-export function getPaymentAdapterOrUnion(
-  chainKey?: ChainKey,
-): PaymentAdapter {
+export function getPaymentAdapterOrUnion(chainKey?: ChainKey): PaymentAdapter {
   return resolveBundleOrThrow(chainKey).payment;
 }
 

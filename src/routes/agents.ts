@@ -23,11 +23,11 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
-import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import {
   isValidPayoutWallet,
   type WalletNamespace,
