@@ -4,7 +4,7 @@
 
 **Base URL:** `https://wasiai-a2a-production.up.railway.app`
 **Protocol:** Google A2A v1 + x402 v2 (spec-literal)
-**Supported Chains:** Kite (testnet, mainnet), Avalanche (Fuji, C-Chain mainnet), Base (Sepolia, mainnet), Solana (devnet, opt-in-off)
+**Supported Chains (inbound x402):** Kite (testnet, mainnet), Avalanche (Fuji, C-Chain mainnet), Base (Sepolia, mainnet). Solana devnet exists as an outbound settle rail only (opt-in-off), it is not a valid `x-payment-chain` for paying the gateway.
 
 This guide is written for backend engineers integrating a marketplace, an agent, or any automated client against the production gateway. If you are exploring the project for the first time, start with the root [`README.md`](../README.md).
 

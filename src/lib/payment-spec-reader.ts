@@ -107,7 +107,7 @@ export function readPaymentSpec(
   return {
     method: methodRaw,
     chain,
-    contract: obj.contract as `0x${string}`,
+    contract: obj.contract,
     asset: typeof obj.asset === 'string' ? obj.asset : undefined,
   };
 }

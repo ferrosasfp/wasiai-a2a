@@ -4,7 +4,7 @@
 [![Deploy](https://img.shields.io/badge/deploy-Railway-blueviolet)](https://wasiai-a2a-production.up.railway.app)
 [![A2A Protocol](https://img.shields.io/badge/protocol-Google%20A2A-blue)](https://google.github.io/A2A/)
 
-Cross-chain agent-to-agent payment protocol, built on [Google A2A Protocol](https://google.github.io/A2A/) with pluggable chain adapters (EVM + Solana), native identity, and x402 settlement. Pay once on Kite or Solana. Fan out to N agents.
+Cross-chain agent-to-agent payment protocol, built on [Google A2A Protocol](https://google.github.io/A2A/) with pluggable chain adapters (EVM plus a Solana devnet settle rail), native identity, and x402 settlement. Pay once on an EVM chain, fan out to N agents.
 
 **Pay once on Kite. Fan-out to N agents on Avalanche. Single HTTP request.**
 
@@ -107,49 +107,51 @@ The general (chain-agnostic) marketplace integration guide lives at [`doc/INTEGR
 
 ## Solana Support
 
-WasiAI A2A includes **non-EVM Solana devnet adapter** (WKH-234) for fee settlement over the Solana network. The payment adapter is a discriminated union type: `PaymentAdapter = EvmPaymentAdapter | SolanaPaymentAdapter` (see `src/adapters/types.ts`). Solana addresses (base58 pubkeys) are validated independently of EVM addresses (0x hex). Settlement is verify-only on Solana (no operator broadcast wallet, no EIP-3009).
+WasiAI A2A includes a **non-EVM Solana devnet adapter** (WKH-234) that pays agents whose payout rail is Solana. The payment adapter is a discriminated union type: `PaymentAdapter = EvmPaymentAdapter | SolanaPaymentAdapter` (see `src/adapters/types.ts`). Solana addresses (base58 pubkeys) are validated independently of EVM addresses (0x hex).
 
-Mainnet Solana is not supported. Devnet-only: `solana-devnet` chainKey, zero production money.
+What the Solana rail actually does (`src/adapters/solana/payment.ts`):
 
-### Quick Start (Solana devnet, 5 min)
+- **Settle-only, outbound.** It settles the downstream leg (the gateway paying a Solana-native agent) inside `signAndSettleDownstream` / `settleSolanaLeg` (`src/lib/downstream-payment.ts:124`). The inbound 402 challenge (charging the caller) stays EVM-only: `getPaymentAdapter()` throws for a non-EVM bundle (`src/adapters/registry.ts:228`), so `x-payment-chain: solana-devnet` is not a supported inbound rail.
+- **Operator-signed SPL transfer.** `settle()` builds a `createTransferInstruction`, signs with the operator `Keypair` from `SOLANA_OPERATOR_PRIVATE_KEY` (`getSolanaOperatorKeypair()`, `src/adapters/solana/chain.ts:111`) and broadcasts via `sendAndConfirmTransaction`. There is no EIP-3009 and no facilitator hop on this leg: the gateway operator is the sender and pays the SOL gas.
+- **Idempotent by `intentId`.** A repeated `intentId` re-verifies the prior signature on-chain (`getParsedTransaction`, pre/post token balances of `payTo`) and returns it instead of re-broadcasting. That `intentId -> signature` map is in-process, so idempotency survives retries inside a process but not a restart (durable cross-process lookup is a tracked follow-up).
+- **Verify-before-trust.** `verify()` asserts an on-chain token balance delta `>= amountAtomic` for the expected mint and `payTo`.
 
-```bash
-# 1. Clone .env
-cp .env.example .env
+Mainnet Solana is not supported. Devnet only: `solana-devnet` chainKey, zero production money.
 
-# 2. Set Solana env vars (opt-in-off by default)
-#    SOLANA_ADAPTER_ENABLED=true
-#    SOLANA_RPC_URL=https://api.devnet.solana.com
-#    SOLANA_ESCROW_PROGRAM_ID=DR5GoMT7sAKzD6wZMKJPeknS3Y6fzgZUNevi7xiESE4x
-#    SOLANA_USDC_MINT=EmxB3hHrqjf3XuqLTG2qVFiKg6Sf1k3zxjcjqmKDGQWP (Solana devnet USDC)
+### Activation checklist (Solana devnet)
 
-# 3. Register a wasi_a2a key (one-time)
-curl -X POST https://wasiai-a2a-production.up.railway.app/auth/agent-signup \
-  -H "Content-Type: application/json" \
-  -d '{"owner_ref":"solana-demo","display_name":"Solana Demo"}'
+Gateway env vars, exact names from [`.env.example`](.env.example) (Solana block):
 
-# 4. Call /compose with x-payment-chain: solana-devnet
-curl -X POST https://wasiai-a2a-production.up.railway.app/compose \
-  -H "Content-Type: application/json" \
-  -H "x-a2a-key: $A2A_KEY" \
-  -H "x-payment-chain: solana-devnet" \
-  -d '{"pipeline":[{"agentSlug":"example-agent","input":{"q":"hello"}}]}'
-# -> HTTP 200 (key-funded on Solana) or HTTP 402 with accepts[].network = "solana:devnet"
+| Var | Required | Value / default |
+|-----|----------|-----------------|
+| `SOLANA_ADAPTER_ENABLED` | yes | `true` (default `false`, the rail is inert while off) |
+| `WASIAI_A2A_CHAINS` | yes | must include `solana-devnet` in the comma-separated list, otherwise the bundle is never built and the leg logs `CHAIN_NOT_SUPPORTED` |
+| `SOLANA_OPERATOR_PRIVATE_KEY` | yes | base58 ed25519 secret of the operator that signs and broadcasts the SPL transfer. Its pubkey needs **devnet SOL for gas** (and devnet USDC in its ATA to have something to send). Never logged, never committed. |
+| `WASIAI_DOWNSTREAM_X402` | yes | `true`, the downstream settle path is flag-gated (`src/lib/downstream-payment.ts:30`) |
+| `SOLANA_RPC_URL` | no | `https://api.devnet.solana.com` |
+| `SOLANA_USDC_MINT_DEVNET` | no | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` (Circle USDC-SPL devnet) |
+| `SOLANA_USDC_DECIMALS` | no | `6` |
+| `SOLANA_COMMITMENT` | no | `confirmed` |
+| `SOLANA_CAIP2_CHAIN_ID` | no | `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` |
+| `SOLANA_SYNTHETIC_CHAIN_ID` | no | `900001` (non-EVM numeric sentinel, not an authoritative chainId) |
+| `SOLANA_CLUSTER` | no | `devnet` (only value supported) |
+| `SOLANA_RPC_URL_FALLBACK` | no | empty |
 
-# 5. Grep logs for chainKey=solana-devnet to confirm chain selection.
-```
+There is no escrow program variable in this repo: the non-custodial escrow lives in the `wasiai-facilitator` service, not in this gateway. If a checklist mentions `SOLANA_ESCROW_PROGRAM_ID`, it belongs to the facilitator, and this rail does not read it.
 
-### Network Config
+Once the vars are set, the rail fires on the downstream leg of `/compose` for any agent whose `payment.chain` is `solana-devnet` and whose `payment.contract` is a base58 pubkey. Grep the logs for `solana settle broadcast confirmed` (success, includes the signature) or for the skip codes `CHAIN_NOT_SUPPORTED` / `INVALID_PAY_TO_FORMAT` / `SETTLE_FAILED` (the leg never throws, it logs and returns `null`, so a missing operator key fails silently from the caller's point of view).
 
-| Network | CAIP-2 | USDC Mint (devnet) | Escrow Program |
-|---------|--------|-------------------|----------------|
-| Solana Devnet | `solana:EtgJlisyVxn6CU87P6D7KS5e3kLtChWSwwahbuR627m` | `EmxB3hHrqjf3XuqLTG2qVFiKg6Sf1k3zxjcjqmKDGQWP` | `DR5GoMT7sAKzD6wZMKJPeknS3Y6fzgZUNevi7xiESE4x` |
+The receipt columns `settle_caip2` / `settle_signature` come from migration `supabase/migrations/20260724000000_wkh234_receipt_solana_caip2.sql`. The ledger write is best-effort and does not block `/compose`, so an unapplied migration costs telemetry, not settlement.
 
-Env vars (full block in `.env.example`): `SOLANA_ADAPTER_ENABLED`, `SOLANA_RPC_URL`, `SOLANA_USDC_MINT`, `SOLANA_ESCROW_PROGRAM_ID`.
+### Network config
 
-### Solana Devnet Status (WKH-234, WKH-237)
+| Network | CAIP-2 | USDC mint (devnet) | Scheme |
+|---------|--------|--------------------|--------|
+| Solana devnet | `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` | `spl-transfer` |
 
-The Solana adapter is **implemented and tested in devnet** with the flag `SOLANA_ADAPTER_ENABLED` defaulting to OFF. This means the rail is present in the codebase but inert on any deployment that does not explicitly enable it. No real Solana mainnet, no real money. Devnet-only for demo and validation. The verify-only settle path does not require an operator wallet (signatures are verified on-chain via `getSignatureStatus`), but configuration requires the escrow program address and USDC mint.
+### Solana devnet status (WKH-234, WKH-237)
+
+The Solana adapter is **implemented and unit-tested**, with `SOLANA_ADAPTER_ENABLED` defaulting to OFF. The rail is present in the codebase but inert on any deployment that does not explicitly enable it. No Solana mainnet, no real money: devnet only, for demo and validation.
 
 ---
 
@@ -170,9 +172,9 @@ Quality snapshot:
 - TypeScript strict, zero `any` — `tsc --noEmit` clean
 - 1,660+ tests green across the a2a + marketplace + facilitator stack
 - Adversarial review, code review, and QA gates green on every shipped feature
-- Multi-chain live on 4+ chains simultaneously: Kite Ozone testnet, Kite mainnet, Avalanche Fuji, Avalanche mainnet, Solana devnet (opt-in-off), Base Sepolia/Mainnet (staged)
+- Multi-chain live on 4 chains simultaneously: Kite Ozone testnet, Kite mainnet, Avalanche Fuji, Avalanche mainnet. Base Sepolia/Mainnet staged (env-gated), Solana devnet present but opt-in-off
 - Mainnet hybrid mode active: Kite testnet PYUSD inbound + Avalanche C-Chain mainnet USDC outbound, real-money smoke verified
-- VM-family adaptive: PaymentAdapter discriminated union (EvmPaymentAdapter for EVM chains, SolanaPaymentAdapter for Solana verify-only path)
+- VM-family adaptive: PaymentAdapter discriminated union (EvmPaymentAdapter for EVM chains, SolanaPaymentAdapter for the Solana settle-only, operator-signed SPL path)
 
 Mainnet proof — real cross-chain agent payments on production money:
 
@@ -207,10 +209,10 @@ During the Kite Hackathon, we cut over `compose`, `orchestrate`, and `capabiliti
 |  wasiai-a2a  (Railway — Fastify, this repo)                 |
 |  /compose, /orchestrate, /discover, /tasks, /mcp            |
 |  Kite testnet PYUSD inbound  /  USDC outbound (mainnet)     |
-|  Solana devnet SPL-USDC (fee settlement, devnet only)       |
+|  Solana devnet SPL-USDC outbound (signed here, devnet only) |
 +--------------------------+----------------------------------+
                            | x402 /verify, /settle (spec-literal)
-                           | (EIP-3009 for EVM, SPL for Solana)
+                           | EIP-3009, EVM legs only
                            v
 +-------------------------------------------------------------+
 |  wasiai-facilitator  (Railway — Fastify, multi-chain)       |
@@ -218,16 +220,15 @@ During the Kite Hackathon, we cut over `compose`, `orchestrate`, and `capabiliti
 |  Kite mainnet (2366)  -- USDC.e        [staged, env-gated]  |
 |  Avalanche Fuji (43113) -- USDC                             |
 |  Avalanche C-Chain (43114) -- USDC      [active, mainnet]   |
-|  Solana devnet (verify-only SPL-USDC)  [opt-in-off, WKH-234]|
 +--------------------------+----------------------------------+
                            | Settlement layer
                            v
         +----------------------------------------+
-        | On-chain (Kite, Avalanche, Solana)   |
+        | On-chain (Kite, Avalanche, Solana)     |
         +----------------------------------------+
 ```
 
-Cross-chain flow: **Kite testnet PYUSD inbound** (or USDC on mainnet) → orchestrator fan-out → **Avalanche C-Chain USDC outbound** to N agents (mainnet hybrid mode). Solana devnet is available for fee settlement (verify-only path, no operator broadcast).
+Cross-chain flow: **Kite testnet PYUSD inbound** (or USDC on mainnet) → orchestrator fan-out → **Avalanche C-Chain USDC outbound** to N agents (mainnet hybrid mode). Solana devnet is available for the outbound fee leg only: that leg skips the facilitator, the gateway operator signs the SPL transfer and broadcasts it to the devnet RPC (see [Solana Support](#solana-support)).
 
 ### Logical layers
 
@@ -277,7 +278,7 @@ The `WASIAI_A2A_CHAIN` env var selects which adapter bundle loads at startup. Ma
 | `kite-mainnet` | staged (env-gated) | USDC.e on Kite mainnet (2366) | -- | Flip via `KITE_NETWORK=mainnet` + `KITE_MAINNET_RPC_URL`. |
 | `avalanche-fuji` | active | -- | USDC testnet on Fuji (43113) | Default downstream when `WASIAI_DOWNSTREAM_X402=true`. |
 | `avalanche-mainnet` | active (mainnet hybrid) | -- | USDC mainnet on Avalanche C-Chain (43114) | Live since 2026-04-29 via `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`. |
-| `solana-devnet` | active (opt-in-off) | SPL-USDC fee settlement (devnet) | -- | Non-EVM: verify-only path, no operator broadcast. Enabled via `SOLANA_ADAPTER_ENABLED=true` + `SOLANA_RPC_URL` + `SOLANA_ESCROW_PROGRAM_ID`. WKH-234. |
+| `solana-devnet` | opt-in-off | -- (inbound is EVM-only) | SPL-USDC on Solana devnet | Non-EVM: settle-only, operator-signed SPL transfer, no facilitator hop. Enabled via `SOLANA_ADAPTER_ENABLED=true` + `solana-devnet` in `WASIAI_A2A_CHAINS` + `SOLANA_OPERATOR_PRIVATE_KEY` (needs devnet SOL for gas). WKH-234. |
 
 ### Multi-chain support
 
