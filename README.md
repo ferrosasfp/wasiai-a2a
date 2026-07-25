@@ -4,7 +4,7 @@
 [![Deploy](https://img.shields.io/badge/deploy-Railway-blueviolet)](https://wasiai-a2a-production.up.railway.app)
 [![A2A Protocol](https://img.shields.io/badge/protocol-Google%20A2A-blue)](https://google.github.io/A2A/)
 
-Cross-chain agent-to-agent payment protocol — built on [Google A2A Protocol](https://google.github.io/A2A/) with pluggable chain adapters, native identity, and x402 settlement.
+Cross-chain agent-to-agent payment protocol, built on [Google A2A Protocol](https://google.github.io/A2A/) with pluggable chain adapters (EVM + Solana), native identity, and x402 settlement. Pay once on Kite or Solana. Fan out to N agents.
 
 **Pay once on Kite. Fan-out to N agents on Avalanche. Single HTTP request.**
 
@@ -105,6 +105,54 @@ The general (chain-agnostic) marketplace integration guide lives at [`doc/INTEGR
 
 ---
 
+## Solana Support
+
+WasiAI A2A includes **non-EVM Solana devnet adapter** (WKH-234) for fee settlement over the Solana network. The payment adapter is a discriminated union type: `PaymentAdapter = EvmPaymentAdapter | SolanaPaymentAdapter` (see `src/adapters/types.ts`). Solana addresses (base58 pubkeys) are validated independently of EVM addresses (0x hex). Settlement is verify-only on Solana (no operator broadcast wallet, no EIP-3009).
+
+Mainnet Solana is not supported. Devnet-only: `solana-devnet` chainKey, zero production money.
+
+### Quick Start (Solana devnet, 5 min)
+
+```bash
+# 1. Clone .env
+cp .env.example .env
+
+# 2. Set Solana env vars (opt-in-off by default)
+#    SOLANA_ADAPTER_ENABLED=true
+#    SOLANA_RPC_URL=https://api.devnet.solana.com
+#    SOLANA_ESCROW_PROGRAM_ID=DR5GoMT7sAKzD6wZMKJPeknS3Y6fzgZUNevi7xiESE4x
+#    SOLANA_USDC_MINT=EmxB3hHrqjf3XuqLTG2qVFiKg6Sf1k3zxjcjqmKDGQWP (Solana devnet USDC)
+
+# 3. Register a wasi_a2a key (one-time)
+curl -X POST https://wasiai-a2a-production.up.railway.app/auth/agent-signup \
+  -H "Content-Type: application/json" \
+  -d '{"owner_ref":"solana-demo","display_name":"Solana Demo"}'
+
+# 4. Call /compose with x-payment-chain: solana-devnet
+curl -X POST https://wasiai-a2a-production.up.railway.app/compose \
+  -H "Content-Type: application/json" \
+  -H "x-a2a-key: $A2A_KEY" \
+  -H "x-payment-chain: solana-devnet" \
+  -d '{"pipeline":[{"agentSlug":"example-agent","input":{"q":"hello"}}]}'
+# -> HTTP 200 (key-funded on Solana) or HTTP 402 with accepts[].network = "solana:devnet"
+
+# 5. Grep logs for chainKey=solana-devnet to confirm chain selection.
+```
+
+### Network Config
+
+| Network | CAIP-2 | USDC Mint (devnet) | Escrow Program |
+|---------|--------|-------------------|----------------|
+| Solana Devnet | `solana:EtgJlisyVxn6CU87P6D7KS5e3kLtChWSwwahbuR627m` | `EmxB3hHrqjf3XuqLTG2qVFiKg6Sf1k3zxjcjqmKDGQWP` | `DR5GoMT7sAKzD6wZMKJPeknS3Y6fzgZUNevi7xiESE4x` |
+
+Env vars (full block in `.env.example`): `SOLANA_ADAPTER_ENABLED`, `SOLANA_RPC_URL`, `SOLANA_USDC_MINT`, `SOLANA_ESCROW_PROGRAM_ID`.
+
+### Solana Devnet Status (WKH-234, WKH-237)
+
+The Solana adapter is **implemented and tested in devnet** with the flag `SOLANA_ADAPTER_ENABLED` defaulting to OFF. This means the rail is present in the codebase but inert on any deployment that does not explicitly enable it. No real Solana mainnet, no real money. Devnet-only for demo and validation. The verify-only settle path does not require an operator wallet (signatures are verified on-chain via `getSignatureStatus`), but configuration requires the escrow program address and USDC mint.
+
+---
+
 ## Production Status
 
 | Component | URL | Status |
@@ -113,16 +161,18 @@ The general (chain-agnostic) marketplace integration guide lives at [`doc/INTEGR
 | A2A orchestrator (this repo) | https://wasiai-a2a-production.up.railway.app | live (Railway) |
 | Multi-chain x402 facilitator | https://wasiai-facilitator-production.up.railway.app | live (Railway) |
 | WasiAgentShop demo (use case) | https://wasiai-agentshop.vercel.app | live (Vercel) |
-| Base Sepolia adapter (84532) | [sepolia.basescan.org](https://sepolia.basescan.org) | staged — env-gated, WKH-103 in branch |
-| Base Mainnet adapter (8453) | [basescan.org](https://basescan.org) | staged — env-gated, WKH-103 in branch |
+| Base Sepolia adapter (84532) | [sepolia.basescan.org](https://sepolia.basescan.org) | staged (env-gated, WKH-103) |
+| Base Mainnet adapter (8453) | [basescan.org](https://basescan.org) | staged (env-gated, WKH-103) |
+| Solana devnet adapter | [solana.fm](https://solana.fm) | experimental (opt-in-off, WKH-234, devnet only) |
 
 Quality snapshot:
 
 - TypeScript strict, zero `any` — `tsc --noEmit` clean
 - 1,660+ tests green across the a2a + marketplace + facilitator stack
 - Adversarial review, code review, and QA gates green on every shipped feature
-- Multi-chain live on 4 chains simultaneously: Kite Ozone testnet, Kite mainnet, Avalanche Fuji, Avalanche mainnet
+- Multi-chain live on 4+ chains simultaneously: Kite Ozone testnet, Kite mainnet, Avalanche Fuji, Avalanche mainnet, Solana devnet (opt-in-off), Base Sepolia/Mainnet (staged)
 - Mainnet hybrid mode active: Kite testnet PYUSD inbound + Avalanche C-Chain mainnet USDC outbound, real-money smoke verified
+- VM-family adaptive: PaymentAdapter discriminated union (EvmPaymentAdapter for EVM chains, SolanaPaymentAdapter for Solana verify-only path)
 
 Mainnet proof — real cross-chain agent payments on production money:
 
@@ -157,8 +207,10 @@ During the Kite Hackathon, we cut over `compose`, `orchestrate`, and `capabiliti
 |  wasiai-a2a  (Railway — Fastify, this repo)                 |
 |  /compose, /orchestrate, /discover, /tasks, /mcp            |
 |  Kite testnet PYUSD inbound  /  USDC outbound (mainnet)     |
+|  Solana devnet SPL-USDC (fee settlement, devnet only)       |
 +--------------------------+----------------------------------+
                            | x402 /verify, /settle (spec-literal)
+                           | (EIP-3009 for EVM, SPL for Solana)
                            v
 +-------------------------------------------------------------+
 |  wasiai-facilitator  (Railway — Fastify, multi-chain)       |
@@ -166,16 +218,16 @@ During the Kite Hackathon, we cut over `compose`, `orchestrate`, and `capabiliti
 |  Kite mainnet (2366)  -- USDC.e        [staged, env-gated]  |
 |  Avalanche Fuji (43113) -- USDC                             |
 |  Avalanche C-Chain (43114) -- USDC      [active, mainnet]   |
+|  Solana devnet (verify-only SPL-USDC)  [opt-in-off, WKH-234]|
 +--------------------------+----------------------------------+
-                           | EIP-3009 TransferWithAuthorization
+                           | Settlement layer
                            v
-                  +------------------+
-                  | On-chain Kite +  |
-                  | Avalanche L1s    |
-                  +------------------+
+        +----------------------------------------+
+        | On-chain (Kite, Avalanche, Solana)   |
+        +----------------------------------------+
 ```
 
-Cross-chain flow: **Kite testnet PYUSD inbound** (or USDC on mainnet) → orchestrator fan-out → **Avalanche C-Chain USDC outbound** to N agents (mainnet hybrid mode).
+Cross-chain flow: **Kite testnet PYUSD inbound** (or USDC on mainnet) → orchestrator fan-out → **Avalanche C-Chain USDC outbound** to N agents (mainnet hybrid mode). Solana devnet is available for fee settlement (verify-only path, no operator broadcast).
 
 ### Logical layers
 
@@ -225,6 +277,7 @@ The `WASIAI_A2A_CHAIN` env var selects which adapter bundle loads at startup. Ma
 | `kite-mainnet` | staged (env-gated) | USDC.e on Kite mainnet (2366) | -- | Flip via `KITE_NETWORK=mainnet` + `KITE_MAINNET_RPC_URL`. |
 | `avalanche-fuji` | active | -- | USDC testnet on Fuji (43113) | Default downstream when `WASIAI_DOWNSTREAM_X402=true`. |
 | `avalanche-mainnet` | active (mainnet hybrid) | -- | USDC mainnet on Avalanche C-Chain (43114) | Live since 2026-04-29 via `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`. |
+| `solana-devnet` | active (opt-in-off) | SPL-USDC fee settlement (devnet) | -- | Non-EVM: verify-only path, no operator broadcast. Enabled via `SOLANA_ADAPTER_ENABLED=true` + `SOLANA_RPC_URL` + `SOLANA_ESCROW_PROGRAM_ID`. WKH-234. |
 
 ### Multi-chain support
 

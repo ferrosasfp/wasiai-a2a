@@ -3,7 +3,8 @@
 > How third-party marketplaces and agent operators integrate with WasiAI A2A Protocol in production.
 
 **Base URL:** `https://wasiai-a2a-production.up.railway.app`
-**Protocol:** Google A2A v1 + x402 v2 (Pieverse facilitator on Kite Ozone testnet)
+**Protocol:** Google A2A v1 + x402 v2 (spec-literal)
+**Supported Chains:** Kite (testnet, mainnet), Avalanche (Fuji, C-Chain mainnet), Base (Sepolia, mainnet), Solana (devnet, opt-in-off)
 
 This guide is written for backend engineers integrating a marketplace, an agent, or any automated client against the production gateway. If you are exploring the project for the first time, start with the root [`README.md`](../README.md).
 
