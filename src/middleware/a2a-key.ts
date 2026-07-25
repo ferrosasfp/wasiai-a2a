@@ -320,9 +320,16 @@ async function runX402Fallback(
 // INSUFFICIENT_BUDGET pueda explicar la CAUSA al caller. La resolución en sí
 // NO cambia (mismo default, sigue siendo opcional) y el path
 // "header presente pero desconocido" (400 CHAIN_NOT_SUPPORTED) queda intacto.
+//
+// `callerKeyId` (fix-pack MNR-1): id interno de la key del caller, usado SOLO
+// como clave del dedup del warn y como field del log (observabilidad
+// server-side). NO cambia nada de lo que se le devuelve al caller — el
+// enriquecimiento del 403 sigue siendo exclusivo del branch master, donde el
+// keyRow ES la credencial presentada (ver buildInsufficientBudgetMessage).
 function resolveTargetChain(
   request: FastifyRequest,
   reply: FastifyReply,
+  callerKeyId: string | null,
 ): {
   chainId: number;
   chainKey: string;
@@ -352,7 +359,8 @@ function resolveTargetChain(
       return null;
     }
     defaultApplied = true;
-    warnDefaultChainApplied(request, chainKey); // WKH-175
+    // WKH-175 (+ fix-pack MNR-1: dedup por caller, no por slug).
+    warnDefaultChainApplied(request, chainKey, callerKeyId);
   }
 
   const bundle = getAdaptersBundle(chainKey);
@@ -368,6 +376,12 @@ function resolveTargetChain(
   // 3 branches (master / delegación / key-session) y también las salidas de
   // error posteriores (p.ej. el 403 INSUFFICIENT_BUDGET), que es justo donde el
   // caller necesita saber en qué red se intentó cobrar.
+  //
+  // MNR-2 (AR, documentado NO implementado): legible SOLO por callers
+  // server-side — el CORS de src/index.ts no declara `exposedHeaders`, así que
+  // un browser no puede leerlo (gap preexistente, compartido con
+  // `x-a2a-remaining-budget`). Ver la nota extendida en middleware/x402.ts,
+  // junto al otro `reply.header(X_A2A_PAYMENT_CHAIN_HEADER, ...)`.
   reply.header(X_A2A_PAYMENT_CHAIN_HEADER, chainKey);
 
   const chainId = bundle.chainConfig.chainId;
@@ -403,11 +417,19 @@ function describeFundedChains(budget: A2AAgentKeyRow['budget']): string[] {
       }))
       .filter((entry) => Number.parseFloat(entry.amount) > 0)
       // Orden determinístico por chainId (los no-numéricos van al final).
-      .sort(
-        (a, b) =>
-          (Number.isFinite(a.chainId) ? a.chainId : Number.POSITIVE_INFINITY) -
-          (Number.isFinite(b.chainId) ? b.chainId : Number.POSITIVE_INFINITY),
-      )
+      // MNR-3 (fix-pack AR): con Number.POSITIVE_INFINITY, dos claves no
+      // numéricas daban `Infinity - Infinity = NaN` → orden
+      // implementation-defined. MAX_SAFE_INTEGER + desempate por la clave cruda
+      // → orden SIEMPRE determinístico (no alcanzable hoy, pero es un one-liner).
+      .sort((a, b) => {
+        const ai = Number.isFinite(a.chainId)
+          ? a.chainId
+          : Number.MAX_SAFE_INTEGER;
+        const bi = Number.isFinite(b.chainId)
+          ? b.chainId
+          : Number.MAX_SAFE_INTEGER;
+        return ai !== bi ? ai - bi : a.chainIdRaw.localeCompare(b.chainIdRaw);
+      })
       .map(
         (entry) =>
           `${slugByChainId.get(entry.chainId) ?? `chain ${entry.chainIdRaw}`} (${entry.amount})`,
@@ -535,7 +557,9 @@ async function resolveDelegationAuth(
     }
 
     // 4. resolver chain/bundle → chainId (REUSO del bloque master).
-    const chain = resolveTargetChain(request, reply);
+    // `delegation.key_id` = id de la parent key que paga (solo para el dedup +
+    // log del warn del default; NO habilita ningún enriquecimiento de respuesta).
+    const chain = resolveTargetChain(request, reply, delegation.key_id);
     if (!chain) return; // resolveTargetChain ya envió la respuesta de error
     const { chainId, chainKey, assetSymbol } = chain;
     request.resolvedChainId = chainId;
@@ -788,7 +812,9 @@ async function resolveKeySessionAuth(
     }
 
     // 4. resolver chain/bundle → chainId (REUSO del bloque master).
-    const chain = resolveTargetChain(request, reply);
+    // `session.key_id` = id de la parent key que paga (solo dedup + log, ver
+    // resolveTargetChain).
+    const chain = resolveTargetChain(request, reply, session.key_id);
     if (!chain) return; // resolveTargetChain ya envió la respuesta de error
     const { chainId, chainKey, assetSymbol } = chain;
     request.resolvedChainId = chainId;
@@ -1015,7 +1041,7 @@ async function resolveMasterAuth(
 
     // 6. Resolve target chain per-request — REUSO del helper resolveTargetChain
     // (WKH-104 TD-DRIFT: deduplicación del bloque master, behavior idéntico CD-1).
-    const chain = resolveTargetChain(request, reply);
+    const chain = resolveTargetChain(request, reply, keyRow.id);
     if (!chain) return; // resolveTargetChain ya envió la respuesta de error
     const { chainId, chainKey, assetSymbol, defaultApplied } = chain;
     request.resolvedChainId = chainId;

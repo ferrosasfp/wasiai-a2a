@@ -3042,6 +3042,10 @@ describe('WKH-175 — default-chain UX (a2a-key paid path)', () => {
     expect(warnCall?.[0]).toMatchObject({
       chainKey: 'kite-ozone-testnet',
       header: 'x-payment-chain',
+      // Fix-pack MNR-1: identidad del caller (id interno, NUNCA el rawKey) + ruta.
+      keyId: TEST_KEY_ID,
+      method: 'POST',
+      route: '/test-175',
     });
     // (3) eco de la chain efectivamente usada.
     expect(res.headers['x-a2a-payment-chain']).toBe('kite-ozone-testnet');
@@ -3075,8 +3079,13 @@ describe('WKH-175 — default-chain UX (a2a-key paid path)', () => {
     expect(res.headers['x-a2a-payment-chain']).toBe('avalanche-fuji');
   });
 
-  // ── T-175-3 (hot-path): el warn está deduplicado por proceso/slug ──
-  it('T-175-3: 2 requests sin header → 1 solo warn (dedup, evita ruido en hot-path)', async () => {
+  // ── T-175-3 (hot-path): el warn está deduplicado por CALLER + ventana ──
+  // Fix-pack MNR-1 — semántica NUEVA: la clave del dedup pasó de `chainKey`
+  // (un solo valor posible: el default → 1 warn por proceso y nunca más) a la
+  // identidad del caller (`keyId`) con una ventana temporal. Acá el caller es
+  // el MISMO en los 2 requests → sigue esperando 1 solo warn; el caso "callers
+  // distintos" lo cubre T-175-11.
+  it('T-175-3: 2 requests del MISMO caller sin header → 1 solo warn (ventana, evita ruido en hot-path)', async () => {
     mockLookupByHash.mockResolvedValue(makeKeyRow());
     mockDebit.mockResolvedValue({ success: true });
     mockGetBalance.mockResolvedValue('9.000000');
@@ -3246,5 +3255,44 @@ describe('WKH-175 — default-chain UX (a2a-key paid path)', () => {
     expect(res.headers['x-a2a-payment-chain']).toBeUndefined();
     expect(findDefaultWarn()).toBeUndefined();
     expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  // ── T-175-11 (fix-pack MNR-1): el dedup es por CALLER, no por chain ──
+  // Es el caso de uso que motivó el ticket: si un caller nuevo empieza a
+  // defaultear, tiene que avisar aunque otro caller ya haya warneado antes.
+  it('T-175-11: 2 callers DISTINTOS sin header → 1 warn cada uno, con su keyId', async () => {
+    const OTHER_KEY_ID = 'ffffffff-0000-1111-2222-333333333333';
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('9.000000');
+    mockLookupByHash
+      .mockResolvedValueOnce(makeKeyRow())
+      .mockResolvedValueOnce(makeKeyRow({ id: OTHER_KEY_ID }));
+
+    for (let i = 0; i < 2; i++) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test-175',
+        headers: { 'x-a2a-key': TEST_KEY },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(200);
+    }
+
+    const defaultWarns = logWarnSpy.mock.calls.filter(
+      (c) =>
+        c[1] === 'payment chain resolved by default (x-payment-chain absent)',
+    );
+    expect(defaultWarns).toHaveLength(2);
+    // Cada warn identifica a su caller por el id INTERNO de la key (nunca el
+    // rawKey ni ningún secreto) + la ruta/método donde pasó.
+    expect(defaultWarns.map((c) => (c[0] as { keyId: string }).keyId)).toEqual([
+      TEST_KEY_ID,
+      OTHER_KEY_ID,
+    ]);
+    expect(defaultWarns[0]?.[0]).toMatchObject({
+      chainKey: 'kite-ozone-testnet',
+      method: 'POST',
+      route: '/test-175',
+    });
   });
 });

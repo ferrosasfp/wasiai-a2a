@@ -49,14 +49,83 @@ export const X_A2A_PAYMENT_CHAIN_HEADER = 'x-a2a-payment-chain';
 // Dedup module-scoped del warn "se aplicó el default". El default se resuelve
 // en CADA request sin `x-payment-chain` (hot-path: hoy la mayoría de los
 // callers legítimos no lo mandan — el SDK sólo lo envía si `network` está
-// seteado), así que un warn por request inundaría los logs. Se avisa UNA vez
-// por proceso y por slug (mismo patrón que `_warnedFallbackSlugs` en
-// services/discovery.ts) y el detalle per-request queda en `debug`.
-const _warnedDefaultChainSlugs = new Set<string>();
+// seteado), así que un warn por request inundaría los logs.
+//
+// WKH-175 fix-pack (MNR-1 del AR): la clave del dedup es la IDENTIDAD DEL
+// CALLER (`keyId` de la agent key, o el sentinel `DEFAULT_CHAIN_WARN_NO_KEY`
+// para el path x402 puro), NO el slug de la chain. Con la clave anterior
+// (`chainKey`) el único valor posible era el default — `warnDefaultChainApplied`
+// se invoca SOLO en el branch del default — así que el warn se emitía una vez
+// al primer request sin header tras el deploy y nunca más: inútil para el caso
+// de uso que motivó el ticket ("avisame que un caller importante dejó de mandar
+// el header"). Ahora: un warn por caller por VENTANA temporal (si el problema
+// persiste, vuelve a avisar) + cap de tamaño para que el Map no crezca sin
+// límite (una entrada por caller crecería indefinidamente).
+// Contraste: en services/discovery.ts el dedup se clavea por registry slug (un
+// dominio de muchos valores), por eso ahí sí da señal por entidad.
+
+/**
+ * Ventana de re-warn por caller: el mismo caller no vuelve a warnear antes de
+ * que pase esto (pero SÍ después, para que un problema persistente re-avise).
+ */
+export const DEFAULT_CHAIN_WARN_WINDOW_MS = 15 * 60 * 1000; // 15 min
+
+/**
+ * Cap de entradas del dedup (1 por caller). Política de desalojo al llenarse:
+ * (1) purgar las entradas ya expiradas (son inservibles: su ventana venció) y
+ * (2) si sigue llena, descartar la entrada del caller warneado hace MÁS tiempo
+ * (FIFO por recencia de warn: `shouldWarnDefaultChain` hace delete+set, así que
+ * el orden de inserción del Map ES el orden de recencia). Consecuencia aceptada:
+ * bajo >CAP callers distintos defaulteando a la vez, algún caller puede
+ * re-warnear antes de la ventana. Preferible a crecer sin límite.
+ */
+export const DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES = 1000;
+
+/**
+ * Discriminante estable para "request sin agent-key" (path x402 puro, donde el
+ * caller se identifica con una firma de pago, no con una key interna). Todo ese
+ * tráfico comparte UNA entrada → conserva el comportamiento "un warn por
+ * ventana" para el agregado anónimo, sin romper el path. No colisiona con un id
+ * de `a2a_agent_keys` (UUID).
+ */
+export const DEFAULT_CHAIN_WARN_NO_KEY = 'no-agent-key';
+
+/** callerRef → epoch ms del último warn emitido para ese caller. */
+const _defaultChainWarnedAt = new Map<string, number>();
 
 /** TEST-ONLY: limpia el dedup de warns (CD: evitar contaminación cross-test). */
 export function _resetDefaultChainWarnDedup(): void {
-  _warnedDefaultChainSlugs.clear();
+  _defaultChainWarnedAt.clear();
+}
+
+/**
+ * ¿Toca emitir el `warn` para este caller? Aplica la ventana temporal y el cap
+ * de tamaño (ver DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES por la política).
+ */
+function shouldWarnDefaultChain(callerRef: string, now: number): boolean {
+  const last = _defaultChainWarnedAt.get(callerRef);
+  if (last !== undefined && now - last < DEFAULT_CHAIN_WARN_WINDOW_MS) {
+    return false;
+  }
+  if (
+    !_defaultChainWarnedAt.has(callerRef) &&
+    _defaultChainWarnedAt.size >= DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES
+  ) {
+    for (const [ref, at] of _defaultChainWarnedAt) {
+      if (now - at >= DEFAULT_CHAIN_WARN_WINDOW_MS) {
+        _defaultChainWarnedAt.delete(ref);
+      }
+    }
+    if (_defaultChainWarnedAt.size >= DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES) {
+      const oldest = _defaultChainWarnedAt.keys().next();
+      if (!oldest.done) _defaultChainWarnedAt.delete(oldest.value);
+    }
+  }
+  // delete+set: reinserta al final para que el orden del Map sea por recencia
+  // de warn (lo que hace correcto el desalojo FIFO de arriba).
+  _defaultChainWarnedAt.delete(callerRef);
+  _defaultChainWarnedAt.set(callerRef, now);
+  return true;
 }
 
 /**
@@ -65,17 +134,29 @@ export function _resetDefaultChainWarnDedup(): void {
  * (abajo) y por `resolveTargetChain` en a2a-key.ts (compose/orchestrate con
  * `x-a2a-key`), que ya importa de este módulo (sin ciclo).
  *
- * `warn` deduplicado (una vez por proceso/slug) + `debug` per-request para
- * trazabilidad completa cuando se baja LOG_LEVEL. NUNCA loguea credenciales.
+ * `warn` deduplicado POR CALLER y por ventana temporal (MNR-1) + `debug`
+ * per-request para trazabilidad completa cuando se baja LOG_LEVEL.
+ *
+ * `callerKeyId`: id interno de la agent key del caller, o `null` para el path
+ * x402 puro (sin agent-key). NUNCA se loguea el rawKey ni ningún secreto —
+ * solo el id interno, mismo campo `keyId` que `a2a-key.insufficient-budget`.
  */
 export function warnDefaultChainApplied(
   request: FastifyRequest,
   chainKey: ChainKey,
+  callerKeyId: string | null,
 ): void {
-  const fields = { chainKey, header: 'x-payment-chain' };
+  const keyId = callerKeyId ?? DEFAULT_CHAIN_WARN_NO_KEY;
+  const fields = {
+    chainKey,
+    header: 'x-payment-chain',
+    keyId,
+    method: request.method,
+    // Patrón de routes/metrics.ts:112: el PATRÓN de ruta (sin querystring).
+    route: request.routeOptions?.url ?? request.url,
+  };
   const msg = 'payment chain resolved by default (x-payment-chain absent)';
-  if (!_warnedDefaultChainSlugs.has(chainKey)) {
-    _warnedDefaultChainSlugs.add(chainKey);
+  if (shouldWarnDefaultChain(keyId, Date.now())) {
     request.log.warn(fields, msg);
   }
   request.log.debug(fields, msg);
@@ -269,7 +350,10 @@ export function requirePayment(
       }
       // WKH-175: el default dejaba de ser silencioso — se avisa (warn
       // deduplicado + debug per-request). NO cambia la resolución.
-      warnDefaultChainApplied(request, chainKey);
+      // `null` = path x402 puro: acá NO hay agent-key (el caller se identifica
+      // con la firma de pago), así que el dedup usa el sentinel
+      // DEFAULT_CHAIN_WARN_NO_KEY. Ver warnDefaultChainApplied.
+      warnDefaultChainApplied(request, chainKey, null);
     }
 
     const bundle = getAdaptersBundle(chainKey);
@@ -285,6 +369,15 @@ export function requirePayment(
     // vez resuelto el bundle) para que TODAS las salidas de este handler la
     // lleven — el 402 challenge incluido, que es donde el caller descubre en qué
     // red se le está cobrando.
+    //
+    // MNR-2 (AR, documentado NO implementado): este header solo es legible por
+    // callers SERVER-SIDE (SDK, agentes, rutas server de Chaski — los únicos que
+    // pueden sostener el secreto `x-a2a-key`). La config de @fastify/cors en
+    // src/index.ts NO declara `exposedHeaders`, así que un caller BROWSER no
+    // puede leerlo. Es un gap PREEXISTENTE y compartido con el header que se
+    // tomó como patrón (`x-a2a-remaining-budget`). Exponerlo a browsers
+    // requeriría agregar AMBOS headers a `exposedHeaders` del CORS: decisión
+    // pendiente, depende de si aparecen consumidores browser reales.
     reply.header(X_A2A_PAYMENT_CHAIN_HEADER, chainKey);
 
     // DT-2 / AC-4: canónico x402 (X-PAYMENT) gana sobre legacy (payment-signature).

@@ -92,7 +92,12 @@ vi.mock('../adapters/registry.js', () => ({
 }));
 
 import { buildEoaPaymentHeader } from '../__tests__/fixtures/passport-shape.js';
-import { _resetDefaultChainWarnDedup, requirePayment } from './x402.js';
+import {
+  _resetDefaultChainWarnDedup,
+  DEFAULT_CHAIN_WARN_NO_KEY,
+  DEFAULT_CHAIN_WARN_WINDOW_MS,
+  requirePayment,
+} from './x402.js';
 
 interface ChallengeBody {
   error: string;
@@ -588,15 +593,21 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
   const DEFAULT_WARN_MSG =
     'payment chain resolved by default (x-payment-chain absent)';
 
-  /** App con `req.log.warn` espiado (hook global corre antes del preHandler). */
+  /**
+   * App con `req.log.warn` y `req.log.debug` espiados (el hook global corre
+   * antes del preHandler).
+   */
   async function makeAppWithWarnSpy(): Promise<{
     app: ReturnType<typeof Fastify>;
     warnSpy: ReturnType<typeof vi.fn>;
+    debugSpy: ReturnType<typeof vi.fn>;
   }> {
     const warnSpy = vi.fn();
+    const debugSpy = vi.fn();
     const app = Fastify();
     app.addHook('preHandler', async (req: FastifyRequest) => {
       req.log.warn = warnSpy as unknown as FastifyRequest['log']['warn'];
+      req.log.debug = debugSpy as unknown as FastifyRequest['log']['debug'];
     });
     app.post(
       '/test',
@@ -605,7 +616,7 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
         reply.send({ ok: true }),
     );
     await app.ready();
-    return { app, warnSpy };
+    return { app, warnSpy, debugSpy };
   }
 
   it('T-175-X1: sin x-payment-chain → warn del default + header x-a2a-payment-chain en el 402', async () => {
@@ -627,9 +638,14 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
         (c) => c[1] === DEFAULT_WARN_MSG,
       );
       expect(warnCall).toBeDefined();
+      // Fix-pack MNR-1: fields del warn = chain + header + identidad del caller
+      // + ruta/método. En el path x402 puro NO hay agent-key → sentinel.
       expect(warnCall?.[0]).toMatchObject({
         chainKey: 'kite-ozone-testnet',
         header: 'x-payment-chain',
+        keyId: DEFAULT_CHAIN_WARN_NO_KEY,
+        method: 'POST',
+        route: '/test',
       });
       expect(res.headers['x-a2a-payment-chain']).toBe('kite-ozone-testnet');
     } finally {
@@ -658,7 +674,12 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
     }
   });
 
-  it('T-175-X3: 2 requests sin header → 1 solo warn (dedup hot-path), header en ambos', async () => {
+  // Fix-pack MNR-1 (semántica NUEVA): el dedup ya no es por slug de chain sino
+  // por identidad del caller + ventana temporal. En el path x402 puro todos los
+  // requests comparten el sentinel `no-agent-key` → el mismo caller dentro de la
+  // ventana sigue dando 1 solo warn (este test conserva su expectativa, pero
+  // ahora por "mismo caller", no por "mismo slug").
+  it('T-175-X3: 2 requests del MISMO caller sin header → 1 solo warn (ventana), header en ambos', async () => {
     _resetDefaultChainWarnDedup();
     const { app, warnSpy } = await makeAppWithWarnSpy();
     try {
@@ -696,6 +717,60 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
         false,
       );
     } finally {
+      await app.close();
+    }
+  });
+
+  // ── Fix-pack MNR-4: el `debug` per-request es el control compensatorio que
+  // hace aceptable el dedup del warn. Sin este test se podía borrar esa línea
+  // sin que nada falle.
+  it('T-175-X5: 3 requests sin header → 3 debug (per-request) + 1 warn (ventana)', async () => {
+    _resetDefaultChainWarnDedup();
+    const { app, warnSpy, debugSpy } = await makeAppWithWarnSpy();
+    try {
+      for (let i = 0; i < 3; i++) {
+        await app.inject({ method: 'POST', url: '/test', payload: {} });
+      }
+      const debugCalls = debugSpy.mock.calls.filter(
+        (c) => c[1] === DEFAULT_WARN_MSG,
+      );
+      expect(debugCalls).toHaveLength(3);
+      expect(debugCalls[0]?.[0]).toMatchObject({
+        chainKey: 'kite-ozone-testnet',
+        keyId: DEFAULT_CHAIN_WARN_NO_KEY,
+        route: '/test',
+      });
+      expect(
+        warnSpy.mock.calls.filter((c) => c[1] === DEFAULT_WARN_MSG),
+      ).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── Fix-pack MNR-1: la ventana temporal hace que un problema PERSISTENTE
+  // vuelva a avisar (el dedup viejo warneaba una vez por proceso y nunca más).
+  it('T-175-X6: pasada la ventana, el mismo caller VUELVE a warnear', async () => {
+    _resetDefaultChainWarnDedup();
+    const t0 = 1_800_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(t0);
+    const { app, warnSpy } = await makeAppWithWarnSpy();
+    try {
+      await app.inject({ method: 'POST', url: '/test', payload: {} });
+      // Dentro de la ventana → sigue deduplicado.
+      nowSpy.mockReturnValue(t0 + DEFAULT_CHAIN_WARN_WINDOW_MS - 1);
+      await app.inject({ method: 'POST', url: '/test', payload: {} });
+      expect(
+        warnSpy.mock.calls.filter((c) => c[1] === DEFAULT_WARN_MSG),
+      ).toHaveLength(1);
+      // Fuera de la ventana → re-avisa.
+      nowSpy.mockReturnValue(t0 + DEFAULT_CHAIN_WARN_WINDOW_MS);
+      await app.inject({ method: 'POST', url: '/test', payload: {} });
+      expect(
+        warnSpy.mock.calls.filter((c) => c[1] === DEFAULT_WARN_MSG),
+      ).toHaveLength(2);
+    } finally {
+      nowSpy.mockRestore();
       await app.close();
     }
   });
