@@ -93,10 +93,13 @@ vi.mock('../adapters/registry.js', () => ({
 
 import { buildEoaPaymentHeader } from '../__tests__/fixtures/passport-shape.js';
 import {
+  _defaultChainWarnDedupSize,
   _resetDefaultChainWarnDedup,
+  DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES,
   DEFAULT_CHAIN_WARN_NO_KEY,
   DEFAULT_CHAIN_WARN_WINDOW_MS,
   requirePayment,
+  warnDefaultChainApplied,
 } from './x402.js';
 
 interface ChallengeBody {
@@ -772,6 +775,114 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
     } finally {
       nowSpy.mockRestore();
       await app.close();
+    }
+  });
+
+  // ── Fix-pack MNR-1 (CR): la POLÍTICA DE DESALOJO del dedup no tenía ni un
+  // test. La purga de expiradas, la evicción del menos-recientemente-warneado y
+  // la línea load-bearing `delete`+`set` estaban 100% sin cobertura: si alguien
+  // borraba el `delete` por "redundante" (el `set` ya sobrescribe el valor), la
+  // suite seguía verde y la evicción degradaba en silencio de "menos-reciente" a
+  // "primero-visto". `DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES` tampoco tenía
+  // consumidor.
+  //
+  // Los 2 tests van CONTRA el choke-point exportado `warnDefaultChainApplied`
+  // (no vía HTTP): la política es module-scoped y no depende de nada de Fastify
+  // más que `log`/`method`/`routeOptions`, así que así son instantáneos y el cap
+  // se parametriza con `_resetDefaultChainWarnDedup(n)` en vez de insertar 1000
+  // entradas.
+
+  /** Request mínimo para ejercitar el choke-point sin levantar un server. */
+  function makeWarnProbe(): {
+    request: FastifyRequest;
+    warnedRefs: () => string[];
+  } {
+    const warnSpy = vi.fn();
+    const request = {
+      method: 'POST',
+      url: '/probe',
+      routeOptions: { url: '/probe' },
+      log: { warn: warnSpy, debug: vi.fn() },
+    } as unknown as FastifyRequest;
+    return {
+      request,
+      warnedRefs: () =>
+        warnSpy.mock.calls
+          .filter((c) => c[1] === DEFAULT_WARN_MSG)
+          .map((c) => (c[0] as { keyId: string }).keyId),
+    };
+  }
+
+  const WARN_T0 = 1_800_000_000_000;
+
+  it('T-175-X7: la política de desalojo acota el Map al cap y purga las entradas expiradas', () => {
+    // Cap de producción intacto (el default sigue siendo el exportado).
+    expect(DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES).toBe(1000);
+    _resetDefaultChainWarnDedup(2); // cap chico SÓLO para este test
+    const nowSpy = vi.spyOn(Date, 'now');
+    const { request, warnedRefs } = makeWarnProbe();
+    try {
+      nowSpy.mockReturnValue(WARN_T0);
+      warnDefaultChainApplied(request, 'kite-ozone-testnet', 'caller-A');
+      warnDefaultChainApplied(request, 'kite-ozone-testnet', 'caller-B');
+      expect(_defaultChainWarnDedupSize()).toBe(2);
+
+      // (a) el Map queda ACOTADO al cap: un 3er caller no lo hace crecer.
+      warnDefaultChainApplied(request, 'kite-ozone-testnet', 'caller-C');
+      expect(_defaultChainWarnDedupSize()).toBe(2);
+      // Los 3 callers distintos warnean (el dedup es por caller, no global).
+      expect(warnedRefs()).toEqual(['caller-A', 'caller-B', 'caller-C']);
+
+      // (c) PURGA de expiradas: pasada la ventana, B y C ya son inservibles → al
+      // entrar un caller nuevo se limpian AMBAS (no se desaloja sólo una) → 1.
+      nowSpy.mockReturnValue(WARN_T0 + DEFAULT_CHAIN_WARN_WINDOW_MS);
+      warnDefaultChainApplied(request, 'kite-ozone-testnet', 'caller-D');
+      expect(_defaultChainWarnDedupSize()).toBe(1);
+    } finally {
+      nowSpy.mockRestore();
+      _resetDefaultChainWarnDedup(); // restaura el cap de producción
+    }
+  });
+
+  it('T-175-X8: al desalojar sobrevive el caller warneado MÁS recientemente (delete+set)', () => {
+    _resetDefaultChainWarnDedup(2);
+    const nowSpy = vi.spyOn(Date, 'now');
+    const { request, warnedRefs } = makeWarnProbe();
+    const warn = (ref: string) =>
+      warnDefaultChainApplied(request, 'kite-ozone-testnet', ref);
+    try {
+      nowSpy.mockReturnValue(WARN_T0);
+      warn('caller-A'); // [A@t0]
+      nowSpy.mockReturnValue(WARN_T0 + DEFAULT_CHAIN_WARN_WINDOW_MS - 1);
+      warn('caller-B'); // [A@t0, B@t0+W-1] → lleno
+      // A re-warnea (su ventana venció) → el delete+set lo reinserta AL FINAL,
+      // así que el orden del Map pasa a ser [B, A]: B es ahora el
+      // menos-recientemente-warneado. Sin el `delete` el orden seguiría [A, B].
+      nowSpy.mockReturnValue(WARN_T0 + DEFAULT_CHAIN_WARN_WINDOW_MS);
+      warn('caller-A');
+      expect(warnedRefs()).toEqual(['caller-A', 'caller-B', 'caller-A']);
+
+      // Entra un caller nuevo con el Map lleno y NADA expirado (A hace 0ms, B
+      // hace 1ms) → se desaloja el menos-recientemente-warneado: B.
+      warn('caller-C');
+      expect(_defaultChainWarnDedupSize()).toBe(2);
+
+      // (b) A —el más recientemente warneado— SOBREVIVIÓ: sigue deduplicado.
+      warn('caller-A');
+      // B fue el desalojado → vuelve a warnear aunque su ventana no había
+      // vencido. Con la evicción degradada (sin delete+set) sería al revés: A
+      // warnearía de nuevo y B quedaría silenciado.
+      warn('caller-B');
+      expect(warnedRefs()).toEqual([
+        'caller-A',
+        'caller-B',
+        'caller-A',
+        'caller-C',
+        'caller-B',
+      ]);
+    } finally {
+      nowSpy.mockRestore();
+      _resetDefaultChainWarnDedup();
     }
   });
 });

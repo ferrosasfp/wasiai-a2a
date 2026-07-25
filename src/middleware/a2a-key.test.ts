@@ -504,10 +504,15 @@ describe('requirePaymentOrA2AKey middleware', () => {
     expect(response.json().error_code).toBe('INSUFFICIENT_BUDGET');
     // AC-8: message includes the target chainId.
     // WKH-175: el texto ahora también trae el slug, la causa (default aplicado
-    // por falta de header) y las chains con saldo. `status` + `error_code` NO
-    // cambian (contrato estable para los clientes que los parsean).
+    // por falta de header) y las OTRAS chains con saldo. `status` + `error_code`
+    // NO cambian (contrato estable para los clientes que los parsean).
+    // Fix-pack MNR-3 (CR): esta key SÓLO tiene budget en 2368, que es justo la
+    // chain target → la lista queda vacía y el mensaje dice "no other chain has
+    // balance". La expectativa ANTERIOR ("chains with balance:
+    // kite-ozone-testnet") pinneaba el defecto de UX que MNR-3 corrige: le
+    // sugería al caller la misma red que lo acababa de rechazar.
     expect(response.json().error).toBe(
-      "chain 2368 (kite-ozone-testnet) balance is 0; no x-payment-chain header sent, used default 'kite-ozone-testnet'; chains with balance: kite-ozone-testnet (10.000000)",
+      "chain 2368 (kite-ozone-testnet) balance is 0; no x-payment-chain header sent, used default 'kite-ozone-testnet'; no other chain has balance",
     );
   });
 
@@ -680,9 +685,11 @@ describe('requirePaymentOrA2AKey middleware', () => {
     // WKH-MULTICHAIN W2: message now includes target chainId (AC-8) instead of
     // the raw PG error. The error is logged via request.log.warn but does not
     // leak to the client.
-    // WKH-175: + slug + causa del default + chains con saldo (mismo 403/code).
+    // WKH-175: + slug + causa del default + OTRAS chains con saldo (mismo
+    // 403/code). Fix-pack MNR-3 (CR): la única chain con budget de esta key es
+    // la target (2368) → excluida de la lista → "no other chain has balance".
     expect(response.json().error).toBe(
-      "chain 2368 (kite-ozone-testnet) balance is 0; no x-payment-chain header sent, used default 'kite-ozone-testnet'; chains with balance: kite-ozone-testnet (10.000000)",
+      "chain 2368 (kite-ozone-testnet) balance is 0; no x-payment-chain header sent, used default 'kite-ozone-testnet'; no other chain has balance",
     );
   });
 
@@ -1002,6 +1009,8 @@ describe('requirePaymentOrA2AKey middleware', () => {
       // WKH-175: el header VINO presente (avalanche-fuji) → el mensaje NO habla
       // de default, pero SÍ lista dónde la key tiene saldo (kite), que es
       // exactamente la confusión cross-chain que este 403 tenía que explicar.
+      // Fix-pack MNR-3: la target (43113, saldo '0') se excluye de la lista;
+      // kite (43113 ≠ 2368) SÍ es una alternativa real → el texto no cambia.
       expect(response.json().error).toBe(
         'chain 43113 (avalanche-fuji) balance is 0; chains with balance: kite-ozone-testnet (10.000000)',
       );
@@ -3011,8 +3020,12 @@ describe('WKH-175 — default-chain UX (a2a-key paid path)', () => {
     );
     mockReceiptEmit.mockResolvedValue(undefined);
     logWarnSpy = vi.fn();
-    // El warn del default está deduplicado por proceso/slug (hot-path): sin este
-    // reset, el primer test del archivo que resuelve el default se lo "come".
+    // El warn del default está deduplicado POR CALLER (keyId) + VENTANA temporal
+    // (fix-pack MNR-1 del AR; ya NO es por proceso/slug): sin este reset, el
+    // primer test que resuelve el default con este keyId se come el warn de los
+    // siguientes durante los 15 min de la ventana. Sin argumento → cap de
+    // producción (la política de desalojo se testea aparte, en
+    // x402.chain-aware.test.ts, con un cap chico).
     _resetDefaultChainWarnDedup();
   });
 
@@ -3139,6 +3152,9 @@ describe('WKH-175 — default-chain UX (a2a-key paid path)', () => {
 
   // ── T-175-5 (mejora 2): la key no tiene saldo en NINGUNA chain ──
   it('T-175-5: sin saldo en ninguna chain → el mensaje lo dice sin romperse', async () => {
+    // Fix-pack MNR-3: el segmento final pasó de "no chain has balance" a "no
+    // other chain has balance" porque la chain target ya está excluida de la
+    // lista por diseño (su saldo lo reporta el PRIMER segmento).
     mockLookupByHash.mockResolvedValue(
       makeKeyRow({ budget: { '2368': '0', '43113': '0.000000' } }),
     );
@@ -3155,7 +3171,7 @@ describe('WKH-175 — default-chain UX (a2a-key paid path)', () => {
     expect(res.statusCode).toBe(403);
     expect(res.json().error_code).toBe('INSUFFICIENT_BUDGET');
     expect(res.json().error).toBe(
-      'chain 43113 (avalanche-fuji) balance is 0; no chain has balance',
+      'chain 43113 (avalanche-fuji) balance is 0; no other chain has balance',
     );
   });
 
@@ -3173,7 +3189,11 @@ describe('WKH-175 — default-chain UX (a2a-key paid path)', () => {
     });
 
     expect(res.statusCode).toBe(403);
-    expect(res.json().error).toContain('no chain has balance');
+    // Fix-pack MNR-3: texto exacto (antes era un `toContain` parcial) con el
+    // nuevo segmento "no other chain has balance".
+    expect(res.json().error).toBe(
+      "chain 2368 (kite-ozone-testnet) balance is 0; no x-payment-chain header sent, used default 'kite-ozone-testnet'; no other chain has balance",
+    );
   });
 
   // ── T-175-7: chainId con saldo NO inicializado en este proceso ──
@@ -3294,5 +3314,67 @@ describe('WKH-175 — default-chain UX (a2a-key paid path)', () => {
       method: 'POST',
       route: '/test-175',
     });
+  });
+
+  // ── T-175-12 (fix-pack MNR-3): el 403 NUNCA sugiere la chain que falló ──
+  // Repro determinístico del CR: saldo 0.500000 en la chain target y precio $1 →
+  // el saldo es > 0 (pasa el filtro del `budget` jsonb) pero INSUFICIENTE. El
+  // mensaje viejo salía "...; chains with balance: kite-ozone-testnet (0.500000)"
+  // → le ofrecía como alternativa la misma red que lo acababa de rechazar, que es
+  // exactamente lo que esta HU ("error accionable") quería evitar.
+  it('T-175-12: saldo > 0 pero insuficiente en la chain target → NO aparece en "chains with balance"', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({ budget: { '2368': '0.500000' } }),
+    );
+    mockDebit.mockResolvedValue({ success: false, error: 'Insufficient' });
+    // Lectura fresca post-debit-fallido: el saldo real de la target.
+    mockGetBalance.mockResolvedValue('0.500000');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-175',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('INSUFFICIENT_BUDGET');
+    // El PRIMER segmento ya informa el saldo de la target; la lista de
+    // alternativas queda vacía → "no other chain has balance".
+    expect(res.json().error).toBe(
+      "chain 2368 (kite-ozone-testnet) balance is 0.500000; no x-payment-chain header sent, used default 'kite-ozone-testnet'; no other chain has balance",
+    );
+    // Guard explícito: el slug de la chain target NO puede aparecer después del
+    // "chains with balance:" (que acá no existe) ni como sugerencia.
+    expect(res.json().error).not.toContain('chains with balance');
+    // El log comparte EXACTAMENTE la misma lista (MNR-4: se computa una vez).
+    const warnCall = logWarnSpy.mock.calls.find(
+      (c) => c[1] === 'a2a-key.insufficient-budget',
+    );
+    expect(warnCall?.[0]).toMatchObject({
+      chainId: 2368,
+      fundedChains: [],
+    });
+  });
+
+  // ── T-175-13 (fix-pack MNR-3): con OTRA chain fondeada, esa sí se sugiere ──
+  it('T-175-13: target con saldo insuficiente + otra chain fondeada → lista sólo la otra', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({ budget: { '2368': '0.500000', '43113': '9.000000' } }),
+    );
+    mockDebit.mockResolvedValue({ success: false, error: 'Insufficient' });
+    mockGetBalance.mockResolvedValue('0.500000');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-175',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe(
+      "chain 2368 (kite-ozone-testnet) balance is 0.500000; no x-payment-chain header sent, used default 'kite-ozone-testnet'; chains with balance: avalanche-fuji (9.000000)",
+    );
   });
 });

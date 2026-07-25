@@ -75,11 +75,24 @@ export const DEFAULT_CHAIN_WARN_WINDOW_MS = 15 * 60 * 1000; // 15 min
  * (1) purgar las entradas ya expiradas (son inservibles: su ventana venció) y
  * (2) si sigue llena, descartar la entrada del caller warneado hace MÁS tiempo
  * (FIFO por recencia de warn: `shouldWarnDefaultChain` hace delete+set, así que
- * el orden de inserción del Map ES el orden de recencia). Consecuencia aceptada:
- * bajo >CAP callers distintos defaulteando a la vez, algún caller puede
- * re-warnear antes de la ventana. Preferible a crecer sin límite.
+ * el orden de inserción del Map ES el orden de recencia).
+ *
+ * Consecuencia aceptada (MNR-2 del CR, medida): con >2×CAP callers distintos
+ * activos el dedup degrada hacia 1 warn POR REQUEST — no "algún caller
+ * re-warnea": en round-robin sobre 2×CAP callers cada entrada ya fue desalojada
+ * cuando su caller vuelve, así que la ventana nunca aplica. La MEMORIA sigue
+ * acotada al cap (no hay leak); lo que queda acotado sólo por el rate del
+ * tráfico es el VOLUMEN DE LOGS, que es justo lo que el dedup existe para
+ * evitar. Preferible a crecer sin límite; el `debug` per-request no cambia.
  */
 export const DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES = 1000;
+
+/**
+ * Cap efectivo del dedup. Es `DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES` en runtime;
+ * `_resetDefaultChainWarnDedup(n)` lo baja SÓLO en tests para poder ejercitar la
+ * política de desalojo sin insertar 1000 entradas (MNR-1 del CR).
+ */
+let _dedupMaxEntries: number = DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES;
 
 /**
  * Discriminante estable para "request sin agent-key" (path x402 puro, donde el
@@ -93,9 +106,25 @@ export const DEFAULT_CHAIN_WARN_NO_KEY = 'no-agent-key';
 /** callerRef → epoch ms del último warn emitido para ese caller. */
 const _defaultChainWarnedAt = new Map<string, number>();
 
-/** TEST-ONLY: limpia el dedup de warns (CD: evitar contaminación cross-test). */
-export function _resetDefaultChainWarnDedup(): void {
+/**
+ * TEST-ONLY: limpia el dedup de warns (CD: evitar contaminación cross-test).
+ *
+ * `maxEntries` (TEST-ONLY, MNR-1): baja el cap de entradas para ejercitar la
+ * política de desalojo con 2-3 callers en vez de 1000. Sin argumento restaura el
+ * cap de producción (`DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES`), así que las ~7
+ * llamadas existentes `_resetDefaultChainWarnDedup()` no cambian de semántica.
+ */
+export function _resetDefaultChainWarnDedup(maxEntries?: number): void {
   _defaultChainWarnedAt.clear();
+  _dedupMaxEntries = maxEntries ?? DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES;
+}
+
+/**
+ * TEST-ONLY: tamaño actual del dedup. Hace OBSERVABLE el cap (sin esto, "el Map
+ * queda acotado" y "las expiradas se purgan" no se pueden afirmar en un test).
+ */
+export function _defaultChainWarnDedupSize(): number {
+  return _defaultChainWarnedAt.size;
 }
 
 /**
@@ -109,14 +138,14 @@ function shouldWarnDefaultChain(callerRef: string, now: number): boolean {
   }
   if (
     !_defaultChainWarnedAt.has(callerRef) &&
-    _defaultChainWarnedAt.size >= DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES
+    _defaultChainWarnedAt.size >= _dedupMaxEntries
   ) {
     for (const [ref, at] of _defaultChainWarnedAt) {
       if (now - at >= DEFAULT_CHAIN_WARN_WINDOW_MS) {
         _defaultChainWarnedAt.delete(ref);
       }
     }
-    if (_defaultChainWarnedAt.size >= DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES) {
+    if (_defaultChainWarnedAt.size >= _dedupMaxEntries) {
       const oldest = _defaultChainWarnedAt.keys().next();
       if (!oldest.done) _defaultChainWarnedAt.delete(oldest.value);
     }
