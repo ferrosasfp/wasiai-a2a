@@ -250,6 +250,27 @@ describe('signAndSettleDownstream — skip codes', () => {
     expect(mockGetPaymentAdapter).not.toHaveBeenCalled();
   });
 
+  it('T-235a-FlagOff-Log: flag off → loguea el skip FLAG_OFF una sola vez por proceso, mismo comportamiento (null)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(false);
+    const logger = makeLogger();
+
+    const first = await signAndSettleDownstream(makeAgent(), logger);
+    expect(first).toBeNull();
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'FLAG_OFF' }),
+      expect.stringContaining('WASIAI_DOWNSTREAM_X402'),
+    );
+    expect(logger.info).toHaveBeenCalledTimes(1);
+
+    // warn-once: el segundo leg NO vuelve a loguear (no ensucia el hot-path),
+    // pero sigue devolviendo null sin resolver adapters.
+    const second = await signAndSettleDownstream(makeAgent(), logger);
+    expect(second).toBeNull();
+    expect(logger.info).toHaveBeenCalledTimes(1);
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(mockGetPaymentAdapter).not.toHaveBeenCalled();
+  });
+
   it('T-SkipNoPayment: payment undefined → null + NO_PAYMENT_FIELD', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const logger = makeLogger();

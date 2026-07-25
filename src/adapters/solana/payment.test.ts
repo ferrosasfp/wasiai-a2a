@@ -9,7 +9,7 @@
  * CD-12: `mock.calls[N]` accesses are guarded (noUncheckedIndexedAccess).
  */
 
-import { PublicKey } from '@solana/web3.js';
+import { PublicKey, type Transaction } from '@solana/web3.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
@@ -163,6 +163,153 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
       amountAtomic: '1000000',
     });
     expect(res.valid).toBe(false);
+  });
+
+  // ── WKH-235a (AC-1/AC-2) — recuperación de firma tras timeout ───────────
+
+  /** Confirmed tx fixture reusada por los casos de recovery (delta >= required). */
+  function mockConfirmedTx(amount = '1000000'): void {
+    fakeConnection.getParsedTransaction.mockResolvedValue({
+      meta: {
+        err: null,
+        preTokenBalances: [
+          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '0' } },
+        ],
+        postTokenBalances: [
+          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount } },
+        ],
+      },
+    });
+  }
+
+  it('T-235a-AC1: confirmation timeout + tx CONFIRMED on-chain → success con la firma del error, sin segundo transfer', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    const intentId = 'ctx-timeout:0:payTo';
+
+    // TransactionExpiredTimeoutError expone `signature` (base58) como campo.
+    const timeoutErr = Object.assign(
+      new Error('Transaction was not confirmed in 30.00 seconds'),
+      { signature: FAKE_SIG },
+    );
+    mockSendAndConfirm.mockRejectedValueOnce(timeoutErr);
+    mockConfirmedTx();
+
+    const res = await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId,
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.txHash).toBe(FAKE_SIG);
+    // La firma se consultó on-chain una vez y NO se re-emitió el transfer.
+    expect(fakeConnection.getParsedTransaction).toHaveBeenCalledTimes(1);
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    expect(mockCreateTransferIx).toHaveBeenCalledTimes(1);
+
+    // `_intentSignatures` quedó poblado: un retry con el MISMO intentId es un
+    // idempotent-hit (verify de la firma previa, cero broadcasts nuevos).
+    const retry = await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId,
+    });
+    expect(retry.txHash).toBe(FAKE_SIG);
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    expect(mockCreateTransferIx).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-235a-AC1b: timeout sin `signature` en el error → la firma se deriva de la tx ya firmada (Transaction.signature)', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    // sendAndConfirmTransaction firma el MISMO objeto Transaction in-place antes
+    // de broadcastear → la firma sobrevive al throw. 64 bytes cero ⇒ base58 '1'×64.
+    mockSendAndConfirm.mockImplementationOnce((..._a: unknown[]) => {
+      const tx = _a[1] as Transaction;
+      tx.signatures = [
+        { publicKey: new PublicKey(OPERATOR), signature: Buffer.alloc(64) },
+      ];
+      return Promise.reject(new Error('socket hang up'));
+    });
+    mockConfirmedTx();
+
+    const res = await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId: 'ctx-timeout:1:payTo',
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.txHash).toBe('1'.repeat(64));
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-235a-AC2: timeout + tx NO confirmada on-chain → propaga el error original (sin regresión)', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    const timeoutErr = Object.assign(new Error('not confirmed in 30.00s'), {
+      signature: FAKE_SIG,
+    });
+    mockSendAndConfirm.mockRejectedValueOnce(timeoutErr);
+    fakeConnection.getParsedTransaction.mockResolvedValue(null); // no está on-chain
+
+    await expect(
+      adapter.settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-timeout:2:payTo',
+      }),
+    ).rejects.toThrow('not confirmed in 30.00s');
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-235a-AC2b: timeout + tx confirmada pero INVÁLIDA (monto insuficiente) → NO se trata como éxito', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    const timeoutErr = Object.assign(new Error('blockhash expired'), {
+      signature: FAKE_SIG,
+    });
+    mockSendAndConfirm.mockRejectedValueOnce(timeoutErr);
+    mockConfirmedTx('500000'); // transferido < requerido
+
+    await expect(
+      adapter.settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-timeout:3:payTo',
+      }),
+    ).rejects.toThrow('blockhash expired');
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-235a-AC2c: fallo ANTES de firmar (sin firma derivable) → propaga el error, cero lecturas on-chain', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    mockSendAndConfirm.mockRejectedValueOnce(
+      new Error('blockhash fetch failed'),
+    );
+
+    await expect(
+      adapter.settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-timeout:4:payTo',
+      }),
+    ).rejects.toThrow('blockhash fetch failed');
+    expect(fakeConnection.getParsedTransaction).not.toHaveBeenCalled();
+  });
+
+  it('T-235a-AC2d: recovery cuyo verify() lanza (RPC caído) → propaga el error original', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    const timeoutErr = Object.assign(new Error('confirm timeout'), {
+      signature: FAKE_SIG,
+    });
+    mockSendAndConfirm.mockRejectedValueOnce(timeoutErr);
+    fakeConnection.getParsedTransaction.mockRejectedValue(new Error('429 rpc'));
+
+    await expect(
+      adapter.settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-timeout:5:payTo',
+      }),
+    ).rejects.toThrow('confirm timeout');
   });
 
   it('exposes the VM-agnostic surface (scheme, mint, caip2, tokens)', () => {
