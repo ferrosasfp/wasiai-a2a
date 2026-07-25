@@ -16,13 +16,17 @@
  * El slug (PK) se deriva server-side del `name` (CD-5). NUNCA se acepta del body.
  */
 
+import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { parsePriceSafe } from '../lib/price.js';
 import { supabase } from '../lib/supabase.js';
 import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
-import { isValidWallet } from '../lib/wallet-format.js';
+import {
+  isValidPayoutWallet,
+  type WalletNamespace,
+} from '../lib/wallet-format.js';
 import type { Database, Json } from '../types/database.types.js';
 import type {
   Agent,
@@ -184,13 +188,34 @@ function assertValidPriceUsdc(value: unknown): void {
 }
 
 /**
- * Write-boundary guard de `payoutWallet` (WKH-143b, money-path). Defense-in-depth:
- * el route ya devolvió 422. Valida con EXACTAMENTE el mismo `isValidWallet` que
- * `resolveRecipients` (CD-1). Un valor inválido persistido rompería el settle.
+ * WKH-234 — resuelve la familia (namespace) del `payoutWallet` desde el slug de
+ * chain. Ausente → `'evm'` (byte-idéntico WKH-143b). `solana-devnet` → `'solana'`.
+ * Chain desconocida → rechazo (AC-6). Usa el resolver PURO `normalizeChainSlug`.
  */
-function assertValidPayoutWallet(value: unknown): void {
+function resolvePayoutNamespace(
+  payoutChain: string | undefined,
+): WalletNamespace {
+  if (payoutChain === undefined) return 'evm';
+  const slug = normalizeChainSlug(payoutChain);
+  if (slug === undefined) {
+    throw new Error(`Invalid payoutChain: unknown chain '${payoutChain}'`);
+  }
+  return slug === 'solana-devnet' ? 'solana' : 'evm';
+}
+
+/**
+ * Write-boundary guard de `payoutWallet` (WKH-143b, money-path). Defense-in-depth:
+ * el route ya devolvió 422. Valida con EXACTAMENTE el mismo criterio que
+ * `resolveRecipients` (CD-1). Un valor inválido persistido rompería el settle.
+ *
+ * WKH-234: namespace-aware. `payoutChain` ausente → familia `'evm'` → criterio
+ * EVM byte-idéntico. `solana-devnet` → valida base58 (32 bytes). Base58 inválido
+ * → mismo error de formato (AC-5); chain desconocida → rechazo (AC-6).
+ */
+function assertValidPayoutWallet(value: unknown, payoutChain?: string): void {
   if (value === undefined) return;
-  if (!(typeof value === 'string' && isValidWallet(value))) {
+  const ns = resolvePayoutNamespace(payoutChain);
+  if (!(typeof value === 'string' && isValidPayoutWallet(value, ns))) {
     throw new Error('Invalid payoutWallet');
   }
 }
@@ -327,7 +352,7 @@ export const publishedAgentService = {
     assertValidPriceUsdc(input.priceUsdc);
     // WKH-143b: defense-in-depth de los inputs money-path (el route ya devolvió
     // 422). Ausentes → no-op → columnas NULL (AC-5).
-    assertValidPayoutWallet(input.payoutWallet);
+    assertValidPayoutWallet(input.payoutWallet, input.payoutChain);
     assertValidReferrerRef(input.referrerRef);
     const capabilities = sanitizeCapabilities(input.capabilities);
 
@@ -484,7 +509,7 @@ export const publishedAgentService = {
     // WKH-143b: defense-in-depth de los inputs money-path (el route ya devolvió
     // 422). Corre DESPUÉS del guard de ownership de arriba.
     if (updates.payoutWallet !== undefined)
-      assertValidPayoutWallet(updates.payoutWallet);
+      assertValidPayoutWallet(updates.payoutWallet, updates.payoutChain);
     if (updates.referrerRef !== undefined)
       assertValidReferrerRef(updates.referrerRef);
 

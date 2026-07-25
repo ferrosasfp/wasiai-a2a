@@ -37,6 +37,51 @@ import {
 
 const log = getLogger('budget');
 
+/**
+ * WKH-234 (AC-8) — registro ADITIVO del CAIP-2 / firma del leg Solana en el
+ * ledger de recibos. Best-effort, fire-and-forget (NUNCA afecta el flujo).
+ * REUSA el `ownerRef` del caller autenticado (CD-1/AC-9) — no abre ninguna query
+ * sobre `a2a_agent_keys`. Solo se invoca cuando el leg es Solana → sin efecto
+ * para legs EVM (byte-idéntico).
+ *
+ * Fix-pack AR-BLQ-1 (2026-07-24): este emit se dispara POST-settle desde
+ * `compose` (vía `budgetService.recordSolanaSettleReceipt`), NO desde `debit`.
+ * Razón temporal: el `debit` per-step es fee-on-attempt (precede a
+ * `invokeAgent`), pero la firma base58 del SPL-transfer sólo existe DESPUÉS del
+ * settle downstream. Threadear la firma al `debit` pre-settle era imposible
+ * (era la causa del falso-verde AC-8 detectado por el AR).
+ */
+function emitSolanaSettleReceipt(args: {
+  keyId: string;
+  ownerRef: string;
+  chainId: number;
+  amountUsd: number;
+  settleCaip2: string;
+  settleSignature: string | undefined;
+}): void {
+  receiptService
+    .emit({
+      ownerRef: args.ownerRef,
+      agentKeyId: args.keyId,
+      sessionId: null,
+      delegationId: null,
+      receiptType: 'budget_debit',
+      amountUsd: args.amountUsd,
+      chainId: args.chainId,
+      txHash: args.settleSignature ?? null,
+      counterparty: null,
+      orchestrationId: null,
+      settleCaip2: args.settleCaip2,
+      settleSignature: args.settleSignature ?? null,
+    })
+    .catch((e) =>
+      log.warn(
+        { detail: e instanceof Error ? e.message : e },
+        '[receipts] solana settle receipt emit failed',
+      ),
+    );
+}
+
 export const budgetService = {
   /**
    * Get balance for a specific chain. Returns "0" if no entry exists.
@@ -369,6 +414,25 @@ export const budgetService = {
     }
 
     return { success: true };
+  },
+
+  /**
+   * WKH-234 (AC-8) fix-pack AR-BLQ-1 — registra el CAIP-2 + firma base58 del leg
+   * Solana en el ledger de recibos, de forma ADITIVA y best-effort. Lo invoca
+   * `compose` DESPUÉS de un settle downstream Solana exitoso (cuando la firma ya
+   * existe), reusando el `ownerRef` REQUERIDO del caller autenticado (CD-1/AC-9)
+   * — sin abrir ninguna query sobre `a2a_agent_keys`. Para legs EVM `compose`
+   * simplemente NO lo llama → columna NULL → byte-idéntico.
+   */
+  recordSolanaSettleReceipt(args: {
+    keyId: string;
+    ownerRef: string;
+    chainId: number;
+    amountUsd: number;
+    settleCaip2: string;
+    settleSignature: string | undefined;
+  }): void {
+    emitSolanaSettleReceipt(args);
   },
 
   /**

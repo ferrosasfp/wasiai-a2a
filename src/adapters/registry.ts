@@ -3,6 +3,7 @@ import type {
   AdaptersBundle,
   AttestationAdapter,
   ChainKey,
+  EvmPaymentAdapter,
   GaslessAdapter,
   IdentityBindingAdapter,
   PaymentAdapter,
@@ -48,13 +49,23 @@ function isTempoEnabled(): boolean {
 }
 
 /**
- * Set de chains soportadas flag-aware. Con `TEMPO_ADAPTER_ENABLED != 'true'`
- * retorna EXACTAMENTE los 6 slugs actuales → byte-idéntico (CD-6).
+ * WKH-234 — feature-flag del rail Solana, default OFF (CD-8). Convención
+ * `=== 'true'` (mirror `isTempoEnabled`). Único choke-point del gate: el resolver
+ * y el adapter NO leen esta env var.
+ */
+function isSolanaEnabled(): boolean {
+  return process.env.SOLANA_ADAPTER_ENABLED === 'true';
+}
+
+/**
+ * Set de chains soportadas flag-aware. Con `SOLANA_ADAPTER_ENABLED != 'true'`
+ * NO agrega `solana-devnet` → byte-idéntico (CD-8). Idéntica defensa para Tempo.
  */
 function getSupportedChains(): readonly ChainKey[] {
-  return isTempoEnabled()
+  const withTempo: readonly ChainKey[] = isTempoEnabled()
     ? [...SUPPORTED_CHAINS, 'tempo-testnet']
     : SUPPORTED_CHAINS;
+  return isSolanaEnabled() ? [...withTempo, 'solana-devnet'] : withTempo;
 }
 
 function isSupportedChain(slug: string): slug is ChainKey {
@@ -107,6 +118,13 @@ async function buildBundle(chainKey: ChainKey): Promise<AdaptersBundle> {
     // WKH-090 — cuarto rail (testnet-only, flag-gated en getSupportedChains()).
     const { createTempoAdapters } = await import('./tempo/index.js');
     return createTempoAdapters({ network: 'testnet' });
+  }
+  if (chainKey === 'solana-devnet') {
+    // WKH-234 — rail Solana (devnet-only, flag-gated en getSupportedChains()).
+    // Con flag OFF el slug nunca pasa el fail-fast de initAdapters → el bundle
+    // no se construye → CHAIN_NOT_SUPPORTED (defensa idéntica a Tempo).
+    const { createSolanaAdapters } = await import('./solana/index.js');
+    return createSolanaAdapters({ network: 'devnet' });
   }
   throw new Error(
     `Unsupported chain '${chainKey}'. Supported: ${getSupportedChains().join(', ')}`,
@@ -195,7 +213,34 @@ function resolveBundleOrThrow(chainKey?: ChainKey): AdaptersBundle {
   return bundle;
 }
 
-export function getPaymentAdapter(chainKey?: ChainKey): PaymentAdapter {
+/**
+ * EVM-only payment accessor (WKH-234). The overwhelming majority of call-sites
+ * (x402 middleware, fee-*, payment-intent, deposit route, sign flows) are
+ * EVM-exclusive and read EVM-only surface (`getToken`, `sign`, `chainId`).
+ *
+ * Post WKH-234 `PaymentAdapter` is a discriminated union
+ * (`EvmPaymentAdapter | SolanaPaymentAdapter`). This accessor narrows via the
+ * `vmFamily` discriminant and returns the EVM surface — byte-identical for the
+ * 7 EVM chains (the throw branch is unreachable for them). The Solana rail is
+ * reached via `getPaymentAdapterOrUnion()` and narrowed at the two settle
+ * choke-points (downstream-payment / compose, W4).
+ */
+export function getPaymentAdapter(chainKey?: ChainKey): EvmPaymentAdapter {
+  const payment = resolveBundleOrThrow(chainKey).payment;
+  if (payment.vmFamily !== 'evm') {
+    throw new Error(
+      `getPaymentAdapter: resolved a non-EVM (${payment.vmFamily}) adapter — use the vmFamily-aware settle path`,
+    );
+  }
+  return payment;
+}
+
+/**
+ * VM-agnostic payment accessor (WKH-234) — returns the discriminated union so
+ * the caller can narrow by `vmFamily`. Used only by the settle choke-points
+ * that must handle both EVM and Solana legs (downstream-payment / compose).
+ */
+export function getPaymentAdapterOrUnion(chainKey?: ChainKey): PaymentAdapter {
   return resolveBundleOrThrow(chainKey).payment;
 }
 

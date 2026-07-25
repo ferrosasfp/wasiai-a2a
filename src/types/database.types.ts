@@ -952,6 +952,8 @@ export type Database = {
           receipt_type: string;
           session_id: string | null;
           tx_hash: string | null;
+          settle_caip2: string | null;
+          settle_signature: string | null;
         };
         Insert: {
           agent_key_id?: string | null;
@@ -968,6 +970,8 @@ export type Database = {
           receipt_type: string;
           session_id?: string | null;
           tx_hash?: string | null;
+          settle_caip2?: string | null;
+          settle_signature?: string | null;
         };
         Update: {
           agent_key_id?: string | null;
@@ -984,6 +988,8 @@ export type Database = {
           receipt_type?: string;
           session_id?: string | null;
           tx_hash?: string | null;
+          settle_caip2?: string | null;
+          settle_signature?: string | null;
         };
         Relationships: [
           {

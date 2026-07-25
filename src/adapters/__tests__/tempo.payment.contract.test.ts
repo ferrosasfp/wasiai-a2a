@@ -40,13 +40,16 @@ import { GaslessNotSupportedError } from '../errors.js';
 import { TempoAttestationAdapter } from '../tempo/attestation.js';
 import { TempoGaslessAdapter } from '../tempo/gasless.js';
 import { _resetWalletClient, TempoPaymentAdapter } from '../tempo/payment.js';
-import type { PaymentAdapter } from '../types.js';
+// WKH-234: `PaymentAdapter` is now a discriminated union; this EVM contract
+// suite types the adapter as `EvmPaymentAdapter` (type-only — no assertion
+// changed, AC-4 byte-identical).
+import type { EvmPaymentAdapter } from '../types.js';
 
 const TEMPO_CHAIN_ID = 42429;
 const ALPHAUSD_DEFAULT = '0x20c0000000000000000000000000000000000001';
 
 describe('TempoPaymentAdapter — contract (WKH-090)', () => {
-  let adapter: PaymentAdapter;
+  let adapter: EvmPaymentAdapter;
 
   beforeEach(() => {
     adapter = new TempoPaymentAdapter({ network: 'testnet' });

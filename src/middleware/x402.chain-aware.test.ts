@@ -287,7 +287,10 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
 
   // ── T-AC4a: unrecognised slug → 400 CHAIN_NOT_SUPPORTED ──
 
-  it('T-AC4a: x-payment-chain=solana → 400 CHAIN_NOT_SUPPORTED (not recognised)', async () => {
+  // WKH-234: `solana` is now a recognized slug (→ solana-devnet), so the
+  // "unrecognised" branch uses `solana-mainnet` — which is NOT recognized
+  // (devnet-only, CD-4). Same assertion, same branch.
+  it('T-AC4a: x-payment-chain=solana-mainnet → 400 CHAIN_NOT_SUPPORTED (not recognised)', async () => {
     const app = Fastify();
     app.post(
       '/test',
@@ -301,7 +304,7 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
       const res = await app.inject({
         method: 'POST',
         url: '/test',
-        headers: { 'x-payment-chain': 'solana' },
+        headers: { 'x-payment-chain': 'solana-mainnet' },
         payload: {},
       });
 

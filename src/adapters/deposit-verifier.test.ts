@@ -73,6 +73,7 @@ function makeBundle(opts: {
   return {
     payment: {
       name: 'test',
+      vmFamily: 'evm',
       chainId: opts.chainId,
       supportedTokens: [opts.token],
     } as unknown as AdaptersBundle['payment'],

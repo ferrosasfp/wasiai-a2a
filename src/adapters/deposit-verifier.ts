@@ -63,7 +63,7 @@ const TRANSFER_EVENT = parseAbiItem(
   'event Transfer(address indexed from, address indexed to, uint256 value)',
 );
 
-type ChainFamily = 'KITE' | 'AVALANCHE' | 'BASE' | 'TEMPO';
+type ChainFamily = 'KITE' | 'AVALANCHE' | 'BASE' | 'TEMPO' | 'SOLANA';
 
 export function resolveChainFamilyEnvSuffix(chainKey: ChainKey): ChainFamily {
   switch (chainKey) {
@@ -79,6 +79,10 @@ export function resolveChainFamilyEnvSuffix(chainKey: ChainKey): ChainFamily {
     // WKH-090 — cuarto rail (testnet-only, flag-gated OFF).
     case 'tempo-testnet':
       return 'TEMPO';
+    // WKH-234 — Solana rail. Deposit = Scope OUT (settle-only); código muerto
+    // para la ruta de deposit (Solana no entra al viem deposit-path).
+    case 'solana-devnet':
+      return 'SOLANA';
   }
 }
 
@@ -142,6 +146,9 @@ export function resolveRpcUrl(chainKey: ChainKey): string | undefined {
     // WKH-090 — cuarto rail (testnet-only, flag-gated OFF).
     case 'tempo-testnet':
       return process.env.TEMPO_TESTNET_RPC_URL;
+    // WKH-234 — Solana rail (código muerto para deposit; settle usa web3.js).
+    case 'solana-devnet':
+      return process.env.SOLANA_RPC_URL;
   }
 }
 
@@ -166,6 +173,9 @@ export function resolveRpcFallbackEnv(chainKey: ChainKey): string {
     // WKH-090 — cuarto rail (testnet-only, flag-gated OFF).
     case 'tempo-testnet':
       return 'TEMPO_TESTNET_RPC_URL_FALLBACK';
+    // WKH-234 — Solana rail (código muerto para deposit; settle usa web3.js).
+    case 'solana-devnet':
+      return 'SOLANA_RPC_URL_FALLBACK';
   }
 }
 
@@ -189,6 +199,13 @@ export function resolveChainObject(chainKey: ChainKey): Chain {
     // WKH-090 — cuarto rail (testnet-only, flag-gated OFF).
     case 'tempo-testnet':
       return getTempoChain('testnet');
+    // WKH-234 — Solana NO tiene un viem `Chain`. NOT_IMPLEMENTED explícito,
+    // NUNCA alcanzado (Solana no entra al deposit viem-path). Fail-loud, no
+    // `default` silencioso (CD-5).
+    case 'solana-devnet':
+      throw new Error(
+        'resolveChainObject: solana-devnet has no viem Chain — Solana settle usa @solana/web3.js',
+      );
   }
 }
 
@@ -272,7 +289,13 @@ export async function verifyDeposit(
   }
 
   // 6. token + recipient + amount (AC-1).
-  const token = bundle.payment.supportedTokens[0];
+  // WKH-234: `bundle.payment` is now a `PaymentAdapter` union. Deposit is an
+  // EVM-only path (Solana deposit = Scope OUT); narrow via `vmFamily` so the
+  // EVM `TokenSpec.address` read stays byte-identical. Non-EVM → undefined →
+  // the existing TOKEN_MISMATCH guard (unreachable for EVM chains).
+  const payment = bundle.payment;
+  const token =
+    payment.vmFamily === 'evm' ? payment.supportedTokens[0] : undefined;
   if (!token) {
     // bundle sin token soportado → ningún Transfer puede matchear (TOKEN_MISMATCH).
     return { ok: false, reason: 'TOKEN_MISMATCH', confirmations };

@@ -2,6 +2,7 @@
  * Compose Service -- Execute multi-agent pipelines
  */
 
+import { randomUUID } from 'node:crypto';
 import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
@@ -108,6 +109,11 @@ export const composeService = {
     let totalCost = 0;
     let totalLatency = 0;
     let lastOutput: unknown = null;
+    // WKH-234: id único por EJECUCIÓN de compose. Ancla el `intentId` del leg
+    // Solana (AC-7): estable entre master + retry del MISMO step (no re-emite un
+    // settle ya confirmado), distinto entre ejecuciones (no dedup cross-run). El
+    // almacén real de idempotencia se cierra en W5 (ledger settle_signature).
+    const composeRunId = randomUUID();
     // B7 (audit 2026-06-24): un solo discover() compartido por todo el pipeline.
     const discoverCache = createDiscoverCache();
     for (let i = 0; i < steps.length; i++) {
@@ -272,12 +278,35 @@ export const composeService = {
       // WKH-104 (TD-SYBIL): hash HMAC del caller para anti-sybil sin exponer
       // el owner_ref crudo (CD-5/CD-6). null si caller anónimo (x402).
       const callerRefHash = hashCallerRef(scopingKeyRow?.owner_ref);
+      // WKH-234 fix-pack AR-BLQ-1: cuando el settle downstream de ESTE step fue
+      // en Solana (`downstream.settleCaip2` presente) y hubo un débito de budget
+      // del caller autenticado, registrar el CAIP-2 + firma base58 en el ledger
+      // (AC-8), REUSANDO el `owner_ref` del caller (CD-1/AC-9 — sin queries
+      // nuevas sobre a2a_agent_keys). Legs EVM (settleCaip2 undefined) → NO se
+      // invoca → columna NULL → byte-idéntico (AC-4). Compartido entre el
+      // happy-path y el retry-ok. Best-effort (el emit interno es fire-and-forget).
+      const recordSolanaLegIfAny = (ds: DownstreamResult | undefined): void => {
+        if (ds?.settleCaip2 && scopingKeyRow && chainId !== undefined) {
+          budgetService.recordSolanaSettleReceipt({
+            keyId: scopingKeyRow.id,
+            ownerRef: scopingKeyRow.owner_ref,
+            chainId,
+            amountUsd: stepDebitedUsd,
+            settleCaip2: ds.settleCaip2,
+            settleSignature: ds.txHash,
+          });
+        }
+      };
       try {
         const { output, txHash, downstream } = await this.invokeAgent(
           agent,
           input,
           a2aKey,
+          undefined,
+          `${composeRunId}:${i}`, // WKH-234 intentId (leg Solana, AC-7)
         );
+        // WKH-234 (AC-8): si el settle downstream fue Solana, anota el ledger.
+        recordSolanaLegIfAny(downstream);
         // CD-9: la cola de éxito (StepResult + agregados + bridge + evento)
         // está COMPARTIDA con el retry-ok vía finishSuccessfulStep. No copiar.
         const agg = await this.finishSuccessfulStep({
@@ -443,7 +472,11 @@ export const composeService = {
                   agent,
                   newInput,
                   a2aKey,
+                  undefined,
+                  `${composeRunId}:${i}`, // WKH-234 intentId — MISMO que el master (AC-7 idempotente)
                 );
+                // WKH-234 (AC-8): retry-ok — anota el ledger si fue Solana.
+                recordSolanaLegIfAny(downstream);
                 // ── PASO 6a: 2xx → éxito. El retry-debit SE QUEDA (caller
                 //    pagó 1 vez). CD-9: cola de éxito COMPARTIDA con happy-path.
                 const agg = await this.finishSuccessfulStep({
@@ -758,6 +791,10 @@ export const composeService = {
     input: Record<string, unknown>,
     a2aKey?: string,
     logger?: DownstreamLogger,
+    // WKH-234: idempotency key para el leg Solana del downstream (AC-7). EVM lo
+    // ignora. Canónico `contextId:stepIndex:payTo`; ausente → el downstream
+    // deriva un fallback por leg.
+    intentId?: string,
   ): Promise<{
     output: unknown;
     txHash?: string | undefined;
@@ -796,6 +833,12 @@ export const composeService = {
     // legacy path for x402 callers only. Downstream Fuji USDC settle (WKH-55)
     // still runs for both paths via signAndSettleDownstream below.
     if (agent.priceUsdc > 0 && !a2aKey) {
+      // WKH-234: the inbound x402 (caller→gateway) is EVM-only — it signs an
+      // EIP-3009 authorization on the gateway's DEFAULT chain, and the caller
+      // has NO Solana wallet (§1). `getPaymentAdapter()` narrows to
+      // `EvmPaymentAdapter` and fails-loud if the default chain were ever Solana
+      // (an unsupported inbound config). The Solana agent fee is settled
+      // operator-side in the DOWNSTREAM leg (signAndSettleDownstream), not here.
       // WAS-V2-3-CLIENT-2: schema drift fallback for payTo (mirrors price_per_call fallback in discovery)
       // canonical: agent.metadata.payTo  ←  preferred (kite registry)
       // fallback:  agent.metadata.payment.contract  ←  wasiai-v2 marketplace exposes payTo here
@@ -999,7 +1042,11 @@ export const composeService = {
       info: (obj: unknown, msg?: string) =>
         log.info({ obj }, msg ?? '[Downstream]'),
     };
-    const downstream = await signAndSettleDownstream(agent, effectiveLogger);
+    const downstream = await signAndSettleDownstream(
+      agent,
+      effectiveLogger,
+      intentId,
+    );
 
     return { output, txHash, ...(downstream && { downstream }) };
   },

@@ -24,6 +24,7 @@ vi.mock('./budget.js', () => ({
     debit: vi.fn(),
     getBalance: vi.fn(),
     registerDeposit: vi.fn(),
+    recordSolanaSettleReceipt: vi.fn(), // WKH-234 fix-pack AR-BLQ-1
   },
 }));
 const mockSign = vi.fn();

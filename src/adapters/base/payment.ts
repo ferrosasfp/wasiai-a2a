@@ -5,7 +5,7 @@ import { getLogger } from '../../lib/logger.js';
 import { buildRpcTransport } from '../../lib/rpc-transport.js';
 import type { X402PaymentRequest } from '../../types/index.js';
 import type {
-  PaymentAdapter,
+  EvmPaymentAdapter,
   QuoteResult,
   SettleRequest,
   SettleResult,
@@ -375,7 +375,8 @@ async function settleX402(
 
 // ─── Adapter class ──────────────────────────────────────────────────────
 
-export class BasePaymentAdapter implements PaymentAdapter {
+export class BasePaymentAdapter implements EvmPaymentAdapter {
+  readonly vmFamily = 'evm' as const;
   readonly name = 'base';
   readonly chainId: number;
   private readonly network: BaseNetwork;

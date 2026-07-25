@@ -366,7 +366,12 @@ export async function verifyDefaultChainSettle(args: {
 
   const chainKey = getDefaultChainKey();
   const bundle = chainKey ? getAdaptersBundle(chainKey) : undefined;
-  const token = bundle?.payment.supportedTokens[0];
+  // WKH-234: narrow the `PaymentAdapter` union via `vmFamily`. Settle re-verify
+  // is viem-only (EVM); a non-EVM adapter yields `undefined` → the existing
+  // fail-OPEN/CLOSED guard below (unreachable for EVM chains).
+  const payment = bundle?.payment;
+  const token =
+    payment?.vmFamily === 'evm' ? payment.supportedTokens[0] : undefined;
   if (!chainKey || !bundle || !token) {
     // Registry not initialized (e.g. unit test) — cannot independently check.
     // WKH-144: testnet fail-OPEN, mainnet fail-CLOSED (single choke-point). When

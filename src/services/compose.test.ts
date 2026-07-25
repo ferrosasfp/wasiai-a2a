@@ -38,6 +38,7 @@ vi.mock('./budget.js', () => ({
     creditWithDest: vi.fn(), // WKH-129
     getBalance: vi.fn(),
     registerDeposit: vi.fn(),
+    recordSolanaSettleReceipt: vi.fn(), // WKH-234 fix-pack AR-BLQ-1
   },
 }));
 const mockSign = vi.fn();
@@ -113,6 +114,7 @@ const mockDownstream = vi.mocked(signAndSettleDownstream);
 const mockDebit = vi.mocked(budgetService.debit);
 const mockCredit = vi.mocked(budgetService.credit);
 const mockCreditWithDest = vi.mocked(budgetService.creditWithDest); // WKH-129
+const mockRecordSolana = vi.mocked(budgetService.recordSolanaSettleReceipt); // WKH-234
 const mockRegen = vi.mocked(regenerateInputFromErrors); // WKH-130
 
 function makeAgent(o: Partial<Agent> = {}): Agent {
@@ -1276,6 +1278,88 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       'test-registry/corridor',
       'owner-test', // F-04 (audit): threaded caller owner_ref
     );
+  });
+
+  // ── WKH-234 fix-pack AR-BLQ-1: threading compose → ledger (AC-8) ──────
+  // Test de INTEGRACIÓN (no un unit del debit aislado): corre el pipeline real
+  // de compose; cuando el settle DOWNSTREAM de un leg fue Solana
+  // (signAndSettleDownstream retorna `settleCaip2`), compose DEBE registrar el
+  // CAIP-2 + firma base58 en el ledger vía `budgetService.recordSolanaSettleReceipt`,
+  // reusando el `owner_ref` del caller (CD-1/AC-9). Un leg EVM NO lo dispara.
+  const SOL_CAIP2_INTEG = 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1';
+  const SOL_SIG_INTEG = '5'.repeat(64); // firma base58 (opaca)
+
+  it('T-234-AC8-INTEG: solana downstream leg → compose records settle_caip2 + signature in the ledger (reuses ownerRef)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk({ result: 'r1' }); // step 0 invoke
+    mockFetchOk({ result: 'r2' }); // step 1 invoke
+    // step 0 downstream = none; step 1 downstream settled on Solana.
+    mockDownstream.mockReset();
+    mockDownstream.mockResolvedValueOnce(null);
+    mockDownstream.mockResolvedValueOnce({
+      txHash: SOL_SIG_INTEG,
+      settledAmount: '500000',
+      settleCaip2: SOL_CAIP2_INTEG,
+    });
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    // Runtime registration of the CAIP-2 + signature happened (this is the exact
+    // path the AR flagged as a false-green — no runtime call before the fix).
+    expect(mockRecordSolana).toHaveBeenCalledTimes(1);
+    expect(mockRecordSolana).toHaveBeenCalledWith({
+      keyId: 'k1',
+      ownerRef: 'owner-test', // reused caller owner_ref (CD-1/AC-9)
+      chainId: 2368,
+      amountUsd: 0.05, // = stepDebitedUsd (priceUsdc + 0 gas overhead on testnet)
+      settleCaip2: SOL_CAIP2_INTEG,
+      settleSignature: SOL_SIG_INTEG,
+    });
+  });
+
+  it('T-234-AC8-INTEG-b: EVM downstream leg → NO ledger CAIP-2 record (column stays NULL, byte-identical)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk({ result: 'r1' });
+    mockFetchOk({ result: 'r2' });
+    // Both legs settled on EVM (no settleCaip2 on the downstream result).
+    mockDownstream.mockReset();
+    mockDownstream.mockResolvedValue({
+      txHash: '0xdeadbeef',
+      settledAmount: '50000',
+    });
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    // EVM legs never touch the Solana settle receipt path (AC-4 byte-identity).
+    expect(mockRecordSolana).not.toHaveBeenCalled();
   });
 
   it('T-COMPOSE-DEBIT-2 should debit steps 1 and 2 in a 3-step pipeline', async () => {

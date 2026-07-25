@@ -180,10 +180,17 @@ export const receiptService = {
         return;
       }
 
-      // UPDATE-once: solo la columna receipt_hash, solo si sigue en '' (CD-2).
+      // UPDATE-once: la columna receipt_hash (+ WKH-234 metadata Solana ADITIVA
+      // settle_caip2/settle_signature cuando el leg es Solana), solo si sigue en
+      // '' (CD-2). settle_* NO participan del HMAC → firma byte-idéntica para EVM.
+      const updatePayload: Database['public']['Tables']['a2a_receipts']['Update'] =
+        { receipt_hash: hash };
+      if (input.settleCaip2) updatePayload.settle_caip2 = input.settleCaip2;
+      if (input.settleSignature)
+        updatePayload.settle_signature = input.settleSignature;
       const { error: updErr } = await supabase
         .from('a2a_receipts')
-        .update({ receipt_hash: hash })
+        .update(updatePayload)
         .eq('id', inserted.id)
         .eq('receipt_hash', '');
       if (updErr) {

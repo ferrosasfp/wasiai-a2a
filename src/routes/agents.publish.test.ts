@@ -471,6 +471,79 @@ describe('agents routes — publish flow (WKH-134)', () => {
     }
   });
 
+  // ── WKH-234 (Solana namespace-aware payout) ──────────────────────────
+  const SOL_WALLET = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
+
+  // T-234-01 (AC-1) — real service persists a base58 payout_wallet when
+  // payoutChain='solana-devnet' (guard EVM NO se activa).
+  it('T-234-01: publish base58 payoutWallet + payoutChain solana-devnet → persisted, no throw (AC-1)', async () => {
+    const { publishedAgentService: realSvc } = await vi.importActual<
+      typeof import('../services/agent.js')
+    >('../services/agent.js');
+
+    await realSvc.publish(
+      {
+        name: 'Solana Payout Agent',
+        agentUrl: 'https://api.example/agent',
+        capabilities: ['x'],
+        payoutWallet: SOL_WALLET,
+        payoutChain: 'solana-devnet',
+      },
+      'tenant-A',
+    );
+
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    const row = mockInsert.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(row.payout_wallet).toBe(SOL_WALLET);
+  });
+
+  // T-234-02 (AC-1) — route accepts base58 + payoutChain solana-devnet → 201.
+  it('T-234-02: POST base58 payoutWallet + payoutChain solana-devnet → 201 (guard EVM no se activa)', async () => {
+    mockPublish.mockResolvedValueOnce(RECORD_RESPONSE);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: {
+        ...VALID_BODY,
+        payoutWallet: SOL_WALLET,
+        payoutChain: 'solana-devnet',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(mockPublish).toHaveBeenCalledTimes(1);
+  });
+
+  // T-234-03 (AC-5) — base58 wallet WITHOUT payoutChain resolves EVM ns → 422.
+  it('T-234-03: POST base58 payoutWallet without payoutChain (EVM ns) → 422 (AC-5)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: { ...VALID_BODY, payoutWallet: SOL_WALLET },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().field).toBe('payoutWallet');
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
+  // T-234-04 (AC-6) — unknown/mainnet payoutChain → 422 (chain desconocida).
+  it('T-234-04: POST payoutWallet + unknown payoutChain (solana-mainnet / garbage) → 422 (AC-6)', async () => {
+    for (const chain of ['solana-mainnet', 'not-a-chain']) {
+      vi.clearAllMocks();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/agents',
+        payload: {
+          ...VALID_BODY,
+          payoutWallet: SOL_WALLET,
+          payoutChain: chain,
+        },
+      });
+      expect(res.statusCode).toBe(422);
+      expect(res.json().field).toBe('payoutWallet');
+      expect(mockPublish).not.toHaveBeenCalled();
+    }
+  });
+
   // T-143B-04 (AC-4/DT-2) — invalid referrerRef → 422, no publish.
   it('T-143B-04: POST referrerRef invalid (whitespace-only, >200 chars) → 422, publish NOT called (AC-4/DT-2)', async () => {
     for (const bad of ['   ', 'x'.repeat(201)]) {

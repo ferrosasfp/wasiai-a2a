@@ -60,6 +60,12 @@ export interface EmitReceiptInput {
   txHash: string | null;
   counterparty: string | null;
   orchestrationId: string | null;
+  // WKH-234 (AC-8): registro ADITIVO del leg Solana. `settleCaip2` = CAIP-2
+  // (`solana:<cluster>`) de la red del settle; `settleSignature` = firma base58.
+  // Ausentes → columnas NULL (byte-idéntico para legs EVM). NO participan del
+  // canonical HMAC (metadata anexa, no firmada).
+  settleCaip2?: string | null;
+  settleSignature?: string | null;
 }
 
 /**

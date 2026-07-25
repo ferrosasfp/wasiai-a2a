@@ -28,3 +28,46 @@ export function isValidWallet(
 ): wallet is string {
   return typeof wallet === 'string' && ADDRESS_RE.test(wallet);
 }
+
+/**
+ * WKH-234 — validador Solana PURO (CD-7): charset base58 + decode a EXACTAMENTE
+ * 32 bytes (pubkey ed25519). NO importa `@solana/web3.js` — preserva el módulo
+ * leaf. Algoritmo base-x estándar (mismo que bs58): acumula dígitos base-256
+ * little-endian, mapea los `1` iniciales a bytes cero, y verifica longitud 32.
+ */
+const BASE58_ALPHABET =
+  '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const SOLANA_PUBKEY_BYTES = 32;
+
+export function isValidSolanaAddress(w: string): boolean {
+  if (typeof w !== 'string' || w.length === 0) return false;
+  const bytes: number[] = [];
+  for (let i = 0; i < w.length; i++) {
+    let carry = BASE58_ALPHABET.indexOf(w[i] as string);
+    if (carry < 0) return false; // char fuera del charset base58
+    for (let j = 0; j < bytes.length; j++) {
+      carry += (bytes[j] as number) * 58;
+      bytes[j] = carry & 0xff;
+      carry >>= 8;
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+  // Cada `1` inicial representa un byte cero de alto orden.
+  for (let i = 0; i < w.length && w[i] === '1'; i++) {
+    bytes.push(0);
+  }
+  return bytes.length === SOLANA_PUBKEY_BYTES;
+}
+
+export type WalletNamespace = 'evm' | 'solana';
+
+/**
+ * WKH-234 — valida `w` contra el formato de la familia `ns` (namespace-aware).
+ * Despacha al validador EVM (`isValidWallet`) o Solana (`isValidSolanaAddress`).
+ */
+export function isValidPayoutWallet(w: string, ns: WalletNamespace): boolean {
+  return ns === 'solana' ? isValidSolanaAddress(w) : isValidWallet(w);
+}

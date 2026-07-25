@@ -23,11 +23,15 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
-import { isValidWallet } from '../lib/wallet-format.js';
+import {
+  isValidPayoutWallet,
+  type WalletNamespace,
+} from '../lib/wallet-format.js';
 import { requireA2AKey } from '../middleware/a2a-key.js';
 import { publishedAgentService } from '../services/agent.js';
 import { OwnershipMismatchError } from '../services/security/errors.js';
@@ -68,12 +72,26 @@ function isValidPriceUsdc(v: unknown): v is number {
 }
 
 /**
- * Write-boundary guard de `payoutWallet` (WKH-143b, money-path input). Valida
- * con EXACTAMENTE el mismo `isValidWallet` que usa `resolveRecipients` (CD-1).
- * `''` / no-EVM / no-string → inválido → 422 (DT-3: NO es "unset").
+ * Write-boundary guard de `payoutWallet` (WKH-143b, money-path input).
+ *
+ * WKH-234: namespace-aware. La familia se resuelve desde `payoutChain` (slug) vía
+ * el resolver PURO `normalizeChainSlug`: ausente → `'evm'` (byte-idéntico); un
+ * slug EVM → `'evm'`; `solana-devnet` → `'solana'` (valida base58); chain
+ * desconocida → inválido (AC-6). `''` / no-string / fuera de formato → inválido →
+ * 422 (DT-3: NO es "unset").
  */
-function isValidPayoutWallet(v: unknown): v is string {
-  return typeof v === 'string' && isValidWallet(v);
+function isValidPayoutWalletForChain(
+  v: unknown,
+  payoutChain: unknown,
+): v is string {
+  if (typeof v !== 'string') return false;
+  let ns: WalletNamespace = 'evm';
+  if (typeof payoutChain === 'string') {
+    const slug = normalizeChainSlug(payoutChain);
+    if (slug === undefined) return false; // AC-6: chain desconocida → inválido
+    ns = slug === 'solana-devnet' ? 'solana' : 'evm';
+  }
+  return isValidPayoutWallet(v, ns);
 }
 
 /**
@@ -178,7 +196,7 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
         // inválido → 422 (mismo criterio EVM que resolveRecipients, CD-1/CD-5).
         if (
           body.payoutWallet !== undefined &&
-          !isValidPayoutWallet(body.payoutWallet)
+          !isValidPayoutWalletForChain(body.payoutWallet, body.payoutChain)
         ) {
           request.log.warn(
             { field: 'payoutWallet' },
@@ -236,6 +254,9 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
         // referrerRef se persiste TRIMMEADO (DT-2).
         if (typeof body.payoutWallet === 'string')
           input.payoutWallet = body.payoutWallet;
+        // WKH-234: contexto de familia namespace-aware (aditivo; ausente → EVM).
+        if (typeof body.payoutChain === 'string')
+          input.payoutChain = body.payoutChain;
         if (typeof body.referrerRef === 'string')
           input.referrerRef = body.referrerRef.trim();
 
@@ -330,7 +351,7 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
         // se rechaza presente-inválido → 422 (CD-1/CD-5/DT-2/DT-3).
         if (
           body.payoutWallet !== undefined &&
-          !isValidPayoutWallet(body.payoutWallet)
+          !isValidPayoutWalletForChain(body.payoutWallet, body.payoutChain)
         ) {
           request.log.warn(
             { field: 'payoutWallet' },

@@ -839,6 +839,7 @@ describe('auth routes', () => {
     return {
       ...bundle,
       payment: {
+        vmFamily: 'evm',
         supportedTokens: [
           {
             symbol: 'USDC',
