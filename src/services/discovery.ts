@@ -120,8 +120,21 @@ function readPayment(
 }
 
 // ─── WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.2) ───────────────────────────
-// Base chains we accept for an ERC-8004 declaration (mainnet / sepolia).
-const ERC8004_ALLOWED_CHAINS: ReadonlySet<number> = new Set([8453, 84532]);
+// Chains we accept for an ERC-8004 declaration surfaced through /discover:
+// Base mainnet/sepolia (8453/84532) + Avalanche C-Chain/Fuji (43114/43113).
+//
+// WKH-237 (DT-1a): this is SOLELY the discovery accept-set — it gates which
+// chainId a DECLARED identity (metadata.registrations[]/metadata.erc8004) and
+// the JSONB reverse-lookup (resolveIdentityForAgent) may carry. It does NOT
+// enable on-chain bind/verify on Avalanche: `POST /erc8004/bind`
+// (src/routes/auth/identity.ts + src/adapters/erc8004-identity.ts) stays
+// Base-only by design in this HU. Extending the bind route to Avalanche
+// (new multi-chain reader + ERC8004_REGISTRY_ADDRESS_AVALANCHE_* env vars +
+// a deployed IdentityRegistry) is WKH-237b / Scope OUT. Do NOT assume a badge
+// here implies an Avalanche on-chain bind path exists.
+const ERC8004_ALLOWED_CHAINS: ReadonlySet<number> = new Set([
+  8453, 84532, 43114, 43113,
+]);
 const TOKEN_ID_RE = /^[0-9]+$/;
 // CAIP-10-like agentId: eip155:<chainId>:<registry>/<tokenId>
 const CAIP_AGENT_ID_RE = /^eip155:(\d+):0x[0-9a-fA-F]{40}\/([0-9]+)$/;
@@ -137,8 +150,9 @@ const CAIP_AGENT_ID_RE = /^eip155:(\d+):0x[0-9a-fA-F]{40}\/([0-9]+)$/;
  *   1. metadata.registrations[].agentId  CAIP-10 `eip155:<chainId>:<registry>/<tokenId>`
  *   2. fallback metadata.erc8004 = { token_id|tokenId, chain_id|chainId }
  *   3. fallback top-level metadata.erc8004_token_id + metadata.erc8004_chain_id
- * The FIRST entry whose chainId ∈ {8453, 84532} wins. tokenId stays a decimal
- * string (CD-11, never Number()). chainId outside the allow-set → ignored.
+ * The FIRST entry whose chainId ∈ {8453, 84532, 43114, 43113} wins (WKH-237).
+ * tokenId stays a decimal string (CD-11, never Number()). chainId outside the
+ * allow-set → ignored.
  */
 export function extractDeclaredTokenId(
   agent: Agent,

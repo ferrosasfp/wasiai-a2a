@@ -739,6 +739,107 @@ describe('discoveryService', () => {
         chainId: 84532,
       });
     });
+
+    // ── WKH-237 (DT-1a): Avalanche C-Chain (43114) + Fuji (43113) accepted ──
+
+    it('AC-1: CAIP-10 registrations[].agentId (Avalanche C-Chain 43114) accepted', () => {
+      const agent = makeAgent({
+        registrations: [
+          {
+            agentId: `eip155:43114:0x${'d'.repeat(40)}/501`,
+            agentRegistry: 'x',
+          },
+        ],
+      });
+      expect(extractDeclaredTokenId(agent)).toEqual({
+        tokenId: '501',
+        chainId: 43114,
+      });
+    });
+
+    it('AC-1: CAIP-10 registrations[].agentId (Avalanche Fuji 43113) accepted', () => {
+      const agent = makeAgent({
+        registrations: [{ agentId: `eip155:43113:0x${'e'.repeat(40)}/77` }],
+      });
+      expect(extractDeclaredTokenId(agent)).toEqual({
+        tokenId: '77',
+        chainId: 43113,
+      });
+    });
+
+    it('AC-1: fallback metadata.erc8004 with Avalanche C-Chain (43114) accepted', () => {
+      const agent = makeAgent({
+        erc8004: { token_id: '9', chain_id: 43114 },
+      });
+      expect(extractDeclaredTokenId(agent)).toEqual({
+        tokenId: '9',
+        chainId: 43114,
+      });
+    });
+
+    it('AC-1: fallback metadata.erc8004 with Avalanche Fuji (43113) accepted', () => {
+      const agent = makeAgent({
+        erc8004: { token_id: '10', chain_id: 43113 },
+      });
+      expect(extractDeclaredTokenId(agent)).toEqual({
+        tokenId: '10',
+        chainId: 43113,
+      });
+    });
+
+    it('AC-1: fallback top-level erc8004_chain_id = 43113 (Fuji) accepted', () => {
+      const agent = makeAgent({
+        erc8004_token_id: '12',
+        erc8004_chain_id: 43113,
+      });
+      expect(extractDeclaredTokenId(agent)).toEqual({
+        tokenId: '12',
+        chainId: 43113,
+      });
+    });
+
+    // AC-4 (no regression): Base 8453/84532 keep being accepted byte-identical.
+    // The existing assertions above ('CAIP-10 mainnet (8453) accepted',
+    // 'CAIP-10 registrations[].agentId (Base sepolia)', etc.) cover Base; the
+    // two below re-assert the fallback paths side-by-side with the new
+    // Avalanche cases so a future refactor can't drop Base silently.
+    it('AC-4: fallback metadata.erc8004 with Base sepolia (84532) still accepted', () => {
+      const agent = makeAgent({ erc8004: { token_id: '9', chain_id: 84532 } });
+      expect(extractDeclaredTokenId(agent)).toEqual({
+        tokenId: '9',
+        chainId: 84532,
+      });
+    });
+
+    it('AC-4: fallback metadata.erc8004 with Base mainnet (8453) still accepted', () => {
+      const agent = makeAgent({ erc8004: { token_id: '3', chain_id: 8453 } });
+      expect(extractDeclaredTokenId(agent)).toEqual({
+        tokenId: '3',
+        chainId: 8453,
+      });
+    });
+
+    // AC-5 (edge): chains outside {8453,84532,43114,43113} stay rejected.
+    it('AC-5: chainId 137 (Polygon) → null (unknown chain rejected)', () => {
+      const agent = makeAgent({ erc8004: { token_id: '1', chain_id: 137 } });
+      expect(extractDeclaredTokenId(agent)).toBeNull();
+    });
+
+    it('AC-5: chainId 1 (Ethereum mainnet) → null (unknown chain rejected)', () => {
+      const agent = makeAgent({ erc8004: { token_id: '1', chain_id: 1 } });
+      expect(extractDeclaredTokenId(agent)).toBeNull();
+    });
+
+    it('AC-5: CAIP-10 with Polygon (137) skipped, Avalanche fallback wins', () => {
+      const agent = makeAgent({
+        registrations: [{ agentId: `eip155:137:0x${'c'.repeat(40)}/5` }],
+        erc8004: { token_id: '88', chain_id: 43113 },
+      });
+      expect(extractDeclaredTokenId(agent)).toEqual({
+        tokenId: '88',
+        chainId: 43113,
+      });
+    });
   });
 
   describe('DT-22 (MNR-1): resolveIdentityForAgent', () => {
@@ -766,6 +867,36 @@ describe('discoveryService', () => {
       expect(r).toEqual({
         erc8004_token_id: '42',
         chain_id: 84532,
+        verified: true,
+      });
+    });
+
+    it('AC-2 (WKH-237): binding on Avalanche Fuji (43113) → verified:true', async () => {
+      setIdentityRows([anchored({ chain_id: 43113 })]);
+      const r = await identityService.resolveIdentityForAgent(
+        '42',
+        43113,
+        'WasiAI',
+        'acme',
+      );
+      expect(r).toEqual({
+        erc8004_token_id: '42',
+        chain_id: 43113,
+        verified: true,
+      });
+    });
+
+    it('AC-2 (WKH-237): binding on Avalanche C-Chain (43114) → verified:true', async () => {
+      setIdentityRows([anchored({ chain_id: 43114 })]);
+      const r = await identityService.resolveIdentityForAgent(
+        '42',
+        43114,
+        'WasiAI',
+        'acme',
+      );
+      expect(r).toEqual({
+        erc8004_token_id: '42',
+        chain_id: 43114,
         verified: true,
       });
     });
@@ -970,6 +1101,38 @@ describe('discoveryService', () => {
       expect(result.agents[0]!.identity).toEqual({
         erc8004_token_id: '42',
         chain_id: 84532,
+        verified: true,
+      });
+    });
+
+    it('AC-2 (WKH-237): discover() surfaces verified:true for an Avalanche Fuji (43113) binding', async () => {
+      setupRegistryResponse([
+        makeRawAgent({
+          id: 'a1',
+          slug: 'remit-kyc-validator',
+          status: 'active',
+          erc8004_token_id: '501',
+          erc8004_chain_id: 43113,
+        }),
+      ]);
+      setIdentityRows([
+        {
+          erc8004_identity: {
+            token_id: '501',
+            chain_id: 43113,
+            agent_card_url: '',
+            owner_address: '0xabc',
+            verified_at: '2026-05-10T00:00:00.000Z',
+            agent_registry: 'reg-1',
+            agent_slug: 'remit-kyc-validator',
+          },
+        },
+      ]);
+
+      const result = await discoveryService.discover({});
+      expect(result.agents[0]!.identity).toEqual({
+        erc8004_token_id: '501',
+        chain_id: 43113,
         verified: true,
       });
     });
