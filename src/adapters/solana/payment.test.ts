@@ -222,11 +222,14 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
   it('T-235a-AC1b: timeout sin `signature` en el error → la firma se deriva de la tx ya firmada (Transaction.signature)', async () => {
     const adapter = new SolanaPaymentAdapter();
     // sendAndConfirmTransaction firma el MISMO objeto Transaction in-place antes
-    // de broadcastear → la firma sobrevive al throw. 64 bytes cero ⇒ base58 '1'×64.
+    // de broadcastear → la firma sobrevive al throw. Buffer con al menos un byte
+    // no-cero (63 ceros + 0x01) ⇒ base58 '1'×63 + '2'.
+    const rawSig = Buffer.alloc(64);
+    rawSig[63] = 1;
     mockSendAndConfirm.mockImplementationOnce((..._a: unknown[]) => {
       const tx = _a[1] as Transaction;
       tx.signatures = [
-        { publicKey: new PublicKey(OPERATOR), signature: Buffer.alloc(64) },
+        { publicKey: new PublicKey(OPERATOR), signature: rawSig },
       ];
       return Promise.reject(new Error('socket hang up'));
     });
@@ -239,7 +242,32 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     });
 
     expect(res.success).toBe(true);
-    expect(res.txHash).toBe('1'.repeat(64));
+    expect(res.txHash).toBe(`${'1'.repeat(63)}2`);
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-235a-AC1b0: `Transaction.signature` todo-ceros (placeholder pre-firma) → NO es firma derivable, propaga el error y cero lecturas on-chain', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    // Guard MNR-3 (fix-pack AR): 64 bytes en cero es el placeholder de web3.js,
+    // no una firma. Su base58 ('1'×64) NO es consultable on-chain y contaminaría
+    // el ledger (`settle_signature`) si se aceptara como txHash.
+    mockSendAndConfirm.mockImplementationOnce((..._a: unknown[]) => {
+      const tx = _a[1] as Transaction;
+      tx.signatures = [
+        { publicKey: new PublicKey(OPERATOR), signature: Buffer.alloc(64) },
+      ];
+      return Promise.reject(new Error('socket hang up'));
+    });
+    mockConfirmedTx(); // aunque la cadena diría "pagado", no hay firma que consultar
+
+    await expect(
+      adapter.settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-timeout:1b0:payTo',
+      }),
+    ).rejects.toThrow('socket hang up');
+    expect(fakeConnection.getParsedTransaction).not.toHaveBeenCalled();
     expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
   });
 
@@ -277,6 +305,45 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
       }),
     ).rejects.toThrow('blockhash expired');
     expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-235a-AC2e: tx CONFIRMADA pero FALLIDA on-chain (meta.err) → NO se recupera aunque el delta de balances alcance', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    // Escenario más probable en devnet tras un timeout: `sendAndConfirmTransaction`
+    // lanza un SendTransactionError que SÍ trae `signature` (se asigna en runtime),
+    // así que entra a recoverConfirmedSettle con un candidato válido. Lo único que
+    // lo detiene es el guard `meta.err` de verify() → esta propiedad de seguridad
+    // queda FIJADA acá (un refactor que reordene ese guard debe romper este test).
+    const sendErr = Object.assign(
+      new Error('Transaction simulation failed: custom program error 0x1'),
+      { signature: FAKE_SIG },
+    );
+    mockSendAndConfirm.mockRejectedValueOnce(sendErr);
+    // meta.err NO nulo, pero con pre/postTokenBalances que darían delta suficiente:
+    // el rechazo debe venir del `err`, NO de la validación de monto.
+    fakeConnection.getParsedTransaction.mockResolvedValue({
+      meta: {
+        err: { InstructionError: [0, { Custom: 1 }] },
+        preTokenBalances: [
+          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '0' } },
+        ],
+        postTokenBalances: [
+          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '5000000' } },
+        ],
+      },
+    });
+
+    await expect(
+      adapter.settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-failed:0:payTo',
+      }),
+    ).rejects.toThrow('custom program error 0x1');
+    // Se consultó on-chain (el candidato existía) y NO se re-emitió el transfer.
+    expect(fakeConnection.getParsedTransaction).toHaveBeenCalledTimes(1);
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    expect(mockCreateTransferIx).toHaveBeenCalledTimes(1);
   });
 
   it('T-235a-AC2c: fallo ANTES de firmar (sin firma derivable) → propaga el error, cero lecturas on-chain', async () => {

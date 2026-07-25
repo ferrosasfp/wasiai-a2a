@@ -118,7 +118,14 @@ function candidateSignatureFromFailure(
     if (typeof fromErr === 'string' && fromErr.length > 0) return fromErr;
   }
   const raw = tx.signature;
-  if (raw && raw.length > 0) return base58Encode(raw);
+  // Guard (fix-pack AR, MNR-3): un buffer de 64 bytes en CERO es el placeholder
+  // que web3.js usa antes de firmar, NO una firma real. Su base58 ('1'×64) sería
+  // una pseudo-firma no consultable on-chain que terminaría en `_intentSignatures`
+  // y viajaría como `txHash` al ledger (`settle_signature`) → contabilidad
+  // contaminada. Se trata igual que `tx.signature === null`: sin firma derivable.
+  if (raw && raw.length > 0 && raw.some((b) => b !== 0)) {
+    return base58Encode(raw);
+  }
   return undefined;
 }
 
@@ -328,6 +335,12 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
   async verify(proof: SolanaSettleProof): Promise<VerifyResult> {
     const connection = getSolanaConnection();
     const parsed = await connection.getParsedTransaction(proof.signature, {
+      // Deliberadamente 'confirmed' (pre-existente WKH-234) y NO
+      // `getSolanaCommitment()`. REVISAR antes de mainnet / dinero real: si se
+      // configura `SOLANA_COMMITMENT=finalized`, un timeout a nivel finalized se
+      // recuperaría (recoverConfirmedSettle) contra una lectura a nivel
+      // confirmed, o sea con una garantía MÁS DÉBIL que la configurada.
+      // Diferido en doc/sdd/185-.../work-item.md (MNR-2 del AR).
       commitment: 'confirmed',
       maxSupportedTransactionVersion: 0,
     });
