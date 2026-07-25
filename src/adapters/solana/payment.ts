@@ -18,6 +18,7 @@ import type {
   SolanaTokenSpec,
   VerifyResult,
 } from '../types.js';
+import { base58Encode } from './base58.js';
 import {
   getSolanaCaip2,
   getSolanaCommitment,
@@ -33,6 +34,9 @@ import {
  *
  * - `settle`: build + sign + broadcast + confirm de un SPL transfer real,
  *   idempotente por `intentId` (AC-7, verify-before-trust en el re-intento).
+ *   WKH-235a (AC-1/AC-2): si la confirmación falla (p. ej.
+ *   `TransactionExpiredTimeoutError`) pero la tx SÍ se confirmó on-chain, la
+ *   firma se recupera y el settle se reporta exitoso — nunca se re-broadcastea.
  * - `verify`: re-lee la tx on-chain (getParsedTransaction) y asserta un transfer
  *   `>= amountAtomic` del mint hacia la ATA de `payTo` (verify-before-trust).
  *
@@ -56,6 +60,44 @@ const ZERO_EVM_ADDRESS =
 // (suficiente para el path idempotente + su unit test); en W5 el almacén real
 // es la columna `settle_signature` del ledger (persist-before-side-effect).
 const _intentSignatures = new Map<string, string>();
+
+/**
+ * WKH-235a (AC-1) — firma-candidata de una tx cuyo `sendAndConfirmTransaction`
+ * lanzó. La firma de una tx Solana es la firma ed25519 del fee-payer sobre el
+ * mensaje: existe ANTES de la confirmación, así que un timeout de confirmación
+ * NO debe perderla.
+ *
+ * Dos fuentes, en orden:
+ *  1. `err.signature` — `TransactionExpiredTimeoutError`,
+ *     `TransactionExpiredBlockheightExceededError` y
+ *     `TransactionExpiredNonceInvalidError` de `@solana/web3.js` exponen la
+ *     firma base58 como campo público.
+ *  2. `tx.signature` — `sendAndConfirmTransaction` firma el MISMO objeto
+ *     `Transaction` in-place antes de broadcastear, así que el Buffer de la
+ *     firma queda disponible incluso si el envío falló después.
+ *
+ * Devuelve `undefined` cuando la tx nunca llegó a firmarse (no hay nada que
+ * verificar on-chain → el fallo es genuino).
+ */
+function candidateSignatureFromFailure(
+  err: unknown,
+  tx: Transaction,
+): string | undefined {
+  if (typeof err === 'object' && err !== null && 'signature' in err) {
+    const fromErr = (err as { signature?: unknown }).signature;
+    if (typeof fromErr === 'string' && fromErr.length > 0) return fromErr;
+  }
+  const raw = tx.signature;
+  // Guard (fix-pack AR, MNR-3): un buffer de 64 bytes en CERO es el placeholder
+  // que web3.js usa antes de firmar, NO una firma real. Su base58 ('1'×64) sería
+  // una pseudo-firma no consultable on-chain que terminaría en `_intentSignatures`
+  // y viajaría como `txHash` al ledger (`settle_signature`) → contabilidad
+  // contaminada. Se trata igual que `tx.signature === null`: sin firma derivable.
+  if (raw?.some((b) => b !== 0)) {
+    return base58Encode(raw);
+  }
+  return undefined;
+}
 
 export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
   readonly vmFamily = 'solana' as const;
@@ -117,6 +159,11 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     //    on-chain y retornar la firma previa — NO re-broadcast. ────────────────
     const prior = _intentSignatures.get(req.intentId);
     if (prior) {
+      // DECISIÓN ABIERTA (MNR-4 del CR de WKH-235a): este `verify()` NO está
+      // envuelto en try/catch, a diferencia del de `recoverConfirmedSettle` (que
+      // degrada a "no recuperado"). Con el RPC caído, un retry de un intentId ya
+      // conocido lanza en vez de degradar. Hay que decidir si debe degradar igual
+      // o propagar a propósito — ver doc/sdd/185-wkh-235a-solana-settle-idempotency-durable/work-item.md
       const verified = await this.verify({
         signature: prior,
         payTo: req.payTo,
@@ -161,14 +208,20 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     );
     const tx = new Transaction().add(ix);
 
-    const signature = await sendAndConfirmTransaction(
-      connection,
-      tx,
-      [operator],
-      {
+    let signature: string;
+    try {
+      signature = await sendAndConfirmTransaction(connection, tx, [operator], {
         commitment: getSolanaCommitment(),
-      },
-    );
+      });
+    } catch (e) {
+      // ── WKH-235a (AC-1/AC-2): timeout de confirmación ≠ pago no ocurrido.
+      //    La firma existe antes de la confirmación → recuperarla y preguntarle
+      //    a la cadena ANTES de declarar SETTLE_FAILED. La validación
+      //    (monto/mint/destino) es la de `verify()` — NO se duplica acá.
+      const recovered = await this.recoverConfirmedSettle(e, tx, req);
+      if (recovered) return recovered;
+      throw e;
+    }
 
     // Persist-before-return del seam de idempotencia (W5 lo respalda en ledger).
     _intentSignatures.set(req.intentId, signature);
@@ -179,9 +232,90 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     return { txHash: signature, success: true };
   }
 
+  /**
+   * WKH-235a (AC-1/AC-2) — self-heal del timeout de confirmación.
+   *
+   * Recupera la firma-candidata del fallo y le pregunta a la cadena vía el
+   * `verify()` de esta misma clase (verify-before-trust: monto/mint/destino, sin
+   * duplicar la validación). Si la tx SÍ está confirmada y es válida, el settle
+   * fue exitoso: se registra la firma en el seam de idempotencia y se retorna
+   * como éxito (el fee ya se pagó on-chain — perderlo es un bug de
+   * contabilidad). Si no, devuelve `undefined` y el caller propaga el error
+   * original (fallo genuino, camino de hoy sin regresión).
+   *
+   * NUNCA re-broadcastea y NUNCA lanza: un fallo del RPC de verificación se
+   * degrada a "no recuperado" para no enmascarar el error original.
+   */
+  private async recoverConfirmedSettle(
+    err: unknown,
+    tx: Transaction,
+    req: SolanaSettleRequest,
+  ): Promise<SettleResult | undefined> {
+    const candidate = candidateSignatureFromFailure(err, tx);
+    if (!candidate) {
+      log.warn(
+        { intentId: req.intentId, detail: String(err) },
+        'solana settle failed with no derivable signature — treating as failure',
+      );
+      return undefined;
+    }
+
+    let verified: VerifyResult;
+    try {
+      verified = await this.verify({
+        signature: candidate,
+        payTo: req.payTo,
+        amountAtomic: req.amountAtomic,
+      });
+    } catch (verifyErr) {
+      log.warn(
+        {
+          intentId: req.intentId,
+          signature: candidate,
+          detail: String(verifyErr),
+        },
+        'solana settle recovery: on-chain verify threw — treating as failure',
+      );
+      return undefined;
+    }
+
+    if (!verified.valid) {
+      log.warn(
+        {
+          intentId: req.intentId,
+          signature: candidate,
+          reason: verified.error,
+          detail: String(err),
+        },
+        'solana settle failed and candidate signature is not confirmed on-chain',
+      );
+      return undefined;
+    }
+
+    // Pago REAL confirmado a pesar del throw → mismo persist-before-return del
+    // camino feliz (el intentId no queda sin firma asociada).
+    _intentSignatures.set(req.intentId, candidate);
+    log.warn(
+      {
+        intentId: req.intentId,
+        signature: candidate,
+        payTo: req.payTo,
+        detail: String(err),
+      },
+      'solana settle confirmation failed but tx IS confirmed on-chain — recovered signature',
+    );
+    return { txHash: candidate, success: true };
+  }
+
   async verify(proof: SolanaSettleProof): Promise<VerifyResult> {
     const connection = getSolanaConnection();
     const parsed = await connection.getParsedTransaction(proof.signature, {
+      // Deliberadamente 'confirmed' (pre-existente WKH-234) y NO
+      // `getSolanaCommitment()`. REVISAR antes de mainnet / dinero real: si se
+      // configura `SOLANA_COMMITMENT=finalized`, un timeout a nivel finalized se
+      // recuperaría (recoverConfirmedSettle) contra una lectura a nivel
+      // confirmed, o sea con una garantía MÁS DÉBIL que la configurada.
+      // Diferido en doc/sdd/185-.../work-item.md (MNR-2 del AR).
       commitment: 'confirmed',
       maxSupportedTransactionVersion: 0,
     });

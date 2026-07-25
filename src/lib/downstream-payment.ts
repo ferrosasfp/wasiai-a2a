@@ -30,6 +30,16 @@ export type { DownstreamLogger };
 const DOWNSTREAM_FLAG = process.env.WASIAI_DOWNSTREAM_X402 === 'true';
 
 /**
+ * WKH-235a — warn-once del skip `FLAG_OFF`. Era el ÚNICO skip-code que
+ * retornaba `null` sin dejar rastro (hallazgo F4 de WKH-241): el campo
+ * `downstream` desaparecía del output de `/compose` sin explicación. El flag se
+ * lee una sola vez al cargar el módulo, así que un log por proceso alcanza
+ * (mismo patrón warn-once que `avalanche/payment.ts` / `discovery.ts`) — se
+ * evita ruido por cada leg de cada request.
+ */
+let _warnedFlagOff = false;
+
+/**
  * EIP-3009 authorization window (`validBefore`) in seconds, passed to
  * `adapter.sign({ ..., timeoutSeconds })`. Reproduces the legacy
  * `VALID_BEFORE_SECONDS = 300` so the Avalanche path keeps its observable 300s
@@ -216,7 +226,7 @@ async function settleSolanaLeg(
  * NEVER throws (CD-7).
  *
  * Returns `null` in any of these cases (each logged with its skip-code):
- *  - flag `WASIAI_DOWNSTREAM_X402` is not 'true'        → FLAG_OFF
+ *  - flag `WASIAI_DOWNSTREAM_X402` is not 'true'        → FLAG_OFF (warn-once)
  *  - agent.payment absent                               → NO_PAYMENT_FIELD
  *  - method !== 'x402'                                  → METHOD_NOT_SUPPORTED
  *  - chain unrecognized or not initialized in registry  → CHAIN_NOT_SUPPORTED
@@ -238,8 +248,17 @@ export async function signAndSettleDownstream(
   // del leg (agent.slug:payTo). Formato canónico: `contextId:stepIndex:payTo`.
   intentId?: string,
 ): Promise<DownstreamResult | null> {
-  // 1. Flag check (zero overhead when off)
+  // 1. Flag check (zero overhead when off). WKH-235a: observabilidad warn-once
+  //    del skip — el comportamiento NO cambia (sigue devolviendo `null` sin
+  //    resolver ningún adapter).
   if (!DOWNSTREAM_FLAG) {
+    if (!_warnedFlagOff) {
+      _warnedFlagOff = true;
+      logger.info(
+        { agentSlug: agent.slug, code: 'FLAG_OFF' },
+        '[Downstream] WASIAI_DOWNSTREAM_X402 not enabled — downstream settle skipped (logged once per process)',
+      );
+    }
     return null;
   }
 
