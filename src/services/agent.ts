@@ -17,6 +17,7 @@
  */
 
 import { normalizeChainSlug } from '../adapters/chain-resolver.js';
+import { readPaymentSpec } from '../lib/payment-spec-reader.js';
 import { parsePriceSafe } from '../lib/price.js';
 import { supabase } from '../lib/supabase.js';
 import {
@@ -108,8 +109,21 @@ function readSchema(
 
 // ── Mappers ─────────────────────────────────────────────────
 
-/** Row → `Agent` (mismo shape que discovery.ts mapAgent — CD-6). */
+/**
+ * Row → `Agent` (mismo shape que discovery.ts mapAgent — CD-6).
+ *
+ * WKH-241: expone el `payment` DECLARADO por el agente en `metadata.payment`
+ * (mismo shape `AgentPaymentSpec` que los registries federados) usando el
+ * MISMO lector compartido `readPaymentSpec` (`lib/payment-spec-reader.ts`,
+ * CD-1/AC-4) — sin él, un agente self-published Solana-native cobraba su fee
+ * por la chain default del gateway. Sin `metadata.payment` → `undefined`, igual
+ * que hoy (AC-2/AC-6, byte-idéntico en el JSON de /discover). El `payment`
+ * NUNCA se deriva de `payout_wallet`/`payout_chain` (CD-3/DT-2: esos son los
+ * campos del creator-split del 1%, semántica distinta al payTo del precio
+ * completo del agente).
+ */
 function mapRowToAgent(row: AgentRow): Agent {
+  const metadata = readMetadataObject(row.metadata);
   return {
     id: row.slug,
     name: row.name,
@@ -126,7 +140,11 @@ function mapRowToAgent(row: AgentRow): Agent {
     invocationNote: INVOCATION_NOTE,
     verified: false,
     status: 'active',
-    metadata: readMetadataObject(row.metadata),
+    metadata,
+    // WKH-241 (AC-1): el spec vive bajo `metadata.payment` — se pasa el objeto
+    // `metadata` completo porque el lector busca la key `payment` (y el
+    // fallback legacy de `chain` top-level) dentro del objeto recibido.
+    payment: readPaymentSpec(metadata),
   };
 }
 
