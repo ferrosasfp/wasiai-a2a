@@ -53,7 +53,12 @@ import type {
   SignedAuthErrorCode,
   SignedAuthHeaders,
 } from '../types/index.js';
-import { type PaymentMiddlewareOptions, requirePayment } from './x402.js';
+import {
+  type PaymentMiddlewareOptions,
+  requirePayment,
+  warnDefaultChainApplied,
+  X_A2A_PAYMENT_CHAIN_HEADER,
+} from './x402.js';
 
 const log = getLogger('a2a-key');
 
@@ -307,15 +312,36 @@ async function runX402Fallback(
 // Replica EXACTA del bloque master (a2a-key.ts §6). Se mantiene en sync con
 // ese bloque (no se refactoriza el master para no arriesgar CD-5 backward-compat).
 // Devuelve null si ya envió una respuesta de error (reply.sent).
+//
+// WKH-175 (aditivo): cuando el header `x-payment-chain` está AUSENTE y la chain
+// se resuelve por el default del registry, (a) se avisa vía
+// `warnDefaultChainApplied` (warn deduplicado + debug per-request) en lugar de
+// aplicarlo en silencio, y (b) se devuelve `defaultApplied` para que el 403
+// INSUFFICIENT_BUDGET pueda explicar la CAUSA al caller. La resolución en sí
+// NO cambia (mismo default, sigue siendo opcional) y el path
+// "header presente pero desconocido" (400 CHAIN_NOT_SUPPORTED) queda intacto.
+//
+// `callerKeyId` (fix-pack MNR-1): id interno de la key del caller, usado SOLO
+// como clave del dedup del warn y como field del log (observabilidad
+// server-side). NO cambia nada de lo que se le devuelve al caller — el
+// enriquecimiento del 403 sigue siendo exclusivo del branch master, donde el
+// keyRow ES la credencial presentada (ver buildInsufficientBudgetMessage).
 function resolveTargetChain(
   request: FastifyRequest,
   reply: FastifyReply,
-): { chainId: number; chainKey: string; assetSymbol: string } | null {
+  callerKeyId: string | null,
+): {
+  chainId: number;
+  chainKey: string;
+  assetSymbol: string;
+  defaultApplied: boolean;
+} | null {
   const headerRaw = request.headers['x-payment-chain'];
   const headerOverride = typeof headerRaw === 'string' ? headerRaw : undefined;
   const defaultChainKey = getDefaultChainKey();
 
   let chainKey = resolveChainKey({ headerOverride });
+  let defaultApplied = false;
   if (!chainKey) {
     if (headerOverride !== undefined) {
       reply.status(400).send({
@@ -332,6 +358,9 @@ function resolveTargetChain(
       });
       return null;
     }
+    defaultApplied = true;
+    // WKH-175 (+ fix-pack MNR-1: dedup por caller, no por slug).
+    warnDefaultChainApplied(request, chainKey, callerKeyId);
   }
 
   const bundle = getAdaptersBundle(chainKey);
@@ -343,9 +372,131 @@ function resolveTargetChain(
     return null;
   }
 
+  // WKH-175: eco de la chain efectivamente usada. Choke-point único → cubre los
+  // 3 branches (master / delegación / key-session) y también las salidas de
+  // error posteriores (p.ej. el 403 INSUFFICIENT_BUDGET), que es justo donde el
+  // caller necesita saber en qué red se intentó cobrar.
+  //
+  // MNR-2 (AR, documentado NO implementado): legible SOLO por callers
+  // server-side — el CORS de src/index.ts no declara `exposedHeaders`, así que
+  // un browser no puede leerlo (gap preexistente, compartido con
+  // `x-a2a-remaining-budget`). Ver la nota extendida en middleware/x402.ts,
+  // junto al otro `reply.header(X_A2A_PAYMENT_CHAIN_HEADER, ...)`.
+  reply.header(X_A2A_PAYMENT_CHAIN_HEADER, chainKey);
+
   const chainId = bundle.chainConfig.chainId;
   const assetSymbol = bundle.payment.supportedTokens[0]?.symbol ?? 'UNKNOWN';
-  return { chainId, chainKey, assetSymbol };
+  return { chainId, chainKey, assetSymbol, defaultApplied };
+}
+
+// ── WKH-175: mensaje accionable del 403 INSUFFICIENT_BUDGET ───────────
+
+/**
+ * Lista legible de las chains donde la key SÍ tiene saldo, derivada del jsonb
+ * `budget` que YA viene en el row (identityService.lookupByHash hace
+ * `select('*')`) — CERO queries extra a la DB y CERO datos de otros owners: son
+ * los saldos de la propia key del caller (Ownership Guard intacto, no se toca
+ * ninguna query sobre `a2a_agent_keys`).
+ *
+ * El slug se deriva del registry EN MEMORIA (`getInitializedChainKeys` +
+ * `getAdaptersBundle`). Un chainId con saldo que no esté inicializado en este
+ * proceso se muestra como `chain <id>` en vez de inventar un slug.
+ *
+ * `excludeChainId` (MNR-3 del CR): la chain TARGET queda fuera de la lista. Es
+ * la que acaba de rechazar el cobro, así que ofrecerla como alternativa
+ * ("chains with balance: <la misma>") invalida el mensaje: pasaba con
+ * `budget={"2368":"0.5"}` y precio $1 — saldo > 0 pero insuficiente. Este helper
+ * NO conoce el precio (sólo el jsonb `budget`), así que no puede decidir
+ * "suficiente vs insuficiente"; lo honesto es excluirla y dejar que el PRIMER
+ * segmento del mensaje reporte su saldo (que además viene de una lectura fresca
+ * vía `budgetService.getBalance`, no del row cacheado).
+ *
+ * ⚠️ INVARIANTE DE SEGURIDAD: NO invocar desde los branches de delegación ni de
+ * key-session. Ahí el `keyRow` es la PARENT KEY, no la credencial que presentó
+ * el caller → devolver sus saldos sería una fuga cross-owner. Exclusivo del
+ * branch master (ver también el header de `resolveTargetChain`).
+ */
+function describeFundedChains(
+  budget: A2AAgentKeyRow['budget'],
+  excludeChainId: number,
+): string[] {
+  const slugByChainId = new Map<number, string>();
+  for (const key of getInitializedChainKeys()) {
+    const chainId = getAdaptersBundle(key)?.chainConfig.chainId;
+    if (typeof chainId === 'number') slugByChainId.set(chainId, key);
+  }
+  return (
+    Object.entries(budget ?? {})
+      .map(([chainIdRaw, amount]) => ({
+        chainIdRaw,
+        chainId: Number.parseInt(chainIdRaw, 10),
+        amount: String(amount),
+      }))
+      .filter((entry) => Number.parseFloat(entry.amount) > 0)
+      // MNR-3: fuera la chain que acaba de fallar (nunca es una "alternativa").
+      .filter((entry) => entry.chainId !== excludeChainId)
+      // Orden determinístico por chainId (los no-numéricos van al final).
+      // MNR-3 (fix-pack AR): con Number.POSITIVE_INFINITY, dos claves no
+      // numéricas daban `Infinity - Infinity = NaN` → orden
+      // implementation-defined. MAX_SAFE_INTEGER + desempate por la clave cruda
+      // → orden SIEMPRE determinístico (no alcanzable hoy, pero es un one-liner).
+      .sort((a, b) => {
+        const ai = Number.isFinite(a.chainId)
+          ? a.chainId
+          : Number.MAX_SAFE_INTEGER;
+        const bi = Number.isFinite(b.chainId)
+          ? b.chainId
+          : Number.MAX_SAFE_INTEGER;
+        return ai !== bi ? ai - bi : a.chainIdRaw.localeCompare(b.chainIdRaw);
+      })
+      .map(
+        (entry) =>
+          `${slugByChainId.get(entry.chainId) ?? `chain ${entry.chainIdRaw}`} (${entry.amount})`,
+      )
+  );
+}
+
+/**
+ * WKH-175: el 403 INSUFFICIENT_BUDGET pasa de `chain 2368 balance is 0` (solo
+ * el chainId numérico) a un mensaje accionable: slug de la chain, la CAUSA
+ * cuando la chain vino del default por falta de header, y las OTRAS chains donde
+ * la key sí tiene saldo. `status` (403) y `error_code` (INSUFFICIENT_BUDGET) NO
+ * cambian — el enriquecimiento es sólo del texto de `error`.
+ *
+ * `fundedChains` llega YA computado (MNR-4 del CR): el call site lo necesita
+ * también para el field `fundedChains` del log, y calcularlo dos veces abría la
+ * puerta a que log y response divergieran si alguien toca una sola llamada.
+ * Viene de `describeFundedChains(budget, chainId)` → NO incluye la chain target.
+ *
+ * ⚠️ INVARIANTE DE SEGURIDAD: NO invocar desde los branches de delegación ni de
+ * key-session. Ahí el `keyRow` es la PARENT KEY, no la credencial que presentó
+ * el caller → el mensaje filtraría saldos cross-owner. Exclusivo del branch
+ * master (ver también el header de `resolveTargetChain`).
+ */
+function buildInsufficientBudgetMessage(args: {
+  chainId: number;
+  chainKey: string;
+  balance: string;
+  defaultApplied: boolean;
+  fundedChains: string[];
+}): string {
+  const parts = [
+    `chain ${args.chainId} (${args.chainKey}) balance is ${args.balance}`,
+  ];
+  if (args.defaultApplied) {
+    parts.push(
+      `no x-payment-chain header sent, used default '${args.chainKey}'`,
+    );
+  }
+  parts.push(
+    args.fundedChains.length > 0
+      ? `chains with balance: ${args.fundedChains.join(', ')}`
+      : // "OTHER": la chain target está excluida por diseño (MNR-3), así que
+        // "no chain has balance" sería falso cuando la target tiene saldo
+        // insuficiente-pero-no-cero.
+        'no other chain has balance',
+  );
+  return parts.join('; ');
 }
 
 // ── Auth credential extraction ──────────────────────────────
@@ -437,7 +588,9 @@ async function resolveDelegationAuth(
     }
 
     // 4. resolver chain/bundle → chainId (REUSO del bloque master).
-    const chain = resolveTargetChain(request, reply);
+    // `delegation.key_id` = id de la parent key que paga (solo para el dedup +
+    // log del warn del default; NO habilita ningún enriquecimiento de respuesta).
+    const chain = resolveTargetChain(request, reply, delegation.key_id);
     if (!chain) return; // resolveTargetChain ya envió la respuesta de error
     const { chainId, chainKey, assetSymbol } = chain;
     request.resolvedChainId = chainId;
@@ -690,7 +843,9 @@ async function resolveKeySessionAuth(
     }
 
     // 4. resolver chain/bundle → chainId (REUSO del bloque master).
-    const chain = resolveTargetChain(request, reply);
+    // `session.key_id` = id de la parent key que paga (solo dedup + log, ver
+    // resolveTargetChain).
+    const chain = resolveTargetChain(request, reply, session.key_id);
     if (!chain) return; // resolveTargetChain ya envió la respuesta de error
     const { chainId, chainKey, assetSymbol } = chain;
     request.resolvedChainId = chainId;
@@ -917,9 +1072,9 @@ async function resolveMasterAuth(
 
     // 6. Resolve target chain per-request — REUSO del helper resolveTargetChain
     // (WKH-104 TD-DRIFT: deduplicación del bloque master, behavior idéntico CD-1).
-    const chain = resolveTargetChain(request, reply);
+    const chain = resolveTargetChain(request, reply, keyRow.id);
     if (!chain) return; // resolveTargetChain ya envió la respuesta de error
-    const { chainId, chainKey, assetSymbol } = chain;
+    const { chainId, chainKey, assetSymbol, defaultApplied } = chain;
     request.resolvedChainId = chainId;
 
     // 7. Optimistic debit BEFORE execution (BLQ-1/2/3/4 fix)
@@ -983,6 +1138,14 @@ async function resolveMasterAuth(
         const balance = await budgetService
           .getBalance(keyRow.id, chainId, keyRow.owner_ref)
           .catch(() => '0');
+        // WKH-175: el mensaje pasa a ser accionable (slug + causa del default +
+        // OTRAS chains con saldo). Los datos extra salen del `budget` jsonb que
+        // YA está en memoria (`keyRow`), sin ninguna query adicional.
+        // MNR-4 (CR): se computa UNA vez y se comparte entre el log y la
+        // response — antes cada uno lo calculaba por separado y podían divergir.
+        // MNR-3 (CR): `chainId` es el target → queda FUERA de la lista (la chain
+        // que rechazó el cobro no es una alternativa que sugerirle al caller).
+        const fundedChains = describeFundedChains(keyRow.budget, chainId);
         request.log.warn(
           {
             keyId: keyRow.id,
@@ -990,13 +1153,21 @@ async function resolveMasterAuth(
             chainId,
             asset_symbol: assetSymbol,
             balance,
+            defaultApplied, // WKH-175: ¿la chain vino del default por falta de header?
+            fundedChains, // WKH-175: dónde MÁS tiene saldo (sin la chain target)
           },
           'a2a-key.insufficient-budget',
         );
         return send403(
           reply,
           'INSUFFICIENT_BUDGET',
-          `chain ${chainId} balance is ${balance}`,
+          buildInsufficientBudgetMessage({
+            chainId,
+            chainKey,
+            balance,
+            defaultApplied,
+            fundedChains,
+          }),
         );
       }
 

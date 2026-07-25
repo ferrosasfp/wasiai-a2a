@@ -92,7 +92,15 @@ vi.mock('../adapters/registry.js', () => ({
 }));
 
 import { buildEoaPaymentHeader } from '../__tests__/fixtures/passport-shape.js';
-import { requirePayment } from './x402.js';
+import {
+  _defaultChainWarnDedupSize,
+  _resetDefaultChainWarnDedup,
+  DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES,
+  DEFAULT_CHAIN_WARN_NO_KEY,
+  DEFAULT_CHAIN_WARN_WINDOW_MS,
+  requirePayment,
+  warnDefaultChainApplied,
+} from './x402.js';
 
 interface ChallengeBody {
   error: string;
@@ -578,6 +586,303 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
       expect(baseAdapter.quote).not.toHaveBeenCalled();
     } finally {
       await app.close();
+    }
+  });
+
+  // ── WKH-175: el default deja de ser silencioso + eco de la chain ──
+  // Aditivo: NO cambia el default ni lo hace obligatorio (el request sin header
+  // sigue resolviendo a kite y devolviendo el mismo 402).
+
+  const DEFAULT_WARN_MSG =
+    'payment chain resolved by default (x-payment-chain absent)';
+
+  /**
+   * App con `req.log.warn` y `req.log.debug` espiados (el hook global corre
+   * antes del preHandler).
+   */
+  async function makeAppWithWarnSpy(): Promise<{
+    app: ReturnType<typeof Fastify>;
+    warnSpy: ReturnType<typeof vi.fn>;
+    debugSpy: ReturnType<typeof vi.fn>;
+  }> {
+    const warnSpy = vi.fn();
+    const debugSpy = vi.fn();
+    const app = Fastify();
+    app.addHook('preHandler', async (req: FastifyRequest) => {
+      req.log.warn = warnSpy as unknown as FastifyRequest['log']['warn'];
+      req.log.debug = debugSpy as unknown as FastifyRequest['log']['debug'];
+    });
+    app.post(
+      '/test',
+      { preHandler: requirePayment({ description: 'test' }) },
+      async (_req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ ok: true }),
+    );
+    await app.ready();
+    return { app, warnSpy, debugSpy };
+  }
+
+  it('T-175-X1: sin x-payment-chain → warn del default + header x-a2a-payment-chain en el 402', async () => {
+    _resetDefaultChainWarnDedup();
+    const { app, warnSpy } = await makeAppWithWarnSpy();
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        payload: {},
+      });
+
+      // Back-compat: mismo 402 challenge en la chain default.
+      expect(res.statusCode).toBe(402);
+      const body = res.json() as ChallengeBody;
+      expect(body.accepts[0]!.network).toBe('eip155:2368');
+
+      const warnCall = warnSpy.mock.calls.find(
+        (c) => c[1] === DEFAULT_WARN_MSG,
+      );
+      expect(warnCall).toBeDefined();
+      // Fix-pack MNR-1: fields del warn = chain + header + identidad del caller
+      // + ruta/método. En el path x402 puro NO hay agent-key → sentinel.
+      expect(warnCall?.[0]).toMatchObject({
+        chainKey: 'kite-ozone-testnet',
+        header: 'x-payment-chain',
+        keyId: DEFAULT_CHAIN_WARN_NO_KEY,
+        method: 'POST',
+        route: '/test',
+      });
+      expect(res.headers['x-a2a-payment-chain']).toBe('kite-ozone-testnet');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('T-175-X2: con x-payment-chain=base-sepolia → sin warn de default + header con ese slug', async () => {
+    _resetDefaultChainWarnDedup();
+    const { app, warnSpy } = await makeAppWithWarnSpy();
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { 'x-payment-chain': 'base-sepolia' },
+        payload: {},
+      });
+
+      expect(res.statusCode).toBe(402);
+      expect(warnSpy.mock.calls.some((c) => c[1] === DEFAULT_WARN_MSG)).toBe(
+        false,
+      );
+      expect(res.headers['x-a2a-payment-chain']).toBe('base-sepolia');
+    } finally {
+      await app.close();
+    }
+  });
+
+  // Fix-pack MNR-1 (semántica NUEVA): el dedup ya no es por slug de chain sino
+  // por identidad del caller + ventana temporal. En el path x402 puro todos los
+  // requests comparten el sentinel `no-agent-key` → el mismo caller dentro de la
+  // ventana sigue dando 1 solo warn (este test conserva su expectativa, pero
+  // ahora por "mismo caller", no por "mismo slug").
+  it('T-175-X3: 2 requests del MISMO caller sin header → 1 solo warn (ventana), header en ambos', async () => {
+    _resetDefaultChainWarnDedup();
+    const { app, warnSpy } = await makeAppWithWarnSpy();
+    try {
+      for (let i = 0; i < 2; i++) {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/test',
+          payload: {},
+        });
+        expect(res.headers['x-a2a-payment-chain']).toBe('kite-ozone-testnet');
+      }
+      expect(
+        warnSpy.mock.calls.filter((c) => c[1] === DEFAULT_WARN_MSG),
+      ).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('T-175-X4: slug desconocido → 400 intacto, sin eco ni warn de default', async () => {
+    _resetDefaultChainWarnDedup();
+    const { app, warnSpy } = await makeAppWithWarnSpy();
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { 'x-payment-chain': 'solana-mainnet' },
+        payload: {},
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect((res.json() as ErrorBody).error_code).toBe('CHAIN_NOT_SUPPORTED');
+      expect(res.headers['x-a2a-payment-chain']).toBeUndefined();
+      expect(warnSpy.mock.calls.some((c) => c[1] === DEFAULT_WARN_MSG)).toBe(
+        false,
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── Fix-pack MNR-4: el `debug` per-request es el control compensatorio que
+  // hace aceptable el dedup del warn. Sin este test se podía borrar esa línea
+  // sin que nada falle.
+  it('T-175-X5: 3 requests sin header → 3 debug (per-request) + 1 warn (ventana)', async () => {
+    _resetDefaultChainWarnDedup();
+    const { app, warnSpy, debugSpy } = await makeAppWithWarnSpy();
+    try {
+      for (let i = 0; i < 3; i++) {
+        await app.inject({ method: 'POST', url: '/test', payload: {} });
+      }
+      const debugCalls = debugSpy.mock.calls.filter(
+        (c) => c[1] === DEFAULT_WARN_MSG,
+      );
+      expect(debugCalls).toHaveLength(3);
+      expect(debugCalls[0]?.[0]).toMatchObject({
+        chainKey: 'kite-ozone-testnet',
+        keyId: DEFAULT_CHAIN_WARN_NO_KEY,
+        route: '/test',
+      });
+      expect(
+        warnSpy.mock.calls.filter((c) => c[1] === DEFAULT_WARN_MSG),
+      ).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── Fix-pack MNR-1: la ventana temporal hace que un problema PERSISTENTE
+  // vuelva a avisar (el dedup viejo warneaba una vez por proceso y nunca más).
+  it('T-175-X6: pasada la ventana, el mismo caller VUELVE a warnear', async () => {
+    _resetDefaultChainWarnDedup();
+    const t0 = 1_800_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(t0);
+    const { app, warnSpy } = await makeAppWithWarnSpy();
+    try {
+      await app.inject({ method: 'POST', url: '/test', payload: {} });
+      // Dentro de la ventana → sigue deduplicado.
+      nowSpy.mockReturnValue(t0 + DEFAULT_CHAIN_WARN_WINDOW_MS - 1);
+      await app.inject({ method: 'POST', url: '/test', payload: {} });
+      expect(
+        warnSpy.mock.calls.filter((c) => c[1] === DEFAULT_WARN_MSG),
+      ).toHaveLength(1);
+      // Fuera de la ventana → re-avisa.
+      nowSpy.mockReturnValue(t0 + DEFAULT_CHAIN_WARN_WINDOW_MS);
+      await app.inject({ method: 'POST', url: '/test', payload: {} });
+      expect(
+        warnSpy.mock.calls.filter((c) => c[1] === DEFAULT_WARN_MSG),
+      ).toHaveLength(2);
+    } finally {
+      nowSpy.mockRestore();
+      await app.close();
+    }
+  });
+
+  // ── Fix-pack MNR-1 (CR): la POLÍTICA DE DESALOJO del dedup no tenía ni un
+  // test. La purga de expiradas, la evicción del menos-recientemente-warneado y
+  // la línea load-bearing `delete`+`set` estaban 100% sin cobertura: si alguien
+  // borraba el `delete` por "redundante" (el `set` ya sobrescribe el valor), la
+  // suite seguía verde y la evicción degradaba en silencio de "menos-reciente" a
+  // "primero-visto". `DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES` tampoco tenía
+  // consumidor.
+  //
+  // Los 2 tests van CONTRA el choke-point exportado `warnDefaultChainApplied`
+  // (no vía HTTP): la política es module-scoped y no depende de nada de Fastify
+  // más que `log`/`method`/`routeOptions`, así que así son instantáneos y el cap
+  // se parametriza con `_resetDefaultChainWarnDedup(n)` en vez de insertar 1000
+  // entradas.
+
+  /** Request mínimo para ejercitar el choke-point sin levantar un server. */
+  function makeWarnProbe(): {
+    request: FastifyRequest;
+    warnedRefs: () => string[];
+  } {
+    const warnSpy = vi.fn();
+    const request = {
+      method: 'POST',
+      url: '/probe',
+      routeOptions: { url: '/probe' },
+      log: { warn: warnSpy, debug: vi.fn() },
+    } as unknown as FastifyRequest;
+    return {
+      request,
+      warnedRefs: () =>
+        warnSpy.mock.calls
+          .filter((c) => c[1] === DEFAULT_WARN_MSG)
+          .map((c) => (c[0] as { keyId: string }).keyId),
+    };
+  }
+
+  const WARN_T0 = 1_800_000_000_000;
+
+  it('T-175-X7: la política de desalojo acota el Map al cap y purga las entradas expiradas', () => {
+    // Cap de producción intacto (el default sigue siendo el exportado).
+    expect(DEFAULT_CHAIN_WARN_DEDUP_MAX_ENTRIES).toBe(1000);
+    _resetDefaultChainWarnDedup(2); // cap chico SÓLO para este test
+    const nowSpy = vi.spyOn(Date, 'now');
+    const { request, warnedRefs } = makeWarnProbe();
+    try {
+      nowSpy.mockReturnValue(WARN_T0);
+      warnDefaultChainApplied(request, 'kite-ozone-testnet', 'caller-A');
+      warnDefaultChainApplied(request, 'kite-ozone-testnet', 'caller-B');
+      expect(_defaultChainWarnDedupSize()).toBe(2);
+
+      // (a) el Map queda ACOTADO al cap: un 3er caller no lo hace crecer.
+      warnDefaultChainApplied(request, 'kite-ozone-testnet', 'caller-C');
+      expect(_defaultChainWarnDedupSize()).toBe(2);
+      // Los 3 callers distintos warnean (el dedup es por caller, no global).
+      expect(warnedRefs()).toEqual(['caller-A', 'caller-B', 'caller-C']);
+
+      // (c) PURGA de expiradas: pasada la ventana, B y C ya son inservibles → al
+      // entrar un caller nuevo se limpian AMBAS (no se desaloja sólo una) → 1.
+      nowSpy.mockReturnValue(WARN_T0 + DEFAULT_CHAIN_WARN_WINDOW_MS);
+      warnDefaultChainApplied(request, 'kite-ozone-testnet', 'caller-D');
+      expect(_defaultChainWarnDedupSize()).toBe(1);
+    } finally {
+      nowSpy.mockRestore();
+      _resetDefaultChainWarnDedup(); // restaura el cap de producción
+    }
+  });
+
+  it('T-175-X8: al desalojar sobrevive el caller warneado MÁS recientemente (delete+set)', () => {
+    _resetDefaultChainWarnDedup(2);
+    const nowSpy = vi.spyOn(Date, 'now');
+    const { request, warnedRefs } = makeWarnProbe();
+    const warn = (ref: string) =>
+      warnDefaultChainApplied(request, 'kite-ozone-testnet', ref);
+    try {
+      nowSpy.mockReturnValue(WARN_T0);
+      warn('caller-A'); // [A@t0]
+      nowSpy.mockReturnValue(WARN_T0 + DEFAULT_CHAIN_WARN_WINDOW_MS - 1);
+      warn('caller-B'); // [A@t0, B@t0+W-1] → lleno
+      // A re-warnea (su ventana venció) → el delete+set lo reinserta AL FINAL,
+      // así que el orden del Map pasa a ser [B, A]: B es ahora el
+      // menos-recientemente-warneado. Sin el `delete` el orden seguiría [A, B].
+      nowSpy.mockReturnValue(WARN_T0 + DEFAULT_CHAIN_WARN_WINDOW_MS);
+      warn('caller-A');
+      expect(warnedRefs()).toEqual(['caller-A', 'caller-B', 'caller-A']);
+
+      // Entra un caller nuevo con el Map lleno y NADA expirado (A hace 0ms, B
+      // hace 1ms) → se desaloja el menos-recientemente-warneado: B.
+      warn('caller-C');
+      expect(_defaultChainWarnDedupSize()).toBe(2);
+
+      // (b) A —el más recientemente warneado— SOBREVIVIÓ: sigue deduplicado.
+      warn('caller-A');
+      // B fue el desalojado → vuelve a warnear aunque su ventana no había
+      // vencido. Con la evicción degradada (sin delete+set) sería al revés: A
+      // warnearía de nuevo y B quedaría silenciado.
+      warn('caller-B');
+      expect(warnedRefs()).toEqual([
+        'caller-A',
+        'caller-B',
+        'caller-A',
+        'caller-C',
+        'caller-B',
+      ]);
+    } finally {
+      nowSpy.mockRestore();
+      _resetDefaultChainWarnDedup();
     }
   });
 });
