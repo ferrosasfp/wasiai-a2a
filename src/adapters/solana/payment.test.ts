@@ -22,6 +22,11 @@ const fakeConnection = {
   getParsedTransaction: vi.fn(
     (..._a: unknown[]): Promise<unknown> => Promise.resolve(null),
   ),
+  // CR-2 (WKH-234): lectura del balance del ATA del operador (pre-flight).
+  getTokenAccountBalance: vi.fn(
+    (..._a: unknown[]): Promise<unknown> =>
+      Promise.resolve({ value: { amount: '1000000' } }),
+  ),
 };
 vi.mock('./chain.js', () => ({
   getSolanaConnection: vi.fn((..._a: unknown[]) => fakeConnection),
@@ -44,10 +49,12 @@ const mockCreateTransferIx = vi.fn((..._a: unknown[]) => ({
   programId: new PublicKey(MINT),
   data: Buffer.alloc(0),
 }));
+const mockGetAtaSync = vi.fn((..._a: unknown[]) => new PublicKey(OPERATOR));
 vi.mock('@solana/spl-token', () => ({
   getOrCreateAssociatedTokenAccount: (...a: unknown[]) =>
     mockGetOrCreateAta(...a),
   createTransferInstruction: (...a: unknown[]) => mockCreateTransferIx(...a),
+  getAssociatedTokenAddressSync: (...a: unknown[]) => mockGetAtaSync(...a),
 }));
 
 // ── Mock sendAndConfirmTransaction (keep PublicKey/Transaction real) ──────
@@ -69,6 +76,9 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     _resetSolanaClients();
     vi.clearAllMocks();
     fakeConnection.getParsedTransaction.mockResolvedValue(null);
+    fakeConnection.getTokenAccountBalance.mockResolvedValue({
+      value: { amount: '1000000' },
+    });
   });
 
   afterEach(() => {
@@ -377,6 +387,38 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
         intentId: 'ctx-timeout:5:payTo',
       }),
     ).rejects.toThrow('confirm timeout');
+  });
+
+  // ── CR-2 (WKH-234) — pre-flight de balance del operador ─────────────────
+
+  it('T-234-CR2-adapter: getOperatorSplBalance() lee el ATA del operador para el mint configurado → monto atómico', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    fakeConnection.getTokenAccountBalance.mockResolvedValue({
+      value: { amount: '7500000' },
+    });
+
+    const balance = await adapter.getOperatorSplBalance();
+
+    expect(balance).toBe('7500000');
+    // La ATA se deriva SIN red (sync) con (mint, operator.publicKey) — misma
+    // derivación que usa settle para la cuenta origen.
+    expect(mockGetAtaSync).toHaveBeenCalledTimes(1);
+    const ataArgs = mockGetAtaSync.mock.calls[0];
+    expect((ataArgs?.[0] as PublicKey).toBase58()).toBe(MINT);
+    expect((ataArgs?.[1] as PublicKey).toBase58()).toBe(OPERATOR);
+    expect(fakeConnection.getTokenAccountBalance).toHaveBeenCalledTimes(1);
+    // Cero broadcasts: es una lectura pura.
+    expect(mockSendAndConfirm).not.toHaveBeenCalled();
+  });
+
+  it('T-234-CR2-adapter-throws: RPC/ATA inexistente → LANZA (el caller decide cómo degradar)', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    fakeConnection.getTokenAccountBalance.mockRejectedValue(
+      new Error('could not find account'),
+    );
+    await expect(adapter.getOperatorSplBalance()).rejects.toThrow(
+      'could not find account',
+    );
   });
 
   it('exposes the VM-agnostic surface (scheme, mint, caip2, tokens)', () => {

@@ -67,6 +67,8 @@ const SOL_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
 const SOL_PAYTO = 'So11111111111111111111111111111111111111112';
 const SOL_SIG = '5'.repeat(64); // firma base58 (no 0x)
 const mockSolanaSettle = vi.fn();
+// CR-2 (WKH-234): balance SPL del operador leído por el pre-flight del leg.
+const mockSolanaBalance = vi.fn();
 const solanaAdapter = {
   vmFamily: 'solana' as const,
   settle: (...a: unknown[]) => mockSolanaSettle(...a),
@@ -74,6 +76,7 @@ const solanaAdapter = {
   supportedTokens: [{ symbol: 'USDC', mint: SOL_MINT, decimals: 6 }],
   getMint: vi.fn().mockReturnValue(SOL_MINT),
   getNetwork: vi.fn().mockReturnValue('solana:test'),
+  getOperatorSplBalance: (...a: unknown[]) => mockSolanaBalance(...a),
 };
 
 // chainId per bundle (used by the ephemeral public client in the balance check)
@@ -211,6 +214,8 @@ function setHappyDefaults() {
 
   // WKH-234: Solana leg settle default (base58 signature).
   mockSolanaSettle.mockResolvedValue({ txHash: SOL_SIG, success: true });
+  // CR-2: operator SPL balance amplio por defecto (10 USDC, 6-dec).
+  mockSolanaBalance.mockResolvedValue('10000000');
 }
 
 // Import the module under test with the flag set (read at module load).
@@ -784,5 +789,82 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
       expect.objectContaining({ code: 'INVALID_PAY_TO_FORMAT' }),
       expect.any(String),
     );
+  });
+
+  // ── CR-2 (WKH-234): paridad del pre-flight de balance con la rama EVM ─────
+
+  function solanaAgent() {
+    return makeAgent({
+      priceUsdc: 0.5,
+      payment: {
+        method: 'x402',
+        asset: 'USDC',
+        chain: 'solana-devnet',
+        contract: SOL_PAYTO,
+      },
+    });
+  }
+
+  it('T-234-CR2a: operator SPL balance < amountAtomic → null + INSUFFICIENT_BALANCE (mismo skip-code que EVM), settle NUNCA llamado', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaBalance.mockResolvedValueOnce('499999'); // requerido: 500000
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(solanaAgent(), logger);
+
+    expect(result).toBeNull();
+    expect(mockSolanaSettle).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'INSUFFICIENT_BALANCE',
+        balance: '499999',
+        required: '500000',
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('T-234-CR2b: balance == amountAtomic (borde exacto) → settle SÍ se ejecuta (el pre-check no es off-by-one)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaBalance.mockResolvedValueOnce('500000');
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(solanaAgent(), logger);
+
+    expect(result?.txHash).toBe(SOL_SIG);
+    expect(mockSolanaSettle).toHaveBeenCalledTimes(1);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('T-234-CR2c: lectura de balance LANZA (RPC caído / ATA inexistente) → NO bloquea: degrada a BALANCE_PRECHECK_SKIPPED y settlea igual', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaBalance.mockRejectedValueOnce(
+      new Error('could not find account'),
+    );
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(solanaAgent(), logger);
+
+    // Invariante: el pre-check es observabilidad, NUNCA un gate que produzca
+    // falsos negativos sobre un settle legítimo.
+    expect(result?.txHash).toBe(SOL_SIG);
+    expect(mockSolanaSettle).toHaveBeenCalledTimes(1);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'BALANCE_PRECHECK_SKIPPED' }),
+      expect.any(String),
+    );
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('T-234-CR2d: camino feliz — el pre-check lee el balance 1× y no altera el resultado del settle', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(solanaAgent(), logger);
+
+    expect(result?.txHash).toBe(SOL_SIG);
+    expect(result?.settledAmount).toBe('500000');
+    expect(mockSolanaBalance).toHaveBeenCalledTimes(1);
+    expect(mockSolanaSettle).toHaveBeenCalledTimes(1);
   });
 });

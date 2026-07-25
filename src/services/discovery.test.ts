@@ -901,6 +901,30 @@ describe('discoveryService', () => {
       });
     });
 
+    it('AC-2neg (WKH-237/MNR-1): declara 43114 pero el binding está en 43113 → null (chain cruzada NO surfacea)', async () => {
+      setIdentityRows([anchored({ chain_id: 43113 })]);
+      expect(
+        await identityService.resolveIdentityForAgent(
+          '42',
+          43114,
+          'WasiAI',
+          'acme',
+        ),
+      ).toBeNull();
+    });
+
+    it('AC-2neg (WKH-237/MNR-1): declara Avalanche (43113) sin ninguna fila de binding → null (default seguro)', async () => {
+      setIdentityRows([]);
+      expect(
+        await identityService.resolveIdentityForAgent(
+          '42',
+          43113,
+          'WasiAI',
+          'acme',
+        ),
+      ).toBeNull();
+    });
+
     it('FIX v3 (DT-23): registry_id match is STRICT (PK), slug normalized', async () => {
       // Binding stores the PK `wasiai` + slug `ACME`; the agent's registry_id is
       // the same PK and the slug is normalized on both sides. Registry is NOT
@@ -1135,6 +1159,83 @@ describe('discoveryService', () => {
         chain_id: 43113,
         verified: true,
       });
+    });
+
+    // ── MNR-1 (AR de WKH-237) — contraparte negativa del test de arriba ──────
+    // INVARIANTE DE SEGURIDAD: una DECLARACIÓN Avalanche en el AgentCard NO
+    // alcanza para el badge. Sin fila de binding matcheante en
+    // `a2a_agent_keys.erc8004_identity` NO se adjunta `identity`. Hoy el
+    // comportamiento sale del `return null` por defecto de
+    // `identity.resolveIdentityForAgent`; sin estos tests un refactor del
+    // reverse-lookup podría introducir un badge falso sin romper la suite.
+
+    it('AC-2neg (WKH-237/MNR-1): declara Avalanche Fuji (43113) SIN filas de binding → sin badge', async () => {
+      setupRegistryResponse([
+        makeRawAgent({
+          id: 'a1',
+          slug: 'remit-kyc-validator',
+          status: 'active',
+          erc8004_token_id: '501',
+          erc8004_chain_id: 43113,
+        }),
+      ]);
+      setIdentityRows([]); // ninguna key activa con erc8004_identity
+
+      const result = await discoveryService.discover({});
+      expect(result.agents).toHaveLength(1);
+      expect(result.agents[0]!.identity).toBeUndefined();
+      expect('identity' in result.agents[0]!).toBe(false);
+    });
+
+    it('AC-2neg (WKH-237/MNR-1): declara Avalanche C-Chain (43114) con binding en 43113 (chain no matchea) → sin badge', async () => {
+      setupRegistryResponse([
+        makeRawAgent({
+          id: 'a1',
+          slug: 'remit-kyc-validator',
+          status: 'active',
+          erc8004_token_id: '501',
+          erc8004_chain_id: 43114,
+        }),
+      ]);
+      // Token + registry + slug idénticos: lo ÚNICO que no matchea es la chain.
+      // El binding de Fuji NO puede surfacear como identidad de mainnet.
+      setIdentityRows([
+        {
+          erc8004_identity: {
+            token_id: '501',
+            chain_id: 43113,
+            agent_card_url: '',
+            owner_address: '0xabc',
+            verified_at: '2026-05-10T00:00:00.000Z',
+            agent_registry: 'reg-1',
+            agent_slug: 'remit-kyc-validator',
+          },
+        },
+      ]);
+
+      const result = await discoveryService.discover({});
+      expect(result.agents[0]!.identity).toBeUndefined();
+    });
+
+    it('AC-2neg (WKH-237/MNR-1): declaración CAIP-10 Avalanche válida sin binding → sin badge', async () => {
+      setupRegistryResponse([
+        makeRawAgent({
+          id: 'a1',
+          slug: 'remit-corridor-fx',
+          status: 'active',
+          registrations: [{ agentId: `eip155:43113:0x${'e'.repeat(40)}/77` }],
+        }),
+      ]);
+      setIdentityRows([]);
+
+      const result = await discoveryService.discover({});
+      expect(result.agents[0]!.identity).toBeUndefined();
+      expect('identity' in result.agents[0]!).toBe(false);
+      // Control anti-vacuidad: la declaración CAIP-10 SÍ se parseó (el
+      // reverse-lookup se consultó), o sea el "sin badge" viene del cruce contra
+      // los bindings y no de una declaración descartada antes de la query.
+      const { supabase } = await import('../lib/supabase.js');
+      expect(vi.mocked(supabase.from)).toHaveBeenCalledWith('a2a_agent_keys');
     });
 
     it('AC-9: discover() leaves identity absent when agent declares nothing (skip, no query)', async () => {

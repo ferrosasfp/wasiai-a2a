@@ -1,5 +1,6 @@
 import {
   createTransferInstruction,
+  getAssociatedTokenAddressSync,
   getOrCreateAssociatedTokenAccount,
 } from '@solana/spl-token';
 import {
@@ -132,6 +133,32 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
 
   getMerchantName(): string {
     return process.env.WASIAI_MERCHANT_NAME ?? 'WasiAI';
+  }
+
+  /**
+   * Balance SPL del operador para el mint configurado, en unidades atómicas
+   * (string) — insumo del pre-flight de balance del leg Solana (CR-2 de
+   * WKH-234, paridad con el `balanceOf` de la rama EVM).
+   *
+   * Lectura PURA del RPC (CD-7: cero imports de services/DB): deriva la ATA del
+   * operador con `getAssociatedTokenAddressSync` (misma derivación que usa
+   * `settle`, sin red) y consulta `getTokenAccountBalance`.
+   *
+   * LANZA cuando la lectura no se puede hacer. Dos causas indistinguibles a
+   * este nivel: RPC caído y ATA del operador inexistente (`getTokenAccountBalance`
+   * rechaza con "could not find account"). Por eso el caller degrada a "balance
+   * desconocido" en vez de tratar el fallo como fondos insuficientes.
+   */
+  async getOperatorSplBalance(): Promise<string> {
+    const connection = getSolanaConnection();
+    const operator = getSolanaOperatorKeypair();
+    const mint = new PublicKey(getSolanaUsdcMint());
+    const ata = getAssociatedTokenAddressSync(mint, operator.publicKey);
+    const res = await connection.getTokenAccountBalance(
+      ata,
+      getSolanaCommitment(),
+    );
+    return res.value.amount;
   }
 
   async quote(amountUsd: number): Promise<QuoteResult> {

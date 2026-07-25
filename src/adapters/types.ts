@@ -121,6 +121,14 @@ export interface SolanaPaymentAdapter extends PaymentAdapterCommon {
   settle(req: SolanaSettleRequest): Promise<SettleResult>; // build+sign+broadcast+confirm, idempotente (AC-7)
   verify(proof: SolanaSettleProof): Promise<VerifyResult>; // getSignatureStatus/getParsedTransaction (verify-before-trust)
   getMint(): string; // base58 (análogo VM-agnóstico de getToken)
+  /**
+   * Balance SPL del operador (unidades atómicas del mint, como string) —
+   * análogo VM-agnóstico del `balanceOf` que la rama EVM lee con viem para su
+   * pre-flight de balance (CR-2 de WKH-234). Lectura pura del RPC: NO importa
+   * services ni DB (CD-7). LANZA cuando la lectura no se puede hacer (RPC
+   * caído, ATA del operador inexistente); el caller decide cómo degradar.
+   */
+  getOperatorSplBalance(): Promise<string>;
 }
 
 export type PaymentAdapter = EvmPaymentAdapter | SolanaPaymentAdapter;
