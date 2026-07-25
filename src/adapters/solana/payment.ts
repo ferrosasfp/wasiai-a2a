@@ -18,6 +18,7 @@ import type {
   SolanaTokenSpec,
   VerifyResult,
 } from '../types.js';
+import { base58Encode } from './base58.js';
 import {
   getSolanaCaip2,
   getSolanaCommitment,
@@ -60,37 +61,6 @@ const ZERO_EVM_ADDRESS =
 // es la columna `settle_signature` del ledger (persist-before-side-effect).
 const _intentSignatures = new Map<string, string>();
 
-// ── Base58 encode PURO (WKH-235a) ────────────────────────────────────────
-// Espejo del `base58DecodeToBytes` de `chain.ts` (misma decisión: NO agregar
-// `bs58` como dependencia — no está declarada en package.json). Se usa SOLO
-// para derivar la firma base58 de una tx YA firmada (`Transaction.signature`
-// es un Buffer) cuando el error de confirmación no la trae.
-const BASE58_ALPHABET =
-  '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-
-function base58Encode(bytes: Uint8Array): string {
-  if (bytes.length === 0) return '';
-  const digits: number[] = [0];
-  for (let i = 0; i < bytes.length; i++) {
-    let carry = bytes[i] as number;
-    for (let j = 0; j < digits.length; j++) {
-      carry += (digits[j] as number) << 8;
-      digits[j] = carry % 58;
-      carry = (carry / 58) | 0;
-    }
-    while (carry > 0) {
-      digits.push(carry % 58);
-      carry = (carry / 58) | 0;
-    }
-  }
-  let out = '';
-  for (let k = 0; k < bytes.length - 1 && bytes[k] === 0; k++) out += '1';
-  for (let q = digits.length - 1; q >= 0; q--) {
-    out += BASE58_ALPHABET[digits[q] as number];
-  }
-  return out;
-}
-
 /**
  * WKH-235a (AC-1) — firma-candidata de una tx cuyo `sendAndConfirmTransaction`
  * lanzó. La firma de una tx Solana es la firma ed25519 del fee-payer sobre el
@@ -123,7 +93,7 @@ function candidateSignatureFromFailure(
   // una pseudo-firma no consultable on-chain que terminaría en `_intentSignatures`
   // y viajaría como `txHash` al ledger (`settle_signature`) → contabilidad
   // contaminada. Se trata igual que `tx.signature === null`: sin firma derivable.
-  if (raw && raw.length > 0 && raw.some((b) => b !== 0)) {
+  if (raw?.some((b) => b !== 0)) {
     return base58Encode(raw);
   }
   return undefined;
@@ -189,6 +159,11 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     //    on-chain y retornar la firma previa — NO re-broadcast. ────────────────
     const prior = _intentSignatures.get(req.intentId);
     if (prior) {
+      // DECISIÓN ABIERTA (MNR-4 del CR de WKH-235a): este `verify()` NO está
+      // envuelto en try/catch, a diferencia del de `recoverConfirmedSettle` (que
+      // degrada a "no recuperado"). Con el RPC caído, un retry de un intentId ya
+      // conocido lanza en vez de degradar. Hay que decidir si debe degradar igual
+      // o propagar a propósito — ver doc/sdd/185-wkh-235a-solana-settle-idempotency-durable/work-item.md
       const verified = await this.verify({
         signature: prior,
         payTo: req.payTo,

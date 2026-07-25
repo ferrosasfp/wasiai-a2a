@@ -1,5 +1,6 @@
 import { Connection, Keypair } from '@solana/web3.js';
 import { getLogger } from '../../lib/logger.js';
+import { base58DecodeToBytes } from './base58.js';
 
 /**
  * Solana devnet chain registration (WKH-234).
@@ -22,9 +23,6 @@ const DEFAULT_USDC_DECIMALS = 6;
 const DEFAULT_COMMITMENT = 'confirmed';
 const DEFAULT_CAIP2_CHAIN_ID = 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1';
 const DEFAULT_SYNTHETIC_CHAIN_ID = 900001;
-
-const BASE58_ALPHABET =
-  '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
 // ── Module-level lazy state (per-process, no per-instance) ────────────────
 let _connection: Connection | null = null;
@@ -76,31 +74,6 @@ export function getSolanaConnection(): Connection {
   if (_connection) return _connection;
   _connection = new Connection(getSolanaRpcUrl(), getSolanaCommitment());
   return _connection;
-}
-
-/**
- * Decodifica un string base58 a bytes (algoritmo base-x estándar). PURO — no
- * depende de `bs58`. Usado solo para el secret-key del operator.
- */
-function base58DecodeToBytes(s: string): Uint8Array {
-  const bytes: number[] = [];
-  for (let i = 0; i < s.length; i++) {
-    let carry = BASE58_ALPHABET.indexOf(s[i] as string);
-    if (carry < 0) {
-      throw new Error('SOLANA_OPERATOR_PRIVATE_KEY is not valid base58');
-    }
-    for (let j = 0; j < bytes.length; j++) {
-      carry += (bytes[j] as number) * 58;
-      bytes[j] = carry & 0xff;
-      carry >>= 8;
-    }
-    while (carry > 0) {
-      bytes.push(carry & 0xff);
-      carry >>= 8;
-    }
-  }
-  for (let i = 0; i < s.length && s[i] === '1'; i++) bytes.push(0);
-  return Uint8Array.from(bytes.reverse());
 }
 
 /**
