@@ -220,6 +220,9 @@ import {
   requireA2AKey,
   requirePaymentOrA2AKey,
 } from './a2a-key.js';
+// WKH-175: el dedup del warn "default aplicado" vive en x402.ts (choke-point
+// compartido con el path x402). Se resetea por test para evitar contaminación.
+import { _resetDefaultChainWarnDedup } from './x402.js';
 
 const mockLookupByHash = vi.mocked(identityService.lookupByHash);
 const mockGetBalance = vi.mocked(budgetService.getBalance);
@@ -500,7 +503,12 @@ describe('requirePaymentOrA2AKey middleware', () => {
     expect(response.statusCode).toBe(403);
     expect(response.json().error_code).toBe('INSUFFICIENT_BUDGET');
     // AC-8: message includes the target chainId.
-    expect(response.json().error).toBe('chain 2368 balance is 0');
+    // WKH-175: el texto ahora también trae el slug, la causa (default aplicado
+    // por falta de header) y las chains con saldo. `status` + `error_code` NO
+    // cambian (contrato estable para los clientes que los parsean).
+    expect(response.json().error).toBe(
+      "chain 2368 (kite-ozone-testnet) balance is 0; no x-payment-chain header sent, used default 'kite-ozone-testnet'; chains with balance: kite-ozone-testnet (10.000000)",
+    );
   });
 
   it('REGRESSION-WKH-61: key with allowed_registries no longer 403s at middleware level', async () => {
@@ -672,7 +680,10 @@ describe('requirePaymentOrA2AKey middleware', () => {
     // WKH-MULTICHAIN W2: message now includes target chainId (AC-8) instead of
     // the raw PG error. The error is logged via request.log.warn but does not
     // leak to the client.
-    expect(response.json().error).toBe('chain 2368 balance is 0');
+    // WKH-175: + slug + causa del default + chains con saldo (mismo 403/code).
+    expect(response.json().error).toBe(
+      "chain 2368 (kite-ozone-testnet) balance is 0; no x-payment-chain header sent, used default 'kite-ozone-testnet'; chains with balance: kite-ozone-testnet (10.000000)",
+    );
   });
 
   // ── BLQ-3: lookupByHash throws → 503 ───────────────────────
@@ -988,7 +999,12 @@ describe('requirePaymentOrA2AKey middleware', () => {
       expect(response.statusCode).toBe(403);
       expect(response.json().error_code).toBe('INSUFFICIENT_BUDGET');
       // AC-8: target chainId in the message (not the original 2368 default).
-      expect(response.json().error).toBe('chain 43113 balance is 0');
+      // WKH-175: el header VINO presente (avalanche-fuji) → el mensaje NO habla
+      // de default, pero SÍ lista dónde la key tiene saldo (kite), que es
+      // exactamente la confusión cross-chain que este 403 tenía que explicar.
+      expect(response.json().error).toBe(
+        'chain 43113 (avalanche-fuji) balance is 0; chains with balance: kite-ozone-testnet (10.000000)',
+      );
       // CD-12: debit AND getBalance read chainId from the same bundle (43113).
       expect(mockDebit).toHaveBeenCalledWith(
         TEST_KEY_ID,
@@ -2955,5 +2971,280 @@ describe('requireA2AKey — auth-only (WKH-173)', () => {
     expect(row.allowed_registries).toEqual(['parent-reg']);
     expect(row.allowed_agent_slugs).toEqual(['sess-slug']);
     expect(row.allowed_categories).toEqual(['parent-cat']);
+  });
+});
+
+// ── WKH-175: default-chain UX en ops pagas ───────────────────────
+// Las 3 mejoras son ADITIVAS (no cambian el default, no lo hacen obligatorio,
+// no cambian status/code): (1) warn cuando se aplica el default por ausencia de
+// `x-payment-chain`, (2) 403 INSUFFICIENT_BUDGET accionable (slug + causa +
+// chains con saldo), (3) header de respuesta `x-a2a-payment-chain`.
+
+describe('WKH-175 — default-chain UX (a2a-key paid path)', () => {
+  let app: ReturnType<typeof Fastify>;
+  let logWarnSpy: ReturnType<typeof vi.fn>;
+
+  beforeAll(async () => {
+    app = Fastify();
+    // Mismo patrón que AC-11 (log shape): un hook global corre ANTES del
+    // preHandler de la ruta, así que reemplazar `req.log.warn` acá alcanza para
+    // observar lo que emite el middleware.
+    app.addHook('preHandler', async (req: FastifyRequest) => {
+      req.log.warn = logWarnSpy as unknown as FastifyRequest['log']['warn'];
+    });
+    app.post(
+      '/test-175',
+      { preHandler: requirePaymentOrA2AKey({ description: 'wkh-175' }) },
+      async (_req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ ok: true }),
+    );
+    await app.ready();
+  });
+
+  afterAll(() => app.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMockRegistryState(
+      ['kite-ozone-testnet', 'avalanche-fuji'],
+      'kite-ozone-testnet',
+    );
+    mockReceiptEmit.mockResolvedValue(undefined);
+    logWarnSpy = vi.fn();
+    // El warn del default está deduplicado por proceso/slug (hot-path): sin este
+    // reset, el primer test del archivo que resuelve el default se lo "come".
+    _resetDefaultChainWarnDedup();
+  });
+
+  const findDefaultWarn = () =>
+    logWarnSpy.mock.calls.find(
+      (c) =>
+        c[1] === 'payment chain resolved by default (x-payment-chain absent)',
+    );
+
+  // ── T-175-1 (mejora 1+3): header ausente → warn + eco del slug default ──
+  it('T-175-1: sin x-payment-chain → warn del default aplicado + header x-a2a-payment-chain', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('9.000000');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-175',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    // (1) el default ya NO es silencioso.
+    const warnCall = findDefaultWarn();
+    expect(warnCall).toBeDefined();
+    expect(warnCall?.[0]).toMatchObject({
+      chainKey: 'kite-ozone-testnet',
+      header: 'x-payment-chain',
+    });
+    // (3) eco de la chain efectivamente usada.
+    expect(res.headers['x-a2a-payment-chain']).toBe('kite-ozone-testnet');
+    // Compatibilidad: el caller sin header sigue cobrando en el default (2368).
+    expect(mockDebit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      2368,
+      1.0,
+      undefined,
+      undefined,
+      undefined,
+      'user-1',
+    );
+  });
+
+  // ── T-175-2 (mejora 1+3): header presente y válido → sin warn, eco del slug ──
+  it('T-175-2: con x-payment-chain válido → NO warn de default + header con ese slug', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('5.000000');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-175',
+      headers: { 'x-a2a-key': TEST_KEY, 'x-payment-chain': 'avalanche-fuji' },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(findDefaultWarn()).toBeUndefined();
+    expect(res.headers['x-a2a-payment-chain']).toBe('avalanche-fuji');
+  });
+
+  // ── T-175-3 (hot-path): el warn está deduplicado por proceso/slug ──
+  it('T-175-3: 2 requests sin header → 1 solo warn (dedup, evita ruido en hot-path)', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockDebit.mockResolvedValue({ success: true });
+    mockGetBalance.mockResolvedValue('9.000000');
+
+    for (let i = 0; i < 2; i++) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test-175',
+        headers: { 'x-a2a-key': TEST_KEY },
+        payload: {},
+      });
+      // El header de respuesta SÍ va en las dos (no está deduplicado).
+      expect(res.headers['x-a2a-payment-chain']).toBe('kite-ozone-testnet');
+    }
+
+    const defaultWarns = logWarnSpy.mock.calls.filter(
+      (c) =>
+        c[1] === 'payment chain resolved by default (x-payment-chain absent)',
+    );
+    expect(defaultWarns).toHaveLength(1);
+  });
+
+  // ── T-175-4 (mejora 2): 403 accionable con la causa del default ──
+  it('T-175-4: 403 INSUFFICIENT_BUDGET → slug + causa (default) + chains con saldo, mismo status/code', async () => {
+    // Saldo real en fuji (43113); la key pide sin header → cae en kite (2368).
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({ budget: { '2368': '0', '43113': '7.500000' } }),
+    );
+    mockDebit.mockResolvedValue({ success: false, error: 'Insufficient' });
+    mockGetBalance.mockResolvedValue('0');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-175',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+
+    // Contrato estable: status 403 + error_code INSUFFICIENT_BUDGET.
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('INSUFFICIENT_BUDGET');
+    expect(res.json().error).toBe(
+      "chain 2368 (kite-ozone-testnet) balance is 0; no x-payment-chain header sent, used default 'kite-ozone-testnet'; chains with balance: avalanche-fuji (7.500000)",
+    );
+    // El header también viaja en el 403 (ahí es donde más se necesita).
+    expect(res.headers['x-a2a-payment-chain']).toBe('kite-ozone-testnet');
+    // Sin queries extra: el listado sale del `budget` en memoria (un solo
+    // getBalance, el que ya existía para el chain target).
+    expect(mockGetBalance).toHaveBeenCalledTimes(1);
+  });
+
+  // ── T-175-5 (mejora 2): la key no tiene saldo en NINGUNA chain ──
+  it('T-175-5: sin saldo en ninguna chain → el mensaje lo dice sin romperse', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({ budget: { '2368': '0', '43113': '0.000000' } }),
+    );
+    mockDebit.mockResolvedValue({ success: false, error: 'Insufficient' });
+    mockGetBalance.mockResolvedValue('0');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-175',
+      headers: { 'x-a2a-key': TEST_KEY, 'x-payment-chain': 'avalanche-fuji' },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('INSUFFICIENT_BUDGET');
+    expect(res.json().error).toBe(
+      'chain 43113 (avalanche-fuji) balance is 0; no chain has balance',
+    );
+  });
+
+  // ── T-175-6 (mejora 2): budget vacío {} → tampoco rompe ──
+  it('T-175-6: budget vacío → mensaje sin lista, sin excepción', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow({ budget: {} }));
+    mockDebit.mockResolvedValue({ success: false, error: 'Insufficient' });
+    mockGetBalance.mockResolvedValue('0');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-175',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toContain('no chain has balance');
+  });
+
+  // ── T-175-7: chainId con saldo NO inicializado en este proceso ──
+  it('T-175-7: saldo en una chain no inicializada → se muestra como "chain <id>" (no se inventa slug)', async () => {
+    mockLookupByHash.mockResolvedValue(
+      makeKeyRow({ budget: { '2368': '0', '84532': '3.000000' } }),
+    );
+    mockDebit.mockResolvedValue({ success: false, error: 'Insufficient' });
+    mockGetBalance.mockResolvedValue('0');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-175',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toContain(
+      'chains with balance: chain 84532 (3.000000)',
+    );
+  });
+
+  // ── T-175-8: los branches delegación/sesión también echan el header ──
+  it('T-175-8: delegación sin header → warn + x-a2a-payment-chain del default', async () => {
+    mockLookupToken.mockResolvedValue(makeDelegationRow());
+    mockGetParentKey.mockResolvedValue(makeKeyRow());
+    mockExceedsPerTx.mockReturnValue(false);
+    mockDebitDelegation.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('49.00');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-175',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-a2a-payment-chain']).toBe('kite-ozone-testnet');
+    expect(findDefaultWarn()).toBeDefined();
+  });
+
+  it('T-175-9: key-session con header válido → x-a2a-payment-chain de ese slug, sin warn', async () => {
+    mockSessionLookup.mockResolvedValue(makeKeySessionRow());
+    mockSessionGetParent.mockResolvedValue(makeKeyRow());
+    mockSessionDebit.mockResolvedValue('1.00');
+    mockGetBalance.mockResolvedValue('9.00');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-175',
+      headers: {
+        authorization: `Bearer ${SESS_TOKEN}`,
+        'x-payment-chain': 'avalanche-fuji',
+      },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-a2a-payment-chain']).toBe('avalanche-fuji');
+    expect(findDefaultWarn()).toBeUndefined();
+  });
+
+  // ── T-175-10: header presente pero DESCONOCIDO → intacto (400, sin eco) ──
+  it('T-175-10: x-payment-chain desconocido → 400 CHAIN_NOT_SUPPORTED intacto (scope OUT)', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/test-175',
+      headers: { 'x-a2a-key': TEST_KEY, 'x-payment-chain': 'ethereum-mainnet' },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('CHAIN_NOT_SUPPORTED');
+    // No hubo chain resuelta → no hay nada que ecoar, y NO se aplicó default.
+    expect(res.headers['x-a2a-payment-chain']).toBeUndefined();
+    expect(findDefaultWarn()).toBeUndefined();
+    expect(mockDebit).not.toHaveBeenCalled();
   });
 });

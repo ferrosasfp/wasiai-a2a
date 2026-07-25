@@ -39,6 +39,48 @@ export const X_PASSPORT_SESSION_HEADER = 'x-passport-session';
 export const X_PAYMENT_HEADER = 'x-payment';
 export const PAYMENT_SIGNATURE_HEADER = 'payment-signature';
 
+// ── WKH-175: default-chain UX (aditivo, DX/observabilidad) ─────────────
+// Header de RESPUESTA con el slug de la chain efectivamente resuelta para
+// cobrar. Mismo patrón que `x-a2a-remaining-budget` (reply.header en el punto
+// donde el dato queda resuelto). Los cambios de WKH-175 son aditivos: NO
+// cambian el default, NO lo hacen obligatorio, NO cambian ningún status/code.
+export const X_A2A_PAYMENT_CHAIN_HEADER = 'x-a2a-payment-chain';
+
+// Dedup module-scoped del warn "se aplicó el default". El default se resuelve
+// en CADA request sin `x-payment-chain` (hot-path: hoy la mayoría de los
+// callers legítimos no lo mandan — el SDK sólo lo envía si `network` está
+// seteado), así que un warn por request inundaría los logs. Se avisa UNA vez
+// por proceso y por slug (mismo patrón que `_warnedFallbackSlugs` en
+// services/discovery.ts) y el detalle per-request queda en `debug`.
+const _warnedDefaultChainSlugs = new Set<string>();
+
+/** TEST-ONLY: limpia el dedup de warns (CD: evitar contaminación cross-test). */
+export function _resetDefaultChainWarnDedup(): void {
+  _warnedDefaultChainSlugs.clear();
+}
+
+/**
+ * WKH-175: choke-point ÚNICO del aviso "la chain de pago se resolvió por
+ * default porque faltaba `x-payment-chain`". Compartido por el path x402
+ * (abajo) y por `resolveTargetChain` en a2a-key.ts (compose/orchestrate con
+ * `x-a2a-key`), que ya importa de este módulo (sin ciclo).
+ *
+ * `warn` deduplicado (una vez por proceso/slug) + `debug` per-request para
+ * trazabilidad completa cuando se baja LOG_LEVEL. NUNCA loguea credenciales.
+ */
+export function warnDefaultChainApplied(
+  request: FastifyRequest,
+  chainKey: ChainKey,
+): void {
+  const fields = { chainKey, header: 'x-payment-chain' };
+  const msg = 'payment chain resolved by default (x-payment-chain absent)';
+  if (!_warnedDefaultChainSlugs.has(chainKey)) {
+    _warnedDefaultChainSlugs.add(chainKey);
+    request.log.warn(fields, msg);
+  }
+  request.log.debug(fields, msg);
+}
+
 declare module 'fastify' {
   interface FastifyRequest {
     paymentTxHash?: string;
@@ -225,6 +267,9 @@ export function requirePayment(
           error: 'No chains initialized in registry',
         });
       }
+      // WKH-175: el default dejaba de ser silencioso — se avisa (warn
+      // deduplicado + debug per-request). NO cambia la resolución.
+      warnDefaultChainApplied(request, chainKey);
     }
 
     const bundle = getAdaptersBundle(chainKey);
@@ -235,6 +280,12 @@ export function requirePayment(
         error: `Chain '${chainKey}' is not initialized. Initialized: ${getInitializedChainKeys().join(', ')}`,
       });
     }
+
+    // WKH-175: eco de la chain efectivamente usada al caller. Se setea acá (una
+    // vez resuelto el bundle) para que TODAS las salidas de este handler la
+    // lleven — el 402 challenge incluido, que es donde el caller descubre en qué
+    // red se le está cobrando.
+    reply.header(X_A2A_PAYMENT_CHAIN_HEADER, chainKey);
 
     // DT-2 / AC-4: canónico x402 (X-PAYMENT) gana sobre legacy (payment-signature).
     // DT-10: .length > 0 evita que un X-PAYMENT vacío gane sobre un payment-signature válido.

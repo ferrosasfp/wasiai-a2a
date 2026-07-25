@@ -92,7 +92,7 @@ vi.mock('../adapters/registry.js', () => ({
 }));
 
 import { buildEoaPaymentHeader } from '../__tests__/fixtures/passport-shape.js';
-import { requirePayment } from './x402.js';
+import { _resetDefaultChainWarnDedup, requirePayment } from './x402.js';
 
 interface ChallengeBody {
   error: string;
@@ -576,6 +576,125 @@ describe('x402 middleware — chain-aware payment path (WKH-111 / BASE-06)', () 
       expect(body.accepts[0]!.maxAmountRequired).toBe('7777777');
       // atomic override short-circuits quote() entirely.
       expect(baseAdapter.quote).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── WKH-175: el default deja de ser silencioso + eco de la chain ──
+  // Aditivo: NO cambia el default ni lo hace obligatorio (el request sin header
+  // sigue resolviendo a kite y devolviendo el mismo 402).
+
+  const DEFAULT_WARN_MSG =
+    'payment chain resolved by default (x-payment-chain absent)';
+
+  /** App con `req.log.warn` espiado (hook global corre antes del preHandler). */
+  async function makeAppWithWarnSpy(): Promise<{
+    app: ReturnType<typeof Fastify>;
+    warnSpy: ReturnType<typeof vi.fn>;
+  }> {
+    const warnSpy = vi.fn();
+    const app = Fastify();
+    app.addHook('preHandler', async (req: FastifyRequest) => {
+      req.log.warn = warnSpy as unknown as FastifyRequest['log']['warn'];
+    });
+    app.post(
+      '/test',
+      { preHandler: requirePayment({ description: 'test' }) },
+      async (_req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ ok: true }),
+    );
+    await app.ready();
+    return { app, warnSpy };
+  }
+
+  it('T-175-X1: sin x-payment-chain → warn del default + header x-a2a-payment-chain en el 402', async () => {
+    _resetDefaultChainWarnDedup();
+    const { app, warnSpy } = await makeAppWithWarnSpy();
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        payload: {},
+      });
+
+      // Back-compat: mismo 402 challenge en la chain default.
+      expect(res.statusCode).toBe(402);
+      const body = res.json() as ChallengeBody;
+      expect(body.accepts[0]!.network).toBe('eip155:2368');
+
+      const warnCall = warnSpy.mock.calls.find(
+        (c) => c[1] === DEFAULT_WARN_MSG,
+      );
+      expect(warnCall).toBeDefined();
+      expect(warnCall?.[0]).toMatchObject({
+        chainKey: 'kite-ozone-testnet',
+        header: 'x-payment-chain',
+      });
+      expect(res.headers['x-a2a-payment-chain']).toBe('kite-ozone-testnet');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('T-175-X2: con x-payment-chain=base-sepolia → sin warn de default + header con ese slug', async () => {
+    _resetDefaultChainWarnDedup();
+    const { app, warnSpy } = await makeAppWithWarnSpy();
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { 'x-payment-chain': 'base-sepolia' },
+        payload: {},
+      });
+
+      expect(res.statusCode).toBe(402);
+      expect(warnSpy.mock.calls.some((c) => c[1] === DEFAULT_WARN_MSG)).toBe(
+        false,
+      );
+      expect(res.headers['x-a2a-payment-chain']).toBe('base-sepolia');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('T-175-X3: 2 requests sin header → 1 solo warn (dedup hot-path), header en ambos', async () => {
+    _resetDefaultChainWarnDedup();
+    const { app, warnSpy } = await makeAppWithWarnSpy();
+    try {
+      for (let i = 0; i < 2; i++) {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/test',
+          payload: {},
+        });
+        expect(res.headers['x-a2a-payment-chain']).toBe('kite-ozone-testnet');
+      }
+      expect(
+        warnSpy.mock.calls.filter((c) => c[1] === DEFAULT_WARN_MSG),
+      ).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('T-175-X4: slug desconocido → 400 intacto, sin eco ni warn de default', async () => {
+    _resetDefaultChainWarnDedup();
+    const { app, warnSpy } = await makeAppWithWarnSpy();
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { 'x-payment-chain': 'solana-mainnet' },
+        payload: {},
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect((res.json() as ErrorBody).error_code).toBe('CHAIN_NOT_SUPPORTED');
+      expect(res.headers['x-a2a-payment-chain']).toBeUndefined();
+      expect(warnSpy.mock.calls.some((c) => c[1] === DEFAULT_WARN_MSG)).toBe(
+        false,
+      );
     } finally {
       await app.close();
     }
