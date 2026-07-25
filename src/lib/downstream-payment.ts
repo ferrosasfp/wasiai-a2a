@@ -126,6 +126,10 @@ function validatePayTo(
  * NEVER-throws (CD-10): retorna `null` + skip-code, nunca lanza. Monto atómico
  * decimals-aware desde el adapter (CD-9).
  *
+ * CR-2 (WKH-234): antes de settlear corre un pre-flight de balance del operador
+ * (mismo skip-code `INSUFFICIENT_BALANCE` que la rama EVM), fail-soft si el
+ * balance no se puede leer — ver el comentario del bloque.
+ *
  * NOTA (fix-pack AR-MNR-2): el settle FRESCO confía en la confirmación de
  * `sendAndConfirmTransaction` (commitment configurado); el `verify()` on-chain
  * del adapter sólo corre en el camino idempotente-hit (re-lee una firma previa
@@ -179,6 +183,46 @@ async function settleSolanaLeg(
     logger.warn(
       { agentSlug: agent.slug, code: 'INVALID_PRICE', detail: String(e) },
       '[Downstream] parseUnits failed (solana)',
+    );
+    return null;
+  }
+
+  // Pre-flight de balance del operador — paridad de observabilidad con la rama
+  // EVM (CR-2 de WKH-234). Corta temprano con el MISMO skip-code
+  // `INSUFFICIENT_BALANCE` que el paso 9 del path EVM, en vez de dejar que el
+  // settle falle-soft con un `SETTLE_FAILED` genérico que no distingue "no hay
+  // fondos" de "falló el RPC" o "la tx se rechazó".
+  //
+  // ASIMETRÍA DELIBERADA vs EVM: si el balance NO se puede leer, acá NO se
+  // bloquea el settle (la rama EVM sí corta con `BALANCE_READ_FAILED`). El
+  // pre-check es una optimización de observabilidad, NO un gate nuevo: en Solana
+  // la lectura del ATA del operador lanza tanto por RPC caído como porque la
+  // cuenta todavía no existe, y ambas son indistinguibles a este nivel →
+  // tratarlas como "fondos insuficientes" bloquearía settles legítimos (falso
+  // negativo). Se degrada a "balance desconocido, intentá el settle" y el error
+  // real, si lo hay, sigue apareciendo como `SETTLE_FAILED`.
+  let operatorBalance: bigint | undefined;
+  try {
+    operatorBalance = BigInt(await adapter.getOperatorSplBalance());
+  } catch (e) {
+    logger.info(
+      {
+        agentSlug: agent.slug,
+        code: 'BALANCE_PRECHECK_SKIPPED',
+        detail: String(e),
+      },
+      '[Downstream] solana balance pre-check skipped (operator SPL balance unreadable)',
+    );
+  }
+  if (operatorBalance !== undefined && operatorBalance < BigInt(amountAtomic)) {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        code: 'INSUFFICIENT_BALANCE',
+        balance: operatorBalance.toString(),
+        required: amountAtomic,
+      },
+      '[Downstream] insufficient solana operator SPL balance',
     );
     return null;
   }
