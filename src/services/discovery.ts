@@ -2,9 +2,9 @@
  * Discovery Service — Search agents across all registries
  */
 
-import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
 import { getLogger } from '../lib/logger.js';
+import { readPaymentSpec } from '../lib/payment-spec-reader.js';
 import { parsePriceSafe } from '../lib/price.js';
 import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 import {
@@ -13,7 +13,6 @@ import {
 } from '../lib/url-validator.js';
 import type {
   Agent,
-  AgentPaymentSpec,
   AgentStatus,
   DiscoveryQuery,
   DiscoveryResult,
@@ -37,87 +36,13 @@ export function _resetFallbackWarnDedup(): void {
   _warnedFallbackSlugs.clear();
 }
 
-/**
- * Type guard para `agent.payment` (WKH-55).
- * Schema drift fallback for wasiai-v2 marketplace shape:
- *   - v2 expone `obj.protocol` (e.g. "x402"), pero el WKH-55 código espera `obj.method`.
- *   - v2 expone `chain` top-level (e.g. "avalanche-testnet"), pero WKH-55 lo busca en payment.
- *   - WKH-55 guard chequea `chain === "avalanche"`; normalizamos solo testnet/mainnet → avalanche.
- *
- * SEC-AR-2026-04-28 BLQ-MED-1 (WKH-113 DT-4/DT-5): dynamic chain validation.
- * Registry comprometido podría exponer `chain: 'avalanche'` (literal) o variantes
- * exóticas para bypassear el guard del downstream-payment. La defensa-en-profundidad
- * es rechazar cualquier chain que el resolver canónico no conozca.
- *
- * Validación (CD-1/CD-9): en lugar de un `Set` hardcodeado de slugs, se deriva
- * de `normalizeChainSlug` (el resolver puro de `../adapters/chain-resolver.js`,
- * reutilizado inbound WKH-111 y downstream WKH-112). Acepta toda chain con
- * adapter conocido (avalanche-*, kite-*, base-*, incl. chainIds numéricos);
- * rechaza slugs desconocidos (polygon/solana → registry comprometido / chain
- * exótica → undefined, defensa preservada).
- *
- * ⚠️ Salida (CD-7): la validación usa `normalizeChainSlug` SOLO para decidir
- * aceptar/rechazar. El valor de `chain` de SALIDA conserva el string legacy:
- * `avalanche-testnet`/`avalanche-mainnet` → `'avalanche'`; resto pass-through.
- * NO se devuelve el `ChainKey` del resolver (devolvería `'avalanche-fuji'` para
- * `'avalanche'`, rompiendo CD-2 y los tests existentes).
- *
- * El downstream pago real (Fuji vs C-Chain) se decide a nivel de
- * `downstream-payment.ts` mediante `WASIAI_DOWNSTREAM_NETWORK`.
- *
- * Retorna undefined si los campos críticos siguen ausentes O la chain no la
- * conoce el resolver.
- */
-function readPayment(
-  raw: Record<string, unknown>,
-): AgentPaymentSpec | undefined {
-  const p = raw.payment;
-  if (!p || typeof p !== 'object') return undefined;
-  const obj = p as Record<string, unknown>;
-
-  // method: prefer obj.method; fallback to obj.protocol (v2 schema drift)
-  const methodRaw =
-    typeof obj.method === 'string'
-      ? obj.method
-      : typeof obj.protocol === 'string'
-        ? obj.protocol
-        : undefined;
-
-  // chain: prefer obj.chain; fallback to raw.chain (v2 exposes at top level)
-  const chainRaw =
-    typeof obj.chain === 'string'
-      ? obj.chain
-      : typeof raw.chain === 'string'
-        ? raw.chain
-        : undefined;
-
-  if (!methodRaw || !chainRaw || typeof obj.contract !== 'string') {
-    return undefined;
-  }
-
-  // SEC-AR BLQ-MED-1 (WKH-113 DT-5): reject any chain the resolver does not
-  // know BEFORE normalization. Dynamic validation derived from the pure
-  // chain-resolver (no hardcoded slug allowlist — CD-1/CD-9). Unknown slug
-  // (registry comprometido / chain exótica) → undefined, defensa preservada.
-  if (normalizeChainSlug(chainRaw) === undefined) {
-    return undefined;
-  }
-
-  // Normalize chain: collapse avalanche testnet/mainnet → 'avalanche' (downstream
-  // guard expects canonical). Kite slugs pass through unchanged so consumers can
-  // distinguish kite-ozone-testnet from kite-mainnet (different stablecoins).
-  const chain =
-    chainRaw === 'avalanche-testnet' || chainRaw === 'avalanche-mainnet'
-      ? 'avalanche'
-      : chainRaw;
-
-  return {
-    method: methodRaw,
-    chain,
-    contract: obj.contract as `0x${string}`,
-    asset: typeof obj.asset === 'string' ? obj.asset : undefined,
-  };
-}
+// ─── WKH-241: el lector del payment spec vive en un módulo leaf ────────
+// `readPayment` (ex líneas 71-119) se movió TAL CUAL a
+// `../lib/payment-spec-reader.js` (`readPaymentSpec`) para compartir el MISMO
+// choke-point con el mapper de agentes self-published (`agent.ts`
+// `mapRowToAgent`) — un solo validador de chain (CD-1/AC-4), sin ciclo de
+// módulos (`discovery.ts` ya importa `agent.ts`, DT-1). Comportamiento y
+// salida byte-idénticos para los registries externos (CD-2).
 
 // ─── WKH-100 FIX-PACK (BLQ-MED-1 / DT-21.2) ───────────────────────────
 // Chains we accept for an ERC-8004 declaration surfaced through /discover:
@@ -608,7 +533,8 @@ export const discoveryService = {
       invocationNote:
         'The invokeUrl is an internal reference. To invoke this agent, use POST /compose or POST /orchestrate on the WasiAI A2A gateway.',
       metadata: raw,
-      payment: readPayment(raw),
+      // WKH-241: mismo lector compartido que `agent.ts` (CD-1/AC-4).
+      payment: readPaymentSpec(raw),
     };
   },
 

@@ -737,4 +737,31 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
       expect.any(String),
     );
   });
+
+  // WKH-241 AC-5: el payment spec ahora también llega de agentes
+  // self-published (metadata.payment, pass-through sin validar formato en
+  // read-time — DT-3). Caso NO cubierto por T-234-AC3c: charset base58 VÁLIDO
+  // pero longitud != 32 bytes. El guard settle-time lo rechaza igual, sin
+  // mover fondos.
+  it('T-241-AC5: base58 con charset válido pero longitud inválida → null + INVALID_PAY_TO_FORMAT, settle NUNCA llamado', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+    const result = await signAndSettleDownstream(
+      makeAgent({
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain: 'solana-devnet',
+          contract: 'abc', // base58 charset ok, NO 32 bytes
+        },
+      }),
+      logger,
+    );
+    expect(result).toBeNull();
+    expect(mockSolanaSettle).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'INVALID_PAY_TO_FORMAT' }),
+      expect.any(String),
+    );
+  });
 });
