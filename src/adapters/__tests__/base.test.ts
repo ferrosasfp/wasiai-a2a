@@ -700,6 +700,39 @@ describe('Base gasless adapter — EIP-3009 operator-relayed (WKH-138)', () => {
     ).rejects.toThrow(/timeout/);
   });
 
+  // ── HU-192: `valueDisposition` decide si routes/gasless.ts reembolsa ───────
+  // Espejo del contrato asertado en avalanche.test.ts.
+  it('HU-192: revert confirmado → not-moved; receipt timeout → unknown', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'reverted' });
+    const adapter = new BaseGaslessAdapter(84532);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'not-moved' });
+
+    mockWaitForReceipt.mockRejectedValue(
+      new WaitForTransactionReceiptTimeoutError({ hash: TX_HASH }),
+    );
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'unknown' });
+  });
+
+  it('HU-192: submit por gas del operador → not-moved; otro fallo de submit → unknown', async () => {
+    mockWriteContract.mockRejectedValue(
+      new Error('insufficient funds for gas * price + value'),
+    );
+    const adapter = new BaseGaslessAdapter(84532);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'not-moved' });
+
+    mockWriteContract.mockRejectedValue(new Error('socket hang up'));
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'unknown' });
+  });
+
   // ── T-AC3: status() funding_state per enabled/pk/balance ──────────────────
   it('T-AC3: status() → disabled when GASLESS_ENABLED != true', async () => {
     const adapter = new BaseGaslessAdapter(84532);

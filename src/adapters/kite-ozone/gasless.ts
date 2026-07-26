@@ -5,6 +5,7 @@ import type {
   GaslessFundingState,
   GaslessSupportedToken,
 } from '../../types/index.js';
+import { GaslessTransferError } from '../errors.js';
 import type {
   GaslessAdapter,
   GaslessAdapterResult,
@@ -260,12 +261,34 @@ export class KiteOzoneGaslessAdapter implements GaslessAdapter {
   async transfer(
     req: GaslessTransferAdapterRequest,
   ): Promise<GaslessAdapterResult> {
-    const payload = await signTransferWithAuthorization({
-      to: req.to,
-      value: req.value,
-    });
-    const result = await submitGaslessTransfer(payload);
-    return { txHash: result.txHash };
+    // HU-192: clasificar el fallo para que routes/gasless.ts sepa si puede
+    // reembolsar el débito del caller. La firma es local (nada llegó a la red);
+    // el submit al relayer es AMBIGUO por definición: si el POST se corta, el
+    // relayer pudo haber mandado la tx igual. Los mensajes se preservan tal
+    // cual (los tests de `submitGaslessTransfer` siguen valiendo).
+    let payload: Awaited<ReturnType<typeof signTransferWithAuthorization>>;
+    try {
+      payload = await signTransferWithAuthorization({
+        to: req.to,
+        value: req.value,
+      });
+    } catch (err) {
+      throw new GaslessTransferError(
+        'kite-testnet',
+        err instanceof Error ? err.message : 'gasless sign failed',
+        'not-moved',
+      );
+    }
+    try {
+      const result = await submitGaslessTransfer(payload);
+      return { txHash: result.txHash };
+    } catch (err) {
+      throw new GaslessTransferError(
+        'kite-testnet',
+        err instanceof Error ? err.message : 'gasless submit failed',
+        'unknown',
+      );
+    }
   }
 
   async status(): Promise<GaslessAdapterStatus> {

@@ -113,6 +113,52 @@ describe('KiteOzoneGaslessAdapter', () => {
     expect(result.txHash).toMatch(/^0x/);
   });
 
+  // ── HU-192: clasificación del fallo para el credit-back de la ruta ────────
+  // Kite es la chain DEFAULT del gasless: si el submit al relayer falla no
+  // podemos saber si el relayer mandó la tx igual, así que el fallo es
+  // 'unknown' (la ruta NO reembolsa). El fallo de firma es local ⟹ 'not-moved'.
+  it('HU-192: submit al relayer falla → GaslessTransferError con valueDisposition unknown', async () => {
+    mockGetBlock.mockResolvedValue({ timestamp: 1700000000n });
+    const fetchImpl = vi
+      .fn()
+      // 1º: getSupportedToken OK
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => TESTNET_RAW,
+        text: async () => '',
+      })
+      // 2º: submit → el POST se corta (el relayer pudo haber submiteado igual)
+      .mockRejectedValueOnce(new Error('fetch failed'));
+    vi.stubGlobal('fetch', fetchImpl);
+
+    await expect(
+      adapter.transfer({
+        to: '0x000000000000000000000000000000000000dEaD' as `0x${string}`,
+        value: 20000000000000000n,
+      }),
+    ).rejects.toMatchObject({
+      name: 'GaslessTransferError',
+      valueDisposition: 'unknown',
+    });
+  });
+
+  it('HU-192: la firma falla (sin operator key) → valueDisposition not-moved', async () => {
+    delete process.env.OPERATOR_PRIVATE_KEY;
+    vi.stubGlobal('fetch', mockFetchOk(TESTNET_RAW));
+
+    await expect(
+      adapter.transfer({
+        to: '0x000000000000000000000000000000000000dEaD' as `0x${string}`,
+        value: 20000000000000000n,
+      }),
+    ).rejects.toMatchObject({
+      name: 'GaslessTransferError',
+      valueDisposition: 'not-moved',
+    });
+  });
+
   it('status() returns GaslessAdapterStatus shape', async () => {
     delete process.env.GASLESS_ENABLED;
     const result = await adapter.status();

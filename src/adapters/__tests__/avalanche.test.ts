@@ -583,6 +583,56 @@ describe('Avalanche gasless adapter — EIP-3009 operator-relayed (WKH-138)', ()
     ).rejects.toThrow(/timeout/);
   });
 
+  // ── HU-192: `valueDisposition` decide si routes/gasless.ts reembolsa ───────
+  // Contrato del que depende el credit-back: sólo se reembolsa cuando el valor
+  // quedó PROBADAMENTE quieto. Un flip de estos valores cobraría de más (o
+  // regalaría un transfer confirmado).
+  it('HU-192: pre-flight (cap) → valueDisposition not-moved (reembolsable)', async () => {
+    process.env.GASLESS_DEFAULT_CAP_USD = '10';
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 50_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'not-moved' });
+  });
+
+  it('HU-192: submit falla por gas del operador → not-moved (nunca entró al mempool)', async () => {
+    mockWriteContract.mockRejectedValue(
+      new Error('insufficient funds for gas * price + value'),
+    );
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'not-moved' });
+  });
+
+  it('HU-192: submit falla por otra causa → unknown (pudo haber sido aceptada)', async () => {
+    mockWriteContract.mockRejectedValue(new Error('socket hang up'));
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'unknown' });
+  });
+
+  it('HU-192: revert confirmado → not-moved (la tx existe pero no transfirió)', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'reverted' });
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'not-moved' });
+  });
+
+  it('HU-192: receipt timeout → unknown (la tx puede confirmarse después)', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockRejectedValue(
+      new WaitForTransactionReceiptTimeoutError({ hash: TX_HASH }),
+    );
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'unknown' });
+  });
+
   // ── T-AC3: status() funding_state per enabled/pk/balance ──────────────────
   it('T-AC3: status() → disabled when GASLESS_ENABLED != true', async () => {
     const adapter = new AvalancheGaslessAdapter(43113);
