@@ -78,9 +78,9 @@ const ZERO_EVM_ADDRESS =
 // viejo → una entrada sólo necesita sobrevivir a la ventana de vida de SU PROPIO
 // compose-run.
 //
-// Política (ver `resolveIntentTtlMs` / `evictIntentSignatures`): TTL con 10× de
-// margen sobre la vida máxima de un run + cap SOFT con ventana protegida. Ante la
-// duda se CONSERVA la entrada (fail-safe hacia no-pagar-dos-veces).
+// Política (ver `resolveIntentTtlMs` / `evictIntentSignatures`): TTL con margen
+// sobre la COTA ESTIMADA de vida de un run + cap SOFT con ventana protegida. Ante
+// la duda se CONSERVA la entrada (fail-safe hacia no-pagar-dos-veces).
 
 interface IntentEntry {
   signature: string;
@@ -93,20 +93,63 @@ const _intentSignatures = new Map<string, IntentEntry>();
 
 /** Default del timeout de un compose-run (`routes/compose.ts`: 180_000 ms). */
 const DEFAULT_COMPOSE_TIMEOUT_MS = 180_000;
-/** Piso del TTL default: 30 min. */
+/** Piso absoluto del TTL default: 30 min. */
 const MIN_DEFAULT_TTL_MS = 1_800_000;
-/** Margen del TTL default sobre la vida máxima de un compose-run. */
+/** Margen del TTL default sobre `TIMEOUT_COMPOSE_MS`. */
 const TTL_SAFETY_FACTOR = 10;
-/**
- * Factor de la VENTANA PROTEGIDA: una entrada más joven que
- * `composeTimeout × 2` NUNCA se desaloja por presión del cap. 2× cubre la vida
- * máxima del run con el doble de margen.
- */
-const PROTECTED_WINDOW_FACTOR = 2;
+/** Margen del TTL default sobre la cota estimada de vida de un run. */
+const TTL_MARGIN_OVER_RUN_BOUND = 2;
 /** Cap SOFT de entradas. Ver `evictIntentSignatures`. */
 const DEFAULT_MAX_INTENT_ENTRIES = 10_000;
 
-/** Vida máxima de un compose-run, según la env que la gobierna. */
+// ─── AR MENOR-1: `TIMEOUT_COMPOSE_MS` **NO** es una cota de ejecución ─────
+//
+// La iteración anterior de este bloque (y el work-item, y `.env.example`) afirmaba
+// que «un run no puede sobrevivir a su propio timeout» y derivaba de ahí el piso
+// del knob. ES FALSO, verificado archivo por archivo:
+//
+//   · `src/middleware/timeout.ts:12-20` sólo MANDA el 504. No hay
+//     `AbortController`, no hay `signal`, no se cancela nada: el pipeline sigue
+//     corriendo después de que el caller recibió el timeout.
+//   · `src/services/compose.ts` invoca al agente con `ssrfFetch(...)` SIN `signal`
+//     y `src/lib/ssrf-dispatcher.ts` construye el `Agent` de undici sin
+//     `headersTimeout`/`bodyTimeout` → el único freno son los defaults de undici
+//     (300 s cada uno), y `bodyTimeout` es un timeout de INACTIVIDAD: un agente
+//     que trickle-feedea un byte cada 299 s mantiene el hop vivo indefinidamente.
+//
+// Conclusión honesta: **no existe cota superior dura** de wall-clock para un run,
+// así que NINGÚN número de TTL puede prometer "no expira dentro de la ventana viva
+// del run". Elegimos NO cancelar el pipeline en el 504 (opción B del AR): abortar
+// un run en medio de un settle es exactamente el estado indeterminado
+// broadcasteado-pero-no-confirmado del que este Map protege — el remedio sería
+// peor que la enfermedad, y cancelar el money-path está fuera del scope de un
+// fix-pack.
+//
+// Lo que sí se hace: el piso deja de venderse como GARANTÍA y pasa a derivarse de
+// la cota más grande que podemos citar con números reales del repo, en vez de de
+// una env que no gobierna la ejecución.
+
+/** Máximo de steps de un pipeline (`routes/compose.ts`: `steps.length > 5`). */
+const MAX_COMPOSE_STEPS = 5;
+/**
+ * Default de undici 8 por request (`headersTimeout` = `bodyTimeout` = 300_000 ms).
+ * NUESTRO código no los configura (`lib/ssrf-dispatcher.ts`), así que es el único
+ * freno del hop de invoke.
+ */
+const UNDICI_DEFAULT_HOP_TIMEOUT_MS = 300_000;
+/**
+ * COTA ESTIMADA de vida de un compose-run: 5 steps × 300 s = 25 min.
+ *
+ * ⚠️ Es una ESTIMACIÓN, no una garantía. Cuenta UN hop por step (el invoke del
+ * agente) y no cuenta los hops del settle (verify + settle del facilitator) ni el
+ * caso del body trickle-feedeado, que no tiene techo. Se documenta así a propósito:
+ * el número es incómodo (25 min contra los 3 min del timeout del compose) y
+ * honesto, en vez de cómodo y falso.
+ */
+const ESTIMATED_MAX_RUN_WALL_CLOCK_MS =
+  MAX_COMPOSE_STEPS * UNDICI_DEFAULT_HOP_TIMEOUT_MS;
+
+/** Timeout de respuesta del compose (NO cota de ejecución — ver arriba). */
 function resolveComposeTimeoutMs(): number {
   const raw = process.env.TIMEOUT_COMPOSE_MS;
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
@@ -114,24 +157,45 @@ function resolveComposeTimeoutMs(): number {
 }
 
 /**
+ * VENTANA PROTEGIDA: una entrada más joven que esto NUNCA se desaloja por presión
+ * del cap, porque podría pertenecer a un run todavía vivo.
+ *
+ * `max(cota estimada del run, TIMEOUT_COMPOSE_MS × 2)` = 25 min con los defaults.
+ * El segundo término no es una cota (ver el bloque de AR MENOR-1) pero se conserva
+ * por monotonía: un operador que sube el timeout del compose está DECLARANDO que
+ * espera runs más largos, y la ventana lo acompaña.
+ */
+function resolveProtectedWindowMs(): number {
+  return Math.max(
+    ESTIMATED_MAX_RUN_WALL_CLOCK_MS,
+    resolveComposeTimeoutMs() * TTL_MARGIN_OVER_RUN_BOUND,
+  );
+}
+
+/**
  * TTL de una entrada de idempotencia.
  *
- * Default: `max(TIMEOUT_COMPOSE_MS × 10, 30 min)` — 10× la vida máxima posible
- * de un run (un run no puede sobrevivir a su propio timeout), y se mueve solo si
- * el operador sube el timeout del compose.
+ * Default: `max(cota × 2, TIMEOUT_COMPOSE_MS × 10, 30 min)` = **50 min** con los
+ * defaults (antes 30 min, que contra la cota real de 25 min era un margen de
+ * ~1.2×, no de 10× — AR MENOR-1).
  *
- * Override `SOLANA_INTENT_DEDUP_TTL_MS`, **con piso `TIMEOUT_COMPOSE_MS × 2`**:
- * un operador NO puede configurar un TTL que expire dentro de la ventana viva de
- * un run (ese sería un doble pago por configuración). El piso es el guard
- * fail-safe del knob.
+ * Override `SOLANA_INTENT_DEDUP_TTL_MS`, **con piso = la ventana protegida**
+ * (25 min con los defaults, antes 6 min): un TTL por debajo de la ventana
+ * protegida es directamente incoherente — la entrada expiraría mientras el
+ * desalojo todavía la considera intocable. NO es la garantía "no expira dentro de
+ * un run vivo" (esa garantía no existe, ver arriba): es el piso más alto que
+ * podemos justificar con números del repo.
  */
 function resolveIntentTtlMs(): number {
-  const composeTimeout = resolveComposeTimeoutMs();
-  const floor = composeTimeout * PROTECTED_WINDOW_FACTOR;
+  const floor = resolveProtectedWindowMs();
   const raw = process.env.SOLANA_INTENT_DEDUP_TTL_MS;
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
   if (Number.isFinite(n) && n > 0) return Math.max(n, floor);
-  return Math.max(composeTimeout * TTL_SAFETY_FACTOR, MIN_DEFAULT_TTL_MS);
+  return Math.max(
+    ESTIMATED_MAX_RUN_WALL_CLOCK_MS * TTL_MARGIN_OVER_RUN_BOUND,
+    resolveComposeTimeoutMs() * TTL_SAFETY_FACTOR,
+    MIN_DEFAULT_TTL_MS,
+  );
 }
 
 /** Cap SOFT de entradas (`SOLANA_INTENT_DEDUP_MAX_ENTRIES`, default 10.000). */
@@ -141,7 +205,17 @@ function resolveMaxIntentEntries(): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_INTENT_ENTRIES;
 }
 
-/** Warn-once del cap saturado con TODAS las entradas protegidas. */
+/**
+ * Warn del cap saturado con TODAS las entradas protegidas: una vez por EPISODIO
+ * de breach, no una vez por proceso.
+ *
+ * AR MENOR-2: antes sólo se re-armaba en `_resetSolanaClients` (TEST-ONLY), así
+ * que era warn-once-per-process — el mismo anti-patrón que este fix-pack ya
+ * documentó para `FLAG_OFF` (auto-blindaje.md): breach a la hora 1, recuperación,
+ * breach a la hora 20 → SILENCIO, y un warn que no vuelve a sonar no es señal
+ * operativa. Ahora el flag se re-arma en cuanto el tamaño vuelve a bajar del cap,
+ * así que cada episodio nuevo loguea exactamente una vez.
+ */
 let _warnedSoftCapBreached = false;
 
 /**
@@ -150,8 +224,8 @@ let _warnedSoftCapBreached = false;
  *
  * 1. Borra lo EXPIRADO (edad > TTL).
  * 2. Si aún se supera el cap, desaloja de más viejo a más nuevo — pero NUNCA una
- *    entrada dentro de la VENTANA PROTEGIDA (`composeTimeout × 2`), porque podría
- *    pertenecer a un run todavía vivo y borrarla habilitaría un doble pago.
+ *    entrada dentro de la VENTANA PROTEGIDA (`resolveProtectedWindowMs`), porque
+ *    podría pertenecer a un run todavía vivo y borrarla habilitaría un doble pago.
  * 3. Si TODAS están protegidas, no se desaloja nada: el Map excede el cap a
  *    propósito y se emite un warn (señal operativa). Ante la duda, CONSERVAR.
  */
@@ -162,23 +236,30 @@ function evictIntentSignatures(now: number): void {
   }
 
   const max = resolveMaxIntentEntries();
-  if (_intentSignatures.size <= max) return;
+  if (_intentSignatures.size <= max) {
+    _warnedSoftCapBreached = false; // re-armado (AR MENOR-2)
+    return;
+  }
 
-  const protectedWindow = resolveComposeTimeoutMs() * PROTECTED_WINDOW_FACTOR;
+  const protectedWindow = resolveProtectedWindowMs();
   // Insertion order = de más viejo a más nuevo, así que el primer candidato que
   // encontramos es el más viejo desalojable.
   for (const [key, entry] of _intentSignatures) {
-    if (_intentSignatures.size <= max) return;
+    if (_intentSignatures.size <= max) break;
     if (now - entry.storedAt <= protectedWindow) break; // protegida ⇒ y las que
     // siguen son aún más jóvenes: no hay nada más que desalojar.
     _intentSignatures.delete(key);
   }
 
-  if (_intentSignatures.size > max && !_warnedSoftCapBreached) {
+  if (_intentSignatures.size <= max) {
+    _warnedSoftCapBreached = false; // el desalojo alcanzó: episodio cerrado
+    return;
+  }
+  if (!_warnedSoftCapBreached) {
     _warnedSoftCapBreached = true;
     log.warn(
       { size: _intentSignatures.size, max, protectedWindowMs: protectedWindow },
-      'solana intent dedup por encima del cap — todas las entradas están dentro de la ventana protegida; se CONSERVAN para no habilitar un doble pago (logged once per process)',
+      'solana intent dedup por encima del cap — todas las entradas están dentro de la ventana protegida; se CONSERVAN para no habilitar un doble pago (una vez por episodio: el warn se re-arma cuando el tamaño baja del cap)',
     );
   }
 }
@@ -564,4 +645,24 @@ export function _seedIntentSignature(
     signature,
     storedAt: Date.now() - ageMs,
   });
+}
+
+/**
+ * TEST-ONLY — política vigente del seam (AR MENOR-1). Se expone para poder
+ * assertear la RELACIÓN entre el piso del knob y la cota estimada de vida de un
+ * run sin re-derivar los números en el test (que fue justamente cómo el work-item
+ * terminó afirmando una garantía que el código no da).
+ */
+export function _intentDedupPolicy(): {
+  ttlMs: number;
+  protectedWindowMs: number;
+  maxEntries: number;
+  estimatedMaxRunWallClockMs: number;
+} {
+  return {
+    ttlMs: resolveIntentTtlMs(),
+    protectedWindowMs: resolveProtectedWindowMs(),
+    maxEntries: resolveMaxIntentEntries(),
+    estimatedMaxRunWallClockMs: ESTIMATED_MAX_RUN_WALL_CLOCK_MS,
+  };
 }

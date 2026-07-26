@@ -7,10 +7,18 @@
  * ⚠️ Ese Map es lo que hace IDEMPOTENTE el settle de un leg Solana. Si una
  * entrada desaparece MIENTRAS EL INTENT SIGUE VIVO, un retry re-broadcastea y
  * SE PAGA DOS VECES. Por eso la política es fail-safe hacia CONSERVAR:
- *   · TTL con 10× de margen sobre la vida máxima de un compose-run.
- *   · Override con PISO `TIMEOUT_COMPOSE_MS × 2` (el operador no puede
- *     configurarse un doble pago).
+ *   · TTL con 2× de margen sobre la COTA ESTIMADA de vida de un run
+ *     (5 steps × 300 s de undici = 25 min ⇒ TTL default 50 min).
+ *   · Override con PISO = la ventana protegida (25 min con los defaults).
  *   · Cap SOFT con VENTANA PROTEGIDA: nunca se desaloja algo joven.
+ *
+ * ⚠️ AR MENOR-1: la iteración anterior derivaba estos números de
+ * `TIMEOUT_COMPOSE_MS` afirmando que «un run no puede sobrevivir a su propio
+ * timeout». Era FALSO — `middleware/timeout.ts` manda el 504 y NO cancela nada
+ * (sin `AbortController`/`signal`, y `ssrf-dispatcher.ts` no fija
+ * `headersTimeout`/`bodyTimeout`). No existe cota dura; los números se derivan
+ * ahora de la cota ESTIMADA y el piso ya no se vende como garantía. Ver
+ * `T-TTL-11`.
  */
 
 import { PublicKey } from '@solana/web3.js';
@@ -75,18 +83,21 @@ const logSpy = vi.hoisted(() => ({
 vi.mock('../../lib/logger.js', () => ({ getLogger: () => logSpy }));
 
 import {
+  _intentDedupPolicy,
   _intentDedupSize,
   _resetSolanaClients,
   _seedIntentSignature,
   SolanaPaymentAdapter,
 } from './payment.js';
 
-/** Default de `TIMEOUT_COMPOSE_MS` (routes/compose.ts). */
+/** Default de `TIMEOUT_COMPOSE_MS` (routes/compose.ts). NO es cota de ejecución. */
 const COMPOSE_TIMEOUT_MS = 180_000;
-/** TTL default resultante: max(180s × 10, 30 min) = 30 min. */
-const DEFAULT_TTL_MS = 1_800_000;
-/** Ventana protegida: 180s × 2 = 6 min. */
-const PROTECTED_WINDOW_MS = COMPOSE_TIMEOUT_MS * 2;
+/** Cota ESTIMADA de vida de un run: 5 steps × 300 s (default de undici) = 25 min. */
+const ESTIMATED_RUN_BOUND_MS = 5 * 300_000;
+/** Ventana protegida: max(cota, TIMEOUT_COMPOSE_MS × 2) = 25 min. */
+const PROTECTED_WINDOW_MS = ESTIMATED_RUN_BOUND_MS;
+/** TTL default: max(cota × 2, 180s × 10, 30 min) = 50 min. */
+const DEFAULT_TTL_MS = ESTIMATED_RUN_BOUND_MS * 2;
 
 function cleanEnv(): void {
   delete process.env.SOLANA_INTENT_DEDUP_TTL_MS;
@@ -173,16 +184,17 @@ describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
 
   // ── EL invariante de dinero ────────────────────────────────────────────
 
-  it('T-TTL-5 (INVARIANTE): una entrada NO puede expirar dentro de la ventana de un compose-run', () => {
+  it('T-TTL-5 (INVARIANTE): una entrada NO puede expirar dentro de la cota estimada de un compose-run', () => {
     const adapter = new SolanaPaymentAdapter();
-    // Un compose-run no puede vivir más que su propio timeout. Se prueba en el
-    // borde exacto y con margen: nada dentro de la ventana expira.
+    // Se prueba en el borde exacto de la cota estimada y con margen: nada dentro
+    // de la ventana expira.
     for (const age of [
       0,
       1,
-      COMPOSE_TIMEOUT_MS / 2,
       COMPOSE_TIMEOUT_MS,
-      COMPOSE_TIMEOUT_MS + 1,
+      COMPOSE_TIMEOUT_MS * 2,
+      ESTIMATED_RUN_BOUND_MS - 1,
+      ESTIMATED_RUN_BOUND_MS,
       PROTECTED_WINDOW_MS,
       DEFAULT_TTL_MS - 1,
     ]) {
@@ -190,12 +202,12 @@ describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
       _seedIntentSignature('vivo', SIG_A, age);
       expect(
         adapter.getSettledSignature('vivo'),
-        `una entrada de ${age}ms NO debe expirar (vida máx. de un run: ${COMPOSE_TIMEOUT_MS}ms)`,
+        `una entrada de ${age}ms NO debe expirar (cota estimada del run: ${ESTIMATED_RUN_BOUND_MS}ms)`,
       ).toBe(SIG_A);
     }
   });
 
-  it('T-TTL-6 (INVARIANTE): el TTL default es 10× la vida máxima de un run', () => {
+  it('T-TTL-6 (INVARIANTE): el TTL default duplica la cota estimada de un run', () => {
     const adapter = new SolanaPaymentAdapter();
     // Justo por debajo del TTL: vive. Justo por encima: expira.
     _seedIntentSignature('borde-vive', SIG_A, DEFAULT_TTL_MS - 1);
@@ -205,14 +217,18 @@ describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
     _seedIntentSignature('borde-muere', SIG_A, DEFAULT_TTL_MS + 1);
     expect(adapter.getSettledSignature('borde-muere')).toBeUndefined();
 
-    // 10× de margen sobre la vida máxima del run.
-    expect(DEFAULT_TTL_MS / COMPOSE_TIMEOUT_MS).toBeGreaterThanOrEqual(10);
+    // AR MENOR-1: el margen se mide contra la COTA ESTIMADA (25 min), no contra
+    // `TIMEOUT_COMPOSE_MS` (que no gobierna la ejecución). Con el TTL viejo de
+    // 30 min este assert daba 1.2 y fallaba.
+    expect(
+      _intentDedupPolicy().ttlMs / ESTIMATED_RUN_BOUND_MS,
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it('T-TTL-7 (FAIL-SAFE del knob): un override peligrosamente corto se eleva al piso', () => {
     const adapter = new SolanaPaymentAdapter();
-    // Un operador pide 1 segundo de TTL — expiraría DENTRO de la ventana de un
-    // run y habilitaría un doble pago. Se eleva a TIMEOUT_COMPOSE_MS × 2.
+    // Un operador pide 1 segundo de TTL — expiraría DENTRO de la ventana en la
+    // que el desalojo considera la entrada intocable. Se eleva al piso.
     process.env.SOLANA_INTENT_DEDUP_TTL_MS = '1000';
 
     _seedIntentSignature('run-vivo', SIG_A, 60_000); // 1 min: run en curso
@@ -229,26 +245,47 @@ describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
 
   it('T-TTL-8: un override RAZONABLE (mayor al piso) se respeta', () => {
     const adapter = new SolanaPaymentAdapter();
-    process.env.SOLANA_INTENT_DEDUP_TTL_MS = String(600_000); // 10 min > piso 6 min
+    // 40 min > piso 25 min (con el piso viejo de 6 min este valor era 10 min).
+    process.env.SOLANA_INTENT_DEDUP_TTL_MS = String(2_400_000);
 
-    _seedIntentSignature('vive', SIG_A, 599_000);
+    _seedIntentSignature('vive', SIG_A, 2_399_000);
     expect(adapter.getSettledSignature('vive')).toBe(SIG_A);
 
     _resetSolanaClients();
-    _seedIntentSignature('muere', SIG_A, 601_000);
+    _seedIntentSignature('muere', SIG_A, 2_401_000);
     expect(adapter.getSettledSignature('muere')).toBeUndefined();
   });
 
   it('T-TTL-9: el TTL sigue a TIMEOUT_COMPOSE_MS (si el operador sube el timeout)', () => {
     const adapter = new SolanaPaymentAdapter();
     process.env.TIMEOUT_COMPOSE_MS = String(600_000); // 10 min por run
-    // TTL default = max(10min × 10, 30min) = 100 min.
+    // TTL default = max(cota×2 = 50min, 10min × 10 = 100min, 30min) = 100 min.
     _seedIntentSignature('vive', SIG_A, 99 * 60_000);
     expect(adapter.getSettledSignature('vive')).toBe(SIG_A);
 
     _resetSolanaClients();
     _seedIntentSignature('muere', SIG_A, 101 * 60_000);
     expect(adapter.getSettledSignature('muere')).toBeUndefined();
+  });
+
+  it('T-TTL-11 (AR MENOR-1): el piso del knob es la cota ESTIMADA, no TIMEOUT_COMPOSE_MS × 2', () => {
+    // El texto viejo prometía «un run no puede sobrevivir a su propio timeout» y
+    // de ahí sacaba un piso de 6 min. `middleware/timeout.ts` sólo manda el 504
+    // (no cancela: sin AbortController/signal) y `ssrf-dispatcher.ts` no fija
+    // headersTimeout/bodyTimeout ⇒ la ejecución puede pasarse largo del timeout.
+    // El piso tiene que derivar de la cota estimada por hops, no del timeout.
+    process.env.SOLANA_INTENT_DEDUP_TTL_MS = '1';
+    const p = _intentDedupPolicy();
+
+    expect(p.estimatedMaxRunWallClockMs).toBe(ESTIMATED_RUN_BOUND_MS);
+    expect(p.ttlMs).toBe(PROTECTED_WINDOW_MS);
+    expect(p.ttlMs).toBeGreaterThanOrEqual(p.estimatedMaxRunWallClockMs);
+    // El piso viejo (6 min) era MENOR que la cota real (25 min): el knob prometía
+    // una garantía que no daba.
+    expect(p.ttlMs).toBeGreaterThan(COMPOSE_TIMEOUT_MS * 2);
+    // Coherencia interna: un TTL por debajo de la ventana protegida haría que una
+    // entrada expire mientras el desalojo la considera intocable.
+    expect(p.ttlMs).toBeGreaterThanOrEqual(p.protectedWindowMs);
   });
 
   it('T-TTL-10: env inválida → default (nunca NaN, que dejaría todo vivo o todo muerto)', () => {
@@ -315,7 +352,7 @@ describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
     }
   });
 
-  it('T-CAP-3: el cap excedido con todo protegido emite un warn (señal operativa), una vez', async () => {
+  it('T-CAP-3: el cap excedido con todo protegido emite un warn (señal operativa), una vez por episodio', async () => {
     const adapter = new SolanaPaymentAdapter();
     process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '1';
     for (let i = 0; i < 3; i++) {
@@ -336,8 +373,87 @@ describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
     const capWarns = logSpy.warn.mock.calls.filter((c) =>
       String(c[1]).includes('ventana protegida'),
     );
-    expect(capWarns).toHaveLength(1); // warn-once
+    expect(capWarns).toHaveLength(1); // no spamea DENTRO del mismo episodio
     expect(capWarns[0]?.[0]).toMatchObject({ max: 1 });
+  });
+
+  it('T-CAP-6 (AR MENOR-2): el warn se RE-ARMA cuando el tamaño baja del cap (no es once-per-proceso)', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    const capWarns = (): unknown[] =>
+      logSpy.warn.mock.calls.filter((c) =>
+        String(c[1]).includes('ventana protegida'),
+      );
+
+    // Episodio 1: cap saturado con todo protegido.
+    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '1';
+    for (let i = 0; i < 3; i++)
+      _seedIntentSignature(`joven-${i}`, SIG_B, 1_000);
+    await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId: 'n1',
+    });
+    expect(capWarns()).toHaveLength(1);
+
+    // Recuperación: el tamaño vuelve a estar por debajo del cap → flag re-armado.
+    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '100';
+    await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId: 'n2',
+    });
+    expect(capWarns()).toHaveLength(1); // sano: no loguea al recuperarse
+
+    // Episodio 2 (el que el warn-once-per-proceso PERDÍA en silencio).
+    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '1';
+    await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId: 'n3',
+    });
+    expect(capWarns()).toHaveLength(2);
+  });
+
+  it('T-CAP-7 (AR MENOR-2): el re-armado también ocurre cuando el DESALOJO alcanza', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    const capWarns = (): unknown[] =>
+      logSpy.warn.mock.calls.filter((c) =>
+        String(c[1]).includes('ventana protegida'),
+      );
+    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '2';
+
+    // Episodio 1: 3 jóvenes + la nueva = 4 > 2, todas protegidas → warn.
+    for (let i = 0; i < 3; i++)
+      _seedIntentSignature(`joven-${i}`, SIG_B, 1_000);
+    await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId: 'n1',
+    });
+    expect(capWarns()).toHaveLength(1);
+
+    // Las 3 envejecen más allá de la ventana protegida (mismo key, storedAt
+    // viejo) → el desalojo del próximo `set` sí puede bajar del cap.
+    for (let i = 0; i < 3; i++) {
+      _seedIntentSignature(`joven-${i}`, SIG_B, PROTECTED_WINDOW_MS + 60_000);
+    }
+    await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId: 'n2',
+    });
+    expect(_intentDedupSize()).toBe(2); // desalojó las 3 viejas
+    expect(capWarns()).toHaveLength(1);
+
+    // Episodio 2: vuelve la saturación con todo protegido → warn nuevo.
+    for (let i = 3; i < 6; i++)
+      _seedIntentSignature(`joven-${i}`, SIG_B, 1_000);
+    await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId: 'n3',
+    });
+    expect(capWarns()).toHaveLength(2);
   });
 
   it('T-CAP-4: el desalojo respeta el borde exacto de la ventana protegida', async () => {
