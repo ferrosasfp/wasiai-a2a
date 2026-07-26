@@ -111,8 +111,61 @@ function expectNoSecretMaterial(payload: unknown): void {
   expect(json).not.toContain(
     createHash('md5').update(FAKE_SECRET).digest('hex'),
   );
-  // Largo: acota el espacio del brute-force.
-  expect(json).not.toContain(String(FAKE_SECRET.length));
+  // Largo: acota el espacio del brute-force. Campo por campo (ver abajo).
+  expectNoSecretLength(payload);
+}
+
+/** Todos los escalares del payload, con su path, para asertar por campo. */
+function* scalarEntries(
+  value: unknown,
+  path = '$',
+): Generator<[string, unknown]> {
+  if (Array.isArray(value)) {
+    for (const [i, item] of value.entries()) {
+      yield* scalarEntries(item, `${path}[${i}]`);
+    }
+    return;
+  }
+  if (value instanceof Date) {
+    yield [path, value.toISOString()];
+    return;
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      yield* scalarEntries(item, `${path}.${key}`);
+    }
+    return;
+  }
+  yield [path, value];
+}
+
+/**
+ * MNR-3 (AR HIGH-2): el largo del secreto se compara CAMPO POR CAMPO, no como
+ * substring del body serializado.
+ *
+ * `expect(json).not.toContain(String(FAKE_SECRET.length))` fallaba con cualquier
+ * campo futuro que contuviera "51" (un precio, un timestamp, un id) y encima con
+ * el mensaje engañoso "leaks the credential length" — un falso positivo
+ * esperando a ocurrir. Lo que hay que prohibir es un CAMPO que sea el largo
+ * (`authValueLength: 51`) o un valor enmascarado con el MISMO largo que el
+ * secreto (`authValue: '*'.repeat(51)`, que filtra el largo igual).
+ */
+function expectNoSecretLength(payload: unknown): void {
+  const len = FAKE_SECRET.length;
+  for (const [path, value] of scalarEntries(payload)) {
+    if (typeof value === 'number') {
+      expect(value, `${path}: es el largo de la credencial`).not.toBe(len);
+    }
+    if (typeof value === 'string') {
+      expect(value, `${path}: es el largo de la credencial`).not.toBe(
+        String(len),
+      );
+      expect(
+        value.length,
+        `${path}: tiene exactamente el largo de la credencial (¿máscara?)`,
+      ).not.toBe(len);
+    }
+  }
 }
 
 beforeEach(() => {
@@ -146,7 +199,10 @@ describe('registryService — read-paths redactados (HIGH-1)', () => {
     // Los campos funcionales siguen intactos (no rompemos consumidores).
     expect(registry?.id).toBe('reg-1');
     expect(registry?.discoveryEndpoint).toBe('https://example.com/discover');
-    expect(registry?.ownerRef).toBe(OWNER);
+    // MNR-5: `ownerRef` NO sale por el path público (identificador de tenant en
+    // un endpoint sin auth). La fila interna sí lo trae — ver T-RED-11.
+    expect(registry).not.toHaveProperty('ownerRef');
+    expect(JSON.stringify(registry)).not.toContain(OWNER);
   });
 
   it('T-RED-03: get() no devuelve auth.value ni derivaciones', async () => {
@@ -296,10 +352,18 @@ describe('toRegistryPublic — mapper obligatorio', () => {
         'id',
         'invokeEndpoint',
         'name',
-        'ownerRef',
         'schema',
       ].sort(),
     );
+    // MNR-5: explícito, porque era el campo que se dropeó.
+    expect(Object.keys(result)).not.toContain('ownerRef');
+  });
+
+  it('T-RED-11 (MNR-5): la fila INTERNA sí trae ownerRef (el guard no es vacuo)', () => {
+    // Contra-prueba de T-RED-02/09b: si `RegistryConfig` dejara de traer
+    // `ownerRef`, los asserts de "no sale" pasarían por vacuidad y los guards de
+    // ownership de `update`/`delete` estarían leyendo `undefined === undefined`.
+    expect(config().ownerRef).toBe(OWNER);
   });
 
   it('T-RED-10: canario de compilación — RegistryConfig NO es asignable a RegistryPublic', () => {

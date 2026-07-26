@@ -135,7 +135,11 @@ describe('registryService.register — owner_ref persisted (WKH-63)', () => {
       OWNER_A,
     );
 
-    expect(result.ownerRef).toBe(OWNER_A);
+    // MNR-5: el `ownerRef` YA NO viaja en la respuesta pública (`GET
+    // /registries` es sin auth → nada de identificadores de tenant). Lo que este
+    // test tiene que fijar es que el owner del CALLER se persiste, y eso se
+    // verifica sobre la columna del INSERT (abajo), no sobre el body.
+    expect(result).not.toHaveProperty('ownerRef');
 
     // Verify INSERT carried owner_ref column.
     const insertSpy = mock.insert as ReturnType<typeof vi.fn>;

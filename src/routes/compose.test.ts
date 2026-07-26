@@ -144,7 +144,7 @@ import {
 } from '../services/agent-price.js';
 import { budgetService } from '../services/budget.js';
 import { composeService } from '../services/compose.js';
-import composeRoutes from './compose.js';
+import composeRoutes, { augmentX402ChallengeAmount } from './compose.js';
 
 const mockCompose = vi.mocked(composeService.compose);
 const mockResolvePrice = vi.mocked(resolveAgentPriceUsdc);
@@ -642,6 +642,60 @@ describe('compose preHandler — WKH-59 real-price-debit', () => {
       if (ORIGINAL_RATE === undefined) delete process.env.PROTOCOL_FEE_RATE;
       else process.env.PROTOCOL_FEE_RATE = ORIGINAL_RATE;
     }
+  });
+
+  // ── MNR-2 (AR HIGH-2): el guard de layer 1, probado en UNIT ──
+  //
+  // `validateComposeBodyHandler` (layer 0) rechaza los bodies malformados ANTES
+  // del preHandler de precio, así que la rama "step malformado" de
+  // `augmentX402ChallengeAmount` YA NO es alcanzable vía HTTP: quedó con 0% de
+  // cobertura y un guard defensivo sin test se rompe en silencio. Se prueba
+  // llamando la función directo (la razón por la que está exportada).
+
+  it('T-ROUTE-X402-AMT-7 (MNR-2, unit): un step malformado se SOBRE-estima como placeholder, no colapsa el challenge', async () => {
+    const ORIGINAL_RATE = process.env.PROTOCOL_FEE_RATE;
+    process.env.PROTOCOL_FEE_RATE = '0';
+    try {
+      // Sólo se cotiza el step BIEN formado (índice 2); el malformado se
+      // sobre-estima sin llamar a discovery.
+      mockResolvePrice.mockResolvedValue(0.5);
+      const request = {} as FastifyRequest;
+
+      await augmentX402ChallengeAmount(
+        request,
+        [
+          { agent: 'a0', input: {} },
+          // biome-ignore lint/suspicious/noExplicitAny: intentional malformed step
+          { agent: 12345 as any, input: {} },
+          { agent: 'a2', input: {} },
+        ],
+        0.5, // step-0 ya resuelto por el caller
+      );
+
+      // 0.5 (step-0) + 1 (PLACEHOLDER por el malformado) + 0.5 (step-2) = 2.
+      // Si la rama hiciera `return` en vez de `continue`, el challenge quedaría
+      // undefined → el middleware cobraría el default de 1 USD mientras el
+      // gateway settlea el prefijo válido downstream (la pérdida de BLQ-MEDIO-1).
+      expect(request.x402ChallengeAmountUsd).toBeCloseTo(2, 8);
+      // El step malformado NO se cotiza; los otros dos sí (step-0 lo trae el
+      // caller ya resuelto, así que acá sólo se resuelve el índice 2).
+      expect(mockResolvePrice).toHaveBeenCalledTimes(1);
+      expect(mockResolvePrice).toHaveBeenCalledWith('a2', undefined);
+    } finally {
+      if (ORIGINAL_RATE === undefined) delete process.env.PROTOCOL_FEE_RATE;
+      else process.env.PROTOCOL_FEE_RATE = ORIGINAL_RATE;
+    }
+  });
+
+  it('T-ROUTE-X402-AMT-8 (MNR-2, unit): pipeline de costo 0 NO advertise challenge', async () => {
+    // Guard `if (pipelineUsd <= 0) return;` — también sin cobertura. Un challenge
+    // de 0 sería un 402 pidiendo nada; mejor dejar el default del middleware.
+    const request = {} as FastifyRequest;
+
+    await augmentX402ChallengeAmount(request, [{ agent: 'a0', input: {} }], 0);
+
+    expect(request.x402ChallengeAmountUsd).toBeUndefined();
+    expect(mockResolvePrice).not.toHaveBeenCalled();
   });
 });
 

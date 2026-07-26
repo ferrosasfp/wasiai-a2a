@@ -249,3 +249,151 @@ step-0 lo debita el middleware; el guard `i > 0` de `compose.ts:208` es la únic
 contra el double-debit, y sigue en pie), así que no hay doble refund. Queda anotado
 porque es el punto exacto donde un cambio futuro en el billing per-step podría
 introducirlo, y la fórmula `max(0, debitado − totalCostUsdc)` es lo único que lo evita.
+
+---
+
+## FIX-PACK POST-AR (2026-07-26) — errores propios encontrados por el AR
+
+### [2026-07-26 07:00] Wave 2 — BLQ-MED-1: puse el credit-back en un lugar donde Fastify nunca lo ejecuta
+
+- **Error**: el credit-back del "504 post-débito" lo escribí como primera línea del route
+  handler de `/compose` (`if (reply.sent) { await refundComposeStep0(request, 0); return; }`).
+  **Nunca se ejecutó**: coverage v8 sobre las 3197 pruebas dio 0 hits en esas líneas, y
+  con latencia inyectada en el RPC de débito el balance bajaba 10 → 9.5 sin refund. Peor:
+  documenté ese caso como "DESPUÉS: NO cobra (credit-back completo)" en el mapa de status
+  del work-item. Declaré resuelto algo que seguía roto.
+- **Causa raíz**: asumí que el route handler corre siempre. **No corre si la reply ya
+  fue enviada**: `fastify/lib/handle-request.js:132` (`preHandlerCallback` →
+  `if (reply.sent) return`) y `fastify/lib/hooks.js:407` (`hookIterator`, que también
+  saltea los preHandlers que falten). Y el 504 lo manda el timer de
+  `middleware/timeout.ts:12-20` desde FUERA del lifecycle, justo cuando el débito ya
+  ocurrió. O sea: **el único caso que el guard tenía que cubrir es exactamente el caso en
+  el que el guard no corre.** El otro `if (reply.sent)` (post-`compose()`) sí funciona,
+  pero por un motivo distinto: ahí el handler ya estaba en ejecución.
+- **Fix**: mover el refund al middleware, donde el débito ocurrió. La ruta le pasa el
+  credit-back como hook (`requirePaymentOrA2AKey(x402Opts, { onDebitOrphaned })`,
+  `routes/compose.ts:596-613`) y el middleware lo invoca en `refundIfDebitOrphaned`
+  (`middleware/a2a-key.ts:583-591`) al final de los tres branches que debitan (master
+  `:1316`, delegación `:839`, sesión `:1065`), después del último I/O real. El bloque
+  inalcanzable se **borró** (`compose.ts:632-640` explica por qué, para que nadie lo lea
+  como protección). Tests T-NOCHARGE-13/14 con latencia inyectada; mutación (quitar el
+  call del branch master) → fallan con `balance=9.5, debits=1, credits=0`.
+- **Por qué NO un hook `onResponse`/`onSend`** (la otra vía que sugirió el AR): esos
+  corren cuando la respuesta sale, y la respuesta puede salir **mientras el RPC de débito
+  está en vuelo**. Acreditar ahí es una carrera: se acredita antes de que el débito
+  aterrice y, si ese débito termina fallando (rollback por `INSUFFICIENT_BUDGET` /
+  `DEST_CAP_EXCEEDED`), queda un credit sin débito → **budget inflado**, que es peor que
+  el bug original. Además exigía un flag (`composeExecuted`) que alguien puede olvidar de
+  setear: el bug espejo. La vía elegida no agrega estado y sólo corre con el débito ya
+  confirmado. T-NOCHARGE-15 fija la contra-prueba: 504 **pre**-débito → `debit=0 credit=0`.
+- **Aplicar en**: CUALQUIER lógica compensatoria (refund, credit, unlock, rollback,
+  liberar reserva) que se escriba dentro de un route handler cuando el cobro ocurre en un
+  preHandler. Regla operativa: **la compensación vive en la misma capa que el efecto que
+  compensa.** Y verificación mínima obligatoria: si escribís una rama que sólo corre en
+  una condición de carrera, medí su coverage — 0 hits sobre la suite completa significa
+  que no existe. `/gasless/transfer` (MNR-1) y los `if (reply.sent) return;` de
+  `routes/orchestrate.ts:98,124,205,221,358,430` son los próximos candidatos a revisar
+  con esta lente.
+
+### [2026-07-26 07:05] Wave 2 — Corregí el mapa de status en las DOS direcciones
+
+- **Error**: la fila "504 timeout antes de compose | ANTES: cobra, sin refund" era falsa
+  para el caso **pre**-débito (ahí Fastify saltea el middleware de pago entero, así que
+  nunca hubo cobro: AR-P1 midió balance 10 → 10) y ocultaba el caso **post**-débito, que
+  sí cobraba y seguía cobrando.
+- **Causa raíz**: metí dos ventanas distintas (pre y post débito) en una sola fila, y
+  llené el "ANTES" por razonamiento sobre el código en vez de medirlo.
+- **Fix**: dos filas separadas en el mapa (`work-item.md`), cada una con su test
+  (T-NOCHARGE-15 para la pre-débito, T-NOCHARGE-13/14 para la post-débito) y una nota
+  explícita de la corrección.
+- **Aplicar en**: cualquier tabla "antes/después" de money-path. Cada fila necesita un
+  test que la sostenga; si no hay test, la fila dice "no medido", no "no cobra".
+
+### [2026-07-26 07:10] Wave 2 — MNR-2: al adelantar la validación dejé el guard de layer 1 sin ninguna prueba
+
+- **Error**: `validateComposeBodyHandler` (layer 0) volvió inalcanzable vía HTTP la rama
+  "step malformado" de `augmentX402ChallengeAmount`, y al reescribir
+  `T-ROUTE-X402-AMT-5` perdí la única prueba que la tocaba. Quedó 0% de cobertura en un
+  guard que mi propio comentario declara conservar como defense-in-depth.
+- **Causa raíz**: cuando adelantás una validación, los guards de más abajo dejan de
+  recibir tráfico. La prueba vía HTTP muere con ellos, y "el comentario dice que sirve" no
+  es una verificación.
+- **Fix**: `export` de la función (sólo para test) + T-ROUTE-X402-AMT-7/8 en unit, que
+  llaman la función directo con un step malformado y con un pipeline de costo 0.
+  Verificado por coverage: las líneas 245/246/256 de `routes/compose.ts` ya no figuran
+  como no cubiertas.
+- **Aplicar en**: cada vez que un fix vuelva inalcanzable un guard existente, decidir
+  explícitamente: o se borra (como el `if (reply.sent)` de BLQ-MED-1), o se prueba en
+  unit. No hay tercera opción: un guard defensivo sin test se rompe en silencio.
+
+### [2026-07-26 07:15] Wave 1 — MNR-3: mi aserción de "no filtra el largo" era un falso positivo esperando ocurrir
+
+- **Error**: `expect(body).not.toContain(String(FAKE_SECRET.length))`, o sea "el body no
+  contiene la cadena `51`". Cualquier campo futuro con un 51 (un precio, un id, un
+  timestamp) rompía el test con el mensaje engañoso `leaks the credential length`.
+- **Causa raíz**: chequeé una propiedad de un CAMPO (¿algún campo revela el largo?)
+  buscando substring en el body serializado.
+- **Fix**: `expectNoSecretLength` recorre los escalares del payload con su path y compara
+  por campo: ningún número igual al largo, ningún string igual a `"51"`, ningún string con
+  exactamente el largo del secreto (caza una máscara tipo `'*'.repeat(len)`).
+  **Empíricamente probado en las dos direcciones**: con un `agent_endpoint`
+  `https://example.com/agents/51/{slug}` la aserción vieja falla (`not to contain '51'`) y
+  la nueva pasa; con un campo `authMasked: '*'.repeat(51)` inyectado en
+  `toRegistryPublic`, la nueva falla con
+  `$.registries[0].authMasked: has exactly the credential length (mask?)`.
+- **Aplicar en**: cualquier aserción de "no filtra X" sobre un body serializado. Buscar
+  substring en el JSON entero sirve para el secreto literal y sus derivaciones largas
+  (prefijo, sufijo, hash) — NO para valores cortos (largos, contadores, ids), que hay que
+  comparar campo por campo.
+
+### [2026-07-26 07:20] Wave 1 — MNR-4: afirmé una garantía de compilación que el compilador no da
+
+- **Error**: el docstring de `RegistryPublic` decía *"it is what makes the compiler reject
+  `reply.send(internalRegistryRow)`"*. Es falso: `reply.send` está tipado
+  `send(payload?: unknown)`, así que `reply.send(await registryService.getEnabled())`
+  compila sin chistar. El AR lo verificó.
+- **Causa raíz**: extrapolé el resultado real (el `tsc` falló cuando pasé la fila interna
+  a un slot **tipado** `RegistryPublic`) a un sink que no está tipado. Peor: mi propio
+  TD-188-4 ya lo decía bien — el comentario del código contradecía la deuda documentada.
+- **Fix**: el docstring ahora enumera dónde SÍ muerde el guard (slot tipado → TS2741,
+  `RegistryPublic[]` → TS2741, retorno `Promise<RegistryPublic[]>` → TS2322, spread →
+  TS2375 por `auth?: never`) y dónde NO (`reply.send`, que acepta `unknown`), y remite al
+  guard runtime `T-RRED-05` como la defensa real en el sink.
+- **Aplicar en**: nunca escribir "el compilador rechaza X" sin haber compilado X. Un
+  comentario que promete una garantía inexistente es peor que no tener comentario: el
+  próximo dev se apoya en ella.
+
+### [2026-07-26 07:25] Wave 1 — MNR-5: acuñé un tipo "HTTP-safe" que seguía exponiendo el tenant
+
+- **Error**: `RegistryPublic` incluía `ownerRef`, y `GET /registries` es público sin auth.
+  La convención del propio repo lo prohíbe explícitamente (`types/index.ts:982-984`,
+  WKH-141/CD-6: "SOLO campos no sensibles — NUNCA ownerRef/...").
+- **Causa raíz**: al portar el tipo copié los campos de `RegistryConfig` uno a uno y
+  revisé sólo el campo que estaba cazando (`auth.value`). Un tipo que se llama "Public"
+  merece un pase por TODOS sus campos contra la convención, no sólo por el del hallazgo.
+- **Fix**: `ownerRef` fuera de `toRegistryPublic` (`services/registry.ts:123-139`); los
+  dos consumidores internos que lo necesitaban (los guards de ownership de `update` y
+  `delete`) pasaron a `getWithSecrets(id)` — misma query, resultado que nunca cruza HTTP.
+  Tests: T-RRED-01 (el body de `GET /registries` no contiene `tenant-A`), T-RED-02,
+  T-RED-09b (allowlist cerrado) y la contra-prueba T-RED-11 (la fila interna SÍ trae
+  `ownerRef`, así que los asserts no pasan por vacuidad).
+- **Aplicar en**: cuando definís una proyección pública, revisá campo por campo contra la
+  lista de campos prohibidos del repo. "Es pre-existente" no es defensa: el momento de
+  dropearlo es cuando estás escribiendo el tipo que decide qué sale.
+
+### [2026-07-26 07:30] Hallazgo derivado (NO tocado): `/gasless/transfer` cobra sin transferir
+
+- **Qué**: `routes/gasless.ts:181-189` y `:214-223` corren DESPUÉS del débito del
+  middleware y devuelven error con **cero refunds**. Es MNR-1 del AR: **pre-existente y
+  con HU propia abierta**, deliberadamente NO tocado en este fix-pack.
+- **Dos lecciones que ese fix debería heredar**:
+  1. **Helper de refund reusable.** `refundComposeStep0` ya resuelve lo difícil (routing
+     al ledger correcto según master/delegación/sesión, `owner_ref` en las 4 variantes de
+     credit, encolado en `refundOutbox` cuando el credit no revirtió nada, best-effort que
+     nunca rompe el response). Duplicarlo a mano para gasless es garantía de que a alguna
+     variante le va a faltar el `owner_ref` o el outbox.
+  2. **La trampa de BLQ-MED-1.** Si ese refund se escribe en el route handler de gasless,
+     no va a correr para el 504 post-débito — igual que acá. `/gasless/transfer` usa el
+     MISMO `createTimeoutHandler` + el MISMO débito en preHandler, así que hereda la misma
+     ventana. El hook `onDebitOrphaned` de `requirePaymentOrA2AKey` ya está disponible
+     para pasarle su propio credit-back (`gaslessEstimatedCostUsd`).

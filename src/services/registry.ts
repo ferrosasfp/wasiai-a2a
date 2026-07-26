@@ -111,6 +111,14 @@ function rowToRegistry(row: RegistryRow): RegistryConfig {
  *
  * En lugar del secreto se expone el esquema declarado (`authType`) y si hay o
  * no credencial configurada. NUNCA prefijo, sufijo, largo ni hash del valor.
+ *
+ * MNR-5 (AR HIGH-2): tampoco sale `ownerRef`. `GET /registries` es PÚBLICO (sin
+ * auth) y la convención del repo (`types/index.ts`, WKH-141/CD-6) prohíbe
+ * explícitamente exponer identificadores de tenant en payloads públicos:
+ * enumerar `owner_ref` mapea qué tenant registró qué marketplace. Era
+ * pre-existente (`list()` ya lo devolvía), pero acuñar el tipo público es el
+ * momento de dropearlo. Los guards de ownership internos (`update`/`delete`)
+ * leen `ownerRef` de `getWithSecrets()`, que nunca cruza HTTP.
  */
 export function toRegistryPublic(registry: RegistryConfig): RegistryPublic {
   const value = registry.auth?.value;
@@ -125,7 +133,6 @@ export function toRegistryPublic(registry: RegistryConfig): RegistryPublic {
     schema: registry.schema,
     enabled: registry.enabled,
     createdAt: registry.createdAt,
-    ownerRef: registry.ownerRef,
     ...(registry.auth?.type !== undefined && { authType: registry.auth.type }),
     authConfigured: typeof value === 'string' && value.length > 0,
   };
@@ -180,10 +187,11 @@ export const registryService = {
    * Get a specific registry by ID (público — visibilidad no cambia).
    *
    * HIGH-1: devuelve `RegistryPublic` — SIN `auth.value`. Este es el método
-   * por defecto para rutas HTTP, checks de existencia y los guards de
-   * ownership internos (todos leen `ownerRef`, no la credencial). Si necesitás
-   * la credencial para un fetch outbound, usá `getWithSecrets` — el nombre
-   * hace explícito que el resultado NO puede cruzar el borde HTTP.
+   * por defecto para rutas HTTP y checks de existencia. Si necesitás la
+   * credencial para un fetch outbound — o el `ownerRef` para un guard de
+   * ownership (MNR-5: ya no viaja en la proyección pública) — usá
+   * `getWithSecrets`, cuyo nombre hace explícito que el resultado NO puede
+   * cruzar el borde HTTP.
    */
   async get(id: string): Promise<RegistryPublic | undefined> {
     const registry = await this.getWithSecrets(id);
@@ -303,8 +311,12 @@ export const registryService = {
     updates: Partial<Omit<RegistryConfig, 'id' | 'createdAt' | 'ownerRef'>>,
     ownerRef: string,
   ): Promise<RegistryPublic> {
-    // 1+2+3+4: pre-fetch + ownership/system check
-    const existing = await this.get(id);
+    // 1+2+3+4: pre-fetch + ownership/system check.
+    // MNR-5: `getWithSecrets` (misma query que `get`) porque el guard necesita
+    // `ownerRef`, que ya NO viaja en la proyección pública. `existing` es
+    // INTERNO: sólo se le leen `ownerRef`; el response se construye abajo con
+    // `toRegistryPublic(...)` sobre la fila fresca del UPDATE.
+    const existing = await this.getWithSecrets(id);
     if (!existing) {
       logOwnershipMismatch({
         op: 'registryUpdate',
@@ -399,7 +411,9 @@ export const registryService = {
    * que `false` solo aparece en una race condition.)
    */
   async delete(id: string, ownerRef: string): Promise<boolean> {
-    const existing = await this.get(id);
+    // MNR-5: ver `update` — el guard lee `ownerRef`, que ya no está en la
+    // proyección pública. Nada de `existing` se devuelve al caller.
+    const existing = await this.getWithSecrets(id);
     if (!existing) {
       logOwnershipMismatch({
         op: 'registryDelete',

@@ -205,7 +205,14 @@ async function validateComposeBodyHandler(
  * Best-effort: throws are caught by the caller and leave the challenge at the
  * 1 USD default (never blocks the request).
  */
-async function augmentX402ChallengeAmount(
+/**
+ * MNR-2 (AR HIGH-2): `export` SOLO para test. El guard de layer 1 (step
+ * malformado → sobre-estimación) es inalcanzable vía HTTP desde que
+ * `validateComposeBodyHandler` (layer 0) rechaza esos bodies pre-pago, así que la
+ * única forma de probarlo — y de que no se rompa en silencio — es llamar la
+ * función directo. La lógica NO cambió (invariante de precio del AR).
+ */
+export async function augmentX402ChallengeAmount(
   request: FastifyRequest,
   steps: ComposeStep[],
   step0Usd: number,
@@ -271,11 +278,17 @@ async function augmentX402ChallengeAmount(
  * OTROS caminos que cobraban sin entregar nada:
  *
  *   1. `!result.success` — el caso original (comportamiento byte-idéntico).
- *   2. `reply.sent` ANTES de compose — el timeout de 504 disparó durante los
- *      preHandlers; el middleware ya debitó y el pipeline NUNCA corrió
- *      (`alreadySpentUsd = 0` → se reembolsa el step-0 entero).
+ *   2. Débito HUÉRFANO — el 504 disparó durante el débito (o durante el read del
+ *      header de budget que va justo después) y el route handler NUNCA se invoca.
+ *      Se llama desde el middleware vía el hook `onDebitOrphaned` (BLQ-MED-1),
+ *      NO desde el handler: `alreadySpentUsd = 0` → se reembolsa el step-0
+ *      entero, porque el pipeline no arrancó.
  *   3. `reply.sent` DESPUÉS de compose — el 504 disparó mientras compose corría;
  *      se pasa `result.totalCostUsdc` para NO reembolsar lo que sí se settleó.
+ *
+ * Los tres son mutuamente excluyentes: (2) sólo corre cuando `reply.sent` ya era
+ * true al terminar el middleware, y en ese caso Fastify saltea el handler, así
+ * que (1) y (3) no pueden ejecutarse. No hay doble refund posible.
  *
  * Precedente: WKH-127 (`orchestrate.ts:1304`) — mismo mecanismo (`budgetService
  * .credit` / `creditWithDest` / `creditDelegation` / `creditSession` + encolado
@@ -580,10 +593,24 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         // de debit para inyectar request.composeEstimatedCostUsd y manejar
         // 404 AGENT_NOT_FOUND / 503 REGISTRY_UNAVAILABLE.
         resolveComposePriceHandler,
-        ...requirePaymentOrA2AKey({
-          description:
-            'WasiAI Compose Service — Multi-agent pipeline execution',
-        }),
+        ...requirePaymentOrA2AKey(
+          {
+            description:
+              'WasiAI Compose Service — Multi-agent pipeline execution',
+          },
+          {
+            // BLQ-MED-1 (AR HIGH-2): credit-back del débito HUÉRFANO. Si el 504
+            // del `createTimeoutHandler` sale mientras el middleware debita (o
+            // mientras lee el header de budget post-débito), Fastify NO invoca
+            // este route handler (`handle-request.js:132`), así que un
+            // `if (reply.sent)` dentro del handler era código inalcanzable: el
+            // caller quedaba cobrado por un pipeline que jamás corrió. El
+            // middleware llama este hook en el único punto donde el débito está
+            // confirmado aplicado y todavía es reversible.
+            // `alreadySpentUsd = 0`: el pipeline no arrancó, nada se settleó.
+            onDebitOrphaned: (request) => refundComposeStep0(request, 0),
+          },
+        ),
       ],
     },
     async (request, reply: FastifyReply) => {
@@ -602,14 +629,16 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      // BLQ-2: bail early if timeout already sent 504
-      // HIGH-2: el 504 del timeout pudo dispararse DESPUÉS del débito del
-      // middleware y ANTES de que el pipeline corriera → el caller quedaba
-      // cobrado sin ejecutar nada. `alreadySpentUsd = 0`: nada se settleó.
-      if (reply.sent) {
-        await refundComposeStep0(request, 0);
-        return;
-      }
+      // BLQ-MED-1 (AR HIGH-2): acá vivía un `if (reply.sent) { refund; return }`
+      // para el 504 pre-compose. Era CÓDIGO INALCANZABLE — Fastify no invoca el
+      // handler cuando la reply ya salió (`fastify/lib/handle-request.js:132`
+      // `preHandlerCallback` → `if (reply.sent) return`), y el AR lo confirmó con
+      // coverage sobre la suite completa (0 hits). Se BORRÓ en vez de dejarlo
+      // como falsa protección: ese caso lo cubre ahora el hook `onDebitOrphaned`
+      // que se le pasa a `requirePaymentOrA2AKey` (ver la cadena de preHandlers),
+      // que corre DENTRO del middleware, con el débito ya confirmado.
+      // El `if (reply.sent)` de ABAJO (post-compose) SÍ es alcanzable: ahí el
+      // handler ya estaba corriendo cuando el timer disparó.
 
       // WKH-58 fix-pack: propagate the a2a credential to the service so compose
       // can skip Pieverse inbound x402 (broken upstream WKH-45) when caller

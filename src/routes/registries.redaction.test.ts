@@ -102,6 +102,60 @@ function chain(): Record<string, unknown> {
   return c;
 }
 
+/** Todos los escalares del body parseado, con su path, para asertar por campo. */
+function* scalarEntries(
+  value: unknown,
+  path = '$',
+): Generator<[string, unknown]> {
+  if (Array.isArray(value)) {
+    for (const [i, item] of value.entries()) {
+      yield* scalarEntries(item, `${path}[${i}]`);
+    }
+    return;
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      yield* scalarEntries(item, `${path}.${key}`);
+    }
+    return;
+  }
+  yield [path, value];
+}
+
+/**
+ * MNR-3 (AR HIGH-2): el largo se compara CAMPO POR CAMPO.
+ *
+ * `expect(body).not.toContain(String(FAKE_SECRET.length))` rompía con cualquier
+ * campo futuro que contuviera "51" (un precio, un timestamp, un id) y encima con
+ * el mensaje engañoso "leaks the credential length". Lo prohibido de verdad es un
+ * CAMPO cuyo valor sea el largo, o un valor enmascarado del MISMO largo que el
+ * secreto (que filtra el largo igual).
+ */
+function expectNoSecretLength(body: string, where: string): void {
+  const len = FAKE_SECRET.length;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    // Un body no-JSON (p.ej. vacío) se juzga como un único valor string.
+    payload = body;
+  }
+  for (const [path, value] of scalarEntries(payload)) {
+    if (typeof value === 'number') {
+      expect(value, `${where} ${path}: is the credential length`).not.toBe(len);
+    }
+    if (typeof value === 'string') {
+      expect(value, `${where} ${path}: is the credential length`).not.toBe(
+        String(len),
+      );
+      expect(
+        value.length,
+        `${where} ${path}: has exactly the credential length (mask?)`,
+      ).not.toBe(len);
+    }
+  }
+}
+
 /** El body no contiene el secreto NI prefijo / sufijo / hash / largo. */
 function expectNoSecretMaterial(body: string, where: string): void {
   expect(body, `${where}: leaks the credential`).not.toContain(FAKE_SECRET);
@@ -114,9 +168,7 @@ function expectNoSecretMaterial(body: string, where: string): void {
   expect(body, `${where}: leaks a credential hash`).not.toContain(
     createHash('sha256').update(FAKE_SECRET).digest('hex'),
   );
-  expect(body, `${where}: leaks the credential length`).not.toContain(
-    String(FAKE_SECRET.length),
-  );
+  expectNoSecretLength(body, where);
 }
 
 // ── Suite ───────────────────────────────────────────────────
@@ -159,6 +211,12 @@ describe('registries routes — credential redaction (HIGH-1)', () => {
     // Reemplazo útil, no material de ataque.
     expect(body.registries[0].authType).toBe('bearer');
     expect(body.registries[0].authConfigured).toBe(true);
+    // MNR-5: `GET /registries` es PÚBLICO (sin auth) → tampoco puede enumerar
+    // qué tenant registró qué marketplace (`types/index.ts` WKH-141/CD-6).
+    expect(body.registries[0]).not.toHaveProperty('ownerRef');
+    expect(res.body, 'GET /registries leaks the owner_ref').not.toContain(
+      OWNER,
+    );
   });
 
   it('T-RRED-02: GET /registries/:id no devuelve la credencial', async () => {

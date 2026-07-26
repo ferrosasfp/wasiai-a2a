@@ -71,9 +71,25 @@ export interface RegistryConfig {
  *   - `authConfigured` is REQUIRED, so the internal row also fails the
  *     missing-property check. Two independent compile-time guards.
  *
+ * SCOPE OF THE COMPILE-TIME GUARD (MNR-4, AR HIGH-2 — do NOT overstate it):
+ * the guard bites on TYPED slots — `const p: RegistryPublic = cfg` (TS2741),
+ * `const l: RegistryPublic[] = [cfg]` (TS2741), a function declared
+ * `Promise<RegistryPublic[]>` returning `getEnabled()` (TS2322), and an object
+ * spread of the internal row (TS2375, because of `auth?: never`). It does NOT
+ * bite on `reply.send(...)`: Fastify types `send(payload?: unknown)`, so
+ * `reply.send(await registryService.getEnabled())` COMPILES. The real defense at
+ * the HTTP sink is (1) every route returning the mapped projection and (2) the
+ * generic runtime guard `T-RRED-05` in `routes/registries.redaction.test.ts`,
+ * which sweeps every registered GET. See TD-188-4.
+ *
  * What replaces the secret: the declared scheme (`authType`) and a boolean
  * saying whether a static credential exists server-side. NEVER a prefix, a
  * suffix, a length or a hash of the value — all of those are attack material.
+ *
+ * MNR-5: `ownerRef` is NOT here. `GET /registries` is public (no auth) and
+ * `types/index.ts` (WKH-141/CD-6) forbids leaking tenant identifiers on public
+ * payloads. Internal ownership guards read `ownerRef` from the row returned by
+ * `getWithSecrets()` (never crosses HTTP), not from this projection.
  */
 export interface RegistryPublic {
   id: string;
@@ -84,12 +100,11 @@ export interface RegistryPublic {
   schema: RegistrySchema;
   enabled: boolean;
   createdAt: Date;
-  ownerRef: string;
 
   /**
    * Redaction guard — structurally forbidden. Never present at runtime.
-   * Do NOT relax this to `RegistryAuth`: it is what makes the compiler reject
-   * `reply.send(internalRegistryRow)`.
+   * Do NOT relax this to `RegistryAuth`: it is what makes `tsc` reject the
+   * internal row in a typed `RegistryPublic` slot (and in a spread of it).
    */
   auth?: never;
 

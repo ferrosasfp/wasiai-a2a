@@ -23,7 +23,9 @@
  * Un test que sólo mira el status no prueba nada de esto: todas las aserciones
  * de dinero comparan el balance ANTES y DESPUÉS.
  *
- * Naming: T-NOCHARGE-01..T-NOCHARGE-11.
+ * Naming: T-NOCHARGE-01..T-NOCHARGE-15 (13..15: BLQ-MED-1, el 504 que dispara
+ * antes de que el route handler exista → el credit-back NO puede vivir en el
+ * handler porque Fastify no lo invoca).
  */
 
 import type { FastifyReply, FastifyRequest } from 'fastify';
@@ -114,7 +116,16 @@ vi.mock('../services/identity.js', () => ({
 const budgetState = vi.hoisted(() => ({
   balance: 10,
   failNextGetBalance: false,
+  // BLQ-MED-1: latencia inyectable en los dos puntos de I/O que corren DENTRO
+  // del middleware de pago, para abrir la ventana en la que el timer del 504
+  // dispara con el débito ya aplicado (o aplicándose) y el route handler nunca
+  // llega a correr. Default 0 → el resto de la suite no cambia.
+  debitLatencyMs: 0,
+  getBalanceLatencyMs: 0,
 }));
+const sleep = vi.hoisted(
+  () => (ms: number) => new Promise((r) => setTimeout(r, ms)),
+);
 const debitMock = vi.hoisted(() =>
   vi.fn(
     async (
@@ -122,6 +133,9 @@ const debitMock = vi.hoisted(() =>
       _chainId: number,
       amountUsd: number,
     ): Promise<{ success: boolean; error?: string }> => {
+      if (budgetState.debitLatencyMs > 0) {
+        await sleep(budgetState.debitLatencyMs);
+      }
       budgetState.balance -= amountUsd;
       return { success: true };
     },
@@ -145,6 +159,9 @@ const creditMock = vi.hoisted(() =>
 );
 const getBalanceMock = vi.hoisted(() =>
   vi.fn(async (): Promise<string> => {
+    if (budgetState.getBalanceLatencyMs > 0) {
+      await sleep(budgetState.getBalanceLatencyMs);
+    }
     if (budgetState.failNextGetBalance) {
       budgetState.failNextGetBalance = false;
       throw new Error('PGRST connection lost');
@@ -227,6 +244,8 @@ describe('compose route — 400 de validación NO cobra (HIGH-2, dirección (a))
     vi.clearAllMocks();
     budgetState.balance = 10;
     budgetState.failNextGetBalance = false;
+    budgetState.debitLatencyMs = 0;
+    budgetState.getBalanceLatencyMs = 0;
     mockResolveDest.mockResolvedValue(null);
     mockResolvePrice.mockResolvedValue(STEP0_PRICE);
   });
@@ -515,6 +534,8 @@ describe('compose route — 504 de timeout post-débito reembolsa (HIGH-2, direc
     vi.clearAllMocks();
     budgetState.balance = 10;
     budgetState.failNextGetBalance = false;
+    budgetState.debitLatencyMs = 0;
+    budgetState.getBalanceLatencyMs = 0;
     mockResolveDest.mockResolvedValue(null);
   });
 
@@ -560,6 +581,29 @@ describe('compose route — 504 de timeout post-débito reembolsa (HIGH-2, direc
   async function flush(): Promise<void> {
     for (let i = 0; i < 5; i++) {
       await new Promise((r) => setImmediate(r));
+    }
+  }
+
+  /**
+   * BLQ-MED-1: el refund del débito HUÉRFANO ocurre dentro del middleware, que
+   * sigue corriendo cuando `inject` ya volvió con el 504. `flush()` no alcanza
+   * (la ventana la abre un `setTimeout` de verdad), así que se espera por la
+   * CONDICIÓN. Si el fix se remueve, esto expira y el test se pone rojo con el
+   * balance real en el mensaje.
+   */
+  async function waitFor(
+    predicate: () => boolean,
+    what: string,
+    timeoutMs = 3000,
+  ): Promise<void> {
+    const started = Date.now();
+    while (!predicate()) {
+      if (Date.now() - started > timeoutMs) {
+        throw new Error(
+          `waitFor timeout: ${what} (balance=${budgetState.balance}, debits=${debitMock.mock.calls.length}, credits=${creditMock.mock.calls.length})`,
+        );
+      }
+      await sleep(5);
     }
   }
 
@@ -611,5 +655,112 @@ describe('compose route — 504 de timeout post-débito reembolsa (HIGH-2, direc
     // max(0, 0.5 - 0.5) = 0 → el trabajo entregado se sigue cobrando.
     expect(creditMock).not.toHaveBeenCalled();
     expect(budgetState.balance).toBeCloseTo(balanceBefore - STEP0_PRICE, 8);
+  });
+
+  // ── BLQ-MED-1: el 504 que dispara ANTES de que el handler exista ──
+  //
+  // Los dos tests de arriba cubren el 504 que dispara MIENTRAS compose corre —
+  // ahí el route handler ya estaba en ejecución, así que su `if (reply.sent)`
+  // podía reaccionar. La ventana que faltaba es la otra: cuando el timer manda
+  // el 504 durante el débito (o durante el read del header que va justo después),
+  // Fastify NO invoca el handler (`handle-request.js:132`), así que TODO
+  // credit-back que viva en el handler es código inalcanzable y el caller queda
+  // cobrado por un pipeline que jamás corrió. El AR lo midió: `debit=1 credit=0`,
+  // balance 10 → 9.5.
+  //
+  // Estos dos tests assertan el BALANCE (antes/después), no el status.
+
+  it('T-NOCHARGE-13 (BLQ-MED-1): 504 MIENTRAS se debita → el handler no corre y el débito se devuelve', async () => {
+    const balanceBefore = budgetState.balance;
+    mockResolvePrice.mockResolvedValue(STEP0_PRICE);
+    // El RPC de débito tarda 40ms con TIMEOUT_COMPOSE_MS=1: el 504 sale mientras
+    // el débito está en vuelo (repro AR-P3).
+    budgetState.debitLatencyMs = 40;
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(504);
+
+    await waitFor(
+      () => creditMock.mock.calls.length > 0,
+      'el credit-back del débito huérfano nunca ocurrió',
+    );
+    await flush();
+
+    // El débito SÍ se aplicó (si no, el test sería vacuo)...
+    expect(debitMock).toHaveBeenCalledTimes(1);
+    expect(debitMock.mock.calls[0]?.[2]).toBe(STEP0_PRICE);
+    // ...el route handler NUNCA corrió (esto es lo que hacía inalcanzable el
+    // credit-back anterior)...
+    expect(mockCompose).not.toHaveBeenCalled();
+    // ...y aun así el caller termina con su plata intacta.
+    expect(creditMock).toHaveBeenCalledTimes(1);
+    expect(creditMock.mock.calls[0]?.[2]).toBe(STEP0_PRICE);
+    expect(creditMock.mock.calls[0]?.[3]).toBe('o1'); // ownership guard
+    expect(budgetState.balance).toBeCloseTo(balanceBefore, 8);
+  });
+
+  it('T-NOCHARGE-14 (BLQ-MED-1): 504 en el read del header POST-débito → mismo credit-back', async () => {
+    const balanceBefore = budgetState.balance;
+    mockResolvePrice.mockResolvedValue(STEP0_PRICE);
+    // Débito instantáneo, pero el `getBalance` del header
+    // `x-a2a-remaining-budget` (post-débito) tarda 40ms → el 504 sale con el
+    // débito YA aplicado (repro AR-P2). Segunda ventana, mismo dueño del fix.
+    budgetState.getBalanceLatencyMs = 40;
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(504);
+
+    await waitFor(
+      () => creditMock.mock.calls.length > 0,
+      'el credit-back del débito huérfano nunca ocurrió (ventana del header)',
+    );
+    await flush();
+
+    expect(debitMock).toHaveBeenCalledTimes(1);
+    expect(mockCompose).not.toHaveBeenCalled();
+    expect(creditMock).toHaveBeenCalledTimes(1);
+    expect(creditMock.mock.calls[0]?.[2]).toBe(STEP0_PRICE);
+    expect(creditMock.mock.calls[0]?.[3]).toBe('o1');
+    expect(budgetState.balance).toBeCloseTo(balanceBefore, 8);
+  });
+
+  it('T-NOCHARGE-15 (BLQ-MED-1, anti-doble-refund): 504 pre-débito NO acredita nada', async () => {
+    // Contra-prueba del riesgo espejo: un refund que corra "por si acaso" en un
+    // hook de respuesta inflaría el budget cuando NUNCA se debitó. Acá el 504
+    // sale durante el preHandler de precio (antes del middleware de pago), así
+    // que Fastify saltea el middleware entero: ni débito ni credit.
+    // El AR ya había refutado la fila del mapa que decía que este caso cobraba.
+    mockResolvePrice.mockImplementation(async () => {
+      await sleep(40);
+      return STEP0_PRICE;
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(504);
+    await flush();
+    await sleep(60);
+    await flush();
+
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(creditMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBe(10);
   });
 });
