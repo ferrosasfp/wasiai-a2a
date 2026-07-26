@@ -539,6 +539,60 @@ function resolveEstimatedCostUsd(request: FastifyRequest): number {
       : PLACEHOLDER_FEE_USD;
 }
 
+/**
+ * BLQ-MED-1 (AR HIGH-2, 2026-07-26): callback de "débito huérfano".
+ *
+ * Lo provee la RUTA (hoy sólo `/compose`) y el middleware lo invoca cuando el
+ * débito step-0 YA se aplicó pero la respuesta al caller YA salió — o sea que la
+ * ruta no va a ejecutar nada por lo que se cobró.
+ *
+ * POR QUÉ ACÁ Y NO EN EL ROUTE HANDLER: cuando el timer de `createTimeoutHandler`
+ * manda el 504 desde FUERA del lifecycle, Fastify NO invoca el handler
+ * (`fastify/lib/handle-request.js:132` `preHandlerCallback` → `if (reply.sent)
+ * return`) ni los preHandlers restantes (`fastify/lib/hooks.js:407`
+ * `hookIterator`). El credit-back que vivía en el handler era CÓDIGO INALCANZABLE
+ * para la ventana "504 durante/después del débito", que es justamente la única en
+ * la que el caller quedaba cobrado sin ejecución.
+ *
+ * POR QUÉ NO UN HOOK `onSend`/`onResponse`: esos corren en el momento en que la
+ * respuesta sale, y el 504 puede salir MIENTRAS el RPC de débito está en vuelo.
+ * Refundear ahí es una carrera: se acreditaría ANTES de que el débito aterrice y,
+ * si el débito después falla (budget insuficiente, cap por destino), el refund
+ * quedaría sin débito que revertir → INFLA el budget. Acá se llama sólo cuando el
+ * débito YA está confirmado aplicado, así que no puede reembolsar de más.
+ */
+export type OrphanedDebitHandler = (request: FastifyRequest) => Promise<void>;
+
+/**
+ * BLQ-MED-1: se llama al FINAL de cada branch que debitó (master, delegación,
+ * sesión), DESPUÉS del read del header de budget — el último `await` de I/O real
+ * antes del handler. Entre este punto y el handler Fastify sólo corre microtasks
+ * (`hookRunner` → `handleResolve` → `next()`), y una microtask no le da lugar al
+ * event loop para disparar un `setTimeout`: no queda ventana descubierta.
+ *
+ * Fail-safe por construcción:
+ *   - `skipMiddlewareDebit` (rutas `/orchestrate*`) ⟹ este middleware NO debitó
+ *     ⟹ no hay nada que devolver;
+ *   - sin callback (cualquier ruta que no lo pasa, p.ej. `/gasless`) ⟹ no-op:
+ *     esta HU no cambia el comportamiento de ninguna otra ruta;
+ *   - `!reply.sent` (el 99.99% de los requests) ⟹ no-op: el handler va a correr
+ *     y sus propios credit-backs siguen siendo los únicos que aplican, así que
+ *     no hay doble refund posible (son mutuamente excluyentes por el propio
+ *     `reply.sent`).
+ */
+async function refundIfDebitOrphaned(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  onDebitOrphaned: OrphanedDebitHandler | undefined,
+): Promise<void> {
+  if (!onDebitOrphaned || request.skipMiddlewareDebit || !reply.sent) return;
+  request.log.warn(
+    { requestId: request.id },
+    'a2a-key.debit-orphaned.refunding',
+  );
+  await onDebitOrphaned(request);
+}
+
 // ── BRANCH DELEGACIÓN (WKH-101) ──────────────────────────────
 // El regex Bearer YA captura wasi_a2a_session_* (empieza con wasi_a2a_).
 // El branch va DESPUÉS de extraer rawKey + estimatedCostUsd y ANTES de la
@@ -549,6 +603,7 @@ async function resolveDelegationAuth(
   reply: FastifyReply,
   rawKey: string,
   estimatedCostUsd: number,
+  onDebitOrphaned?: OrphanedDebitHandler,
 ): Promise<unknown> {
   try {
     // 1. lookup por hash (AC-5)
@@ -764,12 +819,24 @@ async function resolveDelegationAuth(
     };
 
     // 9. remaining budget header (CD-12: mismo chainId del bundle).
-    const remaining = await budgetService.getBalance(
-      parentKey.id,
-      chainId,
-      parentKey.owner_ref,
-    );
-    reply.header('x-a2a-remaining-budget', remaining);
+    // HIGH-2 (2026-07-26): best-effort — ver el racional en el path master. Un
+    // fallo de este read post-débito devolvía 503 con el débito ya aplicado.
+    await budgetService
+      .getBalance(parentKey.id, chainId, parentKey.owner_ref)
+      .then((remaining) => {
+        reply.header('x-a2a-remaining-budget', remaining);
+      })
+      .catch((balanceErr) => {
+        request.log.warn(
+          { err: balanceErr instanceof Error ? balanceErr.message : 'unknown' },
+          'a2a-key.remaining-budget-header.skip',
+        );
+      });
+
+    // BLQ-MED-1: el débito dual-ledger de la delegación ya está aplicado. Si el
+    // 504 del timer salió mientras corría (o mientras corría el read de arriba),
+    // el route handler NUNCA va a correr → devolver el step-0 acá.
+    await refundIfDebitOrphaned(request, reply, onDebitOrphaned);
     return; // fin del branch — NO seguir al flujo master key
   } catch (err) {
     // log SIN token; 503 service error (igual que el catch master).
@@ -794,6 +861,7 @@ async function resolveKeySessionAuth(
   reply: FastifyReply,
   rawKey: string,
   estimatedCostUsd: number,
+  onDebitOrphaned?: OrphanedDebitHandler,
 ): Promise<unknown> {
   try {
     // 1. lookup por hash O(1) (AC-4/AC-5).
@@ -978,12 +1046,23 @@ async function resolveKeySessionAuth(
     };
 
     // 7. remaining budget header (mismo chainId del bundle).
-    const remaining = await budgetService.getBalance(
-      parentKey.id,
-      chainId,
-      parentKey.owner_ref,
-    );
-    reply.header('x-a2a-remaining-budget', remaining);
+    // HIGH-2 (2026-07-26): best-effort — ver el racional en el path master. Un
+    // fallo de este read post-débito devolvía 503 con el débito ya aplicado.
+    await budgetService
+      .getBalance(parentKey.id, chainId, parentKey.owner_ref)
+      .then((remaining) => {
+        reply.header('x-a2a-remaining-budget', remaining);
+      })
+      .catch((balanceErr) => {
+        request.log.warn(
+          { err: balanceErr instanceof Error ? balanceErr.message : 'unknown' },
+          'a2a-key.remaining-budget-header.skip',
+        );
+      });
+
+    // BLQ-MED-1: espejo del branch delegación — el débito dual-ledger de la
+    // sesión ya está aplicado; si la respuesta ya salió, el handler no corre.
+    await refundIfDebitOrphaned(request, reply, onDebitOrphaned);
     return; // fin del branch — NO seguir al flujo master key
   } catch (err) {
     request.log.error(
@@ -1006,6 +1085,7 @@ async function resolveMasterAuth(
   reply: FastifyReply,
   rawKey: string,
   estimatedCostUsd: number,
+  onDebitOrphaned?: OrphanedDebitHandler,
 ): Promise<unknown> {
   let keyRow: A2AAgentKeyRow | null = null;
 
@@ -1204,13 +1284,36 @@ async function resolveMasterAuth(
     // el balance acá daría un valor no-debitado; el route handler setea este
     // header con el saldo post-débito real que expone el service.
     if (!request.skipMiddlewareDebit) {
-      const postDebitBalance = await budgetService.getBalance(
-        keyRow.id,
-        chainId,
-        keyRow.owner_ref,
-      );
-      reply.header('x-a2a-remaining-budget', postDebitBalance);
+      // HIGH-2 (2026-07-26): best-effort. Este read es SOLO para un header de
+      // conveniencia y corre DESPUÉS de un débito exitoso; cuando fallaba, el
+      // catch de abajo devolvía 503 SERVICE_ERROR con el débito ya aplicado y sin
+      // ejecutar nada — cobro sin contraprestación por un header. Ahora el header
+      // se omite y el request sigue: el caller que pagó recibe la ejecución que
+      // pagó. Los otros 503 de este catch (lookup/debit que tiran ANTES o
+      // DURANTE el débito, sin cobro) quedan intactos.
+      await budgetService
+        .getBalance(keyRow.id, chainId, keyRow.owner_ref)
+        .then((postDebitBalance) => {
+          reply.header('x-a2a-remaining-budget', postDebitBalance);
+        })
+        .catch((balanceErr) => {
+          request.log.warn(
+            {
+              err: balanceErr instanceof Error ? balanceErr.message : 'unknown',
+              keyId: keyRow?.id,
+            },
+            'a2a-key.remaining-budget-header.skip',
+          );
+        });
     }
+
+    // BLQ-MED-1 (AR HIGH-2): el débito step-0 ya está aplicado. Si el 504 del
+    // `createTimeoutHandler` salió mientras el débito (o el read del header de
+    // arriba) estaba en vuelo, Fastify NO va a invocar el route handler, así que
+    // el credit-back que vivía allá era inalcanzable y el caller quedaba cobrado
+    // por un pipeline que nunca corrió. Único punto donde el débito está
+    // confirmado aplicado Y todavía se puede revertir.
+    await refundIfDebitOrphaned(request, reply, onDebitOrphaned);
   } catch (err) {
     request.log.error(
       {
@@ -1436,10 +1539,26 @@ export function requireA2AKey(): preHandlerAsyncHookHandler[] {
 // el orden y los early-returns originales: x-a2a-key/Bearer → (session > sess
 // > master) ; ausencia → x402 fallback.
 
+/**
+ * BLQ-MED-1: hooks OPCIONALES de la ruta. `onDebitOrphaned` es el credit-back
+ * que la ruta quiere que se ejecute si el débito step-0 se aplicó pero la
+ * respuesta ya salió (típicamente el 504 del timeout) — ver
+ * `refundIfDebitOrphaned`. Segundo parámetro (no un campo de
+ * `PaymentMiddlewareOptions`) para que ninguna ruta existente cambie de
+ * comportamiento: sin este hook el middleware se comporta exactamente igual que
+ * antes. Hoy sólo `/compose` lo pasa; `/gasless/transfer` tiene su propio
+ * agujero pre-existente (HU aparte) y NO se toca acá.
+ */
+export interface PaymentRouteHooks {
+  onDebitOrphaned?: OrphanedDebitHandler;
+}
+
 export function requirePaymentOrA2AKey(
   x402Opts: PaymentMiddlewareOptions,
+  hooks?: PaymentRouteHooks,
 ): preHandlerAsyncHookHandler[] {
   const x402Handlers = requirePayment(x402Opts);
+  const onDebitOrphaned = hooks?.onDebitOrphaned;
 
   const handler: preHandlerAsyncHookHandler = async (
     request: FastifyRequest,
@@ -1459,17 +1578,35 @@ export function requirePaymentOrA2AKey(
     // El branch va DESPUÉS de extraer rawKey + estimatedCostUsd y ANTES de la
     // resolución master-key. El path master (CD-5) queda intacto.
     if (rawKey.startsWith('wasi_a2a_session_')) {
-      return resolveDelegationAuth(request, reply, rawKey, estimatedCostUsd);
+      return resolveDelegationAuth(
+        request,
+        reply,
+        rawKey,
+        estimatedCostUsd,
+        onDebitOrphaned,
+      );
     }
 
     // Server-side session keys (SIN EIP-712). Va DESPUÉS del branch WKH-101
     // (wasi_a2a_session_*) y ANTES del path master. Los prefijos son mutuamente
     // exclusivos: 'wasi_a2a_session_x'.startsWith('wasi_a2a_sess_') === false.
     if (rawKey.startsWith('wasi_a2a_sess_')) {
-      return resolveKeySessionAuth(request, reply, rawKey, estimatedCostUsd);
+      return resolveKeySessionAuth(
+        request,
+        reply,
+        rawKey,
+        estimatedCostUsd,
+        onDebitOrphaned,
+      );
     }
 
-    return resolveMasterAuth(request, reply, rawKey, estimatedCostUsd);
+    return resolveMasterAuth(
+      request,
+      reply,
+      rawKey,
+      estimatedCostUsd,
+      onDebitOrphaned,
+    );
   };
 
   return [handler];

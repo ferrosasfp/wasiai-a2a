@@ -94,6 +94,80 @@ type ComposeBody = {
   maxBudget?: number;
 };
 
+/** Body del 400 de validación de shape (sin `requestId`, que lo agrega el caller). */
+type ComposeValidationError = {
+  error: string;
+  code: 'VALIDATION_ERROR';
+};
+
+/**
+ * HIGH-2 (2026-07-26): validación de SHAPE del body, extraída del route handler.
+ *
+ * Los tres checks vivían SOLO en el handler, que corre DESPUÉS de
+ * `requirePaymentOrA2AKey` — así que un `/compose` que respondía 400 ya había
+ * pasado por el débito y se le cobraba al caller sin ejecutar nada. El comentario
+ * original de `badStepIndex` incluso lo admitía: "This runs AFTER the payment
+ * middleware, but a 400 here is the failure mode we want".
+ *
+ * Ninguno de los tres depende de nada que produzca el middleware de auth/débito
+ * (`request.a2aKeyRow`, `resolvedChainId`, `composeEstimatedCostUsd`): son puras
+ * funciones del body. Por eso se pueden ADELANTAR al débito (dirección (a)) en
+ * lugar de reembolsar después (dirección (b)) — no se cobra nunca por lo que no
+ * se ejecuta, sin ventana en la que el balance baja y sube.
+ *
+ * Función pura y compartida: la usa el preHandler `validateComposeBodyHandler`
+ * (pre-débito, el guard real) y el route handler (defense-in-depth, para que un
+ * reordenamiento futuro de la cadena de preHandlers no reabra el agujero de
+ * input no validado que cerró BLQ-MEDIO-1).
+ */
+function validateComposeBody(steps: unknown): ComposeValidationError | null {
+  if (!steps || !Array.isArray(steps) || steps.length === 0) {
+    return { error: 'Missing or empty steps array', code: 'VALIDATION_ERROR' };
+  }
+
+  if (steps.length > 5) {
+    return {
+      error: 'Maximum 5 steps allowed per pipeline',
+      code: 'VALIDATION_ERROR',
+    };
+  }
+
+  // BLQ-MEDIO-1: rechazar el pipeline entero si CUALQUIER step no trae un
+  // `agent` string. Antes sólo se validaba el step-0 (en el preHandler de
+  // precio), así que un step final malformado llegaba a composeService, que
+  // settlea el prefijo válido 0..i-1 antes de fallar en el step malo.
+  const badStepIndex = (steps as { agent?: unknown }[]).findIndex(
+    (s) => !s || typeof s.agent !== 'string',
+  );
+  if (badStepIndex !== -1) {
+    return {
+      error: `Step ${badStepIndex} is missing a string 'agent' field`,
+      code: 'VALIDATION_ERROR',
+    };
+  }
+
+  return null;
+}
+
+/**
+ * HIGH-2 preHandler: corre ANTES de `resolveComposePriceHandler` y por lo tanto
+ * ANTES de `requirePaymentOrA2AKey`. Un body malformado se rechaza con el MISMO
+ * 400 de siempre, pero sin débito y sin la llamada de discovery del step-0.
+ *
+ * Idiom Fastify 5 (igual que los paths 404/503 del preHandler de precio):
+ * `return reply.status(...).send(...)` aborta el lifecycle de preHandlers.
+ */
+async function validateComposeBodyHandler(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  const body = request.body as { steps?: unknown } | undefined;
+  const invalid = validateComposeBody(body?.steps);
+  if (invalid) {
+    return reply.status(400).send({ ...invalid, requestId: request.id });
+  }
+}
+
 /**
  * WKH-59 (real-price-debit) preHandler: resuelve el precio real del primer
  * step ANTES del middleware de debit, e inyecta `request.composeEstimatedCostUsd`.
@@ -131,7 +205,14 @@ type ComposeBody = {
  * Best-effort: throws are caught by the caller and leave the challenge at the
  * 1 USD default (never blocks the request).
  */
-async function augmentX402ChallengeAmount(
+/**
+ * MNR-2 (AR HIGH-2): `export` SOLO para test. El guard de layer 1 (step
+ * malformado → sobre-estimación) es inalcanzable vía HTTP desde que
+ * `validateComposeBodyHandler` (layer 0) rechaza esos bodies pre-pago, así que la
+ * única forma de probarlo — y de que no se rompa en silencio — es llamar la
+ * función directo. La lógica NO cambió (invariante de precio del AR).
+ */
+export async function augmentX402ChallengeAmount(
   request: FastifyRequest,
   steps: ComposeStep[],
   step0Usd: number,
@@ -155,6 +236,12 @@ async function augmentX402ChallengeAmount(
       // summing, so the challenge ends >= the real pipeline cost. The route
       // handler also hard-rejects such bodies with 400 (layer 2) so this path is
       // only ever reached defensively.
+      //
+      // HIGH-2 (2026-07-26): `validateComposeBodyHandler` (layer 0) ahora rechaza
+      // este body con 400 ANTES de este preHandler, con la MISMA condición
+      // (`!step || typeof step.agent !== 'string'`) → esta rama es inalcanzable
+      // vía HTTP. Se CONSERVA como defense in depth: si alguien reordena la cadena
+      // de preHandlers, la sobre-estimación sigue siendo el fallback seguro.
       pipelineUsd += PLACEHOLDER_FEE_USD;
       continue;
     }
@@ -182,6 +269,157 @@ async function augmentX402ChallengeAmount(
     return;
   }
   request.x402ChallengeAmountUsd = total;
+}
+
+/**
+ * HIGH-2 (2026-07-26): credit-back del débito step-0, extraído del bloque que
+ * vivía inline en la rama `!result.success` del handler (AUDIT A1). Se extrae SIN
+ * cambiar la matemática ni los `reason` del outbox, para poder reusarlo en los
+ * OTROS caminos que cobraban sin entregar nada:
+ *
+ *   1. `!result.success` — el caso original (comportamiento byte-idéntico).
+ *   2. Débito HUÉRFANO — el 504 disparó durante el débito (o durante el read del
+ *      header de budget que va justo después) y el route handler NUNCA se invoca.
+ *      Se llama desde el middleware vía el hook `onDebitOrphaned` (BLQ-MED-1),
+ *      NO desde el handler: `alreadySpentUsd = 0` → se reembolsa el step-0
+ *      entero, porque el pipeline no arrancó.
+ *   3. `reply.sent` DESPUÉS de compose — el 504 disparó mientras compose corría;
+ *      se pasa `result.totalCostUsdc` para NO reembolsar lo que sí se settleó.
+ *
+ * Los tres son mutuamente excluyentes: (2) sólo corre cuando `reply.sent` ya era
+ * true al terminar el middleware, y en ese caso Fastify saltea el handler, así
+ * que (1) y (3) no pueden ejecutarse. No hay doble refund posible.
+ *
+ * Precedente: WKH-127 (`orchestrate.ts:1304`) — mismo mecanismo (`budgetService
+ * .credit` / `creditWithDest` / `creditDelegation` / `creditSession` + encolado
+ * en `refundOutbox` cuando el refund no revirtió nada). NO se inventa un
+ * mecanismo nuevo.
+ *
+ * `alreadySpentUsd` es el costo REAL ya settleado del pipeline: el refund es
+ * `max(0, debitedUsd - alreadySpentUsd)`, así que nunca reembolsa de más.
+ *
+ * Ownership guard (CLAUDE.md): todas las variantes de credit reciben el
+ * `owner_ref` del caller autenticado (`request.a2aKeyRow.owner_ref` o el del
+ * contexto de delegación/sesión), nunca sólo el `keyId`.
+ *
+ * Best-effort: NUNCA lanza ni cambia el status de la respuesta.
+ */
+async function refundComposeStep0(
+  request: FastifyRequest,
+  alreadySpentUsd: number,
+): Promise<void> {
+  // Sólo el path a2a-key con débito real; x402 puro no debita budget.
+  const debitedUsd = request.composeEstimatedCostUsd;
+  const refundChainId = request.resolvedChainId;
+  if (
+    !request.a2aKeyRow ||
+    typeof debitedUsd !== 'number' ||
+    debitedUsd <= 0 ||
+    refundChainId === undefined
+  ) {
+    return;
+  }
+
+  const refundUsd = Math.max(0, debitedUsd - alreadySpentUsd);
+  if (refundUsd <= 0) return;
+
+  try {
+    // M3 (auditoría): el destino del refund DEBE matchear el del débito.
+    // El step-0 lo debitó el middleware con `request.composeDestination`
+    // (destino canónico resuelto por el preHandler). Reusamos ESE destino
+    // exacto vía creditWithDest (revierte también el dest-cap ledger). Si
+    // no hay destino fiable, usamos credit (sin dest-policy) para no romper
+    // el cap por destino.
+    //
+    // M1 (audit 2026-07-01): el débito step-0 bajo delegación/sesión es
+    // DUAL-LEDGER (debit_delegation_and_parent / debit_session_and_parent
+    // incrementan `total_spent`/`spent_usd` ADEMÁS del parent). Este
+    // bloque NO estaba gateado por contexto → refundeaba sólo el parent
+    // (credit/creditWithDest) y dejaba `total_spent`/`spent_usd` inflado
+    // (self-DoS de la credencial). Ahora enrutamos al refund DUAL-LEDGER
+    // simétrico al débito cuando hay delegación/sesión; el path master
+    // (sin contexto) conserva credit/creditWithDest INTACTO.
+    const creditRes = request.delegationContext
+      ? await budgetService.creditDelegation(
+          request.delegationContext.delegationId,
+          request.delegationContext.ownerRef,
+          request.delegationContext.keyId,
+          refundChainId,
+          refundUsd,
+          request.composeDestination,
+        )
+      : request.keySessionContext
+        ? await budgetService.creditSession(
+            request.keySessionContext.sessionId,
+            request.keySessionContext.ownerRef,
+            request.keySessionContext.keyId,
+            refundChainId,
+            refundUsd,
+            request.composeDestination,
+          )
+        : request.composeDestination
+          ? await budgetService.creditWithDest(
+              request.a2aKeyRow.id,
+              refundChainId,
+              refundUsd,
+              request.a2aKeyRow.owner_ref,
+              request.composeDestination,
+            )
+          : await budgetService.credit(
+              request.a2aKeyRow.id,
+              refundChainId,
+              refundUsd,
+              request.a2aKeyRow.owner_ref,
+            );
+    if (!creditRes.success) {
+      // CD-6: sin msg crudo de PG. No cambia el status code.
+      log.error(
+        {
+          keyId: request.a2aKeyRow.id,
+          chainId: refundChainId,
+          amountUsd: refundUsd,
+          requestId: request.id,
+        },
+        '[compose.refund-failed]',
+      );
+      // M6 (audit 2026-06-24): success:false ⟹ reverted:false / 0
+      // filas (nada se aplicó). Encolar para reintento confiable.
+      // Invariante anti-doble-refund: solo se encola cuando NADA se
+      // aplicó. Best-effort: no rompe el response.
+      await refundOutbox.enqueueRefund({
+        keyId: request.a2aKeyRow.id,
+        chainId: refundChainId,
+        amountUsd: refundUsd,
+        ownerRef: request.a2aKeyRow.owner_ref,
+        destination: request.composeDestination ?? null,
+        reason: 'compose-route.refund-failed',
+      });
+    }
+  } catch (e) {
+    // Best-effort: el fallo del refund NUNCA rompe el response.
+    log.error(
+      { detail: e instanceof Error ? e.message : String(e) },
+      '[compose.refund-threw]',
+    );
+    // M6: el credit tiró antes de aplicar nada → encolar para reintento.
+    await refundOutbox
+      .enqueueRefund({
+        keyId: request.a2aKeyRow.id,
+        chainId: refundChainId,
+        amountUsd: refundUsd,
+        ownerRef: request.a2aKeyRow.owner_ref,
+        destination: request.composeDestination ?? null,
+        reason: 'compose-route.refund-threw',
+      })
+      .catch((outboxErr) =>
+        log.error(
+          {
+            detail: outboxErr instanceof Error ? outboxErr.message : 'unknown',
+          },
+          '[compose.refund-outbox-threw]',
+        ),
+      );
+  }
 }
 
 async function resolveComposePriceHandler(
@@ -345,61 +583,62 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         createTimeoutHandler(
           parseInt(process.env.TIMEOUT_COMPOSE_MS ?? '180000', 10),
         ),
+        // HIGH-2 (2026-07-26): validación de shape ANTES del preHandler de precio
+        // y por lo tanto ANTES del débito. Un body malformado ya no se cobra (ni
+        // el precio real del step-0, ni el $1 de PLACEHOLDER_FEE_USD que se
+        // aplicaba cuando `steps` venía vacío y el preHandler de precio no
+        // inyectaba `composeEstimatedCostUsd`).
+        validateComposeBodyHandler,
         // WKH-59 (real-price-debit) DT-E: resolver precio ANTES del middleware
         // de debit para inyectar request.composeEstimatedCostUsd y manejar
         // 404 AGENT_NOT_FOUND / 503 REGISTRY_UNAVAILABLE.
         resolveComposePriceHandler,
-        ...requirePaymentOrA2AKey({
-          description:
-            'WasiAI Compose Service — Multi-agent pipeline execution',
-        }),
+        ...requirePaymentOrA2AKey(
+          {
+            description:
+              'WasiAI Compose Service — Multi-agent pipeline execution',
+          },
+          {
+            // BLQ-MED-1 (AR HIGH-2): credit-back del débito HUÉRFANO. Si el 504
+            // del `createTimeoutHandler` sale mientras el middleware debita (o
+            // mientras lee el header de budget post-débito), Fastify NO invoca
+            // este route handler (`handle-request.js:132`), así que un
+            // `if (reply.sent)` dentro del handler era código inalcanzable: el
+            // caller quedaba cobrado por un pipeline que jamás corrió. El
+            // middleware llama este hook en el único punto donde el débito está
+            // confirmado aplicado y todavía es reversible.
+            // `alreadySpentUsd = 0`: el pipeline no arrancó, nada se settleó.
+            onDebitOrphaned: (request) => refundComposeStep0(request, 0),
+          },
+        ),
       ],
     },
     async (request, reply: FastifyReply) => {
       const body = request.body;
 
-      if (
-        !body.steps ||
-        !Array.isArray(body.steps) ||
-        body.steps.length === 0
-      ) {
+      // HIGH-2: el guard REAL corre pre-débito en `validateComposeBodyHandler`.
+      // Esto es defense-in-depth (BLQ-MEDIO-1 layer 2): si alguien reordena la
+      // cadena de preHandlers, el pipeline malformado sigue sin llegar a
+      // composeService (que settlearía el prefijo válido 0..i-1 antes de fallar
+      // en el step malo). Mismo body de respuesta, misma función pura.
+      const invalidBody = validateComposeBody(body.steps);
+      if (invalidBody) {
         return reply.status(400).send({
-          error: 'Missing or empty steps array',
-          code: 'VALIDATION_ERROR',
+          ...invalidBody,
           requestId: request.id,
         });
       }
 
-      if (body.steps.length > 5) {
-        return reply.status(400).send({
-          error: 'Maximum 5 steps allowed per pipeline',
-          code: 'VALIDATION_ERROR',
-          requestId: request.id,
-        });
-      }
-
-      // BLQ-MEDIO-1 fix (layer 2 — close the unvalidated-input gap): reject the
-      // whole pipeline when ANY step lacks a string `agent`. Previously only
-      // step-0 was validated (by the price preHandler), so a malformed trailing
-      // step (e.g. non-string `agent`) reached composeService, which settles the
-      // valid 0..i-1 prefix downstream before failing on the bad step. On the
-      // x402 path there is no inbound refund, so the gateway eats the prefix cost.
-      // Rejecting up-front guarantees a malformed pipeline NEVER settles a partial
-      // prefix. This runs AFTER the payment middleware, but a 400 here is the
-      // failure mode we want (no compose call, no downstream settle).
-      const badStepIndex = body.steps.findIndex(
-        (s) => !s || typeof s.agent !== 'string',
-      );
-      if (badStepIndex !== -1) {
-        return reply.status(400).send({
-          error: `Step ${badStepIndex} is missing a string 'agent' field`,
-          code: 'VALIDATION_ERROR',
-          requestId: request.id,
-        });
-      }
-
-      // BLQ-2: bail early if timeout already sent 504
-      if (reply.sent) return;
+      // BLQ-MED-1 (AR HIGH-2): acá vivía un `if (reply.sent) { refund; return }`
+      // para el 504 pre-compose. Era CÓDIGO INALCANZABLE — Fastify no invoca el
+      // handler cuando la reply ya salió (`fastify/lib/handle-request.js:132`
+      // `preHandlerCallback` → `if (reply.sent) return`), y el AR lo confirmó con
+      // coverage sobre la suite completa (0 hits). Se BORRÓ en vez de dejarlo
+      // como falsa protección: ese caso lo cubre ahora el hook `onDebitOrphaned`
+      // que se le pasa a `requirePaymentOrA2AKey` (ver la cadena de preHandlers),
+      // que corre DENTRO del middleware, con el débito ya confirmado.
+      // El `if (reply.sent)` de ABAJO (post-compose) SÍ es alcanzable: ahí el
+      // handler ya estaba corriendo cuando el timer disparó.
 
       // WKH-58 fix-pack: propagate the a2a credential to the service so compose
       // can skip Pieverse inbound x402 (broken upstream WKH-45) when caller
@@ -437,7 +676,14 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       });
 
       // BLQ-2: bail early if timeout fired during compose
-      if (reply.sent) return;
+      // HIGH-2: el 504 se envió mientras compose corría; el débito step-0 sigue
+      // aplicado y la respuesta que ve el caller es un timeout. Se reembolsa con
+      // la MISMA fórmula que la rama de fallo — `result.totalCostUsdc` asegura
+      // que lo ya settleado NO se reembolsa (nunca se devuelve trabajo entregado).
+      if (reply.sent) {
+        await refundComposeStep0(request, result.totalCostUsdc);
+        return;
+      }
 
       if (!result.success) {
         // AUDIT A1 (ALTA, money-path): el middleware (path a2a-key) PRE-debitó el
@@ -450,106 +696,11 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         //   - step-0 falló  → totalCostUsdc=0  → reembolsa el step-0 entero.
         //   - step-0 settleó (su precio ya está en totalCostUsdc) → clamp a 0.
         // Solo aplica al path a2a-key con débito real (x402 puro no debita budget).
-        const debitedUsd = request.composeEstimatedCostUsd;
-        const refundChainId = request.resolvedChainId;
-        if (
-          request.a2aKeyRow &&
-          typeof debitedUsd === 'number' &&
-          debitedUsd > 0 &&
-          refundChainId !== undefined
-        ) {
-          const refundUsd = Math.max(0, debitedUsd - result.totalCostUsdc);
-          if (refundUsd > 0) {
-            try {
-              // M3 (auditoría): el destino del refund DEBE matchear el del débito.
-              // El step-0 lo debitó el middleware con `request.composeDestination`
-              // (destino canónico resuelto por el preHandler). Reusamos ESE destino
-              // exacto vía creditWithDest (revierte también el dest-cap ledger). Si
-              // no hay destino fiable, usamos credit (sin dest-policy) para no romper
-              // el cap por destino.
-              //
-              // M1 (audit 2026-07-01): el débito step-0 bajo delegación/sesión es
-              // DUAL-LEDGER (debit_delegation_and_parent / debit_session_and_parent
-              // incrementan `total_spent`/`spent_usd` ADEMÁS del parent). Este
-              // bloque NO estaba gateado por contexto → refundeaba sólo el parent
-              // (credit/creditWithDest) y dejaba `total_spent`/`spent_usd` inflado
-              // (self-DoS de la credencial). Ahora enrutamos al refund DUAL-LEDGER
-              // simétrico al débito cuando hay delegación/sesión; el path master
-              // (sin contexto) conserva credit/creditWithDest INTACTO.
-              const creditRes = request.delegationContext
-                ? await budgetService.creditDelegation(
-                    request.delegationContext.delegationId,
-                    request.delegationContext.ownerRef,
-                    request.delegationContext.keyId,
-                    refundChainId,
-                    refundUsd,
-                    request.composeDestination,
-                  )
-                : request.keySessionContext
-                  ? await budgetService.creditSession(
-                      request.keySessionContext.sessionId,
-                      request.keySessionContext.ownerRef,
-                      request.keySessionContext.keyId,
-                      refundChainId,
-                      refundUsd,
-                      request.composeDestination,
-                    )
-                  : request.composeDestination
-                    ? await budgetService.creditWithDest(
-                        request.a2aKeyRow.id,
-                        refundChainId,
-                        refundUsd,
-                        request.a2aKeyRow.owner_ref,
-                        request.composeDestination,
-                      )
-                    : await budgetService.credit(
-                        request.a2aKeyRow.id,
-                        refundChainId,
-                        refundUsd,
-                        request.a2aKeyRow.owner_ref,
-                      );
-              if (!creditRes.success) {
-                // CD-6: sin msg crudo de PG. No cambia el status code.
-                log.error(
-                  {
-                    keyId: request.a2aKeyRow.id,
-                    chainId: refundChainId,
-                    amountUsd: refundUsd,
-                    requestId: request.id,
-                  },
-                  '[compose.refund-failed]',
-                );
-                // M6 (audit 2026-06-24): success:false ⟹ reverted:false / 0
-                // filas (nada se aplicó). Encolar para reintento confiable.
-                // Invariante anti-doble-refund: solo se encola cuando NADA se
-                // aplicó. Best-effort: no rompe el response.
-                await refundOutbox.enqueueRefund({
-                  keyId: request.a2aKeyRow.id,
-                  chainId: refundChainId,
-                  amountUsd: refundUsd,
-                  ownerRef: request.a2aKeyRow.owner_ref,
-                  destination: request.composeDestination ?? null,
-                  reason: 'compose-route.refund-failed',
-                });
-              }
-            } catch (e) {
-              // Best-effort: el fallo del refund NUNCA rompe el response.
-              log.error(
-                { detail: e instanceof Error ? e.message : String(e) },
-                '[compose.refund-threw]',
-              );
-              // M6: el credit tiró antes de aplicar nada → encolar para reintento.
-              await refundOutbox.enqueueRefund({
-                keyId: request.a2aKeyRow.id,
-                chainId: refundChainId,
-                amountUsd: refundUsd,
-                ownerRef: request.a2aKeyRow.owner_ref,
-                destination: request.composeDestination ?? null,
-                reason: 'compose-route.refund-threw',
-              });
-            }
-          }
-        }
+        //
+        // HIGH-2 (2026-07-26): el bloque se movió a `refundComposeStep0` SIN
+        // cambiar la matemática ni los `reason` del outbox, para reusarlo en los
+        // dos caminos de 504 que también cobraban sin entregar nada.
+        await refundComposeStep0(request, result.totalCostUsdc);
 
         // WKH-61: errorCode='SCOPE_DENIED' → 403; default 400 (preserva legacy).
         // WKH-125 (AC-2): errorCode='DEST_CAP_EXCEEDED' → 402 (cap por destino

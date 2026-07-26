@@ -7,6 +7,12 @@
  * IMPORTANTE: auth.value puede contener secrets.
  * NUNCA loguear el campo auth completo ni auth.value.
  *
+ * HIGH-1 (2026-07-26): los read-paths que cruzan HTTP devuelven `RegistryPublic`
+ * (sin `auth`), producido por `toRegistryPublic()`. Los métodos que SÍ exponen
+ * la credencial llevan el sufijo `WithSecrets` (más `getEnabled`, cuyo consumo
+ * es exclusivamente el fanout outbound). Ver `types/index.ts:RegistryPublic`
+ * para el racional de por qué el compilador bloquea el leak.
+ *
  * WKH-63 (SEC-REG-1): register/update/delete reciben `ownerRef` y aplican
  * ownership guard en app-layer. La fila pre-existente 'wasiai' se trata
  * como `owner_ref='system'` (back-fill de la migration) y se rechaza con
@@ -25,6 +31,7 @@ import type { Database, Json } from '../types/database.types.js';
 import type {
   RegistryAuth,
   RegistryConfig,
+  RegistryPublic,
   RegistrySchema,
 } from '../types/index.js';
 import {
@@ -90,6 +97,47 @@ function rowToRegistry(row: RegistryRow): RegistryConfig {
   };
 }
 
+// ── Helper: RegistryConfig → RegistryPublic (HIGH-1) ────────
+
+/**
+ * HIGH-1 (2026-07-26): único productor de `RegistryPublic`.
+ *
+ * `registries.auth.value` es una credencial outbound viva. `GET /registries`
+ * devolvía `list()` verbatim y la exponía en claro a cualquier caller (endpoint
+ * público, sin auth). El fix no es un `delete row.auth.value` en la ruta — eso
+ * lo olvida el próximo endpoint — sino que el tipo que sale por HTTP NO PUEDE
+ * contener el secreto (`RegistryPublic.auth?: never` + `authConfigured`
+ * requerido → `RegistryConfig` no es asignable a `RegistryPublic`).
+ *
+ * En lugar del secreto se expone el esquema declarado (`authType`) y si hay o
+ * no credencial configurada. NUNCA prefijo, sufijo, largo ni hash del valor.
+ *
+ * MNR-5 (AR HIGH-2): tampoco sale `ownerRef`. `GET /registries` es PÚBLICO (sin
+ * auth) y la convención del repo (`types/index.ts`, WKH-141/CD-6) prohíbe
+ * explícitamente exponer identificadores de tenant en payloads públicos:
+ * enumerar `owner_ref` mapea qué tenant registró qué marketplace. Era
+ * pre-existente (`list()` ya lo devolvía), pero acuñar el tipo público es el
+ * momento de dropearlo. Los guards de ownership internos (`update`/`delete`)
+ * leen `ownerRef` de `getWithSecrets()`, que nunca cruza HTTP.
+ */
+export function toRegistryPublic(registry: RegistryConfig): RegistryPublic {
+  const value = registry.auth?.value;
+  return {
+    id: registry.id,
+    name: registry.name,
+    discoveryEndpoint: registry.discoveryEndpoint,
+    invokeEndpoint: registry.invokeEndpoint,
+    ...(registry.agentEndpoint !== undefined && {
+      agentEndpoint: registry.agentEndpoint,
+    }),
+    schema: registry.schema,
+    enabled: registry.enabled,
+    createdAt: registry.createdAt,
+    ...(registry.auth?.type !== undefined && { authType: registry.auth.type }),
+    authConfigured: typeof value === 'string' && value.length > 0,
+  };
+}
+
 // ── Helper: RegistryConfig → columnas para INSERT/UPDATE ────
 
 function registryToRow(
@@ -116,8 +164,12 @@ function registryToRow(
 export const registryService = {
   /**
    * List all registries (público — visibilidad no cambia con WKH-63).
+   *
+   * HIGH-1: devuelve `RegistryPublic[]` — SIN `auth.value`. No existe variante
+   * `listWithSecrets`: ningún consumidor necesita las credenciales de TODAS
+   * las registries a la vez (el fanout outbound usa `getEnabled`).
    */
-  async list(): Promise<RegistryConfig[]> {
+  async list(): Promise<RegistryPublic[]> {
     const { data, error } = await supabase
       .from('registries')
       .select('*')
@@ -126,13 +178,35 @@ export const registryService = {
     if (error) throw new Error(`Failed to list registries: ${error.message}`);
 
     // M9: narrowing acotado — `schema`/`auth` jsonb (`Json`) → shapes de dominio.
-    return (data as unknown as RegistryRow[]).map(rowToRegistry);
+    return (data as unknown as RegistryRow[])
+      .map(rowToRegistry)
+      .map(toRegistryPublic);
   },
 
   /**
    * Get a specific registry by ID (público — visibilidad no cambia).
+   *
+   * HIGH-1: devuelve `RegistryPublic` — SIN `auth.value`. Este es el método
+   * por defecto para rutas HTTP y checks de existencia. Si necesitás la
+   * credencial para un fetch outbound — o el `ownerRef` para un guard de
+   * ownership (MNR-5: ya no viaja en la proyección pública) — usá
+   * `getWithSecrets`, cuyo nombre hace explícito que el resultado NO puede
+   * cruzar el borde HTTP.
    */
-  async get(id: string): Promise<RegistryConfig | undefined> {
+  async get(id: string): Promise<RegistryPublic | undefined> {
+    const registry = await this.getWithSecrets(id);
+    return registry ? toRegistryPublic(registry) : undefined;
+  },
+
+  /**
+   * ⚠️ INTERNO — devuelve la fila COMPLETA, con `auth.value` en claro.
+   *
+   * HIGH-1: usar SOLO para construir headers de un fetch outbound
+   * (`discovery.fetchFromRegistry`). El resultado NUNCA debe llegar a
+   * `reply.send()`: pasalo por `toRegistryPublic()` primero (el tipo
+   * `RegistryPublic` no lo acepta directamente, así que `tsc` te avisa).
+   */
+  async getWithSecrets(id: string): Promise<RegistryConfig | undefined> {
     const { data, error } = await supabase
       .from('registries')
       .select('*')
@@ -150,11 +224,15 @@ export const registryService = {
    * Register a new marketplace.
    * ID is generated from name (slug). El `ownerRef` lo provee el route
    * handler desde `request.a2aKeyRow.owner_ref` (WKH-63).
+   *
+   * HIGH-1: la respuesta es `RegistryPublic` — el echo-back del row insertado
+   * tampoco repite `auth.value` (aunque el caller lo acabe de enviar, el
+   * response body queda en logs/proxies del cliente).
    */
   async register(
     config: Omit<RegistryConfig, 'id' | 'createdAt' | 'ownerRef'>,
     ownerRef: string,
-  ): Promise<RegistryConfig> {
+  ): Promise<RegistryPublic> {
     // Defense-in-depth (WKH-62): re-validate even if the route handler
     // bypassed the SSRF guard. The service throws Error (not
     // SSRFViolationError) so callers see a uniform message.
@@ -207,7 +285,7 @@ export const registryService = {
     }
 
     // M9: narrowing acotado — `schema`/`auth` jsonb → shapes de dominio.
-    return rowToRegistry(data as unknown as RegistryRow);
+    return toRegistryPublic(rowToRegistry(data as unknown as RegistryRow));
   },
 
   /**
@@ -232,9 +310,13 @@ export const registryService = {
     id: string,
     updates: Partial<Omit<RegistryConfig, 'id' | 'createdAt' | 'ownerRef'>>,
     ownerRef: string,
-  ): Promise<RegistryConfig> {
-    // 1+2+3+4: pre-fetch + ownership/system check
-    const existing = await this.get(id);
+  ): Promise<RegistryPublic> {
+    // 1+2+3+4: pre-fetch + ownership/system check.
+    // MNR-5: `getWithSecrets` (misma query que `get`) porque el guard necesita
+    // `ownerRef`, que ya NO viaja en la proyección pública. `existing` es
+    // INTERNO: sólo se le leen `ownerRef`; el response se construye abajo con
+    // `toRegistryPublic(...)` sobre la fila fresca del UPDATE.
+    const existing = await this.getWithSecrets(id);
     if (!existing) {
       logOwnershipMismatch({
         op: 'registryUpdate',
@@ -312,7 +394,9 @@ export const registryService = {
     }
 
     // M9: narrowing acotado — `schema`/`auth` jsonb → shapes de dominio.
-    return rowToRegistry(data as unknown as RegistryRow);
+    // HIGH-1: el PATCH devolvía la fila entera, incluida la credencial que el
+    // caller NO tocó en este request.
+    return toRegistryPublic(rowToRegistry(data as unknown as RegistryRow));
   },
 
   /**
@@ -327,7 +411,9 @@ export const registryService = {
    * que `false` solo aparece en una race condition.)
    */
   async delete(id: string, ownerRef: string): Promise<boolean> {
-    const existing = await this.get(id);
+    // MNR-5: ver `update` — el guard lee `ownerRef`, que ya no está en la
+    // proyección pública. Nada de `existing` se devuelve al caller.
+    const existing = await this.getWithSecrets(id);
     if (!existing) {
       logOwnershipMismatch({
         op: 'registryDelete',
@@ -365,7 +451,13 @@ export const registryService = {
   },
 
   /**
-   * Get all enabled registries (público — usado por discovery).
+   * ⚠️ INTERNO — devuelve filas COMPLETAS, con `auth.value` en claro.
+   *
+   * Usado por el fanout outbound (`discovery`, `compose`) y por
+   * `routes/agent-card.ts`, que solo lee `auth.type` vía
+   * `agentCardService.resolveAuthSchemes`. HIGH-1: ninguna ruta devuelve este
+   * resultado verbatim; si agregás un read-path que lo haga, mapealo con
+   * `toRegistryPublic()` (y el test `registries.redaction.test.ts` lo caza).
    */
   async getEnabled(): Promise<RegistryConfig[]> {
     const { data, error } = await supabase

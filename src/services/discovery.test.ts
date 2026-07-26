@@ -22,6 +22,9 @@ vi.mock('./registry.js', () => ({
   registryService: {
     getEnabled: vi.fn(),
     get: vi.fn(),
+    // HIGH-1: el filtro `query.registry` usa `getWithSecrets` (necesita
+    // `auth.value` para el header outbound). `get` quedó redactado.
+    getWithSecrets: vi.fn(),
   },
 }));
 

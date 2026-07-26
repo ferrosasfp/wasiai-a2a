@@ -99,6 +99,8 @@ const REGISTRY_RESPONSE = {
   enabled: true,
   createdAt: new Date(),
   ownerRef: 'tenant-A',
+  // HIGH-1: register/update devuelven `RegistryPublic` (sin `auth`).
+  authConfigured: false,
 };
 
 describe('registries routes — ownership integration (WKH-63 W3)', () => {

@@ -166,8 +166,11 @@ export const discoveryService = {
    * Discover agents across all enabled registries
    */
   async discover(query: DiscoveryQuery): Promise<DiscoveryResult> {
+    // HIGH-1: `getWithSecrets` (no `get`) porque `fetchFromRegistry` necesita
+    // `auth.value` para armar el header outbound. El RegistryConfig NUNCA sale
+    // en la respuesta: `DiscoveryResult.registries` es `string[]` (nombres).
     const registries = query.registry
-      ? ([await registryService.get(query.registry)].filter(
+      ? ([await registryService.getWithSecrets(query.registry)].filter(
           Boolean,
         ) as RegistryConfig[])
       : await registryService.getEnabled();
@@ -554,8 +557,10 @@ export const discoveryService = {
       }
     }
 
+    // HIGH-1: ver `discover()` — el fetch outbound necesita `auth.value`. El
+    // valor de retorno de `getAgent` es un `Agent`, nunca el RegistryConfig.
     const registries = registryId
-      ? ([await registryService.get(registryId)].filter(
+      ? ([await registryService.getWithSecrets(registryId)].filter(
           Boolean,
         ) as RegistryConfig[])
       : await registryService.getEnabled();
