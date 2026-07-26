@@ -161,6 +161,19 @@ function buildDeclaration(
   return { tokenId, chainId };
 }
 
+// ─── Fix-pack P1 (hallazgo 2): `minReputation` ─────────────────────────
+// El parámetro se aceptaba en GET/POST /discover, viajaba en el DiscoveryQuery
+// y NUNCA se leía acá: no filtraba nada. Un caller creía estar pidiendo agentes
+// con reputación mínima y recibía cualquiera.
+//
+// Se implementa (hay fuente real y YA cableada en este mismo path: el score
+// off-chain 0-100 de `reputationService.computeReputationBatch`, adjuntado
+// pre-limit por `attachReputations` — costo del filtro: 0 queries nuevas).
+//
+// La VALIDACIÓN del parámetro vive en `../lib/discovery-query.js` (módulo leaf),
+// no acá: los tests de la ruta mockean este service completo, así que un export
+// nuevo del service que la ruta consuma quedaría `undefined` en esos tests.
+
 export const discoveryService = {
   /**
    * Discover agents across all enabled registries
@@ -324,6 +337,32 @@ export const discoveryService = {
     // sea el top-N por reputación real.
     await this.attachReputations(allAgents);
 
+    // ── Fix-pack P1 (hallazgo 2): `minReputation` filtra DE VERDAD ──────
+    // Corre acá: después de `attachReputations` (necesita el score) y ANTES del
+    // sort/limit, así que también alimenta `total` (matches reales) y la página
+    // se llena con los que SÍ pasan el filtro.
+    //
+    // Filtra SÓLO `computedReputation.score` (off-chain, 0-100, derivado de
+    // tasks efectivamente liquidadas con cap anti-sybil por caller) y NO usa el
+    // fallback `?? a.reputation` que sí usa el `repValue` del sort de abajo.
+    // Intencional: `agent.reputation` lo AUTO-REPORTA el registry en la card
+    // (`mapAgent`, `Number(raw.reputation)`) en una escala indefinida — un filtro
+    // de calidad cuyo valor lo controla la parte que se está filtrando no filtra
+    // nada (basta declarar `reputation: 100`). Ordenar con un dato auto-reportado
+    // es cosmético; FILTRAR con él es una falsa garantía. Por eso el filtro es
+    // deliberadamente MÁS estricto que el sort, que queda intacto.
+    //
+    // FAIL-SAFE: sin score computado (0 tasks liquidadas, o batch degradado a
+    // Map vacío) el agente cuenta 0 → queda EXCLUIDO si `minReputation > 0`. Un
+    // agente sin historial no se cuela por un filtro de calidad.
+    if (query.minReputation != null) {
+      const min = query.minReputation;
+      allAgents = allAgents.filter((a) => {
+        const score = a.computedReputation?.score;
+        return (Number.isFinite(score) ? (score as number) : 0) >= min;
+      });
+    }
+
     // Sort: verified-first (AC-7), then reputation (desc), then price (asc).
     // WKH-103 (AC-6/CD-10): lee computedReputation.score con fallback al
     // reputation upstream del registry (NO reasigna `reputation`).
@@ -343,7 +382,9 @@ export const discoveryService = {
       return a.priceUsdc - b.priceUsdc;
     });
 
-    // Apply limit
+    // Apply limit (PAGE SIZE — post-filtro, post-sort). Fix-pack P1: el fetch
+    // upstream usa su propio over-fetch (`resolveUpstreamFetchLimit`), así que
+    // acá siempre hay candidatos de sobra para llenar la página.
     const limited = query.limit ? allAgents.slice(0, query.limit) : allAgents;
 
     // WKH-100 (AC-8/DT-18): enrich batch post-limit with verified ERC-8004
@@ -357,6 +398,12 @@ export const discoveryService = {
 
     return {
       agents: enriched,
+      // CONTRATO (fix-pack P1, hallazgo 1): `total` = matches TOTALES de los
+      // filtros, PRE-`limit` → es el denominador de paginación, por lo que
+      // `total >= agents.length` cuando hay `limit`. NO es el tamaño de la
+      // página. Antes del fix este número venía de un pool ya truncado por el
+      // registry upstream, así que SUBESTIMABA los matches (mentía en magnitud,
+      // no en semántica).
       total: allAgents.length,
       registries: contributingRegistries,
     };
@@ -443,8 +490,16 @@ export const discoveryService = {
     if (query.query && schema.queryParam && !skipUpstreamQuery) {
       url.searchParams.set(schema.queryParam, query.query);
     }
+    // Fix-pack P1 (hallazgo 1): se manda el OVER-FETCH, no el page size del
+    // caller. El gate `query.limit &&` se preserva a propósito: sin `limit` del
+    // caller seguimos sin mandar `limitParam` (comportamiento byte-idéntico al
+    // de hoy) — imponer un cap donde antes no había ninguno sería reintroducir
+    // el mismo bug de clase "esconder agentes" en el path sin `limit`.
     if (query.limit && schema.limitParam) {
-      url.searchParams.set(schema.limitParam, query.limit.toString());
+      url.searchParams.set(
+        schema.limitParam,
+        resolveUpstreamFetchLimit(query.limit).toString(),
+      );
     }
     if (query.maxPrice && schema.maxPriceParam) {
       url.searchParams.set(schema.maxPriceParam, query.maxPrice.toString());
@@ -624,6 +679,33 @@ export const discoveryService = {
     return null;
   },
 };
+
+// ─── Fix-pack P1 (hallazgo 1): over-fetch upstream ────────────────────
+// El `limit` del caller es un PAGE SIZE que se aplica post-filtro
+// (`runDiscoveryPipeline`, `.slice(0, query.limit)`). Reenviarlo como límite de
+// fetch upstream truncaba el candidate-set ANTES de los filtros locales
+// (status/verified/caps/free-text/maxPrice — que existen justamente porque
+// "upstream may not support all filter params"), así que cada agente descartado
+// localmente era un slot de la página que ya no se podía rellenar: la página
+// salía corta y `total` subestimaba los matches. Medido: limit=5 devolvía 2.
+//
+// Ahora el upstream recibe un límite de OVER-FETCH independiente del page size,
+// para que los filtros locales tengan holgura. Monótono: si el caller pide más
+// que el over-fetch, gana el caller (nunca under-fetch).
+const DEFAULT_UPSTREAM_FETCH_LIMIT = 200;
+
+/**
+ * Límite a reenviar al registry upstream. NO es el page size.
+ * `max(pageLimit, DISCOVERY_UPSTREAM_FETCH_LIMIT ?? 200)`.
+ * Patrón de env de `resolveScaleFactor` (services/reputation.ts): valor
+ * inválido/ausente → default (nunca NaN en la query string).
+ */
+export function resolveUpstreamFetchLimit(pageLimit: number): number {
+  const raw = process.env.DISCOVERY_UPSTREAM_FETCH_LIMIT;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  const base = Number.isFinite(n) && n > 0 ? n : DEFAULT_UPSTREAM_FETCH_LIMIT;
+  return Math.max(pageLimit, base);
+}
 
 // Helper: Get nested value from object using dot notation
 function getNestedValue(obj: unknown, path: string): unknown {

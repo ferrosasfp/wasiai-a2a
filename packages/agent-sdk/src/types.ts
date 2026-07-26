@@ -70,7 +70,15 @@ export interface DiscoverQuery {
   goal?: string; // → q
   capabilities?: string[];
   maxPrice?: number;
+  /**
+   * Score de reputación off-chain MÍNIMO computado por el gateway, escala
+   * **0-100** (fix-pack P1: antes el gateway lo aceptaba y NO filtraba nada).
+   * Filtra por tasks efectivamente liquidadas, NO por el `reputation` que el
+   * registry auto-reporta. Un agente sin historial cuenta 0 → excluido si
+   * `minReputation > 0`. Fuera de `[0,100]` o no numérico → 400 del gateway.
+   */
   minReputation?: number;
+  /** Page size. La respuesta trae `total` = matches ANTES del limit. */
   limit?: number;
   registry?: string;
   verified?: boolean;
