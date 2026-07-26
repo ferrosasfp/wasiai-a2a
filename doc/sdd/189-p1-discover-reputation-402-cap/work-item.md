@@ -365,16 +365,65 @@ necesita sobrevivir a la ventana de vida de SU PROPIO compose-run.
 
 ### TTL elegido y su justificación
 
-Vida máxima de un compose-run = `TIMEOUT_COMPOSE_MS`
-(`src/routes/compose.ts:584`, default **180.000 ms** = 3 min). Un run no puede
-sobrevivir a su propio timeout.
+> ⚠️ **CORREGIDO POR EL AR (MENOR-1).** Lo que decía esta sección era falso y se
+> reemplazó por la versión honesta de más abajo. Se deja el texto viejo tachado
+> porque el error importa: era una garantía inventada, escrita justo en el texto
+> que el operador lee antes de bajar una perilla de dinero.
+>
+> ~~Vida máxima de un compose-run = `TIMEOUT_COMPOSE_MS` (default 180.000 ms).
+> Un run no puede sobrevivir a su propio timeout. TTL default =
+> `max(TIMEOUT_COMPOSE_MS × 10, 30 min)`, margen de 10×. Piso del override =
+> `TIMEOUT_COMPOSE_MS × 2`: un operador no puede configurar un TTL que expire
+> dentro de la ventana viva de un run.~~
 
-- **TTL default = `max(TIMEOUT_COMPOSE_MS × 10, 1.800.000 ms)` = 30 min** con el
-  default de 180 s. Margen de **10×** sobre la vida máxima posible del run, y se
-  mueve solo si el operador sube el timeout del compose.
-- Override `SOLANA_INTENT_DEDUP_TTL_MS`, **con piso `TIMEOUT_COMPOSE_MS × 2`**:
-  un operador no puede configurar un TTL que expire dentro de la ventana viva de
-  un run. El piso es el guard fail-safe del knob.
+**Por qué era falso** (verificado archivo por archivo):
+
+- `src/middleware/timeout.ts:12-20` sólo **manda** el 504. No hay
+  `AbortController`, no hay `signal`, no se cancela nada: el pipeline sigue
+  corriendo después de que el caller recibió el timeout.
+- `src/services/compose.ts:1054` invoca al agente con `ssrfFetch(...)` **sin**
+  `signal`, y `src/lib/ssrf-dispatcher.ts:114-125` construye el `Agent` de undici
+  **sin** `headersTimeout`/`bodyTimeout` → el único freno son los defaults de
+  undici (300 s). Y `bodyTimeout` es de **inactividad**: un agente que manda un
+  byte cada 299 s mantiene el hop vivo indefinidamente.
+
+Conclusión: **no existe cota superior dura** de wall-clock para un run, así que
+NINGÚN número de TTL puede prometer "no expira dentro de un run vivo". Con el TTL
+viejo de 30 min contra una cota realista de 25 min, el margen efectivo era ~1.2×,
+no 10×.
+
+### Decisión (opción B del AR): no cancelar, y decir la verdad
+
+Se descartó cancelar el pipeline en el 504. Abortar un run **en medio de un
+settle** produce exactamente el estado indeterminado
+broadcasteado-pero-no-confirmado del que este Map protege: el remedio sería peor
+que la enfermedad, y cancelar el money-path no es scope de un fix-pack. (Si
+alguna vez se hace, el lugar correcto es un deadline por hop en
+`ssrf-dispatcher.ts`, no un `abort` sobre el pipeline entero.)
+
+Lo que sí cambia: los números dejan de derivar de una env que **no** gobierna la
+ejecución y pasan a derivar de la cota más grande que se puede citar con datos del
+repo (`src/adapters/solana/payment.ts`):
+
+```
+MAX_COMPOSE_STEPS            = 5        (routes/compose.ts:128, `steps.length > 5`)
+UNDICI_DEFAULT_HOP_TIMEOUT   = 300_000  (default de undici 8; nuestro código no lo fija)
+ESTIMATED_MAX_RUN_WALL_CLOCK = 5 × 300 s = 25 min
+```
+
+- **Ventana protegida** = `max(25 min, TIMEOUT_COMPOSE_MS × 2)` = **25 min**.
+- **Piso del override** = la ventana protegida (**25 min**, antes 6 min). NO se
+  vende como garantía: es coherencia interna — un TTL por debajo de la ventana
+  protegida haría expirar una entrada que el desalojo todavía considera intocable.
+- **TTL default** = `max(25 min × 2, TIMEOUT_COMPOSE_MS × 10, 30 min)` =
+  **50 min** (antes 30 min).
+
+La cota es una **estimación, no una garantía**, y así está escrita en el código y
+en `.env.example`: cuenta UN hop por step (el invoke) y no cuenta los hops del
+settle ni el caso del body trickle-feedeado, que no tiene techo. El número es
+incómodo (25 min contra los 3 min del timeout del compose) y es el que hay.
+Fijado por `T-TTL-11` (`intent-dedup.test.ts`), que assertea que el piso es
+`>= ` la cota y **>** `TIMEOUT_COMPOSE_MS × 2`.
 
 ### Cap: SOFT, con ventana protegida (fail-safe hacia no-pagar-dos-veces)
 
@@ -384,10 +433,20 @@ viva → doble pago. Política elegida:
 1. En cada `set`, barrer las entradas **expiradas** (edad > TTL).
 2. Si aun así se supera `SOLANA_INTENT_DEDUP_MAX_ENTRIES` (default 10.000),
    desalojar las más viejas **primero**, pero **NUNCA** una con edad
-   < ventana protegida (`TIMEOUT_COMPOSE_MS × 2`).
+   < ventana protegida (25 min con los defaults — ver la corrección de MENOR-1).
 3. Si TODAS las entradas están dentro de la ventana protegida, **no se desaloja
-   nada**: el Map excede el cap temporalmente y se emite un `warn` (una vez por
-   ventana) como señal operativa.
+   nada**: el Map excede el cap temporalmente y se emite un `warn` como señal
+   operativa, **una vez por EPISODIO de saturación**: el flag se re-arma en cuanto
+   el tamaño vuelve a bajar del cap (por barrido de expiradas, por desalojo o
+   porque el operador subió el cap).
+
+   > ⚠️ **CORREGIDO POR EL AR (MENOR-2).** Acá decía «una vez por ventana» y era
+   > falso: `_warnedSoftCapBreached` sólo se re-armaba en `_resetSolanaClients`
+   > (TEST-ONLY), o sea que era **warn-once-per-proceso** — breach a la hora 1,
+   > recuperación, breach a la hora 20 → **silencio**. Mismo anti-patrón que este
+   > mismo fix-pack ya había documentado para `FLAG_OFF` (`auto-blindaje.md`).
+   > Fijado por `T-CAP-6` (recuperación por cap) y `T-CAP-7` (recuperación por
+   > desalojo).
 
 O sea: ante la duda, **conservar** — exactamente la preferencia pedida. El cap
 acota el crecimiento en régimen; la ventana protegida garantiza que la
@@ -402,3 +461,162 @@ event loop vivo ni introducir flakiness en los tests.
 mismo accessor con chequeo de TTL: una entrada expirada se trata como ausente.
 El `delete` del self-heal (`:217`) y el `clear()` del reset (`:398`) siguen
 funcionando igual.
+
+---
+
+# Fix-pack del AR (iteración 2) — 1 BLOQUEANTE-BAJO + 6 MENOR
+
+El AR validó los 5 fixes (reprodujo el barrido de 200.000 floats, la cobertura
+hit-por-línea de los 5 sitios de dinero y las 3 mutaciones, + 4 propias) y
+**rechazó** por un efecto colateral cruzado que el work-item no analizaba.
+
+## BLQ-BAJO-1 — el over-fetch de H1 cambió la MEMBRESÍA del pool que `/compose` usa para hidratar `payment.chain`
+
+**Mecanismo**: `queryRegistry` es compartido. `compose.resolveAgent` pedía
+`discover({ limit: 50 })` para dos cosas del money-path: (a) hidratar el
+`payment.chain` real (WKH-113/BASE-08, CD-5/CD-10 — el `getAgent` del marketplace
+hardcodea `chain=avalanche`) y (b) el fallback de resolución por slug. Ese pool es
+el **top-50 RANKEADO**. Con el over-fetch el ranking se calcula sobre ≤200 filas
+por registry en vez de ≤50: **mismos 50 slots, 4× candidatos** ⇒ la composición
+del top-50 cambia y un agente que antes entraba puede quedar afuera.
+
+Si el que queda afuera es un agente non-EVM resuelto vía `agentEndpoint`, pierde
+la hidratación ⇒ `payment.chain` se queda en el default ⇒ el leg downstream se
+saltea (guard de familia del payTo / `NO_PAYMENT_FIELD`) o apunta al rail
+equivocado: **el agente no se cobra, en silencio**. Atenuante: los agentes
+self-published resuelven local-first con su payment completo
+(`discovery.ts:606-611`), así que los remit de la incubación no se ven afectados.
+
+### Fix
+
+`src/lib/discovery-fetch-limit.ts` (módulo **leaf** nuevo: `compose.ts` no puede
+importar de `services/discovery.ts` porque media docena de suites lo mockean
+completo — la misma reincidencia ya documentada en `auto-blindaje.md`). Se movió
+ahí `resolveUpstreamFetchLimit` y se agregó
+`resolveComposeAgentPoolLimit() = resolveUpstreamFetchLimit(50)`.
+
+Propiedad que mata la clase de bug: `resolveUpstreamFetchLimit` es **idempotente**
+(`max(max(a,b), b) === max(a,b)`), así que el page size del pool queda **igual** al
+límite que se le pide al registry ⇒ el `slice` post-filtro **no puede** descartar
+un candidato que el fetch trajo. Y el pool es **superconjunto** del de `main` (el
+fetch de 200 filas en orden de registry contiene las 50 de antes) ⇒ este cambio no
+puede esconder un agente que `main` sí resolvía.
+
+`compose.ts` tiene ahora **un solo productor** del pool (`discoverAgentPool`),
+consumido por `createDiscoverCache` y por el fallback de `resolveAgent`: si
+divergieran, el hit de cache y el fallback resolverían sobre pools distintos.
+
+**Por qué NO `discover({})`** (la otra opción que ofrecía el AR): sin `limit` no se
+manda `limitParam`, así que el tamaño del pool lo decidiría el **default de
+paginación del registry**. Un registry que pagina de a 25 devolvería 25 filas:
+peor que hoy y fuera de nuestro control.
+
+### Tests (`src/services/compose.discovery-pool.test.ts`, 7)
+
+No mockea `discoveryService` — el bug vive en la interacción page-size ↔
+over-fetch, y un mock de `discover()` fabrica el pool y por construcción no lo
+puede observar. Se mockea sólo el borde de red (undici), como en
+`discovery.limit.test.ts`.
+
+- `T-POOL-1/2`: 150 candidatos, target último del ranking → `payment.chain` sigue
+  hidratando (`solana-devnet` y `base-sepolia`).
+- `T-POOL-3`: el page size del pool == el over-fetch pedido al registry.
+- `T-POOL-4/5`: el pool sigue a `DISCOVERY_UPSTREAM_FETCH_LIMIT` (300) y respeta
+  el piso de 50 si el operador lo baja.
+- `T-POOL-6`: el fallback por slug (getAgent 404) resuelve del MISMO pool.
+- `T-POOL-7`: **borde del settle por el path real de `/compose`** (con
+  `DiscoverCache`): la chain llega a `signAndSettleDownstream`.
+
+**Mutación**:
+
+| Mutante | Resultado |
+|---|---|
+| `resolveComposeAgentPoolLimit()` → `50` (o sea `main`) | **4 de 7 fallan** (T-POOL-1/2/4/6) |
+| `createDiscoverCache` → `discover({limit:50})` (divergencia cache↔fallback) | **1 de 7 falla** (T-POOL-7, el único que pasa por el cache) |
+
+### Otros consumidores de `discover()` con `limit` implícito (revisados, el bug es de clase)
+
+| Sitio | `limit` | Veredicto |
+|---|---|---|
+| `services/compose.ts` (cache + fallback) | 50 | **AFECTADO** — money-path. Corregido. |
+| `services/orchestrate.ts:551,571` | 50 | **NO es bug**: es una ventana de candidatos para el planner LLM, **rankeada por diseño** (WKH-128). El over-fetch la hace más correcta (top-50 de 200 candidatos reales en vez de top-50 de 50 filas en orden de registry). No hidrata pagos: el `payment` lo resuelve después `compose.resolveAgent`. |
+| `mcp/tools/discover-agents.ts:37` | `input.limit ?? 20` | **NO es bug**: es un endpoint de discovery, donde "top-N rankeado" ES el contrato. `mcp/schemas.ts:58` ya valida `integer, minimum 1, maximum 100`. |
+| `routes/capabilities.ts:43` | ninguno | **No afectado**: sin `limit` no se manda `limitParam` ni se aplica `slice` (byte-idéntico). |
+
+## MENOR-1 — la garantía falsa del knob de TTL
+
+Ver la corrección in-place en la sección H5 (opción B: no cancelar, decir la
+verdad, derivar el piso de la cota estimada por hops = 25 min). Tocados:
+`src/adapters/solana/payment.ts`, `.env.example`, esta sección del work-item.
+
+## MENOR-2 — el warn del cap era once-per-proceso
+
+Ver la corrección in-place en H5. `_warnedSoftCapBreached` se re-arma cuando el
+tamaño baja del cap (dos sitios: early-return por cap y post-desalojo).
+
+## MENOR-3 — el invariante de 6 decimales quedó acotado al rango probado
+
+`src/lib/atomic-amount.ts`: el docstring afirmaba categóricamente que para 6
+decimales el resultado es idéntico al camino viejo. Se acota a **`[0, 100)`** (el
+rango que se barrió, donde vive el catálogo entero) y se **declaran** los dos
+contraejemplos que midió el AR, fijados en `T-6-4`:
+
+- `5e-7` → viejo `0` / nuevo `1` (sub-grilla).
+- `>= 1e21` → viejo **LANZABA** (fail-closed: `String(1e21)` es `'1e+21'` y
+  `parseUnits` rechaza notación científica) / nuevo devuelve el atómico expandido.
+  Es el precio de reemplazar `toFixed` por la expansión del exponente. `T-SCI-2`
+  fijaba el valor nuevo pero nunca lo contrastaba contra el viejo, así que el
+  cambio de fail-closed → éxito no quedaba declarado.
+
+## MENOR-4 — `limit` sin validar contra un contrato nuevo que prometía otra cosa
+
+`doc/INTEGRATION.md` prometía «exactly `min(limit, total)` agents» y el código no
+lo cumplía para los degenerados: `limit=0` devolvía **todo** el catálogo (falsy ⇒
+ni `limitParam` ni `slice`), `limit=-3` devolvía `total-3` (`slice(0,-3)`),
+`limit=abc` devolvía todo. Preexistente e idéntico en `main`, pero el doc que lo
+contradice es de este fix-pack, que sí validó `minReputation`.
+
+`parseLimit` en `src/lib/discovery-query.ts` (el mismo leaf del validador de
+`minReputation`): entero `>= 1`, o **400 `INVALID_LIMIT`**. Sin techo, a propósito:
+el over-fetch es monótono y meter un techo reintroduciría el bug de clase
+"esconder agentes" de H1. Doc y código alineados. 7 tests unitarios + 5 de ruta.
+
+## MENOR-5 — el 6º (y el 7º) sitio de conversión USD→atómico
+
+`src/lib/downstream-payment.ts` es la pata **OUTBOUND** (lo que el gateway paga) y
+tenía `parseUnits(String(agent.priceUsdc), decimals)` en **dos** sitios: el EVM
+(`:685`, el que marcó el AR) y el **leg Solana** (`:288`, que el AR no marcó — el
+bug es de clase). Los dos pasan ahora por `usdToAtomicUnits`.
+
+Divergencia que cierra: `priceUsdc = 1e-7` daba challenge inbound `0` (el helper
+expande el exponente) y `INVALID_PRICE` downstream (`parseUnits` LANZA con
+`'1e-7'`). Byte-idéntico para todo precio con representación decimal plana
+(`toPlainDecimalString` es `String()` salvo cuando hay exponente).
+
+**Guard nuevo, fail-closed**: si la conversión da **0 unidades atómicas**, el leg
+se corta con `INVALID_PRICE`. Es la contrapartida honesta del cambio: un precio
+sub-grilla que antes lanzaba ahora convierte, y con 6 decimales puede redondear a
+0 — broadcastear un transfer de 0 quema gas y deja un recibo que dice que se pagó
+cuando no se movió nada. Antes del cambio ese estado era **inalcanzable** (todo
+decimal `< 1e-6` sale de `String()` en notación científica y `parseUnits` lanzaba),
+así que el guard no cambia ningún caso preexistente. Tests `T-MNR5-1..4`
+(incluye el leg Solana).
+
+## MENOR-6 — punteros stale + campo público sin tipar
+
+- `src/types/index.ts`, `src/services/compose.ts` y `auto-blindaje.md` apuntaban a
+  `src/lib/downstream-payment.ts` para el `Record` exhaustivo de skip-codes, que
+  vive en `src/lib/downstream-skip-code.ts` (se movió justamente para no romper
+  las suites que mockean el módulo del money-path completo).
+- `StepResult.downstreamSettle` pasa de `string` a
+  `` `skipped:${PublicDownstreamSkipCode}` ``: con `string` la exhaustividad del
+  `Record` se perdía justo en el borde de la API, que es donde importa que el
+  contrato sea el cerrado. (Ciclo de tipos con el leaf, resuelto con `import type`
+  — se borra en runtime, no hay ciclo de módulos.)
+
+## Gates de la iteración 2
+
+`tsc --noEmit` 0 · `biome check src/` 0 · **3362 passed | 11 skipped**
+(baseline 3335 → **+27**) · cobertura verificada línea por línea en los archivos
+tocados (los únicos statements sin hit son `catch` defensivos y getters
+PREEXISTENTES; ninguna línea nueva en 0).

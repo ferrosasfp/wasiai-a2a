@@ -102,7 +102,9 @@ volver a pasar. NO es opcional: es lo que protege las HUs siguientes.
   (audiencia interna). Reusar ese vocabulario como contrato público hereda la
   audiencia equivocada.
 - **Fix**: mapeo explícito `Record<DownstreamSkipCode, PublicDownstreamSkipCode>`
-  **exhaustivo por tipo** en `src/lib/downstream-payment.ts`. Los códigos de
+  **exhaustivo por tipo** en `src/lib/downstream-skip-code.ts` (AR MENOR-6: este
+  puntero decía `downstream-payment.ts`, de donde el mapeo se movió para no romper
+  las 6 suites que mockean el módulo del money-path completo). Los códigos de
   config del gateway → `NOT_CONFIGURED`; los de wallet/claves del operador →
   `UNAVAILABLE`; sólo se expone verbatim lo que describe la declaración del
   propio agente (dato que el caller ya ve en `/discover`) o un resultado terminal
@@ -126,10 +128,13 @@ volver a pasar. NO es opcional: es lo que protege las HUs siguientes.
   corrección de dinero apuntan en direcciones opuestas.
 - **Fix**: cap **soft** con **ventana protegida**. Se barre lo expirado; si aún se
   supera el cap se desaloja lo más viejo, pero **nunca** una entrada más joven que
-  `TIMEOUT_COMPOSE_MS × 2`. Si todas están protegidas, no se desaloja nada y se
-  emite un `warn` (el Map excede el cap a propósito). Ante la duda: **conservar**.
-  El override de TTL además tiene **piso** `TIMEOUT_COMPOSE_MS × 2`, para que un
-  operador no pueda configurar un TTL que expire dentro de la ventana viva.
+  la ventana protegida. Si todas están protegidas, no se desaloja nada y se emite
+  un `warn` (el Map excede el cap a propósito). Ante la duda: **conservar**. El
+  override de TTL además tiene **piso** = esa misma ventana.
+  ⚠️ **Corregido por AR MENOR-1**: la ventana era `TIMEOUT_COMPOSE_MS × 2` (6 min)
+  y se justificaba con una garantía falsa (el 504 NO cancela el pipeline). Hoy es
+  `max(5 steps × 300 s de undici, TIMEOUT_COMPOSE_MS × 2)` = 25 min. Ver la
+  entrada «Documentar una garantía que el código no da» más abajo.
 - **Aplicar en**: todo cache/dedup in-process que participe del money-path. La
   pregunta de diseño es «¿qué pasa si esta entrada desaparece ANTES de tiempo?».
   Si la respuesta es "se paga dos veces", el cap va soft. Si es "se recomputa",
@@ -195,3 +200,153 @@ volver a pasar. NO es opcional: es lo que protege las HUs siguientes.
   confiar en un log como canal de datos:
   `grep -n "_warned\|once per process\|dedup" <modulo>`. Si hay dedup, ese log NO
   es un canal confiable.
+
+---
+
+### [2026-07-26 12:40] AR it2 — Un fix de paginación cambió la MEMBRESÍA de un pool que otro módulo usa para decidir dinero
+
+- **Error**: el fix de H1 (over-fetch upstream) se razonó como "la página de
+  `/discover` sale completa". Nadie preguntó **quién más consume `discover()` con
+  un `limit`**. `compose.resolveAgent` usaba `discover({ limit: 50 })` para
+  hidratar el `payment.chain` real del agente (WKH-113). Al pasar el ranking de
+  ≤50 a ≤200 candidatos con los **mismos 50 slots**, la composición del top-50
+  cambió: un agente non-EVM que antes entraba podía quedar afuera, perder la
+  hidratación y terminar con su leg downstream salteado o apuntado al rail
+  equivocado — **sin cobrarse, en silencio**.
+- **Causa raíz**: dos conceptos distintos compartían un número. El `limit` de
+  `/discover` es un **page size de un ranking**; el de `compose` es el **tamaño de
+  un conjunto de búsqueda por slug**. Un ranking top-N es una elección
+  *semánticamente incorrecta* para una búsqueda exacta, y como funcionaba por
+  accidente (el catálogo entraba en 50), nadie lo miró. El fix no introdujo el
+  acoplamiento: lo **activó**.
+- **Fix**: `resolveComposeAgentPoolLimit() = resolveUpstreamFetchLimit(50)` en un
+  leaf compartido, que hace el page size **igual** al fetch upstream (la función
+  es idempotente), así el `slice` no puede descartar un candidato traído. Un solo
+  productor del pool en `compose.ts` para que el cache y el fallback no divergan.
+  Test que mete 150 candidatos y assertea la hidratación por el path real de
+  `/compose`, + mutación (volver a 50 mata 4 de 7 tests).
+- **Aplicar en**: antes de cambiar el tamaño, el orden o el filtrado de CUALQUIER
+  set compartido, `grep -rn "<funcion>(" src/` y clasificar cada consumidor por
+  **para qué usa el set**: ranking (top-N es correcto) vs búsqueda/lookup (top-N
+  es un bug latente). Y si el consumidor es del money-path, el test va por el
+  path completo, no por el helper. Corolario: un fix de "paginación" puede ser un
+  cambio de money-path por transitividad.
+
+---
+
+### [2026-07-26 12:55] AR it2 — Documentar una garantía que el código no da es peor que no documentar nada
+
+- **Error**: el work-item y `.env.example` afirmaban que «un run no puede
+  sobrevivir a su propio timeout» y de ahí derivaban el piso del knob
+  `SOLANA_INTENT_DEDUP_TTL_MS` (`TIMEOUT_COMPOSE_MS × 2` = 6 min), presentado como
+  el guard anti-doble-pago. `src/middleware/timeout.ts:12-20` sólo **manda** el
+  504: no hay `AbortController`, no hay `signal`, no se cancela nada. Y
+  `lib/ssrf-dispatcher.ts` no fija `headersTimeout`/`bodyTimeout`, así que el hop
+  del invoke sólo tiene el default de undici (300 s), que además es de
+  **inactividad**. La ejecución puede pasarse largo del timeout: el margen real
+  del default era ~1.2×, no 10×.
+- **Causa raíz**: se tomó el nombre de una env (`TIMEOUT_COMPOSE_MS`) como
+  evidencia de lo que hace. Un timeout de **respuesta** no es un timeout de
+  **ejecución**, y la diferencia sólo se ve leyendo el handler.
+- **Fix**: la cota pasa a derivarse de números verificables
+  (`MAX_COMPOSE_STEPS = 5` de `routes/compose.ts:128` × 300 s de undici = 25 min),
+  el piso sube a eso, el TTL default a 50 min, y el texto **dice explícitamente
+  que es una estimación y no una garantía** (no cuenta los hops del settle ni el
+  body trickle-feedeado, que no tiene techo). Se descartó cancelar el pipeline:
+  abortar en medio de un settle produce el estado indeterminado del que este Map
+  protege. Fijado por `T-TTL-11`.
+- **Aplicar en**: toda frase de la forma «X no puede pasar de Y» en un doc de
+  operación. Antes de escribirla, encontrar **la línea que lo hace cumplir**. Si
+  no existe, la frase se cambia por la cota real con su margen de error. Un
+  default incómodo y honesto le sirve al operador; uno cómodo y falso lo hace
+  tomar la decisión equivocada con confianza.
+
+---
+
+### [2026-07-26 13:05] AR it2 — El anti-patrón que documenté para `FLAG_OFF` lo repetí dos entradas más abajo
+
+- **Error**: en la misma sesión en que documenté que un warn-once-per-proceso no
+  es un canal confiable (entrada de Wave 4, `FLAG_OFF`), escribí
+  `_warnedSoftCapBreached` como warn-once-per-**proceso** — sólo se re-armaba en
+  `_resetSolanaClients` (TEST-ONLY) — y en el work-item lo describí como «una vez
+  por ventana», que era lo que yo creía haber implementado. Consecuencia: breach a
+  la hora 1, recuperación, breach a la hora 20 → **silencio**.
+- **Causa raíz**: escribir el warn y su documentación en el mismo movimiento, sin
+  volver a mirar dónde se resetea el flag. La lección de la entrada anterior era
+  sobre logs de OTRO módulo; no la apliqué a mi propio código nuevo.
+- **Fix**: re-armar el flag en los dos puntos donde el tamaño vuelve a bajar del
+  cap (early-return por cap y post-desalojo). Tests `T-CAP-6` (recuperación por
+  cap) y `T-CAP-7` (recuperación por desalojo), los dos asserteando **2** warns en
+  dos episodios.
+- **Aplicar en**: un `let _warned* = false` a nivel de módulo es una deuda hasta
+  que se demuestre lo contrario. Checklist: (1) ¿dónde se re-arma? (2) ¿hay un
+  test con DOS episodios? (3) ¿el texto del log y el doc dicen la misma cosa que
+  el código? Y la meta-lección: releer las entradas de auto-blindaje de la sesión
+  EN CURSO antes de escribir código nuevo, no sólo las de sesiones pasadas.
+
+---
+
+### [2026-07-26 13:15] AR it2 — "Idéntico al camino viejo" sin decir en qué rango es una afirmación sin dominio
+
+- **Error**: `atomic-amount.ts` afirmaba categóricamente que para 6 decimales el
+  resultado es idéntico al camino viejo. La evidencia era un barrido de 200.000
+  floats en `[0, 100)`. El AR midió dos contraejemplos FUERA de ese rango: `5e-7`
+  (viejo 0 / nuevo 1) y `>= 1e21` (viejo **lanzaba** / nuevo devuelve un número).
+  El segundo estaba fijado por un test (`T-SCI-2`) que nunca lo contrastaba
+  contra el path viejo, así que el cambio **fail-closed → éxito** no quedaba
+  declarado en ningún lado.
+- **Causa raíz**: el salto de "0 diferencias en la muestra" a "idéntico". Una
+  muestra prueba el rango de la muestra.
+- **Fix**: docstring y test acotados a `[0, 100)` + `T-6-4`, que fija los dos
+  contraejemplos contrastando explícitamente viejo vs nuevo.
+- **Aplicar en**: todo invariante probado por muestreo se escribe con su dominio
+  («para X en [a, b)») y con lo que pasa en los bordes. Y todo test que fija el
+  comportamiento NUEVO de un cambio de conversión debe fijar también el VIEJO en
+  el mismo assert, o el cambio de comportamiento queda tácito.
+
+---
+
+### [2026-07-26 13:25] AR it2 — Un doc nuevo que promete más de lo que el código valida es un bug que yo agregué
+
+- **Error**: `doc/INTEGRATION.md` (agregado en este fix-pack) prometía «when you
+  pass a `limit`, you get exactly `min(limit, total)` agents». Medido: `limit=0`
+  devolvía los 10 de 10 y `limit=-3` devolvía 7 de 10 (`slice(0,-3)`). El
+  comportamiento es **preexistente e idéntico en `main`** — el que no existía
+  antes es el doc que lo contradice. Y en el mismo fix-pack sí había agregado
+  validación estricta para `minReputation`: dos perillas del mismo endpoint con dos
+  estándares.
+- **Causa raíz**: escribir el contrato desde la intención del código en el happy
+  path, sin probar los valores degenerados de cada parámetro que el contrato
+  menciona.
+- **Fix**: `parseLimit` (entero `>= 1`, o 400 `INVALID_LIMIT`) en el mismo leaf
+  que el validador de `minReputation`, + 12 tests. Sin techo a propósito: el
+  over-fetch es monótono y un techo reintroduciría el bug de H1.
+- **Aplicar en**: cuando se escribe (o se cita) un contrato de API, cada
+  parámetro nombrado se prueba con `0`, negativo, no entero y no numérico antes de
+  publicar la frase. Si el código no lo cumple, se valida o se cambia la frase —
+  nunca se deja la promesa suelta.
+
+---
+
+### [2026-07-26 13:35] AR it2 — Producto, no código: la escala nueva de `minReputation` cambia el contrato para clientes existentes
+
+*(Anotado a pedido del AR. NO se arregla acá: es una decisión del founder.)*
+
+- **Qué**: dos consecuencias de producto del filtro nuevo de `minReputation`, que
+  ningún release note menciona:
+  1. Con `REPUTATION_SCALE_FACTOR=50` y el cap anti-sybil K=5, un agente necesita
+     **50 tasks capeadas de ≥10 callers distintos** para llegar a 100. Un caller
+     que pida `minReputation=50` hoy ve un marketplace **casi vacío**. No es un
+     bug del filtro (funciona como se diseñó): es que la escala y el catálogo real
+     todavía no se conocen.
+  2. Un cliente que venía usando la escala 0-1 **mal documentada** (el JSDoc decía
+     0-1) y pasaba `?minReputation=0.8` recibía **todo** (el parámetro era un
+     no-op) y ahora recibe **sólo agentes con ≥1 task liquidada**. Es un cambio de
+     contrato defendible — el filtro por fin filtra — pero es un cambio.
+- **Decisión pendiente del founder**: (a) comunicar el cambio de `minReputation`
+  (release note / changelog del SDK), y (b) decidir si `REPUTATION_SCALE_FACTOR`
+  sigue en 50 o se calibra contra el volumen real de tasks liquidadas, porque de
+  ese número depende que el filtro sea usable o cosmético.
+- **Aplicar en**: cuando un parámetro pasa de no-op a operativo, el cambio es de
+  **contrato**, no de implementación, aunque el tipo no cambie. Merece release
+  note incluso si el bug era obvio.
