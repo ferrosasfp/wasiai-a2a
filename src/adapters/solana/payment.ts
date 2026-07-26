@@ -60,7 +60,149 @@ const ZERO_EVM_ADDRESS =
 // Registro intentId → firma confirmada. En W3 es un store in-memory por proceso
 // (suficiente para el path idempotente + su unit test); en W5 el almacén real
 // es la columna `settle_signature` del ledger (persist-before-side-effect).
-const _intentSignatures = new Map<string, string>();
+//
+// ─── Fix-pack P1 (hallazgo 5): cap + TTL ────────────────────────────────
+// El Map no tenía cota: cada intent dejaba una entrada PARA SIEMPRE (los únicos
+// borrados eran el self-heal y el reset de tests) → leak de memoria en un
+// proceso de larga vida.
+//
+// ⚠️ SEMÁNTICA QUE NO SE PUEDE ROMPER: este Map es lo que hace IDEMPOTENTE el
+// settle de un leg Solana (`settle()`: si el intentId ya tiene firma, se verifica
+// on-chain y se devuelve la previa en vez de re-broadcastear). Si una entrada
+// desaparece MIENTRAS EL INTENT SIGUE VIVO, un retry re-broadcastea → SE PAGA
+// DOS VECES.
+//
+// Dato que acota el problema: el `intentId` es `${composeRunId}:${i}` con
+// `composeRunId = randomUUID()` por ejecución (services/compose.ts). Como el UUID
+// es fresco por run, NINGUNA ejecución futura vuelve a preguntar por un intentId
+// viejo → una entrada sólo necesita sobrevivir a la ventana de vida de SU PROPIO
+// compose-run.
+//
+// Política (ver `resolveIntentTtlMs` / `evictIntentSignatures`): TTL con 10× de
+// margen sobre la vida máxima de un run + cap SOFT con ventana protegida. Ante la
+// duda se CONSERVA la entrada (fail-safe hacia no-pagar-dos-veces).
+
+interface IntentEntry {
+  signature: string;
+  /** `Date.now()` del alta. La entrada expira a `storedAt + TTL`. */
+  storedAt: number;
+}
+
+/** Insertion-ordered (garantía de `Map`) → iterar da de más viejo a más nuevo. */
+const _intentSignatures = new Map<string, IntentEntry>();
+
+/** Default del timeout de un compose-run (`routes/compose.ts`: 180_000 ms). */
+const DEFAULT_COMPOSE_TIMEOUT_MS = 180_000;
+/** Piso del TTL default: 30 min. */
+const MIN_DEFAULT_TTL_MS = 1_800_000;
+/** Margen del TTL default sobre la vida máxima de un compose-run. */
+const TTL_SAFETY_FACTOR = 10;
+/**
+ * Factor de la VENTANA PROTEGIDA: una entrada más joven que
+ * `composeTimeout × 2` NUNCA se desaloja por presión del cap. 2× cubre la vida
+ * máxima del run con el doble de margen.
+ */
+const PROTECTED_WINDOW_FACTOR = 2;
+/** Cap SOFT de entradas. Ver `evictIntentSignatures`. */
+const DEFAULT_MAX_INTENT_ENTRIES = 10_000;
+
+/** Vida máxima de un compose-run, según la env que la gobierna. */
+function resolveComposeTimeoutMs(): number {
+  const raw = process.env.TIMEOUT_COMPOSE_MS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_COMPOSE_TIMEOUT_MS;
+}
+
+/**
+ * TTL de una entrada de idempotencia.
+ *
+ * Default: `max(TIMEOUT_COMPOSE_MS × 10, 30 min)` — 10× la vida máxima posible
+ * de un run (un run no puede sobrevivir a su propio timeout), y se mueve solo si
+ * el operador sube el timeout del compose.
+ *
+ * Override `SOLANA_INTENT_DEDUP_TTL_MS`, **con piso `TIMEOUT_COMPOSE_MS × 2`**:
+ * un operador NO puede configurar un TTL que expire dentro de la ventana viva de
+ * un run (ese sería un doble pago por configuración). El piso es el guard
+ * fail-safe del knob.
+ */
+function resolveIntentTtlMs(): number {
+  const composeTimeout = resolveComposeTimeoutMs();
+  const floor = composeTimeout * PROTECTED_WINDOW_FACTOR;
+  const raw = process.env.SOLANA_INTENT_DEDUP_TTL_MS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return Math.max(n, floor);
+  return Math.max(composeTimeout * TTL_SAFETY_FACTOR, MIN_DEFAULT_TTL_MS);
+}
+
+/** Cap SOFT de entradas (`SOLANA_INTENT_DEDUP_MAX_ENTRIES`, default 10.000). */
+function resolveMaxIntentEntries(): number {
+  const raw = process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_INTENT_ENTRIES;
+}
+
+/** Warn-once del cap saturado con TODAS las entradas protegidas. */
+let _warnedSoftCapBreached = false;
+
+/**
+ * Barrido LAZY (sin `setInterval`: no mantiene el event loop vivo ni introduce
+ * flakiness en los tests). Se llama en cada `set`.
+ *
+ * 1. Borra lo EXPIRADO (edad > TTL).
+ * 2. Si aún se supera el cap, desaloja de más viejo a más nuevo — pero NUNCA una
+ *    entrada dentro de la VENTANA PROTEGIDA (`composeTimeout × 2`), porque podría
+ *    pertenecer a un run todavía vivo y borrarla habilitaría un doble pago.
+ * 3. Si TODAS están protegidas, no se desaloja nada: el Map excede el cap a
+ *    propósito y se emite un warn (señal operativa). Ante la duda, CONSERVAR.
+ */
+function evictIntentSignatures(now: number): void {
+  const ttl = resolveIntentTtlMs();
+  for (const [key, entry] of _intentSignatures) {
+    if (now - entry.storedAt > ttl) _intentSignatures.delete(key);
+  }
+
+  const max = resolveMaxIntentEntries();
+  if (_intentSignatures.size <= max) return;
+
+  const protectedWindow = resolveComposeTimeoutMs() * PROTECTED_WINDOW_FACTOR;
+  // Insertion order = de más viejo a más nuevo, así que el primer candidato que
+  // encontramos es el más viejo desalojable.
+  for (const [key, entry] of _intentSignatures) {
+    if (_intentSignatures.size <= max) return;
+    if (now - entry.storedAt <= protectedWindow) break; // protegida ⇒ y las que
+    // siguen son aún más jóvenes: no hay nada más que desalojar.
+    _intentSignatures.delete(key);
+  }
+
+  if (_intentSignatures.size > max && !_warnedSoftCapBreached) {
+    _warnedSoftCapBreached = true;
+    log.warn(
+      { size: _intentSignatures.size, max, protectedWindowMs: protectedWindow },
+      'solana intent dedup por encima del cap — todas las entradas están dentro de la ventana protegida; se CONSERVAN para no habilitar un doble pago (logged once per process)',
+    );
+  }
+}
+
+/** Alta de una firma en el seam de idempotencia (+ barrido lazy). */
+function rememberIntentSignature(intentId: string, signature: string): void {
+  const now = Date.now();
+  _intentSignatures.set(intentId, { signature, storedAt: now });
+  evictIntentSignatures(now);
+}
+
+/**
+ * Lectura del seam. Una entrada EXPIRADA se trata como ausente (y se borra):
+ * devolver una firma vencida sería peor que no tenerla.
+ */
+function recallIntentSignature(intentId: string): string | undefined {
+  const entry = _intentSignatures.get(intentId);
+  if (!entry) return undefined;
+  if (Date.now() - entry.storedAt > resolveIntentTtlMs()) {
+    _intentSignatures.delete(intentId);
+    return undefined;
+  }
+  return entry.signature;
+}
 
 /**
  * WKH-235a (AC-1) — firma-candidata de una tx cuyo `sendAndConfirmTransaction`
@@ -168,7 +310,7 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
    * firma: eso lo hace `settle()` (verify-before-trust) antes de reusarla.
    */
   getSettledSignature(intentId: string): string | undefined {
-    return _intentSignatures.get(intentId);
+    return recallIntentSignature(intentId);
   }
 
   async quote(amountUsd: number): Promise<QuoteResult> {
@@ -196,7 +338,7 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
   async settle(req: SolanaSettleRequest): Promise<SettleResult> {
     // ── Idempotencia (AC-7): si el intentId ya tiene firma confirmada, verify
     //    on-chain y retornar la firma previa — NO re-broadcast. ────────────────
-    const prior = _intentSignatures.get(req.intentId);
+    const prior = recallIntentSignature(req.intentId);
     if (prior) {
       // DECISIÓN ABIERTA (MNR-4 del CR de WKH-235a): este `verify()` NO está
       // envuelto en try/catch, a diferencia del de `recoverConfirmedSettle` (que
@@ -263,7 +405,7 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     }
 
     // Persist-before-return del seam de idempotencia (W5 lo respalda en ledger).
-    _intentSignatures.set(req.intentId, signature);
+    rememberIntentSignature(req.intentId, signature);
     log.info(
       { intentId: req.intentId, signature, payTo: req.payTo },
       'solana settle broadcast confirmed',
@@ -333,7 +475,7 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
 
     // Pago REAL confirmado a pesar del throw → mismo persist-before-return del
     // camino feliz (el intentId no queda sin firma asociada).
-    _intentSignatures.set(req.intentId, candidate);
+    rememberIntentSignature(req.intentId, candidate);
     log.warn(
       {
         intentId: req.intentId,
@@ -398,4 +540,28 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
  */
 export function _resetSolanaClients(): void {
   _intentSignatures.clear();
+  _warnedSoftCapBreached = false;
+}
+
+/**
+ * TEST-ONLY — tamaño actual del seam de idempotencia. Existe para poder assertear
+ * el cap y el TTL del fix-pack P1 (hallazgo 5) sin exponer el Map.
+ */
+export function _intentDedupSize(): number {
+  return _intentSignatures.size;
+}
+
+/**
+ * TEST-ONLY — inserta una entrada con una antigüedad artificial, para ejercitar
+ * expiración y desalojo sin depender de timers reales.
+ */
+export function _seedIntentSignature(
+  intentId: string,
+  signature: string,
+  ageMs: number,
+): void {
+  _intentSignatures.set(intentId, {
+    signature,
+    storedAt: Date.now() - ageMs,
+  });
 }
