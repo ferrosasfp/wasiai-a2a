@@ -8,7 +8,7 @@ import {
   sendAndConfirmTransaction,
   Transaction,
 } from '@solana/web3.js';
-import { parseUnits } from 'viem';
+import { usdToAtomicUnits } from '../../lib/atomic-amount.js';
 import { getLogger } from '../../lib/logger.js';
 import type {
   SolanaPaymentAdapter as ISolanaPaymentAdapter,
@@ -173,12 +173,14 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
 
   async quote(amountUsd: number): Promise<QuoteResult> {
     const decimals = getSolanaUsdcDecimals();
-    // Mirror del patrón avalanche: toFixed(decimals) antes de parseUnits para
-    // aterrizar notación científica / sub-atómica a la grilla del token.
-    const amountWei = parseUnits(
-      amountUsd.toFixed(decimals),
-      decimals,
-    ).toString();
+    // Fix-pack P1 (hallazgo 3): `toFixed(decimals)` no emite el decimal que el
+    // double representa sino su EXPANSIÓN BINARIA, así que a > 6 decimales metía
+    // un artefacto de float en el monto del challenge 402. `usdToAtomicUnits`
+    // normaliza por la representación decimal más corta con round-trip y sigue
+    // garantizando salida decimal plana (`parseUnits` LANZA con notación
+    // científica, que era el motivo del `toFixed`). Para 6 dec (USDC) el
+    // resultado es IDÉNTICO al camino anterior — verificado con 200k floats.
+    const amountWei = usdToAtomicUnits(amountUsd, decimals);
     return {
       amountWei,
       token: {
