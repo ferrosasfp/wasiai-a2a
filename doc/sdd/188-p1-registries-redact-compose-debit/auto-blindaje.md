@@ -293,7 +293,9 @@ introducirlo, y la fórmula `max(0, debitado − totalCostUsdc)` es lo único qu
   una condición de carrera, medí su coverage — 0 hits sobre la suite completa significa
   que no existe. `/gasless/transfer` (MNR-1) y los `if (reply.sent) return;` de
   `routes/orchestrate.ts:98,124,205,221,358,430` son los próximos candidatos a revisar
-  con esta lente.
+  con esta lente — **ya dimensionados por el re-AR: impacto monetario CERO salvo un
+  residual acotado, ver la entrada `[07:55]` al final de este archivo. No es un "cobra
+  sin ejecutar".**
 
 ### [2026-07-26 07:05] Wave 2 — Corregí el mapa de status en las DOS direcciones
 
@@ -363,6 +365,37 @@ introducirlo, y la fórmula `max(0, debitado − totalCostUsdc)` es lo único qu
   comentario que promete una garantía inexistente es peor que no tener comentario: el
   próximo dev se apoya en ella.
 
+### [2026-07-26 07:50] Wave 2 — MNR-4b (re-AR MENOR-2): la afirmación de alcance era MÁS CHICA que el barrido real, por tercera vez
+
+- **Error**: `work-item.md:214-216` decía *"sin `onDebitOrphaned` el middleware se
+  comporta byte-idéntico a antes, así que `/gasless/transfer` y `/orchestrate*` no
+  cambian"*. Es cierto **sólo** para el delta `1d90929..1b4a92d` (el commit del hook).
+  Para `main...HEAD` es **falso**: el otro cambio del branch en el mismo middleware
+  —`getBalance` pasó a best-effort `.then/.catch` en `a2a-key.ts:826` (delegación),
+  `:1049` (sesión) y `:1286` (master)— **sí** cambia el comportamiento de
+  `/gasless/transfer`, los tres `/orchestrate*`, las tres mutaciones de `/registries` y
+  `/tasks`: un fallo de ese read antes devolvía **503 `SERVICE_ERROR`** y mataba el
+  request; ahora omite el header `x-a2a-remaining-budget` y el request sigue.
+- **Causa raíz**: escribí la afirmación mirando el diff del commit que estaba haciendo,
+  no el diff del branch. Es el MISMO patrón que MNR-4 (afirmar una garantía sin
+  ejecutarla) y que el primer error de la Wave 1 (barrido incompleto): **la tercera vez
+  en la sesión que una afirmación de alcance sale más angosta que el barrido real**.
+- **Fix**: la afirmación quedó acotada al delta del commit y al lado, en el mismo lugar,
+  el alcance NO cubierto: sección **"Cambio de contrato (no-`/compose`)"** en
+  `work-item.md`, que enumera las **12 rutas** afectadas, aclara que el cambio **falla
+  seguro** (el header es informativo, se emite DESPUÉS del débito, no se saltea ningún
+  check de auth/scoping/budget), que **ningún test asertaba el 503 viejo** (la suite
+  quedó verde sin tocar esas suites) y que un consumidor del header **debe tolerar su
+  ausencia** (no verificado contra `wasiai-v2`, fuera del working directory). La fila
+  503 del mapa de status también dejó de citar líneas viejas (`1231/772/993`) y ahora
+  dice explícitamente que el cambio no es sólo de `/compose`.
+- **Aplicar en**: toda frase de la forma "X queda intacto". Regla operativa: **el
+  alcance se afirma contra el diff del BRANCH (`git diff main...HEAD`), no contra el del
+  commit**, y se escribe con el alcance no cubierto declarado al lado (misma sección,
+  misma tabla). Si sólo se verificó el commit, la frase lleva el rango pegado
+  ("vale para `a..b`"), porque un revisor futuro que lea "intacto" NO va a auditar ese
+  delta — que es exactamente lo que pasó acá.
+
 ### [2026-07-26 07:25] Wave 1 — MNR-5: acuñé un tipo "HTTP-safe" que seguía exponiendo el tenant
 
 - **Error**: `RegistryPublic` incluía `ownerRef`, y `GET /registries` es público sin auth.
@@ -397,3 +430,89 @@ introducirlo, y la fórmula `max(0, debitado − totalCostUsdc)` es lo único qu
      MISMO `createTimeoutHandler` + el MISMO débito en preHandler, así que hereda la misma
      ventana. El hook `onDebitOrphaned` de `requirePaymentOrA2AKey` ya está disponible
      para pasarle su propio credit-back (`gaslessEstimatedCostUsd`).
+
+---
+
+## FIX-PACK 2 POST-re-AR (2026-07-26) — los 2 MENORes del re-AR aprobado
+
+### [2026-07-26 07:45] Wave 2 — MENOR-1: cubrí con tests el branch que ya conocía y dejé los otros dos sin red
+
+- **Error**: el fix de BLQ-MED-1 tiene **tres** call-sites (`a2a-key.ts:1316` master,
+  `:839` delegación, `:1065` sesión) y escribí tests (T-NOCHARGE-13/14) sólo para el
+  master. El re-AR lo probó por mutación: **reemplazó las líneas `:839` y `:1065` por un
+  comentario y la suite completa quedó VERDE** (`3203 passed | 11 skipped`). Correlato en
+  coverage: las ramas `creditDelegation` (`compose.ts:343`) y `creditSession` (`:352`) de
+  `refundComposeStep0` tenían **0 hits de branch** (v8 `branchMap` ids 20 y 21, counts
+  `[0,7]`). O sea: dos de los tres branches del money-path sin ninguna protección.
+- **Causa raíz**: asumí que los tres call-sites son "el mismo código llamado tres veces".
+  No lo son: cada branch **debita por un RPC distinto** (`debitDelegationAndParent` /
+  `debitSessionAndParent`, dual-ledger) y **reembolsa por una rama distinta** del
+  ternario de `refundComposeStep0`. Un test del master no ejercita ni el débito ni el
+  refund de los otros dos. Y el bug que este fix-pack corrige (BLQ-MED-1) existió
+  **precisamente** porque nadie miró la cobertura del fix: repetir la omisión en el
+  mismo fix es el error espejo.
+- **Fix**: T-NOCHARGE-16 (delegación, `x-a2a-key: wasi_a2a_session_*`) y T-NOCHARGE-17
+  (key-session, `wasi_a2a_sess_*`) en
+  `src/routes/compose.no-charge-on-validation-error.test.ts`, espejo de T-NOCHARGE-13:
+  `TIMEOUT_COMPOSE_MS=1` + 40ms de latencia inyectada en el RPC dual-ledger de cada
+  service → el 504 sale con el débito en vuelo. Assertan **balance antes/después** (no el
+  status), que `composeService.compose` **nunca** se llamó, que el refund fue al MISMO
+  ledger que debitó (`creditDelegation`/`creditSession`, NO `credit` master: un credit
+  master dejaría `total_spent`/`spent_usd` inflado → self-DoS de la credencial, el M1 de
+  la auditoría) y el `owner_ref` en la posición 2 (ownership guard, CLAUDE.md). Los mocks
+  de `creditDelegation`/`creditSession` pasaron de `mockResolvedValue({success:true})` a
+  mover el balance de verdad: si no, "cobró y reembolsó" sería indistinguible de "cobró y
+  se lo quedó".
+- **Verificado por mutación (los dos, uno por vez)**:
+  - comentando `a2a-key.ts:839` → **sólo** T-NOCHARGE-16 rojo:
+    `waitFor timeout: ... (branch delegación) (balance=9.5, ..., delegationDebits=1,
+    delegationCredits=0)`. T-NOCHARGE-17 siguió verde ⟹ el test apunta a SU línea.
+  - comentando `a2a-key.ts:1065` → **sólo** T-NOCHARGE-17 rojo:
+    `(balance=9.5, ..., sessionDebits=1, sessionCredits=0)`.
+  El mensaje de `waitFor` se extendió con los contadores de los tres ledgers: con sólo
+  los del master reportaba `debits=0 credits=0` y parecía "no se cobró nada" cuando el
+  balance ya estaba en 9.5 — un diagnóstico engañoso en el fallo.
+- **Aplicar en**: cuando un fix se aplica en N call-sites, **N tests y N mutaciones**. La
+  pregunta no es "¿el mecanismo funciona?" sino "¿qué línea exacta pongo en rojo?". Si
+  borrar una línea del fix no rompe ningún test, esa línea está indefensa ante la próxima
+  refactorización. Vale especialmente para los branches delegación/sesión: son la copia
+  menos ejercitada del money-path y ya acumulan historial (H1 del audit 2026-07-01,
+  WKH-125/125b, M1 del refund dual-ledger).
+
+### [2026-07-26 07:55] Wave 2 — Dimensión correcta del hallazgo de `orchestrate.ts` (anotado, NO arreglado)
+
+Lo midió el re-AR y **bajó la severidad**: es **BLQ-BAJO/MENOR**, no ALTO. Queda anotado
+acá para que nadie lo lea como "otro `/compose`":
+
+- `:98`, `:205`, `:358` — inalcanzables (mismo motivo que BLQ-MED-1: Fastify no invoca el
+  handler si `reply.sent`) pero de **impacto monetario CERO**: las tres rutas
+  `/orchestrate*` setean `skipMiddlewareDebit`, así que a esa altura **este middleware no
+  debitó nada**. El débito real ocurre después, DENTRO del service
+  (`services/orchestrate.ts:1138`).
+- `:221` — contrato de cero débito (`/orchestrate/plan` es una cotización).
+- `:124` y `:430` — **alcanzables** y retornan sin refund, pero el service ya corre su
+  propio credit-back para `!pipeline.success` (`services/orchestrate.ts:1304-1355`).
+- **Residual real**: 504 con **pipeline exitoso**. Y ahí el pipeline **sí corrió y
+  settleó downstream**, o sea que **no es "cobra sin ejecutar"**: es "cobra, ejecuta, y el
+  caller no puede recuperar el output". El delta contra `/compose` es el sobrante del
+  estimate + el gas overhead. No se toca en este fix-pack (HU propia).
+
+### [2026-07-26 07:56] Wave 2 — Residual MNR-3 del re-AR: la ventana entre el débito y `refundIfDebitOrphaned`
+
+Anotado por completitud, **hoy inalcanzable**: si algo tirara entre el débito exitoso y
+la llamada a `refundIfDebitOrphaned`, el refund no correría (el `throw` iría al `catch`
+del branch → 503, con el débito aplicado y sin credit-back). Hoy no puede pasar — lo que
+hay entre esos dos puntos es, verificado línea por línea:
+
+- `receiptService.emit(...)` (sólo path master, `a2a-key.ts:1256-1274`):
+  **fire-and-forget** — NO se `await`ea y tiene `.catch`, así que no puede escapar.
+- `isIdentityVerified` + los `buildDelegationEffectiveRow`/`buildSessionEffectiveRow` y
+  las asignaciones a `request.*`: síncronos y puros (sin I/O).
+- `budgetService.getBalance(...)` (los tres branches, `:826`, `:1049`, `:1286`): el único
+  `await` de I/O, y desde este fix-pack tiene `.then/.catch` (best-effort) — un rechazo
+  se traga en el `.catch`, y `getBalance` no puede tirar sincrónicamente (es `async`).
+
+Se documenta porque es el punto exacto donde un `await` nuevo SIN `.catch`
+reintroduciría el bug de BLQ-MED-1: **cualquier I/O que se agregue entre el débito y
+`refundIfDebitOrphaned` debe ser best-effort**, o el refund tiene que moverse a un
+`finally`.

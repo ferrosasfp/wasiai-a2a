@@ -23,11 +23,14 @@
  * Un test que sólo mira el status no prueba nada de esto: todas las aserciones
  * de dinero comparan el balance ANTES y DESPUÉS.
  *
- * Naming: T-NOCHARGE-01..T-NOCHARGE-15 (13..15: BLQ-MED-1, el 504 que dispara
+ * Naming: T-NOCHARGE-01..T-NOCHARGE-17 (13..15: BLQ-MED-1, el 504 que dispara
  * antes de que el route handler exista → el credit-back NO puede vivir en el
- * handler porque Fastify no lo invoca).
+ * handler porque Fastify no lo invoca; 16..17: MENOR-1 del re-AR — los otros dos
+ * call-sites del mismo hook, delegación y key-session, que sólo el path master
+ * tenía cubiertos).
  */
 
+import crypto from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import Fastify from 'fastify';
 import {
@@ -40,7 +43,11 @@ import {
   it,
   vi,
 } from 'vitest';
-import type { A2AAgentKeyRow } from '../types/index.js';
+import type {
+  A2AAgentKeyRow,
+  DelegationRow,
+  KeySessionRow,
+} from '../types/index.js';
 
 // ── Structured logger mock (compose.ts + a2a-key.ts use getLogger) ──
 const logSpy = vi.hoisted(() => ({
@@ -169,6 +176,44 @@ const getBalanceMock = vi.hoisted(() =>
     return budgetState.balance.toFixed(2);
   }),
 );
+// ── MENOR-1 (re-AR): los credits DUAL-LEDGER de delegación y sesión ──
+// `refundComposeStep0` enruta el refund por contexto: `creditDelegation` si hay
+// `delegationContext`, `creditSession` si hay `keySessionContext`, y sólo entonces
+// `credit`/`creditWithDest` (path master). Los tres son ramas distintas, así que
+// estos mocks TAMBIÉN tienen que mover el balance: si devolvieran `{success:true}`
+// sin tocarlo, un test de "cobró y reembolsó" bajo delegación pasaría igual que uno
+// de "cobró y se lo quedó" — exactamente el falso positivo que MENOR-1 señala.
+const creditDelegationMock = vi.hoisted(() =>
+  vi.fn(
+    async (
+      _delegationId: string,
+      // 2º arg = `ownerRef` (ownership guard, CLAUDE.md). Tipado para asertarlo.
+      _ownerRef: string,
+      _keyId: string,
+      _chainId: number,
+      amountUsd: number,
+      _destination?: string,
+    ): Promise<{ success: boolean; reverted?: boolean }> => {
+      budgetState.balance += amountUsd;
+      return { success: true, reverted: true };
+    },
+  ),
+);
+const creditSessionMock = vi.hoisted(() =>
+  vi.fn(
+    async (
+      _sessionId: string,
+      _ownerRef: string,
+      _keyId: string,
+      _chainId: number,
+      amountUsd: number,
+      _destination?: string,
+    ): Promise<{ success: boolean; reverted?: boolean }> => {
+      budgetState.balance += amountUsd;
+      return { success: true, reverted: true };
+    },
+  ),
+);
 vi.mock('../services/budget.js', () => ({
   budgetService: {
     debit: debitMock,
@@ -177,12 +222,95 @@ vi.mock('../services/budget.js', () => ({
     creditWithDest: vi
       .fn()
       .mockResolvedValue({ success: true, reverted: true }),
-    creditDelegation: vi
-      .fn()
-      .mockResolvedValue({ success: true, reverted: true }),
-    creditSession: vi.fn().mockResolvedValue({ success: true, reverted: true }),
+    creditDelegation: creditDelegationMock,
+    creditSession: creditSessionMock,
   },
 }));
+
+// ── MENOR-1 (re-AR): el débito step-0 de delegación / key-session ──
+// NO pasa por `budgetService.debit`: cada branch usa su RPC dual-ledger
+// (`debitDelegationAndParent` / `debitSessionAndParent`), que decrementa el
+// ledger de la credencial ADEMÁS del budget de la parent key. Los mocks mueven el
+// MISMO balance en memoria y heredan `budgetState.debitLatencyMs`, la latencia que
+// abre la ventana del 504 con el débito ya en vuelo.
+//
+// `async (orig)`: se preserva el módulo real y se reemplazan SÓLO los tres métodos
+// de I/O. Así `exceedsPerTxLimit` (que el middleware importa del mismo módulo y
+// evalúa la policy per-tx antes de debitar) sigue siendo la implementación de
+// producción, no un `() => false` que escondería un cambio en ese guard.
+const delegationLookupMock = vi.hoisted(() =>
+  vi.fn(async (_tokenHash: string): Promise<DelegationRow | null> => null),
+);
+const delegationParentMock = vi.hoisted(() =>
+  vi.fn(async (_keyId: string): Promise<A2AAgentKeyRow | null> => null),
+);
+const delegationDebitMock = vi.hoisted(() =>
+  vi.fn(
+    async (
+      _delegationId: string,
+      _ownerRef: string,
+      _keyId: string,
+      _chainId: number,
+      amountUsd: number,
+      _destination?: string,
+    ): Promise<string> => {
+      if (budgetState.debitLatencyMs > 0) {
+        await sleep(budgetState.debitLatencyMs);
+      }
+      budgetState.balance -= amountUsd;
+      return budgetState.balance.toFixed(2);
+    },
+  ),
+);
+vi.mock('../services/delegation.js', async (orig) => {
+  const actual = await orig<typeof import('../services/delegation.js')>();
+  return {
+    ...actual,
+    delegationService: {
+      ...actual.delegationService,
+      lookupByTokenHash: delegationLookupMock,
+      getParentKey: delegationParentMock,
+      debitDelegationAndParent: delegationDebitMock,
+    },
+  };
+});
+
+const sessionLookupMock = vi.hoisted(() =>
+  vi.fn(async (_tokenHash: string): Promise<KeySessionRow | null> => null),
+);
+const sessionParentMock = vi.hoisted(() =>
+  vi.fn(async (_keyId: string): Promise<A2AAgentKeyRow | null> => null),
+);
+const sessionDebitMock = vi.hoisted(() =>
+  vi.fn(
+    async (
+      _sessionId: string,
+      _ownerRef: string,
+      _keyId: string,
+      _chainId: number,
+      amountUsd: number,
+      _destination?: string,
+    ): Promise<string> => {
+      if (budgetState.debitLatencyMs > 0) {
+        await sleep(budgetState.debitLatencyMs);
+      }
+      budgetState.balance -= amountUsd;
+      return budgetState.balance.toFixed(2);
+    },
+  ),
+);
+vi.mock('../services/key-session.js', async (orig) => {
+  const actual = await orig<typeof import('../services/key-session.js')>();
+  return {
+    ...actual,
+    keySessionService: {
+      ...actual.keySessionService,
+      lookupByTokenHash: sessionLookupMock,
+      getParentKey: sessionParentMock,
+      debitSessionAndParent: sessionDebitMock,
+    },
+  };
+});
 
 vi.mock('../services/receipt.js', () => ({
   receiptService: { emit: vi.fn().mockResolvedValue(undefined) },
@@ -224,6 +352,60 @@ const mockCompose = vi.mocked(composeService.compose);
 
 const KEY_HEADER = { 'x-a2a-key': 'wasi_a2a_funded_master_key' };
 const STEP0_PRICE = 0.5;
+
+// ── MENOR-1: credenciales de los otros dos branches del middleware ──
+// El dispatch es por PREFIJO (`a2a-key.ts:1580,1593`) y los prefijos son
+// mutuamente exclusivos: `wasi_a2a_session_` → delegación (WKH-101),
+// `wasi_a2a_sess_` → key-session (WKH-121).
+const DELEGATION_TOKEN = `wasi_a2a_session_${'b'.repeat(96)}`;
+const SESSION_TOKEN = `wasi_a2a_sess_${'c'.repeat(96)}`;
+const sha256 = (s: string): string =>
+  crypto.createHash('sha256').update(s).digest('hex');
+
+function makeDelegationRow(): DelegationRow {
+  return {
+    id: 'd1',
+    key_id: 'k1', // = fundedKey.id (la parent key que paga)
+    owner_ref: 'o1',
+    session_key_address: '0xdef0000000000000000000000000000000000002',
+    session_token_hash: sha256(DELEGATION_TOKEN),
+    policy: {
+      max_amount_per_tx: '5.00', // > STEP0_PRICE → `exceedsPerTxLimit` REAL da false
+      max_total_amount: '100.00',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      allowed_chains: [], // vacío = sin restricción (paridad master)
+      allowed_agent_slugs: [],
+      allowed_registries: [],
+    },
+    total_spent: '0',
+    expires_at: new Date(Date.now() + 3600_000).toISOString(),
+    revoked_at: null,
+    typed_data_raw: {} as DelegationRow['typed_data_raw'],
+    nonce: `0x${'00'.repeat(32)}`,
+    created_at: new Date().toISOString(),
+  };
+}
+
+function makeKeySessionRow(): KeySessionRow {
+  return {
+    id: 's1',
+    key_id: 'k1',
+    owner_ref: 'o1',
+    session_token_hash: sha256(SESSION_TOKEN),
+    ttl_seconds: 3600,
+    expires_at: new Date(Date.now() + 3600_000).toISOString(),
+    max_budget_usd: '10.00',
+    spent_usd: '0',
+    allowed_registries: null,
+    allowed_agent_slugs: null,
+    allowed_categories: null,
+    derivation_mode: 'server',
+    revoked_at: null,
+    created_at: new Date().toISOString(),
+    require_signature: false, // sin firma opt-in → flujo bearer
+    signing_secret_hash: null,
+  };
+}
 
 // ══════════════════════════════════════════════════════════════
 // (a) Validación adelantada al débito
@@ -537,6 +719,12 @@ describe('compose route — 504 de timeout post-débito reembolsa (HIGH-2, direc
     budgetState.debitLatencyMs = 0;
     budgetState.getBalanceLatencyMs = 0;
     mockResolveDest.mockResolvedValue(null);
+    // MENOR-1: sin credencial por defecto → cada test declara la suya. Un
+    // `null` filtrado de otro test daría 401 antes del débito (test vacuo).
+    delegationLookupMock.mockResolvedValue(null);
+    delegationParentMock.mockResolvedValue(null);
+    sessionLookupMock.mockResolvedValue(null);
+    sessionParentMock.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -599,8 +787,14 @@ describe('compose route — 504 de timeout post-débito reembolsa (HIGH-2, direc
     const started = Date.now();
     while (!predicate()) {
       if (Date.now() - started > timeoutMs) {
+        // MENOR-1: los contadores de los TRES ledgers. Con sólo los del master,
+        // el fallo de un branch dual-ledger reportaba `debits=0 credits=0` y
+        // parecía "no se cobró nada" cuando el balance ya estaba en 9.5.
         throw new Error(
-          `waitFor timeout: ${what} (balance=${budgetState.balance}, debits=${debitMock.mock.calls.length}, credits=${creditMock.mock.calls.length})`,
+          `waitFor timeout: ${what} (balance=${budgetState.balance}, ` +
+            `debits=${debitMock.mock.calls.length}, credits=${creditMock.mock.calls.length}, ` +
+            `delegationDebits=${delegationDebitMock.mock.calls.length}, delegationCredits=${creditDelegationMock.mock.calls.length}, ` +
+            `sessionDebits=${sessionDebitMock.mock.calls.length}, sessionCredits=${creditSessionMock.mock.calls.length})`,
         );
       }
       await sleep(5);
@@ -762,5 +956,129 @@ describe('compose route — 504 de timeout post-débito reembolsa (HIGH-2, direc
     expect(debitMock).not.toHaveBeenCalled();
     expect(creditMock).not.toHaveBeenCalled();
     expect(budgetState.balance).toBe(10);
+  });
+
+  // ── MENOR-1 (re-AR): los OTROS DOS call-sites del hook ────────
+  //
+  // T-NOCHARGE-13/14 cubren el path MASTER (`a2a-key.ts:1316`). El hook
+  // `onDebitOrphaned` se invoca en TRES sitios — el tercero y el cuarto son
+  // delegación (`:839`) y key-session (`:1065`) — y el re-AR probó por mutación
+  // que comentar esos dos NO ponía ningún test rojo: la suite entera quedaba
+  // verde con dos de los tres branches del money-path sin red.
+  //
+  // Cada branch debita por un RPC DISTINTO (dual-ledger) y reembolsa por una rama
+  // DISTINTA de `refundComposeStep0` (`compose.ts:343` creditDelegation / `:352`
+  // creditSession, ambas con 0 hits de branch en el coverage). Por eso hacen falta
+  // dos tests y no uno parametrizado sobre el mismo mock.
+  //
+  // Igual que 13/14: la aserción es el BALANCE antes/después + que
+  // `composeService.compose` NUNCA corrió (o sea, se cobró por nada).
+
+  it('T-NOCHARGE-16 (MENOR-1, delegación): 504 mientras se debita el dual-ledger → credit-back de delegación', async () => {
+    const balanceBefore = budgetState.balance;
+    mockResolvePrice.mockResolvedValue(STEP0_PRICE);
+    delegationLookupMock.mockResolvedValue(makeDelegationRow());
+    delegationParentMock.mockResolvedValue(fundedKey);
+    // Misma ventana que T-NOCHARGE-13, pero en el RPC de la delegación.
+    budgetState.debitLatencyMs = 40;
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': DELEGATION_TOKEN },
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(504);
+
+    await waitFor(
+      () => creditDelegationMock.mock.calls.length > 0,
+      'el credit-back del débito huérfano nunca ocurrió (branch delegación)',
+    );
+    await flush();
+
+    // El branch correcto: lookup por el HASH del token, nunca por el token.
+    expect(delegationLookupMock).toHaveBeenCalledWith(sha256(DELEGATION_TOKEN));
+    // El débito dual-ledger SÍ se aplicó (si no, el test sería vacuo)...
+    expect(delegationDebitMock).toHaveBeenCalledTimes(1);
+    expect(delegationDebitMock.mock.calls[0]).toEqual([
+      'd1', // delegationId
+      'o1', // ownerRef
+      'k1', // parent keyId
+      2368, // chainId del bundle
+      STEP0_PRICE,
+    ]);
+    // ...y NO por el ledger master (esa es la otra rama, ya cubierta).
+    expect(debitMock).not.toHaveBeenCalled();
+    // ...el route handler NUNCA corrió → se cobró por cero ejecución...
+    expect(mockCompose).not.toHaveBeenCalled();
+    // ...y el refund fue al MISMO ledger dual que debitó (M1 de la auditoría: un
+    // `credit` master acá dejaría `total_spent` inflado → self-DoS de la
+    // credencial), con el `owner_ref` del caller en la posición 2 (ownership
+    // guard, CLAUDE.md).
+    expect(creditDelegationMock).toHaveBeenCalledTimes(1);
+    expect(creditDelegationMock.mock.calls[0]).toEqual([
+      'd1',
+      'o1',
+      'k1',
+      2368,
+      STEP0_PRICE,
+      undefined, // composeDestination (sin destino resuelto en este fixture)
+    ]);
+    expect(creditDelegationMock.mock.calls[0]?.[1]).toBe('o1');
+    expect(creditMock).not.toHaveBeenCalled();
+    expect(creditSessionMock).not.toHaveBeenCalled();
+    // Neto cero: el caller recibió un timeout y ningún valor.
+    expect(budgetState.balance).toBeCloseTo(balanceBefore, 8);
+  });
+
+  it('T-NOCHARGE-17 (MENOR-1, key-session): 504 mientras se debita el dual-ledger → credit-back de sesión', async () => {
+    const balanceBefore = budgetState.balance;
+    mockResolvePrice.mockResolvedValue(STEP0_PRICE);
+    sessionLookupMock.mockResolvedValue(makeKeySessionRow());
+    sessionParentMock.mockResolvedValue(fundedKey);
+    budgetState.debitLatencyMs = 40;
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': SESSION_TOKEN },
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(504);
+
+    await waitFor(
+      () => creditSessionMock.mock.calls.length > 0,
+      'el credit-back del débito huérfano nunca ocurrió (branch key-session)',
+    );
+    await flush();
+
+    // Prefijos mutuamente exclusivos: este token NO cae en el branch delegación.
+    expect(sessionLookupMock).toHaveBeenCalledWith(sha256(SESSION_TOKEN));
+    expect(delegationLookupMock).not.toHaveBeenCalled();
+    expect(sessionDebitMock).toHaveBeenCalledTimes(1);
+    expect(sessionDebitMock.mock.calls[0]).toEqual([
+      's1', // sessionId
+      'o1', // ownerRef
+      'k1', // parent keyId
+      2368,
+      STEP0_PRICE,
+    ]);
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(mockCompose).not.toHaveBeenCalled();
+    expect(creditSessionMock).toHaveBeenCalledTimes(1);
+    expect(creditSessionMock.mock.calls[0]).toEqual([
+      's1',
+      'o1',
+      'k1',
+      2368,
+      STEP0_PRICE,
+      undefined,
+    ]);
+    expect(creditSessionMock.mock.calls[0]?.[1]).toBe('o1'); // ownership guard
+    expect(creditMock).not.toHaveBeenCalled();
+    expect(creditDelegationMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBeCloseTo(balanceBefore, 8);
   });
 });

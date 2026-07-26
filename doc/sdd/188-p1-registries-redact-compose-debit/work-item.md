@@ -211,9 +211,17 @@ Por qué (a) y no (b) (hook `onResponse` + flag `composeExecuted`):
    que revertir. Inflar el budget es peor que el bug original.
 2. **(a) no agrega estado nuevo** — ni flag que alguien pueda olvidar de setear (el bug
    espejo que el AR marcó para (b)), ni request-decorator nuevo.
-3. **Está gateado por construcción a `/compose`**: sin `onDebitOrphaned` el middleware
-   se comporta byte-idéntico a antes, así que `/gasless/transfer` (MNR-1, HU aparte) y
-   `/orchestrate*` no cambian.
+3. **El hook está gateado por construcción a `/compose`**: sin `onDebitOrphaned`,
+   `refundIfDebitOrphaned` es un no-op. **Alcance de esta afirmación (corregido, re-AR
+   MENOR-2): vale para el delta `1d90929..1b4a92d` (el hook), NO para `main...HEAD`.**
+   El OTRO cambio de este branch en el mismo middleware —`getBalance` pasó a
+   best-effort (`.then/.catch`) en `a2a-key.ts:826`, `:1049`, `:1286`— **sí** cambia el
+   comportamiento de las otras **12 rutas** que usan `requirePaymentOrA2AKey`
+   (`/gasless/transfer`, los tres `/orchestrate*`, las tres mutaciones de `/registries`
+   y las cinco de `/tasks`): ver "Cambio de contrato" abajo. `/gasless/transfer`
+   (MNR-1, HU aparte) no gana ni pierde credit-back; `/orchestrate*` tampoco (setean
+   `skipMiddlewareDebit`, así que este middleware no debita).
+
 4. **No hay doble refund**: (b2) sólo corre si `reply.sent` era true al terminar el
    middleware, y en ese caso Fastify saltea el handler → los otros dos call-sites no
    pueden ejecutarse. Son mutuamente excluyentes por el mismo `reply.sent`.
@@ -224,6 +232,27 @@ el handler Fastify sólo corre microtasks (`hookRunner` → `handleResolve` → 
 una microtask no le da lugar al event loop para disparar un `setTimeout`: no queda
 ventana descubierta. El `if (reply.sent)` que quedaba inalcanzable se **borró**
 (`compose.ts:632-640` documenta por qué, en vez de dejar una falsa protección).
+
+#### Cambio de contrato (no-`/compose`): `x-a2a-remaining-budget` puede faltar
+
+Alcance NO cubierto por la afirmación del punto 3, declarado acá al lado (re-AR
+MENOR-2). Antes, si el read post-débito del header fallaba, el `catch` del branch
+devolvía **503 `SERVICE_ERROR`** y el request moría (con el débito ya aplicado en
+`/compose`, o sin débito en las rutas con `skipMiddlewareDebit`). Ahora el header se
+**omite**, se loguea `a2a-key.remaining-budget-header.skip` y el request **sigue**:
+
+- **`/compose`** — la corrección buscada (fila 503 del mapa de abajo): el que pagó
+  recibe la ejecución que pagó.
+- **Las otras 12 rutas que usan el middleware** (`POST /gasless/transfer`;
+  `/orchestrate`, `/orchestrate/plan`, `/orchestrate/execute`; `POST /registries`,
+  `PATCH /registries/:id`, `DELETE /registries/:id`; y las 5 de `/tasks` — `POST /`,
+  `GET /`, `GET /:id` y los dos `PATCH`) — efecto colateral **deliberado y fail-safe**:
+  un caller que antes recibía 503 ahora recibe su respuesta normal **sin** el header
+  `x-a2a-remaining-budget`. No se saltea ningún check de auth, de scoping ni de budget
+  (el header es informativo y se emite DESPUÉS del débito). **Ningún test asertaba el
+  503 viejo** (la suite quedó verde sin tocar esas suites), así que no hay contrato de
+  test roto — pero un consumidor que lea el header **debe tolerar su ausencia**. No
+  verificado contra `wasiai-v2` (fuera del working directory de esta HU).
 
 ### Mapa completo: qué status cobra, antes y después
 
@@ -245,7 +274,7 @@ terminar el request.
 | **504** timeout **PRE-débito** (durante validación/precio) | timer | Fastify saltea el middleware de pago entero (`hooks.js:407`) | **NO cobra** (nunca cobró: la fila vieja que decía "COBRA" era FALSA — refutado por el AR con AR-P1) | igual — fijado ahora por T-NOCHARGE-15 |
 | **504** timeout **DURANTE el débito** (o durante el read del header post-débito) | timer | `middleware/a2a-key.ts:1316` (`:839` deleg, `:1065` sesión) vía `onDebitOrphaned` | **COBRA, sin refund** — y el fix inicial NO lo arreglaba: su credit-back vivía en el route handler, que Fastify no invoca (0 hits en coverage) | **NO cobra** (credit-back completo desde el middleware) — T-NOCHARGE-13/14, probado por mutación |
 | **504** timeout durante compose | timer | `compose.ts:683` | **COBRA**, sin refund | **cobra sólo lo settleado** (`max(0, debitado − totalCostUsdc)`) |
-| **503** `SERVICE_ERROR` por el read del header `x-a2a-remaining-budget` post-débito | `middleware/a2a-key.ts:1231` (y `772`, `993`) | **COBRA**, sin refund, sin ejecutar | **no aplica**: el read pasó a best-effort → el header se omite y el pipeline corre (el que pagó recibe lo que pagó) |
+| **503** `SERVICE_ERROR` por el read del header `x-a2a-remaining-budget` post-débito | `middleware/a2a-key.ts:1286` (y `:826` deleg, `:1049` sesión) | **COBRA**, sin refund, sin ejecutar | **no aplica**: el read pasó a best-effort → el header se omite y el pipeline corre (el que pagó recibe lo que pagó). **Este cambio NO es sólo de `/compose`**: aplica a las 5 rutas que usan el middleware → ver "Cambio de contrato" arriba |
 | 400 fallo de pipeline | `composeService` | `compose.ts:679` | cobra y **reembolsa** (AUDIT A1) | igual (byte-idéntico) |
 | 402 `DEST_CAP_EXCEEDED` mid-pipeline | cap por destino | `compose.ts:683` | cobra y **reembolsa** | igual |
 | 403 `SCOPE_DENIED` | scoping per-step | `compose.ts:681` | cobra y **reembolsa** | igual |
