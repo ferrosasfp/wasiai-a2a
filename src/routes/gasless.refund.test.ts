@@ -23,6 +23,9 @@
  *   T-192-8  key-session                       → refund DUAL-LEDGER
  *   T-192-9  credit success:false              → 503 igual + outbox con señal
  *   T-192-10 credit tira                       → 503 igual + outbox con señal
+ *   T-192-11 credit tira Y outbox tira         → 503 igual, nunca rompe el response
+ *   T-192-12 skipMiddlewareDebit               → sin débito NO hay credit
+ *   T-192-13 GaslessNotSupportedError          → balance vuelve (nunca tocó la red)
  */
 
 import crypto from 'node:crypto';
@@ -197,7 +200,10 @@ vi.mock('../adapters/registry.js', () => {
   };
 });
 
-import { GaslessTransferError } from '../adapters/errors.js';
+import {
+  GaslessNotSupportedError,
+  GaslessTransferError,
+} from '../adapters/errors.js';
 import { budgetService } from '../services/budget.js';
 import { delegationService } from '../services/delegation.js';
 import { identityService } from '../services/identity.js';
@@ -708,6 +714,31 @@ describe('POST /gasless/transfer — refund on failure (HU-192)', () => {
         (call) => call[1] === '[gasless.refund-outbox-threw]',
       ),
     ).toBe(true);
+  });
+
+  // ── T-192-13: el stub de chain no soportada SÍ reembolsa ───
+  // Fix-pack AR MENOR-1: `classifyGaslessFailure` clasifica
+  // `GaslessNotSupportedError` como 'not-moved' (el stub tira ANTES de tocar la
+  // red) y ese literal no tenía candado: mutarlo a 'unknown' dejaba la suite
+  // verde y el caller cobrado por un transfer que el adapter nunca intentó.
+  it('T-192-13: GaslessNotSupportedError (stub de chain) → el balance vuelve (nunca tocó la red)', async () => {
+    mockGaslessTransfer.mockRejectedValue(
+      new GaslessNotSupportedError('kite-testnet', 'gasless stub'),
+    );
+
+    const before = balance();
+    const res = await post({ 'x-a2a-key': TEST_KEY });
+
+    expect(res.statusCode).toBe(500);
+    expect(balance()).toBe(before);
+    expect(mockCredit).toHaveBeenCalledWith(
+      TEST_KEY_ID,
+      CHAIN_ID,
+      VALUE_USD,
+      OWNER_REF,
+    );
+    expect(mockCredit).toHaveBeenCalledTimes(1);
+    expect(balance()).not.toBeGreaterThan(START_BALANCE);
   });
 });
 

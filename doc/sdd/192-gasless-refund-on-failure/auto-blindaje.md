@@ -70,6 +70,59 @@
   de un `try`, buscar primero el tipo exportado del contrato; la gimnasia de
   `ReturnType`/`Awaited` sólo si no existe.
 
+### [2026-07-26 15:02] Fix-pack AR — mis tests cubrían 12 de 22 clasificaciones, no 20
+
+- **Error**: el AR reportó como MENOR-1 que 2 de los 18 throw sites
+  (`avalanche/gasless.ts:497` y `base/gasless.ts:512`, el catch-all
+  post-broadcast) no morían al mutar su literal. Al escribir el candado corrí una
+  **mutación exhaustiva de las 22 clasificaciones** del money-path (8 throw sites
+  × 2 adapters EVM = 16, +1 rama del ternario de submit por adapter = 18, +2 de
+  Kite, +2 del `classifyGaslessFailure` de la ruta) y sobrevivieron **10**, no 2:
+  los 4 pre-flight/firma de avalanche (`:372`, `:382`, `:419`, `:497`), los 5 de
+  base (`:383`, `:391`, `:401`, `:438`, `:512`) y el
+  `GaslessNotSupportedError → 'not-moved'` de `routes/gasless.ts:322`. Los tests
+  viejos asertaban `rejects.toThrow(/reverted|timeout/)` o
+  `toBeInstanceOf(GaslessTransferError)`, que pasan con **cualquier** literal.
+- **Causa raíz**: dos sesgos encadenados. (a) Escribí los tests HU-192 sobre los
+  sitios que me parecían "los peligrosos" (los post-broadcast) en lugar de
+  enumerar mecánicamente **todos** los literales del tipo y probar uno por uno.
+  (b) Asimetría avalanche/base: copié el bloque HU-192 de avalanche a base
+  incompleto (el `cap pre-flight` quedó afuera) y nada lo detecta, porque el
+  espejo entre adapters no es un test — es una convención.
+- **Fix**: 10 tests nuevos (4 en `avalanche.test.ts`, 5 en `base.test.ts`, 1 en
+  `gasless.refund.test.ts`), cada uno fijando UN literal con
+  `rejects.toMatchObject({ message, valueDisposition })`. Re-corrida la mutación
+  de los 22 sitios: **22/22 KILLED**, y cada mutante mata exactamente 1 test
+  (atribución 1-a-1, sin acoplamiento). El script quedó en el scratchpad
+  (`mut192.py`): flipea el literal en la línea, corre los 5 archivos de test,
+  restaura el archivo.
+- **Aplicar en**: cuando un tipo unión decide plata (`GaslessValueDisposition`,
+  y cualquier futuro `'refundable' | 'unknown'`), el candado se diseña por
+  **enumeración del grep**, no por intuición: `grep -n "'not-moved'\|'unknown'"`
+  sobre los adapters da la lista completa de sitios, y cada uno necesita un test
+  que muera al flipearlo. Un `toThrow(/regex del mensaje/)` NO es candado del
+  literal. Y cuando hay adapters espejados (avalanche/base/kite), el bloque de
+  tests se compara línea a línea entre archivos: la asimetría es el default.
+
+### [2026-07-26 15:05] Fix-pack AR — hallazgo DERIVADO (no tocado acá): doble crédito del outbox
+
+- **Hallazgo del AR (MNR-3, fuera del alcance de este fix-pack)**: si la RPC de
+  credit commitea pero la respuesta se pierde, el `catch` best-effort encola en
+  `refundOutbox` (`routes/gasless.ts:293`) y el sweep reintenta ⟹ el caller puede
+  recibir el crédito **dos veces**. NO es un bug introducido por HU-192: es
+  **heredado** del mismo patrón en `routes/compose.ts:412` y
+  `services/orchestrate.ts:1379`, y el arreglo real es una **idempotency key** en
+  la tabla del outbox (`services/refund-outbox.ts:61` `enqueueRefund`) ⟹ necesita
+  migración de DB.
+- **Por qué no se toca acá**: cambiar el esquema del outbox afecta los 3
+  call-sites y el sweep; entra en su propia HU con su propio AR. Este fix-pack es
+  tests + documentación (regla del orquestador: no tocar la lógica de
+  clasificación ni el refund).
+- **Puntero**: tarea propia abierta por el AR de HU-192 (outbox idempotente).
+  Sitios a migrar juntos: `routes/gasless.ts:267/293`,
+  `routes/compose.ts:395/412`, `services/compose.ts:455`,
+  `services/orchestrate.ts:1379`.
+
 ### [2026-07-26 14:05] Wave 0 — el seam de la HU anterior resolvía OTRO problema
 
 - **Error**: el instinto era "ya existe `onDebitOrphaned`, pasalo y listo".

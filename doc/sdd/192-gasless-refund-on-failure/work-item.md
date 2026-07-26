@@ -180,7 +180,7 @@ débito, sin credit (T-192-5 lo asierta contra el ledger).
 
 | Ruta / call-site | ¿Debita el middleware? | Statuses post-débito | ANTES | DESPUÉS |
 |---|---|---|---|---|
-| `gasless.ts:356` `POST /gasless/transfer` | **SÍ** — valor real del transfer | 500 (`status()` tiró), 503 `gasless_not_operational`, 500 `gasless transfer failed` | cobraba los 3 sin refund | **arreglado acá**: refunda 503 + 500-`status` + 500-`not-moved`; el 500-`unknown` se deja cobrado a propósito, con log loud |
+| `gasless.ts:356` `POST /gasless/transfer` | **SÍ** — valor real del transfer | 500 (`status()` tiró), 503 `gasless_not_operational`, 500 `gasless transfer failed` | cobraba los 3 sin refund | **arreglado acá** (rail budget prepago): refunda 503 + 500-`status` + 500-`not-moved`; el 500-`unknown` se deja cobrado a propósito, con log loud. **Residual (rail x402)**: un caller con `x-payment` y sin `x-a2a-key` settlea `DEFAULT_AMOUNT_USD` = $1 **on-chain** (`middleware/x402.ts:240` + `:262`; la ruta no pasa `amountUsd`) y si el handler corta igual (p. ej. 503 con `GASLESS_ENABLED` off) `refundGaslessDebit` retorna en el guard `!a2aKeyRow` (`routes/gasless.ts:223`): no hay ledger que acreditar y **no hay refund on-chain**. Es el MISMO residual que `registries`/`tasks` y necesita la misma decisión de diseño (§Follow-ups 1) |
 | `compose.ts:602` `POST /compose` | SÍ — precio real del step-0 | 400 validación, 400/402/403 `!success`, 504 | arreglado en HU 188 | sin cambios |
 | `orchestrate.ts:84` `POST /orchestrate` | **NO** — `markSkipMiddlewareDebitHandler` (`:83`) | 504 (`:124`), 400/500 | nada debitado en el middleware; el service debita post-plan (`services/orchestrate.ts:1138`) y corre su propio credit-back para `!pipeline.success` (`:1304-1355`) | sin cambios (fuera de alcance, ver residual abajo) |
 | `orchestrate.ts:195` `POST /orchestrate/plan` | NO — skip (`:194`) | contrato zero-debit | — | sin cambios |
@@ -315,11 +315,19 @@ ejercitan el refund).
 
 ## Follow-ups propuestos (no en esta HU)
 
-1. **HU: refund-on-failure en `/registries` (3 rutas)** — incluye decidir qué
-   hacer con el caller x402 que paga on-chain y recibe 403 `A2A_KEY_REQUIRED`.
-2. **HU: refund-on-failure en `/tasks` (5 endpoints)** — $1 por 400/404/409,
+1. **HU: refund-on-failure del rail x402 (pago on-chain)** — decidir qué hacer
+   con el caller que settlea on-chain y recibe un error: ¿refund on-chain?
+   ¿mover el guard ANTES del pago? Alcanza a `/registries` (403
+   `A2A_KEY_REQUIRED`), a `/tasks` y **también al `/gasless/transfer` arreglado
+   en esta HU**: su rail x402 sigue cobrando $1 on-chain en el 503 (ver la fila
+   de `gasless` en el barrido), donde `refundGaslessDebit` es no-op por diseño
+   (sin `a2aKeyRow` no hay ledger que revertir).
+2. **HU: refund-on-failure en `/registries` (3 rutas)** — el $1 de
+   `PLACEHOLDER_FEE_USD` del rail prepago, no reembolsado en ninguno de sus ~10
+   puntos de retorno.
+3. **HU: refund-on-failure en `/tasks` (5 endpoints)** — $1 por 400/404/409,
    incluidos los GET.
-3. **HU: reconciliación del `valueDisposition: 'unknown'`** — hoy queda un log
+4. **HU: reconciliación del `valueDisposition: 'unknown'`** — hoy queda un log
    loud (`gasless.refund-skipped.settlement-unknown`). Un job que verifique la tx
    on-chain y reembolse si nunca confirmó cerraría el último hueco sin riesgo de
    doble pago.
