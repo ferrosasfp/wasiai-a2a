@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
-import { createWalletClient, parseUnits } from 'viem';
+import { createWalletClient } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import { usdToAtomicUnits } from '../../lib/atomic-amount.js';
 import { getLogger } from '../../lib/logger.js';
 import { buildRpcTransport } from '../../lib/rpc-transport.js';
 import type {
@@ -384,14 +385,17 @@ export class KiteOzonePaymentAdapter implements EvmPaymentAdapter {
     const token = getPaymentToken();
     // WKH money-path fix: HONOR the requested USD amount instead of a flat
     // 1 token hardcode (mirror of base/avalanche). The Kite token (PYUSD) uses
-    // 18 decimals; parseUnits scales the USD figure to atomic units exactly.
-    // MNR-1 fix: normalize via toFixed(decimals) BEFORE parseUnits so a tiny
-    // amount in scientific notation (e.g. 1e-7 → "1e-7") can never reach
-    // parseUnits (which throws on non-decimal strings). toFixed always emits a
-    // plain decimal string. NB: JS Number.toFixed caps at 100 fractional
-    // digits; 18 is well within range.
+    // 18 decimals.
+    //
+    // Fix-pack P1 (hallazgo 3): ESTE es el rail donde el bug pegaba — la chain
+    // default con 18 decimales. El `toFixed(18)` anterior no emitía el decimal
+    // que el double representa sino su EXPANSIÓN BINARIA, así que el monto del
+    // challenge 402 salía con un artefacto de float de −107 a +89 wei
+    // ((0.03).toFixed(18) === '0.029999999999999999'). El motivo por el que el
+    // `toFixed` estaba acá (evitar que la notación científica llegue a
+    // `parseUnits`, que LANZA con ella) lo cubre ahora `usdToAtomicUnits`.
     return {
-      amountWei: parseUnits(amountUsd.toFixed(18), 18).toString(),
+      amountWei: usdToAtomicUnits(amountUsd, 18),
       token: { symbol: getTokenSymbol(), address: token, decimals: 18 },
       facilitatorUrl: getFacilitatorUrl(),
     };

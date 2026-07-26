@@ -69,12 +69,16 @@ vi.mock('@solana/web3.js', async (importOriginal) => {
   };
 });
 
+import { getSolanaUsdcDecimals } from './chain.js';
 import { _resetSolanaClients, SolanaPaymentAdapter } from './payment.js';
 
 describe('SolanaPaymentAdapter (WKH-234)', () => {
   beforeEach(() => {
     _resetSolanaClients();
     vi.clearAllMocks();
+    // `clearAllMocks` NO borra implementaciones, así que un `mockReturnValue`
+    // de un test se filtraría a los siguientes. Se re-fija el default (6).
+    vi.mocked(getSolanaUsdcDecimals).mockReturnValue(6);
     fakeConnection.getParsedTransaction.mockResolvedValue(null);
     fakeConnection.getTokenAccountBalance.mockResolvedValue({
       value: { amount: '1000000' },
@@ -83,6 +87,44 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
 
   afterEach(() => {
     _resetSolanaClients();
+  });
+
+  // ── quote() — fix-pack P1 hallazgo 3 ──────────────────────────────────
+  // `quote()` estaba con 0% de cobertura (verificado con --coverage.include):
+  // el fix del monto atómico habría quedado en código que la suite nunca
+  // ejecuta, o sea indistinguible de un fix que nunca corre.
+  it('T-P1-3a: quote() convierte USD → atómico exacto con los decimals del mint (6)', async () => {
+    const adapter = new SolanaPaymentAdapter();
+
+    expect((await adapter.quote(1)).amountWei).toBe('1000000');
+    expect((await adapter.quote(0.03)).amountWei).toBe('30000');
+    expect((await adapter.quote(1.005)).amountWei).toBe('1005000');
+    expect((await adapter.quote(0.000001)).amountWei).toBe('1');
+    expect((await adapter.quote(400)).amountWei).toBe('400000000');
+
+    const q = await adapter.quote(1);
+    expect(q.token.decimals).toBe(6);
+    expect(q.token.symbol).toBe('USDC');
+  });
+
+  it('T-P1-3b: quote() honra los decimals del mint — con 9 no hay artefacto de float', async () => {
+    // El artefacto de `toFixed(decimals)` aparece a > 6 decimales. Un mint de 9
+    // decimales (SOL-like) lo expone: 0.03 daba 29999999 en vez de 30000000.
+    vi.mocked(getSolanaUsdcDecimals).mockReturnValue(9);
+    const adapter = new SolanaPaymentAdapter();
+
+    expect((await adapter.quote(0.03)).amountWei).toBe('30000000');
+    expect((await adapter.quote(0.1)).amountWei).toBe('100000000');
+    expect((await adapter.quote(1.005)).amountWei).toBe('1005000000');
+    expect((await adapter.quote(1)).token.decimals).toBe(9);
+  });
+
+  it('T-P1-3c: quote() con un monto sub-atómico en notación científica NO lanza', async () => {
+    // `String(1e-7)` es '1e-7' y `parseUnits` lanza con notación científica.
+    const adapter = new SolanaPaymentAdapter();
+    await expect(adapter.quote(1e-7)).resolves.toMatchObject({
+      amountWei: '0',
+    });
   });
 
   it('T-234-AC2: settle() builds + broadcasts an SPL transfer → { success, txHash }', async () => {

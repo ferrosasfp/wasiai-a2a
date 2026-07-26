@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
-import { createWalletClient, parseUnits } from 'viem';
+import { createWalletClient } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import { usdToAtomicUnits } from '../../lib/atomic-amount.js';
 import { getLogger } from '../../lib/logger.js';
 import { buildRpcTransport } from '../../lib/rpc-transport.js';
 import type { X402PaymentRequest } from '../../types/index.js';
@@ -360,11 +361,15 @@ export class TempoPaymentAdapter implements EvmPaymentAdapter {
   // Challenge → quote(): honra el USD real (money-path MNR-1). NO hardcodear.
   async quote(amountUsd: number): Promise<QuoteResult> {
     const token = getTempoUsdAddress();
+    // Fix-pack P1 (hallazgo 3): `toFixed(decimals)` no emite el decimal que el
+    // double representa sino su EXPANSIÓN BINARIA, así que a > 6 decimales metía
+    // un artefacto de float en el monto del challenge 402. `usdToAtomicUnits`
+    // normaliza por la representación decimal más corta con round-trip y sigue
+    // garantizando salida decimal plana (`parseUnits` LANZA con notación
+    // científica, que era el motivo del `toFixed`). Para 6 dec (USDC) el
+    // resultado es IDÉNTICO al camino anterior — verificado con 200k floats.
     return {
-      amountWei: parseUnits(
-        amountUsd.toFixed(TEMPO_USD_DECIMALS),
-        TEMPO_USD_DECIMALS,
-      ).toString(),
+      amountWei: usdToAtomicUnits(amountUsd, TEMPO_USD_DECIMALS),
       token: {
         symbol: TEMPO_USD_SYMBOL,
         address: token,

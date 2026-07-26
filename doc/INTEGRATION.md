@@ -185,6 +185,51 @@ Notes:
 - For `POST /registries`, `POST /compose`, and `POST /orchestrate` the server returns `402 Payment Required` with an `accepts[]` array when no auth is provided. See [Section 4](#4-x402-payment-flow).
 - A2A Protocol interactions (tasks, agent cards, well-known) follow the [Google A2A](https://google.github.io/A2A/) specification. JSON-RPC 2.0 is used inside the MCP surface (`/mcp`).
 
+### `/discover` response contract
+
+`GET /discover` and `POST /discover` return:
+
+```json
+{
+  "agents":  [ /* ... */ ],
+  "total":   42,
+  "registries": ["kite-registry", "self-published"]
+}
+```
+
+- **`agents`** — the page: **up to `limit`** agents that match every filter you
+  passed, sorted verified-first → reputation desc → price asc. When you pass a
+  `limit`, you get exactly `min(limit, total)` agents.
+  - **`limit` must be a safe integer `>= 1`** (i.e. `<= 2^53-1`). Anything else
+    (`0`, negative, fractional, non-numeric, or beyond the safe-integer range like
+    `1e21`) returns `400 INVALID_LIMIT`. Omitting `limit` returns **every** match,
+    with no page size. This is validated so the guarantee above actually holds:
+    before validation, `limit=0` returned the whole catalogue, `limit=-3` returned
+    `total - 3` agents, and `limit=1e21` was forwarded upstream verbatim as
+    `1e+21` — a registry that rejected the malformed parameter made the gateway
+    answer `200` with **zero** agents. All three failed silently.
+- **`total`** — the number of agents that match **all** your filters, **before**
+  `limit` is applied. This is the pagination denominator, so
+  `total >= agents.length`. It is **not** the size of the page — do not use it to
+  size a loop over `agents`.
+- **`registries`** — names of the registries that contributed candidates.
+
+Filters are applied by the gateway (status, `verified`, `capabilities`, free-text
+`q`, `maxPrice`, `minReputation`), not by the upstream registries, so `limit` only
+ever trims the final, already-filtered and already-sorted set.
+
+**`minReputation`** filters on the **gateway-computed off-chain score**
+(`agent.computedReputation.score`), scale **0-100** — derived from tasks the agent
+actually settled and paid for, with an anti-sybil cap per caller. It deliberately
+does **not** consider the `reputation` value a registry self-reports for its own
+agents: a quality filter whose input is controlled by the party being filtered is
+not a filter. Consequences:
+
+- An agent with no settled tasks scores `0` and is **excluded** whenever
+  `minReputation > 0`.
+- A value that is not a number in `[0, 100]` returns
+  `400 INVALID_MIN_REPUTATION` — it is never silently ignored.
+
 ### Protocol fee (pricing)
 
 WasiAI charges a **protocol fee** on orchestrated pipelines and publishes it in
@@ -231,6 +276,51 @@ protocol fee is levied once on top of that total. So a caller pays
 referral split, resolved on the pipeline's primary agent) does not change what
 you pay and is documented in
 [`doc/architecture/FEE-MODEL.md`](architecture/FEE-MODEL.md).
+
+### `/compose` — downstream settlement per step
+
+Each entry of `steps[]` reports whether WasiAI forwarded payment to that agent
+(the "downstream leg"). Exactly one of the two shapes is present:
+
+**Settled** — the agent was paid on-chain:
+
+```json
+{
+  "downstreamTxHash": "0x…",
+  "downstreamBlockNumber": 12345,
+  "downstreamSettledAmount": "500000"
+}
+```
+
+**Skipped** — the leg did not settle, and now the response says why
+(additive field, added by the P1 fix-pack; previously the reason existed only in
+server-side logs):
+
+```json
+{ "downstreamSettle": "skipped:NO_PAYMENT_FIELD" }
+```
+
+| Code | Meaning | What to do |
+|------|---------|------------|
+| `NO_PAYMENT_FIELD` | The agent's card declares no `payment` block. | Ask the agent operator to publish a payment spec. |
+| `METHOD_NOT_SUPPORTED` | The agent's `payment.method` is not x402. | Not payable through this rail. |
+| `CHAIN_NOT_SUPPORTED` | The agent's `payment.chain` is not a rail this gateway settles. | Ask the agent to declare a supported chain. |
+| `INVALID_PAY_TO_FORMAT` | The agent's `payment.contract` is not a valid address for its chain. | Agent-side config error. |
+| `ZERO_PAY_TO` | The agent's payout address is the zero address. | Agent-side config error. |
+| `INVALID_PRICE` | The agent's price is not a finite positive number. | Agent-side config error. |
+| `SETTLE_FAILED` | The payment was attempted and did not go through. | Retryable. |
+| `NOT_CONFIGURED` | This gateway is not configured to settle that leg. | Operational, not your request. Contact support if persistent. |
+| `UNAVAILABLE` | The gateway could not settle right now. | Retryable. Contact support if persistent. |
+
+The first six describe **the agent's own declaration** (the same data you can see
+in `GET /discover`), so they are reported verbatim and are actionable.
+`NOT_CONFIGURED` and `UNAVAILABLE` are deliberately coarse: the finer-grained
+internal reasons would disclose gateway configuration, operator wallet state or
+key status, so they are not exposed. Do not build logic that depends on
+distinguishing them.
+
+Being skipped does **not** fail the step: the agent still ran and you are still
+billed for the pipeline. `downstreamSettle` tells you about the *payout* leg.
 
 ---
 
@@ -300,6 +390,7 @@ All errors share a normalized JSON shape:
 
 | HTTP | Meaning in this API | Recommended action |
 |------|---------------------|--------------------|
+| `400 Bad Request` | A query/body parameter is malformed. The `code` field says which: `INVALID_MIN_REPUTATION` (`minReputation` on `/discover` is not a number in `[0, 100]`). | Fix the parameter. `minReputation` uses the **0-100** off-chain score scale, not 0-1. |
 | `401 Unauthorized` | Not emitted by the application layer. May appear from infrastructure (CDN, reverse proxy) if your request is dropped before reaching the app. | Check the URL, TLS, and that your `Authorization` header is well-formed. If you need auth, this API uses `403` (see next row). |
 | `402 Payment Required` | The endpoint needs payment and none was provided. Body includes `accepts[]` with full x402 payment instructions. | Sign the EIP-712 authorization, base64-encode the payload, retry with `PAYMENT-SIGNATURE`. Alternatively attach a valid `x-a2a-key`. |
 | `403 Forbidden` | An `x-a2a-key` / Bearer was provided but rejected. The `error_code` field tells you why: `KEY_NOT_FOUND`, `KEY_INACTIVE`, `DAILY_LIMIT`, `INSUFFICIENT_BUDGET`, `SCOPE_DENIED`, `PER_CALL_LIMIT`. | `KEY_NOT_FOUND`/`KEY_INACTIVE` → verify the key you are sending and that it has not been disabled. `DAILY_LIMIT`/`INSUFFICIENT_BUDGET` → top up or wait for the daily reset. `SCOPE_DENIED` → request a wider scope from the key owner. `PER_CALL_LIMIT` → lower `budget` in the request body. |

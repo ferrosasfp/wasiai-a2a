@@ -3,7 +3,45 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import {
+  InvalidLimitError,
+  InvalidMinReputationError,
+  parseLimit,
+  parseMinReputation,
+} from '../lib/discovery-query.js';
 import { discoveryService } from '../services/discovery.js';
+
+/**
+ * Fix-pack P1 (hallazgo 2 + AR MENOR-4): `minReputation` / `limit` inválidos →
+ * 400 explícito.
+ *
+ * Se valida ANTES del fanout: un valor basura no debe gastar un round-trip a los
+ * registries ni devolver 200-vacío (o, en el caso de `limit`, un 200 con MÁS
+ * agentes de los pedidos). Devuelve los valores normalizados o `undefined` si ya
+ * se envió el 400 (para que el handler haga `return reply`).
+ */
+function parseFiltersOr400(
+  reply: FastifyReply,
+  raw: { minReputation: unknown; limit: unknown },
+):
+  | { minReputation: number | undefined; limit: number | undefined }
+  | undefined {
+  try {
+    return {
+      minReputation: parseMinReputation(raw.minReputation),
+      limit: parseLimit(raw.limit),
+    };
+  } catch (err) {
+    if (
+      err instanceof InvalidMinReputationError ||
+      err instanceof InvalidLimitError
+    ) {
+      reply.status(400).send({ error: err.message, code: err.code });
+      return undefined;
+    }
+    throw err;
+  }
+}
 
 const discoverRoutes: FastifyPluginAsync = async (fastify) => {
   /**
@@ -14,9 +52,29 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    * - capabilities: comma-separated list of capabilities
    * - q: free text search
    * - maxPrice: maximum price per call in USDC
-   * - minReputation: minimum reputation score (0-1)
-   * - limit: max results
+   * - minReputation: minimum GATEWAY-COMPUTED off-chain reputation score,
+   *   scale **0-100** (`agent.computedReputation.score`). Fix-pack P1: este
+   *   JSDoc decía "(0-1)" y era falso — la escala real es 0-100
+   *   (`AgentReputation.score`). NO filtra por el `reputation` auto-reportado
+   *   por el registry: ese valor lo controla la parte que se está filtrando.
+   *   Un agente sin tasks liquidadas cuenta 0 → excluido si minReputation > 0.
+   *   Valor no numérico o fuera de [0,100] → 400 `INVALID_MIN_REPUTATION`.
+   * - limit: max results (PAGE SIZE — ver el contrato de la respuesta). Entero
+   *   SEGURO `>= 1`; ausente = sin page size (todos los matches). Valor no entero,
+   *   `0`, negativo, no numérico o fuera del rango seguro (`1e21`) → 400
+   *   `INVALID_LIMIT` (AR MENOR-4 + it3 MENOR-3: antes `limit=0` devolvía TODO el
+   *   catálogo, `limit=-3` devolvía `total-3` por el `slice(0,-3)` y `limit=1e21`
+   *   se reenviaba upstream como `'1e+21'` → 200 con 0 agentes; los tres
+   *   contradiciendo el contrato documentado).
    * - registry: filter to specific registry
+   *
+   * Respuesta — contrato de paginación (fix-pack P1, hallazgo 1):
+   * - `agents`: hasta `limit` matches, ordenados verified-first → reputación
+   *   desc → precio asc.
+   * - `total`: cantidad de agentes que matchean TODOS los filtros, ANTES de
+   *   aplicar `limit`. Es el denominador para paginar, así que
+   *   `total >= agents.length`. NO es el tamaño de la página.
+   * - `registries`: nombres de los registries que contribuyeron.
    */
   fastify.get(
     '/',
@@ -37,14 +95,18 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
     ) => {
       const query = request.query;
 
+      const filters = parseFiltersOr400(reply, {
+        minReputation: query.minReputation,
+        limit: query.limit,
+      });
+      if (!filters) return reply;
+
       const result = await discoveryService.discover({
         capabilities: query.capabilities?.split(',').map((s) => s.trim()),
         query: query.q,
         maxPrice: query.maxPrice ? parseFloat(query.maxPrice) : undefined,
-        minReputation: query.minReputation
-          ? parseFloat(query.minReputation)
-          : undefined,
-        limit: query.limit ? parseInt(query.limit, 10) : undefined,
+        minReputation: filters.minReputation,
+        limit: filters.limit,
         registry: query.registry,
         verified: query.verified === 'true' ? true : undefined,
         includeInactive: query.includeInactive === 'true' ? true : undefined,
@@ -56,7 +118,9 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * POST /discover
-   * Same as GET /discover but reads params from JSON body (WKH-DISCOVER-POST)
+   * Same as GET /discover but reads params from JSON body (WKH-DISCOVER-POST).
+   * Mismo contrato de respuesta que el GET: `total` = matches pre-`limit`
+   * (denominador de paginación), `agents` = la página de hasta `limit`.
    */
   fastify.post(
     '/',
@@ -91,13 +155,18 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
         }
       }
 
+      const filters = parseFiltersOr400(reply, {
+        minReputation: body.minReputation,
+        limit: body.limit,
+      });
+      if (!filters) return reply;
+
       const result = await discoveryService.discover({
         capabilities,
         query: body.q != null ? String(body.q) : undefined,
         maxPrice: body.maxPrice != null ? Number(body.maxPrice) : undefined,
-        minReputation:
-          body.minReputation != null ? Number(body.minReputation) : undefined,
-        limit: body.limit != null ? Number(body.limit) : undefined,
+        minReputation: filters.minReputation,
+        limit: filters.limit,
         registry: body.registry != null ? String(body.registry) : undefined,
         verified: body.verified === true ? true : undefined,
         includeInactive: body.includeInactive === true ? true : undefined,

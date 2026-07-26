@@ -8,13 +8,7 @@
  * inline (CD-9). NEVER throws (CD-7): every async step is wrapped and returns `null`
  * with a skip-code.
  */
-import {
-  createPublicClient,
-  erc20Abi,
-  formatUnits,
-  http,
-  parseUnits,
-} from 'viem';
+import { createPublicClient, erc20Abi, formatUnits, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import {
   classifyDestinationEnvironment,
@@ -31,8 +25,26 @@ import {
 } from '../adapters/registry.js';
 import type { ChainKey, SolanaPaymentAdapter } from '../adapters/types.js';
 import type { Agent, DownstreamLogger } from '../types/index.js';
+// AR MENOR-5: mismo helper de conversión USD→atómico que los 5 adapters de pago
+// (fix-pack P1, hallazgo 3). Este módulo es la pata OUTBOUND (lo que el gateway
+// paga); usaba `parseUnits(String(...))` y divergía de la pata inbound.
+import { usdToAtomicUnits } from './atomic-amount.js';
+import { noteSkip } from './downstream-skip-code.js';
 import { isValidSolanaAddress, isValidWallet } from './wallet-format.js';
 
+// Fix-pack P1 (hallazgo 4): la taxonomía de skip-codes y su traducción al
+// vocabulario público se movieron a un módulo LEAF (`downstream-skip-code.ts`)
+// para no romper las suites que mockean ESTE módulo completo. Se re-exporta
+// `DownstreamSkipCode` por back-compat (mismo patrón que `DownstreamLogger`).
+export type {
+  DownstreamSkipCode,
+  PublicDownstreamSkipCode,
+  SkipCodeSink,
+} from './downstream-skip-code.js';
+export {
+  createSkipCapturingLogger,
+  toPublicSkipCode,
+} from './downstream-skip-code.js';
 // Re-export for backward-compat: callers historically import
 // `DownstreamLogger` from this module (e.g. compose.ts). The canonical
 // definition now lives in `types/index.ts` (TD-WKH-55-4 / CR-MNR-3).
@@ -132,60 +144,6 @@ export interface DownstreamResult {
    */
   nonEvmSettle?: NonEvmSettleReceipt;
 }
-
-/**
- * Códigos de skip/observabilidad del leg downstream. TODO valor que salga en el
- * campo `code` de un log de este módulo tiene que estar acá (fix-pack CR-MNR-5:
- * faltaban los tres últimos, que sí se emitían — un tipo incompleto hace que un
- * consumidor de logs crea que la taxonomía está cerrada cuando no lo está).
- *
- * Los tres primeros grupos CORTAN el leg (`return null`); los de observabilidad
- * NO cortan (ver el catálogo en el docstring de `signAndSettleDownstream`).
- */
-export type DownstreamSkipCode =
-  | 'FLAG_OFF'
-  | 'NO_PAYMENT_FIELD'
-  | 'METHOD_NOT_SUPPORTED'
-  | 'CHAIN_NOT_SUPPORTED'
-  // Slug ↔ destino incoherentes. Código PROPIO (fix-pack CR-MNR-5): antes se
-  // logueaba como `MAINNET_NOT_ALLOWED` + `reason:'CHAIN_ENVIRONMENT_DRIFT'`,
-  // y eso mezclaba en un mismo código dos incidentes que no tienen nada que ver
-  // entre sí — "un agente pidió una mainnet sin opt-in" (esperable, sano) vs
-  // "NUESTRA config apunta a un destino que contradice su slug" (bug de
-  // operación, incluye el caso declared=mainnet/actual=testnet, donde permitir
-  // mainnet no es el tema). Un dashboard que cuente `MAINNET_NOT_ALLOWED` no
-  // debe sumar los dos.
-  | 'CHAIN_ENVIRONMENT_DRIFT'
-  | 'MAINNET_NOT_ALLOWED'
-  | 'INVALID_PAY_TO_FORMAT'
-  | 'ZERO_PAY_TO'
-  | 'INVALID_PRICE'
-  | 'INSUFFICIENT_BALANCE'
-  | 'BALANCE_READ_FAILED'
-  | 'SIGNING_FAILED'
-  | 'VERIFY_FAILED'
-  | 'SETTLE_FAILED'
-  // ── Observabilidad: NO cortan el leg ────────────────────────────────
-  // No se pudo leer el balance del operador antes de settlear ⇒ el pre-check se
-  // saltea y el settle sigue. SÓLO se emite en dos condiciones:
-  //   · EVM: falta la RPC env del rail — paso 9 de `signAndSettleDownstream`,
-  //     guard `if (!rpc)`.
-  //   · Solana: `getOperatorSplBalance()` tira — catch en `settleSolanaLeg`.
-  //
-  // ⚠️ NO cubre el caso "falta `OPERATOR_PRIVATE_KEY`" (re-CR MENOR-4: este
-  // comentario lo prometía y era falso). Con RPC presente y PK ausente o sin
-  // `0x`, el `if (pk?.startsWith('0x'))` del paso 9 NO tiene `else`: el pre-check
-  // se saltea **sin emitir ningún código**. Es un hueco de observabilidad, no de
-  // dinero — sin PK el `adapter.sign` posterior falla igual (`SIGNING_FAILED`,
-  // `avalanche/payment.ts:177-180` y sus pares de kite-ozone/base). Se dejó como
-  // hueco a propósito: agregar el log es tocar el money-path que AR+F4+re-CR ya
-  // aprobaron en este diff, y sumaría un 3er código de observabilidad por un
-  // caso sin impacto práctico.
-  | 'BALANCE_PRECHECK_SKIPPED'
-  // Replay idempotente Solana con balance por debajo del monto del leg: el
-  // intent YA tiene firma, así que NO se corta (FIX 2); el log explica por qué
-  // un eventual self-heal re-broadcast fallaría on-chain.
-  | 'BALANCE_LOW_ON_IDEMPOTENT_REPLAY';
 
 // ─── Internal helpers ───────────────────────────────────────────────
 
@@ -322,16 +280,29 @@ async function settleSolanaLeg(
     );
     return null;
   }
+  // AR MENOR-5 (extendido): la pata Solana tenía el MISMO
+  // `parseUnits(String(priceUsdc))` que el sitio EVM de abajo. El AR marcó un solo
+  // sitio, pero el bug es de clase — se alinean los dos por el helper compartido.
   let amountAtomic: string;
   try {
-    amountAtomic = parseUnits(
-      String(agent.priceUsdc),
-      token.decimals,
-    ).toString();
+    amountAtomic = usdToAtomicUnits(agent.priceUsdc, token.decimals);
   } catch (e) {
     logger.warn(
       { agentSlug: agent.slug, code: 'INVALID_PRICE', detail: String(e) },
-      '[Downstream] parseUnits failed (solana)',
+      '[Downstream] atomic amount conversion failed (solana)',
+    );
+    return null;
+  }
+  // Fail-closed idéntico al del sitio EVM: no se broadcastea un transfer de 0.
+  if (amountAtomic === '0') {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        code: 'INVALID_PRICE',
+        priceUsdc: agent.priceUsdc,
+        decimals: token.decimals,
+      },
+      '[Downstream] priceUsdc rounds to 0 atomic units for this mint (solana)',
     );
     return null;
   }
@@ -511,6 +482,11 @@ export async function signAndSettleDownstream(
   //    del skip — el comportamiento NO cambia (sigue devolviendo `null` sin
   //    resolver ningún adapter).
   if (!DOWNSTREAM_FLAG) {
+    // Fix-pack P1 (hallazgo 4): el `code` se registra en CADA request, aparte
+    // del log. El log es warn-once por proceso (WKH-235a), así que a partir del
+    // 2º request el decorador de logger no vería nada y la respuesta HTTP
+    // perdería la señal de skip. El comportamiento del LOG no cambia.
+    noteSkip(logger, 'FLAG_OFF');
     if (!_warnedFlagOff) {
       _warnedFlagOff = true;
       logger.info(
@@ -692,13 +668,42 @@ export async function signAndSettleDownstream(
     return null;
   }
   const decimals = primaryToken.decimals;
+  // AR MENOR-5: 6º sitio de conversión USD → atómico, ahora por el MISMO helper
+  // que los 5 adapters (hallazgo 3). Antes era `parseUnits(String(priceUsdc))`:
+  // esta pata (OUTBOUND, lo que el gateway PAGA) y la pata inbound (el challenge
+  // 402) convertían distinto para precios en notación científica —
+  // `priceUsdc = 1e-7` daba challenge `0` (el helper expande el exponente) y acá
+  // `INVALID_PRICE` (`parseUnits` LANZA con `'1e-7'`). El fix del hallazgo 3
+  // alineó los 5 adapters entre sí; esto cierra la divergencia inbound↔outbound.
+  //
+  // Dato a favor de que es seguro: esta línea NUNCA tuvo el artefacto de
+  // `toFixed` (usaba `String`), así que para todo precio con representación
+  // decimal plana el resultado es byte-idéntico — `toPlainDecimalString` es
+  // `String()` salvo cuando hay exponente.
   let value: bigint;
   try {
-    value = parseUnits(String(agent.priceUsdc), decimals);
+    value = BigInt(usdToAtomicUnits(agent.priceUsdc, decimals));
   } catch (e) {
     logger.warn(
       { agentSlug: agent.slug, code: 'INVALID_PRICE', detail: String(e) },
-      '[Downstream] parseUnits failed',
+      '[Downstream] atomic amount conversion failed',
+    );
+    return null;
+  }
+  // Guard fail-closed del cambio de arriba: un precio sub-grilla que ANTES
+  // lanzaba (notación científica) ahora convierte, y para 6 decimales puede
+  // redondear a 0 unidades atómicas. Broadcastear un transfer de 0 quema gas y
+  // deja un recibo que dice que se pagó cuando no se movió nada. Se trata como
+  // precio inválido (mismo código que el guard de `priceUsdc <= 0`).
+  if (value === 0n) {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        code: 'INVALID_PRICE',
+        priceUsdc: agent.priceUsdc,
+        decimals,
+      },
+      '[Downstream] priceUsdc rounds to 0 atomic units for this token',
     );
     return null;
   }

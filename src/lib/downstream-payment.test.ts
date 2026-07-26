@@ -615,6 +615,127 @@ describe('signAndSettleDownstream — chain-aware delegation', () => {
     expect(signedValue).not.toBe('500000');
   });
 
+  // ── AR MENOR-5: la pata OUTBOUND usa el MISMO helper que la inbound ──────
+
+  it('T-MNR5-1 (18-dec): el valor firmado ya no arrastra el artefacto de float de la conversión', async () => {
+    // `parseUnits(String(1.005), 18)` no tenía el artefacto de `toFixed(18)`, así
+    // que este valor NO cambia — el punto es que ahora sale del mismo helper que
+    // el challenge inbound, y por lo tanto los dos coinciden exactamente.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const agent = makeAgent({
+      priceUsdc: 1.005,
+      payment: {
+        method: 'x402',
+        chain: 'kite-ozone-testnet',
+        contract: PAYTO_ADDR,
+      },
+    });
+    mockKiteSign.mockResolvedValue({
+      paymentRequest: {
+        authorization: {
+          from: '0xOP',
+          to: PAYTO_ADDR,
+          value: '1005000000000000000',
+        },
+        signature: '0xSIGK',
+        network: 'eip155:2368',
+      },
+    });
+
+    await signAndSettleDownstream(agent, makeLogger());
+
+    expect(mockKiteSign).toHaveBeenCalledWith(
+      expect.objectContaining({ value: '1005000000000000000' }),
+    );
+    // El artefacto de la expansión binaria (lo que emitía `toFixed(18)`).
+    expect(mockKiteSign.mock.calls[0]![0]!.value).not.toBe(
+      '1004999999999999893',
+    );
+  });
+
+  it('T-MNR5-2 (notación científica, 18-dec): antes LANZABA INVALID_PRICE, ahora convierte igual que el challenge inbound', async () => {
+    // Divergencia que cerró el AR: `priceUsdc = 1e-7` daba challenge inbound
+    // (helper) y `INVALID_PRICE` outbound (`parseUnits('1e-7')` LANZA). Con 18
+    // decimales el monto es representable, así que el agente cobra lo que se
+    // cobró al caller en vez de saltearse el leg.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const agent = makeAgent({
+      priceUsdc: 1e-7,
+      payment: {
+        method: 'x402',
+        chain: 'kite-ozone-testnet',
+        contract: PAYTO_ADDR,
+      },
+    });
+    mockKiteSign.mockResolvedValue({
+      paymentRequest: {
+        authorization: { from: '0xOP', to: PAYTO_ADDR, value: '100000000000' },
+        signature: '0xSIGK',
+        network: 'eip155:2368',
+      },
+    });
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(agent, logger);
+
+    expect(result).not.toBeNull();
+    expect(mockKiteSign).toHaveBeenCalledWith(
+      expect.objectContaining({ value: '100000000000' }), // 1e-7 * 10^18
+    );
+  });
+
+  it('T-MNR5-3 (fail-closed): un precio que redondea a 0 unidades atómicas NO se firma (INVALID_PRICE)', async () => {
+    // Contrapartida del cambio de arriba: con 6 decimales `1e-7` redondea a 0.
+    // Broadcastear un transfer de 0 quema gas y deja un recibo mentiroso, así que
+    // el guard nuevo lo corta con el mismo código que un precio inválido.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(
+      makeAgent({ priceUsdc: 1e-7 }), // avalanche → 6-dec
+      logger,
+    );
+
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'INVALID_PRICE', decimals: 6 }),
+      expect.stringContaining('0 atomic units'),
+    );
+    expect(mockFujiSign).not.toHaveBeenCalled();
+  });
+
+  it('T-MNR5-4 (leg SOLANA): mismo helper y mismo guard de 0 que el leg EVM', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const solanaAgentAt = (price: number): Agent =>
+      makeAgent({
+        priceUsdc: price,
+        payment: {
+          method: 'x402',
+          chain: 'solana-devnet',
+          contract: SOL_PAYTO,
+        },
+      });
+    mockSolanaBalance.mockResolvedValue('1000000000');
+    mockSolanaSettle.mockResolvedValue({ txHash: SOL_SIG, success: true });
+
+    // 0.5 USDC → 500000 (6-dec del mint), byte-idéntico al camino viejo.
+    await signAndSettleDownstream(solanaAgentAt(0.5), makeLogger());
+    expect(mockSolanaSettle).toHaveBeenCalledWith(
+      expect.objectContaining({ amountAtomic: '500000' }),
+    );
+
+    // Sub-grilla → 0 atómico → fail-closed (antes: `parseUnits` lanzaba).
+    mockSolanaSettle.mockClear();
+    const logger = makeLogger();
+    const result = await signAndSettleDownstream(solanaAgentAt(1e-7), logger);
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'INVALID_PRICE' }),
+      expect.stringContaining('0 atomic units'),
+    );
+    expect(mockSolanaSettle).not.toHaveBeenCalled();
+  });
+
   // WKH-234: `solana` now resolves (→ solana-devnet), so this "unrecognized"
   // test uses `solana-mainnet` — NOT recognized (devnet-only, CD-4).
   it('T-AC4a: chain=solana-mainnet (normalizeChainSlug→undefined) → null + CHAIN_NOT_SUPPORTED, sign NOT called (AC-4/CD-4)', async () => {
@@ -1424,5 +1545,213 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
 
     expect(result).toEqual({ txHash: '0xFUJI', settledAmount: '500000' });
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Fix-pack P1 (hallazgo 4): captura del skip-code para la respuesta ────
+//
+// La señal `steps[].downstreamSettle` de /compose depende de un INVARIANTE de
+// este módulo: todo camino que devuelve `null` loguea antes un `{ code }`. Estos
+// tests lo fijan contra el código REAL (no contra un mock del logger), para que
+// un `return null` nuevo sin código rompa la suite en vez de degradar la
+// respuesta en silencio.
+
+describe('captura del skip-code (fix-pack P1, hallazgo 4)', () => {
+  it('T-P1-4a: FLAG_OFF se reporta SIEMPRE, incluso en el 2º leg (el log es warn-once)', async () => {
+    // ESTE es el caso que un decorador de logger puro NO cubriría: el log de
+    // FLAG_OFF es once-per-process, así que del 2º request en adelante el
+    // decorador no vería nada y la respuesta perdería la señal. De ahí el
+    // `noteSkip` explícito en ese branch.
+    const { signAndSettleDownstream, createSkipCapturingLogger } =
+      await importWithFlag(false);
+
+    const cap1 = createSkipCapturingLogger(makeLogger());
+    expect(await signAndSettleDownstream(makeAgent(), cap1)).toBeNull();
+    expect(cap1.lastSkipCode()).toBe('FLAG_OFF');
+
+    // 2º leg: el log ya no se emite, el CÓDIGO sí.
+    const inner2 = makeLogger();
+    const cap2 = createSkipCapturingLogger(inner2);
+    expect(await signAndSettleDownstream(makeAgent(), cap2)).toBeNull();
+    expect(inner2.info).not.toHaveBeenCalled(); // warn-once preservado
+    expect(cap2.lastSkipCode()).toBe('FLAG_OFF'); // señal preservada
+  });
+
+  it('T-P1-4b: NO_PAYMENT_FIELD → capturado', async () => {
+    const { signAndSettleDownstream, createSkipCapturingLogger } =
+      await importWithFlag(true);
+    const cap = createSkipCapturingLogger(makeLogger());
+
+    expect(
+      await signAndSettleDownstream(makeAgent({ payment: undefined }), cap),
+    ).toBeNull();
+    expect(cap.lastSkipCode()).toBe('NO_PAYMENT_FIELD');
+  });
+
+  it('T-P1-4c: METHOD_NOT_SUPPORTED → capturado', async () => {
+    const { signAndSettleDownstream, createSkipCapturingLogger } =
+      await importWithFlag(true);
+    const cap = createSkipCapturingLogger(makeLogger());
+
+    expect(
+      await signAndSettleDownstream(
+        makeAgent({
+          payment: {
+            method: 'stripe',
+            asset: 'USDC',
+            chain: 'avalanche',
+            contract: PAYTO_ADDR,
+          },
+        }),
+        cap,
+      ),
+    ).toBeNull();
+    expect(cap.lastSkipCode()).toBe('METHOD_NOT_SUPPORTED');
+  });
+
+  it('T-P1-4d: CHAIN_NOT_SUPPORTED → capturado', async () => {
+    const { signAndSettleDownstream, createSkipCapturingLogger } =
+      await importWithFlag(true);
+    const cap = createSkipCapturingLogger(makeLogger());
+
+    expect(
+      await signAndSettleDownstream(
+        makeAgent({
+          payment: {
+            method: 'x402',
+            asset: 'USDC',
+            chain: 'una-chain-que-no-existe',
+            contract: PAYTO_ADDR,
+          },
+        }),
+        cap,
+      ),
+    ).toBeNull();
+    expect(cap.lastSkipCode()).toBe('CHAIN_NOT_SUPPORTED');
+  });
+
+  it('T-P1-4e: INVALID_PAY_TO_FORMAT → capturado', async () => {
+    const { signAndSettleDownstream, createSkipCapturingLogger } =
+      await importWithFlag(true);
+    const cap = createSkipCapturingLogger(makeLogger());
+
+    expect(
+      await signAndSettleDownstream(
+        makeAgent({
+          payment: {
+            method: 'x402',
+            asset: 'USDC',
+            chain: 'avalanche',
+            contract: 'no-es-una-address',
+          },
+        }),
+        cap,
+      ),
+    ).toBeNull();
+    expect(cap.lastSkipCode()).toBe('INVALID_PAY_TO_FORMAT');
+  });
+
+  it('T-P1-4f: INVALID_PRICE → capturado', async () => {
+    const { signAndSettleDownstream, createSkipCapturingLogger } =
+      await importWithFlag(true);
+    const cap = createSkipCapturingLogger(makeLogger());
+
+    expect(
+      await signAndSettleDownstream(makeAgent({ priceUsdc: 0 }), cap),
+    ).toBeNull();
+    expect(cap.lastSkipCode()).toBe('INVALID_PRICE');
+  });
+
+  it('T-P1-4g: MAINNET_NOT_ALLOWED → capturado (y se genericiza en la respuesta)', async () => {
+    const {
+      signAndSettleDownstream,
+      createSkipCapturingLogger,
+      toPublicSkipCode,
+    } = await importWithFlag(true);
+    const cap = createSkipCapturingLogger(makeLogger());
+
+    expect(
+      await signAndSettleDownstream(
+        makeAgent({
+          payment: {
+            method: 'x402',
+            asset: 'USDC',
+            chain: 'avalanche-mainnet',
+            contract: PAYTO_ADDR,
+          },
+        }),
+        cap,
+      ),
+    ).toBeNull();
+    expect(cap.lastSkipCode()).toBe('MAINNET_NOT_ALLOWED');
+    // La allow-list del gateway NO se filtra al caller.
+    expect(toPublicSkipCode('MAINNET_NOT_ALLOWED')).toBe('NOT_CONFIGURED');
+  });
+
+  it('T-P1-4h: INSUFFICIENT_BALANCE → capturado (y se genericiza a UNAVAILABLE)', async () => {
+    const {
+      signAndSettleDownstream,
+      createSkipCapturingLogger,
+      toPublicSkipCode,
+    } = await importWithFlag(true);
+    mockReadContract.mockResolvedValue(1n); // operador sin fondos
+    const cap = createSkipCapturingLogger(makeLogger());
+
+    expect(await signAndSettleDownstream(makeAgent(), cap)).toBeNull();
+    expect(cap.lastSkipCode()).toBe('INSUFFICIENT_BALANCE');
+    // El estado de la tesorería del operador NO se filtra al caller.
+    expect(toPublicSkipCode('INSUFFICIENT_BALANCE')).toBe('UNAVAILABLE');
+  });
+
+  it('T-P1-4i: SETTLE_FAILED → capturado', async () => {
+    const { signAndSettleDownstream, createSkipCapturingLogger } =
+      await importWithFlag(true);
+    mockFujiSettle.mockResolvedValue({ success: false, error: 'boom' });
+    const cap = createSkipCapturingLogger(makeLogger());
+
+    expect(await signAndSettleDownstream(makeAgent(), cap)).toBeNull();
+    expect(cap.lastSkipCode()).toBe('SETTLE_FAILED');
+  });
+
+  it('T-P1-4j: VERIFY_FAILED → capturado (se genericiza a SETTLE_FAILED)', async () => {
+    const {
+      signAndSettleDownstream,
+      createSkipCapturingLogger,
+      toPublicSkipCode,
+    } = await importWithFlag(true);
+    mockFujiVerify.mockResolvedValue({ valid: false, error: 'nope' });
+    const cap = createSkipCapturingLogger(makeLogger());
+
+    expect(await signAndSettleDownstream(makeAgent(), cap)).toBeNull();
+    expect(cap.lastSkipCode()).toBe('VERIFY_FAILED');
+    expect(toPublicSkipCode('VERIFY_FAILED')).toBe('SETTLE_FAILED');
+  });
+
+  it('T-P1-4k: un leg EXITOSO no deja un skip-code terminal (la señal no se emite)', async () => {
+    const { signAndSettleDownstream, createSkipCapturingLogger } =
+      await importWithFlag(true);
+    const cap = createSkipCapturingLogger(makeLogger());
+
+    const result = await signAndSettleDownstream(makeAgent(), cap);
+
+    expect(result).toEqual({ txHash: '0xFUJI', settledAmount: '500000' });
+    // compose sólo consulta el código cuando el resultado es null, pero además
+    // acá no se logueó ningún code: el happy path queda limpio.
+    expect(cap.lastSkipCode()).toBeUndefined();
+  });
+
+  it('T-P1-4l: el decorador NO altera el log del money-path (delegación byte-idéntica)', async () => {
+    const { signAndSettleDownstream, createSkipCapturingLogger } =
+      await importWithFlag(true);
+    const inner = makeLogger();
+    const cap = createSkipCapturingLogger(inner);
+
+    await signAndSettleDownstream(makeAgent({ priceUsdc: 0 }), cap);
+
+    // El logger interno recibió el MISMO payload que recibiría sin decorador.
+    expect(inner.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'INVALID_PRICE', priceUsdc: 0 }),
+      expect.any(String),
+    );
   });
 });

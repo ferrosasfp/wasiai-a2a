@@ -11,11 +11,25 @@ import { getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import { hashCallerRef } from '../lib/caller-hash.js';
 import { selectFacilitatorUrl } from '../lib/cdp-selector.js';
+// Fix-pack P1 AR BLQ-BAJO-1: el page size del pool de agentes que usa
+// `resolveAgent` sale del MISMO módulo leaf que el over-fetch de discovery, para
+// que no puedan desalinearse. Leaf (no `services/discovery.js`) porque las suites
+// que mockean el service completo dejarían el export en `undefined`.
+import { resolveComposeAgentPoolLimit } from '../lib/discovery-fetch-limit.js';
 import {
   type DownstreamLogger,
   type DownstreamResult,
   signAndSettleDownstream,
 } from '../lib/downstream-payment.js';
+// Fix-pack P1 (hallazgo 4): los helpers de skip-code se importan del módulo LEAF,
+// NO de downstream-payment.js. Media docena de suites mockean ese módulo completo
+// con factories sin `importOriginal`, así que importarlos de ahí los deja
+// `undefined` bajo test (rompió 84 tests; ver doc/sdd/189-.../auto-blindaje.md).
+import {
+  createSkipCapturingLogger,
+  type DownstreamSkipCode,
+  toPublicSkipCode,
+} from '../lib/downstream-skip-code.js';
 import { parseFieldErrors } from '../lib/field-error-parser.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
@@ -58,7 +72,7 @@ const log = getLogger('compose');
 
 /**
  * B7 (audit 2026-06-24): cache de discover() acotado a un solo compose().
- * `all()` memoiza la MISMA Promise de `discover({limit:50})` — el resultado se
+ * `all()` memoiza la MISMA Promise del discovery del pool — el resultado se
  * comparte entre todos los steps (datos idénticos), sin re-disparar el discovery
  * completo en cada step.
  */
@@ -66,12 +80,37 @@ interface DiscoverCache {
   all(): Promise<Agent[]>;
 }
 
+/**
+ * Pool de agentes para resolver un step por slug e hidratar su `payment.chain`
+ * real (WKH-113/BASE-08). ÚNICO productor del pool: `createDiscoverCache` y el
+ * fallback de `resolveAgent` tienen que pedir EXACTAMENTE lo mismo (si divergen,
+ * el hit de cache y el fallback resolverían sobre pools distintos).
+ *
+ * ⚠️ AR BLQ-BAJO-1: era `discover({ limit: 50 })`, o sea el TOP-50 RANKEADO. Un
+ * pool para buscar por slug NO puede ser un ranking: cuando el over-fetch del
+ * hallazgo 1 hizo que el ranking se calcule sobre 4× candidatos, la membresía del
+ * top-50 cambió y un agente non-EVM que quedaba afuera perdía la hidratación de
+ * `payment.chain` → el leg downstream se salteaba o apuntaba al rail equivocado,
+ * en silencio.
+ *
+ * PRECONDICIÓN del pool alineado al over-fetch: vale mientras la unión de las
+ * filas de TODAS las fuentes contribuyentes entre en la ventana de over-fetch
+ * (el `slice` del page size es global, el fetch es por registry). Con ~32 agentes
+ * por registry hoy se cumple con margen; el residual está en TD-189-1. La
+ * justificación completa, con la aritmética, en `lib/discovery-fetch-limit.ts`.
+ */
+function discoverAgentPool(): Promise<Agent[]> {
+  return discoveryService
+    .discover({ limit: resolveComposeAgentPoolLimit() })
+    .then((r) => r.agents);
+}
+
 function createDiscoverCache(): DiscoverCache {
   let cached: Promise<Agent[]> | undefined;
   return {
     all() {
       if (!cached) {
-        cached = discoveryService.discover({ limit: 50 }).then((r) => r.agents);
+        cached = discoverAgentPool();
       }
       return cached;
     },
@@ -321,13 +360,14 @@ export const composeService = {
         }
       };
       try {
-        const { output, txHash, downstream } = await this.invokeAgent(
-          agent,
-          input,
-          a2aKey,
-          undefined,
-          `${composeRunId}:${i}`, // WKH-234 intentId (leg Solana, AC-7)
-        );
+        const { output, txHash, downstream, downstreamSkipCode } =
+          await this.invokeAgent(
+            agent,
+            input,
+            a2aKey,
+            undefined,
+            `${composeRunId}:${i}`, // WKH-234 intentId (leg Solana, AC-7)
+          );
         // WKH-234 (AC-8): si el settle downstream fue Solana, anota el ledger.
         recordSolanaLegIfAny(downstream);
         // CD-9: la cola de éxito (StepResult + agregados + bridge + evento)
@@ -337,6 +377,7 @@ export const composeService = {
           output,
           txHash,
           downstream,
+          downstreamSkipCode,
           startTime,
           steps,
           i,
@@ -491,13 +532,14 @@ export const composeService = {
             if (retryDebit.success) {
               try {
                 // ── PASO 5 (DT-5.5): RE-INVOKE reusando invokeAgent.
-                const { output, txHash, downstream } = await this.invokeAgent(
-                  agent,
-                  newInput,
-                  a2aKey,
-                  undefined,
-                  `${composeRunId}:${i}`, // WKH-234 intentId — MISMO que el master (AC-7 idempotente)
-                );
+                const { output, txHash, downstream, downstreamSkipCode } =
+                  await this.invokeAgent(
+                    agent,
+                    newInput,
+                    a2aKey,
+                    undefined,
+                    `${composeRunId}:${i}`, // WKH-234 intentId — MISMO que el master (AC-7 idempotente)
+                  );
                 // WKH-234 (AC-8): retry-ok — anota el ledger si fue Solana.
                 recordSolanaLegIfAny(downstream);
                 // ── PASO 6a: 2xx → éxito. El retry-debit SE QUEDA (caller
@@ -507,6 +549,7 @@ export const composeService = {
                   output,
                   txHash,
                   downstream,
+                  downstreamSkipCode,
                   startTime,
                   steps,
                   i,
@@ -622,6 +665,8 @@ export const composeService = {
     output: unknown;
     txHash?: string | undefined;
     downstream?: DownstreamResult | undefined;
+    /** Fix-pack P1 (hallazgo 4): motivo del skip del leg downstream, si hubo. */
+    downstreamSkipCode?: DownstreamSkipCode | undefined;
     startTime: number;
     steps: ComposeStep[];
     i: number;
@@ -642,6 +687,7 @@ export const composeService = {
       output,
       txHash,
       downstream,
+      downstreamSkipCode,
       startTime,
       steps,
       i,
@@ -665,6 +711,15 @@ export const composeService = {
         downstreamTxHash: downstream.txHash,
         downstreamBlockNumber: downstream.blockNumber,
         downstreamSettledAmount: downstream.settledAmount,
+      }),
+      // Fix-pack P1 (hallazgo 4): señal del skip en la RESPUESTA, no sólo en el
+      // log. `toPublicSkipCode` genericiza los códigos que revelarían config del
+      // gateway / fondos / claves del operador (mapeo exhaustivo en
+      // lib/downstream-skip-code.ts — AR MENOR-6: este puntero decía
+      // downstream-payment.ts). Mutuamente excluyente con los tres campos de
+      // arriba: `downstreamSkipCode` sólo llega cuando el leg NO settleó.
+      ...(downstreamSkipCode && {
+        downstreamSettle: `skipped:${toPublicSkipCode(downstreamSkipCode)}`,
       }),
     };
     // WKH-114 (AC-2/AC-3/AC-4): veredicto de completitud por step. Puro,
@@ -774,15 +829,15 @@ export const composeService = {
     step: ComposeStep,
     discoverCache?: DiscoverCache,
   ): Promise<Agent | null> {
-    // B7 (audit 2026-06-24): cache de discover({limit:50}) POR compose. Esta
+    // B7 (audit 2026-06-24): cache del discovery del pool POR compose. Esta
     // llamada es idéntica en todos los steps (mismos args); sin cache, un
     // pipeline de N steps dispara hasta 4N discoveries completos. Memoizamos la
     // MISMA Promise → misma data, misma semántica de `.find` por slug. Sin
-    // cache (caller no la pasa) cae al discover directo (backward-compat).
+    // cache (caller no la pasa) cae al discover directo (backward-compat), por el
+    // MISMO `discoverAgentPool` (AR BLQ-BAJO-1: dos page sizes distintos harían
+    // que el fallback resolviera sobre un pool distinto al cacheado).
     const discoverAll = (): Promise<Agent[]> =>
-      discoverCache
-        ? discoverCache.all()
-        : discoveryService.discover({ limit: 50 }).then((r) => r.agents);
+      discoverCache ? discoverCache.all() : discoverAgentPool();
 
     // Try with registry hint first, then without (LLM may pass wrong case)
     let agent = await discoveryService.getAgent(step.agent, step.registry);
@@ -822,6 +877,12 @@ export const composeService = {
     output: unknown;
     txHash?: string | undefined;
     downstream?: DownstreamResult;
+    /**
+     * Fix-pack P1 (hallazgo 4): motivo INTERNO del skip del leg downstream.
+     * Presente sólo cuando `downstream` es undefined. `finishSuccessfulStep` lo
+     * traduce al vocabulario PÚBLICO antes de ponerlo en la respuesta.
+     */
+    downstreamSkipCode?: DownstreamSkipCode;
   }> {
     const registries = await registryService.getEnabled();
     const registry = registries.find(
@@ -1149,12 +1210,26 @@ export const composeService = {
       info: (obj: unknown, msg?: string) =>
         log.info({ obj }, msg ?? '[Downstream]'),
     };
+    // Fix-pack P1 (hallazgo 4): se decora el logger para capturar el motivo del
+    // skip, que antes moría en los logs. CERO cambios en la lógica de decisión
+    // de dinero de `signAndSettleDownstream`: el decorador sólo observa los
+    // `{ code }` que esa función YA emite en sus 25 caminos de `return null`.
+    const capturingLogger = createSkipCapturingLogger(effectiveLogger);
     const downstream = await signAndSettleDownstream(
       agent,
-      effectiveLogger,
+      capturingLogger,
       intentId,
     );
 
-    return { output, txHash, ...(downstream && { downstream }) };
+    // Sólo se surfacea cuando el leg NO se settleó (`null`). Si settleó, el
+    // caller usa downstreamTxHash/BlockNumber/SettledAmount como siempre.
+    const skipCode = downstream ? undefined : capturingLogger.lastSkipCode();
+
+    return {
+      output,
+      txHash,
+      ...(downstream && { downstream }),
+      ...(skipCode && { downstreamSkipCode: skipCode }),
+    };
   },
 };

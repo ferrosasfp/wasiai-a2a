@@ -2,6 +2,11 @@
  * WasiAI A2A Protocol — Types
  */
 
+// AR MENOR-6: `StepResult.downstreamSettle` se tipa con el vocabulario PÚBLICO
+// de skip-codes en vez de `string`. Es un ciclo de tipos con
+// `lib/downstream-skip-code.ts` (que importa `DownstreamLogger` de acá), pero
+// `import type` se borra en runtime → no hay ciclo de módulos real.
+import type { PublicDownstreamSkipCode } from '../lib/downstream-skip-code.js';
 // WKH-61: importamos A2AAgentKeyRow del subarchivo para tiparlo en
 // ComposeRequest / OrchestrateRequest. El re-export `export * from './a2a-key.js'`
 // del bottom mantiene la API pública intacta.
@@ -478,6 +483,29 @@ export interface StepResult {
   downstreamBlockNumber?: number;
   /** Atomic units (string, 6-dec USDC) que se settearon downstream (WKH-55) */
   downstreamSettledAmount?: string;
+  /**
+   * Fix-pack P1 (hallazgo 4): estado del leg downstream cuando NO se settleó.
+   * Formato `"skipped:<PublicDownstreamSkipCode>"` (p.ej.
+   * `"skipped:NO_PAYMENT_FIELD"`, `"skipped:NOT_CONFIGURED"`).
+   *
+   * Antes el motivo del skip quedaba SÓLO en los logs del servidor y la
+   * respuesta HTTP no lo decía. Cambio de contrato ADITIVO: presente sólo en el
+   * caso skip; en el caso exitoso se poblan `downstreamTxHash` /
+   * `downstreamBlockNumber` / `downstreamSettledAmount` como siempre.
+   *
+   * ⚠️ El código es del vocabulario PÚBLICO (`toPublicSkipCode`), NO el
+   * `DownstreamSkipCode` interno: los códigos que revelan config del gateway,
+   * fondos del operador o sus claves se genericizan a `NOT_CONFIGURED` /
+   * `UNAVAILABLE`. Ver el `Record` exhaustivo en
+   * `src/lib/downstream-skip-code.ts` (AR MENOR-6: este puntero decía
+   * `downstream-payment.ts`, de donde el mapeo se movió para no romper las suites
+   * que lo mockean completo).
+   *
+   * Tipado como template literal del vocabulario público (AR MENOR-6): con
+   * `string` la exhaustividad del `Record` se perdía justo en el borde de la API,
+   * que es donde importa que el contrato sea el cerrado.
+   */
+  downstreamSettle?: `skipped:${PublicDownstreamSkipCode}`;
   /** WKH-57: telemetry del bridge LLM. Presente solo si bridgeType==='LLM'. */
   transformLLM?: LLMBridgeStats;
   /** WKH-114: veredicto evaluado (AC-4). */
