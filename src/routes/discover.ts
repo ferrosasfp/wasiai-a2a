@@ -4,26 +4,38 @@
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import {
+  InvalidLimitError,
   InvalidMinReputationError,
+  parseLimit,
   parseMinReputation,
 } from '../lib/discovery-query.js';
 import { discoveryService } from '../services/discovery.js';
 
 /**
- * Fix-pack P1 (hallazgo 2): `minReputation` inválido → 400 explícito.
+ * Fix-pack P1 (hallazgo 2 + AR MENOR-4): `minReputation` / `limit` inválidos →
+ * 400 explícito.
  *
  * Se valida ANTES del fanout: un valor basura no debe gastar un round-trip a los
- * registries ni devolver 200-vacío. Devuelve la respuesta ya enviada (para que
- * el handler haga `return`) o `undefined` si el valor es válido.
+ * registries ni devolver 200-vacío (o, en el caso de `limit`, un 200 con MÁS
+ * agentes de los pedidos). Devuelve los valores normalizados o `undefined` si ya
+ * se envió el 400 (para que el handler haga `return reply`).
  */
-function replyIfInvalidMinReputation(
+function parseFiltersOr400(
   reply: FastifyReply,
-  raw: unknown,
-): { minReputation: number | undefined } | undefined {
+  raw: { minReputation: unknown; limit: unknown },
+):
+  | { minReputation: number | undefined; limit: number | undefined }
+  | undefined {
   try {
-    return { minReputation: parseMinReputation(raw) };
+    return {
+      minReputation: parseMinReputation(raw.minReputation),
+      limit: parseLimit(raw.limit),
+    };
   } catch (err) {
-    if (err instanceof InvalidMinReputationError) {
+    if (
+      err instanceof InvalidMinReputationError ||
+      err instanceof InvalidLimitError
+    ) {
       reply.status(400).send({ error: err.message, code: err.code });
       return undefined;
     }
@@ -47,7 +59,11 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    *   por el registry: ese valor lo controla la parte que se está filtrando.
    *   Un agente sin tasks liquidadas cuenta 0 → excluido si minReputation > 0.
    *   Valor no numérico o fuera de [0,100] → 400 `INVALID_MIN_REPUTATION`.
-   * - limit: max results (PAGE SIZE — ver el contrato de la respuesta)
+   * - limit: max results (PAGE SIZE — ver el contrato de la respuesta). Entero
+   *   `>= 1`; ausente = sin page size (todos los matches). Valor no entero, `0`,
+   *   negativo o no numérico → 400 `INVALID_LIMIT` (AR MENOR-4: antes `limit=0`
+   *   devolvía TODO el catálogo y `limit=-3` devolvía `total-3` por el
+   *   `slice(0,-3)`, los dos contradiciendo el contrato documentado).
    * - registry: filter to specific registry
    *
    * Respuesta — contrato de paginación (fix-pack P1, hallazgo 1):
@@ -77,15 +93,18 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
     ) => {
       const query = request.query;
 
-      const minRep = replyIfInvalidMinReputation(reply, query.minReputation);
-      if (!minRep) return reply;
+      const filters = parseFiltersOr400(reply, {
+        minReputation: query.minReputation,
+        limit: query.limit,
+      });
+      if (!filters) return reply;
 
       const result = await discoveryService.discover({
         capabilities: query.capabilities?.split(',').map((s) => s.trim()),
         query: query.q,
         maxPrice: query.maxPrice ? parseFloat(query.maxPrice) : undefined,
-        minReputation: minRep.minReputation,
-        limit: query.limit ? parseInt(query.limit, 10) : undefined,
+        minReputation: filters.minReputation,
+        limit: filters.limit,
         registry: query.registry,
         verified: query.verified === 'true' ? true : undefined,
         includeInactive: query.includeInactive === 'true' ? true : undefined,
@@ -134,15 +153,18 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
         }
       }
 
-      const minRep = replyIfInvalidMinReputation(reply, body.minReputation);
-      if (!minRep) return reply;
+      const filters = parseFiltersOr400(reply, {
+        minReputation: body.minReputation,
+        limit: body.limit,
+      });
+      if (!filters) return reply;
 
       const result = await discoveryService.discover({
         capabilities,
         query: body.q != null ? String(body.q) : undefined,
         maxPrice: body.maxPrice != null ? Number(body.maxPrice) : undefined,
-        minReputation: minRep.minReputation,
-        limit: body.limit != null ? Number(body.limit) : undefined,
+        minReputation: filters.minReputation,
+        limit: filters.limit,
         registry: body.registry != null ? String(body.registry) : undefined,
         verified: body.verified === true ? true : undefined,
         includeInactive: body.includeInactive === true ? true : undefined,

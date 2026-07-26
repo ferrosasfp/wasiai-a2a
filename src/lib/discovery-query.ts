@@ -55,3 +55,43 @@ export function parseMinReputation(raw: unknown): number | undefined {
   }
   return n;
 }
+
+/**
+ * `limit` inválido. La ruta la mapea a 400 `INVALID_LIMIT`.
+ *
+ * Razón de ser (fix-pack P1 AR MENOR-4): `doc/INTEGRATION.md` promete «when you
+ * pass a `limit`, you get exactly `min(limit, total)` agents» y el código NO lo
+ * cumplía para los valores degenerados, en silencio:
+ *   · `limit=0`  → `query.limit` es falsy ⇒ NO se manda `limitParam` upstream Y
+ *     el `slice` se saltea ⇒ devuelve TODO el catálogo (medido: 10 de 10).
+ *   · `limit=-3` → `slice(0, -3)` cuenta desde el final ⇒ devuelve `total - 3`
+ *     (medido: 7 de 10).
+ *   · `limit=abc` → `parseInt` da NaN ⇒ `query.limit` falsy ⇒ devuelve todo.
+ * Preexistente (idéntico en `main`), pero el doc que lo contradice se agregó en
+ * este mismo fix-pack, y el fix-pack sí validó `minReputation`: dejar el doc
+ * mintiendo sobre una de las dos perillas era incoherente.
+ */
+export class InvalidLimitError extends Error {
+  readonly code = 'INVALID_LIMIT' as const;
+  constructor(readonly received: unknown) {
+    super('limit must be an integer >= 1');
+    this.name = 'InvalidLimitError';
+  }
+}
+
+/**
+ * Normaliza y VALIDA el `limit` entrante (string del query string o number del
+ * body JSON). Ausente/vacío → `undefined` (sin page size: se devuelven todos los
+ * matches, comportamiento de hoy). Cualquier otra cosa que no sea un entero
+ * finito `>= 1` → lanza `InvalidLimitError`.
+ *
+ * NO se impone techo: el over-fetch (`resolveUpstreamFetchLimit`) es monótono a
+ * propósito — un caller que pide `limit=500` fetchea 500. Meter un techo acá
+ * sería reintroducir el bug de clase "esconder agentes" que arregló el hallazgo 1.
+ */
+export function parseLimit(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isInteger(n) || n < 1) throw new InvalidLimitError(raw);
+  return n;
+}

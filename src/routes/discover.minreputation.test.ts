@@ -133,4 +133,72 @@ describe('minReputation: validación en la ruta', () => {
       expect.objectContaining({ minReputation: undefined }),
     );
   });
+
+  // ── AR MENOR-4: `limit` también se valida (el doc prometía otra cosa) ────
+
+  it('T-R8: GET con limit=0 → 400 (antes 200 con el catálogo COMPLETO)', async () => {
+    const res = await app.inject({ method: 'GET', url: '/discover?limit=0' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('INVALID_LIMIT');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R9: GET con limit negativo → 400 (antes 200 con total-N por el slice(0,-N))', async () => {
+    const res = await app.inject({ method: 'GET', url: '/discover?limit=-3' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('INVALID_LIMIT');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R10: GET con limit no entero → 400', async () => {
+    for (const v of ['abc', '1.5', '5abc']) {
+      mockDiscover.mockClear();
+      const res = await app.inject({
+        method: 'GET',
+        url: `/discover?limit=${v}`,
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVALID_LIMIT');
+      expect(mockDiscover).not.toHaveBeenCalled();
+    }
+  });
+
+  it('T-R11: POST con limit inválido → 400; válido → llega al service', async () => {
+    for (const v of [0, -3, 1.5]) {
+      mockDiscover.mockClear();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/discover',
+        payload: { limit: v },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVALID_LIMIT');
+      expect(mockDiscover).not.toHaveBeenCalled();
+    }
+
+    mockDiscover.mockClear();
+    const ok = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { limit: 7 },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 7 }),
+    );
+  });
+
+  it('T-R12: limit válido convive con minReputation válido', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?limit=5&minReputation=10',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 5, minReputation: 10 }),
+    );
+  });
 });

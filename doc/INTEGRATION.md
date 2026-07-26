@@ -200,6 +200,11 @@ Notes:
 - **`agents`** — the page: **up to `limit`** agents that match every filter you
   passed, sorted verified-first → reputation desc → price asc. When you pass a
   `limit`, you get exactly `min(limit, total)` agents.
+  - **`limit` must be an integer `>= 1`.** Anything else (`0`, negative,
+    fractional, non-numeric) returns `400 INVALID_LIMIT`. Omitting `limit`
+    returns **every** match, with no page size. This is validated so the
+    guarantee above actually holds: before validation, `limit=0` returned the
+    whole catalogue and `limit=-3` returned `total - 3` agents, both silently.
 - **`total`** — the number of agents that match **all** your filters, **before**
   `limit` is applied. This is the pagination denominator, so
   `total >= agents.length`. It is **not** the size of the page — do not use it to
