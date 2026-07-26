@@ -37,6 +37,20 @@ Before activating mainnet, ALL of these must be true:
 
 ### Step 1 — Activate Avalanche mainnet (downstream USDC outbound)
 
+> ⚠️ **CORRECCIÓN (fix-pack AR-profundo FIX 1c, 2026-07-26).** Este Step
+> instruía `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`. Esa env var **NO LA LEE
+> NINGÚN ARCHIVO DE `src/`** (desde WKH-112 la chain del leg downstream se
+> resuelve por `agent.payment.chain` vía `normalizeChainSlug`): setearla NO
+> activaba ni bloqueaba nada. Era un control muerto.
+>
+> El control REAL es el gate **fail-CLOSED** `WASIAI_DOWNSTREAM_MAINNET_ALLOW`
+> (`src/lib/downstream-payment.ts`, `isDownstreamMainnetAllowed`): ausente o
+> vacía ⇒ NINGUNA mainnet puede settlear en el leg downstream (skip-code
+> `MAINNET_NOT_ALLOWED`). Además `avalanche-mainnet` debe estar en
+> `WASIAI_A2A_CHAINS` para que su bundle exista.
+>
+> El comando de abajo ya usa la env correcta.
+
 ```bash
 RAILWAY_TOKEN=<a2a-railway-token>
 
@@ -51,7 +65,7 @@ curl -X POST "https://backboard.railway.app/graphql/v2" \
         "projectId": "cc694c84-059f-4116-9c31-cb6085e5e79e",
         "environmentId": "a867039e-abc1-4317-aaa9-7409976ad250",
         "serviceId": "27af4db1-9a73-41da-8e12-c2aa6838e52e",
-        "name": "WASIAI_DOWNSTREAM_NETWORK",
+        "name": "WASIAI_DOWNSTREAM_MAINNET_ALLOW",
         "value": "avalanche-mainnet"
       }
     }
@@ -167,7 +181,9 @@ Update `HACKATHON-FINAL.md`:
 ```bash
 # Single command — flip env vars back to testnet defaults
 # wasiai-a2a service
-WASIAI_DOWNSTREAM_NETWORK=fuji
+# Vaciar el gate = fail-CLOSED: ninguna mainnet puede settlear en el leg
+# downstream (el rollback real; `WASIAI_DOWNSTREAM_NETWORK=fuji` NO hacía nada).
+WASIAI_DOWNSTREAM_MAINNET_ALLOW=
 KITE_NETWORK=testnet
 
 # wasiai-facilitator service

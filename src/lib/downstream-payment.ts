@@ -8,9 +8,18 @@
  * inline (CD-9). NEVER throws (CD-7): every async step is wrapped and returns `null`
  * with a skip-code.
  */
-import { createPublicClient, erc20Abi, http, parseUnits } from 'viem';
+import {
+  createPublicClient,
+  erc20Abi,
+  formatUnits,
+  http,
+  parseUnits,
+} from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { normalizeChainSlug } from '../adapters/chain-resolver.js';
+import {
+  isMainnetChainKey,
+  normalizeChainSlug,
+} from '../adapters/chain-resolver.js';
 import {
   getAdaptersBundle,
   getInitializedChainKeys,
@@ -83,6 +92,15 @@ export interface DownstreamResult {
   // (`solana:<cluster>`). Presente SOLO en la rama Solana → `compose` lo usa
   // para registrar el CAIP-2 + firma en el ledger (AC-8). Ausente en legs EVM.
   settleCaip2?: string;
+  // Fix-pack AR-profundo FIX 3: monto REALMENTE settleado al agente, en USD,
+  // derivado de `settledAmount` con los decimals del token del adapter. Es lo
+  // que el recibo del ledger debe cruzar contra la transferencia on-chain — el
+  // débito del caller (`stepDebitedUsd` en compose) NO sirve: vale 0 para el
+  // step 0 (lo debita el middleware) e incluye el gas overhead del gateway, que
+  // nunca se le paga al agente. Poblado SOLO en la rama Solana (la única que
+  // alimenta el ledger vía `settleCaip2`); ausente en legs EVM → rama EVM
+  // byte-idéntica.
+  settledAmountUsd?: number;
 }
 
 export type DownstreamSkipCode =
@@ -90,6 +108,7 @@ export type DownstreamSkipCode =
   | 'NO_PAYMENT_FIELD'
   | 'METHOD_NOT_SUPPORTED'
   | 'CHAIN_NOT_SUPPORTED'
+  | 'MAINNET_NOT_ALLOWED'
   | 'INVALID_PAY_TO_FORMAT'
   | 'ZERO_PAY_TO'
   | 'INVALID_PRICE'
@@ -100,6 +119,44 @@ export type DownstreamSkipCode =
   | 'SETTLE_FAILED';
 
 // ─── Internal helpers ───────────────────────────────────────────────
+
+/**
+ * Fix-pack AR-profundo FIX 1(b) — opt-in EXPLÍCITO para settlear un leg
+ * downstream contra una chain MAINNET (dinero real).
+ *
+ * Contexto del hallazgo: la chain del leg es agent-controlled por diseño (el
+ * agente declara `payment.chain` en su card). `base-mainnet` / `kite-mainnet` /
+ * `avalanche-mainnet` estaban en `SUPPORTED_CHAINS` SIN gate, a diferencia de
+ * `tempo-testnet` / `solana-devnet` (flag-gated en `registry.getSupportedChains`),
+ * y el control que la documentación de operación prometía
+ * (`WASIAI_DOWNSTREAM_NETWORK`) no lo lee NADIE — era un control muerto.
+ *
+ * Política (FAIL-CLOSED, default seguro):
+ *   - `WASIAI_DOWNSTREAM_MAINNET_ALLOW` ausente o vacía → NINGUNA mainnet
+ *     permitida en el leg downstream → skip-code `MAINNET_NOT_ALLOWED`.
+ *   - CSV de slugs (acepta cualquier alias que el resolver conozca, incluidos
+ *     los numéricos: `avalanche-mainnet`, `43114`, `base-mainnet`, `8453`, …) →
+ *     sólo esas mainnets pueden settlear.
+ *
+ * NO afecta ningún entorno actual (todo el deploy es testnet-only) y NO toca el
+ * rail INBOUND: los slugs mainnet siguen en `SUPPORTED_CHAINS` y el debit de
+ * budget inbound sigue funcionando igual. Es estrictamente más restrictivo que
+ * hoy en la única dirección donde el gateway MUEVE fondos del operador.
+ *
+ * La env se lee POR LLAMADA (no cacheada al cargar el módulo, a diferencia de
+ * `DOWNSTREAM_FLAG`): así el operador puede revertir el opt-in con un redeploy
+ * de variables sin depender del orden de import, y el gate es testeable sin
+ * `vi.resetModules()`. El costo es una lectura de `process.env` por leg.
+ */
+function isDownstreamMainnetAllowed(chainKey: ChainKey): boolean {
+  const raw = process.env.WASIAI_DOWNSTREAM_MAINNET_ALLOW;
+  if (typeof raw !== 'string' || raw.trim().length === 0) return false;
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .some((entry) => normalizeChainSlug(entry) === chainKey);
+}
 
 /**
  * Validates payTo format and rejects the zero-address (R-1 mitigation).
@@ -187,11 +244,29 @@ async function settleSolanaLeg(
     return null;
   }
 
+  // Idempotency key determinístico del leg (AC-7). Fallback si el caller no lo
+  // pasó: `<slug>:<payTo>` (estable por leg). Canónico: `contextId:stepIndex:payTo`.
+  //
+  // Fix-pack AR-profundo FIX 2: se resuelve ANTES del pre-flight de balance. El
+  // orden importa: un intent YA settleado no necesita fondos. Con el pre-check
+  // primero, el hit idempotente del adapter era inalcanzable exactamente cuando
+  // el balance del operador había bajado del precio del leg — que es lo que pasa
+  // DESPUÉS de haber pagado ese mismo leg ⇒ el retry devolvía `null` con
+  // `INSUFFICIENT_BALANCE`, sin recibo ni `settle_signature` en el ledger, y el
+  // log afirmaba lo contrario de la verdad (un pago SPL real reportado como no
+  // pagado).
+  const legIntentId = intentId ?? `${agent.slug}:${payTo}`;
+  const priorSignature = adapter.getSettledSignature(legIntentId);
+
   // Pre-flight de balance del operador — paridad de observabilidad con la rama
   // EVM (CR-2 de WKH-234). Corta temprano con el MISMO skip-code
   // `INSUFFICIENT_BALANCE` que el paso 9 del path EVM, en vez de dejar que el
   // settle falle-soft con un `SETTLE_FAILED` genérico que no distingue "no hay
   // fondos" de "falló el RPC" o "la tx se rechazó".
+  //
+  // Se OMITE cuando el intent ya tiene firma (FIX 2): el settle de abajo va a
+  // tomar el camino idempotente (verify on-chain de la firma previa + retorno
+  // sin re-broadcast), que no mueve fondos nuevos.
   //
   // ASIMETRÍA DELIBERADA vs EVM: si el balance NO se puede leer, acá NO se
   // bloquea el settle (la rama EVM sí corta con `BALANCE_READ_FAILED`). El
@@ -201,35 +276,46 @@ async function settleSolanaLeg(
   // tratarlas como "fondos insuficientes" bloquearía settles legítimos (falso
   // negativo). Se degrada a "balance desconocido, intentá el settle" y el error
   // real, si lo hay, sigue apareciendo como `SETTLE_FAILED`.
-  let operatorBalance: bigint | undefined;
-  try {
-    operatorBalance = BigInt(await adapter.getOperatorSplBalance());
-  } catch (e) {
+  if (priorSignature !== undefined) {
     logger.info(
       {
         agentSlug: agent.slug,
         code: 'BALANCE_PRECHECK_SKIPPED',
-        detail: String(e),
+        intentId: legIntentId,
+        reason: 'IDEMPOTENT_INTENT',
       },
-      '[Downstream] solana balance pre-check skipped (operator SPL balance unreadable)',
+      '[Downstream] solana balance pre-check skipped (intent already settled — idempotent replay)',
     );
+  } else {
+    let operatorBalance: bigint | undefined;
+    try {
+      operatorBalance = BigInt(await adapter.getOperatorSplBalance());
+    } catch (e) {
+      logger.info(
+        {
+          agentSlug: agent.slug,
+          code: 'BALANCE_PRECHECK_SKIPPED',
+          detail: String(e),
+        },
+        '[Downstream] solana balance pre-check skipped (operator SPL balance unreadable)',
+      );
+    }
+    if (
+      operatorBalance !== undefined &&
+      operatorBalance < BigInt(amountAtomic)
+    ) {
+      logger.warn(
+        {
+          agentSlug: agent.slug,
+          code: 'INSUFFICIENT_BALANCE',
+          balance: operatorBalance.toString(),
+          required: amountAtomic,
+        },
+        '[Downstream] insufficient solana operator SPL balance',
+      );
+      return null;
+    }
   }
-  if (operatorBalance !== undefined && operatorBalance < BigInt(amountAtomic)) {
-    logger.warn(
-      {
-        agentSlug: agent.slug,
-        code: 'INSUFFICIENT_BALANCE',
-        balance: operatorBalance.toString(),
-        required: amountAtomic,
-      },
-      '[Downstream] insufficient solana operator SPL balance',
-    );
-    return null;
-  }
-
-  // Idempotency key determinístico del leg (AC-7). Fallback si el caller no lo
-  // pasó: `<slug>:<payTo>` (estable por leg). Canónico: `contextId:stepIndex:payTo`.
-  const legIntentId = intentId ?? `${agent.slug}:${payTo}`;
 
   // settle: build+sign+broadcast+confirm + verify-before-trust interno.
   let settleRes: Awaited<ReturnType<typeof adapter.settle>>;
@@ -260,6 +346,11 @@ async function settleSolanaLeg(
     // Fix-pack AR-BLQ-1: propaga el CAIP-2 del adapter para que compose registre
     // el leg Solana en el ledger (AC-8 — settle_caip2 + settle_signature).
     settleCaip2: adapter.caip2ChainId,
+    // Fix-pack AR-profundo FIX 3: monto settleado en USD, derivado del MISMO
+    // atómico que se transfirió y de los decimals del mint del adapter (round-trip
+    // exacto de `parseUnits`). Es el número que el recibo del ledger debe cruzar
+    // contra la transferencia on-chain.
+    settledAmountUsd: Number(formatUnits(BigInt(amountAtomic), token.decimals)),
   };
 }
 
@@ -274,6 +365,7 @@ async function settleSolanaLeg(
  *  - agent.payment absent                               → NO_PAYMENT_FIELD
  *  - method !== 'x402'                                  → METHOD_NOT_SUPPORTED
  *  - chain unrecognized or not initialized in registry  → CHAIN_NOT_SUPPORTED
+ *  - chain is MAINNET without explicit env opt-in       → MAINNET_NOT_ALLOWED
  *  - payTo invalid or zero                              → INVALID_PAY_TO_FORMAT / ZERO_PAY_TO
  *  - priceUsdc not a finite positive number             → INVALID_PRICE
  *  - operator balance < required value                  → INSUFFICIENT_BALANCE
@@ -342,6 +434,24 @@ export async function signAndSettleDownstream(
         initialized: getInitializedChainKeys(),
       },
       `[Downstream] chain=${agent.payment.chain} not supported/initialized — skipped`,
+    );
+    return null;
+  }
+
+  // 4a. Fix-pack AR-profundo FIX 1(b) — gate FAIL-CLOSED de mainnet. La chain
+  //     del leg la declara el AGENTE; sin este opt-in explícito por env, un
+  //     agent card podía dirigir el settle (fondos del operador) a una chain de
+  //     dinero real. Sin `WASIAI_DOWNSTREAM_MAINNET_ALLOW` NINGUNA mainnet
+  //     settlea. NO toca el rail inbound (los slugs siguen soportados).
+  if (isMainnetChainKey(chainKey) && !isDownstreamMainnetAllowed(chainKey)) {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        chain: chainKey,
+        declared: agent.payment.chain,
+        code: 'MAINNET_NOT_ALLOWED',
+      },
+      `[Downstream] chain=${chainKey} is MAINNET and not opted-in via WASIAI_DOWNSTREAM_MAINNET_ALLOW — settle skipped`,
     );
     return null;
   }

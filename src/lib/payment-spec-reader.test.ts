@@ -8,6 +8,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { readPaymentSpec } from './payment-spec-reader.js';
 import { isValidPayoutWallet } from './wallet-format.js';
 
@@ -50,6 +51,66 @@ describe('readPaymentSpec — extracción del payment spec (WKH-241)', () => {
         payment: { method: 'x402', chain, contract: EVM_PAYTO },
       });
       expect(spec?.chain).toBe('avalanche');
+    }
+  });
+
+  // ── Fix-pack AR-profundo FIX 1(a): colapso NAMESPACE-aware ────────
+  // El colapso comparaba STRINGS CRUDOS, así que los alias NUMÉRICOS del mismo
+  // namespace escapaban: `'43114'` pasaba crudo y `downstream-payment.ts` lo
+  // re-normalizaba a `avalanche-mainnet` (DINERO REAL) mientras
+  // `'avalanche-mainnet'` colapsaba a `'avalanche'` → Fuji. Ahora TODO alias del
+  // namespace avalanche tiene un único destino.
+  it('FIX-1a: TODO alias que resuelve a avalanche-mainnet colapsa a "avalanche" (incl. el numérico 43114)', () => {
+    for (const chain of [
+      'avalanche-mainnet',
+      '43114',
+      ' 43114 ',
+      'AVALANCHE-MAINNET',
+    ]) {
+      const spec = readPaymentSpec({
+        payment: { method: 'x402', chain, contract: EVM_PAYTO },
+      });
+      expect(spec?.chain, `alias=${chain} debe colapsar a 'avalanche'`).toBe(
+        'avalanche',
+      );
+      // El destino del leg downstream es el MISMO para todos ellos (Fuji): ya no
+      // hay un alias que se escape a la red de dinero real.
+      expect(normalizeChainSlug(spec?.chain ?? '')).toBe('avalanche-fuji');
+    }
+  });
+
+  it('FIX-1a: los alias testnet del namespace avalanche NO cambian de forma (mismo destino, string crudo intacto)', () => {
+    const cases: Array<[string, string]> = [
+      ['avalanche-testnet', 'avalanche'], // literal legacy (byte-identidad CD-2)
+      ['avalanche', 'avalanche'],
+      ['avalanche-fuji', 'avalanche-fuji'],
+      ['fuji', 'fuji'],
+      ['43113', '43113'],
+    ];
+    for (const [raw, expected] of cases) {
+      const spec = readPaymentSpec({
+        payment: { method: 'x402', chain: raw, contract: EVM_PAYTO },
+      });
+      expect(spec?.chain, `chain=${raw}`).toBe(expected);
+      expect(normalizeChainSlug(spec?.chain ?? '')).toBe('avalanche-fuji');
+    }
+  });
+
+  it('FIX-1a: kite/base/tempo/solana siguen pass-through (cada alias ya tiene destino único)', () => {
+    const cases: Array<[string, string]> = [
+      ['kite-ozone-testnet', 'kite-ozone-testnet'],
+      ['kite-mainnet', 'kite-mainnet'],
+      ['base-sepolia', 'base-sepolia'],
+      ['base-mainnet', 'base-mainnet'],
+      ['8453', '8453'],
+      ['tempo-testnet', 'tempo-testnet'],
+      ['solana-devnet', 'solana-devnet'],
+    ];
+    for (const [raw, expected] of cases) {
+      const spec = readPaymentSpec({
+        payment: { method: 'x402', chain: raw, contract: EVM_PAYTO },
+      });
+      expect(spec?.chain, `chain=${raw}`).toBe(expected);
     }
   });
 

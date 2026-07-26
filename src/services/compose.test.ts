@@ -290,6 +290,91 @@ describe('composeService.invokeAgent', () => {
     expect(result.output).toBe('ok');
   });
 
+  // ── Fix-pack AR-profundo FIX 4: guard de FAMILIA del payTo inbound ────────
+  // Camino real reproducido por el AR: caller x402 (sin `x-a2a-key`) + agente
+  // self-published Solana con priceUsdc > 0. El payTo es base58 y llegaba crudo
+  // a `viem.signTypedData` vía `to: payTo as \`0x${string}\`` ⇒
+  // `InvalidAddressError: Address "So111…112" is invalid`, un error opaco que no
+  // explica nada. El fee del agente Solana se settlea operator-side en el leg
+  // DOWNSTREAM, no en el inbound.
+  const SOL_PAYTO_INBOUND = 'So11111111111111111111111111111111111111112';
+
+  it('T-FIX4: agente con chain no-EVM + caller x402 → el sign inbound se saltea (INBOUND_VM_UNSUPPORTED), sin InvalidAddressError', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const agent = makeAgent({
+      priceUsdc: 0.05,
+      metadata: { payTo: SOL_PAYTO_INBOUND },
+      payment: {
+        method: 'x402',
+        asset: 'USDC',
+        chain: 'solana-devnet',
+        contract: SOL_PAYTO_INBOUND,
+      },
+    });
+    mockFetchOk({ result: 'ok' });
+
+    // Sin a2aKey = caller x402. NO debe lanzar.
+    const result = await composeService.invokeAgent(agent, { q: 'hello' });
+
+    expect(result.output).toBe('ok');
+    expect(result.txHash).toBeUndefined();
+    // El sign EVM (y por lo tanto el settle inbound) nunca se intenta.
+    expect(mockSign).not.toHaveBeenCalled();
+    expect(mockSettle).not.toHaveBeenCalled();
+    const callHeaders = mockFetch.mock.calls[0]![1]!.headers as Record<
+      string,
+      string
+    >;
+    expect(callHeaders['PAYMENT-SIGNATURE']).toBeUndefined();
+    expect(logSpy.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'INBOUND_VM_UNSUPPORTED',
+        chain: 'solana-devnet',
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('T-FIX4b: agente EVM (chain declarada) sigue firmando inbound — byte-idéntico', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'base64mock',
+      paymentRequest: {
+        authorization: {
+          from: '0xAAA',
+          to: '0xBBB',
+          value: '1000000000000000000',
+          validAfter: '0',
+          validBefore: '9999999999',
+          nonce: '0x1234',
+        },
+        signature: '0xSIG',
+        network: 'eip155:43113',
+      },
+    });
+    mockSettle.mockResolvedValue({ success: true, txHash: '0xDEADBEEF' });
+    const agent = makeAgent({
+      priceUsdc: 1.0,
+      metadata: { payTo: '0xBBB' },
+      payment: {
+        method: 'x402',
+        asset: 'USDC',
+        chain: 'avalanche-fuji',
+        contract: '0xBBB',
+      },
+    });
+    mockFetchOk();
+
+    const result = await composeService.invokeAgent(agent, { q: 'hello' });
+
+    expect(mockSign).toHaveBeenCalledTimes(1);
+    expect(result.txHash).toBe('0xDEADBEEF');
+    expect(logSpy.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'INBOUND_VM_UNSUPPORTED' }),
+      expect.any(String),
+    );
+  });
+
   it('T-4: throws when settle fails', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     mockSign.mockResolvedValue({
@@ -1301,7 +1386,14 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     mockDownstream.mockResolvedValueOnce(null);
     mockDownstream.mockResolvedValueOnce({
       txHash: SOL_SIG_INTEG,
-      settledAmount: '500000',
+      // Fix-pack AR-profundo FIX 3: el fixture ahora declara el monto REALMENTE
+      // settleado (0.05 USDC 6-dec = 50000 atómico) — el que el ledger debe
+      // registrar. La aserción de `amountUsd` NO cambia (0.05): antes coincidía
+      // por casualidad con `stepDebitedUsd` porque este test pone el leg Solana
+      // en el step 1 (el único índice donde el bug no aparecía); ahora viene de
+      // `settledAmountUsd`. El caso del step 0 lo cubre T-FIX3-STEP0.
+      settledAmount: '50000',
+      settledAmountUsd: 0.05,
       settleCaip2: SOL_CAIP2_INTEG,
     });
 
@@ -1325,10 +1417,57 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       keyId: 'k1',
       ownerRef: 'owner-test', // reused caller owner_ref (CD-1/AC-9)
       chainId: 2368,
-      amountUsd: 0.05, // = stepDebitedUsd (priceUsdc + 0 gas overhead on testnet)
+      amountUsd: 0.05, // = settledAmountUsd (monto REAL settleado on-chain)
       settleCaip2: SOL_CAIP2_INTEG,
       settleSignature: SOL_SIG_INTEG,
     });
+  });
+
+  // ── Fix-pack AR-profundo FIX 3: el step 0 (caso MÁS común) ────────────────
+  // El único test de AC-8 ponía el leg Solana en el step 1 — el único índice
+  // donde el bug no aparecía. Con el leg en el step 0, `stepDebitedUsd` es 0 por
+  // construcción (el debit per-step está gateado por `i > 0`; el step 0 lo debita
+  // el middleware), así que el ledger emitía `amount_usd = 0` junto a una
+  // `settle_signature` base58 REAL: la reconciliación cruzaba $0 contra una
+  // transferencia real.
+  it('T-FIX3-STEP0: leg Solana en el step 0 → el ledger registra el monto REAL settleado, NO 0', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const only = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    mockAgentsBySlug({ kyc: only });
+    mockFetchOk({ result: 'r1' });
+    // Compose de UN step: el leg Solana ES el step 0.
+    mockDownstream.mockReset();
+    mockDownstream.mockResolvedValueOnce({
+      txHash: SOL_SIG_INTEG,
+      settledAmount: '1000', // 0.001 USDC (6-dec)
+      settledAmountUsd: 0.001,
+      settleCaip2: SOL_CAIP2_INTEG,
+    });
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'kyc', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    // El step 0 NO pasa por budgetService.debit (lo debita el middleware) →
+    // `stepDebitedUsd` sigue siendo 0. El recibo NO debe heredar ese 0.
+    expect(mockDebit).not.toHaveBeenCalled();
+    expect(mockRecordSolana).toHaveBeenCalledTimes(1);
+    expect(mockRecordSolana).toHaveBeenCalledWith({
+      keyId: 'k1',
+      ownerRef: 'owner-test',
+      chainId: 2368,
+      amountUsd: 0.001, // ← antes del fix: 0
+      settleCaip2: SOL_CAIP2_INTEG,
+      settleSignature: SOL_SIG_INTEG,
+    });
+    const recorded = mockRecordSolana.mock.calls[0]?.[0];
+    expect(recorded?.amountUsd).not.toBe(0);
   });
 
   it('T-234-AC8-INTEG-b: EVM downstream leg → NO ledger CAIP-2 record (column stays NULL, byte-identical)', async () => {

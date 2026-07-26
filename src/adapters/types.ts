@@ -129,6 +129,25 @@ export interface SolanaPaymentAdapter extends PaymentAdapterCommon {
    * caído, ATA del operador inexistente); el caller decide cómo degradar.
    */
   getOperatorSplBalance(): Promise<string>;
+  /**
+   * Fix-pack AR-profundo FIX 2 — peek SINCRÓNICO del seam de idempotencia:
+   * devuelve la firma ya confirmada para `intentId`, o `undefined` si el intent
+   * nunca se settleó.
+   *
+   * Existe porque el pre-flight de balance del operador vive en el CALLER
+   * (`downstream-payment.settleSolanaLeg`, para poder devolver el skip-code
+   * `INSUFFICIENT_BALANCE` distinguible) mientras el registro de idempotencia
+   * vive DENTRO del adapter. Sin este peek, el pre-check cortaba ANTES de
+   * `settle()` y el hit idempotente era inalcanzable justamente cuando el
+   * balance ya había bajado por haber pagado ese mismo leg ⇒ un leg PAGADO se
+   * reportaba como no pagado (sin recibo ni `settle_signature`).
+   *
+   * Lectura PURA en memoria (CD-7: sin services/DB, sin RPC, sin I/O): NUNCA
+   * lanza y NUNCA es autoritativa sobre el pago — la validación
+   * verify-before-trust de la firma previa sigue siendo responsabilidad de
+   * `settle()`.
+   */
+  getSettledSignature(intentId: string): string | undefined;
 }
 
 export type PaymentAdapter = EvmPaymentAdapter | SolanaPaymentAdapter;

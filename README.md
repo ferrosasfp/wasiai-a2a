@@ -277,7 +277,7 @@ The `WASIAI_A2A_CHAIN` env var selects which adapter bundle loads at startup. Ma
 | `kite-ozone-testnet` | active | PYUSD on Kite testnet (2368) | -- | Default `WASIAI_A2A_CHAIN`. Used in all hackathon demos. |
 | `kite-mainnet` | staged (env-gated) | USDC.e on Kite mainnet (2366) | -- | Flip via `KITE_NETWORK=mainnet` + `KITE_MAINNET_RPC_URL`. |
 | `avalanche-fuji` | active | -- | USDC testnet on Fuji (43113) | Default downstream when `WASIAI_DOWNSTREAM_X402=true`. |
-| `avalanche-mainnet` | active (mainnet hybrid) | -- | USDC mainnet on Avalanche C-Chain (43114) | Live since 2026-04-29 via `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`. |
+| `avalanche-mainnet` | staged (fail-closed gate) | -- | USDC mainnet on Avalanche C-Chain (43114) | Ran a mainnet hybrid settle on 2026-04-29. Since the 2026-07-26 fix-pack the downstream leg to ANY mainnet requires the explicit opt-in `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`; absent/empty ⇒ skipped with `MAINNET_NOT_ALLOWED`. (The old `WASIAI_DOWNSTREAM_NETWORK` is not read by any code path.) |
 | `solana-devnet` | opt-in-off | -- (inbound is EVM-only) | SPL-USDC on Solana devnet | Non-EVM: settle-only, operator-signed SPL transfer, no facilitator hop. Enabled via `SOLANA_ADAPTER_ENABLED=true` + `solana-devnet` in `WASIAI_A2A_CHAINS` + `SOLANA_OPERATOR_PRIVATE_KEY` (needs devnet SOL for gas). WKH-234. |
 
 ### Multi-chain support
@@ -365,8 +365,8 @@ All variables from `.env.example` with their defaults:
 | `KITE_NETWORK` | No | `testnet` | `testnet` (chain 2368) or `mainnet` (chain 2366) |
 | `KITE_MAINNET_RPC_URL` | Conditional | -- | Required when `KITE_NETWORK=mainnet` |
 | `WASIAI_DOWNSTREAM_X402` | No | -- | Set to `true` to enable downstream USDC payouts to wasiai-v2 agents |
-| `WASIAI_DOWNSTREAM_NETWORK` | No | `fuji` | `fuji` (43113) or `avalanche-mainnet` (43114) |
-| `AVALANCHE_RPC_URL` | Conditional | -- | Required when `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` |
+| `WASIAI_DOWNSTREAM_MAINNET_ALLOW` | No | -- (fail-closed) | CSV of mainnet slugs/chainIds allowed to settle the DOWNSTREAM leg (e.g. `avalanche-mainnet`). Empty/absent = no mainnet leg can settle (`MAINNET_NOT_ALLOWED`). The leg chain itself comes from `agent.payment.chain` (WKH-112), never from an env var |
+| `AVALANCHE_RPC_URL` | Conditional | -- | Required when a leg resolves to `avalanche-mainnet` |
 | `FUJI_RPC_URL` | No | `https://api.avax-test.network/ext/bc/C/rpc` | Avalanche Fuji RPC |
 | `GASLESS_ENABLED` | No | `false` | Enable gasless EIP-3009 transfers |
 | `OPERATOR_PRIVATE_KEY` | Conditional | -- | Operator wallet private key (required when `GASLESS_ENABLED=true`, downstream x402, or x402 signing) |

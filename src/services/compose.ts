@@ -3,7 +3,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { normalizeChainSlug } from '../adapters/chain-resolver.js';
+import {
+  getChainVmFamily,
+  normalizeChainSlug,
+} from '../adapters/chain-resolver.js';
 import { getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import { hashCallerRef } from '../lib/caller-hash.js';
@@ -291,7 +294,18 @@ export const composeService = {
             keyId: scopingKeyRow.id,
             ownerRef: scopingKeyRow.owner_ref,
             chainId,
-            amountUsd: stepDebitedUsd,
+            // Fix-pack AR-profundo FIX 3: el monto del recibo es el REALMENTE
+            // settleado on-chain al agente (`settledAmountUsd`, derivado del
+            // atómico transferido + decimals del adapter), NO `stepDebitedUsd`.
+            // Este recibo lleva la `settle_signature` base58 de una
+            // transferencia real: la reconciliación cruza ambos. `stepDebitedUsd`
+            // es el DÉBITO DEL CALLER y vale 0 para `i === 0` (lo debita el
+            // middleware vía composeEstimatedCostUsd, guard `i > 0` de :208) ⇒ un
+            // compose de UN step con agente Solana emitía `amount_usd = 0` junto
+            // a una firma real. Además incluye el gas overhead del gateway, que
+            // nunca se le paga al agente. Fallback a `stepDebitedUsd` sólo por
+            // exhaustividad de tipos (la rama Solana siempre lo puebla).
+            amountUsd: ds.settledAmountUsd ?? stepDebitedUsd,
             settleCaip2: ds.settleCaip2,
             settleSignature: ds.txHash,
           });
@@ -832,13 +846,43 @@ export const composeService = {
     // settle needed. Pieverse /v2/settle (HTTP 500 since 2026-04-13) is the
     // legacy path for x402 callers only. Downstream Fuji USDC settle (WKH-55)
     // still runs for both paths via signAndSettleDownstream below.
-    if (agent.priceUsdc > 0 && !a2aKey) {
+    // Fix-pack AR-profundo FIX 4: guard de FAMILIA del payTo. El inbound x402 es
+    // EVM-only y castea el payTo a `0x${string}` sin validar; un agente que
+    // declara una chain no-EVM expone un payTo base58 (los agentes Solana
+    // self-published lo hacen) que llegaba a `viem.signTypedData` y reventaba el
+    // request con `InvalidAddressError: Address "So111…112" is invalid` — opaco
+    // para el caller. El narrowing de `getPaymentAdapter()` (más abajo) cubre la
+    // familia del ADAPTER default del gateway, NO la familia del payTo del
+    // agente: son dos cosas distintas. Se decide con el resolver puro
+    // (`normalizeChainSlug` + `getChainVmFamily`), sin duplicar validadores de
+    // formato. Chain declarada ausente o no resoluble → comportamiento previo
+    // intacto (los agentes EVM son byte-idénticos).
+    const declaredChainKey = agent.payment?.chain
+      ? normalizeChainSlug(agent.payment.chain)
+      : undefined;
+    const inboundVmUnsupported =
+      declaredChainKey !== undefined &&
+      getChainVmFamily(declaredChainKey) !== 'evm';
+    if (agent.priceUsdc > 0 && !a2aKey && inboundVmUnsupported) {
+      const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);
+      warn(
+        {
+          agent: agent.slug,
+          chain: declaredChainKey,
+          code: 'INBOUND_VM_UNSUPPORTED',
+        },
+        '[Compose] inbound x402 sign skipped — agent declares a non-EVM chain (payTo is not an EVM address). The agent fee settles operator-side in the downstream leg.',
+      );
+    }
+    if (agent.priceUsdc > 0 && !a2aKey && !inboundVmUnsupported) {
       // WKH-234: the inbound x402 (caller→gateway) is EVM-only — it signs an
       // EIP-3009 authorization on the gateway's DEFAULT chain, and the caller
       // has NO Solana wallet (§1). `getPaymentAdapter()` narrows to
       // `EvmPaymentAdapter` and fails-loud if the default chain were ever Solana
-      // (an unsupported inbound config). The Solana agent fee is settled
-      // operator-side in the DOWNSTREAM leg (signAndSettleDownstream), not here.
+      // (an unsupported inbound config) — pero eso NO dice nada sobre la familia
+      // del payTo del AGENTE, que se filtra en el guard `inboundVmUnsupported`
+      // de arriba. The Solana agent fee is settled operator-side in the
+      // DOWNSTREAM leg (signAndSettleDownstream), not here.
       // WAS-V2-3-CLIENT-2: schema drift fallback for payTo (mirrors price_per_call fallback in discovery)
       // canonical: agent.metadata.payTo  ←  preferred (kite registry)
       // fallback:  agent.metadata.payment.contract  ←  wasiai-v2 marketplace exposes payTo here

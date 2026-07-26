@@ -10,8 +10,8 @@ explorer that the service knows about today.
 > - **Staged — requires operator funding** — code path implemented and
 >   tested, but the operator wallet must be funded with the listed asset on
 >   that chain and the relevant env flag flipped (`KITE_NETWORK=mainnet` or
->   `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`). Until both are true
->   these chains are not active.
+>   `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`). Until both are
+>   true these chains are not active.
 
 ---
 
@@ -131,13 +131,18 @@ Outbound = the chain on which **WasiAI** pays the downstream agent
 
 ### Activation flags
 
-- **Default** — `WASIAI_DOWNSTREAM_NETWORK` unset (or any value other
-  than `avalanche-mainnet`) selects Fuji. The operator wallet pays in
-  Fuji USDC.
-- **Mainnet opt-in** — set `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`
-  AND fund the operator wallet with USDC on Avalanche C-Chain. The
-  pre-flight balance check returns `INSUFFICIENT_BALANCE` if the wallet
-  is empty; the request fails before any signing happens.
+- **Default (fail-closed)** — `WASIAI_DOWNSTREAM_MAINNET_ALLOW` unset or
+  empty ⇒ NO mainnet chain can settle the downstream leg: the leg is
+  skipped with `MAINNET_NOT_ALLOWED` before any signing. The leg chain
+  comes from `agent.payment.chain` (WKH-112), never from an env var — the
+  old `WASIAI_DOWNSTREAM_NETWORK` is NOT read by any code path.
+- **Mainnet opt-in** — set
+  `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet` (CSV; numeric
+  aliases like `43114` also accepted), have `avalanche-mainnet` in
+  `WASIAI_A2A_CHAINS`, AND fund the operator wallet with USDC on
+  Avalanche C-Chain. The pre-flight balance check returns
+  `INSUFFICIENT_BALANCE` if the wallet is empty; the request fails before
+  any signing happens.
 
 ### Custom token contracts
 

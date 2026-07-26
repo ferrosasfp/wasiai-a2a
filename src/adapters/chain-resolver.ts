@@ -68,6 +68,88 @@ const SLUG_ALIASES: Record<string, ChainKey> = Object.assign(
 );
 
 /**
+ * VM family of a `ChainKey` — derivada del MISMO mapa de slugs canónicos, sin
+ * instanciar adapters (el `vmFamily` de los adapters sigue siendo la verdad en
+ * settle-time; esto es su proyección PURA para decidir *antes* de resolver un
+ * bundle).
+ *
+ * Fix-pack AR-profundo FIX 4: el sign x402 INBOUND (`compose.invokeAgent`) es
+ * EVM-only (EIP-3009 + `0x` payTo). Necesita saber si la chain DECLARADA por el
+ * agente es EVM ANTES de castear el payTo a `0x${string}` — el narrowing por
+ * `vmFamily` del ADAPTER no cubre ese caso (cubre la familia del adapter default
+ * del gateway, no la del payTo del agente).
+ *
+ * `Record<ChainKey, …>` exhaustivo: agregar una chain nueva a `ChainKey` sin
+ * clasificarla acá NO compila (fail-loud en build, no en runtime con dinero).
+ */
+export type ChainVmFamily = 'evm' | 'solana';
+
+const CHAIN_VM_FAMILY: Record<ChainKey, ChainVmFamily> = {
+  'kite-ozone-testnet': 'evm',
+  'kite-mainnet': 'evm',
+  'avalanche-fuji': 'evm',
+  'avalanche-mainnet': 'evm',
+  'base-sepolia': 'evm',
+  'base-mainnet': 'evm',
+  'tempo-testnet': 'evm',
+  'solana-devnet': 'solana',
+};
+
+export function getChainVmFamily(chainKey: ChainKey): ChainVmFamily {
+  return CHAIN_VM_FAMILY[chainKey];
+}
+
+/**
+ * Namespace (red lógica) de un `ChainKey`, independiente del entorno
+ * testnet/mainnet.
+ *
+ * Fix-pack AR-profundo FIX 1(a): el colapso legacy de `payment-spec-reader`
+ * comparaba STRINGS CRUDOS (`chainRaw === 'avalanche-mainnet'`), así que el
+ * alias numérico `'43114'` no matcheaba y escapaba crudo hasta
+ * `downstream-payment`, que lo re-normalizaba a `avalanche-mainnet` (destino
+ * DISTINTO al de los alias literales, que colapsan a `'avalanche'` → Fuji).
+ * Con el namespace derivado del `ChainKey` YA normalizado, todos los alias de
+ * un namespace (literales y numéricos) tienen un único destino.
+ *
+ * `Record<ChainKey, …>` exhaustivo por el mismo motivo que `CHAIN_VM_FAMILY`.
+ */
+export type ChainNamespace = 'kite' | 'avalanche' | 'base' | 'tempo' | 'solana';
+
+const CHAIN_NAMESPACE: Record<ChainKey, ChainNamespace> = {
+  'kite-ozone-testnet': 'kite',
+  'kite-mainnet': 'kite',
+  'avalanche-fuji': 'avalanche',
+  'avalanche-mainnet': 'avalanche',
+  'base-sepolia': 'base',
+  'base-mainnet': 'base',
+  'tempo-testnet': 'tempo',
+  'solana-devnet': 'solana',
+};
+
+export function getChainNamespace(chainKey: ChainKey): ChainNamespace {
+  return CHAIN_NAMESPACE[chainKey];
+}
+
+/**
+ * WKH-144: canonical mainnet detection. El string `ChainKey` ES la fuente de
+ * verdad (DT-1): los tres (y sólo tres) slugs mainnet — `kite-mainnet` /
+ * `avalanche-mainnet` / `base-mainnet` — terminan en `-mainnet`; ningún slug
+ * testnet (`kite-ozone-testnet`, `avalanche-fuji`, `base-sepolia`,
+ * `tempo-testnet`, `solana-devnet`) lo hace. Ver el invariante documentado en
+ * `types.ts` sobre `ChainKey`.
+ *
+ * Vive acá (módulo PURO, sin viem / sin registry) desde el fix-pack
+ * AR-profundo FIX 1(b): además del gate fail-CLOSED del settle re-verify
+ * (`settle-verifier.ts`, que la re-exporta para no duplicar el clasificador),
+ * ahora la consume el gate de opt-in mainnet del leg downstream
+ * (`downstream-payment.ts`), que NO puede importar `settle-verifier` sin
+ * arrastrar viem + los chain-factories.
+ */
+export function isMainnetChainKey(chainKey: ChainKey): boolean {
+  return chainKey.endsWith('-mainnet');
+}
+
+/**
  * Normalizes a raw header / manifest value into a `ChainKey`.
  *
  * Returns `undefined` for any unknown input. Total — never throws, never

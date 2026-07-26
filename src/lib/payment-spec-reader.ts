@@ -17,8 +17,45 @@
  * pre-WKH-241) — mismo comportamiento, mismos guards, misma normalización.
  */
 
-import { normalizeChainSlug } from '../adapters/chain-resolver.js';
+import {
+  getChainNamespace,
+  isMainnetChainKey,
+  normalizeChainSlug,
+} from '../adapters/chain-resolver.js';
+import type { ChainKey } from '../adapters/types.js';
 import type { AgentPaymentSpec } from '../types/index.js';
+
+/**
+ * Fix-pack AR-profundo FIX 1(a) — ¿este alias colapsa al slug legacy
+ * `'avalanche'`?
+ *
+ * La decisión se toma sobre el `ChainKey` NORMALIZADO, no sobre el string crudo.
+ * El viejo `chainRaw === 'avalanche-testnet' || chainRaw === 'avalanche-mainnet'`
+ * dejaba escapar los alias NUMÉRICOS del namespace: `'43114'` no matcheaba,
+ * pasaba crudo, y `downstream-payment.ts` lo re-normalizaba a
+ * `avalanche-mainnet` (DINERO REAL) mientras el literal `'avalanche-mainnet'`
+ * terminaba en Fuji. Dos destinos distintos para la misma red declarada.
+ *
+ * Regla:
+ *  (1) TODO alias que resuelva a la MAINNET del namespace avalanche (literal
+ *      `avalanche-mainnet` o numérico `43114`) colapsa a `'avalanche'`, cuyo
+ *      destino es Fuji. Cierra el bypass.
+ *  (2) El literal legacy `'avalanche-testnet'` sigue colapsando (byte-identidad
+ *      CD-2). El resto de los alias testnet (`'avalanche'`, `'avalanche-fuji'`,
+ *      `'fuji'`, `'43113'`) sigue pass-through: TODOS normalizan al MISMO
+ *      `ChainKey` (`avalanche-fuji`) que `'avalanche'`, así que NO existe
+ *      divergencia de destino posible — y el string crudo se sigue exponiendo
+ *      tal cual en `/discover` (cambiarlo sería un cambio de API observable para
+ *      los consumidores externos, fuera del objetivo del fix).
+ */
+function collapsesToLegacyAvalanche(
+  chainKey: ChainKey,
+  chainRaw: string,
+): boolean {
+  if (getChainNamespace(chainKey) !== 'avalanche') return false;
+  if (isMainnetChainKey(chainKey)) return true; // (1)
+  return chainRaw === 'avalanche-testnet'; // (2)
+}
 
 /**
  * Type guard para `agent.payment` (WKH-55).
@@ -41,12 +78,24 @@ import type { AgentPaymentSpec } from '../types/index.js';
  *
  * ⚠️ Salida (CD-7): la validación usa `normalizeChainSlug` SOLO para decidir
  * aceptar/rechazar. El valor de `chain` de SALIDA conserva el string legacy:
- * `avalanche-testnet`/`avalanche-mainnet` → `'avalanche'`; resto pass-through.
- * NO se devuelve el `ChainKey` del resolver (devolvería `'avalanche-fuji'` para
+ * todo el namespace `avalanche` → `'avalanche'`; resto pass-through. NO se
+ * devuelve el `ChainKey` del resolver (devolvería `'avalanche-fuji'` para
  * `'avalanche'`, rompiendo CD-2 y los tests existentes).
  *
- * El downstream pago real (Fuji vs C-Chain) se decide a nivel de
- * `downstream-payment.ts` mediante `WASIAI_DOWNSTREAM_NETWORK`.
+ * Fix-pack AR-profundo FIX 1(a): el colapso ahora es NAMESPACE-AWARE sobre el
+ * `ChainKey` ya normalizado (`getChainNamespace`), NO sobre el string crudo. El
+ * viejo `chainRaw === 'avalanche-mainnet' || chainRaw === 'avalanche-testnet'`
+ * dejaba escapar los alias NUMÉRICOS del mismo namespace (`'43114'`, `'43113'`)
+ * y el alias `'fuji'`: pasaban crudos y `downstream-payment.ts` los
+ * re-normalizaba a un destino DISTINTO del de los alias literales — `'43114'`
+ * terminaba en `avalanche-mainnet` (dinero real) mientras
+ * `'avalanche-mainnet'` terminaba en Fuji. Ahora TODOS los alias del namespace
+ * comparten un único destino.
+ *
+ * La chain del leg downstream sigue siendo agent-controlled por diseño (el
+ * agente declara dónde le pagan); el opt-in explícito por env que habilita un
+ * settle a una chain MAINNET vive en `downstream-payment.ts`
+ * (`WASIAI_DOWNSTREAM_MAINNET_ALLOW`, fail-closed).
  *
  * Retorna undefined si los campos críticos siguen ausentes O la chain no la
  * conoce el resolver.
@@ -92,17 +141,19 @@ export function readPaymentSpec(
   // know BEFORE normalization. Dynamic validation derived from the pure
   // chain-resolver (no hardcoded slug allowlist — CD-1/CD-9). Unknown slug
   // (registry comprometido / chain exótica) → undefined, defensa preservada.
-  if (normalizeChainSlug(chainRaw) === undefined) {
+  const chainKey = normalizeChainSlug(chainRaw);
+  if (chainKey === undefined) {
     return undefined;
   }
 
-  // Normalize chain: collapse avalanche testnet/mainnet → 'avalanche' (downstream
-  // guard expects canonical). Kite slugs pass through unchanged so consumers can
-  // distinguish kite-ozone-testnet from kite-mainnet (different stablecoins).
-  const chain =
-    chainRaw === 'avalanche-testnet' || chainRaw === 'avalanche-mainnet'
-      ? 'avalanche'
-      : chainRaw;
+  // Normalize chain: collapse legacy → 'avalanche' (downstream guard expects
+  // canonical), decidido sobre el `ChainKey` NORMALIZADO (fix-pack AR-profundo
+  // FIX 1a — ver `collapsesToLegacyAvalanche`). Kite/Base pass through unchanged
+  // so consumers can distinguish kite-ozone-testnet de kite-mainnet (different
+  // stablecoins) — cada uno de esos alias ya tiene un destino único.
+  const chain = collapsesToLegacyAvalanche(chainKey, chainRaw)
+    ? 'avalanche'
+    : chainRaw;
 
   return {
     method: methodRaw,

@@ -24,6 +24,7 @@
 import type { PublicClient } from 'viem';
 import { createPublicClient, decodeEventLog, parseAbiItem } from 'viem';
 import { buildRpcTransport } from '../lib/rpc-transport.js';
+import { isMainnetChainKey } from './chain-resolver.js';
 import {
   resolveChainObject,
   resolveRpcFallbackEnv,
@@ -188,18 +189,16 @@ function classifyReceiptError(
 }
 
 /**
- * WKH-144: canonical mainnet detection for the settle re-verify gate. The
- * `ChainKey` string IS the source of truth (DT-1): the three (and only three)
- * mainnet slugs — `kite-mainnet` / `avalanche-mainnet` / `base-mainnet` — all
- * end in `-mainnet`; every testnet slug (`kite-ozone-testnet`, `avalanche-fuji`,
- * `base-sepolia`, `tempo-testnet`) does NOT. Single choke-point (CD-7).
- *
- * Exported (WKH-150) solely so the naming-invariant guard test can cross-check
- * it against the independent viem `Chain.testnet` boolean; the body is unchanged.
+ * WKH-144: canonical mainnet detection for the settle re-verify gate. Single
+ * choke-point (CD-7) — the BODY now lives in `chain-resolver.ts` (pure module,
+ * no viem / no registry) so the downstream mainnet opt-in gate
+ * (`downstream-payment.ts`, fix-pack AR-profundo FIX 1b) can reuse the SAME
+ * classifier without importing this viem-heavy module. Re-exported here
+ * unchanged so every existing call-site and the WKH-150 naming-invariant guard
+ * test (which cross-checks it against the independent viem `Chain.testnet`
+ * boolean) keep importing it from `settle-verifier`.
  */
-export function isMainnetChainKey(chainKey: ChainKey): boolean {
-  return chainKey.endsWith('-mainnet');
-}
+export { isMainnetChainKey };
 
 /**
  * WKH-144: single decision point for a "couldn't independently check on-chain"

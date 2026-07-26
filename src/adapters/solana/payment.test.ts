@@ -411,6 +411,27 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     expect(mockSendAndConfirm).not.toHaveBeenCalled();
   });
 
+  // ── Fix-pack AR-profundo FIX 2 — peek del seam de idempotencia ──────────
+  it('T-FIX2-adapter: getSettledSignature() expone la firma del intent settleado (lectura pura, sin RPC) y undefined si no existe', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    const intentId = 'ctx-fix2:0:payTo';
+
+    // Intent desconocido → undefined, y NO toca la red.
+    expect(adapter.getSettledSignature(intentId)).toBeUndefined();
+    expect(adapter.getSettledSignature('otro-intent')).toBeUndefined();
+    expect(mockSendAndConfirm).not.toHaveBeenCalled();
+    expect(fakeConnection.getParsedTransaction).not.toHaveBeenCalled();
+
+    await adapter.settle({ payTo: PAY_TO, amountAtomic: '1000000', intentId });
+
+    // Post-settle: la firma confirmada queda visible para el pre-flight del
+    // caller (que así NO corta por fondos un leg YA pagado).
+    expect(adapter.getSettledSignature(intentId)).toBe(FAKE_SIG);
+    expect(adapter.getSettledSignature('otro-intent')).toBeUndefined();
+    // Sigue siendo una lectura pura: un solo broadcast (el del settle).
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+  });
+
   it('T-234-CR2-adapter-throws: RPC/ATA inexistente → LANZA (el caller decide cómo degradar)', async () => {
     const adapter = new SolanaPaymentAdapter();
     fakeConnection.getTokenAccountBalance.mockRejectedValue(

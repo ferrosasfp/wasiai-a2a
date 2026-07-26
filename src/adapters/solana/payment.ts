@@ -161,6 +161,16 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     return res.value.amount;
   }
 
+  /**
+   * Fix-pack AR-profundo FIX 2 — peek del seam de idempotencia (in-memory, sin
+   * I/O, no lanza). El caller lo usa para NO cortar por fondos un intent que ya
+   * fue settleado (un pago ya hecho no necesita fondos otra vez). NO valida la
+   * firma: eso lo hace `settle()` (verify-before-trust) antes de reusarla.
+   */
+  getSettledSignature(intentId: string): string | undefined {
+    return _intentSignatures.get(intentId);
+  }
+
   async quote(amountUsd: number): Promise<QuoteResult> {
     const decimals = getSolanaUsdcDecimals();
     // Mirror del patrón avalanche: toFixed(decimals) antes de parseUnits para

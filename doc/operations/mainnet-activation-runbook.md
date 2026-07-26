@@ -9,7 +9,7 @@
 ## TL;DR — What to do on Day 1
 
 1. **Fund wallets** — operator gateway + settle relayer (each chain)
-2. **Set Railway env vars** — `KITE_NETWORK`, `WASIAI_DOWNSTREAM_NETWORK`, RPC URLs
+2. **Set Railway env vars** — `KITE_NETWORK`, `WASIAI_DOWNSTREAM_MAINNET_ALLOW`, RPC URLs
 3. **Migrate DB** — WKH-115 inbound tasks table (if adopting inbound bounties)
 4. **Activate synthetic canary** — WKH-74 (post-deploy validation)
 5. **Set on-call vars** — `HEALTH_MONITOR_TARGETS`, `ONCALL_MENTION` (WKH-77)
@@ -334,7 +334,12 @@ See `doc/operations/oncall-runbook.md` for full escalation procedures.
 ```bash
 # Switch from testnet to mainnet
 KITE_NETWORK=mainnet                          # was: testnet
-WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet  # was: fuji
+# ⚠️ CORRECCIÓN (fix-pack AR-profundo FIX 1c, 2026-07-26): `WASIAI_DOWNSTREAM_NETWORK`
+# NO la lee ningún archivo de src/ (control muerto desde WKH-112 — la chain del leg
+# downstream se resuelve por agent.payment.chain). El control REAL es el gate
+# fail-CLOSED de abajo: ausente/vacío ⇒ NINGUNA mainnet settlea en el leg downstream
+# (skip-code MAINNET_NOT_ALLOWED). CSV de slugs o chainIds.
+WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet   # was: <unset> (fail-closed)
 
 # If enabling Base (optional)
 BASE_ENABLED=true
@@ -470,7 +475,7 @@ If mainnet activation breaks revenue path:
 ```bash
 # 1. In Railway wasiai-a2a:
 KITE_NETWORK=testnet
-WASIAI_DOWNSTREAM_NETWORK=fuji
+WASIAI_DOWNSTREAM_MAINNET_ALLOW=            # vaciar = fail-closed (rollback real)
 # (unset MAINNET_ENABLED flags if set)
 
 # 2. In Railway wasiai-facilitator:

@@ -69,6 +69,9 @@ const SOL_SIG = '5'.repeat(64); // firma base58 (no 0x)
 const mockSolanaSettle = vi.fn();
 // CR-2 (WKH-234): balance SPL del operador leído por el pre-flight del leg.
 const mockSolanaBalance = vi.fn();
+// Fix-pack AR-profundo FIX 2: peek in-memory del seam de idempotencia. Default
+// `undefined` (intent nunca settleado) → los tests preexistentes no cambian.
+const mockSolanaSettledSig = vi.fn();
 const solanaAdapter = {
   vmFamily: 'solana' as const,
   settle: (...a: unknown[]) => mockSolanaSettle(...a),
@@ -76,7 +79,43 @@ const solanaAdapter = {
   supportedTokens: [{ symbol: 'USDC', mint: SOL_MINT, decimals: 6 }],
   getMint: vi.fn().mockReturnValue(SOL_MINT),
   getNetwork: vi.fn().mockReturnValue('solana:test'),
+  caip2ChainId: 'solana:testcluster',
   getOperatorSplBalance: (...a: unknown[]) => mockSolanaBalance(...a),
+  getSettledSignature: (...a: unknown[]) => mockSolanaSettledSig(...a),
+};
+
+// Fix-pack AR-profundo FIX 1(b): adapters MAINNET para ejercitar el gate de
+// opt-in. Los slugs mainnet SIEMPRE estuvieron en SUPPORTED_CHAINS (rail
+// inbound), así que el mock del registry los resuelve como cualquier otro.
+const AVAX_MAINNET_USDC = '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E' as const;
+const mockAvaxMainnetSign = vi.fn();
+const mockAvaxMainnetVerify = vi.fn();
+const mockAvaxMainnetSettle = vi.fn();
+const avaxMainnetAdapter = {
+  vmFamily: 'evm' as const,
+  sign: (...a: unknown[]) => mockAvaxMainnetSign(...a),
+  verify: (...a: unknown[]) => mockAvaxMainnetVerify(...a),
+  settle: (...a: unknown[]) => mockAvaxMainnetSettle(...a),
+  supportedTokens: [
+    { symbol: 'USDC', address: AVAX_MAINNET_USDC, decimals: 6 },
+  ],
+  getToken: vi.fn().mockReturnValue(AVAX_MAINNET_USDC),
+  getNetwork: vi.fn().mockReturnValue('eip155:43114'),
+};
+const BASE_MAINNET_USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as const;
+const mockBaseMainnetSign = vi.fn();
+const mockBaseMainnetVerify = vi.fn();
+const mockBaseMainnetSettle = vi.fn();
+const baseMainnetAdapter = {
+  vmFamily: 'evm' as const,
+  sign: (...a: unknown[]) => mockBaseMainnetSign(...a),
+  verify: (...a: unknown[]) => mockBaseMainnetVerify(...a),
+  settle: (...a: unknown[]) => mockBaseMainnetSettle(...a),
+  supportedTokens: [
+    { symbol: 'USDC', address: BASE_MAINNET_USDC, decimals: 6 },
+  ],
+  getToken: vi.fn().mockReturnValue(BASE_MAINNET_USDC),
+  getNetwork: vi.fn().mockReturnValue('eip155:8453'),
 };
 
 // chainId per bundle (used by the ephemeral public client in the balance check)
@@ -85,18 +124,26 @@ const CHAIN_IDS: Record<string, number> = {
   'avalanche-fuji': 43113,
   'kite-ozone-testnet': 2368,
   'solana-devnet': 900001, // WKH-234 sentinel (DT-8)
+  // Fix-pack AR-profundo FIX 1(b): bundles mainnet inicializados (así el gate
+  // de opt-in se ejercita DESPUÉS del guard CHAIN_NOT_SUPPORTED, no antes).
+  'avalanche-mainnet': 43114,
+  'base-mainnet': 8453,
 };
 const CHAIN_NAMES: Record<string, string> = {
   'base-sepolia': 'Base Sepolia',
   'avalanche-fuji': 'Avalanche Fuji',
   'kite-ozone-testnet': 'Kite Ozone Testnet',
   'solana-devnet': 'Solana Devnet',
+  'avalanche-mainnet': 'Avalanche C-Chain',
+  'base-mainnet': 'Base',
 };
 
 const mockGetPaymentAdapter = vi.fn((chainKey?: string) => {
   if (chainKey === 'base-sepolia') return baseAdapter;
   if (chainKey === 'kite-ozone-testnet') return kiteAdapter;
   if (chainKey === 'solana-devnet') return solanaAdapter; // WKH-234
+  if (chainKey === 'avalanche-mainnet') return avaxMainnetAdapter; // FIX 1(b)
+  if (chainKey === 'base-mainnet') return baseMainnetAdapter; // FIX 1(b)
   return fujiAdapter; // avalanche-fuji (and any default)
 });
 
@@ -216,6 +263,28 @@ function setHappyDefaults() {
   mockSolanaSettle.mockResolvedValue({ txHash: SOL_SIG, success: true });
   // CR-2: operator SPL balance amplio por defecto (10 USDC, 6-dec).
   mockSolanaBalance.mockResolvedValue('10000000');
+  // FIX 2: por defecto NINGÚN intent está settleado (peek → undefined).
+  mockSolanaSettledSig.mockReturnValue(undefined);
+
+  // FIX 1(b): adapters mainnet (sólo se usan cuando el gate deja pasar).
+  mockAvaxMainnetSign.mockResolvedValue({
+    paymentRequest: {
+      authorization: { from: '0xOP', to: PAYTO_ADDR, value: '500000' },
+      signature: '0xSIGAM',
+      network: 'eip155:43114',
+    },
+  });
+  mockAvaxMainnetVerify.mockResolvedValue({ valid: true });
+  mockAvaxMainnetSettle.mockResolvedValue({ txHash: '0xAVAXM', success: true });
+  mockBaseMainnetSign.mockResolvedValue({
+    paymentRequest: {
+      authorization: { from: '0xOP', to: PAYTO_ADDR, value: '500000' },
+      signature: '0xSIGBM',
+      network: 'eip155:8453',
+    },
+  });
+  mockBaseMainnetVerify.mockResolvedValue({ valid: true });
+  mockBaseMainnetSettle.mockResolvedValue({ txHash: '0xBASEM', success: true });
 }
 
 // Import the module under test with the flag set (read at module load).
@@ -243,6 +312,8 @@ afterEach(() => {
   delete process.env.FUJI_RPC_URL;
   delete process.env.BASE_TESTNET_RPC_URL;
   delete process.env.KITE_RPC_URL;
+  // FIX 1(b): el gate es fail-closed; ningún test debe heredar el opt-in.
+  delete process.env.WASIAI_DOWNSTREAM_MAINNET_ALLOW;
 });
 
 // ─── Skip-code tests (legacy 1-a-1 mapping) ──────────────────────────
@@ -866,5 +937,238 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
     expect(result?.settledAmount).toBe('500000');
     expect(mockSolanaBalance).toHaveBeenCalledTimes(1);
     expect(mockSolanaSettle).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Fix-pack AR-profundo FIX 3: monto REAL settleado, en USD ──────────────
+  it('T-FIX3a: el leg Solana propaga settledAmountUsd == monto on-chain (derivado del atómico + decimals)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const result = await signAndSettleDownstream(solanaAgent(), makeLogger());
+    // 0.5 USDC 6-dec → 500000 atómico → 0.5 USD. Es el número que el ledger
+    // debe cruzar contra la firma base58 (antes se registraba el débito del
+    // caller, que vale 0 en el step 0).
+    expect(result?.settledAmount).toBe('500000');
+    expect(result?.settledAmountUsd).toBe(0.5);
+    expect(result?.settleCaip2).toBe('solana:testcluster');
+  });
+
+  // ── Fix-pack AR-profundo FIX 2: idempotencia ANTES del pre-check de fondos ──
+  // Repro del hallazgo: balance 3 USDC, precio 3 USDC, MISMO intentId. La 1ª
+  // llamada paga y deja el balance en 0; la 2ª (retry del mismo leg) cortaba con
+  // INSUFFICIENT_BALANCE y `adapter.settle` NUNCA se invocaba ⇒ un pago SPL real
+  // se reportaba como no pagado (sin recibo ni settle_signature en el ledger).
+  it('T-FIX2: replay del MISMO intentId con el balance ya en 0 → devuelve la firma previa (NO null), un solo broadcast real', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const INTENT = 'ctx-abc:0:So11111111111111111111111111111111111111112';
+
+    // Fake adapter con seam de idempotencia REAL: el primer settle broadcastea y
+    // consume el balance; el segundo es un hit idempotente (sin broadcast).
+    const store = new Map<string, string>();
+    let balanceAtomic = 3_000_000n; // 3 USDC (6-dec) == el precio del leg
+    let broadcasts = 0;
+    mockSolanaSettle.mockImplementation(
+      async (req: { intentId: string; amountAtomic: string }) => {
+        const prior = store.get(req.intentId);
+        if (prior) return { txHash: prior, success: true }; // idempotent hit
+        broadcasts += 1;
+        balanceAtomic -= BigInt(req.amountAtomic);
+        store.set(req.intentId, SOL_SIG);
+        return { txHash: SOL_SIG, success: true };
+      },
+    );
+    mockSolanaBalance.mockImplementation(async () => balanceAtomic.toString());
+    mockSolanaSettledSig.mockImplementation((id: string) => store.get(id));
+
+    const agent = makeAgent({
+      priceUsdc: 3,
+      payment: {
+        method: 'x402',
+        asset: 'USDC',
+        chain: 'solana-devnet',
+        contract: SOL_PAYTO,
+      },
+    });
+
+    const logger1 = makeLogger();
+    const first = await signAndSettleDownstream(agent, logger1, INTENT);
+    expect(first?.txHash).toBe(SOL_SIG);
+    expect(balanceAtomic).toBe(0n);
+
+    const logger2 = makeLogger();
+    const second = await signAndSettleDownstream(agent, logger2, INTENT);
+
+    // El corazón del fix: el retry NO es null y devuelve la MISMA firma.
+    expect(second).not.toBeNull();
+    expect(second?.txHash).toBe(SOL_SIG);
+    expect(second?.settledAmountUsd).toBe(3);
+    // Un único broadcast real (el 2º settle resolvió por idempotencia).
+    expect(broadcasts).toBe(1);
+    // Y NUNCA se reporta INSUFFICIENT_BALANCE sobre un leg ya pagado.
+    expect(logger2.warn).not.toHaveBeenCalled();
+    expect(logger2.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'BALANCE_PRECHECK_SKIPPED',
+        reason: 'IDEMPOTENT_INTENT',
+      }),
+      expect.any(String),
+    );
+    // El pre-check de fondos sólo corrió para el settle FRESCO (1×), no para el
+    // replay: un intent ya settleado no necesita fondos.
+    expect(mockSolanaBalance).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-FIX2b: intent NUEVO con balance insuficiente sigue cortando con INSUFFICIENT_BALANCE (el gate no se debilitó)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaSettledSig.mockReturnValue(undefined); // intent desconocido
+    mockSolanaBalance.mockResolvedValueOnce('499999'); // requerido 500000
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'ctx-new:0:payTo',
+    );
+
+    expect(result).toBeNull();
+    expect(mockSolanaSettle).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'INSUFFICIENT_BALANCE' }),
+      expect.any(String),
+    );
+  });
+});
+
+// ─── Fix-pack AR-profundo FIX 1(b): gate fail-closed de MAINNET ───────────
+// La chain del leg downstream la declara el AGENTE. Los slugs mainnet estaban en
+// SUPPORTED_CHAINS sin gate (a diferencia de tempo/solana) y el control que la
+// doc de operación prometía (WASIAI_DOWNSTREAM_NETWORK) no lo leía nadie.
+describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo FIX 1b)', () => {
+  function mainnetAgent(chain: string) {
+    return makeAgent({
+      priceUsdc: 0.5,
+      payment: {
+        method: 'x402',
+        asset: 'USDC',
+        chain,
+        contract: PAYTO_ADDR,
+      },
+    });
+  }
+
+  it('T-FIX1B-1: env AUSENTE → base-mainnet corta con MAINNET_NOT_ALLOWED, sign/settle NUNCA se invocan', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(
+      mainnetAgent('base-mainnet'),
+      logger,
+    );
+
+    expect(result).toBeNull();
+    expect(mockBaseMainnetSign).not.toHaveBeenCalled();
+    expect(mockBaseMainnetSettle).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'MAINNET_NOT_ALLOWED',
+        chain: 'base-mainnet',
+      }),
+      expect.any(String),
+    );
+  });
+
+  // `kite-mainnet` no está inicializado en el mock del registry → ya corta antes
+  // con CHAIN_NOT_SUPPORTED (guard preexistente). Acá se ejercita la mainnet que
+  // SÍ tiene bundle, que es el caso peligroso que el gate cierra.
+  it('T-FIX1B-2: env AUSENTE → avalanche-mainnet también corta, incluido su alias numérico', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    for (const chain of ['avalanche-mainnet', '43114']) {
+      const logger = makeLogger();
+      const result = await signAndSettleDownstream(mainnetAgent(chain), logger);
+      expect(result, `chain=${chain}`).toBeNull();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'MAINNET_NOT_ALLOWED' }),
+        expect.any(String),
+      );
+    }
+    expect(mockAvaxMainnetSign).not.toHaveBeenCalled();
+  });
+
+  it('T-FIX1B-3: opt-in explícito del slug → el settle mainnet procede', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    process.env.WASIAI_DOWNSTREAM_MAINNET_ALLOW = 'base-mainnet';
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(
+      mainnetAgent('base-mainnet'),
+      logger,
+    );
+
+    expect(result?.txHash).toBe('0xBASEM');
+    expect(mockBaseMainnetSign).toHaveBeenCalledTimes(1);
+    expect(mockBaseMainnetSettle).toHaveBeenCalledTimes(1);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('T-FIX1B-4: el opt-in acepta alias numéricos y CSV, y es POR CHAIN (no un interruptor global)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    // CSV con el alias numérico de avalanche mainnet + espacios.
+    process.env.WASIAI_DOWNSTREAM_MAINNET_ALLOW = ' 43114 , kite-mainnet ';
+
+    const okLogger = makeLogger();
+    const allowed = await signAndSettleDownstream(
+      mainnetAgent('avalanche-mainnet'),
+      okLogger,
+    );
+    expect(allowed?.txHash).toBe('0xAVAXM');
+    expect(okLogger.warn).not.toHaveBeenCalled();
+
+    // base-mainnet NO está en la lista → sigue cortado.
+    const blockedLogger = makeLogger();
+    const blocked = await signAndSettleDownstream(
+      mainnetAgent('base-mainnet'),
+      blockedLogger,
+    );
+    expect(blocked).toBeNull();
+    expect(blockedLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'MAINNET_NOT_ALLOWED' }),
+      expect.any(String),
+    );
+    expect(mockBaseMainnetSign).not.toHaveBeenCalled();
+  });
+
+  it('T-FIX1B-5: env con valor basura o vacío → fail-CLOSED (no habilita nada)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    for (const raw of ['', '   ', 'true', 'all', 'polygon-mainnet']) {
+      process.env.WASIAI_DOWNSTREAM_MAINNET_ALLOW = raw;
+      const logger = makeLogger();
+      const result = await signAndSettleDownstream(
+        mainnetAgent('base-mainnet'),
+        logger,
+      );
+      expect(result, `raw='${raw}'`).toBeNull();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'MAINNET_NOT_ALLOWED' }),
+        expect.any(String),
+      );
+    }
+  });
+
+  it('T-FIX1B-6: los legs TESTNET son byte-idénticos con el gate presente (sin env, sin cambios)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(
+      makeAgent({
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain: 'avalanche-fuji',
+          contract: PAYTO_ADDR,
+        },
+      }),
+      logger,
+    );
+
+    expect(result).toEqual({ txHash: '0xFUJI', settledAmount: '500000' });
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 });
