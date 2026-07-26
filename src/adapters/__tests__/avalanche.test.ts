@@ -62,7 +62,10 @@ vi.mock('viem', async (importOriginal) => {
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
-import { WaitForTransactionReceiptTimeoutError } from 'viem';
+import {
+  createWalletClient,
+  WaitForTransactionReceiptTimeoutError,
+} from 'viem';
 import {
   _resetAvalancheGasless,
   AvalancheGaslessAdapter,
@@ -581,6 +584,120 @@ describe('Avalanche gasless adapter — EIP-3009 operator-relayed (WKH-138)', ()
     await expect(
       adapter.transfer({ to: TO, value: 1_000_000n }),
     ).rejects.toThrow(/timeout/);
+  });
+
+  // ── HU-192: `valueDisposition` decide si routes/gasless.ts reembolsa ───────
+  // Contrato del que depende el credit-back: sólo se reembolsa cuando el valor
+  // quedó PROBADAMENTE quieto. Un flip de estos valores cobraría de más (o
+  // regalaría un transfer confirmado).
+  it('HU-192: pre-flight (cap) → valueDisposition not-moved (reembolsable)', async () => {
+    process.env.GASLESS_DEFAULT_CAP_USD = '10';
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 50_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'not-moved' });
+  });
+
+  it('HU-192: submit falla por gas del operador → not-moved (nunca entró al mempool)', async () => {
+    mockWriteContract.mockRejectedValue(
+      new Error('insufficient funds for gas * price + value'),
+    );
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'not-moved' });
+  });
+
+  it('HU-192: submit falla por otra causa → unknown (pudo haber sido aceptada)', async () => {
+    mockWriteContract.mockRejectedValue(new Error('socket hang up'));
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'unknown' });
+  });
+
+  it('HU-192: revert confirmado → not-moved (la tx existe pero no transfirió)', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockResolvedValue({ status: 'reverted' });
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'not-moved' });
+  });
+
+  it('HU-192: receipt timeout → unknown (la tx puede confirmarse después)', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockRejectedValue(
+      new WaitForTransactionReceiptTimeoutError({ hash: TX_HASH }),
+    );
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({ valueDisposition: 'unknown' });
+  });
+
+  // ── HU-192 fix-pack (AR MENOR-1): candado por MUTACIÓN de los throw sites ──
+  // que quedaban sin test. Cada `it` fija UN literal: flipearlo pone la suite en
+  // rojo. Sin esto un cambio futuro podía invertir la clasificación con la suite
+  // verde — y la clasificación es lo único que decide si la ruta reembolsa.
+  it('HU-192: value bajo el mínimo → not-moved (pre-flight, no se firmó nada)', async () => {
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 0n }), // 0 < minimum_transfer_amount (1 wei)
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('minimum_transfer_amount'),
+      valueDisposition: 'not-moved',
+    });
+    expect(mockSignTypedData).not.toHaveBeenCalled();
+    expect(mockWriteContract).not.toHaveBeenCalled();
+  });
+
+  it('HU-192: wallet sin account → not-moved (pre-flight, no se firmó nada)', async () => {
+    vi.mocked(createWalletClient).mockReturnValueOnce({
+      account: undefined,
+      signTypedData: mockSignTypedData,
+      writeContract: mockWriteContract,
+    } as never);
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('wallet has no account'),
+      valueDisposition: 'not-moved',
+    });
+    expect(mockSignTypedData).not.toHaveBeenCalled();
+    expect(mockWriteContract).not.toHaveBeenCalled();
+  });
+
+  it('HU-192: la firma falla → not-moved (la firma es local, nada llegó a la red)', async () => {
+    mockSignTypedData.mockReset();
+    mockSignTypedData.mockRejectedValue(new Error('signer rejected'));
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('sign failed'),
+      valueDisposition: 'not-moved',
+    });
+    expect(mockWriteContract).not.toHaveBeenCalled();
+  });
+
+  // El catch-all POST-BROADCAST: la tx YA está en la red y el read del receipt
+  // falló por algo que NO es timeout (RPC caído / socket cortado). Un flip a
+  // 'not-moved' acá paga DOS veces: el destinatario cobra on-chain y el caller
+  // recupera su budget. Es el sitio más peligroso de los 18.
+  it('HU-192: receipt read falla (no-timeout, catch-all) → unknown (la tx ya se broadcasteó)', async () => {
+    mockWriteContract.mockResolvedValue(TX_HASH);
+    mockWaitForReceipt.mockRejectedValue(new Error('socket hang up'));
+    const adapter = new AvalancheGaslessAdapter(43113);
+    await expect(
+      adapter.transfer({ to: TO, value: 1_000_000n }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('receipt failed'),
+      valueDisposition: 'unknown',
+    });
+    // La tx efectivamente salió: por eso el valor NO es reembolsable.
+    expect(mockWriteContract).toHaveBeenCalledTimes(1);
   });
 
   // ── T-AC3: status() funding_state per enabled/pk/balance ──────────────────

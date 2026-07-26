@@ -379,6 +379,8 @@ export class BaseGaslessAdapter implements GaslessAdapter {
         `value exceeds per-call cap (estimated ${
           Number.isFinite(estimatedUsd) ? estimatedUsd : 'Infinity'
         } USD > cap ${cap} USD)`,
+        // HU-192: pre-flight, nada se firmó ni se mandó a la red.
+        'not-moved',
       );
     }
     const minimum = getMinimumTransferWei();
@@ -386,13 +388,18 @@ export class BaseGaslessAdapter implements GaslessAdapter {
       throw new GaslessTransferError(
         this.networkTag,
         'value below minimum_transfer_amount',
+        'not-moved', // HU-192: pre-flight.
       );
     }
 
     // ── CD-6: firma SOLO con el OPERATOR key. from == operator.address ───────
     const walletClient = getWalletClient(this.network);
     if (!walletClient.account)
-      throw new GaslessTransferError(this.networkTag, 'wallet has no account');
+      throw new GaslessTransferError(
+        this.networkTag,
+        'wallet has no account',
+        'not-moved', // HU-192: pre-flight.
+      );
     const account = walletClient.account;
     const publicClient = getPublicClient(this.network);
     const token = getUsdcAddress(this.network);
@@ -427,6 +434,8 @@ export class BaseGaslessAdapter implements GaslessAdapter {
       throw new GaslessTransferError(
         this.networkTag,
         `sign failed: ${sanitizeError(err)}`,
+        // HU-192: la firma es local; nada llegó a la red.
+        'not-moved',
       );
     }
 
@@ -460,10 +469,14 @@ export class BaseGaslessAdapter implements GaslessAdapter {
       // a dry wallet surfaces here as viem "insufficient funds for gas".
       // Relabel it with the stable `operator-funding-low` reason instead of an
       // anonymous RPC string (message still sanitized/truncated).
-      const { message } = classifyOperatorError(err);
+      const { message, fundingLow } = classifyOperatorError(err);
       throw new GaslessTransferError(
         this.networkTag,
         `submit failed: ${message.substring(0, 160)}`,
+        // HU-192: ver el racional idéntico en avalanche/gasless.ts — funding-low
+        // ⟹ la tx nunca entró al mempool (reembolsable); cualquier otro fallo de
+        // submit es ambiguo ⟹ 'unknown' (fail-safe).
+        fundingLow ? 'not-moved' : 'unknown',
       );
     }
 
@@ -477,6 +490,8 @@ export class BaseGaslessAdapter implements GaslessAdapter {
         throw new GaslessTransferError(
           this.networkTag,
           `transfer reverted on-chain (tx ${txHash})`,
+          // HU-192: revert CONFIRMADO — no transfirió nada ⟹ reembolsable.
+          'not-moved',
         );
       }
     } catch (err) {
@@ -484,12 +499,17 @@ export class BaseGaslessAdapter implements GaslessAdapter {
         throw new GaslessTransferError(
           this.networkTag,
           `receipt timeout (tx ${txHash})`,
+          // HU-192: la tx YA está en la red y puede confirmarse después ⟹ NO
+          // reembolsar.
+          'unknown',
         );
       }
       if (err instanceof GaslessTransferError) throw err;
       throw new GaslessTransferError(
         this.networkTag,
         `receipt failed: ${sanitizeError(err)}`,
+        // HU-192: broadcasteada; falló el read del receipt ⟹ desconocido.
+        'unknown',
       );
     }
 

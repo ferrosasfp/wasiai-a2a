@@ -46,6 +46,19 @@ vi.mock('../services/budget.js', () => ({
     getBalance: vi.fn(),
     debit: vi.fn(),
     registerDeposit: vi.fn(),
+    // HU-192: la ruta reembolsa el débito cuando el transfer no ocurre.
+    credit: vi.fn(),
+    creditDelegation: vi.fn(),
+    creditSession: vi.fn(),
+  },
+}));
+
+// HU-192: el refund best-effort encola en el outbox si el credit no revierte
+// nada. Mockeado para que ningún test toque supabase.
+vi.mock('../services/refund-outbox.js', () => ({
+  refundOutbox: {
+    enqueueRefund: vi.fn().mockResolvedValue(undefined),
+    processRefundOutbox: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -171,6 +184,7 @@ import gaslessRoutes from './gasless.js';
 const mockLookupByHash = vi.mocked(identityService.lookupByHash);
 const mockGetBalance = vi.mocked(budgetService.getBalance);
 const mockDebit = vi.mocked(budgetService.debit);
+const mockCredit = vi.mocked(budgetService.credit);
 const mockGetGaslessAdapter = vi.mocked(getGaslessAdapter);
 
 // ── Helpers ────────────────────────────────────────────────
@@ -533,6 +547,7 @@ describe('POST /gasless/transfer — chain-aware (WKH-138)', () => {
     mockDebit.mockResolvedValue({ success: true });
     mockGetBalance.mockResolvedValue('95.000000');
     mockGaslessStatus.mockResolvedValue({ funding_state: 'unfunded' });
+    mockCredit.mockResolvedValue({ success: true, reverted: true });
 
     const response = await app.inject({
       method: 'POST',
@@ -544,6 +559,9 @@ describe('POST /gasless/transfer — chain-aware (WKH-138)', () => {
     expect(response.statusCode).toBe(503);
     expect(response.json().error).toBe('gasless_not_operational');
     expect(mockGaslessTransfer).not.toHaveBeenCalled();
+    // HU-192: el débito se aplicó y no hubo transfer → credit-back del monto
+    // exacto, con el owner_ref del caller (ownership guard).
+    expect(mockCredit).toHaveBeenCalledWith(TEST_KEY_ID, 84532, 5, 'user-1');
   });
 
   // ── T-CHAIN-BAD: unrecognized slug → 400 CHAIN_NOT_SUPPORTED ──────────────
