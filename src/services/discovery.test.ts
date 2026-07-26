@@ -287,7 +287,12 @@ describe('discoveryService', () => {
     });
 
     // 068: chain allowlist mainnet support
-    it('mapAgent accepts chain="avalanche-mainnet" and normalizes to "avalanche"', () => {
+    // Fix-pack it2 BLQ-MED-1 — CAMBIO INTENCIONAL DE API: `avalanche-mainnet` ya
+    // NO se colapsa a `'avalanche'` (que resolvía a Fuji). Se reporta lo que el
+    // agente declaró; el bloqueo del dinero vive en el gate fail-CLOSED del leg
+    // downstream (`WASIAI_DOWNSTREAM_MAINNET_ALLOW`), que antes era inejercitable
+    // para avalanche porque ningún card podía producir ese ChainKey.
+    it('mapAgent accepts chain="avalanche-mainnet" and keeps it (no mainnet collapse)', () => {
       const registry = makeRegistry();
       const raw = {
         id: '1',
@@ -308,7 +313,7 @@ describe('discoveryService', () => {
       expect(agent.payment).toEqual({
         method: 'x402',
         asset: 'USDC',
-        chain: 'avalanche', // normalized
+        chain: 'avalanche-mainnet', // it2 BLQ-MED-1: sin colapso mainnet
         contract: '0x000000000000000000000000000000000000aBcD',
       });
     });
@@ -463,7 +468,7 @@ describe('discoveryService', () => {
       expect(chainId.payment?.chain).toBe('84532');
     });
 
-    it('T-AC2a: regression — avalanche variants collapse to "avalanche" (CD-7, NOT avalanche-fuji)', () => {
+    it('T-AC2a: regression — avalanche TESTNET variants collapse to "avalanche" (CD-7, NOT avalanche-fuji); la mainnet NO colapsa (it2 BLQ-MED-1)', () => {
       const plain = discoveryService.mapAgent(
         makeRegistry(),
         makePaymentRaw('avalanche'),
@@ -477,12 +482,14 @@ describe('discoveryService', () => {
       );
       expect(testnet.payment?.chain).toBe('avalanche');
 
+      // it2 BLQ-MED-1: el alias mainnet sale como su ChainKey real, así el gate
+      // fail-CLOSED del leg downstream lo ve (y el opt-in por env es ejercitable).
       const mainnet = discoveryService.mapAgent(
         makeRegistry(),
         makePaymentRaw('avalanche-mainnet'),
       );
-      expect(mainnet.payment?.chain).toBe('avalanche');
-      expect(mainnet.payment?.chain).not.toBe('avalanche-fuji');
+      expect(mainnet.payment?.chain).toBe('avalanche-mainnet');
+      expect(mainnet.payment?.chain).not.toBe('avalanche');
     });
 
     it('T-AC2b: regression — kite-ozone-testnet passes through unchanged (CD-7)', () => {

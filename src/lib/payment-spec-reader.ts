@@ -17,15 +17,68 @@
  * pre-WKH-241) — mismo comportamiento, mismos guards, misma normalización.
  */
 
-import { normalizeChainSlug } from '../adapters/chain-resolver.js';
+import {
+  getChainNamespace,
+  isMainnetChainKey,
+  normalizeChainSlug,
+} from '../adapters/chain-resolver.js';
+import type { ChainKey } from '../adapters/types.js';
 import type { AgentPaymentSpec } from '../types/index.js';
+
+/**
+ * Valor de salida de `payment.chain` para el namespace avalanche.
+ *
+ * Fix-pack AR-profundo FIX 1(a) — la decisión se toma sobre el `ChainKey`
+ * NORMALIZADO, no sobre el string crudo. El viejo
+ * `chainRaw === 'avalanche-testnet' || chainRaw === 'avalanche-mainnet'` dejaba
+ * escapar los alias NUMÉRICOS del namespace: `'43114'` no matcheaba, pasaba
+ * crudo, y `downstream-payment.ts` lo re-normalizaba a `avalanche-mainnet`
+ * mientras el literal `'avalanche-mainnet'` terminaba en Fuji. Dos destinos
+ * distintos para la misma red declarada.
+ *
+ * Fix-pack it2 BLQ-MED-1 — ⚠️ CAMBIO INTENCIONAL DE API OBSERVABLE. La iteración
+ * anterior colapsaba TODO alias mainnet a `'avalanche'` (destino Fuji). Eso
+ * volvía INEJERCITABLE el opt-in `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`
+ * que instruyen `README.md`, `.env.example`, `docs/networks.md` y los dos
+ * runbooks: como `readPaymentSpec` es el ÚNICO productor de `Agent.payment`
+ * (`discovery.mapAgent` + `agent.mapRowToAgent`), NINGÚN valor declarable por un
+ * agente podía producir `chainKey='avalanche-mainnet'` en el leg. Se eliminaba un
+ * control muerto y se introducía otro.
+ *
+ * Regla nueva (el GATE del leg downstream es el ÚNICO choke-point que decide si
+ * se puede pagar en mainnet):
+ *  (1) alias MAINNET del namespace (`avalanche-mainnet`, `43114`) → sale su
+ *      ChainKey real `'avalanche-mainnet'`. Un agente que declare mainnet se ve
+ *      como mainnet (más honesto que mostrar `'avalanche'`) y el gate
+ *      fail-CLOSED lo bloquea sin opt-in explícito.
+ *  (2) el literal legacy `'avalanche-testnet'` sigue colapsando a `'avalanche'`
+ *      (byte-identidad CD-2). El resto de los alias testnet (`'avalanche'`,
+ *      `'avalanche-fuji'`, `'fuji'`, `'43113'`) sigue pass-through: TODOS
+ *      normalizan al MISMO `ChainKey` (`avalanche-fuji`) que `'avalanche'`, así
+ *      que NO existe divergencia de destino posible.
+ *
+ * Consumidores externos afectados (wasiai-v2 / Chaski / remit-*): un agente que
+ * declare `avalanche-mainnet` o `43114` deja de verse como `'avalanche'` en
+ * `/discover`. Es el string que el agente declaró, y el bloqueo del dinero pasó
+ * al gate.
+ */
+function resolveAvalancheOutputChain(
+  chainKey: ChainKey,
+  chainRaw: string,
+): string {
+  if (getChainNamespace(chainKey) !== 'avalanche') return chainRaw;
+  if (isMainnetChainKey(chainKey)) return chainKey; // (1)
+  return chainRaw === 'avalanche-testnet' ? 'avalanche' : chainRaw; // (2)
+}
 
 /**
  * Type guard para `agent.payment` (WKH-55).
  * Schema drift fallback for wasiai-v2 marketplace shape:
  *   - v2 expone `obj.protocol` (e.g. "x402"), pero el WKH-55 código espera `obj.method`.
  *   - v2 expone `chain` top-level (e.g. "avalanche-testnet"), pero WKH-55 lo busca en payment.
- *   - WKH-55 guard chequea `chain === "avalanche"`; normalizamos solo testnet/mainnet → avalanche.
+ *   - WKH-55 guard chequea `chain === "avalanche"`; normalizamos el literal
+ *     legacy `avalanche-testnet` → `avalanche` (los alias mainnet NO colapsan —
+ *     it2 BLQ-MED-1).
  *
  * SEC-AR-2026-04-28 BLQ-MED-1 (WKH-113 DT-4/DT-5): dynamic chain validation.
  * Registry comprometido podría exponer `chain: 'avalanche'` (literal) o variantes
@@ -40,13 +93,25 @@ import type { AgentPaymentSpec } from '../types/index.js';
  * comprometido / chain exótica → undefined, defensa preservada).
  *
  * ⚠️ Salida (CD-7): la validación usa `normalizeChainSlug` SOLO para decidir
- * aceptar/rechazar. El valor de `chain` de SALIDA conserva el string legacy:
- * `avalanche-testnet`/`avalanche-mainnet` → `'avalanche'`; resto pass-through.
- * NO se devuelve el `ChainKey` del resolver (devolvería `'avalanche-fuji'` para
- * `'avalanche'`, rompiendo CD-2 y los tests existentes).
+ * aceptar/rechazar. El valor de `chain` de SALIDA es pass-through del string
+ * declarado, con DOS excepciones en el namespace avalanche (ver
+ * `resolveAvalancheOutputChain`): el literal legacy `'avalanche-testnet'`
+ * colapsa a `'avalanche'` (CD-2), y los alias MAINNET salen como su ChainKey
+ * `'avalanche-mainnet'` (it2 BLQ-MED-1).
  *
- * El downstream pago real (Fuji vs C-Chain) se decide a nivel de
- * `downstream-payment.ts` mediante `WASIAI_DOWNSTREAM_NETWORK`.
+ * Fix-pack it2 BLQ-MED-1: este módulo NO decide más si un pago mainnet es
+ * permisible — sólo reporta con fidelidad lo que el agente declaró. El ÚNICO
+ * choke-point que decide es el gate fail-CLOSED del leg downstream
+ * (`downstream-payment.ts`, `WASIAI_DOWNSTREAM_MAINNET_ALLOW` + clasificación
+ * por el DESTINO REAL). Colapsar los alias mainnet a `'avalanche'` (iteración
+ * anterior) volvía inejercitable ese opt-in para avalanche: como este lector es
+ * el ÚNICO productor de `Agent.payment` (`discovery.mapAgent` +
+ * `agent.mapRowToAgent`), ningún valor declarable podía producir
+ * `chainKey='avalanche-mainnet'` en el leg.
+ *
+ * La chain del leg downstream sigue siendo agent-controlled por diseño (el
+ * agente declara dónde le pagan); habilitar un settle a una chain MAINNET exige
+ * el opt-in explícito por env del gate.
  *
  * Retorna undefined si los campos críticos siguen ausentes O la chain no la
  * conoce el resolver.
@@ -92,17 +157,18 @@ export function readPaymentSpec(
   // know BEFORE normalization. Dynamic validation derived from the pure
   // chain-resolver (no hardcoded slug allowlist — CD-1/CD-9). Unknown slug
   // (registry comprometido / chain exótica) → undefined, defensa preservada.
-  if (normalizeChainSlug(chainRaw) === undefined) {
+  const chainKey = normalizeChainSlug(chainRaw);
+  if (chainKey === undefined) {
     return undefined;
   }
 
-  // Normalize chain: collapse avalanche testnet/mainnet → 'avalanche' (downstream
-  // guard expects canonical). Kite slugs pass through unchanged so consumers can
-  // distinguish kite-ozone-testnet from kite-mainnet (different stablecoins).
-  const chain =
-    chainRaw === 'avalanche-testnet' || chainRaw === 'avalanche-mainnet'
-      ? 'avalanche'
-      : chainRaw;
+  // Normalize chain: collapse legacy `avalanche-testnet` → 'avalanche' (el guard
+  // downstream espera el canónico), decidido sobre el `ChainKey` NORMALIZADO
+  // (fix-pack AR-profundo FIX 1a + it2 BLQ-MED-1 — ver
+  // `resolveAvalancheOutputChain`). Kite/Base/Tempo/Solana pass through unchanged
+  // so consumers can distinguish kite-ozone-testnet de kite-mainnet (different
+  // stablecoins) — cada uno de esos alias ya tiene un destino único.
+  const chain = resolveAvalancheOutputChain(chainKey, chainRaw);
 
   return {
     method: methodRaw,

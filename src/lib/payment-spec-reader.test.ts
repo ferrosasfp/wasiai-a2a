@@ -8,6 +8,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { readPaymentSpec } from './payment-spec-reader.js';
 import { isValidPayoutWallet } from './wallet-format.js';
 
@@ -44,12 +45,75 @@ describe('readPaymentSpec — extracción del payment spec (WKH-241)', () => {
   });
 
   // ── Fidelidad de la extracción movida tal cual (CD-2) ────────────
-  it('preserva la normalización legacy avalanche-testnet/-mainnet → "avalanche" (CD-7)', () => {
-    for (const chain of ['avalanche-testnet', 'avalanche-mainnet']) {
+  it('preserva la normalización legacy avalanche-testnet → "avalanche" (CD-7)', () => {
+    const spec = readPaymentSpec({
+      payment: {
+        method: 'x402',
+        chain: 'avalanche-testnet',
+        contract: EVM_PAYTO,
+      },
+    });
+    expect(spec?.chain).toBe('avalanche');
+  });
+
+  // ── Fix-pack it2 BLQ-MED-1: los alias MAINNET NO colapsan ─────────
+  // ⚠️ CAMBIO INTENCIONAL DE API OBSERVABLE (`/discover`). La iteración anterior
+  // colapsaba TODO alias mainnet del namespace a `'avalanche'` (destino Fuji), y
+  // eso volvía INEJERCITABLE el opt-in `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`
+  // documentado en README/.env.example/docs/networks.md + los 2 runbooks: como
+  // este lector es el ÚNICO productor de `Agent.payment`, ningún valor declarable
+  // por un agente podía producir `chainKey='avalanche-mainnet'` en el leg. Ahora
+  // el reader reporta con fidelidad y el ÚNICO choke-point que decide si se puede
+  // pagar en mainnet es el gate fail-CLOSED de `downstream-payment.ts`.
+  it('BLQ-MED-1: los alias MAINNET del namespace avalanche salen como su ChainKey (NO colapsan a "avalanche")', () => {
+    for (const chain of [
+      'avalanche-mainnet',
+      '43114',
+      ' 43114 ',
+      'AVALANCHE-MAINNET',
+    ]) {
       const spec = readPaymentSpec({
         payment: { method: 'x402', chain, contract: EVM_PAYTO },
       });
-      expect(spec?.chain).toBe('avalanche');
+      expect(spec?.chain, `alias=${chain}`).toBe('avalanche-mainnet');
+      // Y el leg resuelve a la mainnet REAL → el gate la ve y el opt-in es
+      // ejercitable (antes resolvía a Fuji para todos ellos).
+      expect(normalizeChainSlug(spec?.chain ?? '')).toBe('avalanche-mainnet');
+    }
+  });
+
+  it('FIX-1a: los alias testnet del namespace avalanche NO cambian de forma (mismo destino, string crudo intacto)', () => {
+    const cases: Array<[string, string]> = [
+      ['avalanche-testnet', 'avalanche'], // literal legacy (byte-identidad CD-2)
+      ['avalanche', 'avalanche'],
+      ['avalanche-fuji', 'avalanche-fuji'],
+      ['fuji', 'fuji'],
+      ['43113', '43113'],
+    ];
+    for (const [raw, expected] of cases) {
+      const spec = readPaymentSpec({
+        payment: { method: 'x402', chain: raw, contract: EVM_PAYTO },
+      });
+      expect(spec?.chain, `chain=${raw}`).toBe(expected);
+      expect(normalizeChainSlug(spec?.chain ?? '')).toBe('avalanche-fuji');
+    }
+  });
+
+  it('FIX-1a: kite/base/tempo/solana siguen pass-through (cada alias ya tiene destino único)', () => {
+    const cases: Array<[string, string]> = [
+      ['kite-ozone-testnet', 'kite-ozone-testnet'],
+      ['kite-mainnet', 'kite-mainnet'],
+      ['base-sepolia', 'base-sepolia'],
+      ['base-mainnet', 'base-mainnet'],
+      ['8453', '8453'],
+      ['tempo-testnet', 'tempo-testnet'],
+      ['solana-devnet', 'solana-devnet'],
+    ];
+    for (const [raw, expected] of cases) {
+      const spec = readPaymentSpec({
+        payment: { method: 'x402', chain: raw, contract: EVM_PAYTO },
+      });
+      expect(spec?.chain, `chain=${raw}`).toBe(expected);
     }
   });
 

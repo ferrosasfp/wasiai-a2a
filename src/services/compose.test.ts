@@ -117,6 +117,19 @@ const mockCreditWithDest = vi.mocked(budgetService.creditWithDest); // WKH-129
 const mockRecordSolana = vi.mocked(budgetService.recordSolanaSettleReceipt); // WKH-234
 const mockRegen = vi.mocked(regenerateInputFromErrors); // WKH-130
 
+/**
+ * payTo EVM de los fixtures del sign INBOUND (`0x` + 40 hex). Fix-pack CR-MNR-8:
+ * antes este literal estaba copiado CRUDO 33 veces en el archivo (mientras el
+ * equivalente Solana sí tenía constante, `SOL_PAYTO_INBOUND`). Con el guard de
+ * familia del fix-pack AR-profundo FIX 4 eso es una trampa: `isValidWallet` exige
+ * EXACTAMENTE 40 hex, así que una copia con 39 o 41 `B` sigue siendo un string
+ * plausible pero cambia EN SILENCIO la semántica del test — de "el sign inbound
+ * firma" a "el leg se saltea con reason=INVALID_PAY_TO_FORMAT" — y el test sigue
+ * verde por el motivo equivocado. Con `'B'.repeat(40)` la longitud la calcula el
+ * runtime y no se puede mistipear.
+ */
+const EVM_PAYTO = `0x${'B'.repeat(40)}`;
+
 function makeAgent(o: Partial<Agent> = {}): Agent {
   return {
     id: 'agent-1',
@@ -258,7 +271,7 @@ describe('composeService.invokeAgent', () => {
     const mockPR: X402PaymentRequest = {
       authorization: {
         from: '0xAAA',
-        to: '0xBBB',
+        to: EVM_PAYTO,
         value: '1000000000000000000',
         validAfter: '0',
         validBefore: '9999999999',
@@ -272,7 +285,10 @@ describe('composeService.invokeAgent', () => {
       paymentRequest: mockPR,
     });
     mockSettle.mockResolvedValue({ success: true, txHash: '0xDEADBEEF' });
-    const agent = makeAgent({ priceUsdc: 1.0, metadata: { payTo: '0xBBB' } });
+    const agent = makeAgent({
+      priceUsdc: 1.0,
+      metadata: { payTo: EVM_PAYTO },
+    });
     mockFetchOk();
     const result = await composeService.invokeAgent(agent, { q: 'hello' });
     const callHeaders = mockFetch.mock.calls[0]![1]!.headers as Record<
@@ -290,6 +306,176 @@ describe('composeService.invokeAgent', () => {
     expect(result.output).toBe('ok');
   });
 
+  // ── Fix-pack AR-profundo FIX 4: guard de FAMILIA del payTo inbound ────────
+  // Camino real reproducido por el AR: caller x402 (sin `x-a2a-key`) + agente
+  // self-published Solana con priceUsdc > 0. El payTo es base58 y llegaba crudo
+  // a `viem.signTypedData` vía `to: payTo as \`0x${string}\`` ⇒
+  // `InvalidAddressError: Address "So111…112" is invalid`, un error opaco que no
+  // explica nada. El fee del agente Solana se settlea operator-side en el leg
+  // DOWNSTREAM, no en el inbound.
+  const SOL_PAYTO_INBOUND = 'So11111111111111111111111111111111111111112';
+
+  it('T-FIX4: agente con chain no-EVM + caller x402 → el sign inbound se saltea (INBOUND_VM_UNSUPPORTED), sin InvalidAddressError', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const agent = makeAgent({
+      priceUsdc: 0.05,
+      metadata: { payTo: SOL_PAYTO_INBOUND },
+      payment: {
+        method: 'x402',
+        asset: 'USDC',
+        chain: 'solana-devnet',
+        contract: SOL_PAYTO_INBOUND,
+      },
+    });
+    mockFetchOk({ result: 'ok' });
+
+    // Sin a2aKey = caller x402. NO debe lanzar.
+    const result = await composeService.invokeAgent(agent, { q: 'hello' });
+
+    expect(result.output).toBe('ok');
+    expect(result.txHash).toBeUndefined();
+    // El sign EVM (y por lo tanto el settle inbound) nunca se intenta.
+    expect(mockSign).not.toHaveBeenCalled();
+    expect(mockSettle).not.toHaveBeenCalled();
+    const callHeaders = mockFetch.mock.calls[0]![1]!.headers as Record<
+      string,
+      string
+    >;
+    expect(callHeaders['PAYMENT-SIGNATURE']).toBeUndefined();
+    expect(logSpy.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'INBOUND_VM_UNSUPPORTED',
+        chain: 'solana-devnet',
+      }),
+      expect.any(String),
+    );
+  });
+
+  // ── Fix-pack it2 BLQ-BAJO-1: el guard debe mirar EL VALOR (payTo), no el proxy
+  //    (la chain declarada). Los dos repros del AR: `metadata` viene del agent
+  //    card COMPLETO del registry (`discovery.mapAgent` setea `metadata: raw`) y
+  //    cualquier caller autenticado puede registrar un registry, así que el payTo
+  //    y la chain declarada son fuentes INDEPENDIENTES.
+  it('T-it2-BLQ-BAJO-1a (CASO 2 del AR): metadata.payTo base58 SIN payment declarado → el sign inbound se saltea (INVALID_PAY_TO_FORMAT), sin base58 crudo en viem', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const agent = makeAgent({
+      priceUsdc: 0.05,
+      metadata: { payTo: SOL_PAYTO_INBOUND },
+    });
+    // Sin `payment` no hay chain declarada → el guard viejo no disparaba.
+    agent.payment = undefined;
+    mockFetchOk({ result: 'ok' });
+
+    const result = await composeService.invokeAgent(agent, { q: 'hello' });
+
+    expect(result.output).toBe('ok');
+    expect(mockSign).not.toHaveBeenCalled();
+    expect(mockSettle).not.toHaveBeenCalled();
+    expect(logSpy.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'INBOUND_VM_UNSUPPORTED',
+        reason: 'INVALID_PAY_TO_FORMAT',
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('T-it2-BLQ-BAJO-1b (CASO 3 del AR): chain declarada EVM (pasa el guard viejo) + metadata.payTo base58 → igual se saltea', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const agent = makeAgent({
+      priceUsdc: 0.05,
+      metadata: { payTo: SOL_PAYTO_INBOUND },
+      payment: {
+        method: 'x402',
+        asset: 'USDC',
+        chain: 'avalanche-fuji', // EVM: el guard por chain lo dejaba pasar
+        contract: SOL_PAYTO_INBOUND,
+      },
+    });
+    mockFetchOk({ result: 'ok' });
+
+    const result = await composeService.invokeAgent(agent, { q: 'hello' });
+
+    expect(result.output).toBe('ok');
+    expect(mockSign).not.toHaveBeenCalled();
+    expect(logSpy.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'INBOUND_VM_UNSUPPORTED',
+        reason: 'INVALID_PAY_TO_FORMAT',
+        chain: 'avalanche-fuji',
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('T-it2-BLQ-BAJO-1c: payTo del fallback `payment.contract` también se valida (misma fuente que el cast)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const agent = makeAgent({
+      priceUsdc: 0.05,
+      // sin metadata.payTo → resuelve por metadata.payment.contract
+      metadata: { payment: { contract: SOL_PAYTO_INBOUND } },
+      payment: {
+        method: 'x402',
+        asset: 'USDC',
+        chain: 'avalanche-fuji',
+        contract: SOL_PAYTO_INBOUND,
+      },
+    });
+    mockFetchOk({ result: 'ok' });
+
+    const result = await composeService.invokeAgent(agent, { q: 'hello' });
+
+    expect(result.output).toBe('ok');
+    expect(mockSign).not.toHaveBeenCalled();
+    expect(logSpy.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'INBOUND_VM_UNSUPPORTED',
+        reason: 'INVALID_PAY_TO_FORMAT',
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('T-FIX4b: agente EVM (chain declarada) sigue firmando inbound — byte-idéntico', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'base64mock',
+      paymentRequest: {
+        authorization: {
+          from: '0xAAA',
+          to: EVM_PAYTO,
+          value: '1000000000000000000',
+          validAfter: '0',
+          validBefore: '9999999999',
+          nonce: '0x1234',
+        },
+        signature: '0xSIG',
+        network: 'eip155:43113',
+      },
+    });
+    mockSettle.mockResolvedValue({ success: true, txHash: '0xDEADBEEF' });
+    const agent = makeAgent({
+      priceUsdc: 1.0,
+      metadata: { payTo: EVM_PAYTO },
+      payment: {
+        method: 'x402',
+        asset: 'USDC',
+        chain: 'avalanche-fuji',
+        contract: EVM_PAYTO,
+      },
+    });
+    mockFetchOk();
+
+    const result = await composeService.invokeAgent(agent, { q: 'hello' });
+
+    expect(mockSign).toHaveBeenCalledTimes(1);
+    expect(result.txHash).toBe('0xDEADBEEF');
+    expect(logSpy.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'INBOUND_VM_UNSUPPORTED' }),
+      expect.any(String),
+    );
+  });
+
   it('T-4: throws when settle fails', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     mockSign.mockResolvedValue({
@@ -297,7 +483,7 @@ describe('composeService.invokeAgent', () => {
       paymentRequest: {
         authorization: {
           from: '0xAAA',
-          to: '0xBBB',
+          to: EVM_PAYTO,
           value: '1',
           validAfter: '0',
           validBefore: '9999999999',
@@ -312,7 +498,10 @@ describe('composeService.invokeAgent', () => {
       txHash: '',
       error: 'insufficient funds',
     });
-    const agent = makeAgent({ priceUsdc: 1.0, metadata: { payTo: '0xBBB' } });
+    const agent = makeAgent({
+      priceUsdc: 1.0,
+      metadata: { payTo: EVM_PAYTO },
+    });
     mockFetchOk();
     await expect(
       composeService.invokeAgent(agent, { q: 'hello' }),
@@ -329,7 +518,7 @@ describe('composeService.invokeAgent', () => {
       paymentRequest: {
         authorization: {
           from: '0xAAA',
-          to: '0xBBB',
+          to: EVM_PAYTO,
           value: '1000000000000000000',
           validAfter: '0',
           validBefore: '9999999999',
@@ -345,7 +534,10 @@ describe('composeService.invokeAgent', () => {
       ok: false,
       reason: 'AMOUNT_MISMATCH',
     });
-    const agent = makeAgent({ priceUsdc: 1.0, metadata: { payTo: '0xBBB' } });
+    const agent = makeAgent({
+      priceUsdc: 1.0,
+      metadata: { payTo: EVM_PAYTO },
+    });
     mockFetchOk();
     await expect(
       composeService.invokeAgent(agent, { q: 'hello' }),
@@ -359,7 +551,7 @@ describe('composeService.invokeAgent', () => {
       paymentRequest: {
         authorization: {
           from: '0xAAA',
-          to: '0xBBB',
+          to: EVM_PAYTO,
           value: '1',
           validAfter: '0',
           validBefore: '9999999999',
@@ -369,7 +561,10 @@ describe('composeService.invokeAgent', () => {
         network: 'eip155:2368',
       },
     });
-    const agent = makeAgent({ priceUsdc: 1.0, metadata: { payTo: '0xBBB' } });
+    const agent = makeAgent({
+      priceUsdc: 1.0,
+      metadata: { payTo: EVM_PAYTO },
+    });
     mockFetchError(500);
     await expect(
       composeService.invokeAgent(agent, { q: 'hello' }),
@@ -451,7 +646,7 @@ describe('composeService.invokeAgent', () => {
       paymentRequest: {
         authorization: {
           from: '0xAAA',
-          to: '0xBBB',
+          to: EVM_PAYTO,
           value: '1',
           validAfter: '0',
           validBefore: '9999999999',
@@ -462,7 +657,10 @@ describe('composeService.invokeAgent', () => {
       },
     });
     mockSettle.mockResolvedValue({ success: true, txHash: '0xTXHASH' });
-    const agent = makeAgent({ priceUsdc: 1.0, metadata: { payTo: '0xBBB' } });
+    const agent = makeAgent({
+      priceUsdc: 1.0,
+      metadata: { payTo: EVM_PAYTO },
+    });
     mockFetchOk();
     const originalPK = process.env.OPERATOR_PRIVATE_KEY;
     process.env.OPERATOR_PRIVATE_KEY = '0xDEAD_PRIVATE_KEY_NEVER_LOG';
@@ -1283,7 +1481,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
   // ── WKH-234 fix-pack AR-BLQ-1: threading compose → ledger (AC-8) ──────
   // Test de INTEGRACIÓN (no un unit del debit aislado): corre el pipeline real
   // de compose; cuando el settle DOWNSTREAM de un leg fue Solana
-  // (signAndSettleDownstream retorna `settleCaip2`), compose DEBE registrar el
+  // (signAndSettleDownstream retorna `nonEvmSettle`), compose DEBE registrar el
   // CAIP-2 + firma base58 en el ledger vía `budgetService.recordSolanaSettleReceipt`,
   // reusando el `owner_ref` del caller (CD-1/AC-9). Un leg EVM NO lo dispara.
   const SOL_CAIP2_INTEG = 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1';
@@ -1301,8 +1499,18 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     mockDownstream.mockResolvedValueOnce(null);
     mockDownstream.mockResolvedValueOnce({
       txHash: SOL_SIG_INTEG,
-      settledAmount: '500000',
-      settleCaip2: SOL_CAIP2_INTEG,
+      // Fix-pack AR-profundo FIX 3: el fixture ahora declara el monto REALMENTE
+      // settleado (0.05 USDC 6-dec = 50000 atómico) — el que el ledger debe
+      // registrar. La aserción de `amountUsd` NO cambia (0.05): antes coincidía
+      // por casualidad con `stepDebitedUsd` porque este test pone el leg Solana
+      // en el step 1 (el único índice donde el bug no aparecía); ahora viene del
+      // recibo. El caso del step 0 lo cubre T-FIX3-STEP0.
+      //
+      // Fix-pack CR-MNR-1: el CAIP-2 y el monto viajan en UN campo anidado
+      // (`nonEvmSettle`), no en dos opcionales sueltos — el fixture ya no puede
+      // representar "CAIP-2 sin monto", que era el estado que reintroducía el bug.
+      settledAmount: '50000',
+      nonEvmSettle: { caip2: SOL_CAIP2_INTEG, amountUsd: 0.05 },
     });
 
     const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
@@ -1325,10 +1533,56 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       keyId: 'k1',
       ownerRef: 'owner-test', // reused caller owner_ref (CD-1/AC-9)
       chainId: 2368,
-      amountUsd: 0.05, // = stepDebitedUsd (priceUsdc + 0 gas overhead on testnet)
+      amountUsd: 0.05, // = nonEvmSettle.amountUsd (monto REAL settleado on-chain)
       settleCaip2: SOL_CAIP2_INTEG,
       settleSignature: SOL_SIG_INTEG,
     });
+  });
+
+  // ── Fix-pack AR-profundo FIX 3: el step 0 (caso MÁS común) ────────────────
+  // El único test de AC-8 ponía el leg Solana en el step 1 — el único índice
+  // donde el bug no aparecía. Con el leg en el step 0, `stepDebitedUsd` es 0 por
+  // construcción (el debit per-step está gateado por `i > 0`; el step 0 lo debita
+  // el middleware), así que el ledger emitía `amount_usd = 0` junto a una
+  // `settle_signature` base58 REAL: la reconciliación cruzaba $0 contra una
+  // transferencia real.
+  it('T-FIX3-STEP0: leg Solana en el step 0 → el ledger registra el monto REAL settleado, NO 0', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const only = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    mockAgentsBySlug({ kyc: only });
+    mockFetchOk({ result: 'r1' });
+    // Compose de UN step: el leg Solana ES el step 0.
+    mockDownstream.mockReset();
+    mockDownstream.mockResolvedValueOnce({
+      txHash: SOL_SIG_INTEG,
+      settledAmount: '1000', // 0.001 USDC (6-dec)
+      nonEvmSettle: { caip2: SOL_CAIP2_INTEG, amountUsd: 0.001 },
+    });
+
+    const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'kyc', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    // El step 0 NO pasa por budgetService.debit (lo debita el middleware) →
+    // `stepDebitedUsd` sigue siendo 0. El recibo NO debe heredar ese 0.
+    expect(mockDebit).not.toHaveBeenCalled();
+    expect(mockRecordSolana).toHaveBeenCalledTimes(1);
+    expect(mockRecordSolana).toHaveBeenCalledWith({
+      keyId: 'k1',
+      ownerRef: 'owner-test',
+      chainId: 2368,
+      amountUsd: 0.001, // ← antes del fix: 0
+      settleCaip2: SOL_CAIP2_INTEG,
+      settleSignature: SOL_SIG_INTEG,
+    });
+    const recorded = mockRecordSolana.mock.calls[0]?.[0];
+    expect(recorded?.amountUsd).not.toBe(0);
   });
 
   it('T-234-AC8-INTEG-b: EVM downstream leg → NO ledger CAIP-2 record (column stays NULL, byte-identical)', async () => {
@@ -1338,7 +1592,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     mockAgentsBySlug({ kyc: a1, corridor: a2 });
     mockFetchOk({ result: 'r1' });
     mockFetchOk({ result: 'r2' });
-    // Both legs settled on EVM (no settleCaip2 on the downstream result).
+    // Both legs settled on EVM (no `nonEvmSettle` on the downstream result).
     mockDownstream.mockReset();
     mockDownstream.mockResolvedValue({
       txHash: '0xdeadbeef',
@@ -2348,7 +2602,7 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     const mockPR: X402PaymentRequest = {
       authorization: {
         from: '0xAAA',
-        to: '0xBBB',
+        to: EVM_PAYTO,
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
@@ -2364,11 +2618,11 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     mockSettle.mockResolvedValue({ success: true, txHash: '0xDEADBEEF' });
     const agent = makeAgent({
       priceUsdc: 1.0,
-      metadata: { payTo: '0xBBB' },
+      metadata: { payTo: EVM_PAYTO },
       payment: {
         method: 'x402',
         chain: 'base-mainnet',
-        contract: '0xBBB',
+        contract: EVM_PAYTO,
       },
     });
     mockFetchOk();
@@ -2390,7 +2644,7 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     const mockPR: X402PaymentRequest = {
       authorization: {
         from: '0xAAA',
-        to: '0xBBB',
+        to: EVM_PAYTO,
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
@@ -2406,11 +2660,11 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     mockSettle.mockResolvedValue({ success: true, txHash: '0xCAFE' });
     const agent = makeAgent({
       priceUsdc: 0.5,
-      metadata: { payTo: '0xBBB' },
+      metadata: { payTo: EVM_PAYTO },
       payment: {
         method: 'x402',
         chain: 'base-sepolia',
-        contract: '0xBBB',
+        contract: EVM_PAYTO,
       },
     });
     mockFetchOk();
@@ -2432,7 +2686,7 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     const mockPR: X402PaymentRequest = {
       authorization: {
         from: '0xAAA',
-        to: '0xBBB',
+        to: EVM_PAYTO,
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
@@ -2448,11 +2702,11 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     mockSettle.mockResolvedValue({ success: true, txHash: '0xKITE' });
     const agent = makeAgent({
       priceUsdc: 0.1,
-      metadata: { payTo: '0xBBB' },
+      metadata: { payTo: EVM_PAYTO },
       payment: {
         method: 'x402',
         chain: 'kite-testnet',
-        contract: '0xBBB',
+        contract: EVM_PAYTO,
       },
     });
     mockFetchOk();
@@ -2471,7 +2725,7 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     const mockPR: X402PaymentRequest = {
       authorization: {
         from: '0xAAA',
-        to: '0xBBB',
+        to: EVM_PAYTO,
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
@@ -2487,11 +2741,11 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     mockSettle.mockResolvedValue({ success: true, txHash: '0xFUJI' });
     const agent = makeAgent({
       priceUsdc: 0.1,
-      metadata: { payTo: '0xBBB' },
+      metadata: { payTo: EVM_PAYTO },
       payment: {
         method: 'x402',
         chain: 'avalanche-fuji',
-        contract: '0xBBB',
+        contract: EVM_PAYTO,
       },
     });
     mockFetchOk();
@@ -2510,7 +2764,7 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     const mockPR: X402PaymentRequest = {
       authorization: {
         from: '0xAAA',
-        to: '0xBBB',
+        to: EVM_PAYTO,
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
@@ -2527,13 +2781,13 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     const agent = makeAgent({
       priceUsdc: 1.0,
       metadata: {
-        payTo: '0xBBB',
+        payTo: EVM_PAYTO,
         facilitatorUrl: 'https://custom.facilitator.example.com',
       },
       payment: {
         method: 'x402',
         chain: 'base-mainnet',
-        contract: '0xBBB',
+        contract: EVM_PAYTO,
       },
     });
     mockFetchOk();
@@ -3412,7 +3666,7 @@ describe('WKH-195 compose inbound decimals-aware', () => {
       paymentRequest: {
         authorization: {
           from: '0xAAA',
-          to: '0xBBB',
+          to: EVM_PAYTO,
           value: '0',
           validAfter: '0',
           validBefore: '9999999999',
@@ -3447,7 +3701,7 @@ describe('WKH-195 compose inbound decimals-aware', () => {
       primeInbound();
       const agent = makeAgent({
         priceUsdc: price,
-        metadata: { payTo: '0xBBB' },
+        metadata: { payTo: EVM_PAYTO },
       });
       await composeService.invokeAgent(agent, { q: 'hello' });
       expect(mockSign.mock.calls[0]?.[0]?.value).toBe(legacyWei(price));
@@ -3461,7 +3715,10 @@ describe('WKH-195 compose inbound decimals-aware', () => {
     ];
     const price = 1.5;
     primeInbound();
-    const agent = makeAgent({ priceUsdc: price, metadata: { payTo: '0xBBB' } });
+    const agent = makeAgent({
+      priceUsdc: price,
+      metadata: { payTo: EVM_PAYTO },
+    });
     await composeService.invokeAgent(agent, { q: 'hello' });
     const signed = mockSign.mock.calls[0]?.[0]?.value as string;
     expect(signed).toBe(atomic6(price));
@@ -3483,7 +3740,7 @@ describe('WKH-195 compose inbound decimals-aware', () => {
       const price = 0.05;
       const agent = makeAgent({
         priceUsdc: price,
-        metadata: { payTo: '0xBBB' },
+        metadata: { payTo: EVM_PAYTO },
       });
       const result = await composeService.invokeAgent(agent, { q: 'hello' });
       expect(mockSign.mock.calls[0]?.[0]?.value).toBe(legacyWei(price));
@@ -3497,7 +3754,10 @@ describe('WKH-195 compose inbound decimals-aware', () => {
       { symbol: 'PYUSD', address: '0x0', decimals: 18 },
     ];
     primeInbound();
-    const agent = makeAgent({ priceUsdc: 1.0, metadata: { payTo: '0xBBB' } });
+    const agent = makeAgent({
+      priceUsdc: 1.0,
+      metadata: { payTo: EVM_PAYTO },
+    });
     const result = await composeService.invokeAgent(agent, { q: 'hello' });
     expect(mockSettle).toHaveBeenCalledTimes(1);
     expect(result.txHash).toBe('0xTX');

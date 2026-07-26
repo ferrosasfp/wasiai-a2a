@@ -9,9 +9,9 @@ explorer that the service knows about today.
 > - **Active by default** — works out of the box, no env flags required.
 > - **Staged — requires operator funding** — code path implemented and
 >   tested, but the operator wallet must be funded with the listed asset on
->   that chain and the relevant env flag flipped (`KITE_NETWORK=mainnet` or
->   `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`). Until both are true
->   these chains are not active.
+>   that chain and the relevant env flag flipped (the `kite-mainnet` slug in
+>   `WASIAI_A2A_CHAINS`, or `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`
+>   for the downstream leg). Until both are true these chains are not active.
 
 ---
 
@@ -30,9 +30,23 @@ EIP-712 signatures over EIP-3009 `TransferWithAuthorization`.
 
 - **Default** — `KITE_NETWORK` unset (or any value other than `mainnet`)
   selects testnet. PYUSD on chain `2368` is the asset accepted.
-- **Mainnet opt-in** — set `KITE_NETWORK=mainnet` on the gateway runtime
-  AND ensure the operator wallet has USDC.e on KiteAI mainnet. PYUSD does
-  not exist on mainnet; do not attempt to pay with it there.
+- **Mainnet opt-in** — set BOTH `WASIAI_A2A_CHAINS=kite-mainnet` (with **no**
+  Kite *testnet* slug in the CSV) AND `KITE_NETWORK=mainnet`, plus
+  `KITE_MAINNET_RPC_URL`, and ensure the operator wallet has USDC.e on KiteAI
+  mainnet. PYUSD does not exist on mainnet; do not attempt to pay with it there.
+  Canonical source: [`doc/architecture/MULTI-CHAIN.md`](../doc/architecture/MULTI-CHAIN.md) §8.
+- ⚠️ **The two envs are coupled** (fix-pack 2026-07-26, probed with the real
+  factories). `getKiteChain()` reads `KITE_NETWORK` at **call time**, while the
+  `{ network: 'mainnet' }` the registry passes to the factory only pins
+  `chainConfig`:
+  - `KITE_NETWORK=mainnet` **alongside a Kite testnet slug** silently repoints
+    the `kite-ozone-testnet` bundle at chain `2366` (real USDC.e) — the gateway
+    now **refuses to start** on that combination (`assertNoSlugDestinationDrift`).
+  - the `kite-mainnet` slug **without** `KITE_NETWORK=mainnet` starts, but the
+    payment adapter signs on `2368` with **testnet PYUSD**; the registry logs
+    `code=ADAPTER_CHAIN_ID_DRIFT`.
+  - therefore both Kite rails **cannot run in the same process** until
+    `TD-NEW-KITE-PARAMS` lands.
 
 ### EIP-712 domain (inbound)
 
@@ -131,13 +145,47 @@ Outbound = the chain on which **WasiAI** pays the downstream agent
 
 ### Activation flags
 
-- **Default** — `WASIAI_DOWNSTREAM_NETWORK` unset (or any value other
-  than `avalanche-mainnet`) selects Fuji. The operator wallet pays in
-  Fuji USDC.
-- **Mainnet opt-in** — set `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`
-  AND fund the operator wallet with USDC on Avalanche C-Chain. The
-  pre-flight balance check returns `INSUFFICIENT_BALANCE` if the wallet
-  is empty; the request fails before any signing happens.
+- **Default (fail-closed)** — `WASIAI_DOWNSTREAM_MAINNET_ALLOW` unset or
+  empty ⇒ NO mainnet chain can settle the downstream leg: the leg is
+  skipped with `MAINNET_NOT_ALLOWED` before any signing. The leg chain
+  comes from `agent.payment.chain` (WKH-112), never from an env var — the
+  old `WASIAI_DOWNSTREAM_NETWORK` is NOT read by any code path.
+- **Mainnet opt-in** — set
+  `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet` (CSV; numeric
+  aliases like `43114` also accepted), have `avalanche-mainnet` in
+  `WASIAI_A2A_CHAINS`, AND fund the operator wallet with USDC on
+  Avalanche C-Chain.
+- **What the pre-flight balance check actually does** (corrected
+  2026-07-26, fix-pack AR-profundo CR-MNR-10 — this bullet previously
+  claimed "the request fails before any signing happens", which is
+  false on both counts):
+  - If the operator balance is below the leg amount, only **that leg**
+    is skipped: `signAndSettleDownstream` logs `INSUFFICIENT_BALANCE`
+    and returns `null`. **The request does NOT fail** — the agent is
+    still invoked and its output still returned; it simply does not get
+    paid on that leg (`src/lib/downstream-payment.ts`, step 9).
+  - The check only runs when BOTH the chain's RPC env var and
+    `OPERATOR_PRIVATE_KEY` (starting with `0x`) are present. Otherwise it
+    is skipped and **the leg signs and settles without any funds
+    verification**. On mainnet that is the dangerous case, so
+    double-check the env NAME: the gateway's Avalanche rail reads
+    `AVALANCHE_RPC_URL` (not `AVALANCHE_MAINNET_RPC_URL`, which is the
+    facilitator's) — see `RPC_ENV_BY_CHAIN` in
+    `src/lib/downstream-payment.ts`.
+  - ⚠️ **Only the missing-RPC case is logged.** The
+    `BALANCE_PRECHECK_SKIPPED` code is emitted from the `if (!rpc)` guard
+    (and, on Solana, from the `getOperatorSplBalance()` catch). With the
+    RPC present but `OPERATOR_PRIVATE_KEY` absent/malformed, the
+    `if (pk?.startsWith('0x'))` branch has no `else` and the pre-check is
+    skipped **with no log at all** — do not use the absence of
+    `BALANCE_PRECHECK_SKIPPED` as evidence that the pre-check ran.
+    (Corrected 2026-07-26, re-CR MENOR-4: this bullet promised a signal
+    that does not exist.) Practical impact is nil — without the PK the
+    subsequent `adapter.sign` fails anyway (`SIGNING_FAILED`) — which is
+    exactly why the gap was left as-is instead of touching the
+    already-reviewed money-path block.
+  - It is an observability/short-circuit optimisation, not a money gate.
+    The authoritative failure is the on-chain settle itself.
 
 ### Custom token contracts
 

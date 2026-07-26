@@ -121,7 +121,10 @@ Notas:
 - La activación de Kite mainnet usa `WASIAI_A2A_CHAINS=...,kite-mainnet` que dispara una
   mutación temporal de `process.env.KITE_NETWORK = 'mainnet'` confined to `initAdapters()`
   (DT-I). El valor original se restaura via `try/finally` al terminar el `await import()`.
-  Tracked como **TD-NEW-KITE-PARAMS** (refactor post-MVP de `kite-ozone/chain.ts` para no
+  ⚠️ Por eso el slug NO alcanza: esa mutación sólo alcanza al `chainConfig`; el ADAPTER lee
+  `KITE_NETWORK` **después** del `finally` (call-time), así que la activación real exige
+  además `KITE_NETWORK=mainnet` de forma permanente — ver §8. Tracked como
+  **TD-NEW-KITE-PARAMS** (refactor post-MVP de `kite-ozone/chain.ts` + `payment.ts` para no
   leer env).
 
 ## 5. Backward-compat (CD-2)
@@ -230,25 +233,54 @@ Tiempo estimado (mirror de WKH-MULTICHAIN W1): ~4-6h para adapter completo + tes
 - USDC mainnet (chainId 43114, contrato `0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E`).
 - `register_a2a_key_deposit(<KEY_ID>, 43114, <amount>)`.
 - Operator wallet con USDC en C-Chain mainnet (snowtrace.io).
-- `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` o que el agente declare chain
-  `avalanche-mainnet` y el caller propague el header `x-payment-chain: avalanche-mainnet`.
+- El agente declara chain `avalanche-mainnet` (o `43114`) **y** el gateway tiene el opt-in
+  explícito `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`. Sin esa env (ausente o vacía)
+  el leg downstream se saltea con skip-code `MAINNET_NOT_ALLOWED` (fail-CLOSED).
+  ⚠️ `WASIAI_DOWNSTREAM_NETWORK` **no la lee ningún archivo de `src/`** (control muerto desde
+  WKH-112) — corregido en el fix-pack AR-profundo FIX 1c (2026-07-26).
 
 **Para Kite mainnet (post-merge):**
 
 - Operator wallet con USDC.e en Kite mainnet (`0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e`).
 - `register_a2a_key_deposit(<KEY_ID>, 2366, <amount>)`.
-- `KITE_NETWORK=mainnet` (legacy var) + `KITE_MAINNET_RPC_URL=https://rpc.gokite.ai/`.
+- Config de envs: **ver §8 → "Kite mainnet (2366)"**. Son TRES envs acopladas
+  (`WASIAI_A2A_CHAINS` con `kite-mainnet` y sin ningún slug Kite testnet +
+  `KITE_NETWORK=mainnet` + `KITE_MAINNET_RPC_URL`) y setear sólo una de ellas
+  deja el rail roto o el proceso sin arrancar. No las repetimos acá para que no
+  vuelvan a divergir: §8 es la fuente única.
+  (Corregido en el fix-pack AR-profundo it2 MNR-2: esta viñeta decía sólo
+  `KITE_NETWORK=mainnet` + RPC, contradiciendo a §8 nueve líneas más abajo.)
 
 ## 8. Activación mainnet (flip flags en Railway)
 
 ### Kite mainnet (2366)
 
-1. **Railway env update** (no redeploy si el bundle ya está wired):
-   - `WASIAI_A2A_CHAINS=kite-ozone-testnet,kite-mainnet` (mantener testnet como default).
+> ⚠️ Reescrito el 2026-07-26 (fix-pack AR-profundo it2, MNR-3). La versión it2 de este paso
+> decía "⛔ NO setear `KITE_NETWORK=mainnet`; el slug del CSV ya selecciona la red por bundle".
+> Eso es **falso a medias** y produce un rail roto: el probe con factories reales mostró que con
+> `WASIAI_A2A_CHAINS=kite-mainnet` y `KITE_NETWORK` ausente el proceso arranca con
+> `chainConfig.chainId=2366` pero `getPaymentAdapter('kite-mainnet').chainId === 2368` y
+> `getToken()` devuelve el PYUSD de **testnet** — porque el `finally` de
+> `createKiteOzoneAdapters` restaura la env y el adapter la lee en **call-time**.
+
+1. **Railway env update** — las **tres** envs juntas (no redeploy si el bundle ya está wired):
+   - `WASIAI_A2A_CHAINS=kite-mainnet` (+ los slugs de OTROS namespaces que necesites, p.ej.
+     `kite-mainnet,avalanche-fuji`). **Ningún slug Kite testnet en el CSV.**
+   - `KITE_NETWORK=mainnet` — **obligatoria**. `getKiteChain()` / `getKiteNetworkTag()` la leen
+     en call-time (`TD-NEW-KITE-PARAMS`), así que el `{ network: 'mainnet' }` que el registry le
+     pasa al factory sólo fija el `chainConfig`; el adapter que FIRMA y el token EIP-712 los
+     decide esta env. Sin ella el rail arranca firmando en 2368/PYUSD y el registry lo reporta
+     con `code=ADAPTER_CHAIN_ID_DRIFT` (it2 MNR-3).
    - `KITE_MAINNET_RPC_URL=https://rpc.gokite.ai/`.
-   - `KITE_NETWORK=mainnet` (el flag legacy sigue siendo respetado por DT-I durante el
-     init de `createKiteOzoneAdapters({ network: 'mainnet' })`).
-2. **Verificar log de startup**: `[Registry] Adapters initialized: kite-ozone-testnet, kite-mainnet`.
+   - ⛔ **`KITE_NETWORK=mainnet` junto a un slug Kite testnet ⇒ `initAdapters` LANZA**
+     (it2 BLQ-ALTO-1). El bundle de `kite-ozone-testnet` se construye SIN `opts`, así que con esa
+     env apunta a chainId 2366 con USDC.e de MAINNET: un slug que dice "testnet" moviendo dinero
+     real, que además engañaba al gate fail-CLOSED de WKH-144 y al opt-in del leg downstream.
+   - ⇒ **los dos rails Kite NO pueden convivir en el mismo proceso** (no existe combinación
+     coherente): con `KITE_NETWORK=mainnet` el arranque rompe por el slug testnet; sin ella el
+     slug mainnet firma en testnet. El fix de fondo es `TD-NEW-KITE-PARAMS` (§10).
+2. **Verificar log de startup**: `[Registry] Adapters initialized: kite-mainnet, ...` **y** que NO
+   aparezca ninguna línea `ADAPTER_CHAIN_ID_DRIFT`.
 3. **Smoke test obligatorio** post-flip:
 
    ```bash
@@ -261,13 +293,43 @@ Tiempo estimado (mirror de WKH-MULTICHAIN W1): ~4-6h para adapter completo + tes
    # → response con tx hash en kitescan.ai (mainnet explorer)
    ```
 
+4. **Rollback de Kite mainnet** (agregado en el fix-pack AR-profundo CR-MAYOR-2 —
+   §8 documentaba la activación pero **no** la vuelta atrás, y los dos runbooks de
+   `doc/` la tenían MAL):
+
+   Las dos envs se mueven **JUNTAS**, con la misma lógica que la activación:
+
+   ```bash
+   WASIAI_A2A_CHAINS=kite-ozone-testnet   # volver al CSV testnet exacto previo
+   KITE_NETWORK=                          # vaciar/unset EN EL MISMO cambio
+   ```
+
+   - ⛔ **revertir sólo `KITE_NETWORK`** (dejando `WASIAI_A2A_CHAINS=kite-mainnet`)
+     deja el rail ROTO: `chainConfig.chainId` 2366 con el adapter firmando en 2368 /
+     PYUSD de testnet ⇒ `ADAPTER_CHAIN_ID_DRIFT`. Es el mismo bundle inconsistente
+     que produce la activación a medias, y es el bug que tenían los dos rollbacks de
+     `doc/operations/mainnet-activation-runbook.md` y
+     `doc/migration/MAINNET-ACTIVATION-RUNBOOK.md`.
+   - ⛔ **revertir sólo el CSV** (dejando `KITE_NETWORK=mainnet` con un slug Kite
+     testnet) es peor: `initAdapters` **LANZA** y el gateway no arranca.
+   - ✅ **Verificación del rollback** (no está hecho hasta que pasen las dos):
+     `Adapters initialized` lista sólo slugs testnet **y** no aparece ninguna línea
+     `ADAPTER_CHAIN_ID_DRIFT`.
+   - `KITE_NETWORK=testnet` y `KITE_NETWORK` ausente son equivalentes: cualquier
+     valor distinto de `mainnet` resuelve testnet (`kite-ozone/chain.ts:46`).
+
 ### Avalanche mainnet (43114)
 
 1. **Railway env update**:
    - `WASIAI_A2A_CHAINS=...,avalanche-mainnet` (agregar al CSV existente).
    - `AVALANCHE_RPC_URL=https://api.avax.network/ext/bc/C/rpc`.
-   - `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` (si el downstream también debe ir a mainnet —
-     ver §9 abajo).
+   - `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet` (si el downstream también debe ir a
+     mainnet — ver §9 abajo). Ausente/vacía = fail-CLOSED: ninguna mainnet settlea en el leg
+     downstream. La vieja `WASIAI_DOWNSTREAM_NETWORK` NO la lee nadie (control muerto).
+   - `WASIAI_DOWNSTREAM_X402=true` + operator wallet con USDC en C-Chain mainnet — sin esas dos
+     el leg no settlea aunque el opt-in esté seteado. Automatizable con
+     `./scripts/activate-mainnet-downstream.sh` (setea el opt-in + el RPC en a2a y habilita la
+     chain en el facilitator; el resto lo declara en su output).
 2. **Verificar log de startup**: `[Registry] Adapters initialized: ..., avalanche-mainnet`.
 3. **Smoke test obligatorio** post-flip (con USDC mainnet en operator wallet, verificable en
    `snowtrace.io`):
@@ -280,8 +342,10 @@ Tiempo estimado (mirror de WKH-MULTICHAIN W1): ~4-6h para adapter completo + tes
    # → response con tx hash en snowtrace.io (mainnet)
    ```
 
-Mainnet flips son **un solo paso de env var** + smoke. No requieren redeploy ni cambios de
-código (el bundle ya está wired desde W5).
+Los flips mainnet no requieren redeploy ni cambios de código (el bundle ya está wired desde W5),
+pero **no son "un solo paso de env var"**: Avalanche downstream necesita opt-in + RPC + flag +
+fondos, y Kite mainnet necesita las tres envs acopladas de arriba (corregido en it2 MNR-1/MNR-3 —
+la frase anterior de este párrafo invitaba a setear una sola variable y quedarse a mitad de camino).
 
 ## 9. Coexistencia con downstream payment (DT-8)
 
@@ -290,7 +354,7 @@ código (el bundle ya está wired desde W5).
 | Path | Variable de control | Qué controla |
 |------|---------------------|--------------|
 | **Inbound (debit del A2A key budget)** | `WASIAI_A2A_CHAINS` (y header `x-payment-chain` por request) | En qué chainId del JSONB `budget` se debita el caller cuando consume `/compose` o `/orchestrate` con `x-a2a-key`. |
-| **Downstream (sign + settle USDC outbound)** | `WASIAI_DOWNSTREAM_NETWORK` (WKH-55) | En qué chain el orquestador firma EIP-3009 TransferWithAuthorization contra agentes externos (vía `src/lib/downstream-payment.ts`). |
+| **Downstream (sign + settle USDC outbound)** | La chain la declara el AGENTE (`agent.payment.chain` → `normalizeChainSlug`, desde WKH-112). El único control del operador es el gate fail-CLOSED `WASIAI_DOWNSTREAM_MAINNET_ALLOW` (CSV de slugs/chainIds; ausente o vacía ⇒ NINGUNA mainnet settlea → skip-code `MAINNET_NOT_ALLOWED`). | En qué chain el orquestador firma EIP-3009 TransferWithAuthorization contra agentes externos (vía `src/lib/downstream-payment.ts`). ⚠️ `WASIAI_DOWNSTREAM_NETWORK` (WKH-55) era la "variable de control" documentada pero **NO la lee ningún archivo de `src/`**: control muerto, retirado en el fix-pack AR-profundo FIX 1c. |
 
 Ambos pueden estar en chains distintas: el caller paga al gateway en Kite testnet PYUSD (inbound)
 mientras el gateway despacha USDC mainnet a N agentes en Avalanche C-Chain (downstream). Es el
@@ -303,7 +367,10 @@ modo **mainnet hybrid** que vive en producción desde 2026-04-29.
 
 | ID | Descripción | Trigger |
 |----|-------------|---------|
-| **TD-NEW-KITE-PARAMS** | Refactor de `src/adapters/kite-ozone/chain.ts` + `kite-ozone/index.ts` para aceptar `network` como argumento explícito en lugar de leer `process.env.KITE_NETWORK`. Hoy DT-I muta temporalmente la env var dentro de `initAdapters()` y la restaura en `try/finally`. Si en el futuro queremos correr `kite-testnet` + `kite-mainnet` simultáneamente en el mismo proceso, este approach no escala (race entre dos `await import()` paralelos sobre el mismo submódulo). | Cuando aparezca una HU que requiera ambos chains Kite activos al mismo tiempo. |
+| **TD-NEW-KITE-PARAMS** | Refactor de `src/adapters/kite-ozone/chain.ts` + `kite-ozone/payment.ts` + `kite-ozone/index.ts` para aceptar `network` como argumento explícito en lugar de leer `process.env.KITE_NETWORK`. Hoy DT-I muta temporalmente la env var dentro del factory y la restaura en `try/finally`, pero el ADAPTER la lee en **call-time** (getter `chainId`, `getToken()`, dominio EIP-712), o sea DESPUÉS del `finally`. Consecuencias medidas (probe real, it2 MNR-3): (a) `kite-mainnet` sin `KITE_NETWORK=mainnet` arranca con `chainConfig` 2366 y adapter 2368/PYUSD-testnet; (b) los dos slugs Kite **no tienen configuración coherente posible** en el mismo proceso. Mitigación actual: `checkAdapterChainIdDrift` (`registry.ts`) lanza en la dirección peligrosa y loguea `code=ADAPTER_CHAIN_ID_DRIFT` en la segura. Nota (CR-MNR-7): la activación de Kite mainnet NO mueve `attestation` ni `gasless` — los dos tienen `chainId = 2368` HARDCODEADO (`kite-ozone/attestation.ts:8`, `kite-ozone/gasless.ts:258`) y el gasless firma su dominio EIP-712 sobre `kiteTestnet.id` (`gasless.ts:70`) y reporta `network:'kite-testnet'` (`:275`). O sea que con el rail 2366 activo, attest/gasless siguen apuntando a testnet. | Cuando aparezca una HU que requiera ambos chains Kite activos al mismo tiempo (hoy es imposible). |
+| **TD-MAINNET-GATE-USA-CHAINCONFIG** | El gate de opt-in mainnet del leg downstream (`downstream-payment.ts`) clasifica el destino por `bundle.chainConfig.chainId`, pero quien firma es el ADAPTER. Mientras exista un adapter que resuelva su chain en call-time (ver TD arriba) los dos pueden divergir. Hoy la divergencia alcanzable es la SEGURA (gate=mainnet / firma=testnet) y la peligrosa la corta `checkAdapterChainIdDrift` al arrancar. | Se cierra solo cuando TD-NEW-KITE-PARAMS elimine la lectura de env en call-time. Revisar de nuevo si se agrega un adapter env-driven. |
+| **TD-SOLANA-CAIP2-DENYLIST** | `classifySolanaCaip2` (`chain-resolver.ts`) es una **denylist**: sólo la referencia de mainnet-beta (o un string que contenga `mainnet`) se clasifica `mainnet`; cualquier CAIP-2 desconocido cae en `testnet` (fail-OPEN). Evaluado y NO convertido a allowlist en it2 MNR-4: (a) no es alcanzable por un agente (sale de `SOLANA_CAIP2_CHAIN_ID`, env-only) y el rail está flag-gated OFF, (b) no existe ChainKey `solana-mainnet`, (c) una allowlist de genesis conocidos rompería cualquier cluster local (`solana-test-validator` genera un genesis propio) y obligaría a tocar 3 archivos de test que usan refs sintéticas (`solana:test`, `solana:testcluster`), incluido el del money-path. | Cuando exista un ChainKey `solana-mainnet` o el rail Solana salga de flag OFF: ahí la clasificación pasa a decidir sobre dinero real y debe volverse allowlist (y el cluster local, una excepción explícita por env). |
+| **TD-INBOUND-ZERO-PAYTO** | El sign x402 **INBOUND** (`compose.ts` → `invokeAgent`, guard `inboundVmUnsupported`) valida el `payTo` del agente sólo por FORMATO (`isValidWallet`), así que un agente registrado con `payTo = 0x0000…0000` hace que el gateway firme y settlee una autorización EIP-3009 hacia la zero-address (fondos del operador quemados). El leg **DOWNSTREAM** sí lo rechaza (`ZERO_PAY_TO`, `downstream-payment.ts` → `validatePayTo`). Asimetría detectada en el fix-pack AR-profundo CR-MNR-4 y **NO cerrada a propósito**: unificar los dos criterios cambia qué payTos firma un gate del money-path que AR+F4 aprobaron en ese mismo diff, y eso no entra en un fix de tipos/naming. | Antes de cualquier activación mainnet del rail INBOUND, o en cuanto se toque el guard de `invokeAgent` por otro motivo. El fix es una línea (usar `validatePayTo` en vez de `isValidWallet`) + los tests del nuevo skip. |
 | **TD-AVALANCHE-DEPOSIT-AUTOMATION** | Automatizar el deposit Avalanche (§7) reemplazando el SQL `register_a2a_key_deposit` manual por verificación on-chain (lectura del USDC `Transfer` log al wallet del operator + acreditación automática del budget). Mirror del flow Kite existente. | Post-MVP. Requerido si el volumen de smoke tests Avalanche se vuelve operacionalmente costoso. |
 
 Ver también [`CHAIN-ADAPTIVE.md`](CHAIN-ADAPTIVE.md) §7 (Open Questions) y el SDD §11

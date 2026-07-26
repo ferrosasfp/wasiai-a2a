@@ -24,6 +24,7 @@
 import type { PublicClient } from 'viem';
 import { createPublicClient, decodeEventLog, parseAbiItem } from 'viem';
 import { buildRpcTransport } from '../lib/rpc-transport.js';
+import { isMainnetChainKey } from './chain-resolver.js';
 import {
   resolveChainObject,
   resolveRpcFallbackEnv,
@@ -188,18 +189,16 @@ function classifyReceiptError(
 }
 
 /**
- * WKH-144: canonical mainnet detection for the settle re-verify gate. The
- * `ChainKey` string IS the source of truth (DT-1): the three (and only three)
- * mainnet slugs — `kite-mainnet` / `avalanche-mainnet` / `base-mainnet` — all
- * end in `-mainnet`; every testnet slug (`kite-ozone-testnet`, `avalanche-fuji`,
- * `base-sepolia`, `tempo-testnet`) does NOT. Single choke-point (CD-7).
- *
- * Exported (WKH-150) solely so the naming-invariant guard test can cross-check
- * it against the independent viem `Chain.testnet` boolean; the body is unchanged.
+ * WKH-144: canonical mainnet detection for the settle re-verify gate. Single
+ * choke-point (CD-7) — the BODY now lives in `chain-resolver.ts` (pure module,
+ * no viem / no registry) so the downstream mainnet opt-in gate
+ * (`downstream-payment.ts`, fix-pack AR-profundo FIX 1b) can reuse the SAME
+ * classifier without importing this viem-heavy module. Re-exported here
+ * unchanged so every existing call-site and the WKH-150 naming-invariant guard
+ * test (which cross-checks it against the independent viem `Chain.testnet`
+ * boolean) keep importing it from `settle-verifier`.
  */
-export function isMainnetChainKey(chainKey: ChainKey): boolean {
-  return chainKey.endsWith('-mainnet');
-}
+export { isMainnetChainKey };
 
 /**
  * WKH-144: single decision point for a "couldn't independently check on-chain"
@@ -208,6 +207,23 @@ export function isMainnetChainKey(chainKey: ChainKey): boolean {
  * MAINNET it flips to fail-CLOSED (`ok:false`) with a distinguishable reason so
  * an operator can tell an RPC outage apart from a definitive contradiction
  * (AC-5). Never throws (CD-4).
+ *
+ * ⚠️ DEPENDENCIA DE SEGURIDAD (fix-pack CR, residuo señalado): esta función
+ * clasifica por el STRING del slug (`isMainnetChainKey`), o sea justo lo que el
+ * ⚠️ de `chain-resolver.ts` (sobre `isMainnetChainKey`) desaconseja para
+ * decisiones de dinero. Es CORRECTO hoy sólo porque
+ * `registry.assertNoSlugDestinationDrift()` (vía `checkChainEnvironmentCoherence`,
+ * llamada desde `initAdapters`) LANZA al arrancar cuando el destino
+ * real de un bundle contradice el mainnet-ness de su slug (fix-pack it2
+ * BLQ-ALTO-1): con ese assert en pie, "slug testnet" implica "destino testnet".
+ *
+ * ⇒ Si alguien ABLANDA ese assert (lo baja a warning, lo scopea a un subconjunto
+ * de chains, o agrega un factory que resuelva su chain en call-time sin cubrirlo),
+ * este gate vuelve a fail-OPEN sobre settles de MAINNET REAL — la regresión exacta
+ * de WKH-144. En ese caso hay que migrar esta función a
+ * `classifyDestinationEnvironment(destination)` (que mira el chainId/CAIP-2 real)
+ * y pasarle el destino, no el slug. Ver `TD-MAINNET-GATE-USA-CHAINCONFIG`
+ * (`MULTI-CHAIN.md` §10).
  */
 export function rpcUnavailableResult(chainKey: ChainKey): SettleVerification {
   if (isMainnetChainKey(chainKey)) {

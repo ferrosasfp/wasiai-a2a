@@ -8,9 +8,21 @@
  * inline (CD-9). NEVER throws (CD-7): every async step is wrapped and returns `null`
  * with a skip-code.
  */
-import { createPublicClient, erc20Abi, http, parseUnits } from 'viem';
+import {
+  createPublicClient,
+  erc20Abi,
+  formatUnits,
+  http,
+  parseUnits,
+} from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { normalizeChainSlug } from '../adapters/chain-resolver.js';
+import {
+  classifyDestinationEnvironment,
+  findChainEnvironmentDrift,
+  getCanonicalChainId,
+  type LegDestination,
+  normalizeChainSlug,
+} from '../adapters/chain-resolver.js';
 import {
   getAdaptersBundle,
   getInitializedChainKeys,
@@ -19,7 +31,7 @@ import {
 } from '../adapters/registry.js';
 import type { ChainKey, SolanaPaymentAdapter } from '../adapters/types.js';
 import type { Agent, DownstreamLogger } from '../types/index.js';
-import { isValidSolanaAddress } from './wallet-format.js';
+import { isValidSolanaAddress, isValidWallet } from './wallet-format.js';
 
 // Re-export for backward-compat: callers historically import
 // `DownstreamLogger` from this module (e.g. compose.ts). The canonical
@@ -73,23 +85,78 @@ const RPC_ENV_BY_CHAIN: Record<ChainKey, string> = {
 };
 
 // ─── Public types ───────────────────────────────────────────────────
+
+/**
+ * Recibo del ledger para un leg settleado en una familia NO-EVM (hoy sólo
+ * Solana). Los dos campos van JUNTOS o no van — de ahí que sean un objeto y no
+ * dos opcionales sueltos.
+ *
+ * Fix-pack CR-MNR-1 (defecto de TIPOS, no de lógica): antes esto eran
+ * `settleCaip2?: string` y `settledAmountUsd?: number`, dos opcionales
+ * INDEPENDIENTES. La rama Solana los poblaba siempre juntos y la EVM nunca, pero
+ * el tipo permitía el tercer estado (uno sin el otro), y `compose` decidía si
+ * escribir el recibo por el PRIMERO (`settleCaip2`) y tomaba el monto del
+ * SEGUNDO con un `?? stepDebitedUsd`. Un rail nuevo que poblara sólo el CAIP-2
+ * habría reescrito `amount_usd = 0` al lado de una firma on-chain REAL, en
+ * silencio: exactamente el bug que FIX 3 arregló, representable de nuevo por
+ * tipos. Con un único campo anidado el estado inválido no compila y el `??`
+ * desaparece del call-site (`compose.ts` → `recordSolanaLegIfAny`).
+ */
+export interface NonEvmSettleReceipt {
+  /**
+   * CAIP-2 del leg (`solana:<cluster>`), tal como lo reporta el adapter. Es la
+   * señal de que este leg va al ledger de settles no-EVM (AC-8 de WKH-234).
+   */
+  caip2: string;
+  /**
+   * Monto REALMENTE settleado al agente, en USD, derivado del atómico que se
+   * transfirió + los decimals del token del adapter (round-trip exacto de
+   * `parseUnits`). Fix-pack AR-profundo FIX 3: el débito del caller
+   * (`stepDebitedUsd` en compose) NO sirve como monto del recibo — vale 0 para
+   * el step 0 (lo debita el middleware) e incluye el gas overhead del gateway,
+   * que nunca se le paga al agente.
+   */
+  amountUsd: number;
+}
+
 export interface DownstreamResult {
   // WKH-234: namespace-aware. EVM = `0x${string}` (tx hash); Solana = firma
   // base58 del SPL-transfer. Widened a `string` para alojar ambas familias.
   txHash: string;
   blockNumber?: number; // opcional — el adapter SettleResult no lo expone (TD-WKH-112-01)
   settledAmount: string; // atomic units; = value.toString()
-  // WKH-234 fix-pack AR-BLQ-1: CAIP-2 del leg cuando el settle fue Solana
-  // (`solana:<cluster>`). Presente SOLO en la rama Solana → `compose` lo usa
-  // para registrar el CAIP-2 + firma en el ledger (AC-8). Ausente en legs EVM.
-  settleCaip2?: string;
+  /**
+   * Presente SOLO cuando el settle fue en una familia no-EVM (hoy: la rama
+   * Solana). Ausente en legs EVM → la rama EVM queda byte-idéntica y `compose`
+   * no toca el ledger de settles no-EVM.
+   */
+  nonEvmSettle?: NonEvmSettleReceipt;
 }
 
+/**
+ * Códigos de skip/observabilidad del leg downstream. TODO valor que salga en el
+ * campo `code` de un log de este módulo tiene que estar acá (fix-pack CR-MNR-5:
+ * faltaban los tres últimos, que sí se emitían — un tipo incompleto hace que un
+ * consumidor de logs crea que la taxonomía está cerrada cuando no lo está).
+ *
+ * Los tres primeros grupos CORTAN el leg (`return null`); los de observabilidad
+ * NO cortan (ver el catálogo en el docstring de `signAndSettleDownstream`).
+ */
 export type DownstreamSkipCode =
   | 'FLAG_OFF'
   | 'NO_PAYMENT_FIELD'
   | 'METHOD_NOT_SUPPORTED'
   | 'CHAIN_NOT_SUPPORTED'
+  // Slug ↔ destino incoherentes. Código PROPIO (fix-pack CR-MNR-5): antes se
+  // logueaba como `MAINNET_NOT_ALLOWED` + `reason:'CHAIN_ENVIRONMENT_DRIFT'`,
+  // y eso mezclaba en un mismo código dos incidentes que no tienen nada que ver
+  // entre sí — "un agente pidió una mainnet sin opt-in" (esperable, sano) vs
+  // "NUESTRA config apunta a un destino que contradice su slug" (bug de
+  // operación, incluye el caso declared=mainnet/actual=testnet, donde permitir
+  // mainnet no es el tema). Un dashboard que cuente `MAINNET_NOT_ALLOWED` no
+  // debe sumar los dos.
+  | 'CHAIN_ENVIRONMENT_DRIFT'
+  | 'MAINNET_NOT_ALLOWED'
   | 'INVALID_PAY_TO_FORMAT'
   | 'ZERO_PAY_TO'
   | 'INVALID_PRICE'
@@ -97,26 +164,108 @@ export type DownstreamSkipCode =
   | 'BALANCE_READ_FAILED'
   | 'SIGNING_FAILED'
   | 'VERIFY_FAILED'
-  | 'SETTLE_FAILED';
+  | 'SETTLE_FAILED'
+  // ── Observabilidad: NO cortan el leg ────────────────────────────────
+  // No se pudo leer el balance del operador antes de settlear ⇒ el pre-check se
+  // saltea y el settle sigue. SÓLO se emite en dos condiciones:
+  //   · EVM: falta la RPC env del rail — paso 9 de `signAndSettleDownstream`,
+  //     guard `if (!rpc)`.
+  //   · Solana: `getOperatorSplBalance()` tira — catch en `settleSolanaLeg`.
+  //
+  // ⚠️ NO cubre el caso "falta `OPERATOR_PRIVATE_KEY`" (re-CR MENOR-4: este
+  // comentario lo prometía y era falso). Con RPC presente y PK ausente o sin
+  // `0x`, el `if (pk?.startsWith('0x'))` del paso 9 NO tiene `else`: el pre-check
+  // se saltea **sin emitir ningún código**. Es un hueco de observabilidad, no de
+  // dinero — sin PK el `adapter.sign` posterior falla igual (`SIGNING_FAILED`,
+  // `avalanche/payment.ts:177-180` y sus pares de kite-ozone/base). Se dejó como
+  // hueco a propósito: agregar el log es tocar el money-path que AR+F4+re-CR ya
+  // aprobaron en este diff, y sumaría un 3er código de observabilidad por un
+  // caso sin impacto práctico.
+  | 'BALANCE_PRECHECK_SKIPPED'
+  // Replay idempotente Solana con balance por debajo del monto del leg: el
+  // intent YA tiene firma, así que NO se corta (FIX 2); el log explica por qué
+  // un eventual self-heal re-broadcast fallaría on-chain.
+  | 'BALANCE_LOW_ON_IDEMPOTENT_REPLAY';
 
 // ─── Internal helpers ───────────────────────────────────────────────
 
 /**
- * Validates payTo format and rejects the zero-address (R-1 mitigation).
- * Returns { ok: true, addr } or { ok: false, code }.
+ * Fix-pack AR-profundo FIX 1(b) — opt-in EXPLÍCITO para settlear un leg
+ * downstream contra una chain MAINNET (dinero real).
+ *
+ * Contexto del hallazgo: la chain del leg es agent-controlled por diseño (el
+ * agente declara `payment.chain` en su card). `base-mainnet` / `kite-mainnet` /
+ * `avalanche-mainnet` estaban en `SUPPORTED_CHAINS` SIN gate, a diferencia de
+ * `tempo-testnet` / `solana-devnet` (flag-gated en `registry.getSupportedChains`),
+ * y el control que la documentación de operación prometía
+ * (`WASIAI_DOWNSTREAM_NETWORK`) no lo lee NADIE — era un control muerto.
+ *
+ * Política (FAIL-CLOSED, default seguro):
+ *   - `WASIAI_DOWNSTREAM_MAINNET_ALLOW` ausente o vacía → NINGUNA mainnet
+ *     permitida en el leg downstream → skip-code `MAINNET_NOT_ALLOWED`.
+ *   - CSV de slugs (acepta cualquier alias que el resolver conozca, incluidos
+ *     los numéricos: `avalanche-mainnet`, `43114`, `base-mainnet`, `8453`, …) →
+ *     sólo esas mainnets pueden settlear.
+ *
+ * NO afecta ningún entorno actual (todo el deploy es testnet-only) y NO toca el
+ * rail INBOUND: los slugs mainnet siguen en `SUPPORTED_CHAINS` y el debit de
+ * budget inbound sigue funcionando igual. Es estrictamente más restrictivo que
+ * hoy en la única dirección donde el gateway MUEVE fondos del operador.
+ *
+ * La env se lee POR LLAMADA (no cacheada al cargar el módulo, a diferencia de
+ * `DOWNSTREAM_FLAG`): así el operador puede revertir el opt-in con un redeploy
+ * de variables sin depender del orden de import, y el gate es testeable sin
+ * `vi.resetModules()`. El costo es una lectura de `process.env` por leg.
+ */
+function isDownstreamMainnetAllowed(chainKey: ChainKey): boolean {
+  const raw = process.env.WASIAI_DOWNSTREAM_MAINNET_ALLOW;
+  if (typeof raw !== 'string' || raw.trim().length === 0) return false;
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .some((entry) => normalizeChainSlug(entry) === chainKey);
+}
+
+/**
+ * Valida el payTo del leg DOWNSTREAM y rechaza la zero-address (mitigación R-1).
+ * Devuelve `{ ok: true, addr }` o `{ ok: false, code }`.
+ *
+ * Fix-pack it2 BLQ-BAJO-1: el criterio de FORMATO EVM es `isValidWallet`
+ * (`wallet-format.ts`, la ÚNICA fuente de verdad del regex `0x`+40hex — CD-1 de
+ * WKH-143b). Esta función NO repite el regex: le agrega encima el rechazo de la
+ * zero-address, que es una regla propia del leg downstream.
+ *
+ * ⚠️ ALCANCE (fix-pack CR-MNR-4). Esta función es INTERNA a este módulo. El
+ * docstring anterior decía que la compartían "este gate y el sign INBOUND de
+ * `compose.invokeAgent`" y que estaba exportada "para ese segundo consumidor":
+ * era falso — `compose.ts` importa `isValidWallet`, no `validatePayTo`, y no
+ * existía ningún importador externo. Lo que comparten los dos caminos es
+ * `isValidWallet` (el criterio de formato); la regla de la zero-address NO se
+ * comparte, y esa asimetría es DELIBERADA:
+ *
+ *   · leg DOWNSTREAM (acá): payTo == 0x0 ⇒ skip `ZERO_PAY_TO`. El gateway mueve
+ *     fondos PROPIOS del operador, así que quemarlos en 0x0 se corta.
+ *   · sign INBOUND (`compose.ts`, guard `inboundVmUnsupported`): valida sólo
+ *     FORMATO. La zero-address pasa y se firma, igual que antes de este fix-pack.
+ *     NO se endureció acá a propósito: el gate inbound lo aprobaron AR+F4 en este
+ *     mismo diff y cambiar qué payTos firma es un cambio de comportamiento
+ *     observable del money-path, fuera del alcance de un fix de tipos/naming.
+ *     Queda como `TD-INBOUND-ZERO-PAYTO` (`MULTI-CHAIN.md` §10).
  */
 function validatePayTo(
   contract: string,
 ):
   | { ok: true; addr: `0x${string}` }
   | { ok: false; code: 'INVALID_PAY_TO_FORMAT' | 'ZERO_PAY_TO' } {
-  if (!/^0x[0-9a-fA-F]{40}$/.test(contract)) {
+  // `isValidWallet` narrowea a `` `0x${string}` `` (CR-MNR-4) → sin cast crudo.
+  if (!isValidWallet(contract)) {
     return { ok: false, code: 'INVALID_PAY_TO_FORMAT' };
   }
   if (contract.toLowerCase() === '0x0000000000000000000000000000000000000000') {
     return { ok: false, code: 'ZERO_PAY_TO' };
   }
-  return { ok: true, addr: contract as `0x${string}` };
+  return { ok: true, addr: contract };
 }
 
 /**
@@ -187,11 +336,29 @@ async function settleSolanaLeg(
     return null;
   }
 
+  // Idempotency key determinístico del leg (AC-7). Fallback si el caller no lo
+  // pasó: `<slug>:<payTo>` (estable por leg). Canónico: `contextId:stepIndex:payTo`.
+  //
+  // Fix-pack AR-profundo FIX 2: se resuelve ANTES del pre-flight de balance. El
+  // orden importa: un intent YA settleado no necesita fondos. Con el pre-check
+  // primero, el hit idempotente del adapter era inalcanzable exactamente cuando
+  // el balance del operador había bajado del precio del leg — que es lo que pasa
+  // DESPUÉS de haber pagado ese mismo leg ⇒ el retry devolvía `null` con
+  // `INSUFFICIENT_BALANCE`, sin recibo ni `settle_signature` en el ledger, y el
+  // log afirmaba lo contrario de la verdad (un pago SPL real reportado como no
+  // pagado).
+  const legIntentId = intentId ?? `${agent.slug}:${payTo}`;
+  const priorSignature = adapter.getSettledSignature(legIntentId);
+
   // Pre-flight de balance del operador — paridad de observabilidad con la rama
   // EVM (CR-2 de WKH-234). Corta temprano con el MISMO skip-code
   // `INSUFFICIENT_BALANCE` que el paso 9 del path EVM, en vez de dejar que el
   // settle falle-soft con un `SETTLE_FAILED` genérico que no distingue "no hay
   // fondos" de "falló el RPC" o "la tx se rechazó".
+  //
+  // NO BLOQUEA cuando el intent ya tiene firma (FIX 2): el settle de abajo va a
+  // tomar el camino idempotente (verify on-chain de la firma previa + retorno
+  // sin re-broadcast), que no mueve fondos nuevos.
   //
   // ASIMETRÍA DELIBERADA vs EVM: si el balance NO se puede leer, acá NO se
   // bloquea el settle (la rama EVM sí corta con `BALANCE_READ_FAILED`). El
@@ -201,6 +368,16 @@ async function settleSolanaLeg(
   // tratarlas como "fondos insuficientes" bloquearía settles legítimos (falso
   // negativo). Se degrada a "balance desconocido, intentá el settle" y el error
   // real, si lo hay, sigue apareciendo como `SETTLE_FAILED`.
+  //
+  // Fix-pack it2 MNR-1: en el replay idempotente el pre-check pasa de GATE a
+  // SONDA (se lee el balance, pero un balance bajo NUNCA corta). Motivo: el
+  // `settle()` del adapter puede tomar el camino SELF-HEAL — si la firma previa
+  // no verifica on-chain, la borra del seam y re-broadcastea FRESCO
+  // (`solana/payment.ts` §idempotencia). Omitir la lectura por completo perdía
+  // justo ahí la distinguibilidad `INSUFFICIENT_BALANCE` vs `SETTLE_FAILED`. La
+  // sonda la recupera en los logs sin reintroducir el falso negativo que el FIX 2
+  // arregló (un leg YA pagado jamás se reporta como no pagado).
+  const isIdempotentReplay = priorSignature !== undefined;
   let operatorBalance: bigint | undefined;
   try {
     operatorBalance = BigInt(await adapter.getOperatorSplBalance());
@@ -210,26 +387,39 @@ async function settleSolanaLeg(
         agentSlug: agent.slug,
         code: 'BALANCE_PRECHECK_SKIPPED',
         detail: String(e),
+        ...(isIdempotentReplay ? { intentId: legIntentId } : {}),
       },
       '[Downstream] solana balance pre-check skipped (operator SPL balance unreadable)',
     );
   }
-  if (operatorBalance !== undefined && operatorBalance < BigInt(amountAtomic)) {
+  const insufficient =
+    operatorBalance !== undefined && operatorBalance < BigInt(amountAtomic);
+  if (insufficient && isIdempotentReplay) {
+    // NO corta: el intent ya tiene firma. Si el settle termina re-broadcasteando
+    // fresco (self-heal) y falla, este log explica POR QUÉ (fondos), en vez de
+    // dejar sólo un `SETTLE_FAILED` genérico.
+    logger.info(
+      {
+        agentSlug: agent.slug,
+        code: 'BALANCE_LOW_ON_IDEMPOTENT_REPLAY',
+        intentId: legIntentId,
+        balance: operatorBalance?.toString(),
+        required: amountAtomic,
+      },
+      '[Downstream] solana operator SPL balance below the leg amount, but the intent is already settled — replay allowed (a self-heal re-broadcast would fail on-chain)',
+    );
+  } else if (insufficient) {
     logger.warn(
       {
         agentSlug: agent.slug,
         code: 'INSUFFICIENT_BALANCE',
-        balance: operatorBalance.toString(),
+        balance: operatorBalance?.toString(),
         required: amountAtomic,
       },
       '[Downstream] insufficient solana operator SPL balance',
     );
     return null;
   }
-
-  // Idempotency key determinístico del leg (AC-7). Fallback si el caller no lo
-  // pasó: `<slug>:<payTo>` (estable por leg). Canónico: `contextId:stepIndex:payTo`.
-  const legIntentId = intentId ?? `${agent.slug}:${payTo}`;
 
   // settle: build+sign+broadcast+confirm + verify-before-trust interno.
   let settleRes: Awaited<ReturnType<typeof adapter.settle>>;
@@ -257,9 +447,16 @@ async function settleSolanaLeg(
   return {
     txHash: settleRes.txHash, // firma base58 del SPL-transfer
     settledAmount: amountAtomic,
-    // Fix-pack AR-BLQ-1: propaga el CAIP-2 del adapter para que compose registre
-    // el leg Solana en el ledger (AC-8 — settle_caip2 + settle_signature).
-    settleCaip2: adapter.caip2ChainId,
+    // Fix-pack AR-BLQ-1 + FIX 3, unificados en UN campo (CR-MNR-1): el CAIP-2
+    // del adapter y el monto settleado en USD van SIEMPRE juntos, porque son las
+    // dos mitades del mismo recibo del ledger (AC-8 — settle_caip2 +
+    // settle_signature + amount_usd). El monto se deriva del MISMO atómico que se
+    // transfirió y de los decimals del mint del adapter (round-trip exacto de
+    // `parseUnits`), no del débito del caller.
+    nonEvmSettle: {
+      caip2: adapter.caip2ChainId,
+      amountUsd: Number(formatUnits(BigInt(amountAtomic), token.decimals)),
+    },
   };
 }
 
@@ -274,13 +471,31 @@ async function settleSolanaLeg(
  *  - agent.payment absent                               → NO_PAYMENT_FIELD
  *  - method !== 'x402'                                  → METHOD_NOT_SUPPORTED
  *  - chain unrecognized or not initialized in registry  → CHAIN_NOT_SUPPORTED
+ *  - slug ↔ real destination disagree on testnet/mainnet → CHAIN_ENVIRONMENT_DRIFT
+ *    (fix-pack CR-MNR-5: código PROPIO; NO se opta-in, se bloquea siempre)
+ *  - chain is MAINNET without explicit env opt-in       → MAINNET_NOT_ALLOWED
  *  - payTo invalid or zero                              → INVALID_PAY_TO_FORMAT / ZERO_PAY_TO
  *  - priceUsdc not a finite positive number             → INVALID_PRICE
  *  - operator balance < required value                  → INSUFFICIENT_BALANCE
- *  - balance read RPC failure                           → BALANCE_READ_FAILED
+ *  - balance read RPC failure (EVM only)                → BALANCE_READ_FAILED
  *  - adapter.sign throws                                → SIGNING_FAILED
  *  - adapter.verify throws or returns valid=false       → VERIFY_FAILED
  *  - adapter.settle throws or returns success=false     → SETTLE_FAILED
+ *
+ * Códigos que se emiten SIN cortar el leg (observabilidad — el catálogo anterior
+ * los omitía aunque salen en el mismo campo `code`; fix-pack CR-MNR-5):
+ *  - no RPC env (EVM, paso 9 `if (!rpc)`) o ATA ilegible (Solana)
+ *                                                       → BALANCE_PRECHECK_SKIPPED
+ *  - replay idempotente Solana con balance bajo         → BALANCE_LOW_ON_IDEMPOTENT_REPLAY
+ *
+ * ⚠️ `BALANCE_PRECHECK_SKIPPED` NO es benigno en mainnet: significa que el leg va
+ * a FIRMAR sin haber verificado fondos. Para que el pre-check EVM corra hacen falta
+ * DOS cosas: `RPC_ENV_BY_CHAIN[chainKey]` seteada (ver el mapa arriba: el rail
+ * `avalanche-mainnet` lee `AVALANCHE_RPC_URL`, NO `AVALANCHE_MAINNET_RPC_URL` — esa
+ * última es del facilitator) **y** un `OPERATOR_PRIVATE_KEY` que empiece con `0x`.
+ * ⚠️ Pero el CÓDIGO sólo se emite por la primera: si falta la PK, el pre-check se
+ * saltea EN SILENCIO (re-CR MENOR-4 — antes este catálogo prometía una señal que no
+ * existe). Ver la nota completa en `DownstreamSkipCode`, arriba.
  *
  * Returns `DownstreamResult` ONLY when the adapter confirmed `success: true`.
  */
@@ -346,11 +561,85 @@ export async function signAndSettleDownstream(
     return null;
   }
 
-  // 4b. WKH-234 — narrow por vmFamily. El leg Solana es settle-only (SPL
+  // 4a. WKH-234 — resolución del adapter (lectura del Map del registry, NO mueve
+  //     fondos). Se hace ANTES del gate de mainnet porque el gate necesita el id
+  //     AUTORITATIVO del destino de cada familia (chainId EVM vs CAIP-2 Solana).
+  const adapterUnion = getPaymentAdapterOrUnion(chainKey);
+
+  // 4b. Fix-pack AR-profundo FIX 1(b) + it2 BLQ-ALTO-1 — gate FAIL-CLOSED de
+  //     mainnet. La chain del leg la declara el AGENTE; sin opt-in explícito por
+  //     env, un agent card podía dirigir el settle (fondos del operador) a una
+  //     chain de dinero real. Sin `WASIAI_DOWNSTREAM_MAINNET_ALLOW` NINGUNA
+  //     mainnet settlea. NO toca el rail inbound (los slugs siguen soportados).
+  //
+  //     ⚠️ El mainnet-ness se decide por el DESTINO REAL del leg, NO por el
+  //     string del slug (bug it2 BLQ-ALTO-1): el bundle de `kite-ozone-testnet`
+  //     se construye sin `opts` y `getKiteChain()` lee `KITE_NETWORK` en
+  //     call-time, así que con `KITE_NETWORK=mainnet` ese slug "testnet" apunta a
+  //     chainId 2366 (USDC.e de Kite MAINNET) y el gate por slug lo dejaba pasar
+  //     con la env vacía. Ahora se clasifica `bundle.chainConfig.chainId` (EVM) /
+  //     `adapter.caip2ChainId` (Solana) contra un mapa exhaustivo; un chainId sin
+  //     clasificar cuenta como mainnet (fail-closed).
+  const destination: LegDestination =
+    adapterUnion.vmFamily === 'solana'
+      ? { vmFamily: 'solana', caip2ChainId: adapterUnion.caip2ChainId }
+      : { vmFamily: 'evm', chainId: bundle.chainConfig.chainId };
+
+  // 4b-i. Incoherencia slug ↔ destino: se bloquea SIEMPRE, sin opt-in posible
+  //       (el opt-in se expresa por slug, y un slug que miente sobre su entorno
+  //       no puede ser la llave de nada). `initAdapters` además rompe al
+  //       arrancar ante esta misma condición — este guard es la red por-leg.
+  const drift = findChainEnvironmentDrift({ chainKey, destination });
+  if (drift) {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        chain: chainKey,
+        declared: agent.payment.chain,
+        // Fix-pack CR-MNR-5: código PROPIO. Antes esto se logueaba como
+        // `MAINNET_NOT_ALLOWED` + `reason`, y eso metía en el mismo contador dos
+        // cosas distintas: "el agente pidió mainnet sin opt-in" (sano) y
+        // "nuestra config es incoherente" — que incluye el caso
+        // declared=mainnet/actual=testnet, donde permitir mainnet no tiene nada
+        // que ver. El drift NO admite opt-in (ver 4b-i), así que tampoco debe
+        // compartir el código con el gate que SÍ lo admite.
+        code: 'CHAIN_ENVIRONMENT_DRIFT',
+        declaredEnvironment: drift.declared,
+        actualEnvironment: drift.actual,
+        expectedChainId: getCanonicalChainId(chainKey),
+        ...(destination.vmFamily === 'evm'
+          ? { actualChainId: destination.chainId }
+          : { actualCaip2: destination.caip2ChainId }),
+      },
+      `[Downstream] chain=${chainKey} declares ${drift.declared} but its bundle points to a ${drift.actual} destination — incoherent config, settle skipped`,
+    );
+    return null;
+  }
+
+  if (
+    classifyDestinationEnvironment(destination) === 'mainnet' &&
+    !isDownstreamMainnetAllowed(chainKey)
+  ) {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        chain: chainKey,
+        declared: agent.payment.chain,
+        code: 'MAINNET_NOT_ALLOWED',
+        reason: 'NO_OPT_IN',
+        ...(destination.vmFamily === 'evm'
+          ? { actualChainId: destination.chainId }
+          : { actualCaip2: destination.caip2ChainId }),
+      },
+      `[Downstream] chain=${chainKey} is MAINNET and not opted-in via WASIAI_DOWNSTREAM_MAINNET_ALLOW — settle skipped`,
+    );
+    return null;
+  }
+
+  // 4c. WKH-234 — narrow por vmFamily. El leg Solana es settle-only (SPL
   //     transfer operator-signed): NO el dance EVM sign→verify→settle. Tiene su
   //     propia validación base58 + atómico decimals-aware. La rama EVM (pasos
   //     5-13) queda INTACTA byte-idéntica (AC-4). NEVER-throws preservado (CD-10).
-  const adapterUnion = getPaymentAdapterOrUnion(chainKey);
   if (adapterUnion.vmFamily === 'solana') {
     return settleSolanaLeg(agent, adapterUnion, logger, intentId);
   }

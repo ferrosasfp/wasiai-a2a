@@ -181,7 +181,7 @@ Orchestrate LLM planner:
 | Activation step | Result |
 |-----------------|--------|
 | Operator wallet funding | ✅ 0.1 AVAX + 5 USDC mainnet at `0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba` |
-| Railway env update (a2a) | ✅ `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` + `AVALANCHE_RPC_URL` set |
+| Railway env update (a2a) | ✅ `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` + `AVALANCHE_RPC_URL` set — ⚠️ registro histórico del 2026-04-29; esa env var quedó SIN lectores en `src/` con WKH-112 (ver aviso debajo de la tabla de tx) |
 | Railway env update (facilitator) | ✅ `AVALANCHE_MAINNET_ENABLED=true` + `AVALANCHE_MAINNET_RPC_URL` set |
 | facilitator `/supported` | ✅ 3 chains: Kite testnet + Fuji testnet + **Avalanche MAINNET (eip155:43114)** |
 | Smoke real-money via app.wasiai.io | ✅ 4 onchain txs, $0.061 USDC mainnet spent |
@@ -196,9 +196,11 @@ Orchestrate LLM planner:
 | 3 | wasi-wallet-profiler | $0.050 | [`0xca10320c…`](https://snowtrace.io/tx/0xca10320c24ff513d773ce65e0bd306d4acce3e4883180c9dca5573da6cf1dfdb) | confirmed |
 | Inbound | Kite testnet PYUSD (free) | 1.0 PYUSD | [`0x6f406c08…`](https://testnet.kitescan.ai/tx/0x6f406c08f6e59e3c5029f57ec3a84bb4596b94bb02568055ec4f9572981a1bf9) | testnet |
 
-**Architectural significance**: This is the first proven `Kite testnet → Avalanche C-Chain mainnet` cross-chain agent payment in our stack. Same flow used in Demo 1/2 above, but the `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` flag now routes outbound to mainnet USDC at `0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E`.
+**Architectural significance**: This is the first proven `Kite testnet → Avalanche C-Chain mainnet` cross-chain agent payment in our stack. Same flow used in Demo 1/2 above, but the `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` flag routed outbound to mainnet USDC at `0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E`.
 
-Rollback path (if needed): `WASIAI_DOWNSTREAM_NETWORK=fuji` + `AVALANCHE_MAINNET_ENABLED=false` → reverts to testnet-only in ~3min.
+> ⚠️ **Histórico — no ejecutable hoy** (corregido 2026-07-26, fix-pack AR-profundo). `WASIAI_DOWNSTREAM_NETWORK` sí se leía el 2026-04-29 (la introdujo `068`, 2026-04-28), pero **WKH-112** (2026-05-27) movió la chain del leg downstream al `payment.chain` que declara el AGENTE y dejó esa env sin ningún lector en `src/`. Hoy el único control del operador es el gate fail-CLOSED `WASIAI_DOWNSTREAM_MAINNET_ALLOW`. Los dos párrafos de arriba describen cómo fue entonces, **no** cómo se activa ahora — para activar/rollbackear usá "Mainnet readiness" abajo.
+
+Rollback path histórico (el de esa fecha, ya no aplica): `WASIAI_DOWNSTREAM_NETWORK=fuji` + `AVALANCHE_MAINNET_ENABLED=false`. El rollback vigente es vaciar `WASIAI_DOWNSTREAM_MAINNET_ALLOW` (`./scripts/activate-mainnet-downstream.sh --rollback`) → fail-CLOSED en ~3min.
 
 ### PRs merged this session
 
@@ -214,26 +216,51 @@ Rollback path (if needed): `WASIAI_DOWNSTREAM_NETWORK=fuji` + `AVALANCHE_MAINNET
 
 ## Mainnet readiness (staged, not yet activated)
 
-To activate mainnet (after funding wallets):
+> ⚠️ **Reescrito el 2026-07-26** (fix-pack AR-profundo, MNR-1). La versión anterior de este runbook instruía `KITE_NETWORK=mainnet` (hoy **brickea el arranque** si queda un slug Kite *testnet* en el CSV) y `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` (**control muerto**: ningún archivo de `src/` la lee desde WKH-112). Cada env de abajo fue verificada contra `src/` (existe y tiene lector). Fuente canónica: [`doc/architecture/MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) §8.
 
-1. **Fund operator wallet** with USDC native on Avalanche C-Chain mainnet (~10 USDC for first month of demos)
-2. **Fund operator wallet** with USDC.e on Kite mainnet (~10 USDC.e equivalent)
-3. **Set Railway env vars** on `wasiai-a2a-production`:
+Los dos rails mainnet son **independientes**: el outbound (downstream, Avalanche) no necesita el inbound (Kite mainnet) ni viceversa.
+
+**A. Downstream leg → Avalanche C-Chain mainnet (outbound, dinero del operator)**
+
+1. **Fund operator wallet** con USDC nativo en Avalanche C-Chain mainnet (~10 USDC para el primer mes de demos).
+2. **Railway env vars** en `wasiai-a2a-production` (o correr `./scripts/activate-mainnet-downstream.sh`, que setea las dos primeras):
    ```
-   KITE_NETWORK=mainnet                    # was: testnet
-   WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet  # was: fuji
+   WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet   # gate fail-CLOSED, el ÚNICO control del operador
+   AVALANCHE_RPC_URL=https://api.avax.network/ext/bc/C/rpc
+   WASIAI_A2A_CHAINS=kite-ozone-testnet,...,avalanche-mainnet  # sin el slug, el leg corta con CHAIN_NOT_SUPPORTED
+   WASIAI_DOWNSTREAM_X402=true                          # habilita el leg downstream
    ```
-4. **Set Railway env vars** on `wasiai-facilitator-production`:
+   La chain del leg **la declara el agente** (`payment.chain`, WKH-112): estas envs sólo autorizan; no eligen destino. Ausente/vacía la allow-list ⇒ ninguna mainnet settlea (`MAINNET_NOT_ALLOWED`).
+3. **Railway env vars** en `wasiai-facilitator-production`:
    ```
-   KITE_MAINNET_ENABLED=true
    AVALANCHE_MAINNET_ENABLED=true
-   KITE_MAINNET_RPC_URL=https://rpc.gokite.ai/
    AVALANCHE_MAINNET_RPC_URL=https://api.avax.network/ext/bc/C/rpc
    ```
-5. **Verify** `/supported` returns 4 chains (testnet + mainnet)
-6. **Smoke** with low-value real-money tx (~$0.50)
+4. **Smoke** con un agente que declare `avalanche-mainnet` y tx de bajo valor (~$0.50), verificable en `snowtrace.io`.
 
-Rollback: revert env vars → automatic redeploy → back to testnet-only behavior.
+Rollback: `./scripts/activate-mainnet-downstream.sh --rollback` (vacía la allow-list ⇒ fail-CLOSED) → redeploy automático ~3min.
+
+**B. Inbound Kite mainnet (debit del A2A key budget en 2366)**
+
+1. **Fund operator wallet** con USDC.e en Kite mainnet (~10 USDC.e equivalente).
+2. **Railway env vars** en `wasiai-a2a-production` — las **tres** juntas:
+   ```
+   WASIAI_A2A_CHAINS=kite-mainnet,...   # el slug kite-mainnet y NINGÚN slug Kite testnet
+   KITE_NETWORK=mainnet                 # obligatoria: el adapter la lee en CALL-TIME
+   KITE_MAINNET_RPC_URL=https://rpc.gokite.ai/
+   ```
+   - ⛔ `KITE_NETWORK=mainnet` **con** un slug Kite testnet en el CSV ⇒ `initAdapters` **LANZA** (el bundle de `kite-ozone-testnet` apuntaría a 2366 con USDC.e real; it2 BLQ-ALTO-1).
+   - ⛔ el slug `kite-mainnet` **sin** `KITE_NETWORK=mainnet` ⇒ arranca pero el adapter firma en 2368 con PYUSD de testnet; el registry lo reporta con `code=ADAPTER_CHAIN_ID_DRIFT` (it2 MNR-3).
+   - Consecuencia: los dos rails Kite **no pueden convivir** en el mismo proceso hasta `TD-NEW-KITE-PARAMS`.
+3. **Railway env vars** en `wasiai-facilitator-production`:
+   ```
+   KITE_MAINNET_ENABLED=true
+   KITE_MAINNET_RPC_URL=https://rpc.gokite.ai/
+   ```
+4. **Verify** el log de startup: `Adapters initialized` incluye `kite-mainnet` y **no** aparece `ADAPTER_CHAIN_ID_DRIFT`.
+5. **Smoke** con `x-payment-chain: kite-mainnet` y una key con budget en 2366 → tx en `kitescan.ai`.
+
+Rollback: volver `WASIAI_A2A_CHAINS` al CSV testnet **y** borrar `KITE_NETWORK` (las dos juntas, por la misma razón) → redeploy automático. **Verificá el startup antes de darlo por hecho**: `Adapters initialized` debe listar sólo slugs testnet y NO debe aparecer `ADAPTER_CHAIN_ID_DRIFT` (si aparece, quedó una de las dos a medio revertir). Procedimiento completo: [`MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) §8 → "Rollback de Kite mainnet" (agregado en el fix-pack CR-MAYOR-2, junto con la corrección de los dos runbooks de `doc/`, que revertían sólo `KITE_NETWORK` y afirmaban que el sistema volvía a testnet).
 
 ---
 

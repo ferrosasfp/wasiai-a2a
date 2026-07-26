@@ -3,7 +3,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { normalizeChainSlug } from '../adapters/chain-resolver.js';
+import {
+  getChainVmFamily,
+  normalizeChainSlug,
+} from '../adapters/chain-resolver.js';
 import { getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import { hashCallerRef } from '../lib/caller-hash.js';
@@ -22,6 +25,7 @@ import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
+import { isValidWallet } from '../lib/wallet-format.js';
 import type {
   A2AMessage,
   Agent,
@@ -279,20 +283,39 @@ export const composeService = {
       // el owner_ref crudo (CD-5/CD-6). null si caller anónimo (x402).
       const callerRefHash = hashCallerRef(scopingKeyRow?.owner_ref);
       // WKH-234 fix-pack AR-BLQ-1: cuando el settle downstream de ESTE step fue
-      // en Solana (`downstream.settleCaip2` presente) y hubo un débito de budget
-      // del caller autenticado, registrar el CAIP-2 + firma base58 en el ledger
-      // (AC-8), REUSANDO el `owner_ref` del caller (CD-1/AC-9 — sin queries
-      // nuevas sobre a2a_agent_keys). Legs EVM (settleCaip2 undefined) → NO se
-      // invoca → columna NULL → byte-idéntico (AC-4). Compartido entre el
-      // happy-path y el retry-ok. Best-effort (el emit interno es fire-and-forget).
+      // en una familia no-EVM (`downstream.nonEvmSettle` presente) y hubo un
+      // débito de budget del caller autenticado, registrar el CAIP-2 + firma
+      // base58 en el ledger (AC-8), REUSANDO el `owner_ref` del caller
+      // (CD-1/AC-9 — sin queries nuevas sobre a2a_agent_keys). Legs EVM
+      // (`nonEvmSettle` undefined) → NO se invoca → columna NULL → byte-idéntico
+      // (AC-4). Compartido entre el happy-path y el retry-ok. Best-effort (el
+      // emit interno es fire-and-forget).
+      //
+      // Fix-pack CR-MNR-1: el CAIP-2 y el monto vienen del MISMO objeto, así que
+      // la condición del `if` y el monto del recibo no pueden desalinearse. Antes
+      // eran dos opcionales sueltos: se decidía por `ds.settleCaip2` y el monto
+      // salía de `ds.settledAmountUsd ?? stepDebitedUsd` ⇒ un rail que poblara
+      // sólo el primero escribía `amount_usd = 0` junto a una firma on-chain
+      // real, en silencio. El `??` desapareció: ya no hay fallback posible.
       const recordSolanaLegIfAny = (ds: DownstreamResult | undefined): void => {
-        if (ds?.settleCaip2 && scopingKeyRow && chainId !== undefined) {
+        const nonEvm = ds?.nonEvmSettle;
+        if (nonEvm && scopingKeyRow && chainId !== undefined) {
           budgetService.recordSolanaSettleReceipt({
             keyId: scopingKeyRow.id,
             ownerRef: scopingKeyRow.owner_ref,
             chainId,
-            amountUsd: stepDebitedUsd,
-            settleCaip2: ds.settleCaip2,
+            // Fix-pack AR-profundo FIX 3: el monto del recibo es el REALMENTE
+            // settleado on-chain al agente (derivado del atómico transferido +
+            // decimals del adapter), NO `stepDebitedUsd`. Este recibo lleva la
+            // `settle_signature` base58 de una transferencia real: la
+            // reconciliación cruza ambos. `stepDebitedUsd` es el DÉBITO DEL CALLER
+            // y vale 0 para `i === 0` (lo debita el middleware vía
+            // composeEstimatedCostUsd, guard `i > 0` de :208) ⇒ un compose de UN
+            // step con agente Solana emitía `amount_usd = 0` junto a una firma
+            // real. Además incluye el gas overhead del gateway, que nunca se le
+            // paga al agente.
+            amountUsd: nonEvm.amountUsd,
+            settleCaip2: nonEvm.caip2,
             settleSignature: ds.txHash,
           });
         }
@@ -832,28 +855,109 @@ export const composeService = {
     // settle needed. Pieverse /v2/settle (HTTP 500 since 2026-04-13) is the
     // legacy path for x402 callers only. Downstream Fuji USDC settle (WKH-55)
     // still runs for both paths via signAndSettleDownstream below.
-    if (agent.priceUsdc > 0 && !a2aKey) {
+    // Fix-pack AR-profundo FIX 4: guard de FAMILIA del payTo. El inbound x402 es
+    // EVM-only y castea el payTo a `0x${string}` sin validar; un agente que
+    // declara una chain no-EVM expone un payTo base58 (los agentes Solana
+    // self-published lo hacen) que llegaba a `viem.signTypedData` y reventaba el
+    // request con `InvalidAddressError: Address "So111…112" is invalid` — opaco
+    // para el caller. El narrowing de `getPaymentAdapter()` (más abajo) cubre la
+    // familia del ADAPTER default del gateway, NO la familia del payTo del
+    // agente: son dos cosas distintas. Se decide con el resolver puro
+    // (`normalizeChainSlug` + `getChainVmFamily`), sin duplicar validadores de
+    // formato. Chain declarada ausente o no resoluble → comportamiento previo
+    // intacto (los agentes EVM son byte-idénticos).
+    //
+    // Fix-pack it2 BLQ-BAJO-1: el guard de la CHAIN declarada no alcanzaba — es
+    // un PROXY, no el valor. El payTo que se castea sale de OTRA fuente
+    // (`agent.metadata.payTo` / `agent.metadata.payment.contract`, resueltos
+    // abajo), y `discovery.mapAgent` setea `metadata: raw` (el agent card COMPLETO
+    // del registry, y cualquier caller autenticado puede registrar un registry).
+    // Repros del AR: (a) `metadata.payTo` base58 SIN `payment` → chain declarada
+    // ausente → el guard no disparaba; (b) `payment.chain: 'avalanche-fuji'`
+    // (pasa el guard) + `metadata.payTo` base58 → idem. En los dos casos el
+    // base58 crudo llegaba a `viem.signTypedData`. Ahora se guardea EL VALOR con
+    // el MISMO validador de formato EVM del money-path
+    // (`isValidWallet` — la fuente única de `wallet-format.ts`, la misma que usa
+    // por debajo el `validatePayTo` interno de `downstream-payment.ts`; sin
+    // duplicar el regex).
+    //
+    // Fix-pack CR-MNR-4: lo COMPARTIDO es el criterio de FORMATO. El rechazo de
+    // la zero-address NO se comparte — vive sólo en el leg downstream (donde el
+    // gateway mueve fondos propios). El sign inbound de acá valida formato y una
+    // zero-address pasa, igual que antes de este fix-pack: asimetría deliberada y
+    // trackeada como `TD-INBOUND-ZERO-PAYTO` (`MULTI-CHAIN.md` §10), porque
+    // cambiar qué payTos firma este gate es un cambio de comportamiento
+    // observable del money-path.
+    const declaredChainKey = agent.payment?.chain
+      ? normalizeChainSlug(agent.payment.chain)
+      : undefined;
+    const declaredVmUnsupported =
+      declaredChainKey !== undefined &&
+      getChainVmFamily(declaredChainKey) !== 'evm';
+    // WAS-V2-3-CLIENT-2: schema drift fallback for payTo (mirrors price_per_call
+    // fallback in discovery). canonical: agent.metadata.payTo (kite registry);
+    // fallback: agent.metadata.payment.contract (wasiai-v2 marketplace).
+    const meta = agent.metadata as Record<string, unknown> | undefined;
+    const canonicalPayTo =
+      typeof meta?.payTo === 'string' ? meta.payTo : undefined;
+    const fallbackPayment = meta?.payment as
+      | Record<string, unknown>
+      | undefined;
+    const fallbackPayTo =
+      typeof fallbackPayment?.contract === 'string'
+        ? fallbackPayment.contract
+        : undefined;
+    const payTo = canonicalPayTo ?? fallbackPayTo;
+    // Fix-pack CR-MNR-4: el resultado del validador se conserva TIPADO
+    // (`isValidWallet` narrowea a `` `0x${string}` ``) en vez de recalcularse con
+    // un cast crudo `payTo as \`0x${string}\`` en el sign de abajo. El cast era
+    // una aserción sin chequeo al lado de un chequeo que ya se había hecho: si
+    // alguien tocaba este guard, el cast seguía compilando igual. Ahora el sign
+    // sólo puede recibir lo que ESTE validador aprobó, por tipos.
+    const payToEvm: `0x${string}` | undefined =
+      payTo !== undefined && isValidWallet(payTo) ? payTo : undefined;
+    // payTo ausente → NO es este guard: sigue cayendo en el throw explícito de
+    // abajo (comportamiento previo intacto).
+    const payToNotEvm = payTo !== undefined && payToEvm === undefined;
+    const inboundVmUnsupported = declaredVmUnsupported || payToNotEvm;
+    if (agent.priceUsdc > 0 && !a2aKey && inboundVmUnsupported) {
+      const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);
+      warn(
+        {
+          agent: agent.slug,
+          chain: declaredChainKey,
+          code: 'INBOUND_VM_UNSUPPORTED',
+          // Fix-pack CR-MNR-5: el `reason` del formato usa el MISMO nombre que el
+          // skip-code del leg downstream para la MISMA condición
+          // (`INVALID_PAY_TO_FORMAT` de `DownstreamSkipCode`). Antes se llamaba
+          // `PAY_TO_FORMAT` acá e `INVALID_PAY_TO_FORMAT` allá: dos nombres para
+          // "el payTo no tiene formato EVM" obligaban a un dashboard a saber que
+          // son lo mismo.
+          reason: declaredVmUnsupported
+            ? 'DECLARED_CHAIN'
+            : 'INVALID_PAY_TO_FORMAT',
+        },
+        '[Compose] inbound x402 sign skipped — payTo is not an EVM address (non-EVM chain declared and/or non-EVM payTo format). The agent fee settles operator-side in the downstream leg.',
+      );
+    }
+    if (agent.priceUsdc > 0 && !a2aKey && !inboundVmUnsupported) {
       // WKH-234: the inbound x402 (caller→gateway) is EVM-only — it signs an
       // EIP-3009 authorization on the gateway's DEFAULT chain, and the caller
       // has NO Solana wallet (§1). `getPaymentAdapter()` narrows to
       // `EvmPaymentAdapter` and fails-loud if the default chain were ever Solana
-      // (an unsupported inbound config). The Solana agent fee is settled
-      // operator-side in the DOWNSTREAM leg (signAndSettleDownstream), not here.
-      // WAS-V2-3-CLIENT-2: schema drift fallback for payTo (mirrors price_per_call fallback in discovery)
-      // canonical: agent.metadata.payTo  ←  preferred (kite registry)
-      // fallback:  agent.metadata.payment.contract  ←  wasiai-v2 marketplace exposes payTo here
-      const meta = agent.metadata as Record<string, unknown> | undefined;
-      const canonicalPayTo =
-        typeof meta?.payTo === 'string' ? meta.payTo : undefined;
-      const fallbackPayment = meta?.payment as
-        | Record<string, unknown>
-        | undefined;
-      const fallbackPayTo =
-        typeof fallbackPayment?.contract === 'string'
-          ? fallbackPayment.contract
-          : undefined;
-      const payTo = canonicalPayTo ?? fallbackPayTo;
-      if (!payTo)
+      // (an unsupported inbound config) — pero eso NO dice nada sobre la familia
+      // del payTo del AGENTE, que se filtra en el guard `inboundVmUnsupported`
+      // de arriba. The Solana agent fee is settled operator-side in the
+      // DOWNSTREAM leg (signAndSettleDownstream), not here.
+      // it2 BLQ-BAJO-1: `payTo` se resuelve ARRIBA (el guard necesita el VALOR,
+      // no sólo la chain declarada). Acá sólo queda su fail-loud histórico.
+      //
+      // CR-MNR-4: se chequea `payToEvm` (la variante TIPADA) en vez de `payTo`.
+      // Equivalente exacto: en esta rama `inboundVmUnsupported === false`, o sea
+      // `payToNotEvm === false`, o sea `payTo` ausente O válido ⇒ `payToEvm`
+      // undefined SÓLO cuando `payTo` está ausente, que es justo el caso de este
+      // throw. El mensaje no cambia.
+      if (!payToEvm)
         throw new Error(
           `No payTo address for agent ${agent.slug} — neither metadata.payTo nor metadata.payment.contract present`,
         );
@@ -867,7 +971,10 @@ export const composeService = {
       const decimals = adapter.supportedTokens?.[0]?.decimals ?? 18; // CD-4
       const valueWei = usdToAtomic(agent.priceUsdc, decimals); // CD-1
       const result = await adapter.sign({
-        to: payTo as `0x${string}`,
+        // CR-MNR-4: sin cast — `payToEvm` YA es `` `0x${string}` `` porque salió
+        // del type-predicate de `isValidWallet`. El valor es el mismo `payTo` que
+        // el guard aprobó.
+        to: payToEvm,
         value: valueWei,
       });
       // C2 (audit 2026-07-01): DO NOT forward the freshly-signed EIP-3009

@@ -111,8 +111,8 @@ WasiAI A2A includes a **non-EVM Solana devnet adapter** (WKH-234) that pays agen
 
 What the Solana rail actually does (`src/adapters/solana/payment.ts`):
 
-- **Settle-only, outbound.** It settles the downstream leg (the gateway paying a Solana-native agent) inside `signAndSettleDownstream` / `settleSolanaLeg` (`src/lib/downstream-payment.ts:124`). The inbound 402 challenge (charging the caller) stays EVM-only: `getPaymentAdapter()` throws for a non-EVM bundle (`src/adapters/registry.ts:228`), so `x-payment-chain: solana-devnet` is not a supported inbound rail.
-- **Operator-signed SPL transfer.** `settle()` builds a `createTransferInstruction`, signs with the operator `Keypair` from `SOLANA_OPERATOR_PRIVATE_KEY` (`getSolanaOperatorKeypair()`, `src/adapters/solana/chain.ts:111`) and broadcasts via `sendAndConfirmTransaction`. There is no EIP-3009 and no facilitator hop on this leg: the gateway operator is the sender and pays the SOL gas.
+- **Settle-only, outbound.** It settles the downstream leg (the gateway paying a Solana-native agent) inside `signAndSettleDownstream` / `settleSolanaLeg` (`src/lib/downstream-payment.ts:287`). The inbound 402 challenge (charging the caller) stays EVM-only: `getPaymentAdapter()` throws for a non-EVM bundle (`src/adapters/registry.ts:416-419`), so `x-payment-chain: solana-devnet` is not a supported inbound rail.
+- **Operator-signed SPL transfer.** `settle()` builds a `createTransferInstruction`, signs with the operator `Keypair` from `SOLANA_OPERATOR_PRIVATE_KEY` (`getSolanaOperatorKeypair()`, `src/adapters/solana/chain.ts:84`) and broadcasts via `sendAndConfirmTransaction`. There is no EIP-3009 and no facilitator hop on this leg: the gateway operator is the sender and pays the SOL gas.
 - **Idempotent by `intentId`.** A repeated `intentId` re-verifies the prior signature on-chain (`getParsedTransaction`, pre/post token balances of `payTo`) and returns it instead of re-broadcasting. That `intentId -> signature` map is in-process, so idempotency survives retries inside a process but not a restart (durable cross-process lookup is a tracked follow-up).
 - **Verify-before-trust.** `verify()` asserts an on-chain token balance delta `>= amountAtomic` for the expected mint and `payTo`.
 
@@ -127,7 +127,7 @@ Gateway env vars, exact names from [`.env.example`](.env.example) (Solana block)
 | `SOLANA_ADAPTER_ENABLED` | yes | `true` (default `false`, the rail is inert while off) |
 | `WASIAI_A2A_CHAINS` | yes | must include `solana-devnet` in the comma-separated list, otherwise the bundle is never built and the leg logs `CHAIN_NOT_SUPPORTED` |
 | `SOLANA_OPERATOR_PRIVATE_KEY` | yes | base58 ed25519 secret of the operator that signs and broadcasts the SPL transfer. Its pubkey needs **devnet SOL for gas** (and devnet USDC in its ATA to have something to send). Never logged, never committed. |
-| `WASIAI_DOWNSTREAM_X402` | yes | `true`, the downstream settle path is flag-gated (`src/lib/downstream-payment.ts:30`) |
+| `WASIAI_DOWNSTREAM_X402` | yes | `true`, the downstream settle path is flag-gated (`DOWNSTREAM_FLAG`, `src/lib/downstream-payment.ts:42`) |
 | `SOLANA_RPC_URL` | no | `https://api.devnet.solana.com` |
 | `SOLANA_USDC_MINT_DEVNET` | no | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` (Circle USDC-SPL devnet) |
 | `SOLANA_USDC_DECIMALS` | no | `6` |
@@ -275,9 +275,9 @@ The `WASIAI_A2A_CHAIN` env var selects which adapter bundle loads at startup. Ma
 | Bundle | Status | Inbound asset | Outbound asset | Notes |
 |--------|--------|---------------|----------------|-------|
 | `kite-ozone-testnet` | active | PYUSD on Kite testnet (2368) | -- | Default `WASIAI_A2A_CHAIN`. Used in all hackathon demos. |
-| `kite-mainnet` | staged (env-gated) | USDC.e on Kite mainnet (2366) | -- | Flip via `KITE_NETWORK=mainnet` + `KITE_MAINNET_RPC_URL`. |
+| `kite-mainnet` | staged (env-gated) | USDC.e on Kite mainnet (2366) | -- | Flip requires **three** coupled envs: `WASIAI_A2A_CHAINS=kite-mainnet` (no Kite *testnet* slug in the CSV) + `KITE_NETWORK=mainnet` + `KITE_MAINNET_RPC_URL`. ⚠️ `KITE_NETWORK=mainnet` next to a Kite *testnet* slug repoints the `kite-ozone-testnet` bundle at chain 2366 (real USDC.e) while the slug still reads "testnet" → the gateway refuses to start (2026-07-26 fix-pack). ⚠️ The slug **without** `KITE_NETWORK=mainnet` starts but signs on 2368 with testnet PYUSD (`ADAPTER_CHAIN_ID_DRIFT`). Both Kite rails cannot coexist in one process (`TD-NEW-KITE-PARAMS`). Full runbook: [`doc/architecture/MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) §8. |
 | `avalanche-fuji` | active | -- | USDC testnet on Fuji (43113) | Default downstream when `WASIAI_DOWNSTREAM_X402=true`. |
-| `avalanche-mainnet` | active (mainnet hybrid) | -- | USDC mainnet on Avalanche C-Chain (43114) | Live since 2026-04-29 via `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet`. |
+| `avalanche-mainnet` | staged (fail-closed gate) | -- | USDC mainnet on Avalanche C-Chain (43114) | Ran a mainnet hybrid settle on 2026-04-29. Since the 2026-07-26 fix-pack the downstream leg to ANY mainnet requires the explicit opt-in `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`; absent/empty ⇒ skipped with `MAINNET_NOT_ALLOWED`. (The old `WASIAI_DOWNSTREAM_NETWORK` is not read by any code path.) |
 | `solana-devnet` | opt-in-off | -- (inbound is EVM-only) | SPL-USDC on Solana devnet | Non-EVM: settle-only, operator-signed SPL transfer, no facilitator hop. Enabled via `SOLANA_ADAPTER_ENABLED=true` + `solana-devnet` in `WASIAI_A2A_CHAINS` + `SOLANA_OPERATOR_PRIVATE_KEY` (needs devnet SOL for gas). WKH-234. |
 
 ### Multi-chain support
@@ -362,11 +362,11 @@ All variables from `.env.example` with their defaults:
 | `KITE_MERCHANT_NAME` | No | `WasiAI` | Merchant name shown to paying agents |
 | `PAYMENT_WALLET_ADDRESS` | No | Falls back to `KITE_WALLET_ADDRESS` | Chain-agnostic alias for payment wallet |
 | `WASIAI_A2A_CHAIN` | No | `kite-ozone-testnet` | Selects the adapter bundle at startup |
-| `KITE_NETWORK` | No | `testnet` | `testnet` (chain 2368) or `mainnet` (chain 2366) |
-| `KITE_MAINNET_RPC_URL` | Conditional | -- | Required when `KITE_NETWORK=mainnet` |
+| `KITE_NETWORK` | No | `testnet` | `testnet` (chain 2368) or `mainnet` (chain 2366). ⚠️ Read at **call time** by the Kite adapter and coupled to `WASIAI_A2A_CHAINS`: `mainnet` requires the `kite-mainnet` slug **and no Kite testnet slug** (otherwise the gateway refuses to start), and the slug alone without this var signs on testnet PYUSD. See the `kite-mainnet` row in [Adapter bundles](#adapter-bundles) and [`doc/architecture/MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) §8 |
+| `KITE_MAINNET_RPC_URL` | Conditional | -- | Required when `KITE_NETWORK=mainnet` (i.e. when the `kite-mainnet` bundle is active) |
 | `WASIAI_DOWNSTREAM_X402` | No | -- | Set to `true` to enable downstream USDC payouts to wasiai-v2 agents |
-| `WASIAI_DOWNSTREAM_NETWORK` | No | `fuji` | `fuji` (43113) or `avalanche-mainnet` (43114) |
-| `AVALANCHE_RPC_URL` | Conditional | -- | Required when `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` |
+| `WASIAI_DOWNSTREAM_MAINNET_ALLOW` | No | -- (fail-closed) | CSV of mainnet slugs/chainIds allowed to settle the DOWNSTREAM leg (e.g. `avalanche-mainnet`). Empty/absent = no mainnet leg can settle (`MAINNET_NOT_ALLOWED`). The leg chain itself comes from `agent.payment.chain` (WKH-112), never from an env var |
+| `AVALANCHE_RPC_URL` | Conditional | -- | Required when a leg resolves to `avalanche-mainnet` |
 | `FUJI_RPC_URL` | No | `https://api.avax-test.network/ext/bc/C/rpc` | Avalanche Fuji RPC |
 | `GASLESS_ENABLED` | No | `false` | Enable gasless EIP-3009 transfers |
 | `OPERATOR_PRIVATE_KEY` | Conditional | -- | Operator wallet private key (required when `GASLESS_ENABLED=true`, downstream x402, or x402 signing) |

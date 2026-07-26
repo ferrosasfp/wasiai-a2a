@@ -129,6 +129,25 @@ export interface SolanaPaymentAdapter extends PaymentAdapterCommon {
    * caído, ATA del operador inexistente); el caller decide cómo degradar.
    */
   getOperatorSplBalance(): Promise<string>;
+  /**
+   * Fix-pack AR-profundo FIX 2 — peek SINCRÓNICO del seam de idempotencia:
+   * devuelve la firma ya confirmada para `intentId`, o `undefined` si el intent
+   * nunca se settleó.
+   *
+   * Existe porque el pre-flight de balance del operador vive en el CALLER
+   * (`downstream-payment.settleSolanaLeg`, para poder devolver el skip-code
+   * `INSUFFICIENT_BALANCE` distinguible) mientras el registro de idempotencia
+   * vive DENTRO del adapter. Sin este peek, el pre-check cortaba ANTES de
+   * `settle()` y el hit idempotente era inalcanzable justamente cuando el
+   * balance ya había bajado por haber pagado ese mismo leg ⇒ un leg PAGADO se
+   * reportaba como no pagado (sin recibo ni `settle_signature`).
+   *
+   * Lectura PURA en memoria (CD-7: sin services/DB, sin RPC, sin I/O): NUNCA
+   * lanza y NUNCA es autoritativa sobre el pago — la validación
+   * verify-before-trust de la firma previa sigue siendo responsabilidad de
+   * `settle()`.
+   */
+  getSettledSignature(intentId: string): string | undefined;
 }
 
 export type PaymentAdapter = EvmPaymentAdapter | SolanaPaymentAdapter;
@@ -164,14 +183,41 @@ export interface IdentityBindingAdapter {
  *
  * ⚠️ SECURITY INVARIANT (WKH-150 / WKH-144): every MAINNET slug MUST end in the
  * literal suffix `-mainnet`, and every testnet slug MUST NOT. `isMainnetChainKey()`
- * (`settle-verifier.ts`) classifies mainnet purely via `.endsWith('-mainnet')`,
- * and that classification drives the WKH-144 fail-CLOSED settle re-verify gate:
- * a mainnet chain is BLOCKED when a2a cannot independently re-read the tx, while a
- * testnet chain fails OPEN. If a new mainnet chain is added here WITHOUT the
- * `-mainnet` suffix, `isMainnetChainKey()` will silently treat it as testnet →
- * fail-OPEN with real money at stake (reopens WKH-144). The invariant is guarded
- * by a test in `settle-verifier.test.ts` that cross-checks each `ChainKey` against
- * the independent viem `Chain.testnet` boolean of its adapter chain object.
+ * (canonical home: `chain-resolver.ts`; `settle-verifier.ts` re-exports it)
+ * classifies mainnet purely via `.endsWith('-mainnet')`. If a new mainnet chain is
+ * added here WITHOUT the `-mainnet` suffix, it is silently treated as testnet.
+ *
+ * INVENTARIO DE CONSECUENCIAS — agregar una chain toca TODOS estos lugares
+ * (actualizado en el fix-pack AR-profundo it2, MNR-3):
+ *  1. `registry.ts` `buildBundle` — la factory del bundle (sin esto: throw
+ *     `Unsupported chain`).
+ *  2. `chain-resolver.ts` `CHAIN_VM_FAMILY`, `CHAIN_NAMESPACE` y
+ *     `CANONICAL_CHAIN_ID` — `Record<ChainKey, …>` EXHAUSTIVOS: no clasificar la
+ *     chain nueva NO COMPILA (fail-loud en build, no en runtime con dinero).
+ *     `CANONICAL_CHAIN_ID` además exige que su chainId esté en `KnownEvmChainId`
+ *     ⇒ clasificado mainnet/testnet en `EVM_CHAIN_ENVIRONMENT`.
+ *  3. `settle-verifier.ts` (WKH-144) — gate fail-CLOSED del settle re-verify: una
+ *     mainnet se BLOQUEA cuando a2a no puede re-leer la tx; una testnet falla
+ *     OPEN. Clasificación por slug ⇒ un slug mal nombrado = fail-OPEN con dinero
+ *     real. Guardado por un test que cruza cada `ChainKey` contra el boolean
+ *     independiente `Chain.testnet` de viem.
+ *  4. `downstream-payment.ts` (fix-pack AR-profundo) — CONSUMIDOR DE DINERO: gate
+ *     de opt-in `WASIAI_DOWNSTREAM_MAINNET_ALLOW` del leg downstream (fondos del
+ *     operador). Desde it2 clasifica por el DESTINO REAL del leg
+ *     (`classifyDestinationEnvironment`), no por el string del slug.
+ *  5. `registry.ts` `assertNoSlugDestinationDrift` (vía `checkChainEnvironmentCoherence`) — fail-loud al arrancar si el
+ *     destino real del bundle contradice el mainnet-ness del slug (el caso
+ *     `KITE_NETWORK=mainnet` + slug `kite-ozone-testnet`).
+ *  6. `RPC_ENV_BY_CHAIN` (`downstream-payment.ts`) — `Record<ChainKey, string>`
+ *     exhaustivo del env-var name del RPC.
+ *  7. `payment-spec-reader.ts` `resolveAvalancheOutputChain` (línea del
+ *     `isMainnetChainKey(chainKey)`) — el ÚNICO consumidor del invariante cuyo
+ *     resultado SALE POR HTTP: define el `payment.chain` que `/discover` publica
+ *     para el agente (lo consumen wasiai-v2 / Chaski / los remit-*). Es el que
+ *     produjo BLQ-MED-1: al colapsar los alias mainnet a `'avalanche'` dejaba el
+ *     gate de opt-in del leg SIN ninguna entrada posible (control inejercitable).
+ *     Una chain nueva con namespace `avalanche` DEBE revisarse acá. (Faltaba en
+ *     este inventario — agregado en it2 MNR-5.)
  */
 export type ChainKey =
   | 'kite-ozone-testnet'

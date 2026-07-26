@@ -14,8 +14,12 @@ const APP_URL = 'https://app.wasiai.io';
 const KITE_CHAIN_ID = 2368;
 const KITE_PYUSD = '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9';
 const KITE_EXPLORER = 'https://testnet.kitescan.ai/tx';
-// Auto-detect outbound network from env hint (best-effort label only).
-// Real chain is decided by a2a Railway env WASIAI_DOWNSTREAM_NETWORK.
+// `OUTBOUND_MAINNET` sólo elige la URL del explorer que este script imprime.
+// La chain REAL del leg downstream la declara cada AGENTE en `payment.chain`
+// (WKH-112); el único control del operador es el gate fail-CLOSED
+// `WASIAI_DOWNSTREAM_MAINNET_ALLOW` en el Railway de a2a. (Corregido 2026-07-26:
+// este comentario decía que la decidía `WASIAI_DOWNSTREAM_NETWORK`, una env var
+// que ningún archivo de `src/` lee desde WKH-112.)
 const OUTBOUND_MAINNET = process.env.OUTBOUND_MAINNET === 'true';
 const FUJI_EXPLORER = OUTBOUND_MAINNET
   ? 'https://snowtrace.io/tx'
