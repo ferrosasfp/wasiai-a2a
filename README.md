@@ -275,7 +275,7 @@ The `WASIAI_A2A_CHAIN` env var selects which adapter bundle loads at startup. Ma
 | Bundle | Status | Inbound asset | Outbound asset | Notes |
 |--------|--------|---------------|----------------|-------|
 | `kite-ozone-testnet` | active | PYUSD on Kite testnet (2368) | -- | Default `WASIAI_A2A_CHAIN`. Used in all hackathon demos. |
-| `kite-mainnet` | staged (env-gated) | USDC.e on Kite mainnet (2366) | -- | Flip via `KITE_NETWORK=mainnet` + `KITE_MAINNET_RPC_URL`. |
+| `kite-mainnet` | staged (env-gated) | USDC.e on Kite mainnet (2366) | -- | Flip by adding the `kite-mainnet` slug to `WASIAI_A2A_CHAINS` + `KITE_MAINNET_RPC_URL`. ⚠️ Do NOT set `KITE_NETWORK=mainnet` next to a Kite *testnet* slug: it repoints the `kite-ozone-testnet` bundle at chain 2366 (real USDC.e) while the slug still reads "testnet"; since the 2026-07-26 fix-pack the gateway refuses to start on that combination. |
 | `avalanche-fuji` | active | -- | USDC testnet on Fuji (43113) | Default downstream when `WASIAI_DOWNSTREAM_X402=true`. |
 | `avalanche-mainnet` | staged (fail-closed gate) | -- | USDC mainnet on Avalanche C-Chain (43114) | Ran a mainnet hybrid settle on 2026-04-29. Since the 2026-07-26 fix-pack the downstream leg to ANY mainnet requires the explicit opt-in `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`; absent/empty ⇒ skipped with `MAINNET_NOT_ALLOWED`. (The old `WASIAI_DOWNSTREAM_NETWORK` is not read by any code path.) |
 | `solana-devnet` | opt-in-off | -- (inbound is EVM-only) | SPL-USDC on Solana devnet | Non-EVM: settle-only, operator-signed SPL transfer, no facilitator hop. Enabled via `SOLANA_ADAPTER_ENABLED=true` + `solana-devnet` in `WASIAI_A2A_CHAINS` + `SOLANA_OPERATOR_PRIVATE_KEY` (needs devnet SOL for gas). WKH-234. |

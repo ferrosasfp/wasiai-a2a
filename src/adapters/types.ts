@@ -183,14 +183,33 @@ export interface IdentityBindingAdapter {
  *
  * ⚠️ SECURITY INVARIANT (WKH-150 / WKH-144): every MAINNET slug MUST end in the
  * literal suffix `-mainnet`, and every testnet slug MUST NOT. `isMainnetChainKey()`
- * (`settle-verifier.ts`) classifies mainnet purely via `.endsWith('-mainnet')`,
- * and that classification drives the WKH-144 fail-CLOSED settle re-verify gate:
- * a mainnet chain is BLOCKED when a2a cannot independently re-read the tx, while a
- * testnet chain fails OPEN. If a new mainnet chain is added here WITHOUT the
- * `-mainnet` suffix, `isMainnetChainKey()` will silently treat it as testnet →
- * fail-OPEN with real money at stake (reopens WKH-144). The invariant is guarded
- * by a test in `settle-verifier.test.ts` that cross-checks each `ChainKey` against
- * the independent viem `Chain.testnet` boolean of its adapter chain object.
+ * (canonical home: `chain-resolver.ts`; `settle-verifier.ts` re-exports it)
+ * classifies mainnet purely via `.endsWith('-mainnet')`. If a new mainnet chain is
+ * added here WITHOUT the `-mainnet` suffix, it is silently treated as testnet.
+ *
+ * INVENTARIO DE CONSECUENCIAS — agregar una chain toca TODOS estos lugares
+ * (actualizado en el fix-pack AR-profundo it2, MNR-3):
+ *  1. `registry.ts` `buildBundle` — la factory del bundle (sin esto: throw
+ *     `Unsupported chain`).
+ *  2. `chain-resolver.ts` `CHAIN_VM_FAMILY`, `CHAIN_NAMESPACE` y
+ *     `CANONICAL_CHAIN_ID` — `Record<ChainKey, …>` EXHAUSTIVOS: no clasificar la
+ *     chain nueva NO COMPILA (fail-loud en build, no en runtime con dinero).
+ *     `CANONICAL_CHAIN_ID` además exige que su chainId esté en `KnownEvmChainId`
+ *     ⇒ clasificado mainnet/testnet en `EVM_CHAIN_ENVIRONMENT`.
+ *  3. `settle-verifier.ts` (WKH-144) — gate fail-CLOSED del settle re-verify: una
+ *     mainnet se BLOQUEA cuando a2a no puede re-leer la tx; una testnet falla
+ *     OPEN. Clasificación por slug ⇒ un slug mal nombrado = fail-OPEN con dinero
+ *     real. Guardado por un test que cruza cada `ChainKey` contra el boolean
+ *     independiente `Chain.testnet` de viem.
+ *  4. `downstream-payment.ts` (fix-pack AR-profundo) — CONSUMIDOR DE DINERO: gate
+ *     de opt-in `WASIAI_DOWNSTREAM_MAINNET_ALLOW` del leg downstream (fondos del
+ *     operador). Desde it2 clasifica por el DESTINO REAL del leg
+ *     (`classifyDestinationEnvironment`), no por el string del slug.
+ *  5. `registry.ts` `assertChainEnvironmentCoherent` — fail-loud al arrancar si el
+ *     destino real del bundle contradice el mainnet-ness del slug (el caso
+ *     `KITE_NETWORK=mainnet` + slug `kite-ozone-testnet`).
+ *  6. `RPC_ENV_BY_CHAIN` (`downstream-payment.ts`) — `Record<ChainKey, string>`
+ *     exhaustivo del env-var name del RPC.
  */
 export type ChainKey =
   | 'kite-ozone-testnet'

@@ -9,7 +9,8 @@
 ## TL;DR — What to do on Day 1
 
 1. **Fund wallets** — operator gateway + settle relayer (each chain)
-2. **Set Railway env vars** — `KITE_NETWORK`, `WASIAI_DOWNSTREAM_MAINNET_ALLOW`, RPC URLs
+2. **Set Railway env vars** — `WASIAI_A2A_CHAINS` (slug de la mainnet, NO `KITE_NETWORK`),
+   `WASIAI_DOWNSTREAM_MAINNET_ALLOW`, RPC URLs
 3. **Migrate DB** — WKH-115 inbound tasks table (if adopting inbound bounties)
 4. **Activate synthetic canary** — WKH-74 (post-deploy validation)
 5. **Set on-call vars** — `HEALTH_MONITOR_TARGETS`, `ONCALL_MENTION` (WKH-77)
@@ -332,8 +333,13 @@ See `doc/operations/oncall-runbook.md` for full escalation procedures.
 #### In `wasiai-a2a-production` (Gateway)
 
 ```bash
-# Switch from testnet to mainnet
-KITE_NETWORK=mainnet                          # was: testnet
+# Switch from testnet to mainnet — POR SLUG (fix-pack AR-profundo it2 BLQ-ALTO-1).
+# ⛔ NO setear KITE_NETWORK=mainnet: `getKiteChain()` la lee en call-time y el bundle
+#    del slug `kite-ozone-testnet` se construye sin `opts`, así que ese slug "testnet"
+#    pasaría a apuntar a chainId 2366 (USDC.e MAINNET) — dinero real bajo un slug
+#    testnet, que además engañaba al gate fail-CLOSED de WKH-144 y al opt-in del leg
+#    downstream. `initAdapters` ahora LANZA ante esa incoherencia.
+WASIAI_A2A_CHAINS=kite-ozone-testnet,kite-mainnet   # was: kite-ozone-testnet
 # ⚠️ CORRECCIÓN (fix-pack AR-profundo FIX 1c, 2026-07-26): `WASIAI_DOWNSTREAM_NETWORK`
 # NO la lee ningún archivo de src/ (control muerto desde WKH-112 — la chain del leg
 # downstream se resuelve por agent.payment.chain). El control REAL es el gate
@@ -378,7 +384,7 @@ OPERATOR_PRIVATE_KEY=<from secrets manager, NOT plaintext>
 ```bash
 git push origin main
 # or manually trigger Railway deploy via dashboard
-# Verify in Railway logs: "KITE_NETWORK=mainnet" appears in startup
+# Verify in Railway logs: "Adapters initialized" lists `kite-mainnet` in startup
 ```
 
 ---

@@ -17,7 +17,10 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import {
-  isMainnetChainKey,
+  classifyDestinationEnvironment,
+  findChainEnvironmentDrift,
+  getCanonicalChainId,
+  type LegDestination,
   normalizeChainSlug,
 } from '../adapters/chain-resolver.js';
 import {
@@ -28,7 +31,7 @@ import {
 } from '../adapters/registry.js';
 import type { ChainKey, SolanaPaymentAdapter } from '../adapters/types.js';
 import type { Agent, DownstreamLogger } from '../types/index.js';
-import { isValidSolanaAddress } from './wallet-format.js';
+import { isValidSolanaAddress, isValidWallet } from './wallet-format.js';
 
 // Re-export for backward-compat: callers historically import
 // `DownstreamLogger` from this module (e.g. compose.ts). The canonical
@@ -161,13 +164,19 @@ function isDownstreamMainnetAllowed(chainKey: ChainKey): boolean {
 /**
  * Validates payTo format and rejects the zero-address (R-1 mitigation).
  * Returns { ok: true, addr } or { ok: false, code }.
+ *
+ * Fix-pack it2 BLQ-BAJO-1: el criterio de formato EVM es `isValidWallet`
+ * (`wallet-format.ts`, la ÚNICA fuente de verdad del regex `0x`+40hex — CD-1 de
+ * WKH-143b). Antes esta función repetía el regex inline; ahora el mismo
+ * validador lo comparten este gate y el sign INBOUND de `compose.invokeAgent`.
+ * EXPORTADA para ese segundo consumidor — prohibido un validador paralelo.
  */
-function validatePayTo(
+export function validatePayTo(
   contract: string,
 ):
   | { ok: true; addr: `0x${string}` }
   | { ok: false; code: 'INVALID_PAY_TO_FORMAT' | 'ZERO_PAY_TO' } {
-  if (!/^0x[0-9a-fA-F]{40}$/.test(contract)) {
+  if (!isValidWallet(contract)) {
     return { ok: false, code: 'INVALID_PAY_TO_FORMAT' };
   }
   if (contract.toLowerCase() === '0x0000000000000000000000000000000000000000') {
@@ -264,7 +273,7 @@ async function settleSolanaLeg(
   // settle falle-soft con un `SETTLE_FAILED` genérico que no distingue "no hay
   // fondos" de "falló el RPC" o "la tx se rechazó".
   //
-  // Se OMITE cuando el intent ya tiene firma (FIX 2): el settle de abajo va a
+  // NO BLOQUEA cuando el intent ya tiene firma (FIX 2): el settle de abajo va a
   // tomar el camino idempotente (verify on-chain de la firma previa + retorno
   // sin re-broadcast), que no mueve fondos nuevos.
   //
@@ -276,45 +285,57 @@ async function settleSolanaLeg(
   // tratarlas como "fondos insuficientes" bloquearía settles legítimos (falso
   // negativo). Se degrada a "balance desconocido, intentá el settle" y el error
   // real, si lo hay, sigue apareciendo como `SETTLE_FAILED`.
-  if (priorSignature !== undefined) {
+  //
+  // Fix-pack it2 MNR-1: en el replay idempotente el pre-check pasa de GATE a
+  // SONDA (se lee el balance, pero un balance bajo NUNCA corta). Motivo: el
+  // `settle()` del adapter puede tomar el camino SELF-HEAL — si la firma previa
+  // no verifica on-chain, la borra del seam y re-broadcastea FRESCO
+  // (`solana/payment.ts` §idempotencia). Omitir la lectura por completo perdía
+  // justo ahí la distinguibilidad `INSUFFICIENT_BALANCE` vs `SETTLE_FAILED`. La
+  // sonda la recupera en los logs sin reintroducir el falso negativo que el FIX 2
+  // arregló (un leg YA pagado jamás se reporta como no pagado).
+  const isIdempotentReplay = priorSignature !== undefined;
+  let operatorBalance: bigint | undefined;
+  try {
+    operatorBalance = BigInt(await adapter.getOperatorSplBalance());
+  } catch (e) {
     logger.info(
       {
         agentSlug: agent.slug,
         code: 'BALANCE_PRECHECK_SKIPPED',
-        intentId: legIntentId,
-        reason: 'IDEMPOTENT_INTENT',
+        detail: String(e),
+        ...(isIdempotentReplay ? { intentId: legIntentId } : {}),
       },
-      '[Downstream] solana balance pre-check skipped (intent already settled — idempotent replay)',
+      '[Downstream] solana balance pre-check skipped (operator SPL balance unreadable)',
     );
-  } else {
-    let operatorBalance: bigint | undefined;
-    try {
-      operatorBalance = BigInt(await adapter.getOperatorSplBalance());
-    } catch (e) {
-      logger.info(
-        {
-          agentSlug: agent.slug,
-          code: 'BALANCE_PRECHECK_SKIPPED',
-          detail: String(e),
-        },
-        '[Downstream] solana balance pre-check skipped (operator SPL balance unreadable)',
-      );
-    }
-    if (
-      operatorBalance !== undefined &&
-      operatorBalance < BigInt(amountAtomic)
-    ) {
-      logger.warn(
-        {
-          agentSlug: agent.slug,
-          code: 'INSUFFICIENT_BALANCE',
-          balance: operatorBalance.toString(),
-          required: amountAtomic,
-        },
-        '[Downstream] insufficient solana operator SPL balance',
-      );
-      return null;
-    }
+  }
+  const insufficient =
+    operatorBalance !== undefined && operatorBalance < BigInt(amountAtomic);
+  if (insufficient && isIdempotentReplay) {
+    // NO corta: el intent ya tiene firma. Si el settle termina re-broadcasteando
+    // fresco (self-heal) y falla, este log explica POR QUÉ (fondos), en vez de
+    // dejar sólo un `SETTLE_FAILED` genérico.
+    logger.info(
+      {
+        agentSlug: agent.slug,
+        code: 'BALANCE_LOW_ON_IDEMPOTENT_REPLAY',
+        intentId: legIntentId,
+        balance: operatorBalance?.toString(),
+        required: amountAtomic,
+      },
+      '[Downstream] solana operator SPL balance below the leg amount, but the intent is already settled — replay allowed (a self-heal re-broadcast would fail on-chain)',
+    );
+  } else if (insufficient) {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        code: 'INSUFFICIENT_BALANCE',
+        balance: operatorBalance?.toString(),
+        required: amountAtomic,
+      },
+      '[Downstream] insufficient solana operator SPL balance',
+    );
+    return null;
   }
 
   // settle: build+sign+broadcast+confirm + verify-before-trust interno.
@@ -438,29 +459,79 @@ export async function signAndSettleDownstream(
     return null;
   }
 
-  // 4a. Fix-pack AR-profundo FIX 1(b) — gate FAIL-CLOSED de mainnet. La chain
-  //     del leg la declara el AGENTE; sin este opt-in explícito por env, un
-  //     agent card podía dirigir el settle (fondos del operador) a una chain de
-  //     dinero real. Sin `WASIAI_DOWNSTREAM_MAINNET_ALLOW` NINGUNA mainnet
-  //     settlea. NO toca el rail inbound (los slugs siguen soportados).
-  if (isMainnetChainKey(chainKey) && !isDownstreamMainnetAllowed(chainKey)) {
+  // 4a. WKH-234 — resolución del adapter (lectura del Map del registry, NO mueve
+  //     fondos). Se hace ANTES del gate de mainnet porque el gate necesita el id
+  //     AUTORITATIVO del destino de cada familia (chainId EVM vs CAIP-2 Solana).
+  const adapterUnion = getPaymentAdapterOrUnion(chainKey);
+
+  // 4b. Fix-pack AR-profundo FIX 1(b) + it2 BLQ-ALTO-1 — gate FAIL-CLOSED de
+  //     mainnet. La chain del leg la declara el AGENTE; sin opt-in explícito por
+  //     env, un agent card podía dirigir el settle (fondos del operador) a una
+  //     chain de dinero real. Sin `WASIAI_DOWNSTREAM_MAINNET_ALLOW` NINGUNA
+  //     mainnet settlea. NO toca el rail inbound (los slugs siguen soportados).
+  //
+  //     ⚠️ El mainnet-ness se decide por el DESTINO REAL del leg, NO por el
+  //     string del slug (bug it2 BLQ-ALTO-1): el bundle de `kite-ozone-testnet`
+  //     se construye sin `opts` y `getKiteChain()` lee `KITE_NETWORK` en
+  //     call-time, así que con `KITE_NETWORK=mainnet` ese slug "testnet" apunta a
+  //     chainId 2366 (USDC.e de Kite MAINNET) y el gate por slug lo dejaba pasar
+  //     con la env vacía. Ahora se clasifica `bundle.chainConfig.chainId` (EVM) /
+  //     `adapter.caip2ChainId` (Solana) contra un mapa exhaustivo; un chainId sin
+  //     clasificar cuenta como mainnet (fail-closed).
+  const destination: LegDestination =
+    adapterUnion.vmFamily === 'solana'
+      ? { vmFamily: 'solana', caip2ChainId: adapterUnion.caip2ChainId }
+      : { vmFamily: 'evm', chainId: bundle.chainConfig.chainId };
+
+  // 4b-i. Incoherencia slug ↔ destino: se bloquea SIEMPRE, sin opt-in posible
+  //       (el opt-in se expresa por slug, y un slug que miente sobre su entorno
+  //       no puede ser la llave de nada). `initAdapters` además rompe al
+  //       arrancar ante esta misma condición — este guard es la red por-leg.
+  const drift = findChainEnvironmentDrift({ chainKey, destination });
+  if (drift) {
     logger.warn(
       {
         agentSlug: agent.slug,
         chain: chainKey,
         declared: agent.payment.chain,
         code: 'MAINNET_NOT_ALLOWED',
+        reason: 'CHAIN_ENVIRONMENT_DRIFT',
+        declaredEnvironment: drift.declared,
+        actualEnvironment: drift.actual,
+        expectedChainId: getCanonicalChainId(chainKey),
+        ...(destination.vmFamily === 'evm'
+          ? { actualChainId: destination.chainId }
+          : { actualCaip2: destination.caip2ChainId }),
+      },
+      `[Downstream] chain=${chainKey} declares ${drift.declared} but its bundle points to a ${drift.actual} destination — incoherent config, settle skipped`,
+    );
+    return null;
+  }
+
+  if (
+    classifyDestinationEnvironment(destination) === 'mainnet' &&
+    !isDownstreamMainnetAllowed(chainKey)
+  ) {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        chain: chainKey,
+        declared: agent.payment.chain,
+        code: 'MAINNET_NOT_ALLOWED',
+        reason: 'NO_OPT_IN',
+        ...(destination.vmFamily === 'evm'
+          ? { actualChainId: destination.chainId }
+          : { actualCaip2: destination.caip2ChainId }),
       },
       `[Downstream] chain=${chainKey} is MAINNET and not opted-in via WASIAI_DOWNSTREAM_MAINNET_ALLOW — settle skipped`,
     );
     return null;
   }
 
-  // 4b. WKH-234 — narrow por vmFamily. El leg Solana es settle-only (SPL
+  // 4c. WKH-234 — narrow por vmFamily. El leg Solana es settle-only (SPL
   //     transfer operator-signed): NO el dance EVM sign→verify→settle. Tiene su
   //     propia validación base58 + atómico decimals-aware. La rama EVM (pasos
   //     5-13) queda INTACTA byte-idéntica (AC-4). NEVER-throws preservado (CD-10).
-  const adapterUnion = getPaymentAdapterOrUnion(chainKey);
   if (adapterUnion.vmFamily === 'solana') {
     return settleSolanaLeg(agent, adapterUnion, logger, intentId);
   }

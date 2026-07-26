@@ -45,22 +45,27 @@ describe('readPaymentSpec — extracción del payment spec (WKH-241)', () => {
   });
 
   // ── Fidelidad de la extracción movida tal cual (CD-2) ────────────
-  it('preserva la normalización legacy avalanche-testnet/-mainnet → "avalanche" (CD-7)', () => {
-    for (const chain of ['avalanche-testnet', 'avalanche-mainnet']) {
-      const spec = readPaymentSpec({
-        payment: { method: 'x402', chain, contract: EVM_PAYTO },
-      });
-      expect(spec?.chain).toBe('avalanche');
-    }
+  it('preserva la normalización legacy avalanche-testnet → "avalanche" (CD-7)', () => {
+    const spec = readPaymentSpec({
+      payment: {
+        method: 'x402',
+        chain: 'avalanche-testnet',
+        contract: EVM_PAYTO,
+      },
+    });
+    expect(spec?.chain).toBe('avalanche');
   });
 
-  // ── Fix-pack AR-profundo FIX 1(a): colapso NAMESPACE-aware ────────
-  // El colapso comparaba STRINGS CRUDOS, así que los alias NUMÉRICOS del mismo
-  // namespace escapaban: `'43114'` pasaba crudo y `downstream-payment.ts` lo
-  // re-normalizaba a `avalanche-mainnet` (DINERO REAL) mientras
-  // `'avalanche-mainnet'` colapsaba a `'avalanche'` → Fuji. Ahora TODO alias del
-  // namespace avalanche tiene un único destino.
-  it('FIX-1a: TODO alias que resuelve a avalanche-mainnet colapsa a "avalanche" (incl. el numérico 43114)', () => {
+  // ── Fix-pack it2 BLQ-MED-1: los alias MAINNET NO colapsan ─────────
+  // ⚠️ CAMBIO INTENCIONAL DE API OBSERVABLE (`/discover`). La iteración anterior
+  // colapsaba TODO alias mainnet del namespace a `'avalanche'` (destino Fuji), y
+  // eso volvía INEJERCITABLE el opt-in `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`
+  // documentado en README/.env.example/docs/networks.md + los 2 runbooks: como
+  // este lector es el ÚNICO productor de `Agent.payment`, ningún valor declarable
+  // por un agente podía producir `chainKey='avalanche-mainnet'` en el leg. Ahora
+  // el reader reporta con fidelidad y el ÚNICO choke-point que decide si se puede
+  // pagar en mainnet es el gate fail-CLOSED de `downstream-payment.ts`.
+  it('BLQ-MED-1: los alias MAINNET del namespace avalanche salen como su ChainKey (NO colapsan a "avalanche")', () => {
     for (const chain of [
       'avalanche-mainnet',
       '43114',
@@ -70,12 +75,10 @@ describe('readPaymentSpec — extracción del payment spec (WKH-241)', () => {
       const spec = readPaymentSpec({
         payment: { method: 'x402', chain, contract: EVM_PAYTO },
       });
-      expect(spec?.chain, `alias=${chain} debe colapsar a 'avalanche'`).toBe(
-        'avalanche',
-      );
-      // El destino del leg downstream es el MISMO para todos ellos (Fuji): ya no
-      // hay un alias que se escape a la red de dinero real.
-      expect(normalizeChainSlug(spec?.chain ?? '')).toBe('avalanche-fuji');
+      expect(spec?.chain, `alias=${chain}`).toBe('avalanche-mainnet');
+      // Y el leg resuelve a la mainnet REAL → el gate la ve y el opt-in es
+      // ejercitable (antes resolvía a Fuji para todos ellos).
+      expect(normalizeChainSlug(spec?.chain ?? '')).toBe('avalanche-mainnet');
     }
   });
 

@@ -230,8 +230,11 @@ Tiempo estimado (mirror de WKH-MULTICHAIN W1): ~4-6h para adapter completo + tes
 - USDC mainnet (chainId 43114, contrato `0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E`).
 - `register_a2a_key_deposit(<KEY_ID>, 43114, <amount>)`.
 - Operator wallet con USDC en C-Chain mainnet (snowtrace.io).
-- `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` o que el agente declare chain
-  `avalanche-mainnet` y el caller propague el header `x-payment-chain: avalanche-mainnet`.
+- El agente declara chain `avalanche-mainnet` (o `43114`) **y** el gateway tiene el opt-in
+  explícito `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`. Sin esa env (ausente o vacía)
+  el leg downstream se saltea con skip-code `MAINNET_NOT_ALLOWED` (fail-CLOSED).
+  ⚠️ `WASIAI_DOWNSTREAM_NETWORK` **no la lee ningún archivo de `src/`** (control muerto desde
+  WKH-112) — corregido en el fix-pack AR-profundo FIX 1c (2026-07-26).
 
 **Para Kite mainnet (post-merge):**
 
@@ -246,8 +249,15 @@ Tiempo estimado (mirror de WKH-MULTICHAIN W1): ~4-6h para adapter completo + tes
 1. **Railway env update** (no redeploy si el bundle ya está wired):
    - `WASIAI_A2A_CHAINS=kite-ozone-testnet,kite-mainnet` (mantener testnet como default).
    - `KITE_MAINNET_RPC_URL=https://rpc.gokite.ai/`.
-   - `KITE_NETWORK=mainnet` (el flag legacy sigue siendo respetado por DT-I durante el
-     init de `createKiteOzoneAdapters({ network: 'mainnet' })`).
+   - ⛔ **NO setear `KITE_NETWORK=mainnet`** (la instrucción anterior de este paso, retirada en
+     el fix-pack AR-profundo it2 — BLQ-ALTO-1). El slug del CSV ya selecciona la red por bundle:
+     el registry le pasa `{ network: 'mainnet' }` explícito a `kite-mainnet`. `KITE_NETWORK` la
+     leen `getKiteChain()` / `getKiteNetworkTag()` en **call-time**, así que setearla en
+     `mainnet` hace que el bundle del slug `kite-ozone-testnet` (que se construye SIN `opts`)
+     apunte a chainId 2366 con USDC.e de MAINNET: un slug que dice "testnet" moviendo dinero
+     real, que además engañaba al gate fail-CLOSED de WKH-144 y al opt-in del leg downstream.
+     Desde it2 esa combinación es incoherente y **`initAdapters` lanza al arrancar**
+     (`assertChainEnvironmentCoherent`).
 2. **Verificar log de startup**: `[Registry] Adapters initialized: kite-ozone-testnet, kite-mainnet`.
 3. **Smoke test obligatorio** post-flip:
 
@@ -266,8 +276,9 @@ Tiempo estimado (mirror de WKH-MULTICHAIN W1): ~4-6h para adapter completo + tes
 1. **Railway env update**:
    - `WASIAI_A2A_CHAINS=...,avalanche-mainnet` (agregar al CSV existente).
    - `AVALANCHE_RPC_URL=https://api.avax.network/ext/bc/C/rpc`.
-   - `WASIAI_DOWNSTREAM_NETWORK=avalanche-mainnet` (si el downstream también debe ir a mainnet —
-     ver §9 abajo).
+   - `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet` (si el downstream también debe ir a
+     mainnet — ver §9 abajo). Ausente/vacía = fail-CLOSED: ninguna mainnet settlea en el leg
+     downstream. La vieja `WASIAI_DOWNSTREAM_NETWORK` NO la lee nadie (control muerto).
 2. **Verificar log de startup**: `[Registry] Adapters initialized: ..., avalanche-mainnet`.
 3. **Smoke test obligatorio** post-flip (con USDC mainnet en operator wallet, verificable en
    `snowtrace.io`):
@@ -290,7 +301,7 @@ código (el bundle ya está wired desde W5).
 | Path | Variable de control | Qué controla |
 |------|---------------------|--------------|
 | **Inbound (debit del A2A key budget)** | `WASIAI_A2A_CHAINS` (y header `x-payment-chain` por request) | En qué chainId del JSONB `budget` se debita el caller cuando consume `/compose` o `/orchestrate` con `x-a2a-key`. |
-| **Downstream (sign + settle USDC outbound)** | `WASIAI_DOWNSTREAM_NETWORK` (WKH-55) | En qué chain el orquestador firma EIP-3009 TransferWithAuthorization contra agentes externos (vía `src/lib/downstream-payment.ts`). |
+| **Downstream (sign + settle USDC outbound)** | La chain la declara el AGENTE (`agent.payment.chain` → `normalizeChainSlug`, desde WKH-112). El único control del operador es el gate fail-CLOSED `WASIAI_DOWNSTREAM_MAINNET_ALLOW` (CSV de slugs/chainIds; ausente o vacía ⇒ NINGUNA mainnet settlea → skip-code `MAINNET_NOT_ALLOWED`). | En qué chain el orquestador firma EIP-3009 TransferWithAuthorization contra agentes externos (vía `src/lib/downstream-payment.ts`). ⚠️ `WASIAI_DOWNSTREAM_NETWORK` (WKH-55) era la "variable de control" documentada pero **NO la lee ningún archivo de `src/`**: control muerto, retirado en el fix-pack AR-profundo FIX 1c. |
 
 Ambos pueden estar en chains distintas: el caller paga al gateway en Kite testnet PYUSD (inbound)
 mientras el gateway despacha USDC mainnet a N agentes en Avalanche C-Chain (downstream). Es el

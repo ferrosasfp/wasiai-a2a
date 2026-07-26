@@ -81,9 +81,23 @@ curl https://wasiai-a2a-production.up.railway.app/health
 
 ### Step 2 — Activate Kite mainnet inbound
 
+> ⚠️ **CORRECCIÓN (fix-pack AR-profundo it2 BLQ-ALTO-1, 2026-07-26).** Este Step
+> instruía `KITE_NETWORK=mainnet`. **NO usar esa env var.** `getKiteChain()` /
+> `getKiteNetworkTag()` la leen en **call-time**, y el bundle del slug
+> `kite-ozone-testnet` se construye SIN `opts` (`createKiteOzoneAdapters()`): con
+> `KITE_NETWORK=mainnet` ese slug "testnet" pasa a apuntar a chainId **2366**
+> (Kite MAINNET, USDC.e) ⇒ el leg downstream settleaba DINERO REAL con el gate de
+> opt-in vacío, y el gate fail-CLOSED del settle re-verify (WKH-144) clasificaba
+> ese settle mainnet como testnet (fail-OPEN).
+>
+> Esa combinación ahora es **incoherente y rompe el arranque**
+> (`registry.initAdapters` → `assertChainEnvironmentCoherent`).
+
 ```bash
-# Same pattern, set:
-KITE_NETWORK=mainnet
+# Activar Kite mainnet por SLUG (el registry le pasa { network: 'mainnet' }):
+WASIAI_A2A_CHAINS=kite-ozone-testnet,kite-mainnet
+KITE_MAINNET_RPC_URL=https://rpc.gokite.ai/
+# y NO setear KITE_NETWORK (dejarla ausente o en 'testnet')
 ```
 
 Verify the 402 challenge now references USDC.e on Kite mainnet:

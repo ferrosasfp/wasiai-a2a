@@ -1,4 +1,9 @@
 import { getLogger } from '../lib/logger.js';
+import {
+  findChainEnvironmentDrift,
+  getCanonicalChainId,
+  type LegDestination,
+} from './chain-resolver.js';
 import type {
   AdaptersBundle,
   AttestationAdapter,
@@ -131,6 +136,48 @@ async function buildBundle(chainKey: ChainKey): Promise<AdaptersBundle> {
   );
 }
 
+/**
+ * Fix-pack AR-profundo it2 BLQ-ALTO-1 — defensa en profundidad: FAIL-LOUD al
+ * arrancar si el destino REAL de un bundle contradice el mainnet-ness que su
+ * ChainKey DECLARA.
+ *
+ * El caso real: `KITE_NETWORK=mainnet` (lo instruían los runbooks de activación)
+ * + `kite-ozone-testnet` en el CSV. El bundle de ese slug se construye SIN
+ * `opts` (`createKiteOzoneAdapters()`) y `getKiteChain()` lee `KITE_NETWORK` en
+ * call-time ⇒ un slug que dice "testnet" apuntando a chainId 2366 (Kite MAINNET,
+ * USDC.e). Esa incoherencia rompía DOS gates de dinero a la vez: el opt-in
+ * mainnet del leg downstream (clasificaba por slug) y el fail-CLOSED del settle
+ * re-verify de WKH-144 (mismo clasificador ⇒ fail-OPEN sobre un settle mainnet
+ * real). Un slug que miente sobre su entorno tiene que ROMPER EL ARRANQUE, no
+ * pagar con dinero real en silencio.
+ *
+ * La forma correcta de activar Kite mainnet es el slug: `WASIAI_A2A_CHAINS`
+ * con `kite-mainnet` (el registry le pasa `{ network: 'mainnet' }` explícito).
+ */
+function assertChainEnvironmentCoherent(
+  chainKey: ChainKey,
+  bundle: AdaptersBundle,
+): void {
+  const destination: LegDestination =
+    bundle.payment.vmFamily === 'solana'
+      ? { vmFamily: 'solana', caip2ChainId: bundle.payment.caip2ChainId }
+      : { vmFamily: 'evm', chainId: bundle.chainConfig.chainId };
+  const drift = findChainEnvironmentDrift({ chainKey, destination });
+  if (!drift) return;
+  const actualId =
+    destination.vmFamily === 'evm'
+      ? String(destination.chainId)
+      : destination.caip2ChainId;
+  throw new Error(
+    `Incoherent chain config for '${chainKey}': the slug declares ${drift.declared} ` +
+      `but its bundle points to a ${drift.actual} destination (${actualId}; expected ` +
+      `${String(getCanonicalChainId(chainKey))}). Refusing to start — a testnet slug ` +
+      `settling on mainnet spends real money and defeats the WKH-144 fail-closed gate. ` +
+      `Do NOT set KITE_NETWORK=mainnet to activate Kite mainnet: add the 'kite-mainnet' ` +
+      `slug to WASIAI_A2A_CHAINS instead.`,
+  );
+}
+
 export async function initAdapters(): Promise<void> {
   const csvRaw = process.env.WASIAI_A2A_CHAINS;
   const legacyRaw = process.env.WASIAI_A2A_CHAIN;
@@ -185,6 +232,9 @@ export async function initAdapters(): Promise<void> {
 
   for (const chainKey of chainKeys) {
     const bundle = await buildBundle(chainKey);
+    // it2 BLQ-ALTO-1: fail-loud ANTES de registrar el bundle (un bundle
+    // incoherente nunca queda alcanzable por el money-path).
+    assertChainEnvironmentCoherent(chainKey, bundle);
     _bundles.set(chainKey, bundle);
   }
 

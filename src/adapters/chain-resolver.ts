@@ -144,9 +144,159 @@ export function getChainNamespace(chainKey: ChainKey): ChainNamespace {
  * ahora la consume el gate de opt-in mainnet del leg downstream
  * (`downstream-payment.ts`), que NO puede importar `settle-verifier` sin
  * arrastrar viem + los chain-factories.
+ *
+ * ⚠️ LÍMITE (fix-pack it2 BLQ-ALTO-1): esto clasifica lo que el slug DECLARA, NO
+ * a dónde apunta el bundle realmente. El bundle de `kite-ozone-testnet` se
+ * construye SIN `opts` (`registry.ts` → `createKiteOzoneAdapters()`) y
+ * `getKiteChain()` lee `KITE_NETWORK` en CALL-TIME: con `KITE_NETWORK=mainnet`
+ * ese bundle apunta a chainId 2366 (Kite MAINNET) mientras el slug sigue
+ * diciendo "testnet". Para decidir sobre DINERO usá
+ * `classifyDestinationEnvironment()` / `findChainEnvironmentDrift()` (abajo),
+ * que miran el destino REAL.
  */
 export function isMainnetChainKey(chainKey: ChainKey): boolean {
   return chainKey.endsWith('-mainnet');
+}
+
+/**
+ * Entorno económico de una chain: `mainnet` = dinero real.
+ *
+ * Fix-pack AR-profundo it2 BLQ-ALTO-1 — el gate de opt-in del leg downstream
+ * clasificaba por el STRING del slug (`isMainnetChainKey`), y eso se saltea:
+ * `KITE_NETWORK=mainnet` (que los dos runbooks de activación instruían) hace que
+ * el bundle del slug `kite-ozone-testnet` apunte a chainId 2366 con USDC.e de
+ * Kite MAINNET. Un agent card con `payment.chain: 'kite-ozone-testnet'` (o
+ * `2368` / `kite-testnet`) settleaba dinero real desde el operator wallet con el
+ * gate vacío. Desde este fix la clasificación se hace sobre el DESTINO REAL del
+ * leg (chainId del bundle / CAIP-2 del adapter Solana).
+ */
+export type ChainEnvironment = 'mainnet' | 'testnet';
+
+/**
+ * chainIds EVM que el gateway sabe clasificar. Unión de LITERALES a propósito:
+ * `EVM_CHAIN_ENVIRONMENT` es exhaustivo sobre ella, así que agregar un chainId
+ * nuevo obliga a clasificarlo (mainnet vs testnet) o NO COMPILA.
+ */
+export type KnownEvmChainId =
+  | 2368 // KiteAI testnet (Ozone)
+  | 2366 // KiteAI mainnet
+  | 43113 // Avalanche Fuji
+  | 43114 // Avalanche C-Chain
+  | 84532 // Base Sepolia
+  | 8453 // Base
+  | 42429; // Tempo testnet (Moderato)
+
+const EVM_CHAIN_ENVIRONMENT: Record<KnownEvmChainId, ChainEnvironment> = {
+  2368: 'testnet',
+  2366: 'mainnet',
+  43113: 'testnet',
+  43114: 'mainnet',
+  84532: 'testnet',
+  8453: 'mainnet',
+  42429: 'testnet',
+};
+
+/**
+ * chainId EVM canónico de cada `ChainKey` (o `'non-evm'` para los rails cuyo
+ * `chainConfig.chainId` es un sentinel sintético — Solana, DT-8).
+ *
+ * Doble forzado en tiempo de compilación:
+ *  1. `Record<ChainKey, …>` → agregar una chain nueva a `ChainKey` sin declarar
+ *     su chainId acá no compila.
+ *  2. el valor debe ser de `KnownEvmChainId` → declarar un chainId que nadie
+ *     clasificó en `EVM_CHAIN_ENVIRONMENT` tampoco compila.
+ *
+ * Es el antídoto a "una lista suelta que alguien olvida actualizar": no existe
+ * camino para agregar una chain y dejarla sin clasificar.
+ */
+const CANONICAL_CHAIN_ID: Record<ChainKey, KnownEvmChainId | 'non-evm'> = {
+  'kite-ozone-testnet': 2368,
+  'kite-mainnet': 2366,
+  'avalanche-fuji': 43113,
+  'avalanche-mainnet': 43114,
+  'base-sepolia': 84532,
+  'base-mainnet': 8453,
+  'tempo-testnet': 42429,
+  'solana-devnet': 'non-evm',
+};
+
+/**
+ * chainId EVM que el bundle de `chainKey` DEBERÍA tener (`'non-evm'` para
+ * Solana). Sirve para reportar el drift con el número esperado.
+ */
+export function getCanonicalChainId(
+  chainKey: ChainKey,
+): KnownEvmChainId | 'non-evm' {
+  return CANONICAL_CHAIN_ID[chainKey];
+}
+
+/**
+ * Clasifica un chainId EVM REAL. Un chainId DESCONOCIDO se clasifica como
+ * `mainnet` (FAIL-CLOSED): si nadie lo clasificó, tratarlo como dinero real
+ * exige opt-in explícito en vez de settlear a ciegas.
+ */
+export function classifyEvmChainId(chainId: number): ChainEnvironment {
+  return Object.hasOwn(EVM_CHAIN_ENVIRONMENT, chainId)
+    ? EVM_CHAIN_ENVIRONMENT[chainId as KnownEvmChainId]
+    : 'mainnet';
+}
+
+/**
+ * Referencia CAIP-2 de Solana MAINNET-BETA (genesis hash truncado a 32 chars).
+ * El rail Solana es devnet-only (CD-4 de WKH-234): NO existe `solana-mainnet`,
+ * así que el slug no puede declarar mainnet — la única forma de terminar en
+ * dinero real es que `SOLANA_CAIP2_CHAIN_ID` / `SOLANA_RPC_URL` apunten a
+ * mainnet-beta. Se clasifica por DENYLIST (no allowlist) a propósito: un
+ * cluster devnet/localnet con un CAIP-2 exótico NO debe bloquearse por sorpresa.
+ */
+const SOLANA_MAINNET_CAIP2_REFERENCE = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp';
+
+export function classifySolanaCaip2(caip2ChainId: string): ChainEnvironment {
+  const ref = caip2ChainId.trim().replace(/^solana:/i, '');
+  if (ref.startsWith(SOLANA_MAINNET_CAIP2_REFERENCE)) return 'mainnet';
+  return ref.toLowerCase().includes('mainnet') ? 'mainnet' : 'testnet';
+}
+
+/**
+ * Destino REAL de un leg, con el id AUTORITATIVO de cada familia:
+ *  - EVM    → `chainId` (el de `bundle.chainConfig`, el mismo que firma/settlea).
+ *  - Solana → `caip2ChainId` del adapter (el `chainConfig.chainId` de Solana es
+ *             un sentinel sintético env-driven, NO autoritativo — DT-8).
+ * Unión discriminada: es imposible pasar el id de la familia equivocada.
+ */
+export type LegDestination =
+  | { vmFamily: 'evm'; chainId: number }
+  | { vmFamily: 'solana'; caip2ChainId: string };
+
+/**
+ * Entorno del DESTINO REAL del leg (no del slug). Es la función que deben usar
+ * todos los gates que deciden sobre dinero.
+ */
+export function classifyDestinationEnvironment(
+  destination: LegDestination,
+): ChainEnvironment {
+  return destination.vmFamily === 'evm'
+    ? classifyEvmChainId(destination.chainId)
+    : classifySolanaCaip2(destination.caip2ChainId);
+}
+
+/**
+ * ¿El destino REAL del bundle contradice el mainnet-ness que DECLARA su slug?
+ *
+ * Un slug que dice `-testnet` apuntando a un chainId mainnet (o al revés) es una
+ * configuración INCOHERENTE: `registry.initAdapters` rompe al arrancar y el gate
+ * del leg downstream la bloquea sin opt-in posible (el opt-in se expresa por
+ * slug, y un slug que miente no puede ser la llave de nada).
+ */
+export function findChainEnvironmentDrift(input: {
+  chainKey: ChainKey;
+  destination: LegDestination;
+}): { declared: ChainEnvironment; actual: ChainEnvironment } | undefined {
+  const declared: ChainEnvironment = isMainnetChainKey(input.chainKey)
+    ? 'mainnet'
+    : 'testnet';
+  const actual = classifyDestinationEnvironment(input.destination);
+  return declared === actual ? undefined : { declared, actual };
 }
 
 /**

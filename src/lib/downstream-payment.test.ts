@@ -14,6 +14,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Agent } from '../types/index.js';
+// it2 BLQ-MED-1: el productor REAL de `Agent.payment` (módulo puro, no mockeado)
+// para ejercitar el camino card → readPaymentSpec → gate, en vez de inyectar un
+// `payment.chain` que ningún productor genera.
+import { readPaymentSpec } from './payment-spec-reader.js';
 
 const PAYTO_ADDR = '0x000000000000000000000000000000000000aBcD' as const;
 const BASE_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as const;
@@ -1004,16 +1008,20 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
     expect(broadcasts).toBe(1);
     // Y NUNCA se reporta INSUFFICIENT_BALANCE sobre un leg ya pagado.
     expect(logger2.warn).not.toHaveBeenCalled();
+    // Fix-pack it2 MNR-1: en el replay el pre-check es SONDA, no gate — se lee el
+    // balance (2ª lectura) y el balance bajo se reporta en INFO sin cortar, para
+    // no perder la distinguibilidad si el `settle()` toma el camino self-heal
+    // (firma previa que no verifica ⇒ re-broadcast FRESCO).
     expect(logger2.info).toHaveBeenCalledWith(
       expect.objectContaining({
-        code: 'BALANCE_PRECHECK_SKIPPED',
-        reason: 'IDEMPOTENT_INTENT',
+        code: 'BALANCE_LOW_ON_IDEMPOTENT_REPLAY',
+        intentId: INTENT,
+        balance: '0',
+        required: '3000000',
       }),
       expect.any(String),
     );
-    // El pre-check de fondos sólo corrió para el settle FRESCO (1×), no para el
-    // replay: un intent ya settleado no necesita fondos.
-    expect(mockSolanaBalance).toHaveBeenCalledTimes(1);
+    expect(mockSolanaBalance).toHaveBeenCalledTimes(2);
   });
 
   it('T-FIX2b: intent NUEVO con balance insuficiente sigue cortando con INSUFFICIENT_BALANCE (el gate no se debilitó)', async () => {
@@ -1108,23 +1116,57 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  it('T-FIX1B-4: el opt-in acepta alias numéricos y CSV, y es POR CHAIN (no un interruptor global)', async () => {
+  // Fix-pack it2 BLQ-MED-1 — REESCRITO. La versión anterior INYECTABA
+  // `payment.chain = 'avalanche-mainnet'` en el fixture, una forma que los
+  // productores reales (`readPaymentSpec`, el ÚNICO productor de `Agent.payment`:
+  // `discovery.mapAgent` + `agent.mapRowToAgent`) JAMÁS generaban — colapsaban
+  // todo alias mainnet a `'avalanche'`. Era un falso verde: el opt-in de avalanche
+  // NO era ejercitable. Ahora el test recorre el camino REAL:
+  //   agent card (lo que un registry declara) → readPaymentSpec → gate.
+  it('T-FIX1B-4 (it2): el opt-in avalanche-mainnet es ejercitable END-TO-END desde un card real (card → readPaymentSpec → gate), acepta alias numéricos/CSV y es POR CHAIN', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
-    // CSV con el alias numérico de avalanche mainnet + espacios.
-    process.env.WASIAI_DOWNSTREAM_MAINNET_ALLOW = ' 43114 , kite-mainnet ';
 
-    const okLogger = makeLogger();
-    const allowed = await signAndSettleDownstream(
-      mainnetAgent('avalanche-mainnet'),
-      okLogger,
+    // Un registry declara mainnet por su alias NUMÉRICO — ni el literal.
+    const card = {
+      payment: { method: 'x402', chain: '43114', contract: PAYTO_ADDR },
+    };
+    const spec = readPaymentSpec(card);
+    // El productor real ya NO colapsa el alias mainnet (antes: 'avalanche' → Fuji).
+    expect(spec?.chain).toBe('avalanche-mainnet');
+    const agentFromCard = makeAgent({ priceUsdc: 0.5, payment: spec });
+
+    // 1) Sin opt-in → el gate corta el card mainnet.
+    const closedLogger = makeLogger();
+    expect(
+      await signAndSettleDownstream(agentFromCard, closedLogger),
+    ).toBeNull();
+    expect(closedLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'MAINNET_NOT_ALLOWED',
+        reason: 'NO_OPT_IN',
+        chain: 'avalanche-mainnet',
+        actualChainId: 43114,
+      }),
+      expect.any(String),
     );
+    expect(mockAvaxMainnetSign).not.toHaveBeenCalled();
+
+    // 2) Con el opt-in (CSV, alias numérico + espacios) el MISMO card settlea.
+    process.env.WASIAI_DOWNSTREAM_MAINNET_ALLOW = ' 43114 , kite-mainnet ';
+    const okLogger = makeLogger();
+    const allowed = await signAndSettleDownstream(agentFromCard, okLogger);
     expect(allowed?.txHash).toBe('0xAVAXM');
+    expect(mockAvaxMainnetSign).toHaveBeenCalledTimes(1);
     expect(okLogger.warn).not.toHaveBeenCalled();
 
-    // base-mainnet NO está en la lista → sigue cortado.
+    // 3) base-mainnet NO está en la lista → sigue cortado (es POR CHAIN, no un
+    //    interruptor global).
     const blockedLogger = makeLogger();
+    const blockedSpec = readPaymentSpec({
+      payment: { method: 'x402', chain: 'base-mainnet', contract: PAYTO_ADDR },
+    });
     const blocked = await signAndSettleDownstream(
-      mainnetAgent('base-mainnet'),
+      makeAgent({ priceUsdc: 0.5, payment: blockedSpec }),
       blockedLogger,
     );
     expect(blocked).toBeNull();
@@ -1133,6 +1175,25 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
       expect.any(String),
     );
     expect(mockBaseMainnetSign).not.toHaveBeenCalled();
+  });
+
+  it('T-FIX1B-4b (it2): el card testnet real (alias legacy avalanche-testnet) sigue settleando en Fuji — el no-colapso mainnet no toca el path testnet', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const spec = readPaymentSpec({
+      payment: {
+        method: 'x402',
+        chain: 'avalanche-testnet',
+        contract: PAYTO_ADDR,
+      },
+    });
+    expect(spec?.chain).toBe('avalanche'); // colapso legacy intacto (CD-2)
+    const logger = makeLogger();
+    const result = await signAndSettleDownstream(
+      makeAgent({ priceUsdc: 0.5, payment: spec }),
+      logger,
+    );
+    expect(result).toEqual({ txHash: '0xFUJI', settledAmount: '500000' });
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it('T-FIX1B-5: env con valor basura o vacío → fail-CLOSED (no habilita nada)', async () => {
@@ -1150,6 +1211,134 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
         expect.any(String),
       );
     }
+  });
+
+  // ── Fix-pack it2 BLQ-ALTO-1: el gate se salteaba con KITE_NETWORK=mainnet ────
+  // El bundle del ChainKey `kite-ozone-testnet` se construye SIN `opts`
+  // (`registry.ts` → `createKiteOzoneAdapters()`) y `getKiteChain()` lee
+  // `KITE_NETWORK` en CALL-TIME: con `KITE_NETWORK=mainnet` (lo que instruían los
+  // dos runbooks) ese bundle apunta a chainId 2366 / USDC.e de Kite MAINNET
+  // mientras `isMainnetChainKey('kite-ozone-testnet')` devuelve false ⇒ un card
+  // con `payment.chain: 'kite-ozone-testnet'` (o `2368`/`kite-testnet`) settleaba
+  // DINERO REAL con el gate vacío. Se simula devolviendo el bundle mainnet para
+  // ese slug (exactamente lo que hace el factory con esa env).
+  function driftBundle(chainKey?: string) {
+    if (chainKey === 'kite-ozone-testnet') {
+      return {
+        chainConfig: {
+          name: 'KiteAI Mainnet',
+          chainId: 2366, // ← el destino REAL con KITE_NETWORK=mainnet
+          explorerUrl: 'https://kitescan.ai',
+        },
+      };
+    }
+    return undefined;
+  }
+
+  it('T-it2-ALTO-1a: slug testnet cuyo bundle apunta a chainId 2366 (KITE_NETWORK=mainnet) → MAINNET_NOT_ALLOWED por CHAIN_ENVIRONMENT_DRIFT, sin firmar ni settlear (todos sus alias)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    bundleOverride = driftBundle;
+
+    for (const declared of ['kite-ozone-testnet', '2368', 'kite-testnet']) {
+      const logger = makeLogger();
+      const result = await signAndSettleDownstream(
+        mainnetAgent(declared),
+        logger,
+      );
+      expect(result, `chain=${declared}`).toBeNull();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: 'MAINNET_NOT_ALLOWED',
+          reason: 'CHAIN_ENVIRONMENT_DRIFT',
+          chain: 'kite-ozone-testnet',
+          declaredEnvironment: 'testnet',
+          actualEnvironment: 'mainnet',
+          actualChainId: 2366,
+          expectedChainId: 2368,
+        }),
+        expect.any(String),
+      );
+    }
+    expect(mockKiteSign).not.toHaveBeenCalled();
+    expect(mockKiteSettle).not.toHaveBeenCalled();
+  });
+
+  it('T-it2-ALTO-1b: el drift NO se puede habilitar con el opt-in (un slug que miente no es llave de nada)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    bundleOverride = driftBundle;
+
+    for (const raw of ['kite-ozone-testnet', '2368', 'kite-mainnet', '2366']) {
+      process.env.WASIAI_DOWNSTREAM_MAINNET_ALLOW = raw;
+      const logger = makeLogger();
+      const result = await signAndSettleDownstream(
+        mainnetAgent('kite-ozone-testnet'),
+        logger,
+      );
+      expect(result, `allow='${raw}'`).toBeNull();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'CHAIN_ENVIRONMENT_DRIFT' }),
+        expect.any(String),
+      );
+    }
+    expect(mockKiteSign).not.toHaveBeenCalled();
+  });
+
+  it('T-it2-ALTO-1c: el MISMO slug con su bundle coherente (chainId 2368) settlea normal — el gate no rompe el path testnet', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(
+      makeAgent({
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain: 'kite-ozone-testnet',
+          contract: PAYTO_ADDR,
+        },
+      }),
+      logger,
+    );
+
+    expect(result?.txHash).toBe('0xKITE');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('T-it2-ALTO-1d: chainId DESCONOCIDO en un bundle → fail-CLOSED (cuenta como mainnet, no settlea a ciegas)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    bundleOverride = (chainKey?: string) =>
+      chainKey === 'base-sepolia'
+        ? {
+            chainConfig: {
+              name: 'Mystery chain',
+              chainId: 999_999, // nadie lo clasificó
+              explorerUrl: '',
+            },
+          }
+        : undefined;
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(
+      makeAgent({
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain: 'base-sepolia',
+          contract: PAYTO_ADDR,
+        },
+      }),
+      logger,
+    );
+
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'MAINNET_NOT_ALLOWED',
+        actualEnvironment: 'mainnet',
+        actualChainId: 999_999,
+      }),
+      expect.any(String),
+    );
+    expect(mockBaseSign).not.toHaveBeenCalled();
   });
 
   it('T-FIX1B-6: los legs TESTNET son byte-idénticos con el gate presente (sin env, sin cambios)', async () => {

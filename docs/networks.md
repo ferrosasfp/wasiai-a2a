@@ -9,9 +9,9 @@ explorer that the service knows about today.
 > - **Active by default** — works out of the box, no env flags required.
 > - **Staged — requires operator funding** — code path implemented and
 >   tested, but the operator wallet must be funded with the listed asset on
->   that chain and the relevant env flag flipped (`KITE_NETWORK=mainnet` or
->   `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`). Until both are
->   true these chains are not active.
+>   that chain and the relevant env flag flipped (the `kite-mainnet` slug in
+>   `WASIAI_A2A_CHAINS`, or `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`
+>   for the downstream leg). Until both are true these chains are not active.
 
 ---
 
@@ -30,9 +30,17 @@ EIP-712 signatures over EIP-3009 `TransferWithAuthorization`.
 
 - **Default** — `KITE_NETWORK` unset (or any value other than `mainnet`)
   selects testnet. PYUSD on chain `2368` is the asset accepted.
-- **Mainnet opt-in** — set `KITE_NETWORK=mainnet` on the gateway runtime
+- **Mainnet opt-in** — add the `kite-mainnet` slug to `WASIAI_A2A_CHAINS`
+  (the registry passes `{ network: 'mainnet' }` explicitly to that bundle)
   AND ensure the operator wallet has USDC.e on KiteAI mainnet. PYUSD does
   not exist on mainnet; do not attempt to pay with it there.
+- ⚠️ **Do NOT use `KITE_NETWORK=mainnet` alongside a Kite *testnet* slug**
+  (fix-pack 2026-07-26). `getKiteChain()` reads that env var at call time and
+  the `kite-ozone-testnet` bundle is built with no explicit network, so the
+  env var silently repoints a "testnet" slug at chain `2366` (real USDC.e).
+  The gateway now refuses to start on that combination
+  (`assertChainEnvironmentCoherent`). It remains valid only in legacy
+  single-chain mode (`WASIAI_A2A_CHAIN=kite-mainnet`).
 
 ### EIP-712 domain (inbound)
 

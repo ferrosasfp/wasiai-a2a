@@ -424,6 +424,54 @@ describe('adapter registry', () => {
       expect(avax?.chainConfig.name).toBe('Avalanche');
     });
 
+    // ─── Fix-pack it2 BLQ-ALTO-1: fail-loud ante slug ↔ destino incoherentes ──
+    // `KITE_NETWORK=mainnet` (lo instruían los dos runbooks) hace que el bundle
+    // del slug `kite-ozone-testnet` — que se construye SIN `opts` — apunte a
+    // chainId 2366 (Kite MAINNET, USDC.e). Ese "slug testnet en mainnet" rompía
+    // DOS gates de dinero: el opt-in del leg downstream y el fail-CLOSED del
+    // settle re-verify de WKH-144 (ambos clasifican por el string del slug).
+    // Se simula devolviendo el bundle mainnet para el slug testnet, que es
+    // EXACTAMENTE lo que el factory real hace con esa env
+    // (ver kite-factory.test.ts: "respects pre-existing KITE_NETWORK=mainnet").
+    it('T-it2-ALTO-1-reg: initAdapters LANZA si el bundle de un slug testnet apunta a un chainId mainnet (KITE_NETWORK=mainnet)', async () => {
+      const { createKiteOzoneAdapters } = await import(
+        '../kite-ozone/index.js'
+      );
+      vi.mocked(createKiteOzoneAdapters).mockResolvedValueOnce({
+        payment: {
+          name: 'kite-ozone',
+          chainId: 2366,
+          vmFamily: 'evm',
+        } as unknown as Awaited<
+          ReturnType<typeof createKiteOzoneAdapters>
+        >['payment'],
+        attestation: { name: 'kite-ozone', chainId: 2366 } as never,
+        gasless: { name: 'kite-ozone', chainId: 2366 } as never,
+        identity: null,
+        chainConfig: {
+          name: 'KiteAI Mainnet',
+          chainId: 2366,
+          explorerUrl: 'https://kitescan.ai',
+        },
+      });
+      process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet';
+
+      await expect(initAdapters()).rejects.toThrow(
+        /Incoherent chain config for 'kite-ozone-testnet'.*testnet.*mainnet.*2366/s,
+      );
+      // El bundle incoherente NUNCA queda alcanzable por el money-path.
+      expect(getInitializedChainKeys()).toEqual([]);
+    });
+
+    it('T-it2-ALTO-1-reg-b: el arranque coherente NO rompe (kite-mainnet en 2366, kite-ozone-testnet en 2368)', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet,kite-mainnet';
+      await initAdapters();
+      expect(getAdaptersBundle('kite-ozone-testnet')?.chainConfig.chainId).toBe(
+        2368,
+      );
+      expect(getAdaptersBundle('kite-mainnet')?.chainConfig.chainId).toBe(2366);
+    });
+
     it('logs the canonical multi-chain init message with mainnet slugs', async () => {
       loggerSpy.info.mockClear();
       process.env.WASIAI_A2A_CHAINS = 'kite-mainnet,avalanche-mainnet';

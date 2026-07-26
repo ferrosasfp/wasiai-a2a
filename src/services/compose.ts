@@ -25,6 +25,7 @@ import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
+import { isValidWallet } from '../lib/wallet-format.js';
 import type {
   A2AMessage,
   Agent,
@@ -857,12 +858,43 @@ export const composeService = {
     // (`normalizeChainSlug` + `getChainVmFamily`), sin duplicar validadores de
     // formato. Chain declarada ausente o no resoluble → comportamiento previo
     // intacto (los agentes EVM son byte-idénticos).
+    //
+    // Fix-pack it2 BLQ-BAJO-1: el guard de la CHAIN declarada no alcanzaba — es
+    // un PROXY, no el valor. El payTo que se castea sale de OTRA fuente
+    // (`agent.metadata.payTo` / `agent.metadata.payment.contract`, resueltos
+    // abajo), y `discovery.mapAgent` setea `metadata: raw` (el agent card COMPLETO
+    // del registry, y cualquier caller autenticado puede registrar un registry).
+    // Repros del AR: (a) `metadata.payTo` base58 SIN `payment` → chain declarada
+    // ausente → el guard no disparaba; (b) `payment.chain: 'avalanche-fuji'`
+    // (pasa el guard) + `metadata.payTo` base58 → idem. En los dos casos el
+    // base58 crudo llegaba a `viem.signTypedData`. Ahora se guardea EL VALOR con
+    // el MISMO validador de formato EVM del money-path
+    // (`isValidWallet` — la fuente única de `wallet-format.ts`, la que usa
+    // `validatePayTo` de `downstream-payment.ts`; sin duplicar el regex).
     const declaredChainKey = agent.payment?.chain
       ? normalizeChainSlug(agent.payment.chain)
       : undefined;
-    const inboundVmUnsupported =
+    const declaredVmUnsupported =
       declaredChainKey !== undefined &&
       getChainVmFamily(declaredChainKey) !== 'evm';
+    // WAS-V2-3-CLIENT-2: schema drift fallback for payTo (mirrors price_per_call
+    // fallback in discovery). canonical: agent.metadata.payTo (kite registry);
+    // fallback: agent.metadata.payment.contract (wasiai-v2 marketplace).
+    const meta = agent.metadata as Record<string, unknown> | undefined;
+    const canonicalPayTo =
+      typeof meta?.payTo === 'string' ? meta.payTo : undefined;
+    const fallbackPayment = meta?.payment as
+      | Record<string, unknown>
+      | undefined;
+    const fallbackPayTo =
+      typeof fallbackPayment?.contract === 'string'
+        ? fallbackPayment.contract
+        : undefined;
+    const payTo = canonicalPayTo ?? fallbackPayTo;
+    // payTo ausente → NO es este guard: sigue cayendo en el throw explícito de
+    // abajo (comportamiento previo intacto).
+    const payToNotEvm = payTo !== undefined && !isValidWallet(payTo);
+    const inboundVmUnsupported = declaredVmUnsupported || payToNotEvm;
     if (agent.priceUsdc > 0 && !a2aKey && inboundVmUnsupported) {
       const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);
       warn(
@@ -870,8 +902,9 @@ export const composeService = {
           agent: agent.slug,
           chain: declaredChainKey,
           code: 'INBOUND_VM_UNSUPPORTED',
+          reason: declaredVmUnsupported ? 'DECLARED_CHAIN' : 'PAY_TO_FORMAT',
         },
-        '[Compose] inbound x402 sign skipped — agent declares a non-EVM chain (payTo is not an EVM address). The agent fee settles operator-side in the downstream leg.',
+        '[Compose] inbound x402 sign skipped — payTo is not an EVM address (non-EVM chain declared and/or non-EVM payTo format). The agent fee settles operator-side in the downstream leg.',
       );
     }
     if (agent.priceUsdc > 0 && !a2aKey && !inboundVmUnsupported) {
@@ -883,20 +916,8 @@ export const composeService = {
       // del payTo del AGENTE, que se filtra en el guard `inboundVmUnsupported`
       // de arriba. The Solana agent fee is settled operator-side in the
       // DOWNSTREAM leg (signAndSettleDownstream), not here.
-      // WAS-V2-3-CLIENT-2: schema drift fallback for payTo (mirrors price_per_call fallback in discovery)
-      // canonical: agent.metadata.payTo  ←  preferred (kite registry)
-      // fallback:  agent.metadata.payment.contract  ←  wasiai-v2 marketplace exposes payTo here
-      const meta = agent.metadata as Record<string, unknown> | undefined;
-      const canonicalPayTo =
-        typeof meta?.payTo === 'string' ? meta.payTo : undefined;
-      const fallbackPayment = meta?.payment as
-        | Record<string, unknown>
-        | undefined;
-      const fallbackPayTo =
-        typeof fallbackPayment?.contract === 'string'
-          ? fallbackPayment.contract
-          : undefined;
-      const payTo = canonicalPayTo ?? fallbackPayTo;
+      // it2 BLQ-BAJO-1: `payTo` se resuelve ARRIBA (el guard necesita el VALOR,
+      // no sólo la chain declarada). Acá sólo queda su fail-loud histórico.
       if (!payTo)
         throw new Error(
           `No payTo address for agent ${agent.slug} — neither metadata.payTo nor metadata.payment.contract present`,
