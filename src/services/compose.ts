@@ -16,6 +16,15 @@ import {
   type DownstreamResult,
   signAndSettleDownstream,
 } from '../lib/downstream-payment.js';
+// Fix-pack P1 (hallazgo 4): los helpers de skip-code se importan del módulo LEAF,
+// NO de downstream-payment.js. Media docena de suites mockean ese módulo completo
+// con factories sin `importOriginal`, así que importarlos de ahí los deja
+// `undefined` bajo test (rompió 84 tests; ver doc/sdd/189-.../auto-blindaje.md).
+import {
+  createSkipCapturingLogger,
+  type DownstreamSkipCode,
+  toPublicSkipCode,
+} from '../lib/downstream-skip-code.js';
 import { parseFieldErrors } from '../lib/field-error-parser.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
@@ -321,13 +330,14 @@ export const composeService = {
         }
       };
       try {
-        const { output, txHash, downstream } = await this.invokeAgent(
-          agent,
-          input,
-          a2aKey,
-          undefined,
-          `${composeRunId}:${i}`, // WKH-234 intentId (leg Solana, AC-7)
-        );
+        const { output, txHash, downstream, downstreamSkipCode } =
+          await this.invokeAgent(
+            agent,
+            input,
+            a2aKey,
+            undefined,
+            `${composeRunId}:${i}`, // WKH-234 intentId (leg Solana, AC-7)
+          );
         // WKH-234 (AC-8): si el settle downstream fue Solana, anota el ledger.
         recordSolanaLegIfAny(downstream);
         // CD-9: la cola de éxito (StepResult + agregados + bridge + evento)
@@ -337,6 +347,7 @@ export const composeService = {
           output,
           txHash,
           downstream,
+          downstreamSkipCode,
           startTime,
           steps,
           i,
@@ -491,13 +502,14 @@ export const composeService = {
             if (retryDebit.success) {
               try {
                 // ── PASO 5 (DT-5.5): RE-INVOKE reusando invokeAgent.
-                const { output, txHash, downstream } = await this.invokeAgent(
-                  agent,
-                  newInput,
-                  a2aKey,
-                  undefined,
-                  `${composeRunId}:${i}`, // WKH-234 intentId — MISMO que el master (AC-7 idempotente)
-                );
+                const { output, txHash, downstream, downstreamSkipCode } =
+                  await this.invokeAgent(
+                    agent,
+                    newInput,
+                    a2aKey,
+                    undefined,
+                    `${composeRunId}:${i}`, // WKH-234 intentId — MISMO que el master (AC-7 idempotente)
+                  );
                 // WKH-234 (AC-8): retry-ok — anota el ledger si fue Solana.
                 recordSolanaLegIfAny(downstream);
                 // ── PASO 6a: 2xx → éxito. El retry-debit SE QUEDA (caller
@@ -507,6 +519,7 @@ export const composeService = {
                   output,
                   txHash,
                   downstream,
+                  downstreamSkipCode,
                   startTime,
                   steps,
                   i,
@@ -622,6 +635,8 @@ export const composeService = {
     output: unknown;
     txHash?: string | undefined;
     downstream?: DownstreamResult | undefined;
+    /** Fix-pack P1 (hallazgo 4): motivo del skip del leg downstream, si hubo. */
+    downstreamSkipCode?: DownstreamSkipCode | undefined;
     startTime: number;
     steps: ComposeStep[];
     i: number;
@@ -642,6 +657,7 @@ export const composeService = {
       output,
       txHash,
       downstream,
+      downstreamSkipCode,
       startTime,
       steps,
       i,
@@ -665,6 +681,14 @@ export const composeService = {
         downstreamTxHash: downstream.txHash,
         downstreamBlockNumber: downstream.blockNumber,
         downstreamSettledAmount: downstream.settledAmount,
+      }),
+      // Fix-pack P1 (hallazgo 4): señal del skip en la RESPUESTA, no sólo en el
+      // log. `toPublicSkipCode` genericiza los códigos que revelarían config del
+      // gateway / fondos / claves del operador (ver el mapeo en
+      // lib/downstream-payment.ts). Mutuamente excluyente con los tres campos de
+      // arriba: `downstreamSkipCode` sólo llega cuando el leg NO settleó.
+      ...(downstreamSkipCode && {
+        downstreamSettle: `skipped:${toPublicSkipCode(downstreamSkipCode)}`,
       }),
     };
     // WKH-114 (AC-2/AC-3/AC-4): veredicto de completitud por step. Puro,
@@ -822,6 +846,12 @@ export const composeService = {
     output: unknown;
     txHash?: string | undefined;
     downstream?: DownstreamResult;
+    /**
+     * Fix-pack P1 (hallazgo 4): motivo INTERNO del skip del leg downstream.
+     * Presente sólo cuando `downstream` es undefined. `finishSuccessfulStep` lo
+     * traduce al vocabulario PÚBLICO antes de ponerlo en la respuesta.
+     */
+    downstreamSkipCode?: DownstreamSkipCode;
   }> {
     const registries = await registryService.getEnabled();
     const registry = registries.find(
@@ -1149,12 +1179,26 @@ export const composeService = {
       info: (obj: unknown, msg?: string) =>
         log.info({ obj }, msg ?? '[Downstream]'),
     };
+    // Fix-pack P1 (hallazgo 4): se decora el logger para capturar el motivo del
+    // skip, que antes moría en los logs. CERO cambios en la lógica de decisión
+    // de dinero de `signAndSettleDownstream`: el decorador sólo observa los
+    // `{ code }` que esa función YA emite en sus 25 caminos de `return null`.
+    const capturingLogger = createSkipCapturingLogger(effectiveLogger);
     const downstream = await signAndSettleDownstream(
       agent,
-      effectiveLogger,
+      capturingLogger,
       intentId,
     );
 
-    return { output, txHash, ...(downstream && { downstream }) };
+    // Sólo se surfacea cuando el leg NO se settleó (`null`). Si settleó, el
+    // caller usa downstreamTxHash/BlockNumber/SettledAmount como siempre.
+    const skipCode = downstream ? undefined : capturingLogger.lastSkipCode();
+
+    return {
+      output,
+      txHash,
+      ...(downstream && { downstream }),
+      ...(skipCode && { downstreamSkipCode: skipCode }),
+    };
   },
 };

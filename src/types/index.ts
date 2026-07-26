@@ -478,6 +478,22 @@ export interface StepResult {
   downstreamBlockNumber?: number;
   /** Atomic units (string, 6-dec USDC) que se settearon downstream (WKH-55) */
   downstreamSettledAmount?: string;
+  /**
+   * Fix-pack P1 (hallazgo 4): estado del leg downstream cuando NO se settleó.
+   * Formato `"skipped:<PublicDownstreamSkipCode>"` (p.ej.
+   * `"skipped:NO_PAYMENT_FIELD"`, `"skipped:NOT_CONFIGURED"`).
+   *
+   * Antes el motivo del skip quedaba SÓLO en los logs del servidor y la
+   * respuesta HTTP no lo decía. Cambio de contrato ADITIVO: presente sólo en el
+   * caso skip; en el caso exitoso se poblan `downstreamTxHash` /
+   * `downstreamBlockNumber` / `downstreamSettledAmount` como siempre.
+   *
+   * ⚠️ El código es del vocabulario PÚBLICO (`toPublicSkipCode`), NO el
+   * `DownstreamSkipCode` interno: los códigos que revelan config del gateway,
+   * fondos del operador o sus claves se genericizan a `NOT_CONFIGURED` /
+   * `UNAVAILABLE`. Ver el mapeo en `src/lib/downstream-payment.ts`.
+   */
+  downstreamSettle?: string;
   /** WKH-57: telemetry del bridge LLM. Presente solo si bridgeType==='LLM'. */
   transformLLM?: LLMBridgeStats;
   /** WKH-114: veredicto evaluado (AC-4). */

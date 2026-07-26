@@ -97,6 +97,12 @@ vi.mock('./llm/input-retry.js', () => ({
   regenerateInputFromErrors: vi.fn().mockResolvedValue(null),
 }));
 // WKH-55: mock del modulo downstream-payment (DT-K)
+//
+// ⚠️ Factory SIN `importOriginal`: reemplaza el módulo COMPLETO. Todo export de
+// `downstream-payment.js` que `compose.ts` consuma y que no esté acá queda
+// `undefined` bajo test. Por eso los helpers de skip-code del fix-pack P1 viven
+// en el leaf `downstream-skip-code.js` (NO mockeado) — ver
+// doc/sdd/189-p1-discover-reputation-402-cap/auto-blindaje.md.
 vi.mock('../lib/downstream-payment.js', () => ({
   signAndSettleDownstream: vi.fn().mockResolvedValue(null),
 }));
@@ -695,6 +701,66 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
       'k1',
     );
     expect(result.downstream).toBeUndefined();
+  });
+
+  // ── Fix-pack P1 (hallazgo 4): la señal del skip llega a la RESPUESTA ────
+  // Antes, cuando un leg se salteaba el motivo quedaba SÓLO en los logs y la
+  // respuesta HTTP no decía nada.
+
+  it('T-P1-4-compose-a: leg salteado → steps[].downstreamSettle = "skipped:<code público>"', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    // El mock de signAndSettleDownstream devuelve null Y loguea el code por el
+    // logger que recibe — igual que el módulo real en sus 25 caminos de skip.
+    mockDownstream.mockImplementation(async (_agent, logger) => {
+      logger.warn({ code: 'NO_PAYMENT_FIELD' }, '[Downstream] sin payment');
+      return null;
+    });
+    const agent = makeAgent({ slug: 'skip-agent', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk();
+
+    const result = await composeService.compose({
+      steps: [{ agent: agent.slug, input: {} }],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.steps[0]!.downstreamSettle).toBe('skipped:NO_PAYMENT_FIELD');
+    // Mutuamente excluyente con el caso exitoso.
+    expect(result.steps[0]!.downstreamTxHash).toBeUndefined();
+  });
+
+  it('T-P1-4-compose-b (FUGA): un code interno sensible sale GENERICIZADO en la respuesta', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    // INSUFFICIENT_BALANCE revelaría que la hot wallet del operador está seca.
+    mockDownstream.mockImplementation(async (_agent, logger) => {
+      logger.warn({ code: 'INSUFFICIENT_BALANCE' }, '[Downstream] sin fondos');
+      return null;
+    });
+    const agent = makeAgent({ slug: 'skip-agent-2', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk();
+
+    const result = await composeService.compose({
+      steps: [{ agent: agent.slug, input: {} }],
+    });
+
+    expect(result.steps[0]!.downstreamSettle).toBe('skipped:UNAVAILABLE');
+    // El código interno NO aparece en ningún lugar de la respuesta.
+    expect(JSON.stringify(result)).not.toContain('INSUFFICIENT_BALANCE');
+  });
+
+  it('T-P1-4-compose-c: skip SIN code logueado → sin campo (no se inventa un motivo)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockDownstream.mockResolvedValue(null);
+    const agent = makeAgent({ slug: 'skip-agent-3', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk();
+
+    const result = await composeService.compose({
+      steps: [{ agent: agent.slug, input: {} }],
+    });
+
+    expect(result.steps[0]!.downstreamSettle).toBeUndefined();
   });
 
   it('propagates downstreamTxHash to StepResult when downstream succeeds (T-W3-02 / AC-3)', async () => {

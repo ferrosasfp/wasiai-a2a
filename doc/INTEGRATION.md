@@ -269,6 +269,51 @@ referral split, resolved on the pipeline's primary agent) does not change what
 you pay and is documented in
 [`doc/architecture/FEE-MODEL.md`](architecture/FEE-MODEL.md).
 
+### `/compose` — downstream settlement per step
+
+Each entry of `steps[]` reports whether WasiAI forwarded payment to that agent
+(the "downstream leg"). Exactly one of the two shapes is present:
+
+**Settled** — the agent was paid on-chain:
+
+```json
+{
+  "downstreamTxHash": "0x…",
+  "downstreamBlockNumber": 12345,
+  "downstreamSettledAmount": "500000"
+}
+```
+
+**Skipped** — the leg did not settle, and now the response says why
+(additive field, added by the P1 fix-pack; previously the reason existed only in
+server-side logs):
+
+```json
+{ "downstreamSettle": "skipped:NO_PAYMENT_FIELD" }
+```
+
+| Code | Meaning | What to do |
+|------|---------|------------|
+| `NO_PAYMENT_FIELD` | The agent's card declares no `payment` block. | Ask the agent operator to publish a payment spec. |
+| `METHOD_NOT_SUPPORTED` | The agent's `payment.method` is not x402. | Not payable through this rail. |
+| `CHAIN_NOT_SUPPORTED` | The agent's `payment.chain` is not a rail this gateway settles. | Ask the agent to declare a supported chain. |
+| `INVALID_PAY_TO_FORMAT` | The agent's `payment.contract` is not a valid address for its chain. | Agent-side config error. |
+| `ZERO_PAY_TO` | The agent's payout address is the zero address. | Agent-side config error. |
+| `INVALID_PRICE` | The agent's price is not a finite positive number. | Agent-side config error. |
+| `SETTLE_FAILED` | The payment was attempted and did not go through. | Retryable. |
+| `NOT_CONFIGURED` | This gateway is not configured to settle that leg. | Operational, not your request. Contact support if persistent. |
+| `UNAVAILABLE` | The gateway could not settle right now. | Retryable. Contact support if persistent. |
+
+The first six describe **the agent's own declaration** (the same data you can see
+in `GET /discover`), so they are reported verbatim and are actionable.
+`NOT_CONFIGURED` and `UNAVAILABLE` are deliberately coarse: the finer-grained
+internal reasons would disclose gateway configuration, operator wallet state or
+key status, so they are not exposed. Do not build logic that depends on
+distinguishing them.
+
+Being skipped does **not** fail the step: the agent still ran and you are still
+billed for the pipeline. `downstreamSettle` tells you about the *payout* leg.
+
 ---
 
 ## 4. x402 Payment Flow

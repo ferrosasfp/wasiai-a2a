@@ -31,8 +31,22 @@ import {
 } from '../adapters/registry.js';
 import type { ChainKey, SolanaPaymentAdapter } from '../adapters/types.js';
 import type { Agent, DownstreamLogger } from '../types/index.js';
+import { noteSkip } from './downstream-skip-code.js';
 import { isValidSolanaAddress, isValidWallet } from './wallet-format.js';
 
+// Fix-pack P1 (hallazgo 4): la taxonomía de skip-codes y su traducción al
+// vocabulario público se movieron a un módulo LEAF (`downstream-skip-code.ts`)
+// para no romper las suites que mockean ESTE módulo completo. Se re-exporta
+// `DownstreamSkipCode` por back-compat (mismo patrón que `DownstreamLogger`).
+export type {
+  DownstreamSkipCode,
+  PublicDownstreamSkipCode,
+  SkipCodeSink,
+} from './downstream-skip-code.js';
+export {
+  createSkipCapturingLogger,
+  toPublicSkipCode,
+} from './downstream-skip-code.js';
 // Re-export for backward-compat: callers historically import
 // `DownstreamLogger` from this module (e.g. compose.ts). The canonical
 // definition now lives in `types/index.ts` (TD-WKH-55-4 / CR-MNR-3).
@@ -132,60 +146,6 @@ export interface DownstreamResult {
    */
   nonEvmSettle?: NonEvmSettleReceipt;
 }
-
-/**
- * Códigos de skip/observabilidad del leg downstream. TODO valor que salga en el
- * campo `code` de un log de este módulo tiene que estar acá (fix-pack CR-MNR-5:
- * faltaban los tres últimos, que sí se emitían — un tipo incompleto hace que un
- * consumidor de logs crea que la taxonomía está cerrada cuando no lo está).
- *
- * Los tres primeros grupos CORTAN el leg (`return null`); los de observabilidad
- * NO cortan (ver el catálogo en el docstring de `signAndSettleDownstream`).
- */
-export type DownstreamSkipCode =
-  | 'FLAG_OFF'
-  | 'NO_PAYMENT_FIELD'
-  | 'METHOD_NOT_SUPPORTED'
-  | 'CHAIN_NOT_SUPPORTED'
-  // Slug ↔ destino incoherentes. Código PROPIO (fix-pack CR-MNR-5): antes se
-  // logueaba como `MAINNET_NOT_ALLOWED` + `reason:'CHAIN_ENVIRONMENT_DRIFT'`,
-  // y eso mezclaba en un mismo código dos incidentes que no tienen nada que ver
-  // entre sí — "un agente pidió una mainnet sin opt-in" (esperable, sano) vs
-  // "NUESTRA config apunta a un destino que contradice su slug" (bug de
-  // operación, incluye el caso declared=mainnet/actual=testnet, donde permitir
-  // mainnet no es el tema). Un dashboard que cuente `MAINNET_NOT_ALLOWED` no
-  // debe sumar los dos.
-  | 'CHAIN_ENVIRONMENT_DRIFT'
-  | 'MAINNET_NOT_ALLOWED'
-  | 'INVALID_PAY_TO_FORMAT'
-  | 'ZERO_PAY_TO'
-  | 'INVALID_PRICE'
-  | 'INSUFFICIENT_BALANCE'
-  | 'BALANCE_READ_FAILED'
-  | 'SIGNING_FAILED'
-  | 'VERIFY_FAILED'
-  | 'SETTLE_FAILED'
-  // ── Observabilidad: NO cortan el leg ────────────────────────────────
-  // No se pudo leer el balance del operador antes de settlear ⇒ el pre-check se
-  // saltea y el settle sigue. SÓLO se emite en dos condiciones:
-  //   · EVM: falta la RPC env del rail — paso 9 de `signAndSettleDownstream`,
-  //     guard `if (!rpc)`.
-  //   · Solana: `getOperatorSplBalance()` tira — catch en `settleSolanaLeg`.
-  //
-  // ⚠️ NO cubre el caso "falta `OPERATOR_PRIVATE_KEY`" (re-CR MENOR-4: este
-  // comentario lo prometía y era falso). Con RPC presente y PK ausente o sin
-  // `0x`, el `if (pk?.startsWith('0x'))` del paso 9 NO tiene `else`: el pre-check
-  // se saltea **sin emitir ningún código**. Es un hueco de observabilidad, no de
-  // dinero — sin PK el `adapter.sign` posterior falla igual (`SIGNING_FAILED`,
-  // `avalanche/payment.ts:177-180` y sus pares de kite-ozone/base). Se dejó como
-  // hueco a propósito: agregar el log es tocar el money-path que AR+F4+re-CR ya
-  // aprobaron en este diff, y sumaría un 3er código de observabilidad por un
-  // caso sin impacto práctico.
-  | 'BALANCE_PRECHECK_SKIPPED'
-  // Replay idempotente Solana con balance por debajo del monto del leg: el
-  // intent YA tiene firma, así que NO se corta (FIX 2); el log explica por qué
-  // un eventual self-heal re-broadcast fallaría on-chain.
-  | 'BALANCE_LOW_ON_IDEMPOTENT_REPLAY';
 
 // ─── Internal helpers ───────────────────────────────────────────────
 
@@ -511,6 +471,11 @@ export async function signAndSettleDownstream(
   //    del skip — el comportamiento NO cambia (sigue devolviendo `null` sin
   //    resolver ningún adapter).
   if (!DOWNSTREAM_FLAG) {
+    // Fix-pack P1 (hallazgo 4): el `code` se registra en CADA request, aparte
+    // del log. El log es warn-once por proceso (WKH-235a), así que a partir del
+    // 2º request el decorador de logger no vería nada y la respuesta HTTP
+    // perdería la señal de skip. El comportamiento del LOG no cambia.
+    noteSkip(logger, 'FLAG_OFF');
     if (!_warnedFlagOff) {
       _warnedFlagOff = true;
       logger.info(
