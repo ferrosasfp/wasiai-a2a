@@ -91,6 +91,91 @@ no los repita.
 - **Aplicar en**: cuando un test prohíbe un literal en un archivo, la prosa de ese archivo
   también está sujeta a la regla. Vale la pena decirlo en el propio comentario.
 
+### [2026-07-26 14:00] Fix-pack AR — Instrumenté UN camino de salida y llamé "instrumentado" al handler
+
+- **Error**: `noteDownstreamSkips` quedó SOLO en el `return` del 200 de `/compose`
+  (`compose.ts:810`). La rama de fallo (`!result.success`, que retorna en `:721`) nunca
+  pasaba por ahí, así que su fila de `a2a_events` no ganaba `downstreamSkips`, `metaSkips`
+  devolvía `null` y `skipCounts` descartaba el evento con `continue`.
+- **Impacto real (no teórico)**: un pipeline donde el step 1 no le pudo pagar al agente y
+  el step 2 falla le manda el `skipped:*` al caller EN EL BODY del 400, y al mismo tiempo
+  la pantalla del operador podía mostrar `0` con el texto "es el estado bueno". La API
+  decía una cosa y la pantalla otra.
+- **Causa raíz**: leí el handler por su camino feliz. `/orchestrate` sí estaba completo
+  (200 y 403) porque ahí las dos salidas están juntas; en `/compose` están separadas por
+  ~90 líneas de fee/recibos y la de fallo se sale antes.
+- **Fix**: `noteDownstreamSkips(request, result.steps)` también antes del return de la rama
+  de fallo (`compose.ts:728`), cubriendo 400 y 403 con el mismo statement. Verificado por
+  MUTACIÓN (borrar la línea → 3 tests rojos).
+- **Aplicar en**: cuando se agrega telemetría a un handler, enumerar TODOS sus `return`
+  (`grep -c 'return reply'`) antes de declararlo cubierto. Un test por camino de salida, no
+  por handler.
+
+### [2026-07-26 14:05] Fix-pack AR — Un tope de query presentado como "la ventana"
+
+- **Error**: `skipCounts` leía los 500 eventos más recientes (`SKIP_SCAN_LIMIT`) y la UI
+  rotulaba el resultado `Pagos salteados (últimas 24 h)`. Con más de 500 llamadas en la
+  ventana, el número no es el de la ventana y nada lo indicaba.
+- **Causa raíz**: el techo se puso por costo de query (correcto) y se documentó en un
+  comentario del service (insuficiente): el consumidor de ese número es una PANTALLA, y el
+  rótulo de la pantalla afirmaba una cobertura que el service no daba.
+- **Fix**: el service devuelve `scanned`/`truncated` (`rows.length >= SKIP_SCAN_LIMIT`),
+  `health` lo expone como `skipScanLimit`/`skipScanTruncated`, y la pantalla cambia el
+  rótulo a "últimas 500 llamadas, no toda la ventana", agrega "CONTEO INCOMPLETO" y
+  DEJA DE DECIR "es el estado bueno" en ese caso.
+- **Aplicar en**: todo `.limit()` cuyo resultado se muestre como un agregado. Si la query
+  puede tapar filas, el payload tiene que decirlo y la UI tiene que rotularlo. Mismo
+  estándar que ya se aplicó con `skipSignalPresent` ("sin datos" ≠ "cero"): que una
+  pantalla diga "no sé" es aceptable, que diga "todo bien" sin saberlo no.
+
+### [2026-07-26 14:10] Fix-pack AR — Persistencia sin test: la suite no notaba que se borrara
+
+- **Error**: el spread `...(request.downstreamSkips ? { downstreamSkips … } : {})`
+  (`event-tracking.ts:132-134`) no tenía NINGÚN test. El AR lo reemplazó por un comentario
+  y los 3452 tests siguieron verdes: los call-sites se ejecutaban, pero nadie asertaba que
+  el dato llegara al insert.
+- **Causa raíz**: se testeó la FUNCIÓN pura (`parseSkippedMarker`, `isPublicSkipCode`) y el
+  CONSUMIDOR (`trace.test.ts` con metadata inventada en el fixture), y quedó sin cubrir el
+  único punto donde los dos se conectan: el hook que escribe la fila. Un test con fixture
+  del dato ya presente NUNCA prueba que alguien lo escriba.
+- **Fix**: 4 casos en `event-tracking.test.ts` (T-SKIP-1..4) que inyectan un request real y
+  asertan `metadata.downstreamSkips`, incluyendo la distinción `[]` presente vs clave
+  ausente. Verificado por MUTACIÓN: borrando el spread, 3 de los 4 se ponen rojos (el
+  cuarto asserta la AUSENCIA de la clave, así que sobrevive por diseño).
+- **Aplicar en**: cuando el flujo es "productor → jsonb → consumidor", el test del
+  consumidor con fixture NO cubre al productor. Pedir siempre la prueba por mutación de la
+  línea que escribe.
+
+### [2026-07-26 14:15] Fix-pack AR — El escape se verificó con un script que no quedó en el repo
+
+- **Error**: la corrección del `esc()` (agregar `&quot;`/`&#39;`) se validó con un smoke
+  suelto, fuera del repo. Sin test, si alguien vuelve a copiar el `esc()` de
+  `dashboard.html` (que NO escapa comillas) la regresión pasa la suite entera.
+- **Causa raíz**: el `esc()` dependía del DOM (`document.createElement`) y en este repo no
+  hay jsdom, así que "no se podía testear" y quedó como script manual. La dependencia era
+  la que había que sacar, no el test.
+- **Fix**: `esc()` pasa a ser string puro (5 reemplazos, `&` primero) y
+  `dashboard-trace.render.test.ts` ejecuta el JS REAL de la pantalla (extraído del HTML)
+  con un DOM mínimo, pasándole datos hostiles de tenant. Verificado por MUTACIÓN: sacando
+  el escape de comillas se ponen rojos 3 tests.
+- **Aplicar en**: si una función no se puede testear por su dependencia del entorno,
+  evaluar primero sacar la dependencia. Un helper de seguridad sin test no es una
+  corrección, es una intención.
+
+### [2026-07-26 14:20] Fix-pack AR — La pantalla prometía un reintento que no ocurría
+
+- **Error**: `markStale` decía "Reintentando cada 10 s" pero el `setInterval` se armaba
+  SOLO después de un fetch exitoso. Abrir la pantalla con el gateway caído dejaba el aviso
+  y ningún reintento: había que apretar Ver otra vez.
+- **Causa raíz**: el arme del polling estaba escrito al final del camino feliz de
+  `refresh()`, así que cada `return` temprano se lo saltaba (mismo patrón de error que el
+  bloqueante de `/compose`: lógica al final de UN camino de salida).
+- **Fix**: `startPolling()` idempotente, llamado desde el camino feliz Y desde `markStale`.
+  El 401/503 sigue SIN polling a propósito (no se arreglan solos y su texto no promete
+  reintento), y hay un test que fija esa asimetría.
+- **Aplicar en**: cuando el texto de una UI promete un comportamiento, ese texto es un AC.
+  Testearlo, o no prometerlo.
+
 ### [2026-07-26 13:30] Waves 0-2 — El formatter de biome cortó tres veces
 
 - **Error**: `biome check src/` falló tres veces por formato (líneas largas de más de 80

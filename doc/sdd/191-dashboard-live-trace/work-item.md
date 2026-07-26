@@ -23,11 +23,12 @@ Con texto didáctico por bloque: el founder tiene que aprender a leerla, no solo
 | `src/lib/chain-display.ts` | crear (chainId/CAIP-2 → nombre legible + explorer) |
 | `src/services/trace.ts` | crear (lectura cross-tenant de telemetría) |
 | `src/middleware/event-tracking.ts` | extender (persistir skip-codes PÚBLICOS en `metadata`) |
-| `src/routes/compose.ts` | 1 línea aditiva (capturar los skips del pipeline) |
+| `src/routes/compose.ts` | 2 líneas aditivas (capturar los skips del pipeline: rama 200 y rama de fallo) |
 | `src/routes/orchestrate.ts` | 2 líneas aditivas (idem, legacy + execute) |
 | `src/routes/dashboard.ts` | agregar `GET /dashboard/trace` + `GET /dashboard/api/trace` |
 | `src/static/dashboard-trace.html` | crear (HTML+CSS+JS inline, sin build step) |
-| tests | `chain-display.test.ts`, `trace.test.ts`, `dashboard.trace.test.ts`, `downstream-skip-signal.test.ts` (extensión) |
+| `src/static/dashboard.html` | +3/−1 aditivo: link a `/dashboard/trace` en el header y `&` → `&amp;` en el subtítulo (AR MENOR-5: faltaba declararlo) |
+| tests | `chain-display.test.ts`, `trace.test.ts`, `dashboard.trace.test.ts`, `dashboard-trace.render.test.ts`, `compose.downstream-skips.test.ts`, `downstream-skip-signal.test.ts` (extensión), `event-tracking.test.ts` (extensión) |
 
 **Scope OUT**: migraciones, envs, prod, cualquier botón que dispare un `/compose`
 (cada ejecución cuesta dinero), refactor de los dos gates admin existentes.
@@ -133,7 +134,12 @@ mismo-rail.
   `getDefaultChainKey()`, la misma fuente que `GET /capabilities`.
 - `lastCrossChainSettle`: último recibo con `settle_caip2` + `settle_signature` que además
   ES cruce (4.2), con su antigüedad en segundos calculada server-side.
-- `skips[]`: conteo por código PÚBLICO en las últimas N horas (default 24, tope 168).
+- `skips[]`: conteo por código PÚBLICO en las últimas N horas (default 24, tope 168), sobre
+  los `SKIP_SCAN_LIMIT` (500) eventos más recientes de esa ventana. Cuando la ventana tiene
+  más eventos que el techo, el conteo NO es el de la ventana: el payload lo declara
+  (`skipScanTruncated`) y la pantalla rotula el alcance real (AR BLQ-BAJO-1b). La regla es
+  que la pantalla puede decir "no sé" o "incompleto", pero nunca "todo bien" sobre datos que
+  no leyó.
 
 ## 5. Decisión de autorización
 
@@ -193,8 +199,26 @@ ver el tráfico de todos los tenants), así que:
 - **AC-6** Los skips se cuentan y se muestran con el vocabulario **público**; un código
   interno presente en los datos NO se cuenta ni se muestra.
 - **AC-7** Auto-refresh ~10s con hora de última actualización visible; si el fetch falla, la
-  pantalla marca el estado como stale en vez de seguir mostrando datos viejos como buenos.
+  pantalla marca el estado como stale en vez de seguir mostrando datos viejos como buenos, y
+  **sigue reintentando** (el intervalo se arma también en el camino de error, AR MENOR-4).
 - **AC-8** Cero botones que disparen `/compose` u `/orchestrate`.
+- **AC-9** (AR BLQ-BAJO-1) Ninguna pantalla afirma un estado bueno sobre datos incompletos:
+  - los skips se persisten en **todas** las salidas del handler que corre un pipeline
+    (`/compose` 200 / 400 / 403, `/orchestrate` 200 / 403),
+  - cuando el conteo tocó el techo de eventos escaneados, el payload lo dice
+    (`skipScanTruncated`) y la pantalla rotula el alcance real en vez de "últimas N h".
+
+## 7.1 Fix-pack del AR (iteración 2)
+
+| Hallazgo | Resolución | Evidencia |
+|---|---|---|
+| **BLQ-BAJO-1a** rama de fallo de `/compose` sin instrumentar | `noteDownstreamSkips` antes del `return` de la rama `!result.success` | `src/routes/compose.ts:720-728` (la línea es la `:728`); tests `compose.downstream-skips.test.ts` (T-SKIP-400 / T-SKIP-403) |
+| **BLQ-BAJO-1b** el tope de 500 eventos se presentaba como "últimas 24 h" | `skipCounts` devuelve `scanned`/`truncated`; `health` expone `skipScanLimit`/`skipScanTruncated`; la UI rotula el alcance real y deja de decir "es el estado bueno" | `src/services/trace.ts:414-422`, `src/types/trace.ts:56-70`, `src/static/dashboard-trace.html:283-320` (rótulo en `:314-319`); tests `trace.test.ts` (T-TRUNC-1..3), `dashboard-trace.render.test.ts` (T-TRUNC-1..5) |
+| **MENOR-1** la persistencia de los skips sin ningún test | 4 casos nuevos en `event-tracking.test.ts` (T-SKIP-1..4), verificados por mutación | ver auto-blindaje |
+| **MENOR-2** el guard del escape XSS fuera del repo | `esc()` pasa a string puro (sin DOM) y hay un test que ejecuta el JS real de la pantalla con datos hostiles | `src/static/dashboard-trace.render.test.ts` |
+| **MENOR-4** `markStale` prometía un reintento que no ocurría | `startPolling()` compartido: el intervalo se arma también en los caminos de error | `src/static/dashboard-trace.html:461-482`; tests T-RETRY-1..4 |
+| **MENOR-5** `dashboard.html` sin declarar | declarado en el Scope IN (§2) | esta tabla |
+| **MENOR-3** faltan índices para las 2 queries cross-tenant | NO se implementa (migraciones fuera de scope): TD-TRACE-4 con condición de reactivación | §8 |
 
 ## 8. Deuda técnica registrada
 
@@ -204,3 +228,19 @@ ver el tráfico de todos los tenants), así que:
   (`adminTokenMatches`).
 - **TD-TRACE-3** — `/orchestrate*` no correlaciona evento con recibos (H-1): usar
   `request.id` como `orchestrationId`, o persistir el `orchestrationId` en el evento.
+- **TD-TRACE-4** (AR MENOR-3) — **faltan índices para las dos lecturas cross-tenant de
+  `a2a_receipts`**: `recentCalls` (`src/services/trace.ts:448-451`) y
+  `lastCrossChainSettle` (`:346-352`). El índice que existe es
+  `(owner_ref, created_at DESC)` y estas queries NO filtran por `owner_ref` a propósito
+  (son admin/cross-tenant, sección 6), así que no pueden usarlo como leading column:
+  quedan en seq scan + Top-N sort, **dos veces cada 10 s por pestaña abierta**.
+  - Por qué no se arregla acá: una migración está fuera del Scope IN de esta HU
+    (pantalla read-only) y hoy la tabla es chica.
+  - **Condición de reactivación (cualquiera de las dos)**: `a2a_receipts` pasa las
+    **100.000 filas**, o `GET /dashboard/api/trace` pasa de **1 s p95** con una sola
+    pestaña abierta. Cuando se cumpla:
+    `CREATE INDEX CONCURRENTLY idx_a2a_receipts_created_at ON a2a_receipts (created_at DESC)`
+    y un índice parcial para el pulso del rail:
+    `... ON a2a_receipts (created_at DESC) WHERE settle_caip2 IS NOT NULL AND settle_signature IS NOT NULL`.
+  - Mitigación mientras tanto: las dos queries están acotadas por `limit` (25 recibos ×
+    `RECEIPTS_PER_CALL`, y 25 settles), así que el costo es del sort, no del transporte.

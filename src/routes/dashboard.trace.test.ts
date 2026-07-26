@@ -81,6 +81,8 @@ const PAYLOAD = {
     skips: [],
     skipsTotal: 0,
     skipSignalPresent: false,
+    skipScanLimit: 500,
+    skipScanTruncated: false,
   },
   calls: [],
 };

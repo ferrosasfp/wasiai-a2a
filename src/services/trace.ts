@@ -332,6 +332,8 @@ export const traceService = {
       skips: skipStats.skips,
       skipsTotal: skipStats.total,
       skipSignalPresent: skipStats.signalPresent,
+      skipScanLimit: SKIP_SCAN_LIMIT,
+      skipScanTruncated: skipStats.truncated,
     };
   },
 
@@ -374,11 +376,18 @@ export const traceService = {
   /**
    * Conteo de skips por código PÚBLICO en la ventana. `signalPresent=false` = ningún
    * evento de la ventana trae la señal, o sea "sin datos", NO "cero skips".
+   *
+   * `truncated=true` = la ventana tiene más eventos que `SKIP_SCAN_LIMIT`, así que el
+   * conteo es de los N más recientes y NO de la ventana entera (AR BLQ-BAJO-1b). Se
+   * devuelve en vez de esconderse: un conteo parcial presentado como total afirma
+   * "todo bien" sobre datos que nadie leyó.
    */
   async skipCounts(windowHours = DEFAULT_WINDOW_HOURS): Promise<{
     skips: TraceSkipCount[];
     total: number;
     signalPresent: boolean;
+    scanned: number;
+    truncated: boolean;
   }> {
     const hours = clamp(windowHours, 1, MAX_WINDOW_HOURS);
     const since = new Date(Date.now() - hours * 3_600_000).toISOString();
@@ -402,7 +411,15 @@ export const traceService = {
       signalPresent = true;
       codes.push(...skips);
     }
-    return { skips: countSkips(codes), total: codes.length, signalPresent };
+    return {
+      skips: countSkips(codes),
+      total: codes.length,
+      signalPresent,
+      scanned: rows.length,
+      // El `.limit()` de PostgREST devuelve EXACTAMENTE el techo cuando hay más
+      // filas que eso: el conteo tapó las que quedaron afuera.
+      truncated: rows.length >= SKIP_SCAN_LIMIT,
+    };
   },
 
   /**

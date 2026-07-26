@@ -178,15 +178,24 @@
     var lastOkAt = null;
     var timer = null;
 
+    // Escape para HTML. Cubre los cinco caracteres, en este orden (el `&` PRIMERO,
+    // si no se re-escaparían las entidades que genera el resto). Las comillas
+    // entran porque esta función también se usa DENTRO de atributos (href, class):
+    // sin ellas un dato con comillas se sale del atributo y agrega un `onerror`.
+    // Los datos vienen de la DB (identificador del caller, nombres de red, hashes):
+    // no son de confianza.
+    //
+    // Es puro string, sin DOM a propósito: así hay un test de verdad que le pasa
+    // `<script>` y comillas y mira la salida (el `esc()` de dashboard.html usa el
+    // truco del text node, que NO escapa comillas; no copiarlo de ahí).
     function esc(value) {
       if (value === null || value === undefined) return '';
-      var d = document.createElement('div');
-      d.appendChild(document.createTextNode(String(value)));
-      // El text node escapa & < >. Las comillas se escapan a mano porque esta
-      // función también se usa DENTRO de atributos (href, class): sin esto, un
-      // dato con comillas podría salirse del atributo. Los datos vienen de la DB
-      // (identificador del caller, nombres de red, hashes): no son de confianza.
-      return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     function shortHash(hash) {
@@ -267,17 +276,32 @@
         crossPanel =
           '<div class="panel"><h3>Último cruce de redes</h3>' +
           '<div class="big bad">sin registro</div>' +
-          '<p class="hint">Todavía no hay ningún pago cruzando de red en los recibos. No es un error de la pantalla: es que no pasó.</p>' +
+          '<p class="hint">Entre los settles más recientes no hay ninguno que cruce de red. No es un error de la pantalla: no aparece en lo que se revisó.</p>' +
           '</div>';
       }
+
+      // El conteo revisa como máximo `skipScanLimit` eventos. Cuando la ventana
+      // tiene más que eso, el número NO es el de la ventana, y la pantalla lo dice
+      // en el título y en el texto: puede decir "no sé" o "incompleto", nunca
+      // "todo bien" sobre datos que no leyó.
+      var truncated = health.skipScanTruncated === true;
+      var scanLimit = esc(health.skipScanLimit);
+      var truncNote = truncated
+        ? '<p class="hint">CONTEO INCOMPLETO: se revisaron las ' + scanLimit +
+          ' llamadas más recientes y la ventana de ' + esc(health.skipWindowHours) +
+          ' h tiene más. De lo que quedó afuera no sabemos nada. Para ver todo, pedí una ventana más corta (?windowHours=).</p>'
+        : '';
 
       var skipsBody;
       if (!health.skipSignalPresent) {
         skipsBody = '<div class="big warn">sin datos</div>' +
           '<p class="hint">Ninguna llamada de la ventana informó este dato. El gateway lo empezó a guardar con esta pantalla, así que el tráfico anterior no lo tiene. No leerlo como cero.</p>';
       } else if (!health.skips || health.skips.length === 0) {
-        skipsBody = '<div class="big ok">0</div>' +
-          '<p class="hint">Ninguna pata quedó sin pagar en la ventana. Es el estado bueno.</p>';
+        skipsBody = truncated
+          ? '<div class="big warn">0 en lo revisado</div>' +
+            '<p class="hint">Ninguna de las ' + scanLimit + ' llamadas revisadas quedó sin pagar. No alcanza para decir que la ventana está limpia: falta leer el resto.</p>'
+          : '<div class="big ok">0</div>' +
+            '<p class="hint">Ninguna pata quedó sin pagar en la ventana. Es el estado bueno.</p>';
       } else {
         skipsBody = '<div class="big warn">' + esc(health.skipsTotal) + '</div>' +
           health.skips.map(function (s) {
@@ -287,9 +311,12 @@
           }).join('') +
           '<p class="hint">Un skip es una pata del pipeline que no se pagó. El código dice por qué, en el vocabulario público del gateway.</p>';
       }
+      var skipsScope = truncated
+        ? 'últimas ' + scanLimit + ' llamadas, no toda la ventana'
+        : 'últimas ' + esc(health.skipWindowHours) + ' h';
       var skipsPanel =
-        '<div class="panel"><h3>Pagos salteados (últimas ' + esc(health.skipWindowHours) + ' h)</h3>' +
-        skipsBody + '</div>';
+        '<div class="panel"><h3>Pagos salteados (' + skipsScope + ')</h3>' +
+        skipsBody + truncNote + '</div>';
 
       document.getElementById('health').innerHTML = chainsPanel + crossPanel + skipsPanel;
     }
@@ -428,12 +455,17 @@
       lastOkAt = new Date();
       setState('Actualizado ' + lastOkAt.toLocaleTimeString('es-AR', { hour12: false }) +
         ' · se refresca cada ' + (REFRESH_MS / 1000) + ' s', false);
-      if (!timer) timer = setInterval(function () { refresh(); }, REFRESH_MS);
+      startPolling();
     }
 
     /**
      * Un fetch fallido NUNCA deja la pantalla mintiendo: se avisa el motivo y desde
      * cuándo los datos que se ven quedaron viejos (y se atenúan).
+     *
+     * Y arranca el reintento (AR MENOR-4): antes el intervalo se armaba SOLO después
+     * de un fetch exitoso, así que abrir la pantalla con el gateway caído mostraba
+     * "Reintentando cada 10 s" y no reintentaba nunca. Justo cuando más se la
+     * necesita, quedaba muerta hasta que alguien tocaba Ver.
      */
     function markStale(reason) {
       var desde = lastOkAt
@@ -441,6 +473,12 @@
         : 'no se cargó nada todavía';
       setState('DATOS VIEJOS (' + reason + '): ' + desde + '. Reintentando cada ' +
         (REFRESH_MS / 1000) + ' s.', true);
+      startPolling();
+    }
+
+    /** Un solo intervalo por pestaña, sin importar por qué camino se armó. */
+    function startPolling() {
+      if (!timer) timer = setInterval(function () { refresh(); }, REFRESH_MS);
     }
 
     // El token va SIEMPRE en el header X-Admin-Token, nunca en la URL: un query

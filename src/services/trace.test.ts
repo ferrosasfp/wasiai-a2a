@@ -493,6 +493,47 @@ describe('T-6 skipCounts: sólo vocabulario público (AC-6)', () => {
     expect(stats.total).toBe(0);
   });
 
+  // AR BLQ-BAJO-1b: el conteo lee como máximo 500 eventos, pero la UI lo rotulaba
+  // "últimas 24 h". Con más tráfico que el techo, el número NO es el de la ventana:
+  // el service tiene que DECIRLO en vez de dejar que la pantalla afirme "todo bien".
+  it('T-TRUNC-1: por debajo del techo, truncated=false (el conteo cubre la ventana)', async () => {
+    wireFrom({
+      events: [
+        { ...event(), metadata: { requestId: REQ_ID, downstreamSkips: [] } },
+      ],
+    });
+    const stats = await traceService.skipCounts(24);
+    expect(stats.scanned).toBe(1);
+    expect(stats.truncated).toBe(false);
+  });
+
+  it('T-TRUNC-2: con el techo lleno (500 filas), truncated=true', async () => {
+    const events = Array.from({ length: 500 }, (_, i) => ({
+      ...event(),
+      id: `ev-${i}`,
+      metadata: { requestId: `req-${i}`, downstreamSkips: [] },
+    }));
+    wireFrom({ events });
+    const stats = await traceService.skipCounts(24);
+    expect(stats.scanned).toBe(500);
+    expect(stats.truncated).toBe(true);
+    // El conteo sigue siendo el de lo leído: no se inventa nada.
+    expect(stats.total).toBe(0);
+    expect(stats.signalPresent).toBe(true);
+  });
+
+  it('T-TRUNC-3: health propaga el techo y la bandera al payload de la pantalla', async () => {
+    const events = Array.from({ length: 500 }, (_, i) => ({
+      ...event(),
+      id: `ev-${i}`,
+      metadata: { requestId: `req-${i}`, downstreamSkips: [] },
+    }));
+    wireFrom({ events, crossChainReceipts: [] });
+    const health = await traceService.health(24);
+    expect(health.skipScanLimit).toBe(500);
+    expect(health.skipScanTruncated).toBe(true);
+  });
+
   it('clampea la ventana a 7 días y filtra por created_at', async () => {
     const captured = wireFrom({ events: [] });
     await traceService.skipCounts(9999);
@@ -548,6 +589,9 @@ describe('T-8 health: chains del registry real', () => {
       },
     ]);
     expect(health.skipWindowHours).toBe(24);
+    // Sin tráfico no hay nada tapado: el alcance del conteo es la ventana entera.
+    expect(health.skipScanTruncated).toBe(false);
+    expect(health.skipScanLimit).toBeGreaterThan(0);
   });
 });
 

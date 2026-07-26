@@ -717,6 +717,15 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         } else if (result.errorCode === 'DEST_CAP_EXCEEDED') {
           status = 402;
         }
+        // WKH-191x (AR BLQ-BAJO-1a): esta rama TAMBIÉN tiene que dejar los skips
+        // en el evento. Un pipeline puede saltear el pago del step 1 (el caller
+        // recibe ese `skipped:*` en su respuesta) y fallar en el step 2: sin esta
+        // línea el skip viajaba al caller pero NO quedaba en `a2a_events`, así que
+        // el contador de la pantalla lo ignoraba y podía mostrar "0, estado bueno"
+        // sobre datos incompletos. Espejo de orchestrate.ts (que ya cubre su 403).
+        // Escritura en memoria, sin await, sin I/O: no puede lanzar ni cambiar el
+        // status, el body ni un centavo del refund de arriba.
+        noteDownstreamSkips(request, result.steps);
         return reply.status(status).send({
           ...result,
           requestId: request.id,

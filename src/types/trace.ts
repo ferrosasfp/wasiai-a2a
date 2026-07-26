@@ -54,6 +54,19 @@ export interface TraceHealth {
    * "cero skips" cuando en realidad es "sin datos".
    */
   skipSignalPresent: boolean;
+  /**
+   * Techo de eventos que el conteo revisa (query acotada). Viaja en el payload
+   * para que la pantalla pueda decir el número real en vez de tenerlo escrito a
+   * mano y desincronizarse.
+   */
+  skipScanLimit: number;
+  /**
+   * `true` = la ventana tiene MÁS eventos que el techo, así que el conteo cubre
+   * los `skipScanLimit` más recientes y NO la ventana entera (AR BLQ-BAJO-1b).
+   * Con esto en `true` la pantalla no puede afirmar "cero skips en la ventana":
+   * lo que no se leyó no se sabe.
+   */
+  skipScanTruncated: boolean;
 }
 
 /** Un movimiento de dinero (una fila de `a2a_receipts`). */
