@@ -11,6 +11,11 @@ import { getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import { hashCallerRef } from '../lib/caller-hash.js';
 import { selectFacilitatorUrl } from '../lib/cdp-selector.js';
+// Fix-pack P1 AR BLQ-BAJO-1: el page size del pool de agentes que usa
+// `resolveAgent` sale del MISMO módulo leaf que el over-fetch de discovery, para
+// que no puedan desalinearse. Leaf (no `services/discovery.js`) porque las suites
+// que mockean el service completo dejarían el export en `undefined`.
+import { resolveComposeAgentPoolLimit } from '../lib/discovery-fetch-limit.js';
 import {
   type DownstreamLogger,
   type DownstreamResult,
@@ -67,7 +72,7 @@ const log = getLogger('compose');
 
 /**
  * B7 (audit 2026-06-24): cache de discover() acotado a un solo compose().
- * `all()` memoiza la MISMA Promise de `discover({limit:50})` — el resultado se
+ * `all()` memoiza la MISMA Promise del discovery del pool — el resultado se
  * comparte entre todos los steps (datos idénticos), sin re-disparar el discovery
  * completo en cada step.
  */
@@ -75,12 +80,31 @@ interface DiscoverCache {
   all(): Promise<Agent[]>;
 }
 
+/**
+ * Pool de agentes para resolver un step por slug e hidratar su `payment.chain`
+ * real (WKH-113/BASE-08). ÚNICO productor del pool: `createDiscoverCache` y el
+ * fallback de `resolveAgent` tienen que pedir EXACTAMENTE lo mismo (si divergen,
+ * el hit de cache y el fallback resolverían sobre pools distintos).
+ *
+ * ⚠️ AR BLQ-BAJO-1: era `discover({ limit: 50 })`, o sea el TOP-50 RANKEADO. Un
+ * pool para buscar por slug NO puede ser un ranking: cuando el over-fetch del
+ * hallazgo 1 hizo que el ranking se calcule sobre 4× candidatos, la membresía del
+ * top-50 cambió y un agente non-EVM que quedaba afuera perdía la hidratación de
+ * `payment.chain` → el leg downstream se salteaba o apuntaba al rail equivocado,
+ * en silencio. Ver la justificación completa en `lib/discovery-fetch-limit.ts`.
+ */
+function discoverAgentPool(): Promise<Agent[]> {
+  return discoveryService
+    .discover({ limit: resolveComposeAgentPoolLimit() })
+    .then((r) => r.agents);
+}
+
 function createDiscoverCache(): DiscoverCache {
   let cached: Promise<Agent[]> | undefined;
   return {
     all() {
       if (!cached) {
-        cached = discoveryService.discover({ limit: 50 }).then((r) => r.agents);
+        cached = discoverAgentPool();
       }
       return cached;
     },
@@ -684,8 +708,9 @@ export const composeService = {
       }),
       // Fix-pack P1 (hallazgo 4): señal del skip en la RESPUESTA, no sólo en el
       // log. `toPublicSkipCode` genericiza los códigos que revelarían config del
-      // gateway / fondos / claves del operador (ver el mapeo en
-      // lib/downstream-payment.ts). Mutuamente excluyente con los tres campos de
+      // gateway / fondos / claves del operador (mapeo exhaustivo en
+      // lib/downstream-skip-code.ts — AR MENOR-6: este puntero decía
+      // downstream-payment.ts). Mutuamente excluyente con los tres campos de
       // arriba: `downstreamSkipCode` sólo llega cuando el leg NO settleó.
       ...(downstreamSkipCode && {
         downstreamSettle: `skipped:${toPublicSkipCode(downstreamSkipCode)}`,
@@ -798,15 +823,15 @@ export const composeService = {
     step: ComposeStep,
     discoverCache?: DiscoverCache,
   ): Promise<Agent | null> {
-    // B7 (audit 2026-06-24): cache de discover({limit:50}) POR compose. Esta
+    // B7 (audit 2026-06-24): cache del discovery del pool POR compose. Esta
     // llamada es idéntica en todos los steps (mismos args); sin cache, un
     // pipeline de N steps dispara hasta 4N discoveries completos. Memoizamos la
     // MISMA Promise → misma data, misma semántica de `.find` por slug. Sin
-    // cache (caller no la pasa) cae al discover directo (backward-compat).
+    // cache (caller no la pasa) cae al discover directo (backward-compat), por el
+    // MISMO `discoverAgentPool` (AR BLQ-BAJO-1: dos page sizes distintos harían
+    // que el fallback resolviera sobre un pool distinto al cacheado).
     const discoverAll = (): Promise<Agent[]> =>
-      discoverCache
-        ? discoverCache.all()
-        : discoveryService.discover({ limit: 50 }).then((r) => r.agents);
+      discoverCache ? discoverCache.all() : discoverAgentPool();
 
     // Try with registry hint first, then without (LLM may pass wrong case)
     let agent = await discoveryService.getAgent(step.agent, step.registry);

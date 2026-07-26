@@ -3,6 +3,10 @@
  */
 
 import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
+// Fix-pack P1 AR BLQ-BAJO-1: el over-fetch vive en un módulo LEAF porque
+// `services/compose.ts` también necesita el límite del pool y las suites que
+// mockean este service completo dejarían el export en `undefined`.
+import { resolveUpstreamFetchLimit } from '../lib/discovery-fetch-limit.js';
 import { getLogger } from '../lib/logger.js';
 import { readPaymentSpec } from '../lib/payment-spec-reader.js';
 import { parsePriceSafe } from '../lib/price.js';
@@ -679,33 +683,6 @@ export const discoveryService = {
     return null;
   },
 };
-
-// ─── Fix-pack P1 (hallazgo 1): over-fetch upstream ────────────────────
-// El `limit` del caller es un PAGE SIZE que se aplica post-filtro
-// (`runDiscoveryPipeline`, `.slice(0, query.limit)`). Reenviarlo como límite de
-// fetch upstream truncaba el candidate-set ANTES de los filtros locales
-// (status/verified/caps/free-text/maxPrice — que existen justamente porque
-// "upstream may not support all filter params"), así que cada agente descartado
-// localmente era un slot de la página que ya no se podía rellenar: la página
-// salía corta y `total` subestimaba los matches. Medido: limit=5 devolvía 2.
-//
-// Ahora el upstream recibe un límite de OVER-FETCH independiente del page size,
-// para que los filtros locales tengan holgura. Monótono: si el caller pide más
-// que el over-fetch, gana el caller (nunca under-fetch).
-const DEFAULT_UPSTREAM_FETCH_LIMIT = 200;
-
-/**
- * Límite a reenviar al registry upstream. NO es el page size.
- * `max(pageLimit, DISCOVERY_UPSTREAM_FETCH_LIMIT ?? 200)`.
- * Patrón de env de `resolveScaleFactor` (services/reputation.ts): valor
- * inválido/ausente → default (nunca NaN en la query string).
- */
-export function resolveUpstreamFetchLimit(pageLimit: number): number {
-  const raw = process.env.DISCOVERY_UPSTREAM_FETCH_LIMIT;
-  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
-  const base = Number.isFinite(n) && n > 0 ? n : DEFAULT_UPSTREAM_FETCH_LIMIT;
-  return Math.max(pageLimit, base);
-}
 
 // Helper: Get nested value from object using dot notation
 function getNestedValue(obj: unknown, path: string): unknown {
