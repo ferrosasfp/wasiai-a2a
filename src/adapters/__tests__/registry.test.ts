@@ -431,8 +431,19 @@ describe('adapter registry', () => {
   describe('W5 — mainnet wiring (kite-mainnet + avalanche-mainnet)', () => {
     // it2 MNR-3: la activación COHERENTE de Kite mainnet exige el slug
     // `kite-mainnet` Y `KITE_NETWORK=mainnet` (el adapter la lee en call-time —
-    // TD-NEW-KITE-PARAMS). Con el slug solo, el adapter queda en 2368/PYUSD y
-    // `assertNoSlugDestinationDrift` ahora LANZA (ver T-it2-MNR-3-reg).
+    // TD-NEW-KITE-PARAMS). Con el slug solo, el adapter queda en 2368/PYUSD.
+    //
+    // ⚠️ CORRECCIÓN (re-CR MENOR-1): antes esta línea decía que ese caso lo
+    // maneja `assertNoSlugDestinationDrift` y que "ahora LANZA". Falso — el
+    // rename del CR-MNR-3 dejó el comentario apuntando a la mitad equivocada del
+    // split. Ese bundle (`chainConfig` 2366 mainnet + adapter 2368) NO produce
+    // drift de SLUG: lo caza el CHEQUEO 2, `checkAdapterChainIdDrift`, en su
+    // dirección SEGURA ⇒ `log.error` con `code=ADAPTER_CHAIN_ID_DRIFT` y el
+    // arranque SIGUE (lo dice el título del propio test citado:
+    // T-it2-MNR-3-reg, "se LOGUEA como error y NO rompe el arranque"). La tabla
+    // de severidades vive en el docstring de `checkChainEnvironmentCoherence`
+    // (`registry.ts:299-302`). Por eso este `beforeEach` setea la env: sin ella
+    // los tests de wiring de abajo arrancarían con el rail drifteado.
     beforeEach(() => {
       process.env.KITE_NETWORK = 'mainnet';
     });
@@ -496,6 +507,59 @@ describe('adapter registry', () => {
       const bundle = getAdaptersBundle('kite-mainnet');
       expect(bundle?.chainConfig.chainId).toBe(2366);
       expect(getPaymentAdapter('kite-mainnet').chainId).toBe(2366);
+    });
+
+    // ─── re-CR MENOR-6: la SIMETRÍA del chequeo 1, pinneada ───────────────────
+    // `T-it2-ALTO-1-reg` cubre UNA dirección (slug testnet → destino mainnet).
+    // La otra (slug MAINNET → destino TESTNET) no tenía test: el re-CR mutó
+    // `assertNoSlugDestinationDrift` insertando `if (drift.actual !== 'mainnet')
+    // return;` después del `if (!drift) return;` y la mutación SOBREVIVIÓ a las
+    // suites de `src/adapters` + `downstream-payment` (595 passed). O sea: la
+    // propiedad estaba defendida sólo por PROSA (el docstring del chequeo 1, con
+    // sus dos razones) y cualquiera podía "normalizarla" de vuelta sin romper
+    // nada. Este test la vuelve ejecutable.
+    //
+    // Por qué la simetría importa, en una línea: el slug es la LLAVE del opt-in
+    // de dinero (`WASIAI_DOWNSTREAM_MAINNET_ALLOW` es un CSV de slugs, comparado
+    // por slug normalizado en `downstream-payment.ts:217`), así que un slug
+    // mainnet que apunta a testnet convierte el opt-in del operador en un no-op
+    // silencioso: cree que autorizó dinero real y el rail settlea en testnet.
+    // Y el costo de disponibilidad del throw es CERO (ninguna config alcanzable
+    // lo produce — el registry le pasa `{network}` explícito a cada factory), por
+    // eso acá el input se construye a mano A PROPÓSITO, igual que en
+    // T-it2-MNR-3-reg-d.
+    it('T-re-CR-MNR-6: slug MAINNET con destino TESTNET ⇒ LANZA (el chequeo 1 es SIMÉTRICO, no sólo anti-gasto)', async () => {
+      const { createKiteOzoneAdapters } = await import(
+        '../kite-ozone/index.js'
+      );
+      // Bundle imposible por construcción hoy: el slug `kite-mainnet` con un
+      // destino 2368 (Kite TESTNET) en chainConfig Y en el adapter. Los dos
+      // iguales a propósito, para que el CHEQUEO 2 no lance (`adapterChainId ===
+      // configChainId` ⇒ early-return) y el único que pueda cortar sea el 1.
+      vi.mocked(createKiteOzoneAdapters).mockResolvedValueOnce({
+        payment: {
+          name: 'kite-ozone',
+          chainId: 2368,
+          vmFamily: 'evm',
+        } as unknown as Awaited<
+          ReturnType<typeof createKiteOzoneAdapters>
+        >['payment'],
+        attestation: { name: 'kite-ozone', chainId: 2368 } as never,
+        gasless: { name: 'kite-ozone', chainId: 2368 } as never,
+        identity: null,
+        chainConfig: {
+          name: 'KiteAI Testnet',
+          chainId: 2368,
+          explorerUrl: 'https://testnet.kitescan.ai',
+        },
+      });
+      process.env.WASIAI_A2A_CHAINS = 'kite-mainnet';
+
+      await expect(initAdapters()).rejects.toThrow(
+        /Incoherent chain config for 'kite-mainnet': the slug declares mainnet but its bundle points to a testnet destination \(2368; expected 2366\)/,
+      );
+      // Y el bundle mentiroso NUNCA queda alcanzable por el money-path.
+      expect(getInitializedChainKeys()).toEqual([]);
     });
 
     // ─── it2 MNR-3: drift INVERSO (chainConfig ↔ adapter en call-time) ────────

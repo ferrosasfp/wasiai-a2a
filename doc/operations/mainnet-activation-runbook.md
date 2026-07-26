@@ -18,7 +18,10 @@
    §3). Para Kite mainnet, además, `KITE_NETWORK=mainnet` **y sin slug Kite testnet
    en el CSV** (ver Step 5)
 4. **Migrate DB** — WKH-115 inbound tasks table (if adopting inbound bounties)
-5. **Activate synthetic canary** — WKH-74 (post-deploy validation)
+5. **Activate synthetic canary** — WKH-74 (post-deploy validation): `SYNTH_*` +
+   `MONITOR_*` + `RAILWAY_*` + KV en **Vercel `wasiai-x402-mcp`** (Step 3). ⚠️ NO
+   existen las `SYNTHETIC_MONITOR_*` que este runbook pedía antes; y al pasar a
+   mainnet hay que mover `SYNTH_EXPECT_ASSET`/`SYNTH_EXPECT_NETWORK`
 6. **Set on-call vars** — `HEALTH_MONITOR_TARGETS`, `ONCALL_MENTION` (WKH-77) —
    en **Vercel `wasiai-x402-mcp`**, no en el gateway (Step 4)
 7. **Smoke E2E** — verify `/orchestrate` on real mainnet chains with $0.10 USDC
@@ -117,11 +120,19 @@ https://basescan.io/address/0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba
 
 **Un nombre por SERVICIO** (no por chain):
 
+> ⚠️ **CORRECCIÓN 2 (re-CR MENOR-3, 2026-07-26).** Las celdas de la columna
+> "gateway" listaban `deposit-verifier.ts:1NN` junto a rutas por-chain
+> (`src/adapters/<chain>/payment.ts`), lo que se leía como
+> `src/adapters/<chain>/deposit-verifier.ts` — ese archivo **no existe**. El
+> verificador de depósitos es UNO solo y compartido:
+> **`src/adapters/deposit-verifier.ts`** (`resolveRpcUrl`, switch por `ChainKey`).
+> Abajo cada cita lleva su ruta completa.
+
 | Chain | En `wasiai-a2a` (gateway) | En `wasiai-facilitator` | Endpoint |
 |-------|---------------------------|--------------------------|----------|
-| Kite mainnet (2366) | `KITE_MAINNET_RPC_URL`<br><sub>`src/adapters/kite-ozone/payment.ts:204`, `deposit-verifier.ts:137`, `gas-overhead.ts:147`</sub> | `KITE_MAINNET_RPC_URL`<br><sub>`src/chains/kite.ts:36`</sub> | `https://rpc.gokite.ai/` |
-| Avalanche C-Chain (43114) | ⚠️ **`AVALANCHE_RPC_URL`**<br><sub>`src/adapters/avalanche/payment.ts:153`, `gasless.ts:197`, `deposit-verifier.ts:139`, `gas-overhead.ts:143`, y el mapa `RPC_ENV_BY_CHAIN['avalanche-mainnet']` de `src/lib/downstream-payment.ts:72`</sub> | `AVALANCHE_MAINNET_RPC_URL`<br><sub>`src/chains/avalanche.ts:63`</sub> | `https://api.avax.network/ext/bc/C/rpc` |
-| Base mainnet (8453) | `BASE_MAINNET_RPC_URL`<br><sub>`src/adapters/base/payment.ts:170`, `gasless.ts:211`, `deposit-verifier.ts:143`</sub> | `BASE_MAINNET_RPC_URL`<br><sub>`src/chains/base.ts:81`</sub> | `https://mainnet.base.org/` |
+| Kite mainnet (2366) | `KITE_MAINNET_RPC_URL`<br><sub>`src/adapters/kite-ozone/payment.ts:204`, `src/adapters/deposit-verifier.ts:137` (compartido, no por-chain), `src/lib/gas-overhead.ts:147`</sub> | `KITE_MAINNET_RPC_URL`<br><sub>`src/chains/kite.ts:36`</sub> | `https://rpc.gokite.ai/` |
+| Avalanche C-Chain (43114) | ⚠️ **`AVALANCHE_RPC_URL`**<br><sub>`src/adapters/avalanche/payment.ts:153`, `src/adapters/avalanche/gasless.ts:197`, `src/adapters/deposit-verifier.ts:139` (compartido), `src/lib/gas-overhead.ts:143`, y el mapa `RPC_ENV_BY_CHAIN['avalanche-mainnet']` de `src/lib/downstream-payment.ts:72`</sub> | `AVALANCHE_MAINNET_RPC_URL`<br><sub>`src/chains/avalanche.ts:63`</sub> | `https://api.avax.network/ext/bc/C/rpc` |
+| Base mainnet (8453) | `BASE_MAINNET_RPC_URL`<br><sub>`src/adapters/base/payment.ts:170`, `src/adapters/base/gasless.ts:211`, `src/adapters/deposit-verifier.ts:143` (compartido)</sub> | `BASE_MAINNET_RPC_URL`<br><sub>`src/chains/base.ts:81`</sub> | `https://mainnet.base.org/` |
 
 **`AVALANCHE_MAINNET_RPC_URL` tiene CERO lectores en el `src/` de a2a.** El rail
 `avalanche-mainnet` del gateway usa el MISMO `AVALANCHE_RPC_URL` que el rail Fuji
@@ -295,25 +306,114 @@ VALUES (
 
 #### Set env vars in Vercel `wasiai-x402-mcp`
 
+> ⛔ **CORRECCIÓN (fix-pack AR-profundo re-CR MAYOR-3, 2026-07-26): las 4 envs
+> `SYNTHETIC_MONITOR_*` que vivían acá NO EXISTEN** — 0 lectores en TODO el repo
+> (`grep -rn 'SYNTHETIC_MONITOR' .` sólo encontraba este archivo). Seteándolas, la
+> capa D **no corre nunca**: `agentKey = process.env.MONITOR_A2A_KEY`
+> (`mcp-servers/wasiai-x402/api/cron/synthetic-tx-check.mjs:151`) queda `undefined`
+> ⇒ el handler no-opea con `warnOnce` + `200 {ran:false, reason:'not-configured'}`
+> (`:153-166`). O sea: la validación post-deploy de mainnet quedaba muerta **en
+> silencio**, y la "Verification" de abajo afirmaba lo contrario.
+>
+> Los nombres REALES están documentados en
+> `doc/operations/synthetic-monitoring-runbook.md` §1 y en
+> `mcp-servers/wasiai-x402/.env.example` (bloques "Capa A" / "Capa D"). El
+> servicio y la plataforma sí eran correctos: **Vercel `wasiai-x402-mcp`** (el
+> monitor corre en Vercel; sólo el *gate de deploy* consulta la API de Railway).
+
 ```bash
-# Layer A probe (expect-402, $0)
-# — no special env needed, probe is unauthenticated
+# ── Layer A probe (expect-402, $0) ───────────────────────────────────────────
+# NO es "sin env": el probe es unauthenticated (no paga), pero SÍ necesita URL +
+# expectativa, o el cron no-opea (warnOnce + 200).
+SYNTH_ORCHESTRATE_URL="https://wasiai-a2a-production.up.railway.app/orchestrate"
+# resolveProbeUrl — src/synthetic-payment-monitor.mjs:52 (ausente ⇒ no-op)
+SYNTH_EXPECT_PAYTO="0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba"
+SYNTH_EXPECT_ASSET="0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e"   # USDC.e Kite MAINNET
+SYNTH_EXPECT_NETWORK="eip155:2366"                                 # CAIP-2 mainnet
+# resolveExpected — src/synthetic-payment-monitor.mjs:101-103; si falta CUALQUIERA
+# de las tres ⇒ null ⇒ no-op (sin expectativa no hay nada que assertear). Al pasar
+# a mainnet hay que MOVER estos tres valores: el `.env.example:276-278` trae los de
+# Kite TESTNET (PYUSD 0x8E04…ec9 / eip155:2368) y quedarían dando `asset-mismatch`
+# /`network-mismatch` ⇒ alerta critical permanente.
+# Opcionales: SYNTH_PROBE_GOAL, SYNTH_PROBE_BUDGET, SYNTH_PROBE_TIMEOUT_MS.
 
-# Layer D probe (real-tx, $~0.02/deploy)
-SYNTHETIC_MONITOR_AGENT_KEY="a2a_synthetic_monitor_xxx"
-SYNTHETIC_MONITOR_EXPECTED_PAYTO="0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba"
-SYNTHETIC_MONITOR_MAX_COST_USDC="100.0"
-SYNTHETIC_MONITOR_DEPLOY_IDENTIFIER_KV_KEY="wkh74_deploy_sha_mainnet"
+# ── Layer D probe (real-tx, ~$0.02/deploy) ───────────────────────────────────
+MONITOR_A2A_KEY="a2a_synthetic_monitor_xxx"   # api/cron/synthetic-tx-check.mjs:151
+MONITOR_TX_GOAL="AVAX price"                  # :178 — DEBE settlear ≥1 step (ver abajo)
+MONITOR_TX_BUDGET="0.05"                      # :180, opcional (default: SYNTH_PROBE_BUDGET)
+MONITOR_TX_TIMEOUT_MS="90000"                 # :42, opcional (default 90000, cap 120000)
 
-# Reuse existing alert webhook
+# Gate de deploy (los 4 son OBLIGATORIOS para la capa D — _resolveRailwayConfig,
+# api/cron/synthetic-tx-check.mjs:51-55; si falta uno ⇒ no-op). El monitor corre en
+# VERCEL pero el payment-path corre en RAILWAY, así que gatea sobre el deploy id de
+# Railway vía su GraphQL API (DT-2).
+RAILWAY_TOKEN="<secret — project/account token del proyecto wasiai-a2a>"
+RAILWAY_PROJECT_ID="..."
+RAILWAY_ENVIRONMENT_ID="..."
+RAILWAY_SERVICE_ID="..."
+
+# KV (Upstash/Vercel KV) — sin KV la capa D se NIEGA a correr (no puede gatear el
+# gasto): src/kv-client.mjs:32-33, chequeado en synthetic-tx-check.mjs:168-174.
+KV_REST_API_URL="..."     # o UPSTASH_REDIS_REST_URL
+KV_REST_API_TOKEN="..."   # o UPSTASH_REDIS_REST_TOKEN
+
+# Reuse existing alert webhook (+ mención on-call, ver Step 4)
 MCP_ALERT_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+ONCALL_MENTION="<@FOUNDER_DISCORD_ID>"
 ```
+
+⚠️ **No existe ninguna env de "deploy identifier KV key"** (la retirada
+`SYNTHETIC_MONITOR_DEPLOY_IDENTIFIER_KV_KEY`): la clave es una CONSTANTE del código
+— `KV_KEYS.SYNTH_LAST_DEPLOY = 'synthetic-last-deploy-id'`
+(`mcp-servers/wasiai-x402/src/kv-keys.mjs:53`). Tampoco existe un
+`*_MAX_COST_USDC`: el techo del gasto lo dan `MONITOR_TX_BUDGET` **y** el budget
+de la Agent Key dedicada.
+
+⚠️ **`MONITOR_TX_GOAL` DEBE settlear.** La capa D paga con `x-a2a-key` (prepago),
+así que la respuesta de `/orchestrate` nunca trae un `kiteTxHash` top-level: la
+prueba on-chain sale SÓLO de un `pipeline.steps[].txHash`. Un goal que orquesta
+pero no settlea hace que la capa D dispare un **falso positivo critical en cada
+deploy** (`src/synthetic-tx-monitor.mjs:50`,
+`doc/operations/synthetic-monitoring-runbook.md` §1).
 
 #### Verification
 
-Wait ~15 min for the first cron tick, then check Discord `#wasiai-alerts`:
-- Layer A alert should appear every 15 min (free probe, always 402 expected)
-- Layer D alert should appear 1× per deploy (on SHA change), with tx hash
+> ⚠️ **CORRECCIÓN (misma tanda): las dos viñetas de abajo decían que las alertas
+> aparecen en cada tick / en cada deploy.** Falso: los dos monitores alertan **sólo
+> cuando el probe FALLA** (`checkSyntheticPayment` sólo llama a `sendAlert` dentro
+> de `if (severity)` — `src/synthetic-payment-monitor.mjs:209-235`; el camino OK es
+> un `log.info` en `:237`). Silencio en `#wasiai-alerts` = camino sano, así que el
+> canal **no sirve** para confirmar que el monitor está configurado.
+
+Cómo verificar de verdad (no esperando alertas):
+
+```bash
+# 1. Layer A — forzar un tick y leer el JSON del handler (api/cron/
+#    synthetic-payment-check.mjs:89-97 vs :126-130).
+GET https://wasiai-x402-mcp.vercel.app/api/cron/synthetic-payment-check \
+  -H "Authorization: Bearer <CRON_SECRET>"
+# 200 {"checked":0}                      ⇒ NO configurado: falta SYNTH_ORCHESTRATE_URL
+#                                          o alguna de las 3 SYNTH_EXPECT_*
+# 200 {"checked":1,"severity":"ok",...}  ⇒ configurado y el 402 challenge coincide
+# 200 {"checked":1,"severity":"critical"} ⇒ configurado y el money-path está roto
+
+# 2. Layer D — mismo patrón; el gate de deploy hace que casi todos los ticks sean
+#    no-op LEGÍTIMO (`reason:'no-deploy-change'`, src/synthetic-tx-monitor.mjs:196),
+#    lo que NO es un fallo.
+GET https://wasiai-x402-mcp.vercel.app/api/cron/synthetic-tx-check \
+  -H "Authorization: Bearer <CRON_SECRET>"
+# {"ran":false,"reason":"not-configured"}    ⇒ falta MONITOR_A2A_KEY / RAILWAY_* / URL
+# {"ran":false,"reason":"kv-not-configured"} ⇒ falta KV_REST_API_* (la capa D no corre)
+# {"ran":false,"reason":"no-deploy-change"}  ⇒ SANO (configurado, deploy sin cambios)
+```
+
+- Tras el PRIMER deploy del gateway posterior a la activación, la capa D corre UNA
+  vez (`ran:true`). Si el settle no aterriza, ahí sí llega la alerta critical
+  `post-deploy-synthetic-tx-failed` con el detalle (y la KV **no** avanza ⇒
+  reintenta al tick siguiente).
+- Para probar el circuito de alerta end-to-end sin esperar una rotura real, usá el
+  dry-run del health monitor del Step 4 (`?dryRun=1`) — es el único handler con
+  modo de prueba.
 
 ---
 
@@ -325,13 +425,23 @@ Wait ~15 min for the first cron tick, then check Discord `#wasiai-alerts`:
 
 > ⚠️ **CORRECCIÓN (fix-pack AR-profundo CR, barrido completo, 2026-07-26): NO van
 > en Railway `wasiai-a2a`.** Las cuatro envs de abajo tienen **0 lectores en el
-> `src/` de a2a**; las lee el servicio de monitoreo, que corre en Vercel:
-> `HEALTH_MONITOR_TARGETS` y `ONCALL_MENTION` en
-> `mcp-servers/wasiai-x402/api/cron/health-check.mjs:85`, `MCP_ALERT_WEBHOOK_URL`
-> en `mcp-servers/wasiai-x402/src/alerts.mjs`, `CRON_SECRET` en los mismos
-> handlers de cron. Setearlas en el gateway = alerting P0 que nunca dispara,
-> silenciosamente (y el propio comando de verificación de este Step ya apunta a
+> `src/` de a2a**; las lee el servicio de monitoreo, que corre en Vercel. Los 4
+> `process.env` viven en el MISMO archivo —
+> `mcp-servers/wasiai-x402/api/cron/health-check.mjs`:
+> `CRON_SECRET` en `:69`, `HEALTH_MONITOR_TARGETS` en `:85`,
+> `MCP_ALERT_WEBHOOK_URL` en `:105` y `ONCALL_MENTION` en `:106`.
+> Setearlas en el gateway = alerting P0 que nunca dispara, silenciosamente (y el
+> propio comando de verificación de este Step ya apunta a
 > `wasiai-x402-mcp.vercel.app`).
+>
+> ⚠️ **CORRECCIÓN 2 (re-CR MENOR-5, 2026-07-26)**: las líneas citadas estaban
+> desfasadas (`ONCALL_MENTION` decía `:85`, que es `HEALTH_MONITOR_TARGETS`) y
+> `MCP_ALERT_WEBHOOK_URL` se atribuía a `mcp-servers/wasiai-x402/src/alerts.mjs`.
+> Ahí **no hay ningún `process.env`**: `sendAlert` recibe la URL como parámetro
+> `webhookUrl` (`src/alerts.mjs`, el nombre sólo aparece en un comentario, `:5`).
+> Quien la lee del entorno es cada handler de cron (`health-check.mjs:105`,
+> `synthetic-payment-check.mjs:111`, `synthetic-tx-check.mjs:200`,
+> `gas-balance-check.mjs:88`, `balance-check.mjs:161`, `rotate-bearer.mjs:93`).
 
 ```bash
 # Health targets (copy from doc/operations/oncall-runbook.md)
@@ -468,9 +578,18 @@ KITE_MAINNET_RPC_URL=https://rpc.gokite.ai/
 AVALANCHE_MAINNET_RPC_URL=https://api.avax.network/ext/bc/C/rpc
 BASE_MAINNET_RPC_URL=https://mainnet.base.org/
 
-# Operator wallet (same wallet that has gas funded in Step 2)
-OPERATOR_WALLET_ADDRESS=0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba
+# Operator wallet (same wallet que tiene el gas fondeado en Prerequisites §2).
+# ⚠️ CORRECCIÓN (fix-pack AR-profundo re-CR MAYOR-3, 2026-07-26): acá había un
+# `OPERATOR_WALLET_ADDRESS` con CERO lectores — no está en el `src/` del
+# facilitator, ni en su `.env.example`, ni en a2a. La dirección NO se configura:
+# se DERIVA de la private key (`privateKeyToAccount`,
+# `wasiai-facilitator/src/infra/wallet.ts:48-53`). Setearla no hace nada, y peor:
+# sugiere que la address y la key se validan entre sí (no se validan).
 OPERATOR_PRIVATE_KEY=<from secrets manager, NOT plaintext>
+#   ↳ único lector: `wasiai-facilitator/src/infra/wallet.ts:48` (+ el schema
+#     `src/infra/env.ts:67` y el flag `walletPresent` de
+#     `src/core/health-status.ts:116`). Debe matchear
+#     `/^0x[0-9a-fA-F]{64}$/`; si no, el adapter tira `ChainAdapterInitError`.
 ```
 
 #### Deploy both services
@@ -710,8 +829,15 @@ facilitator, ya listados arriba.
   `RPC_ENV_BY_CHAIN` (qué env de RPC lee cada rail del GATEWAY)
 - **Coherencia testnet/mainnet al arrancar**: `src/adapters/registry.ts`
   (`checkChainEnvironmentCoherence`)
-- **Health monitoring**: `mcp-servers/wasiai-x402/src/health-monitor.mjs` (WKH-77)
-- **Synthetic monitoring**: `mcp-servers/wasiai-x402/src/synthetic-tx-monitor.mjs` (WKH-74)
+- **Health monitoring**: `mcp-servers/wasiai-x402/src/health-monitor.mjs` (WKH-77).
+  Las envs las lee el handler, no el módulo: `api/cron/health-check.mjs:69`
+  (`CRON_SECRET`), `:85` (`HEALTH_MONITOR_TARGETS`), `:105`
+  (`MCP_ALERT_WEBHOOK_URL`), `:106` (`ONCALL_MENTION`).
+- **Synthetic monitoring**: `mcp-servers/wasiai-x402/src/synthetic-tx-monitor.mjs` +
+  `src/synthetic-payment-monitor.mjs` (WKH-74). Envs reales: `SYNTH_*` (capa A) y
+  `MONITOR_*` + `RAILWAY_*` + `KV_REST_API_*` (capa D) — inventario completo con
+  su semántica en `doc/operations/synthetic-monitoring-runbook.md` §1 y
+  `mcp-servers/wasiai-x402/.env.example`. **No existe ninguna `SYNTHETIC_MONITOR_*`.**
 - **Inbound adapter**: `src/routes/inbound.ts` (WKH-115)
 - **Runbooks**: 
   - `doc/operations/oncall-runbook.md` (escalation)
@@ -720,11 +846,68 @@ facilitator, ya listados arriba.
 
 ---
 
-**Last updated**: 2026-07-26 (fix-pack AR-profundo, CR MAYOR-1 + MAYOR-2 + barrido
-completo del archivo). Toda env var citada en este runbook fue grepeada contra el
-`src/` del servicio que la lee (a2a y `wasiai-facilitator`). Envs RETIRADAS por no
-tener ningún lector: `WASIAI_DOWNSTREAM_NETWORK`, `BASE_ENABLED`, `MAINNET_ENABLED`,
-`INBOUND_WEBHOOK_SOURCES`, y `AVALANCHE_MAINNET_RPC_URL` **en el bloque del
-gateway** (sigue siendo válida en el del facilitator).
+## Verificación de este runbook (cómo se hizo, y cómo repetirla)
+
+> La revisión anterior cerraba con *"Toda env var citada en este runbook fue
+> grepeada contra el `src/` del servicio que la lee"*. **Era falso**: quedaban 5
+> nombres muertos en este mismo archivo (`SYNTHETIC_MONITOR_*` ×4 en el Step 3 +
+> `OPERATOR_WALLET_ADDRESS` en el Step 5), y esa frase de cierre es justamente lo
+> que licencia al operador a confiar en cada nombre del archivo el día de la
+> activación. El barrido de esa revisión sólo cubrió las secciones que el CR había
+> marcado. Ahora el barrido es del archivo COMPLETO y el método queda escrito, para
+> que la próxima revisión se pueda auditar en vez de creerle.
+
+**Barrido 2026-07-26 (fix-pack AR-profundo, re-CR MAYOR-3) — método exacto:**
+
+```bash
+# 1. Extracción MECÁNICA de todo identificador tipo env del archivo entero
+#    (no "leerlo con atención": 4 de los 5 hallazgos de la ronda anterior estaban
+#     en secciones que nadie había marcado como sospechosas).
+grep -oE '\b[A-Z][A-Z0-9_]{4,}\b' doc/operations/mainnet-activation-runbook.md | sort -u
+
+# 2. Cada nombre, grepeado contra el src/ del SERVICIO al que el doc dice que
+#    pertenece. La unidad de verificación es (env, servicio), no (env):
+grep -rn '<NOMBRE>' src/                                          # a2a (Railway)
+grep -rn '<NOMBRE>' ../wasiai-facilitator/src/                    # facilitator (Railway)
+grep -rn '<NOMBRE>' mcp-servers/wasiai-x402/{src,api,scripts}/    # monitor (Vercel)
+
+# 3. Cada cita `archivo:línea` del archivo, verificada abriendo esa línea:
+grep -oE '[A-Za-z0-9_./-]+\.(ts|mjs|sh|sql):[0-9]+(-[0-9]+)?' <archivo> | sort -u
+```
+
+**Alcance cubierto**: TODAS las secciones (TL;DR, Prerequisites §1-§3, Steps 1-8,
+Rollback, Post-Activation, Troubleshooting, References). Cada env queda con su
+lector en `archivo:línea` **y** su servicio.
+
+**Envs RETIRADAS por no tener ningún lector** (acumulado de las 3 rondas):
+
+| Env retirada | Ronda | Por qué |
+|---|---|---|
+| `WASIAI_DOWNSTREAM_NETWORK` | it2 FIX 1c | 0 lectores desde WKH-112 (la chain del leg sale de `agent.payment.chain`) |
+| `BASE_ENABLED` | it4 CR-MAYOR-1 | 0 lectores en a2a Y en el facilitator (los reales: `BASE_SEPOLIA_ENABLED` / `BASE_MAINNET_ENABLED`) |
+| `MAINNET_ENABLED` (a secas) | it4 CR-MAYOR-2 | 0 lectores; los reales son los tres `*_MAINNET_ENABLED` del facilitator |
+| `INBOUND_WEBHOOK_SOURCES` | it4 barrido | 0 lectores; la config real es por-campo-y-por-fuente (`INBOUND_SOURCE_*_<SOURCE>`) |
+| `AVALANCHE_MAINNET_RPC_URL` **en el bloque del gateway** | it4 CR-MAYOR-1 | 0 lectores en a2a; sigue VÁLIDA en el bloque del facilitator |
+| `SYNTHETIC_MONITOR_AGENT_KEY` | **re-CR MAYOR-3** | 0 lectores en TODO el repo → el real es `MONITOR_A2A_KEY` |
+| `SYNTHETIC_MONITOR_EXPECTED_PAYTO` | **re-CR MAYOR-3** | 0 lectores → el real es `SYNTH_EXPECT_PAYTO` (capa A) |
+| `SYNTHETIC_MONITOR_MAX_COST_USDC` | **re-CR MAYOR-3** | 0 lectores → el techo lo dan `MONITOR_TX_BUDGET` + el budget de la Agent Key |
+| `SYNTHETIC_MONITOR_DEPLOY_IDENTIFIER_KV_KEY` | **re-CR MAYOR-3** | 0 lectores → la clave es una CONSTANTE (`kv-keys.mjs:53`), no una env |
+| `OPERATOR_WALLET_ADDRESS` | **re-CR MAYOR-3** | 0 lectores en el facilitator (ni en su `.env.example`) ni en a2a: la address se DERIVA de `OPERATOR_PRIVATE_KEY` |
+
+**Correcciones de servicio/plataforma** (setear la env correcta en el lugar
+equivocado también la deja muerta, y en silencio): Step 4 (WKH-77) pasó de Railway
+`wasiai-a2a` → **Vercel `wasiai-x402-mcp`** en la it4; el Step 3 (WKH-74) ya apuntaba
+a Vercel y lo que estaba mal eran los NOMBRES.
+
+**Lo que este barrido NO cubre** (declarado explícitamente, para no repetir el
+certificado sobre-vendido): los valores de ejemplo cuyo dueño es una consola externa
+—`RAILWAY_PROJECT_ID`/`ENVIRONMENT_ID`/`SERVICE_ID`, los IDs de Discord de
+`ONCALL_MENTION`, las URLs de webhook, `CRON_SECRET`— existen como envs (lector
+verificado) pero sus VALORES sólo se pueden confirmar en Railway / Vercel / Discord /
+cron-job.org el día de la activación. Igual: los `[CONFIRMAR]` de Prerequisites §1-§2
+son estado operativo, no código, y no se verifican por grep.
+
+**Last updated**: 2026-07-26 (fix-pack AR-profundo — re-CR MAYOR-3 + MENOR-3/5,
+sobre it4 CR MAYOR-1 + MAYOR-2).
 
 **Next revision**: Post-mainnet-go-live (capture lessons learned)

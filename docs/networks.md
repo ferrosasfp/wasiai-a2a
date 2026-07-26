@@ -165,13 +165,25 @@ Outbound = the chain on which **WasiAI** pays the downstream agent
     still invoked and its output still returned; it simply does not get
     paid on that leg (`src/lib/downstream-payment.ts`, step 9).
   - The check only runs when BOTH the chain's RPC env var and
-    `OPERATOR_PRIVATE_KEY` are present. Otherwise it is skipped with
-    `BALANCE_PRECHECK_SKIPPED` and **the leg signs and settles without
-    any funds verification**. On mainnet that is the dangerous case, so
+    `OPERATOR_PRIVATE_KEY` (starting with `0x`) are present. Otherwise it
+    is skipped and **the leg signs and settles without any funds
+    verification**. On mainnet that is the dangerous case, so
     double-check the env NAME: the gateway's Avalanche rail reads
     `AVALANCHE_RPC_URL` (not `AVALANCHE_MAINNET_RPC_URL`, which is the
     facilitator's) — see `RPC_ENV_BY_CHAIN` in
     `src/lib/downstream-payment.ts`.
+  - ⚠️ **Only the missing-RPC case is logged.** The
+    `BALANCE_PRECHECK_SKIPPED` code is emitted from the `if (!rpc)` guard
+    (and, on Solana, from the `getOperatorSplBalance()` catch). With the
+    RPC present but `OPERATOR_PRIVATE_KEY` absent/malformed, the
+    `if (pk?.startsWith('0x'))` branch has no `else` and the pre-check is
+    skipped **with no log at all** — do not use the absence of
+    `BALANCE_PRECHECK_SKIPPED` as evidence that the pre-check ran.
+    (Corrected 2026-07-26, re-CR MENOR-4: this bullet promised a signal
+    that does not exist.) Practical impact is nil — without the PK the
+    subsequent `adapter.sign` fails anyway (`SIGNING_FAILED`) — which is
+    exactly why the gap was left as-is instead of touching the
+    already-reviewed money-path block.
   - It is an observability/short-circuit optimisation, not a money gate.
     The authoritative failure is the on-chain settle itself.
 

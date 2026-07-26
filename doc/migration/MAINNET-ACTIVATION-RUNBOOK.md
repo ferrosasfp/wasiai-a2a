@@ -55,8 +55,13 @@ Before activating mainnet, ALL of these must be true:
 >
 > - `WASIAI_DOWNSTREAM_X402=true` (`src/lib/downstream-payment.ts:42`) — sin esto
 >   el leg no settlea nunca (skip `FLAG_OFF`).
-> - `WASIAI_A2A_CHAINS` con `avalanche-mainnet` (`src/adapters/registry.ts:268`) —
->   sin el slug, `CHAIN_NOT_SUPPORTED`.
+> - `WASIAI_A2A_CHAINS` con `avalanche-mainnet` — lector:
+>   `src/adapters/registry.ts:318` (`const csvRaw = process.env.WASIAI_A2A_CHAINS`,
+>   dentro de `initAdapters`). Sin el slug, el bundle no existe y el leg corta con
+>   `CHAIN_NOT_SUPPORTED`, emitido en `src/lib/downstream-payment.ts:543`.
+>   *(Re-CR MENOR-5: acá se citaba `registry.ts:268`, que es
+>   `if (adapterChainId === configChainId) return;` — el early-return del chequeo 2
+>   de coherencia, nada que ver con el CSV.)*
 > - ⚠️ **`AVALANCHE_RPC_URL`** en a2a (`src/adapters/avalanche/payment.ts:153` y el
 >   mapa `RPC_ENV_BY_CHAIN['avalanche-mainnet']` de
 >   `src/lib/downstream-payment.ts:72`). **NO `AVALANCHE_MAINNET_RPC_URL`**: ese
@@ -273,8 +278,12 @@ The architecture supports running BOTH testnet and mainnet at the same time (cha
 > "only ONE network active at a time per request", ponía el override por header como
 > "TD: future enhancement" y de ahí recomendaba **dos servicios Railway separados**.
 > Las tres cosas están desactualizadas:
-> - a2a inicializa **N bundles** desde el CSV `WASIAI_A2A_CHAINS`
->   (`src/adapters/registry.ts:291-325`).
+> - a2a inicializa **N bundles** desde el CSV `WASIAI_A2A_CHAINS`: el CSV se lee en
+>   `src/adapters/registry.ts:318` y el loop que construye y registra un bundle por
+>   slug es `src/adapters/registry.ts:369-375`. *(Re-CR MENOR-5: se citaba
+>   `:291-325`, que hoy es el docstring de `checkChainEnvironmentCoherence` + el
+>   arranque de `initAdapters` — el rango quedó desfasado por el refactor del propio
+>   fix-pack.)*
 > - el override por request **ya existe**: header `x-payment-chain`
 >   (`src/adapters/chain-resolver.ts`, prioridad DT-1 header > manifest > default).
 > - ⇒ un segundo servicio Railway NO hace falta para el hybrid mode… **salvo por
@@ -334,3 +343,16 @@ lectores), (2) las 3 envs acopladas de Kite mainnet, (3) el rollback revierte
 que estaba bien, (4) el hybrid mode ya no asume un a2a mono-chain, (5) el Step 1
 agrega las 3 piezas que faltaban del rail downstream, incluida
 `AVALANCHE_RPC_URL` (gateway) vs `AVALANCHE_MAINNET_RPC_URL` (facilitator).*
+
+*Re-revisado 2026-07-26 (re-CR MENOR-5) — **las citas `archivo:línea` también se
+verificaron abriendo cada línea**, no sólo las envs. La revisión anterior había
+calculado 2 de ellas ANTES de su propio refactor de `registry.ts` (+22 líneas) y
+quedaron apuntando a otro código: `registry.ts:268` (era el early-return de
+`checkAdapterChainIdDrift`) → el lector del CSV es `registry.ts:318`, y
+`registry.ts:291-325` (era un docstring) → el loop de N bundles es
+`registry.ts:369-375`. Se agregó además de dónde se EMITE `CHAIN_NOT_SUPPORTED`
+(`downstream-payment.ts:543`). Método reproducible en
+`doc/operations/mainnet-activation-runbook.md` §"Verificación de este runbook".
+Alcance NO cubierto por grep, igual que allá: los IDs de Railway y los valores que
+viven en consolas externas (project/environment/service IDs, tokens) — existen como
+envs, pero su VALOR sólo se confirma en el dashboard el día de la activación.*

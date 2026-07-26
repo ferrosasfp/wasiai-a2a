@@ -111,8 +111,8 @@ WasiAI A2A includes a **non-EVM Solana devnet adapter** (WKH-234) that pays agen
 
 What the Solana rail actually does (`src/adapters/solana/payment.ts`):
 
-- **Settle-only, outbound.** It settles the downstream leg (the gateway paying a Solana-native agent) inside `signAndSettleDownstream` / `settleSolanaLeg` (`src/lib/downstream-payment.ts:124`). The inbound 402 challenge (charging the caller) stays EVM-only: `getPaymentAdapter()` throws for a non-EVM bundle (`src/adapters/registry.ts:228`), so `x-payment-chain: solana-devnet` is not a supported inbound rail.
-- **Operator-signed SPL transfer.** `settle()` builds a `createTransferInstruction`, signs with the operator `Keypair` from `SOLANA_OPERATOR_PRIVATE_KEY` (`getSolanaOperatorKeypair()`, `src/adapters/solana/chain.ts:111`) and broadcasts via `sendAndConfirmTransaction`. There is no EIP-3009 and no facilitator hop on this leg: the gateway operator is the sender and pays the SOL gas.
+- **Settle-only, outbound.** It settles the downstream leg (the gateway paying a Solana-native agent) inside `signAndSettleDownstream` / `settleSolanaLeg` (`src/lib/downstream-payment.ts:287`). The inbound 402 challenge (charging the caller) stays EVM-only: `getPaymentAdapter()` throws for a non-EVM bundle (`src/adapters/registry.ts:416-419`), so `x-payment-chain: solana-devnet` is not a supported inbound rail.
+- **Operator-signed SPL transfer.** `settle()` builds a `createTransferInstruction`, signs with the operator `Keypair` from `SOLANA_OPERATOR_PRIVATE_KEY` (`getSolanaOperatorKeypair()`, `src/adapters/solana/chain.ts:84`) and broadcasts via `sendAndConfirmTransaction`. There is no EIP-3009 and no facilitator hop on this leg: the gateway operator is the sender and pays the SOL gas.
 - **Idempotent by `intentId`.** A repeated `intentId` re-verifies the prior signature on-chain (`getParsedTransaction`, pre/post token balances of `payTo`) and returns it instead of re-broadcasting. That `intentId -> signature` map is in-process, so idempotency survives retries inside a process but not a restart (durable cross-process lookup is a tracked follow-up).
 - **Verify-before-trust.** `verify()` asserts an on-chain token balance delta `>= amountAtomic` for the expected mint and `payTo`.
 
@@ -127,7 +127,7 @@ Gateway env vars, exact names from [`.env.example`](.env.example) (Solana block)
 | `SOLANA_ADAPTER_ENABLED` | yes | `true` (default `false`, the rail is inert while off) |
 | `WASIAI_A2A_CHAINS` | yes | must include `solana-devnet` in the comma-separated list, otherwise the bundle is never built and the leg logs `CHAIN_NOT_SUPPORTED` |
 | `SOLANA_OPERATOR_PRIVATE_KEY` | yes | base58 ed25519 secret of the operator that signs and broadcasts the SPL transfer. Its pubkey needs **devnet SOL for gas** (and devnet USDC in its ATA to have something to send). Never logged, never committed. |
-| `WASIAI_DOWNSTREAM_X402` | yes | `true`, the downstream settle path is flag-gated (`src/lib/downstream-payment.ts:30`) |
+| `WASIAI_DOWNSTREAM_X402` | yes | `true`, the downstream settle path is flag-gated (`DOWNSTREAM_FLAG`, `src/lib/downstream-payment.ts:42`) |
 | `SOLANA_RPC_URL` | no | `https://api.devnet.solana.com` |
 | `SOLANA_USDC_MINT_DEVNET` | no | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` (Circle USDC-SPL devnet) |
 | `SOLANA_USDC_DECIMALS` | no | `6` |

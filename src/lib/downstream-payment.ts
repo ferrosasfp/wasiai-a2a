@@ -166,11 +166,21 @@ export type DownstreamSkipCode =
   | 'VERIFY_FAILED'
   | 'SETTLE_FAILED'
   // ── Observabilidad: NO cortan el leg ────────────────────────────────
-  // No se pudo leer el balance del operador antes de settlear (sin RPC env, sin
-  // OPERATOR_PRIVATE_KEY, o ATA ilegible en Solana) ⇒ el pre-check se saltea y
-  // el settle sigue. Se emite en el paso 9 de `signAndSettleDownstream` (rama
-  // EVM, guard `if (!rpc)`) y en `settleSolanaLeg` (catch de
-  // `getOperatorSplBalance`).
+  // No se pudo leer el balance del operador antes de settlear ⇒ el pre-check se
+  // saltea y el settle sigue. SÓLO se emite en dos condiciones:
+  //   · EVM: falta la RPC env del rail — paso 9 de `signAndSettleDownstream`,
+  //     guard `if (!rpc)`.
+  //   · Solana: `getOperatorSplBalance()` tira — catch en `settleSolanaLeg`.
+  //
+  // ⚠️ NO cubre el caso "falta `OPERATOR_PRIVATE_KEY`" (re-CR MENOR-4: este
+  // comentario lo prometía y era falso). Con RPC presente y PK ausente o sin
+  // `0x`, el `if (pk?.startsWith('0x'))` del paso 9 NO tiene `else`: el pre-check
+  // se saltea **sin emitir ningún código**. Es un hueco de observabilidad, no de
+  // dinero — sin PK el `adapter.sign` posterior falla igual (`SIGNING_FAILED`,
+  // `avalanche/payment.ts:177-180` y sus pares de kite-ozone/base). Se dejó como
+  // hueco a propósito: agregar el log es tocar el money-path que AR+F4+re-CR ya
+  // aprobaron en este diff, y sumaría un 3er código de observabilidad por un
+  // caso sin impacto práctico.
   | 'BALANCE_PRECHECK_SKIPPED'
   // Replay idempotente Solana con balance por debajo del monto del leg: el
   // intent YA tiene firma, así que NO se corta (FIX 2); el log explica por qué
@@ -474,15 +484,18 @@ async function settleSolanaLeg(
  *
  * Códigos que se emiten SIN cortar el leg (observabilidad — el catálogo anterior
  * los omitía aunque salen en el mismo campo `code`; fix-pack CR-MNR-5):
- *  - no RPC env / no OPERATOR_PRIVATE_KEY (EVM) o ATA ilegible (Solana)
+ *  - no RPC env (EVM, paso 9 `if (!rpc)`) o ATA ilegible (Solana)
  *                                                       → BALANCE_PRECHECK_SKIPPED
  *  - replay idempotente Solana con balance bajo         → BALANCE_LOW_ON_IDEMPOTENT_REPLAY
  *
  * ⚠️ `BALANCE_PRECHECK_SKIPPED` NO es benigno en mainnet: significa que el leg va
- * a FIRMAR sin haber verificado fondos. Requiere `RPC_ENV_BY_CHAIN[chainKey]`
- * seteada (ver el mapa arriba: el rail `avalanche-mainnet` lee `AVALANCHE_RPC_URL`,
- * NO `AVALANCHE_MAINNET_RPC_URL` — esa última es del facilitator) Y
- * `OPERATOR_PRIVATE_KEY`.
+ * a FIRMAR sin haber verificado fondos. Para que el pre-check EVM corra hacen falta
+ * DOS cosas: `RPC_ENV_BY_CHAIN[chainKey]` seteada (ver el mapa arriba: el rail
+ * `avalanche-mainnet` lee `AVALANCHE_RPC_URL`, NO `AVALANCHE_MAINNET_RPC_URL` — esa
+ * última es del facilitator) **y** un `OPERATOR_PRIVATE_KEY` que empiece con `0x`.
+ * ⚠️ Pero el CÓDIGO sólo se emite por la primera: si falta la PK, el pre-check se
+ * saltea EN SILENCIO (re-CR MENOR-4 — antes este catálogo prometía una señal que no
+ * existe). Ver la nota completa en `DownstreamSkipCode`, arriba.
  *
  * Returns `DownstreamResult` ONLY when the adapter confirmed `success: true`.
  */
