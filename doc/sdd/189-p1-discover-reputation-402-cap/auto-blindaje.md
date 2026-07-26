@@ -350,3 +350,126 @@ volver a pasar. NO es opcional: es lo que protege las HUs siguientes.
 - **Aplicar en**: cuando un parámetro pasa de no-op a operativo, el cambio es de
   **contrato**, no de implementación, aunque el tipo no cambie. Merece release
   note incluso si el bug era obvio.
+
+---
+
+### [2026-07-26 16:20] AR it3 — Tercera afirmación absoluta falsa en la misma sesión: la propiedad valía para N=1 y la escribí para todo N
+
+- **Error**: el argumento load-bearing con el que cerré BLQ-BAJO-1 decía, sin
+  condiciones, que «el page size del pool es igual al límite que se le pide al
+  registry ⇒ el `slice` NO PUEDE descartar un candidato que el fetch trajo» y que
+  el pool es «SUPERCONJUNTO del de `main` ⇒ IMPOSIBLE que esconda un agente que
+  `main` resolvía». Las dos son **falsas con ≥2 registries**: el over-fetch es
+  POR REGISTRY y el `slice` es GLOBAL sobre la concatenación
+  (`services/discovery.ts:293` + `:399`), así que con N fuentes el fetch trae hasta
+  200·N filas y la página conserva 200. Repro del AR (3 registries, 2 de 400 filas
+  con las primeras 50 `verified:false`): `pool=200`, `total=401`,
+  `idx(target) = -1` → `resolveAgent` cae al hardcode `chain='avalanche'`, mientras
+  el mimic de `main` (pool 50) sí encontraba el agente. Extra: `limitParam` es
+  OPCIONAL (`types/index.ts:134`, gate en `discovery.ts:509`) y cualquier caller
+  puede crear un registry sin él vía `POST /registries` — esa fuente ignora el knob.
+- **Causa raíz**: verifiqué la propiedad en el caso que testeé (un registry, donde
+  `49 + 150 = 199 < 200` la hace verdadera) y la enuncié como propiedad del código.
+  Es el MISMO patrón de las dos anteriores de esta sesión (el runbook que
+  certificaba haber grepeado todas las envs, y el TTL que prometía que un run no
+  sobrevive a su timeout): **una verificación puntual convertida en garantía
+  universal**, y encima usada como cierre de un bloqueante.
+- **Fix**: la afirmación baja a su precondición real («la unión de las filas de
+  TODAS las fuentes contribuyentes ≤ la ventana de over-fetch; en la práctica, una
+  sola fuente con `limitParam`») y la precondición queda PEGADA a la afirmación en
+  los 5 sitios: `lib/discovery-fetch-limit.ts` (`resolveComposeAgentPoolLimit`),
+  `services/discovery.ts` (comentario del `slice`), `services/compose.ts`
+  (`discoverAgentPool`), `compose.discovery-pool.test.ts` (T-POOL-3, que corre justo
+  con la precondición) y `.env.example`. Los dos casos nuevos (suma entre registries
+  y registry sin `limitParam`) se plegaron en **TD-189-1**, que ahora lista los tres
+  residuales de la ventana fija en un solo lugar. `.env.example` dice que el knob
+  tiene que superar la **suma** de los catálogos, no el máximo. Severidad real BAJA:
+  ~32 agentes por registry contra una ventana de 200.
+- **Aplicar en**: (1) toda afirmación de la forma «no puede / imposible / siempre»
+  se escribe con su cuantificador («para N=1 fuentes», «para X en [a,b)») al lado,
+  no en otra sección — si el cuantificador no se puede escribir, la afirmación no
+  está probada; (2) cuando el test que respalda la propiedad usa **una** instancia
+  de algo que en producción es **N**, la propiedad es sobre N=1 hasta que se pruebe
+  lo contrario; (3) el barrido de este branch buscando «imposible / no puede /
+  nunca / siempre / garantiza» sobre las líneas agregadas encontró esta MISMA
+  afirmación repetida en 5 sitios (2 en el leaf, 1 en `discovery.ts`, 1 en
+  `.env.example`, 1 en el test T-POOL-3) y **ninguna otra** defectuosa: las demás
+  resultaron verdaderas por construcción o medidas (el `SIEMPRE falso` del guard de
+  binding con `maxAmountRequired` negativo, el «esta línea NUNCA tuvo el artefacto
+  de `toFixed`» de la pata outbound, el «una entrada más joven que la ventana NUNCA
+  se desaloja» del cap). El barrido cuesta un grep: hacerlo ANTES de entregar.
+
+---
+
+### [2026-07-26 16:35] AR it3 — Un límite duplicado como literal es un acoplamiento invisible entre una ruta y el TTL de un Map de dinero
+
+- **Error**: el máximo de steps de un pipeline vivía como literal `5` en
+  `routes/compose.ts` y OTRA VEZ como literal en `adapters/solana/payment.ts`,
+  donde multiplica `ESTIMATED_MAX_RUN_WALL_CLOCK_MS` (y de ahí salen la ventana
+  protegida y el TTL del dedup de settles). Subir el límite de la ruta invalidaba
+  la cota EN SILENCIO y sub-margineaba el TTL: una entrada de idempotencia podía
+  expirar con su run todavía vivo.
+- **Causa raíz**: al derivar una cota nueva a partir de un número que ya existía en
+  otra capa, copié el valor en vez de importarlo. El acoplamiento quedó documentado
+  en un comentario (que no falla) en lugar de en el grafo de módulos (que sí).
+- **Fix**: `src/lib/compose-limits.ts` (leaf nuevo, cero imports, ninguna suite lo
+  mockea) exporta `MAX_COMPOSE_STEPS`; lo consumen la ruta y el adapter. Se eligió
+  la constante compartida por sobre un test que compare literales: el test detecta
+  la divergencia después de escrita, la constante la hace inescribible. El test de
+  TTL conserva a propósito su propio `5 * 300_000` como valor esperado
+  independiente, así subir el límite rompe la batería y obliga a re-revisar el
+  margen a mano.
+- **Aplicar en**: si una constante nueva se DERIVA de otra que vive en otra capa,
+  importarla. Y elegir el leaf sin imports (patrón `pricing-constants.ts`) cuando
+  las dos capas están en lados opuestos de un módulo que las suites mockean
+  wholesale — la trampa que ya costó 12 y 84 tests en este mismo fix-pack.
+
+---
+
+### [2026-07-26 16:45] AR it3 — Cerré `limit=0` y dejé abierto `limit=1e21`: la clase de bug no se agota en el ejemplo que te dieron
+
+- **Error**: `parseLimit` usaba `Number.isInteger`, y `Number.isInteger(1e21)` es
+  `true`. Entonces `?limit=1e21` pasaba la validación, `resolveUpstreamFetchLimit`
+  lo devolvía tal cual y `.toString()` lo mandaba upstream como el literal
+  `'1e+21'`; un registry que rechaza el parámetro tira, el `catch` del fanout
+  (`discovery.ts:267-287`) degrada a `[]` y el caller recibe **200 con 0 agentes**,
+  violando en silencio el `min(limit, total)` que `doc/INTEGRATION.md` acababa de
+  prometer. Exactamente la misma clase que el `limit=0` que había cerrado en el
+  fix-pack anterior.
+- **Causa raíz**: probé los valores degenerados que el AR había NOMBRADO (`0`,
+  negativo, no numérico, fraccionario) y no el resto del dominio del tipo. El
+  predicado que elegí (`isInteger`) es más laxo que el uso real del valor (tiene que
+  sobrevivir a un `toString()` que va en una query string).
+- **Fix**: `Number.isSafeInteger` — todo entero seguro tiene representación decimal
+  plana en `String()` (la notación científica arranca en 1e21) — + `T-L8` y `T-R13`,
+  que fijan la precondición del bug (`Number.isInteger(1e21) === true`,
+  `(1e21).toString() === '1e+21'`) para que el fix no se pueda revertir en silencio.
+  Doc y JSDoc de la ruta actualizados. No es un guard de memoria: no hay
+  `new Array(limit)` y `slice` no preasigna.
+- **Aplicar en**: al validar un número que después se SERIALIZA (query string,
+  header, JSON hacia un tercero), el predicado tiene que cubrir la serialización,
+  no sólo el tipo: `isSafeInteger` por default, y un test que fije el borde.
+
+---
+
+### [2026-07-26 16:55] AR it3 — Corrección a mi propio razonamiento sobre el trickle-feed (input para la HU #48)
+
+*(NO se arregla acá: el trickle-feed tiene HU propia (#48). Se anota para que arranque sabiendo esto.)*
+
+- **Qué dije mal**: al justificar el TTL escribí que no acotar el wall-clock era
+  preferible porque «abortar un run en medio de un settle es el estado
+  broadcasteado-pero-no-confirmado del que este Map protege: el remedio sería peor
+  que la enfermedad». El AR corrigió, con razón, que ese argumento aplica al abort
+  a nivel **pipeline** y NO a acotar el **hop de invoke**: poner
+  `headersTimeout`/`bodyTimeout` en el dispatcher SSRF (o un `signal` sólo en el
+  fetch del invoke) no aborta ningún settle en vuelo — corta un hop outbound que
+  todavía no tocó dinero.
+- **Consecuencia**: SÍ existe un fix seguro y acotado para el trickle-feed (hoy
+  `bodyTimeout` de undici es de INACTIVIDAD y nadie lo configura ⇒ un request
+  outbound no tiene techo de wall-clock), y por lo tanto la cota estimada del run
+  puede volverse una cota REAL. La HU #48 debería arrancar por ahí, y recién
+  después re-evaluar el margen del TTL del dedup (que hoy se deriva de una
+  estimación justamente porque no hay cota dura).
+- **Aplicar en**: cuando se descarta un remedio por su blast radius, verificar que
+  el remedio evaluado sea el MÁS CHICO que resuelve el problema. Descartar el
+  remedio grande no autoriza a concluir que no hay remedio.

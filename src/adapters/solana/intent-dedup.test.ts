@@ -92,7 +92,14 @@ import {
 
 /** Default de `TIMEOUT_COMPOSE_MS` (routes/compose.ts). NO es cota de ejecución. */
 const COMPOSE_TIMEOUT_MS = 180_000;
-/** Cota ESTIMADA de vida de un run: 5 steps × 300 s (default de undici) = 25 min. */
+/**
+ * Cota ESTIMADA de vida de un run: 5 steps × 300 s (default de undici) = 25 min.
+ *
+ * AR it3 MENOR-2: el `5` se deja como literal INDEPENDIENTE a propósito (el código
+ * lo toma de `lib/compose-limits.ts`). Es el tripwire: si alguien sube el máximo de
+ * steps de `/compose`, la cota del código escala y esta batería FALLA, obligando a
+ * re-revisar a mano el margen del TTL en vez de desalinearlo en silencio.
+ */
 const ESTIMATED_RUN_BOUND_MS = 5 * 300_000;
 /** Ventana protegida: max(cota, TIMEOUT_COMPOSE_MS × 2) = 25 min. */
 const PROTECTED_WINDOW_MS = ESTIMATED_RUN_BOUND_MS;

@@ -9,6 +9,7 @@ import {
   Transaction,
 } from '@solana/web3.js';
 import { usdToAtomicUnits } from '../../lib/atomic-amount.js';
+import { MAX_COMPOSE_STEPS } from '../../lib/compose-limits.js';
 import { getLogger } from '../../lib/logger.js';
 import type {
   SolanaPaymentAdapter as ISolanaPaymentAdapter,
@@ -129,8 +130,12 @@ const DEFAULT_MAX_INTENT_ENTRIES = 10_000;
 // la cota más grande que podemos citar con números reales del repo, en vez de de
 // una env que no gobierna la ejecución.
 
-/** Máximo de steps de un pipeline (`routes/compose.ts`: `steps.length > 5`). */
-const MAX_COMPOSE_STEPS = 5;
+// AR it3 MENOR-2: `MAX_COMPOSE_STEPS` se importa del leaf compartido
+// (`lib/compose-limits.ts`) en vez de duplicar el literal `5` que vive en el guard
+// de `routes/compose.ts`. Subir el límite de la ruta ahora escala esta cota
+// automáticamente (y rompe la batería de TTL de `intent-dedup.test.ts`, que
+// conserva su propio literal como valor esperado independiente — la señal de
+// "re-revisá el margen a mano" que antes no existía).
 /**
  * Default de undici 8 por request (`headersTimeout` = `bodyTimeout` = 300_000 ms).
  * NUESTRO código no los configura (`lib/ssrf-dispatcher.ts`), así que es el único
@@ -138,7 +143,8 @@ const MAX_COMPOSE_STEPS = 5;
  */
 const UNDICI_DEFAULT_HOP_TIMEOUT_MS = 300_000;
 /**
- * COTA ESTIMADA de vida de un compose-run: 5 steps × 300 s = 25 min.
+ * COTA ESTIMADA de vida de un compose-run: `MAX_COMPOSE_STEPS` × 300 s = 25 min
+ * con el máximo de steps de hoy (5).
  *
  * ⚠️ Es una ESTIMACIÓN, no una garantía. Cuenta UN hop por step (el invoke del
  * agente) y no cuenta los hops del settle (verify + settle del facilitator) ni el

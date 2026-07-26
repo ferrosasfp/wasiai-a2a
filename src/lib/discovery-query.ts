@@ -74,7 +74,7 @@ export function parseMinReputation(raw: unknown): number | undefined {
 export class InvalidLimitError extends Error {
   readonly code = 'INVALID_LIMIT' as const;
   constructor(readonly received: unknown) {
-    super('limit must be an integer >= 1');
+    super('limit must be a safe integer >= 1 (<= 2^53-1)');
     this.name = 'InvalidLimitError';
   }
 }
@@ -85,13 +85,28 @@ export class InvalidLimitError extends Error {
  * matches, comportamiento de hoy). Cualquier otra cosa que no sea un entero
  * finito `>= 1` → lanza `InvalidLimitError`.
  *
- * NO se impone techo: el over-fetch (`resolveUpstreamFetchLimit`) es monótono a
- * propósito — un caller que pide `limit=500` fetchea 500. Meter un techo acá
- * sería reintroducir el bug de clase "esconder agentes" que arregló el hallazgo 1.
+ * NO se impone techo de MAGNITUD: el over-fetch (`resolveUpstreamFetchLimit`) es
+ * monótono a propósito — un caller que pide `limit=500` fetchea 500. Meter un techo
+ * acá sería reintroducir el bug de clase "esconder agentes" que arregló el
+ * hallazgo 1.
+ *
+ * `Number.isSafeInteger` (no `isInteger`) — AR it3 MENOR-3. Mismo agujero de clase
+ * que el `limit=0`: `Number.isInteger(1e21)` es `true`, así que `?limit=1e21`
+ * pasaba, `Math.max(1e21, 200).toString()` da `'1e+21'` y ESO se manda como
+ * `limitParam` upstream (`discovery.ts:509-514`); un registry que rechaza el
+ * parámetro tira, el `catch` del fanout (`discovery.ts:267-287`) lo degrada a `[]`
+ * y el caller recibe **HTTP 200 con 0 agentes**, violando en silencio el
+ * `min(limit, total)` que promete `doc/INTEGRATION.md:203-210`. El bound cierra
+ * exactamente eso: todo entero seguro (≤ 2^53-1) tiene representación decimal plana
+ * en `String()` (la notación científica arranca en 1e21), y a partir de ahí el
+ * número ya no es representable de forma exacta como page size.
+ *
+ * NO es un guard de memoria/CPU: no hay `new Array(limit)` y `slice(0, limit)` no
+ * preasigna.
  */
 export function parseLimit(raw: unknown): number | undefined {
   if (raw === undefined || raw === null || raw === '') return undefined;
   const n = typeof raw === 'number' ? raw : Number(raw);
-  if (!Number.isInteger(n) || n < 1) throw new InvalidLimitError(raw);
+  if (!Number.isSafeInteger(n) || n < 1) throw new InvalidLimitError(raw);
   return n;
 }

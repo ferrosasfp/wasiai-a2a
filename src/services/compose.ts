@@ -91,7 +91,13 @@ interface DiscoverCache {
  * hallazgo 1 hizo que el ranking se calcule sobre 4× candidatos, la membresía del
  * top-50 cambió y un agente non-EVM que quedaba afuera perdía la hidratación de
  * `payment.chain` → el leg downstream se salteaba o apuntaba al rail equivocado,
- * en silencio. Ver la justificación completa en `lib/discovery-fetch-limit.ts`.
+ * en silencio.
+ *
+ * PRECONDICIÓN del pool alineado al over-fetch: vale mientras la unión de las
+ * filas de TODAS las fuentes contribuyentes entre en la ventana de over-fetch
+ * (el `slice` del page size es global, el fetch es por registry). Con ~32 agentes
+ * por registry hoy se cumple con margen; el residual está en TD-189-1. La
+ * justificación completa, con la aritmética, en `lib/discovery-fetch-limit.ts`.
  */
 function discoverAgentPool(): Promise<Agent[]> {
   return discoveryService

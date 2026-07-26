@@ -388,7 +388,14 @@ export const discoveryService = {
 
     // Apply limit (PAGE SIZE — post-filtro, post-sort). Fix-pack P1: el fetch
     // upstream usa su propio over-fetch (`resolveUpstreamFetchLimit`), así que
-    // acá siempre hay candidatos de sobra para llenar la página.
+    // acá hay candidatos de sobra para llenar la página.
+    //
+    // Lo que este `slice` NO garantiza (AR it3 BLQ-BAJO-1): que conserve todo lo
+    // que el fetch trajo. Es GLOBAL sobre la concatenación de todas las fuentes
+    // (:293) mientras el over-fetch es POR REGISTRY, así que si la unión supera la
+    // ventana, el ranking decide qué queda dentro de la página y hay filas
+    // fetcheadas que se descartan (afecta al pool por-slug de `/compose`, no a
+    // `total`, que es pre-slice). Residual TD-189-1.
     const limited = query.limit ? allAgents.slice(0, query.limit) : allAgents;
 
     // WKH-100 (AC-8/DT-18): enrich batch post-limit with verified ERC-8004

@@ -60,10 +60,12 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    *   Un agente sin tasks liquidadas cuenta 0 → excluido si minReputation > 0.
    *   Valor no numérico o fuera de [0,100] → 400 `INVALID_MIN_REPUTATION`.
    * - limit: max results (PAGE SIZE — ver el contrato de la respuesta). Entero
-   *   `>= 1`; ausente = sin page size (todos los matches). Valor no entero, `0`,
-   *   negativo o no numérico → 400 `INVALID_LIMIT` (AR MENOR-4: antes `limit=0`
-   *   devolvía TODO el catálogo y `limit=-3` devolvía `total-3` por el
-   *   `slice(0,-3)`, los dos contradiciendo el contrato documentado).
+   *   SEGURO `>= 1`; ausente = sin page size (todos los matches). Valor no entero,
+   *   `0`, negativo, no numérico o fuera del rango seguro (`1e21`) → 400
+   *   `INVALID_LIMIT` (AR MENOR-4 + it3 MENOR-3: antes `limit=0` devolvía TODO el
+   *   catálogo, `limit=-3` devolvía `total-3` por el `slice(0,-3)` y `limit=1e21`
+   *   se reenviaba upstream como `'1e+21'` → 200 con 0 agentes; los tres
+   *   contradiciendo el contrato documentado).
    * - registry: filter to specific registry
    *
    * Respuesta — contrato de paginación (fix-pack P1, hallazgo 1):

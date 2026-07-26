@@ -263,8 +263,12 @@ describe('compose.resolveAgent — pool de hidratación de payment (AR BLQ-BAJO-
   });
 
   it('T-POOL-3: el page size del pool es IGUAL al over-fetch que se le pide al registry', async () => {
-    // Invariante que hace imposible la clase de bug: si el `slice` del page size
-    // es del mismo tamaño que el fetch, no puede descartar un candidato traído.
+    // Lo que acota la clase de bug: con el page size del pool igual al fetch
+    // pedido, el `slice` no descarta candidatos traídos — PRECONDICIÓN: una sola
+    // fuente contribuyente (el `slice` es global y el fetch por registry; con la
+    // unión de N fuentes por encima de la ventana la propiedad se cae, ver
+    // `lib/discovery-fetch-limit.ts` y TD-189-1). Este test corre justo con esa
+    // precondición: un único registry.
     const { upstreamLimits } = serveRegistry(
       catalogWithTarget(150, 5, 'solana-devnet', SOLANA_PAY_TO),
     );

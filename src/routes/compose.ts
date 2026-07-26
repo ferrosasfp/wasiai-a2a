@@ -7,6 +7,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { resolveChainKey } from '../adapters/chain-resolver.js';
 import { getAdaptersBundle, getDefaultChainKey } from '../adapters/registry.js';
 import { splitsActive } from '../config/split-config.js';
+import { MAX_COMPOSE_STEPS } from '../lib/compose-limits.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
@@ -125,9 +126,13 @@ function validateComposeBody(steps: unknown): ComposeValidationError | null {
     return { error: 'Missing or empty steps array', code: 'VALIDATION_ERROR' };
   }
 
-  if (steps.length > 5) {
+  // AR it3 MENOR-2: el `5` es una constante compartida (`lib/compose-limits.ts`).
+  // Era un literal acá y OTRO literal en `adapters/solana/payment.ts`, donde
+  // multiplica la cota estimada de wall-clock de un run (y de ahí sale el TTL del
+  // dedup de settles): subir este número desalineaba el TTL en silencio.
+  if (steps.length > MAX_COMPOSE_STEPS) {
     return {
-      error: 'Maximum 5 steps allowed per pipeline',
+      error: `Maximum ${MAX_COMPOSE_STEPS} steps allowed per pipeline`,
       code: 'VALIDATION_ERROR',
     };
   }

@@ -201,4 +201,20 @@ describe('minReputation: validación en la ruta', () => {
       expect.objectContaining({ limit: 5, minReputation: 10 }),
     );
   });
+
+  it('T-R13 (AR it3 MENOR-3): limit fuera del rango de entero seguro → 400, no llega al service', async () => {
+    for (const v of ['1e21', '9007199254740993']) {
+      mockDiscover.mockClear();
+      const res = await app.inject({
+        method: 'GET',
+        url: `/discover?limit=${v}`,
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVALID_LIMIT');
+      // Antes llegaba al service y se reenviaba upstream como el literal
+      // `'1e+21'`: un registry que rechaza el parámetro tira, el `catch` del
+      // fanout degrada a `[]` y el caller recibía 200 con 0 agentes.
+      expect(mockDiscover).not.toHaveBeenCalled();
+    }
+  });
 });

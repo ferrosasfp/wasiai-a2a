@@ -103,10 +103,29 @@ patológico (el fetch ya está acotado además por `DISCOVERY_REGISTRY_TIMEOUT_M
 
 ### TD abierto
 
-**TD-189-1**: con over-fetch, `total` es exacto sólo si el catálogo del registry
-entra en la ventana de over-fetch (hoy: sí, con margen). Para catálogos > 200 por
-registry, `total` vuelve a subestimar. La solución real es paginación cursor-based
-federada + un `count` upstream — fuera de scope de un fix-pack P1.
+**TD-189-1**: el over-fetch es una ventana FIJA por registry, así que todas las
+propiedades que dependen de "el fetch trae todo lo que importa" tienen la misma
+precondición: **la unión de las filas que aportan las fuentes contribuyentes entra
+en la ventana**. Hoy se cumple con margen (~32 agentes por registry contra 200).
+Los tres residuales, en un solo lugar:
+
+1. **`total` subestima** si el catálogo de UN registry supera la ventana (el fetch
+   se trunca antes de contar).
+2. **Suma entre registries** (AR it3): el fetch es por-registry pero el `slice` del
+   page size es GLOBAL (`discovery.ts:293` concatena, `:399` corta), así que con N
+   fuentes el fetch puede traer 200·N filas y la página conserva 200 ⇒ el `slice`
+   descarta candidatos que el fetch SÍ trajo, y el ranking decide cuáles. Rompe el
+   "superconjunto" del pool por-slug de `/compose` (ver BLQ-BAJO-1 más abajo).
+3. **Registry sin `limitParam`** (AR it3): el gate es
+   `query.limit && schema.limitParam` (`discovery.ts:509`) y `limitParam` es
+   opcional (`types/index.ts:134`), creable por cualquier caller vía
+   `POST /registries`. Esa fuente ignora el knob por completo, devuelve su
+   paginación default, y aporta al total del `slice` global.
+
+La solución real para los tres es paginación cursor-based federada + un `count`
+upstream — fuera de scope de un fix-pack P1. Mitigación operativa mientras tanto:
+`DISCOVERY_UPSTREAM_FETCH_LIMIT` tiene que superar la **suma** de los catálogos, no
+el más grande (documentado así en `.env.example`).
 
 ---
 
@@ -495,12 +514,39 @@ completo — la misma reincidencia ya documentada en `auto-blindaje.md`). Se mov
 ahí `resolveUpstreamFetchLimit` y se agregó
 `resolveComposeAgentPoolLimit() = resolveUpstreamFetchLimit(50)`.
 
-Propiedad que mata la clase de bug: `resolveUpstreamFetchLimit` es **idempotente**
-(`max(max(a,b), b) === max(a,b)`), así que el page size del pool queda **igual** al
-límite que se le pide al registry ⇒ el `slice` post-filtro **no puede** descartar
-un candidato que el fetch trajo. Y el pool es **superconjunto** del de `main` (el
-fetch de 200 filas en orden de registry contiene las 50 de antes) ⇒ este cambio no
-puede esconder un agente que `main` sí resolvía.
+Propiedades, con su precondición al lado (**corregido en la iteración 3**: la
+versión anterior las afirmaba sin condiciones y el AR probó que dos de las tres son
+falsas con ≥2 registries):
+
+1. **Idempotencia — verdadera sin condiciones.** `resolveUpstreamFetchLimit` cumple
+   `max(max(a,b), b) === max(a,b)`, así que el page size del pool es exactamente el
+   número que se le pide a **cada** registry.
+2. **El `slice` no descarta lo fetcheado — sólo con UNA fuente contribuyente.** El
+   `slice` es GLOBAL (`discovery.ts:399` sobre la concatenación de `:293`) y el
+   over-fetch es POR REGISTRY. Con N fuentes el fetch trae hasta 200·N filas y la
+   página conserva 200 ⇒ el `slice` sí descarta candidatos traídos. Y `limitParam`
+   es opcional (`types/index.ts:134`, gate en `discovery.ts:509`): un registry sin
+   `limitParam` devuelve su paginación default y para esa fuente no hay alineación
+   ninguna.
+3. **Superconjunto del pool de `main` — sólo con UNA fuente contribuyente.** Con una
+   sola, se sostiene por aritmética (el fetch de 200 filas en orden de registry
+   contiene las 50 de antes; el peor caso reproducido, `49 + 150 = 199 < 200`,
+   entra). Con 2+ **es falsa**: repro del AR sobre el pipeline real (sólo undici
+   mockeado) con 3 registries — dos sirviendo 400 filas cuyas primeras 50 son
+   `verified:false` rep 0 y el resto `verified:true` rep 100, más uno chico con el
+   target (`verified:true`, rep 50, `payment.chain='solana-devnet'`) → `pool=200`,
+   `total=401`, `idx(target) = -1` ⇒ `resolveAgent` cae al hardcode
+   `chain='avalanche'` del marketplace, mientras el mimic de `main` (pool 50) lo
+   encuentra y devuelve `solana-devnet`.
+
+**Severidad del residual: BAJA y no alcanzable en prod hoy** (los registries reales
+tienen ~32 agentes, muy por debajo de la ventana de 200). Lo que estaba roto era la
+**afirmación**, que además era el argumento load-bearing del cierre de este
+bloqueante. Los dos casos nuevos quedan plegados en **TD-189-1** (arriba) y la
+precondición vive pegada a la afirmación en
+`src/lib/discovery-fetch-limit.ts` (`resolveComposeAgentPoolLimit`),
+`src/services/discovery.ts` (el comentario del `slice`), `src/services/compose.ts`
+(`discoverAgentPool`) y `.env.example`.
 
 `compose.ts` tiene ahora **un solo productor** del pool (`discoverAgentPool`),
 consumido por `createDiscoverCache` y por el fallback de `resolveAgent`: si
@@ -531,7 +577,7 @@ puede observar. Se mockea sólo el borde de red (undici), como en
 
 | Mutante | Resultado |
 |---|---|
-| `resolveComposeAgentPoolLimit()` → `50` (o sea `main`) | **4 de 7 fallan** (T-POOL-1/2/4/6) |
+| `resolveComposeAgentPoolLimit()` → `50` (o sea `main`) | **5 de 7 fallan** (T-POOL-1/2/4/6/**7**) — re-medido en it3: la tabla decía 4 y omitía T-POOL-7, que también muere (el borde del settle por el path real de `/compose`: `expected 'avalanche' to be 'solana-devnet'`) |
 | `createDiscoverCache` → `discover({limit:50})` (divergencia cache↔fallback) | **1 de 7 falla** (T-POOL-7, el único que pasa por el cache) |
 
 ### Otros consumidores de `discover()` con `limit` implícito (revisados, el bug es de clase)
@@ -620,3 +666,85 @@ así que el guard no cambia ningún caso preexistente. Tests `T-MNR5-1..4`
 (baseline 3335 → **+27**) · cobertura verificada línea por línea en los archivos
 tocados (los únicos statements sin hit son `catch` defensivos y getters
 PREEXISTENTES; ninguna línea nueva en 0).
+
+---
+
+# Fix-pack del AR (iteración 3) — 1 BLOQUEANTE-BAJO + 2 MENOR
+
+El re-AR validó la remediación de la it2 (el guard de 0 unidades atómicas no
+introduce regresión de cobro — el mínimo del catálogo está 200× por encima del
+umbral; los números del TTL son coherentes; el warn del cap es por episodio; el
+bound `[0,100)` de `atomic-amount` es NECESARIO, midió 159.236 diferencias en
+`[1e6,1e15)`; y la afirmación de cobertura se sostiene) y **rechazó por la
+demostración**, no por el código.
+
+## BLQ-BAJO-1 (it3) — la demostración que cerraba el bloqueante anterior es falsa con ≥2 registries
+
+Corregido **in-place** en la sección de BLQ-BAJO-1 (it2): las tres propiedades
+quedan enunciadas con su precondición al lado, y los dos casos nuevos (suma entre
+registries, registry sin `limitParam`) están plegados en **TD-189-1**. La tabla de
+mutaciones también se corrigió: **5 de 7**, re-medido, no 4.
+
+Sitios tocados: `src/lib/discovery-fetch-limit.ts`, `src/services/discovery.ts`,
+`src/services/compose.ts`, `src/services/compose.discovery-pool.test.ts`,
+`.env.example` (dimensionamiento por **suma**, no por máximo), este work-item.
+
+**Barrido general de afirmaciones absolutas** (la lección, aplicada al branch
+entero): grep de «imposible / no puede / nunca / siempre / garantiza» sobre TODAS
+las líneas agregadas por el branch. Resultado: la única afirmación defectuosa era
+esta, repetida en 5 sitios; el resto (`SIEMPRE falso` del guard de binding con
+`maxAmountRequired` negativo, «esta línea NUNCA tuvo el artefacto de `toFixed`», «una
+entrada más joven que la ventana protegida NUNCA se desaloja») son verdaderas por
+construcción o medidas. Detalle en `auto-blindaje.md`.
+
+## MENOR-2 (it3) — `MAX_COMPOSE_STEPS` duplicado como literal
+
+`src/lib/compose-limits.ts` (leaf nuevo, cero imports) exporta
+`MAX_COMPOSE_STEPS = 5`; lo consumen `routes/compose.ts` (el guard de validación) y
+`adapters/solana/payment.ts` (factor de `ESTIMATED_MAX_RUN_WALL_CLOCK_MS`, del que
+salen la ventana protegida y el TTL del dedup de settles).
+
+**Decisión: constante compartida, NO un test que compare literales.** El test
+detecta la divergencia después de que alguien escribió el segundo número (y sólo si
+corre esa suite); la constante la hace inescribible. Se conserva ADEMÁS el literal
+independiente `5 * 300_000` en `solana/intent-dedup.test.ts` como tripwire: subir el
+máximo de steps escala la cota del código y **rompe** la batería de TTL, que es
+justo la señal de «re-revisá el margen a mano» que antes no existía.
+
+Sobre la trampa del leaf (ya costó 12 y 84 tests en este fix-pack): archivo nuevo,
+sin imports, y **ninguna** suite lo mockea (las suites mockean
+`logger`/`supabase`/`ssrf-dispatcher`/`circuit-breaker`/`url-validator`/
+`downstream-payment`/`payment-spec-reader`). Mismo patrón que `pricing-constants.ts`,
+que `routes/compose.ts` ya importaba.
+
+## MENOR-3 (it3) — `limit=1e21`: la misma clase que el `limit=0` que cerró la it2
+
+`Number.isInteger(1e21)` es `true`, así que `?limit=1e21` pasaba `parseLimit`, se
+reenviaba upstream como el literal `'1e+21'` (`discovery.ts:509-514`), un registry
+que lo rechaza tira, el `catch` del fanout (`:267-287`) degrada a `[]` y el caller
+recibía **200 con 0 agentes** — violando en silencio el `min(limit, total)` que
+`doc/INTEGRATION.md:203-210` promete.
+
+Fix: `Number.isSafeInteger` (todo entero seguro tiene representación decimal plana
+en `String()`; la notación científica arranca en 1e21) + mensaje de error, JSDoc de
+la ruta y `doc/INTEGRATION.md` alineados. **No** es un guard de memoria/CPU: no hay
+`new Array(limit)` y `slice` no preasigna. Tests: `T-L8` (unitario, fija la
+precondición del bug: `Number.isInteger(1e21) === true` y
+`(1e21).toString() === '1e+21'`) y `T-R13` (ruta: 400 y el service NO se llama).
+
+## Fuera de alcance (HU #48, no se toca acá)
+
+El trickle-feed: `bodyTimeout` de undici es de INACTIVIDAD y nadie lo configura ⇒ un
+request outbound no tiene techo de wall-clock. Corrección del AR a mi propio
+razonamiento, anotada en `auto-blindaje.md` para que la HU arranque sabiéndolo:
+acotar **sólo el hop de invoke** (`headersTimeout`/`bodyTimeout` en el dispatcher
+SSRF, o un `signal` sólo en el fetch del invoke) **no** aborta un settle en vuelo —
+mi «el remedio sería peor que la enfermedad» aplicaba al abort a nivel pipeline, no
+al hop. O sea que existe un fix seguro y la cota estimada del run puede volverse
+real.
+
+## Gates de la iteración 3
+
+`tsc --noEmit` 0 · `biome check src/` 0 (354 archivos) · **3364 passed | 11 skipped**
+(3362 → **+2**: `T-L8` y `T-R13`; ninguna suite baja) · mutación re-medida:
+`resolveComposeAgentPoolLimit() → 50` mata **5 de 7** (T-POOL-1/2/4/6/7).
