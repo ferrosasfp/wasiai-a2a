@@ -184,6 +184,7 @@ import {
   getIdentityBindingAdapter,
   getInitializedChainKeys,
   getPaymentAdapter,
+  getPaymentAdapterOrUnion,
   initAdapters,
 } from '../registry.js';
 
@@ -976,6 +977,110 @@ describe('adapter registry', () => {
       await expect(initAdapters()).rejects.toThrow(
         /Supported:.*base-mainnet.*solana-devnet/,
       );
+    });
+
+    // ─── P1 hallazgo 4: lo que del guard de chainId quedó SIN cubrir ─────────
+    //
+    // El chequeo 1 (`assertNoSlugDestinationDrift`) ya está pinneado en sus dos
+    // direcciones para EVM (T-it2-ALTO-1-reg + T-re-CR-MNR-6), y el chequeo 2 en
+    // las suyas (T-it2-MNR-3-reg + T-it2-MNR-3-reg-d). Lo que NO estaba cubierto
+    // es el rail SOLANA de los dos, y se verificó con mutación:
+    //
+    //  · exceptuar Solana del throw del chequeo 1 (`if (!drift ||
+    //    destination.vmFamily === 'solana') return;`) → SOBREVIVÍA la suite
+    //    completa (3364 passed). O sea: el único gate que impide que el rail
+    //    devnet-only settlee en Solana MAINNET no tenía test.
+    //  · borrar el early-return non-EVM del chequeo 2
+    //    (`if (bundle.payment.vmFamily !== 'evm') return;`) → también SOBREVIVÍA.
+
+    it('T-P1-4-solana-mainnet: un bundle Solana cuyo CAIP-2 apunta a MAINNET-BETA ⇒ initAdapters LANZA', async () => {
+      process.env.SOLANA_ADAPTER_ENABLED = 'true';
+      const { createSolanaAdapters } = await import('../solana/index.js');
+      // El rail Solana es devnet-only (CD-4): NO existe un ChainKey
+      // `solana-mainnet`, así que el slug SIEMPRE declara testnet. La única forma
+      // de terminar en dinero real es que `SOLANA_CAIP2_CHAIN_ID` apunte a
+      // mainnet-beta — que es exactamente este bundle.
+      vi.mocked(createSolanaAdapters).mockResolvedValueOnce({
+        payment: {
+          name: 'solana',
+          vmFamily: 'solana',
+          caip2ChainId: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d',
+        } as unknown as Awaited<
+          ReturnType<typeof createSolanaAdapters>
+        >['payment'],
+        attestation: { name: 'solana', chainId: 900001 } as never,
+        gasless: { name: 'solana', chainId: 900001 } as never,
+        identity: null,
+        chainConfig: {
+          name: 'Solana Devnet',
+          chainId: 900001,
+          explorerUrl: 'https://explorer.solana.com?cluster=devnet',
+        },
+      });
+      process.env.WASIAI_A2A_CHAINS = 'solana-devnet';
+
+      await expect(initAdapters()).rejects.toThrow(
+        /Incoherent chain config for 'solana-devnet': the slug declares testnet but its bundle points to a mainnet destination \(solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d/,
+      );
+      // Y el bundle que settlearía dinero REAL nunca queda alcanzable.
+      expect(getInitializedChainKeys()).toEqual([]);
+      expect(getAdaptersBundle('solana-devnet')).toBeUndefined();
+    });
+
+    it('T-P1-4-solana-nodrift: el rail Solana SANO no emite ADAPTER_CHAIN_ID_DRIFT (el chequeo 2 es EVM-only)', async () => {
+      process.env.SOLANA_ADAPTER_ENABLED = 'true';
+      loggerSpy.error.mockClear();
+      process.env.WASIAI_A2A_CHAINS = 'solana-devnet';
+
+      await initAdapters();
+
+      expect(getInitializedChainKeys()).toEqual(['solana-devnet']);
+      // El adapter Solana NO expone `chainId` y su `chainConfig.chainId` es un
+      // sentinel sintético (900001, DT-8). Sin el early-return non-EVM, el
+      // chequeo 2 compara `undefined` contra 900001, los ve distintos y emite un
+      // ADAPTER_CHAIN_ID_DRIFT en CADA arranque del rail Solana: una alarma de
+      // misconfiguración de dinero permanentemente falsa, que es como se
+      // desensibiliza al operador para cuando el drift sea REAL (el de Kite).
+      expect(loggerSpy.error).not.toHaveBeenCalled();
+    });
+
+    // ─── P1 hallazgo 5: el throw de non-EVM ─────────────────────────────────
+    // `registry.ts:416-419`. Estaba en 0% (línea 417 en el reporte de coverage) y
+    // borrar el throw entero SOBREVIVÍA la suite completa.
+    it('T-P1-5: getPaymentAdapter sobre una chain non-EVM LANZA con un mensaje ACCIONABLE', async () => {
+      process.env.SOLANA_ADAPTER_ENABLED = 'true';
+      process.env.WASIAI_A2A_CHAINS = 'base-sepolia,solana-devnet';
+      await initAdapters();
+
+      // Este accessor devuelve `EvmPaymentAdapter`: sus ~7 call-sites (middleware
+      // x402, fee-*, payment-intent, deposit, sign flows) leen `getToken()`,
+      // `sign()` y `chainId`, que el adapter Solana NO tiene. Sin el throw, el
+      // caller recibe un objeto Solana tipado como EVM y explota más lejos con un
+      // `TypeError: adapter.sign is not a function` en medio del money-path.
+      expect(() => getPaymentAdapter('solana-devnet')).toThrow(
+        /getPaymentAdapter: resolved a non-EVM \(solana\) adapter/,
+      );
+      // El mensaje tiene que decir QUÉ hacer, no sólo que falló.
+      expect(() => getPaymentAdapter('solana-devnet')).toThrow(
+        /use the vmFamily-aware settle path/,
+      );
+
+      // Y el rail EVM del MISMO proceso sigue resolviendo normal (el throw es del
+      // adapter equivocado, no del accessor).
+      expect(getPaymentAdapter('base-sepolia').chainId).toBe(84532);
+    });
+
+    it('T-P1-5b: getPaymentAdapterOrUnion SÍ devuelve el adapter Solana (la puerta VM-agnostic no lanza)', async () => {
+      process.env.SOLANA_ADAPTER_ENABLED = 'true';
+      process.env.WASIAI_A2A_CHAINS = 'solana-devnet';
+      await initAdapters();
+
+      // La contracara del test anterior: si ESTE accessor también lanzara, el
+      // rail Solana sería inalcanzable y el throw de arriba dejaría de ser un
+      // guard para volverse un corte del rail.
+      const union = getPaymentAdapterOrUnion('solana-devnet');
+      expect(union.vmFamily).toBe('solana');
+      expect(union.name).toBe('solana');
     });
   });
 });
