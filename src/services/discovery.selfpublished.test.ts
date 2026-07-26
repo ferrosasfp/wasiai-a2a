@@ -14,6 +14,8 @@ vi.mock('./registry.js', () => ({
   registryService: {
     get: vi.fn(),
     getEnabled: vi.fn().mockResolvedValue([]),
+    // HIGH-1: ver discovery.test.ts — el filtro por registry usa getWithSecrets.
+    getWithSecrets: vi.fn(),
   },
 }));
 

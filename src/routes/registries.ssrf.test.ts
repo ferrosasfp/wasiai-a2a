@@ -153,6 +153,8 @@ describe('registries routes — write-time SSRF guard (WKH-62 W2)', () => {
       enabled: true,
       createdAt: new Date(),
       ownerRef: 'tenant-A',
+      // HIGH-1: register/update devuelven `RegistryPublic` (sin `auth`).
+      authConfigured: false,
     });
 
     const res = await app.inject({
@@ -220,6 +222,8 @@ describe('registries routes — write-time SSRF guard (WKH-62 W2)', () => {
       enabled: true,
       createdAt: new Date(),
       ownerRef: 'tenant-A',
+      // HIGH-1: register/update devuelven `RegistryPublic` (sin `auth`).
+      authConfigured: false,
     });
 
     const res = await app.inject({
@@ -251,6 +255,8 @@ describe('registries routes — write-time SSRF guard (WKH-62 W2)', () => {
       enabled: true,
       createdAt: new Date(),
       ownerRef: 'tenant-A',
+      // HIGH-1: register/update devuelven `RegistryPublic` (sin `auth`).
+      authConfigured: false,
     });
 
     const res = await app.inject({

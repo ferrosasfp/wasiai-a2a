@@ -57,6 +57,52 @@ export interface RegistryConfig {
   ownerRef: string;
 }
 
+/**
+ * HTTP-safe projection of `RegistryConfig` (HIGH-1, 2026-07-26).
+ *
+ * `RegistryConfig.auth.value` is a live outbound credential. Every read-path
+ * that crosses the HTTP boundary MUST return this type instead of the internal
+ * row, produced ONLY by `toRegistryPublic()` in `services/registry.ts`.
+ *
+ * Redaction is BY CONSTRUCTION, not by omission:
+ *   - `auth?: never` makes `RegistryConfig` structurally NON-assignable to
+ *     `RegistryPublic` (its `auth?: RegistryAuth | undefined` does not fit
+ *     `never`), so `tsc` rejects a handler that forwards the internal row.
+ *   - `authConfigured` is REQUIRED, so the internal row also fails the
+ *     missing-property check. Two independent compile-time guards.
+ *
+ * What replaces the secret: the declared scheme (`authType`) and a boolean
+ * saying whether a static credential exists server-side. NEVER a prefix, a
+ * suffix, a length or a hash of the value — all of those are attack material.
+ */
+export interface RegistryPublic {
+  id: string;
+  name: string;
+  discoveryEndpoint: string;
+  invokeEndpoint: string;
+  agentEndpoint?: string | undefined;
+  schema: RegistrySchema;
+  enabled: boolean;
+  createdAt: Date;
+  ownerRef: string;
+
+  /**
+   * Redaction guard — structurally forbidden. Never present at runtime.
+   * Do NOT relax this to `RegistryAuth`: it is what makes the compiler reject
+   * `reply.send(internalRegistryRow)`.
+   */
+  auth?: never;
+
+  /** Declared outbound auth scheme. Omitted when the registry has no auth. */
+  authType?: RegistryAuth['type'] | undefined;
+
+  /**
+   * `true` when a static credential is stored server-side for this registry.
+   * Carries no information about the credential itself.
+   */
+  authConfigured: boolean;
+}
+
 export interface RegistrySchema {
   /** How to map discovery params */
   discovery: {

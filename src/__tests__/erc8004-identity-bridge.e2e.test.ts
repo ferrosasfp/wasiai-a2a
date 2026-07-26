@@ -113,12 +113,19 @@ vi.mock('../adapters/erc8004-identity.js', () => ({
 }));
 
 // ── registryService mock (discover + agent-card route) ───────
-vi.mock('../services/registry.js', () => ({
-  registryService: {
-    getEnabled: vi.fn(),
-    get: vi.fn(),
-  },
-}));
+// HIGH-1: se preservan los exports reales (`toRegistryPublic`) para que el
+// fixture de `get()` sea la MISMA proyección HTTP-safe que produce el service.
+vi.mock('../services/registry.js', async (orig) => {
+  const actual = await orig<typeof import('../services/registry.js')>();
+  return {
+    ...actual,
+    registryService: {
+      getEnabled: vi.fn(),
+      get: vi.fn(),
+      getWithSecrets: vi.fn(),
+    },
+  };
+});
 
 // ── circuit breaker (discover) ───────────────────────────────
 vi.mock('../lib/circuit-breaker.js', () => ({
@@ -156,7 +163,7 @@ vi.mock('undici', async (importOriginal) => {
 import agentCardRoutes from '../routes/agent-card.js';
 import authRoutes from '../routes/auth.js';
 import discoverRoutes from '../routes/discover.js';
-import { registryService } from '../services/registry.js';
+import { registryService, toRegistryPublic } from '../services/registry.js';
 
 // ── Fixtures ─────────────────────────────────────────────────
 const FUNDING_WALLET = '0x1111111111111111111111111111111111111111';
@@ -238,7 +245,10 @@ describe('ERC-8004 identity-unified bridge (e2e)', () => {
     mockResolve.mockReset();
     vi.mocked(registryService.getEnabled).mockResolvedValue([makeRegistry()]);
     // FIX v3 (DT-23.3.2): bind's PK-existence pre-check reads registries.get(id).
-    vi.mocked(registryService.get).mockResolvedValue(makeRegistry());
+    // HIGH-1: `get()` devuelve la proyección HTTP-safe (sin `auth.value`).
+    vi.mocked(registryService.get).mockResolvedValue(
+      toRegistryPublic(makeRegistry()),
+    );
     // Real identity.lookupByHash hits the mocked supabase (.eq.single → null),
     // so spy it to return the caller key row.
     vi.spyOn(identityService, 'lookupByHash').mockResolvedValue({

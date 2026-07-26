@@ -13,6 +13,14 @@
  * compartido entre TODOS los payers x402 y permitiría que cualquier payer
  * con $1 USDC modifique/borre registries de otros payers (cross-tenant
  * IDOR). El guard retorna 403 `A2A_KEY_REQUIRED` antes de llegar al service.
+ *
+ * HIGH-1 (2026-07-26): TODAS las respuestas de este plugin son `RegistryPublic`
+ * (sin `auth.value`). El `GET /` es público y devolvía la credencial outbound
+ * en claro. La redacción vive en el service (`toRegistryPublic`) y el tipo
+ * `RegistryPublic` hace que `tsc` rechace devolver la fila interna. Si agregás
+ * un read-path acá, NO uses `registryService.getWithSecrets`/`getEnabled`:
+ * `registries.redaction.test.ts` recorre todos los GET del plugin y falla si
+ * alguna respuesta contiene el secreto.
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
