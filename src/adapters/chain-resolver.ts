@@ -248,6 +248,20 @@ export function classifyEvmChainId(chainId: number): ChainEnvironment {
  * dinero real es que `SOLANA_CAIP2_CHAIN_ID` / `SOLANA_RPC_URL` apunten a
  * mainnet-beta. Se clasifica por DENYLIST (no allowlist) a propósito: un
  * cluster devnet/localnet con un CAIP-2 exótico NO debe bloquearse por sorpresa.
+ *
+ * ⚠️ DEUDA EXPLÍCITA — `TD-SOLANA-CAIP2-DENYLIST` (`MULTI-CHAIN.md` §10). Esta
+ * denylist es fail-OPEN: un CAIP-2 desconocido cae en `testnet`, o sea que el
+ * gate de mainnet del leg lo deja pasar sin opt-in. Es aceptable HOY sólo por
+ * tres condiciones simultáneas: (a) el valor no es agent-controlled (sale de
+ * `SOLANA_CAIP2_CHAIN_ID`, env-only), (b) el rail Solana está flag-gated OFF y
+ * (c) NO existe un ChainKey `solana-mainnet` (CD-4 de WKH-234), así que ningún
+ * slug puede declarar mainnet.
+ *
+ * CONDICIÓN DE REACTIVACIÓN (pasa a ALLOWLIST fail-CLOSED, obligatorio): en
+ * cuanto exista un ChainKey `solana-mainnet` **o** el rail Solana salga de flag
+ * OFF. Ahí esta función empieza a decidir sobre dinero real y el cluster local
+ * (`solana-test-validator`, genesis propio ⇒ CAIP-2 desconocido) pasa a ser una
+ * excepción explícita por env, no el default.
  */
 const SOLANA_MAINNET_CAIP2_REFERENCE = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp';
 

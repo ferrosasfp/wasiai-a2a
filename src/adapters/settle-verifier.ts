@@ -207,6 +207,23 @@ export { isMainnetChainKey };
  * MAINNET it flips to fail-CLOSED (`ok:false`) with a distinguishable reason so
  * an operator can tell an RPC outage apart from a definitive contradiction
  * (AC-5). Never throws (CD-4).
+ *
+ * ⚠️ DEPENDENCIA DE SEGURIDAD (fix-pack CR, residuo señalado): esta función
+ * clasifica por el STRING del slug (`isMainnetChainKey`), o sea justo lo que el
+ * ⚠️ de `chain-resolver.ts` (sobre `isMainnetChainKey`) desaconseja para
+ * decisiones de dinero. Es CORRECTO hoy sólo porque
+ * `registry.assertNoSlugDestinationDrift()` (vía `checkChainEnvironmentCoherence`,
+ * llamada desde `initAdapters`) LANZA al arrancar cuando el destino
+ * real de un bundle contradice el mainnet-ness de su slug (fix-pack it2
+ * BLQ-ALTO-1): con ese assert en pie, "slug testnet" implica "destino testnet".
+ *
+ * ⇒ Si alguien ABLANDA ese assert (lo baja a warning, lo scopea a un subconjunto
+ * de chains, o agrega un factory que resuelva su chain en call-time sin cubrirlo),
+ * este gate vuelve a fail-OPEN sobre settles de MAINNET REAL — la regresión exacta
+ * de WKH-144. En ese caso hay que migrar esta función a
+ * `classifyDestinationEnvironment(destination)` (que mira el chainId/CAIP-2 real)
+ * y pasarle el destino, no el slug. Ver `TD-MAINNET-GATE-USA-CHAINCONFIG`
+ * (`MULTI-CHAIN.md` §10).
  */
 export function rpcUnavailableResult(chainKey: ChainKey): SettleVerification {
   if (isMainnetChainKey(chainKey)) {

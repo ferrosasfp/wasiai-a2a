@@ -41,7 +41,7 @@ EIP-712 signatures over EIP-3009 `TransferWithAuthorization`.
   `chainConfig`:
   - `KITE_NETWORK=mainnet` **alongside a Kite testnet slug** silently repoints
     the `kite-ozone-testnet` bundle at chain `2366` (real USDC.e) — the gateway
-    now **refuses to start** on that combination (`assertChainEnvironmentCoherent`).
+    now **refuses to start** on that combination (`assertNoSlugDestinationDrift`).
   - the `kite-mainnet` slug **without** `KITE_NETWORK=mainnet` starts, but the
     payment adapter signs on `2368` with **testnet PYUSD**; the registry logs
     `code=ADAPTER_CHAIN_ID_DRIFT`.
@@ -154,9 +154,26 @@ Outbound = the chain on which **WasiAI** pays the downstream agent
   `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet` (CSV; numeric
   aliases like `43114` also accepted), have `avalanche-mainnet` in
   `WASIAI_A2A_CHAINS`, AND fund the operator wallet with USDC on
-  Avalanche C-Chain. The pre-flight balance check returns
-  `INSUFFICIENT_BALANCE` if the wallet is empty; the request fails before
-  any signing happens.
+  Avalanche C-Chain.
+- **What the pre-flight balance check actually does** (corrected
+  2026-07-26, fix-pack AR-profundo CR-MNR-10 — this bullet previously
+  claimed "the request fails before any signing happens", which is
+  false on both counts):
+  - If the operator balance is below the leg amount, only **that leg**
+    is skipped: `signAndSettleDownstream` logs `INSUFFICIENT_BALANCE`
+    and returns `null`. **The request does NOT fail** — the agent is
+    still invoked and its output still returned; it simply does not get
+    paid on that leg (`src/lib/downstream-payment.ts`, step 9).
+  - The check only runs when BOTH the chain's RPC env var and
+    `OPERATOR_PRIVATE_KEY` are present. Otherwise it is skipped with
+    `BALANCE_PRECHECK_SKIPPED` and **the leg signs and settles without
+    any funds verification**. On mainnet that is the dangerous case, so
+    double-check the env NAME: the gateway's Avalanche rail reads
+    `AVALANCHE_RPC_URL` (not `AVALANCHE_MAINNET_RPC_URL`, which is the
+    facilitator's) — see `RPC_ENV_BY_CHAIN` in
+    `src/lib/downstream-payment.ts`.
+  - It is an observability/short-circuit optimisation, not a money gate.
+    The authoritative failure is the on-chain settle itself.
 
 ### Custom token contracts
 

@@ -293,6 +293,31 @@ Tiempo estimado (mirror de WKH-MULTICHAIN W1): ~4-6h para adapter completo + tes
    # → response con tx hash en kitescan.ai (mainnet explorer)
    ```
 
+4. **Rollback de Kite mainnet** (agregado en el fix-pack AR-profundo CR-MAYOR-2 —
+   §8 documentaba la activación pero **no** la vuelta atrás, y los dos runbooks de
+   `doc/` la tenían MAL):
+
+   Las dos envs se mueven **JUNTAS**, con la misma lógica que la activación:
+
+   ```bash
+   WASIAI_A2A_CHAINS=kite-ozone-testnet   # volver al CSV testnet exacto previo
+   KITE_NETWORK=                          # vaciar/unset EN EL MISMO cambio
+   ```
+
+   - ⛔ **revertir sólo `KITE_NETWORK`** (dejando `WASIAI_A2A_CHAINS=kite-mainnet`)
+     deja el rail ROTO: `chainConfig.chainId` 2366 con el adapter firmando en 2368 /
+     PYUSD de testnet ⇒ `ADAPTER_CHAIN_ID_DRIFT`. Es el mismo bundle inconsistente
+     que produce la activación a medias, y es el bug que tenían los dos rollbacks de
+     `doc/operations/mainnet-activation-runbook.md` y
+     `doc/migration/MAINNET-ACTIVATION-RUNBOOK.md`.
+   - ⛔ **revertir sólo el CSV** (dejando `KITE_NETWORK=mainnet` con un slug Kite
+     testnet) es peor: `initAdapters` **LANZA** y el gateway no arranca.
+   - ✅ **Verificación del rollback** (no está hecho hasta que pasen las dos):
+     `Adapters initialized` lista sólo slugs testnet **y** no aparece ninguna línea
+     `ADAPTER_CHAIN_ID_DRIFT`.
+   - `KITE_NETWORK=testnet` y `KITE_NETWORK` ausente son equivalentes: cualquier
+     valor distinto de `mainnet` resuelve testnet (`kite-ozone/chain.ts:46`).
+
 ### Avalanche mainnet (43114)
 
 1. **Railway env update**:
@@ -342,9 +367,10 @@ modo **mainnet hybrid** que vive en producción desde 2026-04-29.
 
 | ID | Descripción | Trigger |
 |----|-------------|---------|
-| **TD-NEW-KITE-PARAMS** | Refactor de `src/adapters/kite-ozone/chain.ts` + `kite-ozone/payment.ts` + `kite-ozone/index.ts` para aceptar `network` como argumento explícito en lugar de leer `process.env.KITE_NETWORK`. Hoy DT-I muta temporalmente la env var dentro del factory y la restaura en `try/finally`, pero el ADAPTER la lee en **call-time** (getter `chainId`, `getToken()`, dominio EIP-712), o sea DESPUÉS del `finally`. Consecuencias medidas (probe real, it2 MNR-3): (a) `kite-mainnet` sin `KITE_NETWORK=mainnet` arranca con `chainConfig` 2366 y adapter 2368/PYUSD-testnet; (b) los dos slugs Kite **no tienen configuración coherente posible** en el mismo proceso. Mitigación actual: `assertChainEnvironmentCoherent` lanza en la dirección peligrosa y loguea `code=ADAPTER_CHAIN_ID_DRIFT` en la segura. | Cuando aparezca una HU que requiera ambos chains Kite activos al mismo tiempo (hoy es imposible). |
-| **TD-MAINNET-GATE-USA-CHAINCONFIG** | El gate de opt-in mainnet del leg downstream (`downstream-payment.ts`) clasifica el destino por `bundle.chainConfig.chainId`, pero quien firma es el ADAPTER. Mientras exista un adapter que resuelva su chain en call-time (ver TD arriba) los dos pueden divergir. Hoy la divergencia alcanzable es la SEGURA (gate=mainnet / firma=testnet) y la peligrosa la corta `assertChainEnvironmentCoherent` al arrancar. | Se cierra solo cuando TD-NEW-KITE-PARAMS elimine la lectura de env en call-time. Revisar de nuevo si se agrega un adapter env-driven. |
+| **TD-NEW-KITE-PARAMS** | Refactor de `src/adapters/kite-ozone/chain.ts` + `kite-ozone/payment.ts` + `kite-ozone/index.ts` para aceptar `network` como argumento explícito en lugar de leer `process.env.KITE_NETWORK`. Hoy DT-I muta temporalmente la env var dentro del factory y la restaura en `try/finally`, pero el ADAPTER la lee en **call-time** (getter `chainId`, `getToken()`, dominio EIP-712), o sea DESPUÉS del `finally`. Consecuencias medidas (probe real, it2 MNR-3): (a) `kite-mainnet` sin `KITE_NETWORK=mainnet` arranca con `chainConfig` 2366 y adapter 2368/PYUSD-testnet; (b) los dos slugs Kite **no tienen configuración coherente posible** en el mismo proceso. Mitigación actual: `checkAdapterChainIdDrift` (`registry.ts`) lanza en la dirección peligrosa y loguea `code=ADAPTER_CHAIN_ID_DRIFT` en la segura. Nota (CR-MNR-7): la activación de Kite mainnet NO mueve `attestation` ni `gasless` — los dos tienen `chainId = 2368` HARDCODEADO (`kite-ozone/attestation.ts:8`, `kite-ozone/gasless.ts:258`) y el gasless firma su dominio EIP-712 sobre `kiteTestnet.id` (`gasless.ts:70`) y reporta `network:'kite-testnet'` (`:275`). O sea que con el rail 2366 activo, attest/gasless siguen apuntando a testnet. | Cuando aparezca una HU que requiera ambos chains Kite activos al mismo tiempo (hoy es imposible). |
+| **TD-MAINNET-GATE-USA-CHAINCONFIG** | El gate de opt-in mainnet del leg downstream (`downstream-payment.ts`) clasifica el destino por `bundle.chainConfig.chainId`, pero quien firma es el ADAPTER. Mientras exista un adapter que resuelva su chain en call-time (ver TD arriba) los dos pueden divergir. Hoy la divergencia alcanzable es la SEGURA (gate=mainnet / firma=testnet) y la peligrosa la corta `checkAdapterChainIdDrift` al arrancar. | Se cierra solo cuando TD-NEW-KITE-PARAMS elimine la lectura de env en call-time. Revisar de nuevo si se agrega un adapter env-driven. |
 | **TD-SOLANA-CAIP2-DENYLIST** | `classifySolanaCaip2` (`chain-resolver.ts`) es una **denylist**: sólo la referencia de mainnet-beta (o un string que contenga `mainnet`) se clasifica `mainnet`; cualquier CAIP-2 desconocido cae en `testnet` (fail-OPEN). Evaluado y NO convertido a allowlist en it2 MNR-4: (a) no es alcanzable por un agente (sale de `SOLANA_CAIP2_CHAIN_ID`, env-only) y el rail está flag-gated OFF, (b) no existe ChainKey `solana-mainnet`, (c) una allowlist de genesis conocidos rompería cualquier cluster local (`solana-test-validator` genera un genesis propio) y obligaría a tocar 3 archivos de test que usan refs sintéticas (`solana:test`, `solana:testcluster`), incluido el del money-path. | Cuando exista un ChainKey `solana-mainnet` o el rail Solana salga de flag OFF: ahí la clasificación pasa a decidir sobre dinero real y debe volverse allowlist (y el cluster local, una excepción explícita por env). |
+| **TD-INBOUND-ZERO-PAYTO** | El sign x402 **INBOUND** (`compose.ts` → `invokeAgent`, guard `inboundVmUnsupported`) valida el `payTo` del agente sólo por FORMATO (`isValidWallet`), así que un agente registrado con `payTo = 0x0000…0000` hace que el gateway firme y settlee una autorización EIP-3009 hacia la zero-address (fondos del operador quemados). El leg **DOWNSTREAM** sí lo rechaza (`ZERO_PAY_TO`, `downstream-payment.ts` → `validatePayTo`). Asimetría detectada en el fix-pack AR-profundo CR-MNR-4 y **NO cerrada a propósito**: unificar los dos criterios cambia qué payTos firma un gate del money-path que AR+F4 aprobaron en ese mismo diff, y eso no entra en un fix de tipos/naming. | Antes de cualquier activación mainnet del rail INBOUND, o en cuanto se toque el guard de `invokeAgent` por otro motivo. El fix es una línea (usar `validatePayTo` en vez de `isValidWallet`) + los tests del nuevo skip. |
 | **TD-AVALANCHE-DEPOSIT-AUTOMATION** | Automatizar el deposit Avalanche (§7) reemplazando el SQL `register_a2a_key_deposit` manual por verificación on-chain (lectura del USDC `Transfer` log al wallet del operator + acreditación automática del budget). Mirror del flow Kite existente. | Post-MVP. Requerido si el volumen de smoke tests Avalanche se vuelve operacionalmente costoso. |
 
 Ver también [`CHAIN-ADAPTIVE.md`](CHAIN-ADAPTIVE.md) §7 (Open Questions) y el SDD §11

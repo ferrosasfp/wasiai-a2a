@@ -45,6 +45,19 @@ vi.mock('../../lib/logger.js', () => ({
 // La versión anterior del mock derivaba AMBOS de `opts`, lo que ocultaba ese
 // drift inverso y daba verde a configuraciones que en real quedan rotas.
 // Pinneado con el adapter real en `payment.mainnet.test.ts`.
+//
+// ⚠️ `attestation.chainId` / `gasless.chainId` están HARDCODEADOS en 2368 porque
+// los adapters REALES lo están (fix-pack CR-MNR-7 — el mock los modelaba como
+// network-dependientes, o sea afirmaba fidelidad y no la tenía):
+//   · `kite-ozone/attestation.ts:8`  → `readonly chainId = 2368`
+//   · `kite-ozone/gasless.ts:258`    → `readonly chainId = 2368`
+//     (+ `:60` walletClient sobre `kiteTestnet`, `:70` dominio EIP-712 con
+//      `kiteTestnet.id`, `:275` status `network:'kite-testnet'`)
+// O sea: activar Kite MAINNET (lo que el runbook ahora recomienda) NO mueve
+// attestation ni gasless — siguen en 2368. Trackeado en `TD-NEW-KITE-PARAMS`.
+// Hoy ningún test assertea esos campos, así que no había falso verde ACTIVO; el
+// riesgo era que el próximo test los asserteara contra el mock y creyera que el
+// rail mainnet los mueve.
 vi.mock('../kite-ozone/index.js', () => ({
   createKiteOzoneAdapters: vi.fn(
     async (opts?: { network?: 'testnet' | 'mainnet' }) => {
@@ -66,8 +79,9 @@ vi.mock('../kite-ozone/index.js', () => ({
             return process.env.KITE_NETWORK === 'mainnet' ? 2366 : 2368;
           },
         },
-        attestation: { name: 'kite-ozone', chainId },
-        gasless: { name: 'kite-ozone', chainId },
+        // CR-MNR-7: FIEL al real — 2368 hardcodeado, network-independiente.
+        attestation: { name: 'kite-ozone', chainId: 2368 },
+        gasless: { name: 'kite-ozone', chainId: 2368 },
         identity: null,
         chainConfig: { name, chainId, explorerUrl },
       };
@@ -418,7 +432,7 @@ describe('adapter registry', () => {
     // it2 MNR-3: la activación COHERENTE de Kite mainnet exige el slug
     // `kite-mainnet` Y `KITE_NETWORK=mainnet` (el adapter la lee en call-time —
     // TD-NEW-KITE-PARAMS). Con el slug solo, el adapter queda en 2368/PYUSD y
-    // `assertChainEnvironmentCoherent` ahora LANZA (ver T-it2-MNR-3-reg).
+    // `assertNoSlugDestinationDrift` ahora LANZA (ver T-it2-MNR-3-reg).
     beforeEach(() => {
       process.env.KITE_NETWORK = 'mainnet';
     });
@@ -495,7 +509,7 @@ describe('adapter registry', () => {
     // mainnet y exige opt-in; el dinero sería testnet) ⇒ log.error ruidoso y el
     // arranque sigue. NO se convierte en throw a propósito: volvería
     // no-arrancable una config que hoy arranca (ver el comentario de
-    // `assertChainEnvironmentCoherent`).
+    // `checkAdapterChainIdDrift`).
     it('T-it2-MNR-3-reg: el drift inverso (slug kite-mainnet sin KITE_NETWORK=mainnet) se LOGUEA como error y NO rompe el arranque', async () => {
       delete process.env.KITE_NETWORK;
       loggerSpy.error.mockClear();

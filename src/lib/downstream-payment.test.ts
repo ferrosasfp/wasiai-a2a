@@ -944,15 +944,27 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
   });
 
   // ── Fix-pack AR-profundo FIX 3: monto REAL settleado, en USD ──────────────
-  it('T-FIX3a: el leg Solana propaga settledAmountUsd == monto on-chain (derivado del atómico + decimals)', async () => {
+  it('T-FIX3a: el leg Solana propaga nonEvmSettle.amountUsd == monto on-chain (derivado del atómico + decimals)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const result = await signAndSettleDownstream(solanaAgent(), makeLogger());
     // 0.5 USDC 6-dec → 500000 atómico → 0.5 USD. Es el número que el ledger
     // debe cruzar contra la firma base58 (antes se registraba el débito del
     // caller, que vale 0 en el step 0).
     expect(result?.settledAmount).toBe('500000');
-    expect(result?.settledAmountUsd).toBe(0.5);
-    expect(result?.settleCaip2).toBe('solana:testcluster');
+    // Fix-pack CR-MNR-1: CAIP-2 y monto viajan en UN objeto — el estado "uno sin
+    // el otro" (que habría reescrito amount_usd=0 al lado de una firma real) ya
+    // no es representable, así que se assertea el objeto COMPLETO.
+    expect(result?.nonEvmSettle).toEqual({
+      caip2: 'solana:testcluster',
+      amountUsd: 0.5,
+    });
+  });
+
+  it('T-CR-MNR-1: el leg EVM NO trae `nonEvmSettle` (el ledger no-EVM no se toca)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const result = await signAndSettleDownstream(makeAgent(), makeLogger());
+    expect(result).not.toBeNull();
+    expect(result?.nonEvmSettle).toBeUndefined();
   });
 
   // ── Fix-pack AR-profundo FIX 2: idempotencia ANTES del pre-check de fondos ──
@@ -1003,7 +1015,7 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
     // El corazón del fix: el retry NO es null y devuelve la MISMA firma.
     expect(second).not.toBeNull();
     expect(second?.txHash).toBe(SOL_SIG);
-    expect(second?.settledAmountUsd).toBe(3);
+    expect(second?.nonEvmSettle?.amountUsd).toBe(3);
     // Un único broadcast real (el 2º settle resolvió por idempotencia).
     expect(broadcasts).toBe(1);
     // Y NUNCA se reporta INSUFFICIENT_BALANCE sobre un leg ya pagado.
@@ -1235,7 +1247,7 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
     return undefined;
   }
 
-  it('T-it2-ALTO-1a: slug testnet cuyo bundle apunta a chainId 2366 (KITE_NETWORK=mainnet) → MAINNET_NOT_ALLOWED por CHAIN_ENVIRONMENT_DRIFT, sin firmar ni settlear (todos sus alias)', async () => {
+  it('T-it2-ALTO-1a: slug testnet cuyo bundle apunta a chainId 2366 (KITE_NETWORK=mainnet) → skip-code CHAIN_ENVIRONMENT_DRIFT, sin firmar ni settlear (todos sus alias)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     bundleOverride = driftBundle;
 
@@ -1248,14 +1260,23 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
       expect(result, `chain=${declared}`).toBeNull();
       expect(logger.warn).toHaveBeenCalledWith(
         expect.objectContaining({
-          code: 'MAINNET_NOT_ALLOWED',
-          reason: 'CHAIN_ENVIRONMENT_DRIFT',
+          // Fix-pack CR-MNR-5: código PROPIO, ya NO `MAINNET_NOT_ALLOWED`. Un
+          // dashboard que cuenta "agentes pidiendo mainnet sin opt-in" no debe
+          // sumar "nuestra config es incoherente" (que además incluye el caso
+          // declared=mainnet/actual=testnet, donde permitir mainnet no aplica).
+          code: 'CHAIN_ENVIRONMENT_DRIFT',
           chain: 'kite-ozone-testnet',
           declaredEnvironment: 'testnet',
           actualEnvironment: 'mainnet',
           actualChainId: 2366,
           expectedChainId: 2368,
         }),
+        expect.any(String),
+      );
+      // El drift ya NO comparte código con el gate de opt-in: son incidentes
+      // distintos y deben ser distinguibles en los logs.
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'MAINNET_NOT_ALLOWED' }),
         expect.any(String),
       );
     }
@@ -1276,7 +1297,7 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
       );
       expect(result, `allow='${raw}'`).toBeNull();
       expect(logger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ reason: 'CHAIN_ENVIRONMENT_DRIFT' }),
+        expect.objectContaining({ code: 'CHAIN_ENVIRONMENT_DRIFT' }),
         expect.any(String),
       );
     }
@@ -1330,12 +1351,56 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
     );
 
     expect(result).toBeNull();
+    // El chainId desconocido se clasifica `mainnet` (fail-CLOSED). Con un slug
+    // TESTNET declarado eso además es un DRIFT, así que corta en el guard 4b-i,
+    // que es todavía más fuerte: no admite opt-in. Fix-pack CR-MNR-5: ese corte
+    // ya tiene su propio skip-code (antes se logueaba como MAINNET_NOT_ALLOWED).
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
-        code: 'MAINNET_NOT_ALLOWED',
+        code: 'CHAIN_ENVIRONMENT_DRIFT',
+        declaredEnvironment: 'testnet',
         actualEnvironment: 'mainnet',
         actualChainId: 999_999,
       }),
+      expect.any(String),
+    );
+    expect(mockBaseSign).not.toHaveBeenCalled();
+  });
+
+  it('T-CR-MNR-5: chainId DESCONOCIDO bajo un slug MAINNET (sin drift) → MAINNET_NOT_ALLOWED / NO_OPT_IN, el otro código', async () => {
+    // Misma clasificación fail-CLOSED que T-it2-ALTO-1d, pero sin incoherencia de
+    // slug: declared=mainnet == actual=mainnet ⇒ no hay drift y el corte lo hace
+    // el gate de opt-in. Es el par que prueba que los dos códigos NO son
+    // sinónimos (el motivo de CR-MNR-5).
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    bundleOverride = (chainKey?: string) =>
+      chainKey === 'base-mainnet'
+        ? {
+            chainConfig: {
+              name: 'Mystery chain',
+              chainId: 999_999, // nadie lo clasificó
+              explorerUrl: '',
+            },
+          }
+        : undefined;
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(
+      mainnetAgent('base-mainnet'),
+      logger,
+    );
+
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'MAINNET_NOT_ALLOWED',
+        reason: 'NO_OPT_IN',
+        actualChainId: 999_999,
+      }),
+      expect.any(String),
+    );
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'CHAIN_ENVIRONMENT_DRIFT' }),
       expect.any(String),
     );
     expect(mockBaseSign).not.toHaveBeenCalled();

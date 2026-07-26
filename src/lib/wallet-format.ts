@@ -22,10 +22,18 @@ export const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 /**
  * `true` si `wallet` es un string con formato de address EVM válido. Un valor
  * `null`/`undefined`/no-string / fuera del formato → `false`.
+ *
+ * El type-predicate narrowea a `` `0x${string}` `` (no a `string`) — fix-pack
+ * CR-MNR-4: es lo que permite que los consumidores que necesitan el tipo de viem
+ * lo OBTENGAN del validador en vez de escribir `x as \`0x${string}\`` al lado.
+ * Un cast crudo es una aserción sin chequeo; acá el chequeo ya se hizo (el regex
+ * garantiza el prefijo `0x`), así que el tipo puede expresarlo. Cambio SOLO de
+ * tipos: `` `0x${string}` `` es asignable a `string`, así que los call-sites que
+ * sólo querían un booleano/`string` siguen compilando byte-idénticos.
  */
 export function isValidWallet(
   wallet: string | null | undefined,
-): wallet is string {
+): wallet is `0x${string}` {
   return typeof wallet === 'string' && ADDRESS_RE.test(wallet);
 }
 

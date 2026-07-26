@@ -260,7 +260,7 @@ Rollback: `./scripts/activate-mainnet-downstream.sh --rollback` (vacía la allow
 4. **Verify** el log de startup: `Adapters initialized` incluye `kite-mainnet` y **no** aparece `ADAPTER_CHAIN_ID_DRIFT`.
 5. **Smoke** con `x-payment-chain: kite-mainnet` y una key con budget en 2366 → tx en `kitescan.ai`.
 
-Rollback: volver `WASIAI_A2A_CHAINS` al CSV testnet **y** borrar `KITE_NETWORK` (las dos juntas, por la misma razón) → redeploy automático.
+Rollback: volver `WASIAI_A2A_CHAINS` al CSV testnet **y** borrar `KITE_NETWORK` (las dos juntas, por la misma razón) → redeploy automático. **Verificá el startup antes de darlo por hecho**: `Adapters initialized` debe listar sólo slugs testnet y NO debe aparecer `ADAPTER_CHAIN_ID_DRIFT` (si aparece, quedó una de las dos a medio revertir). Procedimiento completo: [`MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) §8 → "Rollback de Kite mainnet" (agregado en el fix-pack CR-MAYOR-2, junto con la corrección de los dos runbooks de `doc/`, que revertían sólo `KITE_NETWORK` y afirmaban que el sistema volvía a testnet).
 
 ---
 

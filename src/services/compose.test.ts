@@ -117,6 +117,19 @@ const mockCreditWithDest = vi.mocked(budgetService.creditWithDest); // WKH-129
 const mockRecordSolana = vi.mocked(budgetService.recordSolanaSettleReceipt); // WKH-234
 const mockRegen = vi.mocked(regenerateInputFromErrors); // WKH-130
 
+/**
+ * payTo EVM de los fixtures del sign INBOUND (`0x` + 40 hex). Fix-pack CR-MNR-8:
+ * antes este literal estaba copiado CRUDO 33 veces en el archivo (mientras el
+ * equivalente Solana sí tenía constante, `SOL_PAYTO_INBOUND`). Con el guard de
+ * familia del fix-pack AR-profundo FIX 4 eso es una trampa: `isValidWallet` exige
+ * EXACTAMENTE 40 hex, así que una copia con 39 o 41 `B` sigue siendo un string
+ * plausible pero cambia EN SILENCIO la semántica del test — de "el sign inbound
+ * firma" a "el leg se saltea con reason=INVALID_PAY_TO_FORMAT" — y el test sigue
+ * verde por el motivo equivocado. Con `'B'.repeat(40)` la longitud la calcula el
+ * runtime y no se puede mistipear.
+ */
+const EVM_PAYTO = `0x${'B'.repeat(40)}`;
+
 function makeAgent(o: Partial<Agent> = {}): Agent {
   return {
     id: 'agent-1',
@@ -258,7 +271,7 @@ describe('composeService.invokeAgent', () => {
     const mockPR: X402PaymentRequest = {
       authorization: {
         from: '0xAAA',
-        to: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        to: EVM_PAYTO,
         value: '1000000000000000000',
         validAfter: '0',
         validBefore: '9999999999',
@@ -274,7 +287,7 @@ describe('composeService.invokeAgent', () => {
     mockSettle.mockResolvedValue({ success: true, txHash: '0xDEADBEEF' });
     const agent = makeAgent({
       priceUsdc: 1.0,
-      metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+      metadata: { payTo: EVM_PAYTO },
     });
     mockFetchOk();
     const result = await composeService.invokeAgent(agent, { q: 'hello' });
@@ -343,7 +356,7 @@ describe('composeService.invokeAgent', () => {
   //    card COMPLETO del registry (`discovery.mapAgent` setea `metadata: raw`) y
   //    cualquier caller autenticado puede registrar un registry, así que el payTo
   //    y la chain declarada son fuentes INDEPENDIENTES.
-  it('T-it2-BLQ-BAJO-1a (CASO 2 del AR): metadata.payTo base58 SIN payment declarado → el sign inbound se saltea (PAY_TO_FORMAT), sin base58 crudo en viem', async () => {
+  it('T-it2-BLQ-BAJO-1a (CASO 2 del AR): metadata.payTo base58 SIN payment declarado → el sign inbound se saltea (INVALID_PAY_TO_FORMAT), sin base58 crudo en viem', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     const agent = makeAgent({
       priceUsdc: 0.05,
@@ -361,7 +374,7 @@ describe('composeService.invokeAgent', () => {
     expect(logSpy.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         code: 'INBOUND_VM_UNSUPPORTED',
-        reason: 'PAY_TO_FORMAT',
+        reason: 'INVALID_PAY_TO_FORMAT',
       }),
       expect.any(String),
     );
@@ -388,7 +401,7 @@ describe('composeService.invokeAgent', () => {
     expect(logSpy.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         code: 'INBOUND_VM_UNSUPPORTED',
-        reason: 'PAY_TO_FORMAT',
+        reason: 'INVALID_PAY_TO_FORMAT',
         chain: 'avalanche-fuji',
       }),
       expect.any(String),
@@ -417,7 +430,7 @@ describe('composeService.invokeAgent', () => {
     expect(logSpy.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         code: 'INBOUND_VM_UNSUPPORTED',
-        reason: 'PAY_TO_FORMAT',
+        reason: 'INVALID_PAY_TO_FORMAT',
       }),
       expect.any(String),
     );
@@ -430,7 +443,7 @@ describe('composeService.invokeAgent', () => {
       paymentRequest: {
         authorization: {
           from: '0xAAA',
-          to: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+          to: EVM_PAYTO,
           value: '1000000000000000000',
           validAfter: '0',
           validBefore: '9999999999',
@@ -443,12 +456,12 @@ describe('composeService.invokeAgent', () => {
     mockSettle.mockResolvedValue({ success: true, txHash: '0xDEADBEEF' });
     const agent = makeAgent({
       priceUsdc: 1.0,
-      metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+      metadata: { payTo: EVM_PAYTO },
       payment: {
         method: 'x402',
         asset: 'USDC',
         chain: 'avalanche-fuji',
-        contract: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        contract: EVM_PAYTO,
       },
     });
     mockFetchOk();
@@ -470,7 +483,7 @@ describe('composeService.invokeAgent', () => {
       paymentRequest: {
         authorization: {
           from: '0xAAA',
-          to: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+          to: EVM_PAYTO,
           value: '1',
           validAfter: '0',
           validBefore: '9999999999',
@@ -487,7 +500,7 @@ describe('composeService.invokeAgent', () => {
     });
     const agent = makeAgent({
       priceUsdc: 1.0,
-      metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+      metadata: { payTo: EVM_PAYTO },
     });
     mockFetchOk();
     await expect(
@@ -505,7 +518,7 @@ describe('composeService.invokeAgent', () => {
       paymentRequest: {
         authorization: {
           from: '0xAAA',
-          to: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+          to: EVM_PAYTO,
           value: '1000000000000000000',
           validAfter: '0',
           validBefore: '9999999999',
@@ -523,7 +536,7 @@ describe('composeService.invokeAgent', () => {
     });
     const agent = makeAgent({
       priceUsdc: 1.0,
-      metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+      metadata: { payTo: EVM_PAYTO },
     });
     mockFetchOk();
     await expect(
@@ -538,7 +551,7 @@ describe('composeService.invokeAgent', () => {
       paymentRequest: {
         authorization: {
           from: '0xAAA',
-          to: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+          to: EVM_PAYTO,
           value: '1',
           validAfter: '0',
           validBefore: '9999999999',
@@ -550,7 +563,7 @@ describe('composeService.invokeAgent', () => {
     });
     const agent = makeAgent({
       priceUsdc: 1.0,
-      metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+      metadata: { payTo: EVM_PAYTO },
     });
     mockFetchError(500);
     await expect(
@@ -633,7 +646,7 @@ describe('composeService.invokeAgent', () => {
       paymentRequest: {
         authorization: {
           from: '0xAAA',
-          to: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+          to: EVM_PAYTO,
           value: '1',
           validAfter: '0',
           validBefore: '9999999999',
@@ -646,7 +659,7 @@ describe('composeService.invokeAgent', () => {
     mockSettle.mockResolvedValue({ success: true, txHash: '0xTXHASH' });
     const agent = makeAgent({
       priceUsdc: 1.0,
-      metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+      metadata: { payTo: EVM_PAYTO },
     });
     mockFetchOk();
     const originalPK = process.env.OPERATOR_PRIVATE_KEY;
@@ -1468,7 +1481,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
   // ── WKH-234 fix-pack AR-BLQ-1: threading compose → ledger (AC-8) ──────
   // Test de INTEGRACIÓN (no un unit del debit aislado): corre el pipeline real
   // de compose; cuando el settle DOWNSTREAM de un leg fue Solana
-  // (signAndSettleDownstream retorna `settleCaip2`), compose DEBE registrar el
+  // (signAndSettleDownstream retorna `nonEvmSettle`), compose DEBE registrar el
   // CAIP-2 + firma base58 en el ledger vía `budgetService.recordSolanaSettleReceipt`,
   // reusando el `owner_ref` del caller (CD-1/AC-9). Un leg EVM NO lo dispara.
   const SOL_CAIP2_INTEG = 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1';
@@ -1490,11 +1503,14 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       // settleado (0.05 USDC 6-dec = 50000 atómico) — el que el ledger debe
       // registrar. La aserción de `amountUsd` NO cambia (0.05): antes coincidía
       // por casualidad con `stepDebitedUsd` porque este test pone el leg Solana
-      // en el step 1 (el único índice donde el bug no aparecía); ahora viene de
-      // `settledAmountUsd`. El caso del step 0 lo cubre T-FIX3-STEP0.
+      // en el step 1 (el único índice donde el bug no aparecía); ahora viene del
+      // recibo. El caso del step 0 lo cubre T-FIX3-STEP0.
+      //
+      // Fix-pack CR-MNR-1: el CAIP-2 y el monto viajan en UN campo anidado
+      // (`nonEvmSettle`), no en dos opcionales sueltos — el fixture ya no puede
+      // representar "CAIP-2 sin monto", que era el estado que reintroducía el bug.
       settledAmount: '50000',
-      settledAmountUsd: 0.05,
-      settleCaip2: SOL_CAIP2_INTEG,
+      nonEvmSettle: { caip2: SOL_CAIP2_INTEG, amountUsd: 0.05 },
     });
 
     const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
@@ -1517,7 +1533,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       keyId: 'k1',
       ownerRef: 'owner-test', // reused caller owner_ref (CD-1/AC-9)
       chainId: 2368,
-      amountUsd: 0.05, // = settledAmountUsd (monto REAL settleado on-chain)
+      amountUsd: 0.05, // = nonEvmSettle.amountUsd (monto REAL settleado on-chain)
       settleCaip2: SOL_CAIP2_INTEG,
       settleSignature: SOL_SIG_INTEG,
     });
@@ -1540,8 +1556,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     mockDownstream.mockResolvedValueOnce({
       txHash: SOL_SIG_INTEG,
       settledAmount: '1000', // 0.001 USDC (6-dec)
-      settledAmountUsd: 0.001,
-      settleCaip2: SOL_CAIP2_INTEG,
+      nonEvmSettle: { caip2: SOL_CAIP2_INTEG, amountUsd: 0.001 },
     });
 
     const keyRow = makeKeyRow({ id: 'k1', owner_ref: 'owner-test' });
@@ -1577,7 +1592,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
     mockAgentsBySlug({ kyc: a1, corridor: a2 });
     mockFetchOk({ result: 'r1' });
     mockFetchOk({ result: 'r2' });
-    // Both legs settled on EVM (no settleCaip2 on the downstream result).
+    // Both legs settled on EVM (no `nonEvmSettle` on the downstream result).
     mockDownstream.mockReset();
     mockDownstream.mockResolvedValue({
       txHash: '0xdeadbeef',
@@ -2587,7 +2602,7 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     const mockPR: X402PaymentRequest = {
       authorization: {
         from: '0xAAA',
-        to: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        to: EVM_PAYTO,
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
@@ -2603,11 +2618,11 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     mockSettle.mockResolvedValue({ success: true, txHash: '0xDEADBEEF' });
     const agent = makeAgent({
       priceUsdc: 1.0,
-      metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+      metadata: { payTo: EVM_PAYTO },
       payment: {
         method: 'x402',
         chain: 'base-mainnet',
-        contract: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        contract: EVM_PAYTO,
       },
     });
     mockFetchOk();
@@ -2629,7 +2644,7 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     const mockPR: X402PaymentRequest = {
       authorization: {
         from: '0xAAA',
-        to: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        to: EVM_PAYTO,
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
@@ -2645,11 +2660,11 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     mockSettle.mockResolvedValue({ success: true, txHash: '0xCAFE' });
     const agent = makeAgent({
       priceUsdc: 0.5,
-      metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+      metadata: { payTo: EVM_PAYTO },
       payment: {
         method: 'x402',
         chain: 'base-sepolia',
-        contract: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        contract: EVM_PAYTO,
       },
     });
     mockFetchOk();
@@ -2671,7 +2686,7 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     const mockPR: X402PaymentRequest = {
       authorization: {
         from: '0xAAA',
-        to: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        to: EVM_PAYTO,
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
@@ -2687,11 +2702,11 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     mockSettle.mockResolvedValue({ success: true, txHash: '0xKITE' });
     const agent = makeAgent({
       priceUsdc: 0.1,
-      metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+      metadata: { payTo: EVM_PAYTO },
       payment: {
         method: 'x402',
         chain: 'kite-testnet',
-        contract: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        contract: EVM_PAYTO,
       },
     });
     mockFetchOk();
@@ -2710,7 +2725,7 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     const mockPR: X402PaymentRequest = {
       authorization: {
         from: '0xAAA',
-        to: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        to: EVM_PAYTO,
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
@@ -2726,11 +2741,11 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     mockSettle.mockResolvedValue({ success: true, txHash: '0xFUJI' });
     const agent = makeAgent({
       priceUsdc: 0.1,
-      metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+      metadata: { payTo: EVM_PAYTO },
       payment: {
         method: 'x402',
         chain: 'avalanche-fuji',
-        contract: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        contract: EVM_PAYTO,
       },
     });
     mockFetchOk();
@@ -2749,7 +2764,7 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     const mockPR: X402PaymentRequest = {
       authorization: {
         from: '0xAAA',
-        to: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        to: EVM_PAYTO,
         value: '1000000',
         validAfter: '0',
         validBefore: '9999999999',
@@ -2766,13 +2781,13 @@ describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
     const agent = makeAgent({
       priceUsdc: 1.0,
       metadata: {
-        payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        payTo: EVM_PAYTO,
         facilitatorUrl: 'https://custom.facilitator.example.com',
       },
       payment: {
         method: 'x402',
         chain: 'base-mainnet',
-        contract: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+        contract: EVM_PAYTO,
       },
     });
     mockFetchOk();
@@ -3651,7 +3666,7 @@ describe('WKH-195 compose inbound decimals-aware', () => {
       paymentRequest: {
         authorization: {
           from: '0xAAA',
-          to: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+          to: EVM_PAYTO,
           value: '0',
           validAfter: '0',
           validBefore: '9999999999',
@@ -3686,7 +3701,7 @@ describe('WKH-195 compose inbound decimals-aware', () => {
       primeInbound();
       const agent = makeAgent({
         priceUsdc: price,
-        metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+        metadata: { payTo: EVM_PAYTO },
       });
       await composeService.invokeAgent(agent, { q: 'hello' });
       expect(mockSign.mock.calls[0]?.[0]?.value).toBe(legacyWei(price));
@@ -3702,7 +3717,7 @@ describe('WKH-195 compose inbound decimals-aware', () => {
     primeInbound();
     const agent = makeAgent({
       priceUsdc: price,
-      metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+      metadata: { payTo: EVM_PAYTO },
     });
     await composeService.invokeAgent(agent, { q: 'hello' });
     const signed = mockSign.mock.calls[0]?.[0]?.value as string;
@@ -3725,7 +3740,7 @@ describe('WKH-195 compose inbound decimals-aware', () => {
       const price = 0.05;
       const agent = makeAgent({
         priceUsdc: price,
-        metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+        metadata: { payTo: EVM_PAYTO },
       });
       const result = await composeService.invokeAgent(agent, { q: 'hello' });
       expect(mockSign.mock.calls[0]?.[0]?.value).toBe(legacyWei(price));
@@ -3741,7 +3756,7 @@ describe('WKH-195 compose inbound decimals-aware', () => {
     primeInbound();
     const agent = makeAgent({
       priceUsdc: 1.0,
-      metadata: { payTo: '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' },
+      metadata: { payTo: EVM_PAYTO },
     });
     const result = await composeService.invokeAgent(agent, { q: 'hello' });
     expect(mockSettle).toHaveBeenCalledTimes(1);

@@ -205,7 +205,7 @@ export interface IdentityBindingAdapter {
  *     de opt-in `WASIAI_DOWNSTREAM_MAINNET_ALLOW` del leg downstream (fondos del
  *     operador). Desde it2 clasifica por el DESTINO REAL del leg
  *     (`classifyDestinationEnvironment`), no por el string del slug.
- *  5. `registry.ts` `assertChainEnvironmentCoherent` — fail-loud al arrancar si el
+ *  5. `registry.ts` `assertNoSlugDestinationDrift` (vía `checkChainEnvironmentCoherence`) — fail-loud al arrancar si el
  *     destino real del bundle contradice el mainnet-ness del slug (el caso
  *     `KITE_NETWORK=mainnet` + slug `kite-ozone-testnet`).
  *  6. `RPC_ENV_BY_CHAIN` (`downstream-payment.ts`) — `Record<ChainKey, string>`

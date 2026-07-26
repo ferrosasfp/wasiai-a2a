@@ -49,7 +49,26 @@ Before activating mainnet, ALL of these must be true:
 > `MAINNET_NOT_ALLOWED`). Además `avalanche-mainnet` debe estar en
 > `WASIAI_A2A_CHAINS` para que su bundle exista.
 >
-> El comando de abajo ya usa la env correcta.
+> El comando de abajo ya usa la env correcta, **pero setea sólo el gate**. Las
+> otras tres piezas del rail (ampliado en el fix-pack CR-MAYOR-1, cada una
+> verificada contra `src/`):
+>
+> - `WASIAI_DOWNSTREAM_X402=true` (`src/lib/downstream-payment.ts:42`) — sin esto
+>   el leg no settlea nunca (skip `FLAG_OFF`).
+> - `WASIAI_A2A_CHAINS` con `avalanche-mainnet` (`src/adapters/registry.ts:268`) —
+>   sin el slug, `CHAIN_NOT_SUPPORTED`.
+> - ⚠️ **`AVALANCHE_RPC_URL`** en a2a (`src/adapters/avalanche/payment.ts:153` y el
+>   mapa `RPC_ENV_BY_CHAIN['avalanche-mainnet']` de
+>   `src/lib/downstream-payment.ts:72`). **NO `AVALANCHE_MAINNET_RPC_URL`**: ese
+>   nombre tiene 0 lectores en el `src/` de a2a y es el del FACILITATOR
+>   (`wasiai-facilitator/src/chains/avalanche.ts:63`) — el Step 3 lo setea allá,
+>   que es donde va. Setear el equivocado en a2a no falla ruidoso: el pre-check de
+>   balance del operador se saltea con `BALANCE_PRECHECK_SKIPPED`
+>   (`downstream-payment.ts`, paso 9 de `signAndSettleDownstream`, guard `if (!rpc)`) y **el leg de mainnet firma sin verificar
+>   fondos**.
+> - Fondos: USDC nativo en el operator wallet de C-Chain.
+>
+> Automatizable: `./scripts/activate-mainnet-downstream.sh` (y `--rollback`).
 
 ```bash
 RAILWAY_TOKEN=<a2a-railway-token>
@@ -91,7 +110,7 @@ curl https://wasiai-a2a-production.up.railway.app/health
 >   `kite-ozone-testnet` (que se construye SIN `opts`) apunta a chainId **2366**
 >   (USDC.e real): dinero real bajo un slug testnet, que engañaba al gate
 >   fail-CLOSED de WKH-144 y al opt-in del leg downstream. Hoy
->   `registry.initAdapters` **LANZA** (`assertChainEnvironmentCoherent`).
+>   `registry.initAdapters` **LANZA** (`assertNoSlugDestinationDrift`).
 > - el slug `kite-mainnet` **sin** `KITE_NETWORK=mainnet` ⇒ arranca con
 >   `chainConfig.chainId=2366` pero el ADAPTER firma en **2368** con PYUSD de
 >   testnet (lee la env en call-time, y el `finally` del factory ya la restauró);
@@ -199,20 +218,43 @@ Update `HACKATHON-FINAL.md`:
 
 ## Rollback (if mainnet activation fails)
 
+> ⛔ **CORRECCIÓN 3 (fix-pack AR-profundo CR-MAYOR-2, 2026-07-26). La versión
+> anterior de este rollback dejaba el sistema PEOR que antes y afirmaba lo
+> contrario.** Seteaba `KITE_NETWORK=testnet` pero **no revertía
+> `WASIAI_A2A_CHAINS`**, que el Step 2 de arriba puso en `kite-mainnet`. Esa
+> combinación (`WASIAI_A2A_CHAINS=kite-mainnet` + `KITE_NETWORK=testnet`) es
+> justamente la que el propio Step 2 documenta como rota: `chainConfig.chainId`
+> 2366 / `getPaymentAdapter('kite-mainnet').chainId` 2368 / `getToken()` = PYUSD de
+> **testnet** ⇒ `ADAPTER_CHAIN_ID_DRIFT`. Y el texto cerraba con *"System reverts to
+> testnet-only behavior"*, o sea el procedimiento de emergencia rompía el rail que
+> venía a salvar Y decía que estaba bien.
+>
+> Regla: **las dos envs de Kite se mueven SIEMPRE JUNTAS, en las dos direcciones**
+> (activación y rollback). Es la misma regla que ya declaran `MULTI-CHAIN.md` §8 y
+> `HACKATHON-FINAL.md` §"Mainnet readiness" B.
+
 ```bash
-# Single command — flip env vars back to testnet defaults
+# NO es "single command": son tres envs en a2a, y las dos de Kite van juntas.
 # wasiai-a2a service
+WASIAI_A2A_CHAINS=kite-ozone-testnet   # ⚠️ IMPRESCINDIBLE: el CSV testnet exacto que
+                                       # tenías antes del Step 2. Omitirlo = rail roto.
+KITE_NETWORK=                          # vaciar/unset junto con el CSV (cualquier valor
+                                       # != 'mainnet' resuelve testnet — kite-ozone/chain.ts:46)
 # Vaciar el gate = fail-CLOSED: ninguna mainnet puede settlear en el leg
 # downstream (el rollback real; `WASIAI_DOWNSTREAM_NETWORK=fuji` NO hacía nada).
 WASIAI_DOWNSTREAM_MAINNET_ALLOW=
-KITE_NETWORK=testnet
 
 # wasiai-facilitator service
 KITE_MAINNET_ENABLED=false
 AVALANCHE_MAINNET_ENABLED=false
 ```
 
-Both services auto-redeploy in ~2-3min. System reverts to testnet-only behavior.
+Both services auto-redeploy in ~2-3min. **El rollback NO está hecho hasta verificar
+el log de startup de a2a**: `Adapters initialized` debe listar sólo slugs testnet
+(sin `kite-mainnet`) **y** no debe aparecer ninguna línea
+`ADAPTER_CHAIN_ID_DRIFT`. Recién con esas dos cosas el sistema volvió a
+testnet-only; si aparece el drift, quedó una de las dos envs de Kite a medio
+revertir.
 
 If problem is more severe (e.g., bug in mainnet path), the PRs are revertible:
 ```bash
@@ -226,14 +268,33 @@ gh pr revert <facilitator-mainnet-PR>
 
 The architecture supports running BOTH testnet and mainnet at the same time (chain allowlist permits it). Use case: test mainnet flow without disabling testnet for ongoing demo activity.
 
+> ⚠️ **CORRECCIÓN 4 (fix-pack AR-profundo CR, barrido completo, 2026-07-26).** Este
+> bloque estaba escrito antes de WKH-MULTICHAIN y describía un a2a mono-chain: decía
+> "only ONE network active at a time per request", ponía el override por header como
+> "TD: future enhancement" y de ahí recomendaba **dos servicios Railway separados**.
+> Las tres cosas están desactualizadas:
+> - a2a inicializa **N bundles** desde el CSV `WASIAI_A2A_CHAINS`
+>   (`src/adapters/registry.ts:291-325`).
+> - el override por request **ya existe**: header `x-payment-chain`
+>   (`src/adapters/chain-resolver.ts`, prioridad DT-1 header > manifest > default).
+> - ⇒ un segundo servicio Railway NO hace falta para el hybrid mode… **salvo por
+>   Kite**, que es la excepción real: los dos rails Kite no pueden convivir en un
+>   proceso (`TD-NEW-KITE-PARAMS`), porque el adapter lee `KITE_NETWORK` en
+>   call-time. Kite testnet + Kite mainnet a la vez SÍ requiere dos procesos.
+
 ```bash
 # Enable mainnet WITHOUT disabling testnet
 KITE_MAINNET_ENABLED=true        # facilitator
 AVALANCHE_MAINNET_ENABLED=true   # facilitator
 
-# But on a2a, only ONE network active at a time per request
-# Solution: per-request override via header (TD: future enhancement)
-# For now: 2 separate Railway services if needed (a2a-testnet + a2a-mainnet)
+# a2a: multi-chain real vía CSV — p.ej. Fuji testnet + Avalanche mainnet juntos:
+WASIAI_A2A_CHAINS=kite-ozone-testnet,avalanche-fuji,avalanche-mainnet
+# y por request: -H "x-payment-chain: avalanche-mainnet"
+#
+# ⛔ EXCEPCIÓN Kite: NO metas `kite-ozone-testnet` y `kite-mainnet` en el mismo CSV.
+#    Con KITE_NETWORK=mainnet el arranque LANZA; sin ella el rail mainnet firma en
+#    testnet (ADAPTER_CHAIN_ID_DRIFT). Para los dos rails Kite: dos servicios
+#    Railway. Ver doc/architecture/MULTI-CHAIN.md §8 + TD-NEW-KITE-PARAMS.
 ```
 
 **Recommendation**: do NOT run hybrid mode initially. Activate mainnet, validate, then plan multi-network architecture if business value justifies it.
@@ -264,3 +325,12 @@ AVALANCHE_MAINNET_ENABLED=true   # facilitator
 ---
 
 *Generated 2026-04-28 by Claude Code autonomous prep — for Fernando's review on activation day*
+
+*Revisado 2026-07-26 (fix-pack AR-profundo, CR MAYOR-1 + MAYOR-2 + barrido completo):
+toda env var citada acá fue grepeada contra el `src/` del servicio que la lee (a2a y
+`wasiai-facilitator`). Correcciones: (1) `WASIAI_DOWNSTREAM_NETWORK` retirada (0
+lectores), (2) las 3 envs acopladas de Kite mainnet, (3) el rollback revierte
+`WASIAI_A2A_CHAINS` junto con `KITE_NETWORK` — antes producía un rail roto y decía
+que estaba bien, (4) el hybrid mode ya no asume un a2a mono-chain, (5) el Step 1
+agrega las 3 piezas que faltaban del rail downstream, incluida
+`AVALANCHE_RPC_URL` (gateway) vs `AVALANCHE_MAINNET_RPC_URL` (facilitator).*
