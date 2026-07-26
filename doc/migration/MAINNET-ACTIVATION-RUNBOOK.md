@@ -81,23 +81,30 @@ curl https://wasiai-a2a-production.up.railway.app/health
 
 ### Step 2 — Activate Kite mainnet inbound
 
-> ⚠️ **CORRECCIÓN (fix-pack AR-profundo it2 BLQ-ALTO-1, 2026-07-26).** Este Step
-> instruía `KITE_NETWORK=mainnet`. **NO usar esa env var.** `getKiteChain()` /
-> `getKiteNetworkTag()` la leen en **call-time**, y el bundle del slug
-> `kite-ozone-testnet` se construye SIN `opts` (`createKiteOzoneAdapters()`): con
-> `KITE_NETWORK=mainnet` ese slug "testnet" pasa a apuntar a chainId **2366**
-> (Kite MAINNET, USDC.e) ⇒ el leg downstream settleaba DINERO REAL con el gate de
-> opt-in vacío, y el gate fail-CLOSED del settle re-verify (WKH-144) clasificaba
-> ese settle mainnet como testnet (fail-OPEN).
+> ⚠️ **CORRECCIÓN 2 (fix-pack AR-profundo it2 MNR-3, 2026-07-26).** La versión
+> original de este Step instruía `KITE_NETWORK=mainnet` junto al CSV testnet, y la
+> corrección anterior (BLQ-ALTO-1) se fue al otro extremo: "NO usar esa env var,
+> activá sólo por slug". Un probe con factories reales mostró que ninguna de las
+> dos funciona. La verdad, medida:
 >
-> Esa combinación ahora es **incoherente y rompe el arranque**
-> (`registry.initAdapters` → `assertChainEnvironmentCoherent`).
+> - `KITE_NETWORK=mainnet` **con un slug Kite testnet** en el CSV ⇒ el bundle de
+>   `kite-ozone-testnet` (que se construye SIN `opts`) apunta a chainId **2366**
+>   (USDC.e real): dinero real bajo un slug testnet, que engañaba al gate
+>   fail-CLOSED de WKH-144 y al opt-in del leg downstream. Hoy
+>   `registry.initAdapters` **LANZA** (`assertChainEnvironmentCoherent`).
+> - el slug `kite-mainnet` **sin** `KITE_NETWORK=mainnet` ⇒ arranca con
+>   `chainConfig.chainId=2366` pero el ADAPTER firma en **2368** con PYUSD de
+>   testnet (lee la env en call-time, y el `finally` del factory ya la restauró);
+>   el registry lo reporta con `code=ADAPTER_CHAIN_ID_DRIFT`.
+> - ⇒ los dos rails Kite **no pueden convivir** en el mismo proceso
+>   (`TD-NEW-KITE-PARAMS`).
 
 ```bash
-# Activar Kite mainnet por SLUG (el registry le pasa { network: 'mainnet' }):
-WASIAI_A2A_CHAINS=kite-ozone-testnet,kite-mainnet
+# Activar Kite mainnet: las TRES envs juntas (fuente única: doc/architecture/MULTI-CHAIN.md §8).
+WASIAI_A2A_CHAINS=kite-mainnet          # el slug mainnet y NINGÚN slug Kite testnet
+KITE_NETWORK=mainnet                    # obligatoria: el adapter la lee en call-time
 KITE_MAINNET_RPC_URL=https://rpc.gokite.ai/
-# y NO setear KITE_NETWORK (dejarla ausente o en 'testnet')
+# Verificar en el log de startup que NO aparezca ADAPTER_CHAIN_ID_DRIFT.
 ```
 
 Verify the 402 challenge now references USDC.e on Kite mainnet:

@@ -9,8 +9,9 @@
 ## TL;DR — What to do on Day 1
 
 1. **Fund wallets** — operator gateway + settle relayer (each chain)
-2. **Set Railway env vars** — `WASIAI_A2A_CHAINS` (slug de la mainnet, NO `KITE_NETWORK`),
-   `WASIAI_DOWNSTREAM_MAINNET_ALLOW`, RPC URLs
+2. **Set Railway env vars** — `WASIAI_A2A_CHAINS` (slug de la mainnet),
+   `WASIAI_DOWNSTREAM_MAINNET_ALLOW`, RPC URLs. Para Kite mainnet, además,
+   `KITE_NETWORK=mainnet` **y sin slug Kite testnet en el CSV** (ver Step 5)
 3. **Migrate DB** — WKH-115 inbound tasks table (if adopting inbound bounties)
 4. **Activate synthetic canary** — WKH-74 (post-deploy validation)
 5. **Set on-call vars** — `HEALTH_MONITOR_TARGETS`, `ONCALL_MENTION` (WKH-77)
@@ -333,13 +334,20 @@ See `doc/operations/oncall-runbook.md` for full escalation procedures.
 #### In `wasiai-a2a-production` (Gateway)
 
 ```bash
-# Switch from testnet to mainnet — POR SLUG (fix-pack AR-profundo it2 BLQ-ALTO-1).
-# ⛔ NO setear KITE_NETWORK=mainnet: `getKiteChain()` la lee en call-time y el bundle
-#    del slug `kite-ozone-testnet` se construye sin `opts`, así que ese slug "testnet"
-#    pasaría a apuntar a chainId 2366 (USDC.e MAINNET) — dinero real bajo un slug
-#    testnet, que además engañaba al gate fail-CLOSED de WKH-144 y al opt-in del leg
-#    downstream. `initAdapters` ahora LANZA ante esa incoherencia.
-WASIAI_A2A_CHAINS=kite-ozone-testnet,kite-mainnet   # was: kite-ozone-testnet
+# Switch from testnet to mainnet (fix-pack AR-profundo it2 BLQ-ALTO-1 + MNR-3).
+# Kite mainnet exige las DOS envs juntas y NINGÚN slug Kite testnet en el CSV:
+#   · `KITE_NETWORK=mainnet` es OBLIGATORIA — `getKiteChain()`/`getKiteNetworkTag()`
+#     la leen en call-time, así que el `{network:'mainnet'}` del registry sólo fija el
+#     chainConfig; sin la env el adapter firma en 2368 con PYUSD de TESTNET (el
+#     registry lo reporta con code=ADAPTER_CHAIN_ID_DRIFT).
+#   ⛔ pero con un slug Kite TESTNET en el CSV esa misma env hace que
+#     `kite-ozone-testnet` (bundle construido sin `opts`) apunte a chainId 2366
+#     (USDC.e MAINNET) — dinero real bajo un slug testnet, que engañaba al gate
+#     fail-CLOSED de WKH-144 y al opt-in del leg downstream: `initAdapters` LANZA.
+#   ⇒ los dos rails Kite NO pueden convivir en un proceso (TD-NEW-KITE-PARAMS).
+# Fuente única: doc/architecture/MULTI-CHAIN.md §8.
+WASIAI_A2A_CHAINS=kite-mainnet   # was: kite-ozone-testnet
+KITE_NETWORK=mainnet             # was: <unset>/testnet
 # ⚠️ CORRECCIÓN (fix-pack AR-profundo FIX 1c, 2026-07-26): `WASIAI_DOWNSTREAM_NETWORK`
 # NO la lee ningún archivo de src/ (control muerto desde WKH-112 — la chain del leg
 # downstream se resuelve por agent.payment.chain). El control REAL es el gate

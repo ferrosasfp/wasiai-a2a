@@ -210,6 +210,14 @@ export interface IdentityBindingAdapter {
  *     `KITE_NETWORK=mainnet` + slug `kite-ozone-testnet`).
  *  6. `RPC_ENV_BY_CHAIN` (`downstream-payment.ts`) — `Record<ChainKey, string>`
  *     exhaustivo del env-var name del RPC.
+ *  7. `payment-spec-reader.ts` `resolveAvalancheOutputChain` (línea del
+ *     `isMainnetChainKey(chainKey)`) — el ÚNICO consumidor del invariante cuyo
+ *     resultado SALE POR HTTP: define el `payment.chain` que `/discover` publica
+ *     para el agente (lo consumen wasiai-v2 / Chaski / los remit-*). Es el que
+ *     produjo BLQ-MED-1: al colapsar los alias mainnet a `'avalanche'` dejaba el
+ *     gate de opt-in del leg SIN ninguna entrada posible (control inejercitable).
+ *     Una chain nueva con namespace `avalanche` DEBE revisarse acá. (Faltaba en
+ *     este inventario — agregado en it2 MNR-5.)
  */
 export type ChainKey =
   | 'kite-ozone-testnet'

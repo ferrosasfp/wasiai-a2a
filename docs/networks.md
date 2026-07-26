@@ -30,17 +30,23 @@ EIP-712 signatures over EIP-3009 `TransferWithAuthorization`.
 
 - **Default** — `KITE_NETWORK` unset (or any value other than `mainnet`)
   selects testnet. PYUSD on chain `2368` is the asset accepted.
-- **Mainnet opt-in** — add the `kite-mainnet` slug to `WASIAI_A2A_CHAINS`
-  (the registry passes `{ network: 'mainnet' }` explicitly to that bundle)
-  AND ensure the operator wallet has USDC.e on KiteAI mainnet. PYUSD does
-  not exist on mainnet; do not attempt to pay with it there.
-- ⚠️ **Do NOT use `KITE_NETWORK=mainnet` alongside a Kite *testnet* slug**
-  (fix-pack 2026-07-26). `getKiteChain()` reads that env var at call time and
-  the `kite-ozone-testnet` bundle is built with no explicit network, so the
-  env var silently repoints a "testnet" slug at chain `2366` (real USDC.e).
-  The gateway now refuses to start on that combination
-  (`assertChainEnvironmentCoherent`). It remains valid only in legacy
-  single-chain mode (`WASIAI_A2A_CHAIN=kite-mainnet`).
+- **Mainnet opt-in** — set BOTH `WASIAI_A2A_CHAINS=kite-mainnet` (with **no**
+  Kite *testnet* slug in the CSV) AND `KITE_NETWORK=mainnet`, plus
+  `KITE_MAINNET_RPC_URL`, and ensure the operator wallet has USDC.e on KiteAI
+  mainnet. PYUSD does not exist on mainnet; do not attempt to pay with it there.
+  Canonical source: [`doc/architecture/MULTI-CHAIN.md`](../doc/architecture/MULTI-CHAIN.md) §8.
+- ⚠️ **The two envs are coupled** (fix-pack 2026-07-26, probed with the real
+  factories). `getKiteChain()` reads `KITE_NETWORK` at **call time**, while the
+  `{ network: 'mainnet' }` the registry passes to the factory only pins
+  `chainConfig`:
+  - `KITE_NETWORK=mainnet` **alongside a Kite testnet slug** silently repoints
+    the `kite-ozone-testnet` bundle at chain `2366` (real USDC.e) — the gateway
+    now **refuses to start** on that combination (`assertChainEnvironmentCoherent`).
+  - the `kite-mainnet` slug **without** `KITE_NETWORK=mainnet` starts, but the
+    payment adapter signs on `2368` with **testnet PYUSD**; the registry logs
+    `code=ADAPTER_CHAIN_ID_DRIFT`.
+  - therefore both Kite rails **cannot run in the same process** until
+    `TD-NEW-KITE-PARAMS` lands.
 
 ### EIP-712 domain (inbound)
 

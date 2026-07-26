@@ -121,7 +121,10 @@ Notas:
 - La activación de Kite mainnet usa `WASIAI_A2A_CHAINS=...,kite-mainnet` que dispara una
   mutación temporal de `process.env.KITE_NETWORK = 'mainnet'` confined to `initAdapters()`
   (DT-I). El valor original se restaura via `try/finally` al terminar el `await import()`.
-  Tracked como **TD-NEW-KITE-PARAMS** (refactor post-MVP de `kite-ozone/chain.ts` para no
+  ⚠️ Por eso el slug NO alcanza: esa mutación sólo alcanza al `chainConfig`; el ADAPTER lee
+  `KITE_NETWORK` **después** del `finally` (call-time), así que la activación real exige
+  además `KITE_NETWORK=mainnet` de forma permanente — ver §8. Tracked como
+  **TD-NEW-KITE-PARAMS** (refactor post-MVP de `kite-ozone/chain.ts` + `payment.ts` para no
   leer env).
 
 ## 5. Backward-compat (CD-2)
@@ -240,25 +243,44 @@ Tiempo estimado (mirror de WKH-MULTICHAIN W1): ~4-6h para adapter completo + tes
 
 - Operator wallet con USDC.e en Kite mainnet (`0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e`).
 - `register_a2a_key_deposit(<KEY_ID>, 2366, <amount>)`.
-- `KITE_NETWORK=mainnet` (legacy var) + `KITE_MAINNET_RPC_URL=https://rpc.gokite.ai/`.
+- Config de envs: **ver §8 → "Kite mainnet (2366)"**. Son TRES envs acopladas
+  (`WASIAI_A2A_CHAINS` con `kite-mainnet` y sin ningún slug Kite testnet +
+  `KITE_NETWORK=mainnet` + `KITE_MAINNET_RPC_URL`) y setear sólo una de ellas
+  deja el rail roto o el proceso sin arrancar. No las repetimos acá para que no
+  vuelvan a divergir: §8 es la fuente única.
+  (Corregido en el fix-pack AR-profundo it2 MNR-2: esta viñeta decía sólo
+  `KITE_NETWORK=mainnet` + RPC, contradiciendo a §8 nueve líneas más abajo.)
 
 ## 8. Activación mainnet (flip flags en Railway)
 
 ### Kite mainnet (2366)
 
-1. **Railway env update** (no redeploy si el bundle ya está wired):
-   - `WASIAI_A2A_CHAINS=kite-ozone-testnet,kite-mainnet` (mantener testnet como default).
+> ⚠️ Reescrito el 2026-07-26 (fix-pack AR-profundo it2, MNR-3). La versión it2 de este paso
+> decía "⛔ NO setear `KITE_NETWORK=mainnet`; el slug del CSV ya selecciona la red por bundle".
+> Eso es **falso a medias** y produce un rail roto: el probe con factories reales mostró que con
+> `WASIAI_A2A_CHAINS=kite-mainnet` y `KITE_NETWORK` ausente el proceso arranca con
+> `chainConfig.chainId=2366` pero `getPaymentAdapter('kite-mainnet').chainId === 2368` y
+> `getToken()` devuelve el PYUSD de **testnet** — porque el `finally` de
+> `createKiteOzoneAdapters` restaura la env y el adapter la lee en **call-time**.
+
+1. **Railway env update** — las **tres** envs juntas (no redeploy si el bundle ya está wired):
+   - `WASIAI_A2A_CHAINS=kite-mainnet` (+ los slugs de OTROS namespaces que necesites, p.ej.
+     `kite-mainnet,avalanche-fuji`). **Ningún slug Kite testnet en el CSV.**
+   - `KITE_NETWORK=mainnet` — **obligatoria**. `getKiteChain()` / `getKiteNetworkTag()` la leen
+     en call-time (`TD-NEW-KITE-PARAMS`), así que el `{ network: 'mainnet' }` que el registry le
+     pasa al factory sólo fija el `chainConfig`; el adapter que FIRMA y el token EIP-712 los
+     decide esta env. Sin ella el rail arranca firmando en 2368/PYUSD y el registry lo reporta
+     con `code=ADAPTER_CHAIN_ID_DRIFT` (it2 MNR-3).
    - `KITE_MAINNET_RPC_URL=https://rpc.gokite.ai/`.
-   - ⛔ **NO setear `KITE_NETWORK=mainnet`** (la instrucción anterior de este paso, retirada en
-     el fix-pack AR-profundo it2 — BLQ-ALTO-1). El slug del CSV ya selecciona la red por bundle:
-     el registry le pasa `{ network: 'mainnet' }` explícito a `kite-mainnet`. `KITE_NETWORK` la
-     leen `getKiteChain()` / `getKiteNetworkTag()` en **call-time**, así que setearla en
-     `mainnet` hace que el bundle del slug `kite-ozone-testnet` (que se construye SIN `opts`)
-     apunte a chainId 2366 con USDC.e de MAINNET: un slug que dice "testnet" moviendo dinero
+   - ⛔ **`KITE_NETWORK=mainnet` junto a un slug Kite testnet ⇒ `initAdapters` LANZA**
+     (it2 BLQ-ALTO-1). El bundle de `kite-ozone-testnet` se construye SIN `opts`, así que con esa
+     env apunta a chainId 2366 con USDC.e de MAINNET: un slug que dice "testnet" moviendo dinero
      real, que además engañaba al gate fail-CLOSED de WKH-144 y al opt-in del leg downstream.
-     Desde it2 esa combinación es incoherente y **`initAdapters` lanza al arrancar**
-     (`assertChainEnvironmentCoherent`).
-2. **Verificar log de startup**: `[Registry] Adapters initialized: kite-ozone-testnet, kite-mainnet`.
+   - ⇒ **los dos rails Kite NO pueden convivir en el mismo proceso** (no existe combinación
+     coherente): con `KITE_NETWORK=mainnet` el arranque rompe por el slug testnet; sin ella el
+     slug mainnet firma en testnet. El fix de fondo es `TD-NEW-KITE-PARAMS` (§10).
+2. **Verificar log de startup**: `[Registry] Adapters initialized: kite-mainnet, ...` **y** que NO
+   aparezca ninguna línea `ADAPTER_CHAIN_ID_DRIFT`.
 3. **Smoke test obligatorio** post-flip:
 
    ```bash
@@ -279,6 +301,10 @@ Tiempo estimado (mirror de WKH-MULTICHAIN W1): ~4-6h para adapter completo + tes
    - `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet` (si el downstream también debe ir a
      mainnet — ver §9 abajo). Ausente/vacía = fail-CLOSED: ninguna mainnet settlea en el leg
      downstream. La vieja `WASIAI_DOWNSTREAM_NETWORK` NO la lee nadie (control muerto).
+   - `WASIAI_DOWNSTREAM_X402=true` + operator wallet con USDC en C-Chain mainnet — sin esas dos
+     el leg no settlea aunque el opt-in esté seteado. Automatizable con
+     `./scripts/activate-mainnet-downstream.sh` (setea el opt-in + el RPC en a2a y habilita la
+     chain en el facilitator; el resto lo declara en su output).
 2. **Verificar log de startup**: `[Registry] Adapters initialized: ..., avalanche-mainnet`.
 3. **Smoke test obligatorio** post-flip (con USDC mainnet en operator wallet, verificable en
    `snowtrace.io`):
@@ -291,8 +317,10 @@ Tiempo estimado (mirror de WKH-MULTICHAIN W1): ~4-6h para adapter completo + tes
    # → response con tx hash en snowtrace.io (mainnet)
    ```
 
-Mainnet flips son **un solo paso de env var** + smoke. No requieren redeploy ni cambios de
-código (el bundle ya está wired desde W5).
+Los flips mainnet no requieren redeploy ni cambios de código (el bundle ya está wired desde W5),
+pero **no son "un solo paso de env var"**: Avalanche downstream necesita opt-in + RPC + flag +
+fondos, y Kite mainnet necesita las tres envs acopladas de arriba (corregido en it2 MNR-1/MNR-3 —
+la frase anterior de este párrafo invitaba a setear una sola variable y quedarse a mitad de camino).
 
 ## 9. Coexistencia con downstream payment (DT-8)
 
@@ -314,7 +342,9 @@ modo **mainnet hybrid** que vive en producción desde 2026-04-29.
 
 | ID | Descripción | Trigger |
 |----|-------------|---------|
-| **TD-NEW-KITE-PARAMS** | Refactor de `src/adapters/kite-ozone/chain.ts` + `kite-ozone/index.ts` para aceptar `network` como argumento explícito en lugar de leer `process.env.KITE_NETWORK`. Hoy DT-I muta temporalmente la env var dentro de `initAdapters()` y la restaura en `try/finally`. Si en el futuro queremos correr `kite-testnet` + `kite-mainnet` simultáneamente en el mismo proceso, este approach no escala (race entre dos `await import()` paralelos sobre el mismo submódulo). | Cuando aparezca una HU que requiera ambos chains Kite activos al mismo tiempo. |
+| **TD-NEW-KITE-PARAMS** | Refactor de `src/adapters/kite-ozone/chain.ts` + `kite-ozone/payment.ts` + `kite-ozone/index.ts` para aceptar `network` como argumento explícito en lugar de leer `process.env.KITE_NETWORK`. Hoy DT-I muta temporalmente la env var dentro del factory y la restaura en `try/finally`, pero el ADAPTER la lee en **call-time** (getter `chainId`, `getToken()`, dominio EIP-712), o sea DESPUÉS del `finally`. Consecuencias medidas (probe real, it2 MNR-3): (a) `kite-mainnet` sin `KITE_NETWORK=mainnet` arranca con `chainConfig` 2366 y adapter 2368/PYUSD-testnet; (b) los dos slugs Kite **no tienen configuración coherente posible** en el mismo proceso. Mitigación actual: `assertChainEnvironmentCoherent` lanza en la dirección peligrosa y loguea `code=ADAPTER_CHAIN_ID_DRIFT` en la segura. | Cuando aparezca una HU que requiera ambos chains Kite activos al mismo tiempo (hoy es imposible). |
+| **TD-MAINNET-GATE-USA-CHAINCONFIG** | El gate de opt-in mainnet del leg downstream (`downstream-payment.ts`) clasifica el destino por `bundle.chainConfig.chainId`, pero quien firma es el ADAPTER. Mientras exista un adapter que resuelva su chain en call-time (ver TD arriba) los dos pueden divergir. Hoy la divergencia alcanzable es la SEGURA (gate=mainnet / firma=testnet) y la peligrosa la corta `assertChainEnvironmentCoherent` al arrancar. | Se cierra solo cuando TD-NEW-KITE-PARAMS elimine la lectura de env en call-time. Revisar de nuevo si se agrega un adapter env-driven. |
+| **TD-SOLANA-CAIP2-DENYLIST** | `classifySolanaCaip2` (`chain-resolver.ts`) es una **denylist**: sólo la referencia de mainnet-beta (o un string que contenga `mainnet`) se clasifica `mainnet`; cualquier CAIP-2 desconocido cae en `testnet` (fail-OPEN). Evaluado y NO convertido a allowlist en it2 MNR-4: (a) no es alcanzable por un agente (sale de `SOLANA_CAIP2_CHAIN_ID`, env-only) y el rail está flag-gated OFF, (b) no existe ChainKey `solana-mainnet`, (c) una allowlist de genesis conocidos rompería cualquier cluster local (`solana-test-validator` genera un genesis propio) y obligaría a tocar 3 archivos de test que usan refs sintéticas (`solana:test`, `solana:testcluster`), incluido el del money-path. | Cuando exista un ChainKey `solana-mainnet` o el rail Solana salga de flag OFF: ahí la clasificación pasa a decidir sobre dinero real y debe volverse allowlist (y el cluster local, una excepción explícita por env). |
 | **TD-AVALANCHE-DEPOSIT-AUTOMATION** | Automatizar el deposit Avalanche (§7) reemplazando el SQL `register_a2a_key_deposit` manual por verificación on-chain (lectura del USDC `Transfer` log al wallet del operator + acreditación automática del budget). Mirror del flow Kite existente. | Post-MVP. Requerido si el volumen de smoke tests Avalanche se vuelve operacionalmente costoso. |
 
 Ver también [`CHAIN-ADAPTIVE.md`](CHAIN-ADAPTIVE.md) §7 (Open Questions) y el SDD §11

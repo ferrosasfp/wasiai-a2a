@@ -32,10 +32,25 @@ vi.mock('../../lib/logger.js', () => ({
 // W5: accepts `opts?: { network?: 'testnet' | 'mainnet' }` to mirror the real
 // factory signature. When `network === 'mainnet'`, returns the Kite mainnet
 // bundle (chainId 2366) so the registry dispatch test can verify wiring.
+//
+// ⚠️ FIDELIDAD (fix-pack it2 MNR-3): este mock reproduce las DOS temporalidades
+// del factory real, porque su divergencia es un bug de dinero probado con un
+// probe de factories reales (2026-07-26):
+//   · `chainConfig` se resuelve DENTRO del try, con `KITE_NETWORK` ya mutada por
+//     `opts.network` ⇒ sigue a `opts` y, sin `opts`, a `KITE_NETWORK`.
+//   · el ADAPTER lee `KITE_NETWORK` en CALL-TIME (getter `chainId` →
+//     `getKiteChain()`), y el `finally` del factory YA restauró la env ⇒ con
+//     `opts.network='mainnet'` y `KITE_NETWORK` ausente el adapter reporta 2368
+//     (PYUSD de testnet) aunque el `chainConfig` diga 2366.
+// La versión anterior del mock derivaba AMBOS de `opts`, lo que ocultaba ese
+// drift inverso y daba verde a configuraciones que en real quedan rotas.
+// Pinneado con el adapter real en `payment.mainnet.test.ts`.
 vi.mock('../kite-ozone/index.js', () => ({
   createKiteOzoneAdapters: vi.fn(
     async (opts?: { network?: 'testnet' | 'mainnet' }) => {
-      const network = opts?.network ?? 'testnet';
+      const network =
+        opts?.network ??
+        (process.env.KITE_NETWORK === 'mainnet' ? 'mainnet' : 'testnet');
       const chainId = network === 'mainnet' ? 2366 : 2368;
       const name = network === 'mainnet' ? 'KiteAI Mainnet' : 'KiteAI Testnet';
       const explorerUrl =
@@ -43,7 +58,14 @@ vi.mock('../kite-ozone/index.js', () => ({
           ? 'https://kitescan.ai'
           : 'https://testnet.kitescan.ai';
       return {
-        payment: { name: 'kite-ozone', chainId, vmFamily: 'evm' },
+        payment: {
+          name: 'kite-ozone',
+          vmFamily: 'evm',
+          // call-time, igual que el adapter real (NO congelado en el factory).
+          get chainId() {
+            return process.env.KITE_NETWORK === 'mainnet' ? 2366 : 2368;
+          },
+        },
         attestation: { name: 'kite-ozone', chainId },
         gasless: { name: 'kite-ozone', chainId },
         identity: null,
@@ -157,6 +179,9 @@ describe('adapter registry', () => {
     vi.clearAllMocks();
     delete process.env.WASIAI_A2A_CHAIN;
     delete process.env.WASIAI_A2A_CHAINS;
+    // it2 MNR-3: el mock del factory Kite es fiel a `KITE_NETWORK` (call-time),
+    // así que un valor ambiente filtrado cambiaría el destino del bundle.
+    delete process.env.KITE_NETWORK;
     // WKH-090 — CD-1: flag default OFF en cada test (byte-idéntico baseline).
     delete process.env.TEMPO_ADAPTER_ENABLED;
   });
@@ -390,7 +415,15 @@ describe('adapter registry', () => {
 
   // ─── W5: mainnet wiring (kite-mainnet + avalanche-mainnet) ───
   describe('W5 — mainnet wiring (kite-mainnet + avalanche-mainnet)', () => {
-    it('WASIAI_A2A_CHAINS=kite-mainnet → initialized with chainId 2366', async () => {
+    // it2 MNR-3: la activación COHERENTE de Kite mainnet exige el slug
+    // `kite-mainnet` Y `KITE_NETWORK=mainnet` (el adapter la lee en call-time —
+    // TD-NEW-KITE-PARAMS). Con el slug solo, el adapter queda en 2368/PYUSD y
+    // `assertChainEnvironmentCoherent` ahora LANZA (ver T-it2-MNR-3-reg).
+    beforeEach(() => {
+      process.env.KITE_NETWORK = 'mainnet';
+    });
+
+    it('WASIAI_A2A_CHAINS=kite-mainnet (+KITE_NETWORK=mainnet) → initialized with chainId 2366', async () => {
       process.env.WASIAI_A2A_CHAINS = 'kite-mainnet';
       await initAdapters();
 
@@ -430,10 +463,107 @@ describe('adapter registry', () => {
     // chainId 2366 (Kite MAINNET, USDC.e). Ese "slug testnet en mainnet" rompía
     // DOS gates de dinero: el opt-in del leg downstream y el fail-CLOSED del
     // settle re-verify de WKH-144 (ambos clasifican por el string del slug).
-    // Se simula devolviendo el bundle mainnet para el slug testnet, que es
-    // EXACTAMENTE lo que el factory real hace con esa env
-    // (ver kite-factory.test.ts: "respects pre-existing KITE_NETWORK=mainnet").
+    // it2 MNR-3: ya NO se simula con `mockResolvedValueOnce` — el mock del
+    // factory es fiel a `KITE_NETWORK` (ver su comentario arriba), así que el
+    // input lo produce el mismo mecanismo que en real (el env, no un fixture).
     it('T-it2-ALTO-1-reg: initAdapters LANZA si el bundle de un slug testnet apunta a un chainId mainnet (KITE_NETWORK=mainnet)', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet';
+
+      await expect(initAdapters()).rejects.toThrow(
+        /Incoherent chain config for 'kite-ozone-testnet'.*testnet.*mainnet.*2366/s,
+      );
+      // El bundle incoherente NUNCA queda alcanzable por el money-path.
+      expect(getInitializedChainKeys()).toEqual([]);
+    });
+
+    it('T-it2-ALTO-1-reg-b: el arranque coherente NO rompe (kite-mainnet en 2366, chainConfig Y adapter)', async () => {
+      process.env.WASIAI_A2A_CHAINS = 'kite-mainnet';
+      await initAdapters();
+      const bundle = getAdaptersBundle('kite-mainnet');
+      expect(bundle?.chainConfig.chainId).toBe(2366);
+      expect(getPaymentAdapter('kite-mainnet').chainId).toBe(2366);
+    });
+
+    // ─── it2 MNR-3: drift INVERSO (chainConfig ↔ adapter en call-time) ────────
+    // El AR probó que seguir el hint viejo al pie de la letra ("no setees
+    // KITE_NETWORK, agregá el slug kite-mainnet") produce un bundle roto: el
+    // proceso arranca con `chainConfig.chainId=2366` (sin drift de slug) pero
+    // `getPaymentAdapter('kite-mainnet').chainId === 2368` y `getToken()`
+    // devuelve el PYUSD de TESTNET, porque el `finally` del factory ya restauró
+    // `KITE_NETWORK` y el adapter la lee en call-time (TD-NEW-KITE-PARAMS).
+    // Dirección SEGURA (el gate clasifica chainConfig ⇒ trata el leg como
+    // mainnet y exige opt-in; el dinero sería testnet) ⇒ log.error ruidoso y el
+    // arranque sigue. NO se convierte en throw a propósito: volvería
+    // no-arrancable una config que hoy arranca (ver el comentario de
+    // `assertChainEnvironmentCoherent`).
+    it('T-it2-MNR-3-reg: el drift inverso (slug kite-mainnet sin KITE_NETWORK=mainnet) se LOGUEA como error y NO rompe el arranque', async () => {
+      delete process.env.KITE_NETWORK;
+      loggerSpy.error.mockClear();
+      process.env.WASIAI_A2A_CHAINS = 'kite-mainnet';
+
+      await initAdapters();
+
+      expect(getInitializedChainKeys()).toEqual(['kite-mainnet']);
+      expect(loggerSpy.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chainKey: 'kite-mainnet',
+          code: 'ADAPTER_CHAIN_ID_DRIFT',
+          chainConfigChainId: 2366,
+          adapterChainId: 2368,
+        }),
+        expect.stringContaining('MISCONFIGURED'),
+      );
+      // El bundle es exactamente el que el AR reportó: config mainnet, firma testnet.
+      expect(getChainConfig('kite-mainnet').chainId).toBe(2366);
+      expect(getPaymentAdapter('kite-mainnet').chainId).toBe(2368);
+    });
+
+    it('T-it2-MNR-3-reg-b: la remediación del log dice la VERDAD (slug + KITE_NETWORK=mainnet, sin slug testnet)', async () => {
+      delete process.env.KITE_NETWORK;
+      loggerSpy.error.mockClear();
+      process.env.WASIAI_A2A_CHAINS = 'kite-mainnet';
+
+      await initAdapters();
+
+      const [ctx] = loggerSpy.error.mock.calls[0] as [{ remediation: string }];
+      expect(ctx.remediation).toMatch(
+        /set BOTH 'WASIAI_A2A_CHAINS=kite-mainnet'.*AND 'KITE_NETWORK=mainnet'/s,
+      );
+      // El hint viejo ("agregá el slug en vez de setear KITE_NETWORK") era el que
+      // producía este mismo bundle roto: no puede volver.
+      expect(ctx.remediation).not.toMatch(/Do NOT set KITE_NETWORK=mainnet/);
+    });
+
+    it('T-it2-MNR-3-reg-c: la coexistencia de los dos slugs Kite queda cubierta (throw con KITE_NETWORK=mainnet, drift logueado sin ella)', async () => {
+      // (a) con KITE_NETWORK=mainnet el slug TESTNET apunta a 2366 → THROW.
+      process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet,kite-mainnet';
+      await expect(initAdapters()).rejects.toThrow(
+        /Incoherent chain config for 'kite-ozone-testnet'/,
+      );
+
+      // (b) sin KITE_NETWORK arranca, pero el rail `kite-mainnet` queda firmando
+      //     en 2368 y eso se reporta (no hay config coherente para los 2 slugs
+      //     a la vez — TD-NEW-KITE-PARAMS).
+      _resetRegistry();
+      delete process.env.KITE_NETWORK;
+      loggerSpy.error.mockClear();
+      await initAdapters();
+      expect(loggerSpy.error).toHaveBeenCalledWith(
+        expect.objectContaining({ chainKey: 'kite-mainnet' }),
+        expect.stringContaining('MISCONFIGURED'),
+      );
+      expect(getPaymentAdapter('kite-ozone-testnet').chainId).toBe(2368);
+      expect(getPaymentAdapter('kite-mainnet').chainId).toBe(2368);
+    });
+
+    // Dirección PELIGROSA (adapter mainnet + chainConfig testnet): el gate del
+    // leg clasifica `chainConfig` ⇒ pasaría SIN opt-in mientras el adapter firma
+    // dinero real. Hoy NINGÚN factory la produce (el registry nunca pasa
+    // `{network:'testnet'}`), así que el input se construye a mano A PROPÓSITO y
+    // se documenta como defensa para el próximo adapter que lea env en
+    // call-time — NO como un control que hoy proteja algo alcanzable.
+    it('T-it2-MNR-3-reg-d: adapter MAINNET con chainConfig testnet ⇒ LANZA (hoy inalcanzable; defensa para futuros adapters env-driven)', async () => {
+      delete process.env.KITE_NETWORK;
       const { createKiteOzoneAdapters } = await import(
         '../kite-ozone/index.js'
       );
@@ -445,31 +575,21 @@ describe('adapter registry', () => {
         } as unknown as Awaited<
           ReturnType<typeof createKiteOzoneAdapters>
         >['payment'],
-        attestation: { name: 'kite-ozone', chainId: 2366 } as never,
-        gasless: { name: 'kite-ozone', chainId: 2366 } as never,
+        attestation: { name: 'kite-ozone', chainId: 2368 } as never,
+        gasless: { name: 'kite-ozone', chainId: 2368 } as never,
         identity: null,
         chainConfig: {
-          name: 'KiteAI Mainnet',
-          chainId: 2366,
-          explorerUrl: 'https://kitescan.ai',
+          name: 'KiteAI Testnet',
+          chainId: 2368,
+          explorerUrl: 'https://testnet.kitescan.ai',
         },
       });
       process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet';
 
       await expect(initAdapters()).rejects.toThrow(
-        /Incoherent chain config for 'kite-ozone-testnet'.*testnet.*mainnet.*2366/s,
+        /chainConfig\.chainId is 2368 \(testnet\) but its payment adapter signs on 2366 \(MAINNET\)/,
       );
-      // El bundle incoherente NUNCA queda alcanzable por el money-path.
       expect(getInitializedChainKeys()).toEqual([]);
-    });
-
-    it('T-it2-ALTO-1-reg-b: el arranque coherente NO rompe (kite-mainnet en 2366, kite-ozone-testnet en 2368)', async () => {
-      process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet,kite-mainnet';
-      await initAdapters();
-      expect(getAdaptersBundle('kite-ozone-testnet')?.chainConfig.chainId).toBe(
-        2368,
-      );
-      expect(getAdaptersBundle('kite-mainnet')?.chainConfig.chainId).toBe(2366);
     });
 
     it('logs the canonical multi-chain init message with mainnet slugs', async () => {
@@ -513,6 +633,9 @@ describe('adapter registry', () => {
       >;
       factorySpy.mockClear();
 
+      // El path legacy testnet exige `KITE_NETWORK` ausente (con `mainnet` el
+      // bundle de este slug apunta a 2366 y el arranque LANZA — T-it2-ALTO-1-reg).
+      delete process.env.KITE_NETWORK;
       process.env.WASIAI_A2A_CHAINS = 'kite-ozone-testnet';
       await initAdapters();
 
