@@ -60,10 +60,14 @@ describe('usdToAtomicUnits — 6 decimales (USDC: el money-path que NO debe camb
     expect(usdToAtomicUnits(0, 6)).toBe('0');
   });
 
-  it('T-6-2 (INVARIANTE): idéntico a `toFixed(6)` en 200k floats aleatorios', () => {
+  it('T-6-2 (INVARIANTE, ACOTADO A [0,100)): idéntico a `toFixed(6)` en 200k floats aleatorios', () => {
     // El monto cobrado en el happy path (USDC, 6 dec) NO cambia. Esta es la
     // prueba del invariante que exigió el AR de la HU 188: el fix sólo mueve
     // montos en tokens de > 6 decimales.
+    //
+    // ⚠️ AR MENOR-3: el invariante vale para ESTE rango, `[0, 100)`, que es donde
+    // vive el catálogo entero. Fuera de él NO es idéntico — los contraejemplos
+    // están fijados abajo en T-6-4.
     let diffs = 0;
     for (let i = 0; i < 200_000; i++) {
       const v = Math.random() * 100;
@@ -80,6 +84,22 @@ describe('usdToAtomicUnits — 6 decimales (USDC: el money-path que NO debe camb
     for (const p of realPrices) {
       expect(usdToAtomicUnits(p, 6)).toBe(legacyToFixedPath(p, 6));
     }
+  });
+
+  it('T-6-4 (AR MENOR-3): los DOS contraejemplos fuera de [0,100) quedan declarados, no tácitos', () => {
+    // (a) Sub-grilla: `5e-7` con 6 decimales. Viejo 0, nuevo 1. 200× por debajo
+    //     del precio mínimo del catálogo (0.0001), pero es un cambio real.
+    expect(legacyToFixedPath(5e-7, 6)).toBe('0');
+    expect(usdToAtomicUnits(5e-7, 6)).toBe('1');
+
+    // (b) `>= 1e21`: el camino viejo LANZABA (fail-closed: `String(1e21)` es
+    //     '1e+21' y `parseUnits` rechaza la notación científica ⇒ no se emitía
+    //     challenge). El nuevo devuelve el atómico expandido. Es el precio de
+    //     reemplazar `toFixed` por la expansión del exponente, y queda declarado
+    //     acá para que el cambio de fail-closed → éxito no sea tácito (T-SCI-2
+    //     fijaba el valor nuevo pero nunca lo contrastaba contra el viejo).
+    expect(() => legacyToFixedPath(1e21, 6)).toThrow(/not a valid decimal/);
+    expect(usdToAtomicUnits(1e21, 6)).toBe('1000000000000000000000000000');
   });
 });
 

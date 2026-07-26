@@ -28,13 +28,31 @@
  * el exponente a mano a partir de la representación decimal MÁS CORTA con
  * round-trip (`String(n)`), que es el decimal que el número realmente pretende.
  *
- * ─── Invariante sobre el money-path de 6 decimales ───────────────────────
- * Para USDC (6 dec) el resultado es IDÉNTICO al camino viejo: `toFixed(6)`
- * redondea el valor real del double a 6 dp y un double tiene ~15-17 dígitos
- * significativos, así que para montos USD ambos caminos coinciden. Verificado en
- * `atomic-amount.test.ts` con 200.000 floats aleatorios + los precios reales del
- * catálogo: **0 diferencias**. O sea: el monto cobrado en el happy path no
- * cambia; el fix sólo mueve montos en tokens de > 6 decimales.
+ * ─── Invariante sobre el money-path de 6 decimales (ACOTADO AL RANGO PROBADO) ──
+ * Para USDC (6 dec) y montos USD en **`[0, 100)`** el resultado es IDÉNTICO al
+ * camino viejo: `toFixed(6)` redondea el valor real del double a 6 dp y un double
+ * tiene ~15-17 dígitos significativos, así que ahí ambos caminos coinciden.
+ * Verificado en `atomic-amount.test.ts` con 200.000 floats aleatorios de ese rango
+ * + los precios reales del catálogo: **0 diferencias**. El happy path del
+ * marketplace vive entero en ese rango.
+ *
+ * ⚠️ AR MENOR-3 — FUERA de ese rango el camino viejo y el nuevo NO son idénticos,
+ * ni siquiera con 6 decimales. Los dos contraejemplos medidos, declarados para que
+ * el cambio de comportamiento no quede tácito:
+ *
+ *   · `5e-7`  → viejo `0`  / nuevo `1`  (sub-grilla: `toFixed(6)` da `'0.000001'`
+ *     o `'0.000000'` según el double; el helper preserva el decimal pretendido y
+ *     `parseUnits` redondea). Precio 200× por debajo del mínimo del catálogo.
+ *   · `>= 1e21` → viejo **LANZABA** (`String(1e21)` es `'1e+21'` y `parseUnits`
+ *     rechaza notación científica ⇒ fail-closed, no se emitía challenge) / nuevo
+ *     DEVUELVE el atómico expandido. Fijado por `T-SCI-2`. Es el precio del fix
+ *     (expandir el exponente es lo que reemplaza al `toFixed`): un monto de 10^21
+ *     USD deja de ser fail-closed. Sin impacto práctico —`/compose` valida el
+ *     precio contra el budget del caller mucho antes— pero es un cambio de
+ *     comportamiento, no una no-op.
+ *
+ * O sea: en el rango real de precios del marketplace el monto cobrado no cambia;
+ * el fix mueve montos en tokens de > 6 decimales y en los dos bordes de arriba.
  */
 
 import { parseUnits } from 'viem';

@@ -8,13 +8,7 @@
  * inline (CD-9). NEVER throws (CD-7): every async step is wrapped and returns `null`
  * with a skip-code.
  */
-import {
-  createPublicClient,
-  erc20Abi,
-  formatUnits,
-  http,
-  parseUnits,
-} from 'viem';
+import { createPublicClient, erc20Abi, formatUnits, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import {
   classifyDestinationEnvironment,
@@ -31,6 +25,10 @@ import {
 } from '../adapters/registry.js';
 import type { ChainKey, SolanaPaymentAdapter } from '../adapters/types.js';
 import type { Agent, DownstreamLogger } from '../types/index.js';
+// AR MENOR-5: mismo helper de conversión USD→atómico que los 5 adapters de pago
+// (fix-pack P1, hallazgo 3). Este módulo es la pata OUTBOUND (lo que el gateway
+// paga); usaba `parseUnits(String(...))` y divergía de la pata inbound.
+import { usdToAtomicUnits } from './atomic-amount.js';
 import { noteSkip } from './downstream-skip-code.js';
 import { isValidSolanaAddress, isValidWallet } from './wallet-format.js';
 
@@ -282,16 +280,29 @@ async function settleSolanaLeg(
     );
     return null;
   }
+  // AR MENOR-5 (extendido): la pata Solana tenía el MISMO
+  // `parseUnits(String(priceUsdc))` que el sitio EVM de abajo. El AR marcó un solo
+  // sitio, pero el bug es de clase — se alinean los dos por el helper compartido.
   let amountAtomic: string;
   try {
-    amountAtomic = parseUnits(
-      String(agent.priceUsdc),
-      token.decimals,
-    ).toString();
+    amountAtomic = usdToAtomicUnits(agent.priceUsdc, token.decimals);
   } catch (e) {
     logger.warn(
       { agentSlug: agent.slug, code: 'INVALID_PRICE', detail: String(e) },
-      '[Downstream] parseUnits failed (solana)',
+      '[Downstream] atomic amount conversion failed (solana)',
+    );
+    return null;
+  }
+  // Fail-closed idéntico al del sitio EVM: no se broadcastea un transfer de 0.
+  if (amountAtomic === '0') {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        code: 'INVALID_PRICE',
+        priceUsdc: agent.priceUsdc,
+        decimals: token.decimals,
+      },
+      '[Downstream] priceUsdc rounds to 0 atomic units for this mint (solana)',
     );
     return null;
   }
@@ -657,13 +668,42 @@ export async function signAndSettleDownstream(
     return null;
   }
   const decimals = primaryToken.decimals;
+  // AR MENOR-5: 6º sitio de conversión USD → atómico, ahora por el MISMO helper
+  // que los 5 adapters (hallazgo 3). Antes era `parseUnits(String(priceUsdc))`:
+  // esta pata (OUTBOUND, lo que el gateway PAGA) y la pata inbound (el challenge
+  // 402) convertían distinto para precios en notación científica —
+  // `priceUsdc = 1e-7` daba challenge `0` (el helper expande el exponente) y acá
+  // `INVALID_PRICE` (`parseUnits` LANZA con `'1e-7'`). El fix del hallazgo 3
+  // alineó los 5 adapters entre sí; esto cierra la divergencia inbound↔outbound.
+  //
+  // Dato a favor de que es seguro: esta línea NUNCA tuvo el artefacto de
+  // `toFixed` (usaba `String`), así que para todo precio con representación
+  // decimal plana el resultado es byte-idéntico — `toPlainDecimalString` es
+  // `String()` salvo cuando hay exponente.
   let value: bigint;
   try {
-    value = parseUnits(String(agent.priceUsdc), decimals);
+    value = BigInt(usdToAtomicUnits(agent.priceUsdc, decimals));
   } catch (e) {
     logger.warn(
       { agentSlug: agent.slug, code: 'INVALID_PRICE', detail: String(e) },
-      '[Downstream] parseUnits failed',
+      '[Downstream] atomic amount conversion failed',
+    );
+    return null;
+  }
+  // Guard fail-closed del cambio de arriba: un precio sub-grilla que ANTES
+  // lanzaba (notación científica) ahora convierte, y para 6 decimales puede
+  // redondear a 0 unidades atómicas. Broadcastear un transfer de 0 quema gas y
+  // deja un recibo que dice que se pagó cuando no se movió nada. Se trata como
+  // precio inválido (mismo código que el guard de `priceUsdc <= 0`).
+  if (value === 0n) {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        code: 'INVALID_PRICE',
+        priceUsdc: agent.priceUsdc,
+        decimals,
+      },
+      '[Downstream] priceUsdc rounds to 0 atomic units for this token',
     );
     return null;
   }
