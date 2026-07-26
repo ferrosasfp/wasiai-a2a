@@ -2,6 +2,11 @@
  * WasiAI A2A Protocol — Types
  */
 
+// AR MENOR-6: `StepResult.downstreamSettle` se tipa con el vocabulario PÚBLICO
+// de skip-codes en vez de `string`. Es un ciclo de tipos con
+// `lib/downstream-skip-code.ts` (que importa `DownstreamLogger` de acá), pero
+// `import type` se borra en runtime → no hay ciclo de módulos real.
+import type { PublicDownstreamSkipCode } from '../lib/downstream-skip-code.js';
 // WKH-61: importamos A2AAgentKeyRow del subarchivo para tiparlo en
 // ComposeRequest / OrchestrateRequest. El re-export `export * from './a2a-key.js'`
 // del bottom mantiene la API pública intacta.
@@ -491,9 +496,16 @@ export interface StepResult {
    * ⚠️ El código es del vocabulario PÚBLICO (`toPublicSkipCode`), NO el
    * `DownstreamSkipCode` interno: los códigos que revelan config del gateway,
    * fondos del operador o sus claves se genericizan a `NOT_CONFIGURED` /
-   * `UNAVAILABLE`. Ver el mapeo en `src/lib/downstream-payment.ts`.
+   * `UNAVAILABLE`. Ver el `Record` exhaustivo en
+   * `src/lib/downstream-skip-code.ts` (AR MENOR-6: este puntero decía
+   * `downstream-payment.ts`, de donde el mapeo se movió para no romper las suites
+   * que lo mockean completo).
+   *
+   * Tipado como template literal del vocabulario público (AR MENOR-6): con
+   * `string` la exhaustividad del `Record` se perdía justo en el borde de la API,
+   * que es donde importa que el contrato sea el cerrado.
    */
-  downstreamSettle?: string;
+  downstreamSettle?: `skipped:${PublicDownstreamSkipCode}`;
   /** WKH-57: telemetry del bridge LLM. Presente solo si bridgeType==='LLM'. */
   transformLLM?: LLMBridgeStats;
   /** WKH-114: veredicto evaluado (AC-4). */
