@@ -24,6 +24,7 @@ import {
   ReconciliationError,
   reconciliationService,
 } from '../services/reconciliation.js';
+import { traceService } from '../services/trace.js';
 import { ArbiterError } from '../types/arbiter.js';
 
 /**
@@ -156,6 +157,56 @@ const requireAdminTokenStrict: preHandlerAsyncHookHandler = async (
   }
 };
 
+/**
+ * Comparación timing-safe del admin token (WKH-191x). Normaliza longitud ANTES del
+ * `timingSafeEqual` para no filtrar la longitud del token por excepción.
+ *
+ * TD-TRACE-2: los dos gates de arriba tienen esta misma comparación inline. NO se
+ * migraron acá a propósito (son auth de un endpoint que mueve dinero, ya revisada);
+ * la deduplicación es una HU aparte.
+ */
+function adminTokenMatches(provided: unknown, expected: string): boolean {
+  if (typeof provided !== 'string') return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * WKH-191x: gate del trace operativo. **FAIL-CLOSED** (503 en dev Y prod si
+ * `DASHBOARD_ADMIN_TOKEN` no está configurado), NO el opt-in `requireAdminToken`.
+ *
+ * Por qué fail-closed y no opt-in, siendo un GET read-only:
+ *  - el payload es cross-tenant y trae `owner_ref`, montos y tx hashes de TODOS los
+ *    owners. El opt-in deja la superficie ABIERTA cuando `NODE_ENV` no es
+ *    `production`, y un deploy con `NODE_ENV` sin setear es un footgun real.
+ *  - el opt-in de `/api/stats` está grandfathered por compatibilidad (WKH-54: ya
+ *    tenía consumidores). Este endpoint es NUEVO: no hay cliente al que romper, así
+ *    que no hay razón para heredar esa debilidad.
+ *
+ * La ruta HTML (`GET /dashboard/trace`) sigue siendo pública porque NO contiene
+ * datos de tenant: es un cascarón que pide el token y lo manda por header.
+ */
+const requireAdminTokenForTrace: preHandlerAsyncHookHandler = async (
+  request,
+  reply,
+) => {
+  const expected = process.env.DASHBOARD_ADMIN_TOKEN;
+  if (!expected) {
+    return reply.status(503).send({
+      error: 'service_unavailable',
+      message: 'Trace API not configured',
+    });
+  }
+  if (!adminTokenMatches(request.headers['x-admin-token'], expected)) {
+    return reply.status(401).send({
+      error: 'unauthorized',
+      message: 'X-Admin-Token header required for trace API',
+    });
+  }
+};
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Read HTML at startup (not per-request)
@@ -168,6 +219,16 @@ const dashboardHtml = readFileSync(
   'utf-8',
 ).replace('{{CHAIN_EXPLORER_URL}}', CHAIN_EXPLORER_URL);
 
+/**
+ * WKH-191x: pantalla de trace. Sin placeholders a propósito: los nombres de red y
+ * las URLs de explorer las resuelve el API contra el registry real, así que el HTML
+ * no tiene ni un identificador de chain escrito a mano.
+ */
+const traceHtml = readFileSync(
+  resolve(__dirname, '../static/dashboard-trace.html'),
+  'utf-8',
+);
+
 const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * GET /dashboard
@@ -178,6 +239,53 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
     { config: { rateLimit: false } },
     async (_request: FastifyRequest, reply: FastifyReply) => {
       return reply.type('text/html').send(dashboardHtml);
+    },
+  );
+
+  /**
+   * GET /dashboard/trace
+   * WKH-191x: pantalla de seguimiento operativo (live trace read-only). Pública
+   * como `GET /dashboard`, y sin ningún dato de tenant en el HTML: los datos los
+   * pide el browser al API gateada con el token que escribe el operador.
+   */
+  fastify.get(
+    '/trace',
+    { config: { rateLimit: false } },
+    async (_request: FastifyRequest, reply: FastifyReply) => {
+      return reply.type('text/html').send(traceHtml);
+    },
+  );
+
+  /**
+   * GET /dashboard/api/trace
+   * WKH-191x: salud del rail + últimas llamadas con su rastro de dinero.
+   * READ-ONLY: no dispara ningún `/compose` (cada ejecución cuesta dinero).
+   * Gate FAIL-CLOSED (`requireAdminTokenForTrace`): devuelve datos cross-tenant.
+   */
+  fastify.get<{ Querystring: { limit?: string; windowHours?: string } }>(
+    '/api/trace',
+    { config: { rateLimit: false }, preHandler: requireAdminTokenForTrace },
+    async (request, reply: FastifyReply) => {
+      try {
+        // El clamp autoritativo vive en el service; acá sólo se parsea.
+        const limit = Number.parseInt(request.query.limit ?? '', 10);
+        const windowHours = Number.parseInt(
+          request.query.windowHours ?? '',
+          10,
+        );
+        const snapshot = await traceService.snapshot({
+          ...(Number.isNaN(limit) ? {} : { limit }),
+          ...(Number.isNaN(windowHours) ? {} : { windowHours }),
+        });
+        return reply.send(snapshot);
+      } catch (err) {
+        // Mensaje estático al cliente; el detalle queda en el log del servidor.
+        request.log.error(
+          { detail: err instanceof Error ? err.message : 'unknown' },
+          'dashboard trace failed',
+        );
+        return reply.status(500).send({ error: 'Failed to get trace' });
+      }
     },
   );
 

@@ -31,7 +31,10 @@ vi.mock('../services/event.js', () => ({
   },
 }));
 
-import { registerEventTracking } from './event-tracking.js';
+import {
+  noteDownstreamSkips,
+  registerEventTracking,
+} from './event-tracking.js';
 
 // ── Setup ──────────────────────────────────────────────────
 
@@ -301,5 +304,87 @@ describe('registerEventTracking middleware', () => {
     const metadata = mockTrack.mock.calls[0]![0]!.metadata;
     // Strict: key must be ABSENT, not present-with-undefined.
     expect('payment_origin' in metadata).toBe(false);
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // WKH-191x · persistencia de los skips del leg downstream
+  //
+  // AR MENOR-1: el spread de `downstreamSkips` (event-tracking.ts) NO tenía
+  // ningún test: borrarlo dejaba la suite en verde y la pantalla en "sin
+  // datos" para siempre. Estos cuatro casos son el tripwire de esa línea, y
+  // están bajo MUTACIÓN: quitando el spread, T-SKIP-1/2/4 se ponen rojos.
+  // ══════════════════════════════════════════════════════════════════
+
+  /** App aislada cuyo handler corre `noteDownstreamSkips` como lo hace /compose. */
+  async function appWithSteps(
+    steps: ReadonlyArray<{ downstreamSettle?: string | undefined }>,
+  ) {
+    const localApp = Fastify();
+    registerEventTracking(localApp);
+    localApp.post(
+      '/compose',
+      async (req: FastifyRequest, reply: FastifyReply) => {
+        noteDownstreamSkips(req, steps);
+        return reply.send({ ok: true });
+      },
+    );
+    await localApp.ready();
+    return localApp;
+  }
+
+  async function trackedMetadata(
+    steps: ReadonlyArray<{ downstreamSettle?: string | undefined }>,
+  ) {
+    const localApp = await appWithSteps(steps);
+    try {
+      await localApp.inject({ method: 'POST', url: '/compose', payload: {} });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockTrack).toHaveBeenCalledTimes(1);
+      return mockTrack.mock.calls[0]![0]!.metadata;
+    } finally {
+      await localApp.close();
+    }
+  }
+
+  it('T-SKIP-1: los skips del pipeline llegan a metadata.downstreamSkips', async () => {
+    const metadata = await trackedMetadata([
+      { downstreamSettle: 'skipped:NO_PAYMENT_FIELD' },
+      // Un leg PAGADO no aporta código: su valor es el hash del settle.
+      { downstreamSettle: '0xabc123' },
+      { downstreamSettle: 'skipped:SETTLE_FAILED' },
+    ]);
+    expect(metadata.downstreamSkips).toEqual([
+      'NO_PAYMENT_FIELD',
+      'SETTLE_FAILED',
+    ]);
+  });
+
+  it('T-SKIP-2: pipeline sin skips → array VACÍO (que no es lo mismo que "sin datos")', async () => {
+    const metadata = await trackedMetadata([{ downstreamSettle: '0xabc123' }]);
+    // La clave PRESENTE con [] es la señal de "este gateway sí reporta y no
+    // hubo skips". Su AUSENCIA significa "tráfico sin la señal" (T-SKIP-3).
+    expect('downstreamSkips' in metadata).toBe(true);
+    expect(metadata.downstreamSkips).toEqual([]);
+  });
+
+  it('T-SKIP-3: ruta que no corre pipeline → la clave está AUSENTE (no undefined)', async () => {
+    await app.inject({ method: 'POST', url: '/discover', payload: {} });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(mockTrack).toHaveBeenCalledTimes(1);
+    const metadata = mockTrack.mock.calls[0]![0]!.metadata;
+    expect('downstreamSkips' in metadata).toBe(false);
+  });
+
+  it('T-SKIP-4: un código INTERNO no se persiste (no puede llegar a la pantalla)', async () => {
+    const metadata = await trackedMetadata([
+      // Ninguno de estos existe en el vocabulario público: revelan el estado de
+      // la hot wallet del operador y de un feature flag.
+      { downstreamSettle: 'skipped:INSUFFICIENT_BALANCE' },
+      { downstreamSettle: 'skipped:FLAG_OFF' },
+      { downstreamSettle: 'skipped:MAINNET_NOT_ALLOWED' },
+      { downstreamSettle: 'skipped:UNAVAILABLE' },
+    ]);
+    expect(metadata.downstreamSkips).toEqual(['UNAVAILABLE']);
   });
 });

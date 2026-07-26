@@ -15,6 +15,7 @@ import {
   extractRawKey,
   requirePaymentOrA2AKey,
 } from '../middleware/a2a-key.js';
+import { noteDownstreamSkips } from '../middleware/event-tracking.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';
 import { createTimeoutHandler } from '../middleware/timeout.js';
@@ -716,6 +717,15 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         } else if (result.errorCode === 'DEST_CAP_EXCEEDED') {
           status = 402;
         }
+        // WKH-191x (AR BLQ-BAJO-1a): esta rama TAMBIÉN tiene que dejar los skips
+        // en el evento. Un pipeline puede saltear el pago del step 1 (el caller
+        // recibe ese `skipped:*` en su respuesta) y fallar en el step 2: sin esta
+        // línea el skip viajaba al caller pero NO quedaba en `a2a_events`, así que
+        // el contador de la pantalla lo ignoraba y podía mostrar "0, estado bueno"
+        // sobre datos incompletos. Espejo de orchestrate.ts (que ya cubre su 403).
+        // Escritura en memoria, sin await, sin I/O: no puede lanzar ni cambiar el
+        // status, el body ni un centavo del refund de arriba.
+        noteDownstreamSkips(request, result.steps);
         return reply.status(status).send({
           ...result,
           requestId: request.id,
@@ -794,6 +804,10 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const kiteTxHash = request.paymentTxHash;
+      // WKH-191x: retiene los skip-codes PÚBLICOS del pipeline para que el evento
+      // los persista (`a2a_events.metadata.downstreamSkips`). Aditivo puro: NO lee
+      // ni cambia nada del money-path, sólo copia lo que ya viaja en el response.
+      noteDownstreamSkips(request, result.steps);
       return reply.send({ kiteTxHash, ...result });
     },
   );

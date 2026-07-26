@@ -158,6 +158,78 @@ export function toPublicSkipCode(
 }
 
 /**
+ * Significado de cada código PÚBLICO, en una línea, escrito para alguien que
+ * conoce el negocio y no el código (WKH-191x, pantalla `/dashboard/trace`).
+ *
+ * **EXHAUSTIVO POR TIPO** por la misma razón que `PUBLIC_SKIP_CODE`: un código
+ * público nuevo sin explicación NO COMPILA. Y es el ÚNICO texto que la pantalla
+ * muestra: nunca se serializa un `DownstreamSkipCode` interno, porque varios
+ * revelan estado nuestro (fondos del operador, allow-list de mainnet, flags).
+ */
+const PUBLIC_SKIP_MEANING: Record<PublicDownstreamSkipCode, string> = {
+  NO_PAYMENT_FIELD:
+    'El agente no declara cómo cobrar, así que no había a dónde pagarle.',
+  METHOD_NOT_SUPPORTED:
+    'El agente pide un método de pago que este gateway todavía no habla.',
+  CHAIN_NOT_SUPPORTED:
+    'El agente cobra en una red que este gateway todavía no tiene conectada.',
+  INVALID_PAY_TO_FORMAT:
+    'La dirección de cobro que publica el agente no tiene un formato válido.',
+  ZERO_PAY_TO:
+    'El agente publica una dirección de cobro vacía (dirección cero).',
+  INVALID_PRICE: 'El precio que publica el agente no es un monto válido.',
+  SETTLE_FAILED:
+    'Se intentó pagarle al agente y el pago no se pudo confirmar (al caller no se le cobra por este leg).',
+  NOT_CONFIGURED:
+    'El gateway no está configurado para pagar ese leg (por eso no se movió dinero).',
+  UNAVAILABLE:
+    'El gateway no pudo pagar por su propio estado en ese momento; se reintenta en la llamada siguiente.',
+};
+
+/**
+ * Vocabulario público como lista runtime. Derivado de `PUBLIC_SKIP_MEANING`
+ * (keys) para que no exista una segunda lista que se pueda desincronizar.
+ */
+export const PUBLIC_SKIP_CODES = Object.keys(
+  PUBLIC_SKIP_MEANING,
+) as PublicDownstreamSkipCode[];
+
+/**
+ * Type-guard runtime del vocabulario PÚBLICO. Se usa para validar strings que
+ * vienen de `a2a_events.metadata` (jsonb, sin garantía de tipo): un código
+ * interno o basura NO pasa, así que no puede llegar a la pantalla.
+ */
+export function isPublicSkipCode(
+  value: unknown,
+): value is PublicDownstreamSkipCode {
+  // `hasOwn` (no `in`) para que un `constructor` / `toString` heredado del
+  // prototipo NO se valide como código.
+  return typeof value === 'string' && Object.hasOwn(PUBLIC_SKIP_MEANING, value);
+}
+
+/** Explicación de una línea del código público (string vacío si no es válido). */
+export function describePublicSkipCode(value: unknown): string {
+  return isPublicSkipCode(value) ? PUBLIC_SKIP_MEANING[value] : '';
+}
+
+/**
+ * Extrae el código PÚBLICO de un `StepResult.downstreamSettle`
+ * (`skipped:<PUBLIC_CODE>`), o `null` si el string no tiene esa forma.
+ *
+ * Vive acá y no en el route para que el prefijo `skipped:` tenga un solo dueño:
+ * lo escribe `compose.ts` y lo lee la telemetría del dashboard.
+ */
+export function parseSkippedMarker(
+  value: unknown,
+): PublicDownstreamSkipCode | null {
+  if (typeof value !== 'string') return null;
+  const PREFIX = 'skipped:';
+  if (!value.startsWith(PREFIX)) return null;
+  const code = value.slice(PREFIX.length);
+  return isPublicSkipCode(code) ? code : null;
+}
+
+/**
  * Logger que además RETIENE el skip-code. `signAndSettleDownstream` ya loguea
  * `{ code }` en los 25 sitios que devuelven `null`, así que decorar el logger
  * captura el motivo SIN tocar la lógica de decisión de dinero (0 ediciones en

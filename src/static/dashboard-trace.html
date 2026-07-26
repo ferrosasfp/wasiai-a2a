@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WasiAI A2A · Live Trace</title>
+  <!--
+    WKH-191x · Pantalla de seguimiento operativo (read-only).
+
+    HTML + CSS + JS inline, sin dependencias ni build step (patrón de
+    src/static/dashboard.html, pero sin CDN: esta pantalla tiene que abrir
+    igual desde un celular con mala conexión).
+
+    NO tiene ningún botón que ejecute un pipeline (compose ni orchestrate): cada
+    ejecución real cuesta dinero. Todo lo que se ve acá ya pasó. El único fetch de
+    la página es el GET del trace, y hay un test que lo mantiene así.
+  -->
+  <style>
+    :root {
+      --bg: #0f1020;
+      --panel: #191a2e;
+      --panel-2: #12132a;
+      --line: #2a2c47;
+      --text: #e8e9f3;
+      --muted: #9aa0bd;
+      --ok: #00b894;
+      --warn: #fdcb6e;
+      --bad: #e17055;
+      --accent: #6c5ce7;
+      --cross: #ff7ab6;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 1rem;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    h1 { font-size: 1.35rem; margin: 0 0 .25rem; }
+    h2 { font-size: 1.05rem; margin: 2rem 0 .35rem; }
+    p.lead { color: var(--muted); font-size: .85rem; margin: .25rem 0 1rem; max-width: 78ch; }
+    .mono { font-family: var(--mono); }
+    a { color: var(--cross); }
+
+    /* ── barra de estado ─────────────────────────────────────── */
+    .bar {
+      display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 10px; padding: .6rem .75rem; margin-bottom: 1rem;
+    }
+    .bar input {
+      flex: 1 1 200px; min-width: 0; background: var(--panel-2);
+      border: 1px solid var(--line); color: var(--text);
+      border-radius: 8px; padding: .45rem .6rem; font-family: var(--mono); font-size: .85rem;
+    }
+    .bar button {
+      background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+      padding: .5rem .9rem; font-size: .85rem; cursor: pointer;
+    }
+    #refresh-state { font-size: .8rem; color: var(--muted); flex: 1 1 100%; }
+    #refresh-state.stale { color: var(--bad); font-weight: 600; }
+    body.stale .panel, body.stale .call { opacity: .55; }
+
+    /* ── grillas / paneles ───────────────────────────────────── */
+    .grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .panel {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 10px; padding: .85rem;
+    }
+    .panel h3 {
+      margin: 0 0 .1rem; font-size: .72rem; text-transform: uppercase;
+      letter-spacing: .08em; color: var(--muted); font-weight: 600;
+    }
+    .panel .hint { font-size: .76rem; color: var(--muted); margin: .35rem 0 0; }
+    .big { font-size: 1.5rem; font-weight: 700; line-height: 1.2; }
+    .big.ok { color: var(--ok); } .big.warn { color: var(--warn); } .big.bad { color: var(--bad); }
+
+    .chip {
+      display: inline-block; border: 1px solid var(--line); border-radius: 999px;
+      padding: .1rem .5rem; font-size: .74rem; margin: .15rem .25rem .15rem 0;
+      font-family: var(--mono);
+    }
+    .chip.default { border-color: var(--accent); color: #cfc7ff; }
+    .badge {
+      display: inline-block; border-radius: 6px; padding: .05rem .4rem;
+      font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+    }
+    .badge.ok { background: var(--ok); color: #05231c; }
+    .badge.bad { background: var(--bad); color: #2b0f08; }
+    .badge.neutral { background: #3a3d5e; color: var(--text); }
+    .badge.cross { background: var(--cross); color: #2b0a1c; }
+
+    /* ── llamadas ────────────────────────────────────────────── */
+    .call {
+      background: var(--panel); border: 1px solid var(--line);
+      border-left: 4px solid var(--line);
+      border-radius: 10px; padding: .75rem; margin-bottom: .6rem;
+    }
+    .call.cross { border-left-color: var(--cross); background: linear-gradient(90deg, rgba(255,122,182,.07), var(--panel) 45%); }
+    .call-head { display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: baseline; }
+    .call-head .time { font-family: var(--mono); font-size: .8rem; color: var(--muted); }
+    .call-head .ep { font-family: var(--mono); font-size: .85rem; font-weight: 600; }
+    .call-meta { font-size: .78rem; color: var(--muted); margin-top: .2rem; word-break: break-all; }
+    .crossing {
+      margin: .5rem 0; font-size: .84rem; display: flex; flex-wrap: wrap;
+      gap: .35rem; align-items: center;
+    }
+    .crossing .net { font-family: var(--mono); }
+    .legs { margin-top: .5rem; border-top: 1px solid var(--line); }
+    .leg { display: flex; flex-wrap: wrap; gap: .3rem .6rem; padding: .45rem 0; border-bottom: 1px dashed var(--line); font-size: .82rem; }
+    .leg:last-child { border-bottom: 0; }
+    .leg .amount { font-family: var(--mono); font-weight: 700; }
+    .leg .what { color: var(--muted); }
+    .leg .hash { font-family: var(--mono); font-size: .78rem; }
+    .skips { margin-top: .5rem; font-size: .8rem; }
+    .skips .code { font-family: var(--mono); color: var(--warn); font-weight: 700; }
+    .fee { margin-top: .4rem; font-size: .8rem; color: var(--muted); }
+    .empty { color: var(--muted); font-style: italic; padding: 1rem 0; }
+    footer { margin: 2rem 0 1rem; font-size: .75rem; color: var(--muted); }
+    @media (max-width: 520px) {
+      body { padding: .6rem; }
+      .big { font-size: 1.25rem; }
+    }
+  </style>
+</head>
+<body>
+  <h1>WasiAI A2A · Live Trace</h1>
+  <p class="lead">
+    Seguimiento de lo que ya pasó: cada llamada al gateway con su rastro de dinero.
+    Esta pantalla solo lee, no ejecuta nada, así que abrirla o refrescarla no gasta.
+  </p>
+
+  <div class="bar">
+    <input id="admin-token" type="password" placeholder="Token de admin (X-Admin-Token)" autocomplete="off">
+    <button id="load-btn" type="button">Ver</button>
+    <div id="refresh-state">Pega el token de admin y toca Ver.</div>
+  </div>
+
+  <h2>Salud del rail</h2>
+  <p class="lead">
+    Responde una sola pregunta: ¿esto está funcionando ahora? Las redes conectadas
+    salen de la configuración real del gateway (no de una lista escrita a mano). La
+    antigüedad del último cruce es el mejor indicador de vida: si pasaron horas sin
+    ninguno, algo se rompió aunque no haya errores a la vista.
+  </p>
+  <div class="grid" id="health">
+    <div class="panel"><h3>Sin datos</h3><div class="hint">Todavía no se cargó nada.</div></div>
+  </div>
+
+  <h2>Últimas llamadas</h2>
+  <p class="lead">
+    Lo último primero. Cada bloque es una llamada al gateway, y dentro están los
+    movimientos de dinero que le corresponden: el débito al caller, el pago al agente
+    y el fee de plataforma. Cuando el caller pagó en una red y el agente cobró en
+    otra, el bloque queda resaltado en rosa: ese cruce es la tesis del producto.
+  </p>
+  <div id="calls">
+    <div class="empty">Todavía no se cargó nada.</div>
+  </div>
+
+  <footer>
+    WasiAI A2A Protocol · trace read-only · los montos se muestran tal como los
+    guardó la base de datos (sin redondeos de la pantalla).
+  </footer>
+
+  <script>
+    'use strict';
+    var BASE = window.location.origin;
+    var TOKEN_KEY = 'wasiai_admin_token'; // misma clave que /dashboard
+    var REFRESH_MS = 10000;
+    // Umbrales SOLO de lectura (colores). No son un gate ni disparan nada.
+    var AGE_OK_S = 3600;      // menos de 1 hora: el rail está vivo
+    var AGE_WARN_S = 6 * 3600; // menos de 6 horas: sospechoso
+    var lastOkAt = null;
+    var timer = null;
+
+    // Escape para HTML. Cubre los cinco caracteres, en este orden (el `&` PRIMERO,
+    // si no se re-escaparían las entidades que genera el resto). Las comillas
+    // entran porque esta función también se usa DENTRO de atributos (href, class):
+    // sin ellas un dato con comillas se sale del atributo y agrega un `onerror`.
+    // Los datos vienen de la DB (identificador del caller, nombres de red, hashes):
+    // no son de confianza.
+    //
+    // Es puro string, sin DOM a propósito: así hay un test de verdad que le pasa
+    // `<script>` y comillas y mira la salida (el `esc()` de dashboard.html usa el
+    // truco del text node, que NO escapa comillas; no copiarlo de ahí).
+    function esc(value) {
+      if (value === null || value === undefined) return '';
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function shortHash(hash) {
+      var s = String(hash);
+      return s.length > 22 ? s.slice(0, 10) + '…' + s.slice(-8) : s;
+    }
+
+    function hhmmss(iso) {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return '--:--:--';
+      return d.toLocaleTimeString('es-AR', { hour12: false });
+    }
+
+    function fullStamp(iso) {
+      var d = new Date(iso);
+      return isNaN(d.getTime()) ? String(iso) : d.toLocaleString('es-AR');
+    }
+
+    function humanAge(seconds) {
+      var s = Math.max(0, Math.round(Number(seconds) || 0));
+      if (s < 60) return 'hace ' + s + ' s';
+      if (s < 3600) return 'hace ' + Math.round(s / 60) + ' min';
+      if (s < 86400) return 'hace ' + (s / 3600).toFixed(1) + ' h';
+      return 'hace ' + (s / 86400).toFixed(1) + ' días';
+    }
+
+    function ageClass(seconds) {
+      if (seconds <= AGE_OK_S) return 'ok';
+      if (seconds <= AGE_WARN_S) return 'warn';
+      return 'bad';
+    }
+
+    function linkOrText(url, text) {
+      if (!text) return '<span class="what">sin firma</span>';
+      // Sin explorer conocido preferimos texto plano antes que un link roto.
+      if (!url) return '<span class="hash">' + esc(shortHash(text)) + '</span>';
+      return '<a class="hash" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' +
+        esc(shortHash(text)) + '</a>';
+    }
+
+    function setState(message, stale) {
+      var el = document.getElementById('refresh-state');
+      el.textContent = message;
+      el.className = stale ? 'stale' : '';
+      document.body.className = stale ? 'stale' : '';
+    }
+
+    // ── Salud ──────────────────────────────────────────────────
+    function renderHealth(health) {
+      var chains = (health.chains || []).map(function (c) {
+        var cls = c.isDefault ? 'chip default' : 'chip';
+        var suffix = c.isDefault ? ' · default' : '';
+        return '<span class="' + cls + '">' + esc(c.label) + suffix + '</span>';
+      }).join('');
+
+      var chainsPanel =
+        '<div class="panel"><h3>Redes conectadas</h3>' +
+        '<div style="margin-top:.35rem">' + (chains || '<span class="what">ninguna</span>') + '</div>' +
+        '<p class="hint">Son los rails que este gateway tiene cargados ahora mismo. La marcada como default es la que se usa cuando el caller no elige red.</p>' +
+        '</div>';
+
+      var last = health.lastCrossChainSettle;
+      var crossPanel;
+      if (last) {
+        crossPanel =
+          '<div class="panel"><h3>Último cruce de redes</h3>' +
+          '<div class="big ' + ageClass(last.ageSeconds) + '">' + esc(humanAge(last.ageSeconds)) + '</div>' +
+          '<div style="font-size:.82rem;margin-top:.3rem">' +
+          'pagó en <span class="mono">' + esc(last.paidOn.label) + '</span>' +
+          ' y cobró en <span class="mono">' + esc(last.collectedOn.label) + '</span>' +
+          '</div>' +
+          '<div style="font-size:.8rem;margin-top:.2rem">' +
+          esc(last.amountUsd) + ' USD · ' + linkOrText(last.explorerTxUrl, last.signature) +
+          '</div>' +
+          '<p class="hint">' + esc(fullStamp(last.at)) + '. Es el pago más reciente que salió de una red y llegó a otra, con su comprobante on-chain.</p>' +
+          '</div>';
+      } else {
+        crossPanel =
+          '<div class="panel"><h3>Último cruce de redes</h3>' +
+          '<div class="big bad">sin registro</div>' +
+          '<p class="hint">Entre los settles más recientes no hay ninguno que cruce de red. No es un error de la pantalla: no aparece en lo que se revisó.</p>' +
+          '</div>';
+      }
+
+      // El conteo revisa como máximo `skipScanLimit` eventos. Cuando la ventana
+      // tiene más que eso, el número NO es el de la ventana, y la pantalla lo dice
+      // en el título y en el texto: puede decir "no sé" o "incompleto", nunca
+      // "todo bien" sobre datos que no leyó.
+      var truncated = health.skipScanTruncated === true;
+      var scanLimit = esc(health.skipScanLimit);
+      var truncNote = truncated
+        ? '<p class="hint">CONTEO INCOMPLETO: se revisaron las ' + scanLimit +
+          ' llamadas más recientes y la ventana de ' + esc(health.skipWindowHours) +
+          ' h tiene más. De lo que quedó afuera no sabemos nada. Para ver todo, pedí una ventana más corta (?windowHours=).</p>'
+        : '';
+
+      var skipsBody;
+      if (!health.skipSignalPresent) {
+        skipsBody = '<div class="big warn">sin datos</div>' +
+          '<p class="hint">Ninguna llamada de la ventana informó este dato. El gateway lo empezó a guardar con esta pantalla, así que el tráfico anterior no lo tiene. No leerlo como cero.</p>';
+      } else if (!health.skips || health.skips.length === 0) {
+        skipsBody = truncated
+          ? '<div class="big warn">0 en lo revisado</div>' +
+            '<p class="hint">Ninguna de las ' + scanLimit + ' llamadas revisadas quedó sin pagar. No alcanza para decir que la ventana está limpia: falta leer el resto.</p>'
+          : '<div class="big ok">0</div>' +
+            '<p class="hint">Ninguna pata quedó sin pagar en la ventana. Es el estado bueno.</p>';
+      } else {
+        skipsBody = '<div class="big warn">' + esc(health.skipsTotal) + '</div>' +
+          health.skips.map(function (s) {
+            return '<div style="font-size:.82rem;margin-top:.35rem">' +
+              '<span class="code mono">' + esc(s.code) + '</span> × ' + esc(s.count) +
+              '<div class="hint" style="margin-top:0">' + esc(s.meaning) + '</div></div>';
+          }).join('') +
+          '<p class="hint">Un skip es una pata del pipeline que no se pagó. El código dice por qué, en el vocabulario público del gateway.</p>';
+      }
+      var skipsScope = truncated
+        ? 'últimas ' + scanLimit + ' llamadas, no toda la ventana'
+        : 'últimas ' + esc(health.skipWindowHours) + ' h';
+      var skipsPanel =
+        '<div class="panel"><h3>Pagos salteados (' + skipsScope + ')</h3>' +
+        skipsBody + truncNote + '</div>';
+
+      document.getElementById('health').innerHTML = chainsPanel + crossPanel + skipsPanel;
+    }
+
+    // ── Llamadas ───────────────────────────────────────────────
+    function statusBadge(call) {
+      if (call.status === null) {
+        return '<span class="badge neutral" title="No hay evento HTTP asociado a este movimiento">sin evento</span>';
+      }
+      var cls = call.status === 'success' ? 'ok' : 'bad';
+      var http = call.httpStatus === null ? '' : ' ' + call.httpStatus;
+      return '<span class="badge ' + cls + '">' + esc(call.status) + esc(http) + '</span>';
+    }
+
+    var CORRELATION_HINT = {
+      'full': 'Llamada y dinero cruzados por el mismo identificador: lo que ves es la misma operación completa.',
+      'call-only': 'De esta llamada tenemos el pedido HTTP pero ningún recibo: o no movió dinero, o el cobro quedó registrado aparte.',
+      'money-only': 'Movimiento de dinero sin la llamada HTTP al lado. Pasa cuando el recibo no guarda el identificador de la llamada, así que preferimos mostrarlo solo antes que atribuirlo a la llamada equivocada.'
+    };
+
+    function renderLeg(leg) {
+      var what = leg.isCallerDebit
+        ? 'débito al caller'
+        : (leg.collectedOn ? 'pago al agente' : leg.receiptType);
+      var route = '<span class="what">en</span> <span class="mono">' + esc(leg.paidOn.label) + '</span>';
+      if (leg.collectedOn) {
+        route += ' <span class="what">→</span> <span class="mono">' + esc(leg.collectedOn.label) + '</span>';
+      }
+      return '<div class="leg">' +
+        '<span class="amount">' + esc(leg.amountUsd) + ' USD</span>' +
+        '<span class="what">' + esc(what) + '</span>' +
+        route +
+        (leg.crossChain ? ' <span class="badge cross">cruce</span>' : '') +
+        '<span style="margin-left:auto">' + linkOrText(leg.explorerTxUrl, leg.txHash) + '</span>' +
+        '</div>';
+    }
+
+    function renderCall(call) {
+      var head = '<div class="call-head">' +
+        '<span class="time">' + esc(hhmmss(call.at)) + '</span>' +
+        '<span class="ep">' + esc(call.endpoint || 'movimiento de dinero') + '</span>' +
+        statusBadge(call) +
+        (call.latencyMs !== null ? '<span class="time">' + esc(call.latencyMs) + ' ms</span>' : '') +
+        (call.crossChain ? '<span class="badge cross">cruce de redes</span>' : '') +
+        '</div>';
+
+      var meta = '<div class="call-meta">' +
+        'caller: <span class="mono">' + esc(call.ownerRef || 'n/d') + '</span>' +
+        ' · id: <span class="mono">' + esc(call.id) + '</span>' +
+        '</div>';
+
+      var crossing = '';
+      var crossLeg = null;
+      for (var i = 0; i < call.legs.length; i++) {
+        if (call.legs[i].crossChain) { crossLeg = call.legs[i]; break; }
+      }
+      if (crossLeg) {
+        crossing = '<div class="crossing">' +
+          '<span class="badge cross">cruce</span>' +
+          '<span>el caller pagó en <span class="net">' + esc(crossLeg.paidOn.label) + '</span>' +
+          ' y el agente cobró en <span class="net">' + esc(crossLeg.collectedOn.label) + '</span></span>' +
+          '</div>';
+      }
+
+      var legs = call.legs.length
+        ? '<div class="legs">' + call.legs.map(renderLeg).join('') + '</div>'
+        : '<div class="leg"><span class="what">sin movimientos de dinero en esta llamada</span></div>';
+
+      var fee = '';
+      if (call.fee) {
+        var total = call.fee.totalUsd === null
+          ? esc(call.fee.platformUsd) + ' USD (fila vieja: es solo la parte de la plataforma, no el total)'
+          : esc(call.fee.totalUsd) + ' USD (plataforma: ' + esc(call.fee.platformUsd) + ')';
+        fee = '<div class="fee">fee de plataforma: ' + total +
+          ' · estado ' + esc(call.fee.status) +
+          (call.fee.txHash ? ' · ' + linkOrText(call.fee.explorerTxUrl, call.fee.txHash) : '') +
+          '</div>';
+      }
+
+      var skips = '';
+      if (call.skips && call.skips.length) {
+        skips = '<div class="skips">' + call.skips.map(function (s) {
+          return '<div><span class="code">' + esc(s.code) + '</span> × ' + esc(s.count) +
+            ' <span class="what">' + esc(s.meaning) + '</span></div>';
+        }).join('') + '</div>';
+      }
+
+      var note = '<div class="call-meta" style="margin-top:.4rem">' +
+        esc(CORRELATION_HINT[call.correlation] || '') + '</div>';
+
+      return '<article class="call' + (call.crossChain ? ' cross' : '') + '">' +
+        head + meta + crossing + legs + fee + skips + note + '</article>';
+    }
+
+    function renderCalls(calls) {
+      var el = document.getElementById('calls');
+      if (!calls || calls.length === 0) {
+        el.innerHTML = '<div class="empty">No hay llamadas registradas todavía.</div>';
+        return;
+      }
+      el.innerHTML = calls.map(renderCall).join('');
+    }
+
+    // ── Carga ──────────────────────────────────────────────────
+    function token() {
+      return document.getElementById('admin-token').value;
+    }
+
+    async function refresh() {
+      if (!token()) {
+        setState('Falta el token de admin: esta pantalla muestra datos de todos los tenants.', true);
+        return;
+      }
+      var res;
+      try {
+        res = await fetch(BASE + '/dashboard/api/trace', {
+          headers: { 'X-Admin-Token': token() }
+        });
+      } catch (err) {
+        markStale('no se pudo conectar');
+        return;
+      }
+      if (res.status === 401) { setState('Token inválido o ausente.', true); return; }
+      if (res.status === 503) { setState('El gateway no tiene DASHBOARD_ADMIN_TOKEN configurado, así que este trace está cerrado.', true); return; }
+      if (!res.ok) { markStale('el servidor respondió ' + res.status); return; }
+
+      var data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        markStale('respuesta ilegible');
+        return;
+      }
+      renderHealth(data.health);
+      renderCalls(data.calls);
+      lastOkAt = new Date();
+      setState('Actualizado ' + lastOkAt.toLocaleTimeString('es-AR', { hour12: false }) +
+        ' · se refresca cada ' + (REFRESH_MS / 1000) + ' s', false);
+      startPolling();
+    }
+
+    /**
+     * Un fetch fallido NUNCA deja la pantalla mintiendo: se avisa el motivo y desde
+     * cuándo los datos que se ven quedaron viejos (y se atenúan).
+     *
+     * Y arranca el reintento (AR MENOR-4): antes el intervalo se armaba SOLO después
+     * de un fetch exitoso, así que abrir la pantalla con el gateway caído mostraba
+     * "Reintentando cada 10 s" y no reintentaba nunca. Justo cuando más se la
+     * necesita, quedaba muerta hasta que alguien tocaba Ver.
+     */
+    function markStale(reason) {
+      var desde = lastOkAt
+        ? 'los datos son de ' + lastOkAt.toLocaleTimeString('es-AR', { hour12: false })
+        : 'no se cargó nada todavía';
+      setState('DATOS VIEJOS (' + reason + '): ' + desde + '. Reintentando cada ' +
+        (REFRESH_MS / 1000) + ' s.', true);
+      startPolling();
+    }
+
+    /** Un solo intervalo por pestaña, sin importar por qué camino se armó. */
+    function startPolling() {
+      if (!timer) timer = setInterval(function () { refresh(); }, REFRESH_MS);
+    }
+
+    // El token va SIEMPRE en el header X-Admin-Token, nunca en la URL: un query
+    // param queda escrito en los logs del servidor y de cualquier proxy.
+    (function init() {
+      var input = document.getElementById('admin-token');
+      var saved = window.localStorage.getItem(TOKEN_KEY);
+      if (saved) input.value = saved;
+      input.addEventListener('input', function () {
+        window.localStorage.setItem(TOKEN_KEY, input.value);
+      });
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') refresh();
+      });
+      document.getElementById('load-btn').addEventListener('click', function () {
+        refresh();
+      });
+      if (saved) refresh();
+    })();
+  </script>
+</body>
+</html>
