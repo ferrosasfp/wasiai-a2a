@@ -764,12 +764,19 @@ async function resolveDelegationAuth(
     };
 
     // 9. remaining budget header (CD-12: mismo chainId del bundle).
-    const remaining = await budgetService.getBalance(
-      parentKey.id,
-      chainId,
-      parentKey.owner_ref,
-    );
-    reply.header('x-a2a-remaining-budget', remaining);
+    // HIGH-2 (2026-07-26): best-effort — ver el racional en el path master. Un
+    // fallo de este read post-débito devolvía 503 con el débito ya aplicado.
+    await budgetService
+      .getBalance(parentKey.id, chainId, parentKey.owner_ref)
+      .then((remaining) => {
+        reply.header('x-a2a-remaining-budget', remaining);
+      })
+      .catch((balanceErr) => {
+        request.log.warn(
+          { err: balanceErr instanceof Error ? balanceErr.message : 'unknown' },
+          'a2a-key.remaining-budget-header.skip',
+        );
+      });
     return; // fin del branch — NO seguir al flujo master key
   } catch (err) {
     // log SIN token; 503 service error (igual que el catch master).
@@ -978,12 +985,19 @@ async function resolveKeySessionAuth(
     };
 
     // 7. remaining budget header (mismo chainId del bundle).
-    const remaining = await budgetService.getBalance(
-      parentKey.id,
-      chainId,
-      parentKey.owner_ref,
-    );
-    reply.header('x-a2a-remaining-budget', remaining);
+    // HIGH-2 (2026-07-26): best-effort — ver el racional en el path master. Un
+    // fallo de este read post-débito devolvía 503 con el débito ya aplicado.
+    await budgetService
+      .getBalance(parentKey.id, chainId, parentKey.owner_ref)
+      .then((remaining) => {
+        reply.header('x-a2a-remaining-budget', remaining);
+      })
+      .catch((balanceErr) => {
+        request.log.warn(
+          { err: balanceErr instanceof Error ? balanceErr.message : 'unknown' },
+          'a2a-key.remaining-budget-header.skip',
+        );
+      });
     return; // fin del branch — NO seguir al flujo master key
   } catch (err) {
     request.log.error(
@@ -1204,12 +1218,27 @@ async function resolveMasterAuth(
     // el balance acá daría un valor no-debitado; el route handler setea este
     // header con el saldo post-débito real que expone el service.
     if (!request.skipMiddlewareDebit) {
-      const postDebitBalance = await budgetService.getBalance(
-        keyRow.id,
-        chainId,
-        keyRow.owner_ref,
-      );
-      reply.header('x-a2a-remaining-budget', postDebitBalance);
+      // HIGH-2 (2026-07-26): best-effort. Este read es SOLO para un header de
+      // conveniencia y corre DESPUÉS de un débito exitoso; cuando fallaba, el
+      // catch de abajo devolvía 503 SERVICE_ERROR con el débito ya aplicado y sin
+      // ejecutar nada — cobro sin contraprestación por un header. Ahora el header
+      // se omite y el request sigue: el caller que pagó recibe la ejecución que
+      // pagó. Los otros 503 de este catch (lookup/debit que tiran ANTES o
+      // DURANTE el débito, sin cobro) quedan intactos.
+      await budgetService
+        .getBalance(keyRow.id, chainId, keyRow.owner_ref)
+        .then((postDebitBalance) => {
+          reply.header('x-a2a-remaining-budget', postDebitBalance);
+        })
+        .catch((balanceErr) => {
+          request.log.warn(
+            {
+              err: balanceErr instanceof Error ? balanceErr.message : 'unknown',
+              keyId: keyRow?.id,
+            },
+            'a2a-key.remaining-budget-header.skip',
+          );
+        });
     }
   } catch (err) {
     request.log.error(

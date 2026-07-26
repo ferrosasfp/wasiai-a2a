@@ -119,5 +119,116 @@ sigue siendo válida hasta que el founder la rote: este fix sólo cierra el cana
 
 ## WAVE 2 — HIGH-2: un `/compose` que responde 400 cobra igual
 
-Ver `auto-blindaje.md` (decisión (a)/(b) y racional) y la sección "mapa de status" de
-este documento, completada al cerrar la wave 2.
+### Problema
+
+El débito ocurre dentro de `requirePaymentOrA2AKey` (`middleware/a2a-key.ts:1106-1124`
+en el path master; equivalentes en los branches de delegación y sesión), que es un
+**preHandler**. Los tres checks de shape vivían SOLO en el **route handler**, que corre
+después. El comentario original de `badStepIndex` lo admitía textualmente: *"This runs
+AFTER the payment middleware, but a 400 here is the failure mode we want"*.
+
+El credit-back que SÍ existía (AUDIT A1) estaba dentro de `if (!result.success)`, o sea
+sólo para fallos del pipeline — un 400 de validación nunca llegaba ahí.
+
+El peor caso: con `steps: []` el preHandler de precio no inyecta
+`composeEstimatedCostUsd`, así que `resolveEstimatedCostUsd`
+(`middleware/a2a-key.ts:534-540`) cae en `PLACEHOLDER_FEE_USD` y el caller pagaba
+**$1 flat** por un body vacío. Medido: el test T-NOCHARGE-01 sobre el código pre-fix
+falla con `expected 9 to be 10`.
+
+### Decisión: (a) para la validación + (b) para lo que no se puede adelantar
+
+**(a) — adelantar la validación al débito. Elegida para los tres 400.**
+
+Justificación:
+
+1. **Ninguna de las tres validaciones depende de nada que produzca el middleware.**
+   Se verificó una por una: no leen `request.a2aKeyRow`, ni `resolvedChainId`, ni
+   `composeEstimatedCostUsd`, ni `delegationContext`/`keySessionContext`. Son funciones
+   puras del body. La objeción de la vía (a) no aplica acá.
+2. **(b) NO puede cubrir al caller x402.** El bloque de credit-back está gateado en
+   `request.a2aKeyRow` (`compose.ts:298-305`), así que un caller x402 — que settlea su
+   pago inbound on-chain — **no tiene refund posible**. Si se emitiera el 402, el caller
+   pagara y después llegara el 400, esa plata no se puede devolver. La única defensa
+   para ese path es rechazar ANTES de cobrar. Esto es lo que decide la elección: (a) no
+   es sólo "más limpio", es la única que cubre los dos paths de pago.
+3. Sin ventana en la que el balance baja y sube, y sin la llamada de discovery del
+   step-0 para un body que se va a rechazar.
+
+Implementación: `validateComposeBody()` (función pura, `compose.ts:123-150`) +
+`validateComposeBodyHandler` (`compose.ts:160-169`), registrado en la cadena de
+preHandlers en `compose.ts:578`, ANTES de `resolveComposePriceHandler` y de
+`requirePaymentOrA2AKey`. El handler sigue llamando la MISMA función pura
+(`compose.ts:666`) como defense-in-depth, para que un reordenamiento futuro de la
+cadena no reabra el agujero de input no validado que cerró BLQ-MEDIO-1.
+
+**(b) — credit-back para los caminos post-débito que no se pueden adelantar.**
+
+Se reusa el mecanismo de **WKH-127** (`doc/sdd/125-wkh-127-orchestrate-billing/`):
+`budgetService.credit` / `creditWithDest` / `creditDelegation` / `creditSession`
+(`services/budget.ts:445,495,556,...`) + encolado en `refundOutbox` cuando el refund no
+revirtió nada. NO se inventó un mecanismo nuevo: el bloque inline de AUDIT A1 se extrajo
+a `refundComposeStep0()` (`compose.ts:294`) **sin cambiar la matemática ni los `reason`
+del outbox**, y se llama desde tres sitios (`compose.ts:610,655,674`).
+
+### Mapa completo: qué status cobra, antes y después
+
+Path prepago a2a-key, `/compose`. "Cobra" = el balance del caller queda decrementado al
+terminar el request.
+
+| Status | Causa | Dónde se decide | ANTES | DESPUÉS |
+|---|---|---|---|---|
+| **400** `steps` vacío/ausente | shape | handler → ahora preHandler `compose.ts:578` | **COBRA $1** (placeholder) | **NO cobra** |
+| **400** >5 steps | shape | idem | **COBRA** precio step-0 | **NO cobra** |
+| **400** step con `agent` no-string | shape | idem | **COBRA** precio step-0 | **NO cobra** |
+| **504** timeout antes de compose | timer | `compose.ts:609` | **COBRA**, sin refund | **NO cobra** (credit-back completo) |
+| **504** timeout durante compose | timer | `compose.ts:654` | **COBRA**, sin refund | **cobra sólo lo settleado** (`max(0, debitado − totalCostUsdc)`) |
+| **503** `SERVICE_ERROR` por el read del header `x-a2a-remaining-budget` post-débito | `middleware/a2a-key.ts:1231` (y `772`, `993`) | **COBRA**, sin refund, sin ejecutar | **no aplica**: el read pasó a best-effort → el header se omite y el pipeline corre (el que pagó recibe lo que pagó) |
+| 400 fallo de pipeline | `composeService` | `compose.ts:679` | cobra y **reembolsa** (AUDIT A1) | igual (byte-idéntico) |
+| 402 `DEST_CAP_EXCEEDED` mid-pipeline | cap por destino | `compose.ts:683` | cobra y **reembolsa** | igual |
+| 403 `SCOPE_DENIED` | scoping per-step | `compose.ts:681` | cobra y **reembolsa** | igual |
+| 402 `DEST_CAP_EXCEEDED` en el débito | cap | `middleware/a2a-key.ts:1128` | **no cobra** (rollback del RPC) | igual |
+| 403 `INSUFFICIENT_BUDGET` | débito falló | `middleware/a2a-key.ts:1161` | **no cobra** | igual |
+| 404 `AGENT_NOT_FOUND` | agente inexistente | `compose.ts:440` (pre-débito) | **no cobra** | igual |
+| 404 `AGENT_NOT_FOUND` (ghost, precio 0) | agente fantasma | `compose.ts:477` (pre-débito) | **no cobra** | igual |
+| 503 `REGISTRY_UNAVAILABLE` | discovery tiró | `compose.ts:554` (pre-débito) | **no cobra** | igual |
+| 403 `KEY_NOT_FOUND` / `KEY_INACTIVE` / 401 token inválido | auth | pre-débito | **no cobra** | igual |
+| 503 por `lookupByHash` o `debit` que tiran | infra | `middleware/a2a-key.ts:1252` | **no cobra** (el débito no se aplicó) | igual |
+| 422 | — | no existe en `/compose` (sólo en `/registries` y `/agents`) | n/a | n/a |
+| **500** uncaught de `composeService.compose` | ver TD-188-6 | error boundary de Fastify | cobra el step-0 | **igual, y es CORRECTO** — ver TD-188-6 |
+| 200 | happy path | `compose.ts:749` | cobra step-0 + per-step | **igual (invariante)** |
+
+### Invariante verificado
+
+"Un `/compose` que SÍ ejecuta cobra exactamente lo mismo que antes":
+T-NOCHARGE-06 (1 step), T-NOCHARGE-07 (5 steps, el borde inclusive),
+T-NOCHARGE-08 (fallo → reembolsa igual) y T-NOCHARGE-09 (fallo parcial → NO
+sobre-reembolsa) assertan el monto exacto del débito y el balance final. No se tocó
+ningún cálculo de precio: `resolveComposePriceHandler`,
+`augmentX402ChallengeAmount`, `resolveStep0GasOverheadUsd` y la fórmula del refund
+quedaron intactos.
+
+### Tests (13 nuevos)
+
+`src/routes/compose.no-charge-on-validation-error.test.ts` (12) —
+T-NOCHARGE-01..12, con el middleware de pago REAL y un balance en memoria (mismo
+scaffold que `compose.no-debit-on-abort.test.ts`, porque `compose.test.ts` moquea el
+middleware con un pass-through que nunca debita y por eso jamás pudo observar un cobro).
+**Toda aserción de dinero compara el balance antes y después.**
+Más `AC-19b` en `src/__tests__/e2e/e2e.test.ts`.
+
+Verificado por mutación (tres, cada una restaurada):
+- quitar `validateComposeBodyHandler` de la cadena → T-NOCHARGE-01..05 fallan;
+  la de 01 falla con `expected 9 to be 10`, o sea señala directo el cobro de $1;
+- quitar el credit-back del 504 post-compose → T-NOCHARGE-11 falla;
+- volver el read del header a fatal → T-NOCHARGE-10 falla con `expected 503 to be 200`.
+
+### Cambio de comportamiento a revisar
+
+La validación ahora corre **antes de la autenticación/pago**, así que un request
+**no autenticado con body malformado** devuelve **400** en vez de **402**. Era
+inevitable: el caller x402 no tiene refund inbound (punto 2 de la justificación). El
+gate de auth queda intacto para bodies bien formados. `AC-19` usaba `agentSlug` (¡no
+`agent`!), o sea un body malformado, y obtenía el 402 por accidente: se corrigió el
+payload para que pruebe lo que dice probar, y se agregó `AC-19b` para el nuevo
+comportamiento. Detalle en `auto-blindaje.md`.

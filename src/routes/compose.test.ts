@@ -574,24 +574,34 @@ describe('compose preHandler — WKH-59 real-price-debit', () => {
     expect(mockCompose).not.toHaveBeenCalled();
   });
 
-  it('T-ROUTE-X402-AMT-5 (BLQ-MEDIO-1 layer 1, defense in depth): augmentX402ChallengeAmount OVER-estimates a malformed step instead of collapsing to 1 USD', async () => {
-    // Directly exercise the augmentation layer (the route 400 in layer 2 normally
-    // pre-empts this, but layer 1 must still be safe if ever reached). We capture
-    // the challenge the price preHandler set. To reach the augmentation with a
-    // malformed step, we drive it through resolveComposePriceHandler indirectly:
-    // step-0 valid (0.5), step-1 malformed. The augmentation must add
-    // PLACEHOLDER_FEE_USD for the malformed step (over-estimate), NOT bail to the
-    // 1 USD default. Because the route rejects with 400 first, we assert the
-    // captured challenge value the preHandler computed (captured by the auth
-    // mock, which runs AFTER the price preHandler but BEFORE the route handler).
+  it('T-ROUTE-X402-AMT-5 (HIGH-2, was BLQ-MEDIO-1 layer 1): un step malformado NUNCA llega a cotizarse — el 400 corre pre-pago', async () => {
+    // ANTES (BLQ-MEDIO-1): este test manejaba un body malformado a través de
+    // `resolveComposePriceHandler` para verificar que `augmentX402ChallengeAmount`
+    // sobre-estimaba el step malformado (layer 1) en vez de colapsar al default de
+    // 1 USD, porque la validación (layer 2) vivía en el route handler y corría
+    // DESPUÉS del middleware de pago.
+    //
+    // AHORA (HIGH-2): `validateComposeBodyHandler` (layer 0) corre ANTES del
+    // preHandler de precio y del middleware de pago, con la MISMA condición que el
+    // guard de layer 1 (`!step || typeof step.agent !== 'string'`). O sea: layer 0
+    // pre-empta layer 1 de forma total para el path HTTP. La garantía que este test
+    // fija ahora es MÁS FUERTE que la anterior — un body malformado ni siquiera se
+    // cotiza, así que ningún caller (prepago NI x402) puede pagar por él:
+    //   - status 400 VALIDATION_ERROR,
+    //   - el challenge x402 NUNCA se computa (nada que settlear inbound),
+    //   - composeService NUNCA corre (ningún prefijo settlea downstream).
+    // El guard de layer 1 se conserva en `augmentX402ChallengeAmount` como defense
+    // in depth (inalcanzable vía HTTP hoy, pero seguro si se reordenan preHandlers).
     mockResolvePrice.mockResolvedValue(0.5);
     const ORIGINAL_RATE = process.env.PROTOCOL_FEE_RATE;
     process.env.PROTOCOL_FEE_RATE = '0';
     try {
       capturedX402ChallengeAmountUsd = undefined;
-      await app.inject({
+      const res = await app.inject({
         method: 'POST',
         url: '/compose',
+        // x402 path (sin x-a2a-key) — el que NO tiene refund inbound, así que la
+        // única defensa posible es rechazar ANTES de cobrar.
         payload: {
           steps: [
             { agent: 'a1', input: {} },
@@ -600,12 +610,12 @@ describe('compose preHandler — WKH-59 real-price-debit', () => {
           ],
         },
       });
-      // PLACEHOLDER_FEE_USD is the same over-estimate used for not-found prices.
-      // Challenge = step0(0.5) + placeholder(>0), fee rate 0 → > 0.5, and it is
-      // NEVER the flat 1 USD default while a real step (0.5) would settle.
-      expect(capturedX402ChallengeAmountUsd).toBeDefined();
-      expect(capturedX402ChallengeAmountUsd!).toBeGreaterThan(0.5);
-      expect(capturedX402ChallengeAmountUsd).not.toBe(1);
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('VALIDATION_ERROR');
+      // El preHandler de precio no corrió → no hay challenge que cobrar.
+      expect(capturedX402ChallengeAmountUsd).toBeUndefined();
+      expect(mockResolvePrice).not.toHaveBeenCalled();
+      expect(mockCompose).not.toHaveBeenCalled();
     } finally {
       if (ORIGINAL_RATE === undefined) delete process.env.PROTOCOL_FEE_RATE;
       else process.env.PROTOCOL_FEE_RATE = ORIGINAL_RATE;

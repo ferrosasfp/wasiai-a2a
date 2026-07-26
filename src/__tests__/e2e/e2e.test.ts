@@ -374,13 +374,62 @@ describe('E2E', () => {
 
   describe('Protected routes', () => {
     it('AC-19: POST /compose without auth returns 402', async () => {
+      // HIGH-2 (2026-07-26): el payload usaba `agentSlug` (¡no `agent`!), o sea que
+      // era un body MALFORMADO y el 402 se obtenía por accidente — el gate de auth
+      // corría antes de cualquier validación de shape. Desde HIGH-2 la validación
+      // de shape corre PRE-PAGO (para que un body malformado no se cobre, ni en el
+      // path prepago ni en el x402, que no tiene refund inbound), así que ese
+      // payload ahora da 400. El payload se corrige a un body BIEN FORMADO: así el
+      // test prueba lo que dice probar (la ruta exige pago) en vez de apoyarse en
+      // el orden relativo de dos guards distintos.
+      // El nuevo comportamiento (malformado + sin auth → 400 pre-pago) queda
+      // cubierto por AC-19b abajo.
+      //
+      // Con un body bien formado el preHandler de precio SÍ corre, y el
+      // `getAgent` por defecto de este harness devuelve null → 404
+      // AGENT_NOT_FOUND (que también es pre-débito, correcto). Para aislar el
+      // gate de AUTH hay que hacer que el agente resuelva.
+      const mockGetAgent = discoveryService.getAgent as ReturnType<
+        typeof vi.fn
+      >;
+      mockGetAgent.mockResolvedValueOnce({
+        id: 'a1',
+        name: 'Test Agent',
+        slug: 'test',
+        description: '',
+        capabilities: [],
+        priceUsdc: 0.5,
+        registry: 'wasiai',
+        registry_id: 'wasiai',
+        invokeUrl: 'https://example.com/invoke/test',
+        invocationNote: '',
+        verified: false,
+        status: 'active',
+      });
+
       const res = await app.inject({
         method: 'POST',
         url: '/compose',
-        payload: { steps: [{ agentSlug: 'test', input: {} }] },
+        payload: { steps: [{ agent: 'test', input: {} }] },
       });
 
       expect(res.statusCode).toBe(402);
+      mockGetAgent.mockReset();
+      mockGetAgent.mockResolvedValue(null);
+    });
+
+    it('AC-19b (HIGH-2): POST /compose con body malformado y sin auth → 400 ANTES del challenge de pago', async () => {
+      // El caller x402 no tiene refund inbound: si el 402 se emitiera primero y el
+      // caller pagara, el 400 posterior se quedaría con su plata. Rechazar por
+      // shape ANTES del pago es la única defensa para ese path.
+      const res = await app.inject({
+        method: 'POST',
+        url: '/compose',
+        payload: { steps: [] },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('VALIDATION_ERROR');
     });
 
     it('AC-20: POST /orchestrate without auth returns 402', async () => {
