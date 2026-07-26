@@ -7,6 +7,10 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import {
+  type PublicDownstreamSkipCode,
+  parseSkippedMarker,
+} from '../lib/downstream-skip-code.js';
 import { eventService } from '../services/event.js';
 
 // ── DT-2: Allowlisted route prefixes (safer than denylist) ──
@@ -19,12 +23,57 @@ const TRACKED_PREFIXES = [
   '/gasless/status',
 ];
 
+/**
+ * Formato de `a2a_events.event_type` (DT-3). Vive acá, en el único módulo que lo
+ * escribe, y se exporta para que quien lo CONSULTE (el trace del dashboard,
+ * WKH-191x) no reimplemente el string y se desincronice en silencio.
+ */
+export function buildEventType(method: string, endpoint: string): string {
+  return `request:${method}:${endpoint}`;
+}
+
+/**
+ * WKH-191x — retiene los skip-codes PÚBLICOS del leg downstream de un pipeline
+ * para que el evento los persista en `a2a_events.metadata`.
+ *
+ * Por qué existe: `toPublicSkipCode` sólo alimentaba la respuesta HTTP y los logs
+ * (`compose.ts`), así que el motivo por el que un leg no se pagó no quedaba en
+ * ninguna tabla y era imposible contarlo después. `metadata` es `jsonb`, así que
+ * esto NO necesita migración.
+ *
+ * Sólo lee `steps[].downstreamSettle`, cuyo tipo es
+ * `` `skipped:${PublicDownstreamSkipCode}` ``: es imposible por tipos que entre acá
+ * un código INTERNO (los que revelan flags, allow-list de mainnet o el estado de
+ * la wallet del operador). NO toca la lógica de decisión de dinero.
+ *
+ * Guarda un array VACÍO cuando el pipeline no tuvo skips: la ausencia de la clave
+ * significa "este tráfico es anterior a la señal", que no es lo mismo que "cero
+ * skips", y la pantalla distingue los dos casos.
+ */
+export function noteDownstreamSkips(
+  request: FastifyRequest,
+  steps: ReadonlyArray<{ downstreamSettle?: string | undefined }> | undefined,
+): void {
+  const codes: PublicDownstreamSkipCode[] = [];
+  for (const step of steps ?? []) {
+    const code = parseSkippedMarker(step?.downstreamSettle);
+    if (code) codes.push(code);
+  }
+  request.downstreamSkips = codes;
+}
+
 // ── Fastify augmentation for start time (DT-4) ─────────────
 
 declare module 'fastify' {
   interface FastifyRequest {
     /** Epoch ms timestamp set by onRequest hook for latency calculation */
     _eventTrackingStartMs?: number;
+    /**
+     * WKH-191x — skip-codes PÚBLICOS del leg downstream de este request, seteados
+     * por `noteDownstreamSkips` en las rutas que corren un pipeline. Vocabulario
+     * público SIEMPRE (ver el docstring de `noteDownstreamSkips`).
+     */
+    downstreamSkips?: PublicDownstreamSkipCode[];
   }
 }
 
@@ -56,7 +105,7 @@ export function registerEventTracking(fastify: FastifyInstance): void {
         statusCode < 400 ? 'success' : 'failed';
 
       // DT-3: eventType format request:<method>:<route>
-      const eventType = `request:${method}:${url.split('?')[0]}`;
+      const eventType = buildEventType(method, url.split('?')[0] ?? url);
 
       // CD-2: fire-and-forget with .catch() — never block or propagate
       eventService
@@ -76,6 +125,12 @@ export function registerEventTracking(fastify: FastifyInstance): void {
             // without paymentOrigin do NOT add a key with value undefined.
             ...(request.paymentOrigin
               ? { payment_origin: request.paymentOrigin }
+              : {}),
+            // WKH-191x: motivo público de los legs que NO se pagaron. Mismo patrón
+            // spread-condicional que `payment_origin`: las filas de rutas que no
+            // corren pipeline NO ganan una clave con `undefined`.
+            ...(request.downstreamSkips
+              ? { downstreamSkips: request.downstreamSkips }
               : {}),
           },
         })

@@ -12,8 +12,12 @@ import type { DownstreamLogger } from '../types/index.js';
 import {
   createSkipCapturingLogger,
   type DownstreamSkipCode,
+  describePublicSkipCode,
+  isPublicSkipCode,
   noteSkip,
+  PUBLIC_SKIP_CODES,
   type PublicDownstreamSkipCode,
+  parseSkippedMarker,
   toPublicSkipCode,
 } from './downstream-skip-code.js';
 
@@ -190,5 +194,60 @@ describe('createSkipCapturingLogger', () => {
     // Un logger sin sink no debe explotar (el fallback de compose.ts es así).
     const plain = spyLogger();
     expect(() => noteSkip(plain, 'FLAG_OFF')).not.toThrow();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// WKH-191x · vocabulario público en runtime (lo consume /dashboard/trace)
+// ════════════════════════════════════════════════════════════════════
+describe('WKH-191x: vocabulario público runtime', () => {
+  it('T-PUB-1: PUBLIC_SKIP_CODES es exactamente el vocabulario público', () => {
+    expect([...PUBLIC_SKIP_CODES].sort()).toEqual(
+      [...PUBLIC_VOCABULARY].sort(),
+    );
+  });
+
+  it('T-PUB-2: todo código público tiene una explicación de una línea', () => {
+    for (const code of PUBLIC_SKIP_CODES) {
+      const meaning = describePublicSkipCode(code);
+      expect(meaning.length).toBeGreaterThan(10);
+      // Sin em dashes (preferencia de estilo del founder).
+      expect(meaning).not.toContain('—');
+    }
+  });
+
+  it('T-PUB-3 (AC-6): un código INTERNO no pasa el guard público', () => {
+    // Estos cuatro son internos: revelan flags, allow-list de mainnet o el
+    // estado de la hot wallet del operador. La pantalla NO los debe mostrar.
+    for (const internal of [
+      'FLAG_OFF',
+      'MAINNET_NOT_ALLOWED',
+      'INSUFFICIENT_BALANCE',
+      'SIGNING_FAILED',
+    ]) {
+      expect(isPublicSkipCode(internal)).toBe(false);
+      expect(describePublicSkipCode(internal)).toBe('');
+    }
+  });
+
+  it('T-PUB-4: el guard rechaza basura y propiedades heredadas del prototipo', () => {
+    expect(isPublicSkipCode(undefined)).toBe(false);
+    expect(isPublicSkipCode(42)).toBe(false);
+    expect(isPublicSkipCode('')).toBe(false);
+    expect(isPublicSkipCode('toString')).toBe(false);
+    expect(isPublicSkipCode('constructor')).toBe(false);
+  });
+
+  it('T-PUB-5: parseSkippedMarker lee el marcador que escribe compose.ts', () => {
+    expect(parseSkippedMarker('skipped:SETTLE_FAILED')).toBe('SETTLE_FAILED');
+    expect(parseSkippedMarker('skipped:NOT_CONFIGURED')).toBe('NOT_CONFIGURED');
+  });
+
+  it('T-PUB-6: parseSkippedMarker NO acepta un código interno ni otro formato', () => {
+    expect(parseSkippedMarker('skipped:INSUFFICIENT_BALANCE')).toBeNull();
+    expect(parseSkippedMarker('SETTLE_FAILED')).toBeNull();
+    expect(parseSkippedMarker('skipped:')).toBeNull();
+    expect(parseSkippedMarker(null)).toBeNull();
+    expect(parseSkippedMarker({ code: 'SETTLE_FAILED' })).toBeNull();
   });
 });

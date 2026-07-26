@@ -15,6 +15,7 @@ import {
   extractRawKey,
   requirePaymentOrA2AKey,
 } from '../middleware/a2a-key.js';
+import { noteDownstreamSkips } from '../middleware/event-tracking.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';
 import { createTimeoutHandler } from '../middleware/timeout.js';
@@ -794,6 +795,10 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       const kiteTxHash = request.paymentTxHash;
+      // WKH-191x: retiene los skip-codes PÚBLICOS del pipeline para que el evento
+      // los persista (`a2a_events.metadata.downstreamSkips`). Aditivo puro: NO lee
+      // ni cambia nada del money-path, sólo copia lo que ya viaja en el response.
+      noteDownstreamSkips(request, result.steps);
       return reply.send({ kiteTxHash, ...result });
     },
   );

@@ -10,6 +10,7 @@ import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import { createBackpressureHandler } from '../middleware/backpressure.js';
+import { noteDownstreamSkips } from '../middleware/event-tracking.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';
 import { createTimeoutHandler } from '../middleware/timeout.js';
@@ -138,6 +139,10 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         if (result.remainingBudgetUsd !== undefined) {
           reply.header('x-a2a-remaining-budget', result.remainingBudgetUsd);
         }
+        // WKH-191x: retiene los skip-codes PÚBLICOS del pipeline para que el evento
+        // los persista (`a2a_events.metadata.downstreamSkips`). Aditivo puro: NO lee
+        // ni cambia nada del money-path, sólo copia lo que ya viaja en el response.
+        noteDownstreamSkips(request, result.pipeline.steps);
         return reply.status(status).send({ kiteTxHash, ...result });
       } catch (err) {
         const message =
@@ -447,6 +452,8 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         if (result.remainingBudgetUsd !== undefined) {
           reply.header('x-a2a-remaining-budget', result.remainingBudgetUsd);
         }
+        // WKH-191x: ver el comentario del handler atómico (aditivo, telemetría).
+        noteDownstreamSkips(request, result.pipeline.steps);
         return reply.status(status).send({ kiteTxHash, ...result });
       } catch (err) {
         const message =
