@@ -495,19 +495,24 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
   });
 });
 
-// ── Gated devnet integration (no network in CI — CD-6) ───────────────────
-const E2E = process.env.SOLANA_DEVNET_E2E === '1';
-describe.runIf(E2E)('SolanaPaymentAdapter — devnet e2e (gated)', () => {
-  it('settles a real SPL transfer on devnet', async () => {
-    const actual =
-      await vi.importActual<typeof import('./payment.js')>('./payment.js');
-    const adapter = new actual.SolanaPaymentAdapter();
-    const res = await adapter.settle({
-      payTo: process.env.SOLANA_E2E_PAYTO as string,
-      amountAtomic: process.env.SOLANA_E2E_AMOUNT_ATOMIC ?? '1',
-      intentId: `e2e:${Date.now()}`,
-    });
-    expect(res.success).toBe(true);
-    expect(typeof res.txHash).toBe('string');
-  });
-});
+// ── El ex-"devnet e2e" se ELIMINÓ de este archivo (P1, hallazgo 6) ────────
+//
+// Había acá un `describe.runIf(SOLANA_DEVNET_E2E === '1')` llamado "settles a
+// real SPL transfer on devnet" que NO probaba nada, y no podía probar nada
+// VIVIENDO EN ESTE ARCHIVO: `vi.importActual('./payment.js')` desmockea el
+// módulo pedido pero NO sus dependencias, así que el "settle real" resolvía
+// contra el `./chain.js` mockeado de la línea 31 y el
+// `sendAndConfirmTransaction` mockeado de la línea 64.
+//
+// Demostrado antes de borrarlo: con `SOLANA_DEVNET_E2E=1` y un
+// `SOLANA_E2E_PAYTO` cualquiera, PASABA en 270 ms sin red, sin
+// `SOLANA_OPERATOR_PRIVATE_KEY` y sin fondos, asertando `success: true` sobre
+// `FAKE_SIG` — es decir, sobre su propio mock.
+//
+// Reemplazado por un split honesto:
+//  · `settle-wiring.test.ts`      — OFFLINE y siempre activo en CI. Construye la
+//    transferencia con el `@solana/spl-token` REAL y asertea monto/dirección/
+//    firmante sobre los bytes de la instrucción.
+//  · `devnet-e2e.manual.test.ts`  — la parte que SÍ necesita red, sin mocks,
+//    opt-in por env y con runbook. Falla ruidosamente si le faltan las envs, en
+//    vez de pasar en vacío.

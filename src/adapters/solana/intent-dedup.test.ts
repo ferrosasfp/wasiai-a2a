@@ -561,6 +561,87 @@ describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
     expect(fakeConnection.getParsedTransaction).not.toHaveBeenCalled();
   });
 
+  // ── El `delete` del self-heal, en sus DOS direcciones (P1 hallazgo 2) ──
+  //
+  // El `_intentSignatures.delete(req.intentId)` de `payment.ts:448` estaba
+  // LINE-COVERED por T-HEAL-1/T-HEAL-2 pero NO protegido: borrando esa línea
+  // entera la suite completa seguía verde (3364 passed). Motivo: en los dos
+  // tests el re-broadcast SÍ tiene éxito, y el `rememberIntentSignature` del
+  // camino feliz hace `.set()` — que SOBREESCRIBE la entrada vieja igual. O sea
+  // que la assertion `getSettledSignature === SIG_A` pasa con y sin el `delete`.
+  //
+  // Los dos tests de abajo aíslan las dos direcciones en las que ese `delete`
+  // cuesta plata, y las dos son mutación-positivas (ver work-item).
+
+  it('T-P1-2a: firma previa que NO verifica + re-broadcast que FALLA → la firma huérfana NO queda en el seam', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    // La firma previa NO está confirmada on-chain → el settle entra al self-heal.
+    fakeConnection.getParsedTransaction.mockResolvedValue(null);
+    _seedIntentSignature('run-1:0', SIG_B, 1_000);
+    // ...y el re-broadcast fresco falla ANTES de firmar (sin firma derivable ⇒
+    // `recoverConfirmedSettle` devuelve undefined y se propaga el error real).
+    mockSendAndConfirm.mockRejectedValue(new Error('blockhash not found'));
+
+    await expect(
+      adapter.settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'run-1:0',
+      }),
+    ).rejects.toThrow(/blockhash not found/);
+
+    // ⚠️ ESTE es el invariante que el `delete` compra, y el único camino donde se
+    // puede observar: como el re-broadcast falló, NADIE llamó a
+    // `rememberIntentSignature`, así que si el `delete` no ocurrió la entrada
+    // VIEJA (SIG_B, no confirmada on-chain) sobrevive.
+    //
+    // Por qué cuesta plata: `downstream-payment.ts:322` lee justo este seam
+    // (`getSettledSignature`) y con `priorSignature !== undefined` marca el leg
+    // como `isIdempotentReplay`, lo que convierte el pre-check de balance de GATE
+    // en SONDA (`:368`) — un balance insuficiente deja de cortar. O sea: una firma
+    // que la cadena NO reconoce quedaría desactivando el gate
+    // `INSUFFICIENT_BALANCE` de todos los retries siguientes de ese leg.
+    expect(adapter.getSettledSignature('run-1:0')).toBeUndefined();
+    expect(_intentDedupSize()).toBe(0);
+  });
+
+  it('T-P1-2b: firma previa que SÍ verifica → la entrada SOBREVIVE (N retries, CERO broadcasts)', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    // Transferencia confirmada on-chain por el monto exacto del leg.
+    fakeConnection.getParsedTransaction.mockResolvedValue({
+      meta: {
+        err: null,
+        preTokenBalances: [
+          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '0' } },
+        ],
+        postTokenBalances: [
+          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '1000000' } },
+        ],
+      },
+    });
+    _seedIntentSignature('run-1:0', SIG_B, 1_000);
+
+    // TRES retries seguidos del mismo intent. El 3er es el que importa: si el
+    // `delete` se volviera incondicional (o se moviera antes del `if
+    // (verified.valid)`), el 1er retry devolvería la firma previa PERO dejaría el
+    // seam vacío, y el SIGUIENTE retry re-broadcastearía = DOBLE PAGO de un leg
+    // ya pagado on-chain.
+    for (let i = 0; i < 3; i++) {
+      const res = await adapter.settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'run-1:0',
+      });
+      expect(res).toEqual({ txHash: SIG_B, success: true });
+      // La entrada sigue viva DESPUÉS de cada hit idempotente.
+      expect(adapter.getSettledSignature('run-1:0')).toBe(SIG_B);
+      expect(_intentDedupSize()).toBe(1);
+    }
+
+    // Nunca se movió plata nueva.
+    expect(mockSendAndConfirm).not.toHaveBeenCalled();
+  });
+
   // ── Sin timers colgados ───────────────────────────────────────────────
 
   it('T-NOTIMER: el barrido es lazy — no se registra ningún setInterval', async () => {

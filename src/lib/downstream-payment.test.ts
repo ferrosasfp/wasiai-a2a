@@ -1176,6 +1176,82 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
       expect.any(String),
     );
   });
+
+  // ── SETTLE_FAILED del leg Solana (P1 hallazgo 3) ───────────────────────
+  //
+  // Los DOS guards de `downstream-payment.ts:403-416` (el `catch` del settle y el
+  // `!settleRes.success`) estaban SIN NINGÚN test: se verificó mutando los dos a
+  // la vez (rethrow + seguir de largo cobrando) y la suite completa quedó verde
+  // (3364 passed). El leg Solana tenía cubierto el corte por fondos y por payTo
+  // inválido, pero NO el corte por settle fallido, que es justo el que decide si
+  // un leg que no pagó igual se cobra.
+  //
+  // Invariante de los dos: `null` (⇒ el caller NO cobra el leg y /compose lo
+  // reporta como salteado) + señal `SETTLE_FAILED` en el log, y NUNCA una
+  // excepción que escape (el contrato de `signAndSettleDownstream` es fail-soft).
+
+  it('T-P1-3a: adapter.settle LANZA → null + SETTLE_FAILED, sin excepción que escape', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaSettledSig.mockReturnValue(undefined);
+    mockSolanaBalance.mockResolvedValueOnce('1000000'); // fondos de sobra
+    mockSolanaSettle.mockRejectedValueOnce(
+      new Error('blockhash not found / RPC down'),
+    );
+    const logger = makeLogger();
+
+    // Fail-SOFT: el leg se corta, no explota el run entero.
+    const result = await signAndSettleDownstream(solanaAgent(), logger);
+
+    // `null` es lo que hace que el caller NO cobre este leg.
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'SETTLE_FAILED',
+        detail: expect.stringContaining('blockhash not found'),
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('T-P1-3b: adapter.settle devuelve success=false → null + SETTLE_FAILED (no se cobra un leg no pagado)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaSettledSig.mockReturnValue(undefined);
+    mockSolanaBalance.mockResolvedValueOnce('1000000');
+    mockSolanaSettle.mockResolvedValueOnce({
+      success: false,
+      error: 'tx rejected by the cluster',
+    });
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(solanaAgent(), logger);
+
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'SETTLE_FAILED',
+        error: 'tx rejected by the cluster',
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('T-P1-3c: settle "exitoso" SIN txHash → null + SETTLE_FAILED (un recibo sin firma no es un pago)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaSettledSig.mockReturnValue(undefined);
+    mockSolanaBalance.mockResolvedValueOnce('1000000');
+    // `success: true` pero sin firma: no hay nada que anotar como
+    // `settle_signature` en el ledger, así que NO puede contar como pagado.
+    mockSolanaSettle.mockResolvedValueOnce({ success: true });
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(solanaAgent(), logger);
+
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'SETTLE_FAILED' }),
+      expect.any(String),
+    );
+  });
 });
 
 // ─── Fix-pack AR-profundo FIX 1(b): gate fail-closed de MAINNET ───────────
@@ -1711,6 +1787,44 @@ describe('captura del skip-code (fix-pack P1, hallazgo 4)', () => {
 
     expect(await signAndSettleDownstream(makeAgent(), cap)).toBeNull();
     expect(cap.lastSkipCode()).toBe('SETTLE_FAILED');
+  });
+
+  // P1 hallazgo 3: T-P1-4i cubre la captura sobre la rama EVM (fuji). La rama
+  // SOLANA tiene su propio par de `return null` con `SETTLE_FAILED`
+  // (`downstream-payment.ts:403-416`, dentro de `settleSolanaLeg`) y NINGÚN test
+  // ataba su señal al contrato público — o sea que el rail Solana podía dejar de
+  // reportar el motivo del leg no pagado sin romper nada.
+  it('T-P1-3d: SETTLE_FAILED del rail SOLANA → capturado y expuesto VERBATIM en el contrato público', async () => {
+    const {
+      signAndSettleDownstream,
+      createSkipCapturingLogger,
+      toPublicSkipCode,
+    } = await importWithFlag(true);
+    mockSolanaSettledSig.mockReturnValue(undefined);
+    mockSolanaBalance.mockResolvedValueOnce('1000000');
+    mockSolanaSettle.mockResolvedValueOnce({
+      success: false,
+      error: 'cluster rejected',
+    });
+    const cap = createSkipCapturingLogger(makeLogger());
+
+    const result = await signAndSettleDownstream(
+      makeAgent({
+        priceUsdc: 0.5,
+        payment: {
+          method: 'x402',
+          asset: 'USDC',
+          chain: 'solana-devnet',
+          contract: SOL_PAYTO,
+        },
+      }),
+      cap,
+    );
+
+    expect(result).toBeNull(); // no se cobra
+    expect(cap.lastSkipCode()).toBe('SETTLE_FAILED');
+    // Resultado TERMINAL de pago ⇒ el caller lo ve tal cual (no se genericiza).
+    expect(toPublicSkipCode('SETTLE_FAILED')).toBe('SETTLE_FAILED');
   });
 
   it('T-P1-4j: VERIFY_FAILED → capturado (se genericiza a SETTLE_FAILED)', async () => {
