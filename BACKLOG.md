@@ -1,289 +1,295 @@
-# BACKLOG — WasiAI A2A Protocol
+# BACKLOG — WasiAI (fuente de verdad de lo abierto)
 
-> **Última actualización**: 2026-04-27 — Hackathon Kite cerrado. Ver `doc/sdd/_INDEX.md` para HUs DONE en detalle.
+Jira se perdió (tenant suspendido, sin recuperación). Este archivo lo reemplaza.
 
-## Épicas — Estado post-hackathon
+**Reemplaza a la versión anterior** (fechada 2026-04-27, época del hackathon de Kite, con
+épicas E1-E17 todas cerradas salvo deuda técnica cosmética). Esa versión no se perdió: sigue
+en el historial de git de este mismo archivo (`git log -- BACKLOG.md`). Esta reescritura completa
+es correcta porque casi todo lo que listaba ya está cerrado y el documento había quedado obsoleto
+por más de tres meses.
 
-### E1: Core Infrastructure ✅ DONE
-- [x] HU-001: Setup Fastify + health endpoint
-- [x] HU-002: PostgreSQL + migrations setup (Supabase)
-- [x] HU-003: Redis + BullMQ setup (no aplica — replaced by Supabase realtime)
+**Regla del archivo**: acá solo vive lo ABIERTO. Nada de filas "Done"/"cerrado". Si algo no está
+listado, está cerrado y su historia completa (work-item, SDD, auto-blindaje, done-report) vive
+versionada en `doc/sdd/NNN-titulo/` del repo correspondiente. No se reconstruyen tickets cerrados.
 
-### E2: Registry Management ✅ DONE
-- [x] HU-010: POST /registries
-- [x] HU-011: GET /registries
-- [x] HU-012: DELETE /registries/:id
-- [x] HU-013: WasiAI pre-registrado por defecto
-- [x] HU-014 (NEW): Block update/delete del canonical (PR #36, security hot-fix)
-- [ ] HU-015 (TODO): Multi-tenant ownership en registries — ver SEC-REG-1 (WKH-63)
+**Regla de mantenimiento** (repetida al final): esto se actualiza **en el mismo commit** que
+cierra la HU que lo toca. Cerrar algo = borrar su fila de acá, no marcarla "Done".
 
-### E3: Discovery ✅ DONE
-- [x] HU-020: POST /discover básica
-- [x] HU-021: Discovery con filtros
-- [x] HU-022: Ranking/scoring (WKH-15-W4)
-- [x] HU-023 (NEW): Defensive fallback price_per_call (WKH-57, PR #33)
+**Autoridad de esta pasada**: git (`.git/logs/HEAD` y merges reales), no memoria de sesión ni
+`_INDEX.md`. Un intento anterior de reescribir este archivo confundió notas de memoria de días
+atrás con el estado presente y afirmó cosas falsas (que un gate de seguridad "es saltable" y que
+fix-packs de money-path seguían "sin mergear" cuando en realidad ya estaban mergeados). Esta
+versión verifica contra el reflog real de `wasiai-a2a` (confirmado: HEAD = `0c361e5`, con el merge
+`eb24a31` — el fix-pack del gate de mainnet — en su ancestría directa) y contra el código en disco
+donde fue posible. Los repos `chaski-v3`, `wasiai-facilitator`, `wasiai-remittance-agents` y
+`solana-programs` **sí están en esta máquina** (en `/home/ferdev/.openclaw/workspace/`), pero el
+agente que armó esta pasada no tenía acceso a shell, así que no pudo inspeccionarlos ni consultar
+endpoints. Lo que quedó marcado como no verificado por esa razón fue **completado después** por el
+orquestador con acceso real (ver los ítems que hoy dicen `[verificado 2026-07-27]`).
 
-### E4: Agent Cards (A2A Protocol) ✅ DONE
-- [x] HU-030: GET /agents/:id/agent-card
-- [x] HU-031: Schema validation
-- [x] HU-032: Skills mapping
-
-### E5: Compose (Pipelines) ✅ DONE
-- [x] HU-040: POST /compose básico
-- [x] HU-041: Transform entre agentes (LLM Bridge Pro — WKH-57)
-- [x] HU-042: Error handling y rollback
-- [x] HU-043 (NEW): Google A2A fast-path (WKH-56, PR #28)
-- [x] HU-044 (NEW): payTo fallback metadata.payment.contract (PR #35)
-
-### E6: Orchestrate (Goal-based) ✅ DONE
-- [x] HU-050: POST /orchestrate — goal parsing
-- [x] HU-051: Agent selection logic
-- [x] HU-052: Pipeline generation
-
-### E7: A2A JSON-RPC
-Implementación del protocolo A2A de Google.
-
-- [ ] HU-060: message/send
-- [ ] HU-061: message/stream (SSE)
-- [ ] HU-062: task/get, task/list
-- [ ] HU-063: task/cancel
-- [ ] HU-064: task/subscribe
-
-### E7: A2A JSON-RPC ✅ DONE
-- [x] HU-060..064 (mensaje/send, stream, task/get, list, cancel, subscribe)
-
-### E8: Kite Integration ✅ DONE
-- [x] HU-070: x402 payment flow (WKH-37 v2 + WKH-52 PYUSD)
-- [x] HU-071: Agent Passport verification (WKH-29 gasless)
-- [x] HU-072: 1% protocol fee (WKH-44)
-- [x] HU-073 (NEW): Cross-chain Fuji USDC settle (WKH-55, PR #26)
-
-### E9: Schema Inference ✅ DONE
-- [x] HU-080: Inferir schemas
-- [x] HU-081: Cache (L1 in-memory + L2 Supabase con schema_hash WKH-57)
-- [x] HU-082: Transform caching (LLM Bridge Pro WKH-57)
+**Marcas de confianza usadas en cada ítem**:
+- `[verificado]` — confirmado en esta pasada contra código en disco, el reflog de git
+  (`.git/logs/HEAD`), o un merge real citado por hash.
+- `[verificado, pasada anterior]` — confirmado en una pasada anterior (memoria/founder), no
+  re-chequeado línea por línea en ésta, pero sin señal de que haya cambiado.
+- `[según índice]` — viene del `_INDEX.md` del repo y no se pudo confirmar independientemente.
+- `[necesita revisión]` — señal insuficiente o repo no accesible desde esta máquina; alguien tiene
+  que confirmarlo contra el repo real o un endpoint en vivo.
 
 ---
 
-## Hackathon Kite — CERRADO ✅
-**Fecha cierre**: 2026-04-27 — todos los épicos must-have + nice-to-have entregados.
-- 5/5 cross-chain Fuji USDC settles on-chain (smoke E2E 2026-04-26)
-- 463 → 480 tests passing (12 PRs merged en sprint 2026-04-26..27)
-- WKH-56 + WKH-57 productivos en Railway (`wasiai-a2a-production.up.railway.app`)
+## 🚦 Qué bloquea qué (30 segundos)
+
+```
+[FOUNDER: rotar credencial GET        ──► cierra el único hallazgo de severidad "credencial viva
+ /registries, salió por HTTP en prod]      expuesta en prod" que queda. El endpoint YA está
+                                            arreglado (no vuelve a exponerla); rotarla es aparte.
+
+[✅ HECHO 2026-07-27: las 2 env vars   ──► POST /solana/escrow/release pasó de 404 a 401: la ruta
+ del release del escrow ya están]          quedó registrada. La infraestructura de la remesa
+                                            non-custodial está COMPLETA. Falta ejercitarla: liberar
+                                            fondos del escrow de verdad, que nunca se corrió.
+
+[FOUNDER: promover Chaski v3 a        ──► todo lo que WKH-218/233/235/236 mergearon a chaski-v3
+ producción (hoy sirve v2)]                (Chaski sobre rieles A2A) es real en código pero no lo
+                                            ve ningún usuario hasta este paso.
+
+[FOUNDER: decidir el caller x402 en   ──► desbloquea el fix de /registries y /tasks cobrando sin
+ /registries y /tasks]                     reembolsar: un caller x402 pagó ON-CHAIN, y eso no es
+                                            reembolsable acreditando saldo interno sin más contexto.
+
+[Ingeniería: idempotency key en el    ──► transversal (gasless, compose, orchestrate). Sin esto,
+ outbox de refunds]                        un refund que SÍ se aplicó puede re-aplicarse si la RPC
+                                            commitea pero la respuesta se pierde.
+```
+
+**Logro para tener en cuenta como contexto** (no es un ítem abierto, es la base sobre la que se
+apoya buena parte de lo de arriba): el rail multichain funciona end-to-end en producción.
+`POST /discover` devuelve agentes que declaran `payment.chain: solana-devnet`, y **el gateway les
+paga de verdad**: WKH-235/236 (`remit-corridor-fx-solana`, `remit-cashout-payout-solana`) están
+registrados, descubribles, y su fee se liquida on-chain de verdad (settle verificado). Sus filas en
+el `_INDEX.md` de `wasiai-remittance-agents` dicen "in progress (F1)" — están desactualizadas,
+esto ya se cobró `[verificado por indicación explícita de esta pasada; repo no clonado acá]`.
 
 ---
 
-## Post-Hackathon
+## 🔴 Bloqueado por el founder
 
-### E10: Multi-Rail Payment Adapters
-Extender WasiAI-a2a como gateway neutral multi-rail (no sólo Kite x402).
+### Bloqueando algo concreto ahora mismo
 
-- [ ] HU-090: Adapter `tempo-mpp` — integrar Machine Payments Protocol (Stripe + Paradigm, mainnet live 2026-03-18)
-  - Co-existe con `kite-ozone` bajo `src/adapters/`
-  - MPP revive HTTP 402 para pagos machine-to-machine (open-source spec)
-  - Validadores anchor: Visa, Stripe, Zodia Custody
-  - Gas en stablecoins USD, finalidad ~0.6s, EVM-friendly
-  - Docs: https://docs.tempo.xyz, https://stripe.com/blog/machine-payments-protocol
-  - **Valor**: posiciona a WasiAI como "A2A gateway neutral" (Kite + Tempo + futuros), no wrapper de un solo rail
-- [ ] HU-091: Selector de rail por policy (cost, latency, geography)
-- [ ] HU-092: Unificar chain de pago (hoy a2a orquesta en Kite pero agentes wasiai-v2 cobran USDC en Avalanche — deuda de negocio)
+1. **Rotar la credencial que salió por `GET /registries`** `[verificado]`. El endpoint devolvía
+   `registries[].auth.value` en claro (prefijo `wasi_a2a_…`) sin auth. **El bug de código ya está
+   cerrado**: `src/routes/registries.ts` solo puede devolver el tipo `RegistryPublic` (sin
+   `auth.value`) y hay un test dedicado (`registries.redaction.test.ts`) que recorre todos los GET
+   del plugin y falla si algún response contiene el secreto — confirmado leyendo el archivo en esta
+   pasada. **Pero la credencial que ya salió por HTTP en prod sigue viva** hasta que alguien la
+   rote; el fix de código no la desexpone hacia atrás.
+2. **2 variables de entorno del release del escrow, en el Railway del `facilitator`**:
+   `SOLANA_ESCROW_RELEASE_ENABLED` y la clave de la autoridad que firma el release. Sin ellas,
+   `POST /solana/escrow/release` daba **404** porque la ruta no se registraba. Era el paso que cerraba la
+   remesa non-custodial de punta a punta en Solana. Al momento de escribir esto el founder estaba
+   deployándolas — **verificar con `curl -X POST` si ya da 401 (ruta registrada, falta auth) en vez
+   de 404 (ruta ausente)** antes de asumir que sigue bloqueado `[RESUELTO 2026-07-27: el founder puso las dos vars, Railway redeployó y la ruta ahora responde 401 (registrada, pide auth) en vez de 404. Verificado con POST real. Health del facilitator: degraded=false, las 5 redes en rpc=ok, y las 3 rutas Solana (sponsor, escrow/release, settle) todas en 401]`.
+3. **Promover Chaski v3 a producción.** Hoy Vercel sirve `chaski-v2`; v2 y v3 comparten el mismo
+   proyecto Vercel `[verificado, pasada anterior]`. Sin este paso, todo lo que WKH-218 (Chaski sobre
+   rieles A2A, mergeado y verificado en vivo contra un gateway mockeado) mergeó a `chaski-v3` no es
+   lo que ve un usuario real.
+4. **Confirmar si el plan de Vercel protege producción**, para darle URL fija a la pantalla de
+   seguimiento `/dashboard/trace` (hoy vive en `wasiai-a2a`, Railway, no Vercel — pero el mismo tipo
+   de decisión de "URL pública fija vs preview protegido" aplica al resto de la superficie de
+   founder-facing tooling) `[según índice / pasada anterior]`.
+5. **Accesos de sandbox de partners** (Didit AML, TransFi) **y el frente legal/UIF** — sin esto,
+   KYC/AML y el off-ramp a fiat real no pueden ir más allá de sandbox/mock.
+6. **Decidir qué se hace con el caller x402 en `/registries` y `/tasks`** cuando esos endpoints
+   cobran y fallan (ver ítem de ingeniería abajo): un caller x402 pagó **on-chain**, y eso no es
+   reembolsable acreditando saldo interno sin una decisión de producto sobre cómo hacerlo.
 
-### E11: Technical Debt (saved from hackathon)
-- [ ] HU-100: `AGENT_BLOCKLIST` env var → tabla DB con razón + expiración
-- [ ] HU-101: Compose registry case-sensitivity fix
-- [ ] HU-102: Documentar reproducción E2E en README
+### Decisiones de founder de pasadas anteriores, no re-verificadas en ésta
 
-### E12: WKH-55 Technical Debt ✅ MOSTLY DONE (post-sprint 2026-04-27, PR #34)
+No hay evidencia de que hayan cambiado, pero tampoco se re-confirmaron esta vez (repos no clonados
+en esta máquina). Tratarlas como abiertas hasta reconfirmar contra el repo real.
 
-**TD-WKH-55-LIGHT** — 6 de 7 items cerrados en PR #34 (chore/td-wkh-55-cleanup):
-- [x] TD-WKH-55-1: race condition JSDoc note ✓
-- [x] TD-WKH-55-2: comments ES → EN ✓
-- [x] TD-WKH-55-3: `_warnedDefaultUsdc` underscore removed ✓
-- [x] TD-WKH-55-4: `DownstreamLogger` consolidado en `types/index.ts` ✓
-- [x] TD-WKH-55-5: test names descriptivos ✓
-- [x] TD-WKH-55-6: NO-OP (no había `toMatchObject` en el archivo) ✓
-- [x] TD-WKH-55-7: streaming JSON note ✓
-
-Detalle preservado abajo para histórico.
-
-- [x] **TD-WKH-55-1**: Race condition balance/settle (AR-MNR-2)
-  - **Descripción**: Dos invokes paralelos del mismo agente pueden ambos pasar el pre-flight balance check pero solo 1 settle con éxito.
-  - **Archivo**: `src/lib/downstream-payment.ts:343-370` (readOperatorBalance)
-  - **Solución V2**: Investigar optimistic locking en Fuji nonce (si `wasiai-facilitator` soporta idempotency key)
-  - **Estimación**: L
-  - **Prioridad**: BAJA (concurrencia baja esperada)
-
-- [ ] **TD-WKH-55-2**: Comments ES/EN consistency (CR-MNR-1)
-  - **Descripción**: Comentarios mezclados español/inglés, algunos sin tildes (ej: "inyeccion" → "inyección")
-  - **Archivos**: `src/lib/downstream-payment.ts` (múltiples líneas)
-  - **Solución**: Unificar a inglés (idioma codebase)
-  - **Estimación**: S
-  - **Prioridad**: BAJA
-
-- [ ] **TD-WKH-55-3**: Underscore prefix pattern (CR-MNR-2)
-  - **Descripción**: `_warnedDefaultUsdc` usa underscore (patrón Python, no idiomatic en TS)
-  - **Archivo**: `src/lib/downstream-payment.ts:38`
-  - **Solución**: Renombrar a `warnedDefaultUsdc` (sin underscore)
-  - **Estimación**: XS
-  - **Prioridad**: BAJA
-
-- [ ] **TD-WKH-55-4**: DownstreamLogger consolidation (CR-MNR-3)
-  - **Descripción**: `DownstreamLogger` interface definida en 3 sitios (types + constant + usage)
-  - **Archivos**: `src/types/index.ts`, `src/lib/downstream-payment.ts`
-  - **Solución**: Exportar ÚNICO desde `types/index.ts`, importar en downstream-payment
-  - **Estimación**: S
-  - **Prioridad**: BAJA
-
-- [ ] **TD-WKH-55-5**: Test naming clarity (CR-MNR-6)
-  - **Descripción**: Tests T-W2-01..14 numeración mecánica, poco descriptivos
-  - **Archivo**: `src/lib/downstream-payment.test.ts`
-  - **Solución**: Renombrar a descriptivos (T-FlagOff, T-PreflightBalance, T-InsufficientBalance, etc.)
-  - **Estimación**: M
-  - **Prioridad**: BAJA
-
-- [ ] **TD-WKH-55-6**: toMatchObject → exact matchers (AR-MNR-3)
-  - **Descripción**: Mock response shape usa `toMatchObject` (permisivo, puede tener campos extra). Mejorar precisión.
-  - **Archivo**: `src/lib/downstream-payment.test.ts` (tests `/verify` + `/settle` response)
-  - **Solución**: Cambiar a exact shape matchers (ej: `expect(res).toEqual({...})`)
-  - **Estimación**: S
-  - **Prioridad**: BAJA
-
-- [ ] **TD-WKH-55-7**: Streaming JSON optimization (CR-MNR-5)
-  - **Descripción**: Body x402 serializa 2 veces (JSON.stringify + parse interno facilitator). Perf despreciable (< 1ms).
-  - **Archivo**: `src/lib/downstream-payment.ts:220` (postFacilitator)
-  - **Solución**: Stream JSON OPCIONAL (backpressure handling si facilitator rate-limits)
-  - **Estimación**: M
-  - **Prioridad**: BAJA (optimización cosmética)
+7. **WKH-233** (Chaski consume KYC vía agente A2A en vez de Didit directo): decisión Opción A
+   (companion ticket con 2 endpoints nuevos en `wasiai-remittance-agents`, espejando el Didit v3
+   hosted-redirect que Chaski ya usa) vs Opción B (swap directo al `/invoke` actual, que reabriría
+   el IDOR de PII que WKH-179 cerró) `[según índice, no reverificado]`.
+8. **WKH-237b**: ¿existe un `IdentityRegistry` ERC-8004 canónico en Avalanche, o lo deployamos
+   nosotros? Hoy el bind on-chain real sigue hardcodeado a Base `[según índice, no reverificado]`.
+9. **WKH-238**: registro Solana de identidad/reputación — Solana Agent Registry (8004-solana,
+   recomendado) vs SATI `[según índice, no reverificado]`.
+10. **Ratificar que el operador del gateway firma el settle del fee en Solana** (custodial de ese
+    lado, espejo del modelo EVM ya en producción) `[según índice, no reverificado]`.
+11. **Provisionar la Agent Key de Chaski en el gateway** para correr el e2e real de WKH-218 contra
+    el gateway de producción (hoy solo probado contra un gateway mockeado) `[según índice, no
+    reverificado]`.
 
 ---
 
-## E13: Security Hardening ✅ DONE (cerrado 2026-04-27..2026-06-20)
+## ✅ Contexto: lo que se cerró en las últimas 24-48h (para que nadie lo vuelva a listar como abierto)
 
-Identificados en security audit comprehensive del sprint 2026-04-27. Todos los items BLQ-ALTO y BLQ-MED fueron resueltos en HUs dedicadas (SDD-058..062, SDD-116..119).
+Verificado contra `.git/logs/HEAD` de `wasiai-a2a` en esta pasada — HEAD actual = `0c361e5`.
 
-### BLQ-ALTO (alta prioridad)
-- [x] **WKH-59 (SEC-DRAIN-1)** → **DONE** (SDD-061, feat/061-wkh-59-sec-drain-1): `/gasless/transfer` permite drain del operator wallet con $1 budget — re-estimar `estimatedCostUsd` por value real, aplicar `max_spend_per_call_usd` cap. Estimación: M.
-- [x] **WKH-60 (SEC-RCE-1)** → **DONE** (SDD-062, feat/062-wkh-60-sec-rce-1): L2 transform cache poisoning + `new Function()` = RCE multi-tenant — reemplazar `new Function` por `node:vm` sandbox + HMAC sobre transform_fn + `owner_ref` en cache key. Estimación: L (HU dedicada).
-- [x] **WKH-SEC-02 (BLQ-ALTO-3)** → **DONE** (SDD-116/118/119, feat/116-wkh-sec-02-rls + SEC-02b + SEC-02c): Mitigation completa de RPC schema hijacking — agregar `p_owner_ref` validation dentro de `increment_a2a_key_spend` y `register_a2a_key_deposit`. Mitigation parcial (`SET search_path` + `REVOKE anon`) en PR #36. Estimación: S.
-
-### BLQ-MED
-- [x] **WKH-61 (SEC-SCOPE-1)** → **DONE** (SDD-059, feat/059-wkh-61-sec-scope-1): `requirePaymentOrA2AKey` llama `checkScoping(target={})` — feature scoping completamente broken. Mover check al servicio post-resolución del agent. Estimación: M.
-- [x] **WKH-62 (SEC-SSRF-1)** → **DONE** (SDD-058, feat/058-wkh-62-sec-ssrf-1): `/discover` sin SSRF protection — aplicar `validateGatewayUrl` en `discoveryService.queryRegistry`. Estimación: S.
-- [x] **WKH-63 (SEC-REG-1)** → **DONE** (SDD-060, feat/060-wkh-63-sec-reg-1): registries CRUD sin ownership — agregar columna `registries.owner_ref` + filtros. Mitigation parcial (block update/delete `wasiai`) en PR #36. Estimación: M.
-- [x] **BLQ-MED-5** → **DONE** (resuelto como parte de WKH-53 ownership guards + WKH-SEC-02b) — viola convención CLAUDE.md, falta defensa en profundidad. Estimación: XS.
-
-### BLQ-BAJO + MNR — backlog ordinario (ver sprint report)
-
-### Tickets relacionados
-- **WKH-58 (WAS-V2-3-CLIENT-3)**: facilitator HTTP 500 en `/v2/settle` — bloqueante upstream para cerrar `/compose` E2E. Estimación: depende del facilitator.
-
----
-
-## E14: Hardening Refinements — POST-AUDIT 2026-05-29
-
-Items escalados como MENORES durante WKH-AUDIT-A2A (remediación auditoría profesional, status A− → A+).
-
-- [x] **WKH-AUDIT-MINOR-001**: Centralizar `isProduction` en `src/lib/env.ts` → **RESUELTO por WKH-098**
-  - **Descripción**: `process.env.NODE_ENV === 'production'` aparece en múltiples ubicaciones (dashboard.ts, index.ts). Crear constante exportada para reducir duplicación y mejorar testability.
-  - **Archivos**: `src/routes/dashboard.ts`, `src/index.ts`, (crear) `src/lib/env.ts` ✓
-  - **Estimación**: S
-  - **Prioridad**: BAJA (cosmética, refactor)
-  - **Cierre**: feat/098-a2a-cleanup-aplus commit 75626ac
-
-- [x] **WKH-AUDIT-MINOR-002**: Normalizar `NODE_ENV` check pattern → **RESUELTO por WKH-098**
-  - **Descripción**: Código mezcla `NODE_ENV === 'production'` (afirmación) con `NODE_ENV !== 'production'` (negación). Estandarizar a un patrón y documentar en project-context + CLAUDE.md.
-  - **Archivos**: CLAUDE.md, `.nexus/project-context.md`, todos archivos que verifiquen NODE_ENV ✓
-  - **Estimación**: S
-  - **Prioridad**: BAJA (documentación)
-  - **Cierre**: `isProduction()` centralizado en `src/lib/env.ts` con normalización `.trim().toLowerCase()` (AC-4)
-
-- [x] **WKH-CLEANUP-LINT-001**: Resolver 42 lint pre-existentes en `src/adapters/` + test files → **RESUELTO por WKH-098**
-  - **Descripción**: Biome reporta 42 errores en archivos excluidos de Scope IN (test fixtures, adapters). No introducidos por WKH-AUDIT-A2A; deuda técnica pre-existente.
-  - **Archivos**: `src/adapters/__tests__/`, `src/middleware/*.test.ts`, otros ✓
-  - **Estimación**: M (bajo riesgo, cambios mecánicos)
-  - **Prioridad**: BAJA (limpieza cosmética)
-  - **Cierre**: biome check --write + noConsole directives (AC-2, feat/098-a2a-cleanup-aplus commits df79ac8 + dc41ead)
+- **Gate de mainnet por destino real**: `isMainnetChainKey` clasificaba por el string del slug, no
+  por la chain real del bundle; `KITE_NETWORK=mainnet` lo esquivaba. **Cerrado**, branch
+  `fix/ar-profundo-p0-money-path`, merge `eb24a31` (confirmado como ancestro directo de HEAD en el
+  reflog). Reemplazado por un gate fail-closed real (`WASIAI_DOWNSTREAM_MAINNET_ALLOW`, allowlist
+  explícita) — confirmado leyendo `scripts/activate-mainnet-downstream.sh` y
+  `doc/operations/mainnet-activation-runbook.md` en esta pasada: el script viejo seteaba
+  `WASIAI_DOWNSTREAM_NETWORK`, una variable que ningún archivo de `src/` leía (control muerto desde
+  WKH-112); el script actual lo dice explícitamente en un comentario y usa el gate real.
+- **Credencial de `/registries` en claro**: cerrado (ver founder #1 arriba — el código está
+  arreglado, la rotación sigue pendiente).
+- **`/compose` cobraba un 400 de validación sin ejecutar nada**: cerrado, mismo merge `eb24a31` +
+  fix-pack `a35212e`.
+- **5 hallazgos P1**: doble `limit` de `/discover` (escondía agentes), `minReputation` aceptado y
+  ignorado, artefacto de float en el monto atómico del challenge 402, falta de señal del skip en la
+  respuesta de `/compose`, `_intentSignatures` (dedup Solana) sin cap ni TTL. **Cerrados**, merge
+  `6373dd8`.
+- **5 guards del money-path sin test bajo mutación + el e2e de devnet vacuo**: cerrados, merge
+  `54f1f9a` (el mensaje del merge dice explícitamente "el e2e de devnet dejaba de mentir").
+- **`/gasless/transfer` cobraba el transfer que no llegaba a hacer**: cerrado, merge `0c361e5`
+  (HEAD actual).
+- **Pantalla `/dashboard/trace`**: viva en `wasiai-a2a` (no en un repo aparte), merge `b81c2e6`.
+  Confirmado leyendo `src/routes/dashboard.ts` y `src/services/trace.ts` en esta pasada: read-only,
+  gate fail-closed (`requireAdminTokenForTrace`), cross-tenant por diseño y documentado como tal.
+- **`chaski-v3`**: WKH-218 (Chaski corre sobre los rieles A2A) mergeado y **verificado en vivo**
+  contra un gateway mockeado; el cliente A2A ya puede elegir la red de cobro. `[según el log de
+  merges de esta pasada; repo no clonado acá para inspección propia]`.
+- **`wasiai-facilitator`**: el `/health` que reportaba `degraded:true` permanente por sondear Solana
+  con un método de EVM está arreglado y deployado (verificado en vivo en una pasada anterior: pasó
+  a `degraded:false`) `[verificado, pasada anterior; repo no clonado acá]`.
+- **WKH-235/236** (agentes Solana-native, fee real): ver sección de arriba.
 
 ---
 
-## E15: Pitch-prep findings — POST-HACKATHON 2026-06-14
+## 🧩 Ítems de ingeniería abiertos
 
-Detectados al auditar el material del pitch (deck + flashcards) contra el código, antes del pitch Kite del 16-jun. Capturados para revisar DESPUÉS del 16. Tocan capa de pago/identidad → ruta QUALITY.
+### wasiai-a2a
 
-- [x] **WKH-118 (FEE-COMPOSE)**: Cobrar el protocol fee 1% también en `/compose` → **DONE** (SDD-115, feat/115-wkh-118-fee-compose, commit 78d91b9)
-  - **Descripción**: Hoy `chargeProtocolFee` (1%, `src/services/fee-charge.ts`, default 0.01, gated por env `WASIAI_PROTOCOL_FEE_WALLET`) se invoca SOLO en `src/services/orchestrate.ts`. `/compose` NO cobra fee. El demo usa `/compose`, así que no genera revenue, y el deck quedó honesto en "1% por orquestación". Decisión de producto (2026-06-14, Fernando): cobrar 1% en ambos modos.
-  - **Archivos**: `src/services/compose.ts` (replicar el patrón de `orchestrate.ts:~244-280`), `src/services/fee-charge.ts` (reusar `chargeProtocolFee`/`getProtocolFeeRate`), tests.
-  - **Riesgo**: toca la ruta de pago del demo (débito extra). Requiere re-test E2E del demo de AgentShop antes de prod.
-  - **Estimación**: M · **Prioridad**: MEDIA · **Ruta**: QUALITY (financiero)
-  - **Al cerrar**: revertir el deck a "1% por cada /compose u /orchestrate".
+- **`/registries` (3 handlers: POST/PATCH/DELETE, usan `requirePaymentOrA2AKey`) y `/tasks` (5
+  endpoints, TODOS —incluidos los GET— exigen `requirePaymentOrA2AKey`) cobran y nunca reembolsan
+  en caso de error** `[verificado — confirmado leyendo `src/routes/registries.ts` y
+  `src/routes/tasks.ts` en esta pasada]`. Bloqueado por decisión de founder (bloque founder #6):
+  uno de sus modos de error le pega a un caller x402 que ya pagó **on-chain**, y eso no es
+  reembolsable acreditando saldo interno sin más contexto de producto.
+- **El outbox de refunds puede re-aplicar un credit que ya se aplicó**, si la RPC commitea pero la
+  respuesta al caller se pierde (partición de red). Transversal: gasless, compose y orchestrate.
+  `src/services/refund-outbox.ts` documenta un invariante anti-doble-refund basado en "filas
+  afectadas" (A2), pero ese invariante no cubre el caso de respuesta perdida tras un commit real —
+  necesita migración con idempotency key.
+- **Requests salientes sin techo de duración real**: el timeout de `undici`/`fetch` (usado en
+  `src/lib/downstream-payment.ts` y en el resto de las llamadas a agentes downstream) es de
+  inactividad (`bodyTimeout`), no de duración total, y nadie lo configura explícitamente. Un agente
+  que gotea datos lento puede clavar un socket. Es disponibilidad, no plata. Relacionado: hay un PR
+  de dependabot (`dependabot/npm_and_yarn/undici-8.5.0`, branch confirmado en `.git/refs/`) con un
+  bump mayor de esta misma librería, sin integrar.
+- **Test de dedup de Solana inestable (~5%)** en el borde de la ventana temporal protegida
+  `[según pasada anterior, no re-ejecutado en ésta]`.
+- **Falta el write-path de `payment` en `POST /agents` y `PATCH /agents/:slug`** `[verificado,
+  pasada anterior — confirmado en el done-report de WKH-241]`. Hoy `metadata.payment` solo se puede
+  seedear a mano en la base — así se registraron los 2 agentes Solana-native. El AR de WKH-241 dejó
+  anotado que, al implementarlo, necesita allowlist de chains del operador + verificación de
+  ownership del `payTo`, o nace con un BLQ-ALTO (cualquiera podría registrar
+  `base-mainnet`/`kite-mainnet` y settlear dinero real).
+- **`WKH-235a` (idempotencia durable del settle Solana)** quedó re-scopeada y diferida a propósito:
+  el dedup real (`a2a_receipts.settle_intent_id` + `x-idempotency-key` + migración SQL) no se hizo
+  porque hoy no existe ningún mecanismo que reintente un settle Solana con el mismo `intentId`.
+  Reactivar antes de mainnet / dinero real, o en cuanto exista un reintentador de settles.
+- **11 branches stale sin auditar** + PRs de dependabot sin integrar (ver ítem de undici arriba)
+  `[según pasada anterior]`.
 
-- [ ] **WKH-119 (PASSPORT-AUTH)**: Identidad Passport-nativa end-to-end
-  - **Descripción**: Hoy el Kite Agent Passport es solo *binding* (`src/services/identity.ts:bindPassport`, gated por `PASSPORT_BINDING_ENABLED=false`); NO autentica el request. La auth real corre sobre la agent-key propia + identidad ERC-8004. Activar la autenticación Passport-nativa (firma/verify) cuando Kite nos liste en su discovery (el `payment_target_forbidden` se desbloquea con el listing).
-  - **Archivos**: `src/services/identity.ts`, `src/routes/auth.ts`, middleware de auth.
-  - **Dependencia externa**: listing de Kite (no lo controlamos).
-  - **Estimación**: L · **Prioridad**: MEDIA (desbloquea el claim "el Passport firma la identidad")
+### wasiai-facilitator (`main = 75099ef`, verificado 2026-07-27)
 
-- [ ] **WKH-120 (XCHAIN-WALLETS)**: Cross-chain con destinatarios distintos (no self-transfer)
-  - **Descripción**: Las 3 tx cross-chain del demo (Kite/Avalanche/Base, slide Built-on-Kite del deck) son self-transfers: `from == to == operator (0xf432baf…)`. Un jurado que clickee ve una wallet pagándose a sí misma. Regenerar con wallets de agente destino distintas (como ya hacen las 3 tx de AgentShop en Kite: `to=0x94dcdb…`).
-  - **Archivos**: scripts de generación de tx demo / config de wallets de agente por red.
-  - **Estimación**: S · **Prioridad**: BAJA (cosmético de evidencia; hoy mitigado con la frase "wallets de demo")
+- **`/health` no distingue "adapter registrado" de "ruta apagada por flag"**: reporta salud por red,
+  nunca por ruta o flag. Es justo el estado del release del escrow hoy (founder #2): si las 2 env
+  vars faltan, no hay ninguna señal de salud que lo diga, solo el 404 al invocar.
+- **WKH-148** — error explícito `OPERATOR_FUNDING_LOW` en `/settle` (ver zombis abajo, parado desde
+  el 7 de julio).
 
-> **Nota de negocio (NO es HU de código)**: cerrar un **partner de compliance/MTL regulado** para producción con dinero real (referenciado en flashcards P44/P52). Es legal/business, no ingeniería.
+### Pantalla `/dashboard/trace` (wasiai-a2a)
 
----
-
-## E16: Agent Key robustness ✅ DONE (cerrado 2026-06-19..2026-06-21)
-
-Research en `doc/agent-key-vs-passport.md`. Todos los items WKH-121..125 entregados y mergeados. RLS Postgres-level (WKH-SEC-02/02b/02c) + escrow no-custodial (WKH-126a/b/c) también cerrados en este sprint.
-
-- [x] **WKH-121 (KEY-SESSIONS)** → **DONE** (SDD-110, feat/110-wkh-121-key-sessions): Jerarquía de claves + session keys (user → agent → session)
-  - **Gap**: hoy la Agent Key es un bearer `key_hash` único de larga vida (`src/types/a2a-key.ts`). El Passport usa 3 capas con **sesiones time-boxed** ("una sesión, una firma"), acotando el blast radius si una clave se filtra.
-  - **Scope**: derivar session keys efímeras de la agent key, con TTL + cuotas propias por sesión (budget/daily scope por sesión). Tabla `a2a_key_sessions` + middleware que valide la sesión.
-  - **Archivos**: `src/services/identity.ts`, `src/middleware/a2a-key.ts`, migración DB.
-  - **Estimación**: L · **Prioridad**: ALTA
-
-- [x] **WKH-122 (KEY-REVOKE)** → **DONE** (SDD-111, feat/111-wkh-122-session-revoke): Revocación granular e instantánea
-  - **Gap**: hoy solo `identity.deactivate(keyId)` apaga TODA la key (todo o nada). El Passport revoca una sesión sin tocar la key del agente/usuario.
-  - **Scope**: revocar por sesión/scope; lista de revocación con efecto inmediato en el middleware.
-  - **Archivos**: `src/services/identity.ts`, `src/middleware/a2a-key.ts`. (Depende de WKH-121.)
-  - **Estimación**: M · **Prioridad**: ALTA
-
-- [x] **WKH-123 (KEY-SIGNED-AUTH)** → **DONE** (SDD-112, feat/112-wkh-123-signed-auth): Auth por firma / passkey en vez de bearer secreto
-  - **Gap**: hoy se autentica con un secreto bearer (sha256 lookup). Si se filtra, se usa directo. El Passport aprueba sesiones con passkey/firma.
-  - **Scope**: request firmado (EIP-712 o WebAuthn/passkey) — una key filtrada no es usable sin la firma. Coexiste con el bearer para back-compat.
-  - **Archivos**: `src/middleware/a2a-key.ts`, `src/services/identity.ts`.
-  - **Estimación**: L · **Prioridad**: ALTA
-
-- [x] **WKH-124 (KEY-RECEIPTS)** → **DONE** (SDD-113, feat/113-wkh-124-receipts): Recibos inmutables + proof-chain (PoAI-style)
-  - **Gap**: hay eventos + settlement on-chain, pero no una cadena de prueba **session → agent → user** anclada para resolución de disputas (lo que el Passport llama Proof of AI).
-  - **Scope**: recibo inmutable por pago con el linaje session/agent/user, anclado on-chain o firmado; endpoint de verificación.
-  - **Archivos**: `src/services/event.ts`, `src/services/fee-charge.ts` / settlement, posible attestation on-chain.
-  - **Estimación**: L · **Prioridad**: MEDIA
-
-- [x] **WKH-125 (KEY-CONSTRAINTS)** → **DONE** (SDD-114, feat/114-wkh-125-constraints; fix WKH-125b SDD-120): Constraints programables más ricas (destino + velocidad)
-  - **Gap**: hoy hay `daily_limit` + `max_spend_per_call` + allowlists (qué agentes), pero no **cap por destino/vendor** ni **velocidad/ventana de tiempo** arbitraria. El Passport: "no gastar más de $50 con vendors aprobados".
-  - **Scope**: políticas por destino (cap por agente/vendor) + ventanas de tiempo (no solo daily).
-  - **Archivos**: `src/services/budget.ts`, `src/types/a2a-key.ts`, migración DB.
-  - **Estimación**: M · **Prioridad**: MEDIA
-
-> **Nota**: opcional, menor prioridad — **DID + auth que prueba sin revelar al usuario** (el Passport usa DIDs). Evaluar dentro de WKH-123 si aplica.
+- **Faltan índices para las 2 queries cross-tenant** que arma `traceService.snapshot()` contra
+  `a2a_events` / `a2a_receipts` / `a2a_protocol_fees` (`src/services/trace.ts`). Hoy la tabla es
+  chica y no se nota, pero escala mal: dos seq-scans cada 10s por cada pestaña de operador abierta
+  `[RESUELTO 2026-07-27: el founder puso las dos vars, Railway redeployó y la ruta ahora responde 401 (registrada, pide auth) en vez de 404. Verificado con POST real. Health del facilitator: degraded=false, las 5 redes en rpc=ok, y las 3 rutas Solana (sponsor, escrow/release, settle) todas en 401]`.
 
 ---
 
-## E17: Post-E16 Closures ✅ DONE (2026-06-20..2026-06-22)
+## 🗺️ Milestones del programa (Solana LATAM Labs / WayLearn, cierre 31 de agosto de 2026)
 
-Items cerrados después del sprint E16, en el mismo push hacia el cierre del hackathon.
+**Nota de mapeo**: la fuente del plan describe 6 "Sprints" + una "Extensión" en prosa, sin IDs. Los
+docs de milestone del programa (M1 roadmap / M2 negocio / M3 arquitectura) usan otra numeración más
+chica; el "M5" del código/runbooks (`RUNBOOK-M5.md`) es un hito interno (deposit no-custodial en
+devnet) DENTRO de "Sprint 3", no un M-programa aparte. Mapeo cada Sprint recibido a M1..M6 + M7 en
+el orden dado; no hay fuente que numere formalmente M1-M7 1:1.
 
-- [x] **WKH-SEC-02 (RLS Postgres-level)** → **DONE** — ENABLE ROW LEVEL SECURITY en 7 tablas con owner_ref (SDD-116, feat/116-wkh-sec-02-rls). Spinoffs: SEC-02b owner-ref en RPC `increment_a2a_key_spend` (SDD-119), SEC-02c RLS en `registries` + `kite_schema_transforms` (SDD-118).
-- [x] **WKH-126a (Escrow Solidity)** → **DONE** — `WasiAIEscrow.sol` (Foundry, UUPS): deposit/debit/debitBatch/withdraw + EIP-712. Deployado en Base Sepolia + Avalanche Fuji + Kite testnet (SDD-121, feat/121-wkh-126a-escrow-contract).
-- [x] **WKH-126b (Escrow TS integration)** → **DONE** — escrow-verifier + routing condicional /deposit + ABI EIP-712 + tests (SDD-117, feat/117-wkh-126-escrow-noncustodial).
-- [x] **WKH-126c (Escrow per-chain routing)** → **DONE** — `escrowEnabledForChain` helper + fallback a treasury en cadenas sin contrato (SDD-122, fix/122-wkh-126c-escrow-per-chain-routing).
-- [x] **WKH-118 (FEE-COMPOSE)** → **DONE** — 1% protocol fee también en /compose (SDD-115). Ver E15 arriba.
+| M | Contenido | Estado real |
+|---|---|---|
+| M1 · Fundación | Config multi-VM · orquestador de settlement multichain · escrow Anchor con beneficiario fijo + refund por deadline | **DONE** `[verificado, pasada anterior]`. |
+| M2 · Core Solana seguro | Wallet Standard + firma del depósito no-custodial · verificación de pago (pin mint/monto, dedup) · identidad multi-red base58 | **DONE** `[verificado, pasada anterior]`. |
+| M3 · Money-path trustless + gasless | PoP ed25519 · binding + release verificado + refund trustless · gasless fee-payer · contratos tipados/IDL golden tests · e2e devnet con tx verificable | **CASI COMPLETO, con una pieza aún gateada al founder**. PoP, binding+release+gasless: DONE y deployados. El e2e de devnet **ya no es vacuo** (merge `54f1f9a` en `wasiai-a2a`, confirmado por mensaje de merge explícito) — pero el `POST /solana/escrow/release` real sigue dando 404 hasta las 2 env vars del founder (bloque founder #2). Golden tests/IDL: DONE en facilitator y remit-agents; en `chaski-v3` seguía en F1 según la última nota disponible `[no reverificado, repo no clonado]`. |
+| M4 · Marketplace multichain, agentes Solana-native y tenant | Fees on-chain en Solana · corredor/FX y payout Solana-native publicados · identidad/reputación on-chain · Chaski sobre los rieles · off-ramp fiat con partner licenciado · modelo tenant/white-label | **MUY ADELANTADO en 3 de 5 frentes, 0% en 2**. Fees Solana: **YA se cobran de verdad** (ver contexto arriba) — este frente pasó de "bloqueado" a "hecho" desde la última pasada. Agentes Solana-native: publicados, descubribles, cobrando. Chaski sobre rieles (WKH-218): DONE y mergeado, falta promover v3 a prod (founder #3) para que un usuario real lo vea. ERC-8004 Avalanche: solo allow-set de código, sin `IdentityRegistry` real (founder #8). Solana Agent Registry (WKH-238): no iniciada (founder #9). Off-ramp fiat real: config lista, smoke gateado a sandbox del founder (founder #5). Tenant/white-label: **NET-NEW, 0%** — no existe `tenant_id` en ningún lado; `owner_ref` es guard de mutación (IDOR), no scoping de lectura `[según pasada anterior]`. |
+| M5 · Rieles A2A y reconciliación | Auth + pago x402 con timeout/circuit-breaker · reconciliación on-chain-como-verdad + FX entregado vs cotizado · KYC como agente A2A | **PARCIAL**. x402 con timeout/circuit-breaker: existe hace meses en el core de `wasiai-a2a`, no específico de Solana. Reconciliación + FX: hecho del lado EVM (`chaski-v2`), no confirmado equivalente en Solana. KYC como agente A2A (WKH-233): bloqueada, founder #7. |
+| M6 · Producción, operación, seguridad y legal | Gestión de llaves · RPC dedicado/observabilidad/HA · UX de producción · cumplimiento (Travel Rule, AML, PII) · supply-chain, DB con RLS+backup, gate de production-readiness · frente legal | **MAYORMENTE NO INICIADO**, con excepciones puntuales: RLS hecho para EVM en `wasiai-a2a`, no confirmado para tablas Solana nuevas; observabilidad sólida del lado `wasiai-a2a` con el gap conocido de `/health` del facilitator (arriba); PII/AML parcial en `chaski-v2`, con un fail-open de compliance sin confirmar (Didit `aml.hits`, founder #5); load-testing/production-readiness: sin HU encontrada; legal/UIF: 100% founder, sin arrancar. |
+| M7 · Extensión | On-ramp de agentes de terceros · publicar un agente Langflow descubrible y facturable vía x402 | **NO INICIADO**. `WKH-239` (PoC Langflow) es una acción comprometida por el founder, sin HU formal encontrada en ningún `_INDEX.md` revisado `[según memoria]`. |
 
-**Estado al cierre (2026-06-23)**:
-- Tests: **1628 passing / 0 failing** (vitest run)
-- SDDs totales: 122 (todos DONE — 0 in-progress)
-- Chains live: Kite testnet + Avalanche Fuji + Base Sepolia (E2E verificado on-chain)
-- Escrow no-custodial: deployado en 3 cadenas, feature-gated (`ESCROW_ENABLED=false` por defecto)
+---
 
-*Última actualización: 2026-06-23 (reconciliación tracking: 12 SDDs "in progress" → DONE; E13 + E16 cerrados; WKH-118/SEC-02/escrow WKH-126 DONE; 1628 tests verdes)*
+## 🧟 Zombis a decidir (retomar o archivar)
+
+Sin movimiento desde el **7 de julio de 2026** (3 semanas). No se tratan como trabajo activo.
+
+- **`wasiai-a2a`**:
+  - `WKH-157` — recall de free-text en `/discover` (`fix/159-wkh-157-discover-freetext-filter`).
+  - `WKH-152` — planner LLM sin guard de relevancia (`fix/160-wkh-152-llm-relevance-guard`).
+  - `WKH-158` — retry del planner LLM ante fallo transitorio (`fix/161-wkh-158-greedy-relevance-guard`).
+  - `WKH-159` — falso negativo multilingüe del fallback greedy (`fix/162-wkh-159-greedy-multilingual-guard`).
+  - `WKH-160` — relevancia semántica por embeddings. **Parkeada a propósito**, no olvidada: es
+    **blocking prerequisite explícito de mainnet** según `doc/operations/mainnet-activation-runbook.md`
+    (confirmado en esta pasada — el runbook la lista como bloqueante junto al upgrade UUPS del
+    marketplace). Las otras 4 sí valen una decisión "retomar o cerrar como no-prioridad".
+- **`wasiai-facilitator`**: `WKH-148` — error explícito `OPERATOR_FUNDING_LOW` en `/settle`.
+- **`WKH-23` (Tasks DB, `wasiai-a2a`)**: el `_INDEX.md` tiene dos filas contradictorias (`007`) para
+  el mismo ticket/branch, una "WIP" y otra "DONE". Evidencia indirecta de que está cerrado de
+  verdad: `WKH-54` (owner_ref + RLS sobre `tasks`, confirmado en código de esta pasada vía
+  `src/routes/tasks.ts`) se construyó encima de esa tabla sin reportar bloqueo. Recomendación:
+  tratar como DONE y borrar la fila WIP duplicada del índice.
+
+---
+
+## ⚠️ Contradicciones encontradas entre fuentes
+
+1. **`ground-truth.txt` (log de merges provisto para esta pasada) no incluye el merge `eb24a31`**
+   (fix-pack del gate de mainnet) ni sus commits (`466a70a`, `4c84ae6`, `d81c207d`, `182a2e9d`,
+   `15cd4c5a`), aunque están confirmados como ancestros reales de `HEAD` en `.git/logs/HEAD`
+   (reflog). Lectura más probable: ese snapshot de log fue generado con un filtro que se saltó esta
+   branch específica, no que el merge no haya ocurrido — el reflog es una fuente más autoritativa
+   (no se puede falsificar sin reescribir el repo) y lo confirma sin ambigüedad.
+2. **`WKH-235/236` en el `_INDEX.md` de `wasiai-remittance-agents`** dicen "in progress (F1)"
+   mientras que, según esta pasada, ya están registrados, descubribles y cobrando de verdad en
+   producción. El índice de ese repo no se re-verificó directamente (repo no clonado acá) — la
+   fuente de esta afirmación es la instrucción explícita recibida para esta pasada, no una lectura
+   propia del índice.
+3. **`wasiai-facilitator/_INDEX.md`** (según pasadas anteriores) marca el orquestador multichain, el
+   adapter Solana verify+dedup y el gasless fee-payer como "DONE (HELD — no merge; prod/Railway)",
+   pero notas de sesión previas confirman con captura que el deploy activo en Railway ya corresponde
+   a ese merge en `main`. Tratado en este documento como mergeado y deployado, pendiente solo de
+   activación por env vars — no re-verificado en esta pasada (repo no clonado acá).
+4. **`WKH-23` con dos filas contradictorias** en el mismo índice (ver zombis arriba).
+5. **HU-SOL-9 (`chaski-v3`)** se etiqueta a sí misma como `WKH-208`, pero `WKH-208` en
+   `wasiai-remittance-agents` es un ticket distinto y ya cerrado (reescritura del adapter de payout
+   de TransFi). Posible reuso erróneo de número de Jira. No resuelto; tratar `HU-SOL-9` solo por su
+   nombre de programa hasta aclarar.
+
+---
+
+## 📐 Regla de mantenimiento de este archivo
+
+- Este archivo lista **solo lo abierto**. Nada de "Done"/"cerrado" acá.
+- Se actualiza **en el mismo commit** que cierra la HU que lo toca (borrar la fila, no marcarla).
+- Antes de agregar algo como abierto: verificar contra código/reflog/endpoint en vivo cuando sea
+  posible. Si no se pudo verificar, marcarlo `[según índice]` o `[necesita revisión]` explícitamente
+  — nunca como hecho un dato de memoria de sesión sin re-chequear contra git o código.
+- Si una fuente contradice a otra, se documenta la contradicción arriba en vez de elegir en silencio.
+- La historia de todo lo cerrado sigue viviendo en `doc/sdd/NNN-titulo/` de cada repo — no se
+  duplica acá.
