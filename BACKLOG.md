@@ -326,3 +326,44 @@ nadie puede sacar esos fondos. Direcciones posibles: persistencia redundante del
 usuario un comprobante que lo incluya, o que el programa lo guarde en la cuenta (implica redeploy y
 auditoría). Más una reconciliación que detecte escrows vencidos para no acumular fondos huérfanos en
 silencio.
+
+---
+
+## Hallazgos del 2026-07-27, segunda pasada (limpieza de documentación del escrow)
+
+Se corrigió la documentación que nos hizo perder dos intentos hoy (`solana-programs` commit `7fee02f`,
+`chaski-v3` commit `10874f1`, más una receta nueva y reproducible en
+`chaski-v3/doc/sdd/030-hu-sol-11-e2e-m5/ESCROW-DEVNET-RECIPE.md`). Al barrer los archivos completos
+aparecieron once afirmaciones falsas más. Las que quedan abiertas como trabajo:
+
+**`TRANSFI_BASE_URL` tiene defaults opuestos y el del FX apunta a producción.** `[verificado]`
+Una sola variable gobierna dos providers: `fx.ts:9` default-ea a `api.transfi.com` (**producción**) y
+`payout.ts:16` a `sandbox-api.transfi.com`. Sin esa env seteada, el agente de FX consulta la API real
+del partner mientras el de payout habla con el sandbox: el operador cree estar entero en sandbox y no
+lo está. Consultar sin querer la API productiva de un partner licenciado gasta su cuota, ensucia sus
+métricas y puede disparar sus alertas.
+
+**Dos atestaciones de dominio distinto comparten el mismo secreto.** `[verificado]`
+`SOLANA_ESCROW_RELEASE_ATTESTATION_SECRET` y `DEPOSIT_ATTESTATION_SECRET` se setean con el mismo
+valor, y el propio código pide no compartir secretos entre dominios. Quien pueda generar una
+atestación de un tipo puede generar la del otro, rotar una obliga a rotar la otra, y una filtración
+compromete los dos caminos del dinero. Es config, pero hay que cambiarla en los dos lados a la vez.
+
+**No existe mirror del encoding de la atestación de release en Chaski.** `[verificado]`
+Hoy el release solo se puede armar a mano. Si se automatiza, hay que importar o copiar textualmente
+`encodeAttestationMessage` del facilitator: el prefijo de largo es una decisión de seguridad (evita
+que `("a:b","c")` y `("a","b:c")` colisionen) y una reimplementación "equivalente" puede perderla.
+
+### Corregido en esta pasada (para que no se busque dos veces)
+
+Un pubkey del SPL Token program **inventado** en el runbook (rompía toda verificación de SPL), el
+program id `BBQ9` que **nunca se deployó** publicado como el oficial, el mint de Circle citado como el
+que usa el escrow, los nombres de **11 variables del smoke** de las que solo 3 eran correctas (el
+smoke abortaba antes de la primera request: era el próximo intento perdido), un `/api/health` de
+Chaski que no existe, una lista de nueve checkpoints de los que uno era ficción, los topes del sponsor
+inflados hasta 50 veces el real, y una firma de ejemplo que no era base58 válido.
+
+**Y un dato operativo que conviene saber**: el RPC público de devnet **poda historial**. Las
+transacciones del 22 de julio ya no se pueden consultar por su firma. No significa que sean falsas:
+la evidencia durable es la **cuenta** (el PDA y su estado), no la firma. Cualquier verificación futura
+debería mirar cuentas, no signatures.
