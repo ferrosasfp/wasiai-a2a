@@ -172,6 +172,16 @@ describe('refundStep0Debit (HU-193)', () => {
     });
   });
 
+  it('T-SR-11: si además el outbox lanza, tampoco propaga (best-effort de punta a punta)', async () => {
+    creditMock.mockRejectedValueOnce(new Error('PGRST down'));
+    enqueueRefundMock.mockRejectedValueOnce(new Error('outbox down'));
+    // Un fallo del rastro de auditoría NUNCA puede romper la respuesta al caller.
+    await expect(
+      refundStep0Debit(makeRequest(), 'test:both-down'),
+    ).resolves.toBeUndefined();
+    expect(log.error).toHaveBeenCalled();
+  });
+
   it('T-SR-10: si el credit lanza, no propaga y encola para el sweep', async () => {
     creditMock.mockRejectedValueOnce(new Error('PGRST down'));
     await expect(
