@@ -26,6 +26,7 @@ import type {
   X402PaymentRequest,
   X402Response,
 } from '../types/index.js';
+import { markChargesCaller } from './charge-brand.js';
 
 /**
  * Header used to mark a request as Passport-funded.
@@ -678,5 +679,10 @@ export function requirePayment(
     request.paymentVerified = true;
     if (!reply.sent) reply.header('payment-response', settleResult.txHash);
   };
+  // HU-193: este handler settlea el cobro x402 inbound (y el gas del settle lo
+  // paga NUESTRA wallet de operador). Marcarlo hace que el guard estructural
+  // de `routes/charged-routes.meta.test.ts` también cubra una ruta futura que
+  // llame `requirePayment` directo, sin pasar por `requirePaymentOrA2AKey`.
+  markChargesCaller(handler);
   return [handler];
 }

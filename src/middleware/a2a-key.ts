@@ -19,7 +19,7 @@ import {
 } from '../adapters/registry.js';
 import type { ChainKey } from '../adapters/types.js';
 import { getLogger } from '../lib/logger.js';
-import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
+import { resolveStep0DebitUsd } from '../lib/step0-debit.js';
 import { budgetService } from '../services/budget.js';
 import {
   delegationService,
@@ -53,6 +53,7 @@ import type {
   SignedAuthErrorCode,
   SignedAuthHeaders,
 } from '../types/index.js';
+import { markChargesCaller } from './charge-brand.js';
 import {
   type PaymentMiddlewareOptions,
   requirePayment,
@@ -508,12 +509,28 @@ function buildInsufficientBudgetMessage(args: {
 // caller look un-keyed to compose (a2aKey=undefined), wrongly triggering the
 // operator-signed EIP-3009 branch (C2 operator-wallet drain).
 export function extractRawKey(request: FastifyRequest): string | undefined {
-  const headerKey = request.headers['x-a2a-key'];
+  return extractRawKeyFromHeaders(request.headers);
+}
+
+/**
+ * HU-193: MISMA lógica que `extractRawKey`, sobre los headers sueltos.
+ *
+ * Aditivo (`extractRawKey` delega acá, comportamiento byte-idéntico): las
+ * validaciones pre-cobro (`middleware/charged-route.ts`) reciben un
+ * `PreChargeInput` y NO el `FastifyRequest` completo — justamente para que no
+ * puedan leer estado de auth ni hacer I/O. Necesitan poder responder "¿el caller
+ * presentó una credencial a2a?" con exactamente el mismo criterio que usa el
+ * middleware después, o el guard pre-cobro y el guard real podrían divergir.
+ */
+export function extractRawKeyFromHeaders(
+  headers: FastifyRequest['headers'],
+): string | undefined {
+  const headerKey = headers['x-a2a-key'];
   if (headerKey && typeof headerKey === 'string') {
     return headerKey;
   }
   // Check Authorization: Bearer wasi_a2a_* (DT-1/DT-3: case-insensitive scheme, case-sensitive prefix)
-  const authHeader = request.headers.authorization;
+  const authHeader = headers.authorization;
   if (authHeader && typeof authHeader === 'string') {
     const match = /^bearer\s+(.+)$/i.exec(authHeader);
     if (match?.[1]?.startsWith('wasi_a2a_')) {
@@ -531,13 +548,13 @@ export function extractRawKey(request: FastifyRequest): string | undefined {
 // CD-7: el middleware NO lee request.body — solo campos augmentados.
 // CD-9: composeEstimatedCostUsd y gaslessEstimatedCostUsd son distintos.
 // DT-F: orden compose-first (rutas mutuamente excluyentes, sin colisión real).
-function resolveEstimatedCostUsd(request: FastifyRequest): number {
-  return typeof request.composeEstimatedCostUsd === 'number'
-    ? request.composeEstimatedCostUsd
-    : typeof request.gaslessEstimatedCostUsd === 'number'
-      ? request.gaslessEstimatedCostUsd
-      : PLACEHOLDER_FEE_USD;
-}
+//
+// HU-193: la expresión se movió VERBATIM a `lib/step0-debit.ts` y este módulo la
+// importa. Motivo: el credit-back del residuo (`lib/step0-refund.ts`) tiene que
+// acreditar EXACTAMENTE lo que este middleware debitó; con dos expresiones
+// separadas, una divergencia futura reembolsaría de más (inflar el budget es peor
+// que el bug). Ahora es imposible por construcción.
+const resolveEstimatedCostUsd = resolveStep0DebitUsd;
 
 /**
  * BLQ-MED-1 (AR HIGH-2, 2026-07-26): callback de "débito huérfano".
@@ -1608,6 +1625,12 @@ export function requirePaymentOrA2AKey(
       onDebitOrphaned,
     );
   };
+
+  // HU-193: marca estructural "este handler cobra" (débito prepago y/o settle
+  // x402 inbound). La lee `routes/charged-routes.meta.test.ts` recorriendo las
+  // rutas registradas para exigir una validación de forma ANTES en la cadena.
+  // No cambia el comportamiento del handler.
+  markChargesCaller(handler);
 
   return [handler];
 }

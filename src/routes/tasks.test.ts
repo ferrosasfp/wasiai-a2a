@@ -18,8 +18,10 @@ import tasksRoutes from './tasks.js';
 
 // ── Mock auth middleware (WKH-54) — pass-through that populates a2aKeyRow
 vi.mock('../middleware/a2a-key.js', () => ({
-  requirePaymentOrA2AKey:
-    () =>
+  // HU-193: `chargedRoute` hace `...requirePaymentOrA2AKey(...)`, así que el
+  // mock devuelve un ARRAY (antes devolvía el handler suelto; Fastify aceptaba
+  // ambos, pero el spread no).
+  requirePaymentOrA2AKey: () => [
     async (
       request: import('fastify').FastifyRequest,
       _reply: import('fastify').FastifyReply,
@@ -29,6 +31,11 @@ vi.mock('../middleware/a2a-key.js', () => ({
         owner_ref: 'test-owner-ref',
       };
     },
+  ],
+  // HU-193: el check pre-cobro `requireA2AKeyPresence` lo usa para decidir si el
+  // caller presentó credencial. Este archivo prueba el CRUD con caller
+  // autenticado, así que siempre hay credencial.
+  extractRawKeyFromHeaders: () => 'wasi_a2a_fake',
 }));
 
 // ── Mock taskService ─────────────────────────────────────────

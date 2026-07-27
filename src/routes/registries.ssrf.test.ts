@@ -60,6 +60,10 @@ vi.mock('../middleware/a2a-key.js', () => ({
       request.a2aKeyRow = { id: 'fake-key-id', owner_ref: 'tenant-ssrf' };
     },
   ],
+  // HU-193: `chargedRoute` → `requireA2AKeyPresence` lo usa para el guard
+  // pre-cobro. Acá el caller SIEMPRE está autenticado (este archivo prueba el
+  // guard SSRF, no la auth), así que devuelve una credencial presente.
+  extractRawKeyFromHeaders: () => 'wasi_a2a_fake',
 }));
 
 import { registryService } from '../services/registry.js';
