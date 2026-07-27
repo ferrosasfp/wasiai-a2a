@@ -45,10 +45,13 @@ orquestador con acceso real (ver los ítems que hoy dicen `[verificado 2026-07-2
  /registries, salió por HTTP en prod]      expuesta en prod" que queda. El endpoint YA está
                                             arreglado (no vuelve a exponerla); rotarla es aparte.
 
-[✅ HECHO 2026-07-27: las 2 env vars   ──► POST /solana/escrow/release pasó de 404 a 401: la ruta
- del release del escrow ya están]          quedó registrada. La infraestructura de la remesa
-                                            non-custodial está COMPLETA. Falta ejercitarla: liberar
-                                            fondos del escrow de verdad, que nunca se corrió.
+[✅ HECHO 2026-07-27: el escrow queda  ──► sus DOS salidas ejercitadas contra devnet. El RELEASE ya
+ validado en sus dos salidas]               se había corrido el 22-jul (los docs decían que no: la
+                                            cadena dice `Released`). El REFUND se probó hoy, con su
+                                            guard en las dos direcciones: rechazado antes del
+                                            deadline, exitoso después, fondos de vuelta al remitente.
+                                            Falta el circuito completo DESDE Chaski (app → gasless →
+                                            release por endpoint).
 
 [FOUNDER: promover Chaski v3 a        ──► todo lo que WKH-218/233/235/236 mergearon a chaski-v3
  producción (hoy sirve v2)]                (Chaski sobre rieles A2A) es real en código pero no lo
@@ -201,7 +204,7 @@ Verificado contra `.git/logs/HEAD` de `wasiai-a2a` en esta pasada — HEAD actua
 ### wasiai-facilitator (`main = 75099ef`, verificado 2026-07-27)
 
 - **`/health` no distingue "adapter registrado" de "ruta apagada por flag"**: reporta salud por red,
-  nunca por ruta o flag. Es justo el estado del release del escrow hoy (founder #2): si las 2 env
+  nunca por ruta o flag. Fue el estado del release del escrow hasta el 2026-07-27 (ya resuelto): si las env
   vars faltan, no hay ninguna señal de salud que lo diga, solo el 404 al invocar.
 - **WKH-148** — error explícito `OPERATOR_FUNDING_LOW` en `/settle` (ver zombis abajo, parado desde
   el 7 de julio).
@@ -293,3 +296,33 @@ Sin movimiento desde el **7 de julio de 2026** (3 semanas). No se tratan como tr
 - Si una fuente contradice a otra, se documenta la contradicción arriba en vez de elegir en silencio.
 - La historia de todo lo cerrado sigue viviendo en `doc/sdd/NNN-titulo/` de cada repo — no se
   duplica acá.
+
+---
+
+## Hallazgos del 2026-07-27 (escrow Solana)
+
+**El escrow quedó validado en sus dos salidas contra devnet.** `[verificado]`
+
+- **Release**: ya se había corrido el **22 de julio**, no estaba sin probar. El escrow
+  `GXY2todK6pJPdT8h1EcRNZgFX7cZXEnDN7L3XSHCHY2J` está en estado `Released` con sus 10 USDC en el
+  beneficiario. Los documentos (RUNBOOK-M5 y notas de sesión) afirmaban que el release estaba
+  diferido. **La cadena es la fuente de verdad, los documentos estaban desactualizados.** Se
+  descubrió decodificando las cuentas del programa con el IDL, no leyendo docs.
+- **Refund**: ejercitado por primera vez el 27 de julio, y probado en **las dos direcciones**:
+  rechazado por el programa **antes** del deadline (el guard protege), exitoso **después**
+  (tx `4GDwrHgsu2kc…`), con los fondos de vuelta al remitente. Las dos mitades importan: el refund es
+  lo que hace el escrow no-custodial (el usuario recupera su plata solo con su firma), y el guard es
+  lo que hace que el depósito signifique algo.
+
+**RIESGO DE DISEÑO abierto: perder el `remittanceId` vuelve los fondos inalcanzables.** `[verificado]`
+
+El `refund` exige el `remittanceId` como argumento, y ese dato **no es recuperable desde la cadena**
+(solo vive su hash truncado en la seed del PDA). Ya hay un caso real: el escrow
+`BmHDdjKL…` tiene 10 USDC de prueba trabados con el deadline vencido, y su `remittanceId` se perdió
+(el RPC no indexa la transacción vieja y la base de Chaski está bloqueada). En producción esto sería
+grave: un usuario cuya remesa falla y cuyo `remittanceId` se perdió **no puede recuperar su dinero**,
+aunque el refund funcione perfecto. Ahí el escrow deja de ser no-custodial en la práctica, porque
+nadie puede sacar esos fondos. Direcciones posibles: persistencia redundante del id, entregarle al
+usuario un comprobante que lo incluya, o que el programa lo guarde en la cuenta (implica redeploy y
+auditoría). Más una reconciliación que detecte escrows vencidos para no acumular fondos huérfanos en
+silencio.
