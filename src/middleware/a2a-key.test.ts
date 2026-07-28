@@ -83,9 +83,13 @@ type MockChainKey =
   | 'avalanche-fuji'
   | 'avalanche-mainnet';
 
+// HU-204: `payment.vmFamily` es OBLIGATORIO en el bundle real (discriminante de
+// la unión EVM/Solana) y ahora lo lee el guard de inbound del middleware x402.
+// Las 3 chains simuladas acá son EVM.
 type MockBundle = {
   chainConfig: { name: string; chainId: number; explorerUrl: string };
   payment: {
+    vmFamily: 'evm';
     supportedTokens: ReadonlyArray<{
       symbol: string;
       address: `0x${string}`;
@@ -102,6 +106,7 @@ const MOCK_BUNDLES: Record<MockChainKey, MockBundle> = {
       explorerUrl: 'https://explorer.test',
     },
     payment: {
+      vmFamily: 'evm',
       supportedTokens: [
         {
           symbol: 'PYUSD',
@@ -118,6 +123,7 @@ const MOCK_BUNDLES: Record<MockChainKey, MockBundle> = {
       explorerUrl: 'https://testnet.snowtrace.io',
     },
     payment: {
+      vmFamily: 'evm',
       supportedTokens: [
         {
           symbol: 'USDC',
@@ -134,6 +140,7 @@ const MOCK_BUNDLES: Record<MockChainKey, MockBundle> = {
       explorerUrl: 'https://snowtrace.io',
     },
     payment: {
+      vmFamily: 'evm',
       supportedTokens: [
         {
           symbol: 'USDC',
@@ -157,44 +164,52 @@ function setMockRegistryState(
   mockDefaultChain = defaultChain;
 }
 
-vi.mock('../adapters/registry.js', () => ({
-  getPaymentAdapter: vi.fn(() => ({
-    name: 'mock',
-    chainId: 2368,
-    supportedTokens: [],
-    getScheme: () => 'exact',
-    getNetwork: () => 'eip155:2368',
-    getToken: () => '0x0000000000000000000000000000000000000000' as const,
-    getMaxTimeoutSeconds: () => 60,
-    getMerchantName: () => 'WasiAI Test',
-    settle: vi.fn(),
-    verify: vi.fn(),
-    quote: vi.fn().mockResolvedValue({
-      amountWei: '1000000',
-      token: { symbol: 'PYUSD', address: '0x0', decimals: 6 },
-      facilitatorUrl: '',
+vi.mock('../adapters/registry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../adapters/registry.js')>();
+  return {
+    // HU-204: la REGLA del guard de inbound sale del módulo real (un stub podría
+    // mentir y dejarlo verde sin existir).
+    acceptsInboundPayment: actual.acceptsInboundPayment,
+    getInboundPaymentChainKeys: vi.fn(() => [...mockInitializedChains]),
+    getPaymentAdapter: vi.fn(() => ({
+      name: 'mock',
+      chainId: 2368,
+      supportedTokens: [],
+      getScheme: () => 'exact',
+      getNetwork: () => 'eip155:2368',
+      getToken: () => '0x0000000000000000000000000000000000000000' as const,
+      getMaxTimeoutSeconds: () => 60,
+      getMerchantName: () => 'WasiAI Test',
+      settle: vi.fn(),
+      verify: vi.fn(),
+      quote: vi.fn().mockResolvedValue({
+        amountWei: '1000000',
+        token: { symbol: 'PYUSD', address: '0x0', decimals: 6 },
+        facilitatorUrl: '',
+      }),
+      sign: vi.fn(),
+    })),
+    getChainConfig: vi.fn(() => ({
+      name: 'eip155:2368',
+      chainId: 2368,
+      explorerUrl: 'https://explorer.test',
+    })),
+    getAttestationAdapter: vi.fn(),
+    getGaslessAdapter: vi.fn(),
+    getIdentityBindingAdapter: vi.fn(),
+    initAdapters: vi.fn(),
+    _resetRegistry: vi.fn(),
+    getAdaptersBundle: vi.fn((chainKey?: MockChainKey) => {
+      const key = chainKey ?? mockDefaultChain;
+      if (!key) return undefined;
+      if (!mockInitializedChains.includes(key)) return undefined;
+      return MOCK_BUNDLES[key];
     }),
-    sign: vi.fn(),
-  })),
-  getChainConfig: vi.fn(() => ({
-    name: 'eip155:2368',
-    chainId: 2368,
-    explorerUrl: 'https://explorer.test',
-  })),
-  getAttestationAdapter: vi.fn(),
-  getGaslessAdapter: vi.fn(),
-  getIdentityBindingAdapter: vi.fn(),
-  initAdapters: vi.fn(),
-  _resetRegistry: vi.fn(),
-  getAdaptersBundle: vi.fn((chainKey?: MockChainKey) => {
-    const key = chainKey ?? mockDefaultChain;
-    if (!key) return undefined;
-    if (!mockInitializedChains.includes(key)) return undefined;
-    return MOCK_BUNDLES[key];
-  }),
-  getInitializedChainKeys: vi.fn(() => [...mockInitializedChains]),
-  getDefaultChainKey: vi.fn(() => mockDefaultChain),
-}));
+    getInitializedChainKeys: vi.fn(() => [...mockInitializedChains]),
+    getDefaultChainKey: vi.fn(() => mockDefaultChain),
+  };
+});
 
 import { getPaymentAdapter } from '../adapters/registry.js';
 import { budgetService } from '../services/budget.js';
