@@ -7,13 +7,31 @@
  * encola una fila acá. Un sweep periódico reclama N pending (claim atómico vía
  * RPC `claim_refund_outbox` con FOR UPDATE SKIP LOCKED) y reintenta el credit.
  *
- * INVARIANTE ANTI-DOBLE-REFUND: SOLO se encola cuando NADA se aplicó. El check
- * de filas afectadas (A2) garantiza que `budgetService.credit/creditWithDest`
- * devuelven `reverted:true` únicamente cuando la reversión fue real (>=1 fila).
- * Por eso reintentar un entry es idempotente: representa un refund que NO ocurrió.
- * - done:  el retry devolvió `reverted:true` (>=1 fila) → refund aplicado, fin.
+ * INVARIANTE ANTI-DOBLE-REFUND (HU-194 — leer completo antes de tocar esto):
+ *
+ * El check de filas afectadas (A2) demuestra que `success:false` ⟹ NADA se
+ * aplicó, así que ese camino se puede reintentar sin riesgo. Pero el camino de
+ * EXCEPCIÓN NO es demostrable: `refund_a2a_key_spend` puede COMMITEAR y perderse
+ * la respuesta (socket reset, timeout post-commit, pod matado). Ahí el `catch`
+ * del call-site encolaba un refund que YA se había aplicado y el sweep lo
+ * acreditaba de nuevo: el caller cobraba DOS VECES. Misma ambigüedad que resolvió
+ * HU-192 para el transfer gasless ("el error puede ser del read, no de la
+ * acción"), que acá quedaba abierta.
+ *
+ * Por eso la idempotencia NO se apoya en "sólo se encola lo que no se aplicó"
+ * (que no se puede garantizar), sino en una clave del refund LÓGICO que viaja
+ * hasta Postgres: `idem_key` (ver `lib/refund-idem.ts`). La RPC registra el
+ * refund aplicado en `a2a_refund_applications` DENTRO de la misma transacción que
+ * mueve el dinero, así que un reintento del mismo refund lógico es un no-op —
+ * incluso si lo disparan dos procesos a la vez (la serialización la da el
+ * PRIMARY KEY, no un guard en TypeScript).
+ * - done:  el retry devolvió `reverted:true` (>=1 fila, o "ya aplicada").
  * - dead:  superó MAX_ATTEMPTS sin revertir → revisión manual, NO seguir.
- * Un refund que SÍ aplicó NUNCA se encola, así que nunca se re-aplica.
+ *
+ * RESIDUO CONOCIDO: las filas encoladas ANTES de la migración
+ * 20260727000000_hu194_refund_idempotency tienen `idem_key` NULL y se procesan
+ * exactamente como antes (sin dedup). No se les puede deducir una clave: nadie
+ * registró el crédito original.
  *
  * Best-effort de punta a punta: `enqueueRefund` y `processRefundOutbox` NUNCA
  * tiran. Si la tabla no existe (migración no aplicada), el enqueue loguea y el
@@ -38,6 +56,14 @@ export interface RefundOutboxEntry {
   destination?: string | null;
   /** Motivo legible (p. ej. 'orchestrate.refund-failed'). Para auditoría. */
   reason: string;
+  /**
+   * HU-194: clave del refund LÓGICO (`lib/refund-idem.ts` → `refundIdemKey`).
+   * REQUERIDA: tiene que ser LA MISMA que se le pasó al `budgetService.credit*`
+   * que falló, o el sweep acreditaría un refund que ya se aplicó. `reason` NO
+   * entra en la clave: el mismo refund lógico se encola con reason distinto según
+   * cómo falló (`refund-failed` / `refund-threw`) y ambos deben dedupearse.
+   */
+  idemKey: string;
 }
 
 interface RefundOutboxRow {
@@ -51,7 +77,12 @@ interface RefundOutboxRow {
   attempts: number;
   status: string;
   last_error: string | null;
+  /** HU-194. NULL sólo en filas encoladas antes de la migración (sin dedup). */
+  idem_key?: string | null;
 }
+
+/** Código PG de unique_violation. */
+const PG_UNIQUE_VIOLATION = '23505';
 
 export const refundOutbox = {
   /**
@@ -67,8 +98,24 @@ export const refundOutbox = {
         owner_ref: entry.ownerRef,
         destination: entry.destination ?? null,
         reason: entry.reason,
+        idem_key: entry.idemKey,
       });
       if (error) {
+        // HU-194: el índice único parcial `uq_refund_outbox_idem_key` ya tenía una
+        // fila para este refund lógico (dos caminos de error del mismo call-site,
+        // o dos procesos encolando lo mismo). NO es un fallo: es la dedup de la
+        // cola haciendo su trabajo. Se loguea a nivel info y se sigue.
+        if (error.code === PG_UNIQUE_VIOLATION) {
+          log.info(
+            {
+              keyId: entry.keyId,
+              idemKey: entry.idemKey,
+              reason: entry.reason,
+            },
+            '[refund-outbox.enqueue-deduped]',
+          );
+          return;
+        }
         log.error(
           {
             keyId: entry.keyId,
@@ -133,6 +180,12 @@ async function processEntry(row: RefundOutboxRow): Promise<void> {
         ? Number.parseFloat(row.amount_usd)
         : row.amount_usd;
 
+    // HU-194: la clave del refund LÓGICO viaja tal cual hasta la RPC. Es lo que
+    // hace que este reintento sea un no-op si el crédito original YA commiteó
+    // (respuesta perdida) y que 3 barridos seguidos acrediten UNA sola vez.
+    // NULL ⟹ fila encolada antes de la migración ⟹ sin dedup, igual que antes.
+    const idem = { idemKey: row.idem_key ?? null };
+
     const creditRes = row.destination
       ? await budgetService.creditWithDest(
           row.key_id,
@@ -140,12 +193,14 @@ async function processEntry(row: RefundOutboxRow): Promise<void> {
           amount,
           row.owner_ref,
           row.destination,
+          idem,
         )
       : await budgetService.credit(
           row.key_id,
           row.chain_id,
           amount,
           row.owner_ref,
+          idem,
         );
 
     const reverted = creditRes.reverted === true && creditRes.success;

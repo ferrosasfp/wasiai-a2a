@@ -74,7 +74,10 @@ describe('refundStep0Debit (HU-193)', () => {
   it('T-SR-01: master key → credita el monto step-0 ($1) con el owner_ref del caller', async () => {
     await refundStep0Debit(makeRequest(), 'test:case');
     // Ownership guard (CLAUDE.md): el 4º arg es el owner_ref del caller.
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    // HU-194: el 5º arg es la clave del refund LÓGICO (dedup DB-level).
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
+      idemKey: expect.any(String),
+    });
     expect(enqueueRefundMock).not.toHaveBeenCalled();
   });
 
@@ -129,6 +132,9 @@ describe('refundStep0Debit (HU-193)', () => {
       'k1',
       2368,
       1,
+      {
+        idemKey: expect.any(String),
+      },
     );
     expect(creditMock).not.toHaveBeenCalled();
   });
@@ -140,7 +146,9 @@ describe('refundStep0Debit (HU-193)', () => {
       }),
       'test:session',
     );
-    expect(creditSessionMock).toHaveBeenCalledWith('s1', 'o1', 'k1', 2368, 1);
+    expect(creditSessionMock).toHaveBeenCalledWith('s1', 'o1', 'k1', 2368, 1, {
+      idemKey: expect.any(String),
+    });
     expect(creditMock).not.toHaveBeenCalled();
   });
 
@@ -155,6 +163,7 @@ describe('refundStep0Debit (HU-193)', () => {
       1,
       'o1',
       '0xdest',
+      { idemKey: expect.any(String) },
     );
     expect(creditMock).not.toHaveBeenCalled();
   });
@@ -169,6 +178,7 @@ describe('refundStep0Debit (HU-193)', () => {
       ownerRef: 'o1',
       destination: null,
       reason: 'test:failed:refund-failed',
+      idemKey: expect.any(String),
     });
   });
 
@@ -190,5 +200,56 @@ describe('refundStep0Debit (HU-193)', () => {
     expect(enqueueRefundMock).toHaveBeenCalledWith(
       expect.objectContaining({ reason: 'test:threw:refund-threw' }),
     );
+  });
+
+  // ── HU-194: la clave de idempotencia ────────────────────────
+  //
+  // El agujero que se cierra: el credit COMMITEA y su respuesta se pierde
+  // (socket reset / timeout post-commit) → el `catch` encola → el sweep
+  // reintenta → el caller cobra DOS VECES. La única forma de que el sweep pueda
+  // dedupear es que la clave que va al credit sea EXACTAMENTE la que va al
+  // outbox. Si divergen, la dedup no protege nada y el bug vuelve en silencio.
+  it('T-SR-12: la clave que se encola es LA MISMA que la del credit que lanzó', async () => {
+    creditMock.mockRejectedValueOnce(new Error('socket hang up'));
+    await refundStep0Debit(makeRequest(), 'test:lost-response');
+
+    const creditIdem = creditMock.mock.calls[0]?.[4] as
+      | { idemKey: string }
+      | undefined;
+    const enqueued = enqueueRefundMock.mock.calls[0]?.[0] as
+      | { idemKey: string }
+      | undefined;
+    expect(creditIdem?.idemKey).toBeTruthy();
+    expect(enqueued?.idemKey).toBe(creditIdem?.idemKey);
+  });
+
+  it('T-SR-13: dos requests distintos → claves DISTINTAS (son dos refunds legítimos)', async () => {
+    creditMock.mockRejectedValue(new Error('socket hang up'));
+    await refundStep0Debit(makeRequest(), 'test:req-a');
+    await refundStep0Debit(makeRequest(), 'test:req-b');
+
+    const a = (enqueueRefundMock.mock.calls[0]?.[0] as { idemKey: string })
+      .idemKey;
+    const b = (enqueueRefundMock.mock.calls[1]?.[0] as { idemKey: string })
+      .idemKey;
+    // Cada request dejó su PROPIO débito: colapsarlos perdería un crédito real.
+    expect(a).not.toBe(b);
+  });
+
+  it('T-SR-14: los dos caminos de fallo del MISMO refund comparten clave', async () => {
+    // `refund-failed` (success:false) y `refund-threw` (excepción) son el MISMO
+    // refund lógico visto de dos maneras. Si el `reason` entrara en la clave,
+    // darían claves distintas y el sweep podría acreditar dos veces.
+    creditMock.mockResolvedValueOnce({ success: false, reverted: false });
+    const reqA = makeRequest();
+    await refundStep0Debit(reqA, 'test:same');
+    const failedKey = (
+      enqueueRefundMock.mock.calls[0]?.[0] as { idemKey: string }
+    ).idemKey;
+
+    // Mismo request no puede refundear dos veces (T-SR-05), así que se compara
+    // contra la clave que el credit recibió: es la que viajaría en el `catch`.
+    const creditIdem = creditMock.mock.calls[0]?.[4] as { idemKey: string };
+    expect(failedKey).toBe(creditIdem.idemKey);
   });
 });

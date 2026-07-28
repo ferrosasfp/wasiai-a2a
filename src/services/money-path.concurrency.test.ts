@@ -90,21 +90,32 @@ const db = vi.hoisted(() => {
     attempts: number;
     status: string;
     last_error: string | null;
+    idem_key: string | null;
   }
 
   const keys = new Map<string, KeyRow>();
   const nonces = new Set<string>(); // UNIQUE(network, nonce)
   const outbox = new Map<string, OutboxRow>();
+  // HU-194: modela `a2a_refund_applications` (PRIMARY KEY idem_key) — el ledger
+  // de refunds YA APLICADOS que se escribe en la MISMA transacción que acredita.
+  const refundApplications = new Map<string, number>();
+  // HU-194: claves cuyo refund debe COMMITEAR y después perder la respuesta
+  // (socket reset / timeout post-commit). Modela el escenario exacto del bug.
+  const loseResponseFor = new Set<string>();
 
   return {
     runExclusive,
     keys,
     nonces,
     outbox,
+    refundApplications,
+    loseResponseFor,
     reset(): void {
       keys.clear();
       nonces.clear();
       outbox.clear();
+      refundApplications.clear();
+      loseResponseFor.clear();
       tail = Promise.resolve();
     },
     seedKey(
@@ -176,6 +187,7 @@ vi.mock('../lib/supabase.js', () => {
     p_chain_id: number;
     p_amount_usd: number;
     p_owner_ref: string;
+    p_idem_key?: string | null;
   }): { data: number | null; error: PgError } {
     const k = db.keys.get(args.p_key_id);
     if (!k) return { data: null, error: { message: 'KEY_NOT_FOUND' } };
@@ -183,10 +195,36 @@ vi.mock('../lib/supabase.js', () => {
       return { data: null, error: { message: 'OWNERSHIP_MISMATCH' } };
     if (args.p_amount_usd == null || args.p_amount_usd <= 0)
       return { data: 0, error: null }; // defensive no-op → 0 rows
+    // HU-194: `refund_idem_claim` — el claim va DESPUÉS de los guards y DENTRO de
+    // la misma sección crítica que el crédito (= misma transacción en el SQL
+    // real). Ya aplicada ⟹ NO se re-acredita y se devuelve 1 ("la plata está de
+    // vuelta"), que es lo que el sweep necesita para marcar `done`.
+    const idemKey = args.p_idem_key;
+    if (idemKey) {
+      const applied = db.refundApplications.get(idemKey);
+      if (applied !== undefined) {
+        if (Math.abs(applied - args.p_amount_usd) > 1e-9) {
+          return {
+            data: null,
+            error: {
+              message: `REFUND_IDEM_AMOUNT_MISMATCH: idem_key ${idemKey}`,
+            },
+          };
+        }
+        return { data: 1, error: null };
+      }
+      db.refundApplications.set(idemKey, args.p_amount_usd);
+    }
     const chainKey = String(args.p_chain_id);
     const bal = Number.parseFloat(k.budget[chainKey] ?? '0');
     k.budget[chainKey] = String(bal + args.p_amount_usd);
     k.daily_spent_usd = Math.max(k.daily_spent_usd - args.p_amount_usd, 0);
+    // HU-194: COMMIT + respuesta perdida. El efecto (crédito + marcador) YA está
+    // en la DB y el cliente ve un fallo: es la ambigüedad que el invariante viejo
+    // ("sólo se encola lo que no se aplicó") no podía resolver.
+    if (idemKey && db.loseResponseFor.has(idemKey)) {
+      throw new Error('socket hang up');
+    }
     return { data: 1, error: null }; // 1 row reverted
   }
 
@@ -254,6 +292,19 @@ vi.mock('../lib/supabase.js', () => {
       return {
         insert: (row: Record<string, unknown>) =>
           db.runExclusive(() => {
+            const idemKey = (row.idem_key as string | null) ?? null;
+            // HU-194: índice único PARCIAL `uq_refund_outbox_idem_key`
+            // (WHERE idem_key IS NOT NULL) → las filas legacy con NULL no
+            // colisionan, las nuevas se dedupean.
+            if (idemKey !== null) {
+              for (const existing of db.outbox.values()) {
+                if (existing.idem_key === idemKey) {
+                  return {
+                    error: { code: '23505', message: 'duplicate key value' },
+                  };
+                }
+              }
+            }
             const id = `ob-${db.outbox.size + 1}`;
             db.outbox.set(id, {
               id,
@@ -266,6 +317,7 @@ vi.mock('../lib/supabase.js', () => {
               attempts: 0,
               status: 'pending',
               last_error: null,
+              idem_key: idemKey,
             });
             return { error: null };
           }),
@@ -579,6 +631,7 @@ describe('R4 refund race — a single pending refund is applied exactly once', (
       attempts: 0,
       status: 'pending',
       last_error: null,
+      idem_key: 'v1:key-1:8453:op-r4:compose-step:0:d1',
     });
 
     await Promise.all([
@@ -591,15 +644,15 @@ describe('R4 refund race — a single pending refund is applied exactly once', (
     expect(db.outbox.get('ob-1')?.status).toBe('done');
   });
 
-  it('documents that the RPC itself is a blind credit — the guard MUST be the single claim', async () => {
-    // Two credits of the SAME logical refund issued twice == a call-site bug;
-    // this asserts the RPC faithfully applies BOTH if asked twice, proving the
-    // anti-double-refund guarantee is the single-claim (prior test), not the RPC.
+  it('documents that WITHOUT an idem key the RPC is a blind credit (residuo legacy)', async () => {
+    // Sin clave (filas encoladas antes de HU-194) la RPC aplica los DOS créditos:
+    // ahí la única defensa sigue siendo el claim único del sweep. Es exactamente
+    // el residuo documentado en `services/refund-outbox.ts`.
     db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '0' } });
 
     const [a, b] = await Promise.all([
-      budgetService.credit(KEY, CHAIN, 1, OWNER),
-      budgetService.credit(KEY, CHAIN, 1, OWNER),
+      budgetService.credit(KEY, CHAIN, 1, OWNER, { idemKey: null }),
+      budgetService.credit(KEY, CHAIN, 1, OWNER, { idemKey: null }),
     ]);
 
     expect(a.success && a.reverted).toBe(true);
@@ -630,7 +683,7 @@ describe('R5 interleaved debit + refund — balance is conserved', () => {
         undefined,
         OWNER,
       ),
-      budgetService.credit(KEY, CHAIN, 1, OWNER),
+      budgetService.credit(KEY, CHAIN, 1, OWNER, { idemKey: null }),
     ]);
 
     const expected = debitRes.success ? 1 : 2;
@@ -660,11 +713,13 @@ describe('R5 interleaved debit + refund — balance is conserved', () => {
           })),
       );
       ops.push(
-        budgetService.credit(KEY, CHAIN, AMOUNT, OWNER).then((r) => ({
-          kind: 'credit' as const,
-          ok: r.success,
-          amount: AMOUNT,
-        })),
+        budgetService
+          .credit(KEY, CHAIN, AMOUNT, OWNER, { idemKey: null })
+          .then((r) => ({
+            kind: 'credit' as const,
+            ok: r.success,
+            amount: AMOUNT,
+          })),
       );
     }
     const results = await Promise.all(ops);
@@ -677,5 +732,152 @@ describe('R5 interleaved debit + refund — balance is conserved', () => {
     // The store's final balance must equal start + the net of all APPLIED ops.
     expect(db.balance(KEY, CHAIN)).toBeCloseTo(START + delta, 10);
     expect(db.balance(KEY, CHAIN)).toBeGreaterThanOrEqual(0); // never negative
+  });
+});
+
+// ════════════════════════════════════════════════════════════
+// R6 (HU-194). COMMIT-THEN-LOST-RESPONSE — el agujero real del outbox.
+//
+// El invariante viejo ("SOLO se encola cuando NADA se aplicó") era demostrable
+// para `success:false` (check de filas de A2) pero NO para la EXCEPCIÓN: la RPC
+// puede COMMITEAR y perderse la respuesta (socket reset, timeout post-commit).
+// Ahí el `catch` del call-site encolaba un refund YA aplicado y el sweep lo
+// acreditaba de nuevo: el caller cobraba DOS VECES.
+//
+// El store modela la pieza que lo cierra: `a2a_refund_applications` escrito en la
+// MISMA sección crítica que el crédito (= misma transacción en el SQL real).
+// ════════════════════════════════════════════════════════════
+describe('R6 (HU-194) refund idempotente — commit + respuesta perdida', () => {
+  const IDEM = 'v1:key-1:8453:op-r6:step0';
+
+  it('T-194-C1 (CENTRAL): el credit commitea, la respuesta se pierde, el sweep reintenta → UN solo crédito', async () => {
+    db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '0' } });
+    db.loseResponseFor.add(IDEM);
+
+    // 1. El call-site pide el refund: la RPC ACREDITA y commitea, y después se
+    //    cae la conexión. El service ve una excepción.
+    await expect(
+      budgetService.credit(KEY, CHAIN, 1, OWNER, { idemKey: IDEM }),
+    ).rejects.toThrow('socket hang up');
+    expect(db.balance(KEY, CHAIN)).toBe(1); // ya está acreditado
+
+    // 2. El `catch` encola con la MISMA clave (no puede saber si commiteó).
+    await refundOutbox.enqueueRefund({
+      keyId: KEY,
+      chainId: CHAIN,
+      amountUsd: 1,
+      ownerRef: OWNER,
+      reason: 'step0.refund-threw',
+      idemKey: IDEM,
+    });
+
+    // 3. El sweep reintenta. Sin la clave, acá el balance quedaba en 2.
+    db.loseResponseFor.clear(); // el reintento sí ve la respuesta
+    await refundOutbox.processRefundOutbox(20);
+
+    expect(db.balance(KEY, CHAIN)).toBe(1);
+    expect([...db.outbox.values()][0]?.status).toBe('done');
+  });
+
+  it('T-194-C2: el sweep reintentando TRES veces acredita una sola vez', async () => {
+    db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '0' } });
+    db.outbox.set('ob-1', {
+      id: 'ob-1',
+      key_id: KEY,
+      chain_id: CHAIN,
+      amount_usd: 1,
+      owner_ref: OWNER,
+      destination: null,
+      reason: 'compose-route.refund-threw',
+      attempts: 0,
+      status: 'pending',
+      last_error: null,
+      idem_key: IDEM,
+    });
+
+    for (let i = 0; i < 3; i++) {
+      // Se fuerza el re-claim (p. ej. el `markDone` se perdió y la fila volvió a
+      // pending): el peor caso para la dedup.
+      const row = db.outbox.get('ob-1');
+      if (row) row.status = 'pending';
+      await refundOutbox.processRefundOutbox(20);
+    }
+
+    expect(db.balance(KEY, CHAIN)).toBe(1);
+    expect(db.outbox.get('ob-1')?.status).toBe('done');
+  });
+
+  it('T-194-C3: DOS refunds legítimos distintos de la MISMA operación NO se colapsan', async () => {
+    // /compose puede necesitar dos créditos reales del MISMO step: el del primer
+    // débito (slot d1) y el del débito del retry adaptativo (slot d2). Mismo
+    // monto, mismo destino, misma ejecución. Si compartieran clave, el segundo
+    // (dinero REAL del caller) se descartaría como duplicado.
+    db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '0' } });
+    const d1 = 'v1:key-1:8453:run-1:compose-step:3:d1';
+    const d2 = 'v1:key-1:8453:run-1:compose-step:3:d2';
+
+    const a = await budgetService.credit(KEY, CHAIN, 1, OWNER, { idemKey: d1 });
+    const b = await budgetService.credit(KEY, CHAIN, 1, OWNER, { idemKey: d2 });
+
+    expect(a.reverted).toBe(true);
+    expect(b.reverted).toBe(true);
+    expect(db.balance(KEY, CHAIN)).toBe(2); // los DOS créditos se aplicaron
+  });
+
+  it('T-194-C4: dos procesos concurrentes con la MISMA clave → un solo crédito', async () => {
+    // Es el caso que un guard en TypeScript no puede cubrir: la serialización la
+    // da el PRIMARY KEY de `a2a_refund_applications`.
+    db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '0' } });
+
+    const [a, b] = await Promise.all([
+      budgetService.credit(KEY, CHAIN, 1, OWNER, { idemKey: IDEM }),
+      budgetService.credit(KEY, CHAIN, 1, OWNER, { idemKey: IDEM }),
+    ]);
+
+    // Ambos reportan "la plata está de vuelta" (contrato `reverted`), pero el
+    // dinero se movió UNA vez.
+    expect(a.reverted).toBe(true);
+    expect(b.reverted).toBe(true);
+    expect(db.balance(KEY, CHAIN)).toBe(1);
+  });
+
+  it('T-194-C5: misma clave con OTRO monto → REFUND_IDEM_AMOUNT_MISMATCH y NO acredita', async () => {
+    db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '0' } });
+    await budgetService.credit(KEY, CHAIN, 1, OWNER, { idemKey: IDEM });
+
+    const res = await budgetService.credit(KEY, CHAIN, 2, OWNER, {
+      idemKey: IDEM,
+    });
+
+    // Reuso indebido de clave (bug), no un reintento: falla CLOSED y visible en
+    // vez de acreditar un monto ambiguo.
+    expect(res).toEqual({
+      success: false,
+      error: 'REFUND_IDEM_AMOUNT_MISMATCH',
+    });
+    expect(db.balance(KEY, CHAIN)).toBe(1);
+  });
+
+  it('T-194-C6: el enqueue del MISMO refund lógico dos veces deja UNA fila pendiente', async () => {
+    db.seedKey({ id: KEY, owner_ref: OWNER, budget: { [CHAIN]: '0' } });
+    const entry = {
+      keyId: KEY,
+      chainId: CHAIN,
+      amountUsd: 1,
+      ownerRef: OWNER,
+      reason: 'gasless-route.refund-failed:x',
+      idemKey: IDEM,
+    };
+    await refundOutbox.enqueueRefund(entry);
+    // Mismo refund lógico, otro camino de error (mismo idemKey, otro reason).
+    await refundOutbox.enqueueRefund({
+      ...entry,
+      reason: 'gasless-route.refund-threw:x',
+    });
+
+    expect(db.outbox.size).toBe(1);
+
+    await refundOutbox.processRefundOutbox(20);
+    expect(db.balance(KEY, CHAIN)).toBe(1);
   });
 });

@@ -5,6 +5,7 @@
  * Includes: orchestrationId, protocolFeeUsdc, event tracking, timeout, fallback.
  */
 
+import { randomUUID } from 'node:crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { splitsActive } from '../config/split-config.js';
 import {
@@ -14,6 +15,7 @@ import {
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
+import { refundIdemKey } from '../lib/refund-idem.js';
 import type {
   Agent,
   ComposeStep,
@@ -1330,6 +1332,25 @@ export const orchestrateService = {
         // total_spent/spent_usd) via creditDelegation/creditSession — a plain
         // master credit() would refund the parent but leave total_spent/spent_usd
         // inflated (the M1 self-DoS). No `destination` (mirror of the step-0 debit).
+        // HU-194: UUID server-side de ESTA ejecución del refund. El bloque corre
+        // a lo sumo una vez por `executeApprovedPlan`, así que identifica el
+        // refund lógico; dos ejecuciones son dos débitos y dos refunds legítimos.
+        const refundRunId = randomUUID();
+        // HU-194: clave del refund LÓGICO del step-0 de esta ejecución.
+        // `operationId` es un UUID server-side por ejecución (`refundRunId`), NO
+        // el `orchestrationId`: ese último llega en el BODY de
+        // `POST /orchestrate/execute` (`routes/orchestrate.ts`,
+        // `OrchestrateExecuteBody`), o sea es caller-controlled — un caller que
+        // repitiera el mismo id haría que su segundo refund (legítimo, de otro
+        // débito) se descartara como duplicado.
+        const idem = {
+          idemKey: refundIdemKey({
+            keyId: request.scopingKeyRow.id,
+            chainId: request.chainId,
+            operationId: refundRunId,
+            slot: 'orchestrate-step0',
+          }),
+        };
         const creditRes = request.delegationContext
           ? await budgetService.creditDelegation(
               request.delegationContext.delegationId,
@@ -1337,6 +1358,7 @@ export const orchestrateService = {
               request.delegationContext.keyId,
               request.chainId,
               refundUsd,
+              idem,
             )
           : request.keySessionContext
             ? await budgetService.creditSession(
@@ -1345,12 +1367,14 @@ export const orchestrateService = {
                 request.keySessionContext.keyId,
                 request.chainId,
                 refundUsd,
+                idem,
               )
             : await budgetService.credit(
                 request.scopingKeyRow.id,
                 request.chainId,
                 refundUsd,
                 request.scopingKeyRow.owner_ref,
+                idem,
               );
         if (!creditRes.success) {
           // AC-8: log estructurado + flag, sin msg crudo de PG (CD-6).
@@ -1382,6 +1406,7 @@ export const orchestrateService = {
               amountUsd: refundUsd,
               ownerRef: request.scopingKeyRow.owner_ref,
               reason: 'orchestrate.refund-failed',
+              idemKey: idem.idemKey,
             });
           }
         }

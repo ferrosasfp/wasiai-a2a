@@ -58,6 +58,7 @@ import {
   estimateGaslessValueUsd,
   getGaslessDefaultCapUsd,
 } from '../lib/price.js';
+import { refundIdemKey, requestRefundIdemBase } from '../lib/refund-idem.js';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import { budgetService } from '../services/budget.js';
 import { refundOutbox } from '../services/refund-outbox.js';
@@ -228,6 +229,19 @@ async function refundGaslessDebit(
     return;
   }
 
+  // HU-194: clave del refund LÓGICO. Un solo refund de gasless por request (cada
+  // camino de fallo hace `return` inmediato) ⟹ un solo slot. La MISMA clave va al
+  // credit y a los DOS enqueue de abajo, así el sweep no puede acreditar de nuevo
+  // un crédito que ya commiteó con la respuesta perdida.
+  const idem = {
+    idemKey: refundIdemKey({
+      keyId: request.a2aKeyRow.id,
+      chainId: refundChainId,
+      operationId: requestRefundIdemBase(request),
+      slot: 'gasless',
+    }),
+  };
+
   try {
     const creditRes = request.delegationContext
       ? await budgetService.creditDelegation(
@@ -236,6 +250,7 @@ async function refundGaslessDebit(
           request.delegationContext.keyId,
           refundChainId,
           debitedUsd,
+          idem,
         )
       : request.keySessionContext
         ? await budgetService.creditSession(
@@ -244,12 +259,14 @@ async function refundGaslessDebit(
             request.keySessionContext.keyId,
             refundChainId,
             debitedUsd,
+            idem,
           )
         : await budgetService.credit(
             request.a2aKeyRow.id,
             refundChainId,
             debitedUsd,
             request.a2aKeyRow.owner_ref,
+            idem,
           );
     if (!creditRes.success) {
       // Sin msg crudo de PG. No cambia el status code.
@@ -271,6 +288,7 @@ async function refundGaslessDebit(
         ownerRef: request.a2aKeyRow.owner_ref,
         destination: null,
         reason: `gasless-route.refund-failed:${reason}`,
+        idemKey: idem.idemKey,
       });
       return;
     }
@@ -297,6 +315,10 @@ async function refundGaslessDebit(
         ownerRef: request.a2aKeyRow.owner_ref,
         destination: null,
         reason: `gasless-route.refund-threw:${reason}`,
+        // HU-194: MISMA clave que el credit que tiró y que el `refund-failed`.
+        // El `catch` no puede saber si la RPC commiteó antes de perderse la
+        // respuesta; la clave hace que eso deje de importar.
+        idemKey: idem.idemKey,
       })
       .catch((outboxErr) =>
         request.log.error(
