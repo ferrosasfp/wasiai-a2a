@@ -696,7 +696,12 @@ describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
 
   // ── HU-196: el reloj del seam ─────────────────────────────────────────
 
-  it('T-CLK-1: el reloj del seam es inyectable y su DEFAULT es el reloj real (lo que corre en producción)', () => {
+  // OJO: `T-CLK-1` candadea la línea del RESTORE (`_intentDedupClock = clock ??
+  // Date.now`), NO el INICIALIZADOR del port. Son dos líneas distintas y la que
+  // corre en producción es el inicializador (nadie llama al setter en prod).
+  // El inicializador lo candadea `T-CLK-2`. No fusionar los dos tests: cada uno
+  // mata una mutación que el otro no ve.
+  it('T-CLK-1: el reloj del seam es inyectable y el RESTORE vuelve al reloj real', () => {
     const adapter = new SolanaPaymentAdapter();
 
     // Con el reloj inyectado, la entrada nace en la época fija.
@@ -708,11 +713,79 @@ describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
     _setIntentDedupClock();
     expect(Date.now()).toBeGreaterThan(FROZEN_NOW_MS + DEFAULT_TTL_MS);
 
-    // Por lo tanto, con el default la entrada se lee como VENCIDA. Si el default
-    // no fuera el reloj real (p. ej. si quedara pegado el reloj inyectado)
-    // seguiría viva: este assert es lo que ata el default a producción.
+    // Por lo tanto, después del restore la entrada se lee como VENCIDA. Si el
+    // restore no volviera al reloj real (p. ej. si dejara pegado el reloj
+    // inyectado) seguiría viva.
     expect(
       adapter.getSettledSignature('nacida-en-la-epoca-fija'),
     ).toBeUndefined();
+  });
+
+  /**
+   * T-CLK-2 — el candado del INICIALIZADOR del port (`payment.ts`:
+   * `let _intentDedupClock: IntentDedupClock = Date.now`).
+   *
+   * Es la línea que gobierna producción: nadie llama a `_setIntentDedupClock`
+   * fuera de los tests, así que el valor INICIAL del port ES el reloj del
+   * money-path. Un default congelado (p. ej. `() => 0`) desactiva los dos guards
+   * a la vez, porque `now - storedAt` queda siempre en 0:
+   *   · el TTL nunca expira ⇒ una firma vieja se recuerda para siempre;
+   *   · el desalojo nunca saca nada ⇒ el `break` de la ventana protegida corta en
+   *     la primera entrada y el cap soft de 10k queda inoperante (el leak de
+   *     memoria que el fix-pack P1 vino a cerrar).
+   *
+   * Por qué ningún test lo veía: toda la batería siembra `storedAt` RELATIVO a
+   * `intentDedupNow()`, así que un reloj congelado es internamente consistente e
+   * indetectable. Y `T-CLK-1` pasa por el setter, que tiene su propio literal
+   * `Date.now` (otra línea).
+   *
+   * Estrategia: instancia FRESCA del módulo (el `beforeEach` ya inyectó el reloj
+   * congelado en la instancia de este archivo, así que el valor inicial sólo se
+   * puede observar en una copia nueva) + test de EFECTO, no de identidad: se
+   * escribe por el camino de producción y se acota el `storedAt` resultante
+   * contra `Date.now()` real por los DOS lados.
+   */
+  it('T-CLK-2: el módulo ARRANCA con el reloj real — candado del inicializador del port, no del restore', async () => {
+    // `vi.resetModules()` no toca los `vi.mock` del archivo (siguen registrados),
+    // sólo descarta las instancias cacheadas.
+    vi.resetModules();
+    const fresh = await import('./payment.js');
+    const adapter = new fresh.SolanaPaymentAdapter();
+    const ttl = fresh._intentDedupPolicy().ttlMs;
+    /** Holgura de la cota. Absorbe la latencia real del `settle` mockeado. */
+    const TOL_MS = 5_000;
+
+    // Escritura por el camino de PRODUCCIÓN (`settle` → `rememberIntentSignature`)
+    // con el port en su valor INICIAL: `storedAt` = lo que devuelva ese reloj.
+    const probe = Date.now();
+    await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId: 'escrita-con-el-reloj-inicial',
+    });
+
+    // Ahora se LEE con relojes conocidos. Cada assert acota `storedAt` de un lado:
+    //
+    //   viva a `probe + ttl - TOL`   ⇔  storedAt >= probe - TOL
+    // Un default en el pasado (`() => 0`, o cualquiera desfasado más de TOL hacia
+    // atrás) hace que la entrada se lea VENCIDA acá.
+    fresh._setIntentDedupClock(() => probe + ttl - TOL_MS);
+    expect(
+      adapter.getSettledSignature('escrita-con-el-reloj-inicial'),
+      'el reloj inicial del port quedó en el PASADO respecto de Date.now()',
+    ).toBe(SIG_A);
+
+    //   vencida a `probe + ttl + TOL`  ⇔  storedAt < probe + TOL
+    // Un default en el futuro hace que la entrada se lea VIVA acá.
+    fresh._setIntentDedupClock(() => probe + ttl + TOL_MS);
+    expect(
+      adapter.getSettledSignature('escrita-con-el-reloj-inicial'),
+      'el reloj inicial del port quedó en el FUTURO respecto de Date.now()',
+    ).toBeUndefined();
+
+    // Los dos juntos ⇒ |reloj inicial − Date.now()| < 5 s, sin assertear la
+    // identidad de la función: cualquier reloj que no sea el real (congelado o
+    // desfasado) rompe uno de los dos.
+    fresh._setIntentDedupClock();
   });
 });
