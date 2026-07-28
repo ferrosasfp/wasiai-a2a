@@ -217,8 +217,13 @@ const UNDICI_DEFAULT_HOP_TIMEOUT_MS = 300_000;
  * ⚠️ Es una ESTIMACIÓN, no una garantía, y desde la HU-195 es una estimación
  * DELIBERADAMENTE ALTA: cuenta 300 s/hop cuando el techo real del hop de invoke
  * ya es de 60 s. Cuenta UN hop por step (el invoke del agente) y no cuenta los
- * hops del settle (verify + settle del facilitator), que siguen sin techo en el
- * modo `pieverse` de Kite (`adapters/kite-ozone/payment.ts:317,362`).
+ * hops del settle (verify + settle del facilitator).
+ *
+ * ⚠️ ACTUALIZACIÓN HU-198: esos hops del settle YA tienen techo también en el modo
+ * `pieverse` de Kite (30 s cada uno, `KITE_FACILITATOR_TIMEOUT_MS`), así que la
+ * sobre-estimación de esta cota creció: no hay ningún hop de settle sin cota. Se
+ * conserva igual porque para un Map de idempotencia sobre-estimar es el lado
+ * seguro (ver `UNDICI_DEFAULT_HOP_TIMEOUT_MS`).
  *
  * CORRECCIÓN (AR MNR-4): la versión anterior también listaba «ni el caso del body
  * trickle-feedeado, que no tiene techo». Para el hop de invoke eso YA NO ES

@@ -256,19 +256,96 @@ export async function recordDebitHop1(args: {
   return data?.[0]?.persisted_tx_hash ?? null;
 }
 
-/** Flip terminal del ciclo de vida del consumo (settled / reconciliation_pending). */
+/**
+ * Flip del ciclo de vida del consumo.
+ *
+ * `settled` / `reconciliation_pending` son los terminales de siempre. HU-198 agrega
+ * `resolving_settle` para el hop 2 de resultado DESCONOCIDO: es el estado que el
+ * `claim_reconciliation` NO reclama sin tx previa, así que el reconciliador no
+ * re-envía a ciegas un pago que pudo haberse hecho (ver `settleEscrowAware`).
+ */
 export async function recordDebitSettleStatus(args: {
   intentId: string;
   ownerRef: string;
   keyId: string;
   nonce: string;
-  status: 'settled' | 'reconciliation_pending';
-}): Promise<void> {
-  await supabase.rpc('record_debit_settle_status', {
+  status: 'settled' | 'reconciliation_pending' | 'resolving_settle';
+}): Promise<boolean> {
+  const { data, error } = await supabase.rpc('record_debit_settle_status', {
     p_intent_id: args.intentId,
     p_owner_ref: args.ownerRef,
     p_key_id: args.keyId,
     p_nonce: args.nonce,
     p_status: args.status,
   });
+  // HU-198: antes el error se DESCARTABA en silencio, y eso hacía invisible el peor
+  // modo de fallo: si la migración de esta HU no está aplicada, el RPC responde
+  // `INVALID_SETTLE_STATUS` al escribir `resolving_settle`, la fila se queda en
+  // `hop1_confirmed` — que SÍ es auto-reclamable — y el reconciliador vuelve a poder
+  // re-enviar el hop 2 a ciegas. Sin este log eso pasaba sin dejar rastro. Se loguea
+  // y NO se tira: el contrato de la función (nunca rechazar) no cambia, porque el
+  // caller está en un camino de money-safety donde un throw perdería el veredicto.
+  if (error) {
+    log.error(
+      {
+        intentId: args.intentId,
+        status: args.status,
+        detail: error.message,
+      },
+      'record_debit_settle_status failed — the lifecycle row was NOT updated (if the status is resolving_settle, check that the HU-198 migration is applied: an un-updated row stays auto-claimable and the reconciler could resend hop2 blind)',
+    );
+    return false;
+  }
+  // AR BLQ-MEDIO-2: el `error` NO era el único modo de fallo. El guard de transición
+  // (migración 20260728000000) hace que un UPDATE de 0 filas sea un resultado NORMAL,
+  // así que con el `RETURNS void` original el caller no podía distinguir "quedó
+  // escrito" de "el guard lo rechazó". Desde 20260728010000 el RPC devuelve `applied`,
+  // y ACÁ se consume: sin esto, el candado de toda la HU colgaba de un write incapaz de
+  // reportar su propio fracaso.
+  //
+  // `undefined` (RPC viejo todavía deployado, o forma inesperada) se trata como NO
+  // confirmado a propósito: preferimos un warn de más a creer que el candado cerró.
+  // Doble cast a través de `unknown`: con el RPC VIEJO todavía deployado la respuesta
+  // real es `null`, no la fila (el tipo generado ya declara la forma nueva). El
+  // `?.[0]?.applied` cubre las dos, y `undefined` cae al camino de "no confirmado".
+  const row = (
+    data as unknown as
+      | { applied?: boolean; current_status?: string | null }[]
+      | null
+  )?.[0];
+  const applied = row?.applied;
+  // AR#2 BLQ-BAJO-1: el estado REAL de la fila (migración 20260728020000). Es lo que
+  // reemplaza a la consecuencia inventada del mensaje anterior.
+  const currentStatus = row?.current_status ?? null;
+  if (applied !== true) {
+    log.error(
+      {
+        intentId: args.intentId,
+        keyId: args.keyId,
+        nonce: args.nonce,
+        status: args.status,
+        applied: applied ?? null,
+        currentStatus,
+      },
+      // ⚠️ AR#2 BLQ-BAJO-1 — ESTE MENSAJE DICE LO QUE SE SABE, NO UNA CONSECUENCIA.
+      //
+      // La versión anterior afirmaba "the row REMAINS auto-claimable and the reconciler
+      // could resend hop2 blind", y era FALSO en todos sus casos alcanzables:
+      // `applied=false` sólo ocurre cuando el guard rechazó, o sea desde un status que
+      // NO está en (NULL, 'hop1_confirmed', 'reconciliation_pending') — y ninguno de
+      // esos es reclamable para mandar un hop 2 ('settled'/'resolved_*' no los reclama
+      // nadie; 'resolving_*' sólo el lado refund, que no manda hop 2).
+      //
+      // Peor: el escenario donde esta alerta más importa es el caso F (ver TD-198-01 en
+      // `services/reconciliation.ts`), donde la verdad es que el seller YA COBRÓ DOS
+      // VECES. Mandar al operador a "revisar si se puede re-enviar" lo manda a mirar lo
+      // que no es. Ahora se reporta el HECHO (el guard rechazó, la fila quedó en tal
+      // estado) y se le pide LEER antes de concluir.
+      applied === false
+        ? `record_debit_settle_status applied=false — the transition guard REJECTED this write: the lifecycle row was NOT set to '${args.status}' and it KEEPS its current status (${currentStatus ?? 'unreadable'}). This is a state-machine disagreement, NOT a diagnosis: do not assume what happened to the money from this line. Read debit_settle_status and debit_resolution_tx_hash for this intent, and check the chain for a hop2 disbursement to the seller, before concluding anything.`
+        : 'record_debit_settle_status returned no `applied` flag — cannot confirm the lifecycle row was updated (are migrations 20260728010000/20260728020000 applied? a PostgREST schema-cache reload may be pending). Treated as NOT confirmed.',
+    );
+    return false;
+  }
+  return true;
 }

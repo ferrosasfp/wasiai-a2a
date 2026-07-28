@@ -37,6 +37,9 @@ const ALL_CODES: DownstreamSkipCode[] = [
   'SIGNING_FAILED',
   'VERIFY_FAILED',
   'SETTLE_FAILED',
+  // HU-198: el pago quedó en estado desconocido (el hop al facilitator no
+  // contestó). Distinto de SETTLE_FAILED a propósito.
+  'SETTLE_UNKNOWN',
   'BALANCE_PRECHECK_SKIPPED',
   'BALANCE_LOW_ON_IDEMPOTENT_REPLAY',
 ];
@@ -49,6 +52,9 @@ const PUBLIC_VOCABULARY: PublicDownstreamSkipCode[] = [
   'ZERO_PAY_TO',
   'INVALID_PRICE',
   'SETTLE_FAILED',
+  // HU-198: se expone VERBATIM (no se genericiza) porque las dos frases que el
+  // caller necesita son opuestas: "no se pagó" vs "puede haberse pagado".
+  'SETTLE_UNKNOWN',
   'NOT_CONFIGURED',
   'UNAVAILABLE',
 ];

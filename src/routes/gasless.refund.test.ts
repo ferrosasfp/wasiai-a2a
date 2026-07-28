@@ -537,6 +537,49 @@ describe('POST /gasless/transfer — refund on failure (HU-192)', () => {
     expect(mockCredit).toHaveBeenCalledTimes(1);
   });
 
+  // ── HU-198: el refund NO puede depender de la identidad de clase ──────
+  //
+  // Mismo caso de dinero que T-192-2, pero el error viene de OTRO registro de
+  // módulos (misma forma, otra identidad de clase) — lo que pasa con
+  // `vi.resetModules()` + import dinámico, o con dos copias del paquete en el árbol
+  // de dependencias. Con el `instanceof` pelado de antes, `classifyGaslessFailure`
+  // caía a `'unknown'` y NO reembolsaba: el caller quedaba cobrado por un transfer
+  // que PROBADAMENTE no se movió, en silencio. La propiedad afirmada es sobre LA
+  // PLATA (el balance vuelve), no sobre qué función se llamó.
+  it("T-198-Gasless-CrossRegistry: 'not-moved' de otra copia de la clase → el balance vuelve igual", async () => {
+    const foreign = Object.assign(new Error('sign failed: no operator key'), {
+      name: 'GaslessTransferError',
+      valueDisposition: 'not-moved',
+    });
+    // Precondición del test: NO es la clase importada acá (si algún día lo fuera,
+    // este test dejaría de probar el caso cross-registry y hay que revisarlo).
+    expect(foreign instanceof GaslessTransferError).toBe(false);
+    mockGaslessTransfer.mockRejectedValue(foreign);
+
+    const before = balance();
+    const res = await post({ 'x-a2a-key': TEST_KEY });
+
+    expect(res.statusCode).toBe(500);
+    expect(balance()).toBe(before); // reembolsado
+    expect(mockCredit).toHaveBeenCalledTimes(1);
+  });
+
+  it("T-198-Gasless-CrossRegistry-unknown: 'unknown' de otra copia sigue SIN reembolsar", async () => {
+    // La otra mitad: el guard estructural no debe volverse un "reembolsá siempre".
+    const foreign = Object.assign(new Error('receipt timeout (tx 0xfeed)'), {
+      name: 'GaslessTransferError',
+      valueDisposition: 'unknown',
+    });
+    mockGaslessTransfer.mockRejectedValue(foreign);
+
+    const before = balance();
+    const res = await post({ 'x-a2a-key': TEST_KEY });
+
+    expect(res.statusCode).toBe(500);
+    expect(balance()).toBeLessThan(before); // el cobro se mantiene
+    expect(mockCredit).not.toHaveBeenCalled();
+  });
+
   // ── T-192-3: 500 con la tx ya en la red (NO refund) ────────
   it("T-192-3: 500 con valueDisposition 'unknown' → NO reembolsa (la tx pudo aterrizar)", async () => {
     mockGaslessTransfer.mockRejectedValue(

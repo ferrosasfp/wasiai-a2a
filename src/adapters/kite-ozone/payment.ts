@@ -11,6 +11,10 @@ import type {
   PieverseVerifyResponse,
   X402PaymentRequest,
 } from '../../types/index.js';
+import {
+  classifySettleTransportError,
+  FacilitatorSettleError,
+} from '../errors.js';
 import type {
   EvmPaymentAdapter,
   QuoteResult,
@@ -88,6 +92,56 @@ function getFacilitatorApiKey(): string | undefined {
     process.env.FACILITATOR_API_KEY?.trim() ||
     undefined
   );
+}
+
+/**
+ * HU-198 — TECHO DE WALL-CLOCK DE LOS DOS HOPS DEL MODO `pieverse`.
+ *
+ * Eran los ÚNICOS dos hops de settlement del repo sin cota (`/verify` y `/settle`
+ * de `KiteOzonePaymentAdapter`), y encima en el camino VIVO: `pieverse` es el
+ * default de `KITE_FACILITATOR_MODE` (ver `getFacilitatorMode`). Los otros cuatro
+ * (`base/payment.ts`, `avalanche/payment.ts`, `tempo/payment.ts` y el modo `x402`
+ * de este mismo archivo) ya usaban 30 s.
+ *
+ * POR QUÉ 30 s Y NO UN NÚMERO NUEVO: es la norma del repo para un hop a un
+ * facilitator, repetida en los 4 caminos ya acotados (`FACILITATOR_TIMEOUT_MS` en
+ * los otros 3 adapters, `X402_FACILITATOR_TIMEOUT_MS` acá abajo). Inventar un
+ * quinto valor sólo para este par crearía dos normas.
+ *
+ * POR QUÉ EL MISMO PRESUPUESTO PARA `/verify` Y `/settle` (la pregunta era si el
+ * settle merece más): los 4 caminos ya acotados usan UNA constante para los dos
+ * hops, y el 30 s de `X402_FACILITATOR_TIMEOUT_MS` fue elegido JUSTAMENTE por el
+ * settle ("match the on-chain settle window ... without aborting a legit settle
+ * that waits for confirmation"). Además, para el `/settle` un presupuesto MÁS
+ * GRANDE no es gratis: la espera es la única parte cancelable, así que alargarla
+ * sólo agranda la ventana en la que el gateway queda esperando; lo que NO se
+ * arregla esperando más es el estado `unknown` (ver `FacilitatorSettleError`), que
+ * llega igual. El asimétrico tendría que justificarse con evidencia de latencia
+ * real del facilitator, que no tenemos.
+ *
+ * NO SON EL MISMO CASO, aunque compartan el número:
+ *   · `/verify` NO broadcastea nada. Abortarlo no puede dejar plata en el aire, así
+ *     que su error sigue siendo un `Error` común (camino de fallo preexistente).
+ *   · `/settle` SÍ puede haber broadcasteado. Abortar el HTTP no cancela el
+ *     broadcast: deja al gateway CIEGO al resultado. Por eso ese camino tira
+ *     `FacilitatorSettleError` con `valueDisposition: 'unknown'`.
+ *
+ * ⚠️ Se declara una constante PROPIA en vez de reusar `X402_FACILITATOR_TIMEOUT_MS`
+ * a propósito: el modo `x402` queda intacto (cero ediciones en sus dos `fetch`),
+ * así que su valor sigue siendo un literal no configurable. El número duplicado es
+ * el costo de no tocar un camino que ya funciona.
+ */
+const PIEVERSE_FACILITATOR_TIMEOUT_MS = 30_000;
+
+/**
+ * Techo en MILISEGUNDOS de cada hop `pieverse`. Configurable con
+ * `KITE_FACILITATOR_TIMEOUT_MS`; ausente / no numérico / <= 0 → el default de
+ * 30 000 ms (mismo criterio que `envMsOrDefault` en `lib/outbound-timeout.ts`:
+ * una env basura NUNCA apaga el techo).
+ */
+function resolvePieverseFacilitatorTimeoutMs(): number {
+  const n = Number.parseInt(process.env.KITE_FACILITATOR_TIMEOUT_MS ?? '', 10);
+  return Number.isFinite(n) && n > 0 ? n : PIEVERSE_FACILITATOR_TIMEOUT_MS;
 }
 
 // ── Defaults for env-driven configuration (CD-1: no hardcoded addresses in logic) ──
@@ -318,6 +372,11 @@ export class KiteOzonePaymentAdapter implements EvmPaymentAdapter {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        // HU-198: techo de wall-clock. El caso FÁCIL y sin matices: `/verify` NO
+        // broadcastea, así que abortarlo no puede dejar plata en un estado
+        // indeterminado. El error sigue siendo un `Error` común — el camino de
+        // fallo NO cambia, sólo deja de ser infinito.
+        signal: AbortSignal.timeout(resolvePieverseFacilitatorTimeoutMs()),
       });
     } catch (err) {
       throw new Error(
@@ -328,8 +387,21 @@ export class KiteOzonePaymentAdapter implements EvmPaymentAdapter {
       throw new Error(
         `Facilitator returned HTTP ${response.status} on /verify`,
       );
-    const result = (await response.json()) as PieverseVerifyResponse;
-    return { valid: result.valid, error: result.error };
+    // AR#2 BLQ-MEDIO-1, mismo eje que en `settle`: el techo corta también el consumo del
+    // body, así que contra un peer que trickle-feedea el abort ocurre ACÁ. El CONTRATO de
+    // `/verify` NO cambia (sigue siendo un `Error` común, sin disposición de valor: un
+    // verify abortado no puede dejar plata en el aire, y marcarlo `unknown` mandaría a
+    // reconciliar dinero que nunca se movió). Lo que se arregla es que el error salga con
+    // el MISMO mensaje en los dos ejes en vez de un `TimeoutError` sin prefijo — el propio
+    // candado `T-198-VERIFY` no cubría este eje.
+    try {
+      const result = (await response.json()) as PieverseVerifyResponse;
+      return { valid: result.valid, error: result.error };
+    } catch (err) {
+      throw new Error(
+        `Facilitator network error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   async settle(req: SettleRequest): Promise<SettleResult> {
@@ -363,17 +435,58 @@ export class KiteOzonePaymentAdapter implements EvmPaymentAdapter {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        // HU-198: techo de wall-clock. Acá está TODO el matiz: abortar este request
+        // NO cancela el broadcast. Si el facilitator ya mandó la tx, la plata salió
+        // y lo único que perdemos es la respuesta que traía el `txHash`. Por eso el
+        // catch de abajo NO tira un `Error` pelado (indistinguible de "no se pagó")
+        // sino un `FacilitatorSettleError` con su `valueDisposition`.
+        signal: AbortSignal.timeout(resolvePieverseFacilitatorTimeoutMs()),
       });
     } catch (err) {
-      throw new Error(
+      // HU-198: el hop no dio respuesta. Clasificamos qué le pudo pasar al VALOR
+      // (`'not-sent'` sólo con prueba de que no hubo request; el techo cae a
+      // `'unknown'`) y lo transportamos TIPADO, para que el consumidor no tenga que
+      // adivinar leyendo el mensaje. Ver `adapters/errors.ts`.
+      throw new FacilitatorSettleError(
         `Facilitator network error on settle: ${err instanceof Error ? err.message : String(err)}`,
+        classifySettleTransportError(err),
       );
     }
+    // El facilitator CONTESTÓ rechazando: eso es un VEREDICTO suyo, no una incógnita de
+    // transporte, así que sigue por el camino de error preexistente (`Error` común) y
+    // queda FUERA del try de abajo a propósito. (Reclasificar este camino —un 502 que
+    // pudo llegar después de un broadcast— es el BLQ-ALTO del AR, Scope OUT: toca los 5
+    // adapters y tiene su propia HU. Hay un candado de no-regresión:
+    // `T-198-AR2-HTTP-ERROR`.)
     if (!response.ok)
       throw new Error(
         `Facilitator returned HTTP ${response.status} on /settle`,
       );
-    const result = (await response.json()) as PieverseSettleResult;
+    // ⚠️ AR#2 BLQ-MEDIO-1 — LA LECTURA DEL BODY TAMBIÉN ESTÁ BAJO EL TECHO.
+    //
+    // Esto vivía FUERA del try de arriba, y era el agujero en el caso CENTRAL de la HU:
+    // el `AbortSignal` no acota sólo la espera de los headers, acota también el consumo
+    // del body. Contra un peer que TRICKLE-FEEDEA —el único caso realmente sin cota,
+    // porque el `bodyTimeout` de undici se refresca en cada chunk— el reloj se cumple
+    // ACÁ, y lo que salía era un `DOMException/TimeoutError` PELADO: no
+    // `FacilitatorSettleError`, `readSettleValueDisposition() === undefined`, y por lo
+    // tanto el caller inbound recibía "Payment settlement failed" (le afirmábamos que no
+    // se le cobró) sin fila de reconciliación. O sea: la HU fallaba exactamente en el
+    // caso que existe para acotar.
+    //
+    // Al dinero le da lo mismo si el reloj se cumplió antes o después de los headers, así
+    // que el canal por el que se reporta tampoco puede cambiar. Un body que no parsea
+    // (JSON malformado) cae acá igual y también es `unknown`: el facilitator contestó 200
+    // pero no sabemos qué dijo, así que no sabemos si pagó.
+    let result: PieverseSettleResult;
+    try {
+      result = (await response.json()) as PieverseSettleResult;
+    } catch (err) {
+      throw new FacilitatorSettleError(
+        `Facilitator body read failed on settle: ${err instanceof Error ? err.message : String(err)}`,
+        classifySettleTransportError(err),
+      );
+    }
     return {
       txHash: result.txHash,
       success: result.success,

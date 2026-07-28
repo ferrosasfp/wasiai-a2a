@@ -341,6 +341,31 @@ async function debitBuyer(
 }
 
 /**
+ * AR MNR-1 — ¿el resultado del hop 2 es DESCONOCIDO (y por lo tanto NO se puede
+ * re-enviar solo)?
+ *
+ * El test es `!== 'unequivocal'`, NO `=== 'ambiguous'`. Los dos son equivalentes HOY
+ * (el tipo tiene exactamente 2 valores), pero difieren en el DEFAULT, y acá el default
+ * decide dinero:
+ *   · con `=== 'ambiguous'`, un `failureKind` ausente o un 3er valor futuro caería en
+ *     `reconciliation_pending` ⟹ fila auto-reclamable ⟹ el reconciliador re-envía el
+ *     hop 2 a ciegas ⟹ doble pago al seller.
+ *   · con `!== 'unequivocal'` cae en `resolving_settle` ⟹ revisión manual.
+ * O sea: SÓLO el veredicto EXPLÍCITO de "probado que no se ejecutó" habilita el
+ * re-envío. Cualquier otra cosa, incluida la ignorancia, va al lado seguro.
+ *
+ * Está extraída como función pura EXPORTADA a propósito: la diferencia entre las dos
+ * formas es inalcanzable por el camino de integración (todos los `return failed` del
+ * seam setean `failureKind`), así que sin este seam la invariante del default no se
+ * podía candar con un test — sería una afirmación sin evidencia.
+ */
+export function isHop2ResultUnknown(
+  failureKind: SettleOutcome['failureKind'] | undefined,
+): boolean {
+  return failureKind !== 'unequivocal';
+}
+
+/**
  * BLQ-DR: normaliza el `settle_outcome` persistido a un veredicto. NULL/desconocido
  * → 'failed_ambiguous' (money-safe): sin veredicto NO asumimos éxito ni refund; se
  * marca reconciliable. NUNCA default a 'settled' (esa asunción era la causa raíz).
@@ -423,6 +448,14 @@ export async function settlePaymentIntentOnChain(params: {
       log.error({ intentId, detail }, 'settle() threw');
       // AMBIGUO: el settle() lanzó pero la tx PUDO haberse broadcasteado antes
       // del throw → NO sabemos si los fondos se movieron → NO refundar.
+      //
+      // HU-198: este `ambiguous` es la MISMA semántica que
+      // `SettleValueDisposition = 'unknown'` (`adapters/errors.ts`), y por eso el
+      // techo de wall-clock del hop `pieverse` NO necesitó tocar esta función: un
+      // abort del `/settle` llega acá como throw y ya cae del lado money-safe (no
+      // refund → reconciliación). Se clasifican TODOS los throws como ambiguos a
+      // propósito, incluido el `'not-sent'`: acá lo conservador cuesta una revisión
+      // manual, y lo optimista costaría un doble crédito.
       return {
         status: 'failed',
         txHash: null,
@@ -600,12 +633,46 @@ export async function settleEscrowAware(params: {
     if (o2.status === 'failed') {
       // CD-S4: hop 1 ya movió fondos on-chain → remap unequivocal→ambiguous (jamás
       // refund off-chain = doble-crédito) + reconciliation-pending.
+      //
+      // HU-198 — EL ESTADO DEPENDE DE SI EL HOP 2 PUDO HABER PAGADO.
+      //
+      // Antes los dos casos caían en `reconciliation_pending`, y ese estado lo
+      // AUTO-RECLAMA `claim_reconciliation` (migración 20260713000002, el `IN
+      // ('hop1_confirmed','reconciliation_pending')`). Sin `debit_resolution_tx_hash`
+      // que verificar, `reconciliation.ts` salta el verify y RE-ENVÍA el hop 2
+      // (`reconciliation.ts` §6) ⟹ si el hop 2 original SÍ aterrizó, el seller cobra
+      // DOS VECES. Con el techo de wall-clock del hop `pieverse` ese caso pasa de
+      // raro a rutinario, así que hay que distinguirlo.
+      //
+      // El dato para distinguir YA ESTABA COMPUTADO: `failureKind`.
+      //   · 'unequivocal' → el hop 2 PROBADAMENTE no se ejecutó (el sign falló, o el
+      //     facilitator contestó `success:false`). Re-enviar es CORRECTO y es para
+      //     lo que el reconciliador existe ⟹ `reconciliation_pending` (sin cambio).
+      //   · 'ambiguous'   → el hop 2 pudo haber pagado (el settle TIRÓ, o la
+      //     re-verificación on-chain lo contradijo) ⟹ `resolving_settle`, que el LADO
+      //     SETTLE del claim NO reclama sin tx previa, pero que SIGUE en
+      //     `PENDING_STATUSES` ⟹ no auto-PAGA, y aparece igual en `listPending()` para
+      //     que un humano lo resuelva.
+      //
+      //     ⚠️ CORRECCIÓN (AR#2 MNR-3): la versión anterior de este comentario decía "ni
+      //     por el lado settle ni por el refund" y "no auto-reembolsa". Es FALSO desde la
+      //     migración 20260728010000 (MNR-4): el lado REFUND **sí** puede reclamar esta
+      //     fila, a propósito. Si el hop 1 re-verifica `not_confirmed`, los fondos del
+      //     buyer nunca salieron del escrow y su débito off-chain TIENE que revertirse;
+      //     bloquear eso era una regresión. La asimetría es el punto: el refund es
+      //     budget-only e idempotente y no manda ningún hop 2, así que no puede
+      //     doble-pagar. Lo que este estado bloquea es EL RE-ENVÍO, no el reembolso.
+      //
+      // NO se inventó un estado nuevo: `resolving_settle` ya existe en el CHECK y en
+      // el índice `idx_debit_sig_resolving` desde 191c. Lo único que hizo falta fue
+      // dejar que `record_debit_settle_status` lo escriba (migración de esta HU).
+      const unknownHop2 = isHop2ResultUnknown(o2.failureKind);
       await recordDebitSettleStatus({
         intentId,
         ownerRef,
         keyId,
         nonce: row.debit_nonce,
-        status: 'reconciliation_pending',
+        status: unknownHop2 ? 'resolving_settle' : 'reconciliation_pending',
       });
       return {
         status: 'failed',

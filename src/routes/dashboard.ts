@@ -473,6 +473,15 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
           status: outcome.status,
           ...(outcome.side !== undefined ? { side: outcome.side } : {}),
           ...(outcome.txHash !== undefined ? { txHash: outcome.txHash } : {}),
+          // AR BLQ-BAJO-1: el operador necesita saber QUÉ hacer, no sólo un slug. Este
+          // estado es el único que le pide una acción fuera del panel (ir a la cadena),
+          // así que viaja con su instrucción. No revela nada que el admin no vea ya.
+          ...(outcome.status === 'awaiting_manual_settle_evidence'
+            ? {
+                action_required:
+                  'The hop2 payment result is UNKNOWN and this intent was NOT resolved. The reconciler will not resend hop2 blind (that could pay the seller twice). Check the chain for a hop2 disbursement to the seller, then resolve with that evidence.',
+              }
+            : {}),
         });
       } catch (err) {
         request.log.error(

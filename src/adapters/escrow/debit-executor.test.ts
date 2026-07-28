@@ -22,6 +22,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockWriteContract = vi.fn();
 const mockWaitForReceipt = vi.fn();
+// HU-198: `getLogger` devuelve un child NUEVO en cada llamada, así que no se puede
+// espiar la instancia después de que el módulo cargó. Se mockea la fábrica para que
+// todos los `getLogger` compartan el mismo spy.
+const mockLogError = vi.fn();
+
+vi.mock('../../lib/logger.js', () => ({
+  getLogger: () => ({
+    error: (...a: unknown[]) => mockLogError(...a),
+    warn: () => {},
+    info: () => {},
+    debug: () => {},
+  }),
+}));
 
 vi.mock('viem', async (importOriginal) => {
   const actual = await importOriginal<typeof import('viem')>();
@@ -396,5 +409,180 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
     });
     const rpcArgs = mockRpc.mock.calls[0]?.[1] as { p_nonce: unknown };
     expect(typeof rpcArgs.p_nonce).toBe('string');
+  });
+
+  it('T-198: acepta el status resolving_settle y lo pasa tal cual', async () => {
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: null,
+      // biome-ignore lint/suspicious/noExplicitAny: supabase rpc test double
+    } as any);
+
+    await recordDebitSettleStatus({
+      intentId: 'intent-1',
+      ownerRef: 'tenant-A',
+      keyId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      nonce: '7',
+      status: 'resolving_settle',
+    });
+
+    expect(mockRpc).toHaveBeenCalledWith(
+      'record_debit_settle_status',
+      expect.objectContaining({ p_status: 'resolving_settle' }),
+    );
+  });
+
+  it('T-198: un error del RPC se LOGUEA (antes se descartaba en silencio) y NO tira', async () => {
+    // POR QUÉ IMPORTA: si la migración de HU-198 no está aplicada, el RPC responde
+    // `INVALID_SETTLE_STATUS` al escribir `resolving_settle`, la fila se queda en
+    // `hop1_confirmed` (que SÍ es auto-reclamable) y el reconciliador puede volver a
+    // re-enviar el hop 2 a ciegas. Antes eso pasaba sin dejar rastro: el error del
+    // RPC se descartaba. El log es la única señal de que el candado no cerró.
+    mockLogError.mockClear();
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: { message: 'INVALID_SETTLE_STATUS: resolving_settle' },
+      // biome-ignore lint/suspicious/noExplicitAny: supabase rpc test double
+    } as any);
+
+    // NO tira: el caller está en un camino de money-safety y un throw perdería el
+    // veredicto del settle. Devuelve `false` (AR BLQ-MEDIO-2): el estado NO quedó
+    // escrito, y eso ahora es un dato que el caller puede leer.
+    await expect(
+      recordDebitSettleStatus({
+        intentId: 'intent-1',
+        ownerRef: 'tenant-A',
+        keyId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        nonce: '7',
+        status: 'resolving_settle',
+      }),
+    ).resolves.toBe(false);
+
+    expect(mockLogError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'resolving_settle',
+        detail: 'INVALID_SETTLE_STATUS: resolving_settle',
+      }),
+      expect.stringContaining('was NOT updated'),
+    );
+  });
+
+  // ── AR BLQ-MEDIO-2: el 0-row silencioso es un modo de fallo PROPIO ──
+  //
+  // El guard de transición (migración 20260728000000) hace que un UPDATE de 0 filas sea
+  // un RESULTADO NORMAL, no un error. Con el `RETURNS void` original el caller no podía
+  // distinguir "quedó escrito" de "el guard lo rechazó y la fila SIGUE auto-reclamable",
+  // así que el candado de la HU colgaba de un write incapaz de reportar su fracaso. La
+  // propiedad afirmada es que ese caso se detecta Y se grita: si no, la fila queda
+  // auto-reclamable y el reconciliador puede re-enviar el hop 2 a ciegas.
+  it('T-198-AR: applied=false (guard rechazó el write) → false + log loud, sin error del RPC', async () => {
+    mockLogError.mockClear();
+    mockRpc.mockResolvedValue({
+      data: [{ applied: false, current_status: 'settled' }],
+      error: null,
+      // biome-ignore lint/suspicious/noExplicitAny: supabase rpc test double
+    } as any);
+
+    const ok = await recordDebitSettleStatus({
+      intentId: 'intent-1',
+      ownerRef: 'tenant-A',
+      keyId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      nonce: '7',
+      status: 'resolving_settle',
+    });
+
+    // NO hubo `error` del RPC y aun así el write no se aplicó: exactamente el modo de
+    // fallo que el `if (error)` NO cubría.
+    expect(ok).toBe(false);
+    expect(mockLogError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        applied: false,
+        status: 'resolving_settle',
+        // AR#2 BLQ-BAJO-1: el estado REAL viaja al log para poder nombrarlo.
+        currentStatus: 'settled',
+      }),
+      expect.stringContaining('REJECTED this write'),
+    );
+  });
+
+  // ── AR#2 BLQ-BAJO-1: la alerta dice el HECHO, no una consecuencia inventada ──
+  it('T-198-AR2: la alerta NOMBRA el estado real y NO afirma que la fila sigue auto-reclamable', async () => {
+    // La versión anterior afirmaba "the row REMAINS auto-claimable and the reconciler
+    // could resend hop2 blind". Es FALSO en todos los casos alcanzables: `applied=false`
+    // sólo ocurre desde estados que ni el lado settle ni el refund pueden reclamar para
+    // mandar un hop 2. Y en el caso F la verdad es que el seller YA cobró dos veces, así
+    // que el mensaje mandaba al operador a mirar lo que no era.
+    mockLogError.mockClear();
+    mockRpc.mockResolvedValue({
+      data: [{ applied: false, current_status: 'resolved_settled' }],
+      error: null,
+      // biome-ignore lint/suspicious/noExplicitAny: supabase rpc test double
+    } as any);
+
+    await recordDebitSettleStatus({
+      intentId: 'intent-1',
+      ownerRef: 'tenant-A',
+      keyId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      nonce: '7',
+      status: 'resolving_settle',
+    });
+
+    const msg = String(mockLogError.mock.calls[0]?.[1]);
+    // Dice el HECHO: qué quería escribir y en qué estado quedó.
+    expect(msg).toContain('resolved_settled');
+    expect(msg).toMatch(/KEEPS its current status/);
+    // Y pide LEER antes de concluir, en vez de dar un diagnóstico.
+    expect(msg).toMatch(/not a diagnosis/i);
+    // PROHIBIDO volver a la afirmación falsa.
+    expect(msg).not.toMatch(/auto-claimable/i);
+    expect(msg).not.toMatch(/resend hop2 blind/i);
+  });
+
+  it('T-198-AR: applied=true → true y NINGÚN log de error', async () => {
+    // Contra-ejemplo: sin esto, loguear siempre pasaría el test de arriba y la señal
+    // dejaría de significar algo.
+    mockLogError.mockClear();
+    mockRpc.mockResolvedValue({
+      data: [{ applied: true, current_status: 'resolving_settle' }],
+      error: null,
+      // biome-ignore lint/suspicious/noExplicitAny: supabase rpc test double
+    } as any);
+
+    const ok = await recordDebitSettleStatus({
+      intentId: 'intent-1',
+      ownerRef: 'tenant-A',
+      keyId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      nonce: '7',
+      status: 'resolving_settle',
+    });
+
+    expect(ok).toBe(true);
+    expect(mockLogError).not.toHaveBeenCalled();
+  });
+
+  it('T-198-AR: RPC viejo (data null, sin applied) → NO confirmado (no se asume que cerró)', async () => {
+    // Orden de release inverso: el código nuevo con el RPC viejo (`RETURNS void`)
+    // devuelve `null`. Se trata como NO confirmado a propósito: preferimos un warn de
+    // más a creer que el candado cerró cuando no sabemos.
+    mockLogError.mockClear();
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: null,
+      // biome-ignore lint/suspicious/noExplicitAny: supabase rpc test double
+    } as any);
+
+    const ok = await recordDebitSettleStatus({
+      intentId: 'intent-1',
+      ownerRef: 'tenant-A',
+      keyId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      nonce: '7',
+      status: 'resolving_settle',
+    });
+
+    expect(ok).toBe(false);
+    expect(mockLogError).toHaveBeenCalledWith(
+      expect.objectContaining({ applied: null }),
+      expect.stringContaining('no `applied` flag'),
+    );
   });
 });

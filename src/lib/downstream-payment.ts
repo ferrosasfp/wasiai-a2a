@@ -17,6 +17,7 @@ import {
   type LegDestination,
   normalizeChainSlug,
 } from '../adapters/chain-resolver.js';
+import { readSettleValueDisposition } from '../adapters/errors.js';
 import {
   getAdaptersBundle,
   getInitializedChainKeys,
@@ -452,6 +453,9 @@ async function settleSolanaLeg(
  *  - adapter.sign throws                                → SIGNING_FAILED
  *  - adapter.verify throws or returns valid=false       → VERIFY_FAILED
  *  - adapter.settle throws or returns success=false     → SETTLE_FAILED
+ *  - adapter.settle throws con valueDisposition 'unknown' → SETTLE_UNKNOWN
+ *    (HU-198: el hop al facilitator no contestó ⇒ el leg PUEDE estar pagado
+ *    on-chain. NO es "no se pagó" y NO se reintenta a ciegas.)
  *
  * Códigos que se emiten SIN cortar el leg (observabilidad — el catálogo anterior
  * los omitía aunque salen en el mismo campo `code`; fix-pack CR-MNR-5):
@@ -828,9 +832,24 @@ export async function signAndSettleDownstream(
     try {
       settleRes = await adapter.settle(proof);
     } catch (e) {
+      // HU-198: un settle que TIRÓ no siempre es un settle que no pagó. Si el
+      // adapter transporta `valueDisposition: 'unknown'` (el hop al facilitator no
+      // contestó y el broadcast pudo haber salido), el leg NO se puede reportar como
+      // "no se pagó": se emite `SETTLE_UNKNOWN`, que es el código que le dice al
+      // operador que hay que reconciliar contra la cadena antes de reintentar.
+      const disposition = readSettleValueDisposition(e);
+      const code =
+        disposition === 'unknown' ? 'SETTLE_UNKNOWN' : 'SETTLE_FAILED';
       logger.warn(
-        { agentSlug: agent.slug, code: 'SETTLE_FAILED', detail: String(e) },
-        '[Downstream] adapter.settle threw',
+        {
+          agentSlug: agent.slug,
+          code,
+          ...(disposition ? { valueDisposition: disposition } : {}),
+          detail: String(e),
+        },
+        disposition === 'unknown'
+          ? '[Downstream] adapter.settle threw with UNKNOWN value disposition — the leg may already be paid on-chain; do NOT retry blindly'
+          : '[Downstream] adapter.settle threw',
       );
       return null;
     }

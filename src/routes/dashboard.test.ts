@@ -363,6 +363,48 @@ describe('WKH-191c reconciliation admin routes', () => {
     await app.close();
   });
 
+  // ── AR#2 MNR-2: `action_required` es la ÚNICA instrucción accionable que el operador
+  // recibe sobre una fila con plata posiblemente duplicada, y no tenía ningún test:
+  // mutarlo a `false` dejaba la suite verde, mientras el AC-13 lo declaraba evidencia.
+  it('T-198-AR2-MNR2: awaiting_manual_settle_evidence viaja con la instrucción accionable', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockResolveIntent.mockResolvedValue({
+      status: 'awaiting_manual_settle_evidence',
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/resolve',
+      headers: { 'x-admin-token': 'secret' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.status).toBe('awaiting_manual_settle_evidence');
+    // La instrucción existe...
+    expect(typeof body.action_required).toBe('string');
+    // ...y dice las DOS cosas que el operador necesita: que NO se resolvió, y qué mirar.
+    expect(body.action_required).toMatch(/NOT resolved/i);
+    expect(body.action_required).toMatch(/chain/i);
+    // Y advierte por qué el reconciliador no actúa solo (para que no lo fuerce).
+    expect(body.action_required).toMatch(/twice/i);
+    await app.close();
+  });
+
+  it('T-198-AR2-MNR2-neg: un outcome normal NO trae action_required', async () => {
+    // Contra-ejemplo: si el campo saliera siempre, dejaría de señalar el caso que
+    // requiere una acción fuera del panel.
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockResolveIntent.mockResolvedValue({ status: 'settled', side: 'settle' });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/resolve',
+      headers: { 'x-admin-token': 'secret' },
+    });
+    expect(res.json().action_required).toBeUndefined();
+    await app.close();
+  });
+
   it('T-14c: POST resolve con token válido → delega a resolveIntent y devuelve outcome', async () => {
     process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
     mockResolveIntent.mockResolvedValue({
