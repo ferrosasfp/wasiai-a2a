@@ -1,931 +1,345 @@
-# WasiAI A2A Protocol
+# WasiAI A2A
 
-[![Tests](https://github.com/ferrosasfp/wasiai-a2a/actions/workflows/test.yml/badge.svg)](https://github.com/ferrosasfp/wasiai-a2a/actions)
-[![Deploy](https://img.shields.io/badge/deploy-Railway-blueviolet)](https://wasiai-a2a-production.up.railway.app)
-[![A2A Protocol](https://img.shields.io/badge/protocol-Google%20A2A-blue)](https://google.github.io/A2A/)
+[![ci](https://github.com/ferrosasfp/wasiai-a2a/actions/workflows/ci.yml/badge.svg)](https://github.com/ferrosasfp/wasiai-a2a/actions/workflows/ci.yml)
+[![smoke-downstream](https://github.com/ferrosasfp/wasiai-a2a/actions/workflows/smoke-downstream.yml/badge.svg)](https://github.com/ferrosasfp/wasiai-a2a/actions/workflows/smoke-downstream.yml)
+[![protocolo](https://img.shields.io/badge/protocolo-Google%20A2A-blue)](https://google.github.io/A2A/)
+[![licencia](https://img.shields.io/badge/licencia-MIT-green)](LICENSE)
 
-Cross-chain agent-to-agent payment protocol, built on [Google A2A Protocol](https://google.github.io/A2A/) with pluggable chain adapters (EVM plus a Solana devnet settle rail), native identity, and x402 settlement. Pay once on an EVM chain, fan out to N agents.
+Protocolo y gateway HTTP para que un cliente encuentre agentes **por capacidad y no por dirección**, los **componga** en un flujo y **pague por uso**.
 
-**Pay once on Kite. Fan-out to N agents on Avalanche. Single HTTP request.**
+Un cliente no necesita saber que existe `remit-corridor-fx`. Pide "necesito una cotización de FX" y el gateway le devuelve quién puede hacerlo, en qué red cobra y cuánto sale. Después ejecuta el flujo con una sola llamada HTTP y el gateway se encarga del pago a cada agente.
 
-- **Live A2A gateway**: https://wasiai-a2a-production.up.railway.app
-- **Production app**: https://app.wasiai.io
-- **Pitch deck**: https://wasiai.io/pitch-v6
-- **Kite Hackathon 2026 submission**: see the [block below](#-kite-hackathon-2026-submission)
-- **Prior submission archive**: [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md) *(historical)*
+El gateway federa los catálogos de los marketplaces registrados: un agente publicado en cualquiera de ellos es descubrible desde cualquier app conectada. Esa es la tesis del repo: **el marketplace es una aplicación sobre el protocolo, no el protocolo**.
 
----
-
-## 🏆 Kite Hackathon 2026 submission
-
-**Project name**: WasiAI A2A Gateway for the Agentic Economy
-
-For this hackathon we built **WasiAI A2A** (this repo) — the commerce layer for the agentic economy. AI agents discover, invoke, and pay each other autonomously through x402 micropayments. Humans and agents use the same HTTP protocol, the same agent cards, the same payment rails.
-
-To prove the stack works end-to-end (gateway + marketplace + self-hosted facilitator wired together), we built **[WasiAgentShop](https://github.com/ferrosasfp/wasiai-agentshop)** as a real use case on top: cross-border LATAM remittances, settled in PYUSD on Kite Ozone. Three autonomous agents shop the marketplace, score corridors with live FX, and reserve the last-mile partner. Total agent fee: $0.061. End-to-end: under 30 seconds.
-
-| Resource | Link |
-|---|---|
-| 🌐 **Live demo** | https://wasiai-agentshop.vercel.app/ |
-| 🔗 **Sample on-chain tx** | [`0xf3eaa00a…0f1d674`](https://testnet.kitescan.ai/tx/0xf3eaa00a7e83c41b2b9d8247e39d32f564b36cd8745f91e3c080ff23f0f1d674) on KiteScan |
-| 📦 **Use case repo (WasiAgentShop)** | https://github.com/ferrosasfp/wasiai-agentshop |
-| 📋 **Judge walkthrough (5-min pass)** | [SUBMISSION.md](https://github.com/ferrosasfp/wasiai-agentshop/blob/main/SUBMISSION.md) |
-| ⚙️ **Self-hosted x402 facilitator** | https://github.com/ferrosasfp/wasiai-facilitator |
-| 🎤 **Pitch deck** | https://wasiai.io/pitch-v6/ |
-| 🎬 **Demo video** | https://www.youtube.com/watch?v=Ydh_sEJXgt4 |
-
-**Built by Fernando Rosas and Elizabeth Palacios.** We are WasiAI · [wasiai.io](https://wasiai.io)
+- Gateway en vivo: `https://wasiai-a2a-production.up.railway.app`
+- Protocolo base: [Google A2A](https://google.github.io/A2A/) + [x402](https://github.com/x402-foundation/x402) para el pago
 
 ---
 
-## Base Support
+## Descubrimiento por capacidad
 
-WasiAI A2A ships with first-class support for **Base Sepolia** (chainId `84532`) and **Base Mainnet** (chainId `8453`) via the WKH-103 chain adapter, sitting alongside Kite and Avalanche under the same multi-chain dispatch model. Inbound and outbound USDC settle via EIP-3009 `transferWithAuthorization`, with the EIP-712 domain (`name="USDC"`, `version="2"`) verified onchain.
-
-Full standalone guide: [`doc/integration-base.md`](doc/integration-base.md). Verifiable proof: [`doc/BASE-EVIDENCE.md`](doc/BASE-EVIDENCE.md) — three Base Sepolia `transferWithAuthorization` txs on 2026-05-19, total 0.016 USDC, all SUCCESS.
-
-### Quick Start (5 min)
+Todo el catálogo es público y no cuesta nada consultarlo.
 
 ```bash
-# 1. Clone .env
-cp .env.example .env
+GW=https://wasiai-a2a-production.up.railway.app
 
-# 2. Set three Base env vars
-#    WASIAI_A2A_CHAINS=kite-ozone-testnet,base-sepolia
-#    BASE_NETWORK=testnet
-#    BASE_TESTNET_RPC_URL=https://sepolia.base.org
+curl -s "$GW/discover?capabilities=price-feed" | jq '.agents[] | {slug, priceUsdc, chain: .payment.chain}'
+# {"slug":"wasi-chainlink-price","priceUsdc":0.001,"chain":"avalanche"}
 
-# 3. Register a wasi_a2a key (one-time)
-curl -X POST https://wasiai-a2a-production.up.railway.app/auth/agent-signup \
-  -H "Content-Type: application/json" \
-  -d '{"owner_ref":"base-demo","display_name":"Base Demo"}'
-
-# 4. Call /compose with x-payment-chain: base-sepolia
-curl -X POST https://wasiai-a2a-production.up.railway.app/compose \
-  -H "Content-Type: application/json" \
-  -H "x-a2a-key: $A2A_KEY" \
-  -H "x-payment-chain: base-sepolia" \
-  -d '{"pipeline":[{"agentSlug":"example-agent","input":{"q":"hello"}}]}'
-# → HTTP 200 (key-funded) or HTTP 402 with accepts[].network = "eip155:84532"
-
-# 5. Grep the selector log line for chainKey=base-sepolia to confirm chain selection.
+curl -s "$GW/discover?capabilities=remittance-fx-quote" | jq -r '.agents[].slug'
+# remit-corridor-fx-solana
+# remit-corridor-fx
 ```
 
-### Network Config
+El primero vive en un marketplace externo registrado (`registry: "WasiAI"`), el segundo se publicó directo contra el gateway (`registry: "self-published"`). El cliente que consulta no distingue uno de otro, y esa indistinción es el punto: la federación es transparente para quien consume.
 
-| Network | chainId | USDC contract | Explorer |
+Cada agente que devuelve `/discover` trae un `invokeUrl`, pero es una referencia interna. **El caller no llama al agente directo.** Invoca vía `/compose` (pipeline explícito) u `/orchestrate` (por objetivo, con el plan armado por un LLM). Eso es lo que permite que el gateway resuelva precio, presupuesto, scoping y liquidación en un solo lugar en vez de dejarlo en manos de cada cliente.
+
+## Composición y cobro
+
+`/compose` recibe los pasos ya resueltos y devuelve un challenge x402 si no viene pago:
+
+```bash
+curl -s -X POST "$GW/compose" -H 'content-type: application/json' \
+  -d '{"steps":[{"agent":"wasi-chainlink-price","input":{"symbol":"AVAX"}}]}'
+```
+
+```json
+{
+  "error": "payment-signature header is required",
+  "accepts": [{
+    "scheme": "exact",
+    "network": "eip155:2368",
+    "maxAmountRequired": "1010000000000000",
+    "payTo": "0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba",
+    "asset": "0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9",
+    "maxTimeoutSeconds": 300
+  }],
+  "x402Version": 2
+}
+```
+
+El monto es el precio real del pipeline más el fee de protocolo: `0.001 + 1% = 0.00101`. La misma llamada con el header `x-payment-chain: avalanche-fuji` devuelve `network: "eip155:43113"`, el USDC de Fuji y `maxAmountRequired: "1010"` (6 decimales en vez de 18). Es el mismo pipeline cotizado en otra red, sin tocar el body.
+
+Hay dos formas de pagar y el caller elige una por request:
+
+| Vía | Para quién | Cómo |
+|---|---|---|
+| x402 | consumidor esporádico, sin cuenta | responde el `402` con el header `X-Payment` firmado |
+| clave prepaga | integrador con volumen | `POST /auth/agent-signup` devuelve una `wasi_a2a_*`, se manda en `x-a2a-key` o `Authorization: Bearer` |
+
+Prioridad cuando llegan varias: `x-a2a-key` > `Bearer wasi_a2a_*` > x402. Un Bearer que no arranque con `wasi_a2a_` se ignora en vez de rechazarse, para no romper a quien ya usa ese header para otra cosa.
+
+El fee de protocolo es 1% por defecto (`PROTOCOL_FEE_RATE`, con clamp duro en `[0, 0.10]`: un valor fuera de rango loguea error y cae al default). Se calcula sobre el **costo real ejecutado**, no sobre el `budget` declarado, así que pedir un presupuesto grande no infla el fee. `POST /orchestrate/plan` devuelve `feeRatePercent` y `protocolFeeUsdc` para que el caller lea la tarifa efectiva del runtime en lugar de confiar en este documento.
+
+Ese 1% se subdivide en plataforma / creador / referido vía `SPLIT_BPS_*` en basis points, con validación fail-closed (los tres tienen que sumar exactamente `10000` o el proceso rechaza la config). El default es `10000/0/0`, todo a plataforma. Detalle y ejemplo trabajado en [`doc/architecture/FEE-MODEL.md`](doc/architecture/FEE-MODEL.md).
+
+---
+
+## Neutralidad de red
+
+La capa es neutral respecto de la red. No hay una cadena "principal" en el diseño: hay un adaptador por red y un selector por request.
+
+El caso concreto que motivó el diseño es una remesa. El marketplace de agentes corre sobre Avalanche, el principal de la remesa viaja por Solana, y la liquidación la coordina un servicio aparte (`wasiai-facilitator`) con un adaptador por red. Ninguna de las tres piezas necesita que las otras dos estén en su cadena.
+
+Cómo se implementa:
+
+- `PaymentAdapter` es una unión discriminada: `EvmPaymentAdapter | SolanaPaymentAdapter` (`src/adapters/types.ts`). La familia de VM es un dato del tipo, no un `if` desparramado.
+- El bundle de adaptadores (payment, attestation, gasless, identity) se construye por cadena en `src/adapters/registry.ts`. Agregar una red es una carpeta nueva en `src/adapters/<red>/` más una rama en el factory. Los servicios (L3) y las rutas (L4) no se tocan.
+- La selección por request sale del header `x-payment-chain` (acepta el slug o el chainId numérico) con fallback a la primera entrada de `WASIAI_A2A_CHAINS`.
+
+Redes soportadas en código (`SUPPORTED_CHAINS` + los dos rails detrás de bandera):
+
+| Slug | chainId | Estado en código |
+|---|---|---|
+| `kite-ozone-testnet` | 2368 | soportada (default si no se configura nada) |
+| `kite-mainnet` | 2366 | soportada, exige `KITE_NETWORK=mainnet` acoplado |
+| `avalanche-fuji` | 43113 | soportada |
+| `avalanche-mainnet` | 43114 | soportada, con opt-in extra para el leg de salida |
+| `base-sepolia` | 84532 | soportada |
+| `base-mainnet` | 8453 | soportada |
+| `tempo-testnet` | testnet | implementada, apagada por bandera (`TEMPO_ADAPTER_ENABLED`) |
+| `solana-devnet` | sentinela 900001 | implementada, encendida por bandera (`SOLANA_ADAPTER_ENABLED`) |
+
+Los dos rails con bandera arrancan apagados: con la bandera en `false` el slug ni siquiera entra al set soportado, así que el bundle no se construye y el leg corta con `CHAIN_NOT_SUPPORTED`. No es un `if` adentro del adaptador, es que el adaptador no existe en el proceso.
+
+## Qué corre hoy
+
+Esto es el estado real, no el roadmap. Se lee del `GET /capabilities` del deployment de producción.
+
+```bash
+curl -s "$GW/capabilities" | jq '.chains'
+```
+
+| Cadena inicializada hoy | chainId | Rail |
+|---|---|---|
+| Kite Ozone testnet | 2368 | entrante en PYUSD, es el default |
+| Avalanche Fuji | 43113 | entrante y saliente, USDC de testnet |
+| Base Sepolia | 84532 | entrante y saliente, USDC de testnet |
+| Solana devnet | sentinela 900001 | solo saliente, USDC-SPL |
+
+Las tres primeras filas se comprueban mandando `x-payment-chain` a `POST /compose` sin pago: el `402` vuelve con `eip155:2368`, `eip155:43113` o `eip155:84532` y el monto en los decimales del token de esa red.
+
+**Ninguna red mainnet está inicializada en el deployment de hoy.** Los adaptadores de mainnet existen y hubo liquidaciones reales en Avalanche C-Chain en abril de 2026 (ver [Evidencia on-chain](#evidencia-on-chain)), pero el gateway que está arriba ahora mismo corre testnet y devnet, sin dinero real.
+
+Estado del catálogo en ese mismo deployment: 25 agentes descubribles, de un marketplace federado más los publicados directo contra el gateway. Los agentes en sí no viven en este repo: este repo es el protocolo y el gateway, y el catálogo es de terceros.
+
+Sobre las apps que lo consumen, con el tiempo verbal correcto:
+
+- **Chaski** (la app de remesas) usa este gateway hoy **solo para el agente de cotización de FX**, y detrás de una bandera que arranca apagada. La identidad del usuario y el desembolso final se integran punto a punto, sin pasar por el protocolo. Cualquier afirmación de que la remesa entera se orquesta acá es falsa.
+- El marketplace de agentes delega `compose`, `orchestrate` y `capabilities` a este gateway.
+
+---
+
+## Arquitectura
+
+Tres servicios, una base Postgres compartida (Supabase):
+
+```
+app.wasiai.io (Vercel)            thin-proxy + UI del marketplace
+        |  x-wasiai-forward-key (HMAC)
+        v
+wasiai-a2a (Railway, este repo)   /discover /compose /orchestrate /tasks /mcp
+        |  x402 /verify y /settle (solo legs EVM)
+        v
+wasiai-facilitator (Railway)      firma y liquida por red
+        v
+                                  Kite / Avalanche / Base / Solana
+```
+
+El leg de Solana es la excepción a ese dibujo: no pasa por el facilitator. El operador del gateway firma la transferencia SPL y la difunde contra el RPC de devnet, porque no hay un equivalente de EIP-3009 del otro lado.
+
+Adentro del gateway hay cuatro capas:
+
+| Capa | Qué contiene |
+|---|---|
+| L4 API pública | `/discover`, `/compose`, `/orchestrate`, agent cards, `/tasks`, `/auth`, `/dashboard` |
+| L3 primitivas | identidad (`wasi_a2a_*`), presupuesto por clave y por cadena con débito atómico, scoping, rate limits |
+| L2 adaptadores | `PaymentAdapter`, `AttestationAdapter`, `GaslessAdapter`, `IdentityBindingAdapter` |
+| L1 infra | RPCs y contratos de cada red |
+
+La decisión no obvia acá es que **identidad, presupuesto y autorización viven off-chain (L3) y son propios**, no delegados a la cadena. El motivo es de costo: el ciclo A2A es de polling y de micropagos de fracciones de centavo, y resolver cada autorización on-chain cuesta más que el servicio que se está comprando. La cadena entra solo cuando hay que mover plata de verdad.
+
+Detalle completo en [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md) y [`doc/architecture/MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md).
+
+---
+
+## Endpoints
+
+Todos verificados contra `src/routes/`.
+
+**Públicos, sin costo**
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `GET` | `/` | info del servicio |
+| `GET` | `/health` | probe de salud |
+| `GET` | `/.well-known/agent.json` | agent card del propio gateway |
+| `GET \| POST` | `/discover` | busca agentes en todos los registries |
+| `GET` | `/discover/:slug` | un agente puntual |
+| `GET` | `/capabilities` | métodos, cadenas inicializadas y catálogo |
+| `GET` | `/agents/:slug/agent-card` | agent card A2A de un agente |
+| `GET` | `/registries`, `/registries/:id` | marketplaces registrados (las credenciales outbound nunca se serializan) |
+| `GET` | `/gasless/status` | estado del módulo gasless |
+| `GET` | `/dashboard`, `/dashboard/trace` | UI de analítica y de rastreo |
+
+`GET /metrics` expone el formato Prometheus, pero está protegido por `METRICS_TOKEN` y es fail-closed: en producción, si la variable no está seteada, responde `503` en vez de exponer métricas. Todo `/dashboard/api/*` devuelve datos cross-tenant y va detrás de token de operador (`DASHBOARD_ADMIN_TOKEN`); el HTML del dashboard es público porque no lleva ningún dato adentro, los pide el browser contra esa API gateada.
+
+**Con credencial**
+
+| Método | Ruta | Cobra | Descripción |
 |---|---|---|---|
-| Base Sepolia | `84532` | [`0x036C…CF7e`](https://sepolia.basescan.org/address/0x036CbD53842c5426634e7929541eC2318f3dCF7e) | https://sepolia.basescan.org |
-| Base Mainnet | `8453` | [`0x8335…2913`](https://basescan.org/address/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) | https://basescan.org |
+| `POST` | `/compose` | sí | ejecuta un pipeline explícito |
+| `POST` | `/orchestrate` | sí | ejecuta a partir de un objetivo |
+| `POST` | `/orchestrate/plan` | no debita | planifica y cotiza sin ejecutar ni liquidar |
+| `POST` | `/orchestrate/execute` | sí | ejecuta un plan ya aprobado, con techo de costo |
+| `POST` | `/registries` · `PATCH \| DELETE /registries/:id` | sí | alta y gestión de marketplaces |
+| `POST` | `/agents` · `PATCH \| DELETE /agents/:slug` | no | publicación self-serve de agentes |
+| `GET` | `/agents` | no | lista los agentes propios, filtrados por el owner del caller |
+| `POST` | `/agents/:slug/link` · `/agents/links/:token/redeem` | según el link | links de invocación acotados |
+| `POST` | `/mcp` | según el método | servidor MCP (JSON-RPC) |
+| `POST` | `/inbound/:source/tasks` | sí | ingreso de tareas externas por webhook, autenticado por HMAC |
 
-Env vars (full block in `.env.example`): `BASE_NETWORK`, `BASE_TESTNET_RPC_URL`, `BASE_MAINNET_RPC_URL`, `BASE_SEPOLIA_USDC_ADDRESS`, `BASE_MAINNET_USDC_ADDRESS`, `BASE_FACILITATOR_URL`, `CDP_FACILITATOR_URL`.
+Publicar un agente es gratis a propósito: cobrar el alta desincentiva justo lo que necesita el catálogo. El cobro va donde hay ejecución.
 
-### Facilitator Options
+**Tareas (A2A)**, con tenant obligatorio: solo devuelven las del caller y el rail anónimo x402 no aplica.
 
-Two facilitators can verify+settle Base EIP-3009 envelopes. They are interchangeable from the protocol's perspective — pick by operational fit:
+| Método | Ruta | Costo |
+|---|---|---|
+| `POST` | `/tasks` | $1 |
+| `GET` | `/tasks`, `/tasks/:id` | gratis |
+| `PATCH` | `/tasks/:id/status`, `/tasks/:id` | $1 |
 
-- **CDP Facilitator** (`https://x402.org/facilitator`) — Coinbase-hosted, no self-custody of the settle path, **required for Agentic.Market discovery**. Set `CDP_FACILITATOR_URL` to enable; Base-only selector (Kite + Avalanche traffic unaffected).
-- **wasiai-facilitator** (self-hosted at `https://wasiai-facilitator-production.up.railway.app`) — self-custody, single-tenant latency, your `OPERATOR_PRIVATE_KEY` signs the settle tx, your operator wallet pays Base gas in ETH.
+Leer una tarea es gratis a propósito. El ciclo de vida A2A se maneja por polling de `GET /tasks/:id`, así que cobrar por lectura significaba que un poll cada 5 segundos costaba 720 USD por hora: el precio peleaba contra el protocolo. Las lecturas gratis no emiten challenge `402` porque no hay nada que pagar.
 
-Decision matrix with criteria (self-custody, mainnet readiness, cost per tx, latency, Bazaar discovery): [`doc/integration-base.md` §4](doc/integration-base.md#4-facilitator-selection-guide).
+**Identidad y presupuesto**: `POST /auth/agent-signup`, `GET /auth/me`, `POST /auth/deposit` (verifica el depósito on-chain antes de acreditar), `POST|GET|DELETE /auth/key-session`, `POST|GET|DELETE /auth/delegation`, `PUT|GET|DELETE /auth/keys/me/spend-policies`, `POST /auth/erc8004/bind`, `GET /auth/erc8004/resolve/:token_id`. `POST /auth/bind/:chain` sigue devolviendo `501`: es un placeholder declarado, no una función.
 
-### Bazaar Discovery (Agentic.Market)
-
-Agents with `metadata.discoverable: true` (literal boolean) and JSON Schema `inputSchema` + `outputSchema` are eligible for indexing in [Agentic.Market](https://agentic.market) via the [Coinbase Bazaar Discovery Extension](https://github.com/x402-foundation/x402). To activate:
-
-1. Opt in on the agent manifest (`discoverable: true`, declare schemas, set `payment.chain` to `base-mainnet` or `base-sepolia`).
-2. Verify schemas appear on `GET /agents/<slug>/agent-card`.
-3. Set `CDP_FACILITATOR_URL=https://x402.org/facilitator` on the gateway. On the next Base settle, CDP picks up the discovery extension and indexes the agent.
-
-Full three-step walkthrough scoped to Base: [`doc/integration-base.md` §5](doc/integration-base.md#5-appear-on-agenticmarket).
-
-### Comparison with general integration guide
-
-The general (chain-agnostic) marketplace integration guide lives at [`doc/INTEGRATION.md`](doc/INTEGRATION.md) — auth, onboarding, x402, error codes, end-to-end examples. The Base-specific guide ([`doc/integration-base.md`](doc/integration-base.md)) is the 5-minute on-ramp for the Coinbase ecosystem and covers Base-only integration patterns, the facilitator selection matrix, and the Bazaar discovery flow. Read the general guide first if your integration is multi-chain; read the Base guide first if your target is Agentic.Market or a Base-native marketplace.
-
----
-
-## Solana Support
-
-WasiAI A2A includes a **non-EVM Solana devnet adapter** (WKH-234) that pays agents whose payout rail is Solana. The payment adapter is a discriminated union type: `PaymentAdapter = EvmPaymentAdapter | SolanaPaymentAdapter` (see `src/adapters/types.ts`). Solana addresses (base58 pubkeys) are validated independently of EVM addresses (0x hex).
-
-What the Solana rail actually does (`src/adapters/solana/payment.ts`):
-
-- **Settle-only, outbound.** It settles the downstream leg (the gateway paying a Solana-native agent) inside `signAndSettleDownstream` / `settleSolanaLeg` (`src/lib/downstream-payment.ts:287`). The inbound 402 challenge (charging the caller) stays EVM-only: `getPaymentAdapter()` throws for a non-EVM bundle (`src/adapters/registry.ts:416-419`), so `x-payment-chain: solana-devnet` is not a supported inbound rail.
-- **Operator-signed SPL transfer.** `settle()` builds a `createTransferInstruction`, signs with the operator `Keypair` from `SOLANA_OPERATOR_PRIVATE_KEY` (`getSolanaOperatorKeypair()`, `src/adapters/solana/chain.ts:84`) and broadcasts via `sendAndConfirmTransaction`. There is no EIP-3009 and no facilitator hop on this leg: the gateway operator is the sender and pays the SOL gas.
-- **Idempotent by `intentId`.** A repeated `intentId` re-verifies the prior signature on-chain (`getParsedTransaction`, pre/post token balances of `payTo`) and returns it instead of re-broadcasting. That `intentId -> signature` map is in-process, so idempotency survives retries inside a process but not a restart (durable cross-process lookup is a tracked follow-up).
-- **Verify-before-trust.** `verify()` asserts an on-chain token balance delta `>= amountAtomic` for the expected mint and `payTo`.
-
-Mainnet Solana is not supported. Devnet only: `solana-devnet` chainKey, zero production money.
-
-### Activation checklist (Solana devnet)
-
-Gateway env vars, exact names from [`.env.example`](.env.example) (Solana block):
-
-| Var | Required | Value / default |
-|-----|----------|-----------------|
-| `SOLANA_ADAPTER_ENABLED` | yes | `true` (default `false`, the rail is inert while off) |
-| `WASIAI_A2A_CHAINS` | yes | must include `solana-devnet` in the comma-separated list, otherwise the bundle is never built and the leg logs `CHAIN_NOT_SUPPORTED` |
-| `SOLANA_OPERATOR_PRIVATE_KEY` | yes | base58 ed25519 secret of the operator that signs and broadcasts the SPL transfer. Its pubkey needs **devnet SOL for gas** (and devnet USDC in its ATA to have something to send). Never logged, never committed. |
-| `WASIAI_DOWNSTREAM_X402` | yes | `true`, the downstream settle path is flag-gated (`DOWNSTREAM_FLAG`, `src/lib/downstream-payment.ts:42`) |
-| `SOLANA_RPC_URL` | no | `https://api.devnet.solana.com` |
-| `SOLANA_USDC_MINT_DEVNET` | no | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` (Circle USDC-SPL devnet) |
-| `SOLANA_USDC_DECIMALS` | no | `6` |
-| `SOLANA_COMMITMENT` | no | `confirmed` |
-| `SOLANA_CAIP2_CHAIN_ID` | no | `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` |
-| `SOLANA_SYNTHETIC_CHAIN_ID` | no | `900001` (non-EVM numeric sentinel, not an authoritative chainId) |
-| `SOLANA_CLUSTER` | no | `devnet` (only value supported) |
-| `SOLANA_RPC_URL_FALLBACK` | no | empty |
-
-There is no escrow program variable in this repo: the non-custodial escrow lives in the `wasiai-facilitator` service, not in this gateway. If a checklist mentions `SOLANA_ESCROW_PROGRAM_ID`, it belongs to the facilitator, and this rail does not read it.
-
-Once the vars are set, the rail fires on the downstream leg of `/compose` for any agent whose `payment.chain` is `solana-devnet` and whose `payment.contract` is a base58 pubkey. Grep the logs for `solana settle broadcast confirmed` (success, includes the signature) or for the skip codes `CHAIN_NOT_SUPPORTED` / `INVALID_PAY_TO_FORMAT` / `SETTLE_FAILED` (the leg never throws, it logs and returns `null`, so a missing operator key fails silently from the caller's point of view).
-
-The receipt columns `settle_caip2` / `settle_signature` come from migration `supabase/migrations/20260724000000_wkh234_receipt_solana_caip2.sql`. The ledger write is best-effort and does not block `/compose`, so an unapplied migration costs telemetry, not settlement.
-
-### Network config
-
-| Network | CAIP-2 | USDC mint (devnet) | Scheme |
-|---------|--------|--------------------|--------|
-| Solana devnet | `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` | `spl-transfer` |
-
-### Solana devnet status (WKH-234, WKH-237)
-
-The Solana adapter is **implemented and unit-tested**, with `SOLANA_ADAPTER_ENABLED` defaulting to OFF. The rail is present in the codebase but inert on any deployment that does not explicitly enable it. No Solana mainnet, no real money: devnet only, for demo and validation.
+**Pagos programados**: `POST /payments/session` (medido, con vouchers y cierre) y `POST /payments/upto` (tope firmado por ambas partes), más sus `/settle`, `/close` y `/dispute`.
 
 ---
 
-## Production Status
+## Correrlo local
 
-| Component | URL | Status |
-|-----------|-----|--------|
-| Marketplace UI + thin-proxy | https://app.wasiai.io | live (Vercel) |
-| A2A orchestrator (this repo) | https://wasiai-a2a-production.up.railway.app | live (Railway) |
-| Multi-chain x402 facilitator | https://wasiai-facilitator-production.up.railway.app | live (Railway) |
-| WasiAgentShop demo (use case) | https://wasiai-agentshop.vercel.app | live (Vercel) |
-| Base Sepolia adapter (84532) | [sepolia.basescan.org](https://sepolia.basescan.org) | staged (env-gated, WKH-103) |
-| Base Mainnet adapter (8453) | [basescan.org](https://basescan.org) | staged (env-gated, WKH-103) |
-| Solana devnet adapter | [solana.fm](https://solana.fm) | experimental (opt-in-off, WKH-234, devnet only) |
-
-Quality snapshot:
-
-- TypeScript strict, zero `any` — `tsc --noEmit` clean
-- 1,660+ tests green across the a2a + marketplace + facilitator stack
-- Adversarial review, code review, and QA gates green on every shipped feature
-- Multi-chain live on 4 chains simultaneously: Kite Ozone testnet, Kite mainnet, Avalanche Fuji, Avalanche mainnet. Base Sepolia/Mainnet staged (env-gated), Solana devnet present but opt-in-off
-- Mainnet hybrid mode active: Kite testnet PYUSD inbound + Avalanche C-Chain mainnet USDC outbound, real-money smoke verified
-- VM-family adaptive: PaymentAdapter discriminated union (EvmPaymentAdapter for EVM chains, SolanaPaymentAdapter for the Solana settle-only, operator-signed SPL path)
-
-Mainnet proof — real cross-chain agent payments on production money:
-
-| Tx | Chain | Type | Explorer |
-|----|-------|------|----------|
-| `0x9fa6ff83…` | Avalanche C-Chain mainnet | USDC outbound (wasi-chainlink-price, $0.001) | [snowtrace](https://snowtrace.io/tx/0x9fa6ff83eb10e51685ce078e69f9c42fcbe3b138b5b8c3f32909c9fee279c6f1) |
-| `0xa22086d0…` | Avalanche C-Chain mainnet | USDC outbound (wasi-defi-sentiment, $0.010) | [snowtrace](https://snowtrace.io/tx/0xa22086d048b0222a8e08a5ca08997ae6c359e5ba674e63133a0ffbc463af16f9) |
-| `0xca10320c…` | Avalanche C-Chain mainnet | USDC outbound (wasi-wallet-profiler, $0.050) | [snowtrace](https://snowtrace.io/tx/0xca10320c24ff513d773ce65e0bd306d4acce3e4883180c9dca5573da6cf1dfdb) |
-| `0x6f406c08…` | Kite testnet | PYUSD inbound (1.0 PYUSD) | [kitescan](https://testnet.kitescan.ai/tx/0x6f406c08f6e59e3c5029f57ec3a84bb4596b94bb02568055ec4f9572981a1bf9) |
-| `0xf3eaa00a…` | Kite Ozone testnet | PYUSD settle from WasiAgentShop demo | [kitescan](https://testnet.kitescan.ai/tx/0xf3eaa00a7e83c41b2b9d8247e39d32f564b36cd8745f91e3c080ff23f0f1d674) |
-
-### Verifiable proof on Base Sepolia
-
-WKH-104 (Base adapter) + WKH-105 (facilitator Base) verified end-to-end with real `transferWithAuthorization` transactions on Base Sepolia. See [`doc/BASE-EVIDENCE.md`](doc/BASE-EVIDENCE.md) for tx hashes verifiable in [sepolia.basescan.org](https://sepolia.basescan.org).
-
----
-
-## Architecture
-
-### Production deployment topology
-
-During the Kite Hackathon, we cut over `compose`, `orchestrate`, and `capabilities` from the pre-hackathon v2-coupled stack to this chain-adaptive a2a gateway, and added a self-hosted multi-chain facilitator alongside. Today three services share one Supabase production DB:
-
-```
-+-------------------------------------------------------------+
-|  app.wasiai.io  (Vercel — thin-proxy + marketplace UI)      |
-|  /api/v1/{compose, orchestrate, capabilities, mcp}          |
-+--------------------------+----------------------------------+
-                           | x-wasiai-forward-key (HMAC compare)
-                           v
-+-------------------------------------------------------------+
-|  wasiai-a2a  (Railway — Fastify, this repo)                 |
-|  /compose, /orchestrate, /discover, /tasks, /mcp            |
-|  Kite testnet PYUSD inbound  /  USDC outbound (mainnet)     |
-|  Solana devnet SPL-USDC outbound (signed here, devnet only) |
-+--------------------------+----------------------------------+
-                           | x402 /verify, /settle (spec-literal)
-                           | EIP-3009, EVM legs only
-                           v
-+-------------------------------------------------------------+
-|  wasiai-facilitator  (Railway — Fastify, multi-chain)       |
-|  Kite testnet (2368)  -- PYUSD                              |
-|  Kite mainnet (2366)  -- USDC.e        [staged, env-gated]  |
-|  Avalanche Fuji (43113) -- USDC                             |
-|  Avalanche C-Chain (43114) -- USDC      [active, mainnet]   |
-+--------------------------+----------------------------------+
-                           | Settlement layer
-                           v
-        +----------------------------------------+
-        | On-chain (Kite, Avalanche, Solana)     |
-        +----------------------------------------+
-```
-
-Cross-chain flow: **Kite testnet PYUSD inbound** (or USDC on mainnet) → orchestrator fan-out → **Avalanche C-Chain USDC outbound** to N agents (mainnet hybrid mode). Solana devnet is available for the outbound fee leg only: that leg skips the facilitator, the gateway operator signs the SPL transfer and broadcasts it to the devnet RPC (see [Solana Support](#solana-support)).
-
-### Logical layers
-
-WasiAI A2A is a four-layer agentic economy gateway. Identity, budget, and authorization are owned off-chain (L3). On-chain settlement, attestation, and gasless execution are delegated to pluggable adapters (L2), selected at runtime via `WASIAI_A2A_CHAIN`.
-
-```
-+-------------------------------------------------------------+
-|  L4 -- Public API (chain-agnostic, stable interface)        |
-|  Core A2A: /discover  /compose  /orchestrate                |
-|  Agent Cards: /agents/:slug/agent-card  /.well-known/*      |
-|  Ops: /dashboard  /tasks                                    |
-|  Identity: /auth/agent-signup  /auth/deposit  /auth/me      |
-|  Binding: /auth/bind/:chain                                 |
-+-----------------------------+-------------------------------+
-                              | uses
-+-----------------------------v-------------------------------+
-|  L3 -- Agentic Economy Primitives (owned, chain-agnostic)   |
-|  IdentityService  -- wasi_a2a_xxx keys + bindings           |
-|  BudgetService    -- per-key, per-chain, atomic debit       |
-|  AuthzService     -- scoping: registries/agents/categories  |
-|  RateLimitService -- daily / hourly / per-call caps         |
-+-----------------------------+-------------------------------+
-                              | uses
-+-----------------------------v-------------------------------+
-|  L2 -- Chain Adapters (pluggable, runtime-selected)         |
-|  +----------+--------------+----------+------------------+  |
-|  | Payment  | Attestation  | Gasless  | IdentityBinding  |  |
-|  +----------+--------------+----------+------------------+  |
-+-----------------------------+-------------------------------+
-                              | talks to
-+-----------------------------v-------------------------------+
-|  L1 -- Blockchain / Infra                                   |
-|  Kite (testnet 2368, mainnet 2366) + Avalanche (Fuji 43113, |
-|  C-Chain 43114)                                             |
-+-------------------------------------------------------------+
-```
-
-For the full architecture document, see [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md).
-
-### Adapter bundles
-
-The `WASIAI_A2A_CHAIN` env var selects which adapter bundle loads at startup. Mainnet bundles are env-gated and default OFF; flipping flags routes the same code to mainnet without redeploys.
-
-| Bundle | Status | Inbound asset | Outbound asset | Notes |
-|--------|--------|---------------|----------------|-------|
-| `kite-ozone-testnet` | active | PYUSD on Kite testnet (2368) | -- | Default `WASIAI_A2A_CHAIN`. Used in all hackathon demos. |
-| `kite-mainnet` | staged (env-gated) | USDC.e on Kite mainnet (2366) | -- | Flip requires **three** coupled envs: `WASIAI_A2A_CHAINS=kite-mainnet` (no Kite *testnet* slug in the CSV) + `KITE_NETWORK=mainnet` + `KITE_MAINNET_RPC_URL`. ⚠️ `KITE_NETWORK=mainnet` next to a Kite *testnet* slug repoints the `kite-ozone-testnet` bundle at chain 2366 (real USDC.e) while the slug still reads "testnet" → the gateway refuses to start (2026-07-26 fix-pack). ⚠️ The slug **without** `KITE_NETWORK=mainnet` starts but signs on 2368 with testnet PYUSD (`ADAPTER_CHAIN_ID_DRIFT`). Both Kite rails cannot coexist in one process (`TD-NEW-KITE-PARAMS`). Full runbook: [`doc/architecture/MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) §8. |
-| `avalanche-fuji` | active | -- | USDC testnet on Fuji (43113) | Default downstream when `WASIAI_DOWNSTREAM_X402=true`. |
-| `avalanche-mainnet` | staged (fail-closed gate) | -- | USDC mainnet on Avalanche C-Chain (43114) | Ran a mainnet hybrid settle on 2026-04-29. Since the 2026-07-26 fix-pack the downstream leg to ANY mainnet requires the explicit opt-in `WASIAI_DOWNSTREAM_MAINNET_ALLOW=avalanche-mainnet`; absent/empty ⇒ skipped with `MAINNET_NOT_ALLOWED`. (The old `WASIAI_DOWNSTREAM_NETWORK` is not read by any code path.) |
-| `solana-devnet` | opt-in-off | -- (inbound is EVM-only) | SPL-USDC on Solana devnet | Non-EVM: settle-only, operator-signed SPL transfer, no facilitator hop. Enabled via `SOLANA_ADAPTER_ENABLED=true` + `solana-devnet` in `WASIAI_A2A_CHAINS` + `SOLANA_OPERATOR_PRIVATE_KEY` (needs devnet SOL for gas). WKH-234. |
-
-### Multi-chain support
-
-Since WKH-MULTICHAIN (086), `wasiai-a2a` runs all four bundles simultaneously within a single process. Chain selection per request is driven by the `x-payment-chain` header (accepts slug or chainId numeric — e.g. `avalanche-fuji` or `43113`) with fallback to the first entry of `WASIAI_A2A_CHAINS`. The legacy single-chain `WASIAI_A2A_CHAIN=<slug>` env var is preserved for backward-compat. See [`doc/architecture/MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) for the full model, alias table, and post-merge activation procedures.
-
-Adding a new chain: see the **Adapter Pattern** section below.
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- Node.js 20 or newer (the dev setup; Railway/Vercel pin Node 22)
-- Supabase project (PostgreSQL persistence)
-- Kite testnet wallet with some native KITE for gas (for x402 demos)
-
-### Run locally
+Node 22 o superior (`engines` del `package.json`; el CI corre 22).
 
 ```bash
 git clone https://github.com/ferrosasfp/wasiai-a2a.git
 cd wasiai-a2a
-
 npm install
 
 cp .env.example .env
-# Edit .env with your Supabase URL + service-role key, Anthropic API key,
-# Kite wallet address, and (optionally) operator private key for x402/gasless
+# mínimo para arrancar: SUPABASE_URL, SUPABASE_SERVICE_KEY,
+# KITE_WALLET_ADDRESS (o PAYMENT_WALLET_ADDRESS) y ANTHROPIC_API_KEY
 
-npm run dev
-# Server starts on http://localhost:3001
-
-npm test
-# Runs the full Vitest suite (644+ tests in this repo; 1,660+ across the a2a + marketplace + facilitator stack)
+npm run dev          # tsx watch, escucha en 3001
 ```
 
-### Build and start
+El puerto por defecto es 3001 y no 3000, para no chocar con un Next.js corriendo al lado.
 
-```bash
-npm run build
-npm start
-```
+Scripts reales del `package.json`:
 
-### Hackathon E2E (PYUSD settlement on Kite testnet)
+| Script | Qué hace |
+|---|---|
+| `npm run dev` | servidor con recarga (`tsx watch`) |
+| `npm run build` | `tsc` a `dist/` y copia de estáticos |
+| `npm start` | corre `dist/index.js` |
+| `npm test` | suite completa (Vitest) |
+| `npm run test:coverage` | suite con cobertura y umbrales |
+| `npm run lint` | Biome sobre `src/` |
+| `npm run format` | Biome con escritura |
+| `npm run smoke:downstream` | smoke de red del leg de pago saliente |
+| `npm run migrate:preflight` | chequeo previo de migraciones |
 
-Reproducible proof of the full x402 + Kite PYUSD path against the live production endpoints — discovery, canonical x402 `/verify`, on-chain `/settle`, and receipt verification. Auto-mints PYUSD via the permissionless `claim()` on the token contract if the wallet is empty.
+Sin `SUPABASE_URL` real el servidor arranca igual y responde `/health`, pero todo lo que toque catálogo o presupuesto falla: la persistencia no es opcional.
 
-```bash
-# requires OPERATOR_PRIVATE_KEY in .env (any wallet with some native KITE for gas)
-node scripts/hackathon-e2e.mjs
-```
+`.env.example` documenta 122 variables con sus defaults. Las que cambian el comportamiento del dinero son pocas y están agrupadas ahí: `WASIAI_A2A_CHAINS`, `WASIAI_DOWNSTREAM_X402`, `WASIAI_DOWNSTREAM_MAINNET_ALLOW`, `PROTOCOL_FEE_RATE`, `SPLIT_BPS_*`, `GASLESS_ENABLED`, `SOLANA_ADAPTER_ENABLED`, `TEMPO_ADAPTER_ENABLED`.
 
-Overrides (optional):
+Dos guardas de arranque que conviene conocer antes de tocar config de mainnet:
 
-| Env var | Default | Purpose |
-|---------|---------|---------|
-| `A2A_URL` | `https://wasiai-a2a-production.up.railway.app` | A2A gateway to hit |
-| `WASIAI_FACILITATOR_URL` | `https://wasiai-facilitator-production.up.railway.app` | Canonical multi-chain x402 facilitator |
-| `X402_PAYMENT_TOKEN` | `0x8E04D099…2ec9` | PYUSD contract address on Kite testnet |
-| `KITE_TESTNET_RPC_URL` | `https://rpc-testnet.gokite.ai/` | Kite RPC endpoint |
-
-The script prints a tx hash + explorer URL on success.
+- El proceso **se niega a arrancar** si el slug de cadena y la variable de red del adaptador se contradicen (por ejemplo el slug de Kite testnet con `KITE_NETWORK=mainnet`, que apuntaría el bundle "testnet" a la cadena 2366 con dinero real).
+- El leg de salida hacia cualquier mainnet exige un opt-in explícito en `WASIAI_DOWNSTREAM_MAINNET_ALLOW`. Vacío o ausente significa que ningún leg de mainnet liquida: corta con `MAINNET_NOT_ALLOWED`. Es fail-closed a propósito.
 
 ---
 
-## Environment Variables
-
-All variables from `.env.example` with their defaults:
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `PORT` | No | `3001` | Server port |
-| `NODE_ENV` | No | -- | `development` enables verbose error details |
-| `SUPABASE_URL` | Yes | -- | Supabase project URL |
-| `SUPABASE_SERVICE_KEY` | Yes | -- | Supabase service_role key (not anon key) |
-| `KITE_RPC_URL` | No | `https://rpc-testnet.gokite.ai/` | Kite chain RPC endpoint |
-| `KITE_WALLET_ADDRESS` | Yes | -- | Wallet address that receives x402 payments |
-| `KITE_FACILITATOR_URL` | No | `https://wasiai-facilitator-production.up.railway.app` | Canonical multi-chain x402 facilitator (set to `https://facilitator.pieverse.io` to use Pieverse legacy) |
-| `KITE_FACILITATOR_MODE` | No | `pieverse` | `pieverse` or `x402` (canonical spec via WasiAI facilitator) |
-| `KITE_PAYMENT_AMOUNT` | No | `1000000000000000000` (1 token in wei) | Payment amount override |
-| `KITE_MERCHANT_NAME` | No | `WasiAI` | Merchant name shown to paying agents |
-| `PAYMENT_WALLET_ADDRESS` | No | Falls back to `KITE_WALLET_ADDRESS` | Chain-agnostic alias for payment wallet |
-| `WASIAI_A2A_CHAIN` | No | `kite-ozone-testnet` | Selects the adapter bundle at startup |
-| `KITE_NETWORK` | No | `testnet` | `testnet` (chain 2368) or `mainnet` (chain 2366). ⚠️ Read at **call time** by the Kite adapter and coupled to `WASIAI_A2A_CHAINS`: `mainnet` requires the `kite-mainnet` slug **and no Kite testnet slug** (otherwise the gateway refuses to start), and the slug alone without this var signs on testnet PYUSD. See the `kite-mainnet` row in [Adapter bundles](#adapter-bundles) and [`doc/architecture/MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) §8 |
-| `KITE_MAINNET_RPC_URL` | Conditional | -- | Required when `KITE_NETWORK=mainnet` (i.e. when the `kite-mainnet` bundle is active) |
-| `WASIAI_DOWNSTREAM_X402` | No | -- | Set to `true` to enable downstream USDC payouts to wasiai-v2 agents |
-| `WASIAI_DOWNSTREAM_MAINNET_ALLOW` | No | -- (fail-closed) | CSV of mainnet slugs/chainIds allowed to settle the DOWNSTREAM leg (e.g. `avalanche-mainnet`). Empty/absent = no mainnet leg can settle (`MAINNET_NOT_ALLOWED`). The leg chain itself comes from `agent.payment.chain` (WKH-112), never from an env var |
-| `AVALANCHE_RPC_URL` | Conditional | -- | Required when a leg resolves to `avalanche-mainnet` |
-| `FUJI_RPC_URL` | No | `https://api.avax-test.network/ext/bc/C/rpc` | Avalanche Fuji RPC |
-| `GASLESS_ENABLED` | No | `false` | Enable gasless EIP-3009 transfers |
-| `OPERATOR_PRIVATE_KEY` | Conditional | -- | Operator wallet private key (required when `GASLESS_ENABLED=true`, downstream x402, or x402 signing) |
-| `WASIAI_V2_FORWARD_KEY` | No | -- | HMAC shared secret for thin-proxy auth (defense in depth) |
-| `ANTHROPIC_API_KEY` | Yes | -- | Anthropic API key for LLM planning in `/orchestrate` |
-| `BASE_URL` | No | Auto-detected from request | Override the base URL for agent card generation |
-| `CHAIN_EXPLORER_URL` | No | Falls back to `KITE_EXPLORER_URL`, then `https://testnet.kitescan.ai` | Block explorer URL for dashboard links |
-| `KITE_EXPLORER_URL` | No | `https://testnet.kitescan.ai` | Kite-specific explorer URL (legacy alias) |
-| `RATE_LIMIT_MAX` | No | `60` | Global per-IP rate limit |
-| `RATE_LIMIT_ORCHESTRATE_MAX` | No | `10` | Heavy-route per-IP limit (`/orchestrate`, `/compose`) |
-| `RATE_LIMIT_SIGNUP_MAX` | No | `5` | Limit for `/auth/agent-signup` |
-| `RATE_LIMIT_WINDOW_MS` | No | `60000` | Rate limit window in ms |
-| `BACKPRESSURE_MAX` | No | `20` | Max concurrent in-flight `/orchestrate` requests |
-| `TIMEOUT_ORCHESTRATE_MS` | No | `120000` | Request timeout for `/orchestrate` |
-| `TIMEOUT_COMPOSE_MS` | No | `180000` | Request timeout for `/compose` (raised in WKH-65 to absorb the Vercel → Railway hop) |
-| `SHUTDOWN_GRACE_MS` | No | `30000` | Graceful shutdown timeout |
-| `CB_ANTHROPIC_FAILURES` | No | `5` | Anthropic circuit breaker failure threshold |
-| `CB_ANTHROPIC_WINDOW_MS` | No | `60000` | Anthropic circuit breaker window |
-| `CB_ANTHROPIC_COOLDOWN_MS` | No | `30000` | Anthropic circuit breaker cooldown |
-| `CB_REGISTRY_FAILURES` | No | `5` | Per-registry circuit breaker failure threshold |
-| `CB_REGISTRY_WINDOW_MS` | No | `60000` | Per-registry circuit breaker window |
-| `CB_REGISTRY_COOLDOWN_MS` | No | `30000` | Per-registry circuit breaker cooldown |
-
-See `.env.example` for the complete reference (MCP server, schema-transform HMAC, gasless pricing, protocol fee, SSRF allowlists, etc.).
-
----
-
-## API Endpoints
-
-### Health and Discovery
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/` | None | Health check -- returns service info and endpoint list |
-| `GET` | `/health` | None | Health probe -- returns `{ status, version, uptime, timestamp }` |
-| `GET` | `/.well-known/agent.json` | None | Gateway self-describing A2A Agent Card |
-| `GET \| POST` | `/discover` | None | Search agents across all registered marketplaces |
-
-#### Proxy Invocation Pattern
-
-Agents returned by `/discover` include an `invokeUrl` field, but this is an **internal reference** used by the gateway. Callers must **not** call agent URLs directly. Instead:
-
-1. **Discover** agents via `GET /discover` or `POST /discover`.
-2. **Invoke** discovered agents through `POST /compose` (explicit pipeline) or `POST /orchestrate` (goal-based, LLM-planned).
-
-Each agent object includes an `invocationNote` field that documents this pattern.
-
-### Registries (Marketplace Management)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/registries` | None | List all registered marketplaces |
-| `POST` | `/registries` | None | Register a new marketplace |
-| `GET` | `/registries/:id` | None | Get a specific registry |
-| `PATCH` | `/registries/:id` | None | Update a registry |
-| `DELETE` | `/registries/:id` | None | Delete a registry |
-
-### Core A2A (x402 or x-a2a-key required)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `POST` | `/compose` | x402 / x-a2a-key | Execute multi-agent pipelines |
-| `POST` | `/orchestrate` | x402 / x-a2a-key | Goal-based orchestration (LLM selects agents) |
-
-### Agent Cards
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/agents/:slug/agent-card` | None | A2A Agent Card for a specific agent |
-
-### Tasks (A2A Protocol)
-
-Every `/tasks` route is tenant-scoped: it requires an `x-a2a-key` (or
-`Authorization: Bearer wasi_a2a_*`) and only ever returns the caller's own tasks.
-The anonymous x402 rail cannot be used here (no tenant identity).
-
-**Reading a task is free; creating and mutating one costs $1.** The A2A lifecycle
-is driven by polling `GET /tasks/:id`, so charging per read meant a 5-second poll
-cost 720 USD/hour — the price fought the protocol. The free reads emit **no `402`
-challenge at all** (there is nothing to pay for). See
-[`doc/INTEGRATION.md`](doc/INTEGRATION.md) §3.
-
-| Method | Path | Auth | Cost | Description |
-|--------|------|------|------|-------------|
-| `POST` | `/tasks` | x-a2a-key / Bearer | $1 | Create a new task |
-| `GET` | `/tasks` | x-a2a-key / Bearer | free | List your tasks (`status`, `context_id`, `limit`) |
-| `GET` | `/tasks/:id` | x-a2a-key / Bearer | free | Get task status (the polling endpoint) |
-| `PATCH` | `/tasks/:id/status` | x-a2a-key / Bearer | $1 | Update task state |
-| `PATCH` | `/tasks/:id` | x-a2a-key / Bearer | $1 | Append messages/artifacts |
-
-### Identity (Agentic Economy L3)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `POST` | `/auth/agent-signup` | None | Create a new `wasi_a2a_xxx` agent key |
-| `POST` | `/auth/deposit` | None | Register a deposit (501 until on-chain verification lands) |
-| `GET` | `/auth/me` | x-a2a-key / Bearer | Get key status: budget, scoping, bindings |
-| `POST` | `/auth/bind/:chain` | None | On-chain identity binding (501 -- planned for Fase 2) |
-
-### Gasless (EIP-3009)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/gasless/status` | None | Gasless module status and `funding_state` |
-| `POST` | `/gasless/transfer` | None | Execute gasless EIP-3009 transfer (503 when not operational) |
-
-### Dashboard (Analytics)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/dashboard` | None | Analytics dashboard (HTML UI) |
-| `GET` | `/dashboard/api/stats` | None | Aggregated KPIs (JSON) |
-| `GET` | `/dashboard/api/events` | None | Recent events list (JSON) |
-
-### Mock Registry (Development)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/mock-registry/agents` | None | In-memory mock agents for development |
-
----
-
-## Identity System
-
-WasiAI A2A provides its own identity primitive: `wasi_a2a_xxx` keys stored in the `a2a_agent_keys` table. These are independent from any marketplace auth system.
-
-### Signup
-
-```bash
-curl -X POST https://wasiai-a2a-production.up.railway.app/auth/agent-signup \
-  -H "Content-Type: application/json" \
-  -d '{"owner_ref": "my-app", "display_name": "My Agent"}'
-
-# Response 201:
-# { "key": "wasi_a2a_abc123...", "key_id": "uuid-here" }
-```
-
-The plaintext key is returned **once** at signup. Store it securely.
-
-### Check Status
-
-Pass your key via the `x-a2a-key` header or the standard `Authorization: Bearer` header:
-
-```bash
-# Option 1: x-a2a-key header
-curl https://wasiai-a2a-production.up.railway.app/auth/me \
-  -H "x-a2a-key: wasi_a2a_abc123..."
-
-# Option 2: Authorization: Bearer header
-curl https://wasiai-a2a-production.up.railway.app/auth/me \
-  -H "Authorization: Bearer wasi_a2a_abc123..."
-
-# Response 200:
-# { "key_id": "...", "budget": {"2368": "10.00"}, "scoping": {...}, ... }
-```
-
-When both headers are present, `x-a2a-key` takes priority. The Bearer token must start with `wasi_a2a_` to be recognized; other Bearer schemes are ignored.
-
-### Key Features
-
-- **Per-key budget** by chain: `{"2368": "10.00", "43114": "25.00"}`
-- **Daily spending limits** with lazy reset
-- **Scoping**: restrict to specific registries, agent slugs, or categories
-- **Per-call limit**: cap estimated cost per request
-- **On-chain bindings** (optional): ERC-8004, Kite Passport (future), AgentKit wallet
-
----
-
-## Payment Flow
-
-Two payment paths coexist. Callers choose one per request.
-
-### Path 1: x402 Protocol (one-off consumers)
-
-1. Call `/compose` or `/orchestrate` without payment headers.
-2. Receive a `402` response with `accepts` array describing the payment scheme.
-3. Obtain a payment token (e.g., via Kite Agent Passport or compatible x402 signer).
-4. Resend the request with the `X-Payment` header.
-
-```bash
-# Step 1: get payment requirements
-curl -X POST https://wasiai-a2a-production.up.railway.app/orchestrate \
-  -H "Content-Type: application/json" \
-  -d '{"goal": "analyze token safety", "budget": 1}'
-# -> 402 with accepts[].scheme, payTo, asset, etc.
-
-# Step 3: call with payment
-curl -X POST https://wasiai-a2a-production.up.railway.app/orchestrate \
-  -H "Content-Type: application/json" \
-  -H "X-Payment: <payment-token>" \
-  -d '{"goal": "analyze token safety", "budget": 1}'
-```
-
-### Path 2: x-a2a-key / Bearer (heavy users, pre-funded)
-
-1. Sign up via `POST /auth/agent-signup` to get a `wasi_a2a_xxx` key.
-2. Fund the key (deposit flow -- pending on-chain verification in WKH-35).
-3. Pass the key via `x-a2a-key` header or `Authorization: Bearer wasi_a2a_xxx` on every paid request.
-
-```bash
-# Using x-a2a-key header
-curl -X POST https://wasiai-a2a-production.up.railway.app/orchestrate \
-  -H "Content-Type: application/json" \
-  -H "x-a2a-key: wasi_a2a_abc123..." \
-  -d '{"goal": "analyze token safety", "budget": 1}'
-
-# Using Authorization: Bearer header (equivalent)
-curl -X POST https://wasiai-a2a-production.up.railway.app/orchestrate \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer wasi_a2a_abc123..." \
-  -d '{"goal": "analyze token safety", "budget": 1}'
-```
-
-Priority: `x-a2a-key` > `Authorization: Bearer wasi_a2a_*` > x402. Bearer tokens that do not start with `wasi_a2a_` are ignored.
-
-The middleware hashes the key, validates budget/scoping/limits, performs an optimistic debit, then executes the request. The response includes an `x-a2a-remaining-budget` header.
-
----
-
-## Protocol Fee (transparent)
-
-The gateway charges a **protocol fee** on orchestrated pipelines. Unlike closed
-brokers that keep their take rate opaque, WasiAI publishes it:
-
-- **Default rate: 1%.** This is the shipped default, not necessarily the value
-  a given operator runs — always read the effective rate from the quote (below).
-- **Base: the real executed cost of the pipeline**, not the declared `budget`.
-  The fee is a fraction of what the composed agents actually cost, so a large
-  `budget` does not inflate it. (Cost-based fee, `fix/129-wkh-132-orchestrate-fee-on-cost`.)
-- **Configurable** by the operator via the `PROTOCOL_FEE_RATE` env var, a
-  fraction (e.g. `0.01` = 1%) clamped to the range `[0, 0.10]`. Out-of-range or
-  non-numeric values fall back to the `0.01` default. The current env value is
-  intentionally not hardcoded here so this doc never goes stale.
-
-### Reading the effective fee at runtime
-
-`POST /orchestrate/plan` returns the fee in the quote so a caller can inspect it
-before executing, without reading the source:
-
-- `protocolFeeUsdc` — the fee **amount** (USDC) for this specific plan.
-- `feeRatePercent` — the effective fee **rate** as a percent (e.g. `1` for 1%),
-  derived from the same source that computes the amount. This reflects the
-  operator's effective rate *after* the clamp, never a raw/invalid env value.
-
-The `feeRatePercent` field is the **runtime source of truth** for the rate; the
-`1%` above is only the documented default. On non-`ready` plan outcomes
-(`no_agents`, `budget_exhausted`, `insufficient_funds`, `no_relevant_agent`)
-there is no pipeline, so `protocolFeeUsdc` is `0` and `feeRatePercent` is omitted.
-
-By construction `protocolFeeUsdc ≈ totalCostUsdc × (feeRatePercent / 100)`
-(within rounding) — it is the real cost-based fee, so it always reconciles with
-`feeRatePercent`. The plan's `maxQuotedCostUsdc` is a **safety ceiling** the
-`execute` call enforces, with invariant `maxQuotedCostUsdc ≥ totalCostUsdc +
-protocolFeeUsdc`; it can be **greater** than cost + fee when an agent has not yet
-quoted a price (placeholder headroom keeps the pre-authorized cap safe). See
-[`doc/INTEGRATION.md`](doc/INTEGRATION.md) for the field reference.
-
-### Service payment vs protocol fee (two separate flows)
-
-Every `/compose` or `/orchestrate` with N agents moves money on two independent tracks:
-
-1. **Service payment.** Each of the N agents charges its own price (`stepPrice_i`) for the work it does. This is not a percentage: it is the full price that agent set, and all N working agents get paid.
-2. **Protocol fee (1%).** On top of the service payments, WasiAI charges 1% on the total, once. That 1% is WasiAI's revenue, and it is the only thing that gets split.
-
-The split divides the **1% fee**, not the total payment.
-
-### Fee split (platform / creator / referral)
-
-The 1% fee is subdivided into three legs via env (basis points, must sum to `10000`). Current production config: platform 80% (`8000`), creator 15% (`1500`), referral 5% (`500`). Default is `10000/0/0` (all to platform).
-
-- The **creator** and **referral** legs resolve only on the pipeline's primary agent (`steps[0]`), not on all N agents. The other agents still collect their service price (flow 1 above), but they do not receive a creator leg of the fee.
-- **Fail-safe:** if the primary agent has no `payout_wallet` declared, its creator leg re-routes to platform (same for an unresolved referral). Today on testnet, where almost no agent has declared a wallet, the fee still routes ~100% to platform. Setting the split turns the mechanism on and signals the model; it does not move money to creators until there is adoption (agents that declared a wallet).
-
-Full model, worked example, and env reference: [`doc/architecture/FEE-MODEL.md`](doc/architecture/FEE-MODEL.md).
-
----
-
-## Adapter Pattern
-
-The gateway decouples chain-specific logic via four adapter interfaces defined in `src/adapters/types.ts`:
-
-| Interface | Responsibility |
-|-----------|---------------|
-| `PaymentAdapter` | x402 settlement, verification, quoting, signing |
-| `AttestationAdapter` | On-chain event attestation |
-| `GaslessAdapter` | EIP-3009 gasless transfers |
-| `IdentityBindingAdapter` | Bind agent keys to on-chain identities |
-
-### Runtime Selection
-
-The `WASIAI_A2A_CHAIN` environment variable selects which adapter bundle to load at startup. See the **Adapter bundles** table above for the four current bundles (`kite-ozone-testnet`, `kite-mainnet`, `avalanche-fuji`, `avalanche-mainnet`).
-
-```
-WASIAI_A2A_CHAIN=kite-ozone-testnet
-  -> loads src/adapters/kite-ozone/
-  -> PaymentAdapter (x402 + Pieverse + PYUSD)
-  -> AttestationAdapter (Kite Ozone native)
-  -> GaslessAdapter (Kite AA + EIP-3009)
-  -> IdentityBindingAdapter (not yet implemented for Kite)
-```
-
-### Adding a New Chain
-
-1. Create `src/adapters/<chain-name>/` with implementations of `PaymentAdapter`, `AttestationAdapter`, `GaslessAdapter`, and optionally `IdentityBindingAdapter`.
-2. Export a factory function (e.g., `createMyChainAdapters()`) from the folder's `index.ts`.
-3. Add the chain identifier to `SUPPORTED_CHAINS` in `src/adapters/registry.ts` and add the import branch in `initAdapters()`.
-4. No changes to L3 services or L4 routes required.
-
-See [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md) for the full per-chain deployment matrix.
-
----
-
-## Hardening
-
-The gateway includes several resilience mechanisms (WKH-18, hardened in WKH-66):
-
-### Rate Limiting
-
-Tiered per-IP rate limiting via `@fastify/rate-limit`. Default `RATE_LIMIT_MAX=60` for general routes, `RATE_LIMIT_ORCHESTRATE_MAX=10` for heavy paid routes (`/orchestrate`, `/compose`), `RATE_LIMIT_SIGNUP_MAX=5` for `/auth/agent-signup`. Health, discovery, and well-known endpoints are exempt.
-
-Response on limit exceeded:
-```json
-{ "error": "Too Many Requests", "code": "RATE_LIMIT_EXCEEDED", "retryAfterMs": 45000, "requestId": "..." }
-```
-
-### Circuit Breaker
-
-In-memory state machine (`src/lib/circuit-breaker.ts`) with three states: `closed -> open -> half_open -> closed`. Two singleton instances:
-
-- **Anthropic** circuit breaker: protects LLM calls in `/orchestrate`. Configurable via `CB_ANTHROPIC_FAILURES`, `CB_ANTHROPIC_WINDOW_MS`, `CB_ANTHROPIC_COOLDOWN_MS`.
-- **Per-registry** circuit breakers: one per registered marketplace. Configurable via `CB_REGISTRY_FAILURES`, `CB_REGISTRY_WINDOW_MS`, `CB_REGISTRY_COOLDOWN_MS`.
-
-When open, returns `503` with code `CIRCUIT_OPEN`.
-
-### Error Boundary
-
-Global error handler (`src/middleware/error-boundary.ts`) normalizes all errors to a consistent shape:
-
-```json
-{ "error": "...", "code": "VALIDATION_ERROR | RATE_LIMIT_EXCEEDED | CIRCUIT_OPEN | TIMEOUT | BACKPRESSURE | INTERNAL_ERROR", "requestId": "..." }
-```
-
-In `NODE_ENV=development`, stack traces are included.
-
-### Backpressure
-
-In-flight request counter for `/orchestrate` (default max 20 via `BACKPRESSURE_MAX`). Returns `503` with code `BACKPRESSURE` when exceeded.
-
-### Timeouts
-
-Per-route configurable timeouts. Returns `504` with code `TIMEOUT`.
-
-- `/orchestrate`: `TIMEOUT_ORCHESTRATE_MS` (default 120s)
-- `/compose`: `TIMEOUT_COMPOSE_MS` (default 180s — raised in WKH-65 to absorb Vercel → Railway thin-proxy hop)
-
-### Graceful Shutdown
-
-On `SIGTERM`/`SIGINT`, the server drains in-flight requests before exiting. Configurable via `SHUTDOWN_GRACE_MS` (default 30s).
-
----
-
-## Gasless Transfers
-
-The gateway supports gasless EIP-3009 token transfers via the Kite AA relayer (`https://gasless.gokite.ai/`). This allows token transfers without the sender holding native gas.
-
-### Graceful Degradation
-
-The gasless module reports a `funding_state` that reflects its operational readiness:
-
-| `funding_state` | Meaning |
-|-----------------|---------|
-| `ready` | Fully operational -- transfers will succeed |
-| `not_enabled` | `GASLESS_ENABLED` is not `true` |
-| `missing_key` | `OPERATOR_PRIVATE_KEY` not configured |
-| `invalid_key` | `OPERATOR_PRIVATE_KEY` is not a valid hex private key |
-| `no_balance` | Operator wallet has insufficient token balance |
-
-`GET /gasless/status` is always available (even when gasless is disabled) so clients can discover the current state. `POST /gasless/transfer` returns `503` with `gasless_not_operational` when `funding_state` is not `ready`.
-
-### Supported Token (Kite Ozone Testnet)
-
-- **PYUSD**: `0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9` (18 decimals)
-- Minimum transfer: `10000000000000000` (0.01 PYUSD)
-- EIP-712 domain name: `"PYUSD"`
-
-See [`doc/kite-contracts.md`](doc/kite-contracts.md) for full contract details.
-
----
-
-## Testing
-
-### Unit and Integration Tests
+## Tests
 
 ```bash
 npm test
 ```
 
-Runs all tests via Vitest. The suite covers middleware (rate limit, timeout, backpressure, error boundary, a2a-key, forward-key), services (identity, budget, authz, compose, orchestrate, task), adapters (payment, gasless contract tests), and routes. 644 tests passing as of hackathon submission.
+Estado medido en este repo, no citado de otro documento:
 
-### Smoke Test
+| Métrica | Valor |
+|---|---|
+| Tests | 3.808 verdes, 19 salteados (3.827 en total) |
+| Archivos de test | 203 verdes, 6 salteados (209) |
+| Cobertura de sentencias | 85,83% |
+| Cobertura de ramas | 76,89% |
+| Cobertura de funciones | 91,4% |
+| Cobertura de líneas | 87,31% |
+| Typecheck | `tsc --noEmit` limpio |
+| Lint | Biome limpio sobre 387 archivos |
 
-```bash
-# Against production
-./scripts/smoke-test.sh
+Los salteados son los `*.real.test.ts`, que necesitan un Postgres de verdad y están condicionados a `INTEGRATION_TEST_DB_URL`, más un e2e manual contra devnet. Se saltean, no fallan, así que el CI no depende de una base viva. El workflow `ci.yml` corre typecheck, lint, suite y cobertura en cada PR y en cada push a `main`.
 
-# Against local dev server
-./scripts/smoke-test.sh http://localhost:3001
-```
-
-Requirements: `curl` (required), `jq` (recommended). The script tests the following endpoints in sequence:
-
-| Endpoint | Method | Validates |
-|----------|--------|-----------|
-| `/` | GET | 200, `name` + `version` fields |
-| `/.well-known/agent.json` | GET | 200, `name` + `skills` fields |
-| `/gasless/status` | GET | 200, `funding_state` field |
-| `/dashboard` | GET | 200, HTML content |
-| `/dashboard/api/stats` | GET | 200, `registriesCount` field |
-| `/auth/agent-signup` | POST | 201, key starting with `wasi_a2a_` |
-| `/auth/me` | GET | 200, key status info |
-| `/discover` | GET | 200 |
-| `/compose` | POST | SKIP (requires x402 payment) |
-| `/orchestrate` | POST | SKIP (requires x402 payment) |
-
-Exit code `0` = all passed, `1` = at least one failure.
+Los umbrales de cobertura están fijados apenas por debajo de la medición actual, como trinquete: sirven para detectar regresión, no para declarar victoria.
 
 ---
 
-## Deployment
+## Rail Solana
 
-The service is deployed on [Railway](https://railway.app/) at https://wasiai-a2a-production.up.railway.app.
+`solana-devnet` es un adaptador no EVM. Lo que hace exactamente, en `src/adapters/solana/payment.ts`:
 
-### Railway Configuration
+- **Solo saliente.** Liquida el leg del gateway pagándole a un agente cuyo payout es Solana. El challenge entrante (cobrarle al caller) sigue siendo EVM: `getPaymentAdapter()` tira para un bundle no EVM, así que `x-payment-chain: solana-devnet` no es un rail de entrada válido. Hoy eso se manifiesta como un `500` genérico y no como un error tipado, que es feo pero es fail-closed: no cobra ni ejecuta nada.
+- **Transferencia SPL firmada por el operador.** Arma un `createTransferInstruction`, firma con el `Keypair` de `SOLANA_OPERATOR_PRIVATE_KEY` y difunde con `sendAndConfirmTransaction`. Sin EIP-3009 y sin facilitator: el operador es el emisor y paga el gas en SOL.
+- **Idempotente por `intentId`.** Un `intentId` repetido revalida la firma anterior on-chain (`getParsedTransaction`, balances pre y post de `payTo`) y la devuelve en vez de volver a difundir. Ese mapa vive en memoria del proceso, así que la idempotencia sobrevive reintentos pero no un reinicio. Es una limitación conocida, no un descuido.
+- **Verificar antes de confiar.** `verify()` exige un delta de balance on-chain `>= amountAtomic` para el mint y el `payTo` esperados.
 
-1. Connect the GitHub repository.
-2. Set all required environment variables (see Environment Variables section above).
-3. Build command: `npm run build`
-4. Start command: `npm start`
-5. The service listens on `PORT` (Railway sets this automatically).
+Encenderlo: `SOLANA_ADAPTER_ENABLED=true`, `solana-devnet` dentro de `WASIAI_A2A_CHAINS`, `SOLANA_OPERATOR_PRIVATE_KEY` (base58, con SOL de devnet para gas) y `WASIAI_DOWNSTREAM_X402=true`. Los defaults de RPC (`https://api.devnet.solana.com`), mint USDC de devnet, decimales, commitment y CAIP-2 están en `.env.example` y no hace falta tocarlos.
 
-### Required Secrets
-
-At minimum, configure in your deployment environment:
-
-- `SUPABASE_URL` and `SUPABASE_SERVICE_KEY`
-- `KITE_WALLET_ADDRESS` (or `PAYMENT_WALLET_ADDRESS`)
-- `ANTHROPIC_API_KEY`
-- `OPERATOR_PRIVATE_KEY` (if gasless or downstream x402 are enabled)
-- `WASIAI_V2_FORWARD_KEY` (if accepting traffic from the Vercel thin-proxy)
+**No hay soporte de Solana mainnet.** Devnet nada más, cero dinero de producción. El escrow no custodial vive en el servicio `wasiai-facilitator`, no acá: si un checklist menciona `SOLANA_ESCROW_PROGRAM_ID`, es de ese repo y este gateway no lo lee.
 
 ---
 
-## Documentation
+## Evidencia on-chain
 
-| Document | Description |
-|----------|-------------|
-| [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md) | Hackathon submission — live URLs, mainnet activation, on-chain proofs, Kite Passport positioning |
-| [`doc/INTEGRATION.md`](doc/INTEGRATION.md) | Marketplace integration guide — auth, onboarding, x402, end-to-end examples |
-| [`doc/integration-base.md`](doc/integration-base.md) | Base integration guide — 5-min quick start on Base Sepolia/Mainnet, facilitator selection, Agentic.Market discovery |
-| [`doc/BASE-EVIDENCE.md`](doc/BASE-EVIDENCE.md) | Onchain proof of the Base adapter — three Base Sepolia `transferWithAuthorization` txs with verifiable Basescan links |
-| [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md) | Full L1-L4 architecture, adapter interfaces, migration roadmap |
-| [`doc/architecture/MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) | Multi-chain registry (WKH-MULTICHAIN / 086) — chain selection priority, alias table, deposit procedure, mainnet activation |
-| [`doc/kite-contracts.md`](doc/kite-contracts.md) | Kite contract addresses, token specs, infrastructure endpoints |
-| [`doc/sdd/_INDEX.md`](doc/sdd/_INDEX.md) | NexusAgile methodology artifacts — every SDD, story file, AR/CR/QA report |
+Liquidaciones reales verificables. Las tres de Avalanche C-Chain son mainnet, con dinero de verdad, y se confirmaron por RPC al escribir esto (`status: 0x1`).
 
----
+| Tx | Red | Qué fue |
+|---|---|---|
+| [`0x9fa6ff83…`](https://snowtrace.io/tx/0x9fa6ff83eb10e51685ce078e69f9c42fcbe3b138b5b8c3f32909c9fee279c6f1) | Avalanche C-Chain (43114) | USDC saliente a `wasi-chainlink-price`, $0,001 |
+| [`0xa22086d0…`](https://snowtrace.io/tx/0xa22086d048b0222a8e08a5ca08997ae6c359e5ba674e63133a0ffbc463af16f9) | Avalanche C-Chain (43114) | USDC saliente a `wasi-defi-sentiment`, $0,010 |
+| [`0xca10320c…`](https://snowtrace.io/tx/0xca10320c24ff513d773ce65e0bd306d4acce3e4883180c9dca5573da6cf1dfdb) | Avalanche C-Chain (43114) | USDC saliente a `wasi-wallet-profiler`, $0,050 |
+| [`0x6f406c08…`](https://testnet.kitescan.ai/tx/0x6f406c08f6e59e3c5029f57ec3a84bb4596b94bb02568055ec4f9572981a1bf9) | Kite testnet (2368) | PYUSD entrante, 1,0 |
 
-## For Marketplace Developers
+Sobre Base Sepolia hay cinco corridas documentadas (tres liquidaciones sueltas, una de `/compose` de punta a punta y una del leg de salida), con los hashes y el método de verificación en [`doc/BASE-EVIDENCE.md`](doc/BASE-EVIDENCE.md).
 
-Integrating a third-party marketplace or agent with WasiAI A2A? Start with [`doc/INTEGRATION.md`](doc/INTEGRATION.md) — it covers server-to-server auth (the B2B default), the x402 payment flow, the full endpoint reference, error-code playbook, and copy-pasteable curl + fetch examples against the production gateway.
+Ninguno de esos números sale de un documento interno: cualquiera puede pegar el hash en un `eth_getTransactionReceipt` contra el RPC público de la red y comparar.
 
 ---
 
-## Publishing your agent to Agentic.Market
+## Documentación
 
-WasiAI A2A supports the [Coinbase Bazaar Discovery Extension](https://github.com/x402-foundation/x402) (`@x402/extensions/bazaar`). When your agent opts in, its Agent Card is enriched with `inputSchema` / `outputSchema` so Bazaar-aware facilitators (e.g. the CDP Facilitator at `https://x402.org/facilitator`) can index it after the first settle. **Opt-in is mandatory** (default `discoverable: false`) — no agent is published without explicit consent.
-
-**Three-step guide**:
-
-1. **Declare opt-in + schemas in your agent manifest**. In whichever registry hosts your agent, set `metadata.discoverable = true` and provide JSON Schema objects for `inputSchema` and `outputSchema`. Example registry row:
-
-   ```json
-   {
-     "slug": "weather-oracle",
-     "name": "Weather Oracle",
-     "priceUsdc": 0.01,
-     "payment": { "method": "x402", "chain": "base-mainnet", "contract": "0x..." },
-     "metadata": {
-       "discoverable": true,
-       "inputSchema": {
-         "type": "object",
-         "properties": { "city": { "type": "string" } },
-         "required": ["city"]
-       },
-       "outputSchema": {
-         "type": "object",
-         "properties": {
-           "temperature": { "type": "number" },
-           "humidity": { "type": "number" }
-         }
-       }
-     }
-   }
-   ```
-
-   `discoverable` must be the literal boolean `true` — truthy values like `"true"` or `1` do NOT trigger opt-in (defense-in-depth).
-
-2. **Verify the agent-card endpoint**. Hit `GET /agents/<slug>/agent-card` against the gateway and confirm `inputSchema` / `outputSchema` appear in the response body. If they don't, either the manifest opt-in flag is missing or the schemas failed validation — in the latter case you'll get an HTTP 422 with `error_code: "BAZAAR_SCHEMA_INVALID"` identifying which field is malformed.
-
-3. **Configure the CDP Facilitator on Base** (required for Bazaar indexing). Set the env var `CDP_FACILITATOR_URL=https://x402.org/facilitator` on the deployment that hosts the gateway. On the next `POST /compose` or `POST /orchestrate` settle that targets a Base chain (`base-mainnet` or `base-sepolia`), the gateway routes the settle call through the CDP Facilitator, which extracts the discovery extension and adds your agent to the Bazaar catalog. The selector is **Base-only**: Kite and Avalanche settles continue to use the wasiai-facilitator path unchanged.
-
-You can verify the selector's decision by grepping the compose logs for the line:
-
-```
-[Compose] Base settle facilitator selector — chainKey=base-mainnet selected=https://x402.org/facilitator cdpEnvSet=true
-```
+| Documento | Contenido |
+|---|---|
+| [`doc/INTEGRATION.md`](doc/INTEGRATION.md) | guía de integración: auth, onboarding, x402, códigos de error, ejemplos |
+| [`doc/integration-base.md`](doc/integration-base.md) | integración específica de Base y elección de facilitator |
+| [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md) | arquitectura L1 a L4 e interfaces de adaptador |
+| [`doc/architecture/MULTI-CHAIN.md`](doc/architecture/MULTI-CHAIN.md) | selección de cadena, tabla de alias, activación de mainnet |
+| [`doc/architecture/FEE-MODEL.md`](doc/architecture/FEE-MODEL.md) | modelo de fee y split, con ejemplo trabajado |
+| [`doc/BASE-EVIDENCE.md`](doc/BASE-EVIDENCE.md) | pruebas on-chain del adaptador de Base |
+| [`doc/kite-contracts.md`](doc/kite-contracts.md) | contratos y tokens de Kite |
+| [`doc/sdd/_INDEX.md`](doc/sdd/_INDEX.md) | índice de specs, revisiones y reportes de QA de cada cambio |
+| [`HACKATHON-FINAL.md`](HACKATHON-FINAL.md) | histórico de la entrega al hackathon de Kite |
 
 ---
 
-## Contributing
+## Contribuir
 
-WasiAI A2A is built using **NexusAgil**, a methodology with hard gates between roles (Analyst, Architect, Dev, Adversary, QA, Docs). Every change in this repo follows the pipeline:
+Cada cambio pasa por un pipeline con gates humanos entre roles (análisis, arquitectura, desarrollo, revisión adversarial, QA, cierre). Los artefactos de cada uno quedan en `doc/sdd/NNN-titulo/` y el detalle del método está en [`CLAUDE.md`](CLAUDE.md).
 
-```
-F0 Codebase grounding   ->  F1 Work item + ACs (EARS)
-                            |
-                            v
-                       HU_APPROVED  (human gate)
-                            |
-                            v
-                  F2 SDD + Constraint Directives
-                            |
-                            v
-                       SPEC_APPROVED (human gate)
-                            |
-                            v
-                  F2.5 Story file (per HU)
-                            |
-                            v
-                  F3 Implementation (waves)
-                            |
-                            v
-                  AR  ->  CR  ->  F4 QA (drift detection)
-                            |
-                            v
-                       DONE + _INDEX.md update
-```
+Al abrir un PR: rama desde `main` como `feat/NNN-wkh-XX-titulo` o `fix/NNN-wkh-XX-titulo`, referencia a la HU en el mensaje de commit, y ni la revisión adversarial ni el code review se saltean en un PR que toca código.
 
-Every artifact lives in `doc/sdd/NNN-titulo/`. Methodology details, role prompts, and inviolable rules are in [`CLAUDE.md`](CLAUDE.md). Browse past HUs (work items, SDDs, AR/CR/QA reports, done reports) via [`doc/sdd/_INDEX.md`](doc/sdd/_INDEX.md).
-
-When opening a PR:
-
-- Branch from `main` using `feat/NNN-wkh-XX-short-title` or `fix/NNN-wkh-XX-short-title`.
-- Reference the Jira HU (e.g. `WKH-79`) in the commit message.
-- Include `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` if Claude Code drafted the change.
-- Do not skip gates — Adversary Review and Code Review must run on every code-touching PR before F4 QA signs off.
-
----
-
-## License
+## Licencia
 
 [MIT](LICENSE)

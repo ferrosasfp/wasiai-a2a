@@ -10,7 +10,7 @@
 - `./node_modules/.bin/biome check` sobre los 9 archivos tocados (5 código + 4 test) → `Checked 9 files. No fixes applied.` exit 0. (Nota: `npx biome` sin el binario local resuelve mal el paquete en este entorno — usar `./node_modules/.bin/biome` directo.)
 
 ## Runtime checks
-- **Migración NO aplicada a ninguna DB** (esperado, Wave 0 PENDING-DEPLOY): `GET {SUPABASE_URL}/rest/v1/a2a_payment_intent_debit_signatures?limit=1` contra la DB dev (`bdwvrwzvsldephfibmuu`) → `HTTP 404 PGRST205 "Could not find the table 'public.a2a_payment_intent_debit_signatures' in the schema cache"`. Confirma que tabla+RPC (mismo `BEGIN/COMMIT`) siguen sin desplegar.
+- **Migración NO aplicada a ninguna DB** (esperado, Wave 0 PENDING-DEPLOY): `GET {SUPABASE_URL}/rest/v1/a2a_payment_intent_debit_signatures?limit=1` contra la DB dev (`<supabase-dev-ref>`) → `HTTP 404 PGRST205 "Could not find the table 'public.a2a_payment_intent_debit_signatures' in the schema cache"`. Confirma que tabla+RPC (mismo `BEGIN/COMMIT`) siguen sin desplegar.
 - `ESCROW_DEBIT_CAPTURE_ENABLED` no está seteada en `.env`/`.env.local`/`.env.example` del repo → `isDebitCaptureEnabled()` (`debit-capture.ts:57-59`) evalúa `false` por default (unset !== 'true'), consistente con CD-1.
 - Fix-pack de los 3 MENOR (CR/AR) verificado en código, no solo declarado:
   - uint256 `string` en `Row`/`Insert`/`Update` de `a2a_payment_intent_debit_signatures` (`database.types.ts:749,753,767,771,785,789`), no solo en `Functions.Args` (`:2749,2751`).

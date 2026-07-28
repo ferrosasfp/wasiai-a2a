@@ -36,12 +36,24 @@ const mockAdapter = {
   quote: vi.fn().mockResolvedValue({ amountWei: '1000000' }),
 };
 
-vi.mock('../adapters/registry.js', () => ({
-  getPaymentAdapter: () => mockAdapter,
-  getDefaultChainKey: () => 'kite-ozone-testnet',
-  getAdaptersBundle: () => ({ chainConfig: { chainId: 2368 } }),
-  getInitializedChainKeys: () => ['kite-ozone-testnet'],
-}));
+// HU-204: la regla `acceptsInboundPayment` sale del módulo REAL (un mock podría
+// mentir y dejar el guard de inbound verde sin existir); el bundle declara su
+// `payment.vmFamily` — la chain simulada acá es EVM.
+vi.mock('../adapters/registry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../adapters/registry.js')>();
+  return {
+    acceptsInboundPayment: actual.acceptsInboundPayment,
+    getInboundPaymentChainKeys: () => ['kite-ozone-testnet'],
+    getPaymentAdapter: () => mockAdapter,
+    getDefaultChainKey: () => 'kite-ozone-testnet',
+    getAdaptersBundle: () => ({
+      chainConfig: { chainId: 2368 },
+      payment: { vmFamily: 'evm' as const },
+    }),
+    getInitializedChainKeys: () => ['kite-ozone-testnet'],
+  };
+});
 
 import { buildPassportPaymentHeader } from '../__tests__/fixtures/passport-shape.js';
 import { requirePayment } from './x402.js';

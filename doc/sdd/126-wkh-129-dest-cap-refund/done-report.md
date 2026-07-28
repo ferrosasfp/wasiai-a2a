@@ -24,7 +24,7 @@
 | **AR** | APROBADO | Adversarial Review encontró **1 hallazgo MENOR (MNR-1)**: INSERT del ledger compensatorio era **incondicional** en la RPC (insertaba incluso si `p_amount_usd <= 0`), violando la asimetría con el débito (que solo inserta si hay un débito real). Fix en fix-pack: condicionar el INSERT a `EXISTS (policy for p_destination)` que valide la ventana, espejando la lógica del débito exactamente. Re-AR APROBADO (MNR-1 resuelto). | Hallazgo: WKH-125 auto-blindaje BLQ-MED-1 (CREATE OR REPLACE + 1 param = overload); contexto: WKH-127 auto-blindaje #1 (tests desactualizados). Lección: toda reversa de un débito condicional debe espejar la MISMA condición. | **MNR-1 RESUELTO** |
 | **CR** | APROBADO | Code Review: verificadas 13 Constraint Directives (CD-1..CD-13). Evidencias: CD-1 atomicidad (FOR UPDATE en RPC), CD-2 ownership guard DB-layer (IS DISTINCT FROM bajo lock), CD-3 migración aditiva (CREATE OR REPLACE, no DROP), CD-4 valor negativo (−p_amount_usd), CD-5 no-op defensivo (≤0 RETURN sin INSERT), CD-6 back-compat (`credit` 4-arg intacto), CD-7 best-effort en compose (log sin cambiar error al caller), CD-8 ownerRef obligatorio (string, no optional), CD-9/CD-10 tests actualizados (mockCreditWithDest, T-COMPOSE-REFUND-DEST-2), CD-11 firma exacta (uuid,integer,numeric,text,text), CD-12/CD-13 destino canónico (agent.registry/agent.slug, normalizeDestination exacta, ledger key+owner+destination idénticos). | PR #114 citas archivo:línea exactas | **APROBADO (13/13 CDs OK)** |
 | **F4** | APROBADO | QA Validation: 7/7 ACs PASS con evidencia archivo:línea. AC-1 (refund revierte ledger además de budget/daily: T-RWD-REAL-1 verifica SUM neto = 0 post-refund), AC-2 (atomicidad: FOR UPDATE en RPC + INSERT en MISMA tx), AC-3 (ownership guard: OWNERSHIP_MISMATCH lanzado si owner_ref ajeno), AC-4 (ventana rolling: fila compensatoria insertada con NOW() cae dentro de window_secs), AC-5 (no-op defensivo: ≤0 RETURN sin INSERT), AC-6 (wire compose: creditWithDest si destination, credit si no — defensivo), AC-7 (migración aditiva: CREATE OR REPLACE, no DROP de previas, down reversible). | validation.md | **APROBADO (7/7 ACs PASS)** |
-| **DEPLOY** | DONE | Migración `refund_with_dest_policy` aplicada + verificada en prod (Supabase caldzjhjgctpgodldqav, GRANT service_role). Railway deployment levantado (código merged a main). | Commit `25dc521`, PR #114 | Prod ready, migración sinc |
+| **DEPLOY** | DONE | Migración `refund_with_dest_policy` aplicada + verificada en prod (Supabase <supabase-prod-ref>, GRANT service_role). Railway deployment levantado (código merged a main). | Commit `25dc521`, PR #114 | Prod ready, migración sinc |
 
 ---
 
@@ -131,7 +131,7 @@ Consolidada tabla de lecciones y patrones descubiertos en el desarrollo de WKH-1
 ## Estado del deployment
 
 ### Migración en Producción
-- **Base de datos**: Supabase (caldzjhjgctpgodldqav)
+- **Base de datos**: Supabase (<supabase-prod-ref>)
 - **Migración aplicada**: `20260624000000_wkh129_refund_with_dest_policy.sql` ✅ verify'd (Postgres log clean, GRANT service_role OK)
 - **Función disponible**: `refund_with_dest_policy(uuid, integer, numeric, text, text)` en `public` schema, executable solo por `service_role`
 

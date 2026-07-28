@@ -50,7 +50,7 @@ tsc 0 · biome scoped 0 · lint global 1 pre-existente ajeno (reputation.ts:116)
 
 ## 8. Deploy a Producción
 
-**Aplicar**: `20260608000000_wkh125b_delegation_dest_cap.sql` vía Supabase Management API a `caldzjhjgctpgodldqav`.
+**Aplicar**: `20260608000000_wkh125b_delegation_dest_cap.sql` vía Supabase Management API a `<supabase-prod-ref>`.
 **Prerequisitos**: `debit_with_dest_policy` existe (WKH-125 DONE); firma target DOWN `debit_delegation_and_parent(uuid,text,uuid,integer,numeric)` coincide con prod.
 **Rollback**: `_down.sql` en <30s (revierte a 5-param; service_role nunca pasó 6º arg antes del deploy → sin breaking change).
 

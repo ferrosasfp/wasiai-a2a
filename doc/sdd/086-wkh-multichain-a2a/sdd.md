@@ -808,7 +808,7 @@ Para fondear una A2A key con USDC Fuji antes del hackathon (smoke test AC-14):
 
 3. **Insertar deposit en BD**:
    ```sql
-   -- via Supabase SQL editor, dev project bdwvrwzvsldephfibmuu
+   -- via Supabase SQL editor, dev project <supabase-dev-ref>
    SELECT register_a2a_key_deposit(
      '<KEY_ID_UUID>'::uuid,  -- p_key_id
      43113,                   -- p_chain_id (Fuji)

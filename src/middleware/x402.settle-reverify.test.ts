@@ -52,12 +52,21 @@ const mockGetAdaptersBundle = vi.fn((chainKey?: string) => {
   return undefined;
 });
 
-vi.mock('../adapters/registry.js', () => ({
-  getPaymentAdapter: () => kiteAdapter,
-  getAdaptersBundle: (chainKey?: string) => mockGetAdaptersBundle(chainKey),
-  getInitializedChainKeys: () => ['kite-mainnet', 'kite-ozone-testnet'],
-  getDefaultChainKey: () => 'kite-ozone-testnet',
-}));
+// HU-204: `acceptsInboundPayment` (la regla del guard de inbound) sale del
+// módulo REAL — un stub podría mentir y dejar el guard verde sin existir. Los
+// bundles de arriba ya declaran `payment.vmFamily: 'evm'`, así que pasan.
+vi.mock('../adapters/registry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../adapters/registry.js')>();
+  return {
+    acceptsInboundPayment: actual.acceptsInboundPayment,
+    getInboundPaymentChainKeys: () => ['kite-mainnet', 'kite-ozone-testnet'],
+    getPaymentAdapter: () => kiteAdapter,
+    getAdaptersBundle: (chainKey?: string) => mockGetAdaptersBundle(chainKey),
+    getInitializedChainKeys: () => ['kite-mainnet', 'kite-ozone-testnet'],
+    getDefaultChainKey: () => 'kite-ozone-testnet',
+  };
+});
 
 // Nonce anti-replay: mock supabase so the pre-settle insert is a no-op.
 const mockNonceInsert = vi.fn().mockResolvedValue({ data: null, error: null });

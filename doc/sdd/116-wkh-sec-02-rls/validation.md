@@ -113,11 +113,11 @@ checks runtime-first son checks de "readiness para deploy" — no se aplica la m
 El deploy lo ejecuta el orquestador (no QA). Runbook:
 
 1. **Preflight** (ya confirmado PASS): `npm run migrate:preflight supabase/migrations/20260607000000_wkh_sec02_rls.sql`
-2. **Apply dev** (`bdwvrwzvsldephfibmuu`) via Management API (patrón `apply-security-rpc-migration.mjs`).
-3. **Verify dev**: `node scripts/verify-rls-enabled.mjs bdwvrwzvsldephfibmuu` → esperar exit 0 con output `[PASS] RLS enabled on all 7 tables.`
+2. **Apply dev** (`<supabase-dev-ref>`) via Management API (patrón `apply-security-rpc-migration.mjs`).
+3. **Verify dev**: `node scripts/verify-rls-enabled.mjs <supabase-dev-ref>` → esperar exit 0 con output `[PASS] RLS enabled on all 7 tables.`
 4. **Smoke dev**: correr el smoke E2E existente (`scripts/hackathon-e2e.mjs` o smoke equivalente) → confirmar que balance/debit/sesión/depósito/recibo/policy operan idéntico (AC-3/AC-5 en runtime real).
 5. **Idempotencia**: re-aplicar el up en dev → sin error (AC-6).
-6. **Apply prod** (`caldzjhjgctpgodldqav`) + verify + smoke.
+6. **Apply prod** (`<supabase-prod-ref>`) + verify + smoke.
 7. **Rollback si falla**: `apply-security-rpc-migration.mjs` con el down SQL directo (NO via `migrate:preflight`) → DISABLE x7 → re-verify (7/7 false confirmados). Down en < 30s.
 
 ---

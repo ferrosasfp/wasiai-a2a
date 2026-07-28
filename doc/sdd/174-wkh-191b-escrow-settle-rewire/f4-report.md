@@ -22,7 +22,7 @@ que 191a). Gates confirmados en vivo (no solo leídos de CR).
 ## Runtime checks
 
 - **Migration apply state**: NO VERIFICABLE vía query directa — el sandbox de
-  ejecución bloqueó la conexión a la DB compartida (`bdwvrwzvsldephfibmuu`, prod-
+  ejecución bloqueó la conexión a la DB compartida (`<supabase-dev-ref>`, prod-
   adjacent) por política de auto-mode ("ambiguously prod under SHARED INFRA
   BIAS"). No forcé el bypass. Evidencia indirecta suficiente: `supabase/migrations/
   20260713000001_wkh191b_debit_hop1{,_down}.sql` existen solo en el working tree

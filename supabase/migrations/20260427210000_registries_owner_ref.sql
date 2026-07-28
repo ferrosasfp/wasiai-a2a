@@ -2,7 +2,7 @@
 -- Migration: 20260427210000_registries_owner_ref
 -- WKH-63 / SEC-REG-1: Add owner_ref to registries for ownership guards
 -- Proyecto: wasiai-a2a
--- Supabase dev: bdwvrwzvsldephfibmuu.supabase.co
+-- Supabase dev: <supabase-dev-ref>.supabase.co
 -- ============================================================
 --
 -- Aditiva e idempotente:

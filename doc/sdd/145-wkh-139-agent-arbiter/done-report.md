@@ -141,7 +141,7 @@ El SDD §4.11 y el work-item enumeraron 3 `[NEEDS CLARIFICATION]`. La implementa
 2. Backup de `caldz` (a2a + mainnet data).
 3. Correr patrón safe:
    ```bash
-   # 1. Verifiquá que la migración está aplicada a bdwvrwzvsldephfibmuu (dev/testnet)
+   # 1. Verifiquá que la migración está aplicada a <supabase-dev-ref> (dev/testnet)
    # 2. Planificá la aplicación a caldz en mantenimiento
    # 3. Aplicá via flyway/migrate-preflight-confirmed con ROLLBACK pre-signed
    # 4. Verificá CHECK + tabla + RPC en prod

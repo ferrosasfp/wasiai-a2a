@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Aplica la migration 20260427210000_registries_owner_ref a Supabase dev
- * (bdwvrwzvsldephfibmuu) usando el SUPABASE_ACCESS_TOKEN (PAT) via Management API.
+ * (<supabase-dev-ref>) usando el SUPABASE_ACCESS_TOKEN (PAT) via Management API.
  *
  * La migration es idempotente (IF NOT EXISTS) y aditiva — safe to re-run.
  *

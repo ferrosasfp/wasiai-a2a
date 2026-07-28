@@ -2,7 +2,7 @@
 -- Migration: 20260401000000_kite_registries
 -- WKH-7: Crear tabla registries + seed WasiAI
 -- Proyecto: wasiai-a2a (Hackathon Kite)
--- Supabase dev: bdwvrwzvsldephfibmuu.supabase.co
+-- Supabase dev: <supabase-dev-ref>.supabase.co
 -- ============================================================
 
 -- Tabla principal de registries (marketplaces registrados)

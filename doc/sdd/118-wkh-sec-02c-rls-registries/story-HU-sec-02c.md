@@ -322,11 +322,11 @@ npm run lint     # 0 errores
 
 ### Wave 2 — Deploy (manual, fuera de vitest — NO es parte de F3 automatizable)
 Documentado en SDD §13. El Dev deja W2 para el paso de ops post-merge:
-1. Dev apply (up) vía Management API → `bdwvrwzvsldephfibmuu`.
+1. Dev apply (up) vía Management API → `<supabase-dev-ref>`.
 2. `node scripts/verify-rls-enabled.mjs` → **9/9** true.
 3. Smoke registry CRUD + transform cache → service_role idéntico.
 4. Re-aplicar up (idempotencia, AC-6) → sin error.
-5. Prod apply + verify 9/9 + smoke (`caldzjhjgctpgodldqav`).
+5. Prod apply + verify 9/9 + smoke (`<supabase-prod-ref>`).
 
 ---
 

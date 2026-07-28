@@ -29,7 +29,7 @@ HU_APPROVED y SPEC_APPROVED self-aprobados (clinical review). F2.5 → F3 (7 nue
 **Nuevos**: `src/types/receipt.ts`, `src/services/receipt.ts` (+test), `src/routes/receipts.ts` (+test), `supabase/migrations/20260605000000_a2a_receipts.sql` (+down). **Modificados**: `src/services/budget.ts`, `src/middleware/a2a-key.ts`, `src/services/orchestrate.ts`, `src/index.ts`, `.env.example`, tests de integración (budget/orchestrate/a2a-key).
 
 ## 7. Deploy
-- Migración `20260605000000_a2a_receipts.sql` **aplicada a prod** (caldzjhjgctpgodldqav): tabla `a2a_receipts` + RPC `insert_receipt/10` + índice `(owner_ref, created_at DESC)`. HTTP 201.
+- Migración `20260605000000_a2a_receipts.sql` **aplicada a prod** (<supabase-prod-ref>): tabla `a2a_receipts` + RPC `insert_receipt/10` + índice `(owner_ref, created_at DESC)`. HTTP 201.
 - Env var operativa: setear `RECEIPT_SIGNING_SECRET` en Railway para activar la emisión/verificación (sin ella → skip best-effort, no rompe nada).
 
 ## 8. Spinoffs

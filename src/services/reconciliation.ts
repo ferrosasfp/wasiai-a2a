@@ -31,6 +31,10 @@ import { resolveEscrowContract } from '../adapters/escrow-verifier.js';
 import { getAdaptersBundle, getDefaultChainKey } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import { getLogger } from '../lib/logger.js';
+// HU-203: la familia de `event_type` que dejan las retenciones de settle. Se importa
+// del MISMO módulo que las escribe para que el productor y el lector no puedan
+// divergir en el string.
+import { SETTLE_UNKNOWN_EVENT_TYPES } from '../lib/settle-withholding.js';
 import { supabase } from '../lib/supabase.js';
 import { settlePaymentIntentOnChain } from './payment-intent.js';
 
@@ -226,6 +230,55 @@ export interface AmbiguousReport {
   rows: AmbiguousIntentRow[];
   total: number;
   truncated: boolean;
+  /**
+   * HU-203: la MISMA pregunta ("¿qué plata no devolvimos porque el settle pudo haber
+   * salido?") sobre el otro modelo de datos. Va ADENTRO de este reporte, y no en una
+   * cola aparte, a propósito: dos listas separadas de plata retenida se miran por
+   * turnos y una de las dos termina sin mirar.
+   */
+  settleUnknown: SettleUnknownReport;
+}
+
+/**
+ * HU-203 — una retención de settle del camino de EVENTOS (no de payment intents).
+ *
+ * POR QUÉ NO ES UNA `AmbiguousIntentRow`: `listAmbiguous` lee
+ * `a2a_payment_intents.settle_outcome`, y el camino del budget de la agent key
+ * (`compose` / `orchestrate`) NO crea payment intents — debita contra
+ * `a2a_agent_keys` y ahí no hay fila de intent donde escribir un veredicto. Meter
+ * ambos en el mismo array obligaría a inventarle un `intent_id` a algo que no lo
+ * tiene. Sin migración: el registro durable es la fila de `a2a_events` que ya emiten
+ * `middleware/x402.ts` (inbound, HU-201) y `services/compose.ts` /
+ * `services/orchestrate.ts` (outbound, HU-203).
+ *
+ * ESTA LISTA ES SÓLO LECTURA, igual que `AmbiguousIntentRow`: no hay resolución
+ * automática posible sin poder contestar "¿el broadcast aterrizó?", y eso se contesta
+ * on-chain, no por HTTP.
+ */
+export interface SettleUnknownEventRow {
+  event_id: string;
+  /** `x402_settle_unknown` (inbound) o `compose_settle_unknown` (outbound). */
+  event_type: string;
+  agent_id: string | null;
+  /** La evidencia de broadcast cuando el facilitator nos la dio; `null` si no contestó. */
+  tx_hash: string | null;
+  /**
+   * `a2a_events.cost_usdc` verbatim: el monto que NO se le devolvió al caller en ESE
+   * punto. Vale `'0'` en las filas inbound (`x402_settle_unknown`), donde no hubo
+   * débito de budget que retener y el monto del cobro vive en `metadata.requiredAmount`
+   * en unidades atómicas. `::text` por la convención WKH-196 para columnas NUMERIC.
+   */
+  costUsdc: string;
+  /** Dónde está el resto del contexto (nonce, key_id, owner_ref, chain_id, motivo). */
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+/** Mismo contrato de completitud que `AmbiguousReport` y por el mismo motivo. */
+export interface SettleUnknownReport {
+  rows: SettleUnknownEventRow[];
+  total: number;
+  truncated: boolean;
 }
 
 /** Techo de filas del reporte ambiguo (el `total` exacto viaja igual). */
@@ -295,6 +348,20 @@ interface AmbiguousSelectRow {
   settle_outcome: string;
   error_message: string | null;
   updated_at: string;
+}
+
+/**
+ * Fila del SELECT de `listSettleUnknown` (subset REAL, misma regla que
+ * `PendingSelectRow`). `cost_usdc` es NUMERIC ⟹ `::text` (convención WKH-196).
+ */
+interface SettleUnknownSelectRow {
+  id: string;
+  event_type: string;
+  agent_id: string | null;
+  tx_hash: string | null;
+  cost_usdc: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
 }
 
 interface DriftSigRow {
@@ -396,7 +463,13 @@ export const reconciliationService = {
     }
     const rows = (data as unknown as AmbiguousSelectRow[] | null) ?? [];
     const total = count ?? rows.length;
+    // HU-203: SECUENCIAL a propósito, no `Promise.all`. Con las dos promesas en vuelo,
+    // un fallo de la primera deja la segunda como unhandled rejection; en serie, el
+    // primer fallo tira y nunca se emite una lista a medias. Es un endpoint admin de
+    // sólo lectura: la latencia extra no le cuesta nada a nadie.
+    const settleUnknown = await this.listSettleUnknown();
     return {
+      settleUnknown,
       rows: rows.map((r) => ({
         intent_id: r.id,
         owner_ref: r.owner_ref,
@@ -410,6 +483,66 @@ export const reconciliationService = {
         settle_outcome: r.settle_outcome,
         error_message: r.error_message,
         updated_at: r.updated_at,
+      })),
+      total,
+      truncated: total > rows.length,
+    };
+  },
+
+  /**
+   * HU-203: los settles cuyo resultado quedó SIN RESOLVER y por los que NO se devolvió
+   * la plata. Se sirve dentro de `listAmbiguous()` (ver `AmbiguousReport.settleUnknown`).
+   *
+   * Cubre los DOS lados, y el inbound entra acá porque hasta HU-203 no lo listaba nadie:
+   *   · `x402_settle_unknown`    — caller → gateway (`middleware/x402.ts`, HU-201).
+   *   · `compose_settle_unknown` — gateway → agente (`services/compose.ts` y
+   *     `services/orchestrate.ts`, HU-203), incluido el `refund_withheld:false` del
+   *     step 0, que no retiene nada por sí mismo pero deja constancia del settle sin
+   *     resolver.
+   *
+   * Las tres invariantes de `listAmbiguous` valen igual y por los mismos motivos:
+   *   1. NO gateada por `isEscrowSettleEnabled()` — los caminos que producen estas
+   *      filas no tienen NADA que ver con el escrow y corren siempre;
+   *   2. `total` exacto + `truncated` — una lista de plata retenida que se corta en
+   *      silencio afirma algo falso sobre su propia completitud;
+   *   3. un error de query TIRA en vez de devolver `[]` — una lista vacía por fallo
+   *      mentiría "no hay nada retenido", que es la peor respuesta posible acá.
+   *
+   * Cross-tenant DELIBERADO (mismo patrón que `listPending`/`listAmbiguous`): superficie
+   * de ALTO PRIVILEGIO gateada por `requireAdminToken` en la ruta.
+   *
+   * ⚠️ TD-203-01: `a2a_events` no tiene índice por `event_type` (ver
+   * `supabase/migrations/20260404200000_events.sql`), así que este filtro + el
+   * `count:'exact'` escanean la tabla de telemetría. Hoy es aceptable —es un endpoint
+   * admin, sin rate limit y de baja frecuencia— pero cuando la tabla crezca conviene un
+   * índice parcial sobre `event_type IN (...)`. Requiere migración, así que queda fuera
+   * de esta HU.
+   */
+  async listSettleUnknown(): Promise<SettleUnknownReport> {
+    const { data, error, count } = await supabase
+      .from('a2a_events')
+      .select(
+        'id, event_type, agent_id, tx_hash, cost_usdc::text, metadata, created_at',
+        { count: 'exact' },
+      )
+      .in('event_type', [...SETTLE_UNKNOWN_EVENT_TYPES])
+      .order('created_at', { ascending: false })
+      .limit(AMBIGUOUS_LIST_LIMIT);
+    if (error) {
+      log.error({ detail: error.message }, 'listSettleUnknown query failed');
+      throw new ReconciliationError('INTERNAL');
+    }
+    const rows = (data as unknown as SettleUnknownSelectRow[] | null) ?? [];
+    const total = count ?? rows.length;
+    return {
+      rows: rows.map((r) => ({
+        event_id: r.id,
+        event_type: r.event_type,
+        agent_id: r.agent_id,
+        tx_hash: r.tx_hash,
+        costUsdc: r.cost_usdc ?? '0',
+        metadata: r.metadata,
+        created_at: r.created_at,
       })),
       total,
       truncated: total > rows.length,

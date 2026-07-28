@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Aplica la migration kite_schema_transforms_schema_hash a Supabase dev (bdwvrwzvsldephfibmuu)
+ * Aplica la migration kite_schema_transforms_schema_hash a Supabase dev (<supabase-dev-ref>)
  * usando el SUPABASE_ACCESS_TOKEN (PAT) via Management API.
  *
  * La migration es idempotente (IF NOT EXISTS) y aditiva — safe to re-run.

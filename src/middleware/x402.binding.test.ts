@@ -113,24 +113,40 @@ vi.mock('../lib/supabase.js', () => ({
   },
 }));
 
-vi.mock('../adapters/registry.js', () => ({
-  getPaymentAdapter: (chainKey?: string) => mockGetPaymentAdapter(chainKey),
-  getAdaptersBundle: (chainKey?: string) => {
-    if (chainKey === undefined) return { chainConfig: { chainId: 2368 } };
-    if (chainKey === 'base-sepolia') return { chainConfig: { chainId: 84532 } };
-    if (chainKey === 'avalanche-fuji')
-      return { chainConfig: { chainId: 43113 } };
-    if (chainKey === 'kite-ozone-testnet')
-      return { chainConfig: { chainId: 2368 } };
-    return undefined;
-  },
-  getInitializedChainKeys: () => [
-    'kite-ozone-testnet',
-    'base-sepolia',
-    'avalanche-fuji',
-  ],
-  getDefaultChainKey: () => 'kite-ozone-testnet',
-}));
+// HU-204: `acceptsInboundPayment` sale del módulo REAL (stubearla dejaría el
+// guard de inbound verde sin existir), y cada bundle declara su
+// `payment.vmFamily` — las 3 chains simuladas acá SON EVM.
+const EVM_PAYMENT = { vmFamily: 'evm' as const };
+vi.mock('../adapters/registry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../adapters/registry.js')>();
+  return {
+    acceptsInboundPayment: actual.acceptsInboundPayment,
+    getInboundPaymentChainKeys: () => [
+      'kite-ozone-testnet',
+      'base-sepolia',
+      'avalanche-fuji',
+    ],
+    getPaymentAdapter: (chainKey?: string) => mockGetPaymentAdapter(chainKey),
+    getAdaptersBundle: (chainKey?: string) => {
+      if (chainKey === undefined)
+        return { chainConfig: { chainId: 2368 }, payment: EVM_PAYMENT };
+      if (chainKey === 'base-sepolia')
+        return { chainConfig: { chainId: 84532 }, payment: EVM_PAYMENT };
+      if (chainKey === 'avalanche-fuji')
+        return { chainConfig: { chainId: 43113 }, payment: EVM_PAYMENT };
+      if (chainKey === 'kite-ozone-testnet')
+        return { chainConfig: { chainId: 2368 }, payment: EVM_PAYMENT };
+      return undefined;
+    },
+    getInitializedChainKeys: () => [
+      'kite-ozone-testnet',
+      'base-sepolia',
+      'avalanche-fuji',
+    ],
+    getDefaultChainKey: () => 'kite-ozone-testnet',
+  };
+});
 
 import { buildEoaPaymentHeader } from '../__tests__/fixtures/passport-shape.js';
 import { requirePayment } from './x402.js';

@@ -16,6 +16,9 @@ import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { refundIdemKey } from '../lib/refund-idem.js';
+// HU-203: la MISMA forma de evento que emite `services/compose.ts`, para que las dos
+// retenciones lleguen a la misma cola de reconciliación.
+import { buildSettleUnknownEvent } from '../lib/settle-withholding.js';
 import type {
   Agent,
   ComposeStep,
@@ -1314,7 +1317,64 @@ export const orchestrateService = {
         if (pipeline.totalCostUsdc === 0) {
           // AC-5 fallo total: el step-0 ni settleó → reembolsar el step-0 entero
           // (debitedUsd = precio del step-0). Arregla el incidente original.
-          refundUsd = debitedUsd;
+          //
+          // HU-203 GUARD 3 (de 3) — "ni settleó" es una INFERENCIA, y hay un caso en
+          // que es falsa: si el settle del step 0 devolvió evidencia de broadcast (o el
+          // facilitator no dio un veredicto legible), `totalCostUsdc` sigue en 0 porque
+          // el step no se contabilizó, pero la plata pudo haber salido igual. `compose`
+          // no puede frenar este reembolso desde adentro: el débito del step 0 no es
+          // suyo (su guard `i > 0` lo excluye a propósito), lo hace y lo deshace ESTE
+          // bloque. Por eso el veredicto viaja en `pipeline.settleRefundWithheld`.
+          //
+          // El `step === 0` es LOAD-BEARING: si el settle sin resolver fue el de un
+          // step POSTERIOR, `compose` ya retuvo el débito de ese step, y el del step 0
+          // es plata del caller que nunca se gastó — retenerla también sería dejarlo
+          // cobrado sin contraprestación.
+          const step0SettleUnknown = pipeline.settleRefundWithheld?.step === 0;
+          if (step0SettleUnknown) {
+            const withheld = pipeline.settleRefundWithheld;
+            log.error(
+              {
+                orchestrationId,
+                error_code: 'SETTLE_REFUND_WITHHELD',
+                step: 0,
+                reason: withheld?.reason,
+                settleTxHash: withheld?.txHash ?? null,
+                withheldUsd: debitedUsd,
+                detail: pipeline.error,
+              },
+              '[orchestrate.settle-unknown] the step-0 settle may have executed on-chain, so its debit was NOT refunded — reconcile against the chain before returning it by hand',
+            );
+            eventService
+              .track(
+                buildSettleUnknownEvent({
+                  withholding: {
+                    reason: withheld?.reason ?? 'no-facilitator-answer',
+                    txHash: withheld?.txHash ?? null,
+                    detail: pipeline.error ?? 'step 0 settle result unknown',
+                  },
+                  withholder: 'orchestrate-step0',
+                  withheldUsd: debitedUsd,
+                  refundWithheld: true,
+                  step: 0,
+                  keyId: request.scopingKeyRow.id,
+                  ownerRef: request.scopingKeyRow.owner_ref,
+                  chainId: request.chainId,
+                }),
+              )
+              .catch((trackErr: unknown) =>
+                log.error(
+                  {
+                    orchestrationId,
+                    detail:
+                      trackErr instanceof Error ? trackErr.message : 'unknown',
+                  },
+                  '[orchestrate.settle-unknown] the withheld refund could not be persisted as an event — the only remaining record is the log line above',
+                ),
+              );
+          } else {
+            refundUsd = debitedUsd;
+          }
         } else {
           // AC-6 parcial (CD-14): el step-0 SÍ settleó (totalCostUsdc > 0). El
           // costo real del pipeline (`totalCostUsdc`) se contabiliza SOLO con el

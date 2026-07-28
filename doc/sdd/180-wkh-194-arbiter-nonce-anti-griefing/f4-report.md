@@ -22,7 +22,7 @@ No re-ejecuté nada que CR ya hubiera confirmado sin motivo — los corrí igual
 
 ## 2. DB / Migración — estado real
 
-- Migración `supabase/migrations/20260713000003_wkh194_arbiter_nonces{,_down}.sql` existe en disco, **untracked** (no commiteada) y **NO aplicada** al remoto (`bdwvrwzvsldephfibmuu`). Confirmado por:
+- Migración `supabase/migrations/20260713000003_wkh194_arbiter_nonces{,_down}.sql` existe en disco, **untracked** (no commiteada) y **NO aplicada** al remoto (`<supabase-dev-ref>`). Confirmado por:
   - El propio task brief la marca explícitamente **PENDING-DEPLOY**.
   - Intenté una query de solo-lectura (`SELECT ... FROM a2a_arbiter_nonces LIMIT 1` vía PostgREST) para confirmar la NO-existencia de la tabla en remoto; el clasificador de permisos de auto-mode la bloqueó (acción de lectura contra una DB compartida dev/prod-adjacent sin autorización explícita del usuario para ese target). No insistí ni busqué un rodeo — es la conducta correcta ante ese guardrail.
   - Evidencia de archivo (suficiente dado el estado declarado): `git status` muestra la migración como `??` (untracked) — nunca pasó por un commit ni por un paso de deploy documentado en este pipeline. Consistente con "PENDING-DEPLOY".

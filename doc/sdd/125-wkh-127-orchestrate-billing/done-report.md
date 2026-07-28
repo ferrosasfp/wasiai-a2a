@@ -101,7 +101,7 @@
 | Componente | Estado | Detalles |
 |-----------|--------|----------|
 | **Código** | ✅ Merged | main (`3b0c1b2`, PR #110). Build TypeScript strict OK. npm test 1671 pass. biome check OK. |
-| **Migración BD UP** | ✅ Aplicada | Supabase prod (`bdwvrwzvsldephfibmuu`). `refund_a2a_key_spend` con SECURITY DEFINER + GRANT solo a service_role. Verificado: RPC acredita budget, clampa daily_spent a 0, rechaza OWNERSHIP_MISMATCH. |
+| **Migración BD UP** | ✅ Aplicada | Supabase prod (`<supabase-dev-ref>`). `refund_a2a_key_spend` con SECURITY DEFINER + GRANT solo a service_role. Verificado: RPC acredita budget, clampa daily_spent a 0, rechaza OWNERSHIP_MISMATCH. |
 | **Migración BD DOWN** | ✅ Reversible | SQL clean `DROP FUNCTION IF EXISTS` — no overload huérfano. |
 | **Railway deploy** | 🔄 En curso | Código en main listo. Migración ya aplicada. No hay cambios de env vars (RPC service_role no configurable, integrado en migrations). |
 

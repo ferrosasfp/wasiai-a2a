@@ -160,7 +160,7 @@ que el script consulta exactamente estas 7.
   1. arg de CLI: `node scripts/verify-rls-enabled.mjs <project_ref>`
   2. env `PROJECT_REF` si está seteada
   3. fallback: derivar de `SUPABASE_URL` con `/https:\/\/([a-z0-9]+)\.supabase\.co/` (mismo regex del exemplar).
-  - Refs conocidas: **dev** `bdwvrwzvsldephfibmuu`, **prod** `caldzjhjgctpgodldqav` (de `scripts/apply-prod-migrations.sh`). NO hardcodear como default fijo; el operador elige por arg/env.
+  - Refs conocidas: **dev** `<supabase-dev-ref>`, **prod** `<supabase-prod-ref>` (de `scripts/apply-prod-migrations.sh`). NO hardcodear como default fijo; el operador elige por arg/env.
 - Si falta PAT o no se puede resolver el ref → `console.error(...)` + `process.exit(3)` (igual que el exemplar).
 
 **Llamada HTTP:**
@@ -327,11 +327,11 @@ ls supabase/migrations/20260607* 2>/dev/null && echo "COLISION DE TIMESTAMP — 
 
 ### Wave 3 (Deploy — manual, fuera de `vitest`, NO bloquea la HU como código)
 > Estos pasos los corre el operador en el runbook; el Dev los documenta, no los ejecuta como parte del CR salvo que se le pida.
-- [ ] **W3.1**: Aplicar UP en dev (`bdwvrwzvsldephfibmuu`) via Management API.
-- [ ] **W3.2**: `node scripts/verify-rls-enabled.mjs bdwvrwzvsldephfibmuu` → 7/7 true (exit 0).
+- [ ] **W3.1**: Aplicar UP en dev (`<supabase-dev-ref>`) via Management API.
+- [ ] **W3.2**: `node scripts/verify-rls-enabled.mjs <supabase-dev-ref>` → 7/7 true (exit 0).
 - [ ] **W3.3**: Smoke E2E del servicio en dev → ops `service_role` idénticas (AC-3/AC-5).
 - [ ] **W3.4**: Re-aplicar UP en dev → sin error (idempotencia, AC-6).
-- [ ] **W3.5**: Aplicar UP en prod (`caldzjhjgctpgodldqav`) + verify + smoke.
+- [ ] **W3.5**: Aplicar UP en prod (`<supabase-prod-ref>`) + verify + smoke.
 - [ ] **Rollback si hace falta**: aplicar el down via Management API (NO via preflight, DT-6) → `DISABLE x7` → re-verify (7/7 false).
 
 ### Verificación Incremental

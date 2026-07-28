@@ -21,7 +21,7 @@
   - `CREATE INDEX IF NOT EXISTS idx_registries_owner_ref ON registries (owner_ref)`
   - Wrapped con `BEGIN;` / `COMMIT;` (MNR-2 fix-pack)
 - Script de aplicación `scripts/apply-registries-owner-ref-migration.mjs` ejecuta via Supabase Management API con output esperado.
-- **Escalado al operador**: verificar manualmente que la migration fue aplicada al remoto `bdwvrwzvsldephfibmuu` con:
+- **Escalado al operador**: verificar manualmente que la migration fue aplicada al remoto `<supabase-dev-ref>` con:
   ```sql
   SELECT column_name, data_type, is_nullable, column_default
   FROM information_schema.columns

@@ -142,44 +142,59 @@ vi.mock('../../services/task.js', () => ({
 }));
 
 // ── Layer 3: Adapters ─────────────────────────────────────────
-vi.mock('../../adapters/registry.js', () => ({
-  initAdapters: vi.fn(),
-  _resetRegistry: vi.fn(),
-  getPaymentAdapter: vi.fn(() => ({
-    name: 'mock',
-    chainId: 2368,
-    supportedTokens: [],
-    getScheme: () => 'exact',
-    getNetwork: () => 'kite-ozone-testnet',
-    getToken: () => '0x0000000000000000000000000000000000000000',
-    getMaxTimeoutSeconds: () => 60,
-    getMerchantName: () => 'WasiAI Test',
-    settle: vi.fn(),
-    verify: vi.fn(),
-    quote: vi.fn().mockResolvedValue({
-      amountWei: '1000000000000000000',
-      token: { symbol: 'PYUSD', address: '0x0', decimals: 6 },
-      facilitatorUrl: '',
-    }),
-    sign: vi.fn(),
-  })),
-  getChainConfig: vi.fn(() => ({
-    name: 'kite-ozone-testnet',
-    chainId: 2368,
-    explorerUrl: 'https://testnet.kitescan.ai',
-  })),
-  getGaslessAdapter: vi.fn(() => ({
-    status: vi.fn().mockResolvedValue({ funding_state: 'unconfigured' }),
-    transfer: vi.fn(),
-  })),
-  getAttestationAdapter: vi.fn(),
-  getIdentityBindingAdapter: vi.fn(),
-  // WKH-111: x402 requirePayment now resolves a chainKey per-request. Advertise
-  // a single default chain so the no-header path stays at 402 (auth required).
-  getDefaultChainKey: vi.fn(() => 'kite-ozone-testnet'),
-  getAdaptersBundle: vi.fn(() => ({ chainConfig: { chainId: 2368 } })),
-  getInitializedChainKeys: vi.fn(() => ['kite-ozone-testnet']),
-}));
+// HU-204: `acceptsInboundPayment` se toma del módulo REAL (no se stubea). Es la
+// regla que decide si una chain acepta cobro de entrada; un mock podría mentir
+// diciendo "sí" para todo y el guard quedaría verde sin existir. Los bundles de
+// abajo declaran `payment.vmFamily: 'evm'` porque las chains que simulan SON EVM
+// — antes no declaraban `payment` en absoluto, que es parte de por qué el rail
+// Solana era inalcanzable desde los tests.
+vi.mock('../../adapters/registry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../adapters/registry.js')>();
+  return {
+    acceptsInboundPayment: actual.acceptsInboundPayment,
+    getInboundPaymentChainKeys: vi.fn(() => ['kite-ozone-testnet']),
+    initAdapters: vi.fn(),
+    _resetRegistry: vi.fn(),
+    getPaymentAdapter: vi.fn(() => ({
+      name: 'mock',
+      chainId: 2368,
+      supportedTokens: [],
+      getScheme: () => 'exact',
+      getNetwork: () => 'kite-ozone-testnet',
+      getToken: () => '0x0000000000000000000000000000000000000000',
+      getMaxTimeoutSeconds: () => 60,
+      getMerchantName: () => 'WasiAI Test',
+      settle: vi.fn(),
+      verify: vi.fn(),
+      quote: vi.fn().mockResolvedValue({
+        amountWei: '1000000000000000000',
+        token: { symbol: 'PYUSD', address: '0x0', decimals: 6 },
+        facilitatorUrl: '',
+      }),
+      sign: vi.fn(),
+    })),
+    getChainConfig: vi.fn(() => ({
+      name: 'kite-ozone-testnet',
+      chainId: 2368,
+      explorerUrl: 'https://testnet.kitescan.ai',
+    })),
+    getGaslessAdapter: vi.fn(() => ({
+      status: vi.fn().mockResolvedValue({ funding_state: 'unconfigured' }),
+      transfer: vi.fn(),
+    })),
+    getAttestationAdapter: vi.fn(),
+    getIdentityBindingAdapter: vi.fn(),
+    // WKH-111: x402 requirePayment now resolves a chainKey per-request. Advertise
+    // a single default chain so the no-header path stays at 402 (auth required).
+    getDefaultChainKey: vi.fn(() => 'kite-ozone-testnet'),
+    getAdaptersBundle: vi.fn(() => ({
+      chainConfig: { chainId: 2368 },
+      payment: { vmFamily: 'evm' },
+    })),
+    getInitializedChainKeys: vi.fn(() => ['kite-ozone-testnet']),
+  };
+});
 
 // ── Layer 4: Anthropic SDK ────────────────────────────────────
 vi.mock('@anthropic-ai/sdk', () => ({

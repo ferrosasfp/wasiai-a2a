@@ -960,52 +960,80 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
     cols: string | null;
     countOpt: string | null;
     eqCalls: Array<[string, unknown]>;
+    inCalls: Array<[string, unknown]>;
     orderCalls: Array<[string, unknown]>;
     limitCalls: number[];
+  }
+
+  function makeCap(): Captured {
+    return {
+      table: null,
+      cols: null,
+      countOpt: null,
+      eqCalls: [],
+      inCalls: [],
+      orderCalls: [],
+      limitCalls: [],
+    };
   }
 
   /**
    * Doble propio: el `wireFrom` compartido no soporta `.order()`/`.limit()` ni el
    * `count`. Captura la FORMA de la query — sin eso, un test que sólo mira el mapeo
    * no distinguiría una query correcta de una que lee la tabla equivocada.
+   *
+   * HU-203: `listAmbiguous()` hace DOS queries sobre DOS tablas, así que la captura es
+   * POR TABLA. Con una sola, la segunda query pisaba la forma de la primera y los
+   * candados de HU-201 (`cap.table`, `cap.cols`) pasaban a afirmar cosas sobre la query
+   * equivocada — verdes por el motivo incorrecto.
    */
-  function wireIntents(rows: unknown[], count: number | null) {
-    const cap: Captured = {
-      table: null,
-      cols: null,
-      countOpt: null,
-      eqCalls: [],
-      orderCalls: [],
-      limitCalls: [],
-    };
+  function wireIntents(
+    rows: unknown[],
+    count: number | null,
+    opts: { eventRows?: unknown[]; eventCount?: number | null } = {},
+  ): Captured & { events: Captured } {
+    const cap = makeCap();
+    const events = makeCap();
     mockFrom.mockImplementation(((table: string) => {
-      cap.table = table;
+      const isEvents = table === 'a2a_events';
+      const target = isEvents ? events : cap;
+      const payload = isEvents
+        ? {
+            data: opts.eventRows ?? [],
+            error: null,
+            count: opts.eventCount ?? 0,
+          }
+        : { data: rows, error: null, count };
+      target.table = table;
       const b: Record<string, unknown> = {
-        select: (cols?: string, opts?: { count?: string }) => {
-          cap.cols = cols ?? null;
-          cap.countOpt = opts?.count ?? null;
+        select: (cols?: string, o?: { count?: string }) => {
+          target.cols = cols ?? null;
+          target.countOpt = o?.count ?? null;
           return b;
         },
         eq: (col: string, val: unknown) => {
-          cap.eqCalls.push([col, val]);
+          target.eqCalls.push([col, val]);
           return b;
         },
-        order: (col: string, opts?: unknown) => {
-          cap.orderCalls.push([col, opts]);
+        in: (col: string, val: unknown) => {
+          target.inCalls.push([col, val]);
+          return b;
+        },
+        order: (col: string, o?: unknown) => {
+          target.orderCalls.push([col, o]);
           return b;
         },
         limit: (n: number) => {
-          cap.limitCalls.push(n);
-          return Promise.resolve({ data: rows, error: null, count });
+          target.limitCalls.push(n);
+          return Promise.resolve(payload);
         },
         // biome-ignore lint/suspicious/noThenProperty: awaitable supabase builder test double
-        then: (resolve: (v: unknown) => void) =>
-          resolve({ data: rows, error: null, count }),
+        then: (resolve: (v: unknown) => void) => resolve(payload),
       };
       return b;
       // biome-ignore lint/suspicious/noExplicitAny: test double for supabase builder
     }) as any);
-    return cap;
+    return Object.assign(cap, { events });
   }
 
   function ambiguousRow(overrides: Record<string, unknown> = {}) {
@@ -1114,6 +1142,141 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
             error: { message: 'boom' },
             count: null,
           }),
+      };
+      return b;
+      // biome-ignore lint/suspicious/noExplicitAny: test double for supabase builder
+    }) as any);
+
+    await expect(reconciliationService.listAmbiguous()).rejects.toThrow();
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // HU-203 — la MISMA cola, extendida al camino que NO crea payment intents.
+  //
+  // `compose`/`orchestrate` debitan contra `a2a_agent_keys`: no hay fila de intent
+  // donde escribir un `settle_outcome`, así que la retención vive en `a2a_events`. Y
+  // el inbound (`x402_settle_unknown`, HU-201) se suma acá porque hasta ahora se
+  // escribía pero NO lo listaba nadie — exactamente el estado que HU-201 declaró
+  // inaceptable para los intents.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  function settleUnknownEventRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'ev-1',
+      event_type: 'compose_settle_unknown',
+      agent_id: 'corridor',
+      tx_hash: '0xBROADCASTED',
+      cost_usdc: '0.050000',
+      metadata: { refund_withheld: true, key_id: KEY_ID, owner_ref: OWNER },
+      created_at: '2026-07-28T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('T-203-SU-QUERY: lee `a2a_events` filtrando por la familia COMPLETA de event_type', async () => {
+    const cap = wireIntents([], 0, {
+      eventRows: [settleUnknownEventRow()],
+      eventCount: 1,
+    });
+
+    await reconciliationService.listAmbiguous();
+
+    expect(cap.events.table).toBe('a2a_events');
+    const [col, values] = cap.events.inCalls[0] ?? [];
+    expect(col).toBe('event_type');
+    // Si alguien saca `x402_settle_unknown`, las retenciones del inbound vuelven a ser
+    // invisibles — que es el bug que esta lista existe para cerrar.
+    expect(values).toContain('x402_settle_unknown');
+    expect(values).toContain('compose_settle_unknown');
+  });
+
+  it('T-203-SU-ROWS: la fila expone el hash y el monto retenido', async () => {
+    wireIntents([], 0, {
+      eventRows: [settleUnknownEventRow()],
+      eventCount: 1,
+    });
+
+    const out = await reconciliationService.listAmbiguous();
+
+    // El hash es con lo que un humano cruza contra la cadena…
+    expect(out.settleUnknown.rows[0]?.tx_hash).toBe('0xBROADCASTED');
+    // …y el monto es lo que hay que devolver a mano si la tx no aterrizó.
+    expect(out.settleUnknown.rows[0]?.costUsdc).toBe('0.050000');
+    expect(out.settleUnknown.rows[0]?.event_id).toBe('ev-1');
+    expect(out.settleUnknown.rows[0]?.metadata).toMatchObject({
+      refund_withheld: true,
+    });
+  });
+
+  it('T-203-SU-NUMERIC: `cost_usdc` se pide con `::text` (WKH-196: PostgREST redondea)', async () => {
+    const cap = wireIntents([], 0);
+
+    await reconciliationService.listAmbiguous();
+
+    expect(cap.events.cols).toContain('cost_usdc::text');
+  });
+
+  it('T-203-SU-FLAG-OFF: se lista con ESCROW_SETTLE_ENABLED OFF', async () => {
+    // Mismo candado que T-201-AMB-FLAG-OFF y por un motivo más fuerte todavía: estos
+    // caminos (`compose` / `orchestrate` / inbound x402) no tienen NADA que ver con el
+    // escrow. Gatear la lista por ese flag la dejaría vacía siempre.
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
+    wireIntents([], 0, {
+      eventRows: [settleUnknownEventRow()],
+      eventCount: 1,
+    });
+
+    const out = await reconciliationService.listAmbiguous();
+
+    expect(out.settleUnknown.rows).toHaveLength(1);
+  });
+
+  it('T-203-SU-TRUNCATED: una lista acotada lo DECLARA (total exacto)', async () => {
+    const cap = wireIntents([], 0, {
+      eventRows: [
+        settleUnknownEventRow(),
+        settleUnknownEventRow({ id: 'ev-2' }),
+      ],
+      eventCount: 900,
+    });
+
+    const out = await reconciliationService.listAmbiguous();
+
+    expect(cap.events.countOpt).toBe('exact');
+    expect(out.settleUnknown.total).toBe(900);
+    expect(out.settleUnknown.truncated).toBe(true);
+  });
+
+  it('T-203-SU-NOT-TRUNCATED: si entran todas, no se declara truncada', async () => {
+    wireIntents([], 0, {
+      eventRows: [settleUnknownEventRow()],
+      eventCount: 1,
+    });
+
+    const out = await reconciliationService.listAmbiguous();
+
+    expect(out.settleUnknown.total).toBe(1);
+    expect(out.settleUnknown.truncated).toBe(false);
+  });
+
+  it('T-203-SU-ERROR: un fallo de la query de eventos TIRA (no devuelve `[]`)', async () => {
+    // Una lista vacía por fallo afirmaría "no hay nada retenido", que es la peor
+    // respuesta posible acá. Y tiene que tirar la llamada ENTERA: un `listAmbiguous`
+    // que devuelve los intents y se come el error de la otra mitad es una lista
+    // incompleta que se presenta como completa.
+    mockFrom.mockImplementation(((table: string) => {
+      const failing = table === 'a2a_events';
+      const b: Record<string, unknown> = {
+        select: () => b,
+        eq: () => b,
+        in: () => b,
+        order: () => b,
+        limit: () =>
+          Promise.resolve(
+            failing
+              ? { data: null, error: { message: 'boom' }, count: null }
+              : { data: [], error: null, count: 0 },
+          ),
       };
       return b;
       // biome-ignore lint/suspicious/noExplicitAny: test double for supabase builder

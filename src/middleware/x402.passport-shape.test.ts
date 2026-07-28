@@ -45,16 +45,28 @@ const mockAdapter = {
   }),
 };
 
-vi.mock('../adapters/registry.js', () => ({
-  getPaymentAdapter: () => mockAdapter,
-  // WKH-111: requirePayment now resolves a chainKey per-request. Without a
-  // `x-payment-chain` header it falls back to the registry default and guards
-  // against an uninitialized registry. The mock advertises a single default
-  // chain so the legacy default path stays byte-identical (402/200).
-  getDefaultChainKey: () => 'kite-ozone-testnet',
-  getAdaptersBundle: () => ({ chainConfig: { chainId: 2368 } }),
-  getInitializedChainKeys: () => ['kite-ozone-testnet'],
-}));
+// HU-204: la regla `acceptsInboundPayment` sale del módulo REAL (un mock podría
+// mentir y dejar el guard de inbound verde sin existir); el bundle declara su
+// `payment.vmFamily` — la chain simulada acá es EVM.
+vi.mock('../adapters/registry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../adapters/registry.js')>();
+  return {
+    acceptsInboundPayment: actual.acceptsInboundPayment,
+    getInboundPaymentChainKeys: () => ['kite-ozone-testnet'],
+    getPaymentAdapter: () => mockAdapter,
+    // WKH-111: requirePayment now resolves a chainKey per-request. Without a
+    // `x-payment-chain` header it falls back to the registry default and guards
+    // against an uninitialized registry. The mock advertises a single default
+    // chain so the legacy default path stays byte-identical (402/200).
+    getDefaultChainKey: () => 'kite-ozone-testnet',
+    getAdaptersBundle: () => ({
+      chainConfig: { chainId: 2368 },
+      payment: { vmFamily: 'evm' as const },
+    }),
+    getInitializedChainKeys: () => ['kite-ozone-testnet'],
+  };
+});
 
 import {
   buildEoaPaymentHeader,

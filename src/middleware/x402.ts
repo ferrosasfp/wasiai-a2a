@@ -14,8 +14,10 @@ import {
   readSettleValueDisposition,
 } from '../adapters/errors.js';
 import {
+  acceptsInboundPayment,
   getAdaptersBundle,
   getDefaultChainKey,
+  getInboundPaymentChainKeys,
   getInitializedChainKeys,
   getPaymentAdapter,
 } from '../adapters/registry.js';
@@ -51,6 +53,43 @@ export const PAYMENT_SIGNATURE_HEADER = 'payment-signature';
 // donde el dato queda resuelto). Los cambios de WKH-175 son aditivos: NO
 // cambian el default, NO lo hacen obligatorio, NO cambian ningún status/code.
 export const X_A2A_PAYMENT_CHAIN_HEADER = 'x-a2a-payment-chain';
+
+/**
+ * HU-204 — código estable para "esta chain existe y está inicializada, pero NO
+ * acepta cobro de ENTRADA". Distinto de `CHAIN_NOT_SUPPORTED` a propósito: ahí
+ * el slug es desconocido o el rail no está prendido (el caller no puede hacer
+ * nada más que cambiar de chain); acá el rail SÍ está vivo, sólo que en la
+ * dirección contraria — y el caller tiene DOS salidas (otra chain para el x402,
+ * o una agent key prepaga, que sí cobra en esta chain).
+ */
+export const X402_INBOUND_UNSUPPORTED_CODE =
+  'CHAIN_INBOUND_PAYMENT_UNSUPPORTED';
+
+/**
+ * Mensaje del 400 de arriba. Explica la ASIMETRÍA (no sólo la negación) y las
+ * dos salidas, porque un integrador tiene que poder resolverlo leyendo la
+ * respuesta: negar sin decir por qué ni qué hacer es la razón por la que este
+ * caso se vivía como "el gateway está roto".
+ */
+export function inboundPaymentUnsupportedMessage(
+  chainKey: ChainKey,
+  inboundChains: readonly ChainKey[],
+): string {
+  const alternatives =
+    inboundChains.length > 0
+      ? inboundChains.join(', ')
+      : '(none initialized on this deployment)';
+  return (
+    `Chain '${chainKey}' does not accept INBOUND x402 payment (caller → gateway). ` +
+    `It is an OUTBOUND settlement rail: the gateway pays agents on '${chainKey}' ` +
+    `from its own operator wallet, but callers cannot pay the gateway there — ` +
+    `the inbound leg needs an EVM signed authorization (EIP-3009), which this ` +
+    `chain's payment adapter does not implement. ` +
+    `To pay with x402, set 'x-payment-chain' to one of: ${alternatives}. ` +
+    `To keep using '${chainKey}', use a prepaid agent key ('x-a2a-key'): that ` +
+    `path debits your budget on '${chainKey}' and is unaffected by this limit.`
+  );
+}
 
 // Dedup module-scoped del warn "se aplicó el default". El default se resuelve
 // en CADA request sin `x-payment-chain` (hot-path: hoy la mayoría de los
@@ -420,6 +459,41 @@ export function requirePayment(
         error_code: 'CHAIN_NOT_SUPPORTED',
         error: `Chain '${chainKey}' is not initialized. Initialized: ${getInitializedChainKeys().join(', ')}`,
       });
+    }
+
+    // ── HU-204: chain inicializada pero OUTBOUND-ONLY → 400, no 500 ──────────
+    // Todo lo que sigue en este handler (challenge 402, binding check, verify,
+    // settle) pasa por `getPaymentAdapter()`, que LANZA a propósito sobre un
+    // bundle non-EVM (`registry.ts:getPaymentAdapter`). Sin este corte, el throw
+    // viajaba hasta el error-boundary y salía como 500 INTERNAL_ERROR: el
+    // gateway le decía "me rompí" a un caller que en realidad pidió algo que
+    // esta chain no ofrece — y encima le escondía QUÉ hacer.
+    //
+    // Choke-point único: cubre los 5 endpoints cobrables (compose, orchestrate,
+    // orchestrate/plan, orchestrate/execute, gasless/transfer) porque los cinco
+    // entran por `requirePaymentOrA2AKey` → `requirePayment`.
+    //
+    // NO toca el path prepago: con `x-a2a-key` presente, `requirePaymentOrA2AKey`
+    // NUNCA delega en este handler (a2a-key.ts:1606) y resuelve la chain con su
+    // propio `resolveTargetChain`, que sí soporta `solana-devnet`.
+    if (!acceptsInboundPayment(bundle)) {
+      const inboundChains = getInboundPaymentChainKeys();
+      request.log.info(
+        {
+          error_code: X402_INBOUND_UNSUPPORTED_CODE,
+          chainKey,
+          vmFamily: bundle.payment.vmFamily,
+        },
+        'x402 inbound payment rejected: chain is an outbound-settlement-only rail',
+      );
+      return reply
+        .header(X_A2A_PAYMENT_CHAIN_HEADER, chainKey)
+        .status(400)
+        .send({
+          error_code: X402_INBOUND_UNSUPPORTED_CODE,
+          error: inboundPaymentUnsupportedMessage(chainKey, inboundChains),
+          inbound_payment_chains: inboundChains,
+        });
     }
 
     // WKH-175: eco de la chain efectivamente usada al caller. Se setea acá (una

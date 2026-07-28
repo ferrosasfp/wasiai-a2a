@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Aplica la migration 20260427230000_kite_schema_transforms_owner a Supabase
- * dev (bdwvrwzvsldephfibmuu) usando SUPABASE_ACCESS_TOKEN (PAT) via
+ * dev (<supabase-dev-ref>) usando SUPABASE_ACCESS_TOKEN (PAT) via
  * Management API.
  *
  * La migration es idempotente (IF NOT EXISTS / IF EXISTS / BEGIN-COMMIT) y
