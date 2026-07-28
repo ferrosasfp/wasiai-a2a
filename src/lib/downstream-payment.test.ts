@@ -602,6 +602,67 @@ describe('signAndSettleDownstream — skip codes', () => {
       expect.any(String),
     );
   });
+
+  // ── HU-201 (AR BLQ-BAJO-1): el mismo eje, pero en el RETURN en vez del THROW ──
+  //
+  // El `catch` de arriba ya distinguía "no se pagó" de "puede haberse pagado". El `if`
+  // que sigue al settle NO: cualquier `success:false` salía como `SETTLE_FAILED`, que
+  // en el catálogo público de códigos significa literalmente "no se pagó". Y el caso
+  // con txHash es justo donde eso puede ser falso: pieverse devuelve la respuesta del
+  // facilitator verbatim, así que el hash es de un broadcast real.
+  it('T-201-SettleFalseWithHash: settle DEVUELVE success:false CON txHash → SETTLE_UNKNOWN (NO SETTLE_FAILED)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockFujiSettle.mockResolvedValueOnce({
+      success: false,
+      txHash: '0xBROADCASTEDBUTREJECTED',
+      error: 'reverted after broadcast',
+    });
+    const logger = makeLogger();
+    const result = await signAndSettleDownstream(makeAgent(), logger);
+
+    // El leg sigue sin devolver recibo (sin confirmación no se cobra).
+    expect(result).toBeNull();
+    // Pero el código deja de AFIRMAR que no se pagó, y el hash viaja para poder
+    // cruzarlo contra la cadena.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'SETTLE_UNKNOWN',
+        valueDisposition: 'unknown',
+        settleTxHash: '0xBROADCASTEDBUTREJECTED',
+      }),
+      expect.any(String),
+    );
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'SETTLE_FAILED' }),
+      expect.any(String),
+    );
+  });
+
+  it('T-201-SettleFalseNoHash: settle DEVUELVE success:false SIN txHash → sigue siendo SETTLE_FAILED', async () => {
+    // El contra-ejemplo obligatorio: sin él, mandar todo `success:false` a
+    // SETTLE_UNKNOWN pasaría verde y el código dejaría de distinguir nada.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockFujiSettle.mockResolvedValueOnce({
+      success: false,
+      txHash: '',
+      error: 'insufficient balance',
+    });
+    const logger = makeLogger();
+    const result = await signAndSettleDownstream(makeAgent(), logger);
+
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'SETTLE_FAILED',
+        error: 'insufficient balance',
+      }),
+      expect.any(String),
+    );
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'SETTLE_UNKNOWN' }),
+      expect.any(String),
+    );
+  });
 });
 
 // ─── AC tests (chain selection + delegation) ─────────────────────────

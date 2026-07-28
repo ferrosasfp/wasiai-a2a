@@ -148,6 +148,69 @@ export interface DriftRow {
   exceedsThreshold: boolean;
 }
 
+/**
+ * HU-201 (AR BLQ-MEDIO-2) — una fila `failed_ambiguous` del camino NO-ESCROW.
+ *
+ * POR QUÉ EXISTE ESTE TIPO: HU-201 mandó los HTTP non-2xx del facilitator a
+ * `ambiguous` ⟹ `failed_ambiguous` ⟹ **el deposit del buyer NO se reembolsa**. Esa
+ * decisión es correcta (un 502 puede llegar después del broadcast) pero tenía un
+ * costo que el AR encontró y que invalidaba el fix: en el camino no-escrow —que es el
+ * DEFAULT, porque `ESCROW_SETTLE_ENABLED` exige `=== 'true'`— esas filas eran
+ * INVISIBLES.
+ *
+ *   · `listPending()` lee `a2a_payment_intent_debit_signatures`, y sin escrow esa fila
+ *     NO EXISTE.
+ *   · `resolveIntent()` arranca con `if (!isEscrowSettleEnabled()) return flag_off`.
+ *   · Único rastro: `error_message` en texto libre y un `log.warn`.
+ *
+ * O sea que el fix cambiaba "reembolso indebido RUIDOSO" por "retención SILENCIOSA".
+ * Y el modo de falla no es hipotético: ya ocurrió en este repo (el facilitator
+ * exigiendo un Bearer que el adapter no mandaba ⟹ 401 en el 100% de los settles).
+ * Antes era ruidoso pero AUTO-SANANTE: todos los buyers recuperaban su deposit. Con
+ * HU-201 sería el 100% de los deposits retenidos y nadie mirando.
+ *
+ * ESTA LISTA ES SÓLO LECTURA. No resuelve nada: no hay resolución automática posible
+ * sin poder responder "¿el broadcast aterrizó?", y eso se contesta on-chain
+ * (`authorizationState(from, nonce)` del token es un `view` público), no por HTTP. Ese
+ * lector NO existe hoy en el repo y es una HU propia (TD-201-01). Hasta entonces, la
+ * acción es humana y esta lista es el lugar donde se ve.
+ */
+export interface AmbiguousIntentRow {
+  intent_id: string;
+  owner_ref: string;
+  key_id: string;
+  intent_type: string;
+  status: string;
+  chain_id: number;
+  pay_to: string;
+  authorizedUsd: string;
+  consumedUsd: string;
+  settle_outcome: string;
+  /**
+   * Texto libre — pero es DONDE VIVE EL HASH. Cuando el facilitator contestó
+   * `success:false` CON un txHash, `settlePaymentIntentOnChain` lo mete en el mensaje
+   * (`settle failed WITH a broadcast hash (0x…)`) porque no hay columna para él. Es la
+   * pista con la que un humano cruza contra la cadena. Ver TD-201-02.
+   */
+  error_message: string | null;
+  updated_at: string;
+}
+
+/**
+ * Resultado de `listAmbiguous`. Trae `total` A PROPÓSITO: la query está acotada por
+ * `limit`, y una lista truncada EN SILENCIO sobre plata retenida sería la misma
+ * afirmación falsa de completitud que este archivo ya documenta para el drift. Si
+ * `total > rows.length`, el consumidor lo ve.
+ */
+export interface AmbiguousReport {
+  rows: AmbiguousIntentRow[];
+  total: number;
+  truncated: boolean;
+}
+
+/** Techo de filas del reporte ambiguo (el `total` exacto viaja igual). */
+const AMBIGUOUS_LIST_LIMIT = 500;
+
 // ── Row shapes de las queries (subset tipado a mano) ──────────────
 
 interface IntentEmbed {
@@ -189,6 +252,27 @@ interface PendingSelectRow {
   debit_hop1_tx_hash: string | null;
   debit_settle_status: string;
   owner_ref: string;
+}
+
+/**
+ * Fila del SELECT de `listAmbiguous` (subset REAL, misma regla que `PendingSelectRow`).
+ * Los NUMERIC vienen con `::text` — convención del repo desde WKH-196: PostgREST los
+ * entrega como número JSON y `JSON.parse` redondea, así que el cast es obligatorio en
+ * cualquier columna NUMERIC de un money-path.
+ */
+interface AmbiguousSelectRow {
+  id: string;
+  owner_ref: string;
+  key_id: string;
+  intent_type: string;
+  status: string;
+  chain_id: number;
+  pay_to: string;
+  authorized_usd: string;
+  consumed_usd: string;
+  settle_outcome: string;
+  error_message: string | null;
+  updated_at: string;
 }
 
 interface DriftSigRow {
@@ -254,6 +338,57 @@ export const reconciliationService = {
       owner_ref: r.owner_ref,
       debit_settle_status: r.debit_settle_status,
     }));
+  },
+
+  /**
+   * HU-201 (AR BLQ-MEDIO-2): los intents con veredicto `failed_ambiguous` — el buyer
+   * NO fue reembolsado y el resultado del settle es DESCONOCIDO. Ver
+   * `AmbiguousIntentRow` para el por qué.
+   *
+   * NO gateada por `isEscrowSettleEnabled()` A PROPÓSITO, y ése es todo el punto: el
+   * camino que produce estas filas es el NO-escrow, o sea justo el que corre con el
+   * flag OFF. Gatearla la volvería a dejar vacía exactamente cuando importa.
+   *
+   * Cross-tenant DELIBERADO (mismo patrón y misma justificación que `listPending`):
+   * sin filtro `owner_ref`, superficie de ALTO PRIVILEGIO gateada por
+   * `requireAdminToken` en la ruta.
+   */
+  async listAmbiguous(): Promise<AmbiguousReport> {
+    const { data, error, count } = await supabase
+      .from('a2a_payment_intents')
+      .select(
+        'id, owner_ref, key_id, intent_type, status, chain_id, pay_to, ' +
+          'authorized_usd::text, consumed_usd::text, settle_outcome, ' +
+          'error_message, updated_at',
+        { count: 'exact' },
+      )
+      .eq('settle_outcome', 'failed_ambiguous')
+      .order('updated_at', { ascending: false })
+      .limit(AMBIGUOUS_LIST_LIMIT);
+    if (error) {
+      log.error({ detail: error.message }, 'listAmbiguous query failed');
+      throw new ReconciliationError('INTERNAL');
+    }
+    const rows = (data as unknown as AmbiguousSelectRow[] | null) ?? [];
+    const total = count ?? rows.length;
+    return {
+      rows: rows.map((r) => ({
+        intent_id: r.id,
+        owner_ref: r.owner_ref,
+        key_id: r.key_id,
+        intent_type: r.intent_type,
+        status: r.status,
+        chain_id: r.chain_id,
+        pay_to: r.pay_to,
+        authorizedUsd: r.authorized_usd,
+        consumedUsd: r.consumed_usd,
+        settle_outcome: r.settle_outcome,
+        error_message: r.error_message,
+        updated_at: r.updated_at,
+      })),
+      total,
+      truncated: total > rows.length,
+    };
   },
 
   /**
@@ -492,6 +627,30 @@ export const reconciliationService = {
         // ⚠️ HU-201 NO CIERRA (B), (C) NI (F). Cerró (G) —la clasificación— y nada más.
         // El re-envío de abajo sigue saliendo sin evidencia persistida de que el hop 2 se
         // intentó, así que el lease sigue pendiente.
+        //
+        // ── DEUDA ABIERTA QUE HU-201 DEJA ANOTADA (fix-pack AR) ──
+        //
+        // TD-201-01 — LECTOR DE `authorizationState(from, nonce)`. La pregunta que hoy
+        //   NO se puede contestar —"¿el broadcast aterrizó?"— tiene respuesta ON-CHAIN,
+        //   no por HTTP: en EIP-3009 el token expone `authorizationState(authorizer,
+        //   nonce)` como `view` público, y ese bit dice si la autorización se consumió.
+        //   Con eso, un `ambiguous` deja de ser terminal-manual: se resuelve solo. HOY
+        //   NO EXISTE ningún lector de eso en el repo. Es una HU propia, no un fix-pack,
+        //   y ⚠️ NO sirve tal cual en el modo `pieverse` (el DEFAULT), donde la firma es
+        //   un `Authorization` custom contra `KITE_FACILITATOR_ADDRESS` y no un
+        //   `TransferWithAuthorization` contra el token — ver el agujero (a) de la
+        //   opción 1 más arriba, es el mismo.
+        //
+        // TD-201-02 — COLUMNA PARA EL HASH DE EVIDENCIA. Cuando el facilitator contesta
+        //   `success:false` CON txHash, ese hash es la única pista para cruzar contra la
+        //   cadena y hoy sobrevive sólo como PROSA dentro de `error_message` (y como
+        //   campo del log). No es filtrable por SQL. Arreglarlo es una columna nueva en
+        //   `a2a_payment_intents` ⟹ migración ⟹ decisión del founder.
+        //
+        // TD-201-03 — ¿PIEVERSE MANDA HASH EN SUS RECHAZOS NORMALES? Incógnita abierta
+        //   que decide si `ambiguous` es un caso raro o el 100% de los rechazos. Ver el
+        //   docstring de `hasBroadcastEvidence` (`adapters/errors.ts`) por las dos
+        //   direcciones y por cómo se cierra (mirando `listAmbiguous()` con tráfico real).
         //
         // Ninguna es un fix-pack. NO borrar este bloque sin cerrar (B), (C), (F) y (G).
         //

@@ -146,9 +146,23 @@ export type SettleValueDisposition = 'not-sent' | 'unknown';
  * parsear mensajes de error: un `catch (e)` que sólo mira `e.message` no puede
  * distinguir "no salió" de "no sé", y esa es exactamente la decisión de dinero.
  *
- * NO se usa para un facilitator que SÍ contestó rechazando (HTTP 4xx/5xx con
- * cuerpo, `{ success: false }`): eso es un veredicto del facilitator, no una
- * incógnita de transporte, y sigue por el camino de error preexistente.
+ * ⚠️ ALCANCE CORREGIDO EN HU-201 — LEER ANTES DE "RESTAURAR" NADA. Este docstring
+ * decía: "NO se usa para un facilitator que SÍ contestó rechazando (HTTP 4xx/5xx con
+ * cuerpo, `{ success: false }`): eso es un veredicto del facilitator". Esa frase
+ * describía el alcance de HU-198, que dejó la reclasificación fuera a propósito, y hoy
+ * CONTRADICE lo que hace el código. El alcance real ahora:
+ *
+ *   · HTTP non-2xx (con o sin cuerpo) → SÍ usa esta clase, con `'unknown'`. Un 502/504
+ *     lo puede emitir un proxy DESPUÉS de que el facilitator broadcasteó, y un 500 del
+ *     facilitator no dice en qué punto de su pipeline falló. "Contestó" no es
+ *     "dictaminó sobre el valor".
+ *   · 2xx cuyo campo canónico de veredicto es ilegible (ausente / no boolean) → SÍ,
+ *     `'unknown'`: un cuerpo que no entendemos no puede emitir el veredicto más fuerte.
+ *   · 2xx con veredicto negativo LEGIBLE (`settled:false` / `success:false`) → NO usa
+ *     esta clase. Sigue siendo un resultado (`{ success:false }`), porque ESE sí es el
+ *     veredicto del facilitator sobre su propio trabajo, y es el que mantiene vivo el
+ *     reembolso al buyer y el re-envío del hop 2. Si además trae `txHash`, quien
+ *     decide es `hasBroadcastEvidence` (abajo), no esta clase.
  */
 export class FacilitatorSettleError extends Error {
   readonly code = 'facilitator_settle_transport_error';
@@ -215,6 +229,68 @@ export function readSettleValueDisposition(
     candidate.valueDisposition === 'not-sent'
     ? candidate.valueDisposition
     : undefined;
+}
+
+/**
+ * HU-201 (AR BLQ-ALTO, entrada (G) de `services/reconciliation.ts`) — ¿el `txHash` que
+ * vino JUNTO a un `success:false` es evidencia de que hubo broadcast?
+ *
+ * Vive acá, al lado de `readSettleValueDisposition`, porque es de la MISMA familia: son
+ * las dos formas de contestar "¿qué le pasó al valor?" — una lee un error, la otra lee
+ * un resultado. Tiene tres consumidores en tres capas
+ * (`services/payment-intent.ts`, `middleware/x402.ts`, `lib/downstream-payment.ts`), así
+ * que ninguna de ellas puede ser su dueña sin invertir la dirección de dependencias.
+ *
+ * EL HECHO QUE OBLIGA A MIRARLO: en modo `pieverse` —el DEFAULT
+ * (`KITE_FACILITATOR_MODE`, `.env.example`: "current production path")— el adapter
+ * devuelve la respuesta del facilitator VERBATIM
+ * (`kite-ozone/payment.ts` — `{ txHash: result.txHash, success: result.success }`).
+ * O sea que un `200 { success:false, txHash:"0x…" }` nos deja UN HASH DE BROADCAST EN
+ * LA MANO, y los consumidores lo tiraban a la basura para después afirmar "probado que
+ * no se ejecutó". Con ese veredicto:
+ *   · camino escrow    → `reconciliation_pending` → el reconciliador RE-ENVÍA el hop 2
+ *                        a ciegas → el seller cobra DOS VECES.
+ *   · camino no-escrow → `failed_unequivocal` → `finalize_payment_intent` REEMBOLSA el
+ *                        deposit completo al buyer mientras el seller puede tener la
+ *                        plata.
+ *   · inbound (x402)   → 402 "Payment settlement failed", o sea afirmarle al caller que
+ *                        no se le cobró, con el hash en la mano.
+ *
+ * REGLA (deliberadamente asimétrica, igual que `classifySettleTransportError`): CUALQUIER
+ * string no vacío cuenta como evidencia. NO se valida el formato:
+ *   · un `0x…` es el caso EVM/pieverse;
+ *   · una firma base58 sería el caso Solana;
+ *   · un string que no reconocemos significa que NO ENTENDIMOS la respuesta del
+ *     facilitator, y no entenderla es exactamente lo contrario de tener una prueba.
+ * En las tres, el lado seguro es el mismo: `ambiguous` (no refund, no re-envío, revisión
+ * humana). Sólo la AUSENCIA del hash (undefined / null / '' / whitespace / no-string)
+ * deja el veredicto `unequivocal` intacto, y con él el caso legítimo (D) del
+ * reconciliador: el facilitator contestó 2xx diciendo que NO settleó y sin darnos hash.
+ *
+ * ⚠️ NO "endurecer" esto a un regex `^0x[0-9a-f]{64}$`: un hash malformado pasaría a
+ * contar como "no hubo broadcast", que es justo la inferencia que esta HU borra.
+ *
+ * ⚠️ INCÓGNITA ABIERTA — TD-201-03 (AR BLQ-BAJO-3). No sabemos si `pieverse` devuelve un
+ * `txHash` NO VACÍO en sus rechazos NORMALES (firma inválida, saldo insuficiente). Su
+ * tipo lo declara OBLIGATORIO (`PieverseSettleResult.txHash: string`), lo cual es una
+ * señal de que podría venir siempre — pero un campo `string` requerido también se
+ * satisface con `''`, y no hay ninguna respuesta real de pieverse registrada en el repo
+ * para dirimirlo. Las DOS direcciones del error, explícitas:
+ *   · si pieverse NO manda hash en los rechazos → esta regla se comporta como se
+ *     diseñó: los rechazos legítimos siguen siendo `unequivocal` (buyer reembolsado,
+ *     hop 2 re-enviado) y sólo el caso con hash va a revisión.
+ *   · si pieverse SÍ manda hash SIEMPRE → el 100% de los rechazos legítimos pasa a
+ *     `ambiguous`: NINGÚN buyer reembolsado automáticamente y NINGÚN hop 2 re-enviado.
+ *     Eso NO se pierde en silencio —para eso existe `listAmbiguous()` en
+ *     `services/reconciliation.ts`, agregada por esta misma HU— pero convierte el
+ *     reembolso en una tarea manual masiva.
+ * CÓMO SE CIERRA: mirando `GET /dashboard/api/reconciliation` → `ambiguous` en el primer
+ * día con tráfico real, o capturando una respuesta real de rechazo de pieverse y
+ * volviéndola fixture. NO se cierra probando contra `facilitator.pieverse.io` (es un
+ * tercero, y este repo tiene prohibido pegarle desde los tests).
+ */
+export function hasBroadcastEvidence(txHash: unknown): boolean {
+  return typeof txHash === 'string' && txHash.trim().length > 0;
 }
 
 export function classifySettleTransportError(

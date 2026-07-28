@@ -501,9 +501,28 @@ export class KiteOzonePaymentAdapter implements EvmPaymentAdapter {
         classifySettleTransportError(err),
       );
     }
+    // HU-201 fix-pack (AR BLQ-BAJO-3) — UN 2XX SIN VEREDICTO NO ES UN VEREDICTO.
+    //
+    // `PieverseSettleResult.success` es `boolean` EN EL TIPO, pero el cuerpo lo manda un
+    // TERCERO: un `200 {}` (o `{"status":"ok"}`, o cualquier forma que no conozcamos)
+    // deja `result.success === undefined`. Aguas abajo, `!settleResult.success` es
+    // `true` ⟹ hoy eso salía como el veredicto MÁS FUERTE del sistema
+    // (`unequivocal` ⟹ REEMBOLSAR al buyer), a partir de un cuerpo que no entendimos
+    // ENTERO. Es exactamente lo contrario de la doctrina que esta misma HU aplica al
+    // `txHash`: no entender la respuesta no es tener una prueba.
+    //
+    // Acotado A PROPÓSITO al campo que ESTE facilitator garantiza. Exigir `settled`
+    // presente en los adapters x402 SÍ sería sobre-corrección: ahí `settled !== true`
+    // es un default-deny deliberado contra nuestro propio facilitator.
+    if (typeof result.success !== 'boolean') {
+      throw new FacilitatorSettleError(
+        `Facilitator returned HTTP ${response.status} on /settle with no boolean \`success\` field (got ${typeof result.success}) — the verdict is unreadable`,
+        'unknown',
+      );
+    }
     // HU-201: el `txHash` se pasa VERBATIM, incluido cuando viene con `success:false`, y
-    // eso es LOAD-BEARING: `services/payment-intent.ts` (`hasBroadcastEvidence`) lo lee
-    // para no clasificar un `200 {success:false, txHash:"0x…"}` como "probado que no se
+    // eso es LOAD-BEARING: `hasBroadcastEvidence` (`adapters/errors.ts`) lo lee para no
+    // clasificar un `200 {success:false, txHash:"0x…"}` como "probado que no se
     // ejecutó". NO normalizar el hash a `''` en la rama de fallo: eso volvería a borrar
     // la única evidencia de broadcast que tenemos.
     return {

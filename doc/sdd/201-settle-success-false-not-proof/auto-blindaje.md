@@ -15,9 +15,15 @@
   `FacilitatorSettleError(..., 'unknown')`, y el candado
   `T-198-AR2-HTTP-ERROR` (que candaba el comportamiento VIEJO a propósito, porque
   HU-198 dejó esto Scope OUT) se invirtió y pasó a `T-201-HTTP-ERROR`.
-- **Aplicar en**: cualquier barrido por "camino de settle" tiene que enumerar los
-  **cinco** (4 x402 + pieverse), no grepear un patrón. La lista canónica vive en la
-  cabecera de `src/adapters/settle-http-error.hu201.test.ts`.
+- **Aplicar en**: cualquier barrido por "camino de settle" tiene que ENUMERAR los
+  caminos, no grepear un patrón. La lista canónica vive en la cabecera de
+  `src/adapters/settle-http-error.hu201.test.ts`.
+- **⚠️ CORRECCIÓN (AR MENOR)**: son **SEIS** implementaciones de `settle`, no cinco.
+  La sexta es `src/adapters/solana/payment.ts`, y está EXCLUIDA de esta HU con
+  motivo —no habla con un facilitator HTTP: construye, firma y broadcastea ella
+  misma, y es idempotente por `intentId`— pero decir "los cinco" canoniza una lista
+  incompleta para el próximo barrido, que es el error que esta misma entrada
+  describe. La regla correcta: enumerar las seis y JUSTIFICAR cada exclusión.
 
 ### [2026-07-28] Wave 1 — dos referencias del brief apuntaban al guard equivocado
 
@@ -46,8 +52,66 @@
   + "el buyer no recupera su deposit", en silencio.
 - **Fix**: cada test de la dirección peligrosa (T-201-A/C/E) tiene su
   contra-ejemplo obligatorio (T-201-B/D/F). Probado con la **mutación de
-  sobre-corrección** (`failureKind: 'ambiguous'` fijo): pone rojos 10 tests, 3 de
-  ellos los contra-ejemplos nuevos.
+  sobre-corrección** (`failureKind: 'ambiguous'` fijo): pone rojos **12** tests, 3 de
+  ellos los contra-ejemplos nuevos. (Yo había reportado 10: conté sobre una corrida
+  parcial. La dirección del error fue conservadora —sub-declarar cuántos candados
+  hay— pero un número de mutación es evidencia, y una evidencia mal contada no es
+  evidencia. Corregido por el AR.)
 - **Aplicar en**: cualquier HU que endurezca una clasificación de dinero. Mutar
   hacia el lado SEGURO y exigir rojo es tan obligatorio como mutar hacia el
   peligroso.
+
+### [2026-07-28] Fix-pack AR — endurecer sin superficie es cambiar ruido por silencio
+
+- **Error**: el fix mandó los HTTP non-2xx a `ambiguous` ⟹ el deposit del buyer deja
+  de reembolsarse. Acepté ese costo razonando "va a revisión humana"… sin verificar
+  que la revisión humana TUVIERA DÓNDE PASAR. En el camino no-escrow (el DEFAULT)
+  esas filas no las lista `listPending()` (lee la tabla de firmas, que ahí no existe)
+  ni las toca `resolveIntent()` (corta en el gate del flag). La cola no era cara: no
+  existía.
+- **Causa raíz**: razoné sobre el camino ESCROW, que sí tiene superficie
+  (`resolving_settle` + `listPending`), y extendí esa conclusión al camino no-escrow
+  sin comprobarlo. Los dos caminos comparten el clasificador pero NO la
+  observabilidad.
+- **Fix**: `reconciliationService.listAmbiguous()` + `ambiguous` en
+  `GET /dashboard/api/reconciliation`, deliberadamente NO gateado por el flag.
+  Candado: `T-201-AMB-FLAG-OFF` (mutar el gate lo pone rojo).
+- **Aplicar en**: TODA HU que convierta una acción automática en una manual. El
+  entregable no es la reclasificación: es la reclasificación MÁS el lugar donde se
+  ve. Pregunta de control: "¿qué query lista las filas que acabo de crear?". Si la
+  respuesta es "el `error_message`", no hay superficie.
+
+### [2026-07-28] Fix-pack AR — un test puede candar la propiedad equivocada y parecer verde
+
+- **Error**: `T-201-HTTP-CONTRA` afirmaba `expect(result.txHash).toBe('')` y PARECÍA
+  candar la propagación del hash. Era vacuo en esa dimensión: el fixture no traía
+  `transactionHash`, así que `result.transactionHash ?? ''` y un `''` hardcodeado son
+  indistinguibles. La mutación "borrá el hash en la rama de fallo" sobrevivía en los
+  4 adapters x402 con la suite entera en verde — y el hash es la ÚNICA evidencia que
+  hace funcionar todo el fix.
+- **Causa raíz**: el assert miraba el valor CORRECTO pero en el escenario donde la
+  rama no se ejecuta. Es la forma "el escenario está armado de manera que la rama
+  nunca corre", ya cazada dos veces esta semana en este repo.
+- **Fix**: fixture `respondRejected200WithHash()` + `T-201-CONTRA-HASH` en los 4
+  caminos. Los 4 mutantes ahora mueren, cada uno en el test de SU archivo.
+- **Aplicar en**: cuando un assert compara contra un valor por DEFECTO (`''`, `null`,
+  `0`, `undefined`), el test no distingue "lo calculó" de "no lo tocó". Hay que
+  ejercitarlo con un valor NO-default, o mutar y confirmar el rojo.
+
+### [2026-07-28] Fix-pack AR — el veredicto más fuerte del sistema salía de un cuerpo ilegible
+
+- **Error**: apliqué la doctrina "no entender no es tener una prueba" al `txHash` y
+  NO al campo de al lado. Un `200 {}` de pieverse deja `result.success === undefined`
+  ⟹ `!settleResult.success` es `true` ⟹ salía `unequivocal` ⟹ REEMBOLSO. O sea: un
+  cuerpo que no entendimos entero emitía el veredicto más fuerte del sistema, en el
+  mismo commit donde escribí que eso no se hace.
+- **Causa raíz**: leí el tipo (`PieverseSettleResult.success: boolean`) como una
+  garantía. El cuerpo lo manda un TERCERO; el tipo es una declaración nuestra, no un
+  contrato ejecutable.
+- **Fix**: en el settle pieverse, `typeof result.success !== 'boolean'` ⟹
+  `FacilitatorSettleError('unknown')`. Acotado a ESE campo: exigir `settled` en los
+  x402 sería sobre-corrección (ahí `settled !== true` es un default-deny deliberado
+  contra nuestro propio facilitator).
+- **Aplicar en**: cualquier campo de un tercero del que dependa una decisión de
+  dinero. `typeof x !== 'boolean'` sobre el veredicto, no sólo `!x`. Un tipo
+  TypeScript sobre un payload de red es documentación, no validación.

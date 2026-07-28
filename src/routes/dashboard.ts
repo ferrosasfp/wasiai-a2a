@@ -430,19 +430,27 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
    * WKH-191c: surface read-only del motor de reconciliación (AC-1/AC-7). Lista los
    * intents pending + el drift budget-vs-escrow. Corre con el flag OFF (solo lectura).
    * Opt-in `requireAdminToken` (cross-tenant admin, ALTO PRIVILEGIO).
+   *
+   * HU-201 (AR BLQ-MEDIO-2) suma `ambiguous`: los intents `failed_ambiguous`, donde el
+   * deposit del buyer QUEDÓ RETENIDO y el resultado del settle es desconocido. Es la
+   * ÚNICA superficie de esas filas en el camino no-escrow (el default) — sin esto, el
+   * endurecimiento de HU-201 cambiaba un reembolso indebido ruidoso por una retención
+   * silenciosa. Ver `AmbiguousIntentRow` en `services/reconciliation.ts`.
    */
   fastify.get(
     '/api/reconciliation',
     { config: { rateLimit: false }, preHandler: requireAdminToken },
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
-        const [pending, drift] = await Promise.all([
+        const [pending, drift, ambiguous] = await Promise.all([
           reconciliationService.listPending(),
           reconciliationService.driftCheck(),
+          reconciliationService.listAmbiguous(),
         ]);
         return reply.send({
           pending,
           drift,
+          ambiguous,
           flagEnabled: isEscrowSettleEnabled(),
         });
       } catch (err) {

@@ -43,6 +43,10 @@ vi.mock('../services/arbiter.js', () => ({
 const mockListPending = vi.hoisted(() => vi.fn());
 const mockDriftCheck = vi.hoisted(() => vi.fn());
 const mockResolveIntent = vi.hoisted(() => vi.fn());
+// HU-201 (AR BLQ-MEDIO-2): la superficie de los deposits RETENIDOS.
+const mockListAmbiguous = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ rows: [], total: 0, truncated: false }),
+);
 const MockReconciliationError = vi.hoisted(() => {
   class ReconciliationError extends Error {
     code: string;
@@ -58,6 +62,7 @@ vi.mock('../services/reconciliation.js', () => ({
   reconciliationService: {
     listPending: (...a: unknown[]) => mockListPending(...a),
     driftCheck: (...a: unknown[]) => mockDriftCheck(...a),
+    listAmbiguous: (...a: unknown[]) => mockListAmbiguous(...a),
     resolveIntent: (...a: unknown[]) => mockResolveIntent(...a),
   },
   ReconciliationError: MockReconciliationError,
@@ -334,6 +339,73 @@ describe('WKH-191c reconciliation admin routes', () => {
     expect(body.pending).toHaveLength(1);
     expect(body.drift).toHaveLength(1);
     expect(body.drift[0].exceedsThreshold).toBe(true);
+    await app.close();
+  });
+
+  // ── HU-201 (AR BLQ-MEDIO-2): el GET tiene que EXPONER los deposits retenidos ──
+  //
+  // Sin esto, el endurecimiento de HU-201 (un non-2xx del facilitator ya no se
+  // reembolsa automáticamente) deja las filas `failed_ambiguous` sin NINGUNA
+  // superficie en el camino no-escrow, que es el DEFAULT: `pending` lee la tabla de
+  // firmas (sin escrow no hay fila) y `resolveIntent` corta en el gate del flag. O
+  // sea que el fix cambiaba un reembolso indebido RUIDOSO por una retención
+  // SILENCIOSA. El candado es sobre el CONTRATO del endpoint, no sobre el service.
+  it('T-201-ROUTE: GET /api/reconciliation incluye `ambiguous` (deposits retenidos) incluso con el flag OFF', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
+    mockListPending.mockResolvedValue([]);
+    mockDriftCheck.mockResolvedValue([]);
+    mockListAmbiguous.mockResolvedValue({
+      rows: [
+        {
+          intent_id: 'i9',
+          owner_ref: 'tenant-A',
+          key_id: 'k1',
+          intent_type: 'session',
+          status: 'failed',
+          chain_id: 2368,
+          pay_to: '0x2222222222222222222222222222222222222222',
+          authorizedUsd: '10.00000000',
+          consumedUsd: '4.00000000',
+          settle_outcome: 'failed_ambiguous',
+          error_message:
+            'RECONCILE: settle failed WITH a broadcast hash (0xBROADCASTED): boom',
+          updated_at: '2026-07-28T00:00:00.000Z',
+        },
+      ],
+      total: 1,
+      truncated: false,
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/reconciliation',
+      headers: { 'x-admin-token': 'secret' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // El servicio se consulta AUNQUE el flag esté OFF: es el caso que cubre.
+    expect(mockListAmbiguous).toHaveBeenCalled();
+    expect(body.ambiguous.rows).toHaveLength(1);
+    expect(body.ambiguous.total).toBe(1);
+    expect(body.ambiguous.truncated).toBe(false);
+    // El deposit retenido y la pista para cruzar contra la cadena llegan al operador.
+    expect(body.ambiguous.rows[0].authorizedUsd).toBe('10.00000000');
+    expect(body.ambiguous.rows[0].error_message).toContain('0xBROADCASTED');
+    await app.close();
+  });
+
+  it('T-201-ROUTE-AUTH: la lista de deposits retenidos NO se sirve sin admin token', async () => {
+    // Es cross-tenant (intents de todos los owners) y trae `owner_ref` + montos.
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockListAmbiguous.mockClear();
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/reconciliation',
+    });
+    expect(res.statusCode).toBe(401);
+    expect(mockListAmbiguous).not.toHaveBeenCalled();
     await app.close();
   });
 

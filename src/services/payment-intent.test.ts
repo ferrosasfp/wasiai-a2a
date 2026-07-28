@@ -125,10 +125,12 @@ vi.mock('../adapters/escrow/debit-executor.js', () => ({
   recordDebitSettleStatus: (args: unknown) => mockRecordDebitSettleStatus(args),
 }));
 
+// HU-201 fix-pack: `hasBroadcastEvidence` se mudó a `adapters/errors.js` (tres
+// consumidores en tres capas; ver su docstring). El test lo importa de su nueva casa.
+import { hasBroadcastEvidence } from '../adapters/errors.js';
 import { supabase } from '../lib/supabase.js';
 import type { CreateUptoInput } from '../types/index.js';
 import {
-  hasBroadcastEvidence,
   isHop2ResultUnknown,
   paymentIntentService,
   settleEscrowAware,

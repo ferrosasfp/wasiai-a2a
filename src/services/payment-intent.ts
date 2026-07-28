@@ -26,6 +26,7 @@
  */
 
 import { recoverTypedDataAddress } from 'viem';
+import { hasBroadcastEvidence } from '../adapters/errors.js';
 import {
   captureDebitSignatureBestEffort,
   type DebitCaptureInput,
@@ -366,42 +367,6 @@ export function isHop2ResultUnknown(
 }
 
 /**
- * HU-201 (AR BLQ-ALTO, entrada (G) de `reconciliation.ts`) — ¿el `txHash` que vino
- * JUNTO a un `success:false` es evidencia de que hubo broadcast?
- *
- * EL HECHO QUE OBLIGA A MIRARLO: en modo `pieverse` —el DEFAULT
- * (`KITE_FACILITATOR_MODE`, `.env.example`: "current production path")— el adapter
- * devuelve la respuesta del facilitator VERBATIM
- * (`kite-ozone/payment.ts` — `{ txHash: result.txHash, success: result.success }`).
- * O sea que un `200 { success:false, txHash:"0x…" }` nos deja UN HASH DE BROADCAST EN
- * LA MANO, y el clasificador de abajo lo estaba tirando a la basura para después
- * afirmar "probado que no se ejecutó". Con ese veredicto:
- *   · camino escrow    → `reconciliation_pending` → el reconciliador RE-ENVÍA el hop 2
- *                        a ciegas → el seller cobra DOS VECES.
- *   · camino no-escrow → `failed_unequivocal` → `finalize_payment_intent` REEMBOLSA el
- *                        deposit completo al buyer mientras el seller puede tener la
- *                        plata.
- *
- * REGLA (deliberadamente asimétrica, igual que `classifySettleTransportError`): CUALQUIER
- * string no vacío cuenta como evidencia. NO se valida el formato:
- *   · un `0x…` es el caso EVM/pieverse;
- *   · una firma base58 sería el caso Solana;
- *   · un string que no reconocemos significa que NO ENTENDIMOS la respuesta del
- *     facilitator, y no entenderla es exactamente lo contrario de tener una prueba.
- * En las tres, el lado seguro es el mismo: `ambiguous` (no refund, no re-envío, revisión
- * humana). Sólo la AUSENCIA del hash (undefined / null / '' / whitespace / no-string —
- * que es lo que producen los 4 adapters x402 con su `result?.transactionHash ?? ''`)
- * deja el veredicto `unequivocal` intacto, y con él el caso legítimo (D) del
- * reconciliador: el facilitator contestó 200 diciendo que NO settleó y sin darnos hash.
- *
- * ⚠️ NO "endurecer" esto a un regex `^0x[0-9a-f]{64}$`: un hash malformado pasaría a
- * contar como "no hubo broadcast", que es justo la inferencia que esta HU borra.
- */
-export function hasBroadcastEvidence(txHash: unknown): boolean {
-  return typeof txHash === 'string' && txHash.trim().length > 0;
-}
-
-/**
  * BLQ-DR: normaliza el `settle_outcome` persistido a un veredicto. NULL/desconocido
  * → 'failed_ambiguous' (money-safe): sin veredicto NO asumimos éxito ni refund; se
  * marca reconciliable. NUNCA default a 'settled' (esa asunción era la causa raíz).
@@ -472,8 +437,20 @@ export async function settlePaymentIntentOnChain(params: {
         const detail = broadcastEvidence
           ? `settle failed WITH a broadcast hash (${String(settleResult.txHash)}): ${settleResult.error ?? 'unknown'}`
           : `settle failed: ${settleResult.error ?? 'unknown'}`;
+        // AR MENOR: el hash sale como CAMPO ESTRUCTURADO, no sólo dentro de la prosa
+        // de `detail`. Es la única pista para cruzar contra la cadena y no hay columna
+        // donde persistirlo (agregarla es una migración → TD-201-02); un campo propio
+        // lo vuelve al menos filtrable en el agregador de logs, y viaja además en el
+        // `error_message` que expone `listAmbiguous()`.
         log.error(
-          { intentId, detail, broadcastEvidence },
+          {
+            intentId,
+            detail,
+            broadcastEvidence,
+            ...(broadcastEvidence
+              ? { settleTxHash: String(settleResult.txHash) }
+              : {}),
+          },
           'settle reported failure',
         );
         // · SIN hash → INEQUÍVOCO: el facilitator contestó, en su propia respuesta

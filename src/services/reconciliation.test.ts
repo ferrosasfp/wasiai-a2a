@@ -940,3 +940,185 @@ describe('BLQ-ALTO-1 race del doble hop2 (claim exclusivo + lease)', () => {
     expect(out).toMatchObject({ status: 'settled', side: 'settle' });
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// HU-201 (AR BLQ-MEDIO-2) — `listAmbiguous`: la superficie de los deposits RETENIDOS.
+//
+// POR QUÉ ES BLOQUEANTE Y NO COSMÉTICO: HU-201 mandó los HTTP non-2xx a `ambiguous` ⟹
+// `failed_ambiguous` ⟹ el deposit del buyer NO se reembolsa. En el camino NO-ESCROW —el
+// DEFAULT— esas filas eran INVISIBLES: `listPending()` lee la tabla de firmas (que sin
+// escrow no existe) y `resolveIntent()` corta en el gate del flag. O sea que el fix
+// cambiaba "reembolso indebido RUIDOSO" por "retención SILENCIOSA".
+//
+// Y el modo de falla ya ocurrió en este repo: el facilitator exigiendo un Bearer que el
+// adapter no mandaba ⟹ 401 en el 100% de los settles. Antes era auto-sanante (todos los
+// buyers reembolsados); con HU-201 sería el 100% de los deposits retenidos.
+// ════════════════════════════════════════════════════════════════════════════
+describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
+  interface Captured {
+    table: string | null;
+    cols: string | null;
+    countOpt: string | null;
+    eqCalls: Array<[string, unknown]>;
+    orderCalls: Array<[string, unknown]>;
+    limitCalls: number[];
+  }
+
+  /**
+   * Doble propio: el `wireFrom` compartido no soporta `.order()`/`.limit()` ni el
+   * `count`. Captura la FORMA de la query — sin eso, un test que sólo mira el mapeo
+   * no distinguiría una query correcta de una que lee la tabla equivocada.
+   */
+  function wireIntents(rows: unknown[], count: number | null) {
+    const cap: Captured = {
+      table: null,
+      cols: null,
+      countOpt: null,
+      eqCalls: [],
+      orderCalls: [],
+      limitCalls: [],
+    };
+    mockFrom.mockImplementation(((table: string) => {
+      cap.table = table;
+      const b: Record<string, unknown> = {
+        select: (cols?: string, opts?: { count?: string }) => {
+          cap.cols = cols ?? null;
+          cap.countOpt = opts?.count ?? null;
+          return b;
+        },
+        eq: (col: string, val: unknown) => {
+          cap.eqCalls.push([col, val]);
+          return b;
+        },
+        order: (col: string, opts?: unknown) => {
+          cap.orderCalls.push([col, opts]);
+          return b;
+        },
+        limit: (n: number) => {
+          cap.limitCalls.push(n);
+          return Promise.resolve({ data: rows, error: null, count });
+        },
+        // biome-ignore lint/suspicious/noThenProperty: awaitable supabase builder test double
+        then: (resolve: (v: unknown) => void) =>
+          resolve({ data: rows, error: null, count }),
+      };
+      return b;
+      // biome-ignore lint/suspicious/noExplicitAny: test double for supabase builder
+    }) as any);
+    return cap;
+  }
+
+  function ambiguousRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: INTENT_ID,
+      owner_ref: OWNER,
+      key_id: KEY_ID,
+      intent_type: 'session',
+      status: 'failed',
+      chain_id: CHAIN_ID,
+      pay_to: PAYTO,
+      authorized_usd: '10.00000000',
+      consumed_usd: '4.00000000',
+      settle_outcome: 'failed_ambiguous',
+      error_message:
+        'RECONCILE: settle failed WITH a broadcast hash (0xBROADCASTED): boom',
+      updated_at: '2026-07-28T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsEscrowSettleEnabled.mockReturnValue(true);
+  });
+
+  it('T-201-AMB-QUERY: lee `a2a_payment_intents` filtrando por settle_outcome=failed_ambiguous', async () => {
+    const cap = wireIntents([ambiguousRow()], 1);
+
+    await reconciliationService.listAmbiguous();
+
+    // La tabla importa: `listPending` lee la de FIRMAS, que en el camino no-escrow
+    // (el default) no tiene fila. Si esta query leyera ahí, la lista sería vacía
+    // justo en el caso que existe para cubrir.
+    expect(cap.table).toBe('a2a_payment_intents');
+    expect(cap.eqCalls).toContainEqual(['settle_outcome', 'failed_ambiguous']);
+  });
+
+  it('T-201-AMB-FLAG-OFF: funciona con ESCROW_SETTLE_ENABLED OFF — que es el caso que existe para cubrir', async () => {
+    // ÉSTE es el candado central. El camino que produce estas filas es el NO-escrow,
+    // o sea el que corre con el flag OFF. Si alguien "unificara" esta lista con el
+    // gate de `resolveIntent()` (`if (!isEscrowSettleEnabled()) return flag_off`),
+    // volvería a quedar vacía exactamente cuando importa, y en silencio.
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
+    wireIntents([ambiguousRow()], 1);
+
+    const out = await reconciliationService.listAmbiguous();
+
+    expect(out.rows).toHaveLength(1);
+    expect(out.rows[0]?.intent_id).toBe(INTENT_ID);
+  });
+
+  it('T-201-AMB-EVIDENCE: expone el error_message, que es DONDE VIVE el hash de broadcast', async () => {
+    // No hay columna para el hash (sería una migración). El humano que reconcilia lo
+    // saca de acá; si el mapeo lo dropeara, la fila sería inaccionable.
+    wireIntents([ambiguousRow()], 1);
+
+    const out = await reconciliationService.listAmbiguous();
+
+    expect(out.rows[0]?.error_message).toContain('0xBROADCASTED');
+    // Y el monto retenido, que es de lo que se trata la revisión.
+    expect(out.rows[0]?.authorizedUsd).toBe('10.00000000');
+    expect(out.rows[0]?.consumedUsd).toBe('4.00000000');
+  });
+
+  it('T-201-AMB-NUMERIC: los NUMERIC se piden con `::text` (WKH-196: PostgREST redondea)', async () => {
+    const cap = wireIntents([], 0);
+
+    await reconciliationService.listAmbiguous();
+
+    expect(cap.cols).toContain('authorized_usd::text');
+    expect(cap.cols).toContain('consumed_usd::text');
+  });
+
+  it('T-201-AMB-TRUNCATED: una lista acotada lo DECLARA (total exacto), no se calla filas', async () => {
+    // Un reporte de plata retenida que se trunca en silencio afirma algo falso sobre
+    // su propia completitud — el mismo error que este archivo ya documenta para el
+    // drift. Se pide `count: 'exact'` y se compara contra las filas devueltas.
+    const cap = wireIntents([ambiguousRow(), ambiguousRow({ id: 'i2' })], 500);
+
+    const out = await reconciliationService.listAmbiguous();
+
+    expect(cap.countOpt).toBe('exact');
+    expect(out.total).toBe(500);
+    expect(out.truncated).toBe(true);
+  });
+
+  it('T-201-AMB-NOT-TRUNCATED: si entran todas, no se declara truncada', async () => {
+    wireIntents([ambiguousRow()], 1);
+
+    const out = await reconciliationService.listAmbiguous();
+
+    expect(out.total).toBe(1);
+    expect(out.truncated).toBe(false);
+  });
+
+  it('T-201-AMB-ERROR: un fallo de la query NO devuelve una lista vacía (eso mentiría "no hay nada retenido")', async () => {
+    mockFrom.mockImplementation(((_table: string) => {
+      const b: Record<string, unknown> = {
+        select: () => b,
+        eq: () => b,
+        order: () => b,
+        limit: () =>
+          Promise.resolve({
+            data: null,
+            error: { message: 'boom' },
+            count: null,
+          }),
+      };
+      return b;
+      // biome-ignore lint/suspicious/noExplicitAny: test double for supabase builder
+    }) as any);
+
+    await expect(reconciliationService.listAmbiguous()).rejects.toThrow();
+  });
+});

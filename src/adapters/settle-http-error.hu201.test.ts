@@ -37,6 +37,7 @@ import { AvalanchePaymentAdapter } from './avalanche/payment.js';
 import { BasePaymentAdapter } from './base/payment.js';
 import {
   FacilitatorSettleError,
+  hasBroadcastEvidence,
   readSettleValueDisposition,
 } from './errors.js';
 import { KiteOzonePaymentAdapter } from './kite-ozone/payment.js';
@@ -66,7 +67,10 @@ function respond502(): void {
   });
 }
 
-/** El veredicto legítimo: 2xx + cuerpo canónico diciendo que no settleó. */
+/**
+ * El veredicto legítimo: 2xx + cuerpo canónico diciendo que no settleó, SIN hash.
+ * Es el caso que tiene que seguir siendo `unequivocal` aguas abajo.
+ */
 function respondRejected200(): void {
   mockFetch.mockResolvedValueOnce({
     ok: true,
@@ -77,6 +81,31 @@ function respondRejected200(): void {
       error: { code: 'INSUFFICIENT_BALANCE', message: 'no balance' },
     }),
     text: async () => 'rejected',
+  });
+}
+
+/**
+ * AR BLQ-BAJO-2 — el MISMO rechazo pero CON `transactionHash`.
+ *
+ * Sin este fixture, `T-201-HTTP-CONTRA` sólo PARECÍA candar la propagación del hash:
+ * afirmaba `result.txHash === ''`, pero el cuerpo no traía `transactionHash`, así que
+ * `result.transactionHash ?? ''` y un `''` hardcodeado son INDISTINGUIBLES. La mutación
+ * "borrá el hash en la rama de fallo" (M11) sobrevivía con 3783 verdes. Es la forma
+ * "el escenario está armado de manera que la rama nunca se ejecuta".
+ */
+const EVIDENCE_HASH = '0xBROADCASTEDBUTREJECTED';
+function respondRejected200WithHash(): void {
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      settled: false,
+      success: false,
+      transactionHash: EVIDENCE_HASH, // forma x402
+      txHash: EVIDENCE_HASH, // forma pieverse
+      error: { code: 'REVERTED', message: 'reverted after broadcast' },
+    }),
+    text: async () => 'rejected-with-hash',
   });
 }
 
@@ -141,6 +170,23 @@ describe('HU-201 · settle: HTTP non-2xx ≠ success:false', () => {
         expect(result.error).toBe('no balance');
         // Y sin txHash ⟹ `hasBroadcastEvidence` lo deja `unequivocal`.
         expect(result.txHash).toBe('');
+      });
+
+      it('T-201-CONTRA-HASH: un 200 `settled:false` CON transactionHash lo PROPAGA (mata M11: borrar el hash en la rama de fallo)', async () => {
+        // AR BLQ-BAJO-2. El hash es la ÚNICA evidencia de broadcast que tenemos, y es
+        // lo que `hasBroadcastEvidence` lee aguas abajo para NO reembolsar al buyer.
+        // Si el adapter lo normaliza a `''` en esta rama, el fix entero se apaga en
+        // silencio: `success:false` sin hash ⟹ `unequivocal` ⟹ refund.
+        const adapter = make();
+        respondRejected200WithHash();
+
+        const result = await adapter.settle({ ...SETTLE_REQ });
+
+        expect(result.success).toBe(false);
+        expect(result.txHash).toBe(EVIDENCE_HASH);
+        // Y la consecuencia real, afirmada acá para que el candado no dependa de que
+        // alguien recuerde qué hace el consumidor con este campo.
+        expect(hasBroadcastEvidence(result.txHash)).toBe(true);
       });
 
       it('T-201-HTTP-BODY: un body que no parsea también es unknown', async () => {
@@ -214,6 +260,47 @@ describe('HU-201 · settle: HTTP non-2xx ≠ success:false', () => {
 
       expect(result.success).toBe(false);
       expect(result.txHash).toBe('0xBROADCASTED');
+      expect(hasBroadcastEvidence(result.txHash)).toBe(true);
+    });
+
+    // ── AR BLQ-BAJO-3 (2ª mitad): un 2xx SIN veredicto legible ──
+    //
+    // LA PROPIEDAD DE DINERO: `success` ausente ⟹ `!settleResult.success` es `true`
+    // aguas abajo ⟹ salía como `unequivocal`, que es el veredicto MÁS FUERTE del
+    // sistema (REEMBOLSAR al buyer), a partir de un cuerpo que no entendimos entero.
+    // Es la misma inferencia que la HU borra para el `txHash`, en el otro campo.
+    it.each([
+      ['un objeto vacío', {}],
+      ['una forma desconocida', { status: 'ok', result: 'accepted' }],
+      ['un `success` no-boolean', { success: 'true', txHash: '0xabc' }],
+      ['un `success` null', { success: null }],
+    ])('T-201-PIEVERSE-VERDICT: %s en un 200 es UNKNOWN, no "probado que no se ejecutó"', async (_label, body) => {
+      const adapter = new KiteOzonePaymentAdapter();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => 'x',
+      });
+
+      const err = await adapter
+        .settle({ ...SETTLE_REQ })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(FacilitatorSettleError);
+      expect(readSettleValueDisposition(err)).toBe('unknown');
+    });
+
+    it('T-201-PIEVERSE-VERDICT-CONTRA: un `success:false` BOOLEAN sigue siendo un veredicto legible (no se sobre-corrige)', async () => {
+      // El contra-ejemplo obligatorio: si el guard de arriba se pasara de estricto,
+      // el rechazo NORMAL del facilitator dejaría de reembolsar al buyer.
+      const adapter = new KiteOzonePaymentAdapter();
+      respondRejected200();
+
+      const result = await adapter.settle({ ...SETTLE_REQ });
+
+      expect(result.success).toBe(false);
+      expect(hasBroadcastEvidence(result.txHash)).toBe(false);
     });
   });
 });
