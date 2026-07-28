@@ -39,11 +39,17 @@
  *
  * ── POR QUÉ NO `request.id` NI `orchestrationId` ──────────────────────────
  *
- * Ambos son o pueden ser CALLER-CONTROLLED:
- *   - `request.id` sale del header `request-id` cuando el caller lo manda
- *     (`Fastify({ genReqId })` sólo cubre el caso en que NO viene).
- *   - `POST /orchestrate/execute` recibe `orchestrationId` en el body
- *     (`routes/orchestrate.ts`, `OrchestrateExecuteBody`).
+ *   - `orchestrationId` ES caller-controlled: `POST /orchestrate/execute` lo
+ *     recibe en el BODY (`routes/orchestrate.ts:33`, `OrchestrateExecuteBody`) y
+ *     no hay validación de unicidad.
+ *   - `request.id` HOY NO es caller-controlled: Fastify ignora el header entrante
+ *     porque `requestIdHeader` tiene default `false` y `src/index.ts` pasa
+ *     `genReqId` sin setearlo ⟹ es siempre un `crypto.randomUUID()` server-side
+ *     (`middleware/request-id.ts:10`). Igual NO se usa: alcanza con setear
+ *     `requestIdHeader: true` (una línea, en otro archivo, por otro motivo) para
+ *     volverlo caller-controlled. La clave del dinero no debe depender de una
+ *     opción de logging del framework.
+ *
  * Un caller que repite el mismo id en dos requests haría que su SEGUNDO refund
  * (legítimo, de un débito distinto) se descarte como duplicado. Por eso el
  * `operationId` es siempre un UUID generado server-side por operación:

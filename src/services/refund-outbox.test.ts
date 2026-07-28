@@ -192,7 +192,13 @@ describe('refundOutbox', () => {
       expect(updateCalls[0]).toMatchObject({ status: 'done' });
     });
 
-    it('T-194-OB-3: fila sin la columna (migración no aplicada) → idemKey null, no rompe', async () => {
+    // AR BLQ-BAJO-1: el título viejo ("migración no aplicada → no rompe") prometía
+    // back-compat que este test NO prueba: el credit está mockeado como exitoso, así
+    // que no se ejercita ni el write de `idem_key` (PGRST204) ni la RPC con
+    // `p_idem_key` (PGRST202). Lo único que cubre es el READ del sweep. El orden
+    // migración → deploy es un GATE de release, no algo que el código tolere: ver el
+    // header de `supabase/migrations/20260727000000_hu194_refund_idempotency.sql`.
+    it('T-194-OB-3: el READ del sweep tolera una fila SIN la propiedad idem_key → idemKey null', async () => {
       makeFromMock();
       const row = claimedRow();
       delete (row as Record<string, unknown>).idem_key;

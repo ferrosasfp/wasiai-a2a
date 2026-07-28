@@ -23,17 +23,29 @@
 - **Error**: el primer borrador usaba `orchestrationId` como identificador de la
   operación (era una de las opciones sugeridas).
 - **Causa raíz**: `POST /orchestrate/execute` recibe `orchestrationId` en el BODY
-  (`src/routes/orchestrate.ts`, `OrchestrateExecuteBody`) — es caller-controlled.
-  Idéntico problema con `request.id`, que puede llegar por el header `request-id`.
-  Un caller que repitiera el id haría que su SEGUNDO refund (de otro débito real)
-  se descartara como duplicado: pérdida de dinero del caller, silenciosa.
+  (`src/routes/orchestrate.ts:33,299-301`, `OrchestrateExecuteBody`), sin ninguna
+  validación de unicidad — es caller-controlled. Un caller que repitiera el id
+  haría que su SEGUNDO refund (de otro débito real) se descartara como duplicado:
+  pérdida de dinero del caller, silenciosa.
 - **Fix**: el `operationId` es SIEMPRE un UUID server-side por operación
   (`requestRefundIdemBase` memoizado en el request, `composeRunId`, `refundRunId`).
   Test que lo fija: `T-194-O2` (dos ejecuciones con el MISMO `orchestrationId` →
   claves distintas), rojo bajo la mutación M9.
-- **Aplicar en**: TODA clave de idempotencia. Antes de usar un id, rastrear si
-  puede entrar por header o body. `genReqId` sólo cubre el caso en que el caller
-  NO manda el header.
+- **Corrección (AR MNR-2)**: la primera versión de esta entrada afirmaba que
+  `request.id` "puede llegar por el header `request-id`". **Es falso en este
+  codebase**: `requestIdHeader` tiene default `false`
+  (`node_modules/fastify/lib/config-validator.js:60-61`) y `src/index.ts:59-70`
+  pasa `genReqId` sin setearlo, así que el header entrante se IGNORA y `request.id`
+  es siempre un `crypto.randomUUID()` server-side
+  (`src/middleware/request-id.ts:10`). La decisión no cambia (usar un UUID propio
+  sigue siendo lo correcto: `requestIdHeader: true` es una línea en otro archivo
+  por otro motivo), pero el argumento sí: la mitad verdadera era `orchestrationId`.
+- **Aplicar en**: TODA clave de idempotencia. Antes de usar un id como clave,
+  rastrear si puede entrar por header o body **verificando la config REAL del
+  framework** (el default de la opción en el paquete instalado, no lo que uno
+  recuerda del framework). Y si el id es server-side pero una opción de config
+  podría volverlo caller-controlled, no lo uses igual: la clave del dinero no debe
+  depender de una opción de logging.
 
 ### [2026-07-27] W2 — Dos refunds legítimos del mismo step iban a colapsar
 - **Error**: la primera versión del slot era `compose-step:${i}` (sin fase). El
@@ -118,3 +130,54 @@
 - **Aplicar en**: cuando un mutante no pone rojo el test esperado, primero
   verificar QUÉ guard cubre ese test. Puede ser expectativa mal escrita y no test
   vacuo.
+
+### [2026-07-27] Fix-pack AR (BLQ-BAJO-1) — el orden migración→deploy no estaba escrito en ninguna parte
+- **Error**: la HU entregó código que DEPENDE de una migración pendiente de
+  aprobación, sin declarar el orden de release. Si se deploya el código primero, los
+  8 call-sites de refund reciben `PGRST202` (no existe función con `p_idem_key`) en
+  el credit y `PGRST204` (no existe la columna) en el enqueue: el refund no se
+  aplica NI queda encolado y el caller queda cobrado sin rastro recuperable.
+- **Causa raíz**: pensar la compatibilidad en UNA dirección. Se documentó con
+  detalle que la migración es back-compat con el código viejo (que es cierto), y de
+  ahí se asumió que el par era seguro en cualquier orden. La dirección inversa
+  (código nuevo contra schema viejo) nunca se escribió.
+- **Fix**: gate explícito en el header del `.sql` y en `work-item.md` §0. NO se
+  agregó shim en código a propósito: un shim que atrapara `PGRST202` y reintentara
+  sin la clave reabriría el agujero de doble crédito que la HU cierra.
+- **Aplicar en**: toda HU que entregue código + migración juntos. Escribir el orden
+  y qué error CONCRETO da el orden inverso. "Es aditiva/no destructiva" describe la
+  migración, no el release.
+
+### [2026-07-27] Fix-pack AR (MNR-1) — se afirmó cobertura sin medirla por línea
+- **Error**: el commit afirmaba cobertura del par failed/threw de los call-sites,
+  pero el `catch` del credit-back del step-0 de `/compose`
+  (`src/routes/compose.ts:424-451`) tenía **0 hits** en toda la suite, incluida la
+  línea nueva `idemKey: idem.idemKey` (441). Los otros 3 pares sí estaban cubiertos,
+  así que la asimetría pasó desapercibida por analogía.
+- **Causa raíz**: medir cobertura por "existe un test del patrón" en vez de por hits
+  de las líneas nuevas. Un archivo con 3 de 4 caminos cubiertos se lee como cubierto.
+- **Fix**: `T-194-CR-1/2` en `compose.no-charge-on-validation-error.test.ts`
+  (el credit TIRA → el enqueue lleva la MISMA clave; y un enqueue que también tira
+  no rompe el 400). Medido antes/después con
+  `vitest run --coverage.include='src/routes/compose.ts'`: 0 → 2 hits. Verificado
+  por mutación (clave distinta en la 441 → `T-194-CR-1` rojo).
+- **Aplicar en**: toda línea NUEVA del money-path. Antes de afirmar cobertura,
+  correr coverage con `--coverage.include=<el archivo>` y mirar los hits de esas
+  líneas. Si son 0, no hay cobertura, aunque el hermano de al lado la tenga.
+
+### [2026-07-27] Fix-pack AR (MNR-3) — el test contra Postgres real cubría la función MENOS riesgosa
+- **Error**: el archivo env-gated (`refund-idempotency.real.test.ts`) sólo ejercitaba
+  `refund_a2a_key_spend`. Las funciones donde hubo que **corregir un orden de locks
+  invertido** (`refund_delegation_and_parent`, `refund_session_and_parent`) y donde
+  el claim convive con la fila compensatoria del dest-cap
+  (`refund_with_dest_policy`) no se tocaban en ningún lado.
+- **Causa raíz**: escribir el test de integración sobre el camino más fácil de
+  montar (una key y nada más) en vez de sobre el que más riesgo tiene (fixtures de
+  política de gasto y delegación).
+- **Fix**: `T-194-R7` (el dest-cap se revierte UNA vez, no dos) y `T-194-R8`
+  (`total_spent` decrementado UNA vez) + los fixtures en el `beforeAll`. Sigue
+  env-gated y **sin ejecutar**: la aprobación de la migración llega con evidencia
+  ejecutable, no con evidencia inventada.
+- **Aplicar en**: cuando un test es env-gated (nadie lo corre en CI), su valor es la
+  evidencia que habilita; priorizar los caminos que se TOCARON y los que mueven dos
+  ledgers, no el más barato de escribir.

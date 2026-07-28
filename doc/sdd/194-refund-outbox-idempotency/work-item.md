@@ -2,6 +2,21 @@
 
 Branch: `fix/refund-outbox-idempotency` · base `main@050840d`
 
+## 0. ⚠️ ORDEN DE RELEASE (GATE)
+
+**La migración `20260727000000_hu194_refund_idempotency.sql` se aplica ANTES de
+deployar el código.** El orden inverso (código primero) **rompe los 8 call-sites
+de refund**: PostgREST responde `PGRST202` al credit (no existe ninguna función de
+refund con `p_idem_key`) y `PGRST204` al enqueue del outbox (no existe la columna
+`idem_key`) ⟹ el refund **no se aplica NI queda encolado** y el caller queda
+cobrado sin rastro recuperable.
+
+El orden correcto no tiene ventana: `p_idem_key TEXT DEFAULT NULL` + `idem_key`
+nullable dejan al código **viejo** funcionando idéntico mientras se deploya el
+nuevo. No hay shim en código a propósito: un shim que "detecte PGRST202 y
+reintente sin la clave" reabriría exactamente el agujero de doble crédito que esta
+HU cierra.
+
 ## 1. El problema
 
 `src/services/refund-outbox.ts:10-17` declaraba el invariante *"SOLO se encola
@@ -80,12 +95,18 @@ caminos darían claves distintas y el sweep podría acreditar dos veces.
 
 ### 3.3. Por qué NO `request.id` ni `orchestrationId`
 
-Ambos son (o pueden ser) **caller-controlled**:
-
-- `request.id` sale del header `request-id` cuando el caller lo manda
-  (`Fastify({ genReqId })` sólo cubre el caso en que NO viene).
-- `POST /orchestrate/execute` recibe `orchestrationId` **en el body**
-  (`src/routes/orchestrate.ts`, `OrchestrateExecuteBody`).
+- `orchestrationId` **es caller-controlled**: `POST /orchestrate/execute` lo recibe
+  en el **body** (`src/routes/orchestrate.ts:33,299-301`,
+  `OrchestrateExecuteBody`) y no hay ninguna validación de unicidad.
+- `request.id` **hoy NO es caller-controlled** (corrección del AR MNR-2): Fastify
+  ignora el header entrante porque `requestIdHeader` tiene default `false`
+  (`node_modules/fastify/lib/config-validator.js:60-61`) y `src/index.ts:59-70`
+  pasa `genReqId` sin setearlo, así que `request.id` es siempre un
+  `crypto.randomUUID()` server-side (`src/middleware/request-id.ts:10`). Igual no
+  se usa como base de la clave: alcanza con setear `requestIdHeader: true` (una
+  línea, en otro archivo, por otro motivo) para volverlo caller-controlled y
+  convertir un cambio de logging en pérdida silenciosa de dinero. Un UUID propio
+  no depende de la config del framework.
 
 Un caller que repitiera el mismo id en dos requests haría que su SEGUNDO refund
 (legítimo, de otro débito) se descartara como duplicado. Por eso el `operationId`
@@ -129,7 +150,7 @@ suelto no pueda caer en la posición de la clave por error.
 - `p_idem_key` no cambia NUNCA el monto ni el destino de un refund legítimo. El
   objetivo es que se aplique **una vez**, no que se aplique distinto.
 
-## 6. Amount mismatch: fail-closed y visible
+## 6. Mismatch de clave ya aplicada: fail-closed y visible
 
 Si llega la misma clave con OTRO monto es reuso indebido de clave (un bug), no un
 reintento. La RPC levanta `REFUND_IDEM_AMOUNT_MISMATCH` y **no aplica nada**; los
@@ -137,6 +158,23 @@ services lo mapean a un code estable (sin msg crudo de PG). El entry del outbox
 muere en `dead` con `last_error` para revisión manual, en vez de acreditar un
 monto ambiguo. La comparación tiene tolerancia de 1e-9 USD para absorber el ida y
 vuelta float↔NUMERIC (un falso mismatch BLOQUEARÍA un crédito legítimo).
+
+**AR MNR-4**: el camino "ya aplicada" también verifica la **identidad**, no sólo el
+monto — la fila ganadora tiene que ser del mismo `key_id`, `chain_id` y
+`owner_ref`. Si no, levanta `REFUND_IDEM_IDENTITY_MISMATCH` (code hermano, estable,
+mapeado en las 4 variantes de `credit*`: `src/services/budget.ts`). Hoy es
+**inalcanzable** porque la clave embebe `keyId` y `chainId`; existe para que un
+futuro cambio en la composición de la clave (`src/lib/refund-idem.ts`) falle
+RUIDOSO en vez de dedupear entre tenants en silencio. Tests `T-194-B4..B7`.
+
+**AR MNR-5 — retención de `a2a_refund_applications`**: la tabla crece sin techo y
+**no hay pruning, a propósito**. Purgar una fila **re-abre la ventana de doble
+crédito** para cualquier entry del outbox que todavía referencie esa clave (el
+claim volvería a insertar y a acreditar). El volumen es bajo (sólo caminos de
+excepción del money-path). Criterio escrito en el header de la migración por si
+algún día hace falta: purgar SÓLO filas sin entry vivo (`pending`/`processing`) en
+`a2a_refund_outbox`, y nunca por debajo de `MAX_REFUND_ATTEMPTS` × intervalo del
+sweep. Es documentación, no un job.
 
 ## 7. Orden de locks (anti-deadlock)
 
@@ -197,12 +235,36 @@ variante concurrente queda documentada en el header por si la tabla crece.
 | `T-194-G1`, `T-SR-12/13/14` | la clave que se ENCOLA es la MISMA que la del credit que falló |
 | `T-194-OB-1..4` | el sweep pasa la clave; filas legacy (NULL) siguen procesándose; 23505 = no-op |
 | `T-IDEM-01..07` | el contrato de la clave |
-| `T-194-R1..R6` | la semántica SQL contra Postgres REAL (env-gated, skippeados sin `INTEGRATION_TEST_DB_URL`) |
+| `T-194-B1..B3` | el mapeo del `REFUND_IDEM_AMOUNT_MISMATCH` a code estable en las 3 variantes dest/dual-ledger |
+| `T-194-B4..B7` | AR MNR-4: el mapeo del `REFUND_IDEM_IDENTITY_MISMATCH` en las 4 variantes de `credit*` |
+| `T-194-CR-1/2` | AR MNR-1: el `catch` del credit-back del step-0 de `/compose` — el enqueue lleva la MISMA clave que el credit que TIRÓ, y un enqueue que también tira no rompe el 400 |
+| `T-194-R1..R6` | la semántica SQL contra Postgres REAL de `refund_a2a_key_spend` (env-gated, skippeados sin `INTEGRATION_TEST_DB_URL`) |
+| `T-194-R7/R8` | AR MNR-3: `refund_with_dest_policy` (el dest-cap se revierte UNA vez) y `refund_delegation_and_parent` (`total_spent` decrementado UNA vez). Env-gated igual que R1..R6 — evidencia **ejecutable**, no ejecutada: la migración todavía no está aplicada a ninguna base |
 
 Los unitarios de concurrencia corren contra un store en memoria que **modela**
 `a2a_refund_applications` (claim dentro de la misma sección crítica que el
 crédito) y el commit-then-lost-response. La semántica SQL de verdad la ejercita
 `src/__tests__/e2e/refund-idempotency.real.test.ts`.
+
+### 9.1. Cobertura — qué se midió (AR MNR-1)
+
+Medido con `npx vitest run --coverage.include='src/routes/compose.ts'`:
+
+- **Antes del fix-pack**: el bloque `catch` de `refundComposeStep0`
+  (`src/routes/compose.ts:424-451`, el par `refund-threw` del step-0 de `/compose`)
+  tenía **0 hits** en toda la suite — incluido el `idemKey: idem.idemKey` de la
+  línea 441. Gap preexistente (el bloque venía de HIGH-2), pero la afirmación de
+  cobertura de la HU no lo declaraba.
+- **Después**: `426 → 2`, el `enqueueRefund` del catch (statement de la línea 431,
+  que contiene el `idemKey` de la 441) `0 → 2`, y el `.catch` del enqueue
+  (línea 444) `0 → 1`. Tests `T-194-CR-1/2`.
+- `T-194-CR-1` verificado por mutación: cambiando `idemKey: idem.idemKey` por otra
+  clave en `compose.ts:441`, el test se pone **rojo** (`expected ':threw' to be
+  'v1:k1:2368:…:compose-step0'`). La mutación se revirtió.
+- Lo que **sigue** sin ejecutarse: `T-194-R1..R8` (env-gated, requieren la
+  migración aplicada) y `refund_session_and_parent`, cubierta por analogía
+  estructural con `refund_delegation_and_parent` (mismo bloque, otra tabla), no por
+  ejecución.
 
 ## 10. Observaciones fuera de scope (no tocadas)
 

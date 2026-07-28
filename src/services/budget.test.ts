@@ -1691,6 +1691,93 @@ describe('budgetService', () => {
       });
     });
 
+    // HU-194 AR MNR-4: la clave ya está aplicada a OTRA (key, chain, owner) —
+    // sería una dedup CRUZADA. Code estable propio (no el de monto: el mismatch no
+    // es de monto) y sin msg crudo de PG. Las 4 variantes lo mapean igual: una que
+    // devolviera `REFUND_FAILED` escondería el bug de composición de clave.
+    it('T-194-B4: credit mapea REFUND_IDEM_IDENTITY_MISMATCH', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: {
+          message:
+            'REFUND_IDEM_IDENTITY_MISMATCH: idem_key v1:k1:2368:op:step0 ya aplicada a (key k9, chain 2368, owner other)',
+        },
+      } as never);
+
+      const result = await budgetService.credit('k1', 2368, 0.3, 'owner', {
+        idemKey: 'v1:k1:2368:op:step0',
+      });
+
+      expect(result).toEqual({
+        success: false,
+        error: 'REFUND_IDEM_IDENTITY_MISMATCH',
+      });
+      expect(result.error).not.toContain('idem_key');
+    });
+
+    it('T-194-B5: creditWithDest mapea REFUND_IDEM_IDENTITY_MISMATCH', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'REFUND_IDEM_IDENTITY_MISMATCH: idem_key x' },
+      } as never);
+
+      const result = await budgetService.creditWithDest(
+        'k1',
+        2368,
+        0.3,
+        'owner',
+        'wasiai/corridor',
+        { idemKey: 'x' },
+      );
+
+      expect(result).toEqual({
+        success: false,
+        error: 'REFUND_IDEM_IDENTITY_MISMATCH',
+      });
+    });
+
+    it('T-194-B6: creditDelegation mapea REFUND_IDEM_IDENTITY_MISMATCH', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'REFUND_IDEM_IDENTITY_MISMATCH: idem_key x' },
+      } as never);
+
+      const result = await budgetService.creditDelegation(
+        'del-1',
+        'owner-1',
+        'k1',
+        2368,
+        0.3,
+        { idemKey: 'x' },
+      );
+
+      expect(result).toEqual({
+        success: false,
+        error: 'REFUND_IDEM_IDENTITY_MISMATCH',
+      });
+    });
+
+    it('T-194-B7: creditSession mapea REFUND_IDEM_IDENTITY_MISMATCH', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'REFUND_IDEM_IDENTITY_MISMATCH: idem_key x' },
+      } as never);
+
+      const result = await budgetService.creditSession(
+        'sess-1',
+        'owner-1',
+        'k1',
+        2368,
+        0.3,
+        { idemKey: 'x' },
+      );
+
+      expect(result).toEqual({
+        success: false,
+        error: 'REFUND_IDEM_IDENTITY_MISMATCH',
+      });
+    });
+
     it('creditSession maps SESSION_NOT_FOUND to KEY_NOT_FOUND (no raw PG leak)', async () => {
       mockRpc.mockResolvedValue({
         data: null,

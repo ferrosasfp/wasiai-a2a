@@ -479,6 +479,12 @@ export const budgetService = {
       if (error.message.includes('REFUND_IDEM_AMOUNT_MISMATCH')) {
         return { success: false, error: 'REFUND_IDEM_AMOUNT_MISMATCH' };
       }
+      // HU-194 AR MNR-4: hermano del anterior — la clave ya está aplicada a OTRA
+      // (key, chain, owner). No es un monto ambiguo sino una clave que cruzó
+      // identidades (bug de composición), así que lleva su propio code estable.
+      if (error.message.includes('REFUND_IDEM_IDENTITY_MISMATCH')) {
+        return { success: false, error: 'REFUND_IDEM_IDENTITY_MISMATCH' };
+      }
       log.error(
         { keyId, chainId, amountUsd, err: error.message },
         'refund failed',
@@ -536,6 +542,10 @@ export const budgetService = {
       // HU-194: ver `credit`. Ya aplicada con otro monto ⟹ no aplicar nada.
       if (error.message.includes('REFUND_IDEM_AMOUNT_MISMATCH')) {
         return { success: false, error: 'REFUND_IDEM_AMOUNT_MISMATCH' };
+      }
+      // HU-194 AR MNR-4: ver `credit`. Clave ya aplicada a otra identidad.
+      if (error.message.includes('REFUND_IDEM_IDENTITY_MISMATCH')) {
+        return { success: false, error: 'REFUND_IDEM_IDENTITY_MISMATCH' };
       }
       log.error(
         { keyId, chainId, amountUsd, destination, err: error.message },
@@ -618,6 +628,10 @@ export const budgetService = {
       if (error.message.includes('REFUND_IDEM_AMOUNT_MISMATCH')) {
         return { success: false, error: 'REFUND_IDEM_AMOUNT_MISMATCH' };
       }
+      // HU-194 AR MNR-4: ver `credit`. Clave ya aplicada a otra identidad.
+      if (error.message.includes('REFUND_IDEM_IDENTITY_MISMATCH')) {
+        return { success: false, error: 'REFUND_IDEM_IDENTITY_MISMATCH' };
+      }
       log.error(
         { keyId, chainId, amountUsd, delegationId, err: error.message },
         'delegation refund failed',
@@ -677,6 +691,10 @@ export const budgetService = {
       // HU-194: ver `credit`. Ya aplicada con otro monto ⟹ no aplicar nada.
       if (error.message.includes('REFUND_IDEM_AMOUNT_MISMATCH')) {
         return { success: false, error: 'REFUND_IDEM_AMOUNT_MISMATCH' };
+      }
+      // HU-194 AR MNR-4: ver `credit`. Clave ya aplicada a otra identidad.
+      if (error.message.includes('REFUND_IDEM_IDENTITY_MISMATCH')) {
+        return { success: false, error: 'REFUND_IDEM_IDENTITY_MISMATCH' };
       }
       log.error(
         { keyId, chainId, amountUsd, sessionId, err: error.message },

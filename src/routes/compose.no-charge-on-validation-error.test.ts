@@ -158,6 +158,9 @@ const creditMock = vi.hoisted(() =>
       // el ownership guard es obligatorio (CLAUDE.md), así que el mock lo tipa
       // para poder asertarlo.
       _ownerRef: string,
+      // 5º arg = `idem` (HU-194). Tipado para poder comparar la clave del credit
+      // con la que se ENCOLA cuando el credit falla o tira.
+      _idem?: { idemKey: string | null },
     ): Promise<{ success: boolean; reverted?: boolean }> => {
       budgetState.balance += amountUsd;
       return { success: true, reverted: true };
@@ -343,12 +346,14 @@ import {
   resolveAgentPriceUsdc,
 } from '../services/agent-price.js';
 import { composeService } from '../services/compose.js';
+import { refundOutbox } from '../services/refund-outbox.js';
 // NOTE: requirePaymentOrA2AKey is NOT mocked — the REAL middleware runs.
 import composeRoutes from './compose.js';
 
 const mockResolvePrice = vi.mocked(resolveAgentPriceUsdc);
 const mockResolveDest = vi.mocked(resolveAgentDestination);
 const mockCompose = vi.mocked(composeService.compose);
+const mockEnqueue = vi.mocked(refundOutbox.enqueueRefund);
 
 const KEY_HEADER = { 'x-a2a-key': 'wasi_a2a_funded_master_key' };
 const STEP0_PRICE = 0.5;
@@ -622,6 +627,81 @@ describe('compose route — 400 de validación NO cobra (HIGH-2, dirección (a))
     // Ownership guard (CLAUDE.md): el credit recibe el owner_ref del caller.
     expect(creditMock.mock.calls[0]?.[3]).toBe('o1');
     expect(budgetState.balance).toBeCloseTo(balanceBefore, 8);
+  });
+
+  // ── HU-194 (AR MNR-1): el `catch` del credit-back del step-0 ──────────────
+  // El par `refund-failed` (credit devuelve success:false, T-NOCHARGE-08 lo
+  // atraviesa) SÍ estaba cubierto acá; el `refund-threw` (el credit TIRA) no tenía
+  // ni un hit en toda la suite. Es justo el camino que HU-194 existe para cerrar:
+  // la RPC pudo COMMITEAR y perderse la respuesta, así que el enqueue TIENE que
+  // llevar la MISMA clave que el credit que tiró — si no, el sweep acredita de
+  // nuevo. Una línea del money-path sin cobertura no se puede afirmar cubierta.
+
+  it('T-194-CR-1: el credit del step-0 TIRA → encola con la MISMA clave del credit (no una nueva)', async () => {
+    const balanceBefore = budgetState.balance;
+    // Commit-then-lost-response: el credit rechaza sin que se sepa si aplicó.
+    creditMock.mockRejectedValueOnce(new Error('socket hang up'));
+    mockCompose.mockResolvedValueOnce({
+      success: false,
+      output: null,
+      steps: [],
+      totalCostUsdc: 0,
+      totalLatencyMs: 1,
+      error: 'Step 0 failed: downstream 500',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    // Best-effort: el fallo del refund NO cambia el status de la respuesta.
+    expect(res.statusCode).toBe(400);
+    // El credit no aplicó nada observable → el caller sigue cobrado hasta que el
+    // sweep lo reintente. Lo que hace ese cobro RECUPERABLE es el entry encolado.
+    expect(budgetState.balance).toBeCloseTo(balanceBefore - STEP0_PRICE, 8);
+
+    expect(creditMock).toHaveBeenCalledTimes(1);
+    const creditIdem = creditMock.mock.calls[0]?.[4];
+    expect(creditIdem?.idemKey).toMatch(
+      /^v1:k1:2368:[0-9a-f-]{36}:compose-step0$/,
+    );
+
+    expect(mockEnqueue).toHaveBeenCalledTimes(1);
+    const entry = mockEnqueue.mock.calls[0]?.[0];
+    expect(entry?.reason).toBe('compose-route.refund-threw');
+    // LA ASERCIÓN QUE IMPORTA: misma clave. Con una clave distinta (o null) el
+    // reintento del sweep sería la PRIMERA con esa clave y acreditaría de nuevo.
+    expect(entry?.idemKey).toBe(creditIdem?.idemKey);
+    expect(entry?.amountUsd).toBe(STEP0_PRICE);
+    expect(entry?.ownerRef).toBe('o1'); // ownership guard
+  });
+
+  it('T-194-CR-2: si el enqueue TAMBIÉN tira, el response no se rompe (best-effort)', async () => {
+    creditMock.mockRejectedValueOnce(new Error('socket hang up'));
+    mockEnqueue.mockRejectedValueOnce(new Error('outbox unreachable'));
+    mockCompose.mockResolvedValueOnce({
+      success: false,
+      output: null,
+      steps: [],
+      totalCostUsdc: 0,
+      totalLatencyMs: 1,
+      error: 'Step 0 failed: downstream 500',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    // Sin el `.catch()` del enqueue, este rejection subía y cambiaba el 400 por un
+    // 500 (peor: el caller pierde el detalle del error real del pipeline).
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toContain('Step 0 failed');
   });
 
   it('T-NOCHARGE-09 (invariante): fallo parcial NO sobre-reembolsa lo ya settleado', async () => {

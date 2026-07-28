@@ -2,6 +2,16 @@
 -- Migration: 20260727000000_hu194_refund_idempotency
 -- HU-194 — el refund-outbox podía ACREDITAR DOS VECES.
 --
+-- ⚠️ ORDEN DE RELEASE (GATE): ESTA MIGRACIÓN SE APLICA **ANTES** DE DEPLOYAR EL
+-- CÓDIGO DE HU-194. El orden inverso (código primero) ROMPE los 8 call-sites de
+-- refund: PostgREST responde `PGRST202` al credit (no existe ninguna función de
+-- refund con `p_idem_key`) y `PGRST204` al enqueue del outbox (no existe la
+-- columna `idem_key`) ⟹ el refund NO se aplica NI queda encolado y el caller
+-- queda COBRADO sin rastro recuperable. El orden correcto NO tiene ventana:
+-- `p_idem_key TEXT DEFAULT NULL` + `idem_key` nullable dejan al código VIEJO
+-- (sin `p_idem_key` y sin escribir la columna) funcionando IDÉNTICO mientras se
+-- deploya el nuevo.
+--
 -- PROBLEMA (camino de EXCEPCIÓN, no cubierto por A2/M6):
 --   `refund_a2a_key_spend` COMMITEA y la respuesta se pierde (socket reset,
 --   timeout post-commit, pod matado). `budgetService.credit` rechaza →
@@ -37,8 +47,12 @@
 --
 -- CLAVE = REFUND LÓGICO, NO INTENTO. La arma la app
 -- (`src/lib/refund-idem.ts`): `v1:<key_id>:<chain_id>:<base-uuid-del-request>:<slot>`.
---   - `base` es un UUID por request (memoizado), NO `request.id` (que llega por
---     header y es caller-controlled) ni un contador de proceso.
+--   - `base` es un UUID por request (memoizado), NO `orchestrationId` (que llega
+--     en el BODY de POST /orchestrate/execute, sin validación de unicidad) ni un
+--     contador de proceso. Tampoco `request.id`: hoy es server-side (Fastify
+--     ignora el header entrante porque `requestIdHeader` default es `false`), pero
+--     alcanza con setear esa opción para volverlo caller-controlled — un UUID
+--     propio no depende de la config del framework.
 --   - `slot` distingue los refunds LÓGICOS DISTINTOS de una misma operación
 --     (p. ej. `compose-step:3:d1` = refund del 1er débito del step 3 y
 --     `compose-step:3:d2` = refund del débito del retry adaptativo del MISMO
@@ -50,6 +64,10 @@
 -- clave (bug), no un reintento. Se levanta `REFUND_IDEM_AMOUNT_MISMATCH` y NO se
 -- aplica nada (fail-closed y VISIBLE: el entry del outbox muere en `dead` con
 -- `last_error` para revisión manual, en vez de acreditar un monto ambiguo).
+-- IDENTITY MISMATCH (AR MNR-4): mismo criterio si la fila ganadora es de OTRA
+-- (key, chain, owner) — `REFUND_IDEM_IDENTITY_MISMATCH`. Hoy es inalcanzable
+-- porque la clave embebe keyId y chainId; existe para que un futuro cambio en la
+-- composición de la clave falle RUIDOSO en vez de dedupear entre tenants.
 --
 -- NO DESTRUCTIVA / COMPATIBLE:
 --   - `a2a_refund_outbox.idem_key` es una columna NUEVA NULLABLE: las filas ya
@@ -87,6 +105,22 @@
 
 -- ============================================================
 -- 1. Ledger de refunds APLICADOS (dedup DB-level)
+--
+-- RETENCIÓN — la tabla crece sin techo (una fila por refund aplicado). NO hay job
+-- de pruning y es a propósito: **purgar una fila RE-ABRE la ventana de doble
+-- crédito** para cualquier entry del outbox que todavía referencie esa clave (el
+-- claim volvería a insertar y a acreditar). El volumen de refunds es bajo (sólo
+-- los caminos de excepción del money-path), así que la decisión es "no purgar
+-- todavía". Criterio si algún día hace falta, en este orden de preferencia:
+--   1. Purgar SÓLO filas sin entry vivo en `a2a_refund_outbox`:
+--        DELETE FROM a2a_refund_applications a
+--         WHERE a.applied_at < now() - INTERVAL '90 days'
+--           AND NOT EXISTS (SELECT 1 FROM a2a_refund_outbox o
+--                            WHERE o.idem_key = a.idem_key
+--                              AND o.status IN ('pending','processing'));
+--   2. Nunca por debajo de MAX_REFUND_ATTEMPTS × intervalo del sweep
+--      (`src/services/refund-outbox.ts`): antes de esa ventana un entry todavía
+--      puede reintentar y su marcador tiene que seguir estando.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS a2a_refund_applications (
   -- Clave del refund LÓGICO. PRIMARY KEY = índice único = punto de
@@ -130,7 +164,10 @@ CREATE OR REPLACE FUNCTION refund_idem_claim(
   p_destination TEXT DEFAULT NULL
 ) RETURNS BOOLEAN AS $$
 DECLARE
-  v_applied_amount NUMERIC;
+  v_applied_amount   NUMERIC;
+  v_applied_key_id   UUID;
+  v_applied_chain_id INT;
+  v_applied_owner    TEXT;
 BEGIN
   -- Sin clave (llamadas legacy / filas encoladas antes de esta migración):
   -- comportamiento IDÉNTICO al de hoy, sin dedup.
@@ -154,7 +191,8 @@ BEGIN
     -- INSERT de arriba esperó a que resolviera: si abortó, insertamos nosotros;
     -- si commiteó, caemos acá y el SELECT (nuevo snapshot, READ COMMITTED) ve la
     -- fila ganadora.
-    SELECT amount_usd INTO v_applied_amount
+    SELECT amount_usd, key_id, chain_id, owner_ref
+      INTO v_applied_amount, v_applied_key_id, v_applied_chain_id, v_applied_owner
       FROM a2a_refund_applications
       WHERE idem_key = p_idem_key;
 
@@ -166,6 +204,26 @@ BEGIN
       RAISE EXCEPTION
         'REFUND_IDEM_AMOUNT_MISMATCH: idem_key % ya aplicada por % , reintento con %',
         p_idem_key, v_applied_amount, p_amount_usd;
+    END IF;
+
+    -- AR MNR-4: el "ya aplicada" también verifica la IDENTIDAD del refund, no
+    -- sólo el monto. Hoy es INALCANZABLE (la clave embebe keyId y chainId, y el
+    -- owner es el de esa key), pero si mañana cambia la composición de la clave
+    -- (`src/lib/refund-idem.ts`), esto convierte una dedup CRUZADA silenciosa
+    -- (no acreditarle a A porque B ya usó la clave) en un error visible.
+    -- `destination` NO entra a propósito: el crédito original puede haber pasado
+    -- por `refund_with_dest_policy` (con destino) y el reintento del sweep por el
+    -- camino master (`p_destination => NULL`); exigir que coincida convertiría un
+    -- no-op correcto en un entry `dead`. La (key, chain, owner) sí es la misma en
+    -- los dos caminos: el `effectiveRow` de delegación/sesión hereda `id` y
+    -- `owner_ref` del parent (`src/middleware/a2a-key.ts:234-249,829-836`).
+    IF v_applied_key_id   IS DISTINCT FROM p_key_id
+       OR v_applied_chain_id IS DISTINCT FROM p_chain_id
+       OR v_applied_owner IS DISTINCT FROM p_owner_ref THEN
+      RAISE EXCEPTION
+        'REFUND_IDEM_IDENTITY_MISMATCH: idem_key % ya aplicada a (key %, chain %, owner %), reintento con (key %, chain %, owner %)',
+        p_idem_key, v_applied_key_id, v_applied_chain_id, v_applied_owner,
+        p_key_id, p_chain_id, p_owner_ref;
     END IF;
 
     RETURN FALSE;
