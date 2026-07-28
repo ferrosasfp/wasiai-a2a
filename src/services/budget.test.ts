@@ -1623,6 +1623,74 @@ describe('budgetService', () => {
       expect(result).toEqual({ success: true, reverted: true });
     });
 
+    // HU-194: reuso de clave con OTRO monto → code estable, sin msg crudo de PG y
+    // sin aplicar nada (fail-closed y visible en `last_error` del outbox).
+    it('T-194-B1: creditWithDest mapea REFUND_IDEM_AMOUNT_MISMATCH', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: {
+          message: 'REFUND_IDEM_AMOUNT_MISMATCH: idem_key v1:k1:2368:op:step0',
+        },
+      } as never);
+
+      const result = await budgetService.creditWithDest(
+        'k1',
+        2368,
+        0.3,
+        'owner',
+        'wasiai/corridor',
+        { idemKey: 'v1:k1:2368:op:step0' },
+      );
+
+      expect(result).toEqual({
+        success: false,
+        error: 'REFUND_IDEM_AMOUNT_MISMATCH',
+      });
+      expect(result.error).not.toContain('idem_key');
+    });
+
+    it('T-194-B2: creditDelegation mapea REFUND_IDEM_AMOUNT_MISMATCH', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'REFUND_IDEM_AMOUNT_MISMATCH: idem_key x' },
+      } as never);
+
+      const result = await budgetService.creditDelegation(
+        'del-1',
+        'owner-1',
+        'k1',
+        2368,
+        0.3,
+        { idemKey: 'x' },
+      );
+
+      expect(result).toEqual({
+        success: false,
+        error: 'REFUND_IDEM_AMOUNT_MISMATCH',
+      });
+    });
+
+    it('T-194-B3: creditSession mapea REFUND_IDEM_AMOUNT_MISMATCH', async () => {
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: 'REFUND_IDEM_AMOUNT_MISMATCH: idem_key x' },
+      } as never);
+
+      const result = await budgetService.creditSession(
+        'sess-1',
+        'owner-1',
+        'k1',
+        2368,
+        0.3,
+        { idemKey: 'x' },
+      );
+
+      expect(result).toEqual({
+        success: false,
+        error: 'REFUND_IDEM_AMOUNT_MISMATCH',
+      });
+    });
+
     it('creditSession maps SESSION_NOT_FOUND to KEY_NOT_FOUND (no raw PG leak)', async () => {
       mockRpc.mockResolvedValue({
         data: null,
