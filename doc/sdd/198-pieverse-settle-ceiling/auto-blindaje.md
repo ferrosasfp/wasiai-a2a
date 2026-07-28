@@ -106,3 +106,73 @@
   línea + actualizar las dos listas del test.
 - **Aplicar en**: es el patrón a imitar, no un problema. Todo vocabulario que se
   serialice al caller debería tener este par (Record exhaustivo + test de lista).
+
+### [2026-07-28] Fix-pack AR — candé la lista de al lado, no la que sostiene el diseño
+
+- **Error**: candé `DRIFT_ACCOUNTED_STATUSES` (`T-198-Drift`) y NO `PENDING_STATUSES`,
+  que está 20 líneas más arriba **del mismo archivo** y es la que sostiene el diseño
+  entero. El AR borró `'resolving_settle'` de esa lista y la suite dio **3714 passed, 0
+  failed**: la mutación sobrevivió. Sin esa entrada la fila desaparece de
+  `listPending()` y `resolveIntent` tira `NOT_PENDING` ⇒ el limbo invisible que el
+  estado existía para evitar.
+- **Causa raíz**: candé la lista que había TOCADO en vez de la que el diseño NECESITA.
+  El argumento entero de la HU era "no se auto-reclama PERO sigue visible", y sólo
+  testeé la primera mitad. Un estado nuevo tiene tantas invariantes como superficies lo
+  consumen, y hay que enumerarlas: escritura, claim, listado, resolución, drift.
+- **Fix**: `T-198-Pending-List` / `-Resolve` / `-Shared` (el último candea la
+  ANTI-DIVERGENCIA de las dos superficies, que comparten la constante). Mutación
+  re-corrida: 2 rojos.
+- **Aplicar en**: cuando una HU introduce un ESTADO, listar sus superficies y candar
+  cada una. La pregunta no es "¿testeé mi cambio?" sino "¿qué tiene que seguir siendo
+  cierto para que mi cambio signifique lo que digo?".
+
+### [2026-07-28] Fix-pack AR — mi test SQL verificaba que la migración se DESCRIBIERA
+
+- **Error**: `T11` afirmaba `flat(sql).toContain('AND intent_id = p_intent_id')` y
+  **pasó con la cláusula borrada del UPDATE** (mutación Q9). El literal aparecía en el
+  HEADER de la migración, en prosa: *"(3) MNR-3 — el UPDATE ... agrega `AND intent_id =
+  p_intent_id`"*. El test verificaba la documentación, no la conducta.
+- **Causa raíz**: escribo headers largos que citan el SQL que explican, así que en un
+  test que hace `readFileSync` del .sql **los comentarios son parte del string
+  matcheado**. Cuanto mejor documentada la migración, más fácil que su test sea vacuo.
+- **Fix**: helper `code()` que quita las líneas `--` antes de matchear, aplicado a TODAS
+  las afirmaciones de conducta; el sql crudo queda sólo para las afirmaciones que son
+  *sobre* los comentarios (el gate de orden de release). Re-corridas 6 mutaciones SQL
+  (Q9-Q14) para confirmar que ninguna otra era vacua por el mismo motivo.
+- **Aplicar en**: `test/*.migration.test.ts`. Los dos precedentes del repo
+  (`negative-amount-guard`, `agent-links`) matchean el .sql crudo y tienen el mismo
+  riesgo latente — no los toqué, pero si alguien agrega assertions ahí, usar `code()`.
+  Regla general: un test que lee un archivo y busca un string tiene que excluir las
+  regiones donde ese string aparece como PROSA.
+
+### [2026-07-28] Fix-pack AR — la observabilidad que agregué no cubría el fallo que yo mismo introduje
+
+- **Error**: agregué el guard de transición (un UPDATE de 0 filas pasa a ser un
+  resultado NORMAL) y en el mismo commit agregué un `log.error` que **sólo** dispara con
+  `error` del RPC. O sea: introduje un modo de fallo silencioso y "mejoré la
+  observabilidad" sin cubrirlo. Con `RETURNS void` el caller no podía ni enterarse.
+- **Causa raíz**: pensé la observabilidad sobre los fallos que YA conocía (el RPC que
+  tira) en vez de sobre el que mi cambio ESTABA CREANDO (el rechazo silencioso del
+  guard). Un guard nuevo es un camino de fallo nuevo por definición.
+- **Fix**: `RETURNS TABLE(applied boolean)` (patrón de `record_reconciliation_resolution`)
+  + el caller devuelve boolean y grita con `applied=false` y con `undefined`.
+- **Aplicar en**: cada vez que se agrega una PRECONDICIÓN a un write, preguntar "¿cómo
+  se entera el caller de que la precondición no se cumplió?". Si la respuesta es "no se
+  entera", el guard es peor que no tenerlo: cambia el comportamiento sin señal.
+
+### [2026-07-28] Fix-pack AR — enuncié un no-side-effect como feature sin ver que bloqueaba el bueno
+
+- **Error**: escribí "no auto-paga, no auto-reembolsa" como propiedad deseable de
+  `resolving_settle`. La primera mitad era el objetivo; la segunda era una **regresión**
+  que no vi: con hop 1 re-verificando `not_confirmed`, el refund del budget del buyer
+  (correcto y necesario, los fondos nunca salieron del escrow) quedaba inalcanzable para
+  siempre. Pre-branch ese refund procedía.
+- **Causa raíz**: describí el comportamiento del claim ("no reclama esta fila") en vez de
+  razonar por LADO. El claim tiene dos lados con semánticas opuestas: el settle mueve
+  plata nueva (peligroso), el refund revierte un débito y es idempotente (seguro). "No se
+  reclama" era correcto para uno y dañino para el otro.
+- **Fix**: rama `p_side='refund'` en `claim_reconciliation`; el lado settle sigue
+  exigiendo tx previa. La asimetría es el punto.
+- **Aplicar en**: cuando un cambio BLOQUEA algo, enumerar todo lo que pasaba por ahí
+  antes — no sólo lo que se quería bloquear. "Ya no ocurre X" hay que leerlo como "ya no
+  ocurre NADA de lo que usaba ese camino".

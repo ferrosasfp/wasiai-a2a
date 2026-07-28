@@ -37,22 +37,43 @@ const DOWN2 = resolve(
 /** Normaliza espacios para poder matchear SQL multilinea sin pelear con el formato. */
 const flat = (s: string) => s.replace(/\s+/g, ' ');
 
+/**
+ * SQL con los COMENTARIOS QUITADOS, normalizado.
+ *
+ * ⚠️ EXISTE POR UN TEST VACUO REAL, cazado con mutación en este mismo fix-pack: la
+ * primera versión de `T11` afirmaba `flat(sql).toContain('AND intent_id = p_intent_id')`
+ * y PASABA con la cláusula BORRADA del UPDATE, porque el header de la migración la
+ * menciona en prosa ("(3) MNR-3 — el UPDATE ... agrega `AND intent_id = p_intent_id`").
+ * O sea que el test verificaba que la migración se DESCRIBIERA, no que HICIERA.
+ *
+ * REGLA: toda afirmación sobre la CONDUCTA del SQL usa `code()`. `flat()`/el sql crudo (con
+ * comentarios) se reserva para las afirmaciones que son SOBRE los comentarios — el gate
+ * de orden de release, los avisos del `_down`.
+ */
+const code = (s: string) =>
+  flat(
+    s
+      .split('\n')
+      .filter((l) => !l.trimStart().startsWith('--'))
+      .join('\n'),
+  );
+
 describe('HU-198 up #1 — record_debit_settle_status acepta resolving_settle', () => {
   const sql = readFileSync(UP1, 'utf8');
 
   it('T1: el guard de p_status incluye los 3 valores (el `IN` ampliado)', () => {
     // ESTA es la conducta que el AR pudo borrar sin romper nada.
-    expect(flat(sql)).toContain(
+    expect(code(sql)).toContain(
       "IF p_status NOT IN ('settled','reconciliation_pending','resolving_settle') THEN",
     );
-    expect(sql).toContain("RAISE EXCEPTION 'INVALID_SETTLE_STATUS: %'");
+    expect(code(sql)).toContain("RAISE EXCEPTION 'INVALID_SETTLE_STATUS: %'");
   });
 
   it('T2: el guard de transición sólo aplica al valor NUEVO', () => {
     // La condición tiene que estar escapada por `p_status <> 'resolving_settle'`, si no
     // endurecería también los dos valores viejos (cambio de comportamiento preexistente).
-    expect(flat(sql)).toContain("p_status <> 'resolving_settle'");
-    expect(flat(sql)).toContain(
+    expect(code(sql)).toContain("p_status <> 'resolving_settle'");
+    expect(code(sql)).toContain(
       "OR debit_settle_status IN ('hop1_confirmed','reconciliation_pending')",
     );
   });
@@ -65,10 +86,10 @@ describe('HU-198 up #1 — record_debit_settle_status acepta resolving_settle', 
   });
 
   it('T4: el ownership guard y el search_path/GRANT se conservan', () => {
-    expect(sql).toContain("RAISE EXCEPTION 'OWNERSHIP_MISMATCH:");
-    expect(sql).toContain('SET search_path = public, pg_temp');
-    expect(sql).toContain('FROM PUBLIC, anon, authenticated');
-    expect(sql).toContain('TO service_role');
+    expect(code(sql)).toContain("RAISE EXCEPTION 'OWNERSHIP_MISMATCH:");
+    expect(code(sql)).toContain('SET search_path = public, pg_temp');
+    expect(code(sql)).toContain('FROM PUBLIC, anon, authenticated');
+    expect(code(sql)).toContain('TO service_role');
   });
 
   it('T5: declara el gate de ORDEN DE RELEASE en el header', () => {
@@ -82,10 +103,10 @@ describe('HU-198 up #1 — record_debit_settle_status acepta resolving_settle', 
 
   it('T6: el down existe y restringe p_status de vuelta a 2 valores', () => {
     const down = readFileSync(DOWN1, 'utf8');
-    expect(flat(down)).toContain(
+    expect(code(down)).toContain(
       "IF p_status NOT IN ('settled','reconciliation_pending') THEN",
     );
-    expect(flat(down)).not.toContain(
+    expect(code(down)).not.toContain(
       "IF p_status NOT IN ('settled','reconciliation_pending','resolving_settle') THEN",
     );
     // Y avisa que NO revierte las filas ya escritas (reescribirlas podría doble-pagar).
@@ -97,12 +118,10 @@ describe('HU-198 up #2 — applied + MNR-4 + MNR-3', () => {
   const sql = readFileSync(UP2, 'utf8');
 
   it('T7 (BLQ-MEDIO-2): record_debit_settle_status devuelve TABLE(applied BOOLEAN)', () => {
-    expect(flat(sql)).toContain(
-      'RETURNS TABLE(applied BOOLEAN) AS $$'.replace(/\s+/g, ' '),
-    );
+    expect(code(sql)).toContain('RETURNS TABLE(applied BOOLEAN) AS $$');
     // Y el valor sale del ROW_COUNT del UPDATE, no de un literal.
-    expect(sql).toContain('GET DIAGNOSTICS v_rows = ROW_COUNT');
-    expect(flat(sql)).toContain('applied := v_rows > 0;');
+    expect(code(sql)).toContain('GET DIAGNOSTICS v_rows = ROW_COUNT');
+    expect(code(sql)).toContain('applied := v_rows > 0;');
   });
 
   it('T8 (BLQ-MEDIO-2): hace DROP antes del CREATE (Postgres no permite cambiar el retorno)', () => {
@@ -119,7 +138,7 @@ describe('HU-198 up #2 — applied + MNR-4 + MNR-3', () => {
   });
 
   it('T9 (MNR-4): el lado REFUND puede reclamar una fila resolving_settle', () => {
-    expect(flat(sql)).toContain(
+    expect(code(sql)).toContain(
       "OR (p_side = 'refund' AND debit_settle_status = 'resolving_settle')",
     );
   });
@@ -127,24 +146,24 @@ describe('HU-198 up #2 — applied + MNR-4 + MNR-3', () => {
   it('T10 (MNR-4): el lado SETTLE sigue exigiendo tx previa (el re-envío ciego sigue cerrado)', () => {
     // La rama de re-claim conserva su condición original: sin `debit_resolution_tx_hash`
     // el lado settle NO reclama. Si alguien la relaja, vuelve el doble pago.
-    expect(flat(sql)).toContain(
+    expect(code(sql)).toContain(
       "AND (p_side = 'refund' OR debit_resolution_tx_hash IS NOT NULL)",
     );
     // Contra-chequeo: NO existe una rama que le deje al settle reclamar resolving_settle.
-    expect(flat(sql)).not.toContain(
+    expect(code(sql)).not.toContain(
       "OR (p_side = 'settle' AND debit_settle_status = 'resolving_settle')",
     );
   });
 
   it('T11 (MNR-3): el UPDATE cruza el intent verificado con la fila escrita', () => {
-    expect(flat(sql)).toContain('AND intent_id = p_intent_id');
+    expect(code(sql)).toContain('AND intent_id = p_intent_id');
   });
 
   it('T12: conserva el guard de transición de la migración #1 (no lo pierde al reescribir)', () => {
     // La #2 reescribe la función COMPLETA, así que si alguien copia el cuerpo de 191b
     // en vez del de la #1, el guard desaparece en silencio.
-    expect(flat(sql)).toContain("p_status <> 'resolving_settle'");
-    expect(flat(sql)).toContain(
+    expect(code(sql)).toContain("p_status <> 'resolving_settle'");
+    expect(code(sql)).toContain(
       "IF p_status NOT IN ('settled','reconciliation_pending','resolving_settle') THEN",
     );
   });
@@ -154,22 +173,22 @@ describe('HU-198 up #2 — applied + MNR-4 + MNR-3', () => {
     expect(sql).toMatch(/ORDEN INVERSO/);
     // Las dos funciones re-declaran search_path y sus grants.
     expect(
-      sql.match(/SET search_path = public, pg_temp/g)?.length,
+      code(sql).match(/SET search_path = public, pg_temp/g)?.length,
     ).toBeGreaterThanOrEqual(2);
-    expect(sql.match(/TO service_role/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(code(sql).match(/TO service_role/g)?.length).toBeGreaterThanOrEqual(2);
   });
 
   it('T14: el down revierte las DOS conductas de esta migración', () => {
     const down = readFileSync(DOWN2, 'utf8');
     // vuelve a void
-    expect(flat(down)).toContain('RETURNS void AS $$');
-    expect(flat(down)).not.toContain('RETURNS TABLE(applied BOOLEAN)');
+    expect(code(down)).toContain('RETURNS void AS $$');
+    expect(code(down)).not.toContain('RETURNS TABLE(applied BOOLEAN)');
     // saca la rama refund de MNR-4
-    expect(flat(down)).not.toContain(
+    expect(code(down)).not.toContain(
       "OR (p_side = 'refund' AND debit_settle_status = 'resolving_settle')",
     );
     // pero CONSERVA el guard de transición de la #1 (este down no revierte esa)
-    expect(flat(down)).toContain("p_status <> 'resolving_settle'");
+    expect(code(down)).toContain("p_status <> 'resolving_settle'");
     expect(down).toMatch(/NO ES UN ROLLBACK COMPLETO/);
   });
 });
