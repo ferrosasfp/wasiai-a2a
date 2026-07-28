@@ -62,17 +62,48 @@ Capas de obligación:
 
 1. **Tipos.** `validate` es un campo **requerido** y sin default. El opt-out no es
    `[]` silencioso: es `{ skip: '<motivo escrito>' }`, que queda firmado en el
-   código y visible en la marca del handler. Además `PreChargeCheck` es
-   **síncrona** y recibe `PreChargeInput` (`body`/`params`/`query`/`headers`), no
-   el `FastifyRequest`: por construcción no puede hacer I/O ni leer
-   `a2aKeyRow`/`resolvedChainId`, así que no se puede colar una validación de
-   ejecución disfrazada de forma.
+   código, visible en la marca del handler y **congelado por T-META-05** (usarlo
+   obliga a tocar el test, así que aparece en el diff). Además `PreChargeCheck` es
+   **síncrona** y recibe `PreChargeInput` (`body`/`params`/`query`/`headers`) en
+   **vista inmutable**, no el `FastifyRequest`. Qué garantiza eso, con precisión:
+   - no puede leer `a2aKeyRow`/`resolvedChainId` (no existen en el input);
+   - no puede **decidir** con el resultado de una I/O **asíncrona** — todas las
+     fuentes que importan acá son promesas (`dns.lookup` del guard SSRF,
+     `supabase-js`, los RPC, `fetch`) y un check sin `Promise` en el tipo de
+     retorno no puede esperarlas. Esa es la propiedad que sostiene el
+     razonamiento del SSRF (§6.2), no "cero I/O": la I/O **síncrona**
+     (`fs.readFileSync`, `execSync`) sigue siendo alcanzable desde JS y eso no lo
+     puede impedir un tipo. El AR probó el caso (`fs.existsSync` en un check
+     devuelve `true`), tenía razón, y el docstring se corrigió para afirmar
+     exactamente lo que vale;
+   - no puede **mutar** lo que el handler valida después. `readonly` en la
+     interfaz protege el binding, no el objeto: el AR hizo
+     `(input.body as Record<string, unknown>).injected = 'MUTATED'` y el handler
+     vio el cuerpo mutado. Ahora los cuatro campos van envueltos en un Proxy
+     recursivo de sólo-lectura (`readonlyView`, `charged-route.ts`) y toda
+     escritura lanza ANTES del cobro. Se eligió el Proxy sobre `Object.freeze`
+     (que mutaría el objeto real del request y le quitaría al handler la
+     capacidad de mutarlo, en silencio) y sobre `structuredClone` (que costaría
+     una copia del body en el money-path): no copia, no toca el original y su
+     coste es O(1) por propiedad leída.
 2. **Test de estructura.** `src/routes/charged-routes.meta.test.ts` recorre las
    rutas REALMENTE registradas (hook `onRoute`, mismo patrón que
    `registries.redaction.test.ts:T-RRED-05`) y falla si alguna tiene un handler
    marcado `CHARGES_CALLER` (marca puesta en `requirePaymentOrA2AKey` y en
    `requirePayment`) sin un `PRE_CHARGE_VALIDATION` **antes** en la cadena. La
    lista de excepciones legacy está **congelada**.
+   **Alcance = la app entera.** La primera versión registraba 5 plugins a mano, así
+   que una ruta futura que cobrara en cualquiera de los otros ~14 (`payments`,
+   `auth`, `agents`×3, `inbound`, `dashboard`, `well-known`, `receipts`, `mcp`, …)
+   era invisible: el claim "una ruta nueva que cobre sin validar rompe el test" no
+   se sostenía para el futuro, que es justo para lo que existe el guard. Ahora la
+   lista de plugins **se deriva de `src/index.ts`** (se parsea el fuente y se lee
+   cada `fastify.register(<plugin>, { prefix })`; no se puede importar `index.ts`
+   porque es el entrypoint y levanta el server) y **T-META-06** exige que el set
+   escaneado sea exactamente el de la app: agregar un plugin sin escanearlo rompe
+   el test. Verificado por mutación en las dos direcciones: una ruta que cobra sin
+   validar en `/payments` (invisible para el guard viejo, **sobrevivía**) hoy pone
+   rojo T-META-01, y sacar un plugin del set pone rojo T-META-06.
 
 **Límite honesto**: la capa 1 **no** es total hoy. `requirePaymentOrA2AKey` sigue
 exportado y `/compose`, `/orchestrate` (×3) y `/gasless/transfer` lo llaman
@@ -121,25 +152,51 @@ de tenant, WKH-63), así que **ningún caso residual le pega al x402**.
 
 | # | Endpoint | Status residual | Por qué no se pudo adelantar | Riel afectado | Reembolsado |
 |---|----------|-----------------|------------------------------|---------------|-------------|
-| T1 | POST `/tasks` | 500 (fallo de `taskService.create`) | Fallo de I/O contra la DB | prepago | **NO** — ver §5 |
-| T2 | GET `/tasks` | 500 (fallo de `taskService.list`) | idem | prepago | **NO** (idem: no cambia estado, pero tampoco entrega la lectura; se deja explícito abajo) |
+| T1 | POST `/tasks` | 500 (lanza `taskService.create`) | Fallo de I/O contra la DB | prepago | **NO** — decisión, ver §5 |
+| T2 | GET `/tasks` | 500 (lanza `taskService.list`) | idem | prepago | sí (`tasks.list:read-failed`) |
 | T3 | GET `/tasks/:id` | 404 `Task not found` | Ownership: **read + `owner_ref`**, indistinguible de "no existe" a propósito | prepago | sí (`tasks.get-one:not-found`) |
-| T4 | PATCH `/tasks/:id/status` | 404 `Task not found` | idem | prepago | sí |
-| T5 | PATCH `/tasks/:id/status` | 409 estado terminal | El estado se lee de la fila (**read**) | prepago | sí |
-| T6 | PATCH `/tasks/:id` | 404 `Task not found` | idem T3 | prepago | sí |
-| T7 | PATCH `/tasks/:id` | 409 estado terminal | idem T5 | prepago | sí |
+| T4 | GET `/tasks/:id` | 500 (lanza `taskService.get`) | Fallo de I/O contra la DB | prepago | sí (`tasks.get-one:read-failed`) |
+| T5 | PATCH `/tasks/:id/status` | 404 `Task not found` | idem T3 | prepago | sí |
+| T6 | PATCH `/tasks/:id/status` | 409 estado terminal | El estado se lee de la fila (**read**) | prepago | sí |
+| T7 | PATCH `/tasks/:id/status` | 500 (cualquier otro throw: el `throw err` genérico del catch) | Fallo de I/O contra la DB, en el read previo o en el UPDATE | prepago | sí (`tasks.patch-status:failed`) |
+| T8 | PATCH `/tasks/:id` | 404 `Task not found` | idem T3 | prepago | sí |
+| T9 | PATCH `/tasks/:id` | 409 estado terminal | idem T6 | prepago | sí |
+| T10 | PATCH `/tasks/:id` | 500 (`throw err` genérico) | idem T7 | prepago | sí (`tasks.patch-append:failed`) |
 
 ### Los números concretos
 
 | Métrica | Valor |
 |---|---|
 | Endpoints en alcance | **8** |
-| Casos residuales totales (post-fix) | **16** (9 en `/registries` + 7 en `/tasks`) |
+| Casos residuales totales (post-fix) | **19** (9 en `/registries` + 10 en `/tasks`) |
 | Casos residuales que le pegan al riel **x402** | **0** |
-| Casos residuales que le pegan al riel **prepago** | **16** |
-| Residuales prepago **reembolsados** en esta HU | **14** |
-| Residuales prepago NO reembolsados (decisión, §5) | **2** (T1, T2 — los 500 de fallo de DB) |
+| Casos residuales que le pegan al riel **prepago** | **19** |
+| Residuales prepago **reembolsados** | **18** |
+| Residuales prepago NO reembolsados (decisión, §5) | **1** (T1: el 500 de `POST /tasks`) |
 | Statuses que ANTES cobraban y ahora **no llegan a cobrar** | 403 `A2A_KEY_REQUIRED` (×8 endpoints), 400 de forma (×1 en registries, ×7 combinaciones en tasks), y el **500** de `/tasks` en el riel x402 |
+
+### Corrección del inventario (AR, BLQ-BAJO-1)
+
+La primera versión de esta tabla declaraba **16 residuales / 2 sin reembolso**.
+Estaba **corta**: los CINCO handlers de `/tasks` cobran y no devolvían nada cuando
+el service lanza, no dos. El AR lo probó handler por handler, con el middleware
+real y el service en `mockRejectedValue`:
+
+```
+POST   /tasks                -> 500 debit=1 credit=0 bal=9
+GET    /tasks                -> 500 debit=1 credit=0 bal=9
+GET    /tasks/<uuid>         -> 500 debit=1 credit=0 bal=9   <- faltaba en la tabla
+PATCH  /tasks/<uuid>/status  -> 500 debit=1 credit=0 bal=9   <- faltaba
+PATCH  /tasks/<uuid>         -> 500 debit=1 credit=0 bal=9   <- faltaba
+```
+
+Números reales del inventario: **19 residuales / 5 sin reembolso** antes de este
+fix-pack; **19 / 1** después. La conclusión x402 NO cambia (sigue siendo 0/19,
+verificada aparte). Por qué el inventario quedó corto: se recorrieron los caminos
+de rechazo EXPLÍCITOS (cada `return reply.status(...)`) y no los `throw` que caen
+al error boundary, que son igual de cobrados. La lección está en el
+`auto-blindaje.md`. Cada uno de los 5 caminos tiene hoy un test que mira el
+BALANCE (T-NCT-21..25) y una mutación que lo pone rojo.
 
 **Para la decisión del founder**: con este fix **no hace falta reembolso on-chain**
 para estos 8 endpoints, porque el riel x402 dejó de tener casos residuales (0/16).
@@ -154,23 +211,45 @@ por definición (el valor ya se movió downstream).
 todo error puede ser peor que el bug: los adapters lanzan **después** de
 broadcastear y el refund regala la transferencia más el saldo.
 
-Aplicado acá:
+Aplicado acá, el criterio es **una sola pregunta: ¿el camino pudo haber escrito
+algo o entregado algo?**
 
-- Los 14 residuales reembolsados **no mueven valor**: `/registries` y `/tasks` no
-  invocan agentes downstream ni firman transacciones. El único movimiento posible
-  es el propio débito, y los rechazos ocurren antes de cualquier escritura
-  confirmada (pre-fetch de ownership, o UPDATE/DELETE atómico que falló).
-- **T1 (`POST /tasks` → 500) NO se reembolsa a propósito**: un fallo de I/O es
-  **ambiguo**. Si la DB commiteó el insert y se cayó la conexión al responder, la
-  task EXISTE y el caller la puede leer: reembolsar ahí sería regalar el recurso
-  entregado, exactamente el error de HU-192. Sin una señal fiable de "no se
-  escribió nada" (idempotency key, o un `create` que devuelva el estado
-  confirmado), lo correcto es no devolver.
-- **T2 (`GET /tasks` → 500) tampoco**: no hay ambigüedad de estado, pero tampoco
-  hay un camino de rechazo explícito en el handler (el throw sube al error handler
-  de Fastify). Meter un refund ahí exigía envolver el handler en try/catch y
-  cambiar el manejo de errores de la ruta, que está fuera del alcance. Queda
-  documentado como residuo conocido, no silenciado.
+- **Los 15 residuales que no son 500** (R1..R9, T3, T5, T6, T8, T9) **no mueven
+  valor**: `/registries` y `/tasks` no invocan agentes downstream ni firman
+  transacciones. El único movimiento posible es el propio débito, y esos rechazos
+  ocurren antes de cualquier escritura confirmada (pre-fetch de ownership, o
+  UPDATE/DELETE atómico que falló). Se reembolsan.
+- **Los dos 500 de LECTURA se reembolsan** (T2 `GET /tasks`, T4 `GET /tasks/:id`).
+  Acá no hay ninguna ambigüedad de estado que proteger: son lecturas, no escriben
+  nada y no entregaron nada. El caller pagó $1 por un error nuestro. Que el throw
+  suba al error boundary no era una razón para no devolver: el `try/catch` que hace
+  falta es local al handler, no cambia el status (el 500 lo sigue produciendo el
+  error boundary) y cabe en cinco líneas. **Este era el argumento equivocado de la
+  primera versión** ("fuera de alcance"), y el AR tuvo razón en desarmarlo.
+- **Los dos 500 genéricos de los PATCH se reembolsan** (T7, T10), con su riesgo
+  residual DECLARADO. El caso dominante es que nada se escribió: `updateStatus` y
+  `append` primero LEEN la fila (un fallo del read no toca nada) y un UPDATE que
+  reporta error tampoco aplicó. El caso incómodo existe y no lo escondo: si el
+  UPDATE hubiera commiteado y sólo se perdiera la respuesta, el reembolso regala
+  una transición ya aplicada. Se acepta porque (a) lo que se regala es una
+  mutación sobre la propia task del caller, por $1, (b) la ventana es angosta
+  (commit + caída al responder) y (c) los casos sin escritura son mucho más
+  frecuentes. Lo que **eliminaría** el riesgo del todo es un error tipado por
+  etapa en el service (`read-failed` vs `write-failed`), que es la deuda que queda
+  anotada; no se hizo acá porque toca `services/task.ts` (money-path de otras
+  suites) por un caso de $1.
+- **T1 (`POST /tasks` → 500) NO se reembolsa, y se declara**: un fallo del insert
+  es **ambiguo en el sentido caro**. Si la DB commiteó y se cayó la conexión al
+  responder, la task EXISTE, es listable con `GET /tasks` y el caller la puede
+  usar: reembolsar ahí sería regalar un recurso ENTREGADO, exactamente el error de
+  HU-192. Sin una señal fiable de "no se escribió nada" (idempotency key, o un
+  `create` que confirme el estado), la dirección segura es no devolver. La
+  diferencia con T7/T10 no es de tipo sino de qué se regalaría: un recurso nuevo y
+  usable versus una mutación de algo que el caller ya tenía.
+  El contrato público lo dice con su status y su consecuencia práctica
+  (`doc/INTEGRATION.md` §5.1: no reintentar a ciegas un 500 de `POST /tasks`), y
+  **T-NCT-25 congela la decisión**: si alguien agrega el refund, el test falla y
+  obliga a actualizar el contrato en el mismo diff.
 
 ## 6. Efecto colateral declarado: el 402 que pasa a 403/400
 
@@ -202,7 +281,10 @@ Dos sub-casos, con su análisis de riesgo:
    DNS, y pre-cobro le habría dado a cualquiera un oráculo de "¿este hostname
    interno existe y resuelve a una IP privada?" (DNS split-horizon). Por eso el 422
    quedó como residuo reembolsado y `PreChargeCheck` es síncrona por tipo, no por
-   convención.
+   convención: `dns.lookup` es asíncrona, así que un check **no puede esperar su
+   resultado** y por lo tanto no puede decidir con él (la formulación exacta de esa
+   garantía está en §3.1, corregida tras el AR: no es "cero I/O", es "sin oráculo
+   asíncrono").
 
 ## 7. Reporte pedido: el cobro de $1 en los GET de `/tasks`
 
@@ -231,15 +313,21 @@ Dos sub-casos, con su análisis de riesgo:
 ## 8. Verificación
 
 - `npx tsc --noEmit` → 0 errores.
-- `npx biome check src/` → 0.
-- `npx vitest run` → **3573 passed | 11 skipped** (baseline `main`: 3511 | 11; +62
-  tests nuevos, 0 regresiones).
-- Mutación (17 mutantes, todos matados): ver `auto-blindaje.md` §Mutación.
-- Cobertura de las líneas nuevas: `charged-route.ts` + `charge-brand.ts` 100%
-  stmts/branch/func/line; `step0-refund.ts` 100% líneas (17/17); `step0-debit.ts`
-  100% (con las suites de compose+gasless+registries, que ejercitan las 3 ramas del
-  monto). Único código nuevo sin hits: los guards **defense-in-depth** duplicados en
-  los handlers (`registries.ts:183,237,351,405`; `tasks.ts:169,232,265,269,274,320,324`),
+- `npx biome check src/` → 0 (375 archivos).
+- `npx vitest run` → **3583 passed | 11 skipped** (baseline `main`: 3511 | 11; +72
+  tests nuevos, 0 regresiones. El fix-pack del AR agregó 10: T-NCT-21..25,
+  T-CR-10..12, T-META-05..06).
+- Mutación (**28 mutantes, todos matados**): ver `auto-blindaje.md` §Mutación. Los
+  11 del fix-pack cubren cada refund nuevo por separado, la decisión de NO
+  reembolsar el `create` (mutante en la dirección contraria: agregar el refund pone
+  rojo T-NCT-25), el alcance del guard y la vista inmutable.
+- Cobertura de las líneas nuevas: `charged-route.ts` (con `readonlyView` y las 4
+  trampas del Proxy) + `charge-brand.ts` **100%** stmts/branch/func/line;
+  `step0-refund.ts` 100% líneas (17/17); `step0-debit.ts` 100% (con las suites de
+  compose+gasless+registries, que ejercitan las 3 ramas del monto). Los 4 refunds
+  nuevos de `tasks.ts` y sus `try/catch` tienen hits (T-NCT-21..24). Único código
+  nuevo sin hits: los guards **defense-in-depth** duplicados en los handlers
+  (`registries.ts:183,237,351,405`; `tasks.ts:176,257,295,299,304,360,364`),
   inalcanzables vía HTTP porque el check pre-cobro gana. Se conservan a propósito
   (precedente HU-188 `compose.ts:630-636`) y se declaran acá para que nadie los lea
   como cobertura real.
@@ -258,7 +346,8 @@ Nuevos:
 
 Modificados:
 - `src/routes/registries.ts`, `src/routes/tasks.ts` — cadena vía `chargedRoute` +
-  refunds del residuo.
+  refunds del residuo (en `tasks.ts`, también los 4 refunds de los 500 del
+  fix-pack: los dos `try/catch` de las lecturas y los dos `throw err` genéricos).
 - `src/middleware/a2a-key.ts` — `extractRawKeyFromHeaders` (aditivo), monto step-0
   desde `lib/step0-debit.ts`, marca `CHARGES_CALLER`.
 - `src/middleware/x402.ts` — marca `CHARGES_CALLER`.

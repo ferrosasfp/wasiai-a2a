@@ -420,21 +420,33 @@ settle. The response is `400` (or `403 A2A_KEY_REQUIRED`) instead of `402`.
 
 Some rejections can only be decided *after* the charge, because they require a
 database read and your authenticated identity (does the resource exist, is it
-yours, is it in a terminal state) or a DNS lookup (the SSRF guard on registry
-URLs). For those:
+yours, is it in a terminal state), a DNS lookup (the SSRF guard on registry URLs),
+or because the database call itself failed. For those:
 
 | Rail | Rejected after the charge | What happens |
 |------|---------------------------|--------------|
-| **Agent Key (prepaid)** | `404`, `409`, `422`, and the `400` returned by the service layer on `/registries` | The step-0 debit is **credited back** to the same ledger that was debited (including the delegation / key-session counters). Net cost of a rejected request: **0**. If the credit-back itself fails it is queued and retried, so no rejection leaves you permanently charged. |
+| **Agent Key (prepaid)** | `404`, `409`, `422`, the `400` returned by the service layer on `/registries`, and the `500` of a failed database call on `GET /tasks`, `GET /tasks/:id`, `PATCH /tasks/:id/status` and `PATCH /tasks/:id` | The step-0 debit is **credited back** to the same ledger that was debited (including the delegation / key-session counters), so those rejections cost you **0**. If the credit-back itself fails it is queued and retried. |
+| **Agent Key (prepaid)** | `500` on `POST /tasks`, and only there | **NOT refunded.** This is the one path where a rejection leaves you charged $1. See the note right below: it is a deliberate decision, not an oversight. |
 | **x402 (pay per call)** | Same statuses | **NOT refunded.** The inbound payment is an on-chain settlement and there is no internal balance to credit: refunding would require sending a transaction back to you. Today the API does not do that. |
+
+**The one prepaid rejection that keeps your $1: `POST /tasks` answering `500`.**
+A `500` there means the insert did not report success, but it does *not* prove
+that nothing was written: if the row was committed and the connection broke while
+the response was being sent, the task exists and you can find it. Refunding would
+mean handing you a created resource for free, so the API keeps the charge.
+**What that means for your integration: do not blind-retry a `500` from
+`POST /tasks`.** List first (`GET /tasks?context_id=...`, refunded if it fails)
+and retry only if the task is not there, because every retry costs another $1.
+Everywhere else in `/tasks`, and everywhere in `/registries`, a rejection after
+the charge is credited back.
 
 Practical consequence for x402 callers: the endpoints where a post-charge rejection
 is possible are `POST /compose` and `POST /orchestrate*` (execution failures), plus
 `POST /gasless/transfer`. On `/registries` and `/tasks` the x402 rail is rejected
 *before* the charge (see the note in [Section 3](#3-endpoints-reference)), so a
 rejected request there costs you nothing. If your integration cannot tolerate a
-non-refundable rejection, use an Agent Key: the prepaid rail is refundable by
-construction.
+non-refundable rejection, use an Agent Key: on the prepaid rail every post-charge
+rejection is credited back except the `500` of `POST /tasks` described above.
 
 ---
 
