@@ -1144,6 +1144,117 @@ describe('orchestrateService', () => {
     expect(creditCall[3]).toBe('owner-127');
   });
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // HU-203 — "el step-0 ni settleó" es una INFERENCIA, y hay un caso en que es falsa.
+  //
+  // `totalCostUsdc === 0` significa que el step no se CONTABILIZÓ, no que no se pagó.
+  // Si el settle devolvió evidencia de broadcast (o el facilitator no dio un veredicto
+  // legible), el agente pudo haber cobrado on-chain y este reembolso le devuelve la
+  // plata al caller igual: sale dos veces de nuestro lado.
+  //
+  // `compose` no puede frenar ESTE reembolso desde adentro: el débito del step 0 no es
+  // suyo (su guard `i > 0` lo excluye a propósito), lo hace y lo deshace este bloque.
+  // Por eso el veredicto viaja en `ComposeResult.settleRefundWithheld`.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** El setup de T-AC5 (fallo total del pipeline), reusado por los tres tests. */
+  function primeTotalFailure(withheld?: {
+    step: number;
+    reason: 'broadcast-hash';
+    txHash: string;
+  }) {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug) => wkh127Agents.find((a) => a.slug === slug) ?? null,
+    );
+    vi.mocked(composeService.compose).mockResolvedValue({
+      ...mockComposeResult,
+      success: false,
+      totalCostUsdc: 0,
+      ...(withheld ? { settleRefundWithheld: withheld } : {}),
+    });
+    setLlmTwoAgents();
+  }
+
+  it('T-203-ORCH-NO-REFUND: si el settle del step 0 pudo haber salido, su débito NO vuelve', async () => {
+    primeTotalFailure({
+      step: 0,
+      reason: 'broadcast-hash',
+      txHash: '0xBROADCASTED',
+    });
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'step0 settle unknown',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-203-a',
+    );
+
+    // LO QUE IMPORTA: los 0.30 del step 0 NO volvieron al caller.
+    expect(vi.mocked(budgetService.credit)).not.toHaveBeenCalled();
+    expect(vi.mocked(budgetService.creditDelegation)).not.toHaveBeenCalled();
+    expect(vi.mocked(budgetService.creditSession)).not.toHaveBeenCalled();
+  });
+
+  it('T-203-ORCH-SURFACE: la retención del step 0 deja un evento durable con el hash', async () => {
+    // Sin esto, el fix cambiaría un reembolso indebido RUIDOSO por una retención
+    // SILENCIOSA, que es peor: nadie se entera de que le debemos plata a alguien.
+    primeTotalFailure({
+      step: 0,
+      reason: 'broadcast-hash',
+      txHash: '0xBROADCASTED',
+    });
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'step0 settle unknown surfaced',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-203-b',
+    );
+
+    const withheldEvent = vi
+      .mocked(eventService.track)
+      .mock.calls.map((c) => c[0])
+      .find((e) => e.eventType === 'compose_settle_unknown');
+    expect(withheldEvent).toBeDefined();
+    expect(withheldEvent?.txHash).toBe('0xBROADCASTED');
+    expect(withheldEvent?.costUsdc).toBeCloseTo(0.3, 6);
+    expect(withheldEvent?.metadata?.withholder).toBe('orchestrate-step0');
+  });
+
+  it('T-203-ORCH-STEP1-STILL-REFUNDS: si el settle sin resolver fue de OTRO step, el step 0 sí vuelve', async () => {
+    // La otra dirección, y es la que evita la sobre-corrección: `compose` ya retuvo el
+    // débito del step que quedó en duda. El del step 0 es plata del caller que nunca se
+    // gastó — retenerla también lo dejaría cobrado sin contraprestación.
+    primeTotalFailure({
+      step: 1,
+      reason: 'broadcast-hash',
+      txHash: '0xBROADCASTED',
+    });
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'step1 settle unknown',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-203-c',
+    );
+
+    expect(vi.mocked(budgetService.credit)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(budgetService.credit).mock.calls[0]?.[2]).toBeCloseTo(
+      0.3,
+      6,
+    );
+  });
+
   // T-AC6 (AC-6): partial failure → credit with (debited - consumed); >=debited → no credit.
   it('T-AC6a: partial failure refunds the unconsumed remainder', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
