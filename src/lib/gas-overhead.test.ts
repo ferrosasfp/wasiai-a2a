@@ -25,6 +25,8 @@ import {
   assertGasOverheadConfigured,
   GasOverheadUnavailableError,
   getStepGasOverheadUsd,
+  LIVE_CALC_TIMEOUT_MS,
+  PRICE_HOP_TIMEOUT_MS,
 } from './gas-overhead.js';
 
 const AVAX_MAINNET = 43114;
@@ -171,6 +173,122 @@ describe('getStepGasOverheadUsd', () => {
     expect(init).toBeDefined();
     expect(init.signal).toBeInstanceOf(AbortSignal);
     expect((init.signal as AbortSignal).aborted).toBe(false);
+  });
+
+  // ── HU-195 fix-pack (AR BLQ-BAJO-1 / BLQ-BAJO-2) ──────────────────────────
+  //
+  // T-195-GAS-1 (arriba) sólo mira que el `signal` EXISTA, así que el mutante
+  // `AbortSignal.timeout(300_000)` — que reintroduce EXACTAMENTE el bug que la HU
+  // dice arreglar — sobrevivía (29 passed, 0 rojos). Y el VALOR del techo no es
+  // cosmético: si el hop se aborta dentro del presupuesto de la race, el fallback
+  // de env se vuelve alcanzable y el guard fail-closed G-02 pasa a fail-open.
+  //
+  // Estos tres tests candadean las DOS puntas del presupuesto:
+  //   · demasiado CORTO (≤ race) → GAS-2/GAS-3 rojos (valor 0.06 / no throw).
+  //   · demasiado LARGO (300_000, o sin `signal`) → GAS-2 rojo (no aborta).
+  //
+  // `AbortSignal.timeout` no expone sus ms, así que se testea el EFECTO: un fetch
+  // que cuelga hasta que lo aborten, midiendo (a) el valor devuelto y (b) cuándo
+  // muere el socket. Los timers de `AbortSignal.timeout` NO los controla
+  // `vi.useFakeTimers` (viven en los timers internos de Node), así que el reloj es
+  // real: ~2.5 s por test.
+  const HANG_UNTIL_ABORTED = () => {
+    let signal: AbortSignal | undefined;
+    let calledAt = 0;
+    const fetchMock = vi.fn(
+      (_url: unknown, init?: { signal?: AbortSignal }) => {
+        signal = init?.signal;
+        calledAt = Date.now();
+        return new Promise<never>((_resolve, reject) => {
+          // Mismo contrato que undici: el abort RECHAZA el fetch.
+          init?.signal?.addEventListener('abort', () => {
+            reject(init.signal?.reason as Error);
+          });
+        });
+      },
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+    return {
+      get signal() {
+        return signal;
+      },
+      get calledAt() {
+        return calledAt;
+      },
+    };
+  };
+
+  /** Espera el abort del signal con cota. Devuelve ms desde `calledAt`, o null. */
+  async function waitForAbort(
+    signal: AbortSignal,
+    calledAt: number,
+    budgetMs: number,
+  ): Promise<number | null> {
+    if (signal.aborted) return Date.now() - calledAt;
+    const aborted = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), budgetMs);
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+    return aborted ? Date.now() - calledAt : null;
+  }
+
+  it('T-195-GAS-2: CoinGecko colgado ⇒ MISMO valor que antes del techo (fail-open 0 fuera de prod), Y el socket muere', async () => {
+    process.env.AVALANCHE_RPC_URL = 'https://rpc.example/avax';
+    // Con el fallback de env PRESENTE es donde se ve el cambio de semántica: si
+    // el hop abortara dentro del presupuesto de la race, `getNativeTokenUsd`
+    // caería acá y devolvería 0.06 en vez del 0/undefined histórico.
+    process.env.AVAX_USD_FALLBACK = '30';
+    const probe = HANG_UNTIL_ABORTED();
+
+    const startedAt = Date.now();
+    const result = await getStepGasOverheadUsd(AVAX_MAINNET);
+    const elapsed = Date.now() - startedAt;
+
+    // (a) SEMÁNTICA PRESERVADA: la race se rinde ⇒ irresoluble ⇒ 0 fuera de prod.
+    // Medición pre-HU-195 (sin `signal`): result=0 elapsedMs=2004.
+    // Con el techo mal puesto (= LIVE_CALC_TIMEOUT_MS): result=0.06 elapsedMs=2003.
+    expect(result).toBe(0);
+    expect(elapsed).toBeGreaterThanOrEqual(LIVE_CALC_TIMEOUT_MS - 50);
+    expect(elapsed).toBeLessThan(LIVE_CALC_TIMEOUT_MS * 2);
+
+    // (b) EL SOCKET SE ABORTA — y DESPUÉS de que la race se rindió, no antes.
+    const signal = probe.signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    const abortedAfterMs = await waitForAbort(
+      signal as AbortSignal,
+      probe.calledAt,
+      PRICE_HOP_TIMEOUT_MS * 3,
+    );
+    expect(abortedAfterMs).not.toBeNull();
+    expect(abortedAfterMs as number).toBeGreaterThanOrEqual(
+      LIVE_CALC_TIMEOUT_MS,
+    );
+    expect(abortedAfterMs as number).toBeLessThan(PRICE_HOP_TIMEOUT_MS * 2);
+  }, 20_000);
+
+  it('T-195-GAS-3: CoinGecko colgado EN PRODUCCIÓN ⇒ sigue lanzando GasOverheadUnavailableError (fail-closed G-02 intacto)', async () => {
+    process.env.AVALANCHE_RPC_URL = 'https://rpc.example/avax';
+    process.env.AVAX_USD_FALLBACK = '30';
+    const savedNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    HANG_UNTIL_ABORTED();
+    try {
+      await expect(getStepGasOverheadUsd(AVAX_MAINNET)).rejects.toThrow(
+        GasOverheadUnavailableError,
+      );
+    } finally {
+      if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = savedNodeEnv;
+    }
+  }, 20_000);
+
+  it('T-195-GAS-4: INVARIANTE — el techo del hop es ESTRICTAMENTE mayor que el presupuesto de la race', () => {
+    expect(PRICE_HOP_TIMEOUT_MS).toBeGreaterThan(LIVE_CALC_TIMEOUT_MS);
+    // Y sigue MUY por debajo del default de undici que motivó la HU.
+    expect(PRICE_HOP_TIMEOUT_MS).toBeLessThan(300_000);
   });
 
   it('mainnet without override, no RPC configured → fail-open 0', async () => {

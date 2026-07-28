@@ -140,6 +140,9 @@ describe('resolveOutboundHopTimeoutMs — env + invariante del clamp', () => {
     // Un operador pide 10 min por hop contra un 504 de 3 min: el techo efectivo
     // es el 504, si no el "techo" no sirve para nada.
     process.env.TIMEOUT_COMPOSE_MS = '180000';
+    // AR MNR-8: el clamp es contra el MÍNIMO de los dos 504, así que para aislar
+    // el del compose hay que dejar el de orchestrate por encima.
+    process.env.TIMEOUT_ORCHESTRATE_MS = '600000';
     process.env.OUTBOUND_HOP_TIMEOUT_MS = '600000';
     expect(resolveOutboundHopTimeoutMs()).toBe(180_000);
   });
@@ -152,8 +155,44 @@ describe('resolveOutboundHopTimeoutMs — env + invariante del clamp', () => {
 
   it('T-195-ENV-6: TIMEOUT_COMPOSE_MS basura → se clampea contra su propio default (180_000)', () => {
     process.env.TIMEOUT_COMPOSE_MS = 'nope';
+    process.env.TIMEOUT_ORCHESTRATE_MS = '999999';
     process.env.OUTBOUND_HOP_TIMEOUT_MS = '999999';
     expect(resolveOutboundHopTimeoutMs()).toBe(180_000);
+  });
+
+  // ── AR MNR-8: el clamp mira los DOS 504, no sólo el del compose ──────────
+  //
+  // `/orchestrate`, `/inbound` y `/agent-links` invocan el MISMO compose con
+  // `TIMEOUT_ORCHESTRATE_MS` (default 120_000), MÁS CORTO que los 180_000 de
+  // `/compose`. Clampeando sólo contra `TIMEOUT_COMPOSE_MS`, un operador que
+  // pone `OUTBOUND_HOP_TIMEOUT_MS=180000` (valor que el clamp ACEPTA) se queda
+  // con un techo de hop MAYOR que el 504 de orchestrate.
+  it('T-195-ENV-7 (AR MNR-8): el clamp usa el MÍNIMO de TIMEOUT_COMPOSE_MS y TIMEOUT_ORCHESTRATE_MS', () => {
+    process.env.TIMEOUT_COMPOSE_MS = '180000';
+    process.env.TIMEOUT_ORCHESTRATE_MS = '120000';
+    process.env.OUTBOUND_HOP_TIMEOUT_MS = '180000';
+    expect(resolveOutboundHopTimeoutMs()).toBe(120_000);
+  });
+
+  it('T-195-ENV-8 (AR MNR-8): con los DEFAULTS de las dos envs el techo del hop ya está por debajo de ambos', () => {
+    delete process.env.TIMEOUT_COMPOSE_MS;
+    delete process.env.TIMEOUT_ORCHESTRATE_MS;
+    process.env.OUTBOUND_HOP_TIMEOUT_MS = '150000';
+    // Sin envs: min(180_000, 120_000) = 120_000 → el pedido de 150 s se clampea.
+    expect(resolveOutboundHopTimeoutMs()).toBe(120_000);
+  });
+
+  it('T-195-ENV-9 (AR MNR-8): el clamp también sigue a TIMEOUT_ORCHESTRATE_MS cuando el operador lo BAJA', () => {
+    process.env.TIMEOUT_ORCHESTRATE_MS = '20000';
+    delete process.env.OUTBOUND_HOP_TIMEOUT_MS;
+    expect(resolveOutboundHopTimeoutMs()).toBe(20_000);
+  });
+
+  it('T-195-ENV-10: TIMEOUT_ORCHESTRATE_MS basura → su propio default (120_000), no Infinity', () => {
+    process.env.TIMEOUT_ORCHESTRATE_MS = 'nope';
+    process.env.TIMEOUT_COMPOSE_MS = '180000';
+    process.env.OUTBOUND_HOP_TIMEOUT_MS = '999999';
+    expect(resolveOutboundHopTimeoutMs()).toBe(120_000);
   });
 });
 

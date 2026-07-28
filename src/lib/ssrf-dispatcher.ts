@@ -222,6 +222,61 @@ async function assertUrlAllowed(rawUrl: string): Promise<void> {
   }
 }
 
+/** Convierte la `reason` de un `AbortSignal` (tipada `any`) en un `Error`. */
+function abortReasonToError(reason: unknown): Error {
+  // `AbortSignal.timeout` da un `DOMException` TimeoutError (que en Node ES un
+  // Error) y `AbortSignal.any` propaga la reason del caller tal cual — que puede
+  // ser cualquier cosa, porque `controller.abort(x)` acepta cualquier valor.
+  return reason instanceof Error ? reason : new Error(String(reason));
+}
+
+/**
+ * HU-195 fix-pack (AR BLQ-BAJO-3) — corre el pre-flight SSRF DENTRO del mismo
+ * presupuesto de wall-clock que el hop.
+ *
+ * EL PROBLEMA QUE CIERRA: `assertUrlAllowed` hace `dns.lookup` sin timeout
+ * (`url-validator.ts`, stage 5) y corría FUERA del `signal`, así que el techo
+ * declarado por `OUTBOUND_HOP_TIMEOUT_MS` no era el techo real: con un resolver
+ * de 1500 ms y un techo de 200 ms, un hop tardaba 1505 ms (7.5× el techo) y el
+ * `signal` ya estaba abortado cuando el fetch arrancaba.
+ *
+ * NO debilita el guard: `assertUrlAllowed` sigue corriendo por hop ANTES de
+ * abrir el socket. Lo único que cambia es que, si el presupuesto se agota
+ * MIENTRAS resuelve DNS, el hop falla (fail-closed) en vez de esperar sin cota.
+ *
+ * RESIDUAL (documentado, no cerrado acá): `dns.lookup` no acepta `signal` y
+ * corre en el threadpool de libuv, así que la carrera acota lo que ESPERA el
+ * gateway, no el slot del threadpool — un resolver lento sigue ocupando su slot
+ * hasta que contesta. Cerrarlo requiere `dns.Resolver` con `timeout`, que cambia
+ * la semántica de resolución (deja de usar `/etc/hosts`/NSS y contradice CD-A7
+ * de `url-validator.ts`) y es su propia HU.
+ */
+async function assertUrlAllowedWithinBudget(
+  rawUrl: string,
+  signal: AbortSignal,
+): Promise<void> {
+  // Presupuesto YA agotado antes de este hop (p.ej. el hop 2 de un redirect, o un
+  // caller que llega con su signal abortado): no se resuelve DNS ni se abre socket.
+  if (signal.aborted) throw abortReasonToError(signal.reason);
+  // Asignado SIEMPRE: el executor de `Promise` corre sincrónicamente, antes de
+  // cualquier `await`. Sin `| undefined` para no dejar en el `finally` una rama
+  // que ningún test puede ejercitar.
+  let onAbort!: () => void;
+  try {
+    await Promise.race([
+      assertUrlAllowed(rawUrl),
+      new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(abortReasonToError(signal.reason));
+        signal.addEventListener('abort', onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    // El signal SOBREVIVE al hop (gobierna el body stream), así que el listener
+    // se saca siempre: si no, 5 hops de redirect dejarían 5 listeners colgados.
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
 /**
  * Headers whose value is a credential and MUST NOT be re-sent to a different
  * origin after a redirect (defense-in-depth — even though `assertUrlAllowed`
@@ -363,7 +418,9 @@ export async function ssrfFetch(
     // Re-validate the URL we are ABOUT to fetch on every hop (the initial URL is
     // hop 0 — defense-in-depth, callers already validate it, but a redirect
     // target reaching this loop has NOT been validated by the caller).
-    await assertUrlAllowed(currentUrl);
+    // HU-195 fix-pack (AR BLQ-BAJO-3): DENTRO del presupuesto del hop — la fase
+    // de DNS de este pre-flight es parte del techo declarado, no un extra.
+    await assertUrlAllowedWithinBudget(currentUrl, wallClockSignal);
 
     const withDispatcher = {
       ...init,

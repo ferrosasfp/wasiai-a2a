@@ -23,9 +23,12 @@
  *     intentionally OMITTED here (no Chainlink reader in the gateway; CoinGecko
  *     is enough for a per-step margin and keeps this module self-contained).
  *  4. In-memory cache per chain (TTL ~60s) so we don't RPC+fetch on every step.
- *  5. Timeout (~2s) + fail-open: any error / timeout in the live calc degrades
- *     to the static env value → 0. The function NEVER throws — billing must not
- *     break on a network blip.
+ *  5. Timeout (~2s): any error / timeout in the live calc degrades to the static
+ *     env value. If there is no env value either, the behaviour depends on the
+ *     entry point: `getStepGasOverheadUsd` FAILS CLOSED in production (throws
+ *     `GasOverheadUnavailableError`, G-02) and fails open to 0 outside it. The
+ *     `~2s` budget is the `Promise.race` of `resolveStepGasOverhead`; the hop's
+ *     OWN ceiling is deliberately LONGER (`PRICE_HOP_TIMEOUT_MS`).
  *
  * Env:
  *  - `STEP_GAS_OVERHEAD_USD` / `STEP_GAS_OVERHEAD_USD_<CHAINID>` — operator pin /
@@ -61,7 +64,45 @@ const MAX_OVERHEAD_USD = 1.0;
 const GAS_UNITS = 80_000n;
 
 /** Live-calc timeout — fail-open to env/0 if the RPC+price round-trip stalls. */
-const LIVE_CALC_TIMEOUT_MS = 2_000;
+export const LIVE_CALC_TIMEOUT_MS = 2_000;
+
+/**
+ * Margen del techo del hop de precio POR ENCIMA del presupuesto de la race.
+ *
+ * NO es cosmético: ver `PRICE_HOP_TIMEOUT_MS`. Bajarlo a 0 (o a un negativo)
+ * reabre el fail-open que el fix-pack del AR cerró.
+ */
+const PRICE_HOP_GRACE_MS = 500;
+
+/**
+ * HU-195 fix-pack (AR BLQ-BAJO-2) — techo de WALL-CLOCK del hop de CoinGecko.
+ *
+ * INVARIANTE: **estrictamente mayor** que `LIVE_CALC_TIMEOUT_MS`. Esto es una
+ * decisión de semántica de dinero, no un número al azar:
+ *
+ *   · El `Promise.race` de `resolveStepGasOverhead` se rinde a los
+ *     `LIVE_CALC_TIMEOUT_MS` y devuelve `undefined` ⟹ en producción
+ *     `getStepGasOverheadUsd` lanza `GasOverheadUnavailableError` (fail-closed
+ *     G-02: NO settlear con gas descubierto).
+ *   · Si el hop se abortara **antes o al mismo tiempo** que la race, el `catch`
+ *     de `getNativeTokenUsd` pasaría a ser ALCANZABLE dentro del presupuesto: el
+ *     fetch rechaza → cae al `<SYM>_USD_FALLBACK` → `calcLiveOverhead` resuelve
+ *     con el precio de env → la race RESUELVE en vez de rechazar, y el valor se
+ *     cachea 60 s. Un stall transitorio de CoinGecko convertiría el guard
+ *     fail-closed en fail-open-con-fallback y fijaría el overhead un minuto.
+ *     MEDIDO: con `AbortSignal.timeout(LIVE_CALC_TIMEOUT_MS)` el resultado era
+ *     `0.06` a los 2003 ms donde antes del techo era `undefined`/throw a los
+ *     2004 ms.
+ *   · Con el abort DESPUÉS de que la race se rindió, el valor devuelto es
+ *     byte-por-byte el de antes de la HU (la race ya rechazó; lo que resuelva
+ *     `calcLiveOverhead` después lo descarta el `race` — y no se cachea, porque
+ *     el `_cache.set` vive en el camino que ya no se ejecuta), y el beneficio
+ *     nuevo se conserva: el socket no sobrevive hasta los 300 s de undici.
+ *
+ * El candado contra que alguien "optimice" este presupuesto es
+ * `T-195-GAS-2/3/4` en `gas-overhead.test.ts`.
+ */
+export const PRICE_HOP_TIMEOUT_MS = LIVE_CALC_TIMEOUT_MS + PRICE_HOP_GRACE_MS;
 
 /** In-memory cache TTL per chain (ms). Avoids one RPC+fetch per pipeline step. */
 const CACHE_TTL_MS = 60_000;
@@ -231,15 +272,19 @@ async function getNativeTokenUsd(
   if (config.coingeckoId !== undefined) {
     try {
       // HU-195: techo de WALL-CLOCK del hop. El `Promise.race` de
-      // `getCachedOverhead` (línea ~331) hace que el CALLER se rinda a los
+      // `resolveStepGasOverhead` hace que el CALLER se rinda a los
       // `LIVE_CALC_TIMEOUT_MS`, pero NO abortaba este fetch: el socket seguía
       // vivo hasta los defaults de undici (300 s de INACTIVIDAD, y sin cota
-      // alguna contra un peer que trickle-feedea). Alineamos el presupuesto del
-      // hop con el que la race ya declaró → cero cambio en el valor devuelto,
-      // el socket deja de sobrevivir a su propio timeout.
+      // alguna contra un peer que trickle-feedea).
+      //
+      // El presupuesto es `PRICE_HOP_TIMEOUT_MS` = race + margen, ESTRICTAMENTE
+      // MAYOR que el de la race a propósito: acotar el hop POR DEBAJO (o AL
+      // MISMO valor, que por orden de inserción de timers gana el abort) haría
+      // alcanzable el fallback de env DENTRO del presupuesto y convertiría el
+      // fail-closed G-02 en fail-open. Ver el bloque de `PRICE_HOP_TIMEOUT_MS`.
       const res = await fetch(
         `https://api.coingecko.com/api/v3/simple/price?ids=${config.coingeckoId}&vs_currencies=usd`,
-        { signal: AbortSignal.timeout(LIVE_CALC_TIMEOUT_MS) },
+        { signal: AbortSignal.timeout(PRICE_HOP_TIMEOUT_MS) },
       );
       if (res.ok) {
         const data = (await res.json()) as Record<string, { usd?: number }>;

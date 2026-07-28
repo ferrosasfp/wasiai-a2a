@@ -398,6 +398,92 @@ describe('ssrfFetch — connect-time enforcement (real undici Agent)', () => {
   });
 });
 
+// ─── HU-195 fix-pack (AR BLQ-BAJO-3): la fase de DNS del PRE-FLIGHT ─────
+
+describe('ssrfFetch — el techo cubre la fase de DNS del pre-flight', () => {
+  const SAVED_HOP_ENV = process.env.OUTBOUND_HOP_TIMEOUT_MS;
+  afterEach(() => {
+    if (SAVED_HOP_ENV === undefined) delete process.env.OUTBOUND_HOP_TIMEOUT_MS;
+    else process.env.OUTBOUND_HOP_TIMEOUT_MS = SAVED_HOP_ENV;
+  });
+
+  /** `mockLookup` que tarda `delayMs` en contestar (resolver lento / colgado). */
+  function slowLookup(delayMs: number): void {
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        setTimeout(() => {
+          cb(null, [{ address: '93.184.216.34', family: 4 }]);
+        }, delayMs);
+      },
+    );
+  }
+
+  it('T-195-DNS-1: un resolver lento NO puede exceder el techo declarado del hop', async () => {
+    // MEDIDO POR EL AR ANTES DE ESTE FIX-PACK: con node:dns a 1500 ms y un techo
+    // de 200 ms, `ssrfFetch` tardaba 1505 ms — 7.5× el techo — porque
+    // `assertUrlAllowed` corría FUERA del signal (`ssrf-dispatcher.ts:366`) y
+    // `url-validator.ts:296` hace `dns.lookup` sin timeout.
+    process.env.OUTBOUND_HOP_TIMEOUT_MS = '200';
+    slowLookup(1_500);
+    const startedAt = Date.now();
+    await expect(ssrfFetch('http://slow-dns.example/x')).rejects.toThrow();
+    const elapsed = Date.now() - startedAt;
+    expect(elapsed).toBeLessThan(1_000);
+    // Y no se abrió ningún socket: el pre-flight SSRF sigue corriendo ANTES del
+    // fetch, o sea que acotarlo no debilitó el guard.
+    expect(mockUndiciFetch).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it('T-195-DNS-2: el signal del CALLER también corta la fase de DNS (razón no-Error incluida)', async () => {
+    // Presupuesto del hop generoso a propósito: el que corta acá es el caller.
+    process.env.OUTBOUND_HOP_TIMEOUT_MS = '60000';
+    slowLookup(1_500);
+    const caller = new AbortController();
+    setTimeout(() => caller.abort('caller-budget-string'), 100);
+    const startedAt = Date.now();
+    await expect(
+      ssrfFetch('http://slow-dns.example/y', { signal: caller.signal }),
+    ).rejects.toThrow(/caller-budget-string/);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(mockUndiciFetch).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it('T-195-DNS-4: un caller que llega con el presupuesto YA agotado no resuelve DNS ni abre socket', async () => {
+    process.env.OUTBOUND_HOP_TIMEOUT_MS = '60000';
+    slowLookup(1_500);
+    const startedAt = Date.now();
+    await expect(
+      ssrfFetch('http://slow-dns.example/w', {
+        signal: AbortSignal.abort(new Error('presupuesto-agotado')),
+      }),
+    ).rejects.toThrow(/presupuesto-agotado/);
+    // Ni siquiera se llamó al resolver: el chequeo es lo primero del hop.
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(mockLookup).not.toHaveBeenCalled();
+    expect(mockUndiciFetch).not.toHaveBeenCalled();
+  });
+
+  it('T-195-DNS-3: un DNS rápido no se ve afectado (el listener del abort se limpia)', async () => {
+    process.env.OUTBOUND_HOP_TIMEOUT_MS = '60000';
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: '93.184.216.34', family: 4 }]);
+      },
+    );
+    const fake = new Response('{}', { status: 200 });
+    mockUndiciFetch.mockResolvedValueOnce(fake);
+    const caller = new AbortController();
+    const res = await ssrfFetch('http://public.example/z', {
+      signal: caller.signal,
+    });
+    expect(res).toBe(fake);
+    // El compuesto que viajó en el init sigue vivo (gobierna el body stream) y
+    // NO quedó con listeners del pre-flight colgados.
+    const init = mockUndiciFetch.mock.calls[0]![1] as Record<string, unknown>;
+    expect((init.signal as AbortSignal).aborted).toBe(false);
+  });
+});
+
 // ─── H-1: manual redirect re-validation + credential stripping ──────────
 
 describe('ssrfFetch — H-1 manual redirect SSRF re-validation (audit 2026-06-29)', () => {
