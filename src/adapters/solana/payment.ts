@@ -85,12 +85,39 @@ const ZERO_EVM_ADDRESS =
 
 interface IntentEntry {
   signature: string;
-  /** `Date.now()` del alta. La entrada expira a `storedAt + TTL`. */
+  /** Lectura del reloj del seam (`intentDedupNow`) al alta. Expira a `+ TTL`. */
   storedAt: number;
 }
 
 /** Insertion-ordered (garantía de `Map`) → iterar da de más viejo a más nuevo. */
 const _intentSignatures = new Map<string, IntentEntry>();
+
+// ─── HU-196: el reloj del seam es un PORT (default = reloj real) ──────────
+//
+// PROBLEMA (determinismo del test, NO de la política): el desalojo compara
+// `now - storedAt` contra la ventana protegida con `<=`, así que el borde es
+// exacto POR DISEÑO. Leyendo `Date.now()` directamente, un mismo escenario hace
+// DOS lecturas distintas del reloj real — la del alta de la entrada y la del
+// barrido que la evalúa — y todo el wall-clock que pasa entre las dos se SUMA a
+// la edad efectiva. Un test que quiere ejercitar `edad === ventana` mide en
+// realidad `edad + latencia`, y con ≥1 ms de latencia cae del otro lado del
+// `<=`. Eso hacía flakear `T-CAP-4` en la suite completa (donde la latencia es
+// mayor que corriendo el archivo solo).
+//
+// FIX: una sola fuente de tiempo, inyectable. Con el reloj congelado el test
+// mide la edad que declara y el borde queda exacto en las DOS direcciones.
+//
+// ⚠️ La política (TTL, ventana protegida, cap) y el orden de las comparaciones
+// quedan IDÉNTICOS. El default es `Date.now` y `_setIntentDedupClock` es
+// TEST-ONLY: ningún call-site de producción inyecta nada, así que el
+// comportamiento en prod es exactamente el de antes.
+type IntentDedupClock = () => number;
+let _intentDedupClock: IntentDedupClock = Date.now;
+
+/** Única lectura de tiempo del seam de idempotencia (default: reloj real). */
+function intentDedupNow(): number {
+  return _intentDedupClock();
+}
 
 /** Default del timeout de un compose-run (`routes/compose.ts`: 180_000 ms). */
 const DEFAULT_COMPOSE_TIMEOUT_MS = 180_000;
@@ -272,7 +299,7 @@ function evictIntentSignatures(now: number): void {
 
 /** Alta de una firma en el seam de idempotencia (+ barrido lazy). */
 function rememberIntentSignature(intentId: string, signature: string): void {
-  const now = Date.now();
+  const now = intentDedupNow();
   _intentSignatures.set(intentId, { signature, storedAt: now });
   evictIntentSignatures(now);
 }
@@ -284,7 +311,7 @@ function rememberIntentSignature(intentId: string, signature: string): void {
 function recallIntentSignature(intentId: string): string | undefined {
   const entry = _intentSignatures.get(intentId);
   if (!entry) return undefined;
-  if (Date.now() - entry.storedAt > resolveIntentTtlMs()) {
+  if (intentDedupNow() - entry.storedAt > resolveIntentTtlMs()) {
     _intentSignatures.delete(intentId);
     return undefined;
   }
@@ -641,6 +668,10 @@ export function _intentDedupSize(): number {
 /**
  * TEST-ONLY — inserta una entrada con una antigüedad artificial, para ejercitar
  * expiración y desalojo sin depender de timers reales.
+ *
+ * La antigüedad se ancla al reloj del seam (`intentDedupNow`), no a `Date.now()`
+ * directo: con el reloj congelado la edad que se declara acá es EXACTAMENTE la
+ * que ve el desalojo (HU-196).
  */
 export function _seedIntentSignature(
   intentId: string,
@@ -649,8 +680,24 @@ export function _seedIntentSignature(
 ): void {
   _intentSignatures.set(intentId, {
     signature,
-    storedAt: Date.now() - ageMs,
+    storedAt: intentDedupNow() - ageMs,
   });
+}
+
+/**
+ * TEST-ONLY — instala el reloj del seam de dedup. Sin argumento restaura el
+ * default de producción (`Date.now`).
+ *
+ * Existe para los tests de BORDE EXACTO (`T-CAP-4`: `edad === ventana
+ * protegida`): con dos lecturas del reloj real, la edad efectiva es
+ * `edad declarada + latencia del propio test` y el borde se corre. NO afloja
+ * ningún assert — al contrario: con el reloj congelado el borde se ejercita
+ * exacto en las dos direcciones, mientras que antes cualquier latencia >0
+ * convertía el caso «en el borde» en «pasado el borde» (y el test pasaba por
+ * el motivo equivocado, o fallaba).
+ */
+export function _setIntentDedupClock(clock?: IntentDedupClock): void {
+  _intentDedupClock = clock ?? Date.now;
 }
 
 /**

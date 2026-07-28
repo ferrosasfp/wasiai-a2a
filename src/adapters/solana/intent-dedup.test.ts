@@ -87,6 +87,7 @@ import {
   _intentDedupSize,
   _resetSolanaClients,
   _seedIntentSignature,
+  _setIntentDedupClock,
   SolanaPaymentAdapter,
 } from './payment.js';
 
@@ -106,6 +107,25 @@ const PROTECTED_WINDOW_MS = ESTIMATED_RUN_BOUND_MS;
 /** TTL default: max(cota × 2, 180s × 10, 30 min) = 50 min. */
 const DEFAULT_TTL_MS = ESTIMATED_RUN_BOUND_MS * 2;
 
+/**
+ * HU-196 — época fija del reloj inyectado del seam.
+ *
+ * Toda esta batería declara la antigüedad de una entrada (`_seedIntentSignature`)
+ * y después assertea cómo la trata la política. Con el reloj REAL hay dos
+ * lecturas distintas (el alta y la evaluación), así que la edad efectiva es
+ * `edad declarada + latencia del test`: los asserts de BORDE EXACTO (`T-CAP-4`
+ * con `edad === ventana protegida`, y los `±1 ms` de `T-TTL-6/7/10`) miden algo
+ * distinto de lo que declaran. Congelando el reloj, la edad declarada ES la que
+ * ve el desalojo y el borde queda exacto en las dos direcciones.
+ *
+ * NO es `vi.useFakeTimers()`: no se toca ningún timer global (el barrido sigue
+ * siendo lazy — ver `T-NOTIMER`) y el port se restaura en el `afterEach`, así que
+ * no puede contaminar nada. El valor concreto es irrelevante, sólo importa que no
+ * avance; se elige un epoch pasado para que `T-CLK-1` pueda distinguirlo del
+ * reloj real.
+ */
+const FROZEN_NOW_MS = 1_700_000_000_000;
+
 function cleanEnv(): void {
   delete process.env.SOLANA_INTENT_DEDUP_TTL_MS;
   delete process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES;
@@ -117,12 +137,17 @@ describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
     vi.clearAllMocks();
     _resetSolanaClients();
     cleanEnv();
+    // El reloj se instala DESPUÉS del reset a propósito: `_resetSolanaClients`
+    // limpia el Map y NO toca el port, así que los tests que resetean a mitad de
+    // cuerpo (T-TTL-5..10, T-CAP-4) conservan el reloj congelado.
+    _setIntentDedupClock(() => FROZEN_NOW_MS);
     mockSendAndConfirm.mockResolvedValue(SIG_A);
   });
 
   afterEach(() => {
     _resetSolanaClients();
     cleanEnv();
+    _setIntentDedupClock(); // vuelve al default de producción (`Date.now`)
   });
 
   // ── TTL ────────────────────────────────────────────────────────────────
@@ -463,6 +488,16 @@ describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
     expect(capWarns()).toHaveLength(2);
   });
 
+  // HU-196: este test es EL borde. Con el reloj real la edad efectiva era
+  // `PROTECTED_WINDOW_MS + latencia(seed → barrido)`, así que 1 ms de latencia
+  // movía el caso «en el borde» al otro lado del `<=`, desalojaba la entrada y el
+  // primer assert de acá abajo se ponía rojo (medido: ~1 de cada 14 corridas de la
+  // suite COMPLETA, verde corriendo el archivo solo). Con el reloj congelado del
+  // `beforeEach` la edad es exactamente la declarada.
+  //
+  // ⚠️ NO subir la edad sembrada para «darle aire»: eso deja de probar el borde,
+  // que es justo el assert que impide que el desalojo se coma una firma que
+  // todavía protege un run vivo (= doble pago).
   it('T-CAP-4: el desalojo respeta el borde exacto de la ventana protegida', async () => {
     const adapter = new SolanaPaymentAdapter();
     process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '1';
@@ -657,5 +692,27 @@ describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
 
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
+  });
+
+  // ── HU-196: el reloj del seam ─────────────────────────────────────────
+
+  it('T-CLK-1: el reloj del seam es inyectable y su DEFAULT es el reloj real (lo que corre en producción)', () => {
+    const adapter = new SolanaPaymentAdapter();
+
+    // Con el reloj inyectado, la entrada nace en la época fija.
+    _seedIntentSignature('nacida-en-la-epoca-fija', SIG_A, 0);
+    expect(adapter.getSettledSignature('nacida-en-la-epoca-fija')).toBe(SIG_A);
+
+    // Restaurar el default = volver a `Date.now`. La premisa se assertea en vez
+    // de asumirse: hoy está a años de la época fija, muchísimo más que el TTL.
+    _setIntentDedupClock();
+    expect(Date.now()).toBeGreaterThan(FROZEN_NOW_MS + DEFAULT_TTL_MS);
+
+    // Por lo tanto, con el default la entrada se lee como VENCIDA. Si el default
+    // no fuera el reloj real (p. ej. si quedara pegado el reloj inyectado)
+    // seguiría viva: este assert es lo que ata el default a producción.
+    expect(
+      adapter.getSettledSignature('nacida-en-la-epoca-fija'),
+    ).toBeUndefined();
   });
 });
