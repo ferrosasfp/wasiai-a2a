@@ -439,11 +439,23 @@ Each agent object includes an `invocationNote` field that documents this pattern
 
 ### Tasks (A2A Protocol)
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `POST` | `/tasks` | None | Create a new task |
-| `GET` | `/tasks/:id` | None | Get task status |
-| `PATCH` | `/tasks/:id` | None | Update task state |
+Every `/tasks` route is tenant-scoped: it requires an `x-a2a-key` (or
+`Authorization: Bearer wasi_a2a_*`) and only ever returns the caller's own tasks.
+The anonymous x402 rail cannot be used here (no tenant identity).
+
+**Reading a task is free; creating and mutating one costs $1.** The A2A lifecycle
+is driven by polling `GET /tasks/:id`, so charging per read meant a 5-second poll
+cost 720 USD/hour — the price fought the protocol. The free reads emit **no `402`
+challenge at all** (there is nothing to pay for). See
+[`doc/INTEGRATION.md`](doc/INTEGRATION.md) §3.
+
+| Method | Path | Auth | Cost | Description |
+|--------|------|------|------|-------------|
+| `POST` | `/tasks` | x-a2a-key / Bearer | $1 | Create a new task |
+| `GET` | `/tasks` | x-a2a-key / Bearer | free | List your tasks (`status`, `context_id`, `limit`) |
+| `GET` | `/tasks/:id` | x-a2a-key / Bearer | free | Get task status (the polling endpoint) |
+| `PATCH` | `/tasks/:id/status` | x-a2a-key / Bearer | $1 | Update task state |
+| `PATCH` | `/tasks/:id` | x-a2a-key / Bearer | $1 | Append messages/artifacts |
 
 ### Identity (Agentic Economy L3)
 

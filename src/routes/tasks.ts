@@ -4,18 +4,63 @@
  * WKH-54 (ownership isolation): every endpoint now requires an A2A key or
  *        x402 payment and filters by `request.a2aKeyRow.owner_ref`.
  *
- * HU-193 (no-charge-before-validating): los 5 endpoints cobran $1
+ * HU-193 (no-charge-before-validating): los endpoints que COBRAN lo hacen por $1
  * (`PLACEHOLDER_FEE_USD`) en el middleware de pago, ANTES del handler. Todo lo
  * que este plugin rechaza por FORMA (UUID inválido, body no-objeto, status fuera
- * del enum, append sin nada que appendear) se decide ahora en la cadena
- * pre-cobro (`middleware/charged-route.ts`), así que ya no se cobra por ellos.
+ * del enum, append sin nada que appendear) se decide en la cadena pre-cobro
+ * (`middleware/charged-route.ts`), así que ya no se cobra por ellos.
+ * (HU-197: los dos GET ya no cobran nada, así que salieron de esa cadena.)
  *
- * HU-193 fix-pack (BLQ-BAJO-1): los CINCO handlers pueden terminar en un 500 si
- * el service lanza, y los cinco cobraban sin devolver nada. Ahora cuatro
- * reembolsan (los dos GET, que son lecturas puras, y los dos PATCH) y el ÚNICO
- * que se queda con el débito es `POST /` — porque un insert que pudo commitear
- * deja un recurso entregado. Está declarado con su status en
- * `doc/INTEGRATION.md` §5.1: el contrato público NO promete costo neto cero.
+ * HU-193 fix-pack (BLQ-BAJO-1): los handlers pueden terminar en un 500 si el
+ * service lanza, y los cinco cobraban sin devolver nada. De los TRES que hoy
+ * cobran, los dos `PATCH` reembolsan y el ÚNICO que se queda con el débito es
+ * `POST /` — porque un insert que pudo commitear deja un recurso entregado. Está
+ * declarado con su status en `doc/INTEGRATION.md` §5.1: el contrato público NO
+ * promete costo neto cero. (HU-197: los dos GET ya no reembolsan porque ya no
+ * cobran; un 500 de lectura cuesta $0 desde el principio.)
+ *
+ * ══ HU-197 — CONSULTAR EL ESTADO DE UNA TAREA ES GRATIS ════════════════════
+ *
+ * DECISIÓN: se cobra por CREAR y por MUTAR una task, no por PREGUNTAR por ella.
+ * Los dos GET (y sus HEAD hermanos) pasan de $1 por llamada a $0.
+ *
+ * POR QUÉ: el ciclo de vida A2A que nosotros mismos publicamos pide hacer
+ * polling del estado (`submitted` → `working` → `completed`). A $1 por lectura,
+ * un poll cada 5 segundos costaba 720 USD/hora: el precio peleaba contra las
+ * instrucciones de integración. Y cobrar la lectura es cobrar dos veces el mismo
+ * trabajo — el valor está en ejecutarlo, no en informar sobre él.
+ *
+ * CÓMO (y por qué NO se implementó como "precio 0"): las dos lecturas dejan de
+ * pasar por el middleware de pago y usan `requireA2AKey` (auth-only, WKH-173):
+ * autentica master/delegación/sesión y setea `a2aKeyRow` SIN resolver chain, SIN
+ * debitar y SIN montar el riel x402. Consecuencias buscadas:
+ *
+ *   1. no hay débito prepago ni settle on-chain que reembolsar;
+ *   2. NO SE EMITE NINGÚN CHALLENGE x402. Poner `amountUsd: 0` habría dejado un
+ *      402 con `maxAmountRequired: 0` — una ceremonia vacía que confunde al
+ *      integrador y lo puede hacer firmar una autorización por nada. Una lectura
+ *      gratis no pide pago: sin middleware de pago, el challenge es imposible por
+ *      construcción, no por configuración;
+ *   3. GRATIS ≠ PÚBLICO: siguen exigiendo credencial (403 A2A_KEY_REQUIRED sin
+ *      ella) y siguen filtrando por `owner_ref` — son recursos con dueño;
+ *   4. los `refundStep0Debit` de los dos GET se ELIMINARON. Sin débito no hay
+ *      nada que devolver, y un credit sin débito INFLA el budget. Hoy la
+ *      invariante #1 de `refundStep0Debit` (`resolvedChainId === undefined` ⟹
+ *      return, y auth-only no lo setea) ya lo haría no-op, pero dejar código de
+ *      dinero inalcanzable es exactamente lo que en este repo ya salió mal.
+ *
+ * EFECTOS COLATERALES DECLARADOS de las dos lecturas (ambos correctos si no se
+ * cobra): (a) ya no devuelven el header `x-a2a-remaining-budget` ni
+ * `x-a2a-payment-chain` (no hay chain de cobro que resolver); (b) ya no pueden
+ * fallar con 403 DAILY_LIMIT / INSUFFICIENT_BUDGET — una key sin saldo puede
+ * seguir consultando el estado de sus tareas, que es justo el punto; (c) con una
+ * credencial INVÁLIDA y a la vez un pedido malformado, la respuesta pasa de 400 a
+ * 403 KEY_NOT_FOUND: antes el check de forma corría antes del lookup porque el
+ * lookup cobraba; sin cobro, el orden natural es autenticar primero.
+ *
+ * LO QUE NO CAMBIA: `POST /` (crear) y los dos `PATCH` (mutar) siguen cobrando
+ * $1 con la MISMA cadena `chargedRoute` (validación de forma pre-cobro + refund
+ * del residuo). Mutar escribe estado: eso es trabajo, y se paga.
  *
  * ⚠️ CAMBIO DE CONTRATO (declarado): el riel x402 anónimo NO PUEDE operar acá.
  * Todos los endpoints derivan el tenant de `request.a2aKeyRow.owner_ref` y el
@@ -28,6 +73,7 @@
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { refundStep0Debit } from '../lib/step0-refund.js';
+import { requireA2AKey } from '../middleware/a2a-key.js';
 import {
   chargedRoute,
   type PreChargeCheck,
@@ -130,30 +176,32 @@ const statusBodyCheck: PreChargeCheck = (input) => {
     validateStatusValue((input.body as { status?: unknown }).status),
   );
 };
-/**
- * En el list, `status` es OPCIONAL. Se replica EXACTO el guard histórico
- * (`if (status && !TASK_STATES.includes(...))`): un `?status=` vacío es falsy y
- * NO era un 400, así que sigue sin serlo (contrato sin cambios).
- */
-const listStatusCheck: PreChargeCheck = (input) => {
-  const status = (input.query as { status?: unknown } | undefined)?.status;
-  if (!status) return null;
-  return reject(validateStatusValue(status));
-};
-
 const tasksRoutes: FastifyPluginAsync = async (fastify) => {
   // WKH-54: all /tasks/* require authentication + ownership isolation.
   // HU-193: la cadena la arma `chargedRoute`, que EXIGE declarar la validación
   // de forma y la pone siempre antes del cobro. `requireA2AKeyPresence` va
-  // primero en los 5 endpoints (el riel x402 no puede tener tasks).
+  // primero (el riel x402 no puede tener tasks).
+  // HU-197: sólo para los que COBRAN — `POST /` y los dos `PATCH`.
   const paymentOpts = {
-    description: 'WasiAI A2A Tasks — CRUD requires API key or x402 payment',
+    // El texto viaja en el challenge x402. Decir "or x402 payment" era falso
+    // (el riel anónimo no puede operar acá, HU-193) y las lecturas ya no cobran.
+    description:
+      'WasiAI A2A Tasks — creating or updating a task requires an a2a-key; reads are free',
   };
-  const preHandlersFor = (checks: PreChargeCheck[]) =>
+  const chargedPreHandlersFor = (checks: PreChargeCheck[]) =>
     chargedRoute({
       validate: [requireA2AKeyPresence(A2A_KEY_REQUIRED_MESSAGE), ...checks],
       payment: paymentOpts,
     });
+
+  /**
+   * HU-197: cadena de una LECTURA GRATIS. Auth-only: autentica la credencial
+   * (master/delegación/sesión) y setea `a2aKeyRow` para el filtro por
+   * `owner_ref`, sin resolver chain, sin debitar y sin riel x402 → ningún
+   * challenge posible. Las validaciones de forma de las lecturas viven en el
+   * handler (ver cada GET): ya no hay cobro del que adelantarse.
+   */
+  const freeReadPreHandlers = () => requireA2AKey(A2A_KEY_REQUIRED_MESSAGE);
 
   /**
    * POST /tasks — Create a new task (AC-2)
@@ -167,7 +215,7 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
     };
   }>(
     '/',
-    { preHandler: preHandlersFor([objectBodyCheck]) },
+    { preHandler: chargedPreHandlersFor([objectBodyCheck]) },
     async (request, reply: FastifyReply) => {
       const body = request.body;
       // HU-193: defense-in-depth (guard real: `objectBodyCheck` pre-cobro).
@@ -197,6 +245,8 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * GET /tasks — List tasks with filters (AC-4)
    * Scoped to the caller's owner_ref.
+   *
+   * HU-197: LECTURA GRATIS (antes $1). Sin débito, sin settle, sin challenge.
    */
   fastify.get<{
     Querystring: {
@@ -206,11 +256,14 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
     };
   }>(
     '/',
-    { preHandler: preHandlersFor([listStatusCheck]) },
+    { preHandler: freeReadPreHandlers() },
     async (request, reply: FastifyReply) => {
       const { status, context_id, limit } = request.query;
 
-      // HU-193: defense-in-depth (guard real: `listStatusCheck` pre-cobro).
+      // HU-197: guard ÚNICO del `status` del list (antes era también un check
+      // pre-cobro; sin cobro, el handler es el lugar). Se conserva EXACTO el
+      // guard histórico (`if (status && ...)`): un `?status=` vacío es falsy y
+      // nunca fue un 400, así que sigue sin serlo (contrato sin cambios).
       if (status) {
         const invalid = validateStatusValue(status);
         if (invalid) return reply.status(400).send(invalid);
@@ -222,22 +275,16 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
           ? parsedLimit
           : undefined;
 
-      // HU-193 fix-pack (BLQ-BAJO-1): un fallo del read es residuo REEMBOLSABLE
-      // sin ambigüedad. Es una LECTURA: no escribe nada y no entrega nada, así
-      // que no hay ningún estado que proteger (a diferencia del `create`). El
-      // 500 lo sigue produciendo el error boundary — acá sólo se devuelve el
-      // débito antes de re-lanzar.
-      let tasks: Task[];
-      try {
-        tasks = await taskService.list(getOwnerRef(request), {
-          status: status as TaskState | undefined,
-          contextId: context_id,
-          limit: safeLimit,
-        });
-      } catch (err) {
-        await refundStep0Debit(request, 'tasks.list:read-failed');
-        throw err;
-      }
+      // HU-197: acá vivía un `refundStep0Debit('tasks.list:read-failed')`. Se
+      // ELIMINÓ junto con el cobro: sin débito no hay nada que devolver, y un
+      // credit sin débito infla el budget. El 500 lo sigue produciendo el error
+      // boundary con el mismo status; lo que cambia es que ya costaba $0 antes de
+      // fallar.
+      const tasks: Task[] = await taskService.list(getOwnerRef(request), {
+        status: status as TaskState | undefined,
+        contextId: context_id,
+        limit: safeLimit,
+      });
 
       return reply.send({ tasks, total: tasks.length });
     },
@@ -246,31 +293,31 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * GET /tasks/:id — Get a task by ID (AC-3)
    * Returns 404 for both "not found" and "not yours" (existence not leaked).
+   *
+   * HU-197: LECTURA GRATIS (antes $1). Es el endpoint del polling del ciclo de
+   * vida A2A — el que hacía que seguir nuestras propias instrucciones costara
+   * 720 USD/hora.
    */
   fastify.get<{ Params: { id: string } }>(
     '/:id',
-    { preHandler: preHandlersFor([taskIdCheck]) },
+    { preHandler: freeReadPreHandlers() },
     async (request, reply: FastifyReply) => {
-      // HU-193: defense-in-depth (guard real: `taskIdCheck` pre-cobro).
+      // HU-197: guard ÚNICO del formato del `:id` (antes era también un check
+      // pre-cobro). Mismo 400 `Invalid UUID format` que antes.
       const invalidId = validateTaskId(request.params);
       if (invalidId) {
         return reply.status(400).send(invalidId);
       }
-      // HU-193 fix-pack (BLQ-BAJO-1): idem `GET /tasks` — lectura pura, un fallo
-      // no escribió ni entregó nada → residuo reembolsable sin ambigüedad.
-      let task: Task | undefined;
-      try {
-        task = await taskService.get(getOwnerRef(request), request.params.id);
-      } catch (err) {
-        await refundStep0Debit(request, 'tasks.get-one:read-failed');
-        throw err;
-      }
+      // HU-197: se eliminaron los dos `refundStep0Debit` de este handler
+      // (`read-failed` y `not-found`). Sin cobro no hay residuo: el 404 de
+      // "no existe / no es tuya" y el 500 de un read fallido ya cuestan $0.
+      const task: Task | undefined = await taskService.get(
+        getOwnerRef(request),
+        request.params.id,
+      );
       if (!task) {
-        // HU-193 (residuo): "no existe" y "no es tuya" son indistinguibles a
-        // propósito, y ambas necesitan un read a la DB con el `owner_ref` del
-        // caller → no adelantable. No se entregó ninguna lectura: se devuelve el
-        // débito (riel prepago).
-        await refundStep0Debit(request, 'tasks.get-one:not-found');
+        // "No existe" y "no es tuya" siguen siendo indistinguibles a propósito
+        // (no se filtra existencia cross-tenant).
         return reply.status(404).send({ error: 'Task not found' });
       }
       return reply.send(task);
@@ -280,13 +327,17 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * PATCH /tasks/:id/status — Update task status (AC-5)
    * ⚠️ DEBE registrarse ANTES que PATCH /:id (CD-12)
+   *
+   * HU-197: SIGUE COBRANDO $1. Es una MUTACIÓN: escribe una transición de estado
+   * (y la valida contra los estados terminales). Lo que se dejó de cobrar es
+   * preguntar, no cambiar.
    */
   fastify.patch<{
     Params: { id: string };
     Body: { status: string };
   }>(
     '/:id/status',
-    { preHandler: preHandlersFor([taskIdCheck, statusBodyCheck]) },
+    { preHandler: chargedPreHandlersFor([taskIdCheck, statusBodyCheck]) },
     async (request, reply: FastifyReply) => {
       // HU-193: defense-in-depth (guards reales: `taskIdCheck` +
       // `statusBodyCheck`, pre-cobro).
@@ -345,13 +396,16 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * PATCH /tasks/:id — Append messages/artifacts (AC-6)
+   *
+   * HU-197: SIGUE COBRANDO $1. Es una MUTACIÓN: appendea messages/artifacts a la
+   * task (escritura), no una consulta de estado.
    */
   fastify.patch<{
     Params: { id: string };
     Body: { messages?: unknown[]; artifacts?: unknown[] };
   }>(
     '/:id',
-    { preHandler: preHandlersFor([taskIdCheck, appendBodyCheck]) },
+    { preHandler: chargedPreHandlersFor([taskIdCheck, appendBodyCheck]) },
     async (request, reply: FastifyReply) => {
       // HU-193: defense-in-depth (guards reales: `taskIdCheck` +
       // `appendBodyCheck`, pre-cobro).

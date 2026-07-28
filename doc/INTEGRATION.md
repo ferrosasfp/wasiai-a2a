@@ -176,11 +176,11 @@ Single scannable reference. "Auth" column legend:
 | `GET` | `/auth/me` | Key required | Inspect your key: budget, scoping, bindings, daily limits |
 | `POST` | `/auth/deposit` | Public | Register a deposit (returns 501 — pending on-chain verification) |
 | `POST` | `/auth/bind/:chain` | Public | On-chain identity binding (returns 501 — planned) |
-| `POST` | `/tasks` | Key required | Create a task (A2A task lifecycle) |
-| `GET` | `/tasks` | Key required | List your tasks (filters: `status`, `context_id`, `limit`) |
-| `GET` | `/tasks/:id` | Key required | Get task status |
-| `PATCH` | `/tasks/:id/status` | Key required | Update task status |
-| `PATCH` | `/tasks/:id` | Key required | Append messages/artifacts to a task |
+| `POST` | `/tasks` | Key required | Create a task (A2A task lifecycle) — **costs $1** |
+| `GET` | `/tasks` | Key required | List your tasks (filters: `status`, `context_id`, `limit`) — **free** |
+| `GET` | `/tasks/:id` | Key required | Get task status — **free** |
+| `PATCH` | `/tasks/:id/status` | Key required | Update task status — **costs $1** |
+| `PATCH` | `/tasks/:id` | Key required | Append messages/artifacts to a task — **costs $1** |
 | `GET` | `/gasless/status` | Public | Gasless module status (`funding_state` field) |
 | `POST` | `/gasless/transfer` | Public | Execute gasless EIP-3009 transfer (503 when not operational) |
 | `POST` | `/mcp` | MCP token | JSON-RPC 2.0 tool dispatcher for MCP clients |
@@ -189,8 +189,29 @@ Notes:
 
 - `POST /auth/agent-signup` is intentionally public — it is the entry point for onboarding. It is protected by a stricter rate limit (`RATE_LIMIT_SIGNUP_MAX`, default 5 / window) to prevent key-spam.
 - For `POST /compose` and `POST /orchestrate` the server returns `402 Payment Required` with an `accepts[]` array when no auth is provided. See [Section 4](#4-x402-payment-flow).
-- **`/registries` mutations and every `/tasks` endpoint do NOT challenge anonymous callers.** They operate on resources that belong to a tenant, and the anonymous x402 rail carries no tenant identity, so those requests can never succeed. Instead of a `402` you get `403 A2A_KEY_REQUIRED` **before any payment is taken** — no on-chain settle, nothing to refund. Attach an `x-a2a-key` (or `Authorization: Bearer wasi_a2a_*`) to use them. Previously these endpoints emitted a `402`, settled the payment on-chain, and then rejected the request anyway.
+- **`/registries` mutations and every `/tasks` endpoint do NOT challenge anonymous callers.** They operate on resources that belong to a tenant, and the anonymous x402 rail carries no tenant identity, so those requests can never succeed. Instead of a `402` you get `403 A2A_KEY_REQUIRED` **before any payment is taken** — no on-chain settle, nothing to refund. Attach an `x-a2a-key` (or `Authorization: Bearer wasi_a2a_*`) to use them. Previously these endpoints emitted a `402`, settled the payment on-chain, and then rejected the request anyway. On the two `/tasks` reads there is no payment layer left at all, so a `402` is not merely avoided: it cannot be produced.
 - A2A Protocol interactions (tasks, agent cards, well-known) follow the [Google A2A](https://google.github.io/A2A/) specification. JSON-RPC 2.0 is used inside the MCP surface (`/mcp`).
+
+#### Reading a task is free; creating and updating one is not
+
+**`GET /tasks`, `GET /tasks/:id` and their `HEAD` counterparts cost you nothing.**
+No budget debit, no on-chain settle, and — because there is nothing to pay — **no
+`402` challenge is ever emitted on those routes**. They still require a credential
+(`403 A2A_KEY_REQUIRED` without one) and still return only *your* tasks: free is
+not public. A key with an exhausted budget or a spent daily limit can still read
+its own tasks.
+
+**Poll as often as your integration needs.** The A2A lifecycle
+(`submitted` → `working` → `completed`) is driven by polling `GET /tasks/:id`, so
+the previous price of $1 *per read* meant that following this guide at one poll
+every 5 seconds cost 720 USD/hour. That is fixed: you are billed for the work
+(creating the task, mutating it), not for asking about it. The rate limit still
+applies (`RATE_LIMIT_MAX`, default 60 requests / 60s per client), so a 5-second
+interval — 12 reads per minute — fits comfortably; cost is no longer a reason to
+avoid polling.
+
+`POST /tasks` (create) and the two `PATCH` routes (mutate) keep costing **$1**
+each: they write state. Only the reads changed.
 
 ### `/discover` response contract
 
@@ -400,7 +421,7 @@ All errors share a normalized JSON shape:
 | `400 Bad Request` | A query/body parameter is malformed. The `code` field says which: `INVALID_MIN_REPUTATION` (`minReputation` on `/discover` is not a number in `[0, 100]`). | Fix the parameter. `minReputation` uses the **0-100** off-chain score scale, not 0-1. |
 | `401 Unauthorized` | Not emitted by the application layer. May appear from infrastructure (CDN, reverse proxy) if your request is dropped before reaching the app. | Check the URL, TLS, and that your `Authorization` header is well-formed. If you need auth, this API uses `403` (see next row). |
 | `402 Payment Required` | The endpoint needs payment and none was provided. Body includes `accepts[]` with full x402 payment instructions. Note: a request whose *shape* is invalid is rejected with `400` **before** the `402` is emitted, so you never pay to find out the body was malformed (see [5.1](#51-rejected-requests-what-you-are-charged-and-what-is-refunded)). | Sign the EIP-712 authorization, base64-encode the payload, retry with `PAYMENT-SIGNATURE`. Alternatively attach a valid `x-a2a-key`. |
-| `403 Forbidden` | Either no a2a credential was provided on a tenant-scoped endpoint (`error_code: A2A_KEY_REQUIRED` on `/registries` mutations and all of `/tasks` — returned **before any charge**), or an `x-a2a-key` / Bearer was provided but rejected. In the second case the `error_code` field tells you why: `KEY_NOT_FOUND`, `KEY_INACTIVE`, `DAILY_LIMIT`, `INSUFFICIENT_BUDGET`, `SCOPE_DENIED`, `PER_CALL_LIMIT`. | `KEY_NOT_FOUND`/`KEY_INACTIVE` → verify the key you are sending and that it has not been disabled. `DAILY_LIMIT`/`INSUFFICIENT_BUDGET` → top up or wait for the daily reset. `SCOPE_DENIED` → request a wider scope from the key owner. `PER_CALL_LIMIT` → lower `budget` in the request body. |
+| `403 Forbidden` | Either no a2a credential was provided on a tenant-scoped endpoint (`error_code: A2A_KEY_REQUIRED` on `/registries` mutations and all of `/tasks` — returned **before any charge**), or an `x-a2a-key` / Bearer was provided but rejected. In the second case the `error_code` field tells you why: `KEY_NOT_FOUND`, `KEY_INACTIVE`, `DAILY_LIMIT`, `INSUFFICIENT_BUDGET`, `SCOPE_DENIED`, `PER_CALL_LIMIT`. The two `/tasks` reads are free, so they never answer the spend-related codes (`DAILY_LIMIT`, `INSUFFICIENT_BUDGET`, `PER_CALL_LIMIT`): nothing is charged, so nothing can be short. Credential problems (`A2A_KEY_REQUIRED`, `KEY_NOT_FOUND`, `KEY_INACTIVE`, and the delegation / key-session codes for those credential types) are still returned. | `KEY_NOT_FOUND`/`KEY_INACTIVE` → verify the key you are sending and that it has not been disabled. `DAILY_LIMIT`/`INSUFFICIENT_BUDGET` → top up or wait for the daily reset. `SCOPE_DENIED` → request a wider scope from the key owner. `PER_CALL_LIMIT` → lower `budget` in the request body. |
 | `429 Too Many Requests` | Per-IP or per-key rate limit exceeded. Response body includes `retryAfterMs`. | Back off for the duration in `retryAfterMs`. Do not hammer — repeated 429 will extend the window. |
 | `503 Service Unavailable` | An upstream dependency is down or overloaded. The `code` field clarifies: `CIRCUIT_OPEN` (Anthropic or a registry is failing), `BACKPRESSURE` (too many in-flight `/orchestrate`), `gasless_not_operational`, `SERVICE_ERROR` (budget service). | Retry with exponential backoff (start at 1s, cap at 30s, jitter). If the failure persists for more than a minute, check the status page or contact support. |
 | `504 Gateway Timeout` | The request exceeded the configured timeout (`TIMEOUT_ORCHESTRATE_MS` default 120s, `TIMEOUT_COMPOSE_MS` default 60s). | Shrink the workload, split the pipeline, or retry — upstream agents may be cold. |
@@ -425,7 +446,8 @@ or because the database call itself failed. For those:
 
 | Rail | Rejected after the charge | What happens |
 |------|---------------------------|--------------|
-| **Agent Key (prepaid)** | `404`, `409`, `422`, the `400` returned by the service layer on `/registries`, and the `500` of a failed database call on `GET /tasks`, `GET /tasks/:id`, `PATCH /tasks/:id/status` and `PATCH /tasks/:id` | The step-0 debit is **credited back** to the same ledger that was debited (including the delegation / key-session counters), so those rejections cost you **0**. If the credit-back itself fails it is queued and retried. |
+| **Agent Key (prepaid)** | `404`, `409`, `422`, the `400` returned by the service layer on `/registries`, and the `500` of a failed database call on `PATCH /tasks/:id/status` and `PATCH /tasks/:id` | The step-0 debit is **credited back** to the same ledger that was debited (including the delegation / key-session counters), so those rejections cost you **0**. If the credit-back itself fails it is queued and retried. |
+| **Any rail** | Anything returned by `GET /tasks` and `GET /tasks/:id` — `400`, `403`, `404`, `500` | **Nothing to refund: reads are free.** They cost `0` whether they succeed or fail, so there is no debit and no credit — not a charge that gets reversed. |
 | **Agent Key (prepaid)** | `500` on `POST /tasks`, and only there | **NOT refunded.** This is the one path where a rejection leaves you charged $1. See the note right below: it is a deliberate decision, not an oversight. |
 | **x402 (pay per call)** | Same statuses | **NOT refunded.** The inbound payment is an on-chain settlement and there is no internal balance to credit: refunding would require sending a transaction back to you. Today the API does not do that. |
 
@@ -435,10 +457,10 @@ that nothing was written: if the row was committed and the connection broke whil
 the response was being sent, the task exists and you can find it. Refunding would
 mean handing you a created resource for free, so the API keeps the charge.
 **What that means for your integration: do not blind-retry a `500` from
-`POST /tasks`.** List first (`GET /tasks?context_id=...`, refunded if it fails)
-and retry only if the task is not there, because every retry costs another $1.
-Everywhere else in `/tasks`, and everywhere in `/registries`, a rejection after
-the charge is credited back.
+`POST /tasks`.** List first (`GET /tasks?context_id=...`, which is **free**, so
+checking costs you nothing) and retry only if the task is not there, because every
+retry costs another $1. On the `/tasks` mutations, and everywhere in
+`/registries`, a rejection after the charge is credited back.
 
 Practical consequence for x402 callers: the endpoints where a post-charge rejection
 is possible are `POST /compose` and `POST /orchestrate*` (execution failures), plus

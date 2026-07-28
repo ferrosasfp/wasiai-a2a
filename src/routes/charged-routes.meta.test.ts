@@ -23,7 +23,12 @@
  * rompe el test, y "arreglarlo" exige tocar esta lista a mano y justificarlo en
  * la review. Una convención documentada es exactamente lo que ya falló.
  *
- * Naming: T-META-01..T-META-06.
+ * HU-197 agregó T-META-07: además de la RELACIÓN cobro↔validación, se congela el
+ * INVENTARIO de rutas que cobran. Sin eso, un cambio de precio en cualquier
+ * endpoint (quitar un cobro, agregar uno, volver a cobrar una lectura) no rompía
+ * nada acá.
+ *
+ * Naming: T-META-01..T-META-07.
  */
 
 import { readFileSync } from 'node:fs';
@@ -207,22 +212,19 @@ describe('guard estructural — cobrar exige validar antes (HU-193)', () => {
     expect(misordered).toEqual([]);
   });
 
-  it('T-META-03: las 8 rutas del alcance de HU-193 están cubiertas por el componente', () => {
+  it('T-META-03: las rutas del alcance de HU-193 están cubiertas por el componente', () => {
     const covered = registered
       .filter((r) => r.chargeIndex !== -1 && r.validationIndex !== -1)
       .map((r) => r.key)
       .sort();
-    // Los `HEAD` no se declaran: Fastify los registra solo como hermanos de cada
-    // `GET` (`exposeHeadRoutes`), con la MISMA cadena de preHandlers. Vale la pena
-    // dejarlos a la vista: un `HEAD /tasks` también cobra $1 (dato para la
-    // discusión de precio de los GET, ver el work-item).
+    // HU-197: acá había 5 entradas más — `GET /tasks`, `GET /tasks/:id` y sus tres
+    // `HEAD` hermanos (Fastify los registra solo, vía `exposeHeadRoutes`, con la
+    // MISMA cadena de preHandlers que el `GET`, así que un `HEAD /tasks` también
+    // cobraba $1). Las lecturas de `/tasks` ahora son GRATIS: salieron de la
+    // cadena de cobro, y con ellas se fueron sus `HEAD`. Que hoy NINGUNA ruta que
+    // cobra sea un `GET`/`HEAD` es la propiedad que congela T-META-07.
     expect(covered).toEqual([
       'DELETE /registries/:id',
-      'GET /tasks',
-      'GET /tasks/:id',
-      'HEAD /tasks',
-      'HEAD /tasks/',
-      'HEAD /tasks/:id',
       'PATCH /registries/:id',
       'PATCH /tasks/:id',
       'PATCH /tasks/:id/status',
@@ -253,6 +255,50 @@ describe('guard estructural — cobrar exige validar antes (HU-193)', () => {
       .map((r) => `${r.key} (${r.validationDetail})`)
       .sort();
     expect(skipped).toEqual([...SKIPPED_VALIDATION].sort());
+  });
+
+  it('T-META-07 (HU-197): el inventario de rutas que COBRAN está congelado', () => {
+    // POR QUÉ EXISTE: HU-197 bajó a $0 el precio de las lecturas de `/tasks` y el
+    // requisito explícito fue "cero cambios colaterales de precio". Los otros
+    // tests de este archivo miran la RELACIÓN cobro↔validación, no el CONJUNTO de
+    // rutas que cobran, así que ninguno se rompía si un cobro apareciera o
+    // desapareciera en otro recurso.
+    //
+    // Este test recorre la app entera (`onRoute`) y compara el set completo de
+    // rutas con un handler marcado `CHARGES_CALLER` contra esta lista. Cualquier
+    // movimiento de precio en cualquier endpoint — quitar el cobro de un `POST`,
+    // volver a cobrar una lectura de `/tasks` (incluido su `HEAD` hermano, que
+    // hereda la cadena del `GET`), o agregar un endpoint pago nuevo — aparece acá
+    // y obliga a tocar esta lista a mano, o sea en el diff y en la review.
+    const charging = registered
+      .filter((r) => r.chargeIndex !== -1)
+      .map((r) => r.key)
+      .sort();
+    expect(charging).toEqual(
+      [
+        // Mutaciones de recursos con dueño (`chargedRoute`).
+        'DELETE /registries/:id',
+        'PATCH /registries/:id',
+        'POST /registries',
+        'POST /tasks',
+        'PATCH /tasks/:id',
+        'PATCH /tasks/:id/status',
+        // Ejecución (deuda de migración a `chargedRoute`, ver LEGACY_UNVALIDATED).
+        'POST /compose',
+        'POST /orchestrate',
+        'POST /orchestrate/plan',
+        'POST /orchestrate/execute',
+        'POST /gasless/transfer',
+      ].sort(),
+    );
+    // Corolario explícito de HU-197: leer nunca cuesta. Ninguna ruta que cobre
+    // puede ser un método de lectura (y `HEAD` importa: Fastify lo registra como
+    // hermano del `GET` con la misma cadena, así que se cobraba sin declararlo).
+    expect(
+      charging.filter(
+        (key) => key.startsWith('GET ') || key.startsWith('HEAD '),
+      ),
+    ).toEqual([]);
   });
 
   it('T-META-06: el guard escanea EXACTAMENTE los plugins que registra la app', () => {
