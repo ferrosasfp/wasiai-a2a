@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Aplica la migration security RPC search_path a Supabase dev (bdwvrwzvsldephfibmuu)
+ * Aplica la migration security RPC search_path a Supabase dev (<supabase-dev-ref>)
  * via Management API (PAT).
  * Idempotente.
  */

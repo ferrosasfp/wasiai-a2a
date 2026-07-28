@@ -189,11 +189,11 @@ Heredadas del work-item (CD-1..4) + endurecidas con la lección de auto-blindaje
 - [ ] **W1.3**: `npm run test` verde + `tsc`/lint OK.
 
 ### Wave 2 (Deploy — manual, fuera de vitest)
-- [ ] **W2.1**: Aplicar UP en dev (`bdwvrwzvsldephfibmuu`) vía Management API.
+- [ ] **W2.1**: Aplicar UP en dev (`<supabase-dev-ref>`) vía Management API.
 - [ ] **W2.2**: `node scripts/verify-rls-enabled.mjs` contra dev → **9/9** true.
 - [ ] **W2.3**: Smoke E2E del servicio en dev (registry CRUD + transform cache) → service_role idéntico.
 - [ ] **W2.4**: Re-aplicar UP en dev → sin error (AC-6, idempotencia).
-- [ ] **W2.5**: Aplicar UP en prod (`caldzjhjgctpgodldqav`) + verify 9/9 + smoke.
+- [ ] **W2.5**: Aplicar UP en prod (`<supabase-prod-ref>`) + verify 9/9 + smoke.
 
 ---
 
@@ -227,11 +227,11 @@ Heredadas del work-item (CD-1..4) + endurecidas con la lección de auto-blindaje
 ## 13. Plan de DEPLOY explícito
 
 1. **Preflight (up)**: `npm run migrate:preflight supabase/migrations/20260610000000_wkh_sec02c_rls_registries.sql` → PASS.
-2. **Dev apply**: up vía Management API contra `bdwvrwzvsldephfibmuu` (patrón `apply-security-rpc-migration.mjs`).
+2. **Dev apply**: up vía Management API contra `<supabase-dev-ref>` (patrón `apply-security-rpc-migration.mjs`).
 3. **Dev verify**: `node scripts/verify-rls-enabled.mjs` → 9/9 `rls_enabled=true` (exit 0).
 4. **Dev smoke**: registry CRUD + transform cache → service_role idéntico (AC-4).
 5. **Idempotencia**: re-aplicar el up en dev → sin error (AC-6).
-6. **Prod apply**: up vía Management API contra `caldzjhjgctpgodldqav`.
+6. **Prod apply**: up vía Management API contra `<supabase-prod-ref>`.
 7. **Prod verify**: `node scripts/verify-rls-enabled.mjs` (prod) → 9/9 true.
 8. **Prod smoke**: smoke E2E contra prod → service_role idéntico.
 9. **Rollback (si hace falta)**: down vía Management API (NO `migrate:preflight` — DT-6) → `DISABLE x2` → re-verify (las 2 en false).

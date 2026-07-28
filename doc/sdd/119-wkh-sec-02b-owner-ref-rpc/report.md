@@ -39,7 +39,7 @@ tsc 0 · biome 0 · vitest 1625 passed / 4 skipped / 0 failed.
 
 ## 7. Deploy a Producción
 
-**Aplicar**: `20260609000000_wkh_sec02b_owner_ref_rpc.sql` vía Supabase Management API a `caldzjhjgctpgodldqav`. DDL sub-ms, hot-apply seguro (RPC revocada de anon/authenticated). **Prerequisito**: la firma post-125b de `debit_delegation_and_parent` (6-param) debe estar aplicada en prod ANTES (esta migración la recrea desde esa base). **Rollback**: `..._down.sql`.
+**Aplicar**: `20260609000000_wkh_sec02b_owner_ref_rpc.sql` vía Supabase Management API a `<supabase-prod-ref>`. DDL sub-ms, hot-apply seguro (RPC revocada de anon/authenticated). **Prerequisito**: la firma post-125b de `debit_delegation_and_parent` (6-param) debe estar aplicada en prod ANTES (esta migración la recrea desde esa base). **Rollback**: `..._down.sql`.
 
 ## 8. Nota de diseño (guard semi-tautológico para el caller #1)
 

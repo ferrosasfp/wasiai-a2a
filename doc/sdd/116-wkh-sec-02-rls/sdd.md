@@ -65,7 +65,7 @@ Esta HU es **SOLO RLS (DDL de tablas)**. La parte (B) —ownership check dentro 
 | `supabase/migrations/20260605000000_a2a_receipts_down.sql` | Estilo de down script | `DROP ... IF EXISTS`; comentario `-- WKH-XXX down-migration` |
 | `scripts/apply-security-rpc-migration.mjs:1-45` | Patrón de aplicación via Management API | Lee `.env`/`.env.local`, extrae `SUPABASE_ACCESS_TOKEN` (PAT) + `PROJECT_REF` de `SUPABASE_URL`, POST a `/v1/projects/{ref}/database/query`. **Exemplar directo para el verify script** |
 | `scripts/migrate-preflight.mjs:870-907` | Patrón de queries read-only via psql + manifest | `EXPECTED_A2A_TABLES`, `POST_APPLY_QUERIES` (SELECT-only sobre `information_schema`/`pg_constraint`). El verify de RLS sigue esta línea (read-only) |
-| `scripts/apply-prod-migrations.sh:1-40` | Refs de proyectos Supabase | **dev** `bdwvrwzvsldephfibmuu`, **prod** `caldzjhjgctpgodldqav`. Migraciones se aplican via Management API (no `supabase db push`) |
+| `scripts/apply-prod-migrations.sh:1-40` | Refs de proyectos Supabase | **dev** `<supabase-dev-ref>`, **prod** `<supabase-prod-ref>`. Migraciones se aplican via Management API (no `supabase db push`) |
 | `test/migrate-preflight.test.ts:618-628` | **HALLAZGO CRÍTICO** | El analizador estático ya trata `DISABLE ROW LEVEL SECURITY` como **HIGH risk** y `ENABLE ROW LEVEL SECURITY` como seguro. Impacta el down script (ver DT-6 / Riesgo R-3) |
 | `CLAUDE.md` (sección "RLS real") | Contexto del proyecto | "Hoy la defensa es solo app-layer. El plan de `ENABLE ROW LEVEL SECURITY` + policy está trackeado en WKH-SEC-02". Esta HU lo materializa |
 
@@ -189,11 +189,11 @@ filas (alguna tabla no encontrada). Exit 0 solo si las 7 están en `true`.
 2. `npm run migrate:preflight supabase/migrations/20260607000000_wkh_sec02_rls.sql`
    → el analizador estático NO flaggea `ENABLE ROW LEVEL SECURITY` (verificado en
    `migrate-preflight.test.ts:625-628`) → PASS.
-3. Aplicar UP en **dev** (`bdwvrwzvsldephfibmuu`) via Management API.
+3. Aplicar UP en **dev** (`<supabase-dev-ref>`) via Management API.
 4. Correr `node scripts/verify-rls-enabled.mjs` → 7/7 `rls_enabled=true` → exit 0.
 5. Smoke E2E del servicio en dev (script existente) → todas las ops `service_role`
    pasan idénticas (AC-3, AC-5).
-6. Aplicar UP en **prod** (`caldzjhjgctpgodldqav`) + verify + smoke.
+6. Aplicar UP en **prod** (`<supabase-prod-ref>`) + verify + smoke.
 
 ### 4.5 Flujo de error / rollback
 
@@ -299,10 +299,10 @@ filas (alguna tabla no encontrada). Exit 0 solo si las 7 están en `true`.
 - [ ] **W1.3** (opcional, si se factoriza lógica del verify a una función exportable): test puro de la función de decisión (igual patrón que `decide()` en migrate-preflight).
 
 ### Wave 2 (Deploy — manual, fuera de `vitest`)
-- [ ] **W2.1**: Aplicar UP en dev (`bdwvrwzvsldephfibmuu`) via Management API.
+- [ ] **W2.1**: Aplicar UP en dev (`<supabase-dev-ref>`) via Management API.
 - [ ] **W2.2**: `node scripts/verify-rls-enabled.mjs` contra dev → 7/7 true.
 - [ ] **W2.3**: Smoke E2E del servicio en dev → todas las ops `service_role` idénticas.
-- [ ] **W2.4**: Aplicar UP en prod (`caldzjhjgctpgodldqav`) + verify + smoke.
+- [ ] **W2.4**: Aplicar UP en prod (`<supabase-prod-ref>`) + verify + smoke.
 
 ### Test Plan
 
@@ -335,11 +335,11 @@ filas (alguna tabla no encontrada). Exit 0 solo si las 7 están en `true`.
 ## Plan de DEPLOY explícito
 
 1. **Preflight (up)**: `npm run migrate:preflight supabase/migrations/20260607000000_wkh_sec02_rls.sql` → debe ser PASS.
-2. **Dev apply**: aplicar el up via Management API contra `bdwvrwzvsldephfibmuu` (patrón `apply-security-rpc-migration.mjs`).
+2. **Dev apply**: aplicar el up via Management API contra `<supabase-dev-ref>` (patrón `apply-security-rpc-migration.mjs`).
 3. **Dev verify**: `node scripts/verify-rls-enabled.mjs` → exige 7/7 `rls_enabled=true` (exit 0).
 4. **Dev smoke**: correr el smoke E2E del servicio (script existente) — confirmar que balance/debit/sesión/depósito/recibo/policy operan idéntico bajo `service_role`.
 5. **Idempotencia**: re-aplicar el up en dev → sin error (AC-6).
-6. **Prod apply**: aplicar el up via Management API contra `caldzjhjgctpgodldqav`.
+6. **Prod apply**: aplicar el up via Management API contra `<supabase-prod-ref>`.
 7. **Prod verify**: `node scripts/verify-rls-enabled.mjs` (apuntando a prod) → 7/7 true.
 8. **Prod smoke**: smoke E2E contra prod → service_role idéntico.
 9. **Rollback (si hace falta)**: aplicar el down via Management API (NO via `migrate:preflight` — DT-6) → `DISABLE x7` → re-verify (7/7 false).

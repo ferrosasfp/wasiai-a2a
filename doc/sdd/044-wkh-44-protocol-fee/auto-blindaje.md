@@ -10,7 +10,7 @@ Registro de errores cometidos durante F3 y sus fixes, para proteger HUs futuras.
   con `command not found`. `psql` tampoco está disponible.
 - **Causa raíz**: el entorno de dev local no tiene Supabase CLI global ni
   cliente Postgres instalados. El proyecto está linkeado (ver
-  `supabase/.temp/linked-project.json`: ref `bdwvrwzvsldephfibmuu`) pero el
+  `supabase/.temp/linked-project.json`: ref `<supabase-dev-ref>`) pero el
   binario no está en PATH.
 - **Fix**: la Story File (Paso 1.5) explícitamente autoriza "Si no tenés
   Supabase CLI autenticado, documentalo y sigue con la implementación — el F4

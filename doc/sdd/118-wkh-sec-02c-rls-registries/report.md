@@ -45,7 +45,7 @@ tsc 0 · biome 0 · vitest 1625 passed / 0 failed · verify-rls 15 passed.
 
 ## 8. Deploy a Producción (W2, post-merge)
 
-Aplicar `20260610000000_wkh_sec02c_rls_registries.sql` vía Supabase Management API a `caldzjhjgctpgodldqav` → `node scripts/verify-rls-enabled.mjs` debe reportar **9/9** → smoke (registry CRUD + transform cache idéntico). **Rollback**: `..._down.sql` (DISABLE x2).
+Aplicar `20260610000000_wkh_sec02c_rls_registries.sql` vía Supabase Management API a `<supabase-prod-ref>` → `node scripts/verify-rls-enabled.mjs` debe reportar **9/9** → smoke (registry CRUD + transform cache idéntico). **Rollback**: `..._down.sql` (DISABLE x2).
 
 ## 9. Deuda técnica (MNR cosméticos, no bloquean)
 

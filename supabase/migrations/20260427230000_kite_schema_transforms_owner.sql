@@ -2,7 +2,7 @@
 -- Migration: 20260427230000_kite_schema_transforms_owner
 -- WKH-60 / SEC-RCE-1: scope cached transformFn rows by owner_ref
 -- Proyecto: wasiai-a2a
--- Supabase dev: bdwvrwzvsldephfibmuu.supabase.co
+-- Supabase dev: <supabase-dev-ref>.supabase.co
 -- ============================================================
 --
 -- Problema: hoy la cache key es (source_agent_id, target_agent_id, schema_hash)

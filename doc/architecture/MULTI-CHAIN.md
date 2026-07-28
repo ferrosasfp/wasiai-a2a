@@ -197,7 +197,7 @@ Tiempo estimado (mirror de WKH-MULTICHAIN W1): ~4-6h para adapter completo + tes
    tener USDC Fuji para downstream (separate concern; el deposit del A2A key budget es una
    operación de BD, no on-chain).
 
-3. **Insertar deposit en BD** (Supabase SQL editor, dev project `bdwvrwzvsldephfibmuu`):
+3. **Insertar deposit en BD** (Supabase SQL editor, dev project `<supabase-dev-ref>`):
 
    ```sql
    SELECT register_a2a_key_deposit(

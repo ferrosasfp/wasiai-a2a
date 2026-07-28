@@ -18,7 +18,7 @@ HU_APPROVED + SPEC_APPROVED self-aprobados. F2.5 → F3 → AR (APROBADO, audito
 RLS habilitado en las 7 tablas · deny-default anon/authenticated · service_role sin restricción (bypass nativo) · down deshabilita (7 DISABLE) · idempotente · verify script (`pg_class.relrowsecurity`) · zero regresión funcional. Gates: tsc 0 · 1579 tests · lint 0 · migrate:preflight(up) PASS.
 
 ## 5. Deploy + verificación en prod (HECHO)
-- Migración `20260607000000_wkh_sec02_rls.sql` **aplicada a prod** (`caldzjhjgctpgodldqav`), HTTP 201.
+- Migración `20260607000000_wkh_sec02_rls.sql` **aplicada a prod** (`<supabase-prod-ref>`), HTTP 201.
 - **Verificado**: `relrowsecurity = true` en las 7 tablas (query a `pg_class`).
 - **Smoke funcional en vivo** (sin datos sensibles): `GET /auth/key-session` con key inválida → **403** (el middleware consultó `a2a_agent_keys` bajo RLS y la query de service_role funcionó — bypass OK, no 500); `/health` → 200; `/discover` → 200. El servicio funciona idéntico post-RLS.
 - **Rollback** disponible: `20260607000000_wkh_sec02_rls_down.sql` (7 DISABLE) aplicable directo vía Management API en <30s (NO pasa por migrate:preflight, que marca DISABLE como HIGH por diseño).

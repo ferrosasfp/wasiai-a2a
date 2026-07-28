@@ -2,7 +2,7 @@
 -- Migration: 20260404000000_mock_community_registry
 -- WKH-32: Seed mock "Community Hub" registry para demo multi-registry
 -- Proyecto: wasiai-a2a (Hackathon Kite)
--- Supabase dev: bdwvrwzvsldephfibmuu.supabase.co
+-- Supabase dev: <supabase-dev-ref>.supabase.co
 -- ============================================================
 -- IMPORTANTE: discovery_endpoint usa placeholder http://localhost:3001
 -- Actualizar manualmente en Supabase dashboard tras deploy con la URL real

@@ -183,7 +183,7 @@ Migration `20260427160000_secure_rpc_search_path.sql`:
 
 ## Missing Inputs
 
-- [resuelto en F2] Confirmar que Supabase cloud (bdwvrwzvsldephfibmuu) aplica el bypass de service_role correctamente (Supabase docs garantizan esto, pero Architect debe validar en staging antes de prod).
+- [resuelto en F2] Confirmar que Supabase cloud (<supabase-dev-ref>) aplica el bypass de service_role correctamente (Supabase docs garantizan esto, pero Architect debe validar en staging antes de prod).
 - [resuelto en F2] Decidir si se crea una policy explícita `TO service_role` (DT-1) o se confía solo en el bypass nativo — el Architect elige con evidencia del comportamiento Supabase.
 
 ---
@@ -205,7 +205,7 @@ Migration `20260427160000_secure_rpc_search_path.sql`:
 4. El down script permite revertir en < 30s si se detecta problema.
 
 **Mitigacion**:
-- Aplicar primero en la BD dev (mismo proyecto Supabase `bdwvrwzvsldephfibmuu`, schema dev si existe, o directo dado que ya es testnet).
+- Aplicar primero en la BD dev (mismo proyecto Supabase `<supabase-dev-ref>`, schema dev si existe, o directo dado que ya es testnet).
 - Correr el script `verify-rls-enabled.mjs` para confirmar que las 7 tablas tienen RLS activo.
 - Correr smoke E2E (script existente) para confirmar que el servicio sigue operando identicamente.
 - Luego aplicar en prod (Railway env prod si existe BD separada).

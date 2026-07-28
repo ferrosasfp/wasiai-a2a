@@ -9,14 +9,14 @@
 ## Resumen
 
 Toda migration nueva al proyecto wasiai-a2a se aplica directamente en producción
-(Supabase `caldzjhjgctpgodldqav`) sin verificación previa. No existe dry-run, shadow DB,
+(Supabase `<supabase-prod-ref>`) sin verificación previa. No existe dry-run, shadow DB,
 ni post-apply integrity check. Un `DROP COLUMN` accidental o un `ALTER TABLE` de larga
 duración en una tabla crítica se descubre en prod — en el peor momento.
 
 Esta HU produce un **runbook documentado** (`doc/runbooks/migration-preflight.md`) y un
 **script de pre-flight** (`scripts/migrate-preflight.mjs`) que debe ejecutarse ANTES de
 aplicar cualquier migration en producción. El script: corre la migration en la shadow DB
-(proyecto dev `bdwvrwzvsldephfibmuu`), detecta operaciones de riesgo en el SQL, y produce
+(proyecto dev `<supabase-dev-ref>`), detecta operaciones de riesgo en el SQL, y produce
 un reporte humano-readable. No modifica Supabase prod. No aplica migrations automáticamente.
 
 **Para quién**: el equipo de desarrollo (Fernando + cualquier contribuidor futuro) y el
@@ -55,8 +55,8 @@ Hallazgos del F0 audit (2026-05-01):
 | Shadow DB automatizada | No configurada |
 | Post-apply integrity check | No existe |
 | Forma actual de aplicar migrations | Manual: copy-paste en Supabase Dashboard SQL Editor |
-| Prod project | `caldzjhjgctpgodldqav` (Railway env `DATABASE_URL`) |
-| Dev/shadow project | `bdwvrwzvsldephfibmuu` (usado como shadow manual) |
+| Prod project | `<supabase-prod-ref>` (Railway env `DATABASE_URL`) |
+| Dev/shadow project | `<supabase-dev-ref>` (usado como shadow manual) |
 | Archivos SQL existentes en scope | `migrations/kite_001_registries.sql` y otros ad-hoc |
 
 **Conclusión**: el mecanismo actual es completamente manual, sin guardrails automatizados.
@@ -151,13 +151,13 @@ funcionar con Node.js >=20 sin deps externas más allá de las ya en `package.js
    existente.
 
 5. `.env.example` (MODIFICAR) — agregar `SHADOW_DATABASE_URL` con comentario explicativo
-   (apunta a bdwvrwzvsldephfibmuu, NO a prod).
+   (apunta a <supabase-dev-ref>, NO a prod).
 
 ---
 
 ## Scope OUT
 
-- NO modificar Supabase prod (`caldzjhjgctpgodldqav`) — ni su schema, ni sus datos.
+- NO modificar Supabase prod (`<supabase-prod-ref>`) — ni su schema, ni sus datos.
 - NO modificar las migrations existentes en `migrations/` — el pre-flight es prospectivo.
 - NO introducir Supabase CLI ni `supabase db push` — la HU no cambia el workflow de apply,
   solo agrega el pre-flight previo.
@@ -243,7 +243,7 @@ funcionar con Node.js >=20 sin deps externas más allá de las ya en `package.js
   no hay shadow DB automática, las migrations son `.sql` ad-hoc aplicados manualmente via
   dashboard.
 - **[RESUELTO F1]** Shadow DB candidate — es el proyecto dev existente
-  (`bdwvrwzvsldephfibmuu`). El `SHADOW_DATABASE_URL` debe apuntar ahí.
+  (`<supabase-dev-ref>`). El `SHADOW_DATABASE_URL` debe apuntar ahí.
 - **[RESUELTO F1]** Sizing FAST confirmado — no toca código productivo, sin cambios a
   payment path, sin nuevas superficies de seguridad.
 - **[NEEDS CLARIFICATION en F2]** DT-1: mecanismo de dry-run (Supabase JS REST vs psql vs

@@ -32,7 +32,7 @@ activación (191d), donde de todos modos se va a decidir el wiring del cron y el
 NO aplicados al remoto (consistente con 191a/191b, también PENDING-DEPLOY — no hay ninguna fila
 `reconciliation_pending` en prod porque 191b no está activo). **NO VERIFICABLE en vivo**: un
 intento de query read-only (`SELECT debit_settle_status FROM a2a_payment_intent_debit_signatures
-LIMIT 1`) contra la DB compartida (`bdwvrwzvsldephfibmuu`, dev/staging de wasiai-v2) fue
+LIMIT 1`) contra la DB compartida (`<supabase-dev-ref>`, dev/staging de wasiai-v2) fue
 **denegado por el sandbox** del entorno (clasificador de auto-mode: "shared/production Supabase
 usando SERVICE_KEY sin target nombrado explícitamente"). No se intentó bypass. Dado que el propio
 Scope OUT de la HU declara explícitamente "la activación de 191b en prod... pertenece a 191d" y

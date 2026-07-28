@@ -46,7 +46,7 @@ WKH-79 updated README.md to reflect the production state of wasiai-a2a as of 202
 | CD | Constraint | Status | Verification |
 |----|-----------|--------|--------------|
 | CD-1 | No credential-bearing or infra-internal URLs in README | PASS | No exposed credentials in diff |
-| CD-2 | Supabase project ID and DB URL must not be revealed | PASS | grep for `caldzjhjgctpgodldqav` and `bdwvrwzvsldephfibmuu` returns 0 matches |
+| CD-2 | Supabase project ID and DB URL must not be revealed | PASS | grep for `<supabase-prod-ref>` and `<supabase-dev-ref>` returns 0 matches |
 | CD-3 | No unauthorized emojis (only pre-existing or user-approved) | PASS | No new emoji added; diff shows 0 unicode matches |
 | CD-4 | Only verified metrics (644 tests, tx hashes) from HACKATHON-FINAL.md or existing README | PASS | 644 verified from HACKATHON-FINAL.md line 146; all 4 tx hashes verified from lines 194–197 |
 | CD-5 | All relative links must exist on disk | PASS | All 4 relative links verified with `ls` |

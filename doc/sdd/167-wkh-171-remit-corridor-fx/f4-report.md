@@ -28,7 +28,7 @@ overlap, es la excepción documentada: "si CR no cubrió algún estado del códi
 toma la rama `FallbackFxProvider`. Confirmado también por env vars documentadas para el deploy futuro
 en Story File §W3 (prohibidas explícitamente).
 
-**DB state (AC-2):** se evaluó correr `SELECT` read-only contra `a2a_agents` (Supabase `bdwvrwzvsldephfibmuu`,
+**DB state (AC-2):** se evaluó correr `SELECT` read-only contra `a2a_agents` (Supabase `<supabase-dev-ref>`,
 la DB configurada en `.env`/`project-context.md` de `wasiai-a2a`) para confirmar ausencia de la fila
 `remit-corridor-fx` antes del registro. La acción fue **denegada por el clasificador de permisos**
 ("Production Reads... el usuario marcó AC-2 como deploy check humano, no query") — consistente con

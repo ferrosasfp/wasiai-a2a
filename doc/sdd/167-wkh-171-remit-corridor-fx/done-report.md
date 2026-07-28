@@ -226,7 +226,7 @@ curl -X POST https://<a2a-prod-railway>/agents \
 **Pasos**:
 1. **AC-1**: `GET /agents/remit-corridor-fx/agent-card` o `POST /discover` (filtro por `remittance-fx-quote`) → debe retornar `remit-corridor-fx` con `status:"active"`, sin afectar `agentshop-corridor-discoverer`.
 
-2. **AC-2**: Query DB (Supabase `bdwvrwzvsldephfibmuu`) lectura:
+2. **AC-2**: Query DB (Supabase `<supabase-dev-ref>`) lectura:
    ```sql
    SELECT slug, agent_url, price_usdc, status FROM a2a_agents WHERE slug='remit-corridor-fx';
    -- Expected: 1 fila, slug EXACTO, agent_url W3, price_usdc=0.03, status=active

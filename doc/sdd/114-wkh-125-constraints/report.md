@@ -28,7 +28,7 @@ AC-1 set-policy (PUT persiste) · AC-2 cap-reject → 402 DEST_CAP_EXCEEDED sin 
 **Nuevos**: `src/services/spend-policy.ts` (+test), `src/services/agent-price.ts` cambios + test, migración `20260606000000_a2a_key_spend_policies.sql` (+down). **Modificados**: `src/types/a2a-key.ts`, `src/types/index.ts` (ComposeResult.errorCode aditivo), `src/services/security/errors.ts`, `src/services/budget.ts`, `src/services/compose.ts`, `src/services/key-session.ts`, `src/middleware/a2a-key.ts`, `src/routes/compose.ts`, `src/routes/auth.ts`, tests de aridad (compose/orchestrate.billing/budget).
 
 ## 7. Deploy
-- Migración `20260606000000_a2a_key_spend_policies.sql` **aplicada a prod** (caldzjhjgctpgodldqav): 2 tablas + RPC `debit_with_dest_policy/5` + `debit_session_and_parent/6` (overload eliminado). HTTP 201.
+- Migración `20260606000000_a2a_key_spend_policies.sql` **aplicada a prod** (<supabase-prod-ref>): 2 tablas + RPC `debit_with_dest_policy/5` + `debit_session_and_parent/6` (overload eliminado). HTTP 201.
 
 ## 8. 🏁 Cierre de Épica E16 — "Agent Key mejor que Kite Passport"
 | HU | Entregable | Status |
