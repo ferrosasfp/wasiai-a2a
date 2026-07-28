@@ -12,6 +12,9 @@ import { describe, expect, it } from 'vitest';
 import {
   classifySettleTransportError,
   FacilitatorSettleError,
+  GaslessNotSupportedError,
+  GaslessTransferError,
+  readGaslessValueDisposition,
   readSettleValueDisposition,
 } from './errors.js';
 
@@ -127,5 +130,82 @@ describe('readSettleValueDisposition', () => {
     expect(readSettleValueDisposition(new Error('plain'))).toBeUndefined();
     expect(readSettleValueDisposition(null)).toBeUndefined();
     expect(readSettleValueDisposition('boom')).toBeUndefined();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// HU-198 · readGaslessValueDisposition (mismo bug de identidad de clase, otro eje)
+// ════════════════════════════════════════════════════════════════════
+describe('readGaslessValueDisposition', () => {
+  it('T-GAS-instanceof: lee la disposición de los errores reales', () => {
+    expect(
+      readGaslessValueDisposition(
+        new GaslessTransferError('avalanche', 'x', 'not-moved'),
+      ),
+    ).toBe('not-moved');
+    expect(
+      readGaslessValueDisposition(
+        new GaslessTransferError('avalanche', 'x', 'unknown'),
+      ),
+    ).toBe('unknown');
+    // El stub tira ANTES de tocar la red ⇒ el valor no se movió.
+    expect(
+      readGaslessValueDisposition(new GaslessNotSupportedError('base', 'x')),
+    ).toBe('not-moved');
+  });
+
+  it('T-GAS-cross-registry: lee `not-moved` de una COPIA de la clase de otro registro', () => {
+    // ESTE es el caso que importa. Con `instanceof` pelado devolvía undefined y
+    // `classifyGaslessFailure` caía a 'unknown' ⇒ NO se reembolsaba un transfer que
+    // PROBADAMENTE no se movió (plata que le queda debiendo al caller, en silencio).
+    const foreign = Object.assign(new Error('cap exceeded'), {
+      name: 'GaslessTransferError',
+      valueDisposition: 'not-moved',
+    });
+    expect(foreign instanceof GaslessTransferError).toBe(false);
+    expect(readGaslessValueDisposition(foreign)).toBe('not-moved');
+  });
+
+  it('T-GAS-cross-registry-unknown: `unknown` de otra copia sigue siendo `unknown` (no se reembolsa)', () => {
+    const foreign = Object.assign(new Error('receipt timeout'), {
+      name: 'GaslessTransferError',
+      valueDisposition: 'unknown',
+    });
+    expect(readGaslessValueDisposition(foreign)).toBe('unknown');
+  });
+
+  it('T-GAS-cross-registry-notsupported: el stub de otra copia también es `not-moved`', () => {
+    const foreign = Object.assign(new Error('stub'), {
+      name: 'GaslessNotSupportedError',
+    });
+    expect(foreign instanceof GaslessNotSupportedError).toBe(false);
+    expect(readGaslessValueDisposition(foreign)).toBe('not-moved');
+  });
+
+  it('T-GAS-no-impostor: otro `name` o una disposición fuera del dominio → undefined', () => {
+    // undefined ⇒ el caller aplica su fail-safe ('unknown', no reembolsar). Un
+    // impostor NO puede provocar un reembolso diciendo `not-moved`.
+    expect(
+      readGaslessValueDisposition(
+        Object.assign(new Error('x'), {
+          name: 'SomeOtherError',
+          valueDisposition: 'not-moved',
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      readGaslessValueDisposition(
+        Object.assign(new Error('x'), {
+          name: 'GaslessTransferError',
+          valueDisposition: 'definitely-moved',
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('T-GAS-otros: un Error común o basura no aporta disposición', () => {
+    expect(readGaslessValueDisposition(new Error('plain'))).toBeUndefined();
+    expect(readGaslessValueDisposition(null)).toBeUndefined();
+    expect(readGaslessValueDisposition('boom')).toBeUndefined();
   });
 });

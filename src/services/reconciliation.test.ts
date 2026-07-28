@@ -117,6 +117,11 @@ function wireFrom(opts: {
   // WKH-196: cols capturadas del .select() sobre la tabla de firmas (dentro del
   // closure — sin símbolo top-level nuevo consumido por la factory vi.mock, CD-8).
   let sigSelectCols: string | null = null;
+  // HU-198: el doble de `.in()` IGNORABA sus argumentos, así que ningún test podía
+  // ver por qué estados se filtra. Se capturan (col → valores) para poder afirmar la
+  // lista real de estados contabilizados en el drift; un doble que descarta los
+  // argumentos hace vacuo cualquier test sobre ellos.
+  const sigInCalls: Array<{ col: string; values: readonly string[] }> = [];
   mockFrom.mockImplementation(((table: string) => {
     const result = table === 'a2a_agent_keys' ? keyResult : sigResult;
     const b: Record<string, unknown> = {
@@ -128,7 +133,12 @@ function wireFrom(opts: {
       },
       update: () => b,
       eq: () => b,
-      in: () => b,
+      in: (col?: string, values?: readonly string[]) => {
+        if (table === 'a2a_payment_intent_debit_signatures') {
+          sigInCalls.push({ col: col ?? '', values: values ?? [] });
+        }
+        return b;
+      },
       maybeSingle: () => Promise.resolve(result),
       // biome-ignore lint/suspicious/noThenProperty: awaitable supabase builder test double
       then: (resolve: (v: unknown) => void) => resolve(result),
@@ -136,7 +146,13 @@ function wireFrom(opts: {
     return b;
     // biome-ignore lint/suspicious/noExplicitAny: test double for supabase builder
   }) as any);
-  return { sigSelectCols: () => sigSelectCols };
+  return {
+    sigSelectCols: () => sigSelectCols,
+    sigInCalls: () => sigInCalls,
+    /** Valores del `.in()` sobre `debit_settle_status` (el filtro de estados). */
+    settleStatusFilter: () =>
+      sigInCalls.find((c) => c.col === 'debit_settle_status')?.values ?? [],
+  };
 }
 
 /** Configura supabase.rpc por nombre (claim_reconciliation / record_reconciliation_resolution). */
@@ -598,6 +614,27 @@ describe('T-NEW-8 driftCheck round-trip amount + cast-presence (AC-2/AC-4/CD-6, 
     const cols = wired.sigSelectCols();
     expect(cols).toContain('debit_amount_atomic::text');
     expect(cols).not.toContain('debit_nonce::text');
+  });
+
+  // ── HU-198: el reporte de drift no se puede callar un débito vigente ──
+  it('T-198-Drift: cuenta resolving_settle (débito vigente) y NO resolving_refund', async () => {
+    // `resolving_settle` pasó a ser un estado DURADERO (el hop 2 de resultado
+    // desconocido). Ahí el débito del hop 1 está vigente y sin reembolsar, así que
+    // omitirlo hacía que el drift SUB-DECLARARA justo los casos que hay que mirar.
+    // `resolving_refund` queda afuera a propósito: ese débito se está revirtiendo.
+    const wired = wireFrom({
+      sigResult: { data: [], error: null },
+      keyResult: { data: null, error: null },
+    });
+
+    await reconciliationService.driftCheck();
+
+    const statuses = wired.settleStatusFilter();
+    expect(statuses).toContain('hop1_confirmed');
+    expect(statuses).toContain('settled');
+    expect(statuses).toContain('reconciliation_pending');
+    expect(statuses).toContain('resolving_settle');
+    expect(statuses).not.toContain('resolving_refund');
   });
 });
 

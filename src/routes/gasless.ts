@@ -43,9 +43,8 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { resolveChainKey } from '../adapters/chain-resolver.js';
 import {
-  GaslessNotSupportedError,
-  GaslessTransferError,
   type GaslessValueDisposition,
+  readGaslessValueDisposition,
 } from '../adapters/errors.js';
 import {
   getAdaptersBundle,
@@ -338,11 +337,18 @@ async function refundGaslessDebit(
  * site). `GaslessNotSupportedError` es el stub que tira ANTES de tocar la red.
  * Cualquier otro error es NO clasificado ⟹ `'unknown'` (fail-safe: preferimos
  * no reembolsar antes que inflar el budget del caller).
+ *
+ * HU-198: la lectura de la disposición se delega a `readGaslessValueDisposition`,
+ * que valida por FORMA además de por `instanceof`. Motivo: `instanceof` compara
+ * identidad de clase y esa identidad es por-registro-de-módulos, así que se caía
+ * silenciosamente en cualquier consumidor con el grafo de módulos duplicado. Acá el
+ * fallo NO era un reembolso indebido sino un reembolso OMITIDO (el default es
+ * `'unknown'` = no reembolsar), o sea plata que le quedábamos debiendo al caller
+ * por un transfer que probadamente no se movió. El `?? 'unknown'` conserva EXACTO
+ * el fail-safe de HU-192 para el error no clasificado.
  */
 function classifyGaslessFailure(err: unknown): GaslessValueDisposition {
-  if (err instanceof GaslessTransferError) return err.valueDisposition;
-  if (err instanceof GaslessNotSupportedError) return 'not-moved';
-  return 'unknown';
+  return readGaslessValueDisposition(err) ?? 'unknown';
 }
 
 const gaslessRoutes: FastifyPluginAsync = async (fastify) => {

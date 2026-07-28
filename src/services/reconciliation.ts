@@ -45,10 +45,25 @@ const PENDING_STATUSES = [
 ] as const;
 
 // Estados contabilizados en el drift (débito off-chain vigente, no reembolsado).
+//
+// HU-198: se agrega `resolving_settle`. El criterio de esta lista es "el débito del
+// hop 1 ESTÁ VIGENTE y no fue reembolsado", y en `resolving_settle` lo está: los
+// fondos del buyer ya salieron del escrow (hop 1 confirmado) y no hay refund. Desde
+// esta HU ese estado además es DURADERO — `settleEscrowAware` lo usa para el hop 2 de
+// resultado desconocido, no sólo como marca transitoria de un run del reconciliador —
+// así que omitirlo hacía que el reporte de drift SUB-DECLARARA el débito acumulado
+// justamente en los casos que hay que mirar. Un reporte de drift que se calla un caso
+// afirma algo falso.
+//
+// `resolving_refund` NO se agrega, a propósito y con el mismo criterio: ahí el débito
+// está en curso de ser REVERTIDO (el crédito vive dentro de
+// `record_reconciliation_resolution`), así que contarlo como vigente sería la
+// sub/sobre-declaración simétrica. Es la única exclusión y queda nombrada.
 const DRIFT_ACCOUNTED_STATUSES = [
   'hop1_confirmed',
   'settled',
   'reconciliation_pending',
+  'resolving_settle',
 ] as const;
 
 export type ReconciliationErrorCode =
@@ -320,6 +335,44 @@ export const reconciliationService = {
       }
 
       if (!skipResend) {
+        // ⚠️ AGUJERO CONOCIDO Y ACOTADO — RE-ENVÍO SIN EVIDENCIA (HU-198, TD-198-01).
+        //
+        // Acá se re-envía el hop 2 sin ninguna prueba de que no se pagó ya. Eso es
+        // CORRECTO para las dos entradas legítimas (y es para lo que existe el lado
+        // settle del reconciliador):
+        //   (A) el proceso murió DESPUÉS del hop 1 y ANTES de intentar el hop 2 ⟹ el
+        //       seller no cobró y nadie más lo va a pagar.
+        //   (D) el hop 2 falló de forma INEQUÍVOCA (`failureKind:'unequivocal'`: el
+        //       sign falló, o el facilitator contestó `success:false`) ⟹ probado que
+        //       no se ejecutó.
+        // En ninguna de las dos existe un tx del hop 2 que verificar, así que exigir
+        // evidencia del hop 2 como precondición dura NO es la solución: dejaría al
+        // seller sin cobrar automáticamente justo en el caso (A), que es el normal.
+        //
+        // HU-198 cerró la entrada (E) — hop 2 de resultado DESCONOCIDO — mandándola a
+        // `resolving_settle`, que el claim no reclama sin tx (ver `settleEscrowAware`).
+        // QUEDAN ABIERTAS dos entradas que llegan acá como `hop1_confirmed` y son
+        // INDISTINGUIBLES de (A) con lo que hoy se persiste:
+        //   (B) el proceso murió DURANTE el hop 2, después de que el request salió.
+        //   (C) el hop 2 SETTLEÓ pero el flip a 'settled' falló ⟹ el txHash se perdió
+        //       sin persistirse (`settleEscrowAware` no tiene el "lease" de evidencia
+        //       que sí tiene este mismo archivo unas líneas más abajo).
+        // En (B) y (C) este re-envío PAGA DOS VECES al seller.
+        //
+        // POR QUÉ NO SE ARREGLA ACÁ: falta un HECHO PERSISTIDO ("el hop 2 se intentó"),
+        // y agregarlo es una decisión de diseño con costo propio. Las dos candidatas:
+        //   1. Nonce EIP-3009 DETERMINÍSTICO para el hop 2 (derivado del intentId) en
+        //      vez de `randomBytes(32)` (`kite-ozone/payment.ts` §sign y sus pares).
+        //      Es el fix ESTRUCTURAL: el token rechaza el segundo uso del mismo nonce,
+        //      así que el doble pago se vuelve imposible on-chain en vez de evitado por
+        //      convención. Misma doctrina que el `idem_key` de HU-194 ("la idempotencia
+        //      no se apoya en un guard de TypeScript"), pero con la clave viajando al
+        //      contrato en vez de a Postgres. Toca la firma de todos los adapters.
+        //   2. Lease pre-hop2 (marcar "intento en curso" ANTES de mandarlo). Cierra (B)
+        //      y (C) pero convierte (A) en revisión manual y agrega un round-trip a DB
+        //      antes de cada pago.
+        // Ninguna es un fix-pack. NO borrar este bloque sin cerrar (B) y (C).
+        //
         // 6. hop 2 DIRECTO (seam WKH-136; NO settleEscrowAware, DT-R2).
         const settle = await settlePaymentIntentOnChain({
           intentId,

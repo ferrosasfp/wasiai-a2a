@@ -608,12 +608,37 @@ export async function settleEscrowAware(params: {
     if (o2.status === 'failed') {
       // CD-S4: hop 1 ya movió fondos on-chain → remap unequivocal→ambiguous (jamás
       // refund off-chain = doble-crédito) + reconciliation-pending.
+      //
+      // HU-198 — EL ESTADO DEPENDE DE SI EL HOP 2 PUDO HABER PAGADO.
+      //
+      // Antes los dos casos caían en `reconciliation_pending`, y ese estado lo
+      // AUTO-RECLAMA `claim_reconciliation` (migración 20260713000002, el `IN
+      // ('hop1_confirmed','reconciliation_pending')`). Sin `debit_resolution_tx_hash`
+      // que verificar, `reconciliation.ts` salta el verify y RE-ENVÍA el hop 2
+      // (`reconciliation.ts` §6) ⟹ si el hop 2 original SÍ aterrizó, el seller cobra
+      // DOS VECES. Con el techo de wall-clock del hop `pieverse` ese caso pasa de
+      // raro a rutinario, así que hay que distinguirlo.
+      //
+      // El dato para distinguir YA ESTABA COMPUTADO: `failureKind`.
+      //   · 'unequivocal' → el hop 2 PROBADAMENTE no se ejecutó (el sign falló, o el
+      //     facilitator contestó `success:false`). Re-enviar es CORRECTO y es para
+      //     lo que el reconciliador existe ⟹ `reconciliation_pending` (sin cambio).
+      //   · 'ambiguous'   → el hop 2 pudo haber pagado (el settle TIRÓ, o la
+      //     re-verificación on-chain lo contradijo) ⟹ `resolving_settle`, que el
+      //     claim NO reclama sin tx previa (ni por el lado settle ni por el refund)
+      //     pero que SIGUE en `PENDING_STATUSES` ⟹ no auto-paga, no auto-reembolsa,
+      //     y aparece igual en `listPending()` para que un humano lo resuelva.
+      //
+      // NO se inventó un estado nuevo: `resolving_settle` ya existe en el CHECK y en
+      // el índice `idx_debit_sig_resolving` desde 191c. Lo único que hizo falta fue
+      // dejar que `record_debit_settle_status` lo escriba (migración de esta HU).
+      const unknownHop2 = o2.failureKind === 'ambiguous';
       await recordDebitSettleStatus({
         intentId,
         ownerRef,
         keyId,
         nonce: row.debit_nonce,
-        status: 'reconciliation_pending',
+        status: unknownHop2 ? 'resolving_settle' : 'reconciliation_pending',
       });
       return {
         status: 'failed',

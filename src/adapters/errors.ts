@@ -76,6 +76,43 @@ export class GaslessTransferError extends Error {
 }
 
 /**
+ * HU-198: lee la disposición del valor de un error del camino GASLESS, o
+ * `undefined` si el error no la aporta.
+ *
+ * ⚠️ POR QUÉ NO ES UN `instanceof` A SECAS: idéntico motivo que
+ * `readSettleValueDisposition` (abajo) — `instanceof` compara identidad de CLASE, y
+ * esa identidad es por-registro-de-módulos, así que un consumidor cargado con
+ * `vi.resetModules()` + `import()` dinámico (o dos copias del paquete en el árbol de
+ * dependencias) ve otra clase y el `instanceof` da `false`.
+ *
+ * DIRECCIÓN DEL FALLO ACÁ (documentada porque es lo contrario de lo que parece):
+ * `routes/gasless.ts` defaultea a `'unknown'` y sólo reembolsa con `'not-moved'`, así
+ * que un `instanceof` que falla NO produce un reembolso indebido: produce un reembolso
+ * OMITIDO. O sea que el bug no puede pagar dos veces — deja al caller cobrado por un
+ * transfer que PROBADAMENTE no se movió, y en silencio. Sigue siendo plata que le
+ * debemos al caller, por eso se arregla; pero la severidad es "under-refund", no
+ * "double-pay".
+ *
+ * `GaslessNotSupportedError` es el stub que tira ANTES de tocar la red ⟹ `'not-moved'`.
+ */
+export function readGaslessValueDisposition(
+  err: unknown,
+): GaslessValueDisposition | undefined {
+  if (err instanceof GaslessTransferError) return err.valueDisposition;
+  if (err instanceof GaslessNotSupportedError) return 'not-moved';
+  if (!err || typeof err !== 'object') return undefined;
+  const candidate = err as { name?: unknown; valueDisposition?: unknown };
+  if (candidate.name === 'GaslessTransferError') {
+    return candidate.valueDisposition === 'not-moved' ||
+      candidate.valueDisposition === 'unknown'
+      ? candidate.valueDisposition
+      : undefined;
+  }
+  if (candidate.name === 'GaslessNotSupportedError') return 'not-moved';
+  return undefined;
+}
+
+/**
  * HU-198: ¿qué le pasó al VALOR cuando el hop HTTP al facilitator NO contestó?
  *
  * MISMA FORMA que `GaslessValueDisposition` (arriba) y por la MISMA razón, pero

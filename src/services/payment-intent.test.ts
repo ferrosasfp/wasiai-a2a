@@ -1695,6 +1695,62 @@ describe('WKH-191b settleEscrowAware (two-hop)', () => {
     );
   });
 
+  // ── HU-198: el hop 2 de resultado DESCONOCIDO no puede quedar auto-reclamable ──
+  //
+  // LA PROPIEDAD DE DINERO: `reconciliation_pending` lo AUTO-RECLAMA
+  // `claim_reconciliation` y, sin `debit_resolution_tx_hash` que verificar,
+  // `reconciliation.ts` RE-ENVÍA el hop 2. Si el hop 2 original pudo haber pagado
+  // (settle que TIRÓ — p.ej. el techo de wall-clock del hop pieverse), ese re-envío
+  // paga DOS VECES al seller. Por eso ese caso va a `resolving_settle`, que el claim
+  // no reclama sin tx previa. Los dos tests son el par: sin el de abajo
+  // (`unequivocal` → `reconciliation_pending`) alguien podría mandar TODO a
+  // `resolving_settle` y romper el caso legítimo de re-envío sin que nada se ponga
+  // rojo.
+  it('T-198-Escrow-Ambiguous: hop2 que TIRÓ (pudo haber pagado) → resolving_settle, NO reconciliation_pending', async () => {
+    // settle() que rechaza ⇒ `settlePaymentIntentOnChain` devuelve
+    // failureKind:'ambiguous' (la tx pudo haberse broadcasteado antes del throw).
+    mockSign.mockResolvedValue({
+      paymentRequest: {
+        authorization: { value: '1' },
+        signature: '0xsig',
+        network: 'kite',
+      },
+    });
+    mockSettle.mockRejectedValue(
+      new Error('Facilitator network error on settle: aborted due to timeout'),
+    );
+
+    const outcome = await callEscrow();
+
+    expect(outcome.status).toBe('failed');
+    expect(outcome.failureKind).toBe('ambiguous');
+    // El estado persistido es el NO auto-reclamable.
+    expect(mockRecordDebitSettleStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'resolving_settle' }),
+    );
+    // Y NO el que dispararía el re-envío ciego.
+    expect(mockRecordDebitSettleStatus).not.toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'reconciliation_pending' }),
+    );
+  });
+
+  it('T-198-Escrow-Unequivocal: hop2 rechazado por el facilitator → sigue en reconciliation_pending (el re-envío ES correcto)', async () => {
+    // Contra-ejemplo del anterior: probado que el hop 2 NO se ejecutó, re-enviarlo es
+    // para lo que existe el lado settle del reconciliador. Si esto también fuera
+    // `resolving_settle`, el seller nunca cobraría automáticamente.
+    failSettleUnequivocal();
+
+    const outcome = await callEscrow();
+
+    expect(outcome.status).toBe('failed');
+    expect(mockRecordDebitSettleStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'reconciliation_pending' }),
+    );
+    expect(mockRecordDebitSettleStatus).not.toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'resolving_settle' }),
+    );
+  });
+
   // ── T-4 (caller): closeSession con hop2 fail → finalize failed_ambiguous, NO refund ──
   it('T-4 caller: closeSession hop2-fail → finalize failed_ambiguous, NO refund', async () => {
     const db = makeIntentDb({

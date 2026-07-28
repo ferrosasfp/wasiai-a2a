@@ -256,19 +256,43 @@ export async function recordDebitHop1(args: {
   return data?.[0]?.persisted_tx_hash ?? null;
 }
 
-/** Flip terminal del ciclo de vida del consumo (settled / reconciliation_pending). */
+/**
+ * Flip del ciclo de vida del consumo.
+ *
+ * `settled` / `reconciliation_pending` son los terminales de siempre. HU-198 agrega
+ * `resolving_settle` para el hop 2 de resultado DESCONOCIDO: es el estado que el
+ * `claim_reconciliation` NO reclama sin tx previa, así que el reconciliador no
+ * re-envía a ciegas un pago que pudo haberse hecho (ver `settleEscrowAware`).
+ */
 export async function recordDebitSettleStatus(args: {
   intentId: string;
   ownerRef: string;
   keyId: string;
   nonce: string;
-  status: 'settled' | 'reconciliation_pending';
+  status: 'settled' | 'reconciliation_pending' | 'resolving_settle';
 }): Promise<void> {
-  await supabase.rpc('record_debit_settle_status', {
+  const { error } = await supabase.rpc('record_debit_settle_status', {
     p_intent_id: args.intentId,
     p_owner_ref: args.ownerRef,
     p_key_id: args.keyId,
     p_nonce: args.nonce,
     p_status: args.status,
   });
+  // HU-198: antes el error se DESCARTABA en silencio, y eso hacía invisible el peor
+  // modo de fallo: si la migración de esta HU no está aplicada, el RPC responde
+  // `INVALID_SETTLE_STATUS` al escribir `resolving_settle`, la fila se queda en
+  // `hop1_confirmed` — que SÍ es auto-reclamable — y el reconciliador vuelve a poder
+  // re-enviar el hop 2 a ciegas. Sin este log eso pasaba sin dejar rastro. Se loguea
+  // y NO se tira: el contrato de la función (nunca rechazar) no cambia, porque el
+  // caller está en un camino de money-safety donde un throw perdería el veredicto.
+  if (error) {
+    log.error(
+      {
+        intentId: args.intentId,
+        status: args.status,
+        detail: error.message,
+      },
+      'record_debit_settle_status failed — the lifecycle row was NOT updated (if the status is resolving_settle, check that the HU-198 migration is applied: an un-updated row stays auto-claimable and the reconciler could resend hop2 blind)',
+    );
+  }
 }
