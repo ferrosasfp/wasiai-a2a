@@ -9,6 +9,7 @@ import type {
   preHandlerHookHandler,
 } from 'fastify';
 import { resolveChainKey } from '../adapters/chain-resolver.js';
+import { readSettleValueDisposition } from '../adapters/errors.js';
 import {
   getAdaptersBundle,
   getDefaultChainKey,
@@ -574,6 +575,26 @@ export function requirePayment(
     } catch (err) {
       if (reply.sent) return;
       const detail = err instanceof Error ? err.message : String(err);
+      // HU-198: el 402 se manda igual (sin confirmación NO se puede dar acceso),
+      // pero un settle de resultado DESCONOCIDO no es lo mismo que uno rechazado y
+      // no puede quedar sólo como un 402 más en el log de accesos: la plata del
+      // caller PUDO haber salido. Además el nonce inbound ya quedó registrado más
+      // arriba (anti-replay), así que un reintento del MISMO header va a dar
+      // X402_REPLAY: si nadie mira este caso, el caller queda pagando sin servicio.
+      // Se emite con `error_code` estable y nivel error para que sea alertable.
+      if (readSettleValueDisposition(err) === 'unknown') {
+        request.log.error(
+          {
+            error_code: 'X402_SETTLE_UNKNOWN',
+            valueDisposition: 'unknown',
+            chainKey,
+            payTo,
+            requiredAmount,
+            detail,
+          },
+          'x402 inbound settle result UNKNOWN: the facilitator hop was cut without an answer, so the payment may have executed on-chain. Access denied (no confirmation) and the caller may have been charged — reconcile against the chain before treating this as unpaid.',
+        );
+      }
       return reply
         .status(402)
         .send(

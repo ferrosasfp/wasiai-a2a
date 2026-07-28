@@ -49,6 +49,15 @@ export type DownstreamSkipCode =
   | 'SIGNING_FAILED'
   | 'VERIFY_FAILED'
   | 'SETTLE_FAILED'
+  // HU-198: el hop al facilitator NO contestó y el pago PUDO haberse ejecutado
+  // igual (`FacilitatorSettleError` con `valueDisposition: 'unknown'` — abortar el
+  // HTTP no cancela un broadcast). Código PROPIO y separado de `SETTLE_FAILED` por
+  // la misma razón que `CHAIN_ENVIRONMENT_DRIFT` se separó de `MAINNET_NOT_ALLOWED`:
+  // son dos incidentes distintos que no se deben sumar en el mismo contador.
+  // `SETTLE_FAILED` significa "no se pagó" (el facilitator lo dijo, o no hubo ni
+  // request); `SETTLE_UNKNOWN` significa "no sé si se pagó", y ese leg NO se puede
+  // reintentar a ciegas ni dar por no pagado.
+  | 'SETTLE_UNKNOWN'
   // ── Observabilidad: NO cortan el leg ────────────────────────────────
   // No se pudo leer el balance del operador antes de settlear ⇒ el pre-check se
   // saltea y el settle sigue. SÓLO se emite en dos condiciones:
@@ -97,6 +106,13 @@ export type PublicDownstreamSkipCode =
   | 'INVALID_PRICE'
   // Resultado terminal: el leg no se pagó.
   | 'SETTLE_FAILED'
+  // HU-198. Resultado NO terminal: el pago quedó en estado desconocido. Se expone
+  // en vez de colapsarlo en `SETTLE_FAILED` porque las dos frases que el caller
+  // necesita son opuestas ("no se pagó" vs "puede haberse pagado") y porque
+  // `SETTLE_FAILED` afirma además que al caller no se le cobra por el leg, que acá
+  // no está establecido. NO revela config nuestra: dice el estado del pago, no qué
+  // hop ni qué facilitator ni qué env var.
+  | 'SETTLE_UNKNOWN'
   // El gateway no está configurado para settlear este leg (flag/allow-list/drift
   // de config). NO se dice cuál: nombrar la env var o el destino configurado es
   // exactamente la fuga que este mapeo evita.
@@ -136,6 +152,10 @@ const PUBLIC_SKIP_CODE: Record<DownstreamSkipCode, PublicDownstreamSkipCode> = {
   INVALID_PRICE: 'INVALID_PRICE',
   // Verbatim — resultado terminal.
   SETTLE_FAILED: 'SETTLE_FAILED',
+  // Verbatim — resultado NO terminal (HU-198). NO se colapsa en `SETTLE_FAILED`:
+  // eso volvería a afirmarle al caller que el leg no se pagó, que es justo lo que
+  // no sabemos.
+  SETTLE_UNKNOWN: 'SETTLE_UNKNOWN',
   // Genericizados — config del gateway.
   FLAG_OFF: 'NOT_CONFIGURED',
   CHAIN_ENVIRONMENT_DRIFT: 'NOT_CONFIGURED',
@@ -180,6 +200,8 @@ const PUBLIC_SKIP_MEANING: Record<PublicDownstreamSkipCode, string> = {
   INVALID_PRICE: 'El precio que publica el agente no es un monto válido.',
   SETTLE_FAILED:
     'Se intentó pagarle al agente y el pago no se pudo confirmar (al caller no se le cobra por este leg).',
+  SETTLE_UNKNOWN:
+    'Se intentó pagarle al agente y no llegó respuesta a tiempo: el pago puede haberse hecho o no. Queda marcado para revisión y NO se reintenta solo.',
   NOT_CONFIGURED:
     'El gateway no está configurado para pagar ese leg (por eso no se movió dinero).',
   UNAVAILABLE:

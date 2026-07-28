@@ -40,15 +40,22 @@
  *   · 4 de los 5 caminos de settle YA están acotados a 30 s en el repo
  *     (`adapters/base/payment.ts:349`, `avalanche:328`, `tempo:281`,
  *     `kite-ozone` modo x402 `:594`), así que ahí no falta nada.
- *   · Los 2 que faltan son `kite-ozone/payment.ts:317` (`/verify`) y `:362`
- *     (`/settle`) en modo **pieverse**, que es el DEFAULT
- *     (`getFacilitatorMode()`, `payment.ts:66`; `.env.example`:
+ *   · Los 2 que faltaban eran `/verify` y `/settle` de `kite-ozone/payment.ts` en
+ *     modo **pieverse**, que es el DEFAULT (`getFacilitatorMode()`; `.env.example`:
  *     `KITE_FACILITATOR_MODE=pieverse` — "current production path"), o sea el
  *     camino VIVO, no código muerto. Pasar de "sin cota" a "cota + estado
- *     `unknown` manejado" es una decisión de money-path con su propia HU: hay que
- *     definir qué hace el gateway con un settle de resultado desconocido (¿lo
- *     reconcilia?, ¿lo reintenta?, ¿lo marca para revisión?), y eso no se
- *     resuelve poniendo un timeout.
+ *     `unknown` manejado" era una decisión de money-path con su propia HU: había
+ *     que definir qué hace el gateway con un settle de resultado desconocido (¿lo
+ *     reconcilia?, ¿lo reintenta?, ¿lo marca para revisión?), y eso no se resuelve
+ *     poniendo un timeout.
+ *
+ * CERRADO EN LA HU-198: esos 2 hops ya tienen techo, con env propia
+ * (`KITE_FACILITATOR_TIMEOUT_MS`, default 30 s = la norma de arriba) y con el
+ * estado `unknown` representado TIPADO (`SettleValueDisposition` /
+ * `FacilitatorSettleError` en `adapters/errors.ts`) en vez de colapsado en el mismo
+ * camino de error que un rechazo del facilitator. O sea que hoy los 5 caminos de
+ * settle tienen techo. Lo que esta env sigue sin cubrir es el egress de settlement
+ * en general: NO pasa por `ssrfFetch`, cada adapter trae su propio techo.
  *
  * QUÉ CUBRE ESTE TECHO, EXACTAMENTE
  * ---------------------------------

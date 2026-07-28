@@ -13,6 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { FacilitatorSettleError } from '../adapters/errors.js';
 import type { Agent } from '../types/index.js';
 // it2 BLQ-MED-1: el productor REAL de `Agent.payment` (módulo puro, no mockeado)
 // para ejercitar el camino card → readPaymentSpec → gate, en vez de inyectar un
@@ -540,6 +541,64 @@ describe('signAndSettleDownstream — skip codes', () => {
     expect(result).toBeNull();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ code: 'SETTLE_FAILED' }),
+      expect.any(String),
+    );
+  });
+
+  // ── HU-198: un settle de resultado DESCONOCIDO no es un settle fallido ──
+  //
+  // El doble del adapter tira lo MISMO que tira el adapter real cuando el techo de
+  // wall-clock corta el hop `pieverse` (ver `kite-ozone/payment.pieverse-ceiling.
+  // test.ts`, que prueba ese extremo con un servidor node:http real). Acá se prueba
+  // la mitad del CONSUMIDOR: que la disposición del valor gobierne el veredicto del
+  // leg en vez de colapsarse en "no se pagó".
+  it('T-198-SettleUnknown: settle tira con valueDisposition unknown → SETTLE_UNKNOWN (NO SETTLE_FAILED)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockFujiSettle.mockRejectedValueOnce(
+      new FacilitatorSettleError(
+        'Facilitator network error on settle: timeout',
+        'unknown',
+      ),
+    );
+    const logger = makeLogger();
+    const result = await signAndSettleDownstream(makeAgent(), logger);
+
+    // El leg NO devuelve un recibo: sin confirmación NO se puede afirmar que se
+    // pagó (eso marcaría como cobrado algo no confirmado).
+    expect(result).toBeNull();
+    // Y TAMPOCO se reporta como "no se pagó": el código es el propio del estado
+    // desconocido, que es el que le dice al operador que hay que reconciliar antes
+    // de reintentar. Si alguien colapsa este camino en SETTLE_FAILED, este test se
+    // pone rojo.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'SETTLE_UNKNOWN',
+        valueDisposition: 'unknown',
+      }),
+      expect.any(String),
+    );
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'SETTLE_FAILED' }),
+      expect.any(String),
+    );
+  });
+
+  it('T-198-SettleNotSent: settle tira con valueDisposition not-sent → SETTLE_FAILED (el request no salió)', async () => {
+    // La otra mitad de la distinción: probado que NO hubo request, el leg SÍ es
+    // "no se pagó" y se puede reintentar. Sin este test, `SETTLE_UNKNOWN` podría
+    // emitirse para cualquier throw tipado y el test de arriba seguiría verde.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockFujiSettle.mockRejectedValueOnce(
+      new FacilitatorSettleError('ECONNREFUSED', 'not-sent'),
+    );
+    const logger = makeLogger();
+    const result = await signAndSettleDownstream(makeAgent(), logger);
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'SETTLE_FAILED',
+        valueDisposition: 'not-sent',
+      }),
       expect.any(String),
     );
   });

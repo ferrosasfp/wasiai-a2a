@@ -423,6 +423,14 @@ export async function settlePaymentIntentOnChain(params: {
       log.error({ intentId, detail }, 'settle() threw');
       // AMBIGUO: el settle() lanzó pero la tx PUDO haberse broadcasteado antes
       // del throw → NO sabemos si los fondos se movieron → NO refundar.
+      //
+      // HU-198: este `ambiguous` es la MISMA semántica que
+      // `SettleValueDisposition = 'unknown'` (`adapters/errors.ts`), y por eso el
+      // techo de wall-clock del hop `pieverse` NO necesitó tocar esta función: un
+      // abort del `/settle` llega acá como throw y ya cae del lado money-safe (no
+      // refund → reconciliación). Se clasifican TODOS los throws como ambiguos a
+      // propósito, incluido el `'not-sent'`: acá lo conservador cuesta una revisión
+      // manual, y lo optimista costaría un doble crédito.
       return {
         status: 'failed',
         txHash: null,
