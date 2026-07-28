@@ -37,6 +37,23 @@
 --     `CREATE OR REPLACE FUNCTION`. El DROP va dentro de la misma transacción, así que
 --     no hay ventana en la que la función no exista (otras sesiones esperan el lock).
 --
+--     ⚠️ RUNBOOK — VENTANA DEL SCHEMA CACHE DE PostgREST (AR#2 MNR-5): "no hay ventana"
+--     vale a nivel POSTGRES, pero NO a nivel PostgREST. Un DROP+CREATE que cambia la
+--     FIRMA de retorno puede hacer que PostgREST responda `PGRST202` ("Could not find the
+--     function ... in the schema cache") hasta que recargue. En el código eso cae en la
+--     rama `error` de `recordDebitSettleStatus` ⟹ `return false` + log loud: NO se toma
+--     una decisión de dinero equivocada, pero el estado del ciclo de vida NO se escribe
+--     durante esa ventana. Para cerrarla: `NOTIFY pgrst, 'reload schema';` (esta migración
+--     es previa a que se adoptara; la 20260728020000 ya lo incluye) o esperar el reload
+--     automático antes de deployar el código.
+--
+--     ⚠️ ESTA MIGRACIÓN NO ES RE-EJECUTABLE DESPUÉS DE 20260728020000 (descubierto
+--     ejecutando): su `CREATE FUNCTION` declara `TABLE(applied boolean)` y, si la #3 ya
+--     corrió, Postgres rechaza con `42P13: cannot change return type`. Falla RUIDOSA, que
+--     es el lado seguro (no degrada la función en silencio), pero significa que hay que
+--     aplicar en orden y una sola vez. `scripts/apply-hu198-migration.mjs` deriva del
+--     estado REAL de la base qué falta aplicar, justamente por esto.
+--
 -- (2) MNR-4 — `claim_reconciliation` acepta reclamar una fila `resolving_settle`
 --     CUANDO EL LADO ES REFUND.
 --     POR QUÉ (regresión introducida por 20260728000000): una fila que quedó en
@@ -57,6 +74,26 @@
 --     patas son hechos independientes y el refund del buyer es correcto igual. Al
 --     flipear a `resolved_refunded` la fila sale de `PENDING_STATUSES`, así que ese
 --     residuo hay que buscarlo en el ledger del operador, no en `listPending()`.
+--
+--     SUB-CASO NOMBRADO (AR#2 MNR-4) — esta rama NO exige `debit_resolution_tx_hash IS
+--     NULL`, así que TAMBIÉN puede reembolsar una fila que ya tiene un hash de hop 2 sin
+--     verificar, y al flipear a `resolved_refunded` la saca de `PENDING_STATUSES`.
+--     POR QUÉ NO SE AGREGA EL `AND`: agregarlo dejaría a ese subconjunto sin reembolso
+--     AUTOMÁTICO y sin nadie que lo tome — cuando el hop 1 re-verifica `not_confirmed` el
+--     lado elegido es `refund`, así que el lado settle (el único que sabe verificar un
+--     hash) nunca corre para esa fila. O sea que el `AND` cambiaría "reembolso correcto +
+--     residuo auditable" por "buyer sin reembolsar hasta que alguien lo note", que es
+--     peor para el único actor que no tiene ninguna culpa acá.
+--     MITIGACIÓN VIGENTE: el `COALESCE` de `record_reconciliation_resolution` PRESERVA
+--     `debit_resolution_tx_hash`, así que el hash del hop 2 queda en la fila y es
+--     auditable por `intent_id` aunque el estado ya sea terminal. La query para
+--     inventariar el subconjunto:
+--       SELECT intent_id, debit_resolution_tx_hash, debit_amount_atomic
+--         FROM a2a_payment_intent_debit_signatures
+--        WHERE debit_settle_status = 'resolved_refunded'
+--          AND debit_resolution_tx_hash IS NOT NULL;
+--     Cada fila que salga ahí es un hop 2 que hay que verificar contra la cadena para
+--     cuantificar la pérdida del operador.
 --
 -- (3) MNR-3 — el UPDATE de `record_debit_settle_status` agrega
 --     `AND intent_id = p_intent_id`. Heredado de 191b: la función valida el ownership

@@ -2887,7 +2887,10 @@ export type Database = {
         // guard de transición rechazó el write", que el caller TIENE que distinguir
         // (ver `recordDebitSettleStatus`). Mismo shape que
         // `record_reconciliation_resolution`, abajo.
-        Returns: { applied: boolean }[];
+        // AR#2 BLQ-BAJO-1 (migración 20260728020000): + `current_status`, el estado REAL
+        // con el que quedó la fila. Existe para que la alerta pueda NOMBRAR el estado en
+        // vez de afirmar una consecuencia que era falsa en todos sus casos alcanzables.
+        Returns: { applied: boolean; current_status: string | null }[];
       };
       claim_reconciliation: {
         Args: {

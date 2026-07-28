@@ -387,8 +387,21 @@ export class KiteOzonePaymentAdapter implements EvmPaymentAdapter {
       throw new Error(
         `Facilitator returned HTTP ${response.status} on /verify`,
       );
-    const result = (await response.json()) as PieverseVerifyResponse;
-    return { valid: result.valid, error: result.error };
+    // AR#2 BLQ-MEDIO-1, mismo eje que en `settle`: el techo corta también el consumo del
+    // body, así que contra un peer que trickle-feedea el abort ocurre ACÁ. El CONTRATO de
+    // `/verify` NO cambia (sigue siendo un `Error` común, sin disposición de valor: un
+    // verify abortado no puede dejar plata en el aire, y marcarlo `unknown` mandaría a
+    // reconciliar dinero que nunca se movió). Lo que se arregla es que el error salga con
+    // el MISMO mensaje en los dos ejes en vez de un `TimeoutError` sin prefijo — el propio
+    // candado `T-198-VERIFY` no cubría este eje.
+    try {
+      const result = (await response.json()) as PieverseVerifyResponse;
+      return { valid: result.valid, error: result.error };
+    } catch (err) {
+      throw new Error(
+        `Facilitator network error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   async settle(req: SettleRequest): Promise<SettleResult> {
@@ -439,11 +452,41 @@ export class KiteOzonePaymentAdapter implements EvmPaymentAdapter {
         classifySettleTransportError(err),
       );
     }
+    // El facilitator CONTESTÓ rechazando: eso es un VEREDICTO suyo, no una incógnita de
+    // transporte, así que sigue por el camino de error preexistente (`Error` común) y
+    // queda FUERA del try de abajo a propósito. (Reclasificar este camino —un 502 que
+    // pudo llegar después de un broadcast— es el BLQ-ALTO del AR, Scope OUT: toca los 5
+    // adapters y tiene su propia HU. Hay un candado de no-regresión:
+    // `T-198-AR2-HTTP-ERROR`.)
     if (!response.ok)
       throw new Error(
         `Facilitator returned HTTP ${response.status} on /settle`,
       );
-    const result = (await response.json()) as PieverseSettleResult;
+    // ⚠️ AR#2 BLQ-MEDIO-1 — LA LECTURA DEL BODY TAMBIÉN ESTÁ BAJO EL TECHO.
+    //
+    // Esto vivía FUERA del try de arriba, y era el agujero en el caso CENTRAL de la HU:
+    // el `AbortSignal` no acota sólo la espera de los headers, acota también el consumo
+    // del body. Contra un peer que TRICKLE-FEEDEA —el único caso realmente sin cota,
+    // porque el `bodyTimeout` de undici se refresca en cada chunk— el reloj se cumple
+    // ACÁ, y lo que salía era un `DOMException/TimeoutError` PELADO: no
+    // `FacilitatorSettleError`, `readSettleValueDisposition() === undefined`, y por lo
+    // tanto el caller inbound recibía "Payment settlement failed" (le afirmábamos que no
+    // se le cobró) sin fila de reconciliación. O sea: la HU fallaba exactamente en el
+    // caso que existe para acotar.
+    //
+    // Al dinero le da lo mismo si el reloj se cumplió antes o después de los headers, así
+    // que el canal por el que se reporta tampoco puede cambiar. Un body que no parsea
+    // (JSON malformado) cae acá igual y también es `unknown`: el facilitator contestó 200
+    // pero no sabemos qué dijo, así que no sabemos si pagó.
+    let result: PieverseSettleResult;
+    try {
+      result = (await response.json()) as PieverseSettleResult;
+    } catch (err) {
+      throw new FacilitatorSettleError(
+        `Facilitator body read failed on settle: ${err instanceof Error ? err.message : String(err)}`,
+        classifySettleTransportError(err),
+      );
+    }
     return {
       txHash: result.txHash,
       success: result.success,

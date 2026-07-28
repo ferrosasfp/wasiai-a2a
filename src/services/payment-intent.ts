@@ -649,10 +649,19 @@ export async function settleEscrowAware(params: {
       //     facilitator contestó `success:false`). Re-enviar es CORRECTO y es para
       //     lo que el reconciliador existe ⟹ `reconciliation_pending` (sin cambio).
       //   · 'ambiguous'   → el hop 2 pudo haber pagado (el settle TIRÓ, o la
-      //     re-verificación on-chain lo contradijo) ⟹ `resolving_settle`, que el
-      //     claim NO reclama sin tx previa (ni por el lado settle ni por el refund)
-      //     pero que SIGUE en `PENDING_STATUSES` ⟹ no auto-paga, no auto-reembolsa,
-      //     y aparece igual en `listPending()` para que un humano lo resuelva.
+      //     re-verificación on-chain lo contradijo) ⟹ `resolving_settle`, que el LADO
+      //     SETTLE del claim NO reclama sin tx previa, pero que SIGUE en
+      //     `PENDING_STATUSES` ⟹ no auto-PAGA, y aparece igual en `listPending()` para
+      //     que un humano lo resuelva.
+      //
+      //     ⚠️ CORRECCIÓN (AR#2 MNR-3): la versión anterior de este comentario decía "ni
+      //     por el lado settle ni por el refund" y "no auto-reembolsa". Es FALSO desde la
+      //     migración 20260728010000 (MNR-4): el lado REFUND **sí** puede reclamar esta
+      //     fila, a propósito. Si el hop 1 re-verifica `not_confirmed`, los fondos del
+      //     buyer nunca salieron del escrow y su débito off-chain TIENE que revertirse;
+      //     bloquear eso era una regresión. La asimetría es el punto: el refund es
+      //     budget-only e idempotente y no manda ningún hop 2, así que no puede
+      //     doble-pagar. Lo que este estado bloquea es EL RE-ENVÍO, no el reembolso.
       //
       // NO se inventó un estado nuevo: `resolving_settle` ya existe en el CHECK y en
       // el índice `idx_debit_sig_resolving` desde 191c. Lo único que hizo falta fue

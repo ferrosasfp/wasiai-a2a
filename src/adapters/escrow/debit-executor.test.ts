@@ -478,7 +478,7 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
   it('T-198-AR: applied=false (guard rechazó el write) → false + log loud, sin error del RPC', async () => {
     mockLogError.mockClear();
     mockRpc.mockResolvedValue({
-      data: [{ applied: false }],
+      data: [{ applied: false, current_status: 'settled' }],
       error: null,
       // biome-ignore lint/suspicious/noExplicitAny: supabase rpc test double
     } as any);
@@ -495,9 +495,47 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
     // fallo que el `if (error)` NO cubría.
     expect(ok).toBe(false);
     expect(mockLogError).toHaveBeenCalledWith(
-      expect.objectContaining({ applied: false, status: 'resolving_settle' }),
-      expect.stringContaining('REJECTED the write'),
+      expect.objectContaining({
+        applied: false,
+        status: 'resolving_settle',
+        // AR#2 BLQ-BAJO-1: el estado REAL viaja al log para poder nombrarlo.
+        currentStatus: 'settled',
+      }),
+      expect.stringContaining('REJECTED this write'),
     );
+  });
+
+  // ── AR#2 BLQ-BAJO-1: la alerta dice el HECHO, no una consecuencia inventada ──
+  it('T-198-AR2: la alerta NOMBRA el estado real y NO afirma que la fila sigue auto-reclamable', async () => {
+    // La versión anterior afirmaba "the row REMAINS auto-claimable and the reconciler
+    // could resend hop2 blind". Es FALSO en todos los casos alcanzables: `applied=false`
+    // sólo ocurre desde estados que ni el lado settle ni el refund pueden reclamar para
+    // mandar un hop 2. Y en el caso F la verdad es que el seller YA cobró dos veces, así
+    // que el mensaje mandaba al operador a mirar lo que no era.
+    mockLogError.mockClear();
+    mockRpc.mockResolvedValue({
+      data: [{ applied: false, current_status: 'resolved_settled' }],
+      error: null,
+      // biome-ignore lint/suspicious/noExplicitAny: supabase rpc test double
+    } as any);
+
+    await recordDebitSettleStatus({
+      intentId: 'intent-1',
+      ownerRef: 'tenant-A',
+      keyId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      nonce: '7',
+      status: 'resolving_settle',
+    });
+
+    const msg = String(mockLogError.mock.calls[0]?.[1]);
+    // Dice el HECHO: qué quería escribir y en qué estado quedó.
+    expect(msg).toContain('resolved_settled');
+    expect(msg).toMatch(/KEEPS its current status/);
+    // Y pide LEER antes de concluir, en vez de dar un diagnóstico.
+    expect(msg).toMatch(/not a diagnosis/i);
+    // PROHIBIDO volver a la afirmación falsa.
+    expect(msg).not.toMatch(/auto-claimable/i);
+    expect(msg).not.toMatch(/resend hop2 blind/i);
   });
 
   it('T-198-AR: applied=true → true y NINGÚN log de error', async () => {
@@ -505,7 +543,7 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
     // dejaría de significar algo.
     mockLogError.mockClear();
     mockRpc.mockResolvedValue({
-      data: [{ applied: true }],
+      data: [{ applied: true, current_status: 'resolving_settle' }],
       error: null,
       // biome-ignore lint/suspicious/noExplicitAny: supabase rpc test double
     } as any);

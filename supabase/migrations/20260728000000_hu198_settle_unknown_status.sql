@@ -33,11 +33,17 @@
 -- POR QUÉ `resolving_settle` Y NO UN ESTADO NUEVO: el estado que hace falta ("hay un
 -- hop 2 cuyo resultado no conozco: no lo re-mandes solo, pero seguí mostrándolo") ya
 -- existe con esa semántica exacta:
---   · `claim_reconciliation` NO lo reclama sin `debit_resolution_tx_hash`, ni por el
---     lado settle (exige tx) ni por el refund (v_target sería `resolving_refund`)
---     ⟹ el reconciliador NO auto-paga ni auto-reembolsa esa fila.
+--   · el LADO SETTLE de `claim_reconciliation` NO lo reclama sin
+--     `debit_resolution_tx_hash` ⟹ el reconciliador NO auto-PAGA esa fila.
 --   · Sigue en `PENDING_STATUSES` (`src/services/reconciliation.ts`) ⟹ aparece en
 --     `GET /dashboard/api/reconciliation` para que un humano lo resuelva.
+--
+-- ⚠️ CORRECCIÓN (AR#2 MNR-3): la versión original de este header decía que el claim no lo
+-- reclamaba "ni por el lado settle ni por el refund" y que "NO auto-reembolsa". Quedó
+-- FALSO con la migración siguiente (20260728010000, MNR-4), que habilita el lado REFUND a
+-- propósito: si el hop 1 re-verifica `not_confirmed`, el débito off-chain del buyer tiene
+-- que revertirse igual, y bloquearlo era una regresión. Lo que este estado bloquea es EL
+-- RE-ENVÍO del hop 2, no el reembolso.
 -- Agregar un 8º valor al CHECK habría duplicado esa semántica en dos nombres.
 --
 -- GUARD DE TRANSICIÓN (más estricto que el resto del RPC, a propósito): el valor nuevo

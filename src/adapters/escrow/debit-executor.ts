@@ -299,17 +299,24 @@ export async function recordDebitSettleStatus(args: {
   // AR BLQ-MEDIO-2: el `error` NO era el único modo de fallo. El guard de transición
   // (migración 20260728000000) hace que un UPDATE de 0 filas sea un resultado NORMAL,
   // así que con el `RETURNS void` original el caller no podía distinguir "quedó
-  // escrito" de "el guard lo rechazó y la fila sigue auto-reclamable". Desde
-  // 20260728010000 el RPC devuelve `applied`, y ACÁ se consume: sin esto, el candado
-  // de toda la HU colgaba de un write incapaz de reportar su propio fracaso.
+  // escrito" de "el guard lo rechazó". Desde 20260728010000 el RPC devuelve `applied`,
+  // y ACÁ se consume: sin esto, el candado de toda la HU colgaba de un write incapaz de
+  // reportar su propio fracaso.
   //
   // `undefined` (RPC viejo todavía deployado, o forma inesperada) se trata como NO
   // confirmado a propósito: preferimos un warn de más a creer que el candado cerró.
   // Doble cast a través de `unknown`: con el RPC VIEJO todavía deployado la respuesta
   // real es `null`, no la fila (el tipo generado ya declara la forma nueva). El
   // `?.[0]?.applied` cubre las dos, y `undefined` cae al camino de "no confirmado".
-  const applied = (data as unknown as { applied?: boolean }[] | null)?.[0]
-    ?.applied;
+  const row = (
+    data as unknown as
+      | { applied?: boolean; current_status?: string | null }[]
+      | null
+  )?.[0];
+  const applied = row?.applied;
+  // AR#2 BLQ-BAJO-1: el estado REAL de la fila (migración 20260728020000). Es lo que
+  // reemplaza a la consecuencia inventada del mensaje anterior.
+  const currentStatus = row?.current_status ?? null;
   if (applied !== true) {
     log.error(
       {
@@ -318,10 +325,25 @@ export async function recordDebitSettleStatus(args: {
         nonce: args.nonce,
         status: args.status,
         applied: applied ?? null,
+        currentStatus,
       },
+      // ⚠️ AR#2 BLQ-BAJO-1 — ESTE MENSAJE DICE LO QUE SE SABE, NO UNA CONSECUENCIA.
+      //
+      // La versión anterior afirmaba "the row REMAINS auto-claimable and the reconciler
+      // could resend hop2 blind", y era FALSO en todos sus casos alcanzables:
+      // `applied=false` sólo ocurre cuando el guard rechazó, o sea desde un status que
+      // NO está en (NULL, 'hop1_confirmed', 'reconciliation_pending') — y ninguno de
+      // esos es reclamable para mandar un hop 2 ('settled'/'resolved_*' no los reclama
+      // nadie; 'resolving_*' sólo el lado refund, que no manda hop 2).
+      //
+      // Peor: el escenario donde esta alerta más importa es el caso F (ver TD-198-01 en
+      // `services/reconciliation.ts`), donde la verdad es que el seller YA COBRÓ DOS
+      // VECES. Mandar al operador a "revisar si se puede re-enviar" lo manda a mirar lo
+      // que no es. Ahora se reporta el HECHO (el guard rechazó, la fila quedó en tal
+      // estado) y se le pide LEER antes de concluir.
       applied === false
-        ? 'record_debit_settle_status applied=false — the transition guard REJECTED the write, so the lifecycle row still holds its previous status. For resolving_settle this means the row REMAINS auto-claimable and the reconciler could resend hop2 blind: reconcile this intent by hand.'
-        : 'record_debit_settle_status returned no `applied` flag — cannot confirm the lifecycle row was updated (is migration 20260728010000 applied?). Treated as NOT confirmed.',
+        ? `record_debit_settle_status applied=false — the transition guard REJECTED this write: the lifecycle row was NOT set to '${args.status}' and it KEEPS its current status (${currentStatus ?? 'unreadable'}). This is a state-machine disagreement, NOT a diagnosis: do not assume what happened to the money from this line. Read debit_settle_status and debit_resolution_tx_hash for this intent, and check the chain for a hop2 disbursement to the seller, before concluding anything.`
+        : 'record_debit_settle_status returned no `applied` flag — cannot confirm the lifecycle row was updated (are migrations 20260728010000/20260728020000 applied? a PostgREST schema-cache reload may be pending). Treated as NOT confirmed.',
     );
     return false;
   }

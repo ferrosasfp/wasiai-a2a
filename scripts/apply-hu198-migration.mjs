@@ -4,6 +4,7 @@
  * (bdwv) vía Management API:
  *   1. 20260728000000_hu198_settle_unknown_status.sql   (`resolving_settle` escribible)
  *   2. 20260728010000_hu198_settle_status_applied.sql   (`applied` + MNR-4 + MNR-3)
+ *   3. 20260728020000_hu198_settle_status_current.sql   (`current_status`, AR#2 BLQ-BAJO-1)
  * Idempotente (CREATE OR REPLACE; la 2ª hace DROP+CREATE dentro de su transacción).
  *
  * ⚠️ SOLO BDWV. A CALDZ NO SE TOCA: es la base de dinero de PRODUCCIÓN y queda para
@@ -178,7 +179,9 @@ async function readPostState(label) {
   const accepts = newValue.text.includes('INTENT_NOT_FOUND');
   const rejectsNew = newValue.text.includes('INVALID_SETTLE_STATUS');
   const rejectsBogus = bogus.text.includes('INVALID_SETTLE_STATUS');
-  const returnsApplied = /TABLE\(applied boolean\)/i.test(retType.text);
+  // La #2 dejó `TABLE(applied boolean)`; la #3 le suma `current_status`.
+  const returnsApplied = /TABLE\(applied boolean/i.test(retType.text);
+  const returnsCurrentStatus = /current_status text/i.test(retType.text);
   // La rama de MNR-4, tal cual quedó en la función deployada.
   const refundCanClaimResolvingSettle =
     /p_side\s*=\s*'refund'\s+AND\s+debit_settle_status\s*=\s*'resolving_settle'/i.test(
@@ -193,7 +196,10 @@ async function readPostState(label) {
     `  (a) p_status='definitely_not_a_status' → ${rejectsBogus ? 'RECHAZADO ⇒ el guard sigue cerrado' : `inesperado: ${bogus.text.slice(0, 200)}`}`,
   );
   console.log(
-    `  (b) record_debit_settle_status returns → ${returnsApplied ? 'TABLE(applied boolean) ⇒ 20260728010000 APLICADA' : `${retType.text.slice(0, 120)} ⇒ NO aplicada`}`,
+    `  (b) record_debit_settle_status returns → ${retType.text.slice(0, 140)}`,
+  );
+  console.log(
+    `      applied ⇒ ${returnsApplied ? '20260728010000 APLICADA' : 'NO aplicada'} · current_status ⇒ ${returnsCurrentStatus ? '20260728020000 APLICADA' : 'NO aplicada'}`,
   );
   console.log(
     `  (c) claim_reconciliation refund/resolving_settle → ${refundCanClaimResolvingSettle ? 'PRESENTE en la función deployada ⇒ MNR-4 cerrado' : 'AUSENTE ⇒ el refund del buyer sigue inalcanzable'}`,
@@ -202,21 +208,53 @@ async function readPostState(label) {
     accepts,
     rejectsBogus,
     returnsApplied,
+    returnsCurrentStatus,
     refundCanClaimResolvingSettle,
   };
 }
 
 // Las dos migraciones de HU-198, EN ORDEN (la 2ª asume el guard de la 1ª).
+/**
+ * Las tres migraciones de HU-198, EN ORDEN, con la condición que decide si HAY QUE
+ * aplicarlas.
+ *
+ * ⚠️ POR QUÉ HAY CONDICIONES Y NO SE RE-APLICA TODO (descubierto ejecutando): la #1 usa
+ * `CREATE OR REPLACE ... RETURNS void`, así que sobre una base que YA tiene la #2 falla
+ * con `42P13: cannot change return type of existing function`. O sea que la #1 NO es
+ * re-ejecutable después de la #2.
+ *
+ * Eso es el lado SEGURO —falla ruidosa en vez de degradar la función en silencio— pero
+ * significa que un applier que re-corre todo a ciegas se rompe en la 2ª pasada. Un
+ * runner de migraciones real lleva registro de lo aplicado; acá el "registro" se deriva
+ * del ESTADO REAL de la base (las mismas sondas del post-estado), que es más honesto que
+ * una tabla de control que puede desincronizarse.
+ */
 const MIGRATIONS = [
-  '20260728000000_hu198_settle_unknown_status.sql',
-  '20260728010000_hu198_settle_status_applied.sql',
+  {
+    file: '20260728000000_hu198_settle_unknown_status.sql',
+    // Sólo si falta el `IN` ampliado Y la función todavía es `void` (si ya la
+    // reescribió la #2/#3, este archivo no puede correr: ver el ⚠️ de arriba).
+    needed: (st) => !st.accepts && !st.returnsApplied,
+  },
+  {
+    file: '20260728010000_hu198_settle_status_applied.sql',
+    needed: (st) => !st.returnsApplied || !st.refundCanClaimResolvingSettle,
+  },
+  {
+    file: '20260728020000_hu198_settle_status_current.sql',
+    needed: (st) => !st.returnsCurrentStatus,
+  },
 ];
 
 const verifyOnly = process.argv.includes('--verify-only');
 
 if (!verifyOnly) {
-  await readPostState('ANTES');
-  for (const file of MIGRATIONS) {
+  const before = await readPostState('ANTES');
+  for (const { file, needed } of MIGRATIONS) {
+    if (!needed(before)) {
+      console.log(`\n[skip]  ${file} → su efecto YA está en la base`);
+      continue;
+    }
     const sql = readFileSync(resolve(REPO, 'supabase', 'migrations', file), 'utf8');
     console.log(`\n[apply] ${file} → ${TARGET_REF}`);
     const started = Date.now();
@@ -240,6 +278,10 @@ const checks = [
     'record_debit_settle_status NO devuelve applied (20260728010000)',
   ],
   [
+    after.returnsCurrentStatus,
+    'record_debit_settle_status NO devuelve current_status (20260728020000)',
+  ],
+  [
     after.refundCanClaimResolvingSettle,
     'claim_reconciliation NO deja al refund reclamar resolving_settle (MNR-4)',
   ],
@@ -250,4 +292,4 @@ if (failed.length > 0) {
   for (const f of failed) console.error(`  · ${f}`);
   process.exit(1);
 }
-console.log('\n[OK] Post-estado verificado LEYENDO DE LA BASE: los 4 chequeos pasan.');
+console.log('\n[OK] Post-estado verificado LEYENDO DE LA BASE: los 5 chequeos pasan.');

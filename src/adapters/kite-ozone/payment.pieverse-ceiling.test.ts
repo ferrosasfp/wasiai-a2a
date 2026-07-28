@@ -37,7 +37,10 @@ import {
 } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { FacilitatorSettleError } from '../errors.js';
+import {
+  FacilitatorSettleError,
+  readSettleValueDisposition,
+} from '../errors.js';
 import { _resetWalletClient, KiteOzonePaymentAdapter } from './payment.js';
 
 /** Servidor que ACEPTA la conexión y nunca escribe nada (peer mudo). */
@@ -45,6 +48,45 @@ function createSilentServer(): HttpServer {
   return createHttpServer(() => {
     // Ni writeHead ni end: el request queda colgado para siempre.
   });
+}
+
+/**
+ * AR#2 BLQ-MEDIO-1 — servidor que MANDA LOS HEADERS y después TRICKLE-FEEDEA el body
+ * para siempre (un espacio cada `gapMs`, sin `end()`).
+ *
+ * ⚠️ ESTE es el caso que la HU existe para acotar, y era el que NINGÚN test ejercitaba:
+ * los 6 originales usaban sólo `createSilentServer()` (peer que nunca escribe headers).
+ * El peer MUDO ya estaba acotado por undici a 300 s (`headersTimeout`/`bodyTimeout`);
+ * el que NO tiene cota es el que trickle-feedea, porque `bodyTimeout` se REFRESCA en
+ * cada chunk. Ver `work-item.md` §"Corrección al encuadre inicial" y
+ * `lib/outbound-timeout.ts` §"LOS DOS EJES".
+ *
+ * Y es justo el caso donde el `AbortSignal` corta DURANTE `response.json()`, o sea
+ * FUERA del `try` que envolvía sólo al `fetch`: por eso el error salía como
+ * `DOMException/TimeoutError` pelado en vez de `FacilitatorSettleError`.
+ */
+function createTrickleBodyServer(gapMs = 50): HttpServer {
+  const timers = new Set<NodeJS.Timeout>();
+  const server = createHttpServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    // Un JSON que NUNCA se completa: el parser no puede resolver hasta el `end()`.
+    res.write('{"success":');
+    const t = setInterval(() => {
+      // Espacios: JSON válido como whitespace, así que el body sigue siendo parseable
+      // "en progreso" y el peer nunca se queda mudo (refresca el bodyTimeout de undici).
+      res.write(' ');
+    }, gapMs);
+    timers.add(t);
+    res.on('close', () => {
+      clearInterval(t);
+      timers.delete(t);
+    });
+  });
+  server.on('close', () => {
+    for (const t of timers) clearInterval(t);
+    timers.clear();
+  });
+  return server;
 }
 
 function listen(server: HttpServer): Promise<string> {
@@ -176,6 +218,93 @@ describe('HU-198 — techo de los hops pieverse (kite-ozone)', () => {
     const err = await adapter.settle({ ...PROOF }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(FacilitatorSettleError);
     expect((err as FacilitatorSettleError).valueDisposition).toBe('not-sent');
+  });
+
+  // ════════════════════════════════════════════════════════════════════
+  // AR#2 BLQ-MEDIO-1 — el techo que se cumple DURANTE EL BODY
+  // ════════════════════════════════════════════════════════════════════
+  it('T-198-AR2-TRICKLE-SETTLE: el techo que corta durante el body SIGUE dando unknown tipado', async () => {
+    // EL CASO CENTRAL DE LA HU. El `work-item.md` establece que el peer mudo ya estaba
+    // acotado por undici a 300 s y que "lo verdaderamente ilimitado es el peer que
+    // trickle-feedea". Acá el abort ocurre leyendo el body, no esperando los headers.
+    //
+    // La propiedad es sobre LA PLATA y es la MISMA que T-198-SETTLE-UNKNOWN: el gateway
+    // declara "no sé si se pagó". Que el reloj se cumpla antes o después de los headers
+    // no cambia nada de lo que le pasó al dinero, así que no puede cambiar el canal por
+    // el que se reporta.
+    server = createTrickleBodyServer(50);
+    process.env.KITE_FACILITATOR_URL = await listen(server);
+    const adapter = new KiteOzonePaymentAdapter();
+
+    const started = Date.now();
+    const err = await adapter.settle({ ...PROOF }).catch((e: unknown) => e);
+    const elapsed = Date.now() - started;
+
+    // 1. Cortó por el techo (300 ms), no por el bodyTimeout de undici (300 s), que en
+    //    este servidor NUNCA dispara porque se refresca en cada chunk.
+    expect(elapsed).toBeLessThan(15_000);
+
+    // 2. Y salió por el canal TIPADO. Antes del fix esto era un DOMException/TimeoutError
+    //    pelado: `instanceof FacilitatorSettleError === false` y
+    //    `readSettleValueDisposition(err) === undefined`, con la consecuencia de que el
+    //    caller inbound recibía "Payment settlement failed" (le afirmábamos que no se le
+    //    cobró) y no se escribía la fila de reconciliación.
+    expect(err).toBeInstanceOf(FacilitatorSettleError);
+    expect((err as FacilitatorSettleError).valueDisposition).toBe('unknown');
+    // El canal estructural que consumen los dos call-sites (no sólo la clase).
+    expect(readSettleValueDisposition(err)).toBe('unknown');
+  });
+
+  it('T-198-AR2-TRICKLE-VERIFY: el /verify que corta durante el body conserva su contrato (Error común, con el prefijo)', async () => {
+    // El contrato de `/verify` NO cambia (no broadcastea nada), pero el mensaje tiene
+    // que ser el mismo en los dos ejes: antes, el abort durante el body se escapaba del
+    // catch y salía como TimeoutError sin el prefijo `Facilitator network error`, o sea
+    // que el propio candado T-198-VERIFY no cubría este eje.
+    server = createTrickleBodyServer(50);
+    process.env.KITE_FACILITATOR_URL = await listen(server);
+    const adapter = new KiteOzonePaymentAdapter();
+
+    const err = await adapter.verify({ ...PROOF }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/Facilitator network error/);
+    // Sigue SIN disposición de valor: un verify abortado no puede dejar plata en el aire,
+    // y marcarlo `unknown` mandaría a reconciliar dinero que nunca se movió.
+    expect(err).not.toBeInstanceOf(FacilitatorSettleError);
+    expect(readSettleValueDisposition(err)).toBeUndefined();
+  });
+
+  it('T-198-AR2-BADJSON: un body 200 que NO parsea también es unknown (el facilitator pudo haber pagado)', async () => {
+    // Contra-ejemplo del mismo `try`: si el body llega COMPLETO pero no parsea, tampoco
+    // sabemos qué pasó con la plata. Antes esto era un SyntaxError pelado.
+    server = createHttpServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('this is definitely not json');
+    });
+    process.env.KITE_FACILITATOR_URL = await listen(server);
+    const adapter = new KiteOzonePaymentAdapter();
+
+    const err = await adapter.settle({ ...PROOF }).catch((e: unknown) => e);
+    expect(readSettleValueDisposition(err)).toBe('unknown');
+  });
+
+  it('T-198-AR2-HTTP-ERROR: un HTTP 4xx/5xx CONTESTADO sigue siendo un veredicto, no un unknown', async () => {
+    // Candado de NO-REGRESIÓN del fix: al mover el body read dentro de un try que
+    // clasifica, el riesgo era arrastrar también el camino "el facilitator contestó
+    // rechazando", que es un VEREDICTO y no una incógnita de transporte. Ese camino
+    // (y su reclasificación) es el BLQ-ALTO, Scope OUT de esta HU: acá se candea que
+    // NO cambió.
+    server = createHttpServer((_req, res) => {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end('{"error":"bad gateway"}');
+    });
+    process.env.KITE_FACILITATOR_URL = await listen(server);
+    const adapter = new KiteOzonePaymentAdapter();
+
+    const err = await adapter.settle({ ...PROOF }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/HTTP 502/);
+    expect(err).not.toBeInstanceOf(FacilitatorSettleError);
+    expect(readSettleValueDisposition(err)).toBeUndefined();
   });
 
   it('T-198-ENV: una env basura NO apaga el techo (cae al default, sigue cortando)', async () => {

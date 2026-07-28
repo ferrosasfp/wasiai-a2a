@@ -91,6 +91,10 @@ function sigRow(overrides: Record<string, unknown> = {}) {
     debit_nonce: NONCE,
     debit_amount_atomic: AMOUNT_ATOMIC,
     debit_hop1_tx_hash: HOP1_TX,
+    // AR#2 BLQ-BAJO-2(a): el SELECT REAL de `resolveIntent` trae esta columna desde el
+    // fix de BLQ-BAJO-1, y el doble no la exponía — así que ningún test podía ver el
+    // guard que la mira. Default null (la mayoría de los casos no tienen hop 2 previo).
+    debit_resolution_tx_hash: null,
     debit_settle_status: 'reconciliation_pending',
     owner_ref: OWNER,
     a2a_payment_intents: {
@@ -740,7 +744,20 @@ describe('BLQ-ALTO-1 race del doble hop2 (claim exclusivo + lease)', () => {
     status: string;
     tx: string | null;
   }
-  function harness(row: MemRow, opts: { fixed: boolean }): () => number {
+  /**
+   * `raceLostClaim`: el claim devuelve `claimed:false` AUNQUE el estado de la fila lo
+   * habilitaría. Simula la RACE real: entre el SELECT de `resolveIntent` y el
+   * `claim_reconciliation`, otro run flipeó la fila a un terminal. En esa ventana el
+   * `row` que leyó el service dice `resolving_settle` (con o sin tx) y el claim pierde.
+   *
+   * Existe por AR#2 BLQ-BAJO-2(a): sin esto, el contra-ejemplo "resolving_settle CON tx"
+   * hacía GANAR el claim, así que el `if (!claimRow || claimRow.claimed === false)` no se
+   * ejecutaba y el test pasaba por una razón ajena al código que decía candar.
+   */
+  function harness(
+    row: MemRow,
+    opts: { fixed: boolean; raceLostClaim?: boolean },
+  ): () => number {
     mockReverify.mockResolvedValue('confirmed');
     mockVerifyDefaultChainSettle.mockResolvedValue({ ok: true });
     let seamCalls = 0;
@@ -767,6 +784,8 @@ describe('BLQ-ALTO-1 race del doble hop2 (claim exclusivo + lease)', () => {
             data: sigRow({
               debit_settle_status: row.status,
               debit_hop1_tx_hash: HOP1_TX,
+              // Fidelidad con el SELECT real: la tx del hop 2 que la fila tenga.
+              debit_resolution_tx_hash: row.tx,
             }),
             error: null,
           }),
@@ -800,6 +819,10 @@ describe('BLQ-ALTO-1 race del doble hop2 (claim exclusivo + lease)', () => {
         const reclaim =
           row.status === target &&
           (opts.fixed ? args.p_side === 'refund' || row.tx !== null : true);
+        if (opts.raceLostClaim) {
+          // La race: el claim pierde sin tocar el estado que el SELECT ya leyó.
+          return Promise.resolve({ data: [{ claimed: false }], error: null });
+        }
         if (fresh || reclaim) {
           row.status = target;
           return Promise.resolve({
@@ -851,13 +874,33 @@ describe('BLQ-ALTO-1 race del doble hop2 (claim exclusivo + lease)', () => {
     expect(mockSettleSeam).not.toHaveBeenCalled();
   });
 
-  it('AR BLQ-BAJO-1: resolving_settle CON tx previa NO es "awaiting evidence" (hay evidencia que verificar)', async () => {
-    // Contra-ejemplo: el estado nuevo es sólo para la ausencia de evidencia. Con tx
-    // previa el reconciliador SÍ tiene algo que hacer (re-verificar on-chain), así que
-    // NO debe reportar "esperando evidencia manual". Sin este test, devolver el estado
-    // nuevo para cualquier `claimed=false` pasaría igual.
-    harness({ status: 'resolving_settle', tx: HOP1_TX }, { fixed: true });
+  // ── AR#2 BLQ-BAJO-2(a): el par que hace load-bearing al `&& !tx` ──
+  //
+  // La versión anterior de este contra-ejemplo era VACUA: usaba `fixed:true` con tx, y
+  // en esa combinación el claim GANA, así que la rama `claimed === false` (la que
+  // contiene el guard) nunca corría. Borrar `&& !row.debit_resolution_tx_hash` dejaba la
+  // suite entera verde. Ahora los dos casos entran por la MISMA rama (claim perdido por
+  // la race) y se diferencian SÓLO por la presencia de la tx, que es lo que el guard
+  // mira.
+  it('AR#2: claim perdido + resolving_settle SIN tx → awaiting_manual_settle_evidence', async () => {
+    harness(
+      { status: 'resolving_settle', tx: null },
+      { fixed: true, raceLostClaim: true },
+    );
     const out = await reconciliationService.resolveIntent(INTENT_ID);
+    expect(out.status).toBe('awaiting_manual_settle_evidence');
+  });
+
+  it('AR#2: claim perdido + resolving_settle CON tx → already_resolved (hay evidencia que verificar)', async () => {
+    // Con tx previa el caso NO es "esperando evidencia": la evidencia existe y el
+    // crash-recovery del propio reconciliador la re-verifica. Reportar "esperá evidencia
+    // manual" acá mandaría al operador a buscar algo que ya está en la fila.
+    harness(
+      { status: 'resolving_settle', tx: HOP1_TX },
+      { fixed: true, raceLostClaim: true },
+    );
+    const out = await reconciliationService.resolveIntent(INTENT_ID);
+    expect(out.status).toBe('already_resolved');
     expect(out.status).not.toBe('awaiting_manual_settle_evidence');
   });
 

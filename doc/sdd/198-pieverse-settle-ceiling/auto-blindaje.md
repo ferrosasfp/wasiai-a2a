@@ -176,3 +176,115 @@
 - **Aplicar en**: cuando un cambio BLOQUEA algo, enumerar todo lo que pasaba por ahí
   antes — no sólo lo que se quería bloquear. "Ya no ocurre X" hay que leerlo como "ya no
   ocurre NADA de lo que usaba ese camino".
+
+### [2026-07-28] Fix-pack AR#2 — el techo fallaba en el ÚNICO caso que la HU existe para acotar
+
+- **Error**: `await response.json()` quedó FUERA del `try` que envuelve el `fetch`. El
+  `AbortSignal` acota también el consumo del body, así que cuando el techo se cumple
+  DURANTE el body lo que sale es un `DOMException/TimeoutError` pelado — no
+  `FacilitatorSettleError`, `readSettleValueDisposition() === undefined`. Consecuencia
+  medida: el caller inbound recibía "Payment settlement failed" (le afirmábamos que no se
+  le cobró) y NO se escribía la fila de reconciliación. O sea: AC-2, AC-7(b) y AC-7(c)
+  incumplidos por el mismo agujero.
+- **Causa raíz**: dos, y la segunda es la grave.
+  (1) Pensé "el techo acota el fetch" cuando acota **el request entero, body incluido**.
+  El `try` lo puse alrededor de la llamada que me parecía riesgosa, no alrededor de todo
+  lo que el signal puede interrumpir.
+  (2) Los 6 tests usaban SÓLO `createSilentServer()` (peer que nunca manda headers) —
+  y mi propio `work-item.md` dice que **ese caso ya estaba acotado por undici a 300 s**,
+  y que "lo verdaderamente ilimitado es el peer que trickle-feedea". Escribí el análisis
+  correcto y después testeé el caso que el análisis declaraba menos importante. Tres
+  documentos (AC-2, el docstring del adapter y `.env.example`) afirmaban la propiedad que
+  el código no cumplía.
+- **Fix**: el body read va en su propio `try` que clasifica (`unknown`); el `!response.ok`
+  queda AFUERA a propósito (es un veredicto del facilitator, no una incógnita de
+  transporte) con candado de no-regresión. + `createTrickleBodyServer` y 4 tests nuevos.
+  Repro medido antes/después: `ctor=DOMException/TimeoutError, disposition=undefined` →
+  `ctor=FacilitatorSettleError, disposition=unknown`.
+- **Aplicar en**: (a) si un `AbortSignal` gobierna un request, TODO lo que se haga con esa
+  `Response` está bajo el signal — el `try` va alrededor del consumo, no sólo de la
+  llamada. (b) **Cuando el análisis dice "el caso importante es X", el primer test es X.**
+  Si el análisis distingue dos ejes, hay que tener un servidor por eje.
+
+### [2026-07-28] Fix-pack AR#2 — reverti una mutación con `git checkout` sobre un archivo UNTRACKED
+
+- **Error**: muté la migración #3 (borrarle el guard de transición), corrí `git checkout
+  HEAD -- supabase/migrations/`, vi `git diff --stat` vacío y lo leí como "revertido". El
+  archivo es NUEVO/untracked, así que `git checkout HEAD --` no tenía nada que restaurar y
+  el `git diff` vacío era el síntoma esperado, no la prueba. **La mutación quedó en disco**
+  y sólo la encontré al verificar con `grep -c`.
+- **Causa raíz**: usé como evidencia de revert la MISMA señal que es ciega para archivos
+  untracked. Estaba avisado por escrito y aun así lo hice, porque el flujo
+  "mutar → checkout → diff vacío" ya me había funcionado 14 veces con archivos trackeados.
+- **Fix**: para archivos nuevos, backup + `cp` para restaurar y **`sha256sum` antes/después
+  de mutar Y después de restaurar** (el hash restaurado tiene que ser idéntico al inicial).
+  Además: si el archivo mutado ya estaba aplicado a la base, verificar la BASE por separado
+  (acá el deployed conservaba el guard, `guard_present:true`).
+- **Aplicar en**: toda mutación sobre un archivo que no esté en `HEAD`. Regla: **la prueba
+  de que algo se revirtió no puede ser la misma señal que es ciega al archivo**.
+
+### [2026-07-28] Fix-pack AR#2 — tres especies más de test vacuo, todas mías
+
+- **Error**: además de la vacuidad por prosa (ya anotada), el AR encontró tres formas más,
+  las tres con la mutación VERDE: (i) un literal satisfecho por **otra función del mismo
+  archivo** (`GET DIAGNOSTICS` existía en `claim_reconciliation`, así que mutar el de
+  `record_debit_settle_status` a `v_rows := 1` —que hace `applied` SIEMPRE true, o sea
+  anula el candado entero de BLQ-MEDIO-2— pasaba); (ii) una assertion NEGATIVA
+  string-shaped (`not.toContain("p_side = 'settle' AND …")`) que se esquiva escribiendo la
+  condición SIN gate de lado, lo cual REABRE el re-envío ciego; (iii) un guard verificado
+  por presencia de string y no por su tabla de verdad. Y una cuarta que encontré yo al
+  mutar: **la migración #3 no tenía NINGÚN test**, aunque reescribe la función completa.
+- **Causa raíz**: matcheo strings sobre un archivo entero cuando la propiedad es de UNA
+  función; y uso negativas sobre la forma exacta que se me ocurrió prohibir, en vez de
+  afirmar la forma completa de lo permitido. Una negativa string-shaped sólo prohíbe la
+  redacción que anticipé.
+- **Fix**: helper `fnBody(sql, nombre)` que corta el `.sql` por función; la negativa de
+  (ii) reemplazada por un chequeo que enumera TODAS las menciones de `resolving_settle` en
+  el `WHERE` y exige que cada una esté gateada por lado; tabla de verdad evaluada para el
+  guard; y un `describe` propio para la #3 que re-verifica todo lo que esa función ya
+  prometía.
+- **Aplicar en**: (a) scopear el match a la unidad que tiene la propiedad; (b) preferir
+  "toda X cumple Y" sobre "no existe la string Z"; (c) **cada migración que reescribe una
+  función completa tiene que re-verificar TODO lo que esa función ya prometía**, no sólo lo
+  que ella agrega.
+
+### [2026-07-28] Fix-pack AR#2 — dos candados que presenté como evidencia y no candaban nada
+
+- **Error**: (a) el contra-ejemplo "resolving_settle CON tx" usaba una combinación del
+  harness donde el claim GANA, así que la rama con el guard nunca se ejecutaba: borrar
+  `&& !row.debit_resolution_tx_hash` dejaba la suite entera verde. Y mi comentario decía
+  explícitamente "sin este test, devolver el estado nuevo para cualquier `claimed=false`
+  pasaría igual" — falso. (b) el test del `.catch()` afirmaba sólo `statusCode===402`, que
+  no cambia con ni sin `.catch()`; y la regresión real es que sin él hay un
+  `unhandledRejection` que **tumba el proceso** en Node ≥15.
+- **Causa raíz**: en (a) construí el escenario por su ESTADO ("una fila resolving_settle
+  con tx") sin verificar que el escenario pasara por la RAMA que quería candar — no miré si
+  el `if` se ejecutaba. En (b) afirmé lo que era fácil de observar (el status code) en vez
+  de la propiedad que me importaba (que el rechazo quedara MANEJADO).
+- **Fix**: (a) opción `raceLostClaim` en el harness para forzar `claimed=false` con el
+  estado intacto (la race real), y el doble del SELECT ahora expone
+  `debit_resolution_tx_hash` como el query real (tampoco lo exponía). (b) el test observa
+  `process.on('unhandledRejection')`, exige el log propio de la pérdida de telemetría y
+  afirma el body completo.
+- **Aplicar en**: antes de creer un test de rama, **verificar que la rama se ejecuta**
+  (un log temporal o mutar la rama y ver rojo). Y cuando el objetivo es "el error queda
+  manejado", la afirmación tiene que ser sobre el MANEJO (log propio / ausencia de
+  unhandled), nunca sobre un valor que es igual en las dos versiones.
+
+### [2026-07-28] Fix-pack AR#2 — ACs verdaderos por construcción (el mejor hallazgo del review)
+
+- **Error**: 6 de mis 18 ACs nombraban el identificador que los implementa
+  (`readSettleValueDisposition`, `PENDING_STATUSES`, `RETURNS TABLE(applied boolean)`…).
+  Un AC que nombra su implementación es verdadero por construcción: no mide nada, porque
+  cualquier código que exista satisface la descripción de sí mismo.
+- **Causa raíz**: escribí los ACs DESPUÉS del código (work-item retroactivo), así que
+  describí lo que había en vez de la propiedad que el código debía cumplir. Es el sesgo
+  estructural de un AC retroactivo.
+- **Prueba de que no es cosmético**: el único AC redactado como PROHIBICIÓN FALSABLE
+  (AC-2, "nunca `{success:false}` ni un `Error` pelado") **es el único que se rompió**.
+  Correlación perfecta entre "AC falsable" y "AC que encuentra un bug".
+- **Fix**: los 6 bajaron a CD (que es lo que eran) y los ACs se reescribieron como
+  propiedades observables desde afuera del módulo, con la prohibición explícita ("nunca…")
+  que permite escribir el caso que las viola.
+- **Aplicar en**: test de olfato para un AC — si no puedo escribir el caso que lo viola sin
+  mirar la implementación, no es un AC. Y si nombra un símbolo del código, es un CD.

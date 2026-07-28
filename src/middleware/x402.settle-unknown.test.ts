@@ -257,15 +257,50 @@ describe('HU-198: settle inbound con resultado desconocido', () => {
     expect(mockTrack).not.toHaveBeenCalled();
   });
 
-  it('T-198-AR-INBOUND-EVENT-throws: si el insert del evento falla, el 402 sale igual', async () => {
-    // La telemetría NO puede cambiar la respuesta de un money-path. `track()` TIRA si
-    // el insert falla, así que va con `.catch()`.
-    mockTrack.mockClear();
-    mockTrack.mockRejectedValueOnce(new Error('relation does not exist'));
-    const { res } = await callWithSettleRejection(
-      new FacilitatorSettleError('aborted due to timeout', 'unknown'),
-    );
-    expect(res.statusCode).toBe(402);
+  it('T-198-AR-INBOUND-EVENT-throws: si el insert del evento falla, el rechazo queda MANEJADO y el 402 sale completo', async () => {
+    // AR#2 BLQ-BAJO-2(b): la versión anterior sólo afirmaba `statusCode===402`, que NO
+    // cambia con ni sin `.catch()` — así que borrar el `.catch()` dejaba la suite verde.
+    // Y la regresión real es grave: sin `.catch()` el rechazo de `track()` es un
+    // `unhandledRejection`, y en Node ≥15 eso TUMBA EL PROCESO por default
+    // (`--unhandled-rejections=throw`). O sea que el candado de "la telemetría no puede
+    // cambiar la respuesta de un money-path" no detectaba la peor consecuencia posible
+    // de esa línea: que se caiga el gateway entero.
+    //
+    // Ahora se afirman las TRES cosas: (1) el rechazo fue MANEJADO (se observa el
+    // `unhandledRejection` del proceso), (2) quedó el log de la pérdida de telemetría, y
+    // (3) el body del 402 llegó COMPLETO con el mensaje de unknown.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      mockTrack.mockClear();
+      mockTrack.mockRejectedValueOnce(new Error('relation does not exist'));
+      const { res, errors } = await callWithSettleRejection(
+        new FacilitatorSettleError('aborted due to timeout', 'unknown'),
+      );
+
+      // (3) la respuesta del money-path no se degradó.
+      expect(res.statusCode).toBe(402);
+      expect(JSON.stringify(res.json())).toMatch(
+        /may or may not have executed/,
+      );
+
+      // (2) la pérdida de telemetría dejó rastro propio: es la prueba POSITIVA de que
+      // alguien atrapó el rechazo (un `.catch()` ausente no loguea nada).
+      expect(
+        errors.find(
+          (e) => e.obj.error_code === 'X402_SETTLE_UNKNOWN_EVENT_FAILED',
+        ),
+      ).toBeDefined();
+
+      // (1) y el proceso no quedó con un rechazo sin manejar. Se da una vuelta de
+      // microtask+macrotask para que el `unhandledRejection` de Node alcance a emitirse
+      // si el `.catch()` no existiera.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   it('T-198-INBOUND-PLAIN: un settle que tira un Error común NO emite la señal (sigue siendo un 402 normal)', async () => {
