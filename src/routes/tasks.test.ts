@@ -32,6 +32,21 @@ vi.mock('../middleware/a2a-key.js', () => ({
       };
     },
   ],
+  // HU-197: las dos LECTURAS (`GET /` y `GET /:id`) ya no cobran, así que usan el
+  // middleware auth-only en vez del de pago. El mock hace lo mismo que el de
+  // arriba (setea `a2aKeyRow`) pero NO setea `resolvedChainId`, igual que el real
+  // — es lo que hace imposible un refund donde no hubo débito.
+  requireA2AKey: () => [
+    async (
+      request: import('fastify').FastifyRequest,
+      _reply: import('fastify').FastifyReply,
+    ) => {
+      (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = {
+        id: 'test-key-id',
+        owner_ref: 'test-owner-ref',
+      };
+    },
+  ],
   // HU-193: el check pre-cobro `requireA2AKeyPresence` lo usa para decidir si el
   // caller presentó credencial. Este archivo prueba el CRUD con caller
   // autenticado, así que siempre hay credencial.

@@ -21,6 +21,16 @@
  * `settle` del adapter (la tx on-chain ES el cobro, así que "settle NO fue
  * llamado" es la aserción de dinero). Corre el middleware de pago REAL.
  *
+ * ── ACTUALIZACIÓN HU-197 (lecturas gratis) ────────────────────────────────
+ *
+ * Los dos GET (`GET /` y `GET /:id`) ya NO cobran: pasaron del middleware de pago
+ * al auth-only. Los casos de esta suite que medían "cobró $1 y lo devolvió" sobre
+ * una lectura pasan a medir "no hubo NINGÚN movimiento" (ni débito ni credit — un
+ * credit sin débito inflaría el budget). Los tres endpoints que siguen cobrando
+ * (`POST /`, `PATCH /:id/status`, `PATCH /:id`) conservan sus casos sin cambios,
+ * incluido el residuo dual-ledger de delegación/sesión.
+ * El detalle del precio nuevo vive en `tasks.reads-free.test.ts`.
+ *
  * Naming: T-NCT-01..T-NCT-25.
  */
 
@@ -399,6 +409,11 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
   // ══════════════════════════════════════════════════════════
   // Pre-fix cada uno de estos settleaba una tx on-chain (plata del caller, gas
   // nuestro) y devolvía 500 por el throw de `getOwnerRef`.
+  //
+  // HU-197: los tres que cobran lo evitan con el check pre-cobro
+  // `requireA2AKeyPresence`; los dos GET ya no tienen middleware de pago en la
+  // cadena, así que para ellos settlear es imposible por construcción. Los cinco
+  // siguen contestando el MISMO 403 A2A_KEY_REQUIRED (mismo `message`).
 
   const x402Cases: Array<{
     name: string;
@@ -562,7 +577,7 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
   // (C) RESIDUO PREPAGO — no adelantable, pero reembolsado
   // ══════════════════════════════════════════════════════════
 
-  it('T-NCT-12: GET /tasks/:id de una task ajena/inexistente → 404 y el balance queda igual', async () => {
+  it('T-NCT-12 (HU-197): GET /tasks/:id de una task ajena/inexistente → 404 SIN débito y SIN credit', async () => {
     const before = budgetState.balance;
     mockGet.mockResolvedValueOnce(undefined);
 
@@ -573,13 +588,20 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
     });
 
     expect(res.statusCode).toBe(404);
-    // "No existe" y "no es tuya" son indistinguibles a propósito y ambas
-    // necesitan un read con el owner_ref del caller → no adelantable.
-    expect(debitMock).toHaveBeenCalledTimes(1);
-    expect(creditMock).toHaveBeenCalledTimes(1);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
-      idemKey: expect.any(String),
-    });
+    // HU-197: ya no hay residuo que reembolsar porque no hay cobro.
+    //
+    // ALCANCE HONESTO de estas dos aserciones (probado por mutación): la que
+    // tiene dientes es `debitMock` — si alguien vuelve a cobrar la lectura,
+    // falla. La de `creditMock` NO puede detectar que alguien reintroduzca el
+    // `refundStep0Debit` que se borró de este handler: bajo el middleware
+    // auth-only `resolvedChainId` queda `undefined` y la invariante #1 de
+    // `refundStep0Debit` lo vuelve un no-op, así que el credit no ocurre y el
+    // test no cambia de color. Se conserva igual porque es la aserción que
+    // atrapa el caso PELIGROSO de verdad: un refund que sí llegue a acreditar sin
+    // débito (inflar el budget) sólo es posible si alguien devuelve el cobro a
+    // esta ruta, y entonces fallan las dos.
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(creditMock).not.toHaveBeenCalled();
     expect(budgetState.balance).toBe(before);
   });
 
@@ -654,15 +676,19 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
   });
 
   it('T-NCT-17: residuo bajo DELEGACIÓN → credit dual-ledger (no `credit` a secas)', async () => {
+    // HU-197: este caso usaba `GET /tasks/:id`, que ya no cobra (y por lo tanto
+    // no tiene residuo). Se movió a `PATCH /:id/status`, que SÍ sigue cobrando:
+    // la cobertura del refund dual-ledger de delegación se conserva intacta.
     const before = budgetState.balance;
     delegationLookupMock.mockResolvedValueOnce(makeDelegationRow());
     delegationParentMock.mockResolvedValueOnce(fundedKey);
-    mockGet.mockResolvedValueOnce(undefined);
+    mockUpdateStatus.mockRejectedValueOnce(new TaskNotFoundError(UUID));
 
     const res = await app.inject({
-      method: 'GET',
-      url: `/tasks/${UUID}`,
+      method: 'PATCH',
+      url: `/tasks/${UUID}/status`,
       headers: { 'x-a2a-key': DELEGATION_TOKEN },
+      payload: { status: 'working' },
     });
 
     expect(res.statusCode).toBe(404);
@@ -708,7 +734,7 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
   // declaraba dos. Ahora cuatro reembolsan y el único que se queda con el débito
   // es el `create`, por ambigüedad de estado (declarado en INTEGRATION.md §5.1).
 
-  it('T-NCT-21: GET /tasks con el read fallando → 500 y el balance queda igual', async () => {
+  it('T-NCT-21 (HU-197): GET /tasks con el read fallando → 500, sin débito y sin credit', async () => {
     const before = budgetState.balance;
     mockList.mockRejectedValueOnce(new Error('Failed to list tasks: db down'));
 
@@ -718,18 +744,16 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
       headers: KEY_HEADER,
     });
 
-    // Es una LECTURA: no escribió nada y no entregó nada → no hay ambigüedad de
-    // estado que proteger, así que el $1 vuelve.
-    expect(debitMock).toHaveBeenCalledTimes(1);
-    expect(creditMock).toHaveBeenCalledTimes(1);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
-      idemKey: expect.any(String),
-    });
+    // Antes: se cobraba $1 y se reembolsaba (costo neto 0 vía dos movimientos).
+    // Ahora la lectura no cobra, así que no hay ningún movimiento: NI débito NI
+    // credit. Un credit acá sería dinero regalado (inflaría el budget).
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(creditMock).not.toHaveBeenCalled();
     expect(budgetState.balance).toBe(before);
     expect(res.statusCode).toBe(500); // el status NO cambia
   });
 
-  it('T-NCT-22: GET /tasks/:id con el read fallando → 500 y el balance queda igual', async () => {
+  it('T-NCT-22 (HU-197): GET /tasks/:id con el read fallando → 500, sin débito y sin credit', async () => {
     const before = budgetState.balance;
     mockGet.mockRejectedValueOnce(
       new Error(`Failed to get task '${UUID}': db down`),
@@ -741,10 +765,8 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
       headers: KEY_HEADER,
     });
 
-    expect(debitMock).toHaveBeenCalledTimes(1);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
-      idemKey: expect.any(String),
-    });
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(creditMock).not.toHaveBeenCalled();
     expect(budgetState.balance).toBe(before);
     expect(res.statusCode).toBe(500);
   });
@@ -838,10 +860,11 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
     expect(budgetState.balance).toBe(before - 1);
   });
 
-  it('T-NCT-20 (invariante): `?status=` vacío sigue NO siendo 400 y cobra igual que antes', async () => {
+  it('T-NCT-20 (invariante): `?status=` vacío sigue NO siendo 400 (HU-197: y ahora es gratis)', async () => {
     // Contrato preservado: el guard histórico era `if (status && ...)`, así que un
-    // `status` vacío nunca fue un 400. Si el check pre-cobro lo rechazara, sería
-    // un cambio de comportamiento encubierto.
+    // `status` vacío nunca fue un 400. Al mover ese guard del check pre-cobro al
+    // handler (HU-197), rechazarlo habría sido un cambio de comportamiento
+    // encubierto.
     const before = budgetState.balance;
     mockList.mockResolvedValueOnce([]);
 
@@ -852,8 +875,8 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(debitMock).toHaveBeenCalledTimes(1);
+    expect(debitMock).not.toHaveBeenCalled();
     expect(creditMock).not.toHaveBeenCalled();
-    expect(budgetState.balance).toBe(before - 1);
+    expect(budgetState.balance).toBe(before);
   });
 });

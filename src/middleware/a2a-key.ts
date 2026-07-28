@@ -1523,21 +1523,41 @@ async function authenticateKeySession(
 }
 
 /**
+ * Mensaje por defecto del 403 A2A_KEY_REQUIRED (WKH-173, rutas de publicación).
+ * Se conserva como default para que los 4 call-sites de `routes/agents.ts` no
+ * cambien ni un byte de su respuesta.
+ */
+const PUBLISH_A2A_KEY_REQUIRED_MESSAGE =
+  'Publishing requires an authenticated a2a-key. The x402 anonymous path cannot publish (no tenant identity).';
+
+/**
  * WKH-173: middleware auth-only para publish/patch/delete/list de agentes.
  * Autentica la a2a-key (master/delegación/sesión) y setea request.a2aKeyRow
  * SIN chain-resolution, SIN débito, SIN spend-limits, SIN x402 (CD-2/DT-C/DT-G).
  * Ausencia de credencial → 403 A2A_KEY_REQUIRED directo (AC-3).
  * Devuelve un array de 1 handler para preservar la ergonomía `...requireA2AKey()`.
+ *
+ * HU-197 (lecturas gratis de `/tasks`): `message` pasa a ser parametrizable —
+ * ADITIVO, con el texto de publicación como default. Las lecturas de `/tasks`
+ * son GRATIS pero siguen siendo tenant-scoped, así que usan este middleware (que
+ * NO debita, NO resuelve chain y NO monta el riel x402) con su propio mensaje.
+ * Sin el parámetro, un `GET /tasks` sin credencial contestaría "Publishing
+ * requires…", que es falso.
+ *
+ * ⚠️ Este middleware NO setea `resolvedChainId`: es lo que hace que
+ * `lib/step0-refund.ts` sea un no-op estructural en las rutas que lo usan
+ * (invariante #1 de `refundStep0Debit`) — imposible acreditar donde no se debitó.
  */
-export function requireA2AKey(): preHandlerAsyncHookHandler[] {
+export function requireA2AKey(
+  message: string = PUBLISH_A2A_KEY_REQUIRED_MESSAGE,
+): preHandlerAsyncHookHandler[] {
   const handler: preHandlerAsyncHookHandler = async (request, reply) => {
     const rawKey = extractRawKey(request);
     if (!rawKey) {
       return reply.status(403).send({
         error: 'a2a-key required',
         error_code: 'A2A_KEY_REQUIRED',
-        message:
-          'Publishing requires an authenticated a2a-key. The x402 anonymous path cannot publish (no tenant identity).',
+        message,
       });
     }
     if (rawKey.startsWith('wasi_a2a_session_')) {
