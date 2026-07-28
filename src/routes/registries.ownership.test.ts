@@ -77,6 +77,12 @@ vi.mock('../middleware/a2a-key.js', () => ({
       } as A2AAgentKeyRow;
     },
   ],
+  // HU-193: la cadena de preHandlers la arma ahora `chargedRoute`, cuyo check
+  // `requireA2AKeyPresence` usa este helper para decidir PRE-COBRO si el caller
+  // presentó credencial. Se ata a `currentOwner` para conservar exactamente la
+  // simulación de este archivo: `null` = caller x402 anónimo (sin credencial).
+  extractRawKeyFromHeaders: () =>
+    currentOwner === null ? undefined : 'wasi_a2a_fake',
 }));
 
 import {

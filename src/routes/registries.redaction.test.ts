@@ -55,6 +55,8 @@ vi.mock('../middleware/a2a-key.js', () => ({
       request.a2aKeyRow = { id: 'fake-key-id', owner_ref: OWNER };
     },
   ],
+  // HU-193: ver el mismo mock en registries.ssrf.test.ts.
+  extractRawKeyFromHeaders: () => 'wasi_a2a_fake',
 }));
 
 import { supabase } from '../lib/supabase.js';

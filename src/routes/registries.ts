@@ -24,11 +24,16 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { refundStep0Debit } from '../lib/step0-refund.js';
 import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
-import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
+import {
+  chargedRoute,
+  type PreChargeCheck,
+  requireA2AKeyPresence,
+} from '../middleware/charged-route.js';
 import {
   registryService,
   SystemRegistryImmutableError,
@@ -37,17 +42,67 @@ import { OwnershipMismatchError } from '../services/security/errors.js';
 import type { RegistryAuth, RegistrySchema } from '../types/index.js';
 
 /**
+ * HU-193: mensaje del 403 pre-cobro. IDÉNTICO al que ya devolvía el guard del
+ * handler (WKH-63 fix-pack BLQ-ALTO-1), porque el contrato no cambia: lo único
+ * que cambia es CUÁNDO se decide, y por lo tanto que ya no se cobre por un
+ * rechazo garantizado.
+ */
+const A2A_KEY_REQUIRED_MESSAGE =
+  'Registry mutation requires an authenticated a2a-key. The x402 anonymous path is read-only for registries.';
+
+/**
+ * HU-193: la validación de forma del POST, extraída del handler.
+ *
+ * Antes vivía SOLO en el handler, que corre DESPUÉS del middleware de pago: un
+ * body sin `name`/`discoveryEndpoint`/`invokeEndpoint`/`schema` ya había pagado
+ * ($1 de débito prepago, o un settle x402 on-chain con gas nuestro) cuando
+ * recibía el 400. Es un check puro sobre el body → se adelanta.
+ *
+ * Función compartida (patrón `validateComposeBody`, HU-188): la usa el check
+ * pre-cobro (el guard REAL) y el handler (defense-in-depth, para que un
+ * reordenamiento futuro de la cadena no reabra el agujero).
+ */
+type PreChargeRejectionBody = { error: string };
+
+function validateRegisterBody(body: unknown): PreChargeRejectionBody | null {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (!b.name || !b.discoveryEndpoint || !b.invokeEndpoint || !b.schema) {
+    return {
+      error:
+        'Missing required fields: name, discoveryEndpoint, invokeEndpoint, schema',
+    };
+  }
+  return null;
+}
+
+const registerBodyCheck: PreChargeCheck = (input) => {
+  const invalid = validateRegisterBody(input.body);
+  return invalid ? { status: 400, body: invalid } : null;
+};
+
+/**
  * Mapea errores de ownership/system al status HTTP correcto.
  * Retorna `null` si no es un error reconocido (el caller debe re-lanzar).
+ *
+ * HU-193: estos dos rechazos son RESIDUO — dependen de un read a la DB y del
+ * `owner_ref` del caller autenticado, así que no se pueden decidir pre-cobro. En
+ * el riel prepago se reembolsa el débito step-0 (nada se entregó y nada se
+ * movió: el pre-fetch del service falla ANTES de cualquier escritura). En el
+ * riel x402 son inalcanzables, porque ese riel ya se rechaza pre-cobro con 403
+ * `A2A_KEY_REQUIRED`.
  */
-function mapOwnershipError(
+async function mapOwnershipError(
+  request: FastifyRequest,
   err: unknown,
   reply: FastifyReply,
-): FastifyReply | null {
+  refundReason: string,
+): Promise<FastifyReply | null> {
   if (err instanceof OwnershipMismatchError) {
+    await refundStep0Debit(request, `${refundReason}:not-found`);
     return reply.status(404).send({ error: 'Registry not found' });
   }
   if (err instanceof SystemRegistryImmutableError) {
+    await refundStep0Debit(request, `${refundReason}:system-immutable`);
     return reply.status(403).send({ error: 'System registry is immutable' });
   }
   return null;
@@ -104,27 +159,28 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
   }>(
     '/',
     {
-      preHandler: [
-        ...requirePaymentOrA2AKey({
+      preHandler: chargedRoute({
+        // HU-193: los dos rechazos que este endpoint puede decidir SIN I/O y sin
+        // saber quién llama. Corren ANTES del cobro (prepago y x402).
+        validate: [
+          requireA2AKeyPresence(A2A_KEY_REQUIRED_MESSAGE),
+          registerBodyCheck,
+        ],
+        payment: {
           description: 'WasiAI Registry Management — Register marketplace',
-        }),
-      ],
+        },
+      }),
     },
     async (request, reply: FastifyReply) => {
       try {
         const body = request.body;
 
-        // Validate required fields
-        if (
-          !body.name ||
-          !body.discoveryEndpoint ||
-          !body.invokeEndpoint ||
-          !body.schema
-        ) {
-          return reply.status(400).send({
-            error:
-              'Missing required fields: name, discoveryEndpoint, invokeEndpoint, schema',
-          });
+        // HU-193: el guard REAL es `registerBodyCheck` (pre-cobro). Esto es
+        // defense-in-depth con la MISMA función pura: si alguien reordena la
+        // cadena de preHandlers, el body malformado sigue sin llegar al service.
+        const invalidBody = validateRegisterBody(body);
+        if (invalidBody) {
+          return reply.status(400).send(invalidBody);
         }
 
         // SSRF guard (WKH-62 / CD-A5) — validate ALL outbound URLs in the
@@ -150,6 +206,14 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
               { field: err.field, category: err.category },
               'SSRF blocked',
             );
+            // HU-193 (residuo): el guard SSRF hace I/O (resolución DNS), así que
+            // NO puede correr pre-cobro — un `PreChargeCheck` es síncrono a
+            // propósito, para no volver un endpoint impago en un amplificador de
+            // I/O (y para no regalarle a un caller sin credencial válida un
+            // oráculo de "¿este hostname resuelve, y a qué?"). Riel prepago: se
+            // reembolsa (nada se persistió: el 422 corta antes del insert). Riel
+            // x402: inalcanzable, ya se rechazó pre-cobro con 403.
+            await refundStep0Debit(request, 'registries.post:ssrf-blocked');
             return reply.status(422).send({
               error: 'SSRF_BLOCKED',
               field: err.field,
@@ -162,13 +226,18 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
         // WKH-63 fix-pack (BLQ-ALTO-1): exigir a2a-key. Sin tenant identity
         // no se puede mutar registries (un sentinel 'x402-anonymous' sería
         // compartido entre todos los payers x402 → cross-tenant IDOR).
+        //
+        // HU-193: el guard REAL es ahora `requireA2AKeyPresence` en la cadena
+        // pre-cobro (mismo status/código/mensaje, pero SIN cobrarle el challenge
+        // x402 a un pedido cuyo rechazo estaba garantizado). Esto queda como
+        // defense-in-depth: `a2aKeyRow` ausente ⟺ credencial ausente, porque los
+        // tres branches del middleware setean `a2aKeyRow` cuando autentican.
         const keyRow = request.a2aKeyRow;
         if (!keyRow) {
           return reply.status(403).send({
             error: 'a2a-key required',
             error_code: 'A2A_KEY_REQUIRED',
-            message:
-              'Registry mutation requires an authenticated a2a-key. The x402 anonymous path is read-only for registries.',
+            message: A2A_KEY_REQUIRED_MESSAGE,
           });
         }
         const ownerRef = keyRow.owner_ref;
@@ -188,7 +257,12 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
 
         return reply.status(201).send(registry);
       } catch (err) {
-        const mapped = mapOwnershipError(err, reply);
+        const mapped = await mapOwnershipError(
+          request,
+          err,
+          reply,
+          'registries.post',
+        );
         if (mapped) return mapped;
         // F-05 (audit 2026-06-29): static client message — never leak the raw
         // err.message (may carry internal hosts / SQL / SSRF datum). Detail is
@@ -197,6 +271,12 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
           { detail: err instanceof Error ? err.message : 'unknown' },
           'registry register failed',
         );
+        // HU-193 (residuo): las reglas que caen acá necesitan I/O (colisión de
+        // PK contra la DB) o viven dentro del service (validación del `name`),
+        // así que no se pueden adelantar sin duplicar la regla. El registry NO
+        // quedó creado en ninguno de esos caminos (el pre-check y el 23505
+        // abortan el insert) → devolver el débito no regala nada.
+        await refundStep0Debit(request, 'registries.post:register-failed');
         return reply.status(400).send({ error: 'Failed to register registry' });
       }
     },
@@ -212,11 +292,15 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
   }>(
     '/:id',
     {
-      preHandler: [
-        ...requirePaymentOrA2AKey({
+      preHandler: chargedRoute({
+        // HU-193: el PATCH no tiene forma validable sin I/O más allá de la
+        // credencial — el body es un `Partial` libre y el 422 de SSRF necesita
+        // resolución DNS (ver el comentario del 422 en el POST).
+        validate: [requireA2AKeyPresence(A2A_KEY_REQUIRED_MESSAGE)],
+        payment: {
           description: 'WasiAI Registry Management — Update marketplace',
-        }),
-      ],
+        },
+      }),
     },
     async (request, reply: FastifyReply) => {
       try {
@@ -248,6 +332,8 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
               { field: err.field, category: err.category },
               'SSRF blocked',
             );
+            // HU-193 (residuo): ver el 422 del POST — I/O de DNS, no adelantable.
+            await refundStep0Debit(request, 'registries.patch:ssrf-blocked');
             return reply.status(422).send({
               error: 'SSRF_BLOCKED',
               field: err.field,
@@ -258,26 +344,35 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
         }
 
         // WKH-63 fix-pack (BLQ-ALTO-1): ver POST handler para racional.
+        // HU-193: guard real = `requireA2AKeyPresence` pre-cobro; esto es
+        // defense-in-depth.
         const keyRow = request.a2aKeyRow;
         if (!keyRow) {
           return reply.status(403).send({
             error: 'a2a-key required',
             error_code: 'A2A_KEY_REQUIRED',
-            message:
-              'Registry mutation requires an authenticated a2a-key. The x402 anonymous path is read-only for registries.',
+            message: A2A_KEY_REQUIRED_MESSAGE,
           });
         }
         const ownerRef = keyRow.owner_ref;
         const registry = await registryService.update(id, body, ownerRef);
         return reply.send(registry);
       } catch (err) {
-        const mapped = mapOwnershipError(err, reply);
+        const mapped = await mapOwnershipError(
+          request,
+          err,
+          reply,
+          'registries.patch',
+        );
         if (mapped) return mapped;
         // F-05 (audit 2026-06-29): static client message; detail logged server-side.
         request.log.warn(
           { detail: err instanceof Error ? err.message : 'unknown' },
           'registry update failed',
         );
+        // HU-193 (residuo): fallo del UPDATE contra la DB. La fila no cambió
+        // (el UPDATE es atómico y falló), así que el débito se devuelve.
+        await refundStep0Debit(request, 'registries.patch:update-failed');
         return reply.status(400).send({ error: 'Failed to update registry' });
       }
     },
@@ -290,41 +385,55 @@ const registriesRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.delete<{ Params: { id: string } }>(
     '/:id',
     {
-      preHandler: [
-        ...requirePaymentOrA2AKey({
+      preHandler: chargedRoute({
+        // HU-193: un DELETE no tiene cuerpo; lo único decidible sin I/O es la
+        // presencia de credencial.
+        validate: [requireA2AKeyPresence(A2A_KEY_REQUIRED_MESSAGE)],
+        payment: {
           description: 'WasiAI Registry Management — Delete marketplace',
-        }),
-      ],
+        },
+      }),
     },
     async (request, reply: FastifyReply) => {
       try {
         const { id } = request.params;
         // WKH-63 fix-pack (BLQ-ALTO-1): ver POST handler para racional.
+        // HU-193: guard real = `requireA2AKeyPresence` pre-cobro; esto es
+        // defense-in-depth.
         const keyRow = request.a2aKeyRow;
         if (!keyRow) {
           return reply.status(403).send({
             error: 'a2a-key required',
             error_code: 'A2A_KEY_REQUIRED',
-            message:
-              'Registry mutation requires an authenticated a2a-key. The x402 anonymous path is read-only for registries.',
+            message: A2A_KEY_REQUIRED_MESSAGE,
           });
         }
         const ownerRef = keyRow.owner_ref;
         const deleted = await registryService.delete(id, ownerRef);
 
         if (!deleted) {
+          // HU-193 (residuo): race del pre-fetch (la fila desapareció entre el
+          // check de ownership y el DELETE). Nada se borró → se devuelve.
+          await refundStep0Debit(request, 'registries.delete:not-found');
           return reply.status(404).send({ error: 'Registry not found' });
         }
 
         return reply.send({ success: true });
       } catch (err) {
-        const mapped = mapOwnershipError(err, reply);
+        const mapped = await mapOwnershipError(
+          request,
+          err,
+          reply,
+          'registries.delete',
+        );
         if (mapped) return mapped;
         // F-05 (audit 2026-06-29): static client message; detail logged server-side.
         request.log.warn(
           { detail: err instanceof Error ? err.message : 'unknown' },
           'registry delete failed',
         );
+        // HU-193 (residuo): fallo del DELETE contra la DB; la fila sigue ahí.
+        await refundStep0Debit(request, 'registries.delete:delete-failed');
         return reply.status(400).send({ error: 'Failed to delete registry' });
       }
     },
