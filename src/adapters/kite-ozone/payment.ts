@@ -452,15 +452,29 @@ export class KiteOzonePaymentAdapter implements EvmPaymentAdapter {
         classifySettleTransportError(err),
       );
     }
-    // El facilitator CONTESTÓ rechazando: eso es un VEREDICTO suyo, no una incógnita de
-    // transporte, así que sigue por el camino de error preexistente (`Error` común) y
-    // queda FUERA del try de abajo a propósito. (Reclasificar este camino —un 502 que
-    // pudo llegar después de un broadcast— es el BLQ-ALTO del AR, Scope OUT: toca los 5
-    // adapters y tiene su propia HU. Hay un candado de no-regresión:
-    // `T-198-AR2-HTTP-ERROR`.)
+    // HU-201 (AR BLQ-ALTO, el que HU-198 dejó Scope OUT acá mismo) — UN HTTP NON-2XX
+    // **NO** ES UN VEREDICTO.
+    //
+    // El comentario anterior decía que un non-2xx "es un VEREDICTO suyo, no una
+    // incógnita de transporte". Es FALSO en el caso que importa: un 502/504 lo emite un
+    // proxy que puede haberse caído DESPUÉS de que el facilitator broadcasteó, y un 500
+    // del propio facilitator tampoco dice en qué punto de su pipeline falló. Al dinero
+    // sólo le importa una cosa —¿pudo haber salido la tx?— y la respuesta acá es "no
+    // sabemos", exactamente igual que en el techo de wall-clock de HU-198.
+    //
+    // Antes salía como `Error` PELADO, así que `readSettleValueDisposition() ===
+    // undefined` y aguas abajo (`middleware/x402.ts`, `lib/downstream-payment.ts`) el
+    // caso quedaba como un settle "fallido" más, sin superficie de reconciliación. Es el
+    // MISMO colapso que HU-198 arregló para el abort. Este es el camino
+    // `pieverse` = el DEFAULT de producción (`KITE_FACILITATOR_MODE`).
+    //
+    // El candado `T-198-AR2-HTTP-ERROR` afirmaba lo contrario a propósito (candado de
+    // NO-regresión mientras el fix estaba fuera de alcance); esta HU lo invierte y pasa a
+    // llamarse `T-201-HTTP-ERROR`.
     if (!response.ok)
-      throw new Error(
+      throw new FacilitatorSettleError(
         `Facilitator returned HTTP ${response.status} on /settle`,
+        'unknown',
       );
     // ⚠️ AR#2 BLQ-MEDIO-1 — LA LECTURA DEL BODY TAMBIÉN ESTÁ BAJO EL TECHO.
     //
@@ -487,6 +501,11 @@ export class KiteOzonePaymentAdapter implements EvmPaymentAdapter {
         classifySettleTransportError(err),
       );
     }
+    // HU-201: el `txHash` se pasa VERBATIM, incluido cuando viene con `success:false`, y
+    // eso es LOAD-BEARING: `services/payment-intent.ts` (`hasBroadcastEvidence`) lo lee
+    // para no clasificar un `200 {success:false, txHash:"0x…"}` como "probado que no se
+    // ejecutó". NO normalizar el hash a `''` en la rama de fallo: eso volvería a borrar
+    // la única evidencia de broadcast que tenemos.
     return {
       txHash: result.txHash,
       success: result.success,
@@ -715,15 +734,35 @@ async function settleX402(req: SettleRequest): Promise<SettleResult> {
     .json()
     .catch(() => null)) as X402SettleResponse | null;
   if (result === null) {
-    throw new Error(
+    // HU-201: el body no parsea ⟹ no sabemos qué contestó el facilitator ⟹ no
+    // sabemos si broadcasteó. Mismo mensaje de siempre, pero TIPADO `'unknown'`.
+    throw new FacilitatorSettleError(
       `Facilitator returned HTTP ${response.status} on /settle (no JSON body)`,
+      'unknown',
     );
   }
-  if (!response.ok || !result.settled) {
+  // HU-201 (AR BLQ-ALTO) — UN HTTP NON-2XX **NO** ES `success:false`.
+  //
+  // Espejo byte-a-byte del guard de `base/payment.ts` (mismo bug, mismo fix), acá para
+  // el modo `x402` de kite. Un 502/504 —un proxy que corta DESPUÉS de que el
+  // facilitator mandó la tx— se aplanaba a `{ success:false }`, y aguas abajo
+  // (`services/payment-intent.ts`) eso significa "el facilitator confirmó que no se
+  // ejecutó" ⟹ refund al buyer y/o re-envío del hop 2 al seller. Nunca lo confirmó: no
+  // contestó bien. Va por el canal de la incógnita.
+  //
+  // `success:false` queda RESERVADO para un 2xx cuyo cuerpo canónico dice
+  // `settled` falsy — el veredicto del facilitator sobre su propio trabajo.
+  if (!response.ok) {
+    throw new FacilitatorSettleError(
+      `Facilitator returned HTTP ${response.status} on /settle: ${result.error?.message ?? 'no error message in body'}`,
+      'unknown',
+    );
+  }
+  if (!result.settled) {
     return {
-      txHash: result?.transactionHash ?? '',
+      txHash: result.transactionHash ?? '',
       success: false,
-      error: result?.error?.message ?? `HTTP ${response.status}`,
+      error: result.error?.message ?? `HTTP ${response.status}`,
     };
   }
   return {

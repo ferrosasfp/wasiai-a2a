@@ -398,9 +398,27 @@ export const reconciliationService = {
         // settle del reconciliador):
         //   (A) el proceso murió DESPUÉS del hop 1 y ANTES de intentar el hop 2 ⟹ el
         //       seller no cobró y nadie más lo va a pagar.
-        //   (D) el hop 2 falló de forma INEQUÍVOCA (`failureKind:'unequivocal'`: el
-        //       sign falló, o el facilitator contestó `success:false`) ⟹ probado que
-        //       no se ejecutó.
+        //   (D) el hop 2 falló de forma INEQUÍVOCA (`failureKind:'unequivocal'`), que
+        //       desde HU-201 es exactamente DOS cosas:
+        //         · `adapter.sign()` TIRÓ ⟹ pre-broadcast POR CONSTRUCCIÓN: firmar es
+        //           local (`signTypedData`), no hay ningún request al facilitator ni
+        //           ninguna tx que pueda existir. Esto sí es una PRUEBA.
+        //         · el facilitator contestó 2xx con `settled/success` falso y SIN
+        //           txHash. ⚠️ ESTO NO ES UNA PRUEBA, y el comentario anterior lo
+        //           afirmaba como tal ("probado que no se ejecutó"). Es una INFERENCIA
+        //           sobre la semántica de un TERCERO: leemos su `success:false` como "no
+        //           settleé". Se sostiene por tres razones, no porque sea demostrable:
+        //             1. es la MISMA respuesta y el MISMO campo cuyo `success:true` ya
+        //                tratamos como autoritativo para marcar plata como pagada
+        //                (desconfiar sólo de un lado sería incoherente);
+        //             2. viene sin txHash — en el momento en que hay hash, HU-201 lo
+        //                manda a `ambiguous` y NUNCA llega acá;
+        //             3. es la entrada que mantiene vivo el re-envío legítimo; exigir
+        //                prueba dura acá dejaría al seller sin cobrar automáticamente en
+        //                el rechazo normal del facilitator.
+        //           Si un facilitator empezara a contestar `success:false` DESPUÉS de
+        //           broadcastear y sin devolver el hash, este re-envío paga dos veces y
+        //           el gateway no tiene forma de saberlo.
         // En ninguna de las dos existe un tx del hop 2 que verificar, así que exigir
         // evidencia del hop 2 como precondición dura NO es la solución: dejaría al
         // seller sin cobrar automáticamente justo en el caso (A), que es el normal.
@@ -420,14 +438,20 @@ export const reconciliationService = {
         //       sano. Un click en el dashboard —o un barrido concurrente— mientras un
         //       settle lento está en vuelo re-envía y paga dos veces. No hace falta
         //       ningún crash: alcanza con que el hop 2 tarde.
-        //   (G) el veredicto del hop 2 llegó como `success:false` sin ser prueba de que
-        //       no se ejecutó ⟹ se clasifica `unequivocal` ⟹ cae en (D) y se re-envía.
-        //       Es el BLQ-ALTO del AR y vive FUERA de este archivo (en los 5 adapters):
-        //       en modo pieverse el adapter devuelve el `txHash` del facilitator
-        //       verbatim, así que un `200 {success:false, txHash:"0x…"}` nos deja un hash
-        //       de broadcast en la mano y lo tratamos como "no pasó nada"; y en
-        //       base/avalanche/tempo un HTTP 502 se aplana a `success:false`.
-        // En (B), (C), (F) y (G) este re-envío PAGA DOS VECES al seller.
+        //   (G) CERRADA POR HU-201. Era: el veredicto del hop 2 llegaba como
+        //       `success:false` sin ser prueba de que no se ejecutó ⟹ `unequivocal` ⟹
+        //       caía en (D) y se re-enviaba. Las dos formas y sus fixes:
+        //         · pieverse (el modo DEFAULT) devuelve el `txHash` del facilitator
+        //           verbatim, así que un `200 {success:false, txHash:"0x…"}` nos deja un
+        //           hash de broadcast en la mano ⟹ ahora `hasBroadcastEvidence`
+        //           (`payment-intent.ts`) lo clasifica `ambiguous`.
+        //         · un HTTP 502 se aplanaba a `success:false` en los 4 settle x402
+        //           (base/avalanche/tempo/kite-x402) y salía como `Error` pelado en
+        //           kite-pieverse ⟹ ahora los 5 tiran `FacilitatorSettleError` con
+        //           `valueDisposition:'unknown'`, que el seam de `payment-intent.ts`
+        //           captura como `ambiguous`.
+        //       En los dos casos el destino pasa a ser `resolving_settle` ⟹ NO llega acá.
+        // En (B), (C) y (F) este re-envío PAGA DOS VECES al seller.
         //
         // POR QUÉ NO SE ARREGLA ACÁ: falta un HECHO PERSISTIDO ("el hop 2 se intentó"),
         // y agregarlo es una decisión de diseño con costo propio. Las dos candidatas:
@@ -443,13 +467,15 @@ export const reconciliationService = {
         //            contra el token. "El token rechaza el segundo uso" sólo vale para
         //            el modo `x402`, que no es el default. En pieverse la unicidad la
         //            tendría que garantizar el facilitator, que es un TERCERO.
-        //        (b) LE FALTA EL CAMBIO COMPAÑERO. Con nonce determinístico, el rechazo
-        //            del segundo envío llega como `success:false` ⟹ HOY eso es
-        //            `unequivocal` ⟹ el buyer se reembolsa CON EL SELLER YA PAGADO. O
-        //            sea que el nonce determinístico sin arreglar antes la clasificación
-        //            de `success:false` CONVIERTE un doble pago en un descalce peor.
-        //            ⟹ el BLQ-ALTO (entrada G) es PREREQUISITO del nonce, no un ítem
-        //            independiente.
+        //        (b) LE FALTABA EL CAMBIO COMPAÑERO — YA HECHO (HU-201). Con nonce
+        //            determinístico, el rechazo del segundo envío llega como
+        //            `success:false`; ANTES eso era `unequivocal` ⟹ el buyer se
+        //            reembolsaba CON EL SELLER YA PAGADO. Ese prerrequisito está
+        //            cumplido SÓLO en la medida en que el rechazo traiga txHash o un
+        //            non-2xx: si el facilitator/token rechaza con un 2xx `success:false`
+        //            PELADO, sigue siendo `unequivocal`. O sea que el nonce
+        //            determinístico todavía necesita que el rechazo del replay sea
+        //            distinguible de un rechazo normal.
         //
         //   2. Lease pre-hop2: persistir "intento en curso" ANTES de mandar el hop 2
         //      (p.ej. escribir `resolving_settle` antes, y bajarlo a
@@ -462,6 +488,10 @@ export const reconciliationService = {
         // descubierto, el lease es la única que cierra (F) sin depender de un tercero ni
         // de arreglar antes la clasificación de `success:false`. La 1 queda como destino
         // deseable DESPUÉS del BLQ-ALTO, y sólo si se resuelve la unicidad en pieverse.
+        //
+        // ⚠️ HU-201 NO CIERRA (B), (C) NI (F). Cerró (G) —la clasificación— y nada más.
+        // El re-envío de abajo sigue saliendo sin evidencia persistida de que el hop 2 se
+        // intentó, así que el lease sigue pendiente.
         //
         // Ninguna es un fix-pack. NO borrar este bloque sin cerrar (B), (C), (F) y (G).
         //

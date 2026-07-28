@@ -128,6 +128,7 @@ vi.mock('../adapters/escrow/debit-executor.js', () => ({
 import { supabase } from '../lib/supabase.js';
 import type { CreateUptoInput } from '../types/index.js';
 import {
+  hasBroadcastEvidence,
   isHop2ResultUnknown,
   paymentIntentService,
   settleEscrowAware,
@@ -2009,5 +2010,207 @@ describe('WKH-192 settle decimals-aware', () => {
     // el hop 2 (seam, SIN líneas nuevas) firma el atómico 6d que converge con el hop1.
     expect(mockSign.mock.calls[0]?.[0]?.value).toBe(atomic6);
     mockIsEscrowSettleEnabled.mockReturnValue(false);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// HU-201 — un `success:false` CON txHash NO es prueba de que no se ejecutó.
+//
+// LA PROPIEDAD DE DINERO QUE SE CANDA ACÁ, en las dos direcciones:
+//   · CON hash  → NO se reembolsa al buyer y NO se habilita el re-envío del hop 2.
+//   · SIN hash  → se reembolsa y se habilita el re-envío, EXACTAMENTE COMO ANTES.
+// La segunda mitad no es decorativa: sin ella, mandar todo a `ambiguous` pasaría
+// verde y el resultado sería un reconciliador que no reconcilia y un buyer que
+// nunca recupera su deposit.
+//
+// Los asserts son sobre el EFECTO: `db.refunds` (el modelo fiel de
+// `refund_a2a_key_spend` dentro de `finalize_payment_intent`) y el
+// `debit_settle_status` persistido, que es lo que el predicado de
+// `claim_reconciliation` usa para decidir si re-envía. NO se afirma `failureKind`
+// como resultado principal — eso sería afirmar nuestra propia predicción.
+// ════════════════════════════════════════════════════════════════════════════
+describe('HU-201 settle success:false con evidencia de broadcast', () => {
+  const SIGN_OK = {
+    paymentRequest: {
+      authorization: { value: '1' },
+      signature: '0xsig',
+      network: 'kite',
+    },
+  };
+
+  // El caso pieverse REAL: el adapter devuelve la respuesta del facilitator
+  // verbatim, así que un `200 {success:false, txHash:"0x…"}` llega tal cual.
+  function settleFalseWithHash(txHash = '0xBROADCASTED'): void {
+    mockSign.mockResolvedValue(SIGN_OK);
+    mockSettle.mockResolvedValue({ txHash, success: false, error: 'boom' });
+  }
+  function settleFalseNoHash(): void {
+    mockSign.mockResolvedValue(SIGN_OK);
+    mockSettle.mockResolvedValue({ txHash: '', success: false, error: 'boom' });
+  }
+
+  // ── Camino NO-ESCROW (el DEFAULT: ESCROW_SETTLE_ENABLED exige '=== true') ──
+
+  it('T-201-A: closeSession con hash de broadcast → CERO refund al buyer (antes se le devolvía el deposit con el seller posiblemente pagado)', async () => {
+    settleFalseWithHash();
+    const db = makeIntentDb({
+      intent_type: 'session',
+      authorized_usd: 10,
+      consumed_usd: 4,
+    });
+    routeRpc(db.handlers);
+
+    const r = await paymentIntentService.closeSession('i1', OWNER);
+
+    expect(r.status).toBe('failed');
+    // EL EFECTO SOBRE LA PLATA: no se movió nada del budget del buyer.
+    expect(db.refunds).toEqual([]);
+    expect(db.row.settle_outcome).toBe('failed_ambiguous');
+    expect(db.row.status).toBe('failed'); // NO 'refunded'
+  });
+
+  it('T-201-B (contra-ejemplo, el caso legítimo): closeSession con `success:false` SIN hash → sigue reembolsando el deposit COMPLETO', async () => {
+    settleFalseNoHash();
+    const db = makeIntentDb({
+      intent_type: 'session',
+      authorized_usd: 10,
+      consumed_usd: 4,
+    });
+    routeRpc(db.handlers);
+
+    const r = await paymentIntentService.closeSession('i1', OWNER);
+
+    expect(r.status).toBe('failed');
+    expect(db.refunds).toEqual([10]); // deposit completo, sin cambios
+    expect(db.row.settle_outcome).toBe('failed_unequivocal');
+    expect(db.row.status).toBe('refunded');
+  });
+
+  it('T-201-C: settleUpto con hash de broadcast → CERO refund del débito', async () => {
+    settleFalseWithHash();
+    const db = makeIntentDb({
+      intent_type: 'upto',
+      authorized_usd: 10,
+      consumed_usd: 0,
+    });
+    routeRpc(db.handlers);
+
+    const r = await paymentIntentService.settleUpto('i1', OWNER, 4, false);
+
+    expect(r.status).toBe('failed');
+    expect(db.refunds).toEqual([]);
+    expect(db.row.settle_outcome).toBe('failed_ambiguous');
+  });
+
+  it('T-201-D (contra-ejemplo): settleUpto con `success:false` SIN hash → sigue reembolsando el consumido', async () => {
+    settleFalseNoHash();
+    const db = makeIntentDb({
+      intent_type: 'upto',
+      authorized_usd: 10,
+      consumed_usd: 0,
+    });
+    routeRpc(db.handlers);
+
+    const r = await paymentIntentService.settleUpto('i1', OWNER, 4, false);
+
+    expect(r.status).toBe('failed');
+    expect(db.refunds).toEqual([4]);
+    expect(db.row.settle_outcome).toBe('failed_unequivocal');
+  });
+
+  // ── Camino ESCROW: ¿el reconciliador re-envía el hop 2? ──
+  //
+  // `reconciliation_pending` es auto-reclamable por `claim_reconciliation` y, sin
+  // `debit_resolution_tx_hash`, `reconciliation.ts` RE-ENVÍA el hop 2.
+  // `resolving_settle` sin tx NO lo reclama por el lado settle (el predicado del
+  // UPDATE en la migración 20260728010000 excluye 'settle'). O sea que el estado
+  // persistido ES la decisión "se re-envía o no".
+  describe('escrow: el estado persistido decide el re-envío', () => {
+    const ESCROW = '0x1111111111111111111111111111111111111111';
+
+    beforeEach(() => {
+      mockIsEscrowSettleEnabled.mockReturnValue(true);
+      mockResolveEscrowContract.mockReturnValue(ESCROW);
+      mockGetDefaultChainKey.mockReturnValue('kite');
+      mockReadValidDebitSignature.mockResolvedValue({
+        debit_signature: `0x${'ab'.repeat(65)}`,
+        debit_amount_atomic: '3700000',
+        debit_deadline: 9_999_999_999,
+        debit_nonce: '7',
+        debit_key_id_hash: '0xkeyhash',
+        debit_hop1_tx_hash: null,
+        debit_settle_status: null,
+      });
+      mockExecuteDebitHop1.mockResolvedValue({
+        kind: 'confirmed',
+        txHash: '0xhop1',
+        blockNumber: 1n,
+      });
+      mockRecordDebitHop1.mockResolvedValue('0xhop1');
+      mockRecordDebitSettleStatus.mockResolvedValue(undefined);
+    });
+
+    afterEach(() => {
+      mockIsEscrowSettleEnabled.mockReturnValue(false);
+    });
+
+    function callEscrow201() {
+      return settleEscrowAware({
+        intentId: 'i1',
+        ownerRef: OWNER,
+        payTo: PAYTO,
+        finalAmountUsd: 3.7,
+        chainId: 2368,
+        keyId: 'k1',
+      });
+    }
+
+    it('T-201-E: hop2 `success:false` CON hash → resolving_settle ⟹ el reconciliador NO re-envía (antes: reconciliation_pending ⟹ doble pago al seller)', async () => {
+      settleFalseWithHash();
+
+      const outcome = await callEscrow201();
+
+      expect(outcome.status).toBe('failed');
+      expect(mockRecordDebitSettleStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'resolving_settle' }),
+      );
+      expect(mockRecordDebitSettleStatus).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'reconciliation_pending' }),
+      );
+    });
+
+    it('T-201-F (contra-ejemplo, el caso legítimo): hop2 `success:false` SIN hash → sigue en reconciliation_pending ⟹ el seller SÍ cobra automáticamente', async () => {
+      settleFalseNoHash();
+
+      const outcome = await callEscrow201();
+
+      expect(outcome.status).toBe('failed');
+      expect(mockRecordDebitSettleStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'reconciliation_pending' }),
+      );
+      expect(mockRecordDebitSettleStatus).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'resolving_settle' }),
+      );
+    });
+  });
+
+  // ── El clasificador, aparte (la forma exacta del límite) ──
+  it('T-201-G: `hasBroadcastEvidence` — sólo la AUSENCIA del hash deja el veredicto inequívoco', () => {
+    // Evidencia: cualquier string no vacío. NO se valida formato a propósito (un
+    // hash que no reconocemos significa que no entendimos la respuesta, no que
+    // tengamos una prueba).
+    expect(hasBroadcastEvidence('0xBROADCASTED')).toBe(true);
+    expect(hasBroadcastEvidence(`0x${'a'.repeat(64)}`)).toBe(true);
+    expect(hasBroadcastEvidence('5Kd3NBUAd')).toBe(true); // base58 (Solana)
+    expect(hasBroadcastEvidence('n/a')).toBe(true); // ilegible ⇒ tampoco es prueba
+    // Ausencia: lo que producen los 4 adapters x402 (`?? ''`) y pieverse sin hash.
+    expect(hasBroadcastEvidence('')).toBe(false);
+    expect(hasBroadcastEvidence('   ')).toBe(false);
+    expect(hasBroadcastEvidence(undefined)).toBe(false);
+    expect(hasBroadcastEvidence(null)).toBe(false);
+    // `SettleResult.txHash` es `string` en el tipo pero el facilitator es un
+    // TERCERO: un no-string en runtime no puede tirar ni contar como prueba.
+    expect(hasBroadcastEvidence(0)).toBe(false);
+    expect(hasBroadcastEvidence({})).toBe(false);
   });
 });
