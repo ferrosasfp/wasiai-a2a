@@ -7,6 +7,10 @@
 // `lib/downstream-skip-code.ts` (que importa `DownstreamLogger` de acá), pero
 // `import type` se borra en runtime → no hay ciclo de módulos real.
 import type { PublicDownstreamSkipCode } from '../lib/downstream-skip-code.js';
+// HU-203: `ComposeResult.settleRefundWithheld` reusa el vocabulario del módulo que
+// TOMA la decisión de retener, para que no puedan divergir. `import type` → sin ciclo
+// de módulos en runtime.
+import type { SettleWithholdingReason } from '../lib/settle-withholding.js';
 // WKH-61: importamos A2AAgentKeyRow del subarchivo para tiparlo en
 // ComposeRequest / OrchestrateRequest. El re-export `export * from './a2a-key.js'`
 // del bottom mantiene la API pública intacta.
@@ -463,6 +467,25 @@ export interface ComposeResult {
   };
   /** WKH-114: completitud a nivel pipeline (AC-5), DISTINTA de success. */
   verificationStatus?: PipelineVerificationStatus;
+  /**
+   * HU-203: el step que abortó el pipeline lo hizo con un settle cuyo resultado NO se
+   * conoce (hay evidencia de broadcast, o el facilitator no dio un veredicto legible).
+   * Presente ⟹ la plata del caller pudo haber salido de verdad.
+   *
+   * Existe porque el débito del step 0 lo hace y lo reembolsa `services/orchestrate.ts`,
+   * NO `compose` (el guard `i > 0` de compose es la única defensa contra el doble
+   * débito del step 0). Sin este campo, compose podía retener el reembolso de su step y
+   * orchestrate devolvía igual el del step 0, que es la misma pérdida.
+   *
+   * `step` es LOAD-BEARING: orchestrate sólo debe saltear SU reembolso cuando el settle
+   * sin resolver fue el del step 0. Si fue el de un step posterior, el residuo del
+   * step 0 sigue siendo plata del caller que nunca se gastó y devolverla es correcto.
+   */
+  settleRefundWithheld?: {
+    step: number;
+    reason: SettleWithholdingReason;
+    txHash: string | null;
+  };
 }
 
 export interface StepResult {

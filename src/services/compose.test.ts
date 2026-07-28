@@ -107,6 +107,9 @@ vi.mock('../lib/downstream-payment.js', () => ({
   signAndSettleDownstream: vi.fn().mockResolvedValue(null),
 }));
 
+// HU-203: la clase REAL del eje 2 (el hop sin respuesta utilizable). Se usa la de
+// producción y no un doble, para que el test se rompa si el contrato del adapter cambia.
+import { FacilitatorSettleError } from '../adapters/errors.js';
 import { signAndSettleDownstream } from '../lib/downstream-payment.js';
 import { budgetService } from './budget.js';
 import { composeService } from './compose.js';
@@ -3893,5 +3896,385 @@ describe('WKH-195 compose inbound decimals-aware', () => {
     expect(mockSettle).toHaveBeenCalledTimes(1);
     expect(result.txHash).toBe('0xTX');
     expect(result.output).toBe('ok');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// HU-203 — un `success:false` del facilitator NO autoriza a devolverle la plata
+// al caller.
+//
+// LO QUE MIDEN ESTOS TESTS ES LA PLATA, no las llamadas internas: la pregunta
+// es "¿se reembolsó el débito del step, sí o no?", y la respuesta se lee en
+// `budgetService.creditWithDest` / `budgetService.credit`, que son los dos
+// únicos caminos por los que el budget vuelve al caller.
+//
+// LAS DOS DIRECCIONES IMPORTAN Y ESTÁN CUBIERTAS. Retener de menos deja al
+// agente cobrado on-chain y al caller reembolsado (la plata sale dos veces de
+// nuestro lado). Retener de más deja al caller cobrado por un step que no le
+// entregó nada. Por eso hay un test espejo para cada guard: uno con evidencia
+// (no se reembolsa) y uno sin evidencia (se reembolsa igual que siempre).
+//
+// LA FORMA DEL SETUP NO ES ARBITRARIA. `scopingKeyRow` presente + `a2aKey`
+// AUSENTE es exactamente lo que arma `POST /orchestrate`
+// (`routes/orchestrate.ts` propaga `request.a2aKeyRow` pero NUNCA setea
+// `a2aKey`), y es la única combinación en la que coexisten las dos mitades del
+// bug: el settle inbound firmado por el operador (`!a2aKey`) y el débito
+// per-step reembolsable (`scopingKeyRow`). Con la forma de `POST /compose`
+// (ambos presentes) el settle ni siquiera corre.
+// ════════════════════════════════════════════════════════════════════════════
+describe('HU-203 compose — refund vs evidencia de broadcast', () => {
+  function mockAgentsBySlug(agents: Record<string, Agent>) {
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug: string, _registry?: string) => agents[slug] ?? null,
+    );
+  }
+
+  /** Los dos agentes del pipeline: ambos con payTo EVM → ambos firman inbound. */
+  function twoPaidAgents() {
+    const a1 = makeAgent({
+      slug: 'kyc',
+      priceUsdc: 0.001,
+      metadata: { payTo: EVM_PAYTO },
+    });
+    const a2 = makeAgent({
+      slug: 'corridor',
+      priceUsdc: 0.05,
+      id: 'agent-2',
+      metadata: { payTo: EVM_PAYTO },
+    });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+  }
+
+  function primeSign() {
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'base64mock',
+      paymentRequest: {
+        authorization: {
+          from: '0xAAA',
+          to: EVM_PAYTO,
+          value: '1',
+          validAfter: '0',
+          validBefore: '9999999999',
+          nonce: '0x1234',
+        },
+        signature: '0xSIG',
+        network: 'eip155:2368',
+      },
+    });
+  }
+
+  /** La forma de `/orchestrate`: con key row (débito per-step), SIN `a2aKey`. */
+  function runTwoStepPipeline() {
+    return composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+    });
+  }
+
+  /** Suma TODO lo que volvió al budget del caller, por cualquiera de los dos caminos. */
+  function refundedUsd(): number {
+    const withDest = mockCreditWithDest.mock.calls.reduce(
+      (acc, call) => acc + (call[2] as number),
+      0,
+    );
+    const plain = mockCredit.mock.calls.reduce(
+      (acc, call) => acc + (call[2] as number),
+      0,
+    );
+    return withDest + plain;
+  }
+
+  beforeEach(() => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    primeSign();
+    twoPaidAgents();
+  });
+
+  // ── EJE 1: `2xx { success:false, txHash }` ───────────────────────────────
+
+  it('T-203-A1-NO-REFUND: un `success:false` CON txHash NO devuelve el débito del step', async () => {
+    mockFetchOk({ result: 'r1' }); // step 0 invoca ok
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
+    mockFetchOk({ result: 'r2' }); // step 1 invoca ok
+    // …y el facilitator dice que no settleó, PERO nos da un hash de broadcast.
+    mockSettle.mockResolvedValueOnce({
+      success: false,
+      txHash: '0xBROADCASTED',
+      error: 'insufficient funds',
+    });
+
+    const result = await runTwoStepPipeline();
+
+    expect(result.success).toBe(false);
+    // LO QUE IMPORTA: el débito del step 1 (0.05) NO volvió al caller.
+    expect(refundedUsd()).toBe(0);
+    expect(mockCreditWithDest).not.toHaveBeenCalled();
+    expect(mockCredit).not.toHaveBeenCalled();
+    // Y el veredicto viaja para que `orchestrate` no reembolse el step 0.
+    expect(result.settleRefundWithheld).toEqual({
+      step: 1,
+      reason: 'broadcast-hash',
+      txHash: '0xBROADCASTED',
+    });
+  });
+
+  it('T-203-A1-STILL-REFUNDS: un `success:false` SIN txHash sigue devolviendo el débito', async () => {
+    // El contra-ejemplo, y es la mitad que evita la sobre-corrección: el
+    // facilitator contestó, con un veredicto legible, que NO settleó, y no nos
+    // dio ningún hash. Ese es el único caso que conserva el reembolso
+    // automático; si también lo retuviéramos, el caller quedaría cobrado por un
+    // step que probadamente no se ejecutó.
+    mockFetchOk({ result: 'r1' });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
+    mockFetchOk({ result: 'r2' });
+    mockSettle.mockResolvedValueOnce({
+      success: false,
+      txHash: '',
+      error: 'insufficient funds',
+    });
+
+    const result = await runTwoStepPipeline();
+
+    expect(result.success).toBe(false);
+    expect(refundedUsd()).toBe(0.05);
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
+    expect(mockCreditWithDest.mock.calls[0]?.[2]).toBe(0.05);
+    expect(result.settleRefundWithheld).toBeUndefined();
+  });
+
+  it('T-203-A1-WHITESPACE: un txHash que es sólo espacios no es evidencia — se reembolsa', async () => {
+    // `hasBroadcastEvidence` exige un string NO VACÍO tras `trim()`. Un
+    // facilitator que rellena el campo con `'   '` no nos dio ninguna pista, y
+    // tratarlo como evidencia retendría plata sin ningún motivo.
+    mockFetchOk({ result: 'r1' });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
+    mockFetchOk({ result: 'r2' });
+    mockSettle.mockResolvedValueOnce({ success: false, txHash: '   ' });
+
+    const result = await runTwoStepPipeline();
+
+    expect(result.success).toBe(false);
+    expect(refundedUsd()).toBe(0.05);
+  });
+
+  // ── EJE 2: el hop sin respuesta utilizable ───────────────────────────────
+
+  it('T-203-A2-NO-REFUND: `FacilitatorSettleError` con `unknown` NO devuelve el débito', async () => {
+    // Este eje NO lo cubre el fix de los adapters de HU-201. Antes, un HTTP
+    // non-2xx se aplanaba a `success:false` y terminaba en el mismo `throw` que
+    // el eje 1; desde HU-201 llega TIPADO, pero si `compose` no lee su
+    // `valueDisposition` el resultado es idéntico: reembolso indebido.
+    mockFetchOk({ result: 'r1' });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
+    mockFetchOk({ result: 'r2' });
+    mockSettle.mockRejectedValueOnce(
+      new FacilitatorSettleError(
+        'Facilitator returned HTTP 502 on /settle',
+        'unknown',
+      ),
+    );
+
+    const result = await runTwoStepPipeline();
+
+    expect(result.success).toBe(false);
+    expect(refundedUsd()).toBe(0);
+    expect(result.settleRefundWithheld).toEqual({
+      step: 1,
+      reason: 'no-facilitator-answer',
+      txHash: null,
+    });
+  });
+
+  it('T-203-A2-STILL-REFUNDS: `FacilitatorSettleError` con `not-sent` SÍ devuelve el débito', async () => {
+    // `'not-sent'` sólo se emite ante una señal que PRUEBA que no hubo request
+    // (DNS que no resuelve, conexión rechazada, URL inválida). Esa prueba es
+    // justamente lo que mantiene vivo el reembolso legítimo: si acá también
+    // retuviéramos, un facilitator mal configurado dejaría a TODOS los callers
+    // cobrados por steps que nunca salieron.
+    mockFetchOk({ result: 'r1' });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
+    mockFetchOk({ result: 'r2' });
+    mockSettle.mockRejectedValueOnce(
+      new FacilitatorSettleError(
+        'Facilitator network error on settle: getaddrinfo ENOTFOUND',
+        'not-sent',
+      ),
+    );
+
+    const result = await runTwoStepPipeline();
+
+    expect(result.success).toBe(false);
+    expect(refundedUsd()).toBe(0.05);
+    expect(result.settleRefundWithheld).toBeUndefined();
+  });
+
+  it('T-203-A2-CROSS-REGISTRY: el error se lee por FORMA, no por `instanceof`', async () => {
+    // Un consumidor cargado con `vi.resetModules()` + `import()` dinámico ve
+    // OTRA copia de la clase y el `instanceof` da `false`. Si la decisión de
+    // dinero dependiera de la identidad de clase, ese caso colapsaría al camino
+    // de "falló" ⟹ reembolso indebido. Se simula con un objeto que tiene la
+    // FORMA pero no la clase.
+    const foreign = Object.assign(
+      new Error('Facilitator returned HTTP 504 on /settle'),
+      { name: 'FacilitatorSettleError', valueDisposition: 'unknown' },
+    );
+    mockFetchOk({ result: 'r1' });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
+    mockFetchOk({ result: 'r2' });
+    mockSettle.mockRejectedValueOnce(foreign);
+
+    const result = await runTwoStepPipeline();
+
+    expect(result.success).toBe(false);
+    expect(refundedUsd()).toBe(0);
+  });
+
+  // ── El resto de los fallos NO cambia de comportamiento ───────────────────
+
+  it('T-203-UNRELATED: un 502 del AGENTE (sin settle) sigue reembolsando', async () => {
+    // El guard tiene que ser estrecho: sólo mira los fallos de settle. Un
+    // agente que devuelve 502 es un step sin valor entregado y sin ninguna
+    // posibilidad de haber pagado — se reembolsa como siempre.
+    mockFetchOk({ result: 'r1' });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
+    mockFetchError(502);
+
+    const result = await runTwoStepPipeline();
+
+    expect(result.success).toBe(false);
+    expect(refundedUsd()).toBe(0.05);
+    expect(result.settleRefundWithheld).toBeUndefined();
+  });
+
+  // ── La superficie: no reembolsar en silencio sería peor que reembolsar ───
+
+  it('T-203-SURFACE: la retención deja un evento durable con el hash y el monto', async () => {
+    mockFetchOk({ result: 'r1' });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
+    mockFetchOk({ result: 'r2' });
+    mockSettle.mockResolvedValueOnce({
+      success: false,
+      txHash: '0xBROADCASTED',
+    });
+
+    await runTwoStepPipeline();
+
+    const withheldEvent = vi
+      .mocked(eventService.track)
+      .mock.calls.map((c) => c[0])
+      .find((e) => e.eventType === 'compose_settle_unknown');
+    expect(withheldEvent).toBeDefined();
+    // El hash es la clave con la que un humano cruza contra la cadena…
+    expect(withheldEvent?.txHash).toBe('0xBROADCASTED');
+    // …y el monto es lo que hay que devolver a mano si la tx no aterrizó.
+    expect(withheldEvent?.costUsdc).toBe(0.05);
+    expect(withheldEvent?.metadata?.refund_withheld).toBe(true);
+    expect(withheldEvent?.metadata?.key_id).toBe('k1');
+    expect(withheldEvent?.metadata?.owner_ref).toBe('owner-test');
+  });
+
+  it('T-203-SURFACE-STEP0: el step 0 no retiene nada acá, pero tampoco desaparece', async () => {
+    // El débito del step 0 lo hace y lo deshace `orchestrate`, no `compose` (el
+    // guard `i > 0`). Compose no tiene nada que retener, pero el settle sin
+    // resolver se anota igual: un caso que no se reembolsa y que nadie lista es
+    // plata retenida en silencio.
+    mockFetchOk({ result: 'r1' });
+    mockSettle.mockResolvedValueOnce({
+      success: false,
+      txHash: '0xSTEP0BROADCAST',
+    });
+
+    const result = await runTwoStepPipeline();
+
+    expect(result.success).toBe(false);
+    expect(result.settleRefundWithheld).toEqual({
+      step: 0,
+      reason: 'broadcast-hash',
+      txHash: '0xSTEP0BROADCAST',
+    });
+    const withheldEvent = vi
+      .mocked(eventService.track)
+      .mock.calls.map((c) => c[0])
+      .find((e) => e.eventType === 'compose_settle_unknown');
+    expect(withheldEvent?.metadata?.refund_withheld).toBe(false);
+    expect(withheldEvent?.txHash).toBe('0xSTEP0BROADCAST');
+  });
+
+  // ── GUARD 2: el retry adaptativo ─────────────────────────────────────────
+
+  it('T-203-RETRY-NO-REFUND: si el settle del RE-INVOKE pudo salir, el retry-débito NO vuelve', async () => {
+    // Guard propio (no una consecuencia del primero): acá el settle que pudo
+    // salir es el del RE-INVOKE, o sea un débito distinto sobre una tx
+    // distinta. El primer intento falló limpio (400 con field-errors, sin
+    // settle) y por eso se reembolsó; el segundo no.
+    mockFetchOk({ result: 'r1' });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
+    // Step 1, intento 1: 400 con field-errors → refund d1 + retry.
+    mockFetchError(400, '{"fieldErrors":{"amount":["required"]}}');
+    mockRegen.mockResolvedValueOnce({ amount: 42 });
+    // Step 1, intento 2 (re-invoke): invoca ok, y el settle vuelve con hash.
+    mockFetchOk({ result: 'r2' });
+    mockSettle.mockResolvedValueOnce({
+      success: false,
+      txHash: '0xRETRYBROADCAST',
+    });
+
+    const result = await runTwoStepPipeline();
+
+    expect(result.success).toBe(false);
+    // Se debitó dos veces (el original + el del retry) y volvió UNA sola: la
+    // del primer intento, que falló sin tocar el facilitator.
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    expect(refundedUsd()).toBe(0.05);
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
+    const withheldEvent = vi
+      .mocked(eventService.track)
+      .mock.calls.map((c) => c[0])
+      .find((e) => e.eventType === 'compose_settle_unknown');
+    expect(withheldEvent?.metadata?.withholder).toBe('compose-step:1:d2');
+  });
+
+  it('T-203-RETRY-STILL-REFUNDS: si el RE-INVOKE falla sin evidencia, los DOS débitos vuelven', async () => {
+    mockFetchOk({ result: 'r1' });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
+    mockFetchError(400, '{"fieldErrors":{"amount":["required"]}}');
+    mockRegen.mockResolvedValueOnce({ amount: 42 });
+    mockFetchError(502); // el re-invoke falla en el agente, sin settle
+
+    const result = await runTwoStepPipeline();
+
+    expect(result.success).toBe(false);
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    expect(refundedUsd()).toBe(0.1); // 0.05 (d1) + 0.05 (d2)
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(2);
+  });
+
+  it('T-203-NO-RETRY-AFTER-WITHHOLD: con evidencia de broadcast el step NO se reintenta', async () => {
+    // El retry re-debita y RE-INVOCA al agente, o sea que dispararía un SEGUNDO
+    // settle sobre un step que quizá ya se pagó. El error del settle retenido
+    // trae, a propósito, un cuerpo con field-errors parseables: sin el guard,
+    // `willRetry` sería true y el pipeline reintentaría.
+    mockFetchOk({ result: 'r1' });
+    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
+    mockFetchOk({ result: 'r2' });
+    mockSettle.mockResolvedValueOnce({
+      success: false,
+      txHash: '0xBROADCASTED',
+      error:
+        'Agent corridor returned 400: {"fieldErrors":{"amount":["required"]}}',
+    });
+    mockRegen.mockResolvedValueOnce({ amount: 42 });
+
+    await runTwoStepPipeline();
+
+    // Un solo débito (el original) y un solo settle del step 1: no hubo
+    // re-invoke ni re-debit.
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockSettle).toHaveBeenCalledTimes(2); // step 0 + step 1, sin retry
+    expect(refundedUsd()).toBe(0);
   });
 });

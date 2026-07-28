@@ -436,6 +436,12 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
    * ÚNICA superficie de esas filas en el camino no-escrow (el default) — sin esto, el
    * endurecimiento de HU-201 cambiaba un reembolso indebido ruidoso por una retención
    * silenciosa. Ver `AmbiguousIntentRow` en `services/reconciliation.ts`.
+   *
+   * HU-203 suma `ambiguous.settleUnknown`: la MISMA pregunta sobre el camino del budget
+   * de la agent key (`compose` / `orchestrate`) y sobre el inbound x402, que no crean
+   * payment intents y por lo tanto no tienen dónde escribir un `settle_outcome`. Va
+   * ANIDADO dentro de `ambiguous` a propósito: dos listas hermanas de plata retenida se
+   * miran por turnos y una de las dos termina sin mirar. Ver `SettleUnknownEventRow`.
    */
   fastify.get(
     '/api/reconciliation',

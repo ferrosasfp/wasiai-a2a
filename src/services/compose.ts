@@ -35,6 +35,15 @@ import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { refundIdemKey } from '../lib/refund-idem.js';
+// HU-203: los dos ejes del "settle sin resolver" y la forma del evento durable con el
+// que se los lista. Módulo leaf a propósito (ver su docstring).
+import {
+  buildSettleUnknownEvent,
+  readSettleWithholding,
+  SettleRefundWithheldError,
+  type SettleWithholding,
+  withholdingFromSettleResult,
+} from '../lib/settle-withholding.js';
 import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 import {
   SSRFViolationError,
@@ -104,6 +113,25 @@ function discoverAgentPool(): Promise<Agent[]> {
   return discoveryService
     .discover({ limit: resolveComposeAgentPoolLimit() })
     .then((r) => r.agents);
+}
+
+/**
+ * HU-203: traduce la retención al campo de `ComposeResult` que lee
+ * `services/orchestrate.ts` para decidir sobre el débito del step 0. Un solo lugar
+ * donde se arma, para que los dos `return` de error del catch no puedan divergir.
+ */
+function withheldResult(
+  withholding: SettleWithholding | undefined,
+  step: number,
+): Pick<ComposeResult, 'settleRefundWithheld'> {
+  if (!withholding) return {};
+  return {
+    settleRefundWithheld: {
+      step,
+      reason: withholding.reason,
+      txHash: withholding.txHash,
+    },
+  };
 }
 
 function createDiscoverCache(): DiscoverCache {
@@ -395,6 +423,21 @@ export const composeService = {
       } catch (err) {
         const firstError = err instanceof Error ? err.message : String(err);
 
+        // ── HU-203: ¿el settle de este step pudo haber salido igual? ──────
+        // LOS DOS EJES en un solo lector (ver `lib/settle-withholding.ts`):
+        //   1. `2xx { success:false, txHash:"0x…" }` — llega como
+        //      `SettleRefundWithheldError` desde el settle de `invokeAgent`;
+        //   2. el hop sin respuesta utilizable (techo de wall-clock, socket cortado,
+        //      HTTP non-2xx, cuerpo ilegible) — llega como `FacilitatorSettleError`
+        //      con `valueDisposition: 'unknown'` desde el adapter (HU-198/HU-201).
+        // El eje 2 hay que leerlo ACÁ y no sólo en los adapters: antes de HU-201 un
+        // non-2xx se aplanaba a `success:false` y terminaba en el mismo `throw`; desde
+        // HU-201 llega tipado, pero si nadie lo lee produce EXACTAMENTE el mismo
+        // reembolso indebido.
+        // `undefined` ⟹ no hay evidencia de que el valor se haya movido ⟹ el
+        // comportamiento histórico (reembolsar) sigue intacto.
+        const settleWithholding = readSettleWithholding(err);
+
         // WKH-130: ¿este step es elegible para retry? path master = mismo
         // guard que el refund WKH-128 (sin delegación/sesión, con débito
         // per-step activo). CD-6: delegación/sesión NUNCA reintentan.
@@ -485,6 +528,66 @@ export const composeService = {
           return reverted;
         };
 
+        /**
+         * HU-203 — la contrapartida OBLIGATORIA de no reembolsar.
+         *
+         * Un caso que no se reembolsa y que nadie lista es plata retenida en silencio,
+         * que es peor que el reembolso indebido que este fix elimina: el indebido es
+         * ruidoso y auto-sanante, el silencioso no se entera nadie. Cada retención deja
+         * un evento durable en `a2a_events`, que
+         * `reconciliationService.listAmbiguous()` lista bajo `settleUnknown` en
+         * `GET /dashboard/api/reconciliation`.
+         *
+         * Fire-and-forget con `.catch()`, igual que `emitInboundSettleUnknown`
+         * (`middleware/x402.ts`): `track()` TIRA si el insert falla, y un problema de
+         * telemetría no puede cambiar la respuesta de un money-path. El log de arriba
+         * queda como último registro si el insert se cae.
+         */
+        const recordSettleWithheld = (
+          withholding: SettleWithholding,
+          phase: 'd1' | 'd2',
+        ): void => {
+          const refundWithheld = isMasterPath;
+          log.error(
+            {
+              error_code: 'SETTLE_REFUND_WITHHELD',
+              step: i,
+              agent: agent.slug,
+              reason: withholding.reason,
+              settleTxHash: withholding.txHash,
+              withheldUsd: refundWithheld ? stepDebitedUsd : 0,
+              refundWithheld,
+              phase,
+              detail: withholding.detail,
+            },
+            refundWithheld
+              ? '[compose.settle-unknown] the step settle may have executed on-chain, so the per-step debit was NOT refunded — reconcile against the chain before returning it by hand'
+              : '[compose.settle-unknown] the step settle may have executed on-chain; there was no per-step debit to hold here (step 0 is billed by orchestrate)',
+          );
+          eventService
+            .track(
+              buildSettleUnknownEvent({
+                withholding,
+                withholder: `compose-step:${i}:${phase}`,
+                withheldUsd: refundWithheld ? stepDebitedUsd : 0,
+                refundWithheld,
+                agentSlug: agent.slug,
+                agentName: agent.name,
+                registry: agent.registry,
+                step: i,
+                keyId: scopingKeyRow?.id,
+                ownerRef: scopingKeyRow?.owner_ref,
+                chainId,
+              }),
+            )
+            .catch((trackErr) =>
+              log.error(
+                { err: trackErr },
+                '[compose.settle-unknown] the withheld refund could not be persisted as an event — the only remaining record is the log line above',
+              ),
+            );
+        };
+
         // ── PASO 2 (pre-evaluado): ¿hay field-errors parseables? Solo path
         //    master (CD-6) y solo 4xx-con-field-errors (CD-3). Determina si la
         //    telemetría del primer intento lleva metadata.retry_attempted.
@@ -514,9 +617,22 @@ export const composeService = {
           );
 
         // ── PASO 1 (DT-5.1 / CD-1): refund del PRIMER débito — IDÉNTICO a hoy
-        //    (WKH-128/129). Incondicional para path master. Tras esto NO hay
+        //    (WKH-128/129) SALVO cuando el settle pudo haber salido. Tras esto NO hay
         //    débito activo para este step → el re-debit nunca coexiste con él.
-        const refund1ok = await refundStepDebit('d1');
+        //
+        // HU-203 GUARD 1 (de 3): con evidencia de broadcast NO se devuelve la plata.
+        // El `false` es deliberado y hace DOS cosas, las dos necesarias:
+        //   · no se ejecuta `refundStepDebit` ⟹ el caller no recupera un débito cuyo
+        //     pago pudo haber aterrizado;
+        //   · corta el retry adaptativo de abajo, que re-debita y RE-INVOCA al agente
+        //     ⟹ un segundo settle sobre un step que quizá ya se pagó.
+        let refund1ok: boolean;
+        if (settleWithholding) {
+          recordSettleWithheld(settleWithholding, 'd1');
+          refund1ok = false;
+        } else {
+          refund1ok = await refundStepDebit('d1');
+        }
 
         // ── PASO 2..6 (DT-5): retry adaptativo. Solo si hay field-errors Y el
         //    refund#1 fue exitoso (CD-1 reforzado: si el refund falló, NO
@@ -594,7 +710,18 @@ export const composeService = {
                     : String(retryErr);
                 // ── PASO 6b (CD-5): retry falló → reembolsar el RETRY débito
                 //    (best-effort). NO re-reintentar (CD-2).
-                await refundStepDebit('d2');
+                //
+                // HU-203 GUARD 2 (de 3). Es un guard PROPIO y no una consecuencia del
+                // GUARD 1: acá el settle que pudo salir es el del RE-INVOKE, o sea un
+                // débito distinto (`'d2'`) sobre una tx distinta. Que el primer intento
+                // haya fallado de forma limpia (por eso llegamos al retry) no dice nada
+                // sobre el segundo.
+                const retryWithholding = readSettleWithholding(retryErr);
+                if (retryWithholding) {
+                  recordSettleWithheld(retryWithholding, 'd2');
+                } else {
+                  await refundStepDebit('d2');
+                }
                 eventService
                   .track({
                     eventType: 'compose_step',
@@ -632,6 +759,12 @@ export const composeService = {
                   totalCostUsdc: totalCost,
                   totalLatencyMs: totalLatency,
                   error: `Step ${i} failed after retry: ${firstError} | retry: ${retryError}`,
+                  // HU-203: cualquiera de los dos intentos alcanza para que el step 0
+                  // no se reembolse aguas arriba. `??` y no `||`: el primero manda
+                  // porque es el settle más viejo (el que lleva más tiempo pudiendo
+                  // haber aterrizado), y el segundo sólo aplica si el primero no
+                  // retuvo nada.
+                  ...withheldResult(settleWithholding ?? retryWithholding, i),
                 };
               }
             }
@@ -658,6 +791,11 @@ export const composeService = {
           totalCostUsdc: totalCost,
           totalLatencyMs: totalLatency,
           error: `Step ${i} failed: ${firstError}`,
+          // HU-203: se emite SIEMPRE que el settle quedó sin resolver, incluso para el
+          // step 0 (donde `isMasterPath` es falso y compose no tenía nada que retener).
+          // Justamente ahí es donde importa: el débito del step 0 lo reembolsa
+          // `services/orchestrate.ts`, que sin esta señal lo devolvía igual.
+          ...withheldResult(settleWithholding, i),
         };
       }
     }
@@ -1166,10 +1304,30 @@ export const composeService = {
         signature: paymentRequest.signature,
         network: paymentRequest.network ?? '',
       });
-      if (!settleResult.success)
-        throw new Error(
-          `x402 settle failed for ${agent.slug}: ${settleResult.error ?? 'unknown'}`,
+      if (!settleResult.success) {
+        const settleDetail = `x402 settle failed for ${agent.slug}: ${settleResult.error ?? 'unknown'}`;
+        // HU-203, EJE 1 — un `success:false` CON txHash no prueba que no se ejecutó.
+        //
+        // Este `if` descartaba el `settleResult.txHash` y tiraba un `Error` pelado. El
+        // per-step catch de `compose()` no puede distinguir ese error de cualquier otro
+        // fallo del step, así que reembolsaba el débito del caller. Con el hash en la
+        // mano eso significa que el agente cobró on-chain Y el caller recuperó su
+        // budget: la plata sale dos veces de nuestro lado.
+        //
+        // En modo `pieverse` (el DEFAULT de producción, `KITE_FACILITATOR_MODE`) el
+        // adapter devuelve la respuesta del facilitator verbatim, así que este es el
+        // camino vivo. Ver `hasBroadcastEvidence` en `adapters/errors.ts` para por qué
+        // CUALQUIER string no vacío cuenta como evidencia y por qué no se valida el
+        // formato.
+        const withholding = withholdingFromSettleResult(
+          settleResult,
+          `${settleDetail} — the facilitator returned a broadcast tx hash (${settleResult.txHash}), so the payment may have executed on-chain`,
         );
+        if (withholding) throw new SettleRefundWithheldError(withholding);
+        // Sin hash: el facilitator contestó, con un veredicto legible, que no settleó.
+        // Ése es el único caso que conserva el reembolso automático.
+        throw new Error(settleDetail);
+      }
       // TB-01 (audit 2026-06-30): re-verify the settle on-chain BEFORE trusting
       // it. The facilitator just returned `{ success, txHash }`; we independently
       // re-read that tx and confirm it really moved `>= value` of the token to
