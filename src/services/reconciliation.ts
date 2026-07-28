@@ -148,6 +148,69 @@ export interface DriftRow {
   exceedsThreshold: boolean;
 }
 
+/**
+ * HU-201 (AR BLQ-MEDIO-2) — una fila `failed_ambiguous` del camino NO-ESCROW.
+ *
+ * POR QUÉ EXISTE ESTE TIPO: HU-201 mandó los HTTP non-2xx del facilitator a
+ * `ambiguous` ⟹ `failed_ambiguous` ⟹ **el deposit del buyer NO se reembolsa**. Esa
+ * decisión es correcta (un 502 puede llegar después del broadcast) pero tenía un
+ * costo que el AR encontró y que invalidaba el fix: en el camino no-escrow —que es el
+ * DEFAULT, porque `ESCROW_SETTLE_ENABLED` exige `=== 'true'`— esas filas eran
+ * INVISIBLES.
+ *
+ *   · `listPending()` lee `a2a_payment_intent_debit_signatures`, y sin escrow esa fila
+ *     NO EXISTE.
+ *   · `resolveIntent()` arranca con `if (!isEscrowSettleEnabled()) return flag_off`.
+ *   · Único rastro: `error_message` en texto libre y un `log.warn`.
+ *
+ * O sea que el fix cambiaba "reembolso indebido RUIDOSO" por "retención SILENCIOSA".
+ * Y el modo de falla no es hipotético: ya ocurrió en este repo (el facilitator
+ * exigiendo un Bearer que el adapter no mandaba ⟹ 401 en el 100% de los settles).
+ * Antes era ruidoso pero AUTO-SANANTE: todos los buyers recuperaban su deposit. Con
+ * HU-201 sería el 100% de los deposits retenidos y nadie mirando.
+ *
+ * ESTA LISTA ES SÓLO LECTURA. No resuelve nada: no hay resolución automática posible
+ * sin poder responder "¿el broadcast aterrizó?", y eso se contesta on-chain
+ * (`authorizationState(from, nonce)` del token es un `view` público), no por HTTP. Ese
+ * lector NO existe hoy en el repo y es una HU propia (TD-201-01). Hasta entonces, la
+ * acción es humana y esta lista es el lugar donde se ve.
+ */
+export interface AmbiguousIntentRow {
+  intent_id: string;
+  owner_ref: string;
+  key_id: string;
+  intent_type: string;
+  status: string;
+  chain_id: number;
+  pay_to: string;
+  authorizedUsd: string;
+  consumedUsd: string;
+  settle_outcome: string;
+  /**
+   * Texto libre — pero es DONDE VIVE EL HASH. Cuando el facilitator contestó
+   * `success:false` CON un txHash, `settlePaymentIntentOnChain` lo mete en el mensaje
+   * (`settle failed WITH a broadcast hash (0x…)`) porque no hay columna para él. Es la
+   * pista con la que un humano cruza contra la cadena. Ver TD-201-02.
+   */
+  error_message: string | null;
+  updated_at: string;
+}
+
+/**
+ * Resultado de `listAmbiguous`. Trae `total` A PROPÓSITO: la query está acotada por
+ * `limit`, y una lista truncada EN SILENCIO sobre plata retenida sería la misma
+ * afirmación falsa de completitud que este archivo ya documenta para el drift. Si
+ * `total > rows.length`, el consumidor lo ve.
+ */
+export interface AmbiguousReport {
+  rows: AmbiguousIntentRow[];
+  total: number;
+  truncated: boolean;
+}
+
+/** Techo de filas del reporte ambiguo (el `total` exacto viaja igual). */
+const AMBIGUOUS_LIST_LIMIT = 500;
+
 // ── Row shapes de las queries (subset tipado a mano) ──────────────
 
 interface IntentEmbed {
@@ -189,6 +252,27 @@ interface PendingSelectRow {
   debit_hop1_tx_hash: string | null;
   debit_settle_status: string;
   owner_ref: string;
+}
+
+/**
+ * Fila del SELECT de `listAmbiguous` (subset REAL, misma regla que `PendingSelectRow`).
+ * Los NUMERIC vienen con `::text` — convención del repo desde WKH-196: PostgREST los
+ * entrega como número JSON y `JSON.parse` redondea, así que el cast es obligatorio en
+ * cualquier columna NUMERIC de un money-path.
+ */
+interface AmbiguousSelectRow {
+  id: string;
+  owner_ref: string;
+  key_id: string;
+  intent_type: string;
+  status: string;
+  chain_id: number;
+  pay_to: string;
+  authorized_usd: string;
+  consumed_usd: string;
+  settle_outcome: string;
+  error_message: string | null;
+  updated_at: string;
 }
 
 interface DriftSigRow {
@@ -254,6 +338,57 @@ export const reconciliationService = {
       owner_ref: r.owner_ref,
       debit_settle_status: r.debit_settle_status,
     }));
+  },
+
+  /**
+   * HU-201 (AR BLQ-MEDIO-2): los intents con veredicto `failed_ambiguous` — el buyer
+   * NO fue reembolsado y el resultado del settle es DESCONOCIDO. Ver
+   * `AmbiguousIntentRow` para el por qué.
+   *
+   * NO gateada por `isEscrowSettleEnabled()` A PROPÓSITO, y ése es todo el punto: el
+   * camino que produce estas filas es el NO-escrow, o sea justo el que corre con el
+   * flag OFF. Gatearla la volvería a dejar vacía exactamente cuando importa.
+   *
+   * Cross-tenant DELIBERADO (mismo patrón y misma justificación que `listPending`):
+   * sin filtro `owner_ref`, superficie de ALTO PRIVILEGIO gateada por
+   * `requireAdminToken` en la ruta.
+   */
+  async listAmbiguous(): Promise<AmbiguousReport> {
+    const { data, error, count } = await supabase
+      .from('a2a_payment_intents')
+      .select(
+        'id, owner_ref, key_id, intent_type, status, chain_id, pay_to, ' +
+          'authorized_usd::text, consumed_usd::text, settle_outcome, ' +
+          'error_message, updated_at',
+        { count: 'exact' },
+      )
+      .eq('settle_outcome', 'failed_ambiguous')
+      .order('updated_at', { ascending: false })
+      .limit(AMBIGUOUS_LIST_LIMIT);
+    if (error) {
+      log.error({ detail: error.message }, 'listAmbiguous query failed');
+      throw new ReconciliationError('INTERNAL');
+    }
+    const rows = (data as unknown as AmbiguousSelectRow[] | null) ?? [];
+    const total = count ?? rows.length;
+    return {
+      rows: rows.map((r) => ({
+        intent_id: r.id,
+        owner_ref: r.owner_ref,
+        key_id: r.key_id,
+        intent_type: r.intent_type,
+        status: r.status,
+        chain_id: r.chain_id,
+        pay_to: r.pay_to,
+        authorizedUsd: r.authorized_usd,
+        consumedUsd: r.consumed_usd,
+        settle_outcome: r.settle_outcome,
+        error_message: r.error_message,
+        updated_at: r.updated_at,
+      })),
+      total,
+      truncated: total > rows.length,
+    };
   },
 
   /**
@@ -398,9 +533,27 @@ export const reconciliationService = {
         // settle del reconciliador):
         //   (A) el proceso murió DESPUÉS del hop 1 y ANTES de intentar el hop 2 ⟹ el
         //       seller no cobró y nadie más lo va a pagar.
-        //   (D) el hop 2 falló de forma INEQUÍVOCA (`failureKind:'unequivocal'`: el
-        //       sign falló, o el facilitator contestó `success:false`) ⟹ probado que
-        //       no se ejecutó.
+        //   (D) el hop 2 falló de forma INEQUÍVOCA (`failureKind:'unequivocal'`), que
+        //       desde HU-201 es exactamente DOS cosas:
+        //         · `adapter.sign()` TIRÓ ⟹ pre-broadcast POR CONSTRUCCIÓN: firmar es
+        //           local (`signTypedData`), no hay ningún request al facilitator ni
+        //           ninguna tx que pueda existir. Esto sí es una PRUEBA.
+        //         · el facilitator contestó 2xx con `settled/success` falso y SIN
+        //           txHash. ⚠️ ESTO NO ES UNA PRUEBA, y el comentario anterior lo
+        //           afirmaba como tal ("probado que no se ejecutó"). Es una INFERENCIA
+        //           sobre la semántica de un TERCERO: leemos su `success:false` como "no
+        //           settleé". Se sostiene por tres razones, no porque sea demostrable:
+        //             1. es la MISMA respuesta y el MISMO campo cuyo `success:true` ya
+        //                tratamos como autoritativo para marcar plata como pagada
+        //                (desconfiar sólo de un lado sería incoherente);
+        //             2. viene sin txHash — en el momento en que hay hash, HU-201 lo
+        //                manda a `ambiguous` y NUNCA llega acá;
+        //             3. es la entrada que mantiene vivo el re-envío legítimo; exigir
+        //                prueba dura acá dejaría al seller sin cobrar automáticamente en
+        //                el rechazo normal del facilitator.
+        //           Si un facilitator empezara a contestar `success:false` DESPUÉS de
+        //           broadcastear y sin devolver el hash, este re-envío paga dos veces y
+        //           el gateway no tiene forma de saberlo.
         // En ninguna de las dos existe un tx del hop 2 que verificar, así que exigir
         // evidencia del hop 2 como precondición dura NO es la solución: dejaría al
         // seller sin cobrar automáticamente justo en el caso (A), que es el normal.
@@ -420,14 +573,20 @@ export const reconciliationService = {
         //       sano. Un click en el dashboard —o un barrido concurrente— mientras un
         //       settle lento está en vuelo re-envía y paga dos veces. No hace falta
         //       ningún crash: alcanza con que el hop 2 tarde.
-        //   (G) el veredicto del hop 2 llegó como `success:false` sin ser prueba de que
-        //       no se ejecutó ⟹ se clasifica `unequivocal` ⟹ cae en (D) y se re-envía.
-        //       Es el BLQ-ALTO del AR y vive FUERA de este archivo (en los 5 adapters):
-        //       en modo pieverse el adapter devuelve el `txHash` del facilitator
-        //       verbatim, así que un `200 {success:false, txHash:"0x…"}` nos deja un hash
-        //       de broadcast en la mano y lo tratamos como "no pasó nada"; y en
-        //       base/avalanche/tempo un HTTP 502 se aplana a `success:false`.
-        // En (B), (C), (F) y (G) este re-envío PAGA DOS VECES al seller.
+        //   (G) CERRADA POR HU-201. Era: el veredicto del hop 2 llegaba como
+        //       `success:false` sin ser prueba de que no se ejecutó ⟹ `unequivocal` ⟹
+        //       caía en (D) y se re-enviaba. Las dos formas y sus fixes:
+        //         · pieverse (el modo DEFAULT) devuelve el `txHash` del facilitator
+        //           verbatim, así que un `200 {success:false, txHash:"0x…"}` nos deja un
+        //           hash de broadcast en la mano ⟹ ahora `hasBroadcastEvidence`
+        //           (`payment-intent.ts`) lo clasifica `ambiguous`.
+        //         · un HTTP 502 se aplanaba a `success:false` en los 4 settle x402
+        //           (base/avalanche/tempo/kite-x402) y salía como `Error` pelado en
+        //           kite-pieverse ⟹ ahora los 5 tiran `FacilitatorSettleError` con
+        //           `valueDisposition:'unknown'`, que el seam de `payment-intent.ts`
+        //           captura como `ambiguous`.
+        //       En los dos casos el destino pasa a ser `resolving_settle` ⟹ NO llega acá.
+        // En (B), (C) y (F) este re-envío PAGA DOS VECES al seller.
         //
         // POR QUÉ NO SE ARREGLA ACÁ: falta un HECHO PERSISTIDO ("el hop 2 se intentó"),
         // y agregarlo es una decisión de diseño con costo propio. Las dos candidatas:
@@ -443,13 +602,15 @@ export const reconciliationService = {
         //            contra el token. "El token rechaza el segundo uso" sólo vale para
         //            el modo `x402`, que no es el default. En pieverse la unicidad la
         //            tendría que garantizar el facilitator, que es un TERCERO.
-        //        (b) LE FALTA EL CAMBIO COMPAÑERO. Con nonce determinístico, el rechazo
-        //            del segundo envío llega como `success:false` ⟹ HOY eso es
-        //            `unequivocal` ⟹ el buyer se reembolsa CON EL SELLER YA PAGADO. O
-        //            sea que el nonce determinístico sin arreglar antes la clasificación
-        //            de `success:false` CONVIERTE un doble pago en un descalce peor.
-        //            ⟹ el BLQ-ALTO (entrada G) es PREREQUISITO del nonce, no un ítem
-        //            independiente.
+        //        (b) LE FALTABA EL CAMBIO COMPAÑERO — YA HECHO (HU-201). Con nonce
+        //            determinístico, el rechazo del segundo envío llega como
+        //            `success:false`; ANTES eso era `unequivocal` ⟹ el buyer se
+        //            reembolsaba CON EL SELLER YA PAGADO. Ese prerrequisito está
+        //            cumplido SÓLO en la medida en que el rechazo traiga txHash o un
+        //            non-2xx: si el facilitator/token rechaza con un 2xx `success:false`
+        //            PELADO, sigue siendo `unequivocal`. O sea que el nonce
+        //            determinístico todavía necesita que el rechazo del replay sea
+        //            distinguible de un rechazo normal.
         //
         //   2. Lease pre-hop2: persistir "intento en curso" ANTES de mandar el hop 2
         //      (p.ej. escribir `resolving_settle` antes, y bajarlo a
@@ -462,6 +623,34 @@ export const reconciliationService = {
         // descubierto, el lease es la única que cierra (F) sin depender de un tercero ni
         // de arreglar antes la clasificación de `success:false`. La 1 queda como destino
         // deseable DESPUÉS del BLQ-ALTO, y sólo si se resuelve la unicidad en pieverse.
+        //
+        // ⚠️ HU-201 NO CIERRA (B), (C) NI (F). Cerró (G) —la clasificación— y nada más.
+        // El re-envío de abajo sigue saliendo sin evidencia persistida de que el hop 2 se
+        // intentó, así que el lease sigue pendiente.
+        //
+        // ── DEUDA ABIERTA QUE HU-201 DEJA ANOTADA (fix-pack AR) ──
+        //
+        // TD-201-01 — LECTOR DE `authorizationState(from, nonce)`. La pregunta que hoy
+        //   NO se puede contestar —"¿el broadcast aterrizó?"— tiene respuesta ON-CHAIN,
+        //   no por HTTP: en EIP-3009 el token expone `authorizationState(authorizer,
+        //   nonce)` como `view` público, y ese bit dice si la autorización se consumió.
+        //   Con eso, un `ambiguous` deja de ser terminal-manual: se resuelve solo. HOY
+        //   NO EXISTE ningún lector de eso en el repo. Es una HU propia, no un fix-pack,
+        //   y ⚠️ NO sirve tal cual en el modo `pieverse` (el DEFAULT), donde la firma es
+        //   un `Authorization` custom contra `KITE_FACILITATOR_ADDRESS` y no un
+        //   `TransferWithAuthorization` contra el token — ver el agujero (a) de la
+        //   opción 1 más arriba, es el mismo.
+        //
+        // TD-201-02 — COLUMNA PARA EL HASH DE EVIDENCIA. Cuando el facilitator contesta
+        //   `success:false` CON txHash, ese hash es la única pista para cruzar contra la
+        //   cadena y hoy sobrevive sólo como PROSA dentro de `error_message` (y como
+        //   campo del log). No es filtrable por SQL. Arreglarlo es una columna nueva en
+        //   `a2a_payment_intents` ⟹ migración ⟹ decisión del founder.
+        //
+        // TD-201-03 — ¿PIEVERSE MANDA HASH EN SUS RECHAZOS NORMALES? Incógnita abierta
+        //   que decide si `ambiguous` es un caso raro o el 100% de los rechazos. Ver el
+        //   docstring de `hasBroadcastEvidence` (`adapters/errors.ts`) por las dos
+        //   direcciones y por cómo se cierra (mirando `listAmbiguous()` con tráfico real).
         //
         // Ninguna es un fix-pack. NO borrar este bloque sin cerrar (B), (C), (F) y (G).
         //

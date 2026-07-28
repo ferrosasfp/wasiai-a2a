@@ -9,7 +9,10 @@ import type {
   preHandlerHookHandler,
 } from 'fastify';
 import { resolveChainKey } from '../adapters/chain-resolver.js';
-import { readSettleValueDisposition } from '../adapters/errors.js';
+import {
+  hasBroadcastEvidence,
+  readSettleValueDisposition,
+} from '../adapters/errors.js';
 import {
   getAdaptersBundle,
   getDefaultChainKey,
@@ -264,6 +267,28 @@ async function resolvePaymentRequirements(
     opts.amount ??
     (await adapter.quote(opts.amountUsd ?? DEFAULT_AMOUNT_USD)).amountWei;
   return { payTo, requiredAmount };
+}
+
+/**
+ * AR BLQ-MEDIO-3 (HU-198) + AR BLQ-MEDIO-1 (HU-201): el mensaje del 402 cuando el
+ * resultado del settle es DESCONOCIDO.
+ *
+ * Decirle "settlement failed" al caller es afirmar que NO se le cobró, que es
+ * exactamente lo que no sabemos — la misma contradicción que documenta
+ * `lib/downstream-skip-code.ts` ("'no se pagó' y 'puede haberse pagado' son frases
+ * opuestas"). El aviso de NO reintentar con el mismo header es material: el nonce ya
+ * quedó registrado, así que el reintento da X402_REPLAY y el caller no gana nada.
+ *
+ * Con `txHash` (eje HU-201) el mensaje mejora de verdad: el caller se lleva LA
+ * evidencia con la que puede mirar la cadena él mismo, sin depender de nosotros.
+ */
+export function unknownSettleMessage(
+  detail: string,
+  txHash: string | null,
+): string {
+  return txHash !== null
+    ? `Payment settlement result UNKNOWN: the settlement service reported a failure but returned an on-chain transaction hash (${txHash}), so your payment may or may not have executed. Access was NOT granted. Do NOT retry with the same payment header (its nonce is already recorded); check that transaction on-chain. Detail: ${detail}`
+    : `Payment settlement result UNKNOWN: the settlement service did not answer in time, so your payment may or may not have executed on-chain. Access was NOT granted. Do NOT retry with the same payment header (its nonce is already recorded); this case is logged for reconciliation. Detail: ${detail}`;
 }
 
 export async function buildX402Response(
@@ -561,6 +586,75 @@ export function requirePayment(
       // 'fresh' → seguimos. 'unavailable' → fail-open (ya logueado en el service).
     }
 
+    /**
+     * HU-198 + HU-201 — EL CANAL ÚNICO del "settle inbound de resultado DESCONOCIDO".
+     *
+     * Estaba inline dentro del `catch`, y por eso el segundo eje (2xx `success:false`
+     * CON txHash, el camino pieverse) no lo usaba: le respondía "Payment settlement
+     * failed" y no dejaba ni log ni evento. Extraído para que los DOS ejes emitan lo
+     * mismo — un log alertable + un `a2a_events` durable donde reconciliarlo.
+     *
+     * `txHash` es la evidencia de broadcast cuando existe (eje HU-201) y `null` cuando
+     * el hop no contestó y no hay nada que anotar (eje HU-198).
+     */
+    const emitInboundSettleUnknown = (
+      detail: string,
+      txHash: string | null,
+    ): void => {
+      request.log.error(
+        {
+          error_code: 'X402_SETTLE_UNKNOWN',
+          valueDisposition: 'unknown',
+          chainKey,
+          payTo,
+          requiredAmount,
+          ...(txHash !== null ? { settleTxHash: txHash } : {}),
+          detail,
+        },
+        txHash !== null
+          ? 'x402 inbound settle result UNKNOWN: the facilitator answered `success:false` BUT returned a broadcast tx hash, so the payment may have executed on-chain. Access denied (no confirmation) and the caller may have been charged — check that tx hash on-chain before treating this as unpaid.'
+          : 'x402 inbound settle result UNKNOWN: the facilitator hop was cut without an answer, so the payment may have executed on-chain. Access denied (no confirmation) and the caller may have been charged — reconcile against the chain before treating this as unpaid.',
+      );
+      // AR BLQ-MEDIO-3: un log no es una superficie de reconciliación. El lado
+      // OUTBOUND recibió estado DURABLE (`resolving_settle`) + un lugar donde mirarlo
+      // (`listPending()` / `listAmbiguous()`); el INBOUND se quedaba sólo con el log,
+      // sobre la plata del CALLER, y encima con el nonce ya quemado más arriba (así
+      // que el reintento del mismo header da X402_REPLAY). Se persiste un `a2a_events`
+      // para que exista DÓNDE reconciliarlo.
+      //
+      // Fire-and-forget con `.catch()`: `track()` TIRA si el insert falla, y un
+      // problema de telemetría NO puede cambiar la respuesta de un money-path.
+      void eventService
+        .track({
+          eventType: 'x402_settle_unknown',
+          status: 'failed',
+          metadata: {
+            error_code: 'X402_SETTLE_UNKNOWN',
+            valueDisposition: 'unknown',
+            chainKey,
+            payTo,
+            requiredAmount,
+            // El nonce es la clave para cruzar contra la cadena: es el que el
+            // facilitator pudo haber consumido al broadcastear.
+            authorizationNonce:
+              typeof inboundNonce === 'string' ? inboundNonce : null,
+            // HU-201: y cuando el facilitator NOS DIO el hash, es la clave directa.
+            settleTxHash: txHash,
+            resource,
+            detail,
+          },
+        })
+        .catch((trackErr: unknown) => {
+          request.log.error(
+            {
+              error_code: 'X402_SETTLE_UNKNOWN_EVENT_FAILED',
+              detail: trackErr instanceof Error ? trackErr.message : 'unknown',
+            },
+            'x402 inbound settle UNKNOWN could not be persisted as an event — the only remaining record is the log line above',
+          );
+        });
+    };
+
     let settleResult: {
       txHash: string;
       success: boolean;
@@ -584,76 +678,7 @@ export function requirePayment(
       // X402_REPLAY: si nadie mira este caso, el caller queda pagando sin servicio.
       // Se emite con `error_code` estable y nivel error para que sea alertable.
       const inboundUnknown = readSettleValueDisposition(err) === 'unknown';
-      if (inboundUnknown) {
-        request.log.error(
-          {
-            error_code: 'X402_SETTLE_UNKNOWN',
-            valueDisposition: 'unknown',
-            chainKey,
-            payTo,
-            requiredAmount,
-            detail,
-          },
-          'x402 inbound settle result UNKNOWN: the facilitator hop was cut without an answer, so the payment may have executed on-chain. Access denied (no confirmation) and the caller may have been charged — reconcile against the chain before treating this as unpaid.',
-        );
-        // AR BLQ-MEDIO-3: un log no es una superficie de reconciliación. El lado
-        // OUTBOUND de esta HU recibió estado DURABLE (`resolving_settle`) + un lugar
-        // donde mirarlo (`listPending()`); el INBOUND se quedaba sólo con este log,
-        // sobre la plata del CALLER, y encima con el nonce ya quemado más arriba (así
-        // que el reintento del mismo header da X402_REPLAY). Se persiste un
-        // `a2a_events` para que exista DÓNDE reconciliarlo.
-        //
-        // Fire-and-forget con `.catch()`: `track()` TIRA si el insert falla, y un
-        // problema de telemetría NO puede cambiar la respuesta de un money-path.
-        void eventService
-          .track({
-            eventType: 'x402_settle_unknown',
-            status: 'failed',
-            metadata: {
-              error_code: 'X402_SETTLE_UNKNOWN',
-              valueDisposition: 'unknown',
-              chainKey,
-              payTo,
-              requiredAmount,
-              // El nonce es la clave para cruzar contra la cadena: es el que el
-              // facilitator pudo haber consumido al broadcastear.
-              authorizationNonce:
-                typeof inboundNonce === 'string' ? inboundNonce : null,
-              resource,
-              detail,
-            },
-          })
-          .catch((trackErr: unknown) => {
-            request.log.error(
-              {
-                error_code: 'X402_SETTLE_UNKNOWN_EVENT_FAILED',
-                detail:
-                  trackErr instanceof Error ? trackErr.message : 'unknown',
-              },
-              'x402 inbound settle UNKNOWN could not be persisted as an event — the only remaining record is the log line above',
-            );
-          });
-      }
-      return reply.status(402).send(
-        await buildX402Response(
-          opts,
-          resource,
-          chainKey,
-          // AR BLQ-MEDIO-3: mensaje PROPIO para el unknown. Decirle "settlement
-          // failed" al caller es afirmar que no se le cobró, que es exactamente lo
-          // que no sabemos — la misma contradicción que este branch documenta en
-          // `lib/downstream-skip-code.ts` ("'no se pagó' y 'puede haberse pagado' son
-          // frases opuestas"). Y el aviso de NO reintentar con el mismo header es
-          // material: el nonce ya quedó registrado, así que el reintento da
-          // X402_REPLAY y el caller no gana nada.
-          inboundUnknown
-            ? `Payment settlement result UNKNOWN: the settlement service did not answer in time, so your payment may or may not have executed on-chain. Access was NOT granted. Do NOT retry with the same payment header (its nonce is already recorded); this case is logged for reconciliation. Detail: ${detail}`
-            : `Payment settlement failed: ${detail}`,
-        ),
-      );
-    }
-    if (reply.sent) return;
-    if (!settleResult.success)
+      if (inboundUnknown) emitInboundSettleUnknown(detail, null);
       return reply
         .status(402)
         .send(
@@ -661,9 +686,47 @@ export function requirePayment(
             opts,
             resource,
             chainKey,
-            `Payment settlement failed: ${settleResult.error ?? 'unknown reason'}`,
+            inboundUnknown
+              ? unknownSettleMessage(detail, null)
+              : `Payment settlement failed: ${detail}`,
           ),
         );
+    }
+    if (reply.sent) return;
+    if (!settleResult.success) {
+      // HU-201 (AR BLQ-MEDIO-1) — EL SEGUNDO EJE, EN EL MISMO ENDPOINT.
+      //
+      // El `catch` de arriba cubre el eje "el hop no contestó" (incluido, desde
+      // HU-201, el HTTP non-2xx). ESTE es el otro: el facilitator SÍ contestó 2xx con
+      // `success:false` PERO CON un txHash — el camino pieverse, que devuelve la
+      // respuesta verbatim. Antes se le respondía al caller "Payment settlement
+      // failed" TENIENDO EL HASH EN LA MANO: se le afirmaba que no se le cobró.
+      //
+      // Es plata del CALLER, en el endpoint más expuesto, y el nonce inbound ya quedó
+      // quemado más arriba, así que el reintento del mismo header da X402_REPLAY: paga
+      // y no tiene dónde reclamar. Entra por el MISMO canal que el eje de arriba
+      // (`X402_SETTLE_UNKNOWN` + evento durable + mensaje honesto), que es el
+      // mecanismo que ya existía. El hash viaja en el evento porque es LA clave para
+      // cruzar contra la cadena.
+      const evidenceTxHash = hasBroadcastEvidence(settleResult.txHash)
+        ? settleResult.txHash
+        : null;
+      const detail = settleResult.error ?? 'unknown reason';
+      if (evidenceTxHash !== null)
+        emitInboundSettleUnknown(detail, evidenceTxHash);
+      return reply
+        .status(402)
+        .send(
+          await buildX402Response(
+            opts,
+            resource,
+            chainKey,
+            evidenceTxHash !== null
+              ? unknownSettleMessage(detail, evidenceTxHash)
+              : `Payment settlement failed: ${detail}`,
+          ),
+        );
+    }
     // ── TB-01 (audit 2026-06-30): independent on-chain re-verification ──
     // The facilitator just reported `{ success, txHash }`. BEFORE we grant
     // access, re-read that tx hash on-chain and confirm it really settled

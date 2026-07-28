@@ -17,7 +17,10 @@ import {
   type LegDestination,
   normalizeChainSlug,
 } from '../adapters/chain-resolver.js';
-import { readSettleValueDisposition } from '../adapters/errors.js';
+import {
+  hasBroadcastEvidence,
+  readSettleValueDisposition,
+} from '../adapters/errors.js';
 import {
   getAdaptersBundle,
   getInitializedChainKeys,
@@ -854,13 +857,26 @@ export async function signAndSettleDownstream(
       return null;
     }
     if (!settleRes.success || !settleRes.txHash) {
+      // HU-201 (AR BLQ-BAJO-1): este `if` no distinguía lo que el `catch` de arriba SÍ
+      // distingue. `SETTLE_FAILED` significa, en el catálogo público de códigos,
+      // literalmente "no se pagó" — y un `success:false` que viene CON un txHash es
+      // justo el caso en el que eso puede ser falso (pieverse devuelve la respuesta del
+      // facilitator verbatim, así que el hash es de un broadcast real). Se emite el
+      // MISMO `SETTLE_UNKNOWN` que el catch, que es el código que le dice al operador
+      // que hay que mirar la cadena antes de reintentar.
+      const settleUnknown = hasBroadcastEvidence(settleRes.txHash);
       logger.warn(
         {
           agentSlug: agent.slug,
-          code: 'SETTLE_FAILED',
+          code: settleUnknown ? 'SETTLE_UNKNOWN' : 'SETTLE_FAILED',
+          ...(settleUnknown
+            ? { valueDisposition: 'unknown', settleTxHash: settleRes.txHash }
+            : {}),
           error: settleRes.error,
         },
-        '[Downstream] adapter.settle returned success=false',
+        settleUnknown
+          ? '[Downstream] adapter.settle returned success=false BUT with a broadcast tx hash — the leg may already be paid on-chain; do NOT retry blindly'
+          : '[Downstream] adapter.settle returned success=false',
       );
       return null;
     }

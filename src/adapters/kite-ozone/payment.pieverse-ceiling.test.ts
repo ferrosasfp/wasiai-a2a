@@ -287,12 +287,20 @@ describe('HU-198 — techo de los hops pieverse (kite-ozone)', () => {
     expect(readSettleValueDisposition(err)).toBe('unknown');
   });
 
-  it('T-198-AR2-HTTP-ERROR: un HTTP 4xx/5xx CONTESTADO sigue siendo un veredicto, no un unknown', async () => {
-    // Candado de NO-REGRESIÓN del fix: al mover el body read dentro de un try que
-    // clasifica, el riesgo era arrastrar también el camino "el facilitator contestó
-    // rechazando", que es un VEREDICTO y no una incógnita de transporte. Ese camino
-    // (y su reclasificación) es el BLQ-ALTO, Scope OUT de esta HU: acá se candea que
-    // NO cambió.
+  it('T-201-HTTP-ERROR: un HTTP 4xx/5xx CONTESTADO tampoco es un veredicto sobre el VALOR (era T-198-AR2-HTTP-ERROR, INVERTIDO)', async () => {
+    // ⚠️ ESTE TEST CAMBIÓ DE SIGNO A PROPÓSITO EN HU-201.
+    //
+    // En HU-198 candaba que el camino "el facilitator contestó rechazando" NO se
+    // reclasificaba, porque reclasificarlo era el BLQ-ALTO del AR y estaba Scope OUT.
+    // HU-201 ES ese BLQ-ALTO. El servidor de abajo es literalmente el caso: un 502 con
+    // cuerpo. Un proxy puede emitirlo DESPUÉS de que el facilitator broadcasteó, así que
+    // lo único honesto que sabemos del valor es que no sabemos.
+    //
+    // Lo que estaba mal en la premisa vieja: mezclaba dos preguntas. "¿El facilitator
+    // contestó?" (sí, un 502) no es "¿el facilitator dictaminó sobre el valor?" (no).
+    // El único veredicto sobre el valor es un 2xx con el cuerpo canónico, y ése sigue
+    // saliendo por el camino de resultado (`success:false`) — candado
+    // `T-201-HTTP-PIEVERSE-CONTRA` en `adapters/settle-http-error.hu201.test.ts`.
     server = createHttpServer((_req, res) => {
       res.writeHead(502, { 'Content-Type': 'application/json' });
       res.end('{"error":"bad gateway"}');
@@ -303,8 +311,8 @@ describe('HU-198 — techo de los hops pieverse (kite-ozone)', () => {
     const err = await adapter.settle({ ...PROOF }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/HTTP 502/);
-    expect(err).not.toBeInstanceOf(FacilitatorSettleError);
-    expect(readSettleValueDisposition(err)).toBeUndefined();
+    expect(err).toBeInstanceOf(FacilitatorSettleError);
+    expect(readSettleValueDisposition(err)).toBe('unknown');
   });
 
   it('T-198-ENV: una env basura NO apaga el techo (cae al default, sigue cortando)', async () => {

@@ -327,3 +327,154 @@ describe('HU-198: settle inbound con resultado desconocido', () => {
     ).toBeUndefined();
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// HU-201 (AR BLQ-MEDIO-1) — EL SEGUNDO EJE DEL MISMO ENDPOINT.
+//
+// Los tests de arriba cubren el eje "el hop NO contestó" (throw). Este es el otro: el
+// facilitator CONTESTÓ 2xx con `success:false` PERO CON un txHash — el camino pieverse,
+// que devuelve la respuesta verbatim. Antes se le respondía al caller "Payment
+// settlement failed" TENIENDO EL HASH EN LA MANO, sin log alertable y sin evento
+// durable: se le afirmaba que no se le cobró.
+//
+// Por qué importa más acá que en el outbound: es plata del CALLER, en el endpoint más
+// expuesto, y el nonce inbound ya quedó quemado antes del settle, así que el reintento
+// del mismo header da X402_REPLAY. Paga y no tiene dónde reclamar.
+// ════════════════════════════════════════════════════════════════════════════
+describe('HU-201: settle inbound `success:false` CON evidencia de broadcast', () => {
+  const ORIGINAL_WALLET = process.env.KITE_WALLET_ADDRESS;
+  const EVIDENCE = '0xBROADCASTEDBUTREJECTED';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    kiteAdapter.verify.mockResolvedValue({ valid: true });
+    mockNonceInsert.mockResolvedValue({ data: null, error: null });
+    process.env.KITE_WALLET_ADDRESS = SERVER_WALLET;
+  });
+
+  afterEach(() => {
+    if (ORIGINAL_WALLET === undefined) delete process.env.KITE_WALLET_ADDRESS;
+    else process.env.KITE_WALLET_ADDRESS = ORIGINAL_WALLET;
+  });
+
+  /** Igual que `callWithSettleRejection` pero con un settle que RESUELVE. */
+  async function callWithSettleResult(result: {
+    txHash: string;
+    success: boolean;
+    error?: string;
+  }) {
+    const { logger, errors } = makeCapturingLogger();
+    const app = buildApp(logger);
+    await app.ready();
+    try {
+      kiteAdapter.settle.mockResolvedValueOnce(result);
+      const { headers } = buildEoaPaymentHeader({
+        to: SERVER_WALLET,
+        value: KITE_VALUE,
+      });
+      const res = await app.inject({
+        method: 'POST',
+        url: '/test',
+        headers: { ...headers, 'x-payment-chain': 'kite-ozone-testnet' },
+        payload: {},
+      });
+      return { res, errors };
+    } finally {
+      await app.close();
+    }
+  }
+
+  it('T-201-INBOUND-UNKNOWN: `success:false` CON hash → 402 sin acceso + señal alertable X402_SETTLE_UNKNOWN (antes: 402 mudo)', async () => {
+    const { res, errors } = await callWithSettleResult({
+      txHash: EVIDENCE,
+      success: false,
+      error: 'reverted after broadcast',
+    });
+
+    // Propiedad 1 (sin cambios): sin confirmación NO se sirve el recurso.
+    expect(res.statusCode).toBe(402);
+    expect(res.json()).not.toEqual({ paid: true });
+
+    // Propiedad 2 (la que faltaba): el caso deja de ser indistinguible de un rechazo.
+    const unknownLog = errors.find(
+      (e) => e.obj.error_code === 'X402_SETTLE_UNKNOWN',
+    );
+    expect(unknownLog).toBeDefined();
+    expect(unknownLog?.obj.valueDisposition).toBe('unknown');
+    // Y el hash viaja en el log: es LA clave para cruzar contra la cadena.
+    expect(unknownLog?.obj.settleTxHash).toBe(EVIDENCE);
+  });
+
+  it('T-201-INBOUND-MSG: el 402 NO le dice al caller "settlement failed" y le entrega el hash', async () => {
+    const { res } = await callWithSettleResult({
+      txHash: EVIDENCE,
+      success: false,
+      error: 'reverted after broadcast',
+    });
+
+    const body = JSON.stringify(res.json());
+    expect(body).toMatch(/UNKNOWN/);
+    expect(body).toMatch(/may or may not have executed/);
+    expect(body).toMatch(/Do NOT retry with the same payment header/);
+    // El caller se lleva la evidencia y puede mirar la cadena sin depender de nosotros.
+    expect(body).toContain(EVIDENCE);
+    // Y NO la frase que afirma que no se le cobró.
+    expect(body).not.toMatch(/Payment settlement failed/);
+  });
+
+  it('T-201-INBOUND-EVENT: deja una fila DURABLE (a2a_event) con el hash Y el nonce', async () => {
+    mockTrack.mockClear();
+    await callWithSettleResult({
+      txHash: EVIDENCE,
+      success: false,
+      error: 'reverted after broadcast',
+    });
+
+    expect(mockTrack).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'x402_settle_unknown',
+        status: 'failed',
+        metadata: expect.objectContaining({
+          error_code: 'X402_SETTLE_UNKNOWN',
+          valueDisposition: 'unknown',
+          settleTxHash: EVIDENCE,
+          authorizationNonce: expect.any(String),
+        }),
+      }),
+    );
+  });
+
+  // ── LOS CONTRA-EJEMPLOS: sin estos, mandar TODO rechazo al canal unknown pasaría
+  //    verde y el caller dejaría de recibir el diagnóstico correcto de su rechazo.
+
+  it('T-201-INBOUND-CONTRA: `success:false` SIN hash sigue siendo un rechazo normal (mensaje "settlement failed", sin señal, sin evento)', async () => {
+    mockTrack.mockClear();
+    const { res, errors } = await callWithSettleResult({
+      txHash: '',
+      success: false,
+      error: 'insufficient balance',
+    });
+
+    expect(res.statusCode).toBe(402);
+    const body = JSON.stringify(res.json());
+    expect(body).toMatch(/Payment settlement failed/);
+    expect(body).not.toMatch(/may or may not have executed/);
+    expect(
+      errors.find((e) => e.obj.error_code === 'X402_SETTLE_UNKNOWN'),
+    ).toBeUndefined();
+    expect(mockTrack).not.toHaveBeenCalled();
+  });
+
+  it('T-201-INBOUND-CONTRA-OK: un settle EXITOSO no toca ninguno de los dos canales', async () => {
+    mockTrack.mockClear();
+    const { errors } = await callWithSettleResult({
+      txHash: '0xdeadbeef',
+      success: true,
+    });
+
+    expect(
+      errors.find((e) => e.obj.error_code === 'X402_SETTLE_UNKNOWN'),
+    ).toBeUndefined();
+    expect(mockTrack).not.toHaveBeenCalled();
+  });
+});

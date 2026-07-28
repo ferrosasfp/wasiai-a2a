@@ -429,11 +429,34 @@ async function chargeLeg(
     }
 
     const { paymentRequest } = signResult;
-    const settleResult = await getPaymentAdapter().settle({
-      authorization: paymentRequest.authorization,
-      signature: paymentRequest.signature,
-      network: paymentRequest.network ?? '',
-    });
+    // HU-201 (AR MENOR): el settle tiene su PROPIO catch. Antes iba pelado y su
+    // excepción caía en el `catch` de más abajo, que etiqueta TODO como
+    // `DB_ERROR: <msg>` — una etiqueta correcta cuando el que tira es el builder de
+    // supabase, y falsa cuando el que tira es el hop al facilitator. Desde HU-201 ese
+    // hop tira de verdad (un HTTP non-2xx ya no se aplana a `success:false`), así que
+    // un 502 del facilitator se reportaba al operador como un error de base de datos.
+    // El destino del dinero NO cambia (leg failed, sin reintento); cambia el
+    // diagnóstico, que es lo que alguien mira a las 3 AM.
+    let settleResult: Awaited<
+      ReturnType<ReturnType<typeof getPaymentAdapter>['settle']>
+    >;
+    try {
+      settleResult = await getPaymentAdapter().settle({
+        authorization: paymentRequest.authorization,
+        signature: paymentRequest.signature,
+        network: paymentRequest.network ?? '',
+      });
+    } catch (settleErr) {
+      const msg =
+        settleErr instanceof Error ? settleErr.message : String(settleErr);
+      const errMsg = `settle failed: ${msg}`;
+      log.error(
+        { orchestrationId, role, detail: errMsg },
+        'split leg settle threw',
+      );
+      await markLegFailed(orchestrationId, role, ownerRef, errMsg);
+      return { ...base, error: errMsg };
+    }
 
     if (!settleResult.success) {
       const errMsg = `settle failed: ${settleResult.error ?? 'unknown'}`;

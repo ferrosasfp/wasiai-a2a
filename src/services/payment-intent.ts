@@ -26,6 +26,7 @@
  */
 
 import { recoverTypedDataAddress } from 'viem';
+import { hasBroadcastEvidence } from '../adapters/errors.js';
 import {
   captureDebitSignatureBestEffort,
   type DebitCaptureInput,
@@ -429,16 +430,41 @@ export async function settlePaymentIntentOnChain(params: {
         network: paymentRequest.network ?? '',
       });
       if (!settleResult.success) {
-        const detail = `settle failed: ${settleResult.error ?? 'unknown'}`;
-        log.error({ intentId, detail }, 'settle reported failure');
-        // INEQUÍVOCO: el facilitator confirmó que el settle NO se ejecutó → no
-        // se movieron fondos → refund seguro del deposit/débito.
+        // HU-201: el `txHash` que vino CON el `success:false` decide el veredicto.
+        // Antes se descartaba (`txHash: null` a secas) y todo `success:false` salía
+        // `unequivocal`. Ver `hasBroadcastEvidence` para el por qué completo.
+        const broadcastEvidence = hasBroadcastEvidence(settleResult.txHash);
+        const detail = broadcastEvidence
+          ? `settle failed WITH a broadcast hash (${String(settleResult.txHash)}): ${settleResult.error ?? 'unknown'}`
+          : `settle failed: ${settleResult.error ?? 'unknown'}`;
+        // AR MENOR: el hash sale como CAMPO ESTRUCTURADO, no sólo dentro de la prosa
+        // de `detail`. Es la única pista para cruzar contra la cadena y no hay columna
+        // donde persistirlo (agregarla es una migración → TD-201-02); un campo propio
+        // lo vuelve al menos filtrable en el agregador de logs, y viaja además en el
+        // `error_message` que expone `listAmbiguous()`.
+        log.error(
+          {
+            intentId,
+            detail,
+            broadcastEvidence,
+            ...(broadcastEvidence
+              ? { settleTxHash: String(settleResult.txHash) }
+              : {}),
+          },
+          'settle reported failure',
+        );
+        // · SIN hash → INEQUÍVOCO: el facilitator contestó, en su propia respuesta
+        //   canónica, que el settle NO se ejecutó, y no nos dio ninguna tx. Es el
+        //   veredicto explícito de la MISMA respuesta cuyo `success:true` ya tratamos
+        //   como autoritativo ⟹ refund seguro del deposit/débito + re-envío del hop 2.
+        // · CON hash → AMBIGUO: tenemos un hash de broadcast en la mano; "no se
+        //   ejecutó" deja de ser una lectura posible ⟹ NO refund, NO re-envío.
         return {
           status: 'failed',
           txHash: null,
           finalAmountUsd,
           error: detail,
-          failureKind: 'unequivocal',
+          failureKind: broadcastEvidence ? 'ambiguous' : 'unequivocal',
         };
       }
       settleTxHash = settleResult.txHash;
@@ -646,8 +672,9 @@ export async function settleEscrowAware(params: {
       //
       // El dato para distinguir YA ESTABA COMPUTADO: `failureKind`.
       //   · 'unequivocal' → el hop 2 PROBADAMENTE no se ejecutó (el sign falló, o el
-      //     facilitator contestó `success:false`). Re-enviar es CORRECTO y es para
-      //     lo que el reconciliador existe ⟹ `reconciliation_pending` (sin cambio).
+      //     facilitator contestó `success:false` SIN darnos ningún txHash — HU-201).
+      //     Re-enviar es CORRECTO y es para lo que el reconciliador existe ⟹
+      //     `reconciliation_pending` (sin cambio).
       //   · 'ambiguous'   → el hop 2 pudo haber pagado (el settle TIRÓ, o la
       //     re-verificación on-chain lo contradijo) ⟹ `resolving_settle`, que el LADO
       //     SETTLE del claim NO reclama sin tx previa, pero que SIGUE en
@@ -1001,7 +1028,8 @@ export const paymentIntentService = {
     // aplica DENTRO de finalize (misma tx que el status flip, status-gated) ⇒ jamás
     // dos veces. La acción depende del subcaso (inequívoco vs ambiguo):
     if (outcome.failureKind === 'unequivocal') {
-      // sign() lanzó / settle.success===false → CIERTO que NO hubo transfer: refund del
+      // sign() lanzó / settle.success===false SIN txHash (HU-201: con hash es
+      // `ambiguous` y cae al bloque de abajo) → CIERTO que NO hubo transfer: refund del
       // deposit COMPLETO (authorized_usd) dentro de finalize (budget_post==budget_pre).
       const errMsg = outcome.error ?? 'settle failed';
       await recordSettleOutcome(
@@ -1335,7 +1363,8 @@ export const paymentIntentService = {
     // status flip, status-gated) ⇒ exactamente una vez. Solo en el caso inequívoco;
     // el ambiguo PUDO transferir → NO refundar (doble-gasto).
     if (outcome.failureKind === 'unequivocal') {
-      // sign() lanzó / settle.success===false → no hubo transfer: buyer whole.
+      // sign() lanzó / settle.success===false SIN txHash (HU-201) → no hubo transfer:
+      // buyer whole. Con hash el veredicto es `ambiguous` → NO se reembolsa acá.
       const errMsg = outcome.error ?? 'settle failed';
       await recordSettleOutcome(
         intentId,

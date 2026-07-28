@@ -5,6 +5,7 @@ import { usdToAtomicUnits } from '../../lib/atomic-amount.js';
 import { getLogger } from '../../lib/logger.js';
 import { buildRpcTransport } from '../../lib/rpc-transport.js';
 import type { X402PaymentRequest } from '../../types/index.js';
+import { FacilitatorSettleError } from '../errors.js';
 import type {
   EvmPaymentAdapter,
   QuoteResult,
@@ -289,15 +290,34 @@ async function settleX402(req: SettleRequest): Promise<SettleResult> {
     .json()
     .catch(() => null)) as X402SettleResponse | null;
   if (result === null) {
-    throw new Error(
+    // HU-201: el body no parsea ⟹ no sabemos qué contestó el facilitator ⟹ no
+    // sabemos si broadcasteó. Mismo mensaje de siempre, pero TIPADO `'unknown'`.
+    throw new FacilitatorSettleError(
       `Facilitator returned HTTP ${response.status} on /settle (no JSON body)`,
+      'unknown',
     );
   }
-  if (!response.ok || result.settled !== true) {
+  // HU-201 (AR BLQ-ALTO) — UN HTTP NON-2XX **NO** ES `success:false`.
+  //
+  // Espejo byte-a-byte del guard de `base/payment.ts` (mismo bug, mismo fix). Un
+  // 502/504 —un proxy que corta DESPUÉS de que el facilitator mandó la tx— se aplanaba
+  // a `{ success:false }`, y aguas abajo (`services/payment-intent.ts`) eso significa
+  // "el facilitator confirmó que no se ejecutó" ⟹ refund al buyer y/o re-envío del hop
+  // 2 al seller. Nunca lo confirmó: no contestó bien. Va por el canal de la incógnita.
+  //
+  // `success:false` queda RESERVADO para un 2xx cuyo cuerpo canónico dice
+  // `settled !== true` — el veredicto del facilitator sobre su propio trabajo.
+  if (!response.ok) {
+    throw new FacilitatorSettleError(
+      `Facilitator returned HTTP ${response.status} on /settle: ${result.error?.message ?? 'no error message in body'}`,
+      'unknown',
+    );
+  }
+  if (result.settled !== true) {
     return {
-      txHash: result?.transactionHash ?? '',
+      txHash: result.transactionHash ?? '',
       success: false,
-      error: result?.error?.message ?? `HTTP ${response.status}`,
+      error: result.error?.message ?? `HTTP ${response.status}`,
     };
   }
   return {
