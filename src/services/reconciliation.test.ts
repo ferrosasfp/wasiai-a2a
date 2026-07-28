@@ -586,6 +586,70 @@ describe('T-NEW-7 listPending round-trip nonce (AC-4, WKH-196)', () => {
   });
 });
 
+// ════════════════════════════════════════════════════════════════════
+// HU-198 fix-pack (AR BLQ-MEDIO-4) · `resolving_settle` TIENE que seguir siendo
+// visible y resoluble. Es LA invariante que sostiene el diseño entero: el estado se
+// eligió porque no se auto-reclama PERO sigue en la superficie del humano. Si
+// desaparece de `PENDING_STATUSES`, la fila se vuelve un limbo que nadie mira —
+// peor que el bug original (una fila con plata posiblemente duplicada, invisible).
+// El AR probó que borrar esa entrada NO ponía nada rojo: 3714 passed, 0 failed.
+// ════════════════════════════════════════════════════════════════════
+describe('HU-198 fix-pack: resolving_settle sigue en la superficie de reconciliación', () => {
+  it('T-198-Pending-List: listPending() filtra por un set que INCLUYE resolving_settle', async () => {
+    const wired = wireFrom({ sigResult: { data: [], error: null } });
+
+    await reconciliationService.listPending();
+
+    const statuses = wired.settleStatusFilter();
+    // El estado durable del hop 2 desconocido: sin esto no aparece en el panel.
+    expect(statuses).toContain('resolving_settle');
+    // Y los otros pendientes no se perdieron en el camino.
+    expect(statuses).toContain('hop1_confirmed');
+    expect(statuses).toContain('reconciliation_pending');
+    expect(statuses).toContain('resolving_refund');
+  });
+
+  it('T-198-Pending-Resolve: resolveIntent() acepta una fila resolving_settle (no tira NOT_PENDING)', async () => {
+    // La otra mitad: `listPending` y `resolveIntent` comparten PENDING_STATUSES, así
+    // que si el estado se cae de la lista el humano tampoco puede resolverla — ve el
+    // botón (o no) y el POST responde NOT_PENDING. Se afirma el FILTRO que la query
+    // manda, que es lo que decide si la fila es alcanzable.
+    const wired = wireFrom({
+      sigResult: {
+        data: sigRow({ debit_settle_status: 'resolving_settle' }),
+        error: null,
+      },
+    });
+    mockReverify.mockResolvedValue('indeterminate');
+
+    await reconciliationService.resolveIntent(INTENT_ID);
+
+    expect(wired.settleStatusFilter()).toContain('resolving_settle');
+  });
+
+  it('T-198-Pending-Shared: listPending y resolveIntent usan EL MISMO set de estados', async () => {
+    // Candado anti-divergencia: las dos superficies tienen que moverse juntas. Si
+    // alguien agrega un estado a una sola, el humano ve una fila que no puede
+    // resolver (o al revés, puede resolver algo que no ve).
+    const a = wireFrom({ sigResult: { data: [], error: null } });
+    await reconciliationService.listPending();
+    const listStatuses = [...a.settleStatusFilter()];
+
+    const b = wireFrom({
+      sigResult: {
+        data: sigRow({ debit_settle_status: 'resolving_settle' }),
+        error: null,
+      },
+    });
+    mockReverify.mockResolvedValue('indeterminate');
+    await reconciliationService.resolveIntent(INTENT_ID);
+    const resolveStatuses = [...b.settleStatusFilter()];
+
+    expect(listStatuses.length).toBeGreaterThan(0);
+    expect([...resolveStatuses].sort()).toEqual([...listStatuses].sort());
+  });
+});
+
 // ── T-NEW-8: driftCheck round-trip amount > 2^53 + cast-presence (SOLO amount, CD-6) ──
 describe('T-NEW-8 driftCheck round-trip amount + cast-presence (AC-2/AC-4/CD-6, WKH-196)', () => {
   it('sumDebitedAtomic exacto y el select castea SOLO debit_amount_atomic::text', async () => {
@@ -778,9 +842,23 @@ describe('BLQ-ALTO-1 race del doble hop2 (claim exclusivo + lease)', () => {
       { fixed: true },
     );
     const out = await reconciliationService.resolveIntent(INTENT_ID);
-    expect(out).toEqual({ status: 'already_resolved' });
+    // AR BLQ-BAJO-1: antes esto devolvía `already_resolved`, y era una respuesta FALSA
+    // sobre una fila NO resuelta con plata posiblemente duplicada — encima en la única
+    // herramienta que el humano tiene para resolverla. La propiedad de dinero (cero
+    // re-envíos) no cambió; lo que cambió es que el operador ahora se entera.
+    expect(out).toEqual({ status: 'awaiting_manual_settle_evidence' });
     expect(seam()).toBe(0); // exactamente-cero re-envíos → sin double-pay
     expect(mockSettleSeam).not.toHaveBeenCalled();
+  });
+
+  it('AR BLQ-BAJO-1: resolving_settle CON tx previa NO es "awaiting evidence" (hay evidencia que verificar)', async () => {
+    // Contra-ejemplo: el estado nuevo es sólo para la ausencia de evidencia. Con tx
+    // previa el reconciliador SÍ tiene algo que hacer (re-verificar on-chain), así que
+    // NO debe reportar "esperando evidencia manual". Sin este test, devolver el estado
+    // nuevo para cualquier `claimed=false` pasaría igual.
+    harness({ status: 'resolving_settle', tx: HOP1_TX }, { fixed: true });
+    const out = await reconciliationService.resolveIntent(INTENT_ID);
+    expect(out.status).not.toBe('awaiting_manual_settle_evidence');
   });
 
   it('CONTROL (sin el fix): claim pre-fix re-claima resolving_settle → RE-ENVÍA el hop2 (double-pay)', async () => {

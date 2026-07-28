@@ -21,6 +21,7 @@ import {
   verifySettledTx,
 } from '../adapters/settle-verifier.js';
 import type { ChainKey } from '../adapters/types.js';
+import { eventService } from '../services/event.js';
 import { checkAndRecordX402Nonce } from '../services/x402-nonce.js';
 import type {
   X402PaymentPayload,
@@ -582,7 +583,8 @@ export function requirePayment(
       // arriba (anti-replay), así que un reintento del MISMO header va a dar
       // X402_REPLAY: si nadie mira este caso, el caller queda pagando sin servicio.
       // Se emite con `error_code` estable y nivel error para que sea alertable.
-      if (readSettleValueDisposition(err) === 'unknown') {
+      const inboundUnknown = readSettleValueDisposition(err) === 'unknown';
+      if (inboundUnknown) {
         request.log.error(
           {
             error_code: 'X402_SETTLE_UNKNOWN',
@@ -594,17 +596,61 @@ export function requirePayment(
           },
           'x402 inbound settle result UNKNOWN: the facilitator hop was cut without an answer, so the payment may have executed on-chain. Access denied (no confirmation) and the caller may have been charged — reconcile against the chain before treating this as unpaid.',
         );
+        // AR BLQ-MEDIO-3: un log no es una superficie de reconciliación. El lado
+        // OUTBOUND de esta HU recibió estado DURABLE (`resolving_settle`) + un lugar
+        // donde mirarlo (`listPending()`); el INBOUND se quedaba sólo con este log,
+        // sobre la plata del CALLER, y encima con el nonce ya quemado más arriba (así
+        // que el reintento del mismo header da X402_REPLAY). Se persiste un
+        // `a2a_events` para que exista DÓNDE reconciliarlo.
+        //
+        // Fire-and-forget con `.catch()`: `track()` TIRA si el insert falla, y un
+        // problema de telemetría NO puede cambiar la respuesta de un money-path.
+        void eventService
+          .track({
+            eventType: 'x402_settle_unknown',
+            status: 'failed',
+            metadata: {
+              error_code: 'X402_SETTLE_UNKNOWN',
+              valueDisposition: 'unknown',
+              chainKey,
+              payTo,
+              requiredAmount,
+              // El nonce es la clave para cruzar contra la cadena: es el que el
+              // facilitator pudo haber consumido al broadcastear.
+              authorizationNonce:
+                typeof inboundNonce === 'string' ? inboundNonce : null,
+              resource,
+              detail,
+            },
+          })
+          .catch((trackErr: unknown) => {
+            request.log.error(
+              {
+                error_code: 'X402_SETTLE_UNKNOWN_EVENT_FAILED',
+                detail:
+                  trackErr instanceof Error ? trackErr.message : 'unknown',
+              },
+              'x402 inbound settle UNKNOWN could not be persisted as an event — the only remaining record is the log line above',
+            );
+          });
       }
-      return reply
-        .status(402)
-        .send(
-          await buildX402Response(
-            opts,
-            resource,
-            chainKey,
-            `Payment settlement failed: ${detail}`,
-          ),
-        );
+      return reply.status(402).send(
+        await buildX402Response(
+          opts,
+          resource,
+          chainKey,
+          // AR BLQ-MEDIO-3: mensaje PROPIO para el unknown. Decirle "settlement
+          // failed" al caller es afirmar que no se le cobró, que es exactamente lo
+          // que no sabemos — la misma contradicción que este branch documenta en
+          // `lib/downstream-skip-code.ts` ("'no se pagó' y 'puede haberse pagado' son
+          // frases opuestas"). Y el aviso de NO reintentar con el mismo header es
+          // material: el nonce ya quedó registrado, así que el reintento da
+          // X402_REPLAY y el caller no gana nada.
+          inboundUnknown
+            ? `Payment settlement result UNKNOWN: the settlement service did not answer in time, so your payment may or may not have executed on-chain. Access was NOT granted. Do NOT retry with the same payment header (its nonce is already recorded); this case is logged for reconciliation. Detail: ${detail}`
+            : `Payment settlement failed: ${detail}`,
+        ),
+      );
     }
     if (reply.sent) return;
     if (!settleResult.success)

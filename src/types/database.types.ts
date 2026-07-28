@@ -2882,7 +2882,12 @@ export type Database = {
           p_nonce: string;
           p_status: string;
         };
-        Returns: undefined;
+        // HU-198 (migración 20260728010000): pasó de `RETURNS void` a
+        // `RETURNS TABLE(applied boolean)`. `applied=false` NO es un error: es "el
+        // guard de transición rechazó el write", que el caller TIENE que distinguir
+        // (ver `recordDebitSettleStatus`). Mismo shape que
+        // `record_reconciliation_resolution`, abajo.
+        Returns: { applied: boolean }[];
       };
       claim_reconciliation: {
         Args: {

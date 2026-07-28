@@ -341,6 +341,31 @@ async function debitBuyer(
 }
 
 /**
+ * AR MNR-1 — ¿el resultado del hop 2 es DESCONOCIDO (y por lo tanto NO se puede
+ * re-enviar solo)?
+ *
+ * El test es `!== 'unequivocal'`, NO `=== 'ambiguous'`. Los dos son equivalentes HOY
+ * (el tipo tiene exactamente 2 valores), pero difieren en el DEFAULT, y acá el default
+ * decide dinero:
+ *   · con `=== 'ambiguous'`, un `failureKind` ausente o un 3er valor futuro caería en
+ *     `reconciliation_pending` ⟹ fila auto-reclamable ⟹ el reconciliador re-envía el
+ *     hop 2 a ciegas ⟹ doble pago al seller.
+ *   · con `!== 'unequivocal'` cae en `resolving_settle` ⟹ revisión manual.
+ * O sea: SÓLO el veredicto EXPLÍCITO de "probado que no se ejecutó" habilita el
+ * re-envío. Cualquier otra cosa, incluida la ignorancia, va al lado seguro.
+ *
+ * Está extraída como función pura EXPORTADA a propósito: la diferencia entre las dos
+ * formas es inalcanzable por el camino de integración (todos los `return failed` del
+ * seam setean `failureKind`), así que sin este seam la invariante del default no se
+ * podía candar con un test — sería una afirmación sin evidencia.
+ */
+export function isHop2ResultUnknown(
+  failureKind: SettleOutcome['failureKind'] | undefined,
+): boolean {
+  return failureKind !== 'unequivocal';
+}
+
+/**
  * BLQ-DR: normaliza el `settle_outcome` persistido a un veredicto. NULL/desconocido
  * → 'failed_ambiguous' (money-safe): sin veredicto NO asumimos éxito ni refund; se
  * marca reconciliable. NUNCA default a 'settled' (esa asunción era la causa raíz).
@@ -632,7 +657,7 @@ export async function settleEscrowAware(params: {
       // NO se inventó un estado nuevo: `resolving_settle` ya existe en el CHECK y en
       // el índice `idx_debit_sig_resolving` desde 191c. Lo único que hizo falta fue
       // dejar que `record_debit_settle_status` lo escriba (migración de esta HU).
-      const unknownHop2 = o2.failureKind === 'ambiguous';
+      const unknownHop2 = isHop2ResultUnknown(o2.failureKind);
       await recordDebitSettleStatus({
         intentId,
         ownerRef,

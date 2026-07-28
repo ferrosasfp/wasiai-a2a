@@ -270,8 +270,8 @@ export async function recordDebitSettleStatus(args: {
   keyId: string;
   nonce: string;
   status: 'settled' | 'reconciliation_pending' | 'resolving_settle';
-}): Promise<void> {
-  const { error } = await supabase.rpc('record_debit_settle_status', {
+}): Promise<boolean> {
+  const { data, error } = await supabase.rpc('record_debit_settle_status', {
     p_intent_id: args.intentId,
     p_owner_ref: args.ownerRef,
     p_key_id: args.keyId,
@@ -294,5 +294,36 @@ export async function recordDebitSettleStatus(args: {
       },
       'record_debit_settle_status failed — the lifecycle row was NOT updated (if the status is resolving_settle, check that the HU-198 migration is applied: an un-updated row stays auto-claimable and the reconciler could resend hop2 blind)',
     );
+    return false;
   }
+  // AR BLQ-MEDIO-2: el `error` NO era el único modo de fallo. El guard de transición
+  // (migración 20260728000000) hace que un UPDATE de 0 filas sea un resultado NORMAL,
+  // así que con el `RETURNS void` original el caller no podía distinguir "quedó
+  // escrito" de "el guard lo rechazó y la fila sigue auto-reclamable". Desde
+  // 20260728010000 el RPC devuelve `applied`, y ACÁ se consume: sin esto, el candado
+  // de toda la HU colgaba de un write incapaz de reportar su propio fracaso.
+  //
+  // `undefined` (RPC viejo todavía deployado, o forma inesperada) se trata como NO
+  // confirmado a propósito: preferimos un warn de más a creer que el candado cerró.
+  // Doble cast a través de `unknown`: con el RPC VIEJO todavía deployado la respuesta
+  // real es `null`, no la fila (el tipo generado ya declara la forma nueva). El
+  // `?.[0]?.applied` cubre las dos, y `undefined` cae al camino de "no confirmado".
+  const applied = (data as unknown as { applied?: boolean }[] | null)?.[0]
+    ?.applied;
+  if (applied !== true) {
+    log.error(
+      {
+        intentId: args.intentId,
+        keyId: args.keyId,
+        nonce: args.nonce,
+        status: args.status,
+        applied: applied ?? null,
+      },
+      applied === false
+        ? 'record_debit_settle_status applied=false — the transition guard REJECTED the write, so the lifecycle row still holds its previous status. For resolving_settle this means the row REMAINS auto-claimable and the reconciler could resend hop2 blind: reconcile this intent by hand.'
+        : 'record_debit_settle_status returned no `applied` flag — cannot confirm the lifecycle row was updated (is migration 20260728010000 applied?). Treated as NOT confirmed.',
+    );
+    return false;
+  }
+  return true;
 }

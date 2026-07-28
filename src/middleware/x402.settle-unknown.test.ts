@@ -71,6 +71,14 @@ vi.mock('../lib/supabase.js', () => ({
   },
 }));
 
+// AR BLQ-MEDIO-3: el registro durable del unknown va por el seam canónico
+// `eventService.track` (fire-and-forget). Se mockea para poder afirmar el CONTENIDO de
+// la fila persistida, no sólo que "se llamó a algo".
+const mockTrack = vi.fn().mockResolvedValue({ id: 'evt-1' });
+vi.mock('../services/event.js', () => ({
+  eventService: { track: (...a: unknown[]) => mockTrack(...a) },
+}));
+
 import { buildEoaPaymentHeader } from '../__tests__/fixtures/passport-shape.js';
 import { requirePayment } from './x402.js';
 
@@ -188,6 +196,76 @@ describe('HU-198: settle inbound con resultado desconocido', () => {
     expect(unknownLog?.obj.valueDisposition).toBe('unknown');
     // El log tiene que decir la consecuencia de dinero, no sólo "falló".
     expect(String(unknownLog?.msg)).toMatch(/may have executed on-chain/);
+  });
+
+  // ── AR BLQ-MEDIO-3: el caller NO puede recibir "tu pago falló" ──
+  it('T-198-AR-INBOUND-MSG: el 402 del unknown NO dice "settlement failed" y avisa de no reintentar', async () => {
+    // La contradicción que el AR marcó: el lado outbound de esta HU distingue "no se
+    // pagó" de "puede haberse pagado" (`downstream-skip-code.ts`), y el inbound le
+    // afirmaba al caller lo primero sobre SU plata. Y el aviso de no reintentar es
+    // material: el nonce ya quedó registrado, así que el reintento da X402_REPLAY.
+    const { res } = await callWithSettleRejection(
+      new FacilitatorSettleError('aborted due to timeout', 'unknown'),
+    );
+
+    const body = JSON.stringify(res.json());
+    expect(body).toMatch(/UNKNOWN/);
+    expect(body).toMatch(/may or may not have executed/);
+    expect(body).toMatch(/Do NOT retry with the same payment header/);
+    // Y NO la frase que afirma que no se cobró.
+    expect(body).not.toMatch(/Payment settlement failed/);
+  });
+
+  it('T-198-AR-INBOUND-MSG-plain: un rechazo normal SIGUE diciendo "settlement failed"', async () => {
+    // Contra-ejemplo: el mensaje nuevo es SÓLO para el unknown. Si se aplicara a todo,
+    // dejaría de distinguir nada (y perdería la promesa correcta del caso rechazado).
+    const { res } = await callWithSettleRejection(
+      new Error('facilitator rejected the payload'),
+    );
+    const body = JSON.stringify(res.json());
+    expect(body).toMatch(/Payment settlement failed/);
+    expect(body).not.toMatch(/may or may not have executed/);
+  });
+
+  it('T-198-AR-INBOUND-EVENT: el unknown deja una fila DURABLE (a2a_event) con el nonce', async () => {
+    // Un log no es una superficie de reconciliación. El lado outbound recibió estado
+    // durable + listPending(); el inbound se quedaba sólo con el log, sobre la plata del
+    // caller. El nonce es la clave para cruzarlo contra la cadena.
+    mockTrack.mockClear();
+    await callWithSettleRejection(
+      new FacilitatorSettleError('aborted due to timeout', 'unknown'),
+    );
+
+    expect(mockTrack).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'x402_settle_unknown',
+        status: 'failed',
+        metadata: expect.objectContaining({
+          error_code: 'X402_SETTLE_UNKNOWN',
+          valueDisposition: 'unknown',
+          authorizationNonce: expect.any(String),
+        }),
+      }),
+    );
+  });
+
+  it('T-198-AR-INBOUND-EVENT-plain: un rechazo normal NO persiste el evento', async () => {
+    mockTrack.mockClear();
+    await callWithSettleRejection(
+      new Error('facilitator rejected the payload'),
+    );
+    expect(mockTrack).not.toHaveBeenCalled();
+  });
+
+  it('T-198-AR-INBOUND-EVENT-throws: si el insert del evento falla, el 402 sale igual', async () => {
+    // La telemetría NO puede cambiar la respuesta de un money-path. `track()` TIRA si
+    // el insert falla, así que va con `.catch()`.
+    mockTrack.mockClear();
+    mockTrack.mockRejectedValueOnce(new Error('relation does not exist'));
+    const { res } = await callWithSettleRejection(
+      new FacilitatorSettleError('aborted due to timeout', 'unknown'),
+    );
+    expect(res.statusCode).toBe(402);
   });
 
   it('T-198-INBOUND-PLAIN: un settle que tira un Error común NO emite la señal (sigue siendo un 402 normal)', async () => {

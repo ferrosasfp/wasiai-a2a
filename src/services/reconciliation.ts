@@ -55,10 +55,25 @@ const PENDING_STATUSES = [
 // justamente en los casos que hay que mirar. Un reporte de drift que se calla un caso
 // afirma algo falso.
 //
-// `resolving_refund` NO se agrega, a propósito y con el mismo criterio: ahí el débito
-// está en curso de ser REVERTIDO (el crédito vive dentro de
-// `record_reconciliation_resolution`), así que contarlo como vigente sería la
-// sub/sobre-declaración simétrica. Es la única exclusión y queda nombrada.
+// EXCLUSIONES, LAS TRES (AR MNR-2: la versión anterior decía que `resolving_refund` era
+// "la única exclusión", y era una afirmación FALSA de completitud — justo el tipo de
+// afirmación que este comentario existe para evitar):
+//   · `resolving_refund`  — el débito está en curso de ser REVERTIDO (el crédito vive
+//     dentro de `record_reconciliation_resolution`), así que contarlo como vigente
+//     sería la sub/sobre-declaración simétrica.
+//   · `resolved_refunded` — el débito YA se revirtió. Excluido por el mismo criterio.
+//   · `resolved_settled`  — el hop 2 se resolvió y el débito quedó consumido; el
+//     `settled` de la lista ya cubre el consumo por la vía normal. Se excluye por
+//     coherencia con el par `resolving_settle`→`resolved_settled` (contar los dos
+//     duplicaría el mismo débito en la suma).
+//
+// ⚠️ REGRESIÓN DEL ROLLBACK (AR MNR-2, 2ª mitad): el `_down` de la migración
+// 20260728000000 NO revierte esta lista (es código, no SQL), pero SÍ deja de escribirse
+// `resolving_settle`, así que las filas que quedaron en ese estado siguen contándose
+// mientras el código nuevo esté deployado y dejan de aparecer si se revierte el código.
+// O sea: revertir el CÓDIGO de HU-198 devuelve el drift a su sub-declaración anterior
+// para esas filas. Está anotado en el `_down`; si se revierte, inventariarlas con la
+// query que ese archivo trae.
 const DRIFT_ACCOUNTED_STATUSES = [
   'hop1_confirmed',
   'settled',
@@ -98,6 +113,22 @@ export type ResolveStatus =
   | 'flag_off'
   | 'indeterminate'
   | 'already_resolved'
+  /**
+   * AR BLQ-BAJO-1 — HU-198 volvió `resolving_settle` un estado DURABLE, y eso rompió
+   * el significado de `already_resolved` para la única herramienta que el humano
+   * tiene. El diseño delega en "que una persona lo resuelva", pero
+   * `POST /dashboard/api/reconciliation/:id/resolve` contestaba
+   * `200 {"status":"already_resolved"}` para una fila que NO está resuelta y que
+   * contiene plata posiblemente duplicada: el claim devuelve `claimed=false` (por
+   * diseño, para no re-enviar el hop 2 a ciegas) y ese `false` se traducía al mismo
+   * "ya está" que una fila terminal.
+   *
+   * Este estado distingue el caso: el intent está ESPERANDO EVIDENCIA del hop 2
+   * (`resolving_settle` + `debit_resolution_tx_hash IS NULL`). No hay nada que el
+   * reconciliador automático pueda hacer con él — hay que ir a la cadena, encontrar
+   * si el hop 2 pagó, y resolverlo con esa evidencia.
+   */
+  | 'awaiting_manual_settle_evidence'
   | 'settle_failed'
   | 'settled'
   | 'refunded';
@@ -134,6 +165,13 @@ interface SigWithIntentRow {
   debit_amount_atomic: string;
   debit_hop1_tx_hash: string | null;
   debit_settle_status: string;
+  /**
+   * AR BLQ-BAJO-1: se agrega al SELECT porque el `claimed=false` necesita distinguir
+   * "ya resuelto" de "esperando evidencia del hop 2" (`resolving_settle` SIN tx). El
+   * tipo refleja exactamente las columnas pedidas (misma regla que `PendingSelectRow`),
+   * así que agregar el campo acá OBLIGA a agregarlo al select — tsc lo cazó.
+   */
+  debit_resolution_tx_hash: string | null;
   owner_ref: string;
   a2a_payment_intents: IntentEmbed | IntentEmbed[] | null;
 }
@@ -236,7 +274,9 @@ export const reconciliationService = {
       .from('a2a_payment_intent_debit_signatures')
       .select(
         'intent_id, key_id, debit_key_id_hash, debit_nonce::text, debit_amount_atomic::text, ' +
-          'debit_hop1_tx_hash, debit_settle_status, owner_ref, ' +
+          // AR BLQ-BAJO-1: `debit_resolution_tx_hash` es lo que separa "esperando
+          // evidencia del hop 2" de "ya resuelto" cuando el claim devuelve false.
+          'debit_hop1_tx_hash, debit_resolution_tx_hash, debit_settle_status, owner_ref, ' +
           'a2a_payment_intents!inner(pay_to, chain_id, owner_ref)',
       )
       .eq('intent_id', intentId)
@@ -301,6 +341,22 @@ export const reconciliationService = {
         | null
     )?.[0];
     if (!claimRow || claimRow.claimed === false) {
+      // AR BLQ-BAJO-1: `claimed=false` ya NO significa una sola cosa. Desde HU-198 hay
+      // filas que el claim rechaza A PROPÓSITO y que NO están resueltas: el hop 2 quedó
+      // de resultado desconocido (`resolving_settle` sin tx) y el reconciliador se
+      // niega a re-enviarlo a ciegas. Contestarle `already_resolved` al humano sobre
+      // una fila con plata posiblemente duplicada es la peor respuesta posible: lo
+      // manda a otra cosa. Se lee el estado REAL de la fila para distinguirlo.
+      if (
+        row.debit_settle_status === 'resolving_settle' &&
+        !row.debit_resolution_tx_hash
+      ) {
+        log.warn(
+          { intentId, keyId, nonce },
+          'reconcile: intent awaiting MANUAL hop2 evidence (resolving_settle without tx). The reconciler will NOT resend hop2 blind: check the chain for a hop2 disbursement to the seller before resolving.',
+        );
+        return { status: 'awaiting_manual_settle_evidence' };
+      }
       // Otro run ganó / ya terminal → no-op idempotente (AC-5).
       return { status: 'already_resolved' };
     }
@@ -351,27 +407,63 @@ export const reconciliationService = {
         //
         // HU-198 cerró la entrada (E) — hop 2 de resultado DESCONOCIDO — mandándola a
         // `resolving_settle`, que el claim no reclama sin tx (ver `settleEscrowAware`).
-        // QUEDAN ABIERTAS dos entradas que llegan acá como `hop1_confirmed` y son
+        // QUEDAN ABIERTAS CUATRO entradas que llegan acá como `hop1_confirmed` y son
         // INDISTINGUIBLES de (A) con lo que hoy se persiste:
         //   (B) el proceso murió DURANTE el hop 2, después de que el request salió.
         //   (C) el hop 2 SETTLEÓ pero el flip a 'settled' falló ⟹ el txHash se perdió
         //       sin persistirse (`settleEscrowAware` no tiene el "lease" de evidencia
         //       que sí tiene este mismo archivo unas líneas más abajo).
-        // En (B) y (C) este re-envío PAGA DOS VECES al seller.
+        //   (F) NADIE MURIÓ (AR — la enumeración original estaba mal encuadrada en
+        //       "el proceso murió", y por eso no lo vio): `record_debit_hop1` escribe
+        //       `hop1_confirmed` ANTES de que el hop 2 se intente, así que la fila queda
+        //       AUTO-RECLAMABLE durante TODA la ventana del hop 2, con el proceso vivo y
+        //       sano. Un click en el dashboard —o un barrido concurrente— mientras un
+        //       settle lento está en vuelo re-envía y paga dos veces. No hace falta
+        //       ningún crash: alcanza con que el hop 2 tarde.
+        //   (G) el veredicto del hop 2 llegó como `success:false` sin ser prueba de que
+        //       no se ejecutó ⟹ se clasifica `unequivocal` ⟹ cae en (D) y se re-envía.
+        //       Es el BLQ-ALTO del AR y vive FUERA de este archivo (en los 5 adapters):
+        //       en modo pieverse el adapter devuelve el `txHash` del facilitator
+        //       verbatim, así que un `200 {success:false, txHash:"0x…"}` nos deja un hash
+        //       de broadcast en la mano y lo tratamos como "no pasó nada"; y en
+        //       base/avalanche/tempo un HTTP 502 se aplana a `success:false`.
+        // En (B), (C), (F) y (G) este re-envío PAGA DOS VECES al seller.
         //
         // POR QUÉ NO SE ARREGLA ACÁ: falta un HECHO PERSISTIDO ("el hop 2 se intentó"),
         // y agregarlo es una decisión de diseño con costo propio. Las dos candidatas:
-        //   1. Nonce EIP-3009 DETERMINÍSTICO para el hop 2 (derivado del intentId) en
-        //      vez de `randomBytes(32)` (`kite-ozone/payment.ts` §sign y sus pares).
-        //      Es el fix ESTRUCTURAL: el token rechaza el segundo uso del mismo nonce,
-        //      así que el doble pago se vuelve imposible on-chain en vez de evitado por
-        //      convención. Misma doctrina que el `idem_key` de HU-194 ("la idempotencia
-        //      no se apoya en un guard de TypeScript"), pero con la clave viajando al
-        //      contrato en vez de a Postgres. Toca la firma de todos los adapters.
-        //   2. Lease pre-hop2 (marcar "intento en curso" ANTES de mandarlo). Cierra (B)
-        //      y (C) pero convierte (A) en revisión manual y agrega un round-trip a DB
-        //      antes de cada pago.
-        // Ninguna es un fix-pack. NO borrar este bloque sin cerrar (B) y (C).
+        //
+        //   1. Nonce DETERMINÍSTICO para el hop 2 (derivado del intentId) en vez de
+        //      `randomBytes(32)`. La idea era volver el doble pago imposible on-chain
+        //      (el token rechaza el segundo uso), misma doctrina que el `idem_key` de
+        //      HU-194 pero con la clave viajando al contrato. ⚠️ EL AR LE ENCONTRÓ DOS
+        //      AGUJEROS y hoy NO es la recomendación:
+        //        (a) NO ES EIP-3009 EN EL CAMINO VIVO. En modo `pieverse` —el DEFAULT—
+        //            la firma es un `Authorization` custom contra
+        //            `KITE_FACILITATOR_ADDRESS`, no un `TransferWithAuthorization`
+        //            contra el token. "El token rechaza el segundo uso" sólo vale para
+        //            el modo `x402`, que no es el default. En pieverse la unicidad la
+        //            tendría que garantizar el facilitator, que es un TERCERO.
+        //        (b) LE FALTA EL CAMBIO COMPAÑERO. Con nonce determinístico, el rechazo
+        //            del segundo envío llega como `success:false` ⟹ HOY eso es
+        //            `unequivocal` ⟹ el buyer se reembolsa CON EL SELLER YA PAGADO. O
+        //            sea que el nonce determinístico sin arreglar antes la clasificación
+        //            de `success:false` CONVIERTE un doble pago en un descalce peor.
+        //            ⟹ el BLQ-ALTO (entrada G) es PREREQUISITO del nonce, no un ítem
+        //            independiente.
+        //
+        //   2. Lease pre-hop2: persistir "intento en curso" ANTES de mandar el hop 2
+        //      (p.ej. escribir `resolving_settle` antes, y bajarlo a
+        //      `reconciliation_pending` sólo con un veredicto `unequivocal`). Cierra (B),
+        //      (C) y (F) —incluida la ventana del proceso vivo, que ninguna otra opción
+        //      toca— a cambio de convertir (A) en revisión manual y de un round-trip a
+        //      DB antes de cada pago.
+        //
+        // RECOMENDACIÓN ACTUAL: la 2 (lease). Con los dos agujeros de la 1 al
+        // descubierto, el lease es la única que cierra (F) sin depender de un tercero ni
+        // de arreglar antes la clasificación de `success:false`. La 1 queda como destino
+        // deseable DESPUÉS del BLQ-ALTO, y sólo si se resuelve la unicidad en pieverse.
+        //
+        // Ninguna es un fix-pack. NO borrar este bloque sin cerrar (B), (C), (F) y (G).
         //
         // 6. hop 2 DIRECTO (seam WKH-136; NO settleEscrowAware, DT-R2).
         const settle = await settlePaymentIntentOnChain({

@@ -446,7 +446,8 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
     } as any);
 
     // NO tira: el caller está en un camino de money-safety y un throw perdería el
-    // veredicto del settle.
+    // veredicto del settle. Devuelve `false` (AR BLQ-MEDIO-2): el estado NO quedó
+    // escrito, y eso ahora es un dato que el caller puede leer.
     await expect(
       recordDebitSettleStatus({
         intentId: 'intent-1',
@@ -455,7 +456,7 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
         nonce: '7',
         status: 'resolving_settle',
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
 
     expect(mockLogError).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -463,6 +464,87 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
         detail: 'INVALID_SETTLE_STATUS: resolving_settle',
       }),
       expect.stringContaining('was NOT updated'),
+    );
+  });
+
+  // ── AR BLQ-MEDIO-2: el 0-row silencioso es un modo de fallo PROPIO ──
+  //
+  // El guard de transición (migración 20260728000000) hace que un UPDATE de 0 filas sea
+  // un RESULTADO NORMAL, no un error. Con el `RETURNS void` original el caller no podía
+  // distinguir "quedó escrito" de "el guard lo rechazó y la fila SIGUE auto-reclamable",
+  // así que el candado de la HU colgaba de un write incapaz de reportar su fracaso. La
+  // propiedad afirmada es que ese caso se detecta Y se grita: si no, la fila queda
+  // auto-reclamable y el reconciliador puede re-enviar el hop 2 a ciegas.
+  it('T-198-AR: applied=false (guard rechazó el write) → false + log loud, sin error del RPC', async () => {
+    mockLogError.mockClear();
+    mockRpc.mockResolvedValue({
+      data: [{ applied: false }],
+      error: null,
+      // biome-ignore lint/suspicious/noExplicitAny: supabase rpc test double
+    } as any);
+
+    const ok = await recordDebitSettleStatus({
+      intentId: 'intent-1',
+      ownerRef: 'tenant-A',
+      keyId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      nonce: '7',
+      status: 'resolving_settle',
+    });
+
+    // NO hubo `error` del RPC y aun así el write no se aplicó: exactamente el modo de
+    // fallo que el `if (error)` NO cubría.
+    expect(ok).toBe(false);
+    expect(mockLogError).toHaveBeenCalledWith(
+      expect.objectContaining({ applied: false, status: 'resolving_settle' }),
+      expect.stringContaining('REJECTED the write'),
+    );
+  });
+
+  it('T-198-AR: applied=true → true y NINGÚN log de error', async () => {
+    // Contra-ejemplo: sin esto, loguear siempre pasaría el test de arriba y la señal
+    // dejaría de significar algo.
+    mockLogError.mockClear();
+    mockRpc.mockResolvedValue({
+      data: [{ applied: true }],
+      error: null,
+      // biome-ignore lint/suspicious/noExplicitAny: supabase rpc test double
+    } as any);
+
+    const ok = await recordDebitSettleStatus({
+      intentId: 'intent-1',
+      ownerRef: 'tenant-A',
+      keyId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      nonce: '7',
+      status: 'resolving_settle',
+    });
+
+    expect(ok).toBe(true);
+    expect(mockLogError).not.toHaveBeenCalled();
+  });
+
+  it('T-198-AR: RPC viejo (data null, sin applied) → NO confirmado (no se asume que cerró)', async () => {
+    // Orden de release inverso: el código nuevo con el RPC viejo (`RETURNS void`)
+    // devuelve `null`. Se trata como NO confirmado a propósito: preferimos un warn de
+    // más a creer que el candado cerró cuando no sabemos.
+    mockLogError.mockClear();
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: null,
+      // biome-ignore lint/suspicious/noExplicitAny: supabase rpc test double
+    } as any);
+
+    const ok = await recordDebitSettleStatus({
+      intentId: 'intent-1',
+      ownerRef: 'tenant-A',
+      keyId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      nonce: '7',
+      status: 'resolving_settle',
+    });
+
+    expect(ok).toBe(false);
+    expect(mockLogError).toHaveBeenCalledWith(
+      expect.objectContaining({ applied: null }),
+      expect.stringContaining('no `applied` flag'),
     );
   });
 });

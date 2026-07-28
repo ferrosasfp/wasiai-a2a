@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 /**
- * HU-198 — aplica `20260728000000_hu198_settle_unknown_status.sql` a la base de
- * DESARROLLO (bdwv) vía Management API. Idempotente (CREATE OR REPLACE).
+ * HU-198 — aplica LAS DOS migraciones de la HU, EN ORDEN, a la base de DESARROLLO
+ * (bdwv) vía Management API:
+ *   1. 20260728000000_hu198_settle_unknown_status.sql   (`resolving_settle` escribible)
+ *   2. 20260728010000_hu198_settle_status_applied.sql   (`applied` + MNR-4 + MNR-3)
+ * Idempotente (CREATE OR REPLACE; la 2ª hace DROP+CREATE dentro de su transacción).
  *
  * ⚠️ SOLO BDWV. A CALDZ NO SE TOCA: es la base de dinero de PRODUCCIÓN y queda para
  * el pase a mainnet. Por eso este script:
@@ -20,19 +23,30 @@
  *      (Este script usa el PAT del Management API, no la service key, así que la
  *      verificación es una red de seguridad, no el camino principal.)
  *
- * VERIFICACIÓN DE POST-ESTADO (no se asume que el apply salió bien): se LLAMA a la
- * función con un intent inexistente y se lee QUÉ error devuelve. Es un sondeo que NO
- * muta nada, porque el guard de `p_status` corre ANTES del lookup del intent:
- *   · error `INVALID_SETTLE_STATUS` con p_status='resolving_settle' ⟹ vieja versión.
- *   · error `INTENT_NOT_FOUND`      con p_status='resolving_settle' ⟹ NUEVA versión
- *     (pasó el guard de status y llegó al lookup).
- *   · error `INVALID_SETTLE_STATUS` con p_status basura ⟹ el guard sigue cerrado.
+ * VERIFICACIÓN DE POST-ESTADO (no se asume que el apply salió bien) — 4 chequeos, todos
+ * LEYENDO DE LA BASE y sin mutar nada:
+ *   (a) se LLAMA a la función con un intent inexistente y se lee QUÉ error devuelve. El
+ *       guard de `p_status` corre ANTES del lookup del intent, así que:
+ *         · `INVALID_SETTLE_STATUS` con p_status='resolving_settle' ⟹ vieja versión.
+ *         · `INTENT_NOT_FOUND`      con p_status='resolving_settle' ⟹ NUEVA versión.
+ *         · `INVALID_SETTLE_STATUS` con p_status basura ⟹ el guard sigue cerrado.
+ *   (b) `pg_get_function_result` de `record_debit_settle_status` ⟹ confirma el
+ *       `RETURNS TABLE(applied boolean)` de la 2ª migración. La sonda (a) no lo puede
+ *       ver, porque con un intent inexistente la función siempre RAISEa antes de
+ *       devolver.
+ *   (c) `pg_get_functiondef` de `claim_reconciliation` ⟹ confirma la rama refund de
+ *       MNR-4 en la función DEPLOYADA (no en el .sql del repo).
  *
  * Uso:  node scripts/apply-hu198-migration.mjs [--verify-only]
  */
 import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const REPO = '/home/ferdev/.openclaw/workspace/wasiai-a2a';
+// AR MNR-6: la raíz del repo se DERIVA de la ubicación del script. Antes era un path
+// absoluto de la máquina del autor commiteado, que rompe para cualquier otro checkout
+// (y filtra el layout local).
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 // Refs hardcodeados a propósito (ver el bloque de arriba).
 const BDWV_REF = 'bdwvrwzvsldephfibmuu'; // desarrollo — el ÚNICO destino permitido
@@ -142,58 +156,98 @@ const PROBE_UUID = '00000000-0000-0000-0000-000000000000';
 const probe = (status) =>
   `SELECT record_debit_settle_status('${PROBE_UUID}'::uuid, 'hu198-probe-owner', '${PROBE_UUID}'::uuid, 0::numeric, '${status}');`;
 
-/** Lee el estado REAL de la función por su comportamiento. No muta nada. */
+/**
+ * Lee el estado REAL de las dos migraciones. Tres sondas, ninguna muta nada:
+ *   (a) COMPORTAMIENTO de `p_status` (el guard corre ANTES del lookup del intent).
+ *   (b) TIPO DE RETORNO de `record_debit_settle_status` leído del catálogo — así se
+ *       verifica el `RETURNS TABLE(applied boolean)` de la 2ª migración, que la sonda
+ *       de comportamiento no puede ver (con un intent inexistente siempre RAISEa).
+ *   (c) el cuerpo DEPLOYADO de `claim_reconciliation` (`pg_get_functiondef`) para la
+ *       rama refund de MNR-4. Se chequea la función que está EN LA BASE, no el .sql.
+ */
 async function readPostState(label) {
   const newValue = await query(probe('resolving_settle'));
   const bogus = await query(probe('definitely_not_a_status'));
+  const retType = await query(
+    "SELECT pg_get_function_result(oid) AS r FROM pg_proc WHERE proname = 'record_debit_settle_status';",
+  );
+  const claimDef = await query(
+    "SELECT pg_get_functiondef(oid) AS d FROM pg_proc WHERE proname = 'claim_reconciliation';",
+  );
+
   const accepts = newValue.text.includes('INTENT_NOT_FOUND');
   const rejectsNew = newValue.text.includes('INVALID_SETTLE_STATUS');
   const rejectsBogus = bogus.text.includes('INVALID_SETTLE_STATUS');
+  const returnsApplied = /TABLE\(applied boolean\)/i.test(retType.text);
+  // La rama de MNR-4, tal cual quedó en la función deployada.
+  const refundCanClaimResolvingSettle =
+    /p_side\s*=\s*'refund'\s+AND\s+debit_settle_status\s*=\s*'resolving_settle'/i.test(
+      claimDef.text,
+    );
+
   console.log(`\n[post-state:${label}]`);
   console.log(
-    `  p_status='resolving_settle'          → ${accepts ? 'PASA el guard (INTENT_NOT_FOUND) ⇒ migración APLICADA' : rejectsNew ? 'RECHAZADO (INVALID_SETTLE_STATUS) ⇒ migración NO aplicada' : `inesperado: ${newValue.text.slice(0, 200)}`}`,
+    `  (a) p_status='resolving_settle'        → ${accepts ? 'PASA el guard (INTENT_NOT_FOUND) ⇒ 20260728000000 APLICADA' : rejectsNew ? 'RECHAZADO (INVALID_SETTLE_STATUS) ⇒ NO aplicada' : `inesperado: ${newValue.text.slice(0, 200)}`}`,
   );
   console.log(
-    `  p_status='definitely_not_a_status'   → ${rejectsBogus ? 'RECHAZADO (INVALID_SETTLE_STATUS) ⇒ el guard sigue cerrado' : `inesperado: ${bogus.text.slice(0, 200)}`}`,
+    `  (a) p_status='definitely_not_a_status' → ${rejectsBogus ? 'RECHAZADO ⇒ el guard sigue cerrado' : `inesperado: ${bogus.text.slice(0, 200)}`}`,
   );
-  return { accepts, rejectsBogus };
+  console.log(
+    `  (b) record_debit_settle_status returns → ${returnsApplied ? 'TABLE(applied boolean) ⇒ 20260728010000 APLICADA' : `${retType.text.slice(0, 120)} ⇒ NO aplicada`}`,
+  );
+  console.log(
+    `  (c) claim_reconciliation refund/resolving_settle → ${refundCanClaimResolvingSettle ? 'PRESENTE en la función deployada ⇒ MNR-4 cerrado' : 'AUSENTE ⇒ el refund del buyer sigue inalcanzable'}`,
+  );
+  return {
+    accepts,
+    rejectsBogus,
+    returnsApplied,
+    refundCanClaimResolvingSettle,
+  };
 }
+
+// Las dos migraciones de HU-198, EN ORDEN (la 2ª asume el guard de la 1ª).
+const MIGRATIONS = [
+  '20260728000000_hu198_settle_unknown_status.sql',
+  '20260728010000_hu198_settle_status_applied.sql',
+];
 
 const verifyOnly = process.argv.includes('--verify-only');
 
 if (!verifyOnly) {
-  const before = await readPostState('ANTES');
-  if (before.accepts) {
+  await readPostState('ANTES');
+  for (const file of MIGRATIONS) {
+    const sql = readFileSync(resolve(REPO, 'supabase', 'migrations', file), 'utf8');
+    console.log(`\n[apply] ${file} → ${TARGET_REF}`);
+    const started = Date.now();
+    const res = await query(sql);
     console.log(
-      '\n[info] La función YA acepta resolving_settle (re-run idempotente).',
+      `[apply] HTTP ${res.status} (${((Date.now() - started) / 1000).toFixed(1)}s) ${res.text.slice(0, 300)}`,
     );
-  }
-
-  const sqlPath = `${REPO}/supabase/migrations/20260728000000_hu198_settle_unknown_status.sql`;
-  const sql = readFileSync(sqlPath, 'utf8');
-  console.log(`\n[apply] ${sqlPath.split('/').pop()} → ${TARGET_REF}`);
-  const started = Date.now();
-  const res = await query(sql);
-  console.log(
-    `[apply] HTTP ${res.status} (${((Date.now() - started) / 1000).toFixed(1)}s) ${res.text.slice(0, 300)}`,
-  );
-  if (!res.ok) {
-    console.error('[FAIL] El apply falló. NO se asume nada: ver el error arriba.');
-    process.exit(1);
+    if (!res.ok) {
+      console.error('[FAIL] El apply falló. NO se asume nada: ver el error arriba.');
+      process.exit(1);
+    }
   }
 }
 
 const after = await readPostState('DESPUÉS');
-if (!after.accepts) {
-  console.error(
-    '\n[FAIL] post-estado: la función NO acepta resolving_settle. La migración no quedó aplicada.',
-  );
+const checks = [
+  [after.accepts, 'la función NO acepta resolving_settle (20260728000000)'],
+  [after.rejectsBogus, 'la función acepta un status basura (guard abierto)'],
+  [
+    after.returnsApplied,
+    'record_debit_settle_status NO devuelve applied (20260728010000)',
+  ],
+  [
+    after.refundCanClaimResolvingSettle,
+    'claim_reconciliation NO deja al refund reclamar resolving_settle (MNR-4)',
+  ],
+];
+const failed = checks.filter(([ok]) => !ok).map(([, msg]) => msg);
+if (failed.length > 0) {
+  console.error('\n[FAIL] post-estado:');
+  for (const f of failed) console.error(`  · ${f}`);
   process.exit(1);
 }
-if (!after.rejectsBogus) {
-  console.error(
-    '\n[FAIL] post-estado: la función acepta un status basura. El guard quedó abierto.',
-  );
-  process.exit(1);
-}
-console.log('\n[OK] Post-estado verificado LEYENDO DE LA BASE: acepta resolving_settle y sigue rechazando lo demás.');
+console.log('\n[OK] Post-estado verificado LEYENDO DE LA BASE: los 4 chequeos pasan.');

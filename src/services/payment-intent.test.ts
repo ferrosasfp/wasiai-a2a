@@ -128,6 +128,7 @@ vi.mock('../adapters/escrow/debit-executor.js', () => ({
 import { supabase } from '../lib/supabase.js';
 import type { CreateUptoInput } from '../types/index.js';
 import {
+  isHop2ResultUnknown,
   paymentIntentService,
   settleEscrowAware,
   settlePaymentIntentOnChain,
@@ -1732,6 +1733,30 @@ describe('WKH-191b settleEscrowAware (two-hop)', () => {
     expect(mockRecordDebitSettleStatus).not.toHaveBeenCalledWith(
       expect.objectContaining({ status: 'reconciliation_pending' }),
     );
+  });
+
+  // AR MNR-1: la DIRECCIÓN DEL DEFAULT de la decisión, candada aparte.
+  //
+  // Por el camino de integración las dos formas (`!== 'unequivocal'` y
+  // `=== 'ambiguous'`) son indistinguibles: todos los `return failed` del seam setean
+  // `failureKind`. La diferencia aparece con un veredicto AUSENTE o con un 3er valor
+  // futuro, y ahí decide dinero: el lado inseguro re-envía el hop 2 a ciegas. Sin este
+  // test, "el default cae al lado seguro" era una afirmación sin evidencia.
+  it('T-198-AR-MNR1: sólo el veredicto EXPLÍCITO `unequivocal` habilita el re-envío', () => {
+    // Único caso que autoriza el re-envío automático.
+    expect(isHop2ResultUnknown('unequivocal')).toBe(false);
+    // Ambiguo declarado → desconocido.
+    expect(isHop2ResultUnknown('ambiguous')).toBe(true);
+    // AUSENTE → desconocido (el caso que `=== 'ambiguous'` mandaba al lado peligroso).
+    expect(isHop2ResultUnknown(undefined)).toBe(true);
+    // Un 3er valor futuro → desconocido, sin que nadie tenga que acordarse de sumarlo.
+    expect(
+      isHop2ResultUnknown(
+        'some_future_verdict' as unknown as Parameters<
+          typeof isHop2ResultUnknown
+        >[0],
+      ),
+    ).toBe(true);
   });
 
   it('T-198-Escrow-Unequivocal: hop2 rechazado por el facilitator → sigue en reconciliation_pending (el re-envío ES correcto)', async () => {
