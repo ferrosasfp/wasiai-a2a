@@ -94,6 +94,18 @@ vi.mock('./budget.js', () => ({
   },
 }));
 
+// HU-194: el outbox se mockea para poder afirmar que la clave que se ENCOLA es
+// la MISMA que la del credit que falló (si divergen, el sweep duplicaría).
+const enqueueRefundMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(undefined),
+);
+vi.mock('./refund-outbox.js', () => ({
+  refundOutbox: {
+    enqueueRefund: enqueueRefundMock,
+    processRefundOutbox: vi.fn().mockResolvedValue(undefined),
+  },
+}));
+
 // WKH-44: mock fee-charge. Preservamos `ProtocolFeeError` (es una clase
 // real que el SUT usa en `instanceof`) y reemplazamos las funciones.
 vi.mock('./fee-charge.js', async () => {
@@ -1234,6 +1246,82 @@ describe('orchestrateService', () => {
       }),
       '[orchestrate.refund-failed]',
     );
+  });
+
+  // ── HU-194: la clave del refund del step-0 ────────────────
+  it('T-194-O1: refund fallido → la fila del outbox lleva la MISMA clave que el credit', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug) => wkh127Agents.find((a) => a.slug === slug) ?? null,
+    );
+    vi.mocked(composeService.compose).mockResolvedValue({
+      ...mockComposeResult,
+      success: false,
+      totalCostUsdc: 0,
+    });
+    vi.mocked(budgetService.credit).mockResolvedValue({
+      success: false,
+      error: 'REFUND_FAILED',
+    });
+    setLlmTwoAgents();
+
+    await orchestrateService.orchestrate(
+      {
+        goal: 'refund fails',
+        budget: 5.0,
+        chainId: 2368,
+        scopingKeyRow: masterKeyRow(),
+      },
+      'orch-194-o1',
+    );
+
+    const creditIdem = vi.mocked(budgetService.credit).mock.calls[0]?.[4] as {
+      idemKey: string;
+    };
+    const enqueued = enqueueRefundMock.mock.calls[0]?.[0] as {
+      idemKey: string;
+    };
+    expect(creditIdem.idemKey).toMatch(/:orchestrate-step0$/);
+    expect(enqueued.idemKey).toBe(creditIdem.idemKey);
+  });
+
+  it('T-194-O2: dos ejecuciones con el MISMO orchestrationId → claves DISTINTAS', async () => {
+    // `orchestrationId` llega en el BODY de POST /orchestrate/execute, o sea es
+    // CALLER-CONTROLLED: si la clave se derivara de él, un caller que lo repitiera
+    // haría que su segundo refund (de otro débito real) se descartara como
+    // duplicado. La base es un UUID server-side por ejecución.
+    vi.mocked(discoveryService.discover).mockResolvedValue(wkh127Discovery);
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug) => wkh127Agents.find((a) => a.slug === slug) ?? null,
+    );
+    vi.mocked(composeService.compose).mockResolvedValue({
+      ...mockComposeResult,
+      success: false,
+      totalCostUsdc: 0,
+    });
+    vi.mocked(budgetService.credit).mockResolvedValue({
+      success: true,
+      reverted: true,
+    });
+    setLlmTwoAgents();
+
+    const run = (): Promise<unknown> =>
+      orchestrateService.orchestrate(
+        {
+          goal: 'same id twice',
+          budget: 5.0,
+          chainId: 2368,
+          scopingKeyRow: masterKeyRow(),
+        },
+        'orch-194-SAME',
+      );
+    await run();
+    await run();
+
+    const calls = vi.mocked(budgetService.credit).mock.calls;
+    const a = (calls[0]?.[4] as { idemKey: string }).idemKey;
+    const b = (calls[1]?.[4] as { idemKey: string }).idemKey;
+    expect(a).not.toBe(b);
   });
 
   // T-AC9 (AC-9): x402 (no scopingKeyRow) → debit and credit 0 calls.

@@ -687,6 +687,25 @@ describe('POST /gasless/transfer — refund on failure (HU-192)', () => {
     expect(enqueueRefundMock).toHaveBeenCalledTimes(1);
   });
 
+  // ── HU-194: la clave del credit y la del outbox tienen que COINCIDIR ──
+  //
+  // El agujero: el credit COMMITEA y su respuesta se pierde → el `catch` encola
+  // → el sweep reintenta → doble crédito. La dedup DB-level sólo funciona si la
+  // clave que viajó al credit es EXACTAMENTE la que viaja al outbox.
+  it('T-194-G1: credit tira → la fila del outbox lleva la MISMA clave que el credit', async () => {
+    mockGaslessStatus.mockResolvedValue({ funding_state: 'unfunded' });
+    budgetMock.credit.mockRejectedValue(new Error('socket hang up'));
+
+    await post({ 'x-a2a-key': TEST_KEY });
+
+    const creditIdem = mockCredit.mock.calls[0]?.[4] as { idemKey: string };
+    const enqueued = enqueueRefundMock.mock.calls[0]?.[0] as {
+      idemKey: string;
+    };
+    expect(creditIdem.idemKey).toBeTruthy();
+    expect(enqueued.idemKey).toBe(creditIdem.idemKey);
+  });
+
   // ── T-192-10: el credit tira → señal, y el response no se rompe ──
   it('T-192-10: credit tira → 503 igual (best-effort) + entry en el outbox', async () => {
     mockGaslessStatus.mockResolvedValue({ funding_state: 'unfunded' });

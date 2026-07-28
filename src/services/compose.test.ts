@@ -3253,6 +3253,69 @@ describe('composeService.compose — WKH-130 adaptive input-retry', () => {
     expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
   });
 
+  // HU-194 (T-194-D1): el step con retry fallido produce DOS refunds legítimos —
+  // el del primer débito y el del débito del retry — y sus claves de idempotencia
+  // tienen que ser DISTINTAS. Si se colapsaran, la dedup DB-level descartaría el
+  // segundo crédito y el caller perdería dinero REAL (un débito sin devolver).
+  it('T-194-D1: refund del 1er débito y del débito del retry → claves de idempotencia DISTINTAS', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    mockFetchOk();
+    mockFetchError(422, FIELD_ERR_BODY); // 1er intento del step 1 → refund d1
+    mockFetchError(500); // el retry también falla → refund d2
+    mockRegen.mockResolvedValueOnce({ q: 'x', senderName: 'Ana' });
+
+    await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: { q: 'x' } },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    // Dos débitos reembolsados = dos créditos reales.
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(2);
+    const first = mockCreditWithDest.mock.calls[0]?.[5] as { idemKey: string };
+    const second = mockCreditWithDest.mock.calls[1]?.[5] as { idemKey: string };
+    expect(first.idemKey).toBeTruthy();
+    expect(second.idemKey).toBeTruthy();
+    expect(first.idemKey).not.toBe(second.idemKey);
+    // Y los slots dicen CUÁL refund es cada uno (auditable en la DB).
+    expect(first.idemKey.endsWith(':d1')).toBe(true);
+    expect(second.idemKey.endsWith(':d2')).toBe(true);
+  });
+
+  // HU-194 (T-194-D2): dos EJECUCIONES del mismo pipeline son dos débitos y dos
+  // refunds legítimos → claves distintas (el `composeRunId` es por ejecución).
+  it('T-194-D2: dos ejecuciones del mismo step → claves de idempotencia DISTINTAS', async () => {
+    const a1 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a2 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a1, corridor: a2 });
+    const run = async (): Promise<void> => {
+      mockFetchOk();
+      mockFetchError(500);
+      await composeService.compose({
+        steps: [
+          { agent: 'kyc', input: {} },
+          { agent: 'corridor', input: { q: 'x' } },
+        ],
+        scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+        chainId: 2368,
+        a2aKey: 'wasi_a2a_test',
+      });
+    };
+    await run();
+    await run();
+
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(2);
+    const a = mockCreditWithDest.mock.calls[0]?.[5] as { idemKey: string };
+    const b = mockCreditWithDest.mock.calls[1]?.[5] as { idemKey: string };
+    expect(a.idemKey).not.toBe(b.idemKey);
+  });
+
   // AC-9 / T-OBS: telemetría — flags retried / retry_failed + log.
   it('T-OBS: success → metadata.retried; fail → metadata.retry_failed + [compose.retry]', async () => {
     const trackSpy = vi.mocked(eventService.track);

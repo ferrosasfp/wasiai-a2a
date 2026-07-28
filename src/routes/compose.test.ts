@@ -1012,6 +1012,9 @@ describe('compose route — AUDIT A1 step-0 refund on failure', () => {
     expect(mockCredit).toHaveBeenCalledTimes(1);
     const call = mockCredit.mock.calls[0]!;
     expect(call[2]).toBeCloseTo(0.3, 6);
+    // HU-194: el refund del step-0 lleva la clave de su propio slot. Si usara el
+    // slot de otro refund de la misma request, uno de los dos se descartaría.
+    expect(call[4]?.idemKey).toMatch(/:compose-step0$/);
     expect(mockCreditWithDest).not.toHaveBeenCalled();
   });
 
