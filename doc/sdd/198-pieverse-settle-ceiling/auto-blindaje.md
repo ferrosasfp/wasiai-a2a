@@ -1,5 +1,53 @@
 # Auto-Blindaje — HU-198 (techo de los hops pieverse + estado `unknown`)
 
+### [2026-07-28] Wave 3 — asumí la dirección del fallo del `instanceof` sin verificarla
+
+- **Error**: al reportar el `instanceof` de `GaslessTransferError` como el mismo bug,
+  acepté sin verificar que su consecuencia fuera "reembolsar algo que quizás se movió"
+  (double-pay). Es al revés: `classifyGaslessFailure` **defaultea a `'unknown'`** y
+  sólo reembolsa con `'not-moved'` (`routes/gasless.ts`), así que un `instanceof` roto
+  produce un reembolso **OMITIDO**, no uno indebido. Severidad real: under-refund
+  (plata que le debemos al caller, en silencio), NO double-pay.
+- **Causa raíz**: leí la forma del bug (idéntica) y extrapolé la consecuencia sin leer
+  el default del consumidor. La dirección de un fail-safe no se deduce de la forma del
+  error: se lee en el call-site que decide.
+- **Fix**: verifiqué el default en el código antes de escribir el fix y documenté la
+  dirección REAL en el docstring de `readGaslessValueDisposition` (con el "es lo
+  contrario de lo que parece" explícito, para que el próximo no repita la inferencia).
+  El `?? 'unknown'` conserva el fail-safe de HU-192 byte-idéntico; mutarlo a
+  `?? 'not-moved'` pone rojo el T-192-6 preexistente.
+- **Aplicar en**: cualquier reporte de severidad de un bug de clasificación. La
+  pregunta obligatoria es "¿a qué defaultea el consumidor?", no "¿qué tipo de error
+  es?". Dos bugs de la MISMA forma pueden tener consecuencias opuestas.
+
+### [2026-07-28] Wave 3 — `getLogger` devuelve un child nuevo: no se puede espiar la instancia
+
+- **Error**: escribí el test del log nuevo con `vi.spyOn(logger, 'error')` y no había
+  ningún `logger` importable; el spy tampoco habría funcionado.
+- **Causa raíz**: `lib/logger.ts` → `getLogger(name)` hace `rootLogger.child({module})`,
+  o sea devuelve una instancia NUEVA en cada llamada. El módulo bajo prueba capturó su
+  child en el import (`const log = getLogger(...)`), así que ni espiar `rootLogger` ni
+  espiar un child posterior alcanza a ese objeto.
+- **Fix**: `vi.mock('../../lib/logger.js')` con una fábrica cuyo `getLogger` devuelve
+  siempre el mismo doble con un spy compartido.
+- **Aplicar en**: todo test que quiera afirmar CONTENIDO de un log. Hay logs que son la
+  única señal de un modo de fallo silencioso (este mismo: el
+  `INVALID_SETTLE_STATUS` cuando falta la migración), así que "no se puede testear el
+  log" no es una excusa aceptable ahí.
+
+### [2026-07-28] Wave 3 — un doble que ignora sus argumentos hace vacuo el test
+
+- **Error**: quise afirmar por qué estados filtra `driftCheck` y el doble de supabase en
+  `reconciliation.test.ts` tenía `in: () => b` — descarta los argumentos. Un test escrito
+  contra ese doble habría pasado con CUALQUIER lista de estados, incluida la vieja.
+- **Causa raíz**: el doble se escribió para encadenar el builder, no para observarlo. Es
+  la misma clase de vacuidad que el caso de los 3669 tests verdes con un guard borrado.
+- **Fix**: capturar `{col, values}` de cada `.in()` y exponer `settleStatusFilter()`.
+  Mutación probada: sacar `resolving_settle` de `DRIFT_ACCOUNTED_STATUSES` pone rojo el
+  test; antes del cambio al doble, no lo habría puesto.
+- **Aplicar en**: antes de afirmar sobre un argumento, verificar que el doble lo GUARDE.
+  Si el doble lo tira, el test es decorativo.
+
 ### [2026-07-28] Wave 2 — `instanceof` para una decisión de dinero se cae entre registros de módulos
 
 - **Error**: clasifiqué el settle con `e instanceof FacilitatorSettleError` en
