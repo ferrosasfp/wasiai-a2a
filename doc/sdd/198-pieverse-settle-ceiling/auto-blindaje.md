@@ -28,6 +28,22 @@
   se movió). Regla: para leer un campo de un error a través de un límite de módulo, un
   guard estructural, nunca `instanceof` solo.
 
+### [2026-07-28] Verificación — corrí `tsc` antes de escribir el último test
+
+- **Error**: reporté "tsc limpio" en la wave 2 y después agregué
+  `middleware/x402.settle-unknown.test.ts`. El `tsc --noEmit` final falló:
+  `TS2379` por `exactOptionalPropertyTypes` (pushear `{ msg: undefined }` a un
+  `msg?: string` no es lo mismo que omitir la propiedad). Biome y `vitest` pasaban
+  igual, así que sin el tsc COMPLETO al final el error se iba al commit.
+- **Causa raíz**: dos cosas. (1) Verifiqué en el orden equivocado: el typecheck tiene
+  que ser lo ÚLTIMO, después del último archivo escrito, no una vez por wave. (2) La
+  suite y el linter no cubren este error: vitest transpila sin type-check.
+- **Fix**: spread condicional (`...(msg === undefined ? {} : { msg })`) + re-correr los
+  3 gates DESPUÉS del último cambio.
+- **Aplicar en**: es la misma lección que ya está en memoria de WKH-196 (`npx tsc
+  --noEmit` completo, no sólo `npm run build`, que excluye tests). Corolario nuevo: y
+  además al FINAL. Un "verde" de wave intermedia no es evidencia del estado del commit.
+
 ### [2026-07-28] Wave 2 — el guard exhaustivo de skip-codes hizo su trabajo
 
 - **Error**: agregué `SETTLE_UNKNOWN` a `DownstreamSkipCode` y `T-PUB-1`

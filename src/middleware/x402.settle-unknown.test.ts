@@ -89,7 +89,12 @@ function makeCapturingLogger(): {
   const errors: LogCall[] = [];
   const record = (obj: unknown, msg?: string) => {
     if (obj && typeof obj === 'object') {
-      errors.push({ obj: obj as Record<string, unknown>, msg });
+      // `exactOptionalPropertyTypes`: un `msg: undefined` EXPLÍCITO no es lo mismo
+      // que la propiedad ausente, así que se omite en vez de setearla undefined.
+      errors.push({
+        obj: obj as Record<string, unknown>,
+        ...(msg === undefined ? {} : { msg }),
+      });
     }
   };
   const logger = {
