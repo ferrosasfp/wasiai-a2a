@@ -77,19 +77,41 @@ const mockGetPaymentAdapter = vi.fn((chainKey?: string) =>
   chainKey === 'base-sepolia' ? baseAdapter : kiteAdapter,
 );
 
-vi.mock('../adapters/registry.js', () => ({
-  getPaymentAdapter: (chainKey?: string) => mockGetPaymentAdapter(chainKey),
-  // Simulate a registry with kite-ozone-testnet + base-sepolia initialized.
-  getAdaptersBundle: (chainKey?: string) => {
-    if (chainKey === undefined) return { chainConfig: { chainId: 2368 } };
-    if (chainKey === 'base-sepolia') return { chainConfig: { chainId: 84532 } };
-    if (chainKey === 'kite-ozone-testnet')
-      return { chainConfig: { chainId: 2368 } };
-    return undefined; // e.g. avalanche-fuji → recognised but not initialized
-  },
-  getInitializedChainKeys: () => ['kite-ozone-testnet', 'base-sepolia'],
-  getDefaultChainKey: () => 'kite-ozone-testnet',
-}));
+// ⚠️ HU-204 — LÍMITE DE ESTE ARCHIVO, documentado a propósito.
+// Al moquear el registry ENTERO, `getPaymentAdapter` acá es un `vi.fn()` que
+// nunca lanza, así que el throw non-EVM real (`registry.ts:getPaymentAdapter`)
+// es INALCANZABLE desde este archivo — por eso el 500 de `x-payment-chain:
+// solana-devnet` convivió con la suite en verde. Los dos tests "de Solana" de
+// abajo (`solana-mainnet`) NO cubren ese caso: ese slug no existe en
+// `SLUG_ALIASES`, así que ejercitan el camino "slug irreconocible → 400".
+// El caso REAL vive en `x402.non-evm-inbound.test.ts`, con el registry SIN
+// moquear. No agregar acá un bundle Solana falso: daría una cobertura que este
+// harness no puede sostener.
+//
+// `acceptsInboundPayment` se toma del módulo real por el mismo motivo: es la
+// regla del guard y un stub podría mentir.
+const EVM_PAYMENT = { vmFamily: 'evm' as const };
+vi.mock('../adapters/registry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../adapters/registry.js')>();
+  return {
+    acceptsInboundPayment: actual.acceptsInboundPayment,
+    getInboundPaymentChainKeys: () => ['kite-ozone-testnet', 'base-sepolia'],
+    getPaymentAdapter: (chainKey?: string) => mockGetPaymentAdapter(chainKey),
+    // Simulate a registry with kite-ozone-testnet + base-sepolia initialized.
+    getAdaptersBundle: (chainKey?: string) => {
+      if (chainKey === undefined)
+        return { chainConfig: { chainId: 2368 }, payment: EVM_PAYMENT };
+      if (chainKey === 'base-sepolia')
+        return { chainConfig: { chainId: 84532 }, payment: EVM_PAYMENT };
+      if (chainKey === 'kite-ozone-testnet')
+        return { chainConfig: { chainId: 2368 }, payment: EVM_PAYMENT };
+      return undefined; // e.g. avalanche-fuji → recognised but not initialized
+    },
+    getInitializedChainKeys: () => ['kite-ozone-testnet', 'base-sepolia'],
+    getDefaultChainKey: () => 'kite-ozone-testnet',
+  };
+});
 
 import { buildEoaPaymentHeader } from '../__tests__/fixtures/passport-shape.js';
 import {

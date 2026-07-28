@@ -491,6 +491,40 @@ export function getDefaultChainKey(): ChainKey | null {
 }
 
 /**
+ * ¿Este bundle acepta cobro x402 de ENTRADA (caller → gateway)?
+ *
+ * El rail de un bundle NO es simétrico. El leg de SALIDA (gateway → agente) es
+ * VM-agnóstico: `settle()` firma con la wallet DEL OPERADOR, así que sirve para
+ * pagarle a un agente en cualquier familia (es lo que hace el rail Solana hoy).
+ * El leg de ENTRADA es otra cosa: el caller firma una autorización EIP-3009 que
+ * el gateway presenta al facilitator, y todo ese camino
+ * (`buildX402Response` → `resolvePaymentRequirements` → `verify` → `settle`)
+ * pasa por `getPaymentAdapter()`, que es EVM-only POR DISEÑO (ver su docstring:
+ * lee `getToken()` / `sign()` / `chainId`). Un adapter Solana ahí no es "un rail
+ * a medio hacer": es la mitad que nunca existió.
+ *
+ * Esta es la ÚNICA definición de la asimetría. La consumen el guard del
+ * middleware x402 (que corta con 400 antes de tocar `getPaymentAdapter`) y
+ * `GET /capabilities` (que la publica), para que no puedan divergir.
+ */
+export function acceptsInboundPayment(bundle: AdaptersBundle): boolean {
+  return bundle.payment.vmFamily === 'evm';
+}
+
+/**
+ * Chains inicializadas que SÍ aceptan cobro de entrada. Es la lista accionable
+ * que se le devuelve al caller cuando pidió cobrar en una chain outbound-only:
+ * sale del registry vivo, así que no puede quedar desactualizada respecto de la
+ * config real del proceso.
+ */
+export function getInboundPaymentChainKeys(): ChainKey[] {
+  return getInitializedChainKeys().filter((key) => {
+    const bundle = _bundles.get(key);
+    return bundle !== undefined && acceptsInboundPayment(bundle);
+  });
+}
+
+/**
  * TEST-ONLY — clears the registry state so each test can call
  * `initAdapters()` again with different env vars. CD-17.
  */
