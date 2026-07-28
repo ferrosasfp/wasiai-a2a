@@ -28,7 +28,7 @@ It's the first **TRUE cross-chain agent payment system**: pay one chain, fan-out
 | A2A orchestrator | https://wasiai-a2a-production.up.railway.app | ✅ live |
 | Multi-chain facilitator | https://wasiai-facilitator-production.up.railway.app | ✅ live, breakers CLOSED |
 
-All 3 services share the **same production database** (`caldzjhjgctpgodldqav` Supabase prod).
+All 3 services share the **same production database** (Supabase prod project).
 
 ---
 
@@ -111,7 +111,7 @@ Proxy overhead vs directo Railway: **+3s p50** (24.2s vs 21.1s baseline).
                     │ On-chain Kite + Avalanche │
                     └──────────────────────────┘
 
-ALL services share: caldzjhjgctpgodldqav (Supabase prod DB)
+ALL services share: the same Supabase prod DB project
 ```
 
 ### Why this matters
