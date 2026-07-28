@@ -167,6 +167,15 @@ overloads; es el patrón que ya usó
 para agregar el `RETURNS INT`. Los cuerpos se recrean idénticos salvo el bloque
 de claim, y el `_down.sql` restaura las firmas anteriores verbatim.
 
+Verdicto del preflight del repo (`node scripts/migrate-preflight.mjs <file>`, sin
+`SHADOW_DATABASE_URL` → sólo análisis estático, cero conexión a ninguna base):
+
+- UP: `[PASS] Pre-flight OK — safe to apply` (10 findings MEDIUM, todos
+  GRANT/REVOKE del hardening que ya usan los RPC hermanos).
+- DOWN: `[BLOCKED]` por los 3 HIGH esperables de un rollback (`DROP INDEX`,
+  `DROP COLUMN`, `DROP TABLE`). Es el archivo de reversión; su header explica que
+  antes conviene volcar `a2a_refund_applications` a CSV.
+
 El índice único del outbox es **PARCIAL** (`WHERE idem_key IS NOT NULL`): no puede
 fallar por datos preexistentes (todos NULL) ni por duplicados históricos. Por eso
 no se usa `CREATE UNIQUE INDEX CONCURRENTLY` (no corre dentro del bloque
