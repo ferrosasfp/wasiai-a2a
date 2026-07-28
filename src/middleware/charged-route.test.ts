@@ -267,6 +267,7 @@ describe('chargedRoute (HU-193)', () => {
                 'input-field',
                 () => ((input as unknown as Record<string, unknown>).body = {}),
               ],
+              ['setPrototypeOf', () => Object.setPrototypeOf(body, null)],
             ] as Array<[string, () => unknown]>) {
               try {
                 mutate();
@@ -299,6 +300,7 @@ describe('chargedRoute (HU-193)', () => {
         'params:BLOCKED',
         'query:BLOCKED',
         'input-field:BLOCKED',
+        'setPrototypeOf:BLOCKED',
       ]);
       // LA aserción: el handler ve el body ORIGINAL, sin `injected` ni `sneaky`.
       expect(res.statusCode).toBe(200);
