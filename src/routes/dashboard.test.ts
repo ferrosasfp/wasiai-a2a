@@ -315,6 +315,7 @@ describe('WKH-191c reconciliation admin routes', () => {
         finalAmountUsd: '2.0',
         owner_ref: 'tenant-A',
         debit_settle_status: 'reconciliation_pending',
+        hop2_attempted_at: null,
       },
     ]);
     mockDriftCheck.mockResolvedValue([
@@ -339,6 +340,42 @@ describe('WKH-191c reconciliation admin routes', () => {
     expect(body.pending).toHaveLength(1);
     expect(body.drift).toHaveLength(1);
     expect(body.drift[0].exceedsThreshold).toBe(true);
+    await app.close();
+  });
+
+  // ── HU-202: la edad del intento de hop 2 tiene que LLEGAR al operador ──
+  //
+  // El service la calcula, pero si el endpoint la recorta el operador vuelve a no poder
+  // distinguir un settle EN VUELO (2 segundos) de un hop 2 parado (40 minutos): las dos
+  // son `resolving_settle`. Un candado sobre el CONTRATO del endpoint, no sobre el
+  // service — es lo único que el panel consume.
+  it('T-202-ROUTE: GET /api/reconciliation expone `hop2_attempted_at` en cada fila pendiente', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
+    mockListPending.mockResolvedValue([
+      {
+        intent_id: 'i1',
+        key_id: 'k1',
+        nonce: '7',
+        debit_hop1_tx_hash: '0xabc',
+        finalAmountUsd: '2.0',
+        owner_ref: 'tenant-A',
+        debit_settle_status: 'resolving_settle',
+        hop2_attempted_at: '2026-07-29T10:00:00.000Z',
+      },
+    ]);
+    mockDriftCheck.mockResolvedValue([]);
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/reconciliation',
+      headers: { 'x-admin-token': 'secret' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().pending[0].hop2_attempted_at).toBe(
+      '2026-07-29T10:00:00.000Z',
+    );
     await app.close();
   });
 

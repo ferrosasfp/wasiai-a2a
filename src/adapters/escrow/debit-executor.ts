@@ -263,6 +263,19 @@ export async function recordDebitHop1(args: {
  * `resolving_settle` para el hop 2 de resultado DESCONOCIDO: es el estado que el
  * `claim_reconciliation` NO reclama sin tx previa, así que el reconciliador no
  * re-envía a ciegas un pago que pudo haberse hecho (ver `settleEscrowAware`).
+ *
+ * HU-202 — ESTA FUNCIÓN ES EL LEASE DEL HOP 2, no sólo un registro de estado. Desde la
+ * migración 20260729000000 el RPC además escribe `debit_hop2_attempted_at`:
+ *   · `resolving_settle`       → stamp = now()  ⟹ **TOMA** el lease
+ *   · `reconciliation_pending` → stamp = NULL   ⟹ **LIBERA** el lease
+ *   · `settled`                → stamp intacto  (auditoría del terminal)
+ * El stamp es un guard INDEPENDIENTE del status: el lado settle del claim no reclama una
+ * fila estampada sin `debit_resolution_tx_hash`, cualquiera sea su `debit_settle_status`.
+ *
+ * ⚠️ EL BOOLEANO QUE DEVUELVE GOBIERNA DINERO. `false` significa "el hecho NO quedó
+ * persistido", y el caller que está por mandar el hop 2 tiene PROHIBIDO mandarlo igual:
+ * sin el lease escrito, la fila sigue auto-reclamable y el reconciliador puede re-enviar
+ * el mismo pago en paralelo. Descartar este retorno re-abre el doble pago.
  */
 export async function recordDebitSettleStatus(args: {
   intentId: string;

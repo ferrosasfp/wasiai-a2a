@@ -555,6 +555,15 @@ export async function settlePaymentIntentOnChain(params: {
  * ANTES de hop 2; si hop 2 falla, se marca reconciliation-pending y se REMAPEA el
  * `failureKind` a `ambiguous` (los fondos del buyer ya salieron on-chain → un refund
  * off-chain sería doble-crédito). reconciliation-pending NUNCA reembolsa.
+ *
+ * HU-202 — LEASE DEL HOP 2 (cierra TD-198-01 B/C/F/G): entre el hop 1 y el hop 2 se
+ * persiste "voy a intentar el hop 2" (`resolving_settle` + `debit_hop2_attempted_at`), y
+ * el resultado después. Mientras el lease está tomado, `claim_reconciliation` NO reclama
+ * la fila por el lado settle ⟹ ni un barrido del reconciliador ni un click en el
+ * dashboard pueden re-enviar el hop 2 en paralelo. El lease se LIBERA sólo con el
+ * veredicto `unequivocal` (probado que no se ejecutó), que es lo que mantiene vivo el
+ * re-envío automático legítimo. Si el lease no se puede persistir, el hop 2 NO SE MANDA
+ * (fail-closed): la fila queda como el caso (A) y el reconciliador la paga sola.
  */
 export async function settleEscrowAware(params: {
   intentId: string;
@@ -644,7 +653,59 @@ export async function settleEscrowAware(params: {
       hop1TxHash = persisted ?? o1.txHash;
     }
 
-    // 5. Hop 2: el seam WKH-136 SIN cambios (operador → seller).
+    // 5. LEASE DEL HOP 2 (HU-202) — persistir "voy a intentar el hop 2" ANTES de
+    //    intentarlo. Cierra TD-198-01 (B, C, F, G).
+    //
+    // EL AGUJERO QUE CIERRA, Y POR QUÉ NO NECESITA QUE NADA SE CAIGA: `recordDebitHop1`
+    // deja la fila en `hop1_confirmed`, y el `WHERE` de `claim_reconciliation` acepta ese
+    // estado para el lado SETTLE. Sin esta escritura la fila queda AUTO-RECLAMABLE durante
+    // TODA la ventana del hop 2 (sign + `/settle` con techo de 30s + re-verify), así que un
+    // click en `POST /dashboard/api/reconciliation/:id/resolve` —o un barrido concurrente—
+    // mientras un settle lento NORMAL está en vuelo re-envía el hop 2 y PAGA DOS VECES al
+    // seller, con este proceso vivo y sano.
+    //
+    // NO ES UN MECANISMO NUEVO: el reconciliador ya hace exactamente esto con su propio
+    // re-envío (su `claim_reconciliation` flipea a `resolving_settle` ANTES de mandar el
+    // hop 2 — o sea, el claim ES el lease). Acá se le da la misma disciplina al camino que
+    // paga en el 99% de los casos.
+    //
+    // ⚠️ FAIL-CLOSED CON COSTO CERO, Y SE PUEDE DEMOSTRAR: si el lease NO se toma, NO se
+    // manda el hop 2. La fila queda en `hop1_confirmed` y SIN el stamp del hop 2, que es
+    // exactamente el caso (A) de TD-198-01 —"murió después del hop 1 y antes de intentar el
+    // hop 2"—, el único donde el re-envío automático es demostrablemente correcto: nada
+    // salió, el seller no cobró, y el reconciliador lo va a pagar solo. O sea que abortar
+    // acá NO deja plata parada: la deriva al camino que sí sabe resolverla.
+    //
+    // Bonus: dos `settleEscrowAware` concurrentes sobre el mismo intent (hoy los dos mandan
+    // hop 2) pasan a que sólo uno tome el lease — el guard de transición del RPC hace que el
+    // segundo vea `applied=false`.
+    const leaseHeld = await recordDebitSettleStatus({
+      intentId,
+      ownerRef,
+      keyId,
+      nonce: row.debit_nonce,
+      status: 'resolving_settle',
+    });
+    if (!leaseHeld) {
+      // `recordDebitSettleStatus` ya logueó el HECHO (error del RPC / guard rechazó / sin
+      // `applied`) con el estado real de la fila. Acá se loguea la CONSECUENCIA, que es la
+      // que el operador necesita: el hop 2 NO se mandó, y por qué eso está bien.
+      log.warn(
+        { intentId, keyId, hop1TxHash },
+        'hop2 NOT attempted: the pre-hop2 lease could not be persisted. NOTHING was sent to the seller, so nothing can be double-paid; the row stays auto-claimable (case A) and the reconciler will pay the seller. The buyer is NOT refunded on purpose: hop1 already moved their funds on-chain.',
+      );
+      return {
+        status: 'failed',
+        txHash: null,
+        finalAmountUsd,
+        // hop 1 ya movió fondos del buyer → JAMÁS `unequivocal` (sería refund off-chain =
+        // doble-crédito). Mismo remap que la rama de hop2-failed (CD-S4).
+        failureKind: 'ambiguous',
+        error: `RECONCILE-ESCROW: hop1=${hop1TxHash} hop2 NOT attempted (hop2 lease not persisted)`,
+      };
+    }
+
+    // 6. Hop 2: el seam WKH-136 SIN cambios (operador → seller).
     const o2 = await settlePaymentIntentOnChain(base);
     if (o2.status === 'settled') {
       await recordDebitSettleStatus({
@@ -693,14 +754,45 @@ export async function settleEscrowAware(params: {
       // NO se inventó un estado nuevo: `resolving_settle` ya existe en el CHECK y en
       // el índice `idx_debit_sig_resolving` desde 191c. Lo único que hizo falta fue
       // dejar que `record_debit_settle_status` lo escriba (migración de esta HU).
+      //
+      // HU-202 — CON EL LEASE, ESTA RAMA SÓLO TIENE QUE **LIBERAR**, NUNCA RE-AFIRMAR.
+      // La fila YA está en `resolving_settle` desde antes del hop 2 (el lease), así que el
+      // caso desconocido no necesita ninguna escritura: el estado seguro ya es el vigente.
+      // La única escritura que queda es la del veredicto `unequivocal`, que BAJA la fila a
+      // `reconciliation_pending` y limpia el stamp del hop 2 ⟹ vuelve a ser auto-reclamable
+      // ⟹ el reconciliador re-envía. Sin esa liberación, el rechazo NORMAL del facilitator
+      // (caso D) dejaría al seller sin cobrar automáticamente, que es la sobre-corrección
+      // que este fix tiene PROHIBIDA.
       const unknownHop2 = isHop2ResultUnknown(o2.failureKind);
-      await recordDebitSettleStatus({
-        intentId,
-        ownerRef,
-        keyId,
-        nonce: row.debit_nonce,
-        status: unknownHop2 ? 'resolving_settle' : 'reconciliation_pending',
-      });
+      if (unknownHop2) {
+        // Sin escritura A PROPÓSITO. Re-escribir `resolving_settle` acá sería un no-op que
+        // el guard de transición del RPC rechaza (la fila ya está en ese estado) ⟹
+        // `applied=false` ⟹ un `log.error` de alarma en el camino NORMAL de un settle
+        // ambiguo. Una alerta que suena cuando todo funciona como se diseñó enseña a
+        // ignorarla, y es la que tiene que sonar cuando el candado falla de verdad.
+        log.warn(
+          { intentId, keyId, hop1TxHash },
+          'hop2 result UNKNOWN: the pre-hop2 lease is KEPT (resolving_settle without a resolution tx). The reconciler will NOT resend hop2 blind. Check the chain for a hop2 disbursement to the seller before resolving.',
+        );
+      } else {
+        const released = await recordDebitSettleStatus({
+          intentId,
+          ownerRef,
+          keyId,
+          nonce: row.debit_nonce,
+          status: 'reconciliation_pending',
+        });
+        if (!released) {
+          // El lease quedó tomado sobre un hop 2 que PROBADAMENTE no pagó. No hay riesgo de
+          // doble pago (el reconciliador no re-envía una fila leaseada), pero el seller no
+          // va a cobrar solo hasta que alguien la resuelva. Es el costo de la
+          // sobre-corrección, y tiene que ser visible en vez de silencioso.
+          log.error(
+            { intentId, keyId, hop1TxHash },
+            'hop2 lease NOT released after an unequivocal failure: the seller will NOT be paid automatically until a human resolves this intent. No double-payment risk (the leased row is not auto-claimable), but this row is money owed to the seller sitting still.',
+          );
+        }
+      }
       return {
         status: 'failed',
         txHash: null,
