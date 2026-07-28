@@ -21,7 +21,7 @@
  * `settle` del adapter (la tx on-chain ES el cobro, así que "settle NO fue
  * llamado" es la aserción de dinero). Corre el middleware de pago REAL.
  *
- * Naming: T-NCT-01..T-NCT-20.
+ * Naming: T-NCT-01..T-NCT-25.
  */
 
 import crypto from 'node:crypto';
@@ -688,6 +688,116 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
     expect(creditSessionMock).toHaveBeenCalledWith('s1', 'o1', 'k1', 2368, 1);
     expect(creditMock).not.toHaveBeenCalled();
     expect(budgetState.balance).toBe(before);
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // (C-bis) RESIDUO 500 — el service lanza (fix-pack BLQ-BAJO-1)
+  // ══════════════════════════════════════════════════════════
+  // El AR probó que los CINCO handlers cobraban y NO devolvían cuando el service
+  // lanzaba: `POST /tasks`, `GET /tasks`, `GET /tasks/:id`, `PATCH /:id/status`
+  // y `PATCH /:id` → `500 debit=1 credit=0 bal=9`. El inventario original sólo
+  // declaraba dos. Ahora cuatro reembolsan y el único que se queda con el débito
+  // es el `create`, por ambigüedad de estado (declarado en INTEGRATION.md §5.1).
+
+  it('T-NCT-21: GET /tasks con el read fallando → 500 y el balance queda igual', async () => {
+    const before = budgetState.balance;
+    mockList.mockRejectedValueOnce(new Error('Failed to list tasks: db down'));
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/tasks',
+      headers: KEY_HEADER,
+    });
+
+    // Es una LECTURA: no escribió nada y no entregó nada → no hay ambigüedad de
+    // estado que proteger, así que el $1 vuelve.
+    expect(debitMock).toHaveBeenCalledTimes(1);
+    expect(creditMock).toHaveBeenCalledTimes(1);
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(budgetState.balance).toBe(before);
+    expect(res.statusCode).toBe(500); // el status NO cambia
+  });
+
+  it('T-NCT-22: GET /tasks/:id con el read fallando → 500 y el balance queda igual', async () => {
+    const before = budgetState.balance;
+    mockGet.mockRejectedValueOnce(
+      new Error(`Failed to get task '${UUID}': db down`),
+    );
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/tasks/${UUID}`,
+      headers: KEY_HEADER,
+    });
+
+    expect(debitMock).toHaveBeenCalledTimes(1);
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(budgetState.balance).toBe(before);
+    expect(res.statusCode).toBe(500);
+  });
+
+  it('T-NCT-23: PATCH /:id/status con un fallo genérico → 500 y el balance queda igual', async () => {
+    const before = budgetState.balance;
+    mockUpdateStatus.mockRejectedValueOnce(
+      new Error('Failed to update task status: db down'),
+    );
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/tasks/${UUID}/status`,
+      headers: KEY_HEADER,
+      payload: { status: 'working' },
+    });
+
+    expect(debitMock).toHaveBeenCalledTimes(1);
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(budgetState.balance).toBe(before);
+    expect(res.statusCode).toBe(500);
+  });
+
+  it('T-NCT-24: PATCH /:id (append) con un fallo genérico → 500 y el balance queda igual', async () => {
+    const before = budgetState.balance;
+    mockAppend.mockRejectedValueOnce(
+      new Error('Failed to append to task: db down'),
+    );
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/tasks/${UUID}`,
+      headers: KEY_HEADER,
+      payload: { messages: [{ role: 'user' }] },
+    });
+
+    expect(debitMock).toHaveBeenCalledTimes(1);
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(budgetState.balance).toBe(before);
+    expect(res.statusCode).toBe(500);
+  });
+
+  it('T-NCT-25 (decisión declarada): POST /tasks con el insert fallando → 500 y NO se reembolsa', async () => {
+    // NO es un olvido: si el INSERT commiteó y el fallo fue al responder, la task
+    // EXISTE y el caller la puede listar y usar. Reembolsar regalaría un recurso
+    // entregado (lección de HU-192). Este test CONGELA la decisión: si alguien
+    // agrega el refund, falla y hay que actualizar el contrato público
+    // (`doc/INTEGRATION.md` §5.1) junto con el código.
+    const before = budgetState.balance;
+    mockCreate.mockRejectedValueOnce(
+      new Error('Failed to create task: db down'),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/tasks',
+      headers: KEY_HEADER,
+      payload: { messages: [{ role: 'user' }] },
+    });
+
+    expect(debitMock).toHaveBeenCalledTimes(1);
+    expect(creditMock).not.toHaveBeenCalled();
+    expect(creditDelegationMock).not.toHaveBeenCalled();
+    expect(creditSessionMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBe(before - 1);
+    expect(res.statusCode).toBe(500);
   });
 
   // ══════════════════════════════════════════════════════════

@@ -49,16 +49,21 @@
  *   1. TIPOS: `validate` es un campo REQUERIDO de `ChargedRouteSpec`. No hay
  *      default. Y el opt-out no es `[]` silencioso: es
  *      `{ skip: '<motivo escrito>' }`, así que "no valido nada" queda firmado en
- *      el código. Además `PreChargeCheck` es SÍNCRONA y no recibe el
- *      `FastifyRequest` completo (recibe `PreChargeInput`: body/params/query/
- *      headers), así que por construcción NO puede hacer I/O ni leer
- *      `request.a2aKeyRow` / `resolvedChainId` — es decir, no puede colarse acá
- *      una validación de ejecución disfrazada.
+ *      el código (y congelado por el guard estructural, T-META-05). Además
+ *      `PreChargeCheck` es SÍNCRONA y no recibe el `FastifyRequest` completo
+ *      (recibe `PreChargeInput`: body/params/query/headers, en vista inmutable),
+ *      así que por construcción no puede leer `request.a2aKeyRow` /
+ *      `resolvedChainId`, no puede DECIDIR con el resultado de una I/O asíncrona
+ *      (DNS, DB, RPC — ver `PreChargeCheck`) y no puede mutar el input que el
+ *      handler usa después. Es decir: no puede colarse acá una validación de
+ *      ejecución disfrazada.
  *
- *   2. TEST DE ESTRUCTURA: `routes/charged-routes.meta.test.ts` recorre las
- *      rutas realmente registradas (`onRoute`) y falla si alguna tiene un
- *      handler marcado `CHARGES_CALLER` sin un `PRE_CHARGE_VALIDATION` ANTES en
- *      la cadena. La lista de excepciones está congelada, así que una ruta nueva
+ *   2. TEST DE ESTRUCTURA: `routes/charged-routes.meta.test.ts` registra TODOS
+ *      los plugins de la app (la lista se deriva del propio `src/index.ts`, así
+ *      que un plugin nuevo que no se escanee rompe el test), recorre las rutas
+ *      realmente registradas (`onRoute`) y falla si alguna tiene un handler
+ *      marcado `CHARGES_CALLER` sin un `PRE_CHARGE_VALIDATION` ANTES en la
+ *      cadena. La lista de excepciones está congelada, así que una ruta nueva
  *      que cobre sin validar rompe el test.
  *
  * LÍMITE HONESTO: la capa 1 no es total hoy. `requirePaymentOrA2AKey` sigue
@@ -88,12 +93,67 @@ import type { PaymentMiddlewareOptions } from './x402.js';
  * caller. No incluye `a2aKeyRow`, `resolvedChainId` ni nada que produzca el
  * middleware de auth/pago — si tu check necesita eso, no es un check de forma y
  * no puede correr pre-cobro (va al residuo, con reembolso si el riel lo permite).
+ *
+ * `readonly` acá protege el BINDING, no el objeto apuntado: `input.body = x` no
+ * compila, pero `(input.body as Record<string, unknown>).x = 1` sí, y el HANDLER
+ * vería el cuerpo mutado. Por eso los cuatro campos se entregan envueltos en una
+ * vista inmutable (ver `readonlyView`).
  */
 export interface PreChargeInput {
   readonly body: unknown;
   readonly params: unknown;
   readonly query: unknown;
   readonly headers: FastifyRequest['headers'];
+}
+
+/**
+ * Vista de sólo-lectura, RECURSIVA y perezosa, sobre los datos del caller.
+ *
+ * POR QUÉ EXISTE: un `PreChargeCheck` debe ser puro. Sin esto, un check podía
+ * reescribir el body/params/query que el handler valida DESPUÉS (y que se manda
+ * al service), o sea reintroducir por la puerta de atrás el input no validado
+ * que esta HU busca frenar. `Object.freeze` sobre el objeto de Fastify también
+ * lo lograría, pero mutaría el objeto REAL del request (el handler perdería la
+ * capacidad de mutarlo, en silencio, en todas las rutas que usen el
+ * componente); `structuredClone` costaría una copia del body en el money-path.
+ * El Proxy no copia nada, no toca el objeto original y su coste es O(1) por
+ * propiedad realmente leída.
+ *
+ * Cualquier escritura lanza `TypeError`: el request muere en el preHandler de
+ * validación, o sea ANTES del cobro (un check con bug no le cuesta plata al
+ * caller).
+ */
+const READONLY_TRAPS: ProxyHandler<object> = {
+  // Sin `receiver` a propósito: un getter corre con `this === target`, no con el
+  // proxy, así que no rompe accesos a slots internos.
+  get: (target, prop) => readonlyView(Reflect.get(target, prop)),
+  set: (_target, prop) => {
+    throw new TypeError(
+      `PreChargeInput is read-only: a pre-charge check tried to set '${String(prop)}'`,
+    );
+  },
+  defineProperty: (_target, prop) => {
+    throw new TypeError(
+      `PreChargeInput is read-only: a pre-charge check tried to define '${String(prop)}'`,
+    );
+  },
+  deleteProperty: (_target, prop) => {
+    throw new TypeError(
+      `PreChargeInput is read-only: a pre-charge check tried to delete '${String(prop)}'`,
+    );
+  },
+  setPrototypeOf: () => {
+    throw new TypeError(
+      'PreChargeInput is read-only: a pre-charge check tried to set its prototype',
+    );
+  },
+};
+
+function readonlyView<T>(value: T): T {
+  // Sólo objetos y arrays. Primitivas ya son inmutables; las funciones se
+  // devuelven tal cual (envolverlas rompería `this`).
+  if (typeof value !== 'object' || value === null) return value;
+  return new Proxy(value as object, READONLY_TRAPS) as T;
 }
 
 /** Respuesta de rechazo: status + body EXACTO que ya devolvía la ruta. */
@@ -103,10 +163,21 @@ export interface PreChargeRejection {
 }
 
 /**
- * Check puro y SÍNCRONO. `null` = pasa. Sincronía deliberada: sin `async` no hay
- * `await`, y sin `await` no hay I/O (DNS, DB, RPC) posible acá. Eso mantiene el
- * pre-cobro barato y evita convertir un endpoint impago en un amplificador de
- * I/O.
+ * Check puro y SÍNCRONO. `null` = pasa.
+ *
+ * QUÉ GARANTIZA LA SINCRONÍA (exactamente): el tipo no devuelve `Promise`, así
+ * que un check NO PUEDE esperar el resultado de una API asíncrona. Todas las
+ * fuentes de I/O que importan acá son asíncronas y basadas en promesas
+ * (`dns.lookup`/`dns.promises` del guard SSRF, `supabase-js`, los RPC de los
+ * adapters, `fetch`): un check no puede **decidir** con ninguna de ellas, así
+ * que no puede convertirse en oráculo de resolución de nombres, de existencia de
+ * filas ni de estado on-chain, ni disparar un fan-out remoto pre-cobro.
+ *
+ * QUÉ NO GARANTIZA: que no haya I/O en absoluto. La I/O SÍNCRONA sigue siendo
+ * alcanzable desde JS (`fs.readFileSync`, `execSync`), y por lo tanto un check
+ * podría hacerla. Eso no se puede impedir con tipos; lo frena la review — y
+ * ninguno de los checks de este repo importa nada de eso. La propiedad que el
+ * diseño necesita es la de arriba (sin oráculo asíncrono), no "cero I/O".
  */
 export type PreChargeCheck = (
   input: PreChargeInput,
@@ -151,12 +222,15 @@ export function chargedRoute(
     request: FastifyRequest,
     reply: FastifyReply,
   ) => {
-    const input: PreChargeInput = {
-      body: request.body,
-      params: request.params,
-      query: request.query,
-      headers: request.headers,
-    };
+    // Vista inmutable: un check no puede reescribir lo que el handler valida y
+    // manda al service (ver `readonlyView`). `freeze` cubre el contenedor;
+    // `readonlyView`, los objetos apuntados.
+    const input: PreChargeInput = Object.freeze({
+      body: readonlyView(request.body),
+      params: readonlyView(request.params),
+      query: readonlyView(request.query),
+      headers: readonlyView(request.headers),
+    });
     for (const check of checks) {
       const rejection = check(input);
       if (rejection) {

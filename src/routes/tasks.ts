@@ -10,6 +10,13 @@
  * del enum, append sin nada que appendear) se decide ahora en la cadena
  * pre-cobro (`middleware/charged-route.ts`), así que ya no se cobra por ellos.
  *
+ * HU-193 fix-pack (BLQ-BAJO-1): los CINCO handlers pueden terminar en un 500 si
+ * el service lanza, y los cinco cobraban sin devolver nada. Ahora cuatro
+ * reembolsan (los dos GET, que son lecturas puras, y los dos PATCH) y el ÚNICO
+ * que se queda con el débito es `POST /` — porque un insert que pudo commitear
+ * deja un recurso entregado. Está declarado con su status en
+ * `doc/INTEGRATION.md` §5.1: el contrato público NO promete costo neto cero.
+ *
  * ⚠️ CAMBIO DE CONTRATO (declarado): el riel x402 anónimo NO PUEDE operar acá.
  * Todos los endpoints derivan el tenant de `request.a2aKeyRow.owner_ref` y el
  * middleware x402 nunca setea `a2aKeyRow` (no aporta identidad de tenant; ver
@@ -31,7 +38,7 @@ import {
   TerminalStateError,
   taskService,
 } from '../services/task.js';
-import type { TaskState } from '../types/index.js';
+import type { Task, TaskState } from '../types/index.js';
 import { TASK_STATES } from '../types/index.js';
 
 // ── UUID validation helper ──────────────────────────────────
@@ -169,6 +176,13 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(400).send(invalid);
       }
 
+      // HU-193 fix-pack (BLQ-BAJO-1): este es el ÚNICO camino de este plugin que
+      // se queda con el débito. NO se reembolsa a propósito: si el INSERT
+      // commiteó y el fallo fue al responder, la task EXISTE y el caller la
+      // puede listar y usar — reembolsar regalaría un recurso entregado
+      // (lección de HU-192). Sin una señal fiable de "no se escribió nada"
+      // (idempotency key) la dirección segura es no devolver. Está declarado en
+      // `doc/INTEGRATION.md` §5.1 y en el work-item, con su status (500).
       const task = await taskService.create(getOwnerRef(request), {
         contextId: body.contextId,
         messages: body.messages,
@@ -208,11 +222,22 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
           ? parsedLimit
           : undefined;
 
-      const tasks = await taskService.list(getOwnerRef(request), {
-        status: status as TaskState | undefined,
-        contextId: context_id,
-        limit: safeLimit,
-      });
+      // HU-193 fix-pack (BLQ-BAJO-1): un fallo del read es residuo REEMBOLSABLE
+      // sin ambigüedad. Es una LECTURA: no escribe nada y no entrega nada, así
+      // que no hay ningún estado que proteger (a diferencia del `create`). El
+      // 500 lo sigue produciendo el error boundary — acá sólo se devuelve el
+      // débito antes de re-lanzar.
+      let tasks: Task[];
+      try {
+        tasks = await taskService.list(getOwnerRef(request), {
+          status: status as TaskState | undefined,
+          contextId: context_id,
+          limit: safeLimit,
+        });
+      } catch (err) {
+        await refundStep0Debit(request, 'tasks.list:read-failed');
+        throw err;
+      }
 
       return reply.send({ tasks, total: tasks.length });
     },
@@ -231,10 +256,15 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
       if (invalidId) {
         return reply.status(400).send(invalidId);
       }
-      const task = await taskService.get(
-        getOwnerRef(request),
-        request.params.id,
-      );
+      // HU-193 fix-pack (BLQ-BAJO-1): idem `GET /tasks` — lectura pura, un fallo
+      // no escribió ni entregó nada → residuo reembolsable sin ambigüedad.
+      let task: Task | undefined;
+      try {
+        task = await taskService.get(getOwnerRef(request), request.params.id);
+      } catch (err) {
+        await refundStep0Debit(request, 'tasks.get-one:read-failed');
+        throw err;
+      }
       if (!task) {
         // HU-193 (residuo): "no existe" y "no es tuya" son indistinguibles a
         // propósito, y ambas necesitan un read a la DB con el `owner_ref` del
@@ -298,6 +328,16 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
             error: 'Task is in a terminal state and cannot be updated',
           });
         }
+        // HU-193 fix-pack (BLQ-BAJO-1): cualquier otro fallo (el 500). Se
+        // reembolsa. El caso dominante es que NADA se escribió: `updateStatus`
+        // primero LEE la fila (un fallo del read no toca nada) y el UPDATE que
+        // reporta error tampoco aplicó. Riesgo residual declarado: si el UPDATE
+        // hubiera commiteado y sólo se perdiera la respuesta, el reembolso regala
+        // una transición ya aplicada — sobre la propia task del caller, por $1, y
+        // en una ventana muy angosta. Se acepta ese riesgo y NO el del `create`
+        // (que entrega un recurso nuevo, listable y usable). Queda declarado en
+        // `doc/INTEGRATION.md` §5.1.
+        await refundStep0Debit(request, 'tasks.patch-status:failed');
         throw err;
       }
     },
@@ -347,6 +387,9 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
             error: 'Task is in a terminal state and cannot be updated',
           });
         }
+        // HU-193 fix-pack (BLQ-BAJO-1): idem `PATCH /:id/status` — mismo
+        // razonamiento y mismo riesgo residual declarado.
+        await refundStep0Debit(request, 'tasks.patch-append:failed');
         throw err;
       }
     },

@@ -10,9 +10,13 @@
  *     en la marca del handler;
  *   • un `PreChargeCheck` NO puede ver estado de auth ni de cobro: recibe
  *     `PreChargeInput` (body/params/query/headers) y nada más. Eso es lo que
- *     impide que se cuele acá una validación de EJECUCIÓN disfrazada de forma.
+ *     impide que se cuele acá una validación de EJECUCIÓN disfrazada de forma;
+ *   • un `PreChargeCheck` NO puede MUTAR lo que recibe (fix-pack, MENOR-2 del
+ *     AR): `readonly` protege el binding, no el objeto, así que sin la vista
+ *     inmutable un check podía reescribir el body que el handler valida y manda
+ *     al service.
  *
- * Naming: T-CR-01..T-CR-09.
+ * Naming: T-CR-01..T-CR-12.
  */
 
 import type { FastifyReply, FastifyRequest } from 'fastify';
@@ -181,6 +185,170 @@ describe('chargedRoute (HU-193)', () => {
       expect(
         (seen as unknown as Record<string, unknown>).a2aKeyRow,
       ).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── El input es INMUTABLE (fix-pack MENOR-2) ─────────────────
+  // El AR probó que un check podía hacer
+  // `(input.body as Record<string, unknown>).injected = 'MUTATED'` y el HANDLER
+  // veía el cuerpo mutado. Un check "puro" que reescribe lo que el handler valida
+  // después es un footgun serio: reintroduce input no validado en el service.
+
+  /** Handler que DEVUELVE el body que le llegó (para ver si fue mutado). */
+  function buildEchoApp(preHandler: ReturnType<typeof chargedRoute>) {
+    const app = Fastify();
+    app.post(
+      '/t/:id',
+      { preHandler },
+      async (request: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ body: request.body }),
+    );
+    return app;
+  }
+
+  it('T-CR-10: un check que intenta mutar el body lanza y NO se cobra', async () => {
+    const app = buildEchoApp(
+      chargedRoute({
+        validate: [
+          (input) => {
+            (input.body as Record<string, unknown>).injected = 'MUTATED';
+            return null;
+          },
+        ],
+        payment: PAYMENT,
+      }),
+    );
+    await app.ready();
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/t/1',
+        payload: { hello: 'world' },
+      });
+      // El TypeError muere en el preHandler de VALIDACIÓN, o sea antes del
+      // cobro: un check con bug no le cuesta plata al caller.
+      expect(paymentSpy).not.toHaveBeenCalled();
+      expect(res.statusCode).toBe(500);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('T-CR-11: la mutación no llega al handler ni siquiera si el check la traga', async () => {
+    const attempts: string[] = [];
+    const app = buildEchoApp(
+      chargedRoute({
+        validate: [
+          (input) => {
+            const body = input.body as Record<string, unknown>;
+            for (const [name, mutate] of [
+              ['set', () => (body.injected = 'MUTATED')],
+              [
+                'nested-set',
+                () =>
+                  ((body.nested as Record<string, unknown>).deep = 'MUTATED'),
+              ],
+              ['delete', () => delete body.hello],
+              [
+                'defineProperty',
+                () => Object.defineProperty(body, 'sneaky', { value: 1 }),
+              ],
+              [
+                'params',
+                () => ((input.params as Record<string, unknown>).id = 'x'),
+              ],
+              [
+                'query',
+                () => ((input.query as Record<string, unknown>).q = 'x'),
+              ],
+              [
+                'input-field',
+                () => ((input as unknown as Record<string, unknown>).body = {}),
+              ],
+            ] as Array<[string, () => unknown]>) {
+              try {
+                mutate();
+                attempts.push(`${name}:PASSED`);
+              } catch {
+                attempts.push(`${name}:BLOCKED`);
+              }
+            }
+            // Lectura normal: la vista inmutable NO rompe leer valores anidados.
+            return (body.nested as Record<string, unknown>).deep === 'original'
+              ? null
+              : { status: 400, body: { error: 'read-broken' } };
+          },
+        ],
+        payment: PAYMENT,
+      }),
+    );
+    await app.ready();
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/t/1?q=1',
+        payload: { hello: 'world', nested: { deep: 'original' } },
+      });
+      expect(attempts).toEqual([
+        'set:BLOCKED',
+        'nested-set:BLOCKED',
+        'delete:BLOCKED',
+        'defineProperty:BLOCKED',
+        'params:BLOCKED',
+        'query:BLOCKED',
+        'input-field:BLOCKED',
+      ]);
+      // LA aserción: el handler ve el body ORIGINAL, sin `injected` ni `sneaky`.
+      expect(res.statusCode).toBe(200);
+      expect(res.json().body).toEqual({
+        hello: 'world',
+        nested: { deep: 'original' },
+      });
+      expect(paymentSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('T-CR-12: la vista inmutable no cambia lo que el check VE (lecturas intactas)', async () => {
+    let seen: Record<string, unknown> | undefined;
+    const app = buildEchoApp(
+      chargedRoute({
+        validate: [
+          (input) => {
+            const body = input.body as Record<string, unknown>;
+            seen = {
+              typeofBody: typeof body,
+              keys: Object.keys(body),
+              isArrayMessages: Array.isArray(body.messages),
+              spread: { ...body },
+              json: JSON.stringify(body),
+              headerKey: input.headers['x-a2a-key'],
+            };
+            return null;
+          },
+        ],
+        payment: PAYMENT,
+      }),
+    );
+    await app.ready();
+    try {
+      await app.inject({
+        method: 'POST',
+        url: '/t/1',
+        headers: { 'x-a2a-key': 'wasi_a2a_x' },
+        payload: { messages: [{ role: 'user' }], n: 1 },
+      });
+      expect(seen).toEqual({
+        typeofBody: 'object',
+        keys: ['messages', 'n'],
+        isArrayMessages: true,
+        spread: { messages: [{ role: 'user' }], n: 1 },
+        json: '{"messages":[{"role":"user"}],"n":1}',
+        headerKey: 'wasi_a2a_x',
+      });
     } finally {
       await app.close();
     }
