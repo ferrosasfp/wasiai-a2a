@@ -118,6 +118,36 @@ const DEFAULT_MAX_INTENT_ENTRIES = 10_000;
 //     (300 s cada uno), y `bodyTimeout` es un timeout de INACTIVIDAD: un agente
 //     que trickle-feedea un byte cada 299 s mantiene el hop vivo indefinidamente.
 //
+// ⚠️ ACTUALIZACIÓN HU-195 (sólo el segundo bullet): el hop de invoke YA tiene
+// techo. `lib/ssrf-dispatcher.ts` configura `headersTimeout`/`bodyTimeout` y
+// `ssrfFetch` adjunta un `AbortSignal` de wall-clock, ambos gobernados por
+// `OUTBOUND_HOP_TIMEOUT_MS` (default 60 s, clampeado a `TIMEOUT_COMPOSE_MS`) —
+// ver `lib/outbound-timeout.ts`. El trickle-feed infinito está cerrado.
+// Lo que NO cambió, y por eso la conclusión de abajo SIGUE EN PIE: el techo es
+// por HOP, no por PIPELINE. El 504 sigue sin cancelar el run, así que tampoco hay
+// ahora una cota dura de wall-clock por run. Los números de este módulo se
+// dejan a propósito en el peor caso VIEJO (300 s/hop): sobre-estiman la vida de
+// un run, y sobre-estimar el TTL de un Map de idempotencia es el lado seguro del
+// error. Bajarlos a 60 s es una decisión de money-path con su propia HU.
+//
+// ⚠️ EL COSTO COMPLETO DE ESA SOBRE-ESTIMACIÓN (AR MNR-5 de la HU-195): NO es
+// solamente "memoria de más".
+//
+//   · Para el TTL de dedup, sobre-estimar sí es inocuo: la clave incluye un
+//     `composeRunId` (UUID por ejecución), así que un TTL largo NO puede
+//     deduplicar por error un pago legítimo — sólo retiene entradas muertas.
+//   · PERO la MISMA constante alimenta `resolveProtectedWindowMs()`, y la ventana
+//     protegida es lo que vuelve INOPERANTE el cap soft de 10.000 entradas:
+//     `evictIntentSignatures` hace `break` en la PRIMERA entrada protegida y se
+//     limita a un `log.warn`. Con 300 s/hop la ventana no-desalojable es de
+//     25 min; con los 60 s reales del hop serían 6 min. O sea que el peor caso
+//     viejo cuadruplica la ventana en la que el Map puede crecer sin cota por
+//     encima de su propio cap.
+//
+// Se deja así igual (conservar > desalojar, ante la duda no habilitar un doble
+// pago), pero el costo queda nombrado: es memoria de más Y un cap que no corta
+// durante 25 minutos, no sólo lo primero.
+//
 // Conclusión honesta: **no existe cota superior dura** de wall-clock para un run,
 // así que NINGÚN número de TTL puede prometer "no expira dentro de la ventana viva
 // del run". Elegimos NO cancelar el pipeline en el 504 (opción B del AR): abortar
@@ -138,19 +168,39 @@ const DEFAULT_MAX_INTENT_ENTRIES = 10_000;
 // "re-revisá el margen a mano" que antes no existía).
 /**
  * Default de undici 8 por request (`headersTimeout` = `bodyTimeout` = 300_000 ms).
- * NUESTRO código no los configura (`lib/ssrf-dispatcher.ts`), así que es el único
- * freno del hop de invoke.
+ *
+ * ⚠️ CORRECCIÓN (AR MNR-4 de la HU-195): la versión anterior de este comentario
+ * decía «NUESTRO código no los configura (`lib/ssrf-dispatcher.ts`), así que es el
+ * único freno del hop de invoke». **Ya es falso**: desde la HU-195,
+ * `outboundAgentOptions()` fija `headersTimeout`/`bodyTimeout` y `ssrfFetch`
+ * adjunta el `AbortSignal` de wall-clock, los dos gobernados por
+ * `OUTBOUND_HOP_TIMEOUT_MS` (default 60 s). O sea que el freno REAL del hop de
+ * invoke hoy son 60 s, no 300 s.
+ *
+ * Este literal se conserva a propósito como el PEOR CASO HISTÓRICO del que se
+ * derivan los números de abajo: sobre-estima, y para un Map de idempotencia
+ * sobre-estimar es el lado seguro (ver `ESTIMATED_MAX_RUN_WALL_CLOCK_MS`).
+ * Bajarlo a 60 s es money-path y necesita su propia HU.
  */
 const UNDICI_DEFAULT_HOP_TIMEOUT_MS = 300_000;
 /**
  * COTA ESTIMADA de vida de un compose-run: `MAX_COMPOSE_STEPS` × 300 s = 25 min
  * con el máximo de steps de hoy (5).
  *
- * ⚠️ Es una ESTIMACIÓN, no una garantía. Cuenta UN hop por step (el invoke del
- * agente) y no cuenta los hops del settle (verify + settle del facilitator) ni el
- * caso del body trickle-feedeado, que no tiene techo. Se documenta así a propósito:
- * el número es incómodo (25 min contra los 3 min del timeout del compose) y
- * honesto, en vez de cómodo y falso.
+ * ⚠️ Es una ESTIMACIÓN, no una garantía, y desde la HU-195 es una estimación
+ * DELIBERADAMENTE ALTA: cuenta 300 s/hop cuando el techo real del hop de invoke
+ * ya es de 60 s. Cuenta UN hop por step (el invoke del agente) y no cuenta los
+ * hops del settle (verify + settle del facilitator), que siguen sin techo en el
+ * modo `pieverse` de Kite (`adapters/kite-ozone/payment.ts:317,362`).
+ *
+ * CORRECCIÓN (AR MNR-4): la versión anterior también listaba «ni el caso del body
+ * trickle-feedeado, que no tiene techo». Para el hop de invoke eso YA NO ES
+ * CIERTO: el `AbortSignal` de wall-clock de `ssrfFetch` es exactamente el eje que
+ * corta al peer que trickle-feedea. Sigue sin techo el egress que no pasa por
+ * `ssrfFetch` (settlement).
+ *
+ * Se documenta así a propósito: el número es incómodo (25 min contra los 3 min del
+ * timeout del compose) y honesto, en vez de cómodo y falso.
  */
 const ESTIMATED_MAX_RUN_WALL_CLOCK_MS =
   MAX_COMPOSE_STEPS * UNDICI_DEFAULT_HOP_TIMEOUT_MS;
@@ -170,6 +220,11 @@ function resolveComposeTimeoutMs(): number {
  * El segundo término no es una cota (ver el bloque de AR MENOR-1) pero se conserva
  * por monotonía: un operador que sube el timeout del compose está DECLARANDO que
  * espera runs más largos, y la ventana lo acompaña.
+ *
+ * ⚠️ ESTA es la función por la que sobre-estimar la cota del run NO es gratis
+ * (AR MNR-5 de la HU-195): mientras la ventana sea de 25 min, el cap soft de
+ * `evictIntentSignatures` no desaloja NADA y sólo loguea. Detalle en el bloque de
+ * `UNDICI_DEFAULT_HOP_TIMEOUT_MS`.
  */
 function resolveProtectedWindowMs(): number {
   return Math.max(

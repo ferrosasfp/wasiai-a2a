@@ -39,9 +39,26 @@ async function parseBody(response: Response): Promise<unknown> {
 }
 
 /**
- * Performs `fetch` and translates an AbortError (timeout) into a structured
- * -32002 MCPToolError so callers can distinguish timeouts from network
- * errors (MNR-2).
+ * Nombres de error que significan "el request se abortó por un presupuesto de
+ * tiempo". Los DOS hacen falta (HU-195 fix-pack, AR MNR-6):
+ *
+ *   · `AbortError` — lo que produce `controller.abort()`, o sea el
+ *     `MCP_PAY_TIMEOUT_MS` de esta herramienta.
+ *   · `TimeoutError` — lo que produce `AbortSignal.timeout`, o sea el techo de
+ *     hop de `OUTBOUND_HOP_TIMEOUT_MS` que `ssrfFetch` adjunta (un `DOMException`
+ *     con `name === 'TimeoutError'`, verificado empíricamente).
+ *
+ * Con los defaults de hoy (`MCP_PAY_TIMEOUT_MS = 30_000 <
+ * OUTBOUND_HOP_TIMEOUT_MS = 60_000`) gana siempre el primero, así que el segundo
+ * es inalcanzable — pero se rompe en cuanto un operador sube esa env por arriba
+ * del techo del hop: el timeout dejaría de mapear al -32002 estructurado y
+ * saldría como error crudo.
+ */
+const TIMEOUT_ERROR_NAMES = new Set(['AbortError', 'TimeoutError']);
+
+/**
+ * Performs `fetch` and translates a timeout abort into a structured -32002
+ * MCPToolError so callers can distinguish timeouts from network errors (MNR-2).
  */
 async function fetchWithTimeoutMapping(
   url: string,
@@ -54,10 +71,12 @@ async function fetchWithTimeoutMapping(
     // redirect re-validation (was bypassing the dispatcher via global fetch).
     return await ssrfFetch(url, init);
   } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
+    if (err instanceof Error && TIMEOUT_ERROR_NAMES.has(err.name)) {
       throw new MCPToolError(
         MCP_ERRORS.UPSTREAM_GATEWAY,
-        `Gateway timeout after ${timeoutMs}ms`,
+        // El presupuesto EFECTIVO es el más corto de los dos, así que se nombran
+        // los dos en vez de mentir con uno solo.
+        `Gateway timeout (budget: MCP_PAY_TIMEOUT_MS=${timeoutMs}ms or the outbound hop ceiling, whichever is shorter)`,
       );
     }
     throw err;

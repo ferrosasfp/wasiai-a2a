@@ -208,4 +208,38 @@ describe('payX402', () => {
     expect(err.message).toMatch(/exceeds maxAmountWei/);
     expect(mockSign).not.toHaveBeenCalled();
   });
+
+  // ── HU-195 fix-pack (AR MNR-6): los DOS nombres de abort ──────────────────
+  //
+  // `AbortSignal.timeout` (el techo de hop de `OUTBOUND_HOP_TIMEOUT_MS` que
+  // adjunta `ssrfFetch`) rechaza con un `DOMException` cuyo `name` es
+  // `TimeoutError`, NO `AbortError`. Clasificando sólo `AbortError`, ese timeout
+  // no mapeaba al -32002 estructurado y salía como error crudo. Hoy es
+  // inalcanzable (`MCP_PAY_TIMEOUT_MS = 30000 < 60000`) pero se vuelve alcanzable
+  // en cuanto un operador sube esa env por arriba del techo del hop.
+  it.each([
+    ['TimeoutError (AbortSignal.timeout → techo del hop)', 'TimeoutError'],
+    ['AbortError (controller.abort → MCP_PAY_TIMEOUT_MS)', 'AbortError'],
+  ])('T-195-MCP-1 (AR MNR-6): %s mapea al -32002 estructurado', async (_label, errName) => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockRejectedValueOnce(
+      new DOMException('The operation was aborted', errName),
+    );
+    let caught: unknown;
+    try {
+      await payX402(baseInput, ctx);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(MCPToolError);
+    const err = caught as MCPToolError;
+    expect(err.code).toBe(-32002);
+    expect(err.message).toMatch(/Gateway timeout/);
+  });
+
+  it('T-195-MCP-2: un error de red que NO es un abort NO se disfraza de timeout', async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
+    await expect(payX402(baseInput, ctx)).rejects.toThrow(/fetch failed/);
+  });
 });
