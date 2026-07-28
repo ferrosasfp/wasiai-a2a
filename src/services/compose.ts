@@ -34,6 +34,7 @@ import { parseFieldErrors } from '../lib/field-error-parser.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
+import { refundIdemKey } from '../lib/refund-idem.js';
 import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 import {
   SSRFViolationError,
@@ -412,7 +413,14 @@ export const composeService = {
         // tuvo éxito; `false` si el credit RPC falló. WKH-130 fix-pack (AR/CR
         // obs): el retry SOLO procede si el refund#1 fue exitoso — si falla, no
         // re-debitamos (queda 1 solo débito = peor caso pre-WKH-130, nunca 2x).
-        const refundStepDebit = async (): Promise<boolean> => {
+        // HU-194: `phase` distingue los DOS refunds legítimos que este step
+        // puede necesitar — 'd1' = el del PRIMER débito (PASO 1) y 'd2' = el del
+        // débito del RETRY adaptativo (PASO 6b). Mismo monto, mismo destino,
+        // mismo step, misma ejecución: si compartieran clave de idempotencia, el
+        // segundo crédito (dinero REAL del caller) se descartaría como duplicado.
+        const refundStepDebit = async (
+          phase: 'd1' | 'd2',
+        ): Promise<boolean> => {
           if (!isMasterPath || !scopingKeyRow || chainId === undefined)
             return true;
           // M3 (audit 2026-06-24): el refund DEBE usar EXACTAMENTE el mismo
@@ -421,12 +429,24 @@ export const composeService = {
           // string divergía del débito, el credit compensatorio del dest-cap se
           // insertaba en otro destino y el cap del destino real nunca se
           // liberaba. Reusar la única fuente garantiza el match byte a byte.
+          // HU-194: `composeRunId` es un UUID server-side por EJECUCIÓN (no un
+          // id que venga del caller), así que dos ejecuciones nunca comparten
+          // clave y sus refunds no se colapsan.
+          const idem = {
+            idemKey: refundIdemKey({
+              keyId: scopingKeyRow.id,
+              chainId,
+              operationId: composeRunId,
+              slot: `compose-step:${i}:${phase}`,
+            }),
+          };
           const creditRes = await budgetService.creditWithDest(
             scopingKeyRow.id,
             chainId,
             stepDebitedUsd,
             scopingKeyRow.owner_ref,
             stepDestination,
+            idem,
           );
           // A2 (audit 2026-06-24): el re-debit del retry adaptativo SOLO procede
           // si el refund REVIRTIÓ DE VERDAD. `creditWithDest` ahora devuelve
@@ -459,6 +479,7 @@ export const composeService = {
               ownerRef: scopingKeyRow.owner_ref,
               destination: stepDestination,
               reason: 'compose.refund-failed',
+              idemKey: idem.idemKey,
             });
           }
           return reverted;
@@ -495,7 +516,7 @@ export const composeService = {
         // ── PASO 1 (DT-5.1 / CD-1): refund del PRIMER débito — IDÉNTICO a hoy
         //    (WKH-128/129). Incondicional para path master. Tras esto NO hay
         //    débito activo para este step → el re-debit nunca coexiste con él.
-        const refund1ok = await refundStepDebit();
+        const refund1ok = await refundStepDebit('d1');
 
         // ── PASO 2..6 (DT-5): retry adaptativo. Solo si hay field-errors Y el
         //    refund#1 fue exitoso (CD-1 reforzado: si el refund falló, NO
@@ -573,7 +594,7 @@ export const composeService = {
                     : String(retryErr);
                 // ── PASO 6b (CD-5): retry falló → reembolsar el RETRY débito
                 //    (best-effort). NO re-reintentar (CD-2).
-                await refundStepDebit();
+                await refundStepDebit('d2');
                 eventService
                   .track({
                     eventType: 'compose_step',

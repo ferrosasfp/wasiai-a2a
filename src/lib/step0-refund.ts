@@ -59,6 +59,7 @@
 import type { FastifyRequest } from 'fastify';
 import { budgetService } from '../services/budget.js';
 import { refundOutbox } from '../services/refund-outbox.js';
+import { refundIdemKey, requestRefundIdemBase } from './refund-idem.js';
 import { resolveStep0DebitUsd } from './step0-debit.js';
 
 declare module 'fastify' {
@@ -95,6 +96,19 @@ export async function refundStep0Debit(
   // error se encadenaran), la segunda entra al early-return de arriba.
   request.step0RefundApplied = true;
 
+  // HU-194: clave del refund LÓGICO. Un solo refund step-0 por request (garantía
+  // #5 de arriba) ⟹ un solo slot. La MISMA clave va al credit y al outbox: si el
+  // credit commitea y su respuesta se pierde, el reintento del sweep es un no-op
+  // del lado de Postgres en vez de un segundo crédito.
+  const idem = {
+    idemKey: refundIdemKey({
+      keyId: keyRow.id,
+      chainId,
+      operationId: requestRefundIdemBase(request),
+      slot: 'step0',
+    }),
+  };
+
   try {
     const creditRes = request.delegationContext
       ? await budgetService.creditDelegation(
@@ -103,6 +117,7 @@ export async function refundStep0Debit(
           request.delegationContext.keyId,
           chainId,
           amountUsd,
+          idem,
         )
       : request.keySessionContext
         ? await budgetService.creditSession(
@@ -111,6 +126,7 @@ export async function refundStep0Debit(
             request.keySessionContext.keyId,
             chainId,
             amountUsd,
+            idem,
           )
         : // M3 (auditoría, vía compose): el refund tiene que ser SIMÉTRICO al
           // débito. Si el débito pasó por dest-policy (`composeDestination`),
@@ -125,12 +141,14 @@ export async function refundStep0Debit(
               amountUsd,
               keyRow.owner_ref,
               request.composeDestination,
+              idem,
             )
           : await budgetService.credit(
               keyRow.id,
               chainId,
               amountUsd,
               keyRow.owner_ref,
+              idem,
             );
     if (!creditRes.success) {
       // Sin msg crudo de PG (F-05). No cambia el status code.
@@ -147,6 +165,7 @@ export async function refundStep0Debit(
         ownerRef: keyRow.owner_ref,
         destination: request.composeDestination ?? null,
         reason: `${reason}:refund-failed`,
+        idemKey: idem.idemKey,
       });
       return;
     }
@@ -167,6 +186,10 @@ export async function refundStep0Debit(
         ownerRef: keyRow.owner_ref,
         destination: request.composeDestination ?? null,
         reason: `${reason}:refund-threw`,
+        // HU-194: MISMA clave que el `refund-failed` de arriba y que el credit
+        // que acaba de tirar. Ése es el punto: el `catch` no sabe si el crédito
+        // commiteó, y con esta clave da igual — el sweep no puede duplicarlo.
+        idemKey: idem.idemKey,
       })
       .catch((outboxErr) =>
         request.log.error(

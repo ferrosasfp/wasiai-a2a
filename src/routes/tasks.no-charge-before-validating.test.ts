@@ -577,7 +577,9 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
     // necesitan un read con el owner_ref del caller → no adelantable.
     expect(debitMock).toHaveBeenCalledTimes(1);
     expect(creditMock).toHaveBeenCalledTimes(1);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
+      idemKey: expect.any(String),
+    });
     expect(budgetState.balance).toBe(before);
   });
 
@@ -593,7 +595,9 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
     });
 
     expect(res.statusCode).toBe(404);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
+      idemKey: expect.any(String),
+    });
     expect(budgetState.balance).toBe(before);
   });
 
@@ -627,7 +631,9 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
     });
 
     expect(res.statusCode).toBe(404);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
+      idemKey: expect.any(String),
+    });
     expect(budgetState.balance).toBe(before);
   });
 
@@ -666,6 +672,7 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
       'k1',
       2368,
       1,
+      { idemKey: expect.any(String) },
     );
     expect(creditMock).not.toHaveBeenCalled();
     expect(budgetState.balance).toBe(before);
@@ -685,7 +692,9 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
     });
 
     expect(res.statusCode).toBe(409);
-    expect(creditSessionMock).toHaveBeenCalledWith('s1', 'o1', 'k1', 2368, 1);
+    expect(creditSessionMock).toHaveBeenCalledWith('s1', 'o1', 'k1', 2368, 1, {
+      idemKey: expect.any(String),
+    });
     expect(creditMock).not.toHaveBeenCalled();
     expect(budgetState.balance).toBe(before);
   });
@@ -713,7 +722,9 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
     // estado que proteger, así que el $1 vuelve.
     expect(debitMock).toHaveBeenCalledTimes(1);
     expect(creditMock).toHaveBeenCalledTimes(1);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
+      idemKey: expect.any(String),
+    });
     expect(budgetState.balance).toBe(before);
     expect(res.statusCode).toBe(500); // el status NO cambia
   });
@@ -731,7 +742,9 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
     });
 
     expect(debitMock).toHaveBeenCalledTimes(1);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
+      idemKey: expect.any(String),
+    });
     expect(budgetState.balance).toBe(before);
     expect(res.statusCode).toBe(500);
   });
@@ -750,7 +763,9 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
     });
 
     expect(debitMock).toHaveBeenCalledTimes(1);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
+      idemKey: expect.any(String),
+    });
     expect(budgetState.balance).toBe(before);
     expect(res.statusCode).toBe(500);
   });
@@ -769,7 +784,9 @@ describe('/tasks — no cobrar antes de validar (HU-193)', () => {
     });
 
     expect(debitMock).toHaveBeenCalledTimes(1);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
+      idemKey: expect.any(String),
+    });
     expect(budgetState.balance).toBe(before);
     expect(res.statusCode).toBe(500);
   });

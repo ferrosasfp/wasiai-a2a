@@ -11,6 +11,7 @@ import { MAX_COMPOSE_STEPS } from '../lib/compose-limits.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
+import { refundIdemKey, requestRefundIdemBase } from '../lib/refund-idem.js';
 import {
   extractRawKey,
   requirePaymentOrA2AKey,
@@ -329,6 +330,20 @@ async function refundComposeStep0(
   const refundUsd = Math.max(0, debitedUsd - alreadySpentUsd);
   if (refundUsd <= 0) return;
 
+  // HU-194: clave del refund LÓGICO del step-0. Slot propio (`compose-step0`),
+  // distinto de los slots per-step de `services/compose.ts`: son refunds
+  // legítimos DISTINTOS de la misma request y no deben colapsarse. La MISMA
+  // clave va al credit y a los dos enqueue, así el reintento del sweep no
+  // acredita de nuevo un crédito que ya commiteó.
+  const idem = {
+    idemKey: refundIdemKey({
+      keyId: request.a2aKeyRow.id,
+      chainId: refundChainId,
+      operationId: requestRefundIdemBase(request),
+      slot: 'compose-step0',
+    }),
+  };
+
   try {
     // M3 (auditoría): el destino del refund DEBE matchear el del débito.
     // El step-0 lo debitó el middleware con `request.composeDestination`
@@ -352,6 +367,7 @@ async function refundComposeStep0(
           request.delegationContext.keyId,
           refundChainId,
           refundUsd,
+          idem,
           request.composeDestination,
         )
       : request.keySessionContext
@@ -361,6 +377,7 @@ async function refundComposeStep0(
             request.keySessionContext.keyId,
             refundChainId,
             refundUsd,
+            idem,
             request.composeDestination,
           )
         : request.composeDestination
@@ -370,12 +387,14 @@ async function refundComposeStep0(
               refundUsd,
               request.a2aKeyRow.owner_ref,
               request.composeDestination,
+              idem,
             )
           : await budgetService.credit(
               request.a2aKeyRow.id,
               refundChainId,
               refundUsd,
               request.a2aKeyRow.owner_ref,
+              idem,
             );
     if (!creditRes.success) {
       // CD-6: sin msg crudo de PG. No cambia el status code.
@@ -399,6 +418,7 @@ async function refundComposeStep0(
         ownerRef: request.a2aKeyRow.owner_ref,
         destination: request.composeDestination ?? null,
         reason: 'compose-route.refund-failed',
+        idemKey: idem.idemKey,
       });
     }
   } catch (e) {
@@ -416,6 +436,9 @@ async function refundComposeStep0(
         ownerRef: request.a2aKeyRow.owner_ref,
         destination: request.composeDestination ?? null,
         reason: 'compose-route.refund-threw',
+        // HU-194: MISMA clave que el credit que tiró (el error puede ser del
+        // read de la respuesta, no de la acción) y que el `refund-failed`.
+        idemKey: idem.idemKey,
       })
       .catch((outboxErr) =>
         log.error(

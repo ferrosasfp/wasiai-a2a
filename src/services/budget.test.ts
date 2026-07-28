@@ -1299,13 +1299,16 @@ describe('budgetService', () => {
       // >=1 → reversión real → success.
       mockRpc.mockResolvedValue({ data: 1, error: null } as never);
 
-      const result = await budgetService.credit('k1', 84532, 0.05, 'owner');
+      const result = await budgetService.credit('k1', 84532, 0.05, 'owner', {
+        idemKey: null,
+      });
 
       expect(mockRpc).toHaveBeenCalledWith('refund_a2a_key_spend', {
         p_key_id: 'k1',
         p_chain_id: 84532,
         p_amount_usd: 0.05,
         p_owner_ref: 'owner',
+        p_idem_key: null,
       });
       expect(mockRpc).not.toHaveBeenCalledWith(
         'refund_with_dest_policy',
@@ -1319,7 +1322,9 @@ describe('budgetService', () => {
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       mockRpc.mockResolvedValue({ data: 0, error: null } as never);
 
-      const result = await budgetService.credit('k1', 84532, 0.05, 'owner');
+      const result = await budgetService.credit('k1', 84532, 0.05, 'owner', {
+        idemKey: null,
+      });
 
       expect(result).toEqual({
         success: false,
@@ -1341,7 +1346,9 @@ describe('budgetService', () => {
         },
       } as never);
 
-      const result = await budgetService.credit('k1', 84532, 0.05, 'other');
+      const result = await budgetService.credit('k1', 84532, 0.05, 'other', {
+        idemKey: null,
+      });
 
       expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
       // The raw PG detail must NOT appear in the returned error.
@@ -1354,7 +1361,9 @@ describe('budgetService', () => {
         error: { message: 'KEY_NOT_FOUND: key_id k1 does not exist' },
       } as never);
 
-      const result = await budgetService.credit('k1', 84532, 0.05, 'owner');
+      const result = await budgetService.credit('k1', 84532, 0.05, 'owner', {
+        idemKey: null,
+      });
 
       expect(result).toEqual({ success: false, error: 'KEY_NOT_FOUND' });
     });
@@ -1365,7 +1374,9 @@ describe('budgetService', () => {
         error: { message: 'deadlock detected on relation a2a_agent_keys' },
       } as never);
 
-      const result = await budgetService.credit('k1', 84532, 0.05, 'owner');
+      const result = await budgetService.credit('k1', 84532, 0.05, 'owner', {
+        idemKey: null,
+      });
 
       expect(result).toEqual({ success: false, error: 'REFUND_FAILED' });
       expect(result.error).not.toContain('deadlock');
@@ -1390,6 +1401,7 @@ describe('budgetService', () => {
         0.05,
         'owner',
         'wasiai/corridor',
+        { idemKey: null },
       );
 
       expect(mockRpc).toHaveBeenCalledWith('refund_with_dest_policy', {
@@ -1398,6 +1410,7 @@ describe('budgetService', () => {
         p_amount_usd: 0.05,
         p_owner_ref: 'owner',
         p_destination: 'wasiai/corridor',
+        p_idem_key: null,
       });
       expect(result).toEqual({ success: true, reverted: true });
     });
@@ -1414,6 +1427,7 @@ describe('budgetService', () => {
         0.05,
         'owner',
         'wasiai/corridor',
+        { idemKey: null },
       );
 
       expect(result).toEqual({
@@ -1440,6 +1454,7 @@ describe('budgetService', () => {
         0.05,
         'other-owner',
         'wasiai/corridor',
+        { idemKey: null },
       );
 
       expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
@@ -1459,6 +1474,7 @@ describe('budgetService', () => {
         0.05,
         'owner',
         'wasiai/corridor',
+        { idemKey: null },
       );
 
       expect(result).toEqual({ success: false, error: 'REFUND_FAILED' });
@@ -1480,6 +1496,7 @@ describe('budgetService', () => {
         0.05,
         'owner',
         'wasiai/corridor',
+        { idemKey: null },
       );
 
       expect(result).toEqual({ success: false, error: 'KEY_NOT_FOUND' });
@@ -1500,6 +1517,7 @@ describe('budgetService', () => {
         'k1',
         84532,
         0.05,
+        { idemKey: null },
         'wasiai/corridor',
       );
 
@@ -1510,6 +1528,7 @@ describe('budgetService', () => {
         p_chain_id: 84532,
         p_amount_usd: 0.05,
         p_destination: 'wasiai/corridor',
+        p_idem_key: null,
       });
       expect(result).toEqual({ success: true, reverted: true });
     });
@@ -1517,7 +1536,16 @@ describe('budgetService', () => {
     it('creditDelegation omits p_destination when no destination (SQL DEFAULT NULL, master-like dispatch)', async () => {
       mockRpc.mockResolvedValue({ data: 1, error: null } as never);
 
-      await budgetService.creditDelegation('del-1', 'owner-1', 'k1', 2368, 0.3);
+      await budgetService.creditDelegation(
+        'del-1',
+        'owner-1',
+        'k1',
+        2368,
+        0.3,
+        {
+          idemKey: null,
+        },
+      );
 
       // CR NIT-1: without a destination the key is OMITTED (no `as unknown as`
       // cast); the SQL `p_destination TEXT DEFAULT NULL` supplies NULL — the
@@ -1528,6 +1556,8 @@ describe('budgetService', () => {
         p_key_id: 'k1',
         p_chain_id: 2368,
         p_amount_usd: 0.3,
+        // HU-194: la clave viaja SIEMPRE (null = sin dedup).
+        p_idem_key: null,
       });
     });
 
@@ -1540,6 +1570,7 @@ describe('budgetService', () => {
         'k1',
         2368,
         0.3,
+        { idemKey: null },
       );
 
       expect(result).toEqual({
@@ -1561,6 +1592,7 @@ describe('budgetService', () => {
         'k1',
         2368,
         0.3,
+        { idemKey: null },
       );
 
       expect(result).toEqual({ success: false, error: 'OWNERSHIP_MISMATCH' });
@@ -1575,6 +1607,7 @@ describe('budgetService', () => {
         'k1',
         84532,
         0.05,
+        { idemKey: null },
         'wasiai/corridor',
       );
 
@@ -1585,6 +1618,7 @@ describe('budgetService', () => {
         p_chain_id: 84532,
         p_amount_usd: 0.05,
         p_destination: 'wasiai/corridor',
+        p_idem_key: null,
       });
       expect(result).toEqual({ success: true, reverted: true });
     });
@@ -1601,6 +1635,7 @@ describe('budgetService', () => {
         'k1',
         2368,
         0.3,
+        { idemKey: null },
       );
 
       expect(result).toEqual({ success: false, error: 'KEY_NOT_FOUND' });

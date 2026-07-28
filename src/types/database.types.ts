@@ -1015,6 +1015,36 @@ export type Database = {
           },
         ];
       };
+      a2a_refund_applications: {
+        Row: {
+          amount_usd: number;
+          applied_at: string;
+          chain_id: number;
+          destination: string | null;
+          idem_key: string;
+          key_id: string;
+          owner_ref: string;
+        };
+        Insert: {
+          amount_usd: number;
+          applied_at?: string;
+          chain_id: number;
+          destination?: string | null;
+          idem_key: string;
+          key_id: string;
+          owner_ref: string;
+        };
+        Update: {
+          amount_usd?: number;
+          applied_at?: string;
+          chain_id?: number;
+          destination?: string | null;
+          idem_key?: string;
+          key_id?: string;
+          owner_ref?: string;
+        };
+        Relationships: [];
+      };
       a2a_refund_outbox: {
         Row: {
           amount_usd: number;
@@ -1023,6 +1053,7 @@ export type Database = {
           created_at: string;
           destination: string | null;
           id: string;
+          idem_key: string | null;
           key_id: string;
           last_error: string | null;
           owner_ref: string;
@@ -1037,6 +1068,7 @@ export type Database = {
           created_at?: string;
           destination?: string | null;
           id?: string;
+          idem_key?: string | null;
           key_id: string;
           last_error?: string | null;
           owner_ref: string;
@@ -1051,6 +1083,7 @@ export type Database = {
           created_at?: string;
           destination?: string | null;
           id?: string;
+          idem_key?: string | null;
           key_id?: string;
           last_error?: string | null;
           owner_ref?: string;
@@ -2998,6 +3031,7 @@ export type Database = {
           created_at: string;
           destination: string | null;
           id: string;
+          idem_key: string | null;
           key_id: string;
           last_error: string | null;
           owner_ref: string;
@@ -3259,6 +3293,7 @@ export type Database = {
         Args: {
           p_amount_usd: number;
           p_chain_id: number;
+          p_idem_key?: string | null;
           p_key_id: string;
           p_owner_ref: string;
         };
@@ -3270,16 +3305,29 @@ export type Database = {
           p_chain_id: number;
           p_delegation_id: string;
           p_destination?: string;
+          p_idem_key?: string | null;
           p_key_id: string;
           p_owner_ref: string;
         };
         Returns: number;
+      };
+      refund_idem_claim: {
+        Args: {
+          p_amount_usd: number;
+          p_chain_id: number;
+          p_destination?: string | null;
+          p_idem_key: string | null;
+          p_key_id: string;
+          p_owner_ref: string;
+        };
+        Returns: boolean;
       };
       refund_session_and_parent: {
         Args: {
           p_amount_usd: number;
           p_chain_id: number;
           p_destination?: string;
+          p_idem_key?: string | null;
           p_key_id: string;
           p_owner_ref: string;
           p_session_id: string;
@@ -3303,6 +3351,7 @@ export type Database = {
           p_amount_usd: number;
           p_chain_id: number;
           p_destination: string;
+          p_idem_key?: string | null;
           p_key_id: string;
           p_owner_ref: string;
         };

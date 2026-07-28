@@ -1771,6 +1771,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
       0.05,
       'owner-test',
       'test-registry/corridor', // normalizeDestination(`${registry}/${slug}`) del agente del step
+      { idemKey: expect.any(String) }, // HU-194
     );
     // el path 4-arg (credit) NO se usa cuando hay destination.
     expect(mockCredit).not.toHaveBeenCalled();
@@ -3573,6 +3574,7 @@ describe('composeService.compose — gas overhead pass-through', () => {
       0.07,
       'owner-test',
       'test-registry/corridor',
+      { idemKey: expect.any(String) }, // HU-194
     );
   });
 });

@@ -529,7 +529,9 @@ describe('/registries — no cobrar antes de validar (HU-193)', () => {
     expect(budgetState.balance).toBe(before);
     // Ownership guard (CLAUDE.md): el credit va con el owner_ref del caller
     // autenticado, y por el monto exacto del débito ($1), nunca más.
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
+      idemKey: expect.any(String),
+    });
     expect(mockRegister).not.toHaveBeenCalled();
   });
 
@@ -549,7 +551,9 @@ describe('/registries — no cobrar antes de validar (HU-193)', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe('Failed to register registry');
     expect(creditMock).toHaveBeenCalledTimes(1);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
+      idemKey: expect.any(String),
+    });
     expect(budgetState.balance).toBe(before);
   });
 
@@ -565,7 +569,9 @@ describe('/registries — no cobrar antes de validar (HU-193)', () => {
     });
 
     expect(res.statusCode).toBe(404);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
+      idemKey: expect.any(String),
+    });
     expect(budgetState.balance).toBe(before);
   });
 
@@ -629,7 +635,9 @@ describe('/registries — no cobrar antes de validar (HU-193)', () => {
     });
 
     expect(res.statusCode).toBe(404);
-    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1');
+    expect(creditMock).toHaveBeenCalledWith('k1', 2368, 1, 'o1', {
+      idemKey: expect.any(String),
+    });
     expect(budgetState.balance).toBe(before);
   });
 
@@ -691,6 +699,7 @@ describe('/registries — no cobrar antes de validar (HU-193)', () => {
       'k1',
       2368,
       1,
+      { idemKey: expect.any(String) },
     );
     expect(budgetState.balance).toBe(before);
   });
@@ -710,7 +719,9 @@ describe('/registries — no cobrar antes de validar (HU-193)', () => {
     expect(res.statusCode).toBe(404);
     expect(creditSessionMock).toHaveBeenCalledTimes(1);
     expect(creditMock).not.toHaveBeenCalled();
-    expect(creditSessionMock).toHaveBeenCalledWith('s1', 'o1', 'k1', 2368, 1);
+    expect(creditSessionMock).toHaveBeenCalledWith('s1', 'o1', 'k1', 2368, 1, {
+      idemKey: expect.any(String),
+    });
     expect(budgetState.balance).toBe(before);
   });
 

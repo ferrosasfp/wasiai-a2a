@@ -499,6 +499,8 @@ describe('POST /gasless/transfer — refund on failure (HU-192)', () => {
       CHAIN_ID,
       VALUE_USD,
       OWNER_REF,
+      // HU-194: clave del refund LÓGICO (dedup DB-level del reintento).
+      { idemKey: expect.any(String) },
     );
     // Anti-doble-refund: exactamente UNA vez, y el balance NO quedó inflado.
     expect(mockCredit).toHaveBeenCalledTimes(1);
@@ -529,6 +531,8 @@ describe('POST /gasless/transfer — refund on failure (HU-192)', () => {
       CHAIN_ID,
       VALUE_USD,
       OWNER_REF,
+      // HU-194: clave del refund LÓGICO (dedup DB-level del reintento).
+      { idemKey: expect.any(String) },
     );
     expect(mockCredit).toHaveBeenCalledTimes(1);
   });
@@ -576,6 +580,8 @@ describe('POST /gasless/transfer — refund on failure (HU-192)', () => {
       CHAIN_ID,
       VALUE_USD,
       OWNER_REF,
+      // HU-194: clave del refund LÓGICO (dedup DB-level del reintento).
+      { idemKey: expect.any(String) },
     );
   });
 
@@ -623,6 +629,7 @@ describe('POST /gasless/transfer — refund on failure (HU-192)', () => {
       TEST_KEY_ID,
       CHAIN_ID,
       VALUE_USD,
+      { idemKey: expect.any(String) },
     );
     // NO se reembolsa por el ledger del padre solamente.
     expect(mockCredit).not.toHaveBeenCalled();
@@ -647,6 +654,7 @@ describe('POST /gasless/transfer — refund on failure (HU-192)', () => {
       TEST_KEY_ID,
       CHAIN_ID,
       VALUE_USD,
+      { idemKey: expect.any(String) },
     );
     expect(mockCredit).not.toHaveBeenCalled();
   });
@@ -672,6 +680,7 @@ describe('POST /gasless/transfer — refund on failure (HU-192)', () => {
       ownerRef: OWNER_REF,
       destination: null,
       reason: 'gasless-route.refund-failed:not-operational',
+      idemKey: expect.any(String),
     });
     // Un solo intento de credit: el outbox NO se encola además del credit OK.
     expect(mockCredit).toHaveBeenCalledTimes(1);
@@ -695,6 +704,7 @@ describe('POST /gasless/transfer — refund on failure (HU-192)', () => {
       ownerRef: OWNER_REF,
       destination: null,
       reason: 'gasless-route.refund-threw:not-operational',
+      idemKey: expect.any(String),
     });
   });
 
@@ -736,6 +746,8 @@ describe('POST /gasless/transfer — refund on failure (HU-192)', () => {
       CHAIN_ID,
       VALUE_USD,
       OWNER_REF,
+      // HU-194: clave del refund LÓGICO (dedup DB-level del reintento).
+      { idemKey: expect.any(String) },
     );
     expect(mockCredit).toHaveBeenCalledTimes(1);
     expect(balance()).not.toBeGreaterThan(START_BALANCE);

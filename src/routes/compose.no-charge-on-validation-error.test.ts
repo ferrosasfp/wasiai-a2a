@@ -1023,6 +1023,8 @@ describe('compose route — 504 de timeout post-débito reembolsa (HIGH-2, direc
       'k1',
       2368,
       STEP0_PRICE,
+      // HU-194: clave del refund LÓGICO, en la posición 6 (antes del destino).
+      { idemKey: expect.any(String) },
       undefined, // composeDestination (sin destino resuelto en este fixture)
     ]);
     expect(creditDelegationMock.mock.calls[0]?.[1]).toBe('o1');
@@ -1074,6 +1076,7 @@ describe('compose route — 504 de timeout post-débito reembolsa (HIGH-2, direc
       'k1',
       2368,
       STEP0_PRICE,
+      { idemKey: expect.any(String) }, // HU-194
       undefined,
     ]);
     expect(creditSessionMock.mock.calls[0]?.[1]).toBe('o1'); // ownership guard

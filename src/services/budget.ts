@@ -4,6 +4,7 @@
  */
 
 import { getLogger } from '../lib/logger.js';
+import type { RefundIdem } from '../lib/refund-idem.js';
 import { supabase } from '../lib/supabase.js';
 import type { Database } from '../types/database.types.js';
 import type {
@@ -441,18 +442,26 @@ export const budgetService = {
    * debit(): llama la RPC refund_a2a_key_spend (FOR UPDATE + ownership guard).
    * CD-10: ownerRef explícito (string, NO undefined) — el caller orchestrate ya
    * lo tiene en scopingKeyRow.owner_ref → evita el SELECT cold-path de debit().
+   *
+   * HU-194: `idem` es REQUERIDO. Con `idemKey` no nulo, la RPC dedupea el refund
+   * LÓGICO del lado de Postgres (`a2a_refund_applications`): si el crédito ya se
+   * aplicó (p. ej. commiteó y su respuesta se perdió), NO se vuelve a acreditar y
+   * la RPC devuelve 1 → `reverted:true` (la plata está de vuelta). Ver
+   * `lib/refund-idem.ts`.
    */
   async credit(
     keyId: string,
     chainId: number,
     amountUsd: number,
     ownerRef: string,
+    idem: RefundIdem,
   ): Promise<{ success: boolean; error?: string; reverted?: boolean }> {
     const { data, error } = await supabase.rpc('refund_a2a_key_spend', {
       p_key_id: keyId,
       p_chain_id: chainId,
       p_amount_usd: amountUsd,
       p_owner_ref: ownerRef, // CD-4: ownership guard DB-level
+      p_idem_key: idem.idemKey, // HU-194: dedup DB-level del refund lógico
     });
 
     if (error) {
@@ -462,6 +471,13 @@ export const budgetService = {
       }
       if (error.message.includes('KEY_NOT_FOUND')) {
         return { success: false, error: 'KEY_NOT_FOUND' };
+      }
+      // HU-194: misma clave con OTRO monto ⟹ reuso indebido de clave (bug), no
+      // un reintento. La RPC no aplicó nada; el code estable deja rastro en
+      // `last_error` del outbox para revisión manual (nunca acredita un monto
+      // ambiguo).
+      if (error.message.includes('REFUND_IDEM_AMOUNT_MISMATCH')) {
+        return { success: false, error: 'REFUND_IDEM_AMOUNT_MISMATCH' };
       }
       log.error(
         { keyId, chainId, amountUsd, err: error.message },
@@ -498,6 +514,7 @@ export const budgetService = {
     amountUsd: number,
     ownerRef: string,
     destination: string,
+    idem: RefundIdem,
   ): Promise<{ success: boolean; error?: string; reverted?: boolean }> {
     const { data, error } = await supabase.rpc('refund_with_dest_policy', {
       p_key_id: keyId,
@@ -505,6 +522,7 @@ export const budgetService = {
       p_amount_usd: amountUsd,
       p_owner_ref: ownerRef, // CD-2/CD-8: ownership guard DB-level
       p_destination: destination, // misma forma normalizada que el débito
+      p_idem_key: idem.idemKey, // HU-194: dedup DB-level del refund lógico
     });
 
     if (error) {
@@ -514,6 +532,10 @@ export const budgetService = {
       }
       if (error.message.includes('KEY_NOT_FOUND')) {
         return { success: false, error: 'KEY_NOT_FOUND' };
+      }
+      // HU-194: ver `credit`. Ya aplicada con otro monto ⟹ no aplicar nada.
+      if (error.message.includes('REFUND_IDEM_AMOUNT_MISMATCH')) {
+        return { success: false, error: 'REFUND_IDEM_AMOUNT_MISMATCH' };
       }
       log.error(
         { keyId, chainId, amountUsd, destination, err: error.message },
@@ -559,6 +581,7 @@ export const budgetService = {
     keyId: string,
     chainId: number,
     amountUsd: number,
+    idem: RefundIdem,
     destination?: string,
   ): Promise<{ success: boolean; error?: string; reverted?: boolean }> {
     // CR NIT-1: `p_destination?: string` (SQL `DEFAULT NULL`). Under
@@ -572,6 +595,9 @@ export const budgetService = {
         p_key_id: keyId,
         p_chain_id: chainId,
         p_amount_usd: amountUsd,
+        // HU-194: el claim vive en la RPC DUAL-LEDGER (la más externa) para que
+        // un reintento no vuelva a decrementar `total_spent`.
+        p_idem_key: idem.idemKey,
         ...(destination !== undefined && { p_destination: destination }),
       };
     const { data, error } = await supabase.rpc(
@@ -587,6 +613,10 @@ export const budgetService = {
         error.message.includes('DELEGATION_NOT_FOUND')
       ) {
         return { success: false, error: 'KEY_NOT_FOUND' };
+      }
+      // HU-194: ver `credit`. Ya aplicada con otro monto ⟹ no aplicar nada.
+      if (error.message.includes('REFUND_IDEM_AMOUNT_MISMATCH')) {
+        return { success: false, error: 'REFUND_IDEM_AMOUNT_MISMATCH' };
       }
       log.error(
         { keyId, chainId, amountUsd, delegationId, err: error.message },
@@ -612,6 +642,7 @@ export const budgetService = {
     keyId: string,
     chainId: number,
     amountUsd: number,
+    idem: RefundIdem,
     destination?: string,
   ): Promise<{ success: boolean; error?: string; reverted?: boolean }> {
     // CR NIT-1: `p_destination?: string` (SQL `DEFAULT NULL`). Under
@@ -625,6 +656,8 @@ export const budgetService = {
         p_key_id: keyId,
         p_chain_id: chainId,
         p_amount_usd: amountUsd,
+        // HU-194: idem que creditDelegation — claim en la RPC dual-ledger.
+        p_idem_key: idem.idemKey,
         ...(destination !== undefined && { p_destination: destination }),
       };
     const { data, error } = await supabase.rpc(
@@ -640,6 +673,10 @@ export const budgetService = {
         error.message.includes('SESSION_NOT_FOUND')
       ) {
         return { success: false, error: 'KEY_NOT_FOUND' };
+      }
+      // HU-194: ver `credit`. Ya aplicada con otro monto ⟹ no aplicar nada.
+      if (error.message.includes('REFUND_IDEM_AMOUNT_MISMATCH')) {
+        return { success: false, error: 'REFUND_IDEM_AMOUNT_MISMATCH' };
       }
       log.error(
         { keyId, chainId, amountUsd, sessionId, err: error.message },

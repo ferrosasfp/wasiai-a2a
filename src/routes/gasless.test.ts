@@ -561,7 +561,10 @@ describe('POST /gasless/transfer — chain-aware (WKH-138)', () => {
     expect(mockGaslessTransfer).not.toHaveBeenCalled();
     // HU-192: el débito se aplicó y no hubo transfer → credit-back del monto
     // exacto, con el owner_ref del caller (ownership guard).
-    expect(mockCredit).toHaveBeenCalledWith(TEST_KEY_ID, 84532, 5, 'user-1');
+    expect(mockCredit).toHaveBeenCalledWith(TEST_KEY_ID, 84532, 5, 'user-1', {
+      // HU-194: clave del refund LÓGICO.
+      idemKey: expect.any(String),
+    });
   });
 
   // ── T-CHAIN-BAD: unrecognized slug → 400 CHAIN_NOT_SUPPORTED ──────────────
