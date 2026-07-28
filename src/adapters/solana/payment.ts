@@ -118,6 +118,18 @@ const DEFAULT_MAX_INTENT_ENTRIES = 10_000;
 //     (300 s cada uno), y `bodyTimeout` es un timeout de INACTIVIDAD: un agente
 //     que trickle-feedea un byte cada 299 s mantiene el hop vivo indefinidamente.
 //
+// ⚠️ ACTUALIZACIÓN HU-195 (sólo el segundo bullet): el hop de invoke YA tiene
+// techo. `lib/ssrf-dispatcher.ts` configura `headersTimeout`/`bodyTimeout` y
+// `ssrfFetch` adjunta un `AbortSignal` de wall-clock, ambos gobernados por
+// `OUTBOUND_HOP_TIMEOUT_MS` (default 60 s, clampeado a `TIMEOUT_COMPOSE_MS`) —
+// ver `lib/outbound-timeout.ts`. El trickle-feed infinito está cerrado.
+// Lo que NO cambió, y por eso la conclusión de abajo SIGUE EN PIE: el techo es
+// por HOP, no por PIPELINE. El 504 sigue sin cancelar el run, así que tampoco hay
+// ahora una cota dura de wall-clock por run. Los números de este módulo se
+// dejan a propósito en el peor caso VIEJO (300 s/hop): sobre-estiman la vida de
+// un run, y sobre-estimar el TTL de un Map de idempotencia es el lado seguro del
+// error. Bajarlos a 60 s es una decisión de money-path con su propia HU.
+//
 // Conclusión honesta: **no existe cota superior dura** de wall-clock para un run,
 // así que NINGÚN número de TTL puede prometer "no expira dentro de la ventana viva
 // del run". Elegimos NO cancelar el pipeline en el 504 (opción B del AR): abortar

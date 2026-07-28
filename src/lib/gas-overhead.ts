@@ -230,8 +230,16 @@ async function getNativeTokenUsd(
 ): Promise<number | undefined> {
   if (config.coingeckoId !== undefined) {
     try {
+      // HU-195: techo de WALL-CLOCK del hop. El `Promise.race` de
+      // `getCachedOverhead` (línea ~331) hace que el CALLER se rinda a los
+      // `LIVE_CALC_TIMEOUT_MS`, pero NO abortaba este fetch: el socket seguía
+      // vivo hasta los defaults de undici (300 s de INACTIVIDAD, y sin cota
+      // alguna contra un peer que trickle-feedea). Alineamos el presupuesto del
+      // hop con el que la race ya declaró → cero cambio en el valor devuelto,
+      // el socket deja de sobrevivir a su propio timeout.
       const res = await fetch(
         `https://api.coingecko.com/api/v3/simple/price?ids=${config.coingeckoId}&vs_currencies=usd`,
+        { signal: AbortSignal.timeout(LIVE_CALC_TIMEOUT_MS) },
       );
       if (res.ok) {
         const data = (await res.json()) as Record<string, { usd?: number }>;

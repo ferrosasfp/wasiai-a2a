@@ -351,6 +351,51 @@ describe('ssrfFetch — connect-time enforcement (real undici Agent)', () => {
     // H-1: redirects are handled manually so each hop can be re-validated.
     expect(init.redirect).toBe('manual');
   });
+
+  // ── HU-195: el techo de wall-clock viaja SIEMPRE en el init ───────────
+  //
+  // Los ejes se prueban end-to-end contra un servidor local en
+  // `outbound-timeout.test.ts`. Acá se prueba el PLUMBING: que `ssrfFetch` —el
+  // único camino outbound de compose/discovery/MCP— adjunte el `signal` sí o sí,
+  // incluso cuando el caller no manda ninguno (el caso de
+  // `services/compose.ts` en el hop de invoke, que era el agujero original).
+  it('T-195-WIRE-1: ssrfFetch adjunta un AbortSignal de wall-clock aunque el caller no pase ninguno', async () => {
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: '93.184.216.34', family: 4 }]);
+      },
+    );
+    mockUndiciFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    // Init SIN `signal` — exactamente como lo llama services/compose.ts.
+    await ssrfFetch('http://public.example/invoke', {
+      method: 'POST',
+      body: '{}',
+    });
+    const init = mockUndiciFetch.mock.calls[0]![1] as Record<string, unknown>;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect((init.signal as AbortSignal).aborted).toBe(false);
+  });
+
+  it('T-195-WIRE-2: el signal del caller sigue gobernando (se combina, no se descarta)', async () => {
+    mockLookup.mockImplementation(
+      (_h: string, _o: unknown, cb: (e: unknown, a: unknown) => void) => {
+        cb(null, [{ address: '93.184.216.34', family: 4 }]);
+      },
+    );
+    mockUndiciFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const caller = new AbortController();
+    await ssrfFetch('http://public.example/x', { signal: caller.signal });
+    const init = mockUndiciFetch.mock.calls[0]![1] as Record<string, unknown>;
+    const passed = init.signal as AbortSignal;
+    expect(passed).toBeInstanceOf(AbortSignal);
+    // NO es el mismo objeto (es el compuesto) pero el abort del caller lo dispara.
+    expect(passed).not.toBe(caller.signal);
+    expect(passed.aborted).toBe(false);
+    caller.abort(new Error('discovery-5s-budget'));
+    await Promise.resolve();
+    expect(passed.aborted).toBe(true);
+    expect((passed.reason as Error).message).toBe('discovery-5s-budget');
+  });
 });
 
 // ─── H-1: manual redirect re-validation + credential stripping ──────────

@@ -152,6 +152,27 @@ describe('getStepGasOverheadUsd', () => {
     expect(mockGetGasPrice).toHaveBeenCalledTimes(1);
   });
 
+  // HU-195: el `Promise.race` de getCachedOverhead hace que el CALLER se rinda a
+  // los 2 s, pero NO abortaba este fetch — el socket sobrevivía a su propio
+  // timeout (hasta 300 s de INACTIVIDAD de undici, y sin cota ninguna contra un
+  // peer que trickle-feedea). El hop tiene que traer su propio presupuesto.
+  it('T-195-GAS-1: el hop de CoinGecko sale con un AbortSignal de wall-clock', async () => {
+    process.env.AVALANCHE_RPC_URL = 'https://rpc.example/avax';
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ 'avalanche-2': { usd: 30 } }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await getStepGasOverheadUsd(AVAX_MAINNET);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = fetchMock.mock.calls[0]![1] as { signal?: unknown };
+    expect(init).toBeDefined();
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect((init.signal as AbortSignal).aborted).toBe(false);
+  });
+
   it('mainnet without override, no RPC configured → fail-open 0', async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,

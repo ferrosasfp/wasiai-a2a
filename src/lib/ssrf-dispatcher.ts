@@ -46,6 +46,10 @@ import {
 } from 'node:dns';
 import { isIP } from 'node:net';
 import { Agent, type Dispatcher, fetch as undiciFetch } from 'undici';
+import {
+  outboundWallClockSignal,
+  resolveOutboundHopTimeoutMs,
+} from './outbound-timeout.js';
 import { isBlockedAddress, validateOutboundUrl } from './url-validator.js';
 
 /**
@@ -106,20 +110,46 @@ export function ssrfLookup(
 let cachedDispatcher: Agent | undefined;
 
 /**
+ * HU-195 — options del `Agent` outbound, exportadas para que los tests puedan
+ * construir un `Agent` con LOS MISMOS techos y manejarlo contra un servidor
+ * local (el connector real bloquea 127.0.0.1, así que un test end-to-end
+ * reemplaza SÓLO el `lookup`; mismo patrón que el test T-H1 de redirects).
+ *
+ * EJE A — INACTIVIDAD. `headersTimeout` corta al peer que acepta el socket y
+ * nunca manda status line; `bodyTimeout` corta al que se queda mudo en medio del
+ * body. Sin estos dos, regían los defaults de undici 8 (300_000 ms cada uno,
+ * `node_modules/undici/lib/dispatcher/client.js:275-276`).
+ *
+ * OJO: `bodyTimeout` NO es wall-clock — undici lo REFRESCA en cada chunk
+ * (`client-h1.js` `onBody` → `this.timeout.refresh()`). El eje B (el `signal` de
+ * `ssrfFetch`) es el que corta al trickle-feed.
+ */
+export function outboundAgentOptions(): Agent.Options {
+  const hopCeilingMs = resolveOutboundHopTimeoutMs();
+  return {
+    connect: {
+      // M2: the connector resolves via OUR lookup at socket-open time. SNI /
+      // TLS still target the hostname → HTTPS keeps working.
+      lookup: ssrfLookup,
+    },
+    headersTimeout: hopCeilingMs,
+    bodyTimeout: hopCeilingMs,
+  };
+}
+
+/**
  * Returns a process-wide undici `Agent` that enforces the connect-time SSRF
  * check. Lazily constructed and reused (keep-alive friendly). Pass it as the
  * `dispatcher` option of every outbound `fetch` whose URL is attacker-
  * influenceable (registry discovery endpoints, agent invoke URLs).
+ *
+ * HU-195: el `Agent` se construye UNA vez, así que `OUTBOUND_HOP_TIMEOUT_MS` se
+ * lee al primer uso del proceso (el eje B, en cambio, la relee por request).
+ * `_resetSsrfDispatcher()` fuerza la reconstrucción en tests.
  */
 export function getSsrfDispatcher(): Dispatcher {
   if (!cachedDispatcher) {
-    cachedDispatcher = new Agent({
-      connect: {
-        // M2: the connector resolves via OUR lookup at socket-open time. SNI /
-        // TLS still target the hostname → HTTPS keeps working.
-        lookup: ssrfLookup,
-      },
-    });
+    cachedDispatcher = new Agent(outboundAgentOptions());
   }
   return cachedDispatcher;
 }
@@ -317,6 +347,13 @@ export async function ssrfFetch(
   init?: RequestInit,
 ): Promise<Response> {
   const dispatcher = getSsrfDispatcher();
+  // HU-195 EJE B — techo de WALL-CLOCK. Se crea UNA sola vez, ANTES del loop, así
+  // que el presupuesto es UNO para toda la llamada (los hasta 5 hops de redirect
+  // lo COMPARTEN en vez de renovarlo cada uno). Sigue vigente después del
+  // `return`: abortar el signal errorea el stream del body, que es exactamente lo
+  // que corta al peer que trickle-feedea la respuesta (el eje A, `bodyTimeout`, no
+  // lo ve porque se refresca con cada chunk).
+  const wallClockSignal = outboundWallClockSignal(init?.signal);
   let currentUrl = typeof input === 'string' ? input : input.toString();
   let currentHeaders = init?.headers;
   let currentBody = init?.body;
@@ -335,6 +372,10 @@ export async function ssrfFetch(
       body: currentBody,
       // Never let undici auto-follow: each hop must pass assertUrlAllowed first.
       redirect: 'manual' as const,
+      // HU-195: sobrescribe el `signal` que venga en `...init` — `wallClockSignal`
+      // YA lo incluye vía `AbortSignal.any`, así que un caller con presupuesto
+      // propio más corto (discovery 5 s) sigue ganando.
+      signal: wallClockSignal,
       dispatcher,
     };
     const response = (await undiciFetch(
