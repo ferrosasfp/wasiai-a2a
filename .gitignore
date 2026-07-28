@@ -1,5 +1,10 @@
 # Dependencies
 node_modules/
+# Sin la barra final: `node_modules/` NO matchea un SYMLINK llamado `node_modules`,
+# y los agentes que trabajan en un git worktree lo symlinkean al del repo principal
+# (el worktree no tiene deps propias). Sin esta línea aparece como `?? node_modules`
+# y un `git add -A` lo commitea.
+node_modules
 .pnpm-store/
 
 # Build outputs
