@@ -116,11 +116,20 @@ const mockExecuteDebitHop1 = vi.hoisted(() =>
 const mockRecordDebitHop1 = vi.hoisted(() =>
   vi.fn(async (_args: unknown) => '0xhop1' as string | null),
 );
-// HU-202: el doble DEVUELVE BOOLEAN, como la función real. Antes devolvía `undefined`,
+// HU-202: el doble DEVUELVE LO MISMO QUE LA FUNCIÓN REAL. Antes devolvía `undefined`,
 // y esa deriva del doble respecto del contrato real es lo que hacía invisible el
-// fail-closed del lease (el caller ahora NO manda el hop 2 si esto no dice `true`).
+// fail-closed del lease (el caller NO manda el hop 2 si esto no dice `applied`).
+//
+// AR de HU-202, BLOQUEANTE 2: el contrato real dejó de ser un booleano. `false` colapsaba
+// "el guard me rechazó" (otro tiene el lease) con "la escritura nunca ocurrió" (blip de
+// red), que son causas OPUESTAS con remedios distintos. El doble sigue el tipo real, así
+// que un test no puede volver a codificar la versión colapsada sin que tsc lo vea.
 const mockRecordDebitSettleStatus = vi.hoisted(() =>
-  vi.fn(async (_args: unknown): Promise<boolean> => true),
+  vi.fn(
+    async (_args: unknown): Promise<SettleStatusWrite> => ({
+      outcome: 'applied',
+    }),
+  ),
 );
 vi.mock('../adapters/escrow/debit-executor.js', () => ({
   executeDebitHop1: (args: unknown) => mockExecuteDebitHop1(args),
@@ -128,9 +137,25 @@ vi.mock('../adapters/escrow/debit-executor.js', () => ({
   recordDebitSettleStatus: (args: unknown) => mockRecordDebitSettleStatus(args),
 }));
 
+// AR de HU-202, BLOQUEANTE 1: el preflight de esquema es un GATE del camino escrow — con
+// veredicto negativo `settleEscrowAware` cae al seam operador-custodial ANTES del hop 1.
+// El default del doble es `ok:true` para que los tests heredados sigan ejercitando el
+// camino escrow; los tests del propio preflight lo invierten.
+const mockEnsureEscrowSchemaReady = vi.hoisted(() =>
+  vi.fn(
+    async (): Promise<{ ok: boolean; failure?: string; detail?: string }> => ({
+      ok: true,
+    }),
+  ),
+);
+vi.mock('../adapters/escrow/schema-preflight.js', () => ({
+  ensureEscrowSchemaReady: () => mockEnsureEscrowSchemaReady(),
+}));
+
 // HU-201 fix-pack: `hasBroadcastEvidence` se mudó a `adapters/errors.js` (tres
 // consumidores en tres capas; ver su docstring). El test lo importa de su nueva casa.
 import { hasBroadcastEvidence } from '../adapters/errors.js';
+import type { SettleStatusWrite } from '../adapters/escrow/debit-executor.js';
 import { supabase } from '../lib/supabase.js';
 import type { CreateUptoInput } from '../types/index.js';
 import {
@@ -1619,7 +1644,7 @@ describe('WKH-191b settleEscrowAware (two-hop)', () => {
       blockNumber: 1n,
     });
     mockRecordDebitHop1.mockResolvedValue('0xhop1');
-    mockRecordDebitSettleStatus.mockResolvedValue(true); // HU-202: el lease se toma OK (el mock devolvía `undefined`, que ahora significa
+    mockRecordDebitSettleStatus.mockResolvedValue({ outcome: 'applied' }); // HU-202: el lease se toma OK (el mock devolvía `undefined`, que ahora significa
     // "el hecho NO quedó persistido" ⟹ el hop 2 NO se manda).
   });
 
@@ -2011,7 +2036,7 @@ describe('WKH-192 settle decimals-aware', () => {
       blockNumber: 1n,
     });
     mockRecordDebitHop1.mockResolvedValue('0xhop1');
-    mockRecordDebitSettleStatus.mockResolvedValue(true); // HU-202: el lease se toma OK (el mock devolvía `undefined`, que ahora significa
+    mockRecordDebitSettleStatus.mockResolvedValue({ outcome: 'applied' }); // HU-202: el lease se toma OK (el mock devolvía `undefined`, que ahora significa
     // "el hecho NO quedó persistido" ⟹ el hop 2 NO se manda).
     happySettle();
 
@@ -2165,7 +2190,7 @@ describe('HU-201 settle success:false con evidencia de broadcast', () => {
         blockNumber: 1n,
       });
       mockRecordDebitHop1.mockResolvedValue('0xhop1');
-      mockRecordDebitSettleStatus.mockResolvedValue(true); // HU-202: el lease se toma OK (el mock devolvía `undefined`, que ahora significa
+      mockRecordDebitSettleStatus.mockResolvedValue({ outcome: 'applied' }); // HU-202: el lease se toma OK (el mock devolvía `undefined`, que ahora significa
       // "el hecho NO quedó persistido" ⟹ el hop 2 NO se manda).
     });
 
@@ -2270,11 +2295,17 @@ describe('HU-202 lease del hop 2 (settleEscrowAware)', () => {
       blockNumber: 1n,
     });
     mockRecordDebitHop1.mockResolvedValue('0xhop1');
-    mockRecordDebitSettleStatus.mockResolvedValue(true);
+    // `mockReset` y no `mockResolvedValue` a secas: AC-M1 instala un `mockImplementation`
+    // que sobrevive al `mockResolvedValue` del siguiente test y lo haría fallar por orden.
+    mockRecordDebitSettleStatus.mockReset();
+    mockRecordDebitSettleStatus.mockResolvedValue({ outcome: 'applied' });
+    // Esquema OK por default: los tests del preflight lo invierten explícitamente.
+    mockEnsureEscrowSchemaReady.mockResolvedValue({ ok: true });
   });
 
   afterEach(() => {
     mockIsEscrowSettleEnabled.mockReturnValue(false);
+    mockEnsureEscrowSchemaReady.mockResolvedValue({ ok: true });
   });
 
   function callEscrow202() {
@@ -2305,11 +2336,22 @@ describe('HU-202 lease del hop 2 (settleEscrowAware)', () => {
     expect(leaseOrder).toBeLessThan(signOrder);
   });
 
-  it('AC-4 (G) — si el hecho NO se puede persistir, NUNCA sale el hop 2 (fail-closed)', async () => {
-    // El costo de abortar es CERO y se puede demostrar: la fila queda en `hop1_confirmed`
-    // sin stamp, que es el caso (A) — nada salió, nadie puede doble-pagar, y el
-    // reconciliador lo paga solo.
-    mockRecordDebitSettleStatus.mockResolvedValue(false);
+  // ── AR de HU-202, BLOQUEANTE 2 — EL TEST COLAPSADO, PARTIDO POR CAUSA ──────────
+  //
+  // Este bloque era UN test con `mockResolvedValue(false)`, y ese `false` codificaba el
+  // contrato viejo donde "el guard me rechazó" y "la escritura nunca ocurrió" eran el
+  // mismo valor. Con el resultado discriminado, un solo test dejaría la mitad de la
+  // distinción sin cubrir: la conducta de dinero coincide (las dos abortan) pero la
+  // ALARMA no, y la alarma es lo único que le dice al operador si el candado funcionó o
+  // si la base está caída. Dos tests, uno por causa.
+
+  it('AC-4 (G.1) — el guard RECHAZA el lease (otro lo tiene) → NUNCA sale el hop 2', async () => {
+    // El costo de abortar es CERO y se puede demostrar: la fila queda como el caso (A)
+    // —nada salió, nadie puede doble-pagar— y el reconciliador lo paga solo.
+    mockRecordDebitSettleStatus.mockResolvedValue({
+      outcome: 'rejected_by_guard',
+      currentStatus: 'resolving_settle',
+    });
     happySettle();
 
     const outcome = await callEscrow202();
@@ -2321,10 +2363,38 @@ describe('HU-202 lease del hop 2 (settleEscrowAware)', () => {
     // Y JAMÁS `unequivocal`: el hop 1 ya movió fondos del buyer on-chain, así que un
     // refund off-chain sería doble-crédito.
     expect(outcome.failureKind).toBe('ambiguous');
+    // LA DISTINCIÓN: el motivo viaja en el veredicto, no sólo en un log. Si las dos
+    // causas volvieran a colapsar, este `expect` y el del test de abajo no podrían ser
+    // ambos verdaderos.
+    expect(outcome.error).toContain('refused by guard');
+    expect(outcome.error).not.toContain('write failed');
+  });
+
+  it('AC-4 (G.2) — la escritura del lease NUNCA OCURRIÓ (blip de red) → tampoco sale el hop 2, pero es OTRA causa', async () => {
+    // NO es evidencia de que alguien más tenga el lease: es evidencia de que no sabemos
+    // nada. Aborta igual (mandar el hop 2 sin lease reabre el caso F, y un pago demorado
+    // es recuperable mientras que uno duplicado no), pero el remedio es la INFRA.
+    mockRecordDebitSettleStatus.mockResolvedValue({
+      outcome: 'write_failed',
+      detail: 'fetch failed',
+    });
+    happySettle();
+
+    const outcome = await callEscrow202();
+
+    expect(mockSign).not.toHaveBeenCalled();
+    expect(mockSettle).not.toHaveBeenCalled();
+    expect(outcome.status).toBe('failed');
+    expect(outcome.failureKind).toBe('ambiguous');
+    expect(outcome.error).toContain('write failed');
+    expect(outcome.error).not.toContain('refused by guard');
   });
 
   it('AC-4b (G, caller) — con el lease no persistido, el buyer NUNCA se reembolsa (sus fondos ya salieron en el hop 1)', async () => {
-    mockRecordDebitSettleStatus.mockResolvedValue(false);
+    mockRecordDebitSettleStatus.mockResolvedValue({
+      outcome: 'write_failed',
+      detail: 'fetch failed',
+    });
     happySettle();
     const db = makeIntentDb({
       intent_type: 'session',
@@ -2408,13 +2478,93 @@ describe('HU-202 lease del hop 2 (settleEscrowAware)', () => {
       debit_hop1_tx_hash: '0xhop1prev',
       debit_settle_status: 'hop1_confirmed',
     });
-    mockRecordDebitSettleStatus.mockResolvedValue(false);
+    mockRecordDebitSettleStatus.mockResolvedValue({
+      outcome: 'rejected_by_guard',
+      currentStatus: 'resolving_settle',
+    });
     happySettle();
 
     await callEscrow202();
 
     expect(mockExecuteDebitHop1).not.toHaveBeenCalled();
     expect(mockSign).not.toHaveBeenCalled(); // el hop 2 tampoco salió
+  });
+
+  // ── AR de HU-202, BLOQUEANTE 1 — EL GATE DE ORDEN DE RELEASE, EJECUTABLE ───────
+  //
+  // El escenario que estos dos tests candan es el que rompía el 100% del tráfico de
+  // escrow contra una base sin migrar: el hop 1 movía los fondos del buyer, el RPC del
+  // lease tiraba `INVALID_SETTLE_STATUS`, el hop 2 no salía por el fail-closed, y el
+  // intent terminaba `failed_ambiguous` SIN reembolso. Comprador debitado, vendedor sin
+  // cobrar. Hasta el fix-pack, el gate existía sólo como prosa en un `.md` y en el header
+  // del `.sql`.
+
+  it('AC-P1 — con el esquema INCOMPLETO, el camino escrow NO se habilita: el hop 1 nunca se dispara', async () => {
+    mockEnsureEscrowSchemaReady.mockResolvedValue({
+      ok: false,
+      failure: 'RPC_REJECTS_RESOLVING_SETTLE',
+      detail: 'INVALID_SETTLE_STATUS: resolving_settle',
+    });
+    happySettle();
+
+    const outcome = await callEscrow202();
+
+    // LO QUE IMPORTA: los fondos del buyer NO se movieron. Sin hop 1 no hay nada que
+    // reconciliar, así que el modo de falla entero deja de existir.
+    expect(mockExecuteDebitHop1).not.toHaveBeenCalled();
+    expect(mockRecordDebitSettleStatus).not.toHaveBeenCalled();
+    // Y el seller SÍ cobra, por el seam operador-custodial de siempre.
+    expect(outcome.status).toBe('settled');
+  });
+
+  it('AC-P2 — el preflight corta ANTES de leer la firma (no se toca ni la lectura del money-path)', async () => {
+    mockEnsureEscrowSchemaReady.mockResolvedValue({
+      ok: false,
+      failure: 'PROBE_UNAVAILABLE',
+      detail: 'fetch failed',
+    });
+    happySettle();
+
+    await callEscrow202();
+
+    expect(mockReadValidDebitSignature).not.toHaveBeenCalled();
+  });
+
+  // ── AR de HU-202, MENOR 1 — EL CATCH-ALL NO PUEDE RE-SETTLEAR CON EL LEASE TOMADO ──
+
+  it('AC-M1 — si algo TIRA con el lease tomado, el catch-all NO cae al seam (sería un 2º pago)', async () => {
+    // El fallback del catch llama al seam, o sea que MANDA UN PAGO. Con el lease tomado
+    // eso es un hop 2 saliendo desde el manejador de errores sin saber si el primero
+    // aterrizó. Se fuerza el throw DESPUÉS del lease: el flip a `settled` explota.
+    happySettle();
+    mockRecordDebitSettleStatus.mockImplementation(
+      async (args: unknown): Promise<SettleStatusWrite> => {
+        if ((args as { status: string }).status === 'settled') {
+          throw new Error('boom after the lease was taken');
+        }
+        return { outcome: 'applied' };
+      },
+    );
+
+    const outcome = await callEscrow202();
+
+    // El seam corrió UNA sola vez (el hop 2 legítimo), NO dos.
+    expect(mockSettle).toHaveBeenCalledTimes(1);
+    expect(outcome.status).toBe('failed');
+    expect(outcome.failureKind).toBe('ambiguous');
+    expect(outcome.error).toContain('hop2 lease held');
+  });
+
+  it('AC-M2 (contra-ejemplo) — si tira SIN el lease tomado, el fallback al seam sigue intacto', async () => {
+    // La guarda tiene que ser del lease, no un "nunca más fallback": el throw ANTES del
+    // lease (el reader) sigue cayendo al camino operador-custodial y el seller cobra.
+    mockReadValidDebitSignature.mockRejectedValue(new Error('reader boom'));
+    happySettle();
+
+    const outcome = await callEscrow202();
+
+    expect(outcome.status).toBe('settled');
+    expect(mockSettle).toHaveBeenCalledTimes(1);
   });
 
   it('AC-11 — sin escrow (el camino por defecto) el lease NUNCA se interpone: cero escrituras de estado', async () => {

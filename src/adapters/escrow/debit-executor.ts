@@ -272,18 +272,37 @@ export async function recordDebitHop1(args: {
  * El stamp es un guard INDEPENDIENTE del status: el lado settle del claim no reclama una
  * fila estampada sin `debit_resolution_tx_hash`, cualquiera sea su `debit_settle_status`.
  *
- * ⚠️ EL BOOLEANO QUE DEVUELVE GOBIERNA DINERO. `false` significa "el hecho NO quedó
- * persistido", y el caller que está por mandar el hop 2 tiene PROHIBIDO mandarlo igual:
- * sin el lease escrito, la fila sigue auto-reclamable y el reconciliador puede re-enviar
- * el mismo pago en paralelo. Descartar este retorno re-abre el doble pago.
+ * ⚠️ EL RESULTADO QUE DEVUELVE GOBIERNA DINERO. Cualquier valor que no sea `applied`
+ * significa "el hecho NO quedó persistido", y el caller que está por mandar el hop 2
+ * tiene PROHIBIDO mandarlo igual: sin el lease escrito, la fila sigue auto-reclamable y
+ * el reconciliador puede re-enviar el mismo pago en paralelo. Descartar este retorno
+ * re-abre el doble pago.
+ *
+ * ⚠️ POR QUÉ NO ES UN BOOLEANO (AR de HU-202, BLOQUEANTE 2). Un `false` pelado colapsaba
+ * TRES hechos distintos en uno, y la información para separarlos ya se calculaba acá y
+ * se tiraba (se usaba sólo para redactar el log):
+ *   · `rejected_by_guard` — el UPDATE corrió y afectó 0 filas: la fila está en un estado
+ *     desde el que la transición NO se permite. Para el lease eso significa que **otro la
+ *     tiene** (o que ya es terminal). Abortar es lo correcto y es una condición ORDENADA.
+ *   · `write_failed`      — la escritura NUNCA OCURRIÓ (blip de red, RPC ausente, DB
+ *     caída). NO es evidencia de que nadie más tenga el lease: es evidencia de que no
+ *     sabemos nada. Merece una alarma DISTINTA, porque el remedio es distinto (mirar la
+ *     infra, no el intent).
+ * Colapsarlos hacía imposible distinguir "el candado funcionó" de "el candado no pudo
+ * ni intentarse", que son la misma respuesta con causas opuestas.
  */
+export type SettleStatusWrite =
+  | { outcome: 'applied' }
+  | { outcome: 'rejected_by_guard'; currentStatus: string | null }
+  | { outcome: 'write_failed'; detail: string };
+
 export async function recordDebitSettleStatus(args: {
   intentId: string;
   ownerRef: string;
   keyId: string;
   nonce: string;
   status: 'settled' | 'reconciliation_pending' | 'resolving_settle';
-}): Promise<boolean> {
+}): Promise<SettleStatusWrite> {
   const { data, error } = await supabase.rpc('record_debit_settle_status', {
     p_intent_id: args.intentId,
     p_owner_ref: args.ownerRef,
@@ -307,7 +326,9 @@ export async function recordDebitSettleStatus(args: {
       },
       'record_debit_settle_status failed — the lifecycle row was NOT updated (if the status is resolving_settle, check that the HU-198 migration is applied: an un-updated row stays auto-claimable and the reconciler could resend hop2 blind)',
     );
-    return false;
+    // `write_failed`, NO `rejected_by_guard`: el RPC no llegó a decidir nada. Ver el
+    // header — el caller trata los dos como fail-closed pero alerta distinto.
+    return { outcome: 'write_failed', detail: error.message };
   }
   // AR BLQ-MEDIO-2: el `error` NO era el único modo de fallo. El guard de transición
   // (migración 20260728000000) hace que un UPDATE de 0 filas sea un resultado NORMAL,
@@ -358,7 +379,17 @@ export async function recordDebitSettleStatus(args: {
         ? `record_debit_settle_status applied=false — the transition guard REJECTED this write: the lifecycle row was NOT set to '${args.status}' and it KEEPS its current status (${currentStatus ?? 'unreadable'}). This is a state-machine disagreement, NOT a diagnosis: do not assume what happened to the money from this line. Read debit_settle_status and debit_resolution_tx_hash for this intent, and check the chain for a hop2 disbursement to the seller, before concluding anything.`
         : 'record_debit_settle_status returned no `applied` flag — cannot confirm the lifecycle row was updated (are migrations 20260728010000/20260728020000 applied? a PostgREST schema-cache reload may be pending). Treated as NOT confirmed.',
     );
-    return false;
+    // AR de HU-202, BLOQUEANTE 2 — LA DISTINCIÓN QUE ANTES SE CALCULABA Y SE TIRABA.
+    //   · `applied === false` ⟹ el UPDATE corrió y el guard lo rechazó: hay un hecho.
+    //   · `applied === undefined` ⟹ el RPC contestó una forma que no conocemos (RPC viejo
+    //     todavía deployado, schema-cache sin recargar). NO hay hecho ninguno, así que
+    //     afirmar "el guard me rechazó" sería inventar. Es un `write_failed`.
+    return applied === false
+      ? { outcome: 'rejected_by_guard', currentStatus }
+      : {
+          outcome: 'write_failed',
+          detail: 'RPC returned no `applied` flag',
+        };
   }
-  return true;
+  return { outcome: 'applied' };
 }

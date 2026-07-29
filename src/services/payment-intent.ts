@@ -38,6 +38,7 @@ import {
   recordDebitHop1,
   recordDebitSettleStatus,
 } from '../adapters/escrow/debit-executor.js';
+import { ensureEscrowSchemaReady } from '../adapters/escrow/schema-preflight.js';
 import { resolveEscrowContract } from '../adapters/escrow-verifier.js';
 import { getDefaultChainKey, getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
@@ -575,10 +576,37 @@ export async function settleEscrowAware(params: {
 }): Promise<SettleOutcome> {
   const { intentId, ownerRef, payTo, finalAmountUsd, chainId, keyId } = params;
   const base = { intentId, ownerRef, payTo, finalAmountUsd, chainId };
+  // AR de HU-202, MENOR 1 — el catch-all de abajo cae al seam, o sea que RE-SETTLEA. Si
+  // el lease ya está tomado, ese re-settle sería un segundo pago al seller salido del
+  // manejador de errores. Hoy no es alcanzable (el seam es no-throw por contrato y las
+  // líneas entre el lease y el `return` no lanzan), pero la guarda cuesta una línea y el
+  // día que alguien meta un `await` que sí lanza entre medio, no hay nada que la reponga.
+  let leaseAcquired = false;
   try {
     // 0. Flag OFF (default) → fast-path byte-idéntico (CD-1/CD-2/AC-2), 1ª línea:
     //    cero lecturas DB / on-chain.
     if (!isEscrowSettleEnabled()) return settlePaymentIntentOnChain(base);
+
+    // 0.5 PREFLIGHT DE ESQUEMA (AR de HU-202, BLOQUEANTE 1) — el gate de orden de release,
+    //     ejecutable. Va ACÁ, ANTES de leer la firma y MUY antes del hop 1, porque el modo
+    //     de falla que cierra es exactamente "el código quedó adelante del esquema": contra
+    //     una base sin `20260728000000` el RPC del lease tira `INVALID_SETTLE_STATUS`, el
+    //     hop 1 YA movió los fondos del buyer, el hop 2 no sale por el fail-closed del paso
+    //     5, y el intent termina `failed_ambiguous` SIN reembolso. Comprador debitado,
+    //     vendedor sin cobrar. No es un borde: es el 100% del tráfico de escrow.
+    //
+    //     Verificar ANTES del hop 1 es lo que vuelve el fallo GRATIS: no se movió nada, así
+    //     que caer al seam operador-custodial paga al seller por la vía de siempre. El
+    //     veredicto está memoizado (single-flight, cache) ⟹ esto NO es una query por
+    //     request; ver `adapters/escrow/schema-preflight.ts`.
+    const schema = await ensureEscrowSchemaReady();
+    if (!schema.ok) {
+      log.error(
+        { intentId, failure: schema.failure, detail: schema.detail },
+        'escrow settle path DISABLED by schema preflight — falling back to the operator-custodial seam. NO hop1 was attempted, so the buyer escrow was NOT debited and the seller is still paid by the usual path. Apply the pending migrations before relying on the non-custodial path.',
+      );
+      return settlePaymentIntentOnChain(base);
+    }
 
     // 1. Escrow configurado en la default chain (AC-6). Sin chain/escrow → seam.
     const chainKey = getDefaultChainKey();
@@ -679,21 +707,58 @@ export async function settleEscrowAware(params: {
     // Bonus: dos `settleEscrowAware` concurrentes sobre el mismo intent (hoy los dos mandan
     // hop 2) pasan a que sólo uno tome el lease — el guard de transición del RPC hace que el
     // segundo vea `applied=false`.
-    const leaseHeld = await recordDebitSettleStatus({
+    const lease = await recordDebitSettleStatus({
       intentId,
       ownerRef,
       keyId,
       nonce: row.debit_nonce,
       status: 'resolving_settle',
     });
-    if (!leaseHeld) {
-      // `recordDebitSettleStatus` ya logueó el HECHO (error del RPC / guard rechazó / sin
-      // `applied`) con el estado real de la fila. Acá se loguea la CONSECUENCIA, que es la
-      // que el operador necesita: el hop 2 NO se mandó, y por qué eso está bien.
-      log.warn(
-        { intentId, keyId, hop1TxHash },
-        'hop2 NOT attempted: the pre-hop2 lease could not be persisted. NOTHING was sent to the seller, so nothing can be double-paid; the row stays auto-claimable (case A) and the reconciler will pay the seller. The buyer is NOT refunded on purpose: hop1 already moved their funds on-chain.',
-      );
+    if (lease.outcome !== 'applied') {
+      // AR de HU-202, BLOQUEANTE 2 — LAS DOS CAUSAS ABORTAN, PERO NO SON LA MISMA ALARMA.
+      //
+      // DECISIÓN EXPLÍCITA, Y POR QUÉ `write_failed` TAMBIÉN ABORTA: no tener el lease no
+      // es lo mismo que saber que otro lo tiene, pero mandar el hop 2 igual NO es la
+      // alternativa segura — sin el lease la fila sigue auto-reclamable, y ésa es
+      // EXACTAMENTE la ventana del caso (F): un click en el dashboard o un barrido
+      // concurrente re-envía y el seller cobra DOS VECES, con el proceso vivo. La
+      // asimetría del money-path decide: un pago DEMORADO es recuperable (la fila queda
+      // como el caso (A) —nada salió— y el reconciliador la paga sola), un pago DUPLICADO
+      // no se puede deshacer. Así que las dos causas fallan cerrado.
+      //
+      // LO QUE SÍ CAMBIA ES LA ALARMA, porque cambia el remedio:
+      //   · `rejected_by_guard` → condición ORDENADA y esperable bajo concurrencia (otro
+      //     settle tiene el lease, o la fila ya es terminal). `warn`: el candado FUNCIONÓ.
+      //   · `write_failed`      → la escritura nunca ocurrió. No sabemos nada de la fila y
+      //     el remedio es la INFRA, no el intent. `error` con `alert`, porque si esto es
+      //     sistemático (migración faltante, DB caída) entonces TODOS los settles de
+      //     escrow están difiriendo al reconciliador… que necesita la MISMA base para
+      //     poder pagar. Ese caso no se auto-sana y tiene que despertar a alguien.
+      const wroteNothing = lease.outcome === 'write_failed';
+      const consequence =
+        'hop2 NOT attempted: the pre-hop2 lease was not acquired. NOTHING was sent to the seller, so nothing can be double-paid; the row stays auto-claimable (case A) and the reconciler will pay the seller. The buyer is NOT refunded on purpose: hop1 already moved their funds on-chain.';
+      if (wroteNothing) {
+        log.error(
+          {
+            intentId,
+            keyId,
+            hop1TxHash,
+            alert: 'ESCROW_HOP2_LEASE_WRITE_FAILED',
+            detail: lease.detail,
+          },
+          `${consequence} ⚠️ THE LEASE WRITE NEVER LANDED (this is NOT the guard refusing: nobody is known to hold the lease). Fix the persistence path: if this repeats, every escrow settle is deferring to a reconciler that needs the SAME database to pay the seller, so nothing will drain by itself.`,
+        );
+      } else {
+        log.warn(
+          {
+            intentId,
+            keyId,
+            hop1TxHash,
+            currentStatus: lease.currentStatus,
+          },
+          `${consequence} The transition guard REFUSED the write (the row is in '${lease.currentStatus ?? 'unreadable'}'), which is the lock working: another settle holds the lease or the row is already terminal.`,
+        );
+      }
       return {
         status: 'failed',
         txHash: null,
@@ -701,9 +766,10 @@ export async function settleEscrowAware(params: {
         // hop 1 ya movió fondos del buyer → JAMÁS `unequivocal` (sería refund off-chain =
         // doble-crédito). Mismo remap que la rama de hop2-failed (CD-S4).
         failureKind: 'ambiguous',
-        error: `RECONCILE-ESCROW: hop1=${hop1TxHash} hop2 NOT attempted (hop2 lease not persisted)`,
+        error: `RECONCILE-ESCROW: hop1=${hop1TxHash} hop2 NOT attempted (hop2 lease ${wroteNothing ? 'write failed' : 'refused by guard'})`,
       };
     }
+    leaseAcquired = true;
 
     // 6. Hop 2: el seam WKH-136 SIN cambios (operador → seller).
     const o2 = await settlePaymentIntentOnChain(base);
@@ -782,14 +848,29 @@ export async function settleEscrowAware(params: {
           nonce: row.debit_nonce,
           status: 'reconciliation_pending',
         });
-        if (!released) {
+        if (released.outcome !== 'applied') {
           // El lease quedó tomado sobre un hop 2 que PROBADAMENTE no pagó. No hay riesgo de
           // doble pago (el reconciliador no re-envía una fila leaseada), pero el seller no
           // va a cobrar solo hasta que alguien la resuelva. Es el costo de la
           // sobre-corrección, y tiene que ser visible en vez de silencioso.
+          //
+          // AR de HU-202, BLOQUEANTE 3 — la salida ya no es un `UPDATE` a mano: se nombra
+          // el endpoint que destraba la fila, porque esta línea es donde el operador se
+          // entera de que hay una que destrabar.
           log.error(
-            { intentId, keyId, hop1TxHash },
-            'hop2 lease NOT released after an unequivocal failure: the seller will NOT be paid automatically until a human resolves this intent. No double-payment risk (the leased row is not auto-claimable), but this row is money owed to the seller sitting still.',
+            {
+              intentId,
+              keyId,
+              hop1TxHash,
+              alert:
+                released.outcome === 'write_failed'
+                  ? 'ESCROW_HOP2_LEASE_RELEASE_WRITE_FAILED'
+                  : 'ESCROW_HOP2_LEASE_RELEASE_REFUSED',
+              ...(released.outcome === 'write_failed'
+                ? { detail: released.detail }
+                : { currentStatus: released.currentStatus }),
+            },
+            'hop2 lease NOT released after an unequivocal failure: the seller will NOT be paid automatically until a human resolves this intent. No double-payment risk (the leased row is not auto-claimable), but this row is money owed to the seller sitting still. Supported exit: POST /dashboard/api/reconciliation/:intentId/release-lease (attested, no on-chain disbursement) — or /hop2-evidence with a tx hash if one turns up.',
           );
         }
       }
@@ -807,6 +888,28 @@ export async function settleEscrowAware(params: {
     // CD-S5: cualquier throw inesperado (reader/executor/RPC) → fallback al seam.
     // NUNCA rechazar la promise (espejo del contrato del seam).
     const detail = err instanceof Error ? err.message : String(err);
+    // AR de HU-202, MENOR 1 — EL CATCH-ALL QUEDABA POR DEBAJO DEL LEASE Y NO LO CONSULTABA.
+    // El fallback de abajo llama al seam, o sea que MANDA UN PAGO AL SELLER. Con el lease
+    // tomado eso es un hop 2 saliendo desde el manejador de errores, sin que nadie sepa si
+    // el primero aterrizó: exactamente el doble pago que esta HU vino a cerrar, sólo que
+    // por la puerta de atrás. Hoy no es alcanzable —el seam es no-throw por contrato y
+    // entre el lease y los `return` no queda nada que lance— pero "no alcanzable hoy" no es
+    // una propiedad que sobreviva a la próxima edición, y el costo de la guarda es cero.
+    if (leaseAcquired) {
+      log.error(
+        { intentId, detail, alert: 'ESCROW_HOP2_LEASE_HELD_ON_THROW' },
+        'settleEscrowAware threw with the hop2 lease HELD: NOT falling back to the seam (that would re-settle and could pay the seller twice). The row keeps the lease without a resolution tx, so the reconciler will not resend it blind; resolve it via POST /dashboard/api/reconciliation/:intentId/hop2-evidence or /release-lease.',
+      );
+      return {
+        status: 'failed',
+        txHash: null,
+        finalAmountUsd,
+        // hop 1 ya movió fondos del buyer → JAMÁS `unequivocal` (refund off-chain sería
+        // doble-crédito). Mismo remap que el resto de las ramas post-hop1 (CD-S4).
+        failureKind: 'ambiguous',
+        error: `RECONCILE-ESCROW: unexpected error with the hop2 lease held: ${detail}`,
+      };
+    }
     log.warn(
       { intentId, detail },
       'settleEscrowAware fell back to seam (unexpected error)',

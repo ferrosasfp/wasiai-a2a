@@ -57,6 +57,163 @@ const code = (s: string) =>
  * dos. Un match sobre el archivo completo se satisface con la función de al lado, así que
  * la mutación de una quedaría verde.
  */
+/**
+ * ── AR de HU-202, MENOR 2 — DE TABLA DE VERDAD DECORATIVA A EVALUADOR DEL SQL REAL ──
+ *
+ * Este archivo tenía DOS tablas de verdad (una por guard) escritas así:
+ *
+ *     const guard = (p, cur) => p !== 'resolving_settle' || cur === null || [...].includes(cur);
+ *     expect(guard('resolving_settle', 'settled')).toBe(false);
+ *
+ * Eso es una RE-IMPLEMENTACIÓN EN JAVASCRIPT del predicado, seguida de aserciones sobre la
+ * re-implementación. Es verdadera POR CONSTRUCCIÓN: se puede borrar el `WHERE` entero del
+ * `.sql` y esas líneas siguen verdes. Aserciones decorativas, y justo en el archivo cuyo
+ * propósito declarado es cazar vacuidades.
+ *
+ * LA CONVERSIÓN: en vez de re-escribir el predicado, se EXTRAE del `.sql` y se EVALÚA. El
+ * evaluador de abajo cubre el subconjunto de SQL booleano que estos guards usan (`OR`,
+ * `AND`, `=`, `<>`, `IS [NOT] NULL`, `IN (...)`, literales de texto, identificadores). Si
+ * alguien muta el `WHERE` de la migración, el texto extraído cambia, el predicado evaluado
+ * cambia, y la tabla de verdad SE PONE ROJA — que es lo que la versión anterior no podía
+ * hacer bajo ninguna mutación.
+ *
+ * ALCANCE HONESTO: esto sigue sin ser Postgres. Evalúa la EXPRESIÓN tal como está escrita,
+ * con la semántica de tres valores reducida a booleano para el subconjunto usado. No
+ * verifica planes, tipos ni NULLs en operadores que estos guards no usan.
+ */
+
+/** Un valor de columna/parámetro tal como lo ve el evaluador. */
+type SqlValue = string | null;
+
+/**
+ * Evalúa una expresión booleana SQL del subconjunto usado por los guards de esta
+ * migración, contra un entorno `{ identificador: valor }`.
+ *
+ * Precedencia: `OR` (más bajo) → `AND` → comparaciones. Paréntesis soportados.
+ */
+export function evalSqlPredicate(
+  expr: string,
+  env: Record<string, SqlValue>,
+): boolean {
+  const src = expr.trim();
+  let pos = 0;
+
+  const skipWs = () => {
+    while (pos < src.length && /\s/.test(src[pos] as string)) pos++;
+  };
+  /** Consume `word` (case-insensitive) si sigue; devuelve si lo consumió. */
+  const eatWord = (word: string): boolean => {
+    skipWs();
+    const slice = src.slice(pos, pos + word.length);
+    if (slice.toUpperCase() !== word.toUpperCase()) return false;
+    const after = src[pos + word.length];
+    if (after !== undefined && /[A-Za-z0-9_]/.test(after)) return false;
+    pos += word.length;
+    return true;
+  };
+  const eatChar = (ch: string): boolean => {
+    skipWs();
+    if (src[pos] !== ch) return false;
+    pos++;
+    return true;
+  };
+  /** `'texto'` → el texto; identificador → su valor en `env` (error si falta). */
+  const readOperand = (): SqlValue => {
+    skipWs();
+    if (src[pos] === "'") {
+      const end = src.indexOf("'", pos + 1);
+      if (end === -1) throw new Error(`unterminated string at ${pos}`);
+      const lit = src.slice(pos + 1, end);
+      pos = end + 1;
+      return lit;
+    }
+    const m = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(src.slice(pos));
+    if (!m) throw new Error(`expected operand at ${pos}: ${src.slice(pos, 40)}`);
+    const ident = m[0];
+    pos += ident.length;
+    if (!(ident in env)) {
+      // Un identificador que el test no modeló es un agujero del test, NO un pass.
+      throw new Error(`unmodelled identifier in SQL predicate: ${ident}`);
+    }
+    return env[ident] as SqlValue;
+  };
+
+  const parseOr = (): boolean => {
+    let acc = parseAnd();
+    while (eatWord('OR')) acc = parseAnd() || acc;
+    return acc;
+  };
+  const parseAnd = (): boolean => {
+    let acc = parseAtom();
+    while (eatWord('AND')) acc = parseAtom() && acc;
+    return acc;
+  };
+  const parseAtom = (): boolean => {
+    skipWs();
+    if (eatChar('(')) {
+      const v = parseOr();
+      if (!eatChar(')')) throw new Error(`expected ) at ${pos}`);
+      return v;
+    }
+    const left = readOperand();
+    if (eatWord('IS')) {
+      const negated = eatWord('NOT');
+      if (!eatWord('NULL')) throw new Error(`expected NULL at ${pos}`);
+      return negated ? left !== null : left === null;
+    }
+    if (eatWord('IN')) {
+      if (!eatChar('(')) throw new Error(`expected ( after IN at ${pos}`);
+      const items: SqlValue[] = [readOperand()];
+      while (eatChar(',')) items.push(readOperand());
+      if (!eatChar(')')) throw new Error(`expected ) after IN list at ${pos}`);
+      // SQL: `NULL IN (...)` no es TRUE.
+      return left !== null && items.includes(left);
+    }
+    skipWs();
+    if (src.startsWith('<>', pos)) {
+      pos += 2;
+      const right = readOperand();
+      return left !== null && right !== null && left !== right;
+    }
+    if (src[pos] === '=') {
+      pos += 1;
+      const right = readOperand();
+      return left !== null && right !== null && left === right;
+    }
+    throw new Error(`unsupported operator at ${pos}: ${src.slice(pos, 40)}`);
+  };
+
+  const result = parseOr();
+  skipWs();
+  if (pos !== src.length) {
+    throw new Error(`trailing input at ${pos}: ${src.slice(pos, 40)}`);
+  }
+  return result;
+}
+
+/**
+ * Extrae del cuerpo de una función el bloque `AND ( … )` cuyo texto contiene `anchor`.
+ * Balancea paréntesis, así que devuelve la expresión COMPLETA tal como está en el `.sql`.
+ * Si el guard se borra o se renombra, esto TIRA — que es el punto.
+ */
+function extractGuardClause(fnSql: string, anchor: string): string {
+  const anchorAt = fnSql.indexOf(anchor);
+  if (anchorAt === -1) {
+    throw new Error(`guard clause not found in SQL (anchor: ${anchor})`);
+  }
+  const open = fnSql.lastIndexOf('(', anchorAt);
+  if (open === -1) throw new Error(`no opening paren before anchor: ${anchor}`);
+  let depth = 0;
+  for (let i = open; i < fnSql.length; i++) {
+    if (fnSql[i] === '(') depth++;
+    else if (fnSql[i] === ')') {
+      depth--;
+      if (depth === 0) return fnSql.slice(open + 1, i).trim();
+    }
+  }
+  throw new Error(`unbalanced parens for anchor: ${anchor}`);
+}
+
 function fnBody(sql: string, name: string): string {
   const re = new RegExp(
     `CREATE\\s+(?:OR\\s+REPLACE\\s+)?FUNCTION\\s+${name}\\b`,
@@ -128,11 +285,18 @@ describe('HU-202 up — record_debit_settle_status toma y libera el lease', () =
       "OR debit_settle_status IN ('hop1_confirmed','reconciliation_pending')",
     );
 
-    // Candado SEMÁNTICO, no de presencia: se evalúa el predicado como booleano.
+    // ⚠️ AR de HU-202, MENOR 2 — LA TABLA DE VERDAD AHORA EVALÚA EL SQL REAL.
+    //
+    // La versión anterior re-implementaba el predicado en JS y después afirmaba sobre la
+    // re-implementación: verdadera por construcción, verde ante CUALQUIER mutación del
+    // `.sql`. Acá el predicado se EXTRAE del archivo (`extractGuardClause`) y se EVALÚA
+    // (`evalSqlPredicate`), así que mutar el `WHERE` de la migración pone esto en rojo.
+    const clause = extractGuardClause(fn, "p_status <> 'resolving_settle'");
     const guard = (pStatus: string, current: string | null) =>
-      pStatus !== 'resolving_settle' ||
-      current === null ||
-      ['hop1_confirmed', 'reconciliation_pending'].includes(current ?? '');
+      evalSqlPredicate(clause, {
+        p_status: pStatus,
+        debit_settle_status: current,
+      });
     // El lease se puede tomar desde los estados pre-resolución…
     expect(guard('resolving_settle', 'hop1_confirmed')).toBe(true);
     expect(guard('resolving_settle', 'reconciliation_pending')).toBe(true);
@@ -175,12 +339,20 @@ describe('HU-202 up — claim_reconciliation respeta el lease', () => {
       "p_side = 'refund' OR debit_hop2_attempted_at IS NULL OR debit_resolution_tx_hash IS NOT NULL",
     );
 
-    // Candado SEMÁNTICO del guard (la tabla de verdad que decide si sale un 2º pago).
+    // ⚠️ AR de HU-202, MENOR 2 — TABLA DE VERDAD EVALUADA SOBRE EL SQL REAL, no sobre una
+    // copia en JS del predicado. Ésta es la que decide si sale un 2º pago al seller, así
+    // que era la peor de las dos para tenerla decorativa.
+    const clause = extractGuardClause(fn, 'debit_hop2_attempted_at IS NULL');
     const leaseGuard = (
       side: 'settle' | 'refund',
       stamped: boolean,
       hasTx: boolean,
-    ) => side === 'refund' || !stamped || hasTx;
+    ) =>
+      evalSqlPredicate(clause, {
+        p_side: side,
+        debit_hop2_attempted_at: stamped ? '2026-07-28T00:00:00Z' : null,
+        debit_resolution_tx_hash: hasTx ? '0xhop2' : null,
+      });
     // (F)/(B)/(C)/(G): hop 2 intentado, sin tx ⟹ el settle NO puede reclamar.
     expect(leaseGuard('settle', true, false)).toBe(false);
     // (A)/(D): sin intento persistido ⟹ el settle SÍ reclama (el seller cobra solo).
@@ -256,6 +428,87 @@ describe('HU-202 down — rollback', () => {
     expect(down).toMatch(/INVENTARIO OBLIGATORIO ANTES DE REVERTIR/);
     expect(down).toContain('WHERE debit_hop2_attempted_at IS NOT NULL');
     expect(down).toMatch(/ORDEN DE ROLLBACK \(GATE\)/);
+  });
+});
+
+/**
+ * AR de HU-202, MENOR 2 — EL EVALUADOR TIENE QUE SER CONFIABLE, Y LA TABLA DE VERDAD TIENE
+ * QUE PODER FALLAR.
+ *
+ * Un evaluador roto que devolviera siempre lo mismo volvería a hacer decorativas a T7/T10,
+ * sólo que con más código. Así que: (a) se lo prueba contra expresiones conocidas, y (b) se
+ * demuestra que una MUTACIÓN del clause cambia la tabla de verdad — que es la propiedad que
+ * la versión anterior de estos tests no tenía bajo ninguna mutación.
+ */
+describe('HU-202 — el evaluador de predicados SQL no es decorativo', () => {
+  it('T20: evalúa el subconjunto usado por los guards (IS NULL / IN / <> / = / AND / OR / paréntesis)', () => {
+    expect(evalSqlPredicate('a IS NULL', { a: null })).toBe(true);
+    expect(evalSqlPredicate('a IS NULL', { a: 'x' })).toBe(false);
+    expect(evalSqlPredicate('a IS NOT NULL', { a: 'x' })).toBe(true);
+    expect(evalSqlPredicate("a IN ('x','y')", { a: 'y' })).toBe(true);
+    expect(evalSqlPredicate("a IN ('x','y')", { a: 'z' })).toBe(false);
+    expect(evalSqlPredicate("a IN ('x')", { a: null })).toBe(false);
+    expect(evalSqlPredicate("a <> 'x'", { a: 'y' })).toBe(true);
+    expect(evalSqlPredicate("a = 'x'", { a: 'x' })).toBe(true);
+    expect(evalSqlPredicate("a = 'x' OR b IS NULL", { a: 'z', b: null })).toBe(
+      true,
+    );
+    expect(evalSqlPredicate("a = 'x' AND b IS NULL", { a: 'z', b: null })).toBe(
+      false,
+    );
+    expect(
+      evalSqlPredicate("(a = 'x' OR b = 'y') AND c IS NULL", {
+        a: 'x',
+        b: 'n',
+        c: null,
+      }),
+    ).toBe(true);
+  });
+
+  it('T21: un identificador que el test NO modeló TIRA (no puede pasar por verdadero en silencio)', () => {
+    expect(() => evalSqlPredicate('sorpresa IS NULL', {})).toThrow(
+      /unmodelled identifier/,
+    );
+  });
+
+  it('T22 (ANTI-VACUIDAD): mutar el clause CAMBIA la tabla de verdad — o sea que T7/T10 pueden fallar', () => {
+    const up = readFileSync(UP, 'utf8');
+
+    // (a) El guard del lease del claim, mutado con un `IS NULL` → `IS NOT NULL`: el typo
+    //     de una letra que INVIERTE el guard y reabre el re-envío ciego de (B)/(C)/(F)/(G).
+    const real = extractGuardClause(
+      fnBody(up, 'claim_reconciliation'),
+      'debit_hop2_attempted_at IS NULL',
+    );
+    const mutated = real.replace(
+      'debit_hop2_attempted_at IS NULL',
+      'debit_hop2_attempted_at IS NOT NULL',
+    );
+    expect(mutated).not.toBe(real); // la mutación se aplicó de verdad
+    const stampedNoTx = {
+      p_side: 'settle',
+      debit_hop2_attempted_at: '2026-07-28T00:00:00Z',
+      debit_resolution_tx_hash: null,
+    };
+    // El SQL real REFUSA el claim; el mutado lo dejaría pasar. Distintos ⟹ la aserción de
+    // T10 depende del texto del `.sql`, no de una copia en JS.
+    expect(evalSqlPredicate(real, stampedNoTx)).toBe(false);
+    expect(evalSqlPredicate(mutated, stampedNoTx)).toBe(true);
+
+    // (b) El guard de transición del lease, mutado: se le agrega `resolving_settle` a la
+    //     lista de estados desde los que se puede tomar (o sea, pisar el lease de otro).
+    const realT = extractGuardClause(
+      fnBody(up, 'record_debit_settle_status'),
+      "p_status <> 'resolving_settle'",
+    );
+    const mutatedT =
+      "p_status <> 'resolving_settle' OR debit_settle_status IS NULL OR debit_settle_status IN ('hop1_confirmed','reconciliation_pending','resolving_settle')";
+    const alreadyLeased = {
+      p_status: 'resolving_settle',
+      debit_settle_status: 'resolving_settle',
+    };
+    expect(evalSqlPredicate(realT, alreadyLeased)).toBe(false);
+    expect(evalSqlPredicate(mutatedT, alreadyLeased)).toBe(true);
   });
 });
 

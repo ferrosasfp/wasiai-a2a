@@ -7,6 +7,8 @@
 
 import cors, { type FastifyCorsOptions } from '@fastify/cors';
 import Fastify from 'fastify';
+import { isEscrowSettleEnabled } from './adapters/escrow/debit-capture.js';
+import { warmEscrowSchemaPreflight } from './adapters/escrow/schema-preflight.js';
 import {
   getChainConfig,
   getInitializedChainKeys,
@@ -216,6 +218,17 @@ console.log(`
 `);
 
 await fastify.listen({ port, host: '0.0.0.0' });
+
+// AR de HU-202, BLOQUEANTE 1 — que la alarma del gate de orden de release suene AL
+// ARRANCAR y no en medio de una transferencia. Sólo cuando el camino escrow está
+// habilitado: con el flag OFF (el default) esto no hace ni una consulta, así que no
+// puede romper el arranque de un entorno que no usa escrow.
+//
+// FIRE-AND-FORGET A PROPÓSITO: un blip de red contra la DB no debe impedir que el
+// servicio levante y sirva discover/compose/orchestrate, que no tienen nada que ver con
+// el escrow. Esto NO es el gate — el gate real es `ensureEscrowSchemaReady()` dentro de
+// `settleEscrowAware`, que comparte este mismo veredicto memoizado (no pueden divergir).
+if (isEscrowSettleEnabled()) warmEscrowSchemaPreflight();
 
 // M6 (audit 2026-06-24): sweep periódico del outbox de refunds. Reintenta los
 // refunds best-effort que NO aplicaron nada. processRefundOutbox NUNCA tira
