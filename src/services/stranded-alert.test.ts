@@ -67,6 +67,24 @@ describe('HU-306 · el indicador de exposición acumulada (AC-5)', () => {
     expect(mockCount).not.toHaveBeenCalled();
   });
 
+  it('T-ALERT-OFF: un umbral 0 o negativo NO enciende la alerta (AR MENOR-3)', async () => {
+    // Invariante que el docstring del módulo declara y que nada candaba: un `0` NO se
+    // acepta como "alertar siempre" — sería un canal gritando en cada request, o sea un
+    // canal que se aprende a ignorar. Un negativo es directamente un typo.
+    for (const raw of ['0', '-1', '-0.5', 'abc', 'NaN', '   ']) {
+      _resetStrandedAlert();
+      mockCount.mockClear();
+      process.env[THRESHOLD_ENV] = raw;
+
+      const field = getStrandedHealthField();
+      await flush();
+      await refreshStrandedExposure();
+
+      expect(field).toEqual({});
+      expect(mockCount).not.toHaveBeenCalled();
+    }
+  });
+
   it('T-ALERT-BREACH: exposición por encima del umbral ⟹ true + log de alerta', async () => {
     process.env[THRESHOLD_ENV] = '10';
     mockCount.mockResolvedValue({

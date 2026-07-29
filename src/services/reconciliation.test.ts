@@ -1002,6 +1002,7 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
     countOpt: string | null;
     eqCalls: Array<[string, unknown]>;
     inCalls: Array<[string, unknown]>;
+    gteCalls: Array<[string, unknown]>;
     orderCalls: Array<[string, unknown]>;
     limitCalls: number[];
   }
@@ -1013,6 +1014,7 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
       countOpt: null,
       eqCalls: [],
       inCalls: [],
+      gteCalls: [],
       orderCalls: [],
       limitCalls: [],
     };
@@ -1087,6 +1089,13 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
         },
         in: (col: string, val: unknown) => {
           target.inCalls.push([col, val]);
+          return b;
+        },
+        // HU-306: `countStrandedExposureSince` acota la ventana con `.gte`. Se captura
+        // igual que los demás filtros — si no estuviera, el builder ni siquiera
+        // respondería y el test fallaría por una razón que no es la que prueba.
+        gte: (col: string, val: unknown) => {
+          target.gteCalls.push([col, val]);
           return b;
         },
         order: (col: string, o?: unknown) => {
@@ -1573,6 +1582,59 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
     expect(out.strandedRuns.rows[3]?.paidSteps).toHaveLength(1);
     // el `metadata` crudo viaja VERBATIM aunque no se haya podido interpretar
     expect(out.strandedRuns.rows[0]?.metadata).toBeNull();
+  });
+
+  it('T-EXPOSURE-QUERY: el conteo de la ventana pide `::text`, acota y filtra por SU event_type (AR MENOR-4)', async () => {
+    // El candado del `::text` estaba sólo en `listStrandedRuns`; acá sobrevivía sacarlo.
+    // Y el `.limit()` es el que produce el `truncated` del que depende el ÚNICO
+    // fail-safe de la alerta (`breached = truncated || …`): sin límite no hay
+    // truncamiento, y sin truncamiento ese fail-safe no puede dispararse nunca.
+    const cap = wireIntents([], 0, {
+      eventCalls: [{ rows: [{ cost_usdc: '0.030000' }], count: 1 }],
+    });
+
+    const out = await reconciliationService.countStrandedExposureSince(
+      '2026-07-29T00:00:00.000Z',
+    );
+
+    const q = cap.events[0]!;
+    expect(q.table).toBe('a2a_events');
+    expect(q.cols).toContain('cost_usdc::text');
+    expect(q.countOpt).toBe('exact');
+    expect(q.eqCalls[0]).toEqual(['event_type', 'compose_stranded_payment']);
+    expect(q.gteCalls[0]).toEqual(['created_at', '2026-07-29T00:00:00.000Z']);
+    expect(q.limitCalls[0]).toBe(500);
+    // y suma de verdad lo que trajo
+    expect(out).toEqual({ runs: 1, exposureUsd: 0.03, truncated: false });
+  });
+
+  it('T-EXPOSURE-LOWER-BOUND: más filas que el límite ⟹ `truncated` (cota inferior declarada)', async () => {
+    // Con la ventana truncada la suma es una COTA INFERIOR, y quien la consume convierte
+    // eso en breach por sí solo. Si este flag no saliera, un pico sistémico podría
+    // reportar una suma parcial por debajo del umbral y quedar en silencio.
+    wireIntents([], 0, {
+      eventCalls: [{ rows: [{ cost_usdc: '1.000000' }], count: 900 }],
+    });
+
+    const out = await reconciliationService.countStrandedExposureSince(
+      '2026-07-29T00:00:00.000Z',
+    );
+
+    expect(out.runs).toBe(900);
+    expect(out.truncated).toBe(true);
+    expect(out.exposureUsd).toBe(1); // sólo lo que entró: por eso es cota inferior
+  });
+
+  it('T-EXPOSURE-ERROR: un fallo de la query de exposición TIRA (no reporta 0)', async () => {
+    // Un `0` por fallo diría "no hay exposición" en el único canal que existe para
+    // gritar lo contrario.
+    wireIntents([], 0, { eventCalls: [{ error: { message: 'boom' } }] });
+
+    await expect(
+      reconciliationService.countStrandedExposureSince(
+        '2026-07-29T00:00:00.000Z',
+      ),
+    ).rejects.toThrow('INTERNAL');
   });
 
   it('T-READONLY-01: listar NO escribe — ni rpc, ni insert, ni update, ni delete (AC-7)', async () => {

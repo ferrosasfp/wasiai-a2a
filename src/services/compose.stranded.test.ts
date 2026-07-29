@@ -738,13 +738,17 @@ describe('HU-306 · el techo de exposición por pipeline (AC-1)', () => {
       chainId: CHAIN_ID,
     });
 
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('gateway pipeline exposure ceiling');
-    expect(result.steps).toHaveLength(1);
-    // EL efecto: cero débitos per-step (el del step 1 nunca ocurrió)…
+    // ⚠️ ORDEN DELIBERADO (fix-pack CR MENOR-5): las aserciones de DINERO van PRIMERO.
+    // Con el assert del mensaje adelante, un mutante que rompe el techo mataba el test
+    // por el texto del error y las dos afirmaciones que de verdad importan —que no se
+    // debitó y que no se invocó— NUNCA llegaban a ejecutarse. Un test de dinero tiene
+    // que morir en la línea del dinero.
     expect(mockDebit).not.toHaveBeenCalled();
-    // …y una sola llamada saliente, la del step 0. El step 1 no se invocó.
+    // una sola llamada saliente, la del step 0: el step 1 no se invocó
     expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(false);
+    expect(result.steps).toHaveLength(1);
+    expect(result.error).toContain('gateway pipeline exposure ceiling');
   });
 
   it('T-CEILING-02: SIN el techo configurado, el pipeline caro corre y el mensaje es el de siempre', async () => {
