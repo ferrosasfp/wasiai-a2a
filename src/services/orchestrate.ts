@@ -1229,6 +1229,9 @@ export const orchestrateService = {
       // y el débito per-step funciona en ambos paths. El guard `i>0` (CD-1)
       // sigue intacto como única defensa anti-double-charge del step 0.
       chainId: request.chainId,
+      // WKH-303: precios CONGELADOS por un quote firmado que el caller redimió en
+      // `/orchestrate/execute`. Ausente ⇒ compose debita el precio vivo, como hoy.
+      frozenStepPricesUsd: request.frozenStepPricesUsd,
     });
 
     // WKH-132 (AC-1/DT-1): protocolFeeUsdc reportado = rate sobre el COSTO REAL
