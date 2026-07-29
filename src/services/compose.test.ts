@@ -4464,42 +4464,74 @@ describe('WKH-305 (W1) · caracterización: el reordenamiento no mueve un centav
     //
     // El cronómetro tiene que arrancar donde arranca el trabajo que se le
     // atribuye al agente: justo antes de invocarlo.
+    //
+    // ── POR QUÉ RELOJ VIRTUAL Y NO UN UMBRAL DE MILISEGUNDOS ──────────────
+    // La versión anterior dormía 150 ms de verdad y afirmaba `latencyMs < 150`.
+    // Eso no mide dónde arranca el cronómetro: mide si la máquina es más rápida
+    // que el sleep. Bajo carga, la invocación del agente tardó 216 ms y el test
+    // se puso rojo sin que nada estuviera mal (CI, 2026-07-29). Un test flaky
+    // destruye la señal igual que un CI siempre rojo.
+    //
+    // La propiedad real es QUÉ QUEDA ADENTRO DE LA MEDICIÓN, no cuántos
+    // milisegundos son. Así que el débito ya no DUERME: ADELANTA un reloj que
+    // este test controla. Nada más lo mueve, y entonces:
+    //   · cronómetro DESPUÉS del débito ⟹ latencyMs === 0   (lo correcto)
+    //   · cronómetro ANTES  del débito ⟹ latencyMs === 150  (la mutación)
+    // Dos valores exactos y separados, sin depender de la carga de la máquina.
     const DEBIT_MS = 150;
     const a0 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
     const a1 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
     mockAgentsBySlug({ kyc: a0, corridor: a1 });
     mockFetchOk({ result: 'r0' });
     mockFetchOk({ result: 'r1' });
-    ledger.debitLatencyMs = DEBIT_MS;
 
-    const wallClockStart = Date.now();
-    const result = await composeService.compose({
-      steps: [
-        { agent: 'kyc', input: {} },
-        { agent: 'corridor', input: {} },
-      ],
-      scopingKeyRow: makeKeyRow({ id: 'k1' }),
-      chainId: 2368,
-      a2aKey: 'wasi_a2a_test',
-    });
-    const wallClockMs = Date.now() - wallClockStart;
+    // Reloj congelado: sólo avanza cuando el débito lo adelanta.
+    let virtualNowMs = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => virtualNowMs);
+    // Doble del débito LOCAL a este test (no toca el del `beforeEach`, que otros
+    // ~117 tests de este archivo comparten).
+    mockDebit.mockImplementation(
+      async (_keyId: string, _chainId: number, amountUsd: number) => {
+        virtualNowMs += DEBIT_MS; // el débito consume tiempo, sin dormir
+        ledger.balance -= amountUsd;
+        return { success: true };
+      },
+    );
 
-    expect(result.success).toBe(true);
-    // El step 1 es el único con débito per-step (el 0 lo debita el middleware),
-    // así que es el único donde la diferencia es observable.
-    expect(mockDebit).toHaveBeenCalledTimes(1);
-    expect(result.steps[1]?.latencyMs).toBeLessThan(DEBIT_MS);
-    // ── EL FIXTURE ESTÁ ARMADO ────────────────────────────────────────────
-    // El reloj de pared de la llamada COMPLETA sí tiene que incluir el débito:
-    // es la prueba de que el doble durmió de verdad. Sin esto, poner
-    // `debitLatencyMs = 0` desarmaría el escenario y la aserción de arriba
-    // seguiría verde por el motivo equivocado (no porque el cronómetro esté bien
-    // puesto, sino porque no había nada que medir).
-    //
-    // Ojo con la tentación de asertar esto sobre `result.totalLatencyMs`: ESA
-    // suma los `latencyMs` por step, todos medidos desde el cronómetro
-    // post-débito, así que jamás puede incluir el tiempo del débito y la
-    // comparación sería vacua (no puede fallar por construcción).
-    expect(wallClockMs).toBeGreaterThanOrEqual(DEBIT_MS);
+    try {
+      const wallClockStart = Date.now();
+      const result = await composeService.compose({
+        steps: [
+          { agent: 'kyc', input: {} },
+          { agent: 'corridor', input: {} },
+        ],
+        scopingKeyRow: makeKeyRow({ id: 'k1' }),
+        chainId: 2368,
+        a2aKey: 'wasi_a2a_test',
+      });
+      const wallClockMs = Date.now() - wallClockStart;
+
+      expect(result.success).toBe(true);
+      // El step 1 es el único con débito per-step (el 0 lo debita el middleware),
+      // así que es el único donde la diferencia es observable.
+      expect(mockDebit).toHaveBeenCalledTimes(1);
+      // Exacto, no un umbral: nada más que el débito mueve este reloj, así que
+      // cualquier valor distinto de 0 es tiempo del débito que se coló adentro.
+      expect(result.steps[1]?.latencyMs).toBe(0);
+      // ── EL FIXTURE ESTÁ ARMADO ──────────────────────────────────────────
+      // El reloj de la llamada COMPLETA sí tiene que incluir el débito: es la
+      // prueba de que el doble lo adelantó de verdad. Sin esto, un débito que no
+      // consumiera tiempo dejaría la aserción de arriba verde por el motivo
+      // equivocado (no porque el cronómetro esté bien puesto, sino porque no
+      // había nada que medir).
+      //
+      // Ojo con la tentación de asertar esto sobre `result.totalLatencyMs`: ESA
+      // suma los `latencyMs` por step, todos medidos desde el cronómetro
+      // post-débito, así que jamás puede incluir el tiempo del débito y la
+      // comparación sería vacua (no puede fallar por construcción).
+      expect(wallClockMs).toBe(DEBIT_MS);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });
