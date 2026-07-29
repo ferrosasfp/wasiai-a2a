@@ -361,6 +361,61 @@ export interface SettleUnknownReport {
   truncated: boolean;
 }
 
+/**
+ * HU-306 — un step que YA PAGÓ on-chain dentro de un run que después falló.
+ *
+ * La forma la define el leaf (`lib/stranded-payment.ts`), que es quien la escribe en
+ * `metadata.paid_steps[]` y quien la vuelve a leer: una segunda definición acá sería
+ * una copia que diverge el día que se agregue un campo, y el que diverja sería
+ * justamente el lado que reconcilia dinero.
+ */
+export type { StrandedPaidStep } from '../lib/stranded-payment.js';
+
+/**
+ * HU-306 — un RUN de `/compose` que falló dejando pagos ya confirmados on-chain.
+ *
+ * POR QUÉ NO ES UNA `SettleUnknownEventRow` (CD-8): son dos preguntas distintas sobre
+ * dinero distinto. `compose_settle_unknown` dice "el settle quedó SIN RESOLVER y no
+ * devolvimos la plata" — se reconcilia mirando la cadena. Esta fila dice "el settle SE
+ * CONFIRMÓ y el pipeline falló DESPUÉS" — no hay nada que reconciliar contra la cadena,
+ * la plata se fue y lo que queda es contarla y ver si crece. Mezclarlas en la misma lista
+ * obligaría al operador a distinguir a mano dos acciones opuestas.
+ *
+ * SOLO LECTURA (AC-7): no hay remediación automática posible ni deseable — el pago ya
+ * está minado y el destinatario es un tercero.
+ */
+export interface StrandedRunRow {
+  event_id: string;
+  /** La evidencia del PRIMER step pagado del run; la lista completa va en `paidSteps`. */
+  tx_hash: string | null;
+  /**
+   * `a2a_events.cost_usdc` verbatim (`::text`, convención WKH-196): el total en USD que
+   * el caller pagó por los steps que sí se ejecutaron y ya no vuelve.
+   */
+  costUsdc: string;
+  /** `metadata` VERBATIM: es la fuente para reconciliar y no se recorta al mapear. */
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  // ── Derivados de `metadata`, leídos con `readStrandedMetadata` (defensivo, CD-12) ──
+  /** Id del run; `null` si la fila es vieja o el JSON no lo trae. */
+  runId: string | null;
+  /** Índice del step que rompió el pipeline; `null` si no se puede leer. */
+  failedStepIndex: number | null;
+  /** Los steps que pagaron. `[]` ante una forma inesperada — nunca voltea la fila. */
+  paidSteps: StrandedPaidStepRow[];
+}
+
+/** Alias local del tipo del leaf (evita repetir el import en la firma de arriba). */
+type StrandedPaidStepRow =
+  import('../lib/stranded-payment.js').StrandedPaidStep;
+
+/** Mismo contrato de completitud que `SettleUnknownReport` y por el mismo motivo. */
+export interface StrandedRunsReport {
+  rows: StrandedRunRow[];
+  total: number;
+  truncated: boolean;
+}
+
 /** Techo de filas del reporte ambiguo (el `total` exacto viaja igual). */
 const AMBIGUOUS_LIST_LIMIT = 500;
 
@@ -438,6 +493,21 @@ interface SettleUnknownSelectRow {
   id: string;
   event_type: string;
   agent_id: string | null;
+  tx_hash: string | null;
+  cost_usdc: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+/**
+ * Fila del SELECT de `listStrandedRuns` (HU-306). Misma regla que `PendingSelectRow`: el
+ * tipo refleja EXACTAMENTE las columnas pedidas. No trae `event_type` ni `agent_id` — el
+ * filtro ya fija el primero y el segundo es NULL a propósito en esta familia de eventos
+ * (ver `buildStrandedPaymentEvent`: el agente culpable se recupera por join, no se
+ * adivina). `cost_usdc` es NUMERIC ⟹ `::text` (WKH-196).
+ */
+interface StrandedRunSelectRow {
+  id: string;
   tx_hash: string | null;
   cost_usdc: string | null;
   metadata: Record<string, unknown> | null;
