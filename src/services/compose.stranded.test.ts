@@ -83,6 +83,21 @@ vi.mock('./llm/input-retry.js', () => ({
 vi.mock('../lib/downstream-payment.js', () => ({
   signAndSettleDownstream: vi.fn().mockResolvedValue(null),
 }));
+/**
+ * ⚠️ PUNTO CIEGO QUE ESTE MOCK EXISTE PARA ABRIR (fix-pack AR BLOQUEANTE).
+ *
+ * `getStepGasOverheadUsd` FALLA-CERRADO Y TIRA en mainnet cuando no hay ni pin de env ni
+ * estimación viva (`lib/gas-overhead.ts`, `GasOverheadUnavailableError`). Pero bajo test
+ * `isProductionEnv()` es `false`, así que la función devuelve 0 y NUNCA tira: sin este
+ * mock, el escenario "el pipeline LANZA después de que un step ya pagó" era
+ * INALCANZABLE desde la suite. No es que faltara un test — no se podía escribir.
+ *
+ * Default 0 = comportamiento de siempre; sólo el test del throw lo cambia.
+ */
+const mockGasOverhead = vi.hoisted(() => vi.fn());
+vi.mock('../lib/gas-overhead.js', () => ({
+  getStepGasOverheadUsd: (...a: unknown[]) => mockGasOverhead(...a),
+}));
 
 import { signAndSettleDownstream } from '../lib/downstream-payment.js';
 import { COMPOSE_STRANDED_PAYMENT_EVENT } from '../lib/stranded-payment.js';
@@ -208,6 +223,7 @@ beforeEach(() => {
     registries: [],
   });
   mockDownstream.mockResolvedValue(null);
+  mockGasOverhead.mockResolvedValue(0); // testnet / sin config: el valor de siempre
   mockDebit.mockResolvedValue({ success: true });
   mockCredit.mockResolvedValue({ success: true, reverted: true });
   mockCreditWithDest.mockResolvedValue({ success: true, reverted: true });
@@ -247,6 +263,98 @@ describe('HU-306 · el pago varado queda registrado (AC-2)', () => {
     expect(stranded).toHaveLength(1);
     expect(stranded[0]!.status).toBe('failed');
     expect(stranded[0]!.txHash).toBe('0xDOWN0');
+  });
+
+  it('T-STRAND-EMIT-05: el pipeline que LANZA después de un pago también registra (AR BLOQUEANTE)', async () => {
+    // El caso que la HU se perdía entera: `executePipeline` corre trabajo real FUERA del
+    // try por-step (`resolveAgent`, `getStepGasOverheadUsd`, `budgetService.debit`), y
+    // `getStepGasOverheadUsd` TIRA a propósito en mainnet sin configurar. Con el throw
+    // propagándose, el registro del residuo nunca corría: plata afuera, cero eventos,
+    // cero filas, cero aporte a la alerta.
+    const a1 = makeAgent({ slug: 'g1' });
+    const a2 = makeAgent({ slug: 'g2', id: 'agent-2' });
+    wireAgents(a1, a2);
+    mockDownstream.mockResolvedValueOnce({
+      txHash: '0xDOWN0',
+      blockNumber: 7,
+      settledAmount: '20000',
+    });
+    mockFetchOk({ result: 'step0' });
+    // El step 0 resuelve su overhead normal; el step 1 se topa con el fail-closed.
+    mockGasOverhead
+      .mockResolvedValueOnce(0)
+      .mockRejectedValueOnce(
+        new Error('gas overhead unavailable for chain 43114'),
+      );
+
+    await expect(
+      composeService.compose({
+        steps: [
+          { agent: 'g1', input: {} },
+          { agent: 'g2', input: {} },
+        ],
+        scopingKeyRow: makeKeyRow(),
+        chainId: CHAIN_ID,
+      }),
+      // El error SIGUE PROPAGÁNDOSE tal cual: el registro observa, no cambia el contrato
+      // con el caller (que hoy mapea ese throw a su propia respuesta).
+    ).rejects.toThrow('gas overhead unavailable');
+
+    // …y el pago del step 0 quedó registrado igual.
+    const stranded = strandedEvents();
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]!.txHash).toBe('0xDOWN0');
+    const md = stranded[0]!.metadata as Record<string, unknown>;
+    expect(md.failed_step_index).toBe(1);
+    expect(md.paid_steps as unknown[]).toHaveLength(1);
+    // el mensaje del error que rompió el run queda en la fila, para el que reconcilia
+    expect(md.error).toContain('gas overhead unavailable');
+  });
+
+  it('T-STRAND-EMIT-05b (control): el MISMO fixture fallando por la vía normal registra igual', async () => {
+    // Control del test de arriba: si este no pasara, la diferencia entre los dos no
+    // sería el camino del throw sino el fixture.
+    const a1 = makeAgent({ slug: 'g1' });
+    const a2 = makeAgent({ slug: 'g2', id: 'agent-2' });
+    wireAgents(a1, a2);
+    mockDownstream.mockResolvedValueOnce({
+      txHash: '0xDOWN0',
+      blockNumber: 7,
+      settledAmount: '20000',
+    });
+    mockFetchOk({ result: 'step0' });
+    mockFetchError(500);
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'g1', input: {} },
+        { agent: 'g2', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow(),
+      chainId: CHAIN_ID,
+    });
+
+    expect(result.success).toBe(false);
+    expect(strandedEvents()).toHaveLength(1);
+  });
+
+  it('T-STRAND-EMIT-06: si LANZA sin que nadie hubiera pagado, no se registra nada', async () => {
+    // La otra cara de AC-10: el throw no puede inventar un residuo donde no lo hay.
+    const a1 = makeAgent({ slug: 'h1' });
+    wireAgents(a1);
+    mockGasOverhead.mockRejectedValueOnce(
+      new Error('gas overhead unavailable'),
+    );
+
+    await expect(
+      composeService.compose({
+        steps: [{ agent: 'h1', input: {} }],
+        scopingKeyRow: makeKeyRow(),
+        chainId: CHAIN_ID,
+      }),
+    ).rejects.toThrow('gas overhead unavailable');
+
+    expect(strandedEvents()).toHaveLength(0);
   });
 
   it('T-STRAND-EMIT-02: falla el step 0 y NADIE pagó ⟹ CERO eventos de residuo', async () => {

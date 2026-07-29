@@ -213,9 +213,32 @@ export const composeService = {
     // `operationId` de la clave de refund) quedan BYTE-IDÉNTICOS: es el mismo valor,
     // generado una vez por invocación, pasado como parámetro.
     const composeRunId = randomUUID();
-    const result = await this.executePipeline(request, composeRunId);
-    if (!result.success) this.recordStrandedRunIfAny(composeRunId, result);
-    return result;
+    // Fix-pack AR BLOQUEANTE — `results` lo declara ACÁ la envoltura y se lo PRESTA al
+    // pipeline (misma referencia, mismo array que se pushea en `finishSuccessfulStep` y
+    // que viaja en `steps:` de todos los returns: semántica idéntica).
+    //
+    // POR QUÉ. El pipeline no siempre TERMINA: corre trabajo real FUERA de su try
+    // por-step — `resolveAgent`, `getStepGasOverheadUsd` (que FALLA-CERRADO y TIRA en
+    // mainnet sin configurar, `lib/gas-overhead.ts`) y `budgetService.debit`. Cuando
+    // lanza no hay `ComposeResult` que mirar, y `results` era local del pipeline: el
+    // residuo de los steps que YA pagaron quedaba sin registro. Prestando el array, la
+    // envoltura conserva los steps completados aunque el pipeline se vaya por excepción.
+    const results: StepResult[] = [];
+    try {
+      const result = await this.executePipeline(request, composeRunId, results);
+      if (!result.success) this.recordStrandedRunIfAny(composeRunId, result);
+      return result;
+    } catch (err) {
+      // ⚠️ EL ERROR SE RE-LANZA TAL CUAL. Esta HU OBSERVA: convertir el throw en un
+      // `{success:false}` cambiaría el contrato con los dos callers —y `orchestrate.ts`
+      // decide sobre el débito del step 0 con eso—, que es exactamente la clase de
+      // decisión que no se toca acá.
+      this.recordStrandedRunIfAny(composeRunId, {
+        steps: results,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
   },
 
   /**
@@ -231,28 +254,51 @@ export const composeService = {
    * Si ningún step dejó evidencia on-chain no se emite NADA (AC-10): un pipeline que
    * falla en el step 0, o sin pagos confirmados, se comporta byte-idéntico a hoy —
    * cero eventos nuevos, cero queries.
+   *
+   * NO RECIBE UN `ComposeResult` sino su subconjunto `{steps, error, errorCode}`: el
+   * camino del THROW no tiene un `ComposeResult` que pasarle (fix-pack AR BLOQUEANTE), y
+   * un `ComposeResult` satisface esta forma tal cual.
+   *
+   * ⚠️ NO PUEDE LANZAR, y por eso el cuerpo entero va envuelto. Se la llama desde dos
+   * lugares donde una excepción suya haría daño de verdad: en el camino normal
+   * convertiría un `return` en un throw, y en el camino del throw REEMPLAZARÍA el error
+   * original por uno de telemetría. Anotar el residuo no puede cambiar lo anotado (AC-9).
    */
-  recordStrandedRunIfAny(composeRunId: string, result: ComposeResult): void {
-    const strandedSteps = collectStrandedSteps(result.steps);
-    if (strandedSteps.length === 0) return;
-    eventService
-      .track(
-        buildStrandedPaymentEvent({
-          composeRunId,
-          strandedSteps,
-          // `results` sólo se puebla en `finishSuccessfulStep`, así que la cantidad de
-          // steps COMPLETADOS es el índice del que falló. No hace falta reconstruirlo.
-          failedStepIndex: result.steps.length,
-          error: result.error,
-          errorCode: result.errorCode,
-        }),
-      )
-      .catch((trackErr) =>
-        log.error(
-          { err: trackErr, composeRunId },
-          '[compose.stranded] the pipeline failed after a step had already been paid on-chain, and that could NOT be persisted as an event — the only remaining record is this log line',
-        ),
+  recordStrandedRunIfAny(
+    composeRunId: string,
+    result: {
+      steps: StepResult[];
+      error?: string | undefined;
+      errorCode?: string | undefined;
+    },
+  ): void {
+    try {
+      const strandedSteps = collectStrandedSteps(result.steps);
+      if (strandedSteps.length === 0) return;
+      eventService
+        .track(
+          buildStrandedPaymentEvent({
+            composeRunId,
+            strandedSteps,
+            // `results` sólo se puebla en `finishSuccessfulStep`, así que la cantidad de
+            // steps COMPLETADOS es el índice del que falló. No hace falta reconstruirlo.
+            failedStepIndex: result.steps.length,
+            error: result.error,
+            errorCode: result.errorCode,
+          }),
+        )
+        .catch((trackErr) =>
+          log.error(
+            { err: trackErr, composeRunId },
+            '[compose.stranded] the pipeline failed after a step had already been paid on-chain, and that could NOT be persisted as an event — the only remaining record is this log line',
+          ),
+        );
+    } catch (buildErr) {
+      log.error(
+        { err: buildErr, composeRunId },
+        '[compose.stranded] the stranded-payment record could not even be BUILT — the pipeline result is returned/rethrown untouched',
       );
+    }
   },
 
   /**
@@ -266,10 +312,14 @@ export const composeService = {
   async executePipeline(
     request: ComposeRequest,
     composeRunId: string,
+    // Fix-pack AR BLOQUEANTE: el array lo declara la envoltura y se pushea acá igual que
+    // siempre (`finishSuccessfulStep`). Es la MISMA referencia que viaja en `steps:` de
+    // todos los returns; lo único que cambia es quién lo declara, para que los steps ya
+    // pagados sigan siendo alcanzables si este cuerpo se va por excepción.
+    results: StepResult[],
   ): Promise<ComposeResult> {
     const { steps, maxBudget, a2aKey, scopingKeyRow, chainId, logger } =
       request;
-    const results: StepResult[] = [];
     let totalCost = 0;
     let totalLatency = 0;
     let lastOutput: unknown = null;
