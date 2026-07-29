@@ -1025,6 +1025,252 @@ describe('HU-206 — release-lease exige RECONCILIATION_RELEASE_TOKEN además de
   });
 });
 
+// ════════════════════════════════════════════════════════════════════════════
+// HU-207 — LA ESCRITURA DE ARBITRAJE NO PUEDE ABRIRSE POR UNA VARIABLE AUSENTE.
+//
+// `POST /api/arbitrations/:intentId/resolve` resuelve una retención con release/refund/
+// split: `arbiterService.resolveHold` termina en `executeArbitration`, que settlea al
+// seller o reembolsa al buyer. Estaba detrás del gate OPT-IN de WKH-54, que sólo cierra
+// cuando `NODE_ENV` dice EXACTAMENTE `production`: en cualquier despliegue sin
+// `DASHBOARD_ADMIN_TOKEN` y sin ese `NODE_ENV` —un staging, un preview, un servicio
+// recién creado— cualquiera podía mover ese dinero. Producción estaba configurada, así
+// que no fue un incidente: fue una protección que dependía de acertar dos variables en
+// cada entorno nuevo.
+//
+// Estos tests candan las DOS mitades, porque cada una sin la otra es una trampa: que la
+// escritura esté cerrada sin secreto, y que las LECTURAS conserven su passthrough dev
+// (cerrarlas también dejaría los tests verdes y trabaría el desarrollo local sin cerrar
+// ninguna transferencia).
+// ════════════════════════════════════════════════════════════════════════════
+describe('HU-207 — POST /api/arbitrations/:id/resolve es fail-closed (dev Y prod)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.NODE_ENV;
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+    mockIsArbiterEnabled.mockReturnValue(true);
+    mockListHolds.mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    delete process.env.NODE_ENV;
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+  });
+
+  it('T-207-1 (EL test): en dev y sin DASHBOARD_ADMIN_TOKEN, resolver una retención es 503 y el árbitro NI SE LLAMA, mientras las lecturas siguen sirviendo', async () => {
+    delete process.env.NODE_ENV; // no-producción: el caso que el opt-in dejaba pasar
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+    const app = await buildApp();
+
+    // (a) la escritura que mueve dinero: cerrada.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/arbitrations/i1/resolve',
+      payload: { decision: 'release' },
+    });
+    // Se afirma PRIMERO lo que de verdad importa: que el money-path no se haya tocado.
+    // Un 503 devuelto DESPUÉS de settlear seguiría siendo un pago hecho por un anónimo,
+    // y con el gate opt-in este request LLEGABA a `resolveHold` (la mutación lo probó).
+    expect(mockResolveHold).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toBe('service_unavailable');
+
+    // (b) las lecturas conservan su passthrough dev (AC-2 de WKH-54 intacto).
+    const stats = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/stats',
+    });
+    expect(stats.statusCode).toBe(200);
+    const holds = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/arbitrations/holds',
+    });
+    expect(holds.statusCode).toBe(200);
+    expect(mockListHolds).toHaveBeenCalledTimes(1);
+
+    await app.close();
+  });
+
+  it('T-207-2: en producción y sin la variable → 503 (el fail-closed que ya había, sin regresión)', async () => {
+    process.env.NODE_ENV = 'production';
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/arbitrations/i1/resolve',
+      payload: { decision: 'release' },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(mockResolveHold).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('T-207-3: variable configurada y header ausente → 401, el árbitro no se llama', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/arbitrations/i1/resolve',
+      payload: { decision: 'release' },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(mockResolveHold).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  // Contra-ejemplo OBLIGATORIO: sin esto, cablear el endpoint a 503 permanente (o
+  // borrarlo) dejaba toda la sección verde. El endpoint tiene que seguir RESOLVIENDO.
+  it('T-207-4: con el token válido delega en resolveHold y devuelve el outcome (el panel sigue funcionando)', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockResolveHold.mockResolvedValue({
+      decision: 'split',
+      method: 'admin_override',
+      status: 'settled',
+      settleUsd: 6,
+      residualUsd: 4,
+      txHash: '0xarbtx',
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/arbitrations/i7/resolve',
+      headers: { 'x-admin-token': 'secret' },
+      payload: { decision: 'split', splitPct: 60, resolvedBy: 'ops@wasiai' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      decision: 'split',
+      method: 'admin_override',
+      status: 'settled',
+      settleUsd: 6,
+      residualUsd: 4,
+      txHash: '0xarbtx',
+    });
+    expect(mockResolveHold).toHaveBeenCalledWith('i7', {
+      decision: 'split',
+      splitPct: 60,
+      resolvedBy: 'ops@wasiai',
+      note: null,
+    });
+    await app.close();
+  });
+
+  it('T-207-5: en dev, con la variable configurada, resolver funciona igual que en prod (el desarrollo local no se rompe)', async () => {
+    delete process.env.NODE_ENV;
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockResolveHold.mockResolvedValue({
+      decision: 'release',
+      method: 'admin_override',
+      status: 'settled',
+      settleUsd: 10,
+      residualUsd: 0,
+      txHash: '0xdevtx',
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/arbitrations/i1/resolve',
+      headers: { 'x-admin-token': 'secret' },
+      payload: { decision: 'release' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(mockResolveHold).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// HU-207 · GUARD ESTRUCTURAL — el inventario de escrituras se revisa SOLO.
+//
+// El bug no fue teclear el gate equivocado una vez: fue que nada miraba la relación
+// "esto escribe ⟹ esto no puede abrirse sin secreto". Una convención en un comentario
+// ya falló. Este test recorre las rutas REALMENTE registradas por el plugin (hook
+// `onRoute`, no una lista escrita a mano, mismo patrón que `charged-routes.meta.test.ts`)
+// y exige, sin ninguna env configurada y en desarrollo, que TODA ruta que no sea de
+// lectura responda 503. Una escritura futura pegada al gate opt-in rompe acá, aunque
+// nadie se acuerde de esta HU.
+//
+// Es un guard de COMPORTAMIENTO, no de nombres: no le pregunta a la ruta qué preHandler
+// declara (eso se puede renombrar y seguir abierto), le manda el request que un
+// desconocido mandaría.
+// ════════════════════════════════════════════════════════════════════════════
+describe('HU-207 — guard estructural: ninguna escritura del panel se sirve sin secreto', () => {
+  const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+  async function registeredRoutes(): Promise<
+    Array<{ method: string; url: string }>
+  > {
+    const collected: Array<{ method: string; url: string }> = [];
+    const app = Fastify();
+    app.addHook('onRoute', (route) => {
+      const methods = Array.isArray(route.method)
+        ? route.method
+        : [route.method];
+      for (const method of methods) collected.push({ method, url: route.url });
+    });
+    await app.register(dashboardRoutes, { prefix: '/dashboard' });
+    await app.ready();
+    await app.close();
+    return collected;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.NODE_ENV;
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+    delete process.env.RECONCILIATION_RELEASE_TOKEN;
+    mockIsArbiterEnabled.mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    delete process.env.NODE_ENV;
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+    delete process.env.RECONCILIATION_RELEASE_TOKEN;
+  });
+
+  it('T-207-META-1: en dev y sin ninguna variable, TODA ruta no-GET del panel responde 503 y ningún service se invoca', async () => {
+    const routes = await registeredRoutes();
+    const writes = routes.filter((r) => !READ_METHODS.has(r.method));
+    // Si el plugin dejara de registrar escrituras, este guard se volvería vacuo y verde.
+    expect(writes.length).toBeGreaterThan(0);
+
+    const app = await buildApp();
+    const openings: string[] = [];
+    for (const { method, url } of writes) {
+      const res = await app.inject({
+        method: method as 'POST',
+        // `/:intentId` → un id cualquiera: el gate corre ANTES de mirar el parámetro.
+        url: url.replace(/\/:[^/]+/g, '/i1'),
+        payload: {},
+      });
+      if (res.statusCode !== 503)
+        openings.push(`${method} ${url} → ${res.statusCode}`);
+    }
+    expect(openings).toEqual([]);
+
+    // Ningún money-path tocado por esos requests anónimos.
+    for (const spy of [
+      mockResolveHold,
+      mockResolveIntent,
+      mockResolveWithHop2Evidence,
+      mockReleaseHop2Lease,
+    ]) {
+      expect(spy).not.toHaveBeenCalled();
+    }
+    await app.close();
+  });
+
+  it('T-207-META-2: en las MISMAS condiciones, la lectura del panel sigue abierta en dev (no se cerró de más)', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/stats',
+    });
+    expect(res.statusCode).toBe(200);
+    await app.close();
+  });
+});
+
 describe('AR-202 B3 — /resolve deja de nombrar una acción inexistente', () => {
   it('T-AR1: `awaiting_manual_settle_evidence` nombra los DOS endpoints que sí existen', async () => {
     process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
