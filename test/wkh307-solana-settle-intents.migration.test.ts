@@ -367,6 +367,41 @@ describe('WKH-307 up — las 4 funciones de transición', () => {
 // El down — M15 muere acá
 // ══════════════════════════════════════════════════════════════
 
+describe('WKH-307 — el ciclo down → up no puede dejar el ledger sin dedup (AR MNR-4)', () => {
+  const up = readFileSync(UP, 'utf8');
+  const body = code(up);
+
+  it('T-MIG-15: el up ABORTA si el backup conserva filas en vuelo', () => {
+    // El `_down` renombra la tabla; re-aplicar el up crearía una NUEVA Y VACÍA, y eso
+    // deja sin dedup a todo intent a medias ⟹ el siguiente retry re-paga. El paso de
+    // re-hidratación no puede ser prosa: tiene que abortar la migración.
+    expect(body).toMatch(
+      /to_regclass\('public\.a2a_solana_settle_intents_backup_wkh307'\) IS NOT NULL/i,
+    );
+    expect(body).toMatch(/status <> ''confirmed''/i);
+    expect(body).toMatch(/RAISE EXCEPTION 'WKH307_BACKUP_NOT_REHYDRATED/i);
+  });
+
+  it('T-MIG-15b: el gate corre ANTES de crear la tabla', () => {
+    // Si corriera después, la tabla nueva ya existiría y el operador podría creer que
+    // la migración "funcionó" sobre un ledger vacío.
+    const guardAt = body.indexOf('WKH307_BACKUP_NOT_REHYDRATED');
+    const createAt = body.indexOf('CREATE TABLE IF NOT EXISTS');
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(createAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(createAt);
+  });
+
+  it('T-MIG-15c: una instalación LIMPIA no se bloquea (sin backup, no hay gate)', () => {
+    // El guard cuelga de `to_regclass(...) IS NOT NULL`: sin backup no evalúa nada.
+    const guard = body.slice(
+      body.indexOf('DO $wkh307$'),
+      body.indexOf('CREATE TABLE IF NOT EXISTS'),
+    );
+    expect(guard).toMatch(/IF to_regclass\([^)]*\) IS NOT NULL THEN/i);
+  });
+});
+
 describe('WKH-307 down — la evidencia no se destruye', () => {
   const down = readFileSync(DOWN, 'utf8');
   const body = code(down);

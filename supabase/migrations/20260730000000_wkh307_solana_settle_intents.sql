@@ -15,6 +15,11 @@
 --     sin DROP y sin la ventana de schema-cache de PostgREST (PGRST202) que mordio a
 --     20260728010000/20260728020000.
 --
+-- ⚠️ SI ESTE up SE RE-APLICA DESPUES DE UN `_down`: hay que RE-HIDRATAR primero las
+-- filas en vuelo del backup. El bloque (0) de abajo lo hace cumplir y aborta si no se
+-- hizo — un rollback + restauracion sin ese paso deja sin dedup a todo intent a medias
+-- y el siguiente retry re-paga.
+--
 -- CONSECUENCIA DEL ORDEN INVERSO (codigo primero):
 --   · El preflight de esquema (src/adapters/solana/schema-preflight.ts) da veredicto
 --     negativo y **el leg Solana NO settlea** hasta que esta migracion este aplicada.
@@ -103,6 +108,42 @@
 -- ============================================================
 
 BEGIN;
+
+-- ── (0) GATE DEL CICLO down → up (AR MNR-4) ──
+--
+-- El `_down` RENOMBRA la tabla a `..._backup_wkh307` en vez de borrarla (la evidencia
+-- de a quien se le pago no se destruye). Pero entonces re-aplicar ESTE up crea una
+-- tabla NUEVA Y VACIA, y eso deja **sin dedup a todo intent en vuelo**: el proximo
+-- retry de un intent que ya estaba `claimed` o `signed` no encuentra su fila, reclama
+-- como si fuera nuevo y **re-paga**.
+--
+-- El paso de re-hidratacion no puede ser prosa en un runbook: seria exactamente el
+-- "gate que nadie corre" que esta HU existe para no repetir. Asi que el up FALLA
+-- RUIDOSO si detecta un backup con filas sin confirmar.
+--
+-- Las filas `confirmed` no bloquean a proposito: son terminales y su `intent_id`
+-- —`${composeRunId}:${i}`, con un UUID fresco por ejecucion— no vuelve a consultarse.
+-- Lo peligroso es lo que quedo A MITAD.
+--
+-- COMO DESTRABAR (re-hidratar, y recien despues re-aplicar este up):
+--   INSERT INTO public.a2a_solana_settle_intents
+--   SELECT * FROM public.a2a_solana_settle_intents_backup_wkh307
+--    WHERE status <> 'confirmed'
+--   ON CONFLICT (intent_id) DO NOTHING;
+-- (crear primero la tabla con este archivo comentando este bloque, volcar, y seguir).
+DO $wkh307$
+DECLARE
+  v_pending INT;
+BEGIN
+  IF to_regclass('public.a2a_solana_settle_intents_backup_wkh307') IS NOT NULL THEN
+    EXECUTE 'SELECT count(*) FROM public.a2a_solana_settle_intents_backup_wkh307 WHERE status <> ''confirmed'''
+      INTO v_pending;
+    IF v_pending > 0 THEN
+      RAISE EXCEPTION 'WKH307_BACKUP_NOT_REHYDRATED: % in-flight rows (status <> confirmed) still live in a2a_solana_settle_intents_backup_wkh307. Applying this migration now would create an EMPTY ledger and leave those intents without dedup: the next retry would PAY THEM AGAIN. Re-hydrate them first (see the header of this file).', v_pending;
+    END IF;
+  END IF;
+END
+$wkh307$;
 
 -- ── (1) La tabla ──
 CREATE TABLE IF NOT EXISTS public.a2a_solana_settle_intents (
@@ -306,6 +347,21 @@ BEGIN
          signed_at               = now(),
          updated_at              = now()
    WHERE t.intent_id = p_intent_id
+     -- ⚠️ ESTE PREDICADO HACE **DOS** TRABAJOS. El segundo es facil de no ver:
+     --
+     --   (1) ORDEN (invariante I2): sin el, una fila podria pasar a 'signed' desde
+     --       cualquier estado y "claimed sin firma" dejaria de demostrar que no se
+     --       transmitio nada.
+     --
+     --   (2) FRENA AL PERDEDOR DE LA CARRERA DEL LEASE. Caso real: A reclama y tarda
+     --       MAS que el lease firmando (`getOrCreateAssociatedTokenAccount` puede
+     --       crear una cuenta on-chain, que es un round-trip de red). B toma el
+     --       reclamo vencido, firma y persiste: la fila queda 'signed' con la firma
+     --       de B. Cuando A vuelve a intentar persistir la SUYA, ESTE `AND` es lo
+     --       unico que lo frena. Sin el, persisten los dos y **transmiten los dos**.
+     --
+     -- O sea que no alcanza con "el lease ya lo protege": el lease decide quien
+     -- ENTRA, y esto decide quien SALE. Si se toca, se reabre el doble pago.
      AND t.status    = 'claimed'
   RETURNING TRUE, 'applied', t.status, t.settle_signature,
             t.last_valid_block_height::TEXT, t.attempts
