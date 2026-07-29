@@ -17,6 +17,7 @@ import {
 import { assertRequiredEnv, isProduction, parseTrustProxy } from './lib/env.js';
 import { assertGasOverheadConfigured } from './lib/gas-overhead.js';
 import { REDACT_PATHS } from './lib/logger.js';
+import { isPipelineCeilingMisconfigured } from './lib/stranded-payment.js';
 import mcpPlugin from './mcp/index.js';
 import { registerErrorBoundary } from './middleware/error-boundary.js';
 import { registerEventTracking } from './middleware/event-tracking.js';
@@ -61,6 +62,13 @@ assertGasOverheadConfigured(
   getInitializedChainKeys().map((key) => getChainConfig(key).chainId),
 );
 
+// HU-306 (fix-pack CR): el techo de exposición por pipeline hace fail-OPEN ante un valor
+// ilegible —un techo que se cae a 0 por un typo rechazaría TODO el tráfico—, pero eso no
+// puede ser mudo: sin este aviso, `PIPELINE_EXPOSURE_CEILING_USD=1O` y la env sin setear
+// se comportan igual y se ven igual, y el operador creería tener puesto un techo que no
+// existe. Se evalúa UNA vez, al arrancar; no cuesta nada por request.
+const strandedCeilingMisconfigured = isPipelineCeilingMisconfigured();
+
 const fastify = Fastify({
   // F-06 (audit 2026-06-29): redact credential-bearing fields from request logs
   // (Authorization / x-payment / x-a2a-key headers + any *.secret/*.signature).
@@ -103,6 +111,15 @@ if (!prod) {
     );
     corsOptions = { origin: false };
   }
+}
+
+if (strandedCeilingMisconfigured) {
+  fastify.log.warn(
+    '⚠️  PIPELINE_EXPOSURE_CEILING_USD is SET but unreadable (not a positive number) — ' +
+      'the gateway is running WITHOUT a per-pipeline exposure ceiling, exactly as if the ' +
+      'variable were unset. Fail-open is deliberate (a ceiling that collapses to 0 would ' +
+      'reject ALL traffic), but the value you configured is doing nothing. See .env.example.',
+  );
 }
 
 await fastify.register(cors, corsOptions);

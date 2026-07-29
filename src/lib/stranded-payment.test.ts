@@ -10,13 +10,14 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Agent, StepResult } from '../types/index.js';
 import { MAX_COMPOSE_STEPS } from './compose-limits.js';
 import {
   buildStrandedPaymentEvent,
   COMPOSE_STRANDED_PAYMENT_EVENT,
   collectStrandedSteps,
+  isPipelineCeilingMisconfigured,
   MAX_ORCHESTRATE_AGENTS,
   MAX_STRANDABLE_STEPS,
   MAX_STRANDABLE_STEPS_ANY_PATH,
@@ -71,6 +72,26 @@ describe('HU-306 · la cota de exposición es computable, no prosa', () => {
     expect(MAX_STRANDABLE_STEPS).toBe(4);
   });
 
+  it('T-COTA-01b: la cota SIGUE a MAX_COMPOSE_STEPS — no es un 4 escrito a mano (AR MENOR-2)', async () => {
+    // T-COTA-01 no puede distinguir la derivación de un literal mientras los dos valgan
+    // 4: `4 === MAX_COMPOSE_STEPS - 1` pasa igual. La única forma de fijar la
+    // DERIVACIÓN es mover el número del que depende y ver que la cota se mueve sola.
+    // Sin esto, cambiar `MAX_COMPOSE_STEPS - 1` por `4` no rompía ningún test, que es
+    // exactamente el "dos números que divergen en silencio" que el docstring del módulo
+    // dice estar evitando.
+    vi.resetModules();
+    vi.doMock('./compose-limits.js', () => ({ MAX_COMPOSE_STEPS: 9 }));
+    try {
+      const fresh = await import('./stranded-payment.js');
+      expect(fresh.MAX_STRANDABLE_STEPS).toBe(8);
+      // …y todo lo que se deriva de ella también se mueve.
+      expect(fresh.maxStrandedExposureUsd(2)).toBe(16);
+    } finally {
+      vi.doUnmock('./compose-limits.js');
+      vi.resetModules();
+    }
+  });
+
   it('T-COTA-03: el tope de /orchestrate espeja el schema REAL de la ruta (AR MENOR-1)', () => {
     // El camino insignia no pasa por el guard de `MAX_COMPOSE_STEPS`: `/orchestrate`
     // acota por `maxAgents` y llama a compose() directo. Si ese schema sube y este
@@ -117,6 +138,26 @@ describe('HU-306 · la cota de exposición es computable, no prosa', () => {
     expect(resolveEffectivePipelineBudgetUsd(2)).toBe(2);
     expect(resolveEffectivePipelineBudgetUsd(undefined)).toBe(5);
     expect(resolveEffectivePipelineBudgetUsd(0)).toBe(5);
+  });
+
+  it('T-CEILING-05: un techo ilegible se DELATA (fail-open, pero no mudo)', () => {
+    // Sin esto, `PIPELINE_EXPOSURE_CEILING_USD=1O` (con una O) y la env sin setear se
+    // comportan igual y se VEN igual: el operador creería tener un techo puesto.
+    delete process.env[CEILING_ENV];
+    expect(isPipelineCeilingMisconfigured()).toBe(false);
+    for (const raw of ['', '   ']) {
+      process.env[CEILING_ENV] = raw;
+      // vacío = "no configurado", no es un typo
+      expect(isPipelineCeilingMisconfigured()).toBe(false);
+    }
+    for (const raw of ['1O', 'abc', '0', '-3', 'NaN']) {
+      process.env[CEILING_ENV] = raw;
+      expect(isPipelineCeilingMisconfigured()).toBe(true);
+      // …y sigue sin acotar: se avisa, no se rompe el tráfico
+      expect(resolveEffectivePipelineBudgetUsd(9)).toBe(9);
+    }
+    process.env[CEILING_ENV] = '5';
+    expect(isPipelineCeilingMisconfigured()).toBe(false);
   });
 
   it('T-CEILING-04: un techo inválido o no positivo NO acota (fail-open declarado)', () => {

@@ -335,10 +335,32 @@ export function readStrandedMetadata(metadata: unknown): {
 export function resolveEffectivePipelineBudgetUsd(
   callerMaxBudget: number | undefined,
 ): number {
-  const raw = process.env.PIPELINE_EXPOSURE_CEILING_USD;
-  const parsed = raw && raw.trim() !== '' ? Number(raw.trim()) : Number.NaN;
-  const ceiling =
-    Number.isFinite(parsed) && parsed > 0 ? parsed : Number.POSITIVE_INFINITY;
+  const ceiling = readPipelineCeilingUsd() ?? Number.POSITIVE_INFINITY;
   const caller = callerMaxBudget || Number.POSITIVE_INFINITY;
   return Math.min(caller, ceiling);
+}
+
+/** El techo configurado, o `null` si no hay uno usable. Puro, sin logs, sin efectos. */
+function readPipelineCeilingUsd(): number | null {
+  const raw = process.env.PIPELINE_EXPOSURE_CEILING_USD;
+  if (!raw || raw.trim() === '') return null;
+  const n = Number(raw.trim());
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * ¿La env del techo está PUESTA pero es ilegible? (fix-pack CR — observación).
+ *
+ * El fail-open ante un valor inválido es deliberado (un techo que se cae a 0 por un typo
+ * rechazaría todo el tráfico), pero era MUDO: `PIPELINE_EXPOSURE_CEILING_USD=1O` (con
+ * una O) y la env sin setear se comportaban idéntico y se veían idénticas. El operador
+ * creería tener un techo puesto que no existe.
+ *
+ * Se consulta UNA vez al arrancar (`src/index.ts`), no por request: es config, y avisar
+ * en cada llamada sería ruido en el hot-path.
+ */
+export function isPipelineCeilingMisconfigured(): boolean {
+  const raw = process.env.PIPELINE_EXPOSURE_CEILING_USD;
+  const present = typeof raw === 'string' && raw.trim() !== '';
+  return present && readPipelineCeilingUsd() === null;
 }
