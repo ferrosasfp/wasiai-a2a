@@ -125,8 +125,28 @@ const requireAdminToken: preHandlerAsyncHookHandler = async (
 /**
  * WKH-191c: admin-token preHandler FAIL-CLOSED (CD-7). A diferencia del opt-in
  * `requireAdminToken`, este SIEMPRE exige el token: si `DASHBOARD_ADMIN_TOKEN` no está
- * configurado responde 503 en dev Y prod (este `POST` mueve dinero — nunca abierto).
- * Comparación timing-safe (reusa el patrón de `requireAdminToken`).
+ * configurado responde 503 en dev Y prod. Comparación timing-safe (reusa el patrón de
+ * `requireAdminToken`).
+ *
+ * ── ESTE ES EL GATE DE TODA ESCRITURA DE DINERO DEL PANEL (HU-207) ──────────
+ *
+ * Nació para la reconciliación, pero la regla no es de qué módulo es el endpoint: es
+ * que la operación mueva o habilite dinero. Un endpoint así no puede quedar abierto por
+ * la ausencia de una variable, porque ahí la protección deja de ser una decisión y pasa
+ * a ser una coincidencia de configuración: `requireAdminToken` sólo cierra cuando
+ * `NODE_ENV` dice EXACTAMENTE `production` (`lib/env.ts`), así que un staging, un
+ * preview o un servicio recién creado sin `DASHBOARD_ADMIN_TOKEN` sirve la operación a
+ * cualquiera. Fail-closed invierte esa carga: sin secreto no hay operación, y el 503 es
+ * un síntoma visible en el primer intento en vez de un agujero silencioso.
+ *
+ * Los mensajes NO nombran un módulo a propósito (antes decían "reconciliation API"): el
+ * gate cubre reconciliación Y arbitraje, y un 503 que nombra el módulo equivocado manda
+ * al operador a mirar el lado que no es, justo durante un incidente.
+ *
+ * Las LECTURAS del panel se quedan con el opt-in `requireAdminToken` (grandfathered en
+ * WKH-54): ahí el passthrough de desarrollo no habilita ninguna transferencia y sacarlo
+ * traba el desarrollo local sin cerrar nada. Ver `requireAdminTokenForTrace` para la
+ * excepción: una lectura cross-tenant NUEVA sí nace fail-closed.
  */
 const requireAdminTokenStrict: preHandlerAsyncHookHandler = async (
   request,
@@ -137,14 +157,14 @@ const requireAdminTokenStrict: preHandlerAsyncHookHandler = async (
     // CD-7: fail-closed SIEMPRE (dev Y prod) — money-moving endpoint.
     return reply.status(503).send({
       error: 'service_unavailable',
-      message: 'Reconciliation API not configured',
+      message: 'Admin write API not configured',
     });
   }
   const provided = request.headers['x-admin-token'];
   if (typeof provided !== 'string') {
     return reply.status(401).send({
       error: 'unauthorized',
-      message: 'X-Admin-Token header required for reconciliation API',
+      message: 'X-Admin-Token header required for admin write API',
     });
   }
   const a = Buffer.from(provided);
@@ -152,7 +172,7 @@ const requireAdminTokenStrict: preHandlerAsyncHookHandler = async (
   if (a.length !== b.length || !timingSafeEqual(a, b)) {
     return reply.status(401).send({
       error: 'unauthorized',
-      message: 'X-Admin-Token header required for reconciliation API',
+      message: 'X-Admin-Token header required for admin write API',
     });
   }
 };
@@ -475,12 +495,26 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * POST /dashboard/api/arbitrations/:intentId/resolve
    * WKH-189: override humano (release/refund/split) de un intent en `arb_hold`.
-   * Gateado por requireAdminToken + isArbiterEnabled. La validación autoritativa
-   * vive en arbiterService.resolveHold; acá sólo un shape-check defensivo.
+   * La validación autoritativa vive en arbiterService.resolveHold; acá sólo un
+   * shape-check defensivo.
+   *
+   * HU-207 — GATE FAIL-CLOSED (`requireAdminTokenStrict`), NO el opt-in.
+   *
+   * Esta es la única ESCRITURA del panel que quedó con `requireAdminToken`, y `resolveHold`
+   * termina en `executeArbitration`: settlea al seller o reembolsa al buyer. O sea que el
+   * endpoint movía dinero detrás de un gate que se abre solo cuando falta
+   * `DASHBOARD_ADMIN_TOKEN` y `NODE_ENV` no dice exactamente `production`. Producción está
+   * configurada, así que esto no fue un incidente; el problema es que la protección
+   * dependía de dos variables acertadas en CADA entorno, y un staging o un servicio nuevo
+   * sin el token abría el movimiento de fondos a cualquiera. Ahora sin secreto no hay
+   * operación, en dev y en prod, como sus pares de reconciliación.
+   *
+   * El hermano `GET /api/arbitrations/holds` se queda con el opt-in a propósito: es la
+   * lectura grandfathered de WKH-54 y no habilita ninguna transferencia.
    */
   fastify.post<{ Params: { intentId: string } }>(
     '/api/arbitrations/:intentId/resolve',
-    { config: { rateLimit: false }, preHandler: requireAdminToken },
+    { config: { rateLimit: false }, preHandler: requireAdminTokenStrict },
     async (request, reply: FastifyReply) => {
       if (!isArbiterEnabled()) {
         return reply.status(404).send({ error_code: 'NOT_FOUND' }); // AC-8/CD-7
