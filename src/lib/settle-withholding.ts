@@ -198,6 +198,17 @@ export function buildSettleUnknownEvent(input: {
   keyId?: string | undefined;
   ownerRef?: string | undefined;
   chainId?: number | undefined;
+  /**
+   * HU-306: id del run de `/compose` que produjo la retención, cuando lo hay.
+   *
+   * ADITIVO Y OPCIONAL: sin él la fila tiene EXACTAMENTE la forma de hoy (`null`), que
+   * es la que siguen escribiendo los caminos que no son un pipeline. Existe para que las
+   * dos preguntas del mismo run —"¿este settle salió?" (esta fila) y "¿qué pagos ya
+   * confirmados quedaron varados?" (la fila `compose_stranded_payment`)— se puedan mirar
+   * juntas. NO las mezcla: siguen siendo dos `event_type` distintos y dos listas
+   * distintas (CD-8).
+   */
+  composeRunId?: string | undefined;
 }): {
   eventType: string;
   status: 'failed';
@@ -231,6 +242,7 @@ export function buildSettleUnknownEvent(input: {
       owner_ref: input.ownerRef ?? null,
       chain_id: input.chainId ?? null,
       detail: withholding.detail,
+      compose_run_id: input.composeRunId ?? null,
     },
   };
 }

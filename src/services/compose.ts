@@ -60,6 +60,12 @@ import {
   withholdingFromSettleResult,
 } from '../lib/settle-withholding.js';
 import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
+// HU-306: la aritmética del residuo varado y la forma de su evento durable. Módulo leaf
+// (ver su docstring): no arrastra nada al grafo del money-path y no mueve plata.
+import {
+  buildStrandedPaymentEvent,
+  collectStrandedSteps,
+} from '../lib/stranded-payment.js';
 import {
   SSRFViolationError,
   validateRegistryUrl,
@@ -178,18 +184,94 @@ function buildAuthHeaders(
 }
 
 export const composeService = {
+  /**
+   * HU-306 — envoltura del pipeline y PUNTO DE ESTRANGULAMIENTO ÚNICO del residuo.
+   *
+   * La firma, el nombre y el objeto devuelto son EXACTAMENTE los de antes: los dos
+   * callers (`routes/compose.ts` y `services/orchestrate.ts`) no se tocan y siguen
+   * invocando como método, así que el `this` de `executePipeline` se preserva.
+   *
+   * POR QUÉ UNA ENVOLTURA Y NO SIETE PARCHES. El cuerpo del pipeline tiene SIETE
+   * `return { success:false … }` dentro del loop de steps, y cada HU nueva agrega el
+   * suyo (WKH-305 acaba de sumar `INPUT_MAPPING_FAILED`). Envolver cada uno serían
+   * siete oportunidades de olvidarse uno hoy, y una más por HU futura; acá el residuo
+   * se detecta UNA vez, sobre el resultado, sin importar por cuál de los siete salió.
+   *
+   * Lo que hace la envoltura es SOLO OBSERVAR (AC-7): no reembolsa, no acredita, no
+   * reintenta y no cambia el `ComposeResult` — lo devuelve tal cual, sin tocarlo.
+   */
   async compose(request: ComposeRequest): Promise<ComposeResult> {
+    // WKH-234: id único por EJECUCIÓN de compose. Ancla el `intentId` del leg
+    // Solana (AC-7): estable entre master + retry del MISMO step (no re-emite un
+    // settle ya confirmado), distinto entre ejecuciones (no dedup cross-run). El
+    // almacén real de idempotencia se cierra en W5 (ledger settle_signature).
+    //
+    // HU-306: se genera ACÁ, un nivel más arriba que antes, para que el registro del
+    // residuo pueda correlacionarse con los `compose_step` del mismo run. Sus dos usos
+    // dentro del pipeline (`${composeRunId}:${i}` como intentId del leg Solana y
+    // `operationId` de la clave de refund) quedan BYTE-IDÉNTICOS: es el mismo valor,
+    // generado una vez por invocación, pasado como parámetro.
+    const composeRunId = randomUUID();
+    const result = await this.executePipeline(request, composeRunId);
+    if (!result.success) this.recordStrandedRunIfAny(composeRunId, result);
+    return result;
+  },
+
+  /**
+   * HU-306 (AC-2/AC-3/AC-8) — deja constancia durable de la plata que ya salió y no
+   * vuelve, cuando el pipeline falló después de que algún step cobró on-chain.
+   *
+   * FIRE-AND-FORGET, y no por performance (CD-9/AC-9): esto es telemetría de un
+   * resultado que YA está decidido. Si `track` rechaza, el caller recibe EL MISMO
+   * `ComposeResult` que habría recibido sin esta HU — un fallo al ANOTAR el residuo no
+   * puede convertirse en un fallo distinto del pipeline. El `.catch` es obligatorio: sin
+   * él, el rechazo sería una unhandled rejection.
+   *
+   * Si ningún step dejó evidencia on-chain no se emite NADA (AC-10): un pipeline que
+   * falla en el step 0, o sin pagos confirmados, se comporta byte-idéntico a hoy —
+   * cero eventos nuevos, cero queries.
+   */
+  recordStrandedRunIfAny(composeRunId: string, result: ComposeResult): void {
+    const strandedSteps = collectStrandedSteps(result.steps);
+    if (strandedSteps.length === 0) return;
+    eventService
+      .track(
+        buildStrandedPaymentEvent({
+          composeRunId,
+          strandedSteps,
+          // `results` sólo se puebla en `finishSuccessfulStep`, así que la cantidad de
+          // steps COMPLETADOS es el índice del que falló. No hace falta reconstruirlo.
+          failedStepIndex: result.steps.length,
+          error: result.error,
+          errorCode: result.errorCode,
+        }),
+      )
+      .catch((trackErr) =>
+        log.error(
+          { err: trackErr, composeRunId },
+          '[compose.stranded] the pipeline failed after a step had already been paid on-chain, and that could NOT be persisted as an event — the only remaining record is this log line',
+        ),
+      );
+  },
+
+  /**
+   * El pipeline propiamente dicho: cuerpo de siempre, movido tal cual bajo un nombre
+   * propio para que `compose()` pueda envolverlo (HU-306 §3). `composeRunId` entra por
+   * parámetro en vez de generarse acá; ninguna otra línea de este cuerpo cambió de
+   * significado, y en particular NINGUNA decisión de dinero se movió: el guard `i > 0`
+   * del doble-débito del step 0, el `startTime`, el orden débito → invoke → settle, el
+   * `stepDestination` y las claves de idempotencia siguen donde estaban.
+   */
+  async executePipeline(
+    request: ComposeRequest,
+    composeRunId: string,
+  ): Promise<ComposeResult> {
     const { steps, maxBudget, a2aKey, scopingKeyRow, chainId, logger } =
       request;
     const results: StepResult[] = [];
     let totalCost = 0;
     let totalLatency = 0;
     let lastOutput: unknown = null;
-    // WKH-234: id único por EJECUCIÓN de compose. Ancla el `intentId` del leg
-    // Solana (AC-7): estable entre master + retry del MISMO step (no re-emite un
-    // settle ya confirmado), distinto entre ejecuciones (no dedup cross-run). El
-    // almacén real de idempotencia se cierra en W5 (ledger settle_signature).
-    const composeRunId = randomUUID();
     // B7 (audit 2026-06-24): un solo discover() compartido por todo el pipeline.
     const discoverCache = createDiscoverCache();
     for (let i = 0; i < steps.length; i++) {
@@ -466,6 +548,7 @@ export const composeService = {
           scopingKeyRow,
           callerRefHash,
           discoverCache,
+          composeRunId, // HU-306: sólo viaja a la metadata del evento de éxito
         });
         totalCost = agg.totalCost;
         totalLatency = agg.totalLatency;
@@ -628,6 +711,7 @@ export const composeService = {
                 keyId: scopingKeyRow?.id,
                 ownerRef: scopingKeyRow?.owner_ref,
                 chainId,
+                composeRunId, // HU-306: correlación con el resto del run
               }),
             )
             .catch((trackErr) =>
@@ -678,6 +762,11 @@ export const composeService = {
             costUsdc: 0,
             metadata: {
               caller_ref_hash: callerRefHash,
+              // HU-306 (AC-3): correlación por run. Es lo que permite reconstruir, desde
+              // la fila `compose_stranded_payment`, QUÉ agente rompió el pipeline — dato
+              // que el `ComposeResult` no trae (sólo el índice del step).
+              compose_run_id: composeRunId,
+              step: i,
               ...(willRetry && { retry_attempted: true }),
             },
           })
@@ -797,6 +886,7 @@ export const composeService = {
                   callerRefHash,
                   retried: true, // DT-8: metadata.retried
                   discoverCache,
+                  composeRunId, // HU-306: sólo viaja a la metadata del evento de éxito
                 });
                 totalCost = agg.totalCost;
                 totalLatency = agg.totalLatency;
@@ -833,6 +923,10 @@ export const composeService = {
                     costUsdc: 0,
                     metadata: {
                       caller_ref_hash: callerRefHash,
+                      // HU-306 (AC-3): misma correlación por run que el track del primer
+                      // intento — el retry fallido es parte del MISMO run.
+                      compose_run_id: composeRunId,
+                      step: i,
                       retry_failed: true, // DT-8
                     },
                   })
@@ -936,6 +1030,11 @@ export const composeService = {
     callerRefHash: string | null;
     retried?: boolean | undefined;
     discoverCache?: DiscoverCache | undefined; // B7: cache compartido del pipeline
+    /**
+     * HU-306: id del run, SÓLO para la metadata del evento de éxito (el join que
+     * recupera qué agente corrió en cada step). No participa de ninguna decisión.
+     */
+    composeRunId: string;
   }): Promise<{
     totalCost: number;
     totalLatency: number;
@@ -955,6 +1054,7 @@ export const composeService = {
       callerRefHash,
       retried,
       discoverCache,
+      composeRunId,
     } = ctx;
     let { totalCost, totalLatency } = ctx;
     let lastOutput: unknown = output;
@@ -1083,6 +1183,12 @@ export const composeService = {
           llm_tokens_in: llm?.tokensIn ?? null,
           llm_tokens_out: llm?.tokensOut ?? null,
           caller_ref_hash: callerRefHash,
+          // HU-306 (AC-3 / T-STRAND-JOIN): el `compose_run_id` viaja TAMBIÉN en el evento
+          // de ÉXITO, y es el que cierra el join. La fila del residuo no nombra agente a
+          // propósito; el agente de cada step pagado se recupera cruzando por este id
+          // contra estas filas, que sí llevan `agent_id`.
+          compose_run_id: composeRunId,
+          step: i,
           ...(retried && { retried: true }), // DT-8
         },
       })
