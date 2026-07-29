@@ -1,6 +1,8 @@
 # SDD #190 — [WKH-305] Mapeo de un campo puntual entre steps de un pipeline `/compose`
 
-> SPEC_APPROVED: no
+> SPEC_APPROVED: si — 2026-07-28, revision clinica del orquestador (delegada por Fernando).
+> Waves W0-W4 con W3 paralela, 9 decisiones tecnicas, 19 restricciones, 7 criterios,
+> 22 tests y 12 mutantes con su test asesino. Cero pendientes sin resolver.
 > Fecha: 2026-07-28
 > Tipo: feature (money-path)
 > SDD_MODE: full
