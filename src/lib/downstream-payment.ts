@@ -250,7 +250,9 @@ async function settleSolanaLeg(
   agent: Agent,
   adapter: SolanaPaymentAdapter,
   logger: DownstreamLogger,
-  intentId?: string,
+  // WKH-307 (DT-9): OBLIGATORIO. Ver el guard de abajo — el fallback derivado que
+  // vivia aca era una trampa que un store durable vuelve permanente.
+  intentId: string | undefined,
 ): Promise<DownstreamResult | null> {
   // payTo base58 (CD-9) — NO 0x. Validador puro (sin web3.js).
   const payTo = agent.payment?.contract ?? '';
@@ -322,8 +324,48 @@ async function settleSolanaLeg(
   // `INSUFFICIENT_BALANCE`, sin recibo ni `settle_signature` en el ledger, y el
   // log afirmaba lo contrario de la verdad (un pago SPL real reportado como no
   // pagado).
-  const legIntentId = intentId ?? `${agent.slug}:${payTo}`;
-  const priorSignature = adapter.getSettledSignature(legIntentId);
+  // ⚠️ WKH-307 (DT-9) — ACA VIVIA `intentId ?? `${agent.slug}:${payTo}``, Y SE ELIMINO.
+  //
+  // Ese fallback derivaba la clave de idempotencia del NOMBRE del agente y su
+  // DIRECCION DE COBRO: una clave IDENTICA para todos los pagos a ese agente, para
+  // siempre. Con el `Map` + TTL era casi inocuo (deduplicaba ~50 min y expiraba).
+  //
+  // Con el registro DURABLE significa que **el agente cobra una sola vez en su vida**:
+  // el primer pago queda `confirmed`, y todo pago futuro encuentra la fila, re-verifica
+  // la firma vieja on-chain (que es valida, porque ese pago SI ocurrio), la devuelve, y
+  // NO transfiere un centavo — reportando EXITO. El agente trabaja gratis y nadie se
+  // entera.
+  //
+  // Hoy es inalcanzable (los dos call-sites de produccion pasan `${composeRunId}:${i}`),
+  // y por eso mismo se elimina: es el ejemplo canonico de una linea inofensiva que se
+  // vuelve catastrofica cuando arreglas otra cosa. Dejarla "por las dudas" ES el bug.
+  //
+  // Tampoco se deriva un `randomUUID()`: un identificador distinto en cada intento
+  // DESACTIVA la idempotencia entera y convierte cualquier retry en un pago nuevo.
+  if (intentId === undefined || intentId.length === 0) {
+    logger.warn(
+      { agentSlug: agent.slug, code: 'MISSING_INTENT_ID' },
+      '[Downstream] solana leg refused — no idempotency key was supplied; without a stable intentId a retry cannot be told apart from a new payment',
+    );
+    return null;
+  }
+  const legIntentId = intentId;
+
+  // WKH-307: el peek es ASINCRONO y discriminado. `settled`/`in_progress` SONDEAN
+  // (no cortan); `none` y `unknown` GATEAN — y `unknown` con su propio codigo, porque
+  // "el store no contesta" no es "no se pago".
+  const prior = await adapter.getSettledSignature(legIntentId);
+  if (prior.state === 'unknown') {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        code: 'SETTLE_LEDGER_UNAVAILABLE',
+        intentId: legIntentId,
+      },
+      '[Downstream] solana leg refused — the settle ledger did not answer, so the gateway cannot tell whether this intent was already paid (fail-closed)',
+    );
+    return null;
+  }
 
   // Pre-flight de balance del operador — paridad de observabilidad con la rama
   // EVM (CR-2 de WKH-234). Corta temprano con el MISMO skip-code
@@ -345,14 +387,26 @@ async function settleSolanaLeg(
   // real, si lo hay, sigue apareciendo como `SETTLE_FAILED`.
   //
   // Fix-pack it2 MNR-1: en el replay idempotente el pre-check pasa de GATE a
-  // SONDA (se lee el balance, pero un balance bajo NUNCA corta). Motivo: el
-  // `settle()` del adapter puede tomar el camino SELF-HEAL — si la firma previa
-  // no verifica on-chain, la borra del seam y re-broadcastea FRESCO
-  // (`solana/payment.ts` §idempotencia). Omitir la lectura por completo perdía
-  // justo ahí la distinguibilidad `INSUFFICIENT_BALANCE` vs `SETTLE_FAILED`. La
-  // sonda la recupera en los logs sin reintroducir el falso negativo que el FIX 2
-  // arregló (un leg YA pagado jamás se reporta como no pagado).
-  const isIdempotentReplay = priorSignature !== undefined;
+  // SONDA (se lee el balance, pero un balance bajo NUNCA corta).
+  //
+  // ⚠️ WKH-307 CORRIGIÓ ESTE COMENTARIO. Decía que `settle()` podía tomar un camino
+  // SELF-HEAL que «borra la firma del seam y re-broadcastea FRESCO». **Eso ya no
+  // existe**: con el registro durable, una firma registrada que la cadena no respalda
+  // hace que `settle()` RECHACE (ver `solana/payment.ts`, rama `confirmed`), porque
+  // sus causas —contabilidad corrupta, un RPC mintiendo, o un fork— no se arreglan
+  // pagando de nuevo.
+  //
+  // El motivo de que la sonda siga siendo sonda y no vuelva a ser gate es OTRO, y
+  // sigue en pie: un intent ya reclamado puede terminar re-firmando por una vía
+  // legítima (la firma anterior expiró sin aterrizar, o aterrizó con error), y ahí un
+  // corte por fondos perdería la distinguibilidad `INSUFFICIENT_BALANCE` vs
+  // `SETTLE_FAILED` en los logs. La sonda la conserva sin reintroducir el falso
+  // negativo que el FIX 2 arregló (un leg YA pagado jamás se reporta como no pagado).
+  // `settled` (ya pagado) e `in_progress` (reclamado, sin confirmar) SONDEAN: los dos
+  // pueden terminar en el camino idempotente de `settle()`, y si no, `settle()`
+  // fail-closea igual. `none` GATEA, como siempre.
+  const isIdempotentReplay =
+    prior.state === 'settled' || prior.state === 'in_progress';
   let operatorBalance: bigint | undefined;
   try {
     operatorBalance = BigInt(await adapter.getOperatorSplBalance());

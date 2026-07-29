@@ -14,6 +14,7 @@ import {
   getInitializedChainKeys,
   initAdapters,
 } from './adapters/registry.js';
+import { warmSolanaSchemaPreflight } from './adapters/solana/schema-preflight.js';
 import { assertRequiredEnv, isProduction, parseTrustProxy } from './lib/env.js';
 import { assertGasOverheadConfigured } from './lib/gas-overhead.js';
 import { REDACT_PATHS } from './lib/logger.js';
@@ -255,6 +256,13 @@ await fastify.listen({ port, host: '0.0.0.0' });
 // el escrow. Esto NO es el gate — el gate real es `ensureEscrowSchemaReady()` dentro de
 // `settleEscrowAware`, que comparte este mismo veredicto memoizado (no pueden divergir).
 if (isEscrowSettleEnabled()) warmEscrowSchemaPreflight();
+
+// WKH-307: lo mismo para el ledger del settle Solana. Mismo razonamiento y mismo
+// contrato: fire-and-forget, comparte el veredicto memoizado con el gate real
+// (`ensureSolanaSchemaReady()` dentro de `settle()`), y solo corre cuando el adapter
+// esta habilitado. Sin esto, la primera noticia de que falta la migracion llegaria en
+// medio de una transferencia en vez de en el arranque.
+if (process.env.SOLANA_ADAPTER_ENABLED === 'true') warmSolanaSchemaPreflight();
 
 // M6 (audit 2026-06-24): sweep periódico del outbox de refunds. Reintenta los
 // refunds best-effort que NO aplicaron nada. processRefundOutbox NUNCA tira

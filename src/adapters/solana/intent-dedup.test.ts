@@ -1,791 +1,1047 @@
 /**
- * Cap + TTL del seam de idempotencia Solana (fix-pack P1, hallazgo 5).
+ * WKH-307 — IDEMPOTENCIA DURABLE DEL SETTLE SOLANA: los ACs, medidos en broadcasts.
  *
- * `_intentSignatures` no tenía cota: una entrada por intent, para siempre →
- * leak de memoria en un proceso de larga vida.
+ * ── LA UNIDAD DE MEDIDA ────────────────────────────────────────────────────
  *
- * ⚠️ Ese Map es lo que hace IDEMPOTENTE el settle de un leg Solana. Si una
- * entrada desaparece MIENTRAS EL INTENT SIGUE VIVO, un retry re-broadcastea y
- * SE PAGA DOS VECES. Por eso la política es fail-safe hacia CONSERVAR:
- *   · TTL con 2× de margen sobre la COTA ESTIMADA de vida de un run
- *     (5 steps × 300 s de undici = 25 min ⇒ TTL default 50 min).
- *   · Override con PISO = la ventana protegida (25 min con los defaults).
- *   · Cap SOFT con VENTANA PROTEGIDA: nunca se desaloja algo joven.
+ * Casi toda aserción de este archivo termina en
+ * `expect(sendRawTransaction).toHaveBeenCalledTimes(N)` con `N ∈ {0,1}`, más el monto
+ * y el destino cuando `N = 1`. La pregunta que responde cada test es *¿salió una
+ * transmisión? ¿cuántas? ¿de cuánto y a quién?* — **nunca** *¿se llamó a tal función
+ * interna?* ni *¿existe tal variable?*. Un AC que se satisface por construcción no
+ * mide nada.
  *
- * ⚠️ AR MENOR-1: la iteración anterior derivaba estos números de
- * `TIMEOUT_COMPOSE_MS` afirmando que «un run no puede sobrevivir a su propio
- * timeout». Era FALSO — `middleware/timeout.ts` manda el 504 y NO cancela nada
- * (sin `AbortController`/`signal`, y `ssrf-dispatcher.ts` no fija
- * `headersTimeout`/`bodyTimeout`). No existe cota dura; los números se derivan
- * ahora de la cota ESTIMADA y el piso ya no se vende como garantía. Ver
- * `T-TTL-11`.
+ * ── DESTINO DE LA BATERÍA ANTERIOR (26 tests) ──────────────────────────────
+ *
+ * Este archivo candaba una política de `Map` en memoria —TTL, cap, ventana protegida,
+ * reloj inyectable— que WKH-307 elimina ENTERA. Un test de una política borrada no
+ * puede sobrevivir a la política. Conteo auditado: **23 eliminados · 2 invertidos ·
+ * 1 migrado**.
+ *
+ * | # | Test anterior | Destino | Por qué |
+ * |---|---|---|---|
+ * | 1 | `T-TTL-1: una entrada FRESCA sigue siendo idempotente` | ELIMINADO | La propiedad sobrevive en `T-IDM-03`, pero sin TTL el escenario "fresca" no existe |
+ * | 2 | `T-TTL-2: una entrada EXPIRADA se trata como ausente` | ELIMINADO | No hay expiración |
+ * | 3 | `T-TTL-3: leer una entrada expirada la BORRA` | ELIMINADO | ídem |
+ * | 4 | `T-TTL-4: el barrido en el set limpia las expiradas` | ELIMINADO | No hay barrido |
+ * | 5 | `T-TTL-5 (INVARIANTE): no puede expirar dentro de la cota estimada` | ELIMINADO | Nada expira |
+ * | 6 | `T-TTL-6 (INVARIANTE): el TTL default duplica la cota estimada` | ELIMINADO | ídem |
+ * | 7 | `T-TTL-7 (FAIL-SAFE del knob): override corto se eleva al piso` | ELIMINADO | El knob se retiró de `.env.example` |
+ * | 8 | `T-TTL-8: un override RAZONABLE se respeta` | ELIMINADO | ídem |
+ * | 9 | `T-TTL-9: el TTL sigue a TIMEOUT_COMPOSE_MS` | ELIMINADO | ídem |
+ * | 10 | `T-TTL-10: env inválida → default` | ELIMINADO | ídem |
+ * | 11 | `T-TTL-11 (AR MENOR-1): el piso del knob es la cota ESTIMADA` | ELIMINADO | ídem |
+ * | 12 | `T-CAP-1: el cap DESALOJA las más viejas` | ELIMINADO | No hay cap (una tabla no tiene el leak que el cap acotaba) |
+ * | 13 | `T-CAP-2 (FAIL-SAFE): todas protegidas → no se desaloja nada` | ELIMINADO | ídem |
+ * | 14 | `T-CAP-3: el cap excedido emite un warn una vez por episodio` | ELIMINADO | ídem |
+ * | 15 | `T-CAP-4: el desalojo respeta el borde exacto de la ventana` | ELIMINADO | ídem |
+ * | 16 | `T-CAP-5: env de cap inválida → default 10.000` | ELIMINADO | ídem |
+ * | 17 | `T-CAP-6 (AR MENOR-2): el warn se RE-ARMA al bajar del cap` | ELIMINADO | ídem |
+ * | 18 | `T-CAP-7 (AR MENOR-2): el re-armado también con el DESALOJO` | ELIMINADO | ídem |
+ * | 19 | `T-CLK-1: el reloj del seam es inyectable y el RESTORE vuelve al real` | ELIMINADO | El reloj pasa a ser el de Postgres. No hay reloj de proceso que inyectar |
+ * | 20 | `T-CLK-2: el módulo ARRANCA con el reloj real` | ELIMINADO | ídem |
+ * | 21 | `T-NOTIMER: el barrido es lazy — ningún setInterval` | ELIMINADO | No hay barrido |
+ * | 22 | `T-HEAL-2: el self-heal RENUEVA la antigüedad` | ELIMINADO | Mecánica de retención pura |
+ * | 23 | `T-HEAL-3: settle nuevo sobre un intentId expirado re-emite` | ELIMINADO | Dependía de la expiración. **La propiedad legítima que cubría —una tx que nunca aterrizó se puede reintentar— sobrevive MEJOR en `T-IDM-06b`**: ahí el blockhash expirado es una PRUEBA, no una inferencia por tiempo |
+ * | 24 | `T-HEAL-1: firma previa que NO verifica → se borra y se re-emite` | **INVERTIDO** → `T-IDM-12` | Cambio de conducta declarado (R-3) |
+ * | 25 | `T-P1-2a: firma que no verifica + re-broadcast que falla → no queda huérfana` | **INVERTIDO** → `T-IDM-12` | Ya no hay re-broadcast que pueda dejar huérfana |
+ * | 26 | `T-P1-2b: firma que SÍ verifica → la entrada SOBREVIVE (N retries, CERO broadcasts)` | **MIGRADO** → `T-IDM-03b` | La propiedad es exactamente la de la HU; sólo cambia el almacén |
+ *
+ * ── SOBRE EL DOBLE DEL LEDGER ──────────────────────────────────────────────
+ *
+ * `fakeLedger` emula la PK y el índice UNIQUE PARCIAL de verdad (un `Map` que rechaza
+ * el segundo insert, un `Set` de firmas que rechaza la repetida). Eso NO es
+ * "re-implementar el SQL y afirmar sobre la re-implementación": lo que el `.sql`
+ * garantiza se verifica **extrayendo y evaluando sus predicados** en
+ * `test/wkh307-solana-settle-intents.migration.test.ts`. Acá el doble existe para que
+ * el ADAPTER pueda ejercitar los caminos que esas garantías habilitan.
  */
 
-import { PublicKey } from '@solana/web3.js';
+import { Keypair, PublicKey } from '@solana/web3.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
 const PAY_TO = 'So11111111111111111111111111111111111111112';
-const OPERATOR = 'HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH';
-const SIG_A = 'A'.repeat(64);
-const SIG_B = 'B'.repeat(64);
+const PAY_TO_B = 'Vote111111111111111111111111111111111111111';
+/**
+ * ⚠️ Keypair REAL, no un doble con `secretKey` en ceros. `tx.serialize()` VERIFICA las
+ * firmas, así que un secreto falso hace que el adapter explote al serializar — el test
+ * fallaría por el doble y no por el código. Con un keypair real la firma es válida, y
+ * además dos transacciones con el MISMO mensaje bajo el MISMO blockhash producen la
+ * MISMA firma, que es exactamente el escenario que ejercita T-IDM-08.
+ */
+const OPERATOR_KEYPAIR = Keypair.generate();
+const OPERATOR = OPERATOR_KEYPAIR.publicKey.toBase58();
+const AMOUNT = '3000000';
 
-// ── Boundary de red mockeada (mismo patrón que payment.test.ts) ──────────
+/** Un blockhash válido: 32 bytes en base58 (una pubkey sirve). */
+const freshBlockhash = () => Keypair.generate().publicKey.toBase58();
+/** Blockhashes forzados por el test (se consumen en orden). */
+const blockhashQueue: string[] = [];
+
+// ── El doble de la CONEXIÓN. `sendRawTransaction` es la unidad de medida ────
+/** Estado que devuelve `getSignatureStatuses` (null = ausente tras buscar historico). */
+const presenceState: { value: { err: unknown } | null } = {
+  value: { err: null },
+};
+/** La tx NO esta en la cadena (el nodo respondio habiendo buscado su historico). */
+function onChainAbsent() {
+  presenceState.value = null;
+}
+/** La tx esta en la cadena pero FALLO on-chain. */
+function onChainFailed() {
+  presenceState.value = { err: { InstructionError: [0, 'Custom'] } };
+}
+
 const fakeConnection = {
   getParsedTransaction: vi.fn(
     (..._a: unknown[]): Promise<unknown> => Promise.resolve(null),
   ),
   getTokenAccountBalance: vi.fn(
     (..._a: unknown[]): Promise<unknown> =>
-      Promise.resolve({ value: { amount: '1000000' } }),
+      Promise.resolve({ value: { amount: '1000000000' } }),
+  ),
+  /**
+   * ⚠️ Devuelve un blockhash FRESCO en cada llamada, como un RPC real (los bloques
+   * avanzan). Si devolviera siempre el mismo, dos settles distintos producirían el
+   * MISMO mensaje y por lo tanto la MISMA firma, y todo test con más de un intent
+   * chocaría contra el UNIQUE — fallando por el doble y no por el código.
+   *
+   * `blockhashQueue` permite a un test FORZAR una repetición, que es justamente el
+   * escenario de colisión de T-IDM-08.
+   */
+  getLatestBlockhash: vi.fn(
+    (
+      ..._a: unknown[]
+    ): Promise<{
+      blockhash: string;
+      lastValidBlockHeight: number;
+    }> =>
+      Promise.resolve({
+        blockhash: blockhashQueue.shift() ?? freshBlockhash(),
+        lastValidBlockHeight: 1000,
+      }),
+  ),
+  sendRawTransaction: vi.fn((..._a: unknown[]) => Promise.resolve('sent')),
+  confirmTransaction: vi.fn((..._a: unknown[]) =>
+    Promise.resolve({ value: { err: null } }),
+  ),
+  getBlockHeight: vi.fn((..._a: unknown[]) => Promise.resolve(900)),
+  // AR re-review MNR-1: el preflight MIDE la ventana de historico del RPC, porque de
+  // ella depende que un `absent` signifique algo. Default = holgada.
+  getSlot: vi.fn((..._a: unknown[]) => Promise.resolve(200_000_000)),
+  getFirstAvailableBlock: vi.fn((..._a: unknown[]) => Promise.resolve(1)),
+  /**
+   * AR BLQ-MEDIO-1: la determinacion NEGATIVA ya no sale de un `null` de
+   * `getParsedTransaction` (que tambien significa "este nodo no lo tiene indexado"),
+   * sino de `getSignatureStatuses` con `searchTransactionHistory`.
+   *
+   * Default = PRESENTE y sin error. `onChainAbsent()` lo pone en ausente para los
+   * tests que modelan "la tx no aterrizo".
+   */
+  getSignatureStatuses: vi.fn((..._a: unknown[]) =>
+    Promise.resolve({ value: [presenceState.value] }),
   ),
 };
 vi.mock('./chain.js', () => ({
   getSolanaConnection: vi.fn((..._a: unknown[]) => fakeConnection),
-  getSolanaOperatorKeypair: vi.fn((..._a: unknown[]) => ({
-    publicKey: new PublicKey(OPERATOR),
-    secretKey: new Uint8Array(64),
-  })),
+  getSolanaOperatorKeypair: vi.fn((..._a: unknown[]) => OPERATOR_KEYPAIR),
   getSolanaUsdcMint: vi.fn((..._a: unknown[]) => MINT),
   getSolanaUsdcDecimals: vi.fn((..._a: unknown[]) => 6),
   getSolanaCommitment: vi.fn((..._a: unknown[]) => 'confirmed'),
   getSolanaCaip2: vi.fn((..._a: unknown[]) => 'solana:test'),
 }));
 
+const mockGetOrCreateAta = vi.fn((..._a: unknown[]) =>
+  Promise.resolve({ address: new PublicKey(PAY_TO) }),
+);
 vi.mock('@solana/spl-token', () => ({
-  getOrCreateAssociatedTokenAccount: vi.fn((..._a: unknown[]) =>
-    Promise.resolve({ address: new PublicKey(PAY_TO) }),
-  ),
-  createTransferInstruction: vi.fn((..._a: unknown[]) => ({
+  getOrCreateAssociatedTokenAccount: (...a: unknown[]) =>
+    mockGetOrCreateAta(...a),
+  createTransferInstruction: (..._a: unknown[]) => ({
     keys: [],
     programId: new PublicKey(MINT),
     data: Buffer.alloc(0),
-  })),
-  getAssociatedTokenAddressSync: vi.fn(
-    (..._a: unknown[]) => new PublicKey(OPERATOR),
-  ),
+  }),
+  getAssociatedTokenAddressSync: (..._a: unknown[]) => new PublicKey(OPERATOR),
 }));
 
-const mockSendAndConfirm = vi.fn();
-vi.mock('@solana/web3.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@solana/web3.js')>();
-  return {
-    ...actual,
-    sendAndConfirmTransaction: (...a: unknown[]) => mockSendAndConfirm(...a),
-  };
-});
+// ── EL DOBLE DEL LEDGER, con PK y UNIQUE PARCIAL emulados ──────────────────
+type Row = {
+  status: 'claimed' | 'signed' | 'confirmed';
+  payTo: string;
+  amountAtomic: string;
+  mint: string;
+  signature: string | null;
+  lastValidBlockHeight: string | null;
+  attempts: number;
+};
 
-const logSpy = vi.hoisted(() => ({
-  warn: vi.fn(),
-  info: vi.fn(),
-  error: vi.fn(),
+const fakeLedger = vi.hoisted(() => ({
+  rows: new Map<string, unknown>(),
+  signatures: new Set<string>(),
+  /** `true` ⟹ el lease del reclamo se considera vencido (la fila es tomable). */
+  leaseExpired: false,
+  /** Fuerza `store_unavailable` en el reclamo. */
+  claimFails: null as string | null,
+  probeVerdict: { probe: 'ok' } as unknown,
+  reset() {
+    this.rows.clear();
+    this.signatures.clear();
+    this.leaseExpired = false;
+    this.claimFails = null;
+    this.probeVerdict = { probe: 'ok' };
+  },
 }));
-vi.mock('../../lib/logger.js', () => ({ getLogger: () => logSpy }));
 
-import {
-  _intentDedupPolicy,
-  _intentDedupSize,
-  _resetSolanaClients,
-  _seedIntentSignature,
-  _setIntentDedupClock,
-  SolanaPaymentAdapter,
-} from './payment.js';
+const claimMock = vi.hoisted(() => vi.fn());
+const recordSignedMock = vi.hoisted(() => vi.fn());
+const recordConfirmedMock = vi.hoisted(() => vi.fn());
+const reclaimMock = vi.hoisted(() => vi.fn());
+const readMock = vi.hoisted(() => vi.fn());
+const probeMock = vi.hoisted(() => vi.fn());
 
-/** Default de `TIMEOUT_COMPOSE_MS` (routes/compose.ts). NO es cota de ejecución. */
-const COMPOSE_TIMEOUT_MS = 180_000;
-/**
- * Cota ESTIMADA de vida de un run: 5 steps × 300 s (default de undici) = 25 min.
- *
- * AR it3 MENOR-2: el `5` se deja como literal INDEPENDIENTE a propósito (el código
- * lo toma de `lib/compose-limits.ts`). Es el tripwire: si alguien sube el máximo de
- * steps de `/compose`, la cota del código escala y esta batería FALLA, obligando a
- * re-revisar a mano el margen del TTL en vez de desalinearlo en silencio.
- */
-const ESTIMATED_RUN_BOUND_MS = 5 * 300_000;
-/** Ventana protegida: max(cota, TIMEOUT_COMPOSE_MS × 2) = 25 min. */
-const PROTECTED_WINDOW_MS = ESTIMATED_RUN_BOUND_MS;
-/** TTL default: max(cota × 2, 180s × 10, 30 min) = 50 min. */
-const DEFAULT_TTL_MS = ESTIMATED_RUN_BOUND_MS * 2;
+vi.mock('./settle-ledger.js', () => ({
+  claimSettleIntent: claimMock,
+  recordSignedIntent: recordSignedMock,
+  recordConfirmedIntent: recordConfirmedMock,
+  reclaimExpiredIntent: reclaimMock,
+  readSettleIntent: readMock,
+  probeSettleLedger: probeMock,
+}));
 
-/**
- * HU-196 — época fija del reloj inyectado del seam.
- *
- * Toda esta batería declara la antigüedad de una entrada (`_seedIntentSignature`)
- * y después assertea cómo la trata la política. Con el reloj REAL hay dos
- * lecturas distintas (el alta y la evaluación), así que la edad efectiva es
- * `edad declarada + latencia del test`: los asserts de BORDE EXACTO (`T-CAP-4`
- * con `edad === ventana protegida`, y los `±1 ms` de `T-TTL-6/7/10`) miden algo
- * distinto de lo que declaran. Congelando el reloj, la edad declarada ES la que
- * ve el desalojo y el borde queda exacto en las dos direcciones.
- *
- * NO es `vi.useFakeTimers()`: no se toca ningún timer global (el barrido sigue
- * siendo lazy — ver `T-NOTIMER`) y el port se restaura en el `afterEach`, así que
- * no puede contaminar nada. El valor concreto es irrelevante, sólo importa que no
- * avance; se elige un epoch pasado para que `T-CLK-1` pueda distinguirlo del
- * reloj real.
- */
-const FROZEN_NOW_MS = 1_700_000_000_000;
+// ⚠️ `schema-preflight.js` NO se mockea: se usa el REAL, para poder medir su
+// MEMOIZACIÓN (T-IDM-10b) sobre el `probeSettleLedger` mockeado de arriba.
+import { _resetSolanaClients, SolanaPaymentAdapter } from './payment.js';
 
-function cleanEnv(): void {
-  delete process.env.SOLANA_INTENT_DEDUP_TTL_MS;
-  delete process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES;
-  delete process.env.TIMEOUT_COMPOSE_MS;
+/** Instala el comportamiento del ledger emulando PK + UNIQUE parcial. */
+function wireLedger() {
+  claimMock.mockImplementation(
+    async (a: {
+      intentId: string;
+      payTo: string;
+      amountAtomic: string;
+      mint: string;
+    }) => {
+      if (fakeLedger.claimFails) {
+        return { outcome: 'store_unavailable', detail: fakeLedger.claimFails };
+      }
+      const existing = fakeLedger.rows.get(a.intentId) as Row | undefined;
+      if (!existing) {
+        // El INSERT gana: la PK garantiza que sólo uno llegue acá.
+        fakeLedger.rows.set(a.intentId, {
+          status: 'claimed',
+          payTo: a.payTo,
+          amountAtomic: a.amountAtomic,
+          mint: a.mint,
+          signature: null,
+          lastValidBlockHeight: null,
+          attempts: 1,
+        } satisfies Row);
+        return { outcome: 'claimed', attempts: 1 };
+      }
+      // Los términos mandan por encima del estado (AC-8).
+      if (
+        existing.payTo !== a.payTo ||
+        existing.amountAtomic !== a.amountAtomic ||
+        existing.mint !== a.mint
+      ) {
+        return { outcome: 'terms_conflict', status: existing.status };
+      }
+      if (existing.status === 'claimed') {
+        if (!fakeLedger.leaseExpired) return { outcome: 'in_progress' };
+        existing.attempts += 1;
+        return { outcome: 'claimed', attempts: existing.attempts };
+      }
+      if (existing.status === 'signed') {
+        return {
+          outcome: 'signed',
+          signature: existing.signature,
+          lastValidBlockHeight: existing.lastValidBlockHeight,
+        };
+      }
+      return { outcome: 'confirmed', signature: existing.signature };
+    },
+  );
+
+  recordSignedMock.mockImplementation(
+    async (a: {
+      intentId: string;
+      signature: string;
+      lastValidBlockHeight: string;
+    }) => {
+      const row = fakeLedger.rows.get(a.intentId) as Row | undefined;
+      if (row?.status !== 'claimed') {
+        return { ok: false, reason: 'not_claimed', detail: 'not claimed' };
+      }
+      // EL ÍNDICE UNIQUE PARCIAL: la misma firma no puede existir dos veces.
+      if (fakeLedger.signatures.has(a.signature)) {
+        return {
+          ok: false,
+          reason: 'signature_collision',
+          detail: 'duplicate key',
+        };
+      }
+      fakeLedger.signatures.add(a.signature);
+      row.status = 'signed';
+      row.signature = a.signature;
+      row.lastValidBlockHeight = a.lastValidBlockHeight;
+      return { ok: true, attempts: row.attempts };
+    },
+  );
+
+  recordConfirmedMock.mockImplementation(
+    async (a: { intentId: string; signature: string }) => {
+      const row = fakeLedger.rows.get(a.intentId) as Row | undefined;
+      if (!row || row.signature !== a.signature) {
+        return { ok: false, reason: 'signature_mismatch', detail: 'mismatch' };
+      }
+      row.status = 'confirmed';
+      return { ok: true };
+    },
+  );
+
+  reclaimMock.mockImplementation(
+    async (a: { intentId: string; signature: string }) => {
+      const row = fakeLedger.rows.get(a.intentId) as Row | undefined;
+      if (row?.status !== 'signed' || row.signature !== a.signature) {
+        return { ok: false, reason: 'not_signed', detail: 'not signed' };
+      }
+      row.status = 'claimed';
+      row.signature = null;
+      row.lastValidBlockHeight = null;
+      row.attempts += 1;
+      return { ok: true };
+    },
+  );
+
+  readMock.mockImplementation(async (intentId: string) => {
+    const row = fakeLedger.rows.get(intentId) as Row | undefined;
+    if (!row) return { state: 'none' };
+    if (row.status === 'confirmed' && row.signature) {
+      return { state: 'confirmed', signature: row.signature };
+    }
+    if (row.status === 'signed' && row.signature) {
+      return { state: 'signed', signature: row.signature };
+    }
+    return { state: 'claimed' };
+  });
+
+  probeMock.mockImplementation(async () => fakeLedger.probeVerdict);
 }
 
-describe('seam de idempotencia Solana — cap + TTL (hallazgo P1-5)', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    _resetSolanaClients();
-    cleanEnv();
-    // El reloj se instala DESPUÉS del reset a propósito: `_resetSolanaClients`
-    // limpia el Map y NO toca el port, así que los tests que resetean a mitad de
-    // cuerpo (T-TTL-5..10, T-CAP-4) conservan el reloj congelado.
-    _setIntentDedupClock(() => FROZEN_NOW_MS);
-    mockSendAndConfirm.mockResolvedValue(SIG_A);
+/** Siembra una fila con el estado que el test necesita ejercitar. */
+function seedRow(intentId: string, over: Partial<Row> = {}) {
+  const row: Row = {
+    status: 'confirmed',
+    payTo: PAY_TO,
+    amountAtomic: AMOUNT,
+    mint: MINT,
+    signature: 'PriorSignature1111',
+    lastValidBlockHeight: '1000',
+    attempts: 1,
+    ...over,
+  };
+  fakeLedger.rows.set(intentId, row);
+  if (row.signature !== null) fakeLedger.signatures.add(row.signature);
+}
+
+/** Hace que la tx `verify()` bien para `payTo`/`amount`. */
+function onChainOk() {
+  fakeConnection.getParsedTransaction.mockResolvedValue({
+    meta: {
+      err: null,
+      preTokenBalances: [
+        { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '0' } },
+      ],
+      postTokenBalances: [
+        { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: AMOUNT } },
+      ],
+    },
+  });
+}
+
+const req = (intentId: string, over: Record<string, unknown> = {}) => ({
+  payTo: PAY_TO,
+  amountAtomic: AMOUNT,
+  intentId,
+  ...over,
+});
+
+let adapter: SolanaPaymentAdapter;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  fakeLedger.reset();
+  wireLedger();
+  fakeConnection.getParsedTransaction.mockResolvedValue(null);
+  presenceState.value = { err: null };
+  blockhashQueue.length = 0;
+  fakeConnection.getBlockHeight.mockResolvedValue(900);
+  fakeConnection.getSlot.mockResolvedValue(200_000_000);
+  fakeConnection.getFirstAvailableBlock.mockResolvedValue(1);
+  delete process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT;
+  _resetSolanaClients();
+  adapter = new SolanaPaymentAdapter();
+});
+
+afterEach(() => {
+  _resetSolanaClients();
+});
+
+// ══════════════════════════════════════════════════════════════
+// AC-1 — sin reclamo no hay transmisión
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AC-1: el reclamo gobierna la transmisión', () => {
+  it('T-IDM-01a: reclamo rechazado ⟹ CERO broadcasts y settle() rechaza', async () => {
+    fakeLedger.claimFails = 'db down';
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow();
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
   });
 
-  afterEach(() => {
-    _resetSolanaClients();
-    cleanEnv();
-    _setIntentDedupClock(); // vuelve al default de producción (`Date.now`)
+  it('T-IDM-01b: el reclamo ocurre ANTES del primer broadcast (orden, no coincidencia)', async () => {
+    await adapter.settle(req('run:0'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+    const claimOrder = claimMock.mock.invocationCallOrder[0] as number;
+    const sendOrder = fakeConnection.sendRawTransaction.mock
+      .invocationCallOrder[0] as number;
+    expect(claimOrder).toBeLessThan(sendOrder);
   });
 
-  // ── TTL ────────────────────────────────────────────────────────────────
-
-  it('T-TTL-1: una entrada FRESCA sigue siendo idempotente (no re-broadcastea)', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    // La firma previa verifica on-chain → se reusa.
-    fakeConnection.getParsedTransaction.mockResolvedValue({
-      meta: {
-        err: null,
-        preTokenBalances: [],
-        postTokenBalances: [
-          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '1000000' } },
-        ],
-      },
+  it('T-IDM-01c: si `recordSigned` no aplica, NO se transmite (invariante I2)', async () => {
+    recordSignedMock.mockResolvedValue({
+      ok: false,
+      reason: 'not_claimed',
+      detail: 'someone else owns it',
     });
-    _seedIntentSignature('run-1:0', SIG_B, 1_000); // 1s de antigüedad
-
-    const res = await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'run-1:0',
-    });
-
-    expect(res).toEqual({ txHash: SIG_B, success: true });
-    expect(mockSendAndConfirm).not.toHaveBeenCalled(); // NO re-broadcast
-  });
-
-  it('T-TTL-2: una entrada EXPIRADA se trata como ausente (getSettledSignature)', async () => {
-    const adapter = new SolanaPaymentAdapter();
-
-    _seedIntentSignature('fresca', SIG_A, DEFAULT_TTL_MS - 1_000);
-    _seedIntentSignature('vencida', SIG_B, DEFAULT_TTL_MS + 1_000);
-
-    expect(adapter.getSettledSignature('fresca')).toBe(SIG_A);
-    expect(adapter.getSettledSignature('vencida')).toBeUndefined();
-  });
-
-  it('T-TTL-3: leer una entrada expirada la BORRA (no queda basura)', () => {
-    const adapter = new SolanaPaymentAdapter();
-    _seedIntentSignature('vencida', SIG_B, DEFAULT_TTL_MS + 1);
-    expect(_intentDedupSize()).toBe(1);
-
-    adapter.getSettledSignature('vencida');
-
-    expect(_intentDedupSize()).toBe(0);
-  });
-
-  it('T-TTL-4: el barrido en el `set` limpia las expiradas', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    for (let i = 0; i < 5; i++) {
-      _seedIntentSignature(`vieja-${i}`, SIG_B, DEFAULT_TTL_MS + 10_000);
-    }
-    expect(_intentDedupSize()).toBe(5);
-
-    // Un settle nuevo dispara el barrido lazy.
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'nueva',
-    });
-
-    expect(_intentDedupSize()).toBe(1); // sólo la nueva
-    expect(adapter.getSettledSignature('nueva')).toBe(SIG_A);
-  });
-
-  // ── EL invariante de dinero ────────────────────────────────────────────
-
-  it('T-TTL-5 (INVARIANTE): una entrada NO puede expirar dentro de la cota estimada de un compose-run', () => {
-    const adapter = new SolanaPaymentAdapter();
-    // Se prueba en el borde exacto de la cota estimada y con margen: nada dentro
-    // de la ventana expira.
-    for (const age of [
-      0,
-      1,
-      COMPOSE_TIMEOUT_MS,
-      COMPOSE_TIMEOUT_MS * 2,
-      ESTIMATED_RUN_BOUND_MS - 1,
-      ESTIMATED_RUN_BOUND_MS,
-      PROTECTED_WINDOW_MS,
-      DEFAULT_TTL_MS - 1,
-    ]) {
-      _resetSolanaClients();
-      _seedIntentSignature('vivo', SIG_A, age);
-      expect(
-        adapter.getSettledSignature('vivo'),
-        `una entrada de ${age}ms NO debe expirar (cota estimada del run: ${ESTIMATED_RUN_BOUND_MS}ms)`,
-      ).toBe(SIG_A);
-    }
-  });
-
-  it('T-TTL-6 (INVARIANTE): el TTL default duplica la cota estimada de un run', () => {
-    const adapter = new SolanaPaymentAdapter();
-    // Justo por debajo del TTL: vive. Justo por encima: expira.
-    _seedIntentSignature('borde-vive', SIG_A, DEFAULT_TTL_MS - 1);
-    expect(adapter.getSettledSignature('borde-vive')).toBe(SIG_A);
-
-    _resetSolanaClients();
-    _seedIntentSignature('borde-muere', SIG_A, DEFAULT_TTL_MS + 1);
-    expect(adapter.getSettledSignature('borde-muere')).toBeUndefined();
-
-    // AR MENOR-1: el margen se mide contra la COTA ESTIMADA (25 min), no contra
-    // `TIMEOUT_COMPOSE_MS` (que no gobierna la ejecución). Con el TTL viejo de
-    // 30 min este assert daba 1.2 y fallaba.
-    expect(
-      _intentDedupPolicy().ttlMs / ESTIMATED_RUN_BOUND_MS,
-    ).toBeGreaterThanOrEqual(2);
-  });
-
-  it('T-TTL-7 (FAIL-SAFE del knob): un override peligrosamente corto se eleva al piso', () => {
-    const adapter = new SolanaPaymentAdapter();
-    // Un operador pide 1 segundo de TTL — expiraría DENTRO de la ventana en la
-    // que el desalojo considera la entrada intocable. Se eleva al piso.
-    process.env.SOLANA_INTENT_DEDUP_TTL_MS = '1000';
-
-    _seedIntentSignature('run-vivo', SIG_A, 60_000); // 1 min: run en curso
-    expect(adapter.getSettledSignature('run-vivo')).toBe(SIG_A);
-
-    _resetSolanaClients();
-    _seedIntentSignature('en-el-piso', SIG_A, PROTECTED_WINDOW_MS - 1);
-    expect(adapter.getSettledSignature('en-el-piso')).toBe(SIG_A);
-
-    _resetSolanaClients();
-    _seedIntentSignature('pasado-el-piso', SIG_A, PROTECTED_WINDOW_MS + 1);
-    expect(adapter.getSettledSignature('pasado-el-piso')).toBeUndefined();
-  });
-
-  it('T-TTL-8: un override RAZONABLE (mayor al piso) se respeta', () => {
-    const adapter = new SolanaPaymentAdapter();
-    // 40 min > piso 25 min (con el piso viejo de 6 min este valor era 10 min).
-    process.env.SOLANA_INTENT_DEDUP_TTL_MS = String(2_400_000);
-
-    _seedIntentSignature('vive', SIG_A, 2_399_000);
-    expect(adapter.getSettledSignature('vive')).toBe(SIG_A);
-
-    _resetSolanaClients();
-    _seedIntentSignature('muere', SIG_A, 2_401_000);
-    expect(adapter.getSettledSignature('muere')).toBeUndefined();
-  });
-
-  it('T-TTL-9: el TTL sigue a TIMEOUT_COMPOSE_MS (si el operador sube el timeout)', () => {
-    const adapter = new SolanaPaymentAdapter();
-    process.env.TIMEOUT_COMPOSE_MS = String(600_000); // 10 min por run
-    // TTL default = max(cota×2 = 50min, 10min × 10 = 100min, 30min) = 100 min.
-    _seedIntentSignature('vive', SIG_A, 99 * 60_000);
-    expect(adapter.getSettledSignature('vive')).toBe(SIG_A);
-
-    _resetSolanaClients();
-    _seedIntentSignature('muere', SIG_A, 101 * 60_000);
-    expect(adapter.getSettledSignature('muere')).toBeUndefined();
-  });
-
-  it('T-TTL-11 (AR MENOR-1): el piso del knob es la cota ESTIMADA, no TIMEOUT_COMPOSE_MS × 2', () => {
-    // El texto viejo prometía «un run no puede sobrevivir a su propio timeout» y
-    // de ahí sacaba un piso de 6 min. `middleware/timeout.ts` sólo manda el 504
-    // (no cancela: sin AbortController/signal) y `ssrf-dispatcher.ts` no fija
-    // headersTimeout/bodyTimeout ⇒ la ejecución puede pasarse largo del timeout.
-    // El piso tiene que derivar de la cota estimada por hops, no del timeout.
-    process.env.SOLANA_INTENT_DEDUP_TTL_MS = '1';
-    const p = _intentDedupPolicy();
-
-    expect(p.estimatedMaxRunWallClockMs).toBe(ESTIMATED_RUN_BOUND_MS);
-    expect(p.ttlMs).toBe(PROTECTED_WINDOW_MS);
-    expect(p.ttlMs).toBeGreaterThanOrEqual(p.estimatedMaxRunWallClockMs);
-    // El piso viejo (6 min) era MENOR que la cota real (25 min): el knob prometía
-    // una garantía que no daba.
-    expect(p.ttlMs).toBeGreaterThan(COMPOSE_TIMEOUT_MS * 2);
-    // Coherencia interna: un TTL por debajo de la ventana protegida haría que una
-    // entrada expire mientras el desalojo la considera intocable.
-    expect(p.ttlMs).toBeGreaterThanOrEqual(p.protectedWindowMs);
-  });
-
-  it('T-TTL-10: env inválida → default (nunca NaN, que dejaría todo vivo o todo muerto)', () => {
-    const adapter = new SolanaPaymentAdapter();
-    process.env.SOLANA_INTENT_DEDUP_TTL_MS = 'abc';
-
-    _seedIntentSignature('vive', SIG_A, DEFAULT_TTL_MS - 1);
-    expect(adapter.getSettledSignature('vive')).toBe(SIG_A);
-
-    _resetSolanaClients();
-    _seedIntentSignature('muere', SIG_A, DEFAULT_TTL_MS + 1);
-    expect(adapter.getSettledSignature('muere')).toBeUndefined();
-  });
-
-  // ── Cap ────────────────────────────────────────────────────────────────
-
-  it('T-CAP-1: el cap DESALOJA las más viejas (fuera de la ventana protegida)', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '3';
-
-    // 5 entradas VIEJAS (fuera de la ventana protegida, dentro del TTL).
-    const age = PROTECTED_WINDOW_MS + 60_000;
-    for (let i = 0; i < 5; i++) {
-      _seedIntentSignature(`vieja-${i}`, SIG_B, age - i * 1_000);
-    }
-    expect(_intentDedupSize()).toBe(5);
-
-    // El settle nuevo dispara el barrido: 6 entradas → cap 3.
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'nueva',
-    });
-
-    expect(_intentDedupSize()).toBe(3);
-    // La nueva SIEMPRE sobrevive (es la más joven).
-    expect(adapter.getSettledSignature('nueva')).toBe(SIG_A);
-    // Las más viejas se fueron primero (insertion order).
-    expect(adapter.getSettledSignature('vieja-0')).toBeUndefined();
-    expect(adapter.getSettledSignature('vieja-1')).toBeUndefined();
-    expect(adapter.getSettledSignature('vieja-2')).toBeUndefined();
-  });
-
-  it('T-CAP-2 (FAIL-SAFE): con TODAS dentro de la ventana protegida NO se desaloja nada', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '2';
-
-    // 4 entradas JOVENES (posibles runs en curso).
-    for (let i = 0; i < 4; i++) {
-      _seedIntentSignature(`joven-${i}`, SIG_B, 1_000 + i);
-    }
-
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'nueva',
-    });
-
-    // El cap se EXCEDE a propósito: desalojar una entrada viva habilitaría un
-    // doble pago. Ante la duda, conservar.
-    expect(_intentDedupSize()).toBe(5);
-    for (let i = 0; i < 4; i++) {
-      expect(adapter.getSettledSignature(`joven-${i}`)).toBe(SIG_B);
-    }
-  });
-
-  it('T-CAP-3: el cap excedido con todo protegido emite un warn (señal operativa), una vez por episodio', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '1';
-    for (let i = 0; i < 3; i++) {
-      _seedIntentSignature(`joven-${i}`, SIG_B, 1_000);
-    }
-
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'n1',
-    });
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'n2',
-    });
-
-    const capWarns = logSpy.warn.mock.calls.filter((c) =>
-      String(c[1]).includes('ventana protegida'),
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_LEDGER_WRITE_REFUSED/,
     );
-    expect(capWarns).toHaveLength(1); // no spamea DENTRO del mismo episodio
-    expect(capWarns[0]?.[0]).toMatchObject({ max: 1 });
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// AC-2 — concurrencia
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AC-2: dos settle() concurrentes, una sola transferencia', () => {
+  it('T-IDM-02: `Promise.allSettled` sobre el mismo intentId ⟹ EXACTAMENTE 1 broadcast', async () => {
+    // La PK emulada rechaza el segundo insert, igual que Postgres.
+    const results = await Promise.allSettled([
+      adapter.settle(req('run:0')),
+      adapter.settle(req('run:0')),
+    ]);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    // La perdedora RECHAZA: nunca devuelve success:true sobre un pago ajeno.
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// AC-3 / AC-5 — el hit idempotente, y que sobreviva al restart
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AC-3/AC-5: el pago ya hecho no se repite', () => {
+  it('T-IDM-03: fila `confirmed` + verify válido ⟹ esa firma, 0 broadcasts, y SE RE-VERIFICÓ', async () => {
+    seedRow('run:0');
+    onChainOk();
+    const res = await adapter.settle(req('run:0'));
+    expect(res).toEqual({ txHash: 'PriorSignature1111', success: true });
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    // La firma NO se devolvió sin preguntarle a la cadena (verify-before-trust).
+    expect(fakeConnection.getParsedTransaction).toHaveBeenCalled();
   });
 
-  it('T-CAP-6 (AR MENOR-2): el warn se RE-ARMA cuando el tamaño baja del cap (no es once-per-proceso)', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    const capWarns = (): unknown[] =>
-      logSpy.warn.mock.calls.filter((c) =>
-        String(c[1]).includes('ventana protegida'),
-      );
-
-    // Episodio 1: cap saturado con todo protegido.
-    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '1';
-    for (let i = 0; i < 3; i++)
-      _seedIntentSignature(`joven-${i}`, SIG_B, 1_000);
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'n1',
-    });
-    expect(capWarns()).toHaveLength(1);
-
-    // Recuperación: el tamaño vuelve a estar por debajo del cap → flag re-armado.
-    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '100';
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'n2',
-    });
-    expect(capWarns()).toHaveLength(1); // sano: no loguea al recuperarse
-
-    // Episodio 2 (el que el warn-once-per-proceso PERDÍA en silencio).
-    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '1';
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'n3',
-    });
-    expect(capWarns()).toHaveLength(2);
-  });
-
-  it('T-CAP-7 (AR MENOR-2): el re-armado también ocurre cuando el DESALOJO alcanza', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    const capWarns = (): unknown[] =>
-      logSpy.warn.mock.calls.filter((c) =>
-        String(c[1]).includes('ventana protegida'),
-      );
-    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '2';
-
-    // Episodio 1: 3 jóvenes + la nueva = 4 > 2, todas protegidas → warn.
-    for (let i = 0; i < 3; i++)
-      _seedIntentSignature(`joven-${i}`, SIG_B, 1_000);
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'n1',
-    });
-    expect(capWarns()).toHaveLength(1);
-
-    // Las 3 envejecen más allá de la ventana protegida (mismo key, storedAt
-    // viejo) → el desalojo del próximo `set` sí puede bajar del cap.
-    for (let i = 0; i < 3; i++) {
-      _seedIntentSignature(`joven-${i}`, SIG_B, PROTECTED_WINDOW_MS + 60_000);
+  it('T-IDM-03b (absorbe T-P1-2b): N retries, CERO broadcasts', async () => {
+    seedRow('run:0');
+    onChainOk();
+    for (let i = 0; i < 5; i++) {
+      const res = await adapter.settle(req('run:0'));
+      expect(res.txHash).toBe('PriorSignature1111');
     }
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'n2',
-    });
-    expect(_intentDedupSize()).toBe(2); // desalojó las 3 viejas
-    expect(capWarns()).toHaveLength(1);
-
-    // Episodio 2: vuelve la saturación con todo protegido → warn nuevo.
-    for (let i = 3; i < 6; i++)
-      _seedIntentSignature(`joven-${i}`, SIG_B, 1_000);
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'n3',
-    });
-    expect(capWarns()).toHaveLength(2);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
   });
 
-  // HU-196: este test es EL borde. Con el reloj real la edad efectiva era
-  // `PROTECTED_WINDOW_MS + latencia(seed → barrido)`, así que 1 ms de latencia
-  // movía el caso «en el borde» al otro lado del `<=`, desalojaba la entrada y el
-  // primer assert de acá abajo se ponía rojo (medido: ~1 de cada 14 corridas de la
-  // suite COMPLETA, verde corriendo el archivo solo). Con el reloj congelado del
-  // `beforeEach` la edad es exactamente la declarada.
-  //
-  // ⚠️ NO subir la edad sembrada para «darle aire»: eso deja de probar el borde,
-  // que es justo el assert que impide que el desalojo se coma una firma que
-  // todavía protege un run vivo (= doble pago).
-  it('T-CAP-4: el desalojo respeta el borde exacto de la ventana protegida', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = '1';
-
-    // Justo EN el borde ⇒ protegida (la comparación es `<=`).
-    _seedIntentSignature('en-el-borde', SIG_B, PROTECTED_WINDOW_MS);
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'n1',
-    });
-    expect(adapter.getSettledSignature('en-el-borde')).toBe(SIG_B);
-
-    // Un ms más vieja ⇒ desalojable.
+  it('T-IDM-05: EL TEST QUE CANDA EL MOTIVO DE LA HU — instancia nueva sin estado en memoria', async () => {
+    // La fila ya está `confirmed` en el store. El adapter se crea DESPUÉS del reset,
+    // o sea con cero memoria de proceso: es el escenario exacto del restart que antes
+    // hacía re-transmitir un SPL transfer REAL.
+    seedRow('run:0');
+    onChainOk();
     _resetSolanaClients();
-    _seedIntentSignature('pasado-el-borde', SIG_B, PROTECTED_WINDOW_MS + 1);
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'n2',
+    const freshAdapter = new SolanaPaymentAdapter();
+    const res = await freshAdapter.settle(req('run:0'));
+    expect(res).toEqual({ txHash: 'PriorSignature1111', success: true });
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// AC-4 — indisponibilidad del store
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AC-4: "no sé" nunca paga', () => {
+  it('T-IDM-04: los tres modos de indisponibilidad ⟹ 0 broadcasts y ningún success', async () => {
+    // (1) el seam devuelve store_unavailable
+    fakeLedger.claimFails = 'rpc error';
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_LEDGER_UNAVAILABLE/,
+    );
+
+    // (2) el seam LANZA
+    fakeLedger.claimFails = null;
+    claimMock.mockRejectedValueOnce(new Error('connection reset'));
+    await expect(adapter.settle(req('run:1'))).rejects.toThrow();
+
+    // (3) forma inesperada / respuesta degradada
+    claimMock.mockResolvedValueOnce({
+      outcome: 'store_unavailable',
+      detail: 'no usable row',
     });
-    expect(adapter.getSettledSignature('pasado-el-borde')).toBeUndefined();
+    await expect(adapter.settle(req('run:2'))).rejects.toThrow();
+
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// AC-6 — la rama `signed`, con sus tres salidas por DEMOSTRACIÓN
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AC-6: una firma persistida se resuelve contra la cadena', () => {
+  it('T-IDM-06a: `signed` + confirmada on-chain ⟹ esa firma, 0 broadcasts, fila a `confirmed`', async () => {
+    seedRow('run:0', { status: 'signed', signature: 'SignedSig999' });
+    onChainOk();
+    const res = await adapter.settle(req('run:0'));
+    expect(res).toEqual({ txHash: 'SignedSig999', success: true });
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    expect((fakeLedger.rows.get('run:0') as Row).status).toBe('confirmed');
   });
 
-  it('T-CAP-5: env de cap inválida → default 10.000 (no desaloja de más)', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES = 'abc';
-    const age = PROTECTED_WINDOW_MS + 60_000;
-    for (let i = 0; i < 20; i++) {
-      _seedIntentSignature(`vieja-${i}`, SIG_B, age);
+  it('T-IDM-06b: `signed` + NO confirmada + blockhash MUERTO ⟹ re-firma y EXACTAMENTE 1 broadcast', async () => {
+    // Sustituye a T-HEAL-3, y mejor: la salida es una PRUEBA (la altura pasó el
+    // último bloque válido), no una inferencia por tiempo.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'ExpiredSig777',
+      lastValidBlockHeight: '500',
+    });
+    // AR BLQ-MEDIO-1: la ausencia la PRUEBA el nodo respondiendo tras buscar su
+    // histórico. Un `null` de `getParsedTransaction` no alcanza: también significa
+    // "este nodo no lo tiene indexado", y sobre esa lectura se re-transmitía.
+    onChainAbsent();
+    fakeConnection.getParsedTransaction.mockResolvedValue(null);
+    fakeConnection.getBlockHeight.mockResolvedValue(900); // 900 > 500 ⟹ muerta
+
+    const res = await adapter.settle(req('run:0'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+    // La firma vieja quedó archivada y la nueva es DISTINTA.
+    expect(res.txHash).not.toBe('ExpiredSig777');
+    expect(reclaimMock).toHaveBeenCalledWith({
+      intentId: 'run:0',
+      signature: 'ExpiredSig777',
+    });
+  });
+
+  it('T-IDM-06c: `signed` + NO confirmada + blockhash VIVO ⟹ 0 broadcasts y rechazo', async () => {
+    // Todavía podría aterrizar. Es la única ventana donde el sistema dice "no sé
+    // todavía" — y "no sé" nunca autoriza pagar.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'InFlightSig555',
+      lastValidBlockHeight: '1500',
+    });
+    onChainAbsent();
+    fakeConnection.getParsedTransaction.mockResolvedValue(null);
+    fakeConnection.getBlockHeight.mockResolvedValue(900); // 900 <= 1500 ⟹ viva
+
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_IN_FLIGHT_UNRESOLVED/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// AC-8 — los términos del intent
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AC-8: otros términos no son el mismo pago', () => {
+  it('T-IDM-07: destino o monto distintos ⟹ 0 broadcasts y SIN devolver la firma previa', async () => {
+    for (const over of [{ payTo: PAY_TO_B }, { amountAtomic: '9999999' }]) {
+      fakeLedger.reset();
+      wireLedger();
+      seedRow('run:0', { signature: 'PaidToSomeoneElse' });
+      onChainOk();
+      fakeConnection.sendRawTransaction.mockClear();
+
+      const err = await adapter
+        .settle(req('run:0', over))
+        .catch((e: Error) => e);
+      expect(String(err)).toMatch(/SETTLE_INTENT_CONFLICT/);
+      expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+      // Y el error NO filtra la firma del pago ajeno.
+      expect(String(err)).not.toContain('PaidToSomeoneElse');
     }
-
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'nueva',
-    });
-
-    expect(_intentDedupSize()).toBe(21); // muy por debajo de 10.000
   });
 
-  // ── El self-heal sigue funcionando ─────────────────────────────────────
+  it('T-IDM-07b: el mint distinto también entra por terms_conflict', async () => {
+    seedRow('run:0', { mint: 'OtherMint1111111111111111111111111111111' });
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_INTENT_CONFLICT/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+});
 
-  it('T-HEAL-1: firma previa que NO verifica → se borra y se re-emite (self-heal intacto)', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    // La firma previa no está confirmada on-chain.
+// ══════════════════════════════════════════════════════════════
+// AC-9 — la colisión de firma
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AC-9: dos legs idénticos no pueden compartir firma', () => {
+  it('T-IDM-08: colisión ⟹ el adapter RE-FIRMA y transmite con una firma distinta', async () => {
+    // Escenario real: dos legs del mismo run al MISMO agente por el MISMO monto. Bajo
+    // el mismo blockhash el mensaje es idéntico ⟹ la misma firma ed25519 ⟹ UNA sola
+    // transferencia contabilizada como DOS pagos. El UNIQUE lo hace imposible.
+    const shared = freshBlockhash();
+    // Los dos legs arrancan bajo EL MISMO blockhash ⟹ mismo mensaje ⟹ misma firma.
+    blockhashQueue.push(shared, shared);
+
+    const first = await adapter.settle(req('run:0'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+
+    // El segundo leg colisiona; el doble emula el 23505 y el adapter tiene que
+    // re-firmar. La tercera llamada a getLatestBlockhash ya devuelve uno fresco.
+    const second = await adapter.settle(req('run:1'));
+    expect(second.txHash).not.toBe(first.txHash);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(2);
+    // Nunca dos filas con la misma firma.
+    expect(fakeLedger.signatures.size).toBe(2);
+  });
+
+  it('T-IDM-08b: agotados los intentos ⟹ CERO broadcasts y rechazo', async () => {
+    // El blockhash nunca cambia ⟹ la firma siempre colisiona.
+    recordSignedMock.mockResolvedValue({
+      ok: false,
+      reason: 'signature_collision',
+      detail: 'duplicate key',
+    });
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_SIGNATURE_COLLISION_EXHAUSTED/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// AC-10 — el lease
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AC-10: un reclamo huérfano no traba la plata para siempre', () => {
+  it('T-IDM-09a: `claimed` FUERA del lease ⟹ se toma el relevo y sale 1 broadcast', async () => {
+    // Seguro por DEMOSTRACIÓN: una fila `claimed` no tiene firma, y la firma se
+    // persiste ANTES de transmitir ⟹ nunca se transmitió nada.
+    seedRow('run:0', { status: 'claimed', signature: null });
+    fakeLedger.leaseExpired = true;
+    await adapter.settle(req('run:0'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-IDM-09b: `claimed` DENTRO del lease ⟹ 0 broadcasts', async () => {
+    seedRow('run:0', { status: 'claimed', signature: null });
+    fakeLedger.leaseExpired = false;
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_IN_PROGRESS/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// AC-11 — el preflight, y su COSTO
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AC-11: el gate de esquema se ejecuta', () => {
+  it('T-IDM-10a: veredicto negativo ⟹ 0 broadcasts y rechazo con el motivo del esquema', async () => {
+    fakeLedger.probeVerdict = { probe: 'table_missing', detail: 'no relation' };
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_LEDGER_SCHEMA_UNAVAILABLE: table_missing/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    // Ni siquiera se reclamó: el preflight es la PRIMERA operación.
+    expect(claimMock).not.toHaveBeenCalled();
+  });
+
+  it('T-IDM-10b: SE AFIRMA EL COSTO — 1 solo probe en 3 settles (memoización)', async () => {
+    // Lección HU-208 M5: toda afirmación del tipo "no agrega costo" tiene que asertar
+    // el costo, no describirlo.
+    await adapter.settle(req('run:0'));
+    await adapter.settle(req('run:1'));
+    await adapter.settle(req('run:2'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(3);
+    expect(probeMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// R-3 — la INVERSIÓN de T-HEAL-1 / T-P1-2a
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · R-3: una firma confirmada que no verifica NO se re-emite', () => {
+  it('T-IDM-12: `confirmed` + verify FALLA ⟹ 0 broadcasts y rechazo', async () => {
+    // ⚠️ CAMBIO DE CONDUCTA DECLARADO. El seam viejo borraba la entrada y
+    // re-broadcasteaba (self-heal). Con store durable, "la firma registrada no
+    // verifica" es un RPC mintiendo o contabilidad corrupta: ninguna se arregla
+    // pagando de nuevo. Este test afirma lo CONTRARIO de T-HEAL-1/T-P1-2a.
+    seedRow('run:0');
+    onChainAbsent(); // la firma registrada NO está en la cadena
     fakeConnection.getParsedTransaction.mockResolvedValue(null);
-    _seedIntentSignature('run-1:0', SIG_B, 1_000);
-    mockSendAndConfirm.mockResolvedValue(SIG_A);
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_CONFIRMED_BUT_UNVERIFIABLE/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+});
 
-    const res = await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'run-1:0',
+// ══════════════════════════════════════════════════════════════
+// AR BLQ-MEDIO-1 — un `null` de RPC NO prueba ausencia
+//
+// EL DOBLE PAGO CONCRETO QUE ESTOS TESTS CIERRAN: se firma, se persiste, se
+// transmite y la tx SÍ aterriza, pero `confirmTransaction` corta por timeout. Dos
+// minutos después llega el retry. `getBlockHeight` pega contra el nodo de la punta
+// (altura > lastValid ✓) y la lectura de la tx pega contra OTRO nodo del pool que
+// todavía no indexó ese bloque → `null`. Con la lógica anterior eso se leía como
+// "expiró sin aterrizar" ⟹ segundo SPL transfer REAL sobre un pago ya hecho. En
+// Solana no hay backstop on-chain: no se puede deshacer.
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AR BLQ-MEDIO-1: la ausencia se PRUEBA, no se infiere', () => {
+  it('T-IDM-13: nodo ATRASADO (tx presente pero sin parsear) + blockhash muerto ⟹ CERO broadcasts', async () => {
+    // ⚠️ ESTE ES EL TEST DEL HALLAZGO. Las dos condiciones que antes bastaban para
+    // re-pagar están puestas a propósito: el blockhash murió Y `getParsedTransaction`
+    // devuelve `null`. Lo único que cambia es que el nodo, preguntado por el estado de
+    // la firma, dice que SÍ la tiene.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'LandedButUnindexed',
+      lastValidBlockHeight: '500',
     });
+    fakeConnection.getBlockHeight.mockResolvedValue(900); // 900 > 500 ⟹ blockhash muerto
+    fakeConnection.getParsedTransaction.mockResolvedValue(null); // nodo atrasado
+    presenceState.value = { err: null }; // …pero la firma ESTÁ en la cadena
 
-    // Re-broadcast con firma nueva, y el seam quedó apuntando a la nueva.
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
-    expect(res).toEqual({ txHash: SIG_A, success: true });
-    expect(adapter.getSettledSignature('run-1:0')).toBe(SIG_A);
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+
+    // Lo único que importa: NO salió un segundo transfer.
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    expect(reclaimMock).not.toHaveBeenCalled();
+    // ⚠️ Y el MOTIVO importa (AR re-review MNR-3). Antes esto daba
+    // `SETTLE_SIGNED_TERMS_MISMATCH`, cuyo log afirma "está en la cadena pero con
+    // OTROS términos" — FALSO, y manda a un operador a investigar un pago equivocado
+    // que no existe. Un nodo que conoce la firma pero no la tiene indexada es
+    // "no sé", no "no coincide".
+    expect(String(err)).toMatch(/SETTLE_IN_FLIGHT_UNRESOLVED/);
+    expect(String(err)).not.toMatch(/TERMS_MISMATCH/);
   });
 
-  it('T-HEAL-2: el self-heal RENUEVA la antigüedad (la entrada nueva no hereda la vieja)', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    fakeConnection.getParsedTransaction.mockResolvedValue(null);
-    // Entrada casi vencida, pero aún viva.
-    _seedIntentSignature('run-1:0', SIG_B, DEFAULT_TTL_MS - 5_000);
-    mockSendAndConfirm.mockResolvedValue(SIG_A);
-
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'run-1:0',
+  it('T-IDM-14: el RPC de presencia NO contesta + blockhash muerto ⟹ CERO broadcasts', async () => {
+    // "No pude preguntar" nunca autoriza re-pagar.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'UnknownSig',
+      lastValidBlockHeight: '500',
     });
+    fakeConnection.getBlockHeight.mockResolvedValue(900);
+    fakeConnection.getSignatureStatuses.mockRejectedValueOnce(
+      new Error('429 rate limited'),
+    );
 
-    // Si hubiera heredado el `storedAt` viejo, expiraría en 5s. No debe.
-    process.env.SOLANA_INTENT_DEDUP_TTL_MS = String(PROTECTED_WINDOW_MS);
-    expect(adapter.getSettledSignature('run-1:0')).toBe(SIG_A);
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_IN_FLIGHT_UNRESOLVED/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    expect(reclaimMock).not.toHaveBeenCalled();
   });
 
-  it('T-HEAL-3: un settle nuevo sobre un intentId expirado re-emite (no reusa la firma vencida)', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    _seedIntentSignature('viejo', SIG_B, DEFAULT_TTL_MS + 10_000);
-    mockSendAndConfirm.mockResolvedValue(SIG_A);
-
-    const res = await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'viejo',
+  it('T-IDM-14b: una respuesta de presencia con forma inesperada tampoco autoriza', async () => {
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'WeirdSig',
+      lastValidBlockHeight: '500',
     });
-
-    // La entrada vencida NO se reusó → se broadcasteó de nuevo.
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
-    expect(res).toEqual({ txHash: SIG_A, success: true });
-    // Y NO se llamó al verify de la firma vencida.
-    expect(fakeConnection.getParsedTransaction).not.toHaveBeenCalled();
+    fakeConnection.getBlockHeight.mockResolvedValue(900);
+    for (const shape of [null, {}, { value: [] }, { value: 'nope' }]) {
+      fakeConnection.getSignatureStatuses.mockResolvedValueOnce(shape as never);
+      await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+        /SETTLE_IN_FLIGHT_UNRESOLVED/,
+      );
+    }
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
   });
 
-  // ── El `delete` del self-heal, en sus DOS direcciones (P1 hallazgo 2) ──
-  //
-  // El `_intentSignatures.delete(req.intentId)` de `payment.ts:448` estaba
-  // LINE-COVERED por T-HEAL-1/T-HEAL-2 pero NO protegido: borrando esa línea
-  // entera la suite completa seguía verde (3364 passed). Motivo: en los dos
-  // tests el re-broadcast SÍ tiene éxito, y el `rememberIntentSignature` del
-  // camino feliz hace `.set()` — que SOBREESCRIBE la entrada vieja igual. O sea
-  // que la assertion `getSettledSignature === SIG_A` pasa con y sin el `delete`.
-  //
-  // Los dos tests de abajo aíslan las dos direcciones en las que ese `delete`
-  // cuesta plata, y las dos son mutación-positivas (ver work-item).
+  it('T-IDM-15: la tx aterrizó y FALLÓ on-chain ⟹ re-firmar SÍ es correcto (1 broadcast)', async () => {
+    // Una tx grabada con error es TERMINAL: la transferencia no ocurrió y esa firma
+    // nunca puede volver a ejecutarse. Acá re-pagar es lo correcto — y antes este caso
+    // estaba COLAPSADO con "no la encuentro" dentro del mismo `{valid:false}`.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'FailedSig',
+      lastValidBlockHeight: '500',
+    });
+    onChainFailed();
+    fakeConnection.getBlockHeight.mockResolvedValue(900);
 
-  it('T-P1-2a: firma previa que NO verifica + re-broadcast que FALLA → la firma huérfana NO queda en el seam', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    // La firma previa NO está confirmada on-chain → el settle entra al self-heal.
-    fakeConnection.getParsedTransaction.mockResolvedValue(null);
-    _seedIntentSignature('run-1:0', SIG_B, 1_000);
-    // ...y el re-broadcast fresco falla ANTES de firmar (sin firma derivable ⇒
-    // `recoverConfirmedSettle` devuelve undefined y se propaga el error real).
-    mockSendAndConfirm.mockRejectedValue(new Error('blockhash not found'));
-
-    await expect(
-      adapter.settle({
-        payTo: PAY_TO,
-        amountAtomic: '1000000',
-        intentId: 'run-1:0',
-      }),
-    ).rejects.toThrow(/blockhash not found/);
-
-    // ⚠️ ESTE es el invariante que el `delete` compra, y el único camino donde se
-    // puede observar: como el re-broadcast falló, NADIE llamó a
-    // `rememberIntentSignature`, así que si el `delete` no ocurrió la entrada
-    // VIEJA (SIG_B, no confirmada on-chain) sobrevive.
-    //
-    // Por qué cuesta plata: `downstream-payment.ts:322` lee justo este seam
-    // (`getSettledSignature`) y con `priorSignature !== undefined` marca el leg
-    // como `isIdempotentReplay`, lo que convierte el pre-check de balance de GATE
-    // en SONDA (`:368`) — un balance insuficiente deja de cortar. O sea: una firma
-    // que la cadena NO reconoce quedaría desactivando el gate
-    // `INSUFFICIENT_BALANCE` de todos los retries siguientes de ese leg.
-    expect(adapter.getSettledSignature('run-1:0')).toBeUndefined();
-    expect(_intentDedupSize()).toBe(0);
+    const res = await adapter.settle(req('run:0'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+    expect(res.txHash).not.toBe('FailedSig');
   });
 
-  it('T-P1-2b: firma previa que SÍ verifica → la entrada SOBREVIVE (N retries, CERO broadcasts)', async () => {
-    const adapter = new SolanaPaymentAdapter();
-    // Transferencia confirmada on-chain por el monto exacto del leg.
+  it('T-IDM-16: `confirmed` cuya presencia NO se pudo consultar ⟹ error TRANSITORIO, no condena', async () => {
+    // Antes un hipo del RPC sobre una fila `confirmed` daba
+    // SETTLE_CONFIRMED_BUT_UNVERIFIABLE, que es el rechazo PERMANENTE que exige
+    // intervención humana. Un intent sano no puede quedar condenado por un 429.
+    seedRow('run:0');
+    fakeConnection.getSignatureStatuses.mockRejectedValueOnce(
+      new Error('503 upstream'),
+    );
+
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_PRESENCE_UNKNOWN/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+
+  it('T-IDM-17: la determinación negativa usa `searchTransactionHistory`', async () => {
+    // Sin buscar el histórico, un nodo que podó bloques viejos contesta "no la tengo"
+    // sobre una tx que sí existe — y eso es exactamente lo que autoriza el re-pago.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'AbsentSig',
+      lastValidBlockHeight: '500',
+    });
+    onChainAbsent();
+    fakeConnection.getBlockHeight.mockResolvedValue(900);
+
+    await adapter.settle(req('run:0'));
+
+    expect(fakeConnection.getSignatureStatuses).toHaveBeenCalledWith(
+      ['AbsentSig'],
+      { searchTransactionHistory: true },
+    );
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// AR re-review — las tres reservas
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AR re-review: términos, expiración y alcance de `absent`', () => {
+  it('T-IDM-18 (MNR-3): nodo atrasado sobre una fila `confirmed` ⟹ transitorio, NO la condena', async () => {
+    // El efecto colateral que ganamos para "el RPC tira" no valía para "el nodo conoce
+    // la firma pero no la tiene indexada": ese caso caía en
+    // SETTLE_CONFIRMED_BUT_UNVERIFIABLE, que es el rechazo PERMANENTE que exige
+    // intervención humana. Por una causa transitoria.
+    seedRow('run:0');
+    presenceState.value = { err: null }; // el status dice: está en la cadena
+    fakeConnection.getParsedTransaction.mockResolvedValue(null); // pero no indexada acá
+
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+
+    expect(String(err)).toMatch(/SETTLE_PRESENCE_UNKNOWN/);
+    expect(String(err)).not.toMatch(/CONFIRMED_BUT_UNVERIFIABLE/);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+
+  it('T-IDM-18b (MNR-3): términos que REALMENTE no coinciden siguen dando mismatch', async () => {
+    // La contracara: el estado `landed_mismatch` no se volvió inalcanzable. Si la tx
+    // está, se puede parsear, y el delta NO cubre el monto, eso sí es un desajuste real.
+    seedRow('run:0', { status: 'signed', signature: 'MismatchSig' });
+    presenceState.value = { err: null };
     fakeConnection.getParsedTransaction.mockResolvedValue({
       meta: {
         err: null,
         preTokenBalances: [
           { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '0' } },
         ],
+        // delta = 1, muy por debajo de AMOUNT
         postTokenBalances: [
-          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '1000000' } },
+          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '1' } },
         ],
       },
     });
-    _seedIntentSignature('run-1:0', SIG_B, 1_000);
 
-    // TRES retries seguidos del mismo intent. El 3er es el que importa: si el
-    // `delete` se volviera incondicional (o se moviera antes del `if
-    // (verified.valid)`), el 1er retry devolvería la firma previa PERO dejaría el
-    // seam vacío, y el SIGUIENTE retry re-broadcastearía = DOBLE PAGO de un leg
-    // ya pagado on-chain.
-    for (let i = 0; i < 3; i++) {
-      const res = await adapter.settle({
-        payTo: PAY_TO,
-        amountAtomic: '1000000',
-        intentId: 'run-1:0',
-      });
-      expect(res).toEqual({ txHash: SIG_B, success: true });
-      // La entrada sigue viva DESPUÉS de cada hit idempotente.
-      expect(adapter.getSettledSignature('run-1:0')).toBe(SIG_B);
-      expect(_intentDedupSize()).toBe(1);
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+    expect(String(err)).toMatch(/SETTLE_SIGNED_TERMS_MISMATCH/);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+
+  it('T-IDM-19 (MNR-2): `landed_failed` con el blockhash VIVO ⟹ 0 broadcasts', async () => {
+    // Una tx grabada con error es terminal EN EL CASO NORMAL, pero un re-org que la
+    // saque de la cadena canónica mientras su blockhash sigue vivo la vuelve
+    // re-ejecutable — y esta vez podría tener éxito, sobre un intent que ya re-pagó.
+    // Exigir la expiración también acá elimina la única ventana donde dos
+    // transferencias pueden coexistir.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'FailedButAliveSig',
+      lastValidBlockHeight: '1500',
+    });
+    onChainFailed();
+    fakeConnection.getBlockHeight.mockResolvedValue(900); // 900 <= 1500 ⟹ vivo
+
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_IN_FLIGHT_UNRESOLVED/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    expect(reclaimMock).not.toHaveBeenCalled();
+  });
+
+  it('T-IDM-19b (MNR-2): `landed_failed` con el blockhash MUERTO sí re-firma', async () => {
+    // La contracara: con la prueba de expiración en la mano, re-pagar sigue siendo
+    // correcto (la transferencia no ocurrió y esa firma ya no puede ejecutarse).
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'FailedAndDeadSig',
+      lastValidBlockHeight: '500',
+    });
+    onChainFailed();
+    fakeConnection.getBlockHeight.mockResolvedValue(900); // 900 > 500 ⟹ muerto
+
+    const res = await adapter.settle(req('run:0'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+    expect(res.txHash).not.toBe('FailedAndDeadSig');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// AR re-review MNR-1 — la precondición de despliegue de `absent`
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · MNR-1: `absent` depende de que el RPC retenga histórico', () => {
+  it('T-IDM-20: retención MEDIDA e INSUFICIENTE ⟹ el leg NO settlea (0 broadcasts)', async () => {
+    // Un endpoint que retiene menos que la validez de un blockhash devuelve `null`
+    // sobre transacciones que SÍ existen, justo en la ventana donde el código usa ese
+    // `null` para autorizar re-firmar. Sin esta medición era un supuesto tácito.
+    fakeConnection.getSlot.mockResolvedValue(1_000);
+    fakeConnection.getFirstAvailableBlock.mockResolvedValue(900); // retiene 100 < 150
+
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_LEDGER_SCHEMA_UNAVAILABLE: rpc_history_insufficient/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    expect(claimMock).not.toHaveBeenCalled();
+  });
+
+  it('T-IDM-20b: retención HOLGADA ⟹ el leg settlea normal', async () => {
+    fakeConnection.getSlot.mockResolvedValue(200_000_000);
+    fakeConnection.getFirstAvailableBlock.mockResolvedValue(1);
+    await adapter.settle(req('run:0'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-IDM-20c: retención NO MEDIBLE y SIN la declaración ⟹ CORTA (0 broadcasts)', async () => {
+    // No medir NO es evidencia de histórico insuficiente — pero tampoco de lo
+    // contrario, y los dos errores no cuestan lo mismo: permitir de más produce un
+    // `absent` falso ⟹ segundo pago IRREVERSIBLE; cortar de más produce un arranque
+    // fallido, ruidoso y reversible en un minuto.
+    delete process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT;
+    fakeConnection.getFirstAvailableBlock.mockRejectedValue(
+      new Error('Method not found'),
+    );
+
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_LEDGER_SCHEMA_UNAVAILABLE: rpc_history_unmeasurable/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+
+  it('T-IDM-20c2: el error dice EXACTAMENTE cómo salir', async () => {
+    // Un fail-closed sin salida escrita es un callejón: el operador tiene que poder
+    // actuar sin leer el código.
+    delete process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT;
+    fakeConnection.getFirstAvailableBlock.mockRejectedValue(
+      new Error('Method not found'),
+    );
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+    expect(String(err)).toContain(
+      'SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT',
+    );
+    expect(String(err)).toContain('SOLANA_RPC_URL');
+  });
+
+  it('T-IDM-20c3: NO MEDIBLE pero DECLARADA ⟹ arranca (la decisión queda en la config)', async () => {
+    process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT = 'true';
+    fakeConnection.getFirstAvailableBlock.mockRejectedValue(
+      new Error('Method not found'),
+    );
+    await adapter.settle(req('run:0'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+    delete process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT;
+  });
+
+  it('T-IDM-20c4: la declaración NO tiene default permisivo', async () => {
+    // Un valor ausente, vacío o distinto de `true` NO puede leerse como permiso: es
+    // exactamente el error que esta HU viene cazando (lo que falta no autoriza).
+    fakeConnection.getFirstAvailableBlock.mockRejectedValue(
+      new Error('Method not found'),
+    );
+    for (const v of [undefined, '', 'false', '1', 'yes', 'TRUE']) {
+      if (v === undefined) {
+        delete process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT;
+      } else {
+        process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT = v;
+      }
+      _resetSolanaClients();
+      const fresh = new SolanaPaymentAdapter();
+      await expect(fresh.settle(req(`run:${String(v)}`))).rejects.toThrow(
+        /rpc_history_unmeasurable/,
+      );
     }
-
-    // Nunca se movió plata nueva.
-    expect(mockSendAndConfirm).not.toHaveBeenCalled();
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    delete process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT;
   });
 
-  // ── Sin timers colgados ───────────────────────────────────────────────
-
-  it('T-NOTIMER: el barrido es lazy — no se registra ningún setInterval', async () => {
-    const spy = vi.spyOn(globalThis, 'setInterval');
-    const adapter = new SolanaPaymentAdapter();
-
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'n1',
-    });
-    adapter.getSettledSignature('n1');
-
-    expect(spy).not.toHaveBeenCalled();
-    spy.mockRestore();
+  it('T-IDM-20d: la medición se MEMOIZA — 1 sola vez en 3 settles', async () => {
+    // Misma disciplina que T-IDM-10b: una afirmación de "no agrega costo" se asierta.
+    await adapter.settle(req('run:0'));
+    await adapter.settle(req('run:1'));
+    await adapter.settle(req('run:2'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(3);
+    expect(fakeConnection.getFirstAvailableBlock).toHaveBeenCalledTimes(1);
   });
+});
 
-  // ── HU-196: el reloj del seam ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// DT-8 — el peek asíncrono
+// ══════════════════════════════════════════════════════════════
 
-  // OJO: `T-CLK-1` candadea la línea del RESTORE (`_intentDedupClock = clock ??
-  // Date.now`), NO el INICIALIZADOR del port. Son dos líneas distintas y la que
-  // corre en producción es el inicializador (nadie llama al setter en prod).
-  // El inicializador lo candadea `T-CLK-2`. No fusionar los dos tests: cada uno
-  // mata una mutación que el otro no ve.
-  it('T-CLK-1: el reloj del seam es inyectable y el RESTORE vuelve al reloj real', () => {
-    const adapter = new SolanaPaymentAdapter();
+describe('WKH-307 · DT-8: getSettledSignature es async y discriminado', () => {
+  it('T-IDM-11: los 4 valores de SettledPeek', async () => {
+    readMock.mockResolvedValueOnce({ state: 'none' });
+    expect(await adapter.getSettledSignature('x')).toEqual({ state: 'none' });
 
-    // Con el reloj inyectado, la entrada nace en la época fija.
-    _seedIntentSignature('nacida-en-la-epoca-fija', SIG_A, 0);
-    expect(adapter.getSettledSignature('nacida-en-la-epoca-fija')).toBe(SIG_A);
-
-    // Restaurar el default = volver a `Date.now`. La premisa se assertea en vez
-    // de asumirse: hoy está a años de la época fija, muchísimo más que el TTL.
-    _setIntentDedupClock();
-    expect(Date.now()).toBeGreaterThan(FROZEN_NOW_MS + DEFAULT_TTL_MS);
-
-    // Por lo tanto, después del restore la entrada se lee como VENCIDA. Si el
-    // restore no volviera al reloj real (p. ej. si dejara pegado el reloj
-    // inyectado) seguiría viva.
-    expect(
-      adapter.getSettledSignature('nacida-en-la-epoca-fija'),
-    ).toBeUndefined();
-  });
-
-  /**
-   * T-CLK-2 — el candado del INICIALIZADOR del port (`payment.ts`:
-   * `let _intentDedupClock: IntentDedupClock = Date.now`).
-   *
-   * Es la línea que gobierna producción: nadie llama a `_setIntentDedupClock`
-   * fuera de los tests, así que el valor INICIAL del port ES el reloj del
-   * money-path. Un default congelado (p. ej. `() => 0`) desactiva los dos guards
-   * a la vez, porque `now - storedAt` queda siempre en 0:
-   *   · el TTL nunca expira ⇒ una firma vieja se recuerda para siempre;
-   *   · el desalojo nunca saca nada ⇒ el `break` de la ventana protegida corta en
-   *     la primera entrada y el cap soft de 10k queda inoperante (el leak de
-   *     memoria que el fix-pack P1 vino a cerrar).
-   *
-   * Por qué ningún test lo veía: toda la batería siembra `storedAt` RELATIVO a
-   * `intentDedupNow()`, así que un reloj congelado es internamente consistente e
-   * indetectable. Y `T-CLK-1` pasa por el setter, que tiene su propio literal
-   * `Date.now` (otra línea).
-   *
-   * Estrategia: instancia FRESCA del módulo (el `beforeEach` ya inyectó el reloj
-   * congelado en la instancia de este archivo, así que el valor inicial sólo se
-   * puede observar en una copia nueva) + test de EFECTO, no de identidad: se
-   * escribe por el camino de producción y se acota el `storedAt` resultante
-   * contra `Date.now()` real por los DOS lados.
-   */
-  it('T-CLK-2: el módulo ARRANCA con el reloj real — candado del inicializador del port, no del restore', async () => {
-    // `vi.resetModules()` no toca los `vi.mock` del archivo (siguen registrados),
-    // sólo descarta las instancias cacheadas.
-    vi.resetModules();
-    const fresh = await import('./payment.js');
-    const adapter = new fresh.SolanaPaymentAdapter();
-    const ttl = fresh._intentDedupPolicy().ttlMs;
-    /** Holgura de la cota. Absorbe la latencia real del `settle` mockeado. */
-    const TOL_MS = 5_000;
-
-    // Escritura por el camino de PRODUCCIÓN (`settle` → `rememberIntentSignature`)
-    // con el port en su valor INICIAL: `storedAt` = lo que devuelva ese reloj.
-    const probe = Date.now();
-    await adapter.settle({
-      payTo: PAY_TO,
-      amountAtomic: '1000000',
-      intentId: 'escrita-con-el-reloj-inicial',
+    readMock.mockResolvedValueOnce({ state: 'confirmed', signature: 'S1' });
+    expect(await adapter.getSettledSignature('x')).toEqual({
+      state: 'settled',
+      signature: 'S1',
     });
 
-    // Ahora se LEE con relojes conocidos. Cada assert acota `storedAt` de un lado:
-    //
-    //   viva a `probe + ttl - TOL`   ⇔  storedAt >= probe - TOL
-    // Un default en el pasado (`() => 0`, o cualquiera desfasado más de TOL hacia
-    // atrás) hace que la entrada se lea VENCIDA acá.
-    fresh._setIntentDedupClock(() => probe + ttl - TOL_MS);
-    expect(
-      adapter.getSettledSignature('escrita-con-el-reloj-inicial'),
-      'el reloj inicial del port quedó en el PASADO respecto de Date.now()',
-    ).toBe(SIG_A);
+    // `signed` y `claimed` colapsan a in_progress: reclamado, sin confirmar.
+    readMock.mockResolvedValueOnce({ state: 'signed', signature: 'S2' });
+    expect(await adapter.getSettledSignature('x')).toEqual({
+      state: 'in_progress',
+    });
+    readMock.mockResolvedValueOnce({ state: 'claimed' });
+    expect(await adapter.getSettledSignature('x')).toEqual({
+      state: 'in_progress',
+    });
 
-    //   vencida a `probe + ttl + TOL`  ⇔  storedAt < probe + TOL
-    // Un default en el futuro hace que la entrada se lea VIVA acá.
-    fresh._setIntentDedupClock(() => probe + ttl + TOL_MS);
-    expect(
-      adapter.getSettledSignature('escrita-con-el-reloj-inicial'),
-      'el reloj inicial del port quedó en el FUTURO respecto de Date.now()',
-    ).toBeUndefined();
-
-    // Los dos juntos ⇒ |reloj inicial − Date.now()| < 5 s, sin assertear la
-    // identidad de la función: cualquier reloj que no sea el real (congelado o
-    // desfasado) rompe uno de los dos.
-    fresh._setIntentDedupClock();
+    // Un store mudo NO es "no se pagó".
+    readMock.mockResolvedValueOnce({ state: 'unknown', detail: 'boom' });
+    expect(await adapter.getSettledSignature('x')).toEqual({
+      state: 'unknown',
+    });
   });
 });
