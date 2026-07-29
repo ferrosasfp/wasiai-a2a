@@ -318,8 +318,18 @@ export const composeService = {
     // pagados sigan siendo alcanzables si este cuerpo se va por excepción.
     results: StepResult[],
   ): Promise<ComposeResult> {
-    const { steps, maxBudget, a2aKey, scopingKeyRow, chainId, logger } =
-      request;
+    const {
+      steps,
+      maxBudget,
+      a2aKey,
+      scopingKeyRow,
+      chainId,
+      logger,
+      // WKH-303: precios congelados por un quote firmado. Ausente ⇒ precio vivo (hoy).
+      // Vive acá y no en la envoltura `compose()` porque HU-306 bajó el cuerpo del
+      // pipeline a este método; el débito per-step que lo consume está en este scope.
+      frozenStepPricesUsd,
+    } = request;
     let totalCost = 0;
     let totalLatency = 0;
     let lastOutput: unknown = null;
@@ -501,8 +511,28 @@ export const composeService = {
         // still receives EXACTLY `agent.priceUsdc` downstream (invokeAgent /
         // signAndSettleDownstream are unchanged) — the overhead is gateway
         // margin and never settled to the agent.
-        const debitAmount =
-          (isInvalid ? PLACEHOLDER_FEE_USD : agent.priceUsdc) + stepGasOverhead;
+        // WKH-303 (AC-2): si el caller redimió un quote firmado, el monto que se le
+        // debita es el precio CONGELADO de ESTE step, no el vivo. Es la garantía de
+        // precio que se le dio en `/plan`.
+        //
+        // El freeze es EXACTO Y SIMÉTRICO: si el precio vivo subió, el gateway absorbe
+        // la diferencia; si BAJÓ, se cobra igual el congelado. 🔴 PROHIBIDO un
+        // `Math.min(congelado, vivo)`: cobrar el precio nuevo, aunque sea más barato,
+        // sigue siendo cobrar un precio que el caller no aprobó.
+        //
+        // Solo cambia el monto debitado AL CALLER. Intactos, a propósito: el guard
+        // `i > 0` de arriba, el `totalCost += agent.priceUsdc` (base del protocol fee =
+        // costo ejecutado), el check de maxBudget con precio vivo, el refund
+        // `stepDebitedUsd`, y el settle downstream (el agente cobra su precio vivo).
+        const frozenStepPrice = frozenStepPricesUsd?.[i];
+        const hasFrozenPrice =
+          typeof frozenStepPrice === 'number' &&
+          Number.isFinite(frozenStepPrice) &&
+          frozenStepPrice > 0;
+        const debitAmount = hasFrozenPrice
+          ? frozenStepPrice + stepGasOverhead
+          : (isInvalid ? PLACEHOLDER_FEE_USD : agent.priceUsdc) +
+            stepGasOverhead;
 
         if (isInvalid) {
           const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);

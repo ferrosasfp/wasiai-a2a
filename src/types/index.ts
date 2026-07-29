@@ -556,6 +556,18 @@ export interface ComposeRequest {
    * `delegationContext`; mutuamente exclusivo con él en runtime.
    */
   keySessionContext?: KeySessionDebitContext | undefined;
+  /**
+   * WKH-303: precios CONGELADOS por step, provenientes de un quote firmado que el caller
+   * redimió en `/orchestrate/execute`. Índice = índice del step.
+   *
+   * Cuando `frozenStepPricesUsd[i]` es finito y `> 0`, el débito AL CALLER de ese step usa
+   * ese precio en vez del precio vivo del agente: es la garantía de precio que se le dio en
+   * `/plan`. Su ausencia (o un valor 0/negativo/NaN) = EXACTAMENTE el comportamiento de hoy.
+   *
+   * Solo afecta el monto debitado al caller. NO cambia el settle downstream al agente (que
+   * sigue cobrando su precio vivo) ni la base del protocol fee (que es el costo ejecutado).
+   */
+  frozenStepPricesUsd?: readonly number[] | undefined;
 }
 
 export interface ComposeResult {
@@ -768,6 +780,14 @@ export interface OrchestrateRequest {
    * double-charge (CD-1, intacto).
    */
   chainId?: number | undefined;
+  /**
+   * WKH-303: precios CONGELADOS por step de un quote firmado redimido en
+   * `/orchestrate/execute`. Se propaga tal cual a `composeService.compose` para que los
+   * steps 1..N se debiten al precio pactado. Índice = índice del step.
+   *
+   * Ausente = comportamiento de hoy (precio vivo). Solo afecta el débito al caller.
+   */
+  frozenStepPricesUsd?: readonly number[] | undefined;
 }
 
 export interface OrchestrateResult {

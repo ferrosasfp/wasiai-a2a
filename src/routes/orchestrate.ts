@@ -20,6 +20,11 @@ import { createTimeoutHandler } from '../middleware/timeout.js';
 import { resolveAgentPriceUsdc } from '../services/agent-price.js';
 import { getProtocolFeeRate } from '../services/fee-charge.js';
 import { orchestrateService } from '../services/orchestrate.js';
+import {
+  resolveQuoteCaller,
+  signQuote,
+  verifyQuote,
+} from '../services/orchestrate-quote.js';
 import type {
   OrchestratePlanResult,
   ResolvedComposeStep,
@@ -46,6 +51,11 @@ type OrchestrateExecuteBody = {
   budget: number;
   preferCapabilities?: string[];
   maxAgents?: number;
+  /**
+   * WKH-303: quote firmado emitido por `/plan`. OPCIONAL — su ausencia preserva el
+   * comportamiento de hoy byte a byte (precio re-resuelto en vivo contra maxQuotedCostUsdc).
+   */
+  quote?: string;
 };
 
 /**
@@ -302,6 +312,65 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             ? Number((plan.totalCostUsdc * getProtocolFeeRate()).toFixed(6))
             : plan.protocolFeeUsdc;
 
+        // WKH-303 (AC-1): quote firmado que congela precio E IDENTIDAD por step
+        // durante 10 minutos. Se emite SOLO si se cumplen las cinco condiciones:
+        //   1. el plan está 'ready';
+        //   2. hay secreto configurado (`quoteHmacKey()`);
+        //   3. el caller es bindeable (key / delegación / sesión; x402 no lo es);
+        //   4. hay al menos un step y todos traen slug;
+        //   5. TODO `costPerStep[i]` es finito y > 0.
+        // La quinta es deliberada: un step sin precio resuelto cotiza 0 y hoy se cobra
+        // con PLACEHOLDER_FEE_USD. Congelar 0 sería congelar un revenue leak; congelar
+        // el placeholder sería congelar un número que nunca se cotizó. No emitir quote
+        // deja al cliente con el comportamiento de hoy, que no empeora.
+        // Si falla cualquiera, ambos campos quedan `undefined` y JSON.stringify los
+        // omite → respuesta byte-idéntica a la de antes (mismo mecanismo que feeRatePercent).
+        const quoteCaller = resolveQuoteCaller(request);
+        const canQuote =
+          plan.planStatus === 'ready' &&
+          // ⚠️ Este `quoteCaller !== null` está ENMASCARADO por el del ternario de
+          // abajo, que es el que TypeScript necesita para el narrowing antes de
+          // pasarlo como `caller`. Se deja a propósito, para que la lista de las
+          // cinco condiciones de emisión se lea completa en un solo lugar — pero
+          // conviene saber que es redundante: una mutación que lo borre NO cambia
+          // nada observable (fue exactamente lo que escondió al mutante M19, que
+          // sólo muere si además se fabrica un caller en el ternario). Si algún día
+          // se saca, hay que verificar que el narrowing del ternario siga en pie.
+          quoteCaller !== null &&
+          plan.steps.length >= 1 &&
+          plan.steps.length === plan.costPerStep.length &&
+          plan.steps.every(
+            (step) => typeof step.agent === 'string' && step.agent.length > 0,
+          ) &&
+          plan.costPerStep.every(
+            (price) => Number.isFinite(price) && price > 0,
+          );
+
+        const signedQuote =
+          canQuote && quoteCaller !== null
+            ? signQuote({
+                orchestrationId: plan.orchestrationId,
+                caller: quoteCaller,
+                steps: plan.steps.map((step, i) => ({
+                  agent: step.agent,
+                  registry: step.registry ?? null,
+                  priceUsdc: plan.costPerStep[i] as number,
+                })),
+              })
+            : null;
+
+        if (signedQuote !== null) {
+          // CD-10: NUNCA el token, el payload ni el secreto en el log.
+          request.log.info(
+            {
+              orchestrationId: plan.orchestrationId,
+              stepCount: plan.steps.length,
+              expiresAt: signedQuote.expiresAtIso,
+            },
+            '[orchestrate.quote.issued]',
+          );
+        }
+
         // Solo los campos PÚBLICOS del OrchestratePlanResult (pick). Los internos
         // (plannedCostUsd, feeUsdc, billingKeyRow, discoveredAgents, etc.) NO se
         // serializan al cliente. Sin débito → sin header x-a2a-remaining-budget.
@@ -317,6 +386,9 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           maxQuotedCostUsdc: plan.maxQuotedCostUsdc,
           reasoning: plan.reasoning,
           consideredAgents: plan.consideredAgents,
+          // WKH-303: `undefined` ⇒ JSON.stringify los omite ⇒ back-compat sin condicionales.
+          quote: signedQuote?.token,
+          quoteExpiresAt: signedQuote?.expiresAtIso,
         });
       } catch (err) {
         const message =
@@ -364,6 +436,8 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             },
             maxQuotedCostUsdc: { type: 'number', minimum: 0 },
             budget: { type: 'number', exclusiveMinimum: 0, maximum: 100000 },
+            // WKH-303: NO va en `required` — sin quote, el camino de hoy intacto (AC-6).
+            quote: { type: 'string', minLength: 1, maxLength: 8192 },
             maxAgents: { type: 'integer', minimum: 1, maximum: 20 },
             preferCapabilities: {
               type: 'array',
@@ -413,25 +487,170 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         // BLQ-2: bail early if timeout already sent 504
         if (reply.sent) return;
 
+        const steps = body.steps;
+
+        // ─── WKH-303: redención del quote firmado (G1-G6) ───────────────────
+        // TODOS los guards corren ANTES de la primera llamada a executeApprovedPlan,
+        // que es la única línea que mueve dinero. Ninguna capa anterior debita en esta
+        // ruta (markSkipMiddlewareDebitHandler está en el preHandler). De ahí sale la
+        // garantía ESTRUCTURAL de "0 débito" en todo camino de rechazo (CD-3/CD-7).
+        // Orden de barato a caro: la criptografía es local, la existencia del agente es red.
+        const rejectQuote = (
+          statusCode: number,
+          errorCode: string,
+        ): FastifyReply => {
+          // CD-10: nunca el token, el payload ni el secreto.
+          request.log.warn(
+            { orchestrationId, planId, error_code: errorCode },
+            '[orchestrate.quote.rejected]',
+          );
+          return reply
+            .status(statusCode)
+            .send({ error_code: errorCode, requiresNewQuote: true });
+        };
+
+        let frozenPrices: number[] | null = null;
+        const rawQuote = body.quote;
+        if (rawQuote === undefined) {
+          // Omitir el quote es el camino de compatibilidad hacia atrás y está bien:
+          // se cobra el precio vivo bajo el techo declarado. Pero un cliente que
+          // PODÍA tener garantía de precio y no la reenvió degrada, sin ninguna
+          // señal, a "te cobro el precio nuevo que no aprobaste" — que es el bug que
+          // esta HU vino a matar. Un SDK que se olvide de reenviar el campo lo
+          // produce en silencio. Este log es lo que permite MEDIR cuántas
+          // ejecuciones corren sin garantía, un número que hoy no existe.
+          // Solo se emite si el caller es bindeable: un caller x402 nunca pudo tener
+          // quote, así que para él no hay nada degradado que reportar.
+          if (resolveQuoteCaller(request) !== null) {
+            request.log.info(
+              { orchestrationId, planId, stepCount: body.steps.length },
+              '[orchestrate.quote.absent]',
+            );
+          }
+        }
+        if (rawQuote !== undefined) {
+          const quoteCaller = resolveQuoteCaller(request);
+          // G3a: un caller no bindeable (x402/anónimo) no puede redimir NINGÚN quote.
+          if (quoteCaller === null) {
+            return rejectQuote(403, 'QUOTE_CALLER_MISMATCH');
+          }
+
+          // G1/G2/G3b: firma, vigencia y binding. `verifyQuote` nunca tira.
+          const verified = verifyQuote(rawQuote, quoteCaller);
+          if (!verified.ok) {
+            // 🔴 Un quote roto NUNCA degrada al camino de precio vivo: si el caller
+            // presentó un quote, o se honra o se rechaza. Caer al precio vivo le
+            // cobraría un número que no aprobó, que es exactamente el bug de la HU.
+            const status =
+              verified.code === 'QUOTE_EXPIRED'
+                ? 409
+                : verified.code === 'QUOTE_CALLER_MISMATCH'
+                  ? 403
+                  : 400;
+            return rejectQuote(status, verified.code);
+          }
+          const payload = verified.payload;
+
+          // G4: cantidad de steps.
+          if (steps.length !== payload.steps.length) {
+            return rejectQuote(400, 'QUOTE_STEP_MISMATCH');
+          }
+
+          // G5: identidad congelada por step. Se RECHAZA, no se corrige: sobreescribir
+          // el request con la identidad del quote dejaría al cliente ejecutando un
+          // agente distinto del que pidió, con un `input` pensado para otro.
+          for (let i = 0; i < steps.length; i++) {
+            const requested = steps[i];
+            const frozen = payload.steps[i];
+            if (requested === undefined || frozen === undefined) {
+              return rejectQuote(400, 'QUOTE_STEP_MISMATCH');
+            }
+            if (requested.agent !== frozen.a) {
+              return rejectQuote(400, 'QUOTE_STEP_MISMATCH');
+            }
+            if ((requested.registry ?? null) !== frozen.r) {
+              return rejectQuote(400, 'QUOTE_STEP_MISMATCH');
+            }
+          }
+
+          // G6 (CD-6): el agente congelado tiene que seguir vivo. Mismo resolver del
+          // money-path; `null` ⟺ no resuelve en NINGÚN registry habilitado (borrado,
+          // desactivado, o registry deshabilitado). El precio vivo que devuelve se usa
+          // SOLO para el log de delta: JAMÁS para debitar.
+          const prices: number[] = [];
+          for (let i = 0; i < payload.steps.length; i++) {
+            const frozen = payload.steps[i];
+            if (frozen === undefined) {
+              return rejectQuote(400, 'QUOTE_STEP_MISMATCH');
+            }
+            const livePrice = await resolveAgentPriceUsdc(
+              frozen.a,
+              frozen.r ?? undefined,
+              true,
+            );
+            if (livePrice === null) {
+              return rejectQuote(409, 'QUOTE_AGENT_UNAVAILABLE');
+            }
+            const frozenPrice = Number(frozen.p);
+            if (livePrice !== frozenPrice) {
+              request.log.warn(
+                {
+                  orchestrationId,
+                  step: i,
+                  frozenUsd: frozenPrice,
+                  liveUsd: livePrice,
+                  deltaUsd: Number((livePrice - frozenPrice).toFixed(8)),
+                },
+                '[orchestrate.quote.price-delta]',
+              );
+            }
+            prices.push(frozenPrice);
+          }
+          frozenPrices = prices;
+
+          request.log.info(
+            {
+              orchestrationId,
+              planId,
+              stepCount: payload.steps.length,
+              ttlRemainingSec: payload.exp - Math.floor(Date.now() / 1000),
+            },
+            '[orchestrate.quote.redeemed]',
+          );
+        }
+
         // Re-derivación del plan server-side (CD-2/CD-NEW-6): los precios del
         // cliente se IGNORAN. costPerStep se re-resuelve con resolveAgentPriceUsdc;
         // plannedCostUsd (base del débito step-0) = precio de steps[0] server-side
         // (NUNCA de costPerStep del cliente). WKH-132: feeUsdc = totalCostUsdc * rate
         // (cost-based); sólo seedea la reserva maxBudget, no el fee cobrado.
-        const steps = body.steps;
+        // WKH-303: con un quote válido, el precio NO se re-resuelve — se usa el
+        // congelado, que es la garantía que el caller aprobó (CD-12: se lee de un
+        // solo lugar, `payload.steps[i]`, tanto para el step-0 como para 1..N).
         const costPerStep: number[] = [];
-        for (const step of steps) {
-          const price = await resolveAgentPriceUsdc(step.agent, step.registry);
-          costPerStep.push(typeof price === 'number' ? price : 0);
+        if (frozenPrices !== null) {
+          costPerStep.push(...frozenPrices);
+        } else {
+          for (const step of steps) {
+            const price = await resolveAgentPriceUsdc(
+              step.agent,
+              step.registry,
+            );
+            costPerStep.push(typeof price === 'number' ? price : 0);
+          }
         }
         // CD-NEW-6: base del débito step-0 server-side (resolveAgentPriceUsdc),
         // NO costPerStep[0] re-usado del cliente — se vuelve a leer del step real.
         // `steps` tiene minItems:1 por schema → step0 siempre definido (guard sin
         // non-null assertion, convención del codebase).
         const step0 = steps[0];
-        const step0Price = step0
-          ? await resolveAgentPriceUsdc(step0.agent, step0.registry)
-          : null;
+        const step0FrozenPrice = frozenPrices?.[0];
+        const step0Price =
+          step0FrozenPrice !== undefined
+            ? step0FrozenPrice
+            : step0
+              ? await resolveAgentPriceUsdc(step0.agent, step0.registry)
+              : null;
         const plannedCostUsd = typeof step0Price === 'number' ? step0Price : 0;
         const feeRate = getProtocolFeeRate();
         const totalCostUsdc = costPerStep.reduce((sum, c) => sum + c, 0);
@@ -477,7 +696,21 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             keySessionContext: request.keySessionContext,
             chainId: request.resolvedChainId,
             // gate AC-3: el cap aprobado por el cliente.
-            maxQuotedCostUsdc: body.maxQuotedCostUsdc,
+            //
+            // WKH-303: con un quote válido el cap gate NO corre. Ese gate re-resuelve
+            // todos los precios en vivo y tira 409 QUOTE_STALE si la suma supera el
+            // techo — aplicarlo acá le rechazaría la ejecución a un caller que TIENE
+            // garantía de precio, por un precio vivo que ya no lo afecta. Además es
+            // redundante: la suma congelada es ≤ el techo por construcción, porque el
+            // techo se derivó de esos mismos precios en `/plan`.
+            // Spread condicional (CD-20): con `exactOptionalPropertyTypes` activo, pasar
+            // `maxQuotedCostUsdc: undefined` NO es lo mismo que no pasar la propiedad.
+            ...(frozenPrices === null && {
+              maxQuotedCostUsdc: body.maxQuotedCostUsdc,
+            }),
+            // WKH-303: precios congelados para los steps 1..N (el step-0 va por
+            // plannedCostUsd). Ausente sin quote ⇒ compose usa el precio vivo, como hoy.
+            ...(frozenPrices !== null && { frozenStepPricesUsd: frozenPrices }),
           },
           plan,
           orchestrationId,
