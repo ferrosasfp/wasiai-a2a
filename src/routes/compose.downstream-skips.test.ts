@@ -26,7 +26,10 @@ import {
   it,
   vi,
 } from 'vitest';
-import type { PublicDownstreamSkipCode } from '../lib/downstream-skip-code.js';
+import {
+  type PublicDownstreamSkipCode,
+  toPublicSkipCode,
+} from '../lib/downstream-skip-code.js';
 import type {
   A2AAgentKeyRow,
   Agent,
@@ -162,6 +165,40 @@ describe('POST /compose — skips del leg downstream en el evento', () => {
     const res = await inject();
     expect(res.statusCode).toBe(200);
     expect(persisted).toEqual(['NO_PAYMENT_FIELD']);
+  });
+
+  it('T-SKIP-UNKNOWN (WKH-308): `SETTLE_UNKNOWN` llega al CALLER sin colapsarse', async () => {
+    // ⚠️ POR QUÉ ESTE TEST EXISTE. La tabla `PUBLIC_SKIP_CODE` mapea
+    // `SETTLE_UNKNOWN → SETTLE_UNKNOWN` (verbatim, sin genericizar) y su comentario
+    // PROHÍBE colapsarlo en `SETTLE_FAILED`, porque eso volvería a afirmarle al caller
+    // que el leg no se pagó — justo lo que no sabemos. Pero esa prohibición sólo estaba
+    // candada por el unitario de la tabla: colapsarla compilaba limpio y ningún test de
+    // nivel consumidor se ponía rojo.
+    //
+    // Desde WKH-308 este código es también el vehículo del rail Solana, así que su
+    // superficie subió. Acá se afirma la propiedad que importa: **que el caller lo
+    // reciba**.
+    //
+    // El código se pasa por `toPublicSkipCode` A PROPÓSITO en vez de escribir el
+    // literal: es lo que hace que el test recorra el mapeo y muera si alguien lo
+    // colapsa.
+    const publicCode = toPublicSkipCode('SETTLE_UNKNOWN');
+    mockCompose.mockResolvedValueOnce({
+      success: true,
+      output: 'ok',
+      steps: [skippedStep(publicCode), paidStep()],
+      totalCostUsdc: 0.01,
+      totalLatencyMs: 2,
+    });
+
+    const res = await inject();
+
+    expect(res.statusCode).toBe(200);
+    // (1) el caller lo ve en el cuerpo de su respuesta…
+    expect(res.body).toContain('skipped:SETTLE_UNKNOWN');
+    expect(res.body).not.toContain('skipped:SETTLE_FAILED');
+    // (2) …y queda en el evento durable, que es lo que mira el operador.
+    expect(persisted).toEqual(['SETTLE_UNKNOWN']);
   });
 
   it('T-SKIP-400 (AR BLQ-BAJO-1a): pipeline FALLIDO con un skip → también se persiste', async () => {
