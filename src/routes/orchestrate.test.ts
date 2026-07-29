@@ -10,7 +10,11 @@
  *   - T-ROUTE-2b (regresión): success → HTTP 200 (legacy)
  */
 
-import type { FastifyReply, FastifyRequest } from 'fastify';
+import type {
+  FastifyBaseLogger,
+  FastifyReply,
+  FastifyRequest,
+} from 'fastify';
 import Fastify from 'fastify';
 import {
   afterAll,
@@ -1130,6 +1134,106 @@ describe('orchestrate routes — WKH-303 quote freeze', () => {
     expect(plan.plannedCostUsd).toBe(0.09);
     expect(serviceRequest.maxQuotedCostUsdc).toBe(1.0);
     expect('frozenStepPricesUsd' in serviceRequest).toBe(false);
+  });
+
+  // T-Q-R2b (fix-pack FP-3) — la degradación silenciosa deja rastro.
+  // Sin quote se cobra el precio vivo bajo techo, que es correcto por diseño. Lo que
+  // NO puede pasar es que un caller que PODÍA tener garantía la pierda sin que quede
+  // ninguna señal: un SDK que se olvide de reenviar el campo produce exactamente el
+  // bug que la HU vino a matar. El log es lo que hace medible ese caso.
+  /**
+   * App con un logger que CAPTURA los mensajes emitidos. La app compartida del
+   * describe se crea sin logger, así que para afirmar telemetría hace falta una
+   * instancia propia (parchear `request.log` después de `ready()` no intercepta).
+   */
+  async function appWithCapturedLogs(): Promise<{
+    instance: ReturnType<typeof Fastify>;
+    messages: string[];
+  }> {
+    const messages: string[] = [];
+    const record = (_obj: unknown, msg?: unknown) => {
+      if (typeof msg === 'string') messages.push(msg);
+    };
+    const stub = {
+      info: record,
+      warn: record,
+      error: record,
+      debug: record,
+      trace: record,
+      fatal: record,
+      silent: record,
+      level: 'info',
+      child: () => stub,
+    };
+    const instance = Fastify({
+      loggerInstance: stub as unknown as FastifyBaseLogger,
+    });
+    await instance.register(orchestrateRoutes, { prefix: '/orchestrate' });
+    await instance.ready();
+    return { instance, messages };
+  }
+
+  it('T-Q-R2b: caller bindeable SIN quote ⇒ ejecuta al precio vivo y DEJA rastro de que corrió sin garantía', async () => {
+    mockExecute.mockResolvedValue(okResult());
+    vi.mocked(resolveAgentPriceUsdc).mockResolvedValue(0.09);
+    const { instance, messages } = await appWithCapturedLogs();
+    try {
+      const res = await instance.inject({
+        method: 'POST',
+        url: '/orchestrate/execute',
+        headers: { 'x-a2a-key': 'wasi_a2a_test' },
+        payload: executePayload(),
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(messages).toContain('[orchestrate.quote.absent]');
+      // y efectivamente corrió por el camino de precio vivo
+      const plan = mockExecute.mock.calls[0]![1] as { costPerStep: number[] };
+      expect(plan.costPerStep).toEqual([0.09]);
+    } finally {
+      await instance.close();
+    }
+  });
+
+  it('T-Q-R2c: un caller x402 sin quote NO genera ese rastro (nunca pudo tener garantía)', async () => {
+    mockExecute.mockResolvedValue(okResult());
+    vi.mocked(resolveAgentPriceUsdc).mockResolvedValue(0.09);
+    nextKeyRow = undefined; // x402: no bindeable
+    const { instance, messages } = await appWithCapturedLogs();
+    try {
+      const res = await instance.inject({
+        method: 'POST',
+        url: '/orchestrate/execute',
+        headers: { 'x-a2a-key': 'wasi_a2a_test' },
+        payload: executePayload(),
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(messages).not.toContain('[orchestrate.quote.absent]');
+    } finally {
+      await instance.close();
+    }
+  });
+
+  it('T-Q-R2d: con quote válido NO se emite el rastro de ausencia, sino el de redención', async () => {
+    mockExecute.mockResolvedValue(okResult());
+    vi.mocked(resolveAgentPriceUsdc).mockResolvedValue(0.05);
+    const quote = issueQuote();
+    const { instance, messages } = await appWithCapturedLogs();
+    try {
+      const res = await instance.inject({
+        method: 'POST',
+        url: '/orchestrate/execute',
+        headers: { 'x-a2a-key': 'wasi_a2a_test' },
+        payload: executePayload({ quote }),
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(messages).not.toContain('[orchestrate.quote.absent]');
+      expect(messages).toContain('[orchestrate.quote.redeemed]');
+    } finally {
+      await instance.close();
+    }
   });
 
   // T-Q-R3 — AC-3

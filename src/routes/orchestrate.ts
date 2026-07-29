@@ -503,6 +503,23 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
 
         let frozenPrices: number[] | null = null;
         const rawQuote = body.quote;
+        if (rawQuote === undefined) {
+          // Omitir el quote es el camino de compatibilidad hacia atrás y está bien:
+          // se cobra el precio vivo bajo el techo declarado. Pero un cliente que
+          // PODÍA tener garantía de precio y no la reenvió degrada, sin ninguna
+          // señal, a "te cobro el precio nuevo que no aprobaste" — que es el bug que
+          // esta HU vino a matar. Un SDK que se olvide de reenviar el campo lo
+          // produce en silencio. Este log es lo que permite MEDIR cuántas
+          // ejecuciones corren sin garantía, un número que hoy no existe.
+          // Solo se emite si el caller es bindeable: un caller x402 nunca pudo tener
+          // quote, así que para él no hay nada degradado que reportar.
+          if (resolveQuoteCaller(request) !== null) {
+            request.log.info(
+              { orchestrationId, planId, stepCount: body.steps.length },
+              '[orchestrate.quote.absent]',
+            );
+          }
+        }
         if (rawQuote !== undefined) {
           const quoteCaller = resolveQuoteCaller(request);
           // G3a: un caller no bindeable (x402/anónimo) no puede redimir NINGÚN quote.
