@@ -216,20 +216,26 @@ describe('WKH-307 up — los índices', () => {
 
 describe('WKH-307 up — el guard del reclamo, EVALUADO desde el .sql', () => {
   const sql = readFileSync(UP, 'utf8');
-  const guard = withLeaseAsFlag(claimConflictGuard(sql));
+  /**
+   * ⚠️ LAZY A PROPÓSITO. Si el guard se extrajera en el cuerpo del `describe`, un
+   * `.sql` sin el término del lease haría que `withLeaseAsFlag` tirara durante la
+   * COLECCIÓN, y vitest reportaría "no tests" en vez de un test rojo — un FALSO
+   * KILLED: todo en rojo sin haber probado nada. Cazado por el mutante M12.
+   */
+  const guard = () => withLeaseAsFlag(claimConflictGuard(sql));
 
   it('T-MIG-08: el LEASE gobierna las dos direcciones (predicado extraído, no re-escrito)', () => {
     // Fuera del lease ⟹ se toma el relevo (y es seguro por la invariante I2: una fila
     // `claimed` no tiene firma, luego nunca se transmitió nada).
-    expect(evalSqlPredicate(guard, { ...OK_ENV, lease_expired: 'yes' })).toBe(true);
+    expect(evalSqlPredicate(guard(), { ...OK_ENV, lease_expired: 'yes' })).toBe(true);
     // Dentro del lease ⟹ NO se toma: hay otro request en vuelo.
-    expect(evalSqlPredicate(guard, { ...OK_ENV, lease_expired: 'no' })).toBe(false);
+    expect(evalSqlPredicate(guard(), { ...OK_ENV, lease_expired: 'no' })).toBe(false);
   });
 
   it('T-MIG-08b: sólo una fila `claimed` puede ser tomada', () => {
     // `signed` y `confirmed` no se re-reclaman: sus salidas pasan por la cadena.
     for (const status of ['signed', 'confirmed']) {
-      expect(evalSqlPredicate(guard, { ...OK_ENV, 't.status': status })).toBe(
+      expect(evalSqlPredicate(guard(), { ...OK_ENV, 't.status': status })).toBe(
         false,
       );
     }
@@ -238,16 +244,16 @@ describe('WKH-307 up — el guard del reclamo, EVALUADO desde el .sql', () => {
   it('T-MIG-09: los TRES términos del intent tienen que coincidir (AC-8)', () => {
     // Si el caller cambia destino, monto o mint, NO es el mismo pago.
     expect(
-      evalSqlPredicate(guard, { ...OK_ENV, 'EXCLUDED.pay_to': 'PayB' }),
+      evalSqlPredicate(guard(), { ...OK_ENV, 'EXCLUDED.pay_to': 'PayB' }),
     ).toBe(false);
     expect(
-      evalSqlPredicate(guard, { ...OK_ENV, 'EXCLUDED.amount_atomic': '9999999' }),
+      evalSqlPredicate(guard(), { ...OK_ENV, 'EXCLUDED.amount_atomic': '9999999' }),
     ).toBe(false);
-    expect(evalSqlPredicate(guard, { ...OK_ENV, 'EXCLUDED.mint': 'MintY' })).toBe(
+    expect(evalSqlPredicate(guard(), { ...OK_ENV, 'EXCLUDED.mint': 'MintY' })).toBe(
       false,
     );
     // Y con todo igual, pasa.
-    expect(evalSqlPredicate(guard, OK_ENV)).toBe(true);
+    expect(evalSqlPredicate(guard(), OK_ENV)).toBe(true);
   });
 
   it('T-MIG-12: el umbral del lease usa `now()` de POSTGRES, no un parámetro de tiempo', () => {
