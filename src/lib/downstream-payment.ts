@@ -459,8 +459,25 @@ async function settleSolanaLeg(
       intentId: legIntentId,
     });
   } catch (e) {
+    // WKH-308: este catch COLAPSABA todo throw en `SETTLE_FAILED`, o sea que le
+    // afirmaba al caller "el leg no se pagó" incluso cuando el adapter acababa de
+    // decir que NO PUDO COMPROBARLO. Un settle que sí ocurrió quedaba registrado como
+    // impago, y ese dato falso es el insumo de cualquier job futuro que trate esas
+    // filas como pendientes.
+    //
+    // Espejo EXACTO del leg EVM (ver el catch de `adapter.settle` más abajo): se lee la
+    // disposición del valor y `unknown` sale como `SETTLE_UNKNOWN`, que NO es
+    // vocabulario nuevo — el código ya existe, ya es público sin genericizar
+    // (`downstream-skip-code.ts`) y los callers ya lo reciben hoy por el rail EVM.
+    const disposition = readSettleValueDisposition(e);
+    const code = disposition === 'unknown' ? 'SETTLE_UNKNOWN' : 'SETTLE_FAILED';
     logger.warn(
-      { agentSlug: agent.slug, code: 'SETTLE_FAILED', detail: String(e) },
+      {
+        agentSlug: agent.slug,
+        code,
+        ...(disposition ? { valueDisposition: disposition } : {}),
+        detail: String(e),
+      },
       '[Downstream] solana adapter.settle threw',
     );
     return null;

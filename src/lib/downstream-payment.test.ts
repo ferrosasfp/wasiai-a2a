@@ -1436,6 +1436,61 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
 
   // ── WKH-307: los dos skip-codes nuevos ──────────────────────────────────
 
+  it('T-308-LEG-UNKNOWN: el leg deja de afirmar "no se pagó" cuando el adapter no pudo comprobarlo', async () => {
+    // EL EFECTO QUE IMPORTA: el caller recibe `SETTLE_UNKNOWN` —"no sé si se pagó,
+    // reconciliá contra la cadena"— en vez de `SETTLE_FAILED`, que es una afirmación
+    // falsa sobre un pago que pudo haber ocurrido.
+    //
+    // No es vocabulario nuevo: el rail EVM ya emite este código hoy
+    // (`T-198-SettleUnknown`, `T-201-SettleFalseWithHash`) y es público sin
+    // genericizar. Solana simplemente deja de mentir donde EVM ya dice la verdad.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+    mockSolanaBalance.mockResolvedValue('1000000000');
+    mockSolanaSettle.mockRejectedValueOnce(
+      Object.assign(new Error('solana settle presence unknown'), {
+        name: 'FacilitatorSettleError',
+        valueDisposition: 'unknown',
+      }),
+    );
+
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'wkh308-test-intent',
+    );
+
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'SETTLE_UNKNOWN',
+        valueDisposition: 'unknown',
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('T-308-LEG-FAILED: un settle que DE VERDAD falló sigue reportándose como fallado', async () => {
+    // La contracara obligatoria. Sin esto, el arreglo podría haber convertido todo
+    // fallo en "no sé" y ningún leg volvería a reportarse como impago.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+    mockSolanaBalance.mockResolvedValue('1000000000');
+    mockSolanaSettle.mockRejectedValueOnce(new Error('plain failure'));
+
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'wkh308-test-intent',
+    );
+
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'SETTLE_FAILED' }),
+      expect.any(String),
+    );
+  });
+
   it('T-307-MISSING-INTENT: sin `intentId` el leg NO toca la red (DT-9)', async () => {
     // ⚠️ ACÁ VIVÍA UN FALLBACK: `intentId ?? `${agent.slug}:${payTo}``, o sea una clave
     // de idempotencia derivada del NOMBRE del agente y su dirección de cobro — la MISMA
