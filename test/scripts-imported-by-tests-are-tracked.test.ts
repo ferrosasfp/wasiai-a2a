@@ -18,7 +18,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -54,6 +54,20 @@ function importedScriptPaths(): { testFile: string; scriptPath: string }[] {
   return out;
 }
 
+/** ¿Hay metadata de git usable acá? Un tarball/vendorizado no la tiene. */
+function gitMetadataAvailable(): boolean {
+  try {
+    execFileSync('git', ['rev-parse', '--git-dir'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** `true` sii git tiene la ruta en el índice (lo que `checkout` materializa). */
 function isTrackedByGit(repoRelativePath: string): boolean {
   const stdout = execFileSync('git', ['ls-files', '--', repoRelativePath], {
@@ -75,14 +89,25 @@ describe('scripts importados por tests', () => {
   });
 
   it('★ todos están trackeados por git (checkout no trae archivos ignorados)', () => {
-    const untracked = importedScriptPaths().filter(
-      ({ scriptPath }) => !isTrackedByGit(scriptPath),
+    // DOS MODOS, ninguno que pase en silencio:
+    //  · con metadata de git (máquina del dev, CI real) se pregunta por el ÍNDICE,
+    //    que es lo que `checkout` materializa. Ahí se caza el bug en el momento de
+    //    introducirlo, aunque el archivo siga en el disco del autor.
+    //  · sin metadata (tarball, vendorizado, `git archive`) el disco YA es el
+    //    estado post-checkout, así que la existencia del archivo es la verdad.
+    // Saltear el test cuando no hay git sería la falla silenciosa de siempre.
+    const useGit = gitMetadataAvailable();
+    const broken = importedScriptPaths().filter(({ scriptPath }) =>
+      useGit
+        ? !isTrackedByGit(scriptPath)
+        : !existsSync(join(REPO_ROOT, scriptPath)),
     );
     expect(
-      untracked,
-      `Estos scripts los importa un test pero git NO los tiene en el índice, así que ` +
-        `en CI no van a existir y la suite no va a colectar:\n` +
-        untracked.map((u) => `  ${u.scriptPath}  ← ${u.testFile}`).join('\n'),
+      broken,
+      `Estos scripts los importa un test pero ${
+        useGit ? 'git NO los tiene en el índice' : 'NO existen en esta copia'
+      }, así que en CI no van a existir y la suite no va a colectar:\n` +
+        broken.map((u) => `  ${u.scriptPath}  ← ${u.testFile}`).join('\n'),
     ).toEqual([]);
   });
 });
