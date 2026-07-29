@@ -114,6 +114,26 @@ export interface SolanaSettleProof {
   payTo: string;
   amountAtomic: string;
 }
+/**
+ * WKH-307 — resultado del peek de idempotencia.
+ *
+ * ⚠️ POR QUE UNA UNION Y NO `string | undefined`: el retorno anterior COLAPSABA
+ * *"no se pago"* con *"no se si se pago"*, que en un camino de dinero son OPUESTOS.
+ * El primero autoriza a cortar por fondos insuficientes; el segundo obliga a
+ * fail-closear y a decir POR QUE. Con la union el caller distingue y loguea distinto.
+ *
+ * `unknown` es el traductor del fallo: el peek NUNCA lanza, un store mudo llega aca.
+ */
+export type SettledPeek =
+  /** No hay reclamo para este intent. */
+  | { state: 'none' }
+  /** Confirmado y con firma: ya se pago. */
+  | { state: 'settled'; signature: string }
+  /** Reclamado por alguien (o firmado) pero sin confirmar. */
+  | { state: 'in_progress' }
+  /** El store no respondio. NO significa "no se pago". */
+  | { state: 'unknown' };
+
 export interface SolanaPaymentAdapter extends PaymentAdapterCommon {
   readonly vmFamily: 'solana';
   readonly caip2ChainId: string; // DT-1: `solana:<genesis-prefix>` (NO chainId:number)
@@ -142,12 +162,12 @@ export interface SolanaPaymentAdapter extends PaymentAdapterCommon {
    * balance ya había bajado por haber pagado ese mismo leg ⇒ un leg PAGADO se
    * reportaba como no pagado (sin recibo ni `settle_signature`).
    *
-   * Lectura PURA en memoria (CD-7: sin services/DB, sin RPC, sin I/O): NUNCA
-   * lanza y NUNCA es autoritativa sobre el pago — la validación
-   * verify-before-trust de la firma previa sigue siendo responsabilidad de
+   * WKH-307: pasa a ASINCRONO (el registro dejo de ser un `Map` de proceso y paso a
+   * una tabla) y a UNION DISCRIMINADA. NUNCA lanza y NUNCA es autoritativa sobre el
+   * pago — la validacion verify-before-trust sigue siendo responsabilidad de
    * `settle()`.
    */
-  getSettledSignature(intentId: string): string | undefined;
+  getSettledSignature(intentId: string): Promise<SettledPeek>;
 }
 
 export type PaymentAdapter = EvmPaymentAdapter | SolanaPaymentAdapter;
