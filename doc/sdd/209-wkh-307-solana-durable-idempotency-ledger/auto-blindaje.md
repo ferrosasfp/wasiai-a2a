@@ -215,6 +215,50 @@ Reconcilia exacto con el total corrido: **4072 (baseline) + 59 = 4131**.
 
 ---
 
+### [2026-07-29 10:0x] Ejercicio del SQL contra Postgres — 27/27, y dos hallazgos
+
+Los 31 tests de migración **parsean el `.sql` y evalúan predicados en JS**; aplicar la
+migración prueba que el DDL es válido. Ninguna de las dos cosas ejecuta las funciones.
+`scripts/exercise-wkh307-functions.mjs` las corre contra la base de desarrollo:
+**27/27 casos coinciden con lo que los tests en JS afirman**, incluidos el
+`INSERT ... ON CONFLICT`, el `make_interval` en sus dos direcciones, el
+`expired_signatures || ARRAY[...]` y el `RETURNS TABLE` + `RETURN NEXT` — que hasta hoy
+nunca se habían ejecutado.
+
+**Hallazgo 1 — una garantía escrita que la base no cumple (fixture, no código).**
+`T-LDG-10` usaba uint64 max (`18446744073709551615`) como valor de
+`last_valid_block_height` para probar que "viaja como string sin coerción". Es cierto en
+el borde TS, pero **la columna es `BIGINT` con signo** (techo 9223372036854775807): ese
+valor hace que `record_solana_settle_signed` tire `22003 out of range`. O sea que el
+test implicaba un round-trip que la base rechaza.
+
+- **No es un bug de dinero**: un slot de Solana ronda 3.5e8, diez órdenes por debajo del
+  techo; y si alguna vez desbordara, la función tira → `settle-ledger` lo traduce a
+  `store_unavailable` → **fail-closed, sin transmitir** (medido: caso B2, la fila queda
+  `claimed` sin firma, no con una altura truncada).
+- **Fix**: el fixture pasa a `9007199254740993` (2^53+1) — sigue por ENCIMA del entero
+  seguro de JS, que es lo que a WKH-196 le importa, y entra cómodo en `BIGINT`. Y el
+  techo quedó **medido** en el guion (casos B1/B2) en vez de supuesto.
+- **Aplicar en**: un fixture "bien grande para probar precisión" tiene que respetar el
+  TIPO DE LA COLUMNA. Probar con un valor que la base rechaza no prueba el round-trip:
+  prueba el borde de arriba y esconde el de abajo.
+
+**Hallazgo 2 — el guion chocaba consigo mismo entre corridas.**
+`SIG_A`/`SIG_B` eran constantes globales, pero el índice UNIQUE sobre `settle_signature`
+es **global**: la segunda corrida recibía 23505 donde esperaba éxito, y todo lo de abajo
+cascadeaba. Pasó de verdad y me mandó a buscar un bug de SQL que no existía. Las firmas
+pasaron a tener alcance de corrida (`SigA-${RUN}`), y el guion ahora imprime el **error
+crudo de Postgres** cuando una llamada no devuelve fila (un `null` pelado no distingue
+"devolvió vacío" de "tiró").
+
+**Nota operativa que costó 4 filas colgadas**: pipear la salida del guion a `head` cierra
+el pipe, node recibe EPIPE y **muere antes del bloque de limpieza**. Las filas quedaron
+en desarrollo y se borraron con `--cleanup-orphans` (acotado al prefijo
+`wkh307-exercise-%`, verificado 4 → 0, tabla en 0). Para correrlo: sin pipe, o
+redirigiendo a un archivo.
+
+---
+
 ### Residuos declarados
 
 - **La migración NO se aplicó a ninguna base.** El Story File (W4.2) pide aplicarla a
