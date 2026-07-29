@@ -828,9 +828,20 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       );
     }
 
-    // `absent` y `landed_failed` PRUEBAN que la transferencia no ocurrio; y
-    // `landed_mismatch` conserva la conducta previa a proposito (ver el residuo del
-    // work-item de WKH-308): si alguna vez dispara, merece su propia mirada.
+    // `absent` y `landed_failed` PRUEBAN que la transferencia no ocurrio ⟹ fallo
+    // genuino, y el caller propaga el error original.
+    //
+    // `landed_mismatch` CONSERVA la conducta previa (tambien fallo genuino), y la razon
+    // va aca y no en otro archivo: significa que una tx con ESA firma esta on-chain,
+    // sin error, pero el delta hacia `payTo` no cubre `amountAtomic`. En este flujo la
+    // tx la construimos nosotros por el monto exacto, asi que llegar aca implica que la
+    // cadena contradice lo que creemos haber firmado — no es "no se pago" ni "no se":
+    // es una contradiccion que ningun reintento automatico arregla.
+    //
+    // Se deja como fallo (y NO como `unknown`) a proposito: `unknown` significa "puede
+    // que se haya pagado, no reintentes y reconcilia", y aca SI sabemos que lo que
+    // aterrizo no es el pago que pedimos. Si alguna vez dispara en produccion, merece
+    // mirada humana antes que una regla nueva.
     const verified: VerifyResult =
       presence.state === 'landed_ok'
         ? { valid: true }
