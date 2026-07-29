@@ -813,6 +813,12 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
           intentId: req.intentId,
           signature: candidate,
           detail: presence.detail,
+          // FP-2: el SINTOMA que disparó todo. Esta rama LANZA un error nuevo, asi que
+          // el `throw e` del caller nunca corre y el original no viaja solo. Y es
+          // justamente la rama que le dice al operador "andá a reconciliar contra la
+          // cadena": mandarlo sin saber si fue un timeout de confirmacion o otra cosa
+          // lo deja empezando de cero. La rama de fallo genuino ya lo loguea.
+          originalError: String(err),
         },
         'solana settle recovery: could NOT determine whether the broadcast transaction landed — reporting the leg as UNKNOWN, not as failed (asserting "not paid" here would write a false negative into the ledger)',
       );
