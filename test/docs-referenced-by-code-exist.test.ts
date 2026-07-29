@@ -32,11 +32,9 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { dirname } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -76,14 +74,47 @@ const CODE_EXT = ['.ts', '.tsx', '.mjs', '.cjs', '.js', '.sql', '.sh'];
  */
 const MD_TOKEN_RE = /[A-Za-z0-9._/-]+\.md(?![A-Za-z0-9])/g;
 
+/** Directorios que nunca aportan referencias y que harían el barrido carísimo. */
+const WALK_SKIP = new Set(['node_modules', '.git', 'dist', 'coverage', '.next']);
+
+/** Barrido del filesystem, para cuando no hay metadata de git. */
+function walkFiles(dir: string, prefix = ''): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(join(REPO_ROOT, dir === '' ? '.' : dir), {
+    withFileTypes: true,
+  })) {
+    if (WALK_SKIP.has(entry.name)) continue;
+    const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...walkFiles(rel, rel));
+    else out.push(rel);
+  }
+  return out;
+}
+
+/**
+ * Los archivos del repo. Con metadata de git se pregunta por el ÍNDICE (que es lo que
+ * `checkout` materializa); sin ella se barre el disco, que en una copia extraída YA ES el
+ * estado post-checkout.
+ *
+ * ⚠️ EL FALLBACK NO ES DECORATIVO: sin él, esto tiraba `Command failed: git ls-files` en
+ * cualquier copia sin `.git` (un tarball, un vendorizado, la extracción limpia con la que
+ * se verifican las condiciones de CI) y el archivo NO COLECTABA. O sea: el guardián se
+ * caía exactamente en el entorno que vino a proteger, y con el mismo síntoma que el bug
+ * original. Ya le había pasado al guardián de scripts (ver su commit `c6e8c6f`).
+ */
 function trackedFiles(): string[] {
-  return execFileSync('git', ['ls-files'], {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-  })
-    .split('\n')
-    .filter(Boolean);
+  try {
+    return execFileSync('git', ['ls-files'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      maxBuffer: 32 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .split('\n')
+      .filter(Boolean);
+  } catch {
+    return walkFiles('');
+  }
 }
 
 /** Archivos de código trackeados. `doc/**` queda afuera: acá se vigila el CÓDIGO. */
