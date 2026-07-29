@@ -14,6 +14,10 @@
  * esa propiedad; cualquier check que se agregue al route handler NO.
  */
 
+// WKH-305: el único import de este módulo, y es a otro LEAF (cero imports de
+// runtime), así que la propiedad de "no lo moquea nadie" se conserva.
+import { validateInputMappingShape } from './compose-input-mapping.js';
+
 /** Body del error de validación de shape (sin `requestId`, que agrega el caller). */
 export type ComposeStepShapeError = {
   error: string;
@@ -170,6 +174,20 @@ export function validateComposeStepShape(
       stepIndex,
     );
     if (repErr) return repErr;
+  }
+
+  // WKH-305: forma de `inputFromPrevious`. Las reglas viven UNA sola vez, en
+  // `lib/compose-input-mapping.ts` (el resolvedor del service llama a la MISMA
+  // función); acá sólo se traduce el fallo al shape que este módulo ya emite.
+  // Está en este archivo, y no en el route handler, precisamente por lo que dice
+  // el docstring de cabecera: lo que se rechaza acá se rechaza SIN débito.
+  const mappingErr = validateInputMappingShape(step, stepIndex);
+  if (mappingErr) {
+    return {
+      error: `Step ${stepIndex}: ${mappingErr.message}`,
+      code: 'VALIDATION_ERROR',
+      step: stepIndex,
+    };
   }
 
   return null;

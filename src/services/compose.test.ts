@@ -4278,3 +4278,228 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
     expect(refundedUsd()).toBe(0);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════
+// WKH-305 (W1) — CARACTERIZACIÓN del reordenamiento del débito
+//
+// W1 mueve la construcción del `input` del step de DESPUÉS del bloque de débito
+// a ANTES. Es una conmutación de dos bloques que no comparten datos ni efectos:
+// el `input` se calcula sólo con `step.input`/`step.passOutput`/`lastOutput`, y
+// el bloque de débito sólo lee el precio del agente y el gas overhead. Estos
+// tres tests CONGELAN esa afirmación en las tres cosas que un reordenamiento mal
+// hecho rompería: cuánta plata se mueve, cuánta vuelve, y qué objeto exacto
+// recibe el agente.
+//
+// Un `toHaveBeenCalledWith` no alcanzaría: no distingue "cobró y devolvió" de
+// "cobró y se lo quedó". Por eso el mock de `debit`/`creditWithDest` mueve un
+// balance en memoria y las aserciones comparan el número antes vs. después.
+// ══════════════════════════════════════════════════════════════════════
+
+describe('WKH-305 (W1) · caracterización: el reordenamiento no mueve un centavo', () => {
+  // Helper local IDÉNTICO al del describe de WKH-59: se replica en vez de mover
+  // el original para no tocar una línea de un test preexistente.
+  function mockAgentsBySlug(agents: Record<string, Agent>) {
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug: string, _registry?: string) => agents[slug] ?? null,
+    );
+  }
+
+  // Ledger en memoria: `debit` RESTA y `creditWithDest` SUMA de verdad.
+  // `debitLatencyMs` abre a voluntad la ventana de tiempo que ocupa el débito.
+  // Default 0 ⇒ el resto del bloque no cambia.
+  const ledger = { balance: 10, debitLatencyMs: 0 };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  beforeEach(() => {
+    ledger.balance = 10;
+    ledger.debitLatencyMs = 0;
+    // Explícito, no heredado: sin esto el bloque depende de que algún test
+    // ANTERIOR haya dejado seteado `getEnabled` (`clearAllMocks` limpia las
+    // llamadas, no las implementaciones), y correr un solo `it` con `-t` falla.
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockDebit.mockImplementation(
+      async (_keyId: string, _chainId: number, amountUsd: number) => {
+        if (ledger.debitLatencyMs > 0) await sleep(ledger.debitLatencyMs);
+        ledger.balance -= amountUsd;
+        return { success: true };
+      },
+    );
+    mockCreditWithDest.mockImplementation(
+      async (
+        _keyId: string,
+        _chainId: number,
+        amountUsd: number,
+        _ownerRef: string,
+      ) => {
+        ledger.balance += amountUsd;
+        return { success: true, reverted: true };
+      },
+    );
+  });
+
+  it('T-MAP-C1: 3 steps sin mapeo — el balance se mueve EXACTAMENTE precio(step1)+precio(step2)', async () => {
+    const a0 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a1 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    const a2 = makeAgent({ slug: 'payout', priceUsdc: 0.02, id: 'agent-3' });
+    mockAgentsBySlug({ kyc: a0, corridor: a1, payout: a2 });
+    mockFetchOk({ result: 'r0' });
+    mockFetchOk({ result: 'r1' });
+    mockFetchOk({ result: 'r2' });
+
+    const balanceBefore = ledger.balance;
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+        { agent: 'payout', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    // LA ASERCIÓN DE DINERO PRIMERO. El step 0 lo debita el middleware, no el
+    // service (guard `i > 0`), así que sólo se mueven los steps 1 y 2.
+    expect(ledger.balance).toBeCloseTo(balanceBefore - (0.05 + 0.02), 10);
+    // Y el destino canónico y el chainId de cada débito, sin cambios.
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    expect(mockDebit).toHaveBeenNthCalledWith(
+      1,
+      'k1',
+      2368,
+      0.05,
+      undefined,
+      undefined,
+      'test-registry/corridor',
+      'owner-test',
+    );
+    expect(mockDebit).toHaveBeenNthCalledWith(
+      2,
+      'k1',
+      2368,
+      0.02,
+      undefined,
+      undefined,
+      'test-registry/payout',
+      'owner-test',
+    );
+    expect(mockCreditWithDest).not.toHaveBeenCalled();
+  });
+
+  it('T-MAP-C2: fallo post-invoke en el step 1 — el refund devuelve TODO lo debitado', async () => {
+    // El fallo ocurre INVOCANDO, o sea del lado "requiere ejecutar" de la
+    // frontera: el débito ya pasó y el hook de refund tiene que devolverlo
+    // exactamente igual que antes del reordenamiento.
+    const a0 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a1 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a0, corridor: a1 });
+    mockFetchOk({ result: 'r0' });
+    mockFetchError(502); // el step 1 falla en el agente, sin field-errors
+
+    const balanceBefore = ledger.balance;
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    // Bajó y volvió a subir: el balance final es idéntico al inicial.
+    expect(ledger.balance).toBeCloseTo(balanceBefore, 10);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
+    expect(mockCreditWithDest).toHaveBeenCalledWith(
+      'k1',
+      2368,
+      0.05,
+      'owner-test',
+      'test-registry/corridor',
+      expect.objectContaining({ idemKey: expect.any(String) }),
+    );
+  });
+
+  it('T-MAP-C3: sin `passOutput`, el objeto que llega a invokeAgent es la MISMA referencia de step.input', async () => {
+    // `toBe`, no `toEqual`: el camino sin mapeo no alloca nada nuevo. Si alguien
+    // "normalizara" el input con un spread incondicional, esto se pone rojo — y
+    // ese spread sería un cambio de comportamiento silencioso para cualquier
+    // agente que dependa de la identidad del objeto.
+    const a0 = makeAgent({ slug: 'kyc', priceUsdc: 0 });
+    mockAgentsBySlug({ kyc: a0 });
+    mockFetchOk({ result: 'r0' });
+
+    const stepInput = { corridor: 'US-PE', amountUsd: 400 };
+    const spy = vi.spyOn(composeService, 'invokeAgent');
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'kyc', input: stepInput }],
+      scopingKeyRow: makeKeyRow({ id: 'k1' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    expect(spy.mock.calls[0]?.[1]).toBe(stepInput);
+    spy.mockRestore();
+  });
+
+  it('T-MAP-C4: el `latencyMs` del step NO incluye el tiempo del débito', async () => {
+    // Este test existe porque la MUTACIÓN lo pidió: subir el cronómetro
+    // (`const startTime = Date.now()`) arriba del bloque de débito no ponía
+    // rojo NINGÚN test del repo. O sea que la métrica de latencia por step del
+    // money-path no estaba protegida por nada, y cualquiera podía cambiarla sin
+    // enterarse.
+    //
+    // No es una micro-optimización: `latencyMs` es lo que se reporta al caller y
+    // lo que viaja al evento `compose_step`. Si pasara a incluir el débito,
+    // TODOS los steps con débito per-step medirían de golpe otra cosa con el
+    // mismo nombre — un cambio silencioso de métrica en el money-path, no una
+    // medición "más precisa".
+    //
+    // El cronómetro tiene que arrancar donde arranca el trabajo que se le
+    // atribuye al agente: justo antes de invocarlo.
+    const DEBIT_MS = 150;
+    const a0 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a1 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a0, corridor: a1 });
+    mockFetchOk({ result: 'r0' });
+    mockFetchOk({ result: 'r1' });
+    ledger.debitLatencyMs = DEBIT_MS;
+
+    const wallClockStart = Date.now();
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+    const wallClockMs = Date.now() - wallClockStart;
+
+    expect(result.success).toBe(true);
+    // El step 1 es el único con débito per-step (el 0 lo debita el middleware),
+    // así que es el único donde la diferencia es observable.
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(result.steps[1]?.latencyMs).toBeLessThan(DEBIT_MS);
+    // ── EL FIXTURE ESTÁ ARMADO ────────────────────────────────────────────
+    // El reloj de pared de la llamada COMPLETA sí tiene que incluir el débito:
+    // es la prueba de que el doble durmió de verdad. Sin esto, poner
+    // `debitLatencyMs = 0` desarmaría el escenario y la aserción de arriba
+    // seguiría verde por el motivo equivocado (no porque el cronómetro esté bien
+    // puesto, sino porque no había nada que medir).
+    //
+    // Ojo con la tentación de asertar esto sobre `result.totalLatencyMs`: ESA
+    // suma los `latencyMs` por step, todos medidos desde el cronómetro
+    // post-débito, así que jamás puede incluir el tiempo del débito y la
+    // comparación sería vacua (no puede fallar por construcción).
+    expect(wallClockMs).toBeGreaterThanOrEqual(DEBIT_MS);
+  });
+});

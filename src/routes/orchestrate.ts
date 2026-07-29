@@ -8,6 +8,9 @@
 
 import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+// WKH-305 (CR MNR-3): módulo LEAF (cero imports de runtime) — la MISMA
+// definición de las reglas de forma que usan el borde de `/compose` y el service.
+import { validateInputMappingShape } from '../lib/compose-input-mapping.js';
 import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
 import { createBackpressureHandler } from '../middleware/backpressure.js';
 import { noteDownstreamSkips } from '../middleware/event-tracking.js';
@@ -55,6 +58,45 @@ async function markSkipMiddlewareDebitHandler(
   request: FastifyRequest,
 ): Promise<void> {
   request.skipMiddlewareDebit = true;
+}
+
+/**
+ * WKH-305 (CR MNR-3): valida la FORMA de `inputFromPrevious` ANTES del
+ * middleware de pago, igual que hace `validateComposeBodyHandler` en
+ * `routes/compose.ts`.
+ *
+ * POR QUÉ HACE FALTA ACÁ: el schema de `steps[]` de esta ruta **no declara
+ * `additionalProperties: false`**, así que ajv NO remueve las claves que no
+ * conoce — un `inputFromPrevious` malformado llega intacto al handler y de ahí al
+ * service. Sin este preHandler:
+ *   · el rechazo llegaba DESPUÉS del débito del step 0, o sea que un body
+ *     inválido costaba un débito y su reembolso en vez de un error gratis;
+ *   · S8 (mapeo en el step 0) no se aplicaba nunca por esta ruta, así que el
+ *     integrador recibía un error que apuntaba al lugar equivocado.
+ *
+ * Las REGLAS no se duplican: son las mismas de `lib/compose-input-mapping.ts`,
+ * el mismo módulo que consumen el borde de `/compose` y el resolvedor del
+ * service. Acá sólo se traduce al shape de error de esta ruta.
+ *
+ * Idiom Fastify 5: `return reply.status(...).send(...)` aborta la cadena.
+ */
+async function validateStepInputMappingHandler(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  const steps = (request.body as { steps?: unknown } | undefined)?.steps;
+  if (!Array.isArray(steps)) return;
+  for (let i = 0; i < steps.length; i++) {
+    const mappingErr = validateInputMappingShape(steps[i], i);
+    if (mappingErr) {
+      return reply.status(400).send({
+        error: `Step ${i}: ${mappingErr.message}`,
+        code: 'VALIDATION_ERROR',
+        step: i,
+        requestId: request.id,
+      });
+    }
+  }
 }
 
 const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
@@ -339,6 +381,8 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         ),
         // WKH-127/CD-NEW-5 (RIESGO-4): OBLIGATORIO — el service debita el step-0
         // post-plan; sin skip el middleware debitaría el placeholder $1 (double-charge).
+        // WKH-305 (CR MNR-3): ANTES del débito — un mapeo malformado es 400 gratis.
+        validateStepInputMappingHandler,
         markSkipMiddlewareDebitHandler,
         ...requirePaymentOrA2AKey({
           description:

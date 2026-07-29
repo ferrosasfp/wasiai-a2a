@@ -460,6 +460,21 @@ export interface ComposeStep {
   input: Record<string, unknown>;
   /** Use output from previous step */
   passOutput?: boolean;
+  /**
+   * WKH-305: mapeo de campos puntuales desde la salida del step INMEDIATAMENTE
+   * anterior hacia el input de este step. `{ claveDestino: claveOrigen }`, o sea
+   * `input[destino] = salidaAnterior[origen]`.
+   *
+   * Lookup de UNA clave de primer nivel por entrada: sin dot-paths, sin
+   * expresiones, sin defaults, sin acceso a steps anteriores al inmediato. Lo
+   * valida `lib/compose-input-mapping.ts` en DOS puntos, los dos pre-cobro:
+   * `validateComposeStepShape` (borde HTTP) y `resolveStepInput` (service).
+   *
+   * Coexiste con `passOutput` (que inyecta el objeto entero bajo
+   * `previousOutput`); la clave destino `previousOutput` está prohibida para que
+   * no haya dos escritores del mismo campo.
+   */
+  inputFromPrevious?: Record<string, string>;
   /** WKH-114: AC adjuntos en plan-time o por el caller. */
   acceptanceCriteria?: string[];
 }
@@ -553,13 +568,36 @@ export interface ComposeResult {
   /**
    * WKH-61: discriminator para que el route handler mapee a 403 (`SCOPE_DENIED`).
    * WKH-125: `DEST_CAP_EXCEEDED` → 402 (cap por destino excedido mid-pipeline).
+   * WKH-305: `INPUT_MAPPING_FAILED` → **400**, por el `default` que YA existe en
+   * el mapeo de status de `routes/compose.ts` (`let status = 400`). NO agrega una
+   * rama de status nueva: un mapeo irresoluble es un body que el gateway no puede
+   * satisfacer, o sea el mismo 400 de siempre.
    */
-  errorCode?: 'SCOPE_DENIED' | 'DEST_CAP_EXCEEDED';
+  errorCode?: 'SCOPE_DENIED' | 'DEST_CAP_EXCEEDED' | 'INPUT_MAPPING_FAILED';
   /** WKH-61: target denegado, para debugging. `category` se omite si el agent no la expone. */
   scopeDeniedTarget?: {
     registry: string;
     agent_slug: string;
     category?: string;
+  };
+  /**
+   * WKH-305: detalle accionable del fallo de `inputFromPrevious`. Paralelo exacto
+   * de `scopeDeniedTarget`: el `error` en texto también nombra step, campo y
+   * origen, pero un cliente no debería tener que parsearlo para reaccionar.
+   *
+   * No filtra nada sensible: `field` y `source` son los nombres de clave que el
+   * propio llamador declaró en su body.
+   */
+  inputMappingFailure?: {
+    step: number;
+    reason:
+      | 'INVALID_MAPPING_SHAPE'
+      | 'PREVIOUS_OUTPUT_NOT_OBJECT'
+      | 'SOURCE_FIELD_MISSING';
+    /** Clave destino. */
+    field?: string;
+    /** Clave origen leída de la salida del step anterior. */
+    source?: string;
   };
   /** WKH-114: completitud a nivel pipeline (AC-5), DISTINTA de success. */
   verificationStatus?: PipelineVerificationStatus;

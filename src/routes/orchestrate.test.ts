@@ -92,6 +92,7 @@ vi.mock('../services/orchestrate.js', () => ({
 
 import { registerErrorBoundary } from '../middleware/error-boundary.js';
 import { genReqId, registerRequestIdHook } from '../middleware/request-id.js';
+import { resolveAgentPriceUsdc } from '../services/agent-price.js';
 import { orchestrateService } from '../services/orchestrate.js';
 import orchestrateRoutes from './orchestrate.js';
 
@@ -751,5 +752,114 @@ describe('orchestrate routes — WKH-131 /plan + /execute', () => {
     expect(plan.protocolFeeUsdc).toBeCloseTo(0.0005, 6);
     // NO budget-based (5.0 * 0.01 = 0.05).
     expect(plan.feeUsdc).not.toBeCloseTo(5.0 * 0.01, 5);
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // WKH-305 (CR MNR-3) — `inputFromPrevious` por ESTA ruta
+  //
+  // El schema de `steps[]` de /execute NO declara `additionalProperties:false`,
+  // así que ajv NO remueve las claves desconocidas: un `inputFromPrevious`
+  // malformado llega intacto. Sin el preHandler de forma, el rechazo ocurría
+  // DESPUÉS del débito del step 0 (un débito y su reembolso en vez de un error
+  // gratis) y S8 no se aplicaba nunca por acá.
+  //
+  // El ORDEN se afirma con `lastSkipMiddlewareDebit`: lo setea
+  // `markSkipMiddlewareDebitHandler`, que corre JUSTO ANTES del middleware de
+  // pago. Si queda `undefined`, ni el débito ni nada posterior llegó a correr.
+  // ══════════════════════════════════════════════════════════════
+
+  it('T-MAP-25 (CR MNR-3): mapeo malformado en /execute → 400 ANTES del middleware de pago', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: {
+        orchestrationId: 'o-map-25',
+        steps: [
+          { agent: 'a1', registry: 'wasiai', input: {} },
+          {
+            agent: 'a2',
+            registry: 'wasiai',
+            input: {},
+            inputFromPrevious: ['quoteId'], // array: no expresa destino→origen
+          },
+        ],
+        maxQuotedCostUsdc: 1.0,
+        budget: 1.0,
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('VALIDATION_ERROR');
+    expect(res.json().error).toContain('Step 1:');
+    expect(res.json().error).toContain('non-array object');
+    // NADA posterior corrió: ni el marcador pre-débito, ni el pricing, ni el
+    // service. O sea: sin débito y sin reembolso, que es el punto.
+    expect(lastSkipMiddlewareDebit).toBeUndefined();
+    expect(vi.mocked(resolveAgentPriceUsdc)).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  it('T-MAP-26 (CR MNR-3 · S8): mapeo en el step 0 por /execute → 400 que apunta al step correcto', async () => {
+    // Antes esta regla no se aplicaba por esta ruta, así que el integrador
+    // recibía un error del lugar equivocado (o pagaba para descubrirlo).
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: {
+        orchestrationId: 'o-map-26',
+        steps: [
+          {
+            agent: 'a1',
+            registry: 'wasiai',
+            input: {},
+            inputFromPrevious: { quoteId: 'quoteId' },
+          },
+        ],
+        maxQuotedCostUsdc: 1.0,
+        budget: 1.0,
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().step).toBe(0);
+    expect(res.json().error).toContain('not allowed on step 0');
+    expect(lastSkipMiddlewareDebit).toBeUndefined();
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  it('T-MAP-27 (CR MNR-3, invariante): un mapeo BIEN formado pasa y llega INTACTO al service', async () => {
+    // El guard no puede rechazar de más, y el campo no puede perderse por el
+    // camino: el service es quien lo resuelve contra la salida del step previo.
+    mockExecute.mockResolvedValue(okResult());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: {
+        orchestrationId: 'o-map-27',
+        steps: [
+          { agent: 'a1', registry: 'wasiai', input: {} },
+          {
+            agent: 'a2',
+            registry: 'wasiai',
+            input: { method: 'yape' },
+            inputFromPrevious: { quoteId: 'quoteId' },
+          },
+        ],
+        maxQuotedCostUsdc: 1.0,
+        budget: 1.0,
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(lastSkipMiddlewareDebit).toBe(true);
+    // Los steps viajan en el PLAN (2º arg), que es lo que el service ejecuta.
+    const steps = mockExecute.mock.calls[0]?.[1]?.steps as
+      | { inputFromPrevious?: Record<string, string> }[]
+      | undefined;
+    expect(steps?.[1]?.inputFromPrevious).toEqual({ quoteId: 'quoteId' });
   });
 });
