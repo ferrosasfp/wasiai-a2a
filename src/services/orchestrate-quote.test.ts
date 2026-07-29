@@ -20,7 +20,7 @@ import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   computeQuoteBinding,
   QUOTE_MAX_TOKEN_CHARS,
@@ -257,6 +257,82 @@ describe('orchestrate-quote — emisión y verificación', () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.code).toBe('QUOTE_INVALID');
+  });
+
+  // T-Q-U12 (fix-pack FP-1) — INVARIANTE DE REDIMIBILIDAD:
+  // todo token que se emite tiene que poder redimirse. Antes, un precio por debajo
+  // de 5e-9 pasaba el guard de entrada, se congelaba redondeado a "0.00000000" y su
+  // PROPIO verifyQuote lo rechazaba: `/plan` devolvía una garantía de precio que
+  // `/execute` iba a rechazar siempre. Falla cerrado (no cobra de más), pero le
+  // miente al cliente sobre la garantía que tiene, que es lo contrario de la HU.
+  it('T-Q-U12: un precio que se redondea a cero NO se firma (nunca se emite un token irredimible)', () => {
+    for (const priceUsdc of [1e-9, 4e-9, 4.9e-9]) {
+      // premisa: el precio de entrada es > 0, así que el guard de entrada lo deja pasar
+      expect(priceUsdc).toBeGreaterThan(0);
+      // pero al congelarlo con 8 decimales queda en cero
+      expect(Number(priceUsdc.toFixed(8))).toBe(0);
+      expect(
+        signQuote({
+          orchestrationId: 'orch-1',
+          caller: CALLER,
+          steps: [{ agent: 'a1', registry: null, priceUsdc }],
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it('T-Q-U12b: todo token EMITIDO se puede redimir (round-trip, incluido el borde sub-centavo)', () => {
+    // 5e-9 es el primer valor que sobrevive al redondeo (→ "0.00000001").
+    for (const priceUsdc of [5e-9, 1e-8, 0.001, 0.05, 12.5]) {
+      const signed = signQuote({
+        orchestrationId: 'orch-1',
+        caller: CALLER,
+        steps: [{ agent: 'a1', registry: null, priceUsdc }],
+      });
+      if (signed === null) {
+        throw new Error(`no se emitió token para ${priceUsdc}`);
+      }
+      const result = verifyQuote(signed.token, CALLER);
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(`token irredimible para ${priceUsdc}`);
+      expect(Number(result.payload.steps[0]?.p)).toBeGreaterThan(0);
+    }
+  });
+
+  // T-Q-U13 (fix-pack FP-2) — el techo de tamaño es un guard DECLARADO sobre entrada
+  // no confiable: se chequea antes de decodificar nada. No tenía ninguna aserción,
+  // así que subirlo de 8192 a 8192000 dejaba la suite verde.
+  it('T-Q-U13: QUOTE_MAX_TOKEN_CHARS vale 8192 y un token más largo se rechaza SIN parsearlo', () => {
+    expect(QUOTE_MAX_TOKEN_CHARS).toBe(8192);
+
+    // Token con una firma válida en forma pero un payload gigante: si el guard de
+    // tamaño no cortara primero, habría que decodificar/parsear ese payload.
+    const oversized = `v1.${'A'.repeat(QUOTE_MAX_TOKEN_CHARS)}.${'f'.repeat(64)}`;
+    expect(oversized.length).toBeGreaterThan(QUOTE_MAX_TOKEN_CHARS);
+
+    // Se espía JSON.parse: el rechazo tiene que ocurrir ANTES de intentar parsear.
+    const parseSpy = vi.spyOn(JSON, 'parse');
+    try {
+      const result = verifyQuote(oversized, CALLER);
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('unreachable');
+      expect(result.code).toBe('QUOTE_INVALID');
+      expect(parseSpy).not.toHaveBeenCalled();
+    } finally {
+      parseSpy.mockRestore();
+    }
+
+    // Y en el borde: exactamente el techo no lo rechaza POR TAMAÑO (cae después, por
+    // firma), lo que prueba que el corte está en el valor declarado y no en otro.
+    const atLimit = `v1.${'A'.repeat(QUOTE_MAX_TOKEN_CHARS - 68)}.${'f'.repeat(64)}`;
+    expect(atLimit.length).toBe(QUOTE_MAX_TOKEN_CHARS);
+    const atLimitParseSpy = vi.spyOn(JSON, 'parse');
+    try {
+      expect(verifyQuote(atLimit, CALLER).ok).toBe(false);
+      // llegó más lejos: se computó el HMAC (y falló), no se cortó por tamaño
+    } finally {
+      atLimitParseSpy.mockRestore();
+    }
   });
 
   // T-Q-U7b — CD-5: el secreto es DEDICADO, sin fallback cruzado.
