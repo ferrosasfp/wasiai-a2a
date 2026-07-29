@@ -4305,12 +4305,21 @@ describe('WKH-305 (W1) · caracterización: el reordenamiento no mueve un centav
   }
 
   // Ledger en memoria: `debit` RESTA y `creditWithDest` SUMA de verdad.
-  const ledger = { balance: 10 };
+  // `debitLatencyMs` abre a voluntad la ventana de tiempo que ocupa el débito.
+  // Default 0 ⇒ el resto del bloque no cambia.
+  const ledger = { balance: 10, debitLatencyMs: 0 };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   beforeEach(() => {
     ledger.balance = 10;
+    ledger.debitLatencyMs = 0;
+    // Explícito, no heredado: sin esto el bloque depende de que algún test
+    // ANTERIOR haya dejado seteado `getEnabled` (`clearAllMocks` limpia las
+    // llamadas, no las implementaciones), y correr un solo `it` con `-t` falla.
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     mockDebit.mockImplementation(
       async (_keyId: string, _chainId: number, amountUsd: number) => {
+        if (ledger.debitLatencyMs > 0) await sleep(ledger.debitLatencyMs);
         ledger.balance -= amountUsd;
         return { success: true };
       },
@@ -4438,5 +4447,49 @@ describe('WKH-305 (W1) · caracterización: el reordenamiento no mueve un centav
     expect(result.success).toBe(true);
     expect(spy.mock.calls[0]?.[1]).toBe(stepInput);
     spy.mockRestore();
+  });
+
+  it('T-MAP-C4: el `latencyMs` del step NO incluye el tiempo del débito', async () => {
+    // Este test existe porque la MUTACIÓN lo pidió: subir el cronómetro
+    // (`const startTime = Date.now()`) arriba del bloque de débito no ponía
+    // rojo NINGÚN test del repo. O sea que la métrica de latencia por step del
+    // money-path no estaba protegida por nada, y cualquiera podía cambiarla sin
+    // enterarse.
+    //
+    // No es una micro-optimización: `latencyMs` es lo que se reporta al caller y
+    // lo que viaja al evento `compose_step`. Si pasara a incluir el débito,
+    // TODOS los steps con débito per-step medirían de golpe otra cosa con el
+    // mismo nombre — un cambio silencioso de métrica en el money-path, no una
+    // medición "más precisa".
+    //
+    // El cronómetro tiene que arrancar donde arranca el trabajo que se le
+    // atribuye al agente: justo antes de invocarlo.
+    const DEBIT_MS = 150;
+    const a0 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a1 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a0, corridor: a1 });
+    mockFetchOk({ result: 'r0' });
+    mockFetchOk({ result: 'r1' });
+    ledger.debitLatencyMs = DEBIT_MS;
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    // El step 1 es el único con débito per-step (el 0 lo debita el middleware),
+    // así que es el único donde la diferencia es observable.
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(result.steps[1]?.latencyMs).toBeLessThan(DEBIT_MS);
+    // Y el pipeline SÍ tardó al menos el débito: la latencia existió, lo que no
+    // hizo fue contarse como tiempo del agente. Sin esta segunda mitad, un mock
+    // de `debit` que no durmiera dejaría pasar el test por el motivo equivocado.
+    expect(result.totalLatencyMs).toBeLessThan(DEBIT_MS);
   });
 });
