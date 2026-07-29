@@ -379,6 +379,7 @@ beforeEach(() => {
   fakeConnection.getBlockHeight.mockResolvedValue(900);
   fakeConnection.getSlot.mockResolvedValue(200_000_000);
   fakeConnection.getFirstAvailableBlock.mockResolvedValue(1);
+  delete process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT;
   _resetSolanaClients();
   adapter = new SolanaPaymentAdapter();
 });
@@ -940,15 +941,66 @@ describe('WKH-307 · MNR-1: `absent` depende de que el RPC retenga histórico', 
     expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
   });
 
-  it('T-IDM-20c: retención NO MEDIBLE ⟹ warn y se sigue (asimetría deliberada)', async () => {
-    // Apagar TODO el leg porque un método opcional no está soportado es un martillo
-    // enorme para un residuo que además necesita que el blockhash haya expirado.
-    // Se prefiere la alarma visible al apagón por un supuesto no verificable.
+  it('T-IDM-20c: retención NO MEDIBLE y SIN la declaración ⟹ CORTA (0 broadcasts)', async () => {
+    // No medir NO es evidencia de histórico insuficiente — pero tampoco de lo
+    // contrario, y los dos errores no cuestan lo mismo: permitir de más produce un
+    // `absent` falso ⟹ segundo pago IRREVERSIBLE; cortar de más produce un arranque
+    // fallido, ruidoso y reversible en un minuto.
+    delete process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT;
+    fakeConnection.getFirstAvailableBlock.mockRejectedValue(
+      new Error('Method not found'),
+    );
+
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_LEDGER_SCHEMA_UNAVAILABLE: rpc_history_unmeasurable/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+
+  it('T-IDM-20c2: el error dice EXACTAMENTE cómo salir', async () => {
+    // Un fail-closed sin salida escrita es un callejón: el operador tiene que poder
+    // actuar sin leer el código.
+    delete process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT;
+    fakeConnection.getFirstAvailableBlock.mockRejectedValue(
+      new Error('Method not found'),
+    );
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+    expect(String(err)).toContain(
+      'SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT',
+    );
+    expect(String(err)).toContain('SOLANA_RPC_URL');
+  });
+
+  it('T-IDM-20c3: NO MEDIBLE pero DECLARADA ⟹ arranca (la decisión queda en la config)', async () => {
+    process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT = 'true';
     fakeConnection.getFirstAvailableBlock.mockRejectedValue(
       new Error('Method not found'),
     );
     await adapter.settle(req('run:0'));
     expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+    delete process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT;
+  });
+
+  it('T-IDM-20c4: la declaración NO tiene default permisivo', async () => {
+    // Un valor ausente, vacío o distinto de `true` NO puede leerse como permiso: es
+    // exactamente el error que esta HU viene cazando (lo que falta no autoriza).
+    fakeConnection.getFirstAvailableBlock.mockRejectedValue(
+      new Error('Method not found'),
+    );
+    for (const v of [undefined, '', 'false', '1', 'yes', 'TRUE']) {
+      if (v === undefined) {
+        delete process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT;
+      } else {
+        process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT = v;
+      }
+      _resetSolanaClients();
+      const fresh = new SolanaPaymentAdapter();
+      await expect(fresh.settle(req(`run:${String(v)}`))).rejects.toThrow(
+        /rpc_history_unmeasurable/,
+      );
+    }
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    delete process.env.SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT;
   });
 
   it('T-IDM-20d: la medición se MEMOIZA — 1 sola vez en 3 settles', async () => {

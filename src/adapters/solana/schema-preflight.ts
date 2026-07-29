@@ -84,7 +84,11 @@ export type SolanaSchemaFailure =
   // AR re-review MNR-1: el endpoint RPC no retiene historico suficiente, asi que un
   // `absent` de `getSignatureStatuses` no significaria nada en el momento en que el
   // codigo lo usa (justo despues de que el blockhash expira).
-  | 'rpc_history_insufficient';
+  | 'rpc_history_insufficient'
+  // No se pudo MEDIR la retencion y el operador no declaro que el endpoint la tenga.
+  // No saber no autoriza: la consecuencia de equivocarse hacia el lado permisivo es un
+  // `absent` falso ⟹ segundo pago, irreversible.
+  | 'rpc_history_unmeasurable';
 
 export type SolanaSchemaVerdict =
   | { ok: true }
@@ -97,6 +101,20 @@ export type SolanaSchemaVerdict =
  * distinguirse de "no lo tengo" y la determinacion negativa pierde todo valor.
  */
 const BLOCKHASH_VALIDITY_SLOTS = 150;
+
+/**
+ * LA SALIDA EXPLICITA cuando la retencion no se puede MEDIR.
+ *
+ * Sin ella el arranque CORTA. No tiene default permisivo a proposito: ausente significa
+ * cortar, nunca continuar — que es el mismo error que esta HU viene cazando (un valor
+ * que falta no puede leerse como permiso).
+ *
+ * El nombre declara lo que el operador AFIRMA, no una molestia a apagar: quien la setea
+ * esta diciendo "se que este endpoint retiene historico suficiente y me hago cargo", y
+ * esa decision queda registrada en la configuracion en vez de perderse en un warn de
+ * arranque que nadie lee.
+ */
+const HISTORY_DECLARED_ENV = 'SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT';
 
 let _cached: SolanaSchemaVerdict | null = null;
 let _cachedAt = 0;
@@ -124,16 +142,23 @@ export function _resetSolanaSchemaPreflight(): void {
  * responde `null` sobre una tx que SI existe — y desde la respuesta no hay forma de
  * distinguirlo. Eso era un supuesto tacito del despliegue; aca pasa a medirse.
  *
- * ⚠️ ASIMETRIA DELIBERADA, y es una decision, no un descuido:
- *   · retencion MEDIDA e INSUFICIENTE ⟹ **falla** (hay evidencia positiva de que la
+ * ⚠️ FAIL-CLOSED, CON UNA SALIDA EXPLICITA:
+ *   · retencion MEDIDA y SUFICIENTE   ⟹ arranca;
+ *   · retencion MEDIDA e INSUFICIENTE ⟹ **corta** (evidencia positiva de que la
  *     precondicion no se cumple);
- *   · retencion NO MEDIBLE (el endpoint no soporta el metodo, o la llamada falla)
- *     ⟹ **warn ruidoso y se sigue**.
+ *   · retencion NO MEDIBLE            ⟹ **corta**, y el mensaje dice exactamente que
+ *     hacer: usar un endpoint que soporte el metodo, o declarar
+ *     `SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT=true`.
  *
- * Por que no fail-closed en el segundo caso: apagar TODO el leg Solana porque un
- * metodo opcional no esta soportado es un martillo enorme para un residuo que ademas
- * necesita que el blockhash haya expirado para morder. Se prefiere la alarma visible
- * al apagon por un supuesto no verificable. Queda declarado como residuo.
+ * Por que cortar tambien en el tercer caso, aunque no medir NO sea evidencia de falla:
+ * los dos errores no cuestan lo mismo. Permitir de mas produce un `absent` falso ⟹
+ * **segundo pago, irreversible**. Cortar de mas produce un arranque fallido: ruidoso,
+ * inmediato y reversible en un minuto. Cuando los costos son asimetricos, el default va
+ * del lado del error barato.
+ *
+ * Y la salida existe para que "no puedo medir" no se castigue como "esta roto": el
+ * operador puede declararlo, y esa declaracion queda REGISTRADA en la configuracion en
+ * vez de perderse en un warn de arranque que nadie lee.
  */
 async function probeRpcHistoryRetention(): Promise<SolanaSchemaVerdict | null> {
   let currentSlot: number;
@@ -145,11 +170,24 @@ async function probeRpcHistoryRetention(): Promise<SolanaSchemaVerdict | null> {
       connection.getFirstAvailableBlock(),
     ]);
   } catch (err) {
-    log.warn(
-      { detail: err instanceof Error ? err.message : String(err) },
-      'solana settle preflight: could not MEASURE the RPC ledger retention window (getSlot/getFirstAvailableBlock). Continuing, but the `absent` determination that authorises re-signing assumes this endpoint keeps transaction history — verify it serves getSignatureStatuses with searchTransactionHistory over the long-term ledger.',
-    );
-    return null;
+    const detail = err instanceof Error ? err.message : String(err);
+    // La ausencia de un metodo opcional del RPC NO es evidencia de historico
+    // insuficiente — pero tampoco es evidencia de lo contrario. Y los dos errores no
+    // cuestan lo mismo: permitir de mas es un `absent` falso ⟹ segundo pago
+    // IRREVERSIBLE; cortar de mas es un arranque fallido, ruidoso y reversible en un
+    // minuto. Cuando los costos son asimetricos, el default va del lado barato.
+    if (process.env[HISTORY_DECLARED_ENV] === 'true') {
+      log.warn(
+        { detail, declaredVia: HISTORY_DECLARED_ENV },
+        'solana settle preflight: the RPC ledger retention window could NOT be measured, but the operator declared it sufficient. Proceeding on that declaration — if this endpoint does not serve getSignatureStatuses with searchTransactionHistory over the long-term ledger, a settle that already landed can be read as absent and paid a SECOND time.',
+      );
+      return null;
+    }
+    return {
+      ok: false,
+      failure: 'rpc_history_unmeasurable',
+      detail: `${detail} — could not measure the RPC ledger retention window. Either point SOLANA_RPC_URL at an endpoint that supports getSlot/getFirstAvailableBlock, or set ${HISTORY_DECLARED_ENV}=true to declare that this endpoint keeps transaction history (and take responsibility for it).`,
+    };
   }
   const retained = currentSlot - firstAvailable;
   if (!Number.isFinite(retained) || retained <= BLOCKHASH_VALIDITY_SLOTS) {
