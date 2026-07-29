@@ -6,6 +6,10 @@ import {
 import { type Connection, PublicKey, Transaction } from '@solana/web3.js';
 import { usdToAtomicUnits } from '../../lib/atomic-amount.js';
 import { getLogger } from '../../lib/logger.js';
+// Transporta la disposición del valor ('unknown') cuando no se pudo determinar si
+// un pago previo existe — así `downstream-payment.ts` reporta SETTLE_UNKNOWN en vez
+// de afirmar que el leg no se pagó. Lo usan los DOS caminos: el del facilitator
+// (WKH-302, códigos de payout) y el local (WKH-307/308, estado de la cadena).
 import { FacilitatorSettleError } from '../errors.js';
 import type {
   SolanaPaymentAdapter as ISolanaPaymentAdapter,
@@ -23,14 +27,18 @@ import {
   getSolanaCaip2,
   getSolanaCommitment,
   getSolanaConnection,
+  getSolanaNetwork,
   getSolanaOperatorKeypair,
   getSolanaUsdcDecimals,
   getSolanaUsdcMint,
 } from './chain.js';
+// WKH-302 — camino nuevo (bandera ON): el facilitator firma y transmite.
+import { payoutViaFacilitator } from './facilitator-settle.js';
 // WKH-307: la idempotencia dejo de ser un Map de proceso y paso a una tabla. Todo el
 // acceso a datos del adapter vive en `settle-ledger.ts` (CD-7).
 import {
   _resetSolanaSchemaPreflight,
+  BLOCKHASH_VALIDITY_SLOTS,
   ensureSolanaSchemaReady,
 } from './schema-preflight.js';
 import {
@@ -40,6 +48,16 @@ import {
   recordConfirmedIntent,
   recordSignedIntent,
 } from './settle-ledger.js';
+
+/**
+ * Margen, EN BLOQUES, que se le suma a la cota de expiracion fabricada para el camino
+ * del facilitator. Cubre que el nodo que le contesta al gateway vaya ATRASADO respecto
+ * del que atendio al facilitator.
+ *
+ * ⚠️ Subirlo es seguro (se espera de mas). BAJARLO PUEDE COSTAR UN DOBLE PAGO.
+ * El razonamiento completo esta en `fabricateExpiryUpperBound`.
+ */
+const FACILITATOR_HEIGHT_SKEW_MARGIN_SLOTS = 150;
 
 /**
  * Solana devnet SPL-transfer payment adapter (WKH-234). Settle-only,
@@ -288,10 +306,21 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       mint: getSolanaUsdcMint(),
     });
 
+    // ── WKH-302 — bandera de transicion. UNA SOLA LECTURA por invocacion, a una
+    //    const local: si se leyera dos veces, un cambio de env a mitad de request
+    //    podria partir el flujo entre los dos caminos (AC-3). Comparacion literal
+    //    contra 'true'; `Boolean(process.env.X)` daria true para CUALQUIER string
+    //    no vacio, incluido 'false'.
+    //
+    //    Va DESPUES del reclamo y nunca antes (CD-14 de WKH-307): el reclamo es
+    //    funcion de la INTENCION, no de quien transmite, asi que cambiar el
+    //    transporte no puede invalidarlo. Bajarla a una rama rompe esa invariante.
+    const viaFacilitator = process.env.SOLANA_SETTLE_VIA_FACILITATOR === 'true';
+
     switch (claim.outcome) {
       case 'claimed':
         // Ganamos el derecho a transmitir. Es el UNICO caso que sigue.
-        return await this.signPersistBroadcast(req);
+        return await this.dispatchPayment(req, viaFacilitator);
 
       case 'in_progress':
         // Otro request en vuelo que todavia no firmo. "No se todavia" nunca paga.
@@ -322,6 +351,7 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
           claim.signature,
           claim.lastValidBlockHeight,
           req,
+          viaFacilitator,
         );
     }
   }
@@ -417,6 +447,7 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     signature: string,
     lastValidBlockHeight: string | null,
     req: SolanaSettleRequest,
+    viaFacilitator: boolean,
   ): Promise<SettleResult> {
     const presence = await this.probeSettlementPresence({
       signature,
@@ -520,7 +551,7 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       },
       'solana settle: the previously signed transaction will never land (absent + blockhash expired, or landed with an on-chain error) — archived and re-signing',
     );
-    return await this.signPersistBroadcast(req);
+    return await this.dispatchPayment(req, viaFacilitator);
   }
 
   /**
@@ -610,6 +641,176 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     return terms.ok
       ? { state: 'landed_ok' }
       : { state: 'landed_mismatch', detail: terms.error };
+  }
+
+  /**
+   * La bifurcacion por transporte, en UN solo lugar.
+   *
+   * ⚠️ Existe como metodo (y no inline en `settle`) porque hay DOS puntos que
+   * transmiten: la rama `claimed` y la cola de `settleAlreadySigned`, que re-firma
+   * despues de probar que la firma vieja ya no puede aterrizar. Si la bandera solo
+   * se respetara en el primero, un intent con la bandera ON que llegue por el
+   * segundo firmaria con la LLAVE LOCAL — justo lo que CD-15 prohibe.
+   */
+  private async dispatchPayment(
+    req: SolanaSettleRequest,
+    viaFacilitator: boolean,
+  ): Promise<SettleResult> {
+    return viaFacilitator
+      ? await this.settleViaFacilitator(req)
+      : await this.signPersistBroadcast(req);
+  }
+
+  /**
+   * Cota SUPERIOR de la altura en que expira el blockhash que uso el facilitator.
+   *
+   * ⚠️ ES CONSERVADORA A PROPOSITO. NO la "ajustes" para que sea exacta: el error
+   * en cada direccion NO cuesta lo mismo.
+   *
+   *   · pasarse de largo  ⟹ un intent espera de mas antes de poder re-firmarse.
+   *     Se destraba solo, con el tiempo. Molesto.
+   *   · quedarse corto    ⟹ `settleAlreadySigned` cree que la tx vieja ya no puede
+   *     aterrizar cuando TODAVIA puede, re-firma, y aterrizan las dos. SEGUNDO PAGO
+   *     REAL. Irreversible.
+   *
+   * Por que una cota fabricada es legitima, y no un numero inventado: la altura de
+   * la cadena solo SUBE. El facilitator pidio su blockhash en algun instante
+   * POSTERIOR a que saliera nuestro POST y ANTERIOR a que llegara su respuesta. Por
+   * lo tanto la altura medida AL RECIBIR la respuesta ya es >= la altura que el
+   * facilitator vio, y `medida + validez` es >= su expiracion real.
+   *
+   * El margen extra cubre que el nodo que nos contesta vaya ATRASADO respecto del
+   * que atendio al facilitator — el unico caso en que la cota podria quedar corta.
+   * Medido sobre el pool publico de devnet (2026-07-29, 64 muestras): dispersion
+   * entre nodos de 0 bloques, y el desfasaje estructural `confirmed`↔`finalized` de
+   * 31-32 bloques. 150 bloques (~1 min) deja ~5x sobre ese piso estructural.
+   *
+   * ⚠️ Esa medicion es un PISO, no un techo: no se pudo medir un nodo degradado, y
+   * el endpoint del facilitator todavia no existe. El margen esta elegido para el
+   * caso que NO se pudo medir, no para el que si.
+   *
+   * Ganancia sobre pedirle la altura al facilitator: los dos lados de la
+   * comparacion final salen del MISMO proveedor RPC, asi que el desfasaje entre
+   * nodos se cancela en vez de sumarse.
+   */
+  private async fabricateExpiryUpperBound(intentId: string): Promise<string> {
+    const connection = getSolanaConnection();
+    let height: number;
+    try {
+      height = await connection.getBlockHeight(getSolanaCommitment());
+    } catch (err) {
+      // El pago YA OCURRIO (2xx del facilitator) pero no podemos anotar una cota
+      // honesta, y sin cota la fila no se puede escribir. NO es `SETTLE_FAILED`:
+      // afirmar que no se pago dispararia reembolso sobre un pago real.
+      throw new FacilitatorSettleError(
+        `SETTLE_SIGNED_UNRECORDED: ${intentId} — the facilitator paid but the expiry upper bound could not be measured (${errText(err)})`,
+        'unknown',
+      );
+    }
+    return String(
+      BigInt(height) +
+        BigInt(BLOCKHASH_VALIDITY_SLOTS) +
+        BigInt(FACILITATOR_HEIGHT_SKEW_MARGIN_SLOTS),
+    );
+  }
+
+  /**
+   * Camino nuevo (bandera ON): el facilitator firma y transmite. El gateway NO
+   * firma NADA, ni siquiera como fallback — un facilitator caido es un leg no
+   * liquidado, no una excusa para volver a ser camino de dinero (CD-15).
+   *
+   * ⚠️⚠️ VENTANA ABIERTA — ACA FALTA UN MARCADOR DURABLE, Y ESTE ES EL PUNTO EXACTO.
+   *
+   * La invariante I2 de WKH-307 dice que una fila `claimed` SIN firma demuestra que
+   * nunca se transmitio nada. Con el facilitator firmando eso YA NO ES CIERTO: el
+   * gateway se entera de la firma DESPUES del broadcast. Entre el POST de abajo y el
+   * `recordSignedIntent` que le sigue, la fila dice `claimed` mientras puede haber un
+   * pago real en vuelo.
+   *
+   * Si el gateway se cae en esa ventana, el reintento se salva SOLO porque la bandera
+   * sigue encendida (el facilitator dedupea por `intentId` y responde
+   * `alreadySettled`). Si la bandera se APAGO en el medio — un rollback durante un
+   * incidente, que es exactamente cuando pasa — el reintento ve `claimed`, toma el
+   * camino local y firma de nuevo: SEGUNDO PAGO REAL.
+   *
+   * Lo que falta es un estado `dispatched` escrito ANTES del POST, junto con la cota.
+   * Es un estado nuevo en la maquina, o sea migracion, y va junto con el hallazgo R-2
+   * del adversarial (mismo instante, misma escritura, distinto proceso).
+   *
+   * ⛔ CONDICION PREVIA A ENCENDER `SOLANA_SETTLE_VIA_FACILITATOR`, no a mergear.
+   *    La bandera se entrega APAGADA, asi que hoy la ventana no esta viva.
+   *    Encenderla sin el marcador la activa.
+   */
+  private async settleViaFacilitator(
+    req: SolanaSettleRequest,
+  ): Promise<SettleResult> {
+    // ⛔ Ver el bloque de arriba: el marcador `dispatched` va JUSTO ACA, antes del POST.
+    const payout = await payoutViaFacilitator({
+      intentId: req.intentId,
+      payTo: req.payTo,
+      amountAtomic: req.amountAtomic,
+      network: `solana:${getSolanaNetwork()}`,
+    });
+
+    const lastValidBlockHeight = await this.fabricateExpiryUpperBound(
+      req.intentId,
+    );
+    const signed = await recordSignedIntent({
+      intentId: req.intentId,
+      signature: payout.signature,
+      lastValidBlockHeight,
+    });
+    if (!signed.ok) {
+      // Mismo razonamiento que arriba: el pago ocurrio, la contabilidad no cerro.
+      throw new FacilitatorSettleError(
+        `SETTLE_SIGNED_UNRECORDED: ${req.intentId} (${signed.reason} — ${signed.detail})`,
+        'unknown',
+      );
+    }
+
+    // ⚠️ NO se salta a `confirmed` con el 2xx como unica evidencia (verify-before-trust,
+    // CD-5 de WKH-307). Un 2xx es lo que nos CONTARON; `confirmed` es un estado del que
+    // no se vuelve — si despues la cadena dijera `absent`, `settleAlreadyConfirmed`
+    // condena la fila para siempre. Se confirma solo con la cadena mirada.
+    const presence = await this.probeSettlementPresence({
+      signature: payout.signature,
+      payTo: req.payTo,
+      amountAtomic: req.amountAtomic,
+    });
+    if (presence.state === 'landed_ok') {
+      const confirmed = await recordConfirmedIntent({
+        intentId: req.intentId,
+        signature: payout.signature,
+      });
+      if (!confirmed.ok) {
+        log.error(
+          { intentId: req.intentId, reason: confirmed.reason },
+          'solana settle via facilitator: paid and verified on-chain but the ledger row could not be marked confirmed — accounting drift, not a payment problem',
+        );
+      }
+    } else {
+      // La fila queda en `signed` CON la cota: un retry posterior la reconcilia por
+      // `settleAlreadySigned`, que es el camino recuperable. No es un error.
+      log.warn(
+        {
+          intentId: req.intentId,
+          presence: presence.state,
+          alreadySettled: payout.alreadySettled,
+        },
+        'solana settle via facilitator: the facilitator reported success but the chain does not confirm it yet; leaving the row in `signed` so a later retry reconciles it',
+      );
+    }
+
+    log.info(
+      {
+        intentId: req.intentId,
+        signature: payout.signature,
+        alreadySettled: payout.alreadySettled,
+      },
+      'solana settle via facilitator',
+    );
+    // `alreadySettled: true` es un EXITO, no un error: es un pago que ya ocurrio.
+    return { txHash: payout.signature, success: true };
   }
 
   /**
@@ -940,10 +1141,24 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       commitment: 'confirmed',
       maxSupportedTransactionVersion: 0,
     });
-    if (!parsed?.meta || parsed.meta.err) {
+    if (!parsed?.meta) {
+      // ⚠️ HALLAZGO ABIERTO (reportado, NO arreglado acá — ver el comentario del
+      // self-heal en `settle()`). `null` es la respuesta MÁS DÉBIL: además de "no
+      // existe" puede ser un nodo sin ese pedazo de historia, uno atrasado o un
+      // índice degradado. Marcarlo `indeterminate` acá APAGA el self-heal de
+      // WKH-235a, que está deliberadamente testeado (T-HEAL-1/2, T-P1-2a), así que
+      // flipearlo es una decisión de alcance con ticket propio, no un fix suelto.
+      // Se deja el mensaje distinguible para que el follow-up sea preciso.
       return {
         valid: false,
-        error: 'transaction not found or failed on-chain',
+        error: 'transaction not found on the queried node',
+      };
+    }
+    if (parsed.meta.err) {
+      // La cadena RESPONDIÓ: la tx se ejecutó y falló ⇒ negativa demostrada.
+      return {
+        valid: false,
+        error: 'transaction failed on-chain',
       };
     }
     const terms = this.checkTerms(parsed, proof);

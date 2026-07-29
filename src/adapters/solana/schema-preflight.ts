@@ -100,7 +100,10 @@ export type SolanaSchemaVerdict =
  * despues de firmar. Si el nodo no retiene ni siquiera esa ventana, su `null` no puede
  * distinguirse de "no lo tengo" y la determinacion negativa pierde todo valor.
  */
-const BLOCKHASH_VALIDITY_SLOTS = 150;
+// Exportada porque el camino del facilitator (WKH-302) fabrica su propia cota de
+// expiracion con este MISMO numero. Duplicarlo alla haria que un ajuste aca no
+// llegue al otro lado.
+export const BLOCKHASH_VALIDITY_SLOTS = 150;
 
 /**
  * LA SALIDA EXPLICITA cuando la retencion no se puede MEDIR.

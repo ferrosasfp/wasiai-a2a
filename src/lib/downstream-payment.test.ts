@@ -2171,3 +2171,176 @@ describe('captura del skip-code (fix-pack P1, hallazgo 4)', () => {
     );
   });
 });
+
+/**
+ * WKH-302 — el leg Solana deja de aplanar TODO error a `SETTLE_FAILED`.
+ *
+ * `SETTLE_FAILED` significa "no se pagó" y dispara reembolso / re-envío. Con la
+ * firma local eso era casi siempre cierto; con un hop HTTP de por medio, no. Estos
+ * tests fijan las dos mitades: el camino legado NO cambia (T-AC4b) y la disposición
+ * desconocida se reporta como tal (AC-10).
+ *
+ * Ojo con `vi.resetModules()` de `importWithFlag`: es exactamente el escenario que
+ * rompe `instanceof`, así que los errores de acá se construyen como objetos con la
+ * FORMA (`name` + `valueDisposition` + `payoutCode`), que es como los lee el código.
+ */
+describe('WKH-302 — disposición del valor en el leg Solana', () => {
+  /**
+   * ⚠️ RE-ANCLAJE DEL MERGE. Estos tests llamaban SIN `intentId`, porque cuando se
+   * escribieron el leg lo derivaba solo (`agent.slug:payTo`). WKH-307 lo volvió
+   * OBLIGATORIO y fail-closed: sin una clave de idempotencia estable, un retry no se
+   * puede distinguir de un pago nuevo, así que el leg se rechaza con
+   * `MISSING_INTENT_ID` ANTES de llegar al settle. Sin este argumento los 6 casos
+   * pasan a medir el guard nuevo en vez de la disposición del valor.
+   */
+  const SOL_INTENT = 'ctx-302:0:sol';
+
+  const solanaAgent = (): Agent =>
+    makeAgent({
+      priceUsdc: 0.5,
+      payment: {
+        method: 'x402',
+        chain: 'solana-devnet',
+        contract: SOL_PAYTO,
+      },
+    });
+
+  /** Error con la MISMA forma que `FacilitatorSettleError`, sin depender de la clase. */
+  function shapedError(
+    valueDisposition: 'not-sent' | 'unknown',
+    payoutCode?: string,
+  ): Error {
+    const e = new Error('facilitator hop failed');
+    e.name = 'FacilitatorSettleError';
+    return Object.assign(
+      e,
+      { valueDisposition },
+      payoutCode === undefined ? {} : { payoutCode },
+    );
+  }
+
+  const savedFlag = { value: undefined as string | undefined };
+
+  beforeEach(() => {
+    savedFlag.value = process.env.SOLANA_SETTLE_VIA_FACILITATOR;
+    delete process.env.SOLANA_SETTLE_VIA_FACILITATOR;
+    mockSolanaBalance.mockResolvedValue('1000000000');
+  });
+
+  afterEach(() => {
+    if (savedFlag.value === undefined) {
+      delete process.env.SOLANA_SETTLE_VIA_FACILITATOR;
+    } else {
+      process.env.SOLANA_SETTLE_VIA_FACILITATOR = savedFlag.value;
+    }
+  });
+
+  it('★ T-AC4b: bandera UNSET + settle que lanza ⇒ sigue siendo SETTLE_FAILED', async () => {
+    // El camino legado no cambia de conducta: un error suyo no trae disposición,
+    // así que cae al mismo veredicto de siempre. Esto es lo que sostiene AC-4.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaSettle.mockRejectedValue(new Error('RPC exploded'));
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      SOL_INTENT,
+    );
+
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'SETTLE_FAILED' }),
+      '[Downstream] solana adapter.settle threw',
+    );
+  });
+
+  it('★ AC-10: disposición unknown ⇒ SETTLE_UNKNOWN, nunca SETTLE_FAILED', async () => {
+    process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaSettle.mockRejectedValue(shapedError('unknown'));
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      SOL_INTENT,
+    );
+
+    expect(result).toBeNull();
+    const call = logger.warn.mock.calls.find(
+      (c) => (c[0] as { code?: string }).code === 'SETTLE_UNKNOWN',
+    );
+    expect(call).toBeDefined();
+    expect(call?.[0]).toMatchObject({
+      code: 'SETTLE_UNKNOWN',
+      valueDisposition: 'unknown',
+    });
+    expect(String(call?.[1])).toContain('do NOT retry blindly');
+    // Y NO se reportó como "no se pagó".
+    expect(
+      logger.warn.mock.calls.some(
+        (c) => (c[0] as { code?: string }).code === 'SETTLE_FAILED',
+      ),
+    ).toBe(false);
+  });
+
+  it('★ AC-10: not-sent ⇒ SETTLE_FAILED (ahí SÍ sabemos que no se pagó)', async () => {
+    process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaSettle.mockRejectedValue(shapedError('not-sent'));
+    const logger = makeLogger();
+
+    await signAndSettleDownstream(solanaAgent(), logger, SOL_INTENT);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'SETTLE_FAILED' }),
+      '[Downstream] solana adapter.settle threw',
+    );
+  });
+
+  it('★ AC-8: PAYOUT_FUNDING_LOW conserva el skip-code INSUFFICIENT_BALANCE', async () => {
+    // Paridad de observabilidad: con la bandera ON el pre-check local ya no corre,
+    // así que la distinguibilidad "no hay fondos" se recupera del error.
+    process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaSettle.mockRejectedValue(
+      shapedError('not-sent', 'PAYOUT_FUNDING_LOW'),
+    );
+    const logger = makeLogger();
+
+    await signAndSettleDownstream(solanaAgent(), logger, SOL_INTENT);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'INSUFFICIENT_BALANCE' }),
+      expect.any(String),
+    );
+  });
+
+  it('★ con la bandera ON el pre-check local de balance NO se ejecuta', async () => {
+    process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaSettle.mockResolvedValue({ txHash: SOL_SIG, success: true });
+    mockSolanaBalance.mockClear();
+
+    await signAndSettleDownstream(solanaAgent(), makeLogger(), SOL_INTENT);
+
+    // La wallet relevante es la del facilitator; leer la local resolvería el
+    // keypair que esta HU quiere sacar del camino de dinero.
+    expect(mockSolanaBalance).not.toHaveBeenCalled();
+    expect(mockSolanaSettle).toHaveBeenCalledTimes(1);
+  });
+
+  it('control: con la bandera OFF el pre-check local SÍ se ejecuta', async () => {
+    // Desarmar el escenario tiene que cambiar el resultado; si no, el test de
+    // arriba pasaría aunque el pre-check nunca se llamara por otro motivo.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    mockSolanaSettle.mockResolvedValue({ txHash: SOL_SIG, success: true });
+    mockSolanaBalance.mockClear();
+    mockSolanaBalance.mockResolvedValue('1000000000');
+
+    await signAndSettleDownstream(solanaAgent(), makeLogger(), SOL_INTENT);
+
+    expect(mockSolanaBalance).toHaveBeenCalled();
+  });
+});

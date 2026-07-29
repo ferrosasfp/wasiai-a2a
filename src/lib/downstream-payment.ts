@@ -27,6 +27,9 @@ import {
   getPaymentAdapter,
   getPaymentAdapterOrUnion,
 } from '../adapters/registry.js';
+// WKH-302: `readPayoutCode` lee el código POR FORMA (typeof === 'string'), nunca
+// por `instanceof`, por el mismo motivo documentado en `adapters/errors.ts`.
+import { readPayoutCode } from '../adapters/solana/facilitator-settle.js';
 import type { ChainKey, SolanaPaymentAdapter } from '../adapters/types.js';
 import type { Agent, DownstreamLogger } from '../types/index.js';
 // AR MENOR-5: mismo helper de conversión USD→atómico que los 5 adapters de pago
@@ -407,19 +410,31 @@ async function settleSolanaLeg(
   // fail-closea igual. `none` GATEA, como siempre.
   const isIdempotentReplay =
     prior.state === 'settled' || prior.state === 'in_progress';
+
+  // WKH-302 — UNA SOLA lectura de la bandera para todo este leg, a una const, y la
+  // MISMA const se usa en los dos lugares (pre-check y clasificación del catch).
+  // Con la bandera ON el gateway deja de tener autoridad sobre esa wallet: la
+  // relevante es la del facilitator, así que este pre-check se saltea ENTERO (ni
+  // siquiera se llama a `getOperatorSplBalance()`, que resuelve el keypair local).
+  // La distinguibilidad `INSUFFICIENT_BALANCE` no se pierde: se recupera del error,
+  // cuando el adapter lanza con `payoutCode === 'PAYOUT_FUNDING_LOW'` (ver el catch).
+  const viaFacilitator = process.env.SOLANA_SETTLE_VIA_FACILITATOR === 'true';
+
   let operatorBalance: bigint | undefined;
-  try {
-    operatorBalance = BigInt(await adapter.getOperatorSplBalance());
-  } catch (e) {
-    logger.info(
-      {
-        agentSlug: agent.slug,
-        code: 'BALANCE_PRECHECK_SKIPPED',
-        detail: String(e),
-        ...(isIdempotentReplay ? { intentId: legIntentId } : {}),
-      },
-      '[Downstream] solana balance pre-check skipped (operator SPL balance unreadable)',
-    );
+  if (!viaFacilitator) {
+    try {
+      operatorBalance = BigInt(await adapter.getOperatorSplBalance());
+    } catch (e) {
+      logger.info(
+        {
+          agentSlug: agent.slug,
+          code: 'BALANCE_PRECHECK_SKIPPED',
+          detail: String(e),
+          ...(isIdempotentReplay ? { intentId: legIntentId } : {}),
+        },
+        '[Downstream] solana balance pre-check skipped (operator SPL balance unreadable)',
+      );
+    }
   }
   const insufficient =
     operatorBalance !== undefined && operatorBalance < BigInt(amountAtomic);
@@ -459,18 +474,38 @@ async function settleSolanaLeg(
       intentId: legIntentId,
     });
   } catch (e) {
-    // WKH-308: este catch COLAPSABA todo throw en `SETTLE_FAILED`, o sea que le
-    // afirmaba al caller "el leg no se pagó" incluso cuando el adapter acababa de
-    // decir que NO PUDO COMPROBARLO. Un settle que sí ocurrió quedaba registrado como
-    // impago, y ese dato falso es el insumo de cualquier job futuro que trate esas
-    // filas como pendientes.
+    // ⚑ BLOQUE CONVERGENTE — WKH-302 (AC-10) y WKH-308 escribieron ESTE MISMO cambio
+    // por separado, desde repos distintos y con motivaciones distintas, y llegaron a
+    // la misma línea. Se conservan los dos razonamientos porque son complementarios:
+    // uno explica por qué hacía falta, el otro por qué era urgente.
     //
-    // Espejo EXACTO del leg EVM (ver el catch de `adapter.settle` más abajo): se lee la
-    // disposición del valor y `unknown` sale como `SETTLE_UNKNOWN`, que NO es
-    // vocabulario nuevo — el código ya existe, ya es público sin genericizar
-    // (`downstream-skip-code.ts`) y los callers ya lo reciben hoy por el rail EVM.
+    // WKH-308 (el daño que ya existía): este catch COLAPSABA todo throw en
+    // `SETTLE_FAILED`, o sea que le afirmaba al caller "el leg no se pagó" incluso
+    // cuando el adapter acababa de decir que NO PUDO COMPROBARLO. Un settle que sí
+    // ocurrió quedaba registrado como impago, y ese dato falso es el insumo de
+    // cualquier job futuro que trate esas filas como pendientes.
+    //
+    // WKH-302 (por qué empeora al mudar el transporte): `SETTLE_FAILED` dispara
+    // reembolso y/o re-envío del hop. Aplanar era tolerable mientras la firma era
+    // LOCAL (si `sendAndConfirmTransaction` tiraba, casi siempre era determinístico),
+    // pero al pasar a una llamada HTTP el leg hereda fallas de red que ocurren
+    // DESPUÉS de que el facilitator pudo haber transmitido.
+    //
+    // Espejo EXACTO del leg EVM (ver el catch de `adapter.settle` más abajo).
+    // `SETTLE_UNKNOWN` NO es vocabulario nuevo: ya existe, ya es público sin
+    // genericizar (`downstream-skip-code.ts`) y los callers ya lo reciben hoy por EVM.
+    //
+    // Con la bandera OFF, `readSettleValueDisposition` devuelve `undefined` para los
+    // errores del camino legado y el resultado es EXACTAMENTE el de hoy — que es lo
+    // que mantiene AC-4 en pie.
     const disposition = readSettleValueDisposition(e);
-    const code = disposition === 'unknown' ? 'SETTLE_UNKNOWN' : 'SETTLE_FAILED';
+    const payoutCode = readPayoutCode(e);
+    const code =
+      payoutCode === 'PAYOUT_FUNDING_LOW'
+        ? 'INSUFFICIENT_BALANCE'
+        : disposition === 'unknown'
+          ? 'SETTLE_UNKNOWN'
+          : 'SETTLE_FAILED';
     logger.warn(
       {
         agentSlug: agent.slug,
@@ -478,7 +513,9 @@ async function settleSolanaLeg(
         ...(disposition ? { valueDisposition: disposition } : {}),
         detail: String(e),
       },
-      '[Downstream] solana adapter.settle threw',
+      code === 'SETTLE_UNKNOWN'
+        ? '[Downstream] solana adapter.settle threw with UNKNOWN value disposition — the leg may already be paid on-chain; do NOT retry blindly'
+        : '[Downstream] solana adapter.settle threw',
     );
     return null;
   }
