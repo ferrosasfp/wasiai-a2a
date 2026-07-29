@@ -31,8 +31,11 @@ restaurar por `cp` desde el respaldo → **verificar por hash**. Nunca `git chec
 | **M15** | El `_down` hace `DROP TABLE` en vez de `RENAME` | Sí | **KILLED** | `T-MIG-13` |
 | **M16** | La ausencia vuelve a INFERIRSE de que el parseo no verifique (conducta pre-AR) | Sí (2ª formulación) | **KILLED** | `T-IDM-13`, `14`, `14b`, `16`, `17` |
 | **M17** | Se elimina el gate de re-hidratación del ciclo `down → up` | Sí (`.sql` válido) | **KILLED** | `T-MIG-15`, `15b`, `15c` |
+| **M18** | El parse no disponible vuelve a leerse como `landed_mismatch` (AR MNR-3) | Sí (2ª formulación) | **KILLED** | `T-IDM-13`, `T-IDM-18` |
+| **M19** | `landed_failed` vuelve a saltear la prueba de expiración (AR MNR-2) | Sí (2ª formulación) | **KILLED** | `T-IDM-19` |
+| **M20** | La retención de histórico insuficiente deja de fallar el preflight (AR MNR-1) | Sí | **KILLED** | `T-IDM-20` |
 
-**17/17 KILLED. Ningún superviviente.** (M16 y M17 se agregaron con el fix-pack del AR.) Los tres mutantes que hubo que reformular
+**20/20 KILLED. Ningún superviviente.** (M16–M17 salieron del AR; M18–M20 del re-AR.) Los tres mutantes que hubo que reformular
 (M1, M2, M7) NO se contaron hasta que compilaron: un mutante que rompe el parseo o los
 tipos lo caza el compilador, no el test, y contarlo sería un falso KILLED.
 
@@ -259,11 +262,67 @@ redirigiendo a un archivo.
 
 ---
 
+### [2026-07-29 10:2x] re-AR — El probe estaba probado en Postgres, pero no por su canal
+
+- **Hueco**: `scripts/exercise-wkh307-functions.mjs` manda **SQL crudo por la Management
+  API**, así que demostró que *Postgres levanta* `WKH307_PROBE_OK`. El gate necesita otra
+  cosa: que **`supabase.rpc(..., { p_probe: true })` deposite esa cadena en
+  `error.message`**, porque `probeSettleLedger` hace `message.includes(PROBE_OK_MARKER)`.
+  Si PostgREST no expusiera el texto ahí, el veredicto sería `rpc_missing` y **`settle()`
+  rechazaría todos los pagos Solana** con una alarma que manda a aplicar una migración
+  que ya está aplicada.
+- **Por qué era barato**: el caso C7b del ejercicio ya había demostrado que el `RAISE`
+  ocurre ANTES de escribir, así que llamarlo por el cliente real no ensucia la tabla.
+- **Medido** (`scripts/probe-wkh307-preflight.mts`, con `tsx` sobre el código de
+  producción, no una re-implementación): `error.message === "WKH307_PROBE_OK"` **exacto**,
+  `error.code === "P0001"`, `probeSettleLedger() → {probe:'ok'}`,
+  `ensureSolanaSchemaReady() → {ok:true}`, y **0 filas escritas** (antes=0, después=0).
+- **Aplicar en**: probar una integración **por un canal distinto del que usa el código**
+  demuestra menos de lo que parece. "El SQL funciona" y "el cliente ve el error donde el
+  código lo lee" son afirmaciones distintas, y la segunda es la que sostiene el gate.
+
+---
+
+### [2026-07-29 10:3x] re-AR MNR-1 — Mi arreglo introdujo una precondición de despliegue no escrita
+
+- **Error**: documenté `absent` como *"prueba de ausencia"*. No lo es.
+  `searchTransactionHistory: true` obliga al nodo a mirar su almacenamiento de largo
+  plazo — **el que ese nodo tiene**. Un validador sin `--enable-rpc-bigtable-ledger-storage`
+  devuelve `null` igual sobre una tx que sí existe, y desde la respuesta no hay forma de
+  distinguir "busqué en todo el historial" de "busqué hasta donde tengo".
+- **Causa raíz**: al arreglar el bloqueante cambié el disparador frecuente por uno raro,
+  y **presenté el resultado como una prueba** en vez de como una mejora con precondición.
+  El AR atacó su propia sugerencia y encontró el resto; yo la adopté sin auditarla.
+- **Fix**: (a) la doc dice lo que realmente prueba —"este nodo, buscando en lo que tiene,
+  no conoce esta firma"—; (b) la precondición **se mide** en el preflight de arranque
+  (`getSlot` vs `getFirstAvailableBlock`), con umbral derivado y no arbitrario: la
+  validez de un blockhash (~150 slots), que es exactamente el momento en que el código
+  usa un `absent`. Medido en vivo contra el RPC configurado: **895 497 slots retenidos**.
+- **Asimetría deliberada, declarada**: retención **medida e insuficiente** ⟹ falla;
+  retención **no medible** ⟹ warn ruidoso y sigue. Apagar todo el leg porque un método
+  opcional no está soportado es un martillo enorme para un residuo que además necesita
+  que el blockhash haya expirado. Es una decisión, no un descuido.
+- **Aplicar en**: cuando un arreglo cambia "inferencia" por "consulta a un tercero,
+  **revisar qué precondiciones de despliegue trae esa consulta**. Una garantía que
+  depende de cómo esté configurado un nodo no es una garantía hasta que alguien la
+  verifica en el arranque.
+
+---
+
 ### Residuos declarados
 
 - **La migración NO se aplicó a ninguna base.** El Story File (W4.2) pide aplicarla a
   **bdwv**; la instrucción operativa vigente exige autorización explícita antes de
   tocar cualquier base. Queda pendiente de aprobación. `caldz` (producción) está fuera
   de alcance por diseño: es **WKH-307b**.
+- **La rama POSITIVA del gate de re-hidratación NUNCA se ejecutó contra Postgres.** Es
+  el único bloque ejecutable de la migración sin ejercitar: los tests parsean el `.sql`,
+  el ejercicio corre las 4 funciones, y aplicar la migración sobre una base sin backup
+  sólo ejercita su rama negativa. **No se probó contra bdwv a propósito**: el gate
+  hardcodea `public.a2a_solana_settle_intents_backup_wkh307`, así que crearla —aunque
+  fuera dentro de una transacción— arriesga dejarla si el transporte auto-commitea, y
+  esa tabla **bloquearía todo apply futuro**. Probar el candado rompería el camino que
+  el candado protege. Queda el escenario listo para correr en un entorno descartable en
+  `gate-rehydration-test.sql`, con los dos casos y sus hallazgos posibles.
 - **El e2e manual de devnet (W4.3) no se corrió**: requiere red, fondos y
   `SOLANA_DEVNET_E2E=1`. Es opcional en el Story File.
