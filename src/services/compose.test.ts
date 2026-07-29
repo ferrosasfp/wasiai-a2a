@@ -4278,3 +4278,165 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
     expect(refundedUsd()).toBe(0);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════
+// WKH-305 (W1) — CARACTERIZACIÓN del reordenamiento del débito
+//
+// W1 mueve la construcción del `input` del step de DESPUÉS del bloque de débito
+// a ANTES. Es una conmutación de dos bloques que no comparten datos ni efectos:
+// el `input` se calcula sólo con `step.input`/`step.passOutput`/`lastOutput`, y
+// el bloque de débito sólo lee el precio del agente y el gas overhead. Estos
+// tres tests CONGELAN esa afirmación en las tres cosas que un reordenamiento mal
+// hecho rompería: cuánta plata se mueve, cuánta vuelve, y qué objeto exacto
+// recibe el agente.
+//
+// Un `toHaveBeenCalledWith` no alcanzaría: no distingue "cobró y devolvió" de
+// "cobró y se lo quedó". Por eso el mock de `debit`/`creditWithDest` mueve un
+// balance en memoria y las aserciones comparan el número antes vs. después.
+// ══════════════════════════════════════════════════════════════════════
+
+describe('WKH-305 (W1) · caracterización: el reordenamiento no mueve un centavo', () => {
+  // Helper local IDÉNTICO al del describe de WKH-59: se replica en vez de mover
+  // el original para no tocar una línea de un test preexistente.
+  function mockAgentsBySlug(agents: Record<string, Agent>) {
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug: string, _registry?: string) => agents[slug] ?? null,
+    );
+  }
+
+  // Ledger en memoria: `debit` RESTA y `creditWithDest` SUMA de verdad.
+  const ledger = { balance: 10 };
+
+  beforeEach(() => {
+    ledger.balance = 10;
+    mockDebit.mockImplementation(
+      async (_keyId: string, _chainId: number, amountUsd: number) => {
+        ledger.balance -= amountUsd;
+        return { success: true };
+      },
+    );
+    mockCreditWithDest.mockImplementation(
+      async (
+        _keyId: string,
+        _chainId: number,
+        amountUsd: number,
+        _ownerRef: string,
+      ) => {
+        ledger.balance += amountUsd;
+        return { success: true, reverted: true };
+      },
+    );
+  });
+
+  it('T-MAP-C1: 3 steps sin mapeo — el balance se mueve EXACTAMENTE precio(step1)+precio(step2)', async () => {
+    const a0 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a1 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    const a2 = makeAgent({ slug: 'payout', priceUsdc: 0.02, id: 'agent-3' });
+    mockAgentsBySlug({ kyc: a0, corridor: a1, payout: a2 });
+    mockFetchOk({ result: 'r0' });
+    mockFetchOk({ result: 'r1' });
+    mockFetchOk({ result: 'r2' });
+
+    const balanceBefore = ledger.balance;
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+        { agent: 'payout', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    // LA ASERCIÓN DE DINERO PRIMERO. El step 0 lo debita el middleware, no el
+    // service (guard `i > 0`), así que sólo se mueven los steps 1 y 2.
+    expect(ledger.balance).toBeCloseTo(balanceBefore - (0.05 + 0.02), 10);
+    // Y el destino canónico y el chainId de cada débito, sin cambios.
+    expect(mockDebit).toHaveBeenCalledTimes(2);
+    expect(mockDebit).toHaveBeenNthCalledWith(
+      1,
+      'k1',
+      2368,
+      0.05,
+      undefined,
+      undefined,
+      'test-registry/corridor',
+      'owner-test',
+    );
+    expect(mockDebit).toHaveBeenNthCalledWith(
+      2,
+      'k1',
+      2368,
+      0.02,
+      undefined,
+      undefined,
+      'test-registry/payout',
+      'owner-test',
+    );
+    expect(mockCreditWithDest).not.toHaveBeenCalled();
+  });
+
+  it('T-MAP-C2: fallo post-invoke en el step 1 — el refund devuelve TODO lo debitado', async () => {
+    // El fallo ocurre INVOCANDO, o sea del lado "requiere ejecutar" de la
+    // frontera: el débito ya pasó y el hook de refund tiene que devolverlo
+    // exactamente igual que antes del reordenamiento.
+    const a0 = makeAgent({ slug: 'kyc', priceUsdc: 0.001 });
+    const a1 = makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' });
+    mockAgentsBySlug({ kyc: a0, corridor: a1 });
+    mockFetchOk({ result: 'r0' });
+    mockFetchError(502); // el step 1 falla en el agente, sin field-errors
+
+    const balanceBefore = ledger.balance;
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(false);
+    // Bajó y volvió a subir: el balance final es idéntico al inicial.
+    expect(ledger.balance).toBeCloseTo(balanceBefore, 10);
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
+    expect(mockCreditWithDest).toHaveBeenCalledWith(
+      'k1',
+      2368,
+      0.05,
+      'owner-test',
+      'test-registry/corridor',
+      expect.objectContaining({ idemKey: expect.any(String) }),
+    );
+  });
+
+  it('T-MAP-C3: sin `passOutput`, el objeto que llega a invokeAgent es la MISMA referencia de step.input', async () => {
+    // `toBe`, no `toEqual`: el camino sin mapeo no alloca nada nuevo. Si alguien
+    // "normalizara" el input con un spread incondicional, esto se pone rojo — y
+    // ese spread sería un cambio de comportamiento silencioso para cualquier
+    // agente que dependa de la identidad del objeto.
+    const a0 = makeAgent({ slug: 'kyc', priceUsdc: 0 });
+    mockAgentsBySlug({ kyc: a0 });
+    mockFetchOk({ result: 'r0' });
+
+    const stepInput = { corridor: 'US-PE', amountUsd: 400 };
+    const spy = vi.spyOn(composeService, 'invokeAgent');
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'kyc', input: stepInput }],
+      scopingKeyRow: makeKeyRow({ id: 'k1' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+
+    expect(result.success).toBe(true);
+    expect(spy.mock.calls[0]?.[1]).toBe(stepInput);
+    spy.mockRestore();
+  });
+});

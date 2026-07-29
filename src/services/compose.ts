@@ -225,6 +225,28 @@ export const composeService = {
           };
         }
       }
+      // WKH-305: la ENTRADA del step se construye ANTES del bloque de débito.
+      // Antes se construía después, o sea que un step con entrada inválida se
+      // cobraba igual.
+      //
+      // Regla: todo lo que es función pura del body y de las salidas de los steps
+      // ya producidas va antes del cobro; lo que sólo se sabe INVOCANDO al agente
+      // (¿acepta el input?, ¿devuelve 2xx?, ¿salió el settle?) queda después.
+      //
+      // El punto es post-scoping A PROPÓSITO — la autorización va primero, nada se
+      // evalúa para un agente que la credencial no puede invocar — y
+      // pre-`getStepGasOverheadUsd`, que en mainnet sin configurar LANZA
+      // `GasOverheadUnavailableError`: una entrada inválida no debe reportarse como
+      // un error de gas.
+      //
+      // ⚠️ El movimiento es SÓLO éste. El cronómetro de latencia del step y el
+      // guard de doble-débito del step 0 se quedan exactamente donde estaban: el
+      // primero mediría otra cosa con el mismo nombre, y el segundo es la única
+      // defensa contra cobrar dos veces el step 0.
+      const input =
+        step.passOutput && lastOutput
+          ? { ...step.input, previousOutput: lastOutput }
+          : step.input;
       // Gas pass-through (audit 2026-06-25): per-step gateway gas overhead the
       // caller pays ON TOP of the agent price, to cover the downstream settle
       // gas. ALWAYS 0 on testnet / without env config → no behaviour change by
@@ -336,10 +358,6 @@ export const composeService = {
         }
         stepDebitedUsd = debitAmount;
       }
-      const input =
-        step.passOutput && lastOutput
-          ? { ...step.input, previousOutput: lastOutput }
-          : step.input;
       const startTime = Date.now();
       // WKH-104 (TD-SYBIL): hash HMAC del caller para anti-sybil sin exponer
       // el owner_ref crudo (CD-5/CD-6). null si caller anónimo (x402).
