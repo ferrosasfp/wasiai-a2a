@@ -128,61 +128,85 @@ aterrizó. Dejó de dispararse sólo donde estaba mal: cuando no puede comprobar
 
 ---
 
-## 5. Residuo encontrado — **con una corrección a lo que yo mismo afirmé**
+## 5. Lo que SÍ se implementó (y por qué la severidad corregida no lo cancela)
 
-### 5.1 Lo que dije, y por qué estaba mal
+### 5.1 Corrección a lo que yo mismo afirmé
 
-En la primera versión de este documento escribí que un nodo atrasado hacía que
-`compose` **reembolsara** al caller y que **el operador absorbiera** la diferencia. **Lo
-afirmé sin trazar el camino del reembolso. Es falso**, y lo verifiqué:
+En la primera versión escribí que un nodo atrasado hacía que `compose` **reembolsara** y
+que **el operador absorbiera**. **Es falso**, y lo verifiqué: `settleSolanaLeg` captura
+todo throw y devuelve `null` (`downstream-payment.ts:460+`); un `downstream === null`
+**no hace fallar el step**; y el reembolso vive en el catch del step
+(`compose.ts:885-891`), o sea que sólo dispara cuando `invokeAgent` **lanza**.
 
-- `settleSolanaLeg` **captura todo throw** de `adapter.settle` y devuelve `null`
-  (`downstream-payment.ts:460-465`). No re-lanza.
-- Un `downstream === null` **no hace fallar el step**: `invokeAgent` no lanza, corre
-  `finishSuccessfulStep` y el step termina OK.
-- El reembolso (`refundStepDebit`) vive en el **catch del step**
-  (`compose.ts:885-891`), o sea que sólo dispara cuando `invokeAgent` **lanza**.
+**No hay reembolso ni pérdida.** Cometí el mismo error que este documento le señala al
+encargo: afirmar una consecuencia sin seguir el camino hasta el final.
 
-Conclusión: **no hay reembolso, y por lo tanto no hay pérdida para el operador.** El
-agente cobró on-chain y el caller pagó: económicamente correcto.
+### 5.2 El daño real: una contabilidad que miente
 
-Cometí exactamente el error que este mismo documento le señala al encargo original —
-afirmar una consecuencia sin seguir el camino hasta el final.
+> Un settle que **SÍ se pagó** se reportaba como **no settleado**: el caller recibía
+> `skipped:SETTLE_FAILED`, no se surfaceaba el `downstreamTxHash`, no se escribía el
+> recibo del leg (`recordSolanaLegIfAny` no corre con `downstream` en `null`) y la fila
+> quedaba en `signed`.
 
-### 5.2 El daño real, que es menor pero existe
+No se pierde plata hoy. Se arregla igual porque **ese dato falso es el insumo de un bug
+futuro**: el día que un job actúe sobre esas filas —el que pide la reserva del tope
+diario de WKH-302— va a leer un pago hecho como pendiente. Ahí sí aparece el doble pago,
+meses después de escribirse el dato malo y carísimo de diagnosticar.
 
-El defecto sobreviviente es de **contabilidad y observabilidad**, no de dinero:
+### 5.3 El arreglo son DOS partes, porque una sola no cambia nada
 
-> Un settle que **SÍ se pagó** se reporta como **no settleado**. El caller recibe
-> `downstreamSettle: 'skipped:SETTLE_FAILED'`, no se surface el `downstreamTxHash`, no
-> se escribe el recibo del leg Solana en el ledger (`recordSolanaLegIfAny` no se invoca
-> porque `downstream` es `null`), y la fila queda en `signed` en vez de `confirmed`.
+1. **`payment.ts`** — `recoverConfirmedSettle` deja de usar `verify()` (que colapsa
+   *aterrizó-y-falló* / *no está* / *no la tengo indexada*) y usa
+   `probeSettlementPresence`, la misma fuente de tres estados que el resto del adapter
+   desde WKH-307. Ante `unknown` lanza `FacilitatorSettleError(..., 'unknown')`.
+2. **`downstream-payment.ts`** — el catch de `settleSolanaLeg` deja de colapsar todo en
+   `SETTLE_FAILED` y emite `SETTLE_UNKNOWN` cuando la disposición es `unknown`,
+   **espejo exacto** del leg EVM (`:914`).
 
-O sea: la reconciliación mira un pago hecho y lee "no se pagó". Es la misma familia de la
-determinación negativa —tratar *"no pude comprobarlo"* como *"no pasó"*— sólo que el
-costo es de datos, no de plata.
+Sin (2), (1) es decorativo: el catch del leg tragaba cualquier error.
 
-### 5.3 El arreglo NO es de una línea
+**Condición verificada antes de tocar código** — `SETTLE_UNKNOWN` **no es vocabulario
+nuevo**: lo emite el leg EVM (`downstream-payment.ts:899` y `:925`), está mapeado
+**verbatim y sin genericizar** en `PUBLIC_SKIP_CODE` (`downstream-skip-code.ts:164`), y
+dos tests vivos prueban que **hoy llega al caller** (`T-198-SettleUnknown`,
+`T-201-SettleFalseWithHash`). Solana sólo deja de mentir donde EVM ya dice la verdad.
 
-Cambiar `verify()` por `probeSettlementPresence` dentro de `recoverConfirmedSettle`
-**por sí solo no cambia nada observable**: cualquiera sea el error, `settleSolanaLeg`
-lo colapsa a `SETTLE_FAILED` en su catch. Para que el arreglo tenga efecto hacen falta
-**dos partes**:
+**Encuadre correcto**: no es *alinear Solana con EVM* — es **dejar de reportar como
+fallado algo que no pudimos comprobar**. Que EVM ya lo haga sólo significa que hay
+patrón que espejar en vez de inventar.
 
-1. `payment.ts` — `recoverConfirmedSettle` distingue los estados y, ante `unknown`,
-   señaliza "no pude comprobarlo" en vez de "falló";
-2. `downstream-payment.ts` — el catch de `settleSolanaLeg` deja de colapsar todo a
-   `SETTLE_FAILED` y emite **`SETTLE_UNKNOWN`** cuando corresponde, **espejando lo que
-   el leg EVM ya hace** (`readSettleValueDisposition`, `:893-905`). Ese código público
-   ya existe y ya significa lo que hace falta: *"no sé si se pagó, ese leg NO se puede
-   tratar como no pagado"* (`downstream-skip-code.ts:58-60`).
+### 5.4 `verify()` queda sin consumidores internos en Solana — y NO se retira
 
-La parte (2) cambia el **skip-code que ve el caller** (`SETTLE_FAILED` →
-`SETTLE_UNKNOWN`) en un camino que corre hoy. Es un cambio de contrato observable, chico
-pero real, y por eso **no lo implementé sin confirmarlo**: el encargo lo describía como
-una línea, y no lo es.
+Tras el cambio, `grep "this.verify("` en `src/adapters/solana/` da **0**. **Es una
+decisión, no un olvido**, y se escribe acá para el próximo que corra ese grep:
 
-**Encuadre correcto, que es el que pediste dejar escrito**: no es *alinear Solana con
-EVM* — es **dejar de reportar como fallado algo que no pudimos comprobar**. Da la
-casualidad de que el leg EVM ya lo hace, así que hay patrón que espejar en vez de
-inventar.
+- sigue en la **interfaz pública** `SolanaPaymentAdapter` (`types.ts:202`) como la
+  superficie declarada de verify-before-trust;
+- su lógica de términos **se sigue usando**: `probeSettlementPresence` comparte
+  `checkTerms` con ella;
+- borrarla cambiaría el contrato de un adapter por una razón interna.
+
+### 5.5 Tests invertidos, con su razón
+
+| Test | Qué afirmaba | Por qué se invierte |
+|---|---|---|
+| `T-235a-AC2d` | recovery con el RPC caído ⟹ **propaga el error original** (leg reportado FALLADO) | Un RPC que no contesta no prueba que el pago no ocurrió. Ahora ⟹ `unknown`. La propiedad que protegía (no inventar un éxito) **sigue viva**: se rechaza igual, pero sin afirmar lo que no sabemos |
+| `T-235a-AC2` | *"no confirmada on-chain"* inferido de un parseo ausente | Ahora la ausencia se **prueba** (`presenceState = null`), no se infiere |
+
+### 5.6 Campaña de mutación
+
+| # | Mutación | ¿Compiló? | Resultado | Asesino |
+|---|---|---|---|---|
+| **M1** | `unknown` vuelve a caer al camino de fallo (parte 1) | Sí (3ª formulación) | **KILLED** | `T-308-01`, `T-235a-AC2d` |
+| **M2** | El leg vuelve a colapsar todo en `SETTLE_FAILED` (parte 2) | Sí | **KILLED** | `T-308-LEG-UNKNOWN` |
+| **M3** | Un fallo **probado** on-chain se reporta como `unknown` (colapsa los dos otra vez) | Sí (2ª formulación) | **KILLED** | `T-308-03`, `T-235a-AC2e` |
+
+> **M3 pareció SURVIVED y no lo era: el mutante cayó en el sitio equivocado.**
+> `replace(..., 1)` tomó la primera ocurrencia del patrón, que está en
+> `settleAlreadyConfirmed` (`:355`), no en `recoverConfirmedSettle` (`:793`). El archivo
+> cambió —así que un chequeo de "¿aterrizó?" por hash o `git diff` daba verde— pero **el
+> código bajo prueba no**. Aplicado en el sitio correcto, murió con dos tests nombrados.
+>
+> **Lección**: para una mutación no alcanza con que el archivo cambie; tiene que cambiar
+> **el sitio previsto**. Es un refinamiento de la disciplina que ya traía: el guard de
+> "MUTANT_NOT_APPLIED" detecta un diff vacío, no un diff en el lugar equivocado.

@@ -6,6 +6,7 @@ import {
 import { type Connection, PublicKey, Transaction } from '@solana/web3.js';
 import { usdToAtomicUnits } from '../../lib/atomic-amount.js';
 import { getLogger } from '../../lib/logger.js';
+import { FacilitatorSettleError } from '../errors.js';
 import type {
   SolanaPaymentAdapter as ISolanaPaymentAdapter,
   QuoteResult,
@@ -769,24 +770,53 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       return undefined;
     }
 
-    let verified: VerifyResult;
-    try {
-      verified = await this.verify({
-        signature: candidate,
-        payTo: req.payTo,
-        amountAtomic: req.amountAtomic,
-      });
-    } catch (verifyErr) {
+    // ⚠️ WKH-308 — ACA VIVIA `this.verify()`, Y COLAPSABA TRES SITUACIONES EN UNA.
+    //
+    // `verify()` devuelve `{valid:false}` tanto cuando la tx aterrizo y FALLO, como
+    // cuando NO esta, como cuando **este nodo no la tiene indexada**. Las dos primeras
+    // prueban que el pago no ocurrio; la tercera no prueba nada.
+    //
+    // El daño no era plata: era CONTABILIDAD. Un settle que SI se pago se reportaba
+    // como no settleado, no se escribia el recibo del leg y la fila quedaba en `signed`
+    // — o sea que la reconciliacion leia "no se pago" sobre un pago hecho. Ese dato
+    // falso es el insumo de un job futuro que trate la fila como pendiente, y ahi si
+    // aparece el doble pago, meses despues del error.
+    //
+    // `probeSettlementPresence` es la misma fuente de tres estados que usa el resto del
+    // adapter desde WKH-307; aca solo se la reusa.
+    const presence = await this.probeSettlementPresence({
+      signature: candidate,
+      payTo: req.payTo,
+      amountAtomic: req.amountAtomic,
+    });
+
+    if (presence.state === 'unknown') {
+      // NO PUDIMOS COMPROBARLO. No se afirma que el leg no se pago: se transporta la
+      // incertidumbre con `valueDisposition:'unknown'`, que es EXACTAMENTE el mecanismo
+      // que el leg EVM ya usa (`readSettleValueDisposition`) y que el caller ya recibe
+      // hoy como `SETTLE_UNKNOWN`. No es vocabulario nuevo: es dejar de mentir donde el
+      // otro riel ya dice la verdad.
       log.warn(
         {
           intentId: req.intentId,
           signature: candidate,
-          detail: String(verifyErr),
+          detail: presence.detail,
         },
-        'solana settle recovery: on-chain verify threw — treating as failure',
+        'solana settle recovery: could NOT determine whether the broadcast transaction landed — reporting the leg as UNKNOWN, not as failed (asserting "not paid" here would write a false negative into the ledger)',
       );
-      return undefined;
+      throw new FacilitatorSettleError(
+        `solana settle presence unknown for ${req.intentId} (${presence.detail})`,
+        'unknown',
+      );
     }
+
+    // `absent` y `landed_failed` PRUEBAN que la transferencia no ocurrio; y
+    // `landed_mismatch` conserva la conducta previa a proposito (ver el residuo del
+    // work-item de WKH-308): si alguna vez dispara, merece su propia mirada.
+    const verified: VerifyResult =
+      presence.state === 'landed_ok'
+        ? { valid: true }
+        : { valid: false, error: `presence=${presence.state}` };
 
     if (!verified.valid) {
       log.warn(
