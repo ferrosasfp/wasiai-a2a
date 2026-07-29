@@ -239,9 +239,18 @@ export function signQuote(input: {
   for (const step of input.steps) {
     if (typeof step.agent !== 'string' || step.agent.length === 0) return null;
     if (!isFreezablePrice(step.priceUsdc)) return null;
+    // El precio se congela con 8 decimales, así que hay que validar EL NÚMERO QUE
+    // REALMENTE VIAJA, no el de entrada: un precio por debajo de 5e-9 sobrevive el
+    // guard de arriba pero se redondea a "0.00000000", y `verifyQuote` rechaza ese
+    // mismo token por precio no positivo. Sin esta línea `/plan` devolvía un `quote`
+    // + `quoteExpiresAt` que `/execute` rechaza SIEMPRE: el cliente cree tener una
+    // garantía de precio y no la tiene, que es lo contrario de lo que esta HU promete.
+    // Se valida contra el mismo valor que verifica el otro lado (CD-12).
+    const frozen = step.priceUsdc.toFixed(8);
+    if (!isFreezablePrice(Number(frozen))) return null;
     steps.push({
       a: step.agent,
-      p: step.priceUsdc.toFixed(8),
+      p: frozen,
       r: typeof step.registry === 'string' ? step.registry : null,
     });
   }
