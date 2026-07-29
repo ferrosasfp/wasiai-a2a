@@ -142,8 +142,6 @@ vi.mock('./settle-ledger.js', () => ({
   reclaimExpiredIntent: vi.fn(async () => ({ ok: true })),
   readSettleIntent: vi.fn(async () => ({ state: 'none' })),
   probeSettleLedger: vi.fn(async () => ({ probe: 'ok' })),
-  resolveSettleLeaseMs: () => 120_000,
-  PROBE_OK_MARKER: 'WKH307_PROBE_OK',
 }));
 vi.mock('./schema-preflight.js', () => ({
   ensureSolanaSchemaReady: vi.fn(async () => ({ ok: true })),

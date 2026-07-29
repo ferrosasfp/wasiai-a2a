@@ -203,8 +203,6 @@ vi.mock('./settle-ledger.js', () => ({
   reclaimExpiredIntent: reclaimMock,
   readSettleIntent: readMock,
   probeSettleLedger: probeMock,
-  resolveSettleLeaseMs: () => 120_000,
-  PROBE_OK_MARKER: 'WKH307_PROBE_OK',
 }));
 
 // ⚠️ `schema-preflight.js` NO se mockea: se usa el REAL, para poder medir su
