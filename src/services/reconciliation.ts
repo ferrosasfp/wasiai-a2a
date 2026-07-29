@@ -821,6 +821,54 @@ export const reconciliationService = {
   },
 
   /**
+   * HU-306 (AC-5) — cuánta exposición varada se acumuló DESDE `sinceIso`. Lo consume el
+   * indicador de `/health` (`services/stranded-alert.ts`), no el panel.
+   *
+   * ⚠️ POR QUÉ SUMA EN JS Y NO CON `SUM()`: supabase-js no puede pedir un agregado sin un
+   * RPC, y esta HU no crea RPCs (CD-2: cero migraciones). Se traen las filas de la
+   * ventana acotadas por `AMBIGUOUS_LIST_LIMIT` y se suman acá.
+   *
+   * CONSECUENCIA HONESTA: si `truncated`, `exposureUsd` es una **COTA INFERIOR**, no el
+   * total. Por eso la regla de lectura del consumidor es
+   * `breached = truncated || exposureUsd > umbral`: 500 runs varados en una ventana de
+   * una hora ya es sistémico por definición, así que un truncamiento NUNCA puede
+   * producir un "no hay breach" (que sería el fallo peligroso).
+   *
+   * `cost_usdc::text` + suma con `Number(...)`: el `::text` es la convención WKH-196 para
+   * no perder precisión en el transporte. La suma en punto flotante es aceptable acá
+   * PORQUE el resultado se compara contra un umbral de alerta (orden de magnitud), no
+   * para mover ni reembolsar plata.
+   *
+   * Tira ante un error de query, igual que las listas: un `0` por fallo diría "no hay
+   * exposición" en el único canal que existe para gritar lo contrario.
+   */
+  async countStrandedExposureSince(
+    sinceIso: string,
+  ): Promise<{ runs: number; exposureUsd: number; truncated: boolean }> {
+    const { data, error, count } = await supabase
+      .from('a2a_events')
+      .select('cost_usdc::text', { count: 'exact' })
+      .eq('event_type', COMPOSE_STRANDED_PAYMENT_EVENT)
+      .gte('created_at', sinceIso)
+      .limit(AMBIGUOUS_LIST_LIMIT);
+    if (error) {
+      log.error(
+        { detail: error.message },
+        'countStrandedExposureSince query failed',
+      );
+      throw new ReconciliationError('INTERNAL');
+    }
+    const rows =
+      (data as unknown as { cost_usdc: string | null }[] | null) ?? [];
+    const exposureUsd = rows.reduce((acc, r) => {
+      const n = Number(r.cost_usdc ?? '0');
+      return acc + (Number.isFinite(n) ? n : 0);
+    }, 0);
+    const runs = count ?? rows.length;
+    return { runs, exposureUsd, truncated: runs > rows.length };
+  },
+
+  /**
    * AC-2..AC-6: resuelve exactly-one-side un intent pending. El gate del flag vive
    * ACÁ (AC-8/CD-6): con `ESCROW_SETTLE_ENABLED` OFF → `flag_off`, cero lectura de dinero.
    */

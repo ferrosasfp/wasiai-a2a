@@ -42,6 +42,9 @@ import registriesRoutes from './routes/registries.js';
 import tasksRoutes from './routes/tasks.js';
 import wellKnownRoutes from './routes/well-known.js';
 import { refundOutbox } from './services/refund-outbox.js';
+// HU-306 (AC-5): indicador de exposición varada para `/health`. Con el umbral sin
+// configurar no consulta nada y el campo ni aparece.
+import { getStrandedHealthField } from './services/stranded-alert.js';
 
 // F-08 (audit 2026-06-29): fail loudly at boot if required secrets are missing
 // in production (before any adapter init or server bind).
@@ -140,6 +143,12 @@ fastify.get(
       version: '0.1.0',
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
+      // HU-306 (AC-5): campo ADITIVO de tres estados. Con el umbral sin configurar
+      // devuelve `{}` ⟹ la respuesta es byte-idéntica a la de antes. Síncrono, sin
+      // `await` a la base y sin poder tirar (CD-10). ⚠️ La MISMA línea está en
+      // `src/__tests__/e2e/setup.ts`, que duplica este handler porque este módulo hace
+      // `await initAdapters()` a nivel de módulo y no se puede importar desde un test.
+      ...getStrandedHealthField(),
     });
   },
 );

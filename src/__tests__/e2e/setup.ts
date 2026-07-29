@@ -244,6 +244,8 @@ import orchestrateRoutes from '../../routes/orchestrate.js';
 import registriesRoutes from '../../routes/registries.js';
 import tasksRoutes from '../../routes/tasks.js';
 import wellKnownRoutes from '../../routes/well-known.js';
+// HU-306: el mismo helper que usa `src/index.ts` en su `/health` (una sola fuente).
+import { getStrandedHealthField } from '../../services/stranded-alert.js';
 import type { A2AAgentKeyRow } from '../../types/index.js';
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -326,6 +328,11 @@ export async function buildTestApp() {
         version: '0.1.0',
         uptime: process.uptime(),
         timestamp: new Date().toISOString(),
+        // HU-306: MISMA línea que `src/index.ts`. Esta copia existe porque `index.ts`
+        // hace `await initAdapters()` a nivel de módulo y no se puede importar desde un
+        // test; si sólo se tocara allá, el campo no sería testeable end-to-end y las dos
+        // copias divergirían en silencio.
+        ...getStrandedHealthField(),
       });
     },
   );
