@@ -14,6 +14,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import Fastify from 'fastify';
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -30,6 +31,12 @@ let authRejectStatus: number | undefined;
 // WKH-131: captura del flag skipMiddlewareDebit visto por el middleware de pago
 // (lo setea markSkipMiddlewareDebitHandler ANTES, T-EXEC-8).
 let lastSkipMiddlewareDebit: boolean | undefined;
+// WKH-303: contextos de delegación/sesión simulables para los tests del binding del
+// quote (T-Q-R10/T-Q-R11). Default `undefined` en ambos ⇒ los describes preexistentes
+// ven exactamente lo que veían antes (la prop ausente y la prop en `undefined` son
+// indistinguibles para el route, que solo la lee).
+let nextDelegationContext: { delegationId: string } | undefined;
+let nextKeySessionContext: { sessionId: string } | undefined;
 vi.mock('../middleware/a2a-key.js', () => ({
   requirePaymentOrA2AKey: () => [
     async (request: FastifyRequest, reply: FastifyReply) => {
@@ -41,6 +48,12 @@ vi.mock('../middleware/a2a-key.js', () => ({
         return;
       }
       (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = nextKeyRow;
+      (
+        request as unknown as { delegationContext: unknown }
+      ).delegationContext = nextDelegationContext;
+      (
+        request as unknown as { keySessionContext: unknown }
+      ).keySessionContext = nextKeySessionContext;
     },
   ],
 }));
@@ -93,6 +106,13 @@ vi.mock('../services/orchestrate.js', () => ({
 import { registerErrorBoundary } from '../middleware/error-boundary.js';
 import { genReqId, registerRequestIdHook } from '../middleware/request-id.js';
 import { resolveAgentPriceUsdc } from '../services/agent-price.js';
+// WKH-303: módulo REAL (no mockeado) — los tests firman quotes de verdad y el route
+// los verifica de verdad. Re-implementar el HMAC en el test lo volvería vacuo (CD-17).
+import {
+  type QuoteCaller,
+  signQuote,
+  verifyQuote,
+} from '../services/orchestrate-quote.js';
 import { orchestrateService } from '../services/orchestrate.js';
 import orchestrateRoutes from './orchestrate.js';
 
@@ -861,5 +881,483 @@ describe('orchestrate routes — WKH-131 /plan + /execute', () => {
       | { inputFromPrevious?: Record<string, string> }[]
       | undefined;
     expect(steps?.[1]?.inputFromPrevious).toEqual({ quoteId: 'quoteId' });
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// WKH-303 — quote freeze: emisión en /plan y redención en /execute
+//
+// Todo test de RECHAZO afirma, además del status, que
+// `orchestrateService.executeApprovedPlan` NUNCA fue llamado: es la única línea
+// que mueve dinero en esta ruta, así que "no fue llamada" ES la prueba de 0
+// débito. Afirmar sólo el status code pasaría igual si el código debitó antes
+// de responder (ya pasó tres veces en este repo).
+// ══════════════════════════════════════════════════════════════
+
+describe('orchestrate routes — WKH-303 quote freeze', () => {
+  let app: ReturnType<typeof Fastify>;
+  const QUOTE_KEY = 'c'.repeat(64);
+  let quoteEnvSnapshot: string | undefined;
+
+  beforeAll(async () => {
+    app = Fastify();
+    await app.register(orchestrateRoutes, { prefix: '/orchestrate' });
+    await app.ready();
+  });
+
+  afterAll(() => app.close());
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+    authRejectStatus = undefined;
+    lastSkipMiddlewareDebit = undefined;
+    nextDelegationContext = undefined;
+    nextKeySessionContext = undefined;
+    // resolveAgentPriceUsdc vuelve al default del harness tras clearAllMocks.
+    vi.mocked(resolveAgentPriceUsdc).mockResolvedValue(0.05);
+    // CD-16: se restaura en afterEach, nunca al final del cuerpo del test.
+    quoteEnvSnapshot = process.env.ORCHESTRATE_QUOTE_HMAC_KEY;
+    process.env.ORCHESTRATE_QUOTE_HMAC_KEY = QUOTE_KEY;
+  });
+
+  afterEach(() => {
+    if (quoteEnvSnapshot === undefined) {
+      delete process.env.ORCHESTRATE_QUOTE_HMAC_KEY;
+    } else {
+      process.env.ORCHESTRATE_QUOTE_HMAC_KEY = quoteEnvSnapshot;
+    }
+  });
+
+  /** Emite un quote real con el módulo de producción (no se re-implementa el HMAC). */
+  function issueQuote(over: {
+    caller?: QuoteCaller;
+    steps?: { agent: string; registry: string | null; priceUsdc: number }[];
+    nowMs?: number;
+  } = {}): string {
+    const signed = signQuote({
+      orchestrationId: 'plan-q-1',
+      caller: over.caller ?? { kind: 'key', id: 'k1' },
+      steps: over.steps ?? [
+        { agent: 'a1', registry: 'wasiai', priceUsdc: 0.05 },
+      ],
+      ...(over.nowMs !== undefined && { nowMs: over.nowMs }),
+    });
+    if (signed === null) throw new Error('signQuote devolvió null en el arrange');
+    return signed.token;
+  }
+
+  function executePayload(over: Record<string, unknown> = {}) {
+    return {
+      orchestrationId: 'plan-q-1',
+      steps: [{ agent: 'a1', registry: 'wasiai', input: { q: 0 } }],
+      maxQuotedCostUsdc: 1.0,
+      budget: 5.0,
+      ...over,
+    };
+  }
+
+  // ── Emisión (/plan) ──────────────────────────────────────────
+
+  // T-Q-P1 — AC-1
+  it('T-Q-P1: /plan ready emite un quote que congela los MISMOS precios que costPerStep', async () => {
+    mockPlan.mockResolvedValue(readyPlan());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/plan',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(typeof body.quote).toBe('string');
+    expect(typeof body.quoteExpiresAt).toBe('string');
+
+    const verified = verifyQuote(body.quote, { kind: 'key', id: 'k1' });
+    expect(verified.ok).toBe(true);
+    if (!verified.ok) throw new Error('unreachable');
+    // Los precios congelados son EXACTAMENTE los cotizados.
+    expect(verified.payload.steps.map((s) => Number(s.p))).toEqual(
+      body.costPerStep,
+    );
+    expect(verified.payload.steps.map((s) => s.a)).toEqual(['a1']);
+    expect(verified.payload.steps.map((s) => s.r)).toEqual(['wasiai']);
+    // quoteExpiresAt informa el mismo instante que el exp firmado (iat + 600).
+    expect(verified.payload.exp - verified.payload.iat).toBe(600);
+    expect(body.quoteExpiresAt).toBe(
+      new Date(verified.payload.exp * 1000).toISOString(),
+    );
+  });
+
+  // T-Q-P2 — AC-6
+  it('T-Q-P2: sin secreto, el body NO trae las claves quote ni quoteExpiresAt', async () => {
+    process.env.ORCHESTRATE_QUOTE_HMAC_KEY = '';
+    mockPlan.mockResolvedValue(readyPlan());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/plan',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect('quote' in body).toBe(false);
+    expect('quoteExpiresAt' in body).toBe(false);
+    // El resto del body sigue siendo el de siempre.
+    expect(body.planStatus).toBe('ready');
+    expect(body.costPerStep).toEqual([0.5]);
+    expect(body.maxQuotedCostUsdc).toBe(0.505);
+  });
+
+  // T-Q-P3 — AC-1
+  it('T-Q-P3: planStatus != ready ⇒ sin quote (no se congela un plan que no está listo)', async () => {
+    mockPlan.mockResolvedValue(
+      readyPlan({ planStatus: 'no_agents', steps: [], costPerStep: [] }),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/plan',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect('quote' in res.json()).toBe(false);
+  });
+
+  // T-Q-P4 — AC-1
+  it('T-Q-P4: un costPerStep en 0 ⇒ sin quote (no se congela un $0 ni un placeholder)', async () => {
+    mockPlan.mockResolvedValue(
+      readyPlan({
+        steps: [
+          { agent: 'a1', registry: 'wasiai', input: {} },
+          { agent: 'a2', registry: 'wasiai', input: {} },
+        ],
+        costPerStep: [0.5, 0],
+      }),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/plan',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect('quote' in res.json()).toBe(false);
+  });
+
+  // T-Q-P5 — AC-4
+  it('T-Q-P5: caller x402 (sin key, sin delegación, sin sesión) ⇒ sin quote', async () => {
+    nextKeyRow = undefined;
+    mockPlan.mockResolvedValue(readyPlan());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/plan',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { goal: 'do it', budget: 1.0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect('quote' in res.json()).toBe(false);
+  });
+
+  // ── Redención (/execute) ─────────────────────────────────────
+
+  // T-Q-R1 — AC-2
+  it('T-Q-R1: quote válido ⇒ el service recibe precios CONGELADOS y NINGÚN maxQuotedCostUsdc', async () => {
+    mockExecute.mockResolvedValue(okResult());
+    // El precio vivo es OTRO (0.09): si el congelado no mandara, se colaría acá.
+    vi.mocked(resolveAgentPriceUsdc).mockResolvedValue(0.09);
+    const quote = issueQuote();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: executePayload({ quote }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const serviceRequest = mockExecute.mock.calls[0]![0] as {
+      maxQuotedCostUsdc?: number;
+      frozenStepPricesUsd?: readonly number[];
+    };
+    const plan = mockExecute.mock.calls[0]![1] as {
+      plannedCostUsd: number;
+      costPerStep: number[];
+    };
+    expect(plan.costPerStep).toEqual([0.05]);
+    expect(plan.plannedCostUsd).toBe(0.05);
+    expect(serviceRequest.frozenStepPricesUsd).toEqual([0.05]);
+    // El cap gate NO corre con garantía de precio: la prop ni siquiera viaja.
+    expect('maxQuotedCostUsdc' in serviceRequest).toBe(false);
+  });
+
+  // T-Q-R2 — AC-6 (back-compat)
+  it('T-Q-R2: SIN quote ⇒ precios vivos, maxQuotedCostUsdc presente y sin frozenStepPricesUsd', async () => {
+    mockExecute.mockResolvedValue(okResult());
+    vi.mocked(resolveAgentPriceUsdc).mockResolvedValue(0.09);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: executePayload(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const serviceRequest = mockExecute.mock.calls[0]![0] as {
+      maxQuotedCostUsdc?: number;
+      frozenStepPricesUsd?: readonly number[];
+    };
+    const plan = mockExecute.mock.calls[0]![1] as {
+      plannedCostUsd: number;
+      costPerStep: number[];
+    };
+    expect(plan.costPerStep).toEqual([0.09]);
+    expect(plan.plannedCostUsd).toBe(0.09);
+    expect(serviceRequest.maxQuotedCostUsdc).toBe(1.0);
+    expect('frozenStepPricesUsd' in serviceRequest).toBe(false);
+  });
+
+  // T-Q-R3 — AC-3
+  it('T-Q-R3: quote expirado ⇒ 409 QUOTE_EXPIRED, requiresNewQuote y CERO ejecución', async () => {
+    const quote = issueQuote({ nowMs: Date.now() - 601_000 });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: executePayload({ quote }),
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({
+      error_code: 'QUOTE_EXPIRED',
+      requiresNewQuote: true,
+    });
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  // T-Q-R4 — AC-4
+  it('T-Q-R4: quote de otra key ⇒ 403 QUOTE_CALLER_MISMATCH y CERO ejecución', async () => {
+    const quote = issueQuote({ caller: { kind: 'key', id: 'k-otra' } });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: executePayload({ quote }),
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('QUOTE_CALLER_MISMATCH');
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  // T-Q-R5 — AC-2 (§3.2: rechaza, NO corrige)
+  it('T-Q-R5: agente distinto del congelado ⇒ 400 QUOTE_STEP_MISMATCH, sin ejecutar con NINGUNA de las dos identidades', async () => {
+    const quote = issueQuote(); // congela 'a1'
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: executePayload({
+        quote,
+        steps: [{ agent: 'a2-impostor', registry: 'wasiai', input: { q: 0 } }],
+      }),
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('QUOTE_STEP_MISMATCH');
+    // Ni con el agente pedido ni "corrigiendo" al congelado: no se ejecuta nada.
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  it('T-Q-R5b: registry distinto del congelado ⇒ 400 QUOTE_STEP_MISMATCH', async () => {
+    const quote = issueQuote(); // congela registry 'wasiai'
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: executePayload({
+        quote,
+        steps: [{ agent: 'a1', registry: 'otro-registry', input: { q: 0 } }],
+      }),
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('QUOTE_STEP_MISMATCH');
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  // T-Q-R6 — AC-2
+  it('T-Q-R6: un step de más en el body ⇒ 400 QUOTE_STEP_MISMATCH y CERO ejecución', async () => {
+    const quote = issueQuote(); // 1 step congelado
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: executePayload({
+        quote,
+        steps: [
+          { agent: 'a1', registry: 'wasiai', input: { q: 0 } },
+          { agent: 'a1', registry: 'wasiai', input: { q: 1 } },
+        ],
+      }),
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('QUOTE_STEP_MISMATCH');
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  // T-Q-R7 — AC-5
+  it('T-Q-R7: agente congelado que ya no resuelve ⇒ 409 QUOTE_AGENT_UNAVAILABLE y CERO ejecución', async () => {
+    vi.mocked(resolveAgentPriceUsdc).mockResolvedValue(null);
+    const quote = issueQuote();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: executePayload({ quote }),
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error_code).toBe('QUOTE_AGENT_UNAVAILABLE');
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  // T-Q-R8 — AC-2
+  it('T-Q-R8: precio vivo por ENCIMA del techo ⇒ 200 al precio congelado (nunca 409 QUOTE_STALE)', async () => {
+    mockExecute.mockResolvedValue(okResult());
+    // vivo 5.0, techo declarado 1.0: sin el freeze, el cap gate lo mataría.
+    vi.mocked(resolveAgentPriceUsdc).mockResolvedValue(5.0);
+    const quote = issueQuote();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: executePayload({ quote, maxQuotedCostUsdc: 1.0 }),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().error_code).toBeUndefined();
+    const plan = mockExecute.mock.calls[0]![1] as { costPerStep: number[] };
+    expect(plan.costPerStep).toEqual([0.05]);
+  });
+
+  // T-Q-R9 — AC-3
+  it('T-Q-R9: quote basura ⇒ 400 QUOTE_INVALID y NO degrada al camino de precio vivo', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: executePayload({ quote: 'basura' }),
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({
+      error_code: 'QUOTE_INVALID',
+      requiresNewQuote: true,
+    });
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  // T-Q-R10 — AC-4 (mismo owner, otra credencial)
+  it('T-Q-R10: quote de una DELEGACIÓN presentado por la master key del mismo owner ⇒ 403', async () => {
+    const quote = issueQuote({
+      caller: { kind: 'delegation', id: 'deleg-1' },
+    });
+    // El caller que lo presenta es la master key del MISMO owner (o1).
+    nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+    nextDelegationContext = undefined;
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: executePayload({ quote }),
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('QUOTE_CALLER_MISMATCH');
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  // T-Q-R11 — AC-4 (los 3 contextos, punta a punta)
+  it('T-Q-R11: master, delegación y sesión emiten y redimen CADA UNO su propio quote', async () => {
+    const contexts: {
+      label: string;
+      apply: () => void;
+    }[] = [
+      {
+        label: 'master',
+        apply: () => {
+          nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+          nextDelegationContext = undefined;
+          nextKeySessionContext = undefined;
+        },
+      },
+      {
+        label: 'delegación',
+        apply: () => {
+          nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+          nextDelegationContext = { delegationId: 'deleg-9' };
+          nextKeySessionContext = undefined;
+        },
+      },
+      {
+        label: 'sesión',
+        apply: () => {
+          nextKeyRow = { id: 'k1', owner_ref: 'o1' };
+          nextDelegationContext = undefined;
+          nextKeySessionContext = { sessionId: 'sess-9' };
+        },
+      },
+    ];
+
+    for (const ctx of contexts) {
+      vi.clearAllMocks();
+      vi.mocked(resolveAgentPriceUsdc).mockResolvedValue(0.05);
+      mockPlan.mockResolvedValue(readyPlan({ costPerStep: [0.05] }));
+      mockExecute.mockResolvedValue(okResult());
+      ctx.apply();
+
+      // 1) el plan emite el quote bajo ESE contexto
+      const planRes = await app.inject({
+        method: 'POST',
+        url: '/orchestrate/plan',
+        headers: { 'x-a2a-key': 'wasi_a2a_test' },
+        payload: { goal: 'do it', budget: 1.0 },
+      });
+      expect(planRes.statusCode).toBe(200);
+      const issued = planRes.json().quote;
+      expect(typeof issued).toBe(`string`);
+
+      // 2) el MISMO contexto lo redime
+      const execRes = await app.inject({
+        method: 'POST',
+        url: '/orchestrate/execute',
+        headers: { 'x-a2a-key': 'wasi_a2a_test' },
+        payload: executePayload({ quote: issued }),
+      });
+      expect(execRes.statusCode).toBe(200);
+      const plan = mockExecute.mock.calls[0]![1] as { costPerStep: number[] };
+      expect(plan.costPerStep).toEqual([0.05]);
+    }
   });
 });
