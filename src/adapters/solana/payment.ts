@@ -303,8 +303,11 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       case 'terms_conflict':
         // El intent existe con OTROS terminos: no es este pago. Y no se devuelve la
         // firma previa — seria pagarle a A y decirle a B que cobro (AC-8).
+        // AR MNR-1: la salida manual esta en
+        // `doc/sdd/209-wkh-307-solana-durable-idempotency-ledger/runbook-destrabe.md`
+        // (seccion C). Casi siempre es el llamador reusando un intentId, no el ledger.
         throw new Error(
-          `SETTLE_INTENT_CONFLICT: ${req.intentId} already exists with different terms (status=${String(claim.status)})`,
+          `SETTLE_INTENT_CONFLICT: ${req.intentId} already exists with different terms (status=${String(claim.status)}) — see runbook-destrabe.md §C`,
         );
 
       case 'store_unavailable':
