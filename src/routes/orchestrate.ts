@@ -17,7 +17,10 @@ import { createTimeoutHandler } from '../middleware/timeout.js';
 import { resolveAgentPriceUsdc } from '../services/agent-price.js';
 import { getProtocolFeeRate } from '../services/fee-charge.js';
 import { orchestrateService } from '../services/orchestrate.js';
-import type { ComposeStep, OrchestratePlanResult } from '../types/index.js';
+import type {
+  OrchestratePlanResult,
+  ResolvedComposeStep,
+} from '../types/index.js';
 
 type OrchestrateBody = {
   goal: string;
@@ -31,7 +34,11 @@ type OrchestrateBody = {
 // precios del cliente NO se reciben — el route los re-resuelve server-side (CD-2).
 type OrchestrateExecuteBody = {
   orchestrationId: string;
-  steps: ComposeStep[];
+  // HU-208: `ResolvedComposeStep[]` — el JSON schema de abajo exige
+  // `agent: {type:'string', minLength:1}` en cada item, así que Fastify ya
+  // garantiza en el borde lo que el tipo afirma. `/orchestrate/execute` NO
+  // acepta steps por capacidad.
+  steps: ResolvedComposeStep[];
   maxQuotedCostUsdc: number;
   budget: number;
   preferCapabilities?: string[];

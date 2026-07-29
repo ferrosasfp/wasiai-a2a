@@ -25,6 +25,7 @@ import type {
   OrchestratePlanResult,
   OrchestrateRequest,
   OrchestrateResult,
+  ResolvedComposeStep,
 } from '../types/index.js';
 import { resolveAgentPriceUsdc } from './agent-price.js';
 import { resolveAgentSplitContext } from './agent-split-context.js';
@@ -304,7 +305,7 @@ function greedyPlan(
   agents: Agent[],
   budget: number,
   maxAgents: number,
-): { steps: ComposeStep[]; reasoning: string; cost: number } {
+): { steps: ResolvedComposeStep[]; reasoning: string; cost: number } {
   const selected: Agent[] = [];
   let remaining = budget;
 
@@ -315,7 +316,7 @@ function greedyPlan(
     remaining -= agent.priceUsdc;
   }
 
-  const steps: ComposeStep[] = selected.map((agent, index) => ({
+  const steps: ResolvedComposeStep[] = selected.map((agent, index) => ({
     agent: agent.slug,
     registry: agent.registry,
     input: { goal },
@@ -645,7 +646,12 @@ export const orchestrateService = {
     );
 
     // Step 2: LLM Planning (with fallback)
-    let steps: ComposeStep[];
+    // HU-208: `ResolvedComposeStep[]` — las dos ramas que lo asignan (fallback
+    // greedy y plan del LLM) mapean agentes YA resueltos por discovery a
+    // `agent: <slug>`, así que el tipo describe lo que el código garantizaba. El
+    // planner NUNCA emite steps por capacidad: `/orchestrate` ya elige el agente,
+    // que es un problema distinto del de `/compose` (ver types/index.ts).
+    let steps: ResolvedComposeStep[];
     let reasoning: string;
     let usedFallback = false;
     // WKH-127 (AC-1/AC-3, BLQ-ALTO-1): base del débito post-plan = precio del

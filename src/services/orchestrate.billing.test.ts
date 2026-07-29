@@ -495,14 +495,17 @@ describe('orchestrateService — gas overhead pass-through (step-0)', () => {
 // WKH-131 (HU-128): executeApprovedPlan — /execute path (compose REAL).
 // Valida el money-path disjunto + cap gate + credit-back + fee con compose real.
 // ─────────────────────────────────────────────────────────────────────
-import type { ComposeStep, OrchestratePlanResult } from '../types/index.js';
+import type {
+  OrchestratePlanResult,
+  ResolvedComposeStep,
+} from '../types/index.js';
 
 describe('orchestrateService — WKH-131 executeApprovedPlan (real compose)', () => {
   /** Construye un OrchestratePlanResult "aprobado" re-derivando plannedCostUsd
    *  SERVER-SIDE (resolveAgentPriceUsdc del step-0 vía getAgent), igual que el
    *  route de /execute (CD-NEW-6). */
   function approvedPlan(
-    steps: ComposeStep[],
+    steps: ResolvedComposeStep[],
     plannedCostUsd: number,
     overrides: Partial<OrchestratePlanResult> = {},
   ): OrchestratePlanResult {
@@ -542,7 +545,7 @@ describe('orchestrateService — WKH-131 executeApprovedPlan (real compose)', ()
     mockFetchOk();
     mockFetchOk();
 
-    const steps: ComposeStep[] = [
+    const steps: ResolvedComposeStep[] = [
       { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
       { agent: 'a2', registry: 'wasiai', input: { q: 1 }, passOutput: true },
     ];
@@ -575,7 +578,7 @@ describe('orchestrateService — WKH-131 executeApprovedPlan (real compose)', ()
     vi.mocked(discoveryService.getAgent).mockResolvedValue(a1);
     mockFetchOk();
 
-    const steps: ComposeStep[] = [
+    const steps: ResolvedComposeStep[] = [
       { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
     ];
     // El cliente "mandó" un costo falso (0.000001) en costPerStep/totalCostUsdc,
@@ -615,7 +618,7 @@ describe('orchestrateService — WKH-131 executeApprovedPlan (real compose)', ()
     mockFetchOk();
     mockFetchOk();
 
-    const steps: ComposeStep[] = [
+    const steps: ResolvedComposeStep[] = [
       { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
       { agent: 'a2', registry: 'wasiai', input: { q: 1 }, passOutput: true },
       { agent: 'a3', registry: 'wasiai', input: { q: 2 }, passOutput: true },
@@ -657,7 +660,7 @@ describe('orchestrateService — WKH-131 executeApprovedPlan (real compose)', ()
     withAgents([a1]);
     vi.mocked(discoveryService.getAgent).mockResolvedValue(a1);
 
-    const steps: ComposeStep[] = [
+    const steps: ResolvedComposeStep[] = [
       { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
     ];
 
@@ -691,7 +694,7 @@ describe('orchestrateService — WKH-131 executeApprovedPlan (real compose)', ()
     vi.mocked(discoveryService.getAgent).mockResolvedValue(a1);
     mockFetchOk();
 
-    const steps: ComposeStep[] = [
+    const steps: ResolvedComposeStep[] = [
       { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
     ];
 
@@ -733,7 +736,7 @@ describe('orchestrateService — WKH-131 executeApprovedPlan (real compose)', ()
       vi.mocked(discoveryService.getAgent).mockResolvedValue(a1);
       mockFetchOk();
 
-      const steps: ComposeStep[] = [
+      const steps: ResolvedComposeStep[] = [
         { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
       ];
 
@@ -763,7 +766,7 @@ describe('orchestrateService — WKH-131 executeApprovedPlan (real compose)', ()
     withAgents([a1]);
     vi.mocked(discoveryService.getAgent).mockResolvedValue(a1);
 
-    const steps: ComposeStep[] = [
+    const steps: ResolvedComposeStep[] = [
       { agent: 'a1', registry: 'wasiai', input: { q: 0 }, passOutput: false },
     ];
 

@@ -8,10 +8,17 @@ import { resolveChainKey } from '../adapters/chain-resolver.js';
 import { getAdaptersBundle, getDefaultChainKey } from '../adapters/registry.js';
 import { splitsActive } from '../config/split-config.js';
 import { MAX_COMPOSE_STEPS } from '../lib/compose-limits.js';
+import {
+  type ComposeStepShapeError,
+  validateComposeStepShape,
+} from '../lib/compose-step-shape.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { refundIdemKey, requestRefundIdemBase } from '../lib/refund-idem.js';
+// HU-208: fuente ÚNICA del monto del débito step-0, compartida con el middleware
+// que lo debita. Ver el comentario en `refundComposeStep0`.
+import { resolveStep0DebitUsd } from '../lib/step0-debit.js';
 import {
   extractRawKey,
   requirePaymentOrA2AKey,
@@ -26,6 +33,11 @@ import {
 } from '../services/agent-price.js';
 import { resolveAgentSplitContext } from '../services/agent-split-context.js';
 import { budgetService } from '../services/budget.js';
+import { resolveCallerScope } from '../services/caller-scope.js';
+import {
+  createCapabilityResolver,
+  logCapabilityChoice,
+} from '../services/capability-resolver.js';
 import { composeService } from '../services/compose.js';
 import {
   chargeProtocolFee,
@@ -36,7 +48,7 @@ import type { SplitPartyRef } from '../services/fee-split.js';
 import { receiptService } from '../services/receipt.js';
 import { refundOutbox } from '../services/refund-outbox.js';
 import { normalizeDestination } from '../services/spend-policy.js';
-import type { ComposeStep } from '../types/index.js';
+import type { ComposeStep, ResolvedComposeStep } from '../types/index.js';
 
 const log = getLogger('compose');
 
@@ -97,11 +109,14 @@ type ComposeBody = {
   maxBudget?: number;
 };
 
-/** Body del 400 de validación de shape (sin `requestId`, que lo agrega el caller). */
-type ComposeValidationError = {
-  error: string;
-  code: 'VALIDATION_ERROR';
-};
+/**
+ * Body del 400 de validación de shape (sin `requestId`, que lo agrega el caller).
+ *
+ * HU-208: el shape por-step (incluido el código `ambiguous_step` de WAS-187 AC-3)
+ * vive en `lib/compose-step-shape.ts`; este alias mantiene el nombre que ya usaba
+ * el archivo.
+ */
+type ComposeValidationError = ComposeStepShapeError;
 
 /**
  * HIGH-2 (2026-07-26): validación de SHAPE del body, extraída del route handler.
@@ -139,21 +154,40 @@ function validateComposeBody(steps: unknown): ComposeValidationError | null {
     };
   }
 
-  // BLQ-MEDIO-1: rechazar el pipeline entero si CUALQUIER step no trae un
-  // `agent` string. Antes sólo se validaba el step-0 (en el preHandler de
-  // precio), así que un step final malformado llegaba a composeService, que
-  // settlea el prefijo válido 0..i-1 antes de fallar en el step malo.
-  const badStepIndex = (steps as { agent?: unknown }[]).findIndex(
-    (s) => !s || typeof s.agent !== 'string',
-  );
-  if (badStepIndex !== -1) {
-    return {
-      error: `Step ${badStepIndex} is missing a string 'agent' field`,
-      code: 'VALIDATION_ERROR',
-    };
+  // BLQ-MEDIO-1: rechazar el pipeline entero si CUALQUIER step tiene shape
+  // inválido. Antes sólo se validaba el step-0 (en el preHandler de precio), así
+  // que un step final malformado llegaba a composeService, que settlea el prefijo
+  // válido 0..i-1 antes de fallar en el step malo.
+  //
+  // HU-208: el criterio por-step se movió a `lib/compose-step-shape.ts` porque
+  // dejó de ser un `typeof s.agent !== 'string'`: ahora un step vale si trae
+  // `agent` O `capability`, EXACTAMENTE uno de los dos. Los dos juntos son
+  // `ambiguous_step` (400); ninguno conserva el `VALIDATION_ERROR` histórico.
+  for (let i = 0; i < steps.length; i++) {
+    const stepError = validateComposeStepShape((steps as unknown[])[i], i);
+    if (stepError) return stepError;
   }
 
   return null;
+}
+
+/**
+ * HU-208 — guard de "nada se ejecuta sin resolver", capa de runtime.
+ *
+ * `ComposeRequest.steps` es `ResolvedComposeStep[]`, así que el compilador ya
+ * impide entregarle a `composeService.compose` un step por capacidad. Esto es la
+ * red de abajo: comprueba en runtime que el arreglo que se va a EJECUTAR tiene
+ * todos los `agent` resueltos.
+ *
+ * Es inalcanzable por construcción (si `resolveComposeCapabilitiesHandler` corrió,
+ * todos están resueltos; si el body no traía capacidades, ya venían resueltos).
+ * Existe para el caso en que alguien reordene la cadena de preHandlers y saque al
+ * resolver de en medio: sin este chequeo, un step con `capability` llegaría al
+ * ejecutor con `agent: undefined` y moriría recién a mitad del pipeline —
+ * después de haber settleado el prefijo 0..i-1.
+ */
+function findUnresolvedStepIndex(steps: ComposeStep[]): number {
+  return steps.findIndex((s) => !s || typeof s.agent !== 'string');
 }
 
 /**
@@ -173,6 +207,183 @@ async function validateComposeBodyHandler(
   if (invalid) {
     return reply.status(400).send({ ...invalid, requestId: request.id });
   }
+}
+
+/**
+ * HU-208 — MEDICIÓN de la deriva de precio entre la cotización y el cobro.
+ *
+ * Qué residual mide y cuál NO. La resolución por capacidad se fija UNA sola vez
+ * (`resolveComposeCapabilitiesHandler`), así que la IDENTIDAD del agente no puede
+ * cambiar entre el 402/débito y la ejecución. Lo que sí puede cambiar es el
+ * PRECIO del agente ya fijado: se cotiza con `resolveAgentPriceUsdc` (cache de
+ * 60s) y se cobra con el `priceUsdc` que trae el agente re-leído en
+ * `composeService.resolveAgent`.
+ *
+ * Ese residual EXISTE HOY para todo llamador que nombra su agente.
+ *
+ * ⚠️ ESTO NO ES LA SOLUCIÓN, ES INSTRUMENTACIÓN INTERINA. La solución acordada es
+ * CONGELAR la cotización por 10 minutos: una alarma avisa DESPUÉS de que alguien
+ * pagó de más, un precio congelado hace que no pueda pasar. El congelamiento
+ * requiere almacenamiento durable entre requests (el 402 y la ejecución son dos
+ * requests distintos, y en este repo no hay Redis — ver `agent-price.ts` y
+ * `reputation.ts`), así que está pendiente de una decisión de storage.
+ *
+ * Mientras tanto esto mide: hasta ahora nadie sabía si el residual ocurría alguna
+ * vez. El dato dice si el congelamiento es urgente o rutinario. Cuando el
+ * congelamiento aterrice, esta función debería quedar como verificación de que la
+ * ventana congelada se está respetando (deltas esperados = 0), NO borrarse.
+ *
+ * Lo que NO se hizo, y por qué: pinear el precio del `discover` obligaría a que
+ * los steps por capacidad cobren desde una fuente distinta de la de los steps
+ * nombrados (el `agentEndpoint` de `getAgent`). Dos fuentes de precio es el mismo
+ * error de clase que dos definiciones de "el mejor agente".
+ *
+ * Best-effort puro: no toca el dinero, no cambia la respuesta, nunca lanza.
+ */
+function reportComposePriceDrift(
+  request: FastifyRequest,
+  result: { steps: { agent: { slug: string }; costUsdc: number }[] },
+): void {
+  try {
+    const quoted = request.composeQuotedPricesUsd;
+    if (!quoted) return;
+    for (let i = 0; i < result.steps.length; i++) {
+      const step = result.steps[i];
+      const quotedUsd = quoted[i];
+      if (!step || typeof quotedUsd !== 'number') continue;
+      const chargedUsd = step.costUsdc;
+      if (typeof chargedUsd !== 'number' || chargedUsd === quotedUsd) continue;
+      log.warn(
+        {
+          error_code: 'COMPOSE_PRICE_DRIFT',
+          step: i,
+          agent: step.agent.slug,
+          quotedUsd,
+          chargedUsd,
+          deltaUsd: Number((chargedUsd - quotedUsd).toFixed(6)),
+          requestId: request.id,
+        },
+        '[compose.price-drift] the price quoted to the caller does not match the price charged for this step',
+      );
+    }
+  } catch {
+    /* la telemetría NUNCA puede romper una respuesta del money-path */
+  }
+}
+
+/**
+ * HU-208 preHandler: resuelve los steps declarados por CAPACIDAD a un agente
+ * concreto, y deja el pipeline resuelto en `request.composeResolvedSteps`.
+ *
+ * ─── DÓNDE CORRE Y POR QUÉ EXACTAMENTE ACÁ ──────────────────────────────
+ * Va DESPUÉS de `validateComposeBodyHandler` (shape) y ANTES de
+ * `resolveComposePriceHandler`, o sea antes de `requirePaymentOrA2AKey`. Las tres
+ * consecuencias, todas necesarias:
+ *
+ *  1. EL DESCUBRIMIENTO ES GRATIS. Nada de lo que corre antes del middleware de
+ *     pago debita ni settlea, así que resolver acá no le cuesta nada al llamador
+ *     — ni siquiera cuando la resolución falla.
+ *
+ *  2. EL 402 / EL DÉBITO COTIZAN EL PIPELINE REAL. `resolveComposePriceHandler`
+ *     ve un arreglo donde TODOS los steps traen un slug concreto, así que el
+ *     precio del step-0, el destino canónico y el monto del challenge x402 salen
+ *     del agente que efectivamente se va a ejecutar. Ese handler no necesitó UN
+ *     SOLO cambio de lógica de precio: para él, un step resuelto por capacidad es
+ *     indistinguible de uno que el llamador nombró.
+ *
+ *  3. SE RESUELVE UNA SOLA VEZ. `composeService` recibe el arreglo YA resuelto y
+ *     su `resolveAgent` sólo busca por slug. Si la resolución por capacidad
+ *     corriera también allá, correría DESPUÉS de cotizar y DESPUÉS de debitar el
+ *     step-0, sobre entradas de ranking que cambian solas (fetch en vivo a los
+ *     registries + `computeReputationBatch`): podría elegir otro agente y el
+ *     llamador habría pagado por un pipeline y recibido otro.
+ *
+ * ─── BACK-COMPAT ────────────────────────────────────────────────────────
+ * Si NINGÚN step trae `capability`, este handler no hace absolutamente nada: ni
+ * lookup de alcance, ni discovery, ni escribe `composeResolvedSteps`. Un llamador
+ * de los de hoy recorre exactamente el mismo código que antes de esta HU.
+ *
+ * ─── FALLA CERRADO ──────────────────────────────────────────────────────
+ * Una capacidad que no resuelve corta acá con 422 `no_agent_match` (WAS-187 AC-4)
+ * vía `return reply...`, el MISMO idiom Fastify-5 que los caminos 404/503 de
+ * abajo: aborta la cadena de preHandlers ANTES del middleware de pago, así que no
+ * se debita nada y `composeService` ni se invoca. NUNCA se elige un agente
+ * arbitrario ni se ejecuta un pipeline a medias.
+ */
+async function resolveComposeCapabilitiesHandler(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  const body = request.body as { steps?: ComposeStep[] } | undefined;
+  const steps = body?.steps;
+  if (!steps || !Array.isArray(steps) || steps.length === 0) return;
+
+  // Gate de back-compat: sin capacidades no se toca nada (cero queries extra).
+  if (!steps.some((s) => typeof s?.capability === 'string')) return;
+
+  // El alcance de la credencial NO está disponible todavía (lo resuelve el
+  // middleware de pago, que corre después), así que se lee acá en modo
+  // solo-lectura. Ver `services/caller-scope.ts`: no autoriza nada, sólo recorta
+  // el conjunto de candidatos; el alcance se sigue haciendo cumplir en
+  // `composeService.compose`.
+  const scope = await resolveCallerScope(request);
+  const resolver = createCapabilityResolver(scope);
+
+  const resolved: ResolvedComposeStep[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (!step) continue; // el shape ya se validó en el preHandler anterior.
+
+    if (typeof step.capability !== 'string') {
+      // Step nombrado por el llamador: pasa TAL CUAL. `validateComposeStepShape`
+      // ya garantizó que trae un `agent` string.
+      resolved.push(step as ResolvedComposeStep);
+      continue;
+    }
+
+    const outcome = await resolver.resolve(step.capability, step.constraints);
+    if (!outcome.ok) {
+      // WAS-187 AC-4. El `reason` viaja aparte del mensaje para que un cliente
+      // pueda distinguir "no existe" de "tu credencial no lo alcanza" sin
+      // parsear texto.
+      return reply.status(422).send({
+        error: outcome.failure.message,
+        code: 'no_agent_match',
+        reason: outcome.failure.reason,
+        capability: step.capability,
+        step: i,
+        requestId: request.id,
+      });
+    }
+
+    logCapabilityChoice(step.capability, outcome.agent, String(request.id));
+
+    // Se fija el slug Y el registry CANÓNICOS del agente resuelto (no los del
+    // body): es lo que hace que el step keyee igual en el precio, en el destino
+    // del cap y en la resolución del ejecutor. `capability` se conserva para que
+    // la procedencia quede en la respuesta vía `resolvedFrom`.
+    resolved.push({
+      ...step,
+      agent: outcome.agent.slug,
+      registry: outcome.agent.registry,
+      resolvedFrom: { capability: step.capability },
+    });
+  }
+
+  request.composeResolvedSteps = resolved;
+}
+
+/**
+ * HU-208: el pipeline que se va a cotizar y ejecutar. Es el resuelto si hubo
+ * capacidades; si no, el del body (byte-idéntico al comportamiento previo).
+ *
+ * Un solo lector compartido por el preHandler de precio y el route handler: si
+ * cada uno eligiera el arreglo por su cuenta, se podría cotizar sobre uno y
+ * ejecutar el otro.
+ */
+function readComposeSteps(request: FastifyRequest): ComposeStep[] {
+  const body = request.body as { steps?: ComposeStep[] } | undefined;
+  return request.composeResolvedSteps ?? body?.steps ?? [];
 }
 
 /**
@@ -228,6 +439,10 @@ export async function augmentX402ChallengeAmount(
   // discovery call → preserves the single-resolution contract for 1-step
   // pipelines). Steps 1..N are resolved here.
   let pipelineUsd = step0Usd;
+  // HU-208: se retiene el precio cotizado POR STEP para poder compararlo después
+  // contra el realmente cobrado (`reportComposePriceDrift`). Puramente aditivo:
+  // no participa de ninguna suma ni de ninguna decisión de dinero.
+  const quoted: number[] = [step0Usd];
   for (let i = 1; i < steps.length; i++) {
     const step = steps[i];
     if (!step || typeof step.agent !== 'string') {
@@ -250,6 +465,7 @@ export async function augmentX402ChallengeAmount(
       // vía HTTP. Se CONSERVA como defense in depth: si alguien reordena la cadena
       // de preHandlers, la sobre-estimación sigue siendo el fallback seguro.
       pipelineUsd += PLACEHOLDER_FEE_USD;
+      quoted.push(PLACEHOLDER_FEE_USD);
       continue;
     }
     const price = await resolveAgentPriceUsdc(step.agent, step.registry);
@@ -259,7 +475,9 @@ export async function augmentX402ChallengeAmount(
         ? price
         : PLACEHOLDER_FEE_USD;
     pipelineUsd += stepUsd;
+    quoted.push(stepUsd);
   }
+  request.composeQuotedPricesUsd = quoted;
   if (pipelineUsd <= 0) return;
   // Add the 1% protocol fee the caller ultimately bears (mirror chargeProtocolFee).
   const total = Number((pipelineUsd * (1 + getProtocolFeeRate())).toFixed(6));
@@ -316,7 +534,22 @@ async function refundComposeStep0(
   alreadySpentUsd: number,
 ): Promise<void> {
   // Sólo el path a2a-key con débito real; x402 puro no debita budget.
-  const debitedUsd = request.composeEstimatedCostUsd;
+  //
+  // HU-208: el monto sale de `resolveStep0DebitUsd`, la MISMA función con la que
+  // el middleware calculó el débito (invariante #4 de `lib/step0-refund.ts`).
+  // Antes se leía `request.composeEstimatedCostUsd` directo, y eso DIVERGÍA del
+  // débito real: cuando el preHandler de precio no llega a inyectar ese campo, el
+  // middleware igual debita `PLACEHOLDER_FEE_USD` ($1) por el fallback de
+  // `resolveStep0DebitUsd` — pero este refund veía `undefined` y no devolvía
+  // NADA. O sea, cobrado por nada. `step0-debit.ts` se creó justamente para que
+  // débito y crédito no puedan calcularse por separado; compose era el único que
+  // seguía calculándolo por su cuenta.
+  //
+  // Con el campo inyectado (el 99.99% de los requests) el valor es idéntico al
+  // de antes: `resolveStep0DebitUsd` devuelve `composeEstimatedCostUsd` cuando es
+  // un número. Y nunca puede reembolsar de más, porque es exactamente lo que se
+  // debitó.
+  const debitedUsd = resolveStep0DebitUsd(request);
   const refundChainId = request.resolvedChainId;
   if (
     !request.a2aKeyRow ||
@@ -455,23 +688,26 @@ async function resolveComposePriceHandler(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
-  const body = request.body as { steps?: ComposeStep[] } | undefined;
+  // HU-208: se cotiza sobre el pipeline RESUELTO, no sobre el body crudo. Es lo
+  // que hace que el precio del step-0 (el que se debita), el destino canónico del
+  // cap y el monto del challenge x402 correspondan al agente que efectivamente se
+  // va a ejecutar. Sin capacidades, `readComposeSteps` devuelve `body.steps` y
+  // este handler se comporta byte-idéntico a antes.
+  const steps = readComposeSteps(request);
 
   // CD-15: shape validation la hace el route handler (líneas 40-58 originales).
-  if (!body?.steps || !Array.isArray(body.steps) || body.steps.length === 0) {
+  if (steps.length === 0) {
     return;
   }
 
-  const firstStep = body.steps[0];
+  const firstStep = steps[0];
   if (!firstStep || typeof firstStep.agent !== 'string') {
     return;
   }
+  const firstAgent = firstStep.agent;
 
   try {
-    const price = await resolveAgentPriceUsdc(
-      firstStep.agent,
-      firstStep.registry,
-    );
+    const price = await resolveAgentPriceUsdc(firstAgent, firstStep.registry);
 
     if (price === null) {
       // AC-3: agente no existe → 404, NO debit. CD-10: middleware short-circuited.
@@ -480,7 +716,7 @@ async function resolveComposePriceHandler(
       // explícito hace que el código matchee el comentario "NO debit / middleware
       // short-circuited" sin depender del bare-return.
       return reply.status(404).send({
-        error: `Agent not found: ${firstStep.agent}`,
+        error: `Agent not found: ${firstAgent}`,
         error_code: 'AGENT_NOT_FOUND',
       });
     }
@@ -490,7 +726,7 @@ async function resolveComposePriceHandler(
     // del per-step → step-0 keyea idéntico → el cap se evalúa aunque el caller
     // omita `registry`. `price !== null` ya garantiza que el agente existe.
     const resolved = await resolveAgentDestination(
-      firstStep.agent,
+      firstAgent,
       firstStep.registry,
     );
     const composeDestination = resolved
@@ -517,7 +753,7 @@ async function resolveComposePriceHandler(
       // preHandler chain before `requirePaymentOrA2AKey` (same Fastify-5 idiom
       // as the `price === null` and 503 paths above/below → NO debit).
       return reply.status(404).send({
-        error: `Agent not found: ${firstStep.agent}`,
+        error: `Agent not found: ${firstAgent}`,
         error_code: 'AGENT_NOT_FOUND',
       });
     }
@@ -530,7 +766,7 @@ async function resolveComposePriceHandler(
       request.log.warn(
         {
           reason: 'registry-miss',
-          slug: firstStep.agent,
+          slug: firstAgent,
           registry: firstStep.registry ?? null,
         },
         'compose-price.fallback',
@@ -547,7 +783,7 @@ async function resolveComposePriceHandler(
       // the placeholder; steps 1..N add their own prices).
       await augmentX402ChallengeAmount(
         request,
-        body.steps,
+        steps,
         PLACEHOLDER_FEE_USD,
       ).catch((e) => {
         request.log.warn(
@@ -575,7 +811,7 @@ async function resolveComposePriceHandler(
     // it is UNAFFECTED. Reuses the already-resolved step-0 `price` (no extra
     // discovery call). Best-effort: any failure here leaves the challenge at the
     // 1 USD default (never blocks the request, CD-15 shape rules unchanged).
-    await augmentX402ChallengeAmount(request, body.steps, price).catch((e) => {
+    await augmentX402ChallengeAmount(request, steps, price).catch((e) => {
       request.log.warn(
         { err: e instanceof Error ? e.message : 'unknown' },
         'compose.x402-challenge-amount.skip',
@@ -587,7 +823,7 @@ async function resolveComposePriceHandler(
     request.log.error(
       {
         err: err instanceof Error ? err.message : 'unknown',
-        slug: firstStep.agent,
+        slug: firstAgent,
       },
       'compose-price.registry-unavailable',
     );
@@ -618,6 +854,11 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         // aplicaba cuando `steps` venía vacío y el preHandler de precio no
         // inyectaba `composeEstimatedCostUsd`).
         validateComposeBodyHandler,
+        // HU-208: resolver las capacidades a agentes concretos ANTES del
+        // preHandler de precio (y por lo tanto antes del débito / del 402). Ver
+        // su docstring: es lo que hace que se cotice y se ejecute EL MISMO
+        // pipeline. No-op cuando ningún step declara `capability`.
+        resolveComposeCapabilitiesHandler,
         // WKH-59 (real-price-debit) DT-E: resolver precio ANTES del middleware
         // de debit para inyectar request.composeEstimatedCostUsd y manejar
         // 404 AGENT_NOT_FOUND / 503 REGISTRY_UNAVAILABLE.
@@ -658,6 +899,34 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
+      // HU-208: el pipeline que se EJECUTA es el resuelto (el mismo que se cotizó
+      // y por el que se debitó el step-0). Sin capacidades es `body.steps`.
+      const steps = readComposeSteps(request);
+
+      // HU-208 defense-in-depth: ningún step sin resolver puede llegar al
+      // ejecutor. Inalcanzable mientras el resolver siga en la cadena (y el tipo
+      // `ResolvedComposeStep` lo hace un error de compilación), pero si alguien lo
+      // reordena fuera, un step con `capability` llegaría con `agent: undefined` y
+      // moriría a mitad del pipeline, DESPUÉS de settlear el prefijo 0..i-1.
+      //
+      // A diferencia del 400 de arriba, este SÍ reembolsa el step-0 antes de
+      // responder: acá ya pasamos por el middleware de pago, así que el débito
+      // está aplicado y no vamos a ejecutar nada por él. "Cobrado por nada" es
+      // justo el modo de fallo contra el que este archivo viene endurecido
+      // (HIGH-2 / AUDIT A1 / BLQ-MED-1); copiar la forma sin reembolso del guard
+      // de arriba propagaría un patrón que ya sabemos malo. Es gratis porque la
+      // rama es inalcanzable — y si algún día deja de serlo, ya está bien.
+      const unresolvedIndex = findUnresolvedStepIndex(steps);
+      if (unresolvedIndex !== -1) {
+        await refundComposeStep0(request, 0);
+        return reply.status(400).send({
+          error: `Step ${unresolvedIndex} was not resolved to an agent`,
+          code: 'VALIDATION_ERROR',
+          step: unresolvedIndex,
+          requestId: request.id,
+        });
+      }
+
       // BLQ-MED-1 (AR HIGH-2): acá vivía un `if (reply.sent) { refund; return }`
       // para el 504 pre-compose. Era CÓDIGO INALCANZABLE — Fastify no invoca el
       // handler cuando la reply ya salió (`fastify/lib/handle-request.js:132`
@@ -683,7 +952,10 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       // caller on the prepaid path (no operator signature).
       const a2aKey = extractRawKey(request);
       const result = await composeService.compose({
-        steps: body.steps,
+        // HU-208: `steps` (resuelto), NO `body.steps`. `findUnresolvedStepIndex`
+        // acaba de garantizar que todos traen un `agent` string, que es lo que
+        // permite el narrowing a `ResolvedComposeStep[]` que exige el service.
+        steps: steps as ResolvedComposeStep[],
         maxBudget: body.maxBudget,
         a2aKey,
         // WKH-61: propagar el row del caller para scoping per-step
@@ -825,6 +1097,10 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         feeChargeError = e instanceof Error ? e.message : String(e);
         log.error({ detail: feeChargeError }, 'fee charge threw');
       }
+
+      // HU-208: medir la deriva de precio cotizado-vs-cobrado (ver el docstring).
+      // Después del fee y antes de responder; best-effort, no afecta el 200.
+      reportComposePriceDrift(request, result);
 
       const kiteTxHash = request.paymentTxHash;
       // WKH-191x: retiene los skip-codes PÚBLICOS del pipeline para que el evento
