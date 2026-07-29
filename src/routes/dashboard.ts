@@ -174,6 +174,109 @@ function adminTokenMatches(provided: unknown, expected: string): boolean {
 }
 
 /**
+ * HU-206 — SEGUNDA CREDENCIAL, EXCLUSIVA DE `release-lease`.
+ *
+ * ── POR QUÉ SON DOS GATES Y NO UNO (NO UNIFICAR) ────────────────────────────
+ *
+ * `requireAdminTokenStrict` autentica al operador del panel. Ese mismo
+ * `DASHBOARD_ADMIN_TOKEN` abre TAMBIÉN las lecturas cross-tenant (`/api/stats`,
+ * `/api/events`, `/api/reconciliation`, `/api/trace`) y las dos escrituras de
+ * reconciliación. Entre esas escrituras hay una asimetría de evidencia que el token
+ * no distingue:
+ *
+ *   · `/hop2-evidence` atesta que el seller SÍ cobró, y el hash **se verifica contra la
+ *     cadena** antes de escribir nada. Si el operador miente, la cadena lo desmiente:
+ *     su seguridad es criptográfica, no procedimental.
+ *   · `/release-lease` atesta un NEGATIVO ("no hubo desembolso") que este repo NO puede
+ *     verificar, y devuelve la fila al reconciliador, **que reenvía el pago**. Es la
+ *     única operación del servicio que vuelve pagable una fila sin prueba.
+ *
+ * Con una sola credencial, el token que se le presta a alguien para mirar métricas
+ * alcanza para habilitar un pago sin evidencia: escalada de privilegio dentro de una
+ * misma credencial. Por eso `release-lease` exige `RECONCILIATION_RELEASE_TOKEN`
+ * **ADEMÁS** del token de panel, en el header propio `X-Reconciliation-Release-Token`.
+ *
+ * ⚠️ NO COLAPSAR ESTE GATE CON `requireAdminTokenStrict` POR PARECER DUPLICACIÓN. La
+ * duplicación es el punto: son dos secretos con dos audiencias distintas (el panel se
+ * comparte con quien opera y observa; este NO). Unificarlos restaura exactamente el
+ * agujero que este módulo cierra. Y por la misma razón `/hop2-evidence` NO lo pide: el
+ * camino verificable on-chain se deja sin fricción a propósito.
+ *
+ * ── FORMA ELEGIDA: EL SECRETO ES EL INTERRUPTOR ─────────────────────────────
+ *
+ * No hay bandera booleana aparte. La operación existe SÓLO si alguien configuró un
+ * secreto dedicado, y un secreto no se setea por accidente (un `=true` sí). Un flag
+ * adicional agregaría un estado —flag ON + token sin configurar— que tendría que
+ * fail-closed igual, y una forma de creerse protegido por haber apagado el flag
+ * mientras el secreto sigue puesto. Una sola palanca, una sola fuente de verdad: para
+ * cerrar la operación se borra `RECONCILIATION_RELEASE_TOKEN`.
+ *
+ * ── FAIL-CLOSED EN DEV *Y* PROD (y por qué acá NO se distingue) ─────────────
+ *
+ * La distinción prod/dev es del gate OPT-IN `requireAdminToken` (lecturas
+ * grandfathered de WKH-54): sin token configurado, en no-producción pasa. El gate que
+ * hoy protege `release-lease` —`requireAdminTokenStrict`— NO distingue: es 503 en dev
+ * y prod desde que existe. Heredar el passthrough acá ataría la operación sin prueba a
+ * `NODE_ENV`, y un deploy con `NODE_ENV` sin setear es un footgun real ya documentado
+ * en `requireAdminTokenForTrace`. El desarrollo local no se rompe: se configuran las
+ * dos variables (ver `.env.example`) igual que hoy se configura una.
+ */
+const requireReleaseLeaseToken: preHandlerAsyncHookHandler = async (
+  request,
+  reply,
+) => {
+  const expected = process.env.RECONCILIATION_RELEASE_TOKEN?.trim();
+  if (!expected) {
+    // El operador ya pasó `requireAdminTokenStrict`: quien llega acá TIENE el token de
+    // panel y le faltó el otro. Ese es justamente el intento de escalada que esta
+    // credencial separa, así que se registra (nunca el valor de ningún token).
+    request.log.warn(
+      { audit: 'RELEASE_LEASE_NOT_CONFIGURED' },
+      'release-lease attempted with a valid dashboard token while RECONCILIATION_RELEASE_TOKEN is unset. The operation stays DISABLED (fail-closed, dev and prod): it is the only one that makes a row payable without proof.',
+    );
+    return reply.status(503).send({
+      error: 'service_unavailable',
+      message:
+        'Release-lease is not configured: it requires its own RECONCILIATION_RELEASE_TOKEN, separate from DASHBOARD_ADMIN_TOKEN',
+    });
+  }
+  const dashboardToken = process.env.DASHBOARD_ADMIN_TOKEN?.trim();
+  if (
+    dashboardToken !== undefined &&
+    adminTokenMatches(expected, dashboardToken)
+  ) {
+    // Dos variables con el MISMO valor son una sola credencial con dos nombres: la
+    // separación quedaría escrita en el código y ausente en la realidad. Fail-closed y
+    // ruidoso antes que una defensa nominal.
+    request.log.error(
+      { audit: 'RELEASE_LEASE_TOKEN_NOT_DISTINCT' },
+      'RECONCILIATION_RELEASE_TOKEN is identical to DASHBOARD_ADMIN_TOKEN, so it grants no extra privilege. release-lease stays DISABLED until they are distinct secrets.',
+    );
+    return reply.status(503).send({
+      error: 'service_unavailable',
+      message:
+        'Release-lease is not configured: RECONCILIATION_RELEASE_TOKEN must be a distinct secret from DASHBOARD_ADMIN_TOKEN',
+    });
+  }
+  if (
+    !adminTokenMatches(
+      request.headers['x-reconciliation-release-token'],
+      expected,
+    )
+  ) {
+    request.log.warn(
+      { audit: 'RELEASE_LEASE_TOKEN_REJECTED' },
+      'release-lease rejected: valid dashboard token but missing/incorrect X-Reconciliation-Release-Token.',
+    );
+    return reply.status(401).send({
+      error: 'unauthorized',
+      message:
+        'X-Reconciliation-Release-Token header required for release-lease (a distinct, higher-privilege credential than the dashboard token)',
+    });
+  }
+};
+
+/**
  * WKH-191x: gate del trace operativo. **FAIL-CLOSED** (503 en dev Y prod si
  * `DASHBOARD_ADMIN_TOKEN` no está configurado), NO el opt-in `requireAdminToken`.
  *
@@ -497,7 +600,7 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
           ...(outcome.status === 'awaiting_manual_settle_evidence'
             ? {
                 action_required:
-                  'The hop2 payment result is UNKNOWN and this intent was NOT resolved. The reconciler will not resend hop2 blind (that could pay the seller twice). Check the chain for a hop2 disbursement to the seller, then use one of: POST /dashboard/api/reconciliation/:intentId/hop2-evidence with {txHash, resolvedBy} if the seller WAS paid (the hash is verified on-chain before anything is written), or POST /dashboard/api/reconciliation/:intentId/release-lease with {resolvedBy, note} to attest that no disbursement exists and hand the row back to the reconciler.',
+                  'The hop2 payment result is UNKNOWN and this intent was NOT resolved. The reconciler will not resend hop2 blind (that could pay the seller twice). Check the chain for a hop2 disbursement to the seller, then use one of: POST /dashboard/api/reconciliation/:intentId/hop2-evidence with {txHash, resolvedBy} if the seller WAS paid (the hash is verified on-chain before anything is written), or POST /dashboard/api/reconciliation/:intentId/release-lease with {resolvedBy, note} to attest that no disbursement exists and hand the row back to the reconciler. That second one is the only operation that makes a row payable WITHOUT proof, so it needs a second, distinct credential on top of the dashboard token: header X-Reconciliation-Release-Token (env RECONCILIATION_RELEASE_TOKEN). Without it configured the operation stays disabled.',
               }
             : {}),
         });
@@ -571,16 +674,26 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
    * que NO hay desembolso al seller en la cadena, y devuelve la fila al reconciliador.
    *
    * ⚠️ Es la única operación que vuelve pagable una fila sin prueba, así que su seguridad
-   * es procedimental: `requireAdminTokenStrict` + `resolvedBy` y `note` OBLIGATORIOS, que
-   * quedan en el log de auditoría del service. Deliberadamente NO existe ningún camino por
-   * tiempo hacia acá: liberar por edad reabre el doble pago (caso F).
+   * es procedimental: DOS credenciales + `resolvedBy` y `note` OBLIGATORIOS, que quedan en
+   * el log de auditoría. Deliberadamente NO existe ningún camino por tiempo hacia acá:
+   * liberar por edad reabre el doble pago (caso F).
+   *
+   * HU-206 — cadena de dos gates, en este orden y NO unificables:
+   *   1. `requireAdminTokenStrict`   → el token del panel (`DASHBOARD_ADMIN_TOKEN`).
+   *   2. `requireReleaseLeaseToken`  → el secreto propio (`RECONCILIATION_RELEASE_TOKEN`).
+   * El hermano `/hop2-evidence` se queda SÓLO con (1) a propósito: su hash se verifica
+   * on-chain, así que el camino con prueba no paga fricción. El porqué completo está en el
+   * header de `requireReleaseLeaseToken`.
    */
   fastify.post<{
     Params: { intentId: string };
     Body: { resolvedBy?: unknown; note?: unknown };
   }>(
     '/api/reconciliation/:intentId/release-lease',
-    { config: { rateLimit: false }, preHandler: requireAdminTokenStrict },
+    {
+      config: { rateLimit: false },
+      preHandler: [requireAdminTokenStrict, requireReleaseLeaseToken],
+    },
     async (request, reply: FastifyReply) => {
       const body = request.body ?? {};
       const resolvedBy =
@@ -591,6 +704,19 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
       if (resolvedBy === '' || note === '') {
         return reply.status(400).send({ error_code: 'ATTESTATION_REQUIRED' });
       }
+      // HU-206: rastro del INTENTO autorizado, no sólo del efecto. El service ya loguea
+      // la liberación aplicada (`ESCROW_HOP2_LEASE_RELEASED_BY_ATTESTATION`), pero sus
+      // salidas `flag_off` / `not_leased` no dejan ninguna, y "quién ejerció la credencial
+      // de mayor privilegio" tiene que constar aunque la fila no se haya movido.
+      request.log.warn(
+        {
+          intentId: request.params.intentId,
+          resolvedBy,
+          note,
+          audit: 'ESCROW_HOP2_LEASE_RELEASE_REQUESTED',
+        },
+        'release-lease authorized (dashboard token + release token) and about to run: a human is attesting that no on-chain disbursement to the seller exists.',
+      );
       try {
         const outcome = await reconciliationService.releaseHop2Lease(
           request.params.intentId,
@@ -603,6 +729,8 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
       } catch (err) {
         request.log.error(
           {
+            intentId: request.params.intentId,
+            resolvedBy,
             errorClass: err instanceof Error ? err.constructor.name : 'unknown',
           },
           'releaseHop2Lease failed',
