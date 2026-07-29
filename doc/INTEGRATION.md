@@ -350,6 +350,62 @@ distinguishing them.
 Being skipped does **not** fail the step: the agent still ran and you are still
 billed for the pipeline. `downstreamSettle` tells you about the *payout* leg.
 
+### `/compose` — passing one field from the previous step (`inputFromPrevious`)
+
+Sometimes a step needs a value that does not exist yet when you write the request.
+A remittance is the canonical case: the quote step mints a `quoteId`, and the
+payout step needs it. You cannot send it up front, and the payout agent should not
+learn to read `previousOutput.quoteId` — that would turn it into "step 3 of a
+remittance pipeline" and it would stop being callable on its own.
+
+`inputFromPrevious` moves that one field for you:
+
+```jsonc
+{
+  "steps": [
+    { "agent": "remit-corridor-fx",    "input": { "corridor": "US-PE", "amountUsd": 400 } },
+    { "agent": "remit-cashout-payout", "input": { "method": "yape" },
+      "inputFromPrevious": { "quoteId": "quoteId" } }
+  ]
+}
+```
+
+Read it as an assignment: **`{ destination: source }`**, i.e.
+`input[destination] = previousStepOutput[source]`. The destination — the name the
+agent sees — is on the key side, like an alias in SQL or GraphQL. Here the payout
+agent receives `{ "method": "yape", "quoteId": "<the id the fx step returned>" }`.
+
+**This is not an expression language.** Each entry is a single lookup of a
+single top-level key. There are no dot-paths, no JSONPath, no functions, no
+defaults, and no access to any step other than the immediately previous one. A `.`
+inside a key is just a character: `{"x": "a.b"}` against `{"a": {"b": 1}}` does
+**not** resolve — it fails with `SOURCE_FIELD_MISSING`.
+
+Rules, all validated **before you are charged**:
+
+| Rule | Detail |
+|------|--------|
+| Optional | Omit it and nothing changes. A pipeline without mappings behaves exactly as before. |
+| Object, not array | Must be a non-null, non-array object. |
+| 1 to 8 entries | `{}` is **rejected**, not treated as a no-op: a mapping that maps nothing is a caller error. |
+| Strings, ≤ 128 chars | Every key and every value must be a non-empty string of at most 128 characters. |
+| No reserved names | `__proto__`, `constructor` and `prototype` are rejected as key **and** as value. |
+| Not `previousOutput` | That key belongs to `passOutput`; two writers of the same field is not allowed. |
+| Destination must be free | If the key already exists in this step's `input`, the request is rejected instead of silently overwriting the value you sent. |
+| Not on step 0 | There is no previous step. |
+
+**It coexists with `passOutput`.** They do different things: `passOutput: true`
+injects the whole previous output under `previousOutput`, while
+`inputFromPrevious` promotes individual fields to the top level. You can use both
+on the same step.
+
+The value is copied **verbatim** — not cloned, not coerced, not stringified. A
+`null` in the previous output is a *present* value and is mapped as `null`: the
+gateway does not invent a "null does not count" rule over another agent's data.
+
+The mapping reads the previous output **after** the bridge (A2A unwrap / LLM
+transform), so it sees exactly the same object `passOutput` would have injected.
+
 ---
 
 ## 4. x402 Payment Flow
@@ -422,6 +478,7 @@ All errors share a normalized JSON shape:
 | `401 Unauthorized` | Not emitted by the application layer. May appear from infrastructure (CDN, reverse proxy) if your request is dropped before reaching the app. | Check the URL, TLS, and that your `Authorization` header is well-formed. If you need auth, this API uses `403` (see next row). |
 | `402 Payment Required` | The endpoint needs payment and none was provided. Body includes `accepts[]` with full x402 payment instructions. Note: a request whose *shape* is invalid is rejected with `400` **before** the `402` is emitted, so you never pay to find out the body was malformed (see [5.1](#51-rejected-requests-what-you-are-charged-and-what-is-refunded)). | Sign the EIP-712 authorization, base64-encode the payload, retry with `PAYMENT-SIGNATURE`. Alternatively attach a valid `x-a2a-key`. |
 | `403 Forbidden` | Either no a2a credential was provided on a tenant-scoped endpoint (`error_code: A2A_KEY_REQUIRED` on `/registries` mutations and all of `/tasks` — returned **before any charge**), or an `x-a2a-key` / Bearer was provided but rejected. In the second case the `error_code` field tells you why: `KEY_NOT_FOUND`, `KEY_INACTIVE`, `DAILY_LIMIT`, `INSUFFICIENT_BUDGET`, `SCOPE_DENIED`, `PER_CALL_LIMIT`. The two `/tasks` reads are free, so they never answer the spend-related codes (`DAILY_LIMIT`, `INSUFFICIENT_BUDGET`, `PER_CALL_LIMIT`): nothing is charged, so nothing can be short. Credential problems (`A2A_KEY_REQUIRED`, `KEY_NOT_FOUND`, `KEY_INACTIVE`, and the delegation / key-session codes for those credential types) are still returned. | `KEY_NOT_FOUND`/`KEY_INACTIVE` → verify the key you are sending and that it has not been disabled. `DAILY_LIMIT`/`INSUFFICIENT_BUDGET` → top up or wait for the daily reset. `SCOPE_DENIED` → request a wider scope from the key owner. `PER_CALL_LIMIT` → lower `budget` in the request body. |
+| `400` with `errorCode: INPUT_MAPPING_FAILED` | A step's `inputFromPrevious` could not be resolved against the previous step's output. The `inputMappingFailure` object tells you which step, which field and why: `SOURCE_FIELD_MISSING` (the source key is not in the previous output — remember a `.` is a character, not a path), `PREVIOUS_OUTPUT_NOT_OBJECT` (the previous output is `null`, an array or a primitive, so there are no top-level keys to read), `INVALID_MAPPING_SHAPE` (the mapping itself is malformed). | `SOURCE_FIELD_MISSING` → check what the previous agent actually returns (`GET /discover/:slug` shows its output shape); the source key must exist at the **top level**. `PREVIOUS_OUTPUT_NOT_OBJECT` → that agent does not return an object; you cannot map fields out of it. `INVALID_MAPPING_SHAPE` → fix the body. **Billing: the step that failed is never charged** (see [5.1](#51-rejected-requests-what-you-are-charged-and-what-is-refunded)). |
 | `429 Too Many Requests` | Per-IP or per-key rate limit exceeded. Response body includes `retryAfterMs`. | Back off for the duration in `retryAfterMs`. Do not hammer — repeated 429 will extend the window. |
 | `503 Service Unavailable` | An upstream dependency is down or overloaded. The `code` field clarifies: `CIRCUIT_OPEN` (Anthropic or a registry is failing), `BACKPRESSURE` (too many in-flight `/orchestrate`), `gasless_not_operational`, `SERVICE_ERROR` (budget service). | Retry with exponential backoff (start at 1s, cap at 30s, jitter). If the failure persists for more than a minute, check the status page or contact support. |
 | `504 Gateway Timeout` | The request exceeded the configured timeout (`TIMEOUT_ORCHESTRATE_MS` default 120s, `TIMEOUT_COMPOSE_MS` default 60s). | Shrink the workload, split the pipeline, or retry — upstream agents may be cold. |
@@ -438,6 +495,23 @@ rejected for its *form* — missing required field, malformed body, bad UUID, a
 `status` outside the A2A enum, or a missing `x-a2a-key` on a tenant-scoped endpoint
 — you are **not charged at all**, on either rail. No budget debit, no on-chain
 settle. The response is `400` (or `403 A2A_KEY_REQUIRED`) instead of `402`.
+
+**A `/compose` field mapping is validated before the charge too — twice.** Its
+*shape* (the rules in [Section 3](#compose--passing-one-field-from-the-previous-step-inputfromprevious))
+is checked with the rest of the body, so a malformed `inputFromPrevious` is a
+`400` with **no debit and no discovery call**. Its *resolution* against the
+previous step's output can only happen mid-pipeline, and it is evaluated **before
+that step is debited and before its agent is invoked**. So when a mapping cannot
+be resolved at step `i`:
+
+- steps `0..i-1` stay charged — they ran and delivered their result, which is in
+  the `steps[]` array of the response;
+- **step `i` is not charged at all** — not the per-step debit, not the retry debit;
+- the response is a `400` carrying `errorCode: INPUT_MAPPING_FAILED` plus the
+  partial `steps[]` and the real `totalCostUsdc`.
+
+If step 0 itself had not delivered anything, its prepaid debit is credited back by
+the usual mechanism below.
 
 Some rejections can only be decided *after* the charge, because they require a
 database read and your authenticated identity (does the resource exist, is it
