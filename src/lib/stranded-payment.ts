@@ -58,6 +58,35 @@ export const COMPOSE_STRANDED_PAYMENT_EVENT = 'compose_stranded_payment';
 export const MAX_STRANDABLE_STEPS = MAX_COMPOSE_STEPS - 1;
 
 /**
+ * Tope de agentes que acepta `/orchestrate` (fix-pack AR MENOR-1).
+ *
+ * ⚠️ POR QUÉ EXISTE ESTE SEGUNDO NÚMERO. `MAX_COMPOSE_STEPS` se aplica en UN solo lugar,
+ * el guard de `routes/compose.ts`. El camino insignia NO pasa por ahí: `/orchestrate`
+ * acota el plan por `maxAgents` (schema `maximum: 20`, tres endpoints) y llama a
+ * `composeService.compose()` DIRECTO, y `compose()` no tiene tope propio de steps. O sea
+ * que por ese camino pueden quedar varados hasta 19 steps, no 4: un reporte que afirmara
+ * 4 subestimaría la exposición del camino que más importa, casi cinco veces.
+ *
+ * ⚠️ ESTE VALOR ESPEJA EL SCHEMA DE LA RUTA Y NO PUEDE DIVERGIR EN SILENCIO: el test
+ * `T-COTA-03` lee `src/routes/orchestrate.ts` y exige que TODOS los `maxAgents.maximum`
+ * declarados ahí sean exactamente este número. Si alguien sube el tope de la ruta y no
+ * toca esto, ese test se pone rojo — que es la única forma de que dos números en dos
+ * archivos no se separen sin que nadie se entere.
+ *
+ * NO se "arregla" haciendo que `compose()` acote por `MAX_COMPOSE_STEPS`: eso rechazaría
+ * planes de `/orchestrate` que hoy corren, o sea un cambio de comportamiento del
+ * money-path para arreglar un número de un reporte.
+ */
+export const MAX_ORCHESTRATE_AGENTS = 20;
+
+/**
+ * La cota REAL de steps varables, sobre TODOS los caminos que llegan a `compose()`.
+ * Es la que tiene que usar cualquier reporte de exposición: el peor caso manda.
+ */
+export const MAX_STRANDABLE_STEPS_ANY_PATH =
+  Math.max(MAX_COMPOSE_STEPS, MAX_ORCHESTRATE_AGENTS) - 1;
+
+/**
  * Cota superior de exposición de UN pipeline, en USD (AC-1, re-computable por código —
  * CD-6: la fórmula vive acá y en `scripts/report-stranded-exposure.mjs`, no en prosa).
  *

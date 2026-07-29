@@ -70,6 +70,7 @@ const main = async () => {
 
   const {
     MAX_STRANDABLE_STEPS,
+    MAX_STRANDABLE_STEPS_ANY_PATH,
     maxStrandedExposureUsd,
     recommendedAlertThresholdUsd,
   } = await loadFormula();
@@ -103,19 +104,42 @@ const main = async () => {
   if (priced.length === 0) die('ningún agente del catálogo declara un precio legible');
 
   const top = priced.reduce((max, a) => (a.price > max.price ? a : max), priced[0]);
-  const cota = maxStrandedExposureUsd(top.price);
+  // ⚠️ El PEOR CASO manda, y NO es el de `/compose` (fix-pack AR MENOR-1). El guard de
+  // `MAX_COMPOSE_STEPS` vive sólo en `routes/compose.ts`; `/orchestrate` —el camino
+  // insignia— acota por `maxAgents` (hasta 20) y llama a compose() directo. Reportar 4
+  // acá subestimaba la exposición del camino que más importa casi cinco veces.
+  // Redondeo SÓLO para mostrar: `19 * 0.1` en punto flotante imprime
+  // `1.9000000000000001`, y un reporte de dinero con basura de coma flotante se lee como
+  // un error de cálculo (o se copia con la basura incluida a una env).
+  const usd = (n) => Number(n.toFixed(6));
+  const cotaCompose = usd(maxStrandedExposureUsd(top.price));
+  const cota = usd(MAX_STRANDABLE_STEPS_ANY_PATH * top.price);
+  const umbral = usd(10 * cota);
 
   console.log(`  agentes con precio legible : ${priced.length} de ${agents.length}`);
   console.log(`  agente más caro            : ${top.slug} — ${top.price} USDC`);
-  console.log(`  steps que pueden quedar varados (MAX_COMPOSE_STEPS - 1): ${MAX_STRANDABLE_STEPS}`);
-  console.log(`\n  COTA por pipeline          : ${cota} USD`);
   console.log(
-    `  umbral de alerta sugerido  : ${recommendedAlertThresholdUsd(top.price)} USD` +
-      '  (STRANDED_EXPOSURE_ALERT_THRESHOLD_USD)',
+    `  steps varables por camino  : /compose ${MAX_STRANDABLE_STEPS}  ·  /orchestrate ${MAX_STRANDABLE_STEPS_ANY_PATH}`,
   );
+  console.log(`\n  cota por pipeline /compose : ${cotaCompose} USD`);
+  console.log(`  COTA REAL (peor caso)      : ${cota} USD  ← la que vale`);
+  console.log(
+    `  umbral de alerta sugerido  : ${umbral} USD  (STRANDED_EXPOSURE_ALERT_THRESHOLD_USD)`,
+  );
+  if (usd(recommendedAlertThresholdUsd(top.price)) !== umbral) {
+    console.log(
+      `  (el umbral de 10 × cota de /compose sería ${usd(recommendedAlertThresholdUsd(top.price))} USD:\n` +
+        '   se descarta porque dejaría el camino /orchestrate por debajo del radar)',
+    );
+  }
   console.log(
     '\n  El step que FALLA no entra en la cota: si SU settle quedó sin resolver, eso es\n' +
       '  la otra lista (`compose_settle_unknown`) y se cuenta allá.\n',
+  );
+  console.log(
+    '  ⚠️  Los dos caminos NO tienen el mismo tope: el guard de MAX_COMPOSE_STEPS está\n' +
+      '      sólo en la ruta /compose. /orchestrate acota por maxAgents (hasta 20) y llama\n' +
+      '      a compose() directo, así que ahí la cota es la grande.\n',
   );
   console.log(
     '  ⚠️  Esto es una medición de HOY. El precio por agente no tiene techo en el repo:\n' +

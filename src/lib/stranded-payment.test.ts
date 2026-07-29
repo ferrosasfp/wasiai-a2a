@@ -6,6 +6,10 @@
  * exposición que publicamos no es la que el código puede producir", o "el evento que
  * queda escrito no alcanza para reconciliar".
  */
+
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Agent, StepResult } from '../types/index.js';
 import { MAX_COMPOSE_STEPS } from './compose-limits.js';
@@ -13,7 +17,9 @@ import {
   buildStrandedPaymentEvent,
   COMPOSE_STRANDED_PAYMENT_EVENT,
   collectStrandedSteps,
+  MAX_ORCHESTRATE_AGENTS,
   MAX_STRANDABLE_STEPS,
+  MAX_STRANDABLE_STEPS_ANY_PATH,
   maxStrandedExposureUsd,
   readStrandedMetadata,
   recommendedAlertThresholdUsd,
@@ -63,6 +69,28 @@ describe('HU-306 · la cota de exposición es computable, no prosa', () => {
     // hoy (subirlo no pasa desapercibido). Mismo patrón que `compose-limits`.
     expect(MAX_STRANDABLE_STEPS).toBe(MAX_COMPOSE_STEPS - 1);
     expect(MAX_STRANDABLE_STEPS).toBe(4);
+  });
+
+  it('T-COTA-03: el tope de /orchestrate espeja el schema REAL de la ruta (AR MENOR-1)', () => {
+    // El camino insignia no pasa por el guard de `MAX_COMPOSE_STEPS`: `/orchestrate`
+    // acota por `maxAgents` y llama a compose() directo. Si ese schema sube y este
+    // número no, el reporte de exposición subestima y nadie se entera. Por eso el
+    // número no se "documenta": se verifica contra el fuente de la ruta.
+    const HERE = dirname(fileURLToPath(import.meta.url));
+    const route = readFileSync(
+      join(HERE, '..', 'routes', 'orchestrate.ts'),
+      'utf8',
+    );
+    const maximos = [
+      ...route.matchAll(/maxAgents:\s*\{[^}]*maximum:\s*(\d+)/g),
+    ].map((m) => Number(m[1]));
+    // Premisa: los encontramos de verdad (si la forma del schema cambia, este test
+    // avisa en vez de pasar por vacío).
+    expect(maximos.length).toBeGreaterThanOrEqual(3);
+    expect([...new Set(maximos)]).toEqual([MAX_ORCHESTRATE_AGENTS]);
+    // …y la cota que usa cualquier reporte es el PEOR caso de los dos caminos.
+    expect(MAX_STRANDABLE_STEPS_ANY_PATH).toBe(MAX_ORCHESTRATE_AGENTS - 1);
+    expect(MAX_STRANDABLE_STEPS_ANY_PATH).toBeGreaterThan(MAX_STRANDABLE_STEPS);
   });
 
   it('T-COTA-02: la cota es pasos × precio, y el umbral recomendado es 10 × cota', () => {
