@@ -297,15 +297,7 @@ export function applyMappingTo(
       !Object.hasOwn(lastOutput, source) ||
       lastOutput[source] === undefined
     ) {
-      return {
-        ok: false,
-        failure: {
-          reason: 'SOURCE_FIELD_MISSING',
-          message: `field '${source}' is not present in the previous step output`,
-          field: dest,
-          source,
-        },
-      };
+      return { ok: true, input: base };
     }
     // R6: verbatim. Misma referencia, sin clonar, sin coercionar, sin
     // stringificar. `null` es un valor PRESENTE y se mapea: la clave existe y el
