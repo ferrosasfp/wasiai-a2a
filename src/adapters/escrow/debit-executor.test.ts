@@ -446,8 +446,13 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
     } as any);
 
     // NO tira: el caller está en un camino de money-safety y un throw perdería el
-    // veredicto del settle. Devuelve `false` (AR BLQ-MEDIO-2): el estado NO quedó
+    // veredicto del settle. Devuelve el hecho (AR BLQ-MEDIO-2): el estado NO quedó
     // escrito, y eso ahora es un dato que el caller puede leer.
+    //
+    // AR de HU-202, BLOQUEANTE 2 — Y ES `write_failed`, NO `rejected_by_guard`. El RPC
+    // tiró, o sea que el UPDATE nunca corrió: nadie sabe si otro tiene el lease. Es la
+    // causa cuyo remedio es la INFRA, no el intent, y el `false` colapsado la hacía
+    // indistinguible de un rechazo ordenado del guard.
     await expect(
       recordDebitSettleStatus({
         intentId: 'intent-1',
@@ -456,7 +461,10 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
         nonce: '7',
         status: 'resolving_settle',
       }),
-    ).resolves.toBe(false);
+    ).resolves.toEqual({
+      outcome: 'write_failed',
+      detail: 'INVALID_SETTLE_STATUS: resolving_settle',
+    });
 
     expect(mockLogError).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -475,7 +483,7 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
   // así que el candado de la HU colgaba de un write incapaz de reportar su fracaso. La
   // propiedad afirmada es que ese caso se detecta Y se grita: si no, la fila queda
   // auto-reclamable y el reconciliador puede re-enviar el hop 2 a ciegas.
-  it('T-198-AR: applied=false (guard rechazó el write) → false + log loud, sin error del RPC', async () => {
+  it('T-198-AR: applied=false (guard rechazó el write) → rejected_by_guard + log loud, sin error del RPC', async () => {
     mockLogError.mockClear();
     mockRpc.mockResolvedValue({
       data: [{ applied: false, current_status: 'settled' }],
@@ -493,7 +501,15 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
 
     // NO hubo `error` del RPC y aun así el write no se aplicó: exactamente el modo de
     // fallo que el `if (error)` NO cubría.
-    expect(ok).toBe(false);
+    //
+    // AR de HU-202, BLOQUEANTE 2 — ACÁ SÍ ES `rejected_by_guard`, Y ES LO OPUESTO al test
+    // de arriba: el UPDATE corrió, afectó 0 filas, y el estado real de la fila viaja en el
+    // resultado. Los dos tests dan `expect.not` del otro, así que el día que alguien los
+    // vuelva a colapsar en un booleano, uno de los dos se pone rojo.
+    expect(ok).toEqual({
+      outcome: 'rejected_by_guard',
+      currentStatus: 'settled',
+    });
     expect(mockLogError).toHaveBeenCalledWith(
       expect.objectContaining({
         applied: false,
@@ -556,7 +572,7 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
       status: 'resolving_settle',
     });
 
-    expect(ok).toBe(true);
+    expect(ok).toEqual({ outcome: 'applied' });
     expect(mockLogError).not.toHaveBeenCalled();
   });
 
@@ -579,7 +595,13 @@ describe('recordDebitSettleStatus wrapper — llama record_debit_settle_status',
       status: 'resolving_settle',
     });
 
-    expect(ok).toBe(false);
+    // AR de HU-202, BLOQUEANTE 2 — `write_failed`, NO `rejected_by_guard`: sin el flag
+    // `applied` no hay NINGÚN hecho sobre la fila, así que afirmar "el guard me rechazó"
+    // sería inventarlo. La distinción importa justo acá, en el orden de release inverso.
+    expect(ok).toEqual({
+      outcome: 'write_failed',
+      detail: 'RPC returned no `applied` flag',
+    });
     expect(mockLogError).toHaveBeenCalledWith(
       expect.objectContaining({ applied: null }),
       expect.stringContaining('no `applied` flag'),

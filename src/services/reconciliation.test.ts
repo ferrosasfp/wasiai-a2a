@@ -32,6 +32,14 @@ vi.mock('../adapters/escrow/debit-capture.js', () => ({
   isEscrowSettleEnabled: () => mockIsEscrowSettleEnabled(),
 }));
 
+// AR de HU-202, BLOQUEANTE 3: `releaseHop2Lease` reusa el único escritor del lease.
+const mockRecordDebitSettleStatus = vi.hoisted(() =>
+  vi.fn(async (_a: unknown) => ({ outcome: 'applied' as const })),
+);
+vi.mock('../adapters/escrow/debit-executor.js', () => ({
+  recordDebitSettleStatus: (a: unknown) => mockRecordDebitSettleStatus(a),
+}));
+
 const mockReverify = vi.hoisted(() => vi.fn());
 const mockReadEscrowBalance = vi.hoisted(() => vi.fn());
 vi.mock('../adapters/escrow/reconciler-onchain.js', () => ({
@@ -46,8 +54,15 @@ vi.mock('../adapters/escrow-verifier.js', () => ({
   resolveEscrowContract: () => mockResolveEscrow(),
 }));
 
+// AR de HU-202, BLOQUEANTE 3: `getDefaultChainKey` pasa a ser un doble CONTROLABLE. Antes
+// era una constante, así que la rama "no puedo resolver la chain ⟹ no puedo verificar ⟹
+// abortar" era INALCANZABLE desde los tests — y esa rama es la que impide que un entorno
+// mal configurado acepte cualquier hash como evidencia.
+const mockGetDefaultChainKey = vi.hoisted(() =>
+  vi.fn((): string | null => 'base-sepolia'),
+);
 vi.mock('../adapters/registry.js', () => ({
-  getDefaultChainKey: () => 'base-sepolia',
+  getDefaultChainKey: () => mockGetDefaultChainKey(),
   getAdaptersBundle: () => ({
     payment: { supportedTokens: [{ decimals: 6 }] },
   }),
@@ -126,6 +141,13 @@ function wireFrom(opts: {
   // lista real de estados contabilizados en el drift; un doble que descarta los
   // argumentos hace vacuo cualquier test sobre ellos.
   const sigInCalls: Array<{ col: string; values: readonly string[] }> = [];
+  // AR de HU-202, BLOQUEANTE 3 — MISMA LECCIÓN QUE `.in()`, APLICADA A `.eq()`/`.is()`.
+  // Sin capturar estos argumentos, el doble devuelve `sigResult` sea cual sea el filtro,
+  // así que `readLeasedRow` podría pedir `debit_settle_status = 'settled'` (o dejar de
+  // exigir que NO haya tx de resolución) y ningún test lo vería. Probado con mutación: las
+  // dos mutaciones SOBREVIVÍAN hasta que estas dos líneas existieron.
+  const sigEqCalls: Array<{ col: string; value: unknown }> = [];
+  const sigIsCalls: Array<{ col: string; value: unknown }> = [];
   mockFrom.mockImplementation(((table: string) => {
     const result = table === 'a2a_agent_keys' ? keyResult : sigResult;
     const b: Record<string, unknown> = {
@@ -136,7 +158,19 @@ function wireFrom(opts: {
         return b;
       },
       update: () => b,
-      eq: () => b,
+      eq: (col?: string, value?: unknown) => {
+        if (table === 'a2a_payment_intent_debit_signatures') {
+          sigEqCalls.push({ col: col ?? '', value });
+        }
+        return b;
+      },
+      // AR de HU-202, BLOQUEANTE 3: `readLeasedRow` filtra con `.is('…tx_hash', null)`.
+      is: (col?: string, value?: unknown) => {
+        if (table === 'a2a_payment_intent_debit_signatures') {
+          sigIsCalls.push({ col: col ?? '', value });
+        }
+        return b;
+      },
       in: (col?: string, values?: readonly string[]) => {
         if (table === 'a2a_payment_intent_debit_signatures') {
           sigInCalls.push({ col: col ?? '', values: values ?? [] });
@@ -153,6 +187,8 @@ function wireFrom(opts: {
   return {
     sigSelectCols: () => sigSelectCols,
     sigInCalls: () => sigInCalls,
+    sigEqCalls: () => sigEqCalls,
+    sigIsCalls: () => sigIsCalls,
     /** Valores del `.in()` sobre `debit_settle_status` (el filtro de estados). */
     settleStatusFilter: () =>
       sigInCalls.find((c) => c.col === 'debit_settle_status')?.values ?? [],
@@ -181,6 +217,11 @@ function wireRpc(opts: {
 beforeEach(() => {
   vi.clearAllMocks();
   mockIsEscrowSettleEnabled.mockReturnValue(true);
+  // `clearAllMocks` limpia las llamadas pero NO las implementaciones: sin este reset, el
+  // `write_failed` de T-RL3 se filtra a los tests siguientes.
+  mockRecordDebitSettleStatus.mockReset();
+  mockRecordDebitSettleStatus.mockResolvedValue({ outcome: 'applied' });
+  mockGetDefaultChainKey.mockReturnValue('base-sepolia');
   mockResolveEscrow.mockReturnValue(
     '0x7777777777777777777777777777777777777777',
   );
@@ -1283,5 +1324,579 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
     }) as any);
 
     await expect(reconciliationService.listAmbiguous()).rejects.toThrow();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// HU-202 — LEASE DEL HOP 2. El lado settle del reconciliador no puede re-enviar un
+// pago cuando existe un intento de hop 2 persistido y sin resolver.
+//
+// QUÉ MIDEN ESTOS TESTS: **si sale o no un segundo pago al seller**
+// (`mockSettleSeam`), y **si se reembolsa o no** al buyer. No miden qué función se
+// llamó ni con qué nombre de estado. Las dos direcciones están cubiertas a propósito:
+// sobre-corregir acá deja al seller sin cobrar y nadie mira esas filas.
+//
+// EL DOBLE DEL CLAIM NO ESTÁ HARDCODEADO. `claimPredicate` es un MODELO FIEL del
+// `WHERE` de `claim_reconciliation` (migración 20260729000000), así que estos tests
+// derivan `claimed` del ESTADO DE LA FILA en vez de que el test elija la respuesta que
+// le conviene — que sería asumir justo lo que hay que probar. La correspondencia entre
+// el modelo y el SQL real la canda `test/hu202-hop2-lease.migration.test.ts`.
+// ════════════════════════════════════════════════════════════════════
+describe('HU-202 lease del hop 2: qué re-envía y qué no el reconciliador', () => {
+  type LeaseRowState = {
+    debit_settle_status: string;
+    debit_resolution_tx_hash: string | null;
+    debit_hop2_attempted_at: string | null;
+  };
+
+  /**
+   * Modelo del `WHERE` del UPDATE de `claim_reconciliation` (20260729000000), traducido
+   * 1-a-1 desde el SQL:
+   *
+   *   AND (p_side='refund' OR hop2_attempted_at IS NULL OR resolution_tx IS NOT NULL)
+   *   AND ( status IN ('hop1_confirmed','reconciliation_pending')
+   *         OR (status = v_target AND (p_side='refund' OR resolution_tx IS NOT NULL))
+   *         OR (p_side='refund' AND status='resolving_settle') )
+   */
+  function claimPredicate(
+    row: LeaseRowState,
+    side: 'settle' | 'refund',
+  ): boolean {
+    const target = side === 'settle' ? 'resolving_settle' : 'resolving_refund';
+    const leaseGuard =
+      side === 'refund' ||
+      row.debit_hop2_attempted_at === null ||
+      row.debit_resolution_tx_hash !== null;
+    const stateGuard =
+      ['hop1_confirmed', 'reconciliation_pending'].includes(
+        row.debit_settle_status,
+      ) ||
+      (row.debit_settle_status === target &&
+        (side === 'refund' || row.debit_resolution_tx_hash !== null)) ||
+      (side === 'refund' && row.debit_settle_status === 'resolving_settle');
+    return leaseGuard && stateGuard;
+  }
+
+  /** Cablea el claim para que RESPONDA COMO EL SQL sobre esa fila. */
+  function wireClaimFromRow(row: LeaseRowState) {
+    mockRpc.mockImplementation(((
+      name: string,
+      args: Record<string, string>,
+    ) => {
+      if (name === 'claim_reconciliation') {
+        const claimed = claimPredicate(row, args.p_side as 'settle' | 'refund');
+        return Promise.resolve({
+          data: [
+            {
+              claimed,
+              resolution_tx_hash: claimed ? row.debit_resolution_tx_hash : null,
+              amount_atomic: claimed ? AMOUNT_ATOMIC : null,
+            },
+          ],
+          error: null,
+        });
+      }
+      if (name === 'record_reconciliation_resolution') {
+        return Promise.resolve({ data: [{ applied: true }], error: null });
+      }
+      return Promise.resolve({ data: null, error: null });
+      // biome-ignore lint/suspicious/noExplicitAny: test double for supabase builder
+    }) as any);
+  }
+
+  /** Corre `resolveIntent` sobre una fila en ese estado y devuelve qué pasó con la plata. */
+  async function resolveWithRow(row: LeaseRowState, verdict = 'confirmed') {
+    mockReverify.mockResolvedValue(verdict);
+    wireFrom({ sigResult: { data: sigRow(row), error: null } });
+    wireClaimFromRow(row);
+    mockSettleSeam.mockResolvedValue({
+      status: 'settled',
+      txHash: '0xSECOND_PAYMENT',
+      finalAmountUsd: 2,
+    });
+    const out = await reconciliationService.resolveIntent(INTENT_ID);
+    const recordCall = mockRpc.mock.calls.find(
+      (c) => c[0] === 'record_reconciliation_resolution',
+    )?.[1] as { p_refund_amount_usd?: number | null } | undefined;
+    return {
+      out,
+      /** ¿SALIÓ un segundo pago al seller? Es la pregunta de dinero de esta HU. */
+      secondPaymentSent: mockSettleSeam.mock.calls.length > 0,
+      /** ¿Se acreditó budget al buyer? */
+      refundedUsd: recordCall?.p_refund_amount_usd ?? null,
+    };
+  }
+
+  // La fila leaseada: el hop 2 se intentó y no hay tx de resolución que verificar.
+  const LEASED: LeaseRowState = {
+    debit_settle_status: 'resolving_settle',
+    debit_resolution_tx_hash: null,
+    debit_hop2_attempted_at: '2026-07-29T10:00:00.000Z',
+  };
+
+  it('AC-1 (F, el peor: nadie se murió) — con el hop 2 EN VUELO, resolver el intent NUNCA manda un segundo pago', async () => {
+    // El caso F NO necesita ningún crash: `record_debit_hop1` dejaba la fila en
+    // `hop1_confirmed` durante TODA la ventana del hop 2, y un click en el dashboard
+    // durante un settle lento normal la re-enviaba. Con el lease la fila está leaseada
+    // durante esa ventana.
+    const r = await resolveWithRow(LEASED);
+
+    expect(r.secondPaymentSent).toBe(false);
+    expect(r.refundedUsd).toBeNull();
+    // Y el operador recibe una instrucción, no un "ya está" que lo mande a otra cosa.
+    expect(r.out.status).toBe('awaiting_manual_settle_evidence');
+  });
+
+  it('AC-2 (B) — si el proceso murió DESPUÉS de que el request del hop 2 salió, NUNCA se re-envía sin verificar antes una tx on-chain', async () => {
+    // B deja exactamente el mismo rastro que F: lease tomado, sin tx de resolución.
+    const r = await resolveWithRow(LEASED);
+    expect(r.secondPaymentSent).toBe(false);
+  });
+
+  it('AC-3 (C) — si el hop 2 pagó pero el flip terminal falló, NUNCA se re-envía automáticamente', async () => {
+    // C: el settle aterrizó y el txHash se perdió sin persistirse. El lease sobrevive al
+    // fallo del flip, así que la fila queda igual de intocable.
+    const r = await resolveWithRow(LEASED);
+    expect(r.secondPaymentSent).toBe(false);
+  });
+
+  it('AC-4 (G) — una fila estampada que quedó con un status auto-reclamable TAMPOCO se re-envía (el guard no depende del status)', async () => {
+    // G es el caso en que el estado del ciclo de vida no quedó donde se creía. El guard
+    // del stamp es el que hace que el candado no cuelgue de un string: mismo `status`
+    // que el agujero original, pero con el hecho del hop 2 persistido.
+    const r = await resolveWithRow({
+      debit_settle_status: 'hop1_confirmed',
+      debit_resolution_tx_hash: null,
+      debit_hop2_attempted_at: '2026-07-29T10:00:00.000Z',
+    });
+
+    expect(r.secondPaymentSent).toBe(false);
+  });
+
+  it('AC-5 (A) — LA DIRECCIÓN CONTRARIA: sin ningún intento de hop 2 persistido, el seller SÍ cobra solo', async () => {
+    // Si esto se pusiera rojo, el fix habría cambiado un doble pago por un seller que
+    // nunca cobra — y nadie mira esas filas. Es la mitad que hace que el lease valga.
+    const r = await resolveWithRow({
+      debit_settle_status: 'hop1_confirmed',
+      debit_resolution_tx_hash: null,
+      debit_hop2_attempted_at: null,
+    });
+
+    expect(r.secondPaymentSent).toBe(true);
+    expect(r.out.status).toBe('settled');
+    expect(r.out.txHash).toBe('0xSECOND_PAYMENT');
+  });
+
+  it('AC-6 (D) — LA DIRECCIÓN CONTRARIA: tras un rechazo inequívoco (lease liberado), el seller SÍ cobra solo', async () => {
+    // `settleEscrowAware` libera el lease con el veredicto `unequivocal`: baja a
+    // `reconciliation_pending` y limpia el stamp. Si el stamp NO se limpiara, el rechazo
+    // NORMAL del facilitator dejaría al seller sin cobrar automáticamente.
+    const r = await resolveWithRow({
+      debit_settle_status: 'reconciliation_pending',
+      debit_resolution_tx_hash: null,
+      debit_hop2_attempted_at: null,
+    });
+
+    expect(r.secondPaymentSent).toBe(true);
+    expect(r.out.status).toBe('settled');
+  });
+
+  it('AC-7 (refund) — el lease NUNCA bloquea el reembolso del buyer cuando el hop 1 no movió fondos', async () => {
+    // Asimetría deliberada (MNR-4 de HU-198): el refund es budget-only, idempotente y no
+    // manda ningún hop 2, así que no puede doble-pagar. Bloquearlo dejaría al único actor
+    // sin culpa —el buyer— con el débito off-chain puesto para siempre.
+    const r = await resolveWithRow(LEASED, 'not_confirmed');
+
+    expect(r.secondPaymentSent).toBe(false); // NUNCA un transfer en el lado refund
+    expect(r.refundedUsd).toBe(2); // el budget del buyer SÍ vuelve
+    expect(r.out.status).toBe('refunded');
+  });
+
+  it('AC-1b — una fila leaseada CON tx de hop 2 sí se re-claima, pero para VERIFICARLA on-chain, no para re-enviar a ciegas', async () => {
+    // Cuando hay hash hay algo que verificar: el crash-recovery de `resolveIntent` lo
+    // re-verifica ANTES de decidir. Con verify OK el efecto es el flip terminal SIN un
+    // segundo pago.
+    mockVerifyDefaultChainSettle.mockResolvedValue({ ok: true, warn: false });
+    const r = await resolveWithRow({
+      debit_settle_status: 'resolving_settle',
+      debit_resolution_tx_hash: '0xPREVIOUS_HOP2',
+      debit_hop2_attempted_at: '2026-07-29T10:00:00.000Z',
+    });
+
+    expect(r.secondPaymentSent).toBe(false);
+    expect(r.out.status).toBe('settled');
+    expect(r.out.txHash).toBe('0xPREVIOUS_HOP2');
+  });
+
+  it('AC-8 (superficie) — una fila leaseada viaja con CUÁNDO se intentó el hop 2, no sólo con su estado', async () => {
+    // Sin la edad, un settle en vuelo de hace 2 segundos y un hop 2 parado de hace 40
+    // minutos se ven idénticos en el panel: la lista se satura de ruido transitorio y
+    // deja de mirarse. La superficie es parte del fix.
+    const wired = wireFrom({
+      sigResult: {
+        data: [
+          sigRow({
+            debit_settle_status: 'resolving_settle',
+            debit_hop2_attempted_at: '2026-07-29T10:00:00.000Z',
+          }),
+        ],
+        error: null,
+      },
+    });
+
+    const rows = await reconciliationService.listPending();
+
+    expect(rows[0]?.hop2_attempted_at).toBe('2026-07-29T10:00:00.000Z');
+    // Y la query pide la columna de verdad (si no, el campo sería SIEMPRE null en prod).
+    expect(wired.sigSelectCols()).toContain('debit_hop2_attempted_at');
+  });
+
+  it('AC-8b (superficie) — una fila SIN intento de hop 2 NUNCA se presenta como si lo hubiera tenido', async () => {
+    wireFrom({
+      sigResult: {
+        data: [sigRow({ debit_settle_status: 'hop1_confirmed' })],
+        error: null,
+      },
+    });
+
+    const rows = await reconciliationService.listPending();
+
+    expect(rows[0]?.hop2_attempted_at).toBeNull();
+  });
+
+  it('AC-9 (superficie) — la lista de pendientes NUNCA devuelve vacío cuando la query falló', async () => {
+    // Invariante heredada de HU-201: un `[]` silencioso sobre plata retenida afirma una
+    // completitud falsa. Tiene que TIRAR.
+    wireFrom({
+      sigResult: { data: null, error: { message: 'boom' } },
+    });
+
+    await expect(reconciliationService.listPending()).rejects.toThrow();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// AR de HU-202, BLOQUEANTE 3 — LA PUERTA DE SALIDA DE UNA FILA LEASEADA.
+//
+// EL AGUJERO QUE CIERRAN ESTOS TESTS: HU-202 dejó la fila leaseada sin vencimiento, sin
+// renovación, sin liberación por caída y sin NINGUNA operación soportada que la
+// destrabara. Un deploy en medio del hop 2 la dejaba `resolving_settle` + sin
+// `debit_resolution_tx_hash`, o sea rechazada por `claim_reconciliation` POR DISEÑO: el
+// seller no cobraba nunca y el único remedio era un `UPDATE` a mano contra producción.
+//
+// LO QUE MIDEN: que la fila SE DESTRABA, y con qué calidad de evidencia cada camino.
+// ════════════════════════════════════════════════════════════════════════════
+
+const LEASED_TX =
+  '0xfeedfeed0000000000000000000000000000000000000000000000000000feed';
+
+/** La fila trabada: lease tomado, sin tx de resolución. */
+function leasedRow(overrides: Record<string, unknown> = {}) {
+  return sigRow({
+    debit_settle_status: 'resolving_settle',
+    debit_resolution_tx_hash: null,
+    ...overrides,
+  });
+}
+
+describe('AR-202 B3 — resolveWithHop2Evidence (salida 1: evidencia on-chain)', () => {
+  it('T-EV1: el hash VERIFICADO cierra la fila en `resolved_settled` y persiste la evidencia', async () => {
+    wireFrom({ sigResult: { data: leasedRow(), error: null } });
+    wireRpc({});
+    // La verificación REAL devuelve `{ok:true}` SIN `reason`.
+    mockVerifyDefaultChainSettle.mockResolvedValue({ ok: true });
+
+    const out = await reconciliationService.resolveWithHop2Evidence(INTENT_ID, {
+      txHash: LEASED_TX,
+      resolvedBy: 'ops@wasiai',
+    });
+
+    expect(out.status).toBe('settled');
+    expect(mockRpc).toHaveBeenCalledWith(
+      'record_reconciliation_resolution',
+      expect.objectContaining({
+        p_terminal_status: 'resolved_settled',
+        p_tx_hash: LEASED_TX,
+        // Ownership: el owner_ref sale del intent leído, NUNCA del caller admin.
+        p_owner_ref: OWNER,
+        // NUNCA un refund por este camino: el seller cobró, el buyer no vuelve atrás.
+        p_refund_amount_usd: null,
+      }),
+    );
+  });
+
+  it('T-EV2: el hash se verifica contra `pay_to` y el monto FIRMADO (no contra lo que diga el operador)', async () => {
+    wireFrom({ sigResult: { data: leasedRow(), error: null } });
+    wireRpc({});
+    mockVerifyDefaultChainSettle.mockResolvedValue({ ok: true });
+
+    await reconciliationService.resolveWithHop2Evidence(INTENT_ID, {
+      txHash: LEASED_TX,
+      resolvedBy: 'ops@wasiai',
+    });
+
+    expect(mockVerifyDefaultChainSettle).toHaveBeenCalledWith({
+      txHash: LEASED_TX,
+      payTo: PAYTO,
+      requiredAmountAtomic: BigInt(AMOUNT_ATOMIC),
+    });
+  });
+
+  it('T-EV3: si la cadena NO respalda el hash → `evidence_rejected` y CERO escrituras (el lease se mantiene)', async () => {
+    wireFrom({ sigResult: { data: leasedRow(), error: null } });
+    wireRpc({});
+    mockVerifyDefaultChainSettle.mockResolvedValue({
+      ok: false,
+      reason: 'RECIPIENT_MISMATCH',
+    });
+
+    const out = await reconciliationService.resolveWithHop2Evidence(INTENT_ID, {
+      txHash: LEASED_TX,
+      resolvedBy: 'ops@wasiai',
+    });
+
+    expect(out.status).toBe('evidence_rejected');
+    expect(mockRpc).not.toHaveBeenCalledWith(
+      'record_reconciliation_resolution',
+      expect.anything(),
+    );
+  });
+
+  // ⚠️ LOS DOS `ok:true` QUE NO SON EVIDENCIA. Sin estos tests, apagar un env
+  // (`SETTLE_VERIFY_ONCHAIN=false`) convertía el endpoint en un rubber-stamp: cualquier
+  // hash cerraría la fila como pagada.
+  it('T-EV4: con el kill-switch de verificación APAGADO (`ok:true, reason:DISABLED`) NO cierra nada', async () => {
+    wireFrom({ sigResult: { data: leasedRow(), error: null } });
+    wireRpc({});
+    mockVerifyDefaultChainSettle.mockResolvedValue({
+      ok: true,
+      reason: 'DISABLED',
+    });
+
+    const out = await reconciliationService.resolveWithHop2Evidence(INTENT_ID, {
+      txHash: LEASED_TX,
+      resolvedBy: 'ops@wasiai',
+    });
+
+    expect(out.status).toBe('indeterminate');
+    expect(mockRpc).not.toHaveBeenCalledWith(
+      'record_reconciliation_resolution',
+      expect.anything(),
+    );
+  });
+
+  it('T-EV5: con el RPC caído (`ok:true, warn:true` = fail-OPEN de testnet) tampoco cierra: "no pude chequear" no es prueba', async () => {
+    wireFrom({ sigResult: { data: leasedRow(), error: null } });
+    wireRpc({});
+    mockVerifyDefaultChainSettle.mockResolvedValue({
+      ok: true,
+      reason: 'RPC_UNAVAILABLE',
+      warn: true,
+    });
+
+    const out = await reconciliationService.resolveWithHop2Evidence(INTENT_ID, {
+      txHash: LEASED_TX,
+      resolvedBy: 'ops@wasiai',
+    });
+
+    expect(out.status).toBe('indeterminate');
+    expect(mockRpc).not.toHaveBeenCalledWith(
+      'record_reconciliation_resolution',
+      expect.anything(),
+    );
+  });
+
+  it('T-EV5b: un `ok:true` con CUALQUIER otro `reason` tampoco cierra (la verificación real no trae `reason`)', async () => {
+    // Defensa contra el futuro: si mañana `settle-verifier` agrega un `reason` nuevo del
+    // lado `ok:true` —como ya hizo con DISABLED y RPC_UNAVAILABLE—, ese caso NO puede
+    // convertirse en "evidencia" por omisión. Sólo el `{ok:true}` PELADO cierra la fila.
+    wireFrom({ sigResult: { data: leasedRow(), error: null } });
+    wireRpc({});
+    mockVerifyDefaultChainSettle.mockResolvedValue({
+      ok: true,
+      reason: 'SOME_FUTURE_DEGRADATION',
+    });
+
+    const out = await reconciliationService.resolveWithHop2Evidence(INTENT_ID, {
+      txHash: LEASED_TX,
+      resolvedBy: 'ops@wasiai',
+    });
+
+    expect(out.status).not.toBe('settled');
+    expect(mockRpc).not.toHaveBeenCalledWith(
+      'record_reconciliation_resolution',
+      expect.anything(),
+    );
+  });
+
+  it('T-EV5c: sin chain por defecto resoluble NO se verifica NADA → `indeterminate` (un entorno mal configurado no puede sellar un hash)', async () => {
+    // `verifyDefaultChainSettle` devuelve `{ok:true}` PELADO cuando no puede resolver el
+    // chainKey (registry sin inicializar). Sin este corte previo, ese `{ok:true}` sería
+    // indistinguible de una verificación real y cerraría la fila con cualquier hash.
+    mockGetDefaultChainKey.mockReturnValue(null);
+    wireFrom({ sigResult: { data: leasedRow(), error: null } });
+    wireRpc({});
+    mockVerifyDefaultChainSettle.mockResolvedValue({ ok: true });
+
+    const out = await reconciliationService.resolveWithHop2Evidence(INTENT_ID, {
+      txHash: LEASED_TX,
+      resolvedBy: 'ops@wasiai',
+    });
+
+    expect(out.status).toBe('indeterminate');
+    expect(mockVerifyDefaultChainSettle).not.toHaveBeenCalled();
+    expect(mockRpc).not.toHaveBeenCalledWith(
+      'record_reconciliation_resolution',
+      expect.anything(),
+    );
+  });
+
+  it('T-EV5d: la fila que busca es EXACTAMENTE la trabada: `resolving_settle` Y sin tx de resolución', async () => {
+    // Sin esto, `readLeasedRow` podría apuntar a cualquier otro estado (o dejar de exigir
+    // que no haya tx) y las dos salidas actuarían sobre filas SANAS o YA RESUELTAS: un
+    // `release-lease` sobre una fila `settled` la devolvería al reconciliador y el seller
+    // cobraría dos veces. Es el filtro, no el efecto, lo que acota el daño.
+    const w = wireFrom({ sigResult: { data: leasedRow(), error: null } });
+    wireRpc({});
+    mockVerifyDefaultChainSettle.mockResolvedValue({ ok: true });
+
+    await reconciliationService.resolveWithHop2Evidence(INTENT_ID, {
+      txHash: LEASED_TX,
+      resolvedBy: 'ops@wasiai',
+    });
+
+    expect(w.sigEqCalls()).toContainEqual({
+      col: 'debit_settle_status',
+      value: 'resolving_settle',
+    });
+    expect(w.sigEqCalls()).toContainEqual({
+      col: 'debit_validation_status',
+      value: 'valid',
+    });
+    // El `IS NULL` sobre la tx de resolución es lo que separa "trabada" de "ya resuelta".
+    expect(w.sigIsCalls()).toContainEqual({
+      col: 'debit_resolution_tx_hash',
+      value: null,
+    });
+  });
+
+  it('T-EV6: sobre una fila que NO está leaseada → `not_leased`, sin verificar ni escribir', async () => {
+    wireFrom({ sigResult: { data: null, error: null } });
+    wireRpc({});
+
+    const out = await reconciliationService.resolveWithHop2Evidence(INTENT_ID, {
+      txHash: LEASED_TX,
+      resolvedBy: 'ops@wasiai',
+    });
+
+    expect(out.status).toBe('not_leased');
+    expect(mockVerifyDefaultChainSettle).not.toHaveBeenCalled();
+  });
+
+  it('T-EV7: con el flag OFF no toca nada (mismo gate que `resolveIntent`)', async () => {
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
+    const out = await reconciliationService.resolveWithHop2Evidence(INTENT_ID, {
+      txHash: LEASED_TX,
+      resolvedBy: 'ops@wasiai',
+    });
+    expect(out.status).toBe('flag_off');
+    expect(mockFrom).not.toHaveBeenCalled();
+  });
+});
+
+describe('AR-202 B3 — releaseHop2Lease (salida 2: atestación auditada)', () => {
+  it('T-RL1: libera el lease bajando la fila a `reconciliation_pending` (que además limpia el stamp)', async () => {
+    wireFrom({ sigResult: { data: leasedRow(), error: null } });
+
+    const out = await reconciliationService.releaseHop2Lease(INTENT_ID, {
+      resolvedBy: 'ops@wasiai',
+      note: 'no transfer to the seller in the last 3h of blocks',
+    });
+
+    expect(out.status).toBe('lease_released');
+    expect(mockRecordDebitSettleStatus).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intentId: INTENT_ID,
+        // Ownership desde el intent, no desde el caller admin.
+        ownerRef: OWNER,
+        keyId: KEY_ID,
+        nonce: NONCE,
+        status: 'reconciliation_pending',
+      }),
+    );
+  });
+
+  it('T-RL2: la atestación queda AUDITADA (quién y por qué) — si el re-envío doble-paga, tiene que haber registro', async () => {
+    wireFrom({ sigResult: { data: leasedRow(), error: null } });
+
+    await reconciliationService.releaseHop2Lease(INTENT_ID, {
+      resolvedBy: 'ops@wasiai',
+      note: 'checked the explorer',
+    });
+
+    expect(logSpy.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resolvedBy: 'ops@wasiai',
+        note: 'checked the explorer',
+        audit: 'ESCROW_HOP2_LEASE_RELEASED_BY_ATTESTATION',
+      }),
+      expect.stringContaining('RELEASED'),
+    );
+  });
+
+  it('T-RL3: si la escritura NO aplica, NO miente: la fila sigue trabada y se dice', async () => {
+    wireFrom({ sigResult: { data: leasedRow(), error: null } });
+    mockRecordDebitSettleStatus.mockResolvedValue({
+      // biome-ignore lint/suspicious/noExplicitAny: discriminated union narrow in a double
+      outcome: 'write_failed' as any,
+    });
+
+    const out = await reconciliationService.releaseHop2Lease(INTENT_ID, {
+      resolvedBy: 'ops@wasiai',
+      note: 'n',
+    });
+
+    expect(out.status).toBe('indeterminate');
+    expect(logSpy.error).toHaveBeenCalled();
+  });
+
+  it('T-RL4: sobre una fila NO leaseada → `not_leased` y CERO escrituras (no puede tocar filas sanas)', async () => {
+    wireFrom({ sigResult: { data: null, error: null } });
+
+    const out = await reconciliationService.releaseHop2Lease(INTENT_ID, {
+      resolvedBy: 'ops@wasiai',
+      note: 'n',
+    });
+
+    expect(out.status).toBe('not_leased');
+    expect(mockRecordDebitSettleStatus).not.toHaveBeenCalled();
+  });
+
+  it('T-RL5: una fila PRE-migración (`resolving_settle` con el stamp en NULL) también tiene salida', async () => {
+    // Es el caso que un filtro por `debit_hop2_attempted_at IS NOT NULL` dejaría afuera:
+    // las filas más viejas, las que más tiempo llevan paradas.
+    wireFrom({
+      sigResult: {
+        data: leasedRow({ debit_hop2_attempted_at: null }),
+        error: null,
+      },
+    });
+
+    const out = await reconciliationService.releaseHop2Lease(INTENT_ID, {
+      resolvedBy: 'ops@wasiai',
+      note: 'n',
+    });
+
+    expect(out.status).toBe('lease_released');
+  });
+
+  it('T-RL6: con el flag OFF no toca nada', async () => {
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
+    const out = await reconciliationService.releaseHop2Lease(INTENT_ID, {
+      resolvedBy: 'ops@wasiai',
+      note: 'n',
+    });
+    expect(out.status).toBe('flag_off');
+    expect(mockRecordDebitSettleStatus).not.toHaveBeenCalled();
   });
 });

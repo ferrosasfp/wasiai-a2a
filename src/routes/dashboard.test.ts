@@ -43,6 +43,9 @@ vi.mock('../services/arbiter.js', () => ({
 const mockListPending = vi.hoisted(() => vi.fn());
 const mockDriftCheck = vi.hoisted(() => vi.fn());
 const mockResolveIntent = vi.hoisted(() => vi.fn());
+// AR de HU-202, BLOQUEANTE 3: las dos salidas de una fila leaseada.
+const mockResolveWithHop2Evidence = vi.hoisted(() => vi.fn());
+const mockReleaseHop2Lease = vi.hoisted(() => vi.fn());
 // HU-201 (AR BLQ-MEDIO-2): la superficie de los deposits RETENIDOS.
 const mockListAmbiguous = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ rows: [], total: 0, truncated: false }),
@@ -64,6 +67,9 @@ vi.mock('../services/reconciliation.js', () => ({
     driftCheck: (...a: unknown[]) => mockDriftCheck(...a),
     listAmbiguous: (...a: unknown[]) => mockListAmbiguous(...a),
     resolveIntent: (...a: unknown[]) => mockResolveIntent(...a),
+    resolveWithHop2Evidence: (...a: unknown[]) =>
+      mockResolveWithHop2Evidence(...a),
+    releaseHop2Lease: (...a: unknown[]) => mockReleaseHop2Lease(...a),
   },
   ReconciliationError: MockReconciliationError,
 }));
@@ -318,6 +324,7 @@ describe('WKH-191c reconciliation admin routes', () => {
         finalAmountUsd: '2.0',
         owner_ref: 'tenant-A',
         debit_settle_status: 'reconciliation_pending',
+        hop2_attempted_at: null,
       },
     ]);
     mockDriftCheck.mockResolvedValue([
@@ -342,6 +349,42 @@ describe('WKH-191c reconciliation admin routes', () => {
     expect(body.pending).toHaveLength(1);
     expect(body.drift).toHaveLength(1);
     expect(body.drift[0].exceedsThreshold).toBe(true);
+    await app.close();
+  });
+
+  // ── HU-202: la edad del intento de hop 2 tiene que LLEGAR al operador ──
+  //
+  // El service la calcula, pero si el endpoint la recorta el operador vuelve a no poder
+  // distinguir un settle EN VUELO (2 segundos) de un hop 2 parado (40 minutos): las dos
+  // son `resolving_settle`. Un candado sobre el CONTRATO del endpoint, no sobre el
+  // service — es lo único que el panel consume.
+  it('T-202-ROUTE: GET /api/reconciliation expone `hop2_attempted_at` en cada fila pendiente', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
+    mockListPending.mockResolvedValue([
+      {
+        intent_id: 'i1',
+        key_id: 'k1',
+        nonce: '7',
+        debit_hop1_tx_hash: '0xabc',
+        finalAmountUsd: '2.0',
+        owner_ref: 'tenant-A',
+        debit_settle_status: 'resolving_settle',
+        hop2_attempted_at: '2026-07-29T10:00:00.000Z',
+      },
+    ]);
+    mockDriftCheck.mockResolvedValue([]);
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/reconciliation',
+      headers: { 'x-admin-token': 'secret' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().pending[0].hop2_attempted_at).toBe(
+      '2026-07-29T10:00:00.000Z',
+    );
     await app.close();
   });
 
@@ -516,6 +559,173 @@ describe('WKH-191c reconciliation admin routes', () => {
     });
     expect(res.statusCode).toBe(409);
     expect(res.json()).toEqual({ error_code: 'NOT_PENDING' });
+    await app.close();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// AR de HU-202, BLOQUEANTE 3 — LOS DOS VERBOS QUE DESTRABAN UNA FILA LEASEADA.
+//
+// Antes del fix-pack, `/resolve` le decía al operador "resolvé con esa evidencia" y NO
+// EXISTÍA NINGÚN ENDPOINT QUE LO PERMITIERA: el único remedio real era un `UPDATE` a mano
+// contra producción. Estos tests candan que los verbos existan, que estén fail-closed, y
+// que no acepten una atestación anónima.
+// ════════════════════════════════════════════════════════════════════════════
+const EV_TX =
+  '0xfeedfeed0000000000000000000000000000000000000000000000000000feed';
+
+describe('AR-202 B3 — POST /api/reconciliation/:id/hop2-evidence', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('T-EVR1: sin DASHBOARD_ADMIN_TOKEN → 503 (fail-closed, igual que /resolve)', async () => {
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/hop2-evidence',
+      payload: { txHash: EV_TX, resolvedBy: 'ops' },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(mockResolveWithHop2Evidence).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('T-EVR2: con token válido delega el hash y el autor al service', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockResolveWithHop2Evidence.mockResolvedValue({
+      status: 'settled',
+      txHash: EV_TX,
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/hop2-evidence',
+      headers: { 'x-admin-token': 'secret' },
+      payload: { txHash: EV_TX, resolvedBy: 'ops@wasiai', note: 'explorer' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ status: 'settled', txHash: EV_TX });
+    expect(mockResolveWithHop2Evidence).toHaveBeenCalledWith('i1', {
+      txHash: EV_TX,
+      resolvedBy: 'ops@wasiai',
+      note: 'explorer',
+    });
+    await app.close();
+  });
+
+  it('T-EVR3: un `txHash` que no es un hash de 32 bytes → 400 y NUNCA llega al service', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/hop2-evidence',
+      headers: { 'x-admin-token': 'secret' },
+      payload: { txHash: 'nope', resolvedBy: 'ops' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(mockResolveWithHop2Evidence).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('T-EVR4: sin `resolvedBy` → 400 (una resolución de dinero anónima no es auditable)', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/hop2-evidence',
+      headers: { 'x-admin-token': 'secret' },
+      payload: { txHash: EV_TX, resolvedBy: '  ' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(mockResolveWithHop2Evidence).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
+
+describe('AR-202 B3 — POST /api/reconciliation/:id/release-lease', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('T-RLR1: sin DASHBOARD_ADMIN_TOKEN → 503 (fail-closed)', async () => {
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      payload: { resolvedBy: 'ops', note: 'n' },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(mockReleaseHop2Lease).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('T-RLR2: con token + atestación completa → delega y devuelve el outcome', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockReleaseHop2Lease.mockResolvedValue({ status: 'lease_released' });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      headers: { 'x-admin-token': 'secret' },
+      payload: { resolvedBy: 'ops@wasiai', note: 'no transfer on chain' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ status: 'lease_released' });
+    expect(mockReleaseHop2Lease).toHaveBeenCalledWith('i1', {
+      resolvedBy: 'ops@wasiai',
+      note: 'no transfer on chain',
+    });
+    await app.close();
+  });
+
+  it('T-RLR3: sin `note` → 400. Es LA única operación que vuelve pagable una fila sin prueba: sin motivo registrado es el `UPDATE` a mano con otro nombre', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      headers: { 'x-admin-token': 'secret' },
+      payload: { resolvedBy: 'ops@wasiai' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error_code: 'ATTESTATION_REQUIRED' });
+    expect(mockReleaseHop2Lease).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('T-RLR4: sin `resolvedBy` → 400', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      headers: { 'x-admin-token': 'secret' },
+      payload: { note: 'n' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(mockReleaseHop2Lease).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
+
+describe('AR-202 B3 — /resolve deja de nombrar una acción inexistente', () => {
+  it('T-AR1: `awaiting_manual_settle_evidence` nombra los DOS endpoints que sí existen', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    mockResolveIntent.mockResolvedValue({
+      status: 'awaiting_manual_settle_evidence',
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/resolve',
+      headers: { 'x-admin-token': 'secret' },
+    });
+    const action = String(res.json().action_required);
+    expect(action).toContain('hop2-evidence');
+    expect(action).toContain('release-lease');
     await app.close();
   });
 });

@@ -490,10 +490,14 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
           // AR BLQ-BAJO-1: el operador necesita saber QUÉ hacer, no sólo un slug. Este
           // estado es el único que le pide una acción fuera del panel (ir a la cadena),
           // así que viaja con su instrucción. No revela nada que el admin no vea ya.
+          // AR de HU-202, BLOQUEANTE 3 — ESTE MENSAJE NOMBRABA UNA ACCIÓN INEXISTENTE.
+          // Decía "resolvé con esa evidencia" y no había con qué: el único remedio real
+          // era un `UPDATE` a mano contra producción. Ahora nombra los dos verbos que sí
+          // existen, con la asimetría de evidencia explícita (uno verifica, el otro atesta).
           ...(outcome.status === 'awaiting_manual_settle_evidence'
             ? {
                 action_required:
-                  'The hop2 payment result is UNKNOWN and this intent was NOT resolved. The reconciler will not resend hop2 blind (that could pay the seller twice). Check the chain for a hop2 disbursement to the seller, then resolve with that evidence.',
+                  'The hop2 payment result is UNKNOWN and this intent was NOT resolved. The reconciler will not resend hop2 blind (that could pay the seller twice). Check the chain for a hop2 disbursement to the seller, then use one of: POST /dashboard/api/reconciliation/:intentId/hop2-evidence with {txHash, resolvedBy} if the seller WAS paid (the hash is verified on-chain before anything is written), or POST /dashboard/api/reconciliation/:intentId/release-lease with {resolvedBy, note} to attest that no disbursement exists and hand the row back to the reconciler.',
               }
             : {}),
         });
@@ -503,6 +507,105 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
             errorClass: err instanceof Error ? err.constructor.name : 'unknown',
           },
           'resolveIntent failed',
+        );
+        return sendReconciliationError(reply, err);
+      }
+    },
+  );
+
+  /**
+   * POST /dashboard/api/reconciliation/:intentId/hop2-evidence
+   *
+   * AR de HU-202, BLOQUEANTE 3 (salida 1). Cierra una fila leaseada CON evidencia
+   * on-chain: el `txHash` que manda el operador se VERIFICA contra la cadena (token,
+   * destinatario `pay_to`, monto ≥ el firmado) ANTES de escribir nada. Money-moving en el
+   * sentido de que flipea un terminal ⟹ `requireAdminTokenStrict` (fail-closed), igual que
+   * `/resolve`. El gate del flag vive DENTRO del service.
+   */
+  fastify.post<{
+    Params: { intentId: string };
+    Body: { txHash?: unknown; resolvedBy?: unknown; note?: unknown };
+  }>(
+    '/api/reconciliation/:intentId/hop2-evidence',
+    { config: { rateLimit: false }, preHandler: requireAdminTokenStrict },
+    async (request, reply: FastifyReply) => {
+      const body = request.body ?? {};
+      // Validación de forma ANTES de tocar el service: un `txHash` que no es 0x-hex no es
+      // evidencia de nada, y `resolvedBy` es lo que vuelve auditable la acción.
+      const txHash = typeof body.txHash === 'string' ? body.txHash.trim() : '';
+      const resolvedBy =
+        typeof body.resolvedBy === 'string' ? body.resolvedBy.trim() : '';
+      if (!/^0x[0-9a-fA-F]{64}$/.test(txHash) || resolvedBy === '') {
+        return reply.status(400).send({ error_code: 'INVALID_EVIDENCE' });
+      }
+      try {
+        const outcome = await reconciliationService.resolveWithHop2Evidence(
+          request.params.intentId,
+          {
+            txHash,
+            resolvedBy,
+            note: typeof body.note === 'string' ? body.note : null,
+          },
+        );
+        return reply.status(200).send({
+          status: outcome.status,
+          ...(outcome.txHash !== undefined ? { txHash: outcome.txHash } : {}),
+          ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+        });
+      } catch (err) {
+        request.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'resolveWithHop2Evidence failed',
+        );
+        return sendReconciliationError(reply, err);
+      }
+    },
+  );
+
+  /**
+   * POST /dashboard/api/reconciliation/:intentId/release-lease
+   *
+   * AR de HU-202, BLOQUEANTE 3 (salida 2). Libera el lease sobre una ATESTACIÓN humana de
+   * que NO hay desembolso al seller en la cadena, y devuelve la fila al reconciliador.
+   *
+   * ⚠️ Es la única operación que vuelve pagable una fila sin prueba, así que su seguridad
+   * es procedimental: `requireAdminTokenStrict` + `resolvedBy` y `note` OBLIGATORIOS, que
+   * quedan en el log de auditoría del service. Deliberadamente NO existe ningún camino por
+   * tiempo hacia acá: liberar por edad reabre el doble pago (caso F).
+   */
+  fastify.post<{
+    Params: { intentId: string };
+    Body: { resolvedBy?: unknown; note?: unknown };
+  }>(
+    '/api/reconciliation/:intentId/release-lease',
+    { config: { rateLimit: false }, preHandler: requireAdminTokenStrict },
+    async (request, reply: FastifyReply) => {
+      const body = request.body ?? {};
+      const resolvedBy =
+        typeof body.resolvedBy === 'string' ? body.resolvedBy.trim() : '';
+      const note = typeof body.note === 'string' ? body.note.trim() : '';
+      // Los dos son obligatorios A PROPÓSITO: una liberación sin autor ni motivo es
+      // indistinguible del `UPDATE` a mano que este endpoint viene a reemplazar.
+      if (resolvedBy === '' || note === '') {
+        return reply.status(400).send({ error_code: 'ATTESTATION_REQUIRED' });
+      }
+      try {
+        const outcome = await reconciliationService.releaseHop2Lease(
+          request.params.intentId,
+          { resolvedBy, note },
+        );
+        return reply.status(200).send({
+          status: outcome.status,
+          ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+        });
+      } catch (err) {
+        request.log.error(
+          {
+            errorClass: err instanceof Error ? err.constructor.name : 'unknown',
+          },
+          'releaseHop2Lease failed',
         );
         return sendReconciliationError(reply, err);
       }

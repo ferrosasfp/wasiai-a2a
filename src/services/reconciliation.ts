@@ -23,6 +23,10 @@
 
 import { formatUnits } from 'viem';
 import { isEscrowSettleEnabled } from '../adapters/escrow/debit-capture.js';
+// AR de HU-202, BLOQUEANTE 3: la liberación del lease reusa el ÚNICO escritor del lease
+// (ownership guard + resultado discriminado incluidos). Dos escritores del mismo candado
+// divergen.
+import { recordDebitSettleStatus } from '../adapters/escrow/debit-executor.js';
 import {
   readEscrowBalanceAtomic,
   reverifyDebitedByTxHash,
@@ -111,6 +115,26 @@ export interface PendingRow {
   finalAmountUsd: string;
   owner_ref: string;
   debit_settle_status: string;
+  /**
+   * HU-202 — CUÁNDO se intentó el hop 2, o `null` si no se intentó nunca.
+   *
+   * POR QUÉ VIAJA EN LA LISTA (la superficie es parte del fix, no un extra): desde el
+   * lease, una fila `resolving_settle` puede ser DOS cosas radicalmente distintas y hasta
+   * acá indistinguibles:
+   *   · un settle EN VUELO, sano, de hace 2 segundos — no hay nada que hacer;
+   *   · un hop 2 de resultado DESCONOCIDO de hace 40 minutos — plata parada que necesita
+   *     que un humano vaya a la cadena.
+   * Sin este dato las dos se ven igual, la lista se llena de ruido transitorio y deja de
+   * mirarse — que es exactamente el modo de falla que HU-201 documentó ("un estado que no
+   * auto-actúa y que nadie lista es plata retenida en silencio"), sólo que por saturación
+   * en vez de por omisión.
+   *
+   * `null` con `debit_settle_status='resolving_settle'` es legítimo y significa una fila
+   * anterior a HU-202 (o escrita por el RPC viejo): no afirma "no se intentó", afirma
+   * "no hay registro". Se distingue por `debit_hop1_tx_hash` + la cadena, no por esta
+   * columna.
+   */
+  hop2_attempted_at: string | null;
 }
 
 export type ResolveStatus =
@@ -141,6 +165,82 @@ export interface ResolveOutcome {
   status: ResolveStatus;
   side?: 'settle' | 'refund';
   txHash?: string | null;
+}
+
+/**
+ * AR de HU-202, BLOQUEANTE 3 — LA PUERTA DE SALIDA DE UNA FILA LEASEADA.
+ *
+ * ── EL AGUJERO ──────────────────────────────────────────────────────────────
+ *
+ * HU-202 cerró el re-envío ciego, pero no le dejó a la fila leaseada ninguna forma
+ * soportada de salir: no hay vencimiento, no hay renovación, no hay liberación por caída,
+ * y NINGUNA operación del servicio la destraba. El escenario no necesita nada raro: se
+ * toma el lease, sale el hop 2, y el proceso se reinicia (un deploy, un restart rotativo).
+ * La fila queda `resolving_settle` + estampada + sin `debit_resolution_tx_hash`, o sea que
+ * `claim_reconciliation` la rechaza POR DISEÑO — ningún reintento, ningún click y ningún
+ * barrido pueden volver a tocarla. El seller no cobra nunca.
+ *
+ * Peor: `resolveIntent` contesta `awaiting_manual_settle_evidence` con la instrucción
+ * "revisá la cadena y resolvé con esa evidencia", y ese verbo NO EXISTÍA. El único remedio
+ * real era un `UPDATE` a mano contra producción.
+ *
+ * ── LAS DOS SALIDAS, Y POR QUÉ SON DOS ──────────────────────────────────────
+ *
+ * La pregunta que destraba la fila es "¿el hop 2 le pagó al seller?", y tiene dos
+ * respuestas con calidades de evidencia OPUESTAS, así que no pueden compartir un verbo:
+ *
+ *   (1) SÍ, Y ACÁ ESTÁ EL HASH → `resolveWithHop2Evidence`. La afirmación del operador NO
+ *       se cree: el hash se VERIFICA on-chain (`verifyDefaultChainSettle`, el mismo lector
+ *       que usa el crash-recovery) contra `pay_to` y el monto atómico exacto. Recién si la
+ *       cadena confirma, la fila se cierra `resolved_settled` con el hash persistido. Un
+ *       hash que no verifica NO cierra nada.
+ *
+ *   (2) NO HAY DESEMBOLSO EN LA CADENA → `releaseHop2Lease`. Acá no hay hash que
+ *       verificar: es la afirmación de un NEGATIVO, y este repo no tiene con qué probarlo
+ *       (haría falta el lector de `authorizationState`, TD-201-01, que además no aplica en
+ *       `pieverse`). Así que se trata como lo que es: una ATESTACIÓN humana, autenticada,
+ *       auditada y con `resolvedBy`+`note` OBLIGATORIOS. Libera el lease bajándolo a
+ *       `reconciliation_pending` (que limpia el stamp) ⟹ la fila vuelve a ser
+ *       auto-reclamable ⟹ el reconciliador re-envía y el seller cobra.
+ *
+ * ⚠️ POR QUÉ NO HAY —NI PUEDE HABER— UNA LIBERACIÓN POR TEMPORIZADOR. Un TTL que devuelve
+ * la fila al pool sin que nadie mire la cadena reabre EXACTAMENTE el caso (F): el hop 2
+ * pudo haber aterrizado y el re-envío paga dos veces. El lease no expira porque el hecho
+ * que representa —"se mandó un pago cuyo resultado no conocemos"— tampoco expira. Lo único
+ * que puede resolverlo es evidencia, y la evidencia la trae la cadena o una persona.
+ */
+export interface Hop2EvidenceInput {
+  /** Hash del hop 2 a verificar. Se verifica; no se confía. */
+  txHash: string;
+  /** Quién resuelve. Obligatorio: sin esto la acción no es auditable. */
+  resolvedBy: string;
+  note?: string | null;
+}
+
+export interface ReleaseLeaseInput {
+  /** Quién atesta el negativo. Obligatorio. */
+  resolvedBy: string;
+  /** Qué se miró para concluir que no hubo desembolso. Obligatorio. */
+  note: string;
+}
+
+export type Hop2EvidenceStatus =
+  | 'flag_off'
+  /** No hay ninguna fila leaseada sin resolver para este intent. */
+  | 'not_leased'
+  /** El RPC no pudo decidir (nodo caído) → NO se escribió nada, reintentable. */
+  | 'indeterminate'
+  /** La cadena NO respalda el hash: no paga a `pay_to` el monto exacto. */
+  | 'evidence_rejected'
+  /** Verificado on-chain y cerrado `resolved_settled`. */
+  | 'settled'
+  /** Lease liberado; la fila vuelve al reconciliador. */
+  | 'lease_released';
+
+export interface Hop2EvidenceOutcome {
+  status: Hop2EvidenceStatus;
+  txHash?: string | null;
+  reason?: string;
 }
 
 export interface DriftRow {
@@ -305,6 +405,8 @@ interface PendingSelectRow {
   debit_hop1_tx_hash: string | null;
   debit_settle_status: string;
   owner_ref: string;
+  /** HU-202: el stamp del lease del hop 2 (migración 20260729000000). */
+  debit_hop2_attempted_at: string | null;
 }
 
 /**
@@ -356,6 +458,46 @@ function firstEmbed<T>(embed: T | T[] | null): T | null {
   return Array.isArray(embed) ? (embed[0] ?? null) : embed;
 }
 
+/**
+ * AR de HU-202, BLOQUEANTE 3 — lee LA fila que quedó sin puerta de salida: el lease tomado
+ * y sin resolver. Compartida por las dos salidas para que no puedan discrepar sobre a qué
+ * filas aplican.
+ *
+ * ⚠️ EL CRITERIO ES `resolving_settle` + SIN `debit_resolution_tx_hash`, Y **NO** INCLUYE
+ * `debit_hop2_attempted_at IS NOT NULL` A PROPÓSITO. Una fila escrita antes de la migración
+ * 20260729000000 (o por el RPC viejo) puede estar `resolving_settle` con el stamp en NULL, y
+ * está IGUAL de trabada: el `WHERE` de `claim_reconciliation` la rechaza por la rama del
+ * status. Exigir el stamp dejaría exactamente a esas filas —las más viejas, las que más
+ * tiempo llevan paradas— sin salida soportada, que es el bug que esto viene a cerrar.
+ *
+ * Devuelve `null` si no hay tal fila: el caller contesta `not_leased` y no escribe nada.
+ */
+async function readLeasedRow(
+  intentId: string,
+): Promise<{ row: SigWithIntentRow; intent: IntentEmbed } | null> {
+  const { data, error } = await supabase
+    .from('a2a_payment_intent_debit_signatures')
+    .select(
+      'intent_id, key_id, debit_key_id_hash, debit_nonce::text, debit_amount_atomic::text, ' +
+        'debit_hop1_tx_hash, debit_resolution_tx_hash, debit_settle_status, owner_ref, ' +
+        'a2a_payment_intents!inner(pay_to, chain_id, owner_ref)',
+    )
+    .eq('intent_id', intentId)
+    .eq('debit_validation_status', 'valid')
+    .eq('debit_settle_status', 'resolving_settle')
+    .is('debit_resolution_tx_hash', null)
+    .maybeSingle();
+  if (error) {
+    log.error({ intentId, detail: error.message }, 'readLeasedRow failed');
+    throw new ReconciliationError('INTERNAL');
+  }
+  const row = data as unknown as SigWithIntentRow | null;
+  if (!row) return null;
+  const intent = firstEmbed(row.a2a_payment_intents);
+  if (!intent) return null;
+  return { row, intent };
+}
+
 /** Umbral atomic del drift (env; default 0 → reporta cualquier delta ≠ 0). */
 function getDriftThresholdAtomic(): bigint {
   const raw = process.env.RECONCILE_DRIFT_ALERT_THRESHOLD_ATOMIC;
@@ -387,7 +529,9 @@ export const reconciliationService = {
       .from('a2a_payment_intent_debit_signatures')
       .select(
         'intent_id, key_id, debit_nonce::text, debit_amount_atomic::text, debit_hop1_tx_hash, ' +
-          'debit_settle_status, owner_ref',
+          // HU-202: `debit_hop2_attempted_at` es lo que separa un settle EN VUELO de un
+          // hop 2 parado — las dos aparecen como `resolving_settle`.
+          'debit_settle_status, debit_hop2_attempted_at, owner_ref',
       )
       .eq('debit_validation_status', 'valid')
       .in('debit_settle_status', [...PENDING_STATUSES]);
@@ -404,6 +548,7 @@ export const reconciliationService = {
       finalAmountUsd: formatUnits(BigInt(r.debit_amount_atomic), decimals),
       owner_ref: r.owner_ref,
       debit_settle_status: r.debit_settle_status,
+      hop2_attempted_at: r.debit_hop2_attempted_at ?? null,
     }));
   },
 
@@ -659,133 +804,103 @@ export const reconciliationService = {
       }
 
       if (!skipResend) {
-        // ⚠️ AGUJERO CONOCIDO Y ACOTADO — RE-ENVÍO SIN EVIDENCIA (HU-198, TD-198-01).
+        // ⚠️ RE-ENVÍO SIN PRUEBA DURA — ACOTADO POR EL LEASE (HU-202 cierra TD-198-01).
         //
-        // Acá se re-envía el hop 2 sin ninguna prueba de que no se pagó ya. Eso es
-        // CORRECTO para las dos entradas legítimas (y es para lo que existe el lado
-        // settle del reconciliador):
-        //   (A) el proceso murió DESPUÉS del hop 1 y ANTES de intentar el hop 2 ⟹ el
-        //       seller no cobró y nadie más lo va a pagar.
-        //   (D) el hop 2 falló de forma INEQUÍVOCA (`failureKind:'unequivocal'`), que
-        //       desde HU-201 es exactamente DOS cosas:
-        //         · `adapter.sign()` TIRÓ ⟹ pre-broadcast POR CONSTRUCCIÓN: firmar es
-        //           local (`signTypedData`), no hay ningún request al facilitator ni
-        //           ninguna tx que pueda existir. Esto sí es una PRUEBA.
-        //         · el facilitator contestó 2xx con `settled/success` falso y SIN
-        //           txHash. ⚠️ ESTO NO ES UNA PRUEBA, y el comentario anterior lo
-        //           afirmaba como tal ("probado que no se ejecutó"). Es una INFERENCIA
-        //           sobre la semántica de un TERCERO: leemos su `success:false` como "no
-        //           settleé". Se sostiene por tres razones, no porque sea demostrable:
+        // Acá se re-envía el hop 2. Desde HU-202 eso ya NO pasa "sin ninguna prueba de que
+        // no se pagó": para llegar hasta esta línea, `claim_reconciliation` tuvo que
+        // aceptar la fila, y su `WHERE` sólo la acepta por el lado settle si NO hay un hop 2
+        // estampado sin resolver (`debit_hop2_attempted_at IS NULL OR
+        // debit_resolution_tx_hash IS NOT NULL`). O sea que el hecho que faltaba —"el hop 2
+        // se intentó"— ahora existe, se persiste ANTES del intento y gobierna esta decisión.
+        //
+        // LAS DOS ENTRADAS QUE SIGUEN LLEGANDO ACÁ, y por qué el re-envío es correcto:
+        //   (A) el proceso murió DESPUÉS del hop 1 y ANTES de tomar el lease ⟹ el hop 2
+        //       nunca se intentó, el seller no cobró y nadie más lo va a pagar. Es la razón
+        //       de existir del lado settle del reconciliador.
+        //   (D) el hop 2 falló de forma INEQUÍVOCA (`failureKind:'unequivocal'`) y
+        //       `settleEscrowAware` LIBERÓ el lease a propósito. Desde HU-201 son dos cosas:
+        //         · `adapter.sign()` TIRÓ ⟹ pre-broadcast POR CONSTRUCCIÓN: firmar es local
+        //           (`signTypedData`), no hay ningún request al facilitator ni ninguna tx
+        //           que pueda existir. Esto sí es una PRUEBA.
+        //         · el facilitator contestó 2xx con `settled/success` falso y SIN txHash.
+        //           ⚠️ ESTO NO ES UNA PRUEBA: es una INFERENCIA sobre la semántica de un
+        //           TERCERO. Se sostiene por tres razones, no porque sea demostrable:
         //             1. es la MISMA respuesta y el MISMO campo cuyo `success:true` ya
         //                tratamos como autoritativo para marcar plata como pagada
         //                (desconfiar sólo de un lado sería incoherente);
-        //             2. viene sin txHash — en el momento en que hay hash, HU-201 lo
-        //                manda a `ambiguous` y NUNCA llega acá;
+        //             2. viene sin txHash — en el momento en que hay hash, HU-201 lo manda
+        //                a `ambiguous` y NUNCA llega acá;
         //             3. es la entrada que mantiene vivo el re-envío legítimo; exigir
-        //                prueba dura acá dejaría al seller sin cobrar automáticamente en
-        //                el rechazo normal del facilitator.
+        //                prueba dura acá dejaría al seller sin cobrar automáticamente en el
+        //                rechazo normal del facilitator.
         //           Si un facilitator empezara a contestar `success:false` DESPUÉS de
-        //           broadcastear y sin devolver el hash, este re-envío paga dos veces y
-        //           el gateway no tiene forma de saberlo.
-        // En ninguna de las dos existe un tx del hop 2 que verificar, así que exigir
-        // evidencia del hop 2 como precondición dura NO es la solución: dejaría al
-        // seller sin cobrar automáticamente justo en el caso (A), que es el normal.
+        //           broadcastear y sin devolver el hash, este re-envío paga dos veces y el
+        //           gateway no tiene forma de saberlo. ES EL RESIDUO VIVO — ver TD-201-01.
         //
-        // HU-198 cerró la entrada (E) — hop 2 de resultado DESCONOCIDO — mandándola a
-        // `resolving_settle`, que el claim no reclama sin tx (ver `settleEscrowAware`).
-        // QUEDAN ABIERTAS CUATRO entradas que llegan acá como `hop1_confirmed` y son
-        // INDISTINGUIBLES de (A) con lo que hoy se persiste:
+        // ── LO QUE HU-202 CERRÓ (y cómo, para que no se borre por accidente) ──
+        //
+        // El agujero era que `record_debit_hop1` escribe `hop1_confirmed` ANTES de que el
+        // hop 2 se intente, y la fila se quedaba así durante TODA la ventana del hop 2. El
+        // `WHERE` del claim acepta `hop1_confirmed` para el lado settle, así que cuatro
+        // entradas distintas llegaban acá siendo INDISTINGUIBLES de (A):
         //   (B) el proceso murió DURANTE el hop 2, después de que el request salió.
-        //   (C) el hop 2 SETTLEÓ pero el flip a 'settled' falló ⟹ el txHash se perdió
-        //       sin persistirse (`settleEscrowAware` no tiene el "lease" de evidencia
-        //       que sí tiene este mismo archivo unas líneas más abajo).
-        //   (F) NADIE MURIÓ (AR — la enumeración original estaba mal encuadrada en
-        //       "el proceso murió", y por eso no lo vio): `record_debit_hop1` escribe
-        //       `hop1_confirmed` ANTES de que el hop 2 se intente, así que la fila queda
-        //       AUTO-RECLAMABLE durante TODA la ventana del hop 2, con el proceso vivo y
-        //       sano. Un click en el dashboard —o un barrido concurrente— mientras un
-        //       settle lento está en vuelo re-envía y paga dos veces. No hace falta
-        //       ningún crash: alcanza con que el hop 2 tarde.
-        //   (G) CERRADA POR HU-201. Era: el veredicto del hop 2 llegaba como
-        //       `success:false` sin ser prueba de que no se ejecutó ⟹ `unequivocal` ⟹
-        //       caía en (D) y se re-enviaba. Las dos formas y sus fixes:
-        //         · pieverse (el modo DEFAULT) devuelve el `txHash` del facilitator
-        //           verbatim, así que un `200 {success:false, txHash:"0x…"}` nos deja un
-        //           hash de broadcast en la mano ⟹ ahora `hasBroadcastEvidence`
-        //           (`payment-intent.ts`) lo clasifica `ambiguous`.
-        //         · un HTTP 502 se aplanaba a `success:false` en los 4 settle x402
-        //           (base/avalanche/tempo/kite-x402) y salía como `Error` pelado en
-        //           kite-pieverse ⟹ ahora los 5 tiran `FacilitatorSettleError` con
-        //           `valueDisposition:'unknown'`, que el seam de `payment-intent.ts`
-        //           captura como `ambiguous`.
-        //       En los dos casos el destino pasa a ser `resolving_settle` ⟹ NO llega acá.
-        // En (B), (C) y (F) este re-envío PAGA DOS VECES al seller.
+        //       ⟹ CERRADO: el lease quedó tomado y sin `debit_resolution_tx_hash`, así que
+        //       el claim NO reclama la fila y `resolveIntent` contesta
+        //       `awaiting_manual_settle_evidence`.
+        //   (C) el hop 2 SETTLEÓ pero el flip a 'settled' falló ⟹ el txHash se perdió.
+        //       ⟹ CERRADO por lo mismo: el lease sobrevive al fallo del flip.
+        //   (F) NADIE MURIÓ — el peor, y el que no necesitaba que nada se cayera: un click
+        //       en el dashboard (o un barrido concurrente) mientras un settle lento estaba
+        //       en vuelo re-enviaba y pagaba dos veces, con el proceso vivo y sano.
+        //       ⟹ CERRADO: durante TODA la ventana del hop 2 la fila está leaseada, así que
+        //       no es auto-reclamable ni clickeable-a-re-envío.
+        //   (G) `hop1_confirmed` porque el write de `resolving_settle` falló.
+        //       ⟹ CERRADO por el otro lado: si el lease no se persiste,
+        //       `settleEscrowAware` NO MANDA el hop 2 (fail-closed). La fila queda como (A)
+        //       —nada salió— y este re-envío es correcto.
         //
-        // POR QUÉ NO SE ARREGLA ACÁ: falta un HECHO PERSISTIDO ("el hop 2 se intentó"),
-        // y agregarlo es una decisión de diseño con costo propio. Las dos candidatas:
+        // EL COSTO, DECLARADO: el lease convierte en revisión manual la ventana entre que
+        // se escribió el lease y que el request del hop 2 salió (armar params +
+        // `signTypedData` local + dispatch: milisegundos, sin ninguna E/S de red en el
+        // medio). NO convierte (A) entera en manual —lo anterior a la escritura del lease
+        // sigue auto-resolviéndose— ni toca (D), que es la entrada legítima que ocurre de
+        // verdad y de forma repetida.
         //
-        //   1. Nonce DETERMINÍSTICO para el hop 2 (derivado del intentId) en vez de
-        //      `randomBytes(32)`. La idea era volver el doble pago imposible on-chain
-        //      (el token rechaza el segundo uso), misma doctrina que el `idem_key` de
-        //      HU-194 pero con la clave viajando al contrato. ⚠️ EL AR LE ENCONTRÓ DOS
-        //      AGUJEROS y hoy NO es la recomendación:
-        //        (a) NO ES EIP-3009 EN EL CAMINO VIVO. En modo `pieverse` —el DEFAULT—
-        //            la firma es un `Authorization` custom contra
-        //            `KITE_FACILITATOR_ADDRESS`, no un `TransferWithAuthorization`
-        //            contra el token. "El token rechaza el segundo uso" sólo vale para
-        //            el modo `x402`, que no es el default. En pieverse la unicidad la
-        //            tendría que garantizar el facilitator, que es un TERCERO.
-        //        (b) LE FALTABA EL CAMBIO COMPAÑERO — YA HECHO (HU-201). Con nonce
-        //            determinístico, el rechazo del segundo envío llega como
-        //            `success:false`; ANTES eso era `unequivocal` ⟹ el buyer se
-        //            reembolsaba CON EL SELLER YA PAGADO. Ese prerrequisito está
-        //            cumplido SÓLO en la medida en que el rechazo traiga txHash o un
-        //            non-2xx: si el facilitator/token rechaza con un 2xx `success:false`
-        //            PELADO, sigue siendo `unequivocal`. O sea que el nonce
-        //            determinístico todavía necesita que el rechazo del replay sea
-        //            distinguible de un rechazo normal.
+        // ⚠️ RESIDUO CONOCIDO: las filas que ya estaban en `hop1_confirmed` cuando se
+        // aplicó la migración siguen siendo auto-reclamables. Nadie persistió evidencia de
+        // su hop 2 y no se puede inventar retroactivamente.
         //
-        //   2. Lease pre-hop2: persistir "intento en curso" ANTES de mandar el hop 2
-        //      (p.ej. escribir `resolving_settle` antes, y bajarlo a
-        //      `reconciliation_pending` sólo con un veredicto `unequivocal`). Cierra (B),
-        //      (C) y (F) —incluida la ventana del proceso vivo, que ninguna otra opción
-        //      toca— a cambio de convertir (A) en revisión manual y de un round-trip a
-        //      DB antes de cada pago.
+        // ── LA OTRA OPCIÓN QUE SE DESCARTÓ, Y POR QUÉ ──
         //
-        // RECOMENDACIÓN ACTUAL: la 2 (lease). Con los dos agujeros de la 1 al
-        // descubierto, el lease es la única que cierra (F) sin depender de un tercero ni
-        // de arreglar antes la clasificación de `success:false`. La 1 queda como destino
-        // deseable DESPUÉS del BLQ-ALTO, y sólo si se resuelve la unicidad en pieverse.
+        // Nonce DETERMINÍSTICO para el hop 2 (derivado del intentId) en vez de
+        // `randomBytes(32)`, para volver el doble pago imposible ON-CHAIN (el token rechaza
+        // el segundo uso). ⚠️ EL AGUJERO (a) SIGUE ABIERTO Y ES DECISIVO: en modo `pieverse`
+        // —el DEFAULT DE PRODUCCIÓN— la firma es un `Authorization` custom contra
+        // `KITE_FACILITATOR_ADDRESS`, no un `TransferWithAuthorization` contra el token, así
+        // que "el token rechaza el segundo uso" NO APLICA AL CAMINO VIVO: la unicidad
+        // dependería del contrato de un TERCERO. (El agujero (b) —el rechazo del replay
+        // llegando como `success:false` ⟹ `unequivocal` ⟹ buyer reembolsado con el seller
+        // pagado— sí se cerró en HU-201.) Queda como destino deseable DESPUÉS de resolver la
+        // unicidad en pieverse; el lease no depende de ningún tercero.
         //
-        // ⚠️ HU-201 NO CIERRA (B), (C) NI (F). Cerró (G) —la clasificación— y nada más.
-        // El re-envío de abajo sigue saliendo sin evidencia persistida de que el hop 2 se
-        // intentó, así que el lease sigue pendiente.
+        // ── DEUDA ABIERTA (sigue vigente) ──
         //
-        // ── DEUDA ABIERTA QUE HU-201 DEJA ANOTADA (fix-pack AR) ──
-        //
-        // TD-201-01 — LECTOR DE `authorizationState(from, nonce)`. La pregunta que hoy
-        //   NO se puede contestar —"¿el broadcast aterrizó?"— tiene respuesta ON-CHAIN,
-        //   no por HTTP: en EIP-3009 el token expone `authorizationState(authorizer,
-        //   nonce)` como `view` público, y ese bit dice si la autorización se consumió.
-        //   Con eso, un `ambiguous` deja de ser terminal-manual: se resuelve solo. HOY
-        //   NO EXISTE ningún lector de eso en el repo. Es una HU propia, no un fix-pack,
-        //   y ⚠️ NO sirve tal cual en el modo `pieverse` (el DEFAULT), donde la firma es
-        //   un `Authorization` custom contra `KITE_FACILITATOR_ADDRESS` y no un
-        //   `TransferWithAuthorization` contra el token — ver el agujero (a) de la
-        //   opción 1 más arriba, es el mismo.
+        // TD-201-01 — LECTOR DE `authorizationState(from, nonce)`. La pregunta que todavía
+        //   NO se puede contestar —"¿el broadcast aterrizó?"— tiene respuesta ON-CHAIN, no
+        //   por HTTP: en EIP-3009 el token expone `authorizationState(authorizer, nonce)`
+        //   como `view` público. Con eso, una fila leaseada sin resolver deja de ser
+        //   terminal-manual: se resuelve sola. HOY NO EXISTE ese lector en el repo, y
+        //   ⚠️ NO sirve tal cual en `pieverse` (el DEFAULT) — es el mismo agujero (a).
         //
         // TD-201-02 — COLUMNA PARA EL HASH DE EVIDENCIA. Cuando el facilitator contesta
         //   `success:false` CON txHash, ese hash es la única pista para cruzar contra la
-        //   cadena y hoy sobrevive sólo como PROSA dentro de `error_message` (y como
-        //   campo del log). No es filtrable por SQL. Arreglarlo es una columna nueva en
-        //   `a2a_payment_intents` ⟹ migración ⟹ decisión del founder.
+        //   cadena y hoy sobrevive sólo como PROSA dentro de `error_message`.
         //
-        // TD-201-03 — ¿PIEVERSE MANDA HASH EN SUS RECHAZOS NORMALES? Incógnita abierta
-        //   que decide si `ambiguous` es un caso raro o el 100% de los rechazos. Ver el
-        //   docstring de `hasBroadcastEvidence` (`adapters/errors.ts`) por las dos
-        //   direcciones y por cómo se cierra (mirando `listAmbiguous()` con tráfico real).
+        // TD-201-03 — ¿PIEVERSE MANDA HASH EN SUS RECHAZOS NORMALES? Decide si `ambiguous`
+        //   es un caso raro o el 100% de los rechazos. Ver `hasBroadcastEvidence`
+        //   (`adapters/errors.ts`) y `listAmbiguous()` con tráfico real.
         //
-        // Ninguna es un fix-pack. NO borrar este bloque sin cerrar (B), (C), (F) y (G).
+        // NO borrar el lease de `settleEscrowAware` sin re-abrir (B), (C), (F) y (G).
         //
         // 6. hop 2 DIRECTO (seam WKH-136; NO settleEscrowAware, DT-R2).
         const settle = await settlePaymentIntentOnChain({
@@ -858,6 +973,169 @@ export const reconciliationService = {
       side,
       txHash,
     };
+  },
+
+  /**
+   * AR de HU-202, BLOQUEANTE 3 (salida 1) — CIERRA UNA FILA LEASEADA CON EVIDENCIA
+   * ON-CHAIN DEL HOP 2.
+   *
+   * El operador trae un hash; el servicio NO le cree. Lo verifica contra la cadena con el
+   * mismo lector del crash-recovery (`verifyDefaultChainSettle`: token correcto,
+   * destinatario `pay_to`, monto ≥ el atómico firmado) y sólo cierra si la cadena lo
+   * respalda. Un endpoint que aceptara el hash de palabra sería un `UPDATE` a mano con
+   * más pasos: convertiría la atestación en un flip terminal sin ninguna prueba.
+   *
+   * Reusa `record_reconciliation_resolution` (191c) tal cual: es status-gated
+   * `resolving_settle → resolved_settled`, persiste el hash con COALESCE y es idempotente.
+   * NO hace falta ninguna migración nueva.
+   */
+  async resolveWithHop2Evidence(
+    intentId: string,
+    input: Hop2EvidenceInput,
+  ): Promise<Hop2EvidenceOutcome> {
+    if (!isEscrowSettleEnabled()) return { status: 'flag_off' };
+
+    const leased = await readLeasedRow(intentId);
+    if (!leased) return { status: 'not_leased' };
+    const { row, intent } = leased;
+
+    // Sin chain/token resolubles no hay verificación posible. Chequeo EXPLÍCITO y previo
+    // porque `verifyDefaultChainSettle` devuelve `{ok:true}` pelado cuando no puede
+    // resolver el chainKey (settle-verifier.ts, rama de registry sin inicializar): sin
+    // este corte, un entorno mal configurado aceptaría cualquier hash como prueba.
+    const chainKey = getDefaultChainKey();
+    if (!chainKey) {
+      log.warn(
+        { intentId },
+        'hop2 evidence: default chainKey unresolvable → cannot verify → abort',
+      );
+      return { status: 'indeterminate', reason: 'CHAIN_UNRESOLVABLE' };
+    }
+
+    const verified = await verifyDefaultChainSettle({
+      txHash: input.txHash,
+      payTo: intent.pay_to,
+      requiredAmountAtomic: BigInt(row.debit_amount_atomic),
+    });
+
+    // ⚠️ EL ÚNICO `ok` QUE VALE ES EL QUE VIENE DE MIRAR LA CADENA. `verifyDefaultChainSettle`
+    // devuelve `ok:true` en DOS casos que NO son evidencia y que acá serían un flip terminal
+    // sobre plata:
+    //   · `reason:'DISABLED'`  — el kill-switch `SETTLE_VERIFY_ONCHAIN` está apagado ⟹ no
+    //     miró nada. Aceptar acá volvería el endpoint un rubber-stamp con sólo apagar un env.
+    //   · `warn:true`          — "no pude chequear" (RPC caído). En testnet eso es fail-OPEN
+    //     y llega como `ok:true`; es una degradación aceptable para DEJAR PASAR un settle que
+    //     el facilitator ya broadcasteó, NO para CERRAR una fila cuya pregunta abierta es
+    //     justamente si el pago existe.
+    // La verificación real devuelve `{ok:true}` SIN `reason` — eso es lo que se exige.
+    if (verified.warn === true || verified.reason === 'DISABLED') {
+      log.warn(
+        { intentId, reason: verified.reason ?? 'RPC_UNAVAILABLE' },
+        'hop2 evidence: chain verification unavailable (RPC down or SETTLE_VERIFY_ONCHAIN off) → nothing written, retry later',
+      );
+      return {
+        status: 'indeterminate',
+        reason: verified.reason ?? 'RPC_UNAVAILABLE',
+      };
+    }
+    if (!verified.ok || verified.reason !== undefined) {
+      log.warn(
+        { intentId, reason: verified.reason ?? 'UNVERIFIED' },
+        'hop2 evidence REJECTED: the chain does not back this tx as a hop2 disbursement to the seller. The lease is KEPT.',
+      );
+      return {
+        status: 'evidence_rejected',
+        reason: verified.reason ?? 'UNVERIFIED',
+      };
+    }
+
+    const rec = await supabase.rpc('record_reconciliation_resolution', {
+      p_intent_id: intentId,
+      p_owner_ref: intent.owner_ref,
+      p_key_id: row.key_id,
+      p_nonce: row.debit_nonce,
+      p_terminal_status: 'resolved_settled',
+      p_tx_hash: input.txHash,
+      p_chain_id: intent.chain_id,
+      p_refund_amount_usd: null,
+    });
+    if (rec.error) this.mapRpcError(rec.error, intentId, 'record');
+
+    log.warn(
+      {
+        intentId,
+        keyId: row.key_id,
+        txHash: input.txHash,
+        resolvedBy: input.resolvedBy,
+        note: input.note ?? null,
+        audit: 'ESCROW_HOP2_EVIDENCE_ACCEPTED',
+      },
+      'hop2 lease CLOSED with on-chain evidence: the tx was verified to pay the seller the signed amount, so the intent is resolved_settled.',
+    );
+    return { status: 'settled', txHash: input.txHash };
+  },
+
+  /**
+   * AR de HU-202, BLOQUEANTE 3 (salida 2) — LIBERA EL LEASE CON UNA ATESTACIÓN AUDITADA
+   * DE QUE NO HUBO DESEMBOLSO AL SELLER.
+   *
+   * ⚠️ ESTA ES LA ÚNICA OPERACIÓN DEL REPO QUE MUEVE UNA FILA A UN ESTADO PAGABLE SIN
+   * PRUEBA. Existe porque la alternativa es peor —una fila que nadie puede tocar y un
+   * seller que no cobra nunca— pero su seguridad NO viene del código: viene de que sea un
+   * acto humano, autenticado (`requireAdminTokenStrict`), deliberado y con nombre. Por eso
+   * `resolvedBy` y `note` son OBLIGATORIOS y viajan al log de auditoría: si el re-envío
+   * termina en un doble pago, tiene que existir el registro de quién dijo que no lo habría.
+   *
+   * NO ES —Y NO PUEDE SER— UN TEMPORIZADOR. Liberar por edad devuelve la fila al pool sin
+   * que nadie haya mirado la cadena, que es exactamente el caso (F) que HU-202 cerró.
+   *
+   * Efecto: `reconciliation_pending` vía `record_debit_settle_status`, que además LIMPIA
+   * `debit_hop2_attempted_at` (migración 20260729000000) ⟹ la fila vuelve a ser
+   * auto-reclamable ⟹ el reconciliador re-envía el hop 2 y el seller cobra. Reusa el ÚNICO
+   * escritor del lease a propósito: dos escritores del mismo candado divergen.
+   */
+  async releaseHop2Lease(
+    intentId: string,
+    input: ReleaseLeaseInput,
+  ): Promise<Hop2EvidenceOutcome> {
+    if (!isEscrowSettleEnabled()) return { status: 'flag_off' };
+
+    const leased = await readLeasedRow(intentId);
+    if (!leased) return { status: 'not_leased' };
+    const { row, intent } = leased;
+
+    const released = await recordDebitSettleStatus({
+      intentId,
+      ownerRef: intent.owner_ref,
+      keyId: row.key_id,
+      nonce: row.debit_nonce,
+      status: 'reconciliation_pending',
+    });
+    if (released.outcome !== 'applied') {
+      log.error(
+        {
+          intentId,
+          keyId: row.key_id,
+          resolvedBy: input.resolvedBy,
+          outcome: released.outcome,
+        },
+        'hop2 lease release did NOT apply: the row was not moved back to reconciliation_pending, so it is still stuck. Re-check its current status before retrying.',
+      );
+      return { status: 'indeterminate', reason: released.outcome };
+    }
+
+    log.warn(
+      {
+        intentId,
+        keyId: row.key_id,
+        hop1TxHash: row.debit_hop1_tx_hash,
+        resolvedBy: input.resolvedBy,
+        note: input.note,
+        audit: 'ESCROW_HOP2_LEASE_RELEASED_BY_ATTESTATION',
+      },
+      'hop2 lease RELEASED on a human attestation that no disbursement to the seller exists on-chain. The row is auto-claimable again and the reconciler WILL resend hop2. If the attestation was wrong, this is where the double payment started.',
+    );
+    return { status: 'lease_released' };
   },
 
   /**
