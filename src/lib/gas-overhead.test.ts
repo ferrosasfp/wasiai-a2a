@@ -3,6 +3,7 @@
  * 2026-06-24). Live calc mocks viem (`getGasPrice`) and `global.fetch`
  * (CoinGecko), mirroring wasiai-v2 `overhead-gas-source.test.ts`.
  */
+import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ── vi.hoisted — mock viem's createPublicClient before the import ───────────
@@ -192,13 +193,25 @@ describe('getStepGasOverheadUsd', () => {
   // muere el socket. Los timers de `AbortSignal.timeout` NO los controla
   // `vi.useFakeTimers` (viven en los timers internos de Node), así que el reloj es
   // real: ~2.5 s por test.
+  //
+  // ⚠️ TODAS las duraciones de este bloque se miden con `performance.now()`
+  // (MONOTÓNICO), nunca con `Date.now()` (reloj de pared). No es cosmético: la
+  // duración que se afirma la gobierna un temporizador de Node, que corre sobre
+  // el reloj monotónico. Medirla con el de pared compara dos relojes distintos, y
+  // cuando el de pared se queda corto respecto del monotónico la aserción cae
+  // aunque el temporizador haya andado perfecto.
+  //
+  // Eso no es teórico: con `Date.now()` este test fallaba ~3 de cada 18 corridas
+  // de la suite completa (y 0 en aislamiento, incluso con la CPU saturada), o sea
+  // un gate rojo el ~17% de las veces por un defecto de MEDICIÓN, no del código
+  // bajo prueba. `performance.now()` mide la misma base de tiempo que el timer.
   const HANG_UNTIL_ABORTED = () => {
     let signal: AbortSignal | undefined;
     let calledAt = 0;
     const fetchMock = vi.fn(
       (_url: unknown, init?: { signal?: AbortSignal }) => {
         signal = init?.signal;
-        calledAt = Date.now();
+        calledAt = performance.now();
         return new Promise<never>((_resolve, reject) => {
           // Mismo contrato que undici: el abort RECHAZA el fetch.
           init?.signal?.addEventListener('abort', () => {
@@ -224,7 +237,7 @@ describe('getStepGasOverheadUsd', () => {
     calledAt: number,
     budgetMs: number,
   ): Promise<number | null> {
-    if (signal.aborted) return Date.now() - calledAt;
+    if (signal.aborted) return performance.now() - calledAt;
     const aborted = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => resolve(false), budgetMs);
       signal.addEventListener('abort', () => {
@@ -232,7 +245,7 @@ describe('getStepGasOverheadUsd', () => {
         resolve(true);
       });
     });
-    return aborted ? Date.now() - calledAt : null;
+    return aborted ? performance.now() - calledAt : null;
   }
 
   it('T-195-GAS-2: CoinGecko colgado ⇒ MISMO valor que antes del techo (fail-open 0 fuera de prod), Y el socket muere', async () => {
@@ -243,9 +256,9 @@ describe('getStepGasOverheadUsd', () => {
     process.env.AVAX_USD_FALLBACK = '30';
     const probe = HANG_UNTIL_ABORTED();
 
-    const startedAt = Date.now();
+    const startedAt = performance.now();
     const result = await getStepGasOverheadUsd(AVAX_MAINNET);
-    const elapsed = Date.now() - startedAt;
+    const elapsed = performance.now() - startedAt;
 
     // (a) SEMÁNTICA PRESERVADA: la race se rinde ⇒ irresoluble ⇒ 0 fuera de prod.
     // Medición pre-HU-195 (sin `signal`): result=0 elapsedMs=2004.
