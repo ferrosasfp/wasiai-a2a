@@ -6,6 +6,7 @@ import {
 import { type Connection, PublicKey, Transaction } from '@solana/web3.js';
 import { usdToAtomicUnits } from '../../lib/atomic-amount.js';
 import { getLogger } from '../../lib/logger.js';
+import { FacilitatorSettleError } from '../errors.js';
 import type {
   SolanaPaymentAdapter as ISolanaPaymentAdapter,
   QuoteResult,
@@ -742,18 +743,30 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
   }
 
   /**
-   * WKH-235a (AC-1/AC-2) — self-heal del timeout de confirmación.
+   * WKH-235a (AC-1/AC-2) — self-heal del timeout de confirmación,
+   * **acotado por WKH-308 a los tres estados de la cadena**.
    *
-   * Recupera la firma-candidata del fallo y le pregunta a la cadena vía el
-   * `verify()` de esta misma clase (verify-before-trust: monto/mint/destino, sin
-   * duplicar la validación). Si la tx SÍ está confirmada y es válida, el settle
-   * fue exitoso: se registra la firma en el seam de idempotencia y se retorna
-   * como éxito (el fee ya se pagó on-chain — perderlo es un bug de
-   * contabilidad). Si no, devuelve `undefined` y el caller propaga el error
-   * original (fallo genuino, camino de hoy sin regresión).
+   * Recupera la firma-candidata del fallo y le pregunta a la cadena vía
+   * `probeSettlementPresence` (NO vía `verify()`: ése colapsa *aterrizó-y-falló* /
+   * *no está* / *este nodo no la tiene indexada* en un solo `valid:false`, y sobre esa
+   * mezcla se escribía un falso negativo en el ledger).
    *
-   * NUNCA re-broadcastea y NUNCA lanza: un fallo del RPC de verificación se
-   * degrada a "no recuperado" para no enmascarar el error original.
+   * Las tres salidas, que son el contrato de esta función:
+   *
+   *   · `landed_ok`                  ⟹ el pago SÍ ocurrió: se marca confirmado y se
+   *     retorna éxito (el fee ya salió on-chain — perderlo es un bug de contabilidad);
+   *   · `absent` / `landed_failed`   ⟹ está PROBADO que la transferencia no ocurrió:
+   *     devuelve `undefined` y el caller propaga el error original (fallo genuino,
+   *     sin regresión respecto del camino histórico);
+   *   · `unknown`                    ⟹ **LANZA** `FacilitatorSettleError` con
+   *     `valueDisposition:'unknown'`. No se afirma que el leg no se pagó, porque no lo
+   *     sabemos; la incertidumbre viaja hasta el leg, que la publica como
+   *     `SETTLE_UNKNOWN`.
+   *
+   * ⚠️ Decía *"NUNCA lanza"*. **Ya no es cierto** y el cambio es el punto de WKH-308:
+   * degradar el "no pude comprobarlo" a "no recuperado" era exactamente lo que
+   * enmascaraba el pago real. Lo que **sigue siendo cierto** es que NUNCA
+   * re-broadcastea: ninguna de las tres ramas re-transmite.
    */
   private async recoverConfirmedSettle(
     err: unknown,
@@ -769,24 +782,70 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       return undefined;
     }
 
-    let verified: VerifyResult;
-    try {
-      verified = await this.verify({
-        signature: candidate,
-        payTo: req.payTo,
-        amountAtomic: req.amountAtomic,
-      });
-    } catch (verifyErr) {
+    // ⚠️ WKH-308 — ACA VIVIA `this.verify()`, Y COLAPSABA TRES SITUACIONES EN UNA.
+    //
+    // `verify()` devuelve `{valid:false}` tanto cuando la tx aterrizo y FALLO, como
+    // cuando NO esta, como cuando **este nodo no la tiene indexada**. Las dos primeras
+    // prueban que el pago no ocurrio; la tercera no prueba nada.
+    //
+    // El daño no era plata: era CONTABILIDAD. Un settle que SI se pago se reportaba
+    // como no settleado, no se escribia el recibo del leg y la fila quedaba en `signed`
+    // — o sea que la reconciliacion leia "no se pago" sobre un pago hecho. Ese dato
+    // falso es el insumo de un job futuro que trate la fila como pendiente, y ahi si
+    // aparece el doble pago, meses despues del error.
+    //
+    // `probeSettlementPresence` es la misma fuente de tres estados que usa el resto del
+    // adapter desde WKH-307; aca solo se la reusa.
+    const presence = await this.probeSettlementPresence({
+      signature: candidate,
+      payTo: req.payTo,
+      amountAtomic: req.amountAtomic,
+    });
+
+    if (presence.state === 'unknown') {
+      // NO PUDIMOS COMPROBARLO. No se afirma que el leg no se pago: se transporta la
+      // incertidumbre con `valueDisposition:'unknown'`, que es EXACTAMENTE el mecanismo
+      // que el leg EVM ya usa (`readSettleValueDisposition`) y que el caller ya recibe
+      // hoy como `SETTLE_UNKNOWN`. No es vocabulario nuevo: es dejar de mentir donde el
+      // otro riel ya dice la verdad.
       log.warn(
         {
           intentId: req.intentId,
           signature: candidate,
-          detail: String(verifyErr),
+          detail: presence.detail,
+          // FP-2: el SINTOMA que disparó todo. Esta rama LANZA un error nuevo, asi que
+          // el `throw e` del caller nunca corre y el original no viaja solo. Y es
+          // justamente la rama que le dice al operador "andá a reconciliar contra la
+          // cadena": mandarlo sin saber si fue un timeout de confirmacion o otra cosa
+          // lo deja empezando de cero. La rama de fallo genuino ya lo loguea.
+          originalError: String(err),
         },
-        'solana settle recovery: on-chain verify threw — treating as failure',
+        'solana settle recovery: could NOT determine whether the broadcast transaction landed — reporting the leg as UNKNOWN, not as failed (asserting "not paid" here would write a false negative into the ledger)',
       );
-      return undefined;
+      throw new FacilitatorSettleError(
+        `solana settle presence unknown for ${req.intentId} (${presence.detail})`,
+        'unknown',
+      );
     }
+
+    // `absent` y `landed_failed` PRUEBAN que la transferencia no ocurrio ⟹ fallo
+    // genuino, y el caller propaga el error original.
+    //
+    // `landed_mismatch` CONSERVA la conducta previa (tambien fallo genuino), y la razon
+    // va aca y no en otro archivo: significa que una tx con ESA firma esta on-chain,
+    // sin error, pero el delta hacia `payTo` no cubre `amountAtomic`. En este flujo la
+    // tx la construimos nosotros por el monto exacto, asi que llegar aca implica que la
+    // cadena contradice lo que creemos haber firmado — no es "no se pago" ni "no se":
+    // es una contradiccion que ningun reintento automatico arregla.
+    //
+    // Se deja como fallo (y NO como `unknown`) a proposito: `unknown` significa "puede
+    // que se haya pagado, no reintentes y reconcilia", y aca SI sabemos que lo que
+    // aterrizo no es el pago que pedimos. Si alguna vez dispara en produccion, merece
+    // mirada humana antes que una regla nueva.
+    const verified: VerifyResult =
+      presence.state === 'landed_ok'
+        ? { valid: true }
+        : { valid: false, error: `presence=${presence.state}` };
 
     if (!verified.valid) {
       log.warn(

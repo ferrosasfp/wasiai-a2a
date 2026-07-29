@@ -182,6 +182,7 @@ vi.mock('./schema-preflight.js', () => ({
   _resetSolanaSchemaPreflight: vi.fn(),
 }));
 
+import { readSettleValueDisposition } from '../errors.js';
 import { base58Encode } from './base58.js';
 import { getSolanaUsdcDecimals } from './chain.js';
 import { _resetSolanaClients, SolanaPaymentAdapter } from './payment.js';
@@ -204,7 +205,6 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     // de un test se filtraría a los siguientes. Se re-fija el default (6).
     vi.mocked(getSolanaUsdcDecimals).mockReturnValue(6);
     fakeConnection.getParsedTransaction.mockResolvedValue(null);
-    presenceState.value = { err: null };
     presenceState.value = { err: null };
     fakeConnection.getTokenAccountBalance.mockResolvedValue({
       value: { amount: '1000000' },
@@ -464,13 +464,95 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     signSpy.mockRestore();
   });
 
+  // ══════════════════════════════════════════════════════════════
+  // WKH-308 — un settle que SI se pago dejaba de reportarse como pagado
+  // ══════════════════════════════════════════════════════════════
+
+  it('T-308-01: nodo ATRASADO tras un fallo de confirmación ⟹ NO se afirma que el leg no se pagó', async () => {
+    // EL ESCENARIO REAL: el broadcast salió, la confirmación cortó por timeout, y la tx
+    // SI ATERRIZO. Al recuperar, el nodo que responde conoce la firma
+    // (`getSignatureStatuses` la reporta presente) pero todavía no la tiene indexada
+    // (`getParsedTransaction` da null).
+    //
+    // ANTES: `verify()` colapsaba ese null con "no está" ⟹ `valid:false` ⟹ el settle se
+    // reportaba FALLADO sobre un pago que ocurrió. La contabilidad quedaba diciendo lo
+    // contrario de lo que pasó, y ese dato falso es el insumo de un job futuro que
+    // trate la fila como pendiente.
+    //
+    // AHORA: se distingue "no pude comprobarlo" y se transporta como tal.
+    const adapter = new SolanaPaymentAdapter();
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(
+      new Error('Transaction was not confirmed in 30.00 seconds'),
+    );
+    presenceState.value = { err: null }; // la cadena SI la conoce
+    fakeConnection.getParsedTransaction.mockResolvedValue(null); // nodo atrasado
+
+    const err = await adapter
+      .settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-308:lagging:payTo',
+      })
+      .catch((e: Error) => e);
+
+    // EL EFECTO: el error transporta "no sé si se pagó", no "no se pagó". Es lo que
+    // hace que el leg NO se contabilice como impago.
+    expect(readSettleValueDisposition(err)).toBe('unknown');
+    // Y no se re-transmitió nada: seguimos sin saber, y no saber no paga.
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-308-02: el caso que NO se puede romper — un settle que DE VERDAD falló sigue fallando', async () => {
+    // Contracara obligatoria. Si esto se rompiera, el arreglo habría convertido todo
+    // fallo en "no sé" y ningún leg volvería a reportarse como impago.
+    const adapter = new SolanaPaymentAdapter();
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(
+      new Error('not confirmed in 30.00s'),
+    );
+    presenceState.value = null; // el nodo BUSCÓ su histórico y no la conoce ⟹ absent
+    fakeConnection.getParsedTransaction.mockResolvedValue(null);
+
+    const err = await adapter
+      .settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-308:genuine:payTo',
+      })
+      .catch((e: Error) => e);
+
+    // Sin disposición: es un fallo liso, reportable como tal.
+    expect(readSettleValueDisposition(err)).toBeUndefined();
+    expect(String(err)).toContain('not confirmed in 30.00s');
+  });
+
+  it('T-308-03: la tx aterrizó y FALLÓ on-chain ⟹ también es un fallo liso', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(
+      new Error('confirm boom'),
+    );
+    presenceState.value = { err: { InstructionError: [0, 'Custom'] } };
+
+    const err = await adapter
+      .settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-308:onchainfail:payTo',
+      })
+      .catch((e: Error) => e);
+
+    expect(readSettleValueDisposition(err)).toBeUndefined();
+  });
+
   it('T-235a-AC2: timeout + tx NO confirmada on-chain → propaga el error original (sin regresión)', async () => {
     const adapter = new SolanaPaymentAdapter();
     const timeoutErr = Object.assign(new Error('not confirmed in 30.00s'), {
       signature: FAKE_SIG,
     });
     fakeConnection.confirmTransaction.mockRejectedValueOnce(timeoutErr);
-    fakeConnection.getParsedTransaction.mockResolvedValue(null); // no está on-chain
+    // WKH-308: "no está on-chain" ahora se PRUEBA (el nodo buscó su histórico y no la
+    // conoce), no se infiere de que el parseo no esté disponible.
+    presenceState.value = null;
+    fakeConnection.getParsedTransaction.mockResolvedValue(null);
 
     await expect(
       adapter.settle({
@@ -557,21 +639,36 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     expect(fakeConnection.getParsedTransaction).not.toHaveBeenCalled();
   });
 
-  it('T-235a-AC2d: recovery cuyo verify() lanza (RPC caído) → propaga el error original', async () => {
+  it('T-235a-AC2d (INVERTIDO por WKH-308): recovery con el RPC caído ⟹ UNKNOWN, no fallo', async () => {
+    // ⚠️ CAMBIO DE CONDUCTA DECLARADO. Este test afirmaba que un RPC caído durante la
+    // recuperación hacía **propagar el error original**, o sea reportar el leg como
+    // FALLADO. Eso es exactamente el falso negativo que WKH-308 cierra: un RPC que no
+    // contesta no prueba que el pago no ocurrió — prueba que no pudimos preguntar.
+    //
+    // Se invierte, no se borra: la propiedad que el test protegía (no inventar un
+    // éxito) sigue viva — no se devuelve `success`, se rechaza. Lo que cambia es CÓMO
+    // se rechaza: con la incertidumbre transportada en vez de afirmando lo que no
+    // sabemos.
     const adapter = new SolanaPaymentAdapter();
     const timeoutErr = Object.assign(new Error('confirm timeout'), {
       signature: FAKE_SIG,
     });
     fakeConnection.confirmTransaction.mockRejectedValueOnce(timeoutErr);
-    fakeConnection.getParsedTransaction.mockRejectedValue(new Error('429 rpc'));
+    fakeConnection.getSignatureStatuses.mockRejectedValueOnce(
+      new Error('429 rpc'),
+    );
 
-    await expect(
-      adapter.settle({
+    const err = await adapter
+      .settle({
         payTo: PAY_TO,
         amountAtomic: '1000000',
         intentId: 'ctx-timeout:5:payTo',
-      }),
-    ).rejects.toThrow('confirm timeout');
+      })
+      .catch((e: Error) => e);
+
+    expect(readSettleValueDisposition(err)).toBe('unknown');
+    // Y sigue sin devolver un éxito inventado.
+    expect(String(err)).not.toContain('success');
   });
 
   // ── CR-2 (WKH-234) — pre-flight de balance del operador ─────────────────
