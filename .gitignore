@@ -115,7 +115,14 @@ backups/
 /.nexus/product-context.md
 /.nexus/project-context.md
 /BACKLOG.md
-/CLAUDE.md
+# NOTA: /CLAUDE.md NO va acá. No es documentación interna de trabajo: es la
+# convención que el CÓDIGO cita como su fuente de verdad. 19 comentarios en
+# `src/services/identity.ts`, `src/routes/compose.ts`, `src/routes/gasless.ts`,
+# `src/lib/step0-refund.ts` y una migración SQL dicen "ver CLAUDE.md" para
+# explicar el Ownership Guard, que es lo que impide el acceso cruzado entre
+# dueños. Ignorarlo dejaba a cualquiera que clonara el repo leyendo un puntero
+# a un archivo inexistente, en código de seguridad. Ver el guardián en
+# test/docs-referenced-by-code-exist.test.ts.
 /SPRINT-REPORT-2026-04-27.md
 /SPRINT-SECURITY-COMPLETE-2026-04-27.md
 /doc/audit/2026-06-24-auditoria-profunda.md
