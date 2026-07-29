@@ -8,7 +8,7 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import Fastify from 'fastify';
+import Fastify, { type FastifyBaseLogger } from 'fastify';
 import {
   afterAll,
   afterEach,
@@ -86,6 +86,35 @@ const ORIGINAL_ADMIN_TOKEN = process.env.DASHBOARD_ADMIN_TOKEN;
 
 async function buildApp() {
   const app = Fastify();
+  await app.register(dashboardRoutes, { prefix: '/dashboard' });
+  await app.ready();
+  return app;
+}
+
+/**
+ * HU-206: la misma app, con un logger que captura los `warn`. Mismo patrón que
+ * `makeCapturingLogger` en `middleware/x402.settle-unknown.test.ts`: `child()` se
+ * devuelve a sí mismo para que `request.log` (que es un child) caiga en el mismo array.
+ * Sirve para candar la auditoría, que es parte de la defensa de esta operación.
+ */
+async function buildAppWithWarnCapture(sink: Record<string, unknown>[]) {
+  const logger = {
+    warn: (obj: unknown) => {
+      if (obj && typeof obj === 'object')
+        sink.push(obj as Record<string, unknown>);
+    },
+    error: () => {},
+    info: () => {},
+    debug: () => {},
+    trace: () => {},
+    fatal: () => {},
+    silent: () => {},
+    level: 'warn',
+    child() {
+      return this;
+    },
+  } as unknown as FastifyBaseLogger;
+  const app = Fastify({ loggerInstance: logger });
   await app.register(dashboardRoutes, { prefix: '/dashboard' });
   await app.ready();
   return app;
@@ -644,9 +673,23 @@ describe('AR-202 B3 — POST /api/reconciliation/:id/hop2-evidence', () => {
   });
 });
 
+// HU-206: credenciales de prueba, generadas acá. NUNCA valores reales.
+const PANEL_TOKEN = 'test-panel-token-206';
+const RELEASE_TOKEN = 'test-release-token-206-distinct';
+/** Las dos credenciales que exige `release-lease` a partir de HU-206. */
+const BOTH_CREDS = {
+  'x-admin-token': PANEL_TOKEN,
+  'x-reconciliation-release-token': RELEASE_TOKEN,
+};
+
 describe('AR-202 B3 — POST /api/reconciliation/:id/release-lease', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.RECONCILIATION_RELEASE_TOKEN = RELEASE_TOKEN;
+  });
+
+  afterEach(() => {
+    delete process.env.RECONCILIATION_RELEASE_TOKEN;
   });
 
   it('T-RLR1: sin DASHBOARD_ADMIN_TOKEN → 503 (fail-closed)', async () => {
@@ -662,14 +705,14 @@ describe('AR-202 B3 — POST /api/reconciliation/:id/release-lease', () => {
     await app.close();
   });
 
-  it('T-RLR2: con token + atestación completa → delega y devuelve el outcome', async () => {
-    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+  it('T-RLR2: con LAS DOS credenciales + atestación completa → delega y devuelve el outcome', async () => {
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
     mockReleaseHop2Lease.mockResolvedValue({ status: 'lease_released' });
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
       url: '/dashboard/api/reconciliation/i1/release-lease',
-      headers: { 'x-admin-token': 'secret' },
+      headers: BOTH_CREDS,
       payload: { resolvedBy: 'ops@wasiai', note: 'no transfer on chain' },
     });
     expect(res.statusCode).toBe(200);
@@ -682,12 +725,12 @@ describe('AR-202 B3 — POST /api/reconciliation/:id/release-lease', () => {
   });
 
   it('T-RLR3: sin `note` → 400. Es LA única operación que vuelve pagable una fila sin prueba: sin motivo registrado es el `UPDATE` a mano con otro nombre', async () => {
-    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
       url: '/dashboard/api/reconciliation/i1/release-lease',
-      headers: { 'x-admin-token': 'secret' },
+      headers: BOTH_CREDS,
       payload: { resolvedBy: 'ops@wasiai' },
     });
     expect(res.statusCode).toBe(400);
@@ -697,16 +740,287 @@ describe('AR-202 B3 — POST /api/reconciliation/:id/release-lease', () => {
   });
 
   it('T-RLR4: sin `resolvedBy` → 400', async () => {
-    process.env.DASHBOARD_ADMIN_TOKEN = 'secret';
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
       url: '/dashboard/api/reconciliation/i1/release-lease',
-      headers: { 'x-admin-token': 'secret' },
+      headers: BOTH_CREDS,
       payload: { note: 'n' },
     });
     expect(res.statusCode).toBe(400);
     expect(mockReleaseHop2Lease).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// HU-206 — LA OPERACIÓN SIN PRUEBA EXIGE UNA CREDENCIAL PROPIA.
+//
+// El agujero: `DASHBOARD_ADMIN_TOKEN` abría por igual las lecturas cross-tenant, la
+// resolución CON evidencia verificada on-chain (`hop2-evidence`) y la ATESTACIÓN SIN
+// prueba (`release-lease`, que devuelve la fila al reconciliador y éste REENVÍA EL
+// PAGO). O sea: el token que se presta para mirar métricas alcanzaba para habilitar un
+// pago sin evidencia. Estos tests candan la separación y, sobre todo, candan que el
+// camino verificable NO haya pagado fricción por ella.
+// ════════════════════════════════════════════════════════════════════════════
+describe('HU-206 — release-lease exige RECONCILIATION_RELEASE_TOKEN además del token de panel', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.NODE_ENV;
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+    delete process.env.RECONCILIATION_RELEASE_TOKEN;
+  });
+
+  afterEach(() => {
+    delete process.env.NODE_ENV;
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+    delete process.env.RECONCILIATION_RELEASE_TOKEN;
+  });
+
+  it('T-206-1 (EL test): con el token de panel VÁLIDO y sin la credencial nueva, release-lease es RECHAZADA mientras hop2-evidence y las lecturas siguen funcionando', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
+    delete process.env.RECONCILIATION_RELEASE_TOKEN;
+    mockResolveWithHop2Evidence.mockResolvedValue({ status: 'settled' });
+    const app = await buildApp();
+
+    // (a) la operación SIN prueba: cerrada.
+    const release = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      headers: { 'x-admin-token': PANEL_TOKEN },
+      payload: { resolvedBy: 'ops@wasiai', note: 'looked at the explorer' },
+    });
+    expect(release.statusCode).toBe(503);
+    expect(release.json().error).toBe('service_unavailable');
+    expect(mockReleaseHop2Lease).not.toHaveBeenCalled();
+
+    // (b) la operación VERIFICADA on-chain: intacta con el mismo token de panel.
+    const evidence = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/hop2-evidence',
+      headers: { 'x-admin-token': PANEL_TOKEN },
+      payload: { txHash: EV_TX, resolvedBy: 'ops@wasiai' },
+    });
+    expect(evidence.statusCode).toBe(200);
+    expect(mockResolveWithHop2Evidence).toHaveBeenCalledTimes(1);
+
+    // (c) las lecturas: intactas.
+    const stats = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/stats',
+      headers: { 'x-admin-token': PANEL_TOKEN },
+    });
+    expect(stats.statusCode).toBe(200);
+    const recon = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/reconciliation',
+      headers: { 'x-admin-token': PANEL_TOKEN },
+    });
+    expect(recon.statusCode).toBe(200);
+
+    await app.close();
+  });
+
+  it('T-206-2: credencial nueva CONFIGURADA pero el header manda un valor incorrecto → 401 y el service ni se toca', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
+    process.env.RECONCILIATION_RELEASE_TOKEN = RELEASE_TOKEN;
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      headers: {
+        'x-admin-token': PANEL_TOKEN,
+        'x-reconciliation-release-token': 'wrong-value-same-length-padding',
+      },
+      payload: { resolvedBy: 'ops@wasiai', note: 'n' },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe('unauthorized');
+    expect(mockReleaseHop2Lease).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('T-206-3: credencial nueva configurada y el header AUSENTE → 401 (el token de panel solo no alcanza)', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
+    process.env.RECONCILIATION_RELEASE_TOKEN = RELEASE_TOKEN;
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      headers: { 'x-admin-token': PANEL_TOKEN },
+      payload: { resolvedBy: 'ops@wasiai', note: 'n' },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(mockReleaseHop2Lease).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('T-206-4: la credencial nueva NO reemplaza al token de panel — sin `x-admin-token` sigue siendo 401', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
+    process.env.RECONCILIATION_RELEASE_TOKEN = RELEASE_TOKEN;
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      headers: { 'x-reconciliation-release-token': RELEASE_TOKEN },
+      payload: { resolvedBy: 'ops@wasiai', note: 'n' },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(mockReleaseHop2Lease).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('T-206-5: las dos variables con el MISMO valor → 503. Dos nombres para una sola credencial no separan privilegios', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
+    process.env.RECONCILIATION_RELEASE_TOKEN = PANEL_TOKEN;
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      headers: {
+        'x-admin-token': PANEL_TOKEN,
+        'x-reconciliation-release-token': PANEL_TOKEN,
+      },
+      payload: { resolvedBy: 'ops@wasiai', note: 'n' },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(mockReleaseHop2Lease).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('T-206-6: con LAS DOS credenciales correctas la operación funciona (la separación no la rompe)', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
+    process.env.RECONCILIATION_RELEASE_TOKEN = RELEASE_TOKEN;
+    mockReleaseHop2Lease.mockResolvedValue({ status: 'lease_released' });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      headers: BOTH_CREDS,
+      payload: { resolvedBy: 'ops@wasiai', note: 'no transfer on chain' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(mockReleaseHop2Lease).toHaveBeenCalledWith('i1', {
+      resolvedBy: 'ops@wasiai',
+      note: 'no transfer on chain',
+    });
+    await app.close();
+  });
+
+  // ── DESARROLLO LOCAL ──────────────────────────────────────────────────────
+  // El passthrough dev del gate OPT-IN (`requireAdminToken`, lecturas de WKH-54) NO se
+  // hereda acá: atar la operación sin prueba a `NODE_ENV` convierte un deploy con la
+  // variable sin setear en una habilitación silenciosa. Lo que sí se preserva es que el
+  // dev local siga andando configurando las variables.
+  // T-206-7a AÍSLA el gate nuevo: el token de panel se configura Y se manda, así que
+  // `requireAdminTokenStrict` pasa y el 503 sólo puede venir de `requireReleaseLeaseToken`.
+  // Sin esa aislación el test pasaba igual con un `if (!isProduction()) return;` metido en
+  // el gate nuevo (mutación M6 sobrevivía): el 503 lo daba el gate de panel y tapaba todo.
+  it('T-206-7a: en dev (NODE_ENV sin setear), con el token de panel VÁLIDO y sin la credencial nueva → 503. No hay passthrough dev en la operación sin prueba', async () => {
+    delete process.env.NODE_ENV;
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
+    delete process.env.RECONCILIATION_RELEASE_TOKEN;
+    const app = await buildApp();
+    const release = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      headers: { 'x-admin-token': PANEL_TOKEN },
+      payload: { resolvedBy: 'ops@wasiai', note: 'n' },
+    });
+    expect(release.statusCode).toBe(503);
+    expect(release.json().error).toBe('service_unavailable');
+    expect(mockReleaseHop2Lease).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('T-206-7b: en dev y sin NINGUNA variable, release-lease sigue CERRADA mientras las lecturas conservan su passthrough dev (AC-2 de WKH-54 intacto)', async () => {
+    delete process.env.NODE_ENV;
+    delete process.env.DASHBOARD_ADMIN_TOKEN;
+    delete process.env.RECONCILIATION_RELEASE_TOKEN;
+    const app = await buildApp();
+
+    const release = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      payload: { resolvedBy: 'ops@wasiai', note: 'n' },
+    });
+    expect(release.statusCode).toBe(503);
+    expect(mockReleaseHop2Lease).not.toHaveBeenCalled();
+
+    const stats = await app.inject({
+      method: 'GET',
+      url: '/dashboard/api/stats',
+    });
+    expect(stats.statusCode).toBe(200);
+
+    await app.close();
+  });
+
+  it('T-206-8: en dev, con las dos variables configuradas, la operación funciona igual que en prod (el desarrollo local no se rompe)', async () => {
+    delete process.env.NODE_ENV;
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
+    process.env.RECONCILIATION_RELEASE_TOKEN = RELEASE_TOKEN;
+    mockReleaseHop2Lease.mockResolvedValue({ status: 'lease_released' });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      headers: BOTH_CREDS,
+      payload: { resolvedBy: 'ops@wasiai', note: 'n' },
+    });
+    expect(res.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('T-206-9: el uso de la credencial de mayor privilegio queda auditado con autor, motivo e intent', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
+    process.env.RECONCILIATION_RELEASE_TOKEN = RELEASE_TOKEN;
+    mockReleaseHop2Lease.mockResolvedValue({ status: 'not_leased' });
+    const warned: Record<string, unknown>[] = [];
+    const app = await buildAppWithWarnCapture(warned);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i9/release-lease',
+      headers: BOTH_CREDS,
+      payload: { resolvedBy: 'ops@wasiai', note: 'explorer shows no transfer' },
+    });
+    expect(res.statusCode).toBe(200);
+    // `not_leased` no deja rastro en el service: el del route es el ÚNICO registro de
+    // quién ejerció la credencial. Por eso se audita el INTENTO, no sólo el efecto.
+    const entry = warned.find(
+      (w) => w.audit === 'ESCROW_HOP2_LEASE_RELEASE_REQUESTED',
+    );
+    expect(entry).toBeDefined();
+    expect(entry?.resolvedBy).toBe('ops@wasiai');
+    expect(entry?.note).toBe('explorer shows no transfer');
+    expect(entry?.intentId).toBe('i9');
+    await app.close();
+  });
+
+  it('T-206-10: un intento con token de panel válido y sin la credencial nueva queda registrado (es el patrón de escalada que esto separa)', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.DASHBOARD_ADMIN_TOKEN = PANEL_TOKEN;
+    delete process.env.RECONCILIATION_RELEASE_TOKEN;
+    const warned: Record<string, unknown>[] = [];
+    const app = await buildAppWithWarnCapture(warned);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/dashboard/api/reconciliation/i1/release-lease',
+      headers: { 'x-admin-token': PANEL_TOKEN },
+      payload: { resolvedBy: 'ops@wasiai', note: 'n' },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(warned.some((w) => w.audit === 'RELEASE_LEASE_NOT_CONFIGURED')).toBe(
+      true,
+    );
     await app.close();
   });
 });

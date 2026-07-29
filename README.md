@@ -185,6 +185,8 @@ Todos verificados contra `src/routes/`.
 
 `GET /metrics` expone el formato Prometheus, pero está protegido por `METRICS_TOKEN` y es fail-closed: en producción, si la variable no está seteada, responde `503` en vez de exponer métricas. Todo `/dashboard/api/*` devuelve datos cross-tenant y va detrás de token de operador (`DASHBOARD_ADMIN_TOKEN`); el HTML del dashboard es público porque no lleva ningún dato adentro, los pide el browser contra esa API gateada.
 
+Una sola operación pide **dos** credenciales: `POST /dashboard/api/reconciliation/:intentId/release-lease` exige además `RECONCILIATION_RELEASE_TOKEN` (header `X-Reconciliation-Release-Token`), que debe ser un secreto distinto del token de panel. Es la única operación que vuelve pagable una fila **sin prueba** —atesta un negativo que no se puede verificar y el reconciliador reenvía el pago—, así que no comparte credencial con las lecturas ni con su hermana `hop2-evidence`, cuyo hash sí se verifica on-chain. Si `RECONCILIATION_RELEASE_TOKEN` no está configurada, la operación responde `503` en producción **y** en desarrollo.
+
 **Con credencial**
 
 | Método | Ruta | Cobra | Descripción |
