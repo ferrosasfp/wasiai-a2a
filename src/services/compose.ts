@@ -65,6 +65,7 @@ import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 import {
   buildStrandedPaymentEvent,
   collectStrandedSteps,
+  resolveEffectivePipelineBudgetUsd,
 } from '../lib/stranded-payment.js';
 import {
   SSRFViolationError,
@@ -374,18 +375,34 @@ export const composeService = {
       // per-step debit below). NOT settled to the agent (gateway margin).
       const stepGasOverhead =
         chainId !== undefined ? await getStepGasOverheadUsd(chainId) : 0;
-      if (
-        maxBudget &&
-        totalCost + agent.priceUsdc + stepGasOverhead > maxBudget
-      )
+      // HU-306 (AC-1): el MISMO guard de presupuesto de siempre, que ya corta ANTES del
+      // débito y ANTES del invoke; lo único que cambia es contra QUÉ compara. El techo
+      // del gateway y el `maxBudget` del caller se combinan con `min`, y los dos tienen
+      // `+Infinity` como neutro:
+      //   · env sin setear + sin `maxBudget` ⟹ +Infinity ⟹ el guard NUNCA dispara ⟹
+      //     comportamiento byte-idéntico al de antes de esta HU;
+      //   · `maxBudget: 0` sigue significando "sin límite" (`0 || Infinity`), que es la
+      //     semántica que este guard ya tenía y que no se toca;
+      //   · env sin setear + `maxBudget` presente ⟹ el mensaje es STRING POR STRING el
+      //     de hoy (por eso el ternario, y no un mensaje nuevo para todos los casos).
+      // NO se agrega un `errorCode`: sería tocar el union de `ComposeResult.errorCode`,
+      // que es de otra HU. El mensaje distinguible alcanza para el operador.
+      const effectivePipelineBudget =
+        resolveEffectivePipelineBudgetUsd(maxBudget);
+      const wouldNeed = totalCost + agent.priceUsdc + stepGasOverhead;
+      if (wouldNeed > effectivePipelineBudget) {
+        const ceilingBinds = !maxBudget || effectivePipelineBudget < maxBudget;
         return {
           success: false,
           output: null,
           steps: results,
           totalCostUsdc: totalCost,
           totalLatencyMs: totalLatency,
-          error: `Budget exceeded: would need ${totalCost + agent.priceUsdc + stepGasOverhead}, max is ${maxBudget}`,
+          error: ceilingBinds
+            ? `Budget exceeded: would need ${wouldNeed}, max is ${effectivePipelineBudget} (gateway pipeline exposure ceiling)`
+            : `Budget exceeded: would need ${wouldNeed}, max is ${maxBudget}`,
         };
+      }
       // WKH-59 (real-price-debit) AC-2: steps 2..N debit atómico via
       // budgetService.debit (PG function increment_a2a_key_spend — CD-2).
       //

@@ -16,7 +16,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { A2AAgentKeyRow, Agent } from '../types/index.js';
 
 const logSpy = vi.hoisted(() => ({
@@ -584,6 +584,137 @@ describe('HU-306 · observar no cambia lo observado (AC-9, AC-10)', () => {
     expect(strandedEvents()).toHaveLength(0);
     // el débito per-step sigue siendo uno solo (el step 0 lo cobra el middleware).
     expect(mockDebit).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── AC-1: el techo por pipeline (entregado y APAGADO) ────────────────────
+
+describe('HU-306 · el techo de exposición por pipeline (AC-1)', () => {
+  const CEILING_ENV = 'PIPELINE_EXPOSURE_CEILING_USD';
+
+  afterEach(() => {
+    delete process.env[CEILING_ENV];
+  });
+
+  it('T-CEILING-01: con el techo configurado, el step que lo excedería NO debita y NO invoca', async () => {
+    // Lo que se mide es DINERO Y LLAMADAS, no el status: el guard corta ANTES del débito
+    // y ANTES del invoke, así que ni se cobra ni se le pide nada al agente.
+    process.env[CEILING_ENV] = '0.05';
+    const a1 = makeAgent({ slug: 'c1', priceUsdc: 0.02 });
+    const a2 = makeAgent({ slug: 'c2', id: 'agent-2', priceUsdc: 0.09 });
+    wireAgents(a1, a2);
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'h',
+      paymentRequest: {
+        authorization: {
+          from: '0xA',
+          to: EVM_PAYTO,
+          value: '1',
+          validAfter: '0',
+          validBefore: '9999999999',
+          nonce: '0x1',
+        },
+        signature: '0xSIG',
+        network: 'eip155:2368',
+      },
+    });
+    mockSettle.mockResolvedValue({ success: true, txHash: '0xIN' });
+    mockFetchOk({ result: 'step0' }); // sólo el step 0 llega a invocarse
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'c1', input: {} },
+        { agent: 'c2', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow(),
+      chainId: CHAIN_ID,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('gateway pipeline exposure ceiling');
+    expect(result.steps).toHaveLength(1);
+    // EL efecto: cero débitos per-step (el del step 1 nunca ocurrió)…
+    expect(mockDebit).not.toHaveBeenCalled();
+    // …y una sola llamada saliente, la del step 0. El step 1 no se invocó.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-CEILING-02: SIN el techo configurado, el pipeline caro corre y el mensaje es el de siempre', async () => {
+    // El techo se entrega SIN SETEAR a propósito. Con la env ausente, el comportamiento y
+    // el string del error son los de antes de esta HU, carácter por carácter.
+    const a1 = makeAgent({ slug: 'd1', priceUsdc: 0.6 });
+    const a2 = makeAgent({ slug: 'd2', id: 'agent-2', priceUsdc: 0.6 });
+    wireAgents(a1, a2);
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'h',
+      paymentRequest: {
+        authorization: {
+          from: '0xA',
+          to: EVM_PAYTO,
+          value: '1',
+          validAfter: '0',
+          validBefore: '9999999999',
+          nonce: '0x1',
+        },
+        signature: '0xSIG',
+        network: 'eip155:2368',
+      },
+    });
+    mockSettle.mockResolvedValue({ success: true, txHash: '0xIN' });
+    mockFetchOk();
+    mockFetchOk();
+
+    // (a) sin `maxBudget` NI techo: el pipeline caro corre entero.
+    const libre = await composeService.compose({
+      steps: [
+        { agent: 'd1', input: {} },
+        { agent: 'd2', input: {} },
+      ],
+    });
+    expect(libre.success).toBe(true);
+
+    // (b) con `maxBudget` y SIN techo: el mensaje es EXACTAMENTE el histórico — sin la
+    //     coletilla del techo, que es lo que distingue quién ató el presupuesto.
+    mockFetchOk();
+    const acotado = await composeService.compose({
+      steps: [
+        { agent: 'd1', input: {} },
+        { agent: 'd2', input: {} },
+      ],
+      maxBudget: 1.0,
+    });
+    expect(acotado.success).toBe(false);
+    expect(acotado.error).toBe('Budget exceeded: would need 1.2, max is 1');
+    expect(acotado.error).not.toContain('ceiling');
+  });
+
+  it('T-CEILING-02b: `maxBudget: 0` sigue significando "sin límite"', async () => {
+    const a1 = makeAgent({ slug: 'e1', priceUsdc: 5 });
+    wireAgents(a1);
+    mockSign.mockResolvedValue({
+      xPaymentHeader: 'h',
+      paymentRequest: {
+        authorization: {
+          from: '0xA',
+          to: EVM_PAYTO,
+          value: '1',
+          validAfter: '0',
+          validBefore: '9999999999',
+          nonce: '0x1',
+        },
+        signature: '0xSIG',
+        network: 'eip155:2368',
+      },
+    });
+    mockSettle.mockResolvedValue({ success: true, txHash: '0xIN' });
+    mockFetchOk();
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'e1', input: {} }],
+      maxBudget: 0,
+    });
+
+    expect(result.success).toBe(true);
   });
 });
 
