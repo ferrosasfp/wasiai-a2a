@@ -328,6 +328,14 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         const quoteCaller = resolveQuoteCaller(request);
         const canQuote =
           plan.planStatus === 'ready' &&
+          // ⚠️ Este `quoteCaller !== null` está ENMASCARADO por el del ternario de
+          // abajo, que es el que TypeScript necesita para el narrowing antes de
+          // pasarlo como `caller`. Se deja a propósito, para que la lista de las
+          // cinco condiciones de emisión se lea completa en un solo lugar — pero
+          // conviene saber que es redundante: una mutación que lo borre NO cambia
+          // nada observable (fue exactamente lo que escondió al mutante M19, que
+          // sólo muere si además se fabrica un caller en el ternario). Si algún día
+          // se saca, hay que verificar que el narrowing del ternario siga en pie.
           quoteCaller !== null &&
           plan.steps.length >= 1 &&
           plan.steps.length === plan.costPerStep.length &&

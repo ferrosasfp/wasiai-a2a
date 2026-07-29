@@ -10,11 +10,7 @@
  *   - T-ROUTE-2b (regresión): success → HTTP 200 (legacy)
  */
 
-import type {
-  FastifyBaseLogger,
-  FastifyReply,
-  FastifyRequest,
-} from 'fastify';
+import type { FastifyBaseLogger, FastifyReply, FastifyRequest } from 'fastify';
 import Fastify from 'fastify';
 import {
   afterAll,
@@ -141,6 +137,17 @@ function okResult(over: Partial<OrchestrateResult> = {}): OrchestrateResult {
 }
 
 // ── Setup ───────────────────────────────────────────────────
+
+// Reset de ALCANCE DE ARCHIVO de los contextos de credencial que simula el mock del
+// middleware de auth. Vive acá y no dentro del describe de WKH-303 a propósito: los
+// describes preexistentes no los setean nunca, así que su aislamiento dependería del
+// ORDEN DE DECLARACIÓN (que el de la HU quede último) en vez de un reset explícito.
+// Funciona igual con el reset local, pero apoyarse en el orden es una garantía que
+// se rompe sola el día que alguien agregue un describe debajo.
+beforeEach(() => {
+  nextDelegationContext = undefined;
+  nextKeySessionContext = undefined;
+});
 
 describe('orchestrate routes — WKH-61 scope mapping', () => {
   let app: ReturnType<typeof Fastify>;
@@ -914,8 +921,7 @@ describe('orchestrate routes — WKH-303 quote freeze', () => {
     nextKeyRow = { id: 'k1', owner_ref: 'o1' };
     authRejectStatus = undefined;
     lastSkipMiddlewareDebit = undefined;
-    nextDelegationContext = undefined;
-    nextKeySessionContext = undefined;
+    // (los contextos de delegación/sesión los resetea el beforeEach de archivo)
     // resolveAgentPriceUsdc vuelve al default del harness tras clearAllMocks.
     vi.mocked(resolveAgentPriceUsdc).mockResolvedValue(0.05);
     // CD-16: se restaura en afterEach, nunca al final del cuerpo del test.
