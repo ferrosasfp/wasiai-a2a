@@ -9,6 +9,11 @@ import {
 } from '../adapters/chain-resolver.js';
 import { getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
+// HU-208: el lector de `category` se movió a un módulo LEAF porque ahora lo
+// comparten el ejecutor (este archivo, que HACE CUMPLIR el alcance) y el selector
+// de candidatos por capacidad. Dos lectores distintos = el selector elige agentes
+// que el ejecutor después rechaza con 403. Ver lib/agent-category.ts.
+import { readAgentCategory } from '../lib/agent-category.js';
 import { hashCallerRef } from '../lib/caller-hash.js';
 import { selectFacilitatorUrl } from '../lib/cdp-selector.js';
 // Fix-pack P1 AR BLQ-BAJO-1: el page size del pool de agentes que usa
@@ -56,9 +61,9 @@ import type {
   AuthzTarget,
   ComposeRequest,
   ComposeResult,
-  ComposeStep,
   LLMBridgeStats,
   RegistryConfig,
+  ResolvedComposeStep,
   StepResult,
   X402PaymentRequest,
 } from '../types/index.js';
@@ -162,17 +167,6 @@ function buildAuthHeaders(
   return headers;
 }
 
-/**
- * WKH-61: lee category del Agent.metadata con type-guard.
- * Retorna `undefined` si metadata.category no es un string (registries que no
- * exponen category). NO usar `agent.capabilities[0]` como proxy (CD-8).
- */
-function readCategory(agent: Agent): string | undefined {
-  const meta = agent.metadata as Record<string, unknown> | undefined;
-  const cat = meta?.category;
-  return typeof cat === 'string' ? cat : undefined;
-}
-
 export const composeService = {
   async compose(request: ComposeRequest): Promise<ComposeResult> {
     const { steps, maxBudget, a2aKey, scopingKeyRow, chainId, logger } =
@@ -209,7 +203,7 @@ export const composeService = {
         const target: AuthzTarget = {
           registry: agent.registry,
           agent_slug: agent.slug,
-          category: readCategory(agent),
+          category: readAgentCategory(agent),
         };
         const scope = authzService.checkScoping(scopingKeyRow, target);
         if (!scope.allowed) {
@@ -827,7 +821,7 @@ export const composeService = {
     /** Fix-pack P1 (hallazgo 4): motivo del skip del leg downstream, si hubo. */
     downstreamSkipCode?: DownstreamSkipCode | undefined;
     startTime: number;
-    steps: ComposeStep[];
+    steps: ResolvedComposeStep[];
     i: number;
     results: StepResult[];
     totalCost: number;
@@ -881,6 +875,12 @@ export const composeService = {
         downstreamSettle: `skipped:${toPublicSkipCode(downstreamSkipCode)}`,
       }),
     };
+    // HU-208: procedencia del agente. Se copia del step RESUELTO, que la trae
+    // sólo si el gateway lo eligió a partir de una `capability`. Aditivo: en un
+    // step nombrado por el llamador el campo queda ausente y la respuesta es
+    // byte-idéntica a la de antes de esta HU.
+    const resolvedFrom = steps[i]?.resolvedFrom;
+    if (resolvedFrom) result.resolvedFrom = resolvedFrom;
     // WKH-114 (AC-2/AC-3/AC-4): veredicto de completitud por step. Puro,
     // sync, never-throw (CD-8); NO re-invoca (CD-5) ni toca billing (CD-1/CD-4).
     result.acceptance = verifyStepOutput(output, steps[i]?.acceptanceCriteria);
@@ -984,8 +984,18 @@ export const composeService = {
 
     return { totalCost, totalLatency, lastOutput };
   },
+  /**
+   * HU-208: recibe `ResolvedComposeStep`, o sea un step cuyo `agent` ES un slug
+   * concreto. NO resuelve capacidades — a propósito. La resolución por capacidad
+   * ocurre UNA sola vez, en el preHandler de `/compose`, antes de cotizar el
+   * precio y antes del débito del step-0. Si viviera acá correría por SEGUNDA vez,
+   * después de cobrar, sobre entradas de ranking que cambian solas (fetch en vivo
+   * a los registries + `computeReputationBatch`), y podría devolver otro agente:
+   * el llamador habría pagado por un pipeline y recibido otro. El tipo del
+   * parámetro es lo que impide reintroducir eso sin que el compilador avise.
+   */
   async resolveAgent(
-    step: ComposeStep,
+    step: ResolvedComposeStep,
     discoverCache?: DiscoverCache,
   ): Promise<Agent | null> {
     // B7 (audit 2026-06-24): cache del discovery del pool POR compose. Esta

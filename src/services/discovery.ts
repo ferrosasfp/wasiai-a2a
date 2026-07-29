@@ -2,6 +2,9 @@
  * Discovery Service — Search agents across all registries
  */
 
+// HU-208: lector ÚNICO de `category`, compartido con `services/compose.ts` (el
+// que HACE CUMPLIR el alcance). Ver lib/agent-category.ts.
+import { readAgentCategory } from '../lib/agent-category.js';
 import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
 // Fix-pack P1 AR BLQ-BAJO-1: el over-fetch vive en un módulo LEAF porque
 // `services/compose.ts` también necesita el límite del pool y las suites que
@@ -10,6 +13,9 @@ import { resolveUpstreamFetchLimit } from '../lib/discovery-fetch-limit.js';
 import { getLogger } from '../lib/logger.js';
 import { readPaymentSpec } from '../lib/payment-spec-reader.js';
 import { parsePriceSafe } from '../lib/price.js';
+// HU-208: desempate aleatorio del ranking. Módulo LEAF (fuente inyectable para
+// que los tests no dependan de `Math.random`).
+import { assignTiebreaks, compareTiebreak } from '../lib/ranking-tiebreak.js';
 import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 import {
   SSRFViolationError,
@@ -24,6 +30,8 @@ import type {
 } from '../types/index.js';
 import { SELF_PUBLISHED_REGISTRY_NAME } from '../types/index.js';
 import { publishedAgentService } from './agent.js';
+// HU-208: `authz.ts` es una hoja pura (sólo `import type`), así que no hay ciclo.
+import { authzService } from './authz.js';
 import { identityService } from './identity.js';
 import { registryService } from './registry.js';
 import { reputationService } from './reputation.js';
@@ -336,6 +344,58 @@ export const discoveryService = {
       allAgents = allAgents.filter((a) => a.priceUsdc <= maxPrice);
     }
 
+    // ── HU-208: filtro de CANDIDATURA (alcance del llamador) ───────────────
+    //
+    // ⚠️ POR QUÉ VIVE ACÁ Y NO EN `/compose`. Está en el bloque PRE-SORT a
+    // propósito. El `slice` del page size (más abajo) corre DESPUÉS del sort, así
+    // que sobre una lista ya ordenada sólo puede sacar elementos de la COLA:
+    // `sorted.slice(0, N)[0] === sorted[0]` para todo N >= 1. Mientras el filtro
+    // corra ANTES del sort, el ganador del ranking es invariante al recorte y el
+    // residual TD-189-1 (documentado abajo, en el `slice`) NO alcanza a la
+    // resolución por capacidad. Si este filtro se moviera aguas ABAJO del
+    // recorte —p.ej. filtrando en el resolver sobre la página ya cortada— un
+    // candidato válido podría quedar fuera de la ventana y la precondición de ese
+    // residual pasaría a estar encima del camino del dinero. NO MOVER.
+    //
+    // ⚠️ NO agregar acá un filtro por CHAIN (ni por ningún otro atributo que
+    // sirva para señalar un agente concreto). Se evaluó y se RECHAZÓ: forzar el
+    // rail es hacerle trampa al ranking. El orden verified → reputación → precio
+    // se respeta SIEMPRE; si el agente que queremos no gana, el arreglo es del
+    // lado de los datos (que se gane la reputación), no del lado del código.
+    // `maxPrice` y `minReputation` sí son legítimos: son restricciones del que
+    // pide, no una forma de elegir un agente concreto por la puerta de atrás.
+    let excludedByScope = 0;
+
+    if (query.scope) {
+      // HU-208 (port de WAS-187 AC-7): un agente que la credencial del llamador
+      // estructuralmente NO puede invocar no es un candidato. No es un fallback
+      // silencioso: es definir bien el conjunto. Que "el mejor" sea relativo al
+      // llamador es correcto — distintos llamadores tienen legítimamente
+      // distintos candidatos.
+      //
+      // Se llama a `authzService.checkScoping`, la MISMA función que después hace
+      // cumplir el alcance en `composeService.compose`. Con dos predicados
+      // distintos el selector podría elegir un agente que el ejecutor rechaza, y
+      // el llamador comería un 403 sobre un agente que nunca nombró.
+      //
+      // NO se le pasa `estimated_cost_usd`, así que el check de
+      // `max_spend_per_call_usd` (rama 4 de checkScoping) queda fuera: ese límite
+      // lo hace cumplir el middleware de pago y el llamador tiene
+      // `constraints.max_price_usdc` para expresar su techo. Filtrar acá por él
+      // sería una restricción que nadie pidió.
+      const scope = query.scope;
+      const before = allAgents.length;
+      allAgents = allAgents.filter(
+        (a) =>
+          authzService.checkScoping(scope, {
+            registry: a.registry,
+            agent_slug: a.slug,
+            category: readAgentCategory(a),
+          }).allowed,
+      );
+      excludedByScope = before - allAgents.length;
+    }
+
     // WKH-103 (DT-8/OBS-2): score batch pre-sort, 1 query (CD-12). Sin RPC
     // on-chain (CD-13). Corre sobre allAgents (pre-limit) para que la página
     // sea el top-N por reputación real.
@@ -378,12 +438,28 @@ export const discoveryService = {
       const rep = x.computedReputation?.score ?? x.reputation;
       return Number.isFinite(rep) ? (rep as number) : 0;
     };
+    // HU-208: desempate ALEATORIO cuando los TRES criterios se agotan.
+    //
+    // Antes ganaba el orden del arreglo, que sale de cómo se concatenaron las
+    // fuentes (`results.flat()` + self-published): un sesgo posicional invisible
+    // por el cual, entre agentes idénticos en identidad, reputación y precio,
+    // siempre ganaba el mismo — repartiendo ingresos por un accidente de
+    // implementación. Dos agentes empatados merecen la misma chance.
+    //
+    // El valor se asigna UNA vez por agente ANTES de ordenar (nunca dentro del
+    // comparador: un `cmp` no determinista deja el resultado del sort INDEFINIDO
+    // por especificación). Así el orden sigue siendo total y estable dentro de la
+    // request. Ver `lib/ranking-tiebreak.ts` — la fuente es inyectable para que
+    // los tests no se vuelvan flakes.
+    const tiebreaks = assignTiebreaks(allAgents);
     allAgents.sort((a, b) => {
       const verifiedDiff = Number(b.verified) - Number(a.verified);
       if (verifiedDiff !== 0) return verifiedDiff;
       const repDiff = repValue(b) - repValue(a);
       if (repDiff !== 0) return repDiff;
-      return a.priceUsdc - b.priceUsdc;
+      const priceDiff = a.priceUsdc - b.priceUsdc;
+      if (priceDiff !== 0) return priceDiff;
+      return compareTiebreak(tiebreaks, a, b);
     });
 
     // Apply limit (PAGE SIZE — post-filtro, post-sort). Fix-pack P1: el fetch
@@ -417,6 +493,12 @@ export const discoveryService = {
       // no en semántica).
       total: allAgents.length,
       registries: contributingRegistries,
+      // HU-208: cuántos candidatos descartó el filtro de candidatura. Sin esto
+      // un conjunto vacío es indistinguible de "no existe tal capacidad", y un
+      // operador buscaría el problema en el catálogo cuando en realidad hay un
+      // agente que su credencial no alcanza. Es la contrapartida de filtrar:
+      // nada se elige a escondidas y nada se descarta a escondidas.
+      excluded: { scope: excludedByScope },
     };
   },
 

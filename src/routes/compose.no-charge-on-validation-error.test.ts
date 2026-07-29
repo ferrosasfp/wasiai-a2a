@@ -523,7 +523,13 @@ describe('compose route — 400 de validación NO cobra (HIGH-2, dirección (a))
     expect(budgetState.balance).toBe(balanceBefore);
     expect(debitMock).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(400);
-    expect(res.json().error).toBe("Step 1 is missing a string 'agent' field");
+    // HU-208: el mensaje ahora nombra TAMBIÉN la alternativa nueva
+    // (`capability`). El comportamiento que este test protege — 400 pre-débito,
+    // balance intacto, compose no invocado — no cambió ni un byte; sólo el texto.
+    expect(res.json().error).toBe(
+      "Step 1 is missing a string 'agent' or 'capability' field",
+    );
+    expect(res.json().code).toBe('VALIDATION_ERROR');
     expect(mockCompose).not.toHaveBeenCalled();
   });
 

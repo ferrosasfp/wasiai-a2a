@@ -50,6 +50,7 @@ import type {
   DelegationRow,
   KeySessionDebitContext,
   KeySessionRow,
+  ResolvedComposeStep,
   SignedAuthErrorCode,
   SignedAuthHeaders,
 } from '../types/index.js';
@@ -73,6 +74,23 @@ declare module 'fastify' {
 
     composeEstimatedCostUsd?: number; // WKH-59 (real-price-debit) — CD-9
     composeDestination?: string | undefined; // WKH-125 (cap por destino del step 0)
+    /**
+     * HU-208: el pipeline con TODAS las capacidades ya resueltas a un agente
+     * concreto. Lo produce `resolveComposeCapabilitiesHandler` ANTES del
+     * preHandler de precio, así que el precio se cotiza, el step-0 se debita y el
+     * pipeline se ejecuta SOBRE EL MISMO arreglo — una sola resolución por
+     * request. Ausente cuando ningún step declaró `capability` (los callers de
+     * siempre no pagan ni una query extra).
+     */
+    composeResolvedSteps?: ResolvedComposeStep[];
+    /**
+     * HU-208: el precio POR STEP con el que se cotizó el pipeline (el que
+     * alimentó el débito del step-0 y el monto del challenge x402). Se compara
+     * contra el precio realmente cobrado al terminar, para MEDIR la deriva de
+     * precio entre la cotización y la ejecución. Ver
+     * `reportComposePriceDrift` en `routes/compose.ts`.
+     */
+    composeQuotedPricesUsd?: number[];
     resolvedChainId?: number; // WKH-59 (real-price-debit) DT-D
     delegationRow?: DelegationRow; // WKH-101
     delegationContext?: DelegationDebitContext; // WKH-101 DT-11 (débito per-step)

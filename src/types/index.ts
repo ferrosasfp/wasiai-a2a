@@ -356,12 +356,35 @@ export interface DiscoveryQuery {
   registry?: string | undefined; // Filter to specific registry
   verified?: boolean | undefined;
   includeInactive?: boolean | undefined;
+  /**
+   * HU-208 (port de WAS-187 AC-7): el alcance del LLAMADOR, para que un agente
+   * que su credencial estructuralmente no puede invocar no sea candidato.
+   *
+   * Es la fila efectiva de la key (`request.a2aKeyRow`) y NO un shape propio a
+   * propósito: el filtro llama a `authzService.checkScoping`, EXACTAMENTE la
+   * misma función que después hace cumplir el alcance en
+   * `composeService.compose`. Con dos predicados distintos, el selector podría
+   * elegir un agente que el ejecutor rechaza (403 sobre un agente que el
+   * llamador nunca nombró).
+   *
+   * `undefined` (llamador x402 anónimo, sin credencial) → sin filtro: no hay
+   * alcance que aplicar.
+   */
+  scope?: A2AAgentKeyRow | undefined;
 }
 
 export interface DiscoveryResult {
   agents: Agent[];
   total: number;
   registries: string[];
+  /**
+   * HU-208: cuántos candidatos descartó cada filtro de CANDIDATURA. Aditivo y
+   * opcional (los callers que no lo leen no cambian). Existe para que un
+   * conjunto vacío pueda explicarse: sin este dato, "no hay agente" y "hay uno
+   * pero tu credencial no lo alcanza" son el mismo mensaje, y mandan a buscar el
+   * problema al lugar equivocado.
+   */
+  excluded?: { scope: number };
 }
 
 // ============================================================
@@ -388,9 +411,49 @@ export interface StepAcceptance {
   failedCriteria?: string[];
 }
 
+/**
+ * HU-208: restricciones del CONJUNTO DE CANDIDATOS de un step declarado por
+ * `capability`. Port de `ComposeStep.constraints` de WAS-187 (wasiai-v2
+ * `sdd-187.md` §1.1) menos `min_performance`, que allá ordenaba por una columna
+ * `performance_score` que acá NO existe: nuestro `AgentReputation.score` YA se
+ * deriva de tasks liquidadas + success_rate + latencia, o sea que es la señal de
+ * performance operacional. Portar un segundo score habría creado dos
+ * definiciones de "el mejor", que es el error que esta HU existe para no cometer.
+ *
+ * ⚠️ Las dos se aplican como filtros PRE-SORT dentro de
+ * `discoveryService.runDiscoveryPipeline`, NUNCA como post-filtro sobre la página
+ * ya recortada. La razón está en `resolveCapabilityStep` (services/
+ * capability-resolver.ts) y es lo que mantiene el residual TD-189-1 FUERA del
+ * camino del dinero. No mover estos filtros aguas abajo del `slice`.
+ */
+export interface ComposeStepConstraints {
+  /** Techo de precio por llamada en USD. Mapea a `DiscoveryQuery.maxPrice`. */
+  max_price_usdc?: number;
+  /**
+   * Piso de reputación COMPUTADA (0-100, off-chain, derivada de tasks
+   * liquidadas). Mapea a `DiscoveryQuery.minReputation`, que deliberadamente NO
+   * usa el `reputation` auto-reportado por el registry (ver discovery.ts).
+   */
+  min_reputation?: number;
+}
+
 export interface ComposeStep {
-  /** Agent ID or slug */
-  agent: string;
+  /**
+   * Agent ID or slug.
+   *
+   * HU-208: pasó a OPCIONAL porque un step puede declararse por `capability` y
+   * dejar que el gateway elija el agente. Es MUTUAMENTE EXCLUYENTE con
+   * `capability`: traer las dos, o ninguna, es un 400 (`validateComposeBody`).
+   */
+  agent?: string;
+  /**
+   * HU-208: la CAPACIDAD requerida; el gateway resuelve qué agente la cumple
+   * mejor con el ranking que ya existe (verified → reputación → precio).
+   * Mutuamente excluyente con `agent`.
+   */
+  capability?: string;
+  /** HU-208: filtros del conjunto de candidatos. Sólo aplica junto a `capability`. */
+  constraints?: ComposeStepConstraints;
   /** Registry name (optional, will search all if not specified) */
   registry?: string;
   /** Input for this step */
@@ -401,8 +464,41 @@ export interface ComposeStep {
   acceptanceCriteria?: string[];
 }
 
+/**
+ * HU-208: step cuyo agente YA ESTÁ RESUELTO a un slug concreto.
+ *
+ * ⚠️ ESTE TIPO ES UN GUARD DE DINERO, no azúcar sintáctica. `ComposeRequest.steps`
+ * lo exige, así que `composeService.compose` NO PUEDE recibir un step sin
+ * resolver: intentarlo es un error de compilación, no un bug de runtime.
+ *
+ * Por qué importa: `composeService.resolveAgent` re-resuelve cada step por su
+ * cuenta. Si la resolución por capacidad viviera ahí, correría por SEGUNDA vez
+ * después de que el precio ya se cotizó y el step-0 ya se debitó, sobre entradas
+ * de ranking que cambian solas (fetch en vivo a los registries +
+ * `computeReputationBatch` contra la DB) — y podría elegir OTRO agente. El
+ * llamador habría pagado por un pipeline y recibido otro. La resolución ocurre
+ * UNA sola vez, en el preHandler, y desde ahí el step es indistinguible de uno
+ * que el llamador nombró a mano.
+ */
+export interface ResolvedComposeStep extends ComposeStep {
+  agent: string;
+  /**
+   * HU-208: procedencia. Presente SÓLO si el gateway eligió este agente a partir
+   * de una `capability`; ausente si el llamador lo nombró. Es la información que
+   * de verdad falta en la respuesta — el agente resuelto YA viaja entero en
+   * `StepResult.agent`, así que un `resolved_slug` (WAS-187 AC-5) sería
+   * redundante; lo que no se puede reconstruir es QUIÉN eligió.
+   */
+  resolvedFrom?: { capability: string };
+}
+
 export interface ComposeRequest {
-  steps: ComposeStep[];
+  /**
+   * HU-208: `ResolvedComposeStep[]`, no `ComposeStep[]`. Ver el docstring del
+   * tipo — es el guard de compilación que impide que un step por capacidad
+   * llegue sin resolver al ejecutor.
+   */
+  steps: ResolvedComposeStep[];
   /** Max budget in USDC */
   maxBudget?: number | undefined;
   /** Propagated to agent invocations as header `x-a2a-key` (WKH-MCP-X402) */
@@ -493,6 +589,18 @@ export interface StepResult {
   output: unknown;
   costUsdc: number;
   latencyMs: number;
+  /**
+   * HU-208: procedencia del agente de ESTE step. Presente SÓLO cuando el gateway
+   * lo eligió a partir de una `capability`; ausente cuando el llamador lo nombró.
+   * Cambio de contrato ADITIVO.
+   *
+   * El agente elegido YA viaja entero en `agent` (esa es la forma que la
+   * respuesta ya tenía y que se respeta), así que repetir el slug — el
+   * `resolved_slug` de WAS-187 AC-5 — no agregaría nada. Lo que no se puede
+   * reconstruir desde la respuesta es si el llamador lo pidió o el gateway lo
+   * decidió, y eso es justo lo que hace auditable una elección server-side.
+   */
+  resolvedFrom?: { capability: string };
   txHash?: string | undefined; // Hash de tx on-chain si hubo pago x402
   /** @deprecated Use bridgeType. Kept for backward-compat (WKH-56 DT-3). */
   cacheHit?: boolean | 'SKIPPED';
@@ -656,8 +764,15 @@ export type OrchestratePlanStatus =
 export interface OrchestratePlanResult {
   orchestrationId: string;
   planStatus: OrchestratePlanStatus;
-  /** Steps del plan ejecutable; [] en early-returns. */
-  steps: ComposeStep[];
+  /**
+   * Steps del plan ejecutable; [] en early-returns.
+   *
+   * HU-208: `ResolvedComposeStep[]` — el planner los construye a partir de
+   * agentes YA resueltos por discovery (`orchestrate.ts` mapea `agent.slug`), así
+   * que el tipo describe lo que el código ya garantizaba. Necesario además
+   * porque estos steps se le pasan a `composeService.compose`.
+   */
+  steps: ResolvedComposeStep[];
   /** Precio resuelto server-side por step; [] en early-returns. */
   costPerStep: number[];
   /** sum(costPerStep) — informativo, NO base del débito. */
@@ -705,7 +820,13 @@ export interface OrchestratePlanResult {
 export interface OrchestrateExecuteRequest extends OrchestrateRequest {
   /** El plan aprobado por el cliente (steps re-resueltos server-side, AC-4). */
   orchestrationId: string;
-  steps: ComposeStep[];
+  /**
+   * HU-208: `ResolvedComposeStep[]`. El JSON schema de la ruta ya exige
+   * `agent: {type:'string', minLength:1}` en cada step (`routes/orchestrate.ts`),
+   * así que el tipo refleja una invariante que Fastify ya hace cumplir en el
+   * borde. `/orchestrate` NO acepta steps por capacidad en esta HU.
+   */
+  steps: ResolvedComposeStep[];
   /** Cap aprobado por el cliente; gate AC-3. */
   maxQuotedCostUsdc: number;
 }
