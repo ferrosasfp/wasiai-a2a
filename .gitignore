@@ -190,4 +190,8 @@ backups/
 /scripts/smoke-prod-via-app-wasiai.mjs
 /scripts/switch-railway-to-prod-db.sh
 /scripts/verify-r2-wallets.mjs
-/scripts/verify-rls-enabled.mjs
+# NOTA: /scripts/verify-rls-enabled.mjs NO va acá. `test/verify-rls-enabled.test.ts`
+# lo importa, y `actions/checkout` no materializa archivos ignorados: ignorarlo deja
+# la suite sin colectar y `npm test` en exit 1 en TODA rama. Es read-only, no tiene
+# credenciales (el PAT sale de .env en runtime) y está escrito para ser testeado.
+# Ver el test-guardián en test/scripts-imported-by-tests-are-tracked.test.ts.
