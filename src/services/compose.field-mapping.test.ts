@@ -119,12 +119,19 @@ vi.mock('./refund-outbox.js', () => ({
   refundOutbox: { enqueueRefund: vi.fn().mockResolvedValue(undefined) },
 }));
 
+import { signAndSettleDownstream } from '../lib/downstream-payment.js';
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
 import { regenerateInputFromErrors } from './llm/input-retry.js';
 import { maybeTransform } from './llm/transform.js';
 
 const mockRegen = vi.mocked(regenerateInputFromErrors);
+/**
+ * EL PAGO AL AGENTE. `signAndSettleDownstream` es el leg que le manda la plata al
+ * agente invocado; contarlo es contar pagos reales, no "se llamó a una función".
+ * A diferencia del débito del caller, este pago NO se reembolsa: si sale, salió.
+ */
+const mockDownstreamPay = vi.mocked(signAndSettleDownstream);
 
 function makeAgent(o: Partial<Agent> = {}): Agent {
   return {
@@ -217,6 +224,13 @@ const P2 = 0.02;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // ⚠️ `clearAllMocks` limpia las LLAMADAS, no la cola de `mockResolvedValueOnce`.
+  // Un test que encola una respuesta y NO la consume (p. ej. el que prueba que el
+  // retry NO ocurre) se la deja al test siguiente y le corre todas las respuestas
+  // un lugar. `mockReset` es lo único que vacía la cola.
+  mockFetch.mockReset();
+  mockRegen.mockReset();
+  mockRegen.mockResolvedValue(null);
   budgetState.balance = 10;
   debitMock.mockImplementation(async (_k, _c, amountUsd: number) => {
     budgetState.balance -= amountUsd;
@@ -653,13 +667,18 @@ describe('WKH-305 · AC-7: el retry adaptativo re-aplica el mapeo antes del re-d
    * RE-INVOKE se encola DESPUÉS de llamar a esto: `mockResolvedValueOnce` es una
    * cola FIFO y el orden de encolado ES el orden de las respuestas.
    */
-  function queueStep0AndFailedAttempt() {
+  function queueStep0AndFailedAttempt(flaggedField = 'amount') {
     mockAgentsBySlug({
       fx: makeAgent({ slug: 'fx', priceUsdc: P0 }),
       payout: makeAgent({ slug: 'payout', priceUsdc: P1, id: 'agent-2' }),
     });
     mockFetchOk({ quoteId: 'q-real', rate: 3.7 });
-    mockFetchError(400, '{"fieldErrors":{"amount":["required"]}}');
+    // `flaggedField` = el campo que el AGENTE señala como problemático. Default
+    // `amount` (ajeno al mapeo) = el camino de retry de siempre.
+    mockFetchError(
+      400,
+      JSON.stringify({ fieldErrors: { [flaggedField]: ['required'] } }),
+    );
   }
 
   function runRetryPipeline() {
@@ -719,6 +738,73 @@ describe('WKH-305 · AC-7: el retry adaptativo re-aplica el mapeo antes del re-d
     expect(debitMock).toHaveBeenCalledTimes(2);
     expect(creditWithDestMock).toHaveBeenCalledTimes(2);
     expect(budgetState.balance).toBeCloseTo(balanceBefore, 10);
+  });
+
+  // ── CR MNR-2: el retry condenado a repetir el valor mapeado ──────────────
+  //
+  // El caso real: el agente rechaza el `quoteId` porque VENCIÓ. El LLM regenera
+  // uno nuevo, el mapeo lo PISA con el mismo de siempre (AC-7), y el re-invoke
+  // manda exactamente el valor que el agente acaba de rechazar. El reintento
+  // está garantizado a fallar antes de empezar — y no sale gratis: el débito del
+  // caller vuelve, pero el pago downstream al agente ya salió y no se revierte.
+
+  it('T-MAP-23 (CR MNR-2 · DINERO): si el agente rechaza un campo QUE EL MAPEO PUEBLA, no hay retry ni segundo pago', async () => {
+    queueStep0AndFailedAttempt('quoteId'); // el agente señala el campo MAPEADO
+    // Si el retry corriera, el LLM devolvería esto y el mapeo lo pisaría con
+    // 'q-real' — el mismo valor que el agente rechazó.
+    mockRegen.mockResolvedValueOnce({ method: 'yape', quoteId: 'q-nuevo' });
+    mockFetchOk({ result: 'paid' }); // encolado A PROPÓSITO: no debe consumirse
+
+    const balanceBefore = budgetState.balance;
+    const result = await runRetryPipeline();
+
+    expect(result.success).toBe(false);
+    // ── DINERO: el ledger del caller hace UN solo viaje, no dos.
+    // Sin el guard son 2 débitos + 2 créditos: cada re-débito consume y libera
+    // el cap por destino, y el neto sólo vuelve a cero si el refund del retry
+    // TAMBIÉN revierte. Un viaje de dinero que no podía terminar bien.
+    expect(debitMock).toHaveBeenCalledTimes(1);
+    expect(creditWithDestMock).toHaveBeenCalledTimes(1);
+    expect(budgetState.balance).toBeCloseTo(balanceBefore, 10);
+    // ── Ni siquiera se llamó al LLM: el guard corre ANTES de regenerar.
+    expect(mockRegen).not.toHaveBeenCalled();
+    // ── El agente se invocó 2 veces, no 3 (la 3ª respuesta quedó sin consumir).
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // ── PAGOS AL AGENTE: uno solo, el del step 0.
+    // ⚠️ Honestidad sobre qué prueba esta línea: HOY vale 1 con guard y sin él,
+    // porque el intento condenado responde 400 y `invokeAgent` LANZA antes de
+    // llegar al leg de pago downstream (que sólo corre tras un 2xx). O sea que
+    // por sí sola NO discrimina, y no se la cuenta como la evidencia del guard
+    // —esa es el débito de arriba—. Está como candado de regresión: T-MAP-24
+    // muestra que un retry que SÍ llega a 2xx paga de verdad, así que si alguien
+    // hiciera que el intento condenado alcance el leg de pago, ese segundo settle
+    // (que no se reembolsa) aparecería acá.
+    expect(mockDownstreamPay).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-MAP-24 (CR MNR-2, la otra dirección): un campo problemático AJENO al mapeo sigue reintentando como hoy', async () => {
+    // El guard tiene que ser una intersección, no un interruptor: con mapeo
+    // declarado pero un campo señalado que el mapeo NO puebla, el retry
+    // adaptativo funciona igual que antes de esta corrección.
+    queueStep0AndFailedAttempt('amount'); // NO es clave destino del mapeo
+    mockRegen.mockResolvedValueOnce({ method: 'yape', amount: 42 });
+    mockFetchOk({ result: 'paid' });
+
+    const result = await runRetryPipeline();
+
+    expect(result.success).toBe(true);
+    // Hubo retry: 2 débitos (original + retry) y 3 invocaciones del agente.
+    expect(mockRegen).toHaveBeenCalledTimes(1);
+    expect(debitMock).toHaveBeenCalledTimes(2);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    // PAGOS AL AGENTE: 2 — el step 0 y el RE-INVOKE, que llegó a 2xx. El primer
+    // intento del step 1 (400) no pagó: `invokeAgent` lanza antes del leg de
+    // pago. Esto es lo que hace concreto el costo del retry condenado de
+    // T-MAP-23: un reintento que llega a 2xx paga de verdad, y ese pago no
+    // se reembolsa.
+    expect(mockDownstreamPay).toHaveBeenCalledTimes(2);
+    // Y el campo mapeado viajó igual en el re-invoke (AC-7 intacto).
+    expect(bodySentToAgent(2).quoteId).toBe('q-real');
   });
 
   it('T-MAP-20b (CD-3): sin mapeo declarado, el camino del retry queda byte-idéntico', async () => {

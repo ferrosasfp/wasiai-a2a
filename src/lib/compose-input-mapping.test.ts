@@ -18,6 +18,7 @@ import {
   checkMappingShape,
   MAX_INPUT_MAPPING_ENTRIES,
   MAX_INPUT_MAPPING_KEY_LEN,
+  mappingOwnsAnyField,
   resolveStepInput,
   validateInputMappingShape,
 } from './compose-input-mapping.js';
@@ -389,6 +390,35 @@ describe('WKH-305 · applyMappingTo — R2..R6', () => {
     expect(bad.ok).toBe(false);
     if (bad.ok) return;
     expect(bad.failure.source).toBe('rate');
+  });
+
+  it('T-MAP-L26 (CR MNR-2): `mappingOwnsAnyField` es la intersección campos-señalados ∩ destinos', () => {
+    const mapping = { quoteId: 'quoteId', rate: 'fxRate' };
+    // Positivo: el agente señala un campo que el mapeo PUEBLA ⇒ el retry
+    // repetiría el mismo valor rechazado ⇒ no se reintenta.
+    expect(mappingOwnsAnyField(mapping, ['quoteId'])).toBe(true);
+    expect(mappingOwnsAnyField(mapping, ['amount', 'rate'])).toBe(true);
+    // Negativo: ningún campo señalado es destino ⇒ el retry sigue teniendo
+    // sentido y corre como siempre.
+    expect(mappingOwnsAnyField(mapping, ['amount'])).toBe(false);
+    // El lado ORIGEN no cuenta: `fxRate` es de dónde se lee, no lo que el
+    // agente ve. Si el agente se queja de `fxRate`, no es el campo que
+    // escribimos nosotros.
+    expect(mappingOwnsAnyField(mapping, ['fxRate'])).toBe(false);
+    // Sin mapeo o sin campos ⇒ nunca bloquea el retry (CD-3: byte-idéntico).
+    expect(mappingOwnsAnyField(undefined, ['quoteId'])).toBe(false);
+    expect(mappingOwnsAnyField(mapping, [])).toBe(false);
+    expect(mappingOwnsAnyField(mapping, null)).toBe(false);
+    expect(mappingOwnsAnyField(mapping, undefined)).toBe(false);
+  });
+
+  it('T-MAP-L27 (CD-6): `mappingOwnsAnyField` usa hasOwn, no hereda del prototipo', () => {
+    // Con `in`, un agente que señalara `constructor` o `toString` bloquearía el
+    // retry de CUALQUIER step con mapeo, aunque el mapeo no toque ese campo.
+    const mapping = { quoteId: 'quoteId' };
+    expect(mappingOwnsAnyField(mapping, ['constructor'])).toBe(false);
+    expect(mappingOwnsAnyField(mapping, ['toString'])).toBe(false);
+    expect(mappingOwnsAnyField(mapping, ['hasOwnProperty'])).toBe(false);
   });
 
   it('T-MAP-L25: el orden de chequeo es forma → lastOutput → entrada', () => {

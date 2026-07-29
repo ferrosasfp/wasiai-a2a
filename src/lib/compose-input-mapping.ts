@@ -185,6 +185,44 @@ export function validateInputMappingShape(
   };
 }
 
+/**
+ * ¿Alguno de los campos que el agente marcó como problemáticos es una clave
+ * DESTINO del mapeo declarado? (CR MNR-2)
+ *
+ * ⚠️ ESTO ES UN GUARD DE DINERO, no una optimización.
+ *
+ * El retry adaptativo (WKH-130) le pide a un LLM que regenere el input y vuelve
+ * a invocar al agente. Pero desde WKH-305 el mapeo se RE-APLICA sobre ese input
+ * (AC-7), o sea que **pisa** el campo mapeado con el mismo valor de siempre — el
+ * de la salida del step anterior. Si el campo que el agente rechazó es
+ * justamente ése (p. ej. un `quoteId` VENCIDO), el re-invoke va a mandar el
+ * valor que el agente acaba de rechazar: **el reintento está garantizado a
+ * fallar antes de empezar**.
+ *
+ * Y no sale gratis: el débito del caller se reembolsa, pero el pago DOWNSTREAM
+ * al agente ya salió y no se revierte. Cada reintento condenado quema un settle
+ * real más una llamada al LLM.
+ *
+ * Es la intersección de dos conjuntos, evaluada ANTES de regenerar: los campos
+ * que el agente señaló contra las claves destino del mapeo. Si se tocan, no hay
+ * retry — se cae al error normal, que es exactamente el mismo que el caller
+ * habría recibido después de pagar el segundo intento.
+ *
+ * `Object.hasOwn` y no `in` (CD-6): un campo llamado `constructor` no puede
+ * hacer que esto devuelva `true` por herencia del prototipo.
+ *
+ * Comparación EXACTA, sin normalizar mayúsculas ni alias: los nombres los
+ * declaró el caller y los reporta el agente; inventar una semántica de matcheo
+ * saltearía retries legítimos.
+ */
+export function mappingOwnsAnyField(
+  mapping: Record<string, string> | undefined,
+  fields: readonly string[] | null | undefined,
+): boolean {
+  if (mapping === undefined || !fields || fields.length === 0) return false;
+  return fields.some((f) => Object.hasOwn(mapping, f));
+}
+
 export type InputMappingFailure = {
   reason:
     | 'INVALID_MAPPING_SHAPE'

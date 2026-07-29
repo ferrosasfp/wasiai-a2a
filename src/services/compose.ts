@@ -23,6 +23,7 @@ import { selectFacilitatorUrl } from '../lib/cdp-selector.js';
 // llegaría `undefined` bajo test. Un archivo sin dependencias no lo moquea nadie.
 import {
   applyMappingTo,
+  mappingOwnsAnyField,
   resolveStepInput,
 } from '../lib/compose-input-mapping.js';
 // Fix-pack P1 AR BLQ-BAJO-1: el page size del pool de agentes que usa
@@ -643,7 +644,26 @@ export const composeService = {
         const missingFields = isMasterPath
           ? parseFieldErrors(firstError)
           : null;
-        const willRetry = !!missingFields && missingFields.length > 0;
+        // WKH-305 (CR MNR-2): si el agente marcó como problemático un campo que
+        // el MAPEO puebla, el retry está garantizado a fallar. El mapeo se
+        // re-aplica sobre el input regenerado (AC-7), así que el re-invoke
+        // mandaría EL MISMO valor que el agente acaba de rechazar — el caso
+        // canónico es un `quoteId` VENCIDO, y es justo el que va a aparecer
+        // cuando entre el congelamiento de precio.
+        //
+        // No es sólo una llamada perdida: el débito del caller vuelve, pero el
+        // pago DOWNSTREAM al agente del primer intento YA salió y no se revierte.
+        // Reintentar quema un settle real más una llamada al LLM para llegar al
+        // mismo error. Se saltea el retry ENTERO (sin LLM, sin re-débito, sin
+        // re-invoke) y se cae al return de error normal.
+        const retryWouldRepeatMappedValue = mappingOwnsAnyField(
+          step.inputFromPrevious,
+          missingFields,
+        );
+        const willRetry =
+          !!missingFields &&
+          missingFields.length > 0 &&
+          !retryWouldRepeatMappedValue;
 
         // Telemetría del primer intento fallido (sin cambios respecto a hoy,
         // + DT-8 flag retry_attempted cuando vamos a reintentar).
