@@ -654,6 +654,58 @@ describe('HU-306 · observar no cambia lo observado (AC-9, AC-10)', () => {
     expect(logSpy.error).toHaveBeenCalled();
   });
 
+  it('T-STRAND-TRACK-THROWS-SYNC: la telemetría del residuo NO puede reemplazar el error del caller (AR MR-4b)', async () => {
+    // POR QUÉ ESTE TEST EXISTE Y EL DE ARRIBA NO ALCANZA. `T-STRAND-TRACK-THROWS` usa
+    // `mockRejectedValue`, o sea una PROMESA rechazada, que se la come el `.catch()`
+    // interno: el `try` externo de `recordStrandedRunIfAny` nunca se ejercita. Con
+    // `track` lanzando SINCRÓNICAMENTE, en cambio, el `.catch()` ni llega a existir y la
+    // excepción sube por el camino del throw — donde, sin el blindaje, REEMPLAZARÍA el
+    // error original del pipeline por uno de telemetría. Es el daño exacto que el
+    // docstring de esa función dice estar evitando, en el camino del dinero.
+    const a1 = makeAgent({ slug: 's1' });
+    const a2 = makeAgent({ slug: 's2', id: 'agent-2' });
+    wireAgents(a1, a2);
+    mockDownstream.mockResolvedValueOnce({
+      txHash: '0xPAGADO',
+      blockNumber: 3,
+      settledAmount: '20000',
+    });
+    mockFetchOk({ result: 'step0' });
+    // El pipeline se va por excepción DESPUÉS de que el step 0 pagó.
+    mockGasOverhead
+      .mockResolvedValueOnce(0)
+      .mockRejectedValueOnce(new Error('GAS_ORIGINAL'));
+    // ⚠️ EL DETALLE QUE HACE FUNCIONAR EL ESCENARIO: el track del step 0 tiene que
+    // RESOLVER; sólo el SEGUNDO —el del residuo— lanza, y lanza sincrónicamente.
+    mockTrack.mockResolvedValueOnce({} as never).mockImplementationOnce(() => {
+      throw new Error('TELEMETRIA_SINCRONA');
+    });
+
+    let capturado: unknown;
+    try {
+      await composeService.compose({
+        steps: [
+          { agent: 's1', input: {} },
+          { agent: 's2', input: {} },
+        ],
+        scopingKeyRow: makeKeyRow(),
+        chainId: CHAIN_ID,
+      });
+      throw new Error('debía lanzar');
+    } catch (err) {
+      capturado = err;
+    }
+
+    // El caller recibe SU error, no el de la telemetría.
+    expect((capturado as Error).message).toContain('GAS_ORIGINAL');
+    expect((capturado as Error).message).not.toContain('TELEMETRIA_SINCRONA');
+    // …y el fallo de telemetría quedó en el log, que es donde tiene que quedar.
+    expect(logSpy.error).toHaveBeenCalled();
+    // Premisa del escenario: el track del residuo se INTENTÓ (si no, el test estaría
+    // verde por no haber llegado nunca a la línea que se quiere proteger).
+    expect(mockTrack).toHaveBeenCalledTimes(2);
+  });
+
   it('T-STRAND-BYTE-IDENTICO: un pipeline exitoso emite lo MISMO que antes de la HU (CD-19)', async () => {
     const a1 = makeAgent({ slug: 'b1', priceUsdc: 0.02 });
     const a2 = makeAgent({ slug: 'b2', id: 'agent-2', priceUsdc: 0.03 });
