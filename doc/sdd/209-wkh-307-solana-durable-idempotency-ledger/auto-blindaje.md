@@ -29,8 +29,10 @@ restaurar por `cp` desde el respaldo → **verificar por hash**. Nunca `git chec
 | **M13** | Se borran los tres términos del intent (AC-8 desaparece) | Sí | **KILLED** | `T-MIG-09` |
 | **M14** | El índice de `settle_signature` SIN `UNIQUE` | Sí | **KILLED** | `T-MIG-10` |
 | **M15** | El `_down` hace `DROP TABLE` en vez de `RENAME` | Sí | **KILLED** | `T-MIG-13` |
+| **M16** | La ausencia vuelve a INFERIRSE de que el parseo no verifique (conducta pre-AR) | Sí (2ª formulación) | **KILLED** | `T-IDM-13`, `14`, `14b`, `16`, `17` |
+| **M17** | Se elimina el gate de re-hidratación del ciclo `down → up` | Sí (`.sql` válido) | **KILLED** | `T-MIG-15`, `15b`, `15c` |
 
-**15/15 KILLED. Ningún superviviente.** Los tres mutantes que hubo que reformular
+**17/17 KILLED. Ningún superviviente.** (M16 y M17 se agregaron con el fix-pack del AR.) Los tres mutantes que hubo que reformular
 (M1, M2, M7) NO se contaron hasta que compilaron: un mutante que rompe el parseo o los
 tipos lo caza el compilador, no el test, y contarlo sería un falso KILLED.
 
@@ -46,6 +48,53 @@ tipos lo caza el compilador, no el test, y contarlo sería un falso KILLED.
   ledger está MOCKEADO, así que una mutación dentro de `settle-ledger.ts` no se
   ejecuta. `T-IDM-08` prueba cómo REACCIONA el adapter a una colisión; `T-LDG-08`
   prueba cómo el ledger la TRADUCE. Sólo el segundo puede cazar esta mutación.
+
+---
+
+### [2026-07-29 03:3x] AR BLQ-MEDIO-1 — Un `null` de RPC declarado como prueba
+
+- **Error**: la salida que autoriza RE-TRANSMITIR exigía dos hechos y yo declaré los
+  dos como pruebas (`"Las tres salidas son por DEMOSTRACION, nunca por tiempo"`). Sólo
+  uno lo era. El segundo —"la tx no está en la cadena"— salía de que
+  `getParsedTransaction` devolviera `null`, y ese `null` también significa *este nodo
+  no tiene ese histórico*, *va atrasado* o *el índice está degradado*.
+- **El doble pago concreto**: la tx aterriza, `confirmTransaction` corta por timeout, y
+  el retry consulta la altura contra el nodo de la punta (expirado ✓) y el parseo
+  contra otro nodo del pool que no indexó ese bloque (`null`) ⟹ "expiró sin aterrizar"
+  ⟹ **segundo SPL transfer real**. Sin backstop on-chain.
+- **Causa raíz**: el tipo. `VerifyResult` es `{valid: boolean}`, y con un booleano
+  *"probado que no está"* y *"no pude preguntar"* colapsan en el mismo `false`. El
+  call-site no podía distinguirlos ni aunque quisiera. Es el mismo error que yo mismo
+  había evitado en el seam del ledger (uniones discriminadas, CD-11) y no apliqué acá.
+- **Fix**: la determinación negativa pasa a `getSignatureStatuses` con
+  `searchTransactionHistory: true` (responde `null` **habiendo buscado**), y el
+  veredicto vive en `SettlementPresence`, una unión de **cinco** estados que el
+  compilador obliga a agotar: `landed_ok` / `landed_failed` / `landed_mismatch` /
+  `absent` / `unknown`. Los dos últimos eran el mismo valor y son opuestos.
+  `VerifyResult` NO se tocó: lo comparten 4 adapters EVM que son Scope OUT.
+- **Aplicar en**: **toda consulta a un sistema externo tiene TRES respuestas, no dos —
+  está / no está / no pude preguntar.** Si el retorno es un `boolean` o un `T | null`,
+  el tercer caso ya se perdió en el DISEÑO y todo call-site aguas abajo lo va a
+  colapsar mal. El arreglo tiene que vivir en el tipo, no en el call-site: si el tipo
+  lo fuerza, el próximo que lo toque no puede repetirlo.
+
+---
+
+### [2026-07-29 03:4x] AR MNR-4 — Una decisión de no destruir evidencia abrió otro hueco
+
+- **Error**: el `_down` renombra la tabla en vez de borrarla (correcto: la evidencia de
+  a quién se le pagó no se destruye). Pero re-aplicar el `up` crea **una tabla nueva y
+  vacía**, y eso deja **sin dedup a todo intent en vuelo**: el siguiente retry re-paga.
+  La query de inventario existía, pero enmarcada como *"antes de BORRAR el backup"*, no
+  como *"antes de re-aplicar el up"*.
+- **Causa raíz**: pensé el `_down` como final de camino, no como mitad de un CICLO. Un
+  rollback casi siempre viene seguido de una restauración.
+- **Fix**: gate EJECUTABLE en el `up`, antes de crear la tabla — aborta con
+  `WKH307_BACKUP_NOT_REHYDRATED` si el backup conserva filas `status <> 'confirmed'`.
+  No un paso en un runbook: es exactamente el *"gate que nadie corre no es un gate"*
+  que esta misma HU aplica al preflight de esquema.
+- **Aplicar en**: cuando una migración `_down` preserva datos, preguntarse **qué pasa
+  al re-aplicar el `up`**. Preservar sin re-hidratar es preservar para nadie.
 
 ---
 
@@ -139,6 +188,30 @@ tipos lo caza el compilador, no el test, y contarlo sería un falso KILLED.
 - **Aplicar en**: cuando un guard nuevo pone en rojo tests preexistentes, la primera
   pregunta es *¿estos tests dependían de lo que el guard elimina?*. Si la respuesta es
   sí, re-anclarlos ES el trabajo; aflojar el guard sería borrar la evidencia.
+
+---
+
+### Delta de tests — DERIVADO, no afirmado (CR menor 3)
+
+El CR no pudo re-derivar el delta sin hacer checkout de la base. Queda derivable con
+estos comandos, contra el commit base de la HU (`013d04e`):
+
+```bash
+# RETIRADOS (la batería vieja completa)
+git show 013d04e:src/adapters/solana/intent-dedup.test.ts | grep -c "^  it("   # 26
+
+# AGREGADOS
+grep -c "^  it(" src/adapters/solana/intent-dedup.test.ts                       # 27
+grep -c "^  it(" src/adapters/solana/settle-ledger.test.ts                      # 20
+grep -c "^  it(" test/wkh307-solana-settle-intents.migration.test.ts            # 31
+# y el delta de los dos re-anclados:
+#   payment.test.ts     19 → 23   (+4)
+#   downstream-payment  71 → 74   (+3)
+```
+
+`retirados = 26` · `agregados = 27 + 20 + 31 + 4 + 3 = 85` · **neto = +59**.
+
+Reconcilia exacto con el total corrido: **4072 (baseline) + 59 = 4131**.
 
 ---
 
