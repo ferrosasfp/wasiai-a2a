@@ -139,6 +139,21 @@ export interface SolanaSettleProof {
  * La determinacion NEGATIVA (`absent`) exige que el nodo haya RESPONDIDO habiendo
  * buscado en el historico (`getSignatureStatuses` con `searchTransactionHistory`),
  * no la ausencia de un parseo.
+ *
+ * ⚠️ HASTA DONDE LLEGA `absent`, DICHO SIN INFLAR (AR re-review MNR-1). NO es una
+ * "prueba de ausencia" absoluta: `searchTransactionHistory` obliga al nodo a mirar su
+ * almacenamiento de largo plazo — **el que ESE nodo tiene**. Un validador sin
+ * `--enable-rpc-bigtable-ledger-storage`, o sin el rango de ledger correspondiente,
+ * devuelve `null` igual sobre una tx que SI existe, y desde la respuesta **no hay
+ * forma de distinguir** "busque en todo el historial" de "busque hasta donde tengo".
+ *
+ * Lo que `absent` significa de verdad: **este nodo, buscando en lo que tiene, no
+ * conoce esta firma.**
+ *
+ * Por eso `absent` NO autoriza por si solo: el codigo exige ADEMAS la prueba de
+ * expiracion del blockhash. Y la precondicion de despliegue —el endpoint tiene que
+ * retener historico— se verifica en el preflight de arranque
+ * (`schema-preflight.ts`), en vez de quedar como un supuesto tacito.
  */
 export type SettlementPresence =
   /** Aterrizo y cumple los terminos (monto/mint/destino). NO re-transmitir. */

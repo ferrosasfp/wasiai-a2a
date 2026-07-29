@@ -3,7 +3,7 @@ import {
   getAssociatedTokenAddressSync,
   getOrCreateAssociatedTokenAccount,
 } from '@solana/spl-token';
-import { PublicKey, Transaction } from '@solana/web3.js';
+import { type Connection, PublicKey, Transaction } from '@solana/web3.js';
 import { usdToAtomicUnits } from '../../lib/atomic-amount.js';
 import { getLogger } from '../../lib/logger.js';
 import type {
@@ -465,34 +465,40 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       );
     }
 
-    // `landed_failed`: la tx esta grabada on-chain CON ERROR. La transferencia no
-    // ocurrio y esa firma es TERMINAL (una tx fallida nunca vuelve a ejecutarse), asi
-    // que no hace falta esperar a que expire el blockhash: re-firmar es correcto y no
-    // puede duplicar nada.
-    if (presence.state !== 'landed_failed') {
-      // `absent`: hace falta ADEMAS la prueba de expiracion. Sin ella, la tx podria
-      // aterrizar en cualquier momento.
-      if (lastValidBlockHeight === null) {
-        throw new Error(
-          `SETTLE_SIGNED_UNRESOLVED: ${req.intentId} is not on chain but has no last_valid_block_height to prove it can no longer land`,
-        );
-      }
-      const connection = getSolanaConnection();
-      const height = await connection.getBlockHeight(getSolanaCommitment());
-      // BigInt y no Number(): la altura viaja como string a proposito (CD-8).
-      if (BigInt(height) <= BigInt(lastValidBlockHeight)) {
-        // (c) Sigue viva: podria aterrizar en cualquier momento. "No se" no paga.
-        log.warn(
-          {
-            intentId: req.intentId,
-            signature,
-            blockHeight: String(height),
-            lastValidBlockHeight,
-          },
-          'solana settle refused — the previously signed transaction has not landed but its blockhash is STILL VALID; it could confirm at any moment',
-        );
-        throw new Error(`SETTLE_IN_FLIGHT_UNRESOLVED: ${req.intentId}`);
-      }
+    // Llegados aca la presencia es `absent` o `landed_failed`. LAS DOS exigen ademas
+    // la PRUEBA DE EXPIRACION antes de re-firmar.
+    //
+    // ⚠️ AR re-review MNR-2 — `landed_failed` ESTABA EXCEPTUADO de este chequeo, con el
+    // razonamiento de que una tx grabada con error es terminal y su firma no puede
+    // volver a ejecutarse. Es cierto en el caso normal, pero deja una ventana: un
+    // re-org que saque de la cadena canonica el bloque de esa tx fallida MIENTRAS su
+    // blockhash sigue vivo la vuelve re-ejecutable — y esta vez puede tener exito (si
+    // fallo por estado de cuenta) sobre un intent que ya re-pago. Dos transferencias
+    // coexistiendo.
+    //
+    // Exigir la expiracion cuesta, a lo sumo, la espera del blockhash en un camino
+    // raro. Elimina la unica ventana donde eso podia pasar.
+    if (lastValidBlockHeight === null) {
+      throw new Error(
+        `SETTLE_SIGNED_UNRESOLVED: ${req.intentId} (presence=${presence.state}) has no last_valid_block_height to prove the previous transaction can no longer land`,
+      );
+    }
+    const connection = getSolanaConnection();
+    const height = await connection.getBlockHeight(getSolanaCommitment());
+    // BigInt y no Number(): la altura viaja como string a proposito (CD-8).
+    if (BigInt(height) <= BigInt(lastValidBlockHeight)) {
+      // (c) Sigue viva: podria aterrizar (o re-ejecutarse tras un re-org). No paga.
+      log.warn(
+        {
+          intentId: req.intentId,
+          signature,
+          presence: presence.state,
+          blockHeight: String(height),
+          lastValidBlockHeight,
+        },
+        'solana settle refused — the previously signed transaction is not settled but its blockhash is STILL VALID; it could confirm (or be re-executed after a re-org) at any moment',
+      );
+      throw new Error(`SETTLE_IN_FLIGHT_UNRESOLVED: ${req.intentId}`);
     }
 
     // (b) LAS DOS PRUEBAS en la mano. Se archiva la firma vieja y se re-firma.
@@ -565,17 +571,44 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     }
 
     // Presente y sin error: recien ahora se validan los TERMINOS.
-    let verified: VerifyResult;
+    //
+    // ⚠️ AR re-review MNR-3 — ACA VIVIA `this.verify()`, Y COLAPSABA DOS COSAS. Su
+    // `VerifyResult` devuelve `{valid:false}` tanto cuando los terminos no coinciden
+    // como cuando NO SE PUDO LEER la transaccion. Con eso, un nodo que conoce la firma
+    // pero no la tiene indexada producia `landed_mismatch`, o sea un log afirmando
+    // "esta en la cadena pero con OTROS terminos" —falso— y, sobre una fila
+    // `confirmed`, la CONDENA PERMANENTE por una causa transitoria.
+    //
+    // La distincion de tres valores que esta funcion introdujo en la capa de PRESENCIA
+    // hacia falta tambien un piso mas arriba, en la de TERMINOS.
+    let parsed: Awaited<ReturnType<typeof connection.getParsedTransaction>>;
     try {
-      verified = await this.verify(proof);
+      parsed = await connection.getParsedTransaction(proof.signature, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0,
+      });
     } catch (err) {
       return { state: 'unknown', detail: errText(err) };
     }
-    if (verified.valid) return { state: 'landed_ok' };
-    return {
-      state: 'landed_mismatch',
-      detail: verified.error ?? 'terms mismatch',
-    };
+    if (!parsed?.meta) {
+      // El status dice que ESTA, pero este nodo no la tiene parseada. No se puede
+      // afirmar nada sobre los terminos: eso es "no se", no "no coinciden".
+      return {
+        state: 'unknown',
+        detail:
+          'signature status reports the transaction as present, but this node has no parsed transaction for it (lagging or unindexed)',
+      };
+    }
+    if (parsed.meta.err) {
+      return {
+        state: 'landed_failed',
+        detail: JSON.stringify(parsed.meta.err),
+      };
+    }
+    const terms = this.checkTerms(parsed, proof);
+    return terms.ok
+      ? { state: 'landed_ok' }
+      : { state: 'landed_mismatch', detail: terms.error };
   }
 
   /**
@@ -797,14 +830,53 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     return { txHash: candidate, success: true };
   }
 
+  /**
+   * Valida los TERMINOS (monto/mint/destino) sobre una tx YA PARSEADA. Puro, sin red.
+   *
+   * Se extrajo de `verify()` (AR re-review MNR-3) para que `probeSettlementPresence`
+   * pueda reusar la validacion SIN heredar el colapso de dos valores de
+   * `VerifyResult`: alli hace falta distinguir "no pude leer la tx" de "los terminos
+   * no coinciden", y `verify()` devuelve `{valid:false}` para las dos.
+   */
+  private checkTerms(
+    parsed: NonNullable<
+      Awaited<ReturnType<Connection['getParsedTransaction']>>
+    >,
+    proof: SolanaSettleProof,
+  ): { ok: true } | { ok: false; error: string } {
+    const meta = parsed.meta;
+    if (!meta) return { ok: false, error: 'transaction has no meta' };
+    const mint = getSolanaUsdcMint();
+    const required = BigInt(proof.amountAtomic);
+
+    // Delta de balance de token del owner=payTo para el mint esperado
+    // (verify-before-trust). pre/postTokenBalances son la fuente canonica.
+    const pre = meta.preTokenBalances ?? [];
+    const post = meta.postTokenBalances ?? [];
+    const balanceFor = (list: typeof post): bigint => {
+      const entry = list.find(
+        (b) => b.owner === proof.payTo && b.mint === mint,
+      );
+      return entry ? BigInt(entry.uiTokenAmount.amount) : 0n;
+    };
+    const delta = balanceFor(post) - balanceFor(pre);
+    if (delta < required) {
+      return {
+        ok: false,
+        error: `on-chain transfer ${delta} < required ${required} for ${proof.payTo}`,
+      };
+    }
+    return { ok: true };
+  }
+
   async verify(proof: SolanaSettleProof): Promise<VerifyResult> {
     const connection = getSolanaConnection();
     const parsed = await connection.getParsedTransaction(proof.signature, {
       // Deliberadamente 'confirmed' (pre-existente WKH-234) y NO
       // `getSolanaCommitment()`. REVISAR antes de mainnet / dinero real: si se
       // configura `SOLANA_COMMITMENT=finalized`, un timeout a nivel finalized se
-      // recuperaría (recoverConfirmedSettle) contra una lectura a nivel
-      // confirmed, o sea con una garantía MÁS DÉBIL que la configurada.
+      // recuperaria (recoverConfirmedSettle) contra una lectura a nivel
+      // confirmed, o sea con una garantia MAS DEBIL que la configurada.
       // Diferido en doc/sdd/185-.../work-item.md (MNR-2 del AR).
       commitment: 'confirmed',
       maxSupportedTransactionVersion: 0,
@@ -815,30 +887,8 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
         error: 'transaction not found or failed on-chain',
       };
     }
-
-    const mint = getSolanaUsdcMint();
-    const required = BigInt(proof.amountAtomic);
-
-    // Delta de balance de token del owner=payTo para el mint esperado
-    // (verify-before-trust). pre/postTokenBalances son la fuente canónica.
-    const pre = parsed.meta.preTokenBalances ?? [];
-    const post = parsed.meta.postTokenBalances ?? [];
-
-    const balanceFor = (list: typeof post): bigint => {
-      const entry = list.find(
-        (b) => b.owner === proof.payTo && b.mint === mint,
-      );
-      return entry ? BigInt(entry.uiTokenAmount.amount) : 0n;
-    };
-
-    const delta = balanceFor(post) - balanceFor(pre);
-    if (delta < required) {
-      return {
-        valid: false,
-        error: `on-chain transfer ${delta} < required ${required} for ${proof.payTo}`,
-      };
-    }
-    return { valid: true };
+    const terms = this.checkTerms(parsed, proof);
+    return terms.ok ? { valid: true } : { valid: false, error: terms.error };
   }
 }
 

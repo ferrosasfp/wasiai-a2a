@@ -126,6 +126,10 @@ const fakeConnection = {
     Promise.resolve({ value: { err: null } }),
   ),
   getBlockHeight: vi.fn((..._a: unknown[]) => Promise.resolve(900)),
+  // AR re-review MNR-1: el preflight MIDE la ventana de historico del RPC, porque de
+  // ella depende que un `absent` signifique algo. Default = holgada.
+  getSlot: vi.fn((..._a: unknown[]) => Promise.resolve(200_000_000)),
+  getFirstAvailableBlock: vi.fn((..._a: unknown[]) => Promise.resolve(1)),
   /**
    * AR BLQ-MEDIO-1: la determinacion NEGATIVA ya no sale de un `null` de
    * `getParsedTransaction` (que tambien significa "este nodo no lo tiene indexado"),
@@ -373,6 +377,8 @@ beforeEach(() => {
   presenceState.value = { err: null };
   blockhashQueue.length = 0;
   fakeConnection.getBlockHeight.mockResolvedValue(900);
+  fakeConnection.getSlot.mockResolvedValue(200_000_000);
+  fakeConnection.getFirstAvailableBlock.mockResolvedValue(1);
   _resetSolanaClients();
   adapter = new SolanaPaymentAdapter();
 });
@@ -730,9 +736,13 @@ describe('WKH-307 · AR BLQ-MEDIO-1: la ausencia se PRUEBA, no se infiere', () =
     // Lo único que importa: NO salió un segundo transfer.
     expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
     expect(reclaimMock).not.toHaveBeenCalled();
-    // Y no se devuelve un éxito inventado: la tx está pero sus términos no se
-    // pudieron validar contra el parseo ⟹ fail-closed explícito.
-    expect(String(err)).toMatch(/SETTLE_SIGNED_TERMS_MISMATCH/);
+    // ⚠️ Y el MOTIVO importa (AR re-review MNR-3). Antes esto daba
+    // `SETTLE_SIGNED_TERMS_MISMATCH`, cuyo log afirma "está en la cadena pero con
+    // OTROS términos" — FALSO, y manda a un operador a investigar un pago equivocado
+    // que no existe. Un nodo que conoce la firma pero no la tiene indexada es
+    // "no sé", no "no coincide".
+    expect(String(err)).toMatch(/SETTLE_IN_FLIGHT_UNRESOLVED/);
+    expect(String(err)).not.toMatch(/TERMS_MISMATCH/);
   });
 
   it('T-IDM-14: el RPC de presencia NO contesta + blockhash muerto ⟹ CERO broadcasts', async () => {
@@ -819,6 +829,135 @@ describe('WKH-307 · AR BLQ-MEDIO-1: la ausencia se PRUEBA, no se infiere', () =
       ['AbsentSig'],
       { searchTransactionHistory: true },
     );
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// AR re-review — las tres reservas
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AR re-review: términos, expiración y alcance de `absent`', () => {
+  it('T-IDM-18 (MNR-3): nodo atrasado sobre una fila `confirmed` ⟹ transitorio, NO la condena', async () => {
+    // El efecto colateral que ganamos para "el RPC tira" no valía para "el nodo conoce
+    // la firma pero no la tiene indexada": ese caso caía en
+    // SETTLE_CONFIRMED_BUT_UNVERIFIABLE, que es el rechazo PERMANENTE que exige
+    // intervención humana. Por una causa transitoria.
+    seedRow('run:0');
+    presenceState.value = { err: null }; // el status dice: está en la cadena
+    fakeConnection.getParsedTransaction.mockResolvedValue(null); // pero no indexada acá
+
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+
+    expect(String(err)).toMatch(/SETTLE_PRESENCE_UNKNOWN/);
+    expect(String(err)).not.toMatch(/CONFIRMED_BUT_UNVERIFIABLE/);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+
+  it('T-IDM-18b (MNR-3): términos que REALMENTE no coinciden siguen dando mismatch', async () => {
+    // La contracara: el estado `landed_mismatch` no se volvió inalcanzable. Si la tx
+    // está, se puede parsear, y el delta NO cubre el monto, eso sí es un desajuste real.
+    seedRow('run:0', { status: 'signed', signature: 'MismatchSig' });
+    presenceState.value = { err: null };
+    fakeConnection.getParsedTransaction.mockResolvedValue({
+      meta: {
+        err: null,
+        preTokenBalances: [
+          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '0' } },
+        ],
+        // delta = 1, muy por debajo de AMOUNT
+        postTokenBalances: [
+          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '1' } },
+        ],
+      },
+    });
+
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+    expect(String(err)).toMatch(/SETTLE_SIGNED_TERMS_MISMATCH/);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+
+  it('T-IDM-19 (MNR-2): `landed_failed` con el blockhash VIVO ⟹ 0 broadcasts', async () => {
+    // Una tx grabada con error es terminal EN EL CASO NORMAL, pero un re-org que la
+    // saque de la cadena canónica mientras su blockhash sigue vivo la vuelve
+    // re-ejecutable — y esta vez podría tener éxito, sobre un intent que ya re-pagó.
+    // Exigir la expiración también acá elimina la única ventana donde dos
+    // transferencias pueden coexistir.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'FailedButAliveSig',
+      lastValidBlockHeight: '1500',
+    });
+    onChainFailed();
+    fakeConnection.getBlockHeight.mockResolvedValue(900); // 900 <= 1500 ⟹ vivo
+
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_IN_FLIGHT_UNRESOLVED/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    expect(reclaimMock).not.toHaveBeenCalled();
+  });
+
+  it('T-IDM-19b (MNR-2): `landed_failed` con el blockhash MUERTO sí re-firma', async () => {
+    // La contracara: con la prueba de expiración en la mano, re-pagar sigue siendo
+    // correcto (la transferencia no ocurrió y esa firma ya no puede ejecutarse).
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'FailedAndDeadSig',
+      lastValidBlockHeight: '500',
+    });
+    onChainFailed();
+    fakeConnection.getBlockHeight.mockResolvedValue(900); // 900 > 500 ⟹ muerto
+
+    const res = await adapter.settle(req('run:0'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+    expect(res.txHash).not.toBe('FailedAndDeadSig');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// AR re-review MNR-1 — la precondición de despliegue de `absent`
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · MNR-1: `absent` depende de que el RPC retenga histórico', () => {
+  it('T-IDM-20: retención MEDIDA e INSUFICIENTE ⟹ el leg NO settlea (0 broadcasts)', async () => {
+    // Un endpoint que retiene menos que la validez de un blockhash devuelve `null`
+    // sobre transacciones que SÍ existen, justo en la ventana donde el código usa ese
+    // `null` para autorizar re-firmar. Sin esta medición era un supuesto tácito.
+    fakeConnection.getSlot.mockResolvedValue(1_000);
+    fakeConnection.getFirstAvailableBlock.mockResolvedValue(900); // retiene 100 < 150
+
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_LEDGER_SCHEMA_UNAVAILABLE: rpc_history_insufficient/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    expect(claimMock).not.toHaveBeenCalled();
+  });
+
+  it('T-IDM-20b: retención HOLGADA ⟹ el leg settlea normal', async () => {
+    fakeConnection.getSlot.mockResolvedValue(200_000_000);
+    fakeConnection.getFirstAvailableBlock.mockResolvedValue(1);
+    await adapter.settle(req('run:0'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-IDM-20c: retención NO MEDIBLE ⟹ warn y se sigue (asimetría deliberada)', async () => {
+    // Apagar TODO el leg porque un método opcional no está soportado es un martillo
+    // enorme para un residuo que además necesita que el blockhash haya expirado.
+    // Se prefiere la alarma visible al apagón por un supuesto no verificable.
+    fakeConnection.getFirstAvailableBlock.mockRejectedValue(
+      new Error('Method not found'),
+    );
+    await adapter.settle(req('run:0'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-IDM-20d: la medición se MEMOIZA — 1 sola vez en 3 settles', async () => {
+    // Misma disciplina que T-IDM-10b: una afirmación de "no agrega costo" se asierta.
+    await adapter.settle(req('run:0'));
+    await adapter.settle(req('run:1'));
+    await adapter.settle(req('run:2'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(3);
+    expect(fakeConnection.getFirstAvailableBlock).toHaveBeenCalledTimes(1);
   });
 });
 

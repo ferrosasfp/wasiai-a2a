@@ -61,6 +61,7 @@
  */
 
 import { getLogger } from '../../lib/logger.js';
+import { getSolanaCommitment, getSolanaConnection } from './chain.js';
 import { probeSettleLedger } from './settle-ledger.js';
 
 const log = getLogger('solana-schema-preflight');
@@ -79,11 +80,23 @@ const RETRY_MS_DEFAULT = 60_000;
 export type SolanaSchemaFailure =
   | 'table_missing'
   | 'rpc_missing'
-  | 'probe_failed';
+  | 'probe_failed'
+  // AR re-review MNR-1: el endpoint RPC no retiene historico suficiente, asi que un
+  // `absent` de `getSignatureStatuses` no significaria nada en el momento en que el
+  // codigo lo usa (justo despues de que el blockhash expira).
+  | 'rpc_history_insufficient';
 
 export type SolanaSchemaVerdict =
   | { ok: true }
   | { ok: false; failure: SolanaSchemaFailure; detail: string };
+
+/**
+ * Validez de un blockhash de Solana, en slots. Es el UMBRAL, y no es arbitrario: el
+ * codigo usa un `absent` EXACTAMENTE cuando el blockhash ya expiro, o sea ~150 slots
+ * despues de firmar. Si el nodo no retiene ni siquiera esa ventana, su `null` no puede
+ * distinguirse de "no lo tengo" y la determinacion negativa pierde todo valor.
+ */
+const BLOCKHASH_VALIDITY_SLOTS = 150;
 
 let _cached: SolanaSchemaVerdict | null = null;
 let _cachedAt = 0;
@@ -102,12 +115,66 @@ export function _resetSolanaSchemaPreflight(): void {
   _inFlight = null;
 }
 
+/**
+ * AR re-review MNR-1 — LA PRECONDICION DE DESPLIEGUE, HECHA EXPLICITA.
+ *
+ * `absent` (la determinacion que autoriza re-firmar, junto con la expiracion del
+ * blockhash) se apoya en que el endpoint RPC retenga historico. Un validador sin
+ * `--enable-rpc-bigtable-ledger-storage`, o sin el rango de ledger correspondiente,
+ * responde `null` sobre una tx que SI existe — y desde la respuesta no hay forma de
+ * distinguirlo. Eso era un supuesto tacito del despliegue; aca pasa a medirse.
+ *
+ * ⚠️ ASIMETRIA DELIBERADA, y es una decision, no un descuido:
+ *   · retencion MEDIDA e INSUFICIENTE ⟹ **falla** (hay evidencia positiva de que la
+ *     precondicion no se cumple);
+ *   · retencion NO MEDIBLE (el endpoint no soporta el metodo, o la llamada falla)
+ *     ⟹ **warn ruidoso y se sigue**.
+ *
+ * Por que no fail-closed en el segundo caso: apagar TODO el leg Solana porque un
+ * metodo opcional no esta soportado es un martillo enorme para un residuo que ademas
+ * necesita que el blockhash haya expirado para morder. Se prefiere la alarma visible
+ * al apagon por un supuesto no verificable. Queda declarado como residuo.
+ */
+async function probeRpcHistoryRetention(): Promise<SolanaSchemaVerdict | null> {
+  let currentSlot: number;
+  let firstAvailable: number;
+  try {
+    const connection = getSolanaConnection();
+    [currentSlot, firstAvailable] = await Promise.all([
+      connection.getSlot(getSolanaCommitment()),
+      connection.getFirstAvailableBlock(),
+    ]);
+  } catch (err) {
+    log.warn(
+      { detail: err instanceof Error ? err.message : String(err) },
+      'solana settle preflight: could not MEASURE the RPC ledger retention window (getSlot/getFirstAvailableBlock). Continuing, but the `absent` determination that authorises re-signing assumes this endpoint keeps transaction history — verify it serves getSignatureStatuses with searchTransactionHistory over the long-term ledger.',
+    );
+    return null;
+  }
+  const retained = currentSlot - firstAvailable;
+  if (!Number.isFinite(retained) || retained <= BLOCKHASH_VALIDITY_SLOTS) {
+    return {
+      ok: false,
+      failure: 'rpc_history_insufficient',
+      detail: `RPC retains ~${retained} slots (first=${firstAvailable}, current=${currentSlot}); a blockhash stays valid for ~${BLOCKHASH_VALIDITY_SLOTS} slots, so a null from getSignatureStatuses could not be told apart from "this node does not have it"`,
+    };
+  }
+  log.info(
+    { retainedSlots: retained },
+    'solana settle preflight: RPC ledger retention window measured',
+  );
+  return null;
+}
+
 /** Traduce el probe crudo del ledger al veredicto del preflight. NUNCA lanza. */
 async function probeSolanaSchema(): Promise<SolanaSchemaVerdict> {
   const result = await probeSettleLedger();
   switch (result.probe) {
-    case 'ok':
-      return { ok: true };
+    case 'ok': {
+      // El esquema esta; falta la OTRA precondicion de la que depende `absent`.
+      const history = await probeRpcHistoryRetention();
+      return history ?? { ok: true };
+    }
     case 'table_missing':
       return { ok: false, failure: 'table_missing', detail: result.detail };
     case 'rpc_missing':
