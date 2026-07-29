@@ -17,6 +17,16 @@
  * cuerpo hace: un match contra el texto completo se satisface con el comentario. Eso
  * verificaría que la migración se *describa*, no que *haga*. El sql crudo se reserva
  * para las afirmaciones que son SOBRE los comentarios (el gate de orden de release).
+ *
+ * ── DOS TESTS PROTEGEN DOCUMENTACIÓN, Y ESTÁN MARCADOS ─────────────────────
+ *
+ * `T-MIG-13c` y `T-MIG-14a` afirman sobre COMENTARIOS del `.sql`, no sobre conducta:
+ * llevan `[DOCUMENTACIÓN, no conducta]` en el nombre para que nadie los lea como
+ * garantías ejecutables. Son legítimos —el inventario previo al rollback y el gate de
+ * orden de release son instrucciones para un operador, y que desaparezcan en silencio
+ * es un riesgo real— pero **la propiedad ejecutable equivalente se prueba aparte**:
+ * el `RENAME` en vez de `DROP TABLE` lo canda `T-MIG-13`, y el gate de orden lo hace
+ * cumplir el preflight de esquema en código (`schema-preflight.ts`), no este texto.
  */
 
 import { readFileSync } from 'node:fs';
@@ -428,7 +438,7 @@ describe('WKH-307 down — la evidencia no se destruye', () => {
     expect(body).toMatch(/DROP INDEX IF EXISTS public\.ux_a2a_solana_settle_intents_signature/i);
   });
 
-  it('T-MIG-13c: la cabecera trae el inventario obligatorio previo al rollback', () => {
+  it('T-MIG-13c [DOCUMENTACIÓN, no conducta]: la cabecera trae el inventario obligatorio previo al rollback', () => {
     // Afirmación SOBRE los comentarios (por eso usa el sql crudo): sin el inventario,
     // un rollback deja fuera de línea filas con plata posiblemente en vuelo.
     expect(down).toMatch(/INVENTARIO OBLIGATORIO ANTES DE REVERTIR/i);
@@ -444,7 +454,7 @@ describe('WKH-307 — gate de orden de release y applier', () => {
   const up = readFileSync(UP, 'utf8');
   const applier = readFileSync(APPLIER, 'utf8');
 
-  it('T-MIG-14a: el `.sql` declara que la migración va ANTES del código', () => {
+  it('T-MIG-14a [DOCUMENTACIÓN, no conducta]: el `.sql` declara que la migración va ANTES del código', () => {
     expect(up).toMatch(/ORDEN DE RELEASE \(GATE\)/i);
     expect(up).toMatch(/ANTES\*{0,2} DE DEPLOYAR EL CODIGO/i);
   });
