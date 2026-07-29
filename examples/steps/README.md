@@ -37,6 +37,10 @@ node examples/steps/6-me.mjs
 ```
 
 ## Limpieza
-```bash
-./scripts/cleanup-wkh-35-prod-testkey.sh   # borra keys + deposits con owner_ref LIKE 'wkh35-%'
-```
+
+Estos pasos dejan una Agent Key de prueba y sus deposits. Para borrarlos, eliminá las
+filas de `a2a_agent_keys` y `a2a_key_deposits` cuyo `owner_ref` sea `LIKE 'wkh35-%'`.
+
+El script de barrido es utilería interna de operaciones y **no se versiona en este
+repositorio**: si trabajás en el equipo, pedilo; si no, el criterio de arriba es todo lo
+que hace.

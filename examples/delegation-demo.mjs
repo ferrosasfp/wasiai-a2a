@@ -92,4 +92,6 @@ if (delegationId) {
 }
 
 console.log(`\nOK ✓ — Fase 2 end-to-end contra prod: bind → firma EIP-712 → crear → listar → revocar.`);
-console.log(`Limpieza: ./scripts/cleanup-wkh-35-prod-testkey.sh  (barre owner_ref '${OWNER_REF}'; la delegación cae por ON DELETE CASCADE).`);
+// No se nombra ningún script: el de barrido es utilería interna y NO está en este repo,
+// así que decirle al usuario que lo corra es una instrucción falsa. Se describe el criterio.
+console.log(`Limpieza: borrá las filas con owner_ref '${OWNER_REF}' (la delegación cae por ON DELETE CASCADE).`);

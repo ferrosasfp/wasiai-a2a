@@ -93,7 +93,16 @@ function codeFiles(): string[] {
   );
 }
 
-/** Saca los `./` y `../` del principio: `../../doc/X.md` → `doc/X.md`. */
+/**
+ * Saca los `./` y `../` del principio, para que una referencia relativa quede como ruta
+ * desde la raíz del repo.
+ *
+ * ⚠️ Sin ejemplo literal a propósito: este archivo es CÓDIGO y el guardián se escanea a sí
+ * mismo, así que una ruta de muestra en la prosa se denuncia sola. Ya pasó: el ejemplo que
+ * había acá puso el test en rojo en cuanto el archivo entró al índice — antes no, porque
+ * `git ls-files` todavía no lo listaba y el guardián no se veía. Un verde que dependía de
+ * no estar trackeado no era un verde.
+ */
 function stripRelativePrefix(token: string): string {
   return token.replace(/^(?:\.{1,2}\/)+/, '');
 }
