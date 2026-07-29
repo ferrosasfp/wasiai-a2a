@@ -17,6 +17,7 @@ import {
 import { assertRequiredEnv, isProduction, parseTrustProxy } from './lib/env.js';
 import { assertGasOverheadConfigured } from './lib/gas-overhead.js';
 import { REDACT_PATHS } from './lib/logger.js';
+import { isPipelineCeilingMisconfigured } from './lib/stranded-payment.js';
 import mcpPlugin from './mcp/index.js';
 import { registerErrorBoundary } from './middleware/error-boundary.js';
 import { registerEventTracking } from './middleware/event-tracking.js';
@@ -42,6 +43,9 @@ import registriesRoutes from './routes/registries.js';
 import tasksRoutes from './routes/tasks.js';
 import wellKnownRoutes from './routes/well-known.js';
 import { refundOutbox } from './services/refund-outbox.js';
+// HU-306 (AC-5): indicador de exposición varada para `/health`. Con el umbral sin
+// configurar no consulta nada y el campo ni aparece.
+import { getStrandedHealthField } from './services/stranded-alert.js';
 
 // F-08 (audit 2026-06-29): fail loudly at boot if required secrets are missing
 // in production (before any adapter init or server bind).
@@ -57,6 +61,13 @@ await initAdapters();
 assertGasOverheadConfigured(
   getInitializedChainKeys().map((key) => getChainConfig(key).chainId),
 );
+
+// HU-306 (fix-pack CR): el techo de exposición por pipeline hace fail-OPEN ante un valor
+// ilegible —un techo que se cae a 0 por un typo rechazaría TODO el tráfico—, pero eso no
+// puede ser mudo: sin este aviso, `PIPELINE_EXPOSURE_CEILING_USD=1O` y la env sin setear
+// se comportan igual y se ven igual, y el operador creería tener puesto un techo que no
+// existe. Se evalúa UNA vez, al arrancar; no cuesta nada por request.
+const strandedCeilingMisconfigured = isPipelineCeilingMisconfigured();
 
 const fastify = Fastify({
   // F-06 (audit 2026-06-29): redact credential-bearing fields from request logs
@@ -102,6 +113,15 @@ if (!prod) {
   }
 }
 
+if (strandedCeilingMisconfigured) {
+  fastify.log.warn(
+    '⚠️  PIPELINE_EXPOSURE_CEILING_USD is SET but unreadable (not a positive number) — ' +
+      'the gateway is running WITHOUT a per-pipeline exposure ceiling, exactly as if the ' +
+      'variable were unset. Fail-open is deliberate (a ceiling that collapses to 0 would ' +
+      'reject ALL traffic), but the value you configured is doing nothing. See .env.example.',
+  );
+}
+
 await fastify.register(cors, corsOptions);
 
 // Resilience middleware (order matters: request-id -> error boundary -> rate limit)
@@ -140,6 +160,12 @@ fastify.get(
       version: '0.1.0',
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
+      // HU-306 (AC-5): campo ADITIVO de tres estados. Con el umbral sin configurar
+      // devuelve `{}` ⟹ la respuesta es byte-idéntica a la de antes. Síncrono, sin
+      // `await` a la base y sin poder tirar (CD-10). ⚠️ La MISMA línea está en
+      // `src/__tests__/e2e/setup.ts`, que duplica este handler porque este módulo hace
+      // `await initAdapters()` a nivel de módulo y no se puede importar desde un test.
+      ...getStrandedHealthField(),
     });
   },
 );

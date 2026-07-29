@@ -1002,6 +1002,7 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
     countOpt: string | null;
     eqCalls: Array<[string, unknown]>;
     inCalls: Array<[string, unknown]>;
+    gteCalls: Array<[string, unknown]>;
     orderCalls: Array<[string, unknown]>;
     limitCalls: number[];
   }
@@ -1013,6 +1014,7 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
       countOpt: null,
       eqCalls: [],
       inCalls: [],
+      gteCalls: [],
       orderCalls: [],
       limitCalls: [],
     };
@@ -1027,24 +1029,53 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
    * POR TABLA. Con una sola, la segunda query pisaba la forma de la primera y los
    * candados de HU-201 (`cap.table`, `cap.cols`) pasaban a afirmar cosas sobre la query
    * equivocada — verdes por el motivo incorrecto.
+   *
+   * HU-306 (CD-23): ahora son TRES queries y las dos últimas van sobre LA MISMA tabla
+   * (`a2a_events`: settleUnknown y strandedRuns). Capturar sólo por tabla repetiría el
+   * bug un nivel más abajo, y en la dirección más peligrosa:
+   *   · `events.cols` / `events.countOpt` los pisaría la segunda query ⟹ el candado
+   *     `cost_usdc::text` de HU-203 podía quedar verde por las columnas de la query
+   *     NUEVA, no por las suyas;
+   *   · con un payload compartido, las dos queries devolverían las MISMAS filas ⟹ un
+   *     test de `strandedRuns` "pasaría" leyendo las filas de `settleUnknown`.
+   * Por eso la captura es POR TABLA **Y POR ORDEN DE LLAMADA**: `events` es un ARRAY
+   * (una entrada por query a `a2a_events`, en orden) y cada llamada tiene su propio
+   * payload (`opts.eventCalls[i]`), que además puede ser un ERROR para probar que el
+   * fallo de UNA de las dos sube.
    */
   function wireIntents(
     rows: unknown[],
     count: number | null,
-    opts: { eventRows?: unknown[]; eventCount?: number | null } = {},
-  ): Captured & { events: Captured } {
+    opts: {
+      eventCalls?: Array<{
+        rows?: unknown[];
+        count?: number | null;
+        error?: { message: string };
+      }>;
+    } = {},
+  ): Captured & { events: Captured[] } {
     const cap = makeCap();
-    const events = makeCap();
+    const events: Captured[] = [];
+    let eventCallIndex = 0;
     mockFrom.mockImplementation(((table: string) => {
       const isEvents = table === 'a2a_events';
-      const target = isEvents ? events : cap;
-      const payload = isEvents
-        ? {
-            data: opts.eventRows ?? [],
-            error: null,
-            count: opts.eventCount ?? 0,
-          }
-        : { data: rows, error: null, count };
+      let target: Captured;
+      let payload: {
+        data: unknown[] | null;
+        error: { message: string } | null;
+        count: number | null;
+      };
+      if (isEvents) {
+        const spec = opts.eventCalls?.[eventCallIndex++];
+        target = makeCap();
+        events.push(target);
+        payload = spec?.error
+          ? { data: null, error: spec.error, count: null }
+          : { data: spec?.rows ?? [], error: null, count: spec?.count ?? 0 };
+      } else {
+        target = cap;
+        payload = { data: rows, error: null, count };
+      }
       target.table = table;
       const b: Record<string, unknown> = {
         select: (cols?: string, o?: { count?: string }) => {
@@ -1058,6 +1089,13 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
         },
         in: (col: string, val: unknown) => {
           target.inCalls.push([col, val]);
+          return b;
+        },
+        // HU-306: `countStrandedExposureSince` acota la ventana con `.gte`. Se captura
+        // igual que los demás filtros — si no estuviera, el builder ni siquiera
+        // respondería y el test fallaría por una razón que no es la que prueba.
+        gte: (col: string, val: unknown) => {
+          target.gteCalls.push([col, val]);
           return b;
         },
         order: (col: string, o?: unknown) => {
@@ -1216,14 +1254,13 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
 
   it('T-203-SU-QUERY: lee `a2a_events` filtrando por la familia COMPLETA de event_type', async () => {
     const cap = wireIntents([], 0, {
-      eventRows: [settleUnknownEventRow()],
-      eventCount: 1,
+      eventCalls: [{ rows: [settleUnknownEventRow()], count: 1 }],
     });
 
     await reconciliationService.listAmbiguous();
 
-    expect(cap.events.table).toBe('a2a_events');
-    const [col, values] = cap.events.inCalls[0] ?? [];
+    expect(cap.events[0]!.table).toBe('a2a_events');
+    const [col, values] = cap.events[0]!.inCalls[0] ?? [];
     expect(col).toBe('event_type');
     // Si alguien saca `x402_settle_unknown`, las retenciones del inbound vuelven a ser
     // invisibles — que es el bug que esta lista existe para cerrar.
@@ -1233,8 +1270,7 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
 
   it('T-203-SU-ROWS: la fila expone el hash y el monto retenido', async () => {
     wireIntents([], 0, {
-      eventRows: [settleUnknownEventRow()],
-      eventCount: 1,
+      eventCalls: [{ rows: [settleUnknownEventRow()], count: 1 }],
     });
 
     const out = await reconciliationService.listAmbiguous();
@@ -1254,7 +1290,7 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
 
     await reconciliationService.listAmbiguous();
 
-    expect(cap.events.cols).toContain('cost_usdc::text');
+    expect(cap.events[0]!.cols).toContain('cost_usdc::text');
   });
 
   it('T-203-SU-FLAG-OFF: se lista con ESCROW_SETTLE_ENABLED OFF', async () => {
@@ -1263,8 +1299,7 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
     // escrow. Gatear la lista por ese flag la dejaría vacía siempre.
     mockIsEscrowSettleEnabled.mockReturnValue(false);
     wireIntents([], 0, {
-      eventRows: [settleUnknownEventRow()],
-      eventCount: 1,
+      eventCalls: [{ rows: [settleUnknownEventRow()], count: 1 }],
     });
 
     const out = await reconciliationService.listAmbiguous();
@@ -1274,24 +1309,27 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
 
   it('T-203-SU-TRUNCATED: una lista acotada lo DECLARA (total exacto)', async () => {
     const cap = wireIntents([], 0, {
-      eventRows: [
-        settleUnknownEventRow(),
-        settleUnknownEventRow({ id: 'ev-2' }),
+      eventCalls: [
+        {
+          rows: [
+            settleUnknownEventRow(),
+            settleUnknownEventRow({ id: 'ev-2' }),
+          ],
+          count: 900,
+        },
       ],
-      eventCount: 900,
     });
 
     const out = await reconciliationService.listAmbiguous();
 
-    expect(cap.events.countOpt).toBe('exact');
+    expect(cap.events[0]!.countOpt).toBe('exact');
     expect(out.settleUnknown.total).toBe(900);
     expect(out.settleUnknown.truncated).toBe(true);
   });
 
   it('T-203-SU-NOT-TRUNCATED: si entran todas, no se declara truncada', async () => {
     wireIntents([], 0, {
-      eventRows: [settleUnknownEventRow()],
-      eventCount: 1,
+      eventCalls: [{ rows: [settleUnknownEventRow()], count: 1 }],
     });
 
     const out = await reconciliationService.listAmbiguous();
@@ -1324,6 +1362,319 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
     }) as any);
 
     await expect(reconciliationService.listAmbiguous()).rejects.toThrow();
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // HU-306 — LA TERCERA LISTA: pagos que YA salieron on-chain y quedaron varados
+  // porque el pipeline falló después. Es la SEGUNDA query sobre `a2a_events`, así que
+  // todo se afirma contra `cap.events[1]` (CD-23): contra `events[0]` estaríamos
+  // mirando la query de HU-203 y el candado quedaría verde por el motivo equivocado.
+  // ══════════════════════════════════════════════════════════════════
+
+  function strandedRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'strand-1',
+      tx_hash: '0xPAID0',
+      cost_usdc: '0.050000',
+      metadata: {
+        compose_run_id: 'run-abc',
+        failed_step_index: 2,
+        stranded_usd: 0.05,
+        paid_steps: [
+          {
+            step: 0,
+            agent_slug: 'remit-kyc-validator',
+            registry: 'wasiai',
+            chain: 'avalanche-fuji',
+            cost_usdc: 0.02,
+            settled_atomic: '20000',
+            tx_hash: '0xPAID0',
+            evidence: 'downstream',
+          },
+        ],
+      },
+      created_at: '2026-07-29T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('T-STRAND-QUERY: lee `a2a_events` filtrando por el event_type NUEVO (no el de HU-203)', async () => {
+    const cap = wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        { rows: [strandedRow()], count: 1 },
+      ],
+    });
+
+    await reconciliationService.listAmbiguous();
+
+    // Son DOS queries distintas sobre la misma tabla, y esta es la segunda.
+    expect(cap.events).toHaveLength(2);
+    expect(cap.events[1]!.table).toBe('a2a_events');
+    const [col, value] = cap.events[1]!.eqCalls[0] ?? [];
+    expect(col).toBe('event_type');
+    expect(value).toBe('compose_stranded_payment');
+    // …y NO reusa el filtro de la familia de HU-203 (`.in`), que traería filas de la
+    // otra pregunta: settles SIN RESOLVER, que sí hay que reconciliar contra la cadena.
+    expect(cap.events[1]!.inCalls).toHaveLength(0);
+    expect(cap.events[1]!.orderCalls[0]?.[0]).toBe('created_at');
+    expect(cap.events[1]!.limitCalls[0]).toBe(500);
+  });
+
+  it('T-STRAND-NUMERIC: pide `cost_usdc::text` (WKH-196) en SU propia query', async () => {
+    const cap = wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        { rows: [strandedRow()], count: 1 },
+      ],
+    });
+
+    await reconciliationService.listAmbiguous();
+
+    // Sin el `::text`, PostgREST entrega el NUMERIC como número JSON y `JSON.parse`
+    // redondea: el monto de la exposición reportada dejaría de ser el real.
+    expect(cap.events[1]!.cols).toContain('cost_usdc::text');
+  });
+
+  it('T-STRAND-TRUNCATED: la lista acotada lo DECLARA, con total exacto', async () => {
+    const cap = wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        {
+          rows: [strandedRow(), strandedRow({ id: 'strand-2' })],
+          count: 900,
+        },
+      ],
+    });
+
+    const out = await reconciliationService.listAmbiguous();
+
+    expect(cap.events[1]!.countOpt).toBe('exact');
+    expect(out.strandedRuns.total).toBe(900);
+    expect(out.strandedRuns.truncated).toBe(true);
+    expect(out.strandedRuns.rows).toHaveLength(2);
+  });
+
+  it('T-STRAND-NOT-TRUNCATED: si entran todas, no se declara truncada', async () => {
+    wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        { rows: [strandedRow()], count: 1 },
+      ],
+    });
+
+    const out = await reconciliationService.listAmbiguous();
+
+    expect(out.strandedRuns.total).toBe(1);
+    expect(out.strandedRuns.truncated).toBe(false);
+  });
+
+  it('T-STRAND-NESTED: viaja anidada y NO pisa `rows` ni `settleUnknown`', async () => {
+    wireIntents([ambiguousRow()], 1, {
+      eventCalls: [
+        { rows: [settleUnknownEventRow()], count: 1 },
+        { rows: [strandedRow()], count: 1 },
+      ],
+    });
+
+    const out = await reconciliationService.listAmbiguous();
+
+    // Las tres listas conviven, cada una con SUS filas. Si el doble no discriminara por
+    // orden de llamada, las dos de eventos traerían lo mismo y esto pasaría igual — por
+    // eso los ids de los fixtures son distintos.
+    expect(out.rows[0]?.intent_id).toBe(INTENT_ID);
+    expect(out.settleUnknown.rows[0]?.event_id).toBe('ev-1');
+    expect(out.strandedRuns.rows[0]?.event_id).toBe('strand-1');
+    // y la fila del residuo trae lo que hace falta para reconciliar a mano
+    expect(out.strandedRuns.rows[0]?.runId).toBe('run-abc');
+    expect(out.strandedRuns.rows[0]?.failedStepIndex).toBe(2);
+    expect(out.strandedRuns.rows[0]?.costUsdc).toBe('0.050000');
+    expect(out.strandedRuns.rows[0]?.paidSteps).toEqual([
+      {
+        step: 0,
+        agent_slug: 'remit-kyc-validator',
+        registry: 'wasiai',
+        chain: 'avalanche-fuji',
+        cost_usdc: 0.02,
+        settled_atomic: '20000',
+        tx_hash: '0xPAID0',
+        evidence: 'downstream',
+      },
+    ]);
+  });
+
+  it('T-STRAND-FAMILY-SEPARATE: la lista de HU-203 sigue filtrando EXACTAMENTE sus dos event_type (CD-8)', async () => {
+    const cap = wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        { rows: [], count: 0 },
+      ],
+    });
+
+    await reconciliationService.listAmbiguous();
+
+    const [, values] = cap.events[0]!.inCalls[0] ?? [];
+    // Ni uno más: meter `compose_stranded_payment` acá corrompería la cola de HU-203 con
+    // filas que NO hay que reconciliar contra la cadena (su settle ya se confirmó).
+    expect(values).toEqual(['x402_settle_unknown', 'compose_settle_unknown']);
+  });
+
+  it('T-STRAND-ERROR: un fallo de ESTA query TIRA — jamás una lista vacía (AC-4)', async () => {
+    // ⚠️ Acá el método se llama SOLO, así que su query es la PRIMERA de esta cableada
+    // (el índice de `eventCalls` cuenta llamadas a `a2a_events`, no métodos). El caso
+    // "falla la segunda de dos" es el del test siguiente, vía `listAmbiguous`.
+    // "No hay pagos varados" y "no pudimos saberlo" no se escriben igual.
+    wireIntents([], 0, {
+      eventCalls: [{ error: { message: 'boom' } }],
+    });
+
+    await expect(reconciliationService.listStrandedRuns()).rejects.toThrow(
+      'INTERNAL',
+    );
+  });
+
+  it('T-STRAND-ERROR-PROPAGA: ese fallo SUBE por listAmbiguous (nadie lo traga)', async () => {
+    wireIntents([ambiguousRow()], 1, {
+      eventCalls: [
+        { rows: [settleUnknownEventRow()], count: 1 },
+        { error: { message: 'boom' } },
+      ],
+    });
+
+    // Un `listAmbiguous` que devolviera los intents y la lista de HU-203, comiéndose el
+    // error de la tercera, sería una respuesta INCOMPLETA presentada como completa.
+    await expect(reconciliationService.listAmbiguous()).rejects.toThrow(
+      'INTERNAL',
+    );
+  });
+
+  it('T-STRAND-DEFENSIVE: una fila con metadata rota degrada ESA fila, no la lista (CD-12)', async () => {
+    wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        {
+          rows: [
+            strandedRow({ id: 'rota-1', metadata: null }),
+            strandedRow({ id: 'rota-2', metadata: [] }),
+            strandedRow({
+              id: 'rota-3',
+              metadata: { compose_run_id: 42, paid_steps: 'no-es-una-lista' },
+            }),
+            strandedRow({ id: 'sana' }),
+          ],
+          count: 4,
+        },
+      ],
+    });
+
+    const out = await reconciliationService.listAmbiguous();
+
+    // Las CUATRO se listan: una fila vieja o mal formada que volteara el mapeo entero
+    // sería devolver `[]` por la puerta de atrás.
+    expect(out.strandedRuns.rows).toHaveLength(4);
+    for (const row of out.strandedRuns.rows.slice(0, 3)) {
+      expect(row.runId).toBeNull();
+      expect(row.failedStepIndex).toBeNull();
+      expect(row.paidSteps).toEqual([]);
+    }
+    // …y la sana conserva todo su detalle.
+    expect(out.strandedRuns.rows[3]?.runId).toBe('run-abc');
+    expect(out.strandedRuns.rows[3]?.paidSteps).toHaveLength(1);
+    // el `metadata` crudo viaja VERBATIM aunque no se haya podido interpretar
+    expect(out.strandedRuns.rows[0]?.metadata).toBeNull();
+  });
+
+  it('T-EXPOSURE-QUERY: el conteo de la ventana pide `::text`, acota y filtra por SU event_type (AR MENOR-4)', async () => {
+    // El candado del `::text` estaba sólo en `listStrandedRuns`; acá sobrevivía sacarlo.
+    // Y el `.limit()` es el que produce el `truncated` del que depende el ÚNICO
+    // fail-safe de la alerta (`breached = truncated || …`): sin límite no hay
+    // truncamiento, y sin truncamiento ese fail-safe no puede dispararse nunca.
+    const cap = wireIntents([], 0, {
+      eventCalls: [{ rows: [{ cost_usdc: '0.030000' }], count: 1 }],
+    });
+
+    const out = await reconciliationService.countStrandedExposureSince(
+      '2026-07-29T00:00:00.000Z',
+    );
+
+    const q = cap.events[0]!;
+    expect(q.table).toBe('a2a_events');
+    expect(q.cols).toContain('cost_usdc::text');
+    expect(q.countOpt).toBe('exact');
+    expect(q.eqCalls[0]).toEqual(['event_type', 'compose_stranded_payment']);
+    expect(q.gteCalls[0]).toEqual(['created_at', '2026-07-29T00:00:00.000Z']);
+    expect(q.limitCalls[0]).toBe(500);
+    // y suma de verdad lo que trajo
+    expect(out).toEqual({ runs: 1, exposureUsd: 0.03, truncated: false });
+  });
+
+  it('T-EXPOSURE-LOWER-BOUND: más filas que el límite ⟹ `truncated` (cota inferior declarada)', async () => {
+    // Con la ventana truncada la suma es una COTA INFERIOR, y quien la consume convierte
+    // eso en breach por sí solo. Si este flag no saliera, un pico sistémico podría
+    // reportar una suma parcial por debajo del umbral y quedar en silencio.
+    wireIntents([], 0, {
+      eventCalls: [{ rows: [{ cost_usdc: '1.000000' }], count: 900 }],
+    });
+
+    const out = await reconciliationService.countStrandedExposureSince(
+      '2026-07-29T00:00:00.000Z',
+    );
+
+    expect(out.runs).toBe(900);
+    expect(out.truncated).toBe(true);
+    expect(out.exposureUsd).toBe(1); // sólo lo que entró: por eso es cota inferior
+  });
+
+  it('T-EXPOSURE-ERROR: un fallo de la query de exposición TIRA (no reporta 0)', async () => {
+    // Un `0` por fallo diría "no hay exposición" en el único canal que existe para
+    // gritar lo contrario.
+    wireIntents([], 0, { eventCalls: [{ error: { message: 'boom' } }] });
+
+    await expect(
+      reconciliationService.countStrandedExposureSince(
+        '2026-07-29T00:00:00.000Z',
+      ),
+    ).rejects.toThrow('INTERNAL');
+  });
+
+  it('T-READONLY-01: listar NO escribe — ni rpc, ni insert, ni update, ni delete (AC-7)', async () => {
+    const writes: string[] = [];
+    mockRpc.mockClear();
+    mockFrom.mockImplementation(((table: string) => {
+      const b: Record<string, unknown> = {
+        select: () => b,
+        eq: () => b,
+        in: () => b,
+        order: () => b,
+        limit: () => Promise.resolve({ data: [], error: null, count: 0 }),
+        insert: () => {
+          writes.push(`insert:${table}`);
+          return b;
+        },
+        update: () => {
+          writes.push(`update:${table}`);
+          return b;
+        },
+        delete: () => {
+          writes.push(`delete:${table}`);
+          return b;
+        },
+        upsert: () => {
+          writes.push(`upsert:${table}`);
+          return b;
+        },
+        // biome-ignore lint/suspicious/noThenProperty: awaitable supabase builder test double
+        then: (resolve: (v: unknown) => void) =>
+          resolve({ data: [], error: null, count: 0 }),
+      };
+      return b;
+      // biome-ignore lint/suspicious/noExplicitAny: test double for supabase builder
+    }) as any);
+
+    await reconciliationService.listStrandedRuns();
+
+    expect(writes).toEqual([]);
+    expect(mockRpc).not.toHaveBeenCalled();
   });
 });
 

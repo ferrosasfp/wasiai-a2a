@@ -39,6 +39,14 @@ import { getLogger } from '../lib/logger.js';
 // del MISMO módulo que las escribe para que el productor y el lector no puedan
 // divergir en el string.
 import { SETTLE_UNKNOWN_EVENT_TYPES } from '../lib/settle-withholding.js';
+// HU-306: mismo criterio que arriba — el `event_type` y el lector de `metadata` se
+// importan del módulo que los ESCRIBE. El lector es defensivo (CD-12): una fila vieja o
+// mal formada devuelve campos vacíos, nunca tira, y por lo tanto no puede vaciar la
+// lista entera por la puerta de atrás.
+import {
+  COMPOSE_STRANDED_PAYMENT_EVENT,
+  readStrandedMetadata,
+} from '../lib/stranded-payment.js';
 import { supabase } from '../lib/supabase.js';
 import { settlePaymentIntentOnChain } from './payment-intent.js';
 
@@ -317,6 +325,13 @@ export interface AmbiguousReport {
    * turnos y una de las dos termina sin mirar.
    */
   settleUnknown: SettleUnknownReport;
+  /**
+   * HU-306: la TERCERA pregunta del mismo panel — "¿qué pagos ya confirmados quedaron
+   * varados porque el pipeline falló después?". Va anidada acá, y no en un endpoint
+   * propio, por el MISMO motivo que `settleUnknown`: tres listas de plata en tres
+   * pantallas distintas se miran por turnos y siempre hay una que no se mira.
+   */
+  strandedRuns: StrandedRunsReport;
 }
 
 /**
@@ -357,6 +372,61 @@ export interface SettleUnknownEventRow {
 /** Mismo contrato de completitud que `AmbiguousReport` y por el mismo motivo. */
 export interface SettleUnknownReport {
   rows: SettleUnknownEventRow[];
+  total: number;
+  truncated: boolean;
+}
+
+/**
+ * HU-306 — un step que YA PAGÓ on-chain dentro de un run que después falló.
+ *
+ * La forma la define el leaf (`lib/stranded-payment.ts`), que es quien la escribe en
+ * `metadata.paid_steps[]` y quien la vuelve a leer: una segunda definición acá sería
+ * una copia que diverge el día que se agregue un campo, y el que diverja sería
+ * justamente el lado que reconcilia dinero.
+ */
+export type { StrandedPaidStep } from '../lib/stranded-payment.js';
+
+/**
+ * HU-306 — un RUN de `/compose` que falló dejando pagos ya confirmados on-chain.
+ *
+ * POR QUÉ NO ES UNA `SettleUnknownEventRow` (CD-8): son dos preguntas distintas sobre
+ * dinero distinto. `compose_settle_unknown` dice "el settle quedó SIN RESOLVER y no
+ * devolvimos la plata" — se reconcilia mirando la cadena. Esta fila dice "el settle SE
+ * CONFIRMÓ y el pipeline falló DESPUÉS" — no hay nada que reconciliar contra la cadena,
+ * la plata se fue y lo que queda es contarla y ver si crece. Mezclarlas en la misma lista
+ * obligaría al operador a distinguir a mano dos acciones opuestas.
+ *
+ * SOLO LECTURA (AC-7): no hay remediación automática posible ni deseable — el pago ya
+ * está minado y el destinatario es un tercero.
+ */
+export interface StrandedRunRow {
+  event_id: string;
+  /** La evidencia del PRIMER step pagado del run; la lista completa va en `paidSteps`. */
+  tx_hash: string | null;
+  /**
+   * `a2a_events.cost_usdc` verbatim (`::text`, convención WKH-196): el total en USD que
+   * el caller pagó por los steps que sí se ejecutaron y ya no vuelve.
+   */
+  costUsdc: string;
+  /** `metadata` VERBATIM: es la fuente para reconciliar y no se recorta al mapear. */
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  // ── Derivados de `metadata`, leídos con `readStrandedMetadata` (defensivo, CD-12) ──
+  /** Id del run; `null` si la fila es vieja o el JSON no lo trae. */
+  runId: string | null;
+  /** Índice del step que rompió el pipeline; `null` si no se puede leer. */
+  failedStepIndex: number | null;
+  /** Los steps que pagaron. `[]` ante una forma inesperada — nunca voltea la fila. */
+  paidSteps: StrandedPaidStepRow[];
+}
+
+/** Alias local del tipo del leaf (evita repetir el import en la firma de arriba). */
+type StrandedPaidStepRow =
+  import('../lib/stranded-payment.js').StrandedPaidStep;
+
+/** Mismo contrato de completitud que `SettleUnknownReport` y por el mismo motivo. */
+export interface StrandedRunsReport {
+  rows: StrandedRunRow[];
   total: number;
   truncated: boolean;
 }
@@ -438,6 +508,21 @@ interface SettleUnknownSelectRow {
   id: string;
   event_type: string;
   agent_id: string | null;
+  tx_hash: string | null;
+  cost_usdc: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+/**
+ * Fila del SELECT de `listStrandedRuns` (HU-306). Misma regla que `PendingSelectRow`: el
+ * tipo refleja EXACTAMENTE las columnas pedidas. No trae `event_type` ni `agent_id` — el
+ * filtro ya fija el primero y el segundo es NULL a propósito en esta familia de eventos
+ * (ver `buildStrandedPaymentEvent`: el agente culpable se recupera por join, no se
+ * adivina). `cost_usdc` es NUMERIC ⟹ `::text` (WKH-196).
+ */
+interface StrandedRunSelectRow {
+  id: string;
   tx_hash: string | null;
   cost_usdc: string | null;
   metadata: Record<string, unknown> | null;
@@ -588,8 +673,14 @@ export const reconciliationService = {
     // primer fallo tira y nunca se emite una lista a medias. Es un endpoint admin de
     // sólo lectura: la latencia extra no le cuesta nada a nadie.
     const settleUnknown = await this.listSettleUnknown();
+    // HU-306: SECUENCIAL por el mismo motivo que la anterior (un fallo en vuelo dejaría
+    // una rejection sin manejar) y SIN `try` alrededor: si esta query falla, el error
+    // TIENE que subir. Un `catch` que devolviera la lista a medias diría "no hay pagos
+    // varados" cuando la verdad es "no pudimos saberlo" (AC-4).
+    const strandedRuns = await this.listStrandedRuns();
     return {
       settleUnknown,
+      strandedRuns,
       rows: rows.map((r) => ({
         intent_id: r.id,
         owner_ref: r.owner_ref,
@@ -667,6 +758,114 @@ export const reconciliationService = {
       total,
       truncated: total > rows.length,
     };
+  },
+
+  /**
+   * HU-306 (AC-2/AC-3/AC-4): los runs de `/compose` que fallaron DESPUÉS de que algún
+   * step ya había cobrado on-chain. Se sirve dentro de `listAmbiguous()`
+   * (`AmbiguousReport.strandedRuns`).
+   *
+   * ⛔ NO se mezcla con `listSettleUnknown` (CD-8). Filtra por SU PROPIO `event_type` y
+   * la otra lista sigue filtrando por los suyos: son dos preguntas con dos acciones
+   * humanas opuestas ("reconciliar contra la cadena" vs "esto ya se fue, contalo").
+   * Meter este `event_type` en `SETTLE_UNKNOWN_EVENT_TYPES` corrompería la lista de
+   * HU-203 con filas que no hay que reconciliar.
+   *
+   * Hereda las TRES invariantes de `listAmbiguous`/`listSettleUnknown`, y ninguna se
+   * puede debilitar:
+   *   1. NO gateada por `isEscrowSettleEnabled()` — el camino que produce estas filas es
+   *      el no-escrow, o sea justo el que corre con el flag OFF;
+   *   2. `total` exacto (`count:'exact'`) + `truncated` — una lista de plata que se
+   *      corta en silencio afirma algo falso sobre su propia completitud;
+   *   3. un error de query TIRA en vez de devolver `[]` — "no hay nada varado" es la
+   *      peor mentira posible en esta superficie.
+   *
+   * `cost_usdc::text` es obligatorio (WKH-196): PostgREST entrega los NUMERIC como
+   * número JSON y `JSON.parse` redondea.
+   *
+   * ⚠️ TD-203-01 vale igual acá: `a2a_events` no tiene índice por `event_type`.
+   */
+  async listStrandedRuns(): Promise<StrandedRunsReport> {
+    const { data, error, count } = await supabase
+      .from('a2a_events')
+      .select('id, tx_hash, cost_usdc::text, metadata, created_at', {
+        count: 'exact',
+      })
+      .eq('event_type', COMPOSE_STRANDED_PAYMENT_EVENT)
+      .order('created_at', { ascending: false })
+      .limit(AMBIGUOUS_LIST_LIMIT);
+    if (error) {
+      log.error({ detail: error.message }, 'listStrandedRuns query failed');
+      throw new ReconciliationError('INTERNAL');
+    }
+    const rows = (data as unknown as StrandedRunSelectRow[] | null) ?? [];
+    const total = count ?? rows.length;
+    return {
+      rows: rows.map((r) => {
+        // Defensivo por fila: una `metadata` inesperada degrada ESA fila, no la lista.
+        const parsed = readStrandedMetadata(r.metadata);
+        return {
+          event_id: r.id,
+          tx_hash: r.tx_hash,
+          costUsdc: r.cost_usdc ?? '0',
+          metadata: r.metadata,
+          created_at: r.created_at,
+          runId: parsed.runId,
+          failedStepIndex: parsed.failedStepIndex,
+          paidSteps: parsed.paidSteps,
+        };
+      }),
+      total,
+      truncated: total > rows.length,
+    };
+  },
+
+  /**
+   * HU-306 (AC-5) — cuánta exposición varada se acumuló DESDE `sinceIso`. Lo consume el
+   * indicador de `/health` (`services/stranded-alert.ts`), no el panel.
+   *
+   * ⚠️ POR QUÉ SUMA EN JS Y NO CON `SUM()`: supabase-js no puede pedir un agregado sin un
+   * RPC, y esta HU no crea RPCs (CD-2: cero migraciones). Se traen las filas de la
+   * ventana acotadas por `AMBIGUOUS_LIST_LIMIT` y se suman acá.
+   *
+   * CONSECUENCIA HONESTA: si `truncated`, `exposureUsd` es una **COTA INFERIOR**, no el
+   * total. Por eso la regla de lectura del consumidor es
+   * `breached = truncated || exposureUsd > umbral`: 500 runs varados en una ventana de
+   * una hora ya es sistémico por definición, así que un truncamiento NUNCA puede
+   * producir un "no hay breach" (que sería el fallo peligroso).
+   *
+   * `cost_usdc::text` + suma con `Number(...)`: el `::text` es la convención WKH-196 para
+   * no perder precisión en el transporte. La suma en punto flotante es aceptable acá
+   * PORQUE el resultado se compara contra un umbral de alerta (orden de magnitud), no
+   * para mover ni reembolsar plata.
+   *
+   * Tira ante un error de query, igual que las listas: un `0` por fallo diría "no hay
+   * exposición" en el único canal que existe para gritar lo contrario.
+   */
+  async countStrandedExposureSince(
+    sinceIso: string,
+  ): Promise<{ runs: number; exposureUsd: number; truncated: boolean }> {
+    const { data, error, count } = await supabase
+      .from('a2a_events')
+      .select('cost_usdc::text', { count: 'exact' })
+      .eq('event_type', COMPOSE_STRANDED_PAYMENT_EVENT)
+      .gte('created_at', sinceIso)
+      .limit(AMBIGUOUS_LIST_LIMIT);
+    if (error) {
+      log.error(
+        { detail: error.message },
+        'countStrandedExposureSince query failed',
+      );
+      throw new ReconciliationError('INTERNAL');
+    }
+    const rows =
+      (data as unknown as { cost_usdc: string | null }[] | null) ?? [];
+    const exposureUsd = rows.reduce((acc, r) => {
+      const n = Number(r.cost_usdc ?? '0');
+      return acc + (Number.isFinite(n) ? n : 0);
+    }, 0);
+    const runs = count ?? rows.length;
+    return { runs, exposureUsd, truncated: runs > rows.length };
   },
 
   /**
