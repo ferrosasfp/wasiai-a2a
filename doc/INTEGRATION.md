@@ -295,6 +295,121 @@ On non-`ready` plan outcomes (`no_agents`, `budget_exhausted`,
 `POST /orchestrate/execute` return the amount (`protocolFeeUsdc`) but not
 `feeRatePercent`; use `POST /orchestrate/plan` to read the rate before executing.
 
+### Price freeze: the signed `quote` (10-minute guarantee)
+
+Between `POST /orchestrate/plan` (which quotes) and `POST /orchestrate/execute`
+(which runs and debits) an agent's price can change. Without a quote, `execute`
+re-resolves prices **live** and the only thing stopping a change is the
+`maxQuotedCostUsdc` ceiling you declared: if the price moved but stayed under the
+ceiling, **you are debited the new price you never approved**.
+
+A `plan` that comes back `ready` therefore also returns a **signed quote** that
+freezes, per step, both the **price** and the **agent identity** (slug +
+registry) for exactly **10 minutes**:
+
+```jsonc
+{
+  "planStatus": "ready",
+  "costPerStep": [0.05, 0.06],
+  "maxQuotedCostUsdc": 0.1211,
+
+  "quote": "v1.eyJiaW5kIjoi….a3f…",            // opaque token — send it back as-is
+  "quoteExpiresAt": "2026-07-28T14:31:07.000Z" // informational; the real exp is signed inside
+}
+```
+
+Send it back on execute (the field is **optional**):
+
+```jsonc
+{
+  "orchestrationId": "…",
+  "steps": [ /* the same steps, same order, same agents */ ],
+  "maxQuotedCostUsdc": 0.1211,  // ⚠️ IGNORED when the quote is valid — see below
+  "budget": 1.0,
+  "quote": "v1.eyJiaW5kIjoi….a3f…"
+}
+```
+
+> ⚠️ **With a valid quote, `maxQuotedCostUsdc` is ignored: the frozen price IS the
+> ceiling.** The field stays in the schema (it is still required, and it is what
+> applies when you send no quote), but the ceiling check does not run on a quoted
+> execution — it re-resolves live prices, and rejecting a caller who holds a price
+> guarantee because of a live price that no longer affects them would defeat the
+> guarantee. If you were using `maxQuotedCostUsdc` as a second safety net, note that
+> **on a quoted execution the guarantee replaces it**: you are charged the frozen
+> total and nothing else, which is by construction ≤ the ceiling you approved.
+
+With a valid quote you are debited the **frozen** price and the **frozen** agent,
+never the live ones. **The freeze is exact in both directions**: if the live price
+went up the gateway absorbs the difference; if it went **down you are still
+charged the frozen price**, because charging a different number — even a cheaper
+one — means charging a price you did not approve. (The agent downstream still
+receives its own live price; that is not affected.)
+
+The token is opaque: do not parse it, do not modify it, just store and return it.
+It is self-contained and verified with a server-side secret — there is no session
+or database row behind it.
+
+**Errors** (all five share the same body shape):
+
+```json
+{ "error_code": "QUOTE_EXPIRED", "requiresNewQuote": true }
+```
+
+| HTTP | `error_code` | When |
+|---|---|---|
+| 400 | `QUOTE_INVALID` | malformed token, signature does not verify, invalid payload, or a non-positive frozen price |
+| 409 | `QUOTE_EXPIRED` | more than 10 minutes since it was issued |
+| 403 | `QUOTE_CALLER_MISMATCH` | the quote was issued to a different credential than the one presenting it |
+| 400 | `QUOTE_STEP_MISMATCH` | different number of steps, or a different `agent`/`registry` at some index |
+| 409 | `QUOTE_AGENT_UNAVAILABLE` | a frozen agent no longer resolves in any enabled registry |
+
+**None of these debit anything.** All the checks run before any money moves, so a
+rejected redemption always leaves your balance untouched. On any of them, ask for
+a new plan and use the fresh quote. A mismatched step is **rejected, not
+corrected**: the gateway will not silently swap in the agent from the quote,
+because your `input` was written for the agent you asked for.
+
+**Binding.** A quote is tied to the **exact credential** that requested the plan
+(agent key, delegation, or key session). The same owner using a *different* key
+cannot redeem it, and a caller that pays per-request via x402 cannot get or
+redeem a quote at all (there is no stable credential to bind to). In that case
+both fields are simply absent from the plan response.
+
+**When no quote is issued.** `quote` and `quoteExpiresAt` are omitted entirely
+(the keys are not present) when the plan is not `ready`, when any step has no
+resolved price, when the caller is not bindeable, or when the server has no quote
+secret configured. That response is byte-for-byte what the endpoint returned
+before this feature existed, so **omitting the field keeps the old behaviour**:
+live price re-resolution against `maxQuotedCostUsdc`, with `409 QUOTE_STALE` if
+it is exceeded. Existing integrations need no changes.
+
+> ⚠️ **A quote can be redeemed more than once within its 10 minutes.** This is a
+> deliberate trade-off, not an oversight: single-use would require durable
+> storage, and the quote is intentionally storage-free. It is **not** double
+> billing — each redemption runs a real pipeline and is charged its own amount
+> (two redemptions = two executions = two charges). What repeats is the *price
+> guarantee*, honoured twice. It is also not a way around your limits: every
+> redemption still goes through budget, daily limits and per-destination caps.
+> The bounded effect is that, for up to 10 minutes, you may run N pipelines at
+> the old price instead of the new one — and only when the price went up.
+>
+> **What this means for your retry logic.** A quote is *not* an idempotency key.
+> If a request times out or a connection drops and your client retries
+> `POST /orchestrate/execute` with the same `quote`, you get a **second real
+> execution and a second charge** — the gateway has no way to tell that retry
+> apart from a deliberate second run. The rule that "a rejected redemption never
+> charges" applies to the five `error_code` rejections above; it does **not** make
+> re-sending a valid quote free. Treat a retry of `execute` exactly as you would
+> treat a retry of any other billable call: only retry when you know the previous
+> attempt did not run.
+
+**Key rotation.** The signing secret lives only on the server. If the operator
+rotates it, every quote issued with the previous secret stops verifying and comes
+back as `400 QUOTE_INVALID` — request a new plan. If the secret is removed
+entirely, plans stop returning quotes and any quote presented is rejected
+(fail-closed); execution keeps working through the live-price path.
+
 **Fee vs service price.** The `protocolFeeUsdc` is separate from what the
 composed agents cost. Each agent charges its own service price (`stepPrice_i`)
 for the work it does; those prices are the bulk of `totalCostUsdc`. The 1%

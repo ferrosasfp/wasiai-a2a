@@ -9,15 +9,34 @@
  * CD-12: `mock.calls[N]` accesses are guarded (noUncheckedIndexedAccess).
  */
 
-import { PublicKey, type Transaction } from '@solana/web3.js';
+import { Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
 const PAY_TO = 'So11111111111111111111111111111111111111112';
-const OPERATOR = 'HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH';
+/** Keypair REAL: `tx.serialize()` VERIFICA las firmas (un secreto falso explota). */
+const OPERATOR_KEYPAIR = Keypair.fromSeed(new Uint8Array(32).fill(7));
+const OPERATOR = OPERATOR_KEYPAIR.publicKey.toBase58();
+/**
+ * Blockhashes válidos (32 bytes base58), deterministas y DISTINTOS por llamada — como
+ * un RPC real, donde los bloques avanzan.
+ *
+ * ⚠️ Hace falta que sean distintos porque `createTransferInstruction` está mockeada a
+ * una instrucción FIJA: sin variar el blockhash, dos settles producirían el MISMO
+ * mensaje y por lo tanto la MISMA firma, chocando contra el UNIQUE (el escenario que
+ * T-IDM-08 ejercita a propósito, y que acá sería sólo ruido del doble).
+ */
+const blockhashFor = (n: number) =>
+  Keypair.fromSeed(new Uint8Array(32).fill(9 + (n % 200))).publicKey.toBase58();
+let blockhashSeq = 0;
+const BLOCKHASH = blockhashFor(0);
 const FAKE_SIG = '5'.repeat(64);
 
 // ── Mock the network boundary (chain.ts) ─────────────────────────────────
+/** Estado que devuelve `getSignatureStatuses` (null = ausente tras buscar historico). */
+const presenceState: { value: { err: unknown } | null } = {
+  value: { err: null },
+};
 const fakeConnection = {
   getParsedTransaction: vi.fn(
     (..._a: unknown[]): Promise<unknown> => Promise.resolve(null),
@@ -27,13 +46,35 @@ const fakeConnection = {
     (..._a: unknown[]): Promise<unknown> =>
       Promise.resolve({ value: { amount: '1000000' } }),
   ),
+  // WKH-307: el adapter dejó de usar `sendAndConfirmTransaction` (ese helper
+  // sobrescribe el blockhash y RE-FIRMA adentro, así que sería imposible conocer la
+  // firma ANTES de transmitir — que es lo que la invariante I2 necesita).
+  getLatestBlockhash: vi.fn((..._a: unknown[]) =>
+    Promise.resolve({
+      blockhash: blockhashFor(blockhashSeq++),
+      lastValidBlockHeight: 1000,
+    }),
+  ),
+  sendRawTransaction: vi.fn((..._a: unknown[]) => Promise.resolve('sent')),
+  confirmTransaction: vi.fn((..._a: unknown[]) =>
+    Promise.resolve({ value: { err: null } }),
+  ),
+  getBlockHeight: vi.fn((..._a: unknown[]) => Promise.resolve(900)),
+  /**
+   * AR BLQ-MEDIO-1: la determinacion NEGATIVA ya no sale de un `null` de
+   * `getParsedTransaction` (que tambien significa "este nodo no lo tiene indexado"),
+   * sino de `getSignatureStatuses` con `searchTransactionHistory`.
+   *
+   * Default = PRESENTE y sin error. `onChainAbsent()` lo pone en ausente para los
+   * tests que modelan "la tx no aterrizo".
+   */
+  getSignatureStatuses: vi.fn((..._a: unknown[]) =>
+    Promise.resolve({ value: [presenceState.value] }),
+  ),
 };
 vi.mock('./chain.js', () => ({
   getSolanaConnection: vi.fn((..._a: unknown[]) => fakeConnection),
-  getSolanaOperatorKeypair: vi.fn((..._a: unknown[]) => ({
-    publicKey: new PublicKey(OPERATOR),
-    secretKey: new Uint8Array(64),
-  })),
+  getSolanaOperatorKeypair: vi.fn((..._a: unknown[]) => OPERATOR_KEYPAIR),
   getSolanaUsdcMint: vi.fn((..._a: unknown[]) => MINT),
   getSolanaUsdcDecimals: vi.fn((..._a: unknown[]) => 6),
   getSolanaCommitment: vi.fn((..._a: unknown[]) => 'confirmed'),
@@ -57,10 +98,12 @@ vi.mock('@solana/spl-token', () => ({
   getAssociatedTokenAddressSync: (...a: unknown[]) => mockGetAtaSync(...a),
 }));
 
-// ── Mock sendAndConfirmTransaction (keep PublicKey/Transaction real) ──────
-const mockSendAndConfirm = vi.fn((..._a: unknown[]) =>
-  Promise.resolve(FAKE_SIG),
-);
+// ── T-PAY-04: el helper que la HU ABANDONA ────────────────────────────────
+// `sendAndConfirmTransaction` sobrescribe el blockhash y RE-FIRMA adentro, así que
+// mientras se lo use es IMPOSIBLE conocer la firma antes de transmitir — y sin eso la
+// invariante I2 (persistir antes de broadcastear) no puede existir. El doble queda
+// para poder afirmar que registra CERO llamadas en todos los caminos.
+const mockSendAndConfirm = vi.fn((..._a: unknown[]) => Promise.resolve('nope'));
 vi.mock('@solana/web3.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@solana/web3.js')>();
   return {
@@ -69,19 +112,108 @@ vi.mock('@solana/web3.js', async (importOriginal) => {
   };
 });
 
+// ── El ledger y el preflight ──────────────────────────────────────────────
+// Sin estos dobles, `settle()` hablaría con el `supabase` que `vitest.config.ts`
+// apunta a localhost, el reclamo fallaría y —por FAIL-CLOSED— todo test que llegue a
+// settle() se pondría rojo POR EL MOTIVO EQUIVOCADO.
+const ledgerRows = new Map<string, { signature: string | null }>();
+const ledgerSignatures = new Set<string>();
+const claimMock = vi.fn(async (a: { intentId: string }) => {
+  const row = ledgerRows.get(a.intentId);
+  if (!row) {
+    ledgerRows.set(a.intentId, { signature: null });
+    return { outcome: 'claimed' as const, attempts: 1 };
+  }
+  if (row.signature) {
+    return { outcome: 'confirmed' as const, signature: row.signature };
+  }
+  return { outcome: 'in_progress' as const };
+});
+const recordSignedMock = vi.fn(
+  async (a: {
+    intentId: string;
+    signature: string;
+    lastValidBlockHeight: string;
+  }) => {
+    if (ledgerSignatures.has(a.signature)) {
+      return {
+        ok: false as const,
+        reason: 'signature_collision' as const,
+        detail: 'dup',
+      };
+    }
+    ledgerSignatures.add(a.signature);
+    const row = ledgerRows.get(a.intentId);
+    if (row) row.signature = a.signature;
+    return { ok: true as const, attempts: 1 };
+  },
+);
+const recordConfirmedMock = vi.fn(async () => ({ ok: true as const }));
+type PeekRead =
+  | { state: 'none' }
+  | { state: 'claimed' }
+  | { state: 'signed'; signature: string }
+  | { state: 'confirmed'; signature: string }
+  | { state: 'unknown'; detail: string };
+const readMock = vi.fn(async (intentId: string): Promise<PeekRead> => {
+  const row = ledgerRows.get(intentId);
+  if (!row) return { state: 'none' };
+  return row.signature
+    ? { state: 'confirmed', signature: row.signature }
+    : { state: 'claimed' };
+});
+vi.mock('./settle-ledger.js', () => ({
+  claimSettleIntent: (...a: unknown[]) =>
+    claimMock(...(a as [{ intentId: string }])),
+  recordSignedIntent: (...a: unknown[]) =>
+    recordSignedMock(
+      ...(a as [
+        { intentId: string; signature: string; lastValidBlockHeight: string },
+      ]),
+    ),
+  recordConfirmedIntent: () => recordConfirmedMock(),
+  reclaimExpiredIntent: vi.fn(async () => ({ ok: true })),
+  readSettleIntent: (...a: unknown[]) => readMock(...(a as [string])),
+  probeSettleLedger: vi.fn(async () => ({ probe: 'ok' })),
+}));
+vi.mock('./schema-preflight.js', () => ({
+  ensureSolanaSchemaReady: vi.fn(async () => ({ ok: true })),
+  warmSolanaSchemaPreflight: vi.fn(),
+  _resetSolanaSchemaPreflight: vi.fn(),
+}));
+
+import { readSettleValueDisposition } from '../errors.js';
+import { base58Encode } from './base58.js';
 import { getSolanaUsdcDecimals } from './chain.js';
 import { _resetSolanaClients, SolanaPaymentAdapter } from './payment.js';
+
+/**
+ * La firma que el adapter persistió ANTES de transmitir (invariante I2). WKH-307: ya
+ * no hay una `FAKE_SIG` fija que el doble del broadcast devuelva — la firma la produce
+ * el adapter al firmar, y ES la que viaja on-chain.
+ */
+const persistedSig = (n = 0): string | undefined =>
+  recordSignedMock.mock.calls[n]?.[0]?.signature;
 
 describe('SolanaPaymentAdapter (WKH-234)', () => {
   beforeEach(() => {
     _resetSolanaClients();
     vi.clearAllMocks();
+    ledgerRows.clear();
+    ledgerSignatures.clear();
     // `clearAllMocks` NO borra implementaciones, así que un `mockReturnValue`
     // de un test se filtraría a los siguientes. Se re-fija el default (6).
     vi.mocked(getSolanaUsdcDecimals).mockReturnValue(6);
     fakeConnection.getParsedTransaction.mockResolvedValue(null);
+    presenceState.value = { err: null };
     fakeConnection.getTokenAccountBalance.mockResolvedValue({
       value: { amount: '1000000' },
+    });
+    // Secuencia reiniciada por test ⟹ el primer settle de cada test usa BLOCKHASH.
+    blockhashSeq = 0;
+    fakeConnection.sendRawTransaction.mockResolvedValue('sent');
+    fakeConnection.confirmTransaction.mockResolvedValue({
+      value: { err: null },
     });
   });
 
@@ -136,10 +268,12 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     });
 
     expect(res.success).toBe(true);
-    expect(res.txHash).toBe(FAKE_SIG);
+    // La firma devuelta es EXACTAMENTE la persistida antes del broadcast.
+    expect(res.txHash).toBe(persistedSig());
+    expect(res.txHash).toBeTruthy();
     expect(mockGetOrCreateAta).toHaveBeenCalledTimes(2); // operator + payTo ATAs
     expect(mockCreateTransferIx).toHaveBeenCalledTimes(1);
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
 
     // amount threaded as bigint into the transfer instruction (arg index 3).
     const call = mockCreateTransferIx.mock.calls[0];
@@ -156,8 +290,8 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
       amountAtomic: '1000000',
       intentId,
     });
-    expect(first.txHash).toBe(FAKE_SIG);
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    expect(first.txHash).toBe(persistedSig());
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
 
     // verify() re-reads the tx on-chain: a confirmed transfer of >= amount to
     // payTo's balance (post - pre delta).
@@ -180,8 +314,8 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
       intentId,
     });
     expect(retry.success).toBe(true);
-    expect(retry.txHash).toBe(FAKE_SIG);
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1); // STILL 1 — no re-emit
+    expect(retry.txHash).toBe(persistedSig());
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1); // STILL 1 — no re-emit
     expect(fakeConnection.getParsedTransaction).toHaveBeenCalledTimes(1);
   });
 
@@ -238,12 +372,18 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     const adapter = new SolanaPaymentAdapter();
     const intentId = 'ctx-timeout:0:payTo';
 
-    // TransactionExpiredTimeoutError expone `signature` (base58) como campo.
-    const timeoutErr = Object.assign(
-      new Error('Transaction was not confirmed in 30.00 seconds'),
-      { signature: FAKE_SIG },
+    // TransactionExpiredTimeoutError expone `signature` (base58) como campo — y en
+    // producción es LA MISMA firma que el adapter acaba de firmar y persistir. El
+    // doble lo reproduce leyéndola del ledger en vez de inventar una constante: una
+    // firma distinta sería un escenario que no puede ocurrir.
+    fakeConnection.confirmTransaction.mockImplementationOnce(() =>
+      Promise.reject(
+        Object.assign(
+          new Error('Transaction was not confirmed in 30.00 seconds'),
+          { signature: persistedSig() },
+        ),
+      ),
     );
-    mockSendAndConfirm.mockRejectedValueOnce(timeoutErr);
     mockConfirmedTx();
 
     const res = await adapter.settle({
@@ -253,38 +393,33 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     });
 
     expect(res.success).toBe(true);
-    expect(res.txHash).toBe(FAKE_SIG);
+    expect(res.txHash).toBe(persistedSig());
     // La firma se consultó on-chain una vez y NO se re-emitió el transfer.
     expect(fakeConnection.getParsedTransaction).toHaveBeenCalledTimes(1);
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
     expect(mockCreateTransferIx).toHaveBeenCalledTimes(1);
 
-    // `_intentSignatures` quedó poblado: un retry con el MISMO intentId es un
-    // idempotent-hit (verify de la firma previa, cero broadcasts nuevos).
+    // El LEDGER quedó poblado: un retry con el MISMO intentId es un idempotent-hit
+    // (verify de la firma previa, cero broadcasts nuevos) — y ahora sobrevive a un
+    // restart del proceso, que es el motivo de existir de la HU.
     const retry = await adapter.settle({
       payTo: PAY_TO,
       amountAtomic: '1000000',
       intentId,
     });
-    expect(retry.txHash).toBe(FAKE_SIG);
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    expect(retry.txHash).toBe(persistedSig());
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
     expect(mockCreateTransferIx).toHaveBeenCalledTimes(1);
   });
 
-  it('T-235a-AC1b: timeout sin `signature` en el error → la firma se deriva de la tx ya firmada (Transaction.signature)', async () => {
+  it('T-235a-AC1b: error de confirmación SIN `signature` → la firma se deriva de la tx ya firmada', async () => {
     const adapter = new SolanaPaymentAdapter();
-    // sendAndConfirmTransaction firma el MISMO objeto Transaction in-place antes
-    // de broadcastear → la firma sobrevive al throw. Buffer con al menos un byte
-    // no-cero (63 ceros + 0x01) ⇒ base58 '1'×63 + '2'.
-    const rawSig = Buffer.alloc(64);
-    rawSig[63] = 1;
-    mockSendAndConfirm.mockImplementationOnce((..._a: unknown[]) => {
-      const tx = _a[1] as Transaction;
-      tx.signatures = [
-        { publicKey: new PublicKey(OPERATOR), signature: rawSig },
-      ];
-      return Promise.reject(new Error('socket hang up'));
-    });
+    // WKH-307: la tx la firma el ADAPTER antes de transmitir, así que su firma existe
+    // y es real. Si el error de confirmación no la trae, se deriva de `tx.signature`
+    // — que es EXACTAMENTE la que se persistió antes del broadcast (invariante I2).
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(
+      new Error('socket hang up'),
+    );
     mockConfirmedTx();
 
     const res = await adapter.settle({
@@ -294,23 +429,25 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     });
 
     expect(res.success).toBe(true);
-    expect(res.txHash).toBe(`${'1'.repeat(63)}2`);
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    // La firma recuperada es la MISMA que se persistió antes de transmitir.
+    const persisted = recordSignedMock.mock.calls[0]?.[0]?.signature;
+    expect(persisted).toBeTruthy();
+    expect(res.txHash).toBe(persisted);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
   });
 
-  it('T-235a-AC1b0: `Transaction.signature` todo-ceros (placeholder pre-firma) → NO es firma derivable, propaga el error y cero lecturas on-chain', async () => {
+  it('T-235a-AC1b0: una firma NO derivable nunca se convierte en txHash (guard MNR-3)', async () => {
+    // El escenario original —`Transaction.signature` en 64 ceros, el placeholder de
+    // web3.js— dejó de ser alcanzable vía `settle()`: el adapter firma con un keypair
+    // REAL y, si tras firmar no hay firma, REHÚSA antes de transmitir. La propiedad que
+    // el test protege es la misma: **un placeholder jamás viaja como `txHash` ni se
+    // persiste como `settle_signature`**. Se fuerza dejando `sign()` sin efecto.
     const adapter = new SolanaPaymentAdapter();
-    // Guard MNR-3 (fix-pack AR): 64 bytes en cero es el placeholder de web3.js,
-    // no una firma. Su base58 ('1'×64) NO es consultable on-chain y contaminaría
-    // el ledger (`settle_signature`) si se aceptara como txHash.
-    mockSendAndConfirm.mockImplementationOnce((..._a: unknown[]) => {
-      const tx = _a[1] as Transaction;
-      tx.signatures = [
-        { publicKey: new PublicKey(OPERATOR), signature: Buffer.alloc(64) },
-      ];
-      return Promise.reject(new Error('socket hang up'));
-    });
-    mockConfirmedTx(); // aunque la cadena diría "pagado", no hay firma que consultar
+    const signSpy = vi
+      .spyOn(Transaction.prototype, 'sign')
+      .mockImplementationOnce(function (this: Transaction) {
+        this.signatures = [];
+      });
 
     await expect(
       adapter.settle({
@@ -318,9 +455,92 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
         amountAtomic: '1000000',
         intentId: 'ctx-timeout:1b0:payTo',
       }),
-    ).rejects.toThrow('socket hang up');
+    ).rejects.toThrow(/SETTLE_SIGN_FAILED/);
+
+    // Ni se transmitió, ni se persistió una firma basura, ni se leyó la cadena.
+    expect(fakeConnection.sendRawTransaction).not.toHaveBeenCalled();
+    expect(recordSignedMock).not.toHaveBeenCalled();
     expect(fakeConnection.getParsedTransaction).not.toHaveBeenCalled();
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    signSpy.mockRestore();
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // WKH-308 — un settle que SI se pago dejaba de reportarse como pagado
+  // ══════════════════════════════════════════════════════════════
+
+  it('T-308-01: nodo ATRASADO tras un fallo de confirmación ⟹ NO se afirma que el leg no se pagó', async () => {
+    // EL ESCENARIO REAL: el broadcast salió, la confirmación cortó por timeout, y la tx
+    // SI ATERRIZO. Al recuperar, el nodo que responde conoce la firma
+    // (`getSignatureStatuses` la reporta presente) pero todavía no la tiene indexada
+    // (`getParsedTransaction` da null).
+    //
+    // ANTES: `verify()` colapsaba ese null con "no está" ⟹ `valid:false` ⟹ el settle se
+    // reportaba FALLADO sobre un pago que ocurrió. La contabilidad quedaba diciendo lo
+    // contrario de lo que pasó, y ese dato falso es el insumo de un job futuro que
+    // trate la fila como pendiente.
+    //
+    // AHORA: se distingue "no pude comprobarlo" y se transporta como tal.
+    const adapter = new SolanaPaymentAdapter();
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(
+      new Error('Transaction was not confirmed in 30.00 seconds'),
+    );
+    presenceState.value = { err: null }; // la cadena SI la conoce
+    fakeConnection.getParsedTransaction.mockResolvedValue(null); // nodo atrasado
+
+    const err = await adapter
+      .settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-308:lagging:payTo',
+      })
+      .catch((e: Error) => e);
+
+    // EL EFECTO: el error transporta "no sé si se pagó", no "no se pagó". Es lo que
+    // hace que el leg NO se contabilice como impago.
+    expect(readSettleValueDisposition(err)).toBe('unknown');
+    // Y no se re-transmitió nada: seguimos sin saber, y no saber no paga.
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-308-02: el caso que NO se puede romper — un settle que DE VERDAD falló sigue fallando', async () => {
+    // Contracara obligatoria. Si esto se rompiera, el arreglo habría convertido todo
+    // fallo en "no sé" y ningún leg volvería a reportarse como impago.
+    const adapter = new SolanaPaymentAdapter();
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(
+      new Error('not confirmed in 30.00s'),
+    );
+    presenceState.value = null; // el nodo BUSCÓ su histórico y no la conoce ⟹ absent
+    fakeConnection.getParsedTransaction.mockResolvedValue(null);
+
+    const err = await adapter
+      .settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-308:genuine:payTo',
+      })
+      .catch((e: Error) => e);
+
+    // Sin disposición: es un fallo liso, reportable como tal.
+    expect(readSettleValueDisposition(err)).toBeUndefined();
+    expect(String(err)).toContain('not confirmed in 30.00s');
+  });
+
+  it('T-308-03: la tx aterrizó y FALLÓ on-chain ⟹ también es un fallo liso', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(
+      new Error('confirm boom'),
+    );
+    presenceState.value = { err: { InstructionError: [0, 'Custom'] } };
+
+    const err = await adapter
+      .settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-308:onchainfail:payTo',
+      })
+      .catch((e: Error) => e);
+
+    expect(readSettleValueDisposition(err)).toBeUndefined();
   });
 
   it('T-235a-AC2: timeout + tx NO confirmada on-chain → propaga el error original (sin regresión)', async () => {
@@ -328,8 +548,11 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     const timeoutErr = Object.assign(new Error('not confirmed in 30.00s'), {
       signature: FAKE_SIG,
     });
-    mockSendAndConfirm.mockRejectedValueOnce(timeoutErr);
-    fakeConnection.getParsedTransaction.mockResolvedValue(null); // no está on-chain
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(timeoutErr);
+    // WKH-308: "no está on-chain" ahora se PRUEBA (el nodo buscó su histórico y no la
+    // conoce), no se infiere de que el parseo no esté disponible.
+    presenceState.value = null;
+    fakeConnection.getParsedTransaction.mockResolvedValue(null);
 
     await expect(
       adapter.settle({
@@ -338,7 +561,7 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
         intentId: 'ctx-timeout:2:payTo',
       }),
     ).rejects.toThrow('not confirmed in 30.00s');
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('T-235a-AC2b: timeout + tx confirmada pero INVÁLIDA (monto insuficiente) → NO se trata como éxito', async () => {
@@ -346,7 +569,7 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     const timeoutErr = Object.assign(new Error('blockhash expired'), {
       signature: FAKE_SIG,
     });
-    mockSendAndConfirm.mockRejectedValueOnce(timeoutErr);
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(timeoutErr);
     mockConfirmedTx('500000'); // transferido < requerido
 
     await expect(
@@ -356,7 +579,7 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
         intentId: 'ctx-timeout:3:payTo',
       }),
     ).rejects.toThrow('blockhash expired');
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('T-235a-AC2e: tx CONFIRMADA pero FALLIDA on-chain (meta.err) → NO se recupera aunque el delta de balances alcance', async () => {
@@ -370,7 +593,7 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
       new Error('Transaction simulation failed: custom program error 0x1'),
       { signature: FAKE_SIG },
     );
-    mockSendAndConfirm.mockRejectedValueOnce(sendErr);
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(sendErr);
     // meta.err NO nulo, pero con pre/postTokenBalances que darían delta suficiente:
     // el rechazo debe venir del `err`, NO de la validación de monto.
     fakeConnection.getParsedTransaction.mockResolvedValue({
@@ -394,13 +617,15 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     ).rejects.toThrow('custom program error 0x1');
     // Se consultó on-chain (el candidato existía) y NO se re-emitió el transfer.
     expect(fakeConnection.getParsedTransaction).toHaveBeenCalledTimes(1);
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
     expect(mockCreateTransferIx).toHaveBeenCalledTimes(1);
   });
 
   it('T-235a-AC2c: fallo ANTES de firmar (sin firma derivable) → propaga el error, cero lecturas on-chain', async () => {
     const adapter = new SolanaPaymentAdapter();
-    mockSendAndConfirm.mockRejectedValueOnce(
+    // WKH-307: el punto "antes de firmar" es ahora el fetch del blockhash — sin él no
+    // hay tx firmada, así que no hay firma que consultar on-chain.
+    fakeConnection.getLatestBlockhash.mockRejectedValueOnce(
       new Error('blockhash fetch failed'),
     );
 
@@ -414,21 +639,36 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     expect(fakeConnection.getParsedTransaction).not.toHaveBeenCalled();
   });
 
-  it('T-235a-AC2d: recovery cuyo verify() lanza (RPC caído) → propaga el error original', async () => {
+  it('T-235a-AC2d (INVERTIDO por WKH-308): recovery con el RPC caído ⟹ UNKNOWN, no fallo', async () => {
+    // ⚠️ CAMBIO DE CONDUCTA DECLARADO. Este test afirmaba que un RPC caído durante la
+    // recuperación hacía **propagar el error original**, o sea reportar el leg como
+    // FALLADO. Eso es exactamente el falso negativo que WKH-308 cierra: un RPC que no
+    // contesta no prueba que el pago no ocurrió — prueba que no pudimos preguntar.
+    //
+    // Se invierte, no se borra: la propiedad que el test protegía (no inventar un
+    // éxito) sigue viva — no se devuelve `success`, se rechaza. Lo que cambia es CÓMO
+    // se rechaza: con la incertidumbre transportada en vez de afirmando lo que no
+    // sabemos.
     const adapter = new SolanaPaymentAdapter();
     const timeoutErr = Object.assign(new Error('confirm timeout'), {
       signature: FAKE_SIG,
     });
-    mockSendAndConfirm.mockRejectedValueOnce(timeoutErr);
-    fakeConnection.getParsedTransaction.mockRejectedValue(new Error('429 rpc'));
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(timeoutErr);
+    fakeConnection.getSignatureStatuses.mockRejectedValueOnce(
+      new Error('429 rpc'),
+    );
 
-    await expect(
-      adapter.settle({
+    const err = await adapter
+      .settle({
         payTo: PAY_TO,
         amountAtomic: '1000000',
         intentId: 'ctx-timeout:5:payTo',
-      }),
-    ).rejects.toThrow('confirm timeout');
+      })
+      .catch((e: Error) => e);
+
+    expect(readSettleValueDisposition(err)).toBe('unknown');
+    // Y sigue sin devolver un éxito inventado.
+    expect(String(err)).not.toContain('success');
   });
 
   // ── CR-2 (WKH-234) — pre-flight de balance del operador ─────────────────
@@ -450,28 +690,39 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     expect((ataArgs?.[1] as PublicKey).toBase58()).toBe(OPERATOR);
     expect(fakeConnection.getTokenAccountBalance).toHaveBeenCalledTimes(1);
     // Cero broadcasts: es una lectura pura.
-    expect(mockSendAndConfirm).not.toHaveBeenCalled();
+    expect(fakeConnection.sendRawTransaction).not.toHaveBeenCalled();
   });
 
   // ── Fix-pack AR-profundo FIX 2 — peek del seam de idempotencia ──────────
-  it('T-FIX2-adapter: getSettledSignature() expone la firma del intent settleado (lectura pura, sin RPC) y undefined si no existe', async () => {
+  it('T-FIX2-adapter: getSettledSignature() es ASÍNCRONO y discriminado (DT-8)', async () => {
+    // ⚠️ Antes devolvía `string | undefined`, lo que COLAPSABA *"no se pagó"* con
+    // *"no sé si se pagó"* — que en un camino de dinero son OPUESTOS: el primero
+    // autoriza a cortar por fondos insuficientes, el segundo obliga a fail-closear.
     const adapter = new SolanaPaymentAdapter();
-    const intentId = 'ctx-fix2:0:payTo';
+    const intentId = 'ctx-peek:0:payTo';
 
-    // Intent desconocido → undefined, y NO toca la red.
-    expect(adapter.getSettledSignature(intentId)).toBeUndefined();
-    expect(adapter.getSettledSignature('otro-intent')).toBeUndefined();
-    expect(mockSendAndConfirm).not.toHaveBeenCalled();
-    expect(fakeConnection.getParsedTransaction).not.toHaveBeenCalled();
+    // Sin reclamo: `none` (y NO `undefined`, que no distinguía nada).
+    expect(await adapter.getSettledSignature(intentId)).toEqual({
+      state: 'none',
+    });
 
+    // Tras un settle exitoso: `settled` con LA firma.
     await adapter.settle({ payTo: PAY_TO, amountAtomic: '1000000', intentId });
+    expect(await adapter.getSettledSignature(intentId)).toEqual({
+      state: 'settled',
+      signature: persistedSig(),
+    });
 
-    // Post-settle: la firma confirmada queda visible para el pre-flight del
-    // caller (que así NO corta por fondos un leg YA pagado).
-    expect(adapter.getSettledSignature(intentId)).toBe(FAKE_SIG);
-    expect(adapter.getSettledSignature('otro-intent')).toBeUndefined();
-    // Sigue siendo una lectura pura: un solo broadcast (el del settle).
-    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    // Otro intent sigue en `none`.
+    expect(await adapter.getSettledSignature('otro-intent')).toEqual({
+      state: 'none',
+    });
+
+    // Y un store mudo es `unknown`: NUNCA lanza y NUNCA se lee como "no pagado".
+    readMock.mockResolvedValueOnce({ state: 'unknown', detail: 'boom' });
+    expect(await adapter.getSettledSignature(intentId)).toEqual({
+      state: 'unknown',
+    });
   });
 
   it('T-234-CR2-adapter-throws: RPC/ATA inexistente → LANZA (el caller decide cómo degradar)', async () => {
@@ -482,6 +733,118 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     await expect(adapter.getOperatorSplBalance()).rejects.toThrow(
       'could not find account',
     );
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // WKH-307 — EL ORDEN persist → broadcast (T-PAY-*)
+  // ══════════════════════════════════════════════════════════════
+
+  it('T-PAY-01: `recordSigned` ocurre ANTES de `sendRawTransaction`, y la firma es LA MISMA', async () => {
+    // ⚠️ ESTE ES EL TEST DE LA INVARIANTE I2. Si el orden se invierte, una fila
+    // `claimed` deja de demostrar que no se transmitió nada, y el caso
+    // "transmitió y se cayó antes de persistir" se vuelve irrecuperable: no se puede
+    // distinguir "no salió nada" de "salió y no sé cuál".
+    const adapter = new SolanaPaymentAdapter();
+    const res = await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId: 'ctx-order:0:payTo',
+    });
+
+    const persistOrder = recordSignedMock.mock.invocationCallOrder[0] as number;
+    const sendOrder = fakeConnection.sendRawTransaction.mock
+      .invocationCallOrder[0] as number;
+    expect(persistOrder).toBeLessThan(sendOrder);
+
+    // Y la firma persistida es EXACTAMENTE la transmitida y la devuelta. Persistir
+    // una firma distinta de la que sale sería peor que no persistir nada.
+    const persisted = persistedSig();
+    expect(res.txHash).toBe(persisted);
+    const rawSent = fakeConnection.sendRawTransaction.mock.calls[0]?.[0];
+    const txSent = Transaction.from(Buffer.from(rawSent as Uint8Array));
+    expect(base58Encode(txSent.signature as Buffer)).toBe(persisted);
+  });
+
+  it('T-PAY-02: si `recordSigned` NO aplica ⟹ CERO broadcasts (I2 en forma falsable)', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    recordSignedMock.mockResolvedValueOnce({
+      ok: false,
+      reason: 'not_claimed',
+      detail: 'otro proceso es dueño del reclamo',
+    } as never);
+
+    await expect(
+      adapter.settle({
+        payTo: PAY_TO,
+        amountAtomic: '1000000',
+        intentId: 'ctx-order:1:payTo',
+      }),
+    ).rejects.toThrow(/SETTLE_LEDGER_WRITE_REFUSED/);
+    expect(fakeConnection.sendRawTransaction).not.toHaveBeenCalled();
+  });
+
+  it('T-PAY-03: `feePayer`/`recentBlockhash` se setean ANTES de firmar, y el confirm usa LO PERSISTIDO', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId: 'ctx-order:2:payTo',
+    });
+
+    // La tx transmitida quedó anclada al blockhash pedido y firmada por el operador:
+    // si el blockhash se hubiera seteado DESPUÉS de firmar, la firma no verificaría y
+    // `Transaction.from` no podría reconstruirla con ese recentBlockhash.
+    const rawSent = fakeConnection.sendRawTransaction.mock.calls[0]?.[0];
+    const txSent = Transaction.from(Buffer.from(rawSent as Uint8Array));
+    expect(txSent.recentBlockhash).toBe(BLOCKHASH);
+    expect(txSent.signatures[0]?.publicKey.toBase58()).toBe(OPERATOR);
+
+    // Y el confirm se hace contra EXACTAMENTE el blockhash/altura persistidos: si
+    // difirieran, se estaría esperando la confirmación de otra ventana.
+    const confirmArgs = fakeConnection.confirmTransaction.mock
+      .calls[0]?.[0] as {
+      signature: string;
+      blockhash: string;
+      lastValidBlockHeight: number;
+    };
+    expect(confirmArgs.signature).toBe(persistedSig());
+    expect(confirmArgs.blockhash).toBe(BLOCKHASH);
+    expect(String(confirmArgs.lastValidBlockHeight)).toBe(
+      recordSignedMock.mock.calls[0]?.[0]?.lastValidBlockHeight,
+    );
+  });
+
+  it('T-PAY-04: `sendAndConfirmTransaction` NO se invoca en NINGÚN camino', async () => {
+    const adapter = new SolanaPaymentAdapter();
+
+    // (a) camino feliz
+    await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId: 'ctx-pay04:0:payTo',
+    });
+    // (b) camino de recuperación tras fallo de confirmación.
+    //     ⚠️ Monto DISTINTO a propósito: con el blockhash fijo de este archivo, dos
+    //     transferencias del mismo monto al mismo destino producen el MISMO mensaje y
+    //     por lo tanto la MISMA firma — que es justo lo que el UNIQUE bloquea (ver
+    //     T-IDM-08). Acá se quiere ejercitar el camino, no la colisión.
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(
+      new Error('confirm timeout'),
+    );
+    mockConfirmedTx('2000000'); // el delta on-chain tiene que cubrir ESTE monto
+    await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '2000000',
+      intentId: 'ctx-pay04:1:payTo',
+    });
+    // (c) camino idempotente (el intent de (a), ya confirmado)
+    await adapter.settle({
+      payTo: PAY_TO,
+      amountAtomic: '1000000',
+      intentId: 'ctx-pay04:0:payTo',
+    });
+
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(0);
   });
 
   it('exposes the VM-agnostic surface (scheme, mint, caip2, tokens)', () => {

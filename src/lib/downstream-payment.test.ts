@@ -76,7 +76,18 @@ const mockSolanaSettle = vi.fn();
 const mockSolanaBalance = vi.fn();
 // Fix-pack AR-profundo FIX 2: peek in-memory del seam de idempotencia. Default
 // `undefined` (intent nunca settleado) → los tests preexistentes no cambian.
+/**
+ * WKH-307: el peek es ASINCRONO y devuelve una union discriminada. El helper traduce
+ * la forma vieja de los tests (`undefined` = no pagado, string = firma) a la nueva, para
+ * no re-escribir 8 escenarios que siguen midiendo lo mismo.
+ */
 const mockSolanaSettledSig = vi.fn();
+const mockSolanaPeekOverride: { value: unknown } = { value: null };
+const peekOf = (v: unknown) =>
+  mockSolanaPeekOverride.value ??
+  (typeof v === 'string' && v.length > 0
+    ? { state: 'settled' as const, signature: v }
+    : { state: 'none' as const });
 const solanaAdapter = {
   vmFamily: 'solana' as const,
   settle: (...a: unknown[]) => mockSolanaSettle(...a),
@@ -86,7 +97,8 @@ const solanaAdapter = {
   getNetwork: vi.fn().mockReturnValue('solana:test'),
   caip2ChainId: 'solana:testcluster',
   getOperatorSplBalance: (...a: unknown[]) => mockSolanaBalance(...a),
-  getSettledSignature: (...a: unknown[]) => mockSolanaSettledSig(...a),
+  getSettledSignature: async (...a: unknown[]) =>
+    peekOf(mockSolanaSettledSig(...a)),
 };
 
 // Fix-pack AR-profundo FIX 1(b): adapters MAINNET para ejercitar el gate de
@@ -839,7 +851,11 @@ describe('signAndSettleDownstream — chain-aware delegation', () => {
     mockSolanaSettle.mockResolvedValue({ txHash: SOL_SIG, success: true });
 
     // 0.5 USDC → 500000 (6-dec del mint), byte-idéntico al camino viejo.
-    await signAndSettleDownstream(solanaAgentAt(0.5), makeLogger());
+    await signAndSettleDownstream(
+      solanaAgentAt(0.5),
+      makeLogger(),
+      'wkh307-test-intent',
+    );
     expect(mockSolanaSettle).toHaveBeenCalledWith(
       expect.objectContaining({ amountAtomic: '500000' }),
     );
@@ -847,7 +863,11 @@ describe('signAndSettleDownstream — chain-aware delegation', () => {
     // Sub-grilla → 0 atómico → fail-closed (antes: `parseUnits` lanzaba).
     mockSolanaSettle.mockClear();
     const logger = makeLogger();
-    const result = await signAndSettleDownstream(solanaAgentAt(1e-7), logger);
+    const result = await signAndSettleDownstream(
+      solanaAgentAt(1e-7),
+      logger,
+      'wkh307-test-intent',
+    );
     expect(result).toBeNull();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ code: 'INVALID_PRICE' }),
@@ -999,7 +1019,11 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
         contract: SOL_PAYTO,
       },
     });
-    const result = await signAndSettleDownstream(agent, makeLogger());
+    const result = await signAndSettleDownstream(
+      agent,
+      makeLogger(),
+      'wkh307-test-intent',
+    );
 
     expect(result).not.toBeNull();
     expect(result?.txHash).toBe(SOL_SIG); // base58, not 0x
@@ -1051,6 +1075,7 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
         },
       }),
       makeLogger(),
+      'wkh307-test-intent',
     );
     expect(sol?.txHash).toBe(SOL_SIG);
     expect(mockSolanaSettle).toHaveBeenCalledTimes(1);
@@ -1126,7 +1151,11 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
     mockSolanaBalance.mockResolvedValueOnce('499999'); // requerido: 500000
     const logger = makeLogger();
 
-    const result = await signAndSettleDownstream(solanaAgent(), logger);
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'wkh307-test-intent',
+    );
 
     expect(result).toBeNull();
     expect(mockSolanaSettle).not.toHaveBeenCalled();
@@ -1145,7 +1174,11 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
     mockSolanaBalance.mockResolvedValueOnce('500000');
     const logger = makeLogger();
 
-    const result = await signAndSettleDownstream(solanaAgent(), logger);
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'wkh307-test-intent',
+    );
 
     expect(result?.txHash).toBe(SOL_SIG);
     expect(mockSolanaSettle).toHaveBeenCalledTimes(1);
@@ -1159,7 +1192,11 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
     );
     const logger = makeLogger();
 
-    const result = await signAndSettleDownstream(solanaAgent(), logger);
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'wkh307-test-intent',
+    );
 
     // Invariante: el pre-check es observabilidad, NUNCA un gate que produzca
     // falsos negativos sobre un settle legítimo.
@@ -1176,7 +1213,11 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
     const logger = makeLogger();
 
-    const result = await signAndSettleDownstream(solanaAgent(), logger);
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'wkh307-test-intent',
+    );
 
     expect(result?.txHash).toBe(SOL_SIG);
     expect(result?.settledAmount).toBe('500000');
@@ -1187,7 +1228,11 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
   // ── Fix-pack AR-profundo FIX 3: monto REAL settleado, en USD ──────────────
   it('T-FIX3a: el leg Solana propaga nonEvmSettle.amountUsd == monto on-chain (derivado del atómico + decimals)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
-    const result = await signAndSettleDownstream(solanaAgent(), makeLogger());
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      makeLogger(),
+      'wkh307-test-intent',
+    );
     // 0.5 USDC 6-dec → 500000 atómico → 0.5 USD. Es el número que el ledger
     // debe cruzar contra la firma base58 (antes se registraba el débito del
     // caller, que vale 0 en el step 0).
@@ -1203,7 +1248,11 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
 
   it('T-CR-MNR-1: el leg EVM NO trae `nonEvmSettle` (el ledger no-EVM no se toca)', async () => {
     const { signAndSettleDownstream } = await importWithFlag(true);
-    const result = await signAndSettleDownstream(makeAgent(), makeLogger());
+    const result = await signAndSettleDownstream(
+      makeAgent(),
+      makeLogger(),
+      'wkh307-test-intent',
+    );
     expect(result).not.toBeNull();
     expect(result?.nonEvmSettle).toBeUndefined();
   });
@@ -1320,7 +1369,11 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
     const logger = makeLogger();
 
     // Fail-SOFT: el leg se corta, no explota el run entero.
-    const result = await signAndSettleDownstream(solanaAgent(), logger);
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'wkh307-test-intent',
+    );
 
     // `null` es lo que hace que el caller NO cobre este leg.
     expect(result).toBeNull();
@@ -1343,7 +1396,11 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
     });
     const logger = makeLogger();
 
-    const result = await signAndSettleDownstream(solanaAgent(), logger);
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'wkh307-test-intent',
+    );
 
     expect(result).toBeNull();
     expect(logger.warn).toHaveBeenCalledWith(
@@ -1364,13 +1421,137 @@ describe('signAndSettleDownstream — Solana leg (WKH-234)', () => {
     mockSolanaSettle.mockResolvedValueOnce({ success: true });
     const logger = makeLogger();
 
-    const result = await signAndSettleDownstream(solanaAgent(), logger);
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'wkh307-test-intent',
+    );
 
     expect(result).toBeNull();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ code: 'SETTLE_FAILED' }),
       expect.any(String),
     );
+  });
+
+  // ── WKH-307: los dos skip-codes nuevos ──────────────────────────────────
+
+  it('T-308-LEG-UNKNOWN: el leg deja de afirmar "no se pagó" cuando el adapter no pudo comprobarlo', async () => {
+    // EL EFECTO QUE IMPORTA: el caller recibe `SETTLE_UNKNOWN` —"no sé si se pagó,
+    // reconciliá contra la cadena"— en vez de `SETTLE_FAILED`, que es una afirmación
+    // falsa sobre un pago que pudo haber ocurrido.
+    //
+    // No es vocabulario nuevo: el rail EVM ya emite este código hoy
+    // (`T-198-SettleUnknown`, `T-201-SettleFalseWithHash`) y es público sin
+    // genericizar. Solana simplemente deja de mentir donde EVM ya dice la verdad.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+    mockSolanaBalance.mockResolvedValue('1000000000');
+    mockSolanaSettle.mockRejectedValueOnce(
+      Object.assign(new Error('solana settle presence unknown'), {
+        name: 'FacilitatorSettleError',
+        valueDisposition: 'unknown',
+      }),
+    );
+
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'wkh308-test-intent',
+    );
+
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'SETTLE_UNKNOWN',
+        valueDisposition: 'unknown',
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('T-308-LEG-FAILED: un settle que DE VERDAD falló sigue reportándose como fallado', async () => {
+    // La contracara obligatoria. Sin esto, el arreglo podría haber convertido todo
+    // fallo en "no sé" y ningún leg volvería a reportarse como impago.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+    mockSolanaBalance.mockResolvedValue('1000000000');
+    mockSolanaSettle.mockRejectedValueOnce(new Error('plain failure'));
+
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'wkh308-test-intent',
+    );
+
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'SETTLE_FAILED' }),
+      expect.any(String),
+    );
+  });
+
+  it('T-307-MISSING-INTENT: sin `intentId` el leg NO toca la red (DT-9)', async () => {
+    // ⚠️ ACÁ VIVÍA UN FALLBACK: `intentId ?? `${agent.slug}:${payTo}``, o sea una clave
+    // de idempotencia derivada del NOMBRE del agente y su dirección de cobro — la MISMA
+    // para todos sus pagos, PARA SIEMPRE. Con el `Map` + TTL era casi inocuo; con el
+    // registro DURABLE significa que el agente cobra UNA SOLA VEZ EN SU VIDA, y el
+    // sistema reporta éxito mientras el agente trabaja gratis.
+    //
+    // Sin clave estable, un retry es indistinguible de un pago nuevo. Fail-closed.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+    mockSolanaBalance.mockResolvedValue('1000000000');
+
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      undefined,
+    );
+
+    expect(result).toBeNull();
+    expect(mockSolanaSettle).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'MISSING_INTENT_ID' }),
+      expect.any(String),
+    );
+  });
+
+  it('T-307-MISSING-INTENT-b: un `intentId` VACÍO se trata igual que ausente', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+    mockSolanaBalance.mockResolvedValue('1000000000');
+
+    const result = await signAndSettleDownstream(solanaAgent(), logger, '');
+
+    expect(result).toBeNull();
+    expect(mockSolanaSettle).not.toHaveBeenCalled();
+  });
+
+  it('T-307-LEDGER-UNAVAILABLE: con el ledger mudo el leg corta ANTES de settlear (AC-4)', async () => {
+    // "No sé si ya pagué" NO es "no pagué". Cortar acá ahorra un RPC y deja el motivo
+    // REAL en el log, en vez de un `SETTLE_FAILED` genérico que no distingue
+    // "no hay fondos" de "el store no contesta".
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+    mockSolanaBalance.mockResolvedValue('1000000000');
+    mockSolanaSettledSig.mockReturnValueOnce(undefined);
+    // El doble del peek devuelve `unknown` (el store no respondió).
+    mockSolanaPeekOverride.value = { state: 'unknown' };
+
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      'wkh307-test-intent',
+    );
+
+    expect(result).toBeNull();
+    expect(mockSolanaSettle).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'SETTLE_LEDGER_UNAVAILABLE' }),
+      expect.any(String),
+    );
+    mockSolanaPeekOverride.value = null;
   });
 });
 
@@ -1939,6 +2120,7 @@ describe('captura del skip-code (fix-pack P1, hallazgo 4)', () => {
         },
       }),
       cap,
+      'wkh307-test-intent',
     );
 
     expect(result).toBeNull(); // no se cobra
@@ -2003,6 +2185,16 @@ describe('captura del skip-code (fix-pack P1, hallazgo 4)', () => {
  * FORMA (`name` + `valueDisposition` + `payoutCode`), que es como los lee el código.
  */
 describe('WKH-302 — disposición del valor en el leg Solana', () => {
+  /**
+   * ⚠️ RE-ANCLAJE DEL MERGE. Estos tests llamaban SIN `intentId`, porque cuando se
+   * escribieron el leg lo derivaba solo (`agent.slug:payTo`). WKH-307 lo volvió
+   * OBLIGATORIO y fail-closed: sin una clave de idempotencia estable, un retry no se
+   * puede distinguir de un pago nuevo, así que el leg se rechaza con
+   * `MISSING_INTENT_ID` ANTES de llegar al settle. Sin este argumento los 6 casos
+   * pasan a medir el guard nuevo en vez de la disposición del valor.
+   */
+  const SOL_INTENT = 'ctx-302:0:sol';
+
   const solanaAgent = (): Agent =>
     makeAgent({
       priceUsdc: 0.5,
@@ -2050,7 +2242,11 @@ describe('WKH-302 — disposición del valor en el leg Solana', () => {
     mockSolanaSettle.mockRejectedValue(new Error('RPC exploded'));
     const logger = makeLogger();
 
-    const result = await signAndSettleDownstream(solanaAgent(), logger);
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      SOL_INTENT,
+    );
 
     expect(result).toBeNull();
     expect(logger.warn).toHaveBeenCalledWith(
@@ -2065,7 +2261,11 @@ describe('WKH-302 — disposición del valor en el leg Solana', () => {
     mockSolanaSettle.mockRejectedValue(shapedError('unknown'));
     const logger = makeLogger();
 
-    const result = await signAndSettleDownstream(solanaAgent(), logger);
+    const result = await signAndSettleDownstream(
+      solanaAgent(),
+      logger,
+      SOL_INTENT,
+    );
 
     expect(result).toBeNull();
     const call = logger.warn.mock.calls.find(
@@ -2091,7 +2291,7 @@ describe('WKH-302 — disposición del valor en el leg Solana', () => {
     mockSolanaSettle.mockRejectedValue(shapedError('not-sent'));
     const logger = makeLogger();
 
-    await signAndSettleDownstream(solanaAgent(), logger);
+    await signAndSettleDownstream(solanaAgent(), logger, SOL_INTENT);
 
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ code: 'SETTLE_FAILED' }),
@@ -2109,7 +2309,7 @@ describe('WKH-302 — disposición del valor en el leg Solana', () => {
     );
     const logger = makeLogger();
 
-    await signAndSettleDownstream(solanaAgent(), logger);
+    await signAndSettleDownstream(solanaAgent(), logger, SOL_INTENT);
 
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ code: 'INSUFFICIENT_BALANCE' }),
@@ -2123,7 +2323,7 @@ describe('WKH-302 — disposición del valor en el leg Solana', () => {
     mockSolanaSettle.mockResolvedValue({ txHash: SOL_SIG, success: true });
     mockSolanaBalance.mockClear();
 
-    await signAndSettleDownstream(solanaAgent(), makeLogger());
+    await signAndSettleDownstream(solanaAgent(), makeLogger(), SOL_INTENT);
 
     // La wallet relevante es la del facilitator; leer la local resolvería el
     // keypair que esta HU quiere sacar del camino de dinero.
@@ -2139,7 +2339,7 @@ describe('WKH-302 — disposición del valor en el leg Solana', () => {
     mockSolanaBalance.mockClear();
     mockSolanaBalance.mockResolvedValue('1000000000');
 
-    await signAndSettleDownstream(solanaAgent(), makeLogger());
+    await signAndSettleDownstream(solanaAgent(), makeLogger(), SOL_INTENT);
 
     expect(mockSolanaBalance).toHaveBeenCalled();
   });

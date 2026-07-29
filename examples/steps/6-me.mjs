@@ -9,4 +9,6 @@ const me = await api('/auth/me', { method: 'GET', key: s.key });
 console.log(`[6] Estado de la key:`);
 console.log(`    budget = ${JSON.stringify(me.budget)}`);
 console.log(`\nListo. Usá la Agent Key (header x-a2a-key) en /compose y /orchestrate.`);
-console.log(`Limpieza: ./scripts/cleanup-wkh-35-prod-testkey.sh  (barre owner_ref LIKE 'wkh35-%')`);
+// No se nombra ningún script: el de barrido es utilería interna y NO está en este repo,
+// así que decirle al usuario que lo corra es una instrucción falsa. Se describe el criterio.
+console.log(`Limpieza: borrá las filas de a2a_agent_keys y a2a_key_deposits con owner_ref LIKE 'wkh35-%'.`);

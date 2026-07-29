@@ -78,7 +78,13 @@ export type DownstreamSkipCode =
   // Replay idempotente Solana con balance por debajo del monto del leg: el
   // intent YA tiene firma, así que NO se corta (FIX 2); el log explica por qué
   // un eventual self-heal re-broadcast fallaría on-chain.
-  | 'BALANCE_LOW_ON_IDEMPOTENT_REPLAY';
+  | 'BALANCE_LOW_ON_IDEMPOTENT_REPLAY'
+  // WKH-307 (DT-9): el leg no trae clave de idempotencia. Sin una clave ESTABLE, un
+  // retry es indistinguible de un pago nuevo, asi que no se transmite nada.
+  | 'MISSING_INTENT_ID'
+  // WKH-307 (AC-4): el ledger de settle no contesto. "No se si ya pague" NUNCA
+  // autoriza pagar.
+  | 'SETTLE_LEDGER_UNAVAILABLE';
 
 // ─── Fix-pack P1 (hallazgo 4): señal de skip en la respuesta HTTP ──────
 //
@@ -165,6 +171,13 @@ const PUBLIC_SKIP_CODE: Record<DownstreamSkipCode, PublicDownstreamSkipCode> = {
   BALANCE_READ_FAILED: 'UNAVAILABLE',
   BALANCE_PRECHECK_SKIPPED: 'UNAVAILABLE',
   BALANCE_LOW_ON_IDEMPOTENT_REPLAY: 'UNAVAILABLE',
+  // WKH-307: los dos mapean a codigos publicos QUE YA EXISTEN, a proposito. No se
+  // agrega vocabulario publico nuevo y `PUBLIC_SKIP_MEANING` no cambia ⟹ cero cambio
+  // del contrato de API. `MISSING_INTENT_ID` es config del gateway (el caller no puede
+  // hacer nada con el detalle) y `SETTLE_LEDGER_UNAVAILABLE` es un estado transitorio
+  // de infraestructura, que es exactamente lo que `UNAVAILABLE` significa.
+  MISSING_INTENT_ID: 'NOT_CONFIGURED',
+  SETTLE_LEDGER_UNAVAILABLE: 'UNAVAILABLE',
   SIGNING_FAILED: 'UNAVAILABLE',
   // Genericizado — detalle del facilitator.
   VERIFY_FAILED: 'SETTLE_FAILED',

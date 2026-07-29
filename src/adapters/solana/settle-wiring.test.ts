@@ -44,7 +44,7 @@ import {
   getAssociatedTokenAddressSync,
   TOKEN_PROGRAM_ID,
 } from '@solana/spl-token';
-import { Keypair, PublicKey, type Transaction } from '@solana/web3.js';
+import { Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 /** USDC devnet (el default documentado de `chain.ts`). */
@@ -58,7 +58,42 @@ const OPERATOR = Keypair.fromSeed(new Uint8Array(32).fill(7));
 // El operator es un Keypair REAL (firma de verdad); la Connection es un stub
 // porque acá no se llega a usar (el único consumidor, el getOrCreate del ATA,
 // también está mockeado).
-const fakeConnection = { __stub: 'connection' };
+/**
+ * WKH-307: la Connection dejó de ser un `{ __stub }` inerte. El adapter ya no usa
+ * `sendAndConfirmTransaction` (ese helper sobrescribe el blockhash y RE-FIRMA adentro,
+ * así que sería imposible conocer la firma antes de transmitir), sino
+ * `getLatestBlockhash` → `tx.sign` → `sendRawTransaction` → `confirmTransaction`.
+ *
+ * ⚠️ Y `sendRawTransaction` recibe un BUFFER SERIALIZADO, no un objeto: la captura se
+ * REHIDRATA con `Transaction.from(raw)`, que preserva instrucciones, `programId`,
+ * `keys` y `data`. Las aserciones de bytes de abajo siguen valiendo SIN aflojarse.
+ */
+const BLOCKHASH = Keypair.fromSeed(
+  new Uint8Array(32).fill(9),
+).publicKey.toBase58();
+const sent: { raw?: Uint8Array; options?: unknown } = {};
+const fakeConnection = {
+  getLatestBlockhash: vi.fn(async (..._a: unknown[]) => ({
+    blockhash: BLOCKHASH,
+    lastValidBlockHeight: 1000,
+  })),
+  sendRawTransaction: vi.fn(async (raw: Uint8Array, options: unknown) => {
+    sent.raw = raw;
+    sent.options = options;
+    return 'sent';
+  }),
+  confirmTransaction: vi.fn(async (..._a: unknown[]) => ({
+    value: { err: null },
+  })),
+  getBlockHeight: vi.fn(async (..._a: unknown[]) => 900),
+  getParsedTransaction: vi.fn(async (..._a: unknown[]) => null),
+};
+
+/** La `Transaction` que el adapter construyó, rehidratada desde el buffer. */
+function sentTx(): Transaction {
+  if (!sent.raw) throw new Error('no se transmitió ninguna transacción');
+  return Transaction.from(Buffer.from(sent.raw));
+}
 vi.mock('./chain.js', () => ({
   getSolanaConnection: vi.fn((..._a: unknown[]) => fakeConnection),
   getSolanaOperatorKeypair: vi.fn((..._a: unknown[]) => OPERATOR),
@@ -88,29 +123,31 @@ vi.mock('@solana/spl-token', async (importOriginal) => {
   };
 });
 
-// ── Único borde falso #3: el broadcast ────────────────────────────────────
-// Se CAPTURA la Transaction real que el adapter construyó.
-const sent: { tx?: Transaction; signers?: unknown; options?: unknown } = {};
-const CONFIRMED_SIG = 'z'.repeat(64);
-vi.mock('@solana/web3.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@solana/web3.js')>();
-  return {
-    ...actual,
-    sendAndConfirmTransaction: vi.fn(
-      async (
-        _connection: unknown,
-        tx: Transaction,
-        signers: unknown,
-        options: unknown,
-      ) => {
-        sent.tx = tx;
-        sent.signers = signers;
-        sent.options = options;
-        return CONFIRMED_SIG;
-      },
-    ),
-  };
-});
+// ── El ledger y el preflight ──────────────────────────────────────────────
+// Sin estos dobles, `settle()` intentaría hablar con el `supabase` que
+// `vitest.config.ts` apunta a localhost, el reclamo fallaría y —por FAIL-CLOSED— los
+// 5 tests se pondrían rojos POR EL MOTIVO EQUIVOCADO (el guard funcionando, no la
+// construcción de la transferencia rota).
+const ledgerSignatures = new Set<string>();
+vi.mock('./settle-ledger.js', () => ({
+  claimSettleIntent: vi.fn(async () => ({ outcome: 'claimed', attempts: 1 })),
+  recordSignedIntent: vi.fn(async (a: { signature: string }) => {
+    if (ledgerSignatures.has(a.signature)) {
+      return { ok: false, reason: 'signature_collision', detail: 'dup' };
+    }
+    ledgerSignatures.add(a.signature);
+    return { ok: true, attempts: 1 };
+  }),
+  recordConfirmedIntent: vi.fn(async () => ({ ok: true })),
+  reclaimExpiredIntent: vi.fn(async () => ({ ok: true })),
+  readSettleIntent: vi.fn(async () => ({ state: 'none' })),
+  probeSettleLedger: vi.fn(async () => ({ probe: 'ok' })),
+}));
+vi.mock('./schema-preflight.js', () => ({
+  ensureSolanaSchemaReady: vi.fn(async () => ({ ok: true })),
+  warmSolanaSchemaPreflight: vi.fn(),
+  _resetSolanaSchemaPreflight: vi.fn(),
+}));
 
 import { _resetSolanaClients, SolanaPaymentAdapter } from './payment.js';
 
@@ -123,8 +160,8 @@ function decodeTransfer(data: Uint8Array): { tag: number; amount: bigint } {
 describe('settle Solana — construcción REAL de la transferencia (P1 hallazgo 6)', () => {
   beforeEach(() => {
     _resetSolanaClients();
-    delete sent.tx;
-    delete sent.signers;
+    ledgerSignatures.clear();
+    delete sent.raw;
     delete sent.options;
   });
 
@@ -136,13 +173,14 @@ describe('settle Solana — construcción REAL de la transferencia (P1 hallazgo 
       intentId: 'wiring:0:payTo',
     });
 
-    expect(res).toEqual({ txHash: CONFIRMED_SIG, success: true });
+    // La firma que devuelve el settle es la de la tx que se transmitió.
+    expect(res.success).toBe(true);
+    expect(res.txHash).toBeTruthy();
 
-    const tx = sent.tx;
-    expect(tx).toBeDefined();
+    const tx = sentTx();
     // Una sola instrucción: el adapter no mete nada más en la tx de un leg.
-    expect(tx?.instructions).toHaveLength(1);
-    const ix = tx?.instructions[0];
+    expect(tx.instructions).toHaveLength(1);
+    const ix = tx.instructions[0];
     // Program id REAL del SPL Token program (no un mock que dice "sí").
     expect(ix?.programId.toBase58()).toBe(TOKEN_PROGRAM_ID.toBase58());
 
@@ -172,7 +210,7 @@ describe('settle Solana — construcción REAL de la transferencia (P1 hallazgo 
     // Las dos ATAs son DISTINTAS: si fueran iguales el test no probaría el orden.
     expect(expectedFrom.toBase58()).not.toBe(expectedTo.toBase58());
 
-    const keys = sent.tx?.instructions[0]?.keys;
+    const keys = sentTx().instructions[0]?.keys;
     // Layout SPL Transfer: [0]=source, [1]=destination, [2]=owner/authority.
     expect(keys?.[0]?.pubkey.toBase58()).toBe(expectedFrom.toBase58());
     expect(keys?.[1]?.pubkey.toBase58()).toBe(expectedTo.toBase58());
@@ -189,14 +227,14 @@ describe('settle Solana — construcción REAL de la transferencia (P1 hallazgo 
       intentId: 'wiring:2:payTo',
     });
 
-    // Un único signer, y es el operador (no el payTo, no un keypair efímero).
-    expect(Array.isArray(sent.signers)).toBe(true);
-    const signers = sent.signers as Keypair[];
-    expect(signers).toHaveLength(1);
-    expect(signers[0]?.publicKey.toBase58()).toBe(
-      OPERATOR.publicKey.toBase58(),
-    );
-    expect(sent.options).toEqual({ commitment: 'confirmed' });
+    // Un único firmante, y es el operador (no el payTo, no un keypair efímero).
+    // Se lee de la tx REHIDRATADA: la firma viaja DENTRO del buffer serializado.
+    const sigs = sentTx().signatures;
+    expect(sigs).toHaveLength(1);
+    expect(sigs[0]?.publicKey.toBase58()).toBe(OPERATOR.publicKey.toBase58());
+    expect(sigs[0]?.signature).not.toBeNull();
+    // El commitment configurado viaja al broadcast (ahora como preflightCommitment).
+    expect(sent.options).toEqual({ preflightCommitment: 'confirmed' });
   });
 
   it('T-P1-6d: montos de borde se codifican exactos (1 atómico y un monto grande)', async () => {
@@ -208,7 +246,7 @@ describe('settle Solana — construcción REAL de la transferencia (P1 hallazgo 
       intentId: 'wiring:3:payTo',
     });
     expect(
-      decodeTransfer(sent.tx?.instructions[0]?.data as Uint8Array),
+      decodeTransfer(sentTx().instructions[0]?.data as Uint8Array),
     ).toEqual({ tag: 3, amount: 1n });
 
     // 400 USDC: el monto de la remesa insignia. Un `Number` intermedio acá sería
@@ -219,7 +257,7 @@ describe('settle Solana — construcción REAL de la transferencia (P1 hallazgo 
       intentId: 'wiring:4:payTo',
     });
     expect(
-      decodeTransfer(sent.tx?.instructions[0]?.data as Uint8Array),
+      decodeTransfer(sentTx().instructions[0]?.data as Uint8Array),
     ).toEqual({ tag: 3, amount: 400000000n });
   });
 
@@ -241,7 +279,7 @@ describe('settle Solana — construcción REAL de la transferencia (P1 hallazgo 
       2500000n,
     );
 
-    const actualIx = sent.tx?.instructions[0];
+    const actualIx = sentTx().instructions[0];
     expect(Buffer.from(actualIx?.data as Uint8Array).toString('hex')).toBe(
       Buffer.from(canonical.data).toString('hex'),
     );

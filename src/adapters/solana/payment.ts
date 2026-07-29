@@ -3,21 +3,19 @@ import {
   getAssociatedTokenAddressSync,
   getOrCreateAssociatedTokenAccount,
 } from '@solana/spl-token';
-import {
-  PublicKey,
-  sendAndConfirmTransaction,
-  Transaction,
-} from '@solana/web3.js';
+import { type Connection, PublicKey, Transaction } from '@solana/web3.js';
 import { usdToAtomicUnits } from '../../lib/atomic-amount.js';
-import { MAX_COMPOSE_STEPS } from '../../lib/compose-limits.js';
 import { getLogger } from '../../lib/logger.js';
 // Transporta la disposición del valor ('unknown') cuando no se pudo determinar si
 // un pago previo existe — así `downstream-payment.ts` reporta SETTLE_UNKNOWN en vez
-// de afirmar que el leg no se pagó.
+// de afirmar que el leg no se pagó. Lo usan los DOS caminos: el del facilitator
+// (WKH-302, códigos de payout) y el local (WKH-307/308, estado de la cadena).
 import { FacilitatorSettleError } from '../errors.js';
 import type {
   SolanaPaymentAdapter as ISolanaPaymentAdapter,
   QuoteResult,
+  SettledPeek,
+  SettlementPresence,
   SettleResult,
   SolanaSettleProof,
   SolanaSettleRequest,
@@ -36,6 +34,30 @@ import {
 } from './chain.js';
 // WKH-302 — camino nuevo (bandera ON): el facilitator firma y transmite.
 import { payoutViaFacilitator } from './facilitator-settle.js';
+// WKH-307: la idempotencia dejo de ser un Map de proceso y paso a una tabla. Todo el
+// acceso a datos del adapter vive en `settle-ledger.ts` (CD-7).
+import {
+  _resetSolanaSchemaPreflight,
+  BLOCKHASH_VALIDITY_SLOTS,
+  ensureSolanaSchemaReady,
+} from './schema-preflight.js';
+import {
+  claimSettleIntent,
+  readSettleIntent,
+  reclaimExpiredIntent,
+  recordConfirmedIntent,
+  recordSignedIntent,
+} from './settle-ledger.js';
+
+/**
+ * Margen, EN BLOQUES, que se le suma a la cota de expiracion fabricada para el camino
+ * del facilitator. Cubre que el nodo que le contesta al gateway vaya ATRASADO respecto
+ * del que atendio al facilitator.
+ *
+ * ⚠️ Subirlo es seguro (se espera de mas). BAJARLO PUEDE COSTAR UN DOBLE PAGO.
+ * El razonamiento completo esta en `fabricateExpiryUpperBound`.
+ */
+const FACILITATOR_HEIGHT_SKEW_MARGIN_SLOTS = 150;
 
 /**
  * Solana devnet SPL-transfer payment adapter (WKH-234). Settle-only,
@@ -64,350 +86,54 @@ const USDC_SYMBOL = 'USDC' as const;
 const ZERO_EVM_ADDRESS =
   '0x0000000000000000000000000000000000000000' as `0x${string}`;
 
-// ── Idempotencia (DT-10 / AC-7) — seam W3 ────────────────────────────────
-// Registro intentId → firma confirmada. En W3 es un store in-memory por proceso
-// (suficiente para el path idempotente + su unit test); en W5 el almacén real
-// es la columna `settle_signature` del ledger (persist-before-side-effect).
+// ── Idempotencia (WKH-307) ────────────────────────────────────────────────
 //
-// ─── Fix-pack P1 (hallazgo 5): cap + TTL ────────────────────────────────
-// El Map no tenía cota: cada intent dejaba una entrada PARA SIEMPRE (los únicos
-// borrados eran el self-heal y el reset de tests) → leak de memoria en un
-// proceso de larga vida.
+// El registro de "a que intentId ya se le pago y con que firma" VIVIA ACA, en un Map
+// de proceso con TTL, cap y ventana protegida. Se fue entero: un restart lo borraba y
+// despues de ese restart el sistema no sabia si ya le habia pagado a un agente.
 //
-// ⚠️ SEMÁNTICA QUE NO SE PUEDE ROMPER: este Map es lo que hace IDEMPOTENTE el
-// settle de un leg Solana (`settle()`: si el intentId ya tiene firma, se verifica
-// on-chain y se devuelve la previa en vez de re-broadcastear). Si una entrada
-// desaparece MIENTRAS EL INTENT SIGUE VIVO, un retry re-broadcastea → SE PAGA
-// DOS VECES.
-//
-// Dato que acota el problema: el `intentId` es `${composeRunId}:${i}` con
-// `composeRunId = randomUUID()` por ejecución (services/compose.ts). Como el UUID
-// es fresco por run, NINGUNA ejecución futura vuelve a preguntar por un intentId
-// viejo → una entrada sólo necesita sobrevivir a la ventana de vida de SU PROPIO
-// compose-run.
-//
-// Política (ver `resolveIntentTtlMs` / `evictIntentSignatures`): TTL con margen
-// sobre la COTA ESTIMADA de vida de un run + cap SOFT con ventana protegida. Ante
-// la duda se CONSERVA la entrada (fail-safe hacia no-pagar-dos-veces).
+// Ahora vive en `a2a_solana_settle_intents` y se toca por `settle-ledger.ts`. Nada de
+// lo que se borro debe volver: sin TTL, sin cap, sin ventana protegida, sin reloj
+// inyectable. El unico reloj que gobierna algo es el de Postgres, adentro del lease.
 
-interface IntentEntry {
-  signature: string;
-  /** Lectura del reloj del seam (`intentDedupNow`) al alta. Expira a `+ TTL`. */
-  storedAt: number;
+/** Cuantas veces se re-firma ante una colision de firma antes de rendirse (AC-9). */
+const DEFAULT_SIGN_MAX_ATTEMPTS = 3;
+
+/**
+ * Tope de re-firmas por colision del indice UNIQUE de firma. La colision ocurre ANTES
+ * del broadcast, asi que reintentar no puede pagar de mas; el tope existe para no
+ * girar para siempre si algo mas anda mal.
+ */
+/** Texto de un error desconocido, sin asumir que sea `Error`. */
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
-/** Insertion-ordered (garantía de `Map`) → iterar da de más viejo a más nuevo. */
-const _intentSignatures = new Map<string, IntentEntry>();
-
-// ─── HU-196: el reloj del seam es un PORT (default = reloj real) ──────────
-//
-// PROBLEMA (determinismo del test, NO de la política): el desalojo compara
-// `now - storedAt` contra la ventana protegida con `<=`, así que el borde es
-// exacto POR DISEÑO. Leyendo `Date.now()` directamente, un mismo escenario hace
-// DOS lecturas distintas del reloj real — la del alta de la entrada y la del
-// barrido que la evalúa — y todo el wall-clock que pasa entre las dos se SUMA a
-// la edad efectiva. Un test que quiere ejercitar `edad === ventana` mide en
-// realidad `edad + latencia`, y con ≥1 ms de latencia cae del otro lado del
-// `<=`. Eso hacía flakear `T-CAP-4` en la suite completa (donde la latencia es
-// mayor que corriendo el archivo solo).
-//
-// FIX: una sola fuente de tiempo, inyectable. Con el reloj congelado el test
-// mide la edad que declara y el borde queda exacto en las DOS direcciones.
-//
-// ⚠️ La política (TTL, ventana protegida, cap) y el orden de las comparaciones
-// quedan IDÉNTICOS. El default es `Date.now` y `_setIntentDedupClock` es
-// TEST-ONLY: ningún call-site de producción inyecta nada, así que el
-// comportamiento en prod es exactamente el de antes.
-type IntentDedupClock = () => number;
-let _intentDedupClock: IntentDedupClock = Date.now;
-
-/** Única lectura de tiempo del seam de idempotencia (default: reloj real). */
-function intentDedupNow(): number {
-  return _intentDedupClock();
-}
-
-/** Default del timeout de un compose-run (`routes/compose.ts`: 180_000 ms). */
-const DEFAULT_COMPOSE_TIMEOUT_MS = 180_000;
-/** Piso absoluto del TTL default: 30 min. */
-const MIN_DEFAULT_TTL_MS = 1_800_000;
-/** Margen del TTL default sobre `TIMEOUT_COMPOSE_MS`. */
-const TTL_SAFETY_FACTOR = 10;
-/** Margen del TTL default sobre la cota estimada de vida de un run. */
-const TTL_MARGIN_OVER_RUN_BOUND = 2;
-/** Cap SOFT de entradas. Ver `evictIntentSignatures`. */
-const DEFAULT_MAX_INTENT_ENTRIES = 10_000;
-
-// ─── AR MENOR-1: `TIMEOUT_COMPOSE_MS` **NO** es una cota de ejecución ─────
-//
-// La iteración anterior de este bloque (y el work-item, y `.env.example`) afirmaba
-// que «un run no puede sobrevivir a su propio timeout» y derivaba de ahí el piso
-// del knob. ES FALSO, verificado archivo por archivo:
-//
-//   · `src/middleware/timeout.ts:12-20` sólo MANDA el 504. No hay
-//     `AbortController`, no hay `signal`, no se cancela nada: el pipeline sigue
-//     corriendo después de que el caller recibió el timeout.
-//   · `src/services/compose.ts` invoca al agente con `ssrfFetch(...)` SIN `signal`
-//     y `src/lib/ssrf-dispatcher.ts` construye el `Agent` de undici sin
-//     `headersTimeout`/`bodyTimeout` → el único freno son los defaults de undici
-//     (300 s cada uno), y `bodyTimeout` es un timeout de INACTIVIDAD: un agente
-//     que trickle-feedea un byte cada 299 s mantiene el hop vivo indefinidamente.
-//
-// ⚠️ ACTUALIZACIÓN HU-195 (sólo el segundo bullet): el hop de invoke YA tiene
-// techo. `lib/ssrf-dispatcher.ts` configura `headersTimeout`/`bodyTimeout` y
-// `ssrfFetch` adjunta un `AbortSignal` de wall-clock, ambos gobernados por
-// `OUTBOUND_HOP_TIMEOUT_MS` (default 60 s, clampeado a `TIMEOUT_COMPOSE_MS`) —
-// ver `lib/outbound-timeout.ts`. El trickle-feed infinito está cerrado.
-// Lo que NO cambió, y por eso la conclusión de abajo SIGUE EN PIE: el techo es
-// por HOP, no por PIPELINE. El 504 sigue sin cancelar el run, así que tampoco hay
-// ahora una cota dura de wall-clock por run. Los números de este módulo se
-// dejan a propósito en el peor caso VIEJO (300 s/hop): sobre-estiman la vida de
-// un run, y sobre-estimar el TTL de un Map de idempotencia es el lado seguro del
-// error. Bajarlos a 60 s es una decisión de money-path con su propia HU.
-//
-// ⚠️ EL COSTO COMPLETO DE ESA SOBRE-ESTIMACIÓN (AR MNR-5 de la HU-195): NO es
-// solamente "memoria de más".
-//
-//   · Para el TTL de dedup, sobre-estimar sí es inocuo: la clave incluye un
-//     `composeRunId` (UUID por ejecución), así que un TTL largo NO puede
-//     deduplicar por error un pago legítimo — sólo retiene entradas muertas.
-//   · PERO la MISMA constante alimenta `resolveProtectedWindowMs()`, y la ventana
-//     protegida es lo que vuelve INOPERANTE el cap soft de 10.000 entradas:
-//     `evictIntentSignatures` hace `break` en la PRIMERA entrada protegida y se
-//     limita a un `log.warn`. Con 300 s/hop la ventana no-desalojable es de
-//     25 min; con los 60 s reales del hop serían 6 min. O sea que el peor caso
-//     viejo cuadruplica la ventana en la que el Map puede crecer sin cota por
-//     encima de su propio cap.
-//
-// Se deja así igual (conservar > desalojar, ante la duda no habilitar un doble
-// pago), pero el costo queda nombrado: es memoria de más Y un cap que no corta
-// durante 25 minutos, no sólo lo primero.
-//
-// Conclusión honesta: **no existe cota superior dura** de wall-clock para un run,
-// así que NINGÚN número de TTL puede prometer "no expira dentro de la ventana viva
-// del run". Elegimos NO cancelar el pipeline en el 504 (opción B del AR): abortar
-// un run en medio de un settle es exactamente el estado indeterminado
-// broadcasteado-pero-no-confirmado del que este Map protege — el remedio sería
-// peor que la enfermedad, y cancelar el money-path está fuera del scope de un
-// fix-pack.
-//
-// Lo que sí se hace: el piso deja de venderse como GARANTÍA y pasa a derivarse de
-// la cota más grande que podemos citar con números reales del repo, en vez de de
-// una env que no gobierna la ejecución.
-
-// AR it3 MENOR-2: `MAX_COMPOSE_STEPS` se importa del leaf compartido
-// (`lib/compose-limits.ts`) en vez de duplicar el literal `5` que vive en el guard
-// de `routes/compose.ts`. Subir el límite de la ruta ahora escala esta cota
-// automáticamente (y rompe la batería de TTL de `intent-dedup.test.ts`, que
-// conserva su propio literal como valor esperado independiente — la señal de
-// "re-revisá el margen a mano" que antes no existía).
-/**
- * Default de undici 8 por request (`headersTimeout` = `bodyTimeout` = 300_000 ms).
- *
- * ⚠️ CORRECCIÓN (AR MNR-4 de la HU-195): la versión anterior de este comentario
- * decía «NUESTRO código no los configura (`lib/ssrf-dispatcher.ts`), así que es el
- * único freno del hop de invoke». **Ya es falso**: desde la HU-195,
- * `outboundAgentOptions()` fija `headersTimeout`/`bodyTimeout` y `ssrfFetch`
- * adjunta el `AbortSignal` de wall-clock, los dos gobernados por
- * `OUTBOUND_HOP_TIMEOUT_MS` (default 60 s). O sea que el freno REAL del hop de
- * invoke hoy son 60 s, no 300 s.
- *
- * Este literal se conserva a propósito como el PEOR CASO HISTÓRICO del que se
- * derivan los números de abajo: sobre-estima, y para un Map de idempotencia
- * sobre-estimar es el lado seguro (ver `ESTIMATED_MAX_RUN_WALL_CLOCK_MS`).
- * Bajarlo a 60 s es money-path y necesita su propia HU.
- */
-const UNDICI_DEFAULT_HOP_TIMEOUT_MS = 300_000;
-/**
- * COTA ESTIMADA de vida de un compose-run: `MAX_COMPOSE_STEPS` × 300 s = 25 min
- * con el máximo de steps de hoy (5).
- *
- * ⚠️ Es una ESTIMACIÓN, no una garantía, y desde la HU-195 es una estimación
- * DELIBERADAMENTE ALTA: cuenta 300 s/hop cuando el techo real del hop de invoke
- * ya es de 60 s. Cuenta UN hop por step (el invoke del agente) y no cuenta los
- * hops del settle (verify + settle del facilitator).
- *
- * ⚠️ ACTUALIZACIÓN HU-198: esos hops del settle YA tienen techo también en el modo
- * `pieverse` de Kite (30 s cada uno, `KITE_FACILITATOR_TIMEOUT_MS`), así que la
- * sobre-estimación de esta cota creció: no hay ningún hop de settle sin cota. Se
- * conserva igual porque para un Map de idempotencia sobre-estimar es el lado
- * seguro (ver `UNDICI_DEFAULT_HOP_TIMEOUT_MS`).
- *
- * CORRECCIÓN (AR MNR-4): la versión anterior también listaba «ni el caso del body
- * trickle-feedeado, que no tiene techo». Para el hop de invoke eso YA NO ES
- * CIERTO: el `AbortSignal` de wall-clock de `ssrfFetch` es exactamente el eje que
- * corta al peer que trickle-feedea. Sigue sin techo el egress que no pasa por
- * `ssrfFetch` (settlement).
- *
- * Se documenta así a propósito: el número es incómodo (25 min contra los 3 min del
- * timeout del compose) y honesto, en vez de cómodo y falso.
- */
-const ESTIMATED_MAX_RUN_WALL_CLOCK_MS =
-  MAX_COMPOSE_STEPS * UNDICI_DEFAULT_HOP_TIMEOUT_MS;
-
-/** Timeout de respuesta del compose (NO cota de ejecución — ver arriba). */
-function resolveComposeTimeoutMs(): number {
-  const raw = process.env.TIMEOUT_COMPOSE_MS;
+function resolveSignMaxAttempts(): number {
+  const raw = process.env.SOLANA_SETTLE_SIGN_MAX_ATTEMPTS;
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_COMPOSE_TIMEOUT_MS;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_SIGN_MAX_ATTEMPTS;
 }
 
 /**
- * VENTANA PROTEGIDA: una entrada más joven que esto NUNCA se desaloja por presión
- * del cap, porque podría pertenecer a un run todavía vivo.
- *
- * `max(cota estimada del run, TIMEOUT_COMPOSE_MS × 2)` = 25 min con los defaults.
- * El segundo término no es una cota (ver el bloque de AR MENOR-1) pero se conserva
- * por monotonía: un operador que sube el timeout del compose está DECLARANDO que
- * espera runs más largos, y la ventana lo acompaña.
- *
- * ⚠️ ESTA es la función por la que sobre-estimar la cota del run NO es gratis
- * (AR MNR-5 de la HU-195): mientras la ventana sea de 25 min, el cap soft de
- * `evictIntentSignatures` no desaloja NADA y sólo loguea. Detalle en el bloque de
- * `UNDICI_DEFAULT_HOP_TIMEOUT_MS`.
- */
-function resolveProtectedWindowMs(): number {
-  return Math.max(
-    ESTIMATED_MAX_RUN_WALL_CLOCK_MS,
-    resolveComposeTimeoutMs() * TTL_MARGIN_OVER_RUN_BOUND,
-  );
-}
-
-/**
- * TTL de una entrada de idempotencia.
- *
- * Default: `max(cota × 2, TIMEOUT_COMPOSE_MS × 10, 30 min)` = **50 min** con los
- * defaults (antes 30 min, que contra la cota real de 25 min era un margen de
- * ~1.2×, no de 10× — AR MENOR-1).
- *
- * Override `SOLANA_INTENT_DEDUP_TTL_MS`, **con piso = la ventana protegida**
- * (25 min con los defaults, antes 6 min): un TTL por debajo de la ventana
- * protegida es directamente incoherente — la entrada expiraría mientras el
- * desalojo todavía la considera intocable. NO es la garantía "no expira dentro de
- * un run vivo" (esa garantía no existe, ver arriba): es el piso más alto que
- * podemos justificar con números del repo.
- */
-function resolveIntentTtlMs(): number {
-  const floor = resolveProtectedWindowMs();
-  const raw = process.env.SOLANA_INTENT_DEDUP_TTL_MS;
-  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
-  if (Number.isFinite(n) && n > 0) return Math.max(n, floor);
-  return Math.max(
-    ESTIMATED_MAX_RUN_WALL_CLOCK_MS * TTL_MARGIN_OVER_RUN_BOUND,
-    resolveComposeTimeoutMs() * TTL_SAFETY_FACTOR,
-    MIN_DEFAULT_TTL_MS,
-  );
-}
-
-/** Cap SOFT de entradas (`SOLANA_INTENT_DEDUP_MAX_ENTRIES`, default 10.000). */
-function resolveMaxIntentEntries(): number {
-  const raw = process.env.SOLANA_INTENT_DEDUP_MAX_ENTRIES;
-  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_INTENT_ENTRIES;
-}
-
-/**
- * Warn del cap saturado con TODAS las entradas protegidas: una vez por EPISODIO
- * de breach, no una vez por proceso.
- *
- * AR MENOR-2: antes sólo se re-armaba en `_resetSolanaClients` (TEST-ONLY), así
- * que era warn-once-per-process — el mismo anti-patrón que este fix-pack ya
- * documentó para `FLAG_OFF` (auto-blindaje.md): breach a la hora 1, recuperación,
- * breach a la hora 20 → SILENCIO, y un warn que no vuelve a sonar no es señal
- * operativa. Ahora el flag se re-arma en cuanto el tamaño vuelve a bajar del cap,
- * así que cada episodio nuevo loguea exactamente una vez.
- */
-let _warnedSoftCapBreached = false;
-
-/**
- * Barrido LAZY (sin `setInterval`: no mantiene el event loop vivo ni introduce
- * flakiness en los tests). Se llama en cada `set`.
- *
- * 1. Borra lo EXPIRADO (edad > TTL).
- * 2. Si aún se supera el cap, desaloja de más viejo a más nuevo — pero NUNCA una
- *    entrada dentro de la VENTANA PROTEGIDA (`resolveProtectedWindowMs`), porque
- *    podría pertenecer a un run todavía vivo y borrarla habilitaría un doble pago.
- * 3. Si TODAS están protegidas, no se desaloja nada: el Map excede el cap a
- *    propósito y se emite un warn (señal operativa). Ante la duda, CONSERVAR.
- */
-function evictIntentSignatures(now: number): void {
-  const ttl = resolveIntentTtlMs();
-  for (const [key, entry] of _intentSignatures) {
-    if (now - entry.storedAt > ttl) _intentSignatures.delete(key);
-  }
-
-  const max = resolveMaxIntentEntries();
-  if (_intentSignatures.size <= max) {
-    _warnedSoftCapBreached = false; // re-armado (AR MENOR-2)
-    return;
-  }
-
-  const protectedWindow = resolveProtectedWindowMs();
-  // Insertion order = de más viejo a más nuevo, así que el primer candidato que
-  // encontramos es el más viejo desalojable.
-  for (const [key, entry] of _intentSignatures) {
-    if (_intentSignatures.size <= max) break;
-    if (now - entry.storedAt <= protectedWindow) break; // protegida ⇒ y las que
-    // siguen son aún más jóvenes: no hay nada más que desalojar.
-    _intentSignatures.delete(key);
-  }
-
-  if (_intentSignatures.size <= max) {
-    _warnedSoftCapBreached = false; // el desalojo alcanzó: episodio cerrado
-    return;
-  }
-  if (!_warnedSoftCapBreached) {
-    _warnedSoftCapBreached = true;
-    log.warn(
-      { size: _intentSignatures.size, max, protectedWindowMs: protectedWindow },
-      'solana intent dedup por encima del cap — todas las entradas están dentro de la ventana protegida; se CONSERVAN para no habilitar un doble pago (una vez por episodio: el warn se re-arma cuando el tamaño baja del cap)',
-    );
-  }
-}
-
-/** Alta de una firma en el seam de idempotencia (+ barrido lazy). */
-function rememberIntentSignature(intentId: string, signature: string): void {
-  const now = intentDedupNow();
-  _intentSignatures.set(intentId, { signature, storedAt: now });
-  evictIntentSignatures(now);
-}
-
-/**
- * Lectura del seam. Una entrada EXPIRADA se trata como ausente (y se borra):
- * devolver una firma vencida sería peor que no tenerla.
- */
-/**
- * ¿La cadena DEMOSTRÓ que ese pago no está? Sólo entonces se puede auto-curar el
- * seam de idempotencia y volver a emitir. "No pude determinarlo" no alcanza: es
- * exactamente la confusión que hace pagar dos veces.
- */
-function isProvenAbsent(result: VerifyResult): boolean {
-  return result.valid === false && result.indeterminate !== true;
-}
-
-function recallIntentSignature(intentId: string): string | undefined {
-  const entry = _intentSignatures.get(intentId);
-  if (!entry) return undefined;
-  if (intentDedupNow() - entry.storedAt > resolveIntentTtlMs()) {
-    _intentSignatures.delete(intentId);
-    return undefined;
-  }
-  return entry.signature;
-}
-
-/**
- * WKH-235a (AC-1) — firma-candidata de una tx cuyo `sendAndConfirmTransaction`
+ * WKH-235a (AC-1) — firma-candidata de una tx cuyo BROADCAST o CONFIRMACIÓN
  * lanzó. La firma de una tx Solana es la firma ed25519 del fee-payer sobre el
  * mensaje: existe ANTES de la confirmación, así que un timeout de confirmación
  * NO debe perderla.
+ *
+ * WKH-307: desde que la firma se PERSISTE antes de transmitir (invariante I2), esta
+ * recuperación dejó de ser la única red — la fila ya quedó en `signed` con la firma
+ * correcta, así que aunque el proceso muera acá el próximo retry la re-verifica. Se
+ * conserva porque resuelve el caso EN CALIENTE sin esperar a ese retry.
  *
  * Dos fuentes, en orden:
  *  1. `err.signature` — `TransactionExpiredTimeoutError`,
  *     `TransactionExpiredBlockheightExceededError` y
  *     `TransactionExpiredNonceInvalidError` de `@solana/web3.js` exponen la
  *     firma base58 como campo público.
- *  2. `tx.signature` — `sendAndConfirmTransaction` firma el MISMO objeto
- *     `Transaction` in-place antes de broadcastear, así que el Buffer de la
- *     firma queda disponible incluso si el envío falló después.
+ *  2. `tx.signature` — el adapter firma el objeto `Transaction` ANTES de
+ *     transmitirlo, así que el Buffer de la firma queda disponible incluso si el
+ *     envío o la confirmación fallaron después.
  *
  * Devuelve `undefined` cuando la tx nunca llegó a firmarse (no hay nada que
  * verificar on-chain → el fallo es genuino).
@@ -423,8 +149,8 @@ function candidateSignatureFromFailure(
   const raw = tx.signature;
   // Guard (fix-pack AR, MNR-3): un buffer de 64 bytes en CERO es el placeholder
   // que web3.js usa antes de firmar, NO una firma real. Su base58 ('1'×64) sería
-  // una pseudo-firma no consultable on-chain que terminaría en `_intentSignatures`
-  // y viajaría como `txHash` al ledger (`settle_signature`) → contabilidad
+  // una pseudo-firma no consultable on-chain que se persistiria como
+  // `settle_signature` y viajaria como `txHash` al ledger → contabilidad
   // contaminada. Se trata igual que `tx.signature === null`: sin firma derivable.
   if (raw?.some((b) => b !== 0)) {
     return base58Encode(raw);
@@ -494,13 +220,32 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
   }
 
   /**
-   * Fix-pack AR-profundo FIX 2 — peek del seam de idempotencia (in-memory, sin
-   * I/O, no lanza). El caller lo usa para NO cortar por fondos un intent que ya
-   * fue settleado (un pago ya hecho no necesita fondos otra vez). NO valida la
-   * firma: eso lo hace `settle()` (verify-before-trust) antes de reusarla.
+   * PEEK del seam de idempotencia. El caller lo usa para NO cortar por fondos un
+   * intent que ya fue settleado (un pago ya hecho no necesita fondos otra vez).
+   *
+   * WKH-307: pasa a ASINCRONO (lee la tabla, no un Map) y a UNION DISCRIMINADA. El
+   * retorno anterior (`string | undefined`) colapsaba *"no se pago"* con *"no se si
+   * se pago"*, que en un camino de dinero son OPUESTOS: el primero autoriza cortar
+   * por fondos, el segundo obliga a fail-closear.
+   *
+   * NUNCA lanza (contrato preservado): un fallo del store se traduce a `unknown`.
+   * NO valida la firma ni autoriza nada: `settle()` sigue siendo la unica autoridad.
    */
-  getSettledSignature(intentId: string): string | undefined {
-    return recallIntentSignature(intentId);
+  async getSettledSignature(intentId: string): Promise<SettledPeek> {
+    const read = await readSettleIntent(intentId);
+    switch (read.state) {
+      case 'confirmed':
+        return { state: 'settled', signature: read.signature };
+      // `signed` y `claimed` son lo mismo para el caller: alguien lo reclamo y
+      // todavia no esta confirmado.
+      case 'signed':
+      case 'claimed':
+        return { state: 'in_progress' };
+      case 'none':
+        return { state: 'none' };
+      default:
+        return { state: 'unknown' };
+    }
   }
 
   async quote(amountUsd: number): Promise<QuoteResult> {
@@ -525,114 +270,570 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     };
   }
 
+  /**
+   * WKH-307 — el orden es el contrato.
+   *
+   *   preflight de esquema → RECLAMO ATOMICO → (solo si se gano) firmar →
+   *   PERSISTIR la firma → transmitir → confirmar → marcar confirmado
+   *
+   * El reclamo es la PRIMERA operacion con la DB o la red, antes de resolver
+   * conexion, operador o ATAs: nada que cueste plata ocurre antes de haber ganado el
+   * derecho a hacerlo.
+   */
   async settle(req: SolanaSettleRequest): Promise<SettleResult> {
-    // ── Idempotencia (AC-7): si el intentId ya tiene firma confirmada, verify
-    //    on-chain y retornar la firma previa — NO re-broadcast. ────────────────
-    const prior = recallIntentSignature(req.intentId);
-    if (prior) {
-      // DECISIÓN ABIERTA (MNR-4 del CR de WKH-235a): este `verify()` NO está
-      // envuelto en try/catch, a diferencia del de `recoverConfirmedSettle` (que
-      // degrada a "no recuperado"). Con el RPC caído, un retry de un intentId ya
-      // conocido lanza en vez de degradar. Hay que decidir si debe degradar igual
-      // o propagar a propósito — ver doc/sdd/185-wkh-235a-solana-settle-idempotency-durable/work-item.md
-      let verified: VerifyResult;
-      try {
-        verified = await this.verify({
-          signature: prior,
-          payTo: req.payTo,
-          amountAtomic: req.amountAtomic,
-        });
-      } catch (e) {
-        // El RPC no contestó. NO es evidencia de que el pago previo no exista, así
-        // que ni se re-emite ni se afirma que falló: incógnita explícita.
-        throw new FacilitatorSettleError(
-          `Could not verify the prior signature for intent ${req.intentId}: ${
-            e instanceof Error ? e.message : String(e)
-          }`,
-          'unknown',
-        );
-      }
-      if (verified.valid) {
-        log.info(
-          { intentId: req.intentId, signature: prior },
-          'solana settle idempotent hit — returning prior signature',
-        );
-        return { txHash: prior, success: true };
-      }
-      // ⚠️ 4º SITIO DE LA MISMA CAUSA RAÍZ — arreglado a medias A PROPÓSITO.
-      //
-      // ARREGLADO acá: si el RPC LANZA (arriba), ya no se propaga como un fallo
-      // genérico ni se re-emite: se reporta incógnita. Eso cierra el caso donde
-      // literalmente no se pudo preguntar.
-      //
-      // NO ARREGLADO, y reportado: `verify()` devuelve `valid:false` tanto cuando
-      // la cadena dice "esa tx falló" como cuando `getParsedTransaction` devuelve
-      // `null` — y `null` también lo da un nodo sin ese pedazo de historia, uno
-      // atrasado o un índice degradado. En ese caso este camino borra el seam y
-      // vuelve a pagar, con la bandera OFF (el camino por defecto hoy) y sin más
-      // barrera que el Map que se acaba de borrar.
-      //
-      // No se cambia acá porque el self-heal ante `valid:false` es una decisión de
-      // diseño de WKH-235a con tests que la fijan (T-HEAL-1/2, T-P1-2a): apagarla
-      // requiere ticket. `isProvenAbsent` deja el mecanismo listo para cuando se
-      // decida — hoy nadie setea `indeterminate`, así que el comportamiento es el
-      // de siempre salvo por el caso del throw.
-      if (!isProvenAbsent(verified)) {
-        throw new FacilitatorSettleError(
-          `Prior signature for intent ${req.intentId} could not be determined on-chain — refusing to re-emit`,
-          'unknown',
-        );
-      }
-      // Firma previa demostradamente ausente → limpiar y re-emitir (self-heal).
-      _intentSignatures.delete(req.intentId);
-    }
-
-    // ── WKH-302 — bandera de transición. UNA SOLA LECTURA por invocación, a una
-    //    const local: si se leyera dos veces, un cambio de env a mitad de request
-    //    podría partir el flujo entre los dos caminos (AC-3). Comparación literal
-    //    contra 'true'; `Boolean(process.env.X)` daría true para CUALQUIER string
-    //    no vacío, incluido 'false'.
-    //
-    //    El bloque de idempotencia de arriba queda ANTES de esta ramificación y es
-    //    COMÚN a los dos caminos: es el mismo seam que hoy, no se duplica.
-    const viaFacilitator = process.env.SOLANA_SETTLE_VIA_FACILITATOR === 'true';
-
-    if (viaFacilitator) {
-      // El facilitator firma y transmite. Con la bandera ON el gateway NO firma
-      // NADA, ni siquiera como fallback: un facilitator caído es un leg no
-      // liquidado, no una excusa para que el gateway vuelva a ser camino de dinero
-      // (CD-15). Por eso acá no se resuelve el keypair local ni se llama a
-      // `sendAndConfirmTransaction` / `getOrCreateAssociatedTokenAccount` /
-      // `recoverConfirmedSettle`.
-      const payout = await payoutViaFacilitator({
-        intentId: req.intentId,
-        payTo: req.payTo,
-        amountAtomic: req.amountAtomic,
-        network: `solana:${getSolanaNetwork()}`,
-      });
-      // El seam de idempotencia se escribe SÓLO con una firma realmente devuelta
-      // por un 2xx — jamás con un valor derivado de un error.
-      rememberIntentSignature(req.intentId, payout.signature);
-      log.info(
+    // ── Paso 0: el esquema. Un gate que nadie corre no es un gate (AC-11).
+    const schema = await ensureSolanaSchemaReady();
+    if (!schema.ok) {
+      log.error(
         {
           intentId: req.intentId,
-          signature: payout.signature,
-          payTo: req.payTo,
-          alreadySettled: payout.alreadySettled,
+          failure: schema.failure,
+          detail: schema.detail,
         },
-        'solana settle via facilitator',
+        'solana settle refused — settle ledger schema preflight failed; without the durable ledger the gateway cannot know whether this agent was already paid',
       );
-      // `alreadySettled: true` es un ÉXITO, no un error: es un pago que ya ocurrió.
-      return { txHash: payout.signature, success: true };
-      // El error se propaga TAL CUAL (no se envuelve ni se aplana): quien clasifica
-      // la disposición del valor es `lib/downstream-payment.ts`.
+      throw new Error(
+        `SETTLE_LEDGER_SCHEMA_UNAVAILABLE: ${schema.failure} — ${schema.detail}`,
+      );
     }
 
+    // ── Paso 1-2: EL RECLAMO. Unica puerta al broadcast.
+    const claim = await claimSettleIntent({
+      intentId: req.intentId,
+      caip2: getSolanaCaip2(),
+      payTo: req.payTo,
+      amountAtomic: req.amountAtomic,
+      mint: getSolanaUsdcMint(),
+    });
+
+    // ── WKH-302 — bandera de transicion. UNA SOLA LECTURA por invocacion, a una
+    //    const local: si se leyera dos veces, un cambio de env a mitad de request
+    //    podria partir el flujo entre los dos caminos (AC-3). Comparacion literal
+    //    contra 'true'; `Boolean(process.env.X)` daria true para CUALQUIER string
+    //    no vacio, incluido 'false'.
+    //
+    //    Va DESPUES del reclamo y nunca antes (CD-14 de WKH-307): el reclamo es
+    //    funcion de la INTENCION, no de quien transmite, asi que cambiar el
+    //    transporte no puede invalidarlo. Bajarla a una rama rompe esa invariante.
+    const viaFacilitator = process.env.SOLANA_SETTLE_VIA_FACILITATOR === 'true';
+
+    switch (claim.outcome) {
+      case 'claimed':
+        // Ganamos el derecho a transmitir. Es el UNICO caso que sigue.
+        return await this.dispatchPayment(req, viaFacilitator);
+
+      case 'in_progress':
+        // Otro request en vuelo que todavia no firmo. "No se todavia" nunca paga.
+        log.warn(
+          { intentId: req.intentId },
+          'solana settle refused — another request holds a live claim for this intent and has not signed yet',
+        );
+        throw new Error(`SETTLE_IN_PROGRESS: ${req.intentId}`);
+
+      case 'terms_conflict':
+        // El intent existe con OTROS terminos: no es este pago. Y no se devuelve la
+        // firma previa — seria pagarle a A y decirle a B que cobro (AC-8).
+        // AR MNR-1: la salida manual esta en
+        // `doc/sdd/209-wkh-307-solana-durable-idempotency-ledger/runbook-destrabe.md`
+        // (seccion C). Casi siempre es el llamador reusando un intentId, no el ledger.
+        throw new Error(
+          `SETTLE_INTENT_CONFLICT: ${req.intentId} already exists with different terms (status=${String(claim.status)}) — see runbook-destrabe.md §C`,
+        );
+
+      case 'store_unavailable':
+        throw new Error(`SETTLE_LEDGER_UNAVAILABLE: ${claim.detail}`);
+
+      case 'confirmed':
+        return await this.settleAlreadyConfirmed(claim.signature, req);
+
+      default:
+        return await this.settleAlreadySigned(
+          claim.signature,
+          claim.lastValidBlockHeight,
+          req,
+          viaFacilitator,
+        );
+    }
+  }
+
+  /**
+   * Rama `confirmed`: el pago ya se hizo. Se RE-VERIFICA on-chain antes de devolver la
+   * firma (verify-before-trust, CD-5) — la tabla dice que se pago, la cadena lo prueba.
+   */
+  private async settleAlreadyConfirmed(
+    signature: string,
+    req: SolanaSettleRequest,
+  ): Promise<SettleResult> {
+    const presence = await this.probeSettlementPresence({
+      signature,
+      payTo: req.payTo,
+      amountAtomic: req.amountAtomic,
+    });
+
+    if (presence.state === 'landed_ok') {
+      log.info(
+        { intentId: req.intentId, signature },
+        'solana settle idempotent hit — returning the prior signature, nothing broadcast',
+      );
+      return { txHash: signature, success: true };
+    }
+
+    // AR BLQ-MEDIO-1: "no pude preguntar" NO es "no verifica". Antes los dos
+    // terminaban en el rechazo PERMANENTE de abajo, o sea que un hipo del RPC
+    // condenaba un intent sano a intervencion humana. Ahora es un error TRANSITORIO
+    // y el proximo retry vuelve a preguntar.
+    if (presence.state === 'unknown') {
+      log.warn(
+        { intentId: req.intentId, signature, detail: presence.detail },
+        'solana settle deferred — the ledger says this intent was confirmed but the chain could not be queried; NOT re-broadcasting and NOT condemning the row',
+      );
+      throw new Error(
+        `SETTLE_PRESENCE_UNKNOWN: ${req.intentId} (${presence.detail})`,
+      );
+    }
+
+    // ⚠️ CAMBIO DE CONDUCTA DELIBERADO (R-3). El seam in-memory borraba la entrada y
+    // RE-EMITIA (self-heal). Con un store durable esto NO se arregla pagando de nuevo.
+    //
+    // TRES causas posibles, y la tercera es la que importa para el destrabe (AR MNR-1):
+    //   1. contabilidad corrupta (la fila no corresponde a esa firma);
+    //   2. un RPC devolviendo datos que no son los de la cadena;
+    //   3. **un FORK**: la fila llego a `confirmed` tras un `confirmTransaction` a
+    //      commitment `confirmed`, que es OPTIMISTA — una tx confirmada asi puede
+    //      caerse si su bloque queda fuera de la cadena canonica. En ESE caso el pago
+    //      genuinamente NO ocurrio y el agente quedo sin cobrar.
+    //
+    // La asimetria se mantiene a proposito (no cobrar es recuperable, cobrar dos veces
+    // no), pero el caso 3 necesita SALIDA MANUAL, no quedar clavado para siempre:
+    // el procedimiento de destrabe esta en
+    // `doc/sdd/209-wkh-307-solana-durable-idempotency-ledger/runbook-destrabe.md`.
+    const detail =
+      presence.state === 'absent'
+        ? 'the signature is not on chain (node searched its history)'
+        : presence.detail;
+    log.error(
+      {
+        intentId: req.intentId,
+        signature,
+        presence: presence.state,
+        detail,
+        runbook:
+          'doc/sdd/209-wkh-307-solana-durable-idempotency-ledger/runbook-destrabe.md',
+      },
+      'solana settle REFUSED — the ledger says this intent was confirmed but the chain does not back that up. NOT re-broadcasting: corrupt accounting, a lying RPC and a forked-out optimistic confirmation all look the same from here, and paying again only fixes the third. See the runbook to unstick.',
+    );
+    throw new Error(
+      `SETTLE_CONFIRMED_BUT_UNVERIFIABLE: ${req.intentId} (${presence.state}: ${detail})`,
+    );
+  }
+
+  /**
+   * Rama `signed`: hay firma persistida, o sea que el broadcast PUDO haber salido.
+   *
+   * ⚠️ AR BLQ-MEDIO-1 — LO QUE HACE SEGURA A LA SALIDA (b). Re-transmitir exige DOS
+   * hechos, y los dos tienen que ser PRUEBAS:
+   *
+   *   1. el blockhash murio (`getBlockHeight() > last_valid_block_height`) — prueba
+   *      de que ESA tx ya no puede aterrizar;
+   *   2. la tx NO esta en la cadena — y esto **antes se infería de un `null`**, que
+   *      tambien puede significar "el nodo no tiene ese historico" o "va atrasado".
+   *      Un nodo del pool sin el bloque indexado alcanzaba para concluir "expiro sin
+   *      aterrizar" sobre una tx YA PAGADA ⟹ segundo SPL transfer real.
+   *
+   * Ahora (2) sale de `probeSettlementPresence`, que sólo devuelve `absent` cuando el
+   * nodo RESPONDIO habiendo buscado en su historico. Todo lo demas fail-closea.
+   */
+  private async settleAlreadySigned(
+    signature: string,
+    lastValidBlockHeight: string | null,
+    req: SolanaSettleRequest,
+    viaFacilitator: boolean,
+  ): Promise<SettleResult> {
+    const presence = await this.probeSettlementPresence({
+      signature,
+      payTo: req.payTo,
+      amountAtomic: req.amountAtomic,
+    });
+
+    if (presence.state === 'landed_ok') {
+      // (a) El pago aterrizo. Marcarlo confirmado es contabilidad, no autorizacion.
+      const confirmed = await recordConfirmedIntent({
+        intentId: req.intentId,
+        signature,
+      });
+      if (!confirmed.ok) {
+        log.error(
+          { intentId: req.intentId, signature, reason: confirmed.reason },
+          'solana settle: the transfer IS confirmed on-chain but the ledger row could not be marked confirmed — accounting drift, not a payment problem',
+        );
+      }
+      log.info(
+        { intentId: req.intentId, signature },
+        'solana settle recovered — the signed transaction had already landed on-chain; nothing broadcast',
+      );
+      return { txHash: signature, success: true };
+    }
+
+    // "No pude preguntar" NUNCA autoriza re-transmitir.
+    if (presence.state === 'unknown') {
+      log.warn(
+        { intentId: req.intentId, signature, detail: presence.detail },
+        'solana settle refused — could not determine whether the signed transaction landed; refusing to re-broadcast on an unanswered question',
+      );
+      throw new Error(
+        `SETTLE_IN_FLIGHT_UNRESOLVED: ${req.intentId} (presence unknown: ${presence.detail})`,
+      );
+    }
+
+    // Algo aterrizo con esa firma pero con OTROS terminos: re-pagar seria pagar dos
+    // veces por cosas distintas. Fail-closed.
+    if (presence.state === 'landed_mismatch') {
+      log.error(
+        { intentId: req.intentId, signature, detail: presence.detail },
+        'solana settle refused — a transaction with this signature IS on chain but does not match the intent terms',
+      );
+      throw new Error(
+        `SETTLE_SIGNED_TERMS_MISMATCH: ${req.intentId} (${presence.detail})`,
+      );
+    }
+
+    // Llegados aca la presencia es `absent` o `landed_failed`. LAS DOS exigen ademas
+    // la PRUEBA DE EXPIRACION antes de re-firmar.
+    //
+    // ⚠️ AR re-review MNR-2 — `landed_failed` ESTABA EXCEPTUADO de este chequeo, con el
+    // razonamiento de que una tx grabada con error es terminal y su firma no puede
+    // volver a ejecutarse. Es cierto en el caso normal, pero deja una ventana: un
+    // re-org que saque de la cadena canonica el bloque de esa tx fallida MIENTRAS su
+    // blockhash sigue vivo la vuelve re-ejecutable — y esta vez puede tener exito (si
+    // fallo por estado de cuenta) sobre un intent que ya re-pago. Dos transferencias
+    // coexistiendo.
+    //
+    // Exigir la expiracion cuesta, a lo sumo, la espera del blockhash en un camino
+    // raro. Elimina la unica ventana donde eso podia pasar.
+    if (lastValidBlockHeight === null) {
+      throw new Error(
+        `SETTLE_SIGNED_UNRESOLVED: ${req.intentId} (presence=${presence.state}) has no last_valid_block_height to prove the previous transaction can no longer land`,
+      );
+    }
+    const connection = getSolanaConnection();
+    const height = await connection.getBlockHeight(getSolanaCommitment());
+    // BigInt y no Number(): la altura viaja como string a proposito (CD-8).
+    if (BigInt(height) <= BigInt(lastValidBlockHeight)) {
+      // (c) Sigue viva: podria aterrizar (o re-ejecutarse tras un re-org). No paga.
+      log.warn(
+        {
+          intentId: req.intentId,
+          signature,
+          presence: presence.state,
+          blockHeight: String(height),
+          lastValidBlockHeight,
+        },
+        'solana settle refused — the previously signed transaction is not settled but its blockhash is STILL VALID; it could confirm (or be re-executed after a re-org) at any moment',
+      );
+      throw new Error(`SETTLE_IN_FLIGHT_UNRESOLVED: ${req.intentId}`);
+    }
+
+    // (b) LAS DOS PRUEBAS en la mano. Se archiva la firma vieja y se re-firma.
+    const reclaimed = await reclaimExpiredIntent({
+      intentId: req.intentId,
+      signature,
+    });
+    if (!reclaimed.ok) {
+      throw new Error(
+        `SETTLE_RECLAIM_REFUSED: ${req.intentId} (${reclaimed.reason} — ${reclaimed.detail})`,
+      );
+    }
+    log.warn(
+      {
+        intentId: req.intentId,
+        expiredSignature: signature,
+        presence: presence.state,
+      },
+      'solana settle: the previously signed transaction will never land (absent + blockhash expired, or landed with an on-chain error) — archived and re-signing',
+    );
+    return await this.dispatchPayment(req, viaFacilitator);
+  }
+
+  /**
+   * AR BLQ-MEDIO-1 — ¿esta esta firma en la cadena, y en que estado?
+   *
+   * Es la unica fuente admitida para una determinacion NEGATIVA, porque es la unica
+   * que puede distinguir "el nodo busco y no la tiene" de "no pude preguntar":
+   * `getSignatureStatuses(..., { searchTransactionHistory: true })` obliga al nodo a
+   * mirar tambien el almacenamiento de largo plazo, y devuelve `null` en la posicion
+   * de la firma SOLO tras haber buscado.
+   *
+   * ⚠️ NO se usa `getParsedTransaction` para decidir ausencia: su `null` mezcla
+   * "no existe" con "este nodo no lo tiene indexado / va atrasado". Esa lectura sigue
+   * usandose, pero solo para validar los TERMINOS de una tx que ya sabemos presente.
+   *
+   * NUNCA lanza: todo fallo se traduce a `unknown`.
+   */
+  private async probeSettlementPresence(
+    proof: SolanaSettleProof,
+  ): Promise<SettlementPresence> {
+    const connection = getSolanaConnection();
+    let statuses: Awaited<
+      ReturnType<typeof connection.getSignatureStatuses>
+    > | null = null;
+    try {
+      statuses = await connection.getSignatureStatuses([proof.signature], {
+        searchTransactionHistory: true,
+      });
+    } catch (err) {
+      return { state: 'unknown', detail: errText(err) };
+    }
+    if (!statuses || !Array.isArray(statuses.value)) {
+      return {
+        state: 'unknown',
+        detail: 'getSignatureStatuses returned no status array',
+      };
+    }
+    if (statuses.value.length === 0) {
+      return {
+        state: 'unknown',
+        detail: 'getSignatureStatuses returned empty',
+      };
+    }
+    const status = statuses.value[0];
+    // `null` DESPUES de haber buscado el historico = prueba de ausencia.
+    if (status === null || status === undefined) return { state: 'absent' };
+    if (status.err) {
+      return { state: 'landed_failed', detail: JSON.stringify(status.err) };
+    }
+
+    // Presente y sin error: recien ahora se validan los TERMINOS.
+    //
+    // ⚠️ AR re-review MNR-3 — ACA VIVIA `this.verify()`, Y COLAPSABA DOS COSAS. Su
+    // `VerifyResult` devuelve `{valid:false}` tanto cuando los terminos no coinciden
+    // como cuando NO SE PUDO LEER la transaccion. Con eso, un nodo que conoce la firma
+    // pero no la tiene indexada producia `landed_mismatch`, o sea un log afirmando
+    // "esta en la cadena pero con OTROS terminos" —falso— y, sobre una fila
+    // `confirmed`, la CONDENA PERMANENTE por una causa transitoria.
+    //
+    // La distincion de tres valores que esta funcion introdujo en la capa de PRESENCIA
+    // hacia falta tambien un piso mas arriba, en la de TERMINOS.
+    let parsed: Awaited<ReturnType<typeof connection.getParsedTransaction>>;
+    try {
+      parsed = await connection.getParsedTransaction(proof.signature, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0,
+      });
+    } catch (err) {
+      return { state: 'unknown', detail: errText(err) };
+    }
+    if (!parsed?.meta) {
+      // El status dice que ESTA, pero este nodo no la tiene parseada. No se puede
+      // afirmar nada sobre los terminos: eso es "no se", no "no coinciden".
+      return {
+        state: 'unknown',
+        detail:
+          'signature status reports the transaction as present, but this node has no parsed transaction for it (lagging or unindexed)',
+      };
+    }
+    if (parsed.meta.err) {
+      return {
+        state: 'landed_failed',
+        detail: JSON.stringify(parsed.meta.err),
+      };
+    }
+    const terms = this.checkTerms(parsed, proof);
+    return terms.ok
+      ? { state: 'landed_ok' }
+      : { state: 'landed_mismatch', detail: terms.error };
+  }
+
+  /**
+   * La bifurcacion por transporte, en UN solo lugar.
+   *
+   * ⚠️ Existe como metodo (y no inline en `settle`) porque hay DOS puntos que
+   * transmiten: la rama `claimed` y la cola de `settleAlreadySigned`, que re-firma
+   * despues de probar que la firma vieja ya no puede aterrizar. Si la bandera solo
+   * se respetara en el primero, un intent con la bandera ON que llegue por el
+   * segundo firmaria con la LLAVE LOCAL — justo lo que CD-15 prohibe.
+   */
+  private async dispatchPayment(
+    req: SolanaSettleRequest,
+    viaFacilitator: boolean,
+  ): Promise<SettleResult> {
+    return viaFacilitator
+      ? await this.settleViaFacilitator(req)
+      : await this.signPersistBroadcast(req);
+  }
+
+  /**
+   * Cota SUPERIOR de la altura en que expira el blockhash que uso el facilitator.
+   *
+   * ⚠️ ES CONSERVADORA A PROPOSITO. NO la "ajustes" para que sea exacta: el error
+   * en cada direccion NO cuesta lo mismo.
+   *
+   *   · pasarse de largo  ⟹ un intent espera de mas antes de poder re-firmarse.
+   *     Se destraba solo, con el tiempo. Molesto.
+   *   · quedarse corto    ⟹ `settleAlreadySigned` cree que la tx vieja ya no puede
+   *     aterrizar cuando TODAVIA puede, re-firma, y aterrizan las dos. SEGUNDO PAGO
+   *     REAL. Irreversible.
+   *
+   * Por que una cota fabricada es legitima, y no un numero inventado: la altura de
+   * la cadena solo SUBE. El facilitator pidio su blockhash en algun instante
+   * POSTERIOR a que saliera nuestro POST y ANTERIOR a que llegara su respuesta. Por
+   * lo tanto la altura medida AL RECIBIR la respuesta ya es >= la altura que el
+   * facilitator vio, y `medida + validez` es >= su expiracion real.
+   *
+   * El margen extra cubre que el nodo que nos contesta vaya ATRASADO respecto del
+   * que atendio al facilitator — el unico caso en que la cota podria quedar corta.
+   * Medido sobre el pool publico de devnet (2026-07-29, 64 muestras): dispersion
+   * entre nodos de 0 bloques, y el desfasaje estructural `confirmed`↔`finalized` de
+   * 31-32 bloques. 150 bloques (~1 min) deja ~5x sobre ese piso estructural.
+   *
+   * ⚠️ Esa medicion es un PISO, no un techo: no se pudo medir un nodo degradado, y
+   * el endpoint del facilitator todavia no existe. El margen esta elegido para el
+   * caso que NO se pudo medir, no para el que si.
+   *
+   * Ganancia sobre pedirle la altura al facilitator: los dos lados de la
+   * comparacion final salen del MISMO proveedor RPC, asi que el desfasaje entre
+   * nodos se cancela en vez de sumarse.
+   */
+  private async fabricateExpiryUpperBound(intentId: string): Promise<string> {
+    const connection = getSolanaConnection();
+    let height: number;
+    try {
+      height = await connection.getBlockHeight(getSolanaCommitment());
+    } catch (err) {
+      // El pago YA OCURRIO (2xx del facilitator) pero no podemos anotar una cota
+      // honesta, y sin cota la fila no se puede escribir. NO es `SETTLE_FAILED`:
+      // afirmar que no se pago dispararia reembolso sobre un pago real.
+      throw new FacilitatorSettleError(
+        `SETTLE_SIGNED_UNRECORDED: ${intentId} — the facilitator paid but the expiry upper bound could not be measured (${errText(err)})`,
+        'unknown',
+      );
+    }
+    return String(
+      BigInt(height) +
+        BigInt(BLOCKHASH_VALIDITY_SLOTS) +
+        BigInt(FACILITATOR_HEIGHT_SKEW_MARGIN_SLOTS),
+    );
+  }
+
+  /**
+   * Camino nuevo (bandera ON): el facilitator firma y transmite. El gateway NO
+   * firma NADA, ni siquiera como fallback — un facilitator caido es un leg no
+   * liquidado, no una excusa para volver a ser camino de dinero (CD-15).
+   *
+   * ⚠️⚠️ VENTANA ABIERTA — ACA FALTA UN MARCADOR DURABLE, Y ESTE ES EL PUNTO EXACTO.
+   *
+   * La invariante I2 de WKH-307 dice que una fila `claimed` SIN firma demuestra que
+   * nunca se transmitio nada. Con el facilitator firmando eso YA NO ES CIERTO: el
+   * gateway se entera de la firma DESPUES del broadcast. Entre el POST de abajo y el
+   * `recordSignedIntent` que le sigue, la fila dice `claimed` mientras puede haber un
+   * pago real en vuelo.
+   *
+   * Si el gateway se cae en esa ventana, el reintento se salva SOLO porque la bandera
+   * sigue encendida (el facilitator dedupea por `intentId` y responde
+   * `alreadySettled`). Si la bandera se APAGO en el medio — un rollback durante un
+   * incidente, que es exactamente cuando pasa — el reintento ve `claimed`, toma el
+   * camino local y firma de nuevo: SEGUNDO PAGO REAL.
+   *
+   * Lo que falta es un estado `dispatched` escrito ANTES del POST, junto con la cota.
+   * Es un estado nuevo en la maquina, o sea migracion, y va junto con el hallazgo R-2
+   * del adversarial (mismo instante, misma escritura, distinto proceso).
+   *
+   * ⛔ CONDICION PREVIA A ENCENDER `SOLANA_SETTLE_VIA_FACILITATOR`, no a mergear.
+   *    La bandera se entrega APAGADA, asi que hoy la ventana no esta viva.
+   *    Encenderla sin el marcador la activa.
+   */
+  private async settleViaFacilitator(
+    req: SolanaSettleRequest,
+  ): Promise<SettleResult> {
+    // ⛔ Ver el bloque de arriba: el marcador `dispatched` va JUSTO ACA, antes del POST.
+    const payout = await payoutViaFacilitator({
+      intentId: req.intentId,
+      payTo: req.payTo,
+      amountAtomic: req.amountAtomic,
+      network: `solana:${getSolanaNetwork()}`,
+    });
+
+    const lastValidBlockHeight = await this.fabricateExpiryUpperBound(
+      req.intentId,
+    );
+    const signed = await recordSignedIntent({
+      intentId: req.intentId,
+      signature: payout.signature,
+      lastValidBlockHeight,
+    });
+    if (!signed.ok) {
+      // Mismo razonamiento que arriba: el pago ocurrio, la contabilidad no cerro.
+      throw new FacilitatorSettleError(
+        `SETTLE_SIGNED_UNRECORDED: ${req.intentId} (${signed.reason} — ${signed.detail})`,
+        'unknown',
+      );
+    }
+
+    // ⚠️ NO se salta a `confirmed` con el 2xx como unica evidencia (verify-before-trust,
+    // CD-5 de WKH-307). Un 2xx es lo que nos CONTARON; `confirmed` es un estado del que
+    // no se vuelve — si despues la cadena dijera `absent`, `settleAlreadyConfirmed`
+    // condena la fila para siempre. Se confirma solo con la cadena mirada.
+    const presence = await this.probeSettlementPresence({
+      signature: payout.signature,
+      payTo: req.payTo,
+      amountAtomic: req.amountAtomic,
+    });
+    if (presence.state === 'landed_ok') {
+      const confirmed = await recordConfirmedIntent({
+        intentId: req.intentId,
+        signature: payout.signature,
+      });
+      if (!confirmed.ok) {
+        log.error(
+          { intentId: req.intentId, reason: confirmed.reason },
+          'solana settle via facilitator: paid and verified on-chain but the ledger row could not be marked confirmed — accounting drift, not a payment problem',
+        );
+      }
+    } else {
+      // La fila queda en `signed` CON la cota: un retry posterior la reconcilia por
+      // `settleAlreadySigned`, que es el camino recuperable. No es un error.
+      log.warn(
+        {
+          intentId: req.intentId,
+          presence: presence.state,
+          alreadySettled: payout.alreadySettled,
+        },
+        'solana settle via facilitator: the facilitator reported success but the chain does not confirm it yet; leaving the row in `signed` so a later retry reconciles it',
+      );
+    }
+
+    log.info(
+      {
+        intentId: req.intentId,
+        signature: payout.signature,
+        alreadySettled: payout.alreadySettled,
+      },
+      'solana settle via facilitator',
+    );
+    // `alreadySettled: true` es un EXITO, no un error: es un pago que ya ocurrio.
+    return { txHash: payout.signature, success: true };
+  }
+
+  /**
+   * Pasos 4-8: construir, firmar, **PERSISTIR**, transmitir, confirmar.
+   *
+   * ⚠️ EL ORDEN ES LA INVARIANTE I2 Y NO SE PUEDE REORDENAR: la firma se persiste
+   * ANTES del broadcast, y por eso una fila `claimed` (sin firma) DEMUESTRA que nunca
+   * se transmitio nada. Si `recordSignedIntent` no aplica, la transaccion firmada se
+   * DESCARTA sin tocar la red.
+   *
+   * Se firma explicito y se transmite crudo — NO `sendAndConfirmTransaction`. Ese
+   * helper sobrescribe el blockhash y VUELVE A FIRMAR adentro, asi que es imposible
+   * conocer la firma antes de transmitir, que es justo lo que I2 necesita.
+   */
+  private async signPersistBroadcast(
+    req: SolanaSettleRequest,
+  ): Promise<SettleResult> {
     const connection = getSolanaConnection();
     const operator = getSolanaOperatorKeypair();
     const mint = new PublicKey(getSolanaUsdcMint());
     const payTo = new PublicKey(req.payTo);
     const amount = BigInt(req.amountAtomic);
+    const commitment = getSolanaCommitment();
 
     // ATAs del operator (source) y del agente payTo (destination).
     const fromAta = await getOrCreateAssociatedTokenAccount(
@@ -648,51 +849,125 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       payTo,
     );
 
-    const ix = createTransferInstruction(
-      fromAta.address,
-      toAta.address,
-      operator.publicKey,
-      amount,
-    );
-    const tx = new Transaction().add(ix);
+    const maxAttempts = resolveSignMaxAttempts();
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const ix = createTransferInstruction(
+        fromAta.address,
+        toAta.address,
+        operator.publicKey,
+        amount,
+      );
+      const tx = new Transaction().add(ix);
 
-    let signature: string;
-    try {
-      signature = await sendAndConfirmTransaction(connection, tx, [operator], {
-        commitment: getSolanaCommitment(),
+      const latest = await connection.getLatestBlockhash(commitment);
+      tx.feePayer = operator.publicKey;
+      tx.recentBlockhash = latest.blockhash;
+      tx.lastValidBlockHeight = latest.lastValidBlockHeight;
+      tx.sign(operator);
+
+      const raw = tx.signature;
+      if (!raw) {
+        throw new Error(
+          `SETTLE_SIGN_FAILED: ${req.intentId} produced no signature`,
+        );
+      }
+      const signature = base58Encode(raw);
+
+      // ── PERSIST-BEFORE-BROADCAST. Nada de lo de abajo corre si esto no aplica.
+      const persisted = await recordSignedIntent({
+        intentId: req.intentId,
+        signature,
+        lastValidBlockHeight: String(latest.lastValidBlockHeight),
       });
-    } catch (e) {
-      // ── WKH-235a (AC-1/AC-2): timeout de confirmación ≠ pago no ocurrido.
-      //    La firma existe antes de la confirmación → recuperarla y preguntarle
-      //    a la cadena ANTES de declarar SETTLE_FAILED. La validación
-      //    (monto/mint/destino) es la de `verify()` — NO se duplica acá.
-      const recovered = await this.recoverConfirmedSettle(e, tx, req);
-      if (recovered) return recovered;
-      throw e;
+      if (!persisted.ok) {
+        if (persisted.reason === 'signature_collision') {
+          // Otro intent ya persistio EXACTAMENTE esta firma: mismo mensaje bajo el
+          // mismo blockhash. Como el choque ocurre antes del broadcast, todavia no
+          // salio nada: se re-firma con blockhash fresco. Este es el bucle que
+          // reemplaza al del SDK, y es mas fuerte (durable y cross-proceso).
+          log.warn(
+            { intentId: req.intentId, attempt },
+            'solana settle: signature collision — re-signing with a fresh blockhash (nothing was broadcast)',
+          );
+          continue;
+        }
+        throw new Error(
+          `SETTLE_LEDGER_WRITE_REFUSED: ${persisted.reason} — ${persisted.detail}`,
+        );
+      }
+
+      // ── EL UNICO EFECTO IRREVERSIBLE ──
+      try {
+        await connection.sendRawTransaction(tx.serialize(), {
+          preflightCommitment: commitment,
+        });
+        await connection.confirmTransaction(
+          {
+            signature,
+            blockhash: latest.blockhash,
+            lastValidBlockHeight: latest.lastValidBlockHeight,
+          },
+          commitment,
+        );
+      } catch (e) {
+        // Timeout de confirmacion != pago no ocurrido. Ahora ademas la firma YA esta
+        // persistida, asi que aunque este proceso muera la fila queda en `signed` y
+        // el proximo retry le pregunta a la cadena en vez de adivinar.
+        const recovered = await this.recoverConfirmedSettle(e, tx, req);
+        if (recovered) return recovered;
+        throw e;
+      }
+
+      const confirmed = await recordConfirmedIntent({
+        intentId: req.intentId,
+        signature,
+      });
+      if (!confirmed.ok) {
+        // El pago OCURRIO. Perderlo seria un bug de contabilidad, no de dinero: la
+        // fila queda en `signed` con la firma correcta y el retry converge.
+        log.error(
+          { intentId: req.intentId, signature, reason: confirmed.reason },
+          'solana settle: transfer confirmed on-chain but the ledger row could not be marked confirmed — accounting drift, the payment is fine',
+        );
+      }
+      log.info(
+        { intentId: req.intentId, signature },
+        'solana settle broadcast confirmed',
+      );
+      return { txHash: signature, success: true };
     }
 
-    // Persist-before-return del seam de idempotencia (W5 lo respalda en ledger).
-    rememberIntentSignature(req.intentId, signature);
-    log.info(
-      { intentId: req.intentId, signature, payTo: req.payTo },
-      'solana settle broadcast confirmed',
+    // Agotados los intentos: fail-closed. NUNCA se transmitio nada en este camino.
+    throw new Error(
+      `SETTLE_SIGNATURE_COLLISION_EXHAUSTED: ${req.intentId} after ${maxAttempts} signing attempts`,
     );
-    return { txHash: signature, success: true };
   }
 
   /**
-   * WKH-235a (AC-1/AC-2) — self-heal del timeout de confirmación.
+   * WKH-235a (AC-1/AC-2) — self-heal del timeout de confirmación,
+   * **acotado por WKH-308 a los tres estados de la cadena**.
    *
-   * Recupera la firma-candidata del fallo y le pregunta a la cadena vía el
-   * `verify()` de esta misma clase (verify-before-trust: monto/mint/destino, sin
-   * duplicar la validación). Si la tx SÍ está confirmada y es válida, el settle
-   * fue exitoso: se registra la firma en el seam de idempotencia y se retorna
-   * como éxito (el fee ya se pagó on-chain — perderlo es un bug de
-   * contabilidad). Si no, devuelve `undefined` y el caller propaga el error
-   * original (fallo genuino, camino de hoy sin regresión).
+   * Recupera la firma-candidata del fallo y le pregunta a la cadena vía
+   * `probeSettlementPresence` (NO vía `verify()`: ése colapsa *aterrizó-y-falló* /
+   * *no está* / *este nodo no la tiene indexada* en un solo `valid:false`, y sobre esa
+   * mezcla se escribía un falso negativo en el ledger).
    *
-   * NUNCA re-broadcastea y NUNCA lanza: un fallo del RPC de verificación se
-   * degrada a "no recuperado" para no enmascarar el error original.
+   * Las tres salidas, que son el contrato de esta función:
+   *
+   *   · `landed_ok`                  ⟹ el pago SÍ ocurrió: se marca confirmado y se
+   *     retorna éxito (el fee ya salió on-chain — perderlo es un bug de contabilidad);
+   *   · `absent` / `landed_failed`   ⟹ está PROBADO que la transferencia no ocurrió:
+   *     devuelve `undefined` y el caller propaga el error original (fallo genuino,
+   *     sin regresión respecto del camino histórico);
+   *   · `unknown`                    ⟹ **LANZA** `FacilitatorSettleError` con
+   *     `valueDisposition:'unknown'`. No se afirma que el leg no se pagó, porque no lo
+   *     sabemos; la incertidumbre viaja hasta el leg, que la publica como
+   *     `SETTLE_UNKNOWN`.
+   *
+   * ⚠️ Decía *"NUNCA lanza"*. **Ya no es cierto** y el cambio es el punto de WKH-308:
+   * degradar el "no pude comprobarlo" a "no recuperado" era exactamente lo que
+   * enmascaraba el pago real. Lo que **sigue siendo cierto** es que NUNCA
+   * re-broadcastea: ninguna de las tres ramas re-transmite.
    */
   private async recoverConfirmedSettle(
     err: unknown,
@@ -708,24 +983,70 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       return undefined;
     }
 
-    let verified: VerifyResult;
-    try {
-      verified = await this.verify({
-        signature: candidate,
-        payTo: req.payTo,
-        amountAtomic: req.amountAtomic,
-      });
-    } catch (verifyErr) {
+    // ⚠️ WKH-308 — ACA VIVIA `this.verify()`, Y COLAPSABA TRES SITUACIONES EN UNA.
+    //
+    // `verify()` devuelve `{valid:false}` tanto cuando la tx aterrizo y FALLO, como
+    // cuando NO esta, como cuando **este nodo no la tiene indexada**. Las dos primeras
+    // prueban que el pago no ocurrio; la tercera no prueba nada.
+    //
+    // El daño no era plata: era CONTABILIDAD. Un settle que SI se pago se reportaba
+    // como no settleado, no se escribia el recibo del leg y la fila quedaba en `signed`
+    // — o sea que la reconciliacion leia "no se pago" sobre un pago hecho. Ese dato
+    // falso es el insumo de un job futuro que trate la fila como pendiente, y ahi si
+    // aparece el doble pago, meses despues del error.
+    //
+    // `probeSettlementPresence` es la misma fuente de tres estados que usa el resto del
+    // adapter desde WKH-307; aca solo se la reusa.
+    const presence = await this.probeSettlementPresence({
+      signature: candidate,
+      payTo: req.payTo,
+      amountAtomic: req.amountAtomic,
+    });
+
+    if (presence.state === 'unknown') {
+      // NO PUDIMOS COMPROBARLO. No se afirma que el leg no se pago: se transporta la
+      // incertidumbre con `valueDisposition:'unknown'`, que es EXACTAMENTE el mecanismo
+      // que el leg EVM ya usa (`readSettleValueDisposition`) y que el caller ya recibe
+      // hoy como `SETTLE_UNKNOWN`. No es vocabulario nuevo: es dejar de mentir donde el
+      // otro riel ya dice la verdad.
       log.warn(
         {
           intentId: req.intentId,
           signature: candidate,
-          detail: String(verifyErr),
+          detail: presence.detail,
+          // FP-2: el SINTOMA que disparó todo. Esta rama LANZA un error nuevo, asi que
+          // el `throw e` del caller nunca corre y el original no viaja solo. Y es
+          // justamente la rama que le dice al operador "andá a reconciliar contra la
+          // cadena": mandarlo sin saber si fue un timeout de confirmacion o otra cosa
+          // lo deja empezando de cero. La rama de fallo genuino ya lo loguea.
+          originalError: String(err),
         },
-        'solana settle recovery: on-chain verify threw — treating as failure',
+        'solana settle recovery: could NOT determine whether the broadcast transaction landed — reporting the leg as UNKNOWN, not as failed (asserting "not paid" here would write a false negative into the ledger)',
       );
-      return undefined;
+      throw new FacilitatorSettleError(
+        `solana settle presence unknown for ${req.intentId} (${presence.detail})`,
+        'unknown',
+      );
     }
+
+    // `absent` y `landed_failed` PRUEBAN que la transferencia no ocurrio ⟹ fallo
+    // genuino, y el caller propaga el error original.
+    //
+    // `landed_mismatch` CONSERVA la conducta previa (tambien fallo genuino), y la razon
+    // va aca y no en otro archivo: significa que una tx con ESA firma esta on-chain,
+    // sin error, pero el delta hacia `payTo` no cubre `amountAtomic`. En este flujo la
+    // tx la construimos nosotros por el monto exacto, asi que llegar aca implica que la
+    // cadena contradice lo que creemos haber firmado — no es "no se pago" ni "no se":
+    // es una contradiccion que ningun reintento automatico arregla.
+    //
+    // Se deja como fallo (y NO como `unknown`) a proposito: `unknown` significa "puede
+    // que se haya pagado, no reintentes y reconcilia", y aca SI sabemos que lo que
+    // aterrizo no es el pago que pedimos. Si alguna vez dispara en produccion, merece
+    // mirada humana antes que una regla nueva.
+    const verified: VerifyResult =
+      presence.state === 'landed_ok'
+        ? { valid: true }
+        : { valid: false, error: `presence=${presence.state}` };
 
     if (!verified.valid) {
       log.warn(
@@ -740,9 +1061,23 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       return undefined;
     }
 
-    // Pago REAL confirmado a pesar del throw → mismo persist-before-return del
-    // camino feliz (el intentId no queda sin firma asociada).
-    rememberIntentSignature(req.intentId, candidate);
+    // Pago REAL confirmado a pesar del throw. La firma YA estaba persistida (I2), asi
+    // que aca solo se marca confirmado: es contabilidad, no autorizacion. Si falla, el
+    // pago sigue siendo valido y la fila queda en `signed` con la firma correcta.
+    const confirmed = await recordConfirmedIntent({
+      intentId: req.intentId,
+      signature: candidate,
+    });
+    if (!confirmed.ok) {
+      log.error(
+        {
+          intentId: req.intentId,
+          signature: candidate,
+          reason: confirmed.reason,
+        },
+        'solana settle recovery: transfer IS confirmed on-chain but the ledger row could not be marked confirmed — accounting drift, the payment is fine',
+      );
+    }
     log.warn(
       {
         intentId: req.intentId,
@@ -755,14 +1090,53 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     return { txHash: candidate, success: true };
   }
 
+  /**
+   * Valida los TERMINOS (monto/mint/destino) sobre una tx YA PARSEADA. Puro, sin red.
+   *
+   * Se extrajo de `verify()` (AR re-review MNR-3) para que `probeSettlementPresence`
+   * pueda reusar la validacion SIN heredar el colapso de dos valores de
+   * `VerifyResult`: alli hace falta distinguir "no pude leer la tx" de "los terminos
+   * no coinciden", y `verify()` devuelve `{valid:false}` para las dos.
+   */
+  private checkTerms(
+    parsed: NonNullable<
+      Awaited<ReturnType<Connection['getParsedTransaction']>>
+    >,
+    proof: SolanaSettleProof,
+  ): { ok: true } | { ok: false; error: string } {
+    const meta = parsed.meta;
+    if (!meta) return { ok: false, error: 'transaction has no meta' };
+    const mint = getSolanaUsdcMint();
+    const required = BigInt(proof.amountAtomic);
+
+    // Delta de balance de token del owner=payTo para el mint esperado
+    // (verify-before-trust). pre/postTokenBalances son la fuente canonica.
+    const pre = meta.preTokenBalances ?? [];
+    const post = meta.postTokenBalances ?? [];
+    const balanceFor = (list: typeof post): bigint => {
+      const entry = list.find(
+        (b) => b.owner === proof.payTo && b.mint === mint,
+      );
+      return entry ? BigInt(entry.uiTokenAmount.amount) : 0n;
+    };
+    const delta = balanceFor(post) - balanceFor(pre);
+    if (delta < required) {
+      return {
+        ok: false,
+        error: `on-chain transfer ${delta} < required ${required} for ${proof.payTo}`,
+      };
+    }
+    return { ok: true };
+  }
+
   async verify(proof: SolanaSettleProof): Promise<VerifyResult> {
     const connection = getSolanaConnection();
     const parsed = await connection.getParsedTransaction(proof.signature, {
       // Deliberadamente 'confirmed' (pre-existente WKH-234) y NO
       // `getSolanaCommitment()`. REVISAR antes de mainnet / dinero real: si se
       // configura `SOLANA_COMMITMENT=finalized`, un timeout a nivel finalized se
-      // recuperaría (recoverConfirmedSettle) contra una lectura a nivel
-      // confirmed, o sea con una garantía MÁS DÉBIL que la configurada.
+      // recuperaria (recoverConfirmedSettle) contra una lectura a nivel
+      // confirmed, o sea con una garantia MAS DEBIL que la configurada.
       // Diferido en doc/sdd/185-.../work-item.md (MNR-2 del AR).
       commitment: 'confirmed',
       maxSupportedTransactionVersion: 0,
@@ -787,102 +1161,20 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
         error: 'transaction failed on-chain',
       };
     }
-
-    const mint = getSolanaUsdcMint();
-    const required = BigInt(proof.amountAtomic);
-
-    // Delta de balance de token del owner=payTo para el mint esperado
-    // (verify-before-trust). pre/postTokenBalances son la fuente canónica.
-    const pre = parsed.meta.preTokenBalances ?? [];
-    const post = parsed.meta.postTokenBalances ?? [];
-
-    const balanceFor = (list: typeof post): bigint => {
-      const entry = list.find(
-        (b) => b.owner === proof.payTo && b.mint === mint,
-      );
-      return entry ? BigInt(entry.uiTokenAmount.amount) : 0n;
-    };
-
-    const delta = balanceFor(post) - balanceFor(pre);
-    if (delta < required) {
-      return {
-        valid: false,
-        error: `on-chain transfer ${delta} < required ${required} for ${proof.payTo}`,
-      };
-    }
-    return { valid: true };
+    const terms = this.checkTerms(parsed, proof);
+    return terms.ok ? { valid: true } : { valid: false, error: terms.error };
   }
 }
 
 /**
- * TEST-ONLY — limpia el seam de idempotencia in-memory (mirror
- * `_resetWalletClient`). El reset de Connection/operator vive en
+ * TEST-ONLY — mirror de `_resetWalletClient`.
+ *
+ * WKH-307: ya no hay nada de idempotencia que limpiar en memoria (el estado vive en
+ * `a2a_solana_settle_intents`). Se CONSERVA porque `payment.test.ts` y
+ * `settle-wiring.test.ts` lo llaman, y porque el reset del cache del preflight de
+ * esquema si es estado de proceso. El reset de Connection/operator vive en
  * `chain._resetSolanaChain`.
  */
 export function _resetSolanaClients(): void {
-  _intentSignatures.clear();
-  _warnedSoftCapBreached = false;
-}
-
-/**
- * TEST-ONLY — tamaño actual del seam de idempotencia. Existe para poder assertear
- * el cap y el TTL del fix-pack P1 (hallazgo 5) sin exponer el Map.
- */
-export function _intentDedupSize(): number {
-  return _intentSignatures.size;
-}
-
-/**
- * TEST-ONLY — inserta una entrada con una antigüedad artificial, para ejercitar
- * expiración y desalojo sin depender de timers reales.
- *
- * La antigüedad se ancla al reloj del seam (`intentDedupNow`), no a `Date.now()`
- * directo: con el reloj congelado la edad que se declara acá es EXACTAMENTE la
- * que ve el desalojo (HU-196).
- */
-export function _seedIntentSignature(
-  intentId: string,
-  signature: string,
-  ageMs: number,
-): void {
-  _intentSignatures.set(intentId, {
-    signature,
-    storedAt: intentDedupNow() - ageMs,
-  });
-}
-
-/**
- * TEST-ONLY — instala el reloj del seam de dedup. Sin argumento restaura el
- * default de producción (`Date.now`).
- *
- * Existe para los tests de BORDE EXACTO (`T-CAP-4`: `edad === ventana
- * protegida`): con dos lecturas del reloj real, la edad efectiva es
- * `edad declarada + latencia del propio test` y el borde se corre. NO afloja
- * ningún assert — al contrario: con el reloj congelado el borde se ejercita
- * exacto en las dos direcciones, mientras que antes cualquier latencia >0
- * convertía el caso «en el borde» en «pasado el borde» (y el test pasaba por
- * el motivo equivocado, o fallaba).
- */
-export function _setIntentDedupClock(clock?: IntentDedupClock): void {
-  _intentDedupClock = clock ?? Date.now;
-}
-
-/**
- * TEST-ONLY — política vigente del seam (AR MENOR-1). Se expone para poder
- * assertear la RELACIÓN entre el piso del knob y la cota estimada de vida de un
- * run sin re-derivar los números en el test (que fue justamente cómo el work-item
- * terminó afirmando una garantía que el código no da).
- */
-export function _intentDedupPolicy(): {
-  ttlMs: number;
-  protectedWindowMs: number;
-  maxEntries: number;
-  estimatedMaxRunWallClockMs: number;
-} {
-  return {
-    ttlMs: resolveIntentTtlMs(),
-    protectedWindowMs: resolveProtectedWindowMs(),
-    maxEntries: resolveMaxIntentEntries(),
-    estimatedMaxRunWallClockMs: ESTIMATED_MAX_RUN_WALL_CLOCK_MS,
-  };
+  _resetSolanaSchemaPreflight();
 }

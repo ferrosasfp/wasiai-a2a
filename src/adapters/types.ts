@@ -126,6 +126,86 @@ export interface SolanaSettleProof {
   payTo: string;
   amountAtomic: string;
 }
+/**
+ * WKH-307 (AR BLQ-MEDIO-1) — PRESENCIA ON-CHAIN de una firma ya transmitida.
+ *
+ * ⚠️ POR QUE ESTE TIPO EXISTE, Y POR QUE TIENE CINCO ESTADOS Y NO DOS.
+ *
+ * Este es el veredicto del que cuelga la decision de RE-TRANSMITIR un SPL transfer.
+ * En Solana no hay backstop on-chain: si se re-transmite algo que ya aterrizo, el
+ * agente cobra dos veces y no hay forma de deshacerlo.
+ *
+ * El error que este tipo hace IMPOSIBLE: tratar un `null` de RPC como prueba de
+ * ausencia. Un `getParsedTransaction` que devuelve `null` puede significar
+ * "no existe", pero tambien "este nodo no tiene ese historico", "este nodo va
+ * atrasado" o "el indice esta degradado". Con un `boolean` (o un `T | null`) los
+ * cuatro colapsan en el mismo `false`, y el call-site no puede distinguir
+ * *"probado que no aterrizo"* de *"no pude preguntar"* — que en un camino de dinero
+ * son OPUESTOS: el primero autoriza re-pagar, el segundo obliga a fail-closear.
+ *
+ * REGLA GENERAL (vale para cualquier consulta a un sistema externo): toda pregunta
+ * tiene TRES respuestas, no dos — **esta / no esta / no pude preguntar**. Si el tipo
+ * no tiene el tercero, el tercero ya se perdio en el diseño y todo call-site aguas
+ * abajo lo va a colapsar mal.
+ *
+ * La determinacion NEGATIVA (`absent`) exige que el nodo haya RESPONDIDO habiendo
+ * buscado en el historico (`getSignatureStatuses` con `searchTransactionHistory`),
+ * no la ausencia de un parseo.
+ *
+ * ⚠️ HASTA DONDE LLEGA `absent`, DICHO SIN INFLAR (AR re-review MNR-1). NO es una
+ * "prueba de ausencia" absoluta: `searchTransactionHistory` obliga al nodo a mirar su
+ * almacenamiento de largo plazo — **el que ESE nodo tiene**. Un validador sin
+ * `--enable-rpc-bigtable-ledger-storage`, o sin el rango de ledger correspondiente,
+ * devuelve `null` igual sobre una tx que SI existe, y desde la respuesta **no hay
+ * forma de distinguir** "busque en todo el historial" de "busque hasta donde tengo".
+ *
+ * Lo que `absent` significa de verdad: **este nodo, buscando en lo que tiene, no
+ * conoce esta firma.**
+ *
+ * Por eso `absent` NO autoriza por si solo: el codigo exige ADEMAS la prueba de
+ * expiracion del blockhash. Y la precondicion de despliegue —el endpoint tiene que
+ * retener historico— se verifica en el preflight de arranque
+ * (`schema-preflight.ts`), en vez de quedar como un supuesto tacito.
+ */
+export type SettlementPresence =
+  /** Aterrizo y cumple los terminos (monto/mint/destino). NO re-transmitir. */
+  | { state: 'landed_ok' }
+  /**
+   * Aterrizo y FALLO on-chain. La transferencia NO ocurrio y esa firma es terminal
+   * (una tx fallida ya esta grabada: nunca puede volver a ejecutarse), asi que
+   * re-pagar con una firma nueva es correcto.
+   */
+  | { state: 'landed_failed'; detail: string }
+  /**
+   * Aterrizo pero NO cumple los terminos. Algo se movio con esa firma: re-pagar
+   * seria pagar dos veces por cosas distintas. Fail-closed, requiere mirada humana.
+   */
+  | { state: 'landed_mismatch'; detail: string }
+  /** El nodo RESPONDIO, buscando en el historico, y no la conoce. Prueba de ausencia. */
+  | { state: 'absent' }
+  /** No se pudo preguntar. NUNCA autoriza re-transmitir. */
+  | { state: 'unknown'; detail: string };
+
+/**
+ * WKH-307 — resultado del peek de idempotencia.
+ *
+ * ⚠️ POR QUE UNA UNION Y NO `string | undefined`: el retorno anterior COLAPSABA
+ * *"no se pago"* con *"no se si se pago"*, que en un camino de dinero son OPUESTOS.
+ * El primero autoriza a cortar por fondos insuficientes; el segundo obliga a
+ * fail-closear y a decir POR QUE. Con la union el caller distingue y loguea distinto.
+ *
+ * `unknown` es el traductor del fallo: el peek NUNCA lanza, un store mudo llega aca.
+ */
+export type SettledPeek =
+  /** No hay reclamo para este intent. */
+  | { state: 'none' }
+  /** Confirmado y con firma: ya se pago. */
+  | { state: 'settled'; signature: string }
+  /** Reclamado por alguien (o firmado) pero sin confirmar. */
+  | { state: 'in_progress' }
+  /** El store no respondio. NO significa "no se pago". */
+  | { state: 'unknown' };
+
 export interface SolanaPaymentAdapter extends PaymentAdapterCommon {
   readonly vmFamily: 'solana';
   readonly caip2ChainId: string; // DT-1: `solana:<genesis-prefix>` (NO chainId:number)
@@ -154,12 +234,12 @@ export interface SolanaPaymentAdapter extends PaymentAdapterCommon {
    * balance ya había bajado por haber pagado ese mismo leg ⇒ un leg PAGADO se
    * reportaba como no pagado (sin recibo ni `settle_signature`).
    *
-   * Lectura PURA en memoria (CD-7: sin services/DB, sin RPC, sin I/O): NUNCA
-   * lanza y NUNCA es autoritativa sobre el pago — la validación
-   * verify-before-trust de la firma previa sigue siendo responsabilidad de
+   * WKH-307: pasa a ASINCRONO (el registro dejo de ser un `Map` de proceso y paso a
+   * una tabla) y a UNION DISCRIMINADA. NUNCA lanza y NUNCA es autoritativa sobre el
+   * pago — la validacion verify-before-trust sigue siendo responsabilidad de
    * `settle()`.
    */
-  getSettledSignature(intentId: string): string | undefined;
+  getSettledSignature(intentId: string): Promise<SettledPeek>;
 }
 
 export type PaymentAdapter = EvmPaymentAdapter | SolanaPaymentAdapter;

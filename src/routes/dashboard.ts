@@ -579,6 +579,19 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
    * payment intents y por lo tanto no tienen dónde escribir un `settle_outcome`. Va
    * ANIDADO dentro de `ambiguous` a propósito: dos listas hermanas de plata retenida se
    * miran por turnos y una de las dos termina sin mirar. Ver `SettleUnknownEventRow`.
+   *
+   * HU-306 suma `ambiguous.strandedRuns`: los runs de `/compose` que fallaron DESPUÉS de
+   * que algún step YA cobró on-chain. Es plata que salió y NO vuelve, y hasta esta HU su
+   * única evidencia (`StepResult.downstreamTxHash`) moría con la respuesta HTTP.
+   *
+   * ⚠️ ES OTRA PREGUNTA que `settleUnknown`, y por eso es otra lista (CD-8): allá el
+   * settle quedó SIN RESOLVER y hay que ir a mirar la cadena; acá el settle SE CONFIRMÓ
+   * y no hay nada que reconciliar — la acción humana es contar, ver si crece y decidir si
+   * hace falta un techo por pipeline. Mezclarlas obligaría al operador a separar a mano
+   * dos acciones opuestas. Ver `StrandedRunRow` en `services/reconciliation.ts`.
+   *
+   * SOLO LECTURA, como el resto de este endpoint: cero remediación automática (AC-7).
+   * El handler NO cambia — la lista viaja anidada en el mismo objeto `ambiguous`.
    */
   fastify.get(
     '/api/reconciliation',

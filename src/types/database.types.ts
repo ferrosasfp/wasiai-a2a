@@ -1045,6 +1045,68 @@ export type Database = {
         };
         Relationships: [];
       };
+      /**
+       * WKH-307 — dedup durable del settle Solana.
+       *
+       * `amount_atomic` y `last_valid_block_height` son `string` a propósito
+       * (convención WKH-196): PostgREST devuelve `NUMERIC` como número JSON y
+       * `JSON.parse` redondea por encima de 2^53. Sin `owner_ref` ni RLS: es dedup
+       * global del gateway, no un objeto de un tenant (ver el `COMMENT ON TABLE`).
+       */
+      a2a_solana_settle_intents: {
+        Row: {
+          amount_atomic: string;
+          attempts: number;
+          caip2: string;
+          claimed_at: string;
+          confirmed_at: string | null;
+          created_at: string;
+          expired_signatures: string[];
+          intent_id: string;
+          last_valid_block_height: string | null;
+          mint: string;
+          pay_to: string;
+          settle_signature: string | null;
+          signed_at: string | null;
+          status: string;
+          updated_at: string;
+        };
+        Insert: {
+          amount_atomic: string;
+          attempts?: number;
+          caip2: string;
+          claimed_at?: string;
+          confirmed_at?: string | null;
+          created_at?: string;
+          expired_signatures?: string[];
+          intent_id: string;
+          last_valid_block_height?: string | null;
+          mint: string;
+          pay_to: string;
+          settle_signature?: string | null;
+          signed_at?: string | null;
+          status?: string;
+          updated_at?: string;
+        };
+        Update: {
+          amount_atomic?: string;
+          attempts?: number;
+          caip2?: string;
+          claimed_at?: string;
+          confirmed_at?: string | null;
+          created_at?: string;
+          expired_signatures?: string[];
+          intent_id?: string;
+          last_valid_block_height?: string | null;
+          mint?: string;
+          pay_to?: string;
+          settle_signature?: string | null;
+          signed_at?: string | null;
+          status?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       a2a_refund_outbox: {
         Row: {
           amount_usd: number;
@@ -2796,6 +2858,71 @@ export type Database = {
       };
     };
     Functions: {
+      /**
+       * WKH-307 — las 4 transiciones del ledger de settle Solana.
+       *
+       * Las cuatro devuelven LA MISMA fila a propósito: un solo consumo en TS y, sobre
+       * todo, una migración futura puede `CREATE OR REPLACE` sin `DROP` y sin la
+       * ventana de schema-cache de PostgREST (`PGRST202`).
+       *
+       * `last_valid_block_height` viaja como `string` (WKH-196, ver la tabla).
+       */
+      claim_solana_settle_intent: {
+        Args: {
+          p_intent_id: string;
+          p_caip2: string;
+          p_pay_to: string;
+          p_amount_atomic: string;
+          p_mint: string;
+          p_lease_ms: number;
+          p_probe?: boolean;
+        };
+        Returns: {
+          applied: boolean;
+          outcome: string;
+          status: string | null;
+          settle_signature: string | null;
+          last_valid_block_height: string | null;
+          attempts: number | null;
+        }[];
+      };
+      record_solana_settle_signed: {
+        Args: {
+          p_intent_id: string;
+          p_signature: string;
+          p_last_valid_block_height: string;
+        };
+        Returns: {
+          applied: boolean;
+          outcome: string;
+          status: string | null;
+          settle_signature: string | null;
+          last_valid_block_height: string | null;
+          attempts: number | null;
+        }[];
+      };
+      record_solana_settle_confirmed: {
+        Args: { p_intent_id: string; p_signature: string };
+        Returns: {
+          applied: boolean;
+          outcome: string;
+          status: string | null;
+          settle_signature: string | null;
+          last_valid_block_height: string | null;
+          attempts: number | null;
+        }[];
+      };
+      reclaim_solana_settle_intent: {
+        Args: { p_intent_id: string; p_signature: string };
+        Returns: {
+          applied: boolean;
+          outcome: string;
+          status: string | null;
+          settle_signature: string | null;
+          last_valid_block_height: string | null;
+          attempts: number | null;
+        }[];
+      };
       claim_agent_link: {
         Args: { p_token_hash: string };
         Returns: {

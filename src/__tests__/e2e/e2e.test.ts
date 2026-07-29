@@ -322,6 +322,36 @@ describe('E2E', () => {
       expect(body).toHaveProperty('uptime');
       expect(typeof body.uptime).toBe('number');
     });
+
+    // HU-306 (AC-5 / T-HEALTH-SHAPE)
+    it('T-HEALTH-SHAPE: sin umbral configurado el campo de exposición NO aparece, y `status` sigue intacto', async () => {
+      delete process.env.STRANDED_EXPOSURE_ALERT_THRESHOLD_USD;
+      const res = await app.inject({ method: 'GET', url: '/health' });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // El `healthyField` que el monitor lee para decidir "arriba/abajo" no se toca.
+      expect(body).toHaveProperty('status', 'ok');
+      // Feature OFF ⟹ campo AUSENTE (no `false`): "no se computó" y "se computó y no hay
+      // breach" son cosas distintas y no se escriben igual.
+      expect(body).not.toHaveProperty('strandedExposureBreached');
+    });
+
+    it('T-HEALTH-SHAPE: con umbral configurado el campo aparece y es ADITIVO', async () => {
+      process.env.STRANDED_EXPOSURE_ALERT_THRESHOLD_USD = '25';
+      try {
+        const res = await app.inject({ method: 'GET', url: '/health' });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body).toHaveProperty('status', 'ok');
+        expect(body).toHaveProperty('uptime');
+        expect(body).toHaveProperty('strandedExposureBreached');
+        // Recién arrancado y sin snapshot: 'unknown' (truthy ⟹ el monitor alerta como
+        // degradado). NUNCA `false`, que afirmaría que no hay breach sin haberlo mirado.
+        expect(body.strandedExposureBreached).toBe('unknown');
+      } finally {
+        delete process.env.STRANDED_EXPOSURE_ALERT_THRESHOLD_USD;
+      }
+    });
   });
 
   // ── Bearer auth on /auth/me (WKH-BEARER-FIX AC-8) ────────
