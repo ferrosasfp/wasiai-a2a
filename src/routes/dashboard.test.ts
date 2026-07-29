@@ -169,17 +169,20 @@ describe('AC-3/AC-4: env + docs naming drift', () => {
     expect(env).toContain('SUPABASE_SERVICE_KEY');
   });
 
-  it('AC-4: project-context.md references SUPABASE_SERVICE_KEY (not _ROLE_) for the runtime var', () => {
-    const ctx = readFileSync(
-      resolve(root, '.nexus/project-context.md'),
-      'utf-8',
-    );
-    expect(ctx).not.toContain('SUPABASE_SERVICE_ROLE_KEY=sb_secret_');
-  });
-
-  it('AC-4: CLAUDE.md runtime var reference uses SUPABASE_SERVICE_KEY', () => {
-    const claude = readFileSync(resolve(root, 'CLAUDE.md'), 'utf-8');
-    expect(claude).toContain('SUPABASE_SERVICE_KEY');
+  // AC-4 apunta a la documentación que un integrador realmente sigue, y que
+  // está versionada. Antes leía dos archivos de proceso interno que salieron
+  // del repo al hacerlo público: el test se caía por la ausencia del archivo,
+  // no por drift, que es la peor forma de fallar (ruido que tapa la señal).
+  it('AC-4: la doc versionada nombra SUPABASE_SERVICE_KEY, no la variante _ROLE_', () => {
+    for (const rel of ['README.md', '.env.example']) {
+      const doc = readFileSync(resolve(root, rel), 'utf-8');
+      expect(doc, `${rel} debe documentar la var de runtime`).toContain(
+        'SUPABASE_SERVICE_KEY',
+      );
+      expect(doc, `${rel} no debe usar el nombre viejo`).not.toContain(
+        'SUPABASE_SERVICE_ROLE_KEY=sb_secret_',
+      );
+    }
   });
 });
 
