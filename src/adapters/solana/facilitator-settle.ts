@@ -51,10 +51,29 @@ export interface PayoutViaFacilitatorResult {
 /**
  * Códigos del facilitator que prueban que NO hubo gasto (§2.6 / §6.3).
  *
- * LISTA CERRADA POR CONSTRUCCIÓN: es exactamente el conjunto de resultados
- * terminales en los que el facilitator libera la reserva del tope diario. No la
- * amplíes "por si acaso": mover un código a esta lista convierte una incógnita en
- * un "no se pagó", que es el veredicto que dispara reembolso y re-envío.
+ * ⚠️ EL CRITERIO NO ES "¿el facilitator liberó su reserva?" — eso decía este
+ * comentario y ERA FALSO (AR menor). `PAYOUT_IN_PROGRESS` libera la reserva y NO
+ * está en esta lista, correctamente. Quien "arregle" esa inconsistencia siguiendo
+ * la regla escrita metería acá justo el código que significa **"otro request puede
+ * estar pagando ahora mismo"**, y eso es un doble pago.
+ *
+ * EL CRITERIO REAL, y el único que importa: **este código, ¿demuestra que el
+ * INTENT no fue pagado?** No "¿falló este request?" — son cosas distintas. Un
+ * request puede fallar sobre un intent que ya está pagado o pagándose.
+ *
+ * Por eso NO están acá:
+ *  · `PAYOUT_IN_PROGRESS`      — otro intento puede estar pagando.
+ *  · `PAYOUT_BROADCAST_FAILED` — se transmitió y no se pudo confirmar.
+ *  · `PAYOUT_BROADCAST_UNKNOWN`— se transmitió; suerte indeterminada.
+ *  · `PAYOUT_STORE_UNAVAILABLE`— (AR BLQ-3) el ledger del facilitator se cayó.
+ *    Responde sobre ESTE request, no sobre el intent: se emite con el ledger
+ *    caído (donde el intent puede estar pagado de antes) y también cuando el
+ *    perdedor de un CAS pierde mientras el ganador transmite.
+ *
+ * `PAYOUT_BROADCAST_EXPIRED` SÍ está, y sólo es legítimo porque el facilitator
+ * garantiza que ya no lo emite después de un envío exitoso (ahí usa
+ * `PAYOUT_BROADCAST_UNKNOWN`). Esa garantía tiene test propio del lado del
+ * facilitator; si alguna vez se rompe, este código tiene que salir de la lista.
  *
  * Exportada para que el test la pueda leer y para que un agregado quede visible.
  */
@@ -67,7 +86,6 @@ export const PAYOUT_NO_SPEND_CODES = new Set([
   'PAYOUT_DAILY_CAP',
   'PAYOUT_FUNDING_LOW',
   'PAYOUT_RPC_UNAVAILABLE',
-  'PAYOUT_STORE_UNAVAILABLE',
   'PAYOUT_INTENT_CONFLICT',
   'PAYOUT_BROADCAST_EXPIRED',
 ] as const);

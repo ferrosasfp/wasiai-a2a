@@ -163,6 +163,31 @@ describe('T-AC10 — disposición DEFINIDA (sabemos que no se gastó)', () => {
     }
   });
 
+  it('★ AR BLQ-3: PAYOUT_STORE_UNAVAILABLE ⇒ unknown, NO "no se gastó"', async () => {
+    // Ese código responde sobre ESTE request; la pregunta del gateway es sobre el
+    // INTENT. Se emite con el ledger caído (donde el intent puede estar pagado de
+    // antes) y también cuando el perdedor de un CAS pierde mientras el ganador
+    // transmite. Tratarlo como prueba de no-gasto dispara reembolso sobre un pago
+    // que existe.
+    fetchSpy.mockResolvedValue(
+      jsonResponse(500, { error: { code: 'PAYOUT_STORE_UNAVAILABLE' } }),
+    );
+    const e = await catchPayout();
+    expect(readSettleValueDisposition(e)).toBe('unknown');
+    expect(PAYOUT_NO_SPEND_CODES.has('PAYOUT_STORE_UNAVAILABLE' as never)).toBe(
+      false,
+    );
+  });
+
+  it('★ PAYOUT_BROADCAST_UNKNOWN (código nuevo del facilitator) ⇒ unknown por default', async () => {
+    // No hace falta que el gateway lo conozca: la regla de default lo pone del
+    // lado seguro solo. Ésa es la propiedad que hace segura la lista cerrada.
+    fetchSpy.mockResolvedValue(
+      jsonResponse(502, { error: { code: 'PAYOUT_BROADCAST_UNKNOWN' } }),
+    );
+    expect(readSettleValueDisposition(await catchPayout())).toBe('unknown');
+  });
+
   it('★ PAYOUT_FUNDING_LOW ⇒ not-sent (se traduce a INSUFFICIENT_BALANCE aguas abajo)', async () => {
     fetchSpy.mockResolvedValue(
       jsonResponse(503, { error: { code: 'PAYOUT_FUNDING_LOW' } }),

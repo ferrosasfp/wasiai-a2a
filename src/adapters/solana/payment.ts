@@ -11,6 +11,10 @@ import {
 import { usdToAtomicUnits } from '../../lib/atomic-amount.js';
 import { MAX_COMPOSE_STEPS } from '../../lib/compose-limits.js';
 import { getLogger } from '../../lib/logger.js';
+// Transporta la disposición del valor ('unknown') cuando no se pudo determinar si
+// un pago previo existe — así `downstream-payment.ts` reporta SETTLE_UNKNOWN en vez
+// de afirmar que el leg no se pagó.
+import { FacilitatorSettleError } from '../errors.js';
 import type {
   SolanaPaymentAdapter as ISolanaPaymentAdapter,
   QuoteResult,
@@ -371,6 +375,15 @@ function rememberIntentSignature(intentId: string, signature: string): void {
  * Lectura del seam. Una entrada EXPIRADA se trata como ausente (y se borra):
  * devolver una firma vencida sería peor que no tenerla.
  */
+/**
+ * ¿La cadena DEMOSTRÓ que ese pago no está? Sólo entonces se puede auto-curar el
+ * seam de idempotencia y volver a emitir. "No pude determinarlo" no alcanza: es
+ * exactamente la confusión que hace pagar dos veces.
+ */
+function isProvenAbsent(result: VerifyResult): boolean {
+  return result.valid === false && result.indeterminate !== true;
+}
+
 function recallIntentSignature(intentId: string): string | undefined {
   const entry = _intentSignatures.get(intentId);
   if (!entry) return undefined;
@@ -522,11 +535,23 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       // degrada a "no recuperado"). Con el RPC caído, un retry de un intentId ya
       // conocido lanza en vez de degradar. Hay que decidir si debe degradar igual
       // o propagar a propósito — ver doc/sdd/185-wkh-235a-solana-settle-idempotency-durable/work-item.md
-      const verified = await this.verify({
-        signature: prior,
-        payTo: req.payTo,
-        amountAtomic: req.amountAtomic,
-      });
+      let verified: VerifyResult;
+      try {
+        verified = await this.verify({
+          signature: prior,
+          payTo: req.payTo,
+          amountAtomic: req.amountAtomic,
+        });
+      } catch (e) {
+        // El RPC no contestó. NO es evidencia de que el pago previo no exista, así
+        // que ni se re-emite ni se afirma que falló: incógnita explícita.
+        throw new FacilitatorSettleError(
+          `Could not verify the prior signature for intent ${req.intentId}: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+          'unknown',
+        );
+      }
       if (verified.valid) {
         log.info(
           { intentId: req.intentId, signature: prior },
@@ -534,7 +559,31 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
         );
         return { txHash: prior, success: true };
       }
-      // Firma previa no verifica → limpiar y re-emitir (self-heal).
+      // ⚠️ 4º SITIO DE LA MISMA CAUSA RAÍZ — arreglado a medias A PROPÓSITO.
+      //
+      // ARREGLADO acá: si el RPC LANZA (arriba), ya no se propaga como un fallo
+      // genérico ni se re-emite: se reporta incógnita. Eso cierra el caso donde
+      // literalmente no se pudo preguntar.
+      //
+      // NO ARREGLADO, y reportado: `verify()` devuelve `valid:false` tanto cuando
+      // la cadena dice "esa tx falló" como cuando `getParsedTransaction` devuelve
+      // `null` — y `null` también lo da un nodo sin ese pedazo de historia, uno
+      // atrasado o un índice degradado. En ese caso este camino borra el seam y
+      // vuelve a pagar, con la bandera OFF (el camino por defecto hoy) y sin más
+      // barrera que el Map que se acaba de borrar.
+      //
+      // No se cambia acá porque el self-heal ante `valid:false` es una decisión de
+      // diseño de WKH-235a con tests que la fijan (T-HEAL-1/2, T-P1-2a): apagarla
+      // requiere ticket. `isProvenAbsent` deja el mecanismo listo para cuando se
+      // decida — hoy nadie setea `indeterminate`, así que el comportamiento es el
+      // de siempre salvo por el caso del throw.
+      if (!isProvenAbsent(verified)) {
+        throw new FacilitatorSettleError(
+          `Prior signature for intent ${req.intentId} could not be determined on-chain — refusing to re-emit`,
+          'unknown',
+        );
+      }
+      // Firma previa demostradamente ausente → limpiar y re-emitir (self-heal).
       _intentSignatures.delete(req.intentId);
     }
 
@@ -718,10 +767,24 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       commitment: 'confirmed',
       maxSupportedTransactionVersion: 0,
     });
-    if (!parsed?.meta || parsed.meta.err) {
+    if (!parsed?.meta) {
+      // ⚠️ HALLAZGO ABIERTO (reportado, NO arreglado acá — ver el comentario del
+      // self-heal en `settle()`). `null` es la respuesta MÁS DÉBIL: además de "no
+      // existe" puede ser un nodo sin ese pedazo de historia, uno atrasado o un
+      // índice degradado. Marcarlo `indeterminate` acá APAGA el self-heal de
+      // WKH-235a, que está deliberadamente testeado (T-HEAL-1/2, T-P1-2a), así que
+      // flipearlo es una decisión de alcance con ticket propio, no un fix suelto.
+      // Se deja el mensaje distinguible para que el follow-up sea preciso.
       return {
         valid: false,
-        error: 'transaction not found or failed on-chain',
+        error: 'transaction not found on the queried node',
+      };
+    }
+    if (parsed.meta.err) {
+      // La cadena RESPONDIÓ: la tx se ejecutó y falló ⇒ negativa demostrada.
+      return {
+        valid: false,
+        error: 'transaction failed on-chain',
       };
     }
 

@@ -70,6 +70,7 @@ vi.mock('@solana/web3.js', async (importOriginal) => {
   };
 });
 
+import { readSettleValueDisposition } from '../errors.js';
 import { _resetSolanaClients, SolanaPaymentAdapter } from './payment.js';
 
 const savedEnv = new Map<string, string | undefined>();
@@ -118,6 +119,10 @@ beforeEach(() => {
   mockSendAndConfirm.mockClear();
   mockGetOperatorKeypair.mockClear();
   mockGetOrCreateAta.mockClear();
+  // Estado del RPC por test: si no se resetea, el mock de un caso (null / throw /
+  // tx fallida) se filtra al siguiente y el orden pasa a decidir el resultado.
+  fakeConnection.getParsedTransaction.mockReset();
+  fakeConnection.getParsedTransaction.mockResolvedValue(null);
   fetchSpy = vi.spyOn(globalThis, 'fetch');
 });
 
@@ -230,6 +235,65 @@ describe('T-AC4 — con la bandera ausente todo es idéntico a pre-302', () => {
     await adapter.settle(settleReq('run-shared:0'));
     expect(adapter.getSettledSignature('run-shared:0')).toBe(FACILITATOR_SIG);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('AR 4º sitio — el seam de idempotencia no se borra ante un RPC que no contesta', () => {
+  // Hallazgo propio, en el camino LEGADO (bandera OFF), que es el de producción hoy.
+  // `verify()` devolvía `valid:false` tanto cuando la cadena dice "esa tx falló"
+  // como cuando `getParsedTransaction` devuelve `null` — y `null` puede ser un nodo
+  // sin ese pedazo de historia, uno atrasado o un índice degradado. Con `valid:false`
+  // el código BORRABA el seam y volvía a firmar: doble pago, con la única barrera
+  // (el Map en memoria) recién eliminada.
+
+  it('★ un RPC que LANZA no borra el seam ni re-emite', async () => {
+    const adapter = new SolanaPaymentAdapter();
+    await adapter.settle(settleReq('run-idem3:0'));
+    fakeConnection.getParsedTransaction.mockRejectedValue(
+      new Error('RPC down'),
+    );
+    try {
+      await adapter.settle(settleReq('run-idem3:0'));
+      expect.unreachable('debería haber lanzado');
+    } catch (e) {
+      expect(readSettleValueDisposition(e)).toBe('unknown');
+    }
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+    expect(adapter.getSettledSignature('run-idem3:0')).toBe(LOCAL_SIG);
+  });
+
+  it('control: una negativa DEMOSTRADA (tx falló on-chain) SÍ se auto-cura', async () => {
+    // Desarmar el escenario tiene que cambiar el resultado: si la cadena responde
+    // que esa tx se ejecutó y falló, re-emitir es lo correcto. Sin este control, el
+    // fix podría estar bloqueando TODO retry y los tests de arriba pasarían igual.
+    const adapter = new SolanaPaymentAdapter();
+    await adapter.settle(settleReq('run-idem4:0'));
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(1);
+
+    fakeConnection.getParsedTransaction.mockResolvedValue({
+      meta: {
+        err: { InstructionError: [0, 'Custom'] },
+        preTokenBalances: [],
+        postTokenBalances: [],
+      },
+    });
+    const res = await adapter.settle(settleReq('run-idem4:0'));
+    expect(res.success).toBe(true);
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(2); // re-emitió, correctamente
+  });
+
+  it('DOCUMENTA EL HALLAZGO ABIERTO: un `null` del nodo todavía re-emite', async () => {
+    // Este test NO celebra el comportamiento: lo FIJA para que el follow-up sea
+    // visible y para que nadie crea que el 4º sitio quedó cerrado. `null` también
+    // lo devuelve un nodo atrasado o sin ese pedazo de historia, y ahí esto es un
+    // doble pago. Apagarlo toca el self-heal de WKH-235a (T-HEAL-1/2, T-P1-2a),
+    // que tiene tests propios: requiere ticket, no un fix suelto.
+    const adapter = new SolanaPaymentAdapter();
+    await adapter.settle(settleReq('run-idem5:0'));
+    fakeConnection.getParsedTransaction.mockResolvedValue(null);
+    const res = await adapter.settle(settleReq('run-idem5:0'));
+    expect(res.success).toBe(true);
+    expect(mockSendAndConfirm).toHaveBeenCalledTimes(2); // ← el riesgo, documentado
   });
 });
 

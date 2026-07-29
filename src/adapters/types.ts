@@ -28,6 +28,18 @@ export interface X402Proof {
 export interface VerifyResult {
   valid: boolean;
   error?: string | undefined;
+  /**
+   * `true` cuando NO se pudo determinar el estado on-chain (RPC caído, la tx no
+   * aparece en el nodo consultado, respuesta ilegible) — a diferencia de una
+   * negativa DEMOSTRADA (la tx se ejecutó y falló, o acreditó de menos).
+   *
+   * ⚠️ Existe porque `valid: boolean` tiene dos valores y la pregunta tiene TRES:
+   * está / no está / no pude preguntar. Sin este campo, todo call-site lee
+   * `valid:false` y colapsa "no sé" con "no", que en un camino de dinero autoriza
+   * volver a pagar algo ya pagado. Campo OPCIONAL y aditivo: los adapters que no
+   * lo setean se comportan igual que siempre.
+   */
+  indeterminate?: boolean | undefined;
 }
 export interface QuoteResult {
   amountWei: string;
