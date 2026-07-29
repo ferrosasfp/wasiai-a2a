@@ -46,18 +46,18 @@ vi.mock('../middleware/a2a-key.js', () => ({
   requirePaymentOrA2AKey: () => [
     async (request: FastifyRequest, _reply: FastifyReply) => {
       (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = nextKeyRow;
-      (
-        request as unknown as { delegationContext: unknown }
-      ).delegationContext = nextDelegationContext;
-      (
-        request as unknown as { keySessionContext: unknown }
-      ).keySessionContext = nextKeySessionContext;
+      (request as unknown as { delegationContext: unknown }).delegationContext =
+        nextDelegationContext;
+      (request as unknown as { keySessionContext: unknown }).keySessionContext =
+        nextKeySessionContext;
       (request as unknown as { resolvedChainId: unknown }).resolvedChainId =
         2368;
     },
   ],
 }));
-vi.mock('../middleware/forward-key.js', () => ({ requireForwardKey: () => [] }));
+vi.mock('../middleware/forward-key.js', () => ({
+  requireForwardKey: () => [],
+}));
 vi.mock('../middleware/timeout.js', () => ({
   createTimeoutHandler: () => async () => {
     /* no-op */
@@ -92,9 +92,11 @@ vi.mock('./fee-charge.js', async () => {
     await vi.importActual<typeof import('./fee-charge.js')>('./fee-charge.js');
   return {
     ...actual,
-    chargeProtocolFee: vi
-      .fn()
-      .mockResolvedValue({ status: 'skipped', feeUsdc: 0, reason: 'WALLET_UNSET' }),
+    chargeProtocolFee: vi.fn().mockResolvedValue({
+      status: 'skipped',
+      feeUsdc: 0,
+      reason: 'WALLET_UNSET',
+    }),
     getProtocolFeeRate: vi.fn().mockReturnValue(0.01),
   };
 });
@@ -300,7 +302,10 @@ afterEach(async () => {
 /** Emite un quote real con el módulo de producción. */
 function issueQuote(
   steps: { agent: string; registry: string | null; priceUsdc: number }[],
-  over: { caller?: Parameters<typeof signQuote>[0]['caller']; nowMs?: number } = {},
+  over: {
+    caller?: Parameters<typeof signQuote>[0]['caller'];
+    nowMs?: number;
+  } = {},
 ): string {
   const signed = signQuote({
     orchestrationId: 'plan-b',
@@ -328,7 +333,9 @@ describe('WKH-303 — el saldo se mueve EXACTAMENTE por el precio congelado', ()
     withAgents([a1]);
     mockPrice.mockResolvedValue(0.09); // el vivo, más caro
     mockFetchOk();
-    const quote = issueQuote([{ agent: 'a1', registry: 'wasiai', priceUsdc: 0.05 }]);
+    const quote = issueQuote([
+      { agent: 'a1', registry: 'wasiai', priceUsdc: 0.05 },
+    ]);
 
     const antes = balanceUsd;
     const res = await execute({
@@ -409,7 +416,9 @@ describe('WKH-303 — el saldo se mueve EXACTAMENTE por el precio congelado', ()
     withAgents([a1]);
     mockPrice.mockResolvedValue(0.01); // el vivo, más barato
     mockFetchOk();
-    const quote = issueQuote([{ agent: 'a1', registry: 'wasiai', priceUsdc: 0.05 }]);
+    const quote = issueQuote([
+      { agent: 'a1', registry: 'wasiai', priceUsdc: 0.05 },
+    ]);
 
     const antes = balanceUsd;
     const res = await execute({
@@ -428,6 +437,51 @@ describe('WKH-303 — el saldo se mueve EXACTAMENTE por el precio congelado', ()
     expect(debitCalls).toHaveLength(1);
     expect(debitCalls[0]!.amountUsd).toBeCloseTo(0.05, 8);
     expect(debitCalls[0]!.amountUsd).not.toBeCloseTo(0.01, 6);
+  });
+
+  // T-Q-B3b — AC-2 (§3.4). El caso que le faltaba a T-Q-B3: la simetría del freeze en
+  // los steps 1..N, que es OTRO camino de código (el `debitAmount` de compose; el
+  // step-0 lo debita el service). Con un solo step ese camino ni se ejecuta, y con
+  // precios vivos MÁS CAROS un `Math.min(congelado, vivo)` devolvería el congelado
+  // igual. Hace falta multi-step CON el vivo más barato para que la diferencia
+  // aparezca en el saldo.
+  it('T-Q-B3b: en los steps 1..N el vivo más BARATO tampoco se cobra: manda el congelado', async () => {
+    // Los agentes cotizan barato AHORA; el quote congeló precios más altos.
+    const a1 = makeAgent({ slug: 'a1', id: 'id1', priceUsdc: 0.01 });
+    const a2 = makeAgent({ slug: 'a2', id: 'id2', priceUsdc: 0.02 });
+    withAgents([a1, a2]);
+    mockPrice.mockImplementation(async (slug: string) => {
+      const live: Record<string, number> = { a1: 0.01, a2: 0.02 };
+      return live[slug] ?? null;
+    });
+    mockFetchOk();
+    mockFetchOk();
+    const quote = issueQuote([
+      { agent: 'a1', registry: 'wasiai', priceUsdc: 0.05 },
+      { agent: 'a2', registry: 'wasiai', priceUsdc: 0.06 },
+    ]);
+
+    const antes = balanceUsd;
+    const res = await execute({
+      orchestrationId: 'plan-b',
+      steps: [
+        { agent: 'a1', registry: 'wasiai', input: { q: 0 } },
+        { agent: 'a2', registry: 'wasiai', input: { q: 1 } },
+      ],
+      maxQuotedCostUsdc: 1.0,
+      budget: 5.0,
+      quote,
+    });
+    const despues = balanceUsd;
+
+    expect(res.statusCode).toBe(200);
+    // 0.05 (step-0, service) + 0.06 (step-1, compose) — NO 0.05 + 0.02.
+    expect(Number((antes - despues).toFixed(8))).toBe(0.11);
+    expect(debitCalls).toHaveLength(2);
+    expect(debitCalls[0]!.amountUsd).toBeCloseTo(0.05, 8);
+    expect(debitCalls[1]!.amountUsd).toBeCloseTo(0.06, 8);
+    // Lo que mataría un `Math.min(congelado, vivo)`: jamás el precio vivo.
+    expect(debitCalls[1]!.amountUsd).not.toBeCloseTo(0.02, 6);
   });
 
   // T-Q-B4 — AC-3, en los 3 contextos de débito
@@ -496,7 +550,9 @@ describe('WKH-303 — el saldo se mueve EXACTAMENTE por el precio congelado', ()
   it('T-Q-B5: agente congelado que ya no resuelve ⇒ saldo idéntico y CERO débitos', async () => {
     withAgents([]);
     mockPrice.mockResolvedValue(null); // ya no resuelve en ningún registry
-    const quote = issueQuote([{ agent: 'a1', registry: 'wasiai', priceUsdc: 0.05 }]);
+    const quote = issueQuote([
+      { agent: 'a1', registry: 'wasiai', priceUsdc: 0.05 },
+    ]);
 
     const antes = balanceUsd;
     const res = await execute({
@@ -546,7 +602,9 @@ describe('WKH-303 — el saldo se mueve EXACTAMENTE por el precio congelado', ()
     // `signQuote` se niega a firmar un precio 0, así que el token con un 0 se
     // fabrica re-firmando el payload con la clave real: la firma VERIFICA y aun
     // así el guard de precio lo rechaza.
-    const base = issueQuote([{ agent: 'a1', registry: 'wasiai', priceUsdc: 0.05 }]);
+    const base = issueQuote([
+      { agent: 'a1', registry: 'wasiai', priceUsdc: 0.05 },
+    ]);
     const [version, encoded] = base.split('.') as [string, string];
     const payload = JSON.parse(
       Buffer.from(encoded, 'base64url').toString('utf8'),

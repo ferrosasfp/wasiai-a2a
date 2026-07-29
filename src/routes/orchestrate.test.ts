@@ -48,12 +48,10 @@ vi.mock('../middleware/a2a-key.js', () => ({
         return;
       }
       (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = nextKeyRow;
-      (
-        request as unknown as { delegationContext: unknown }
-      ).delegationContext = nextDelegationContext;
-      (
-        request as unknown as { keySessionContext: unknown }
-      ).keySessionContext = nextKeySessionContext;
+      (request as unknown as { delegationContext: unknown }).delegationContext =
+        nextDelegationContext;
+      (request as unknown as { keySessionContext: unknown }).keySessionContext =
+        nextKeySessionContext;
     },
   ],
 }));
@@ -106,6 +104,7 @@ vi.mock('../services/orchestrate.js', () => ({
 import { registerErrorBoundary } from '../middleware/error-boundary.js';
 import { genReqId, registerRequestIdHook } from '../middleware/request-id.js';
 import { resolveAgentPriceUsdc } from '../services/agent-price.js';
+import { orchestrateService } from '../services/orchestrate.js';
 // WKH-303: módulo REAL (no mockeado) — los tests firman quotes de verdad y el route
 // los verifica de verdad. Re-implementar el HMAC en el test lo volvería vacuo (CD-17).
 import {
@@ -113,7 +112,6 @@ import {
   signQuote,
   verifyQuote,
 } from '../services/orchestrate-quote.js';
-import { orchestrateService } from '../services/orchestrate.js';
 import orchestrateRoutes from './orchestrate.js';
 
 const mockOrchestrate = vi.mocked(orchestrateService.orchestrate);
@@ -930,11 +928,13 @@ describe('orchestrate routes — WKH-303 quote freeze', () => {
   });
 
   /** Emite un quote real con el módulo de producción (no se re-implementa el HMAC). */
-  function issueQuote(over: {
-    caller?: QuoteCaller;
-    steps?: { agent: string; registry: string | null; priceUsdc: number }[];
-    nowMs?: number;
-  } = {}): string {
+  function issueQuote(
+    over: {
+      caller?: QuoteCaller;
+      steps?: { agent: string; registry: string | null; priceUsdc: number }[];
+      nowMs?: number;
+    } = {},
+  ): string {
     const signed = signQuote({
       orchestrationId: 'plan-q-1',
       caller: over.caller ?? { kind: 'key', id: 'k1' },
@@ -943,7 +943,8 @@ describe('orchestrate routes — WKH-303 quote freeze', () => {
       ],
       ...(over.nowMs !== undefined && { nowMs: over.nowMs }),
     });
-    if (signed === null) throw new Error('signQuote devolvió null en el arrange');
+    if (signed === null)
+      throw new Error('signQuote devolvió null en el arrange');
     return signed.token;
   }
 
@@ -1015,9 +1016,12 @@ describe('orchestrate routes — WKH-303 quote freeze', () => {
 
   // T-Q-P3 — AC-1
   it('T-Q-P3: planStatus != ready ⇒ sin quote (no se congela un plan que no está listo)', async () => {
-    mockPlan.mockResolvedValue(
-      readyPlan({ planStatus: 'no_agents', steps: [], costPerStep: [] }),
-    );
+    // Los steps y los precios se dejan POBLADOS a propósito: si se vaciaran, el que
+    // frenaría la emisión sería el guard de "hay al menos un step", y este test no
+    // probaría nada sobre `planStatus`. Así el único motivo posible es el estado del
+    // plan. (El route no puede apoyarse en la convención del service de que un plan
+    // no-ready siempre viene sin steps: eso es un invariante de OTRA capa.)
+    mockPlan.mockResolvedValue(readyPlan({ planStatus: 'no_agents' }));
 
     const res = await app.inject({
       method: 'POST',
@@ -1215,6 +1219,35 @@ describe('orchestrate routes — WKH-303 quote freeze', () => {
           { agent: 'a1', registry: 'wasiai', input: { q: 0 } },
           { agent: 'a1', registry: 'wasiai', input: { q: 1 } },
         ],
+      }),
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('QUOTE_STEP_MISMATCH');
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  // T-Q-R6b — AC-2. El caso que faltaba: MENOS steps en el body que en el quote.
+  // Existe porque el mutante que apaga el guard de CANTIDAD sobrevivía: con un step
+  // de MÁS, el chequeo defensivo de `frozen === undefined` dentro del guard de
+  // identidad lo atrapaba igual, así que apagar el de cantidad no cambiaba nada
+  // observable. Con menos steps NO hay tal red: el recorrido de identidad se queda
+  // corto, todos coinciden, y el plan saldría con MÁS precios que steps.
+  it('T-Q-R6b: menos steps en el body que en el quote ⇒ 400 QUOTE_STEP_MISMATCH y CERO ejecución', async () => {
+    const quote = issueQuote({
+      steps: [
+        { agent: 'a1', registry: 'wasiai', priceUsdc: 0.05 },
+        { agent: 'a2', registry: 'wasiai', priceUsdc: 0.06 },
+      ],
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: executePayload({
+        quote,
+        steps: [{ agent: 'a1', registry: 'wasiai', input: { q: 0 } }],
       }),
     });
 

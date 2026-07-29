@@ -134,7 +134,9 @@ export function quoteHmacKey(): string | null {
  *
  * `null` = caller no bindeable (x402 / anónimo): no se emite quote y no se puede redimir uno.
  */
-export function resolveQuoteCaller(ctx: QuoteCallerContext): QuoteCaller | null {
+export function resolveQuoteCaller(
+  ctx: QuoteCallerContext,
+): QuoteCaller | null {
   const delegationId = ctx.delegationContext?.delegationId;
   if (typeof delegationId === 'string' && delegationId.length > 0) {
     return { kind: 'delegation', id: delegationId };
@@ -183,7 +185,9 @@ function buildCanonicalQuotePayload(payload: QuotePayload): string {
 
 /** Firma sobre el string CRUDO `"<version>.<b64payload>"`, nunca sobre el objeto parseado. */
 function computeQuoteSignature(signingInput: string, secret: string): string {
-  return createHmac('sha256', secret).update(signingInput, 'utf8').digest('hex');
+  return createHmac('sha256', secret)
+    .update(signingInput, 'utf8')
+    .digest('hex');
 }
 
 /** Comparación constante-temporal. Formato ANTES de `Buffer.from`, longitud ANTES de comparar. */
@@ -255,9 +259,10 @@ export function signQuote(input: {
     v: 1,
   };
 
-  const encoded = Buffer.from(buildCanonicalQuotePayload(payload), 'utf8').toString(
-    'base64url',
-  );
+  const encoded = Buffer.from(
+    buildCanonicalQuotePayload(payload),
+    'utf8',
+  ).toString('base64url');
   const signingInput = `${QUOTE_VERSION}.${encoded}`;
   const signature = computeQuoteSignature(signingInput, secret);
 
@@ -269,20 +274,28 @@ export function signQuote(input: {
 
 /** Valida la FORMA del payload decodificado. Devuelve `null` si algo no cierra. */
 function parseQuotePayload(raw: unknown): QuotePayload | null {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
+    return null;
   const candidate = raw as Record<string, unknown>;
 
   if (candidate.v !== 1) return null;
-  if (typeof candidate.bind !== 'string' || !HMAC_HEX_RE.test(candidate.bind)) return null;
+  if (typeof candidate.bind !== 'string' || !HMAC_HEX_RE.test(candidate.bind))
+    return null;
   if (typeof candidate.oid !== 'string') return null;
-  if (!Number.isInteger(candidate.iat) || !Number.isInteger(candidate.exp)) return null;
+  if (!Number.isInteger(candidate.iat) || !Number.isInteger(candidate.exp))
+    return null;
 
   const rawSteps = candidate.steps;
   if (!Array.isArray(rawSteps) || rawSteps.length === 0) return null;
 
   const steps: QuoteStepPayload[] = [];
   for (const rawStep of rawSteps) {
-    if (typeof rawStep !== 'object' || rawStep === null || Array.isArray(rawStep)) return null;
+    if (
+      typeof rawStep !== 'object' ||
+      rawStep === null ||
+      Array.isArray(rawStep)
+    )
+      return null;
     const step = rawStep as Record<string, unknown>;
     if (typeof step.a !== 'string' || step.a.length === 0) return null;
     if (typeof step.p !== 'string') return null;
@@ -363,7 +376,9 @@ export function verifyQuote(
   if (payload === null) return { ok: false, code: 'QUOTE_INVALID' };
 
   // (6) vigencia
-  const nowSec = Math.floor((typeof nowMs === 'number' ? nowMs : Date.now()) / 1000);
+  const nowSec = Math.floor(
+    (typeof nowMs === 'number' ? nowMs : Date.now()) / 1000,
+  );
   if (nowSec >= payload.exp) return { ok: false, code: 'QUOTE_EXPIRED' };
   // Un `iat` en el futuro más allá del skew significa reloj adelantado (o token fabricado):
   // aceptarlo alargaría la ventana efectiva más allá de los 10 minutos.

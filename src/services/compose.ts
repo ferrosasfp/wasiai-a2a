@@ -380,7 +380,8 @@ export const composeService = {
           frozenStepPrice > 0;
         const debitAmount = hasFrozenPrice
           ? frozenStepPrice + stepGasOverhead
-          : (isInvalid ? PLACEHOLDER_FEE_USD : agent.priceUsdc) + stepGasOverhead;
+          : (isInvalid ? PLACEHOLDER_FEE_USD : agent.priceUsdc) +
+            stepGasOverhead;
 
         if (isInvalid) {
           const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);

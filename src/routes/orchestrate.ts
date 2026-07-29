@@ -19,12 +19,12 @@ import { orchestrateRateLimit } from '../middleware/rate-limit.js';
 import { createTimeoutHandler } from '../middleware/timeout.js';
 import { resolveAgentPriceUsdc } from '../services/agent-price.js';
 import { getProtocolFeeRate } from '../services/fee-charge.js';
+import { orchestrateService } from '../services/orchestrate.js';
 import {
   resolveQuoteCaller,
   signQuote,
   verifyQuote,
 } from '../services/orchestrate-quote.js';
-import { orchestrateService } from '../services/orchestrate.js';
 import type {
   OrchestratePlanResult,
   ResolvedComposeStep,
@@ -607,7 +607,10 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           costPerStep.push(...frozenPrices);
         } else {
           for (const step of steps) {
-            const price = await resolveAgentPriceUsdc(step.agent, step.registry);
+            const price = await resolveAgentPriceUsdc(
+              step.agent,
+              step.registry,
+            );
             costPerStep.push(typeof price === 'number' ? price : 0);
           }
         }

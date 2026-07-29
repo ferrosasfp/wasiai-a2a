@@ -22,11 +22,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  computeQuoteBinding,
   QUOTE_MAX_TOKEN_CHARS,
   QUOTE_TTL_SECONDS,
   type QuoteCaller,
   type QuoteStepInput,
-  computeQuoteBinding,
+  quoteHmacKey,
   resolveQuoteCaller,
   signQuote,
   verifyQuote,
@@ -43,13 +44,18 @@ const STEPS: QuoteStepInput[] = [
 // CD-16: la env se restaura en afterEach, NUNCA en la última línea del cuerpo del
 // test — si el test falla antes, contaminaría todo el archivo.
 let envSnapshot: string | undefined;
+let receiptSecretSnapshot: string | undefined;
 beforeEach(() => {
   envSnapshot = process.env.ORCHESTRATE_QUOTE_HMAC_KEY;
+  receiptSecretSnapshot = process.env.RECEIPT_SIGNING_SECRET;
   process.env.ORCHESTRATE_QUOTE_HMAC_KEY = KEY;
 });
 afterEach(() => {
   if (envSnapshot === undefined) delete process.env.ORCHESTRATE_QUOTE_HMAC_KEY;
   else process.env.ORCHESTRATE_QUOTE_HMAC_KEY = envSnapshot;
+  if (receiptSecretSnapshot === undefined)
+    delete process.env.RECEIPT_SIGNING_SECRET;
+  else process.env.RECEIPT_SIGNING_SECRET = receiptSecretSnapshot;
 });
 
 /** Re-encodea un payload mutado CONSERVANDO la firma original del token. */
@@ -251,6 +257,24 @@ describe('orchestrate-quote — emisión y verificación', () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.code).toBe('QUOTE_INVALID');
+  });
+
+  // T-Q-U7b — CD-5: el secreto es DEDICADO, sin fallback cruzado.
+  // Este caso existe porque el mutante M14 (fallback a RECEIPT_SIGNING_SECRET)
+  // SOBREVIVÍA: el fallback solo es observable si el OTRO secreto existe, y ningún
+  // test lo seteaba. En producción `RECEIPT_SIGNING_SECRET` normalmente SÍ está, así
+  // que sin este test un fallback cruzado pasaría inadvertido: acoplaría dos
+  // subsistemas (rotar uno invalidaría el otro en silencio) y filtrar cualquiera de
+  // los dos permitiría FORJAR quotes.
+  it('T-Q-U7b: con RECEIPT_SIGNING_SECRET presente pero SIN el secreto dedicado, no se firma nada', () => {
+    delete process.env.ORCHESTRATE_QUOTE_HMAC_KEY;
+    process.env.RECEIPT_SIGNING_SECRET = 'secreto-de-recibos-no-de-quotes';
+
+    expect(quoteHmacKey()).toBeNull();
+    expect(computeQuoteBinding(CALLER)).toBeNull();
+    expect(
+      signQuote({ orchestrationId: 'orch-3', caller: CALLER, steps: STEPS }),
+    ).toBeNull();
   });
 
   // T-Q-U8
