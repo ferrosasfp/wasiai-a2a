@@ -406,6 +406,19 @@ gateway does not invent a "null does not count" rule over another agent's data.
 The mapping reads the previous output **after** the bridge (A2A unwrap / LLM
 transform), so it sees exactly the same object `passOutput` would have injected.
 
+**If the agent rejects a mapped field, the step is not retried.** WasiAI normally
+retries a step once when the agent replies `4xx` naming the fields it could not
+accept. That retry is skipped when any of those fields is a mapping *destination*,
+because the mapping would re-write it with the same value the agent just
+rejected — the canonical case is an **expired `quoteId`**. Retrying would be
+guaranteed to fail while still costing you a second round-trip. You get the
+agent's original error instead, which is the same answer you would have received
+after paying for the second attempt. A rejected field that is *not* a mapping
+destination retries exactly as before.
+
+`inputFromPrevious` also works on `POST /orchestrate/execute`, with the same rules
+and the same pre-charge validation.
+
 ---
 
 ## 4. x402 Payment Flow

@@ -5,7 +5,11 @@ patrón que los previene. Nada de esto es hipotético.
 
 ---
 
-## Verificación por mutación — los 12 mutantes (G5 · Done Definition 7)
+## Verificación por mutación — los 15 mutantes (G5 · Done Definition 7)
+
+> M1..M12 son los del Story File. M13..M15 se agregaron para los guards nuevos
+> que salieron del AR (MNR-2, MNR-3) y como control del arreglo del flake (MNR-1):
+> **todo guard nuevo se verifica mutando**, no por cobertura de línea (CD-12).
 
 Procedimiento por mutante: árbol limpio → aplicar → **probar que aterrizó**
 (`git diff` no vacío) → **`npx tsc --noEmit` limpio** (CD-15: un mutante que no
@@ -27,6 +31,9 @@ respaldo → **verificar por hash** (`sha256sum -c`). Nunca `git checkout --`
 | **M10** | El early-return deja de propagar `steps: results` / `totalCostUsdc: totalCost` | Sí | **KILLED** | `T-MAP-08` |
 | **M11** | Quitar el guard `i > 0` del bloque de débito (CD-7) | Sí | **KILLED** | **34 tests PREEXISTENTES**; el canónico es `T-COMPOSE-DEBIT-6 should NOT debit step 0 in service (anti-double-debit guard)`. También `T-COMPOSE-DEBIT-1`, `T-COMPOSE-REFUND-2`, `T-SESS-MULTISTEP` |
 | **M12** | Mover `const startTime = Date.now()` arriba del bloque de débito (CD-8) | Sí | **SURVIVED → test escrito → KILLED** | Ninguno al principio. Se escribió `T-MAP-C4` **con el mutante aplicado** (orden CD-12) y ahí murió |
+| **M13** | Neutralizar `mappingOwnsAnyField` (que devuelva siempre `false`) — el guard del retry condenado (AR MNR-2) | Sí | **KILLED** | `T-MAP-23`. `T-MAP-24` sigue verde, que es lo correcto: el guard no debe tocar el retry legítimo |
+| **M14** | Sacar `validateStepInputMappingHandler` de la cadena de preHandlers de `/orchestrate/execute` (AR MNR-3) | Sí | **KILLED** | `T-MAP-25`, `T-MAP-26` |
+| **M15** | Bajar el presupuesto de la race de `getStepGasOverheadUsd` a 200 ms — mutante de control para probar que el arreglo del flake NO neuteó el test (AR MNR-1) | Sí | **KILLED** | `T-195-GAS-2` (`expected 201.35 to be greater than or equal to 1950`) |
 
 **M12 es el hallazgo real de esta batería.** La métrica de latencia por step del
 money-path no estaba protegida por nada: cualquiera podía cambiar qué mide
@@ -47,7 +54,7 @@ completa, no estimado:
 
 - **Statements nuevos sin hits: NINGUNO.** Todo statement agregado por esta HU se
   ejecuta al menos una vez.
-- **`src/services/compose.ts:734` — rama `false` de `if (remapped.ok)`: sin hits,
+- **`src/services/compose.ts:754` — rama `false` de `if (remapped.ok)`: sin hits,
   e INALCANZABLE POR CONSTRUCCIÓN.** Si la primera aplicación del mapeo tuvo
   éxito, la re-aplicación del retry es total: `lastOutput` es el MISMO objeto (el
   step falló, el pipeline no avanzó) y las claves del mapeo son las mismas. Se
@@ -55,13 +62,20 @@ completa, no estimado:
   camino seguro ya está escrito y no re-debita ni re-invoca. **Se declara acá en
   vez de forzar un test artificial** que tendría que romper el invariante para
   alcanzarla.
-- **`src/services/compose.ts:736` — rama `false` de `if (retryInput)`: sin hits,
+- **`src/services/compose.ts:756` — rama `false` de `if (retryInput)`: sin hits,
   pero SÍ alcanzable** (cuando el LLM devuelve `null`). No es un hueco que abra
   esta HU: es exactamente el mismo hueco preexistente de la rama `false` de
-  `if (newInput)` (`:728`), que ya estaba sin cubrir antes de WKH-305. Esta HU
+  `if (newInput)` (`:748`), que ya estaba sin cubrir antes de WKH-305. Esta HU
   movió la expresión del guard, no cambió su cobertura.
-- Fuera de alcance, preexistentes y sin tocar: `:225` (el `??` de `SCOPE_DENIED`)
-  y `:749` (rama `false` de `if (retryDebit.success)`).
+- Fuera de alcance, preexistentes y sin tocar: `:226` (el `??` de `SCOPE_DENIED`)
+  y `:769` (rama `false` de `if (retryDebit.success)`).
+
+> Números de línea RE-MEDIDOS después de los arreglos del AR (el guard de MNR-2
+> corrió el archivo ~20 líneas). Ningún statement sin hits del archivo pertenece a
+> esta HU: los 12 que quedan son manejadores de log/error preexistentes.
+
+El guard nuevo de MNR-2 (`:659`, `:666`) SÍ tiene hits, y además está verificado
+por mutación (M13).
 
 ---
 
@@ -89,6 +103,94 @@ completa, no estimado:
      restaurar, verificar el hash. No dejar un mutante vivo entre llamadas.
   3. Si hay que salvar trabajo a mitad de una mutación, **restaurar primero**
      (`cp` desde el respaldo + `sha256sum -c`) y recién entonces commitear.
+
+---
+
+### [2026-07-29 01:40] AR MNR-2 — El retry adaptativo repetía el valor que el agente acababa de rechazar
+
+- **Error**: al re-aplicar el mapeo sobre el input regenerado (AC-7), el retry
+  pisa el campo mapeado con el MISMO valor de la salida anterior. Si el campo que
+  el agente rechazó ES el mapeado (el caso canónico: un `quoteId` **vencido**), el
+  re-invoke manda exactamente lo que el agente acaba de rechazar: **el reintento
+  está garantizado a fallar antes de empezar**, y encima cuesta una llamada al LLM
+  y un viaje completo de dinero (débito + refund) en el ledger del caller.
+- **Causa raíz**: AC-7 se diseñó contra el riesgo de que el LLM INVENTARA el
+  valor, y ese razonamiento es correcto. Lo que no se consideró es el caso en que
+  el valor autoritativo es justamente el que el agente rechaza — o sea que
+  "protegerlo" garantiza el fracaso. Dos requisitos correctos que se contradicen
+  en un caso puntual, y la contradicción sólo aparece si se piensa el escenario
+  END-TO-END en vez de la regla aislada.
+- **Fix**: `mappingOwnsAnyField()` en el leaf + guard sobre `willRetry`. Es la
+  **intersección** de los campos que el agente señaló con las claves DESTINO del
+  mapeo, evaluada ANTES de regenerar: si se tocan, no hay retry (sin LLM, sin
+  re-débito, sin re-invoke) y se cae al mismo error que el caller habría recibido
+  después de pagar el segundo intento. `Object.hasOwn`, no `in` (T-MAP-L27).
+- **Corrección a la premisa del hallazgo**: el AR lo describió como "el pago al
+  agente ya salió y no se revierte". **Medido, en el path a2a-key eso no ocurre**:
+  el intento condenado responde 400 y `invokeAgent` LANZA antes del leg de pago
+  downstream (que sólo corre tras un 2xx), así que los pagos al agente son 1 con
+  guard y sin él. Lo que el guard SÍ evita, y está medido: un segundo débito con
+  su refund (dos consumos del cap por destino), una llamada al LLM y una segunda
+  invocación del agente. El costo del pago aparece cuando el reintento llega a
+  2xx — eso lo muestra `T-MAP-24` (2 pagos) frente a `T-MAP-23` (1).
+- **Aplicar en**: cuando una regla nueva PISA un valor que otro actor puede haber
+  rechazado, preguntarse siempre *"¿y si lo que estoy protegiendo es justo lo que
+  está mal?"*. Y al escribir el test de dinero, **medir primero y afirmar después**:
+  la aserción de "pagos al agente" se corrigió porque el número real la desmintió,
+  en vez de dejarla puesta como adorno (ver la entrada de la aserción vacua).
+
+---
+
+### [2026-07-29 01:47] AR MNR-1 — Un flake ajeno que mi carga hizo aparecer
+
+- **Error**: `src/lib/gas-overhead.test.ts` fallaba ~3 de cada 18 corridas de la
+  suite completa. Yo lo había reportado como residuo con la hipótesis de
+  "contención de CPU". **La hipótesis era falsa** y el AR la refutó con evidencia:
+  0 fallos con 48 procesos quemando CPU en aislamiento, 0 sin mis tres archivos
+  nuevos.
+- **Causa raíz**: la aserción mide con **reloj de pared** (`Date.now()`) una
+  duración gobernada por un **temporizador monotónico** (`setTimeout` /
+  `AbortSignal.timeout`, que corren sobre el reloj monotónico de libuv). Son dos
+  bases de tiempo distintas: cuando la de pared se queda corta, la aserción cae
+  aunque el temporizador haya andado perfecto. El archivo es byte-idéntico a
+  `main` — **no lo introduje yo** —, pero mi carga cambió el scheduling lo
+  suficiente como para destapar el defecto latente.
+- **Fix**: las 5 mediciones de duración del bloque pasaron a `performance.now()`
+  (monotónico, `node:perf_hooks`), o sea la MISMA base de tiempo que el timer que
+  gobierna la duración. 12 corridas de la suite completa en verde.
+- **Y la parte que no es opcional**: se probó que el test arreglado **sigue
+  pudiendo fallar por el motivo correcto** (mutante M15: bajar el presupuesto de
+  la race a 200 ms ⇒ `expected 201.35 to be greater than or equal to 1950`). Un
+  flake "arreglado" volviéndolo incapaz de detectar nada es peor que el flake.
+- **Aplicar en**: **toda aserción sobre una duración usa reloj monotónico**, nunca
+  `Date.now()`. Y mi propio error de método: reportar una hipótesis
+  ("contención") sin poder probarla fue correcto como transparencia, pero la
+  hipótesis en sí era una conjetura cómoda — la que evita mirar el test. Cuando
+  algo falla de forma intermitente, la primera pregunta es **qué se está midiendo
+  y con qué**, no quién más estaba usando la máquina.
+
+---
+
+### [2026-07-29 01:38] AR MNR-3 — El mapeo entraba por `/orchestrate/execute` sin validación de borde
+
+- **Error**: el schema de `steps[]` de `POST /orchestrate/execute` no declara
+  `additionalProperties: false`, así que ajv **no remueve** las claves que no
+  conoce: un `inputFromPrevious` malformado llegaba intacto al handler y de ahí al
+  service. El rechazo ocurría DESPUÉS del débito del step 0 (un débito y su
+  reembolso en vez de un error gratis) y S8 (mapeo en el step 0) no se aplicaba
+  nunca por esa ruta, así que el error apuntaba al lugar equivocado.
+- **Causa raíz**: yo **documenté** este bypass (es el motivo por el que el
+  resolvedor revalida la forma, R3/T-MAP-21) pero lo traté como algo que sólo
+  requería defensa en el service. Saber que un camino existe no es lo mismo que
+  cerrarlo: el fail-closed del service protege la CORRECTITUD, no el bolsillo del
+  caller.
+- **Fix**: `validateStepInputMappingHandler` en la cadena de preHandlers de
+  `/execute`, antes de `markSkipMiddlewareDebitHandler` y del middleware de pago.
+  Llama a la MISMA `validateInputMappingShape` del leaf — cero reglas duplicadas.
+- **Aplicar en**: cuando un endpoint acepta una estructura que otro ya valida,
+  **verificar empíricamente si el schema la deja pasar** (montar la app y mirar lo
+  que llega al handler) en vez de asumir que el tipo o el schema la filtran. Un
+  `additionalProperties` ausente es invisible leyendo el tipo TypeScript.
 
 ---
 
@@ -259,20 +361,20 @@ completa, no estimado:
 
 ### [2026-07-28 22:43] W3 — Un fallo de suite completa que NO se pudo reproducir
 
-- **Observación honesta, sin fix**: una corrida de `npm test` encadenada después
-  de `npm run lint` en la misma invocación reportó **1 test fallado** de 4064. Las
-  **11 corridas siguientes** de la suite completa dieron verde
-  (`4064 passed | 19 skipped`, 0 failed).
-- **Qué NO se pudo hacer**: identificar el test. La salida quedó truncada por el
-  filtro de la CLI y el nombre no se recuperó.
-- **Hipótesis (no confirmada)**: contención de CPU con el proceso de lint,
-  afectando a algún test sensible a tiempos. **No está probada.**
-- **Por qué se documenta igual**: un fallo intermitente en una suite que cubre el
-  money-path no es ruido aceptable, y no reportarlo lo convierte en deuda
-  invisible. Queda como residuo declarado para AR/QA.
+- **Observación reportada como residuo**: una corrida de `npm test` reportó **1
+  test fallado** de 4064; las 11 siguientes dieron verde. No se pudo identificar
+  el test (salida truncada por el filtro de la CLI) y se declaró con la hipótesis
+  de contención de CPU.
+- **CERRADO por el AR** — ver la entrada de AR MNR-1 más arriba. Era
+  `src/lib/gas-overhead.test.ts`, y **mi hipótesis de contención resultó FALSA**
+  (el AR midió 0 fallos con la CPU saturada en aislamiento). La causa real es una
+  aserción de duración medida con reloj de pared contra un temporizador
+  monotónico. Ya está arreglado y verificado.
 - **Aplicar en**: capturar SIEMPRE la salida completa de la suite a un archivo
-  (`> run.txt 2>&1`) en vez de leerla por pipe truncado. Un fallo que no se puede
-  nombrar no se puede investigar.
+  (`> run.txt 2>&1`) en vez de leerla por pipe truncado — un fallo que no se puede
+  nombrar no se puede investigar, y por no nombrarlo casi se va como "ruido". Y
+  no adjuntar una hipótesis cómoda a un residuo: o se prueba, o se declara que no
+  se sabe.
 
 ---
 
