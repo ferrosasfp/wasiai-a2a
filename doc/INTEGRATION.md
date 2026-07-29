@@ -324,11 +324,20 @@ Send it back on execute (the field is **optional**):
 {
   "orchestrationId": "…",
   "steps": [ /* the same steps, same order, same agents */ ],
-  "maxQuotedCostUsdc": 0.1211,
+  "maxQuotedCostUsdc": 0.1211,  // ⚠️ IGNORED when the quote is valid — see below
   "budget": 1.0,
   "quote": "v1.eyJiaW5kIjoi….a3f…"
 }
 ```
+
+> ⚠️ **With a valid quote, `maxQuotedCostUsdc` is ignored: the frozen price IS the
+> ceiling.** The field stays in the schema (it is still required, and it is what
+> applies when you send no quote), but the ceiling check does not run on a quoted
+> execution — it re-resolves live prices, and rejecting a caller who holds a price
+> guarantee because of a live price that no longer affects them would defeat the
+> guarantee. If you were using `maxQuotedCostUsdc` as a second safety net, note that
+> **on a quoted execution the guarantee replaces it**: you are charged the frozen
+> total and nothing else, which is by construction ≤ the ceiling you approved.
 
 With a valid quote you are debited the **frozen** price and the **frozen** agent,
 never the live ones. **The freeze is exact in both directions**: if the live price
@@ -384,6 +393,16 @@ it is exceeded. Existing integrations need no changes.
 > redemption still goes through budget, daily limits and per-destination caps.
 > The bounded effect is that, for up to 10 minutes, you may run N pipelines at
 > the old price instead of the new one — and only when the price went up.
+>
+> **What this means for your retry logic.** A quote is *not* an idempotency key.
+> If a request times out or a connection drops and your client retries
+> `POST /orchestrate/execute` with the same `quote`, you get a **second real
+> execution and a second charge** — the gateway has no way to tell that retry
+> apart from a deliberate second run. The rule that "a rejected redemption never
+> charges" applies to the five `error_code` rejections above; it does **not** make
+> re-sending a valid quote free. Treat a retry of `execute` exactly as you would
+> treat a retry of any other billable call: only retry when you know the previous
+> attempt did not run.
 
 **Key rotation.** The signing secret lives only on the server. If the operator
 rotates it, every quote issued with the previous secret stops verifying and comes
