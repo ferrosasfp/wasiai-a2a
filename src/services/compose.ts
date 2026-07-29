@@ -16,6 +16,15 @@ import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import { readAgentCategory } from '../lib/agent-category.js';
 import { hashCallerRef } from '../lib/caller-hash.js';
 import { selectFacilitatorUrl } from '../lib/cdp-selector.js';
+// WKH-305: el resolvedor de `inputFromPrevious` vive en un módulo LEAF (cero
+// imports de runtime) por el mismo motivo que `downstream-skip-code.js`: media
+// docena de suites mockean los módulos gordos del money-path COMPLETOS con
+// factories sin `importOriginal`, así que una función traída de uno de ellos
+// llegaría `undefined` bajo test. Un archivo sin dependencias no lo moquea nadie.
+import {
+  applyMappingTo,
+  resolveStepInput,
+} from '../lib/compose-input-mapping.js';
 // Fix-pack P1 AR BLQ-BAJO-1: el page size del pool de agentes que usa
 // `resolveAgent` sale del MISMO módulo leaf que el over-fetch de discovery, para
 // que no puedan desalinearse. Leaf (no `services/discovery.js`) porque las suites
@@ -243,10 +252,38 @@ export const composeService = {
       // guard de doble-débito del step 0 se quedan exactamente donde estaban: el
       // primero mediría otra cosa con el mismo nombre, y el segundo es la única
       // defensa contra cobrar dos veces el step 0.
-      const input =
-        step.passOutput && lastOutput
-          ? { ...step.input, previousOutput: lastOutput }
-          : step.input;
+      //
+      // `resolveStepInput` calcula la base de siempre (`passOutput` +
+      // `step.input`, carácter por carácter la expresión que vivía acá) y encima
+      // resuelve `inputFromPrevious`. Sin mapeo declarado devuelve la base POR LA
+      // MISMA REFERENCIA: el pipeline sin mapeo es byte-idéntico.
+      const resolved = resolveStepInput(step, lastOutput);
+      if (!resolved.ok) {
+        // AC-5 sale gratis de copiar la forma de los otros returns de error del
+        // loop: `results` y `totalCost` ya llevan lo cobrado y ENTREGADO por los
+        // steps 0..i-1, y el route reembolsa aguas arriba sólo lo que no se gastó.
+        // El step `i` no se cobró: este return está antes del bloque de débito.
+        return {
+          success: false,
+          output: null,
+          steps: results,
+          totalCostUsdc: totalCost,
+          totalLatencyMs: totalLatency,
+          error: `Step ${i} input mapping failed: ${resolved.failure.message}`,
+          errorCode: 'INPUT_MAPPING_FAILED',
+          inputMappingFailure: {
+            step: i,
+            reason: resolved.failure.reason,
+            ...(resolved.failure.field !== undefined && {
+              field: resolved.failure.field,
+            }),
+            ...(resolved.failure.source !== undefined && {
+              source: resolved.failure.source,
+            }),
+          },
+        };
+      }
+      const input = resolved.input;
       // Gas pass-through (audit 2026-06-25): per-step gateway gas overhead the
       // caller pays ON TOP of the agent price, to cover the downstream settle
       // gas. ALWAYS 0 on testnet / without env config → no behaviour change by
@@ -665,7 +702,38 @@ export const composeService = {
             agent.slug,
             agent.description,
           );
+          // ── WKH-305 (AC-7): el mapeo se RE-APLICA sobre el input que
+          //    regeneró el LLM, ANTES del re-débito.
+          //
+          //    NO es redundante con la aplicación del master: el input que se
+          //    RE-INVOCA no es el que se mapeó, es el que devolvió el modelo.
+          //    `regenerateInputFromErrors` recibe el input que YA tenía el campo
+          //    mapeado y le pide a un LLM que lo "arregle": el modelo puede
+          //    borrarlo, renombrarlo o INVENTARLE un valor. Que un modelo de
+          //    lenguaje decida el `quoteId` de una remesa es inaceptable — es un
+          //    identificador emitido por otro agente, no un texto que se pueda
+          //    completar de forma plausible — y además hace que el caller pague un
+          //    retry destinado a fallar.
+          //
+          //    No introduce una rama de fallo nueva antes del re-débito: si la
+          //    primera aplicación tuvo éxito, ésta es total por construcción
+          //    (`lastOutput` es el MISMO objeto — el step falló, el pipeline no
+          //    avanzó — y las claves son las mismas). El `ok:false` se maneja
+          //    igualmente, fail-closed (CD-2): sin re-débito y sin re-invoke, cae
+          //    al return de error normal de abajo.
+          //
+          //    Sin mapeo declarado, `applyMappingTo` devuelve `newInput` POR LA
+          //    MISMA REFERENCIA ⇒ el camino WKH-130 de hoy queda byte-idéntico.
+          let retryInput: Record<string, unknown> | null = null;
           if (newInput) {
+            const remapped = applyMappingTo(
+              newInput,
+              step.inputFromPrevious,
+              lastOutput,
+            );
+            if (remapped.ok) retryInput = remapped.input;
+          }
+          if (retryInput) {
             // ── PASO 4 (DT-5.4 / CD-1 / CD-8): RE-DEBIT. MISMO monto
             //    stepDebitedUsd (NO recalcular priceUsdc), MISMA destination.
             //    El primer débito YA fue reembolsado → un solo débito activo.
@@ -684,7 +752,7 @@ export const composeService = {
                 const { output, txHash, downstream, downstreamSkipCode } =
                   await this.invokeAgent(
                     agent,
-                    newInput,
+                    retryInput, // WKH-305 (AC-7): con el mapeo RE-APLICADO
                     a2aKey,
                     undefined,
                     `${composeRunId}:${i}`, // WKH-234 intentId — MISMO que el master (AC-7 idempotente)
