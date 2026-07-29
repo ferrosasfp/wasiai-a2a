@@ -91,19 +91,24 @@ function resolveSignMaxAttempts(): number {
 }
 
 /**
- * WKH-235a (AC-1) — firma-candidata de una tx cuyo `sendAndConfirmTransaction`
+ * WKH-235a (AC-1) — firma-candidata de una tx cuyo BROADCAST o CONFIRMACIÓN
  * lanzó. La firma de una tx Solana es la firma ed25519 del fee-payer sobre el
  * mensaje: existe ANTES de la confirmación, así que un timeout de confirmación
  * NO debe perderla.
+ *
+ * WKH-307: desde que la firma se PERSISTE antes de transmitir (invariante I2), esta
+ * recuperación dejó de ser la única red — la fila ya quedó en `signed` con la firma
+ * correcta, así que aunque el proceso muera acá el próximo retry la re-verifica. Se
+ * conserva porque resuelve el caso EN CALIENTE sin esperar a ese retry.
  *
  * Dos fuentes, en orden:
  *  1. `err.signature` — `TransactionExpiredTimeoutError`,
  *     `TransactionExpiredBlockheightExceededError` y
  *     `TransactionExpiredNonceInvalidError` de `@solana/web3.js` exponen la
  *     firma base58 como campo público.
- *  2. `tx.signature` — `sendAndConfirmTransaction` firma el MISMO objeto
- *     `Transaction` in-place antes de broadcastear, así que el Buffer de la
- *     firma queda disponible incluso si el envío falló después.
+ *  2. `tx.signature` — el adapter firma el objeto `Transaction` ANTES de
+ *     transmitirlo, así que el Buffer de la firma queda disponible incluso si el
+ *     envío o la confirmación fallaron después.
  *
  * Devuelve `undefined` cuando la tx nunca llegó a firmarse (no hay nada que
  * verificar on-chain → el fallo es genuino).
