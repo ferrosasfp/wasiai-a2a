@@ -193,13 +193,42 @@ decisión, no un olvido**, y se escribe acá para el próximo que corra ese grep
 | `T-235a-AC2d` | recovery con el RPC caído ⟹ **propaga el error original** (leg reportado FALLADO) | Un RPC que no contesta no prueba que el pago no ocurrió. Ahora ⟹ `unknown`. La propiedad que protegía (no inventar un éxito) **sigue viva**: se rechaza igual, pero sin afirmar lo que no sabemos |
 | `T-235a-AC2` | *"no confirmada on-chain"* inferido de un parseo ausente | Ahora la ausencia se **prueba** (`presenceState = null`), no se infiere |
 
-### 5.6 Campaña de mutación
+### 5.6 La dependencia que no es obvia y que alguien va a romper sin querer
+
+> **El escenario que motiva esta HU —nodo atrasado sobre una tx que sí aterrizó— cae en
+> `unknown` gracias al fix-pack de la 307, no a la 307 original.** Si esa reserva (la
+> MNR-3, que sacó la capa de términos de `verify()`) no se hubiera cerrado antes, ese
+> caso habría caído en `landed_mismatch` → `SETTLE_FAILED`, y **la HU habría dejado sin
+> cubrir su propio ejemplo**.
+
+Concretamente: `probeSettlementPresence` sólo puede devolver `unknown` ante un parseo
+ausente porque MNR-3 introdujo esa distinción. Antes, un `getParsedTransaction` nulo
+sobre una firma presente se leía como "los términos no coinciden".
+
+**Esto es lo que le dice al próximo que mire aquel arreglo por qué no es cosmético.**
+
+### 5.7 La precondición de despliegue: se hereda, pero NO se agrava
+
+La reserva abierta de WKH-307 —`absent` depende de que el endpoint RPC retenga
+histórico, y un pool heterogéneo puede responder con un nodo sin él— **aplica también a
+este camino, con un costo mucho menor**:
+
+> Acá un `absent` falso cuesta **una fila mal contada**, no un doble pago, porque
+> **ninguna rama de `recoverConfirmedSettle` re-transmite**. El peor caso es reportar
+> como fallado algo que se pagó — o sea, exactamente el defecto que esta HU reduce, no
+> uno nuevo.
+
+Queda anotado para que, cuando se cierre la HU del pool heterogéneo, se sepa que este
+camino era el de exposición baja y el de WKH-307 el de exposición alta.
+
+### 5.8 Campaña de mutación
 
 | # | Mutación | ¿Compiló? | Resultado | Asesino |
 |---|---|---|---|---|
 | **M1** | `unknown` vuelve a caer al camino de fallo (parte 1) | Sí (3ª formulación) | **KILLED** | `T-308-01`, `T-235a-AC2d` |
 | **M2** | El leg vuelve a colapsar todo en `SETTLE_FAILED` (parte 2) | Sí | **KILLED** | `T-308-LEG-UNKNOWN` |
 | **M3** | Un fallo **probado** on-chain se reporta como `unknown` (colapsa los dos otra vez) | Sí (2ª formulación) | **KILLED** | `T-308-03`, `T-235a-AC2e` |
+| **M4** | `SETTLE_UNKNOWN` se colapsa a `SETTLE_FAILED` en la tabla pública | Sí | **KILLED** | `T-SKIP-UNKNOWN` (nivel consumidor) |
 
 > **M3 pareció SURVIVED y no lo era: el mutante cayó en el sitio equivocado.**
 > `replace(..., 1)` tomó la primera ocurrencia del patrón, que está en
@@ -208,5 +237,7 @@ decisión, no un olvido**, y se escribe acá para el próximo que corra ese grep
 > código bajo prueba no**. Aplicado en el sitio correcto, murió con dos tests nombrados.
 >
 > **Lección**: para una mutación no alcanza con que el archivo cambie; tiene que cambiar
-> **el sitio previsto**. Es un refinamiento de la disciplina que ya traía: el guard de
+> **el sitio previsto**. Desde este fix-pack el aterrizaje se verifica **por rango de
+> líneas de la función objetivo**, no por hash: M4 se confirmó en la línea 164, dentro
+> del bloque `PUBLIC_SKIP_CODE`, antes de contarlo. Es un refinamiento de la disciplina que ya traía: el guard de
 > "MUTANT_NOT_APPLIED" detecta un diff vacío, no un diff en el lugar equivocado.
