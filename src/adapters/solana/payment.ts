@@ -743,18 +743,30 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
   }
 
   /**
-   * WKH-235a (AC-1/AC-2) — self-heal del timeout de confirmación.
+   * WKH-235a (AC-1/AC-2) — self-heal del timeout de confirmación,
+   * **acotado por WKH-308 a los tres estados de la cadena**.
    *
-   * Recupera la firma-candidata del fallo y le pregunta a la cadena vía el
-   * `verify()` de esta misma clase (verify-before-trust: monto/mint/destino, sin
-   * duplicar la validación). Si la tx SÍ está confirmada y es válida, el settle
-   * fue exitoso: se registra la firma en el seam de idempotencia y se retorna
-   * como éxito (el fee ya se pagó on-chain — perderlo es un bug de
-   * contabilidad). Si no, devuelve `undefined` y el caller propaga el error
-   * original (fallo genuino, camino de hoy sin regresión).
+   * Recupera la firma-candidata del fallo y le pregunta a la cadena vía
+   * `probeSettlementPresence` (NO vía `verify()`: ése colapsa *aterrizó-y-falló* /
+   * *no está* / *este nodo no la tiene indexada* en un solo `valid:false`, y sobre esa
+   * mezcla se escribía un falso negativo en el ledger).
    *
-   * NUNCA re-broadcastea y NUNCA lanza: un fallo del RPC de verificación se
-   * degrada a "no recuperado" para no enmascarar el error original.
+   * Las tres salidas, que son el contrato de esta función:
+   *
+   *   · `landed_ok`                  ⟹ el pago SÍ ocurrió: se marca confirmado y se
+   *     retorna éxito (el fee ya salió on-chain — perderlo es un bug de contabilidad);
+   *   · `absent` / `landed_failed`   ⟹ está PROBADO que la transferencia no ocurrió:
+   *     devuelve `undefined` y el caller propaga el error original (fallo genuino,
+   *     sin regresión respecto del camino histórico);
+   *   · `unknown`                    ⟹ **LANZA** `FacilitatorSettleError` con
+   *     `valueDisposition:'unknown'`. No se afirma que el leg no se pagó, porque no lo
+   *     sabemos; la incertidumbre viaja hasta el leg, que la publica como
+   *     `SETTLE_UNKNOWN`.
+   *
+   * ⚠️ Decía *"NUNCA lanza"*. **Ya no es cierto** y el cambio es el punto de WKH-308:
+   * degradar el "no pude comprobarlo" a "no recuperado" era exactamente lo que
+   * enmascaraba el pago real. Lo que **sigue siendo cierto** es que NUNCA
+   * re-broadcastea: ninguna de las tres ramas re-transmite.
    */
   private async recoverConfirmedSettle(
     err: unknown,
