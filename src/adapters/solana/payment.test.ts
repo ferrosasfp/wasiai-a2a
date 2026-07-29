@@ -33,6 +33,10 @@ const BLOCKHASH = blockhashFor(0);
 const FAKE_SIG = '5'.repeat(64);
 
 // ── Mock the network boundary (chain.ts) ─────────────────────────────────
+/** Estado que devuelve `getSignatureStatuses` (null = ausente tras buscar historico). */
+const presenceState: { value: { err: unknown } | null } = {
+  value: { err: null },
+};
 const fakeConnection = {
   getParsedTransaction: vi.fn(
     (..._a: unknown[]): Promise<unknown> => Promise.resolve(null),
@@ -56,6 +60,17 @@ const fakeConnection = {
     Promise.resolve({ value: { err: null } }),
   ),
   getBlockHeight: vi.fn((..._a: unknown[]) => Promise.resolve(900)),
+  /**
+   * AR BLQ-MEDIO-1: la determinacion NEGATIVA ya no sale de un `null` de
+   * `getParsedTransaction` (que tambien significa "este nodo no lo tiene indexado"),
+   * sino de `getSignatureStatuses` con `searchTransactionHistory`.
+   *
+   * Default = PRESENTE y sin error. `onChainAbsent()` lo pone en ausente para los
+   * tests que modelan "la tx no aterrizo".
+   */
+  getSignatureStatuses: vi.fn((..._a: unknown[]) =>
+    Promise.resolve({ value: [presenceState.value] }),
+  ),
 };
 vi.mock('./chain.js', () => ({
   getSolanaConnection: vi.fn((..._a: unknown[]) => fakeConnection),
@@ -191,6 +206,8 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
     // de un test se filtraría a los siguientes. Se re-fija el default (6).
     vi.mocked(getSolanaUsdcDecimals).mockReturnValue(6);
     fakeConnection.getParsedTransaction.mockResolvedValue(null);
+    presenceState.value = { err: null };
+    presenceState.value = { err: null };
     fakeConnection.getTokenAccountBalance.mockResolvedValue({
       value: { amount: '1000000' },
     });

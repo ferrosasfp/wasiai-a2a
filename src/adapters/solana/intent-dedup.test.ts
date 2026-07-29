@@ -79,6 +79,19 @@ const freshBlockhash = () => Keypair.generate().publicKey.toBase58();
 const blockhashQueue: string[] = [];
 
 // ── El doble de la CONEXIÓN. `sendRawTransaction` es la unidad de medida ────
+/** Estado que devuelve `getSignatureStatuses` (null = ausente tras buscar historico). */
+const presenceState: { value: { err: unknown } | null } = {
+  value: { err: null },
+};
+/** La tx NO esta en la cadena (el nodo respondio habiendo buscado su historico). */
+function onChainAbsent() {
+  presenceState.value = null;
+}
+/** La tx esta en la cadena pero FALLO on-chain. */
+function onChainFailed() {
+  presenceState.value = { err: { InstructionError: [0, 'Custom'] } };
+}
+
 const fakeConnection = {
   getParsedTransaction: vi.fn(
     (..._a: unknown[]): Promise<unknown> => Promise.resolve(null),
@@ -113,6 +126,17 @@ const fakeConnection = {
     Promise.resolve({ value: { err: null } }),
   ),
   getBlockHeight: vi.fn((..._a: unknown[]) => Promise.resolve(900)),
+  /**
+   * AR BLQ-MEDIO-1: la determinacion NEGATIVA ya no sale de un `null` de
+   * `getParsedTransaction` (que tambien significa "este nodo no lo tiene indexado"),
+   * sino de `getSignatureStatuses` con `searchTransactionHistory`.
+   *
+   * Default = PRESENTE y sin error. `onChainAbsent()` lo pone en ausente para los
+   * tests que modelan "la tx no aterrizo".
+   */
+  getSignatureStatuses: vi.fn((..._a: unknown[]) =>
+    Promise.resolve({ value: [presenceState.value] }),
+  ),
 };
 vi.mock('./chain.js', () => ({
   getSolanaConnection: vi.fn((..._a: unknown[]) => fakeConnection),
@@ -348,6 +372,7 @@ beforeEach(() => {
   fakeLedger.reset();
   wireLedger();
   fakeConnection.getParsedTransaction.mockResolvedValue(null);
+  presenceState.value = { err: null };
   blockhashQueue.length = 0;
   fakeConnection.getBlockHeight.mockResolvedValue(900);
   _resetSolanaClients();
@@ -498,7 +523,11 @@ describe('WKH-307 · AC-6: una firma persistida se resuelve contra la cadena', (
       signature: 'ExpiredSig777',
       lastValidBlockHeight: '500',
     });
-    fakeConnection.getParsedTransaction.mockResolvedValue(null); // no aterrizó
+    // AR BLQ-MEDIO-1: la ausencia la PRUEBA el nodo respondiendo tras buscar su
+    // histórico. Un `null` de `getParsedTransaction` no alcanza: también significa
+    // "este nodo no lo tiene indexado", y sobre esa lectura se re-transmitía.
+    onChainAbsent();
+    fakeConnection.getParsedTransaction.mockResolvedValue(null);
     fakeConnection.getBlockHeight.mockResolvedValue(900); // 900 > 500 ⟹ muerta
 
     const res = await adapter.settle(req('run:0'));
@@ -519,6 +548,7 @@ describe('WKH-307 · AC-6: una firma persistida se resuelve contra la cadena', (
       signature: 'InFlightSig555',
       lastValidBlockHeight: '1500',
     });
+    onChainAbsent();
     fakeConnection.getParsedTransaction.mockResolvedValue(null);
     fakeConnection.getBlockHeight.mockResolvedValue(900); // 900 <= 1500 ⟹ viva
 
@@ -661,11 +691,136 @@ describe('WKH-307 · R-3: una firma confirmada que no verifica NO se re-emite', 
     // verifica" es un RPC mintiendo o contabilidad corrupta: ninguna se arregla
     // pagando de nuevo. Este test afirma lo CONTRARIO de T-HEAL-1/T-P1-2a.
     seedRow('run:0');
-    fakeConnection.getParsedTransaction.mockResolvedValue(null); // no verifica
+    onChainAbsent(); // la firma registrada NO está en la cadena
+    fakeConnection.getParsedTransaction.mockResolvedValue(null);
     await expect(adapter.settle(req('run:0'))).rejects.toThrow(
       /SETTLE_CONFIRMED_BUT_UNVERIFIABLE/,
     );
     expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// AR BLQ-MEDIO-1 — un `null` de RPC NO prueba ausencia
+//
+// EL DOBLE PAGO CONCRETO QUE ESTOS TESTS CIERRAN: se firma, se persiste, se
+// transmite y la tx SÍ aterriza, pero `confirmTransaction` corta por timeout. Dos
+// minutos después llega el retry. `getBlockHeight` pega contra el nodo de la punta
+// (altura > lastValid ✓) y la lectura de la tx pega contra OTRO nodo del pool que
+// todavía no indexó ese bloque → `null`. Con la lógica anterior eso se leía como
+// "expiró sin aterrizar" ⟹ segundo SPL transfer REAL sobre un pago ya hecho. En
+// Solana no hay backstop on-chain: no se puede deshacer.
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-307 · AR BLQ-MEDIO-1: la ausencia se PRUEBA, no se infiere', () => {
+  it('T-IDM-13: nodo ATRASADO (tx presente pero sin parsear) + blockhash muerto ⟹ CERO broadcasts', async () => {
+    // ⚠️ ESTE ES EL TEST DEL HALLAZGO. Las dos condiciones que antes bastaban para
+    // re-pagar están puestas a propósito: el blockhash murió Y `getParsedTransaction`
+    // devuelve `null`. Lo único que cambia es que el nodo, preguntado por el estado de
+    // la firma, dice que SÍ la tiene.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'LandedButUnindexed',
+      lastValidBlockHeight: '500',
+    });
+    fakeConnection.getBlockHeight.mockResolvedValue(900); // 900 > 500 ⟹ blockhash muerto
+    fakeConnection.getParsedTransaction.mockResolvedValue(null); // nodo atrasado
+    presenceState.value = { err: null }; // …pero la firma ESTÁ en la cadena
+
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+
+    // Lo único que importa: NO salió un segundo transfer.
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    expect(reclaimMock).not.toHaveBeenCalled();
+    // Y no se devuelve un éxito inventado: la tx está pero sus términos no se
+    // pudieron validar contra el parseo ⟹ fail-closed explícito.
+    expect(String(err)).toMatch(/SETTLE_SIGNED_TERMS_MISMATCH/);
+  });
+
+  it('T-IDM-14: el RPC de presencia NO contesta + blockhash muerto ⟹ CERO broadcasts', async () => {
+    // "No pude preguntar" nunca autoriza re-pagar.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'UnknownSig',
+      lastValidBlockHeight: '500',
+    });
+    fakeConnection.getBlockHeight.mockResolvedValue(900);
+    fakeConnection.getSignatureStatuses.mockRejectedValueOnce(
+      new Error('429 rate limited'),
+    );
+
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_IN_FLIGHT_UNRESOLVED/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    expect(reclaimMock).not.toHaveBeenCalled();
+  });
+
+  it('T-IDM-14b: una respuesta de presencia con forma inesperada tampoco autoriza', async () => {
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'WeirdSig',
+      lastValidBlockHeight: '500',
+    });
+    fakeConnection.getBlockHeight.mockResolvedValue(900);
+    for (const shape of [null, {}, { value: [] }, { value: 'nope' }]) {
+      fakeConnection.getSignatureStatuses.mockResolvedValueOnce(shape as never);
+      await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+        /SETTLE_IN_FLIGHT_UNRESOLVED/,
+      );
+    }
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+
+  it('T-IDM-15: la tx aterrizó y FALLÓ on-chain ⟹ re-firmar SÍ es correcto (1 broadcast)', async () => {
+    // Una tx grabada con error es TERMINAL: la transferencia no ocurrió y esa firma
+    // nunca puede volver a ejecutarse. Acá re-pagar es lo correcto — y antes este caso
+    // estaba COLAPSADO con "no la encuentro" dentro del mismo `{valid:false}`.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'FailedSig',
+      lastValidBlockHeight: '500',
+    });
+    onChainFailed();
+    fakeConnection.getBlockHeight.mockResolvedValue(900);
+
+    const res = await adapter.settle(req('run:0'));
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+    expect(res.txHash).not.toBe('FailedSig');
+  });
+
+  it('T-IDM-16: `confirmed` cuya presencia NO se pudo consultar ⟹ error TRANSITORIO, no condena', async () => {
+    // Antes un hipo del RPC sobre una fila `confirmed` daba
+    // SETTLE_CONFIRMED_BUT_UNVERIFIABLE, que es el rechazo PERMANENTE que exige
+    // intervención humana. Un intent sano no puede quedar condenado por un 429.
+    seedRow('run:0');
+    fakeConnection.getSignatureStatuses.mockRejectedValueOnce(
+      new Error('503 upstream'),
+    );
+
+    await expect(adapter.settle(req('run:0'))).rejects.toThrow(
+      /SETTLE_PRESENCE_UNKNOWN/,
+    );
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+
+  it('T-IDM-17: la determinación negativa usa `searchTransactionHistory`', async () => {
+    // Sin buscar el histórico, un nodo que podó bloques viejos contesta "no la tengo"
+    // sobre una tx que sí existe — y eso es exactamente lo que autoriza el re-pago.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'AbsentSig',
+      lastValidBlockHeight: '500',
+    });
+    onChainAbsent();
+    fakeConnection.getBlockHeight.mockResolvedValue(900);
+
+    await adapter.settle(req('run:0'));
+
+    expect(fakeConnection.getSignatureStatuses).toHaveBeenCalledWith(
+      ['AbsentSig'],
+      { searchTransactionHistory: true },
+    );
   });
 });
 

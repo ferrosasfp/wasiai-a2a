@@ -10,6 +10,7 @@ import type {
   SolanaPaymentAdapter as ISolanaPaymentAdapter,
   QuoteResult,
   SettledPeek,
+  SettlementPresence,
   SettleResult,
   SolanaSettleProof,
   SolanaSettleRequest,
@@ -84,6 +85,11 @@ const DEFAULT_SIGN_MAX_ATTEMPTS = 3;
  * del broadcast, asi que reintentar no puede pagar de mas; el tope existe para no
  * girar para siempre si algo mas anda mal.
  */
+/** Texto de un error desconocido, sin asumir que sea `Error`. */
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 function resolveSignMaxAttempts(): number {
   const raw = process.env.SOLANA_SETTLE_SIGN_MAX_ATTEMPTS;
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
@@ -324,12 +330,13 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     signature: string,
     req: SolanaSettleRequest,
   ): Promise<SettleResult> {
-    const verified = await this.verify({
+    const presence = await this.probeSettlementPresence({
       signature,
       payTo: req.payTo,
       amountAtomic: req.amountAtomic,
     });
-    if (verified.valid) {
+
+    if (presence.state === 'landed_ok') {
       log.info(
         { intentId: req.intentId, signature },
         'solana settle idempotent hit — returning the prior signature, nothing broadcast',
@@ -337,39 +344,83 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       return { txHash: signature, success: true };
     }
 
+    // AR BLQ-MEDIO-1: "no pude preguntar" NO es "no verifica". Antes los dos
+    // terminaban en el rechazo PERMANENTE de abajo, o sea que un hipo del RPC
+    // condenaba un intent sano a intervencion humana. Ahora es un error TRANSITORIO
+    // y el proximo retry vuelve a preguntar.
+    if (presence.state === 'unknown') {
+      log.warn(
+        { intentId: req.intentId, signature, detail: presence.detail },
+        'solana settle deferred — the ledger says this intent was confirmed but the chain could not be queried; NOT re-broadcasting and NOT condemning the row',
+      );
+      throw new Error(
+        `SETTLE_PRESENCE_UNKNOWN: ${req.intentId} (${presence.detail})`,
+      );
+    }
+
     // ⚠️ CAMBIO DE CONDUCTA DELIBERADO (R-3). El seam in-memory borraba la entrada y
-    // RE-EMITIA (self-heal). Con un store durable, "la firma registrada no verifica"
-    // es o bien un RPC mintiendo, o bien contabilidad corrupta: **ninguna de las dos
-    // se arregla pagando de nuevo**. Las dos exigen mirada humana.
+    // RE-EMITIA (self-heal). Con un store durable esto NO se arregla pagando de nuevo.
+    //
+    // TRES causas posibles, y la tercera es la que importa para el destrabe (AR MNR-1):
+    //   1. contabilidad corrupta (la fila no corresponde a esa firma);
+    //   2. un RPC devolviendo datos que no son los de la cadena;
+    //   3. **un FORK**: la fila llego a `confirmed` tras un `confirmTransaction` a
+    //      commitment `confirmed`, que es OPTIMISTA — una tx confirmada asi puede
+    //      caerse si su bloque queda fuera de la cadena canonica. En ESE caso el pago
+    //      genuinamente NO ocurrio y el agente quedo sin cobrar.
+    //
+    // La asimetria se mantiene a proposito (no cobrar es recuperable, cobrar dos veces
+    // no), pero el caso 3 necesita SALIDA MANUAL, no quedar clavado para siempre:
+    // el procedimiento de destrabe esta en
+    // `doc/sdd/209-wkh-307-solana-durable-idempotency-ledger/runbook-destrabe.md`.
+    const detail =
+      presence.state === 'absent'
+        ? 'the signature is not on chain (node searched its history)'
+        : presence.detail;
     log.error(
-      { intentId: req.intentId, signature, reason: verified.error },
-      'solana settle REFUSED — the ledger says this intent was confirmed but the signature does not verify on-chain. NOT re-broadcasting: this is either an RPC lying or corrupt accounting, and paying again fixes neither.',
+      {
+        intentId: req.intentId,
+        signature,
+        presence: presence.state,
+        detail,
+        runbook:
+          'doc/sdd/209-wkh-307-solana-durable-idempotency-ledger/runbook-destrabe.md',
+      },
+      'solana settle REFUSED — the ledger says this intent was confirmed but the chain does not back that up. NOT re-broadcasting: corrupt accounting, a lying RPC and a forked-out optimistic confirmation all look the same from here, and paying again only fixes the third. See the runbook to unstick.',
     );
     throw new Error(
-      `SETTLE_CONFIRMED_BUT_UNVERIFIABLE: ${req.intentId} (${verified.error ?? 'unknown'})`,
+      `SETTLE_CONFIRMED_BUT_UNVERIFIABLE: ${req.intentId} (${presence.state}: ${detail})`,
     );
   }
 
   /**
    * Rama `signed`: hay firma persistida, o sea que el broadcast PUDO haber salido.
-   * Las tres salidas son por DEMOSTRACION, nunca por tiempo:
    *
-   *   (a) la tx verifica on-chain          ⟹ se pago: confirmar y devolverla;
-   *   (b) no verifica y el blockhash MURIO ⟹ esa tx no puede aterrizar NUNCA:
-   *       se archiva la firma y se re-firma;
-   *   (c) no verifica y el blockhash VIVE  ⟹ todavia podria aterrizar ⟹ fail-closed.
+   * ⚠️ AR BLQ-MEDIO-1 — LO QUE HACE SEGURA A LA SALIDA (b). Re-transmitir exige DOS
+   * hechos, y los dos tienen que ser PRUEBAS:
+   *
+   *   1. el blockhash murio (`getBlockHeight() > last_valid_block_height`) — prueba
+   *      de que ESA tx ya no puede aterrizar;
+   *   2. la tx NO esta en la cadena — y esto **antes se infería de un `null`**, que
+   *      tambien puede significar "el nodo no tiene ese historico" o "va atrasado".
+   *      Un nodo del pool sin el bloque indexado alcanzaba para concluir "expiro sin
+   *      aterrizar" sobre una tx YA PAGADA ⟹ segundo SPL transfer real.
+   *
+   * Ahora (2) sale de `probeSettlementPresence`, que sólo devuelve `absent` cuando el
+   * nodo RESPONDIO habiendo buscado en su historico. Todo lo demas fail-closea.
    */
   private async settleAlreadySigned(
     signature: string,
     lastValidBlockHeight: string | null,
     req: SolanaSettleRequest,
   ): Promise<SettleResult> {
-    const verified = await this.verify({
+    const presence = await this.probeSettlementPresence({
       signature,
       payTo: req.payTo,
       amountAtomic: req.amountAtomic,
     });
-    if (verified.valid) {
+
+    if (presence.state === 'landed_ok') {
       // (a) El pago aterrizo. Marcarlo confirmado es contabilidad, no autorizacion.
       const confirmed = await recordConfirmedIntent({
         intentId: req.intentId,
@@ -388,31 +439,60 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       return { txHash: signature, success: true };
     }
 
-    if (lastValidBlockHeight === null) {
-      // Sin la altura no se puede DEMOSTRAR nada. No se infiere por tiempo.
-      throw new Error(
-        `SETTLE_SIGNED_UNRESOLVED: ${req.intentId} has a signature that does not verify and no last_valid_block_height to prove it expired`,
-      );
-    }
-
-    const connection = getSolanaConnection();
-    const height = await connection.getBlockHeight(getSolanaCommitment());
-    // BigInt y no Number(): la altura viaja como string a proposito (CD-8).
-    if (BigInt(height) <= BigInt(lastValidBlockHeight)) {
-      // (c) Sigue viva: podria aterrizar en cualquier momento. "No se" no paga.
+    // "No pude preguntar" NUNCA autoriza re-transmitir.
+    if (presence.state === 'unknown') {
       log.warn(
-        {
-          intentId: req.intentId,
-          signature,
-          blockHeight: String(height),
-          lastValidBlockHeight,
-        },
-        'solana settle refused — the previously signed transaction has not landed but its blockhash is STILL VALID; it could confirm at any moment',
+        { intentId: req.intentId, signature, detail: presence.detail },
+        'solana settle refused — could not determine whether the signed transaction landed; refusing to re-broadcast on an unanswered question',
       );
-      throw new Error(`SETTLE_IN_FLIGHT_UNRESOLVED: ${req.intentId}`);
+      throw new Error(
+        `SETTLE_IN_FLIGHT_UNRESOLVED: ${req.intentId} (presence unknown: ${presence.detail})`,
+      );
     }
 
-    // (b) PRUEBA de que esa tx ya no puede aterrizar. Se archiva y se re-firma.
+    // Algo aterrizo con esa firma pero con OTROS terminos: re-pagar seria pagar dos
+    // veces por cosas distintas. Fail-closed.
+    if (presence.state === 'landed_mismatch') {
+      log.error(
+        { intentId: req.intentId, signature, detail: presence.detail },
+        'solana settle refused — a transaction with this signature IS on chain but does not match the intent terms',
+      );
+      throw new Error(
+        `SETTLE_SIGNED_TERMS_MISMATCH: ${req.intentId} (${presence.detail})`,
+      );
+    }
+
+    // `landed_failed`: la tx esta grabada on-chain CON ERROR. La transferencia no
+    // ocurrio y esa firma es TERMINAL (una tx fallida nunca vuelve a ejecutarse), asi
+    // que no hace falta esperar a que expire el blockhash: re-firmar es correcto y no
+    // puede duplicar nada.
+    if (presence.state !== 'landed_failed') {
+      // `absent`: hace falta ADEMAS la prueba de expiracion. Sin ella, la tx podria
+      // aterrizar en cualquier momento.
+      if (lastValidBlockHeight === null) {
+        throw new Error(
+          `SETTLE_SIGNED_UNRESOLVED: ${req.intentId} is not on chain but has no last_valid_block_height to prove it can no longer land`,
+        );
+      }
+      const connection = getSolanaConnection();
+      const height = await connection.getBlockHeight(getSolanaCommitment());
+      // BigInt y no Number(): la altura viaja como string a proposito (CD-8).
+      if (BigInt(height) <= BigInt(lastValidBlockHeight)) {
+        // (c) Sigue viva: podria aterrizar en cualquier momento. "No se" no paga.
+        log.warn(
+          {
+            intentId: req.intentId,
+            signature,
+            blockHeight: String(height),
+            lastValidBlockHeight,
+          },
+          'solana settle refused — the previously signed transaction has not landed but its blockhash is STILL VALID; it could confirm at any moment',
+        );
+        throw new Error(`SETTLE_IN_FLIGHT_UNRESOLVED: ${req.intentId}`);
+      }
+    }
+
+    // (b) LAS DOS PRUEBAS en la mano. Se archiva la firma vieja y se re-firma.
     const reclaimed = await reclaimExpiredIntent({
       intentId: req.intentId,
       signature,
@@ -423,10 +503,76 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       );
     }
     log.warn(
-      { intentId: req.intentId, expiredSignature: signature },
-      'solana settle: the previously signed transaction expired without landing (block height passed its last valid height) — archived and re-signing',
+      {
+        intentId: req.intentId,
+        expiredSignature: signature,
+        presence: presence.state,
+      },
+      'solana settle: the previously signed transaction will never land (absent + blockhash expired, or landed with an on-chain error) — archived and re-signing',
     );
     return await this.signPersistBroadcast(req);
+  }
+
+  /**
+   * AR BLQ-MEDIO-1 — ¿esta esta firma en la cadena, y en que estado?
+   *
+   * Es la unica fuente admitida para una determinacion NEGATIVA, porque es la unica
+   * que puede distinguir "el nodo busco y no la tiene" de "no pude preguntar":
+   * `getSignatureStatuses(..., { searchTransactionHistory: true })` obliga al nodo a
+   * mirar tambien el almacenamiento de largo plazo, y devuelve `null` en la posicion
+   * de la firma SOLO tras haber buscado.
+   *
+   * ⚠️ NO se usa `getParsedTransaction` para decidir ausencia: su `null` mezcla
+   * "no existe" con "este nodo no lo tiene indexado / va atrasado". Esa lectura sigue
+   * usandose, pero solo para validar los TERMINOS de una tx que ya sabemos presente.
+   *
+   * NUNCA lanza: todo fallo se traduce a `unknown`.
+   */
+  private async probeSettlementPresence(
+    proof: SolanaSettleProof,
+  ): Promise<SettlementPresence> {
+    const connection = getSolanaConnection();
+    let statuses: Awaited<
+      ReturnType<typeof connection.getSignatureStatuses>
+    > | null = null;
+    try {
+      statuses = await connection.getSignatureStatuses([proof.signature], {
+        searchTransactionHistory: true,
+      });
+    } catch (err) {
+      return { state: 'unknown', detail: errText(err) };
+    }
+    if (!statuses || !Array.isArray(statuses.value)) {
+      return {
+        state: 'unknown',
+        detail: 'getSignatureStatuses returned no status array',
+      };
+    }
+    if (statuses.value.length === 0) {
+      return {
+        state: 'unknown',
+        detail: 'getSignatureStatuses returned empty',
+      };
+    }
+    const status = statuses.value[0];
+    // `null` DESPUES de haber buscado el historico = prueba de ausencia.
+    if (status === null || status === undefined) return { state: 'absent' };
+    if (status.err) {
+      return { state: 'landed_failed', detail: JSON.stringify(status.err) };
+    }
+
+    // Presente y sin error: recien ahora se validan los TERMINOS.
+    let verified: VerifyResult;
+    try {
+      verified = await this.verify(proof);
+    } catch (err) {
+      return { state: 'unknown', detail: errText(err) };
+    }
+    if (verified.valid) return { state: 'landed_ok' };
+    return {
+      state: 'landed_mismatch',
+      detail: verified.error ?? 'terms mismatch',
+    };
   }
 
   /**
