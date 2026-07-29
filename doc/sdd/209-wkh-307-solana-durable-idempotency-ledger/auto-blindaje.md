@@ -34,8 +34,9 @@ restaurar por `cp` desde el respaldo → **verificar por hash**. Nunca `git chec
 | **M18** | El parse no disponible vuelve a leerse como `landed_mismatch` (AR MNR-3) | Sí (2ª formulación) | **KILLED** | `T-IDM-13`, `T-IDM-18` |
 | **M19** | `landed_failed` vuelve a saltear la prueba de expiración (AR MNR-2) | Sí (2ª formulación) | **KILLED** | `T-IDM-19` |
 | **M20** | La retención de histórico insuficiente deja de fallar el preflight (AR MNR-1) | Sí | **KILLED** | `T-IDM-20` |
+| **M21** | La retención NO MEDIBLE vuelve a continuar sin la declaración del operador | Sí | **KILLED** | `T-IDM-20c`, `20c2`, `20c4` |
 
-**20/20 KILLED. Ningún superviviente.** (M16–M17 salieron del AR; M18–M20 del re-AR.) Los tres mutantes que hubo que reformular
+**21/21 KILLED. Ningún superviviente.** (M16–M17 del AR; M18–M21 del re-AR.) Los tres mutantes que hubo que reformular
 (M1, M2, M7) NO se contaron hasta que compilaron: un mutante que rompe el parseo o los
 tipos lo caza el compilador, no el test, y contarlo sería un falso KILLED.
 
@@ -298,10 +299,21 @@ redirigiendo a un archivo.
   (`getSlot` vs `getFirstAvailableBlock`), con umbral derivado y no arbitrario: la
   validez de un blockhash (~150 slots), que es exactamente el momento en que el código
   usa un `absent`. Medido en vivo contra el RPC configurado: **895 497 slots retenidos**.
-- **Asimetría deliberada, declarada**: retención **medida e insuficiente** ⟹ falla;
-  retención **no medible** ⟹ warn ruidoso y sigue. Apagar todo el leg porque un método
-  opcional no está soportado es un martillo enorme para un residuo que además necesita
-  que el blockhash haya expirado. Es una decisión, no un descuido.
+- **La asimetría se resolvió FAIL-CLOSED, con salida explícita** (decisión del
+  coordinador; yo había propuesto warn-y-seguir y el argumento que me convenció es de
+  costos): permitir de más produce un `absent` falso ⟹ **segundo pago, irreversible**;
+  cortar de más produce un arranque fallido, **ruidoso, inmediato y reversible en un
+  minuto**. Cuando los dos errores no cuestan lo mismo, el default va del lado barato.
+  · medida y suficiente ⟹ arranca · medida e insuficiente ⟹ corta ·
+  **no medible ⟹ corta**, con el mensaje diciendo cómo salir.
+  Mi objeción (no poder medir NO es evidencia de falla) se salvó con
+  `SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT=true`: **sin default permisivo**
+  (ausente = cortar) y con un nombre que declara lo que el operador AFIRMA, no un
+  `SKIP_` que el próximo lector apague por molestia. Así la decisión queda registrada en
+  la configuración en vez de perderse en un warn de arranque que nadie lee.
+- **Aplicar en**: un warn de arranque no es un control. Si algo tiene que decidirse, que
+  el sistema **pare y pida la decisión**; el registro de esa decisión vale más que la
+  comodidad de seguir.
 - **Aplicar en**: cuando un arreglo cambia "inferencia" por "consulta a un tercero,
   **revisar qué precondiciones de despliegue trae esa consulta**. Una garantía que
   depende de cómo esté configurado un nodo no es una garantía hasta que alguien la
