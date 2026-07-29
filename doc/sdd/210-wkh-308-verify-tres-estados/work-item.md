@@ -128,22 +128,61 @@ aterrizó. Dejó de dispararse sólo donde estaba mal: cuando no puede comprobar
 
 ---
 
-## 5. Residuo encontrado, que NO es el hallazgo
+## 5. Residuo encontrado — **con una corrección a lo que yo mismo afirmé**
 
-`recoverConfirmedSettle` (`payment.ts:774`) es el **único consumidor de `verify()` que
-queda en el riel Solana**, y hereda su colapso. No puede causar doble pago (ante `!valid`
-lanza), pero sí esto:
+### 5.1 Lo que dije, y por qué estaba mal
 
-> Un nodo atrasado, sobre una tx que **SÍ aterrizó**, hace que `getParsedTransaction`
-> devuelva `null` ⟹ `verify()` da `valid:false` ⟹ el settle se reporta **fallado**. El
-> agente **cobró on-chain**, el caller recibe un fallo y `compose` le **reembolsa** el
-> débito. El operador absorbe la diferencia.
+En la primera versión de este documento escribí que un nodo atrasado hacía que
+`compose` **reembolsara** al caller y que **el operador absorbiera** la diferencia. **Lo
+afirmé sin trazar el camino del reembolso. Es falso**, y lo verifiqué:
 
-Acotado: la fila queda en `signed` **con la firma correcta** (la consulta de inventario
-del `.sql` la lista), no hay doble pago, y no es plata del caller.
+- `settleSolanaLeg` **captura todo throw** de `adapter.settle` y devuelve `null`
+  (`downstream-payment.ts:460-465`). No re-lanza.
+- Un `downstream === null` **no hace fallar el step**: `invokeAgent` no lanza, corre
+  `finishSuccessfulStep` y el step termina OK.
+- El reembolso (`refundStepDebit`) vive en el **catch del step**
+  (`compose.ts:885-891`), o sea que sólo dispara cuando `invokeAgent` **lanza**.
 
-**El arreglo natural** —que `recoverConfirmedSettle` use `probeSettlementPresence` en vez
-de `verify()`, exactamente la alineación que este encargo pedía— **es de una línea de
-llamada**, pero es un cambio de conducta en el camino que corre hoy y merece su propia
-revisión. **Queda para que decidan si abrirlo**; es el candidato más fuerte que dejó esta
-verificación.
+Conclusión: **no hay reembolso, y por lo tanto no hay pérdida para el operador.** El
+agente cobró on-chain y el caller pagó: económicamente correcto.
+
+Cometí exactamente el error que este mismo documento le señala al encargo original —
+afirmar una consecuencia sin seguir el camino hasta el final.
+
+### 5.2 El daño real, que es menor pero existe
+
+El defecto sobreviviente es de **contabilidad y observabilidad**, no de dinero:
+
+> Un settle que **SÍ se pagó** se reporta como **no settleado**. El caller recibe
+> `downstreamSettle: 'skipped:SETTLE_FAILED'`, no se surface el `downstreamTxHash`, no
+> se escribe el recibo del leg Solana en el ledger (`recordSolanaLegIfAny` no se invoca
+> porque `downstream` es `null`), y la fila queda en `signed` en vez de `confirmed`.
+
+O sea: la reconciliación mira un pago hecho y lee "no se pagó". Es la misma familia de la
+determinación negativa —tratar *"no pude comprobarlo"* como *"no pasó"*— sólo que el
+costo es de datos, no de plata.
+
+### 5.3 El arreglo NO es de una línea
+
+Cambiar `verify()` por `probeSettlementPresence` dentro de `recoverConfirmedSettle`
+**por sí solo no cambia nada observable**: cualquiera sea el error, `settleSolanaLeg`
+lo colapsa a `SETTLE_FAILED` en su catch. Para que el arreglo tenga efecto hacen falta
+**dos partes**:
+
+1. `payment.ts` — `recoverConfirmedSettle` distingue los estados y, ante `unknown`,
+   señaliza "no pude comprobarlo" en vez de "falló";
+2. `downstream-payment.ts` — el catch de `settleSolanaLeg` deja de colapsar todo a
+   `SETTLE_FAILED` y emite **`SETTLE_UNKNOWN`** cuando corresponde, **espejando lo que
+   el leg EVM ya hace** (`readSettleValueDisposition`, `:893-905`). Ese código público
+   ya existe y ya significa lo que hace falta: *"no sé si se pagó, ese leg NO se puede
+   tratar como no pagado"* (`downstream-skip-code.ts:58-60`).
+
+La parte (2) cambia el **skip-code que ve el caller** (`SETTLE_FAILED` →
+`SETTLE_UNKNOWN`) en un camino que corre hoy. Es un cambio de contrato observable, chico
+pero real, y por eso **no lo implementé sin confirmarlo**: el encargo lo describía como
+una línea, y no lo es.
+
+**Encuadre correcto, que es el que pediste dejar escrito**: no es *alinear Solana con
+EVM* — es **dejar de reportar como fallado algo que no pudimos comprobar**. Da la
+casualidad de que el leg EVM ya lo hace, así que hay patrón que espejar en vez de
+inventar.
