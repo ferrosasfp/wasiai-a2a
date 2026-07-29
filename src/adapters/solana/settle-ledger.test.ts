@@ -298,7 +298,20 @@ describe('WKH-307 · precision, PII, argumentos y la regla del SELECT', () => {
   it('T-LDG-10: los montos y la altura viajan como STRING, cero coercion numerica', async () => {
     // Un uint64 por encima de 2^53 pierde digitos con Number(). WKH-196 pago caro
     // exactamente este bug.
+    // `amount_atomic` es TEXT en la tabla: no tiene techo, asi que uint64 max es un
+    // fixture legitimo y el que mas duele si alguien mete un Number().
     const huge = '18446744073709551615';
+    /**
+     * ⚠️ `last_valid_block_height` es `BIGINT` CON SIGNO (techo 9223372036854775807),
+     * NO `TEXT`. Este test usaba `huge` tambien para el, y ejercitar el SQL de verdad
+     * mostro que la funcion tira `22003 out of range` con ese valor: la garantia
+     * "cualquier uint64 hace round-trip" no existia para esta columna.
+     *
+     * 2^53 + 1 es el fixture correcto: sigue POR ENCIMA del entero seguro de JS —que es
+     * lo que WKH-196 vino a proteger— y entra comodo en BIGINT. Un slot de Solana real
+     * ronda 3.5e8.
+     */
+    const hugeHeight = '9007199254740993';
     rpcQueue.push({ data: row(), error: null });
     await claimSettleIntent({ ...CLAIM, amountAtomic: huge });
     const args = rpcCalls[0]?.args as Record<string, unknown>;
@@ -309,10 +322,10 @@ describe('WKH-307 · precision, PII, argumentos y la regla del SELECT', () => {
     await recordSignedIntent({
       intentId: 'i',
       signature: 'S',
-      lastValidBlockHeight: huge,
+      lastValidBlockHeight: hugeHeight,
     });
     const args2 = rpcCalls[1]?.args as Record<string, unknown>;
-    expect(args2.p_last_valid_block_height).toBe(huge);
+    expect(args2.p_last_valid_block_height).toBe(hugeHeight);
     expect(typeof args2.p_last_valid_block_height).toBe('string');
   });
 

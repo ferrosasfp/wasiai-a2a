@@ -177,7 +177,7 @@ COMMENT ON COLUMN public.a2a_solana_settle_intents.settle_signature IS
   'Firma base58. NOT NULL desde el estado signed. El indice UNIQUE parcial sobre esta columna repone la proteccion anti-firma-duplicada que se pierde al dejar sendAndConfirmTransaction.';
 
 COMMENT ON COLUMN public.a2a_solana_settle_intents.last_valid_block_height IS
-  'Habilita la PRUEBA "esta tx ya no puede aterrizar" (getBlockHeight() > este valor), que es como sale del estado signed sin apostar por tiempo.';
+  'Habilita la PRUEBA "esta tx ya no puede aterrizar" (getBlockHeight() > este valor), que es como sale del estado signed sin apostar por tiempo. BIGINT CON SIGNO: techo 9223372036854775807. Viaja como TEXT en la API de las funciones (WKH-196) pero NO admite uint64 completo; un valor por encima del techo hace tirar 22003 y el seam lo traduce a store_unavailable (fail-closed, sin transmitir). Un slot de Solana ronda 3.5e8.';
 
 COMMENT ON COLUMN public.a2a_solana_settle_intents.expired_signatures IS
   'Historial de firmas que expiraron sin aterrizar. La evidencia de que se intento pagar no se borra nunca.';
