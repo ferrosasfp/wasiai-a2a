@@ -5,6 +5,66 @@ patrón que los previene. Nada de esto es hipotético.
 
 ---
 
+## Verificación por mutación — los 12 mutantes (G5 · Done Definition 7)
+
+Procedimiento por mutante: árbol limpio → aplicar → **probar que aterrizó**
+(`git diff` no vacío) → **`npx tsc --noEmit` limpio** (CD-15: un mutante que no
+compila es un falso KILLED) → correr el/los test(s) → restaurar por `cp` desde el
+respaldo → **verificar por hash** (`sha256sum -c`). Nunca `git checkout --`
+(CD-16).
+
+| # | Mutación | ¿Compiló? | Resultado | Test(s) asesino(s) — observado, no esperado |
+|---|----------|-----------|-----------|---------------------------------------------|
+| **M1** | Devolver la construcción del `input` a después del bloque de débito | Sí | **KILLED** | `T-MAP-07` — balance `9.93` en vez de `9.95`: se cobró el step 2, que nunca corrió |
+| **M2** | Origen ausente → `{ ok: true, input: base }` en vez de `SOURCE_FIELD_MISSING` | Sí | **KILLED** | 9 tests: `T-MAP-03`, `T-MAP-09`, `T-MAP-10c`, `T-MAP-L18`, `T-MAP-L19`, `T-MAP-L24` + 3 más. Medido en vivo sobre HEAD (ver incidente del mutante congelado) |
+| **M3** | `Object.hasOwn(prev, source)` → `source in prev` | Sí | **KILLED** | `T-MAP-10c` (el `in` camina el prototipo y resuelve `toString`) |
+| **M4** | Traversal por `.` (`source.split('.').reduce(...)`) | Sí | **KILLED** | `T-MAP-09` (su único trabajo en la vida), + `T-MAP-09b`, `T-MAP-10c` |
+| **M5** | Mutar `base` (`base[dest] = …`) en vez de construir objeto nuevo | Sí | **KILLED** | `T-MAP-02` (service), `T-MAP-L22` (leaf) |
+| **M6** | Quitar la re-aplicación del mapeo en el retry (pasar `newInput` crudo) | Sí | **KILLED** | `T-MAP-19`, `T-MAP-19b` |
+| **M7** | Quitar S7 (destino que colisiona con una clave ya presente en `step.input`) | Sí | **KILLED** | `T-MAP-17` (ruta, pre-cobro), `T-SHAPE-22`, `T-MAP-L04`, `T-MAP-L07`, `T-MAP-L14` |
+| **M8** | Quitar S8 (mapeo declarado en el step 0) | Sí | **KILLED** | `T-MAP-16` (ruta), `T-SHAPE-23`, `T-MAP-L06` |
+| **M9** | Sacar la revalidación de forma del resolvedor (R3), dejándola sólo en la ruta | Sí | **KILLED** | `T-MAP-21` (el bypass de `/orchestrate/execute`), `T-MAP-L13`, `T-MAP-L14`, `T-MAP-L25` |
+| **M10** | El early-return deja de propagar `steps: results` / `totalCostUsdc: totalCost` | Sí | **KILLED** | `T-MAP-08` |
+| **M11** | Quitar el guard `i > 0` del bloque de débito (CD-7) | Sí | **KILLED** | **34 tests PREEXISTENTES**; el canónico es `T-COMPOSE-DEBIT-6 should NOT debit step 0 in service (anti-double-debit guard)`. También `T-COMPOSE-DEBIT-1`, `T-COMPOSE-REFUND-2`, `T-SESS-MULTISTEP` |
+| **M12** | Mover `const startTime = Date.now()` arriba del bloque de débito (CD-8) | Sí | **SURVIVED → test escrito → KILLED** | Ninguno al principio. Se escribió `T-MAP-C4` **con el mutante aplicado** (orden CD-12) y ahí murió |
+
+**M12 es el hallazgo real de esta batería.** La métrica de latencia por step del
+money-path no estaba protegida por nada: cualquiera podía cambiar qué mide
+`latencyMs` sin que se enterara un solo test.
+
+### Corrección a los punteros del Story File (M1 y M10)
+
+El Story File nombra `T-MAP-18` como asesino de M1 y de M10. **No puede matarlos**:
+es un test de RUTA y esa suite moquea `composeService.compose` por completo, así
+que no observa nada de lo que pasa dentro del service. Los dos mueren igual, en el
+nivel donde la propiedad es observable (`T-MAP-07` y `T-MAP-08`). No se agregó
+ningún test: la propiedad está cubierta, el puntero estaba mal.
+
+### Líneas nuevas sin cobertura — declaradas (G9)
+
+Medido con `vitest --coverage` sobre `src/services/compose.ts` con la suite
+completa, no estimado:
+
+- **Statements nuevos sin hits: NINGUNO.** Todo statement agregado por esta HU se
+  ejecuta al menos una vez.
+- **`src/services/compose.ts:734` — rama `false` de `if (remapped.ok)`: sin hits,
+  e INALCANZABLE POR CONSTRUCCIÓN.** Si la primera aplicación del mapeo tuvo
+  éxito, la re-aplicación del retry es total: `lastOutput` es el MISMO objeto (el
+  step falló, el pipeline no avanzó) y las claves del mapeo son las mismas. Se
+  conserva como defensa fail-closed (CD-2): si algún día deja de ser total, el
+  camino seguro ya está escrito y no re-debita ni re-invoca. **Se declara acá en
+  vez de forzar un test artificial** que tendría que romper el invariante para
+  alcanzarla.
+- **`src/services/compose.ts:736` — rama `false` de `if (retryInput)`: sin hits,
+  pero SÍ alcanzable** (cuando el LLM devuelve `null`). No es un hueco que abra
+  esta HU: es exactamente el mismo hueco preexistente de la rama `false` de
+  `if (newInput)` (`:728`), que ya estaba sin cubrir antes de WKH-305. Esta HU
+  movió la expresión del guard, no cambió su cobertura.
+- Fuera de alcance, preexistentes y sin tocar: `:225` (el `??` de `SCOPE_DENIED`)
+  y `:749` (rama `false` de `if (retryDebit.success)`).
+
+---
+
 ### [2026-07-29 00:55] TODAS — Un MUTANTE quedó commiteado como si fuera el fix
 
 - **Error**: el commit `659a39e` ("wip: trabajo en curso") incorporó al branch el
@@ -29,6 +89,60 @@ patrón que los previene. Nada de esto es hipotético.
      restaurar, verificar el hash. No dejar un mutante vivo entre llamadas.
   3. Si hay que salvar trabajo a mitad de una mutación, **restaurar primero**
      (`cp` desde el respaldo + `sha256sum -c`) y recién entonces commitear.
+
+---
+
+### [2026-07-29 01:21] W4 — Una aserción VACUA dentro del test escrito para cerrar M12
+
+- **Error**: `T-MAP-C4` (el test nuevo que mata a M12) cerraba con
+  `expect(result.totalLatencyMs).toBeLessThan(DEBIT_MS)` y un comentario que
+  afirmaba: *"sin esta segunda mitad, un mock de `debit` que no durmiera dejaría
+  pasar el test por el motivo equivocado"*. **La aserción no puede fallar por
+  construcción**: `totalLatencyMs` es la suma de los `latencyMs` por step, todos
+  medidos desde el cronómetro POST-débito, así que jamás puede incluir el tiempo
+  del débito duerma lo que duerma el doble. El CR lo probó poniendo
+  `debitLatencyMs = 0` (desarmando el escenario que el comentario decía proteger)
+  y el test siguió verde.
+- **Causa raíz**: escribir la aserción "de refuerzo" razonando sobre el NOMBRE del
+  campo (`totalLatencyMs` suena a "el tiempo total, que incluye todo") en vez de
+  sobre **cómo se calcula**. Es CD-12 otra vez, en su forma más incómoda: afirmar
+  una protección que no existe, dentro del test escrito precisamente para cerrar
+  un superviviente.
+- **Fix**: se reemplazó por el chequeo que el comentario describía de verdad —
+  medir el **reloj de pared de la llamada completa** (`Date.now()` alrededor de
+  `composeService.compose`) y exigir `>= DEBIT_MS`. Y se verificó en las dos
+  direcciones, que es lo que faltaba la primera vez:
+  · fixture armado → verde;
+  · `debitLatencyMs = 0` → **rojo** (`expected 75 to be greater than or equal to 150`);
+  · M12 re-aplicado → rojo por la aserción principal.
+  El comentario ahora además nombra la trampa para que nadie la reintroduzca.
+- **Aplicar en**: toda aserción "de refuerzo" que exista para probar que el
+  FIXTURE está armado. **Se valida desarmando el fixture y viendo el rojo.** Si al
+  romper el escenario el test sigue verde, esa aserción no protege nada — sea cual
+  sea el nombre del campo que mira. Mismo método que la mutación, aplicado a los
+  propios tests.
+
+---
+
+### [2026-07-29 00:55] Proceso — Especificaciones de OTRAS HUs viajando en esta rama
+
+- **Qué pasó**: la rama `feat/305-wkh-305-compose-field-mapping` contiene, por el
+  commit `659a39e` del orquestador durante la pausa por créditos, las
+  especificaciones completas (`sdd.md`, `story-*.md`, `work-item.md`) de
+  **WKH-303, WKH-306 y WKH-307**. No son de esta HU y están fuera de su alcance.
+- **Causa raíz**: la misma que la del mutante congelado — commitear a las apuradas
+  para no perder trabajo, tomando el árbol entero en vez de archivo por archivo.
+  Es el riesgo conocido de un repo donde varios agentes escriben `doc/sdd/` en
+  paralelo mientras uno escribe `src/`.
+- **Consecuencia asumida**: el historial de esta rama **no responde limpio "qué
+  entró con esta HU"**. Un `git log --stat` de la rama mezcla código de WKH-305
+  con documentación de otras tres HUs.
+- **Por qué NO se corrige**: sacarlas exigiría cirugía sobre commits ya existentes
+  (rebase / filter). El riesgo de perder trabajo ajeno supera al beneficio de un
+  historial prolijo. Se deja constancia en vez de operar.
+- **Aplicar en**: cuando haya que salvar trabajo en curso, **commitear archivo por
+  archivo** (`git add <path>`, nunca `-A` ni `.`), revisando `git status` antes.
+  Y si hay una verificación por mutación en vuelo, restaurar ANTES de commitear.
 
 ---
 

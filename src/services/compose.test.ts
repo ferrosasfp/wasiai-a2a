@@ -4472,6 +4472,7 @@ describe('WKH-305 (W1) · caracterización: el reordenamiento no mueve un centav
     mockFetchOk({ result: 'r1' });
     ledger.debitLatencyMs = DEBIT_MS;
 
+    const wallClockStart = Date.now();
     const result = await composeService.compose({
       steps: [
         { agent: 'kyc', input: {} },
@@ -4481,15 +4482,24 @@ describe('WKH-305 (W1) · caracterización: el reordenamiento no mueve un centav
       chainId: 2368,
       a2aKey: 'wasi_a2a_test',
     });
+    const wallClockMs = Date.now() - wallClockStart;
 
     expect(result.success).toBe(true);
     // El step 1 es el único con débito per-step (el 0 lo debita el middleware),
     // así que es el único donde la diferencia es observable.
     expect(mockDebit).toHaveBeenCalledTimes(1);
     expect(result.steps[1]?.latencyMs).toBeLessThan(DEBIT_MS);
-    // Y el pipeline SÍ tardó al menos el débito: la latencia existió, lo que no
-    // hizo fue contarse como tiempo del agente. Sin esta segunda mitad, un mock
-    // de `debit` que no durmiera dejaría pasar el test por el motivo equivocado.
-    expect(result.totalLatencyMs).toBeLessThan(DEBIT_MS);
+    // ── EL FIXTURE ESTÁ ARMADO ────────────────────────────────────────────
+    // El reloj de pared de la llamada COMPLETA sí tiene que incluir el débito:
+    // es la prueba de que el doble durmió de verdad. Sin esto, poner
+    // `debitLatencyMs = 0` desarmaría el escenario y la aserción de arriba
+    // seguiría verde por el motivo equivocado (no porque el cronómetro esté bien
+    // puesto, sino porque no había nada que medir).
+    //
+    // Ojo con la tentación de asertar esto sobre `result.totalLatencyMs`: ESA
+    // suma los `latencyMs` por step, todos medidos desde el cronómetro
+    // post-débito, así que jamás puede incluir el tiempo del débito y la
+    // comparación sería vacua (no puede fallar por construcción).
+    expect(wallClockMs).toBeGreaterThanOrEqual(DEBIT_MS);
   });
 });
