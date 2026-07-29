@@ -25,10 +25,13 @@ import {
   getSolanaCaip2,
   getSolanaCommitment,
   getSolanaConnection,
+  getSolanaNetwork,
   getSolanaOperatorKeypair,
   getSolanaUsdcDecimals,
   getSolanaUsdcMint,
 } from './chain.js';
+// WKH-302 — camino nuevo (bandera ON): el facilitator firma y transmite.
+import { payoutViaFacilitator } from './facilitator-settle.js';
 
 /**
  * Solana devnet SPL-transfer payment adapter (WKH-234). Settle-only,
@@ -533,6 +536,47 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       }
       // Firma previa no verifica → limpiar y re-emitir (self-heal).
       _intentSignatures.delete(req.intentId);
+    }
+
+    // ── WKH-302 — bandera de transición. UNA SOLA LECTURA por invocación, a una
+    //    const local: si se leyera dos veces, un cambio de env a mitad de request
+    //    podría partir el flujo entre los dos caminos (AC-3). Comparación literal
+    //    contra 'true'; `Boolean(process.env.X)` daría true para CUALQUIER string
+    //    no vacío, incluido 'false'.
+    //
+    //    El bloque de idempotencia de arriba queda ANTES de esta ramificación y es
+    //    COMÚN a los dos caminos: es el mismo seam que hoy, no se duplica.
+    const viaFacilitator = process.env.SOLANA_SETTLE_VIA_FACILITATOR === 'true';
+
+    if (viaFacilitator) {
+      // El facilitator firma y transmite. Con la bandera ON el gateway NO firma
+      // NADA, ni siquiera como fallback: un facilitator caído es un leg no
+      // liquidado, no una excusa para que el gateway vuelva a ser camino de dinero
+      // (CD-15). Por eso acá no se resuelve el keypair local ni se llama a
+      // `sendAndConfirmTransaction` / `getOrCreateAssociatedTokenAccount` /
+      // `recoverConfirmedSettle`.
+      const payout = await payoutViaFacilitator({
+        intentId: req.intentId,
+        payTo: req.payTo,
+        amountAtomic: req.amountAtomic,
+        network: `solana:${getSolanaNetwork()}`,
+      });
+      // El seam de idempotencia se escribe SÓLO con una firma realmente devuelta
+      // por un 2xx — jamás con un valor derivado de un error.
+      rememberIntentSignature(req.intentId, payout.signature);
+      log.info(
+        {
+          intentId: req.intentId,
+          signature: payout.signature,
+          payTo: req.payTo,
+          alreadySettled: payout.alreadySettled,
+        },
+        'solana settle via facilitator',
+      );
+      // `alreadySettled: true` es un ÉXITO, no un error: es un pago que ya ocurrió.
+      return { txHash: payout.signature, success: true };
+      // El error se propaga TAL CUAL (no se envuelve ni se aplana): quien clasifica
+      // la disposición del valor es `lib/downstream-payment.ts`.
     }
 
     const connection = getSolanaConnection();

@@ -27,6 +27,9 @@ import {
   getPaymentAdapter,
   getPaymentAdapterOrUnion,
 } from '../adapters/registry.js';
+// WKH-302: `readPayoutCode` lee el código POR FORMA (typeof === 'string'), nunca
+// por `instanceof`, por el mismo motivo documentado en `adapters/errors.ts`.
+import { readPayoutCode } from '../adapters/solana/facilitator-settle.js';
 import type { ChainKey, SolanaPaymentAdapter } from '../adapters/types.js';
 import type { Agent, DownstreamLogger } from '../types/index.js';
 // AR MENOR-5: mismo helper de conversión USD→atómico que los 5 adapters de pago
@@ -353,19 +356,31 @@ async function settleSolanaLeg(
   // sonda la recupera en los logs sin reintroducir el falso negativo que el FIX 2
   // arregló (un leg YA pagado jamás se reporta como no pagado).
   const isIdempotentReplay = priorSignature !== undefined;
+
+  // WKH-302 — UNA SOLA lectura de la bandera para todo este leg, a una const, y la
+  // MISMA const se usa en los dos lugares (pre-check y clasificación del catch).
+  // Con la bandera ON el gateway deja de tener autoridad sobre esa wallet: la
+  // relevante es la del facilitator, así que este pre-check se saltea ENTERO (ni
+  // siquiera se llama a `getOperatorSplBalance()`, que resuelve el keypair local).
+  // La distinguibilidad `INSUFFICIENT_BALANCE` no se pierde: se recupera del error,
+  // cuando el adapter lanza con `payoutCode === 'PAYOUT_FUNDING_LOW'` (ver el catch).
+  const viaFacilitator = process.env.SOLANA_SETTLE_VIA_FACILITATOR === 'true';
+
   let operatorBalance: bigint | undefined;
-  try {
-    operatorBalance = BigInt(await adapter.getOperatorSplBalance());
-  } catch (e) {
-    logger.info(
-      {
-        agentSlug: agent.slug,
-        code: 'BALANCE_PRECHECK_SKIPPED',
-        detail: String(e),
-        ...(isIdempotentReplay ? { intentId: legIntentId } : {}),
-      },
-      '[Downstream] solana balance pre-check skipped (operator SPL balance unreadable)',
-    );
+  if (!viaFacilitator) {
+    try {
+      operatorBalance = BigInt(await adapter.getOperatorSplBalance());
+    } catch (e) {
+      logger.info(
+        {
+          agentSlug: agent.slug,
+          code: 'BALANCE_PRECHECK_SKIPPED',
+          detail: String(e),
+          ...(isIdempotentReplay ? { intentId: legIntentId } : {}),
+        },
+        '[Downstream] solana balance pre-check skipped (operator SPL balance unreadable)',
+      );
+    }
   }
   const insufficient =
     operatorBalance !== undefined && operatorBalance < BigInt(amountAtomic);
@@ -405,9 +420,36 @@ async function settleSolanaLeg(
       intentId: legIntentId,
     });
   } catch (e) {
+    // WKH-302 (AC-10) — "no sé si se pagó" es un resultado DISTINTO de "no se
+    // pagó". Hasta acá este catch aplanaba TODO a `SETTLE_FAILED`, que en el
+    // catálogo de este repo significa literalmente "no se pagó" y dispara reembolso
+    // y/o re-envío del hop. Eso era tolerable mientras la firma era LOCAL (si
+    // `sendAndConfirmTransaction` tiraba, casi siempre era determinístico), pero al
+    // pasar a una llamada HTTP el leg hereda fallas de red que ocurren DESPUÉS de
+    // que el facilitator pudo haber transmitido. Mismo patrón que ya usa la rama
+    // EVM de este archivo (`readSettleValueDisposition`).
+    //
+    // Con la bandera OFF, `readSettleValueDisposition` devuelve `undefined` para
+    // los errores del camino legado y el resultado es EXACTAMENTE el de hoy
+    // (`SETTLE_FAILED`) — que es lo que mantiene AC-4 en pie.
+    const disposition = readSettleValueDisposition(e);
+    const payoutCode = readPayoutCode(e);
+    const code =
+      payoutCode === 'PAYOUT_FUNDING_LOW'
+        ? 'INSUFFICIENT_BALANCE'
+        : disposition === 'unknown'
+          ? 'SETTLE_UNKNOWN'
+          : 'SETTLE_FAILED';
     logger.warn(
-      { agentSlug: agent.slug, code: 'SETTLE_FAILED', detail: String(e) },
-      '[Downstream] solana adapter.settle threw',
+      {
+        agentSlug: agent.slug,
+        code,
+        ...(disposition ? { valueDisposition: disposition } : {}),
+        detail: String(e),
+      },
+      code === 'SETTLE_UNKNOWN'
+        ? '[Downstream] solana adapter.settle threw with UNKNOWN value disposition — the leg may already be paid on-chain; do NOT retry blindly'
+        : '[Downstream] solana adapter.settle threw',
     );
     return null;
   }
