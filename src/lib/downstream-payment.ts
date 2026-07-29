@@ -387,13 +387,21 @@ async function settleSolanaLeg(
   // real, si lo hay, sigue apareciendo como `SETTLE_FAILED`.
   //
   // Fix-pack it2 MNR-1: en el replay idempotente el pre-check pasa de GATE a
-  // SONDA (se lee el balance, pero un balance bajo NUNCA corta). Motivo: el
-  // `settle()` del adapter puede tomar el camino SELF-HEAL — si la firma previa
-  // no verifica on-chain, la borra del seam y re-broadcastea FRESCO
-  // (`solana/payment.ts` §idempotencia). Omitir la lectura por completo perdía
-  // justo ahí la distinguibilidad `INSUFFICIENT_BALANCE` vs `SETTLE_FAILED`. La
-  // sonda la recupera en los logs sin reintroducir el falso negativo que el FIX 2
-  // arregló (un leg YA pagado jamás se reporta como no pagado).
+  // SONDA (se lee el balance, pero un balance bajo NUNCA corta).
+  //
+  // ⚠️ WKH-307 CORRIGIÓ ESTE COMENTARIO. Decía que `settle()` podía tomar un camino
+  // SELF-HEAL que «borra la firma del seam y re-broadcastea FRESCO». **Eso ya no
+  // existe**: con el registro durable, una firma registrada que la cadena no respalda
+  // hace que `settle()` RECHACE (ver `solana/payment.ts`, rama `confirmed`), porque
+  // sus causas —contabilidad corrupta, un RPC mintiendo, o un fork— no se arreglan
+  // pagando de nuevo.
+  //
+  // El motivo de que la sonda siga siendo sonda y no vuelva a ser gate es OTRO, y
+  // sigue en pie: un intent ya reclamado puede terminar re-firmando por una vía
+  // legítima (la firma anterior expiró sin aterrizar, o aterrizó con error), y ahí un
+  // corte por fondos perdería la distinguibilidad `INSUFFICIENT_BALANCE` vs
+  // `SETTLE_FAILED` en los logs. La sonda la conserva sin reintroducir el falso
+  // negativo que el FIX 2 arregló (un leg YA pagado jamás se reporta como no pagado).
   // `settled` (ya pagado) e `in_progress` (reclamado, sin confirmar) SONDEAN: los dos
   // pueden terminar en el camino idempotente de `settle()`, y si no, `settle()`
   // fail-closea igual. `none` GATEA, como siempre.
