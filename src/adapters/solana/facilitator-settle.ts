@@ -18,12 +18,15 @@
  * veces por diseño**.
  *
  * De ahí la regla, con LISTA CERRADA y default al lado seguro:
- *   · Sólo los códigos de `PAYOUT_NO_SPEND_CODES` prueban que no se gastó — y esa
- *     lista coincide EXACTAMENTE con los resultados terminales en los que el
- *     facilitator LIBERA la reserva de su tope diario.
+ *   · Sólo los códigos de `PAYOUT_NO_SPEND_CODES` prueban que no se gastó. El
+ *     criterio es "¿este código demuestra que el INTENT no fue pagado?", NO "¿el
+ *     facilitator liberó su reserva?" — ver el docstring de la constante, donde está
+ *     explicado por qué esa segunda formulación (la que decía acá) es falsa y
+ *     seguirla agrega un doble pago.
  *   · TODO lo demás es `'unknown'`: `PAYOUT_IN_PROGRESS`, `PAYOUT_BROADCAST_FAILED`,
- *     un código que no reconocemos, un cuerpo ilegible, un non-2xx sin código, un
- *     timeout. Un código nuevo que alguien agregue mañana cae solo del lado seguro.
+ *     `PAYOUT_STORE_UNAVAILABLE`, un código que no reconocemos, un cuerpo ilegible,
+ *     un non-2xx sin código, un timeout. Un código nuevo que alguien agregue mañana
+ *     cae solo del lado seguro.
  *
  * Espejo estructural de `settleX402` (`src/adapters/avalanche/payment.ts`).
  */
