@@ -289,3 +289,20 @@
   `success_rate` y con él el score real.
 - **Aplicar en**: todo contador de "partes distintas". Un bucket catch-all vale
   **cero** identidades, no una — si no, cualquiera compra la primera gratis.
+
+### [2026-07-30] Fix-pack de texto — Un glob en un JSDoc cerró el comentario
+
+- **Error**: escribiendo un residual en el JSDoc de `DiscoveryResult.excluded` puse la
+  ruta `doc/sdd/211-*/residuales.md`. Ese `*/` **cierra el bloque de comentario**, así
+  que el resto del texto pasó a parsearse como código: `types/index.ts` dejó de
+  compilar (`TS1005`, `TS1443`, `TS1160` a mil líneas de distancia) y **41 archivos de
+  test** cayeron con error de importación. Un fix-pack que era **sólo documentación**
+  rompió el árbol entero.
+- **Causa raíz**: un patrón de glob (`211-*/`) es indistinguible del terminador de un
+  comentario de bloque. Y el síntoma aparece **lejos** del error: el primer diagnóstico
+  apuntaba a la línea 1636 de un archivo cuya edición fue en la 502.
+- **Fix**: la ruta se nombra sin glob (`el residuales.md de la HU`). Verificado con
+  `grep` que no quedó ningún otro `*/` dentro de un comentario en `src/`.
+- **Aplicar en**: nunca escribir `*` seguido de `/` dentro de un comentario de bloque
+  — ni rutas con glob, ni expresiones tipo `a */ b`. Y el corolario de proceso: **un
+  cambio "sólo de texto" también pasa por `tsc`**. Un comentario es sintaxis.

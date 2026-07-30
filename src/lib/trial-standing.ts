@@ -79,8 +79,15 @@ export function resolveTrialMaxAgentsPerPublisher(): number {
  * `F` — CALLERS DISTINTOS que tienen que haber registrado un `failed` para anular
  * el carril. Default **2** (PROVISORIO) — AR fix-pack BLQ-MED-2.
  *
- * `F = 1` reproduce el comportamiento anterior, y es una opción legítima de
- * operación: se deja alcanzable por env en vez de hardcodear el criterio.
+ * `F = 1` es una opción legítima de operación y se deja alcanzable por env en vez de
+ * hardcodear el criterio.
+ *
+ * ⚠️ `F = 1` NO reproduce exactamente el comportamiento anterior (el comentario decía
+ * eso y dejó de ser cierto con CR MNR-2). `failedCallerCount` cuenta SÓLO callers
+ * IDENTIFICADOS, así que un fallo EXCLUSIVAMENTE ANÓNIMO — sin `caller_ref_hash`,
+ * o sea cualquier llamada x402 sin agent key — antes anulaba el carril y ahora no lo
+ * anula ni con `F = 1`. En todo escenario donde haya al menos un caller identificado
+ * que falló, `F = 1` sí equivale a la política anterior.
  */
 export function resolveTrialMaxFailedCallers(): number {
   const raw = process.env.TRIAL_MAX_FAILED_CALLERS;

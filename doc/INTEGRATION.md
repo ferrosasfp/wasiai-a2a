@@ -241,8 +241,9 @@ each: they write state. Only the reads changed.
   `total >= agents.length`. It is **not** the size of the page — do not use it to
   size a loop over `agents`.
 - **`registries`** — names of the registries that contributed candidates.
-- **`excluded`** — `{ scope, reputation, trialAvailable }`: how many candidates each
-  candidacy filter discarded, counted **before** sorting and paging. It exists so an
+- **`excluded`** — `{ scope, reputation, trialAvailable, standingUnavailable }`: how
+  many candidates each candidacy filter discarded (and whether the reputation read
+  itself failed), counted **before** sorting and paging. It exists so an
   empty result can explain itself: without it, "there is no such agent" and "there is
   one but your credential cannot reach it" (or "there is one but it does not meet
   your reputation floor") are the same message, and they send you looking in the
@@ -345,7 +346,9 @@ Two response fields go with it:
 - `excluded.reputation` — candidates the floor discarded.
 - `excluded.trialAvailable` — candidates that are **eligible** for the lane. With
   `allowTrial: true` this is **exact** and equals the number of `trial` badges in
-  `agents`. **Without** `allowTrial` it is an **upper bound**: the per-publisher
+  `agents`, **except when the same slug appears in more than one registry**, in which
+  case it can read **lower** than the number of badges (the admitted set is keyed by
+  bare slug). **Without** `allowTrial` it is an **upper bound**: the per-publisher
   quota needs a lookup that the default path deliberately does not perform, so the
   number is counted before the quota is applied. Read it as "up to N", not as "N will
   be admitted".

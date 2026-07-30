@@ -500,7 +500,10 @@ export interface DiscoveryResult {
      *
      * ⚠️ SEMÁNTICA QUE CAMBIA CON EL OPT-IN, y hay que decirlo:
      *   · con `allowTrial: true` es EXACTO y coincide con la cantidad de badges
-     *     `trial` en `agents` (T-17);
+     *     `trial` en `agents` (T-17) — SALVO con slugs repetidos entre
+     *     registries, donde puede quedar POR DEBAJO de la cantidad de badges (el
+     *     conjunto de admitidos se indexa por slug pelado; residual MNR-8 en el
+     *     `residuales.md` de la HU);
      *   · sin `allowTrial` es una COTA SUPERIOR (pre-cupo): CD-9 prohíbe la
      *     query del ancla de publicación en el camino por defecto, y sin anclas
      *     el cupo `M` por publicador no se puede aplicar.
