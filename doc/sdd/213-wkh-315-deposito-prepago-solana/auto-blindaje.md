@@ -147,3 +147,64 @@ el error ocurre**, no al final.
 - **Aplicar en**: antes de "modificar" un archivo que un Story File lista, **verificar
   que exista**. Si no existe, es un hallazgo para el orquestador, no una invitación a
   crearlo.
+
+> ⚠️ **ESTA ENTRADA ERA FALSA Y SE CORRIGE ABAJO** (fix-pack AR/CR · MNR M1). El
+> documento **SI existe**: es `doc/architecture/MULTI-CHAIN.md`, 26 KB, versionado.
+> Ver la entrada del fix-pack más abajo.
+
+---
+
+### [2026-07-30 FIX-PACK · BLQ-MED-1] Un guard de dinero que fallaba ABIERTO, y un comentario que afirmaba lo contrario
+
+- **Error**: `atomicOf` (`deposit-verifier.ts`) **ignoraba en silencio** toda entrada
+  cuyo `uiTokenAmount.amount` no parseara a `BigInt`. Del lado `post` eso sub-mide y es
+  inofensivo; del lado **`pre`** hacía `preOurs = 0n` y por lo tanto
+  `delta = postOurs` — **el saldo ENTERO de la ATA de tesorería acreditado como
+  depósito**. Con 1000 USDC en tesorería y un depósito de 1, acreditaba 1001.
+- **Causa raíz**: el `catch` se escribió pensando en UNA de las dos listas. El
+  comentario lo decía explícitamente ("si eso hace que el delta no sea > 0, nadie
+  acredita") y **es falso del lado `pre`**, donde ignorar una entrada AUMENTA el delta.
+  Es la familia de "un guard que afirma más de lo que su evidencia sostiene": el
+  comentario documentaba una garantía que el código no daba, y por eso nadie la
+  cuestionó. Ninguno de los 33 casos del archivo tenía un `amount` ilegible.
+- **Fix**: `atomicOf` devuelve `bigint | null` y `sumAtomic` devuelve `null` si
+  CUALQUIER entrada relevante es ilegible ⇒ `DEPOSIT_VERIFICATION_UNKNOWN` (503, la
+  prueba NO se consume). Igual en el bloque de atribución del depositante. Comentario
+  reescrito con lo que el código hace de verdad.
+- **HALLAZGO EXTRA, y es la mitad del bug**: `try { BigInt(x) }` **no alcanza**.
+  `BigInt('')` y `BigInt('   ')` dan `0n`, y `BigInt('0x10')` da `16n`: para tres de las
+  formas ilegibles más probables el `catch` **ni se ejecuta**, y un `''` del lado `pre`
+  producía el mismo crédito del saldo de tesorería por otra puerta. Se exige
+  `/^\d+$/` antes de convertir (el RPC manda siempre un entero decimal).
+- **Mutación**: con el `continue` restaurado mueren `BLQ-MED-1 … lado PRE` y
+  `BLQ-MED-1 … lado POST`; quitando el regex muere el caso `''` del lado PRE.
+  **Y el test del lado PRE sobrevivía al primer mutante** hasta que se le agregó
+  `expect(res.detail).toContain('deposit ATA')`: el UNKNOWN lo terminaba dando OTRO
+  guard (el de atribución), que mira las mismas entradas. Un test de "veredicto
+  correcto" sin identificar **qué guard habló** es vacuo en cuanto hay dos guards que
+  pueden decir lo mismo.
+- **Aplicar en**: (a) todo `catch`/`continue` dentro de una suma de dinero — preguntar
+  qué pasa si la entrada saltada está del lado del MINUENDO; (b) nunca usar `BigInt(s)`
+  como validador de formato: **valida menos de lo que parece**; (c) cuando dos guards
+  pueden emitir el mismo veredicto, el test tiene que pinchar cuál de los dos.
+
+---
+
+### [2026-07-30 FIX-PACK · MNR-2] Un campo ausente leído como "fue a otro lado"
+
+- **Error**: `isOurAta` exigía `b.owner === expectedOwner` **además** del mint y la
+  dirección de la ATA. `owner` es OPCIONAL en el tipo de `@solana/web3.js`, así que un
+  RPC que lo omite hacía que la ATA de depósito no matcheara y el veredicto saliera
+  `RECIPIENT_MISMATCH`: una afirmación de que la plata fue a otro lado, hecha sobre un
+  dato que faltaba, y determinista (el depositante legítimo quedaba bloqueado para
+  siempre). El comentario de al lado declaraba ese caso "imposible".
+- **Causa raíz**: el tercer término no agregaba seguridad —la ATA es una PDA derivada de
+  (mint, owner), así que mint + DIRECCION ya identifican la cuenta— pero sí agregaba una
+  forma de fallar sobre un campo opcional.
+- **Fix**: el `owner` ausente no descalifica; el `owner` presente y distinto sigue
+  descalificando. Y en el bloque de atribución, una cuenta que BAJA saldo sin `owner`
+  declarado da `DEPOSIT_VERIFICATION_UNKNOWN` en vez de `DEPOSITOR_AMBIGUOUS`: "no pude
+  preguntar" no es "hay más de un candidato".
+- **Aplicar en**: antes de sumar un término a un match, preguntarse **qué información
+  agrega que los otros no den ya**. Un término redundante sobre un campo OPCIONAL no es
+  defensa en profundidad: es una fuente de falsos negativos con voz de veredicto.

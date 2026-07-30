@@ -72,7 +72,12 @@ const SIGNATURE = 'SiGnAtUrEfixture315';
 interface Bal {
   accountIndex: number;
   mint: string;
-  owner: string;
+  /**
+   * OPCIONAL a propósito: `owner` es opcional en el tipo de `@solana/web3.js`, así que
+   * un fixture que lo exija no puede expresar el caso que el RPC produce de verdad
+   * (fix-pack AR MNR-2).
+   */
+  owner?: string;
   amount: string;
 }
 
@@ -84,12 +89,16 @@ const uiAmount = (amount: string) => ({
 });
 
 const toBalances = (bs: Bal[]) =>
-  bs.map((b) => ({
-    accountIndex: b.accountIndex,
-    mint: b.mint,
-    owner: b.owner,
-    uiTokenAmount: uiAmount(b.amount),
-  }));
+  bs.map((b) => {
+    const base = {
+      accountIndex: b.accountIndex,
+      mint: b.mint,
+      uiTokenAmount: uiAmount(b.amount),
+    };
+    // El campo se OMITE (no se manda `owner: undefined`): así el fixture tiene la
+    // forma exacta de una respuesta del RPC que no lo incluye.
+    return b.owner === undefined ? base : { ...base, owner: b.owner };
+  });
 
 /**
  * Una tx parseada con la forma REAL: `accountKeys` como `ParsedMessageAccount[]`
@@ -623,6 +632,234 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       expect(res.ok).toBe(false);
       if (res.ok) throw new Error('unreachable');
       expect(res.reason).toBe('RECIPIENT_MISMATCH');
+    });
+  });
+
+  // ── FIX-PACK AR · BLQ-MED-1: un `amount` ILEGIBLE es indeterminación ─────
+  //
+  // Ninguno de los 33 casos originales de este archivo tenía un `amount` que
+  // `BigInt()` rechazara, y por eso el guard podía fallar ABIERTO sin que nada se
+  // pusiera rojo.
+  describe('BLQ-MED-1: un `amount` que no parsea NUNCA se ignora en silencio', () => {
+    /**
+     * Tesorería con 1000 USDC que recibe 1 USDC, con el `amount` del lado `pre`
+     * ILEGIBLE. Es el escenario exacto del exploit.
+     */
+    const treasuryTx = (preAmount: string, postAmount: string) =>
+      parsedTx({
+        keys: [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA],
+        pre: [
+          { accountIndex: 1, mint: MINT, owner: DEPOSITOR, amount: '10000000' },
+          { accountIndex: 2, mint: MINT, owner: OWNER, amount: preAmount },
+        ],
+        post: [
+          { accountIndex: 1, mint: MINT, owner: DEPOSITOR, amount: '9000000' },
+          { accountIndex: 2, mint: MINT, owner: OWNER, amount: postAmount },
+        ],
+      });
+
+    it('BLQ-MED-1: `amount` ilegible del lado PRE ⇒ UNKNOWN, y NUNCA acredita el saldo entero de la tesorería', async () => {
+      // ⚠️ EL MUTANTE. Con el `continue` original, `preOurs` colapsaba a 0n y el
+      // delta pasaba a ser `postOurs` COMPLETO: 1001 USDC acreditados por un depósito
+      // de 1, o sea el saldo de tesorería regalado por un string mal formado.
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      // ⚠️ LOS SEIS IMPORTAN, Y TRES NO LANZAN. `BigInt('')` y `BigInt('   ')` dan
+      // `0n` y `BigInt('0x10')` da `16n`: un `try/catch` alrededor de `BigInt` NO los
+      // ve. Sin ellos en esta lista, el fix quedaría cubierto sólo para las formas que
+      // sí tiran.
+      for (const unreadable of ['1.0', '1e9', '', '0x10', 'abc', '   ']) {
+        mockGetParsedTransaction.mockResolvedValue(
+          treasuryTx(unreadable, '1001000000'),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok, unreadable).toBe(false);
+        if (res.ok) {
+          throw new Error(
+            `acreditó ${res.amountUsd} USDC con un pre-balance ilegible (${unreadable})`,
+          );
+        }
+        expect(res.reason, unreadable).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        // Y explícitamente NO una negativa medida: el 400 diría "tu plata fue a otro
+        // lado", que es una afirmación sobre la cadena que este dato no sostiene.
+        expect(res.reason, unreadable).not.toBe('RECIPIENT_MISMATCH');
+        // ⚠️ CUAL GUARD HABLO, NO SOLO QUE ALGUIEN HABLO. Sin esto, el mutante
+        // sobrevive: con el `continue` restaurado el delta se mide mal (1001 USDC) y
+        // el veredicto UNKNOWN lo termina dando el guard de ATRIBUCION del depositante,
+        // que mira las mismas entradas. El test quedaría verde afirmando una propiedad
+        // que el código ya no tiene — la vacuidad de siempre, con otro disfraz.
+        expect(res.detail, unreadable).toContain('deposit ATA');
+      }
+    });
+
+    it('BLQ-MED-1: `amount` ilegible del lado POST ⇒ UNKNOWN (sub-medir tampoco es medir)', async () => {
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      mockGetParsedTransaction.mockResolvedValue(
+        treasuryTx('1000000000', '1e9'),
+      );
+
+      const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+      expect(res.ok).toBe(false);
+      if (res.ok) throw new Error('unreachable');
+      expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+      expect(res.reason).not.toBe('RECIPIENT_MISMATCH');
+    });
+
+    it('BLQ-MED-1: el andamiaje — el MISMO fixture con los dos `amount` legibles SI acredita 1 USDC', async () => {
+      // Sin esto, los dos tests de arriba podrían estar verdes por cualquier otra
+      // razón (una env, un fixture roto) y no por el `amount` ilegible.
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      mockGetParsedTransaction.mockResolvedValue(
+        treasuryTx('1000000000', '1001000000'),
+      );
+
+      const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+      expect(res.ok).toBe(true);
+      if (!res.ok) throw new Error('unreachable');
+      expect(res.amountUsd).toBe('1');
+      expect(res.amountAtomic).toBe(1000000n);
+    });
+
+    it('BLQ-MED-1: un `amount` ilegible en una entrada de NUESTRO mint que no es la ATA también da UNKNOWN', async () => {
+      // La atribución del depositante lee TODAS las entradas del mint, no sólo la ATA.
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      mockGetParsedTransaction.mockResolvedValue(
+        parsedTx({
+          keys: [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA],
+          pre: [
+            { accountIndex: 1, mint: MINT, owner: DEPOSITOR, amount: '10.5' },
+            { accountIndex: 2, mint: MINT, owner: OWNER, amount: '0' },
+          ],
+          post: [
+            {
+              accountIndex: 1,
+              mint: MINT,
+              owner: DEPOSITOR,
+              amount: '5000000',
+            },
+            { accountIndex: 2, mint: MINT, owner: OWNER, amount: '5000000' },
+          ],
+        }),
+      );
+
+      const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+      expect(res.ok).toBe(false);
+      if (res.ok) throw new Error('unreachable');
+      expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+      expect(res.reason).not.toBe('DEPOSITOR_AMBIGUOUS');
+    });
+  });
+
+  // ── FIX-PACK AR · MNR-2: un `owner` AUSENTE no es "fue a otro lado" ──────
+  describe('MNR-2: un `owner` que el RPC no mandó es un dato ausente, no una negativa', () => {
+    it('MNR-2: nuestra ATA SIN `owner` en pre/post ⇒ acredita igual (mint + dirección ya la identifican)', async () => {
+      // ⚠️ Antes salía `RECIPIENT_MISMATCH`: una afirmación de que la plata fue a otro
+      // lado, hecha sobre un campo que el nodo no mandó. Y el depositante legítimo
+      // quedaba bloqueado para siempre, porque el veredicto es determinista.
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      mockGetParsedTransaction.mockResolvedValue(
+        parsedTx({
+          keys: [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA],
+          pre: [
+            {
+              accountIndex: 1,
+              mint: MINT,
+              owner: DEPOSITOR,
+              amount: '10000000',
+            },
+            { accountIndex: 2, mint: MINT, amount: '0' }, // sin `owner`
+          ],
+          post: [
+            {
+              accountIndex: 1,
+              mint: MINT,
+              owner: DEPOSITOR,
+              amount: '5000000',
+            },
+            { accountIndex: 2, mint: MINT, amount: '5000000' }, // sin `owner`
+          ],
+        }),
+      );
+
+      const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+      expect(res.ok).toBe(true);
+      if (!res.ok) throw new Error('unreachable');
+      expect(res.amountUsd).toBe('5');
+      expect(res.ata).toBe(OUR_ATA);
+      expect(res.depositor).toBe(DEPOSITOR);
+    });
+
+    it('MNR-2: el `owner` PRESENTE y distinto sigue descalificando (el control no se debilitó)', async () => {
+      // El caso de arriba no puede haber abierto la puerta a "cualquier owner sirve".
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      mockGetParsedTransaction.mockResolvedValue(
+        parsedTx({
+          keys: [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA],
+          pre: [
+            {
+              accountIndex: 1,
+              mint: MINT,
+              owner: DEPOSITOR,
+              amount: '10000000',
+            },
+            {
+              accountIndex: 2,
+              mint: MINT,
+              owner: OTHER_DEPOSITOR,
+              amount: '0',
+            },
+          ],
+          post: [
+            {
+              accountIndex: 1,
+              mint: MINT,
+              owner: DEPOSITOR,
+              amount: '5000000',
+            },
+            {
+              accountIndex: 2,
+              mint: MINT,
+              owner: OTHER_DEPOSITOR,
+              amount: '5000000',
+            },
+          ],
+        }),
+      );
+      const res = await verifySolanaDeposit({ signature: SIGNATURE });
+      expect(res.ok).toBe(false);
+      if (res.ok) throw new Error('unreachable');
+      expect(res.reason).toBe('RECIPIENT_MISMATCH');
+    });
+
+    it('MNR-2: la cuenta de ORIGEN sin `owner` ⇒ UNKNOWN, no DEPOSITOR_AMBIGUOUS', async () => {
+      // Bajó saldo, así que ES un origen — pero el nodo no dijo de quién. "No pude
+      // preguntar" (503, reintentable) en vez de "hay más de un candidato" (400).
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      mockGetParsedTransaction.mockResolvedValue(
+        parsedTx({
+          keys: [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA],
+          pre: [
+            { accountIndex: 1, mint: MINT, amount: '10000000' }, // sin `owner`
+            { accountIndex: 2, mint: MINT, owner: OWNER, amount: '0' },
+          ],
+          post: [
+            { accountIndex: 1, mint: MINT, amount: '5000000' },
+            { accountIndex: 2, mint: MINT, owner: OWNER, amount: '5000000' },
+          ],
+        }),
+      );
+
+      const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+      expect(res.ok).toBe(false);
+      if (res.ok) throw new Error('unreachable');
+      expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+      expect(res.reason).not.toBe('DEPOSITOR_AMBIGUOUS');
     });
   });
 

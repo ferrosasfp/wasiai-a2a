@@ -301,33 +301,105 @@ export async function verifySolanaDeposit(
     return undefined;
   };
 
+  /**
+   * El `owner` DECLARADO de una entrada, o `undefined` si el RPC no lo mandó.
+   *
+   * ⚠️ `owner` es **OPCIONAL** en el tipo de `@solana/web3.js`: su ausencia es un caso
+   * real del transporte, no paranoia. Se normaliza acá una sola vez para que ningún
+   * call-site vuelva a comparar un `undefined` contra una pubkey y lea el resultado
+   * como "es de otro" (fix-pack AR MNR-2).
+   */
+  const declaredOwner = (b: {
+    owner?: string | undefined;
+  }): string | undefined => {
+    const o = b.owner;
+    return o === undefined || o === null || o === '' ? undefined : o;
+  };
+
   const isOurAta = (b: {
     accountIndex: number;
     mint: string;
     owner?: string | undefined;
-  }): boolean =>
-    b.mint === mint &&
-    b.owner === expectedOwner &&
-    addressAt(b.accountIndex) === expectedAta;
+  }): boolean => {
+    if (b.mint !== mint) return false;
+    if (addressAt(b.accountIndex) !== expectedAta) return false;
+    // ⚠️ EL `owner` AUSENTE NO DESCALIFICA (fix-pack AR MNR-2). La ATA es una PDA
+    // derivada del par (mint, owner): mint + DIRECCION ya identifican la cuenta sin
+    // ambigüedad, así que exigir además el `owner` no agrega ninguna seguridad — y sí
+    // agregaba un falso negativo. Un RPC que omite el campo hacía que la ATA de
+    // depósito no matcheara y el veredicto saliera `RECIPIENT_MISMATCH`: **una
+    // afirmación de que la plata fue a otro lado hecha sobre un dato ausente**.
+    // Cuando el campo SI viene y contradice al owner configurado, sigue descalificando.
+    const owner = declaredOwner(b);
+    return owner === undefined || owner === expectedOwner;
+  };
 
-  const atomicOf = (
+  /**
+   * El monto atómico de UNA entrada, o `null` si el `amount` no se puede leer como
+   * entero decimal sin signo. `null` significa **"no pude medir"**, no "cero".
+   *
+   * ⚠️ POR QUE UN `try { BigInt(x) }` NO ALCANZA, y es un hallazgo del fix-pack.
+   * `BigInt` **acepta cosas que no son un monto** y las convierte en silencio:
+   * `BigInt('')` y `BigInt('   ')` dan `0n`, y `BigInt('0x10')` da `16n`. O sea que el
+   * `catch` ni siquiera se ejecutaba para tres de las formas ilegibles más probables,
+   * y del lado `pre` un `''` colapsaba el saldo previo a cero — exactamente el mismo
+   * crédito del saldo entero de tesorería que BLQ-MED-1 describe, por otra puerta.
+   * El RPC de Solana manda SIEMPRE un entero decimal en base 10 como string, así que
+   * exigirlo no rechaza ningún dato legítimo.
+   */
+  const ATOMIC_AMOUNT_RE = /^\d+$/;
+  const atomicOf = (b: {
+    uiTokenAmount: { amount: string };
+  }): bigint | null => {
+    try {
+      const raw = b.uiTokenAmount.amount;
+      if (typeof raw !== 'string' || !ATOMIC_AMOUNT_RE.test(raw)) return null;
+      return BigInt(raw);
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * Suma de las entradas RELEVANTES. **`null` si CUALQUIERA es ilegible.**
+   *
+   * ⚠️ FIX-PACK AR (BLQ-MED-1) — ACA EL GUARD FALLABA ABIERTO, Y ES DINERO.
+   *
+   * Antes, una entrada con `amount` no parseable (`"1.0"`, `"1e9"`, cualquier string
+   * que `BigInt()` rechace) se **ignoraba en silencio** y la suma seguía. Del lado
+   * `post` eso sub-mide y es inofensivo. Del lado `pre` hacía `preOurs = 0n`, o sea
+   * `delta = postOurs`: **el saldo ENTERO de la ATA de tesorería acreditado como si
+   * fuera el depósito**. Con 1000 USDC en tesorería y un depósito de 1, acreditaba 1001.
+   *
+   * Y el comentario que había acá afirmaba lo contrario ("si eso hace que el delta no
+   * sea > 0, nadie acredita"), que es falso del lado `pre`: un guard que afirma más de
+   * lo que su evidencia sostiene.
+   *
+   * Un dato ilegible es **indeterminación**, y la indeterminación se rechaza SIN
+   * consumir la prueba (`DEPOSIT_VERIFICATION_UNKNOWN` ⇒ 503, reintentable contra otro
+   * nodo), nunca se adivina.
+   */
+  const sumAtomic = (
     list: readonly { uiTokenAmount: { amount: string } }[],
-  ): bigint => {
+  ): bigint | null => {
     let total = 0n;
     for (const b of list) {
-      try {
-        total += BigInt(b.uiTokenAmount.amount);
-      } catch {
-        // Un `amount` no numérico es un dato que no podemos sumar. Se ignora la
-        // entrada en vez de lanzar; si eso hace que el delta no sea > 0, el veredicto
-        // será RECIPIENT_MISMATCH y nadie acredita nada.
-      }
+      const v = atomicOf(b);
+      if (v === null) return null;
+      total += v;
     }
     return total;
   };
 
-  const preOurs = atomicOf(pre.filter(isOurAta));
-  const postOurs = atomicOf(post.filter(isOurAta));
+  const preOurs = sumAtomic(pre.filter(isOurAta));
+  const postOurs = sumAtomic(post.filter(isOurAta));
+  if (preOurs === null || postOurs === null) {
+    return {
+      ok: false,
+      reason: 'DEPOSIT_VERIFICATION_UNKNOWN',
+      detail: `a token balance entry of the deposit ATA carries an unreadable uiTokenAmount.amount (pre readable=${preOurs !== null}, post readable=${postOurs !== null}) — the delta cannot be measured, so neither a credit nor a mismatch can be asserted`,
+    };
+  }
   const delta = postOurs - preOurs;
 
   if (delta <= 0n) {
@@ -351,37 +423,62 @@ export async function verifySolanaDeposit(
   // **NO es el fee-payer**: en Solana el fee-payer puede ser un tercero (gasless) y no
   // tiene por qué haber puesto los fondos. Usar el primer firmante haría que un
   // depósito gasless se atribuyera al relayer y el gate rechazara al dueño real.
+  //
+  // ⚠️ Y UN DATO ILEGIBLE ACA TAMPOCO SE SALTEA (misma familia que BLQ-MED-1). Un
+  // `amount` que no parsea o un `owner` que el RPC no mandó no producen "este no es el
+  // origen": producen **"no sé quién es el origen"**. Saltearlos hacía que la
+  // atribución se decidiera sobre las entradas que SI se pudieron leer, y con eso
+  // `sourceOwners` podía quedar en exactamente uno —el equivocado— y acreditarle el
+  // depósito a quien no lo hizo, o caer en un `DEPOSITOR_AMBIGUOUS` (400, definitivo)
+  // que afirma un hecho de la cadena sobre un campo que faltaba.
   const postByIndex = new Map<number, bigint>();
   for (const b of post) {
     if (b.mint !== mint) continue;
-    try {
-      postByIndex.set(b.accountIndex, BigInt(b.uiTokenAmount.amount));
-    } catch {
-      /* amount ilegible: la entrada no puede sostener una afirmación de origen */
+    const after = atomicOf(b);
+    if (after === null) {
+      return {
+        ok: false,
+        reason: 'DEPOSIT_VERIFICATION_UNKNOWN',
+        detail: `a postTokenBalance entry for the configured mint carries an unreadable uiTokenAmount.amount — the depositor cannot be determined`,
+      };
     }
+    postByIndex.set(b.accountIndex, after);
   }
   const sourceOwners = new Set<string>();
   for (const b of pre) {
     if (b.mint !== mint) continue;
-    const owner = b.owner;
-    if (owner === undefined || owner === null || owner === '') continue;
-    let before: bigint;
-    try {
-      before = BigInt(b.uiTokenAmount.amount);
-    } catch {
-      continue;
+    const before = atomicOf(b);
+    if (before === null) {
+      return {
+        ok: false,
+        reason: 'DEPOSIT_VERIFICATION_UNKNOWN',
+        detail: `a preTokenBalance entry for the configured mint carries an unreadable uiTokenAmount.amount — the depositor cannot be determined`,
+      };
     }
     // Si la cuenta desapareció de `post` (se cerró), su saldo pasó a 0.
     const after = postByIndex.get(b.accountIndex) ?? 0n;
-    if (after - before < 0n) sourceOwners.add(owner);
+    if (after - before >= 0n) continue; // no bajó: no es un origen
+    const owner = declaredOwner(b);
+    if (owner === undefined) {
+      // La cuenta BAJO —o sea que ES un origen— pero el nodo no dijo de quién es.
+      // Eso es "no pude preguntar", no "hay más de un candidato".
+      return {
+        ok: false,
+        reason: 'DEPOSIT_VERIFICATION_UNKNOWN',
+        detail:
+          'a source token account for the configured mint lost balance but its `owner` is absent in preTokenBalances — the depositor cannot be named',
+      };
+    }
+    sourceOwners.add(owner);
   }
 
   if (sourceOwners.size !== 1) {
     // ⚠️ FAIL-CLOSED, y a propósito. Con dos o más owners de origen, ADIVINAR cuál es
     // el depositante es exactamente donde se pierde el gate: elegir mal atribuye el
     // depósito a quien no lo hizo. Un wallet legítimo no produce este caso.
-    // Cero (imposible si el delta de destino es > 0, pero el compilador no lo sabe)
-    // cae acá también, en vez de colarse como un `undefined`.
+    // Cero cae acá también, en vez de colarse como un `undefined`. Es alcanzable con
+    // un `pre` que no lista la cuenta de origen; lo que YA NO llega hasta acá es el
+    // dato ausente o ilegible, que sale arriba como indeterminación.
     return {
       ok: false,
       reason: 'DEPOSITOR_AMBIGUOUS',
