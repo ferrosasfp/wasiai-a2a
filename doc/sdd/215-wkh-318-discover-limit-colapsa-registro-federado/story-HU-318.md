@@ -279,6 +279,13 @@ el criterio de terminado de la anterior en verde.
 
 **Después** (agregar):
 
+> ⚠️ **ENMIENDA F3 (BLQ-1) — este bloque quedó viejo.** `DiscoverySourceState`
+> tiene **cuatro** miembros (`ok | truncated | unverified | failed`) y
+> `CatalogStatus` también (`complete | unverified | truncated | partial`). El
+> bloque de abajo es el que se escribió en W0; el vigente está en
+> `src/types/index.ts:405-478`, con el docstring que explica qué prueba cada
+> estado. **Copiá de ahí, no de acá.**
+
 ```ts
 // ============================================================
 // WKH-318 — HONESTIDAD DEL CATÁLOGO FEDERADO
@@ -1100,6 +1107,17 @@ npx vitest run   # suite completa verde
 #### W2.1 — Detección en `queryRegistry`
 
 Reemplazá el bloque final que W1.1 dejó (`return { agents, state: 'ok', rows: agents.length };`):
+
+> ⚠️ **ENMIENDA F3 (BLQ-1) — el bloque de abajo quedó viejo en dos cosas.** El
+> vigente está en `src/services/discovery.ts` (buscá
+> `la completitud se PRUEBA, no se supone`):
+> 1. **El fallback ya no es `ok`.** Se busca evidencia para los DOS lados y el
+>    return final es `state: completenessProven ? 'ok' : 'unverified'`. El
+>    `return { agents, state: 'ok', ... }` de abajo era el bug de BLQ-1.
+> 2. **La lectura del cursor cambió** (AR MNR-G): se usa la veracidad del valor,
+>    no `!== null`. Un `0` o un `false` son centinelas de "no hay más", no
+>    cursores. Y la clave **ausente** (`undefined`) ya no se lee igual que la
+>    clave **vacía**: la vacía DECLARA completitud, la ausente no declara nada.
 
 **Después**:
 ```ts
