@@ -47,6 +47,23 @@ const reputationMap = vi.hoisted(() => ({ value: new Map<string, unknown>() }));
 vi.mock('./reputation.js', () => ({
   reputationService: {
     computeReputationBatch: vi.fn(async () => reputationMap.value),
+    // WKH-313: el consumidor real de `attachReputations`; se DERIVA del mismo
+    // `reputationMap` que ya inyectaban estos tests (misma fuente, sin degradación).
+    computeStandingBatch: vi.fn(async () => {
+      const standings = new Map();
+      for (const [slug, reputation] of reputationMap.value as Map<
+        string,
+        { tasks_settled: number }
+      >) {
+        standings.set(slug, {
+          tasksSettled: reputation.tasks_settled,
+          successCount: reputation.tasks_settled,
+          failedCount: 0,
+          reputation,
+        });
+      }
+      return { degraded: false, standings };
+    }),
   },
 }));
 

@@ -217,4 +217,152 @@ describe('minReputation: validación en la ruta', () => {
       expect(mockDiscover).not.toHaveBeenCalled();
     }
   });
+
+  // ── T-14 (WKH-313 / DT-7): `allowTrial` en el borde HTTP, GET y POST ────
+
+  it('T-R14: GET `allowTrial=true` llega al service como booleano', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?minReputation=2&allowTrial=true',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalledWith(
+      expect.objectContaining({ minReputation: 2, allowTrial: true }),
+    );
+  });
+
+  it('T-R15: POST `allowTrial: true` llega IGUAL que por GET (simetría)', async () => {
+    // El POST es el que se olvida. Un flag de riesgo validado en un solo verbo deja
+    // al otro camino aceptando basura por el mismo endpoint.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { minReputation: 2, allowTrial: true },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalledWith(
+      expect.objectContaining({ minReputation: 2, allowTrial: true }),
+    );
+  });
+
+  it('T-R16: sin `allowTrial` el service lo recibe undefined (default = no admitir)', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?minReputation=2',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalledWith(
+      expect.objectContaining({ allowTrial: undefined }),
+    );
+  });
+
+  it('T-R17: `allowTrial=false` NO opta (llega undefined, no `false`)', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?minReputation=2&allowTrial=false',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalledWith(
+      expect.objectContaining({ allowTrial: undefined }),
+    );
+  });
+
+  it('T-R18: GET `allowTrial=maybe` → 400 INVALID_ALLOW_TRIAL, sin fanout', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?allowTrial=maybe',
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('INVALID_ALLOW_TRIAL');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R19: POST `allowTrial` no booleano → 400 (validado en los DOS verbos)', async () => {
+    // `'true'`/`'false'` como STRING en el body sí se aceptan, y es deliberado: el
+    // parser es UNO solo para los dos verbos (DT-7 pide que parseen igual), así que
+    // no puede ser sensible al verbo. La tolerancia se limita a esos dos literales
+    // exactos, donde la intención no es ambigua; todo lo demás es 400.
+    for (const v of ['maybe', 'TRUE', 1, 0, {}]) {
+      mockDiscover.mockClear();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/discover',
+        payload: { allowTrial: v },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVALID_ALLOW_TRIAL');
+      expect(mockDiscover).not.toHaveBeenCalled();
+    }
+  });
+});
+
+// ── T-03 (AC-3, W1) · el conjunto vacío deja de ser MUDO ────────────────
+//
+// Es lo único de la HU que hace visible el problema aunque la política no se
+// toque, y es lo que convierte el próximo diagnóstico de 3 semanas en 3 minutos.
+describe('T-03 (AC-3) · `excluded` viaja en el JSON de GET y POST', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    app = Fastify();
+    await app.register(discoverRoutes, { prefix: '/discover' });
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    mockDiscover.mockClear();
+    mockDiscover.mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      excluded: {
+        scope: 1,
+        reputation: 3,
+        trialAvailable: 2,
+        // AR fix-pack BLQ-BAJO-4: el cuarto campo del contrato. El doble lo declara
+        // en vez de aflojar el tipo: si mañana se agrega otro, la ruta se entera acá.
+        standingUnavailable: false,
+      },
+    });
+  });
+
+  it('T-R20: GET serializa `excluded.reputation` y `excluded.trialAvailable`', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?minReputation=50',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().excluded).toEqual({
+      scope: 1,
+      reputation: 3,
+      trialAvailable: 2,
+      standingUnavailable: false,
+    });
+  });
+
+  it('T-R21: POST serializa los MISMOS contadores', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { minReputation: 50 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().excluded).toEqual({
+      scope: 1,
+      reputation: 3,
+      trialAvailable: 2,
+      standingUnavailable: false,
+    });
+  });
 });

@@ -9,8 +9,10 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  InvalidAllowTrialError,
   InvalidLimitError,
   InvalidMinReputationError,
+  parseAllowTrial,
   parseLimit,
   parseMinReputation,
 } from './discovery-query.js';
@@ -158,6 +160,61 @@ describe('parseLimit (AR MENOR-4)', () => {
       expect(err).toBeInstanceOf(InvalidLimitError);
       expect((err as InvalidLimitError).code).toBe('INVALID_LIMIT');
       expect((err as InvalidLimitError).received).toBe('0');
+    }
+  });
+});
+
+// ── T-14 (WKH-313 / DT-7) · parseAllowTrial ─────────────────────────────
+//
+// `allowTrial` es el OPT-IN a admitir un agente SIN HISTORIAL bajo el piso que el
+// caller pidió, sobre el camino del dinero. Un flag así no se adivina: por eso el
+// parser es explícito y no un `Boolean(raw)`.
+describe('T-14 · parseAllowTrial (WKH-313)', () => {
+  it('T-AT1: ausente / null / vacío → undefined (no opta: comportamiento de hoy)', () => {
+    expect(parseAllowTrial(undefined)).toBeUndefined();
+    expect(parseAllowTrial(null)).toBeUndefined();
+    expect(parseAllowTrial('')).toBeUndefined();
+  });
+
+  it('T-AT2: `true` y `"true"` → true (GET y POST parsean IGUAL)', () => {
+    // El GET trae string y el POST trae boolean: los dos tienen que llegar al
+    // mismo lugar, porque los dos son el mismo endpoint.
+    expect(parseAllowTrial(true)).toBe(true);
+    expect(parseAllowTrial('true')).toBe(true);
+  });
+
+  it('T-AT3: `false` y `"false"` → undefined (apagarlo explícito = no optar)', () => {
+    // Lo que este test canda es que `"false"` NO sea truthy. Con un `Boolean(raw)`,
+    // un caller que escribe `?allowTrial=false` terminaría ACEPTANDO candidatos en
+    // estreno — exactamente lo contrario de lo que pidió.
+    expect(parseAllowTrial(false)).toBeUndefined();
+    expect(parseAllowTrial('false')).toBeUndefined();
+  });
+
+  it.each([
+    'maybe',
+    '1',
+    '0',
+    'TRUE',
+    'yes',
+    'on',
+    ' true',
+    1,
+    0,
+    {},
+    [],
+  ])('T-AT4: %j → InvalidAllowTrialError (nunca se adivina un flag de riesgo)', (raw) => {
+    expect(() => parseAllowTrial(raw)).toThrow(InvalidAllowTrialError);
+  });
+
+  it('T-AT5: el error lleva el code que la ruta mapea a 400', () => {
+    try {
+      parseAllowTrial('maybe');
+      expect.unreachable('debía lanzar');
+    } catch (err) {
+      expect(err).toBeInstanceOf(InvalidAllowTrialError);
+      expect((err as InvalidAllowTrialError).code).toBe('INVALID_ALLOW_TRIAL');
+      expect((err as InvalidAllowTrialError).received).toBe('maybe');
     }
   });
 });

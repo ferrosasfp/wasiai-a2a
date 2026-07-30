@@ -297,6 +297,323 @@ describe('reputationService.computeReputationBatch', () => {
   });
 });
 
+// ── WKH-313 · computeStandingBatch ──────────────────────────────────────
+//
+// El punto entero de esta función es transportar un TERCER valor: hasta acá,
+// "ninguno de estos agentes tiene historial" y "no pude preguntar por el
+// historial" eran el MISMO Map vacío. Con el carril de estreno esa ambigüedad
+// admitiría a un desconocido bajo el piso que el caller pidió.
+describe('WKH-313 · reputationService.computeStandingBatch', () => {
+  it('T-10b (CD-7/DT-5): un error de la query viaja como `degraded: true`, NO como Map vacío', async () => {
+    setResults([
+      { data: null, error: { code: '42P01', message: 'relation missing' } },
+    ]);
+
+    const batch = await reputationService.computeStandingBatch(['a', 'b']);
+
+    // Lo que se está candando: que el fallo sea DISTINGUIBLE de "no hay datos".
+    expect(batch.degraded).toBe(true);
+    expect(batch.standings.size).toBe(0);
+  });
+
+  it('T-10b bis: sin error, "no hay filas" es `degraded: false` (ausencia ≠ degradado)', async () => {
+    setResults([{ data: [], error: null }]);
+
+    const batch = await reputationService.computeStandingBatch(['a', 'b']);
+
+    expect(batch.degraded).toBe(false);
+    expect(batch.standings.size).toBe(0);
+  });
+
+  it('T-10b ter: `slugs` vacío no consulta la DB y NO es una lectura degradada', async () => {
+    const batch = await reputationService.computeStandingBatch([]);
+
+    expect(mockFrom).not.toHaveBeenCalled();
+    expect(batch.degraded).toBe(false);
+    expect(batch.standings.size).toBe(0);
+  });
+
+  it('T-10b quater: UN solo SELECT con `.in` para N slugs (anti-N+1, CD-12)', async () => {
+    setResults([{ data: [row({ agent_id: 's1' })], error: null }]);
+
+    await reputationService.computeStandingBatch(['s1', 's2', 's3']);
+
+    expect(mockFrom).toHaveBeenCalledTimes(1);
+    expect(_terminalCalls).toEqual([{ method: 'in', arg: ['s1', 's2', 's3'] }]);
+  });
+
+  it('expone los TRES contadores + el score real, y el score es `null` con 0 liquidadas', async () => {
+    setResults([
+      {
+        data: [
+          rowWithCaller('c1', { agent_id: 'trabajo', status: 'success' }),
+          row({ agent_id: 'trabajo', status: 'failed', latency_ms: null }),
+          row({ agent_id: 'solo-fallos', status: 'failed', latency_ms: null }),
+        ],
+        error: null,
+      },
+    ]);
+
+    const batch = await reputationService.computeStandingBatch([
+      'trabajo',
+      'solo-fallos',
+    ]);
+
+    expect(batch.degraded).toBe(false);
+    expect(batch.standings.get('trabajo')).toMatchObject({
+      tasksSettled: 1,
+      successCount: 1,
+      failedCount: 1,
+    });
+    // 1 liquidada, success_rate 0.50 → round(1/50 × 100 × 0.5) = 1.
+    expect(batch.standings.get('trabajo')?.reputation?.score).toBe(1);
+
+    // El que sólo falló SÍ aparece en el Map (y con `failedCount >= 1`): es lo
+    // que permite distinguir "sin historial" de "mal historial" (CD-14).
+    expect(batch.standings.get('solo-fallos')).toMatchObject({
+      tasksSettled: 0,
+      successCount: 0,
+      failedCount: 1,
+      reputation: null,
+    });
+  });
+
+  it('`tasksSettled` usa el MISMO cap por caller que el score (CD-8, una sola cuenta)', async () => {
+    process.env.REPUTATION_MAX_TASKS_PER_CALLER = '2';
+    setResults([
+      {
+        data: [
+          rowWithCaller('mismo', { agent_id: 'a' }),
+          rowWithCaller('mismo', { agent_id: 'a' }),
+          rowWithCaller('mismo', { agent_id: 'a' }),
+          rowWithCaller('mismo', { agent_id: 'a' }),
+        ],
+        error: null,
+      },
+    ]);
+
+    const batch = await reputationService.computeStandingBatch(['a']);
+    const counters = batch.standings.get('a');
+
+    // 4 liquidadas de UN caller con K=2 → 2, y el contador que agota el carril
+    // tiene que ser EXACTAMENTE el mismo que el que alimenta el score.
+    expect(counters?.tasksSettled).toBe(2);
+    expect(counters?.reputation?.tasks_settled).toBe(2);
+  });
+
+  it('T-08 (AC-7/CD-3): un `reputation`/`score` en el metadata del evento NO altera los contadores', async () => {
+    // El standing no tiene NINGUNA entrada que el agente controle. Si alguien
+    // leyera un score del metadata, el agente se puntuaría a sí mismo.
+    setResults([
+      {
+        data: [
+          row({
+            agent_id: 'impostor',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+            metadata: { reputation: 100, score: 100, tasks_settled: 99 },
+          }),
+        ],
+        error: null,
+      },
+    ]);
+
+    const batch = await reputationService.computeStandingBatch(['impostor']);
+
+    expect(batch.standings.get('impostor')).toEqual({
+      tasksSettled: 0,
+      successCount: 0,
+      failedCount: 1,
+      // CR MNR-2: fila sin `caller_ref_hash` → bucket `'__anon__'`, que NO cuenta
+      // como caller identificado. El crudo sí la cuenta.
+      failedCallerCount: 0,
+      reputation: null,
+    });
+  });
+
+  // AR fix-pack BLQ-MED-2: el contador de callers DISTINTOS que fallaron. Es el
+  // que decide la anulación del carril de estreno; `failedCount` (crudo) se
+  // conserva porque es el que alimenta `success_rate` en la fórmula del score.
+  it('AR BLQ-MED-2: 3 fallos de UN caller son 1 caller; 2 callers son 2', async () => {
+    setResults([
+      {
+        data: [
+          rowWithCaller('c1', {
+            agent_id: 'reintentos',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          rowWithCaller('c1', {
+            agent_id: 'reintentos',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          rowWithCaller('c1', {
+            agent_id: 'reintentos',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          rowWithCaller('c1', {
+            agent_id: 'dos-quejas',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          rowWithCaller('c2', {
+            agent_id: 'dos-quejas',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+        ],
+        error: null,
+      },
+    ]);
+
+    const batch = await reputationService.computeStandingBatch([
+      'reintentos',
+      'dos-quejas',
+    ]);
+
+    expect(batch.standings.get('reintentos')).toMatchObject({
+      failedCount: 3,
+      failedCallerCount: 1,
+    });
+    expect(batch.standings.get('dos-quejas')).toMatchObject({
+      failedCount: 2,
+      failedCallerCount: 2,
+    });
+  });
+
+  it('CR MNR-2: una ráfaga ANÓNIMA no aporta NINGÚN caller distinto', async () => {
+    // `'__anon__'` no es "un caller": es "no sé quién". Contarlo como UNA identidad
+    // distinta le regalaba el segundo bucket a un atacante, porque una llamada x402
+    // anónima no requiere registrarse: con una identidad propia más una anónima
+    // anulaba el carril de un rival para siempre, sin falsificar nada.
+    //
+    // Consecuencia declarada y deliberada: fallos SÓLO anónimos no anulan el
+    // carril. Siguen bajando `success_rate` (y con él el score real), que es el
+    // mecanismo de siempre.
+    setResults([
+      {
+        data: [
+          row({
+            agent_id: 'anonimos',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          row({
+            agent_id: 'anonimos',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+        ],
+        error: null,
+      },
+    ]);
+
+    const batch = await reputationService.computeStandingBatch(['anonimos']);
+
+    expect(batch.standings.get('anonimos')).toMatchObject({
+      // El crudo NO cambia: la fórmula del score lo sigue leyendo igual.
+      failedCount: 2,
+      // El que decide la anulación sí: cero partes IDENTIFICADAS reportaron nada.
+      failedCallerCount: 0,
+    });
+  });
+
+  it('CR MNR-2: un caller identificado + una ráfaga anónima sigue siendo UN caller', async () => {
+    // El caso exacto del ataque: el atacante tiene UNA identidad y suma llamadas
+    // anónimas gratis. Con F=2, esto NO puede anular el carril.
+    setResults([
+      {
+        data: [
+          rowWithCaller('atacante', {
+            agent_id: 'victima',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          row({
+            agent_id: 'victima',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+        ],
+        error: null,
+      },
+    ]);
+
+    const batch = await reputationService.computeStandingBatch(['victima']);
+
+    expect(batch.standings.get('victima')).toMatchObject({
+      failedCount: 2,
+      failedCallerCount: 1,
+    });
+  });
+
+  it('CR MNR-2: DOS callers identificados sí suman dos (la anulación sigue viva)', async () => {
+    // El contrapeso: sacar el bucket anónimo no puede volver inanulable el carril.
+    setResults([
+      {
+        data: [
+          rowWithCaller('parte-a', {
+            agent_id: 'malo',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          rowWithCaller('parte-b', {
+            agent_id: 'malo',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+        ],
+        error: null,
+      },
+    ]);
+
+    const batch = await reputationService.computeStandingBatch(['malo']);
+
+    expect(batch.standings.get('malo')?.failedCallerCount).toBe(2);
+  });
+
+  it('computeReputationBatch se DERIVA del standing: contrato externo idéntico', async () => {
+    setResults([
+      {
+        data: [
+          rowWithCaller('c1', { agent_id: 'con-score' }),
+          row({
+            agent_id: 'sin-score',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+        ],
+        error: null,
+      },
+    ]);
+
+    const map = await reputationService.computeReputationBatch([
+      'con-score',
+      'sin-score',
+    ]);
+
+    // Sólo los slugs con score, UNA sola query: el mismo contrato de antes.
+    expect(map.has('con-score')).toBe(true);
+    expect(map.has('sin-score')).toBe(false);
+    expect(mockFrom).toHaveBeenCalledTimes(1);
+  });
+});
+
 // WKH-104 (TD-SYBIL): cap por caller en tasks_settled (CD-7/CD-8/CD-10).
 describe('reputationService — cap por caller anti-sybil (WKH-104)', () => {
   // T-CAP-1 / AC-11 / CD-7: 1 caller × N tasks (N>K) → tasks_settled === K.

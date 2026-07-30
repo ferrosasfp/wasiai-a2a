@@ -17,6 +17,10 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Agent, RegistryConfig } from '../types/index.js';
+import {
+  SELF_PUBLISHED_REGISTRY_ID,
+  SELF_PUBLISHED_REGISTRY_NAME,
+} from '../types/index.js';
 
 vi.mock('./registry.js', () => ({
   registryService: {
@@ -27,10 +31,18 @@ vi.mock('./registry.js', () => ({
   SYSTEM_OWNER_REF: 'system',
 }));
 
+// WKH-313: `listPublisherAnchors` devuelve `owner_ref` a propósito — el ancla se usa
+// para CONTAR el cupo del carril de estreno, NUNCA para publicar (CD-10). El doble lo
+// entrega poblado justamente para probar que el borde de salida no lo arrastra.
+const { mockListAnchors, mockListAsAgents } = vi.hoisted(() => ({
+  mockListAnchors: vi.fn(),
+  mockListAsAgents: vi.fn(),
+}));
 vi.mock('./agent.js', () => ({
   publishedAgentService: {
-    listAsAgents: vi.fn().mockResolvedValue([]),
+    listAsAgents: (...args: unknown[]) => mockListAsAgents(...args),
     getBySlugAsAgent: vi.fn().mockResolvedValue(null),
+    listPublisherAnchors: (slugs: string[]) => mockListAnchors(slugs),
   },
 }));
 
@@ -43,6 +55,11 @@ vi.mock('./identity.js', () => ({
 vi.mock('./reputation.js', () => ({
   reputationService: {
     computeReputationBatch: vi.fn().mockResolvedValue(new Map()),
+    // WKH-313: el consumidor real de `attachReputations`. Sin standings y SIN
+    // degradación: nadie tiene historial, la lectura funcionó.
+    computeStandingBatch: vi
+      .fn()
+      .mockResolvedValue({ degraded: false, standings: new Map() }),
     computeReputationForAgent: vi.fn().mockResolvedValue(null),
   },
 }));
@@ -108,6 +125,7 @@ function expectNoSecretMaterial(payload: unknown, where: string): void {
 beforeEach(() => {
   vi.clearAllMocks();
   mockFetch.mockReset();
+  mockListAsAgents.mockResolvedValue([]);
 });
 
 describe('discoveryService — no arrastra la credencial del registry (HIGH-1)', () => {
@@ -201,5 +219,77 @@ describe('agentCardService — solo el esquema de auth, nunca el valor (HIGH-1)'
 
     expect(card.authentication.schemes).toEqual(['bearer']);
     expectNoSecretMaterial(card, 'buildAgentCard()');
+  });
+});
+
+// ── T-16 (WKH-313 / CD-10) · el ancla de publicación no se publica ──────
+//
+// El carril de estreno LEE `a2a_agents.owner_ref` para contar el cupo por
+// publicador. Ese dato es de la misma familia que la credencial del registry: se usa
+// server-side y no sale. Y la clasificación de standing tampoco: publicar
+// `penalized` sería una letra escarlata sin contrato (DT-6).
+describe('T-16 (CD-10) · ni `owner_ref` ni el standing salen en la respuesta', () => {
+  const FAKE_OWNER_REF = 'owner-ref-9f3c-DO-NOT-SURFACE';
+
+  it('T-DRED-06: el admitido por estreno trae `trial` y NADA del ancla ni del standing', async () => {
+    // El agente es SELF-PUBLISHED a propósito: su ancla es el `owner_ref` de la
+    // fila, así que sin la siembra de abajo NO se lo admite. Eso hace que la
+    // aserción "el escenario está armado" sea de verdad load-bearing — con un
+    // agente federado el ancla sería el `registry_id` y se admitiría igual, o sea
+    // que el `owner_ref` nunca entraría al camino y este test mediría aire.
+    vi.mocked(registryService.getEnabled).mockResolvedValue([secretRegistry()]);
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
+    mockListAsAgents.mockResolvedValue([
+      {
+        id: 'a1',
+        name: 'Agent 1',
+        slug: 'a1',
+        description: 'd',
+        capabilities: ['kyc'],
+        priceUsdc: 0,
+        registry: SELF_PUBLISHED_REGISTRY_NAME,
+        registry_id: SELF_PUBLISHED_REGISTRY_ID,
+        invokeUrl: 'https://example.com/invoke/a1',
+        invocationNote: '',
+        verified: false,
+        status: 'active',
+        metadata: {},
+      } satisfies Agent,
+    ]);
+    mockListAnchors.mockResolvedValue({
+      degraded: false,
+      anchors: new Map([
+        ['a1', { ownerRef: FAKE_OWNER_REF, createdAt: '2026-01-01T00:00:00Z' }],
+      ]),
+    });
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    // El escenario está armado: el agente SÍ fue admitido por el carril.
+    expect(result.agents).toHaveLength(1);
+    expect(result.agents[0]?.trial?.granted).toBe(true);
+
+    const json = JSON.stringify(result);
+    expect(json, 'leaks the publisher anchor').not.toContain(FAKE_OWNER_REF);
+    expect(json, 'leaks owner_ref as a key').not.toContain('owner_ref');
+    expect(json, 'leaks ownerRef as a key').not.toContain('ownerRef');
+    // La clasificación de standing NO es campo público de `Agent` (DT-6).
+    for (const leaked of [
+      'penalized',
+      'newcomer',
+      'scored',
+      'tasksSettled',
+      'failedCount',
+      'successCount',
+      'degraded',
+    ]) {
+      expect(json, `leaks the standing internals: ${leaked}`).not.toContain(
+        leaked,
+      );
+    }
+    expectNoSecretMaterial(result, 'discover({allowTrial})');
   });
 });

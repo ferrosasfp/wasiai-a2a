@@ -27,7 +27,11 @@
  */
 import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
-import type { AgentReputation } from '../types/index.js';
+import type {
+  AgentReputation,
+  AgentStandingBatch,
+  AgentStandingCounters,
+} from '../types/index.js';
 
 const log = getLogger('reputation');
 
@@ -79,6 +83,16 @@ interface RepAccumulator {
   settledLatencyCount: number;
   successCount: number; // status='success' (cualquier costo)
   failedCount: number; // status='failed'
+  /**
+   * AR fix-pack BLQ-MED-2: CALLERS DISTINTOS que registraron al menos un `failed`
+   * (mismo bucketing que `settledByCaller`: `caller_ref_hash` o `'__anon__'`).
+   *
+   * Vive al lado de `settledByCaller` y NO toca `failedCount`: la fórmula del score
+   * (`computeFromAccumulator`) sigue leyendo el contador crudo, byte por byte. Este
+   * Set alimenta SÓLO la anulación del carril de estreno, que es la política a la
+   * que "un fallo es un fallo" le quedaba grande — ver `lib/trial-standing.ts`.
+   */
+  failedCallers: Set<string>;
 }
 
 /** Filas que pedimos a Supabase (select mínimo, DT-5/CD-2). */
@@ -99,7 +113,22 @@ function emptyAccumulator(): RepAccumulator {
     settledLatencyCount: 0,
     successCount: 0,
     failedCount: 0,
+    failedCallers: new Set<string>(),
   };
+}
+
+/**
+ * WKH-104 (CD-7/CD-8): el caller de una fila. Eventos sin `caller_ref_hash`
+ * (históricos o anónimos) caen todos en el MISMO bucket `'__anon__'`, nunca en
+ * error ni en un colapso a null.
+ */
+const ANON_CALLER_BUCKET = '__anon__';
+
+function callerBucket(row: RepRow): string {
+  return (
+    (row.metadata?.caller_ref_hash as string | null | undefined) ??
+    ANON_CALLER_BUCKET
+  );
 }
 
 /** Acumula una fila en el accumulator del slug (anti-sybil CD-1 en JS). */
@@ -112,12 +141,10 @@ function accumulateRow(acc: RepAccumulator, row: RepRow): void {
     acc.successCount++;
     // tasks_settled exige success AND cost_usdc>0 (anti-sybil CD-1).
     if (Number.isFinite(cost) && cost > 0) {
-      // WKH-104 (CD-7/CD-8): contabilizar la task bajo su caller. Eventos sin
-      // caller_ref_hash (históricos o anónimos) caen en el bucket '__anon__'
-      // (capeado a K en computeFromAccumulator), NUNCA error ni colapso a null.
-      const hash =
-        (row.metadata?.caller_ref_hash as string | null | undefined) ??
-        '__anon__';
+      // WKH-104 (CD-7/CD-8): contabilizar la task bajo su caller (bucket
+      // '__anon__' para históricos/anónimos, capeado a K en
+      // computeFromAccumulator).
+      const hash = callerBucket(row);
       acc.settledByCaller.set(hash, (acc.settledByCaller.get(hash) ?? 0) + 1);
       acc.settledVolume += cost;
       if (row.latency_ms != null) {
@@ -127,7 +154,53 @@ function accumulateRow(acc: RepAccumulator, row: RepRow): void {
     }
   } else if (isFailed) {
     acc.failedCount++;
+    // AR fix-pack BLQ-MED-2: además del crudo, QUIÉN falló. Un mismo caller que
+    // reintenta tres veces contra un agente caído treinta segundos deja 3 en
+    // `failedCount` y 1 acá — y esa diferencia es la que decide si el carril de
+    // estreno se anula. `failedCount` NO cambia: la fórmula del score lo sigue
+    // leyendo igual.
+    //
+    // ── CR MNR-2: `'__anon__'` NO cuenta como un caller distinto ─────────────
+    // Acá el bucket anónimo NO es "un caller": es "no sé quién". Colapsa bajo una
+    // etiqueta a un número DESCONOCIDO de partes (todo evento sin
+    // `caller_ref_hash`: históricos, y cualquier llamada x402 sin agent key). Con
+    // `F` callers distintos anulando el carril, contarlo como exactamente UNA
+    // identidad distinta afirma algo que el dato no dice — y lo afirma en la
+    // dirección cara: un atacante con UNA identidad más UNA llamada anónima (que
+    // no requiere registrarse) sumaba 2 buckets y anulaba el carril de un rival
+    // para siempre, sin falsificar nada.
+    //
+    // Subir `F` a 3 no arregla eso: el atacante seguiría necesitando 2 identidades
+    // (2 + anónimo = 3), o sea el MISMO costo, mientras le sube la vara a la
+    // anulación legítima. Sacar el bucket que no identifica a nadie deja el costo
+    // del atacante en 2 identidades reales y no encarece el caso honesto.
+    //
+    // CONSECUENCIA DECLARADA: fallos que vengan SÓLO de callers anónimos ya no
+    // anulan el carril. Siguen bajando `success_rate` y con él el score real, que
+    // es el mecanismo de siempre y no se toca. El carril se anula por evidencia de
+    // partes IDENTIFICADAS y distintas — que es lo que `F` quiso decir siempre.
+    const bucket = callerBucket(row);
+    if (bucket !== ANON_CALLER_BUCKET) acc.failedCallers.add(bucket);
   }
+}
+
+/**
+ * WKH-104 (TD-SYBIL CD-7/CD-8): cap por caller. Cada caller (incl. el bucket
+ * '__anon__' de históricos/anónimos) aporta a lo sumo K tasks. Esto evita
+ * que un caller infle su propio score con autopago. Eventos legacy sin
+ * caller_ref_hash caen en '__anon__' → su contribución queda capeada a K,
+ * por lo que scores inflados pre-WKH-104 pueden BAJAR (esperado, no bug).
+ *
+ * WKH-313 (CD-8): extraído a un helper porque `computeStandingBatch` expone
+ * `tasksSettled` como contador propio. Con dos expresiones del cap, el contador
+ * que agota el carril de estreno y el que alimenta el score divergirían — el
+ * mismo bug de clase que el refund del step-0 en HU-208. Hay UNA sola cuenta.
+ */
+function cappedSettled(acc: RepAccumulator): number {
+  const K = resolveMaxTasksPerCaller();
+  let tasksSettled = 0;
+  for (const n of acc.settledByCaller.values()) tasksSettled += Math.min(n, K);
+  return tasksSettled;
 }
 
 /**
@@ -136,14 +209,7 @@ function accumulateRow(acc: RepAccumulator, row: RepRow): void {
  * universo success+failed del slug (OBS-1).
  */
 function computeFromAccumulator(acc: RepAccumulator): AgentReputation | null {
-  // WKH-104 (TD-SYBIL CD-7/CD-8): cap por caller. Cada caller (incl. el bucket
-  // '__anon__' de históricos/anónimos) aporta a lo sumo K tasks. Esto evita
-  // que un caller infle su propio score con autopago. Eventos legacy sin
-  // caller_ref_hash caen en '__anon__' → su contribución queda capeada a K,
-  // por lo que scores inflados pre-WKH-104 pueden BAJAR (esperado, no bug).
-  const K = resolveMaxTasksPerCaller();
-  let tasksSettled = 0;
-  for (const n of acc.settledByCaller.values()) tasksSettled += Math.min(n, K);
+  const tasksSettled = cappedSettled(acc);
   if (tasksSettled === 0) return null;
 
   const totalVolumeUsdc = Number(acc.settledVolume.toFixed(6));
@@ -185,6 +251,25 @@ export interface ReputationService {
   computeReputationBatch(
     slugs: string[],
   ): Promise<Map<string, AgentReputation>>;
+
+  /**
+   * WKH-313 (DT-4/DT-5) — el STANDING en batch: los mismos contadores del MISMO
+   * accumulator y de la MISMA query que el score (CD-8), más un tercer valor
+   * EXPLÍCITO `degraded`.
+   *
+   * `degraded: true` significa "no pude preguntar por el historial", que NO es lo
+   * mismo que "no tiene historial". Hasta esta HU las dos cosas eran el mismo
+   * `Map` vacío, y con el carril de estreno esa ambigüedad admitiría a cualquiera
+   * bajo el piso: es el defecto de clase que HU-307 pagó siete veces. Con
+   * `degraded: true` no se admite a NADIE (fail-closed, CD-7).
+   *
+   * Un slug AUSENTE del Map con `degraded: false` sí significa "cero eventos".
+   * Esa distinción se lee SIEMPRE vía `lib/trial-standing.ts` `standingFor`,
+   * nunca con un `.get()` crudo.
+   *
+   * `slugs` vacío ⟹ `{ degraded: false, standings: Map vacío }` SIN tocar la DB.
+   */
+  computeStandingBatch(slugs: string[]): Promise<AgentStandingBatch>;
 }
 
 export const reputationService: ReputationService = {
@@ -228,8 +313,25 @@ export const reputationService: ReputationService = {
   async computeReputationBatch(
     slugs: string[],
   ): Promise<Map<string, AgentReputation>> {
+    // WKH-313 (CD-8): se DERIVA de `computeStandingBatch` — misma query, mismo
+    // accumulator, misma fórmula. El contrato externo es IDÉNTICO al de antes:
+    // sólo entran los slugs con score, y una lectura degradada devuelve un Map
+    // vacío (fail-safe de `discovery.ts`: sin score, el filtro cuenta 0). La
+    // distinción `degraded` la consume el camino del carril de estreno, que es el
+    // único para el que "ausente" y "no pude preguntar" no son equivalentes.
     const out = new Map<string, AgentReputation>();
-    if (slugs.length === 0) return out;
+    const { standings } = await reputationService.computeStandingBatch(slugs);
+    for (const [slug, counters] of standings) {
+      if (counters.reputation) out.set(slug, counters.reputation);
+    }
+    return out;
+  },
+
+  async computeStandingBatch(slugs: string[]): Promise<AgentStandingBatch> {
+    const standings = new Map<string, AgentStandingCounters>();
+    // Sin slugs no hay nada que preguntar: NO es una lectura degradada, es una
+    // lectura vacía. Cero I/O (CD-9).
+    if (slugs.length === 0) return { degraded: false, standings };
 
     // UN solo SELECT con .in('agent_id', slugs) (CD-12/AH-7). PROHIBIDO 1
     // query por agente. status/cost se filtran en el reduce JS porque
@@ -240,16 +342,22 @@ export const reputationService: ReputationService = {
       .in('agent_id', slugs);
 
     if (error) {
-      // CD-18: log server-side, NUNCA propagar error.message. Batch falla →
-      // Map vacío (caller deja a los agentes sin el campo, AC-4).
+      // CD-18: log server-side, NUNCA propagar error.message.
+      //
+      // WKH-313 (CD-7/DT-5): acá vivía `return out` — un Map vacío INDISTINGUIBLE
+      // de "ninguno de estos agentes tiene historial". Ahora la degradación viaja
+      // como un tercer valor EXPLÍCITO. Un `Map` vacío no puede transportar la
+      // diferencia entre "pregunté y no hay" y "no pude preguntar", y con el
+      // carril de estreno esa diferencia decide si se admite a un desconocido
+      // bajo el piso del caller.
       log.error(
         {
           count: slugs.length,
           code: error.code,
         },
-        'computeReputationBatch query failed',
+        'computeStandingBatch query failed',
       );
-      return out;
+      return { degraded: true, standings: new Map() };
     }
 
     // Reduce JS por agent_id en Map<slug, RepAccumulator> (patrón agentMap).
@@ -266,12 +374,19 @@ export const reputationService: ReputationService = {
       accumulateRow(acc, row);
     }
 
-    // Aplicar fórmula; solo agregar slugs con tasks_settled>0.
     for (const [slug, acc] of accBySlug) {
-      const rep = computeFromAccumulator(acc);
-      if (rep) out.set(slug, rep);
+      standings.set(slug, {
+        // AC-7/CD-3: los tres contadores salen SÓLO de columnas que el agente no
+        // controla (`status`, `cost_usdc`, `caller_ref_hash`). Nada de
+        // `metadata.reputation`/`metadata.score` entra acá.
+        tasksSettled: cappedSettled(acc),
+        successCount: acc.successCount,
+        failedCount: acc.failedCount,
+        failedCallerCount: acc.failedCallers.size,
+        reputation: computeFromAccumulator(acc),
+      });
     }
 
-    return out;
+    return { degraded: false, standings };
   },
 };

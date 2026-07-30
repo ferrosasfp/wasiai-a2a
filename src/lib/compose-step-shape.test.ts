@@ -162,6 +162,50 @@ describe('HU-208 · validateComposeStepShape — constraints', () => {
       )?.error,
     ).toContain('unsupported constraint');
   });
+
+  // ── T-14 (WKH-313 / DT-7) ──────────────────────────────────────────────
+  it('T-14: `allow_trial` booleano se ACEPTA (sin él, el opt-in era inalcanzable)', () => {
+    // Sin la clave en el allowlist, un caller que manda `allow_trial` recibe 400
+    // `unsupported constraint` y el carril de estreno no se puede pedir por
+    // /compose — o sea que el leg de payout de Chaski seguiría sin resolver.
+    expect(
+      validateComposeStepShape(
+        { capability: 'fx', input: {}, constraints: { allow_trial: true } },
+        0,
+      ),
+    ).toBeNull();
+    expect(
+      validateComposeStepShape(
+        {
+          capability: 'fx',
+          input: {},
+          constraints: { min_reputation: 2, allow_trial: false },
+        },
+        0,
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    1,
+    0,
+    'true',
+    'false',
+    'maybe',
+    null,
+    {},
+    [],
+  ])('T-14: `allow_trial: %j` (no booleano) → 400 VALIDATION_ERROR', (bad) => {
+    // `validateNumericConstraint` no sirve para esta clave: aceptaría `0`/`1` y
+    // rechazaría `true`. Y coercionar sería peor que rechazar: un `'false'`
+    // truthy haría que el caller acepte, sin saberlo, un agente sin historial.
+    const err = validateComposeStepShape(
+      { capability: 'fx', input: {}, constraints: { allow_trial: bad } },
+      0,
+    );
+    expect(err?.code).toBe('VALIDATION_ERROR');
+    expect(err?.error).toContain("'allow_trial' must be a boolean");
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════

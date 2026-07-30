@@ -4,8 +4,10 @@
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import {
+  InvalidAllowTrialError,
   InvalidLimitError,
   InvalidMinReputationError,
+  parseAllowTrial,
   parseLimit,
   parseMinReputation,
 } from '../lib/discovery-query.js';
@@ -22,19 +24,28 @@ import { discoveryService } from '../services/discovery.js';
  */
 function parseFiltersOr400(
   reply: FastifyReply,
-  raw: { minReputation: unknown; limit: unknown },
+  raw: { minReputation: unknown; limit: unknown; allowTrial: unknown },
 ):
-  | { minReputation: number | undefined; limit: number | undefined }
+  | {
+      minReputation: number | undefined;
+      limit: number | undefined;
+      allowTrial: boolean | undefined;
+    }
   | undefined {
   try {
     return {
       minReputation: parseMinReputation(raw.minReputation),
       limit: parseLimit(raw.limit),
+      // WKH-313: se valida acá, en el helper COMPARTIDO por GET y POST, y no en
+      // cada handler. El POST es el que se olvida: un flag que sólo se valida en
+      // GET deja al otro camino aceptando basura por el mismo endpoint.
+      allowTrial: parseAllowTrial(raw.allowTrial),
     };
   } catch (err) {
     if (
       err instanceof InvalidMinReputationError ||
-      err instanceof InvalidLimitError
+      err instanceof InvalidLimitError ||
+      err instanceof InvalidAllowTrialError
     ) {
       reply.status(400).send({ error: err.message, code: err.code });
       return undefined;
@@ -67,14 +78,35 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    *   se reenviaba upstream como `'1e+21'` → 200 con 0 agentes; los tres
    *   contradiciendo el contrato documentado).
    * - registry: filter to specific registry
+   * - allowTrial: WKH-313 — OPT-IN al CARRIL DE ESTRENO. `'true'` admite, bajo
+   *   `minReputation`, a agentes sin historial (0 liquidadas, 0 fallos) que además
+   *   pasen el techo `T` y el cupo `M` por publicador. Ausente/`'false'` = el
+   *   comportamiento de hoy, byte por byte, incluido el costo de I/O. El admitido
+   *   NO recibe score fabricado: conserva su puntaje real (0) y ordena ÚLTIMO, así
+   *   que sólo puede ser elegido cuando NINGÚN agente pasa por mérito, y viene
+   *   marcado con `agents[].trial`. Para que ese "ordena último" sea CIERTO también
+   *   para un agente federado, el admitido se surfacea con `verified: false` y con
+   *   `reputation` = su score REAL: los dos son campos que el card AUTO-REPORTA y
+   *   son las dos primeras claves del ranking (AR fix-pack BLQ-ALTO-1). Cualquier
+   *   valor que no sea `'true'`/`'false'` → 400 `INVALID_ALLOW_TRIAL` (nunca se
+   *   adivina un flag de riesgo).
    *
    * Respuesta — contrato de paginación (fix-pack P1, hallazgo 1):
    * - `agents`: hasta `limit` matches, ordenados verified-first → reputación
    *   desc → precio asc.
    * - `total`: cantidad de agentes que matchean TODOS los filtros, ANTES de
    *   aplicar `limit`. Es el denominador para paginar, así que
-   *   `total >= agents.length`. NO es el tamaño de la página.
+   *   `total >= agents.length`. NO es el tamaño de la página. WKH-313 (R-5):
+   *   SUBE cuando hay admitidos por estreno — es un cambio observable para quien
+   *   pagina con `allowTrial=true`.
    * - `registries`: nombres de los registries que contribuyeron.
+   * - `excluded`: `{ scope, reputation, trialAvailable, standingUnavailable }` —
+   *   cuántos descartó cada filtro de candidatura, para que un conjunto vacío pueda
+   *   explicarse. `standingUnavailable: true` significa que el gateway NO PUDO LEER
+   *   el historial: sin score nadie pasa el piso, así que `reputation` cuenta
+   *   exclusiones reales pero NO significan "estos agentes no llegan" (AR fix-pack
+   *   BLQ-BAJO-4). `trialAvailable` es exacto con `allowTrial` y una COTA SUPERIOR
+   *   sin él (el cupo por publicador se aplica después).
    */
   fastify.get(
     '/',
@@ -85,6 +117,7 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
           q?: string;
           maxPrice?: string;
           minReputation?: string;
+          allowTrial?: string;
           limit?: string;
           registry?: string;
           verified?: string;
@@ -98,6 +131,7 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
       const filters = parseFiltersOr400(reply, {
         minReputation: query.minReputation,
         limit: query.limit,
+        allowTrial: query.allowTrial,
       });
       if (!filters) return reply;
 
@@ -106,6 +140,7 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
         query: query.q,
         maxPrice: query.maxPrice ? parseFloat(query.maxPrice) : undefined,
         minReputation: filters.minReputation,
+        allowTrial: filters.allowTrial,
         limit: filters.limit,
         registry: query.registry,
         verified: query.verified === 'true' ? true : undefined,
@@ -121,6 +156,10 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    * Same as GET /discover but reads params from JSON body (WKH-DISCOVER-POST).
    * Mismo contrato de respuesta que el GET: `total` = matches pre-`limit`
    * (denominador de paginación), `agents` = la página de hasta `limit`.
+   *
+   * WKH-313: `allowTrial` (booleano) se valida con el MISMO helper que el GET, así
+   * que los dos caminos parsean idéntico. Un flag de riesgo validado en un solo
+   * verbo deja al otro aceptando basura por el mismo endpoint.
    */
   fastify.post(
     '/',
@@ -131,6 +170,7 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
           q?: string;
           maxPrice?: number;
           minReputation?: number;
+          allowTrial?: boolean;
           limit?: number;
           registry?: string;
           verified?: boolean;
@@ -158,6 +198,7 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
       const filters = parseFiltersOr400(reply, {
         minReputation: body.minReputation,
         limit: body.limit,
+        allowTrial: body.allowTrial,
       });
       if (!filters) return reply;
 
@@ -166,6 +207,7 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
         query: body.q != null ? String(body.q) : undefined,
         maxPrice: body.maxPrice != null ? Number(body.maxPrice) : undefined,
         minReputation: filters.minReputation,
+        allowTrial: filters.allowTrial,
         limit: filters.limit,
         registry: body.registry != null ? String(body.registry) : undefined,
         verified: body.verified === true ? true : undefined,

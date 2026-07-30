@@ -66,7 +66,17 @@ export type CapabilityResolutionFailure = {
    * agente" cuando en realidad hay uno que su credencial no alcanza busca el
    * problema en el catálogo, que es el lugar equivocado.
    */
-  reason: 'no_candidates' | 'excluded_by_scope';
+  reason:
+    | 'no_candidates'
+    | 'excluded_by_scope'
+    | 'excluded_by_reputation'
+    /**
+     * AR fix-pack BLQ-BAJO-4 — el gateway NO PUDO LEER el historial, así que nadie
+     * tiene score y el piso no se pudo evaluar. Es distinto de
+     * `excluded_by_reputation`: ahí los agentes no llegan al piso; acá no sabemos
+     * si llegan. Un reintento puede resolverlo; bajar el piso, no.
+     */
+    | 'reputation_unavailable';
   message: string;
 };
 
@@ -100,6 +110,13 @@ export async function resolveCapability(
   if (constraints?.min_reputation !== undefined) {
     query.minReputation = constraints.min_reputation;
   }
+  // WKH-313 (DT-7): el opt-in al carril de estreno viaja del step al pipeline. Sin
+  // este mapeo el caller manda `allow_trial: true`, pasa la validación de forma y
+  // NO PASA NADA — un filtro que el que pide cree haber relajado y no relajó, que es
+  // la misma clase de bug (con el signo invertido) que este archivo ya nombra.
+  if (constraints?.allow_trial !== undefined) {
+    query.allowTrial = constraints.allow_trial;
+  }
   if (scope) {
     query.scope = scope;
   }
@@ -124,6 +141,54 @@ export async function resolveCapability(
       failure: {
         reason: 'excluded_by_scope',
         message: `No agent fulfilling capability '${capability}' is within this key's scope`,
+      },
+    };
+  }
+
+  // WKH-313 (DT-10): el conjunto vaciado POR EL PISO tiene su propio motivo. Hasta
+  // acá volvía como `no_candidates`, o sea INDISTINGUIBLE de "esa capacidad no
+  // existe" — y ese diagnóstico costó tres semanas de confusión en Chaski, donde el
+  // agente existía y lo excluía un piso de 2 que él no podía alcanzar por no haber
+  // trabajado nunca. Se evalúa DESPUÉS del alcance: si la credencial ni siquiera
+  // alcanza al agente, ese es el problema de más arriba y gana.
+  const excludedByReputation = result.excluded?.reputation ?? 0;
+
+  // AR fix-pack BLQ-BAJO-4: el DÉCIMO sitio de "no pude preguntar" estaba acá, en el
+  // diagnóstico. Con el batch de standing degradado NINGÚN agente tiene score, el
+  // fail-safe del filtro los cuenta 0 y los excluye a todos, y este mensaje afirmaba
+  // "ninguno alcanza el min_reputation que pediste": una afirmación sobre los
+  // AGENTES cuando el hecho es sobre el GATEWAY. El consumidor bajaba el piso (o
+  // encendía `allow_trial`) para arreglar algo que no estaba roto ahí. Va ANTES del
+  // motivo por piso porque lo explica: esas exclusiones existieron, pero no
+  // significan lo que parecen.
+  if (result.excluded?.standingUnavailable === true) {
+    return {
+      ok: false,
+      failure: {
+        reason: 'reputation_unavailable',
+        message:
+          `Cannot evaluate min_reputation for capability '${capability}': the gateway could not read agent history. ` +
+          'This is not a statement about the agents, and lowering the floor or setting allow_trial will not help; retry.',
+      },
+    };
+  }
+
+  if (excludedByReputation > 0) {
+    const trialAvailable = result.excluded?.trialAvailable ?? 0;
+    return {
+      ok: false,
+      failure: {
+        reason: 'excluded_by_reputation',
+        message:
+          `No agent fulfilling capability '${capability}' meets the requested min_reputation` +
+          // AR MNR-5 / CR MENOR-1: "hasta N" y "elegibles", no "serían admitidos".
+          // Sin opt-in este contador es una COTA SUPERIOR (pre-cupo, por contrato
+          // del tipo): con 8 elegibles del mismo ancla y M=2, prometer 8 admisiones
+          // es prometer 6 que no van a pasar. El único consumidor del número lo
+          // leía como exacto.
+          (trialAvailable > 0
+            ? `; up to ${trialAvailable} candidate(s) have no settled history yet and are eligible for the trial lane with 'allow_trial' (a per-publisher quota applies)`
+            : ''),
       },
     };
   }
@@ -162,6 +227,16 @@ export function createCapabilityResolver(scope: A2AAgentKeyRow | undefined): {
       const key = `${capability}::${JSON.stringify({
         p: constraints?.max_price_usdc ?? null,
         r: constraints?.min_reputation ?? null,
+        // WKH-313 (R-4): `allow_trial` ENTRA a la clave porque cambia el conjunto de
+        // candidatos. Sin él, dos steps de la misma capability con opt-in distinto
+        // comparten la resolución memoizada, y el que NO optó recibiría un agente en
+        // estreno que nunca aceptó — sobre el camino del dinero.
+        //
+        // AR MNR-7: se normaliza a booleano. Con `?? null`, `false` y AUSENTE daban
+        // claves distintas para el MISMO conjunto de candidatos (sólo `true` cambia
+        // algo), así que un pipeline que mezclara las dos formas de no-optar pagaba
+        // un `discover` de más — fanout a todos los registries incluido.
+        t: constraints?.allow_trial === true,
       })}`;
       let pending = memo.get(key);
       if (!pending) {

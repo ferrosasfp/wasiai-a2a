@@ -86,10 +86,30 @@ vi.mock('../lib/supabase.js', () => {
 // service. Mock reputationService so the enrichment + sort run deterministically
 // without coupling to the supabase reduce. `setReputationBatch` controls the
 // Map the batch resolves to; `mockComputeBatch` lets tests assert no-N+1.
+//
+// WKH-313: el consumidor real es ahora `computeStandingBatch` (necesita el tercer
+// valor `degraded`, CD-7). El doble se DERIVA del mismo `mockComputeBatch`, así que
+// los escenarios de abajo (incluido T-AC4, que mockea un rechazo) no cambian.
 const mockComputeBatch = vi.fn();
 vi.mock('./reputation.js', () => ({
   reputationService: {
     computeReputationBatch: (slugs: string[]) => mockComputeBatch(slugs),
+    computeStandingBatch: async (slugs: string[]) => {
+      const repMap = (await mockComputeBatch(slugs)) as Map<
+        string,
+        { tasks_settled: number }
+      >;
+      const standings = new Map();
+      for (const [slug, reputation] of repMap) {
+        standings.set(slug, {
+          tasksSettled: reputation.tasks_settled,
+          successCount: reputation.tasks_settled,
+          failedCount: 0,
+          reputation,
+        });
+      }
+      return { degraded: false, standings };
+    },
     computeReputationForAgent: vi.fn(),
   },
 }));
