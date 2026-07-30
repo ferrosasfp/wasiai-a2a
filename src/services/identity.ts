@@ -199,6 +199,62 @@ export const identityService = {
   },
 
   /**
+   * WKH-315 (AC-7 / AC-8) — bind de la funding wallet **Solana** a una key.
+   *
+   * Copia de `bindFundingWallet` con UNA diferencia, y es la que importa: **no hay
+   * `toLowerCase()` en ningún punto**. La pubkey se persiste y se devuelve
+   * BYTE-EXACTA, tal como llegó.
+   *
+   * ⚠️ POR QUE NO SE NORMALIZA LA CAJA, Y POR QUE ES UNA COLUMNA APARTE.
+   *
+   * base58 usa mayúsculas y minúsculas como SIMBOLOS DISTINTOS. Bajar de caja una
+   * pubkey no la "normaliza": la **destruye**, y peor, mapea pubkeys diferentes al
+   * mismo valor almacenado — o sea colisiones en un índice UNIQUE que existe para
+   * impedir que dos keys reclamen la misma wallet. En Postgres la igualdad de `TEXT`
+   * ya es byte-exacta, así que el índice es case-sensitive sin hacer nada.
+   *
+   * Y por eso es una COLUMNA NUEVA en vez de reusar `funding_wallet`: ese campo se
+   * persiste lowercase desde la app y su migración lo declara CONTRATO. Cambiarlo
+   * tocaría el camino EVM (CD-1). Además, con una sola columna un owner no podría
+   * tener las dos wallets bindeadas a la vez.
+   *
+   * El resto es idéntico: Ownership Guard (`UPDATE` filtrado por `id` **y**
+   * `owner_ref`, porque el cliente usa `SUPABASE_SERVICE_KEY` y bypassa RLS), 0 filas
+   * ⇒ `OwnershipMismatchError`, `23505` del UNIQUE parcial ⇒
+   * `FundingWalletAlreadyBoundError`.
+   *
+   * `bindFundingWallet` **no se toca**.
+   */
+  async bindSolanaFundingWallet(
+    keyId: string,
+    ownerId: string,
+    pubkey: string,
+  ): Promise<string> {
+    const { data, error } = await supabase
+      .from('a2a_agent_keys')
+      .update({ funding_wallet_solana: pubkey })
+      .eq('id', keyId)
+      .eq('owner_ref', ownerId)
+      .select('id');
+
+    if (error) {
+      // UNIQUE parcial (funding_wallet_solana) violado: la pubkey ya está bindeada a
+      // otra key.
+      if (error.code === '23505') {
+        throw new FundingWalletAlreadyBoundError();
+      }
+      throw new Error(`Failed to bind solana funding wallet: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) {
+      logOwnershipMismatch('deactivate', keyId, ownerId);
+      throw new OwnershipMismatchError();
+    }
+
+    return pubkey;
+  },
+
+  /**
    * Bind a Kite Agent Passport address to a key (WKH-117, AC-8).
    *
    * Ownership Guard (CLAUDE.md / CD-3): UPDATE filtered by id AND owner_ref so
