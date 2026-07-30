@@ -120,6 +120,29 @@ próxima HU.
 
 ---
 
+### [2026-07-30 17:55] Waves 1–2 — Dos nominaciones de mutante del story file no se sostienen
+
+- **Hallazgo** (no es un error propio, es una corrección al story file, verificada
+  mutante por mutante con la disciplina de §9):
+  - **M2b** (`(s.rows ?? 0) >= 0`) está nominado a `T-SRC-05`. `T-SRC-05` **NO lo
+    mata**: es el camino feliz con una sola fuente `ok`/`rows: 3`, y con `>` o con
+    `>=` el resultado es el mismo `['test-registry']`. Los que sí lo matan son
+    `T-SRC-02` (una fuente `ok` con `rows: 0` pasaría a figurar en `registries`) y
+    `T-SRC-01`/`T-SRC-07` (una fuente `failed` con `rows: null` también, porque
+    `null ?? 0` es `0`). Medido: 5 tests rojos, ninguno de ellos `T-SRC-05`.
+  - **T-SRC-06** pide asertar "los 11 campos previos" de `/capabilities`. Los
+    campos previos **medidos son 12** (`name`, `description`, `url`, `protocol`,
+    `capabilities`, `methods`, `inputModes`, `outputModes`, `chains`, `agents`,
+    `agentsTotal`, `registries`). El test asserta el conjunto medido y congela las
+    14 claves exactas.
+- **Aplicar en**: una tabla de "mutante → test que lo mata" escrita junto al
+  diseño es una **hipótesis**, no una medición. Correr el mutante y anotar QUÉ
+  test se puso rojo es lo único que la convierte en evidencia. Un KILLED
+  reportado contra el test nominado sin haber mirado la lista real de fallos es
+  un falso positivo esperando su turno.
+
+---
+
 ### [2026-07-30] Wave 0 — El número de fixtures estimado no era el medido
 
 - **Nota** (no es un error propio, es calibración para el próximo): el story
