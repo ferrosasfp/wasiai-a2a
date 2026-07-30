@@ -15,6 +15,12 @@ import type {
   AgentStandingBatch,
   AgentStandingCounters,
 } from '../types/index.js';
+// AR fix-pack BLQ-MED-3: el cupo desempata por SORTEO cuando no hay `created_at`.
+// La fuente se fija acá para que el reparto sea medible y no un flake.
+import {
+  _resetTiebreakRandomSource,
+  _setTiebreakRandomSource,
+} from './ranking-tiebreak.js';
 import {
   classifyStanding,
   isTrialEligible,
@@ -56,7 +62,14 @@ beforeEach(() => {
 
 afterEach(() => {
   process.env = { ...ORIGINAL_ENV };
+  _resetTiebreakRandomSource();
 });
+
+/** Fuente de sorteo determinista: entrega los valores en orden y después `1`. */
+function seq(values: number[]): () => number {
+  let i = 0;
+  return () => values[i++] ?? 1;
+}
 
 // ── T-22 (DT-8): N, T y M son CONFIGURACIÓN, y el default es el conservador ──
 describe('T-22 (DT-8) · N/T/M salen de env con default CONSERVADOR', () => {
@@ -242,16 +255,24 @@ describe('T-19 (CD-15) · cupo M por publicador, determinista', () => {
     expect([...selectTrialAdmitted(cands, 1)].sort()).toEqual(['o1-a', 'o2-a']);
   });
 
-  it('T-19: `created_at` EMPATADO → gana el `slug` menor, y es el MISMO en 50 corridas permutadas', () => {
-    // Sin el desempate por `slug`, con `created_at` empatado volvería a decidir el
-    // orden del arreglo — que sale de cómo se concatenaron las fuentes en
-    // discovery. Exactamente lo que CD-15 prohíbe.
+  it('T-19: con `created_at` EMPATADO el orden del ARREGLO no decide (CD-15)', () => {
+    // Lo que CD-15 prohíbe es que decida cómo se concatenaron las fuentes en
+    // discovery. Con la fuente del sorteo FIJADA por slug, el resultado tiene que
+    // ser el mismo en 50 permutaciones del mismo conjunto.
     const same = '2026-06-06T00:00:00Z';
     const base = [
       cand('zeta', 'owner-1', same),
       cand('alfa', 'owner-1', same),
       cand('mika', 'owner-1', same),
     ];
+    // Sorteo fijado: `mika` saca el número más bajo. Se elige a propósito el que NO
+    // es ni el primero del arreglo ni el `slug` menor — si ganara `alfa`, estaría
+    // decidiendo el nombre; si ganara `zeta`, el arreglo.
+    const draw = new Map([
+      ['zeta', 0.9],
+      ['alfa', 0.5],
+      ['mika', 0.1],
+    ]);
 
     const seen = new Set<string>();
     for (let i = 0; i < 50; i++) {
@@ -260,22 +281,82 @@ describe('T-19 (CD-15) · cupo M por publicador, determinista', () => {
       permuted.push(...permuted.splice(0, i % permuted.length));
       if (i % 2 === 0) permuted.reverse();
 
+      // La fuente se consume EN EL ORDEN del arreglo permutado, así que el valor se
+      // ata al slug (y no a la posición) para que el escenario mida el desempate.
+      let seq = 0;
+      _setTiebreakRandomSource(
+        () => draw.get(permuted[seq++]?.slug ?? '') ?? 1,
+      );
+
       const admitted = selectTrialAdmitted(permuted, 1);
       expect(admitted.size).toBe(1);
       seen.add([...admitted][0] as string);
     }
 
-    expect([...seen]).toEqual(['alfa']);
+    expect([...seen]).toEqual(['mika']);
   });
 
-  it('sin `createdAt` (agentes federados) el orden lo decide el `slug`', () => {
+  it('AR BLQ-MED-3: sin `createdAt` (federados) el cupo se SORTEA — el nombre no es prioridad permanente', () => {
+    // El hallazgo: todo federado entra sin `created_at`, así que el desempate caía
+    // siempre en `slug` ascendente y los 2 cupos del registry se los quedaban, de
+    // forma PERMANENTE, los dos slugs lexicográficamente menores. Bastaba llamarse
+    // `aaa-...`. Acá se canda lo contrario: con el sorteo, el `slug` menor PIERDE.
     const cands = [
+      cand('aaa-agent', 'registry:reg-1'),
       cand('m-agent', 'registry:reg-1'),
-      cand('a-agent', 'registry:reg-1'),
       cand('z-agent', 'registry:reg-1'),
     ];
+    _setTiebreakRandomSource(seq([0.9, 0.4, 0.2]));
 
-    expect([...selectTrialAdmitted(cands, 1)]).toEqual(['a-agent']);
+    expect([...selectTrialAdmitted(cands, 1)]).toEqual(['z-agent']);
+  });
+
+  it('AR BLQ-MED-3: a lo largo de varias corridas, CADA elegible del ancla puede entrar', () => {
+    // La propiedad que compra el sorteo no es "gana otro", es que NINGUNO queda
+    // excluido para siempre. Con un desempate fijo (slug, o el hash del slug) los
+    // dos de abajo no entrarían jamás, por muchas requests que pasen.
+    const cands = [
+      cand('aaa-agent', 'registry:reg-1'),
+      cand('m-agent', 'registry:reg-1'),
+      cand('z-agent', 'registry:reg-1'),
+    ];
+    const winners = new Set<string>();
+    for (const draw of [
+      [0.1, 0.5, 0.9],
+      [0.9, 0.1, 0.5],
+      [0.5, 0.9, 0.1],
+    ]) {
+      _setTiebreakRandomSource(seq(draw));
+      winners.add([...selectTrialAdmitted(cands, 1)][0] as string);
+    }
+
+    expect([...winners].sort()).toEqual(['aaa-agent', 'm-agent', 'z-agent']);
+  });
+
+  it('el que TIENE `created_at` va antes que el que no lo tiene (no se mezclan criterios)', () => {
+    // Escenario defensivo: hoy un ancla es homogénea (o toda self-published, o toda
+    // federada). Si algún día se mezclaran, el dato REAL de antigüedad manda sobre
+    // el sorteo, y el sorteo no puede desplazar a quien tiene fecha.
+    const cands = [
+      cand('sorteado', 'owner-1'),
+      cand('con-fecha', 'owner-1', '2026-09-09T00:00:00Z'),
+    ];
+    _setTiebreakRandomSource(seq([0.01, 0.99]));
+
+    expect([...selectTrialAdmitted(cands, 1)]).toEqual(['con-fecha']);
+  });
+
+  it('sorteo EMPATADO (fuente constante) → sigue habiendo orden total, y lo cierra el `slug`', () => {
+    // Rama inalcanzable con `Math.random`, pero un comparador que devolviera 0 le
+    // devolvería la decisión al orden del arreglo — que es lo que CD-15 prohíbe.
+    const cands = [
+      cand('zzz', 'registry:reg-1'),
+      cand('aaa', 'registry:reg-1'),
+    ];
+    _setTiebreakRandomSource(() => 0.5);
+
+    expect([...selectTrialAdmitted(cands, 1)]).toEqual(['aaa']);
+    expect([...selectTrialAdmitted([...cands].reverse(), 1)]).toEqual(['aaa']);
   });
 
   it('M sale de la env; con menos candidatos que M entran todos', () => {

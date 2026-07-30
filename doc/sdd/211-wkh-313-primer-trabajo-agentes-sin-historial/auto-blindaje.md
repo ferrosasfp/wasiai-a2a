@@ -25,6 +25,26 @@
   entra al comparador y viene de un card federado es **auto-reportado** hasta que se
   demuestre lo contrario.
 
+### [2026-07-30] Fix-pack AR · BLQ-MED-3 — Un desempate "determinista" que era una exclusión permanente
+
+- **Error**: el cupo `M` desempataba por `slug` ascendente cuando no había
+  `created_at`, y NINGÚN agente federado trae `created_at`. Resultado: un registry
+  con 20 agentes nuevos de 10 publicadores repartía 2 cupos, siempre a los dos slugs
+  lexicográficamente menores, en todas las requests. Bastaba llamarse `aaa-payout-1`.
+  El carril quedaba bloqueado justo para el caso que motiva la HU.
+- **Causa raíz**: leí "determinista" como "una función total y estable" y elegí el
+  primer criterio que cumplía eso. Determinista y **permanente** no son lo mismo: un
+  desempate fijo sobre un atributo que el candidato ELIGE (su nombre) es un ranking
+  encubierto y además grindeable. El JSDoc encima decía "los M más antiguos por
+  `created_at`", que para federados no era lo que hacía.
+- **Fix**: dentro del ancla, `created_at` cuando lo hay y **SORTEO por request**
+  cuando no (misma fuente inyectable que el desempate del ranking, HU-208). El `slug`
+  queda sólo como cierre de orden total para el empate exacto de dos sorteos.
+  Mutante `M-MED3` (volver al `slug`): 5 rojos.
+- **Aplicar en**: todo desempate que reparta un recurso escaso. Preguntarse no sólo
+  "¿es determinista?" sino "¿quién queda afuera PARA SIEMPRE, y puede el candidato
+  elegir el valor con el que se lo ordena?".
+
 ### [2026-07-30] W0.1 — El tipo creció y el sitio de construcción quedó atrás
 
 - **Error**: agregué `reputation` y `trialAvailable` a `DiscoveryResult.excluded`

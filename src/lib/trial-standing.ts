@@ -17,6 +17,12 @@
  * real bajo) y por eso ordena ÚLTIMO: sólo puede ser elegido cuando NINGÚN
  * agente pasa por mérito. Eso es lo que hace que el carril no sea un atajo.
  *
+ * Ese "ordena ÚLTIMO" NO sale gratis y NO vive acá: el ranking lee `verified` y,
+ * sin score computado, cae al `reputation` del card — los dos AUTO-REPORTADOS por
+ * el agente. `services/discovery.ts` (bloque del badge) los neutraliza para el
+ * admitido; sin eso la garantía es falsa para todo agente federado (AR fix-pack
+ * BLQ-ALTO-1).
+ *
  * Módulo LEAF a propósito (sin imports de `services/` ni de `lib/supabase.js`),
  * por el mismo motivo documentado en `lib/discovery-query.ts:1-10`: los tests de
  * rutas mockean el service completo y cualquier export nuevo que la ruta consuma
@@ -28,6 +34,10 @@ import type {
   AgentStandingCounters,
   AgentStandingKind,
 } from '../types/index.js';
+// AR fix-pack BLQ-MED-3: el SORTEO del cupo reusa la MISMA fuente inyectable que
+// el desempate del ranking (HU-208). Módulo LEAF también, así que no rompe la
+// razón por la que este archivo es leaf.
+import { assignTiebreaks, compareTiebreak } from './ranking-tiebreak.js';
 
 // ── N, T y M — env con default (DT-8) ───────────────────────────────────
 //
@@ -155,28 +165,64 @@ export interface TrialCandidate {
   /**
    * Ancla de publicación: `a2a_agents.owner_ref` para self-published,
    * `registry_id` para federados. Se usa para CONTAR, no para publicar (CD-10).
+   *
+   * ⚠️ ASIMETRÍA REAL, y hay que decirla (AR fix-pack BLQ-MED-3): para un agente
+   * federado NO TENEMOS al publicador. El catálogo remoto no expone quién subió
+   * cada card, así que el ancla más fina disponible es el registry ENTERO. Un
+   * registry con 10 publicadores honestos reparte `M` cupos entre los 10, o sea que
+   * el control sub-admite. Se elige esa dirección a propósito: la alternativa
+   * (ancla por card, o sin cupo para federados) le devolvería a un sybil la
+   * capacidad de inundar el carril publicando en un registry federado, que es
+   * justamente el ataque que el cupo existe para frenar. Residual documentado.
    */
   anchor: string;
   /**
    * `a2a_agents.created_at`. Ausente para agentes federados (el shape `Agent` no
-   * trae `created_at`), en cuyo caso el orden lo decide el `slug` — determinista
-   * igual, y su ancla es el `registry_id`, así que sólo compite contra agentes
-   * del MISMO registry.
+   * trae `created_at`): ahí el orden dentro del ancla lo decide el SORTEO por
+   * request, NUNCA el `slug` (ver `selectTrialAdmitted`).
    */
   createdAt?: string | undefined;
 }
 
 /**
  * Aplica el cupo `M` por publicador: dentro de cada ancla retienen el estreno los
- * `M` candidatos MÁS ANTIGUOS por `created_at`.
+ * `M` candidatos más antiguos por `created_at`, y cuando no hay `created_at`
+ * comparable, los `M` que salgan sorteados en ESTA request.
  *
- * ⚠️ DETERMINISTA POR CONTRATO (CD-15). PROHIBIDO resolverlo por el orden del
- * arreglo (que sale de cómo se concatenaron las fuentes en `discovery.ts`) y
- * PROHIBIDO el tiebreak aleatorio de `lib/ranking-tiebreak.ts`.
+ * ── Orden dentro de un ancla ────────────────────────────────────────────────
+ *   1. `created_at` ascendente, cuando LOS DOS lo tienen (self-published: el dato
+ *      sale de nuestra propia tabla y "el que llegó primero" es una política
+ *      legítima de reparto);
+ *   2. el que TIENE fecha antes que el que no la tiene;
+ *   3. SORTEO (`lib/ranking-tiebreak.ts`, fuente inyectable), asignado UNA vez por
+ *      candidato ANTES de ordenar;
+ *   4. `slug` ascendente como último recurso, sólo para que la relación de orden
+ *      sea TOTAL si dos sorteos empatan exactamente (inalcanzable en la práctica
+ *      con `Math.random`; un comparador que devuelve 0 dejaría decidir al orden del
+ *      arreglo, que es lo que CD-15 prohíbe).
  *
- * El desempate final por `slug` ascendente NO es decorativo: dos filas pueden
- * tener el MISMO `created_at`, y sin él el orden del arreglo volvería a decidir
- * — exactamente lo que CD-15 prohíbe.
+ * ⚠️ POR QUÉ EL SORTEO REEMPLAZA AL `slug` (AR fix-pack BLQ-MED-3). El SDD escribió
+ * "PROHIBIDO el tiebreak aleatorio" pensando en el orden del ARREGLO; el efecto real
+ * fue peor. Todo agente federado entra sin `created_at`, así que el desempate caía
+ * SIEMPRE en `slug` ascendente: un registry con 20 agentes nuevos de 10 publicadores
+ * distintos repartía 2 cupos, y se los llevaban de forma PERMANENTE los dos slugs
+ * lexicográficamente menores. Bastaba llamarse `aaa-payout-1` para quedarse con el
+ * carril, y a los otros 18 no les quedaba ninguna corrida en la que entrar: un
+ * bloqueo barato y permanente justo del caso que motiva la HU (oferta nueva llegando
+ * por el marketplace federado).
+ *
+ * Un desempate FIJO cualquiera (hash del slug incluido) tiene el mismo defecto: es
+ * una permutación estable, o sea que se puede moler el nombre hasta caer arriba y el
+ * que cae abajo no entra nunca. Lo que hay que romper no es el criterio, es su
+ * PERMANENCIA. El sorteo le da a cada elegible del ancla la misma chance en cada
+ * request, que es exactamente el argumento con el que HU-208 sacó el sesgo
+ * posicional del ranking ("dos agentes empatados merecen la misma chance").
+ *
+ * Sigue siendo DETERMINISTA donde CD-15 lo necesitaba: el valor se asigna una sola
+ * vez por candidato y antes de ordenar, así que el orden es total y estable DENTRO de
+ * la request (dos steps de la misma capability resuelven al mismo agente), y el orden
+ * del arreglo no decide nada. Lo que cambia entre requests distintas es QUIÉN de los
+ * empatados entra, que es la propiedad que se busca.
  *
  * Por qué el cupo existe: hoy `remittance-payout` no tiene NINGÚN agente con
  * score, así que dos candidatos en estreno empatan en 0 y el desempate del sort
@@ -198,12 +244,23 @@ export function selectTrialAdmitted(
     group.push(c);
   }
 
+  // UNA sola asignación para todos los candidatos, antes de cualquier `sort`.
+  const draw = assignTiebreaks(cands);
+
   const admitted = new Set<string>();
   for (const group of byAnchor.values()) {
     const ordered = [...group].sort((a, b) => {
-      const aCreated = a.createdAt ?? '';
-      const bCreated = b.createdAt ?? '';
-      if (aCreated !== bCreated) return aCreated < bCreated ? -1 : 1;
+      const aCreated = a.createdAt;
+      const bCreated = b.createdAt;
+      if (aCreated !== undefined && bCreated !== undefined) {
+        if (aCreated !== bCreated) return aCreated < bCreated ? -1 : 1;
+      } else if (aCreated !== undefined) {
+        return -1;
+      } else if (bCreated !== undefined) {
+        return 1;
+      }
+      const drawn = compareTiebreak(draw, a, b);
+      if (drawn !== 0) return drawn;
       if (a.slug !== b.slug) return a.slug < b.slug ? -1 : 1;
       return 0;
     });

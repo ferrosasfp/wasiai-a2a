@@ -694,10 +694,13 @@ export const discoveryService = {
    * (CD-9). UNA sola lectura de anclas por corrida del pipeline (anti-N+1).
    *
    * FAIL-CLOSED en los tres bordes:
-   *   · la lectura de anclas falla ⟹ NADIE se admite (no "sin ancla, pasa igual");
+   *   · la lectura de anclas falla ⟹ NADIE se admite (no "sin ancla, pasa igual"),
+   *     y eso vale también para los federados: si no se puede leer el mapa de
+   *     publicadores, no se sabe qué cupo se está gastando;
    *   · un self-published sin fila de ancla ⟹ no es candidato;
-   *   · el cupo se resuelve por `(created_at, slug)` ascendente, NUNCA por el orden
-   *     del arreglo ni por el tiebreak aleatorio del ranking (CD-15).
+   *   · el cupo se resuelve por `created_at` ascendente cuando lo hay y por SORTEO
+   *     por request cuando no (federados), NUNCA por el orden del arreglo ni por el
+   *     `slug` — ver `selectTrialAdmitted` (AR fix-pack BLQ-MED-3).
    *
    * Por qué el cupo tiene que existir ANTES de que alguien encienda el opt-in en un
    * leg de dinero: hoy `remittance-payout` no tiene NINGÚN agente con score, así que
@@ -732,8 +735,18 @@ export const discoveryService = {
 
     const candidates: TrialCandidate[] = [];
     for (const a of eligible) {
-      const anchor = anchorRead.anchors.get(a.slug);
-      if (anchor) {
+      // AR fix-pack MNR-6: el ancla del self-published se busca SÓLO para agentes
+      // self-published. `listPublisherAnchors` consulta `a2a_agents` por `slug`, y
+      // los slugs NO son únicos entre registries (`runDiscoveryPipeline` hace
+      // `results.flat()` sin deduplicar). Sin este gate, un federado que eligiera un
+      // slug ya usado localmente HEREDABA el `owner_ref` y el `created_at` de la
+      // fila ajena: se colaba en el cupo de otro publicador y encima con una
+      // antigüedad que no es suya.
+      if (a.registry_id === SELF_PUBLISHED_REGISTRY_ID) {
+        const anchor = anchorRead.anchors.get(a.slug);
+        // Self-published sin fila de ancla: no se puede contar su cupo, así que no
+        // es candidato. Fail-closed, sin excepción por "es sólo un caso borde".
+        if (!anchor) continue;
         candidates.push({
           slug: a.slug,
           anchor: `owner:${anchor.ownerRef}`,
@@ -741,14 +754,14 @@ export const discoveryService = {
         });
         continue;
       }
-      if (a.registry_id === SELF_PUBLISHED_REGISTRY_ID) {
-        // Self-published sin fila de ancla: no se puede contar su cupo, así que no
-        // es candidato. Fail-closed, sin excepción por "es sólo un caso borde".
-        continue;
-      }
       // Federado: el ancla es su `registry_id`, así que sólo compite por el cupo
-      // contra agentes del MISMO registry. No trae `created_at` (el shape `Agent`
-      // no lo tiene) → el orden lo decide el `slug`, determinista igual.
+      // contra agentes del MISMO registry. No trae `created_at` (el shape `Agent` no
+      // lo tiene) → dentro del ancla el cupo se SORTEA por request. NO por `slug`:
+      // eso le daba el carril de forma permanente a quien eligiera el nombre
+      // lexicográficamente menor (AR fix-pack BLQ-MED-3, ver `selectTrialAdmitted`).
+      // Y sí, el ancla es el registry ENTERO y no el publicador, porque el card
+      // federado no dice quién lo publicó: el cupo sub-admite en un registry
+      // multi-publicador, que es la dirección conservadora.
       candidates.push({ slug: a.slug, anchor: `registry:${a.registry_id}` });
     }
 

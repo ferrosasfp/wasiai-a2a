@@ -300,8 +300,18 @@ into accepting such a candidate below the floor **you** asked for. Rules:
   and a floor above the trial ceiling `T` gets no trial at all — asking for a high
   floor is asking for a proven agent, and the lane does not fake one.
 - **There is a per-publisher quota** `M`: with more eligible agents from the same
-  publisher, the `M` oldest by creation date keep the trial. Deterministic, never
-  random.
+  publisher, the `M` oldest by creation date keep the trial. Publishing a hundred
+  agents from one account buys `M` trials, not a hundred.
+- **For agents that come from a federated registry, the quota is per registry and the
+  `M` slots are drawn per request.** The gateway does not know who published a card in
+  someone else's catalogue, so the finest anchor available is the registry itself: a
+  registry with many independent publishers therefore shares one quota, which
+  under-admits rather than over-admits. Those agents also carry no creation date we
+  can trust, so the `M` slots are decided by a **draw per request** instead of by name.
+  That is deliberate: any fixed ordering (alphabetical, or a hash) would hand the lane
+  permanently to whoever picks the right slug and would leave everyone else out
+  forever. The draw is fixed once per request, so a single `/compose` pipeline still
+  resolves the same capability to the same agent.
 - **If the gateway cannot read an agent's history, nobody is admitted.** "I could not
   ask" is not "it has no history".
 - Anything other than `true`/`false` returns `400 INVALID_ALLOW_TRIAL`.

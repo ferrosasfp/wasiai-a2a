@@ -84,6 +84,12 @@ vi.mock('./identity.js', () => ({
   identityService: { resolveIdentityForAgent: vi.fn().mockResolvedValue(null) },
 }));
 
+// AR fix-pack BLQ-MED-3: el cupo de los federados desempata por SORTEO. La fuente
+// se fija para que el reparto sea medible (y no un flake).
+import {
+  _resetTiebreakRandomSource,
+  _setTiebreakRandomSource,
+} from '../lib/ranking-tiebreak.js';
 import { discoveryService } from './discovery.js';
 import { registryService } from './registry.js';
 
@@ -215,7 +221,14 @@ beforeEach(() => {
   mockListAsAgents.mockResolvedValue([]);
   standings();
   anchors();
+  _resetTiebreakRandomSource();
 });
+
+/** Fuente de sorteo determinista: entrega los valores en orden y después `1`. */
+function seq(values: number[]): () => number {
+  let i = 0;
+  return () => values[i++] ?? 1;
+}
 
 // ── T-02 (AC-2) · el badge, y NADA de score fabricado ───────────────────
 describe('T-02 (AC-2) · el admitido viene MARCADO y sin score fabricado', () => {
@@ -754,6 +767,84 @@ describe('T-11 (AC-10/CD-15) · cupo `M` por publicador, determinista', () => {
     });
 
     expect(result.agents.map((a) => a.slug).sort()).toEqual(['a', 'b', 'c']);
+  });
+});
+
+// ── AR BLQ-MED-3 · el cupo de los FEDERADOS ─────────────────────────────
+describe('AR BLQ-MED-3 · el cupo federado no se reparte por orden alfabético', () => {
+  it('6 nuevos del mismo registry con M=2 → los cupos NO se los quedan los slugs menores', async () => {
+    // El escenario del AR, en chico: un registry federado con oferta nueva. Todos
+    // entran sin `created_at`, así que antes el desempate caía en `slug` ascendente
+    // y `aaa-1`/`aaa-2` se quedaban con los 2 cupos SIEMPRE, en todas las requests,
+    // para siempre. Bastaba con elegir el nombre.
+    serve([
+      raw('aaa-1'),
+      raw('aaa-2'),
+      raw('bbb-1'),
+      raw('bbb-2'),
+      raw('ccc-1'),
+      raw('ccc-2'),
+    ]);
+    // Sorteo (se consume en el orden de los candidatos): los dos últimos sacan los
+    // números más bajos.
+    _setTiebreakRandomSource(seq([0.9, 0.8, 0.7, 0.6, 0.1, 0.2]));
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    expect(result.agents.map((a) => a.slug).sort()).toEqual(['ccc-1', 'ccc-2']);
+    expect(result.excluded?.trialAvailable).toBe(2);
+    // Y el cupo SIGUE siendo 2 por registry: el sorteo cambia quién, no cuántos.
+    expect(result.excluded?.reputation).toBe(4);
+  });
+
+  it('otra corrida, otro sorteo, otros admitidos: la exclusión no es permanente', async () => {
+    serve([raw('aaa-1'), raw('bbb-1'), raw('ccc-1')]);
+    process.env.TRIAL_MAX_AGENTS_PER_PUBLISHER = '1';
+    _setTiebreakRandomSource(seq([0.9, 0.1, 0.5]));
+    const primera = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    serve([raw('aaa-1'), raw('bbb-1'), raw('ccc-1')]);
+    _setTiebreakRandomSource(seq([0.4, 0.8, 0.2]));
+    const segunda = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    expect(primera.agents.map((a) => a.slug)).toEqual(['bbb-1']);
+    expect(segunda.agents.map((a) => a.slug)).toEqual(['ccc-1']);
+  });
+
+  it('AR MNR-6: un federado con slug colisionante NO hereda el ancla ni la antigüedad de la fila self-published', async () => {
+    // `listPublisherAnchors` busca por `slug` en `a2a_agents`, y los slugs NO son
+    // únicos entre registries. Antes, el federado `colision` tomaba el `owner_ref`
+    // y el `created_at` de la fila ajena: entraba a competir por el cupo de OTRO
+    // publicador (y con una antigüedad que no es suya), así que perdía contra los
+    // dos self-published más viejos de ese owner y quedaba fuera del carril.
+    serve([raw('colision')]);
+    mockListAsAgents.mockResolvedValue([local('sp-1'), local('sp-2')]);
+    anchors([
+      ['sp-1', { ownerRef: 'owner-1', createdAt: '2026-01-01T00:00:00Z' }],
+      ['sp-2', { ownerRef: 'owner-1', createdAt: '2026-02-02T00:00:00Z' }],
+      ['colision', { ownerRef: 'owner-1', createdAt: '2026-03-03T00:00:00Z' }],
+    ]);
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    // 2 por el cupo de `owner-1` + 1 por el cupo del registry federado.
+    expect(result.agents.map((a) => a.slug).sort()).toEqual([
+      'colision',
+      'sp-1',
+      'sp-2',
+    ]);
   });
 });
 
