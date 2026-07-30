@@ -724,6 +724,11 @@ export const budgetService = {
     ownerId: string,
     txHash: string,
     token?: string,
+    /**
+     * WKH-315 (AC-3 / AC-13) — familia de VM del depósito. **Se omite en la rama
+     * EVM**: ver el spread condicional abajo.
+     */
+    vmFamily?: 'evm' | 'solana',
   ): Promise<string> {
     // M9: el tipo generado declara `p_token?: string` (no captura que la SQL fn
     // acepta NULL — `p_token TEXT DEFAULT NULL`). Narrowing acotado al objeto de
@@ -737,6 +742,14 @@ export const budgetService = {
         p_owner_ref: ownerId,
         p_tx_hash: txHash,
         p_token: token ?? null,
+        // ⚠️ SPREAD CONDICIONAL, NO `p_vm_family: vmFamily ?? 'evm'` (CD-1).
+        //
+        // La llamada EVM tiene que quedar BYTE-IDENTICA: exactamente los mismos 6
+        // args nombrados que hoy, sin una clave de más. Enviar `p_vm_family: 'evm'`
+        // explícitamente parecería equivalente y no lo es — cambia el payload que
+        // viaja a PostgREST, y con eso la resolución de la sobrecarga de la función.
+        // El DEFAULT 'evm' vive en la SQL; el TypeScript no lo duplica.
+        ...(vmFamily !== undefined ? { p_vm_family: vmFamily } : {}),
       } as unknown as Database['public']['Functions']['register_a2a_key_deposit']['Args'];
     const { data, error } = await supabase.rpc(
       'register_a2a_key_deposit',

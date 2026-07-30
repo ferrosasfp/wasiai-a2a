@@ -8,6 +8,11 @@
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { recoverMessageAddress } from 'viem';
+import { verifyEd25519Base58 } from '../../lib/ed25519.js';
+import {
+  isValidSolanaAddress,
+  isValidSolanaSignature,
+} from '../../lib/wallet-format.js';
 import { identityService } from '../../services/identity.js';
 import {
   FundingWalletAlreadyBoundError,
@@ -17,6 +22,7 @@ import {
   ADDRESS_RE,
   fundingWalletBindMessage,
   resolveCallerKey,
+  solanaFundingWalletBindMessage,
 } from './parsers.js';
 
 export const fundingWalletRoutes: FastifyPluginAsync = async (fastify) => {
@@ -42,10 +48,91 @@ export const fundingWalletRoutes: FastifyPluginAsync = async (fastify) => {
 
       // 2. Validar input. key_id y owner_ref salen del caller, NUNCA del body.
       const body = req.body as
-        | { wallet?: unknown; signature?: unknown }
+        | { wallet?: unknown; signature?: unknown; namespace?: unknown }
         | undefined;
       const wallet = body?.wallet;
       const signature = body?.signature;
+
+      // ── WKH-315 (AC-7 / AC-8) — DESPACHO POR CAMPO EXPLICITO ────────────────
+      //
+      // `namespace` es OPCIONAL con default `'evm'`: un caller de hoy manda
+      // `{wallet, signature}` sin él ⇒ rama EVM byte-idéntica (CD-1).
+      //
+      // ⚠️ NO SE DESPACHA OLFATEANDO EL FORMATO DEL VALOR, aunque los dos predicados
+      // sean hoy mutuamente excluyentes (el alfabeto base58 no contiene `'0'`).
+      // Elegir QUE GATE DE SEGURIDAD se aplica en base a una coincidencia de charset
+      // es exactamente la clase de acoplamiento implícito que se rompe en silencio
+      // cuando alguien toca uno de los dos predicados.
+      //
+      // ⚠️ Y un `namespace` NO RECONOCIDO es 400, **no** un default a EVM
+      // (fail-closed): si un cliente pide una familia que no entendemos, aplicarle
+      // el gate de otra familia es peor que rechazarlo.
+      const ns = body?.namespace;
+      if (ns !== undefined && ns !== 'evm' && ns !== 'solana') {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+
+      if (ns === 'solana') {
+        // 3s. Formato: pubkey base58 de 32 bytes + firma base58 de 64 bytes.
+        // **Sin `ADDRESS_RE` y sin `toLowerCase()` en ningún punto** (CD-6/AC-8):
+        // bajar de caja una cadena base58 la destruye.
+        if (
+          typeof wallet !== 'string' ||
+          !isValidSolanaAddress(wallet) ||
+          typeof signature !== 'string' ||
+          !isValidSolanaSignature(signature)
+        ) {
+          return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+        }
+
+        // 4s. Prueba de posesión ed25519 sobre el mensaje canónico derivado del
+        // key_id AUTENTICADO (nunca del body). Mismo error_code que EVM.
+        if (
+          !verifyEd25519Base58(
+            solanaFundingWalletBindMessage(callerKey.id),
+            wallet,
+            signature,
+          )
+        ) {
+          return reply
+            .status(403)
+            .send({ error_code: 'FUNDING_WALLET_PROOF_INVALID' });
+        }
+
+        // 5s. Persistir BYTE-EXACTO (Ownership Guard: id + owner_ref).
+        try {
+          const fundingWalletSolana =
+            await identityService.bindSolanaFundingWallet(
+              callerKey.id,
+              callerKey.owner_ref,
+              wallet,
+            );
+          return reply
+            .status(200)
+            .send({ funding_wallet_solana: fundingWalletSolana });
+        } catch (err) {
+          if (err instanceof FundingWalletAlreadyBoundError) {
+            return reply
+              .status(409)
+              .send({ error_code: 'FUNDING_WALLET_ALREADY_BOUND' });
+          }
+          if (err instanceof OwnershipMismatchError) {
+            return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+          }
+          fastify.log.error(
+            {
+              errorClass:
+                err instanceof Error ? err.constructor.name : 'unknown',
+            },
+            'solana funding-wallet bind failed',
+          );
+          return reply
+            .status(500)
+            .send({ error_code: 'FUNDING_WALLET_BIND_FAILED' });
+        }
+      }
+
+      // ── Desde acá, la rama EVM queda BYTE-IDENTICA (CD-1) ───────────────────
       if (
         typeof wallet !== 'string' ||
         !ADDRESS_RE.test(wallet) ||

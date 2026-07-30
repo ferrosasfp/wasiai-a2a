@@ -36,6 +36,29 @@ export function fundingWalletBindMessage(keyId: string): string {
   return `WASIAI_BIND_FUNDING_WALLET:${keyId}`;
 }
 
+/**
+ * WKH-315 (AC-7) — mensaje canónico del bind de una funding wallet **Solana**.
+ * El de EVM (arriba) **no se toca**.
+ *
+ * ⚠️ POR QUE UN TEXTO DISTINTO DEL DE EVM Y NO EL MISMO. Hoy los preimágenes ya
+ * difieren de hecho (EIP-191 prefija `\x19Ethereum Signed Message:\n<len>` y un
+ * wallet Solana firma los bytes crudos), así que compartir el texto **sería** seguro
+ * hoy. Se namespacea igual porque esa no-colisión depende de una convención de
+ * wallets AJENA, y una separación de dominios que cuesta 12 caracteres no se deja
+ * apoyada en la buena conducta de un tercero.
+ *
+ * ⚠️ SIN CAIP-2 NI CLUSTER EN EL PREIMAGEN, A PROPOSITO. El bind es por *key*, no por
+ * red. Meter un valor env-driven acá haría que un cambio de `SOLANA_CAIP2_CHAIN_ID`
+ * **invalidara todos los binds existentes** — el mismo error que CD-8 caza en el
+ * índice del anti-replay, en otro lugar.
+ *
+ * El `keyId` sale SIEMPRE del caller autenticado, NUNCA del body: es lo que ata la
+ * prueba a una key concreta y evita que se replayee a otra.
+ */
+export function solanaFundingWalletBindMessage(keyId: string): string {
+  return `WASIAI_BIND_FUNDING_WALLET_SOLANA:${keyId}`;
+}
+
 // ── ERC-8004 identity binding input validation (WKH-100, DT-14) ──────────────
 
 const TOKEN_ID_RE = /^[0-9]+$/;
