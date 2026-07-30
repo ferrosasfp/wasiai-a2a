@@ -299,10 +299,20 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
       meta: {
         err: null,
         preTokenBalances: [
-          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '0' } },
+          {
+            accountIndex: 1,
+            owner: PAY_TO,
+            mint: MINT,
+            uiTokenAmount: { amount: '0' },
+          },
         ],
         postTokenBalances: [
-          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '1000000' } },
+          {
+            accountIndex: 1,
+            owner: PAY_TO,
+            mint: MINT,
+            uiTokenAmount: { amount: '1000000' },
+          },
         ],
       },
     });
@@ -325,10 +335,20 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
       meta: {
         err: null,
         preTokenBalances: [
-          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '0' } },
+          {
+            accountIndex: 1,
+            owner: PAY_TO,
+            mint: MINT,
+            uiTokenAmount: { amount: '0' },
+          },
         ],
         postTokenBalances: [
-          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '500000' } },
+          {
+            accountIndex: 1,
+            owner: PAY_TO,
+            mint: MINT,
+            uiTokenAmount: { amount: '500000' },
+          },
         ],
       },
     });
@@ -359,10 +379,20 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
       meta: {
         err: null,
         preTokenBalances: [
-          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '0' } },
+          {
+            accountIndex: 1,
+            owner: PAY_TO,
+            mint: MINT,
+            uiTokenAmount: { amount: '0' },
+          },
         ],
         postTokenBalances: [
-          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount } },
+          {
+            accountIndex: 1,
+            owner: PAY_TO,
+            mint: MINT,
+            uiTokenAmount: { amount },
+          },
         ],
       },
     });
@@ -600,10 +630,20 @@ describe('SolanaPaymentAdapter (WKH-234)', () => {
       meta: {
         err: { InstructionError: [0, { Custom: 1 }] },
         preTokenBalances: [
-          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '0' } },
+          {
+            accountIndex: 1,
+            owner: PAY_TO,
+            mint: MINT,
+            uiTokenAmount: { amount: '0' },
+          },
         ],
         postTokenBalances: [
-          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '5000000' } },
+          {
+            accountIndex: 1,
+            owner: PAY_TO,
+            mint: MINT,
+            uiTokenAmount: { amount: '5000000' },
+          },
         ],
       },
     });
