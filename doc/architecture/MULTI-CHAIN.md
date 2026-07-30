@@ -376,6 +376,32 @@ modo **mainnet hybrid** que vive en producción desde 2026-04-29.
 Ver también [`CHAIN-ADAPTIVE.md`](CHAIN-ADAPTIVE.md) §7 (Open Questions) y el SDD §11
 (Missing Inputs resueltos).
 
+### 10.1 WKH-315 — el depósito prepago Solana: envs nuevas y qué deuda activa
+
+El camino de **ENTRADA** de dinero por Solana (`POST /auth/deposit` con una firma
+base58) agrega tres variables de entorno, todas OFF/vacías por default. El registro vive
+acá porque es el registro de deudas del multichain; el runbook que le sirve al
+**depositante** vive en [`../INTEGRATION.md`](../INTEGRATION.md) §6, y el razonamiento
+completo de cada variable, en `.env.example`.
+
+| Env | Qué controla | Default |
+|-----|--------------|---------|
+| `A2A_DEPOSIT_OWNER_SOLANA` | Pubkey base58 dueña de la cuenta de depósito. **Sin fallback**: ausente o inválida ⇒ camino apagado. El destino publicado NO es esta pubkey sino la **ATA** derivada de (mint, owner). | vacía |
+| `A2A_DEPOSIT_ENABLED_SOLANA` | Gate del camino de entrada, comparación literal contra `'true'`. Separado de `SOLANA_ADAPTER_ENABLED` a propósito: encender el rail de SALIDA y abrir una ENTRADA de dinero son dos decisiones. | `false` |
+| `A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA` | **Afirmación del operador**, no un apagador: declara que la cuenta de depósito es deliberadamente distinta de la del operador. Sin ella, `getSolanaOperatorKeypair()` lanza cuando las dos pubkeys difieren **y el camino de depósito está encendido**. | vacía |
+
+**Orden de activación, no negociable**: migración → `A2A_DEPOSIT_OWNER_SOLANA` → el flag
+al final. La migración antes del código no deja ventana; el orden inverso degrada
+ruidosamente (el flag OFF hace que el camino no exista) en vez de duplicar un crédito.
+
+**La deuda que este camino ERODA — `TD-SOLANA-CAIP2-DENYLIST`** (fila de la tabla de
+arriba). Su condición de reactivación era *"cuando exista un ChainKey `solana-mainnet`
+**o** el rail Solana salga de flag OFF"*. De las tres condiciones que hoy la hacen
+tolerable, **el depósito eroda la segunda**: poner `A2A_DEPOSIT_ENABLED_SOLANA=true` en
+un entorno que además sirve valor real dispara la conversión a **allowlist fail-CLOSED**,
+y esa story hay que abrirla ANTES del flip. La deuda **no se cierra en WKH-315** (Scope
+OUT del SDD §6): se declara y queda sin dueño asignado.
+
 ## 11. Referencias
 
 - **Work item**: [`../sdd/086-wkh-multichain-a2a/work-item.md`](../sdd/086-wkh-multichain-a2a/work-item.md)

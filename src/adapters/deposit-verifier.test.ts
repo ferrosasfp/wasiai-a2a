@@ -28,7 +28,13 @@ vi.mock('viem', async (importOriginal) => {
 });
 
 import { _resetVerifier, verifyDeposit } from './deposit-verifier.js';
-import type { AdaptersBundle, ChainKey, TokenSpec } from './types.js';
+// WKH-315 (AC-14): los 14 `chainKey: '<slug>' as ChainKey` de este archivo eran
+// casts de ENSANCHAMIENTO — el literal ya es un `EvmChainKey`, el `as ChainKey`
+// sólo le borraba esa información al compilador. Con `VerifyDepositArgs.chainKey:
+// EvmChainKey` esos casts dejan de compilar. Se quitaron los casts (cero
+// aserciones, cero fixtures, cero mocks, cero conducta tocada) y `ChainKey` dejó
+// de usarse acá. Declarado en el done-report como la única desviación de §1.7.
+import type { AdaptersBundle, TokenSpec } from './types.js';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────
 const TREASURY = '0x1111111111111111111111111111111111111111' as const;
@@ -144,7 +150,7 @@ describe('verifyDeposit', () => {
     });
 
     const res = await verifyDeposit({
-      chainKey: 'kite-ozone-testnet' as ChainKey,
+      chainKey: 'kite-ozone-testnet',
       bundle: KITE_BUNDLE,
       txHash: TX_HASH,
     });
@@ -170,7 +176,7 @@ describe('verifyDeposit', () => {
     });
 
     const res = await verifyDeposit({
-      chainKey: 'base-sepolia' as ChainKey,
+      chainKey: 'base-sepolia',
       bundle: BASE_BUNDLE,
       txHash: TX_HASH,
     });
@@ -189,7 +195,7 @@ describe('verifyDeposit', () => {
     });
 
     const res = await verifyDeposit({
-      chainKey: 'kite-ozone-testnet' as ChainKey,
+      chainKey: 'kite-ozone-testnet',
       bundle: KITE_BUNDLE,
       txHash: TX_HASH,
     });
@@ -202,7 +208,7 @@ describe('verifyDeposit', () => {
     mockGetReceipt.mockRejectedValue(new Error('not found'));
 
     const res = await verifyDeposit({
-      chainKey: 'kite-ozone-testnet' as ChainKey,
+      chainKey: 'kite-ozone-testnet',
       bundle: KITE_BUNDLE,
       txHash: TX_HASH,
     });
@@ -228,7 +234,7 @@ describe('verifyDeposit', () => {
     });
 
     const res = await verifyDeposit({
-      chainKey: 'kite-ozone-testnet' as ChainKey,
+      chainKey: 'kite-ozone-testnet',
       bundle: KITE_BUNDLE,
       txHash: TX_HASH,
     });
@@ -254,7 +260,7 @@ describe('verifyDeposit', () => {
     });
 
     const res = await verifyDeposit({
-      chainKey: 'kite-ozone-testnet' as ChainKey,
+      chainKey: 'kite-ozone-testnet',
       bundle: KITE_BUNDLE,
       txHash: TX_HASH,
     });
@@ -279,7 +285,7 @@ describe('verifyDeposit', () => {
     });
 
     const res = await verifyDeposit({
-      chainKey: 'kite-ozone-testnet' as ChainKey,
+      chainKey: 'kite-ozone-testnet',
       bundle: KITE_BUNDLE,
       txHash: TX_HASH,
     });
@@ -304,7 +310,7 @@ describe('verifyDeposit', () => {
     });
 
     const res = await verifyDeposit({
-      chainKey: 'kite-ozone-testnet' as ChainKey,
+      chainKey: 'kite-ozone-testnet',
       bundle: KITE_BUNDLE,
       txHash: TX_HASH,
       expectedAmountUsd: '999.00',
@@ -327,7 +333,7 @@ describe('verifyDeposit', () => {
     });
 
     const res = await verifyDeposit({
-      chainKey: 'kite-ozone-testnet' as ChainKey,
+      chainKey: 'kite-ozone-testnet',
       bundle: KITE_BUNDLE,
       txHash: TX_HASH,
       // 1 + 1 wei: Number('1.000000000000000001') === Number('1') colapsa a igual;
@@ -351,7 +357,7 @@ describe('verifyDeposit', () => {
     });
 
     const res = await verifyDeposit({
-      chainKey: 'kite-ozone-testnet' as ChainKey,
+      chainKey: 'kite-ozone-testnet',
       bundle: KITE_BUNDLE,
       txHash: TX_HASH,
       expectedAmountUsd: '1',
@@ -377,7 +383,7 @@ describe('verifyDeposit', () => {
       ],
     });
     const kite = await verifyDeposit({
-      chainKey: 'kite-ozone-testnet' as ChainKey,
+      chainKey: 'kite-ozone-testnet',
       bundle: KITE_BUNDLE,
       txHash: TX_HASH,
     });
@@ -396,7 +402,7 @@ describe('verifyDeposit', () => {
       ],
     });
     const base = await verifyDeposit({
-      chainKey: 'base-sepolia' as ChainKey,
+      chainKey: 'base-sepolia',
       bundle: BASE_BUNDLE,
       txHash: TX_HASH,
     });
@@ -409,7 +415,7 @@ describe('verifyDeposit', () => {
     _resetVerifier();
 
     const res = await verifyDeposit({
-      chainKey: 'kite-ozone-testnet' as ChainKey,
+      chainKey: 'kite-ozone-testnet',
       bundle: KITE_BUNDLE,
       txHash: TX_HASH,
     });
@@ -434,7 +440,7 @@ describe('verifyDeposit', () => {
     });
 
     const res = await verifyDeposit({
-      chainKey: 'kite-ozone-testnet' as ChainKey,
+      chainKey: 'kite-ozone-testnet',
       bundle: KITE_BUNDLE,
       txHash: TX_HASH,
     });

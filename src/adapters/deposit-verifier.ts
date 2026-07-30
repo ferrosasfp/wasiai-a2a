@@ -21,6 +21,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { buildRpcTransport } from '../lib/rpc-transport.js';
 import { getAvalancheChain } from './avalanche/chain.js';
 import { getBaseChain } from './base/chain.js';
+import { getChainVmFamily } from './chain-resolver.js';
 import { getKiteChain } from './kite-ozone/chain.js';
 import { getTempoChain } from './tempo/chain.js';
 import type { AdaptersBundle, ChainKey } from './types.js';
@@ -47,8 +48,47 @@ export interface DepositVerification {
   confirmations?: number;
 }
 
+/**
+ * WKH-315 (AC-14 / CD-5) — un `ChainKey` que está GARANTIZADO de ser EVM.
+ *
+ * ⚠️ POR QUE ESTE TIPO EXISTE. `resolveTreasury('solana-devnet')` no fallaba: era
+ * PEOR. Buscaba `A2A_DEPOSIT_TREASURY_SOLANA`, lo testeaba contra
+ * `ADDRESS_RE = /^0x…{40}$/` — que una pubkey base58 no puede pasar — y caía al
+ * fallback `privateKeyToAccount(OPERATOR_PRIVATE_KEY).address`. O sea que
+ * devolvía **una dirección EVM como destino esperado de un depósito Solana, en
+ * silencio**. Un caller que confiara en ese valor mandaría USDC de Solana a un
+ * string que en Solana no es nada.
+ *
+ * El cierre NO es un comentario ni un guard en runtime: es el COMPILADOR. Con
+ * `resolveTreasury(chainKey: EvmChainKey)` el reuso ingenuo desde el camino
+ * Solana **no compila**, y eso no se puede olvidar de correr.
+ *
+ * `Exclude<ChainKey, 'solana-devnet'>` y no un alias suelto: cuando se agregue
+ * otra cadena no-EVM habrá que sumarla al `Exclude`, y hasta que se haga
+ * `isEvmChainKey` (que consulta la proyección exhaustiva `getChainVmFamily`) va a
+ * devolver `false` para ella igual — o sea que el runtime queda del lado seguro
+ * incluso si el tipo se queda corto.
+ */
+export type EvmChainKey = Exclude<ChainKey, 'solana-devnet'>;
+
+/**
+ * Type-guard de `EvmChainKey`. La decisión NO se re-implementa acá: se delega en
+ * `getChainVmFamily`, un `Record<ChainKey, …>` PURO y exhaustivo que no lee env
+ * (`chain-resolver.ts`). Un segundo criterio paralelo sería exactamente la clase
+ * de divergencia silenciosa que este tipo existe para evitar.
+ */
+export function isEvmChainKey(k: ChainKey): k is EvmChainKey {
+  return getChainVmFamily(k) === 'evm';
+}
+
 export interface VerifyDepositArgs {
-  chainKey: ChainKey;
+  // WKH-315 (SDD GAP #2): `EvmChainKey`, no `ChainKey`. `verifyDeposit` es el
+  // camino viem de punta a punta (llama `resolveChainObject`, que LANZA para
+  // Solana) y su call-site interno `resolveTreasury(chainKey)` exige el tipo
+  // narrowed. El narrowing lo hace el guard de `routes/auth/deposit.ts`, DESPUES
+  // de la bifurcación Solana — no un cast (una aserción sin chequeo) ni un guard
+  // nuevo dentro de `verifyDeposit` (cambiaría un cuerpo que CD-1 congela).
+  chainKey: EvmChainKey;
   bundle: AdaptersBundle;
   txHash: `0x${string}`;
   expectedAmountUsd?: string | undefined; // body.amount declarado (opcional; → AMOUNT_MISMATCH)
@@ -79,8 +119,13 @@ export function resolveChainFamilyEnvSuffix(chainKey: ChainKey): ChainFamily {
     // WKH-090 — cuarto rail (testnet-only, flag-gated OFF).
     case 'tempo-testnet':
       return 'TEMPO';
-    // WKH-234 — Solana rail. Deposit = Scope OUT (settle-only); código muerto
-    // para la ruta de deposit (Solana no entra al viem deposit-path).
+    // WKH-234 — Solana rail. ⚠️ EL COMENTARIO QUE HABIA ACA YA ERA FALSO (fix-pack
+    // AR · MNR-4): decía "Deposit = Scope OUT (settle-only)", y desde WKH-315 el
+    // depósito Solana EXISTE. Lo que sigue siendo cierto es más chico: ese camino no
+    // pasa por acá. `verifySolanaDeposit` (`adapters/solana/deposit-verifier.ts`) no
+    // llama a `resolveMinConfirmations` — espera `finalized`, que es un hecho del
+    // ledger y no un conteo de confirmaciones—, así que esta rama sigue sin lector en
+    // el camino de depósito. La firma sí exige cubrir el caso: `ChainKey` lo incluye.
     case 'solana-devnet':
       return 'SOLANA';
   }
@@ -107,8 +152,13 @@ export function resolveMinConfirmations(chainKey: ChainKey): number {
  * `A2A_DEPOSIT_TREASURY_<FAMILY>` → fallback operator address derived from
  * `OPERATOR_PRIVATE_KEY`. Returns `null` if neither is available/valid
  * (fail-loud → RECIPIENT_MISMATCH, cero crédito).
+ *
+ * WKH-315 (AC-14 / CD-5): recibe `EvmChainKey`, NO `ChainKey`. El cuerpo es
+ * byte-idéntico — el único cambio es el tipo del parámetro, que hace que
+ * `resolveTreasury('solana-devnet')` no compile. Ver `EvmChainKey` arriba para el
+ * landmine que eso cierra.
  */
-export function resolveTreasury(chainKey: ChainKey): `0x${string}` | null {
+export function resolveTreasury(chainKey: EvmChainKey): `0x${string}` | null {
   const family = resolveChainFamilyEnvSuffix(chainKey);
   const envTreasury = process.env[`A2A_DEPOSIT_TREASURY_${family}`];
   if (envTreasury && ADDRESS_RE.test(envTreasury)) {

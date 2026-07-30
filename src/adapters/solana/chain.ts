@@ -91,11 +91,67 @@ export function getSolanaOperatorKeypair(): Keypair {
   }
   const secret = base58DecodeToBytes(raw.trim());
   const keypair = Keypair.fromSecretKey(secret);
+  const operatorPubkey = keypair.publicKey.toBase58();
+  log.info({ operator: operatorPubkey }, 'solana operator loaded');
+
+  // ── WKH-315 (§4.4) — COHERENCIA CUENTA-DE-DEPOSITO ↔ OPERADOR ──────────────
+  //
+  // El riesgo que cierra: si `A2A_DEPOSIT_OWNER_SOLANA` apunta a una pubkey que el
+  // operador NO controla, el dinero del usuario aterriza en una cuenta desde la que
+  // no se puede pagar. Nadie se enteraría hasta querer gastarlo, y el depósito ya
+  // estaría acreditado en el saldo.
+  //
+  // ⚠️ POR QUE LA ASERCION VIVE ACA Y NO EN EL CAMINO DE DEPOSITO. Comprobarlo
+  // requiere la PUBKEY DEL OPERADOR, o sea cargar el `Keypair` — y AC-12/CD-4
+  // prohíben que el camino de depósito lo toque (un depósito no necesita que el
+  // gateway firme nada, y hacerlo ataría un proceso que sólo RECIBE a la llave que
+  // FIRMA). Tampoco puede ir en `createSolanaAdapters`: esa factory hoy NO carga el
+  // keypair, y hacerlo rompería el arranque de un proceso que sólo quiere recibir
+  // depósitos. Acá el keypair ya está cargado: cero dependencia de arranque nueva.
+  //
+  // ⚠️ TRADE-OFF DECLARADO: un error de config del DEPOSITO deja de settlear la
+  // SALIDA. Es ruidoso, inmediato y reversible en un minuto (setear la env bien, o
+  // declarar la cuenta dedicada), contra un dinero perdido que no lo es. Cuando los
+  // dos errores no cuestan lo mismo, el default va del lado barato.
+  //
+  // La salida es una AFIRMACION DEL OPERADOR, no un apagador del control (exemplar:
+  // `SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT` en `schema-preflight.ts`): quien
+  // usa deliberadamente una cuenta de depósito distinta lo DECLARA con
+  // `A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA=true` y se hace responsable de barrerla.
+  //
+  // ⚠️ Y LA ASERCION SOLO CORRE CON EL CAMINO DE DEPOSITO ENCENDIDO (fix-pack AR ·
+  // BLQ-BAJO-1). Sin esta condición, seguir el orden de activación que el propio
+  // `.env.example` declara —migración, después el owner, y el flag AL FINAL— y
+  // olvidarse de la env de cuenta dedicada **tiraba TODO settle Solana de SALIDA**
+  // (`payment.ts`) con el depósito todavía APAGADO, o sea sin que existiera un solo
+  // depósito que proteger. El runbook correcto no puede ser el que rompe producción.
+  //
+  // Se lee la env directamente en vez de llamar a `isSolanaDepositEnabled()`:
+  // `deposit-account.ts` importa `getSolanaUsdcMint` de ESTE módulo, así que la
+  // llamada crearía un ciclo de imports en el camino de firma. La comparación es la
+  // misma comparación literal contra `'true'`, y el choke-point del depósito sigue
+  // siendo único — acá el flag es una PRECONDICION de la aserción, no una decisión
+  // sobre si el camino de entrada está abierto.
+  const depositPathOn = process.env.A2A_DEPOSIT_ENABLED_SOLANA === 'true';
+  const declaredOwner = process.env.A2A_DEPOSIT_OWNER_SOLANA?.trim();
+  if (
+    depositPathOn &&
+    declaredOwner !== undefined &&
+    declaredOwner !== '' &&
+    declaredOwner !== operatorPubkey &&
+    process.env.A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA !== 'true'
+  ) {
+    // El mensaje nombra las dos envs (accionable) y NO incluye ningún secreto: las
+    // dos pubkeys son públicas por definición.
+    throw new Error(
+      `A2A_DEPOSIT_OWNER_SOLANA (${declaredOwner}) is not the solana operator pubkey (${operatorPubkey}) — deposits would land in an account this process cannot pay from. Point the env at the operator, or set A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA=true to declare the deposit account is deliberately separate.`,
+    );
+  }
+
+  // ⚠️ EL CACHE VA DESPUES DE LA ASERCION, A PROPOSITO. Si se cacheara antes, el
+  // primer llamado lanzaría y el SEGUNDO devolvería el keypair del cache sin
+  // re-chequear: un guard que se saltea con un simple reintento no es un guard.
   _operator = keypair;
-  log.info(
-    { operator: keypair.publicKey.toBase58() },
-    'solana operator loaded',
-  );
   return keypair;
 }
 

@@ -1242,6 +1242,91 @@ describe('budgetService', () => {
       });
     });
 
+    // ── WKH-315 (AC-3 / AC-13 / M12) — el 7º param, ADITIVO ─────────────────
+    //
+    // ⚠️ LA PROPIEDAD ES LA AUSENCIA DE LA CLAVE, no su valor. La llamada EVM tiene
+    // que quedar BYTE-IDENTICA (CD-1): exactamente los 6 args nombrados de hoy. Un
+    // `p_vm_family: vmFamily ?? 'evm'` parecería equivalente y no lo es — cambia el
+    // payload que viaja a PostgREST y con eso la resolución de la sobrecarga.
+    it('T-315-11b: SIN vmFamily el payload NO tiene la clave p_vm_family (CD-1, CD-9)', async () => {
+      mockRpc.mockResolvedValue({ data: '5.000000', error: null } as never);
+
+      await budgetService.registerDeposit(
+        'key-1',
+        2368,
+        '5.00',
+        'user-1',
+        '0xfeed',
+        'USDC',
+      );
+
+      // Se CAPTURA el arg y se inspeccionan sus claves: `toHaveBeenCalledWith` con
+      // un objeto exacto ya lo cubre, pero esta aserción dice explícitamente QUE
+      // propiedad se está protegiendo, para que no se pierda en un futuro refactor
+      // del fixture de arriba.
+      const [, args] = mockRpc.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(Object.hasOwn(args, 'p_vm_family')).toBe(false);
+      expect(Object.keys(args).sort()).toEqual([
+        'p_amount_usd',
+        'p_chain_id',
+        'p_key_id',
+        'p_owner_ref',
+        'p_token',
+        'p_tx_hash',
+      ]);
+    });
+
+    it("T-315-11b: con vmFamily 'solana' el payload SI la manda", async () => {
+      mockRpc.mockResolvedValue({ data: '5.000000', error: null } as never);
+
+      await budgetService.registerDeposit(
+        'key-1',
+        900001,
+        '5.00',
+        'user-1',
+        'SoLaNaSiGnAtUrE',
+        'USDC',
+        'solana',
+      );
+
+      expect(mockRpc).toHaveBeenCalledWith('register_a2a_key_deposit', {
+        p_key_id: 'key-1',
+        p_chain_id: 900001,
+        p_amount_usd: 5.0,
+        p_owner_ref: 'user-1',
+        p_tx_hash: 'SoLaNaSiGnAtUrE',
+        p_token: 'USDC',
+        p_vm_family: 'solana',
+      });
+    });
+
+    it("T-315-11b: con vmFamily 'evm' EXPLICITO la manda (el default de la SQL no es el único camino)", async () => {
+      // Andamiaje: prueba que el spread condicional depende de `undefined` y no de
+      // una comparación contra `'solana'`. Si el código hiciera
+      // `vmFamily === 'solana' ? {...} : {}`, este caso quedaría sin cubrir y una
+      // llamada EVM explícita perdería el arg en silencio.
+      mockRpc.mockResolvedValue({ data: '5.000000', error: null } as never);
+
+      await budgetService.registerDeposit(
+        'key-1',
+        2368,
+        '5.00',
+        'user-1',
+        '0xfeed',
+        'USDC',
+        'evm',
+      );
+
+      const [, args] = mockRpc.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(args.p_vm_family).toBe('evm');
+    });
+
     // T11 — DEPOSIT_ALREADY_CREDITED → DepositAlreadyCreditedError. AC-3.
     it('maps DEPOSIT_ALREADY_CREDITED rpc error to DepositAlreadyCreditedError (AC-3)', async () => {
       mockRpc.mockResolvedValue({

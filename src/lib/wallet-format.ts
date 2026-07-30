@@ -46,13 +46,47 @@ export function isValidWallet(
 const BASE58_ALPHABET =
   '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const SOLANA_PUBKEY_BYTES = 32;
+/** WKH-315: una firma/txid de Solana es una firma ed25519 cruda de 64 bytes. */
+const SOLANA_SIGNATURE_BYTES = 64;
 
 export function isValidSolanaAddress(w: string): boolean {
-  if (typeof w !== 'string' || w.length === 0) return false;
+  // Fix-pack CR · MNR-1: era el MISMO loop que `base58DecodedByteLength`, byte por
+  // byte, salvo el `return`. Dos copias de un decoder que tienen que comportarse
+  // igual y que nada obliga a que se muevan juntas: la próxima corrección de borde
+  // (un charset, un `1` inicial) se aplica en una y no en la otra, y el desacuerdo
+  // aparece como un rechazo inexplicable en un money-path. Conducta idéntica: los
+  // dos casos que el loop cortaba temprano (`typeof` / vacío / charset inválido) el
+  // helper los devuelve como `null`, y `null === 32` es `false`.
+  return base58DecodedByteLength(w) === SOLANA_PUBKEY_BYTES;
+}
+
+/**
+ * WKH-315 — largo en bytes de `s` decodificado como base58, o `null` si el
+ * charset es inválido. DEVUELVE, NUNCA LANZA: este predicado corre sobre input
+ * del caller (`tx_hash` de `POST /auth/deposit`, `signature` del bind), y
+ * `base58DecodeToBytes` (`adapters/solana/base58.ts`) está PROHIBIDO acá porque
+ * lanza con un mensaje que nombra `SOLANA_OPERATOR_PRIVATE_KEY` — un typo del
+ * usuario no puede producir una falsa alarma de secreto en los logs.
+ *
+ * ⚠️ ES EL UNICO DECODER BASE58 DE ESTE MODULO (fix-pack CR · MNR-1).
+ * `isValidSolanaAddress` lo llama en vez de repetir el loop. La HU original lo
+ * había duplicado para no tocar un predicado del money-path, y el argumento era
+ * razonable — pero el costo de dos copias que tienen que coincidir se paga
+ * después, cuando una se corrige y la otra no.
+ *
+ * El ALFABETO, en cambio, sigue repetido en el repo: `BASE58_ALPHABET` acá,
+ * `solana/base58.ts` (encode + decode del secreto del operador) y el `bs58` que
+ * usan las dependencias. NO se unifica: este módulo es **leaf** a propósito (no
+ * importa nada del proyecto, para evitar ciclos) y `solana/base58.ts` LANZA con un
+ * mensaje que nombra `SOLANA_OPERATOR_PRIVATE_KEY`, así que no puede correr sobre
+ * input del caller. Queda anotado dónde están, que es lo que faltaba.
+ */
+function base58DecodedByteLength(s: string): number | null {
+  if (typeof s !== 'string' || s.length === 0) return null;
   const bytes: number[] = [];
-  for (let i = 0; i < w.length; i++) {
-    let carry = BASE58_ALPHABET.indexOf(w[i] as string);
-    if (carry < 0) return false; // char fuera del charset base58
+  for (let i = 0; i < s.length; i++) {
+    let carry = BASE58_ALPHABET.indexOf(s[i] as string);
+    if (carry < 0) return null; // char fuera del charset base58
     for (let j = 0; j < bytes.length; j++) {
       carry += (bytes[j] as number) * 58;
       bytes[j] = carry & 0xff;
@@ -64,10 +98,26 @@ export function isValidSolanaAddress(w: string): boolean {
     }
   }
   // Cada `1` inicial representa un byte cero de alto orden.
-  for (let i = 0; i < w.length && w[i] === '1'; i++) {
+  for (let i = 0; i < s.length && s[i] === '1'; i++) {
     bytes.push(0);
   }
-  return bytes.length === SOLANA_PUBKEY_BYTES;
+  return bytes.length;
+}
+
+/**
+ * WKH-315 — `true` si `s` es una firma/txid de Solana bien formada: charset
+ * base58 + decode a EXACTAMENTE 64 bytes. Módulo leaf: NO importa
+ * `@solana/web3.js`.
+ *
+ * Es un predicado ESTRUCTURAL ESTRICTO, no un regex laxo (CD-6b): junto con
+ * `/^0x[0-9a-fA-F]{64}$/` forman dos conjuntos MUTUAMENTE EXCLUYENTES — el
+ * alfabeto base58 no contiene `'0'`, así que ningún `0x…` puede ser base58.
+ *
+ * Sin normalización de caja en ningún punto (CD-6/AC-8): bajar a minúsculas una
+ * cadena base58 la DESTRUYE (mapea dos firmas distintas a la misma).
+ */
+export function isValidSolanaSignature(s: string): boolean {
+  return base58DecodedByteLength(s) === SOLANA_SIGNATURE_BYTES;
 }
 
 export type WalletNamespace = 'evm' | 'solana';
