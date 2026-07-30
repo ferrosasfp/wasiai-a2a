@@ -21,8 +21,10 @@ import type {
  * El `message` se mantiene BYTE-IDÉNTICO al `Error` genérico que había antes
  * (`Registry ${name} returned ${status}`) para no romper ningún test que lo asserte.
  *
- * ⚠️ Se sigue tirando FUERA de `cb.execute` (`discovery.ts:631`). Esta HU NO
- * cambia la semántica del circuit breaker — ver TD-318-1.
+ * ⚠️ Se sigue tirando FUERA de `cb.execute` — buscá `throw new RegistryHttpError`
+ * en `services/discovery.ts` (por texto, no por número de línea: esta misma HU ya
+ * movió esa función y dejó el puntero viejo apuntando a otra). Esta HU NO cambia
+ * la semántica del circuit breaker — ver TD-318-1.
  */
 export class RegistryHttpError extends Error {
   public readonly status: number;
@@ -34,17 +36,28 @@ export class RegistryHttpError extends Error {
 }
 
 /**
- * Roll-up. Precedencia: `partial` > `truncated` > `complete`.
+ * Roll-up. Precedencia: `partial` > `truncated` > `unverified` > `complete`.
  *
- * Sin fuentes (ningún registro habilitado, sólo self-published) ⇒ `complete`:
- * no hay nada que haya fallado. Eso NO es una suposición optimista — es que el
- * conjunto de cosas que podrían haber fallado está vacío.
+ * El orden es "de lo más conocido y peor, a lo menos conocido": una fuente caída
+ * (sabemos que falta) manda sobre una truncada (sabemos que falta menos), y
+ * cualquiera de las dos manda sobre no-saber. `unverified` va último entre los
+ * no-completos porque es el único que no afirma nada.
+ *
+ * `complete` es el ÚNICO valor que afirma algo fuerte —"todas las fuentes
+ * probaron haber dado todo"— y por eso es el que necesita que NADA lo contradiga
+ * y que nadie se haya quedado sin poder probarlo.
+ *
+ * Sin fuentes (ningún registro habilitado y ninguna fuente local consultada) ⇒
+ * `complete`: no hay nada que haya fallado NI nada cuya completitud haya quedado
+ * sin probar. Eso NO es una suposición optimista — es que el conjunto de cosas
+ * que podrían haber fallado está vacío.
  */
 export function buildCatalogStatus(
   sources: readonly DiscoverySource[],
 ): CatalogStatus {
   if (sources.some((s) => s.state === 'failed')) return 'partial';
   if (sources.some((s) => s.state === 'truncated')) return 'truncated';
+  if (sources.some((s) => s.state === 'unverified')) return 'unverified';
   return 'complete';
 }
 

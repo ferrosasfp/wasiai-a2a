@@ -274,13 +274,17 @@ describe('discoveryService — runtime SSRF guard (WKH-62 W1)', () => {
     });
 
     // WKH-318: `queryRegistry` devuelve un `RegistryFetchOutcome`. El registro
-    // allowlisteado contestó 200 con `[]` ⇒ `ok` / `rows: 0` — le preguntamos y
-    // no tiene, que NO es lo mismo que no haber podido preguntarle.
+    // allowlisteado contestó 200 con `[]` ⇒ `rows: 0` — le preguntamos y no
+    // tiene, que NO es lo mismo que no haber podido preguntarle (`rows: null`).
+    //
+    // El estado es `unverified` y no `ok` porque esta llamada no manda `limit` y
+    // el registro no declara `nextCursorPath`: contestó, pero no hay forma de
+    // probar que eso era todo (AR BLQ-1). `rows: 0` sigue siendo el dato duro.
     const outcome = await discoveryService.queryRegistry(registry, {});
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(outcome.agents).toEqual([]);
-    expect(outcome.state).toBe('ok');
+    expect(outcome.state).toBe('unverified');
     expect(outcome.rows).toBe(0);
   });
 });

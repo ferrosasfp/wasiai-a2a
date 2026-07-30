@@ -393,13 +393,39 @@ export interface DiscoveryQuery {
 // ============================================================
 
 /**
- * Tres estados por fuente. Un booleano ya habría perdido el tercero, que es
- * justo el que esta HU existe para no perder.
+ * Cuatro estados por fuente. Un booleano ya habría perdido el tercero; el cuarto
+ * lo perdía el triplete, y es el que se lleva el caso REAL de producción.
+ *
+ * `ok` exige EVIDENCIA POSITIVA de completitud. No alcanza con que la fuente
+ * haya contestado: hay que poder demostrar que lo que trajo es todo lo que tenía
+ * para esta query. Hoy esa prueba puede venir de dos lados, y de ninguno más:
+ *
+ *   · el registro declara `nextCursorPath` y el cursor llega vacío ⇒ él mismo
+ *     dice "no hay más" (exacto);
+ *   · se le envió un límite y devolvió MENOS filas que ese límite ⇒ la página no
+ *     se llenó, así que no quedó nada afuera.
+ *
+ * Sin ninguna de las dos, el estado es `unverified` — NO `ok`. Es el caso que el
+ * AR midió: el registro real se siembra sin `nextCursorPath`
+ * (`20260401000000_kite_registries.sql:44-66`) y `/capabilities` llama a
+ * `discover({})` sin `limit`, así que no se manda `limitParam`. Ahí no hay
+ * evidencia OBTENIBLE, y afirmar `ok`/`complete` es exactamente la clase de
+ * mentira que esta HU existe para matar: la respuesta afirmaría más de lo que la
+ * evidencia sostiene, sobre 20 de 22 agentes.
  */
 export type DiscoverySourceState =
-  | 'ok' // respondió, y lo que trajo es todo lo que tiene para esta query
-  | 'truncated' // respondió, pero hay más filas que NO trajimos
-  | 'failed'; // NO se la pudo consultar
+  /** respondió, y hay EVIDENCIA de que lo que trajo es todo lo que tiene */
+  | 'ok'
+  /** respondió, y hay EVIDENCIA de que hay más filas que NO trajimos */
+  | 'truncated'
+  /**
+   * respondió, pero NO hay forma de saber si trajo todo. No es una sospecha de
+   * truncamiento: es la ausencia de evidencia en las dos direcciones, y decirlo
+   * es más honesto que elegir una.
+   */
+  | 'unverified'
+  /** NO se la pudo consultar */
+  | 'failed';
 
 export type DiscoverySourceFailure =
   | 'http_error'
@@ -417,7 +443,9 @@ export interface DiscoverySource {
    * locales (status/verified/caps/free-text/maxPrice/scope/minReputation).
    *
    * `null` cuando `state === 'failed'` — NUNCA 0 (CD-14). Un 0 significa "le
-   * pregunté y no tiene"; `null` significa "no pude preguntarle".
+   * pregunté y no tiene"; `null` significa "no pude preguntarle". En
+   * `unverified` hay número: la fuente contestó y esas filas entraron; lo que no
+   * se sabe es si eran todas.
    *
    * POR QUÉ PRE-FILTRO: medido en producción, `?capabilities=remit.quote&limit=10`
    * devuelve 0 agentes con las dos fuentes sanas. Si "aportó" se contara
@@ -431,8 +459,15 @@ export interface DiscoverySource {
   truncationEvidence?: 'cursor' | 'page_full';
 }
 
-/** Roll-up de request. Mismo triplete, un nivel más arriba. */
-export type CatalogStatus = 'complete' | 'truncated' | 'partial';
+/**
+ * Roll-up de request. El mismo cuarteto, un nivel más arriba.
+ *
+ * `complete` significa "TODAS las fuentes probaron haber dado todo", no "ninguna
+ * se quejó". Si una sola no pudo probarlo, el roll-up es `unverified`: el caller
+ * se entera de que la respuesta no alcanza para afirmar completitud, que es
+ * distinto de saber que falta algo.
+ */
+export type CatalogStatus = 'complete' | 'unverified' | 'truncated' | 'partial';
 
 /** Referencia mínima de una fuente caída, para los cuerpos de error del money-path. */
 export interface FailedSourceRef {

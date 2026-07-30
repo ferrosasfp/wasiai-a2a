@@ -143,28 +143,44 @@ describe('WKH-318 — detección de truncamiento', () => {
     expect(result.registries).toEqual(['test-registry']);
   });
 
-  it('T-TRUNC-02: cursor null / ausente / cadena vacía NO son evidencia (no se sobre-declara)', async () => {
+  it('T-TRUNC-02: un cursor vacío es la DECLARACIÓN de "no hay más" (prueba completitud); la clave AUSENTE no declara nada', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([withCursorPath()]);
 
     // (a) la clave existe con valor nulo — es exactamente cómo un registro dice
-    // "no hay más".
+    // "no hay más". Eso es EVIDENCIA de completitud, no ausencia de evidencia.
     serve({ agents: catalog(3), next_cursor: null });
     const withNull = await discoveryService.discover({});
     expect(withNull.sources[0]?.state).toBe('ok');
     expect(withNull.sources[0]?.truncationEvidence).toBeUndefined();
     expect(withNull.catalogStatus).toBe('complete');
 
-    // (b) la clave directamente no viene.
+    // (b) la clave declarada NO viene. AUSENTE no es NULO: el registro no dijo
+    // nada, así que no hay nada que probar la completitud ⇒ `unverified`.
+    // Leerlo como "no hay más" sería inventarle una declaración que no hizo.
     serve({ agents: catalog(3) });
     const missing = await discoveryService.discover({});
-    expect(missing.sources[0]?.state).toBe('ok');
-    expect(missing.catalogStatus).toBe('complete');
+    expect(missing.sources[0]?.state).toBe('unverified');
+    expect(missing.catalogStatus).toBe('unverified');
 
-    // (c) cadena vacía.
+    // (c) cadena vacía: centinela de "no hay más", igual que null.
     serve({ agents: catalog(3), next_cursor: '' });
     const empty = await discoveryService.discover({});
     expect(empty.sources[0]?.state).toBe('ok');
     expect(empty.catalogStatus).toBe('complete');
+  });
+
+  it('T-TRUNC-02b (AR MNR-G): `0` y `false` son centinelas de "no hay más", NO cursores', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([withCursorPath()]);
+
+    // Con el `cursor !== null` de antes, un `0` o un `false` forzaban
+    // `truncated`. Son valores plausibles para "no hay más página".
+    serve({ agents: catalog(3), next_cursor: 0 });
+    const zero = await discoveryService.discover({});
+    expect(zero.sources[0]?.state).toBe('ok');
+
+    serve({ agents: catalog(3), next_cursor: false });
+    const no = await discoveryService.discover({});
+    expect(no.sources[0]?.state).toBe('ok');
   });
 
   it('T-TRUNC-03: sin cursor declarado, una página LLENA (rows === sentLimit) ⇒ truncated / `page_full`', async () => {
@@ -197,8 +213,24 @@ describe('WKH-318 — detección de truncamiento', () => {
     // El assert que importa es sobre lo ENVIADO, no sobre el resultado: el
     // camino sin `limit` tiene que quedar byte-idéntico al de antes de la HU.
     expect(upstreamLimits).toEqual([null]);
-    // 200 filas y ningún límite enviado ⇒ no hay evidencia de truncamiento.
-    // Marcar `truncated` acá sería inventar una certeza que no tenemos.
+    // 200 filas, ningún límite enviado y ningún cursor declarado ⇒ no hay
+    // evidencia PARA NINGÚN LADO. Marcar `truncated` sería inventar una certeza;
+    // marcar `ok` sería inventar la contraria, que es lo que hacía antes del
+    // BLQ-1. `unverified` es lo único que se puede afirmar.
+    expect(result.sources[0]?.state).toBe('unverified');
+    expect(result.sources[0]?.truncationEvidence).toBeUndefined();
+    expect(result.catalogStatus).toBe('unverified');
+  });
+
+  it('T-TRUNC-08: la declaración EXACTA le gana a la heurística — cursor vacío con la página llena es `ok`, no `page_full`', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([withCursorPath()]);
+    // 200 filas con over-fetch 200 (página llena) PERO el registro declara que
+    // no hay más. Le creemos al que sabe: la coincidencia de tamaño no es
+    // evidencia frente a una declaración explícita.
+    serve({ agents: catalog(200), next_cursor: null });
+
+    const result = await discoveryService.discover({ limit: 5 });
+
     expect(result.sources[0]?.state).toBe('ok');
     expect(result.sources[0]?.truncationEvidence).toBeUndefined();
     expect(result.catalogStatus).toBe('complete');

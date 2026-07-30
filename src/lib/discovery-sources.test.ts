@@ -33,22 +33,38 @@ describe('WKH-318 discovery-sources (módulo leaf)', () => {
     expect(buildCatalogStatus([])).toBe('complete');
   });
 
-  it('T-LIB-02: precedencia partial > truncated > complete', () => {
+  it('T-LIB-02: precedencia partial > truncated > unverified > complete', () => {
     expect(
       buildCatalogStatus([
         src('a', 'ok', 3),
-        src('b', 'truncated', 100),
-        src('c', 'failed', null, 'http_error'),
+        src('b', 'unverified', 20),
+        src('c', 'truncated', 100),
+        src('d', 'failed', null, 'http_error'),
       ]),
     ).toBe('partial');
 
     expect(
-      buildCatalogStatus([src('a', 'ok', 3), src('b', 'truncated', 100)]),
+      buildCatalogStatus([
+        src('a', 'ok', 3),
+        src('b', 'unverified', 20),
+        src('c', 'truncated', 100),
+      ]),
     ).toBe('truncated');
+
+    // AR BLQ-1: una sola fuente sin evidencia obtenible alcanza para que el
+    // catálogo NO se pueda declarar completo.
+    expect(
+      buildCatalogStatus([src('a', 'ok', 3), src('b', 'unverified', 20)]),
+    ).toBe('unverified');
 
     expect(buildCatalogStatus([src('a', 'ok', 3), src('b', 'ok', 0)])).toBe(
       'complete',
     );
+  });
+
+  it('T-LIB-04b (BLQ-1): `unverified` NO se lee como completo', () => {
+    // El guard del corte B es fail-closed: "no sé" se rechaza igual que "falta".
+    expect(isCatalogComplete({ catalogStatus: 'unverified' })).toBe(false);
   });
 
   it('T-LIB-03: classifyFetchFailure cubre las 5 clases nombradas; lo desconocido es unknown, nunca ok', () => {

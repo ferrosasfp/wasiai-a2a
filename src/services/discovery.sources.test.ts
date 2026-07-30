@@ -10,7 +10,11 @@
  * Lo que se fija acá:
  *   · `registries` = las fuentes que APORTARON FILAS, no las configuradas.
  *   · `sources[]`  = estado por fuente, con `rows: null` ≠ `rows: 0`.
- *   · `catalogStatus` = roll-up, precedencia partial > truncated > complete.
+ *   · `catalogStatus` = roll-up, precedencia partial > truncated > unverified >
+ *     complete.
+ *   · (AR BLQ-1) `ok` exige EVIDENCIA de completitud; sin evidencia obtenible el
+ *     estado es `unverified`, no `ok`.
+ *   · (AR BLQ-2) la fuente local declara su propio fallo en vez de desaparecer.
  *
  * Los mocks son los de `discovery.limit.test.ts:20-62` (el exemplar), con dos
  * agregados: el breaker puede abrirse a pedido (para `circuit_open`) y el
@@ -164,7 +168,8 @@ describe('WKH-318 — honestidad de `registries` / `sources` / `catalogStatus`',
 
     const result = await discoveryService.discover({});
 
-    expect(result.sources).toHaveLength(1);
+    // 2 fuentes: la federada caída y la local (consultada, sin agentes).
+    expect(result.sources).toHaveLength(2);
     expect(result.sources[0]).toEqual({
       name: 'test-registry',
       state: 'failed',
@@ -181,9 +186,13 @@ describe('WKH-318 — honestidad de `registries` / `sources` / `catalogStatus`',
   it('T-SRC-02: una fuente que responde 200 con [] es ok/rows:0 (no null), el catálogo es complete, y aun así no figura en `registries`', async () => {
     serveByHost({ 'example.com': () => okResponse([]) });
 
-    const result = await discoveryService.discover({});
+    // Con `limit` se envía `limitParam`, y 0 filas < 200 pedidas es EVIDENCIA de
+    // que no quedó nada afuera. Sin evidencia el estado sería `unverified`
+    // (T-SRC-08), y este test dejaría de hablar de lo que quiere hablar: la
+    // diferencia entre `rows: 0` y `rows: null`.
+    const result = await discoveryService.discover({ limit: 5 });
 
-    expect(result.sources).toHaveLength(1);
+    expect(result.sources).toHaveLength(2);
     expect(result.sources[0]).toEqual({
       name: 'test-registry',
       state: 'ok',
@@ -276,13 +285,18 @@ describe('WKH-318 — honestidad de `registries` / `sources` / `catalogStatus`',
   it('T-SRC-05: camino sano — `registries` byte-idéntico al de antes de esta HU y catalogStatus complete', async () => {
     serveByHost({ 'example.com': () => okResponse(catalog(3)) });
 
-    const result = await discoveryService.discover({});
+    // `limit` ⇒ se envían 200 y llegan 3: la página no se llenó, así que la
+    // completitud está PROBADA y el estado es `ok` (no `unverified`).
+    const result = await discoveryService.discover({ limit: 5 });
 
     // El contrato público NO cambia de forma ni de valor cuando todo anda bien.
     expect(result.registries).toEqual(['test-registry']);
     expect(result.catalogStatus).toBe('complete');
     expect(result.sources).toEqual([
       { name: 'test-registry', state: 'ok', rows: 3 },
+      // La fuente local se consultó y no tenía nada. Se DECLARA (rows: 0), que
+      // es lo que la distingue de un SELECT caído (T-SRC-09).
+      { name: 'self-published', state: 'ok', rows: 0 },
     ]);
     expect(result.agents).toHaveLength(3);
     expect(result.total).toBe(3);
@@ -308,7 +322,7 @@ describe('WKH-318 — honestidad de `registries` / `sources` / `catalogStatus`',
       },
     ]);
 
-    const result = await discoveryService.discover({});
+    const result = await discoveryService.discover({ limit: 5 });
 
     expect(result.registries).toEqual(['test-registry', 'self-published']);
     expect(result.sources).toEqual([
@@ -339,10 +353,152 @@ describe('WKH-318 — honestidad de `registries` / `sources` / `catalogStatus`',
 
     const result = await discoveryService.discover({});
 
-    expect(result.sources).toHaveLength(2);
+    // 2 federadas + la local = 3 fuentes consultadas; UNA sola contribuyó.
+    const federated = result.sources.filter((s) => s.name !== 'self-published');
+    expect(federated).toHaveLength(2);
     expect(result.sources.filter((s) => s.state === 'failed')).toHaveLength(1);
     expect(result.registries).toHaveLength(1);
     expect(result.registries).toEqual(['up-registry']);
     expect(result.catalogStatus).toBe('partial');
+  });
+
+  // ── AR BLQ-1: `ok` exige evidencia; sin evidencia obtenible es `unverified` ──
+
+  it('T-SRC-08 (BLQ-1): una fuente que contesta SIN evidencia obtenible es `unverified`, y el catálogo NO se declara complete', async () => {
+    // El caso REAL de producción: el registro `wasiai` se siembra sin
+    // `nextCursorPath` y `/capabilities` llama a `discover({})` sin `limit`, así
+    // que tampoco se manda `limitParam`. No hay forma de saber si trajo todo.
+    serveByHost({ 'example.com': () => okResponse(catalog(20)) });
+
+    const result = await discoveryService.discover({});
+
+    expect(result.sources[0]).toEqual({
+      name: 'test-registry',
+      state: 'unverified',
+      // Hay número: contestó y esas filas entraron. Lo que no se sabe es si
+      // eran todas. Por eso NO es `rows: null` — eso es "no pude preguntarle".
+      rows: 20,
+    });
+    expect(result.catalogStatus).toBe('unverified');
+    // Sigue contribuyendo: aportó filas. `unverified` no es una caída.
+    expect(result.registries).toContain('test-registry');
+    expect(result.agents).toHaveLength(20);
+  });
+
+  it('T-SRC-08b (BLQ-1): el repro exacto del AR — 20 filas CON next_cursor pero sin `nextCursorPath` declarado no puede dar complete', async () => {
+    // Antes del fix esto devolvía {state:'ok', rows:20, catalogStatus:'complete'}
+    // sobre 20 de 22 agentes: cambiaba una mentira por otra, que es textualmente
+    // lo que el corte A se comprometió a NO hacer.
+    serveByHost({
+      'example.com': () =>
+        okResponse({ agents: catalog(20), next_cursor: 'hay-mas' }),
+    });
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeRegistry({
+        schema: {
+          discovery: { limitParam: 'limit', agentsPath: 'agents' },
+          invoke: { method: 'POST' },
+        },
+      }),
+    ]);
+
+    const result = await discoveryService.discover({});
+
+    expect(result.catalogStatus).not.toBe('complete');
+    expect(result.catalogStatus).toBe('unverified');
+    expect(result.sources[0]?.state).toBe('unverified');
+  });
+
+  // ── AR BLQ-2: la fuente local también rinde cuentas ────────────────────
+
+  it('T-SRC-09 (BLQ-2): si el SELECT local falla, la fuente self-published se declara failed/rows:null y el catálogo es partial', async () => {
+    // Es la fuente que carga los 3 agentes del money-path de Chaski. Antes, un
+    // SELECT caído era indistinguible de "no hay agentes locales" y el catálogo
+    // se publicaba `complete` sin ellos.
+    serveByHost({ 'example.com': () => okResponse(catalog(2)) });
+    vi.mocked(publishedAgentService.listAsAgents).mockRejectedValue(
+      new Error('supabase down'),
+    );
+
+    const result = await discoveryService.discover({ limit: 5 });
+
+    const local = result.sources.find((s) => s.name === 'self-published');
+    expect(local).toEqual({
+      name: 'self-published',
+      state: 'failed',
+      rows: null,
+      failure: 'unknown',
+    });
+    expect(result.catalogStatus).toBe('partial');
+    // CD-4/CD-9: sigue degradando — los federados se devuelven igual.
+    expect(result.agents).toHaveLength(2);
+    expect(result.registries).toEqual(['test-registry']);
+  });
+
+  it('T-SRC-10 (BLQ-2): un SELECT local que devuelve 0 agentes es `ok`/rows:0 — distinguible del que falló', async () => {
+    serveByHost({ 'example.com': () => okResponse(catalog(2)) });
+    vi.mocked(publishedAgentService.listAsAgents).mockResolvedValue([]);
+
+    const result = await discoveryService.discover({ limit: 5 });
+
+    const local = result.sources.find((s) => s.name === 'self-published');
+    expect(local).toEqual({
+      name: 'self-published',
+      state: 'ok',
+      rows: 0,
+    });
+    expect(local?.rows).not.toBeNull();
+    expect(result.catalogStatus).toBe('complete');
+  });
+
+  it('T-SRC-11 (BLQ-2): si el caller filtró a otro registry, la fuente local NO se consultó y NO figura en `sources`', async () => {
+    vi.mocked(registryService.getWithSecrets).mockResolvedValue(makeRegistry());
+    serveByHost({ 'example.com': () => okResponse(catalog(2)) });
+
+    const result = await discoveryService.discover({
+      registry: 'test-registry',
+      limit: 5,
+    });
+
+    // No aparece: no se la consultó. Eso es distinto de haberla consultado y que
+    // no tuviera nada (T-SRC-10) y de no haber podido (T-SRC-09).
+    expect(
+      result.sources.find((s) => s.name === 'self-published'),
+    ).toBeUndefined();
+    expect(result.catalogStatus).toBe('complete');
+  });
+
+  it('T-SRC-12 (BLQ-2 + MNR-A): sin registries habilitados y con el SELECT local caído, el early-return declara partial — no complete', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    vi.mocked(publishedAgentService.listAsAgents).mockRejectedValue(
+      new Error('supabase down'),
+    );
+
+    const result = await discoveryService.discover({});
+
+    expect(result.agents).toEqual([]);
+    expect(result.sources).toEqual([
+      {
+        name: 'self-published',
+        state: 'failed',
+        rows: null,
+        failure: 'unknown',
+      },
+    ]);
+    // El early-return calcula el roll-up con `buildCatalogStatus`, no con un
+    // literal: por eso esta rama no puede quedarse en `complete` (CR MNR-A).
+    expect(result.catalogStatus).toBe('partial');
+  });
+
+  it('T-SRC-13: sin NINGUNA fuente consultada, el catálogo es complete — el conjunto de lo que pudo fallar está vacío', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    vi.mocked(registryService.getWithSecrets).mockResolvedValue(undefined);
+
+    const result = await discoveryService.discover({
+      registry: 'no-existe-pero-no-es-self-published',
+    });
+
+    expect(result.sources).toEqual([]);
+    expect(result.catalogStatus).toBe('complete');
   });
 });

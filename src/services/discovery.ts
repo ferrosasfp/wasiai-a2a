@@ -215,29 +215,76 @@ export const discoveryService = {
     // outbound, sin self-fetch). Aditivo/degradable (CD-9): si el SELECT falla,
     // discover() sigue devolviendo los agentes de registries. Se incluyen solo
     // si no se filtró a otro registry (respeta `query.registry`).
+    // ── WKH-318 (AR BLQ-2): la fuente local también rinde cuentas ──────────
+    //
+    // El `catch` degradaba a `localAgents = []` y la fila de `self-published` se
+    // empujaba sólo si había agentes. O sea: un SELECT caído era INDISTINGUIBLE
+    // de "no hay agentes self-published", y el catálogo se declaraba `complete`
+    // igual. Es la misma mentira que esta HU mata del lado federado, del lado
+    // local — y encima sobre la fuente que carga los tres agentes del money-path
+    // de Chaski.
+    //
+    // `null` = no se la consultó (el caller filtró a otro registry): no es una
+    // fuente de esta query y no debe aparecer en `sources`.
     let localAgents: Agent[] = [];
+    let localSource: DiscoverySource | null = null;
     if (!query.registry || query.registry === SELF_PUBLISHED_REGISTRY_NAME) {
       try {
         localAgents = await publishedAgentService.listAsAgents();
+        // `state: 'ok'` con evidencia, no por defecto: `listAsAgents()` es un
+        // SELECT sin `limit` ni cursor (`services/agent.ts:429-440`), así que
+        // devuelve TODO lo que hay. La completitud está probada por construcción.
+        localSource = {
+          name: SELF_PUBLISHED_REGISTRY_NAME,
+          state: 'ok',
+          rows: localAgents.length,
+        };
       } catch (err) {
         log.error(
           { detail: err instanceof Error ? err.message : 'unknown' },
           'self-published agents merge failed',
         );
+        // CD-9: se sigue degradando — un SELECT caído no tumba discover(). Lo
+        // que cambia es que ahora se DECLARA en vez de desaparecer.
         localAgents = [];
+        const failure = classifyFetchFailure(err);
+        localSource = {
+          name: SELF_PUBLISHED_REGISTRY_NAME,
+          state: 'failed',
+          rows: null,
+          failure,
+        };
+        log.warn(
+          {
+            error_code: 'REGISTRY_SOURCE_FAILED',
+            registry: SELF_PUBLISHED_REGISTRY_NAME,
+            failure,
+          },
+          '[discovery.source-failed] a registry could not be queried; the catalog is partial',
+        );
       }
     }
 
     // NO early-return si solo hay locales (sin registries habilitados).
     if (registries.length === 0 && localAgents.length === 0) {
-      // WKH-318: `complete`, no `partial`. No hay fuentes ⇒ no hay nada que haya
-      // fallado. "No tengo a quién preguntarle" no es "no pude preguntar".
+      // WKH-318: sin fuentes, `complete` — no hay nada que haya fallado ni nada
+      // cuya completitud haya quedado sin probar. "No tengo a quién preguntarle"
+      // no es "no pude preguntar".
+      //
+      // Pero si la fuente local SÍ se consultó y se cayó, su fila viaja igual:
+      // este early-return también se alcanza cuando el SELECT falló y no hay
+      // registries, y ahí el catálogo es `partial`, no `complete`.
+      //
+      // CR MNR-A: el roll-up sale de `buildCatalogStatus`, NUNCA de un literal.
+      // Dos expresiones de la misma regla divergen (CD-11), y ésta era la única
+      // línea de producción nueva sin cobertura.
+      const sources = localSource ? [localSource] : [];
       return {
         agents: [],
         total: 0,
         registries: [],
-        sources: [],
-        catalogStatus: 'complete',
+        sources,
+        catalogStatus: buildCatalogStatus(sources),
       };
     }
 
@@ -247,6 +294,7 @@ export const discoveryService = {
       registries,
       localAgents,
       false,
+      localSource,
     );
 
     // WKH-157 broaden-retry: a registry's own strict search backend can drop
@@ -269,6 +317,7 @@ export const discoveryService = {
         registries,
         localAgents,
         true,
+        localSource,
       );
     }
 
@@ -281,12 +330,19 @@ export const discoveryService = {
    * free-text broaden-retry. `skipUpstreamQuery=true` omits forwarding `q` to
    * the registries (the local substring filter still runs). `localAgents` is
    * the already-fetched self-published set (no re-fetch across attempts).
+   *
+   * WKH-318 (AR BLQ-2): `localSource` es CÓMO le fue a ese SELECT — `null` si no
+   * se lo consultó. Viaja aparte de `localAgents` porque un array vacío no puede
+   * distinguir "no hay agentes locales" de "no pude leerlos", que es justo la
+   * distinción que esta HU existe para no perder. Se pasa igual en el
+   * broaden-retry: es el MISMO fetch local, así que su estado es el mismo.
    */
   async runDiscoveryPipeline(
     query: DiscoveryQuery,
     registries: RegistryConfig[],
     localAgents: Agent[],
     skipUpstreamQuery: boolean,
+    localSource: DiscoverySource | null = null,
   ): Promise<DiscoveryResult> {
     // Query all registries in parallel
     const outcomes = await Promise.all(
@@ -548,12 +604,13 @@ export const discoveryService = {
       }
       return source;
     });
-    if (localAgents.length > 0) {
-      sources.push({
-        name: SELF_PUBLISHED_REGISTRY_NAME,
-        state: 'ok',
-        rows: localAgents.length,
-      });
+    // WKH-318 (AR BLQ-2): la fila local entra por HABERSE CONSULTADO, no por
+    // haber traído filas. El gate viejo (`localAgents.length > 0`) escondía dos
+    // casos distintos detrás del mismo silencio: el SELECT que falló y el que
+    // devolvió cero. Ahora `null` significa una sola cosa — no se la consultó,
+    // porque el caller filtró a otro registry.
+    if (localSource) {
+      sources.push(localSource);
     }
 
     const contributingRegistries = sources
@@ -739,38 +796,56 @@ export const discoveryService = {
 
     const agents = agentsData.map((raw) => this.mapAgent(registry, raw));
 
-    // ── WKH-318 (DT-8): el truncamiento se DETECTA, no se pagina ───────────
+    // ── WKH-318 (DT-8 + AR BLQ-1): la completitud se PRUEBA, no se supone ──
     //
-    // Dos evidencias, en este orden de precedencia:
+    // Que la fuente haya contestado NO dice si trajo todo. Hay que buscar
+    // evidencia, y puede apuntar para cualquiera de los dos lados — o no existir.
     //
-    //  1. `cursor` — EXACTA. El registro declaró `nextCursorPath` y ese campo
-    //     llegó no-nulo. Es la que atrapa el caso real medido: v2 tiene 22
-    //     agentes activos y el camino sin `limit` devuelve 20 con `next_cursor`
-    //     seteado. Sin esta detección, el corte A cambiaría una mentira por otra
-    //     (`catalogStatus: 'complete'` sobre 20 de 22).
+    // FUENTE 1 (EXACTA) — el registro declaró `nextCursorPath`:
+    //   · cursor con valor      ⇒ hay más filas          → `truncated`/`cursor`
+    //   · cursor vacío/nulo     ⇒ él mismo dice "no hay más" → completitud PROBADA
+    //   · la clave NO viene     ⇒ no dijo nada           → sin evidencia
+    //   Gana sobre la heurística: si el registro declara que no hay más, una
+    //   página justo llena es coincidencia, no truncamiento.
     //
-    //  2. `page_full` — HEURÍSTICA. Se mandó un límite y llegaron EXACTAMENTE
-    //     esa cantidad de filas. Su único error posible es sobre-declarar
-    //     (catálogo justo del tamaño del cap), y sobre-declarar incompletitud es
-    //     el lado SEGURO del error.
+    // FUENTE 2 (HEURÍSTICA, sólo si no hubo declaración exacta) — se envió límite:
+    //   · llegaron >= las pedidas ⇒ la página se llenó    → `truncated`/`page_full`
+    //   · llegaron menos          ⇒ no se llenó, no quedó nada afuera → PROBADA
+    //   Su único error posible es sobre-declarar truncamiento (catálogo justo del
+    //   tamaño del cap), que es el lado SEGURO.
     //
-    // Sin límite enviado y sin `nextCursorPath` declarado NO hay evidencia, y el
-    // estado es `ok`: no se inventa una certeza que no tenemos.
+    // SIN NINGUNA DE LAS DOS no hay evidencia OBTENIBLE, y el estado es
+    // `unverified` — NO `ok`. Es el caso real de producción: el registro `wasiai`
+    // se siembra sin `nextCursorPath` y `/capabilities` llama a `discover({})`
+    // sin `limit`, así que tampoco se manda `limitParam`. Devolver `ok` ahí
+    // publicaba `catalogStatus: 'complete'` sobre 20 de 22 agentes: cambiaba una
+    // mentira por otra, que es textualmente lo que esta HU se comprometió a no
+    // hacer.
     let truncationEvidence: 'cursor' | 'page_full' | undefined;
+    let completenessProven = false;
+
     if (schema.nextCursorPath) {
       const cursor = getNestedValue(data, schema.nextCursorPath);
-      // `null` explícito y `undefined` NO son evidencia. Que la CLAVE exista con
-      // valor nulo es exactamente cómo un registro dice "no hay más".
-      if (cursor !== null && cursor !== undefined && cursor !== '') {
+      if (cursor) {
+        // Cualquier valor con contenido es un cursor. Los centinelas falsy
+        // (`null`, `''`, `0`, `false`) son la forma habitual de decir "no hay
+        // más" y NO se leen como truncamiento (AR MNR-G: con el `!== null`
+        // anterior, un `0` o un `false` forzaban `truncated`).
         truncationEvidence = 'cursor';
+      } else if (cursor !== undefined) {
+        // AUSENTE no es NULO: un registro que dice "no hay más" manda la clave
+        // en nulo; uno que no la manda no dijo nada, y suponerle completitud
+        // sería inventarle una declaración que nunca hizo.
+        completenessProven = true;
       }
     }
-    if (
-      !truncationEvidence &&
-      sentLimit !== undefined &&
-      agents.length >= sentLimit
-    ) {
-      truncationEvidence = 'page_full';
+
+    if (!truncationEvidence && !completenessProven && sentLimit !== undefined) {
+      if (agents.length >= sentLimit) {
+        truncationEvidence = 'page_full';
+      } else {
+        completenessProven = true;
+      }
     }
 
     if (truncationEvidence) {
@@ -781,7 +856,11 @@ export const discoveryService = {
         truncationEvidence,
       };
     }
-    return { agents, state: 'ok', rows: agents.length };
+    return {
+      agents,
+      state: completenessProven ? 'ok' : 'unverified',
+      rows: agents.length,
+    };
   },
 
   /**
