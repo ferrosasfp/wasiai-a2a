@@ -687,11 +687,21 @@ porque el compilador los rompió.
 >    fail-open — puede abrirlo.** Meter una ampliación en el mismo commit que cierra un
 >    agujero mezcla dos cosas con perfiles de riesgo opuestos, y deja al revisor sin
 >    poder verificar el cierre por separado. Primero se cierra, después se ensancha.
-> 2. **Su beneficio operativo en el camino caliente es chico.** El `owner` se omite
->    —según el propio AR— en transacciones **viejas servidas desde almacenamiento de
->    largo plazo**, y `probeSettlementPresence` lee a `confirmed` **inmediatamente
->    después** de settlear: transacciones frescas. La clase de input que el tier
->    resolvería casi no aparece en el momento en que este código corre.
+> 2. ~~**Su beneficio operativo en el camino caliente es chico.**~~ **PREMISA
+>    CORREGIDA EN EL RE-AR (MNR-3) — era falsa para uno de los tres consumidores.**
+>    Yo escribí que `probeSettlementPresence` lee siempre transacciones **frescas**
+>    (a `confirmed`, inmediatamente después de settlear). Eso vale para
+>    `settleViaFacilitator` y `recoverConfirmedSettle`, y **es falso para
+>    `settleAlreadyConfirmed`**: esa rama corre en **cada re-entrega del mismo
+>    `intentId`** sobre una fila que ya está `confirmed`, o sea **horas o días
+>    después** — que es exactamente la ventana en que una tx se sirve desde
+>    **almacenamiento de largo plazo**, la clase que omite `owner`.
+>
+>    **No invalida la decisión** (los otros tres argumentos se sostienen solos y el
+>    costo sigue siendo fail-closed), pero **sube la probabilidad del costo aceptado
+>    y por lo tanto la prioridad de W2.1**. Se deja como está escrito y no se
+>    disimula: era mi argumento más débil y el que más se parecía a lo que yo quería
+>    que fuera cierto.
 > 3. **Agrega superficie que LANZA a un guard cuya propiedad estrella es "NUNCA
 >    lanza"**: `new PublicKey()` y `getAssociatedTokenAddressSync()` lanzan con base58
 >    inválido u owner off-curve, más una lectura defensiva de `accountKeys`. Sumar
@@ -704,7 +714,34 @@ porque el compilador los rompió.
 > **Costo aceptado, explícito**: hasta W2.1, un pago real cuya entrada de `pre` venga sin
 > `owner` sale `indeterminate`. Es **fail-closed** (no cuesta plata) pero
 > **determinístico** (no se destraba solo), y por eso el log ahora lo dice con todas las
-> letras (MNR-D) y apunta al runbook. Si aparece en producción, W2.1 es la respuesta.
+> letras (MNR-D) y apunta al runbook.
+>
+> **EL GATILLO DE W2.1 ES UNA SEÑAL DE PRODUCCIÓN, NO UNA FECHA** (re-AR MNR-3): la
+> aparición de **`terms_unclassifiable_entry`** en el log —sobre todo en la rama de
+> `settleAlreadyConfirmed`, que es la que lee historia vieja— es la evidencia de que la
+> clase de input existe de verdad. Una sola ocurrencia ya justifica W2.1; cero
+> ocurrencias sostenidas la mantienen donde está. Es la métrica que reemplaza a mi
+> premisa equivocada, y se mide con `grep terms_unclassifiable_entry`.
+>
+> ### 🔍 QUÉ GARANTIZA ESTE FIX, Y QUÉ NO (re-AR MNR-2)
+>
+> Dicho con precisión, porque la diferencia es la justificación entera de W2.1:
+>
+> - **Lo que garantiza**: *"toda entrada anónima está **contada**"*. Una entrada del
+>   mint esperado que **no declara** su `owner` —campo **opcional** del esquema, que un
+>   RPC omite sin mentir— nunca puede desaparecer en silencio del cálculo. Cierra la
+>   clase de input **barata**: la que se produce por **omisión**.
+> - **Lo que NO garantiza**: *"toda entrada nuestra está **reconocida**"*. El
+>   reconocimiento está clavado a la **igualdad exacta** del string: una entrada con
+>   `payTo + ' '`, o con distinta caja, se descarta como ajena y sigue dando `match`
+>   (ejecutado por el AR).
+>
+> **Por qué eso NO bloquea**: esa segunda clase exige **falsificar** un string, no
+> **omitir** un campo. Un RPC que devuelve un `owner` distinto del real ya está
+> mintiendo, y contra un transporte que miente ningún guard de este archivo alcanza —
+> esa defensa es la del tier de dirección (W2.1), que identifica la cuenta por su
+> **posición en `accountKeys`** en vez de por un string que el mismo transporte provee.
+> Queda escrito para que nadie lea este fix como más ancho de lo que es.
 
 ### W2 — Endurecimiento (paralelizable: tres tareas independientes)
 
@@ -906,6 +943,23 @@ de lo que parece.
 | **M16** | **Sobre-corrección**: `delta < required` ⇒ `indeterminate` (borrar `mismatch`) | **T-IDM-18b + T-319-12** |
 | **M17** | Quitar el tier de dirección (W2) | T-319-19 |
 | **M18** | No envolver `getAssociatedTokenAddressSync` (W2) | T-319-20 |
+
+**Mutantes AGREGADOS EN F3** (no estaban en el plan; salieron del AR y del re-AR):
+
+| # | Mutación | Muere con | Origen |
+|---|---|---|---|
+| **M19** | Volver a un contador único de no clasificables (borrar el bloqueo de `match` por `unclassifiablePre`) | T-319-7c | AR BLQ-1 |
+| **M20** | Dejar de contar por lado (todo va a `unclassifiablePost`) | T-319-7c, T-319-7d | AR BLQ-1 |
+| **M21** | `Error` pelado en `settleAlreadyConfirmed` (la incógnita pierde su disposición) | T-319-13 | AR BLQ-2 |
+| **M22** | Ídem en `settleAlreadySigned` | T-319-14 | AR BLQ-2 |
+| **M23** | **Sobre-corrección**: TODO throw pasa a `'unknown'` y el mismatch medido deja de doler | T-319-13b | AR BLQ-2 |
+| **M24** | Sacar el envoltorio de `probeSettlementPresence` | T-319-11b | AR MNR-C |
+| **M25** | **Sacarle el `&& owner.length > 0` a `declaredOwner`**: `owner: ''` deja de contarse y se descarta **en silencio** ⇒ **la sexta forma reabierta borrando cuatro tokens**. Compilaba y **sobrevivía la suite entera de 4333 tests** | **T-319-7c** (caso `owner: ''`) | **re-AR MNR-1** |
+
+> **M25 es la lección de la campaña**: el mutante que sobrevive no aparece en las
+> ramas que uno escribió pensando en el ataque, sino en la **cláusula chiquita que las
+> sostiene a todas**. Un guard de dinero no está verificado hasta que se mutan también
+> sus **predicados auxiliares**, no sólo sus ramas.
 
 **Protocolo (CD-5 + reglas operativas de 203/209):** respaldo físico + hash del archivo antes de
 mutar; **prohibido `git checkout --`** sobre trabajo sin commitear; **verificar que el archivo

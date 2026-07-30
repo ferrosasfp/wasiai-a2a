@@ -1665,6 +1665,32 @@ describe('WKH-319 · AC-6/AC-7/AC-8: el veredicto', () => {
     expect(inflado.detail).toMatch(/^terms_unclassifiable_entry/);
     expect(inflado.detail).toMatch(/INFLATED/);
 
+    // ⚠️ LAS FORMAS NO-STRING Y LA VACÍA VAN POR LA MISMA PUERTA (re-AR MNR-1).
+    // `owner: ''` es la MÁS PELIGROSA de todas y por eso tiene test propio: es la
+    // única que `typeof owner === 'string'` acepta. Sin el `&& owner.length > 0` de
+    // `declaredOwner`, `''` no da `null` sino `''`, que no iguala a `payTo`, así que
+    // la entrada se DESCARTA EN SILENCIO — ni contada ni vista por el guard de
+    // simetría. Borrar esos cuatro tokens reabre la sexta forma entera, compila, y
+    // sobrevivía la suite completa hasta este caso (mutante M25).
+    for (const owner of ['', 123, null, {}, [], true]) {
+      const out = await termsOutcome({
+        meta: {
+          err: null,
+          preTokenBalances: [tb('0'), { ...anonPre, owner }],
+          postTokenBalances: [
+            tb(AMOUNT),
+            { ...anonPre, owner, uiTokenAmount: { amount: '0' } },
+          ],
+        },
+      });
+      const etiqueta = JSON.stringify(owner);
+      expect(`owner=${etiqueta}: ${out.kind}`).toBe(
+        `owner=${etiqueta}: indeterminate`,
+      );
+      expect(out.detail).toMatch(/^terms_unclassifiable_entry/);
+      expect(out.detail).toMatch(/INFLATED/);
+    }
+
     // EL CONTROL QUE LO CONVIERTE EN PRUEBA: la MISMA forma con el `owner`
     // declarado ya se cazaba. O sea que omitir `owner` era lo único que hacía falta
     // para convertir un caso cazado en un pago certificado.

@@ -236,6 +236,20 @@ function atomicOf(b: TokenBalanceLike): bigint | null {
  * El `owner` DECLARADO, o `null` si la entrada no lo trae. Leer un `owner` ausente
  * como "es de otro" es una AFIRMACION SOBRE UN DATO AUSENTE, y sub-mide el delta ⇒
  * `landed_mismatch` sobre un pago real. Por eso devuelve `null` y el caller decide.
+ *
+ * ⚠️ EL `length > 0` NO ES COSMETICO — ES LA CLAUSULA QUE SOSTIENE EL FIX DE BLQ-1
+ * (re-AR MNR-1). Decide POR QUE PUERTA cae un `owner: ''`, y las dos puertas tienen
+ * consecuencias opuestas:
+ *
+ *   · con el guard  → `null` ⟹ la entrada se cuenta como NO CLASIFICABLE ⟹ si esta
+ *     en `pre`, BLOQUEA el `match`;
+ *   · sin el guard  → `''` ⟹ `'' !== payTo` ⟹ la entrada se DESCARTA EN SILENCIO:
+ *     no suma, no se cuenta, y ademas queda INVISIBLE para el guard de simetria del
+ *     Paso 5, que solo recorre las claves de los dos mapas.
+ *
+ * O sea que borrar cuatro tokens de esta linea REABRE la sexta forma del fail-open
+ * entera. Se midio: el mutante COMPILA y sobrevivia la suite de 4333 tests.
+ * Clavado por `T-319-7c` (caso `owner: ''`) y por el mutante **M25**.
  */
 function declaredOwner(b: TokenBalanceLike): string | null {
   return typeof b.owner === 'string' && b.owner.length > 0 ? b.owner : null;

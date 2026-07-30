@@ -54,6 +54,55 @@ resumen de la HU: es lo que protege a la próxima del mismo tropiezo.
 
 ---
 
+### [2026-07-30 13:05] Wave 1 — Muté las ramas del guard, no el predicado que las sostiene
+
+- **Error**: mi campaña de mutación tenía 21 mutantes muertos y aun así **dejó vivo
+  el que importaba**. Lo encontró el re-AR: sacarle `&& b.owner.length > 0` a
+  `declaredOwner` **compila** y **sobrevivía la suite entera de 4333 tests**. Con
+  esa línea mutada, un `owner: ''` deja de dar `null`, devuelve `''`, no iguala a
+  `payTo` y la entrada **se descarta en silencio** — ni contada como no
+  clasificable, ni vista por el guard de simetría. **La sexta forma del fail-open,
+  reabierta borrando cuatro tokens.**
+- **Causa raíz**: muté las **ramas del veredicto** (las que escribí pensando en el
+  ataque: `match`, `mismatch`, delta negativo, completitud) y no muté los
+  **predicados auxiliares** de los que esas ramas dependen. `declaredOwner` parecía
+  un helper de lectura, no un guard de dinero — pero es quien decide **por qué
+  puerta** entra cada entrada, y por lo tanto quién habilita todo lo demás.
+- **Fix**: `T-319-7c` recorre `['', 123, null, {}, [], true]` como `owner`, con el
+  caso `''` explicado aparte por ser el único que `typeof === 'string'` acepta.
+  Mutante **M25** agregado al inventario, verificado muerto **contra su test
+  nombrado y contra la suite completa** (que es donde antes sobrevivía).
+- **Aplicar en**: **un guard de dinero no está verificado hasta que se mutan sus
+  PREDICADOS, no sólo sus ramas.** El inventario de mutantes se arma recorriendo
+  las líneas de las que el guard *depende*, no las que el guard *escribe*. Un
+  helper de una línea que devuelve `string | null` en un camino de dinero es un
+  guard, aunque no lo parezca.
+
+---
+
+### [2026-07-30 13:05] Wave 1 — Escribí una premisa que me convenía y no la verifiqué
+
+- **Error**: para justificar no adelantar el tier de dirección argumenté que
+  `probeSettlementPresence` lee siempre transacciones **frescas**, así que la clase
+  de input que omite `owner` (historia vieja servida desde almacenamiento de largo
+  plazo) casi no aparecería. **Es falso para `settleAlreadyConfirmed`**, que corre
+  en cada re-entrega del mismo `intentId` sobre una fila ya `confirmed` — o sea
+  horas o días después, justo la ventana que yo decía que no ocurría.
+- **Causa raíz**: verifiqué el argumento contra **dos** de los tres consumidores y
+  generalicé. Y no es casual **cuál** de los cuatro argumentos salió mal: fue el
+  único que afirmaba algo sobre el mundo (frecuencia esperada) en vez de sobre el
+  código, y el que más convenía a la conclusión que ya había elegido.
+- **Fix**: premisa marcada como corregida **sin borrarla** (para que se vea qué se
+  creyó y por qué), y el gatillo de W2.1 pasa a ser una **señal de producción
+  medible** —la aparición de `terms_unclassifiable_entry` en el log— en vez de mi
+  estimación.
+- **Aplicar en**: cuando una decisión se apoya en "esto casi no va a pasar",
+  **enumerar los call-sites uno por uno** en vez de generalizar del que se tiene
+  más fresco. Y si la afirmación es sobre frecuencia en producción, no cerrarla con
+  una estimación: dejar una **métrica** que la falsifique sola.
+
+---
+
 ### [2026-07-30 12:20] Wave 1 — Cerré el colapso un piso abajo y lo dejé vivo un piso arriba
 
 - **Error**: hice que la indeterminación de términos viajara correctamente hasta
