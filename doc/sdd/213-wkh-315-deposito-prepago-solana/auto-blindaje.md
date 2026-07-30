@@ -292,8 +292,10 @@ ausente descalificando de nuevo, el `_down` sin archivar los binds y los backups
 **21/21 KILLED, cada uno con el nombre del test que muere.** Los archivos se restauraron
 verificando `sha256` en cada iteración.
 
-*(Actualizado en la iteración 3: la campaña son ahora **31 mutantes, 31 KILLED** — el 31º
-lo agregó un sobreviviente que ella misma encontró, ver la última entrada.)*
+*(Actualizado en la iteración 4: **34 mutantes, 34 KILLED**. Diez son de FORMA DE LISTA
+y no de lógica —índice duplicado en `pre`, en `post` y en las dos, el orden invertido de
+las filas duplicadas, ausencias simétricas con montos que coinciden, la misma dirección
+en dos índices—, que es la clase que los mutantes de lógica no alcanzaban.)*
 
 ---
 
@@ -446,3 +448,73 @@ lo agregó un sobreviviente que ella misma encontró, ver la última entrada.)*
   no asumir que la validación de aquél lo cubre: **cubre su subconjunto**. Y cuando la
   campaña marca un sobreviviente en código recién escrito, casi siempre es una lección
   vieja que no se aplicó al código nuevo.
+
+---
+
+### [2026-07-30 FIX-PACK it4 · LA LECCION QUE VALE MAS QUE LAS OTRAS JUNTAS] Tres iteraciones arreglando síntomas de un defecto de ESTRUCTURA
+
+- **El síntoma, cuatro veces idéntico**: `{"ok":true,"amountUsd":"1001"}` para un depósito
+  de 1 USDC. Cada iteración cerró el caso que le mostraron y la siguiente revisión
+  encontró otro camino al **mismo resultado literal**. Tres guards nuevos, tres veces
+  verde, tres veces incompleto.
+- **La causa raíz, que no era ninguno de los cuatro casos**: `delta` se **calculaba** por
+  un camino (suma POR ENTRADA de las filas que matcheaban nuestra ATA) y se **auditaba**
+  por otro (agregación POR INDICE, "gana la última", sobre todas las filas del mint), y
+  **los dos números nunca se comparaban entre sí**. Dos agregaciones paralelas con reglas
+  distintas no se restringen: cada una puede estar bien y el par, mal. Por eso cada fix
+  entraba *al lado* del cálculo en vez de cerrar *sobre* él.
+- **La señal que estuvo ahí todo el tiempo y no leí**: los repros no se parecían entre sí
+  (dato ilegible, lista ausente, fila ausente, dos filas ausentes) pero el RESULTADO era
+  siempre el mismo string. **Cuando distintas causas producen la misma salida exacta, la
+  causa común no está en ninguna de ellas: está en la estructura que las convierte a
+  todas en ese número.** Un patrón de repetición en los síntomas es evidencia sobre el
+  DISEÑO, no una lista de casos por tapar.
+- **El fix (estructural, no un cuarto guard)**: una sola **tabla canónica** por lista
+  (índice → monto del mint), construida con reglas fail-closed —índice duplicado
+  RECHAZA, monto ilegible RECHAZA—, y **todo** derivado de ella: el delta que se acredita
+  y la ecuación que lo audita, `delta === baja neta de las demás cuentas`, cuyo lado
+  izquierdo **es** el crédito y cuyo lado derecho sale de filas disjuntas de la misma
+  tabla. Más una regla de presencia: **nuestra ATA aparece en las dos listas o en
+  ninguna**, porque el saldo previo de la cuenta que recibe el dinero es el único dato
+  que no admite default.
+- **Por qué esto sí cumple el criterio y los otros tres no**: con `delta` fijado por filas
+  que TIENEN que estar presentes, cualquier incoherencia restante sólo puede mover el
+  lado derecho de la ecuación, y moverlo produce desigualdad ⇒ `UNKNOWN`. **Toda
+  incoherencia es fail-CLOSED por construcción**: puede negar un crédito, nunca inflarlo.
+  Es una propiedad de la forma del código, no la unión de los casos que se me ocurrieron.
+- **Y el detalle que retrata todo**: con "gana la última", **invertir el orden de dos
+  renglones cambiaba el veredicto** de `ok:true` a `UNKNOWN`. Un resultado que depende de
+  la POSICION de una fila no es una medición. Ahora hay un test que corre los dos órdenes
+  y exige respuestas byte-idénticas.
+- **Aplicar en**: (a) si una revisión encuentra el MISMO resultado por un camino nuevo
+  después de un fix, **parar de parchear y mirar la estructura** — el tercer repro ya era
+  suficiente evidencia y yo seguí agregando guards; (b) un valor de dinero debe tener
+  **una sola derivación**, y lo que lo audita tiene que consumir ESE valor, no
+  recalcularlo por otra vía; (c) ante datos con forma de tabla, **canonizar primero y
+  decidir después**: validar mientras se recorre reparte la misma decisión en N lugares
+  que pueden divergir; (d) frente a un dato contradictorio (dos filas para la misma
+  cuenta), **rechazar es más barato y más honesto que desempatar** — un desempate es una
+  decisión arbitraria escondida en el código.
+
+---
+
+### [2026-07-30 FIX-PACK it4 · BLQ-BAJO-2] Enuncié una regla y la apliqué a un solo caso
+
+- **Error**: en it3 escribí que *"un veredicto de indeterminación precede a cualquier
+  veredicto medido derivado de los mismos datos posiblemente incompletos"* y la apliqué
+  **sólo a `DEPOSITOR_AMBIGUOUS`**, dejando `RECIPIENT_MISMATCH` —que sale de las mismas
+  listas— corriendo antes. Con las filas de nuestra ATA truncadas, contestaba con un 400
+  definitivo que la plata fue a otra cuenta, **con un `detail` idéntico** al del destino
+  genuinamente equivocado y **sin el evento durable** (la ruta sólo lo emite para
+  `UNKNOWN`). Alguien cuya plata sí llegó recibía una negativa definitiva y sin rastro.
+- **Causa raíz**: enuncié la regla mientras arreglaba UN caso, así que la escribí como
+  general y la implementé como local. Una regla que se formula en el momento de aplicarla
+  tiende a nacer con el alcance del ejemplo que la motivó.
+- **Fix**: la ecuación corre antes de los dos veredictos medidos. Los casos se separan
+  solos: destino equivocado real ⇒ las listas cuadran ⇒ el 400 es una medición; filas
+  truncadas ⇒ la ecuación falla ⇒ 503 con evento durable. Y hay un test que exige que los
+  dos `detail` sean DISTINTOS, porque ser indistinguibles era la mitad del daño.
+- **Aplicar en**: cuando escribas una regla general en un comentario, **buscá en el
+  mismo archivo todos los sitios que caen bajo ella antes de cerrar** — `grep` de los
+  otros `return` del mismo tipo cuesta un minuto. Si no, la regla queda como documentación
+  de una excepción.

@@ -737,7 +737,12 @@ describe('WKH-315 · verifySolanaDeposit', () => {
         // tocara. La conjunción es lo único que hoy sólo puede decir ESTE guard: los
         // de atribución dicen "unreadable" pero "for the configured mint", y el de
         // conservación dice "deposit ATA" pero no "unreadable".
-        expect(res.detail, unreadable).toContain('deposit ATA');
+        // ⚠️ NEEDLE RE-PINCHADO EN it4, A PROPOSITO Y NO POR COMODIDAD. Con la tabla
+        // canónica el guard que habla es el de CONSTRUCCION de la tabla del lado
+        // `pre`, y su mensaje nombra la lista — que es una identificación MEJOR que
+        // la anterior, porque distingue pre de post en vez de decir sólo "la ATA".
+        // La conjunción sigue siendo lo que impide que otro guard lo satisfaga.
+        expect(res.detail, unreadable).toContain('preTokenBalances carries');
         expect(res.detail, unreadable).toContain(
           'unreadable uiTokenAmount.amount',
         );
@@ -763,7 +768,7 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       // —UNKNOWN, y no RECIPIENT_MISMATCH— satisface las tres aserciones de arriba.
       // O sea que el test seguía verde, seguía "matando" al mutante en la campaña... y
       // ya no probaba nada sobre el guard que nombra.
-      expect(res.detail).toContain('deposit ATA');
+      expect(res.detail).toContain('postTokenBalances carries');
       expect(res.detail).toContain('unreadable uiTokenAmount.amount');
     });
 
@@ -845,11 +850,17 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       uiTokenAmount: uiAmount(amount),
     });
 
-    it('BLQ-MED-3: `pre` NO lista nuestra ATA ⇒ UNKNOWN por conservación, y NUNCA acredita los 1001 USDC de tesorería', async () => {
+    it('BLQ-MED-3: `pre` NO lista nuestra ATA ⇒ UNKNOWN por PRESENCIA ASIMETRICA, y NUNCA acredita los 1001 USDC de tesorería', async () => {
       // ⚠️ EL CASO QUE MAS DUELE Y EL MENOS VISIBLE: las dos listas están presentes,
-      // ningún campo es ilegible, y sin embargo el delta medido sobre UNA cuenta es
-      // el saldo entero de la tesorería. Lo único que lo delata es cruzarlo contra lo
-      // que los orígenes efectivamente pagaron.
+      // ningún campo es ilegible, y sin embargo el delta medido sobre UNA cuenta sería
+      // el saldo entero de la tesorería.
+      //
+      // ⚠️ EN it4 LO CORTA UN GUARD DISTINTO, Y ESE ES EL PUNTO DEL REDISEÑO. Antes lo
+      // atrapaba un invariante de totales corriendo AL LADO del cálculo; ahora no llega
+      // a haber número que auditar: el saldo previo de la cuenta que recibe el dinero
+      // no se puede sustituir por un default, así que la ASIMETRIA de presencia corta
+      // antes. Un guard que evita construir el número equivocado es más fuerte que uno
+      // que lo construye y después lo revisa.
       mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
       mockGetParsedTransaction.mockResolvedValue(
         rawTx({
@@ -872,9 +883,10 @@ describe('WKH-315 · verifySolanaDeposit', () => {
         );
       }
       expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
-      // ⚠️ Y POR EL MOTIVO CORRECTO. Sin esto el test sobrevive a la mutación del
-      // invariante: el veredicto lo daría cualquier otro guard y el nombre mentiría.
-      expect(res.detail).toContain('conservation check failed');
+      // ⚠️ Y POR EL MOTIVO CORRECTO, con los dos flags de presencia: sin esto el test
+      // sobrevive a la mutación del guard porque cualquier otro daría UNKNOWN también.
+      expect(res.detail).toContain('appears in only ONE');
+      expect(res.detail).toContain('pre=false, post=true');
     });
 
     it('BLQ-MED-3 (andamiaje): el MISMO escenario con la fila presente acredita 1 USDC, no 1001', async () => {
@@ -997,8 +1009,11 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       // delta inflado por la otra ausencia, y el guard aplaudía: reproducido en
       // `{ok:true, amountUsd:"1001"}`.
       //
-      // Con la igualdad de los dos lados, cada ausencia deja su propio desbalance:
-      // sube 1001, baja 1002.
+      // ⚠️ Y EN it4 NI SIQUIERA LLEGA AL INVARIANTE, que es el punto: la ausencia de
+      // la fila de NUESTRA ATA en `pre` se corta por presencia asimétrica, antes de que
+      // exista un número que auditar. El caso donde las dos ausencias se pagan
+      // EXACTAMENTE entre ellas (montos que coinciden) tiene su propio test más abajo,
+      // porque contra un invariante de totales era indetectable.
       mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
       mockGetParsedTransaction.mockResolvedValue(
         rawTx(
@@ -1026,22 +1041,20 @@ describe('WKH-315 · verifySolanaDeposit', () => {
         );
       }
       expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
-      expect(res.detail).toContain('conservation check failed');
-      // Los dos números, para que el test muera si el invariante vuelve a ser un techo
-      // de un solo lado: ahí los dos totales dejan de reportarse.
-      expect(res.detail).toContain('gained 1001000000');
-      expect(res.detail).toContain('lost 1002000000');
+      expect(res.detail).toContain('appears in only ONE');
+      expect(res.detail).toContain('pre=false, post=true');
     });
 
     it('BLQ-BAJO-1 (it3): un `amount` ilegible en una entrada de TERCEROS del mismo mint ⇒ UNKNOWN, no un crédito', async () => {
       // ⚠️ ESTE HUECO LO ENCONTRO LA CAMPAÑA, NO LA REVISION, y no lo cubría ningún
-      // test de BLQ-MED-1: aquellos ponen el dato ilegible en NUESTRA ATA, así que el
-      // guard del delta responde primero y el loop de conservación nunca llegaba a
-      // ejercitarse. Acá el dato ilegible está en una cuenta de un tercero que sólo
-      // aparece en `post` — el delta se mide perfecto (5 USDC), la atribución también,
-      // y sin embargo hay una porción del mismo mint que se movió por una cantidad que
-      // NO SE PUEDE MEDIR. Saltearla hacía que los totales cuadraran por omisión: el
-      // invariante daba verde sobre una suma a la que le faltaba un sumando.
+      // test de BLQ-MED-1: aquellos ponen el dato ilegible en NUESTRA ATA. Acá está en
+      // una cuenta de un tercero — el delta de nuestra ATA se mide perfecto (5 USDC) y
+      // la atribución también, y sin embargo hay una porción del mismo mint que se movió
+      // por una cantidad que NO SE PUEDE MEDIR. Saltearla hacía que los totales cuadraran
+      // por omisión: verde sobre una suma a la que le faltaba un sumando.
+      //
+      // En it4 lo corta la construcción de la tabla canónica, que es UNA sola y se
+      // niega a construirse con agujeros. La propiedad es la misma; el lugar, más temprano.
       mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
       mockGetParsedTransaction.mockResolvedValue(
         rawTx(
@@ -1070,9 +1083,297 @@ describe('WKH-315 · verifySolanaDeposit', () => {
         );
       }
       expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
-      expect(res.detail).toContain(
-        'conservation of the transfer cannot be checked',
-      );
+      expect(res.detail).toContain('postTokenBalances carries');
+      expect(res.detail).toContain('unreadable uiTokenAmount.amount');
+    });
+
+    // ── it4 · LOS REPROS QUE FALSIFICARON LAS TRES ITERACIONES ANTERIORES ────
+    describe('it4: ninguna incoherencia de listas puede producir un crédito mayor al depósito real', () => {
+      it('REPRO A: la MISMA ATA dos veces en `post` ⇒ UNKNOWN — no se elige entre dos filas contradictorias', async () => {
+        // ⚠️ Antes: `{ok:true, amountUsd:"1001"}`, porque el crédito sumaba POR ENTRADA
+        // (1000 + 1) mientras el invariante agregaba POR INDICE con "gana la última"
+        // (1). Dos reglas distintas sobre la misma fila.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx({
+            err: null,
+            preTokenBalances: [
+              bal(1, DEPOSITOR, '10000000'),
+              bal(2, OWNER, '0'),
+            ],
+            postTokenBalances: [
+              bal(1, DEPOSITOR, '9000000'),
+              bal(2, OWNER, '1000000000'),
+              bal(2, OWNER, '1000000'), // el MISMO índice, otra vez
+            ],
+          }),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) {
+          throw new Error(
+            `acreditó ${res.amountUsd} USDC con una fila duplicada`,
+          );
+        }
+        expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        expect(res.detail).toContain('TWO entries for account index 2');
+      });
+
+      it('REPRO A (orden invertido): el veredicto NO depende de la POSICION de las filas duplicadas', async () => {
+        // ⚠️ EL SINTOMA QUE RETRATA EL BUG ESTRUCTURAL: con "gana la última", invertir
+        // dos renglones cambiaba el veredicto de `ok:true` a `UNKNOWN`. Un resultado
+        // que depende de la posición de una fila no es una medición. Los dos órdenes
+        // tienen que dar EXACTAMENTE lo mismo.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        const run = async (dupFirst: string, dupSecond: string) => {
+          mockGetParsedTransaction.mockResolvedValue(
+            rawTx({
+              err: null,
+              preTokenBalances: [
+                bal(1, DEPOSITOR, '10000000'),
+                bal(2, OWNER, '0'),
+              ],
+              postTokenBalances: [
+                bal(1, DEPOSITOR, '9000000'),
+                bal(2, OWNER, dupFirst),
+                bal(2, OWNER, dupSecond),
+              ],
+            }),
+          );
+          return verifySolanaDeposit({ signature: SIGNATURE });
+        };
+
+        const a = await run('1000000000', '1000000');
+        const b = await run('1000000', '1000000000');
+
+        expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+        expect(a.ok).toBe(false);
+      });
+
+      it('REPRO A (pre): el índice repetido también se rechaza del lado `pre`', async () => {
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx({
+            err: null,
+            preTokenBalances: [
+              bal(1, DEPOSITOR, '10000000'),
+              bal(2, OWNER, '1000000000'),
+              bal(2, OWNER, '0'),
+            ],
+            postTokenBalances: [
+              bal(1, DEPOSITOR, '9000000'),
+              bal(2, OWNER, '1001000000'),
+            ],
+          }),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) throw new Error('unreachable');
+        expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        expect(res.detail).toContain('preTokenBalances carries TWO entries');
+      });
+
+      it('REPRO A (las DOS listas): con duplicados de los dos lados también se rechaza', async () => {
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx({
+            err: null,
+            preTokenBalances: [
+              bal(2, OWNER, '1000000000'),
+              bal(2, OWNER, '0'),
+              bal(1, DEPOSITOR, '10000000'),
+            ],
+            postTokenBalances: [
+              bal(2, OWNER, '1001000000'),
+              bal(2, OWNER, '1000000'),
+              bal(1, DEPOSITOR, '9000000'),
+            ],
+          }),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) throw new Error('unreachable');
+        expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        expect(res.detail).toContain('TWO entries for account index 2');
+      });
+
+      it('la MISMA dirección en DOS índices ⇒ UNKNOWN — una cuenta no ocupa dos casilleros', async () => {
+        // `accountKeys` con la pubkey repetida: dos índices resuelven a nuestra ATA.
+        // Cuál de los dos saldos es "el" saldo de la cuenta no tiene respuesta.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx(
+            {
+              err: null,
+              preTokenBalances: [
+                bal(1, OWNER, '0'),
+                bal(2, OWNER, '1000000000'),
+              ],
+              postTokenBalances: [
+                bal(1, OWNER, '5000000'),
+                bal(2, OWNER, '1000000000'),
+              ],
+            },
+            [DEPOSITOR, OUR_ATA, OUR_ATA],
+          ),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) throw new Error('unreachable');
+        expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        expect(res.detail).toContain('different account indexes');
+      });
+
+      it('REPRO F: dos filas truncadas con montos que COINCIDEN ⇒ UNKNOWN (un invariante de totales no lo ve)', async () => {
+        // ⚠️ EL CASO QUE MATA CUALQUIER INVARIANTE DE TOTALES, y el que falsificó mi
+        // afirmación de it3 ("ninguna ausencia puede pagar por la otra"): una ausencia
+        // en `pre` sube el total que sube, una en `post` sube el total que baja, y **con
+        // montos iguales se pagan exactamente**. Acá `totalUp == totalDown == 1001000000`
+        // y el resultado era `{ok:true, amountUsd:"1001"}` por un depósito de 1.
+        //
+        // Lo corta la presencia asimétrica de NUESTRA ATA, que no depende de ninguna
+        // suma: el saldo previo de la cuenta que recibe el dinero no admite default.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx(
+            {
+              err: null,
+              preTokenBalances: [
+                bal(1, DEPOSITOR, '10000000'),
+                bal(3, DEPOSITOR, '1001000000'),
+              ],
+              postTokenBalances: [
+                bal(1, DEPOSITOR, '9000000'),
+                bal(2, OWNER, '1001000000'),
+              ],
+            },
+            [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA, OWNER_SECOND_ACCOUNT],
+          ),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) {
+          throw new Error(
+            `acreditó ${res.amountUsd} USDC con dos ausencias que se compensan`,
+          );
+        }
+        expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        expect(res.detail).toContain('appears in only ONE');
+      });
+
+      it('BLQ-BAJO-2: filas de nuestra ATA truncadas de las DOS listas ⇒ UNKNOWN, no RECIPIENT_MISMATCH', async () => {
+        // El depositante bajó 1 USDC y NADIE lo recibió según las listas. Antes salía
+        // `RECIPIENT_MISMATCH`: un 400 definitivo, sin evento durable, diciéndole a
+        // alguien cuya plata sí llegó que la mandó a otra cuenta.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx({
+            err: null,
+            preTokenBalances: [bal(1, DEPOSITOR, '10000000')],
+            postTokenBalances: [bal(1, DEPOSITOR, '9000000')],
+          }),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) throw new Error('unreachable');
+        expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        expect(res.reason).not.toBe('RECIPIENT_MISMATCH');
+        expect(res.detail).toContain('conservation check failed');
+      });
+
+      it('BLQ-BAJO-2: el destino GENUINAMENTE equivocado sigue siendo RECIPIENT_MISMATCH, y su detalle es DISTINTO', async () => {
+        // ⚠️ EL ANDAMIAJE QUE HACE QUE EL TEST DE ARRIBA SIGNIFIQUE ALGO. Los dos casos
+        // salían con el MISMO string de `detail`, o sea indistinguibles para el operador
+        // y para el caller. Acá las listas cuadran (el tercero recibió lo que el
+        // depositante pagó), así que el 400 es una afirmación MEDIDA.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx(
+            {
+              err: null,
+              preTokenBalances: [
+                bal(1, DEPOSITOR, '10000000'),
+                bal(3, OTHER_DEPOSITOR, '0'),
+              ],
+              postTokenBalances: [
+                bal(1, DEPOSITOR, '9000000'),
+                bal(3, OTHER_DEPOSITOR, '1000000'),
+              ],
+            },
+            [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA, FOREIGN_ATA],
+          ),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) throw new Error('unreachable');
+        expect(res.reason).toBe('RECIPIENT_MISMATCH');
+        // Y los dos detalles NO pueden ser el mismo string.
+        expect(res.detail).not.toContain('conservation check failed');
+      });
+
+      it('la ecuación cierra sobre el CREDITO y muere en las DOS direcciones — de más', async () => {
+        // delta 5 > baja neta de los demás 0: tokens que aparecen de la nada.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx({
+            err: null,
+            preTokenBalances: [bal(2, OWNER, '0')],
+            postTokenBalances: [bal(2, OWNER, '5000000')],
+          }),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) throw new Error('unreachable');
+        expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        expect(res.detail).toContain('gained 5000000');
+        expect(res.detail).toContain('dropped 0 net');
+      });
+
+      it('la ecuación cierra sobre el CREDITO y muere en las DOS direcciones — de menos', async () => {
+        // ⚠️ ESTA ES LA DIRECCION QUE MI TEST DE it3 NO MATABA (MNR-1 del re-AR): su
+        // fixture usaba 1001 contra 1002, que satisface `up < down`, así que el mutante
+        // que invierte la comparación sobrevivía al test que nombra la propiedad.
+        // Acá el depositante baja 8 y nuestra ATA sube 5: faltan filas del lado que
+        // recibió los otros 3.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx({
+            err: null,
+            preTokenBalances: [
+              bal(1, DEPOSITOR, '10000000'),
+              bal(2, OWNER, '0'),
+            ],
+            postTokenBalances: [
+              bal(1, DEPOSITOR, '2000000'),
+              bal(2, OWNER, '5000000'),
+            ],
+          }),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) throw new Error('unreachable');
+        expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        expect(res.detail).toContain('gained 5000000');
+        expect(res.detail).toContain('dropped 8000000 net');
+      });
     });
 
     it('MNR-1 (it3): un ELEMENTO nulo dentro de la lista NO LANZA — el contenedor válido no basta', async () => {
