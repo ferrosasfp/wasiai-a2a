@@ -482,6 +482,7 @@ export const discoveryService = {
         query.minReputation,
         query.allowTrial === true,
         standingBatch,
+        query.verified === true,
       );
       allAgents = floor.agents;
       excludedByReputation = floor.excludedByReputation;
@@ -592,30 +593,69 @@ export const discoveryService = {
    * @param min        el piso que pidió el caller (`minReputation`).
    * @param allowTrial opt-in EXPLÍCITO al carril. `false` ⟹ cero queries nuevas.
    * @param standingBatch el standing en batch, con su tercer valor `degraded`.
+   * @param verifiedOnly el caller pidió `verified=true`. AR fix-pack BLQ-BAJO-2:
+   *   el carril NO admite en ese caso. El filtro de `verified` (más arriba en el
+   *   pipeline) selecciona por lo que el CARD AFIRMA de sí mismo, y la admisión
+   *   por estreno neutraliza esa afirmación justamente porque no es evidencia
+   *   (ver el bloque de BLQ-ALTO-1 más abajo). Admitir igual devolvería, dentro de
+   *   una respuesta a `verified=true`, un agente con `verified: false`: el payload
+   *   contradiciendo al filtro que lo dejó pasar. Se elige la dirección
+   *   CONSERVADORA — el carril se achica, no se ensancha.
    */
   async applyReputationFloor(
     allAgents: Agent[],
     min: number,
     allowTrial: boolean,
     standingBatch: AgentStandingBatch,
+    verifiedOnly: boolean,
   ): Promise<{
     agents: Agent[];
     excludedByReputation: number;
     trialAvailable: number;
   }> {
-    // (i) Elegibles: EL ÚNICO predicado (CD-8), el mismo que después usan el
-    // contador y el badge. `standingFor` resuelve la distinción
+    // UNA sola expresión de "pasa por MÉRITO" (CD-8), compartida por los dos
+    // lugares que la necesitan: la preselección de elegibles al carril y el filtro
+    // de abajo. Con dos copias, la de acá y la del filtro divergirían y el carril
+    // marcaría a quien nunca relajó nada — que es exactamente el bug que esta
+    // función tuvo (AR BLQ-MED-1).
+    const passesOnMerit = (a: Agent): boolean => {
+      const score = a.computedReputation?.score;
+      return (Number.isFinite(score) ? (score as number) : 0) >= min;
+    };
+
+    // (i) Elegibles: EL ÚNICO predicado del carril (CD-8), el mismo que después
+    // usan el contador y el badge. `standingFor` resuelve la distinción
     // ausente-vs-degradado; con `degraded: true` esto da SIEMPRE vacío y no se
     // admite a nadie (AC-9, fail-closed).
-    const eligible = allAgents.filter((a) =>
-      isTrialEligible(standingFor(a.slug, standingBatch), min),
+    //
+    // ── AR fix-pack BLQ-MED-1: el que YA pasa por mérito NO es candidato ──────
+    // `newcomer` es `tasksSettled < N`, que NO es lo mismo que "sin score": con
+    // `N = 3`, un agente con 1 o 2 liquidadas tiene `computedReputation` REAL y
+    // puede superar el piso por sus propios medios. Sin este `!passesOnMerit`,
+    // ese agente entraba a `trialAdmitted` y el paso del badge le ponía
+    // `trial.granted = true` y le neutralizaba `verified`/`reputation`. Dos
+    // consecuencias, las dos graves:
+    //
+    //   · el badge AFIRMABA una relajación que no ocurrió (`excluded.reputation`
+    //     podía ser 0: nadie había sido excluido). Es AC-2 al revés;
+    //   · y como la neutralización toca las dos primeras claves del sort, ENCENDER
+    //     el opt-in cambiaba el ganador ENTRE DOS AGENTES CON HISTORIAL. Con
+    //     `/compose` tomando `agents[0]`, cambiaba a quién se contrata. Eso viola
+    //     CD-6 de frente.
+    //
+    // El carril marca SÓLO a quien entró POR el carril. Si el agente ya cumple el
+    // piso, no hay nada que relajar y no hay nada que anunciar.
+    const eligible = allAgents.filter(
+      (a) =>
+        !passesOnMerit(a) &&
+        isTrialEligible(standingFor(a.slug, standingBatch), min),
     );
 
     // (ii) Cupo M por publicador — SÓLO con opt-in del caller. Sin `allowTrial`
     // no se lee ni una fila más (CD-9: el camino por defecto no cambia en nada,
     // incluido el costo de I/O).
     let trialAdmitted: Set<string> = new Set();
-    if (eligible.length > 0 && allowTrial) {
+    if (eligible.length > 0 && allowTrial && !verifiedOnly) {
       trialAdmitted = await this.selectTrialCandidates(eligible, min);
     }
 
@@ -625,13 +665,11 @@ export const discoveryService = {
     const trialAvailable = allowTrial ? trialAdmitted.size : eligible.length;
 
     const beforeReputation = allAgents.length;
-    const agents = allAgents.filter((a) => {
-      const score = a.computedReputation?.score;
-      // Rama de MÉRITO primero, byte-idéntica a la de siempre.
-      if ((Number.isFinite(score) ? (score as number) : 0) >= min) return true;
-      // Rama de ESTRENO, segunda. Vacía salvo que el caller haya optado.
-      return trialAdmitted.has(a.slug);
-    });
+    const agents = allAgents.filter(
+      // Rama de MÉRITO primero, byte-idéntica a la de siempre; rama de ESTRENO
+      // segunda, y vacía salvo que el caller haya optado.
+      (a) => passesOnMerit(a) || trialAdmitted.has(a.slug),
+    );
     const excludedByReputation = beforeReputation - agents.length;
 
     // (iii) Badge (AC-2/DT-3/CD-2): una relajación de piso que no se ve en la

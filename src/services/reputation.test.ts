@@ -425,8 +425,9 @@ describe('WKH-313 · reputationService.computeStandingBatch', () => {
       tasksSettled: 0,
       successCount: 0,
       failedCount: 1,
-      // Fila sin `caller_ref_hash` → bucket `'__anon__'`, o sea UN caller.
-      failedCallerCount: 1,
+      // CR MNR-2: fila sin `caller_ref_hash` → bucket `'__anon__'`, que NO cuenta
+      // como caller identificado. El crudo sí la cuenta.
+      failedCallerCount: 0,
       reputation: null,
     });
   });
@@ -488,10 +489,15 @@ describe('WKH-313 · reputationService.computeStandingBatch', () => {
     });
   });
 
-  it('AR BLQ-MED-2: una ráfaga ANÓNIMA cuenta como UN solo caller', async () => {
-    // Mismo bucketing que el cap anti-sybil: sin `caller_ref_hash` todo cae en
-    // `'__anon__'`. Es la dirección conservadora — una ráfaga sin credencial no
-    // puede, sola, anularle el carril a nadie.
+  it('CR MNR-2: una ráfaga ANÓNIMA no aporta NINGÚN caller distinto', async () => {
+    // `'__anon__'` no es "un caller": es "no sé quién". Contarlo como UNA identidad
+    // distinta le regalaba el segundo bucket a un atacante, porque una llamada x402
+    // anónima no requiere registrarse: con una identidad propia más una anónima
+    // anulaba el carril de un rival para siempre, sin falsificar nada.
+    //
+    // Consecuencia declarada y deliberada: fallos SÓLO anónimos no anulan el
+    // carril. Siguen bajando `success_rate` (y con él el score real), que es el
+    // mecanismo de siempre.
     setResults([
       {
         data: [
@@ -515,9 +521,69 @@ describe('WKH-313 · reputationService.computeStandingBatch', () => {
     const batch = await reputationService.computeStandingBatch(['anonimos']);
 
     expect(batch.standings.get('anonimos')).toMatchObject({
+      // El crudo NO cambia: la fórmula del score lo sigue leyendo igual.
+      failedCount: 2,
+      // El que decide la anulación sí: cero partes IDENTIFICADAS reportaron nada.
+      failedCallerCount: 0,
+    });
+  });
+
+  it('CR MNR-2: un caller identificado + una ráfaga anónima sigue siendo UN caller', async () => {
+    // El caso exacto del ataque: el atacante tiene UNA identidad y suma llamadas
+    // anónimas gratis. Con F=2, esto NO puede anular el carril.
+    setResults([
+      {
+        data: [
+          rowWithCaller('atacante', {
+            agent_id: 'victima',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          row({
+            agent_id: 'victima',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+        ],
+        error: null,
+      },
+    ]);
+
+    const batch = await reputationService.computeStandingBatch(['victima']);
+
+    expect(batch.standings.get('victima')).toMatchObject({
       failedCount: 2,
       failedCallerCount: 1,
     });
+  });
+
+  it('CR MNR-2: DOS callers identificados sí suman dos (la anulación sigue viva)', async () => {
+    // El contrapeso: sacar el bucket anónimo no puede volver inanulable el carril.
+    setResults([
+      {
+        data: [
+          rowWithCaller('parte-a', {
+            agent_id: 'malo',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          rowWithCaller('parte-b', {
+            agent_id: 'malo',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+        ],
+        error: null,
+      },
+    ]);
+
+    const batch = await reputationService.computeStandingBatch(['malo']);
+
+    expect(batch.standings.get('malo')?.failedCallerCount).toBe(2);
   });
 
   it('computeReputationBatch se DERIVA del standing: contrato externo idéntico', async () => {

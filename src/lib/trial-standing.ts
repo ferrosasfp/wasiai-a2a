@@ -115,8 +115,13 @@ export function resolveTrialMaxFailedCallers(): number {
  * Con `F` callers distintos hace falta que el fallo lo vean partes INDEPENDIENTES.
  * No encarece mucho el ataque (`F` llamadas en vez de una), pero cambia su
  * naturaleza: deja de bastar un accidente, y deja de bastar una sola parte
- * interesada. El bucket `'__anon__'` cuenta como UN caller, así que una ráfaga
- * anónima tampoco alcanza sola.
+ * interesada.
+ *
+ * `failedCallerCount` cuenta SÓLO callers IDENTIFICADOS: el bucket `'__anon__'`
+ * (todo evento sin `caller_ref_hash`) no suma, porque no es "un caller" sino "no
+ * sé quién" — ver el bloque de CR MNR-2 en `services/reputation.ts`
+ * `accumulateRow`. Sin eso, una llamada x402 anónima (que no requiere registrarse)
+ * le regalaba a un atacante el segundo bucket.
  *
  * ── Y por qué la anulación NO expira (decisión explícita) ───────────────────
  * Se evaluó una ventana temporal (contar sólo fallos recientes). Se rechazó por

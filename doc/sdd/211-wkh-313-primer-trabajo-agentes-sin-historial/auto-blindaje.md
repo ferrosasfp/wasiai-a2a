@@ -224,3 +224,68 @@
 - **Aplicar en**: cuando una unión discriminada de un SDD no puede expresar un
   estado que el mismo SDD describe en prosa, el bug es de la firma, no del estado.
   Declararlo antes de codear, no después.
+
+### [2026-07-30] CR BLQ-MED-1 — "Está en el carril" no es "no llega al piso"
+
+- **Error**: `eligible` se armaba sólo con `isTrialEligible(...)`. Pero `newcomer` es
+  `tasksSettled < N`, y eso **no** es "sin score": con `N = 3`, un agente con 1 o 2
+  liquidadas tiene `computedReputation` REAL y puede superar el piso por sus propios
+  medios. Ese agente entraba a `trialAdmitted` igual, y el paso del badge le ponía
+  `trial.granted = true` y le neutralizaba `verified`/`reputation`. Dos daños: el
+  badge **afirmaba una relajación que no ocurrió** (con `excluded.reputation === 0`,
+  o sea nadie excluido), y como la neutralización toca las **dos primeras claves del
+  sort**, encender el opt-in **cambiaba el ganador entre dos agentes con historial**
+  — con `/compose` tomando `agents[0]`, cambiaba a quién se contrata. Viola CD-6 de
+  frente, y lo introdujo mi propio fix de BLQ-ALTO-1.
+- **Causa raíz**: dos conceptos distintos colapsados en uno. El carril debe admitir a
+  quien **el piso excluye**; yo lo até a quien **está dentro de la ventana de
+  contador**. Los dos coinciden en el caso obvio (0 liquidadas) y **divergen justo en
+  la ventana `1..N-1`**, que es la única donde el carril puede tocar a alguien que ya
+  tiene historial.
+- **Fix**: una sola expresión de "pasa por mérito" (`passesOnMerit`) compartida por
+  el pre-filtro de elegibles y por el filtro (CD-8), y `eligible` exige
+  `!passesOnMerit(a)`. El carril marca SÓLO a quien entró POR el carril.
+- **Por qué mi suite no lo vio, y es la lección**: mi guard de CD-6 usaba probados de
+  **45 y 5** liquidadas — los dos `scored`, o sea **nunca elegibles**. El test
+  cubría el caso donde el bug es imposible. Un guard de no-regresión tiene que vivir
+  en la **frontera** del cambio, no cómodo lejos de ella.
+- **Aplicar en**: cualquier predicado que use un contador como proxy de una
+  condición. Preguntarse en qué rango del contador el proxy y la condición
+  **divergen**, y poner el test ahí. Y a todo guard de no-regresión: comprobar que su
+  fixture pueda **efectivamente** entrar al camino nuevo.
+
+### [2026-07-30] CR MNR-1 — El test insignia lo decidía `verified`, no el score
+
+- **Error**: `[scored 90, scored 10, trial] → el trial ÚLTIMO` **sobrevivía** a un
+  mutante que le fabrica score **100** al admitido. El helper `raw()` había pasado a
+  declarar `verified: true` por defecto (fix-pack anterior) y el admitido sale con
+  `verified: false` forzado: la **primera** clave del sort decidía todo el orden y el
+  score nunca se miraba. El nombre del test prometía medir la reputación.
+- **Causa raíz**: cambiar el DEFAULT de un helper de fixtures compartido reescribe en
+  silencio el significado de todos los tests que lo usan. Ninguno se puso rojo.
+- **Fix**: los dos probados van con `verified: false` explícito, así el empate en la
+  primera clave obliga a que decida el score. Verificado: el mutante de score 100
+  ahora **muere** ahí.
+- **Aplicar en**: cambiar un default de un fixture compartido obliga a re-verificar
+  por MUTACIÓN los tests que dependen de él — pasar no alcanza, hay que ver que
+  sigan matando lo que decían matar.
+
+### [2026-07-30] CR MNR-2 — Un bucket que dice "no sé quién" contado como un caller
+
+- **Error**: `failedCallerCount` (los callers distintos que anulan el carril) contaba
+  `'__anon__'` como una identidad más. Como toda llamada x402 **sin agent key** cae
+  ahí, un atacante con **una** identidad conseguía el segundo bucket gratis y anulaba
+  el carril de un rival **para siempre**, sin falsificar nada.
+- **Causa raíz**: el mismo defecto de clase de esta HU, en otro disfraz.
+  `'__anon__'` no es "un caller": es "no sé quién" — un número **desconocido** de
+  partes colapsado bajo una etiqueta. Contarlo como exactamente una identidad
+  distinta **afirma algo que el dato no dice**, y lo afirma en la dirección cara.
+- **Fix**: el bucket anónimo no suma a `failedCallers`. Elegido **sobre subir `F` a
+  3**, y por aritmética: con `F = 3` el atacante sigue necesitando 2 identidades (2 +
+  anónimo), o sea el MISMO costo, mientras le sube la vara a la anulación legítima.
+  Sacar el bucket que no identifica a nadie deja el costo del atacante en 2
+  identidades reales sin encarecer el caso honesto. **Consecuencia declarada**:
+  fallos exclusivamente anónimos ya no anulan el carril; siguen bajando
+  `success_rate` y con él el score real.
+- **Aplicar en**: todo contador de "partes distintas". Un bucket catch-all vale
+  **cero** identidades, no una — si no, cualquiera compra la primera gratis.

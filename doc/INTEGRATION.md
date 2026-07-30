@@ -291,6 +291,19 @@ into accepting such a candidate below the floor **you** asked for. Rules:
   `/compose` picks the head of the list. So for a trial-admitted agent the gateway
   replaces both claims with what it can verify, in the ranking **and** in the payload.
   Nothing else about the card is touched, and no other agent is affected.
+- **The lane only ever applies to an agent the floor would have excluded.** An agent
+  that already meets `minReputation` on its own passes on merit, is **not** badged,
+  and keeps its card untouched — including when it is still inside the lane by task
+  count (with `N = 3`, an agent with 1 or 2 settled tasks has a real score and can
+  clear a low floor by itself). Turning `allowTrial` on therefore **cannot** change
+  the relative order of agents that already have history, which is what makes it safe
+  to switch on for a `/compose` step that picks the head of the list.
+- **`allowTrial` and `verified=true` do not combine.** If you filter by
+  `verified=true`, the trial lane admits nobody. That filter selects on a claim the
+  agent card makes about itself, and trial admission replaces that claim precisely
+  because it is not evidence; returning an admitted agent would put a
+  `verified: false` agent inside a response to a `verified=true` query. The
+  conservative direction wins: the lane narrows, the filter is never contradicted.
 - **It is always visible.** An admitted agent carries
   `trial: { granted: true, under_min_reputation, tasks_settled, remaining_settled_tasks }`.
   A floor relaxed in silence would be a worse bug than the one this feature fixes.
@@ -302,8 +315,11 @@ into accepting such a candidate below the floor **you** asked for. Rules:
 - **Voiding needs independent callers, and it does not expire.** It counts *callers*
   and not failures on purpose: one caller retrying against an agent that was down for
   thirty seconds would otherwise void that agent's lane permanently, and a third party
-  could burn a competitor's lane with a single cheap call. Failures with no caller
-  identity all share one anonymous bucket, so an anonymous burst counts as one. The
+  could burn a competitor's lane with a single cheap call. Only **identified** callers
+  count: a failure with no caller identity (any x402 call without an agent key) is not
+  "a caller", it is "we do not know who", so it adds nothing to that tally — otherwise
+  an attacker holding one identity would get the second one for free. Failures from
+  anonymous callers still lower `success_rate`, and with it the real score. The
   void has no expiry: a voided agent is still discoverable and hireable by anyone who
   does not ask for a floor, so it can still earn settled tasks and leave the lane on
   merit. The lane is a shortcut, and only the shortcut closes.

@@ -319,7 +319,18 @@ describe('T-02 (AC-2) · el admitido viene MARCADO y sin score fabricado', () =>
 
 // ── T-06 (CD-6) · EL ORDEN DORADO ───────────────────────────────────────
 describe('T-06 (CD-6) · el admitido ordena ÚLTIMO y el ranking de los demás no se mueve', () => {
-  const scored = [raw('alto'), raw('bajo'), raw('estreno')];
+  // ⚠️ CR MNR-1: los dos probados van con `verified: false` A PROPÓSITO. El helper
+  // `raw()` declara `verified: true` por defecto (para que el escenario del card
+  // auto-reportado sea el caso base), y el admitido sale con `verified: false`
+  // forzado. Con los probados en `true`, la PRIMERA clave del sort decidía todo el
+  // orden y estos tests NO medían la reputación que su nombre dice medir: medido,
+  // sobrevivían a un mutante que le fabrica score 100 al admitido. Empatados en
+  // `verified`, lo único que puede decidir es el score.
+  const scored = [
+    raw('alto', { verified: false }),
+    raw('bajo', { verified: false }),
+    raw('estreno'),
+  ];
   const scoredStandings: Array<[string, AgentStandingCounters]> = [
     ['alto', counters({ tasksSettled: 45, reputation: rep(90) })],
     ['bajo', counters({ tasksSettled: 5, reputation: rep(10) })],
@@ -340,6 +351,113 @@ describe('T-06 (CD-6) · el admitido ordena ÚLTIMO y el ranking de los demás n
       'estreno',
     ]);
     expect(result.agents[2]?.trial?.granted).toBe(true);
+  });
+
+  // ── AR fix-pack BLQ-MED-1 · LA VENTANA QUE FALTABA ────────────────────────
+  //
+  // Los tests de arriba usan probados de 45 y 5 liquidadas: los dos `scored`, o
+  // sea NUNCA elegibles al carril. La ventana de regresión real es OTRA —
+  // `1..N-1` liquidadas CON score que ya alcanza el piso: ahí el agente es
+  // `newcomer` por contador y aun así pasa por mérito. Sin ese escenario, el
+  // guard de CD-6 no cubría el único caso donde el carril podía tocar a alguien
+  // con historial.
+  it('BLQ-MED-1: el que pasa por MÉRITO con 1..N-1 liquidadas NO recibe badge ni relajación', async () => {
+    // 1 liquidada (dentro del carril por contador) y score real 2, con piso 2:
+    // pasa por mérito. No hay NADA que relajar, así que no puede haber badge.
+    serve([raw('llego-solo')]);
+    standings([
+      [
+        'llego-solo',
+        counters({ tasksSettled: 1, successCount: 1, reputation: rep(2, 1) }),
+      ],
+    ]);
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    expect(result.agents.map((a) => a.slug)).toEqual(['llego-solo']);
+    // Nadie fue excluido ⟹ no hubo relajación ⟹ el badge sería una afirmación
+    // FALSA. Es AC-2 al revés: anunciar una relajación que no ocurrió.
+    expect(result.excluded?.reputation).toBe(0);
+    expect(result.excluded?.trialAvailable).toBe(0);
+    expect(result.agents[0]?.trial).toBeUndefined();
+    // Y su card queda intacto: la neutralización es SÓLO para el admitido.
+    expect(result.agents[0]?.verified).toBe(true);
+    expect(result.agents[0]?.reputation).toBe(100);
+  });
+
+  it('BLQ-MED-1: encender el opt-in NO cambia el ganador entre dos agentes con historial', async () => {
+    // El que duele, porque `/compose` toma `agents[0]`: los DOS pasan el piso 10.
+    //   A: card `verified:true`, 2 liquidadas (newcomer por contador), score real 10
+    //   B: card `verified:false`, 5 liquidadas (scored), score real 20
+    // A gana por `verified`, que es la primera clave del sort. Si el carril lo
+    // tomara por elegible, le forzaría `verified:false` y B pasaría a ganar: el
+    // opt-in cambiaría a quién se contrata.
+    const dosConHistorial = [
+      raw('a-nuevo-verificado', { verified: true }),
+      raw('b-viejo', { verified: false }),
+    ];
+    const standingsDeAmbos: Array<[string, AgentStandingCounters]> = [
+      [
+        'a-nuevo-verificado',
+        counters({ tasksSettled: 2, successCount: 2, reputation: rep(10, 2) }),
+      ],
+      [
+        'b-viejo',
+        counters({ tasksSettled: 5, successCount: 5, reputation: rep(20, 5) }),
+      ],
+    ];
+
+    serve(dosConHistorial);
+    standings(standingsDeAmbos);
+    const sinOptIn = await discoveryService.discover({ minReputation: 10 });
+
+    serve(dosConHistorial);
+    standings(standingsDeAmbos);
+    const conOptIn = await discoveryService.discover({
+      minReputation: 10,
+      allowTrial: true,
+    });
+
+    expect(sinOptIn.agents.map((a) => a.slug)).toEqual([
+      'a-nuevo-verificado',
+      'b-viejo',
+    ]);
+    // CD-6: byte-idéntico para los que YA tienen historial.
+    expect(conOptIn.agents.map((a) => a.slug)).toEqual(
+      sinOptIn.agents.map((a) => a.slug),
+    );
+    expect(conOptIn.agents.every((a) => a.trial === undefined)).toBe(true);
+    expect(conOptIn.agents[0]?.verified).toBe(true);
+  });
+
+  it('BLQ-MED-1: con 1..N-1 liquidadas pero score INSUFICIENTE, el carril SÍ lo toma', async () => {
+    // El contrapeso, para que el fix no haya apagado la ventana entera: mismo
+    // agente, mismo contador, pero el piso ahora está por ENCIMA de su score real.
+    // Ahí sí hay relajación, y por lo tanto badge.
+    serve([raw('no-alcanza')]);
+    standings([
+      [
+        'no-alcanza',
+        counters({ tasksSettled: 1, successCount: 1, reputation: rep(2, 1) }),
+      ],
+    ]);
+
+    const result = await discoveryService.discover({
+      minReputation: 8,
+      allowTrial: true,
+    });
+
+    expect(result.agents.map((a) => a.slug)).toEqual(['no-alcanza']);
+    expect(result.agents[0]?.trial).toEqual({
+      granted: true,
+      under_min_reputation: 8,
+      tasks_settled: 1,
+      remaining_settled_tasks: 2,
+    });
+    expect(result.excluded?.trialAvailable).toBe(1);
   });
 
   it('el orden de los dos scored es IDÉNTICO con y sin la feature', async () => {
@@ -450,6 +568,42 @@ describe('T-06 (CD-6) · el admitido ordena ÚLTIMO y el ranking de los demás n
 
     expect(result.agents[0]?.reputation).toBe(2);
     expect(result.agents[0]?.computedReputation?.score).toBe(2);
+    expect(result.agents[0]?.verified).toBe(false);
+  });
+});
+
+// ── BLQ-BAJO-2 · el cruce con el filtro `verified=true` ─────────────────
+describe('BLQ-BAJO-2 · con `verified=true` el carril NO admite', () => {
+  it('un pedido `verified=true` NUNCA devuelve un agente con `verified:false`', async () => {
+    // El filtro de `verified` corre ANTES y selecciona por lo que el CARD AFIRMA de
+    // sí mismo. La admisión por estreno neutraliza esa afirmación justamente porque
+    // no es evidencia. Admitir igual devolvería, dentro de una respuesta a
+    // `verified=true`, un agente con `verified:false`: el payload contradiciendo al
+    // filtro que lo dejó pasar.
+    serve([raw('se-declara-verificado')]); // card: verified true, sin historial
+
+    const result = await discoveryService.discover({
+      verified: true,
+      minReputation: 5,
+      allowTrial: true,
+    });
+
+    expect(result.agents).toHaveLength(0);
+    expect(result.excluded?.trialAvailable).toBe(0);
+    // Y no se gastó la query del ancla: no había a quién admitir.
+    expect(mockListAnchors).not.toHaveBeenCalled();
+  });
+
+  it('sin `verified=true`, el MISMO agente sí entra por el carril (el gate es el cruce, no el carril)', async () => {
+    serve([raw('se-declara-verificado')]);
+
+    const result = await discoveryService.discover({
+      minReputation: 5,
+      allowTrial: true,
+    });
+
+    expect(result.agents.map((a) => a.slug)).toEqual(['se-declara-verificado']);
+    expect(result.agents[0]?.trial?.granted).toBe(true);
     expect(result.agents[0]?.verified).toBe(false);
   });
 });

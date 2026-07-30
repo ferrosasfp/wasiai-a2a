@@ -122,9 +122,12 @@ function emptyAccumulator(): RepAccumulator {
  * (históricos o anónimos) caen todos en el MISMO bucket `'__anon__'`, nunca en
  * error ni en un colapso a null.
  */
+const ANON_CALLER_BUCKET = '__anon__';
+
 function callerBucket(row: RepRow): string {
   return (
-    (row.metadata?.caller_ref_hash as string | null | undefined) ?? '__anon__'
+    (row.metadata?.caller_ref_hash as string | null | undefined) ??
+    ANON_CALLER_BUCKET
   );
 }
 
@@ -156,7 +159,28 @@ function accumulateRow(acc: RepAccumulator, row: RepRow): void {
     // `failedCount` y 1 acá — y esa diferencia es la que decide si el carril de
     // estreno se anula. `failedCount` NO cambia: la fórmula del score lo sigue
     // leyendo igual.
-    acc.failedCallers.add(callerBucket(row));
+    //
+    // ── CR MNR-2: `'__anon__'` NO cuenta como un caller distinto ─────────────
+    // Acá el bucket anónimo NO es "un caller": es "no sé quién". Colapsa bajo una
+    // etiqueta a un número DESCONOCIDO de partes (todo evento sin
+    // `caller_ref_hash`: históricos, y cualquier llamada x402 sin agent key). Con
+    // `F` callers distintos anulando el carril, contarlo como exactamente UNA
+    // identidad distinta afirma algo que el dato no dice — y lo afirma en la
+    // dirección cara: un atacante con UNA identidad más UNA llamada anónima (que
+    // no requiere registrarse) sumaba 2 buckets y anulaba el carril de un rival
+    // para siempre, sin falsificar nada.
+    //
+    // Subir `F` a 3 no arregla eso: el atacante seguiría necesitando 2 identidades
+    // (2 + anónimo = 3), o sea el MISMO costo, mientras le sube la vara a la
+    // anulación legítima. Sacar el bucket que no identifica a nadie deja el costo
+    // del atacante en 2 identidades reales y no encarece el caso honesto.
+    //
+    // CONSECUENCIA DECLARADA: fallos que vengan SÓLO de callers anónimos ya no
+    // anulan el carril. Siguen bajando `success_rate` y con él el score real, que
+    // es el mecanismo de siempre y no se toca. El carril se anula por evidencia de
+    // partes IDENTIFICADAS y distintas — que es lo que `F` quiso decir siempre.
+    const bucket = callerBucket(row);
+    if (bucket !== ANON_CALLER_BUCKET) acc.failedCallers.add(bucket);
   }
 }
 
