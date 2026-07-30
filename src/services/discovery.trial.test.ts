@@ -113,7 +113,18 @@ function rep(score: number, tasksSettled = 10): AgentReputation {
   };
 }
 
-/** raw agent de registry; `reputation` es el valor AUTO-REPORTADO por el card. */
+/**
+ * raw agent de registry. `reputation` y `verified` son los valores que el card
+ * AUTO-REPORTA, o sea los que controla la parte que se está rankeando.
+ *
+ * ⚠️ EL DEFAULT MIENTE A PROPÓSITO (AR fix-pack BLQ-ALTO-1). Antes era
+ * `reputation: 0` (y sin `verified`), y con eso el test del orden dorado pasaba
+ * por la razón equivocada: el admitido ordenaba último porque su card declaraba
+ * 0, no porque el pipeline neutralizara el auto-reporte. Cambiar ese único campo
+ * lo ponía PRIMERO. Ahora todo agente federado de este archivo llega declarando
+ * lo máximo que puede declarar sobre sí mismo, así que cualquier test que lo vea
+ * ordenar último está midiendo el arreglo y no el fixture.
+ */
 function raw(
   slug: string,
   o: Record<string, unknown> = {},
@@ -125,7 +136,8 @@ function raw(
     description: 'desc',
     capabilities: ['x'],
     price: 0,
-    reputation: 0,
+    reputation: 100,
+    verified: true,
     status: 'active',
     ...o,
   };
@@ -337,6 +349,67 @@ describe('T-06 (CD-6) · el admitido ordena ÚLTIMO y el ranking de los demás n
       'caro-probado',
       'barato-sin-historial',
     ]);
+  });
+
+  it('T-06-CARD (AR BLQ-ALTO-1): un card que se AUTO-DECLARA `verified:true` y `reputation:100` igual ordena ÚLTIMO', async () => {
+    // El escenario que el AR reprodujo: el admitido por el carril no tiene
+    // `computedReputation`, así que `repValue` caía al fallback `?? reputation` y
+    // ese número lo escribe el propio agente en su card. `verified` es peor: es la
+    // PRIMERA clave del sort y sale del mismo lugar. Un desconocido en estreno
+    // declarando 100/true le ganaba a uno con score REAL 60, y `/compose` toma
+    // `agents[0]`.
+    //
+    // El agente probado se declara MODESTO (verified:false, reputation:0) para que
+    // el único orden que puede dar verde sea el que sale de datos verificables: si
+    // el auto-reporte pesara aunque más no sea como desempate, este test se cae.
+    serve([
+      raw('estreno-fanfarron', { reputation: 100, verified: true, price: 0 }),
+      raw('probado-modesto', { reputation: 0, verified: false, price: 9 }),
+    ]);
+    standings([
+      ['probado-modesto', counters({ tasksSettled: 30, reputation: rep(60) })],
+    ]);
+
+    const result = await discoveryService.discover({
+      minReputation: 5,
+      allowTrial: true,
+    });
+
+    expect(result.agents.map((a) => a.slug)).toEqual([
+      'probado-modesto',
+      'estreno-fanfarron',
+    ]);
+    // Y el card auto-reportado tampoco sobrevive EN LA RESPUESTA: rankear como 0
+    // mientras se devuelve 100 sería la misma mentira, corrida de lugar.
+    const admitido = result.agents[1];
+    expect(admitido?.trial?.granted).toBe(true);
+    expect(admitido?.verified).toBe(false);
+    expect(admitido?.reputation).toBe(0);
+    // El que pasa por mérito NO se toca: su card queda tal cual llegó.
+    expect(result.agents[0]?.verified).toBe(false);
+    expect(result.agents[0]?.reputation).toBe(0);
+  });
+
+  it('T-06-CARD-bis: con score real bajo, el admitido conserva su score real y NO el del card', async () => {
+    // Frontera del `?? 0`: 1 liquidada ⟹ SÍ hay `computedReputation` (score 2), y
+    // el card declara 100. El valor que queda es el REAL, no el declarado ni un 0
+    // de relleno.
+    serve([raw('arranco-y-fanfarronea')]);
+    standings([
+      [
+        'arranco-y-fanfarronea',
+        counters({ tasksSettled: 1, successCount: 1, reputation: rep(2, 1) }),
+      ],
+    ]);
+
+    const result = await discoveryService.discover({
+      minReputation: 8,
+      allowTrial: true,
+    });
+
+    expect(result.agents[0]?.reputation).toBe(2);
+    expect(result.agents[0]?.computedReputation?.score).toBe(2);
+    expect(result.agents[0]?.verified).toBe(false);
   });
 });
 

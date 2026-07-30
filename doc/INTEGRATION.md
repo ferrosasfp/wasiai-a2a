@@ -283,6 +283,14 @@ into accepting such a candidate below the floor **you** asked for. Rules:
   **not** given a synthetic score to "make it pass", so it sorts **last** and can
   only ever be chosen when **no** agent qualifies on merit. Publishing a hundred new
   agents does not displace one with a reputation.
+- **An admitted agent is surfaced with `verified: false` and with `reputation` set to
+  its real computed score.** Ranking reads `verified` first and, with no computed
+  score, falls back to the `reputation` value on the agent card, and both of those are
+  **self-reported by the agent**. A federated agent declaring `{"reputation": 100,
+  "verified": true}` would otherwise sort **first** while having no history at all, and
+  `/compose` picks the head of the list. So for a trial-admitted agent the gateway
+  replaces both claims with what it can verify, in the ranking **and** in the payload.
+  Nothing else about the card is touched, and no other agent is affected.
 - **It is always visible.** An admitted agent carries
   `trial: { granted: true, under_min_reputation, tasks_settled, remaining_settled_tasks }`.
   A floor relaxed in silence would be a worse bug than the one this feature fixes.

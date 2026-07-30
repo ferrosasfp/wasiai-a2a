@@ -1,5 +1,30 @@
 # Auto-Blindaje — HU WKH-313 (carril de estreno)
 
+### [2026-07-30] Fix-pack AR · BLQ-ALTO-1 — La garantía se probó contra un fixture que no podía romperla
+
+- **Error**: la garantía central de la HU («el admitido conserva su score real, así
+  que ordena ÚLTIMO») era **falsa para todo agente federado**. `repValue` es
+  `computedReputation?.score ?? reputation` y el admitido no tiene el primero, así
+  que caía al `reputation` del **card que publica el propio agente**; `verified`,
+  primera clave del sort, sale del mismo lugar. Un desconocido declarando
+  `{reputation:100, verified:true}` ordenaba **primero**, y `/compose` toma
+  `agents[0]`: camino del dinero.
+- **Causa raíz**: el test del orden dorado pasaba **sólo** porque el fixture `raw()`
+  fijaba `reputation: 0`. Cambiando ese único campo se caía. Es el patrón "mide
+  aire" por tercera vez en esta HU: el escenario le daba al sujeto un valor que ya
+  garantizaba el resultado esperado, sin ejercitar el mecanismo.
+- **Fix**: el fixture pasa a mentir por defecto (`reputation: 100`, `verified: true`)
+  y el pipeline **neutraliza los dos campos auto-reportados del admitido**
+  (`discovery.ts`, bloque del badge): `verified = false` y `reputation =
+  computedReputation?.score ?? 0`. El comparador y `repValue` quedan byte-idénticos:
+  se corrigió **lo que se les da de comer**, no el criterio. Mutante `M-CARD`
+  (quitar las dos líneas) mata 5 tests, entre ellos `T-06-CARD`.
+- **Aplicar en**: cualquier invariante de ORDEN. El fixture tiene que estar sesgado
+  **en contra** de la propiedad que se afirma; si el dato de entrada ya implica la
+  salida, el test no prueba el mecanismo. Y regla general del ranking: todo campo que
+  entra al comparador y viene de un card federado es **auto-reportado** hasta que se
+  demuestre lo contrario.
+
 ### [2026-07-30] W0.1 — El tipo creció y el sitio de construcción quedó atrás
 
 - **Error**: agregué `reputation` y `trialAvailable` a `DiscoveryResult.excluded`

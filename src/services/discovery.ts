@@ -508,12 +508,59 @@ export const discoveryService = {
 
       // (iii) Badge (AC-2/DT-3/CD-2): una relajación de piso que no se ve en la
       // respuesta es un piso relajado en silencio, que es la clase de bug que este
-      // repo rechaza por escrito. NO se toca `computedReputation` ni `reputation`.
+      // repo rechaza por escrito. `computedReputation` NO se toca: el score real no
+      // se fabrica nunca.
+      //
+      // ── AR fix-pack BLQ-ALTO-1: por qué acá TAMBIÉN se pisan `verified` y
+      //    `reputation` del admitido ──────────────────────────────────────────
+      // La garantía central de esta HU ("el admitido conserva su puntaje REAL, así
+      // que ordena ÚLTIMO") era FALSA para agentes federados, y el AR lo reprodujo:
+      //
+      //   · `repValue` (abajo) es `computedReputation?.score ?? reputation`. Un
+      //     admitido en estreno NO tiene `computedReputation` (0 liquidadas), así
+      //     que el fallback tomaba `Agent.reputation`, que para un federado sale de
+      //     `mapAgent` ⟹ del CARD QUE EL PROPIO AGENTE PUBLICA. Declarando
+      //     `reputation: 100` un desconocido ordenaba PRIMERO.
+      //   · `verified` es la PRIMERA clave del sort y tiene el mismo origen: el
+      //     card. Declarando `verified: true` ganaba incluso empatando en score.
+      //
+      // Y `/compose` toma `result.agents[0]` (capability-resolver.ts): era el camino
+      // del dinero eligiendo por un número que elige el cobrador.
+      //
+      // El arreglo NO puede estar en el comparador ni en `repValue` (directiva de
+      // no-regresión: el ranking de los que YA tienen historial queda byte-idéntico,
+      // CD-6). Está en LO QUE SE LE DA DE COMER: un agente admitido por el carril
+      // llega al sort con los dos campos auto-reportados REEMPLAZADOS por lo que el
+      // gateway sí puede verificar.
+      //
+      //   `verified = false`      — el carril admite por AUSENCIA de historial. Una
+      //                             insignia de identidad que el propio card afirma
+      //                             no es historial verificado, y acá es la primera
+      //                             clave del sort. El único ancla no forjable es
+      //                             `Agent.identity` (ERC-8004, verificada on-chain
+      //                             por `attachIdentities`), que es OTRO campo y NO
+      //                             se toca.
+      //   `reputation = score real` — `computedReputation?.score ?? 0`, o sea
+      //                             EXACTAMENTE lo que `repValue` computaría si el
+      //                             card no mintiera. Con score real bajo (1-2
+      //                             liquidadas) el valor no cambia nada, porque
+      //                             `repValue` ya prefiere `computedReputation`.
+      //
+      // Esto es una pisada DELIBERADA y acotada al admitido: nadie más ve tocado su
+      // card. Y se hace también sobre la RESPUESTA (no sólo sobre una copia para
+      // ordenar) a propósito: devolver `reputation: 100` en el payload mientras se
+      // lo rankea como 0 sería una segunda mentira, esta vez hacia el cliente.
       if (trialAdmitted.size > 0) {
         const n = resolveTrialMaxSettledTasks();
         for (const a of allAgents) {
           if (!trialAdmitted.has(a.slug)) continue;
           const st = standingFor(a.slug, standingBatch);
+          // Rama defensiva DECLARADA (AR/CR MENOR): `st` no puede ser `'unknown'`
+          // acá. `trialAdmitted` se llena SÓLO desde `eligible`, y con el batch
+          // degradado `isTrialEligible('unknown', …)` es `false` para todos, así que
+          // `eligible` queda vacío y no se leen ni las anclas (T-10). El `?? 0` es
+          // el default seguro de una rama INALCANZABLE por construcción, no un caso
+          // real sin test.
           const tasksSettled = st === 'unknown' ? 0 : st.tasksSettled;
           a.trial = {
             granted: true,
@@ -521,6 +568,8 @@ export const discoveryService = {
             tasks_settled: tasksSettled,
             remaining_settled_tasks: n - tasksSettled,
           };
+          a.verified = false;
+          a.reputation = a.computedReputation?.score ?? 0;
         }
       }
     }

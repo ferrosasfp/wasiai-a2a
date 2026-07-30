@@ -430,6 +430,15 @@ export interface DiscoveryQuery {
    *
    * El agente admitido NO recibe score fabricado: conserva su puntaje real (0)
    * y por lo tanto ordena ÚLTIMO (CD-6).
+   *
+   * ⚠️ AR fix-pack BLQ-ALTO-1 — cómo se sostiene ese "ordena ÚLTIMO". Sin score
+   * computado el ranking cae al `Agent.reputation` del card, y la PRIMERA clave del
+   * sort es `Agent.verified`: los dos los AUTO-REPORTA el agente (`mapAgent`), así
+   * que un federado que declarara `{reputation:100, verified:true}` ordenaba
+   * PRIMERO y `/compose` toma `agents[0]`. Por eso el admitido llega al sort, y sale
+   * en la respuesta, con `verified: false` y `reputation` = su score REAL
+   * (`computedReputation?.score ?? 0`). El comparador NO se tocó: se corrigió lo que
+   * se le da de comer.
    */
   allowTrial?: boolean | undefined;
   limit?: number | undefined;
@@ -544,7 +553,9 @@ export interface ComposeStepConstraints {
    *
    * Ausente/`false` = comportamiento de hoy. `true` admite bajo `min_reputation`
    * a un agente sin historial, que igual ordena ÚLTIMO porque su score real
-   * sigue siendo 0 (CD-6). No-booleano ⟹ 400 `VALIDATION_ERROR`.
+   * sigue siendo 0 y porque el pipeline le neutraliza los dos campos que el card
+   * auto-reporta (`verified` y `reputation` — ver `DiscoveryQuery.allowTrial`).
+   * No-booleano ⟹ 400 `VALIDATION_ERROR`.
    */
   allow_trial?: boolean;
 }

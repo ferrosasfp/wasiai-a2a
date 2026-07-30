@@ -84,8 +84,12 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    *   comportamiento de hoy, byte por byte, incluido el costo de I/O. El admitido
    *   NO recibe score fabricado: conserva su puntaje real (0) y ordena ÚLTIMO, así
    *   que sólo puede ser elegido cuando NINGÚN agente pasa por mérito, y viene
-   *   marcado con `agents[].trial`. Cualquier valor que no sea `'true'`/`'false'`
-   *   → 400 `INVALID_ALLOW_TRIAL` (nunca se adivina un flag de riesgo).
+   *   marcado con `agents[].trial`. Para que ese "ordena último" sea CIERTO también
+   *   para un agente federado, el admitido se surfacea con `verified: false` y con
+   *   `reputation` = su score REAL: los dos son campos que el card AUTO-REPORTA y
+   *   son las dos primeras claves del ranking (AR fix-pack BLQ-ALTO-1). Cualquier
+   *   valor que no sea `'true'`/`'false'` → 400 `INVALID_ALLOW_TRIAL` (nunca se
+   *   adivina un flag de riesgo).
    *
    * Respuesta — contrato de paginación (fix-pack P1, hallazgo 1):
    * - `agents`: hasta `limit` matches, ordenados verified-first → reputación
