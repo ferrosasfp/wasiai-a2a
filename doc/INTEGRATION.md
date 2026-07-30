@@ -837,23 +837,15 @@ re-opens every past Solana deposit for re-crediting.
 
 ### 6.7 Known debt this path activates — `TD-SOLANA-CAIP2-DENYLIST`
 
-Declared here, **not closed by this feature**, and it needs an owner.
+**This is an operator concern, not a depositor one.** Turning
+`A2A_SOLANA_DEPOSIT_ENABLED=true` in an environment that also serves real value erodes
+one of the three conditions that keep `TD-SOLANA-CAIP2-DENYLIST` tolerable, and the
+story that converts it to a fail-CLOSED allowlist has to be opened **first**.
 
-`classifySolanaCaip2` (`src/adapters/chain-resolver.ts`) is a **fail-OPEN denylist**: an
-unknown CAIP-2 falls back to `testnet`, so a leg's mainnet gate lets it through without
-opt-in. That is acceptable today only because of three simultaneous conditions: the
-value is env-only (not agent-controlled), the Solana rail is flag-gated off, and there
-is no `solana-mainnet` chain key.
-
-**Enabling the Solana deposit path erodes the second of those three.** The documented
-reactivation condition — flip to a fail-CLOSED allowlist — triggers when the rail leaves
-flag-off *or* a `solana-mainnet` chain key appears. Whoever turns
-`A2A_SOLANA_DEPOSIT_ENABLED=true` in an environment that also serves real value must
-open that story first.
-
-*(The code comment cites `MULTI-CHAIN.md §10`. That document is not in this repository —
-it was moved out in the 2026-07-28 cleanup. This section is the live reference until
-that pointer is redirected.)*
+The debt itself, its three conditions, its trigger and the three new environment
+variables are tracked where debt is tracked:
+[`architecture/MULTI-CHAIN.md`](architecture/MULTI-CHAIN.md) §10 / §10.1. It is
+**declared, not closed** by this feature.
 
 ---
 

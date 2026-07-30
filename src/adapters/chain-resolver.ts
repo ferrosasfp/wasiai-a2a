@@ -249,7 +249,9 @@ export function classifyEvmChainId(chainId: number): ChainEnvironment {
  * mainnet-beta. Se clasifica por DENYLIST (no allowlist) a propósito: un
  * cluster devnet/localnet con un CAIP-2 exótico NO debe bloquearse por sorpresa.
  *
- * ⚠️ DEUDA EXPLÍCITA — `TD-SOLANA-CAIP2-DENYLIST` (`MULTI-CHAIN.md` §10). Esta
+ * ⚠️ DEUDA EXPLÍCITA — `TD-SOLANA-CAIP2-DENYLIST`
+ * (`doc/architecture/MULTI-CHAIN.md` §10; el nombre pelado que había acá no lo
+ * encontraba nadie). Esta
  * denylist es fail-OPEN: un CAIP-2 desconocido cae en `testnet`, o sea que el
  * gate de mainnet del leg lo deja pasar sin opt-in. Es aceptable HOY sólo por
  * tres condiciones simultáneas: (a) el valor no es agent-controlled (sale de

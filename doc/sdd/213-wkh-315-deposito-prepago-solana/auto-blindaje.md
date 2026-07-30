@@ -208,3 +208,31 @@ el error ocurre**, no al final.
 - **Aplicar en**: antes de sumar un término a un match, preguntarse **qué información
   agrega que los otros no den ya**. Un término redundante sobre un campo OPCIONAL no es
   defensa en profundidad: es una fuente de falsos negativos con voz de veredicto.
+
+---
+
+### [2026-07-30 FIX-PACK · M1] Concluí "el archivo no existe" de una ruta mal tipeada, y lo escribí como lección
+
+- **Error**: la entrada `[W3.2]` de más arriba afirma que `MULTI-CHAIN.md` **no existe en
+  este repositorio**. **Es falso.** Existe: `doc/architecture/MULTI-CHAIN.md`, 26 KB,
+  versionado en `main` desde hace meses. Lo que no existe es `doc/MULTI-CHAIN.md`, que es
+  la ruta —**sin la carpeta `architecture/`**— que el story file escribió en `:301` y
+  `:567` y que yo verifiqué al pie de la letra.
+- **Causa raíz**: verifiqué **la ruta que me dieron**, no **el documento**. Un `ls` de la
+  ruta exacta contesta la pregunta equivocada cuando la ruta puede estar mal tipeada, y
+  un `.md` de arquitectura vive casi siempre en una subcarpeta. Y encontré una
+  explicación **coherente y falsa** para el hueco (la limpieza del 2026-07-28 sí sacó
+  documentación interna), lo cual apagó la duda en vez de encenderla: cuando la primera
+  hipótesis explica bien el síntoma, deja de buscarse una segunda.
+- **Fix**: el registro de la deuda `TD-SOLANA-CAIP2-DENYLIST` y las tres envs nuevas
+  fueron a `doc/architecture/MULTI-CHAIN.md` §10.1 —el registro de deudas de verdad—,
+  `INTEGRATION.md` §6.7 quedó con lo que le sirve al depositante y un puntero, y el
+  comentario de `chain-resolver.ts` ahora cita la ruta COMPLETA, que además queda
+  vigilada por `test/docs-referenced-by-code-exist.test.ts` (sólo verifica referencias
+  con forma de ruta: el nombre pelado que había antes era invisible para el guardián).
+- **Aplicar en**: cuando un artefacto "no existe", buscarlo **por nombre en todo el
+  repo** antes de escribirlo como hecho (`git ls-files | grep -i <nombre>` cuesta un
+  segundo). Es la misma familia que el falso rojo del mint: **verificar qué SIGNIFICA el
+  dato antes que su VALOR**, y desconfiar del hallazgo que además trae su propia
+  explicación cómoda. Y una lección escrita en un auto-blindaje se propaga: un hecho
+  falso acá vale más caro que uno en un comentario.
