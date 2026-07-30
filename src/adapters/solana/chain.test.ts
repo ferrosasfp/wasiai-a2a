@@ -69,6 +69,10 @@ const ENV_KEYS = [
   'SOLANA_CAIP2_CHAIN_ID',
   'SOLANA_SYNTHETIC_CHAIN_ID',
   'SOLANA_OPERATOR_PRIVATE_KEY',
+  // WKH-315 (W3.1): las lee la aserción de coherencia cuenta-de-depósito ↔
+  // operador. Se limpian con las demás para que ningún test las herede.
+  'A2A_DEPOSIT_SOLANA_OWNER',
+  'A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED',
 ] as const;
 
 describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', () => {
@@ -264,6 +268,118 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
         new Uint8Array(32).fill(7),
       );
       expect(() => getSolanaOperatorKeypair()).toThrow();
+    });
+
+    // ── WKH-315 · T-315-20 — coherencia cuenta-de-depósito ↔ operador ────────
+    //
+    // El riesgo: si `A2A_DEPOSIT_SOLANA_OWNER` apunta a una pubkey que el operador NO
+    // controla, el dinero del usuario aterriza en una cuenta desde la que no se puede
+    // pagar, y nadie se entera hasta querer gastarlo.
+    describe('T-315-20: aserción de coherencia con A2A_DEPOSIT_SOLANA_OWNER', () => {
+      /** Setea un operador real y devuelve su pubkey. */
+      function withOperator(): string {
+        const kp = Keypair.generate();
+        process.env.SOLANA_OPERATOR_PRIVATE_KEY = base58Encode(kp.secretKey);
+        return kp.publicKey.toBase58();
+      }
+
+      it('T-315-20: owner == operador ⇒ carga OK', () => {
+        const pubkey = withOperator();
+        process.env.A2A_DEPOSIT_SOLANA_OWNER = pubkey;
+        expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(pubkey);
+      });
+
+      it('T-315-20: env AUSENTE ⇒ carga OK (la aserción no inventa un requisito)', () => {
+        const pubkey = withOperator();
+        delete process.env.A2A_DEPOSIT_SOLANA_OWNER;
+        expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(pubkey);
+      });
+
+      it('T-315-20: env VACIA ⇒ carga OK (una env seteada a "" es "sin configurar")', () => {
+        const pubkey = withOperator();
+        process.env.A2A_DEPOSIT_SOLANA_OWNER = '';
+        expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(pubkey);
+      });
+
+      it('T-315-20: owner ≠ operador SIN la declaración ⇒ LANZA, nombrando las DOS envs', () => {
+        withOperator();
+        const foreign = Keypair.generate().publicKey.toBase58();
+        process.env.A2A_DEPOSIT_SOLANA_OWNER = foreign;
+
+        expect(() => getSolanaOperatorKeypair()).toThrow(
+          /A2A_DEPOSIT_SOLANA_OWNER/,
+        );
+        // El mensaje tiene que decir QUE hacer, no sólo que algo está mal.
+        expect(() => getSolanaOperatorKeypair()).toThrow(
+          /A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED=true/,
+        );
+        // Y por qué importa: el dinero aterrizaría donde no se puede pagar desde.
+        expect(() => getSolanaOperatorKeypair()).toThrow(/cannot pay from/);
+      });
+
+      it("T-315-20: owner ≠ operador CON ..._IS_DEDICATED='true' ⇒ carga OK (afirmación del operador)", () => {
+        const pubkey = withOperator();
+        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+          Keypair.generate().publicKey.toBase58();
+        process.env.A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED = 'true';
+        expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(pubkey);
+      });
+
+      it("T-315-20: la salida es ESTRICTA — 'TRUE'/'1'/'yes' NO declaran nada y sigue lanzando", () => {
+        // Con `Boolean(env)` cualquier string apagaría el control. La salida es una
+        // afirmación deliberada, así que exige el literal exacto.
+        withOperator();
+        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+          Keypair.generate().publicKey.toBase58();
+        for (const v of ['TRUE', 'True', '1', 'yes', 'on', '']) {
+          process.env.A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED = v;
+          _resetSolanaChain();
+          expect(() => getSolanaOperatorKeypair(), `valor=${v}`).toThrow(
+            /A2A_DEPOSIT_SOLANA_OWNER/,
+          );
+        }
+      });
+
+      it('T-315-20: el guard NO se saltea con un reintento — no se cachea antes de la aserción', () => {
+        // ⚠️ Si `_operator` se asignara ANTES del chequeo, el primer llamado lanzaría
+        // y el SEGUNDO devolvería el keypair cacheado sin re-chequear. Un guard que
+        // se evade reintentando no es un guard.
+        withOperator();
+        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+          Keypair.generate().publicKey.toBase58();
+        expect(() => getSolanaOperatorKeypair()).toThrow();
+        expect(() => getSolanaOperatorKeypair()).toThrow();
+        expect(() => getSolanaOperatorKeypair()).toThrow();
+      });
+
+      it('T-315-20 (CD-3): el mensaje del throw NO contiene el secreto', () => {
+        const kp = Keypair.generate();
+        const b58 = base58Encode(kp.secretKey);
+        process.env.SOLANA_OPERATOR_PRIVATE_KEY = b58;
+        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+          Keypair.generate().publicKey.toBase58();
+
+        let msg = '';
+        try {
+          getSolanaOperatorKeypair();
+        } catch (e) {
+          msg = e instanceof Error ? e.message : String(e);
+        }
+        // Andamiaje: efectivamente lanzó.
+        expect(msg).not.toBe('');
+        expect(msg).not.toContain(b58);
+        expect(msg).not.toContain(b58.slice(0, 32));
+        // Las dos pubkeys SI pueden aparecer: son públicas por definición.
+        expect(msg).toContain(kp.publicKey.toBase58());
+      });
+
+      it('T-315-20: tolera whitespace alrededor del owner (un .env copy-pasteado lo trae)', () => {
+        const pubkey = withOperator();
+        process.env.A2A_DEPOSIT_SOLANA_OWNER = `  ${pubkey}\n`;
+        // Sin el `.trim()`, esto lanzaría por un salto de línea invisible: un
+        // fail-loud por un carácter que el operador no puede ver es una trampa.
+        expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(pubkey);
+      });
     });
   });
 });
