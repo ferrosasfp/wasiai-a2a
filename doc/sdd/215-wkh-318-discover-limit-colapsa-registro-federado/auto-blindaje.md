@@ -120,6 +120,62 @@ próxima HU.
 
 ---
 
+### [2026-07-30 18:40] Fix-pack AR — Maté el colapso de tres valores y dejé vivo el de dos
+
+- **Error** (AR BLQ-1): puse tanta atención en que `rows` no colapsara
+  `0` con `null` que no vi que **`state` colapsaba dos cosas en `ok`**:
+  *"respondió y trajo todo"* y *"respondió y no tengo forma de saber si trajo
+  todo"*. Y elegía la primera. Era el caso de PRODUCCIÓN, no un borde: el
+  registro real se siembra sin `nextCursorPath` y `/capabilities` llama a
+  `discover({})` sin `limit`, así que no hay evidencia obtenible por ningún lado.
+  El repro del AR: 20 filas **con `next_cursor` seteado** devolvían
+  `{"state":"ok","catalogStatus":"complete"}`.
+- **Causa raíz**: escribí la detección de truncamiento como *"buscar evidencia de
+  que FALTA algo, y si no la encuentro, está completo"*. Ese default es una
+  afirmación disfrazada de ausencia. `ok` era el valor por descarte, y por
+  descarte no se prueba nada. Es la misma estructura del bug que la HU ataca, un
+  nivel más adentro: el original decía "consulté este registro" sin haberlo
+  consultado; el mío decía "esta fuente me dio todo" sin poder saberlo.
+- **Fix**: invertir la carga de la prueba. `ok` exige **evidencia positiva** de
+  completitud (el registro declara que no hay más, o la página no se llenó), y
+  sin ninguna de las dos el estado es `unverified`. El roll-up gana el mismo
+  escalón: `partial > truncated > unverified > complete`.
+- **Falsifiqué una afirmación mía en un commit**: escribí que sin las migraciones
+  "el código es inerte y **falla en la dirección segura**". La inercia era cierta
+  y estaba probada. La dirección **no**: fallaba sobre-declarando completitud,
+  que es la insegura. Dije dos cosas y sólo verifiqué una.
+- **Aplicar en**: cuando un tipo tenga un valor que signifique "todo bien",
+  preguntarse **qué lo prueba**. Si la respuesta es "que no encontré nada malo",
+  hay dos estados escondidos ahí y uno es una afirmación sin respaldo. Y al
+  escribir "falla en la dirección segura", verificar **la dirección**, no sólo
+  que falle: son dos afirmaciones y la segunda es la que importa.
+
+---
+
+### [2026-07-30 18:55] Fix-pack AR — Apliqué la regla nueva a las fuentes remotas y me olvidé de la local
+
+- **Error** (AR BLQ-2): el `catch` del SELECT de self-published seguía degradando
+  a `localAgents = []`, y la fila de esa fuente se empujaba a `sources` sólo si
+  `localAgents.length > 0`. O sea: **un SELECT caído era indistinguible de "no hay
+  agentes self-published"**, y el catálogo se declaraba `complete` igual. Es
+  exactamente el bug que la HU mata, del lado local — y encima sobre la fuente
+  que carga los tres agentes del money-path de Chaski.
+- **Causa raíz**: traté "el fanout federado" como el lugar donde vivía el
+  problema, porque ahí estaba el `.catch(() => [])` que el work-item nombraba. La
+  fuente local entra por otro camino (un `try/catch` 250 líneas más arriba) y
+  nunca la pasé por la regla nueva. El gate `length > 0` ya estaba ahí de antes y
+  lo leí como parte del paisaje.
+- **Fix**: la fila entra por **haberse consultado**, no por haber traído filas.
+  `null` pasa a significar una sola cosa —no se la consultó, porque el caller
+  filtró a otro registry— y el fallo del SELECT viaja como `failed`/`rows: null`
+  con su `log.warn` estructurado, igual que una fuente remota.
+- **Aplicar en**: cuando una HU introduce una regla ("toda fuente declara cómo le
+  fue"), enumerar **todas** las fuentes por las que entran datos, no sólo la que
+  el bug original nombraba. Un `catch` que asigna un valor vacío es siempre
+  sospechoso, esté donde esté: `[]` no puede distinguir *no hay* de *no pude*.
+
+---
+
 ### [2026-07-30 17:55] Waves 1–2 — Dos nominaciones de mutante del story file no se sostienen
 
 - **Hallazgo** (no es un error propio, es una corrección al story file, verificada
