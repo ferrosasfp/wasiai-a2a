@@ -23,6 +23,7 @@
 import crypto from 'node:crypto';
 import { Keypair } from '@solana/web3.js';
 import Fastify from 'fastify';
+import { privateKeyToAccount } from 'viem/accounts';
 import {
   afterAll,
   afterEach,
@@ -96,7 +97,10 @@ vi.mock('../services/receipt.js', () => ({
 // `deposit-account.js` se usa REAL (es config pura, env-driven): así el flag y la
 // derivación de la ATA se ejercitan de verdad en `deposit-info`.
 
-import { getAdaptersBundle, getInitializedChainKeys } from '../adapters/registry.js';
+import {
+  getAdaptersBundle,
+  getInitializedChainKeys,
+} from '../adapters/registry.js';
 import { verifySolanaDeposit } from '../adapters/solana/deposit-verifier.js';
 import type { AdaptersBundle } from '../adapters/types.js';
 import { budgetService } from '../services/budget.js';
@@ -165,7 +169,10 @@ const SIGNATURE = realSignature();
 const VALID_EVM_TX = `0x${'a'.repeat(64)}`;
 
 const TEST_KEY = `wasi_a2a_${'a'.repeat(64)}`;
-const TEST_KEY_HASH = crypto.createHash('sha256').update(TEST_KEY).digest('hex');
+const TEST_KEY_HASH = crypto
+  .createHash('sha256')
+  .update(TEST_KEY)
+  .digest('hex');
 const TEST_KEY_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
 function makeKeyRow(overrides: Partial<A2AAgentKeyRow> = {}): A2AAgentKeyRow {
@@ -746,7 +753,8 @@ describe('WKH-315 · rutas del depósito Solana', () => {
 
   // ── AC-11 / T-315-12: GET /auth/deposit-info ──────────────────────────────
   describe('AC-11: GET /auth/deposit-info (T-315-12, 12b, 12c)', () => {
-    const getInfo = () => app.inject({ method: 'GET', url: '/auth/deposit-info' });
+    const getInfo = () =>
+      app.inject({ method: 'GET', url: '/auth/deposit-info' });
 
     it('T-315-12: con el flag OFF, Solana NO se lista', async () => {
       // Publicar una cuenta de depósito sin el camino habilitado invitaría a mandar
@@ -806,31 +814,97 @@ describe('WKH-315 · rutas del depósito Solana', () => {
       // ⚠️ Publicar una address EVM acá es el landmine de `resolveTreasury` con otro
       // nombre: el depositante mandaría USDC de devnet a un string que en Solana no
       // es nada.
-      process.env.A2A_DEPOSIT_TREASURY_SOLANA =
-        '0x1111111111111111111111111111111111111111';
-      process.env.OPERATOR_PRIVATE_KEY = `0x${'11'.repeat(32)}`;
+      //
+      // ══════════════════════════════════════════════════════════════════════════
+      // ⚠️ POR QUE ESTE TEST NO PROHIBE UNA TIRADA DE '1' (Y POR QUE LO HIZO UNA VEZ)
+      // ══════════════════════════════════════════════════════════════════════════
+      //
+      // La primera versión afirmaba `expect(raw).not.toContain('1'.repeat(32))`, con
+      // la intención de cazar el fixture de `OPERATOR_PRIVATE_KEY` (que era
+      // `0x` + '11' × 32). Se puso ROJA, y NO por una fuga: el guard chocaba con un
+      // valor que la respuesta publica LEGITIMAMENTE.
+      //
+      // Medido: el mint fixture `So111…112` tiene una tirada de **40 unos
+      // consecutivos**, así que contiene el needle de 32. Y `token.mint` es
+      // precisamente el dato que el depositante NECESITA para transferir. O sea: el
+      // guard prohibía la carga útil de la respuesta.
+      //
+      // La lección, que vale más que el fix: **un secreto formado por un carácter
+      // repetido es indistinguible de una dirección base58 legítima**, así que un
+      // guard por subcadena sobre él no puede separar la fuga del dato bueno. El
+      // arreglo NO fue borrar la aserción (eso sí habría debilitado el control):
+      // fue (a) darle al fixture un valor DISTINTIVO, y (b) afirmar sobre el valor
+      // COMPLETO del secreto y sobre la address DERIVADA de él —que es el valor que
+      // el landmine de `resolveTreasury` realmente filtraría— en vez de sobre un
+      // pedazo suyo que colisiona con todo.
+      //
+      // Un guard demasiado amplio que alguien relaja de apuro es cómo se pierde un
+      // control de verdad. Este quedó MAS estrecho en su superficie y MAS fuerte en
+      // lo que prueba.
+      // ══════════════════════════════════════════════════════════════════════════
+
+      // Fixture DISTINTIVO: sin tiradas de un mismo carácter, así que si aparece en
+      // la respuesta es porque se filtró, no por una coincidencia de charset.
+      const PK_HEX = 'a3f19c7d';
+      const OPERATOR_PK = `0x${PK_HEX.repeat(8)}` as `0x${string}`;
+      const TREASURY_ENV = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+      process.env.A2A_DEPOSIT_TREASURY_SOLANA = TREASURY_ENV;
+      process.env.OPERATOR_PRIVATE_KEY = OPERATOR_PK;
+      // La address que `resolveTreasury` DERIVARIA de esa pk por su fallback: es el
+      // valor exacto que el landmine publicaría como "destino" de un depósito Solana.
+      const derivedOperatorAddress = privateKeyToAccount(OPERATOR_PK).address;
+
       mockGetInitializedChainKeys.mockReturnValue(['solana-devnet']);
       mockGetAdaptersBundle.mockReturnValue(solanaBundle());
 
-      const res = await getInfo();
-      const raw = res.body;
+      try {
+        const res = await getInfo();
+        const raw = res.body;
 
-      expect(raw).not.toMatch(/0x[0-9a-fA-F]{40}/); // ninguna address EVM
-      expect(raw).not.toContain('treasury');
-      expect(raw).not.toContain('escrow');
-      expect(raw).not.toContain('PRIVATE');
-      expect(raw).not.toContain('11111111111111111111111111111111'); // el pk fixture
-      const n = (res.json().networks as Record<string, unknown>[])[0] as Record<
-        string,
-        unknown
-      >;
-      expect(n).not.toHaveProperty('treasury');
-      expect(n).not.toHaveProperty('escrow_mode');
-      expect(n).not.toHaveProperty('escrow_contract');
-      expect(n).not.toHaveProperty('min_confirmations');
+        // (1) NINGUNA address EVM, en ninguna forma. Este es el guard ancho que sí
+        // corresponde: `0x` + 40 hex no puede aparecer en una entrada Solana.
+        expect(raw).not.toMatch(/0x[0-9a-fA-F]{40}/);
+        // (2) Ni el treasury de la env, ni la address DERIVADA del fallback — el
+        // valor concreto del landmine —, en cualquier caja.
+        expect(raw.toLowerCase()).not.toContain(TREASURY_ENV.toLowerCase());
+        expect(raw.toLowerCase()).not.toContain(
+          derivedOperatorAddress.toLowerCase(),
+        );
+        // (3) La clave privada, completa y también su cuerpo hex sin el `0x`.
+        expect(raw).not.toContain(OPERATOR_PK);
+        expect(raw.toLowerCase()).not.toContain(PK_HEX.repeat(8));
+        // (4) Y ningún nombre de campo del vocabulario EVM/secretos.
+        for (const forbidden of [
+          'treasury',
+          'escrow',
+          'PRIVATE',
+          'private_key',
+          'privateKey',
+          'secret',
+        ]) {
+          expect(raw, forbidden).not.toContain(forbidden);
+        }
 
-      delete process.env.A2A_DEPOSIT_TREASURY_SOLANA;
-      delete process.env.OPERATOR_PRIVATE_KEY;
+        // (5) Andamiaje ANTI-VACUIDAD: la respuesta tiene que traer contenido real.
+        // Sin esto, un `networks: []` pasaría los cinco guards de arriba y el test
+        // afirmaría "no filtra nada" sobre una respuesta vacía.
+        const nets = res.json().networks as Record<string, unknown>[];
+        expect(nets).toHaveLength(1);
+        const n = nets[0] as Record<string, unknown>;
+        expect(n.deposit_account_owner).toBe(DEPOSIT_OWNER);
+        expect((n.token as { mint: string }).mint).toBe(MINT);
+
+        expect(n).not.toHaveProperty('treasury');
+        expect(n).not.toHaveProperty('escrow_mode');
+        expect(n).not.toHaveProperty('escrow_contract');
+        expect(n).not.toHaveProperty('min_confirmations');
+      } finally {
+        // `finally`: si una aserción falla, las envs no quedan pisadas para el resto
+        // del archivo (un test que ensucia el entorno del vecino es un falso rojo
+        // más difícil de leer que el original).
+        delete process.env.A2A_DEPOSIT_TREASURY_SOLANA;
+        delete process.env.OPERATOR_PRIVATE_KEY;
+      }
     });
 
     it('AC-10: la entrada EVM de deposit-info queda con su forma de siempre', async () => {
@@ -900,7 +974,11 @@ describe('WKH-315 · rutas del depósito Solana', () => {
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ funding_wallet_solana: pubkey });
       // El key_id sale del CALLER, nunca del body.
-      expect(mockBindSolana).toHaveBeenCalledWith(TEST_KEY_ID, 'user-1', pubkey);
+      expect(mockBindSolana).toHaveBeenCalledWith(
+        TEST_KEY_ID,
+        'user-1',
+        pubkey,
+      );
     });
 
     it('T-315-08d: una firma válida para OTRO key_id ⇒ 403 FUNDING_WALLET_PROOF_INVALID', async () => {
@@ -931,12 +1009,16 @@ describe('WKH-315 · rutas del depósito Solana', () => {
       expect(res.json().error_code).toBe('FUNDING_WALLET_PROOF_INVALID');
     });
 
-    it("T-315-09: un `namespace` no reconocido ⇒ 400 INVALID_INPUT — fail-closed, NO default a EVM", async () => {
+    it('T-315-09: un `namespace` no reconocido ⇒ 400 INVALID_INPUT — fail-closed, NO default a EVM', async () => {
       // ⚠️ Si un cliente pide una familia que no entendemos, aplicarle el gate de
       // OTRA familia es peor que rechazarlo.
       const { pubkey, sig } = bindProof();
       for (const ns of ['sol', 'SOLANA', 'bitcoin', '', 1, null, {}]) {
-        const res = await postBind({ namespace: ns, wallet: pubkey, signature: sig });
+        const res = await postBind({
+          namespace: ns,
+          wallet: pubkey,
+          signature: sig,
+        });
         expect(res.statusCode, JSON.stringify(ns)).toBe(400);
         expect(res.json().error_code).toBe('INVALID_INPUT');
       }
