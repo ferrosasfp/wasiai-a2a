@@ -586,9 +586,18 @@ npm test                # vitest run
    responde distinto **después** del deploy, no antes.
 5. `auto-blindaje.md` de esta HU (formato de las HUs 208/209).
 6. **Done-report que declare, sin maquillar**:
-   - que **W0.3 no se entregó** y por qué (CD-13: N/T/M/CC sin decidir) ⟹ **la demo insignia sigue
-     sin destrabarse**; lo que se entrega es la mitad del gateway, que es la mitad que no depende de
-     una decisión;
+   - que **W0.3 no se entregó** y por qué (CD-13: N/T/M/CC sin decidir) ⟹ **el leg de payout de la
+     demo insignia sigue sin resolver**; lo que se entrega es la mitad del gateway, que es la mitad
+     que no depende de una decisión.
+     **[CORRECCIÓN DOCS 2026-07-30]**: la frase original acá decía, sin matiz, "la demo insignia
+     sigue sin destrabarse". Es más amplia de lo medido y hay que corregirla para que no se
+     propague: el **leg de cotización** (`remittance-fx-quote`) responde **200 con tasa real** hoy y
+     no depende en nada de esta HU (no manda `min_reputation`, `sdd.md:28`). Lo que mantiene **inerte**
+     el flujo de valor de punta a punta son **dos flags apagados a propósito** en `chaski-v3`
+     (`NEXT_PUBLIC_SOLANA_SETTLE_ENABLED`, `NEXT_PUBLIC_EIP3009_ENABLED`), sin relación con WKH-313.
+     Lo único que esta HU deja sin resolver es el **leg de payout** puntual (`resolveCapability` →
+     `no_candidates` con `min_reputation=2` y el único agente en score-nada, `sdd.md:28`), que
+     necesita W0.3. Ver `report.md` de esta HU, sección "Corrección de hecho".
    - la **desviación de la firma literal de DT-4** (§2.7) para que AR la ratifique o la rechace;
    - los **residuales nuevos** de §9;
    - el cambio observable de `total` con `allowTrial=true` (R-5 del SDD).
