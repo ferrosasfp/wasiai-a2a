@@ -604,7 +604,19 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       expect(res.reason).toBe('RECIPIENT_MISMATCH');
     });
 
-    it('M8: la ATA correcta pero con OTRO owner declarado ⇒ RECIPIENT_MISMATCH', async () => {
+    it('it5: la ATA correcta pero con OTRO owner declarado ⇒ UNKNOWN por CONTRADICCION (antes: RECIPIENT_MISMATCH)', async () => {
+      // ⚠️ CAMBIO DELIBERADO DE VEREDICTO (fix-pack it5 · BLQ-ALTO-1).
+      //
+      // Antes, un `owner` que no coincidía descalificaba la fila —"no es la nuestra"— y
+      // la fila pasaba a contarse como OTRA cuenta. Eso convertía un campo que el emisor
+      // del dato controla en el árbitro de a qué cubeta va una fila, y con eso se
+      // esquivaba el guard de duplicados: dos índices con la MISMA dirección, mintiendo
+      // el `owner` de uno, y el crédito se financiaba solo (reproducido: 1001 USDC).
+      //
+      // La dirección de una ATA es una PDA derivada de (mint, owner): la dirección YA es
+      // la identidad. Un `owner` declarado que la contradice no es "otra cuenta", es un
+      // dato imposible ⇒ indeterminación. Sigue sin acreditar, que es lo que importa,
+      // pero ahora por la razón correcta y con evento durable.
       mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
       mockGetParsedTransaction.mockResolvedValue(
         parsedTx({
@@ -642,7 +654,8 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       const res = await verifySolanaDeposit({ signature: SIGNATURE });
       expect(res.ok).toBe(false);
       if (res.ok) throw new Error('unreachable');
-      expect(res.reason).toBe('RECIPIENT_MISMATCH');
+      expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+      expect(res.detail).toContain('the dataset contradicts itself');
     });
 
     it('un delta de 0 sobre nuestra ATA ⇒ RECIPIENT_MISMATCH (nada llegó)', async () => {
@@ -1042,7 +1055,6 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       }
       expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
       expect(res.detail).toContain('appears in only ONE');
-      expect(res.detail).toContain('pre=false, post=true');
     });
 
     it('BLQ-BAJO-1 (it3): un `amount` ilegible en una entrada de TERCEROS del mismo mint ⇒ UNKNOWN, no un crédito', async () => {
@@ -1118,7 +1130,7 @@ describe('WKH-315 · verifySolanaDeposit', () => {
           );
         }
         expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
-        expect(res.detail).toContain('TWO entries for account index 2');
+        expect(res.detail).toContain('TWO entries for the same account');
       });
 
       it('REPRO A (orden invertido): el veredicto NO depende de la POSICION de las filas duplicadas', async () => {
@@ -1200,7 +1212,7 @@ describe('WKH-315 · verifySolanaDeposit', () => {
         expect(res.ok).toBe(false);
         if (res.ok) throw new Error('unreachable');
         expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
-        expect(res.detail).toContain('TWO entries for account index 2');
+        expect(res.detail).toContain('TWO entries for the same account');
       });
 
       it('la MISMA dirección en DOS índices ⇒ UNKNOWN — una cuenta no ocupa dos casilleros', async () => {
@@ -1229,7 +1241,9 @@ describe('WKH-315 · verifySolanaDeposit', () => {
         expect(res.ok).toBe(false);
         if (res.ok) throw new Error('unreachable');
         expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
-        expect(res.detail).toContain('different account indexes');
+        // it5: lo rechaza la tabla canónica, que se indexa por DIRECCION. Ya no hace
+        // falta un guard aparte para esta forma: es el MISMO duplicado.
+        expect(res.detail).toContain('TWO entries for the same account');
       });
 
       it('REPRO F: dos filas truncadas con montos que COINCIDEN ⇒ UNKNOWN (un invariante de totales no lo ve)', async () => {
@@ -1269,6 +1283,200 @@ describe('WKH-315 · verifySolanaDeposit', () => {
         }
         expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
         expect(res.detail).toContain('appears in only ONE');
+      });
+
+      it('CE1 (it5): una fila de UN SOLO LADO no puede financiar un delta inflado', async () => {
+        // ⚠️ EL CONTRAEJEMPLO QUE FALSIFICO MI AFIRMACION DE it4. Yo escribí que una
+        // fila ausente "sólo puede mover el lado DERECHO, y moverlo produce
+        // desigualdad". Falso: moverlo también puede RESTAURAR la igualdad contra un
+        // izquierdo ya inflado. Acá `idx0` existe sólo en `pre` con 1000 USDC; leído
+        // como "se drenó entera" aporta exactamente lo que falta para que
+        // `delta = 1001` cierre. Reproducido en `{ok:true, amountUsd:"1001"}`.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx(
+            {
+              err: null,
+              preTokenBalances: [
+                bal(1, DEPOSITOR, '10000000'),
+                bal(3, DEPOSITOR, '1000000000'), // sólo en `pre`
+                bal(2, OWNER, '0'),
+              ],
+              postTokenBalances: [
+                bal(1, DEPOSITOR, '9000000'),
+                bal(2, OWNER, '1001000000'),
+              ],
+            },
+            [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA, OWNER_SECOND_ACCOUNT],
+          ),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) {
+          throw new Error(
+            `acreditó ${res.amountUsd} USDC financiado por una fila de un solo lado`,
+          );
+        }
+        expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        expect(res.detail).toContain('appears in only ONE');
+        expect(res.detail).toContain('pre=true, post=false');
+      });
+
+      it('X1 (it5): dos índices con la MISMA dirección y un `owner` MENTIDO ⇒ UNKNOWN', async () => {
+        // ⚠️ EL GUARD DE it4 CONSULTABA EL `owner` PARA DECIDIR SI UNA FILA ERA NUESTRA,
+        // así que bastaba mentirlo en una de las dos filas de la misma dirección para
+        // que sólo una entrara como "nuestra" y la otra financiara el crédito desde el
+        // lado de las OTRAS cuentas. El test de it4 usaba el `owner` coherente en las
+        // dos: probaba que el guard existía, no que fuera completo.
+        //
+        // Con la tabla indexada por DIRECCION, las dos filas colisionan antes de que
+        // nadie mire un `owner`.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx(
+            {
+              err: null,
+              preTokenBalances: [
+                bal(1, DEPOSITOR, '10000000'),
+                bal(2, OWNER, '0'),
+                bal(3, DEPOSITOR, '1000000000'), // MISMA dirección que idx2, owner mentido
+              ],
+              postTokenBalances: [
+                bal(1, DEPOSITOR, '9000000'),
+                bal(2, OWNER, '1001000000'),
+                bal(3, DEPOSITOR, '0'),
+              ],
+            },
+            [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA, OUR_ATA],
+          ),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) {
+          throw new Error(
+            `acreditó ${res.amountUsd} USDC con dos filas para la misma dirección`,
+          );
+        }
+        expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        // Con el `owner` MENTIDO habla el guard de contradicción, que corre primero:
+        // la dirección es nuestra ATA y el `owner` declarado no puede serlo.
+        expect(res.detail).toContain('the dataset contradicts itself');
+      });
+
+      it('X1b (it5): dos índices con la MISMA dirección y SIN mentir el `owner` ⇒ UNKNOWN por duplicado', async () => {
+        // ⚠️ LA VARIANTE QUE AISLA LA REGLA NUEVA. Sin `owner` no hay contradicción que
+        // detectar, así que el único guard que puede hablar es la tabla indexada por
+        // DIRECCION. Si el test de arriba fuera el único, la regla de duplicado por
+        // dirección quedaría sin cobertura propia — tapada por el otro guard.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx(
+            {
+              err: null,
+              preTokenBalances: [
+                {
+                  accountIndex: 1,
+                  mint: MINT,
+                  uiTokenAmount: uiAmount('10000000'),
+                },
+                { accountIndex: 2, mint: MINT, uiTokenAmount: uiAmount('0') },
+                {
+                  accountIndex: 3,
+                  mint: MINT,
+                  uiTokenAmount: uiAmount('1000000000'),
+                },
+              ],
+              postTokenBalances: [
+                {
+                  accountIndex: 1,
+                  mint: MINT,
+                  uiTokenAmount: uiAmount('9000000'),
+                },
+                {
+                  accountIndex: 2,
+                  mint: MINT,
+                  uiTokenAmount: uiAmount('1001000000'),
+                },
+                { accountIndex: 3, mint: MINT, uiTokenAmount: uiAmount('0') },
+              ],
+            },
+            [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA, OUR_ATA],
+          ),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) {
+          throw new Error(
+            `acreditó ${res.amountUsd} USDC con la dirección duplicada`,
+          );
+        }
+        expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        expect(res.detail).toContain('TWO entries for the same account');
+      });
+
+      it('it5: un delta de EXACTAMENTE -1 ⇒ UNKNOWN (el borde del guard de negativo)', async () => {
+        // Mutante sobreviviente de it4: `delta < 0n` → `delta < -1n` pasaba porque
+        // ningún fixture fijaba el borde. Fail-closed igual, pero el código de error
+        // cambiaba y el borde no estaba candado.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx({
+            err: null,
+            preTokenBalances: [
+              bal(1, DEPOSITOR, '10000000'),
+              bal(2, OWNER, '5'),
+            ],
+            postTokenBalances: [
+              bal(1, DEPOSITOR, '10000001'),
+              bal(2, OWNER, '4'),
+            ],
+          }),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(false);
+        if (res.ok) throw new Error('unreachable');
+        expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        expect(res.detail).toContain('is NEGATIVE (-1)');
+      });
+
+      it('it5: una cuenta de TERCEROS del mismo mint cuyo saldo NO cambia no es un origen', async () => {
+        // Mutante sobreviviente de it4: `after - before >= 0n` → `> 0n` hacía que una
+        // cuenta sin movimiento contara como origen ⇒ dos owners ⇒ DEPOSITOR_AMBIGUOUS
+        // sobre un depósito perfectamente normal. El código acertaba; faltaba el test.
+        mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+        mockGetParsedTransaction.mockResolvedValue(
+          rawTx(
+            {
+              err: null,
+              preTokenBalances: [
+                bal(1, DEPOSITOR, '10000000'),
+                bal(2, OWNER, '0'),
+                bal(3, OTHER_DEPOSITOR, '7000000'), // no se mueve
+              ],
+              postTokenBalances: [
+                bal(1, DEPOSITOR, '5000000'),
+                bal(2, OWNER, '5000000'),
+                bal(3, OTHER_DEPOSITOR, '7000000'),
+              ],
+            },
+            [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA, FOREIGN_ATA],
+          ),
+        );
+
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok).toBe(true);
+        if (!res.ok) throw new Error('unreachable');
+        expect(res.amountUsd).toBe('5');
+        expect(res.depositor).toBe(DEPOSITOR);
       });
 
       it('BLQ-BAJO-2: filas de nuestra ATA truncadas de las DOS listas ⇒ UNKNOWN, no RECIPIENT_MISMATCH', async () => {
@@ -1509,8 +1717,14 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       expect(res.depositor).toBe(DEPOSITOR);
     });
 
-    it('MNR-2: el `owner` PRESENTE y distinto sigue descalificando (el control no se debilitó)', async () => {
-      // El caso de arriba no puede haber abierto la puerta a "cualquier owner sirve".
+    it('MNR-2 + it5: el `owner` PRESENTE y distinto NO acredita — pero ahora es una CONTRADICCION, no "otra cuenta"', async () => {
+      // El caso de arriba (owner ausente ⇒ acredita) no puede haber abierto la puerta a
+      // "cualquier owner sirve", y no la abrió: sigue sin acreditar.
+      //
+      // ⚠️ Lo que cambió en it5 es el MOTIVO, y era el agujero. "Descalificar" la fila la
+      // mandaba a la cubeta de las OTRAS cuentas, donde su saldo financiaba el lado
+      // derecho de la ecuación. Ahora una dirección que es nuestra ATA con un `owner` que
+      // la contradice es un dato imposible: `UNKNOWN`, y ninguna cubeta.
       mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
       mockGetParsedTransaction.mockResolvedValue(
         parsedTx({
@@ -1548,7 +1762,8 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       const res = await verifySolanaDeposit({ signature: SIGNATURE });
       expect(res.ok).toBe(false);
       if (res.ok) throw new Error('unreachable');
-      expect(res.reason).toBe('RECIPIENT_MISMATCH');
+      expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+      expect(res.detail).toContain('the dataset contradicts itself');
     });
 
     it('MNR-2: la cuenta de ORIGEN sin `owner` ⇒ UNKNOWN, no DEPOSITOR_AMBIGUOUS', async () => {
@@ -1702,9 +1917,26 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       expect(res.detail).toContain('conservation check failed');
     });
 
-    it('una cuenta de origen que se CIERRA en la misma tx sigue contando como origen (y CONSERVA)', async () => {
-      // El `owner` está poblado en `preTokenBalances` aun si la cuenta desaparece de
-      // `post`. Sin leer de `pre`, ese depositante quedaría invisible.
+    it('it5 (COSTO DECLARADO): una cuenta del mint CERRADA en la misma tx ⇒ 503 UNKNOWN, no un crédito adivinado', async () => {
+      // ⚠️ ESTE TEST CAMBIO DE VEREDICTO EN it5, Y ES EL PRECIO QUE PAGA BLQ-ALTO-2.
+      //
+      // Una fila presente sólo en `pre` tiene DOS lecturas con créditos distintos:
+      // "cuenta cerrada, bajó todo su saldo" o "fila que se perdió, bajó una cantidad
+      // desconocida". Mientras se leyó como la primera, una fila de un solo lado podía
+      // financiar un delta inflado y hacer que la ecuación CERRARA — reproducido en
+      // 1001 USDC por un depósito de 1 (CE1). La ambigüedad es la misma que ya había
+      // hecho inaceptable la asimetría en NUESTRA fila; no puede depender de quién es
+      // el dueño de la fila.
+      //
+      // COSTO, medido y aceptado: un depositante que hace "transfer + close" de su
+      // cuenta de USDC en la misma tx recibe 503 (sin consumir la prueba, con evento
+      // durable) en vez de un crédito. Remediación: depositar sin cerrar la cuenta en la
+      // misma tx, o el runbook manual. NO afecta crear/cerrar cuentas de OTROS mints
+      // (WSOL temporal de las rutas de swap), porque acá sólo se miran filas del mint
+      // configurado.
+      //
+      // Lo que el test sigue custodiando: que el `owner` de `preTokenBalances` se lea
+      // (era el punto original) y que el veredicto NUNCA sea un crédito adivinado.
       mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
       mockGetParsedTransaction.mockResolvedValue(
         parsedTx({
@@ -1725,9 +1957,14 @@ describe('WKH-315 · verifySolanaDeposit', () => {
         }),
       );
       const res = await verifySolanaDeposit({ signature: SIGNATURE });
-      expect(res.ok).toBe(true);
-      if (!res.ok) throw new Error('unreachable');
-      expect(res.depositor).toBe(DEPOSITOR);
+      expect(res.ok).toBe(false);
+      if (res.ok) {
+        throw new Error(
+          `acreditó ${res.amountUsd} USDC leyendo una fila de un solo lado como "se cerró"`,
+        );
+      }
+      expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+      expect(res.detail).toContain('appears in only ONE');
     });
   });
 

@@ -292,10 +292,11 @@ ausente descalificando de nuevo, el `_down` sin archivar los binds y los backups
 **21/21 KILLED, cada uno con el nombre del test que muere.** Los archivos se restauraron
 verificando `sha256` en cada iteración.
 
-*(Actualizado en la iteración 4: **34 mutantes, 34 KILLED**. Diez son de FORMA DE LISTA
-y no de lógica —índice duplicado en `pre`, en `post` y en las dos, el orden invertido de
-las filas duplicadas, ausencias simétricas con montos que coinciden, la misma dirección
-en dos índices—, que es la clase que los mutantes de lógica no alcanzaban.)*
+*(Actualizado en la iteración 5: **38 mutantes, 38 KILLED**, más un **fuzz sistemático
+propio** que quedó en el repo como red permanente (`deposit-verifier.fuzz.test.ts`):
+103 mutaciones de una fila y 5.253 combinaciones cruzadas de `pre`/`post` sobre un
+depósito legítimo, **cero inflaciones**. El criterio de aceptación dejó de ser prosa:
+es un test que corre en cada CI.)*
 
 ---
 
@@ -518,3 +519,78 @@ en dos índices—, que es la clase que los mutantes de lógica no alcanzaban.)*
   mismo archivo todos los sitios que caen bajo ella antes de cerrar** — `grep` de los
   otros `return` del mismo tipo cuesta un minuto. Si no, la regla queda como documentación
   de una excepción.
+
+---
+
+### [2026-07-30 FIX-PACK it5 · LA CAUSA RAIZ DE LAS CINCO ITERACIONES] El sobre-anuncio apaga las revisiones
+
+- **Error**: en cada iteración escribí una **propiedad universal** que la fórmula no
+  sostenía. La de it4 —*"cualquier fila ausente de otra cuenta sólo puede mover el lado
+  DERECHO, y moverlo produce desigualdad"*— es falsa en un paso: mover el lado derecho
+  también puede **RESTAURAR** la igualdad contra un izquierdo ya inflado. El revisor lo
+  falsificó con tres contraejemplos ejecutados (CE1, CE2, X1).
+- **Causa raíz, y es la que explica las cinco vueltas**: una afirmación universal en un
+  comentario **no es documentación, es una instrucción de dejar de buscar**. Yo la
+  escribía, el revisor la leía, y los dos dejábamos de mirar en esa dirección. El daño no
+  fue el bug: fue que la frase **protegió al bug de ser encontrado**. Por eso cada
+  iteración cerró un caso y no la familia.
+- **Fix**: toda afirmación del archivo se reescribió a su forma falsable, con el criterio
+  explícito: **si no puedo nombrar el input concreto que la rompería, la frase dice de
+  más**. La garantía quedó: *ninguna incoherencia de PRESENCIA, DUPLICACION,
+  ILEGIBILIDAD o IDENTIDAD de filas puede inflar el crédito* — cuatro clases, cada una
+  con guard y test con nombre. Y se escribió el **límite** que antes se omitía: un
+  dataset internamente COHERENTE pero falso es indistinguible de un depósito legítimo
+  por cualquier chequeo local, así que la versión universal de la frase **nunca podrá ser
+  verdadera** contra un RPC que miente; lo que acota ese riesgo es la confianza en el
+  endpoint, y eso no vive en este archivo.
+- **Aplicar en**: (a) un comentario que dice "cualquier / ninguno / siempre" sobre un
+  guard de dinero necesita, al lado, **el input que lo rompería si fuera falso**; si no
+  se puede escribir, la frase se baja a lo demostrable; (b) escribir el LIMITE junto a la
+  garantía no es debilidad — es lo que mantiene a la revisión buscando donde todavía hay
+  algo; (c) la prosa de un money-path se revisa con el mismo rigor que su código, porque
+  **una frase de más cuesta iteraciones enteras**.
+
+---
+
+### [2026-07-30 FIX-PACK it5 · BLQ-ALTO-1] Indexé por la etiqueta y no por la identidad
+
+- **Error**: la tabla canónica se indexaba por `accountIndex`, pero lo que identifica una
+  cuenta es su **dirección**. Mi propia premisa para rechazar el índice repetido —"un
+  mensaje no puede listar la misma cuenta dos veces"— se viola igual en su forma de
+  dirección, y ahí no rechazaba. Peor: `isOurAta` consultaba el `owner` para decidir si
+  una fila era nuestra, así que **mentir el `owner` de una de dos filas con la misma
+  dirección** mandaba una a la cubeta "nuestra" y la otra a "las demás", donde financiaba
+  el crédito (X1 ⇒ 1001 USDC por un depósito de 1).
+- **Causa raíz**: elegí como clave el campo con el que venían escritas las filas en vez
+  del que define la cosa. Y dejé que un campo **controlado por el emisor del dato**
+  decidiera en qué cubeta cae una fila, que es entregarle el árbitro al que puede mentir.
+- **Fix**: la tabla se indexa por dirección (las dos formas del duplicado caen en la misma
+  regla, y sin consultar el `owner`), y un `owner` declarado que contradice la derivación
+  de la ATA pasa de "no es la nuestra" a **contradicción del dataset ⇒ UNKNOWN**.
+- **Aplicar en**: la clave de una tabla canónica tiene que ser **la identidad del objeto**,
+  no la etiqueta con la que llegó. Y ningún campo que el emisor controle puede decidir la
+  CLASIFICACION de un dato en un guard de dinero: sólo puede confirmarla o contradecirla.
+
+---
+
+### [2026-07-30 FIX-PACK it5 · BLQ-ALTO-2] Tercera vez: enuncié una regla y la apliqué a un solo caso
+
+- **Error**: en it4 escribí la regla de presencia bilateral —una cuenta aparece en las dos
+  listas o en ninguna— y la apliqué **sólo a NUESTRA fila**. Para las demás quedó un
+  `?? 0n` que dejaba a una fila de un solo lado aportar valor sin límite: con eso, una
+  fila que sólo existe en `pre` financiaba un `delta` inflado y **la igualdad cerraba**
+  (CE1).
+- **Causa raíz, y es un patrón mío ya documentado dos veces**: enuncio la regla mientras
+  arreglo un caso, así que nace con el alcance del ejemplo. Es la tercera aparición
+  (MNR-4 en it3, BLQ-BAJO-2 en it4, ésta). **Que se repita tres veces significa que no
+  alcanza con "acordarse": necesita un paso mecánico.**
+- **Fix**: presencia bilateral para TODA fila del mint, con el costo medido y declarado
+  (transfer+close del depositante y creación de una ATA de terceros del mismo mint pasan
+  a 503; crear/cerrar cuentas de OTROS mints no se ve afectado). Y desapareció el último
+  `?? 0n` del camino de dinero.
+- **PASO MECANICO QUE ADOPTO** (por la reincidencia): al cerrar una iteración, por cada
+  regla nueva escrita en un comentario, **grepear el archivo por el patrón que la regla
+  gobierna** (`?? 0n`, `.get(`, cada `return` del mismo tipo) y dejar anotado en el commit
+  cuántos sitios se revisaron. Una regla sin ese conteo se considera aplicada a un caso.
+- **Aplicar en**: cualquier regla enunciada como general — el alcance se verifica con un
+  grep, no con la intención de quien la escribió.

@@ -404,23 +404,38 @@ export async function verifySolanaDeposit(
     return o === undefined || o === null || o === '' ? undefined : o;
   };
 
-  const isOurAta = (b: {
-    accountIndex: number;
-    mint: string;
-    owner?: string | undefined;
-  }): boolean => {
-    if (b.mint !== mint) return false;
-    if (addressAt(b.accountIndex) !== expectedAta) return false;
-    // ⚠️ EL `owner` AUSENTE NO DESCALIFICA (fix-pack AR MNR-2). La ATA es una PDA
-    // derivada del par (mint, owner): mint + DIRECCION ya identifican la cuenta sin
-    // ambigüedad, así que exigir además el `owner` no agrega ninguna seguridad — y sí
-    // agregaba un falso negativo. Un RPC que omite el campo hacía que la ATA de
-    // depósito no matcheara y el veredicto saliera `RECIPIENT_MISMATCH`: **una
-    // afirmación de que la plata fue a otro lado hecha sobre un dato ausente**.
-    // Cuando el campo SI viene y contradice al owner configurado, sigue descalificando.
+  // ── LA IDENTIDAD DE UNA CUENTA ES SU DIRECCION (fix-pack it5 · BLQ-ALTO-1) ─
+  //
+  // ⚠️ EL `owner` YA NO DECIDE A QUE CUENTA PERTENECE UNA FILA, Y ESE ERA EL AGUJERO.
+  //
+  // Antes, una fila cuyo `owner` declarado no coincidía con el configurado se
+  // descalificaba como "no es la nuestra" y pasaba a contarse como **otra cuenta**. Con
+  // eso, dos índices que resolvían a la MISMA dirección esquivaban el guard de
+  // duplicados con sólo mentir el `owner` de una de las dos filas: una entraba como
+  // nuestra ATA y la otra financiaba el crédito desde el otro lado de la ecuación
+  // (reproducido: 1001 USDC por un depósito de 1). Un campo que el emisor del dato
+  // controla no puede decidir en qué cubeta cae una fila.
+  //
+  // La ATA es una PDA derivada de (mint, owner): **la dirección ya es la identidad**.
+  // Un `owner` declarado que contradice esa derivación no descalifica la fila: es una
+  // CONTRADICCION del dataset consigo mismo, y eso es indeterminación.
+  const isOurAta = (b: { accountIndex: number; mint: string }): boolean =>
+    b.mint === mint && addressAt(b.accountIndex) === expectedAta;
+
+  for (const b of [...pre, ...post]) {
+    if (!isOurAta(b)) continue;
     const owner = declaredOwner(b);
-    return owner === undefined || owner === expectedOwner;
-  };
+    // El `owner` AUSENTE no descalifica (fix-pack AR MNR-2): mint + dirección ya
+    // identifican la cuenta, y exigirlo agregaba un falso negativo sobre un campo
+    // opcional. Presente y contradictorio es otra cosa: es un dato imposible.
+    if (owner !== undefined && owner !== expectedOwner) {
+      return {
+        ok: false,
+        reason: 'DEPOSIT_VERIFICATION_UNKNOWN',
+        detail: `a token balance row for the deposit ATA address declares owner ${owner}, but that address is the associated token account derived for ${expectedOwner} — the dataset contradicts itself and no balance can be read from it`,
+      };
+    }
+  }
 
   /**
    * El monto atómico de UNA entrada, o `null` si el `amount` no se puede leer como
@@ -484,13 +499,34 @@ export async function verifySolanaDeposit(
    * misma respuesta literal —`{ok:true, amountUsd:"1001"}` por un depósito de 1— por
    * cuatro caminos distintos. El bug no era ninguno de los cuatro: era la ESTRUCTURA.
    *
-   * Ahora hay **una sola tabla canónica por lista** (índice → monto, del mint
+   * Ahora hay **una sola tabla canónica por lista** (DIRECCION → monto, del mint
    * configurado) y **todo** sale de ella: el delta que se acredita y la medición que lo
    * audita. La ecuación final compara el crédito contra filas DISJUNTAS de la misma
    * tabla, así que los dos números están obligados a hablar del mismo hecho.
    *
+   * ── LO QUE ESTE ARCHIVO GARANTIZA, EN SU FORMA FALSABLE (it5) ──────────────
+   *
+   * ⚠️ Cada frase de acá tiene que poder romperse nombrando un input concreto. Si no se
+   * puede nombrar, la frase dice de más — y decir de más es lo que produjo CINCO
+   * iteraciones: una afirmación universal que la fórmula no sostenía hizo, cada vez, que
+   * todos dejáramos de buscar en esa dirección. El sobre-anuncio no es un problema de
+   * estilo: es un apagador de revisiones.
+   *
+   * GARANTIA: **ninguna incoherencia de PRESENCIA, DUPLICACION, ILEGIBILIDAD o IDENTIDAD
+   * de filas puede inflar el crédito.** Las cuatro clases tienen guard propio y test con
+   * nombre, y un fuzz sistemático (206 mutaciones de una fila y 21.321 de dos) las
+   * respalda.
+   *
+   * LIMITE, escrito como límite y no como pendiente: un dataset **internamente
+   * coherente pero falso** —una historia consistente, "esta cuenta tenía 1000 y los
+   * mandó acá"— es indistinguible de un depósito legítimo por cualquier chequeo local,
+   * porque es idéntico a lo que ese depósito produciría. Ningún invariante sobre estas
+   * dos listas puede rechazarlo. Lo que acota ese riesgo no vive acá: es la confianza en
+   * el endpoint RPC configurado y la finalidad medida con `getSignatureStatuses`.
+   *
    * Reglas de construcción, las tres fail-CLOSED:
-   *  1. **`accountIndex` repetido ⇒ se RECHAZA la tx.** No se define un desempate.
+   *  1. **Dirección repetida ⇒ se RECHAZA la tx** (y el `accountIndex` repetido cae en la
+   *     misma regla, porque resuelve a la misma dirección). No se define un desempate.
    *     Justificación (que el orquestador pidió por escrito): `pre/postTokenBalances`
    *     tiene, por construcción, **una entrada por token account tocada** — el
    *     `accountIndex` es la clave en `accountKeys`, y un mensaje de Solana no puede
@@ -505,7 +541,7 @@ export async function verifySolanaDeposit(
    *  3. La tabla es la ÚNICA fuente: nadie vuelve a leer `b.uiTokenAmount` después.
    */
   type CanonicalTable =
-    | { ok: true; byIndex: Map<number, bigint> }
+    | { ok: true; byAddress: Map<string, bigint> }
     | { ok: false; detail: string };
 
   const canonicalize = (
@@ -516,13 +552,25 @@ export async function verifySolanaDeposit(
     }[],
     label: 'preTokenBalances' | 'postTokenBalances',
   ): CanonicalTable => {
-    const byIndex = new Map<number, bigint>();
+    const byAddress = new Map<string, bigint>();
     for (const b of list) {
       if (b.mint !== mint) continue;
-      if (byIndex.has(b.accountIndex)) {
+      // La clave es la DIRECCION, no el `accountIndex` (fix-pack it5 · BLQ-ALTO-1).
+      // Mi propia premisa para rechazar el índice repetido —"un mensaje no puede listar
+      // la misma cuenta dos veces"— se viola también en su forma de DIRECCION, y ahí no
+      // rechazaba: dos índices distintos apuntando a la misma pubkey eran, para la
+      // tabla, dos cuentas. Indexar por lo que de verdad identifica a la cuenta hace
+      // que las dos formas del mismo problema caigan en la misma regla, y **sin
+      // consultar el `owner`**, que es lo que hacía esquivable el guard anterior.
+      // `addressAt` no puede devolver `undefined` acá: toda fila del mint ya pasó el
+      // guard de resolución de arriba; el `?? ''` sólo satisface al compilador y, si
+      // alguna vez se alcanzara, colapsaría las filas irresolubles en una sola clave y
+      // el propio chequeo de duplicado las rechazaría. Fail-closed en los dos casos.
+      const addr = addressAt(b.accountIndex) ?? '';
+      if (byAddress.has(addr)) {
         return {
           ok: false,
-          detail: `${label} carries TWO entries for account index ${b.accountIndex} of the configured mint — a token account appears at most once per list, so these two rows are contradictory statements about the same account and no balance can be derived from them`,
+          detail: `${label} carries TWO entries for the same account ${addr} of the configured mint (the second one at index ${b.accountIndex}) — a token account appears at most once per list, so these two rows are contradictory statements about the same account and no balance can be derived from them`,
         };
       }
       const v = atomicOf(b);
@@ -532,9 +580,9 @@ export async function verifySolanaDeposit(
           detail: `${label} carries an entry for the configured mint with an unreadable uiTokenAmount.amount — the balance table cannot be built, and a table built with holes is not a measurement`,
         };
       }
-      byIndex.set(b.accountIndex, v);
+      byAddress.set(addr, v);
     }
-    return { ok: true, byIndex };
+    return { ok: true, byAddress };
   };
 
   const preTable = canonicalize(pre, 'preTokenBalances');
@@ -548,58 +596,57 @@ export async function verifySolanaDeposit(
         : preTable.detail,
     };
   }
-  const preByIdx = preTable.byIndex;
-  const postByIdx = postTable.byIndex;
+  const preByAddr = preTable.byAddress;
+  const postByAddr = postTable.byAddress;
 
-  // ── El índice de NUESTRA ATA: uno solo, o ninguno ─────────────────────────
-  // Dos índices distintos que resuelven a la misma dirección serían dos cuentas que
-  // son la misma cuenta: no hay lectura correcta de eso.
-  const ourIndexes = new Set<number>();
-  for (const b of [...pre, ...post]) {
-    if (isOurAta(b)) ourIndexes.add(b.accountIndex);
-  }
-  if (ourIndexes.size > 1) {
-    return {
-      ok: false,
-      reason: 'DEPOSIT_VERIFICATION_UNKNOWN',
-      detail: `the deposit ATA resolves to ${ourIndexes.size} different account indexes in this transaction — the same account cannot occupy two slots, so its balance cannot be established`,
-    };
-  }
-  const ourIdx = ourIndexes.size === 1 ? ([...ourIndexes][0] as number) : null;
-
-  // ── EL DELTA, DERIVADO UNA SOLA VEZ Y SOLO DE FILAS PRESENTES ─────────────
+  // ── PRESENCIA BILATERAL, PARA **TODA** FILA DEL MINT ──────────────────────
   //
-  // ⚠️ NUESTRA ATA TIENE QUE ESTAR EN LAS DOS LISTAS, O EN NINGUNA.
+  // ⚠️ FIX-PACK it5 · BLQ-ALTO-2 — Y ES LA TERCERA VEZ QUE COMETO ESTE ERROR DE FORMA.
   //
-  // Aparecer en UNA SOLA es una asimetría con dos lecturas incompatibles y créditos
-  // distintos: puede ser una cuenta recién creada (saldo previo 0 ⇒ acreditar todo el
-  // saldo final es CORRECTO) o **una fila que se perdió** (saldo previo 1000 ⇒ acreditar
-  // el saldo final es regalar la tesorería). Es literalmente el repro que sobrevivió
-  // tres iteraciones, y ninguna suma global puede distinguirlo: con montos que
-  // coinciden, una ausencia en `pre` y otra en `post` **se pagan exactamente entre
-  // ellas** y cualquier invariante de totales da verde.
+  // En it4 escribí la regla —una cuenta aparece en las dos listas o en ninguna, porque
+  // "sólo en una" tiene dos lecturas con créditos distintos— y **la apliqué únicamente a
+  // NUESTRA fila**. Para las demás quedó un `?? 0n` que dejaba a una fila de un solo
+  // lado aportar valor sin límite del lado derecho de la ecuación. Con eso, una fila que
+  // sólo existe en `pre` financiaba un `delta` inflado y **la igualdad cerraba**:
+  // reproducido, 1001 USDC por un depósito de 1. Mover el lado derecho no siempre
+  // produce desigualdad — también puede RESTAURARLA contra un izquierdo ya inflado, que
+  // es justo el paso que yo había dado por válido.
   //
-  // Por eso el corte se hace ACA, sobre la PRESENCIA, antes de que haya un número que
-  // auditar. El saldo previo de la cuenta que recibe el dinero es el único dato que no
-  // se puede sustituir por un default.
+  // La misma ambigüedad que hacía inaceptable la asimetría en nuestra fila la hace
+  // inaceptable en cualquiera: una fila sólo en `pre` es "cuenta cerrada" (bajó todo) o
+  // "fila perdida" (bajó una cantidad desconocida), y las dos lecturas dan créditos
+  // distintos. La regla no puede depender de QUIEN es el dueño de la fila.
   //
-  // COSTO DECLARADO: si la ATA de depósito se creara en la misma tx del primer depósito,
-  // ese depósito sale 503 (`UNKNOWN`, sin consumir la prueba) y se acredita por el
-  // runbook manual. Es una precondición del operador —crear la ATA antes de encender el
-  // flag, que el runbook ya ordena— y no un caso del depositante.
-  let delta = 0n;
-  if (ourIdx !== null) {
-    const before = preByIdx.get(ourIdx);
-    const after = postByIdx.get(ourIdx);
-    if ((before === undefined) !== (after === undefined)) {
+  // ── COSTO, MEDIDO Y DECLARADO ─────────────────────────────────────────────
+  // Pasan a `503 UNKNOWN` (sin consumir la prueba, con evento durable) las txs que
+  // CREAN o CIERRAN una cuenta **del mint configurado** en la misma tx del depósito:
+  //   · el depositante cierra su cuenta de USDC en la misma tx en que deposita
+  //     ("transfer + close" para recuperar el rent) — es el caso realista;
+  //   · el depósito viene acompañado de un pago a un tercero que todavía no tiene ATA
+  //     de USDC y la crea en esa misma tx.
+  // NO afectan: crear/cerrar cuentas de OTROS mints (el caso común de las rutas de swap
+  // con WSOL temporal), porque acá sólo se miran filas del mint configurado.
+  // Remediación del depositante: repetir el depósito sin cerrar la cuenta en la misma
+  // tx; o el runbook manual, que ya existe. Es molesto y recuperable; un crédito inflado
+  // no lo es, y cuando los dos errores no cuestan lo mismo el default va del lado barato.
+  for (const addr of new Set([...preByAddr.keys(), ...postByAddr.keys()])) {
+    const inPre = preByAddr.has(addr);
+    const inPost = postByAddr.has(addr);
+    if (inPre !== inPost) {
       return {
         ok: false,
         reason: 'DEPOSIT_VERIFICATION_UNKNOWN',
-        detail: `the deposit ATA appears in only ONE of the two token balance lists (pre=${before !== undefined}, post=${after !== undefined}) — that is either a freshly created account or a lost row, and the two readings credit different amounts, so neither can be asserted`,
+        detail: `account ${addr}${addr === expectedAta ? ' (the deposit ATA)' : ''} appears in only ONE of the two token balance lists (pre=${inPre}, post=${inPost}) — that is either an account created/closed in this transaction or a lost row, and the two readings credit different amounts, so neither can be asserted`,
       };
     }
-    delta = (after ?? 0n) - (before ?? 0n);
   }
+
+  // ── EL DELTA, DERIVADO UNA SOLA VEZ Y SOLO DE FILAS PRESENTES ─────────────
+  // Después del guard de arriba, nuestra dirección está en las dos tablas o en ninguna,
+  // así que estos dos `?? 0n` ya no son una suposición: son el caso "no aparece en
+  // ninguna", que es un delta de cero medido, no un default que rellena un hueco.
+  const delta =
+    (postByAddr.get(expectedAta) ?? 0n) - (preByAddr.get(expectedAta) ?? 0n);
 
   if (delta < 0n) {
     // ⚠️ UN DELTA NEGATIVO ES IMPOSIBLE LEYENDO BIEN (fix-pack it2 · BLQ-MED-3): la
@@ -633,25 +680,45 @@ export async function verifySolanaDeposit(
   // del resto. Un depósito legítimo la cumple; una tx que además le paga a un tercero
   // también (ese tercero SUBE, así que baja la baja neta del resto en la misma medida).
   //
-  // Por qué las ausencias de OTRAS cuentas ya no pueden hacer daño: `delta` quedó fijado
-  // arriba con filas que tienen que estar PRESENTES en las dos listas. Cualquier fila
-  // ausente de otra cuenta sólo puede mover el lado DERECHO, y moverlo produce
-  // desigualdad ⇒ `UNKNOWN`. O sea que toda incoherencia restante es fail-CLOSED por
-  // construcción: puede negar un crédito, nunca inflarlo. Ese es el criterio que había
-  // que cumplir, y es una propiedad de la estructura, no de una lista de casos.
+  // ── LO QUE ESTA ECUACION SI GARANTIZA, Y LO QUE NO (fix-pack it5 · prosa) ──
   //
-  // ⚠️ SUPUESTO DECLARADO, no silencioso: el mint configurado es SPL Token clásico, sin
-  // extensión de fee ni mint/burn en el camino del depositante. Con Token-2022 y fee, lo
-  // retenido rompería la igualdad en una tx legítima y esto la rechazaría con un 503:
-  // fail-CLOSED y visible, no un crédito de más — pero hay que revisitarlo ahí, no
-  // descubrirlo.
+  // ⚠️ LA VERSION ANTERIOR DE ESTE COMENTARIO ERA FALSA, y el sobre-anuncio es la causa
+  // raíz de las cuatro iteraciones: decía *"cualquier fila ausente de otra cuenta sólo
+  // puede mover el lado DERECHO, y moverlo produce desigualdad"*. **El paso no vale**:
+  // mover el lado derecho también puede RESTAURAR la igualdad contra un lado izquierdo
+  // ya inflado, que es exactamente lo que hacía CE1. Cada vez que escribí una propiedad
+  // universal que la fórmula no sostenía, esa frase hizo que todos —yo incluido—
+  // dejáramos de buscar en esa dirección. Una afirmación de más en un comentario es un
+  // apagador de revisiones.
   //
-  // Y la afirmación honesta, que ya me falsificaron una vez por escribirla de más: esto
-  // NO caza "corrupción inenumerable". Caza UNA propiedad, enunciable y falsable.
+  // GARANTIA, en su forma falsable (y respaldada por un fuzz de 206 mutaciones de una
+  // fila y 21.321 de dos, con cero inflaciones tras este fix): **ninguna incoherencia de
+  // PRESENCIA, DUPLICACION, ILEGIBILIDAD o IDENTIDAD de filas puede inflar el crédito.**
+  // Cada una de esas cuatro clases tiene su guard y su test con nombre, y cada frase de
+  // acá se puede romper nombrando un input concreto — si no, diría de más.
+  //
+  // ⚠️ LIMITE DEL ALCANCE, escrito como límite y no como pendiente: un dataset
+  // INTERNAMENTE COHERENTE pero falso —una historia consistente: "esta cuenta tenía 1000
+  // y los mandó acá"— es indistinguible de un depósito legítimo por cualquier chequeo
+  // local, porque es idéntico a lo que produciría ese depósito. Ningún invariante sobre
+  // estas dos listas puede rechazarlo, así que la afirmación universal "ninguna
+  // incoherencia puede inflar el crédito" **nunca podrá ser verdadera contra un RPC que
+  // miente**. Lo que acota ese riesgo no vive en este archivo: es la confianza en el
+  // endpoint (`SOLANA_RPC_URL`, config del operador) y la finalidad leída con
+  // `getSignatureStatuses`.
+  //
+  // ⚠️ SUPUESTO DECLARADO: el mint configurado es SPL Token clásico, sin extensión de fee
+  // ni mint/burn en el camino del depositante. Con Token-2022 y fee, lo retenido rompería
+  // la igualdad en una tx legítima y esto la rechazaría con un 503: fail-CLOSED y
+  // visible, no un crédito de más — pero hay que revisitarlo ahí, no descubrirlo.
+  //
+  // Nota sobre los `?? 0n` de abajo: NO son un default sobre un hueco. La presencia
+  // bilateral ya corrió, así que toda dirección de la unión está en las DOS tablas; el
+  // `?? 0n` es inalcanzable y sólo satisface al compilador.
   let othersNetDrop = 0n;
-  for (const idx of new Set([...preByIdx.keys(), ...postByIdx.keys()])) {
-    if (ourIdx !== null && idx === ourIdx) continue;
-    othersNetDrop += (preByIdx.get(idx) ?? 0n) - (postByIdx.get(idx) ?? 0n);
+  for (const addr of new Set([...preByAddr.keys(), ...postByAddr.keys()])) {
+    if (addr === expectedAta) continue;
+    othersNetDrop += (preByAddr.get(addr) ?? 0n) - (postByAddr.get(addr) ?? 0n);
   }
   if (delta !== othersNetDrop) {
     return {
@@ -706,19 +773,21 @@ export async function verifySolanaDeposit(
   // la forma exacta del bug estructural que esta iteración vino a cerrar. Acá sólo se
   // usa el crudo para el `owner`, que la tabla no lleva.
   //
-  // ⚠️ EL `?? 0n` DE ACA ABAJO SIGUE, Y AHORA SI ES DEFENDIBLE (it3 · BLQ-BAJO-1).
-  // Cambió su ROL, que es lo que lo hacía peligroso: ya no alimenta ningún techo de
-  // crédito —la ecuación ya corrió y ya rechazó toda lista que no cuadre—, sólo sirve
-  // para IDENTIFICAR quién bajó. Y su modo de falla es el contrario del anterior: si
-  // sobra un candidato, el veredicto es `DEPOSITOR_AMBIGUOUS` o un owner que el gate de
-  // funding wallet rechaza. Fail-CLOSED.
+  // ⚠️ Y ACA YA NO QUEDA NINGUN `?? 0n` (fix-pack it5). El que había leía "ausente de
+  // `post`" como "se drenó entera", que es la misma suposición que BLQ-ALTO-2 vino a
+  // cerrar. Con la presencia bilateral exigida para TODA fila del mint, una cuenta
+  // ausente de `post` ya no llega hasta acá: la tx se rechazó antes. Los dos saldos
+  // existen o no se llega.
   const sourceOwners = new Set<string>();
   for (const b of pre) {
     if (b.mint !== mint) continue;
-    const before = preByIdx.get(b.accountIndex);
-    if (before === undefined) {
-      // Inalcanzable: la tabla se construyó de esta misma lista y ya rechazó lo
-      // ilegible. El compilador no lo sabe, y un `!` sería una aserción sin chequeo.
+    const addr = addressAt(b.accountIndex) ?? '';
+    const before = preByAddr.get(addr);
+    const after = postByAddr.get(addr);
+    if (before === undefined || after === undefined) {
+      // Inalcanzable: las tablas se construyeron de estas mismas listas y la presencia
+      // bilateral ya corrió. El compilador no lo sabe, y un `!` sería una aserción sin
+      // chequeo.
       return {
         ok: false,
         reason: 'DEPOSIT_VERIFICATION_UNKNOWN',
@@ -726,8 +795,6 @@ export async function verifySolanaDeposit(
           'a preTokenBalance entry for the configured mint is missing from the canonical balance table — the depositor cannot be determined',
       };
     }
-    // Si la cuenta desapareció de `post` (se cerró), su saldo pasó a 0.
-    const after = postByIdx.get(b.accountIndex) ?? 0n;
     if (after - before >= 0n) continue; // no bajó: no es un origen
     const owner = declaredOwner(b);
     if (owner === undefined) {
