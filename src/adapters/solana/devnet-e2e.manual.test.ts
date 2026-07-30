@@ -35,20 +35,57 @@
  *   3. `SOLANA_OPERATOR_PRIVATE_KEY` es el secret ed25519 de 64 bytes en BASE58
  *      (NO el JSON array de solana-keygen). Conversión:
  *        node -e "const b=require('bs58');const k=require('/tmp/wasiai-devnet-operator.json');console.log(b.default.encode(Uint8Array.from(k)))"
+ *   4. **UNA BASE DE DATOS ALCANZABLE, Y QUE SEA `bdwv`.** Desde WKH-307 `settle()`
+ *      arranca con el preflight del ledger durable (`ensureSolanaSchemaReady()` →
+ *      `probeSettleLedger()`), que es OBLIGATORIO y fail-closed: sin él el e2e no
+ *      llega nunca a la cadena, muere en `SETTLE_LEDGER_SCHEMA_UNAVAILABLE`.
+ *      La migración `20260730000000_wkh307_solana_settle_intents.sql` está aplicada
+ *      en **bdwv** (verificado: el probe devuelve `{ probe: 'ok' }` contra bdwv).
+ *      **JAMÁS caldz** — es el archivo de mainnet, y este test mueve dinero.
  *
- * Ejecución:
+ * ─── EJECUCIÓN ────────────────────────────────────────────────────────────
+ * ⚠️ HAY QUE USAR EL CONFIG DEDICADO `vitest.e2e.config.ts`. Con el config principal
+ * este test es IMPOSIBLE de correr, y exportar `SUPABASE_URL` NO alcanza:
+ * `vitest.config.ts:17-20` declara `test.env` con `SUPABASE_URL=http://localhost:54321`
+ * y una service key de juguete, y **la `env` de la config de vitest GANA sobre
+ * `process.env`**. O sea que el preflight pega contra un localhost donde nada escucha
+ * (evidencia: `probe: 'failed' … TypeError: fetch failed`) por más que hayas exportado
+ * las credenciales correctas. Ese estubeo NO se toca: es lo que impide que los ~4300
+ * unit tests escriban en una base real. `vitest.e2e.config.ts` no declara `env`, así
+ * que ahí sí pasan las credenciales del entorno.
+ *
  *   SOLANA_DEVNET_E2E=1 \
  *   SOLANA_OPERATOR_PRIVATE_KEY=<base58-64-bytes> \
  *   SOLANA_E2E_PAYTO=<pubkey-destino-con-ATA-creada> \
  *   SOLANA_E2E_AMOUNT_ATOMIC=1 \
- *     ./node_modules/.bin/vitest run src/adapters/solana/devnet-e2e.manual.test.ts
+ *     node --env-file=.env ./node_modules/vitest/vitest.mjs run \
+ *       --config vitest.e2e.config.ts
+ *
+ * Sobre el `--env-file`:
+ *   · `.env` es la fuente recomendada del par `SUPABASE_URL` / `SUPABASE_SERVICE_KEY`:
+ *     apunta a **bdwv** y no trae ninguna variable de Solana, así que no puede
+ *     contaminar la corrida.
+ *   · `node --env-file=` y NO `set -a; . ./.env`: sourcear este `.env` con bash aborta
+ *     (`./.env: line 38: …: command not found`) porque hay valores con caracteres que
+ *     el shell interpreta.
+ *   · 🚨 **NO cargues `.env.local` completo.** Trae `SOLANA_USDC_MINT_DEVNET=8yRX3f…`,
+ *     que es el mint VIEJO: liquidarías con el token equivocado y el resultado no
+ *     probaría nada del money-path real. El mint correcto es el default del código,
+ *     `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` (USDC de Circle) — o sea que lo
+ *     mejor es NO setear `SOLANA_USDC_MINT_DEVNET` en absoluto.
  *
  * Qué esperar: la firma se imprime por consola; se verifica en
  *   https://explorer.solana.com/tx/<sig>?cluster=devnet
  *
+ * Si la salida dice `1 skipped` NO corriste nada: falta `SOLANA_DEVNET_E2E=1`.
+ *
  * Si falla:
  *   · "could not find account"        → falta la ATA (del operador o del payTo).
  *   · "insufficient funds for rent"   → falta SOL de devnet para fees.
+ *   · `SETTLE_LEDGER_SCHEMA_UNAVAILABLE` con `probe_failed` → la base no
+ *     respondió (¿estás corriendo con el config principal? ¿falta el `--env-file`?).
+ *   · `SETTLE_LEDGER_SCHEMA_UNAVAILABLE` con `table_missing` → esa base NO
+ *     tiene la migración de WKH-307. Apuntá a bdwv o aplicala.
  *   · timeout de confirmación         → devnet congestionada; reintentar. El
  *     adapter tiene self-heal (WKH-235a) y recupera la firma si SÍ confirmó.
  */
