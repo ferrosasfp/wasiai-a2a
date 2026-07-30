@@ -211,7 +211,19 @@ vi.mock('./settle-ledger.js', () => ({
 
 // ⚠️ `schema-preflight.js` NO se mockea: se usa el REAL, para poder medir su
 // MEMOIZACIÓN (T-IDM-10b) sobre el `probeSettleLedger` mockeado de arriba.
+// ⚠️ El clasificador REAL, el mismo que usa `settleSolanaLeg`. Se importa a
+// propósito en vez de re-implementar la regla: los tests de `downstream-payment`
+// mockean el adapter Solana entero, así que NINGUNO prueba que lo que este adapter
+// LANZA de verdad lleve la disposición que el leg necesita leer (AR BLQ-2).
+import { readSettleValueDisposition } from '../errors.js';
 import { _resetSolanaClients, SolanaPaymentAdapter } from './payment.js';
+
+/** El código de leg que `settleSolanaLeg` derivaría de este throw. */
+function legCodeFor(err: unknown): 'SETTLE_UNKNOWN' | 'SETTLE_FAILED' {
+  return readSettleValueDisposition(err) === 'unknown'
+    ? 'SETTLE_UNKNOWN'
+    : 'SETTLE_FAILED';
+}
 
 /** Instala el comportamiento del ledger emulando PK + UNIQUE parcial. */
 function wireLedger() {
@@ -1596,39 +1608,98 @@ describe('WKH-319 · AC-6/AC-7/AC-8: el veredicto', () => {
     expect(out.detail).toMatch(/on-chain transfer 1 < required 1000000/);
   });
 
-  it('T-319-7b: `owner` ausente — sub-medir no autoriza afirmar la negativa', async () => {
-    // Una entrada de nuestro mint sin `owner` sólo puede SUMAR al lado que no
-    // medimos. Si aun así el delta medido ALCANZA, la afirmación positiva es sólida;
-    // si NO alcanza, no se puede afirmar la negativa. (W2 la vuelve medible.)
-    const anon = {
+  it('T-319-7b: `owner` ausente en `post` sub-mide ⟹ no autoriza la NEGATIVA', async () => {
+    // Del lado `post`, no medir una entrada achica el delta: sólo puede SUB-medir.
+    // Eso no habilita afirmar "la plata no llegó", pero tampoco es un fail-open.
+    const anonPost = (amount: string) => ({
       accountIndex: 9,
       mint: MINT,
-      uiTokenAmount: { amount: '1', decimals: 6, uiAmount: null },
-    };
+      uiTokenAmount: { amount, decimals: 6, uiAmount: null },
+    });
     const noAlcanza = await termsOutcome({
       meta: {
         err: null,
-        preTokenBalances: [
-          tb('0'),
-          { ...anon, uiTokenAmount: { amount: '0' } },
-        ],
-        postTokenBalances: [tb('1'), anon],
+        preTokenBalances: [tb('0')],
+        postTokenBalances: [tb('1'), anonPost('1')],
       },
     });
     expect(noAlcanza.kind).toBe('indeterminate');
     expect(noAlcanza.detail).toMatch(/^terms_unclassifiable_entry/);
+    expect(noAlcanza.detail).toMatch(/could only ADD/);
 
+    // Con `pre` COMPLETO y el delta medido alcanzando, la afirmación positiva es
+    // sólida: una entrada anónima en `post` sólo pudo sumar a lo que no medimos.
     const alcanza = await termsOutcome({
+      meta: {
+        err: null,
+        preTokenBalances: [tb('0')],
+        postTokenBalances: [tb(AMOUNT), anonPost('1')],
+      },
+    });
+    expect(alcanza.kind).toBe('match');
+  });
+
+  it('T-319-7c (AR BLQ-1): `owner` ausente en `pre` INFLA el delta ⟹ jamás `match`', async () => {
+    // ⚠️ LA SEXTA FORMA DEL FAIL-OPEN, y la más chica de todas: alcanza con que el
+    // RPC OMITA `owner` —campo opcional en el esquema real— en la entrada del lado
+    // `pre`. Esa entrada no entra a ningún mapa, así que además de no sumar es
+    // INVISIBLE para el guard de simetría. Y en `pre` no medir NO sub-mide: achica
+    // `preSum` y por lo tanto AGRANDA el delta. Es la mecánica exacta del `?? []`.
+    const anonPre = {
+      accountIndex: 9,
+      mint: MINT,
+      uiTokenAmount: { amount: '100000000', decimals: 6, uiAmount: null },
+    };
+    const inflado = await termsOutcome({
+      meta: {
+        err: null,
+        // Las tenencias de payTo BAJAN de 100 USDC a 3: la tx no le pagó, le sacó.
+        preTokenBalances: [tb('0'), anonPre],
+        postTokenBalances: [
+          tb(AMOUNT),
+          { ...anonPre, uiTokenAmount: { amount: '0' } },
+        ],
+      },
+    });
+    expect(inflado.kind).toBe('indeterminate');
+    expect(inflado.detail).toMatch(/^terms_unclassifiable_entry/);
+    expect(inflado.detail).toMatch(/INFLATED/);
+
+    // EL CONTROL QUE LO CONVIERTE EN PRUEBA: la MISMA forma con el `owner`
+    // declarado ya se cazaba. O sea que omitir `owner` era lo único que hacía falta
+    // para convertir un caso cazado en un pago certificado.
+    const conOwner = await termsOutcome({
+      meta: {
+        err: null,
+        preTokenBalances: [tb('0'), tb('100000000', { accountIndex: 9 })],
+        postTokenBalances: [tb(AMOUNT), tb('0', { accountIndex: 9 })],
+      },
+    });
+    expect(conOwner.kind).toBe('indeterminate');
+    expect(conOwner.detail).toMatch(/^terms_negative_delta/);
+  });
+
+  it('T-319-7d: una entrada anónima en `pre` tampoco puede saltearse el delta negativo', async () => {
+    // Con `< required` y `pre` incompleto, el delta VERDADERO podría ser negativo.
+    // Devolver `mismatch` ahí sería SETTLE_CONFIRMED_BUT_UNVERIFIABLE —condena
+    // permanente— sobre datos incoherentes, que es justo lo que el guard de delta
+    // negativo existe para no hacer.
+    const out = await termsOutcome({
       meta: {
         err: null,
         preTokenBalances: [
           tb('0'),
-          { ...anon, uiTokenAmount: { amount: '0' } },
+          {
+            accountIndex: 9,
+            mint: MINT,
+            uiTokenAmount: { amount: '5000000', decimals: 6, uiAmount: null },
+          },
         ],
-        postTokenBalances: [tb(AMOUNT), anon],
+        postTokenBalances: [tb('1')],
       },
     });
-    expect(alcanza.kind).toBe('match');
+    expect(out.kind).toBe('indeterminate');
+    expect(out.detail).toMatch(/true delta could be negative/);
   });
 });
 
@@ -1646,6 +1717,11 @@ describe('WKH-319 · AC-10/AC-11/AC-12: la indeterminación llega a los consumid
     expect(String(err)).toMatch(/terms_list_absent/);
     expect(String(err)).not.toMatch(/CONFIRMED_BUT_UNVERIFIABLE/);
     expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    // ⚠️ AR BLQ-2 — LA INCÓGNITA TIENE QUE SOBREVIVIR AL VIAJE HASTA EL LEG. Con un
+    // `Error` pelado el clasificador devuelve `undefined` y `settleSolanaLeg`
+    // publica `SETTLE_FAILED`, que DISPARA REEMBOLSO Y/O RE-ENVÍO DEL HOP: el
+    // adapter diría "no pude comprobarlo" y el leg afirmaría "no se pagó".
+    expect(legCodeFor(err)).toBe('SETTLE_UNKNOWN');
   });
 
   it('T-319-14: fila `signed` + blockhash EXPIRADO + `pre` ausente ⟹ ni confirma ni re-transmite', async () => {
@@ -1669,12 +1745,33 @@ describe('WKH-319 · AC-10/AC-11/AC-12: la indeterminación llega a los consumid
     expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
     expect(recordConfirmedMock).not.toHaveBeenCalled();
     expect(reclaimMock).not.toHaveBeenCalled();
+    expect(legCodeFor(err)).toBe('SETTLE_UNKNOWN'); // AR BLQ-2
     // La fila sigue reconciliable: `signed`, con su cota intacta.
     expect(fakeLedger.rows.get('run:0')).toMatchObject({
       status: 'signed',
       signature: 'InFlightSig',
       lastValidBlockHeight: '100',
     });
+  });
+
+  it('T-319-13b: LA CONTRACARA — un mismatch MEDIDO sigue siendo SETTLE_FAILED', async () => {
+    // Sin esto, el fix de BLQ-2 podría haber convertido TODO throw del adapter en
+    // "no sé" y ningún leg volvería a reportarse como impago. Un delta medido que
+    // no cubre el monto es una negativa DEMOSTRADA: tiene que seguir doliendo.
+    seedRow('run:0');
+    presenceState.value = { err: null };
+    fakeConnection.getParsedTransaction.mockResolvedValue({
+      meta: {
+        err: null,
+        preTokenBalances: [tb('0')],
+        postTokenBalances: [tb('1')],
+      },
+    });
+
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+
+    expect(String(err)).toMatch(/SETTLE_CONFIRMED_BUT_UNVERIFIABLE/);
+    expect(legCodeFor(err)).toBe('SETTLE_FAILED');
   });
 
   it('T-319-15: timeout de confirmación + `pre` ausente ⟹ SETTLE_UNKNOWN, no SETTLE_FAILED', async () => {
@@ -1695,6 +1792,7 @@ describe('WKH-319 · AC-10/AC-11/AC-12: la indeterminación llega a los consumid
     expect((err as { valueDisposition?: string }).valueDisposition).toBe(
       'unknown',
     );
+    expect(legCodeFor(err)).toBe('SETTLE_UNKNOWN');
     // Se transmitió UNA vez (el settle original), y NO se re-transmitió.
     expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
     expect(recordConfirmedMock).not.toHaveBeenCalled();

@@ -236,6 +236,32 @@ function declaredOwner(b: TokenBalanceLike): string | null {
 }
 
 /**
+ * WKH-319 (CR MNR-D) — el mensaje operativo correcto para una presencia `unknown`.
+ *
+ * La rama `unknown` se documentó como *"la cadena no se pudo consultar"*, que era
+ * cierto cuando su única causa era el RPC. Ahora también llegan causas donde **la
+ * cadena contestó perfecto** y lo que falló fue INTERPRETARLA (`terms_*`), e incluso
+ * una donde el dato malo es NUESTRO (`terms_required_unreadable` valida
+ * `proof.amountAtomic`, que sale del ledger). Las dos clases se destraban distinto:
+ *
+ *   · RPC mudo            → transitorio, el próximo retry contra otro nodo lo resuelve;
+ *   · `terms_*`           → **DETERMINÍSTICO**: el mismo nodo va a volver a fallar
+ *     igual, y reintentar para siempre bajo un mensaje de "transitorio" esconde el
+ *     problema. Necesita cambiar de endpoint o mirada humana (runbook).
+ *
+ * Publicar la segunda con el texto de la primera manda al operador a esperar algo
+ * que no va a pasar solo.
+ */
+function unresolvedTermsMessage(
+  detail: string,
+  transientMessage: string,
+): string {
+  return detail.startsWith('terms_')
+    ? `${transientMessage} — ⚠️ NOTE: the chain DID answer; what failed was interpreting it (${detail.split(':')[0]}). This does NOT clear up by itself: same input, same result. See doc/sdd/209-wkh-307-solana-durable-idempotency-ledger/runbook-destrabe.md`
+    : transientMessage;
+}
+
+/**
  * Lamports de `pre/postBalances` en un indice, o `null` si no se puede leer (lista
  * ausente, no-array, indice fuera de rango, valor no numerico).
  *
@@ -476,10 +502,20 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     if (presence.state === 'unknown') {
       log.warn(
         { intentId: req.intentId, signature, detail: presence.detail },
-        'solana settle deferred — the ledger says this intent was confirmed but the chain could not be queried; NOT re-broadcasting and NOT condemning the row',
+        unresolvedTermsMessage(
+          presence.detail,
+          'solana settle deferred — the ledger says this intent was confirmed but the chain could not be queried; NOT re-broadcasting and NOT condemning the row',
+        ),
       );
-      throw new Error(
+      // ⚠️ `FacilitatorSettleError(..., 'unknown')` y NO un `Error` pelado (AR BLQ-2).
+      // `settleSolanaLeg` clasifica el throw con `readSettleValueDisposition`, y un
+      // error sin disposicion cae en `SETTLE_FAILED` — que DISPARA REEMBOLSO Y/O
+      // RE-ENVIO DEL HOP. O sea: el adapter diria "no pude comprobarlo" y el leg le
+      // afirmaria al caller "no se pago". Es el mismo colapso que esta HU cierra un
+      // piso mas abajo, y seria absurdo dejarlo vivo un piso mas arriba.
+      throw new FacilitatorSettleError(
         `SETTLE_PRESENCE_UNKNOWN: ${req.intentId} (${presence.detail})`,
+        'unknown',
       );
     }
 
@@ -569,10 +605,16 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     if (presence.state === 'unknown') {
       log.warn(
         { intentId: req.intentId, signature, detail: presence.detail },
-        'solana settle refused — could not determine whether the signed transaction landed; refusing to re-broadcast on an unanswered question',
+        unresolvedTermsMessage(
+          presence.detail,
+          'solana settle refused — could not determine whether the signed transaction landed; refusing to re-broadcast on an unanswered question',
+        ),
       );
-      throw new Error(
+      // Idem `settleAlreadyConfirmed` (AR BLQ-2): la incognita tiene que VIAJAR con
+      // su disposicion o el leg la publica como "no se pago".
+      throw new FacilitatorSettleError(
         `SETTLE_IN_FLIGHT_UNRESOLVED: ${req.intentId} (presence unknown: ${presence.detail})`,
+        'unknown',
       );
     }
 
@@ -1287,7 +1329,26 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     const postOurs = new Map<number, bigint>();
     // Entradas de NUESTRO mint que no se pueden atribuir por falta de `owner`.
     // No son nuestras, pero tampoco se puede afirmar que no lo sean.
-    let unclassifiable = 0;
+    //
+    // ⚠️ SE CUENTAN POR LADO, Y NO ES UN DETALLE (AR BLQ-1). Una entrada sin
+    // clasificar no entra a ninguno de los dos mapas, asi que ademas de no sumar es
+    // INVISIBLE para el guard de simetria del Paso 5 — y el efecto de esa ceguera
+    // es OPUESTO segun el lado:
+    //
+    //   · en `post`  no medirla achica `postSum` ⟹ achica el delta ⟹ solo puede
+    //     sub-medir. La afirmacion POSITIVA sigue siendo solida;
+    //   · en `pre`   no medirla achica `preSum` ⟹ **AGRANDA** el delta ⟹ puede
+    //     volver verdadero un `>=` que era falso. **Es la mecanica exacta del
+    //     `?? []` original, con otro disfraz.**
+    //
+    // Repro que lo probo: `payTo` con una entrada anonima que BAJA de 100 USDC a 0
+    // y una nuestra que sube 0 → 3, con required 3000000, daba `match` — o sea
+    // `landed_ok` sobre una tx donde las tenencias de payTo se DERRUMBARON. La
+    // misma forma con el `owner` declarado da `terms_negative_delta`: omitir
+    // `owner` era lo unico que hacia falta para convertir un caso cazado en un
+    // pago certificado.
+    let unclassifiablePre = 0;
+    let unclassifiablePost = 0;
     for (const [list, ours, side] of [
       [pre, preOurs, 'pre'],
       [post, postOurs, 'post'],
@@ -1296,7 +1357,8 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
         if (b.mint !== mint) continue;
         const owner = declaredOwner(b);
         if (owner === null) {
-          unclassifiable += 1;
+          if (side === 'pre') unclassifiablePre += 1;
+          else unclassifiablePost += 1;
           continue;
         }
         if (owner !== proof.payTo) continue;
@@ -1368,19 +1430,33 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
         detail: `terms_negative_delta: ${delta} for ${proof.payTo} — a receiving account cannot spend`,
       };
     }
+    const unclassifiableDetail = (why: string): SolanaTermsVerdict => ({
+      verdict: 'indeterminate',
+      detail: `terms_unclassifiable_entry: ${unclassifiablePre} pre / ${unclassifiablePost} post balance entries of the expected mint carry no owner — ${why} (measured delta ${delta}, required ${required})`,
+    });
     if (delta >= required) {
-      // La afirmacion POSITIVA es solida aunque haya entradas sin clasificar:
-      // medir de menos no puede volver verdadero un `>=` que era falso.
+      // La afirmacion positiva EXIGE que el lado `pre` este completo. Una entrada
+      // anonima ahi solo puede haber INFLADO este delta (AR BLQ-1).
+      if (unclassifiablePre > 0) {
+        return unclassifiableDetail(
+          'an unattributed pre entry can only have INFLATED this delta',
+        );
+      }
       return { verdict: 'match', creditedAtomic: delta.toString() };
     }
-    if (unclassifiable > 0) {
-      // No alcanza, pero hay entradas de nuestro mint que no se pudieron atribuir
-      // y que solo podrian SUMAR al lado que no medimos. No se puede afirmar la
-      // negativa. (W2 agrega el tier de direccion y vuelve medible la mayoria.)
-      return {
-        verdict: 'indeterminate',
-        detail: `terms_unclassifiable_entry: ${unclassifiable} balance entr${unclassifiable === 1 ? 'y' : 'ies'} of the expected mint carry no owner, and the measured delta ${delta} < required ${required}`,
-      };
+    // La NEGATIVA exige los DOS lados completos, y el de `pre` tambien — aunque una
+    // entrada anonima ahi no pueda romper el `< required` por si sola. Razon: si esa
+    // entrada fuera nuestra, el delta VERDADERO seria mas chico que el medido y
+    // podria ser NEGATIVO, o sea justo lo que el guard de delta negativo existe para
+    // no condenar. Sin esta rama, una entrada sin `owner` en `pre` alcanza para
+    // saltearse ese guard y producir SETTLE_CONFIRMED_BUT_UNVERIFIABLE —condena
+    // permanente— sobre datos incoherentes.
+    if (unclassifiablePre > 0 || unclassifiablePost > 0) {
+      return unclassifiableDetail(
+        unclassifiablePost > 0
+          ? 'an unattributed post entry could only ADD to the side we did not measure'
+          : 'an unattributed pre entry means the true delta could be negative',
+      );
     }
     return {
       verdict: 'mismatch',
