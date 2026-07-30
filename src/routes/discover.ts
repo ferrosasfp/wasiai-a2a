@@ -79,14 +79,24 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    *   aparecía igual y la respuesta afirmaba haberlo consultado. El tipo
    *   (`string[]`) y el nombre no cambian; el valor sólo se acorta cuando una
    *   fuente realmente no aportó nada.
-   * - `sources`: estado POR FUENTE. `state` es `ok` (respondió y trajo todo lo
-   *   que tiene para esta query) | `truncated` (respondió, pero hay más filas
-   *   que no trajimos) | `failed` (no se la pudo consultar). `rows` son las
-   *   filas que aportó ANTES de los filtros locales, y es `null` — no 0 —
-   *   cuando `state` es `failed`: 0 significa "le pregunté y no tiene", `null`
-   *   significa "no pude preguntarle".
-   * - `catalogStatus`: roll-up de la request. `complete` | `truncated` |
-   *   `partial`, con precedencia `partial` > `truncated` > `complete`.
+   * - `sources`: estado POR FUENTE. `state` es `ok` (respondió, y hay EVIDENCIA
+   *   de que trajo todo lo que tiene para esta query) | `truncated` (respondió,
+   *   y hay evidencia de que hay más filas que no trajimos) | `unverified`
+   *   (respondió, pero no hay forma de saber si trajo todo) | `failed` (no se la
+   *   pudo consultar). `rows` son las filas que aportó ANTES de los filtros
+   *   locales, y es `null` — no 0 — cuando `state` es `failed`: 0 significa "le
+   *   pregunté y no tiene", `null` significa "no pude preguntarle". En
+   *   `unverified` hay número: lo que no se sabe es si eran todas.
+   *
+   *   `ok` NO es el default: se gana con evidencia, y hoy sólo hay dos formas de
+   *   tenerla — que el registro declare `nextCursorPath` y el cursor llegue
+   *   vacío, o que se le haya enviado un límite y haya devuelto menos filas que
+   *   ese límite. Un registro que contesta sin ninguna de las dos es
+   *   `unverified`.
+   * - `catalogStatus`: roll-up de la request. `complete` | `unverified` |
+   *   `truncated` | `partial`, con precedencia
+   *   `partial` > `truncated` > `unverified` > `complete`. `complete` significa
+   *   "todas las fuentes probaron haber dado todo", no "ninguna se quejó".
    */
   fastify.get(
     '/',

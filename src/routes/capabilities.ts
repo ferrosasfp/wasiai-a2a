@@ -75,9 +75,15 @@ const capabilitiesRoutes: FastifyPluginAsync = async (fastify) => {
       agentsTotal: discovered.total,
       registries: discovered.registries,
       // WKH-318: cambio ADITIVO sobre una respuesta pública — mismo patrón que
-      // HU-204 en este archivo (:41-43). Los 11 campos previos quedan intactos,
-      // con el mismo nombre y el mismo valor. Esta superficie replicaba el bug:
+      // HU-204 en este archivo (:41-43). Los campos previos quedan intactos, con
+      // el mismo nombre y el mismo valor. Esta superficie replicaba el bug:
       // afirmaba haber consultado registros que no habían contestado.
+      //
+      // El conjunto EXACTO de claves lo congela `T-SRC-06`
+      // (`capabilities.inbound-chains.test.ts`), que las asserta una por una y
+      // compara `Object.keys`. No se pone el número acá a propósito: un número
+      // en un comentario se desactualiza en silencio (ya pasó — decía 11 y son
+      // 12), un test no.
       catalogStatus: discovered.catalogStatus,
       sources: discovered.sources,
     });

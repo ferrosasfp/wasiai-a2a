@@ -144,10 +144,18 @@ export interface RegistrySchema {
     agentMapping?: AgentFieldMapping;
     /**
      * WKH-318: techo de `limit` que este registro acepta, DECLARADO por el
-     * registrante. Cuando está, `queryRegistry` envía
-     * `min(over-fetch, maxLimit)`. **Ausente ⇒ comportamiento byte-idéntico al
-     * de antes de esta HU** (el código es inerte sin la migración: falla en la
-     * dirección segura).
+     * registrante.
+     *
+     * ⚠️ **TODAVÍA NO LO LEE NADIE.** El campo existe desde el corte A, pero el
+     * clamp (`min(over-fetch, maxLimit)` en `queryRegistry`) llega recién con el
+     * corte B / W3. Antes decía "cuando está, `queryRegistry` envía..." en
+     * presente, y era falso: `maxLimit` no aparecía en ninguna otra línea de
+     * `src/` (AR MNR-E).
+     *
+     * Consecuencia mientras tanto, y es una TERCERA forma de truncamiento que el
+     * corte A no cubre: si el registro clampea en silencio (le pedimos 200 y nos
+     * da 100 sin cursor), la página no se llena y no hay evidencia de
+     * truncamiento. Eso hoy se reporta `ok`. Lo cierra W3.
      */
     maxLimit?: number;
     /**
@@ -493,17 +501,24 @@ export interface DiscoveryResult {
   total: number;
   /**
    * WKH-318: las fuentes que **aportaron filas** al conjunto candidato, NO las
-   * fuentes configuradas. El tipo y el nombre no cambian; en el camino sano el
-   * valor es byte-idéntico al de antes de esta HU. Sólo se acorta cuando una
-   * fuente realmente no aportó nada.
+   * fuentes configuradas. El tipo (`string[]`) y el nombre no cambian; el valor
+   * **sólo se acorta cuando una fuente realmente no aportó nada**.
+   *
+   * ⚠️ CR MNR-C: acá decía además "en el camino sano el valor es byte-idéntico".
+   * Es FALSO, y lo prueba `T-SRC-02`: un registro habilitado que responde 200 con
+   * `[]` es camino sano —no falló nada— y aun así sale de la lista, porque no
+   * aportó filas. La frase venía del §2.1 del story file, que se contradice con
+   * la advertencia de su propio W1.3; manda la específica. Lo que sí es
+   * byte-idéntico es el camino en el que **todas** las fuentes aportan.
    */
   registries: string[];
   /** WKH-318: estado POR FUENTE. Requerido: ningún constructor puede omitirlo. */
   sources: DiscoverySource[];
   /**
-   * WKH-318: roll-up. Precedencia `partial` > `truncated` > `complete`.
-   * Sin registros habilitados (sólo self-published) ⇒ `complete`: no hay nada
-   * que haya fallado.
+   * WKH-318: roll-up. Precedencia
+   * `partial` > `truncated` > `unverified` > `complete`.
+   * Sin ninguna fuente consultada ⇒ `complete`: no hay nada que haya fallado ni
+   * nada cuya completitud haya quedado sin probar.
    */
   catalogStatus: CatalogStatus;
   /**
