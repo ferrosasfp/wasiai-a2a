@@ -657,3 +657,56 @@ no se citan en prosa — los assertea el propio test.)*
 - **Aplicar en**: **no citar cifras de evidencia en comentarios**. Si la cifra importa,
   vive en un `expect`; si no importa, no va. Un número escrito al lado de una afirmación
   la hace parecer medida aunque no lo esté.
+
+
+---
+
+### [2026-07-30 FIX-PACK it7 · BLQ-1] Escribí "Medido:" delante de algo que no medí
+
+- **Error**: el caso CE1 del fuzz llevaba un comentario con tres afirmaciones sobre por
+  qué la fila fantasma tenía que tener el mismo `owner` que el depositante. Las tres
+  falsas o vacías, verificadas una por una por el revisor y re-verificadas por mí:
+  (1) con otro `owner` el veredicto **no** cambia —es idéntico carácter por carácter—
+  porque la presencia bilateral corre **antes** del bloque de atribución, así que el
+  fantasma nunca llega a ser un segundo origen; (2) el candado sigue poniéndose rojo
+  igual con las dos variantes; (3) el "Medido:" era cierto pero vacío: con el otro
+  `owner` tampoco hay inflación, y el conjunto de inflaciones es el MISMO. **La elección
+  era inerte.**
+- **Causa raíz**: razoné el mecanismo mirando el bloque de atribución sin comprobar el
+  ORDEN en que corren los guards de mi propio archivo, y después escribí la conclusión
+  con la palabra "Medido" adelante — que es la que más confianza transmite— cuando lo
+  único que había medido era otra cosa (que ese caso no inflaba). **Prefijar una
+  inferencia con "medido" la convierte en una barrera para el próximo revisor**: deja de
+  buscar ahí, y por una razón que no existe. Y estaba en el archivo cuya única razón de
+  existir en esa iteración era que su prosa coincidiera con lo que mide.
+- **Fix**: el comentario dice ahora lo que se midió —el `owner` es indistinto, con el
+  porqué estructural— y deja anotado que antes decía otra cosa, para que la corrección
+  también quede visible.
+- **Aplicar en**: la palabra "medido" es un compromiso, no un énfasis. Si la frase que
+  sigue no corresponde **exactamente** al comando que corrí y a su salida, no lleva esa
+  palabra. Y antes de explicar por qué un guard actúa, **verificar el ORDEN de los guards
+  del propio archivo**: la explicación más plausible suele ser la del guard que ni
+  siquiera llegó a correr.
+
+---
+
+### [2026-07-30 FIX-PACK it7 · MNR-1] Una explicación única para cuatro casos que tenían dos motivos
+
+- **Error**: expliqué las cuatro filas "sólo candado" de la tabla de sensibilidad con un
+  único motivo ("los guards son redundantes entre sí"). Es exacto para dos —otro guard
+  toma el relevo, ahora medido con un doble mutante: neutralizando también el chequeo
+  defensivo de atribución, la familia del fantasma **sí infla**— y equivocado para los
+  otros dos, que simplemente **no son guards anti-inflación**: uno sigue midiendo el
+  mismo delta y el otro no entra en ninguna aritmética de monto.
+- **Y faltaba un límite del ORACULO**, que el revisor explicó mejor que yo: `isCoherent`
+  **no lee `owner` en ninguna línea**, así que clasifica como COHERENTE un dataset con el
+  owner mentido que el verificador rechaza (medido). El barrido es **estructuralmente
+  ciego** a esa clase.
+- **Causa raíz**: una explicación que cubre todos los casos de una tabla es cómoda y por
+  eso mismo sospechosa. Agrupé por el síntoma ("quedó verde") en vez de por el mecanismo,
+  y una de las cuatro filas ni siquiera tenía mecanismo propio: tenía un hueco del
+  oráculo.
+- **Aplicar en**: cuando una tabla de resultados tiene varias filas con el mismo símbolo,
+  **verificar el mecanismo de cada una por separado antes de escribir un porqué común**.
+  Y todo oráculo de test tiene que declarar qué clase de error NO modela, en el mismo
+  lugar donde se define — si no, su silencio se lee como cobertura.

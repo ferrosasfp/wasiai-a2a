@@ -65,13 +65,23 @@
  * "candado"   = lo caza el caso adversario por su needle, pero el barrido NO produce
  *               una inflación con ese guard caído.
  *
- * Y la razón de las cuatro filas de sólo-candado es una propiedad del CODIGO, no una
- * debilidad del barrido: **los guards son redundantes entre sí para la inflación**.
- * Sacando uno, otro sigue rechazando el mismo dataset — por ejemplo, con la presencia
- * bilateral reducida a nuestra fila (el bug de it4), la fila fantasma termina cazada por
- * el chequeo defensivo del bloque de atribución. Es defensa en profundidad real, y su
- * consecuencia es que el barrido, que sólo mide INFLACION, no puede aislar a esos cuatro:
- * para eso está el candado, que mide QUE GUARD HABLA.
+ * ⚠️ Y LAS CUATRO FILAS DE SOLO-CANDADO NO TIENEN TODAS EL MISMO MOTIVO. La versión
+ * anterior de esta cabecera las explicaba a las cuatro con "los guards son redundantes
+ * entre sí", que es exacto para dos y flojo para las otras dos:
+ *
+ *  · ILEGIBILIDAD y PRESENCIA-sólo-nuestra ⇒ **otro guard toma el relevo**. Medido con
+ *    un doble mutante: neutralizando además el chequeo defensivo del bloque de
+ *    atribución, la familia del fantasma **sí infla**. O sea que el barrido no las aísla
+ *    porque el código las cubre por partida doble — defensa en profundidad real.
+ *  · IDENTIDAD (por índice) e IDENTIDAD (owner) ⇒ **no son guards anti-inflación**. El
+ *    primero sigue midiendo el mismo delta sobre los datasets del barrido; el segundo no
+ *    entra en ninguna aritmética de monto. Quitarlos empeora el VEREDICTO, no el número.
+ *  · Y para el del `owner` hay además un límite del ORACULO, escrito abajo en
+ *    `isCoherent`: el barrido es **estructuralmente ciego** a esa clase.
+ *
+ * La conclusión operativa no cambia —el barrido, que sólo mide INFLACION, no puede
+ * aislar a esos cuatro, y para eso está el candado, que mide QUE GUARD HABLA— pero el
+ * porqué ahora es el que se midió, no el primero que sonó razonable.
  */
 
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
@@ -194,11 +204,19 @@ describe('FUZZ · candado: cada guard tiene un caso donde es EL UNICO que puede 
         [
           row(1, DEP, String(DEP_PRE)),
           row(2, OWNER, String(TREASURY_PRE)),
-          // ⚠️ MISMO `owner` QUE EL DEPOSITANTE, Y NO ES UN DETALLE. Con un owner
-          // distinto, la fila fantasma agrega un segundo origen y el veredicto lo
-          // termina dando `DEPOSITOR_AMBIGUOUS`: el caso dejaría de aislar la PRESENCIA
-          // y el guard podría desaparecer sin que nadie se entere. Medido: con `OTHER`,
-          // neutralizar la presencia bilateral NO produce inflación en el barrido.
+          // El `owner` de la fila fantasma es INDISTINTO. Medido con las dos variantes
+          // (`DEP` y un tercero): el veredicto es idéntico carácter por carácter, y con
+          // la presencia bilateral neutralizada el conjunto de inflaciones del barrido
+          // también. La razón está en el propio verificador: **la presencia bilateral
+          // corre ANTES del bloque de atribución**, así que el fantasma nunca llega a
+          // ser un segundo origen.
+          //
+          // ⚠️ ESTE COMENTARIO DECIA OTRA COSA, Y ESTABA PREFIJADO CON "Medido:".
+          // Afirmaba que con otro owner el veredicto lo daba `DEPOSITOR_AMBIGUOUS` y que
+          // el caso dejaba de aislar la PRESENCIA. Las dos cosas son FALSAS y ninguna se
+          // midió. En el archivo cuya única razón de existir es que su prosa coincida
+          // con lo que mide, y con la palabra que más confianza transmite adelante: el
+          // próximo revisor deja de buscar acá por una razón inventada.
           row(3, DEP, String(phantom)),
         ],
         [
@@ -500,6 +518,13 @@ function compensated(): Case[] {
  * una historia consistente pero falsa es indistinguible de la verdad por cualquier
  * chequeo local. El oráculo honesto es entonces: **sobre un dataset INCOHERENTE, el
  * crédito nunca puede superar el depósito real**.
+ *
+ * ⚠️ PUNTO CIEGO DECLARADO DE ESTE ORACULO: **no modela la clase IDENTIDAD**. No lee
+ * `owner` en ninguna línea, así que un dataset con el `owner` de nuestra ATA MENTIDO lo
+ * clasifica como COHERENTE mientras el verificador lo rechaza por contradicción —
+ * medido. Consecuencia: el BARRIDO es estructuralmente ciego a esa clase y su cobertura
+ * la aporta el candado, no el barrido. Se escribe acá para que el próximo no lo
+ * descubra creyendo que encontró un agujero del verificador.
  */
 function isCoherent(pre: Row[], post: Row[], keys: string[]): boolean {
   const addr = (i: number) => keys[i];
