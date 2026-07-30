@@ -1,11 +1,15 @@
 /**
  * WKH-313 — La POLÍTICA del carril de estreno, sin DB y sin service.
  *
- * Acá se candan las cuatro cosas que el carril NO puede perder:
+ * Acá se candan las cinco cosas que el carril NO puede perder:
  *   · la frontera exacta de `N` (T-04) y del techo `T` (T-12);
- *   · que el primer fallo ANULE el carril y no lo decremente (T-05/CD-14);
+ *   · que la anulación por fallos sea un CORTE y no un decremento (T-05/CD-14), y
+ *     que haga falta la corroboración de `F` callers DISTINTOS: con el contador
+ *     crudo, un fallo transitorio anulaba el carril para siempre (AR BLQ-MED-2);
  *   · que "no pude preguntar" (`degraded`) NO sea "no tiene historial" (T-18/CD-7);
- *   · que el cupo `M` sea DETERMINISTA, incluso con `created_at` empatado (T-19/CD-15).
+ *   · que el cupo `M` no lo decida el orden del arreglo (T-19/CD-15) NI el `slug`
+ *     cuando no hay `created_at`: eso le regalaba el carril, de forma permanente, a
+ *     quien eligiera el nombre lexicográficamente menor (AR BLQ-MED-3).
  *
  * Módulo leaf y funciones puras: cero mocks, cero red.
  */
@@ -25,6 +29,7 @@ import {
   classifyStanding,
   isTrialEligible,
   resolveTrialMaxAgentsPerPublisher,
+  resolveTrialMaxFailedCallers,
   resolveTrialMaxMinReputation,
   resolveTrialMaxSettledTasks,
   selectTrialAdmitted,
@@ -91,22 +96,25 @@ function seq(values: number[]): () => number {
   return () => values[i++] ?? 1;
 }
 
-// ── T-22 (DT-8): N, T y M son CONFIGURACIÓN, y el default es el conservador ──
-describe('T-22 (DT-8) · N/T/M salen de env con default CONSERVADOR', () => {
-  it('ausentes → los defaults propuestos (3 / 10 / 2), PROVISORIOS', () => {
+// ── T-22 (DT-8): N, T, M y F son CONFIGURACIÓN, y el default es el conservador ──
+describe('T-22 (DT-8) · N/T/M/F salen de env con default CONSERVADOR', () => {
+  it('ausentes → los defaults propuestos (3 / 10 / 2 / 2), PROVISORIOS', () => {
     expect(resolveTrialMaxSettledTasks()).toBe(3);
     expect(resolveTrialMaxMinReputation()).toBe(10);
     expect(resolveTrialMaxAgentsPerPublisher()).toBe(2);
+    expect(resolveTrialMaxFailedCallers()).toBe(2);
   });
 
   it('un valor válido se respeta (ratificar los números es config, no código)', () => {
     process.env.TRIAL_MAX_SETTLED_TASKS = '5';
     process.env.TRIAL_MAX_MIN_REPUTATION = '25';
     process.env.TRIAL_MAX_AGENTS_PER_PUBLISHER = '1';
+    process.env.TRIAL_MAX_FAILED_CALLERS = '3';
 
     expect(resolveTrialMaxSettledTasks()).toBe(5);
     expect(resolveTrialMaxMinReputation()).toBe(25);
     expect(resolveTrialMaxAgentsPerPublisher()).toBe(1);
+    expect(resolveTrialMaxFailedCallers()).toBe(3);
   });
 
   it.each([
@@ -120,12 +128,14 @@ describe('T-22 (DT-8) · N/T/M salen de env con default CONSERVADOR', () => {
     process.env.TRIAL_MAX_SETTLED_TASKS = raw;
     process.env.TRIAL_MAX_MIN_REPUTATION = raw;
     process.env.TRIAL_MAX_AGENTS_PER_PUBLISHER = raw;
+    process.env.TRIAL_MAX_FAILED_CALLERS = raw;
 
     // Lo que se está candando es la DIRECCIÓN del fallback. Un `T` que cayera a
     // Infinity o un `M` que cayera a 0 desactivarían el control en silencio.
     expect(resolveTrialMaxSettledTasks()).toBe(3);
     expect(resolveTrialMaxMinReputation()).toBe(10);
     expect(resolveTrialMaxAgentsPerPublisher()).toBe(2);
+    expect(resolveTrialMaxFailedCallers()).toBe(2);
   });
 });
 
@@ -189,9 +199,9 @@ describe('classifyStanding · los tres estados derivados', () => {
 
   it('el que YA salió del carril se juzga por su score real, no vuelve a entrar', () => {
     const n = resolveTrialMaxSettledTasks();
-    expect(
-      classifyStanding(failedBy(3, 1, { tasksSettled: n })),
-    ).toBe('scored');
+    expect(classifyStanding(failedBy(3, 1, { tasksSettled: n }))).toBe(
+      'scored',
+    );
   });
 
   it('N se toma de la env (`classifyStanding` no hardcodea 3)', () => {
