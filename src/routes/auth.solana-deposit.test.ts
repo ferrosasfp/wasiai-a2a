@@ -34,6 +34,7 @@ import {
   it,
   vi,
 } from 'vitest';
+import type { SolanaDepositReason } from '../adapters/types.js';
 import type { A2AAgentKeyRow } from '../types/index.js';
 import authRoutes from './auth.js';
 
@@ -497,15 +498,41 @@ describe('WKH-315 · rutas del depósito Solana', () => {
 
   // ── AC-6 / M15: el mapeo de errores y el orden verify → credit ────────────
   describe('AC-6: 400 vs 503, y la prueba NUNCA se consume (M15)', () => {
-    const negatives = [
-      'TX_ABSENT',
-      'TX_FAILED',
-      'DEPOSIT_NOT_FINALIZED',
-      'MINT_MISMATCH',
-      'RECIPIENT_MISMATCH',
-      'AMOUNT_MISMATCH',
-      'DEPOSITOR_AMBIGUOUS',
-    ] as const;
+    /**
+     * El status esperado POR CADA motivo, como `Record<SolanaDepositReason, …>`.
+     *
+     * ⚠️ ES UN `Record` Y NO UNA LISTA A MANO (fix-pack CR · MNR-5). Antes acá había
+     * dos arrays literales que replicaban el `switch` de `routes/auth/deposit.ts`, y
+     * una lista copiada a mano no se entera de un motivo NUEVO: entraba sin cobertura
+     * y la suite seguía **verde**. Con el `Record`, agregar un miembro a
+     * `SolanaDepositReason` **no compila** hasta que alguien decida acá si su motivo
+     * es una negativa medida (400) o un "no puedo responder" (503) — que es
+     * exactamente la decisión que la ruta obliga a tomar con su `switch` sin
+     * `default`. La exhaustividad la verifica el COMPILADOR, no mi memoria.
+     */
+    const EXPECTED_STATUS: Record<SolanaDepositReason, 400 | 503> = {
+      TX_ABSENT: 400,
+      TX_FAILED: 400,
+      DEPOSIT_NOT_FINALIZED: 400,
+      MINT_MISMATCH: 400,
+      RECIPIENT_MISMATCH: 400,
+      AMOUNT_MISMATCH: 400,
+      DEPOSITOR_AMBIGUOUS: 400,
+      DEPOSIT_ACCOUNT_NOT_CONFIGURED: 503,
+      DEPOSIT_VERIFICATION_UNKNOWN: 503,
+    };
+
+    const reasonsWith = (status: 400 | 503) =>
+      (Object.keys(EXPECTED_STATUS) as SolanaDepositReason[]).filter(
+        (r) => EXPECTED_STATUS[r] === status,
+      );
+
+    const negatives = reasonsWith(400);
+
+    it('MNR-5 (andamiaje): el Record cubre los DOS grupos — si uno queda vacío, los loops de abajo no prueban nada', () => {
+      expect(negatives.length).toBeGreaterThan(0);
+      expect(reasonsWith(503).length).toBeGreaterThan(0);
+    });
 
     for (const reason of negatives) {
       it(`T-315-07d (M15): ${reason} ⇒ 400 y registerDeposit NO se llama`, async () => {
@@ -527,10 +554,7 @@ describe('WKH-315 · rutas del depósito Solana', () => {
       });
     }
 
-    for (const reason of [
-      'DEPOSIT_ACCOUNT_NOT_CONFIGURED',
-      'DEPOSIT_VERIFICATION_UNKNOWN',
-    ] as const) {
+    for (const reason of reasonsWith(503)) {
       it(`${reason} ⇒ 503 (no 400) y registerDeposit NO se llama`, async () => {
         // ⚠️ El 400 diría "tu depósito no existe / no coincide". El 503 dice "no
         // puedo responder por la cadena". Con un `unknown` mapeado a 400, un timeout

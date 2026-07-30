@@ -50,26 +50,14 @@ const SOLANA_PUBKEY_BYTES = 32;
 const SOLANA_SIGNATURE_BYTES = 64;
 
 export function isValidSolanaAddress(w: string): boolean {
-  if (typeof w !== 'string' || w.length === 0) return false;
-  const bytes: number[] = [];
-  for (let i = 0; i < w.length; i++) {
-    let carry = BASE58_ALPHABET.indexOf(w[i] as string);
-    if (carry < 0) return false; // char fuera del charset base58
-    for (let j = 0; j < bytes.length; j++) {
-      carry += (bytes[j] as number) * 58;
-      bytes[j] = carry & 0xff;
-      carry >>= 8;
-    }
-    while (carry > 0) {
-      bytes.push(carry & 0xff);
-      carry >>= 8;
-    }
-  }
-  // Cada `1` inicial representa un byte cero de alto orden.
-  for (let i = 0; i < w.length && w[i] === '1'; i++) {
-    bytes.push(0);
-  }
-  return bytes.length === SOLANA_PUBKEY_BYTES;
+  // Fix-pack CR · MNR-1: era el MISMO loop que `base58DecodedByteLength`, byte por
+  // byte, salvo el `return`. Dos copias de un decoder que tienen que comportarse
+  // igual y que nada obliga a que se muevan juntas: la próxima corrección de borde
+  // (un charset, un `1` inicial) se aplica en una y no en la otra, y el desacuerdo
+  // aparece como un rechazo inexplicable en un money-path. Conducta idéntica: los
+  // dos casos que el loop cortaba temprano (`typeof` / vacío / charset inválido) el
+  // helper los devuelve como `null`, y `null === 32` es `false`.
+  return base58DecodedByteLength(w) === SOLANA_PUBKEY_BYTES;
 }
 
 /**
@@ -80,12 +68,18 @@ export function isValidSolanaAddress(w: string): boolean {
  * lanza con un mensaje que nombra `SOLANA_OPERATOR_PRIVATE_KEY` — un typo del
  * usuario no puede producir una falsa alarma de secreto en los logs.
  *
- * ⚠️ POR QUE EL LOOP ESTA DUPLICADO Y NO EXTRAIDO DE `isValidSolanaAddress`:
- * ese predicado es la única fuente de verdad del criterio de wallet Solana y lo
- * consumen el write-path del publish y el money-path de cobro. Refactorizarlo
- * para compartir este helper no cambia su conducta esperada, pero sí lo pone en
- * el diff de una HU de dinero sin ganar nada verificable. Aditivo > tocar lo que
- * ya funciona (CD-1).
+ * ⚠️ ES EL UNICO DECODER BASE58 DE ESTE MODULO (fix-pack CR · MNR-1).
+ * `isValidSolanaAddress` lo llama en vez de repetir el loop. La HU original lo
+ * había duplicado para no tocar un predicado del money-path, y el argumento era
+ * razonable — pero el costo de dos copias que tienen que coincidir se paga
+ * después, cuando una se corrige y la otra no.
+ *
+ * El ALFABETO, en cambio, sigue repetido en el repo: `BASE58_ALPHABET` acá,
+ * `solana/base58.ts` (encode + decode del secreto del operador) y el `bs58` que
+ * usan las dependencias. NO se unifica: este módulo es **leaf** a propósito (no
+ * importa nada del proyecto, para evitar ciclos) y `solana/base58.ts` LANZA con un
+ * mensaje que nombra `SOLANA_OPERATOR_PRIVATE_KEY`, así que no puede correr sobre
+ * input del caller. Queda anotado dónde están, que es lo que faltaba.
  */
 function base58DecodedByteLength(s: string): number | null {
   if (typeof s !== 'string' || s.length === 0) return null;

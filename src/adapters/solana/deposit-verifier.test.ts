@@ -25,7 +25,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // ── Dobles del RPC. Se mockea `chain.js` (la fábrica de la Connection), NO el
 //    módulo bajo prueba ni `deposit-account.js`: la resolución de la cuenta de
 //    depósito se ejercita de verdad, con env.
-const MINT = 'So11111111111111111111111111111111111111112';
+/**
+ * El mint que el doble de `chain.js` reporta como el USDC configurado.
+ *
+ * ⚠️ DOS COSAS QUE PARECEN COSMETICAS Y NO LO SON (fix-pack CR · MNR-7).
+ *
+ * 1. **`vi.hoisted`, para que el fixture y el mock sean EL MISMO VALOR.** Antes el
+ *    literal estaba escrito dos veces —una en `const MINT` y otra adentro de
+ *    `getSolanaUsdcMint`— sin ningún assert que los atara. Dos copias que tienen que
+ *    coincidir y nadie verifica que coincidan: cambiar una sola dejaba TODOS los tests
+ *    de términos pasando por la razón equivocada (`MINT_MISMATCH` en todos lados).
+ *    `vi.hoisted` es la forma admitida de compartir un valor con una factory hoisteada.
+ * 2. **Ya no es `So111…112`.** Ese es el mint canónico de **wSOL**, usado como fixture
+ *    de USDC: un valor que MIENTE sobre qué representa, y el mismo que produjo el falso
+ *    rojo de `T-315-12c` (su tirada de 40 unos matcheaba el needle de un guard de
+ *    secretos). Ahora es el mint de USDC devnet, que es lo que el fixture dice ser.
+ */
+const MINT = vi.hoisted(() => '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU');
 const mockGetSignatureStatuses = vi.hoisted(() => vi.fn());
 const mockGetParsedTransaction = vi.hoisted(() => vi.fn());
 
@@ -34,7 +50,7 @@ vi.mock('./chain.js', () => ({
     getSignatureStatuses: mockGetSignatureStatuses,
     getParsedTransaction: mockGetParsedTransaction,
   }),
-  getSolanaUsdcMint: () => 'So11111111111111111111111111111111111111112',
+  getSolanaUsdcMint: () => MINT,
   getSolanaUsdcDecimals: () => 6,
 }));
 

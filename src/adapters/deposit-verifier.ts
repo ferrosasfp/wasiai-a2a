@@ -119,8 +119,13 @@ export function resolveChainFamilyEnvSuffix(chainKey: ChainKey): ChainFamily {
     // WKH-090 — cuarto rail (testnet-only, flag-gated OFF).
     case 'tempo-testnet':
       return 'TEMPO';
-    // WKH-234 — Solana rail. Deposit = Scope OUT (settle-only); código muerto
-    // para la ruta de deposit (Solana no entra al viem deposit-path).
+    // WKH-234 — Solana rail. ⚠️ EL COMENTARIO QUE HABIA ACA YA ERA FALSO (fix-pack
+    // AR · MNR-4): decía "Deposit = Scope OUT (settle-only)", y desde WKH-315 el
+    // depósito Solana EXISTE. Lo que sigue siendo cierto es más chico: ese camino no
+    // pasa por acá. `verifySolanaDeposit` (`adapters/solana/deposit-verifier.ts`) no
+    // llama a `resolveMinConfirmations` — espera `finalized`, que es un hecho del
+    // ledger y no un conteo de confirmaciones—, así que esta rama sigue sin lector en
+    // el camino de depósito. La firma sí exige cubrir el caso: `ChainKey` lo incluye.
     case 'solana-devnet':
       return 'SOLANA';
   }

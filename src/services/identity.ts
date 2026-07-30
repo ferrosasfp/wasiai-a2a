@@ -247,6 +247,13 @@ export const identityService = {
     }
 
     if (!data || data.length === 0) {
+      // ⚠️ `'deactivate'` NO describe lo que pasó: esto es un fallo de ownership del
+      // BIND Solana. Se reusa esa etiqueta porque `OwnershipOp` (`errors.ts`) no
+      // expone una op de funding-wallet y ese archivo está fuera del scope de la HU —
+      // el mismo criterio, y el mismo comentario, que `bindPassport` (`:289`) y
+      // `bindErc8004Identity` (`:357`). El logger es PII-safe igual. Sin esta nota, un
+      // campo que MIENTE en un log de seguridad queda sin explicación al lado (fix-pack
+      // CR · MNR-8). Deuda chica y real: un `OwnershipOp` con la op verdadera.
       logOwnershipMismatch('deactivate', keyId, ownerId);
       throw new OwnershipMismatchError();
     }
