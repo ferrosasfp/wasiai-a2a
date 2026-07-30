@@ -236,3 +236,58 @@ el error ocurre**, no al final.
   dato antes que su VALOR**, y desconfiar del hallazgo que además trae su propia
   explicación cómoda. Y una lección escrita en un auto-blindaje se propaga: un hecho
   falso acá vale más caro que uno en un comentario.
+
+---
+
+### [2026-07-30 FIX-PACK · BLQ-MED-2] Copié el idioma de la migración exemplar, pero no la línea que cerraba la ventana
+
+- **Error**: la migración dropea `register_a2a_key_deposit` de 6 params —**que está en
+  uso**— y crea la de 7, **sin emitir `NOTIFY pgrst, 'reload schema';`**. Con el caché de
+  esquema viejo, `budgetService.registerDeposit` no resuelve y `POST /auth/deposit` del
+  camino **EVM** contesta 500: la migración rompía el camino que su propia cabecera
+  promete byte-idéntico, y su propia afirmación de "migración antes del código ⇒ sin
+  ventana".
+- **Causa raíz**: copié de `20260730000000_wkh307...` el idioma del DROP+CREATE y el
+  hardening por firma, pero no el `NOTIFY` — que ahí está documentado a tres líneas del
+  final, para funciones **NUEVAS**. Acá el riesgo es MAYOR (se borra una viva) y aun así
+  se me pasó, porque revisé el bloque que copié y no el archivo entero del exemplar.
+- **Fix**: una línea en cada archivo, con la razón escrita, más tres tests estructurales
+  (existe en los dos, y va DESPUES del swap). Se pone igual aunque Supabase suele traer
+  un event-trigger que recarga solo: **no se pudo determinar** para la base destino, y
+  "no lo pude comprobar" no es "está cubierto".
+- **Aplicar en**: cuando se copia un idioma de un exemplar, leer el archivo **completo**,
+  no el bloque análogo. Y en toda migración que toque una función que ya tiene callers.
+
+---
+
+### [2026-07-30 FIX-PACK · BLQ-BAJO-1] Un guard que cobra antes de tener algo que cuidar
+
+- **Error**: la aserción de coherencia cuenta-de-depósito ↔ operador lanzaba dentro de
+  `getSolanaOperatorKeypair()` **sin condicionar a que el camino de depósito estuviera
+  encendido**. Siguiendo el orden de activación que el propio `.env.example` declara
+  —migración, owner, y el flag AL FINAL— y olvidando `..._IS_DEDICATED`, **todo settle
+  Solana de SALIDA se caía** con el depósito apagado, o sea sin que existiera un solo
+  depósito que proteger.
+- **Causa raíz**: puse el guard donde estaba el dato (el keypair ya cargado) y razoné el
+  trade-off "romper la salida es mejor que perder plata" — que es cierto **cuando hay
+  plata en juego**. No modelé la ventana en la que el depósito todavía no existe, que es
+  justamente la que el runbook recomienda transitar. Un guard cuya precondición no está
+  en su condición se dispara fuera de su propio dominio.
+- **Fix**: el flag entra en la condición. Tres tests, incluido el andamiaje de que con el
+  flag en `'true'` el mismo caso SIGUE lanzando — sin eso, "condicionar" y "apagar" son
+  indistinguibles y los dos primeros tests pasarían sin probar nada.
+- **Aplicar en**: todo guard nuevo, preguntarse **en qué estados del sistema se dispara**
+  y si en alguno todavía no existe el bien que protege. Y probar SIEMPRE el lado positivo
+  del control junto con el negativo.
+
+---
+
+### [2026-07-30 FIX-PACK · campaña] Re-corrida de mutación: 21/21 KILLED
+
+Se re-corrieron los mutantes de la campaña original que tocan código modificado (M1, M2,
+M3, M4, M8, M9, M10, M11, M12, M13, M14, M16, M19) más **8 mutantes nuevos** del
+fix-pack: el `continue` de BLQ-MED-1, el `BigInt` sin validar formato, el `NOTIFY`
+ausente en `up` y en `_down`, el flag fuera de la condición de BLQ-BAJO-1, el `owner`
+ausente descalificando de nuevo, el `_down` sin archivar los binds y los backups sin RLS.
+**21/21 KILLED, cada uno con el nombre del test que muere.** Los archivos se restauraron
+verificando `sha256` en cada iteración.
