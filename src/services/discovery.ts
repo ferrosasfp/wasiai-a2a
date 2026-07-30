@@ -10,6 +10,15 @@ import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
 // `services/compose.ts` también necesita el límite del pool y las suites que
 // mockean este service completo dejarían el export en `undefined`.
 import { resolveUpstreamFetchLimit } from '../lib/discovery-fetch-limit.js';
+// WKH-318: el vocabulario de la honestidad del catálogo vive en un módulo LEAF
+// por la MISMA razón que `discovery-fetch-limit.js` (ver su docstring): las
+// suites que mockean este service completo dejarían un export nuevo en
+// `undefined`, y `routes/compose.ts` necesita estas funciones.
+import {
+  buildCatalogStatus,
+  classifyFetchFailure,
+  RegistryHttpError,
+} from '../lib/discovery-sources.js';
 import { getLogger } from '../lib/logger.js';
 import { readPaymentSpec } from '../lib/payment-spec-reader.js';
 import { parsePriceSafe } from '../lib/price.js';
@@ -36,7 +45,9 @@ import type {
   AgentStatus,
   DiscoveryQuery,
   DiscoveryResult,
+  DiscoverySource,
   RegistryConfig,
+  RegistryFetchOutcome,
 } from '../types/index.js';
 import {
   SELF_PUBLISHED_REGISTRY_ID,
@@ -217,22 +228,77 @@ export const discoveryService = {
     // outbound, sin self-fetch). Aditivo/degradable (CD-9): si el SELECT falla,
     // discover() sigue devolviendo los agentes de registries. Se incluyen solo
     // si no se filtró a otro registry (respeta `query.registry`).
+    // ── WKH-318 (AR BLQ-2): la fuente local también rinde cuentas ──────────
+    //
+    // El `catch` degradaba a `localAgents = []` y la fila de `self-published` se
+    // empujaba sólo si había agentes. O sea: un SELECT caído era INDISTINGUIBLE
+    // de "no hay agentes self-published", y el catálogo se declaraba `complete`
+    // igual. Es la misma mentira que esta HU mata del lado federado, del lado
+    // local — y encima sobre la fuente que carga los tres agentes del money-path
+    // de Chaski.
+    //
+    // `null` = no se la consultó (el caller filtró a otro registry): no es una
+    // fuente de esta query y no debe aparecer en `sources`.
     let localAgents: Agent[] = [];
+    let localSource: DiscoverySource | null = null;
     if (!query.registry || query.registry === SELF_PUBLISHED_REGISTRY_NAME) {
       try {
         localAgents = await publishedAgentService.listAsAgents();
+        // `state: 'ok'` con evidencia, no por defecto: `listAsAgents()` es un
+        // SELECT sin `limit` ni cursor (`services/agent.ts:429-440`), así que
+        // devuelve TODO lo que hay. La completitud está probada por construcción.
+        localSource = {
+          name: SELF_PUBLISHED_REGISTRY_NAME,
+          state: 'ok',
+          rows: localAgents.length,
+        };
       } catch (err) {
         log.error(
           { detail: err instanceof Error ? err.message : 'unknown' },
           'self-published agents merge failed',
         );
+        // CD-9: se sigue degradando — un SELECT caído no tumba discover(). Lo
+        // que cambia es que ahora se DECLARA en vez de desaparecer.
         localAgents = [];
+        const failure = classifyFetchFailure(err);
+        localSource = {
+          name: SELF_PUBLISHED_REGISTRY_NAME,
+          state: 'failed',
+          rows: null,
+          failure,
+        };
+        log.warn(
+          {
+            error_code: 'REGISTRY_SOURCE_FAILED',
+            registry: SELF_PUBLISHED_REGISTRY_NAME,
+            failure,
+          },
+          '[discovery.source-failed] a registry could not be queried; the catalog is partial',
+        );
       }
     }
 
     // NO early-return si solo hay locales (sin registries habilitados).
     if (registries.length === 0 && localAgents.length === 0) {
-      return { agents: [], total: 0, registries: [] };
+      // WKH-318: sin fuentes, `complete` — no hay nada que haya fallado ni nada
+      // cuya completitud haya quedado sin probar. "No tengo a quién preguntarle"
+      // no es "no pude preguntar".
+      //
+      // Pero si la fuente local SÍ se consultó y se cayó, su fila viaja igual:
+      // este early-return también se alcanza cuando el SELECT falló y no hay
+      // registries, y ahí el catálogo es `partial`, no `complete`.
+      //
+      // CR MNR-A: el roll-up sale de `buildCatalogStatus`, NUNCA de un literal.
+      // Dos expresiones de la misma regla divergen (CD-11), y ésta era la única
+      // línea de producción nueva sin cobertura.
+      const sources = localSource ? [localSource] : [];
+      return {
+        agents: [],
+        total: 0,
+        registries: [],
+        sources,
+        catalogStatus: buildCatalogStatus(sources),
+      };
     }
 
     // First attempt: forward query.query upstream (existing behavior — DT-1).
@@ -241,6 +307,7 @@ export const discoveryService = {
       registries,
       localAgents,
       false,
+      localSource,
     );
 
     // WKH-157 broaden-retry: a registry's own strict search backend can drop
@@ -263,6 +330,7 @@ export const discoveryService = {
         registries,
         localAgents,
         true,
+        localSource,
       );
     }
 
@@ -275,43 +343,76 @@ export const discoveryService = {
    * free-text broaden-retry. `skipUpstreamQuery=true` omits forwarding `q` to
    * the registries (the local substring filter still runs). `localAgents` is
    * the already-fetched self-published set (no re-fetch across attempts).
+   *
+   * WKH-318 (AR BLQ-2): `localSource` es CÓMO le fue a ese SELECT — `null` si no
+   * se lo consultó. Viaja aparte de `localAgents` porque un array vacío no puede
+   * distinguir "no hay agentes locales" de "no pude leerlos", que es justo la
+   * distinción que esta HU existe para no perder. Se pasa igual en el
+   * broaden-retry: es el MISMO fetch local, así que su estado es el mismo.
    */
   async runDiscoveryPipeline(
     query: DiscoveryQuery,
     registries: RegistryConfig[],
     localAgents: Agent[],
     skipUpstreamQuery: boolean,
+    localSource: DiscoverySource | null = null,
   ): Promise<DiscoveryResult> {
     // Query all registries in parallel
-    const results = await Promise.all(
+    const outcomes = await Promise.all(
       registries.map((registry) =>
-        this.queryRegistry(registry, query, skipUpstreamQuery).catch((err) => {
-          // TD-sprint-security MNR-5: SSRF violations are config issues,
-          // not transient errors — log them with a distinct prefix so
-          // operators can grep for misconfigured registry endpoints.
-          if (err instanceof SSRFViolationError) {
-            log.error(
+        this.queryRegistry(registry, query, skipUpstreamQuery)
+          .then((outcome) => ({ registry, outcome }))
+          .catch((err) => {
+            // TD-sprint-security MNR-5: SSRF violations are config issues,
+            // not transient errors — log them with a distinct prefix so
+            // operators can grep for misconfigured registry endpoints.
+            if (err instanceof SSRFViolationError) {
+              log.error(
+                {
+                  registry: registry.name,
+                  category: err.category,
+                  reason: err.reason,
+                },
+                'SSRF blocked',
+              );
+            } else {
+              log.error(
+                { registry: registry.name, detail: err.message },
+                'Error querying registry',
+              );
+            }
+            // WKH-318: el fallo deja de ser MUDO. Antes se degradaba a `[]` y la
+            // respuesta seguía afirmando que este registro contribuyó — el bug
+            // de esta HU. Ahora viaja como `failed`/`rows:null` hasta el caller,
+            // y además queda un warn estructurado grepeable.
+            const failure = classifyFetchFailure(err);
+            log.warn(
               {
+                error_code: 'REGISTRY_SOURCE_FAILED',
                 registry: registry.name,
-                category: err.category,
-                reason: err.reason,
+                failure,
               },
-              'SSRF blocked',
+              '[discovery.source-failed] a registry could not be queried; the catalog is partial',
             );
-          } else {
-            log.error(
-              { registry: registry.name, detail: err.message },
-              'Error querying registry',
-            );
-          }
-          return [] as Agent[];
-        }),
+            // CD-4: la excepción se sigue degradando — un registro caído NO
+            // tumba /discover. Lo que cambia es que ahora se DECLARA.
+            const outcome: RegistryFetchOutcome = {
+              agents: [],
+              state: 'failed',
+              rows: null,
+              failure,
+            };
+            return { registry, outcome };
+          }),
       ),
     );
 
     // Merge results — los locales entran ANTES del pipeline común
     // (status/verified/caps/price/rep/sort/limit) → mismo shape (CD-6).
-    let allAgents = [...results.flat(), ...localAgents];
+    let allAgents = [
+      ...outcomes.flatMap((o) => o.outcome.agents),
+      ...localAgents,
+    ];
 
     // Blocklist: exclude known-broken or mock agents (env-configurable)
     const blocklist = (process.env.AGENT_BLOCKLIST ?? '')
@@ -540,10 +641,43 @@ export const discoveryService = {
     // identity. No RPC at serve-time — only the JSONB reverse-lookup (W2).
     const enriched = await this.attachIdentities(limited);
 
-    const contributingRegistries = registries.map((r) => r.name);
-    if (localAgents.length > 0) {
-      contributingRegistries.push(SELF_PUBLISHED_REGISTRY_NAME);
+    // ── WKH-318: `registries` = las fuentes que APORTARON FILAS ────────────
+    //
+    // Antes era `registries.map(r => r.name)`: la lista de fuentes CONFIGURADAS.
+    // Una fuente que devolvía 400 y se degradaba a `[]` aparecía igual — la
+    // respuesta afirmaba haberla consultado. Medido en producción: `?limit=50`
+    // devolvía 3 agentes (los 3 self-published) y `["WasiAI","self-published"]`.
+    //
+    // "Aportó filas" = filas DEVUELTAS POR EL FETCH, antes de los filtros
+    // locales. Es, literalmente, la misma regla que las líneas de abajo ya
+    // aplicaban SÓLO a los self-published: acá se generaliza, no se inventa una
+    // segunda. Contarlo post-filtro haría que una query selectiva
+    // (`?capabilities=remit.quote`, medida: 0 agentes) reportara fuentes
+    // desaparecidas y el caller leyera degradación donde sólo hubo un filtro.
+    const sources: DiscoverySource[] = outcomes.map(({ registry, outcome }) => {
+      const source: DiscoverySource = {
+        name: registry.name,
+        state: outcome.state,
+        rows: outcome.rows,
+      };
+      if (outcome.failure) source.failure = outcome.failure;
+      if (outcome.truncationEvidence) {
+        source.truncationEvidence = outcome.truncationEvidence;
+      }
+      return source;
+    });
+    // WKH-318 (AR BLQ-2): la fila local entra por HABERSE CONSULTADO, no por
+    // haber traído filas. El gate viejo (`localAgents.length > 0`) escondía dos
+    // casos distintos detrás del mismo silencio: el SELECT que falló y el que
+    // devolvió cero. Ahora `null` significa una sola cosa — no se la consultó,
+    // porque el caller filtró a otro registry.
+    if (localSource) {
+      sources.push(localSource);
     }
+
+    const contributingRegistries = sources
+      .filter((s) => (s.rows ?? 0) > 0)
+      .map((s) => s.name);
 
     return {
       agents: enriched,
@@ -555,6 +689,10 @@ export const discoveryService = {
       // no en semántica).
       total: allAgents.length,
       registries: contributingRegistries,
+      // WKH-318: el detalle POR FUENTE y su roll-up. Aditivos: no se quita ni se
+      // re-tipa ningún campo previo.
+      sources,
+      catalogStatus: buildCatalogStatus(sources),
       // HU-208: cuántos candidatos descartó el filtro de candidatura. Sin esto
       // un conjunto vacío es indistinguible de "no existe tal capacidad", y un
       // operador buscaría el problema en el catálogo cuando en realidad hay un
@@ -901,7 +1039,7 @@ export const discoveryService = {
     registry: RegistryConfig,
     query: DiscoveryQuery,
     skipUpstreamQuery = false,
-  ): Promise<Agent[]> {
+  ): Promise<RegistryFetchOutcome> {
     // SSRF guard (WKH-62) — validate before any fetch (CD-A3: outside
     // circuit breaker scope so SSRF attempts don't pollute breaker stats).
     // We validate the raw discoveryEndpoint, NOT url.toString(), because
@@ -929,11 +1067,12 @@ export const discoveryService = {
     // caller seguimos sin mandar `limitParam` (comportamiento byte-idéntico al
     // de hoy) — imponer un cap donde antes no había ninguno sería reintroducir
     // el mismo bug de clase "esconder agentes" en el path sin `limit`.
+    // WKH-318: el límite EFECTIVAMENTE enviado, para poder detectar `page_full`.
+    // `undefined` ⇒ no se mandó ninguno (camino sin `limit` del caller, CD-5/CD-8).
+    let sentLimit: number | undefined;
     if (query.limit && schema.limitParam) {
-      url.searchParams.set(
-        schema.limitParam,
-        resolveUpstreamFetchLimit(query.limit).toString(),
-      );
+      sentLimit = resolveUpstreamFetchLimit(query.limit);
+      url.searchParams.set(schema.limitParam, sentLimit.toString());
     }
     if (query.maxPrice && schema.maxPriceParam) {
       url.searchParams.set(schema.maxPriceParam, query.maxPrice.toString());
@@ -969,8 +1108,12 @@ export const discoveryService = {
       }).finally(() => clearTimeout(timer));
     });
 
+    // WKH-318: mismo `throw`, mismo mensaje, MISMO LUGAR (fuera de `cb.execute`).
+    // Sólo gana un `name` para que el fanout pueda clasificarlo como
+    // `http_error` sin parsear texto. La semántica del circuit breaker NO cambia
+    // en esta HU (TD-318-1): un 400 sostenido sigue sin abrir nada.
     if (!response.ok) {
-      throw new Error(`Registry ${registry.name} returned ${response.status}`);
+      throw new RegistryHttpError(registry.name, response.status);
     }
 
     const data = await response.json();
@@ -980,12 +1123,85 @@ export const discoveryService = {
       ? getNestedValue(data, schema.agentsPath)
       : data;
 
+    // WKH-318 (CD-14): un payload que no es un array NO es "le pregunté y no
+    // tiene". Es "respondió algo que no entiendo" ⇒ `failed` / `rows: null`.
+    // Antes esto devolvía `[]` y era indistinguible de un catálogo vacío.
     if (!Array.isArray(agentsData)) {
-      return [];
+      return {
+        agents: [],
+        state: 'failed',
+        rows: null,
+        failure: 'bad_payload',
+      };
     }
 
-    // Map to standard Agent format
-    return agentsData.map((raw) => this.mapAgent(registry, raw));
+    const agents = agentsData.map((raw) => this.mapAgent(registry, raw));
+
+    // ── WKH-318 (DT-8 + AR BLQ-1): la completitud se PRUEBA, no se supone ──
+    //
+    // Que la fuente haya contestado NO dice si trajo todo. Hay que buscar
+    // evidencia, y puede apuntar para cualquiera de los dos lados — o no existir.
+    //
+    // FUENTE 1 (EXACTA) — el registro declaró `nextCursorPath`:
+    //   · cursor con valor      ⇒ hay más filas          → `truncated`/`cursor`
+    //   · cursor vacío/nulo     ⇒ él mismo dice "no hay más" → completitud PROBADA
+    //   · la clave NO viene     ⇒ no dijo nada           → sin evidencia
+    //   Gana sobre la heurística: si el registro declara que no hay más, una
+    //   página justo llena es coincidencia, no truncamiento.
+    //
+    // FUENTE 2 (HEURÍSTICA, sólo si no hubo declaración exacta) — se envió límite:
+    //   · llegaron >= las pedidas ⇒ la página se llenó    → `truncated`/`page_full`
+    //   · llegaron menos          ⇒ no se llenó, no quedó nada afuera → PROBADA
+    //   Su único error posible es sobre-declarar truncamiento (catálogo justo del
+    //   tamaño del cap), que es el lado SEGURO.
+    //
+    // SIN NINGUNA DE LAS DOS no hay evidencia OBTENIBLE, y el estado es
+    // `unverified` — NO `ok`. Es el caso real de producción: el registro `wasiai`
+    // se siembra sin `nextCursorPath` y `/capabilities` llama a `discover({})`
+    // sin `limit`, así que tampoco se manda `limitParam`. Devolver `ok` ahí
+    // publicaba `catalogStatus: 'complete'` sobre 20 de 22 agentes: cambiaba una
+    // mentira por otra, que es textualmente lo que esta HU se comprometió a no
+    // hacer.
+    let truncationEvidence: 'cursor' | 'page_full' | undefined;
+    let completenessProven = false;
+
+    if (schema.nextCursorPath) {
+      const cursor = getNestedValue(data, schema.nextCursorPath);
+      if (cursor) {
+        // Cualquier valor con contenido es un cursor. Los centinelas falsy
+        // (`null`, `''`, `0`, `false`) son la forma habitual de decir "no hay
+        // más" y NO se leen como truncamiento (AR MNR-G: con el `!== null`
+        // anterior, un `0` o un `false` forzaban `truncated`).
+        truncationEvidence = 'cursor';
+      } else if (cursor !== undefined) {
+        // AUSENTE no es NULO: un registro que dice "no hay más" manda la clave
+        // en nulo; uno que no la manda no dijo nada, y suponerle completitud
+        // sería inventarle una declaración que nunca hizo.
+        completenessProven = true;
+      }
+    }
+
+    if (!truncationEvidence && !completenessProven && sentLimit !== undefined) {
+      if (agents.length >= sentLimit) {
+        truncationEvidence = 'page_full';
+      } else {
+        completenessProven = true;
+      }
+    }
+
+    if (truncationEvidence) {
+      return {
+        agents,
+        state: 'truncated',
+        rows: agents.length,
+        truncationEvidence,
+      };
+    }
+    return {
+      agents,
+      state: completenessProven ? 'ok' : 'unverified',
+      rows: agents.length,
+    };
   },
 
   /**

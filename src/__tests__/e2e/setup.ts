@@ -60,12 +60,29 @@ vi.mock('../../services/event.js', () => ({
   },
 }));
 
+// WKH-318 (AR MNR-B): este mock devolvía formas que el tipo YA prohíbe —
+// `discover` sin `sources`/`catalogStatus`, y `queryRegistry` con el `Agent[]`
+// viejo en vez de un `RegistryFetchOutcome`. Compilaba porque un literal dentro
+// de `mockResolvedValue` no se type-checkea contra la firma real (el mismo
+// agujero que dejó pasar un `expect(x).toEqual([])` en discovery.ssrf.test.ts).
+//
+// Hoy no rompe nada, pero `isCatalogComplete` es FAIL-CLOSED: en cuanto el corte
+// B meta el guard de `requireCompleteCatalog`, todo e2e que pase por acá
+// empezaría a rechazar por un catálogo que el mock nunca declaró.
 vi.mock('../../services/discovery.js', () => ({
   discoveryService: {
-    discover: vi
-      .fn()
-      .mockResolvedValue({ agents: [], total: 0, registries: [] }),
-    queryRegistry: vi.fn().mockResolvedValue([]),
+    discover: vi.fn().mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      sources: [],
+      catalogStatus: 'complete',
+    }),
+    queryRegistry: vi.fn().mockResolvedValue({
+      agents: [],
+      state: 'ok',
+      rows: 0,
+    }),
     mapAgent: vi.fn(),
     getAgent: vi.fn().mockResolvedValue(null),
   },

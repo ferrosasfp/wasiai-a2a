@@ -118,6 +118,8 @@ beforeEach(() => {
     agents: [],
     total: 0,
     registries: [],
+    sources: [],
+    catalogStatus: 'complete',
   });
   mockDownstream.mockResolvedValue(null);
 });
@@ -149,6 +151,8 @@ describe('WKH-113 chain-flow — discovery→compose (BASE-08)', () => {
       ],
       total: 1,
       registries: ['test-registry'],
+      sources: [],
+      catalogStatus: 'complete',
     });
 
     const agent = await composeService.resolveAgent({
@@ -187,6 +191,8 @@ describe('WKH-113 chain-flow — discovery→compose (BASE-08)', () => {
       ],
       total: 1,
       registries: ['test-registry'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     mockFetchOk();
 
@@ -222,6 +228,8 @@ describe('WKH-113 chain-flow — discovery→compose (BASE-08)', () => {
       ],
       total: 1,
       registries: ['test-registry'],
+      sources: [],
+      catalogStatus: 'complete',
     });
 
     const agent = await composeService.resolveAgent({
@@ -257,6 +265,8 @@ describe('WKH-113 chain-flow — discovery→compose (BASE-08)', () => {
       ],
       total: 1,
       registries: ['test-registry'],
+      sources: [],
+      catalogStatus: 'complete',
     });
 
     const agent = await composeService.resolveAgent({
@@ -282,6 +292,8 @@ describe('WKH-113 chain-flow — discovery→compose (BASE-08)', () => {
       agents: [],
       total: 0,
       registries: ['test-registry'],
+      sources: [],
+      catalogStatus: 'complete',
     });
 
     const agent = await composeService.resolveAgent({

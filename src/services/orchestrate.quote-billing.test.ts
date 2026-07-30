@@ -227,6 +227,8 @@ function withAgents(agents: Agent[]): void {
     agents,
     total: agents.length,
     registries: ['wasiai'],
+    sources: [],
+    catalogStatus: 'complete',
   });
 }
 

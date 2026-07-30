@@ -161,11 +161,14 @@ describe('discoveryService — runtime SSRF guard (WKH-62 W1)', () => {
         ]),
     });
 
-    const agents = await discoveryService.queryRegistry(registry, {});
+    // WKH-318: `queryRegistry` devuelve un `RegistryFetchOutcome`, no un
+    // `Agent[]` — el fanout necesitaba saber CÓMO le fue a la fuente, no sólo
+    // qué trajo. Los agentes viven en `.agents`; el resto del test no cambia.
+    const outcome = await discoveryService.queryRegistry(registry, {});
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(agents).toHaveLength(1);
-    expect(agents[0]!.slug).toBe('a1');
+    expect(outcome.agents).toHaveLength(1);
+    expect(outcome.agents[0]!.slug).toBe('a1');
   });
 
   it('T-DISC-03: discover() — SSRF registry is dropped, sibling public registry still returns', async () => {
@@ -275,9 +278,18 @@ describe('discoveryService — runtime SSRF guard (WKH-62 W1)', () => {
       json: () => Promise.resolve([]),
     });
 
-    const agents = await discoveryService.queryRegistry(registry, {});
+    // WKH-318: `queryRegistry` devuelve un `RegistryFetchOutcome`. El registro
+    // allowlisteado contestó 200 con `[]` ⇒ `rows: 0` — le preguntamos y no
+    // tiene, que NO es lo mismo que no haber podido preguntarle (`rows: null`).
+    //
+    // El estado es `unverified` y no `ok` porque esta llamada no manda `limit` y
+    // el registro no declara `nextCursorPath`: contestó, pero no hay forma de
+    // probar que eso era todo (AR BLQ-1). `rows: 0` sigue siendo el dato duro.
+    const outcome = await discoveryService.queryRegistry(registry, {});
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(agents).toEqual([]);
+    expect(outcome.agents).toEqual([]);
+    expect(outcome.state).toBe('unverified');
+    expect(outcome.rows).toBe(0);
   });
 });

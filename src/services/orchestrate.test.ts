@@ -173,6 +173,8 @@ const mockDiscoveryResult: DiscoveryResult = {
   agents: mockAgents,
   total: 2,
   registries: ['wasiai'],
+  sources: [],
+  catalogStatus: 'complete',
 };
 
 const mockComposeResult: ComposeResult = {
@@ -300,6 +302,8 @@ describe('orchestrateService', () => {
       agents: [],
       total: 0,
       registries: [],
+      sources: [],
+      catalogStatus: 'complete',
     });
 
     const result = await orchestrateService.orchestrate(
@@ -730,6 +734,8 @@ describe('orchestrateService', () => {
       agents: [],
       total: 0,
       registries: [],
+      sources: [],
+      catalogStatus: 'complete',
     });
 
     const result = await orchestrateService.orchestrate(
@@ -947,6 +953,8 @@ describe('orchestrateService', () => {
     agents: wkh127Agents,
     total: 2,
     registries: ['wasiai'],
+    sources: [],
+    catalogStatus: 'complete',
   };
 
   function masterKeyRow() {
@@ -1081,6 +1089,8 @@ describe('orchestrateService', () => {
       ],
       total: 2,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     };
     vi.mocked(discoveryService.discover).mockResolvedValue(zeroPriceDiscovery);
     // P1 (audit 2026-07-01): keep getAgent consistent with the zero-price
@@ -1683,6 +1693,8 @@ describe('orchestrateService', () => {
       agents: collisionAgents,
       total: collisionAgents.length,
       registries: ['wasiai', 'decoy'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     // getAgent honors the registry hint: (slug, registry) → exact pair; a
     // slug-only lookup falls to the cheapest match (the decoy) — the bug shape.
@@ -1909,6 +1921,8 @@ describe('orchestrateService', () => {
       agents: [...makeDemoAgents(), realAgent],
       total: 4,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     setLlmResponse(
       JSON.stringify({
@@ -1945,6 +1959,8 @@ describe('orchestrateService', () => {
       agents: makeDemoAgents(),
       total: 3,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     // LLM returns nothing usable → triggers greedy over demos only.
     setLlmError(new Error('API timeout'));
@@ -1985,6 +2001,8 @@ describe('orchestrateService', () => {
       agents: [...makeDemoAgents(), realAgent],
       total: 4,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     setLlmResponse(
       JSON.stringify({
@@ -2035,6 +2053,8 @@ describe('orchestrateService', () => {
       agents: [...makeDemoAgents(), realAgent],
       total: 4,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     // The LLM ignores the real agent and selects only a demo echo.
     setLlmResponse(
@@ -2254,6 +2274,8 @@ describe('orchestrateService', () => {
       agents: [],
       total: 0,
       registries: [],
+      sources: [],
+      catalogStatus: 'complete',
     });
 
     const plan = await orchestrateService.planOrchestration(
@@ -2304,6 +2326,8 @@ describe('orchestrateService', () => {
     agents: wkh152Agents,
     total: 2,
     registries: ['wasiai'],
+    sources: [],
+    catalogStatus: 'complete',
   };
 
   /** Keep getAgent consistent with the wkh152 discover set (step-0 recompute). */
@@ -2458,6 +2482,8 @@ describe('orchestrateService', () => {
       agents: mlAgents,
       total: 2,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     vi.mocked(discoveryService.getAgent).mockImplementation(
       async (slug) => mlAgents.find((a) => a.slug === slug) ?? null,
@@ -2606,6 +2632,8 @@ describe('orchestrateService', () => {
       agents: [opaqueAgent],
       total: 1,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     vi.mocked(discoveryService.getAgent).mockImplementation(async (slug) =>
       slug === 'zeta-v1' ? opaqueAgent : null,
@@ -2693,6 +2721,8 @@ describe('orchestrateService', () => {
       agents: [...makeDemoAgents(), realAgent],
       total: 4,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     setLlmResponse(
       JSON.stringify({
@@ -2782,6 +2812,8 @@ describe('orchestrateService', () => {
     agents: wkh163Agents,
     total: 3,
     registries: ['wasiai'],
+    sources: [],
+    catalogStatus: 'complete',
   };
   /** Keep getAgent consistent with the wkh163 discover set (step-0 recompute). */
   function wkh163GetAgent(): void {
@@ -2953,6 +2985,8 @@ describe('orchestrateService', () => {
     agents: wkh163TerminalAgents,
     total: 3,
     registries: ['wasiai'],
+    sources: [],
+    catalogStatus: 'complete',
   };
 
   // T-163-4 (AC-3/AC-8, WKH-166): multi-leg LLM plan de 3 steps donde solo A (weather)
@@ -3195,6 +3229,8 @@ describe('orchestrateService', () => {
       agents,
       total: agents.length,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     vi.mocked(discoveryService.getAgent).mockImplementation(async (slug) => {
       return agents.find((a) => a.slug === slug) ?? null;
@@ -3425,6 +3461,8 @@ describe('orchestrateService', () => {
       agents: [],
       total: 0,
       registries: [],
+      sources: [],
+      catalogStatus: 'complete',
     });
 
     const plan = await orchestrateService.planOrchestration(
@@ -3447,6 +3485,8 @@ describe('orchestrateService', () => {
       agents: [{ ...mockAgents[0]!, priceUsdc: 0.5 }],
       total: 1,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     // LLM elige el agente pero el budget-fit lo trunca (budget < precio).
     setLlmResponse(
@@ -3488,6 +3528,8 @@ describe('orchestrateService', () => {
       agents: [demoAgent],
       total: 1,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     setLlmResponse(
       JSON.stringify({
@@ -3529,6 +3571,8 @@ describe('orchestrateService', () => {
       agents: [],
       total: 0,
       registries: [],
+      sources: [],
+      catalogStatus: 'complete',
     });
     await orchestrateService.orchestrate({ goal: 'x', budget: 5.0 }, 'plan-7a');
     // orchestrate() → planOrchestration (track) + mapPlanEarlyReturn (NO track).
@@ -3549,7 +3593,13 @@ describe('orchestrateService', () => {
     setLlmSummarizer();
     // 1er call (con caps) → vacío; 2º call (sin caps) → los agentes reales.
     vi.mocked(discoveryService.discover)
-      .mockResolvedValueOnce({ agents: [], total: 0, registries: [] })
+      .mockResolvedValueOnce({
+        agents: [],
+        total: 0,
+        registries: [],
+        sources: [],
+        catalogStatus: 'complete',
+      })
       .mockResolvedValueOnce(mockDiscoveryResult);
 
     const plan = await orchestrateService.planOrchestration(
@@ -3627,6 +3677,8 @@ describe('orchestrateService', () => {
       agents: [],
       total: 0,
       registries: [],
+      sources: [],
+      catalogStatus: 'complete',
     });
 
     const plan = await orchestrateService.planOrchestration(
@@ -3650,6 +3702,8 @@ describe('orchestrateService', () => {
       agents: [],
       total: 0,
       registries: [],
+      sources: [],
+      catalogStatus: 'complete',
     });
 
     const plan = await orchestrateService.planOrchestration(
@@ -3666,8 +3720,20 @@ describe('orchestrateService', () => {
   // loop (CD-3).
   it('T-WKH151-4: both passes empty → genuine no_agents (2 discover calls, no loop)', async () => {
     vi.mocked(discoveryService.discover)
-      .mockResolvedValueOnce({ agents: [], total: 0, registries: [] })
-      .mockResolvedValueOnce({ agents: [], total: 0, registries: [] });
+      .mockResolvedValueOnce({
+        agents: [],
+        total: 0,
+        registries: [],
+        sources: [],
+        catalogStatus: 'complete',
+      })
+      .mockResolvedValueOnce({
+        agents: [],
+        total: 0,
+        registries: [],
+        sources: [],
+        catalogStatus: 'complete',
+      });
 
     const plan = await orchestrateService.planOrchestration(
       {
@@ -3697,11 +3763,19 @@ describe('orchestrateService', () => {
     };
     // 1er discover (con caps) vacío → retry sin caps trae SOLO un demo.
     vi.mocked(discoveryService.discover)
-      .mockResolvedValueOnce({ agents: [], total: 0, registries: [] })
+      .mockResolvedValueOnce({
+        agents: [],
+        total: 0,
+        registries: [],
+        sources: [],
+        catalogStatus: 'complete',
+      })
       .mockResolvedValueOnce({
         agents: [demoAgent],
         total: 1,
         registries: ['wasiai'],
+        sources: [],
+        catalogStatus: 'complete',
       });
     setLlmResponse(
       JSON.stringify({
@@ -4004,6 +4078,8 @@ describe('orchestrateService', () => {
       agents: [...mockAgents, priceAgent],
       total: 3,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     vi.mocked(discoveryService.getAgent).mockImplementation(async (slug) => {
       return [...mockAgents, priceAgent].find((a) => a.slug === slug) ?? null;
@@ -4130,6 +4206,8 @@ describe('orchestrateService', () => {
       agents: [demoAgent],
       total: 1,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
     vi.mocked(discoveryService.getAgent).mockImplementation(async (slug) =>
       slug === 'base-demo' ? demoAgent : null,

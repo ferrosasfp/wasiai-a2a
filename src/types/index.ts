@@ -142,6 +142,29 @@ export interface RegistrySchema {
     agentsPath?: string;
     /** Field mappings for agent object */
     agentMapping?: AgentFieldMapping;
+    /**
+     * WKH-318: techo de `limit` que este registro acepta, DECLARADO por el
+     * registrante.
+     *
+     * ⚠️ **TODAVÍA NO LO LEE NADIE.** El campo existe desde el corte A, pero el
+     * clamp (`min(over-fetch, maxLimit)` en `queryRegistry`) llega recién con el
+     * corte B / W3. Antes decía "cuando está, `queryRegistry` envía..." en
+     * presente, y era falso: `maxLimit` no aparecía en ninguna otra línea de
+     * `src/` (AR MNR-E).
+     *
+     * Consecuencia mientras tanto, y es una TERCERA forma de truncamiento que el
+     * corte A no cubre: si el registro clampea en silencio (le pedimos 200 y nos
+     * da 100 sin cursor), la página no se llena y no hay evidencia de
+     * truncamiento. Eso hoy se reporta `ok`. Lo cierra W3.
+     */
+    maxLimit?: number;
+    /**
+     * WKH-318: path (dot-notation, `getNestedValue`) al cursor de paginación en
+     * la respuesta del registro. Cuando está declarado Y llega no-nulo, la
+     * fuente se reporta `truncated` con evidencia `cursor` (exacta). No se
+     * pagina (TD-318-2): se DETECTA.
+     */
+    nextCursorPath?: string;
   };
 
   /** How to call invoke */
@@ -474,10 +497,131 @@ export interface DiscoveryQuery {
   scope?: A2AAgentKeyRow | undefined;
 }
 
+// ============================================================
+// WKH-318 — HONESTIDAD DEL CATÁLOGO FEDERADO
+// ============================================================
+
+/**
+ * Cuatro estados por fuente. Un booleano ya habría perdido el tercero; el cuarto
+ * lo perdía el triplete, y es el que se lleva el caso REAL de producción.
+ *
+ * `ok` exige EVIDENCIA POSITIVA de completitud. No alcanza con que la fuente
+ * haya contestado: hay que poder demostrar que lo que trajo es todo lo que tenía
+ * para esta query. Hoy esa prueba puede venir de dos lados, y de ninguno más:
+ *
+ *   · el registro declara `nextCursorPath` y el cursor llega vacío ⇒ él mismo
+ *     dice "no hay más" (exacto);
+ *   · se le envió un límite y devolvió MENOS filas que ese límite ⇒ la página no
+ *     se llenó, así que no quedó nada afuera.
+ *
+ * Sin ninguna de las dos, el estado es `unverified` — NO `ok`. Es el caso que el
+ * AR midió: el registro real se siembra sin `nextCursorPath`
+ * (`20260401000000_kite_registries.sql:44-66`) y `/capabilities` llama a
+ * `discover({})` sin `limit`, así que no se manda `limitParam`. Ahí no hay
+ * evidencia OBTENIBLE, y afirmar `ok`/`complete` es exactamente la clase de
+ * mentira que esta HU existe para matar: la respuesta afirmaría más de lo que la
+ * evidencia sostiene, sobre 20 de 22 agentes.
+ */
+export type DiscoverySourceState =
+  /** respondió, y hay EVIDENCIA de que lo que trajo es todo lo que tiene */
+  | 'ok'
+  /** respondió, y hay EVIDENCIA de que hay más filas que NO trajimos */
+  | 'truncated'
+  /**
+   * respondió, pero NO hay forma de saber si trajo todo. No es una sospecha de
+   * truncamiento: es la ausencia de evidencia en las dos direcciones, y decirlo
+   * es más honesto que elegir una.
+   */
+  | 'unverified'
+  /** NO se la pudo consultar */
+  | 'failed';
+
+export type DiscoverySourceFailure =
+  | 'http_error'
+  | 'timeout'
+  | 'ssrf_blocked'
+  | 'circuit_open'
+  | 'bad_payload'
+  | 'unknown';
+
+export interface DiscoverySource {
+  name: string;
+  state: DiscoverySourceState;
+  /**
+   * Filas que la fuente aportó al conjunto candidato, ANTES de los filtros
+   * locales (status/verified/caps/free-text/maxPrice/scope/minReputation).
+   *
+   * `null` cuando `state === 'failed'` — NUNCA 0 (CD-14). Un 0 significa "le
+   * pregunté y no tiene"; `null` significa "no pude preguntarle". En
+   * `unverified` hay número: la fuente contestó y esas filas entraron; lo que no
+   * se sabe es si eran todas.
+   *
+   * POR QUÉ PRE-FILTRO: medido en producción, `?capabilities=remit.quote&limit=10`
+   * devuelve 0 agentes con las dos fuentes sanas. Si "aportó" se contara
+   * post-filtro, una query selectiva reportaría fuentes desaparecidas y el
+   * caller leería degradación donde sólo hubo un filtro.
+   */
+  rows: number | null;
+  /** Sólo cuando `state === 'failed'`. */
+  failure?: DiscoverySourceFailure;
+  /** Sólo cuando `state === 'truncated'`. `cursor` es exacta; `page_full` es heurística. */
+  truncationEvidence?: 'cursor' | 'page_full';
+}
+
+/**
+ * Roll-up de request. El mismo cuarteto, un nivel más arriba.
+ *
+ * `complete` significa "TODAS las fuentes probaron haber dado todo", no "ninguna
+ * se quejó". Si una sola no pudo probarlo, el roll-up es `unverified`: el caller
+ * se entera de que la respuesta no alcanza para afirmar completitud, que es
+ * distinto de saber que falta algo.
+ */
+export type CatalogStatus = 'complete' | 'unverified' | 'truncated' | 'partial';
+
+/** Referencia mínima de una fuente caída, para los cuerpos de error del money-path. */
+export interface FailedSourceRef {
+  name: string;
+  failure: DiscoverySourceFailure;
+}
+
+/**
+ * Lo que `queryRegistry` devuelve ahora. Antes devolvía `Agent[]` y toda la
+ * información sobre CÓMO le fue a la fuente se perdía en el `.catch(() => [])`
+ * del fanout.
+ */
+export interface RegistryFetchOutcome {
+  agents: Agent[];
+  state: DiscoverySourceState;
+  rows: number | null;
+  failure?: DiscoverySourceFailure;
+  truncationEvidence?: 'cursor' | 'page_full';
+}
+
 export interface DiscoveryResult {
   agents: Agent[];
   total: number;
+  /**
+   * WKH-318: las fuentes que **aportaron filas** al conjunto candidato, NO las
+   * fuentes configuradas. El tipo (`string[]`) y el nombre no cambian; el valor
+   * **sólo se acorta cuando una fuente realmente no aportó nada**.
+   *
+   * ⚠️ CR MNR-C: acá decía además "en el camino sano el valor es byte-idéntico".
+   * Es FALSO, y lo prueba `T-SRC-02`: un registro habilitado que responde 200 con
+   * `[]` es camino sano —no falló nada— y aun así sale de la lista, porque no
+   * aportó filas. La frase venía del §2.1 del story file, que se contradice con
+   * la advertencia de su propio W1.3; manda la específica. Lo que sí es
+   * byte-idéntico es el camino en el que **todas** las fuentes aportan.
+   */
   registries: string[];
+  /** WKH-318: estado POR FUENTE. Requerido: ningún constructor puede omitirlo. */
+  sources: DiscoverySource[];
+  /**
+   * WKH-318: roll-up. Precedencia
+   * `partial` > `truncated` > `unverified` > `complete`.
+   * Sin ninguna fuente consultada ⇒ `complete`: no hay nada que haya fallado ni
+   * nada cuya completitud haya quedado sin probar.
+   */
+  catalogStatus: CatalogStatus;
   /**
    * HU-208: cuántos candidatos descartó cada filtro de CANDIDATURA. Aditivo y
    * opcional (los callers que no lo leen no cambian). Existe para que un
@@ -723,6 +867,12 @@ export interface ComposeRequest {
    * sigue cobrando su precio vivo) ni la base del protocol fee (que es el costo ejecutado).
    */
   frozenStepPricesUsd?: readonly number[] | undefined;
+  /**
+   * WKH-318: el caller declara su tolerancia a un catálogo parcial. `true` ⇒ si
+   * el catálogo no es `complete`, se aborta ANTES del primer `invokeAgent` y el
+   * route reembolsa el step-0. Ausente/`false` ⇒ comportamiento de hoy.
+   */
+  requireCompleteCatalog?: boolean | undefined;
 }
 
 export interface ComposeResult {
@@ -787,6 +937,10 @@ export interface ComposeResult {
     reason: SettleWithholdingReason;
     txHash: string | null;
   };
+  /** WKH-318: las fuentes que no se pudieron consultar en este pipeline. */
+  failedSources?: FailedSourceRef[];
+  /** WKH-318: roll-up del catálogo con el que se armó el pool de este pipeline. */
+  catalogStatus?: CatalogStatus;
 }
 
 export interface StepResult {
@@ -943,6 +1097,12 @@ export interface OrchestrateRequest {
    * Ausente = comportamiento de hoy (precio vivo). Solo afecta el débito al caller.
    */
   frozenStepPricesUsd?: readonly number[] | undefined;
+  /**
+   * WKH-318: la tolerancia del caller a un catálogo parcial. `true` ⇒ el planner
+   * hace early-return `catalog_incomplete` (cero débito por construcción) y el
+   * flag baja a compose para la capa 2 (TOCTOU).
+   */
+  requireCompleteCatalog?: boolean | undefined;
 }
 
 export interface OrchestrateResult {
@@ -963,6 +1123,8 @@ export interface OrchestrateResult {
   debitFallback?: boolean;
   /** WKH-127: saldo post-débito (y post-refund) real; el route lo escribe en x-a2a-remaining-budget. */
   remainingBudgetUsd?: string;
+  /** WKH-318: las fuentes que no se pudieron consultar al armar el catálogo. */
+  failedSources?: FailedSourceRef[];
 }
 
 // WKH-131 (HU-128): /orchestrate/plan + /orchestrate/execute split.
@@ -970,6 +1132,12 @@ export type OrchestratePlanStatus =
   | 'ready'
   | 'insufficient_funds'
   | 'no_agents'
+  /**
+   * WKH-318: NO se colapsa con `no_agents`. `no_agents` = *pregunté y no hay*;
+   * `catalog_incomplete` = *no pude preguntar*, y el caller pidió
+   * explícitamente un catálogo completo (CD-15).
+   */
+  | 'catalog_incomplete'
   | 'budget_exhausted'
   | 'no_relevant_agent';
 // circuit_open: DIFERIDO (DT-3). NO agregar en esta HU.
@@ -1028,6 +1196,11 @@ export interface OrchestratePlanResult {
    * no hubo retry). Interno; NO se serializa al cliente.
    */
   retryAgentCount?: number | null;
+  /**
+   * WKH-318: las fuentes que no se pudieron consultar. Presente en el
+   * early-return `catalog_incomplete`; el route lo propaga al cliente.
+   */
+  failedSources?: FailedSourceRef[];
 }
 
 export interface OrchestrateExecuteRequest extends OrchestrateRequest {

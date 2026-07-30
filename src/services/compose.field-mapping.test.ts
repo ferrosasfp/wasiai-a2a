@@ -247,6 +247,8 @@ beforeEach(() => {
     agents: [],
     total: 0,
     registries: [],
+    sources: [],
+    catalogStatus: 'complete',
   });
   mockRegen.mockResolvedValue(null);
   vi.mocked(maybeTransform).mockResolvedValue({

@@ -66,7 +66,13 @@ vi.mock('../lib/supabase.js', () => ({
 
 vi.mock('../services/discovery.js', () => ({
   discoveryService: {
-    discover: vi.fn(async () => ({ agents: [], total: 0, registries: [] })),
+    discover: vi.fn(async () => ({
+      agents: [],
+      total: 0,
+      registries: [],
+      sources: [],
+      catalogStatus: 'complete',
+    })),
   },
 }));
 
@@ -86,6 +92,7 @@ vi.mock('../services/agent-card.js', () => ({
 }));
 
 import { _resetRegistry, initAdapters } from '../adapters/registry.js';
+import { discoveryService } from '../services/discovery.js';
 import capabilitiesRoutes from './capabilities.js';
 
 interface ChainEntry {
@@ -94,6 +101,20 @@ interface ChainEntry {
   chainId: number;
   isDefault: boolean;
   acceptsInboundPayment: boolean;
+}
+
+/** WKH-318: el cuerpo COMPLETO, para poder asertar el contrato campo por campo. */
+async function getBody(): Promise<Record<string, unknown>> {
+  const app = Fastify();
+  await app.register(capabilitiesRoutes, { prefix: '/capabilities' });
+  await app.ready();
+  try {
+    const res = await app.inject({ method: 'GET', url: '/capabilities' });
+    expect(res.statusCode).toBe(200);
+    return JSON.parse(res.body) as Record<string, unknown>;
+  } finally {
+    await app.close();
+  }
 }
 
 async function getChains(): Promise<ChainEntry[]> {
@@ -155,5 +176,79 @@ describe('HU-204 — GET /capabilities distingue entrada de salida', () => {
       chainId: 900001,
       isDefault: false,
     });
+  });
+
+  /**
+   * WKH-318 — T-SRC-06.
+   *
+   * `/capabilities` replicaba el bug de `/discover`: publicaba `registries` sin
+   * decir si esos registros habían contestado. Se agregan `catalogStatus` y
+   * `sources`, y se congela que el agregado es ADITIVO: los campos previos
+   * conservan nombre Y valor.
+   *
+   * Nota de medición: el story file dice "los 11 campos previos"; los campos
+   * previos REALES son 12 (`name`, `description`, `url`, `protocol`,
+   * `capabilities`, `methods`, `inputModes`, `outputModes`, `chains`, `agents`,
+   * `agentsTotal`, `registries`). Se asserta el conjunto medido, no el estimado.
+   */
+  it('T-SRC-06: expone catalogStatus + sources y conserva los 12 campos previos con el mismo nombre y valor', async () => {
+    vi.mocked(discoveryService.discover).mockResolvedValueOnce({
+      agents: [],
+      total: 0,
+      // La fuente contestó 400: no aportó filas, así que no está acá...
+      registries: [],
+      // ...pero su estado SÍ es legible, que es todo el punto de la HU.
+      sources: [
+        {
+          name: 'WasiAI',
+          state: 'failed',
+          rows: null,
+          failure: 'http_error',
+        },
+      ],
+      catalogStatus: 'partial',
+    });
+
+    const body = await getBody();
+
+    // (a) lo nuevo llega.
+    expect(body.catalogStatus).toBe('partial');
+    expect(body.sources).toEqual([
+      { name: 'WasiAI', state: 'failed', rows: null, failure: 'http_error' },
+    ]);
+
+    // (b) lo viejo no se movió — campo por campo, no un toMatchObject laxo.
+    expect(body.name).toBe('wasiai-a2a');
+    expect(body.description).toBe('test');
+    expect(body.url).toBe('http://localhost:3001');
+    expect(body.protocol).toBe('a2a');
+    expect(body.capabilities).toEqual({});
+    expect(body.methods).toEqual([]);
+    expect(body.inputModes).toEqual([]);
+    expect(body.outputModes).toEqual([]);
+    expect(Array.isArray(body.chains)).toBe(true);
+    expect(body.agents).toEqual([]);
+    expect(body.agentsTotal).toBe(0);
+    expect(body.registries).toEqual([]);
+
+    // (c) y no apareció ni desapareció NINGÚN otro campo.
+    expect(Object.keys(body).sort()).toEqual(
+      [
+        'agents',
+        'agentsTotal',
+        'capabilities',
+        'catalogStatus',
+        'chains',
+        'description',
+        'inputModes',
+        'methods',
+        'name',
+        'outputModes',
+        'protocol',
+        'registries',
+        'sources',
+        'url',
+      ].sort(),
+    );
   });
 });

@@ -235,6 +235,8 @@ describe('compose HTTP e2e flow (P0)', () => {
       agents: [],
       total: 0,
       registries: [],
+      sources: [],
+      catalogStatus: 'complete',
     });
   });
 
