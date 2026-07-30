@@ -261,8 +261,33 @@ export async function verifySolanaDeposit(
   const mint = getSolanaUsdcMint();
   const decimals = getSolanaUsdcDecimals();
   const meta = parsed.meta;
-  const pre = meta.preTokenBalances ?? [];
-  const post = meta.postTokenBalances ?? [];
+
+  // ── 5a. LAS DOS LISTAS TIENEN QUE ESTAR (fix-pack it2 · BLQ-MED-3) ────────
+  //
+  // ⚠️ ACA VIVIA UN `?? []`, Y UN `?? []` ES UNA SUPOSICION DISFRAZADA DE DEFAULT.
+  //
+  // `pre/postTokenBalances` son **opcionales** en el tipo de `@solana/web3.js`, así que
+  // su ausencia llega hasta acá pasando la validación del SDK. Leerlas como listas
+  // VACIAS convierte "el nodo no me mandó los saldos previos" en "los saldos previos
+  // eran cero", que es una MEDICION que nadie hizo:
+  //   · `pre` ausente  ⇒ `preOurs = 0` ⇒ delta = el saldo ENTERO de la tesorería
+  //     (reproducido: 1001 USDC acreditados por un depósito de 1);
+  //   · `post` ausente ⇒ delta NEGATIVO, y salía como `RECIPIENT_MISMATCH`, o sea una
+  //     afirmación de que la plata fue a otro lado sobre un campo que faltaba.
+  //
+  // Es el mismo error que BLQ-MED-1 en su versión de PRESENCIA en vez de VALOR: allá
+  // el dato era ilegible, acá directamente no vino. Los dos son indeterminación.
+  const preRaw = meta.preTokenBalances;
+  const postRaw = meta.postTokenBalances;
+  if (!Array.isArray(preRaw) || !Array.isArray(postRaw)) {
+    return {
+      ok: false,
+      reason: 'DEPOSIT_VERIFICATION_UNKNOWN',
+      detail: `the parsed transaction carries no token balance list (pre present=${Array.isArray(preRaw)}, post present=${Array.isArray(postRaw)}) — without both there is no delta to measure, and an absent list is not an empty one`,
+    };
+  }
+  const pre = preRaw;
+  const post = postRaw;
 
   const mintSeen =
     pre.some((b) => b.mint === mint) || post.some((b) => b.mint === mint);
@@ -286,10 +311,33 @@ export async function verifySolanaDeposit(
   // owner para el mismo mint y puede **SUB-MEDIR el delta** (el owner puede tener más
   // de una token account del mismo mint). Y CD-5 exige comparar contra la ATA, que es
   // la dirección que efectivamente se le publicó al depositante.
-  const accountKeys = parsed.transaction.message.accountKeys;
+  //
+  // ⚠️ Y SE LEE A LA DEFENSIVA (fix-pack it2 · MENOR-1). `parsed.transaction.message
+  // .accountKeys` era el ÚNICO acceso encadenado sin protección del archivo: con
+  // `transaction` o `message` ausentes tiraba `TypeError` —probado—, y como la ruta no
+  // envuelve la llamada, salía **500 en vez de 503** y sin el evento durable que AC-6
+  // exige. La cabecera promete "NUNCA lanza" y esa promesa tiene que ser verdadera, no
+  // aspiracional: un módulo que se defiende de `owner`, `confirmationStatus`,
+  // `pre/post` y `accountKeys[i]` ausentes y no de estos dos, no se estaba defendiendo:
+  // estaba adivinando cuáles campos opcionales iban a venir.
+  //
+  // Sin `accountKeys` no hay match de DIRECCION, y sin match de dirección no se puede
+  // afirmar ni que llegó ni que no llegó ⇒ indeterminación, no mismatch.
+  const rawKeys: unknown = (
+    parsed.transaction as { message?: { accountKeys?: unknown } } | undefined
+  )?.message?.accountKeys;
+  if (!Array.isArray(rawKeys)) {
+    return {
+      ok: false,
+      reason: 'DEPOSIT_VERIFICATION_UNKNOWN',
+      detail:
+        'the parsed transaction carries no account key list — the deposit ATA address cannot be matched, so neither a credit nor a recipient mismatch can be asserted',
+    };
+  }
+  const accountKeys: readonly unknown[] = rawKeys;
   const addressAt = (accountIndex: number): string | undefined => {
     const entry = accountKeys[accountIndex];
-    if (entry === undefined) return undefined;
+    if (entry === undefined || entry === null) return undefined;
     // `accountKeys` puede venir como `PublicKey` o como `ParsedMessageAccount`
     // (`{pubkey, signer, writable}`) según el tipo de mensaje. Se cubren las dos sin
     // asumir cuál — asumir la forma es cómo un fixture "válido" hace pasar un test
@@ -402,6 +450,20 @@ export async function verifySolanaDeposit(
   }
   const delta = postOurs - preOurs;
 
+  if (delta < 0n) {
+    // ⚠️ UN DELTA NEGATIVO ES IMPOSIBLE LEYENDO BIEN (fix-pack it2 · BLQ-MED-3): la
+    // ATA de depósito no gasta, así que su saldo no puede haber BAJADO en una tx que
+    // el depositante presenta como su depósito. Si el número da negativo, lo que
+    // aprendimos es que los datos no son coherentes —no que la plata haya ido a otro
+    // lado—, y `RECIPIENT_MISMATCH` (400, definitivo) era exactamente esa afirmación
+    // de más. Va ANTES del `<= 0n` para no quedar tapado por él.
+    return {
+      ok: false,
+      reason: 'DEPOSIT_VERIFICATION_UNKNOWN',
+      detail: `the deposit ATA balance delta is NEGATIVE (${delta}) — a receiving account cannot lose balance, so the token balance lists are incoherent and nothing can be asserted about this transfer`,
+    };
+  }
+
   if (delta <= 0n) {
     // Hay entradas del mint, pero el saldo de NUESTRA ATA no subió. El token es el
     // correcto y el destino no. Análogo exacto de RECIPIENT_MISMATCH.
@@ -445,6 +507,13 @@ export async function verifySolanaDeposit(
     postByIndex.set(b.accountIndex, after);
   }
   const sourceOwners = new Set<string>();
+  /**
+   * La baja TOTAL de las cuentas de origen del mismo mint. Es el insumo del invariante
+   * de conservación de más abajo, y se acumula acá porque este loop ya calcula
+   * exactamente esa resta para decidir quién es origen: medir dos veces lo mismo en dos
+   * lugares es cómo las dos mediciones terminan discrepando.
+   */
+  let totalSourceDrop = 0n;
   for (const b of pre) {
     if (b.mint !== mint) continue;
     const before = atomicOf(b);
@@ -458,6 +527,7 @@ export async function verifySolanaDeposit(
     // Si la cuenta desapareció de `post` (se cerró), su saldo pasó a 0.
     const after = postByIndex.get(b.accountIndex) ?? 0n;
     if (after - before >= 0n) continue; // no bajó: no es un origen
+    totalSourceDrop += before - after;
     const owner = declaredOwner(b);
     if (owner === undefined) {
       // La cuenta BAJO —o sea que ES un origen— pero el nodo no dijo de quién es.
@@ -486,6 +556,43 @@ export async function verifySolanaDeposit(
     };
   }
   const depositor = [...sourceOwners][0] as string;
+
+  // ── 6b. INVARIANTE DE CONSERVACION (fix-pack it2 · BLQ-MED-3) ─────────────
+  //
+  // ⚠️ LO QUE ACREDITAMOS NO PUEDE SUPERAR LO QUE ALGUIEN PAGO.
+  //
+  // El delta se mide sobre UNA cuenta (la ATA de depósito) y hasta acá ninguna otra
+  // cosa lo contrastaba. Si las listas están completas eso alcanza; el problema es que
+  // **una lista incompleta no se anuncia**. Reproducido: `pre` presente pero SIN la
+  // entrada de nuestra ATA (la tesorería ya tenía 1000 USDC y el depósito era de 1)
+  // ⇒ `preOurs = 0` ⇒ se acreditaban 1001. Ninguna de las defensas nuevas lo veía,
+  // porque el dato no era ilegible ni la lista estaba ausente: **faltaba una fila**.
+  //
+  // Este chequeo es de otra NATURALEZA que los demás: no valida un campo, cruza dos
+  // mediciones independientes de la misma tx (lo que subió el destino contra lo que
+  // bajaron los orígenes) y por eso caza formas de corrupción que no se pueden
+  // enumerar de antemano. Es el equivalente de partida doble.
+  //
+  // Y NO se recalcula la fórmula que vigila: `totalSourceDrop` sale del loop de
+  // atribución, que lee entradas DISTINTAS (las de origen) de las que produjeron el
+  // delta (la de destino). Un invariante que se recalcula a sí mismo aplaude siempre.
+  //
+  // Un depósito legítimo lo cumple con IGUALDAD (lo que bajó una cuenta subió la otra).
+  // La desigualdad `<=` deja pasar el caso real de una tx que además mueve fondos a
+  // otras cuentas del mismo mint —ahí el origen baja MAS que nuestro delta— sin
+  // dejar pasar nunca el caso peligroso, que es acreditar de más.
+  //
+  // Nota de por qué hacía falta acá y no alcanzaba con la defensa de respaldo: el único
+  // chequeo que habría atrapado esto es `AMOUNT_MISMATCH`, y `body.amount` es OPCIONAL
+  // en la ruta. Una protección que depende de que el propio caller la pida no es una
+  // protección.
+  if (delta > totalSourceDrop) {
+    return {
+      ok: false,
+      reason: 'DEPOSIT_VERIFICATION_UNKNOWN',
+      detail: `conservation check failed: the deposit ATA gained ${delta} atomic units but the source accounts of the mint only lost ${totalSourceDrop} — the token balance lists are incomplete or incoherent, so the credited amount cannot be trusted`,
+    };
+  }
 
   // ── 7. El monto declarado (opcional): BigInt contra BigInt ────────────────
   if (expectedAmountUsd !== undefined) {

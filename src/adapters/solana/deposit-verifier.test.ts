@@ -683,7 +683,21 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       // `0n` y `BigInt('0x10')` da `16n`: un `try/catch` alrededor de `BigInt` NO los
       // ve. Sin ellos en esta lista, el fix quedaría cubierto sólo para las formas que
       // sí tiran.
-      for (const unreadable of ['1.0', '1e9', '', '0x10', 'abc', '   ']) {
+      // Las tres últimas las agregó el re-AR: el regex las corta y el `try` no las
+      // veía — `BigInt(' 42 ')` y `BigInt('\n42\n')` dan `42n` (ignoran el espaciado)
+      // y `BigInt('+5')` da `5n`. Un `amount` con espacios o signo no es un monto que
+      // este RPC produzca: es un dato de otra procedencia.
+      for (const unreadable of [
+        '1.0',
+        '1e9',
+        '',
+        '0x10',
+        'abc',
+        '   ',
+        ' 42 ',
+        '\n42\n',
+        '+5',
+      ]) {
         mockGetParsedTransaction.mockResolvedValue(
           treasuryTx(unreadable, '1001000000'),
         );
@@ -705,7 +719,18 @@ describe('WKH-315 · verifySolanaDeposit', () => {
         // el veredicto UNKNOWN lo termina dando el guard de ATRIBUCION del depositante,
         // que mira las mismas entradas. El test quedaría verde afirmando una propiedad
         // que el código ya no tiene — la vacuidad de siempre, con otro disfraz.
+        //
+        // ⚠️⚠️ Y SON DOS NEEDLES, NO UNO, PORQUE UN NEEDLE ENVEJECE. Con sólo
+        // `'deposit ATA'` este test volvió a sobrevivir en la iteración 2: el
+        // invariante de conservación —que es NUEVO— también dice "deposit ATA" en su
+        // detalle, así que el needle dejó de identificar a un guard sin que nadie lo
+        // tocara. La conjunción es lo único que hoy sólo puede decir ESTE guard: los
+        // de atribución dicen "unreadable" pero "for the configured mint", y el de
+        // conservación dice "deposit ATA" pero no "unreadable".
         expect(res.detail, unreadable).toContain('deposit ATA');
+        expect(res.detail, unreadable).toContain(
+          'unreadable uiTokenAmount.amount',
+        );
       }
     });
 
@@ -767,6 +792,208 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       if (res.ok) throw new Error('unreachable');
       expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
       expect(res.reason).not.toBe('DEPOSITOR_AMBIGUOUS');
+    });
+  });
+
+  // ── FIX-PACK it2 · BLQ-MED-3: la indeterminación por AUSENCIA ────────────
+  //
+  // BLQ-MED-1 cerró la indeterminación del VALOR (un `amount` ilegible). Esta cierra
+  // la de la PRESENCIA: una lista que no vino, o una FILA que falta dentro de una
+  // lista que sí vino. El daño reproducido es el mismo —el saldo entero de la
+  // tesorería acreditado— por una puerta que ninguna validación de campo podía ver.
+  describe('BLQ-MED-3: una lista o una fila AUSENTE nunca se lee como un cero medido', () => {
+    /** Una tx cruda, para poder OMITIR piezas que `parsedTx` siempre construye. */
+    const rawTx = (
+      meta: unknown,
+      keys: string[] = [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA],
+    ) => ({
+      meta,
+      transaction: {
+        message: {
+          accountKeys: keys.map((k, i) => ({
+            pubkey: new PublicKey(k),
+            signer: i === 0,
+            writable: true,
+          })),
+        },
+      },
+    });
+
+    const bal = (accountIndex: number, owner: string, amount: string) => ({
+      accountIndex,
+      mint: MINT,
+      owner,
+      uiTokenAmount: uiAmount(amount),
+    });
+
+    it('BLQ-MED-3: `pre` NO lista nuestra ATA ⇒ UNKNOWN por conservación, y NUNCA acredita los 1001 USDC de tesorería', async () => {
+      // ⚠️ EL CASO QUE MAS DUELE Y EL MENOS VISIBLE: las dos listas están presentes,
+      // ningún campo es ilegible, y sin embargo el delta medido sobre UNA cuenta es
+      // el saldo entero de la tesorería. Lo único que lo delata es cruzarlo contra lo
+      // que los orígenes efectivamente pagaron.
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      mockGetParsedTransaction.mockResolvedValue(
+        rawTx({
+          err: null,
+          // La ATA de depósito (accountIndex 2) NO aparece acá, aunque ya tenía 1000.
+          preTokenBalances: [bal(1, DEPOSITOR, '10000000')],
+          postTokenBalances: [
+            bal(1, DEPOSITOR, '9000000'),
+            bal(2, OWNER, '1001000000'),
+          ],
+        }),
+      );
+
+      const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+      expect(res.ok).toBe(false);
+      if (res.ok) {
+        throw new Error(
+          `acreditó ${res.amountUsd} USDC (esperado: ningún crédito)`,
+        );
+      }
+      expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+      // ⚠️ Y POR EL MOTIVO CORRECTO. Sin esto el test sobrevive a la mutación del
+      // invariante: el veredicto lo daría cualquier otro guard y el nombre mentiría.
+      expect(res.detail).toContain('conservation check failed');
+    });
+
+    it('BLQ-MED-3 (andamiaje): el MISMO escenario con la fila presente acredita 1 USDC, no 1001', async () => {
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      mockGetParsedTransaction.mockResolvedValue(
+        rawTx({
+          err: null,
+          preTokenBalances: [
+            bal(1, DEPOSITOR, '10000000'),
+            bal(2, OWNER, '1000000000'),
+          ],
+          postTokenBalances: [
+            bal(1, DEPOSITOR, '9000000'),
+            bal(2, OWNER, '1001000000'),
+          ],
+        }),
+      );
+
+      const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+      expect(res.ok).toBe(true);
+      if (!res.ok) throw new Error('unreachable');
+      expect(res.amountUsd).toBe('1');
+    });
+
+    it('BLQ-MED-3: el invariante es `<=`, no `==` — una tx que además paga a otra cuenta del mint SI acredita', async () => {
+      // El origen baja 8 (5 a nuestra ATA + 3 a un tercero). Exigir igualdad
+      // rechazaría un depósito legítimo; el peligro es acreditar de MAS, no de menos.
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      mockGetParsedTransaction.mockResolvedValue(
+        rawTx(
+          {
+            err: null,
+            preTokenBalances: [
+              bal(1, DEPOSITOR, '10000000'),
+              bal(2, OWNER, '0'),
+              bal(3, OTHER_DEPOSITOR, '0'),
+            ],
+            postTokenBalances: [
+              bal(1, DEPOSITOR, '2000000'),
+              bal(2, OWNER, '5000000'),
+              bal(3, OTHER_DEPOSITOR, '3000000'),
+            ],
+          },
+          [DEPOSITOR, DEPOSITOR_ATA, OUR_ATA, FOREIGN_ATA],
+        ),
+      );
+
+      const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+      expect(res.ok).toBe(true);
+      if (!res.ok) throw new Error('unreachable');
+      expect(res.amountUsd).toBe('5');
+    });
+
+    it('BLQ-MED-3: `preTokenBalances` AUSENTE ⇒ UNKNOWN, NUNCA DEPOSITOR_AMBIGUOUS (400 sobre un campo que no vino)', async () => {
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      mockGetParsedTransaction.mockResolvedValue(
+        rawTx({ err: null, postTokenBalances: [bal(2, OWNER, '1001000000')] }),
+      );
+
+      const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+      expect(res.ok).toBe(false);
+      if (res.ok) {
+        throw new Error(
+          `acreditó ${res.amountUsd} USDC sin lista de saldos previos`,
+        );
+      }
+      expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+      expect(res.reason).not.toBe('DEPOSITOR_AMBIGUOUS');
+      expect(res.detail).toContain('no token balance list');
+    });
+
+    it('BLQ-MED-3: `postTokenBalances` AUSENTE ⇒ UNKNOWN, NUNCA RECIPIENT_MISMATCH', async () => {
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      mockGetParsedTransaction.mockResolvedValue(
+        rawTx({ err: null, preTokenBalances: [bal(2, OWNER, '1000000000')] }),
+      );
+
+      const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+      expect(res.ok).toBe(false);
+      if (res.ok) throw new Error('unreachable');
+      expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+      expect(res.reason).not.toBe('RECIPIENT_MISMATCH');
+      expect(res.detail).toContain('no token balance list');
+    });
+
+    it('BLQ-MED-3: un delta NEGATIVO ⇒ UNKNOWN, no RECIPIENT_MISMATCH (una cuenta que recibe no puede perder saldo)', async () => {
+      // Las dos listas están y son legibles, pero se contradicen. Un número imposible
+      // dice "los datos están mal", no "tu plata fue a otro lado".
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      mockGetParsedTransaction.mockResolvedValue(
+        rawTx({
+          err: null,
+          preTokenBalances: [bal(2, OWNER, '1000000000')],
+          postTokenBalances: [bal(2, OWNER, '999000000')],
+        }),
+      );
+
+      const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+      expect(res.ok).toBe(false);
+      if (res.ok) throw new Error('unreachable');
+      expect(res.reason).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+      expect(res.reason).not.toBe('RECIPIENT_MISMATCH');
+      expect(res.detail).toContain('NEGATIVE');
+    });
+
+    it('MENOR-1: sin `transaction` o sin `accountKeys` NO LANZA — devuelve UNKNOWN (500 vs 503)', async () => {
+      // ⚠️ La cabecera del módulo promete "NUNCA lanza" y era falso: la ruta no
+      // envuelve la llamada, así que un `TypeError` salía como 500 y SIN el evento
+      // durable que AC-6 exige. Una promesa de la cabecera se verifica o se corrige.
+      mockGetSignatureStatuses.mockResolvedValue(finalizedStatus());
+      const meta = {
+        err: null,
+        preTokenBalances: [bal(2, OWNER, '0')],
+        postTokenBalances: [bal(2, OWNER, '5000000')],
+      };
+      for (const broken of [
+        { meta }, // sin `transaction`
+        { meta, transaction: {} }, // sin `message`
+        { meta, transaction: { message: {} } }, // sin `accountKeys`
+        { meta, transaction: { message: { accountKeys: null } } },
+      ]) {
+        const label = JSON.stringify(broken.transaction ?? 'sin transaction');
+        mockGetParsedTransaction.mockResolvedValue(broken);
+
+        // `resolves` y no un try/catch: un throw acá pone el test rojo con el stack
+        // del TypeError, que es exactamente el síntoma que se está cerrando.
+        const res = await verifySolanaDeposit({ signature: SIGNATURE });
+
+        expect(res.ok, label).toBe(false);
+        if (res.ok) throw new Error('unreachable');
+        expect(res.reason, label).toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+        expect(res.detail, label).toContain('no account key list');
+      }
     });
   });
 

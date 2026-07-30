@@ -321,13 +321,13 @@ Devuelve **una dirección EVM** como destino esperado de un depósito Solana, en
 
 **La cuenta de depósito (MI-6).**
 
-- Env **obligatoria y sin fallback**: `A2A_DEPOSIT_SOLANA_OWNER` (pubkey base58, validada con
+- Env **obligatoria y sin fallback**: `A2A_DEPOSIT_OWNER_SOLANA` (pubkey base58, validada con
   `isValidSolanaAddress`). Ausente o inválida ⇒ **el camino de depósito Solana está
   deshabilitado** (fail-loud), NUNCA un fallback. *El fallback silencioso es exactamente cómo
   `resolveTreasury` se volvió un landmine; no se repite la forma.*
 - **El destino esperado es la ATA, no el owner** (CD-5):
   `getAssociatedTokenAddressSync(new PublicKey(getSolanaUsdcMint()), new
-  PublicKey(A2A_DEPOSIT_SOLANA_OWNER))` — mismo derivador que `payment.ts:214`, sin red y
+  PublicKey(A2A_DEPOSIT_OWNER_SOLANA))` — mismo derivador que `payment.ts:214`, sin red y
   **sin `Keypair`** (AC-12/CD-4).
 - **Recomendación (`[DECIDE FOUNDER]` D-6): que sea la pubkey del OPERADOR.** Argumento que
   conecta con las decisiones #2 y #4 del founder: si los depósitos entran a la misma cuenta
@@ -345,7 +345,7 @@ Devuelve **una dirección EVM** como destino esperado de un depósito Solana, en
   recibir depósitos. Diseño: la aserción vive en `chain.ts:getSolanaOperatorKeypair()`
   **después** de la carga exitosa (que ya loguea la pubkey, `:95-98`) — cero dependencia de
   arranque nueva, y fail-loud. Salida explícita declarada, siguiendo el exemplar de
-  `schema-preflight.ts:120`: `A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED=true` cuando la cuenta de
+  `schema-preflight.ts:120`: `A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA=true` cuando la cuenta de
   depósito es deliberadamente distinta de la del operador.
   **Trade-off declarado:** un error de config del DEPÓSITO deja de settlear la SALIDA. Es
   ruidoso, inmediato y reversible en un minuto, contra un dinero perdido que no lo es —
@@ -421,13 +421,13 @@ el bucket viejo** (recuperable, visible, sin pérdida) en vez de **saldo duplica
   adapter NO leen esa env*. Sin ella, `getAdaptersBundle('solana-devnet')` es `undefined` y
   `deposit.ts:85-87` responde `CHAIN_NOT_SUPPORTED`. **Mi módulo NO la lee** (respeta CD-7 de
   WKH-234): el AND es estructural, vía la existencia del bundle.
-- **Flag propio, nuevo: `A2A_SOLANA_DEPOSIT_ENABLED` (default OFF).** Justificación: encender
+- **Flag propio, nuevo: `A2A_DEPOSIT_ENABLED_SOLANA` (default OFF).** Justificación: encender
   el rail de SALIDA (pagarle a un agente) y abrir un camino de ENTRADA de dinero son dos
   decisiones distintas, y **CD-13 exige** poder publicar la cuenta de depósito sólo cuando la
   verificación está cableada Y habilitada. Un solo flag obligaría a elegir entre "no puedo
   settlear" y "publiqué una cuenta de depósito sin verificador".
 - **Choke-point único**: `isSolanaDepositEnabled()` en `deposit-account.ts`, que exige
-  `A2A_SOLANA_DEPOSIT_ENABLED === 'true'` **Y** `resolveSolanaDepositOwner() !== null`.
+  `A2A_DEPOSIT_ENABLED_SOLANA === 'true'` **Y** `resolveSolanaDepositOwner() !== null`.
   Comparación estricta de string (PROHIBIDO `Boolean(process.env...)`), exemplar
   `parsers.ts:81-83`.
 
@@ -522,7 +522,7 @@ el bucket viejo** (recuperable, visible, sin pérdida) en vez de **saldo duplica
    - hay entradas del mint pero el **delta de la ATA esperada** no es `> 0` ⇒
      **`RECIPIENT_MISMATCH`** (análogo de `RECIPIENT_MISMATCH`).
    - **El match de destino es TRIPLE** (CD-5): `mint === esperado` **Y**
-     `owner === A2A_DEPOSIT_SOLANA_OWNER` **Y** la dirección de la cuenta —
+     `owner === A2A_DEPOSIT_OWNER_SOLANA` **Y** la dirección de la cuenta —
      `parsed.transaction.message.accountKeys[accountIndex]` — **=== la ATA derivada**.
      *Por qué las tres y no sólo `(owner, mint)` como `checkTerms` (`payment.ts:1117-1119`):
      un `find` por `(owner,mint)` toma la PRIMERA de varias cuentas posibles del mismo owner
@@ -806,7 +806,7 @@ firma hacia mi cuenta, y es irreversible?"* (descubrir + acreditar).
 
 - **La migración de W0.3 debe estar aplicada a `bdwv` antes del deploy** del código. Es la
   misma clase de precondición que WKH-307 volvió ejecutable con un preflight. **Acá NO se
-  construye un preflight nuevo**: el flag propio (`A2A_SOLANA_DEPOSIT_ENABLED`, default OFF)
+  construye un preflight nuevo**: el flag propio (`A2A_DEPOSIT_ENABLED_SOLANA`, default OFF)
   cumple el rol y es más simple. Se declara en el runbook de W3.2 el orden migración → env.
 - La fila 189 (`fix/p1-discover-reputation-402-cap`, abierta) toca `middleware/x402.ts`: **no
   afecta a esta HU** (no lo toca). Afecta a 314.
@@ -895,7 +895,7 @@ que ver el nombre del test que falló.
 | **M16** | el monto acreditado pasa a ser `body.amount` en vez del de la cadena | `T-315-01`, `T-315-02` |
 | **M17** | `verifyEd25519Base58` devuelve `true` ante un error de decode | `T-315-08d` |
 | **M18** | `resolveSolanaDepositOwner` cae a `resolveTreasury` cuando la env falta | `T-315-15`, `T-315-12` |
-| **M19** | `A2A_SOLANA_DEPOSIT_ENABLED` se compara con `Boolean(process.env...)` | `T-315-12` (valor `'false'` debe seguir OFF) |
+| **M19** | `A2A_DEPOSIT_ENABLED_SOLANA` se compara con `Boolean(process.env...)` | `T-315-12` (valor `'false'` debe seguir OFF) |
 | **M20** | el paso 3b (coherencia familia↔formato) se elimina | nuevo `T-315-17`: firma base58 con `x-payment-chain: avalanche-fuji` ⇒ 400 `INVALID_INPUT` y **cero red** |
 
 **CD-15 aplicado**: cada mutante exige el **nombre** del test que falló y su motivo. Un
@@ -922,7 +922,7 @@ helper que pueda tirar se invoca en el cuerpo de un `describe` (209 §M12).
 | **D-3 / MI-2** | Cómo se prueba el control de la wallet | **Resuelto** | §5: bind ed25519 real, primitivo medido |
 | **D-4** | ¿Quién cierra `TD-SOLANA-CAIP2-DENYLIST`? | No para 315 | Se **declara** el disparo (encender el rail dispara su condición de reactivación escrita en `chain-resolver.ts:260-264`). WKH-315 no lo cierra. **Necesita dueño** |
 | **D-5 / MI-3** | ¿La demo paga x402 o prepago? | **Ya no** | **No pude determinarlo** (requiere `chaski-v3`). §7.1 eliminó la dependencia de orden |
-| **D-6 / MI-6** | ¿ATA del operador o cuenta dedicada? | No | §4.4: **recomendada la del operador** (los depósitos re-abastecen la liquidez Solana); si es dedicada, declarar `A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED=true` |
+| **D-6 / MI-6** | ¿ATA del operador o cuenta dedicada? | No | §4.4: **recomendada la del operador** (los depósitos re-abastecen la liquidez Solana); si es dedicada, declarar `A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA=true` |
 | **D-7** | Reserva y umbral de alerta de la puerta de liquidez | No para 315 | Apéndice A. Propuestos: reserva **2 USDC**, alerta **5 USDC** — **`[DECIDE FOUNDER]`, NO hardcodeados como definitivos** |
 
 **No hay `[NEEDS CLARIFICATION]` bloqueante del arranque.** D-6 y D-7 son valores de
@@ -1049,8 +1049,8 @@ correcta de lo irrecortable.
   **Cuttable** si el AR juzga el blast-radius excesivo; si se corta, el residuo va al runbook
   y se declara.
 - **W3.2** `.env.example` + `doc/INTEGRATION.md` + `doc/MULTI-CHAIN.md` — envs nuevas
-  (`A2A_DEPOSIT_SOLANA_OWNER`, `A2A_SOLANA_DEPOSIT_ENABLED`,
-  `A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED`), runbook del depositante (cómo firmar el mensaje,
+  (`A2A_DEPOSIT_OWNER_SOLANA`, `A2A_DEPOSIT_ENABLED_SOLANA`,
+  `A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA`), runbook del depositante (cómo firmar el mensaje,
   a qué ATA transferir, orden migración → env → flag), y **el disparo declarado de
   `TD-SOLANA-CAIP2-DENYLIST`** (§9 D-4).
 - **W3.3** Campaña de mutación 20/20 (§8.4) + cobertura de las líneas de los guards de dinero.

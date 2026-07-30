@@ -291,3 +291,77 @@ ausente en `up` y en `_down`, el flag fuera de la condición de BLQ-BAJO-1, el `
 ausente descalificando de nuevo, el `_down` sin archivar los binds y los backups sin RLS.
 **21/21 KILLED, cada uno con el nombre del test que muere.** Los archivos se restauraron
 verificando `sha256` en cada iteración.
+
+*(Actualizado en la iteración 2: la campaña son ahora **27 mutantes, 27 KILLED**.)*
+
+---
+
+### [2026-07-30 FIX-PACK it2 · BLQ-MED-3] Arreglé la indeterminación del VALOR y dejé abierta la de la PRESENCIA
+
+- **Error**: cerré BLQ-MED-1 (un `amount` ilegible) y di el guard por cerrado. El re-AR
+  reprodujo **el mismo daño exacto** —1001 USDC acreditados por un depósito de 1— por
+  tres puertas que mi fix no tocaba: `preTokenBalances` **ausente** (`?? []` la lee como
+  vacía ⇒ `preOurs = 0`), `postTokenBalances` ausente (⇒ delta NEGATIVO, que salía como
+  `RECIPIENT_MISMATCH`), y —la peor— **una lista presente a la que le falta la FILA de
+  nuestra ATA**, donde ningún campo es ilegible y ninguna lista falta.
+- **Causa raíz**: pensé el problema como "los valores pueden venir mal" y no como "los
+  datos pueden venir INCOMPLETOS". Un `?? []` es una **suposición disfrazada de
+  default**: convierte "no me lo mandaron" en "era cero", que es una medición que nadie
+  hizo. Y la fila faltante ni siquiera es expresable como validación de campo: no hay
+  nada que validar donde no hay nada.
+- **Fix**: tres guards de naturalezas distintas, porque uno solo no cubre a los otros.
+  (1) las dos listas tienen que ser arrays de verdad, si no ⇒ UNKNOWN; (2) `delta < 0n`
+  ⇒ UNKNOWN (una cuenta que recibe no puede perder saldo: si el número es imposible, lo
+  que aprendimos es que los datos están mal, no que la plata fue a otro lado); (3) un
+  **invariante de conservación**: lo acreditado no puede superar la baja total de las
+  cuentas de origen del mismo mint, con `totalSourceDrop` sacado del loop de atribución
+  —que lee entradas DISTINTAS de las que producen el delta—, así que el invariante no se
+  recalcula a sí mismo.
+- **Y por qué no alcanzaba la defensa de respaldo**: el único chequeo que habría atrapado
+  esto es `AMOUNT_MISMATCH`, y `body.amount` es **opcional** en la ruta. Una protección
+  que depende de que el propio caller la pida no es una protección.
+- **Aplicar en**: (a) todo `?? []` / `?? 0` sobre un dato EXTERNO en un camino de dinero
+  es sospechoso por definición — preguntar siempre "¿qué afirmo si esto no vino?";
+  (b) validar campos no cubre datos incompletos: hace falta al menos **una aserción que
+  cruce dos mediciones independientes** de la misma operación; (c) cerrar un bug por su
+  ejemplo (el `amount` ilegible) y no por su CLASE (la indeterminación) deja hermanos
+  vivos. El re-AR encontró tres.
+
+---
+
+### [2026-07-30 FIX-PACK it2 · el needle que envejeció] Un test específico se volvió vacuo sin que nadie lo tocara
+
+- **Error**: el test del lado PRE de BLQ-MED-1 **volvió a sobrevivir** al mutante del
+  regex en la iteración 2, después de haber quedado KILLED en la iteración 1. Nadie tocó
+  el test.
+- **Causa raíz**: su needle era `expect(res.detail).toContain('deposit ATA')`, elegido
+  precisamente para identificar QUE guard habló. El invariante de conservación —nuevo—
+  también dice "deposit ATA" en su detalle, así que el needle pasó a matchear dos
+  guards y el test volvió a afirmar "alguien dijo UNKNOWN" en vez de "lo dijo ESTE".
+  **Un identificador por subcadena no es estable frente a código nuevo**: su unicidad
+  depende de todo lo que todavía no se escribió.
+- **Fix**: dos needles en conjunción (`'deposit ATA'` **y**
+  `'unreadable uiTokenAmount.amount'`), que es lo único que hoy sólo puede decir ese
+  guard, con la razón escrita al lado para que el próximo que agregue un mensaje sepa
+  qué está sosteniendo.
+- **Aplicar en**: **re-correr los mutantes viejos después de agregar guards nuevos**, no
+  sólo los mutantes del cambio. Es la única forma de descubrir que un test dejó de
+  probar lo que probaba, porque su código no cambió y el diff no lo muestra. Acá lo
+  cazó la campaña completa; una campaña "sólo de lo nuevo" lo habría dejado pasar.
+
+---
+
+### [2026-07-30 FIX-PACK it2 · MENOR-1] La cabecera prometía "NUNCA lanza" y había dos accesos sin proteger
+
+- **Error**: `parsed.transaction.message.accountKeys` era el único acceso encadenado sin
+  protección del archivo. Con `transaction` o `message` ausentes tiraba `TypeError`
+  (probado), y como la ruta no envuelve la llamada, salía **500 en vez de 503** y sin el
+  evento durable que AC-6 exige.
+- **Causa raíz**: el módulo se defiende de `owner`, `confirmationStatus`, `pre/post` y
+  `accountKeys[i]` ausentes — o sea que la defensa no fue una política, fue una lista de
+  campos que se me ocurrieron. Y la cabecera declaraba la promesa completa igual.
+- **Fix**: se cerró (no se bajó la promesa): sin `accountKeys` no hay match de dirección
+  ⇒ UNKNOWN. Test con las cuatro formas rotas.
+- **Aplicar en**: cuando una cabecera promete una propiedad TOTAL ("nunca lanza",
+  "siempre devuelve"), esa propiedad necesita un test que la ejerza sobre la forma
+  DEGENERADA del input, no sobre la típica. Si no, la promesa es aspiracional.

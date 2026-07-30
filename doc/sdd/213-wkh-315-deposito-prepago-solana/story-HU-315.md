@@ -380,12 +380,12 @@ La exhaustividad la fuerza el compilador en el `switch` del mapeo de errores de 
 | Qué | Detalle |
 |---|---|
 | **Contrato** | `resolveSolanaDepositOwner(): string \| null` · `resolveSolanaDepositAta(): string \| null` · `isSolanaDepositEnabled(): boolean` |
-| **Owner** | `A2A_DEPOSIT_SOLANA_OWNER`, validado con `isValidSolanaAddress`. Ausente o inválida ⇒ `null`. **PROHIBIDO cualquier fallback** — el fallback silencioso es exactamente cómo `resolveTreasury` se volvió un landmine |
+| **Owner** | `A2A_DEPOSIT_OWNER_SOLANA`, validado con `isValidSolanaAddress`. Ausente o inválida ⇒ `null`. **PROHIBIDO cualquier fallback** — el fallback silencioso es exactamente cómo `resolveTreasury` se volvió un landmine |
 | **ATA** | `getAssociatedTokenAddressSync(new PublicKey(getSolanaUsdcMint()), new PublicKey(owner)).toBase58()` — mismo derivador que `payment.ts:214`, **sin red**. Cualquier throw de `PublicKey` ⇒ `null` (no propagues) |
-| **Flag** | `process.env.A2A_SOLANA_DEPOSIT_ENABLED === 'true'` **Y** `resolveSolanaDepositOwner() !== null`. **PROHIBIDO `Boolean(process.env...)`** (exemplar `parsers.ts:81-83`) |
+| **Flag** | `process.env.A2A_DEPOSIT_ENABLED_SOLANA === 'true'` **Y** `resolveSolanaDepositOwner() !== null`. **PROHIBIDO `Boolean(process.env...)`** (exemplar `parsers.ts:81-83`) |
 | **Prohibiciones** | **CERO** `Keypair`, cero `getSolanaOperatorKeypair`, cero lectura de `SOLANA_ADAPTER_ENABLED` (el AND con el rail es estructural: sin flag no hay bundle) |
 | AC | AC-4, AC-11, AC-12, AC-14 |
-| Tests | `deposit-account.test.ts`: **T-315-13** (estático: los archivos del camino de depósito no mencionan `getSolanaOperatorKeypair` ni `Keypair` en sus imports) · **T-315-19** (`A2A_SOLANA_DEPOSIT_ENABLED='false'`/`'1'`/`'TRUE'`/ausente ⇒ OFF; sólo `'true'` ⇒ ON) · owner inválido ⇒ ATA `null` ⇒ OFF |
+| Tests | `deposit-account.test.ts`: **T-315-13** (estático: los archivos del camino de depósito no mencionan `getSolanaOperatorKeypair` ni `Keypair` en sus imports) · **T-315-19** (`A2A_DEPOSIT_ENABLED_SOLANA='false'`/`'1'`/`'TRUE'`/ausente ⇒ OFF; sólo `'true'` ⇒ ON) · owner inválido ⇒ ATA `null` ⇒ OFF |
 | Mutantes | **M18, M19** |
 
 > **Nota anti-falso-positivo para T-315-13**: `deposit-account.ts` importa `./chain.js` para el mint, y
@@ -411,7 +411,7 @@ La exhaustividad la fuerza el compilador en el `switch` del mapeo de errores de 
 | 3 | Finalidad (§1.3): `confirmationStatus === 'finalized'` | `'processed'`/`'confirmed'` ⇒ `DEPOSIT_NOT_FINALIZED` (400) · **ausente ⇒ `unknown`** (503) |
 | 4 | `getParsedTransaction(signature, { commitment: DEPOSIT_COMMITMENT, maxSupportedTransactionVersion: 0 })` | throw ⇒ `unknown` · `!parsed?.meta` ⇒ **`unknown`** ("el status dice que está pero este nodo no la tiene parseada" ≠ "no coinciden" — lección literal de `payment.ts:625-633`) · `parsed.meta.err` ⇒ `TX_FAILED` |
 | 5 | Términos sobre `pre/postTokenBalances`, **en el orden del EVM** (`deposit-verifier.ts:341-346`) para que los códigos sean distinguibles | ninguna entrada con `mint === getSolanaUsdcMint()` en pre **ni** post ⇒ `MINT_MISMATCH` · hay entradas del mint pero el delta de la ATA esperada **no es `> 0`** ⇒ `RECIPIENT_MISMATCH` |
-| 5b | **Match TRIPLE del destino** (CD-5): `mint === esperado` **Y** `owner === A2A_DEPOSIT_SOLANA_OWNER` **Y** `parsed.transaction.message.accountKeys[accountIndex] === <ATA derivada>` | *Por qué las tres y no `(owner, mint)` como `checkTerms` (`payment.ts:1117-1119`): un `find` por `(owner,mint)` toma la PRIMERA de varias cuentas del mismo owner y puede **sub-medir** el delta; y CD-5 exige comparar contra la ATA* |
+| 5b | **Match TRIPLE del destino** (CD-5): `mint === esperado` **Y** `owner === A2A_DEPOSIT_OWNER_SOLANA` **Y** `parsed.transaction.message.accountKeys[accountIndex] === <ATA derivada>` | *Por qué las tres y no `(owner, mint)` como `checkTerms` (`payment.ts:1117-1119`): un `find` por `(owner,mint)` toma la PRIMERA de varias cuentas del mismo owner y puede **sub-medir** el delta; y CD-5 exige comparar contra la ATA* |
 | 6 | Depositante (§1.8): owner de la entrada del mint con delta **negativo**, leído de `preTokenBalances` | ≠1 owner distinto ⇒ `DEPOSITOR_AMBIGUOUS` |
 | 7 | Monto declarado (opcional), **BigInt vs BigInt**: `parseUnits(expectedAmountUsd, getSolanaUsdcDecimals())` vs `amountAtomic`; throw de `parseUnits` ⇒ `AMOUNT_MISMATCH` | `AMOUNT_MISMATCH`. **PROHIBIDO `usdToAtomicUnits`** |
 | 8 | `{ok:true, amountAtomic, amountUsd: formatUnits(delta, decimals), depositor, ata, mint, signature}` | **El monto acreditado es SIEMPRE el de la cadena** (AC-1) |
@@ -563,8 +563,8 @@ CD-1 **verdes sin editarse**.
 
 | # | Tarea | Detalle | AC / CD | Test |
 |---|---|---|---|---|
-| **W3.1** | `chain.ts` — coherencia cuenta-de-depósito ↔ operador | Ancla: el `log.info({ operator: keypair.publicKey.toBase58() }, …)` **dentro de** `getSolanaOperatorKeypair`, **después** de la carga exitosa. Regla: si `A2A_DEPOSIT_SOLANA_OWNER` está seteada **y** `!== keypair.publicKey.toBase58()` **y** `A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED !== 'true'` ⇒ **throw** fail-loud (mensaje sin secretos). Exemplar de la salida declarada: `schema-preflight.ts:120`. **Trade-off declarado**: un error de config del DEPÓSITO deja de settlear la SALIDA — ruidoso, inmediato y reversible en un minuto, contra un dinero perdido que no lo es. **Cuttable** si el AR juzga el blast-radius excesivo; si se corta, el residuo va al runbook de W3.2 y **se declara** | §4.4 SDD | **T-315-20** (aditivo en `chain.test.ts`): owner == operador ⇒ carga ok · owner ≠ operador sin la declaración ⇒ throw · owner ≠ operador con `..._IS_DEDICATED='true'` ⇒ carga ok · env ausente ⇒ carga ok |
-| **W3.2** | `.env.example` + `doc/INTEGRATION.md` + `doc/MULTI-CHAIN.md` | Envs: `A2A_DEPOSIT_SOLANA_OWNER`, `A2A_SOLANA_DEPOSIT_ENABLED` (default OFF), `A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED`. Runbook del depositante: cómo firmar `WASIAI_BIND_FUNDING_WALLET_SOLANA:<key_id>`, a qué **ATA** transferir, y el orden **migración → env → flag**. Y el **disparo declarado** de `TD-SOLANA-CAIP2-DENYLIST` (`chain-resolver.ts:252-264`: su condición de reactivación se dispara al encender el rail; **esta HU no lo cierra**, lo declara y pide dueño) | AC-11 · D-4 | `test/docs-referenced-by-code-exist.test.ts` sigue verde |
+| **W3.1** | `chain.ts` — coherencia cuenta-de-depósito ↔ operador | Ancla: el `log.info({ operator: keypair.publicKey.toBase58() }, …)` **dentro de** `getSolanaOperatorKeypair`, **después** de la carga exitosa. Regla: si `A2A_DEPOSIT_OWNER_SOLANA` está seteada **y** `!== keypair.publicKey.toBase58()` **y** `A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA !== 'true'` ⇒ **throw** fail-loud (mensaje sin secretos). Exemplar de la salida declarada: `schema-preflight.ts:120`. **Trade-off declarado**: un error de config del DEPÓSITO deja de settlear la SALIDA — ruidoso, inmediato y reversible en un minuto, contra un dinero perdido que no lo es. **Cuttable** si el AR juzga el blast-radius excesivo; si se corta, el residuo va al runbook de W3.2 y **se declara** | §4.4 SDD | **T-315-20** (aditivo en `chain.test.ts`): owner == operador ⇒ carga ok · owner ≠ operador sin la declaración ⇒ throw · owner ≠ operador con `..._IS_DEDICATED='true'` ⇒ carga ok · env ausente ⇒ carga ok |
+| **W3.2** | `.env.example` + `doc/INTEGRATION.md` + `doc/MULTI-CHAIN.md` | Envs: `A2A_DEPOSIT_OWNER_SOLANA`, `A2A_DEPOSIT_ENABLED_SOLANA` (default OFF), `A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA`. Runbook del depositante: cómo firmar `WASIAI_BIND_FUNDING_WALLET_SOLANA:<key_id>`, a qué **ATA** transferir, y el orden **migración → env → flag**. Y el **disparo declarado** de `TD-SOLANA-CAIP2-DENYLIST` (`chain-resolver.ts:252-264`: su condición de reactivación se dispara al encender el rail; **esta HU no lo cierra**, lo declara y pide dueño) | AC-11 · D-4 | `test/docs-referenced-by-code-exist.test.ts` sigue verde |
 | **W3.3** | **Campaña de mutación 20/20** (§4) + **cobertura de las líneas de los guards de dinero** | Serial, va última. "La suite pasa" **no** es la métrica: se mide cobertura de las líneas de los guards | CD-15 | — |
 | **W3.4** | **Aplicar la migración a `bdwv`** | **Founder-gated. `caldz` PROHIBIDA.** Post-estado leído del **catálogo** (`information_schema.columns`, `pg_indexes`, `pg_get_functiondef`), no del exit code | CD-12 | — |
 
@@ -603,7 +603,7 @@ CD-1 **verdes sin editarse**.
 | **M16** | el monto acreditado pasa a ser `body.amount` en vez del de la cadena | `deposit.ts` paso 5 / verificador paso 8 | `T-315-01`, `T-315-02` | W1.2 / W2.4 |
 | **M17** | `verifyEd25519Base58` devuelve `true` ante un error de decode | `lib/ed25519.ts` | `T-315-08d` | W1.3 |
 | **M18** | `resolveSolanaDepositOwner` cae a `resolveTreasury` cuando la env falta | `deposit-account.ts` | `T-315-15` (no compila), `T-315-12` | W0.4 / W1.1 |
-| **M19** | `A2A_SOLANA_DEPOSIT_ENABLED` se compara con `Boolean(process.env...)` | `deposit-account.ts` | `T-315-19` (`'false'` debe seguir OFF), `T-315-12` | W1.1 |
+| **M19** | `A2A_DEPOSIT_ENABLED_SOLANA` se compara con `Boolean(process.env...)` | `deposit-account.ts` | `T-315-19` (`'false'` debe seguir OFF), `T-315-12` | W1.1 |
 | **M20** | el paso 3b (coherencia familia↔formato) se elimina | `deposit.ts` | `T-315-17`: firma base58 con `x-payment-chain: avalanche-fuji` ⇒ 400 `INVALID_INPUT` y **cero red** | W2.4 |
 
 ### 4.1 Cuando un mutante sobrevive — dos causas, no una
@@ -738,7 +738,7 @@ npm run migrate:preflight
 
 ### 7.3 Nota de release (no es código)
 
-**Orden no negociable: la migración va ANTES del código, y `A2A_SOLANA_DEPOSIT_ENABLED` se enciende
+**Orden no negociable: la migración va ANTES del código, y `A2A_DEPOSIT_ENABLED_SOLANA` se enciende
 al final.** Orden correcto ⇒ sin ventana (la columna existe y nadie la usa todavía). Orden inverso ⇒
 el flag OFF por default hace que el camino Solana no exista: degradación **ruidosa y recuperable**, no
 un crédito duplicado. Ése es exactamente el punto de que el gate sea el flag y no la prosa.
@@ -775,7 +775,7 @@ config" (espejo de `RPC_UNAVAILABLE` / `ESCROW_CONTRACT_NOT_CONFIGURED`, `deposi
 | D-1 / D-7 | Bucket del saldo por red vs contabilidad única | El depósito acredita `budget['<sentinel>']`, igual que EVM. La contabilidad única es **otra HU** (toca los tres caminos de débito). **No la empieces.** |
 | D-2 | ¿Mínimo de depósito? | Hoy no existe ninguno. AC-9 **diferido**; el diseño no lo impide. `T-315-10` testea la ausencia |
 | D-4 | ¿Quién cierra `TD-SOLANA-CAIP2-DENYLIST`? | Se **declara** el disparo en W3.2. **No lo cierres acá** |
-| D-6 | ¿ATA del operador o cuenta dedicada? | Recomendada la del operador; si es dedicada, el operador declara `A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED=true`. **El código soporta las dos**: no elijas por él |
+| D-6 | ¿ATA del operador o cuenta dedicada? | Recomendada la del operador; si es dedicada, el operador declara `A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA=true`. **El código soporta las dos**: no elijas por él |
 | MI-3 / D-5 | ¿La demo paga x402 o prepago? | **No se pudo determinar** (requiere `chaski-v3`). Ya no es bloqueante: §7.1 del SDD eliminó la dependencia de orden con WKH-314 |
 
 ---
