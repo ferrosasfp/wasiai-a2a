@@ -505,3 +505,121 @@ describe('WKH-307 · confirmar, reclamar y el peek', () => {
     expect(args.p_probe).toBe(true);
   });
 });
+
+// ══════════════════════════════════════════════════════════════
+// T-LDG-19..21 — "NO PUDE PREGUNTAR" NO ES "LA TABLA NO ESTA"
+//
+// `supabase-js` NO LANZA ante un fallo de red: lo DEVUELVE en `.error`
+// (`postgrest-js/dist/index.mjs`, el `.catch(fetchError => ...)` construye
+// `{ error: { message: 'TypeError: fetch failed', code: '' }, status: 0 }`).
+//
+// ⚠️ POR ESO ESTOS TESTS NO USAN `mockRejectedValue`. Un rechazo entra por el
+// `catch` del `try`, que YA devolvia `failed` — o sea que un test con
+// `mockRejectedValue` pasa con y sin el arreglo, y no prueba nada. La rama
+// arreglada es la del OBJETO devuelto.
+//
+// Reproducido en vivo: el preflight fallaba con
+// `table_missing — TypeError: fetch failed`. El veredicto y el detalle se
+// contradecian en la misma linea, y el operador recibia "aplica la migracion"
+// (que ya estaba aplicada) en vez de "mira la DB" (que estaba inalcanzable).
+// Encima `table_missing` no se reintenta solo y `probe_failed` si
+// (`schema-preflight.ts:72-79`).
+// ══════════════════════════════════════════════════════════════
+
+/** Forma EXACTA que `postgrest-js` devuelve ante un fallo de transporte. */
+function transportFailureResponse() {
+  return {
+    data: null,
+    count: null,
+    status: 0,
+    statusText: '',
+    error: {
+      message: 'TypeError: fetch failed',
+      details:
+        'TypeError: fetch failed\n\nCaused by: Error: getaddrinfo ENOTFOUND',
+      hint: '',
+      code: '',
+    },
+  };
+}
+
+describe('WKH-307 · el probe distingue "no pude preguntar" de "no esta"', () => {
+  it('T-LDG-19: un fallo de RED DEVUELTO en .error (no lanzado) es `failed`, NUNCA `table_missing`', async () => {
+    limitMock.mockResolvedValueOnce(transportFailureResponse() as never);
+
+    const result = await probeSettleLedger();
+
+    expect(result.probe).toBe('failed');
+    // Y el detalle no puede afirmar nada sobre el esquema.
+    expect(result).not.toEqual({
+      probe: 'table_missing',
+      detail: 'TypeError: fetch failed',
+    });
+    // Ademas NO se ejercita el rpc: sin la tabla comprobada no hay nada que decidir.
+    expect(rpcCalls).toHaveLength(0);
+  });
+
+  it('T-LDG-20: NO-REGRESION — PGRST205 (la relacion NO existe, codigo verificado en vivo) sigue siendo `table_missing`', async () => {
+    limitMock.mockResolvedValueOnce({
+      data: null,
+      count: null,
+      status: 404,
+      statusText: 'Not Found',
+      error: {
+        code: 'PGRST205',
+        message:
+          "Could not find the table 'public.a2a_solana_settle_intents' in the schema cache",
+        details: null,
+        hint: null,
+      },
+    } as never);
+
+    const result = await probeSettleLedger();
+
+    expect(result.probe).toBe('table_missing');
+  });
+
+  it('T-LDG-20b: NO-REGRESION — 42P01 y el texto crudo de Postgres tambien son `table_missing`', async () => {
+    limitMock.mockResolvedValueOnce({
+      data: null,
+      status: 400,
+      error: { code: '42P01', message: 'undefined_table', details: null },
+    } as never);
+    expect((await probeSettleLedger()).probe).toBe('table_missing');
+
+    // Sin `code` (proxy que no lo propaga): el texto sigue siendo evidencia.
+    limitMock.mockResolvedValueOnce({
+      data: null,
+      status: 400,
+      error: {
+        message: 'relation "public.a2a_solana_settle_intents" does not exist',
+      },
+    } as never);
+    expect((await probeSettleLedger()).probe).toBe('table_missing');
+  });
+
+  it('T-LDG-21: un fallo de RED en el rpc del probe es `failed`, NUNCA `rpc_missing` (segundo sitio del mismo bug)', async () => {
+    limitMock.mockResolvedValueOnce({ data: [], error: null } as never);
+    rpcQueue.push(transportFailureResponse());
+
+    const result = await probeSettleLedger();
+
+    // `rpc_missing` diria "re-aplica la migracion, la funcion es la vieja": una
+    // afirmacion sobre el esquema que una respuesta que nunca llego no autoriza.
+    expect(result.probe).toBe('failed');
+  });
+
+  it('T-LDG-21b: un error del SERVIDOR sobre el rpc (PGRST202) sigue siendo `rpc_missing`', async () => {
+    limitMock.mockResolvedValueOnce({ data: [], error: null } as never);
+    rpcQueue.push({
+      data: null,
+      status: 404,
+      error: {
+        code: 'PGRST202',
+        message:
+          'Could not find the function public.claim_solana_settle_intent',
+      },
+    });
+    expect((await probeSettleLedger()).probe).toBe('rpc_missing');
+  });
+});

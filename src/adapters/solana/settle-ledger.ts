@@ -65,6 +65,69 @@ export const PROBE_OK_MARKER = 'WKH307_PROBE_OK';
 const PG_UNIQUE_VIOLATION = '23505';
 
 /**
+ * PostgREST: "la tabla no esta en el schema cache". VERIFICADO EN VIVO contra bdwv
+ * (no asumido): una consulta a una relacion inexistente devuelve
+ * `{ code: 'PGRST205', message: "Could not find the table 'public.<x>' in the schema
+ * cache", details: null, hint: null }`.
+ */
+const PGRST_TABLE_NOT_IN_SCHEMA_CACHE = 'PGRST205';
+
+/**
+ * Postgres crudo: `undefined_table`. PostgREST normaliza a PGRST205 cuando la relacion
+ * no esta en su cache, pero un 42P01 puede llegar igual desde el cuerpo de una funcion
+ * (una `plpgsql` que referencia una tabla que no existe). Se acepta como la MISMA
+ * evidencia de esquema.
+ */
+const PG_UNDEFINED_TABLE = '42P01';
+
+/**
+ * ¿Este error es EVIDENCIA POSITIVA de que la relacion no existe?
+ *
+ * La pregunta se hace en positivo A PROPOSITO. Antes el codigo trataba
+ * `if (table.error)` como "la tabla no esta", y `supabase-js` **no lanza** ante un
+ * fallo de red: lo DEVUELVE en `.error` (verificado en la fuente de `postgrest-js`,
+ * `dist/index.mjs`: el `.catch(fetchError => ...)` devuelve
+ * `{ error: { message: 'TypeError: fetch failed', code: '' }, status: 0 }`). O sea que
+ * una DB caida salia clasificada como "falta la migracion" — y el operador recibia la
+ * instruccion de aplicar una migracion que ya estaba aplicada, mientras el motivo real
+ * (`probe_failed`, el unico que se reintenta solo) quedaba sin usar.
+ *
+ * Todo lo que no sea evidencia de esquema cae en "no pude preguntar". Esa es la
+ * direccion barata del error: `probe_failed` manda a mirar la DB y reintenta;
+ * `table_missing` manda a tocar migraciones y no reintenta.
+ */
+function isRelationMissingError(err: {
+  code?: string | null;
+  message?: string | null;
+}): boolean {
+  const code = err.code ?? '';
+  if (code === PGRST_TABLE_NOT_IN_SCHEMA_CACHE || code === PG_UNDEFINED_TABLE) {
+    return true;
+  }
+  // Fallback por mensaje: un proxy o una version de PostgREST que no propague el
+  // `code` sigue diciendo lo mismo en el texto. "fetch failed" no matchea ninguno de
+  // los dos, asi que un fallo de transporte NO se cuela por aca.
+  const msg = (err.message ?? '').toLowerCase();
+  if (msg.includes('could not find the table')) return true;
+  return msg.includes('relation') && msg.includes('does not exist');
+}
+
+/**
+ * ¿La respuesta viene de un FALLO DE TRANSPORTE (nunca hubo respuesta del servidor)?
+ *
+ * `postgrest-js` marca ese caso con `status: 0` + `code: ''` (misma fuente que arriba;
+ * tambien cubre `AbortError` / timeout). Un error que SI viene del servidor trae el
+ * `code` del cuerpo PostgREST y un status HTTP real.
+ */
+function isTransportFailure(res: {
+  status?: number;
+  error?: { code?: string | null } | null;
+}): boolean {
+  if (!res.error) return false;
+  return (res.error.code ?? '') === '' && res.status === 0;
+}
+
+/**
  * Lease del reclamo, en ms. Cuanto puede estar una fila en `claimed` antes de que
  * otro proceso pueda tomarla.
  *
@@ -541,7 +604,17 @@ export async function probeSettleLedger(): Promise<LedgerProbeResult> {
       .select('intent_id')
       .limit(1);
     if (table.error) {
-      return { probe: 'table_missing', detail: table.error.message };
+      // Solo la EVIDENCIA POSITIVA de que la relacion no existe se llama
+      // `table_missing`. Red, timeout, auth o DNS son "no pude preguntar" ⟹ `failed`
+      // (⟹ `probe_failed` en el preflight), que es el motivo que manda a mirar la DB y
+      // el unico que se reintenta solo.
+      if (isRelationMissingError(table.error)) {
+        return { probe: 'table_missing', detail: table.error.message };
+      }
+      return {
+        probe: 'failed',
+        detail: `could not determine whether the settle ledger table exists (code=${table.error.code || 'none'}, status=${String(table.status)}): ${table.error.message}`,
+      };
     }
   } catch (err) {
     return { probe: 'failed', detail: errText(err) };
@@ -559,6 +632,16 @@ export async function probeSettleLedger(): Promise<LedgerProbeResult> {
     });
     const message = rpc.error?.message ?? '';
     if (message.includes(PROBE_OK_MARKER)) return { probe: 'ok' };
+    // MISMO BUG, SEGUNDO SITIO DE ESTA FUNCION: un fallo de transporte no lanza, y sin
+    // este chequeo su mensaje ("TypeError: fetch failed") caia en el `rpc_missing` de
+    // abajo — o sea "re-aplica la migracion, quedo una version vieja de la funcion",
+    // que es una afirmacion sobre el esquema que la respuesta no permite hacer.
+    if (isTransportFailure(rpc)) {
+      return {
+        probe: 'failed',
+        detail: `could not reach the database to exercise the claim rpc (status=${String(rpc.status)}): ${message}`,
+      };
+    }
     if (message.length === 0) {
       // Sin error: o el `p_probe` no existe (funcion vieja) o la funcion escribio.
       // No se puede afirmar que el esquema sea el nuevo ⟹ fail-closed.

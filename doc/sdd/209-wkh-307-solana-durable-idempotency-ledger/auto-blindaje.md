@@ -338,3 +338,97 @@ redirigiendo a un archivo.
   `gate-rehydration-test.sql`, con los dos casos y sus hallazgos posibles.
 - **El e2e manual de devnet (W4.3) no se corrió**: requiere red, fondos y
   `SOLANA_DEVNET_E2E=1`. Es opcional en el Story File.
+
+---
+
+## Post-mortem WKH-307c — el e2e manual era incorrible, y el probe mentía el motivo
+
+### [2026-07-29 20:15] Wave 0 — `table_missing` para un fallo de red: el séptimo sitio del bug sistémico
+- **Error**: `probeSettleLedger()` clasificaba CUALQUIER `.error` de la consulta a la tabla
+  como `table_missing` (`settle-ledger.ts:543-545`, antes del arreglo). Reproducido en vivo:
+  el veredicto salió `table_missing — TypeError: fetch failed`, o sea el veredicto y el
+  detalle contradiciéndose en la misma línea.
+- **Causa raíz**: `supabase-js` **no lanza** ante un fallo de transporte: lo DEVUELVE en
+  `.error`. Verificado en la fuente (`@supabase/postgrest-js/dist/index.mjs`, el
+  `.catch(fetchError => ...)` construye `{ error: { message: 'TypeError: fetch failed',
+  code: '', details, hint }, data: null, status: 0 }`). El `catch` del `try` —que existía
+  justamente para decir "no pude preguntar"— estaba MUERTO para el modo de fallo más
+  común. Costo real: `table_missing` manda a aplicar una migración ya aplicada y **no se
+  reintenta solo**; `probe_failed` manda a mirar la DB y **sí** se reintenta
+  (`schema-preflight.ts:72-79`).
+- **Fix**: la pregunta se hace EN POSITIVO. `isRelationMissingError()` exige evidencia de
+  esquema (`PGRST205` — código VERIFICADO en vivo contra bdwv, no asumido — o `42P01`, o el
+  texto "could not find the table" / "relation ... does not exist"); todo lo demás es
+  `probe: 'failed'`. No se inventó ningún valor nuevo: `probe_failed` ya existía en
+  `SolanaSchemaFailure`.
+- **Aplicar en**: TODO `if (res.error) return <veredicto definitivo>` sobre un cliente que
+  devuelve los fallos de red en banda. La regla: un veredicto que afirma algo del mundo
+  ("la tabla no existe", "la función es vieja") necesita evidencia POSITIVA; la ausencia de
+  evidencia se llama "no pude preguntar".
+
+### [2026-07-29 20:20] Wave 0 — el MISMO bug, 20 líneas más abajo
+- **Error**: la rama del rpc del probe tenía la forma idéntica: cualquier mensaje de error
+  que no fuera la marca `WKH307_PROBE_OK` salía como `rpc_missing` ("re-aplicá la
+  migración, quedó una versión vieja de la función"). Un `TypeError: fetch failed` caía ahí.
+- **Causa raíz**: buscar el bug "en su sitio" en vez de buscar su FORMA en todo el archivo.
+  Los dos sitios estaban en la misma función.
+- **Fix**: `isTransportFailure(res)` (`code === '' && status === 0`, la firma exacta que
+  `postgrest-js` le pone a un fallo sin respuesta del servidor) antes de afirmar nada sobre
+  el esquema. Los otros 5 sitios del archivo (`claimSettleIntent`, `recordSignedIntent`,
+  `recordConfirmedIntent`, `reclaimExpiredIntent`, `readSettleIntent`) se revisaron uno por
+  uno: **no tienen el bug**, porque su veredicto ante `.error` ya es `store_unavailable` /
+  `unknown`, que ES "no sé". El único que discrimina por código (`23505` ⟹
+  `signature_collision`) usa evidencia positiva, así que un fallo de red (`code: ''`) no
+  puede colarse.
+- **Aplicar en**: cuando encuentres un bug de clasificación, grepeá su FORMA
+  (`if (x.error) return`) en todo el archivo antes de dar el arreglo por terminado.
+
+### [2026-07-29 20:28] Wave 1 — un e2e imposible de correr no es un e2e
+- **Error**: `devnet-e2e.manual.test.ts` era INCORRIBLE desde esta HU. `settle()` arranca
+  con el preflight del ledger, y `vitest.config.ts:17-20` fija
+  `env: { SUPABASE_URL: 'http://localhost:54321', ... }`. La `env` de la config de vitest
+  **gana sobre `process.env`**, así que exportar las credenciales de bdwv NO servía de nada
+  (cuatro intentos perdidos ahí).
+- **Causa raíz**: el runbook del header documentaba SOL, USDC, ATAs y formato de clave —
+  todo lo que el test necesitaba ANTES de WKH-307. Cuando la HU agregó una precondición
+  nueva (una base alcanzable), el runbook no se actualizó. Una precondición que existe en el
+  código y no en el runbook se descubre a mano, corriendo.
+- **Fix**: `vitest.e2e.config.ts` (config aparte que NO declara `env`, e incluye SOLO ese
+  archivo) + runbook reescrito con la base, el comando y la trampa de la `env`. El bloque
+  `env` del config principal **NO se tocó**: es lo que impide que los ~4300 unit tests
+  escriban en una base real.
+- **Aplicar en**: cuando una HU agrega una precondición de ENTORNO a un camino existente,
+  el runbook de ese camino es parte del Scope IN. Y un test que nadie puede correr envejece
+  igual que un gate que nadie corre.
+
+### [2026-07-29 20:29] Wave 1 — dos errores propios de esta sesión, registrados
+- **Error 1**: escribí `SOLANA_SETTLE_LEDGER_SCHEMA_UNAVAILABLE` en el runbook. El string
+  real es `SETTLE_LEDGER_SCHEMA_UNAVAILABLE` (`payment.ts:296`), sin el prefijo. **Causa**:
+  lo escribí de memoria en vez de grepearlo. **Fix**: verificado con grep y corregido. Un
+  código de error inventado en un runbook manda a buscar en los logs algo que no existe.
+- **Error 2**: recomendé `set -a; . ./.env; set +a` para cargar credenciales. **No funciona
+  en este repo**: aborta con `./.env: line 38: ...: command not found` porque hay valores
+  con caracteres que bash interpreta. **Fix**: el runbook usa
+  `node --env-file=.env ./node_modules/vitest/vitest.mjs run --config ...`, que parsea
+  dotenv sin pasar por el shell. **Aplicar en**: cualquier instrucción de runbook que
+  sourcee un `.env` con secretos base64 o con metacaracteres de shell en los valores.
+
+### [2026-07-29 20:31] Decisión registrada — `passWithNoTests` en el config del e2e
+- Se dejó en **`false`**, igual que el config principal. Los dos caminos se MIDIERON, no se
+  supusieron:
+  · sin `SOLANA_DEVNET_E2E=1` el `describe.runIf(E2E)` se degrada a `describe.skip`, el
+    archivo SÍ colecta y la salida es `1 skipped` con exit 0 — `passWithNoTests` no
+    participa de ese camino;
+  · con el glob roto (probado con un filtro que no matchea) la salida es
+    `No test files found, exiting with code 1`.
+- O sea que el único caso donde el flag decide es el del glob roto, y ahí queremos ruido.
+  Con `true` ese caso saldría 0 y se leería igual que un e2e exitoso: el peor resultado
+  posible para un comando cuyo propósito es mover dinero real. El caso "está apagado" ya se
+  distingue solo porque dice `skipped`, no `passed`, y el runbook lo declara.
+
+### [2026-07-29 20:29] Actualización factual de "Residuos declarados"
+- El residuo de arriba dice **"La migración NO se aplicó a ninguna base"**. Eso **ya no es
+  cierto para bdwv**: medido en esta sesión, `probeSettleLedger()` contra bdwv devuelve
+  `{ probe: 'ok' }` (861 ms, red real), o sea que la tabla resuelve **y** el rpc levanta
+  `WKH307_PROBE_OK`. El probe usa `p_probe := true` y no escribió ninguna fila. Sobre
+  `caldz` **no pude determinarlo** y no se consultó: sigue siendo WKH-307b.
