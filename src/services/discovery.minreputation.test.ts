@@ -50,9 +50,29 @@ vi.mock('./agent.js', () => ({
 }));
 
 const mockComputeBatch = vi.fn();
+// WKH-313: `attachReputations` pasó a consumir `computeStandingBatch` (necesita el
+// tercer valor `degraded`, ver CD-7). El doble se DERIVA del mismo
+// `mockComputeBatch` que ya usaban estos tests, así que los escenarios de abajo —
+// incluido T-8, que es la no-regresión del fail-safe — no cambian ni una línea.
 vi.mock('./reputation.js', () => ({
   reputationService: {
     computeReputationBatch: (slugs: string[]) => mockComputeBatch(slugs),
+    computeStandingBatch: async (slugs: string[]) => {
+      const repMap = (await mockComputeBatch(slugs)) as Map<
+        string,
+        AgentReputation
+      >;
+      const standings = new Map();
+      for (const [slug, reputation] of repMap) {
+        standings.set(slug, {
+          tasksSettled: reputation.tasks_settled,
+          successCount: reputation.tasks_settled,
+          failedCount: 0,
+          reputation,
+        });
+      }
+      return { degraded: false, standings };
+    },
     computeReputationForAgent: vi.fn(),
   },
 }));

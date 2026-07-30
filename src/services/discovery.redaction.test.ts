@@ -43,6 +43,11 @@ vi.mock('./identity.js', () => ({
 vi.mock('./reputation.js', () => ({
   reputationService: {
     computeReputationBatch: vi.fn().mockResolvedValue(new Map()),
+    // WKH-313: el consumidor real de `attachReputations`. Sin standings y SIN
+    // degradación: nadie tiene historial, la lectura funcionó.
+    computeStandingBatch: vi
+      .fn()
+      .mockResolvedValue({ degraded: false, standings: new Map() }),
     computeReputationForAgent: vi.fn().mockResolvedValue(null),
   },
 }));

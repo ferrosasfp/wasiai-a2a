@@ -66,7 +66,7 @@ export type CapabilityResolutionFailure = {
    * agente" cuando en realidad hay uno que su credencial no alcanza busca el
    * problema en el catálogo, que es el lugar equivocado.
    */
-  reason: 'no_candidates' | 'excluded_by_scope';
+  reason: 'no_candidates' | 'excluded_by_scope' | 'excluded_by_reputation';
   message: string;
 };
 
@@ -100,6 +100,13 @@ export async function resolveCapability(
   if (constraints?.min_reputation !== undefined) {
     query.minReputation = constraints.min_reputation;
   }
+  // WKH-313 (DT-7): el opt-in al carril de estreno viaja del step al pipeline. Sin
+  // este mapeo el caller manda `allow_trial: true`, pasa la validación de forma y
+  // NO PASA NADA — un filtro que el que pide cree haber relajado y no relajó, que es
+  // la misma clase de bug (con el signo invertido) que este archivo ya nombra.
+  if (constraints?.allow_trial !== undefined) {
+    query.allowTrial = constraints.allow_trial;
+  }
   if (scope) {
     query.scope = scope;
   }
@@ -124,6 +131,28 @@ export async function resolveCapability(
       failure: {
         reason: 'excluded_by_scope',
         message: `No agent fulfilling capability '${capability}' is within this key's scope`,
+      },
+    };
+  }
+
+  // WKH-313 (DT-10): el conjunto vaciado POR EL PISO tiene su propio motivo. Hasta
+  // acá volvía como `no_candidates`, o sea INDISTINGUIBLE de "esa capacidad no
+  // existe" — y ese diagnóstico costó tres semanas de confusión en Chaski, donde el
+  // agente existía y lo excluía un piso de 2 que él no podía alcanzar por no haber
+  // trabajado nunca. Se evalúa DESPUÉS del alcance: si la credencial ni siquiera
+  // alcanza al agente, ese es el problema de más arriba y gana.
+  const excludedByReputation = result.excluded?.reputation ?? 0;
+  if (excludedByReputation > 0) {
+    const trialAvailable = result.excluded?.trialAvailable ?? 0;
+    return {
+      ok: false,
+      failure: {
+        reason: 'excluded_by_reputation',
+        message:
+          `No agent fulfilling capability '${capability}' meets the requested min_reputation` +
+          (trialAvailable > 0
+            ? `; ${trialAvailable} candidate(s) have no settled history yet and would be admitted with 'allow_trial'`
+            : ''),
       },
     };
   }
@@ -162,6 +191,11 @@ export function createCapabilityResolver(scope: A2AAgentKeyRow | undefined): {
       const key = `${capability}::${JSON.stringify({
         p: constraints?.max_price_usdc ?? null,
         r: constraints?.min_reputation ?? null,
+        // WKH-313 (R-4): `allow_trial` ENTRA a la clave porque cambia el conjunto de
+        // candidatos. Sin él, dos steps de la misma capability con opt-in distinto
+        // comparten la resolución memoizada, y el que NO optó recibiría un agente en
+        // estreno que nunca aceptó — sobre el camino del dinero.
+        t: constraints?.allow_trial ?? null,
       })}`;
       let pending = memo.get(key);
       if (!pending) {

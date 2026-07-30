@@ -110,3 +110,43 @@ export function parseLimit(raw: unknown): number | undefined {
   if (!Number.isSafeInteger(n) || n < 1) throw new InvalidLimitError(raw);
   return n;
 }
+
+/**
+ * WKH-313 — `allowTrial` inválido. La ruta la mapea a 400 `INVALID_ALLOW_TRIAL`.
+ *
+ * Razón de ser, y es la misma clase de bug que `minReputation`: `allowTrial` es
+ * el OPT-IN a admitir un agente sin historial bajo el piso del caller. Con un
+ * `Boolean(raw)`, `?allowTrial=false` (string no vacío) y `?allowTrial=maybe`
+ * serían `true` — o sea que un caller que escribió mal el parámetro, o que quiso
+ * apagarlo explícitamente, terminaría ACEPTANDO un candidato en estreno sobre el
+ * camino del dinero sin haberlo pedido. Un flag de riesgo no se adivina.
+ */
+export class InvalidAllowTrialError extends Error {
+  readonly code = 'INVALID_ALLOW_TRIAL' as const;
+  constructor(readonly received: unknown) {
+    super(
+      "allowTrial must be a boolean ('true' or 'false'); it opts IN to admitting agents with no settled history below your minReputation floor",
+    );
+    this.name = 'InvalidAllowTrialError';
+  }
+}
+
+/**
+ * Normaliza y VALIDA el `allowTrial` entrante (string del query string o boolean
+ * del body JSON).
+ *
+ *   ausente / `null` / `''`     → `undefined` (no opta: comportamiento de hoy)
+ *   `true`  / `'true'`          → `true`
+ *   `false` / `'false'`         → `undefined` (idem: no opta)
+ *   cualquier otra cosa         → `InvalidAllowTrialError`
+ *
+ * `false` colapsa a `undefined` a propósito: los dos significan exactamente lo
+ * mismo (no admitir), y el service tiene UN solo camino por defecto en vez de
+ * dos que hay que mantener idénticos.
+ */
+export function parseAllowTrial(raw: unknown): boolean | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (raw === true || raw === 'true') return true;
+  if (raw === false || raw === 'false') return undefined;
+  throw new InvalidAllowTrialError(raw);
+}

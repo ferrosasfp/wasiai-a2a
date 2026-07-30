@@ -440,6 +440,62 @@ export const publishedAgentService = {
   },
 
   /**
+   * WKH-313 (CD-7/CD-10/CD-12) — ANCLA DE PUBLICACIÓN de los candidatos al carril
+   * de estreno: `owner_ref` (para contar el cupo `M` por publicador) y
+   * `created_at` (para elegir, de forma determinista, a los `M` más antiguos).
+   *
+   * UN solo SELECT con `.in('slug', slugs)` (anti-N+1, patrón de
+   * `computeStandingBatch`). Corre SÓLO cuando el caller optó al carril: en el
+   * camino por defecto no hay ni una query nueva (CD-9).
+   *
+   * ⚠️ EL RESULTADO ES DISCRIMINADO, Y ES DELIBERADO. Devolver un `Map` vacío ante
+   * un error haría que "este agente no tiene ancla" y "no pude leer las anclas"
+   * fueran lo mismo, y el cupo anti-sybil se apagaría solo justo cuando la DB está
+   * en problemas: el llamador leería "sin ancla" y admitiría igual. Con
+   * `{ degraded: true }` no se admite a NADIE (fail-closed). Es el mismo defecto de
+   * clase que `degraded` corrige en el standing, en otro sitio.
+   *
+   * NUNCA lanza. `owner_ref` NO se surfacea en ninguna respuesta (CD-10): se usa
+   * para CONTAR, no para publicar.
+   */
+  async listPublisherAnchors(slugs: string[]): Promise<
+    | { degraded: true }
+    | {
+        degraded: false;
+        anchors: Map<string, { ownerRef: string; createdAt: string }>;
+      }
+  > {
+    if (slugs.length === 0) return { degraded: false, anchors: new Map() };
+
+    const { data, error } = await supabase
+      .from('a2a_agents')
+      .select('slug, owner_ref, created_at')
+      .in('slug', slugs)
+      .eq('enabled', true);
+
+    if (error) {
+      // El `error.message` se DESCARTA acá (CD-18: nunca al caller) y la
+      // degradación viaja como dato. Loguea el consumidor (`discovery.ts`), que es
+      // el que además decide qué hacer con ella: este service no tiene logger y
+      // agregárselo sólo para esto acoplaría el módulo sin ganar nada.
+      return { degraded: true };
+    }
+
+    const anchors = new Map<string, { ownerRef: string; createdAt: string }>();
+    for (const rowData of (data ?? []) as Array<{
+      slug: string;
+      owner_ref: string;
+      created_at: string;
+    }>) {
+      anchors.set(rowData.slug, {
+        ownerRef: rowData.owner_ref,
+        createdAt: rowData.created_at,
+      });
+    }
+    return { degraded: false, anchors };
+  },
+
+  /**
    * Resolve a single self-published agent by slug as `Agent` (discovery
    * local-first). Retorna null si no existe o está deshabilitado.
    */

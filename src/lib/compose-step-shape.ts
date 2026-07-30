@@ -153,7 +153,15 @@ export function validateComposeStepShape(
     // haber fijado el rail y el servidor elegiría por su cuenta — la misma clase
     // de bug que el `NaN`: un filtro que el que pide cree tener y no tiene.
     // Decirle que no se soporta es honesto; ignorarlo, no.
-    const allowed = new Set(['max_price_usdc', 'min_reputation']);
+    const allowed = new Set([
+      'max_price_usdc',
+      'min_reputation',
+      // WKH-313 (DT-7): sin esta entrada, un caller que manda `allow_trial`
+      // recibe 400 `unsupported constraint` — o sea que el opt-in al carril de
+      // estreno sería inalcanzable desde /compose y el leg de payout de Chaski
+      // seguiría sin resolver.
+      'allow_trial',
+    ]);
     const unknownKey = Object.keys(c).find((k) => !allowed.has(k));
     if (unknownKey !== undefined) {
       return {
@@ -174,6 +182,18 @@ export function validateComposeStepShape(
       stepIndex,
     );
     if (repErr) return repErr;
+    // WKH-313: `allow_trial` es BOOLEANO, así que `validateNumericConstraint` no
+    // sirve acá (aceptaría `0`/`1` y rechazaría `true`). Se valida aparte y se
+    // RECHAZA lo no booleano en vez de coercionarlo: un `'false'` o un `'maybe'`
+    // tratados como truthy harían que el caller acepte, sin saberlo, un agente sin
+    // historial sobre el camino del dinero.
+    if (c.allow_trial !== undefined && typeof c.allow_trial !== 'boolean') {
+      return {
+        error: `Step ${stepIndex}: 'allow_trial' must be a boolean`,
+        code: 'VALIDATION_ERROR',
+        step: stepIndex,
+      };
+    }
   }
 
   // WKH-305: forma de `inputFromPrevious`. Las reglas viven UNA sola vez, en

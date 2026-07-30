@@ -17,18 +17,31 @@ import { parsePriceSafe } from '../lib/price.js';
 // que los tests no dependan de `Math.random`).
 import { assignTiebreaks, compareTiebreak } from '../lib/ranking-tiebreak.js';
 import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
+// WKH-313: la POLÍTICA del carril de estreno (N/T/M + el único predicado) vive en
+// un módulo LEAF por el mismo motivo que `discovery-query.ts`.
+import {
+  isTrialEligible,
+  resolveTrialMaxSettledTasks,
+  selectTrialAdmitted,
+  standingFor,
+  type TrialCandidate,
+} from '../lib/trial-standing.js';
 import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
 import type {
   Agent,
+  AgentStandingBatch,
   AgentStatus,
   DiscoveryQuery,
   DiscoveryResult,
   RegistryConfig,
 } from '../types/index.js';
-import { SELF_PUBLISHED_REGISTRY_NAME } from '../types/index.js';
+import {
+  SELF_PUBLISHED_REGISTRY_ID,
+  SELF_PUBLISHED_REGISTRY_NAME,
+} from '../types/index.js';
 import { publishedAgentService } from './agent.js';
 // HU-208: `authz.ts` es una hoja pura (sólo `import type`), así que no hay ciclo.
 import { authzService } from './authz.js';
@@ -371,7 +384,7 @@ export const discoveryService = {
     // página y no los matches — y era justamente la ausencia de este número la
     // que convirtió un diagnóstico de Chaski en tres semanas de confusión.
     let excludedByReputation = 0;
-    const trialAvailable = 0;
+    let trialAvailable = 0;
 
     if (query.scope) {
       // HU-208 (port de WAS-187 AC-7): un agente que la credencial del llamador
@@ -406,7 +419,11 @@ export const discoveryService = {
     // WKH-103 (DT-8/OBS-2): score batch pre-sort, 1 query (CD-12). Sin RPC
     // on-chain (CD-13). Corre sobre allAgents (pre-limit) para que la página
     // sea el top-N por reputación real.
-    await this.attachReputations(allAgents);
+    // WKH-313 (DT-6/CD-10): el batch de standing se guarda en una LOCAL. El
+    // standing NO es campo público de `Agent`: publicar `penalized` sería una letra
+    // escarlata sin contrato, y el ancla de publicación no sale nunca (CD-10). Lo
+    // único que se surfacea del carril es el badge `trial` del ADMITIDO.
+    const standingBatch = await this.attachReputations(allAgents);
 
     // ── Fix-pack P1 (hallazgo 2): `minReputation` filtra DE VERDAD ──────
     // Corre acá: después de `attachReputations` (necesita el score) y ANTES del
@@ -426,14 +443,85 @@ export const discoveryService = {
     // FAIL-SAFE: sin score computado (0 tasks liquidadas, o batch degradado a
     // Map vacío) el agente cuenta 0 → queda EXCLUIDO si `minReputation > 0`. Un
     // agente sin historial no se cuela por un filtro de calidad.
+    //
+    // ── ⚠️ ASIMETRÍA REAL DE ESTE BLOQUE, para el próximo lector (WKH-313) ────
+    // El párrafo de arriba se lee fácil como "una perilla más estricta que otra".
+    // No es eso. `agent.reputation` NO entra al filtro porque lo declara sobre sí
+    // misma la parte filtrada. Y ojo: `verified` tiene EXACTAMENTE el mismo
+    // problema — sale del card que AUTO-REPORTA el registry (ver `mapAgent`, más
+    // abajo en este archivo) y está hardcodeado `false` para todo self-published
+    // (`services/agent.ts`, `verified: false`), o sea que ningún agente
+    // self-published puede alcanzarlo, y encima es la PRIMERA clave del sort. El
+    // único ancla de identidad NO forjable y alcanzable solo es `Agent.identity`
+    // (ERC-8004, verificado on-chain al bindear, lo asigna `attachIdentities`), que
+    // es OTRO campo. Por eso WKH-313 NO usa `verified` para nada: exigirlo como
+    // requisito del carril de estreno rompería los tres legs del flujo insignia sin
+    // arreglar ninguno. Sería teatro.
+    //
+    // ── WKH-313: el CARRIL DE ESTRENO, dentro de este mismo bloque ────────────
+    // Va acá adentro y NO como post-filtro (CD-11): el filtro se queda PRE-SORT y
+    // PRE-`slice` por el motivo largo que explica el comentario del scope, arriba.
+    // El predicado gana una SEGUNDA RAMA, con la de mérito PRIMERO e intacta:
+    //
+    //     admitido = (scoreReal >= min) || trialAdmitted.has(slug)
+    //
+    // El admitido NO recibe score fabricado (nada de `score: min`, nada de
+    // reasignar `computedReputation`): conserva su puntaje real, así que `repValue`
+    // le da 0 y ordena ÚLTIMO. Sólo puede ser elegido cuando NINGÚN agente pasa por
+    // mérito. Eso es lo que hace que el carril no sea un atajo, y es lo que
+    // mantiene el ranking de los que ya tienen historial byte-idéntico (CD-6).
     if (query.minReputation != null) {
       const min = query.minReputation;
+
+      // (i) Elegibles: EL ÚNICO predicado (CD-8), el mismo que después usan el
+      // contador y el badge. `standingFor` resuelve la distinción
+      // ausente-vs-degradado; con `degraded: true` esto da SIEMPRE vacío y no se
+      // admite a nadie (AC-9, fail-closed).
+      const eligible = allAgents.filter((a) =>
+        isTrialEligible(standingFor(a.slug, standingBatch), min),
+      );
+
+      // (ii) Cupo M por publicador — SÓLO con opt-in del caller. Sin `allowTrial`
+      // no se lee ni una fila más (CD-9: el camino por defecto no cambia en nada,
+      // incluido el costo de I/O).
+      let trialAdmitted: Set<string> = new Set();
+      if (eligible.length > 0 && query.allowTrial === true) {
+        trialAdmitted = await this.selectTrialCandidates(eligible, min);
+      }
+
+      // `trialAvailable` es EXACTO con opt-in (coincide con la cantidad de badges)
+      // y una COTA SUPERIOR sin opt-in: sin las anclas no se puede aplicar el cupo,
+      // y pedirlas en el camino por defecto violaría CD-9. Documentado en el tipo.
+      trialAvailable =
+        query.allowTrial === true ? trialAdmitted.size : eligible.length;
+
       const beforeReputation = allAgents.length;
       allAgents = allAgents.filter((a) => {
         const score = a.computedReputation?.score;
-        return (Number.isFinite(score) ? (score as number) : 0) >= min;
+        // Rama de MÉRITO primero, byte-idéntica a la de siempre.
+        if ((Number.isFinite(score) ? (score as number) : 0) >= min) return true;
+        // Rama de ESTRENO, segunda. Vacía salvo que el caller haya optado.
+        return trialAdmitted.has(a.slug);
       });
       excludedByReputation = beforeReputation - allAgents.length;
+
+      // (iii) Badge (AC-2/DT-3/CD-2): una relajación de piso que no se ve en la
+      // respuesta es un piso relajado en silencio, que es la clase de bug que este
+      // repo rechaza por escrito. NO se toca `computedReputation` ni `reputation`.
+      if (trialAdmitted.size > 0) {
+        const n = resolveTrialMaxSettledTasks();
+        for (const a of allAgents) {
+          if (!trialAdmitted.has(a.slug)) continue;
+          const st = standingFor(a.slug, standingBatch);
+          const tasksSettled = st === 'unknown' ? 0 : st.tasksSettled;
+          a.trial = {
+            granted: true,
+            under_min_reputation: min,
+            tasks_settled: tasksSettled,
+            remaining_settled_tasks: n - tasksSettled,
+          };
+        }
+      }
     }
 
     // Sort: verified-first (AC-7), then reputation (desc), then price (asc).
@@ -548,22 +636,111 @@ export const discoveryService = {
   },
 
   /**
+   * WKH-313 (AC-10/CD-15) — aplica el CUPO `M` por publicador sobre los elegibles
+   * y devuelve el conjunto de slugs efectivamente admitidos al carril de estreno.
+   *
+   * Sólo se invoca cuando el caller optó (`allowTrial === true`) y hay al menos un
+   * elegible: es lo que mantiene el camino por defecto con CERO queries nuevas
+   * (CD-9). UNA sola lectura de anclas por corrida del pipeline (anti-N+1).
+   *
+   * FAIL-CLOSED en los tres bordes:
+   *   · la lectura de anclas falla ⟹ NADIE se admite (no "sin ancla, pasa igual");
+   *   · un self-published sin fila de ancla ⟹ no es candidato;
+   *   · el cupo se resuelve por `(created_at, slug)` ascendente, NUNCA por el orden
+   *     del arreglo ni por el tiebreak aleatorio del ranking (CD-15).
+   *
+   * Por qué el cupo tiene que existir ANTES de que alguien encienda el opt-in en un
+   * leg de dinero: hoy `remittance-payout` no tiene NINGÚN agente con score, así que
+   * dos candidatos en estreno empatan en 0 y el desempate del sort es ALEATORIO. Un
+   * sybil que publique la misma capability tendría ~50% de quedarse con el
+   * `depositAddress` contra el que el usuario firma el principal de la remesa.
+   */
+  async selectTrialCandidates(
+    eligible: Agent[],
+    min: number,
+  ): Promise<Set<string>> {
+    let anchorRead: Awaited<
+      ReturnType<typeof publishedAgentService.listPublisherAnchors>
+    >;
+    try {
+      anchorRead = await publishedAgentService.listPublisherAnchors(
+        eligible.map((a) => a.slug),
+      );
+    } catch {
+      anchorRead = { degraded: true };
+    }
+
+    if (anchorRead.degraded) {
+      // CD-7 otra vez, en otro sitio: "no pude leer las anclas" NO es "estos
+      // agentes no tienen publicador". Sin poder contar el cupo, no se admite.
+      log.error(
+        { minReputation: min, eligible: eligible.length },
+        'trial publisher anchors unavailable — no trial admission',
+      );
+      return new Set();
+    }
+
+    const candidates: TrialCandidate[] = [];
+    for (const a of eligible) {
+      const anchor = anchorRead.anchors.get(a.slug);
+      if (anchor) {
+        candidates.push({
+          slug: a.slug,
+          anchor: `owner:${anchor.ownerRef}`,
+          createdAt: anchor.createdAt,
+        });
+        continue;
+      }
+      if (a.registry_id === SELF_PUBLISHED_REGISTRY_ID) {
+        // Self-published sin fila de ancla: no se puede contar su cupo, así que no
+        // es candidato. Fail-closed, sin excepción por "es sólo un caso borde".
+        continue;
+      }
+      // Federado: el ancla es su `registry_id`, así que sólo compite por el cupo
+      // contra agentes del MISMO registry. No trae `created_at` (el shape `Agent`
+      // no lo tiene) → el orden lo decide el `slug`, determinista igual.
+      candidates.push({ slug: a.slug, anchor: `registry:${a.registry_id}` });
+    }
+
+    return selectTrialAdmitted(candidates);
+  },
+
+  /**
    * WKH-103 (DT-8/DT-10): enriquece computedReputation en batch con UN solo
    * query (CD-12). Sin RPC on-chain (CD-13). Fallo DB → agentes sin el campo,
    * NUNCA rompe discover (AC-4/CD-5).
+   *
+   * WKH-313 (AC-9/CD-7): pasa a DEVOLVER el batch de standing. Antes el `catch {}`
+   * de acá se tragaba el fallo y el pipeline no podía distinguir "ninguno de estos
+   * agentes tiene historial" de "no pude preguntar por el historial" — las dos
+   * cosas eran la ausencia del campo. Mientras el filtro sólo EXCLUÍA eso era
+   * inocuo (fail-safe); con un carril que ADMITE bajo el piso deja de serlo: un
+   * fallo de DB admitiría a cualquier desconocido. El fallo ya no se traga, se
+   * TRADUCE a `degraded: true`, y con eso no se admite a nadie.
+   *
+   * `computedReputation` se sigue adjuntando exactamente igual que antes (omitido
+   * si no hay score — CD-9). El standing NO se adjunta al `Agent`: es un dato
+   * interno del pipeline (DT-6/CD-10).
    */
-  async attachReputations(agents: Agent[]): Promise<Agent[]> {
+  async attachReputations(agents: Agent[]): Promise<AgentStandingBatch> {
+    let batch: AgentStandingBatch;
     try {
       const slugs = agents.map((a) => a.slug);
-      const repMap = await reputationService.computeReputationBatch(slugs);
-      for (const a of agents) {
-        const rep = repMap.get(a.slug);
-        if (rep) a.computedReputation = rep; // omitido si no hay (CD-9)
-      }
+      batch = await reputationService.computeStandingBatch(slugs);
     } catch {
-      /* DB fail → sin reputación, NO rompe discover (AC-4) */
+      // DB fail → sin reputación, NO rompe discover (AC-4) — pero AHORA el
+      // pipeline se entera desde el valor de retorno, no desde un silencio.
+      return { degraded: true, standings: new Map() };
     }
-    return agents;
+    for (const a of agents) {
+      // `standingFor` y no `standings.get()` crudo: la distinción
+      // ausente/degradado se lee en UN solo lugar (CD-7).
+      const st = standingFor(a.slug, batch);
+      if (st !== 'unknown' && st.reputation) {
+        a.computedReputation = st.reputation; // omitido si no hay (CD-9)
+      }
+    }
+    return batch;
   },
 
   /**
