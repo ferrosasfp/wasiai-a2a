@@ -330,6 +330,15 @@ describe('T-03 (AC-3) · `excluded` viaja en el JSON de GET y POST', () => {
       agents: [],
       total: 0,
       registries: [],
+      // Merge WKH-313 ↔ WKH-318: este doble nació en la rama del carril de estreno,
+      // y 318 volvió `sources`/`catalogStatus` REQUERIDOS. El auto-merge combinó las
+      // dos ramas sin que nada se pusiera rojo — la suite pasó en verde porque vitest
+      // NO typechequea; lo cazó `tsc --noEmit` sobre `main` ya mergeado.
+      // `sources: []` ⇒ `complete` es la misma regla que aplica el early-return de
+      // producción (`buildCatalogStatus([])`): sin fuentes consultadas no hay nada
+      // que pueda faltar. NO se afloja ningún tipo para que el doble pase.
+      sources: [],
+      catalogStatus: 'complete' as const,
       excluded: {
         scope: 1,
         reputation: 3,
