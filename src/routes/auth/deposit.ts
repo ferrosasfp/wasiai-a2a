@@ -247,7 +247,9 @@ export const depositRoutes: FastifyPluginAsync = async (fastify) => {
           .send({ error_code: 'FUNDING_WALLET_NOT_BOUND' });
       }
       if (result.depositor !== callerKey.funding_wallet_solana) {
-        return reply.status(403).send({ error_code: 'FUNDING_WALLET_MISMATCH' });
+        return reply
+          .status(403)
+          .send({ error_code: 'FUNDING_WALLET_MISMATCH' });
       }
 
       // Acreditar. NUNCA antes del verify (CD-4), y `chainId` es SIEMPRE el del

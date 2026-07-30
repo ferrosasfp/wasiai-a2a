@@ -1264,7 +1264,10 @@ describe('budgetService', () => {
       // un objeto exacto ya lo cubre, pero esta aserción dice explícitamente QUE
       // propiedad se está protegiendo, para que no se pierda en un futuro refactor
       // del fixture de arriba.
-      const [, args] = mockRpc.mock.calls[0] as [string, Record<string, unknown>];
+      const [, args] = mockRpc.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
       expect(Object.hasOwn(args, 'p_vm_family')).toBe(false);
       expect(Object.keys(args).sort()).toEqual([
         'p_amount_usd',
@@ -1317,7 +1320,10 @@ describe('budgetService', () => {
         'evm',
       );
 
-      const [, args] = mockRpc.mock.calls[0] as [string, Record<string, unknown>];
+      const [, args] = mockRpc.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
       expect(args.p_vm_family).toBe('evm');
     });
 

@@ -19,6 +19,7 @@
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { Keypair, PublicKey } from '@solana/web3.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { isValidSolanaAddress as isValidSolanaAddressForTest } from '../../lib/wallet-format.js';
 import { getSolanaUsdcMint } from './chain.js';
 import {
   isSolanaDepositEnabled,
@@ -73,6 +74,35 @@ describe('WKH-315 · deposit-account.ts', () => {
         '0x1111111111111111111111111111111111111111';
       process.env.OPERATOR_PRIVATE_KEY = `0x${'11'.repeat(32)}`;
       expect(resolveSolanaDepositOwner()).toBeNull();
+      expect(resolveSolanaDepositAta()).toBeNull();
+      expect(isSolanaDepositEnabled()).toBe(false);
+    });
+
+    it('M18 (el caso que de verdad duele): `A2A_DEPOSIT_TREASURY_SOLANA` con una pubkey VALIDA tampoco se usa', () => {
+      // ══════════════════════════════════════════════════════════════════════════
+      // ⚠️ ESTE CASO EXISTE PORQUE UN MUTANTE SOBREVIVIO AL TEST DE ARRIBA.
+      //
+      // La campaña de mutación aplicó el fallback real
+      // (`A2A_DEPOSIT_SOLANA_OWNER ?? A2A_DEPOSIT_TREASURY_SOLANA`) y la suite quedó
+      // VERDE. El motivo: el test de arriba pone en esa env una address EVM, que
+      // `isValidSolanaAddress` rechaza igual, así que el fallback devolvía `null`
+      // por la validación siguiente y NO por su ausencia. El test probaba el
+      // validador, no la ausencia del fallback.
+      //
+      // El caso peligroso es justamente el que faltaba: un operador confundido
+      // pone una pubkey base58 VALIDA en la env de treasury —que es exactamente la
+      // confusión que el landmine de `resolveTreasury` invita, porque esa env se
+      // llama "SOLANA"—. Con fallback, el depósito se dirigiría a una cuenta que
+      // nadie eligió para eso. Sin fallback, el camino queda apagado y se nota.
+      // ══════════════════════════════════════════════════════════════════════════
+      const validButUnrelated = Keypair.generate().publicKey.toBase58();
+      // Andamiaje: la env SI contiene algo que pasaría el validador.
+      expect(isValidSolanaAddressForTest(validButUnrelated)).toBe(true);
+      process.env.A2A_DEPOSIT_TREASURY_SOLANA = validButUnrelated;
+      delete process.env.A2A_DEPOSIT_SOLANA_OWNER;
+
+      expect(resolveSolanaDepositOwner()).toBeNull();
+      expect(resolveSolanaDepositOwner()).not.toBe(validButUnrelated);
       expect(resolveSolanaDepositAta()).toBeNull();
       expect(isSolanaDepositEnabled()).toBe(false);
     });
