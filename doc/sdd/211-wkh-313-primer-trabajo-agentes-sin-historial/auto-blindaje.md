@@ -88,6 +88,19 @@
 - **Aplicar en**: cuando un dato habilita un fail-closed, seguirlo hasta el mensaje.
   Un sistema que se protege bien y explica mal manda a arreglar lo que no está roto.
 
+### [2026-07-30] Fix-pack AR · MENORES — Un allowlist copiado en el test que lo vigila
+
+- **Error**: T-CAPRES-06 candaba la decisión "no existe una restricción de `chain`"
+  contra un arreglo LITERAL escrito en el propio test. O sea que alguien podía
+  agregar `chain` al validador de verdad y el test seguía verde: medía su copia.
+  Tercera aparición del mismo patrón en esta HU.
+- **Causa raíz**: el allowlist real era un `const` local dentro de la función de
+  validación, así que el test no tenía cómo leerlo y "resolví" duplicándolo.
+- **Fix**: `ALLOWED_STEP_CONSTRAINTS` exportado desde `lib/compose-step-shape.ts`,
+  usado por el validador Y por el test. Mutante (agregar `'chain'`): rojo.
+- **Aplicar en**: un test que afirma sobre una lista tiene que IMPORTAR la lista. Si
+  no se puede importar, el arreglo es exportarla, no copiarla.
+
 ### [2026-07-30] W0.1 — El tipo creció y el sitio de construcción quedó atrás
 
 - **Error**: agregué `reputation` y `trialAvailable` a `DiscoveryResult.excluded`

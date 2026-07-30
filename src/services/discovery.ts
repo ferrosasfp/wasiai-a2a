@@ -458,7 +458,7 @@ export const discoveryService = {
     // requisito del carril de estreno rompería los tres legs del flujo insignia sin
     // arreglar ninguno. Sería teatro.
     //
-    // ── WKH-313: el CARRIL DE ESTRENO, dentro de este mismo bloque ────────────
+    // ── WKH-313: el CARRIL DE ESTRENO, dentro de este mismo paso ──────────────
     // Va acá adentro y NO como post-filtro (CD-11): el filtro se queda PRE-SORT y
     // PRE-`slice` por el motivo largo que explica el comentario del scope, arriba.
     // El predicado gana una SEGUNDA RAMA, con la de mérito PRIMERO e intacta:
@@ -467,111 +467,25 @@ export const discoveryService = {
     //
     // El admitido NO recibe score fabricado (nada de `score: min`, nada de
     // reasignar `computedReputation`): conserva su puntaje real, así que `repValue`
-    // le da 0 y ordena ÚLTIMO. Sólo puede ser elegido cuando NINGÚN agente pasa por
-    // mérito. Eso es lo que hace que el carril no sea un atajo, y es lo que
-    // mantiene el ranking de los que ya tienen historial byte-idéntico (CD-6).
+    // le da 0 y ordena ÚLTIMO. Para que eso valga TAMBIÉN para un federado, el paso
+    // le neutraliza los dos campos que su propio card auto-reporta (`verified` y
+    // `reputation`) — el detalle está en `applyReputationFloor` (AR BLQ-ALTO-1).
+    // Sólo puede ser elegido cuando NINGÚN agente pasa por mérito. Eso es lo que
+    // hace que el carril no sea un atajo, y es lo que mantiene el ranking de los que
+    // ya tienen historial byte-idéntico (CD-6).
     if (query.minReputation != null) {
-      const min = query.minReputation;
-
-      // (i) Elegibles: EL ÚNICO predicado (CD-8), el mismo que después usan el
-      // contador y el badge. `standingFor` resuelve la distinción
-      // ausente-vs-degradado; con `degraded: true` esto da SIEMPRE vacío y no se
-      // admite a nadie (AC-9, fail-closed).
-      const eligible = allAgents.filter((a) =>
-        isTrialEligible(standingFor(a.slug, standingBatch), min),
+      // CR MENOR-5: la mecánica vive en `applyReputationFloor`, un paso ÚNICO del
+      // pipeline. Se extrae SIN mover nada: sigue corriendo acá, entre
+      // `attachReputations` y el `sort`, que es la posición que CD-11 protege.
+      const floor = await this.applyReputationFloor(
+        allAgents,
+        query.minReputation,
+        query.allowTrial === true,
+        standingBatch,
       );
-
-      // (ii) Cupo M por publicador — SÓLO con opt-in del caller. Sin `allowTrial`
-      // no se lee ni una fila más (CD-9: el camino por defecto no cambia en nada,
-      // incluido el costo de I/O).
-      let trialAdmitted: Set<string> = new Set();
-      if (eligible.length > 0 && query.allowTrial === true) {
-        trialAdmitted = await this.selectTrialCandidates(eligible, min);
-      }
-
-      // `trialAvailable` es EXACTO con opt-in (coincide con la cantidad de badges)
-      // y una COTA SUPERIOR sin opt-in: sin las anclas no se puede aplicar el cupo,
-      // y pedirlas en el camino por defecto violaría CD-9. Documentado en el tipo.
-      trialAvailable =
-        query.allowTrial === true ? trialAdmitted.size : eligible.length;
-
-      const beforeReputation = allAgents.length;
-      allAgents = allAgents.filter((a) => {
-        const score = a.computedReputation?.score;
-        // Rama de MÉRITO primero, byte-idéntica a la de siempre.
-        if ((Number.isFinite(score) ? (score as number) : 0) >= min)
-          return true;
-        // Rama de ESTRENO, segunda. Vacía salvo que el caller haya optado.
-        return trialAdmitted.has(a.slug);
-      });
-      excludedByReputation = beforeReputation - allAgents.length;
-
-      // (iii) Badge (AC-2/DT-3/CD-2): una relajación de piso que no se ve en la
-      // respuesta es un piso relajado en silencio, que es la clase de bug que este
-      // repo rechaza por escrito. `computedReputation` NO se toca: el score real no
-      // se fabrica nunca.
-      //
-      // ── AR fix-pack BLQ-ALTO-1: por qué acá TAMBIÉN se pisan `verified` y
-      //    `reputation` del admitido ──────────────────────────────────────────
-      // La garantía central de esta HU ("el admitido conserva su puntaje REAL, así
-      // que ordena ÚLTIMO") era FALSA para agentes federados, y el AR lo reprodujo:
-      //
-      //   · `repValue` (abajo) es `computedReputation?.score ?? reputation`. Un
-      //     admitido en estreno NO tiene `computedReputation` (0 liquidadas), así
-      //     que el fallback tomaba `Agent.reputation`, que para un federado sale de
-      //     `mapAgent` ⟹ del CARD QUE EL PROPIO AGENTE PUBLICA. Declarando
-      //     `reputation: 100` un desconocido ordenaba PRIMERO.
-      //   · `verified` es la PRIMERA clave del sort y tiene el mismo origen: el
-      //     card. Declarando `verified: true` ganaba incluso empatando en score.
-      //
-      // Y `/compose` toma `result.agents[0]` (capability-resolver.ts): era el camino
-      // del dinero eligiendo por un número que elige el cobrador.
-      //
-      // El arreglo NO puede estar en el comparador ni en `repValue` (directiva de
-      // no-regresión: el ranking de los que YA tienen historial queda byte-idéntico,
-      // CD-6). Está en LO QUE SE LE DA DE COMER: un agente admitido por el carril
-      // llega al sort con los dos campos auto-reportados REEMPLAZADOS por lo que el
-      // gateway sí puede verificar.
-      //
-      //   `verified = false`      — el carril admite por AUSENCIA de historial. Una
-      //                             insignia de identidad que el propio card afirma
-      //                             no es historial verificado, y acá es la primera
-      //                             clave del sort. El único ancla no forjable es
-      //                             `Agent.identity` (ERC-8004, verificada on-chain
-      //                             por `attachIdentities`), que es OTRO campo y NO
-      //                             se toca.
-      //   `reputation = score real` — `computedReputation?.score ?? 0`, o sea
-      //                             EXACTAMENTE lo que `repValue` computaría si el
-      //                             card no mintiera. Con score real bajo (1-2
-      //                             liquidadas) el valor no cambia nada, porque
-      //                             `repValue` ya prefiere `computedReputation`.
-      //
-      // Esto es una pisada DELIBERADA y acotada al admitido: nadie más ve tocado su
-      // card. Y se hace también sobre la RESPUESTA (no sólo sobre una copia para
-      // ordenar) a propósito: devolver `reputation: 100` en el payload mientras se
-      // lo rankea como 0 sería una segunda mentira, esta vez hacia el cliente.
-      if (trialAdmitted.size > 0) {
-        const n = resolveTrialMaxSettledTasks();
-        for (const a of allAgents) {
-          if (!trialAdmitted.has(a.slug)) continue;
-          const st = standingFor(a.slug, standingBatch);
-          // Rama defensiva DECLARADA (AR/CR MENOR): `st` no puede ser `'unknown'`
-          // acá. `trialAdmitted` se llena SÓLO desde `eligible`, y con el batch
-          // degradado `isTrialEligible('unknown', …)` es `false` para todos, así que
-          // `eligible` queda vacío y no se leen ni las anclas (T-10). El `?? 0` es
-          // el default seguro de una rama INALCANZABLE por construcción, no un caso
-          // real sin test.
-          const tasksSettled = st === 'unknown' ? 0 : st.tasksSettled;
-          a.trial = {
-            granted: true,
-            under_min_reputation: min,
-            tasks_settled: tasksSettled,
-            remaining_settled_tasks: n - tasksSettled,
-          };
-          a.verified = false;
-          a.reputation = a.computedReputation?.score ?? 0;
-        }
-      }
+      allAgents = floor.agents;
+      excludedByReputation = floor.excludedByReputation;
+      trialAvailable = floor.trialAvailable;
     }
 
     // Sort: verified-first (AC-7), then reputation (desc), then price (asc).
@@ -659,6 +573,134 @@ export const discoveryService = {
         standingUnavailable: standingBatch.degraded,
       },
     };
+  },
+
+  /**
+   * WKH-313 — el PISO de reputación y, dentro de él, el CARRIL DE ESTRENO.
+   *
+   * Extraído de `runDiscoveryPipeline` (CR MENOR-5) SIN mover su posición: lo llama
+   * el mismo punto del pipeline, después de `attachReputations` (necesita el score)
+   * y ANTES del `sort` y del `slice`. Eso es lo que CD-11 protege y lo que mantiene
+   * el residual TD-189-1 fuera del camino del dinero — ver el comentario largo del
+   * call-site. NO convertir esto en un post-filtro.
+   *
+   * Devuelve la lista filtrada y los dos contadores en vez de mutar locales: así el
+   * call-site no puede olvidarse de uno (era el bug de forma que W0.1 ya pagó una
+   * vez con el sitio de construcción de `excluded`).
+   *
+   * @param allAgents  candidatos ya filtrados por status/caps/precio/alcance.
+   * @param min        el piso que pidió el caller (`minReputation`).
+   * @param allowTrial opt-in EXPLÍCITO al carril. `false` ⟹ cero queries nuevas.
+   * @param standingBatch el standing en batch, con su tercer valor `degraded`.
+   */
+  async applyReputationFloor(
+    allAgents: Agent[],
+    min: number,
+    allowTrial: boolean,
+    standingBatch: AgentStandingBatch,
+  ): Promise<{
+    agents: Agent[];
+    excludedByReputation: number;
+    trialAvailable: number;
+  }> {
+    // (i) Elegibles: EL ÚNICO predicado (CD-8), el mismo que después usan el
+    // contador y el badge. `standingFor` resuelve la distinción
+    // ausente-vs-degradado; con `degraded: true` esto da SIEMPRE vacío y no se
+    // admite a nadie (AC-9, fail-closed).
+    const eligible = allAgents.filter((a) =>
+      isTrialEligible(standingFor(a.slug, standingBatch), min),
+    );
+
+    // (ii) Cupo M por publicador — SÓLO con opt-in del caller. Sin `allowTrial`
+    // no se lee ni una fila más (CD-9: el camino por defecto no cambia en nada,
+    // incluido el costo de I/O).
+    let trialAdmitted: Set<string> = new Set();
+    if (eligible.length > 0 && allowTrial) {
+      trialAdmitted = await this.selectTrialCandidates(eligible, min);
+    }
+
+    // `trialAvailable` es EXACTO con opt-in (coincide con la cantidad de badges)
+    // y una COTA SUPERIOR sin opt-in: sin las anclas no se puede aplicar el cupo,
+    // y pedirlas en el camino por defecto violaría CD-9. Documentado en el tipo.
+    const trialAvailable = allowTrial ? trialAdmitted.size : eligible.length;
+
+    const beforeReputation = allAgents.length;
+    const agents = allAgents.filter((a) => {
+      const score = a.computedReputation?.score;
+      // Rama de MÉRITO primero, byte-idéntica a la de siempre.
+      if ((Number.isFinite(score) ? (score as number) : 0) >= min) return true;
+      // Rama de ESTRENO, segunda. Vacía salvo que el caller haya optado.
+      return trialAdmitted.has(a.slug);
+    });
+    const excludedByReputation = beforeReputation - agents.length;
+
+    // (iii) Badge (AC-2/DT-3/CD-2): una relajación de piso que no se ve en la
+    // respuesta es un piso relajado en silencio, que es la clase de bug que este
+    // repo rechaza por escrito. `computedReputation` NO se toca: el score real no
+    // se fabrica nunca.
+    //
+    // ── AR fix-pack BLQ-ALTO-1: por qué acá TAMBIÉN se pisan `verified` y
+    //    `reputation` del admitido ──────────────────────────────────────────
+    // La garantía central de esta HU ("el admitido conserva su puntaje REAL, así
+    // que ordena ÚLTIMO") era FALSA para agentes federados, y el AR lo reprodujo:
+    //
+    //   · `repValue` (abajo) es `computedReputation?.score ?? reputation`. Un
+    //     admitido en estreno NO tiene `computedReputation` (0 liquidadas), así
+    //     que el fallback tomaba `Agent.reputation`, que para un federado sale de
+    //     `mapAgent` ⟹ del CARD QUE EL PROPIO AGENTE PUBLICA. Declarando
+    //     `reputation: 100` un desconocido ordenaba PRIMERO.
+    //   · `verified` es la PRIMERA clave del sort y tiene el mismo origen: el
+    //     card. Declarando `verified: true` ganaba incluso empatando en score.
+    //
+    // Y `/compose` toma `result.agents[0]` (capability-resolver.ts): era el camino
+    // del dinero eligiendo por un número que elige el cobrador.
+    //
+    // El arreglo NO puede estar en el comparador ni en `repValue` (directiva de
+    // no-regresión: el ranking de los que YA tienen historial queda byte-idéntico,
+    // CD-6). Está en LO QUE SE LE DA DE COMER: un agente admitido por el carril
+    // llega al sort con los dos campos auto-reportados REEMPLAZADOS por lo que el
+    // gateway sí puede verificar.
+    //
+    //   `verified = false`      — el carril admite por AUSENCIA de historial. Una
+    //                             insignia de identidad que el propio card afirma
+    //                             no es historial verificado, y acá es la primera
+    //                             clave del sort. El único ancla no forjable es
+    //                             `Agent.identity` (ERC-8004, verificada on-chain
+    //                             por `attachIdentities`), que es OTRO campo y NO
+    //                             se toca.
+    //   `reputation = score real` — `computedReputation?.score ?? 0`, o sea
+    //                             EXACTAMENTE lo que `repValue` computaría si el
+    //                             card no mintiera. Con score real bajo (1-2
+    //                             liquidadas) el valor no cambia nada, porque
+    //                             `repValue` ya prefiere `computedReputation`.
+    //
+    // Esto es una pisada DELIBERADA y acotada al admitido: nadie más ve tocado su
+    // card. Y se hace también sobre la RESPUESTA (no sólo sobre una copia para
+    // ordenar) a propósito: devolver `reputation: 100` en el payload mientras se
+    // lo rankea como 0 sería una segunda mentira, esta vez hacia el cliente.
+    if (trialAdmitted.size > 0) {
+      const n = resolveTrialMaxSettledTasks();
+      for (const a of agents) {
+        if (!trialAdmitted.has(a.slug)) continue;
+        const st = standingFor(a.slug, standingBatch);
+        // Rama defensiva DECLARADA (AR/CR MENOR): `st` no puede ser `'unknown'`
+        // acá. `trialAdmitted` se llena SÓLO desde `eligible`, y con el batch
+        // degradado `isTrialEligible('unknown', …)` es `false` para todos, así que
+        // `eligible` queda vacío y no se leen ni las anclas (T-10). El `?? 0` es
+        // el default seguro de una rama INALCANZABLE por construcción, no un caso
+        // real sin test.
+        const tasksSettled = st === 'unknown' ? 0 : st.tasksSettled;
+        a.trial = {
+          granted: true,
+          under_min_reputation: min,
+          tasks_settled: tasksSettled,
+          remaining_settled_tasks: n - tasksSettled,
+        };
+        a.verified = false;
+        a.reputation = a.computedReputation?.score ?? 0;
+      }
+    }
+    return { agents, excludedByReputation, trialAvailable };
   },
 
   /**

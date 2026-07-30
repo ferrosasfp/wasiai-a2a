@@ -9,6 +9,8 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+// CR MENOR-4: el allowlist REAL de `constraints`, no una copia literal en el test.
+import { ALLOWED_STEP_CONSTRAINTS } from '../lib/compose-step-shape.js';
 import type { A2AAgentKeyRow, Agent, DiscoveryQuery } from '../types/index.js';
 
 vi.mock('../lib/logger.js', () => ({
@@ -159,8 +161,16 @@ describe('HU-208 · resolveCapability — falla CERRADO, con motivo accionable',
     // propio piso), no una forma de señalar un agente concreto: el orden
     // verified → reputación → precio se sigue respetando y el admitido ordena
     // último. `chain` sigue afuera, y por el mismo motivo de siempre.
-    const constraintKeys = ['max_price_usdc', 'min_reputation', 'allow_trial'];
-    expect(constraintKeys).not.toContain('chain');
+    //
+    // CR MENOR-4: se lee el allowlist REAL del validador. Antes era un arreglo
+    // literal copiado acá, así que el test seguía verde mientras alguien agregaba
+    // `chain` al validador de verdad: medía su propia copia.
+    expect([...ALLOWED_STEP_CONSTRAINTS].sort()).toEqual([
+      'allow_trial',
+      'max_price_usdc',
+      'min_reputation',
+    ]);
+    expect(ALLOWED_STEP_CONSTRAINTS.has('chain')).toBe(false);
   });
 });
 
