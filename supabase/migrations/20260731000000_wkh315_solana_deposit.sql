@@ -209,4 +209,22 @@ GRANT EXECUTE ON FUNCTION public.register_a2a_key_deposit(uuid, integer, numeric
 -- `a2a_key_deposits` ya tiene RLS ON sin policy = deny-all para anon/authenticated;
 -- el service usa `service_role`, que bypassa. Las columnas nuevas heredan eso.
 
+-- ── 8. RECARGA DEL SCHEMA-CACHE DE PostgREST (fix-pack AR · BLQ-MED-2) ───────
+--
+-- ⚠️ ACA NO ES DEFENSA EN PROFUNDIDAD: ES OBLIGATORIO, Y MAS QUE EN WKH-307.
+--
+-- El exemplar (`20260730000000_wkh307_solana_settle_intents.sql:537-539`) documenta
+-- esta misma ventana para funciones NUEVAS ("sin esto el primer rpc() puede dar
+-- PGRST202"). Acá el paso 5 **DROPEA una función QUE ESTA EN USO** y la re-crea con
+-- otra firma. Mientras el caché de PostgREST siga con la firma vieja de 6 params,
+-- `budgetService.registerDeposit` (`src/services/budget.ts`) no resuelve y
+-- **`POST /auth/deposit` del camino EVM devuelve 500** — o sea que la migración
+-- rompería el camino que la cabecera promete byte-idéntico, y rompería su propia
+-- afirmación de "migración antes del código ⇒ sin ventana".
+--
+-- Supabase suele traer un event-trigger que recarga solo, pero **no se pudo
+-- determinar para la base destino**, y "no lo pude comprobar" no es "está cubierto".
+-- Es una línea y no depende de ninguna suposición.
+NOTIFY pgrst, 'reload schema';
+
 COMMIT;

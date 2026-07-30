@@ -304,6 +304,39 @@ describe('WKH-315 — migración del depósito Solana (estructural sobre el .sql
     });
   });
 
+  // ── BLQ-MED-2: la ventana del schema-cache de PostgREST ───────────────────
+  describe('BLQ-MED-2: las DOS migraciones recargan el schema-cache de PostgREST', () => {
+    // ⚠️ POR QUE ES UN TEST Y NO UNA REVISION. Las dos migraciones hacen un SWAP de
+    // firma sobre una función QUE ESTA EN USO (`register_a2a_key_deposit`, la que
+    // llama `budgetService.registerDeposit`). Sin el `NOTIFY`, PostgREST sigue
+    // resolviendo contra la firma vieja y `POST /auth/deposit` del camino **EVM**
+    // contesta 500 — la regresión que CD-1 prohíbe, causada por la migración que
+    // promete no tener ventana.
+    const NOTIFY = /NOTIFY\s+pgrst\s*,\s*'reload schema'\s*;/i;
+
+    it("BLQ-MED-2: el `up` emite NOTIFY pgrst, 'reload schema'", () => {
+      expect(upCode).toMatch(NOTIFY);
+    });
+
+    it("BLQ-MED-2: el `_down` también (su swap es inverso y tiene la misma ventana)", () => {
+      expect(downCode).toMatch(NOTIFY);
+    });
+
+    it('BLQ-MED-2: el NOTIFY va DESPUES del swap de firmas (avisar antes no avisa de nada)', () => {
+      for (const [name, sql] of [
+        ['up', upCode],
+        ['down', downCode],
+      ] as const) {
+        const createAt = sql.search(
+          /CREATE\s+OR\s+REPLACE\s+FUNCTION\s+register_a2a_key_deposit/i,
+        );
+        const notifyAt = sql.search(NOTIFY);
+        expect(createAt, name).toBeGreaterThanOrEqual(0);
+        expect(notifyAt, name).toBeGreaterThan(createAt);
+      }
+    });
+  });
+
   // ── Higiene: transaccional y sin secretos ─────────────────────────────────
   it('las dos migraciones son transaccionales (BEGIN/COMMIT) y no nombran ninguna credencial', () => {
     for (const [name, sql] of [

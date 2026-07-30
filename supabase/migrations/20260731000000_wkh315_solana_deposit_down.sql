@@ -131,6 +131,14 @@ REVOKE EXECUTE ON FUNCTION public.register_a2a_key_deposit(uuid, integer, numeri
 GRANT EXECUTE ON FUNCTION public.register_a2a_key_deposit(uuid, integer, numeric, text, text, text)
   TO service_role;
 
+-- ── 4b. RECARGA DEL SCHEMA-CACHE DE PostgREST (fix-pack AR · BLQ-MED-2) ──────
+-- El swap es INVERSO al del `up` (dropea la de 7, restaura la de 6) y tiene la misma
+-- ventana: con el caché viejo, `budgetService.registerDeposit` le pide a PostgREST una
+-- firma que ya no existe y el fondeo EVM contesta 500 justo después de un rollback,
+-- que es el peor momento posible para un síntoma nuevo. Exemplar del idioma:
+-- `20260730000000_wkh307_solana_settle_intents_down.sql:63`.
+NOTIFY pgrst, 'reload schema';
+
 -- ── 5. INVENTARIO PREVIO AL ROLLBACK, para el operador ───────────────────────
 -- Antes de correr esto, mirá qué se va a archivar:
 --   SELECT count(*) FROM a2a_key_deposits WHERE vm_family = 'solana';
