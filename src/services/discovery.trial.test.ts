@@ -154,7 +154,9 @@ function serve(rows: Record<string, unknown>[]): void {
   mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(rows) });
 }
 
-function counters(o: Partial<AgentStandingCounters> = {}): AgentStandingCounters {
+function counters(
+  o: Partial<AgentStandingCounters> = {},
+): AgentStandingCounters {
   return {
     tasksSettled: 0,
     successCount: 0,
@@ -165,9 +167,7 @@ function counters(o: Partial<AgentStandingCounters> = {}): AgentStandingCounters
 }
 
 /** Standing NO degradado. Los slugs ausentes son newcomers legítimos. */
-function standings(
-  entries: Array<[string, AgentStandingCounters]> = [],
-): void {
+function standings(entries: Array<[string, AgentStandingCounters]> = []): void {
   mockStandingBatch.mockResolvedValue({
     degraded: false,
     standings: new Map(entries),
@@ -230,7 +230,9 @@ describe('T-02 (AC-2) · el admitido viene MARCADO y sin score fabricado', () =>
 
   it('el que pasa POR MÉRITO no lleva badge (el badge no es decoración)', async () => {
     serve([raw('veterano')]);
-    standings([['veterano', counters({ tasksSettled: 10, reputation: rep(20) })]]);
+    standings([
+      ['veterano', counters({ tasksSettled: 10, reputation: rep(20) })],
+    ]);
 
     const result = await discoveryService.discover({
       minReputation: 2,
@@ -245,7 +247,10 @@ describe('T-02 (AC-2) · el admitido viene MARCADO y sin score fabricado', () =>
     serve([raw('arranco')]);
     // 1 liquidada, 0 fallos → sigue en el carril (N=3) y su score real es bajo.
     standings([
-      ['arranco', counters({ tasksSettled: 1, successCount: 1, reputation: rep(2, 1) })],
+      [
+        'arranco',
+        counters({ tasksSettled: 1, successCount: 1, reputation: rep(2, 1) }),
+      ],
     ]);
 
     // Piso 8: por encima de su score real (2) y por DEBAJO del techo T (10), así
@@ -283,7 +288,11 @@ describe('T-06 (CD-6) · el admitido ordena ÚLTIMO y el ranking de los demás n
       allowTrial: true,
     });
 
-    expect(result.agents.map((a) => a.slug)).toEqual(['alto', 'bajo', 'estreno']);
+    expect(result.agents.map((a) => a.slug)).toEqual([
+      'alto',
+      'bajo',
+      'estreno',
+    ]);
     expect(result.agents[2]?.trial?.granted).toBe(true);
   });
 
@@ -302,17 +311,22 @@ describe('T-06 (CD-6) · el admitido ordena ÚLTIMO y el ranking de los demás n
     const withoutTrial = await discoveryService.discover({ minReputation: 5 });
 
     expect(withoutTrial.agents.map((a) => a.slug)).toEqual(['alto', 'bajo']);
-    expect(
-      withTrial.agents.filter((a) => !a.trial).map((a) => a.slug),
-    ).toEqual(withoutTrial.agents.map((a) => a.slug));
+    expect(withTrial.agents.filter((a) => !a.trial).map((a) => a.slug)).toEqual(
+      withoutTrial.agents.map((a) => a.slug),
+    );
   });
 
   it('el admitido NUNCA le gana a alguien que pasa por mérito, ni siendo más barato', async () => {
     // El precio es el TERCER criterio del sort: si el estreno recibiera un score
     // sintético igual al piso, empataría en reputación y su precio 0 lo pondría
     // PRIMERO. Con su score real (0) eso no puede pasar.
-    serve([raw('barato-sin-historial', { price: 0 }), raw('caro-probado', { price: 9 })]);
-    standings([['caro-probado', counters({ tasksSettled: 5, reputation: rep(10) })]]);
+    serve([
+      raw('barato-sin-historial', { price: 0 }),
+      raw('caro-probado', { price: 9 }),
+    ]);
+    standings([
+      ['caro-probado', counters({ tasksSettled: 5, reputation: rep(10) })],
+    ]);
 
     const result = await discoveryService.discover({
       minReputation: 10,
@@ -331,7 +345,10 @@ describe('T-04 (AC-4) · el carril se agota POR ÉXITO en N liquidadas', () => {
   it('FRONTERA: `N-1` liquidadas admite, `N` ya NO (queda sujeto a su score real)', async () => {
     serve([raw('casi')]);
     standings([
-      ['casi', counters({ tasksSettled: 2, successCount: 2, reputation: rep(4, 2) })],
+      [
+        'casi',
+        counters({ tasksSettled: 2, successCount: 2, reputation: rep(4, 2) }),
+      ],
     ]);
     const dentro = await discoveryService.discover({
       minReputation: 8,
@@ -342,7 +359,10 @@ describe('T-04 (AC-4) · el carril se agota POR ÉXITO en N liquidadas', () => {
 
     serve([raw('casi')]);
     standings([
-      ['casi', counters({ tasksSettled: 3, successCount: 3, reputation: rep(6, 3) })],
+      [
+        'casi',
+        counters({ tasksSettled: 3, successCount: 3, reputation: rep(6, 3) }),
+      ],
     ]);
     const fuera = await discoveryService.discover({
       minReputation: 8,
@@ -356,7 +376,10 @@ describe('T-04 (AC-4) · el carril se agota POR ÉXITO en N liquidadas', () => {
   it('el que salió del carril SÍ pasa por mérito si su score alcanza (sin badge)', async () => {
     serve([raw('salio')]);
     standings([
-      ['salio', counters({ tasksSettled: 3, successCount: 3, reputation: rep(6, 3) })],
+      [
+        'salio',
+        counters({ tasksSettled: 3, successCount: 3, reputation: rep(6, 3) }),
+      ],
     ]);
 
     const result = await discoveryService.discover({

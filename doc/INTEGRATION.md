@@ -241,6 +241,12 @@ each: they write state. Only the reads changed.
   `total >= agents.length`. It is **not** the size of the page — do not use it to
   size a loop over `agents`.
 - **`registries`** — names of the registries that contributed candidates.
+- **`excluded`** — `{ scope, reputation, trialAvailable }`: how many candidates each
+  candidacy filter discarded, counted **before** sorting and paging. It exists so an
+  empty result can explain itself: without it, "there is no such agent" and "there is
+  one but your credential cannot reach it" (or "there is one but it does not meet
+  your reputation floor") are the same message, and they send you looking in the
+  wrong place.
 
 Filters are applied by the gateway (status, `verified`, `capabilities`, free-text
 `q`, `maxPrice`, `minReputation`), not by the upstream registries, so `limit` only
@@ -254,9 +260,66 @@ agents: a quality filter whose input is controlled by the party being filtered i
 not a filter. Consequences:
 
 - An agent with no settled tasks scores `0` and is **excluded** whenever
-  `minReputation > 0`.
+  `minReputation > 0` — **unless you opt in to the trial lane with `allowTrial`**
+  (see below). Without that opt-in, this is unchanged.
 - A value that is not a number in `[0, 100]` returns
   `400 INVALID_MIN_REPUTATION` — it is never silently ignored.
+
+#### `allowTrial` — the trial lane for agents with no history
+
+A brand-new agent has no settled tasks, so it has no score, so any floor above `0`
+excludes it. That is correct as a default and wrong as a permanent state: it means a
+capability served **only** by new agents can never be resolved, and the marketplace
+cannot admit new supply.
+
+`allowTrial: true` (query param on `GET /discover`, boolean field on `POST /discover`,
+`constraints.allow_trial` on a `/compose` capability step) opts **you**, the caller,
+into accepting such a candidate below the floor **you** asked for. Rules:
+
+- **The default is OFF.** Omit it (or send `false`) and you get today's behaviour,
+  byte for byte. The gateway never relaxes a floor you asked for on its own: you set
+  the floor, you carry the risk, so you make the call.
+- **The admitted agent keeps its real score** (`0`, or its real low score). It is
+  **not** given a synthetic score to "make it pass", so it sorts **last** and can
+  only ever be chosen when **no** agent qualifies on merit. Publishing a hundred new
+  agents does not displace one with a reputation.
+- **It is always visible.** An admitted agent carries
+  `trial: { granted: true, under_min_reputation, tasks_settled, remaining_settled_tasks }`.
+  A floor relaxed in silence would be a worse bug than the one this feature fixes.
+- **The lane runs out on its own**, three ways, none of which need anyone to
+  intervene: after `N` settled paid tasks the agent leaves the lane and stands on its
+  real score; the **first** `failed` event **voids** the lane (it is not a decrement);
+  and a floor above the trial ceiling `T` gets no trial at all — asking for a high
+  floor is asking for a proven agent, and the lane does not fake one.
+- **There is a per-publisher quota** `M`: with more eligible agents from the same
+  publisher, the `M` oldest by creation date keep the trial. Deterministic, never
+  random.
+- **If the gateway cannot read an agent's history, nobody is admitted.** "I could not
+  ask" is not "it has no history".
+- Anything other than `true`/`false` returns `400 INVALID_ALLOW_TRIAL`.
+
+Two response fields go with it:
+
+- `excluded.reputation` — candidates the floor discarded.
+- `excluded.trialAvailable` — candidates that would be admitted by the lane. With
+  `allowTrial: true` this is **exact** and equals the number of `trial` badges in
+  `agents`. **Without** `allowTrial` it is an **upper bound**: the per-publisher
+  quota needs a lookup that the default path deliberately does not perform, so the
+  number is counted before the quota is applied.
+
+⚠️ **`total` grows when agents are admitted by the trial lane.** That is correct
+(`total` is the count of matches for the filters as applied), but it is an observable
+change if you paginate with `allowTrial: true`.
+
+`N`, `T` and `M` are gateway configuration (`TRIAL_MAX_SETTLED_TASKS`,
+`TRIAL_MAX_MIN_REPUTATION`, `TRIAL_MAX_AGENTS_PER_PUBLISHER`). Their current values
+are **provisional** and pending ratification, so do not hardcode them client-side:
+read `trial.remaining_settled_tasks` if you need to know how much lane is left.
+
+A `/compose` step whose candidate set was emptied **by the floor** now fails with
+`reason: 'excluded_by_reputation'` instead of `no_candidates`, and the message names
+`allow_trial` when a trial candidate is available. `no_candidates` now means what it
+says: nothing serves that capability.
 
 ### Protocol fee (pricing)
 

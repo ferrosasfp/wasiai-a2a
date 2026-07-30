@@ -163,12 +163,30 @@ function makeAgent(slug: string, over: Partial<Agent> = {}): Agent {
 }
 
 /** Respuesta de `discover` con el conjunto YA ordenado (como lo entrega el pipeline). */
-function discovered(agents: Agent[], excluded?: { scope: number }) {
+function discovered(
+  agents: Agent[],
+  // WKH-313: los tres contadores del `excluded` real. Los que no interesan al
+  // escenario van en 0 explícito, no ausentes: el resolver los distingue.
+  excluded?: Partial<{
+    scope: number;
+    reputation: number;
+    trialAvailable: number;
+  }>,
+) {
   return {
     agents,
     total: agents.length,
     registries: ['wasiai'],
-    ...(excluded ? { excluded } : {}),
+    ...(excluded
+      ? {
+          excluded: {
+            scope: 0,
+            reputation: 0,
+            trialAvailable: 0,
+            ...excluded,
+          },
+        }
+      : {}),
   };
 }
 
@@ -382,6 +400,62 @@ describe('HU-208 · una capacidad que no resuelve', () => {
     expect(res.statusCode).toBe(422);
     expect(res.json().reason).toBe('excluded_by_scope');
     expect(res.json().error).toContain("key's scope");
+  });
+
+  // ── T-15b (WKH-313 / DT-10) ──────────────────────────────────────────
+  it('T-CAPROUTE-08b: el 422 dice si fue el PISO DE REPUTACIÓN, no "no hay agente"', async () => {
+    // Éste es el 422 que Chaski recibía en el leg de payout: el agente EXISTE y lo
+    // excluye un piso de 2 que no puede alcanzar porque nunca trabajó. Como el
+    // motivo volvía como `no_candidates`, el diagnóstico apuntaba al catálogo.
+    discoverMock.mockResolvedValue(
+      discovered([], { reputation: 1, trialAvailable: 1 }),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: {
+        steps: [
+          {
+            capability: 'remittance-payout',
+            input: {},
+            constraints: { min_reputation: 2 },
+          },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().reason).toBe('excluded_by_reputation');
+    expect(res.json().error).toContain('min_reputation');
+    // Y nombra la salida: hay un candidato a un flag de distancia.
+    expect(res.json().error).toContain('allow_trial');
+  });
+
+  it('T-CAPROUTE-08c: `allow_trial: true` en un step es forma VÁLIDA y llega al pipeline', async () => {
+    discoverMock.mockResolvedValue(discovered([makeAgent('nuevo')]));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: {
+        steps: [
+          {
+            capability: 'remittance-payout',
+            input: {},
+            constraints: { min_reputation: 2, allow_trial: true },
+          },
+        ],
+      },
+    });
+
+    // Sin la clave en el allowlist de forma, esto era 400 `unsupported constraint`.
+    expect(res.statusCode).not.toBe(400);
+    expect(discoverMock).toHaveBeenCalledWith(
+      expect.objectContaining({ minReputation: 2, allowTrial: true }),
+    );
   });
 });
 

@@ -499,7 +499,8 @@ export const discoveryService = {
       allAgents = allAgents.filter((a) => {
         const score = a.computedReputation?.score;
         // Rama de MÉRITO primero, byte-idéntica a la de siempre.
-        if ((Number.isFinite(score) ? (score as number) : 0) >= min) return true;
+        if ((Number.isFinite(score) ? (score as number) : 0) >= min)
+          return true;
         // Rama de ESTRENO, segunda. Vacía salvo que el caller haya optado.
         return trialAdmitted.has(a.slug);
       });

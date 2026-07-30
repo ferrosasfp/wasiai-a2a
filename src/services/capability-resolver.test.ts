@@ -130,7 +130,9 @@ describe('HU-208 · resolveCapability — falla CERRADO, con motivo accionable',
       agents: [],
       total: 0,
       registries: [],
-      excluded: { scope: 3 },
+      // WKH-313: el doble se COMPLETA con los dos contadores nuevos (el tipo los
+      // exige), no se afloja el tipo para que el doble viejo siga entrando.
+      excluded: { scope: 3, reputation: 0, trialAvailable: 0 },
     });
 
     const res = await resolveCapability('fx-quote', undefined, undefined);
@@ -148,7 +150,11 @@ describe('HU-208 · resolveCapability — falla CERRADO, con motivo accionable',
     // como un agregado silencioso. El orden verified → reputación → precio se
     // respeta siempre; si un agente no gana, se lo gana con datos, no con un
     // filtro que lo señale.
-    const constraintKeys = ['max_price_usdc', 'min_reputation'];
+    // WKH-313 sumó `allow_trial`, que es una restricción del que PIDE (relaja su
+    // propio piso), no una forma de señalar un agente concreto: el orden
+    // verified → reputación → precio se sigue respetando y el admitido ordena
+    // último. `chain` sigue afuera, y por el mismo motivo de siempre.
+    const constraintKeys = ['max_price_usdc', 'min_reputation', 'allow_trial'];
     expect(constraintKeys).not.toContain('chain');
   });
 });
@@ -185,5 +191,165 @@ describe('HU-208 · createCapabilityResolver — consistencia dentro de una requ
     await resolver.resolve('fx-quote', { max_price_usdc: 5 });
 
     expect(discoverMock).toHaveBeenCalledTimes(2);
+  });
+
+  // ── T-20 (WKH-313 / R-4) ───────────────────────────────────────────────
+  it('T-20: dos steps con `allow_trial` DISTINTO no comparten la resolución memoizada', async () => {
+    // Sin `allow_trial` en la clave del memo, el step que NO optó recibiría el
+    // agente resuelto para el que SÍ optó: un candidato en estreno que nunca
+    // aceptó, sobre el camino del dinero. La clave incluye las restricciones
+    // justamente porque cambian el CONJUNTO de candidatos, y ésta lo cambia.
+    discoverMock.mockResolvedValue({
+      agents: [makeAgent('x')],
+      total: 1,
+      registries: [],
+    });
+    const resolver = createCapabilityResolver(undefined);
+
+    await resolver.resolve('fx-quote', { min_reputation: 2 });
+    await resolver.resolve('fx-quote', {
+      min_reputation: 2,
+      allow_trial: true,
+    });
+
+    expect(discoverMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('T-20 bis: el MISMO `allow_trial` sí comparte la resolución (sigue habiendo memo)', async () => {
+    discoverMock.mockResolvedValue({
+      agents: [makeAgent('x')],
+      total: 1,
+      registries: [],
+    });
+    const resolver = createCapabilityResolver(undefined);
+
+    await resolver.resolve('fx-quote', {
+      min_reputation: 2,
+      allow_trial: true,
+    });
+    await resolver.resolve('fx-quote', {
+      min_reputation: 2,
+      allow_trial: true,
+    });
+
+    expect(discoverMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── T-15 (WKH-313 / DT-10) · el 422 explicable ──────────────────────────
+//
+// Hasta acá, un conjunto vaciado POR EL PISO volvía como `no_candidates`, o sea
+// indistinguible de "esa capacidad no existe". Ese diagnóstico costó tres semanas
+// de confusión en Chaski: el agente existía, y lo excluía un piso de 2 que no podía
+// alcanzar porque nunca había trabajado.
+describe('T-15 (DT-10) · `excluded_by_reputation` como tercer motivo', () => {
+  it('T-15: vacío POR EL PISO → `excluded_by_reputation`, NO `no_candidates`', async () => {
+    discoverMock.mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      excluded: { scope: 0, reputation: 1, trialAvailable: 0 },
+    });
+
+    const res = await resolveCapability(
+      'remittance-payout',
+      { min_reputation: 2 },
+      undefined,
+    );
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.failure.reason).toBe('excluded_by_reputation');
+      expect(res.failure.message).toContain('min_reputation');
+    }
+  });
+
+  it('T-15: con candidatos en estreno disponibles, el mensaje NOMBRA la salida', async () => {
+    // Un 422 que dice "no hay agente" cuando hay uno a un flag de distancia manda a
+    // buscar el problema al catálogo, que es el lugar equivocado.
+    discoverMock.mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      excluded: { scope: 0, reputation: 1, trialAvailable: 1 },
+    });
+
+    const res = await resolveCapability(
+      'remittance-payout',
+      { min_reputation: 2 },
+      undefined,
+    );
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.failure.reason).toBe('excluded_by_reputation');
+      expect(res.failure.message).toContain('allow_trial');
+      expect(res.failure.message).toContain('no settled history');
+    }
+  });
+
+  it('T-15: con `scope > 0` gana `excluded_by_scope` (el orden se preserva)', async () => {
+    // Si la credencial ni siquiera alcanza al agente, ese es el problema de más
+    // arriba: contestar por el piso mandaría a arreglar lo que no está roto.
+    discoverMock.mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      excluded: { scope: 2, reputation: 3, trialAvailable: 0 },
+    });
+
+    const res = await resolveCapability(
+      'fx-quote',
+      { min_reputation: 2 },
+      undefined,
+    );
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.failure.reason).toBe('excluded_by_scope');
+  });
+
+  it('T-15: vacío SIN exclusiones sigue siendo `no_candidates`', async () => {
+    discoverMock.mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      excluded: { scope: 0, reputation: 0, trialAvailable: 0 },
+    });
+
+    const res = await resolveCapability('inexistente', undefined, undefined);
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.failure.reason).toBe('no_candidates');
+  });
+
+  it('T-15: `allow_trial` se MAPEA a `query.allowTrial` (si no, el caller pide y no pasa nada)', async () => {
+    discoverMock.mockResolvedValue({
+      agents: [makeAgent('nuevo')],
+      total: 1,
+      registries: [],
+    });
+
+    await resolveCapability(
+      'remittance-payout',
+      { min_reputation: 2, allow_trial: true },
+      undefined,
+    );
+
+    expect(discoverMock).toHaveBeenCalledWith(
+      expect.objectContaining({ minReputation: 2, allowTrial: true }),
+    );
+  });
+
+  it('T-15: sin `allow_trial` en las constraints, `allowTrial` NO viaja', async () => {
+    discoverMock.mockResolvedValue({
+      agents: [makeAgent('x')],
+      total: 1,
+      registries: [],
+    });
+
+    await resolveCapability('fx-quote', { min_reputation: 2 }, undefined);
+
+    const query = discoverMock.mock.calls[0]?.[0] as DiscoveryQuery;
+    expect('allowTrial' in query).toBe(false);
   });
 });
