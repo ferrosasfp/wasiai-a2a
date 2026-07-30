@@ -166,6 +166,30 @@ export interface SolanaSettleProof {
  * expiracion del blockhash. Y la precondicion de despliegue —el endpoint tiene que
  * retener historico— se verifica en el preflight de arranque
  * (`schema-preflight.ts`), en vez de quedar como un supuesto tacito.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ⛔ NO LE AGREGUES UN SEXTO ESTADO A ESTA UNION (WKH-319, CD-13).
+ *
+ * Esta advertencia vive ACA —y no solo en el codigo que la razona— porque ACA es
+ * el lugar fisico donde alguien lo haria, y porque el compilador NO lo va a frenar.
+ *
+ * Los cuatro consumidores (`payment.ts`: `settleAlreadyConfirmed`,
+ * `settleAlreadySigned`, `settleViaFacilitator`, `recoverConfirmedSettle`)
+ * discriminan con CADENAS DE `if`, no con `switch` exhaustivo. Un estado nuevo que
+ * alguien no agregue a esas cadenas cae por descarte en la cola de
+ * `settleAlreadySigned`, que —tras probar la expiracion del blockhash—
+ * **RE-TRANSMITE**. En Solana no hay backstop on-chain: eso es un SEGUNDO PAGO
+ * REAL, en silencio, y TypeScript no dice una palabra.
+ *
+ * Si necesitas expresar una causa nueva de indeterminacion, NO es un estado: es un
+ * `detail` de `unknown`, que ya significa exactamente "no se pudo determinar".
+ * Asi resolvio WKH-319 su `terms_*` (ver `checkTerms`), en vez de agregar
+ * `terms_indeterminate` aca.
+ *
+ * Si aun asi hace falta el estado, la cola de `settleAlreadySigned` exige
+ * pertenencia EXPLICITA a `{absent, landed_failed}` y va a fallar cerrada con
+ * `SETTLE_PRESENCE_UNHANDLED`. Ese guard es tu red — no lo saques para "simplificar".
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 export type SettlementPresence =
   /** Aterrizo y cumple los terminos (monto/mint/destino). NO re-transmitir. */

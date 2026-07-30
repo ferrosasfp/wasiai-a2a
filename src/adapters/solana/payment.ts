@@ -161,11 +161,17 @@ function candidateSignatureFromFailure(
 
 // ── WKH-319 · primitivos del guard de TERMINOS ────────────────────────────
 //
-// Transcritos (no importados) de `deposit-verifier.ts`, que resuelve el bug GEMELO
-// del lado ENTRADA (WKH-315). Importar crearia una dependencia
-// `payment.ts → deposit-verifier.ts` al REVES de la que 315 diseño, justo mientras
-// esa HU esta en vuelo. La convergencia tiene dueño: cuando WKH-314 promueva
-// `presence.ts`, estos cuatro primitivos viven ahi una sola vez (TD-319-2).
+// Transcritos (no importados) de `src/adapters/solana/deposit-verifier.ts`, que
+// resuelve el bug GEMELO del lado ENTRADA (WKH-315).
+//
+// ⚠️ ESE ARCHIVO NO EXISTE EN ESTA RAMA (CR MNR-F): vive en la rama de WKH-315, sin
+// mergear. NO confundirlo con `src/adapters/deposit-verifier.ts` —sin `solana/`—,
+// que es el del rail EVM y no tiene ninguno de estos cuatro primitivos.
+//
+// Importar crearia ademas una dependencia `payment.ts → deposit-verifier.ts` al
+// REVES de la que 315 diseño (315 lee de `payment.ts`, no al contrario), justo
+// mientras esa HU esta en vuelo. La convergencia tiene dueño: cuando WKH-314
+// promueva `presence.ts`, estos cuatro primitivos viven ahi una sola vez (TD-319-2).
 
 /**
  * La forma MINIMA de una entrada de `pre/postTokenBalances` que hace falta para
@@ -630,8 +636,31 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       );
     }
 
-    // Llegados aca la presencia es `absent` o `landed_failed`. LAS DOS exigen ademas
-    // la PRUEBA DE EXPIRACION antes de re-firmar.
+    // ⛔ LISTA BLANCA, NO COLA POR DESCARTE (WKH-319, AC-15 / CR MNR-A).
+    //
+    // Acá abajo se RE-TRANSMITE, y en Solana no hay backstop on-chain: un segundo
+    // transfer es plata perdida sin vuelta. Antes esta rama era la cola de una
+    // cadena de `if`, o sea que asumía "llegados acá la presencia es `absent` o
+    // `landed_failed`". Esa afirmación era CORRECTA HOY y NO VERIFICADA POR EL
+    // COMPILADOR: cualquier estado que se agregue a `SettlementPresence` y que
+    // alguien olvide sumar a la cadena caía justo acá, en la rama que vuelve a
+    // pagar, en silencio.
+    //
+    // Sólo estos dos PRUEBAN que la transferencia no ocurrió. Con los 5 estados de
+    // hoy este throw es inalcanzable: existe para que el sexto falle CERRADO.
+    // El `as string` es DELIBERADO y no es pereza de tipos: en este punto TypeScript
+    // ya redujo `presence` a `never` —lo cual es, literalmente, la prueba de que hoy
+    // el guard es inalcanzable— y sin ensanchar no habria forma de escribir la
+    // comprobacion para un estado que TODAVIA NO EXISTE. Ese es el punto del guard.
+    const observed = presence.state as string;
+    if (observed !== 'absent' && observed !== 'landed_failed') {
+      throw new FacilitatorSettleError(
+        `SETTLE_PRESENCE_UNHANDLED: ${req.intentId} (${observed}) — refusing to re-broadcast on a presence state this branch does not know how to prove did not happen`,
+        'unknown',
+      );
+    }
+
+    // Las DOS exigen ademas la PRUEBA DE EXPIRACION antes de re-firmar.
     //
     // ⚠️ AR re-review MNR-2 — `landed_failed` ESTABA EXCEPTUADO de este chequeo, con el
     // razonamiento de que una tx grabada con error es terminal y su firma no puede
@@ -701,8 +730,30 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
    * usandose, pero solo para validar los TERMINOS de una tx que ya sabemos presente.
    *
    * NUNCA lanza: todo fallo se traduce a `unknown`.
+   *
+   * ⚠️ Y AHORA ESO ES ESTRUCTURAL, NO ARGUMENTADO (WKH-319, AR MNR-C). La promesa
+   * estaba sostenida por los `try` alrededor de las DOS llamadas de red, pero el
+   * cuerpo tenia accesos encadenados FUERA de todo `try` (`statuses.value`,
+   * `status.err`, `parsed.meta.err`, los `JSON.stringify` sobre errores on-chain, y
+   * hasta `getSolanaConnection()`). Ninguno es producible por un payload JSON-RPC
+   * valido, pero "NUNCA" es una promesa absoluta y los callers la usan como tal:
+   * quien la lea no deberia tener que auditar el cuerpo para saber si es cierta.
+   * El envoltorio de abajo la hace verdadera por construccion.
    */
   private async probeSettlementPresence(
+    proof: SolanaSettleProof,
+  ): Promise<SettlementPresence> {
+    try {
+      return await this.probeSettlementPresenceInner(proof);
+    } catch (err) {
+      // Distinto de `terms_threw`: aquel es un fallo de la VALIDACION de terminos,
+      // este es cualquier otra cosa del cuerpo del probe. Se distinguen en el log a
+      // proposito (CD-8).
+      return { state: 'unknown', detail: `probe_threw: ${errText(err)}` };
+    }
+  }
+
+  private async probeSettlementPresenceInner(
     proof: SolanaSettleProof,
   ): Promise<SettlementPresence> {
     const connection = getSolanaConnection();
@@ -1390,11 +1441,24 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       if (before !== undefined) {
         preSum += before;
       } else {
-        // Presente en `post`, ausente en `pre`. DOS causas con consecuencias
+        // Presente en `post`, ausente en `pre`. Dos causas con consecuencias
         // OPUESTAS: la ATA se creo en esta misma tx (saldo previo genuinamente 0),
-        // o la lista llego truncada (tomarlo como 0 FABRICA el dato). Una cuenta
-        // que no existia tiene 0 lamports; una cuenta de token existente es
-        // rent-exempt, o sea estrictamente > 0.
+        // o la lista llego truncada (tomarlo como 0 FABRICA el dato).
+        //
+        // ⚠️ LO QUE EL DISCRIMINADOR PRUEBA Y LO QUE NO (AR MNR-B). La implicacion
+        // vale en UNA sola direccion: `0 lamports` PRUEBA que la cuenta no existia
+        // —una cuenta de token es rent-exempt, asi que existir implica > 0—, pero
+        // `> 0 lamports` NO prueba que existiera COMO CUENTA DE TOKEN: una
+        // direccion puede tener lamports sin ser todavia una cuenta de token (ATA
+        // pre-fondeada; el programa ATA soporta crearla sobre una direccion con
+        // saldo, transfiriendo solo la diferencia).
+        //
+        // O sea que este guard tiene un tercer caso, y cae del lado CERRADO: un
+        // pago REAL a una ATA pre-fondeada sale `indeterminate`. No cuesta plata,
+        // pero NO se destraba solo — el mismo payload da el mismo resultado
+        // siempre. Si aparece en produccion, se distingue en el log por
+        // `terms_pre_row_missing` y se resuelve con el tier de direccion (W2.1),
+        // que identifica la cuenta sin depender de los lamports.
         if (lamportsAt(meta.preBalances, index) !== 0) {
           return {
             verdict: 'indeterminate',

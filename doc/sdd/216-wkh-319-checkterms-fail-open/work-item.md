@@ -106,8 +106,37 @@ roto, y sin estos ACs el QA no tiene con qué verlo.
 | **AC-3** | **WHEN** una cuenta del conjunto receptor aparece en `post` y **no** en `pre` (lista `pre` **vacía**, o **presente sin la entry** de `payTo`), **AND** `meta.preBalances[accountIndex]` **no es `0`**, no es leíble o el índice está fuera de rango, THEN THE SYSTEM SHALL devolver `indeterminate` con `detail` `terms_pre_row_missing` | T-319-2, T-319-3, T-319-4 |
 | **AC-4** `[SC]` | **WHEN** una cuenta del conjunto receptor aparece en `pre` y **no** en `post`, THE SYSTEM SHALL aplicar la regla **simétrica** de AC-3/AC-5 sobre `meta.postBalances[accountIndex]`. La simetría **no es estética**: sin ella, una fila nuestra faltante del lado `post` hace que el delta se vea **más chico** y produce un **`landed_mismatch` falso sobre un pago real** | T-319-10 · mutante **M6** |
 | **AC-5** `[SC]` | **WHEN** una cuenta del conjunto receptor aparece en `post` y no en `pre`, **AND** `meta.preBalances[accountIndex] === 0`, THEN THE SYSTEM SHALL tomar su saldo previo como `0n` y **completar la medición** — la **ATA creada en la misma tx** SHALL seguir acreditando (`landed_ok`). El caso espejo (cuenta cerrada en la tx, `postBalances[accountIndex] === 0`) SHALL seguir siendo **medible** | T-319-9, T-319-10 · mutante **M15** |
-| **AC-6** | **WHEN** una entrada del mint esperado tiene `owner` **ausente** (quinta forma), THE SYSTEM SHALL NOT contarla como del receptor **ni** afirmar por eso que la plata fue a otro lado | Paso 4 · T-319-19 |
-| **AC-7** `[SC]` | **IF** existe al menos una entrada no clasificable (`owner` ausente y sin tier de dirección) **AND** el delta medido es `< required`, THEN THE SYSTEM SHALL devolver `indeterminate` (`terms_unclassifiable_entry`) y SHALL NOT devolver `mismatch`. **WHILE** el delta medido ya alcanza `required`, THE SYSTEM SHALL devolver `match` (medir de menos no puede volver verdadero un `>=` falso) | `sdd.md` §4.6 W1 · T-319-19 |
+| **AC-6** | **WHEN** una entrada del mint esperado tiene `owner` **ausente** (quinta forma), THE SYSTEM SHALL NOT contarla como del receptor **ni** afirmar por eso que la plata fue a otro lado | Paso 4 · T-319-7b/7c |
+
+> ### ⚠️ ENMIENDA AL AC-7 — el AC original describía el bug, no el arreglo
+>
+> **AC-7 decía**: *"medir de menos no puede volver verdadero un `>=` falso"*, y por
+> lo tanto autorizaba `match` con entradas no clasificables **de cualquier lado**.
+> El implementador lo cumplió al pie de la letra, y el resultado fue **la sexta
+> forma del fail-open**.
+>
+> **El input que lo rompe** (ejecutado, `required = 3000000`):
+>
+> ```
+> pre : [{idx 1, owner: payTo, '0'}, {idx 9, SIN owner, '100000000'}]
+> post: [{idx 1, owner: payTo, '3000000'}, {idx 9, SIN owner, '0'}]
+> ```
+>
+> Las tenencias de `payTo` **bajaron de 100 USDC a 3**, y el veredicto era
+> **`match` ⟹ `landed_ok` ⟹ `success:true`**.
+>
+> **Por qué el AC estaba mal**: una entrada sin clasificar no entra a ninguno de los
+> dos mapas, así que además de no sumar es **invisible para el guard de simetría**. Y
+> el efecto es **opuesto según el lado**: en `post` no medirla achica el delta (eso sí
+> es sub-medir); en `pre` achica `preSum` y por lo tanto **agranda** el delta. La
+> frase del AC sólo era cierta para `post`.
+>
+> **El control que lo vuelve prueba**: la misma forma **con `owner` declarado** da
+> `terms_negative_delta`. Omitir un campo **opcional del esquema** era lo único que
+> hacía falta para convertir un caso cazado en un pago certificado.
+>
+> Corregido en AC-7. Enmienda escrita por `nexus-dev` durante F3, a pedido del AR.
+| **AC-7** `[SC]` **CORREGIDO — el AC original estaba MAL (AR BLQ-1)** | **IF** existe al menos una entrada no clasificable **en la lista `pre`**, THEN THE SYSTEM SHALL NOT devolver `match` **bajo ninguna circunstancia**, y SHALL devolver `indeterminate` (`terms_unclassifiable_entry`). **IF** existe al menos una entrada no clasificable **en `post`** **AND** el delta medido es `< required`, THEN THE SYSTEM SHALL devolver `indeterminate` y SHALL NOT devolver `mismatch`. **IF** hay entradas no clasificables en `pre` **AND** el delta es `< required`, THE SYSTEM SHALL devolver `indeterminate` (el delta verdadero podría ser **negativo**, y `mismatch` ahí es condena permanente) | T-319-7b, **T-319-7c**, T-319-7d · mutantes **M19**, **M20** |
 | **AC-8** `[SC]` (W2) | **WHERE** el tier de dirección está disponible **AND** `addressAt(accountIndex) === expectedAta`, THE SYSTEM SHALL contar la entrada como del conjunto receptor **aunque `owner` esté ausente**, resolviendo a `landed_ok` un pago real que en W1 quedaba `unknown`. La identidad SHALL ser una **UNIÓN** (`dirección ∨ owner`), nunca una conjunción | T-319-19 · mutante **M17** |
 
 ### Bloque B — La familia de `amount` y la forma de las entradas
@@ -153,7 +182,23 @@ roto, y sin estos ACs el QA no tiene con qué verlo.
 | **AC-25** | **WHEN** `checkTerms` devuelve `indeterminate` en la rama `signed`, `settleAlreadySigned` SHALL lanzar `SETTLE_IN_FLIGHT_UNRESOLVED`, con **cero** llamadas a `sendRawTransaction`, y SHALL NOT marcar la fila `confirmed` | `payment.ts:452`, `:478-486` · T-319-14 |
 | **AC-26** | **WHEN** `checkTerms` devuelve `indeterminate` dentro de `recoverConfirmedSettle`, el leg SHALL aparecer como `SETTLE_UNKNOWN` (`valueDisposition:'unknown'`) y SHALL NOT aparecer como `SETTLE_FAILED` | `payment.ts:1000` · `downstream-payment.ts:501-520` · T-319-15 |
 | **AC-27** | **WHEN** `checkTerms` devuelve `indeterminate` dentro de `settleViaFacilitator`, la fila SHALL quedar en `signed` (sin `recordConfirmedIntent`) | `payment.ts:775`, `:791-802` · T-319-16 |
-| **AC-28** | Todo `detail` de indeterminación de términos SHALL llevar el prefijo estable **`terms_`** y una causa distinguible (`terms_list_absent`, `terms_entry_shape`, `terms_amount_unreadable`, `terms_pre_row_missing`, `terms_post_row_missing`, `terms_negative_delta`, `terms_unclassifiable_entry`, `terms_threw`) | logs de `probeSettlementPresence` · CD-8 |
+| **AC-28** **ACTUALIZADO en F3** | Todo `detail` de indeterminación de términos SHALL llevar el prefijo estable **`terms_`** y una causa distinguible. **Inventario real, verificado contra el código** (`grep -o 'terms_[a-z_]*'`): `terms_list_absent`, `terms_entry_shape`, `terms_amount_unreadable`, `terms_pre_row_missing`, `terms_post_row_missing`, `terms_negative_delta`, `terms_unclassifiable_entry`, `terms_threw`, **`terms_meta_absent`**, **`terms_required_unreadable`**, **`terms_duplicate_index`**. Y una causa de indeterminación que **no es de términos** y por eso NO lleva ese prefijo: **`probe_threw`** | logs de `probeSettlementPresence` · CD-8 |
+
+> ### 📋 Desviaciones del inventario de `detail` declaradas en F3 (AR/CR MNR-E)
+>
+> El prefijo existe **para medir en producción**, así que un identificador que cambia
+> sin declararse rompe la consulta del operador. Las cuatro desviaciones:
+>
+> | # | Qué | Por qué |
+> |---|---|---|
+> | 1 | **Renombre** `terms_pre_list_absent` → **`terms_list_absent`** (el SDD §4.3 usaba el primero) | El guard es **una sola comprobación sobre las DOS listas** y su `detail` reporta el estado de ambas (`pre=false post=true`). Llamarlo `pre_…` haría creer que existe un `terms_post_list_absent` que no existe |
+> | 2 | **Nuevo** `terms_meta_absent` | La rama `!meta`. Estructuralmente **inalcanzable** desde los dos call-sites (los dos guardan `!parsed?.meta` antes), pero devolver `mismatch` ahí contradecía CD-2 |
+> | 3 | **Nuevo** `terms_required_unreadable` | `BigInt(proof.amountAtomic)` **lanzaba** para un `amountAtomic` no decimal, y `BigInt('')` es `0n`. **Ojo**: es el único `terms_*` cuyo dato malo es **NUESTRO** (sale del ledger), no de la cadena |
+> | 4 | **Nuevo** `terms_duplicate_index` | La misma cuenta de token listada dos veces en la misma lista son datos incoherentes. `Map.set` habría dejado ganar a la última en silencio |
+>
+> Las tres nuevas son **alcanzables**, **fallan cerradas**, **ninguna colapsa una
+> distinción existente** y **ninguna filtra nada** (van a `logger.warn`, nunca al body
+> de una respuesta). Verificado por el AR.
 | **AC-29** | La cola de re-transmisión de `settleAlreadySigned` SHALL exigir **pertenencia explícita** a `{absent, landed_failed}`; un estado no contemplado SHALL lanzar `SETTLE_PRESENCE_UNHANDLED` en vez de re-transmitir | `payment.ts:500-517` · T-319-18 · mutante **M13** |
 | **AC-30** | (W2) `verify()` SHALL marcar `indeterminate: true` en **toda** negativa no medida (tx no parseable en el nodo consultado, términos indeterminados), **sin** cambiar su `valid` | `payment.ts:1144-1165` · T-319-17 · mutante **M12b** |
 

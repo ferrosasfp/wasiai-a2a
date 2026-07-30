@@ -177,6 +177,7 @@ más los de HUs viejas (`134-`, `144-`, `191-`, `093-`). Se leyó el de 315 y se
 | 5 | `src/adapters/solana/payment.ts` · `settleAlreadySigned:500-517` | Modificar | Lista-blanca explícita en la cola | W2 | AC-15 |
 | 6 | `src/adapters/solana/payment.test.ts` | Modificar (4 fixtures) + tests nuevos | §8 | W1-W2 | todos |
 | 7 | `src/adapters/solana/intent-dedup.test.ts` | Modificar (2 fixtures) + tests nuevos | §8 | W1-W2 | AC-10..13 |
+| 7b | `src/adapters/solana/payment.flag.test.ts` | Modificar (**sólo-tests**, agregado en F3 · MNR-G) | Es el **único** archivo con el harness del facilitator (spy de `fetch` + doble de ledger), así que es el hogar natural de **T-319-16** (AC-13). Sin él, el consumidor del cruce de límite de confianza queda sin test | W1 | AC-13 |
 | 8 | `doc/sdd/216-.../_INDEX-row.md`, `doc/sdd/_INDEX.md` | Crear/Modificar | Cierre | W3 | — |
 
 **Ningún archivo más.** No hay migraciones, no hay envs nuevas, no hay dependencias nuevas.
@@ -278,11 +279,27 @@ es la decisión más importante del SDD:
 
 Lo que **sí** se hace es cerrar esa trampa para el próximo (AC-15, §4.7) y no perder
 diagnosticabilidad: **todo `detail` de indeterminación de términos lleva el prefijo estable
-`terms_`** (`terms_pre_list_absent`, `terms_entry_shape`, `terms_amount_unreadable`,
-`terms_pre_row_missing`, `terms_post_row_missing`, `terms_negative_delta`,
-`terms_unclassifiable_entry`, `terms_threw`). El operador distingue en el log *"el RPC no
-contestó"* (reintentar contra otro nodo, se destraba solo) de *"las listas de balances no se
-pudieron interpretar"* (el mismo nodo va a volver a fallar). **CD-8.**
+`terms_`**. El operador distingue en el log *"el RPC no contestó"* (reintentar contra otro
+nodo, se destraba solo) de *"las listas de balances no se pudieron interpretar"* (el mismo
+nodo va a volver a fallar). **CD-8.**
+
+> **ENMIENDA F3 (MNR-E) — inventario real, verificado contra el código.** La lista que
+> este SDD publicaba cambió en implementación y las desviaciones se declaran acá en vez
+> de dejarlas implícitas (el prefijo existe **para medir en producción**, así que un
+> identificador que cambia sin avisar rompe la consulta del operador):
+>
+> `terms_list_absent` (**renombrado** desde `terms_pre_list_absent`: el guard es UNA
+> comprobación sobre las DOS listas y su `detail` reporta el estado de ambas, así que el
+> nombre viejo hacía creer que existía un `terms_post_list_absent`), `terms_entry_shape`,
+> `terms_amount_unreadable`, `terms_pre_row_missing`, `terms_post_row_missing`,
+> `terms_negative_delta`, `terms_unclassifiable_entry`, `terms_threw`, y **tres nuevos**:
+> `terms_meta_absent`, `terms_required_unreadable`, `terms_duplicate_index`.
+>
+> Aparte, `probe_threw` — que **no lleva el prefijo `terms_` a propósito**: no es un
+> fallo de la validación de términos sino del resto del cuerpo del probe (AR MNR-C), y
+> mezclarlos le sacaría al operador justo la distinción que el prefijo le da.
+>
+> El detalle de por qué cada uno, en `work-item.md` (AC-28).
 
 ### 4.4 DT-3 — El cuerpo nuevo de `checkTerms`, guard por guard
 
@@ -433,10 +450,34 @@ independiente (`deposit-verifier.ts:414-423`).
 
 **W1 (corte mínimo):** una entrada de nuestro mint con `owner` ausente **no es nuestra**, pero
 **si existe al menos una** y el delta medido resulta `< required`, el veredicto es
-**`indeterminate`** (`terms_unclassifiable_entry`), **no `mismatch`**. Fundamento: una entrada
-no clasificada sólo puede **agregar** al lado que no medimos; si aún así el delta medido ya
-alcanza, la afirmación positiva es sólida (medir de menos no puede volver verdadero un
-`>=` falso). Si **no** alcanza, no podemos afirmar la negativa.
+**`indeterminate`** (`terms_unclassifiable_entry`), **no `mismatch`**.
+
+> ### 🔴 ENMIENDA F3 — el párrafo que seguía acá estaba MAL, y era un fail-open (AR BLQ-1)
+>
+> **Decía**: *"una entrada no clasificada sólo puede agregar al lado que no medimos; si
+> aún así el delta medido ya alcanza, la afirmación positiva es sólida (medir de menos
+> no puede volver verdadero un `>=` falso)"*.
+>
+> **Eso es cierto para `post` y FALSO para `pre`.** Una entrada sin clasificar no entra
+> a ninguno de los dos mapas, así que además de no sumar es **invisible para el guard
+> de simetría del Paso 5**. Y el efecto de esa ceguera es **opuesto según el lado**:
+>
+> - en **`post`**, no medirla achica `postSum` ⟹ **achica** el delta ⟹ sub-mide;
+> - en **`pre`**, no medirla achica `preSum` ⟹ **AGRANDA** el delta ⟹ puede volver
+>   verdadero un `>=` que era falso. **Es la mecánica exacta del `?? []` original.**
+>
+> Repro ejecutado (`required = 3000000`): `pre` con una entrada anónima de 100 USDC que
+> en `post` baja a 0, más la nuestra que sube de 0 a 3 ⟹ **`match`**. Las tenencias de
+> `payTo` se derrumbaron y el sistema certificó el pago. La misma forma **con `owner`
+> declarado** ya se cazaba (`terms_negative_delta`).
+>
+> **Regla correcta, implementada:** el contador se parte por lado.
+> - `match` exige `unclassifiablePre === 0`;
+> - `mismatch` exige **los dos** en cero. La exigencia sobre `pre` no es simetría
+>   estética: si esa entrada fuera nuestra, el delta **verdadero** podría ser
+>   **negativo**, o sea justo lo que el guard de delta negativo existe para no
+>   condenar. Sin ella, omitir `owner` alcanza para saltearse ese guard y producir
+>   `SETTLE_CONFIRMED_BUT_UNVERIFIABLE` —condena permanente— sobre datos incoherentes.
 
 **W2 (endurecimiento):** se agrega el **tier de dirección**, que hace la mayoría de esos casos
 **medibles** en vez de indeterminados:
@@ -635,13 +676,43 @@ porque el compilador los rompió.
 > está agregando, W2.3); `verify()` sigue sin `indeterminate` (**muerto en producción hoy**,
 > W2.2).
 
+> ### 🧭 DECISIÓN F3 — el tier de dirección (W2.1) **NO** se adelanta al corte
+>
+> El AR dejó abierto si conviene traerlo, porque abarataría el costo operativo del fix
+> de BLQ-1 (entradas sin `owner` que ahora bloquean el `match`) y el de MNR-B. Decidido
+> que **no**, y el motivo principal es de **orden**, no de esfuerzo:
+>
+> 1. **El tier de dirección es una AMPLIACIÓN, no un cierre.** Es una **unión**: sólo
+>    puede convertir `indeterminate` en `match`/`mismatch`. **No puede cerrar un
+>    fail-open — puede abrirlo.** Meter una ampliación en el mismo commit que cierra un
+>    agujero mezcla dos cosas con perfiles de riesgo opuestos, y deja al revisor sin
+>    poder verificar el cierre por separado. Primero se cierra, después se ensancha.
+> 2. **Su beneficio operativo en el camino caliente es chico.** El `owner` se omite
+>    —según el propio AR— en transacciones **viejas servidas desde almacenamiento de
+>    largo plazo**, y `probeSettlementPresence` lee a `confirmed` **inmediatamente
+>    después** de settlear: transacciones frescas. La clase de input que el tier
+>    resolvería casi no aparece en el momento en que este código corre.
+> 3. **Agrega superficie que LANZA a un guard cuya propiedad estrella es "NUNCA
+>    lanza"**: `new PublicKey()` y `getAssociatedTokenAddressSync()` lanzan con base58
+>    inválido u owner off-curve, más una lectura defensiva de `accountKeys`. Sumar
+>    throw-surface en el mismo tramo en que se acaba de cerrar una brecha de honestidad
+>    sobre throws (MNR-C) es exactamente el orden equivocado.
+> 4. **Ya está especificado con sus tests y mutantes propios** (T-319-19, T-319-20, M17,
+>    M18). Traerlo sin ellos sería peor que dejarlo donde está: perdería la evidencia
+>    que su propio diseño exige.
+>
+> **Costo aceptado, explícito**: hasta W2.1, un pago real cuya entrada de `pre` venga sin
+> `owner` sale `indeterminate`. Es **fail-closed** (no cuesta plata) pero
+> **determinístico** (no se destraba solo), y por eso el log ahora lo dice con todas las
+> letras (MNR-D) y apunta al runbook. Si aparece en producción, W2.1 es la respuesta.
+
 ### W2 — Endurecimiento (paralelizable: tres tareas independientes)
 
 | Tarea | Qué | AC |
 |---|---|---|
 | W2.1 | Tier de dirección para el `owner` ausente (§4.6): `expectedAta` + `addressAt`, **envueltos** | AC-8 |
 | W2.2 | `verify()` ⇒ `indeterminate:true` en las dos negativas no medidas + **corregir el docstring caduco de `:1144-1156`** | AC-14 |
-| W2.3 | Lista-blanca en la cola de `settleAlreadySigned` (§4.7) | AC-15 |
+| W2.3 | ~~Lista-blanca en la cola de `settleAlreadySigned` (§4.7)~~ **ADELANTADA AL CORTE en F3** (CR MNR-A): el CR verificó que hoy un estado nuevo **compila limpio** y cae en la rama que re-transmite, y este mismo SDD lo registra como riesgo **"Alto — segundo pago"** (R-5). Dejar la mitigación para después es dejar el segundo pago disponible. Hecha, con T-319-18 y mutante M13 | AC-15 ✅ |
 | W2.4 | `creditedAtomic` en el log del `landed_ok` (§4.8) | — |
 
 ### W3 — Evidencia y cierre

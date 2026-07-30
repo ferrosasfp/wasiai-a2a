@@ -1774,6 +1774,64 @@ describe('WKH-319 · AC-10/AC-11/AC-12: la indeterminación llega a los consumid
     expect(legCodeFor(err)).toBe('SETTLE_FAILED');
   });
 
+  it('T-319-11b (AR MNR-C): "NUNCA lanza" es cierto para TODO el cuerpo del probe', async () => {
+    // El cinturón de CD-6 envolvía `checkTerms`, pero el cuerpo tenía accesos
+    // encadenados fuera de todo `try` (`statuses.value`, `status.err`,
+    // `parsed.meta.err`). La promesa es absoluta y los callers la usan como tal:
+    // acá se fuerza un throw ANTES de `checkTerms` y el probe tiene que absorberlo.
+    seedRow('run:0');
+    fakeConnection.getSignatureStatuses.mockImplementationOnce(() =>
+      Promise.resolve({
+        get value(): never {
+          throw new Error('status payload exploded');
+        },
+      }),
+    );
+
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+
+    // No propaga el TypeError: sale por la rama de indeterminación, y con una causa
+    // distinguible de la de términos.
+    expect(String(err)).toMatch(/SETTLE_PRESENCE_UNKNOWN/);
+    expect(String(err)).toMatch(/probe_threw: status payload exploded/);
+    expect(String(err)).not.toMatch(/terms_threw/);
+    expect(legCodeFor(err)).toBe('SETTLE_UNKNOWN');
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+
+  it('T-319-18 (AC-15): un SEXTO estado de presencia NO puede llegar a la cola que re-transmite', async () => {
+    // ⚠️ EL GUARD QUE EXISTE PARA EL PRÓXIMO, NO PARA HOY. Con los 5 estados
+    // actuales es inalcanzable. Se ejercita inyectando un estado inventado por cast
+    // —exactamente lo que haría alguien que agregue uno a `SettlementPresence` y se
+    // olvide de sumarlo a las cadenas de `if` de los cuatro consumidores.
+    //
+    // Sin la lista blanca, este estado cae por descarte en la rama que prueba la
+    // expiración del blockhash y RE-TRANSMITE: un segundo SPL transfer real,
+    // irreversible, sin que TypeScript diga una palabra.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'SixthStateSig',
+      lastValidBlockHeight: '100',
+    });
+    fakeConnection.getBlockHeight.mockResolvedValue(900); // expirado: re-firmaría
+    const probe = vi
+      .spyOn(
+        adapter as unknown as {
+          probeSettlementPresence: () => Promise<unknown>;
+        },
+        'probeSettlementPresence',
+      )
+      .mockResolvedValue({ state: 'terms_indeterminate', detail: 'inventado' });
+
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+
+    expect(String(err)).toMatch(/SETTLE_PRESENCE_UNHANDLED/);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    expect(reclaimMock).not.toHaveBeenCalled();
+    expect(legCodeFor(err)).toBe('SETTLE_UNKNOWN');
+    probe.mockRestore();
+  });
+
   it('T-319-15: timeout de confirmación + `pre` ausente ⟹ SETTLE_UNKNOWN, no SETTLE_FAILED', async () => {
     // `recoverConfirmedSettle`: la incertidumbre viaja con `valueDisposition:'unknown'`
     // hasta el leg, que la publica como SETTLE_UNKNOWN. Un `landed_mismatch` acá se
