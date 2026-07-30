@@ -248,18 +248,20 @@ describe('T-02 (AC-2) · el admitido viene MARCADO y sin score fabricado', () =>
       ['arranco', counters({ tasksSettled: 1, successCount: 1, reputation: rep(2, 1) })],
     ]);
 
+    // Piso 8: por encima de su score real (2) y por DEBAJO del techo T (10), así
+    // que lo que decide es el carril y no el techo.
     const result = await discoveryService.discover({
-      minReputation: 50,
+      minReputation: 8,
       allowTrial: true,
     });
 
     expect(result.agents[0]?.trial).toEqual({
       granted: true,
-      under_min_reputation: 50,
+      under_min_reputation: 8,
       tasks_settled: 1,
       remaining_settled_tasks: 2,
     });
-    // Y conserva su score REAL, que es el que tenía: 2, no 50.
+    // Y conserva su score REAL, que es el que tenía: 2, no 8.
     expect(result.agents[0]?.computedReputation?.score).toBe(2);
   });
 });
@@ -397,8 +399,10 @@ describe('T-05 (AC-5/CD-14) · el primer `failed` ANULA el carril, no lo decreme
       ],
     ]);
 
+    // Piso 8, no 50: por debajo del techo T, así que si esto queda vacío es POR LA
+    // ANULACIÓN y no porque el techo lo haya frenado antes (el test mediría aire).
     const result = await discoveryService.discover({
-      minReputation: 50,
+      minReputation: 8,
       allowTrial: true,
     });
 
