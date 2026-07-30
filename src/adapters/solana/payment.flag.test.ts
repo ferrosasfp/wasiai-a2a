@@ -388,6 +388,48 @@ describe('T-AC3 — exactamente UN camino por request, nunca los dos', () => {
     expect(mockRecordConfirmed).not.toHaveBeenCalled();
     expect(rows.get('run-vbt:0')?.status).toBe('signed');
   });
+
+  it('T-319-16 (WKH-319): la firma ESTÁ pero los términos no se pueden medir ⟹ la fila queda `signed`', async () => {
+    // ⚠️ EL ÚNICO CRUCE DE LÍMITE DE CONFIANZA. `checkTerms` es la ÚNICA verificación
+    // de que el facilitator movió la plata. Con `preTokenBalances` ausente el guard
+    // viejo fabricaba un `landed_ok` y la fila saltaba a `confirmed` **con la cadena
+    // sin respaldarlo** — y `confirmed` es un estado del que no se vuelve: si más
+    // tarde la cadena dijera `absent`, `settleAlreadyConfirmed` la condena para
+    // siempre. El fail-open de hoy no cobraba un doble pago acá: FABRICABA LA CONDENA
+    // DE MAÑANA.
+    process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
+    process.env.SOLANA_FACILITATOR_URL = 'https://facilitator.test';
+    fetchSpy.mockResolvedValue(okPayoutResponse());
+    // El status dice que la firma ESTÁ en la cadena…
+    fakeConnection.getSignatureStatuses.mockResolvedValue({
+      value: [{ err: null }],
+    });
+    // …pero las listas de balances no permiten medir nada: `pre` no vino, y el
+    // saldo de `payTo` en `post` es su saldo ABSOLUTO, no lo que esta tx movió.
+    fakeConnection.getParsedTransaction.mockResolvedValue({
+      meta: {
+        err: null,
+        postTokenBalances: [
+          {
+            accountIndex: 1,
+            mint: MINT,
+            owner: PAY_TO,
+            uiTokenAmount: { amount: '4900000000' },
+          },
+        ],
+      },
+    });
+
+    const res = await new SolanaPaymentAdapter().settle(settleReq('run-319:0'));
+
+    // El leg NO se reporta fallado (el facilitator respondió 2xx sobre un pago
+    // probablemente real: devolver `false` dispara reembolso y/o re-envío del hop).
+    expect(res.success).toBe(true);
+    // Pero la fila NO salta a `confirmed`: queda reconciliable por un retry.
+    expect(mockRecordConfirmed).not.toHaveBeenCalled();
+    expect(rows.get('run-319:0')?.status).toBe('signed');
+    expect(broadcasts).toHaveLength(0);
+  });
 });
 
 describe('T-AC4 — con la bandera ausente todo es idéntico a pre-302', () => {

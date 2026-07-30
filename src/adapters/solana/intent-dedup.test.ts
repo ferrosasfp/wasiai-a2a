@@ -351,10 +351,20 @@ function onChainOk() {
     meta: {
       err: null,
       preTokenBalances: [
-        { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '0' } },
+        {
+          accountIndex: 1,
+          owner: PAY_TO,
+          mint: MINT,
+          uiTokenAmount: { amount: '0' },
+        },
       ],
       postTokenBalances: [
-        { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: AMOUNT } },
+        {
+          accountIndex: 1,
+          owner: PAY_TO,
+          mint: MINT,
+          uiTokenAmount: { amount: AMOUNT },
+        },
       ],
     },
   });
@@ -863,11 +873,21 @@ describe('WKH-307 · AR re-review: términos, expiración y alcance de `absent`'
       meta: {
         err: null,
         preTokenBalances: [
-          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '0' } },
+          {
+            accountIndex: 1,
+            owner: PAY_TO,
+            mint: MINT,
+            uiTokenAmount: { amount: '0' },
+          },
         ],
         // delta = 1, muy por debajo de AMOUNT
         postTokenBalances: [
-          { owner: PAY_TO, mint: MINT, uiTokenAmount: { amount: '1' } },
+          {
+            accountIndex: 1,
+            owner: PAY_TO,
+            mint: MINT,
+            uiTokenAmount: { amount: '1' },
+          },
         ],
       },
     });
@@ -1043,5 +1063,640 @@ describe('WKH-307 · DT-8: getSettledSignature es async y discriminado', () => {
     expect(await adapter.getSettledSignature('x')).toEqual({
       state: 'unknown',
     });
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// WKH-319 — el fail-open del camino de SALIDA (`checkTerms`)
+// ══════════════════════════════════════════════════════════════
+//
+// ── POR QUÉ LA SUITE NO PODÍA VER EL BUG ──────────────────────────────────
+//
+// Las 6 fixtures que existían usaban `preTokenBalances: [{owner: PAY_TO, amount:'0'}]`,
+// y `'0'` es **la ÚNICA forma donde el bug es indistinguible del comportamiento
+// correcto**: con el saldo previo en cero, `delta = post - 0 = post`, que es
+// exactamente lo que el código roto calculaba. Además ninguna traía `accountIndex`,
+// que el esquema real del SDK exige — o sea que modelaban una respuesta que el RPC
+// nunca manda. Un fixture "del tipo correcto" que pasa por casualidad.
+//
+// ── LA UNIDAD DE MEDIDA DE ESTA BATERÍA ───────────────────────────────────
+//
+// Todo se observa por el camino REAL de producción (`settle()`), nunca llamando a la
+// función privada. Los tres veredictos son distinguibles desde afuera porque los tres
+// tienen consecuencias DISTINTAS sobre el dinero:
+//
+//   · match         → devuelve la firma previa, cero broadcasts;
+//   · mismatch      → `SETTLE_CONFIRMED_BUT_UNVERIFIABLE` (condena PERMANENTE);
+//   · indeterminate → `SETTLE_PRESENCE_UNKNOWN` (transitorio, el retry re-pregunta).
+
+/** Entrada de balance con la forma REAL del RPC (CD-4/CD-11). */
+function tb(
+  amount: string,
+  over: { accountIndex?: number; owner?: string; mint?: string } = {},
+): Record<string, unknown> {
+  return {
+    accountIndex: over.accountIndex ?? 1,
+    mint: over.mint ?? MINT,
+    owner: over.owner ?? PAY_TO,
+    uiTokenAmount: {
+      amount,
+      decimals: 6,
+      uiAmount: null,
+      uiAmountString: amount,
+    },
+  };
+}
+
+/** Lamports de una cuenta de token EXISTENTE (rent-exempt). Un `1` prueba menos. */
+const RENT_EXEMPT_LAMPORTS = 2039280;
+
+type TermsOutcome =
+  | { kind: 'match'; detail: '' }
+  | { kind: 'mismatch'; detail: string }
+  | { kind: 'indeterminate'; detail: string };
+
+/**
+ * Corre `settle()` sobre una fila `confirmed` y traduce el resultado al veredicto de
+ * TÉRMINOS. Ningún caso de esta batería puede transmitir: se asserta acá adentro.
+ */
+async function termsOutcome(
+  meta: unknown,
+  requiredAtomic: string = AMOUNT,
+): Promise<TermsOutcome> {
+  vi.clearAllMocks();
+  fakeLedger.reset();
+  wireLedger();
+  presenceState.value = { err: null }; // la firma ESTÁ en la cadena
+  seedRow('run:terms', {
+    status: 'confirmed',
+    signature: 'TermsSig',
+    amountAtomic: requiredAtomic,
+  });
+  fakeConnection.getParsedTransaction.mockResolvedValue(meta);
+
+  const out = await adapter
+    .settle(req('run:terms', { amountAtomic: requiredAtomic }))
+    .catch((e: Error) => e);
+
+  expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  if (!(out instanceof Error)) {
+    expect(out).toEqual({ txHash: 'TermsSig', success: true });
+    return { kind: 'match', detail: '' };
+  }
+  const msg = String(out);
+  const indeterminate = /SETTLE_PRESENCE_UNKNOWN: [^(]*\(([\s\S]*)\)$/.exec(
+    msg,
+  );
+  if (indeterminate?.[1] !== undefined) {
+    return { kind: 'indeterminate', detail: indeterminate[1] };
+  }
+  const mismatch =
+    /SETTLE_CONFIRMED_BUT_UNVERIFIABLE: [^(]*\(landed_mismatch: ([\s\S]*)\)$/.exec(
+      msg,
+    );
+  if (mismatch?.[1] !== undefined) {
+    return { kind: 'mismatch', detail: mismatch[1] };
+  }
+  throw new Error(`veredicto de términos no reconocido: ${msg}`);
+}
+
+describe('WKH-319 · AC-1: una lista AUSENTE no es una lista vacía', () => {
+  it('T-319-1: LA REPRO — `payTo` GASTA 100 USDC con `pre` ausente ⟹ NUNCA landed_ok', async () => {
+    // La transacción es AJENA: `payTo` aparece como PAGADOR y no recibe nada de
+    // nosotros. Con el `?? []`, `delta` dejaba de ser un delta y pasaba a ser el
+    // SALDO ABSOLUTO de payTo (4900 USDC) — o sea que la firma de una tx de un
+    // tercero se certificaba como "nuestro pago llegó".
+    const out = await termsOutcome(
+      { meta: { err: null, postTokenBalances: [tb('4900000000')] } },
+      '1000000',
+    );
+    expect(out.kind).toBe('indeterminate');
+    expect(out.detail).toMatch(/^terms_/);
+    expect(out.detail).toMatch(/^terms_list_absent/);
+  });
+
+  it('T-319-1b: las CINCO formas de la lista ⟹ las cinco indeterminadas', async () => {
+    const credit = [tb(AMOUNT)];
+    const debit = [tb('0')];
+    const forms: Array<[string, unknown]> = [
+      ['pre ausente', { err: null, postTokenBalances: credit }],
+      [
+        'pre null',
+        { err: null, preTokenBalances: null, postTokenBalances: credit },
+      ],
+      ['post ausente', { err: null, preTokenBalances: debit }],
+      [
+        'post null',
+        { err: null, preTokenBalances: debit, postTokenBalances: null },
+      ],
+      ['las dos ausentes', { err: null }],
+    ];
+    for (const [name, meta] of forms) {
+      const out = await termsOutcome({ meta });
+      expect(`${name}: ${out.kind}`).toBe(`${name}: indeterminate`);
+      expect(out.detail).toMatch(/^terms_list_absent/);
+    }
+    // Y con `required = 0` tampoco: no medir sigue siendo no medir, aunque el
+    // umbral sea trivial de alcanzar.
+    const cero = await termsOutcome({ meta: { err: null } }, '0');
+    expect(cero.kind).toBe('indeterminate');
+  });
+
+  it('T-319-2: `pre: []` PRESENTE Y VACÍA con post acreditando ⟹ NO es "saldo previo cero"', async () => {
+    // Una lista vacía y una fila ausente en una lista poblada son la MISMA pregunta
+    // sin responder: ¿esta cuenta tenía saldo antes? El único dato que la responde
+    // son los lamports, y acá dicen que la cuenta YA EXISTÍA.
+    const out = await termsOutcome({
+      meta: {
+        err: null,
+        preTokenBalances: [],
+        postTokenBalances: [tb(AMOUNT)],
+        preBalances: [1_000_000_000, RENT_EXEMPT_LAMPORTS],
+        postBalances: [1_000_000_000, RENT_EXEMPT_LAMPORTS],
+      },
+    });
+    expect(out.kind).toBe('indeterminate');
+    expect(out.detail).toMatch(/^terms_pre_row_missing/);
+  });
+});
+
+describe('WKH-319 · AC-3/AC-4/AC-5: completitud del conjunto receptor', () => {
+  it('T-319-3: `pre` poblada pero SIN nuestra fila, con la cuenta ya existente ⟹ indeterminado', async () => {
+    const out = await termsOutcome({
+      meta: {
+        err: null,
+        // La lista trae otra cuenta (otro owner), o sea que NO está vacía: lo que
+        // falta es justo nuestra fila.
+        preTokenBalances: [tb('7000000', { accountIndex: 5, owner: PAY_TO_B })],
+        postTokenBalances: [
+          tb('7000000', { accountIndex: 5, owner: PAY_TO_B }),
+          tb(AMOUNT),
+        ],
+        preBalances: [
+          1_000_000_000,
+          RENT_EXEMPT_LAMPORTS,
+          0,
+          0,
+          0,
+          RENT_EXEMPT_LAMPORTS,
+        ],
+        postBalances: [
+          1_000_000_000,
+          RENT_EXEMPT_LAMPORTS,
+          0,
+          0,
+          0,
+          RENT_EXEMPT_LAMPORTS,
+        ],
+      },
+    });
+    expect(out.kind).toBe('indeterminate');
+    expect(out.detail).toMatch(/^terms_pre_row_missing/);
+  });
+
+  it('T-319-4: `preBalances` ausente o corto ⟹ indeterminado — `undefined` NO es `0`', async () => {
+    const base = {
+      err: null,
+      preTokenBalances: [],
+      postTokenBalances: [tb(AMOUNT, { accountIndex: 4 })],
+    };
+    for (const [name, meta] of [
+      ['preBalances ausente', base],
+      // Índice 4 fuera de rango: la lista existe pero no llega hasta nuestra cuenta.
+      ['preBalances corto', { ...base, preBalances: [1_000_000_000, 0] }],
+      ['preBalances no-array', { ...base, preBalances: 'nope' }],
+    ] as Array<[string, unknown]>) {
+      const out = await termsOutcome({ meta });
+      expect(`${name}: ${out.kind}`).toBe(`${name}: indeterminate`);
+      expect(out.detail).toMatch(/^terms_pre_row_missing/);
+    }
+  });
+
+  it('T-319-9: la ATA creada EN LA MISMA TX sigue acreditando (AC-4)', async () => {
+    // ⚠️ EL CANARIO CONTRA LA SOBRE-CORRECCIÓN (M15). Un arreglo que exige la fila
+    // en `pre` SIEMPRE rechaza el primer pago que le hacemos a un agente nuevo —
+    // rechazar de más también es un arreglo roto.
+    const out = await termsOutcome({
+      meta: {
+        err: null,
+        preTokenBalances: [],
+        postTokenBalances: [tb(AMOUNT, { accountIndex: 4 })],
+        // 0 lamports en `pre` = la cuenta NO EXISTÍA. Una cuenta de token que
+        // existe es rent-exempt (> 0), así que las dos causas se distinguen.
+        preBalances: [1_000_000_000, 0, 0, 0, 0],
+        postBalances: [999_000_000, 0, 0, 0, RENT_EXEMPT_LAMPORTS],
+      },
+    });
+    expect(out.kind).toBe('match');
+  });
+
+  it('T-319-10: la regla ESPEJO del lado `post` (AC-5)', async () => {
+    // Una cuenta nuestra que se CIERRA en la tx desaparece de `post`, y su saldo
+    // posterior real es 0. Sin la regla simétrica el delta se ve MÁS CHICO y sale un
+    // `landed_mismatch` falso sobre un pago REAL — el mismo error, al revés.
+    const meta = (postLamports: number) => ({
+      err: null,
+      preTokenBalances: [
+        tb('0', { accountIndex: 3 }),
+        tb('5000000000', { accountIndex: 7 }),
+      ],
+      // idx 3 desapareció; idx 7 recibió AMOUNT.
+      postTokenBalances: [tb('5003000000', { accountIndex: 7 })],
+      preBalances: [
+        1_000_000_000,
+        0,
+        0,
+        RENT_EXEMPT_LAMPORTS,
+        0,
+        0,
+        0,
+        RENT_EXEMPT_LAMPORTS,
+      ],
+      postBalances: [
+        1_000_000_000,
+        0,
+        0,
+        postLamports,
+        0,
+        0,
+        0,
+        RENT_EXEMPT_LAMPORTS,
+      ],
+    });
+    // Cuenta cerrada (0 lamports) ⟹ medible ⟹ el pago se acredita.
+    expect((await termsOutcome({ meta: meta(0) })).kind).toBe('match');
+    // La cuenta SIGUE existiendo pero su fila no vino ⟹ lista truncada.
+    const truncated = await termsOutcome({ meta: meta(RENT_EXEMPT_LAMPORTS) });
+    expect(truncated.kind).toBe('indeterminate');
+    expect(truncated.detail).toMatch(/^terms_post_row_missing/);
+  });
+});
+
+describe('WKH-319 · AC-2/AC-9: entradas ilegibles, sin lanzar', () => {
+  it('T-319-5: entradas con forma inválida ⟹ indeterminado, y `checkTerms` NO lanza', async () => {
+    // `preTokenBalances: [null]` tiraba TypeError en el primer `b.mint`. Si el
+    // veredicto llegara por `terms_threw` el guard interno no existiría — el `try`
+    // externo lo estaría tapando. Por eso se exige `terms_entry_shape`.
+    const post = [tb(AMOUNT)];
+    for (const [name, pre] of [
+      ['[null]', [null]],
+      [
+        'sin accountIndex',
+        [{ mint: MINT, owner: PAY_TO, uiTokenAmount: { amount: '0' } }],
+      ],
+      [
+        'uiTokenAmount vacío',
+        [{ accountIndex: 1, mint: MINT, owner: PAY_TO, uiTokenAmount: {} }],
+      ],
+      [
+        'amount no-string',
+        [
+          {
+            accountIndex: 1,
+            mint: MINT,
+            owner: PAY_TO,
+            uiTokenAmount: { amount: 0 },
+          },
+        ],
+      ],
+    ] as Array<[string, unknown]>) {
+      const out = await termsOutcome({
+        meta: { err: null, preTokenBalances: pre, postTokenBalances: post },
+      });
+      expect(`${name}: ${out.kind}`).toBe(`${name}: indeterminate`);
+      expect(out.detail).toMatch(/^terms_entry_shape/);
+      expect(out.detail).not.toMatch(/terms_threw/);
+    }
+  });
+
+  it('T-319-6: la familia de `amount` que `BigInt` acepta o convierte mal', async () => {
+    // ⚠️ `try { BigInt(x) } catch {}` NO alcanza para los cuatro primeros: el catch
+    // NI SE EJECUTA. BigInt('')=0n, BigInt('   ')=0n, BigInt('0x10')=16n.
+    for (const amount of [
+      '',
+      '   ',
+      '0x10',
+      '+5',
+      '1.0',
+      '1e9',
+      '-1',
+      '1_000',
+      // BigInt() ACEPTA el whitespace envolvente: daría 5000000000n en silencio.
+      '\n5000000000\n',
+    ]) {
+      const out = await termsOutcome({
+        meta: {
+          err: null,
+          preTokenBalances: [tb(amount)],
+          postTokenBalances: [tb('5000010000')],
+        },
+      });
+      expect(`${JSON.stringify(amount)}: ${out.kind}`).toBe(
+        `${JSON.stringify(amount)}: indeterminate`,
+      );
+      expect(out.detail).toMatch(/^terms_amount_unreadable/);
+    }
+  });
+
+  it('T-319-5b: `mint` no-string y `uiTokenAmount` no-objeto ⟹ indeterminado', async () => {
+    const post = [tb(AMOUNT)];
+    for (const [name, pre] of [
+      [
+        'mint no-string',
+        [
+          {
+            accountIndex: 1,
+            mint: 7,
+            owner: PAY_TO,
+            uiTokenAmount: { amount: '0' },
+          },
+        ],
+      ],
+      [
+        'uiTokenAmount null',
+        [{ accountIndex: 1, mint: MINT, owner: PAY_TO, uiTokenAmount: null }],
+      ],
+      [
+        'uiTokenAmount string',
+        [{ accountIndex: 1, mint: MINT, owner: PAY_TO, uiTokenAmount: '0' }],
+      ],
+      [
+        'accountIndex fraccionario',
+        [
+          {
+            accountIndex: 1.5,
+            mint: MINT,
+            owner: PAY_TO,
+            uiTokenAmount: { amount: '0' },
+          },
+        ],
+      ],
+    ] as Array<[string, unknown]>) {
+      const out = await termsOutcome({
+        meta: { err: null, preTokenBalances: pre, postTokenBalances: post },
+      });
+      expect(`${name}: ${out.kind}`).toBe(`${name}: indeterminate`);
+      expect(out.detail).toMatch(/^terms_entry_shape/);
+    }
+  });
+
+  it('T-319-5c: OTRO mint no cuenta, y un `accountIndex` repetido no se puede medir', async () => {
+    // Un token cualquiera acreditado a `payTo` en la misma tx NO es nuestro pago.
+    const otroMint = await termsOutcome({
+      meta: {
+        err: null,
+        preTokenBalances: [
+          tb('0'),
+          tb('0', { accountIndex: 8, mint: PAY_TO_B }),
+        ],
+        postTokenBalances: [
+          tb('0'),
+          tb('999000000', { accountIndex: 8, mint: PAY_TO_B }),
+        ],
+      },
+    });
+    expect(otroMint.kind).toBe('mismatch');
+
+    // La MISMA cuenta listada dos veces son datos incoherentes, no un saldo.
+    const duplicado = await termsOutcome({
+      meta: {
+        err: null,
+        preTokenBalances: [tb('0'), tb('0')],
+        postTokenBalances: [tb(AMOUNT)],
+      },
+    });
+    expect(duplicado.kind).toBe('indeterminate');
+    expect(duplicado.detail).toMatch(/^terms_duplicate_index/);
+  });
+
+  it('T-319-5d: un monto REQUERIDO ilegible no es "requerido cero"', async () => {
+    const out = await termsOutcome(
+      {
+        meta: {
+          err: null,
+          preTokenBalances: [tb('0')],
+          postTokenBalances: [tb(AMOUNT)],
+        },
+      },
+      '1.5',
+    );
+    expect(out.kind).toBe('indeterminate');
+    expect(out.detail).toMatch(/^terms_required_unreadable/);
+  });
+
+  it('T-319-11: si `checkTerms` lanzara, `probeSettlementPresence` sigue sin lanzar', async () => {
+    // Cinturón Y tirantes (CD-6): el guard no puede sostenerse sobre su propio
+    // razonamiento. Se fuerza un throw DENTRO de la lectura de las listas.
+    const meta: Record<string, unknown> = { err: null, postTokenBalances: [] };
+    Object.defineProperty(meta, 'preTokenBalances', {
+      get() {
+        throw new Error('rpc payload exploded');
+      },
+      enumerable: true,
+    });
+    const out = await termsOutcome({ meta });
+    expect(out.kind).toBe('indeterminate');
+    expect(out.detail).toMatch(/^terms_threw: rpc payload exploded/);
+  });
+});
+
+describe('WKH-319 · AC-6/AC-7/AC-8: el veredicto', () => {
+  it('T-319-7: delta NEGATIVO ⟹ indeterminado, NUNCA landed_mismatch (AC-6)', async () => {
+    // Para una tx que construimos nosotros esto es físicamente imposible: el destino
+    // no gasta. Un `mismatch` acá es SETTLE_CONFIRMED_BUT_UNVERIFIABLE, o sea condena
+    // permanente con salida manual, por una causa que nunca se midió.
+    const out = await termsOutcome({
+      meta: {
+        err: null,
+        preTokenBalances: [tb('5000000000')],
+        postTokenBalances: [tb('1000000')],
+      },
+    });
+    expect(out.kind).toBe('indeterminate');
+    expect(out.detail).toMatch(/^terms_negative_delta/);
+  });
+
+  it('T-319-8: DOS cuentas del mismo owner+mint ⟹ agregación por accountIndex (AC-7)', async () => {
+    // Con el `.find()` los dos lados resolvían a la PRIMERA entrada de cada lista,
+    // sin exigir que fuera la misma cuenta: acá daría delta 0 ⟹ landed_mismatch
+    // sobre un pago REAL. La de delta 0 va primera en `post` a propósito.
+    const out = await termsOutcome({
+      meta: {
+        err: null,
+        preTokenBalances: [
+          tb('0', { accountIndex: 3 }),
+          tb('5000000000', { accountIndex: 7 }),
+        ],
+        postTokenBalances: [
+          tb('0', { accountIndex: 3 }),
+          tb('5003000000', { accountIndex: 7 }),
+        ],
+      },
+    });
+    expect(out.kind).toBe('match');
+  });
+
+  it('T-319-8b: el `find` resolviendo a cuentas DISTINTAS fabricaba un landed_ok', async () => {
+    // El caso explotable del `.find()`, reproducido: `payTo` tiene dos token
+    // accounts del mismo mint y NO recibió NADA en esta tx. `post` lista primero la
+    // cuenta gorda (B, 5000 USDC) y `pre` lista sólo la flaca (A, 0). Los dos `find`
+    // resolvían a cuentas DISTINTAS ⟹ delta = 5000000000 - 0 ⟹ **landed_ok sobre
+    // una transferencia que nunca ocurrió**. Emparejar por `accountIndex` lo mata.
+    const out = await termsOutcome({
+      meta: {
+        err: null,
+        preTokenBalances: [tb('0', { accountIndex: 3 })],
+        postTokenBalances: [
+          tb('5000000000', { accountIndex: 7 }),
+          tb('0', { accountIndex: 3 }),
+        ],
+        // La cuenta gorda YA EXISTÍA antes de la tx: su fila falta en `pre`, y eso
+        // es una lista truncada, no una ATA recién creada.
+        preBalances: [
+          1_000_000_000,
+          0,
+          0,
+          RENT_EXEMPT_LAMPORTS,
+          0,
+          0,
+          0,
+          RENT_EXEMPT_LAMPORTS,
+        ],
+        postBalances: [
+          1_000_000_000,
+          0,
+          0,
+          RENT_EXEMPT_LAMPORTS,
+          0,
+          0,
+          0,
+          RENT_EXEMPT_LAMPORTS,
+        ],
+      },
+    });
+    expect(out.kind).toBe('indeterminate');
+    expect(out.detail).toMatch(/^terms_pre_row_missing/);
+  });
+
+  it('T-319-12: la negativa MEDIDA sigue viva — landed_mismatch NO es inalcanzable (AC-8, CD-9)', async () => {
+    // ⚠️ REFUERZO DE T-IDM-18b contra la SOBRE-CORRECCIÓN (M16). Si esta aserción
+    // alguna vez hay que aflojarla, el arreglo se pasó: convirtió una negativa
+    // demostrada en una indeterminación.
+    const out = await termsOutcome(
+      {
+        meta: {
+          err: null,
+          preTokenBalances: [tb('0')],
+          postTokenBalances: [tb('1')],
+        },
+      },
+      '1000000',
+    );
+    expect(out.kind).toBe('mismatch');
+    expect(out.detail).toMatch(/on-chain transfer 1 < required 1000000/);
+  });
+
+  it('T-319-7b: `owner` ausente — sub-medir no autoriza afirmar la negativa', async () => {
+    // Una entrada de nuestro mint sin `owner` sólo puede SUMAR al lado que no
+    // medimos. Si aun así el delta medido ALCANZA, la afirmación positiva es sólida;
+    // si NO alcanza, no se puede afirmar la negativa. (W2 la vuelve medible.)
+    const anon = {
+      accountIndex: 9,
+      mint: MINT,
+      uiTokenAmount: { amount: '1', decimals: 6, uiAmount: null },
+    };
+    const noAlcanza = await termsOutcome({
+      meta: {
+        err: null,
+        preTokenBalances: [
+          tb('0'),
+          { ...anon, uiTokenAmount: { amount: '0' } },
+        ],
+        postTokenBalances: [tb('1'), anon],
+      },
+    });
+    expect(noAlcanza.kind).toBe('indeterminate');
+    expect(noAlcanza.detail).toMatch(/^terms_unclassifiable_entry/);
+
+    const alcanza = await termsOutcome({
+      meta: {
+        err: null,
+        preTokenBalances: [
+          tb('0'),
+          { ...anon, uiTokenAmount: { amount: '0' } },
+        ],
+        postTokenBalances: [tb(AMOUNT), anon],
+      },
+    });
+    expect(alcanza.kind).toBe('match');
+  });
+});
+
+describe('WKH-319 · AC-10/AC-11/AC-12: la indeterminación llega a los consumidores', () => {
+  it('T-319-13: fila `confirmed` + `pre` ausente ⟹ SETTLE_PRESENCE_UNKNOWN, no la condena', async () => {
+    seedRow('run:0');
+    presenceState.value = { err: null };
+    fakeConnection.getParsedTransaction.mockResolvedValue({
+      meta: { err: null, postTokenBalances: [tb('4900000000')] },
+    });
+
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+
+    expect(String(err)).toMatch(/SETTLE_PRESENCE_UNKNOWN/);
+    expect(String(err)).toMatch(/terms_list_absent/);
+    expect(String(err)).not.toMatch(/CONFIRMED_BUT_UNVERIFIABLE/);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+  });
+
+  it('T-319-14: fila `signed` + blockhash EXPIRADO + `pre` ausente ⟹ ni confirma ni re-transmite', async () => {
+    // ⚠️ EL PEOR CASO, Y EL QUE MIDE LA PLATA. Antes del arreglo esta misma entrada
+    // daba `landed_ok`: la fila se marcaba `confirmed`, se devolvía `success:true`,
+    // **el agente nunca cobraba** y el reintento quedaba CLAUSURADO para siempre.
+    seedRow('run:0', {
+      status: 'signed',
+      signature: 'InFlightSig',
+      lastValidBlockHeight: '100',
+    });
+    presenceState.value = { err: null };
+    fakeConnection.getBlockHeight.mockResolvedValue(900); // 900 > 100 ⟹ expirado
+    fakeConnection.getParsedTransaction.mockResolvedValue({
+      meta: { err: null, postTokenBalances: [tb('4900000000')] },
+    });
+
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+
+    expect(String(err)).toMatch(/SETTLE_IN_FLIGHT_UNRESOLVED/);
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(0);
+    expect(recordConfirmedMock).not.toHaveBeenCalled();
+    expect(reclaimMock).not.toHaveBeenCalled();
+    // La fila sigue reconciliable: `signed`, con su cota intacta.
+    expect(fakeLedger.rows.get('run:0')).toMatchObject({
+      status: 'signed',
+      signature: 'InFlightSig',
+      lastValidBlockHeight: '100',
+    });
+  });
+
+  it('T-319-15: timeout de confirmación + `pre` ausente ⟹ SETTLE_UNKNOWN, no SETTLE_FAILED', async () => {
+    // `recoverConfirmedSettle`: la incertidumbre viaja con `valueDisposition:'unknown'`
+    // hasta el leg, que la publica como SETTLE_UNKNOWN. Un `landed_mismatch` acá se
+    // degradaría a SETTLE_FAILED — una negativa falsa sobre un leg nunca determinado.
+    presenceState.value = { err: null };
+    fakeConnection.confirmTransaction.mockRejectedValueOnce(
+      new Error('Transaction was not confirmed in 30.00 seconds'),
+    );
+    fakeConnection.getParsedTransaction.mockResolvedValue({
+      meta: { err: null, postTokenBalances: [tb('4900000000')] },
+    });
+
+    const err = await adapter.settle(req('run:0')).catch((e: Error) => e);
+
+    expect((err as { name?: string }).name).toBe('FacilitatorSettleError');
+    expect((err as { valueDisposition?: string }).valueDisposition).toBe(
+      'unknown',
+    );
+    // Se transmitió UNA vez (el settle original), y NO se re-transmitió.
+    expect(fakeConnection.sendRawTransaction).toHaveBeenCalledTimes(1);
+    expect(recordConfirmedMock).not.toHaveBeenCalled();
   });
 });

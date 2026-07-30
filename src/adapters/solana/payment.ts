@@ -159,6 +159,96 @@ function candidateSignatureFromFailure(
   return undefined;
 }
 
+// ── WKH-319 · primitivos del guard de TERMINOS ────────────────────────────
+//
+// Transcritos (no importados) de `deposit-verifier.ts`, que resuelve el bug GEMELO
+// del lado ENTRADA (WKH-315). Importar crearia una dependencia
+// `payment.ts → deposit-verifier.ts` al REVES de la que 315 diseño, justo mientras
+// esa HU esta en vuelo. La convergencia tiene dueño: cuando WKH-314 promueva
+// `presence.ts`, estos cuatro primitivos viven ahi una sola vez (TD-319-2).
+
+/**
+ * La forma MINIMA de una entrada de `pre/postTokenBalances` que hace falta para
+ * MEDIR. `accountIndex` y `mint` son OBLIGATORIOS en el esquema de `@solana/web3.js`;
+ * `owner` es `optional(string())`, por eso viaja como `unknown` y se lee con
+ * `declaredOwner`.
+ */
+type TokenBalanceLike = {
+  accountIndex: number;
+  mint: string;
+  owner?: unknown;
+  uiTokenAmount: { amount: string };
+};
+
+/**
+ * ⚠️ NO reemplazar por `try { BigInt(x) } catch {}`. Para esta familia de strings el
+ * `catch` NI SIQUIERA SE EJECUTA: `BigInt('')` es `0n`, `BigInt('   ')` es `0n` y
+ * `BigInt('0x10')` es `16n`. Un saldo previo ilegible leido como cero es exactamente
+ * el fail-open que esta HU cierra, con otro disfraz.
+ */
+const ATOMIC_AMOUNT_RE = /^[0-9]+$/;
+
+/**
+ * Valida el CONTENIDO, no solo el contenedor. `preTokenBalances: [null]` tira
+ * `TypeError` en el primer `b.mint` (medido en WKH-315): o se cierran todas las
+ * formas, o la promesa "NUNCA lanza" de `probeSettlementPresence` es falsa.
+ */
+function isBalanceEntry(b: unknown): b is TokenBalanceLike {
+  if (typeof b !== 'object' || b === null) return false;
+  const e = b as {
+    accountIndex?: unknown;
+    mint?: unknown;
+    uiTokenAmount?: unknown;
+  };
+  if (typeof e.accountIndex !== 'number' || !Number.isInteger(e.accountIndex)) {
+    return false;
+  }
+  if (typeof e.mint !== 'string') return false;
+  if (typeof e.uiTokenAmount !== 'object' || e.uiTokenAmount === null) {
+    return false;
+  }
+  return typeof (e.uiTokenAmount as { amount?: unknown }).amount === 'string';
+}
+
+/** Copia la lista entera o `null` si CUALQUIER entrada no se puede leer. */
+function readBalanceList(list: unknown[]): TokenBalanceLike[] | null {
+  const out: TokenBalanceLike[] = [];
+  for (const b of list) {
+    if (!isBalanceEntry(b)) return null;
+    out.push(b);
+  }
+  return out;
+}
+
+/** `null` significa "no pude medir", NUNCA cero. */
+function atomicOf(b: TokenBalanceLike): bigint | null {
+  const raw = b.uiTokenAmount.amount;
+  return ATOMIC_AMOUNT_RE.test(raw) ? BigInt(raw) : null;
+}
+
+/**
+ * El `owner` DECLARADO, o `null` si la entrada no lo trae. Leer un `owner` ausente
+ * como "es de otro" es una AFIRMACION SOBRE UN DATO AUSENTE, y sub-mide el delta ⇒
+ * `landed_mismatch` sobre un pago real. Por eso devuelve `null` y el caller decide.
+ */
+function declaredOwner(b: TokenBalanceLike): string | null {
+  return typeof b.owner === 'string' && b.owner.length > 0 ? b.owner : null;
+}
+
+/**
+ * Lamports de `pre/postBalances` en un indice, o `null` si no se puede leer (lista
+ * ausente, no-array, indice fuera de rango, valor no numerico).
+ *
+ * ⚠️ `null` NO es `0`. Es la unica distincion que separa "la ATA se creo en esta
+ * misma tx" (0 lamports: la cuenta no existia) de "la lista llego truncada" — y
+ * tratarlas igual es el fail-open.
+ */
+function lamportsAt(list: unknown, index: number): number | null {
+  if (!Array.isArray(list)) return null;
+  const v: unknown = list[index];
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
 export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
   readonly vmFamily = 'solana' as const;
   readonly name = 'solana';
@@ -1118,6 +1208,20 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
    * pueda reusar la validacion SIN heredar el colapso de dos valores de
    * `VerifyResult`: alli hace falta distinguir "no pude leer la tx" de "los terminos
    * no coinciden", y `verify()` devuelve `{valid:false}` para las dos.
+   *
+   * ⚠️ WKH-319 — ESTA FUNCION NO FALLABA ABIERTO POR NO VERIFICAR: FALLABA ABIERTO
+   * POR VERIFICAR OTRA COSA. Con `preTokenBalances` ausente, un `?? []` fabricaba la
+   * lista, el saldo previo daba `0n`, y `delta` dejaba de ser un delta para pasar a
+   * ser el SALDO ABSOLUTO de `payTo`. La comprobacion degeneraba de *"esta tx
+   * transfirio >= required a payTo"* a *"payTo tiene >= required"*: una tx AJENA en la
+   * que `payTo` GASTA 100 USDC y no recibe nada devolvia `ok:true`.
+   *
+   * ORDEN DE LOS GUARDS = PARTE DEL CONTRATO (CD-12). Cada paso solo puede devolver
+   * `indeterminate` o seguir; `mismatch` es SIEMPRE el ultimo y exige que todo lo
+   * anterior haya salido bien. El delta negativo se chequea ANTES del `< required`
+   * para no quedar tapado por el.
+   *
+   * NUNCA lanza para ninguna entrada admitida por el esquema de `@solana/web3.js`.
    */
   private checkTerms(
     parsed: NonNullable<
@@ -1126,29 +1230,162 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     proof: SolanaSettleProof,
   ): SolanaTermsVerdict {
     const meta = parsed.meta;
-    if (!meta)
-      return { verdict: 'mismatch', detail: 'transaction has no meta' };
-    const mint = getSolanaUsdcMint();
-    const required = BigInt(proof.amountAtomic);
-
-    // Delta de balance de token del owner=payTo para el mint esperado
-    // (verify-before-trust). pre/postTokenBalances son la fuente canonica.
-    const pre = meta.preTokenBalances ?? [];
-    const post = meta.postTokenBalances ?? [];
-    const balanceFor = (list: typeof post): bigint => {
-      const entry = list.find(
-        (b) => b.owner === proof.payTo && b.mint === mint,
-      );
-      return entry ? BigInt(entry.uiTokenAmount.amount) : 0n;
-    };
-    const delta = balanceFor(post) - balanceFor(pre);
-    if (delta < required) {
+    if (!meta) {
+      // Inalcanzable desde los dos call-sites (los dos guardan `!parsed?.meta`
+      // antes), pero sin meta no hay NADA que medir: eso es indeterminacion, no
+      // una negativa.
       return {
-        verdict: 'mismatch',
-        detail: `on-chain transfer ${delta} < required ${required} for ${proof.payTo}`,
+        verdict: 'indeterminate',
+        detail: 'terms_meta_absent: the parsed transaction carries no meta',
       };
     }
-    return { verdict: 'match', creditedAtomic: delta.toString() };
+    const mint = getSolanaUsdcMint();
+    // `BigInt('')` es `0n` y `BigInt('1.0')` LANZA: el monto requerido pasa por el
+    // mismo tamiz que los saldos. Un requerido ilegible no es "requerido cero".
+    if (!ATOMIC_AMOUNT_RE.test(proof.amountAtomic)) {
+      return {
+        verdict: 'indeterminate',
+        detail: `terms_required_unreadable: ${JSON.stringify(proof.amountAtomic)} is not a base-10 atomic amount`,
+      };
+    }
+    const required = BigInt(proof.amountAtomic);
+
+    // ── Paso 1 — PRESENCIA de las listas ────────────────────────────────
+    // Una lista AUSENTE y una lista VACIA son dos indeterminaciones distintas, y
+    // NINGUNA de las dos es un dato. Aca vivian los dos `?? []` (CD-3): no vuelven
+    // en ninguna forma (`|| []`, `Array.isArray(x) ? x : []`, un default de
+    // parametro). El `??` fabricaba justo el dato que el guard iba a mirar.
+    const preRaw: unknown = meta.preTokenBalances;
+    const postRaw: unknown = meta.postTokenBalances;
+    if (!Array.isArray(preRaw) || !Array.isArray(postRaw)) {
+      return {
+        verdict: 'indeterminate',
+        detail: `terms_list_absent: pre=${Array.isArray(preRaw)} post=${Array.isArray(postRaw)} — an absent balance list is not an empty one`,
+      };
+    }
+
+    // ── Paso 2 — FORMA de las entradas ──────────────────────────────────
+    const pre = readBalanceList(preRaw);
+    const post = readBalanceList(postRaw);
+    if (pre === null || post === null) {
+      return {
+        verdict: 'indeterminate',
+        detail: `terms_entry_shape: unreadable balance entries (pre_ok=${pre !== null} post_ok=${post !== null}) — an entry that cannot be read is not an entry worth zero`,
+      };
+    }
+
+    // ── Pasos 3 y 4 — el CONJUNTO RECEPTOR, agregado por `accountIndex` ──
+    // ⚠️ Aca vivia un `.find()` que tomaba LA PRIMERA entrada de `payTo` en cada
+    // lista, sin exigir que fueran la MISMA cuenta: con dos token accounts del
+    // mismo owner+mint, los dos `find` podian resolver a cuentas distintas y el
+    // delta salia de restar peras con manzanas. No se lo reemplaza por "fijar el
+    // accountIndex del post", sino por AGREGACION sobre todas las cuentas nuestras
+    // emparejadas por indice: mide el hecho economico que el recibo afirma —*las
+    // tenencias del mint de payTo subieron >= required*— y NO importa ningun
+    // supuesto sobre que cuenta concreta elige el facilitator (§4.6 del SDD).
+    const preOurs = new Map<number, bigint>();
+    const postOurs = new Map<number, bigint>();
+    // Entradas de NUESTRO mint que no se pueden atribuir por falta de `owner`.
+    // No son nuestras, pero tampoco se puede afirmar que no lo sean.
+    let unclassifiable = 0;
+    for (const [list, ours, side] of [
+      [pre, preOurs, 'pre'],
+      [post, postOurs, 'post'],
+    ] as const) {
+      for (const b of list) {
+        if (b.mint !== mint) continue;
+        const owner = declaredOwner(b);
+        if (owner === null) {
+          unclassifiable += 1;
+          continue;
+        }
+        if (owner !== proof.payTo) continue;
+        const amount = atomicOf(b);
+        if (amount === null) {
+          return {
+            verdict: 'indeterminate',
+            detail: `terms_amount_unreadable: ${side}[${b.accountIndex}] amount ${JSON.stringify(b.uiTokenAmount.amount)} is not a base-10 atomic amount`,
+          };
+        }
+        if (ours.has(b.accountIndex)) {
+          return {
+            verdict: 'indeterminate',
+            detail: `terms_duplicate_index: ${side} lists accountIndex ${b.accountIndex} twice for the same mint`,
+          };
+        }
+        ours.set(b.accountIndex, amount);
+      }
+    }
+
+    // ── Paso 5 — COMPLETITUD del conjunto receptor, simetrica ────────────
+    // `pre/postBalances` se leen SOLO ante una asimetria: una tx simetrica (el caso
+    // normal) no los toca, asi que no se agrega indeterminacion gratuita.
+    let preSum = 0n;
+    let postSum = 0n;
+    for (const index of new Set([...preOurs.keys(), ...postOurs.keys()])) {
+      const before = preOurs.get(index);
+      const after = postOurs.get(index);
+      if (before !== undefined) {
+        preSum += before;
+      } else {
+        // Presente en `post`, ausente en `pre`. DOS causas con consecuencias
+        // OPUESTAS: la ATA se creo en esta misma tx (saldo previo genuinamente 0),
+        // o la lista llego truncada (tomarlo como 0 FABRICA el dato). Una cuenta
+        // que no existia tiene 0 lamports; una cuenta de token existente es
+        // rent-exempt, o sea estrictamente > 0.
+        if (lamportsAt(meta.preBalances, index) !== 0) {
+          return {
+            verdict: 'indeterminate',
+            detail: `terms_pre_row_missing: accountIndex ${index} is in post but not in pre, and preBalances[${index}] does not prove the account did not exist`,
+          };
+        }
+      }
+      if (after !== undefined) {
+        postSum += after;
+      } else {
+        // La regla espejo NO es estetica: sin ella, dropear una fila nuestra del
+        // lado `post` hace que el delta se vea MAS CHICO y produce un
+        // `landed_mismatch` FALSO sobre un pago real — el mismo error, al reves.
+        if (lamportsAt(meta.postBalances, index) !== 0) {
+          return {
+            verdict: 'indeterminate',
+            detail: `terms_post_row_missing: accountIndex ${index} is in pre but not in post, and postBalances[${index}] does not prove the account was closed`,
+          };
+        }
+      }
+    }
+
+    // ── Paso 6 — el VEREDICTO ───────────────────────────────────────────
+    const delta = postSum - preSum;
+    if (delta < 0n) {
+      // Para una tx que construimos nosotros esto es FISICAMENTE IMPOSIBLE: el
+      // destino no gasta. Si el numero da negativo, lo que aprendimos es que los
+      // datos no son coherentes — NO que la plata haya ido a otro lado. Devolver
+      // `mismatch` aca condena la fila para siempre
+      // (SETTLE_CONFIRMED_BUT_UNVERIFIABLE) por una causa que nunca se midio.
+      return {
+        verdict: 'indeterminate',
+        detail: `terms_negative_delta: ${delta} for ${proof.payTo} — a receiving account cannot spend`,
+      };
+    }
+    if (delta >= required) {
+      // La afirmacion POSITIVA es solida aunque haya entradas sin clasificar:
+      // medir de menos no puede volver verdadero un `>=` que era falso.
+      return { verdict: 'match', creditedAtomic: delta.toString() };
+    }
+    if (unclassifiable > 0) {
+      // No alcanza, pero hay entradas de nuestro mint que no se pudieron atribuir
+      // y que solo podrian SUMAR al lado que no medimos. No se puede afirmar la
+      // negativa. (W2 agrega el tier de direccion y vuelve medible la mayoria.)
+      return {
+        verdict: 'indeterminate',
+        detail: `terms_unclassifiable_entry: ${unclassifiable} balance entr${unclassifiable === 1 ? 'y' : 'ies'} of the expected mint carry no owner, and the measured delta ${delta} < required ${required}`,
+      };
+    }
+    return {
+      verdict: 'mismatch',
+      detail: `on-chain transfer ${delta} < required ${required} for ${proof.payTo}`,
+    };
   }
 
   async verify(proof: SolanaSettleProof): Promise<VerifyResult> {
