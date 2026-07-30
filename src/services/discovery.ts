@@ -649,6 +649,14 @@ export const discoveryService = {
         scope: excludedByScope,
         reputation: excludedByReputation,
         trialAvailable,
+        // AR fix-pack BLQ-BAJO-4: el tercer valor del standing YA existía acá
+        // adentro (`standingBatch.degraded`, DT-5) y moría en esta función. Sin
+        // propagarlo, un batch degradado deja a todos sin score, el filtro los
+        // excluye a todos y el consumidor recibe "ninguno alcanza el piso" — una
+        // afirmación sobre los agentes cuando el hecho es sobre el gateway. Se
+        // propaga SIEMPRE, con o sin `minReputation`: también explica por qué
+        // ningún agente trae `computedReputation`.
+        standingUnavailable: standingBatch.degraded,
       },
     };
   },

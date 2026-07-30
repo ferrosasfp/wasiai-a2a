@@ -508,6 +508,23 @@ export interface DiscoveryResult {
      * clase de dato que se lee mal.
      */
     trialAvailable: number;
+    /**
+     * AR fix-pack BLQ-BAJO-4 — la lectura del HISTORIAL falló
+     * (`AgentStandingBatch.degraded`). Sin este dato, un batch degradado deja a
+     * TODOS los agentes sin score, el filtro los cuenta 0 y los excluye a todos, y
+     * el conjunto vacío se explica como "ninguno alcanza el `min_reputation` que
+     * pediste" — que es una afirmación sobre los agentes cuando la verdad es una
+     * sobre el gateway: "no pude preguntar".
+     *
+     * Es exactamente el defecto de clase que esta HU existe para cerrar (el AC del
+     * vacío que se explica), reaparecido DENTRO del diagnóstico. Con `true`, el
+     * número de `reputation` sigue siendo real (esos agentes SÍ se excluyeron) pero
+     * el motivo que se le cuenta al consumidor cambia.
+     *
+     * Se llama `standingUnavailable` y no `degraded` a propósito: `degraded` es el
+     * nombre del campo INTERNO del batch, que no sale nunca en la respuesta (T-16).
+     */
+    standingUnavailable: boolean;
   };
 }
 

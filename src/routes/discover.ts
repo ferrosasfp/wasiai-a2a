@@ -100,8 +100,13 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    *   SUBE cuando hay admitidos por estreno — es un cambio observable para quien
    *   pagina con `allowTrial=true`.
    * - `registries`: nombres de los registries que contribuyeron.
-   * - `excluded`: `{ scope, reputation, trialAvailable }` — cuántos descartó cada
-   *   filtro de candidatura, para que un conjunto vacío pueda explicarse.
+   * - `excluded`: `{ scope, reputation, trialAvailable, standingUnavailable }` —
+   *   cuántos descartó cada filtro de candidatura, para que un conjunto vacío pueda
+   *   explicarse. `standingUnavailable: true` significa que el gateway NO PUDO LEER
+   *   el historial: sin score nadie pasa el piso, así que `reputation` cuenta
+   *   exclusiones reales pero NO significan "estos agentes no llegan" (AR fix-pack
+   *   BLQ-BAJO-4). `trialAvailable` es exacto con `allowTrial` y una COTA SUPERIOR
+   *   sin él (el cupo por publicador se aplica después).
    */
   fastify.get(
     '/',

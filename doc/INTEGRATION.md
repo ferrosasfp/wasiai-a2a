@@ -327,11 +327,19 @@ into accepting such a candidate below the floor **you** asked for. Rules:
 Two response fields go with it:
 
 - `excluded.reputation` — candidates the floor discarded.
-- `excluded.trialAvailable` — candidates that would be admitted by the lane. With
+- `excluded.trialAvailable` — candidates that are **eligible** for the lane. With
   `allowTrial: true` this is **exact** and equals the number of `trial` badges in
   `agents`. **Without** `allowTrial` it is an **upper bound**: the per-publisher
   quota needs a lookup that the default path deliberately does not perform, so the
-  number is counted before the quota is applied.
+  number is counted before the quota is applied. Read it as "up to N", not as "N will
+  be admitted".
+- `excluded.standingUnavailable` — `true` means the gateway **could not read agent
+  history** for this query. Then nobody has a computed score, so the floor excludes
+  everyone and `excluded.reputation` counts real exclusions that do **not** mean "these
+  agents fall short". Lowering the floor or setting `allowTrial` will not help; the
+  trial lane is fail-closed in this case on purpose. Retry instead. A `/compose` step
+  in that situation fails with `reason: 'reputation_unavailable'`, which is a separate
+  reason from `excluded_by_reputation` for exactly this distinction.
 
 ⚠️ **`total` grows when agents are admitted by the trial lane.** That is correct
 (`total` is the count of matches for the filters as applied), but it is an observable

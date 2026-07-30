@@ -70,6 +70,24 @@
   preguntar quién puede incrementarlo, cuánto le cuesta, y si la condición se puede
   revertir alguna vez.
 
+### [2026-07-30] Fix-pack AR · BLQ-BAJO-4 — El décimo "no pude preguntar", adentro del diagnóstico
+
+- **Error**: con `attachReputations` degradado, ningún agente tiene score ⟹ el
+  fail-safe del piso los excluye a todos ⟹ el 422 decía «*No agent meets the
+  requested min_reputation*». La verdad era «*no pude leer el historial*». Es la HU
+  cuyo AC existe para que el vacío deje de mentir, mintiendo con más confianza.
+- **Causa raíz**: el tercer valor (`AgentStandingBatch.degraded`) ya estaba en la
+  mano — se lo usa dos líneas más arriba para NO admitir a nadie — y se moría en la
+  función. Propagué el dato hasta donde tomaba una decisión (fail-closed) y no hasta
+  donde se EXPLICA la decisión.
+- **Fix**: `excluded.standingUnavailable` en el contrato de `/discover` (nombre
+  distinto de `degraded` a propósito: T-16 canda que el interno no salga) y motivo
+  propio `reputation_unavailable` en el resolver, ANTES del motivo por piso y DESPUÉS
+  del alcance. Mutantes: hardcodear `false` mata el test de discovery; anular la
+  rama del resolver mata el suyo.
+- **Aplicar en**: cuando un dato habilita un fail-closed, seguirlo hasta el mensaje.
+  Un sistema que se protege bien y explica mal manda a arreglar lo que no está roto.
+
 ### [2026-07-30] W0.1 — El tipo creció y el sitio de construcción quedó atrás
 
 - **Error**: agregué `reputation` y `trialAvailable` a `DiscoveryResult.excluded`

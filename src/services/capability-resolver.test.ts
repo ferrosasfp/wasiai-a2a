@@ -132,7 +132,12 @@ describe('HU-208 · resolveCapability — falla CERRADO, con motivo accionable',
       registries: [],
       // WKH-313: el doble se COMPLETA con los dos contadores nuevos (el tipo los
       // exige), no se afloja el tipo para que el doble viejo siga entrando.
-      excluded: { scope: 3, reputation: 0, trialAvailable: 0 },
+      excluded: {
+        scope: 3,
+        reputation: 0,
+        trialAvailable: 0,
+        standingUnavailable: false,
+      },
     });
 
     const res = await resolveCapability('fx-quote', undefined, undefined);
@@ -248,7 +253,12 @@ describe('T-15 (DT-10) · `excluded_by_reputation` como tercer motivo', () => {
       agents: [],
       total: 0,
       registries: [],
-      excluded: { scope: 0, reputation: 1, trialAvailable: 0 },
+      excluded: {
+        scope: 0,
+        reputation: 1,
+        trialAvailable: 0,
+        standingUnavailable: false,
+      },
     });
 
     const res = await resolveCapability(
@@ -271,7 +281,12 @@ describe('T-15 (DT-10) · `excluded_by_reputation` como tercer motivo', () => {
       agents: [],
       total: 0,
       registries: [],
-      excluded: { scope: 0, reputation: 1, trialAvailable: 1 },
+      excluded: {
+        scope: 0,
+        reputation: 1,
+        trialAvailable: 1,
+        standingUnavailable: false,
+      },
     });
 
     const res = await resolveCapability(
@@ -285,7 +300,71 @@ describe('T-15 (DT-10) · `excluded_by_reputation` como tercer motivo', () => {
       expect(res.failure.reason).toBe('excluded_by_reputation');
       expect(res.failure.message).toContain('allow_trial');
       expect(res.failure.message).toContain('no settled history');
+      // AR MNR-5 / CR MENOR-1: el número es una COTA (el cupo por publicador corre
+      // después), así que el mensaje promete "hasta N elegibles", no N admisiones.
+      expect(res.failure.message).toContain('up to 1 candidate(s)');
+      expect(res.failure.message).toContain('eligible');
+      expect(res.failure.message).not.toContain('would be admitted');
     }
+  });
+
+  // AR fix-pack BLQ-BAJO-4: "no pude preguntar" ≠ "ninguno alcanza el piso".
+  it('T-15: con el historial ILEGIBLE el motivo es `reputation_unavailable`, no el piso', async () => {
+    // Con el batch de standing degradado NINGÚN agente tiene score, así que el
+    // fail-safe del filtro los excluye a TODOS y `reputation` llega en 2. El mensaje
+    // anterior decía "ninguno alcanza el min_reputation que pediste": una afirmación
+    // sobre los agentes cuando el hecho es sobre el gateway. El consumidor bajaba el
+    // piso para arreglar algo que no estaba roto ahí.
+    discoverMock.mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      excluded: {
+        scope: 0,
+        reputation: 2,
+        trialAvailable: 0,
+        standingUnavailable: true,
+      },
+    });
+
+    const res = await resolveCapability(
+      'remittance-payout',
+      { min_reputation: 2 },
+      undefined,
+    );
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.failure.reason).toBe('reputation_unavailable');
+      expect(res.failure.message).toContain('could not read agent history');
+      // Y NO afirma lo que no sabe.
+      expect(res.failure.message).not.toContain('meets the requested');
+    }
+  });
+
+  it('T-15: con historial ilegible Y alcance insuficiente, gana el ALCANCE', async () => {
+    // El orden de precedencia no cambia: si la credencial ni siquiera alcanza al
+    // agente, ese es el problema de más arriba.
+    discoverMock.mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      excluded: {
+        scope: 1,
+        reputation: 1,
+        trialAvailable: 0,
+        standingUnavailable: true,
+      },
+    });
+
+    const res = await resolveCapability(
+      'fx-quote',
+      { min_reputation: 2 },
+      undefined,
+    );
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.failure.reason).toBe('excluded_by_scope');
   });
 
   it('T-15: con `scope > 0` gana `excluded_by_scope` (el orden se preserva)', async () => {
@@ -295,7 +374,12 @@ describe('T-15 (DT-10) · `excluded_by_reputation` como tercer motivo', () => {
       agents: [],
       total: 0,
       registries: [],
-      excluded: { scope: 2, reputation: 3, trialAvailable: 0 },
+      excluded: {
+        scope: 2,
+        reputation: 3,
+        trialAvailable: 0,
+        standingUnavailable: false,
+      },
     });
 
     const res = await resolveCapability(
@@ -313,7 +397,12 @@ describe('T-15 (DT-10) · `excluded_by_reputation` como tercer motivo', () => {
       agents: [],
       total: 0,
       registries: [],
-      excluded: { scope: 0, reputation: 0, trialAvailable: 0 },
+      excluded: {
+        scope: 0,
+        reputation: 0,
+        trialAvailable: 0,
+        standingUnavailable: false,
+      },
     });
 
     const res = await resolveCapability('inexistente', undefined, undefined);

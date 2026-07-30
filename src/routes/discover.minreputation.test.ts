@@ -324,7 +324,14 @@ describe('T-03 (AC-3) · `excluded` viaja en el JSON de GET y POST', () => {
       agents: [],
       total: 0,
       registries: [],
-      excluded: { scope: 1, reputation: 3, trialAvailable: 2 },
+      excluded: {
+        scope: 1,
+        reputation: 3,
+        trialAvailable: 2,
+        // AR fix-pack BLQ-BAJO-4: el cuarto campo del contrato. El doble lo declara
+        // en vez de aflojar el tipo: si mañana se agrega otro, la ruta se entera acá.
+        standingUnavailable: false,
+      },
     });
   });
 
@@ -339,6 +346,7 @@ describe('T-03 (AC-3) · `excluded` viaja en el JSON de GET y POST', () => {
       scope: 1,
       reputation: 3,
       trialAvailable: 2,
+      standingUnavailable: false,
     });
   });
 
@@ -354,6 +362,7 @@ describe('T-03 (AC-3) · `excluded` viaja en el JSON de GET y POST', () => {
       scope: 1,
       reputation: 3,
       trialAvailable: 2,
+      standingUnavailable: false,
     });
   });
 });

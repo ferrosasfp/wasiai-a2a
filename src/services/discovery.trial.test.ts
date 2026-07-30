@@ -664,6 +664,35 @@ describe('T-10 (AC-9/CD-7) · con la lectura de standing DEGRADADA no entra NADI
     expect(result.excluded?.trialAvailable).toBe(0);
   });
 
+  it('AR BLQ-BAJO-4: el vacío dice que NO PUDO PREGUNTAR, no que nadie alcance el piso', async () => {
+    // El décimo sitio de "no pude preguntar", y estaba en el DIAGNÓSTICO: con el
+    // batch degradado nadie tiene score, el fail-safe los excluye a todos y
+    // `excluded.reputation` queda en 2 — que leído solo dice "ninguno alcanza tu
+    // piso". El tercer valor ya existía adentro del pipeline y moría ahí.
+    serve([raw('desconocido'), raw('otro')]);
+    standingDegraded();
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    expect(result.excluded?.standingUnavailable).toBe(true);
+    expect(result.excluded?.reputation).toBe(2);
+  });
+
+  it('AR BLQ-BAJO-4: con la lectura OK el campo es `false` (el contraste)', async () => {
+    // Mismo vacío, misma cantidad de excluidos, y la única diferencia es si el
+    // gateway pudo preguntar. Sin el campo, los dos casos son el mismo mensaje.
+    serve([raw('sin-historial'), raw('otro-sin-historial')]);
+    standings([]);
+
+    const result = await discoveryService.discover({ minReputation: 2 });
+
+    expect(result.excluded?.standingUnavailable).toBe(false);
+    expect(result.excluded?.reputation).toBe(2);
+  });
+
   it('`degraded: true` no lee ni siquiera las anclas: no hay a quién contarle el cupo', async () => {
     serve([raw('desconocido')]);
     standingDegraded();
