@@ -23,6 +23,24 @@
 -- RE-HIDRATA desde ese archivo si la tabla existe. La tabla de backup NO se borra
 -- nunca automáticamente — borrarla es una decisión humana, con la evidencia
 -- delante.
+--
+-- ⚠️ ESTE `_down` DROPEA **DOS** COLUMNAS, Y LAS ARCHIVA A LAS DOS — pero las
+-- restaura de forma ASIMETRICA, y la asimetría es deliberada (fix-pack CR · MNR-2).
+-- Antes esta cabecera decía "archiva primero" cubriendo los dos drops, y sólo
+-- archivaba `vm_family`: `funding_wallet_solana` se perdía sin respaldo y un ciclo
+-- bajada→subida borraba TODOS los binds Solana. Un encabezado que promete más de lo
+-- que el cuerpo hace es la misma familia de bug que esta HU vino a cerrar, en
+-- documentación.
+--
+--   · `vm_family`             ⇒ archivado + **re-hidratado AUTOMATICAMENTE por el `up`**.
+--     No es opcional: sin eso el ciclo re-abre depósitos ya acreditados (plata).
+--   · `funding_wallet_solana` ⇒ archivado, **restauración MANUAL** (el SQL está abajo).
+--     Automatizarla dentro del `up` la haría abortar por el UNIQUE parcial si en el
+--     interín otra key bindeó la misma pubkey, o sea que un `up` podría quedar
+--     imposible de correr por un dato de usuario. El costo de no restaurar es
+--     FAIL-CLOSED y recuperable por el propio usuario: `POST /auth/deposit` contesta
+--     403 `FUNDING_WALLET_NOT_BOUND` y el depositante vuelve a bindear con una firma.
+--     Perder plata y perder un bind no cuestan lo mismo, así que no se tratan igual.
 -- ============================================================
 
 BEGIN;
@@ -43,6 +61,38 @@ INSERT INTO a2a_key_deposits_solana_backup_wkh315 (id, tx_hash)
       AND NOT EXISTS (
         SELECT 1 FROM a2a_key_deposits_solana_backup_wkh315 b WHERE b.id = d.id
       );
+
+-- ── 0b. LOS BINDS SOLANA TAMBIEN SE ARCHIVAN (fix-pack CR · MNR-2) ───────────
+-- `funding_wallet_solana` se dropea abajo. Sin este archivo, un ciclo down→up
+-- borraba todos los binds y no quedaba de dónde reconstruirlos. Restauración
+-- MANUAL y declarada (ver la cabecera y el §6 de abajo).
+CREATE TABLE IF NOT EXISTS a2a_agent_keys_funding_wallet_solana_backup_wkh315 AS
+  SELECT id, funding_wallet_solana
+    FROM a2a_agent_keys
+    WHERE funding_wallet_solana IS NOT NULL;
+
+INSERT INTO a2a_agent_keys_funding_wallet_solana_backup_wkh315 (id, funding_wallet_solana)
+  SELECT k.id, k.funding_wallet_solana
+    FROM a2a_agent_keys k
+    WHERE k.funding_wallet_solana IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM a2a_agent_keys_funding_wallet_solana_backup_wkh315 b
+        WHERE b.id = k.id
+      );
+
+-- ── 0c. LAS TABLAS DE BACKUP NO NACEN PUBLICAS (fix-pack AR · MNR-3) ─────────
+--
+-- `CREATE TABLE AS` crea una tabla SIN RLS, y en Supabase los privilegios por
+-- default alcanzan a `anon`/`authenticated`. Es la clase exacta de hallazgo que ya
+-- ocurrió en este ecosistema (tablas `facilitator_*` legibles por `anon`). El
+-- contenido es de baja sensibilidad —ids, firmas base58 públicas, pubkeys— pero
+-- "poco sensible" no es "público", y una tabla que nace abierta no se cierra sola.
+-- RLS ON **sin policy** = deny-all para anon/authenticated; `service_role` bypassa.
+ALTER TABLE a2a_key_deposits_solana_backup_wkh315 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE a2a_agent_keys_funding_wallet_solana_backup_wkh315 ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE a2a_key_deposits_solana_backup_wkh315 FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE a2a_agent_keys_funding_wallet_solana_backup_wkh315 FROM PUBLIC, anon, authenticated;
 
 -- ── 1. El índice parcial del anti-replay Solana ──────────────────────────────
 DROP INDEX IF EXISTS uq_a2a_key_deposits_solana_sig;
@@ -142,9 +192,29 @@ NOTIFY pgrst, 'reload schema';
 -- ── 5. INVENTARIO PREVIO AL ROLLBACK, para el operador ───────────────────────
 -- Antes de correr esto, mirá qué se va a archivar:
 --   SELECT count(*) FROM a2a_key_deposits WHERE vm_family = 'solana';
--- Y después de correrlo, que el archivo tenga esa misma cuenta:
+--   SELECT count(*) FROM a2a_agent_keys WHERE funding_wallet_solana IS NOT NULL;
+-- Y después de correrlo, que los archivos tengan esas mismas cuentas:
 --   SELECT count(*) FROM a2a_key_deposits_solana_backup_wkh315;
+--   SELECT count(*) FROM a2a_agent_keys_funding_wallet_solana_backup_wkh315;
 -- Si no coinciden, NO vuelvas a correr el `up` hasta entender por qué: el `up`
 -- re-hidrata SOLO lo que esté en esa tabla.
+
+-- ── 6. RESTAURACION MANUAL DE LOS BINDS, DESPUES de volver a correr el `up` ───
+-- `vm_family` lo re-hidrata el `up` solo. Los binds NO (ver la cabecera: un UNIQUE
+-- violado dejaría el `up` sin poder correr). Corré esto A MANO, revisando primero
+-- los conflictos:
+--   -- 1) ¿alguna pubkey archivada quedó bindeada a OTRA key en el interín?
+--   SELECT b.id, b.funding_wallet_solana
+--     FROM a2a_agent_keys_funding_wallet_solana_backup_wkh315 b
+--     JOIN a2a_agent_keys k ON k.funding_wallet_solana = b.funding_wallet_solana
+--    WHERE k.id <> b.id;
+--   -- 2) si el resultado es vacío, restaurá:
+--   UPDATE a2a_agent_keys k
+--      SET funding_wallet_solana = b.funding_wallet_solana
+--     FROM a2a_agent_keys_funding_wallet_solana_backup_wkh315 b
+--    WHERE k.id = b.id
+--      AND k.funding_wallet_solana IS NULL;
+-- Sin restaurar, el depositante Solana recibe 403 FUNDING_WALLET_NOT_BOUND y puede
+-- re-bindear él mismo con una firma. Es molesto, es visible y no pierde plata.
 
 COMMIT;

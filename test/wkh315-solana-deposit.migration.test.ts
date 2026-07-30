@@ -304,6 +304,63 @@ describe('WKH-315 — migración del depósito Solana (estructural sobre el .sql
     });
   });
 
+  // ── MNR-2 / MNR-3: el `_down` archiva LAS DOS columnas, y sin abrirlas ────
+  describe('MNR-2 / MNR-3: los dos backups del `_down`', () => {
+    const WALLET_BACKUP = 'a2a_agent_keys_funding_wallet_solana_backup_wkh315';
+    const DEPOSIT_BACKUP = 'a2a_key_deposits_solana_backup_wkh315';
+
+    it('MNR-2: `funding_wallet_solana` también se archiva (la cabecera cubre los DOS drops)', () => {
+      // ⚠️ Antes la cabecera decía "ARCHIVA PRIMERO" y sólo archivaba `vm_family`:
+      // un ciclo down→up perdía TODOS los binds Solana sin respaldo. Un encabezado
+      // que promete más de lo que el cuerpo hace es el mismo bug de esta HU, en prosa.
+      expect(downCode).toMatch(
+        new RegExp(
+          `CREATE\\s+TABLE\\s+IF\\s+NOT\\s+EXISTS\\s+${WALLET_BACKUP}\\s+AS\\s+SELECT\\s+id,\\s*funding_wallet_solana\\s+FROM\\s+a2a_agent_keys`,
+          'i',
+        ),
+      );
+    });
+
+    it('MNR-2: el archivo de binds va ANTES del DROP COLUMN (el orden ES la propiedad)', () => {
+      const backupAt = downCode.indexOf(
+        `CREATE TABLE IF NOT EXISTS ${WALLET_BACKUP}`,
+      );
+      const dropAt = downCode.search(
+        /ALTER\s+TABLE\s+a2a_agent_keys\s+DROP\s+COLUMN\s+IF\s+EXISTS\s+funding_wallet_solana/i,
+      );
+      expect(backupAt).toBeGreaterThanOrEqual(0);
+      expect(dropAt).toBeGreaterThanOrEqual(0);
+      expect(backupAt).toBeLessThan(dropAt);
+    });
+
+    it('MNR-3: las DOS tablas de backup nacen con RLS ON y sin privilegios para anon/authenticated', () => {
+      // `CREATE TABLE AS` no trae RLS y en Supabase los defaults alcanzan a `anon`.
+      // Contenido de baja sensibilidad no es contenido público.
+      for (const t of [DEPOSIT_BACKUP, WALLET_BACKUP]) {
+        expect(downCode, t).toMatch(
+          new RegExp(`ALTER\\s+TABLE\\s+${t}\\s+ENABLE\\s+ROW\\s+LEVEL\\s+SECURITY`, 'i'),
+        );
+        expect(downCode, t).toMatch(
+          new RegExp(
+            `REVOKE\\s+ALL\\s+ON\\s+TABLE\\s+${t}\\s+FROM\\s+PUBLIC,\\s*anon,\\s*authenticated`,
+            'i',
+          ),
+        );
+      }
+    });
+
+    it('MNR-2: la asimetría está DECLARADA — sólo `vm_family` se re-hidrata en el `up`', () => {
+      // El `up` re-hidrata la columna cuya pérdida es PLATA (re-crédito) y NO toca los
+      // binds, cuya pérdida es fail-closed y re-bindeable. Si alguien agrega la
+      // re-hidratación automática de los binds al `up`, este test lo obliga a
+      // enfrentarse con el UNIQUE que puede abortar la migración entera.
+      expect(upCode).not.toContain(WALLET_BACKUP);
+      expect(downSql).toContain(WALLET_BACKUP);
+      // Y la cabecera del `_down` tiene que EXPLICARLO, no sólo hacerlo.
+      expect(downSql).toMatch(/restauraci[oó]n\s+MANUAL/i);
+    });
+  });
+
   // ── BLQ-MED-2: la ventana del schema-cache de PostgREST ───────────────────
   describe('BLQ-MED-2: las DOS migraciones recargan el schema-cache de PostgREST', () => {
     // ⚠️ POR QUE ES UN TEST Y NO UNA REVISION. Las dos migraciones hacen un SWAP de
