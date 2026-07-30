@@ -17,8 +17,9 @@ This guide is written for backend engineers integrating a marketplace, an agent,
 3. [Endpoints Reference](#3-endpoints-reference)
 4. [x402 Payment Flow](#4-x402-payment-flow)
 5. [Error Codes](#5-error-codes)
-6. [End-to-End Example](#6-end-to-end-example)
-7. [Support](#support)
+6. [Funding an Agent Key on Solana (devnet)](#6-funding-an-agent-key-on-solana-devnet)
+7. [End-to-End Example](#7-end-to-end-example)
+8. [Support](#support)
 
 ---
 
@@ -674,7 +675,189 @@ rejection is credited back except the `500` of `POST /tasks` described above.
 
 ---
 
-## 6. End-to-End Example
+## 6. Funding an Agent Key on Solana (devnet)
+
+> **Status: devnet only. No real money.** There is no `solana-mainnet` chain key, by
+> design. Everything below moves devnet USDC.
+
+An Agent Key holds a prepaid balance per chain. This section is the inbound path for
+Solana: you prove you control a Solana wallet, you transfer devnet USDC from it, and
+the gateway credits your key after verifying the transfer on-chain.
+
+### 6.1 Why there are two steps and not one
+
+You cannot just send USDC and present the signature. **Signatures of an account are
+public** on Solana (`getSignaturesForAddress` over the deposit account), so if the
+gateway credited whoever presented a signature first, anyone could poll the deposit
+account, grab someone else's signature and claim it. Worse: the anti-replay index that
+exists to protect deposits would then guarantee the *legitimate* depositor loses — their
+signature would already be "credited", to the attacker.
+
+So the deposit is bound to a wallet you proved you control, and the gateway requires
+that the funds came **from that wallet**.
+
+### 6.2 Step 1 — Bind your Solana funding wallet
+
+Sign this exact message with your Solana wallet, where `<key_id>` is your Agent Key id:
+
+```
+WASIAI_BIND_FUNDING_WALLET_SOLANA:<key_id>
+```
+
+The message is raw bytes (no EIP-191 prefix, no hashing) — this is what
+`signMessage` does in Phantom/Solflare and what `nacl.sign.detached` produces.
+
+```bash
+curl -X POST https://a2a.wasiai.io/auth/funding-wallet \
+  -H "x-a2a-key: $A2A_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "namespace": "solana",
+    "wallet":    "<your base58 pubkey>",
+    "signature": "<base58 signature, 64 bytes>"
+  }'
+
+# 200 OK
+# { "funding_wallet_solana": "<your base58 pubkey>" }
+```
+
+- `namespace` is **required for Solana**. Omitting it means `evm` (backwards
+  compatible); an unrecognized value is a `400 INVALID_INPUT`, never a silent fallback.
+- The `key_id` in the message comes from the **authenticated key**, never from the body,
+  so a signature cannot be replayed onto a different key.
+- The pubkey is stored **byte-exact**. base58 is case-sensitive: `Abc…` and `abc…` are
+  different wallets and neither is normalized.
+- One wallet binds to at most one key ⇒ a second key claiming it gets
+  `409 FUNDING_WALLET_ALREADY_BOUND`.
+
+### 6.3 Step 2 — Read where to send the funds
+
+```bash
+curl https://a2a.wasiai.io/auth/deposit-info
+```
+
+The Solana entry appears **only when the deposit path is enabled**:
+
+```json
+{
+  "chain_id": 900001,
+  "slug": "solana-devnet",
+  "family": "SOLANA",
+  "vm_family": "solana",
+  "cluster": "devnet",
+  "token": { "symbol": "USDC", "mint": "<SPL mint>", "decimals": 6 },
+  "deposit_account": "<ATA — SEND HERE>",
+  "deposit_account_owner": "<owner pubkey — do NOT send here>",
+  "required_commitment": "finalized"
+}
+```
+
+> ⚠️ **Send to `deposit_account`, not to `deposit_account_owner`.** In Solana, SPL
+> tokens do not live in the wallet: they live in an Associated Token Account derived
+> from the pair (mint, owner). `deposit_account` is that ATA. Sending to the owner
+> pubkey is how people lose tokens.
+
+`chain_id` is a **synthetic sentinel**, not a real Solana chain id — Solana has no EVM
+chain id. Use the value this endpoint publishes; do not hardcode it.
+
+### 6.4 Step 3 — Transfer, then register the deposit
+
+Transfer devnet USDC from your bound wallet to `deposit_account`. **You pay your own
+transaction fee**: the gateway never signs anything on your behalf.
+
+```bash
+curl -X POST https://a2a.wasiai.io/auth/deposit \
+  -H "x-a2a-key: $A2A_KEY" \
+  -H 'x-payment-chain: solana-devnet' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "key_id":   "<your key_id>",
+    "chain_id":  900001,
+    "tx_hash":  "<base58 transaction signature>",
+    "amount":   "5"
+  }'
+
+# 200 OK
+# { "balance": "5.000000", "chain_id": 900001 }
+```
+
+- `x-payment-chain: solana-devnet` is **required**. There is deliberately no numeric
+  alias for the Solana sentinel: the sentinel is env-driven, so an alias would keep
+  routing after it changed and produce an unexplainable `CHAIN_MISMATCH`.
+- `tx_hash` is the base58 **signature**, not a `0x…` hash.
+- `amount` is **optional** and is only cross-checked. **The credited amount is always
+  the one measured on-chain**, never the one you declare. If they disagree you get
+  `AMOUNT_MISMATCH` and nothing is credited.
+- The gateway waits for **`finalized`** before crediting. A `confirmed` transaction
+  returns `400 DEPOSIT_NOT_FINALIZED` — that is a *retry later*, not a rejection.
+
+### 6.5 What each failure means, and whether your proof is burned
+
+**No failure below consumes your signature**: nothing is inserted, so you can present
+the same signature again once the cause is gone. The only terminal one is the `409`.
+
+| HTTP | `error_code` | What happened | What to do |
+|---|---|---|---|
+| 400 | `INVALID_INPUT` | Malformed reference, or the reference format does not match the chain family (a base58 signature with an EVM chain, or a `0x…` with `solana-devnet`) | Fix the request. No network call was made |
+| 400 | `TX_ABSENT` | The node searched its history and does not know this signature | Check the signature |
+| 400 | `TX_FAILED` | It landed and failed on-chain — nothing moved | Send a new transfer |
+| 400 | `DEPOSIT_NOT_FINALIZED` | Measured as `processed`/`confirmed` | **Retry in a few seconds** |
+| 400 | `MINT_MISMATCH` | You sent a different token | Send the published `mint` |
+| 400 | `RECIPIENT_MISMATCH` | Right token, wrong account | **No automatic refund.** Contact support |
+| 400 | `AMOUNT_MISMATCH` | Declared ≠ on-chain | Re-send with the right `amount`, or omit it |
+| 400 | `DEPOSITOR_AMBIGUOUS` | More than one source wallet in the same transaction | Deposit from a single wallet |
+| 403 | `FUNDING_WALLET_NOT_BOUND` | You skipped 6.2 | Bind your wallet |
+| 403 | `FUNDING_WALLET_MISMATCH` | The funds came from a wallet that is not the bound one | Deposit from the bound wallet |
+| 409 | `DEPOSIT_ALREADY_CREDITED` | This signature was already credited | Nothing — it is already in your balance |
+| 503 | `DEPOSIT_ACCOUNT_NOT_CONFIGURED` | The Solana deposit path is off on the server | Retry later / contact support |
+| 503 | `DEPOSIT_VERIFICATION_UNKNOWN` | **We could not determine** whether it landed | **Retry.** Your proof was not consumed |
+
+> The `503 DEPOSIT_VERIFICATION_UNKNOWN` is deliberately not a `400`. "We could not ask
+> the chain" is not the same as "your deposit does not exist", and telling you the
+> second when only the first is true would be claiming your money never arrived.
+
+### 6.6 Operator runbook — activation order
+
+**Non-negotiable order.** Migration → env → flag:
+
+1. apply `supabase/migrations/20260731000000_wkh315_solana_deposit.sql`;
+2. set `A2A_DEPOSIT_SOLANA_OWNER` (and `A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED=true`
+   only if that account is deliberately *not* the operator's);
+3. set `A2A_SOLANA_DEPOSIT_ENABLED=true` **last**.
+
+Migration before code means no window: the column exists and nothing uses it yet. The
+reverse order degrades **loudly** (the flag defaults off, so the path simply does not
+exist) instead of double-crediting. See `.env.example` for the full reasoning on each
+variable, including why no environment variable can weaken the `finalized` requirement.
+
+**Rollback caveat:** the `_down` migration archives the Solana signatures into
+`a2a_key_deposits_solana_backup_wkh315` *before* dropping `vm_family`, and the `up`
+re-hydrates from it. Do not drop that table by hand — without it, a `down → up` cycle
+re-opens every past Solana deposit for re-crediting.
+
+### 6.7 Known debt this path activates — `TD-SOLANA-CAIP2-DENYLIST`
+
+Declared here, **not closed by this feature**, and it needs an owner.
+
+`classifySolanaCaip2` (`src/adapters/chain-resolver.ts`) is a **fail-OPEN denylist**: an
+unknown CAIP-2 falls back to `testnet`, so a leg's mainnet gate lets it through without
+opt-in. That is acceptable today only because of three simultaneous conditions: the
+value is env-only (not agent-controlled), the Solana rail is flag-gated off, and there
+is no `solana-mainnet` chain key.
+
+**Enabling the Solana deposit path erodes the second of those three.** The documented
+reactivation condition — flip to a fail-CLOSED allowlist — triggers when the rail leaves
+flag-off *or* a `solana-mainnet` chain key appears. Whoever turns
+`A2A_SOLANA_DEPOSIT_ENABLED=true` in an environment that also serves real value must
+open that story first.
+
+*(The code comment cites `MULTI-CHAIN.md §10`. That document is not in this repository —
+it was moved out in the 2026-07-28 cleanup. This section is the live reference until
+that pointer is redirected.)*
+
+---
+
+## 7. End-to-End Example
 
 A single flow that signs up, discovers, and composes — both as a Bash/curl script and as a Node/TypeScript `fetch` snippet. Both target production and require no placeholders other than values you compute at runtime.
 
