@@ -296,9 +296,17 @@ into accepting such a candidate below the floor **you** asked for. Rules:
   A floor relaxed in silence would be a worse bug than the one this feature fixes.
 - **The lane runs out on its own**, three ways, none of which need anyone to
   intervene: after `N` settled paid tasks the agent leaves the lane and stands on its
-  real score; the **first** `failed` event **voids** the lane (it is not a decrement);
-  and a floor above the trial ceiling `T` gets no trial at all — asking for a high
-  floor is asking for a proven agent, and the lane does not fake one.
+  real score; `failed` events from `F` **distinct callers** **void** the lane (a void,
+  not a decrement); and a floor above the trial ceiling `T` gets no trial at all —
+  asking for a high floor is asking for a proven agent, and the lane does not fake one.
+- **Voiding needs independent callers, and it does not expire.** It counts *callers*
+  and not failures on purpose: one caller retrying against an agent that was down for
+  thirty seconds would otherwise void that agent's lane permanently, and a third party
+  could burn a competitor's lane with a single cheap call. Failures with no caller
+  identity all share one anonymous bucket, so an anonymous burst counts as one. The
+  void has no expiry: a voided agent is still discoverable and hireable by anyone who
+  does not ask for a floor, so it can still earn settled tasks and leave the lane on
+  merit. The lane is a shortcut, and only the shortcut closes.
 - **There is a per-publisher quota** `M`: with more eligible agents from the same
   publisher, the `M` oldest by creation date keep the trial. Publishing a hundred
   agents from one account buys `M` trials, not a hundred.
@@ -329,8 +337,9 @@ Two response fields go with it:
 (`total` is the count of matches for the filters as applied), but it is an observable
 change if you paginate with `allowTrial: true`.
 
-`N`, `T` and `M` are gateway configuration (`TRIAL_MAX_SETTLED_TASKS`,
-`TRIAL_MAX_MIN_REPUTATION`, `TRIAL_MAX_AGENTS_PER_PUBLISHER`). Their current values
+`N`, `T`, `M` and `F` are gateway configuration (`TRIAL_MAX_SETTLED_TASKS`,
+`TRIAL_MAX_MIN_REPUTATION`, `TRIAL_MAX_AGENTS_PER_PUBLISHER`,
+`TRIAL_MAX_FAILED_CALLERS`). Their current values
 are **provisional** and pending ratification, so do not hardcode them client-side:
 read `trial.remaining_settled_tasks` if you need to know how much lane is left.
 

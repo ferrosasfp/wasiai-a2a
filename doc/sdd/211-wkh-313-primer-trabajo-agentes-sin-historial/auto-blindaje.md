@@ -45,6 +45,31 @@
   "¿es determinista?" sino "¿quién queda afuera PARA SIEMPRE, y puede el candidato
   elegir el valor con el que se lo ordena?".
 
+### [2026-07-30] Fix-pack AR · BLQ-MED-2 — "El primer fallo anula" era una condena perpetua
+
+- **Error**: `classifyStanding` anulaba el carril con `failedCount >= 1`. Medido: la
+  anulación es **permanente** (`tasksSettled < N` para siempre, porque sin admisión
+  nunca hay liquidadas) y **no hace falta malicia** — un timeout de red, o el agente
+  caído treinta segundos, reinstalaba el deadlock que la HU existe para romper. La
+  versión con atacante costaba una llamada.
+- **Causa raíz**: escribí el corte sobre el contador que ya existía en vez de sobre
+  el HECHO que quería medir ("este agente entrega mal"). Un contador crudo de fallos
+  no distingue un reintento del mismo caller de la queja de dos partes
+  independientes, y confundir esas dos cosas es lo que convierte un accidente en una
+  condena.
+- **Fix**: `failedCallerCount` (callers DISTINTOS, mismo bucketing `'__anon__'` que
+  el cap anti-sybil) + `F` por env, default 2. Vive al lado de `cappedSettled`, sobre
+  los mismos rows y la misma query, **sin tocar la fórmula congelada**: `failedCount`
+  sigue alimentando `success_rate` byte por byte. Mutantes: `M-MED2` (volver al
+  crudo) 5 rojos, `M-MED2b` (colapsar los buckets) 1 rojo.
+- **Decisión escrita**: la anulación **no expira**. El carril no es el único camino a
+  tener historial (un anulado sigue siendo contratable por quien no pide piso), así
+  que cierra un atajo y no la puerta; y una ventana temporal premiaría esperar, del
+  otro lado de un `depositAddress`.
+- **Aplicar en**: todo corte binario derivado de un contador. Antes de escribirlo,
+  preguntar quién puede incrementarlo, cuánto le cuesta, y si la condición se puede
+  revertir alguna vez.
+
 ### [2026-07-30] W0.1 — El tipo creció y el sitio de construcción quedó atrás
 
 - **Error**: agregué `reputation` y `trialAvailable` a `DiscoveryResult.excluded`

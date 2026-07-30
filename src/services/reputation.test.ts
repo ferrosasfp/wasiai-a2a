@@ -425,7 +425,98 @@ describe('WKH-313 · reputationService.computeStandingBatch', () => {
       tasksSettled: 0,
       successCount: 0,
       failedCount: 1,
+      // Fila sin `caller_ref_hash` → bucket `'__anon__'`, o sea UN caller.
+      failedCallerCount: 1,
       reputation: null,
+    });
+  });
+
+  // AR fix-pack BLQ-MED-2: el contador de callers DISTINTOS que fallaron. Es el
+  // que decide la anulación del carril de estreno; `failedCount` (crudo) se
+  // conserva porque es el que alimenta `success_rate` en la fórmula del score.
+  it('AR BLQ-MED-2: 3 fallos de UN caller son 1 caller; 2 callers son 2', async () => {
+    setResults([
+      {
+        data: [
+          rowWithCaller('c1', {
+            agent_id: 'reintentos',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          rowWithCaller('c1', {
+            agent_id: 'reintentos',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          rowWithCaller('c1', {
+            agent_id: 'reintentos',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          rowWithCaller('c1', {
+            agent_id: 'dos-quejas',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          rowWithCaller('c2', {
+            agent_id: 'dos-quejas',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+        ],
+        error: null,
+      },
+    ]);
+
+    const batch = await reputationService.computeStandingBatch([
+      'reintentos',
+      'dos-quejas',
+    ]);
+
+    expect(batch.standings.get('reintentos')).toMatchObject({
+      failedCount: 3,
+      failedCallerCount: 1,
+    });
+    expect(batch.standings.get('dos-quejas')).toMatchObject({
+      failedCount: 2,
+      failedCallerCount: 2,
+    });
+  });
+
+  it('AR BLQ-MED-2: una ráfaga ANÓNIMA cuenta como UN solo caller', async () => {
+    // Mismo bucketing que el cap anti-sybil: sin `caller_ref_hash` todo cae en
+    // `'__anon__'`. Es la dirección conservadora — una ráfaga sin credencial no
+    // puede, sola, anularle el carril a nadie.
+    setResults([
+      {
+        data: [
+          row({
+            agent_id: 'anonimos',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+          row({
+            agent_id: 'anonimos',
+            status: 'failed',
+            cost_usdc: 0,
+            latency_ms: null,
+          }),
+        ],
+        error: null,
+      },
+    ]);
+
+    const batch = await reputationService.computeStandingBatch(['anonimos']);
+
+    expect(batch.standings.get('anonimos')).toMatchObject({
+      failedCount: 2,
+      failedCallerCount: 1,
     });
   });
 

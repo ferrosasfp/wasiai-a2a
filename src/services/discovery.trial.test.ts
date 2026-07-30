@@ -179,9 +179,29 @@ function counters(
     tasksSettled: 0,
     successCount: 0,
     failedCount: 0,
+    failedCallerCount: 0,
     reputation: null,
     ...o,
   };
+}
+
+/**
+ * Contadores de un agente al que le fallaron `callers` callers DISTINTOS, con
+ * `retries` fallos cada uno. Los dos números importan por separado: el crudo
+ * alimenta la fórmula del score, el de callers distintos decide la anulación del
+ * carril (AR fix-pack BLQ-MED-2). Con el default `F = 2`, `failedBy(2)` anula y
+ * `failedBy(1, 9)` NO.
+ */
+function failedBy(
+  callers: number,
+  retries = 1,
+  o: Partial<AgentStandingCounters> = {},
+): AgentStandingCounters {
+  return counters({
+    failedCount: callers * retries,
+    failedCallerCount: callers,
+    ...o,
+  });
 }
 
 /** Standing NO degradado. Los slugs ausentes son newcomers legítimos. */
@@ -217,6 +237,7 @@ beforeEach(() => {
   delete process.env.TRIAL_MAX_SETTLED_TASKS;
   delete process.env.TRIAL_MAX_MIN_REPUTATION;
   delete process.env.TRIAL_MAX_AGENTS_PER_PUBLISHER;
+  delete process.env.TRIAL_MAX_FAILED_CALLERS;
   vi.mocked(registryService.getEnabled).mockResolvedValue([makeRegistry()]);
   mockListAsAgents.mockResolvedValue([]);
   standings();
@@ -478,11 +499,11 @@ describe('T-04 (AC-4) · el carril se agota POR ÉXITO en N liquidadas', () => {
   });
 });
 
-// ── T-05 (AC-5 / CD-14) · el primer fallo ANULA ─────────────────────────
-describe('T-05 (AC-5/CD-14) · el primer `failed` ANULA el carril, no lo decrementa', () => {
-  it('1 fallo con 0 liquidadas → NO se admite ni con `allowTrial`', async () => {
+// ── T-05 (AC-5 / CD-14) · la anulación por fallos ───────────────────────
+describe('T-05 (AC-5/CD-14) · `F` callers distintos ANULAN el carril, y no lo decrementan', () => {
+  it('fallos de `F` callers con 0 liquidadas → NO se admite ni con `allowTrial`', async () => {
     serve([raw('fallo-de-entrada')]);
-    standings([['fallo-de-entrada', counters({ failedCount: 1 })]]);
+    standings([['fallo-de-entrada', failedBy(2)]]);
 
     const result = await discoveryService.discover({
       minReputation: 2,
@@ -494,15 +515,46 @@ describe('T-05 (AC-5/CD-14) · el primer `failed` ANULA el carril, no lo decreme
     expect(result.excluded?.trialAvailable).toBe(0);
   });
 
-  it('2 liquidadas + 1 fallo tampoco: es ANULACIÓN, no "le quedan N-1"', async () => {
+  it('AR BLQ-MED-2: un fallo TRANSITORIO de UN solo caller NO mata el carril', async () => {
+    // Lo que se está candando es que el carril siga vivo. Con el contador crudo,
+    // un timeout de red o el agente caído treinta segundos lo anulaba PARA SIEMPRE
+    // (sin admisión nunca hay liquidadas ⟹ `tasksSettled < N` para siempre), o sea
+    // que reinstalaba el deadlock que esta HU existe para romper. Y un tercero
+    // podía quemárselo a un competidor con una sola llamada barata.
+    serve([raw('tuvo-un-mal-dia')]);
+    standings([['tuvo-un-mal-dia', failedBy(1, 3)]]);
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    expect(result.agents.map((a) => a.slug)).toEqual(['tuvo-un-mal-dia']);
+    expect(result.agents[0]?.trial?.granted).toBe(true);
+  });
+
+  it('AR BLQ-MED-2: `F = 1` por env reproduce la política anterior', async () => {
+    // El criterio queda alcanzable por configuración, no clavado en el código.
+    process.env.TRIAL_MAX_FAILED_CALLERS = '1';
+    serve([raw('tuvo-un-mal-dia')]);
+    standings([['tuvo-un-mal-dia', failedBy(1, 3)]]);
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    expect(result.agents).toHaveLength(0);
+  });
+
+  it('2 liquidadas + fallos de `F` callers tampoco: es ANULACIÓN, no "le quedan N-1"', async () => {
     serve([raw('arranco-y-fallo')]);
     standings([
       [
         'arranco-y-fallo',
-        counters({
+        failedBy(2, 1, {
           tasksSettled: 2,
           successCount: 2,
-          failedCount: 1,
           reputation: rep(3, 2),
         }),
       ],
@@ -864,7 +916,7 @@ describe('T-17 (CD-8) · k admitidos ⟺ k badges ⟺ `trialAvailable === k`', (
       ['nuevo-3', { ownerRef: 'o3', createdAt: '2026-01-01T00:00:00Z' }],
       ['penalizado', { ownerRef: 'o4', createdAt: '2026-01-01T00:00:00Z' }],
     ]);
-    standings([['penalizado', counters({ failedCount: 1 })]]);
+    standings([['penalizado', failedBy(2)]]);
 
     const result = await discoveryService.discover({
       minReputation: 2,
@@ -932,7 +984,7 @@ describe('T-03 (AC-3) · `excluded.reputation` cuenta los que descartó el PISO'
 
   it('el ADMITIDO no se cuenta como excluido: pasó el filtro', async () => {
     serve([raw('admitido'), raw('penalizado')]);
-    standings([['penalizado', counters({ failedCount: 1 })]]);
+    standings([['penalizado', failedBy(2)]]);
 
     const result = await discoveryService.discover({
       minReputation: 2,
@@ -989,7 +1041,7 @@ describe('T-13 (CD-9) · el camino por defecto no gasta ni una query nueva', () 
 
   it('con `allowTrial` y CERO elegibles: ancla 0 (no se pregunta al vacío)', async () => {
     serve([raw('penalizado')]);
-    standings([['penalizado', counters({ failedCount: 1 })]]);
+    standings([['penalizado', failedBy(2)]]);
 
     await discoveryService.discover({ minReputation: 2, allowTrial: true });
 

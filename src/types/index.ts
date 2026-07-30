@@ -345,6 +345,18 @@ export interface AgentStandingCounters {
   tasksSettled: number;
   successCount: number;
   failedCount: number;
+  /**
+   * AR fix-pack BLQ-MED-2 — CALLERS DISTINTOS con al menos un `failed` (bucket
+   * `'__anon__'` para eventos sin `caller_ref_hash`, igual que el cap anti-sybil).
+   *
+   * Es el contador que ANULA el carril de estreno, y es distinto de `failedCount`
+   * a propósito: con el crudo, UN solo fallo transitorio (el agente caído treinta
+   * segundos, un timeout de red) mataba el carril PARA SIEMPRE, y un tercero podía
+   * quemárselo a un competidor con una sola llamada barata. `failedCount` se
+   * conserva intacto porque es lo que alimenta `success_rate` en la fórmula del
+   * score, que no se toca.
+   */
+  failedCallerCount: number;
   /** El score real. `null` ⟺ `tasksSettled === 0`. NUNCA se fabrica (CD-6/AC-7). */
   reputation: AgentReputation | null;
 }

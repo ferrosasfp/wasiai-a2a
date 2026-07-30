@@ -41,9 +41,28 @@ function counters(
     tasksSettled: 0,
     successCount: 0,
     failedCount: 0,
+    failedCallerCount: 0,
     reputation: null,
     ...o,
   };
+}
+
+/**
+ * Contadores de un agente al que le fallaron `callers` callers DISTINTOS, con
+ * `retries` fallos cada uno. Los dos números por separado importan: `failedCount`
+ * alimenta la fórmula del score y `failedCallerCount` decide la anulación del
+ * carril (AR fix-pack BLQ-MED-2).
+ */
+function failedBy(
+  callers: number,
+  retries = 1,
+  o: Partial<AgentStandingCounters> = {},
+): AgentStandingCounters {
+  return counters({
+    failedCount: callers * retries,
+    failedCallerCount: callers,
+    ...o,
+  });
 }
 
 function batch(
@@ -58,6 +77,7 @@ beforeEach(() => {
   delete process.env.TRIAL_MAX_SETTLED_TASKS;
   delete process.env.TRIAL_MAX_MIN_REPUTATION;
   delete process.env.TRIAL_MAX_AGENTS_PER_PUBLISHER;
+  delete process.env.TRIAL_MAX_FAILED_CALLERS;
 });
 
 afterEach(() => {
@@ -124,23 +144,53 @@ describe('classifyStanding · los tres estados derivados', () => {
     expect(classifyStanding(counters({ tasksSettled: n + 1 }))).toBe('scored');
   });
 
-  it('T-05 (AC-5/CD-14): el PRIMER fallo ANULA el carril — no lo decrementa', () => {
+  it('T-05 (AC-5/CD-14): alcanzado `F`, la anulación es un CORTE — no un decremento', () => {
     // Con 0 liquidadas.
-    expect(classifyStanding(counters({ failedCount: 1 }))).toBe('penalized');
+    expect(classifyStanding(failedBy(2))).toBe('penalized');
     // Y con 2 liquidadas dentro del carril TAMPOCO le "quedan N-1".
+    expect(classifyStanding(failedBy(2, 1, { tasksSettled: 2 }))).toBe(
+      'penalized',
+    );
+    // Anulación, no decremento: 5 callers no es "peor" que 2, es el mismo estado.
+    expect(classifyStanding(failedBy(5, 1, { tasksSettled: 2 }))).toBe(
+      'penalized',
+    );
+  });
+
+  it('AR BLQ-MED-2: UN caller no anula el carril, por muchas veces que reintente', () => {
+    // El hallazgo: con el contador crudo, un timeout de red o el agente caído
+    // treinta segundos mataba el carril PARA SIEMPRE (sin admisión nunca hay
+    // liquidadas, así que `tasksSettled < N` para siempre), y un tercero podía
+    // quemárselo a un competidor con una sola llamada. Eso reinstalaba el deadlock
+    // que la HU existe para romper.
+    expect(classifyStanding(failedBy(1))).toBe('newcomer');
+    expect(classifyStanding(failedBy(1, 9))).toBe('newcomer');
+    // Lo que anula es la CORROBORACIÓN de partes independientes.
+    expect(classifyStanding(failedBy(2, 1))).toBe('penalized');
+  });
+
+  it('AR BLQ-MED-2: `F` sale de la env (`TRIAL_MAX_FAILED_CALLERS`), no de un 2 hardcodeado', () => {
+    process.env.TRIAL_MAX_FAILED_CALLERS = '3';
+    expect(classifyStanding(failedBy(2))).toBe('newcomer');
+    expect(classifyStanding(failedBy(3))).toBe('penalized');
+
+    // `F = 1` es la política vieja, y sigue siendo alcanzable por configuración.
+    process.env.TRIAL_MAX_FAILED_CALLERS = '1';
+    expect(classifyStanding(failedBy(1))).toBe('penalized');
+  });
+
+  it('AR BLQ-MED-2: `failedCount` crudo NO decide (es el que alimenta la fórmula)', () => {
+    // Si la clasificación volviera a mirar `failedCount`, este caso sería
+    // `penalized`. La fórmula del score sigue leyéndolo; el carril, no.
     expect(
-      classifyStanding(counters({ tasksSettled: 2, failedCount: 1 })),
-    ).toBe('penalized');
-    // Anulación, no decremento: 5 fallos no es "peor" que 1, es el mismo estado.
-    expect(
-      classifyStanding(counters({ tasksSettled: 2, failedCount: 5 })),
-    ).toBe('penalized');
+      classifyStanding(counters({ failedCount: 7, failedCallerCount: 0 })),
+    ).toBe('newcomer');
   });
 
   it('el que YA salió del carril se juzga por su score real, no vuelve a entrar', () => {
     const n = resolveTrialMaxSettledTasks();
     expect(
-      classifyStanding(counters({ tasksSettled: n, failedCount: 3 })),
+      classifyStanding(failedBy(3, 1, { tasksSettled: n })),
     ).toBe('scored');
   });
 
@@ -170,7 +220,9 @@ describe('isTrialEligible · el único predicado de admisión (CD-8)', () => {
   });
 
   it('T-05: `penalized` NO es elegible ni con el piso más bajo posible', () => {
-    expect(isTrialEligible(counters({ failedCount: 1 }), 1)).toBe(false);
+    expect(isTrialEligible(failedBy(2), 1)).toBe(false);
+    // Y el contraste, que es lo que el fix-pack compró: un solo caller no anula.
+    expect(isTrialEligible(failedBy(1, 4), 1)).toBe(true);
   });
 
   it('T-04: el que ya salió del carril por éxito NO es elegible', () => {
@@ -196,6 +248,7 @@ describe('T-18 (CD-7) · standingFor distingue AUSENCIA de DEGRADACIÓN', () => 
       tasksSettled: 0,
       successCount: 0,
       failedCount: 0,
+      failedCallerCount: 0,
       reputation: null,
     });
     expect(st !== 'unknown' && classifyStanding(st)).toBe('newcomer');
@@ -211,7 +264,7 @@ describe('T-18 (CD-7) · standingFor distingue AUSENCIA de DEGRADACIÓN', () => 
   });
 
   it('`degraded: false` + slug presente → sus contadores reales', () => {
-    const c = counters({ tasksSettled: 2, successCount: 2, failedCount: 1 });
+    const c = failedBy(1, 1, { tasksSettled: 2, successCount: 2 });
 
     expect(standingFor('x', batch([['x', c]]))).toEqual(c);
   });

@@ -83,6 +83,16 @@ interface RepAccumulator {
   settledLatencyCount: number;
   successCount: number; // status='success' (cualquier costo)
   failedCount: number; // status='failed'
+  /**
+   * AR fix-pack BLQ-MED-2: CALLERS DISTINTOS que registraron al menos un `failed`
+   * (mismo bucketing que `settledByCaller`: `caller_ref_hash` o `'__anon__'`).
+   *
+   * Vive al lado de `settledByCaller` y NO toca `failedCount`: la fórmula del score
+   * (`computeFromAccumulator`) sigue leyendo el contador crudo, byte por byte. Este
+   * Set alimenta SÓLO la anulación del carril de estreno, que es la política a la
+   * que "un fallo es un fallo" le quedaba grande — ver `lib/trial-standing.ts`.
+   */
+  failedCallers: Set<string>;
 }
 
 /** Filas que pedimos a Supabase (select mínimo, DT-5/CD-2). */
@@ -103,7 +113,19 @@ function emptyAccumulator(): RepAccumulator {
     settledLatencyCount: 0,
     successCount: 0,
     failedCount: 0,
+    failedCallers: new Set<string>(),
   };
+}
+
+/**
+ * WKH-104 (CD-7/CD-8): el caller de una fila. Eventos sin `caller_ref_hash`
+ * (históricos o anónimos) caen todos en el MISMO bucket `'__anon__'`, nunca en
+ * error ni en un colapso a null.
+ */
+function callerBucket(row: RepRow): string {
+  return (
+    (row.metadata?.caller_ref_hash as string | null | undefined) ?? '__anon__'
+  );
 }
 
 /** Acumula una fila en el accumulator del slug (anti-sybil CD-1 en JS). */
@@ -116,12 +138,10 @@ function accumulateRow(acc: RepAccumulator, row: RepRow): void {
     acc.successCount++;
     // tasks_settled exige success AND cost_usdc>0 (anti-sybil CD-1).
     if (Number.isFinite(cost) && cost > 0) {
-      // WKH-104 (CD-7/CD-8): contabilizar la task bajo su caller. Eventos sin
-      // caller_ref_hash (históricos o anónimos) caen en el bucket '__anon__'
-      // (capeado a K en computeFromAccumulator), NUNCA error ni colapso a null.
-      const hash =
-        (row.metadata?.caller_ref_hash as string | null | undefined) ??
-        '__anon__';
+      // WKH-104 (CD-7/CD-8): contabilizar la task bajo su caller (bucket
+      // '__anon__' para históricos/anónimos, capeado a K en
+      // computeFromAccumulator).
+      const hash = callerBucket(row);
       acc.settledByCaller.set(hash, (acc.settledByCaller.get(hash) ?? 0) + 1);
       acc.settledVolume += cost;
       if (row.latency_ms != null) {
@@ -131,6 +151,12 @@ function accumulateRow(acc: RepAccumulator, row: RepRow): void {
     }
   } else if (isFailed) {
     acc.failedCount++;
+    // AR fix-pack BLQ-MED-2: además del crudo, QUIÉN falló. Un mismo caller que
+    // reintenta tres veces contra un agente caído treinta segundos deja 3 en
+    // `failedCount` y 1 acá — y esa diferencia es la que decide si el carril de
+    // estreno se anula. `failedCount` NO cambia: la fórmula del score lo sigue
+    // leyendo igual.
+    acc.failedCallers.add(callerBucket(row));
   }
 }
 
@@ -332,6 +358,7 @@ export const reputationService: ReputationService = {
         tasksSettled: cappedSettled(acc),
         successCount: acc.successCount,
         failedCount: acc.failedCount,
+        failedCallerCount: acc.failedCallers.size,
         reputation: computeFromAccumulator(acc),
       });
     }

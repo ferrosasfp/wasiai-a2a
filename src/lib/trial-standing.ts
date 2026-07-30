@@ -7,8 +7,9 @@
  * SOLA VEZ (CD-8), bajo qué condiciones ese agente puede ser admitido igual:
  *
  *   · el que consulta lo pidió (`allowTrial` / `constraints.allow_trial`);
- *   · no falló nunca (`failedCount === 0` — CD-14: el primer fallo ANULA el
- *     carril, no lo decrementa);
+ *   · no le falló a `F` callers DISTINTOS (CD-14 revisado por el AR fix-pack
+ *     BLQ-MED-2: la anulación es un corte, no un decremento, pero un solo fallo
+ *     transitorio no puede dispararla);
  *   · todavía está dentro del carril (`tasksSettled < N`);
  *   · el piso pedido no supera el techo (`min <= T`);
  *   · su publicador no agotó su cupo (`M` agentes en estreno por ancla).
@@ -74,14 +75,27 @@ export function resolveTrialMaxAgentsPerPublisher(): number {
   return Number.isFinite(n) && n > 0 ? n : 2;
 }
 
+/**
+ * `F` — CALLERS DISTINTOS que tienen que haber registrado un `failed` para anular
+ * el carril. Default **2** (PROVISORIO) — AR fix-pack BLQ-MED-2.
+ *
+ * `F = 1` reproduce el comportamiento anterior, y es una opción legítima de
+ * operación: se deja alcanzable por env en vez de hardcodear el criterio.
+ */
+export function resolveTrialMaxFailedCallers(): number {
+  const raw = process.env.TRIAL_MAX_FAILED_CALLERS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? n : 2;
+}
+
 // ── Clasificación (pura) ────────────────────────────────────────────────
 
 /**
  * Clasifica un standing a partir de sus contadores. Función PURA.
  *
  *   `scored`    ⟺ `tasksSettled >= N`  → fuera del carril, mérito puro
- *   `penalized` ⟺ `failedCount >= 1` y `tasksSettled < N`  → carril ANULADO
- *   `newcomer`  ⟺ `failedCount === 0` y `tasksSettled < N` → elegible
+ *   `penalized` ⟺ `failedCallerCount >= F` y `tasksSettled < N` → carril ANULADO
+ *   `newcomer`  ⟺ `failedCallerCount < F` y `tasksSettled < N`  → elegible
  *
  * El orden importa: `scored` se evalúa PRIMERO porque un agente que ya salió del
  * carril por éxito no vuelve a entrar por haber tenido un fallo — su historial ya
@@ -89,13 +103,38 @@ export function resolveTrialMaxAgentsPerPublisher(): number {
  *
  * "Sin historial" y "mal historial" son estados DISTINTOS (CD-14): el que arrancó
  * y entregó mal ya tuvo su oportunidad.
+ *
+ * ── AR fix-pack BLQ-MED-2: por qué CALLERS DISTINTOS y no `failedCount` ─────
+ * CD-14 decía "el primer `failed` ANULA el carril". Medido, eso era otra cosa: la
+ * anulación es PERMANENTE (con `failedCount >= 1` y `tasksSettled < N` para
+ * siempre, porque sin admisión nunca hay liquidadas) y NO hace falta un atacante.
+ * Un timeout de red, o el agente caído treinta segundos, bastaba para reinstalar
+ * EXACTAMENTE el deadlock que esta HU existe para romper. Y con un tercero de por
+ * medio, quemarle el carril a un competidor costaba una llamada.
+ *
+ * Con `F` callers distintos hace falta que el fallo lo vean partes INDEPENDIENTES.
+ * No encarece mucho el ataque (`F` llamadas en vez de una), pero cambia su
+ * naturaleza: deja de bastar un accidente, y deja de bastar una sola parte
+ * interesada. El bucket `'__anon__'` cuenta como UN caller, así que una ráfaga
+ * anónima tampoco alcanza sola.
+ *
+ * ── Y por qué la anulación NO expira (decisión explícita) ───────────────────
+ * Se evaluó una ventana temporal (contar sólo fallos recientes). Se rechazó por
+ * dos motivos. Uno: el carril NO es el único camino a tener historial — un agente
+ * anulado sigue siendo descubrible y contratable por cualquiera que no pida piso,
+ * así que puede ganarse sus liquidadas y salir del carril por mérito. La anulación
+ * cierra un atajo, no la puerta. Dos: una ventana premia esperar — un agente que
+ * entrega mal recupera el atajo sin haber arreglado nada, y del otro lado del atajo
+ * está el `depositAddress` de una remesa. Si esto se revisa, lo que hay que mover
+ * primero es `F` (env), no el reloj.
  */
 export function classifyStanding(
   c: AgentStandingCounters,
   n: number = resolveTrialMaxSettledTasks(),
+  f: number = resolveTrialMaxFailedCallers(),
 ): AgentStandingKind {
   if (c.tasksSettled >= n) return 'scored';
-  if (c.failedCount >= 1) return 'penalized';
+  if (c.failedCallerCount >= f) return 'penalized';
   return 'newcomer';
 }
 
@@ -122,11 +161,12 @@ export function isTrialEligible(
   min: number,
   n: number = resolveTrialMaxSettledTasks(),
   t: number = resolveTrialMaxMinReputation(),
+  f: number = resolveTrialMaxFailedCallers(),
 ): boolean {
   // CD-7: "no pude preguntar por el historial" NO es "no tiene historial".
   if (c === 'unknown') return false;
   if (min > t) return false;
-  return classifyStanding(c, n) === 'newcomer';
+  return classifyStanding(c, n, f) === 'newcomer';
 }
 
 /**
@@ -152,6 +192,7 @@ export function standingFor(
       tasksSettled: 0,
       successCount: 0,
       failedCount: 0,
+      failedCallerCount: 0,
       reputation: null,
     }
   );
