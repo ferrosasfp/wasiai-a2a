@@ -206,6 +206,44 @@ export type SettledPeek =
   /** El store no respondio. NO significa "no se pago". */
   | { state: 'unknown' };
 
+/**
+ * WKH-319 — veredicto de TERMINOS sobre una tx ya parseada.
+ *
+ * ⚠️ POR QUE TRES VALORES Y NO DOS. `checkTerms` devolvia
+ * `{ok:true} | {ok:false; error}`, y esa union de DOS respondia una pregunta de TRES:
+ * *coincide* / *no coincide* / **no pude medirlo**. Sin el tercero, toda forma de dato
+ * ilegible —una lista ausente, una entrada truncada, un `amount` que no es un entero—
+ * tenia que aterrizar en uno de los dos, y aterrizaba en el equivocado: con
+ * `preTokenBalances` ausente el `?? []` fabricaba la lista, `delta` pasaba a ser el
+ * SALDO ABSOLUTO de payTo, y una tx donde payTo GASTA se certificaba como nuestro pago.
+ *
+ * ⚠️ POR QUE EL DISCRIMINANTE ES `verdict: string` Y NO `ok`.
+ *  1. `ok: true | false | 'unknown'` seria PEOR que la union de dos: `if (terms.ok)` da
+ *     **true** para `'unknown'` — un fail-open silencioso con forma de arreglo.
+ *  2. Renombrar el campo hace que **cada lectura vieja deje de compilar**. El colapso no
+ *     se previene con un comentario que pida no hacerlo: se previene haciendo que no
+ *     compile. Los dos call-sites tienen que ser revisitados a mano, y ese es
+ *     exactamente el punto.
+ *
+ * `creditedAtomic` viaja SOLO en `match`: es el hecho MEDIDO, no el que pedimos. Existe
+ * para que el log y (mas adelante) el recibo puedan cerrar sobre el mismo hecho — hoy el
+ * recibo usa el monto que CREEMOS haber pagado (TD-319-1). String, no bigint, por la
+ * convencion de la casa: los atomicos viajan como string.
+ */
+export type SolanaTermsVerdict =
+  /** Medido: el conjunto receptor subio >= lo requerido. */
+  | { verdict: 'match'; creditedAtomic: string }
+  /**
+   * MEDIDO y no alcanza. Exige que las dos listas esten presentes, sean interpretables
+   * y esten COMPLETAS sobre el conjunto receptor. Es una negativa demostrada.
+   */
+  | { verdict: 'mismatch'; detail: string }
+  /**
+   * No se pudo medir. NO es una negativa: no autoriza condenar una fila ni
+   * re-transmitir. El caller lo traduce a `SettlementPresence.unknown`.
+   */
+  | { verdict: 'indeterminate'; detail: string };
+
 export interface SolanaPaymentAdapter extends PaymentAdapterCommon {
   readonly vmFamily: 'solana';
   readonly caip2ChainId: string; // DT-1: `solana:<genesis-prefix>` (NO chainId:number)

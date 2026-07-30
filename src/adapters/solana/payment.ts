@@ -19,6 +19,7 @@ import type {
   SettleResult,
   SolanaSettleProof,
   SolanaSettleRequest,
+  SolanaTermsVerdict,
   SolanaTokenSpec,
   VerifyResult,
 } from '../types.js';
@@ -637,10 +638,30 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
         detail: JSON.stringify(parsed.meta.err),
       };
     }
-    const terms = this.checkTerms(parsed, proof);
-    return terms.ok
-      ? { state: 'landed_ok' }
-      : { state: 'landed_mismatch', detail: terms.error };
+    // WKH-319 — el `try` externo es CINTURON Y TIRANTES (CD-6). Los guards internos
+    // de `checkTerms` hacen que esto no ocurra, pero la promesa "NUNCA lanza" del
+    // docstring de arriba tiene que ser ESTRUCTURALMENTE cierta, no argumentada: un
+    // guard que se sostiene sobre su propio razonamiento no es un guard.
+    let terms: SolanaTermsVerdict;
+    try {
+      terms = this.checkTerms(parsed, proof);
+    } catch (err) {
+      return { state: 'unknown', detail: `terms_threw: ${errText(err)}` };
+    }
+    switch (terms.verdict) {
+      case 'match':
+        return { state: 'landed_ok' };
+      case 'mismatch':
+        return { state: 'landed_mismatch', detail: terms.detail };
+      case 'indeterminate':
+        // "No pude medir los terminos" es un caso de `unknown`, NO de
+        // `landed_mismatch`: NO condena la fila y NO autoriza re-transmitir.
+        // Deliberadamente NO se agrega un sexto estado a `SettlementPresence`
+        // (CD-13): los consumidores discriminan con cadenas de `if` y caen por
+        // descarte a la cola que RE-TRANSMITE, asi que un estado nuevo que alguien
+        // no agregue a esa cadena cae en la rama que paga de nuevo, en silencio.
+        return { state: 'unknown', detail: terms.detail };
+    }
   }
 
   /**
@@ -1103,9 +1124,10 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
       Awaited<ReturnType<Connection['getParsedTransaction']>>
     >,
     proof: SolanaSettleProof,
-  ): { ok: true } | { ok: false; error: string } {
+  ): SolanaTermsVerdict {
     const meta = parsed.meta;
-    if (!meta) return { ok: false, error: 'transaction has no meta' };
+    if (!meta)
+      return { verdict: 'mismatch', detail: 'transaction has no meta' };
     const mint = getSolanaUsdcMint();
     const required = BigInt(proof.amountAtomic);
 
@@ -1122,11 +1144,11 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     const delta = balanceFor(post) - balanceFor(pre);
     if (delta < required) {
       return {
-        ok: false,
-        error: `on-chain transfer ${delta} < required ${required} for ${proof.payTo}`,
+        verdict: 'mismatch',
+        detail: `on-chain transfer ${delta} < required ${required} for ${proof.payTo}`,
       };
     }
-    return { ok: true };
+    return { verdict: 'match', creditedAtomic: delta.toString() };
   }
 
   async verify(proof: SolanaSettleProof): Promise<VerifyResult> {
@@ -1161,8 +1183,13 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
         error: 'transaction failed on-chain',
       };
     }
+    // WKH-319 — W2 le agrega `indeterminate: true` a la rama no medida (AC-14). Hoy
+    // `verify()` NO tiene call-site de produccion (lo despierta WKH-314), asi que el
+    // corte minimo sólo lo adapta al discriminante nuevo sin cambiar su contrato.
     const terms = this.checkTerms(parsed, proof);
-    return terms.ok ? { valid: true } : { valid: false, error: terms.error };
+    return terms.verdict === 'match'
+      ? { valid: true }
+      : { valid: false, error: terms.detail };
   }
 }
 
