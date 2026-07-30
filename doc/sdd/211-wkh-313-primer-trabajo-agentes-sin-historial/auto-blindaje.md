@@ -101,6 +101,23 @@
 - **Aplicar en**: un test que afirma sobre una lista tiene que IMPORTAR la lista. Si
   no se puede importar, el arreglo es exportarla, no copiarla.
 
+### [2026-07-30] Fix-pack AR · Campaña — Mi propio arreglo dejó ciego a un mutante viejo
+
+- **Error potencial evitado**: al forzar `verified = false` en el admitido (BLQ-ALTO-1),
+  el test que mataba **M6** (darle score sintético igual al piso) dejó de matarlo. Su
+  escenario era «probado caro vs estreno barato»: como el probado seguía llegando
+  `verified: true` desde su card, ganaba por la PRIMERA clave del sort y el empate en
+  reputación que M6 provoca ya nunca se evaluaba. La suite quedaba verde con el
+  mutante vivo.
+- **Causa raíz**: un fix que agrega una clave de decisión ARRIBA de la que un test
+  mide lo vuelve vacuo sin ponerlo rojo. La campaña de mutación no se re-corrió
+  "por prolijidad": es lo único que lo detecta.
+- **Fix**: el probado del escenario pasa a `verified: false`, así los dos empatan en
+  identidad y lo único que puede decidir es el score. M6 vuelve a morir (verificado).
+- **Aplicar en**: después de tocar CUALQUIER entrada del comparador, re-correr los
+  mutantes de los tests de ORDEN, no sólo los del cambio. Un fix puede matar la
+  capacidad de un test de detectar otro bug.
+
 ### [2026-07-30] W0.1 — El tipo creció y el sitio de construcción quedó atrás
 
 - **Error**: agregué `reputation` y `trialAvailable` a `DiscoveryResult.excluded`

@@ -366,9 +366,16 @@ describe('T-06 (CD-6) · el admitido ordena ÚLTIMO y el ranking de los demás n
     // El precio es el TERCER criterio del sort: si el estreno recibiera un score
     // sintético igual al piso, empataría en reputación y su precio 0 lo pondría
     // PRIMERO. Con su score real (0) eso no puede pasar.
+    //
+    // ⚠️ El probado va con `verified: false` A PROPÓSITO (fix-pack): `verified` es la
+    // PRIMERA clave del sort y el admitido sale con `false` forzado, así que un
+    // probado `verified: true` ganaría por identidad y este test NO estaría midiendo
+    // la reputación. Empatados en `verified`, lo único que puede decidir es el score
+    // — que es justo el mutante que este test tiene que matar (M6: score sintético
+    // igual al piso ⟹ empate en reputación ⟹ gana el precio 0 del estreno).
     serve([
       raw('barato-sin-historial', { price: 0 }),
-      raw('caro-probado', { price: 9 }),
+      raw('caro-probado', { price: 9, verified: false }),
     ]);
     standings([
       ['caro-probado', counters({ tasksSettled: 5, reputation: rep(10) })],
