@@ -292,7 +292,8 @@ ausente descalificando de nuevo, el `_down` sin archivar los binds y los backups
 **21/21 KILLED, cada uno con el nombre del test que muere.** Los archivos se restauraron
 verificando `sha256` en cada iteración.
 
-*(Actualizado en la iteración 2: la campaña son ahora **27 mutantes, 27 KILLED**.)*
+*(Actualizado en la iteración 3: la campaña son ahora **31 mutantes, 31 KILLED** — el 31º
+lo agregó un sobreviviente que ella misma encontró, ver la última entrada.)*
 
 ---
 
@@ -365,3 +366,83 @@ verificando `sha256` en cada iteración.
 - **Aplicar en**: cuando una cabecera promete una propiedad TOTAL ("nunca lanza",
   "siempre devuelve"), esa propiedad necesita un test que la ejerza sobre la forma
   DEGENERADA del input, no sobre la típica. Si no, la promesa es aspiracional.
+
+---
+
+### [2026-07-30 FIX-PACK it3 · BLQ-BAJO-1] Escribí el guard contra el `??` usando un `??`
+
+- **Error**: el invariante de conservación que agregué en it2 comparaba
+  `delta <= totalSourceDrop`, y `totalSourceDrop` salía de `postByIndex.get(idx) ?? 0n`:
+  **una fila ausente en `post` se leía como "esa cuenta se drenó entera" e INFLABA EL
+  TECHO**. O sea que el único insumo del guard usaba exactamente el patrón que el resto
+  del fix-pack declara prohibido, tres pantallas más arriba, con mi propia firma.
+  Reproducido por el re-AR: con `pre` sin la fila de nuestra ATA **y** `post` sin la fila
+  de la cuenta que "pagó", `{ok:true, amountUsd:"1001"}`. **Una truncación de listas
+  produce las dos ausencias de una sola vez**, así que no hacía falta un atacante.
+- **Causa raíz**: apliqué la regla nueva ("una ausencia no es un cero medido") a los
+  datos que estaba auditando y no al código que escribí para auditarlos. La forma del
+  error es *el guard se exime de la regla que impone*. Y había una pista que ignoré:
+  el techo era **de un solo lado**, así que una ausencia podía compensar a la otra —
+  ninguna medición que se pueda inflar desde afuera sirve como límite.
+- **Fix**: se reemplazó el techo por una **igualdad de los dos lados**: sobre las
+  entradas del mint, `subió total == bajó total`. Una fila que falta en `pre` produce una
+  subida sin bajada; una que falta en `post`, una bajada sin subida. **Ninguna ausencia
+  puede pagar por la otra.** El `?? 0n` que queda es ahora la definición SIMETRICA de
+  los dos únicos casos reales de ausencia (cuenta creada = valía 0 antes; cuenta cerrada
+  = vale 0 después), y el `?? 0n` del loop de atribución cambió de rol: ya no alimenta
+  ningún techo —la conservación ya corrió— y su modo de falla pasó a ser fail-CLOSED
+  (un candidato de más ⇒ `DEPOSITOR_AMBIGUOUS`).
+- **Y se corrigió una afirmación mía que el re-AR falsificó**: el comentario decía que el
+  invariante "caza formas de corrupción que no se pueden enumerar". No: caza **una**
+  propiedad, enunciable y falsable. Un guard no puede prometer más de lo que su fórmula
+  sostiene — que es, literalmente, la tesis de esta HU aplicada a mí.
+- **Supuesto ahora DECLARADO**: el mint es SPL clásico, sin transfer-fee ni mint/burn en
+  el camino del depositante. Con Token-2022 y fee, `bajó > subió` en una tx legítima y
+  este guard la rechazaría (fail-closed, visible, revisitable) — pero se escribe ahora,
+  no se descubre después.
+- **Aplicar en**: (a) después de escribir un guard, **releerlo con la regla que el guard
+  impone** — el código de auditoría no está exento de la política que audita; (b) todo
+  límite (techo/piso) tiene que calcularse sobre datos que el escenario adverso no pueda
+  inflar; si puede, no es un límite: es una sugerencia; (c) preferir **igualdades de dos
+  lados** a desigualdades de uno cuando el dato puede faltar de los dos.
+
+---
+
+### [2026-07-30 FIX-PACK it3 · MNR-3] Contar mutantes muertos OCULTA que un test perdió su poder
+
+- **Error**: el test del lado POST de BLQ-MED-1 se desafiló solo, igual que el de PRE en
+  it2 — pero esta vez **la campaña siguió reportando 100% KILLED**. El mutante que ese
+  test vigila (restaurar el `continue`) también lo mata el test del lado PRE, así que la
+  muerte estaba "cubierta" y el desafilado quedó invisible.
+- **Causa raíz**: al agregar el guard de `delta < 0n`, el mutante sobre ese fixture pasó
+  a producir un delta negativo y a morir en **el guard nuevo**, cuyo veredicto —UNKNOWN,
+  no `RECIPIENT_MISMATCH`— satisface las tres aserciones del test. Y la métrica de la
+  campaña es *por mutante*, no *por test*: **atribuye la muerte a la suite, no al test
+  que la nombra**, así que un test puede volverse vacuo sin mover un solo número.
+- **Fix**: la misma conjunción de dos needles que en it2, ahora también en el test del
+  lado POST, con la explicación al lado.
+- **Aplicar en**: cuando dos tests vigilan el MISMO mutante, la campaña deja de ser
+  evidencia sobre cada uno. Para un guard de dinero, **el test tiene que identificar por
+  cuál CAMINO murió** (needle sobre el detalle), no sólo el veredicto — es lo único que
+  distingue "este test sigue probando lo suyo" de "otro test lo está tapando". Y el
+  corolario incómodo: **un 100% de mutación no es prueba de que ningún test se desafiló**.
+
+---
+
+### [2026-07-30 FIX-PACK it3 · el hueco que encontró la campaña, no la revisión]
+
+- **Error**: `balancesByIndex` —el loop del invariante nuevo— se saltaba con `continue`
+  las entradas del mint con `amount` ilegible. Los tests de BLQ-MED-1 no lo cubrían
+  porque ponen el dato ilegible en NUESTRA ATA, donde el guard del delta responde
+  primero: el loop de conservación nunca se ejercitaba con un dato roto.
+- **Causa raíz**: escribí el guard nuevo y **no le apliqué la lección de BLQ-MED-1** (un
+  dato ilegible en una entrada relevante es indeterminación, no cero). Con `continue`,
+  los totales cuadraban **por omisión**: una suma a la que le falta un sumando da
+  "balanceada" con la misma facilidad con la que da cualquier otra cosa.
+- **Fix**: `return null` ⇒ UNKNOWN, y el test que faltaba: el `amount` ilegible en una
+  cuenta **de terceros** del mismo mint, que es la única forma de llegar a ese loop con
+  un dato roto.
+- **Aplicar en**: al agregar un loop que recorre los MISMOS datos que otro ya validado,
+  no asumir que la validación de aquél lo cubre: **cubre su subconjunto**. Y cuando la
+  campaña marca un sobreviviente en código recién escrito, casi siempre es una lección
+  vieja que no se aplicó al código nuevo.
