@@ -99,7 +99,13 @@ describe('discover route — behaviour (P1-4)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockDiscover.mockResolvedValue({ agents: [], total: 0, registries: [] });
+    mockDiscover.mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      sources: [],
+      catalogStatus: 'complete',
+    });
     mockGetAgent.mockResolvedValue(null);
   });
 
@@ -124,6 +130,8 @@ describe('discover route — behaviour (P1-4)', () => {
       ],
       total: 1,
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
 
     const res = await app.inject({ method: 'GET', url: '/discover' });
@@ -265,6 +273,8 @@ describe('discover route — behaviour (P1-4)', () => {
       total: 1,
       // a remote registry failed to respond → omitted from the surviving list.
       registries: ['wasiai'],
+      sources: [],
+      catalogStatus: 'complete',
     });
 
     const res = await app.inject({ method: 'GET', url: '/discover' });

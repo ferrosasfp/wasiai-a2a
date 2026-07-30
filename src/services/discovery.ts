@@ -219,7 +219,15 @@ export const discoveryService = {
 
     // NO early-return si solo hay locales (sin registries habilitados).
     if (registries.length === 0 && localAgents.length === 0) {
-      return { agents: [], total: 0, registries: [] };
+      // WKH-318: `complete`, no `partial`. No hay fuentes ⇒ no hay nada que haya
+      // fallado. "No tengo a quién preguntarle" no es "no pude preguntar".
+      return {
+        agents: [],
+        total: 0,
+        registries: [],
+        sources: [],
+        catalogStatus: 'complete',
+      };
     }
 
     // First attempt: forward query.query upstream (existing behavior — DT-1).

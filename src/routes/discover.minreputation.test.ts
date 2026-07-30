@@ -46,7 +46,13 @@ describe('minReputation: validación en la ruta', () => {
 
   beforeEach(() => {
     mockDiscover.mockClear();
-    mockDiscover.mockResolvedValue({ agents: [], total: 0, registries: [] });
+    mockDiscover.mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      sources: [],
+      catalogStatus: 'complete',
+    });
   });
 
   it('T-R1: GET con minReputation válido → 200 y el valor llega al service', async () => {

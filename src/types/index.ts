@@ -142,6 +142,21 @@ export interface RegistrySchema {
     agentsPath?: string;
     /** Field mappings for agent object */
     agentMapping?: AgentFieldMapping;
+    /**
+     * WKH-318: techo de `limit` que este registro acepta, DECLARADO por el
+     * registrante. Cuando está, `queryRegistry` envía
+     * `min(over-fetch, maxLimit)`. **Ausente ⇒ comportamiento byte-idéntico al
+     * de antes de esta HU** (el código es inerte sin la migración: falla en la
+     * dirección segura).
+     */
+    maxLimit?: number;
+    /**
+     * WKH-318: path (dot-notation, `getNestedValue`) al cursor de paginación en
+     * la respuesta del registro. Cuando está declarado Y llega no-nulo, la
+     * fuente se reporta `truncated` con evidencia `cursor` (exacta). No se
+     * pagina (TD-318-2): se DETECTA.
+     */
+    nextCursorPath?: string;
   };
 
   /** How to call invoke */
@@ -373,10 +388,89 @@ export interface DiscoveryQuery {
   scope?: A2AAgentKeyRow | undefined;
 }
 
+// ============================================================
+// WKH-318 — HONESTIDAD DEL CATÁLOGO FEDERADO
+// ============================================================
+
+/**
+ * Tres estados por fuente. Un booleano ya habría perdido el tercero, que es
+ * justo el que esta HU existe para no perder.
+ */
+export type DiscoverySourceState =
+  | 'ok' // respondió, y lo que trajo es todo lo que tiene para esta query
+  | 'truncated' // respondió, pero hay más filas que NO trajimos
+  | 'failed'; // NO se la pudo consultar
+
+export type DiscoverySourceFailure =
+  | 'http_error'
+  | 'timeout'
+  | 'ssrf_blocked'
+  | 'circuit_open'
+  | 'bad_payload'
+  | 'unknown';
+
+export interface DiscoverySource {
+  name: string;
+  state: DiscoverySourceState;
+  /**
+   * Filas que la fuente aportó al conjunto candidato, ANTES de los filtros
+   * locales (status/verified/caps/free-text/maxPrice/scope/minReputation).
+   *
+   * `null` cuando `state === 'failed'` — NUNCA 0 (CD-14). Un 0 significa "le
+   * pregunté y no tiene"; `null` significa "no pude preguntarle".
+   *
+   * POR QUÉ PRE-FILTRO: medido en producción, `?capabilities=remit.quote&limit=10`
+   * devuelve 0 agentes con las dos fuentes sanas. Si "aportó" se contara
+   * post-filtro, una query selectiva reportaría fuentes desaparecidas y el
+   * caller leería degradación donde sólo hubo un filtro.
+   */
+  rows: number | null;
+  /** Sólo cuando `state === 'failed'`. */
+  failure?: DiscoverySourceFailure;
+  /** Sólo cuando `state === 'truncated'`. `cursor` es exacta; `page_full` es heurística. */
+  truncationEvidence?: 'cursor' | 'page_full';
+}
+
+/** Roll-up de request. Mismo triplete, un nivel más arriba. */
+export type CatalogStatus = 'complete' | 'truncated' | 'partial';
+
+/** Referencia mínima de una fuente caída, para los cuerpos de error del money-path. */
+export interface FailedSourceRef {
+  name: string;
+  failure: DiscoverySourceFailure;
+}
+
+/**
+ * Lo que `queryRegistry` devuelve ahora. Antes devolvía `Agent[]` y toda la
+ * información sobre CÓMO le fue a la fuente se perdía en el `.catch(() => [])`
+ * del fanout.
+ */
+export interface RegistryFetchOutcome {
+  agents: Agent[];
+  state: DiscoverySourceState;
+  rows: number | null;
+  failure?: DiscoverySourceFailure;
+  truncationEvidence?: 'cursor' | 'page_full';
+}
+
 export interface DiscoveryResult {
   agents: Agent[];
   total: number;
+  /**
+   * WKH-318: las fuentes que **aportaron filas** al conjunto candidato, NO las
+   * fuentes configuradas. El tipo y el nombre no cambian; en el camino sano el
+   * valor es byte-idéntico al de antes de esta HU. Sólo se acorta cuando una
+   * fuente realmente no aportó nada.
+   */
   registries: string[];
+  /** WKH-318: estado POR FUENTE. Requerido: ningún constructor puede omitirlo. */
+  sources: DiscoverySource[];
+  /**
+   * WKH-318: roll-up. Precedencia `partial` > `truncated` > `complete`.
+   * Sin registros habilitados (sólo self-published) ⇒ `complete`: no hay nada
+   * que haya fallado.
+   */
+  catalogStatus: CatalogStatus;
   /**
    * HU-208: cuántos candidatos descartó cada filtro de CANDIDATURA. Aditivo y
    * opcional (los callers que no lo leen no cambian). Existe para que un
@@ -568,6 +662,12 @@ export interface ComposeRequest {
    * sigue cobrando su precio vivo) ni la base del protocol fee (que es el costo ejecutado).
    */
   frozenStepPricesUsd?: readonly number[] | undefined;
+  /**
+   * WKH-318: el caller declara su tolerancia a un catálogo parcial. `true` ⇒ si
+   * el catálogo no es `complete`, se aborta ANTES del primer `invokeAgent` y el
+   * route reembolsa el step-0. Ausente/`false` ⇒ comportamiento de hoy.
+   */
+  requireCompleteCatalog?: boolean | undefined;
 }
 
 export interface ComposeResult {
@@ -632,6 +732,10 @@ export interface ComposeResult {
     reason: SettleWithholdingReason;
     txHash: string | null;
   };
+  /** WKH-318: las fuentes que no se pudieron consultar en este pipeline. */
+  failedSources?: FailedSourceRef[];
+  /** WKH-318: roll-up del catálogo con el que se armó el pool de este pipeline. */
+  catalogStatus?: CatalogStatus;
 }
 
 export interface StepResult {
@@ -788,6 +892,12 @@ export interface OrchestrateRequest {
    * Ausente = comportamiento de hoy (precio vivo). Solo afecta el débito al caller.
    */
   frozenStepPricesUsd?: readonly number[] | undefined;
+  /**
+   * WKH-318: la tolerancia del caller a un catálogo parcial. `true` ⇒ el planner
+   * hace early-return `catalog_incomplete` (cero débito por construcción) y el
+   * flag baja a compose para la capa 2 (TOCTOU).
+   */
+  requireCompleteCatalog?: boolean | undefined;
 }
 
 export interface OrchestrateResult {
@@ -808,6 +918,8 @@ export interface OrchestrateResult {
   debitFallback?: boolean;
   /** WKH-127: saldo post-débito (y post-refund) real; el route lo escribe en x-a2a-remaining-budget. */
   remainingBudgetUsd?: string;
+  /** WKH-318: las fuentes que no se pudieron consultar al armar el catálogo. */
+  failedSources?: FailedSourceRef[];
 }
 
 // WKH-131 (HU-128): /orchestrate/plan + /orchestrate/execute split.
@@ -815,6 +927,12 @@ export type OrchestratePlanStatus =
   | 'ready'
   | 'insufficient_funds'
   | 'no_agents'
+  /**
+   * WKH-318: NO se colapsa con `no_agents`. `no_agents` = *pregunté y no hay*;
+   * `catalog_incomplete` = *no pude preguntar*, y el caller pidió
+   * explícitamente un catálogo completo (CD-15).
+   */
+  | 'catalog_incomplete'
   | 'budget_exhausted'
   | 'no_relevant_agent';
 // circuit_open: DIFERIDO (DT-3). NO agregar en esta HU.
@@ -873,6 +991,11 @@ export interface OrchestratePlanResult {
    * no hubo retry). Interno; NO se serializa al cliente.
    */
   retryAgentCount?: number | null;
+  /**
+   * WKH-318: las fuentes que no se pudieron consultar. Presente en el
+   * early-return `catalog_incomplete`; el route lo propaga al cliente.
+   */
+  failedSources?: FailedSourceRef[];
 }
 
 export interface OrchestrateExecuteRequest extends OrchestrateRequest {

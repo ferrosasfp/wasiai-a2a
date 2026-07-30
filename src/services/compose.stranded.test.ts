@@ -221,6 +221,8 @@ beforeEach(() => {
     agents: [],
     total: 0,
     registries: [],
+    sources: [],
+    catalogStatus: 'complete',
   });
   mockDownstream.mockResolvedValue(null);
   mockGasOverhead.mockResolvedValue(0); // testnet / sin config: el valor de siempre
@@ -901,6 +903,8 @@ describe('HU-306 · el cobro no distingue de quién es el agente (AC-6)', () => 
         agents: [],
         total: 0,
         registries: [],
+        sources: [],
+        catalogStatus: 'complete',
       });
       const step0 = makeAgent({ slug: 'entrada', priceUsdc: 0.02 });
       wireAgents(step0, step1);

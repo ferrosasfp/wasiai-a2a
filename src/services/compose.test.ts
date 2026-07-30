@@ -228,6 +228,8 @@ beforeEach(() => {
     agents: [],
     total: 0,
     registries: [],
+    sources: [],
+    catalogStatus: 'complete',
   });
   // WKH-55: default downstream mock = null (no-op)
   mockDownstream.mockResolvedValue(null);
@@ -3457,6 +3459,8 @@ describe('composeService.compose — discover cache (B7)', () => {
       agents: [agent1, agent2],
       total: 2,
       registries: [],
+      sources: [],
+      catalogStatus: 'complete',
     });
     mockFetchOk({ result: 'step1' });
     mockFetchOk({ result: 'step2' });
