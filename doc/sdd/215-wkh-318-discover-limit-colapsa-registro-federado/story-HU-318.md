@@ -19,6 +19,43 @@ algo**: leé §10 (orden de merge) antes de tocar nada.
 
 ---
 
+## ⚠️ ENMIENDA DE F3 — el cuarto estado (`unverified`)
+
+> **Escrita por el Dev al cerrar el corte A, después del fix-pack del AR.** Sin
+> esto, F4 lee el contrato viejo y reporta un drift que no existe.
+
+El AR marcó **BLQ-1**: `state: 'ok'` cargaba dos semánticas incompatibles —
+*"respondió y trajo todo"* y *"respondió y no tengo forma de saber si trajo
+todo"*— y elegía la primera. **Era el caso de producción**, no un borde: el
+registro real se siembra sin `nextCursorPath`
+(`20260401000000_kite_registries.sql:44-66`) y `/capabilities` llama a
+`discover({})` sin `limit`, así que no se manda `limitParam`. Repro del AR: 20
+filas **con `next_cursor` seteado** devolvían `{"state":"ok",
+"catalogStatus":"complete"}` — o sea, el corte A **cambiaba una mentira por
+otra**, que es textualmente lo que prohíbe la no-negociable §2.5.
+
+**Enmienda**: `ok` deja de ser el default y pasa a ganarse con **evidencia
+positiva** de completitud. Aparece un cuarto valor, `unverified`, en
+`DiscoverySourceState` **y** en `CatalogStatus`.
+
+| Antes (este archivo, W0.1/W0.2) | Ahora (código en el árbol) |
+|---|---|
+| `state: ok \| truncated \| failed` | `state: ok \| truncated \| **unverified** \| failed` |
+| `catalogStatus: complete \| truncated \| partial` | `catalogStatus: complete \| **unverified** \| truncated \| partial` |
+| precedencia `partial > truncated > complete` | `partial > truncated > **unverified** > complete` |
+
+**El contrato vigente vive en el código**, no acá: `src/types/index.ts:405-478`
+(los tipos y el porqué de cada estado) y `src/routes/discover.ts:82-99` (el
+contrato público de la respuesta). Ante cualquier diferencia entre este archivo y
+esos dos, **mandan esos dos**.
+
+Los cuatro puntos de este story file que quedaron stale están corregidos **in
+situ** y marcados `ENMIENDA F3`: §2.2, W1.4, W1.6 y TD-318-2. Los tests, mutantes
+y evidencia del cambio están en `mutation-log.md` (M26, M29) y en
+`auto-blindaje.md` (la entrada de BLQ-1).
+
+---
+
 ## 1. El problema, y los datos que no se pueden perder
 
 Pedimos 200 agentes al registro federado `WasiAI`, ese registro corta en 100 y
@@ -69,8 +106,13 @@ reinterpretes.
    **cómo se calcula**: de "los registros configurados" a "las fuentes que
    aportaron filas". En el camino sano el valor es **byte-idéntico** al de hoy.
 2. **La degradación viaja en campos NUEVOS**: `sources[]` con
-   `state: ok|truncated|failed` y `rows: number|null`, más el roll-up
-   `catalogStatus: complete|truncated|partial`.
+   `state: ok|truncated|unverified|failed` y `rows: number|null`, más el roll-up
+   `catalogStatus: complete|unverified|truncated|partial`.
+   > **ENMIENDA F3 (BLQ-1)**: acá decía tres estados y un roll-up de tres. Son
+   > **cuatro** de cada lado. `unverified` = *respondió, pero no hay forma de
+   > saber si trajo todo*, y es el estado del caso de producción. `ok` exige
+   > evidencia positiva de completitud; sin ella no se declara. Precedencia del
+   > roll-up: `partial > truncated > unverified > complete`.
 3. **`null` NO es `0`.** `rows: 0` significa *le pregunté y no tiene*.
    `rows: null` significa *no pude preguntarle*. Colapsarlos es el bug que esta
    HU existe para matar.
@@ -917,6 +959,33 @@ Y el merge, **líneas 299-301**:
     }
 ```
 
+> **ENMIENDA F3 (CR MNR-A + AR BLQ-2)**: el early-return **ya no escribe el
+> literal `'complete'`**. Dos cosas cambiaron:
+>
+> 1. El roll-up lo calcula `buildCatalogStatus(sources)`. Un literal acá era una
+>    **segunda expresión de la misma regla** (CD-11 aplicado al productor en vez
+>    del lector), y era la única línea de producción nueva sin cobertura: si
+>    alguien cambiaba la regla en el leaf, esta copia seguía devolviendo lo viejo
+>    por un camino que ningún test recorría.
+> 2. Esta rama **también se alcanza con la fuente local caída** (SELECT roto + cero
+>    registries habilitados), y ahí el catálogo es `partial`, no `complete`. La
+>    fila de `self-published` viaja en `sources` aunque no haya traído agentes.
+>
+> Forma real en el árbol (`src/services/discovery.ts`, buscá
+> `const sources = localSource ? [localSource] : []`):
+> ```ts
+>       const sources = localSource ? [localSource] : [];
+>       return {
+>         agents: [],
+>         total: 0,
+>         registries: [],
+>         sources,
+>         catalogStatus: buildCatalogStatus(sources),
+>       };
+> ```
+> Tests: `T-SRC-12` (local caída ⇒ `partial`) y `T-SRC-13` (ninguna fuente
+> consultada ⇒ `complete`). Mutante: **M28**.
+
 #### W1.5 — `/capabilities` deja de replicar la mentira
 
 **`src/routes/capabilities.ts:64-77`**
@@ -974,6 +1043,13 @@ Y el merge, **líneas 299-301**:
    * - `catalogStatus`: roll-up de la request. `complete` | `truncated` |
    *   `partial`, con precedencia `partial` > `truncated` > `complete`.
 ```
+
+> **ENMIENDA F3 (BLQ-1)**: este JSDoc documenta **tres** estados y el roll-up de
+> tres. En el árbol son **cuatro**, y además `ok` se define distinto: no es
+> "respondió y trajo todo", es "respondió **y hay evidencia** de que trajo todo".
+> El texto vigente está en `src/routes/discover.ts:82-99` e incluye las dos únicas
+> formas de ganar esa evidencia (cursor vacío declarado, o página que no se
+> llenó). **No re-escribas el archivo desde este bloque**: quedó viejo.
 
 **Cero cambios de lógica en este archivo.**
 
@@ -1917,6 +1993,13 @@ La decisión es del orquestador.
 - **TD-318-2 — Paginación por `next_cursor`.** El camino **sin** `limit` sigue
   mostrando 20 de 22 (medido por el architect, no re-verificado) — y ahora lo
   **declara** `truncated`. Vuelve a ser urgente cuando el catálogo federado supere 100.
+  > **ENMIENDA F3 (BLQ-1)**: lo declara **`unverified`**, no `truncated`, y la
+  > diferencia es justamente el punto de la HU. `truncated` afirma *"hay más filas
+  > que no trajimos"*; sin `nextCursorPath` aplicado en la DB y sin `limitParam`
+  > enviado, eso **no se puede afirmar**: lo único cierto es que no hay forma de
+  > saberlo. Una vez aplicada la migración de W2 a bdwv, ese mismo camino pasa a
+  > `truncated` con evidencia `cursor` — que es cuando la deuda se vuelve
+  > accionable de verdad.
 - **TD-318-3 — Threading del `DiscoveryResult`** del preHandler al service, para
   evitar el re-fetch del pool en modo estricto (hoy: preHandler + service = 2
   fetches, **sólo** para quien opta por el modo, y **pre-pago**).
@@ -1928,6 +2011,24 @@ La decisión es del orquestador.
 ---
 
 ## 12. Done Definition
+
+> **ENMIENDA F3 — alcance de lo entregado.** Esta checklist cubre la HU
+> **completa** (W0→W4). Lo entregado y revisado hasta acá es el **CORTE A**
+> (W0+W1+W2), que el propio archivo declara mergeable por sí solo (§ banner de
+> fin de corte A). Al leerla, F4 debería contar contra el corte A:
+>
+> | Ítem | Corte A |
+> |---|---|
+> | 5 waves | **W0, W1, W2** hechas. W3 (clamp) y W4 (money-path estricto) **no empezadas**. |
+> | "los 34 tests de §7" | son el total de las 5 waves. El corte A aporta **36**, medidos: 8 (`discovery-sources.test.ts`) + 18 (`discovery.sources.test.ts`) + 9 (`discovery.truncation.test.ts`) + 1 (`T-SRC-06`, en `capabilities.inbound-chains.test.ts`). Coincide con el delta de la suite completa: 4306 → 4342. `T-CLAMP-*` y `T-STRICT-*` son de W3/W4. |
+> | "los 25 mutantes M1…M25" | del corte A se corrieron **16/16 KILLED** (M1–M10 + M26–M30, ver `mutation-log.md`). **M11–M25 son de W3/W4**: su código no existe todavía. |
+> | "las 4 migraciones" | el corte A escribe **2** (up + down de `nextCursorPath`). Las de `maxLimit` son de W3. **Ninguna aplicada.** |
+> | CD-9 / CD-10 (saldo, nº de llamadas) | **N/A en el corte A**: no toca el money-path. Aplican en W4. |
+>
+> Lo que **sí** se cumple entero en el corte A: `tsc --noEmit` completo en verde,
+> suite completa en verde, `isCatalogComplete()` como única expresión de
+> completitud, cero `as any`/`@ts-expect-error`, commits por wave sin push ni
+> merge, y `auto-blindaje.md` escrito.
 
 La HU está lista para AR cuando **todas** estas se cumplen:
 

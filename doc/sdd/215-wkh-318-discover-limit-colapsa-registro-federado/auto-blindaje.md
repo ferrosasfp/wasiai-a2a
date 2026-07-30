@@ -176,6 +176,39 @@ próxima HU.
 
 ---
 
+### [2026-07-30 19:30] Post-fix-pack — La misma regla se me escapó TRES veces, y cada vez en un borde distinto
+
+- **El patrón** (lo nombra el AR en su hallazgo B-5, después de aprobar): la regla
+  de esta HU es *"toda fuente declara cómo le fue"*. La escribí tres veces y las
+  tres veces la apliqué de menos:
+  1. **W1** — la apliqué al fanout federado, que era donde el work-item señalaba
+     el `.catch(() => [])`.
+  2. **BLQ-2** — no había llegado a la **fuente local**, que entra por otro camino
+     (un `try/catch` 250 líneas más arriba) y desaparecía en silencio.
+  3. **B-5** — ya arreglada la fuente local, sigue sin llegar a la **completitud**
+     de esa fuente local: se declara `ok` incondicionalmente. Repro del AR:
+     `listAsAgents()` con 5000 filas ⇒ `{"catalogStatus":"complete","rows":5000}`,
+     mientras la misma cantidad de filas por el camino federado da `unverified`.
+     **Dos reglas para el mismo hecho.**
+- **Causa raíz**: cada vez tomé como frontera el lugar donde el bug se había
+  manifestado, en vez de la definición de la regla. Y en el tercer caso hay un
+  agravante propio: justifiqué el `ok` con un **argumento de construcción metido
+  en un comentario** (*"listAsAgents() es un SELECT sin limit"*) en vez de con
+  evidencia en la respuesta. Un comentario no es evidencia: si mañana PostgREST
+  aplica `db-max-rows`, el SELECT devuelve el tope con un `Content-Range` que
+  nadie lee y el comentario sigue diciendo lo mismo, ahora falso. **Grep en todo
+  el árbol de `max_rows|max-rows|Content-Range|.range(`: cero hits** — o sea, ni
+  se lee el header ni está pineado el valor.
+- **Fix**: NO se aplicó (toca 7 tests y va al corte B). Queda como **B-5, marcada
+  precondición del corte B**, con las tres salidas posibles escritas.
+- **Aplicar en**: cuando una HU introduzca una regla general, **enumerar las
+  instancias antes de implementarla** y tachar de una lista, en vez de arreglar
+  los sitios a medida que aparecen. Y desconfiar de todo `state`/`status` que se
+  asigne **incondicionalmente**: si el valor no sale de mirar la respuesta, sale
+  de una creencia — y las creencias no se testean, se comentan.
+
+---
+
 ### [2026-07-30 17:55] Waves 1–2 — Dos nominaciones de mutante del story file no se sostienen
 
 - **Hallazgo** (no es un error propio, es una corrección al story file, verificada

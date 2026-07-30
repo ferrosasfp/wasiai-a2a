@@ -6,13 +6,26 @@
  * `agents` de wasiai-v2 tiene 22 activos y el camino sin `limit` devuelve 20 con
  * `next_cursor` seteado.
  *
- * Dos evidencias, con precedencia:
- *   1. `cursor`    — EXACTA. El registro declara `nextCursorPath` y llega no-nulo.
- *   2. `page_full` — HEURÍSTICA. Llegaron exactamente tantas filas como se pidió.
- *      Sólo puede equivocarse sobre-declarando, que es el lado seguro.
+ * `ok` NO es el default: se GANA con evidencia positiva de completitud (AR
+ * BLQ-1). Hay cuatro evidencias posibles, dos para cada lado, y el orden importa:
  *
- * Sin límite enviado y sin cursor declarado NO hay evidencia ⇒ `ok`. No se
- * inventa una certeza que no tenemos.
+ *   TRUNCAMIENTO
+ *   1. `cursor`    — EXACTA. El registro declara `nextCursorPath` y llega CON
+ *                    valor. Gana sobre la heurística.
+ *   2. `page_full` — HEURÍSTICA. Llegaron tantas filas como se pidieron. Sólo
+ *                    puede equivocarse sobre-declarando, que es el lado seguro.
+ *
+ *   COMPLETITUD
+ *   3. cursor vacío (`null`/`''`/`0`/`false`) — el registro DECLARA que no hay
+ *      más. Es una declaración, no una ausencia: por eso prueba completitud,
+ *      mientras que la clave AUSENTE no prueba nada (`T-TRUNC-02`).
+ *   4. página que no se llenó — llegaron menos filas que el límite enviado, así
+ *      que no quedó nada afuera.
+ *
+ * Sin NINGUNA de las cuatro no hay evidencia para ningún lado, y el estado es
+ * `unverified` — no `ok` (`T-TRUNC-05`). Antes del fix de BLQ-1 este mismo
+ * docstring decía "⇒ `ok`", y era el caso de producción: declarar completitud
+ * por descarte es una afirmación disfrazada de ausencia.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
