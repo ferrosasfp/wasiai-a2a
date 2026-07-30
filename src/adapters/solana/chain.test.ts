@@ -73,6 +73,9 @@ const ENV_KEYS = [
   // operador. Se limpian con las demás para que ningún test las herede.
   'A2A_DEPOSIT_SOLANA_OWNER',
   'A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED',
+  // Fix-pack AR (BLQ-BAJO-1): la aserción sólo corre con el camino de depósito
+  // ENCENDIDO, así que el flag es parte de su entrada.
+  'A2A_SOLANA_DEPOSIT_ENABLED',
 ] as const;
 
 describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', () => {
@@ -276,10 +279,14 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
     // controla, el dinero del usuario aterriza en una cuenta desde la que no se puede
     // pagar, y nadie se entera hasta querer gastarlo.
     describe('T-315-20: aserción de coherencia con A2A_DEPOSIT_SOLANA_OWNER', () => {
-      /** Setea un operador real y devuelve su pubkey. */
+      /**
+       * Setea un operador real **y enciende el camino de depósito**, que desde el
+       * fix-pack (BLQ-BAJO-1) es precondición de la aserción. Devuelve su pubkey.
+       */
       function withOperator(): string {
         const kp = Keypair.generate();
         process.env.SOLANA_OPERATOR_PRIVATE_KEY = base58Encode(kp.secretKey);
+        process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'true';
         return kp.publicKey.toBase58();
       }
 
@@ -356,6 +363,9 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
         const kp = Keypair.generate();
         const b58 = base58Encode(kp.secretKey);
         process.env.SOLANA_OPERATOR_PRIVATE_KEY = b58;
+        // El flag es precondición de la aserción desde BLQ-BAJO-1. Su andamiaje
+        // ("efectivamente lanzó") es lo que cazó la omisión.
+        process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'true';
         process.env.A2A_DEPOSIT_SOLANA_OWNER =
           Keypair.generate().publicKey.toBase58();
 
@@ -371,6 +381,49 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
         expect(msg).not.toContain(b58.slice(0, 32));
         // Las dos pubkeys SI pueden aparecer: son públicas por definición.
         expect(msg).toContain(kp.publicKey.toBase58());
+      });
+
+      // ── FIX-PACK AR · BLQ-BAJO-1: el runbook no puede brickear la SALIDA ────
+      it('BLQ-BAJO-1: con el DEPOSITO APAGADO, un owner distinto NO tira el settle de salida', () => {
+        // ⚠️ EL ESCENARIO ES EL RUNBOOK CORRECTO, NO UN ERROR EXOTICO. El propio
+        // `.env.example` manda: migración → setear el owner → **y el flag AL FINAL**.
+        // Entre el paso 2 y el 3 el depósito está apagado. Sin esta condición, un
+        // operador que además se olvida de `..._IS_DEDICATED` deja de settlear TODO
+        // Solana de salida (`payment.ts`) sin que exista un solo depósito que
+        // proteger: el guard cobraba antes de tener nada que cuidar.
+        const kp = Keypair.generate();
+        process.env.SOLANA_OPERATOR_PRIVATE_KEY = base58Encode(kp.secretKey);
+        process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'false';
+        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+          Keypair.generate().publicKey.toBase58();
+
+        expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(
+          kp.publicKey.toBase58(),
+        );
+      });
+
+      it('BLQ-BAJO-1: el flag AUSENTE tampoco enciende la aserción (default = camino apagado)', () => {
+        const kp = Keypair.generate();
+        process.env.SOLANA_OPERATOR_PRIVATE_KEY = base58Encode(kp.secretKey);
+        delete process.env.A2A_SOLANA_DEPOSIT_ENABLED;
+        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+          Keypair.generate().publicKey.toBase58();
+
+        expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(
+          kp.publicKey.toBase58(),
+        );
+      });
+
+      it("BLQ-BAJO-1: y el control NO se debilitó — con el flag en 'true' el mismo caso SIGUE lanzando", () => {
+        // Andamiaje contra el fix de más: si condicionar el guard lo hubiera apagado
+        // siempre, los dos tests de arriba pasarían igual y no probarían nada.
+        const kp = Keypair.generate();
+        process.env.SOLANA_OPERATOR_PRIVATE_KEY = base58Encode(kp.secretKey);
+        process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'true';
+        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+          Keypair.generate().publicKey.toBase58();
+
+        expect(() => getSolanaOperatorKeypair()).toThrow(/cannot pay from/);
       });
 
       it('T-315-20: tolera whitespace alrededor del owner (un .env copy-pasteado lo trae)', () => {

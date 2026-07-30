@@ -118,8 +118,24 @@ export function getSolanaOperatorKeypair(): Keypair {
   // `SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT` en `schema-preflight.ts`): quien
   // usa deliberadamente una cuenta de depósito distinta lo DECLARA con
   // `A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED=true` y se hace responsable de barrerla.
+  //
+  // ⚠️ Y LA ASERCION SOLO CORRE CON EL CAMINO DE DEPOSITO ENCENDIDO (fix-pack AR ·
+  // BLQ-BAJO-1). Sin esta condición, seguir el orden de activación que el propio
+  // `.env.example` declara —migración, después el owner, y el flag AL FINAL— y
+  // olvidarse de la env de cuenta dedicada **tiraba TODO settle Solana de SALIDA**
+  // (`payment.ts`) con el depósito todavía APAGADO, o sea sin que existiera un solo
+  // depósito que proteger. El runbook correcto no puede ser el que rompe producción.
+  //
+  // Se lee la env directamente en vez de llamar a `isSolanaDepositEnabled()`:
+  // `deposit-account.ts` importa `getSolanaUsdcMint` de ESTE módulo, así que la
+  // llamada crearía un ciclo de imports en el camino de firma. La comparación es la
+  // misma comparación literal contra `'true'`, y el choke-point del depósito sigue
+  // siendo único — acá el flag es una PRECONDICION de la aserción, no una decisión
+  // sobre si el camino de entrada está abierto.
+  const depositPathOn = process.env.A2A_SOLANA_DEPOSIT_ENABLED === 'true';
   const declaredOwner = process.env.A2A_DEPOSIT_SOLANA_OWNER?.trim();
   if (
+    depositPathOn &&
     declaredOwner !== undefined &&
     declaredOwner !== '' &&
     declaredOwner !== operatorPubkey &&
