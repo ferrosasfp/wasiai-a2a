@@ -94,6 +94,24 @@ export interface A2AAgentKeyRow {
   kite_passport: Record<string, unknown> | null;
   agentkit_wallet: Record<string, unknown> | null;
   funding_wallet: string | null; // WKH-35 FIX-1: bound depositor wallet (lowercase)
+  /**
+   * WKH-315: bound Solana depositor pubkey (base58). Se persiste y se compara
+   * BYTE-EXACTO — sin `toLowerCase()` en ningún punto (CD-6/AC-8). Bajar a
+   * minúsculas una cadena base58 la DESTRUYE: mapea dos pubkeys distintas a la
+   * misma, y el índice UNIQUE de Postgres sobre `TEXT` ya es case-sensitive.
+   * Columna SEPARADA de `funding_wallet` a propósito: ese contrato es lowercase
+   * (declarado en `20260529000001:14`) y un owner tiene que poder bindear las dos.
+   *
+   * ⚠️ OPCIONAL A PROPOSITO, Y DECLARADO (Story File W0.5). Como propiedad
+   * REQUERIDA rompía `tsc` en 33 archivos de test que construyen un
+   * `A2AAgentKeyRow` a mano — entre ellos `routes/auth.test.ts`, que CD-1/AC-10
+   * exige VERDE Y SIN EDITAR. Entre ensanchar el tipo un poco y editar una de las
+   * cuatro suites que son la prueba de no-regresión del camino EVM, se elige lo
+   * primero. El riesgo queda acotado y del lado seguro: el único lector en
+   * producción es el gate de `POST /auth/deposit`, que fail-closea sobre
+   * cualquier valor falsy (`undefined` incluido) con 403 FUNDING_WALLET_NOT_BOUND.
+   */
+  funding_wallet_solana?: string | null;
   metadata: Record<string, unknown>;
   /**
    * WKH-123: opt-in per-request signature auth (EIP-712, master keys). When

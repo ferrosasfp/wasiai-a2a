@@ -206,6 +206,71 @@ export type SettledPeek =
   /** El store no respondio. NO significa "no se pago". */
   | { state: 'unknown' };
 
+// ── WKH-315 — depósito Solana (bloque ADITIVO; SettlementPresence NO se toca) ──
+//
+// ⚠️ POR QUE NO SE REUSA `DepositVerification` (`deposit-verifier.ts`): ese tipo
+// es `{ ok: boolean; reason?: ... }`, o sea un booleano con un motivo OPCIONAL.
+// Con esa forma "no pude preguntarle a la cadena" no tiene dónde vivir y termina
+// colapsado en `TX_NOT_FOUND` — que es una determinación NEGATIVA. En el camino
+// de ENTRADA de dinero ese colapso es al revés de peligroso que en el de salida:
+// afirma que un depósito no existe cuando lo único cierto es que el nodo no
+// contestó. CD-3/CD-14: toda consulta externa tiene TRES respuestas.
+//
+// `SolanaDepositLanding` es la capa de PRESENCIA+FINALIDAD (análogo de
+// `SettlementPresence`, que queda congelado para el camino de salida) y
+// `SolanaDepositVerification` es el veredicto completo, ya con los términos.
+
+/**
+ * Presencia on-chain de una firma de depósito, CON su finalidad. Cinco estados
+ * porque la finalidad se LEE (`confirmationStatus`), no se hereda, y su ausencia
+ * es un caso real del SDK (el campo es opcional): ausente ⇒ `unknown`, NUNCA
+ * "todavía no".
+ */
+export type SolanaDepositLanding =
+  /** Aterrizó, sin error, y el nodo la reporta `finalized`. Evidencia POSITIVA. */
+  | { state: 'finalized_ok' }
+  /** Aterrizó y falló on-chain: nada se movió y esa firma es terminal. */
+  | { state: 'landed_failed'; detail: string }
+  /**
+   * Aterrizó pero todavía no está `finalized` — negativa MEDIDA (el nodo dijo
+   * `processed`/`confirmed`) y por lo tanto reintentable por el depositante.
+   */
+  | { state: 'not_finalized'; confirmationStatus: string }
+  /** El nodo RESPONDIÓ, habiendo buscado el histórico, y no la conoce. */
+  | { state: 'absent' }
+  /** No se pudo preguntar. NUNCA acredita y NUNCA afirma ausencia. */
+  | { state: 'unknown'; detail: string };
+
+/** Motivos de rechazo de un depósito Solana. El mapeo a HTTP vive en la ruta. */
+export type SolanaDepositReason =
+  | 'TX_ABSENT'
+  | 'TX_FAILED'
+  | 'DEPOSIT_NOT_FINALIZED'
+  | 'MINT_MISMATCH'
+  | 'RECIPIENT_MISMATCH'
+  | 'AMOUNT_MISMATCH'
+  | 'DEPOSITOR_AMBIGUOUS'
+  | 'DEPOSIT_ACCOUNT_NOT_CONFIGURED'
+  | 'DEPOSIT_VERIFICATION_UNKNOWN';
+
+/**
+ * Veredicto del verificador de depósito Solana — unión DISCRIMINADA por `ok`.
+ * En la rama `ok: true` los campos son OBLIGATORIOS (no opcionales): el monto
+ * acreditado es siempre el de la cadena y el depositante siempre existe, así que
+ * el call-site no puede olvidarse de chequearlos.
+ */
+export type SolanaDepositVerification =
+  | {
+      ok: true;
+      amountAtomic: bigint;
+      amountUsd: string;
+      depositor: string;
+      ata: string;
+      mint: string;
+      signature: string;
+    }
+  | { ok: false; reason: SolanaDepositReason; detail?: string };
+
 export interface SolanaPaymentAdapter extends PaymentAdapterCommon {
   readonly vmFamily: 'solana';
   readonly caip2ChainId: string; // DT-1: `solana:<genesis-prefix>` (NO chainId:number)

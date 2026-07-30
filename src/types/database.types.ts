@@ -206,6 +206,7 @@ export type Database = {
           display_name: string | null;
           erc8004_identity: Json | null;
           funding_wallet: string | null;
+          funding_wallet_solana: string | null; // WKH-315
           id: string;
           is_active: boolean | null;
           key_hash: string;
@@ -230,6 +231,7 @@ export type Database = {
           display_name?: string | null;
           erc8004_identity?: Json | null;
           funding_wallet?: string | null;
+          funding_wallet_solana?: string | null; // WKH-315
           id?: string;
           is_active?: boolean | null;
           key_hash: string;
@@ -254,6 +256,7 @@ export type Database = {
           display_name?: string | null;
           erc8004_identity?: Json | null;
           funding_wallet?: string | null;
+          funding_wallet_solana?: string | null; // WKH-315
           id?: string;
           is_active?: boolean | null;
           key_hash?: string;
@@ -414,6 +417,7 @@ export type Database = {
           owner_ref: string;
           token: string | null;
           tx_hash: string;
+          vm_family: string; // WKH-315 — NOT NULL DEFAULT 'evm'
         };
         Insert: {
           amount_usd: number;
@@ -424,6 +428,7 @@ export type Database = {
           owner_ref: string;
           token?: string | null;
           tx_hash: string;
+          vm_family?: string; // WKH-315 — el DEFAULT lo pone Postgres
         };
         Update: {
           amount_usd?: number;
@@ -434,6 +439,7 @@ export type Database = {
           owner_ref?: string;
           token?: string | null;
           tx_hash?: string;
+          vm_family?: string; // WKH-315
         };
         Relationships: [
           {
@@ -3500,6 +3506,10 @@ export type Database = {
           p_owner_ref: string;
           p_token?: string;
           p_tx_hash: string;
+          // WKH-315: 7º param `p_vm_family TEXT DEFAULT 'evm'`. Editado A MANO
+          // (aditivo), NO regenerado: regenerar traería drift de otras tablas y
+          // ensancharía el diff de un money-path.
+          p_vm_family?: string;
         };
         Returns: string;
       };

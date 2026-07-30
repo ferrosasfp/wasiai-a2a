@@ -46,6 +46,8 @@ export function isValidWallet(
 const BASE58_ALPHABET =
   '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const SOLANA_PUBKEY_BYTES = 32;
+/** WKH-315: una firma/txid de Solana es una firma ed25519 cruda de 64 bytes. */
+const SOLANA_SIGNATURE_BYTES = 64;
 
 export function isValidSolanaAddress(w: string): boolean {
   if (typeof w !== 'string' || w.length === 0) return false;
@@ -68,6 +70,60 @@ export function isValidSolanaAddress(w: string): boolean {
     bytes.push(0);
   }
   return bytes.length === SOLANA_PUBKEY_BYTES;
+}
+
+/**
+ * WKH-315 — largo en bytes de `s` decodificado como base58, o `null` si el
+ * charset es inválido. DEVUELVE, NUNCA LANZA: este predicado corre sobre input
+ * del caller (`tx_hash` de `POST /auth/deposit`, `signature` del bind), y
+ * `base58DecodeToBytes` (`adapters/solana/base58.ts`) está PROHIBIDO acá porque
+ * lanza con un mensaje que nombra `SOLANA_OPERATOR_PRIVATE_KEY` — un typo del
+ * usuario no puede producir una falsa alarma de secreto en los logs.
+ *
+ * ⚠️ POR QUE EL LOOP ESTA DUPLICADO Y NO EXTRAIDO DE `isValidSolanaAddress`:
+ * ese predicado es la única fuente de verdad del criterio de wallet Solana y lo
+ * consumen el write-path del publish y el money-path de cobro. Refactorizarlo
+ * para compartir este helper no cambia su conducta esperada, pero sí lo pone en
+ * el diff de una HU de dinero sin ganar nada verificable. Aditivo > tocar lo que
+ * ya funciona (CD-1).
+ */
+function base58DecodedByteLength(s: string): number | null {
+  if (typeof s !== 'string' || s.length === 0) return null;
+  const bytes: number[] = [];
+  for (let i = 0; i < s.length; i++) {
+    let carry = BASE58_ALPHABET.indexOf(s[i] as string);
+    if (carry < 0) return null; // char fuera del charset base58
+    for (let j = 0; j < bytes.length; j++) {
+      carry += (bytes[j] as number) * 58;
+      bytes[j] = carry & 0xff;
+      carry >>= 8;
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+  // Cada `1` inicial representa un byte cero de alto orden.
+  for (let i = 0; i < s.length && s[i] === '1'; i++) {
+    bytes.push(0);
+  }
+  return bytes.length;
+}
+
+/**
+ * WKH-315 — `true` si `s` es una firma/txid de Solana bien formada: charset
+ * base58 + decode a EXACTAMENTE 64 bytes. Módulo leaf: NO importa
+ * `@solana/web3.js`.
+ *
+ * Es un predicado ESTRUCTURAL ESTRICTO, no un regex laxo (CD-6b): junto con
+ * `/^0x[0-9a-fA-F]{64}$/` forman dos conjuntos MUTUAMENTE EXCLUYENTES — el
+ * alfabeto base58 no contiene `'0'`, así que ningún `0x…` puede ser base58.
+ *
+ * Sin normalización de caja en ningún punto (CD-6/AC-8): bajar a minúsculas una
+ * cadena base58 la DESTRUYE (mapea dos firmas distintas a la misma).
+ */
+export function isValidSolanaSignature(s: string): boolean {
+  return base58DecodedByteLength(s) === SOLANA_SIGNATURE_BYTES;
 }
 
 export type WalletNamespace = 'evm' | 'solana';

@@ -13,6 +13,7 @@ import {
   resolveChainKey,
 } from '../../adapters/chain-resolver.js';
 import {
+  isEvmChainKey,
   resolveChainFamilyEnvSuffix,
   resolveMinConfirmations,
   resolveTreasury,
@@ -90,6 +91,17 @@ export const depositRoutes: FastifyPluginAsync = async (fastify) => {
     // 4. chain_id match (AC-4).
     if (body.chain_id !== chainId) {
       return reply.status(400).send({ error_code: 'CHAIN_MISMATCH' });
+    }
+
+    // 4b. WKH-315 (AC-14 / SDD GAP #2) — el narrowing a `EvmChainKey` que el
+    // camino viem necesita. Este guard es INALCANZABLE: no-EVM ⟺ 'solana-devnet'
+    // ⟺ `bundle.payment.vmFamily === 'solana'`, que el sub-flujo Solana de arriba
+    // ya retornó. Existe para que `tsc` pueda pasarle `chainKey` a `verifyDeposit`
+    // y a `resolveTreasury` sin un cast — un cast es una aserción SIN chequeo, y
+    // AC-14 pide que la defensa sea el compilador. Desde acá el bloque EVM es
+    // byte-idéntico al de antes de esta HU (CD-1).
+    if (!isEvmChainKey(chainKey)) {
+      return reply.status(400).send({ error_code: 'CHAIN_NOT_SUPPORTED' });
     }
 
     // 5. Verificar on-chain ANTES de acreditar (AC-1 / CD-4). Selector escrow vs
@@ -205,6 +217,12 @@ export const depositRoutes: FastifyPluginAsync = async (fastify) => {
           // a non-EVM chain is skipped. Byte-identical for the EVM chains.
           const payment = bundle.payment;
           if (payment.vmFamily !== 'evm') return null;
+          // WKH-315 (AC-14): los DOS guards se conservan A PROPOSITO. El de
+          // arriba narrowea `payment` y es el que preserva la conducta observable
+          // byte a byte (CD-1); este narrowea `chainKey`, que es lo que
+          // `resolveTreasury`/`resolveMinConfirmations` necesitan sin un cast.
+          // Redundantes en runtime, no redundantes para el compilador.
+          if (!isEvmChainKey(chainKey)) return null;
           const token = payment.supportedTokens[0];
           if (!token) return null; // CD-3: tolerate empty supportedTokens
           // Escrow no-custodial: cuando está activo para esta cadena, el caller
