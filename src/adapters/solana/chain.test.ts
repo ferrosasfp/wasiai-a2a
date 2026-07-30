@@ -71,11 +71,11 @@ const ENV_KEYS = [
   'SOLANA_OPERATOR_PRIVATE_KEY',
   // WKH-315 (W3.1): las lee la aserción de coherencia cuenta-de-depósito ↔
   // operador. Se limpian con las demás para que ningún test las herede.
-  'A2A_DEPOSIT_SOLANA_OWNER',
-  'A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED',
+  'A2A_DEPOSIT_OWNER_SOLANA',
+  'A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA',
   // Fix-pack AR (BLQ-BAJO-1): la aserción sólo corre con el camino de depósito
   // ENCENDIDO, así que el flag es parte de su entrada.
-  'A2A_SOLANA_DEPOSIT_ENABLED',
+  'A2A_DEPOSIT_ENABLED_SOLANA',
 ] as const;
 
 describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', () => {
@@ -275,10 +275,10 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
 
     // ── WKH-315 · T-315-20 — coherencia cuenta-de-depósito ↔ operador ────────
     //
-    // El riesgo: si `A2A_DEPOSIT_SOLANA_OWNER` apunta a una pubkey que el operador NO
+    // El riesgo: si `A2A_DEPOSIT_OWNER_SOLANA` apunta a una pubkey que el operador NO
     // controla, el dinero del usuario aterriza en una cuenta desde la que no se puede
     // pagar, y nadie se entera hasta querer gastarlo.
-    describe('T-315-20: aserción de coherencia con A2A_DEPOSIT_SOLANA_OWNER', () => {
+    describe('T-315-20: aserción de coherencia con A2A_DEPOSIT_OWNER_SOLANA', () => {
       /**
        * Setea un operador real **y enciende el camino de depósito**, que desde el
        * fix-pack (BLQ-BAJO-1) es precondición de la aserción. Devuelve su pubkey.
@@ -286,39 +286,39 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
       function withOperator(): string {
         const kp = Keypair.generate();
         process.env.SOLANA_OPERATOR_PRIVATE_KEY = base58Encode(kp.secretKey);
-        process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'true';
+        process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'true';
         return kp.publicKey.toBase58();
       }
 
       it('T-315-20: owner == operador ⇒ carga OK', () => {
         const pubkey = withOperator();
-        process.env.A2A_DEPOSIT_SOLANA_OWNER = pubkey;
+        process.env.A2A_DEPOSIT_OWNER_SOLANA = pubkey;
         expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(pubkey);
       });
 
       it('T-315-20: env AUSENTE ⇒ carga OK (la aserción no inventa un requisito)', () => {
         const pubkey = withOperator();
-        delete process.env.A2A_DEPOSIT_SOLANA_OWNER;
+        delete process.env.A2A_DEPOSIT_OWNER_SOLANA;
         expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(pubkey);
       });
 
       it('T-315-20: env VACIA ⇒ carga OK (una env seteada a "" es "sin configurar")', () => {
         const pubkey = withOperator();
-        process.env.A2A_DEPOSIT_SOLANA_OWNER = '';
+        process.env.A2A_DEPOSIT_OWNER_SOLANA = '';
         expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(pubkey);
       });
 
       it('T-315-20: owner ≠ operador SIN la declaración ⇒ LANZA, nombrando las DOS envs', () => {
         withOperator();
         const foreign = Keypair.generate().publicKey.toBase58();
-        process.env.A2A_DEPOSIT_SOLANA_OWNER = foreign;
+        process.env.A2A_DEPOSIT_OWNER_SOLANA = foreign;
 
         expect(() => getSolanaOperatorKeypair()).toThrow(
-          /A2A_DEPOSIT_SOLANA_OWNER/,
+          /A2A_DEPOSIT_OWNER_SOLANA/,
         );
         // El mensaje tiene que decir QUE hacer, no sólo que algo está mal.
         expect(() => getSolanaOperatorKeypair()).toThrow(
-          /A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED=true/,
+          /A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA=true/,
         );
         // Y por qué importa: el dinero aterrizaría donde no se puede pagar desde.
         expect(() => getSolanaOperatorKeypair()).toThrow(/cannot pay from/);
@@ -326,9 +326,9 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
 
       it("T-315-20: owner ≠ operador CON ..._IS_DEDICATED='true' ⇒ carga OK (afirmación del operador)", () => {
         const pubkey = withOperator();
-        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+        process.env.A2A_DEPOSIT_OWNER_SOLANA =
           Keypair.generate().publicKey.toBase58();
-        process.env.A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED = 'true';
+        process.env.A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA = 'true';
         expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(pubkey);
       });
 
@@ -336,13 +336,13 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
         // Con `Boolean(env)` cualquier string apagaría el control. La salida es una
         // afirmación deliberada, así que exige el literal exacto.
         withOperator();
-        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+        process.env.A2A_DEPOSIT_OWNER_SOLANA =
           Keypair.generate().publicKey.toBase58();
         for (const v of ['TRUE', 'True', '1', 'yes', 'on', '']) {
-          process.env.A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED = v;
+          process.env.A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA = v;
           _resetSolanaChain();
           expect(() => getSolanaOperatorKeypair(), `valor=${v}`).toThrow(
-            /A2A_DEPOSIT_SOLANA_OWNER/,
+            /A2A_DEPOSIT_OWNER_SOLANA/,
           );
         }
       });
@@ -352,7 +352,7 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
         // y el SEGUNDO devolvería el keypair cacheado sin re-chequear. Un guard que
         // se evade reintentando no es un guard.
         withOperator();
-        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+        process.env.A2A_DEPOSIT_OWNER_SOLANA =
           Keypair.generate().publicKey.toBase58();
         expect(() => getSolanaOperatorKeypair()).toThrow();
         expect(() => getSolanaOperatorKeypair()).toThrow();
@@ -365,8 +365,8 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
         process.env.SOLANA_OPERATOR_PRIVATE_KEY = b58;
         // El flag es precondición de la aserción desde BLQ-BAJO-1. Su andamiaje
         // ("efectivamente lanzó") es lo que cazó la omisión.
-        process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'true';
-        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+        process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'true';
+        process.env.A2A_DEPOSIT_OWNER_SOLANA =
           Keypair.generate().publicKey.toBase58();
 
         let msg = '';
@@ -393,8 +393,8 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
         // proteger: el guard cobraba antes de tener nada que cuidar.
         const kp = Keypair.generate();
         process.env.SOLANA_OPERATOR_PRIVATE_KEY = base58Encode(kp.secretKey);
-        process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'false';
-        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+        process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'false';
+        process.env.A2A_DEPOSIT_OWNER_SOLANA =
           Keypair.generate().publicKey.toBase58();
 
         expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(
@@ -405,8 +405,8 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
       it('BLQ-BAJO-1: el flag AUSENTE tampoco enciende la aserción (default = camino apagado)', () => {
         const kp = Keypair.generate();
         process.env.SOLANA_OPERATOR_PRIVATE_KEY = base58Encode(kp.secretKey);
-        delete process.env.A2A_SOLANA_DEPOSIT_ENABLED;
-        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+        delete process.env.A2A_DEPOSIT_ENABLED_SOLANA;
+        process.env.A2A_DEPOSIT_OWNER_SOLANA =
           Keypair.generate().publicKey.toBase58();
 
         expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(
@@ -419,8 +419,8 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
         // siempre, los dos tests de arriba pasarían igual y no probarían nada.
         const kp = Keypair.generate();
         process.env.SOLANA_OPERATOR_PRIVATE_KEY = base58Encode(kp.secretKey);
-        process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'true';
-        process.env.A2A_DEPOSIT_SOLANA_OWNER =
+        process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'true';
+        process.env.A2A_DEPOSIT_OWNER_SOLANA =
           Keypair.generate().publicKey.toBase58();
 
         expect(() => getSolanaOperatorKeypair()).toThrow(/cannot pay from/);
@@ -428,7 +428,7 @@ describe('solana/chain.ts — resolución de config del rail (P1 hallazgo 1)', (
 
       it('T-315-20: tolera whitespace alrededor del owner (un .env copy-pasteado lo trae)', () => {
         const pubkey = withOperator();
-        process.env.A2A_DEPOSIT_SOLANA_OWNER = `  ${pubkey}\n`;
+        process.env.A2A_DEPOSIT_OWNER_SOLANA = `  ${pubkey}\n`;
         // Sin el `.trim()`, esto lanzaría por un salto de línea invisible: un
         // fail-loud por un carácter que el operador no puede ver es una trampa.
         expect(getSolanaOperatorKeypair().publicKey.toBase58()).toBe(pubkey);

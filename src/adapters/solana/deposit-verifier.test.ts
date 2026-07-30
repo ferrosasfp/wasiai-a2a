@@ -164,8 +164,8 @@ function happyTx(amount: string) {
 }
 
 const ENV_KEYS = [
-  'A2A_DEPOSIT_SOLANA_OWNER',
-  'A2A_SOLANA_DEPOSIT_ENABLED',
+  'A2A_DEPOSIT_OWNER_SOLANA',
+  'A2A_DEPOSIT_ENABLED_SOLANA',
   'SOLANA_USDC_MINT_DEVNET',
 ] as const;
 
@@ -177,8 +177,8 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       saved.set(k, process.env[k]);
       delete process.env[k];
     }
-    process.env.A2A_DEPOSIT_SOLANA_OWNER = OWNER;
-    process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'true';
+    process.env.A2A_DEPOSIT_OWNER_SOLANA = OWNER;
+    process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'true';
     vi.clearAllMocks();
   });
 
@@ -1075,7 +1075,7 @@ describe('WKH-315 · verifySolanaDeposit', () => {
   // ── AC-11 / T-315-18: el flag y el choke-point ───────────────────────────
   describe('AC-11: el flag es el choke-point y corta ANTES de la red', () => {
     it('T-315-18: con el flag OFF ⇒ DEPOSIT_ACCOUNT_NOT_CONFIGURED y CERO llamadas al RPC', async () => {
-      process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'false';
+      process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'false';
 
       const res = await verifySolanaDeposit({ signature: SIGNATURE });
 
@@ -1087,8 +1087,8 @@ describe('WKH-315 · verifySolanaDeposit', () => {
       expect(mockGetParsedTransaction).not.toHaveBeenCalled();
     });
 
-    it('sin `A2A_DEPOSIT_SOLANA_OWNER` ⇒ DEPOSIT_ACCOUNT_NOT_CONFIGURED, cero red', async () => {
-      delete process.env.A2A_DEPOSIT_SOLANA_OWNER;
+    it('sin `A2A_DEPOSIT_OWNER_SOLANA` ⇒ DEPOSIT_ACCOUNT_NOT_CONFIGURED, cero red', async () => {
+      delete process.env.A2A_DEPOSIT_OWNER_SOLANA;
       const res = await verifySolanaDeposit({ signature: SIGNATURE });
       expect(res.ok).toBe(false);
       if (res.ok) throw new Error('unreachable');

@@ -8,7 +8,7 @@
  *
  * T-315-19  el flag es una comparación de string ESTRICTA. Con `Boolean(env)`, el
  *           string `'false'` es TRUTHY: un operador que escribe
- *           `A2A_SOLANA_DEPOSIT_ENABLED=false` para APAGAR la entrada de dinero la
+ *           `A2A_DEPOSIT_ENABLED_SOLANA=false` para APAGAR la entrada de dinero la
  *           estaría ENCENDIENDO. Ese es el mutante M19.
  * T-315-13  ningún archivo del camino de depósito INVOCA el loader del keypair
  *           (AC-12/CD-4). Test ESTATICO, con su limitación escrita.
@@ -28,8 +28,8 @@ import {
 } from './deposit-account.js';
 
 const ENV_KEYS = [
-  'A2A_DEPOSIT_SOLANA_OWNER',
-  'A2A_SOLANA_DEPOSIT_ENABLED',
+  'A2A_DEPOSIT_OWNER_SOLANA',
+  'A2A_DEPOSIT_ENABLED_SOLANA',
   'SOLANA_USDC_MINT_DEVNET',
   // Se limpian a propósito: si el módulo las leyera (no debe), estos tests lo
   // notarían al fallar con ellas ausentes.
@@ -83,7 +83,7 @@ describe('WKH-315 · deposit-account.ts', () => {
       // ⚠️ ESTE CASO EXISTE PORQUE UN MUTANTE SOBREVIVIO AL TEST DE ARRIBA.
       //
       // La campaña de mutación aplicó el fallback real
-      // (`A2A_DEPOSIT_SOLANA_OWNER ?? A2A_DEPOSIT_TREASURY_SOLANA`) y la suite quedó
+      // (`A2A_DEPOSIT_OWNER_SOLANA ?? A2A_DEPOSIT_TREASURY_SOLANA`) y la suite quedó
       // VERDE. El motivo: el test de arriba pone en esa env una address EVM, que
       // `isValidSolanaAddress` rechaza igual, así que el fallback devolvía `null`
       // por la validación siguiente y NO por su ausencia. El test probaba el
@@ -99,7 +99,7 @@ describe('WKH-315 · deposit-account.ts', () => {
       // Andamiaje: la env SI contiene algo que pasaría el validador.
       expect(isValidSolanaAddressForTest(validButUnrelated)).toBe(true);
       process.env.A2A_DEPOSIT_TREASURY_SOLANA = validButUnrelated;
-      delete process.env.A2A_DEPOSIT_SOLANA_OWNER;
+      delete process.env.A2A_DEPOSIT_OWNER_SOLANA;
 
       expect(resolveSolanaDepositOwner()).toBeNull();
       expect(resolveSolanaDepositOwner()).not.toBe(validButUnrelated);
@@ -114,20 +114,20 @@ describe('WKH-315 · deposit-account.ts', () => {
         'short',
         Keypair.generate().secretKey.length.toString(),
       ]) {
-        process.env.A2A_DEPOSIT_SOLANA_OWNER = bad;
+        process.env.A2A_DEPOSIT_OWNER_SOLANA = bad;
         expect(resolveSolanaDepositOwner(), bad).toBeNull();
       }
     });
 
     it('una pubkey válida se devuelve TAL CUAL, sin normalizar la caja', () => {
-      process.env.A2A_DEPOSIT_SOLANA_OWNER = OWNER;
+      process.env.A2A_DEPOSIT_OWNER_SOLANA = OWNER;
       expect(resolveSolanaDepositOwner()).toBe(OWNER);
       // Y no se pasa a minúsculas: bajar de caja una cadena base58 la DESTRUYE.
       expect(resolveSolanaDepositOwner()).not.toBe(OWNER.toLowerCase());
     });
 
     it('tolera whitespace alrededor (un `.env` copy-pasteado suele traerlo)', () => {
-      process.env.A2A_DEPOSIT_SOLANA_OWNER = `  ${OWNER}\n`;
+      process.env.A2A_DEPOSIT_OWNER_SOLANA = `  ${OWNER}\n`;
       expect(resolveSolanaDepositOwner()).toBe(OWNER);
     });
   });
@@ -135,7 +135,7 @@ describe('WKH-315 · deposit-account.ts', () => {
   // ── resolveSolanaDepositAta: el destino es la ATA (CD-5) ──────────────────
   describe('resolveSolanaDepositAta — el destino es la ATA, no el owner (CD-5)', () => {
     it('deriva la ATA del par (mint, owner) y es DISTINTA del owner', () => {
-      process.env.A2A_DEPOSIT_SOLANA_OWNER = OWNER;
+      process.env.A2A_DEPOSIT_OWNER_SOLANA = OWNER;
       const ata = resolveSolanaDepositAta();
       expect(ata).not.toBeNull();
       // ⚠️ La aserción que importa: publicar el owner como destino haría que el
@@ -144,7 +144,7 @@ describe('WKH-315 · deposit-account.ts', () => {
     });
 
     it('coincide byte a byte con el derivador de la librería (oráculo externo, no re-implementación)', () => {
-      process.env.A2A_DEPOSIT_SOLANA_OWNER = OWNER;
+      process.env.A2A_DEPOSIT_OWNER_SOLANA = OWNER;
       const expected = getAssociatedTokenAddressSync(
         new PublicKey(getSolanaUsdcMint()),
         new PublicKey(OWNER),
@@ -153,7 +153,7 @@ describe('WKH-315 · deposit-account.ts', () => {
     });
 
     it('cambia si cambia el MINT — la ATA depende del par, no sólo del owner', () => {
-      process.env.A2A_DEPOSIT_SOLANA_OWNER = OWNER;
+      process.env.A2A_DEPOSIT_OWNER_SOLANA = OWNER;
       const withDefaultMint = resolveSolanaDepositAta();
       process.env.SOLANA_USDC_MINT_DEVNET =
         Keypair.generate().publicKey.toBase58();
@@ -163,15 +163,15 @@ describe('WKH-315 · deposit-account.ts', () => {
     });
 
     it('un mint corrupto devuelve null y NO LANZA (lo consume una ruta pública y un verificador never-throw)', () => {
-      process.env.A2A_DEPOSIT_SOLANA_OWNER = OWNER;
+      process.env.A2A_DEPOSIT_OWNER_SOLANA = OWNER;
       process.env.SOLANA_USDC_MINT_DEVNET = 'no-es-una-pubkey';
       expect(() => resolveSolanaDepositAta()).not.toThrow();
       expect(resolveSolanaDepositAta()).toBeNull();
     });
 
     it('owner inválido ⇒ ATA null ⇒ el camino queda OFF (la cadena completa)', () => {
-      process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'true';
-      process.env.A2A_DEPOSIT_SOLANA_OWNER = 'no-es-una-pubkey';
+      process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'true';
+      process.env.A2A_DEPOSIT_OWNER_SOLANA = 'no-es-una-pubkey';
       expect(resolveSolanaDepositOwner()).toBeNull();
       expect(resolveSolanaDepositAta()).toBeNull();
       expect(isSolanaDepositEnabled()).toBe(false);
@@ -181,36 +181,36 @@ describe('WKH-315 · deposit-account.ts', () => {
   // ── T-315-19: el flag estricto (M19) ─────────────────────────────────────
   describe('T-315-19: isSolanaDepositEnabled — comparación de string ESTRICTA (M19)', () => {
     beforeEach(() => {
-      process.env.A2A_DEPOSIT_SOLANA_OWNER = OWNER;
+      process.env.A2A_DEPOSIT_OWNER_SOLANA = OWNER;
     });
 
     it("T-315-19: SOLO 'true' exacto enciende", () => {
-      process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'true';
+      process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'true';
       expect(isSolanaDepositEnabled()).toBe(true);
     });
 
     it("T-315-19 (M19): 'false' deja OFF — con Boolean(env) el string 'false' es TRUTHY y encendería la entrada de dinero", () => {
       // ⚠️ EL MUTANTE QUE ESTE CASO MATA. Un operador que escribe
-      // `A2A_SOLANA_DEPOSIT_ENABLED=false` para APAGAR el camino lo estaría
+      // `A2A_DEPOSIT_ENABLED_SOLANA=false` para APAGAR el camino lo estaría
       // ENCENDIENDO si el código usara `Boolean(process.env...)`.
-      process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'false';
+      process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'false';
       expect(isSolanaDepositEnabled()).toBe(false);
     });
 
     it("T-315-19: '1', 'TRUE', 'yes', '' y la ausencia dejan OFF (default fail-safe)", () => {
       for (const v of ['1', 'TRUE', 'True', 'yes', 'on', '']) {
-        process.env.A2A_SOLANA_DEPOSIT_ENABLED = v;
+        process.env.A2A_DEPOSIT_ENABLED_SOLANA = v;
         expect(isSolanaDepositEnabled(), `valor=${JSON.stringify(v)}`).toBe(
           false,
         );
       }
-      delete process.env.A2A_SOLANA_DEPOSIT_ENABLED;
+      delete process.env.A2A_DEPOSIT_ENABLED_SOLANA;
       expect(isSolanaDepositEnabled()).toBe(false);
     });
 
     it("T-315-19: con el flag en 'true' pero SIN owner sigue OFF (las dos condiciones son necesarias)", () => {
-      process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'true';
-      delete process.env.A2A_DEPOSIT_SOLANA_OWNER;
+      process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'true';
+      delete process.env.A2A_DEPOSIT_OWNER_SOLANA;
       expect(isSolanaDepositEnabled()).toBe(false);
     });
 
@@ -218,7 +218,7 @@ describe('WKH-315 · deposit-account.ts', () => {
       // El flag del rail tiene choke-point único en `registry.ts` y la regla de que
       // el resolver y los adapters no lo leen. Si este módulo lo leyera, habría dos
       // fuentes de verdad del mismo gate.
-      process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'true';
+      process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'true';
       process.env.SOLANA_ADAPTER_ENABLED = 'false';
       expect(isSolanaDepositEnabled()).toBe(true);
     });

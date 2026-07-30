@@ -821,9 +821,9 @@ the same signature again once the cause is gone. The only terminal one is the `4
 **Non-negotiable order.** Migration → env → flag:
 
 1. apply `supabase/migrations/20260731000000_wkh315_solana_deposit.sql`;
-2. set `A2A_DEPOSIT_SOLANA_OWNER` (and `A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED=true`
+2. set `A2A_DEPOSIT_OWNER_SOLANA` (and `A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA=true`
    only if that account is deliberately *not* the operator's);
-3. set `A2A_SOLANA_DEPOSIT_ENABLED=true` **last**.
+3. set `A2A_DEPOSIT_ENABLED_SOLANA=true` **last**.
 
 Migration before code means no window: the column exists and nothing uses it yet. The
 reverse order degrades **loudly** (the flag defaults off, so the path simply does not
@@ -838,7 +838,7 @@ re-opens every past Solana deposit for re-crediting.
 ### 6.7 Known debt this path activates — `TD-SOLANA-CAIP2-DENYLIST`
 
 **This is an operator concern, not a depositor one.** Turning
-`A2A_SOLANA_DEPOSIT_ENABLED=true` in an environment that also serves real value erodes
+`A2A_DEPOSIT_ENABLED_SOLANA=true` in an environment that also serves real value erodes
 one of the three conditions that keep `TD-SOLANA-CAIP2-DENYLIST` tolerable, and the
 story that converts it to a fail-CLOSED allowlist has to be opened **first**.
 

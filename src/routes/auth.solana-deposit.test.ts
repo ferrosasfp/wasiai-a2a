@@ -247,8 +247,8 @@ function evmBundle(): AdaptersBundle {
 }
 
 const ENV_KEYS = [
-  'A2A_DEPOSIT_SOLANA_OWNER',
-  'A2A_SOLANA_DEPOSIT_ENABLED',
+  'A2A_DEPOSIT_OWNER_SOLANA',
+  'A2A_DEPOSIT_ENABLED_SOLANA',
   'SOLANA_USDC_MINT_DEVNET',
 ] as const;
 
@@ -282,8 +282,8 @@ describe('WKH-315 · rutas del depósito Solana', () => {
       saved.set(k, process.env[k]);
       delete process.env[k];
     }
-    process.env.A2A_DEPOSIT_SOLANA_OWNER = DEPOSIT_OWNER;
-    process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'true';
+    process.env.A2A_DEPOSIT_OWNER_SOLANA = DEPOSIT_OWNER;
+    process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'true';
     process.env.SOLANA_USDC_MINT_DEVNET = MINT;
     vi.clearAllMocks();
     mockLookupByHash.mockResolvedValue(makeKeyRow());
@@ -698,7 +698,7 @@ describe('WKH-315 · rutas del depósito Solana', () => {
     it('T-315-18: con el flag OFF, el verificador contesta DEPOSIT_ACCOUNT_NOT_CONFIGURED ⇒ 503', async () => {
       // El flag lo lee el VERIFICADOR (choke-point único), así que acá se prueba que
       // la ruta traduce ese estado a 503 y no acredita.
-      process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'false';
+      process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'false';
       mockVerifySolana.mockResolvedValue({
         ok: false,
         reason: 'DEPOSIT_ACCOUNT_NOT_CONFIGURED',
@@ -759,7 +759,7 @@ describe('WKH-315 · rutas del depósito Solana', () => {
     it('T-315-12: con el flag OFF, Solana NO se lista', async () => {
       // Publicar una cuenta de depósito sin el camino habilitado invitaría a mandar
       // plata que nadie puede acreditar.
-      process.env.A2A_SOLANA_DEPOSIT_ENABLED = 'false';
+      process.env.A2A_DEPOSIT_ENABLED_SOLANA = 'false';
       mockGetInitializedChainKeys.mockReturnValue(['solana-devnet']);
       mockGetAdaptersBundle.mockReturnValue(solanaBundle());
 
@@ -769,8 +769,8 @@ describe('WKH-315 · rutas del depósito Solana', () => {
       expect(res.json().networks).toEqual([]);
     });
 
-    it('T-315-12: sin `A2A_DEPOSIT_SOLANA_OWNER`, Solana NO se lista (aunque el flag esté ON)', async () => {
-      delete process.env.A2A_DEPOSIT_SOLANA_OWNER;
+    it('T-315-12: sin `A2A_DEPOSIT_OWNER_SOLANA`, Solana NO se lista (aunque el flag esté ON)', async () => {
+      delete process.env.A2A_DEPOSIT_OWNER_SOLANA;
       mockGetInitializedChainKeys.mockReturnValue(['solana-devnet']);
       mockGetAdaptersBundle.mockReturnValue(solanaBundle());
       const res = await getInfo();

@@ -96,7 +96,7 @@ export function getSolanaOperatorKeypair(): Keypair {
 
   // ── WKH-315 (§4.4) — COHERENCIA CUENTA-DE-DEPOSITO ↔ OPERADOR ──────────────
   //
-  // El riesgo que cierra: si `A2A_DEPOSIT_SOLANA_OWNER` apunta a una pubkey que el
+  // El riesgo que cierra: si `A2A_DEPOSIT_OWNER_SOLANA` apunta a una pubkey que el
   // operador NO controla, el dinero del usuario aterriza en una cuenta desde la que
   // no se puede pagar. Nadie se enteraría hasta querer gastarlo, y el depósito ya
   // estaría acreditado en el saldo.
@@ -117,7 +117,7 @@ export function getSolanaOperatorKeypair(): Keypair {
   // La salida es una AFIRMACION DEL OPERADOR, no un apagador del control (exemplar:
   // `SOLANA_RPC_LEDGER_HISTORY_DECLARED_SUFFICIENT` en `schema-preflight.ts`): quien
   // usa deliberadamente una cuenta de depósito distinta lo DECLARA con
-  // `A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED=true` y se hace responsable de barrerla.
+  // `A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA=true` y se hace responsable de barrerla.
   //
   // ⚠️ Y LA ASERCION SOLO CORRE CON EL CAMINO DE DEPOSITO ENCENDIDO (fix-pack AR ·
   // BLQ-BAJO-1). Sin esta condición, seguir el orden de activación que el propio
@@ -132,19 +132,19 @@ export function getSolanaOperatorKeypair(): Keypair {
   // misma comparación literal contra `'true'`, y el choke-point del depósito sigue
   // siendo único — acá el flag es una PRECONDICION de la aserción, no una decisión
   // sobre si el camino de entrada está abierto.
-  const depositPathOn = process.env.A2A_SOLANA_DEPOSIT_ENABLED === 'true';
-  const declaredOwner = process.env.A2A_DEPOSIT_SOLANA_OWNER?.trim();
+  const depositPathOn = process.env.A2A_DEPOSIT_ENABLED_SOLANA === 'true';
+  const declaredOwner = process.env.A2A_DEPOSIT_OWNER_SOLANA?.trim();
   if (
     depositPathOn &&
     declaredOwner !== undefined &&
     declaredOwner !== '' &&
     declaredOwner !== operatorPubkey &&
-    process.env.A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED !== 'true'
+    process.env.A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA !== 'true'
   ) {
     // El mensaje nombra las dos envs (accionable) y NO incluye ningún secreto: las
     // dos pubkeys son públicas por definición.
     throw new Error(
-      `A2A_DEPOSIT_SOLANA_OWNER (${declaredOwner}) is not the solana operator pubkey (${operatorPubkey}) — deposits would land in an account this process cannot pay from. Point the env at the operator, or set A2A_DEPOSIT_SOLANA_OWNER_IS_DEDICATED=true to declare the deposit account is deliberately separate.`,
+      `A2A_DEPOSIT_OWNER_SOLANA (${declaredOwner}) is not the solana operator pubkey (${operatorPubkey}) — deposits would land in an account this process cannot pay from. Point the env at the operator, or set A2A_DEPOSIT_OWNER_IS_DEDICATED_SOLANA=true to declare the deposit account is deliberately separate.`,
     );
   }
 

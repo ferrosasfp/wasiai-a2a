@@ -6,8 +6,8 @@
 -- Aditiva e idempotente. NO altera ninguna fila EVM existente.
 --
 -- ORDEN DE RELEASE, NO NEGOCIABLE (Story File §7.3):
---   1. esta migración   2. las envs (A2A_DEPOSIT_SOLANA_OWNER)
---   3. el flag A2A_SOLANA_DEPOSIT_ENABLED=true  ← ULTIMO
+--   1. esta migración   2. las envs (A2A_DEPOSIT_OWNER_SOLANA)
+--   3. el flag A2A_DEPOSIT_ENABLED_SOLANA=true  ← ULTIMO
 -- Migración antes del código ⇒ sin ventana (la columna existe y nadie la usa).
 -- Orden inverso ⇒ el flag OFF por default hace que el camino Solana no exista:
 -- degradación RUIDOSA y recuperable, nunca un crédito duplicado.

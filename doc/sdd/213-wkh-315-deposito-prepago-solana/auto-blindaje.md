@@ -96,7 +96,7 @@ el error ocurre**, no al final.
 ### [2026-07-30 W3.3] Un mutante sobrevivió: el test probaba el validador, no la ausencia del fallback
 
 - **Error**: **M18 SOBREVIVIO** en la primera corrida de la campaña. La mutación
-  (`A2A_DEPOSIT_SOLANA_OWNER ?? A2A_DEPOSIT_TREASURY_SOLANA`) dejó la suite entera verde.
+  (`A2A_DEPOSIT_OWNER_SOLANA ?? A2A_DEPOSIT_TREASURY_SOLANA`) dejó la suite entera verde.
 - **Causa raíz**: el test ponía en la env de treasury una **address EVM**, que
   `isValidSolanaAddress` rechaza igual. O sea que el `null` venía de la validación
   siguiente, **no de la ausencia del fallback**. El test afirmaba sobre el validador y

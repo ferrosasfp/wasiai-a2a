@@ -46,7 +46,7 @@ import { isValidSolanaAddress } from '../../lib/wallet-format.js';
 import { getSolanaUsdcMint } from './chain.js';
 
 /**
- * Pubkey base58 dueña de la cuenta de depósito, desde `A2A_DEPOSIT_SOLANA_OWNER`.
+ * Pubkey base58 dueña de la cuenta de depósito, desde `A2A_DEPOSIT_OWNER_SOLANA`.
  * `null` si la env falta o no es una pubkey Solana bien formada.
  *
  * **PROHIBIDO cualquier fallback** — ver la cabecera. El `| null` no viola CD-3: es
@@ -55,7 +55,7 @@ import { getSolanaUsdcMint } from './chain.js';
  * unión discriminada.
  */
 export function resolveSolanaDepositOwner(): string | null {
-  const raw = process.env.A2A_DEPOSIT_SOLANA_OWNER;
+  const raw = process.env.A2A_DEPOSIT_OWNER_SOLANA;
   if (raw === undefined || raw === '') return null;
   const owner = raw.trim();
   // Se valida con el MISMO predicado que el resto del repo usa para una wallet
@@ -97,12 +97,12 @@ export function resolveSolanaDepositAta(): string | null {
  * la ruta ni el verificador leen la env por su cuenta.
  *
  * Dos condiciones, las dos necesarias:
- *   1. `A2A_SOLANA_DEPOSIT_ENABLED === 'true'` — comparación de string ESTRICTA;
+ *   1. `A2A_DEPOSIT_ENABLED_SOLANA === 'true'` — comparación de string ESTRICTA;
  *   2. la cuenta de depósito está configurada.
  *
- * ⚠️ **PROHIBIDO `Boolean(process.env.A2A_SOLANA_DEPOSIT_ENABLED)`** (exemplar:
+ * ⚠️ **PROHIBIDO `Boolean(process.env.A2A_DEPOSIT_ENABLED_SOLANA)`** (exemplar:
  * `escrowModeEnabled` en `routes/auth/parsers.ts`). Con `Boolean(...)`, el string
- * `'false'` es TRUTHY: un operador que escribe `A2A_SOLANA_DEPOSIT_ENABLED=false`
+ * `'false'` es TRUTHY: un operador que escribe `A2A_DEPOSIT_ENABLED_SOLANA=false`
  * para APAGAR el camino de entrada de dinero lo estaría ENCENDIENDO. Sólo `'true'`
  * exacto enciende; `'1'`, `'TRUE'`, `'yes'`, `''` y la ausencia dejan OFF (default
  * fail-safe).
@@ -113,6 +113,6 @@ export function resolveSolanaDepositAta(): string | null {
  * settlear" y "publiqué una cuenta de depósito sin verificador cableado".
  */
 export function isSolanaDepositEnabled(): boolean {
-  if (process.env.A2A_SOLANA_DEPOSIT_ENABLED !== 'true') return false;
+  if (process.env.A2A_DEPOSIT_ENABLED_SOLANA !== 'true') return false;
   return resolveSolanaDepositOwner() !== null;
 }

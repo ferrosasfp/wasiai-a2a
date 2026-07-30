@@ -172,14 +172,14 @@ export async function verifySolanaDeposit(
   const { signature, expectedAmountUsd } = args;
 
   // ── 1. La cuenta de depósito. CHOKE-POINT UNICO del flag ──────────────────
-  // La ruta NO lee `A2A_SOLANA_DEPOSIT_ENABLED`: si lo hiciera, habría dos lugares
+  // La ruta NO lee `A2A_DEPOSIT_ENABLED_SOLANA`: si lo hiciera, habría dos lugares
   // que deciden si el camino de entrada de dinero está abierto.
   if (!isSolanaDepositEnabled()) {
     return {
       ok: false,
       reason: 'DEPOSIT_ACCOUNT_NOT_CONFIGURED',
       detail:
-        'solana deposit path is disabled (A2A_SOLANA_DEPOSIT_ENABLED !== "true" or A2A_DEPOSIT_SOLANA_OWNER unset/invalid)',
+        'solana deposit path is disabled (A2A_DEPOSIT_ENABLED_SOLANA !== "true" or A2A_DEPOSIT_OWNER_SOLANA unset/invalid)',
     };
   }
   const expectedOwner = resolveSolanaDepositOwner();
