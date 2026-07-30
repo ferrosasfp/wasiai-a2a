@@ -669,11 +669,12 @@ export const discoveryService = {
     // caller seguimos sin mandar `limitParam` (comportamiento byte-idéntico al
     // de hoy) — imponer un cap donde antes no había ninguno sería reintroducir
     // el mismo bug de clase "esconder agentes" en el path sin `limit`.
+    // WKH-318: el límite EFECTIVAMENTE enviado, para poder detectar `page_full`.
+    // `undefined` ⇒ no se mandó ninguno (camino sin `limit` del caller, CD-5/CD-8).
+    let sentLimit: number | undefined;
     if (query.limit && schema.limitParam) {
-      url.searchParams.set(
-        schema.limitParam,
-        resolveUpstreamFetchLimit(query.limit).toString(),
-      );
+      sentLimit = resolveUpstreamFetchLimit(query.limit);
+      url.searchParams.set(schema.limitParam, sentLimit.toString());
     }
     if (query.maxPrice && schema.maxPriceParam) {
       url.searchParams.set(schema.maxPriceParam, query.maxPrice.toString());
@@ -737,7 +738,49 @@ export const discoveryService = {
     }
 
     const agents = agentsData.map((raw) => this.mapAgent(registry, raw));
-    // W2 reemplaza este bloque por la detección de truncamiento.
+
+    // ── WKH-318 (DT-8): el truncamiento se DETECTA, no se pagina ───────────
+    //
+    // Dos evidencias, en este orden de precedencia:
+    //
+    //  1. `cursor` — EXACTA. El registro declaró `nextCursorPath` y ese campo
+    //     llegó no-nulo. Es la que atrapa el caso real medido: v2 tiene 22
+    //     agentes activos y el camino sin `limit` devuelve 20 con `next_cursor`
+    //     seteado. Sin esta detección, el corte A cambiaría una mentira por otra
+    //     (`catalogStatus: 'complete'` sobre 20 de 22).
+    //
+    //  2. `page_full` — HEURÍSTICA. Se mandó un límite y llegaron EXACTAMENTE
+    //     esa cantidad de filas. Su único error posible es sobre-declarar
+    //     (catálogo justo del tamaño del cap), y sobre-declarar incompletitud es
+    //     el lado SEGURO del error.
+    //
+    // Sin límite enviado y sin `nextCursorPath` declarado NO hay evidencia, y el
+    // estado es `ok`: no se inventa una certeza que no tenemos.
+    let truncationEvidence: 'cursor' | 'page_full' | undefined;
+    if (schema.nextCursorPath) {
+      const cursor = getNestedValue(data, schema.nextCursorPath);
+      // `null` explícito y `undefined` NO son evidencia. Que la CLAVE exista con
+      // valor nulo es exactamente cómo un registro dice "no hay más".
+      if (cursor !== null && cursor !== undefined && cursor !== '') {
+        truncationEvidence = 'cursor';
+      }
+    }
+    if (
+      !truncationEvidence &&
+      sentLimit !== undefined &&
+      agents.length >= sentLimit
+    ) {
+      truncationEvidence = 'page_full';
+    }
+
+    if (truncationEvidence) {
+      return {
+        agents,
+        state: 'truncated',
+        rows: agents.length,
+        truncationEvidence,
+      };
+    }
     return { agents, state: 'ok', rows: agents.length };
   },
 
