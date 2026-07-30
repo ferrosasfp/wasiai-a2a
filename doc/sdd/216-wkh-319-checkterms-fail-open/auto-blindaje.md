@@ -5,6 +5,81 @@ resumen de la HU: es lo que protege a la próxima del mismo tropiezo.
 
 ---
 
+### [2026-07-30 12:05] Wave 1 — Escribí un comentario que JUSTIFICABA un fail-open, y el AC me daba la razón
+
+- **Error**: dejé viva **la sexta forma del mismo bug que la HU existe para
+  cerrar**. Una entrada de balance sin `owner` no entra a ninguno de los dos
+  mapas, así que además de no sumar es **invisible para el guard de simetría**; y
+  yo permitía `match` con entradas sin clasificar de **cualquier lado**, apoyado
+  en un comentario que decía *"medir de menos no puede volver verdadero un `>=`
+  que era falso"*. Esa frase es cierta para `post` y **falsa para `pre`**: ahí no
+  medir achica `preSum` y por lo tanto **agranda** el delta. Repro: `payTo` baja
+  de 100 USDC a 3 y el sistema devolvía `match` ⇒ `landed_ok` ⇒ `success:true`.
+- **Causa raíz**: razoné la asimetría **una sola vez y la apliqué a los dos
+  lados**. Peor: escribí el razonamiento como comentario afirmativo, y un
+  comentario seguro de sí mismo es lo que hace que el próximo lector no vuelva a
+  revisar la cuenta. Y `owner` es **opcional en el esquema**, así que el input
+  que lo dispara no es exótico: es un campo que el RPC puede omitir.
+- **Fix**: contador partido por lado (`unclassifiablePre` / `unclassifiablePost`).
+  `match` exige `pre` limpio; `mismatch` exige los dos, porque una entrada
+  anónima en `pre` podría esconder un delta **negativo** y saltearse ese guard.
+  T-319-7c lo clava **con su control**: la misma forma con `owner` declarado ya
+  se cazaba.
+- **Aplicar en**: **cuando un guard trata dos lados de una resta, la propiedad
+  hay que demostrarla DOS VECES, una por lado.** `pre` y `post`, débito y
+  crédito, entrada y salida: el signo invierte la conclusión y la intuición no
+  avisa. Y si un dato no se puede clasificar, preguntarse **de qué lado cae** —
+  no alcanza con contar cuántos hay.
+
+---
+
+### [2026-07-30 12:05] Wave 1 — El AC decía lo mismo que mi comentario, y eso NO es verificación
+
+- **Error**: mi implementación **cumplía AC-7 al pie de la letra**. El AC
+  (`work-item.md`) y el SDD (§4.6) afirmaban exactamente la misma frase
+  equivocada. Si me hubiera limitado a "ajustarme al AC" —que es literalmente lo
+  que este rol tiene prohibido desviar— **el fail-open se quedaba**.
+- **Causa raíz**: los tres artefactos (SDD, AC, código) decían lo mismo porque
+  **el segundo y el tercero se derivaron del primero**. Tres copias de un
+  razonamiento no son tres verificaciones: son **una sola, contada tres veces**.
+  Es la versión documental del guard que se compara consigo mismo.
+- **Fix**: se corrigieron **el AC y el SDD además del código**, cada uno con el
+  input concreto que los rompe, y marcados como enmienda de F3 con su autor. Un
+  AC que describía el bug no se puede dejar en pie: el F4 lo validaría como PASS.
+- **Aplicar en**: **un AC no es evidencia de que el diseño sea correcto — es
+  evidencia de qué se decidió.** Ante un hallazgo que el AC bendice, la salida
+  NO es cumplir el AC: es escalar y corregir el AC. Y la prueba de una propiedad
+  de dinero tiene que ser **ejecutada contra un input**, nunca "está escrito en
+  tres lugares".
+
+---
+
+### [2026-07-30 12:20] Wave 1 — Cerré el colapso un piso abajo y lo dejé vivo un piso arriba
+
+- **Error**: hice que la indeterminación de términos viajara correctamente hasta
+  el adapter… y ahí la tiré por la borda. `SETTLE_PRESENCE_UNKNOWN` y
+  `SETTLE_IN_FLIGHT_UNRESOLVED` salían como `Error` pelado, así que
+  `readSettleValueDisposition` devolvía `undefined` y `settleSolanaLeg` publicaba
+  **`SETTLE_FAILED`** — que dispara **reembolso y/o re-envío del hop**. El
+  adapter decía *"no pude comprobarlo"* y el leg le afirmaba al caller *"no se
+  pagó"*: el bug sistémico del proyecto, dentro de la HU que existe para cerrarlo.
+- **Causa raíz**: verifiqué el tercer valor **hasta el borde de mi archivo**. El
+  mapeo a `SETTLE_FAILED` era pre-existente, así que no lo miré — pero mi HU
+  **ensanchó enormemente el embudo** hacia esas dos ramas. Heredar una línea no
+  es lo mismo que no ser responsable de ella cuando le multiplicás el tráfico.
+- **Fix**: `FacilitatorSettleError(..., 'unknown')`, el patrón que
+  `recoverConfirmedSettle` ya usaba bien 400 líneas abajo. El test importa el
+  **clasificador real** (`readSettleValueDisposition`) y lo corre contra el
+  **error real** del adapter — los tests de `downstream-payment` mockean el
+  adapter Solana entero, que es exactamente por qué este seam no tenía cobertura.
+- **Aplicar en**: **un valor nuevo se persigue hasta el consumidor que toma la
+  decisión de dinero, no hasta el borde del archivo.** Y cuando dos suites se
+  mockean mutuamente (el adapter mockea el leg, el leg mockea el adapter), el
+  seam entre ambas **no lo prueba nadie**: hay que importar la función real de un
+  lado y correrla contra el objeto real del otro.
+
+---
+
 ### [2026-07-30 11:20] Wave 0 — Un `tsc --noEmit` VERDE sobre un worktree sin `node_modules`
 
 - **Error**: corrí `npx tsc --noEmit` en `wt-319` y leí `TSC_EXIT=0` como
