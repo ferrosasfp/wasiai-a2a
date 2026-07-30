@@ -73,6 +73,53 @@ próxima HU.
 
 ---
 
+### [2026-07-30 17:32] Wave 1 — Mi mock de DNS desactivaba el guard que el test decía probar
+
+- **Error**: `T-SRC-04/ssrf_blocked` daba `failure: 'unknown'` en vez de
+  `'ssrf_blocked'`. Mi primer reflejo fue "el clasificador está mal".
+- **Causa raíz**: era el test. Para que un host inventado
+  (`healthy.example.org`) resolviera, mockeé `node:dns` con
+  `mockResolvedValue([{address:'93.184.216.34'}])` — **para todos los hosts**.
+  `validateOutboundUrl` NO rechaza un IPv4 literal por su texto: `127.0.0.1`
+  pasa el bloqueo literal (rule 3 sólo cubre `localhost`/`*.local`) y se rechaza
+  recién en la rule 5, **por lo que devuelve `dns.lookup`**
+  (`url-validator.ts:292-318`). Con mi mock, `127.0.0.1` "resolvía" a una IP
+  pública, pasaba el guard, y el fallo terminaba siendo mi propio
+  `throw new Error('host no ruteado')` del helper de fetch — un `Error` genérico,
+  o sea `'unknown'`. **El test pasaba por el camino equivocado y habría dado
+  verde a un `classifyFetchFailure` roto.**
+- **Fix**: el mock replica la semántica REAL de `dns.lookup` — un IP literal se
+  devuelve tal cual, un nombre resuelve a una IP pública.
+- **Aplicar en**: todo mock que se interponga entre el test y el guard que el
+  test dice ejercitar. Antes de creerle a un test de seguridad, preguntar por
+  dónde entró el fallo: si el motivo es genérico (`unknown`, `Error`), lo más
+  probable es que el guard real ni se haya ejecutado. Es la misma familia que
+  "guards que se comparan consigo mismos": acá el mock se había comido al guard.
+
+---
+
+### [2026-07-30 17:38] Wave 1 — `tsc` no atrapó todos los call-sites del tipo que cambié
+
+- **Error**: cambiar `queryRegistry` de `Promise<Agent[]>` a
+  `Promise<RegistryFetchOutcome>` rompió DOS tests en
+  `discovery.ssrf.test.ts`. `tsc` marcó **uno solo** (`agents[0]!.slug`, TS7053).
+  El otro (`expect(agents).toEqual([])`) **compila perfecto**: `toEqual` acepta
+  `any`, así que un objeto comparado contra un array es un error de runtime, no
+  de tipos. Lo cazó la suite, no el compilador.
+- **Causa raíz**: haber tomado "`tsc` limpio" como prueba de que ya estaban
+  todos los consumidores migrados. Las aserciones de test son un agujero
+  sistemático en esa garantía: `toEqual`, `toMatchObject` y `expect(x).toBe(y)`
+  no propagan el tipo del sujeto.
+- **Fix**: se migró el segundo call-site y, ya que el test estaba ahí, se le
+  agregaron los asserts de `state`/`rows` que el nuevo contrato permite.
+- **Aplicar en**: cuando cambies el tipo de retorno de una función exportada, la
+  lista de call-sites se arma con `grep` del NOMBRE, no con la lista de errores
+  de `tsc`. Y la wave no cierra con `tsc` limpio: cierra con `tsc` limpio **y**
+  la suite completa verde. Este repo ya tiene el precedente inverso (WKH-196:
+  `npm run build` verde con la suite rota).
+
+---
+
 ### [2026-07-30] Wave 0 — El número de fixtures estimado no era el medido
 
 - **Nota** (no es un error propio, es calibración para el próximo): el story

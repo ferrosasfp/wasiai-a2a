@@ -74,6 +74,12 @@ const capabilitiesRoutes: FastifyPluginAsync = async (fastify) => {
       agents: discovered.agents,
       agentsTotal: discovered.total,
       registries: discovered.registries,
+      // WKH-318: cambio ADITIVO sobre una respuesta pública — mismo patrón que
+      // HU-204 en este archivo (:41-43). Los 11 campos previos quedan intactos,
+      // con el mismo nombre y el mismo valor. Esta superficie replicaba el bug:
+      // afirmaba haber consultado registros que no habían contestado.
+      catalogStatus: discovered.catalogStatus,
+      sources: discovered.sources,
     });
   });
 };

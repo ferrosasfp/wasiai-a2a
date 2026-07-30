@@ -10,6 +10,15 @@ import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
 // `services/compose.ts` también necesita el límite del pool y las suites que
 // mockean este service completo dejarían el export en `undefined`.
 import { resolveUpstreamFetchLimit } from '../lib/discovery-fetch-limit.js';
+// WKH-318: el vocabulario de la honestidad del catálogo vive en un módulo LEAF
+// por la MISMA razón que `discovery-fetch-limit.js` (ver su docstring): las
+// suites que mockean este service completo dejarían un export nuevo en
+// `undefined`, y `routes/compose.ts` necesita estas funciones.
+import {
+  buildCatalogStatus,
+  classifyFetchFailure,
+  RegistryHttpError,
+} from '../lib/discovery-sources.js';
 import { getLogger } from '../lib/logger.js';
 import { readPaymentSpec } from '../lib/payment-spec-reader.js';
 import { parsePriceSafe } from '../lib/price.js';
@@ -26,7 +35,9 @@ import type {
   AgentStatus,
   DiscoveryQuery,
   DiscoveryResult,
+  DiscoverySource,
   RegistryConfig,
+  RegistryFetchOutcome,
 } from '../types/index.js';
 import { SELF_PUBLISHED_REGISTRY_NAME } from '../types/index.js';
 import { publishedAgentService } from './agent.js';
@@ -278,35 +289,61 @@ export const discoveryService = {
     skipUpstreamQuery: boolean,
   ): Promise<DiscoveryResult> {
     // Query all registries in parallel
-    const results = await Promise.all(
+    const outcomes = await Promise.all(
       registries.map((registry) =>
-        this.queryRegistry(registry, query, skipUpstreamQuery).catch((err) => {
-          // TD-sprint-security MNR-5: SSRF violations are config issues,
-          // not transient errors — log them with a distinct prefix so
-          // operators can grep for misconfigured registry endpoints.
-          if (err instanceof SSRFViolationError) {
-            log.error(
+        this.queryRegistry(registry, query, skipUpstreamQuery)
+          .then((outcome) => ({ registry, outcome }))
+          .catch((err) => {
+            // TD-sprint-security MNR-5: SSRF violations are config issues,
+            // not transient errors — log them with a distinct prefix so
+            // operators can grep for misconfigured registry endpoints.
+            if (err instanceof SSRFViolationError) {
+              log.error(
+                {
+                  registry: registry.name,
+                  category: err.category,
+                  reason: err.reason,
+                },
+                'SSRF blocked',
+              );
+            } else {
+              log.error(
+                { registry: registry.name, detail: err.message },
+                'Error querying registry',
+              );
+            }
+            // WKH-318: el fallo deja de ser MUDO. Antes se degradaba a `[]` y la
+            // respuesta seguía afirmando que este registro contribuyó — el bug
+            // de esta HU. Ahora viaja como `failed`/`rows:null` hasta el caller,
+            // y además queda un warn estructurado grepeable.
+            const failure = classifyFetchFailure(err);
+            log.warn(
               {
+                error_code: 'REGISTRY_SOURCE_FAILED',
                 registry: registry.name,
-                category: err.category,
-                reason: err.reason,
+                failure,
               },
-              'SSRF blocked',
+              '[discovery.source-failed] a registry could not be queried; the catalog is partial',
             );
-          } else {
-            log.error(
-              { registry: registry.name, detail: err.message },
-              'Error querying registry',
-            );
-          }
-          return [] as Agent[];
-        }),
+            // CD-4: la excepción se sigue degradando — un registro caído NO
+            // tumba /discover. Lo que cambia es que ahora se DECLARA.
+            const outcome: RegistryFetchOutcome = {
+              agents: [],
+              state: 'failed',
+              rows: null,
+              failure,
+            };
+            return { registry, outcome };
+          }),
       ),
     );
 
     // Merge results — los locales entran ANTES del pipeline común
     // (status/verified/caps/price/rep/sort/limit) → mismo shape (CD-6).
-    let allAgents = [...results.flat(), ...localAgents];
+    let allAgents = [
+      ...outcomes.flatMap((o) => o.outcome.agents),
+      ...localAgents,
+    ];
 
     // Blocklist: exclude known-broken or mock agents (env-configurable)
     const blocklist = (process.env.AGENT_BLOCKLIST ?? '')
@@ -486,10 +523,42 @@ export const discoveryService = {
     // identity. No RPC at serve-time — only the JSONB reverse-lookup (W2).
     const enriched = await this.attachIdentities(limited);
 
-    const contributingRegistries = registries.map((r) => r.name);
+    // ── WKH-318: `registries` = las fuentes que APORTARON FILAS ────────────
+    //
+    // Antes era `registries.map(r => r.name)`: la lista de fuentes CONFIGURADAS.
+    // Una fuente que devolvía 400 y se degradaba a `[]` aparecía igual — la
+    // respuesta afirmaba haberla consultado. Medido en producción: `?limit=50`
+    // devolvía 3 agentes (los 3 self-published) y `["WasiAI","self-published"]`.
+    //
+    // "Aportó filas" = filas DEVUELTAS POR EL FETCH, antes de los filtros
+    // locales. Es, literalmente, la misma regla que las líneas de abajo ya
+    // aplicaban SÓLO a los self-published: acá se generaliza, no se inventa una
+    // segunda. Contarlo post-filtro haría que una query selectiva
+    // (`?capabilities=remit.quote`, medida: 0 agentes) reportara fuentes
+    // desaparecidas y el caller leyera degradación donde sólo hubo un filtro.
+    const sources: DiscoverySource[] = outcomes.map(({ registry, outcome }) => {
+      const source: DiscoverySource = {
+        name: registry.name,
+        state: outcome.state,
+        rows: outcome.rows,
+      };
+      if (outcome.failure) source.failure = outcome.failure;
+      if (outcome.truncationEvidence) {
+        source.truncationEvidence = outcome.truncationEvidence;
+      }
+      return source;
+    });
     if (localAgents.length > 0) {
-      contributingRegistries.push(SELF_PUBLISHED_REGISTRY_NAME);
+      sources.push({
+        name: SELF_PUBLISHED_REGISTRY_NAME,
+        state: 'ok',
+        rows: localAgents.length,
+      });
     }
+
+    const contributingRegistries = sources
+      .filter((s) => (s.rows ?? 0) > 0)
+      .map((s) => s.name);
 
     return {
       agents: enriched,
@@ -501,6 +570,10 @@ export const discoveryService = {
       // no en semántica).
       total: allAgents.length,
       registries: contributingRegistries,
+      // WKH-318: el detalle POR FUENTE y su roll-up. Aditivos: no se quita ni se
+      // re-tipa ningún campo previo.
+      sources,
+      catalogStatus: buildCatalogStatus(sources),
       // HU-208: cuántos candidatos descartó el filtro de candidatura. Sin esto
       // un conjunto vacío es indistinguible de "no existe tal capacidad", y un
       // operador buscaría el problema en el catálogo cuando en realidad hay un
@@ -568,7 +641,7 @@ export const discoveryService = {
     registry: RegistryConfig,
     query: DiscoveryQuery,
     skipUpstreamQuery = false,
-  ): Promise<Agent[]> {
+  ): Promise<RegistryFetchOutcome> {
     // SSRF guard (WKH-62) — validate before any fetch (CD-A3: outside
     // circuit breaker scope so SSRF attempts don't pollute breaker stats).
     // We validate the raw discoveryEndpoint, NOT url.toString(), because
@@ -636,8 +709,12 @@ export const discoveryService = {
       }).finally(() => clearTimeout(timer));
     });
 
+    // WKH-318: mismo `throw`, mismo mensaje, MISMO LUGAR (fuera de `cb.execute`).
+    // Sólo gana un `name` para que el fanout pueda clasificarlo como
+    // `http_error` sin parsear texto. La semántica del circuit breaker NO cambia
+    // en esta HU (TD-318-1): un 400 sostenido sigue sin abrir nada.
     if (!response.ok) {
-      throw new Error(`Registry ${registry.name} returned ${response.status}`);
+      throw new RegistryHttpError(registry.name, response.status);
     }
 
     const data = await response.json();
@@ -647,12 +724,21 @@ export const discoveryService = {
       ? getNestedValue(data, schema.agentsPath)
       : data;
 
+    // WKH-318 (CD-14): un payload que no es un array NO es "le pregunté y no
+    // tiene". Es "respondió algo que no entiendo" ⇒ `failed` / `rows: null`.
+    // Antes esto devolvía `[]` y era indistinguible de un catálogo vacío.
     if (!Array.isArray(agentsData)) {
-      return [];
+      return {
+        agents: [],
+        state: 'failed',
+        rows: null,
+        failure: 'bad_payload',
+      };
     }
 
-    // Map to standard Agent format
-    return agentsData.map((raw) => this.mapAgent(registry, raw));
+    const agents = agentsData.map((raw) => this.mapAgent(registry, raw));
+    // W2 reemplaza este bloque por la detección de truncamiento.
+    return { agents, state: 'ok', rows: agents.length };
   },
 
   /**

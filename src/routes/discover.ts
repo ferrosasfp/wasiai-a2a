@@ -74,7 +74,19 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    * - `total`: cantidad de agentes que matchean TODOS los filtros, ANTES de
    *   aplicar `limit`. Es el denominador para paginar, así que
    *   `total >= agents.length`. NO es el tamaño de la página.
-   * - `registries`: nombres de los registries que contribuyeron.
+   * - `registries`: nombres de las fuentes que APORTARON FILAS. WKH-318: antes
+   *   listaba los registries CONFIGURADOS, así que un registro que fallaba
+   *   aparecía igual y la respuesta afirmaba haberlo consultado. El tipo
+   *   (`string[]`) y el nombre no cambian; el valor sólo se acorta cuando una
+   *   fuente realmente no aportó nada.
+   * - `sources`: estado POR FUENTE. `state` es `ok` (respondió y trajo todo lo
+   *   que tiene para esta query) | `truncated` (respondió, pero hay más filas
+   *   que no trajimos) | `failed` (no se la pudo consultar). `rows` son las
+   *   filas que aportó ANTES de los filtros locales, y es `null` — no 0 —
+   *   cuando `state` es `failed`: 0 significa "le pregunté y no tiene", `null`
+   *   significa "no pude preguntarle".
+   * - `catalogStatus`: roll-up de la request. `complete` | `truncated` |
+   *   `partial`, con precedencia `partial` > `truncated` > `complete`.
    */
   fastify.get(
     '/',
