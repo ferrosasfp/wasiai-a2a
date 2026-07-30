@@ -513,9 +513,15 @@ export async function verifySolanaDeposit(
    * estilo: es un apagador de revisiones.
    *
    * GARANTIA: **ninguna incoherencia de PRESENCIA, DUPLICACION, ILEGIBILIDAD o IDENTIDAD
-   * de filas puede inflar el crédito.** Las cuatro clases tienen guard propio y test con
-   * nombre, y un fuzz sistemático (206 mutaciones de una fila y 21.321 de dos) las
-   * respalda.
+   * de filas puede inflar el crédito.** Las cuatro clases tienen guard propio, test con
+   * nombre y un caso adversario en `deposit-verifier.fuzz.test.ts`, donde además se
+   * midió que **neutralizar cualquiera de los guards pone ese archivo en rojo**.
+   *
+   * ⚠️ SIN CIFRAS ACA (fix-pack it6 · BLQ-2). Esta prosa citaba "206 mutaciones y 21.321
+   * pares" mientras el fuzz commiteado corría 103 y 5.253: un sobre-anuncio de 2× y 4×
+   * **sobre la evidencia**, en el comentario que gobierna un guard de dinero. Un número
+   * en prosa se desactualiza en silencio y nadie se entera; el que assertea un test se
+   * pone rojo. Los conteos viven en el fuzz, con `expect`.
    *
    * LIMITE, escrito como límite y no como pendiente: un dataset **internamente
    * coherente pero falso** —una historia consistente, "esta cuenta tenía 1000 y los
@@ -564,8 +570,12 @@ export async function verifySolanaDeposit(
       // consultar el `owner`**, que es lo que hacía esquivable el guard anterior.
       // `addressAt` no puede devolver `undefined` acá: toda fila del mint ya pasó el
       // guard de resolución de arriba; el `?? ''` sólo satisface al compilador y, si
-      // alguna vez se alcanzara, colapsaría las filas irresolubles en una sola clave y
-      // el propio chequeo de duplicado las rechazaría. Fail-closed en los dos casos.
+      // alguna vez se alcanzara, colapsaría las filas irresolubles en una sola clave:
+      // con DOS o más el chequeo de duplicado las rechaza; con UNA sola no hay duplicado
+      // y contaría como otra cuenta, así que la afirmación "fail-closed en los dos casos"
+      // que había acá decía de más. El estado es inalcanzable —verificado instrumentando
+      // este punto con un `throw`, con la suite y el fuzz enteros en verde—, pero eso lo
+      // sostiene el guard de resolución de arriba, no este `??`.
       const addr = addressAt(b.accountIndex) ?? '';
       if (byAddress.has(addr)) {
         return {
@@ -691,11 +701,13 @@ export async function verifySolanaDeposit(
   // dejáramos de buscar en esa dirección. Una afirmación de más en un comentario es un
   // apagador de revisiones.
   //
-  // GARANTIA, en su forma falsable (y respaldada por un fuzz de 206 mutaciones de una
-  // fila y 21.321 de dos, con cero inflaciones tras este fix): **ninguna incoherencia de
-  // PRESENCIA, DUPLICACION, ILEGIBILIDAD o IDENTIDAD de filas puede inflar el crédito.**
-  // Cada una de esas cuatro clases tiene su guard y su test con nombre, y cada frase de
-  // acá se puede romper nombrando un input concreto — si no, diría de más.
+  // GARANTIA, en su forma falsable: **ninguna incoherencia de PRESENCIA, DUPLICACION,
+  // ILEGIBILIDAD o IDENTIDAD de filas puede inflar el crédito.** Cada una de esas cuatro
+  // clases tiene su guard, su test con nombre y su caso adversario en el fuzz; los
+  // conteos del barrido los assertea el propio fuzz y no se repiten acá, porque un número
+  // escrito en prosa se desactualiza en silencio (pasó: esta línea citaba un barrido 2×
+  // y 4× más grande que el commiteado). Y cada frase de acá se puede romper nombrando un
+  // input concreto — si no, diría de más.
   //
   // ⚠️ LIMITE DEL ALCANCE, escrito como límite y no como pendiente: un dataset
   // INTERNAMENTE COHERENTE pero falso —una historia consistente: "esta cuenta tenía 1000

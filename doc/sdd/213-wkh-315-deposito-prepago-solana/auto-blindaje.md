@@ -292,11 +292,9 @@ ausente descalificando de nuevo, el `_down` sin archivar los binds y los backups
 **21/21 KILLED, cada uno con el nombre del test que muere.** Los archivos se restauraron
 verificando `sha256` en cada iteración.
 
-*(Actualizado en la iteración 5: **38 mutantes, 38 KILLED**, más un **fuzz sistemático
-propio** que quedó en el repo como red permanente (`deposit-verifier.fuzz.test.ts`):
-103 mutaciones de una fila y 5.253 combinaciones cruzadas de `pre`/`post` sobre un
-depósito legítimo, **cero inflaciones**. El criterio de aceptación dejó de ser prosa:
-es un test que corre en cada CI.)*
+*(Actualizado en la iteración 6: la campaña de mutación sigue verde, y el fuzz dejó de
+ser decorativo: se midió guard por guard y **los ocho lo ponen ROJO**. Los conteos ya
+no se citan en prosa — los assertea el propio test.)*
 
 ---
 
@@ -594,3 +592,68 @@ es un test que corre en cada CI.)*
   cuántos sitios se revisaron. Una regla sin ese conteo se considera aplicada a un caso.
 - **Aplicar en**: cualquier regla enunciada como general — el alcance se verifica con un
   grep, no con la intención de quien la escribió.
+
+
+---
+
+### [2026-07-30 FIX-PACK it6 · BLQ-1] Escribí un fuzz que no podía ponerse rojo
+
+- **Error**: el fuzz que agregué en it5 decía respaldar cuatro clases de incoherencia
+  (PRESENCIA, DUPLICACION, ILEGIBILIDAD, IDENTIDAD) y **era sensible a una sola**: la
+  ecuación de conservación. El revisor neutralizó cada guard por separado y corrió sólo
+  el fuzz: **cinco de seis quedaron VERDES**. O sea que si mañana alguien borraba la
+  presencia bilateral, el fuzz aplaudía.
+- **Causa raíz, y no fue mala suerte — fue construcción**: (a) el dataset base nunca
+  tenía dos índices resolviendo a la misma dirección, así que la clase DUPLICACION no se
+  barría; (b) el alfabeto de montos sólo tenía enteros legibles ⇒ ILEGIBILIDAD tampoco;
+  (c) el cruce combinaba `pre` de una mutación con `post` de otra, así que los casos que
+  exigen DOS cambios del mismo lado (CE1) eran inalcanzables; (d) los montos no se
+  derivaban de los saldos de las otras filas, así que **la ecuación nunca podía cerrar
+  con un delta inflado**: "cero inflaciones" estaba garantizado casi por construcción.
+  El error de fondo es el mismo de siempre en otra capa: **el artefacto de evidencia
+  también puede anunciar de más**, y un número grande al lado de una afirmación se lee
+  como respaldo aunque no toque la propiedad que la frase nombra.
+- **Fix**: el fuzz tiene ahora dos partes que dicen qué miden. Un **candado** con un caso
+  adversario POR GUARD, construido para que la ecuación CIERRE —así el único que puede
+  rechazar es el guard de esa clase— y con el needle de ese guard asertado. Y un
+  **barrido** ampliado con montos ilegibles, un `accountKeys` donde otro índice resuelve
+  a nuestra ATA, y familias COMPENSADAS con los montos derivados de los otros saldos.
+- **Y hubo que corregir el ORACULO, que es el hallazgo fino**: el barrido ampliado marcó
+  una "inflación" que no lo era. Cruzar el `pre` de un caso con el `post` de otro a veces
+  no produce una corrupción de un depósito de 1 USDC, sino **un dataset COHERENTE que
+  describe un depósito legítimo más grande** — y acreditar ahí es correcto. El oráculo
+  honesto es: *sobre un dataset INCOHERENTE, el crédito nunca supera el depósito real*.
+  Es el mismo límite que el verificador ya declara, ahora ejecutable.
+- **Medición final** (cada guard neutralizado, corriendo sólo el fuzz): **8/8 ROJO**.
+  Cuatro por INFLACION real en el barrido (duplicación en sus dos órdenes, presencia
+  eliminada, conservación) y cuatro sólo por el candado — porque **los guards son
+  redundantes entre sí para la inflación** y, al sacar uno, otro sigue rechazando el
+  mismo dataset. Eso es defensa en profundidad real, y está escrito como tal.
+- **Un detalle que salió midiendo**: el caso CE1 del fuzz sólo aísla la PRESENCIA si la
+  fila fantasma tiene el MISMO `owner` que el depositante; con un owner distinto la caza
+  el guard de atribución y el caso deja de probar lo que su nombre dice. Un caso
+  adversario mal parametrizado es un test que se cree específico y no lo es.
+- **Aplicar en**: (a) un fuzz se valida **neutralizando lo que dice vigilar** y viendo si
+  se pone rojo; si no se puede poner rojo, no es evidencia; (b) el oráculo de un fuzz es
+  tan importante como el generador: sobre datasets arbitrarios hay que definir qué
+  significa "mal", no asumirlo; (c) cuando un caso adversario no aísla a su guard, el
+  problema suele estar en un parámetro que deja actuar a otro guard.
+
+---
+
+### [2026-07-30 FIX-PACK it6 · BLQ-2] Cité números que ningún test respaldaba
+
+- **Error**: los comentarios del verificador citaban "206 mutaciones y 21.321 pares"
+  mientras el fuzz commiteado corría 103 y 5.253. La prosa quedó escrita **contra un
+  barrido que no se commiteó** — un sobre-anuncio de 2× y 4× sobre la evidencia, en el
+  comentario que gobierna un guard de dinero. (El mensaje de commit sí decía los números
+  reales, lo que lo hace más incómodo: tenía el dato correcto a mano.)
+- **Causa raíz**: escribí la prosa mientras exploraba un barrido más grande y la dejé
+  cuando el commiteado quedó más chico. **Un número en prosa no tiene quién lo verifique**:
+  se desactualiza en silencio y sobrevive a cualquier cambio del test.
+- **Fix**: ningún conteo en prosa. Los assertea el propio fuzz (`expect(ALL.length)`,
+  `expect(AMOUNTS.length)`, cotas del muestreo), que es lo único que se pone rojo cuando
+  el barrido se encoge.
+- **Aplicar en**: **no citar cifras de evidencia en comentarios**. Si la cifra importa,
+  vive en un `expect`; si no importa, no va. Un número escrito al lado de una afirmación
+  la hace parecer medida aunque no lo esté.
