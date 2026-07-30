@@ -292,6 +292,11 @@ export interface Agent {
   identity?: AgentCardIdentity;
   /** WKH-103 (AC-1): score off-chain computado. Omitido si 0 tasks (CD-9). */
   computedReputation?: AgentReputation;
+  /**
+   * WKH-313 (AC-2/DT-3): el agente entró bajo el piso por el CARRIL DE ESTRENO.
+   * Omitido (no `null`) salvo que la admisión haya ocurrido de verdad.
+   */
+  trial?: AgentTrialAdmission;
 }
 
 /**
@@ -319,6 +324,65 @@ export interface AgentReputation {
    * NO altera `score` en v1 (additive, DT-3.1).
    */
   onchain?: { value: string; chain_id: number };
+}
+
+/**
+ * WKH-313 — contadores CRUDOS del standing de un agente. Salen del MISMO
+ * accumulator y de la MISMA query que el score (CD-8): no hay una segunda
+ * expresión de la cuenta ni una segunda query.
+ *
+ * Es un shape de CONTADORES y no la unión discriminada literal de DT-4
+ * (`{kind:'scored';reputation} | {kind:'newcomer'} | {kind:'penalized'}`) por
+ * una razón concreta: con `N > 1` un agente puede estar a la vez DENTRO del
+ * carril (1-2 liquidadas) y TENER reputación real que hay que adjuntar, y esa
+ * unión no puede expresar los dos hechos juntos. La clasificación se deriva con
+ * una función PURA sobre estos contadores (`lib/trial-standing.ts`
+ * `classifyStanding`), que es lo que preserva el espíritu de DT-4/CD-8 (una
+ * sola expresión del predicado, una sola expresión del score).
+ */
+export interface AgentStandingCounters {
+  /** Liquidadas pagas, YA capeadas por caller (K) — misma cuenta que el score. */
+  tasksSettled: number;
+  successCount: number;
+  failedCount: number;
+  /** El score real. `null` ⟺ `tasksSettled === 0`. NUNCA se fabrica (CD-6/AC-7). */
+  reputation: AgentReputation | null;
+}
+
+/**
+ * WKH-313 — clasificación DERIVADA (función pura, `lib/trial-standing.ts`). NO
+ * es campo público de `Agent` (DT-6/CD-10): publicar `penalized` sería una letra
+ * escarlata sin contrato.
+ */
+export type AgentStandingKind = 'scored' | 'newcomer' | 'penalized';
+
+/**
+ * WKH-313 — resultado del batch de standing. `degraded` es un TERCER valor
+ * EXPLÍCITO: NO es un Map vacío (CD-7). Con `degraded: true` no se admite a
+ * NADIE por el carril de estreno, porque "no pude preguntar por el historial" no
+ * es "no tiene historial".
+ */
+export interface AgentStandingBatch {
+  degraded: boolean;
+  standings: Map<string, AgentStandingCounters>;
+}
+
+/**
+ * WKH-313 (AC-2/DT-3) — el agente entró bajo el piso por el carril de estreno.
+ * El campo SÓLO existe cuando la admisión ocurrió: un piso relajado en silencio
+ * es la clase de bug que este repo rechaza por escrito dos veces
+ * (`discovery.ts` filtro de `minReputation`, `lib/compose-step-shape.ts`
+ * allowlist de constraints). NO lleva `owner_ref` ni la clasificación de
+ * standing (CD-10).
+ */
+export interface AgentTrialAdmission {
+  granted: true;
+  /** El piso que el caller pidió y que este agente NO alcanza por mérito. */
+  under_min_reputation: number;
+  /** Liquidadas pagas acumuladas (`0..N-1`). Es el contador que agota el carril. */
+  tasks_settled: number;
+  /** Las que le quedan de estreno: `N - tasks_settled`. */
+  remaining_settled_tasks: number;
 }
 
 /**
@@ -352,6 +416,22 @@ export interface DiscoveryQuery {
   query?: string | undefined;
   maxPrice?: number | undefined;
   minReputation?: number | undefined;
+  /**
+   * WKH-313 (AC-8) — OPT-IN del consumidor al carril de estreno. `true` admite,
+   * bajo `minReputation`, a agentes sin historial (`newcomer`) que además pasen
+   * el techo `T` y el cupo `M` por publicador (`lib/trial-standing.ts`).
+   *
+   * DEFAULT = NO ADMITIR. Ausente/`false` ⟹ el comportamiento de hoy byte por
+   * byte, incluido el costo de I/O (CD-9: cero queries nuevas). El que puso el
+   * piso es el que come el riesgo, así que es el que decide relajarlo: que el
+   * gateway ignore por su cuenta un piso que el caller pidió es el MISMO defecto
+   * que este repo ya rechaza por escrito, con el signo invertido y sobre el
+   * camino del dinero.
+   *
+   * El agente admitido NO recibe score fabricado: conserva su puntaje real (0)
+   * y por lo tanto ordena ÚLTIMO (CD-6).
+   */
+  allowTrial?: boolean | undefined;
   limit?: number | undefined;
   registry?: string | undefined; // Filter to specific registry
   verified?: boolean | undefined;
@@ -384,7 +464,30 @@ export interface DiscoveryResult {
    * pero tu credencial no lo alcanza" son el mismo mensaje, y mandan a buscar el
    * problema al lugar equivocado.
    */
-  excluded?: { scope: number };
+  excluded?: {
+    scope: number;
+    /**
+     * WKH-313 (AC-3): cuántos candidatos descartó el piso de `minReputation`,
+     * contados PRE-sort y PRE-`slice` (o sea sobre los matches reales, no sobre
+     * la página). Un agente admitido por el carril de estreno NO se cuenta acá:
+     * pasó el filtro.
+     */
+    reputation: number;
+    /**
+     * WKH-313 (AC-3): cuántos candidatos se habrían admitido por el carril de
+     * estreno.
+     *
+     * ⚠️ SEMÁNTICA QUE CAMBIA CON EL OPT-IN, y hay que decirlo:
+     *   · con `allowTrial: true` es EXACTO y coincide con la cantidad de badges
+     *     `trial` en `agents` (T-17);
+     *   · sin `allowTrial` es una COTA SUPERIOR (pre-cupo): CD-9 prohíbe la
+     *     query del ancla de publicación en el camino por defecto, y sin anclas
+     *     el cupo `M` por publicador no se puede aplicar.
+     * Un contador que a veces es exacto y a veces una cota, sin decirlo, es la
+     * clase de dato que se lee mal.
+     */
+    trialAvailable: number;
+  };
 }
 
 // ============================================================
@@ -435,6 +538,15 @@ export interface ComposeStepConstraints {
    * usa el `reputation` auto-reportado por el registry (ver discovery.ts).
    */
   min_reputation?: number;
+  /**
+   * WKH-313 (DT-7) — opt-in al CARRIL DE ESTRENO para este step. `snake_case`
+   * como sus dos hermanas. Mapea a `DiscoveryQuery.allowTrial`.
+   *
+   * Ausente/`false` = comportamiento de hoy. `true` admite bajo `min_reputation`
+   * a un agente sin historial, que igual ordena ÚLTIMO porque su score real
+   * sigue siendo 0 (CD-6). No-booleano ⟹ 400 `VALIDATION_ERROR`.
+   */
+  allow_trial?: boolean;
 }
 
 export interface ComposeStep {

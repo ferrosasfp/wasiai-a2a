@@ -365,6 +365,13 @@ export const discoveryService = {
     // `maxPrice` y `minReputation` sí son legítimos: son restricciones del que
     // pide, no una forma de elegir un agente concreto por la puerta de atrás.
     let excludedByScope = 0;
+    // WKH-313 (AC-3): cuántos descartó el PISO de reputación, y cuántos se
+    // habrían admitido por el carril de estreno. Se cuentan acá arriba, en el
+    // bloque PRE-SORT/PRE-`slice`, porque contarlos después del recorte mediría la
+    // página y no los matches — y era justamente la ausencia de este número la
+    // que convirtió un diagnóstico de Chaski en tres semanas de confusión.
+    let excludedByReputation = 0;
+    const trialAvailable = 0;
 
     if (query.scope) {
       // HU-208 (port de WAS-187 AC-7): un agente que la credencial del llamador
@@ -421,10 +428,12 @@ export const discoveryService = {
     // agente sin historial no se cuela por un filtro de calidad.
     if (query.minReputation != null) {
       const min = query.minReputation;
+      const beforeReputation = allAgents.length;
       allAgents = allAgents.filter((a) => {
         const score = a.computedReputation?.score;
         return (Number.isFinite(score) ? (score as number) : 0) >= min;
       });
+      excludedByReputation = beforeReputation - allAgents.length;
     }
 
     // Sort: verified-first (AC-7), then reputation (desc), then price (asc).
@@ -498,7 +507,11 @@ export const discoveryService = {
       // operador buscaría el problema en el catálogo cuando en realidad hay un
       // agente que su credencial no alcanza. Es la contrapartida de filtrar:
       // nada se elige a escondidas y nada se descarta a escondidas.
-      excluded: { scope: excludedByScope },
+      excluded: {
+        scope: excludedByScope,
+        reputation: excludedByReputation,
+        trialAvailable,
+      },
     };
   },
 
