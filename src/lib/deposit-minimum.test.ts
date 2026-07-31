@@ -259,15 +259,14 @@ describe('deposit-minimum', () => {
       '1.',
     ];
 
-    it.each(UNPARSEABLE)(
-      'monto ilegible %j => DEPOSIT_AMOUNT_INVALID (nunca acredita, y no miente diciendo que es chico)',
-      (amount) => {
-        process.env[ENV] = '1';
-        expect(checkDepositMinimum(amount)).toEqual({
-          ok: false,
-          reason: 'DEPOSIT_AMOUNT_INVALID',
-        });
-      },
-    );
+    it.each(
+      UNPARSEABLE,
+    )('monto ilegible %j => DEPOSIT_AMOUNT_INVALID (nunca acredita, y no miente diciendo que es chico)', (amount) => {
+      process.env[ENV] = '1';
+      expect(checkDepositMinimum(amount)).toEqual({
+        ok: false,
+        reason: 'DEPOSIT_AMOUNT_INVALID',
+      });
+    });
   });
 });

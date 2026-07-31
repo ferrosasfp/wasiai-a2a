@@ -1557,24 +1557,21 @@ describe('budgetService', () => {
       ['cientifica', '1e6'],
       ['cero', '0'],
       ['sub-grilla', '1.0000001'],
-    ])(
-      'env %s (%j): fail-closed, ni siquiera un deposito grande acredita',
-      async (_label, raw) => {
-        process.env.A2A_DEPOSIT_MIN_USDC = raw;
+    ])('env %s (%j): fail-closed, ni siquiera un deposito grande acredita', async (_label, raw) => {
+      process.env.A2A_DEPOSIT_MIN_USDC = raw;
 
-        await expect(
-          budgetService.registerDeposit(
-            'key-1',
-            EVM_CHAIN,
-            '1000',
-            'user-1',
-            EVM_TX,
-            'USDC',
-          ),
-        ).rejects.toBeInstanceOf(DepositMinimumNotConfiguredError);
-        expect(mockRpc).not.toHaveBeenCalled();
-      },
-    );
+      await expect(
+        budgetService.registerDeposit(
+          'key-1',
+          EVM_CHAIN,
+          '1000',
+          'user-1',
+          EVM_TX,
+          'USDC',
+        ),
+      ).rejects.toBeInstanceOf(DepositMinimumNotConfiguredError);
+      expect(mockRpc).not.toHaveBeenCalled();
+    });
 
     it('un monto verificado ilegible NO acredita, y se distingue del "es chico"', async () => {
       process.env.A2A_DEPOSIT_MIN_USDC = '1';
@@ -1674,14 +1671,7 @@ describe('budgetService', () => {
       process.env.A2A_DEPOSIT_MIN_USDC = '2.5';
 
       const err = (await budgetService
-        .registerDeposit(
-          'key-1',
-          EVM_CHAIN,
-          '0.75',
-          'user-1',
-          EVM_TX,
-          'USDC',
-        )
+        .registerDeposit('key-1', EVM_CHAIN, '0.75', 'user-1', EVM_TX, 'USDC')
         .catch((e: unknown) => e)) as DepositBelowMinimumError;
 
       expect(err).toBeInstanceOf(DepositBelowMinimumError);
