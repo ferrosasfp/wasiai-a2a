@@ -28,6 +28,7 @@ import {
   _resetStrandedAlert,
   describeStrandedThresholdStartup,
   getStrandedHealthField,
+  getStrandedThresholdState,
   getStrandedThresholdUsd,
   refreshStrandedExposure,
   STRANDED_HEALTH_FIELD,
@@ -83,8 +84,19 @@ describe('HU-306 · el indicador de exposición acumulada (AC-5)', () => {
       await flush();
       await refreshStrandedExposure();
 
-      expect(field).toEqual({});
+      // La POLÍTICA que este test defiende: la alerta no se enciende ⟹ ni una query.
       expect(mockCount).not.toHaveBeenCalled();
+      // Lo que el campo DICE es otra cosa, y desde el fix-pack 2026-07-31 depende de si
+      // la env está puesta: `'   '` es "no hay nada escrito" (campo omitido), pero un
+      // `0`/`abc` es una env PUESTA que no hace nada, y eso `/health` lo delata con
+      // `'unknown'` en vez de desaparecer. Ver el describe del fix-pack más abajo.
+      expect(field).toEqual(
+        raw.trim() === '' ? {} : { [STRANDED_HEALTH_FIELD]: 'unknown' },
+      );
+      // En ningún caso `false`: eso afirmaría que se computó y no hay breach.
+      expect(
+        (field as Record<string, unknown>)[STRANDED_HEALTH_FIELD],
+      ).not.toBe(false);
     }
   });
 
@@ -381,12 +393,17 @@ describe('fix-pack 2026-07-31 · el arranque dice en qué estado quedó el umbra
     await refreshStrandedExposure();
 
     expect(report.state).toBe('unreadable');
-    // El síntoma que el aviso viene a delatar: silencio total, idéntico al de "no hay
-    // nada que alertar". El aviso de arranque es la ÚNICA señal que queda.
+    // El síntoma que el aviso viene a delatar: la alerta no suena aunque haya 999.999
+    // varados, y no se hace ni una query, exactamente como si la env no existiera.
     expect(getStrandedThresholdUsd()).toBeNull();
     expect(mockCount).not.toHaveBeenCalled();
     expect(alertaDelLog()).toBeUndefined();
-    expect(getStrandedHealthField()).toEqual({});
+    // Lo que NO es silencio total desde el fix-pack de `/health`: el campo aparece
+    // diciendo `'unknown'`. El aviso de arranque ya no es la única señal — antes lo era,
+    // y salía UNA vez en el log del deploy, que es donde nadie mira.
+    expect(getStrandedHealthField()).toEqual({
+      [STRANDED_HEALTH_FIELD]: 'unknown',
+    });
   });
 
   it('PUESTA Y LEGIBLE: con el 19 que hay en producción, el arranque imprime 19', () => {
@@ -468,5 +485,239 @@ describe('fix-pack 2026-07-31 · el arranque dice en qué estado quedó el umbra
     }
     await flush();
     expect(mockCount).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Fix-pack observabilidad 2026-07-31 (segunda parte) — `/health` TAMBIÉN distingue los
+ * tres estados del umbral.
+ *
+ * QUÉ SE ARREGLA. El aviso de arranque ya distinguía ausente / legible / ilegible, pero
+ * `/health` seguía con DOS estados: preguntaba `getStrandedThresholdUsd() === null` y con
+ * eso omitía el campo tanto para la env ausente como para la env PUESTA e ILEGIBLE. O sea
+ * que un `19` escrito `1O` hacía DESAPARECER el campo del único canal push que existe, y
+ * un campo ausente se lee como "no hay problema". El síntoma de un umbral mal escrito era
+ * una alerta que nunca suena Y un `/health` que no delata nada — indistinguible de que no
+ * haya nada que alertar. El aviso de arranque sale UNA vez, en el log del deploy; el
+ * monitor, que es lo que corre siempre, no lo mira.
+ *
+ * QUÉ SE AFIRMA ACÁ:
+ *   ausente    ⟹ el campo se OMITE. Es una decisión, no un descuido: ver el docstring de
+ *               `getStrandedHealthField`.
+ *   ilegible   ⟹ el campo APARECE y dice `'unknown'` (truthy ⟹ el monitor alerta).
+ *   legible    ⟹ exactamente lo de antes.
+ * …y que la POLÍTICA no se movió: con la env ausente o ilegible sigue sin salir NI UNA
+ * query (se cuenta, no se supone) y NI UN log de alerta.
+ */
+describe('fix-pack 2026-07-31 · /health distingue "apagada" de "mal escrita"', () => {
+  /** Envs PUESTAS que no producen un umbral usable. `1O` es el typo que motiva todo esto. */
+  const ILEGIBLES = [
+    '1O',
+    'abc',
+    'NaN',
+    '0',
+    '-1',
+    '-0.5',
+    '1,5',
+    '19 USD',
+    'Infinity',
+  ];
+  /** Envs que cuentan como AUSENTES: no hay nada escrito ahí. */
+  const AUSENTES = ['', '   '];
+
+  const alertaDelLog = () =>
+    logSpy.error.mock.calls.find(
+      (c) =>
+        (c[0] as Record<string, unknown>)?.alert ===
+        'COMPOSE_STRANDED_PAYMENT_EXPOSURE_HIGH',
+    );
+
+  it.each(
+    ILEGIBLES,
+  )('ILEGIBLE (%s): el campo APARECE diciendo "unknown" — no se puede desaparecer del canal push', (raw) => {
+    process.env[THRESHOLD_ENV] = raw;
+
+    const field = getStrandedHealthField();
+
+    // Lo que estaba mal: el campo se OMITÍA, y un campo ausente se lee como "no hay
+    // problema". Un monitor no puede alertar sobre algo que no está en el JSON.
+    expect(STRANDED_HEALTH_FIELD in field).toBe(true);
+    expect(field).toEqual({ [STRANDED_HEALTH_FIELD]: 'unknown' });
+    // Y es truthy, que es la propiedad que hace que el `degradedPath` del monitor
+    // dispare sin una línea nueva de código en el monitor.
+    expect(
+      Boolean((field as Record<string, unknown>)[STRANDED_HEALTH_FIELD]),
+    ).toBe(true);
+    // Nunca `false`: eso afirmaría "se computó y no hay breach" cuando no se computó
+    // nada, en el único canal que existe para gritarlo.
+    expect((field as Record<string, unknown>)[STRANDED_HEALTH_FIELD]).not.toBe(
+      false,
+    );
+  });
+
+  it.each(
+    ILEGIBLES,
+  )('ILEGIBLE (%s): la POLÍTICA no se movió — cero queries y cero log de alerta', async (raw) => {
+    process.env[THRESHOLD_ENV] = raw;
+    // Exposición que sería breach segurísimo si el umbral se pudiera leer.
+    mockCount.mockResolvedValue({
+      runs: 900,
+      exposureUsd: 999_999,
+      truncated: true,
+    });
+
+    // 50 hits, como los que pega el monitor + los health checks del hosting.
+    for (let i = 0; i < 50; i++) getStrandedHealthField();
+    await flush();
+    await refreshStrandedExposure();
+    await flush();
+
+    // La feature sigue APAGADA: el campo dice que no se sabe, no que se fue a mirar.
+    expect(mockCount).not.toHaveBeenCalled();
+    expect(alertaDelLog()).toBeUndefined();
+    // Ni un log, de ningún nivel: el campo de `/health` es la señal, no el log. 50 hits
+    // escupiendo una línea cada uno serían un canal que se aprende a ignorar.
+    expect(logSpy.error).not.toHaveBeenCalled();
+    expect(logSpy.warn).not.toHaveBeenCalled();
+    expect(logSpy.info).not.toHaveBeenCalled();
+    expect(getStrandedThresholdUsd()).toBeNull();
+    // …y el campo sigue diciendo lo mismo después de los 50 hits.
+    expect(getStrandedHealthField()).toEqual({
+      [STRANDED_HEALTH_FIELD]: 'unknown',
+    });
+  });
+
+  it.each(
+    AUSENTES,
+  )('AUSENTE ("%s"): el campo se OMITE — apagar la alerta a propósito no es una anomalía', async (raw) => {
+    process.env[THRESHOLD_ENV] = raw;
+
+    const field = getStrandedHealthField();
+    await flush();
+    await refreshStrandedExposure();
+
+    // Omitir es la respuesta correcta acá: no hay nada que el operador no sepa, y un
+    // `'unknown'` truthy pondría en `degraded` a TODOS los deploys que jamás encendieron
+    // la feature — un canal que grita siempre es un canal que se aprende a ignorar.
+    expect(field).toEqual({});
+    expect(STRANDED_HEALTH_FIELD in field).toBe(false);
+    expect(mockCount).not.toHaveBeenCalled();
+    expect(alertaDelLog()).toBeUndefined();
+  });
+
+  it('AUSENTE (env borrada): el campo se OMITE y /health queda byte-idéntico (AC-10)', async () => {
+    delete process.env[THRESHOLD_ENV];
+
+    const field = getStrandedHealthField();
+    await flush();
+
+    expect(field).toEqual({});
+    expect(mockCount).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { exposureUsd: 0, computado: false },
+    { exposureUsd: 999, computado: true },
+  ])('ILEGIBLE: no se reusa el snapshot ($computado) computado cuando el umbral SÍ se leía', async ({
+    exposureUsd,
+    computado,
+  }) => {
+    // Con la env legible se computa un veredicto real y FRESCO (no rancio)…
+    process.env[THRESHOLD_ENV] = '10';
+    mockCount.mockResolvedValue({ runs: 3, exposureUsd, truncated: false });
+    await refreshStrandedExposure();
+    expect(getStrandedHealthField()).toEqual({
+      [STRANDED_HEALTH_FIELD]: computado,
+    });
+
+    // …y alguien edita la env y la rompe. Ese veredicto se computó contra un umbral que
+    // ya no se puede leer: repetirlo es afirmar algo (haya o no haya breach) apoyado en
+    // un número que nadie sabe cuál es. Mismo criterio que el snapshot rancio.
+    process.env[THRESHOLD_ENV] = '1O';
+    expect(getStrandedHealthField()).toEqual({
+      [STRANDED_HEALTH_FIELD]: 'unknown',
+    });
+  });
+
+  it('PUESTA Y LEGIBLE: nada cambia — el campo sigue computándose contra la base', async () => {
+    process.env[THRESHOLD_ENV] = '10';
+    mockCount.mockResolvedValue({
+      runs: 40,
+      exposureUsd: 12.5,
+      truncated: false,
+    });
+
+    await refreshStrandedExposure();
+
+    expect(getStrandedHealthField()).toEqual({
+      [STRANDED_HEALTH_FIELD]: true,
+    });
+    expect(mockCount).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * EL CANDADO DE LA FUENTE ÚNICA. Lo que hace que esto funcione no es que haya tres
+   * ramas en `/health`: es que las tres salen de la MISMA lectura de la env que usan el
+   * aviso de arranque y el camino de alerta. Si alguien agrega un segundo parseo, los dos
+   * lados se van a desincronizar en algún borde, y este test es el que se pone rojo.
+   */
+  it.each([
+    { raw: undefined, state: 'unset', enHealth: 'omitido' },
+    { raw: '', state: 'unset', enHealth: 'omitido' },
+    { raw: '   ', state: 'unset', enHealth: 'omitido' },
+    { raw: '1O', state: 'unreadable', enHealth: 'unknown' },
+    { raw: '0', state: 'unreadable', enHealth: 'unknown' },
+    { raw: '-1', state: 'unreadable', enHealth: 'unknown' },
+    { raw: 'Infinity', state: 'unreadable', enHealth: 'unknown' },
+    { raw: '19', state: 'active', enHealth: 'presente' },
+    { raw: '  19  ', state: 'active', enHealth: 'presente' },
+    { raw: '0.75', state: 'active', enHealth: 'presente' },
+  ] as const)('ATADO ($raw): el arranque dice $state y /health lo refleja ($enHealth)', ({
+    raw,
+    state,
+    enHealth,
+  }) => {
+    if (raw === undefined) delete process.env[THRESHOLD_ENV];
+    else process.env[THRESHOLD_ENV] = raw;
+
+    // Los tres consumidores de la clasificación, con el MISMO input.
+    expect(getStrandedThresholdState()).toBe(state);
+    expect(describeStrandedThresholdStartup().state).toBe(state);
+
+    const field = getStrandedHealthField();
+    const presente = STRANDED_HEALTH_FIELD in field;
+    const valor = (field as Record<string, unknown>)[STRANDED_HEALTH_FIELD];
+
+    if (enHealth === 'omitido') {
+      expect(presente).toBe(false);
+    } else if (enHealth === 'unknown') {
+      expect(presente).toBe(true);
+      expect(valor).toBe('unknown');
+    } else {
+      expect(presente).toBe(true);
+      // Legible y sin snapshot todavía: 'unknown' honesto, pero por NO HABERLO MIRADO,
+      // no por no poder leer la config. Lo que se afirma acá es que el campo existe.
+      expect(valor).not.toBeUndefined();
+    }
+
+    // El umbral usable existe si y sólo si el estado es `active`. Una fuente, no dos.
+    expect(getStrandedThresholdUsd() === null).toBe(state !== 'active');
+  });
+
+  it('los tres estados de /health son distinguibles entre sí', () => {
+    delete process.env[THRESHOLD_ENV];
+    const ausente = getStrandedHealthField();
+    process.env[THRESHOLD_ENV] = '1O';
+    const ilegible = getStrandedHealthField();
+    process.env[THRESHOLD_ENV] = '19';
+    mockCount.mockResolvedValue({ runs: 0, exposureUsd: 0, truncated: false });
+    const legible = getStrandedHealthField();
+
+    // El caso que este fix arregla: "apagada a propósito" y "mal escrita" ya no se
+    // escriben igual en el JSON. Antes las dos eran `{}`.
+    expect(ausente).not.toEqual(ilegible);
+    expect(ausente).toEqual({});
+    expect(ilegible).toEqual({ [STRANDED_HEALTH_FIELD]: 'unknown' });
+    expect(STRANDED_HEALTH_FIELD in legible).toBe(true);
   });
 });

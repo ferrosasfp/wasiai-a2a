@@ -210,8 +210,11 @@ fastify.get(
       version: '0.1.0',
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
-      // HU-306 (AC-5): campo ADITIVO de tres estados. Con el umbral sin configurar
-      // devuelve `{}` ⟹ la respuesta es byte-idéntica a la de antes. Síncrono, sin
+      // HU-306 (AC-5): campo ADITIVO de tres estados. Con el umbral SIN SETEAR devuelve
+      // `{}` ⟹ la respuesta es byte-idéntica a la de antes; con el umbral puesto e
+      // ILEGIBLE el campo aparece diciendo `'unknown'` (fix-pack 2026-07-31: un typo en
+      // la env no puede hacer desaparecer del canal push al indicador de que la alerta
+      // está rota, porque un campo ausente se lee como "no hay problema"). Síncrono, sin
       // `await` a la base y sin poder tirar (CD-10). ⚠️ La MISMA línea está en
       // `src/__tests__/e2e/setup.ts`, que duplica este handler porque este módulo hace
       // `await initAdapters()` a nivel de módulo y no se puede importar desde un test.

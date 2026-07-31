@@ -352,6 +352,29 @@ describe('E2E', () => {
         delete process.env.STRANDED_EXPOSURE_ALERT_THRESHOLD_USD;
       }
     });
+
+    // Fix-pack observabilidad 2026-07-31: "apagada a propósito" y "mal escrita" son cosas
+    // distintas y no se pueden escribir igual en el JSON. Antes las dos omitían el campo,
+    // así que un typo en el umbral hacía DESAPARECER del canal push justamente al
+    // indicador de que la alerta está rota, y un campo ausente se lee como "no hay
+    // problema". Se prueba contra el handler real de /health, no contra el helper.
+    it('T-HEALTH-SHAPE: con el umbral PUESTO pero ILEGIBLE el campo APARECE diciendo "unknown"', async () => {
+      // `1O` con letra O: no da error, da una alerta que nunca suena.
+      process.env.STRANDED_EXPOSURE_ALERT_THRESHOLD_USD = '1O';
+      try {
+        const res = await app.inject({ method: 'GET', url: '/health' });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body).toHaveProperty('status', 'ok');
+        // No desaparece: el monitor tiene que poder alertar sobre esto.
+        expect(body).toHaveProperty('strandedExposureBreached');
+        expect(body.strandedExposureBreached).toBe('unknown');
+        // Truthy ⟹ el `degradedPath` del health-monitor dispara sin tocar el monitor.
+        expect(Boolean(body.strandedExposureBreached)).toBe(true);
+      } finally {
+        delete process.env.STRANDED_EXPOSURE_ALERT_THRESHOLD_USD;
+      }
+    });
   });
 
   // ── Bearer auth on /auth/me (WKH-BEARER-FIX AC-8) ────────

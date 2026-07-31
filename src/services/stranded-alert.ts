@@ -15,7 +15,9 @@
  *   false       SE COMPUTÓ y no hay breach.
  *   true        breach: la exposición acumulada en la ventana superó el umbral.
  *   'unknown'   NO SE PUEDE AFIRMAR que no haya breach: nunca se computó, la última
- *               computación falló, o el dato está rancio.
+ *               computación falló, el dato está rancio, o la env del umbral está PUESTA
+ *               y es ILEGIBLE (fix-pack 2026-07-31 — ver `getStrandedHealthField`: "sin
+ *               configurar" y "mal escrita" no son lo mismo y no se escriben igual).
  *
  * POR QUÉ `'unknown'` Y NO `false`. Es la misma doctrina que AC-4 aplicada al tercer
  * pilar: una lista vacía por caída de la base se lee igual que "no hay nada retenido",
@@ -85,6 +87,41 @@ export function getStrandedThresholdUsd(): number | null {
 }
 
 /**
+ * En cuál de los TRES estados quedó la config del umbral. **Es la única clasificación que
+ * existe**: el aviso de arranque y el campo de `/health` la consumen los dos, y ninguno
+ * vuelve a interpretar la env por su cuenta.
+ *
+ * POR QUÉ IMPORTA QUE SEA UNA SOLA. `getStrandedThresholdUsd()` devuelve `null` para dos
+ * situaciones que NO son la misma: "no hay nada configurado" y "hay algo configurado que
+ * no se puede leer". Cada consumidor que quiera distinguirlas necesita el chequeo de
+ * PRESENCIA (`raw.trim() !== ''`), y ese chequeo escrito dos veces se desincroniza en
+ * algún borde (¿un `'   '` cuenta como presente?) — con el resultado de que el arranque
+ * diría una cosa y `/health` otra sobre la misma env. Acá está escrito UNA vez; el
+ * veredicto de legibilidad no se re-parsea, sale de `getStrandedThresholdUsd()`.
+ *
+ * Es puro y barato (una lectura de env + un `Number`): se puede llamar por request.
+ *
+ * ⚠️ POR QUÉ **NO** SE UNIFICA CON `isPipelineCeilingMisconfigured` (`lib/stranded-payment.ts`).
+ * Ese predicado hace la misma pregunta ("¿puesta pero ilegible?") sobre OTRA env, y la
+ * tentación de sacar un helper genérico es real. No se hace, y no es prolijidad mal
+ * entendida: el techo `PIPELINE_EXPOSURE_CEILING_USD` **gobierna el guard de presupuesto
+ * de `/compose`**, o sea tráfico que se acepta o se rechaza. Un helper compartido haría
+ * que cambiarle a ESTA alerta la definición de "legible" (aceptar un `0`, poner una cota
+ * superior, admitir sufijos) le cambie en silencio el criterio al techo que decide si un
+ * pipeline corre. Se estaría acoplando un canal de observabilidad con un control de
+ * dinero para ahorrar cuatro líneas. Cada env es autoritativa sobre su propio parseo y
+ * cada una tiene sus tests; si divergen, no se rompe nada, porque no comparten consumidor.
+ */
+export type StrandedThresholdState = 'unset' | 'active' | 'unreadable';
+
+export function getStrandedThresholdState(): StrandedThresholdState {
+  const raw = process.env[STRANDED_THRESHOLD_ENV];
+  if (raw === undefined || raw.trim() === '') return 'unset';
+  // Presente. Que sirva o no lo decide LA MISMA función que usa el camino de alerta.
+  return getStrandedThresholdUsd() === null ? 'unreadable' : 'active';
+}
+
+/**
  * Lo que el arranque tiene que decir sobre el umbral (fix-pack observabilidad 2026-07-31).
  *
  * QUÉ PROBLEMA RESUELVE. `PIPELINE_EXPOSURE_CEILING_USD` ya se delata al arrancar cuando
@@ -114,7 +151,7 @@ export function getStrandedThresholdUsd(): number | null {
  * apagada y `/health` sigue byte-idéntico (AC-10).
  */
 export interface StrandedThresholdStartupReport {
-  state: 'unset' | 'active' | 'unreadable';
+  state: StrandedThresholdState;
   /** `warn` sólo para el estado que amerita un grito. */
   level: 'info' | 'warn';
   setting: typeof STRANDED_THRESHOLD_ENV;
@@ -128,8 +165,14 @@ export function describeStrandedThresholdStartup(): StrandedThresholdStartupRepo
   const raw = process.env[STRANDED_THRESHOLD_ENV];
   // La MISMA lectura que usa el camino de alerta. Nunca un re-parseo paralelo.
   const thresholdUsd = getStrandedThresholdUsd();
+  // …y la MISMA clasificación que usa `/health`: este aviso no decide por su cuenta qué
+  // cuenta como "ausente", porque entonces el arranque y `/health` podrían discrepar.
+  const state = getStrandedThresholdState();
 
-  if (raw === undefined || raw.trim() === '') {
+  // El `raw === undefined` de la derecha NO es una segunda regla: una env sin definir es
+  // `unset` por construcción de `getStrandedThresholdState`. Está para que el compilador
+  // sepa que más abajo, en el caso ilegible, hay un string crudo que mostrar.
+  if (state === 'unset' || raw === undefined) {
     return {
       state: 'unset',
       level: 'info',
@@ -142,7 +185,10 @@ export function describeStrandedThresholdStartup(): StrandedThresholdStartupRepo
     };
   }
 
-  if (thresholdUsd === null) {
+  // El `thresholdUsd === null` de la derecha NO es una segunda regla: por construcción de
+  // `getStrandedThresholdState` una env presente es `unreadable` exactamente cuando esa
+  // función devuelve `null`. Está para que el compilador sepa que abajo hay un número.
+  if (state === 'unreadable' || thresholdUsd === null) {
     return {
       state: 'unreadable',
       level: 'warn',
@@ -150,8 +196,9 @@ export function describeStrandedThresholdStartup(): StrandedThresholdStartupRepo
       value: raw,
       message:
         `⚠️  ${STRANDED_THRESHOLD_ENV} esta PUESTA pero es ILEGIBLE (valor: "${raw}"): ` +
-        'la alerta de exposicion varada esta APAGADA, exactamente como si la variable no existiera. ' +
-        'El sintoma de esto es una alerta que NUNCA suena, y eso se ve igual que "no hay nada que alertar". ' +
+        'la alerta de exposicion varada NO SUENA y no se hace ni una query, igual que si la variable no existiera. ' +
+        'El sintoma de esto es una alerta que NUNCA suena, y eso se ve igual que "no hay nada que alertar": ' +
+        `por eso /health publica \`${STRANDED_HEALTH_FIELD}: "unknown"\` mientras el valor no se pueda leer. ` +
         'Corregi el valor (USD, positivo, punto decimal: 19 o 19.5). Ver .env.example.',
     };
   }
@@ -222,9 +269,32 @@ export async function refreshStrandedExposure(): Promise<void> {
 /**
  * El campo aditivo de `/health`. SÍNCRONO, no tira, y no espera a la base (CD-10).
  *
- * Devuelve `{}` cuando el umbral no está configurado: el `/health` de un deploy que no
- * activó la alerta es byte-idéntico al de antes de esta HU (AC-10), y no dispara NI UNA
- * query (CD-19 — el test lo cuenta, no lo supone).
+ * ─── LA CONFIG DEL UMBRAL TAMBIÉN TIENE TRES ESTADOS ACÁ (fix-pack 2026-07-31) ──────
+ *
+ *   ausente     el campo se OMITE.
+ *   ilegible    el campo APARECE diciendo `'unknown'`.
+ *   legible     el campo APARECE con el veredicto computado (`true`/`false`/`'unknown'`).
+ *
+ * QUÉ ESTABA MAL. Esto preguntaba `getStrandedThresholdUsd() === null`, que colapsa las
+ * dos primeras filas, así que un `19` escrito `1O` hacía DESAPARECER el campo. Un campo
+ * ausente se lee como "no hay problema": el síntoma de un umbral mal escrito era una
+ * alerta que nunca suena Y un `/health` mudo, o sea algo indistinguible de que no haya
+ * nada que alertar. El aviso de arranque lo delata, pero sale UNA vez en el log del
+ * deploy; el monitor, que es lo que corre siempre, no lo mira. `'unknown'` es truthy ⟹ el
+ * `degradedPath` alerta, y ese es el punto: **se puede alertar sobre una alerta rota**.
+ *
+ * POR QUÉ EL CASO AUSENTE SÍ SE SIGUE OMITIENDO (y no es la misma omisión). No hay
+ * ambigüedad que reportar: nadie encendió la feature, y eso es una decisión del operador,
+ * no un dato que no se pudo conseguir. Reportar `'unknown'` ahí pondría en `degraded` a
+ * TODOS los deploys que a propósito no usan la alerta — un canal que grita siempre es un
+ * canal que se aprende a ignorar, que es exactamente el daño que este fix-pack combate.
+ * Además sostiene AC-10 (`/health` byte-idéntico al de antes de la HU-306 sin la env) y
+ * la propiedad de costo CERO (CD-19: ni una query, y el test las cuenta). La diferencia
+ * con el caso ilegible es que ahí SÍ hay algo que el operador cree tener y no tiene.
+ *
+ * NINGUNO DE LOS DOS CASOS TOCA LA BASE: los dos salen antes del refresh de fondo, así
+ * que el costo es cero por construcción y no por que `refreshStrandedExposure` casualmente
+ * también chequee el umbral.
  *
  * CD-11: acá va SÓLO el booleano de tres estados. Nada de conteos, montos, ids ni slugs
  * — `/health` es público y la exposición acumulada del operador no lo es.
@@ -234,7 +304,14 @@ export function getStrandedHealthField():
   | {
       [STRANDED_HEALTH_FIELD]: StrandedHealthValue;
     } {
-  if (getStrandedThresholdUsd() === null) return {};
+  // La MISMA clasificación que usa el aviso de arranque. No se re-lee la env acá.
+  const state = getStrandedThresholdState();
+  if (state === 'unset') return {};
+  if (state === 'unreadable') {
+    // Sin snapshot, sin refresh y sin query: no hay umbral contra el cual comparar. Un
+    // snapshot viejo tampoco sirve — se computó contra un número que ya no se puede leer.
+    return { [STRANDED_HEALTH_FIELD]: 'unknown' };
+  }
   const now = Date.now();
   const age = snapshot ? now - snapshot.computedAt : Number.POSITIVE_INFINITY;
   // Refresh en segundo plano, acotado por REFRESH_MS y por el vuelo en curso. El
