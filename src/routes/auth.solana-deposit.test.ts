@@ -873,7 +873,7 @@ describe('WKH-315 · rutas del depósito Solana', () => {
       expect(res.json().networks).toEqual([]);
     });
 
-    it('T-315-12b: con el flag ON y owner configurado, lista los 7 campos y deposit_account ≠ deposit_account_owner', async () => {
+    it('T-315-12b: con el flag ON y owner configurado, lista los campos del contrato y deposit_account ≠ deposit_account_owner', async () => {
       mockGetInitializedChainKeys.mockReturnValue(['solana-devnet']);
       mockGetAdaptersBundle.mockReturnValue(solanaBundle());
 
@@ -882,11 +882,16 @@ describe('WKH-315 · rutas del depósito Solana', () => {
 
       expect(nets).toHaveLength(1);
       const n = nets[0] as Record<string, unknown>;
+      // Fix-pack AR 2026-07-31: `deposit_minimum_usdc` + `deposits_enabled` entran
+      // al contrato. La entrada Solana es la que está POR ABRIRSE, o sea la que no
+      // tiene clientes que ya sepan el mínimo de memoria: acá el hueco dolía más.
       expect(Object.keys(n).sort()).toEqual([
         'chain_id',
         'cluster',
         'deposit_account',
         'deposit_account_owner',
+        'deposit_minimum_usdc',
+        'deposits_enabled',
         'family',
         'required_commitment',
         'slug',
@@ -1004,7 +1009,10 @@ describe('WKH-315 · rutas del depósito Solana', () => {
     });
 
     it('AC-10: la entrada EVM de deposit-info queda con su forma de siempre', async () => {
-      // CD-1: el listado EVM no cambia ni un campo.
+      // CD-1: el listado EVM no cambia ni un campo POR CULPA DE SOLANA. Los dos
+      // campos del fix-pack (`deposit_minimum_usdc` / `deposits_enabled`) sí están,
+      // y están en las DOS familias a propósito: el mínimo es del camino, no de una
+      // cadena, así que una entrada que no lo trajera diría una mentira por omisión.
       mockGetInitializedChainKeys.mockReturnValue(['avalanche-fuji']);
       mockGetAdaptersBundle.mockReturnValue(evmBundle());
 
@@ -1016,6 +1024,8 @@ describe('WKH-315 · rutas del depósito Solana', () => {
 
       expect(Object.keys(n).sort()).toEqual([
         'chain_id',
+        'deposit_minimum_usdc',
+        'deposits_enabled',
         'escrow_contract',
         'escrow_mode',
         'family',

@@ -68,6 +68,13 @@ A2A_BASE=https://wasiai-a2a-production.up.railway.app \
 FUNDER_PK=0xTuPrivateKey NETWORK=avalanche-fuji AMOUNT=1.0 \
 node examples/fund-agent-key.mjs
 ```
+**Mínimo de depósito**: el gateway lo publica en `GET /auth/deposit-info` como
+`deposit_minimum_usdc` (con `deposits_enabled`), es el mismo para todas las redes y se
+aplica **por transacción** (no se agregan depósitos chicos). Un monto por debajo devuelve
+`400 DEPOSIT_BELOW_MINIMUM` cuando la transferencia on-chain ya ocurrió, así que el script
+corta antes de firmar. En modo treasury (custodial) esos fondos quedan en la billetera del
+operador y no hay forma de acreditarlos; en modo escrow siguen siendo tuyos en el contrato.
+
 Redes soportadas en el script: `avalanche-fuji`, `base-sepolia`, `kite-ozone-testnet` (esta última usa `KITE_RPC_URL`). El script llama a `GET /auth/deposit-info` y toma `escrow_contract`/`treasury`, `token` y `decimales` automáticamente; si la red tiene `escrow_mode`, hace `approve` + `deposit` al contrato, si no, el `transfer` legacy al treasury.
 
 ## Variante frontend (humano con MetaMask)

@@ -15,7 +15,12 @@ import {
   initAdapters,
 } from './adapters/registry.js';
 import { warmSolanaSchemaPreflight } from './adapters/solana/schema-preflight.js';
-import { assertRequiredEnv, isProduction, parseTrustProxy } from './lib/env.js';
+import {
+  assertDepositMinimumEnv,
+  assertRequiredEnv,
+  isProduction,
+  parseTrustProxy,
+} from './lib/env.js';
 import { assertGasOverheadConfigured } from './lib/gas-overhead.js';
 import { REDACT_PATHS } from './lib/logger.js';
 import { isPipelineCeilingMisconfigured } from './lib/stranded-payment.js';
@@ -51,6 +56,13 @@ import { getStrandedHealthField } from './services/stranded-alert.js';
 // F-08 (audit 2026-06-29): fail loudly at boot if required secrets are missing
 // in production (before any adapter init or server bind).
 assertRequiredEnv();
+
+// Fix-pack AR 2026-07-31: el mínimo de depósito se EVALÚA al arrancar, no sólo se
+// chequea su presencia. `A2A_DEPOSIT_MIN_USDC='1,5'` está presente y no vacía, así que
+// `assertRequiredEnv()` la daría por buena; el guard, en cambio, no la puede leer y
+// cierra TODOS los depósitos. Mal escrita → no bootea (con el valor en el mensaje);
+// ausente → warning ruidoso más abajo, cuando el logger ya existe.
+const depositMinimumWarning = assertDepositMinimumEnv();
 
 // Initialize chain-adaptive adapters before server starts
 await initAdapters();
@@ -121,6 +133,10 @@ if (strandedCeilingMisconfigured) {
       'variable were unset. Fail-open is deliberate (a ceiling that collapses to 0 would ' +
       'reject ALL traffic), but the value you configured is doing nothing. See .env.example.',
   );
+}
+
+if (depositMinimumWarning !== null) {
+  fastify.log.warn(`⚠️  ${depositMinimumWarning}`);
 }
 
 await fastify.register(cors, corsOptions);
