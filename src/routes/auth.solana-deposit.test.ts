@@ -110,6 +110,9 @@ import { identityService } from '../services/identity.js';
 import { receiptService } from '../services/receipt.js';
 import {
   DepositAlreadyCreditedError,
+  DepositAmountInvalidError,
+  DepositBelowMinimumError,
+  DepositMinimumNotConfiguredError,
   FundingWalletAlreadyBoundError,
   OwnershipMismatchError,
 } from '../services/security/errors.js';
@@ -493,6 +496,75 @@ describe('WKH-315 · rutas del depósito Solana', () => {
       });
       expect(res.statusCode).toBe(403);
       expect(res.json().error_code).toBe('FUNDING_WALLET_NOT_BOUND');
+    });
+  });
+
+  // ── Mínimo de depósito, superficie HTTP de la rama Solana ─────────────────
+  //
+  // El guard vive en `budgetService.registerDeposit`, el único acreditador, así que
+  // NO hay una implementación por cadena. Acá se prueba que su error atraviesa la
+  // rama Solana con código propio, y no colapsado en el 500 `DEPOSIT_FAILED` ni
+  // confundido con `DEPOSIT_ALREADY_CREDITED` (ya usado) ni con
+  // `DEPOSIT_VERIFICATION_UNKNOWN` (no verificable). Los mismos tres casos existen
+  // para EVM en `auth.escrow.test.ts`: si alguien moviera el guard a una sola rama,
+  // uno de los dos archivos se pondría rojo.
+  describe('mínimo de depósito: la rama Solana pasa por el MISMO guard', () => {
+    it('por debajo del mínimo ⇒ 400 DEPOSIT_BELOW_MINIMUM + minimum_usdc', async () => {
+      mockVerifySolana.mockResolvedValue(okVerification('0.000001'));
+      mockRegisterDeposit.mockRejectedValue(new DepositBelowMinimumError('1'));
+
+      const res = await postDeposit({
+        key_id: TEST_KEY_ID,
+        chain_id: SOLANA_CHAIN_ID,
+        tx_hash: SIGNATURE,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({
+        error_code: 'DEPOSIT_BELOW_MINIMUM',
+        minimum_usdc: '1',
+      });
+      // Ni el saldo ni el depositante viajan en la respuesta.
+      const body = JSON.stringify(res.json());
+      expect(body).not.toContain(DEPOSITOR);
+      expect(body).not.toContain('balance');
+      // Y NO es ninguno de los códigos preexistentes.
+      expect(res.json().error_code).not.toBe('DEPOSIT_ALREADY_CREDITED');
+      expect(res.json().error_code).not.toBe('DEPOSIT_VERIFICATION_UNKNOWN');
+      expect(res.json().error_code).not.toBe('DEPOSIT_FAILED');
+    });
+
+    it('mínimo sin configurar ⇒ 503 DEPOSIT_MINIMUM_NOT_CONFIGURED', async () => {
+      mockVerifySolana.mockResolvedValue(okVerification('5'));
+      mockRegisterDeposit.mockRejectedValue(
+        new DepositMinimumNotConfiguredError(),
+      );
+
+      const res = await postDeposit({
+        key_id: TEST_KEY_ID,
+        chain_id: SOLANA_CHAIN_ID,
+        tx_hash: SIGNATURE,
+      });
+
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error_code).toBe('DEPOSIT_MINIMUM_NOT_CONFIGURED');
+      // 503, NO 400: el problema es de config del operador, no del monto.
+      expect(res.json().error_code).not.toBe('DEPOSIT_BELOW_MINIMUM');
+    });
+
+    it('monto verificado ilegible ⇒ 500 DEPOSIT_AMOUNT_INVALID', async () => {
+      mockVerifySolana.mockResolvedValue(okVerification('5'));
+      mockRegisterDeposit.mockRejectedValue(new DepositAmountInvalidError());
+
+      const res = await postDeposit({
+        key_id: TEST_KEY_ID,
+        chain_id: SOLANA_CHAIN_ID,
+        tx_hash: SIGNATURE,
+      });
+
+      expect(res.statusCode).toBe(500);
+      expect(res.json().error_code).toBe('DEPOSIT_AMOUNT_INVALID');
+      expect(res.json().error_code).not.toBe('DEPOSIT_FAILED');
     });
   });
 

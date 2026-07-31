@@ -36,6 +36,12 @@ import { logOwnershipMismatch } from './errors.js';
 const ERROR_CONTRACT: ReadonlyArray<[string, string]> = [
   ['OwnershipMismatchError', 'OWNERSHIP_MISMATCH'],
   ['DepositAlreadyCreditedError', 'DEPOSIT_ALREADY_CREDITED'],
+  // Minimo de deposito. Tres codigos DISTINTOS y ninguno colapsado contra
+  // DEPOSIT_ALREADY_CREDITED: "es chico", "no esta configurado" y "monto ilegible"
+  // se operan distinto y tienen que separarse en telemetria.
+  ['DepositBelowMinimumError', 'DEPOSIT_BELOW_MINIMUM'],
+  ['DepositMinimumNotConfiguredError', 'DEPOSIT_MINIMUM_NOT_CONFIGURED'],
+  ['DepositAmountInvalidError', 'DEPOSIT_AMOUNT_INVALID'],
   ['FundingWalletProofInvalidError', 'FUNDING_WALLET_PROOF_INVALID'],
   ['FundingWalletAlreadyBoundError', 'FUNDING_WALLET_ALREADY_BOUND'],
   ['FundingWalletNotBoundError', 'FUNDING_WALLET_NOT_BOUND'],

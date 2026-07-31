@@ -98,6 +98,9 @@ import { identityService } from '../services/identity.js';
 import { receiptService } from '../services/receipt.js';
 import {
   DepositAlreadyCreditedError,
+  DepositAmountInvalidError,
+  DepositBelowMinimumError,
+  DepositMinimumNotConfiguredError,
   OwnershipMismatchError,
 } from '../services/security/errors.js';
 
@@ -357,6 +360,90 @@ describe('POST /auth/deposit — escrow routing (WKH-126b)', () => {
 
     expect(res.statusCode).toBe(403);
     expect(res.json().error_code).toBe('OWNERSHIP_MISMATCH');
+  });
+
+  // ── Minimo de deposito, superficie HTTP de la rama EVM ────────────────────
+  //
+  // El guard vive en `budgetService.registerDeposit` (unico acreditador). Aca se
+  // prueba SOLO que su error llega al caller con un codigo PROPIO y no colapsado
+  // dentro del 500 `DEPOSIT_FAILED` generico. La familia Solana tiene el mismo par
+  // de casos en `auth.solana-deposit.test.ts`.
+  it('EVM: por debajo del minimo → 400 DEPOSIT_BELOW_MINIMUM + minimum_usdc, NO 500 DEPOSIT_FAILED', async () => {
+    delete process.env.ESCROW_MODE_ENABLED;
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockGetAdaptersBundle.mockReturnValue(makeBundle(2368));
+    mockVerifyDeposit.mockResolvedValue({
+      ok: true,
+      amountUsd: '0.000001',
+      tokenSymbol: 'PYUSD',
+      from: DEPOSITOR,
+    });
+    mockRegisterDeposit.mockRejectedValue(new DepositBelowMinimumError('1'));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/deposit',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: depositPayload({ amount: '0.000001' }),
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({
+      error_code: 'DEPOSIT_BELOW_MINIMUM',
+      minimum_usdc: '1',
+    });
+    // El mensaje lleva el minimo y NADA mas: ni saldo, ni datos del depositante.
+    expect(JSON.stringify(res.json())).not.toContain(DEPOSITOR);
+    expect(JSON.stringify(res.json())).not.toContain('balance');
+  });
+
+  it('EVM: minimo sin configurar → 503 DEPOSIT_MINIMUM_NOT_CONFIGURED (no 400, no DEPOSIT_FAILED)', async () => {
+    delete process.env.ESCROW_MODE_ENABLED;
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockGetAdaptersBundle.mockReturnValue(makeBundle(2368));
+    mockVerifyDeposit.mockResolvedValue({
+      ok: true,
+      amountUsd: '10',
+      tokenSymbol: 'PYUSD',
+      from: DEPOSITOR,
+    });
+    mockRegisterDeposit.mockRejectedValue(
+      new DepositMinimumNotConfiguredError(),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/deposit',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: depositPayload(),
+    });
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error_code).toBe('DEPOSIT_MINIMUM_NOT_CONFIGURED');
+  });
+
+  it('EVM: monto verificado ilegible → 500 DEPOSIT_AMOUNT_INVALID, distinguible del DEPOSIT_FAILED generico', async () => {
+    delete process.env.ESCROW_MODE_ENABLED;
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+    mockGetAdaptersBundle.mockReturnValue(makeBundle(2368));
+    mockVerifyDeposit.mockResolvedValue({
+      ok: true,
+      amountUsd: '10',
+      tokenSymbol: 'PYUSD',
+      from: DEPOSITOR,
+    });
+    mockRegisterDeposit.mockRejectedValue(new DepositAmountInvalidError());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/deposit',
+      headers: { 'x-a2a-key': TEST_KEY },
+      payload: depositPayload(),
+    });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error_code).toBe('DEPOSIT_AMOUNT_INVALID');
+    expect(res.json().error_code).not.toBe('DEPOSIT_FAILED');
   });
 
   // ── AC-11 — receipt deposit_verified emitted; emit throw doesn't break 200 ──
