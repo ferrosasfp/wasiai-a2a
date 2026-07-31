@@ -159,4 +159,44 @@ aparecer. No es una bitácora de lo que salió bien: es lo que hay que no repeti
 
 ---
 
+### [2026-07-31 16:45] Fix-pack `/health` — el `if` que narrowaba era el que llevaba la política
+
+- **Error**: al reemplazar `if (raw === undefined || raw.trim() === '')` y
+  `if (thresholdUsd === null)` por `if (state === 'unset')` / `if (state === 'unreadable')`
+  en `describeStrandedThresholdStartup`, `tsc --noEmit` se puso rojo dos veces seguidas:
+  `value: raw` pasó a ser `string | undefined` y `value: thresholdUsd` pasó a ser
+  `number | null`. Los tests seguían verdes: sólo el typecheck lo vio.
+
+- **Causa raíz**: los dos `if` viejos hacían DOS trabajos a la vez — decidir la rama y
+  estrechar el tipo. Al extraer la decisión a `getStrandedThresholdState()` (que es lo
+  correcto: una sola clasificación), el compilador perdió la prueba de que abajo había un
+  string y un número, porque esa prueba vivía en la forma del `if`, no en el dato.
+
+- **Fix**: cada rama conserva su condición de narrowing como segundo disyunto
+  (`state === 'unset' || raw === undefined`), con un comentario que dice explícitamente
+  que NO es una segunda regla sino la misma, escrita para el compilador. No se usó `!`,
+  ni `as`, ni `?? ''`: un fallback fabricado hubiera hecho que un caso imposible
+  imprimiera un valor inventado en el log.
+
+- **Aplicar en**: cualquier refactor que mueva una decisión de un `if` a una función.
+  Correr `npx tsc --noEmit` COMPLETO en ese paso, no sólo los tests — el repo define
+  verde como lint + tsc + tests, y este error sólo aparecía en el segundo.
+
+---
+
+### [2026-07-31 16:41] Fix-pack `/health` — `npx biome` no corre; el formateo se hace por script
+
+- **Error**: `npx biome format --write <archivos>` falla con
+  `npm error could not determine executable to run`, así que el lint quedó rojo por
+  formato después de editar los tests.
+
+- **Fix**: usar los scripts del repo: `npm run format` (biome format --write src/) y
+  `npm run lint`. Se verificó que `format` sólo tocó los archivos de este cambio
+  (`git status` sin archivos ajenos).
+
+- **Aplicar en**: cualquier corrección de formato en este repo. `npx <tool>` no es
+  equivalente al script de package.json acá.
+
+---
+
 *Auto-Blindaje de F3 (Dev) — NexusAgil*
