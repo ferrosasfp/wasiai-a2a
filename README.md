@@ -7,12 +7,23 @@
 
 Protocolo y gateway HTTP para que un cliente encuentre agentes **por capacidad y no por dirección**, los **componga** en un flujo y **pague por uso**.
 
-Un cliente no necesita saber que existe `remit-corridor-fx`. Pide "necesito una cotización de FX" y el gateway le devuelve quién puede hacerlo, en qué red cobra y cuánto sale. Después ejecuta el flujo con una sola llamada HTTP y el gateway se encarga del pago a cada agente.
+Un cliente no necesita saber que existe `remit-corridor-fx-solana`. Pide "necesito una cotización de FX" y el gateway le devuelve quién puede hacerlo, en qué red cobra y cuánto sale. Después ejecuta el flujo con una sola llamada HTTP y el gateway se encarga del pago a cada agente.
 
 El gateway federa los catálogos de los marketplaces registrados: un agente publicado en cualquiera de ellos es descubrible desde cualquier app conectada. Esa es la tesis del repo: **el marketplace es una aplicación sobre el protocolo, no el protocolo**.
 
 - Gateway en vivo: `https://wasiai-a2a-production.up.railway.app`
+- Red principal: **Solana** (devnet hoy; ninguna mainnet está inicializada en este deployment)
 - Protocolo base: [Google A2A](https://google.github.io/A2A/) + [x402](https://github.com/x402-foundation/x402) para el pago
+
+## Solana primero
+
+**Solana es la red principal de este gateway.** Es el único rail no EVM del código y la cadena en la que cobra hoy la línea de remesa del catálogo: de sus agentes, los dos que declaran cadena de cobro (`remit-corridor-fx-solana` y `remit-cashout-payout-solana`) la declaran `solana-devnet` (medido contra `GET /discover` del deployment de producción el 2026-07-30).
+
+El leg de pago Solana no es roadmap: mueve USDC-SPL de verdad. La transferencia [`3pNqu9jH…`](https://explorer.solana.com/tx/3pNqu9jHduGaXioB8Mf7WNvBgZQgJV4MnE6NDGWZdz6aY5gr2ivxfbwzrnweutSVtyKnvv7y7kXnARroktjyWsZx?cluster=devnet) está confirmada en devnet (`err: None`), es del USDC de Circle (`4zMMC9sr…`) y el destinatario es la wallet de cobro del agente `remit-corridor-fx-solana`. Se verifica con un `getTransaction` contra el RPC público de devnet, sin pedirle permiso a nadie.
+
+Las otras redes siguen acá y siguen siendo verdad: Avalanche, Base, Kite y Tempo tienen su propio adaptador, y esa neutralidad es el producto. Lo que hay es un **orden**, no una exclusividad: cuando hay que elegir una red, es Solana.
+
+Una asimetría que conviene leer temprano en vez de descubrirla contra un `400`: Solana es hoy el rail de **salida** (el gateway le paga al agente) y la cadena en la que puede debitar una clave prepaga. El cobro de **entrada** por x402 sigue siendo EVM, porque ese leg necesita una autorización firmada tipo EIP-3009 que el adaptador de Solana no implementa. El detalle está en [Rail Solana](#rail-solana).
 
 ---
 
@@ -23,25 +34,26 @@ Todo el catálogo es público y no cuesta nada consultarlo.
 ```bash
 GW=https://wasiai-a2a-production.up.railway.app
 
+curl -s "$GW/discover?capabilities=remittance-fx-quote" | jq '.agents[] | {slug, priceUsdc, chain: .payment.chain}'
+# {"slug":"remit-corridor-fx-solana","priceUsdc":0.03,"chain":"solana-devnet"}
+
 curl -s "$GW/discover?capabilities=price-feed" | jq '.agents[] | {slug, priceUsdc, chain: .payment.chain}'
 # {"slug":"wasi-chainlink-price","priceUsdc":0.001,"chain":"avalanche"}
-
-curl -s "$GW/discover?capabilities=remittance-fx-quote" | jq -r '.agents[].slug'
-# remit-corridor-fx-solana
-# remit-corridor-fx
 ```
 
-El primero vive en un marketplace externo registrado (`registry: "WasiAI"`), el segundo se publicó directo contra el gateway (`registry: "self-published"`). El cliente que consulta no distingue uno de otro, y esa indistinción es el punto: la federación es transparente para quien consume.
+El primero se publicó directo contra el gateway (`registry: "self-published"`) y cobra en Solana; el segundo vive en un marketplace externo registrado (`registry: "WasiAI"`) y cobra en Avalanche. El cliente que consulta no distingue uno de otro ni tiene que saber en qué red cobra cada uno, y esa indistinción es el punto: la federación, y la cadena, son transparentes para quien consume.
 
 Cada agente que devuelve `/discover` trae un `invokeUrl`, pero es una referencia interna. **El caller no llama al agente directo.** Invoca vía `/compose` (pipeline explícito) u `/orchestrate` (por objetivo, con el plan armado por un LLM). Eso es lo que permite que el gateway resuelva precio, presupuesto, scoping y liquidación en un solo lugar en vez de dejarlo en manos de cada cliente.
 
 ## Composición y cobro
 
+Un pipeline tiene dos legs y no tienen por qué estar en la misma red: el **pago de salida** a cada agente (que para un agente Solana se liquida en USDC-SPL sobre Solana) y el **cobro de entrada** al caller, que hoy es x402 sobre EVM. El ejemplo de abajo es exactamente eso: el agente cobra en `solana-devnet` y el caller paga en una red EVM.
+
 `/compose` recibe los pasos ya resueltos y devuelve un challenge x402 si no viene pago:
 
 ```bash
 curl -s -X POST "$GW/compose" -H 'content-type: application/json' \
-  -d '{"steps":[{"agent":"wasi-chainlink-price","input":{"symbol":"AVAX"}}]}'
+  -d '{"steps":[{"agent":"remit-corridor-fx-solana","input":{"amountUsdc":100,"corridor":"USDC-PEN"}}]}'
 ```
 
 ```json
@@ -50,7 +62,7 @@ curl -s -X POST "$GW/compose" -H 'content-type: application/json' \
   "accepts": [{
     "scheme": "exact",
     "network": "eip155:2368",
-    "maxAmountRequired": "1010000000000000",
+    "maxAmountRequired": "30300000000000000",
     "payTo": "0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba",
     "asset": "0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9",
     "maxTimeoutSeconds": 300
@@ -59,7 +71,9 @@ curl -s -X POST "$GW/compose" -H 'content-type: application/json' \
 }
 ```
 
-El monto es el precio real del pipeline más el fee de protocolo: `0.001 + 1% = 0.00101`. La misma llamada con el header `x-payment-chain: avalanche-fuji` devuelve `network: "eip155:43113"`, el USDC de Fuji y `maxAmountRequired: "1010"` (6 decimales en vez de 18). Es el mismo pipeline cotizado en otra red, sin tocar el body.
+El monto es el precio real del pipeline más el fee de protocolo: `0.03 + 1% = 0.0303`. La misma llamada con el header `x-payment-chain: avalanche-fuji` devuelve `network: "eip155:43113"`, el USDC de Fuji y `maxAmountRequired: "30300"` (6 decimales en vez de 18). Es el mismo pipeline cotizado en otra red, sin tocar el body.
+
+Lo que **no** hace, dicho con el error real: `x-payment-chain: solana-devnet` corta con `400 CHAIN_INBOUND_PAYMENT_UNSUPPORTED` y la respuesta explica la asimetría y las dos salidas (otra cadena para el x402, o una clave prepaga, que sí debita presupuesto en `solana-devnet`). Solana liquida hacia afuera; no cobra hacia adentro.
 
 Hay dos formas de pagar y el caller elige una por request:
 
@@ -78,30 +92,30 @@ Ese 1% se subdivide en plataforma / creador / referido vía `SPLIT_BPS_*` en bas
 
 ## Neutralidad de red
 
-La capa es neutral respecto de la red. No hay una cadena "principal" en el diseño: hay un adaptador por red y un selector por request.
+Que Solana sea la red principal es una decisión de **producto**, no un privilegio del diseño: en el código no hay una cadena cableada como especial. Hay un adaptador por red y un selector por request, y por eso agregar la siguiente cadena que pida un corredor es una carpeta más, no un rewrite.
 
-El caso concreto que motivó el diseño es una remesa. El marketplace de agentes corre sobre Avalanche, el principal de la remesa viaja por Solana, y la liquidación la coordina un servicio aparte (`wasiai-facilitator`) con un adaptador por red. Ninguna de las tres piezas necesita que las otras dos estén en su cadena.
+El caso concreto que motivó el diseño es una remesa. El principal de la remesa viaja por Solana, el marketplace de agentes corre sobre Avalanche, y la liquidación la coordina un servicio aparte (`wasiai-facilitator`) con un adaptador por red. Ninguna de las tres piezas necesita que las otras dos estén en su cadena.
 
 Cómo se implementa:
 
-- `PaymentAdapter` es una unión discriminada: `EvmPaymentAdapter | SolanaPaymentAdapter` (`src/adapters/types.ts`). La familia de VM es un dato del tipo, no un `if` desparramado.
+- `PaymentAdapter` es una unión discriminada (`src/adapters/types.ts`): `SolanaPaymentAdapter` es un miembro de pleno derecho del tipo, no un caso especial colgado del camino EVM. La familia de VM es un dato del tipo (`vmFamily`), no un `if` desparramado.
 - El bundle de adaptadores (payment, attestation, gasless, identity) se construye por cadena en `src/adapters/registry.ts`. Agregar una red es una carpeta nueva en `src/adapters/<red>/` más una rama en el factory. Los servicios (L3) y las rutas (L4) no se tocan.
 - La selección por request sale del header `x-payment-chain` (acepta el slug o el chainId numérico) con fallback a la primera entrada de `WASIAI_A2A_CHAINS`.
 
-Redes soportadas en código (`SUPPORTED_CHAINS` + los dos rails detrás de bandera):
+Redes soportadas en código (`SUPPORTED_CHAINS` + los dos rails detrás de bandera), con la principal arriba:
 
 | Slug | chainId | Estado en código |
 |---|---|---|
-| `kite-ozone-testnet` | 2368 | soportada (default si no se configura nada) |
+| `solana-devnet` | sentinela 900001 | **red principal** · rail no EVM detrás de `SOLANA_ADAPTER_ENABLED`, encendido en el deployment de producción |
+| `kite-ozone-testnet` | 2368 | soportada (default de cobro si no se configura nada) |
 | `kite-mainnet` | 2366 | soportada, exige `KITE_NETWORK=mainnet` acoplado |
 | `avalanche-fuji` | 43113 | soportada |
 | `avalanche-mainnet` | 43114 | soportada, con opt-in extra para el leg de salida |
 | `base-sepolia` | 84532 | soportada |
 | `base-mainnet` | 8453 | soportada |
 | `tempo-testnet` | testnet | implementada, apagada por bandera (`TEMPO_ADAPTER_ENABLED`) |
-| `solana-devnet` | sentinela 900001 | implementada, encendida por bandera (`SOLANA_ADAPTER_ENABLED`) |
 
-Los dos rails con bandera arrancan apagados: con la bandera en `false` el slug ni siquiera entra al set soportado, así que el bundle no se construye y el leg corta con `CHAIN_NOT_SUPPORTED`. No es un `if` adentro del adaptador, es que el adaptador no existe en el proceso.
+El orden de la tabla es de prioridad de producto; en `src/adapters/registry.ts` los dos rails con bandera se agregan al final del set y arrancan apagados en el repo (`SOLANA_ADAPTER_ENABLED=false` en `.env.example`, encendido por config del deployment). Con la bandera en `false` el slug ni siquiera entra al set soportado, así que el bundle no se construye y el leg corta con `CHAIN_NOT_SUPPORTED`. No es un `if` adentro del adaptador, es que el adaptador no existe en el proceso.
 
 ## Qué corre hoy
 
@@ -113,21 +127,43 @@ curl -s "$GW/capabilities" | jq '.chains'
 
 | Cadena inicializada hoy | chainId | Rail |
 |---|---|---|
-| Kite Ozone testnet | 2368 | entrante en PYUSD, es el default |
+| **Solana devnet** | sentinela 900001 | solo saliente, USDC-SPL (`acceptsInboundPayment: false`) |
+| Kite Ozone testnet | 2368 | entrante en PYUSD, es el default de cobro |
 | Avalanche Fuji | 43113 | entrante y saliente, USDC de testnet |
 | Base Sepolia | 84532 | entrante y saliente, USDC de testnet |
-| Solana devnet | sentinela 900001 | solo saliente, USDC-SPL |
 
-Las tres primeras filas se comprueban mandando `x-payment-chain` a `POST /compose` sin pago: el `402` vuelve con `eip155:2368`, `eip155:43113` o `eip155:84532` y el monto en los decimales del token de esa red.
+Las tres filas EVM se comprueban mandando `x-payment-chain` a `POST /compose` sin pago: el `402` vuelve con `eip155:2368`, `eip155:43113` o `eip155:84532` y el monto en los decimales del token de esa red. La fila de Solana se comprueba al revés, y esa es su naturaleza: el mismo request con `x-payment-chain: solana-devnet` devuelve `400 CHAIN_INBOUND_PAYMENT_UNSUPPORTED`, porque paga hacia afuera y no cobra hacia adentro.
 
 **Ninguna red mainnet está inicializada en el deployment de hoy.** Los adaptadores de mainnet existen y hubo liquidaciones reales en Avalanche C-Chain en abril de 2026 (ver [Evidencia on-chain](#evidencia-on-chain)), pero el gateway que está arriba ahora mismo corre testnet y devnet, sin dinero real.
 
-Estado del catálogo en ese mismo deployment: 25 agentes descubribles, de un marketplace federado más los publicados directo contra el gateway. Los agentes en sí no viven en este repo: este repo es el protocolo y el gateway, y el catálogo es de terceros.
+Estado del catálogo en ese mismo deployment: 23 agentes descubribles (medido el 2026-07-30 contra `GET /discover`), de un marketplace federado más los publicados directo contra el gateway. Dos cobran en Solana devnet: son los de la línea de remesa que declaran cadena de cobro. Los agentes en sí no viven en este repo: este repo es el protocolo y el gateway, y el catálogo es de terceros.
 
 Sobre las apps que lo consumen, con el tiempo verbal correcto:
 
 - **Chaski** (la app de remesas) usa este gateway hoy **solo para el agente de cotización de FX**, y detrás de una bandera que arranca apagada. La identidad del usuario y el desembolso final se integran punto a punto, sin pasar por el protocolo. Cualquier afirmación de que la remesa entera se orquesta acá es falsa.
 - El marketplace de agentes delega `compose`, `orchestrate` y `capabilities` a este gateway.
+
+---
+
+## Rail Solana
+
+Es la red principal, así que es la que más letra chica merece. `solana-devnet` es el único adaptador no EVM del repo (`src/adapters/solana/`).
+
+**Salida de dinero, o sea pagarle al agente** (`payment.ts`):
+
+- **Transferencia SPL firmada por el operador.** Arma un `createTransferInstruction`, firma con el `Keypair` de `SOLANA_OPERATOR_PRIVATE_KEY` y difunde con `sendAndConfirmTransaction`. Sin EIP-3009: el operador es el emisor y paga el gas en SOL. Con `SOLANA_SETTLE_VIA_FACILITATOR=true` la firma y el broadcast los hace el facilitator y el gateway deja de tener una llave de settlement; la bandera arranca apagada.
+- **Idempotente por `intentId`, en Postgres.** El registro de "a qué `intentId` ya se le pagó y con qué firma" vive en la tabla `a2a_solana_settle_intents` (`settle-ledger.ts`, migración `20260730000000_wkh307_solana_settle_intents.sql`), con escrituras condicionales atómicas vía `plpgsql` y el reloj del lease del lado de Postgres. Es a propósito: Solana no tiene el backstop que da el nonce determinista de EIP-3009 (un SPL transfer re-transmitido paga de nuevo), así que este seam de aplicación es la única defensa contra el doble pago, y un restart del proceso ya no la borra.
+- **Fail-closed, y "no sé" no es "no pasó".** Un RPC caído, un timeout o una respuesta ilegible no autorizan una transferencia ni se reportan como leg no pagado: quedan como disposición desconocida para que un retry o la reconciliación las resuelva. Reportar "no se pagó" sobre algo que no se pudo comprobar es pagar dos veces por diseño.
+- **Verificar antes de confiar.** `verify()` exige un delta de balance on-chain `>= amountAtomic` para el mint y el `payTo` esperados; un reintento revalida la firma anterior en cadena (`getParsedTransaction`) en vez de volver a difundir.
+
+**Entrada de dinero, qué sí y qué no:**
+
+- **Sí: depósito prepago en Solana** (`deposit-account.ts` + `deposit-verifier.ts`). `POST /auth/deposit` acepta una firma Solana, la verifica en cadena contra la cuenta de depósito y acredita presupuesto. El destino que se publica en `GET /auth/deposit-info` es la **ATA** derivada del par (mint, owner), no una wallet: en Solana los tokens no viven en la cuenta. Va detrás de su propio flag (`A2A_DEPOSIT_ENABLED_SOLANA`, separado del flag del rail a propósito) y exige que el depositante coincida con la funding wallet declarada de la clave.
+- **No: x402 entrante.** El challenge de entrada sigue siendo EVM. `x-payment-chain: solana-devnet` corta con `400 CHAIN_INBOUND_PAYMENT_UNSUPPORTED` (`src/middleware/x402.ts`), un error tipado que además dice las dos salidas: otra cadena para el x402, o clave prepaga para seguir operando en `solana-devnet`.
+
+Encenderlo: `SOLANA_ADAPTER_ENABLED=true`, `solana-devnet` dentro de `WASIAI_A2A_CHAINS`, `SOLANA_OPERATOR_PRIVATE_KEY` (base58, con SOL de devnet para gas) y `WASIAI_DOWNSTREAM_X402=true`. Los defaults de RPC (`https://api.devnet.solana.com`), mint USDC de devnet (el de Circle, `4zMMC9sr…`), decimales, commitment y CAIP-2 están en `.env.example` y no hace falta tocarlos.
+
+**No hay soporte de Solana mainnet.** Devnet nada más, cero dinero de producción. El escrow no custodial vive en el servicio `wasiai-facilitator`, no acá: si un checklist menciona `SOLANA_ESCROW_PROGRAM_ID`, es de ese repo y este gateway no lo lee.
 
 ---
 
@@ -144,10 +180,10 @@ wasiai-a2a (Railway, este repo)   /discover /compose /orchestrate /tasks /mcp
         v
 wasiai-facilitator (Railway)      firma y liquida por red
         v
-                                  Kite / Avalanche / Base / Solana
+                                  Solana / Avalanche / Base / Kite
 ```
 
-El leg de Solana es la excepción a ese dibujo: no pasa por el facilitator. El operador del gateway firma la transferencia SPL y la difunde contra el RPC de devnet, porque no hay un equivalente de EIP-3009 del otro lado.
+El leg de Solana es la excepción a ese dibujo. Por defecto no pasa por el facilitator: el operador del gateway firma la transferencia SPL y la difunde contra el RPC de devnet, porque no hay un equivalente de EIP-3009 del otro lado. Con `SOLANA_SETTLE_VIA_FACILITATOR=true` esa firma se delega al facilitator (`POST /solana/payout`) y el gateway no firma nada, ni siquiera como fallback: un facilitator caído es un leg no liquidado, no una excusa para volver a ser camino de dinero. La bandera arranca apagada y con ella apagada el comportamiento es el de antes.
 
 Adentro del gateway hay cuatro capas:
 
@@ -214,7 +250,7 @@ Publicar un agente es gratis a propósito: cobrar el alta desincentiva justo lo 
 
 Leer una tarea es gratis a propósito. El ciclo de vida A2A se maneja por polling de `GET /tasks/:id`, así que cobrar por lectura significaba que un poll cada 5 segundos costaba 720 USD por hora: el precio peleaba contra el protocolo. Las lecturas gratis no emiten challenge `402` porque no hay nada que pagar.
 
-**Identidad y presupuesto**: `POST /auth/agent-signup`, `GET /auth/me`, `POST /auth/deposit` (verifica el depósito on-chain antes de acreditar), `POST|GET|DELETE /auth/key-session`, `POST|GET|DELETE /auth/delegation`, `PUT|GET|DELETE /auth/keys/me/spend-policies`, `POST /auth/erc8004/bind`, `GET /auth/erc8004/resolve/:token_id`. `POST /auth/bind/:chain` sigue devolviendo `501`: es un placeholder declarado, no una función.
+**Identidad y presupuesto**: `POST /auth/agent-signup`, `GET /auth/me`, `POST /auth/deposit` (verifica el depósito on-chain antes de acreditar; acepta una firma Solana o un hash EVM, y rechaza antes de salir a la red si la referencia no corresponde a la cadena pedida), `POST|GET|DELETE /auth/key-session`, `POST|GET|DELETE /auth/delegation`, `PUT|GET|DELETE /auth/keys/me/spend-policies`, `POST /auth/erc8004/bind`, `GET /auth/erc8004/resolve/:token_id`. `POST /auth/bind/:chain` sigue devolviendo `501`: es un placeholder declarado, no una función.
 
 **Pagos programados**: `POST /payments/session` (medido, con vouchers y cierre) y `POST /payments/upto` (tope firmado por ambas partes), más sus `/settle`, `/close` y `/dispute`.
 
@@ -238,6 +274,8 @@ npm run dev          # tsx watch, escucha en 3001
 
 El puerto por defecto es 3001 y no 3000, para no chocar con un Next.js corriendo al lado.
 
+Ese mínimo levanta el gateway con el rail EVM por defecto: el rail Solana pide su propia bandera y su llave de operador ([Rail Solana](#rail-solana)). Y si `WASIAI_A2A_CHAINS` tuviera **sólo** `solana-devnet`, el proceso arranca pero no queda ninguna cadena que acepte cobro x402 de entrada: en esa config la única vía de cobro es la clave prepaga.
+
 Scripts reales del `package.json`:
 
 | Script | Qué hace |
@@ -254,7 +292,7 @@ Scripts reales del `package.json`:
 
 Sin `SUPABASE_URL` real el servidor arranca igual y responde `/health`, pero todo lo que toque catálogo o presupuesto falla: la persistencia no es opcional.
 
-`.env.example` documenta 122 variables con sus defaults. Las que cambian el comportamiento del dinero son pocas y están agrupadas ahí: `WASIAI_A2A_CHAINS`, `WASIAI_DOWNSTREAM_X402`, `WASIAI_DOWNSTREAM_MAINNET_ALLOW`, `PROTOCOL_FEE_RATE`, `SPLIT_BPS_*`, `GASLESS_ENABLED`, `SOLANA_ADAPTER_ENABLED`, `TEMPO_ADAPTER_ENABLED`.
+`.env.example` documenta 179 variables con sus defaults (contadas con `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`). Las que cambian el comportamiento del dinero son pocas y están agrupadas ahí: `SOLANA_ADAPTER_ENABLED`, `SOLANA_SETTLE_VIA_FACILITATOR`, `A2A_DEPOSIT_ENABLED_SOLANA`, `WASIAI_A2A_CHAINS`, `WASIAI_DOWNSTREAM_X402`, `WASIAI_DOWNSTREAM_MAINNET_ALLOW`, `PROTOCOL_FEE_RATE`, `SPLIT_BPS_*`, `GASLESS_ENABLED`, `TEMPO_ADAPTER_ENABLED`.
 
 Dos guardas de arranque que conviene conocer antes de tocar config de mainnet:
 
@@ -273,14 +311,14 @@ Estado medido en este repo, no citado de otro documento:
 
 | Métrica | Valor |
 |---|---|
-| Tests | 3.808 verdes, 19 salteados (3.827 en total) |
-| Archivos de test | 203 verdes, 6 salteados (209) |
-| Cobertura de sentencias | 85,83% |
-| Cobertura de ramas | 76,89% |
-| Cobertura de funciones | 91,4% |
-| Cobertura de líneas | 87,31% |
+| Tests | 4.726 verdes, 19 salteados (4.745 en total) |
+| Archivos de test | 240 verdes, 6 salteados (246) |
+| Cobertura de sentencias | 86,88% |
+| Cobertura de ramas | 78,76% |
+| Cobertura de funciones | 92,1% |
+| Cobertura de líneas | 88,42% |
 | Typecheck | `tsc --noEmit` limpio |
-| Lint | Biome limpio sobre 387 archivos |
+| Lint | Biome limpio sobre 438 archivos |
 
 Los salteados son los `*.real.test.ts`, que necesitan un Postgres de verdad y están condicionados a `INTEGRATION_TEST_DB_URL`, más un e2e manual contra devnet. Se saltean, no fallan, así que el CI no depende de una base viva. El workflow `ci.yml` corre typecheck, lint, suite y cobertura en cada PR y en cada push a `main`.
 
@@ -288,27 +326,13 @@ Los umbrales de cobertura están fijados apenas por debajo de la medición actua
 
 ---
 
-## Rail Solana
-
-`solana-devnet` es un adaptador no EVM. Lo que hace exactamente, en `src/adapters/solana/payment.ts`:
-
-- **Solo saliente.** Liquida el leg del gateway pagándole a un agente cuyo payout es Solana. El challenge entrante (cobrarle al caller) sigue siendo EVM: `getPaymentAdapter()` tira para un bundle no EVM, así que `x-payment-chain: solana-devnet` no es un rail de entrada válido. Hoy eso se manifiesta como un `500` genérico y no como un error tipado, que es feo pero es fail-closed: no cobra ni ejecuta nada.
-- **Transferencia SPL firmada por el operador.** Arma un `createTransferInstruction`, firma con el `Keypair` de `SOLANA_OPERATOR_PRIVATE_KEY` y difunde con `sendAndConfirmTransaction`. Sin EIP-3009 y sin facilitator: el operador es el emisor y paga el gas en SOL.
-- **Idempotente por `intentId`.** Un `intentId` repetido revalida la firma anterior on-chain (`getParsedTransaction`, balances pre y post de `payTo`) y la devuelve en vez de volver a difundir. Ese mapa vive en memoria del proceso, así que la idempotencia sobrevive reintentos pero no un reinicio. Es una limitación conocida, no un descuido.
-- **Verificar antes de confiar.** `verify()` exige un delta de balance on-chain `>= amountAtomic` para el mint y el `payTo` esperados.
-
-Encenderlo: `SOLANA_ADAPTER_ENABLED=true`, `solana-devnet` dentro de `WASIAI_A2A_CHAINS`, `SOLANA_OPERATOR_PRIVATE_KEY` (base58, con SOL de devnet para gas) y `WASIAI_DOWNSTREAM_X402=true`. Los defaults de RPC (`https://api.devnet.solana.com`), mint USDC de devnet, decimales, commitment y CAIP-2 están en `.env.example` y no hace falta tocarlos.
-
-**No hay soporte de Solana mainnet.** Devnet nada más, cero dinero de producción. El escrow no custodial vive en el servicio `wasiai-facilitator`, no acá: si un checklist menciona `SOLANA_ESCROW_PROGRAM_ID`, es de ese repo y este gateway no lo lee.
-
----
-
 ## Evidencia on-chain
 
-Liquidaciones reales verificables. Las tres de Avalanche C-Chain son mainnet, con dinero de verdad, y se confirmaron por RPC al escribir esto (`status: 0x1`).
+Liquidaciones verificables. La de Solana es devnet (sin dinero real) y se confirmó por RPC al escribir esto (`err: None`); las tres de Avalanche C-Chain son mainnet, con dinero de verdad, y también se confirmaron por RPC (`status: 0x1`).
 
 | Tx | Red | Qué fue |
 |---|---|---|
+| [`3pNqu9jH…`](https://explorer.solana.com/tx/3pNqu9jHduGaXioB8Mf7WNvBgZQgJV4MnE6NDGWZdz6aY5gr2ivxfbwzrnweutSVtyKnvv7y7kXnARroktjyWsZx?cluster=devnet) | Solana devnet | USDC-SPL de Circle saliente a la wallet de cobro de `remit-corridor-fx-solana`, 0,000001 |
 | [`0x9fa6ff83…`](https://snowtrace.io/tx/0x9fa6ff83eb10e51685ce078e69f9c42fcbe3b138b5b8c3f32909c9fee279c6f1) | Avalanche C-Chain (43114) | USDC saliente a `wasi-chainlink-price`, $0,001 |
 | [`0xa22086d0…`](https://snowtrace.io/tx/0xa22086d048b0222a8e08a5ca08997ae6c359e5ba674e63133a0ffbc463af16f9) | Avalanche C-Chain (43114) | USDC saliente a `wasi-defi-sentiment`, $0,010 |
 | [`0xca10320c…`](https://snowtrace.io/tx/0xca10320c24ff513d773ce65e0bd306d4acce3e4883180c9dca5573da6cf1dfdb) | Avalanche C-Chain (43114) | USDC saliente a `wasi-wallet-profiler`, $0,050 |
@@ -316,7 +340,7 @@ Liquidaciones reales verificables. Las tres de Avalanche C-Chain son mainnet, co
 
 Sobre Base Sepolia hay cinco corridas documentadas (tres liquidaciones sueltas, una de `/compose` de punta a punta y una del leg de salida), con los hashes y el método de verificación en [`doc/BASE-EVIDENCE.md`](doc/BASE-EVIDENCE.md).
 
-Ninguno de esos números sale de un documento interno: cualquiera puede pegar el hash en un `eth_getTransactionReceipt` contra el RPC público de la red y comparar.
+Ninguno de esos números sale de un documento interno: cualquiera puede pegar el hash en un `eth_getTransactionReceipt` contra el RPC público de la red y comparar. Para la firma de Solana el equivalente es un `getTransaction` contra `https://api.devnet.solana.com`: devuelve `meta.err: null` y el par de balances pre/post del mint de Circle que prueba la transferencia.
 
 ---
 
@@ -324,6 +348,7 @@ Ninguno de esos números sale de un documento interno: cualquiera puede pegar el
 
 | Documento | Contenido |
 |---|---|
+| [`doc/solana-labs/`](doc/solana-labs) | entregables del programa Solana LATAM Labs: roadmap (M1), negocio (M2) y arquitectura del MVP (M3) |
 | [`doc/INTEGRATION.md`](doc/INTEGRATION.md) | guía de integración: auth, onboarding, x402, códigos de error, ejemplos |
 | [`doc/integration-base.md`](doc/integration-base.md) | integración específica de Base y elección de facilitator |
 | [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md) | arquitectura L1 a L4 e interfaces de adaptador |
