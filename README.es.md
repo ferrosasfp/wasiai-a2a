@@ -21,7 +21,7 @@ El gateway federa los catálogos de los marketplaces registrados: un agente publ
 
 ## Solana primero
 
-**Solana es la red principal de este gateway.** Es el único rail no EVM del código y la cadena en la que cobra hoy la línea de remesa del catálogo: de sus agentes, los dos que declaran cadena de cobro (`remit-corridor-fx-solana` y `remit-cashout-payout-solana`) la declaran `solana-devnet` (medido contra `GET /discover` del deployment de producción el 2026-07-30).
+**Solana es la red principal de este gateway.** Es el único rail no EVM del código y la cadena en la que cobra hoy la línea de remesa del catálogo: de sus agentes, los dos que declaran cadena de cobro (`remit-corridor-fx-solana` y `remit-cashout-payout-solana`) la declaran `solana-devnet` (medido contra `GET /discover` del deployment de producción el 2026-07-31).
 
 El leg de pago Solana no es roadmap: mueve USDC-SPL de verdad. La transferencia [`3pNqu9jH…`](https://explorer.solana.com/tx/3pNqu9jHduGaXioB8Mf7WNvBgZQgJV4MnE6NDGWZdz6aY5gr2ivxfbwzrnweutSVtyKnvv7y7kXnARroktjyWsZx?cluster=devnet) está confirmada en devnet (`err: None`), es del USDC de Circle (`4zMMC9sr…`) y el destinatario es la wallet de cobro del agente `remit-corridor-fx-solana`. Se verifica con un `getTransaction` contra el RPC público de devnet, sin pedirle permiso a nadie.
 
@@ -98,7 +98,7 @@ Ese 1% se subdivide en plataforma / creador / referido vía `SPLIT_BPS_*` en bas
 
 Que Solana sea la red principal es una decisión de **producto**, no un privilegio del diseño: en qué cadena corre un request se resuelve por configuración y por el agent card, no por una rama que le dé a una red capacidades que las otras no tienen. Hay un adaptador por red y un selector por request, y por eso agregar la siguiente cadena que pida un corredor es una carpeta más, no un rewrite.
 
-Hay un nombre de cadena cableado en el código, y es un default y no un privilegio: si no están seteadas ni `WASIAI_A2A_CHAINS` ni `WASIAI_A2A_CHAIN`, `src/adapters/registry.ts` cae a `kite-ozone-testnet`, que es por lo que la tabla de abajo lo marca como default de cobro. Cualquier deployment que setee la variable nunca llega a ese literal.
+Hay un nombre de cadena cableado en el código, como default: si no están seteadas ni `WASIAI_A2A_CHAINS` ni `WASIAI_A2A_CHAIN`, `src/adapters/registry.ts` cae a `kite-ozone-testnet`, que es lo que la tabla de abajo llama default de cobro. Cualquier deployment que setee la variable nunca llega a ese literal.
 
 El caso concreto que motivó el diseño es una remesa. El principal de la remesa viaja por Solana, el marketplace de agentes corre sobre Avalanche, y la liquidación la coordina un servicio aparte (`wasiai-facilitator`) con un adaptador por red. Ninguna de las tres piezas necesita que las otras dos estén en su cadena.
 
@@ -121,7 +121,7 @@ Redes soportadas en código (`SUPPORTED_CHAINS` + los dos rails detrás de bande
 | `base-mainnet` | 8453 | soportada |
 | `tempo-testnet` | testnet | implementada, apagada por bandera (`TEMPO_ADAPTER_ENABLED`) |
 
-El orden de la tabla es de prioridad de producto; en `src/adapters/registry.ts` los dos rails con bandera se agregan al final del set y arrancan apagados en el repo (`SOLANA_ADAPTER_ENABLED=false` en `.env.example`, encendido por config del deployment). Con la bandera en `false` el slug ni siquiera entra al set soportado, así que el bundle no se construye y el leg corta con `CHAIN_NOT_SUPPORTED`. No es un `if` adentro del adaptador, es que el adaptador no existe en el proceso.
+En `src/adapters/registry.ts` los dos rails con bandera se agregan al final del set y arrancan apagados en el repo (`SOLANA_ADAPTER_ENABLED=false` en `.env.example`, encendido por config del deployment). Con la bandera en `false` el slug ni siquiera entra al set soportado, así que el bundle no se construye y el leg corta con `CHAIN_NOT_SUPPORTED`. No es un `if` adentro del adaptador, es que el adaptador no existe en el proceso.
 
 ## Qué corre hoy
 
@@ -144,7 +144,7 @@ Las tres filas EVM se comprueban mandando `x-payment-chain` a `POST /compose` si
 
 **Ninguna red mainnet está inicializada en el deployment de hoy.** Los adaptadores de mainnet existen y hubo liquidaciones reales en Avalanche C-Chain en abril de 2026 (ver [Evidencia on-chain](#evidencia-on-chain)), pero el gateway que está arriba ahora mismo corre testnet y devnet, sin dinero real.
 
-Estado del catálogo en ese mismo deployment: 23 agentes descubribles (medido el 2026-07-30 contra `GET /discover`), de un marketplace federado más los publicados directo contra el gateway. Dos cobran en Solana devnet: son los de la línea de remesa que declaran cadena de cobro. Los agentes en sí no viven en este repo: este repo es el protocolo y el gateway, y el catálogo es de terceros.
+Estado del catálogo en ese mismo deployment: 23 agentes descubribles (medido el 2026-07-31 contra `GET /discover`), de un marketplace federado más los publicados directo contra el gateway. Dos cobran en Solana devnet: son los de la línea de remesa que declaran cadena de cobro. Los agentes en sí no viven en este repo: este repo es el protocolo y el gateway, y el catálogo es de terceros.
 
 Ese `23` no es un número redondeado, y el endpoint que lo devuelve dice cuánto se cree a sí mismo. La misma respuesta trae `catalogStatus` y el desglose por fuente; el 2026-07-31 decía:
 
@@ -171,19 +171,19 @@ Es la red principal, así que es la que más letra chica merece. `solana-devnet`
 **Salida de dinero, o sea pagarle al agente** (`payment.ts`):
 
 - **Transferencia SPL firmada por el operador.** Arma un `createTransferInstruction`, firma con el `Keypair` de `SOLANA_OPERATOR_PRIVATE_KEY` y difunde con `sendAndConfirmTransaction`. Sin EIP-3009: el operador es el emisor y paga el gas en SOL. Con `SOLANA_SETTLE_VIA_FACILITATOR=true` la firma y el broadcast los hace el facilitator y el gateway deja de tener una llave de settlement; la bandera arranca apagada.
-- **Idempotente por `intentId`, en Postgres.** El registro de "a qué `intentId` ya se le pagó y con qué firma" vive en la tabla `a2a_solana_settle_intents` (`settle-ledger.ts`, migración `20260730000000_wkh307_solana_settle_intents.sql`), con escrituras condicionales atómicas vía `plpgsql` y el reloj del lease del lado de Postgres. Es a propósito: Solana no tiene el backstop que da el nonce determinista de EIP-3009 (un SPL transfer re-transmitido paga de nuevo), así que este seam de aplicación es la única defensa contra el doble pago, y un restart del proceso ya no la borra.
+- **Idempotente por `intentId`, en Postgres.** El registro de "a qué `intentId` ya se le pagó y con qué firma" vive en la tabla `a2a_solana_settle_intents` (`settle-ledger.ts`, migración `20260730000000_wkh307_solana_settle_intents.sql`), con escrituras condicionales atómicas vía `plpgsql` y el reloj del lease del lado de Postgres. Es a propósito: Solana no tiene el backstop que da el nonce determinista de EIP-3009 (un SPL transfer re-transmitido paga de nuevo), así que este seam de aplicación es la única defensa contra el doble pago, y un restart del proceso no la borra.
 - **Fail-closed, y "no sé" no es "no pasó".** Un RPC caído, un timeout o una respuesta ilegible no autorizan una transferencia ni se reportan como leg no pagado: quedan como disposición desconocida para que un retry o la reconciliación las resuelva. Reportar "no se pagó" sobre algo que no se pudo comprobar es pagar dos veces por diseño.
 - **Verificar antes de confiar.** `verify()` exige un delta de balance on-chain `>= amountAtomic` para el mint y el `payTo` esperados; un reintento revalida la firma anterior en cadena (`getParsedTransaction`) en vez de volver a difundir.
 
 **Entrada de dinero, qué sí y qué no:**
 
-- **Depósito prepago en Solana: implementado, testeado y prendido en el deployment de producción.** Estar en el código y estar prendido en el deployment siguen siendo dos afirmaciones distintas, y conviene decirlas por separado incluso ahora que las dos apuntan para el mismo lado. *En el código* (`deposit-account.ts` + `deposit-verifier.ts`, con el flag prendido y apagado cubiertos en `src/routes/auth.solana-deposit.test.ts`): `POST /auth/deposit` acepta una firma Solana, la verifica en cadena contra la cuenta de depósito y acredita presupuesto, y el destino que publica `GET /auth/deposit-info` es la **ATA** derivada del par (mint, owner), no una wallet, porque en Solana los tokens no viven en la cuenta. Va detrás de su propio flag (`A2A_DEPOSIT_ENABLED_SOLANA`, separado del flag del rail a propósito) y exige que el depositante coincida con la funding wallet declarada de la clave. *En el deployment que está arriba*, ese flag ahora está prendido: `curl -s "$GW/auth/deposit-info"` devuelve cuatro redes, y la de `solana-devnet` trae `deposit_account: "9BBtuaoFpV3BNUrv4GnNu68RXBVeNwVaJiggyxuK4Qfx"`, su `deposit_account_owner` publicado aparte para que se pueda auditar la derivación, `required_commitment: "finalized"` y el mint de USDC de devnet (medido el 2026-07-31). Esa entrada no trae `treasury` ni `escrow_*` a propósito: los dos son resoluciones EVM, y una address EVM adentro de la entrada Solana mandaría USDC de devnet a un string que en Solana no es nada. `src/routes/auth/deposit.ts` sigue publicando la entrada sólo si el flag está prendido, y eso es el diseño y no un resto: anunciar una cuenta de depósito sin un verificador cableado detrás es invitar plata que después nadie puede acreditar.
+- **Depósito prepago en Solana: implementado, testeado y prendido en el deployment de producción.** Estar en el código y estar prendido en el deployment son dos afirmaciones distintas, así que van por separado. *En el código* (`deposit-account.ts` + `deposit-verifier.ts`, con el flag prendido y apagado cubiertos en `src/routes/auth.solana-deposit.test.ts`): `POST /auth/deposit` acepta una firma Solana, la verifica en cadena contra la cuenta de depósito y acredita presupuesto, y el destino que publica `GET /auth/deposit-info` es la **ATA** derivada del par (mint, owner), no una wallet, porque en Solana los tokens no viven en la cuenta. Va detrás de su propio flag (`A2A_DEPOSIT_ENABLED_SOLANA`, separado del flag del rail a propósito) y exige que el depositante coincida con la funding wallet declarada de la clave. *En el deployment que está arriba*, ese flag ahora está prendido: `curl -s "$GW/auth/deposit-info"` devuelve cuatro redes, y la de `solana-devnet` trae `deposit_account: "9BBtuaoFpV3BNUrv4GnNu68RXBVeNwVaJiggyxuK4Qfx"`, su `deposit_account_owner` publicado aparte para que se pueda auditar la derivación, `required_commitment: "finalized"` y el mint de USDC de devnet (medido el 2026-07-31). Esa entrada no trae `treasury` ni `escrow_*` a propósito: los dos son resoluciones EVM, y una address EVM adentro de la entrada Solana mandaría USDC de devnet a un string que en Solana no es nada. `src/routes/auth/deposit.ts` publica la entrada sólo si el flag está prendido: anunciar una cuenta de depósito sin un verificador cableado detrás es invitar plata que después nadie puede acreditar.
 - **El mínimo, y que se puede comprobar desde afuera.** Cada entrada trae además `deposit_minimum_usdc` y `deposits_enabled`, los dos calculados con `resolveDepositMinimumMicroUsd()`, el mismo choke-point que lee `checkDepositMinimum()` adentro de `budgetService.registerDeposit`. Es una sola fuente, no una copia publicada que pueda desfasarse, y `src/routes/auth.deposit-info-minimum.test.ts` la clava por los dos bordes: el monto publicado acredita, un micro-dólar menos no. La consecuencia práctica es que la configuración del camino del dinero se puede verificar desde afuera con un `curl` pelado y sin credenciales. Medido hoy, las cuatro redes publican el mismo `deposit_minimum_usdc: "1"` y `deposits_enabled: true`, y eso es el contrato y no una casualidad: el mínimo es del camino de depósito, no de una cadena. Sin mínimo configurado el campo es `null` y `deposits_enabled` es `false`, nunca `"0"`, porque un cero se leería como "mandá lo que quieras" mientras el guard en ese estado rechaza todo depósito.
 - **No: x402 entrante.** El challenge de entrada sigue siendo EVM. `x-payment-chain: solana-devnet` corta con `400 CHAIN_INBOUND_PAYMENT_UNSUPPORTED` (`src/middleware/x402.ts`), un error tipado que además dice las dos salidas: otra cadena para el x402, o clave prepaga para seguir operando en `solana-devnet`.
 
 Encender el rail: `SOLANA_ADAPTER_ENABLED=true`, `solana-devnet` dentro de `WASIAI_A2A_CHAINS`, `SOLANA_OPERATOR_PRIVATE_KEY` (base58, con SOL de devnet para gas) y `WASIAI_DOWNSTREAM_X402=true`. Los depósitos entrantes son un segundo interruptor arriba de ése, en este orden: aplicar la migración `20260731000000_wkh315_solana_deposit.sql`, setear `A2A_DEPOSIT_OWNER_SOLANA` (la pubkey dueña, no el destino) y `A2A_DEPOSIT_MIN_USDC`, y recién entonces `A2A_DEPOSIT_ENABLED_SOLANA=true`. Sin el mínimo el camino queda cerrado y contesta `503 DEPOSIT_MINIMUM_NOT_CONFIGURED` en vez de acreditar a ciegas. Los defaults de RPC (`https://api.devnet.solana.com`), mint USDC de devnet (el de Circle, `4zMMC9sr…`), decimales, commitment y CAIP-2 están en `.env.example` y no hace falta tocarlos.
 
-**No hay soporte de Solana mainnet.** Devnet nada más, cero dinero de producción. El escrow no custodial vive en el servicio `wasiai-facilitator`, no acá: si un checklist menciona `SOLANA_ESCROW_PROGRAM_ID`, es de ese repo y este gateway no lo lee.
+**No hay soporte de Solana mainnet.** Devnet nada más, cero dinero de producción. El escrow no custodial vive en el servicio `wasiai-facilitator`, no acá: `SOLANA_ESCROW_PROGRAM_ID` es de ese repo y este gateway no lo lee.
 
 ---
 
@@ -241,7 +241,7 @@ Todos verificados contra `src/routes/`.
 
 `GET /metrics` expone el formato Prometheus, pero está protegido por `METRICS_TOKEN` y es fail-closed: en producción, si la variable no está seteada, responde `503` en vez de exponer métricas. Todo `/dashboard/api/*` devuelve datos cross-tenant y va detrás de token de operador (`DASHBOARD_ADMIN_TOKEN`); el HTML del dashboard es público porque no lleva ningún dato adentro, los pide el browser contra esa API gateada.
 
-Una sola operación pide **dos** credenciales: `POST /dashboard/api/reconciliation/:intentId/release-lease` exige además `RECONCILIATION_RELEASE_TOKEN` (header `X-Reconciliation-Release-Token`), que debe ser un secreto distinto del token de panel. Es la única operación que vuelve pagable una fila **sin prueba** —atesta un negativo que no se puede verificar y el reconciliador reenvía el pago—, así que no comparte credencial con las lecturas ni con su hermana `hop2-evidence`, cuyo hash sí se verifica on-chain. Si `RECONCILIATION_RELEASE_TOKEN` no está configurada, la operación responde `503` en producción **y** en desarrollo.
+Una sola operación pide **dos** credenciales: `POST /dashboard/api/reconciliation/:intentId/release-lease` exige además `RECONCILIATION_RELEASE_TOKEN` (header `X-Reconciliation-Release-Token`), que debe ser un secreto distinto del token de panel. Es la única operación que vuelve pagable una fila **sin prueba** (atesta un negativo que no se puede verificar y el reconciliador reenvía el pago), así que no comparte credencial con las lecturas ni con su hermana `hop2-evidence`, cuyo hash sí se verifica on-chain. Si `RECONCILIATION_RELEASE_TOKEN` no está configurada, la operación responde `503` en producción **y** en desarrollo.
 
 **Con credencial**
 
@@ -312,7 +312,7 @@ Scripts reales del `package.json`:
 
 Sin `SUPABASE_URL` real el servidor arranca igual y responde `/health`, pero todo lo que toque catálogo o presupuesto falla: la persistencia no es opcional.
 
-`.env.example` documenta 179 variables con sus defaults (contadas con `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`). Las que cambian el comportamiento del dinero son pocas y están agrupadas ahí: `SOLANA_ADAPTER_ENABLED`, `SOLANA_SETTLE_VIA_FACILITATOR`, `A2A_DEPOSIT_ENABLED_SOLANA`, `WASIAI_A2A_CHAINS`, `WASIAI_DOWNSTREAM_X402`, `WASIAI_DOWNSTREAM_MAINNET_ALLOW`, `PROTOCOL_FEE_RATE`, `SPLIT_BPS_*`, `GASLESS_ENABLED`, `TEMPO_ADAPTER_ENABLED`.
+`.env.example` documenta 180 variables con sus defaults (contadas con `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`), y las pocas que cambian el comportamiento del dinero están agrupadas ahí.
 
 Dos guardas de arranque que conviene conocer antes de tocar config de mainnet:
 
@@ -331,14 +331,14 @@ Estado medido en este repo, no citado de otro documento:
 
 | Métrica | Valor |
 |---|---|
-| Tests | 4.726 verdes, 19 salteados (4.745 en total) |
-| Archivos de test | 240 verdes, 6 salteados (246) |
-| Cobertura de sentencias | 86,88% |
-| Cobertura de ramas | 78,76% |
-| Cobertura de funciones | 92,1% |
-| Cobertura de líneas | 88,42% |
+| Tests | 4.862 verdes, 19 salteados (4.881 en total) |
+| Archivos de test | 242 verdes, 6 salteados (248) |
+| Cobertura de sentencias | 86,97% |
+| Cobertura de ramas | 78,87% |
+| Cobertura de funciones | 92,15% |
+| Cobertura de líneas | 88,49% |
 | Typecheck | `tsc --noEmit` limpio |
-| Lint | Biome limpio sobre 438 archivos |
+| Lint | `npm run lint` (Biome) sobre 441 archivos; el badge `ci` de arriba es el resultado vivo |
 
 Los salteados son los `*.real.test.ts`, que necesitan un Postgres de verdad y están condicionados a `INTEGRATION_TEST_DB_URL`, más un e2e manual contra devnet. Se saltean, no fallan, así que el CI no depende de una base viva. El workflow `ci.yml` corre typecheck, lint, suite y cobertura en cada PR y en cada push a `main`.
 
@@ -385,7 +385,7 @@ Ninguno de esos números sale de un documento interno: cualquiera puede pegar el
 
 Cada cambio pasa por un pipeline con gates humanos entre roles (análisis, arquitectura, desarrollo, revisión adversarial, QA, cierre). Los artefactos de cada uno quedan en `doc/sdd/NNN-titulo/` y el detalle del método está en [`CLAUDE.md`](CLAUDE.md).
 
-Al abrir un PR: rama desde `main` como `feat/NNN-wkh-XX-titulo` o `fix/NNN-wkh-XX-titulo`, referencia a la HU en el mensaje de commit, y ni la revisión adversarial ni el code review se saltean en un PR que toca código.
+Al abrir un PR: rama desde `main` con prefijo `feat/` o `fix/`, y ni la revisión adversarial ni el code review se saltean en un PR que toca código.
 
 ## Licencia
 
