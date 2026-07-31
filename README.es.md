@@ -127,6 +127,8 @@ Esto es el estado real, no el roadmap. Se lee del `GET /capabilities` del deploy
 curl -s "$GW/capabilities" | jq '.chains'
 ```
 
+Las filas de abajo van en orden de producto; el endpoint devuelve Kite primero, porque es el default.
+
 | Cadena inicializada hoy | chainId | Rail |
 |---|---|---|
 | **Solana devnet** | sentinela 900001 | solo saliente, USDC-SPL (`acceptsInboundPayment: false`) |
