@@ -35,6 +35,10 @@ import {
   resolveSolanaDepositOwner,
 } from '../../adapters/solana/deposit-account.js';
 import { verifySolanaDeposit } from '../../adapters/solana/deposit-verifier.js';
+import {
+  formatMicroUsd,
+  resolveDepositMinimumMicroUsd,
+} from '../../lib/deposit-minimum.js';
 import { isValidSolanaSignature } from '../../lib/wallet-format.js';
 import { budgetService } from '../../services/budget.js';
 import { eventService } from '../../services/event.js';
@@ -458,6 +462,35 @@ export const depositRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/deposit-info',
     async (_req: FastifyRequest, reply: FastifyReply) => {
+      // ── Fix-pack AR 2026-07-31 — el mínimo, en el mismo contrato que dice a
+      //    dónde mandar la plata ─────────────────────────────────────────────
+      //
+      // MISMA FUENTE QUE EL GUARD, no una constante nueva ni otra lectura de la env:
+      // `resolveDepositMinimumMicroUsd()` es el choke-point que usa
+      // `checkDepositMinimum()` en `budgetService.registerDeposit`. Con dos fuentes,
+      // el día que cambie una el contrato publicado miente.
+      //
+      // POR QUÉ VA POR ENTRADA Y NO ARRIBA DE TODO, aunque el mínimo sea del CAMINO y
+      // no de una cadena: el shape de esta respuesta hace que un cliente pierda los
+      // campos de nivel raíz. El único consumidor que este repo versiona
+      // (`examples/steps/2-deposit-info.mjs`) hace `const { networks } = ...`, elige
+      // UNA entrada y sólo propaga esa entrada a los pasos siguientes; un campo
+      // hermano de `networks` se le cae en el paso 2 y el paso 4 nunca lo ve. El
+      // mínimo tiene que estar donde el cliente ya está mirando. Que sea el MISMO
+      // valor en todas las entradas es parte del contrato y está clavado en un test.
+      //
+      // CUANDO NO ESTÁ CONFIGURADO: `deposit_minimum_usdc: null` +
+      // `deposits_enabled: false`. `null` no es `"0"` (cero sería "cualquier monto
+      // sirve", que es lo contrario de lo que pasa), y el booleano lo dice sin que
+      // haya que interpretar el `null`: en ese estado el gateway rechaza TODO depósito
+      // con 503, así que la respuesta no puede invitar a mandar plata.
+      const depositMinimumMicroUsd = resolveDepositMinimumMicroUsd();
+      const depositMinimumUsdc =
+        depositMinimumMicroUsd === null
+          ? null
+          : formatMicroUsd(depositMinimumMicroUsd);
+      const depositsEnabled = depositMinimumMicroUsd !== null;
+
       const networks = getInitializedChainKeys()
         .map((chainKey) => {
           const bundle = getAdaptersBundle(chainKey);
@@ -504,6 +537,10 @@ export const depositRoutes: FastifyPluginAsync = async (fastify) => {
               // El commitment es un literal del verificador, no una env: se publica
               // para que el depositante sepa que un `confirmed` no alcanza.
               required_commitment: 'finalized' as const,
+              // El mínimo NO es de esta cadena: es el mismo del camino. Va acá
+              // porque acá es donde el cliente lo lee (ver el bloque de arriba).
+              deposit_minimum_usdc: depositMinimumUsdc,
+              deposits_enabled: depositsEnabled,
             };
           }
 
@@ -535,6 +572,10 @@ export const depositRoutes: FastifyPluginAsync = async (fastify) => {
               decimals: token.decimals,
             },
             min_confirmations: resolveMinConfirmations(chainKey),
+            // Mismo valor que en la entrada Solana: el mínimo es del camino de
+            // depósito, no de la cadena (ver el bloque de arriba).
+            deposit_minimum_usdc: depositMinimumUsdc,
+            deposits_enabled: depositsEnabled,
           };
         })
         .filter((entry) => entry !== null);

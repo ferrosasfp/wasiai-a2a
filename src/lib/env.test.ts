@@ -6,13 +6,18 @@
 
 import Fastify from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { assertRequiredEnv, parseTrustProxy } from './env.js';
+import {
+  assertDepositMinimumEnv,
+  assertRequiredEnv,
+  parseTrustProxy,
+} from './env.js';
 
 const KEYS = [
   'NODE_ENV',
   'SUPABASE_URL',
   'SUPABASE_SERVICE_KEY',
   'OPERATOR_PRIVATE_KEY',
+  'A2A_DEPOSIT_MIN_USDC',
 ] as const;
 const ORIGINAL: Record<string, string | undefined> = {};
 
@@ -59,6 +64,91 @@ describe('assertRequiredEnv — F-08', () => {
     process.env.SUPABASE_SERVICE_KEY = '   ';
     process.env.OPERATOR_PRIVATE_KEY = '0xabc';
     expect(() => assertRequiredEnv()).toThrow(/SUPABASE_SERVICE_KEY/);
+  });
+});
+
+/**
+ * assertDepositMinimumEnv — fix-pack AR 2026-07-31.
+ *
+ * ANTES: un `A2A_DEPOSIT_MIN_USDC` mal escrito no se notaba al arrancar. El proceso
+ * subia normal y la primera noticia era un 503 en el primer deposito de un tercero.
+ *
+ * OJO CON EL ATAJO QUE NO FUNCIONA: agregar el nombre a la lista de
+ * `assertRequiredEnv()` NO atrapa nada de esto. Esa funcion chequea PRESENCIA, y
+ * `'1,5'` esta presente y no vacia. Por eso el chequeo EVALUA el valor con la misma
+ * funcion que usa el guard.
+ */
+describe('assertDepositMinimumEnv — fix-pack AR 2026-07-31', () => {
+  // Presente pero ilegible → el proceso NO arranca. Es el caso en el que el operador
+  // CREE tener un minimo puesto.
+  it.each([
+    '1,5',
+    '1 USDC',
+    '1.0000001',
+    '0',
+    '0.000000',
+    '1e6',
+    '-1',
+    '.5',
+    '1.',
+  ])('un minimo mal escrito (%s) hace fallar el arranque, y el mensaje trae el valor', (raw) => {
+    process.env.A2A_DEPOSIT_MIN_USDC = raw;
+    expect(() => assertDepositMinimumEnv()).toThrow(/MAL ESCRITA/);
+    expect(() => assertDepositMinimumEnv()).toThrow(
+      new RegExp(raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    );
+  });
+
+  it.each([
+    '1',
+    '1.0',
+    '0.5',
+    '2.5',
+    '0.000001',
+    '  1  ',
+  ])('un minimo valido (%s) deja arrancar sin warning', (raw) => {
+    process.env.A2A_DEPOSIT_MIN_USDC = raw;
+    expect(assertDepositMinimumEnv()).toBeNull();
+  });
+
+  // Ausente → NO tumba el gateway (hace muchas cosas que no son depositar), pero
+  // devuelve el warning para que el arranque lo grite.
+  it.each([
+    undefined,
+    '',
+    '   ',
+  ])('con la env ausente/vacia (%s) no lanza y devuelve un warning ruidoso', (raw) => {
+    if (raw === undefined) delete process.env.A2A_DEPOSIT_MIN_USDC;
+    else process.env.A2A_DEPOSIT_MIN_USDC = raw;
+
+    const warning = assertDepositMinimumEnv();
+
+    expect(warning).not.toBeNull();
+    expect(warning).toMatch(/NO ESTA CONFIGURADA/);
+    expect(warning).toMatch(/A2A_DEPOSIT_MIN_USDC/);
+  });
+
+  // El AR lo pidio explicito: hoy las dos causas son la misma rama y mandan al
+  // operador a buscar donde no es. Un mensaje que no las separa no sirve.
+  it('separa AUSENTE de MAL ESCRITA: ninguno de los dos textos sirve para el otro caso', () => {
+    delete process.env.A2A_DEPOSIT_MIN_USDC;
+    const absent = assertDepositMinimumEnv() as string;
+
+    process.env.A2A_DEPOSIT_MIN_USDC = '1,5';
+    let malformed = '';
+    try {
+      assertDepositMinimumEnv();
+    } catch (err) {
+      malformed = (err as Error).message;
+    }
+
+    expect(malformed).not.toBe('');
+    // El de ausente no acusa un valor que no existe.
+    expect(absent).not.toMatch(/MAL ESCRITA/);
+    // El de mal escrita no dice "falta": la variable esta, lo que falla es el valor.
+    expect(malformed).not.toMatch(/NO ESTA CONFIGURADA/);
+    expect(malformed).toContain('1,5');
+    expect(absent).not.toContain('1,5');
   });
 });
 

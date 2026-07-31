@@ -72,8 +72,15 @@ function toMicroUsd(raw: string): bigint | null {
   return BigInt(intPart) * SCALE + BigInt(fracPart);
 }
 
-/** Micro-dolares de vuelta a decimal canonico, para poder DECIR el minimo. */
-function formatMicroUsd(micro: bigint): string {
+/**
+ * Micro-dolares de vuelta a decimal canonico, para poder DECIR el minimo.
+ *
+ * Exportada (fix-pack AR 2026-07-31) porque `GET /auth/deposit-info` tiene que
+ * PUBLICAR el mismo numero que el guard aplica, y con el mismo formateo. Si el
+ * endpoint formateara por su cuenta, el contrato publicado y el guard podrian
+ * decir cosas distintas del mismo `bigint`.
+ */
+export function formatMicroUsd(micro: bigint): string {
   const intPart = (micro / SCALE).toString();
   const fracPart = (micro % SCALE).toString().padStart(SCALE_DECIMALS, '0');
   const trimmed = fracPart.replace(/0+$/, '');
@@ -103,6 +110,37 @@ export function resolveDepositMinimumMicroUsd(): bigint | null {
   const micro = toMicroUsd(trimmed);
   if (micro === null || micro <= 0n) return null;
   return micro;
+}
+
+/**
+ * Estado de la env del minimo, con la CAUSA separada (fix-pack AR 2026-07-31).
+ *
+ * `resolveDepositMinimumMicroUsd()` devuelve `null` para dos situaciones que el
+ * operador arregla en lugares distintos: "no la puse" y "la puse mal". Colapsarlas
+ * manda a buscar donde no es (el AR lo midio: hoy son la misma rama).
+ *
+ * NO DUPLICA LA DECISION. Quien decide si el valor sirve sigue siendo
+ * `resolveDepositMinimumMicroUsd()`; esta funcion solo lee el crudo para partir su
+ * `null` en dos causas. Si manana cambia el criterio de validez, cambia en un solo
+ * lugar y esto lo sigue.
+ */
+export type DepositMinimumEnvStatus =
+  | { state: 'configured'; microUsd: bigint; usdc: string }
+  | { state: 'absent' }
+  | { state: 'invalid'; raw: string };
+
+export function classifyDepositMinimumEnv(): DepositMinimumEnvStatus {
+  const micro = resolveDepositMinimumMicroUsd();
+  if (micro !== null) {
+    return {
+      state: 'configured',
+      microUsd: micro,
+      usdc: formatMicroUsd(micro),
+    };
+  }
+  const raw = process.env.A2A_DEPOSIT_MIN_USDC;
+  if (raw === undefined || raw.trim() === '') return { state: 'absent' };
+  return { state: 'invalid', raw: raw.trim() };
 }
 
 /**

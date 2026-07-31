@@ -122,6 +122,23 @@ const net = networks.find((n) => n.slug === NETWORK);
 if (!net) { console.error(`Red '${NETWORK}' no disponible. Opciones: ${networks.map(n => n.slug).join(', ')}`); process.exit(1); }
 const escrowActive = Boolean(net.escrow_mode && net.escrow_contract);
 if (!escrowActive && !net.treasury) { console.error(`La red ${NETWORK} no tiene escrow ni treasury configurado todavía.`); process.exit(1); }
+// Mínimo de depósito publicado por el gateway (chain-agnóstico). Se chequea ANTES de
+// firmar nada: un monto por debajo se rechaza recién en /auth/deposit, con la
+// transferencia ya hecha, y en modo treasury (custodial) esos fondos no se acreditan.
+const minMicro = (v) => {
+  const m = /^(\d+)(?:\.(\d+))?$/.exec(String(v ?? '').trim());
+  return m ? BigInt(m[1]) * 1000000n + BigInt((m[2] ?? '').slice(0, 6).padEnd(6, '0')) : null;
+};
+if (net.deposits_enabled !== true) {
+  console.error(`El camino de depósito está CERRADO: el gateway no tiene mínimo configurado (deposits_enabled=${net.deposits_enabled}). Nada de lo que mandes se puede acreditar.`);
+  process.exit(1);
+}
+const amountMicro = minMicro(AMOUNT);
+const minimumMicro = minMicro(net.deposit_minimum_usdc);
+if (amountMicro === null || minimumMicro === null || amountMicro < minimumMicro) {
+  console.error(`AMOUNT=${AMOUNT} no llega al mínimo publicado (${net.deposit_minimum_usdc}). El depósito se rechazaría con 400 DEPOSIT_BELOW_MINIMUM. No se transfiere nada.`);
+  process.exit(1);
+}
 const dest = escrowActive ? `escrow=${net.escrow_contract} (no-custodial)` : `treasury=${net.treasury}`;
 console.log(`0. deposit-info: ${dest} token=${net.token.symbol}(${net.token.decimals}d) chain_id=${net.chain_id} min_conf=${net.min_confirmations}`);
 
