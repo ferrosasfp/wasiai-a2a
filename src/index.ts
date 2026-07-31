@@ -51,7 +51,10 @@ import wellKnownRoutes from './routes/well-known.js';
 import { refundOutbox } from './services/refund-outbox.js';
 // HU-306 (AC-5): indicador de exposición varada para `/health`. Con el umbral sin
 // configurar no consulta nada y el campo ni aparece.
-import { getStrandedHealthField } from './services/stranded-alert.js';
+import {
+  describeStrandedThresholdStartup,
+  getStrandedHealthField,
+} from './services/stranded-alert.js';
 
 // F-08 (audit 2026-06-29): fail loudly at boot if required secrets are missing
 // in production (before any adapter init or server bind).
@@ -81,6 +84,13 @@ assertGasOverheadConfigured(
 // se comportan igual y se ven igual, y el operador creería tener puesto un techo que no
 // existe. Se evalúa UNA vez, al arrancar; no cuesta nada por request.
 const strandedCeilingMisconfigured = isPipelineCeilingMisconfigured();
+
+// Fix-pack observabilidad 2026-07-31: el mismo aviso, para la OTRA variable de la HU-306.
+// El techo de arriba ya se delataba; el UMBRAL, que es el que decide SI SUENA la alerta,
+// no decia una palabra al arrancar. Un `19` escrito `1O` no da error: da una alerta que
+// nunca suena, que se ve igual que "no hay nada que alertar". Tres estados (ausente /
+// puesta y legible / puesta e ilegible), evaluados UNA vez, sin costo por request.
+const strandedThresholdStartup = describeStrandedThresholdStartup();
 
 const fastify = Fastify({
   // F-06 (audit 2026-06-29): redact credential-bearing fields from request logs
@@ -137,6 +147,29 @@ if (strandedCeilingMisconfigured) {
 
 if (depositMinimumWarning !== null) {
   fastify.log.warn(`⚠️  ${depositMinimumWarning}`);
+}
+
+// El estado del umbral de la alerta de exposicion varada. `setting`/`value` estructurados
+// (misma forma que los avisos de configuracion del facilitator) para que el operador
+// CONFIRME DESDE EL LOG el numero que quedo activo, sin entrar al panel del hosting. Un
+// umbral no es un secreto. Ausente => `info` (esta apagada a proposito, no es un error);
+// ilegible => `warn` (grita, como el techo).
+if (strandedThresholdStartup.level === 'warn') {
+  fastify.log.warn(
+    {
+      setting: strandedThresholdStartup.setting,
+      value: strandedThresholdStartup.value,
+    },
+    strandedThresholdStartup.message,
+  );
+} else {
+  fastify.log.info(
+    {
+      setting: strandedThresholdStartup.setting,
+      value: strandedThresholdStartup.value,
+    },
+    strandedThresholdStartup.message,
+  );
 }
 
 await fastify.register(cors, corsOptions);
