@@ -3,7 +3,7 @@
  * Tests: AC-8 (getBalance), AC-9 (debit), AC-10 (registerDeposit), AC-11 (daily reset)
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ── Mock structured logger ──────────────────────────────────
 // budget.ts logs server-side via getLogger('budget'). Mock it so tests can
@@ -73,6 +73,9 @@ import {
   DelegationRevokedError,
   DelegationTotalLimitExceededError,
   DepositAlreadyCreditedError,
+  DepositAmountInvalidError,
+  DepositBelowMinimumError,
+  DepositMinimumNotConfiguredError,
   DestCapExceededError,
   InvalidDebitAmountError,
   OwnershipMismatchError,
@@ -1197,6 +1200,17 @@ describe('budgetService', () => {
   });
 
   describe('registerDeposit', () => {
+    // El guard de minimo de deposito es FAIL-CLOSED: sin `A2A_DEPOSIT_MIN_USDC`
+    // ningun deposito acredita en NINGUNA cadena. Los casos de este bloque prueban
+    // el payload de la RPC, asi que necesitan el minimo puesto para llegar hasta
+    // ella. El guard en si se prueba en el bloque de mas abajo.
+    beforeEach(() => {
+      process.env.A2A_DEPOSIT_MIN_USDC = '1';
+    });
+    afterEach(() => {
+      delete process.env.A2A_DEPOSIT_MIN_USDC;
+    });
+
     // T10 — firma v2 (6 args): pasa p_owner_ref + p_tx_hash + p_token a la rpc.
     it('passes p_owner_ref + p_tx_hash + p_token to rpc and returns balance (AC-1, AC-5, WKH-35)', async () => {
       mockRpc.mockResolvedValue({ data: '15.000000', error: null } as never);
@@ -1371,6 +1385,337 @@ describe('budgetService', () => {
       await expect(
         budgetService.registerDeposit('x', 1, '1', 'user-1', '0xabc'),
       ).rejects.toThrow('Failed to register deposit: KEY_NOT_FOUND');
+    });
+  });
+
+  /**
+   * Minimo de deposito, EN EL UNICO ACREDITADOR.
+   *
+   * `registerDeposit` es la unica funcion del repo que llama a la RPC
+   * `register_a2a_key_deposit`, y esa RPC es lo unico que inserta en
+   * `a2a_key_deposits` y suma al budget. Por eso los tests de abajo alcanzan para
+   * afirmar que el guard aplica a TODAS las cadenas: no hay otro camino al credito.
+   *
+   * La afirmacion "no se consume la prueba" se assertea siempre de la misma forma:
+   * `mockRpc` NO fue llamado. Sin RPC no hay INSERT, y sin INSERT el UNIQUE
+   * (chain_id, tx_hash) sigue libre para el proximo intento.
+   */
+  describe('registerDeposit: minimo de deposito del camino de deposito', () => {
+    const EVM_CHAIN = 43113;
+    const SOLANA_CHAIN = 900001;
+    const EVM_TX = `0x${'a'.repeat(64)}`;
+    const SOLANA_SIG = 'So1anaSignatureBase58';
+
+    afterEach(() => {
+      delete process.env.A2A_DEPOSIT_MIN_USDC;
+    });
+
+    it('EXACTAMENTE el minimo ACREDITA: el borde va para adentro', async () => {
+      process.env.A2A_DEPOSIT_MIN_USDC = '1';
+      mockRpc.mockResolvedValue({ data: '1.000000', error: null } as never);
+
+      const balance = await budgetService.registerDeposit(
+        'key-1',
+        EVM_CHAIN,
+        '1',
+        'user-1',
+        EVM_TX,
+        'USDC',
+      );
+
+      expect(balance).toBe('1.000000');
+      expect(mockRpc).toHaveBeenCalledTimes(1);
+    });
+
+    it('UN ATOMO por debajo del minimo RECHAZA y NO llama a la RPC', async () => {
+      process.env.A2A_DEPOSIT_MIN_USDC = '1';
+
+      await expect(
+        budgetService.registerDeposit(
+          'key-1',
+          EVM_CHAIN,
+          '0.999999',
+          'user-1',
+          EVM_TX,
+          'USDC',
+        ),
+      ).rejects.toBeInstanceOf(DepositBelowMinimumError);
+      expect(mockRpc).not.toHaveBeenCalled();
+    });
+
+    it('muy por debajo (0.000001, el piso efectivo de antes de este guard) RECHAZA', async () => {
+      process.env.A2A_DEPOSIT_MIN_USDC = '1';
+
+      await expect(
+        budgetService.registerDeposit(
+          'key-1',
+          EVM_CHAIN,
+          '0.000001',
+          'user-1',
+          EVM_TX,
+          'USDC',
+        ),
+      ).rejects.toBeInstanceOf(DepositBelowMinimumError);
+      expect(mockRpc).not.toHaveBeenCalled();
+    });
+
+    // ── El guard es CHAIN-AGNOSTICO: mismo rechazo por las dos familias ───────
+    //
+    // `registerDeposit` no ramifica por cadena, asi que estos dos casos no prueban
+    // dos implementaciones: prueban que hay UNA sola y que las dos familias pasan
+    // por ella. Si alguien moviera el guard a la rama EVM de la ruta, el caso
+    // Solana se pondria rojo.
+    it('EVM (sin vmFamily): mismo rechazo, sin RPC', async () => {
+      process.env.A2A_DEPOSIT_MIN_USDC = '1';
+
+      await expect(
+        budgetService.registerDeposit(
+          'key-1',
+          EVM_CHAIN,
+          '0.5',
+          'user-1',
+          EVM_TX,
+          'USDC',
+        ),
+      ).rejects.toBeInstanceOf(DepositBelowMinimumError);
+      expect(mockRpc).not.toHaveBeenCalled();
+    });
+
+    it("SOLANA (vmFamily 'solana'): mismo rechazo, sin RPC", async () => {
+      process.env.A2A_DEPOSIT_MIN_USDC = '1';
+
+      await expect(
+        budgetService.registerDeposit(
+          'key-1',
+          SOLANA_CHAIN,
+          '0.5',
+          'user-1',
+          SOLANA_SIG,
+          'USDC',
+          'solana',
+        ),
+      ).rejects.toBeInstanceOf(DepositBelowMinimumError);
+      expect(mockRpc).not.toHaveBeenCalled();
+    });
+
+    it('SOLANA: exactamente el minimo tambien acredita (el guard no discrimina familia)', async () => {
+      process.env.A2A_DEPOSIT_MIN_USDC = '1';
+      mockRpc.mockResolvedValue({ data: '1.000000', error: null } as never);
+
+      await budgetService.registerDeposit(
+        'key-1',
+        SOLANA_CHAIN,
+        '1',
+        'user-1',
+        SOLANA_SIG,
+        'USDC',
+        'solana',
+      );
+
+      expect(mockRpc).toHaveBeenCalledTimes(1);
+    });
+
+    // ── Fail-closed ───────────────────────────────────────────────────────────
+
+    it('env AUSENTE: rechaza, y el error dice QUE FALTA CONFIGURAR, no que el monto sea chico', async () => {
+      delete process.env.A2A_DEPOSIT_MIN_USDC;
+
+      const err = await budgetService
+        .registerDeposit('key-1', EVM_CHAIN, '1000', 'user-1', EVM_TX, 'USDC')
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(DepositMinimumNotConfiguredError);
+      expect(err).not.toBeInstanceOf(DepositBelowMinimumError);
+      expect((err as Error).message).toContain('A2A_DEPOSIT_MIN_USDC');
+      expect(mockRpc).not.toHaveBeenCalled();
+    });
+
+    it('env ausente en SOLANA tambien: el fail-closed no es de una cadena', async () => {
+      delete process.env.A2A_DEPOSIT_MIN_USDC;
+
+      await expect(
+        budgetService.registerDeposit(
+          'key-1',
+          SOLANA_CHAIN,
+          '1000',
+          'user-1',
+          SOLANA_SIG,
+          'USDC',
+          'solana',
+        ),
+      ).rejects.toBeInstanceOf(DepositMinimumNotConfiguredError);
+      expect(mockRpc).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['vacia', ''],
+      ['espacios', '   '],
+      ['negativa', '-1'],
+      ['no numerica', 'un dolar'],
+      ['NaN', 'NaN'],
+      ['Infinity', 'Infinity'],
+      ['cientifica', '1e6'],
+      ['cero', '0'],
+      ['sub-grilla', '1.0000001'],
+    ])(
+      'env %s (%j): fail-closed, ni siquiera un deposito grande acredita',
+      async (_label, raw) => {
+        process.env.A2A_DEPOSIT_MIN_USDC = raw;
+
+        await expect(
+          budgetService.registerDeposit(
+            'key-1',
+            EVM_CHAIN,
+            '1000',
+            'user-1',
+            EVM_TX,
+            'USDC',
+          ),
+        ).rejects.toBeInstanceOf(DepositMinimumNotConfiguredError);
+        expect(mockRpc).not.toHaveBeenCalled();
+      },
+    );
+
+    it('un monto verificado ilegible NO acredita, y se distingue del "es chico"', async () => {
+      process.env.A2A_DEPOSIT_MIN_USDC = '1';
+
+      await expect(
+        budgetService.registerDeposit(
+          'key-1',
+          EVM_CHAIN,
+          'NaN',
+          'user-1',
+          EVM_TX,
+          'USDC',
+        ),
+      ).rejects.toBeInstanceOf(DepositAmountInvalidError);
+      expect(mockRpc).not.toHaveBeenCalled();
+    });
+
+    // ── La prueba NO se consume ───────────────────────────────────────────────
+
+    it('el rechazo por monto NO consume la prueba: el MISMO tx acredita despues con el monto correcto', async () => {
+      process.env.A2A_DEPOSIT_MIN_USDC = '1';
+
+      // Intento 1: por debajo del minimo.
+      await expect(
+        budgetService.registerDeposit(
+          'key-1',
+          EVM_CHAIN,
+          '0.25',
+          'user-1',
+          EVM_TX,
+          'USDC',
+        ),
+      ).rejects.toBeInstanceOf(DepositBelowMinimumError);
+      // La prueba de que la prueba no se consumio: NO hubo INSERT. El UNIQUE
+      // (chain_id, tx_hash) sigue libre.
+      expect(mockRpc).not.toHaveBeenCalled();
+
+      // Intento 2: mismo tx_hash, monto correcto. Acredita.
+      mockRpc.mockResolvedValue({ data: '2.000000', error: null } as never);
+      const balance = await budgetService.registerDeposit(
+        'key-1',
+        EVM_CHAIN,
+        '2',
+        'user-1',
+        EVM_TX,
+        'USDC',
+      );
+
+      expect(balance).toBe('2.000000');
+      expect(mockRpc).toHaveBeenCalledTimes(1);
+      expect(mockRpc).toHaveBeenCalledWith('register_a2a_key_deposit', {
+        p_key_id: 'key-1',
+        p_chain_id: EVM_CHAIN,
+        p_amount_usd: 2,
+        p_owner_ref: 'user-1',
+        p_tx_hash: EVM_TX, // el MISMO de la vez que se rechazo
+        p_token: 'USDC',
+      });
+    });
+
+    it('el rechazo por fail-closed tampoco consume la prueba', async () => {
+      delete process.env.A2A_DEPOSIT_MIN_USDC;
+      await expect(
+        budgetService.registerDeposit(
+          'key-1',
+          SOLANA_CHAIN,
+          '5',
+          'user-1',
+          SOLANA_SIG,
+          'USDC',
+          'solana',
+        ),
+      ).rejects.toBeInstanceOf(DepositMinimumNotConfiguredError);
+      expect(mockRpc).not.toHaveBeenCalled();
+
+      process.env.A2A_DEPOSIT_MIN_USDC = '1';
+      mockRpc.mockResolvedValue({ data: '5.000000', error: null } as never);
+      await budgetService.registerDeposit(
+        'key-1',
+        SOLANA_CHAIN,
+        '5',
+        'user-1',
+        SOLANA_SIG,
+        'USDC',
+        'solana',
+      );
+      const [, args] = mockRpc.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(args.p_tx_hash).toBe(SOLANA_SIG);
+    });
+
+    // ── Que se le dice al caller ──────────────────────────────────────────────
+
+    it('el error lleva el minimo requerido y NADA del depositante', async () => {
+      process.env.A2A_DEPOSIT_MIN_USDC = '2.5';
+
+      const err = (await budgetService
+        .registerDeposit(
+          'key-1',
+          EVM_CHAIN,
+          '0.75',
+          'user-1',
+          EVM_TX,
+          'USDC',
+        )
+        .catch((e: unknown) => e)) as DepositBelowMinimumError;
+
+      expect(err).toBeInstanceOf(DepositBelowMinimumError);
+      expect(err.minimumUsdc).toBe('2.5');
+      expect(err.message).toContain('2.5');
+      // Ni el monto depositado, ni la key, ni el owner, ni el tx.
+      expect(err.message).not.toContain('0.75');
+      expect(err.message).not.toContain('key-1');
+      expect(err.message).not.toContain('user-1');
+      expect(err.message).not.toContain(EVM_TX);
+    });
+
+    it('el fail-closed se loguea (config del operador) y el rechazo por monto NO', async () => {
+      // El de config tiene que ser ruidoso: nadie puede depositar hasta que se
+      // arregle. El de monto no se loguea por intento, porque un log por rechazo es
+      // el mismo amplificador que el guard busca desalentar.
+      delete process.env.A2A_DEPOSIT_MIN_USDC;
+      await budgetService
+        .registerDeposit('key-1', EVM_CHAIN, '5', 'user-1', EVM_TX, 'USDC')
+        .catch(() => undefined);
+      expect(logSpy.error).toHaveBeenCalledTimes(1);
+      const [meta] = logSpy.error.mock.calls[0] as [Record<string, unknown>];
+      expect(meta.error_code).toBe('DEPOSIT_MINIMUM_NOT_CONFIGURED');
+      expect(meta.envVar).toBe('A2A_DEPOSIT_MIN_USDC');
+      // Sin datos del depositante en el log tampoco.
+      expect(Object.keys(meta)).not.toContain('keyId');
+      expect(Object.keys(meta)).not.toContain('ownerId');
+
+      logSpy.error.mockClear();
+      process.env.A2A_DEPOSIT_MIN_USDC = '1';
+      await budgetService
+        .registerDeposit('key-1', EVM_CHAIN, '0.5', 'user-1', EVM_TX, 'USDC')
+        .catch(() => undefined);
+      expect(logSpy.error).not.toHaveBeenCalled();
     });
   });
 

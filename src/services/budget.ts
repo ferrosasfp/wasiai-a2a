@@ -3,6 +3,7 @@
  * WKH-34: Agentic Economy Primitives L3
  */
 
+import { checkDepositMinimum } from '../lib/deposit-minimum.js';
 import { getLogger } from '../lib/logger.js';
 import type { RefundIdem } from '../lib/refund-idem.js';
 import { supabase } from '../lib/supabase.js';
@@ -25,6 +26,9 @@ import {
   DelegationRevokedError,
   DelegationTotalLimitExceededError,
   DepositAlreadyCreditedError,
+  DepositAmountInvalidError,
+  DepositBelowMinimumError,
+  DepositMinimumNotConfiguredError,
   DestCapExceededError,
   InvalidDebitAmountError,
   logOwnershipMismatch,
@@ -730,6 +734,53 @@ export const budgetService = {
      */
     vmFamily?: 'evm' | 'solana',
   ): Promise<string> {
+    // Minimo de deposito, CHAIN-AGNOSTICO. Ver `src/lib/deposit-minimum.ts`.
+    //
+    // POR QUE VIVE ACA Y NO EN LA RUTA NI EN UN ADAPTER:
+    // `registerDeposit` es el UNICO acreditador de depositos del gateway. Es la unica
+    // funcion del repo que llama a la RPC `register_a2a_key_deposit`, y esa RPC es lo
+    // unico que inserta en `a2a_key_deposits` y suma al budget. Una cadena nueva no
+    // puede acreditar sin pasar por aca, asi que el guard aplica a todas POR
+    // CONSTRUCCION y no por repeticion. Ponerlo en la ruta (que hoy tiene DOS sitios
+    // de llamada, el EVM y el Solana) o en cada adapter garantizaria que la proxima
+    // cadena naciera sin el.
+    //
+    // CORRE ANTES DE LA RPC A PROPOSITO. Dos consecuencias, las dos buscadas:
+    //   1. NO SE CONSUME LA PRUEBA. No se inserta fila, asi que el UNIQUE
+    //      (chain_id, tx_hash) queda libre: el depositante puede volver a presentar
+    //      la misma referencia cuando mande el monto correcto.
+    //   2. No se toma el `FOR UPDATE` sobre la fila de la clave, asi que un rechazo
+    //      no serializa contra los depositos legitimos de esa misma clave.
+    //
+    // El monto que se evalua es el VERIFICADO en cadena (`result.amountUsd` de los
+    // verificadores), nunca el declarado por el caller: el call-site ya garantiza eso
+    // (CD-4) y aca no hay forma de recibir otra cosa.
+    const minimumVerdict = checkDepositMinimum(amountUsd);
+    if (!minimumVerdict.ok) {
+      if (minimumVerdict.reason === 'DEPOSIT_MINIMUM_NOT_CONFIGURED') {
+        // Se loguea SOLO esta: es un error de config del operador y tiene que ser
+        // ruidoso. Las otras dos no se loguean por request porque un log por intento
+        // rechazado es, el mismo, un amplificador de la inundacion que este guard
+        // busca desalentar.
+        //
+        // Sin `keyId`, sin `ownerId`, sin monto: la causa es la env, y nada de eso
+        // ayuda a arreglarla.
+        log.error(
+          {
+            error_code: 'DEPOSIT_MINIMUM_NOT_CONFIGURED',
+            envVar: 'A2A_DEPOSIT_MIN_USDC',
+            chainId,
+          },
+          'deposit rejected fail-closed: A2A_DEPOSIT_MIN_USDC is unset or malformed, so no deposit can be credited on ANY chain until the operator sets it. No budget was credited and the proof was NOT consumed.',
+        );
+        throw new DepositMinimumNotConfiguredError();
+      }
+      if (minimumVerdict.reason === 'DEPOSIT_AMOUNT_INVALID') {
+        throw new DepositAmountInvalidError();
+      }
+      throw new DepositBelowMinimumError(minimumVerdict.minimumUsdc);
+    }
+
     // M9: el tipo generado declara `p_token?: string` (no captura que la SQL fn
     // acepta NULL — `p_token TEXT DEFAULT NULL`). Narrowing acotado al objeto de
     // args para preservar el envío explícito de `null` (contrato AC-10) sin

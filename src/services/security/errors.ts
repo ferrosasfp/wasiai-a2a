@@ -32,6 +32,60 @@ export class DepositAlreadyCreditedError extends Error {
 }
 
 /**
+ * Minimo de deposito del camino de deposito (`src/lib/deposit-minimum.ts`).
+ *
+ * Tres clases y NO una: este repo ya tiene deuda abierta por colapsar causas
+ * distintas en un solo codigo, y las tres condiciones de abajo se operan distinto.
+ * "No llega al minimo" lo arregla el depositante; "no esta configurado" lo arregla
+ * el operador; "monto ilegible" es un bug del gateway. Ninguna es
+ * `DEPOSIT_ALREADY_CREDITED` ni `DEPOSIT_VERIFICATION_UNKNOWN`.
+ *
+ * Las tres se lanzan ANTES de la RPC `register_a2a_key_deposit`, asi que NO SE
+ * INSERTA FILA y LA PRUEBA NO SE CONSUME: el mismo (chain, tx) se puede volver a
+ * presentar. Es la decision explicita "rechazar, sin consumir la prueba".
+ */
+
+/** Monto verificado < minimo configurado. 400, sin credito y sin consumir la prueba. */
+export class DepositBelowMinimumError extends Error {
+  readonly code = 'DEPOSIT_BELOW_MINIMUM' as const;
+  /**
+   * El minimo requerido, en USDC. Es lo UNICO que viaja al caller: nunca el saldo,
+   * nunca el monto depositado, nunca datos del depositante.
+   */
+  readonly minimumUsdc: string;
+  constructor(minimumUsdc: string) {
+    super(`Deposit is below the minimum of ${minimumUsdc} USDC`);
+    this.name = 'DepositBelowMinimumError';
+    this.minimumUsdc = minimumUsdc;
+  }
+}
+
+/**
+ * `A2A_DEPOSIT_MIN_USDC` ausente o mal escrita. 503: es un problema de config del
+ * operador, no del caller, y el mensaje tiene que decir eso y no "tu monto es chico".
+ */
+export class DepositMinimumNotConfiguredError extends Error {
+  readonly code = 'DEPOSIT_MINIMUM_NOT_CONFIGURED' as const;
+  constructor() {
+    super('A2A_DEPOSIT_MIN_USDC is not configured (deposits are fail-closed)');
+    this.name = 'DepositMinimumNotConfiguredError';
+  }
+}
+
+/**
+ * El monto verificado no es un decimal plano no negativo. Inalcanzable para un
+ * caller (los tres verificadores devuelven `formatUnits`); si aparece es un bug del
+ * gateway, por eso 500 y no 400.
+ */
+export class DepositAmountInvalidError extends Error {
+  readonly code = 'DEPOSIT_AMOUNT_INVALID' as const;
+  constructor() {
+    super('Verified deposit amount is not a plain non-negative decimal');
+    this.name = 'DepositAmountInvalidError';
+  }
+}
+
+/**
  * WKH-35 FIX-1 (BLQ-MED-1): funding-wallet binding errors.
  *
  * The deposit treasury is shared, so validating only `Transfer.to` lets an

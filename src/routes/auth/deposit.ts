@@ -41,10 +41,49 @@ import { eventService } from '../../services/event.js';
 import { receiptService } from '../../services/receipt.js';
 import {
   DepositAlreadyCreditedError,
+  DepositAmountInvalidError,
+  DepositBelowMinimumError,
+  DepositMinimumNotConfiguredError,
   OwnershipMismatchError,
 } from '../../services/security/errors.js';
 import type { DepositInput } from '../../types/index.js';
 import { escrowEnabledForChain, resolveCallerKey } from './parsers.js';
+
+/**
+ * Traduce los errores del guard de minimo (`src/lib/deposit-minimum.ts`) a HTTP.
+ *
+ * Es UNA sola funcion consumida por las DOS ramas de credito (EVM y Solana) para que
+ * el mapeo no se bifurque por cadena: el guard es unico, su superficie HTTP tambien.
+ * Devuelve `null` cuando el error no es del guard, para que cada rama siga con su
+ * propio manejo.
+ *
+ * Tres codigos DISTINTOS a proposito, y ninguno se colapsa contra
+ * `DEPOSIT_ALREADY_CREDITED` (ya usado), `DEPOSIT_VERIFICATION_UNKNOWN` (no
+ * verificable) ni `DEPOSIT_FAILED` (generico).
+ *
+ * `minimum_usdc` es lo UNICO que se le devuelve al caller: nunca el saldo, nunca el
+ * monto que deposito, nunca datos del depositante.
+ */
+function mapDepositMinimumError(
+  err: unknown,
+): { status: 400 | 500 | 503; body: Record<string, unknown> } | null {
+  if (err instanceof DepositBelowMinimumError) {
+    // 400: el caller lo puede arreglar mandando mas.
+    return {
+      status: 400,
+      body: { error_code: err.code, minimum_usdc: err.minimumUsdc },
+    };
+  }
+  if (err instanceof DepositMinimumNotConfiguredError) {
+    // 503: falta config del operador. NO es "tu monto es chico".
+    return { status: 503, body: { error_code: err.code } };
+  }
+  if (err instanceof DepositAmountInvalidError) {
+    // 500: el monto lo produjo un verificador NUESTRO, asi que es bug del gateway.
+    return { status: 500, body: { error_code: err.code } };
+  }
+  return null;
+}
 
 export const depositRoutes: FastifyPluginAsync = async (fastify) => {
   /**
@@ -286,6 +325,10 @@ export const depositRoutes: FastifyPluginAsync = async (fastify) => {
         if (err instanceof OwnershipMismatchError) {
           return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
         }
+        const minimumError = mapDepositMinimumError(err);
+        if (minimumError !== null) {
+          return reply.status(minimumError.status).send(minimumError.body);
+        }
         fastify.log.error(
           {
             errorClass: err instanceof Error ? err.constructor.name : 'unknown',
@@ -387,6 +430,10 @@ export const depositRoutes: FastifyPluginAsync = async (fastify) => {
       }
       if (err instanceof OwnershipMismatchError) {
         return reply.status(403).send({ error_code: 'OWNERSHIP_MISMATCH' });
+      }
+      const minimumError = mapDepositMinimumError(err);
+      if (minimumError !== null) {
+        return reply.status(minimumError.status).send(minimumError.body);
       }
       fastify.log.error(
         { errorClass: err instanceof Error ? err.constructor.name : 'unknown' },
