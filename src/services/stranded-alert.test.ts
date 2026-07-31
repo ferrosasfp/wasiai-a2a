@@ -26,9 +26,12 @@ vi.mock('./reconciliation.js', () => ({
 
 import {
   _resetStrandedAlert,
+  describeStrandedThresholdStartup,
   getStrandedHealthField,
+  getStrandedThresholdUsd,
   refreshStrandedExposure,
   STRANDED_HEALTH_FIELD,
+  STRANDED_THRESHOLD_ENV,
 } from './stranded-alert.js';
 
 const THRESHOLD_ENV = 'STRANDED_EXPOSURE_ALERT_THRESHOLD_USD';
@@ -258,5 +261,212 @@ describe('HU-306 · el indicador de exposición acumulada (AC-5)', () => {
     expect(getStrandedHealthField()).toEqual({
       [STRANDED_HEALTH_FIELD]: 'unknown',
     });
+  });
+});
+
+/**
+ * Fix-pack observabilidad 2026-07-31 — el aviso de arranque del UMBRAL.
+ *
+ * LO QUE SE AFIRMA ACÁ. Que el arranque distingue TRES estados y que el número que
+ * imprime es EL MISMO que usa el camino de alerta. La segunda parte es la que importa: un
+ * arranque que dice `19` mientras la alerta usa otro número es un log que MIENTE, y eso es
+ * peor que no tener log. Por eso el valor no se afirma por separado, se ATA contra el
+ * `thresholdUsd` que sale del log de alerta real.
+ *
+ * NADA DE ESTO CAMBIA LA POLÍTICA: con la env ausente la alerta sigue apagada, y eso
+ * también se afirma acá para que un cambio de comportamiento no se cuele como
+ * "observabilidad".
+ */
+describe('fix-pack 2026-07-31 · el arranque dice en qué estado quedó el umbral', () => {
+  const alertaDelLog = () =>
+    logSpy.error.mock.calls.find(
+      (c) =>
+        (c[0] as Record<string, unknown>)?.alert ===
+        'COMPOSE_STRANDED_PAYMENT_EXPOSURE_HIGH',
+    );
+
+  it('el nombre de la env que se reporta es el que se lee de verdad', () => {
+    // Sin esto, el aviso podría estar mirando una variable que no existe y decir siempre
+    // "ausente" con toda la razón del mundo.
+    expect(STRANDED_THRESHOLD_ENV).toBe(THRESHOLD_ENV);
+    expect(describeStrandedThresholdStartup().setting).toBe(THRESHOLD_ENV);
+  });
+
+  it.each([
+    undefined,
+    '',
+    '   ',
+  ])('AUSENTE (%s): se dice que la alerta está apagada A PROPÓSITO, y NO como un error', (raw) => {
+    if (raw === undefined) delete process.env[THRESHOLD_ENV];
+    else process.env[THRESHOLD_ENV] = raw;
+
+    const report = describeStrandedThresholdStartup();
+
+    expect(report.state).toBe('unset');
+    // Colapsar esto con "ilegible" sería exactamente el error que el aviso corrige: un
+    // grito por una alerta que nadie encendió entrena al operador a ignorar el log.
+    expect(report.level).toBe('info');
+    expect(report.level).not.toBe('warn');
+    expect(report.value).toBe('(unset)');
+    expect(report.message).toMatch(/NO ESTA CONFIGURADA/);
+    expect(report.message).toMatch(/APAGADA a proposito/);
+    expect(report.message).toMatch(/NO ES UN ERROR/);
+    // Y ninguno de los textos del caso ilegible aparece acá.
+    expect(report.message).not.toMatch(/ILEGIBLE/);
+    expect(report.message).not.toContain('⚠️');
+  });
+
+  it.each([
+    undefined,
+    '',
+    '   ',
+  ])('AUSENTE (%s): la POLÍTICA no cambia — la alerta sigue sin sonar y sin tocar la base', async (raw) => {
+    if (raw === undefined) delete process.env[THRESHOLD_ENV];
+    else process.env[THRESHOLD_ENV] = raw;
+
+    describeStrandedThresholdStartup();
+    const field = getStrandedHealthField();
+    await flush();
+    await refreshStrandedExposure();
+
+    expect(field).toEqual({});
+    expect(mockCount).not.toHaveBeenCalled();
+    expect(alertaDelLog()).toBeUndefined();
+  });
+
+  it.each([
+    '1O',
+    'abc',
+    'NaN',
+    '0',
+    '-1',
+    '1,5',
+    '19 USD',
+    'Infinity',
+  ])('ILEGIBLE (%s): se GRITA, con el valor crudo, y NUNCA se reporta como ausente', (raw) => {
+    process.env[THRESHOLD_ENV] = raw;
+
+    const report = describeStrandedThresholdStartup();
+
+    expect(report.state).toBe('unreadable');
+    expect(report.state).not.toBe('unset');
+    // Es el estado que amerita el grito: la env está puesta y no hace nada.
+    expect(report.level).toBe('warn');
+    expect(report.message).toContain('⚠️');
+    expect(report.message).toMatch(/ILEGIBLE/);
+    // El valor crudo va en el mensaje Y en el campo estructurado: sin verlo, el operador
+    // no puede distinguir `1O` de `10` mirando el log.
+    expect(report.value).toBe(raw);
+    expect(report.message).toContain(raw);
+    // Y el texto del caso ausente NO sirve para este caso.
+    expect(report.message).not.toMatch(/NO ESTA CONFIGURADA/);
+    expect(report.message).not.toMatch(/NO ES UN ERROR/);
+  });
+
+  it.each([
+    '1O',
+    'abc',
+    '0',
+    '-1',
+  ])('ILEGIBLE (%s): y el grito está justificado — la alerta efectivamente NO suena', async (raw) => {
+    process.env[THRESHOLD_ENV] = raw;
+    // 999999 varados en la ventana: si el umbral se leyera, esto sería breach seguro.
+    mockCount.mockResolvedValue({
+      runs: 900,
+      exposureUsd: 999_999,
+      truncated: true,
+    });
+
+    const report = describeStrandedThresholdStartup();
+    await refreshStrandedExposure();
+
+    expect(report.state).toBe('unreadable');
+    // El síntoma que el aviso viene a delatar: silencio total, idéntico al de "no hay
+    // nada que alertar". El aviso de arranque es la ÚNICA señal que queda.
+    expect(getStrandedThresholdUsd()).toBeNull();
+    expect(mockCount).not.toHaveBeenCalled();
+    expect(alertaDelLog()).toBeUndefined();
+    expect(getStrandedHealthField()).toEqual({});
+  });
+
+  it('PUESTA Y LEGIBLE: con el 19 que hay en producción, el arranque imprime 19', () => {
+    process.env[THRESHOLD_ENV] = '19';
+
+    const report = describeStrandedThresholdStartup();
+
+    expect(report.state).toBe('active');
+    expect(report.level).toBe('info');
+    expect(report.value).toBe(19);
+    expect(report.message).toContain('19');
+    expect(report.message).toMatch(/ACTIVA/);
+    // No es un grito: la config está bien. Gritar acá sería ruido que se aprende a ignorar.
+    expect(report.message).not.toContain('⚠️');
+    expect(report.message).not.toMatch(/ILEGIBLE|NO ESTA CONFIGURADA/);
+  });
+
+  it.each([
+    '19',
+    '12.5',
+    '0.75',
+    '1000',
+    '  19  ',
+    '0.000001',
+  ])('ATADO (%s): el número que imprime el arranque es EL MISMO que usa la alerta', async (raw) => {
+    process.env[THRESHOLD_ENV] = raw;
+    const report = describeStrandedThresholdStartup();
+
+    // Se hace sonar la alerta de verdad y se lee el umbral que USÓ.
+    mockCount.mockResolvedValue({
+      runs: 7,
+      exposureUsd: Number(raw) + 1_000,
+      truncated: false,
+    });
+    await refreshStrandedExposure();
+
+    const alerta = alertaDelLog();
+    expect(alerta).toBeDefined();
+    const usadoPorLaAlerta = (alerta![0] as Record<string, unknown>)
+      .thresholdUsd;
+
+    // (a) el campo estructurado del log de arranque
+    expect(report.value).toBe(usadoPorLaAlerta);
+    // (b) y el número que el operador va a LEER en el texto. Si el arranque dice 19 y la
+    // alerta usa 13, el log miente y es peor que no tenerlo.
+    expect(report.message).toContain(String(usadoPorLaAlerta));
+    // (c) y las dos cosas son la misma lectura de env, no dos parseos paralelos.
+    expect(report.value).toBe(getStrandedThresholdUsd());
+  });
+
+  it('los tres estados son distinguibles entre sí: ningún texto sirve para otro caso', () => {
+    delete process.env[THRESHOLD_ENV];
+    const ausente = describeStrandedThresholdStartup();
+    process.env[THRESHOLD_ENV] = '1O';
+    const ilegible = describeStrandedThresholdStartup();
+    process.env[THRESHOLD_ENV] = '19';
+    const activa = describeStrandedThresholdStartup();
+
+    expect(new Set([ausente.state, ilegible.state, activa.state]).size).toBe(3);
+    expect(
+      new Set([ausente.message, ilegible.message, activa.message]).size,
+    ).toBe(3);
+    // El único que grita es el que tiene la env puesta sin efecto.
+    expect([ausente.level, ilegible.level, activa.level]).toEqual([
+      'info',
+      'warn',
+      'info',
+    ]);
+    // Y el valor reportado nunca es el mismo tipo de dato por casualidad.
+    expect(ausente.value).toBe('(unset)');
+    expect(ilegible.value).toBe('1O');
+    expect(activa.value).toBe(19);
+  });
+
+  it('el aviso de arranque no toca la base: es config, se evalúa una vez y no cuesta I/O', async () => {
+    for (const raw of ['19', '1O', '']) {
+      process.env[THRESHOLD_ENV] = raw;
+      describeStrandedThresholdStartup();
+    }
+    await flush();
+    expect(mockCount).not.toHaveBeenCalled();
   });
 });

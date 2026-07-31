@@ -65,6 +65,9 @@ let snapshot: Snapshot | null = null;
 let lastAttemptAt = 0;
 let inFlight = false;
 
+/** Nombre de la env del umbral. Se usa acá y en el aviso de arranque. */
+export const STRANDED_THRESHOLD_ENV = 'STRANDED_EXPOSURE_ALERT_THRESHOLD_USD';
+
 /**
  * Umbral en USD de exposición ACUMULADA en la ventana. Ausente, vacío o ilegible ⟹
  * `null` ⟹ feature OFF (patrón `getDriftThresholdAtomic`: se lee en CADA llamada, nunca
@@ -75,10 +78,93 @@ let inFlight = false;
  * de alerta gritando en cada request, o sea un canal que se aprende a ignorar.
  */
 export function getStrandedThresholdUsd(): number | null {
-  const raw = process.env.STRANDED_EXPOSURE_ALERT_THRESHOLD_USD;
+  const raw = process.env[STRANDED_THRESHOLD_ENV];
   if (!raw || raw.trim() === '') return null;
   const n = Number(raw.trim());
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Lo que el arranque tiene que decir sobre el umbral (fix-pack observabilidad 2026-07-31).
+ *
+ * QUÉ PROBLEMA RESUELVE. `PIPELINE_EXPOSURE_CEILING_USD` ya se delata al arrancar cuando
+ * está puesta y es ilegible (`isPipelineCeilingMisconfigured` → `src/index.ts`). El
+ * umbral, que es EL QUE DECIDE SI SUENA LA ALERTA, no decía nada: se leía en un solo
+ * lugar y sólo cuando el camino de alerta corría. Un `19` escrito `1O` no produce un
+ * error, produce UNA ALERTA QUE NUNCA SUENA, y eso es indistinguible de que no haya nada
+ * que alertar. O sea: el guard que avisa cuando algo va mal no avisaba cuando él mismo
+ * estaba mal configurado.
+ *
+ * TRES ESTADOS, NO DOS (misma doctrina que el campo de `/health`):
+ *
+ *   `unset`       ausente ⟹ la alerta está apagada A PROPÓSITO. Se dice, no se grita:
+ *                 no es un error.
+ *   `active`      puesta y legible ⟹ se imprime EL VALOR que quedó activo, para que el
+ *                 operador lo confirme desde el log y no desde el panel del hosting.
+ *   `unreadable`  puesta e ilegible ⟹ se grita, como el techo. Colapsar esto con `unset`
+ *                 sería exactamente el error que este aviso viene a corregir.
+ *
+ * EL VALOR SALE DE `getStrandedThresholdUsd()`, NO DE UN RE-PARSEO. Si el arranque
+ * dijera `19` y el camino de alerta usara otro número, el log MIENTE, y un log que miente
+ * es peor que no tenerlo. Por eso acá no se vuelve a interpretar la env: se llama a la
+ * MISMA función que usa `refreshStrandedExposure`, y el número del mensaje sale de esa
+ * misma variable.
+ *
+ * NO CAMBIA NINGUNA POLÍTICA: esto es observabilidad. Con la env ausente la alerta sigue
+ * apagada y `/health` sigue byte-idéntico (AC-10).
+ */
+export interface StrandedThresholdStartupReport {
+  state: 'unset' | 'active' | 'unreadable';
+  /** `warn` sólo para el estado que amerita un grito. */
+  level: 'info' | 'warn';
+  setting: typeof STRANDED_THRESHOLD_ENV;
+  /** El número activo, o el crudo que no se pudo leer, o `(unset)`. */
+  value: number | string;
+  message: string;
+}
+
+/** Se evalúa UNA vez, al arrancar (`src/index.ts`). No cuesta nada por request. */
+export function describeStrandedThresholdStartup(): StrandedThresholdStartupReport {
+  const raw = process.env[STRANDED_THRESHOLD_ENV];
+  // La MISMA lectura que usa el camino de alerta. Nunca un re-parseo paralelo.
+  const thresholdUsd = getStrandedThresholdUsd();
+
+  if (raw === undefined || raw.trim() === '') {
+    return {
+      state: 'unset',
+      level: 'info',
+      setting: STRANDED_THRESHOLD_ENV,
+      value: '(unset)',
+      message:
+        `${STRANDED_THRESHOLD_ENV} NO ESTA CONFIGURADA: la alerta de exposicion varada esta APAGADA a proposito. ` +
+        'El campo `strandedExposureBreached` no aparece en /health y no se hace ni una query. ' +
+        'Esto NO ES UN ERROR: seteala (USD, positivo) si queres encenderla. Ver .env.example.',
+    };
+  }
+
+  if (thresholdUsd === null) {
+    return {
+      state: 'unreadable',
+      level: 'warn',
+      setting: STRANDED_THRESHOLD_ENV,
+      value: raw,
+      message:
+        `⚠️  ${STRANDED_THRESHOLD_ENV} esta PUESTA pero es ILEGIBLE (valor: "${raw}"): ` +
+        'la alerta de exposicion varada esta APAGADA, exactamente como si la variable no existiera. ' +
+        'El sintoma de esto es una alerta que NUNCA suena, y eso se ve igual que "no hay nada que alertar". ' +
+        'Corregi el valor (USD, positivo, punto decimal: 19 o 19.5). Ver .env.example.',
+    };
+  }
+
+  return {
+    state: 'active',
+    level: 'info',
+    setting: STRANDED_THRESHOLD_ENV,
+    value: thresholdUsd,
+    message:
+      `${STRANDED_THRESHOLD_ENV} ACTIVA en USD ${thresholdUsd}: la alerta de exposicion varada suena cuando la ` +
+      'exposicion acumulada en la ventana supera ese monto. Es el mismo numero que usa el camino de alerta, no una copia.',
+  };
 }
 
 /** Ventana en minutos. Default 60 = 15× el período de poleo del monitor. */
