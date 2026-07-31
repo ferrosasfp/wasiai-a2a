@@ -9,6 +9,8 @@
 
 Protocolo y gateway HTTP para que un cliente encuentre agentes **por capacidad y no por dirección**, los **componga** en un flujo y **pague por uso**.
 
+**Solana es la red principal de este gateway, y su leg de liquidación está verificado en cadena**: el pago de abajo mueve USDC-SPL de verdad en devnet, y cualquiera lo puede comprobar contra el RPC público. Lo que esa transferencia prueba es el mecanismo, no un cobro a precio de lista: el monto movido es 0,000001 USDC contra un precio declarado de 0,03.
+
 Un cliente no necesita saber que existe `remit-corridor-fx-solana`. Pide "necesito una cotización de FX" y el gateway le devuelve quién puede hacerlo, en qué red cobra y cuánto sale. Después ejecuta el flujo con una sola llamada HTTP y el gateway se encarga del pago a cada agente.
 
 El gateway federa los catálogos de los marketplaces registrados: un agente publicado en cualquiera de ellos es descubrible desde cualquier app conectada. Esa es la tesis del repo: **el marketplace es una aplicación sobre el protocolo, no el protocolo**.
@@ -94,7 +96,9 @@ Ese 1% se subdivide en plataforma / creador / referido vía `SPLIT_BPS_*` en bas
 
 ## Neutralidad de red
 
-Que Solana sea la red principal es una decisión de **producto**, no un privilegio del diseño: en el código no hay una cadena cableada como especial. Hay un adaptador por red y un selector por request, y por eso agregar la siguiente cadena que pida un corredor es una carpeta más, no un rewrite.
+Que Solana sea la red principal es una decisión de **producto**, no un privilegio del diseño: en qué cadena corre un request se resuelve por configuración y por el agent card, no por una rama que le dé a una red capacidades que las otras no tienen. Hay un adaptador por red y un selector por request, y por eso agregar la siguiente cadena que pida un corredor es una carpeta más, no un rewrite.
+
+Hay un nombre de cadena cableado en el código, y es un default y no un privilegio: si no están seteadas ni `WASIAI_A2A_CHAINS` ni `WASIAI_A2A_CHAIN`, `src/adapters/registry.ts` cae a `kite-ozone-testnet`, que es por lo que la tabla de abajo lo marca como default de cobro. Cualquier deployment que setee la variable nunca llega a ese literal.
 
 El caso concreto que motivó el diseño es una remesa. El principal de la remesa viaja por Solana, el marketplace de agentes corre sobre Avalanche, y la liquidación la coordina un servicio aparte (`wasiai-facilitator`) con un adaptador por red. Ninguna de las tres piezas necesita que las otras dos estén en su cadena.
 
@@ -142,6 +146,17 @@ Las tres filas EVM se comprueban mandando `x-payment-chain` a `POST /compose` si
 
 Estado del catálogo en ese mismo deployment: 23 agentes descubribles (medido el 2026-07-30 contra `GET /discover`), de un marketplace federado más los publicados directo contra el gateway. Dos cobran en Solana devnet: son los de la línea de remesa que declaran cadena de cobro. Los agentes en sí no viven en este repo: este repo es el protocolo y el gateway, y el catálogo es de terceros.
 
+Ese `23` no es un número redondeado, y el endpoint que lo devuelve dice cuánto se cree a sí mismo. La misma respuesta trae `catalogStatus` y el desglose por fuente; el 2026-07-31 decía:
+
+```bash
+curl -s "$GW/capabilities" | jq '{catalogStatus, sources}'
+# "catalogStatus": "truncated"
+# "sources": [ {"name":"WasiAI","state":"truncated","rows":20,"truncationEvidence":"cursor"},
+#              {"name":"self-published","state":"ok","rows":3} ]
+```
+
+Leído en voz alta: el marketplace federado devolvió 20 filas y dejó un cursor no vacío, así que probó que hay más que no mandó; los 3 publicados directo contra el gateway están probados completos. Una fuente es `ok` sólo con evidencia, o el cursor agotado o menos filas que el límite que se le envió; la que contesta sin ninguna de las dos queda `unverified`, y la que no se pudo consultar queda `failed` con `rows: null` en vez de `rows: 0`, porque "no pude preguntar" no es "no tiene". Lo mismo el roll-up: `complete` significa que todas las fuentes probaron haber dado todo, no que ninguna se quejó. El catálogo prefiere declarar que puede estar incompleto antes que publicar un total que no puede respaldar, que es también por lo que ese número puede moverse sin que nada esté roto.
+
 Sobre las apps que lo consumen, con el tiempo verbal correcto:
 
 - **Chaski** (la app de remesas) usa este gateway hoy **solo para el agente de cotización de FX**, y detrás de una bandera que arranca apagada. La identidad del usuario y el desembolso final se integran punto a punto, sin pasar por el protocolo. Cualquier afirmación de que la remesa entera se orquesta acá es falsa.
@@ -162,7 +177,7 @@ Es la red principal, así que es la que más letra chica merece. `solana-devnet`
 
 **Entrada de dinero, qué sí y qué no:**
 
-- **Sí: depósito prepago en Solana** (`deposit-account.ts` + `deposit-verifier.ts`). `POST /auth/deposit` acepta una firma Solana, la verifica en cadena contra la cuenta de depósito y acredita presupuesto. El destino que se publica en `GET /auth/deposit-info` es la **ATA** derivada del par (mint, owner), no una wallet: en Solana los tokens no viven en la cuenta. Va detrás de su propio flag (`A2A_DEPOSIT_ENABLED_SOLANA`, separado del flag del rail a propósito) y exige que el depositante coincida con la funding wallet declarada de la clave.
+- **Depósito prepago en Solana: implementado y testeado, apagado en el deployment de producción.** Son dos cosas distintas, las dos ciertas, y conviene no confundirlas. *En el código* (`deposit-account.ts` + `deposit-verifier.ts`, con el flag prendido y apagado cubiertos en `src/routes/auth.solana-deposit.test.ts`): `POST /auth/deposit` acepta una firma Solana, la verifica en cadena contra la cuenta de depósito y acredita presupuesto, y el destino que publica `GET /auth/deposit-info` es la **ATA** derivada del par (mint, owner), no una wallet, porque en Solana los tokens no viven en la cuenta. Va detrás de su propio flag (`A2A_DEPOSIT_ENABLED_SOLANA`, separado del flag del rail a propósito) y exige que el depositante coincida con la funding wallet declarada de la clave. *En el deployment que está arriba*, ese flag está apagado, y el endpoint lo dice: `curl -s "$GW/auth/deposit-info"` devuelve `kite-ozone-testnet`, `avalanche-fuji` y `base-sepolia`, **sin ninguna entrada Solana** (medido el 2026-07-31). `src/routes/auth/deposit.ts` publica la entrada Solana sólo si el flag está prendido, a propósito: anunciar una cuenta de depósito sin un verificador cableado detrás es invitar plata que después nadie puede acreditar. Así que hoy no hay destino publicado para fondear una clave prepaga en `solana-devnet` contra el gateway en vivo.
 - **No: x402 entrante.** El challenge de entrada sigue siendo EVM. `x-payment-chain: solana-devnet` corta con `400 CHAIN_INBOUND_PAYMENT_UNSUPPORTED` (`src/middleware/x402.ts`), un error tipado que además dice las dos salidas: otra cadena para el x402, o clave prepaga para seguir operando en `solana-devnet`.
 
 Encenderlo: `SOLANA_ADAPTER_ENABLED=true`, `solana-devnet` dentro de `WASIAI_A2A_CHAINS`, `SOLANA_OPERATOR_PRIVATE_KEY` (base58, con SOL de devnet para gas) y `WASIAI_DOWNSTREAM_X402=true`. Los defaults de RPC (`https://api.devnet.solana.com`), mint USDC de devnet (el de Circle, `4zMMC9sr…`), decimales, commitment y CAIP-2 están en `.env.example` y no hace falta tocarlos.
@@ -254,7 +269,7 @@ Publicar un agente es gratis a propósito: cobrar el alta desincentiva justo lo 
 
 Leer una tarea es gratis a propósito. El ciclo de vida A2A se maneja por polling de `GET /tasks/:id`, así que cobrar por lectura significaba que un poll cada 5 segundos costaba 720 USD por hora: el precio peleaba contra el protocolo. Las lecturas gratis no emiten challenge `402` porque no hay nada que pagar.
 
-**Identidad y presupuesto**: `POST /auth/agent-signup`, `GET /auth/me`, `POST /auth/deposit` (verifica el depósito on-chain antes de acreditar; acepta una firma Solana o un hash EVM, y rechaza antes de salir a la red si la referencia no corresponde a la cadena pedida), `POST|GET|DELETE /auth/key-session`, `POST|GET|DELETE /auth/delegation`, `PUT|GET|DELETE /auth/keys/me/spend-policies`, `POST /auth/erc8004/bind`, `GET /auth/erc8004/resolve/:token_id`. `POST /auth/bind/:chain` sigue devolviendo `501`: es un placeholder declarado, no una función.
+**Identidad y presupuesto**: `POST /auth/agent-signup`, `GET /auth/me`, `POST /auth/deposit` (verifica el depósito on-chain antes de acreditar; acepta una firma Solana o un hash EVM, y rechaza antes de salir a la red si la referencia no corresponde a la cadena pedida; el leg Solana va detrás de `A2A_DEPOSIT_ENABLED_SOLANA` y está apagado en el deployment en vivo, ver [Rail Solana](#rail-solana)), `POST|GET|DELETE /auth/key-session`, `POST|GET|DELETE /auth/delegation`, `PUT|GET|DELETE /auth/keys/me/spend-policies`, `POST /auth/erc8004/bind`, `GET /auth/erc8004/resolve/:token_id`. `POST /auth/bind/:chain` sigue devolviendo `501`: es un placeholder declarado, no una función.
 
 **Pagos programados**: `POST /payments/session` (medido, con vouchers y cierre) y `POST /payments/upto` (tope firmado por ambas partes), más sus `/settle`, `/close` y `/dispute`.
 
