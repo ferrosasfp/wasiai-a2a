@@ -153,7 +153,7 @@ leyendo/escribiendo idéntico.)
 ### MNR-2 — `BACKLOG.md` / `HACKATHON-FINAL.md` modificados fuera del Scope IN
 - **Categoría**: Scope Drift
 - **Archivo**: `BACKLOG.md` (+66 líneas, E15/E16 backlog) y `HACKATHON-FINAL.md` (+1 línea,
-  resultado 3er puesto). Working tree, no commiteado en esta HU.
+  resultado 2do puesto). Working tree, no commiteado en esta HU.
 - **Por qué**: el Scope IN declara 4 archivos. Estos 2 docs no están en la lista. Verificado
   que su contenido NO tiene relación con SEC-02c (grep "sec-02c|registries|kite_schema" → 0).
   Es drift pre-existente del branch (grooming/nota de hackathon), no trabajo de esta HU.

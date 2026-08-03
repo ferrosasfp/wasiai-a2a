@@ -1,7 +1,7 @@
 # WasiAI A2A — Cierre al 100% (testnet / idea-validation)
 
 > **Fecha**: 2026-06-23 · **Estado**: ✅ 100% para testnet/idea-validation · Mainnet = track posterior (ver §5).
-> Reporte de cierre consolidado. La submission del hackathon (3er puesto) vive en `HACKATHON-FINAL.md` (intacta).
+> Reporte de cierre consolidado. La submission del hackathon (2do puesto) vive en `HACKATHON-FINAL.md` (intacta).
 
 ## 1. Estado del producto
 - **1656 tests pasando / 0 failed** (4 skipped e2e DB-gated), `tsc` 0 errores, `biome` 0.
