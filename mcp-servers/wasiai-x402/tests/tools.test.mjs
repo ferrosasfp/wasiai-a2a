@@ -142,9 +142,82 @@ test('T25 (AC-1): discover_agents builds GET capabilities with query/maxPrice/ca
     assert.equal(calls.length, 1);
     const u = new URL(calls[0].url);
     assert.equal(u.pathname, '/api/v1/capabilities');
-    assert.equal(u.searchParams.get('query'), 'AVAX price');
+    // WKH-322: el nombre del campo de ENTRADA de la tool sigue siendo `query`
+    // (contrato MCP publicado, README:120); el nombre que viaja POR EL CABLE es
+    // `q`, que es el que `/discover` de a2a acepta. `query` en el cable llega
+    // hasta a2a verbatim (v2 `forward-handler.ts` copia toda clave) y post-WKH-322
+    // devuelve 400 UNKNOWN_DISCOVER_PARAM.
+    assert.equal(u.searchParams.get('q'), 'AVAX price');
+    assert.equal(u.searchParams.get('query'), null, 'la clave `query` no debe viajar por el cable');
     assert.equal(u.searchParams.get('maxPrice'), '10');
     assert.equal(u.searchParams.get('capabilities'), 'defi,price');
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+// ── T-322-A (WKH-322 BLQ-MED-2) ────────────────────────────────────────────
+test('T-322-A: discover_agents con status no-2xx NO devuelve el error como resultado', async () => {
+  const errBody = {
+    error: "unknown parameter 'query'. /discover accepts: allowTrial, capabilities, ...",
+    code: 'UNKNOWN_DISCOVER_PARAM',
+  };
+  const { fetchFn } = makeFetchFake([{ status: 400, body: errBody }]);
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { discoverAgentsHandler } = await loadHandlers();
+    const r = await discoverAgentsHandler({ query: 'AVAX' }, fakeConfig());
+    // Lo que NO puede pasar: que el objeto de error salga en el lugar del resultado.
+    assert.notDeepEqual(r, errBody, 'el body de error no puede devolverse tal cual');
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 400);
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+// ── T-322-A2 (WKH-322 BLQ-MED-2) ───────────────────────────────────────────
+// Separado de T-322-A a propósito: son dos propiedades distintas ("falla" y
+// "dice por qué") y un `it` con las dos se comporta como un solo test contra
+// los dos mutantes (auto-blindaje 14:40).
+test('T-322-A2: el fallo de discover_agents dice POR QUÉ, no sólo que falló', async () => {
+  const errBody = {
+    error: "unknown parameter 'query'. /discover accepts: allowTrial, capabilities, ...",
+    code: 'UNKNOWN_DISCOVER_PARAM',
+  };
+  const { fetchFn } = makeFetchFake([{ status: 400, body: errBody }]);
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { discoverAgentsHandler } = await loadHandlers();
+    const r = await discoverAgentsHandler({ query: 'AVAX' }, fakeConfig());
+    assert.match(r.error, /400/);
+    assert.match(r.error, /unknown parameter/);
+  } finally {
+    cap.restore();
+    globalThis.fetch = origFetch;
+  }
+});
+
+// ── T-322-B (WKH-322 BLQ-MED-2) ────────────────────────────────────────────
+test('T-322-B: discover_agents con 502 de cuerpo NO-JSON falla sin tirar', async () => {
+  // Un edge proxy contesta text/html: leer el body no puede romper el handler
+  // ANTES de que el status se evalúe.
+  const { fetchFn } = makeFetchFake([{ status: 502, body: '<html>bad gateway</html>' }]);
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchFn;
+  const cap = captureStderr();
+  try {
+    const { discoverAgentsHandler } = await loadHandlers();
+    const r = await discoverAgentsHandler({ query: 'AVAX' }, fakeConfig());
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 502);
+    assert.match(r.error, /502/);
   } finally {
     cap.restore();
     globalThis.fetch = origFetch;
