@@ -35,6 +35,10 @@ import type {
   AgentStandingCounters,
   AgentStandingKind,
 } from '../types/index.js';
+// R-4: la clasificación de capacidades vive en UN solo módulo y se IMPORTA. No
+// se copia acá ni una entrada de la lista: ver `lib/capability-risk.ts:12-19`.
+// Módulo LEAF también, así que no rompe la razón por la que este archivo es leaf.
+import { needsTightTrialQuota } from './capability-risk.js';
 // AR fix-pack BLQ-MED-3: el SORTEO del cupo reusa la MISMA fuente inyectable que
 // el desempate del ranking (HU-208). Módulo LEAF también, así que no rompe la
 // razón por la que este archivo es leaf.
@@ -74,6 +78,27 @@ export function resolveTrialMaxAgentsPerPublisher(): number {
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
   return Number.isFinite(n) && n > 0 ? n : 2;
 }
+
+/**
+ * `M_desembolso` — cupo por publicador para las capacidades que ENTREGAN VALOR.
+ *
+ * Es la regla R-4 de
+ * `doc/sdd/211-wkh-313-primer-trabajo-agentes-sin-historial/residuales.md:18-23`,
+ * escrita ahí desde WKH-313 y hasta hoy sin nadie que la hiciera cumplir:
+ * `prepare` y `submit` resuelven el agente por separado, la clave del memo mitiga
+ * la divergencia DENTRO de una request pero no ENTRE las dos, y mientras eso siga
+ * así «la regla es `M = 1` para capacidades de desembolso».
+ *
+ * ⚠️ NO ES ENV, a diferencia de `N`/`T`/`M`/`F`, y la asimetría es deliberada.
+ * Esos cuatro son números de operación marcados `[DECIDE FOUNDER]`: moverlos
+ * ajusta cuánto dura el estreno o cuán tolerante es. Éste no ajusta nada: es el
+ * techo que hace que apoderarse del `depositAddress` cueste N identidades
+ * registradas en vez de 1. Una env que pudiera subirlo a 2 volvería a abrir
+ * exactamente el ataque que ya está MEDIDO (`residuales.md:42-50`: un sybil con 20
+ * de 22 candidatos se queda los dos cupos en ~82% de las requests), y lo abriría
+ * desde un panel de configuración, sin pasar por una revisión de código.
+ */
+export const TRIAL_MAX_DISBURSEMENT_AGENTS_PER_PUBLISHER = 1;
 
 /**
  * `F` — CALLERS DISTINTOS que tienen que haber registrado un `failed` para anular
@@ -235,12 +260,48 @@ export interface TrialCandidate {
    * request, NUNCA el `slug` (ver `selectTrialAdmitted`).
    */
   createdAt?: string | undefined;
+  /**
+   * Las capacidades que el agente DECLARA (`Agent.capabilities`). Deciden a qué
+   * cupo entra: el estrecho de desembolso o el ancho del publicador.
+   *
+   * OBLIGATORIO a propósito (no opcional, no `| undefined`): que el compilador
+   * exija el dato en cada sitio de construcción es lo que impide que un call-site
+   * nuevo se olvide de pasarlo y caiga, POR OMISIÓN, en el cupo ancho. Un arreglo
+   * VACÍO es una respuesta legítima y cae del lado restrictivo, ver
+   * `lib/capability-risk.ts` `classifyCapabilities`.
+   */
+  capabilities: readonly unknown[];
 }
 
 /**
- * Aplica el cupo `M` por publicador: dentro de cada ancla retienen el estreno los
- * `M` candidatos más antiguos por `created_at`, y cuando no hay `created_at`
- * comparable, los `M` que salgan sorteados en ESTA request.
+ * Aplica el cupo por publicador: dentro de cada ancla retienen el estreno los
+ * candidatos más antiguos por `created_at`, y cuando no hay `created_at`
+ * comparable, los que salgan sorteados en ESTA request.
+ *
+ * ── El cupo es por PUBLICADOR **Y** por CAPACIDAD (R-4) ─────────────────────
+ * Se aplican DOS cupos, en este orden, y los dos POR ANCLA:
+ *
+ *   1. `TRIAL_MAX_DISBURSEMENT_AGENTS_PER_PUBLISHER` (= 1) sobre los candidatos
+ *      que entregan valor o que no se pudieron clasificar
+ *      (`lib/capability-risk.ts` `needsTightTrialQuota`);
+ *   2. `M` (`TRIAL_MAX_AGENTS_PER_PUBLISHER`) sobre los que quedaron, contando
+ *      TODOS juntos: es el cupo de siempre y sigue siendo el techo del total.
+ *
+ * Los dos, y no uno u otro. Un cupo por capacidad que REEMPLAZARA al ancho le
+ * daría a un publicador `M` estrenos por CADA capacidad que declare, o sea que
+ * endurecer el control lo habría aflojado. Y un cupo ancho solo es lo que había
+ * hasta ahora: `TRIAL_MAX_AGENTS_PER_PUBLISHER` no distingue si el agente cotiza
+ * o si paga.
+ *
+ * El orden de las dos etapas no es cosmético: si el cupo ancho corriera primero,
+ * un publicador que llena sus `M` vacantes con agentes de desembolso dejaría a su
+ * agente inocuo afuera por culpa de candidatos que el cupo estrecho iba a
+ * descartar igual.
+ *
+ * Las dos cuentas se llevan POR ANCLA: dos publicadores distintos tienen un cupo
+ * de desembolso cada uno, no uno entre los dos. El cupo ENCARECE el ataque (una
+ * identidad registrada por intento), no lo prohíbe; R-1 de `residuales.md:9-16`
+ * deja escrito por qué el ancla-cuenta es lo mejor disponible hoy.
  *
  * ── Orden dentro de un ancla ────────────────────────────────────────────────
  *   1. `created_at` ascendente, cuando LOS DOS lo tienen (self-published: el dato
@@ -287,37 +348,80 @@ export function selectTrialAdmitted(
   cands: TrialCandidate[],
   m: number = resolveTrialMaxAgentsPerPublisher(),
 ): Set<string> {
-  const byAnchor = new Map<string, TrialCandidate[]>();
-  for (const c of cands) {
-    let group = byAnchor.get(c.anchor);
-    if (!group) {
-      group = [];
-      byAnchor.set(c.anchor, group);
-    }
-    group.push(c);
-  }
-
   // UNA sola asignación para todos los candidatos, antes de cualquier `sort`.
   const draw = assignTiebreaks(cands);
 
-  const admitted = new Set<string>();
-  for (const group of byAnchor.values()) {
-    const ordered = [...group].sort((a, b) => {
-      const aCreated = a.createdAt;
-      const bCreated = b.createdAt;
-      if (aCreated !== undefined && bCreated !== undefined) {
-        if (aCreated !== bCreated) return aCreated < bCreated ? -1 : 1;
-      } else if (aCreated !== undefined) {
-        return -1;
-      } else if (bCreated !== undefined) {
-        return 1;
+  const order = (a: TrialCandidate, b: TrialCandidate): number => {
+    const aCreated = a.createdAt;
+    const bCreated = b.createdAt;
+    if (aCreated !== undefined && bCreated !== undefined) {
+      if (aCreated !== bCreated) return aCreated < bCreated ? -1 : 1;
+    } else if (aCreated !== undefined) {
+      return -1;
+    } else if (bCreated !== undefined) {
+      return 1;
+    }
+    const drawn = compareTiebreak(draw, a, b);
+    if (drawn !== 0) return drawn;
+    if (a.slug !== b.slug) return a.slug < b.slug ? -1 : 1;
+    return 0;
+  };
+
+  /** Retiene, POR ANCLA, los `cap` primeros según `order`. */
+  const applyQuota = (
+    pool: TrialCandidate[],
+    cap: number,
+  ): TrialCandidate[] => {
+    const groups = new Map<string, TrialCandidate[]>();
+    for (const c of pool) {
+      let group = groups.get(c.anchor);
+      if (!group) {
+        group = [];
+        groups.set(c.anchor, group);
       }
-      const drawn = compareTiebreak(draw, a, b);
-      if (drawn !== 0) return drawn;
-      if (a.slug !== b.slug) return a.slug < b.slug ? -1 : 1;
-      return 0;
-    });
-    for (const c of ordered.slice(0, m)) admitted.add(c.slug);
-  }
+      group.push(c);
+    }
+    const kept = new Set<TrialCandidate>();
+    for (const group of groups.values()) {
+      for (const c of [...group].sort(order).slice(0, cap)) kept.add(c);
+    }
+    // Se devuelve en el ORDEN ORIGINAL del pool. La etapa siguiente vuelve a
+    // ordenar por `order`, así que el orden del arreglo no decide nada (CD-15).
+    return pool.filter((c) => kept.has(c));
+  };
+
+  const needsTight = new Set<TrialCandidate>(
+    cands.filter((c) => needsTightTrialQuota(c.capabilities)),
+  );
+
+  // ETAPA 1 · el cupo ESTRECHO, PRIMERO. Los que entregan valor (o los que no se
+  // pudieron clasificar) compiten entre ellos, DENTRO de su ancla, por UNA sola
+  // entrada. Va antes que el cupo ancho por dos motivos: el que ya perdió acá no
+  // le consume una vacante del cupo ancho a un hermano inocuo, y el corte más
+  // restrictivo no queda nunca detrás de uno más laxo que podría volverlo
+  // irrelevante.
+  const tightWinners = new Set<TrialCandidate>(
+    applyQuota(
+      cands.filter((c) => needsTight.has(c)),
+      TRIAL_MAX_DISBURSEMENT_AGENTS_PER_PUBLISHER,
+    ),
+  );
+
+  // ETAPA 2 · el cupo ANCHO de siempre, sobre los que quedaron: `M` por ancla,
+  // contando TODOS los candidatos juntos. Que sea la última etapa es lo que impide
+  // que el total por publicador SUBA.
+  //
+  // El corte termina ACÁ, sobre los CANDIDATOS: lo que sale de esta función ya es
+  // el conjunto final de admitidos. Nada aguas abajo vuelve a recortar por cupo;
+  // el `sort` del ranking (`services/discovery.ts:623-632`) sólo ORDENA lo que ya
+  // pasó por acá. Un cupo aplicado DESPUÉS de ese sorteo no protegería nada,
+  // porque el sybil ya se habría llevado sus entradas al bombo.
+  const survivors = applyQuota(
+    cands.filter((c) => !needsTight.has(c) || tightWinners.has(c)),
+    m,
+  );
+
+  const admitted = new Set<string>();
+  for (const c of survivors) admitted.add(c.slug);
   return admitted;
 }

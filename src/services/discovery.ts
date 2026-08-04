@@ -983,6 +983,11 @@ export const discoveryService = {
           slug: a.slug,
           anchor: `owner:${anchor.ownerRef}`,
           createdAt: anchor.createdAt,
+          // R-4: lo que el agente DECLARA servir decide si compite por el cupo
+          // estrecho de desembolso o por el ancho del publicador. Se pasa crudo:
+          // clasificarlo es trabajo de `lib/capability-risk.ts`, y una segunda
+          // lectura acá sería una segunda copia de esa política.
+          capabilities: a.capabilities,
         });
         continue;
       }
@@ -994,7 +999,11 @@ export const discoveryService = {
       // Y sí, el ancla es el registry ENTERO y no el publicador, porque el card
       // federado no dice quién lo publicó: el cupo sub-admite en un registry
       // multi-publicador, que es la dirección conservadora.
-      candidates.push({ slug: a.slug, anchor: `registry:${a.registry_id}` });
+      candidates.push({
+        slug: a.slug,
+        anchor: `registry:${a.registry_id}`,
+        capabilities: a.capabilities,
+      });
     }
 
     return selectTrialAdmitted(candidates);
