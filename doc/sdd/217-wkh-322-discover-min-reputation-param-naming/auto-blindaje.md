@@ -280,8 +280,20 @@ No todo lo señalado entra. Queda escrito para que nadie lo lea después como ol
 - **Aplicar en**: todo guard, lint, scanner o invariante nuevo. **Antes de
   declarar su alcance, plantar a propósito una docena de variantes y medir cuáles
   pasan mudas.** La lista de límites se escribe con esa medición, no con lo que
-  uno recuerda haber programado. Y ningún ítem de esa lista vale si no tiene un
-  caso que lo congele.
+  uno recuerda haber programado. Y todo ítem de esa lista **que sea fixturable**
+  tiene que tener su caso que lo congele; el que no lo sea hay que marcarlo como
+  tal, porque un ítem sin fixture y sin marca no se distingue de uno que dejé sin
+  hacer.
+  **Corregido en el fix-pack 4** (AR-4 `MNR-2`): la frase original decía "ningún
+  ítem de esa lista vale si no tiene un caso que lo congele" y **la propia lista
+  no lo cumplía** — `params.set(KEY, x)` estaba declarado desde el principio y era
+  el único ítem declarado sin fixture, pudiendo tenerlo (`SP_RE:160-161` exige una
+  comilla pegada al `set(`, o sea que le entra a `scanFile` como cualquier otra
+  forma plantada). Ya tiene el suyo, con su control. El que **genuinamente no es
+  fixturable** es el helper cross-file (`callDiscover({ query })` con el `set(k,v)`
+  en otro archivo): congelarlo exigiría dos archivos y el extractor trabaja de a
+  uno, así que ahí la declaración es todo lo que hay y hay que decirlo en vez de
+  taparlo con un universal que suena mejor.
 
 ### [2026-08-04 03:05] Fix-pack 3 — "¿leí algo?" no es "¿leí todo?"
 - **Error**: `T-CS-3` existe textualmente para que "no sé qué manda este

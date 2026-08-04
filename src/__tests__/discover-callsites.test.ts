@@ -53,7 +53,9 @@
  *     gemela del lado body `{ [k]: v }`. Ningún análisis estático las alcanza.
  *   - un helper propio que reciba las claves de afuera
  *     (`callDiscover({ query })` con el `set(k, v)` en otro archivo): el
- *     extractor no cruza archivos.
+ *     extractor no cruza archivos. ⚠️ ES EL ÚNICO ÍTEM DE ESTA LISTA SIN FIXTURE
+ *     en `T-CS-4`, y no por descuido: congelarlo exige DOS archivos y `scanFile`
+ *     trabaja de a uno. Acá la declaración es todo lo que hay.
  *   - `new URLSearchParams([['query', …]])` — array de pares (el literal de
  *     OBJETO sí se lee).
  *   - la query string CONCATENADA: `'/discover' + '?query=' + v`. `QS_RE` exige
@@ -904,6 +906,35 @@ describe('WKH-322 · T-CS-4: el extractor contra formas plantadas', () => {
     );
     expect(r.hits).toEqual([]);
     expect(r.opaquePosts).toEqual([]);
+  });
+
+  it('LÍMITE DECLARADO: la clave COMPUTADA `params.set(KEY, x)` pasa muda', () => {
+    // La gemela del de arriba, del lado GET. Estaba declarada en "QUÉ NO CUBRE"
+    // desde el principio y era el único ítem declarado que NO tenía caso, o sea
+    // que la lista se creía a sí misma. `SP_RE` exige una comilla pegada al
+    // `set(`, así que un identificador pelado no rinde clave.
+    const r = scanText(
+      [
+        'const url = new URL("https://gw.wasiai.io/discover");',
+        'url.searchParams.set(KEY, value);',
+        'await fetch(url);',
+      ].join('\n'),
+    );
+    expect(r.hits).toEqual([]);
+    expect(r.opaquePosts).toEqual([]);
+  });
+
+  it('CONTROL: el mismo `set()` con la clave ENTRECOMILLADA sí se lee', () => {
+    // Sin este control el de arriba pasaría igual con un extractor que no lea
+    // NINGÚN `searchParams.set`, y el límite quedaría midiendo otra cosa.
+    const r = scanText(
+      [
+        'const url = new URL("https://gw.wasiai.io/discover");',
+        'url.searchParams.set("query", value);',
+        'await fetch(url);',
+      ].join('\n'),
+    );
+    expect(r.hits.map((h) => `${h.key}:${h.how}`)).toEqual(['query:searchParams']);
   });
 
   // ── Las formas que AR-3 plantó y pasaban MUDAS ───────────────────────────
