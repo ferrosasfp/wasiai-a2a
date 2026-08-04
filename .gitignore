@@ -59,6 +59,14 @@ backups/
 
 # Local ops/smoke helpers — machine-specific (abs paths + dev-tokens.env), NOT for CI.
 # El settlement downstream x402 ya se validó on-chain (Base tx 0x9fb7…, Avax tx 0xb9cf…).
+#
+# NOTA (WKH-322 AR-3): `smoke-base-downstream.mjs:116` llama a `/discover`. El
+# guard `src/__tests__/discover-callsites.test.ts` SÍ barre los gitignoreados,
+# pero sólo en la corrida LOCAL: `actions/checkout` no los materializa, así que
+# en CI ese archivo no existe y nadie verifica sus claves. Es el signo INVERTIDO
+# de la nota de más abajo (línea ~200) sobre `verify-rls-enabled.mjs`: allá
+# ignorar el archivo ROMPÍA CI; acá lo deja sin cubrir en silencio. Si este
+# script pasa a ser parte del contrato verificado, sacarlo del .gitignore.
 /scripts/diag-base-settle.mjs
 /scripts/diag-base-settle-run.sh
 /scripts/smoke-base-downstream.mjs

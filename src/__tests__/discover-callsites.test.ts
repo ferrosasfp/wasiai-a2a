@@ -44,6 +44,13 @@
  *   - ventanas que esperan el rechazo (mencionan `UNKNOWN_DISCOVER_PARAM`
  *     cerca): son los tests del propio guard, donde mandar la clave mala es el
  *     punto.
+ *   - los archivos GITIGNOREADOS se barren, pero SÓLO en la corrida local:
+ *     `actions/checkout` no los materializa, así que en CI no existen y el
+ *     barrido no los ve. Hoy hay dos que llaman al endpoint —
+ *     `scripts/smoke-base-downstream.mjs` (`.gitignore:72`) y
+ *     `scripts/smoke-prod-via-app-wasiai.mjs` (`.gitignore:205`) — y para ellos
+ *     la corrida del dev antes de commitear es la única línea de defensa. Ver
+ *     `T-CS-0b`.
  *
  * SI ESTE TEST DA UN FALSO POSITIVO, no lo silencies con una excepción por
  * archivo: o el extractor está atribuyendo el body al endpoint equivocado
@@ -149,25 +156,58 @@ interface OpaquePost {
 
 // ── Enumeración de archivos ────────────────────────────────────────────────
 
+function gitLsFiles(args: string[]): string[] {
+  // Si git no está, esto tira — un barrido vacío que pasa en verde es
+  // justamente el modo de falla que este archivo viene a matar.
+  const out = execFileSync('git', ['ls-files', '-z', ...args], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return out.split('\0').filter(Boolean);
+}
+
+/**
+ * Exclusiones de VOLUMEN (no de criterio) para la enumeración de gitignoreados:
+ * sin ellas `git ls-files --ignored` trae 38.134 entradas, casi todas de
+ * `node_modules/`, y cuesta 450 ms. Con ellas son 267 y cuesta 36 ms.
+ */
+const IGNORED_VOLUME_EXCLUDES = [
+  ':(exclude)node_modules/**',
+  ':(exclude)**/node_modules/**',
+  ':(exclude)dist/**',
+  ':(exclude)**/dist/**',
+  ':(exclude)coverage/**',
+  ':(exclude)**/coverage/**',
+];
+
 function repoFiles(): string[] {
   // `git ls-files` en vez de una lista de directorios: el caso `mcp-servers/`
-  // entra solo. Si git no está, esto tira — un barrido vacío que pasa en verde
-  // es justamente el modo de falla que este archivo viene a matar.
+  // entra solo.
   // `--others --exclude-standard` suma los archivos NUEVOS todavía sin
   // commitear: un call-site recién escrito tiene que ponerse rojo en la
   // corrida local, no recién en CI después del commit.
-  const out = execFileSync(
-    'git',
-    ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
-    {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-    },
-  );
-  return out
-    .split('\0')
-    .filter(Boolean)
+  const tracked = gitLsFiles(['--cached', '--others', '--exclude-standard']);
+  // ⚠️ `--ignored` suma los GITIGNOREADOS que existan en esta copia (AR-3
+  // `BLQ-BAJO-3`). Hoy hay dos que llaman al endpoint:
+  // `scripts/smoke-base-downstream.mjs:116` (`body: { q: GOAL }`) y
+  // `scripts/smoke-prod-via-app-wasiai.mjs:85` (`capabilities?limit=20`). El
+  // primero FIGURA en el inventario de call-sites del AR-2: un revisor humano
+  // contó como call-site un archivo que el guard automático era
+  // estructuralmente incapaz de mirar — justo la asimetría que este mecanismo
+  // vino a eliminar. Verificado: cambiarle la clave a `query` dejaba `npm test`
+  // en verde.
+  // En CI estos archivos NO existen (`actions/checkout` no materializa
+  // ignorados), así que para ELLOS la corrida local es la única línea de
+  // defensa. Declarado en "QUÉ NO CUBRE".
+  const ignored = gitLsFiles([
+    '--others',
+    '--ignored',
+    '--exclude-standard',
+    '--',
+    ...IGNORED_VOLUME_EXCLUDES,
+  ]);
+  return [...tracked, ...ignored]
     .filter((f) => f !== SELF)
     .filter((f) => !EXCLUDED_PREFIXES.some((p) => f.startsWith(p)))
     .filter((f) => {
@@ -351,6 +391,7 @@ function scanFile(
 ): { hits: Hit[]; opaquePosts: OpaquePost[] } {
   const hits: Hit[] = [];
   const opaquePosts: OpaquePost[] = [];
+  const isCode = CODE_EXTS.some((e) => rel.endsWith(e));
   const lines = text.split('\n');
   const lineStarts: number[] = [];
   {
@@ -369,8 +410,43 @@ function scanFile(
     (o) => !targets.includes(o),
   );
 
+  /**
+   * ¿La mención al endpoint está dentro de un COMENTARIO de un archivo de
+   * código? Un comentario nunca ES un call-site: es prosa, y la prosa la
+   * verifica el barrido de `.md` por su cuenta.
+   *
+   * ⚠️ EXISTE POR UN FALSO POSITIVO REAL, destapado al empezar a ver los
+   * gitignoreados: `scripts/smoke-prod-via-app-wasiai.mjs:82` tiene el
+   * comentario `// Step 1: GET /api/v1/capabilities (… should hit a2a
+   * /discover)`. Esa línea abría una ventana de 12 líneas hacia atrás que
+   * alcanzaba el helper x402 de la línea 71, y el barrido reportaba `network`
+   * como parámetro de `/discover`. La llamada REAL está en la línea 85, a 14
+   * líneas del helper: fuera de la ventana, como corresponde.
+   *
+   * ⚠️ Apaga sólo la VENTANA, no la atribución: la mención comentada se sigue
+   * usando en `nearestEndpointIsTarget` para decidir a quién pertenece un dato.
+   * Un comentario que nombra el endpoint sigue siendo evidencia de a qué
+   * endpoint apunta el código de al lado; lo que no es, es un call-site.
+   *
+   * Se probó primero el arreglo "el body tiene que tener un emisor
+   * (`fetch(`/`http.post(`) cerca" y se DESCARTÓ por medición: escondía
+   * `scripts/smoke-base-downstream.mjs:116`, que manda el body a través de un
+   * helper `api(path, { body })` propio — o sea que habría tapado justo el
+   * call-site que `BLQ-BAJO-3` pide destapar.
+   */
+  const isProseMention = (off: number): boolean => {
+    if (!isCode) return false;
+    const ln = lineOf(lineStarts, off);
+    const line = lines[ln] as string;
+    const before = line.slice(0, off - (lineStarts[ln] as number));
+    if (/^\s*(?:\*|\/\/|#)/.test(line)) return true; // JSDoc, `//`, `#`
+    // `//` que no venga de un `https://`.
+    return /(?:^|[^:])\/\//.test(before) || /(?:^|\s)#/.test(before);
+  };
+
   const active = new Set<number>();
   for (const o of targets) {
+    if (isProseMention(o)) continue;
     const ln = lineOf(lineStarts, o);
     for (
       let k = Math.max(0, ln - WINDOW_BACK);
@@ -482,7 +558,7 @@ function scanFile(
 
   // 4. POSTs opacos (sólo en código): hay un request POST hacia el endpoint y
   //    NO se pudo leer ningún body cerca. No poder leerlo es rojo.
-  if (CODE_EXTS.some((e) => rel.endsWith(e))) {
+  if (isCode) {
     const requestCalls = allMatchOffsets(text, REQUEST_CALL_RE);
     /** Cada body pertenece a UNA sola llamada: la más cercana. Sin esto, el
      *  body de la llamada de arriba "cubre" a la de abajo y un POST opaco pasa
@@ -579,6 +655,32 @@ describe('WKH-322 · call-sites de /discover en todo el repo', () => {
     expect([...files].some((f) => f.startsWith('scripts/'))).toBe(true);
     expect([...files].some((f) => f.startsWith('src/'))).toBe(true);
     expect([...files].some((f) => f.endsWith('.md'))).toBe(true);
+  });
+
+  it('T-CS-0b: los gitignoreados que existan en esta copia entran al barrido', () => {
+    // AR-3 `BLQ-BAJO-3`. Sin esto, sacar la rama `--ignored` de `repoFiles()`
+    // no pone nada en rojo y `scripts/smoke-base-downstream.mjs` vuelve a ser
+    // invisible para el guard mientras los humanos lo siguen contando como
+    // call-site en el inventario.
+    //
+    // ⚠️ EN CI ESTA ASERCIÓN ES VACUA, y se declara en vez de esconderse:
+    // `actions/checkout` no materializa archivos ignorados, así que la lista es
+    // vacía y no hay nada que verificar. Para los gitignoreados, la corrida
+    // LOCAL del dev es la única línea de defensa que existe.
+    const ignoredOnDisk = gitLsFiles([
+      '--others',
+      '--ignored',
+      '--exclude-standard',
+      '--',
+      ...IGNORED_VOLUME_EXCLUDES,
+    ]).filter((f) => CODE_EXTS.some((e) => f.endsWith(e)));
+    const enumerated = new Set(repoFiles());
+    expect(
+      ignoredOnDisk.filter((f) => !enumerated.has(f)),
+      'Hay archivos gitignoreados de código en esta copia que el barrido NO enumera.\n' +
+        'Un call-site ahí adentro es invisible para este guard aunque un humano lo\n' +
+        'cuente en el inventario, que es la asimetría que el mecanismo vino a matar.\n',
+    ).toEqual([]);
   });
 
   it('T-CS-1: el extractor sabe leer las 4 formas de escribir un call-site', () => {
