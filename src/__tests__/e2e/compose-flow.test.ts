@@ -234,6 +234,7 @@ describe('compose HTTP e2e flow (P0)', () => {
     mockDiscoverSvc.mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete',

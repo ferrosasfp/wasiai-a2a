@@ -41,6 +41,7 @@ describe('discoverAgents', () => {
     const fullResult: DiscoveryResult = {
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [], // CD-9: always include registries (even empty)
       sources: [],
       catalogStatus: 'complete',

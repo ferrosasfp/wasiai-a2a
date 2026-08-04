@@ -172,6 +172,7 @@ const mockAgents: Agent[] = [
 const mockDiscoveryResult: DiscoveryResult = {
   agents: mockAgents,
   total: 2,
+  totalAtLeast: 2,
   registries: ['wasiai'],
   sources: [],
   catalogStatus: 'complete',
@@ -301,6 +302,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete',
@@ -733,6 +735,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValueOnce({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete',
@@ -952,6 +955,7 @@ describe('orchestrateService', () => {
   const wkh127Discovery: DiscoveryResult = {
     agents: wkh127Agents,
     total: 2,
+    totalAtLeast: 2,
     registries: ['wasiai'],
     sources: [],
     catalogStatus: 'complete',
@@ -1088,6 +1092,7 @@ describe('orchestrateService', () => {
         { ...mockAgents[1]!, slug: 'translator-v1', priceUsdc: 0 },
       ],
       total: 2,
+      totalAtLeast: 2,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -1692,6 +1697,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: collisionAgents,
       total: collisionAgents.length,
+      totalAtLeast: collisionAgents.length,
       registries: ['wasiai', 'decoy'],
       sources: [],
       catalogStatus: 'complete',
@@ -1920,6 +1926,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [...makeDemoAgents(), realAgent],
       total: 4,
+      totalAtLeast: 4,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -1958,6 +1965,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: makeDemoAgents(),
       total: 3,
+      totalAtLeast: 3,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -2000,6 +2008,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [...makeDemoAgents(), realAgent],
       total: 4,
+      totalAtLeast: 4,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -2052,6 +2061,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [...makeDemoAgents(), realAgent],
       total: 4,
+      totalAtLeast: 4,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -2273,6 +2283,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete',
@@ -2325,6 +2336,7 @@ describe('orchestrateService', () => {
   const wkh152Discovery: DiscoveryResult = {
     agents: wkh152Agents,
     total: 2,
+    totalAtLeast: 2,
     registries: ['wasiai'],
     sources: [],
     catalogStatus: 'complete',
@@ -2481,6 +2493,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: mlAgents,
       total: 2,
+      totalAtLeast: 2,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -2631,6 +2644,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [opaqueAgent],
       total: 1,
+      totalAtLeast: 1,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -2720,6 +2734,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [...makeDemoAgents(), realAgent],
       total: 4,
+      totalAtLeast: 4,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -2811,6 +2826,7 @@ describe('orchestrateService', () => {
   const wkh163Discovery: DiscoveryResult = {
     agents: wkh163Agents,
     total: 3,
+    totalAtLeast: 3,
     registries: ['wasiai'],
     sources: [],
     catalogStatus: 'complete',
@@ -2984,6 +3000,7 @@ describe('orchestrateService', () => {
   const wkh163TerminalDiscovery: DiscoveryResult = {
     agents: wkh163TerminalAgents,
     total: 3,
+    totalAtLeast: 3,
     registries: ['wasiai'],
     sources: [],
     catalogStatus: 'complete',
@@ -3228,6 +3245,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents,
       total: agents.length,
+      totalAtLeast: agents.length,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -3460,6 +3478,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete',
@@ -3484,6 +3503,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [{ ...mockAgents[0]!, priceUsdc: 0.5 }],
       total: 1,
+      totalAtLeast: 1,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -3527,6 +3547,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [demoAgent],
       total: 1,
+      totalAtLeast: 1,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -3570,6 +3591,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete',
@@ -3596,6 +3618,7 @@ describe('orchestrateService', () => {
       .mockResolvedValueOnce({
         agents: [],
         total: 0,
+        totalAtLeast: 0,
         registries: [],
         sources: [],
         catalogStatus: 'complete',
@@ -3676,6 +3699,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete',
@@ -3701,6 +3725,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete',
@@ -3723,6 +3748,7 @@ describe('orchestrateService', () => {
       .mockResolvedValueOnce({
         agents: [],
         total: 0,
+        totalAtLeast: 0,
         registries: [],
         sources: [],
         catalogStatus: 'complete',
@@ -3730,6 +3756,7 @@ describe('orchestrateService', () => {
       .mockResolvedValueOnce({
         agents: [],
         total: 0,
+        totalAtLeast: 0,
         registries: [],
         sources: [],
         catalogStatus: 'complete',
@@ -3766,6 +3793,7 @@ describe('orchestrateService', () => {
       .mockResolvedValueOnce({
         agents: [],
         total: 0,
+        totalAtLeast: 0,
         registries: [],
         sources: [],
         catalogStatus: 'complete',
@@ -3773,6 +3801,7 @@ describe('orchestrateService', () => {
       .mockResolvedValueOnce({
         agents: [demoAgent],
         total: 1,
+        totalAtLeast: 1,
         registries: ['wasiai'],
         sources: [],
         catalogStatus: 'complete',
@@ -4077,6 +4106,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [...mockAgents, priceAgent],
       total: 3,
+      totalAtLeast: 3,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -4205,6 +4235,7 @@ describe('orchestrateService', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [demoAgent],
       total: 1,
+      totalAtLeast: 1,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',

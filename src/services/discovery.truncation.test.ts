@@ -157,7 +157,23 @@ describe('WKH-318 — detección de truncamiento', () => {
   });
 
   it('T-TRUNC-02: un cursor vacío es la DECLARACIÓN de "no hay más" (prueba completitud); la clave AUSENTE no declara nada', async () => {
-    vi.mocked(registryService.getEnabled).mockResolvedValue([withCursorPath()]);
+    // HU-323 — el registro de este test pierde `limitParam` (`withCursorPath`
+    // lo declara). Razón: el sub-caso (b) habla de la rama del CURSOR, y para
+    // verla hay que aislarla de la otra evidencia. Desde HU-323 el over-fetch se
+    // manda siempre que haya `limitParam`, así que con `limitParam` puesto el
+    // caso (b) llegaría a `completenessProven` por página corta (3 filas de 200
+    // pedidas) y el test dejaría de poder distinguir "la clave ausente no declara
+    // nada" de "la clave ausente declara completitud" — que es LA distinción que
+    // el test existe para pinear. La combinación de las dos evidencias tiene sus
+    // propios tests (T-TRUNC-08, T-SRC-08c).
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeRegistry({
+        schema: {
+          discovery: { agentsPath: 'agents', nextCursorPath: 'next_cursor' },
+          invoke: { method: 'POST' },
+        },
+      }),
+    ]);
 
     // (a) la clave existe con valor nulo — es exactamente cómo un registro dice
     // "no hay más". Eso es EVIDENCIA de completitud, no ausencia de evidencia.
@@ -218,21 +234,48 @@ describe('WKH-318 — detección de truncamiento', () => {
     expect(result.catalogStatus).toBe('complete');
   });
 
-  it('T-TRUNC-05 (AC-7 / CD-5 / CD-8): SIN `limit` del caller no se envía NINGÚN parámetro nuevo upstream, y sin cursor declarado el estado es ok', async () => {
+  it('T-TRUNC-05 (HU-323): SIN `limit` del caller se envía el over-fetch, y una página llena hasta ese número es `truncated`/`page_full`', async () => {
     const { upstreamLimits } = serve(catalog(200));
 
     const result = await discoveryService.discover({});
 
-    // El assert que importa es sobre lo ENVIADO, no sobre el resultado: el
-    // camino sin `limit` tiene que quedar byte-idéntico al de antes de la HU.
-    expect(upstreamLimits).toEqual([null]);
-    // 200 filas, ningún límite enviado y ningún cursor declarado ⇒ no hay
-    // evidencia PARA NINGÚN LADO. Marcar `truncated` sería inventar una certeza;
-    // marcar `ok` sería inventar la contraria, que es lo que hacía antes del
-    // BLQ-1. `unverified` es lo único que se puede afirmar.
-    expect(result.sources[0]?.state).toBe('unverified');
-    expect(result.sources[0]?.truncationEvidence).toBeUndefined();
-    expect(result.catalogStatus).toBe('unverified');
+    // ⚠️ Acá se esperaba `[null]`, con este comentario: "el camino sin `limit`
+    // tiene que quedar byte-idéntico al de antes de la HU". HU-323 revoca esa
+    // promesa a propósito y con medición: byte-idéntico significaba aceptar la
+    // paginación default del registro, y en producción eso eran 20 filas de 22.
+    expect(upstreamLimits).toEqual(['200']);
+    // Y el efecto colateral BUENO de mandar un número: ahora hay evidencia donde
+    // antes no había ninguna. 200 filas contra 200 pedidas ⇒ la página se llenó,
+    // que es la heurística `page_full`. Antes esto era `unverified` — honesto,
+    // pero sin decir para qué lado.
+    expect(result.sources[0]?.state).toBe('truncated');
+    expect(result.sources[0]?.truncationEvidence).toBe('page_full');
+    expect(result.catalogStatus).toBe('truncated');
+  });
+
+  it('T-TRUNC-05b (HU-323): sin `limit` del caller y con techo declarado, el over-fetch sale CLAMPEADO', async () => {
+    // El caso de producción: el registro federado declara `maxLimit: 100` y
+    // responde 400 a `?limit=101`. El clamp tiene que aplicarse también en el
+    // camino sin `limit`, o la llamada más común sería la única que se come el
+    // 400 y perdería la fuente ENTERA.
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeRegistry({
+        schema: {
+          discovery: { limitParam: 'limit', maxLimit: 100 },
+          invoke: { method: 'POST' },
+        },
+      }),
+    ]);
+    const { upstreamLimits } = serve(catalog(25));
+
+    const result = await discoveryService.discover({});
+
+    expect(upstreamLimits).toEqual(['100']);
+    // 25 < 100 ⇒ la página no se llenó ⇒ completitud probada. Es exactamente lo
+    // que hoy devuelve `GET /discover?limit=100` contra producción.
+    expect(result.sources[0]?.state).toBe('ok');
+    expect(result.catalogStatus).toBe('complete');
+    expect(result.total).toBe(25);
   });
 
   it('T-TRUNC-08: la declaración EXACTA le gana a la heurística — cursor vacío con la página llena es `ok`, no `page_full`', async () => {

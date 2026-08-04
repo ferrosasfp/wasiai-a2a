@@ -365,9 +365,22 @@ describe('WKH-318 — honestidad de `registries` / `sources` / `catalogStatus`',
   // ── AR BLQ-1: `ok` exige evidencia; sin evidencia obtenible es `unverified` ──
 
   it('T-SRC-08 (BLQ-1): una fuente que contesta SIN evidencia obtenible es `unverified`, y el catálogo NO se declara complete', async () => {
-    // El caso REAL de producción: el registro `wasiai` se siembra sin
-    // `nextCursorPath` y `/capabilities` llama a `discover({})` sin `limit`, así
-    // que tampoco se manda `limitParam`. No hay forma de saber si trajo todo.
+    // ⚠️ HU-323 cambió CÓMO se llega a este caso, no la regla que el test
+    // defiende. Antes bastaba con `discover({})`: sin `limit` del caller no se
+    // mandaba `limitParam` y no había evidencia por ningún lado. Ahora el
+    // over-fetch se manda SIEMPRE que el registro declare `limitParam`, así que
+    // esa vía ya no produce un caso sin evidencia — produce evidencia de
+    // completitud (página corta), que es justamente el bug que se arregló.
+    //
+    // La única forma que queda de no tener evidencia OBTENIBLE es que el
+    // registro no declare NINGUNA de las dos cosas con las que se prueba:
+    // ni `nextCursorPath` (no dice si hay más) ni `limitParam` (no acepta que le
+    // pidamos un número contra el cual comparar). Eso es lo que se monta acá.
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeRegistry({
+        schema: { discovery: {}, invoke: { method: 'POST' } },
+      }),
+    ]);
     serveByHost({ 'example.com': () => okResponse(catalog(20)) });
 
     const result = await discoveryService.discover({});
@@ -385,10 +398,62 @@ describe('WKH-318 — honestidad de `registries` / `sources` / `catalogStatus`',
     expect(result.agents).toHaveLength(20);
   });
 
-  it('T-SRC-08b (BLQ-1): el repro exacto del AR — 20 filas CON next_cursor pero sin `nextCursorPath` declarado no puede dar complete', async () => {
+  it('T-SRC-08b (BLQ-1): el repro exacto del AR — 20 filas CON next_cursor pero sin `nextCursorPath` NI `limitParam` no puede dar complete', async () => {
     // Antes del fix esto devolvía {state:'ok', rows:20, catalogStatus:'complete'}
     // sobre 20 de 22 agentes: cambiaba una mentira por otra, que es textualmente
     // lo que el corte A se comprometió a NO hacer.
+    //
+    // HU-323: se le saca `limitParam` al registro por la misma razón que a
+    // T-SRC-08 — con `limitParam` ahora SÍ hay una evidencia obtenible (la
+    // página corta), y el caso que este test quiere describir es el de no tener
+    // ninguna. El sub-caso en que la página corta convive con un cursor que no
+    // sabemos leer está abajo, en T-SRC-08c.
+    serveByHost({
+      'example.com': () =>
+        okResponse({ agents: catalog(20), next_cursor: 'hay-mas' }),
+    });
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeRegistry({
+        schema: {
+          discovery: { agentsPath: 'agents' },
+          invoke: { method: 'POST' },
+        },
+      }),
+    ]);
+
+    const result = await discoveryService.discover({});
+
+    expect(result.catalogStatus).not.toBe('complete');
+    expect(result.catalogStatus).toBe('unverified');
+    expect(result.sources[0]?.state).toBe('unverified');
+  });
+
+  /**
+   * ⚠️ HU-323 — TEST DE CARACTERIZACIÓN DE UN RESIDUAL. Lo que asserta abajo es
+   * lo que el código HACE, y NO es lo que uno querría que hiciera. Está escrito
+   * para que el agujero sea visible y revisable, no para bendecirlo.
+   *
+   * EL AGUJERO: la heurística `rows < sentLimit ⇒ completitud probada` supone que
+   * el registro HONRA el límite que le mandamos. Un registro que acepta
+   * `?limit=200`, devuelve 20 y anuncia que hay más en una clave que nunca
+   * declaró (`nextCursorPath` ausente) rompe esa suposición, y nosotros
+   * publicamos `complete` sobre una página recortada. Es TD-318B-1 (el registro
+   * trunca en silencio) visto desde nuestro lado.
+   *
+   * QUÉ CAMBIÓ CON HU-323, para no acusarla de más ni de menos: el agujero NO es
+   * nuevo — ya se alcanzaba con cualquier `discover({ limit: N })`, porque ahí el
+   * over-fetch se mandaba desde el fix-pack P1. Lo que HU-323 hace es volverlo
+   * alcanzable TAMBIÉN desde la llamada sin `limit`, que antes caía en
+   * `unverified`. Se aceptó ese costo con la medición al lado: en el camino sin
+   * `limit` la alternativa no era "honesto y completo", era `unverified` Y DOS
+   * AGENTES MENOS (23 de 25 en producción), porque el registro real corta en 20
+   * y sí honra el límite cuando se lo mandamos.
+   *
+   * CÓMO SE CIERRA DE VERDAD: que el registro declare `nextCursorPath` (evidencia
+   * exacta, gana sobre la heurística) o paginación real aguas arriba (TD-318-2).
+   * Ninguna de las dos es un cambio de esta HU.
+   */
+  it('T-SRC-08c (HU-323, residual TD-318B-1): una página CORTA con un cursor NO declarado se publica `complete` — el registro tendría que declarar su cursor', async () => {
     serveByHost({
       'example.com': () =>
         okResponse({ agents: catalog(20), next_cursor: 'hay-mas' }),
@@ -404,9 +469,30 @@ describe('WKH-318 — honestidad de `registries` / `sources` / `catalogStatus`',
 
     const result = await discoveryService.discover({});
 
-    expect(result.catalogStatus).not.toBe('complete');
-    expect(result.catalogStatus).toBe('unverified');
-    expect(result.sources[0]?.state).toBe('unverified');
+    // 20 filas contra las 200 pedidas ⇒ la heurística concluye completitud.
+    expect(result.sources[0]?.state).toBe('ok');
+    expect(result.catalogStatus).toBe('complete');
+    // Y el control que prueba que la causa es la NO-declaración: el MISMO
+    // payload, con `nextCursorPath` declarado, sale `truncated`. O sea que el
+    // agujero se cierra del lado del registro, no con más heurística nuestra.
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeRegistry({
+        schema: {
+          discovery: {
+            limitParam: 'limit',
+            agentsPath: 'agents',
+            nextCursorPath: 'next_cursor',
+          },
+          invoke: { method: 'POST' },
+        },
+      }),
+    ]);
+
+    const declared = await discoveryService.discover({});
+
+    expect(declared.sources[0]?.state).toBe('truncated');
+    expect(declared.catalogStatus).toBe('truncated');
+    expect(declared.total).toBe('unknown');
   });
 
   // ── AR BLQ-2: la fuente local también rinde cuentas ────────────────────

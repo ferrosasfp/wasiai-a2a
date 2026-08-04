@@ -220,6 +220,7 @@ beforeEach(() => {
   vi.mocked(discoveryService.discover).mockResolvedValue({
     agents: [],
     total: 0,
+    totalAtLeast: 0,
     registries: [],
     sources: [],
     catalogStatus: 'complete',
@@ -902,6 +903,7 @@ describe('HU-306 · el cobro no distingue de quién es el agente (AC-6)', () => 
       vi.mocked(discoveryService.discover).mockResolvedValue({
         agents: [],
         total: 0,
+        totalAtLeast: 0,
         registries: [],
         sources: [],
         catalogStatus: 'complete',

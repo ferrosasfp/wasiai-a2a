@@ -227,6 +227,7 @@ beforeEach(() => {
   vi.mocked(discoveryService.discover).mockResolvedValue({
     agents: [],
     total: 0,
+    totalAtLeast: 0,
     registries: [],
     sources: [],
     catalogStatus: 'complete',
@@ -3458,6 +3459,7 @@ describe('composeService.compose — discover cache (B7)', () => {
     vi.mocked(discoveryService.discover).mockResolvedValue({
       agents: [agent1, agent2],
       total: 2,
+      totalAtLeast: 2,
       registries: [],
       sources: [],
       catalogStatus: 'complete',

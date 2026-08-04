@@ -12,6 +12,7 @@ import type {
   DiscoverySource,
   DiscoverySourceFailure,
   FailedSourceRef,
+  ReportedTotal,
 } from '../types/index.js';
 
 /**
@@ -59,6 +60,36 @@ export function buildCatalogStatus(
   if (sources.some((s) => s.state === 'truncated')) return 'truncated';
   if (sources.some((s) => s.state === 'unverified')) return 'unverified';
   return 'complete';
+}
+
+/**
+ * HU-323 — LA ÚNICA expresión de "este total se sabe" (mismo criterio CD-11 que
+ * `isCatalogComplete`).
+ *
+ * `total` sale de contar el conjunto candidato. Ese conteo sólo es EL TOTAL si el
+ * conjunto candidato tiene todo lo que hay; cuando el catálogo llegó recortado, el
+ * mismo número deja de ser un total y pasa a ser una cota inferior. Publicarlo
+ * igual, con el nombre `total`, es rellenar un dato desconocido con el que hay a
+ * mano.
+ *
+ * Los dos estados que PRUEBAN que falta algo:
+ *   · `truncated` — una fuente declaró que hay más filas (cursor) o su página
+ *     llegó llena hasta el límite que le enviamos.
+ *   · `partial`   — una fuente no se pudo consultar; sus matches no están
+ *     contados y no hay forma de saber cuántos eran.
+ *
+ * `unverified` queda AFUERA a propósito, y la distinción es la misma que la del
+ * roll-up (`buildCatalogStatus`): es "no pude probar que no falta", no "sé que
+ * falta". No hay evidencia de ninguna fila ausente. Meterlo acá haría que `total`
+ * fuera `'unknown'` en todo camino contra un registro que no declara cursor,
+ * o sea casi siempre, y un campo que nunca tiene número no informa nada.
+ * `complete` es, por definición, el caso en que el conteo SÍ es el total.
+ */
+export function resolveReportedTotal(
+  counted: number,
+  status: CatalogStatus,
+): ReportedTotal {
+  return status === 'truncated' || status === 'partial' ? 'unknown' : counted;
 }
 
 /**

@@ -24,6 +24,7 @@ import {
   buildCatalogStatus,
   classifyFetchFailure,
   RegistryHttpError,
+  resolveReportedTotal,
 } from '../lib/discovery-sources.js';
 import { getLogger } from '../lib/logger.js';
 import { readPaymentSpec } from '../lib/payment-spec-reader.js';
@@ -298,12 +299,17 @@ export const discoveryService = {
       // Dos expresiones de la misma regla divergen (CD-11), y ésta era la única
       // línea de producción nueva sin cobertura.
       const sources = localSource ? [localSource] : [];
+      // HU-323: el status se computa UNA vez y lo consumen los dos campos que
+      // dependen de él. Con el SELECT local caído esto es `partial`, y ahí el 0
+      // no es el total: es todo lo que se pudo contar (`resolveReportedTotal`).
+      const catalogStatus = buildCatalogStatus(sources);
       return {
         agents: [],
-        total: 0,
+        total: resolveReportedTotal(0, catalogStatus),
+        totalAtLeast: 0,
         registries: [],
         sources,
-        catalogStatus: buildCatalogStatus(sources),
+        catalogStatus,
       };
     }
 
@@ -326,7 +332,14 @@ export const discoveryService = {
     // this (money-path safe, DT-2 mirror of WKH-151). Single retry, no loop
     // (CD-3). Additive/degradable: the pipeline swallows per-registry errors
     // (CD-4), so the retry can only ever return more or the same 0.
-    if (result.total === 0 && query.query) {
+    //
+    // HU-323: la condición era `result.total === 0` y ahora es
+    // `result.totalAtLeast === 0`. NO es un cambio de criterio: `totalAtLeast` ES
+    // el `allAgents.length` que `total` publicaba antes, sólo que ahora `total`
+    // puede valer `'unknown'` y `'unknown' === 0` es `false`. Dejarlo apuntando a
+    // `total` habría APAGADO el broaden-retry justo cuando el catálogo llega
+    // truncado — el caso en que más falta hace, y sobre el flujo estrella.
+    if (result.totalAtLeast === 0 && query.query) {
       log.info(
         { query: query.query },
         'discover free-text 0 results — broaden retry without upstream q',
@@ -685,6 +698,11 @@ export const discoveryService = {
       .filter((s) => (s.rows ?? 0) > 0)
       .map((s) => s.name);
 
+    // HU-323: UNA sola evaluación del roll-up, consumida por `catalogStatus` y
+    // por `total`. Dos llamadas serían dos expresiones del mismo hecho y podrían
+    // divergir si alguien mueve una (CD-11).
+    const catalogStatus = buildCatalogStatus(sources);
+
     return {
       agents: enriched,
       // CONTRATO (fix-pack P1, hallazgo 1): `total` = matches TOTALES de los
@@ -693,12 +711,19 @@ export const discoveryService = {
       // página. Antes del fix este número venía de un pool ya truncado por el
       // registry upstream, así que SUBESTIMABA los matches (mentía en magnitud,
       // no en semántica).
-      total: allAgents.length,
+      //
+      // HU-323: y esa subestimación seguía viva cuando el catálogo llega
+      // recortado — `allAgents.length` cuenta lo que ENTRÓ, no lo que hay. Con
+      // `truncated`/`partial` el total no se sabe y se dice `'unknown'` en vez de
+      // publicar la cota inferior con nombre de total. El número sigue disponible,
+      // con su nombre correcto, en `totalAtLeast`.
+      total: resolveReportedTotal(allAgents.length, catalogStatus),
+      totalAtLeast: allAgents.length,
       registries: contributingRegistries,
       // WKH-318: el detalle POR FUENTE y su roll-up. Aditivos: no se quita ni se
       // re-tipa ningún campo previo.
       sources,
-      catalogStatus: buildCatalogStatus(sources),
+      catalogStatus,
       // HU-208: cuántos candidatos descartó el filtro de candidatura. Sin esto
       // un conjunto vacío es indistinguible de "no existe tal capacidad", y un
       // operador buscaría el problema en el catálogo cuando en realidad hay un
@@ -1078,18 +1103,53 @@ export const discoveryService = {
       url.searchParams.set(schema.queryParam, query.query);
     }
     // Fix-pack P1 (hallazgo 1): se manda el OVER-FETCH, no el page size del
-    // caller. El gate `query.limit &&` se preserva a propósito: sin `limit` del
-    // caller seguimos sin mandar `limitParam` (comportamiento byte-idéntico al
-    // de hoy) — imponer un cap donde antes no había ninguno sería reintroducir
-    // el mismo bug de clase "esconder agentes" en el path sin `limit`.
+    // caller.
+    //
+    // ⚠️ HU-323 — ACÁ ESTABA `query.limit &&`, Y ERA EL BUG. El gate viejo decía
+    // que sin `limit` del caller no se mandaba `limitParam`, y lo justificaba así:
+    // "imponer un cap donde antes no había ninguno sería reintroducir el mismo bug
+    // de clase 'esconder agentes' en el path sin `limit`". Esa frase supone que no
+    // mandar límite equivale a pedir TODO, y eso es falso: lo que decide el tamaño
+    // de la página cuando no mandamos nada es la PAGINACIÓN DEFAULT DEL REGISTRO,
+    // que no controlamos. Medido en producción el 2026-08-04 contra el registro
+    // federado `WasiAI`: `GET /discover` (sin `limit`) ⇒ `sources[0].rows: 20`,
+    // `truncationEvidence: 'cursor'`, `total: 23`; `GET /discover?limit=100` ⇒
+    // `rows: 22`, `state: 'ok'`, `total: 25`. O sea que el gate que existía para
+    // no esconder agentes escondía dos (`avalanche-ecosystem-pulse`,
+    // `sentiment-analyzer`) en la llamada MÁS común, la que no pasa parámetros.
+    //
+    // Ahora el over-fetch se manda SIEMPRE que el registro declare `limitParam`.
+    // `query.limit ?? 0` hace que el caller sin page size caiga en el piso del
+    // over-fetch: `resolveUpstreamFetchLimit(0)` es `max(0, 200)` = 200.
+    //
+    // QUÉ SE PIERDE, y no se borra porque es real: un registro cuya paginación
+    // default devuelva MÁS de `DISCOVERY_UPSTREAM_FETCH_LIMIT` filas ahora recibe
+    // un cap que antes no recibía, y su pool se acorta. Tres cosas lo acotan y
+    // ninguna existía cuando se escribió el gate viejo: (1) ese recorte ya no es
+    // mudo — sale `truncated`/`page_full` en `sources[]` y arrastra el
+    // `catalogStatus` (WKH-318), (2) desde esta HU arrastra además `total:
+    // 'unknown'`, así que el número tampoco lo esconde, y (3) el techo es una env
+    // NUESTRA y se sube sin deploy de código. El recorte del gate viejo, en
+    // cambio, lo fijaba el registro y no había perilla.
+    //
+    // EFECTO EN LOS LOGS, que también es real: los dos `warn` de abajo
+    // (`REGISTRY_MAX_LIMIT_INVALID` y `REGISTRY_MAX_LIMIT_BELOW_COMPOSE_POOL`)
+    // viven DENTRO de este gate, así que pasan de emitirse en las requests que
+    // traían `?limit` a emitirse en TODAS. El tamaño de cada uno no cambia (lo
+    // acota `previewDeclaredMaxLimit`, AR MNR-4), pero la frecuencia sí, y
+    // `/discover` es la ruta más caliente y es gratis. Sólo aplica a registros
+    // MAL CONFIGURADOS (techo basura, o techo declarado por debajo de 50): con
+    // los registros reales de hoy ninguno de los dos se emite.
+    //
     // WKH-318: el límite EFECTIVAMENTE enviado, para poder detectar `page_full`.
-    // `undefined` ⇒ no se mandó ninguno (camino sin `limit` del caller, CD-5/CD-8).
+    // `undefined` ⇒ no se mandó ninguno (hoy sólo pasa si el registro no declara
+    // `limitParam`, que es también el único caso que puede quedar `unverified`).
     // WKH-318 corte B: el over-fetch se recorta al techo que el registry DECLARA
     // (`schema.discovery.maxLimit`). Sin declaración usable no hay clamp, así que
     // el número que sale por la red es el mismo de antes (CD-3).
     let sentLimit: number | undefined;
-    if (query.limit && schema.limitParam) {
-      const unclamped = resolveUpstreamFetchLimit(query.limit);
+    if (schema.limitParam) {
+      const unclamped = resolveUpstreamFetchLimit(query.limit ?? 0);
       sentLimit = clampToRegistryMaxLimit(unclamped, schema.maxLimit);
       url.searchParams.set(schema.limitParam, sentLimit.toString());
       // `!== undefined` separa "no declaró techo" de "declaró basura", y la
