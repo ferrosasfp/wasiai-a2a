@@ -282,14 +282,25 @@ describe('T-18 (CD-7) · standingFor distingue AUSENCIA de DEGRADACIÓN', () => 
 
 // ── T-19 (CD-15): el cupo M es DETERMINISTA ─────────────────────────────
 describe('T-19 (CD-15) · cupo M por publicador, determinista', () => {
+  /**
+   * Candidato de los tests del cupo ANCHO.
+   *
+   * ⚠️ La capacidad por defecto NO es decorativa: desde R-4 el cupo también mira
+   * QUÉ sirve el agente, y un candidato sin capacidades clasificables cae en el
+   * cupo estrecho de 1 (a propósito — ver el bloque R-4 más abajo, que lo mide).
+   * Estos tests miden el reparto POR ANCLA, así que declaran una capacidad
+   * verificada como NO-desembolso (`remittance-fx-quote`, el agente de FX de
+   * HU-171) para que el único cupo en juego sea `M`.
+   */
   function cand(
     slug: string,
     anchor: string,
     createdAt?: string,
+    capabilities: readonly string[] = ['remittance-fx-quote'],
   ): TrialCandidate {
     return createdAt === undefined
-      ? { slug, anchor }
-      : { slug, anchor, createdAt };
+      ? { slug, anchor, capabilities }
+      : { slug, anchor, createdAt, capabilities };
   }
 
   it('T-11 (AC-10): 5 candidatos del mismo ancla y M=2 → los 2 más ANTIGUOS', () => {
@@ -437,5 +448,159 @@ describe('T-19 (CD-15) · cupo M por publicador, determinista', () => {
 
   it('sin candidatos → Set vacío (nadie entra por defecto)', () => {
     expect(selectTrialAdmitted([]).size).toBe(0);
+  });
+});
+
+// ── R-4 · el cupo es por publicador Y POR CAPACIDAD ─────────────────────
+//
+// `residuales.md:18-23`: «si no se puede garantizar el mismo agente en los dos
+// legs, la regla es `M = 1` para capacidades de desembolso». Estaba escrita y no
+// la hacía cumplir nadie.
+//
+// ⚠️ Todos los números esperados de este bloque son LITERALES escritos a mano. Un
+// test que dijera `expect(admitted.size).toBe(resolveTrialMaxAgentsPerPublisher())`
+// o `toBe(TRIAL_MAX_DISBURSEMENT_AGENTS_PER_PUBLISHER)` repetiría la fórmula del
+// código y sobreviviría a que el código cambie el cupo.
+describe('R-4 · cupo por publicador Y por capacidad (M=1 para desembolso)', () => {
+  /** Las 4 de `remit-cashout-payout` (done-report.md:202). Una alcanza. */
+  const PAGA = ['remittance-payout'];
+  /** El agente de FX (done-report.md:177): cotiza, no entrega valor. */
+  const COTIZA = ['remittance-fx-quote'];
+
+  /** Acá `capabilities` NO tiene default: es lo que cada test está midiendo. */
+  function cand(
+    slug: string,
+    anchor: string,
+    createdAt: string | undefined,
+    capabilities: readonly string[],
+  ): TrialCandidate {
+    return createdAt === undefined
+      ? { slug, anchor, capabilities }
+      : { slug, anchor, createdAt, capabilities };
+  }
+
+  it('3 agentes de DESEMBOLSO del mismo publicador → entra 1, no 2', () => {
+    // Con M=2 (el default) el cupo viejo dejaba entrar DOS. El sorteo del carril
+    // reparte el `depositAddress` entre los empatados en score 0, así que dos
+    // entradas al bombo por una sola cuenta es exactamente el ataque medido.
+    const cands = [
+      cand('pay-1', 'owner:sybil', '2026-01-01T00:00:00Z', PAGA),
+      cand('pay-2', 'owner:sybil', '2026-02-02T00:00:00Z', PAGA),
+      cand('pay-3', 'owner:sybil', '2026-03-03T00:00:00Z', PAGA),
+    ];
+
+    const admitted = selectTrialAdmitted(cands, 2);
+
+    expect(admitted.size).toBe(1);
+    expect([...admitted]).toEqual(['pay-1']);
+  });
+
+  it('3 agentes de una capacidad NO de desembolso → el cupo ancho de siempre (2)', () => {
+    const cands = [
+      cand('fx-1', 'owner:honesto', '2026-01-01T00:00:00Z', COTIZA),
+      cand('fx-2', 'owner:honesto', '2026-02-02T00:00:00Z', COTIZA),
+      cand('fx-3', 'owner:honesto', '2026-03-03T00:00:00Z', COTIZA),
+    ];
+
+    const admitted = selectTrialAdmitted(cands, 2);
+
+    expect(admitted.size).toBe(2);
+    expect([...admitted].sort()).toEqual(['fx-1', 'fx-2']);
+  });
+
+  it('el cupo de desembolso es POR PUBLICADOR: dos publicadores tienen 1 cada uno', () => {
+    // Si el cupo fuera un total del carril (y no por ancla), el segundo publicador
+    // honesto no entraría nunca — el carril existe para lo contrario.
+    const cands = [
+      cand('a-pay-1', 'owner:a', '2026-01-01T00:00:00Z', PAGA),
+      cand('a-pay-2', 'owner:a', '2026-02-02T00:00:00Z', PAGA),
+      cand('b-pay-1', 'owner:b', '2026-01-15T00:00:00Z', PAGA),
+      cand('b-pay-2', 'owner:b', '2026-02-15T00:00:00Z', PAGA),
+    ];
+
+    const admitted = selectTrialAdmitted(cands, 2);
+
+    expect(admitted.size).toBe(2);
+    expect([...admitted].sort()).toEqual(['a-pay-1', 'b-pay-1']);
+  });
+
+  it('capacidad DESCONOCIDA → el lado seguro: 1, igual que desembolso', () => {
+    // La decisión explícita. Una capacidad que mueva plata y que nadie haya
+    // agregado a la lista no puede comprar el cupo ancho por el solo hecho de ser
+    // nueva.
+    const cands = [
+      cand('x-1', 'owner:nuevo', '2026-01-01T00:00:00Z', ['algo-nuevo']),
+      cand('x-2', 'owner:nuevo', '2026-02-02T00:00:00Z', ['algo-nuevo']),
+      cand('x-3', 'owner:nuevo', '2026-03-03T00:00:00Z', ['algo-nuevo']),
+    ];
+
+    const admitted = selectTrialAdmitted(cands, 2);
+
+    expect(admitted.size).toBe(1);
+    expect([...admitted]).toEqual(['x-1']);
+  });
+
+  it('sin capacidades declaradas → 1 (una lista vacía no es una declaración de inocencia)', () => {
+    const cands = [
+      cand('mudo-1', 'owner:mudo', '2026-01-01T00:00:00Z', []),
+      cand('mudo-2', 'owner:mudo', '2026-02-02T00:00:00Z', []),
+    ];
+
+    expect(selectTrialAdmitted(cands, 2).size).toBe(1);
+  });
+
+  it('los dos cupos se aplican JUNTOS: mezclar capacidades no compra estrenos extra', () => {
+    // Sin la intersección, un publicador con 2 que pagan + 2 que cotizan se
+    // llevaría 1 + 2 = 3 estrenos, o sea MÁS que el cupo ancho de 2 que ya tenía:
+    // "endurecer" el control lo habría aflojado.
+    const cands = [
+      cand('pay-1', 'owner:mixto', '2026-01-01T00:00:00Z', PAGA),
+      cand('pay-2', 'owner:mixto', '2026-02-02T00:00:00Z', PAGA),
+      cand('fx-1', 'owner:mixto', '2026-03-03T00:00:00Z', COTIZA),
+      cand('fx-2', 'owner:mixto', '2026-04-04T00:00:00Z', COTIZA),
+    ];
+
+    const admitted = selectTrialAdmitted(cands, 2);
+
+    expect(admitted.size).toBe(2);
+    // `pay-2` cae por el cupo de desembolso; `fx-2` cae por el cupo ancho.
+    expect([...admitted].sort()).toEqual(['fx-1', 'pay-1']);
+  });
+
+  it('subir `M` por env NO afloja el cupo de desembolso', () => {
+    // `TRIAL_MAX_AGENTS_PER_PUBLISHER` es config de operación; el 1 del desembolso
+    // no lo es, y por eso no hay env que lo mueva.
+    process.env.TRIAL_MAX_AGENTS_PER_PUBLISHER = '5';
+    const cands = [
+      cand('pay-1', 'owner:sybil', '2026-01-01T00:00:00Z', PAGA),
+      cand('pay-2', 'owner:sybil', '2026-02-02T00:00:00Z', PAGA),
+      cand('pay-3', 'owner:sybil', '2026-03-03T00:00:00Z', PAGA),
+    ];
+
+    expect(selectTrialAdmitted(cands).size).toBe(1);
+  });
+
+  it('el cupo de desembolso se lleva con el MISMO sorteo, y no siempre gana el mismo', () => {
+    // Federados: sin `created_at`, la única entrada al cupo la reparte el sorteo
+    // por request. Que el cupo sea 1 no puede volver PERMANENTE la exclusión — es
+    // la propiedad que AR BLQ-MED-3 compró para el cupo ancho.
+    const cands = [
+      cand('pay-a', 'registry:reg-1', undefined, PAGA),
+      cand('pay-b', 'registry:reg-1', undefined, PAGA),
+      cand('pay-c', 'registry:reg-1', undefined, PAGA),
+    ];
+    const winners = new Set<string>();
+    for (const draw of [
+      [0.1, 0.5, 0.9],
+      [0.9, 0.1, 0.5],
+      [0.5, 0.9, 0.1],
+    ]) {
+      _setTiebreakRandomSource(seq(draw));
+      const admitted = selectTrialAdmitted(cands, 2);
+      expect(admitted.size).toBe(1);
+      winners.add([...admitted][0] as string);
+    }
+
+    expect([...winners].sort()).toEqual(['pay-a', 'pay-b', 'pay-c']);
   });
 });

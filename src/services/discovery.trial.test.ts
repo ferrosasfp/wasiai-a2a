@@ -130,6 +130,13 @@ function rep(score: number, tasksSettled = 10): AgentReputation {
  * lo ponía PRIMERO. Ahora todo agente federado de este archivo llega declarando
  * lo máximo que puede declarar sobre sí mismo, así que cualquier test que lo vea
  * ordenar último está midiendo el arreglo y no el fixture.
+ *
+ * ⚠️ `capabilities` TAMPOCO es decorativo desde R-4: el cupo del carril mira qué
+ * sirve el agente, y una capacidad que no se puede clasificar cae en el cupo
+ * ESTRECHO de 1 (a propósito). El default declara una capacidad verificada como
+ * NO-desembolso (`remittance-fx-quote`, el agente de FX de HU-171) para que los
+ * tests del cupo por ancla midan `M` y no el cupo de desembolso; los tests de R-4
+ * pasan la suya explícita.
  */
 function raw(
   slug: string,
@@ -140,7 +147,7 @@ function raw(
     slug,
     name: slug,
     description: 'desc',
-    capabilities: ['x'],
+    capabilities: ['remittance-fx-quote'],
     price: 0,
     reputation: 100,
     verified: true,
@@ -149,14 +156,22 @@ function raw(
   };
 }
 
-/** Agente SELF-PUBLISHED ya mapeado (los que tienen ancla `owner_ref`). */
-function local(slug: string): Agent {
+/**
+ * Agente SELF-PUBLISHED ya mapeado (los que tienen ancla `owner_ref`).
+ *
+ * Mismo apunte que `raw` sobre `capabilities`: el default es NO-desembolso para
+ * que el cupo en juego sea `M`. Los tests de R-4 pasan `capabilities` explícitas.
+ */
+function local(
+  slug: string,
+  capabilities: string[] = ['remittance-fx-quote'],
+): Agent {
   return {
     id: slug,
     name: slug,
     slug,
     description: 'desc',
-    capabilities: ['x'],
+    capabilities,
     priceUsdc: 0,
     registry: SELF_PUBLISHED_REGISTRY_NAME,
     registry_id: SELF_PUBLISHED_REGISTRY_ID,
@@ -1235,6 +1250,184 @@ describe('T-13 (CD-9) · el camino por defecto no gasta ni una query nueva', () 
 
     await discoveryService.discover({ minReputation: 2, allowTrial: true });
 
+    expect(mockListAnchors).toHaveBeenCalledTimes(0);
+  });
+});
+
+// ── R-4 · el cupo también mira QUÉ sirve el agente ──────────────────────
+//
+// `residuales.md:18-23` dejó escrita la regla («`M = 1` para capacidades de
+// desembolso») y nadie la hacía cumplir: `TRIAL_MAX_AGENTS_PER_PUBLISHER` es un
+// cupo por publicador GLOBAL. Acá se mide dónde importa: quién queda en `agents`,
+// que es de donde `/compose` toma `agents[0]` y con él el `depositAddress`.
+//
+// Los números esperados son LITERALES. Ningún test de este bloque los recalcula
+// con `resolveTrialMaxAgentsPerPublisher()` ni con la constante del cupo estrecho.
+describe('R-4 · cupo por publicador Y por capacidad, medido en `agents`', () => {
+  /** Una de las 4 de `remit-cashout-payout` (done-report.md:202). */
+  const PAGA = ['remittance-payout'];
+  /** Del agente de FX (done-report.md:177): cotiza, no entrega valor. */
+  const COTIZA = ['remittance-fx-quote'];
+
+  function anchorsOf(entries: Array<[string, string, string]>): void {
+    anchors(
+      entries.map(([slug, owner, createdAt]) => [
+        slug,
+        { ownerRef: owner, createdAt },
+      ]),
+    );
+  }
+
+  it('un publicador con 3 agentes de DESEMBOLSO → entra 1 (antes entraban 2)', async () => {
+    serve([]);
+    mockListAsAgents.mockResolvedValue([
+      local('pay-1', PAGA),
+      local('pay-2', PAGA),
+      local('pay-3', PAGA),
+    ]);
+    anchorsOf([
+      ['pay-1', 'owner-sybil', '2026-01-01T00:00:00Z'],
+      ['pay-2', 'owner-sybil', '2026-02-02T00:00:00Z'],
+      ['pay-3', 'owner-sybil', '2026-03-03T00:00:00Z'],
+    ]);
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    expect(result.agents.map((a) => a.slug)).toEqual(['pay-1']);
+    expect(result.excluded?.trialAvailable).toBe(1);
+    // Los otros dos quedan excluidos por el piso, como cualquier newcomer sin cupo.
+    expect(result.excluded?.reputation).toBe(2);
+    // Y el que entró lleva el badge: una relajación de piso que no se ve en la
+    // respuesta es un piso relajado en silencio.
+    expect(result.agents[0]?.trial?.granted).toBe(true);
+  });
+
+  it('un publicador con 3 agentes de una capacidad NO de desembolso → el cupo de siempre (2)', async () => {
+    serve([]);
+    mockListAsAgents.mockResolvedValue([
+      local('fx-1', COTIZA),
+      local('fx-2', COTIZA),
+      local('fx-3', COTIZA),
+    ]);
+    anchorsOf([
+      ['fx-1', 'owner-honesto', '2026-01-01T00:00:00Z'],
+      ['fx-2', 'owner-honesto', '2026-02-02T00:00:00Z'],
+      ['fx-3', 'owner-honesto', '2026-03-03T00:00:00Z'],
+    ]);
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    expect(result.agents.map((a) => a.slug).sort()).toEqual(['fx-1', 'fx-2']);
+    expect(result.excluded?.trialAvailable).toBe(2);
+  });
+
+  it('dos publicadores con agentes de desembolso → 1 CADA UNO (el cupo no es un total)', async () => {
+    serve([]);
+    mockListAsAgents.mockResolvedValue([
+      local('a-pay-1', PAGA),
+      local('a-pay-2', PAGA),
+      local('b-pay-1', PAGA),
+      local('b-pay-2', PAGA),
+    ]);
+    anchorsOf([
+      ['a-pay-1', 'owner-a', '2026-01-01T00:00:00Z'],
+      ['a-pay-2', 'owner-a', '2026-02-02T00:00:00Z'],
+      ['b-pay-1', 'owner-b', '2026-01-15T00:00:00Z'],
+      ['b-pay-2', 'owner-b', '2026-02-15T00:00:00Z'],
+    ]);
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    expect(result.agents.map((a) => a.slug).sort()).toEqual([
+      'a-pay-1',
+      'b-pay-1',
+    ]);
+    expect(result.excluded?.trialAvailable).toBe(2);
+  });
+
+  it('una capacidad DESCONOCIDA cae del lado seguro: 1, no 2', async () => {
+    // La decisión explícita. Si mañana se publica una capacidad que mueve plata y
+    // nadie la agrega a la lista, el cupo que recibe es el estrecho.
+    serve([]);
+    mockListAsAgents.mockResolvedValue([
+      local('nuevo-1', ['capacidad-que-nadie-listo']),
+      local('nuevo-2', ['capacidad-que-nadie-listo']),
+      local('nuevo-3', ['capacidad-que-nadie-listo']),
+    ]);
+    anchorsOf([
+      ['nuevo-1', 'owner-nuevo', '2026-01-01T00:00:00Z'],
+      ['nuevo-2', 'owner-nuevo', '2026-02-02T00:00:00Z'],
+      ['nuevo-3', 'owner-nuevo', '2026-03-03T00:00:00Z'],
+    ]);
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    expect(result.agents.map((a) => a.slug)).toEqual(['nuevo-1']);
+    expect(result.excluded?.trialAvailable).toBe(1);
+  });
+
+  it('SIN `allowTrial` el camino de hoy no se mueve: 0 admitidos, 0 badges, 0 queries de ancla', async () => {
+    // Lo que este bloque NO puede haber cambiado. El cupo por capacidad vive
+    // ENTERO adentro del carril: sin opt-in no hay admisión, no hay badge y no se
+    // lee una fila más (CD-9).
+    const catalogo = [
+      local('pay-1', PAGA),
+      local('pay-2', PAGA),
+      local('pay-3', PAGA),
+    ];
+    serve([]);
+    mockListAsAgents.mockResolvedValue(catalogo);
+    anchorsOf([
+      ['pay-1', 'owner-sybil', '2026-01-01T00:00:00Z'],
+      ['pay-2', 'owner-sybil', '2026-02-02T00:00:00Z'],
+      ['pay-3', 'owner-sybil', '2026-03-03T00:00:00Z'],
+    ]);
+
+    const sinOptIn = await discoveryService.discover({ minReputation: 2 });
+
+    expect(sinOptIn.agents).toHaveLength(0);
+    expect(sinOptIn.total).toBe(0);
+    expect(sinOptIn.excluded?.reputation).toBe(3);
+    // Cota superior pre-cupo: los 3 son elegibles, el cupo no llegó a correr.
+    expect(sinOptIn.excluded?.trialAvailable).toBe(3);
+    expect(mockListAnchors).toHaveBeenCalledTimes(0);
+  });
+
+  it('SIN piso de reputación tampoco cambia nada: los 3 de desembolso siguen saliendo', async () => {
+    // El cupo no es un filtro del catálogo. Quien no pide piso ve lo de siempre,
+    // con o sin opt-in, y sin badge.
+    serve([]);
+    mockListAsAgents.mockResolvedValue([
+      local('pay-1', PAGA),
+      local('pay-2', PAGA),
+      local('pay-3', PAGA),
+    ]);
+    anchorsOf([
+      ['pay-1', 'owner-sybil', '2026-01-01T00:00:00Z'],
+      ['pay-2', 'owner-sybil', '2026-02-02T00:00:00Z'],
+      ['pay-3', 'owner-sybil', '2026-03-03T00:00:00Z'],
+    ]);
+
+    const result = await discoveryService.discover({ allowTrial: true });
+
+    expect(result.agents.map((a) => a.slug).sort()).toEqual([
+      'pay-1',
+      'pay-2',
+      'pay-3',
+    ]);
+    expect(result.agents.every((a) => a.trial === undefined)).toBe(true);
     expect(mockListAnchors).toHaveBeenCalledTimes(0);
   });
 });
