@@ -69,6 +69,7 @@ vi.mock('../services/discovery.js', () => ({
     discover: vi.fn(async () => ({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete',
@@ -194,7 +195,13 @@ describe('HU-204 — GET /capabilities distingue entrada de salida', () => {
   it('T-SRC-06: expone catalogStatus + sources y conserva los 12 campos previos con el mismo nombre y valor', async () => {
     vi.mocked(discoveryService.discover).mockResolvedValueOnce({
       agents: [],
-      total: 0,
+      // HU-323: el doble dice lo que DIRÍA producción. Con una fuente caída el
+      // catálogo es `partial` y el total no se sabe, así que `resolveReportedTotal`
+      // devuelve `'unknown'`; el 0 que se contó viaja en `totalAtLeast`. Dejar
+      // `total: 0` acá volvería al doble más optimista que el código real y este
+      // test dejaría de poder ver el passthrough que asserta abajo.
+      total: 'unknown',
+      totalAtLeast: 0,
       // La fuente contestó 400: no aportó filas, así que no está acá...
       registries: [],
       // ...pero su estado SÍ es legible, que es todo el punto de la HU.
@@ -228,7 +235,17 @@ describe('HU-204 — GET /capabilities distingue entrada de salida', () => {
     expect(body.outputModes).toEqual([]);
     expect(Array.isArray(body.chains)).toBe(true);
     expect(body.agents).toEqual([]);
-    expect(body.agentsTotal).toBe(0);
+    // HU-323: `agentsTotal` es passthrough de `DiscoveryResult.total`, así que
+    // hereda el tercer estado. Acá decía `0`, y `0` sobre un catálogo `partial`
+    // es la afirmación "no hay agentes" cuando el hecho es "no pude contarlos".
+    //
+    // NO se agrega un `agentsTotalAtLeast` a esta superficie a propósito, y la
+    // razón es medible: `/capabilities` llama a `discover({})` SIN `limit`, y sin
+    // `limit` el pipeline no hace `slice` (`services/discovery.ts`, la línea del
+    // page size), así que acá `agents.length` YA ES la cota inferior y estaría en
+    // la misma respuesta. En `/discover` no lo es —`agents` puede venir cortado
+    // por `limit`— y por eso ahí `totalAtLeast` sí es un campo aparte.
+    expect(body.agentsTotal).toBe('unknown');
     expect(body.registries).toEqual([]);
 
     // (c) y no apareció ni desapareció NINGÚN otro campo.

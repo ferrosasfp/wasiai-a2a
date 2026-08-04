@@ -102,6 +102,7 @@ describe('discover route — behaviour (P1-4)', () => {
     mockDiscover.mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete',
@@ -129,6 +130,7 @@ describe('discover route — behaviour (P1-4)', () => {
         },
       ],
       total: 1,
+      totalAtLeast: 1,
       registries: ['wasiai'],
       sources: [],
       catalogStatus: 'complete',
@@ -271,6 +273,7 @@ describe('discover route — behaviour (P1-4)', () => {
         },
       ],
       total: 1,
+      totalAtLeast: 1,
       // a remote registry failed to respond → omitted from the surviving list.
       registries: ['wasiai'],
       sources: [],

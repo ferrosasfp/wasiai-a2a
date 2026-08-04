@@ -615,9 +615,63 @@ export interface RegistryFetchOutcome {
   truncationEvidence?: 'cursor' | 'page_full';
 }
 
+/**
+ * HU-323 — el valor publicado de `total`, con su tercer estado.
+ *
+ * `'unknown'` (string, TRUTHY) y no `null`/campo ausente, por la misma razón por
+ * la que `/health` publica `strandedExposureBreached: 'unknown'` en vez de omitir
+ * el campo cuando el umbral está puesto pero es ilegible (`services/stranded-alert.ts`,
+ * commit bfe9a55): un valor falsy o un campo que desaparece se leen como "no hay
+ * problema" — `total ?? 0` y `total || 0` darían **0**, que es una afirmación
+ * MÁS falsa que el número recortado que se está sacando. Truthy obliga a que
+ * quien lo consuma se entere.
+ *
+ * Sigue existiendo un número para quien necesita uno: `DiscoveryResult.totalAtLeast`.
+ */
+export type ReportedTotal = number | 'unknown';
+
 export interface DiscoveryResult {
   agents: Agent[];
-  total: number;
+  /**
+   * Matches de TODOS los filtros, PRE-`limit` (denominador de paginación), o
+   * `'unknown'` cuando el catálogo se sabe INCOMPLETO y por lo tanto nadie puede
+   * saber el total sin paginar.
+   *
+   * ⚠️ HU-323 — POR QUÉ ESTE CAMPO PUEDE NO SER UN NÚMERO. Antes era
+   * `allAgents.length` SIEMPRE, incluso con `catalogStatus: 'truncated'`. Medido
+   * en producción el 2026-08-04: `GET /discover` devolvía `total: 23` sobre un
+   * catálogo de 25, porque la fuente federada había cortado en su página default
+   * de 20. Al lado de `catalogStatus: 'truncated'` eso no es una mentira, pero es
+   * ambiguo: un cliente que lee sólo `total` se lleva 23 como si fuera el total.
+   * Rellenar un dato desconocido con el que hay a mano es exactamente lo que la
+   * doctrina de este repo prohíbe.
+   *
+   * CUÁNDO es `'unknown'`, y quién lo decide: `resolveReportedTotal`
+   * (`lib/discovery-sources.ts`) es la ÚNICA expresión de la regla — un
+   * `catalogStatus` que PRUEBA que falta algo (`truncated`: una fuente declaró
+   * que hay más filas; `partial`: una fuente no se pudo consultar).
+   * `unverified` NO entra: ahí no hay evidencia de que falte nada, sólo falta de
+   * evidencia de que no falte, y hacerlo `'unknown'` dejaría a `total` sin número
+   * en casi todo camino que no declare cursor.
+   */
+  total: ReportedTotal;
+  /**
+   * HU-323 — COTA INFERIOR del total: los matches que efectivamente se contaron.
+   * SIEMPRE un número, y siempre `total >= totalAtLeast` en el sentido de la
+   * realidad (`total === totalAtLeast` cuando `total` es un número).
+   *
+   * Es, byte por byte, el valor que `total` traía antes de esta HU. Existe para
+   * que sacarle el número a `total` no pierda información y para que el
+   * consumidor que necesita un entero (una barra de progreso, un log) tenga uno
+   * cuyo NOMBRE ya dice que es una cota y no un total.
+   *
+   * También es el que consume la lógica interna: el gate del broaden-retry de
+   * WKH-157 (`services/discovery.ts`) preguntaba `result.total === 0` y ahora
+   * pregunta `result.totalAtLeast === 0` — la MISMA expresión sobre el MISMO
+   * número, para que el backstop del flujo estrella no cambie de conducta por un
+   * cambio de presentación.
+   */
+  totalAtLeast: number;
   /**
    * WKH-318: las fuentes que **aportaron filas** al conjunto candidato, NO las
    * fuentes configuradas. El tipo (`string[]`) y el nombre no cambian; el valor

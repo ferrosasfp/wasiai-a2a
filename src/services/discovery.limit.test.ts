@@ -198,14 +198,52 @@ describe('discover(): contrato de limit / total (hallazgo P1-1)', () => {
     expect(upstreamLimits).toEqual(['200']);
   });
 
-  it('T-8: SIN limit del caller no se manda limitParam (comportamiento de hoy preservado)', async () => {
+  // ⚠️ HU-323 — ESTE TEST DECÍA LO CONTRARIO, y lo que afirmaba era el bug.
+  // Se llamaba "SIN limit del caller no se manda limitParam (comportamiento de
+  // hoy preservado)" y assertaba `upstreamLimits === [null]`. Esa promesa de
+  // preservación suponía que no mandar límite equivale a pedir TODO; medido
+  // contra producción el 2026-08-04, equivale a aceptar la PÁGINA DEFAULT DEL
+  // REGISTRO, que para el registro federado `WasiAI` es 20 filas de 22.
+  // `GET /discover` devolvía 23 agentes y `?limit=100` devolvía 25.
+  it('T-8 (HU-323): SIN limit del caller se manda igual el OVER-FETCH, para que la página del registro no decida el catálogo', async () => {
     const { upstreamLimits } = serveHonoringLimit(catalog(10, 3));
 
     const result = await discoveryService.discover({});
 
-    expect(upstreamLimits).toEqual([null]);
+    // El default (200) sale por la red aunque el caller no haya pedido nada.
+    expect(upstreamLimits).toEqual(['200']);
+    // Sin page size, `total` NO se ve afectado: los 10 del catálogo menos los 3
+    // inactivos. Lo que cambia es de dónde salieron los candidatos.
     expect(result.agents).toHaveLength(7);
     expect(result.total).toBe(7);
+    expect(result.totalAtLeast).toBe(7);
+  });
+
+  it('T-8b (HU-323): el registro que pagina MÁS CHICO que su catálogo ya no recorta la llamada por defecto', async () => {
+    // El repro exacto de producción, en chico: un registro cuya página default
+    // son 4 filas de un catálogo de 25. Este es el caso que el gate viejo dejaba
+    // pasar y el que motivó la HU.
+    const rows = catalog(25);
+    const upstreamLimits: (string | null)[] = [];
+    mockFetch.mockImplementation((url: string) => {
+      const lim = new URL(url).searchParams.get('limit');
+      upstreamLimits.push(lim);
+      // Sin `?limit`, el registro pagina de a 4 POR SU CUENTA. Con `?limit=N`
+      // honra el número.
+      const take = lim ? Number(lim) : 4;
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(rows.slice(0, take)),
+      });
+    });
+
+    const result = await discoveryService.discover({});
+
+    expect(upstreamLimits).toEqual(['200']);
+    // Con el gate viejo esto era 4. Ese 4 lo elegía el registro, no nosotros.
+    expect(result.agents).toHaveLength(25);
+    expect(result.total).toBe(25);
+    expect(result.catalogStatus).toBe('complete');
   });
 
   it('T-9: registry SIN limitParam en su schema nunca recibe el parámetro', async () => {
@@ -306,7 +344,7 @@ describe('discover(): contrato de limit / total (hallazgo P1-1)', () => {
     );
   });
 
-  it('T-CLAMP-02b: SIN limit del caller no se manda limitParam, aunque haya maxLimit (AC-2, CD-2, CD-9d)', async () => {
+  it('T-CLAMP-02b (HU-323): SIN limit del caller se manda el over-fetch YA CLAMPEADO al techo declarado', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([
       registryWithMaxLimit(100),
     ]);
@@ -314,9 +352,16 @@ describe('discover(): contrato de limit / total (hallazgo P1-1)', () => {
 
     await discoveryService.discover({});
 
-    // El clamp vive DENTRO del gate: imponer un cap donde antes no había
-    // ninguno reintroduciría el bug de clase "esconder agentes".
-    expect(upstreamLimits).toEqual([null]);
+    // Antes acá se esperaba `[null]` con este comentario: "El clamp vive DENTRO
+    // del gate: imponer un cap donde antes no había ninguno reintroduciría el
+    // bug de clase 'esconder agentes'". La medición lo dio vuelta — no mandar
+    // nada NO es no tener cap, es aceptar el cap del registro (20 en producción).
+    //
+    // El clamp sigue viviendo dentro del gate; lo que cambió es el gate. Sale
+    // `100` y no `200` porque el techo declarado gana sobre el over-fetch: es el
+    // mismo `clampToRegistryMaxLimit` de siempre, ahora también en este camino.
+    // El `400` que WKH-318 corte B vino a evitar sigue evitado.
+    expect(upstreamLimits).toEqual(['100']);
   });
 
   it('T-CLAMP-02c: registry SIN limitParam nunca recibe el parámetro, aunque declare maxLimit (AC-2, CD-9e)', async () => {

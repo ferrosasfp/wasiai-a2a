@@ -158,6 +158,21 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    *   `total >= agents.length`. NO es el tamaño de la página. WKH-313 (R-5):
    *   SUBE cuando hay admitidos por estreno — es un cambio observable para quien
    *   pagina con `allowTrial=true`.
+   *
+   *   HU-323 — TERCER ESTADO: `'unknown'` (string) cuando `catalogStatus` es
+   *   `truncated` o `partial`, o sea cuando hay EVIDENCIA de que el catálogo
+   *   llegó incompleto. Antes se publicaba igual el conteo de lo que había
+   *   entrado; medido en producción, `GET /discover` devolvía `total: 23` sobre
+   *   un catálogo de 25 porque la fuente federada cortó en su página de 20. Con
+   *   `catalogStatus: 'truncated'` al lado eso no era una mentira, pero un cliente
+   *   que lee sólo `total` se llevaba un número que no es el total. Es `'unknown'`
+   *   y no `null` ni un campo ausente por la misma razón que
+   *   `/health.strandedExposureBreached`: un valor falsy se lee como "no hay
+   *   problema" (`total ?? 0` daría 0, peor que 23).
+   * - `totalAtLeast`: HU-323 — SIEMPRE un número: los matches que se contaron, o
+   *   sea una COTA INFERIOR del total. Es exactamente el valor que `total` traía
+   *   antes de esta HU, con el nombre que le corresponde. Cuando `total` es un
+   *   número, los dos coinciden.
    * - `registries`: nombres de las fuentes que APORTARON FILAS. WKH-318: antes
    *   listaba los registries CONFIGURADOS, así que un registro que fallaba
    *   aparecía igual y la respuesta afirmaba haberlo consultado. El tipo

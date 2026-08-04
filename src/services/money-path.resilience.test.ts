@@ -204,6 +204,7 @@ function withAgents(agents: Agent[]): void {
   vi.mocked(discoveryService.discover).mockResolvedValue({
     agents,
     total: agents.length,
+    totalAtLeast: agents.length,
     registries: ['wasiai'],
     sources: [],
     catalogStatus: 'complete',

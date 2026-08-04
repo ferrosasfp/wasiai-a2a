@@ -1894,7 +1894,19 @@ describe('discover — free-text broaden-retry (WKH-157)', () => {
     });
 
     expect(result.agents).toHaveLength(0);
-    expect(result.total).toBe(0);
+    // HU-323 — acá decía `expect(result.total).toBe(0)`. En esta suite la fuente
+    // local no está mockeada, así que el SELECT se cae y el catálogo queda
+    // `partial`: sobre un catálogo que se sabe incompleto, un `0` con nombre de
+    // `total` afirma "no hay ninguno" cuando el hecho es "no los pude contar a
+    // todos". El conteo real (0 matches de lo que SÍ se pudo leer) sigue estando,
+    // con el nombre que le corresponde.
+    expect(result.catalogStatus).toBe('partial');
+    expect(result.total).toBe('unknown');
+    expect(result.totalAtLeast).toBe(0);
+    // Y lo que este test vino a probar sigue en pie: el gate del broaden-retry
+    // mira `totalAtLeast`, así que el retry ocurrió igual (2 llamadas) pese a que
+    // `total` ya no es un número. Si el gate hubiera quedado en `total === 0`,
+    // acá habría UNA sola llamada.
     // Exactly one retry — CD-3: no loop.
     expect(spy).toHaveBeenCalledTimes(2);
     expect(mockFetch).toHaveBeenCalledTimes(2);

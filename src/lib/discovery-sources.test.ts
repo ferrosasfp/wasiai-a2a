@@ -15,6 +15,7 @@ import {
   isCatalogComplete,
   listFailedSources,
   RegistryHttpError,
+  resolveReportedTotal,
 } from './discovery-sources.js';
 
 function src(
@@ -124,6 +125,39 @@ describe('WKH-318 discovery-sources (módulo leaf)', () => {
     expect(err.name).toBe('RegistryHttpError');
     expect(err.status).toBe(400);
     expect(err).toBeInstanceOf(Error);
+  });
+
+  // ── HU-323: `total` tiene un tercer estado ───────────────────────────────
+
+  it('T-LIB-323a: resolveReportedTotal devuelve el conteo cuando el catálogo está completo', () => {
+    expect(resolveReportedTotal(25, 'complete')).toBe(25);
+    expect(resolveReportedTotal(0, 'complete')).toBe(0);
+  });
+
+  it('T-LIB-323b: con evidencia de que FALTA algo, el total se declara desconocido — nunca el conteo recortado', () => {
+    // Los dos estados que PRUEBAN el hueco. El 23 es el número real medido en
+    // producción bajo truncamiento: es lo que entró, no lo que hay (25).
+    expect(resolveReportedTotal(23, 'truncated')).toBe('unknown');
+    expect(resolveReportedTotal(23, 'partial')).toBe('unknown');
+    expect(resolveReportedTotal(23, 'truncated')).not.toBe(23);
+  });
+
+  it('T-LIB-323c: `unverified` NO vuelve el total desconocido — "no pude probar que no falta" no es "sé que falta"', () => {
+    // La línea está donde la pone `buildCatalogStatus`: `unverified` es el único
+    // no-completo que no afirma nada. Si entrara acá, `total` sería `'unknown'`
+    // contra todo registro que no declare cursor —casi siempre— y un campo que
+    // nunca trae número no informa nada.
+    expect(resolveReportedTotal(20, 'unverified')).toBe(20);
+  });
+
+  it('T-LIB-323d: el valor desconocido es TRUTHY, para que no se lea como 0 ni como "no hay problema"', () => {
+    // Misma razón que `/health.strandedExposureBreached: "unknown"`: con `null`
+    // o con el campo ausente, `total ?? 0` daría 0 — una afirmación más falsa
+    // que el conteo recortado que se está sacando.
+    const unknown = resolveReportedTotal(23, 'truncated');
+    expect(Boolean(unknown)).toBe(true);
+    expect(unknown).not.toBeNull();
+    expect(unknown).not.toBeUndefined();
   });
 
   it('listFailedSources proyecta sólo las caídas y nunca pierde el motivo', () => {

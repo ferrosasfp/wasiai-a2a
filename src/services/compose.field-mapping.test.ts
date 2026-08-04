@@ -246,6 +246,7 @@ beforeEach(() => {
   vi.mocked(discoveryService.discover).mockResolvedValue({
     agents: [],
     total: 0,
+    totalAtLeast: 0,
     registries: [],
     sources: [],
     catalogStatus: 'complete',

@@ -46,7 +46,10 @@
  * hace el registry en silencio, acá lo hacemos nosotros.
  */
 
-/** Over-fetch por registry cuando el caller manda `limit`. */
+/**
+ * Over-fetch por registry. HU-323: también es el PISO del camino sin `limit` del
+ * caller — se llama con `0` y `Math.max` lo deja en este número.
+ */
 const DEFAULT_UPSTREAM_FETCH_LIMIT = 200;
 
 /**
@@ -236,11 +239,20 @@ export function clampToRegistryMaxLimit(
  * en prod; queda como residual explícito en TD-189-1 (work-item), no como
  * propiedad del código.
  *
- * Por qué NO `discover({})` (la otra opción del AR): sin `limit` no se manda
- * `limitParam`, así que el tamaño del pool lo decide el DEFAULT DE PAGINACIÓN DEL
- * REGISTRY. Un registry que pagina de a 25 devolvería 25 filas — PEOR que hoy y
- * fuera de nuestro control. El límite explícito mantiene el pool acotado y
- * gobernado por una env nuestra.
+ * Por qué NO `discover({})` (la otra opción del AR): el tamaño del pool lo
+ * decidiría el DEFAULT DE PAGINACIÓN DEL REGISTRY. Un registry que pagina de a 25
+ * devolvería 25 filas — PEOR que hoy y fuera de nuestro control. El límite
+ * explícito mantiene el pool acotado y gobernado por una env nuestra.
+ *
+ * ⚠️ HU-323 — este párrafo describía además el MECANISMO ("sin `limit` no se
+ * manda `limitParam`") y ese mecanismo YA NO EXISTE: `queryRegistry` manda el
+ * over-fetch a todo registry que declare `limitParam`, con o sin `limit` del
+ * caller. La razón de arriba se sostiene igual, porque es sobre el TAMAÑO del
+ * pool y no sobre cómo se lo pide; lo que cambió es que ese mismo riesgo —el
+ * registro decidiendo la página— es justo el que se midió mordiendo a `/discover`
+ * y a `/capabilities` en producción (20 filas de 22), y por eso se cerró también
+ * ahí. Ver el bloque largo del gate en `services/discovery.ts` (buscá
+ * `HU-323 — ACÁ ESTABA`, por texto y no por número de línea).
  *
  * El piso de 50 preserva el pool histórico si el operador baja
  * `DISCOVERY_UPSTREAM_FETCH_LIMIT` por debajo (y con una sola fuente la alineación

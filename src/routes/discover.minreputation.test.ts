@@ -50,6 +50,7 @@ describe('minReputation: validación en la ruta', () => {
     mockDiscover.mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete',
@@ -330,6 +331,7 @@ describe('T-03 (AC-3) · `excluded` viaja en el JSON de GET y POST', () => {
     mockDiscover.mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       // Merge WKH-313 ↔ WKH-318: este doble nació en la rama del carril de estreno,
       // y 318 volvió `sources`/`catalogStatus` REQUERIDOS. El auto-merge combinó las
@@ -410,6 +412,7 @@ describe('WKH-322 · min_reputation y UNKNOWN_DISCOVER_PARAM', () => {
     mockDiscover.mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete' as const,
@@ -616,6 +619,7 @@ describe('WKH-322 · min_reputation y UNKNOWN_DISCOVER_PARAM', () => {
     mockDiscover.mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete' as const,
@@ -651,6 +655,7 @@ describe('WKH-322 · min_reputation y UNKNOWN_DISCOVER_PARAM', () => {
     mockDiscover.mockResolvedValue({
       agents: [],
       total: 0,
+      totalAtLeast: 0,
       registries: [],
       sources: [],
       catalogStatus: 'complete' as const,
