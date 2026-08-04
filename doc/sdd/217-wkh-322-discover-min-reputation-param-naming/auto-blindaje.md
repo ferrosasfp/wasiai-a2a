@@ -57,6 +57,13 @@ para que la próxima HU no los repita.
   `src/` entero, para no mezclar reformateos ajenos en el diff de la HU).
 - **Aplicar en**: correr `npm run lint` ANTES del commit de cada wave, no al
   final de la HU. `main` ya estuvo rojo por saltear esto (commit `34e1f2b`).
+- **REINCIDIÓ en el fix-pack 4** (2026-08-04 04:07): commiteé `37bcc26` con
+  `src/__tests__/discover-callsites.test.ts` mal formateado y lo descubrí recién
+  en el lint de cierre. Lo que falló no fue el olvido: corrí `npm run lint`
+  después del PRIMER commit del fix-pack y salió limpio, así que di el lint por
+  cubierto para el resto. **Un lint verde caduca en la siguiente edición.** La
+  regla mecánica es correrlo entre el `git add` y el `git commit`, no una vez por
+  sesión.
 
 ### [2026-08-04 14:05] Fix-pack — el Story File decía 4, el AR dijo 6, y eran 8
 - **Error**: el radio de `query` → `q` se contó **tres veces mal**. F2.5 enumeró 4

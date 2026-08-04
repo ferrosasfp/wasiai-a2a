@@ -934,7 +934,9 @@ describe('WKH-322 · T-CS-4: el extractor contra formas plantadas', () => {
         'await fetch(url);',
       ].join('\n'),
     );
-    expect(r.hits.map((h) => `${h.key}:${h.how}`)).toEqual(['query:searchParams']);
+    expect(r.hits.map((h) => `${h.key}:${h.how}`)).toEqual([
+      'query:searchParams',
+    ]);
   });
 
   // ── Las formas que AR-3 plantó y pasaban MUDAS ───────────────────────────
