@@ -142,6 +142,9 @@ interface OpaquePost {
   file: string;
   line: number;
   snippet: string;
+  /** `'no-body'`: no se encontró ningún literal. `'partial-body'`: se encontró
+   *  uno pero tenía un spread / clave computada / token no resoluble adentro. */
+  reason: 'no-body' | 'partial-body';
 }
 
 // ── Enumeración de archivos ────────────────────────────────────────────────
@@ -198,12 +201,28 @@ function lineOf(lineStarts: number[], offset: number): number {
   return lo;
 }
 
-/** Claves de nivel 1 del objeto literal (JS o JSON) que abre en `open`. */
+/**
+ * Claves de nivel 1 del objeto literal (JS o JSON) que abre en `open`, MÁS un
+ * flag `unresolved` que dice si quedó algo sin leer.
+ *
+ * ⚠️ EL FLAG NO ES DECORATIVO — es la diferencia entre "¿leí algo?" y "¿leí
+ * TODO?" (AR-3 `BLQ-BAJO-2`). Sin él, `JSON.stringify({ ...extraFilters, limit: 5 })`
+ * devolvía `['limit']`, el POST contaba como "body leído" y el `query` que sale
+ * de verdad por el cable no aparecía **ni como hit ni como rojo**: verde mudo.
+ * Eso es la negación exacta de lo que `T-CS-3` promete.
+ *
+ * Cae en `unresolved` todo lo que ocupe una posición de clave y no resuelva a un
+ * nombre estático: el spread (`...x`), la clave computada (`[k]: v`), una llamada
+ * (`...toFilters()`), y en general cualquier token que el extractor no sepa
+ * nombrar. El shorthand (`{ q, limit }`) SÍ resuelve: la clave es el nombre del
+ * identificador.
+ */
 function topLevelKeys(
   text: string,
   open: number,
-): Array<{ key: string; offset: number }> {
+): { keys: Array<{ key: string; offset: number }>; unresolved: boolean } {
   const keys: Array<{ key: string; offset: number }> = [];
+  let unresolved = false;
   const IDENT = /^[A-Za-z_$][\w$-]*/;
   let depth = 0;
   let atKeyPos = false;
@@ -221,6 +240,16 @@ function topLevelKeys(
       continue;
     }
     if (c === '{' || c === '[' || c === '(') {
+      // `{ [k]: v }` — clave computada. NO marca `unresolved`, a propósito y
+      // medido: es exactamente la misma "clave construida en runtime" que ya
+      // está declarada como límite del lado GET (`params.set(KEY, x)`), y
+      // ningún análisis estático la alcanza por ninguno de los dos caminos.
+      // Marcarla roja no daría un arreglo posible: daría una excepción.
+      // Distinta del spread, que SÍ marca: el spread esconde claves que son
+      // ESTÁTICAS, sólo que escritas en otro lado del repo — o sea justo lo que
+      // este barrido existe para encontrar.
+      // Hoy la única del repo es `routes/discover.minreputation.test.ts:732`
+      // (`payload: { [name]: value }`, el `it.each` POSITIVO del propio guard).
       depth += 1;
       atKeyPos = c === '{' && depth === 1;
       i += 1;
@@ -244,8 +273,14 @@ function topLevelKeys(
         if (text[j] === '\\') j += 1;
         j += 1;
       }
-      if (atKeyPos && depth === 1 && /^\s*:/.test(text.slice(j + 1, j + 8))) {
-        keys.push({ key: text.slice(i + 1, j), offset: i + 1 });
+      if (atKeyPos && depth === 1) {
+        if (/^\s*:/.test(text.slice(j + 1, j + 8))) {
+          keys.push({ key: text.slice(i + 1, j), offset: i + 1 });
+        } else {
+          // Una cadena en posición de clave que no abre un `key: value`. No sé
+          // qué es; no puedo afirmar que el body esté leído.
+          unresolved = true;
+        }
       }
       atKeyPos = false;
       i = j + 1;
@@ -255,19 +290,28 @@ function topLevelKeys(
       const m = text.slice(i, i + 80).match(IDENT);
       if (m) {
         const ident = m[0] as string;
-        if (/^\s*:/.test(text.slice(i + ident.length, i + ident.length + 8))) {
+        const after = text.slice(i + ident.length, i + ident.length + 8);
+        if (/^\s*:/.test(after)) {
           keys.push({ key: ident, offset: i });
+        } else if (/^\s*[,}]/.test(after)) {
+          // Shorthand `{ q, limit }`: la clave ES el identificador. Resuelve.
+          keys.push({ key: ident, offset: i });
+        } else {
+          // `foo()`, `a.b`, un operador… ocupa la posición de clave y no la sé
+          // nombrar.
+          unresolved = true;
         }
         i += ident.length;
       } else {
-        i += 1; // spread, etc.
+        unresolved = true; // spread `...x`, y cualquier token no identificador
+        i += 1;
       }
       atKeyPos = false;
       continue;
     }
     i += 1;
   }
-  return keys;
+  return { keys, unresolved };
 }
 
 function allMatchOffsets(text: string, re: RegExp): number[] {
@@ -413,7 +457,8 @@ function scanFile(
   }
 
   // 3. Cuerpos JSON.
-  const bodyAnchors: number[] = [];
+  /** `unresolved`: el literal existía pero quedó algo adentro sin leer. */
+  const bodyAnchors: Array<{ offset: number; unresolved: boolean }> = [];
   BODY_ANCHOR_RE.lastIndex = 0;
   let a = BODY_ANCHOR_RE.exec(text);
   while (a !== null) {
@@ -428,9 +473,9 @@ function scanFile(
     );
     if (braceRel !== -1 && rest[braceRel] === '{' && !isCannedResponse) {
       const open = a.index + anchor.length + braceRel;
-      bodyAnchors.push(a.index);
-      for (const { key, offset } of topLevelKeys(text, open))
-        push(offset, key, 'body JSON');
+      const parsed = topLevelKeys(text, open);
+      bodyAnchors.push({ offset: a.index, unresolved: parsed.unresolved });
+      for (const { key, offset } of parsed.keys) push(offset, key, 'body JSON');
     }
     a = BODY_ANCHOR_RE.exec(text);
   }
@@ -462,16 +507,22 @@ function scanFile(
         /post|POST/.test(construct) || /method\s*:\s*['"`]POST/.test(span);
       if (hitsTarget && isPost) {
         const own = c.index;
+        const ownedAnchors = bodyAnchors.filter(
+          (b) => ownerOf(b.offset) === own && Math.abs(b.offset - own) < 900,
+        );
+        const hasAssignedBody = hits.some(
+          (h) =>
+            h.how === 'asignación al body' &&
+            ownerOf(lineStarts[h.line - 1] as number) === own &&
+            Math.abs((lineStarts[h.line - 1] as number) - own) < 900,
+        );
+        // "¿Leí TODO?", no "¿leí algo?" (AR-3 `BLQ-BAJO-2`): un literal con un
+        // spread adentro deja de contar como body leído aunque haya rendido
+        // otras claves. Un `hasBody` booleano hacía pasar en verde justo el
+        // caso en el que el extractor sabe A MEDIAS.
+        const partiallyRead = ownedAnchors.some((b) => b.unresolved);
         const hasBody =
-          bodyAnchors.some(
-            (b) => ownerOf(b) === own && Math.abs(b - own) < 900,
-          ) ||
-          hits.some(
-            (h) =>
-              h.how === 'asignación al body' &&
-              ownerOf(lineStarts[h.line - 1] as number) === own &&
-              Math.abs((lineStarts[h.line - 1] as number) - own) < 900,
-          );
+          (ownedAnchors.length > 0 || hasAssignedBody) && !partiallyRead;
         const ln = lineOf(lineStarts, c.index);
         // Los tests del propio guard mandan bodies deliberadamente ilegibles
         // (`payload: [1,2]`, un primitivo): que no tengan claves es el punto.
@@ -480,6 +531,7 @@ function scanFile(
             file: rel,
             line: ln + 1,
             snippet: (lines[ln] as string).trim().slice(0, 160),
+            reason: partiallyRead ? 'partial-body' : 'no-body',
           });
         }
       }
@@ -557,15 +609,117 @@ describe('WKH-322 · call-sites de /discover en todo el repo', () => {
 
   it('T-CS-3: no hay POST hacia /discover cuyo cuerpo el barrido no pueda leer', () => {
     const detail = scan.opaquePosts
-      .map((o) => `  ${o.file}:${o.line}\n      ${o.snippet}`)
+      .map((o) => `  ${o.file}:${o.line}  [${o.reason}]\n      ${o.snippet}`)
       .join('\n');
     expect(
       scan.opaquePosts,
-      'Hay POST(s) hacia /discover cuyo body este test no supo extraer, así que no puede\n' +
-        'afirmar nada sobre sus claves. "No sé" se reporta rojo a propósito: es lo que\n' +
-        'impide que una FORMA nueva de escribir la llamada se cuele sin revisar.\n' +
+      'Hay POST(s) hacia /discover cuyo body este test no supo extraer ENTERO, así que no\n' +
+        'puede afirmar nada sobre sus claves. "No sé" se reporta rojo a propósito: es lo\n' +
+        'que impide que una FORMA nueva de escribir la llamada se cuele sin revisar.\n' +
+        '  · `no-body`      → no se encontró ningún literal cerca del request.\n' +
+        '  · `partial-body` → SÍ hay literal, pero adentro quedó un spread o un token\n' +
+        '                     no resoluble: las claves leídas son un subconjunto de las\n' +
+        '                     que salen por el cable.\n' +
         'Arreglo: escribir el body como literal junto al call-site, o enseñarle la forma\n' +
-        `nueva al extractor (BODY_ANCHOR_RE / MEMBER_RE).\n${detail}\n`,
+        `nueva al extractor (BODY_ANCHOR_RE / MEMBER_RE / topLevelKeys).\n${detail}\n`,
     ).toEqual([]);
+  });
+});
+
+// ── El extractor medido contra formas plantadas ────────────────────────────
+
+/**
+ * `T-CS-4` — el mecanismo probado por lo que NO caza, no sólo por lo que caza.
+ *
+ * POR QUÉ EXISTE (AR-3): los tests de arriba miden el extractor contra el repo
+ * REAL, así que sólo prueban las formas que hoy alguien escribió. AR-3 plantó 15
+ * formas distintas en un directorio nuevo y encontró que varias pasaban MUDAS
+ * sin estar declaradas. Un barrido que pasa en verde sobre un repo que no tiene
+ * la forma peligrosa no dice nada sobre esa forma.
+ *
+ * Cada caso de acá es una de esas formas, congelada como fixture: el fixture le
+ * entra a `scanFile` directo, así que el caso vive para siempre y no depende de
+ * que alguien deje un archivo plantado en el árbol. Los casos marcados
+ * "límite declarado" documentan mecánicamente lo que el barrido NO ve — si algún
+ * día alguien se lo enseña, ESE test se pone rojo y hay que sacarlo de la lista
+ * de límites del docstring de arriba, que es exactamente el acoplamiento que
+ * faltaba.
+ */
+const FIXTURE = 'planted/fixture.mjs';
+const scanText = (src: string) => scanFile(FIXTURE, src);
+
+describe('WKH-322 · T-CS-4: el extractor contra formas plantadas', () => {
+  it('un body con SPREAD se reporta `partial-body` aunque haya rendido otras claves', () => {
+    // ⚠️ El caso exacto de AR-3 `BLQ-BAJO-2`. Antes del fix esto salía VERDE con
+    // un solo hit (`limit`) y el `query` que sale por el cable no aparecía ni
+    // como hit ni como rojo.
+    const r = scanText(
+      [
+        'await fetch("https://gw.wasiai.io/discover", {',
+        '  method: "POST",',
+        '  body: JSON.stringify({ ...extraFilters, limit: 5 }),',
+        '});',
+      ].join('\n'),
+    );
+    expect(r.opaquePosts.map((o) => o.reason)).toEqual(['partial-body']);
+    // Y lo que SÍ pudo leer se sigue reportando: el rojo no reemplaza al hit.
+    expect(r.hits.map((h) => h.key)).toContain('limit');
+  });
+
+  it('CONTROL: el mismo body SIN spread se lee entero y no reporta nada', () => {
+    // Sin este control, el caso de arriba pasaría igual con un extractor que
+    // declare `partial-body` para TODO body.
+    const r = scanText(
+      [
+        'await fetch("https://gw.wasiai.io/discover", {',
+        '  method: "POST",',
+        '  body: JSON.stringify({ q: "oracle", limit: 5 }),',
+        '});',
+      ].join('\n'),
+    );
+    expect(r.opaquePosts).toEqual([]);
+    expect(r.hits.map((h) => h.key).sort()).toEqual(['limit', 'q']);
+  });
+
+  it('el shorthand `{ q, limit }` resuelve: la clave ES el identificador', () => {
+    const r = scanText(
+      [
+        'await fetch("https://gw.wasiai.io/discover", {',
+        '  method: "POST",',
+        '  body: JSON.stringify({ q, limit }),',
+        '});',
+      ].join('\n'),
+    );
+    expect(r.opaquePosts).toEqual([]);
+    expect(r.hits.map((h) => h.key).sort()).toEqual(['limit', 'q']);
+  });
+
+  it('un body que es una VARIABLE se reporta `no-body` (no hay literal que leer)', () => {
+    const r = scanText(
+      [
+        'await fetch("https://gw.wasiai.io/discover", {',
+        '  method: "POST",',
+        '  body: JSON.stringify(filters),',
+        '});',
+      ].join('\n'),
+    );
+    expect(r.opaquePosts.map((o) => o.reason)).toEqual(['no-body']);
+  });
+
+  it('LÍMITE DECLARADO: la clave COMPUTADA `{ [k]: v }` pasa muda', () => {
+    // No es un descuido: es la misma clave-construida-en-runtime que el límite
+    // ya declarado del lado GET (`params.set(KEY, x)`). Está acá para que el
+    // límite sea MEDIBLE y no sólo una frase. Si alguien enseña esta forma,
+    // este test se pone rojo y hay que actualizar "QUÉ NO CUBRE".
+    const r = scanText(
+      [
+        'await fetch("https://gw.wasiai.io/discover", {',
+        '  method: "POST",',
+        '  body: JSON.stringify({ [name]: value }),',
+        '});',
+      ].join('\n'),
+    );
+    expect(r.hits).toEqual([]);
+    expect(r.opaquePosts).toEqual([]);
   });
 });
