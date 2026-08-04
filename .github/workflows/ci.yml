@@ -11,6 +11,12 @@ on:
     branches: [main]
   pull_request:
 
+# Este workflow sólo lee el árbol: no comenta PRs, no publica, no toca el
+# registry. Sin este bloque los jobs heredan el default del repo, que puede ser
+# read/write sobre todos los scopes.
+permissions:
+  contents: read
+
 jobs:
   build-test:
     runs-on: ubuntu-latest
@@ -45,9 +51,22 @@ jobs:
       # El guardián que impide que un sub-paquete nuevo vuelva a nacer huérfano
       # es `test/test-files-are-run-in-ci.test.ts`, y descubre los runners
       # leyendo ESTE archivo: agregar el step de abajo es lo que lo pone verde.
+      #
+      # ⚠️ `--ignore-scripts` EXPLÍCITO en los dos installs de sub-paquete.
+      # El `.npmrc` de la raíz fija `ignore-scripts=true` ("do NOT remove this
+      # flag globally"), pero npm resuelve el .npmrc de proyecto desde el prefix
+      # (el directorio con package.json), NO de los ancestros. Medido:
+      #   $ npm config get ignore-scripts                              → true
+      #   $ cd mcp-servers/wasiai-x402 && npm config get ignore-scripts → false
+      #   $ cd packages/agent-sdk      && npm config get ignore-scripts → false
+      # O sea que sin la bandera estos dos steps instalaban con preinstall/
+      # postinstall HABILITADOS — exactamente el vector que el .npmrc existe
+      # para cerrar. Peor en agent-sdk: sin package-lock.json, `npm install`
+      # re-resuelve los `^` en cada corrida, así que una patch comprometida de
+      # cualquier transitiva ejecutaría código en el runner.
       - name: Install dependencies (mcp-servers/wasiai-x402)
         working-directory: mcp-servers/wasiai-x402
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Test (mcp-servers/wasiai-x402)
         working-directory: mcp-servers/wasiai-x402
@@ -57,7 +76,7 @@ jobs:
       # propio. Generarlo es un cambio aparte; sin él, `npm ci` falla.
       - name: Install dependencies (packages/agent-sdk)
         working-directory: packages/agent-sdk
-        run: npm install --no-audit --no-fund
+        run: npm install --ignore-scripts --no-audit --no-fund
 
       - name: Test (packages/agent-sdk)
         working-directory: packages/agent-sdk
