@@ -226,7 +226,7 @@ fi
 
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$BASE_URL/discover" \
   -H "Content-Type: application/json" \
-  -d '{"query": "test"}')
+  -d '{"q": "test"}')   # WKH-322: `q` es el nombre publico; `query` da 400
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 BODY=$(echo "$RESPONSE" | sed '$d')
 
