@@ -51,7 +51,8 @@ export type CapabilityRisk =
  * (`doc/sdd/170-wkh-172-remit-cashout-payout/done-report.md:202`, idéntico en
  * `sdd.md:434` y `story-file.md:620`). Su gemelo Solana
  * `remit-cashout-payout-solana` sirve la misma `remittance-payout`
- * (`doc/roadmap/2026-08-incubadora-solana-checklist.md:48-53`).
+ * (`doc/sdd/217-wkh-322-discover-min-reputation-param-naming/sdd.md:41`: es el
+ * ÚNICO agente del catálogo con esa capacidad).
  *
  * Todo en minúsculas: el lookup normaliza (ver `classifyCapability`), así que acá
  * NO se escriben variantes de mayúsculas.
