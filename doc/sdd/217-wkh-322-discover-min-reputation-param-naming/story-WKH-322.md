@@ -9,7 +9,7 @@
 | Branch | `feat/217-wkh-322-discover-reputation-param-naming` (desde `main`) |
 | Archivos de producción | 2 (`src/lib/discovery-query.ts`, `src/routes/discover.ts`) |
 | Archivos de test | 2 (aditivos) + 1 corrección (`e2e.test.ts`) |
-| Scripts a corregir | 2 (`scripts/perf-bench.mjs`, `scripts/k6-load-test.js`) — ver §2 |
+| Scripts a corregir | **la lista vive en §2.2, no acá** — este renglón dijo "2" cuando eran 10 |
 | Doc público | 1 (`doc/INTEGRATION.md`) |
 | Fecha | 2026-08-04 |
 
@@ -108,7 +108,7 @@ que el 400 les es transparente. **No los toques.**
 `doc/QUICKSTART-PUBLISH.md`, `doc/BASE-EVIDENCE.md`): sólo `capabilities`, `limit`, `q`.
 **Ningún ejemplo publicado quedaría rechazado.**
 
-### 2.2 🔴 POST — el SDD dijo "cero", F2.5 dijo CUATRO y son OCHO. Corrección del fix-pack
+### 2.2 🔴 POST — el SDD dijo "cero", F2.5 dijo CUATRO, el fix-pack dijo OCHO y son DIEZ
 
 > El §3.4 del SDD afirma *"radio interno medido = 0 … no rompe ni un test existente"*.
 > **Eso es falso.** La medición del SDD enumeró las query strings de GET y **no
@@ -122,7 +122,7 @@ uno al otro en `src/routes/discover.ts:229`:
 query: body.q != null ? String(body.q) : undefined,
 ```
 
-**`body.query` no lo lee nadie.** Y **ocho** call-sites de este repo mandan exactamente eso:
+**`body.query` no lo lee nadie.** Y **diez** call-sites de este repo mandan exactamente eso:
 
 | # | Archivo:línea | Body | Consecuencia del 400 |
 |---|---|---|---|
@@ -134,17 +134,26 @@ query: body.q != null ? String(body.q) : undefined,
 | 6 | `scripts/smoke-e2e-comprehensive.mjs:144` | `{ query: '', limit: 50 }` | 400 → `agents` `undefined` → `?? []` → **el smoke imprime `0/5 target slugs found` y SIGUE, sin fallar** |
 | 7 | `scripts/smoke-e2e-cross-chain.mjs:127` | `{ query: '', limit: 50 }` | 400 → falla en `:132`, pero diagnosticado como "Missing agents" |
 | 8 | `scripts/smoke-e2e-final.mjs:147` | `{ query: '', limit: 50 }` | 400 → falla en `:153`, pero diagnosticado como "Missing" |
+| 9 | `scripts/smoke-test.sh:229` | `-d '{"query": "test"}'` | afirma `HTTP_CODE = 200` → **el smoke de aceptación reporta FAIL sobre una release sana** |
+| 10 | `mcp-servers/wasiai-x402/src/handlers.mjs:141` | `?query=<texto>` → `/api/v1/capabilities` de v2, que lo reenvía verbatim | tool MCP **publicada**: hoy un filtro que nunca se aplicó, post-merge un 400 que el handler devolvía **como si fuera el resultado** |
 
-> **Corrección del fix-pack (2026-08-04).** F2.5 enumeró 4 y el AR encontró 2 más
-> (`#5`, `#6`). El re-grep del fix-pack encontró **otros 2** que el AR tampoco tenía
-> (`#7`, `#8`): son copias literales de `#6`, y el AR los perdió porque grepeó por
-> nombre de archivo conocido en vez de por la clave. **El grep que encuentra los 8** es
-> por la CLAVE (`"query"\s*:` sobre `scripts/`, `src/`, `packages/`), cruzado con "¿el
-> destino de este `fetch`/`http.post` es `/discover`?" — hay 12 hits más de
-> `JSON.stringify({ query: sql })` que van a la API de Supabase y NO son de esta clase.
+> **Corrección del segundo fix-pack (2026-08-04).** El conteo se equivocó **cuatro
+> veces**: F2.5 dijo 4, el AR-1 encontró 6, el primer fix-pack encontró 8, el AR-2
+> encontró **10**. Los dos últimos son de causas distintas y por eso importan más que
+> el número: `#9` estaba **dentro** del alcance del grep que el auto-blindaje declaraba
+> canónico (`scripts/ src/ packages/`) y se escapó igual porque el cruce a mano se
+> abandona; `#10` está en `mcp-servers/`, un directorio que ese alcance **no incluye**.
+>
+> Por eso este número dejó de ser el mecanismo. El inventario vivo es
+> `src/__tests__/discover-callsites.test.ts`: barre el repo entero con `git ls-files`,
+> extrae las claves que viajan hacia `/discover` en las 4 formas que el repo usa y las
+> cruza contra `ALLOWED_DISCOVER_PARAMS`. Corre en `npm test`. **Si alguien escribe un
+> onceavo, se pone rojo solo** — probado plantando uno en un directorio nuevo.
 >
 > Los `#6`, `#7` y `#8` se corrigen además con un assert de status: el `#6` no fallaba
-> (mudo) y el `#7`/`#8` fallaban señalando el lugar equivocado.
+> (mudo) y el `#7`/`#8` fallaban señalando el lugar equivocado. El `#10` llevó el mismo
+> arreglo una capa más afuera: `discoverAgentsHandler` devolvía el body sin mirar
+> `res.status`.
 
 **Verificados y descartados** (mandan `q` o no van a `/discover`):
 `scripts/hackathon-e2e.mjs:112-116` y `:375` (este último es
@@ -165,7 +174,7 @@ como si significara algo.
 |---|---|---|---|
 | `min_reputation` | `minReputation` | el bug que origina la HU | filtro de reputación inerte |
 | `capability` | `capabilities` | la medición del work-item | 23 agentes donde había 1 (factor 23) |
-| `query` | `q` | 8 call-sites de este repo | dos benchmarks que miden lo mismo y no lo dicen, y un smoke mudo |
+| `query` | `q` | 10 call-sites de este repo | dos benchmarks que miden lo mismo y no lo dicen, y un smoke mudo |
 
 Los tres son nombres **plausibles**. Los tres devuelven **200**. Ninguno hizo nada.
 
@@ -173,11 +182,11 @@ Los tres son nombres **plausibles**. Los tres devuelven **200**. Ninguno hizo na
 
 El permiso para meter el 400 **no se debilita: se invierte a favor**. Ya no descansa en
 "no rompe nada" (que era falso), sino en algo más fuerte y medido: **si en este repo se
-escribió `query` en ocho lugares distintos y nadie se enteró en meses, el silencio ya
+escribió `query` en diez lugares distintos y nadie se enteró en meses, el silencio ya
 está costando plata y credibilidad de medición.**
 
 Lo que sí cambia, y hay que decirlo con honestidad, es **R-1**: si nosotros lo
-escribimos mal ocho veces, la probabilidad de que un integrador externo también lo
+escribimos mal diez veces, la probabilidad de que un integrador externo también lo
 haya hecho **no es baja**. Ver §9.
 
 ### 2.4 Por qué `query` NO se aliasa (aplicando el criterio que ya fijó el SDD)
@@ -187,7 +196,7 @@ otra superficie de esta API.**
 
 - `min_reputation` **califica**: es contrato público de `/compose`
   (`compose-step-shape.ts:51`), documentado y en uso por chaski-v3.
-- `query` **NO califica**: es un nombre **interno** que se filtró a ocho call-sites. No
+- `query` **NO califica**: es un nombre **interno** que se filtró a diez call-sites. No
   está documentado en ningún lado como parámetro público.
 - `capability` **NO califica**: es un singular plausible, nada más.
 
@@ -196,7 +205,7 @@ imaginación de los callers, y cada sinónimo hay que mantenerlo, documentarlo y
 para siempre. **Para `query` y `capability` la respuesta correcta es el 400 que nombra
 el parámetro bueno.** Se enseña el nombre canónico una vez y no se crea un segundo.
 
-⇒ **Los 8 call-sites se arreglan** (`query` → `q`). Eso además **repara el benchmark**
+⇒ **Los 10 call-sites se arreglan** (`query` → `q`). Eso además **repara el benchmark**
 en vez de sólo callarlo. Es un ensanchamiento de scope **declarado**, no de contrabando:
 `scripts/perf-bench.mjs`, `scripts/k6-load-test.js`, `scripts/k6-deep-test.js` y los tres
 `scripts/smoke-e2e-*.mjs` no estaban en el Scope IN del work-item y entran acá por esta
@@ -558,7 +567,7 @@ llega hoy a `T-R21`** (`:368`). Usá el setup que ya existe (`:22-56`): mock de
 
 **CD-6: cada caso nuevo lleva su gemelo POST.**
 
-#### W1.6 — 🔴 Los ocho call-sites internos que hoy mandan `query`
+#### W1.6 — 🔴 Los diez call-sites internos que hoy mandan `query`
 
 **Esto no es opcional y no es cosmético.** Sin esto, W1 deja la suite en rojo y cinco
 scripts rotos contra producción. Ver §2.2 para la evidencia completa.
@@ -573,6 +582,8 @@ scripts rotos contra producción. Ver §2.2 para la evidencia completa.
 | `scripts/smoke-e2e-comprehensive.mjs:144` | `{ query: '', limit: 50 }` | `{ q: '', limit: 50 }` **+ assert de status** |
 | `scripts/smoke-e2e-cross-chain.mjs:127` | `{ query: '', limit: 50 }` | `{ q: '', limit: 50 }` **+ assert de status** |
 | `scripts/smoke-e2e-final.mjs:147` | `{ query: '', limit: 50 }` | `{ q: '', limit: 50 }` **+ assert de status** |
+| `scripts/smoke-test.sh:229` | `-d '{"query": "test"}'` | `-d '{"q": "test"}'` |
+| `mcp-servers/wasiai-x402/src/handlers.mjs:141` | `searchParams.set('query', …)` | `searchParams.set('q', …)` **+ chequeo de `res.status`** |
 
 Los tres `smoke-e2e-*` llevan además un `if (res.status !== 200) → exit 1`. En
 `smoke-e2e-comprehensive.mjs` es **obligatorio**: sin él la fase A.2 es muda (el 400 se
@@ -748,10 +759,10 @@ inventes.** Grepeala. Si no existe, escribilo en el reporte y pará.
 ### R-1 — El 400 puede romper a un integrador externo
 
 **Estado corregido en F2.5, y corregido otra vez en el fix-pack.** El SDD afirmaba radio
-interno = 0; F2.5 dijo 4; **son 8 call-sites** (§2.2). Eso **sube**, no baja, la
-probabilidad estimada del radio externo: si en este repo se escribió `query` ocho veces
-sin que nadie lo notara — y hicieron falta tres pasadas para contarlas — un integrador
-externo bien pudo hacer lo mismo.
+interno = 0; F2.5 dijo 4; **son 10 call-sites** (§2.2). Eso **sube**, no baja, la
+probabilidad estimada del radio externo: si en este repo se escribió `query` diez veces
+sin que nadie lo notara — y hicieron falta CUATRO pasadas para contarlas, la última con
+un test que barre el repo — un integrador externo bien pudo hacer lo mismo.
 
 **Mitigaciones asumidas de antemano, no descubiertas después:**
 
@@ -848,8 +859,10 @@ verificado como inviable.
 - [ ] `T-U1..T-U6` y `T-R22..T-R34` presentes, nombrados y verdes.
 - [ ] **Todos** los mutantes de §7.1 corridos a mano y muertos, con el registro
       mutante → test en el reporte.
-- [ ] Los 8 call-sites de `query` corregidos (§6 W1.6), y los tres `smoke-e2e-*.mjs` con
-      su assert de status.
+- [ ] Los 10 call-sites de `query` corregidos (§6 W1.6), y los tres `smoke-e2e-*.mjs` con
+      su assert de status. **El conteo ya no es el criterio** (falló cuatro veces): el
+      criterio es que `src/__tests__/discover-callsites.test.ts` esté verde, porque cruza
+      TODAS las claves del repo contra `ALLOWED_DISCOVER_PARAMS`.
 - [ ] `doc/INTEGRATION.md` con los 10 parámetros, el alias, la frase de convergencia y las
       3 filas nuevas de la tabla de errores.
 - [ ] `git diff` **no toca**: `src/services/discovery.ts`, `src/services/capability-resolver.ts`,

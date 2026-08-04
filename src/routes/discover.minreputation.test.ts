@@ -865,10 +865,16 @@ describe('WKH-322 · min_reputation y UNKNOWN_DISCOVER_PARAM', () => {
 
   it('T-R34 (§2.2): POST `{ query: "test" }` → 400 que nombra `q`', async () => {
     // `query` es el nombre INTERNO del campo de texto libre del tipo
-    // `DiscoveryQuery`; el público es `q`. Cuatro call-sites de este repo lo
+    // `DiscoveryQuery`; el público es `q`. Varios call-sites de este repo lo
     // escribieron mal y nadie se enteró en meses: dos escenarios de
     // `perf-bench.mjs` llamados "empty query" y "filter category" medían la misma
     // llamada sin filtrar. Este test impide que vuelva a pasar en silencio.
+    //
+    // Acá NO va el conteo: se contó mal cuatro veces seguidas (4 → 6 → 8 → 10) y
+    // un número dentro de un comentario no tiene quién lo obligue a envejecer
+    // bien. El inventario vivo lo mantiene
+    // `src/__tests__/discover-callsites.test.ts`, que barre el repo entero y se
+    // pone rojo ante un call-site nuevo con una clave que la ruta rechaza.
     const res = await app.inject({
       method: 'POST',
       url: '/discover',
