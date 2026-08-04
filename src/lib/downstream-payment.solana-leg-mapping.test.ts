@@ -22,10 +22,19 @@
  *     el propio test. Prueba que el leg clasifica bien un error INVENTADO; no que
  *     el adapter produzca uno clasificable.
  *   · `adapters/solana/intent-dedup.test.ts` sí usa el adapter real, pero afirma
- *     contra un `legCodeFor()` local (línea 222) que **RE-IMPLEMENTA** el ternario
- *     de `downstream-payment.ts`. Es un guard que se compara consigo mismo: si el
- *     leg dejara de leer la disposición, ese helper seguiría devolviendo
- *     `SETTLE_UNKNOWN` y sus tests seguirían verdes.
+ *     contra un `legCodeFor()` local (`intent-dedup.test.ts:222`) que
+ *     **RE-IMPLEMENTA** el ternario de `downstream-payment.ts:503-508`. Es un guard
+ *     que se compara consigo mismo: si el leg dejara de leer la disposición, ese
+ *     helper seguiría devolviendo `SETTLE_UNKNOWN` y sus tests seguirían verdes.
+ *
+ *     ⚠️ DEUDA CONOCIDA, SIN DUEÑO — `TD-LEGCODE-SELFREF`. `legCodeFor()` sigue
+ *     en pie y sigue siendo self-referential; NO se tocó en este cambio (es la
+ *     batería de otra HU, ya cerrada). MEDIDO: mutar
+ *     `downstream-payment.ts:503-508` para que ignore la disposición pone en rojo
+ *     4 tests de ESTE archivo y **0 de los 64** de `intent-dedup.test.ts`. Ése es
+ *     el motivo por el que el bug de los cuatro sitios sobrevivió a un AR, un CR
+ *     y un F4. Mientras el helper exista, sus aserciones `legCodeFor(...)` no
+ *     cuentan como cobertura del mapeo.
  *
  * Acá NO se mockea el adapter ni se re-implementa la regla: se mockean los SEAMS
  * de abajo del adapter (conexión RPC, ledger, spl-token) y el error viaja
@@ -36,8 +45,22 @@
  * ── LA CONTRACARA ES PARTE DE LA MEDICIÓN ──
  * `T-MAP-04` fija que un veredicto MEDIDO (`landed_mismatch` — la cadena contestó
  * y el delta no cubre el monto) siga siendo `SETTLE_FAILED`. Sin él, convertir
- * todo throw en `'unknown'` pasaría los otros tres y ningún leg volvería a
+ * todo throw en `'unknown'` pasaría los otros cuatro y ningún leg volvería a
  * reportarse como impago.
+ *
+ * ── LOS CUATRO SITIOS, UN TEST CADA UNO ──
+ * `payment.ts` tiene CUATRO throws cuyo marcador declara una indeterminación, y
+ * cada uno tiene su propio test porque cada uno es una rama distinta del adapter:
+ *
+ *   | sitio                          | rama                                   | test     |
+ *   |--------------------------------|----------------------------------------|----------|
+ *   | `SETTLE_PRESENCE_UNKNOWN`      | fila `confirmed`, probe mudo           | T-MAP-01 |
+ *   | `SETTLE_IN_FLIGHT_UNRESOLVED`  | fila `signed`, probe mudo              | T-MAP-02 |
+ *   | `SETTLE_IN_FLIGHT_UNRESOLVED`  | `landed_failed` + blockhash VIVO       | T-MAP-03 |
+ *   | `SETTLE_SIGNED_UNRESOLVED`     | `absent` + SIN cota de expiración      | T-MAP-05 |
+ *
+ * Los cuatro escenarios son disjuntos: revertir uno solo a `Error` pelado pone en
+ * rojo un único test (medido, no supuesto).
  */
 
 import { Keypair, PublicKey } from '@solana/web3.js';
@@ -359,7 +382,34 @@ describe('settleSolanaLeg — el mapeo REAL de lo que el adapter Solana lanza', 
     expect(fakeConnection.sendRawTransaction).not.toHaveBeenCalled();
   });
 
-  it('T-MAP-05: el adapter que entra al leg es el REAL, no un doble', async () => {
+  it('T-MAP-05: tx previa sin cota de expiración ⟹ el leg publica SETTLE_UNKNOWN', async () => {
+    // CUARTO sitio del pasillo (`SETTLE_SIGNED_UNRESOLVED`). Escenario DISTINTO al
+    // de T-MAP-03 a propósito: allá la cota existe y está viva; acá la cota NO
+    // EXISTE (`lastValidBlockHeight: null`) y la cadena contestó `absent`. Los dos
+    // llegan al mismo veredicto por caminos que no se solapan, así que revertir
+    // uno no puede tapar al otro.
+    //
+    // `absent` sin prueba de expiración NO cierra la pregunta: la tx firmada puede
+    // estar todavía en vuelo.
+    readMock.mockResolvedValue({ state: 'signed', signature: 'NoHeightSig' });
+    claimMock.mockResolvedValue({
+      outcome: 'signed',
+      signature: 'NoHeightSig',
+      lastValidBlockHeight: null,
+    });
+    presenceState.value = null; // ausente: el nodo buscó su histórico
+
+    const { result, code, detail } = await runLeg();
+
+    expect(result).toBeNull();
+    expect(detail).toMatch(/SETTLE_SIGNED_UNRESOLVED/);
+    expect(detail).toMatch(/no last_valid_block_height/);
+    expect(code).toBe('SETTLE_UNKNOWN');
+    expect(fakeConnection.sendRawTransaction).not.toHaveBeenCalled();
+    expect(reclaimMock).not.toHaveBeenCalled();
+  });
+
+  it('T-MAP-06: el adapter que entra al leg es el REAL, no un doble', async () => {
     // El archivo entero depende de esta premisa; sin afirmarla, un `vi.mock`
     // agregado más adelante podría re-introducir el doble y los cuatro tests de
     // arriba seguirían verdes midiendo un fantasma.

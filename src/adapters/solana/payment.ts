@@ -687,8 +687,24 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     // Exigir la expiracion cuesta, a lo sumo, la espera del blockhash en un camino
     // raro. Elimina la unica ventana donde eso podia pasar.
     if (lastValidBlockHeight === null) {
-      throw new Error(
+      // ⚠️ CUARTA PUERTA DEL MISMO PASILLO. El nombre del marcador lo dice
+      // (`_UNRESOLVED`) y el mensaje también: **falta la prueba** de que la tx
+      // previa ya no pueda aterrizar. Eso es "no pude preguntar", no "no pasó".
+      //
+      // El `presence` de acá es `absent` o `landed_failed`, y ninguno de los dos
+      // CIERRA la pregunta por sí solo: la lógica de las tres líneas de abajo es
+      // exactamente que hace falta ADEMÁS la prueba de expiración, porque un
+      // `absent` con blockhash vivo puede aterrizar todavía y un `landed_failed`
+      // puede re-ejecutarse tras un re-org (ver el bloque de AR MNR-2 arriba).
+      // Sin `last_valid_block_height` esa segunda prueba no existe, así que la
+      // conclusión que queda es "no sé", no "no se pagó".
+      //
+      // Con `Error` pelado el leg lo publicaba como `SETTLE_FAILED` = «no se pagó»
+      // y habilitaba reembolso/re-envío sobre una transferencia que puede estar
+      // viva. Es el mismo colapso que los otros tres sitios de este archivo.
+      throw new FacilitatorSettleError(
         `SETTLE_SIGNED_UNRESOLVED: ${req.intentId} (presence=${presence.state}) has no last_valid_block_height to prove the previous transaction can no longer land`,
+        'unknown',
       );
     }
     const connection = getSolanaConnection();
