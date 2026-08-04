@@ -687,8 +687,24 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
     // Exigir la expiracion cuesta, a lo sumo, la espera del blockhash en un camino
     // raro. Elimina la unica ventana donde eso podia pasar.
     if (lastValidBlockHeight === null) {
-      throw new Error(
+      // ⚠️ CUARTA PUERTA DEL MISMO PASILLO. El nombre del marcador lo dice
+      // (`_UNRESOLVED`) y el mensaje también: **falta la prueba** de que la tx
+      // previa ya no pueda aterrizar. Eso es "no pude preguntar", no "no pasó".
+      //
+      // El `presence` de acá es `absent` o `landed_failed`, y ninguno de los dos
+      // CIERRA la pregunta por sí solo: la lógica de las tres líneas de abajo es
+      // exactamente que hace falta ADEMÁS la prueba de expiración, porque un
+      // `absent` con blockhash vivo puede aterrizar todavía y un `landed_failed`
+      // puede re-ejecutarse tras un re-org (ver el bloque de AR MNR-2 arriba).
+      // Sin `last_valid_block_height` esa segunda prueba no existe, así que la
+      // conclusión que queda es "no sé", no "no se pagó".
+      //
+      // Con `Error` pelado el leg lo publicaba como `SETTLE_FAILED` = «no se pagó»
+      // y habilitaba reembolso/re-envío sobre una transferencia que puede estar
+      // viva. Es el mismo colapso que los otros tres sitios de este archivo.
+      throw new FacilitatorSettleError(
         `SETTLE_SIGNED_UNRESOLVED: ${req.intentId} (presence=${presence.state}) has no last_valid_block_height to prove the previous transaction can no longer land`,
+        'unknown',
       );
     }
     const connection = getSolanaConnection();
@@ -706,7 +722,26 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
         },
         'solana settle refused — the previously signed transaction is not settled but its blockhash is STILL VALID; it could confirm (or be re-executed after a re-org) at any moment',
       );
-      throw new Error(`SETTLE_IN_FLIGHT_UNRESOLVED: ${req.intentId}`);
+      // ⚠️ TERCER SITIO del mismo marcador, y el que AR BLQ-2 (WKH-319) NO tocó:
+      // ese fix cubrió los dos throws de la rama `presence.state === 'unknown'`
+      // (`settleAlreadyConfirmed` y `settleAlreadySigned`) y este quedó `Error`
+      // pelado. `readSettleValueDisposition` devuelve `undefined` para un `Error`
+      // sin `valueDisposition`, y `settleSolanaLeg` traduce ese `undefined` a
+      // `SETTLE_FAILED` — el código que, en el vocabulario público, afirma "no se
+      // pagó" (`downstream-skip-code.ts`).
+      //
+      // Acá esa afirmación es FALSA por construcción: el mensaje de arriba dice que
+      // la tx firmada PUEDE aterrizar todavía (su blockhash sigue vivo). O sea que
+      // el adapter mide "no puedo descartarlo" y el leg publicaba "no ocurrió".
+      // `'unknown'` es lo que el leg necesita leer para publicar `SETTLE_UNKNOWN`.
+      //
+      // NO es una sobre-corrección hacia "todo es unknown": las salidas de este
+      // mismo método que sí PRUEBAN un veredicto siguen siendo `Error` pelado y
+      // siguen mapeando a `SETTLE_FAILED` (`SETTLE_SIGNED_TERMS_MISMATCH`, arriba).
+      throw new FacilitatorSettleError(
+        `SETTLE_IN_FLIGHT_UNRESOLVED: ${req.intentId}`,
+        'unknown',
+      );
     }
 
     // (b) LAS DOS PRUEBAS en la mano. Se archiva la firma vieja y se re-firma.
