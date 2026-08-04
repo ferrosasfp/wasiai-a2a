@@ -80,24 +80,50 @@ para que la próxima HU no los repita.
      y se vuelve a la lista de arriba. El AR cayó en la variante elegante del mismo
      error: grepeó **por nombre de archivo conocido** (los smokes que ya conocía),
      que es un grep limpio — y por eso perdió los dos que no estaban en su cabeza.
-- **Fix**: el grep que encuentra los 8 es **por la CLAVE del protocolo**, no por la
-  firma ni por el archivo, y con un segundo paso mecánico obligatorio:
+- **Fix que escribí acá el 2026-08-04 14:05, y que los hechos DESMINTIERON el
+  mismo día** (reescrito el 2026-08-05 con lo que pasó, sin suavizarlo):
 
   ```
   grep -rnE "(\"|')?query(\"|')?\s*:" scripts/ src/ packages/   # el universo
   grep -rn "/discover" scripts/ src/ packages/                  # el destino
   ```
-  y el cruce a mano: para cada hit del primero, **¿a dónde va este `fetch` /
-  `http.post`?** Los 12 de Supabase se descartan con una línea de evidencia cada
-  uno. El resultado va **escrito en el reporte, con los descartados incluidos** —
-  un descarte sin nombre es indistinguible de un hit que no se vio.
+  Lo declaré "el grep que encuentra los 8". El AR-2 encontró **10**, y los dos
+  que faltaban prueban que este procedimiento falla por **dos causas distintas**:
+
+  1. **El alcance dejaba afuera un directorio entero.** `mcp-servers/wasiai-x402/`
+     es un cliente HTTP **publicado** de este mismo repo, y no está en `scripts/`
+     ni en `src/` ni en `packages/`. `handlers.mjs:141` mandaba `?query=` a
+     `/api/v1/capabilities` de v2, que lo reenvía verbatim a `/discover`. Este
+     grep no podía verlo: no por ruido, por construcción.
+  2. **El otro estaba DENTRO del alcance y se escapó igual.**
+     `scripts/smoke-test.sh:229` (`-d '{"query": "test"}'`) matchea el primer
+     regex, y `scripts/` está en el scope. O sea: **el grep correcto se corrió y
+     el paso de cruce a mano se abandonó** — que es exactamente el modo de falla
+     que esta misma entrada diagnostica dos párrafos más arriba. La lección quedó
+     escrita y no se aplicó en la sesión que la escribió.
+
+  **Ampliar el grep arregla la causa 1 y NO toca la causa 2.** Un procedimiento
+  que depende de que una persona cruce ~70 hits a mano ya falló cuatro veces
+  seguidas (4 → 6 → 8 → 10); la quinta también iba a fallar.
+- **Fix real (segundo fix-pack)**: `src/__tests__/discover-callsites.test.ts`.
+  Enumera los archivos con `git ls-files --cached --others` (un directorio nuevo
+  entra solo: la causa 1 no puede repetirse), extrae las claves que viajan hacia
+  `/discover` en las 4 formas que el repo usa y las cruza contra
+  `ALLOWED_DISCOVER_PARAMS` — la constante real, no una copia. Corre en
+  `npm test`, o sea en CI: la causa 2 tampoco puede repetirse, porque ya no hay
+  paso humano que abandonar. Probado plantando un onceavo call-site en un
+  directorio nuevo (`tools/brandnew/`): rojo, con archivo:línea y clave. Y
+  mutado: revertir el `#9` o el `#10` pone `T-CS-2` en rojo, o sea que este test
+  **habría cazado los dos que cuatro rondas de grep no vieron**.
 - **Aplicar en**: todo rename de un nombre que viaja por el cable (query param,
-  campo de body, header, clave de env, columna). La regla mecánica: **cuando el
-  radio es un NOMBRE y no una FIRMA, el compilador no ayuda y una lista heredada
-  no cuenta como medición.** Y el corolario que cuesta más: **un grep cuyos
-  primeros resultados son ruido es el grep correcto la mayoría de las veces** —
-  el ruido es la señal de que estás buscando por el eje bueno (el dato) y no por
-  el eje cómodo (el símbolo).
+  campo de body, header, clave de env, columna). Las dos reglas, en orden:
+  1. **Cuando el radio es un NOMBRE y no una FIRMA, el compilador no ayuda y una
+     lista heredada no cuenta como medición.**
+  2. **Un procedimiento manual escrito en un `.md` no es un mecanismo.** Si el
+     paso que evita el bug es "acordate de correr esto y cruzarlo a mano", el bug
+     vuelve. Enunciar la regla no alcanza: hace falta algo que se ponga rojo
+     solo. El costo de escribir ese test fue una tarde; el de no escribirlo,
+     cuatro rondas de AR.
 
 ### [2026-08-04 14:20] Fix-pack — arreglar la clave no alcanzaba: el smoke era MUDO
 - **Error**: `smoke-e2e-comprehensive.mjs` mandaba `{ query: '' }` y no tenía
@@ -156,6 +182,59 @@ No todo lo señalado entra. Queda escrito para que nadie lo lea después como ol
   el transcript de aquella sesión, que no tengo. Escribir el log de memoria sería
   fabricar evidencia de mutaciones que yo no corrí. Los **6** mutantes de ESTE
   fix-pack sí están, con su firma de muerte, en los mensajes de commit y acá arriba.
+
+### [2026-08-05 02:15] Fix-pack 2 — mi propio comentario apagó el chequeo que acababa de escribir
+- **Error**: el barrido de call-sites exime las ventanas que "esperan el
+  rechazo", detectándolas por la presencia del texto `UNKNOWN_DISCOVER_PARAM`
+  cerca. Arriba del `searchParams.set('q', …)` de `handlers.mjs` yo había escrito
+  un comentario que explica el fix y **menciona `UNKNOWN_DISCOVER_PARAM`**. El
+  barrido dejó de mirar ese call-site: el único de `mcp-servers/` desapareció del
+  inventario y `T-CS-0` se puso rojo por la razón correcta (no encontraba hits en
+  ese directorio).
+- **Causa raíz**: una excepción basada en TEXTO se apaga escribiendo el texto.
+  Y el texto que la apaga es justamente el que uno escribe al documentar el fix,
+  o sea que la exención se activa donde más molesta.
+- **Fix**: restringir la exención a archivos `*.test.*`. En código normal un
+  comentario ya no puede apagar el chequeo. Verificado: con la restricción, el
+  hit de `handlers.mjs` vuelve y `T-CS-0`/`T-CS-1` pasan.
+- **Aplicar en**: toda regla de lint/scan con escape hatch textual. Preguntarse
+  **"¿quién más puede escribir este texto sin querer apagarme?"**. Si la
+  respuesta incluye "un comentario que explica el fix", la exención necesita otra
+  condición (tipo de archivo, marcador explícito, contexto sintáctico).
+
+### [2026-08-05 02:20] Fix-pack 2 — el barrido pasó en verde sobre un POST que no sabía leer
+- **Error**: `T-CS-3` (los POST cuyo body el extractor no entiende) usaba una
+  ventana de proximidad en caracteres para decidir "¿este POST tiene un body
+  legible?". Planté a propósito un call-site con el body armado por una función
+  (`JSON.stringify(body)` con `body = buildBody(t)`) y **pasó en verde**: el body
+  literal de la llamada de ARRIBA, 5 líneas antes, caía dentro de su ventana y lo
+  "cubría".
+- **Causa raíz**: proximidad no es pertenencia. Dos llamadas seguidas comparten
+  ventana, así que la evidencia de una vale como evidencia de la otra — y el modo
+  de falla va en la dirección insegura (verde).
+- **Fix**: cada body se le asigna a UNA sola llamada, la más cercana
+  (`ownerOf`), y una llamada sólo cuenta como "legible" si hay un body cuyo dueño
+  es ella. Con eso el call-site plantado se pone rojo.
+- **Aplicar en**: cualquier análisis por ventanas (lint, scanners, correlación de
+  logs, matching de eventos). **Si dos cosas del mismo tipo pueden caer en la
+  misma ventana, hay que asignarle dueño a la evidencia.** Y el corolario de
+  método: este bug sólo apareció porque probé el mecanismo AL REVÉS, plantando un
+  caso que debía ponerlo rojo. Un mecanismo nuevo que sólo se verificó en verde
+  no está verificado.
+
+### [2026-08-05 02:28] Fix-pack 2 — usé una API de ES2024 en un repo con target ES2022
+- **Error**: escribí `expect(msg.isWellFormed()).toBe(true)` en `T-U9c`. Vitest
+  pasó (Node 22 la tiene) y `npx tsc --noEmit` falló: `Property 'isWellFormed'
+  does not exist on type 'string'` — `tsconfig.json` fija `target: ES2022`.
+- **Causa raíz**: el runtime de los tests es más nuevo que el `lib` del
+  compilador, así que una API moderna pasa la corrida y muere en el typecheck.
+  El test verde da la sensación de terminado.
+- **Fix**: afirmar la propiedad directo con un regex de suplente suelto, en vez
+  de subir el `target` del repo entero por un aserto de un test (eso sería
+  scope de otra HU).
+- **Aplicar en**: `npx tsc --noEmit` va SIEMPRE, aunque la suite esté verde.
+  `npm run build` tampoco alcanza (`tsconfig.build.json` excluye los tests): es
+  literalmente la lección de WKH-196 en este mismo repo.
 
 ### [2026-08-04 00:53] Wave 1 — inserté un párrafo en el medio de una lista de JSDoc
 - **Error**: metí el párrafo de `UNKNOWN_DISCOVER_PARAM` entre el bullet de
