@@ -36,6 +36,33 @@ jobs:
       - name: Test
         run: npm test
 
+      # ⚠️ Los dos sub-paquetes de abajo tienen su PROPIO package.json y su
+      # propio runner: el `npm test` de acá arriba es `vitest run` con
+      # include `src/**` + `test/**`, así que no los toca ni por accidente.
+      # Estuvieron huérfanos hasta AR-3 de WKH-322: 347 + 30 tests verdes que
+      # no corría nadie, incluidos los tres de regresión de un BLOQUEANTE
+      # (borrar el fix de `handlers.mjs` dejaba este CI en verde).
+      # El guardián que impide que un sub-paquete nuevo vuelva a nacer huérfano
+      # es `test/test-files-are-run-in-ci.test.ts`, y descubre los runners
+      # leyendo ESTE archivo: agregar el step de abajo es lo que lo pone verde.
+      - name: Install dependencies (mcp-servers/wasiai-x402)
+        working-directory: mcp-servers/wasiai-x402
+        run: npm ci
+
+      - name: Test (mcp-servers/wasiai-x402)
+        working-directory: mcp-servers/wasiai-x402
+        run: npm test
+
+      # `npm install` y no `npm ci`: este paquete no tiene package-lock.json
+      # propio. Generarlo es un cambio aparte; sin él, `npm ci` falla.
+      - name: Install dependencies (packages/agent-sdk)
+        working-directory: packages/agent-sdk
+        run: npm install --no-audit --no-fund
+
+      - name: Test (packages/agent-sdk)
+        working-directory: packages/agent-sdk
+        run: npm test
+
   coverage:
     runs-on: ubuntu-latest
     # Coverage runs the same suite with v8 coverage + thresholds. The Postgres
