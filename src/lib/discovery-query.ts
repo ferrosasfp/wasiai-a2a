@@ -243,7 +243,7 @@ export class ConflictingMinReputationError extends Error {
   readonly code = 'CONFLICTING_MIN_REPUTATION' as const;
   constructor(readonly received: unknown) {
     super(
-      "minReputation and min_reputation are aliases and were sent with different values; send only one (they are the same filter, so two different values cannot both be honored)",
+      'minReputation and min_reputation are aliases and were sent with different values; send only one (they are the same filter, so two different values cannot both be honored)',
     );
     this.name = 'ConflictingMinReputationError';
   }

@@ -124,7 +124,7 @@ export function loadTest() {
 
     const postDiscover = http.post(
       `${BASE_URL}/discover`,
-      JSON.stringify({ capabilities: ['defi'], query: 'oracle', limit: 3 }),
+      JSON.stringify({ capabilities: ['defi'], q: 'oracle', limit: 3 }),
       { headers: jsonHeaders }
     )
     checkResponse(postDiscover, 'POST /discover', 200)
