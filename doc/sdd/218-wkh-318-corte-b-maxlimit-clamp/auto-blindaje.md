@@ -65,6 +65,51 @@ implementación y lo que los corta la próxima vez.
 
 ---
 
+### [2026-08-04] Fix-pack — Corrí la campaña que me pidieron, no la que cubría mi cambio
+
+- **Error**: cerré la campaña con **"10/10 muertos"** y ninguno de los 10 mutantes
+  tocaba el guard de W1.3 (`discovery.ts:1106`). Sus **dos** mitades sobrevivían a
+  la suite COMPLETA — lo encontraron el AR (`BLQ-BAJO-2`, 5014 tests en verde) y
+  el CR (`M-1`, 4996) por separado, el mismo día. Y la mitad `sentLimit <
+  unclamped` **sí cambia la conducta observable**, que es exactamente la vara que
+  yo mismo había fijado en la nota de M5 de este mismo fix.
+- **Causa raíz**: tomé la lista de mutantes del story file como si fuera la
+  definición de cobertura. El story file enumera los mutantes que el Architect
+  imaginó **antes** de que el código existiera; la línea que más argumenté en el
+  diff (tres lugares de prosa defendiéndola, con su input falsificador) nació
+  después y por eso no estaba en la lista. El número "10/10" leía como cobertura
+  completa del cambio y era cobertura completa de **una lista**.
+- **Fix**: MA1 y MA2 agregados al `mutation-log.md`, con las dos aserciones
+  negativas que los matan (T-CLAMP-02 4º sub-caso y T-CLAMP-01). Reproduje primero
+  que sobrevivían (56/56 en verde con cada mutante aplicado) y recién después
+  escribí los tests. Y el título del log ahora dice de dónde salen los 12.
+- **Aplicar en**: toda campaña de mutación. La lista del contrato es el **piso**,
+  no el techo. Antes de escribir "N/N muertos", recorrer el `git diff` línea por
+  línea y preguntar por cada condición nueva: *¿qué mutación la borra y qué test
+  se pone rojo?* Señal de alarma específica: **una condición que necesitó un
+  párrafo de prosa para defenderse casi nunca tiene test** — la prosa se escribió
+  justo porque no había nada mecánico que la sostuviera.
+
+---
+
+### [2026-08-04] Fix-pack — Un nombre que afirma la causa invita a borrar el guard
+
+- **Error**: llamé al helper `clampFallsBelowComposePoolFloor(sent)` cuando su
+  cuerpo es `sent < 50`. Recibe **un** número: no puede saber si hubo clamp.
+- **Causa raíz**: nombré la función por el **caso de uso del único call-site**, no
+  por lo que la función decide. Con ese nombre, el `sentLimit < unclamped &&` de
+  al lado se lee como redundante — y era justo la mitad sin test (mutante MA1).
+  Las dos cosas juntas son la receta para que el próximo lector la borre con la
+  suite aplaudiendo.
+- **Fix**: renombrado a `isBelowComposePoolFloor`. Es una desviación deliberada
+  del nombre que fija el story file en W0.3, pedida por el CR (M-2) y anotada acá
+  para que no se lea como drift.
+- **Aplicar en**: nombrar por lo que la firma puede decidir. Si el nombre contiene
+  una causa (`clampFalls…`, `userDeleted…`, `retryFailed…`) que no está en los
+  parámetros, es una afirmación que la función no puede sostener.
+
+---
+
 ### [2026-08-04] W2 — El marcador de línea 2 parte la frase del título
 
 - **Error**: en el primer intento escribí el título de la migración repartido

@@ -10,8 +10,8 @@ import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
 // `services/compose.ts` también necesita el límite del pool y las suites que
 // mockean este service completo dejarían el export en `undefined`.
 import {
-  clampFallsBelowComposePoolFloor,
   clampToRegistryMaxLimit,
+  isBelowComposePoolFloor,
   isUsableRegistryMaxLimit,
   resolveUpstreamFetchLimit,
 } from '../lib/discovery-fetch-limit.js';
@@ -1098,12 +1098,16 @@ export const discoveryService = {
           '[discovery.max-limit-invalid] the registry declared an unusable maxLimit; no clamp was applied',
         );
       }
-      // Las DOS mitades hacen falta. Sin `sentLimit < unclamped`, un operador que
-      // baja `DISCOVERY_UPSTREAM_FETCH_LIMIT=10` contra un registry SIN `maxLimit`
+      // Las DOS mitades hacen falta, y cada una tiene su test. Sin
+      // `sentLimit < unclamped`, un operador que baja
+      // `DISCOVERY_UPSTREAM_FETCH_LIMIT=10` contra un registry SIN `maxLimit`
       // dispararía este warn, y eso sería salida observable nueva en un camino
-      // que esta HU se comprometió a dejar intacto (CD-3). La primera mitad es la
-      // que dice que fue el clamp quien bajó el número.
-      if (sentLimit < unclamped && clampFallsBelowComposePoolFloor(sentLimit)) {
+      // que esta HU se comprometió a dejar intacto (CD-3): lo pinea el 4º
+      // sub-caso de T-CLAMP-02 (mutante MA1). El helper de la derecha sólo sabe
+      // `sent < 50` y no puede conocer la causa, así que la primera mitad es la
+      // que dice que fue el clamp quien bajó el número; lo pinea T-CLAMP-01
+      // (mutante MA2). Los dos mutantes sobrevivían a la suite completa.
+      if (sentLimit < unclamped && isBelowComposePoolFloor(sentLimit)) {
         log.warn(
           {
             error_code: 'REGISTRY_MAX_LIMIT_BELOW_COMPOSE_POOL',

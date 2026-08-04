@@ -253,6 +253,16 @@ describe('discover(): contrato de limit / total (hallazgo P1-1)', () => {
 
     // Sin clamp saldría '500' (el caller gana al over-fetch, T-6).
     expect(upstreamLimits).toEqual(['100']);
+    // Hubo clamp (100 < 500) pero 100 NO cae bajo el piso del pool: el warn del
+    // piso NO se emite. Mata al mutante MA2 (borrar la mitad
+    // `isBelowComposePoolFloor(sentLimit)` del guard de `discovery.ts:1106`),
+    // que sin esto sobrevive con la suite completa en verde.
+    expect(logSpy.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        error_code: 'REGISTRY_MAX_LIMIT_BELOW_COMPOSE_POOL',
+      }),
+      expect.anything(),
+    );
   });
 
   it('T-CLAMP-02: SIN maxLimit el número enviado es byte-idéntico al de hoy, y no hay warn (AC-2, CD-9b)', async () => {
@@ -271,9 +281,27 @@ describe('discover(): contrato de limit / total (hallazgo P1-1)', () => {
     await discoveryService.discover({ limit: 5 });
     expect(c.upstreamLimits).toEqual(['300']);
 
+    // 4º sub-caso: el operador baja el over-fetch por env POR DEBAJO del piso
+    // del pool, SIN `maxLimit` declarado. El número enviado (10) cae bajo 50 y
+    // aun así NO warnea: el warn es del clamp, no del env. Mata al mutante MA1
+    // (borrar la mitad `sentLimit < unclamped` del guard de `discovery.ts:1106`),
+    // que sin esto sobrevive con la suite completa en verde.
+    process.env.DISCOVERY_UPSTREAM_FETCH_LIMIT = '10';
+    const d = serveHonoringLimit(catalog(10));
+    await discoveryService.discover({ limit: 5 });
+    expect(d.upstreamLimits).toEqual(['10']);
+
     // Ausencia de declaración NO es declaración inválida: `undefined` no warnea.
+    // Ninguno de los dos códigos: el registry de este test nunca declaró techo,
+    // así que ni el warn de techo basura ni el del piso tienen de dónde salir.
     expect(logSpy.warn).not.toHaveBeenCalledWith(
       expect.objectContaining({ error_code: 'REGISTRY_MAX_LIMIT_INVALID' }),
+      expect.anything(),
+    );
+    expect(logSpy.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        error_code: 'REGISTRY_MAX_LIMIT_BELOW_COMPOSE_POOL',
+      }),
       expect.anything(),
     );
   });

@@ -184,8 +184,14 @@ export function resolveComposeAgentPoolLimit(): number {
 }
 
 /**
- * WKH-318 corte B — ¿el número que quedó después del clamp cae por debajo del
- * piso histórico del pool de `/compose` (el `COMPOSE_POOL_MIN_LIMIT` de arriba)?
+ * WKH-318 corte B — ¿este número cae por debajo del piso histórico del pool de
+ * `/compose` (el `COMPOSE_POOL_MIN_LIMIT` de arriba)?
+ *
+ * El nombre dice `isBelow…` y no `clampFallsBelow…` (CR M-2) porque recibe UN
+ * solo número: no tiene forma de saber si hubo clamp, y afirmar la causa en el
+ * nombre invita a borrar el `sentLimit < unclamped &&` del call-site
+ * (`discovery.ts:1106`) por redundante. Esa mitad NO es redundante y tiene su
+ * propio test (T-CLAMP-02, 4º sub-caso).
  *
  * Existe para que `queryRegistry` no escriba `sent < 50` a mano: sería la
  * segunda expresión del mismo concepto y las dos divergen apenas alguien mueva
@@ -200,6 +206,6 @@ export function resolveComposeAgentPoolLimit(): number {
  * hidrata `payment.chain` y su leg downstream se saltea en silencio (clase
  * WKH-113 / BLQ-BAJO-1). Queda como TD-318B-2.
  */
-export function clampFallsBelowComposePoolFloor(sent: number): boolean {
+export function isBelowComposePoolFloor(sent: number): boolean {
   return sent < COMPOSE_POOL_MIN_LIMIT;
 }
