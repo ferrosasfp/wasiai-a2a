@@ -16,7 +16,7 @@ Eso es lo que hace que M3 muera: si el test dijera
 `Math.max` en producción **y** en el test dejaría el test verde, y M3
 sobreviviría con el guard aplaudiendo.
 
-## Resultado — 12/12 muertos (10 de la campaña del contrato + 2 del fix-pack)
+## Resultado — 13/13 muertos (10 de la campaña del contrato + 3 del fix-pack)
 
 ⚠️ **Leer antes que la tabla.** Las primeras 10 mutaciones son las que el story
 file pidió, y **NO cubrían el cambio entero**: el guard de W1.3
@@ -24,7 +24,9 @@ file pidió, y **NO cubrían el cambio entero**: el guard de W1.3
 suite COMPLETA (lo midieron el AR y el CR por separado, 5014 y 4996 tests en
 verde). "10/10 muertos" se leía como cobertura completa del diff y no lo era.
 MA1 y MA2, abajo, son las que faltaban; se agregaron en el fix-pack junto con
-las dos aserciones que las matan.
+las dos aserciones que las matan. MA3 cubre la única línea de producción que el
+fix-pack agregó (el acotado del log de AR MNR-4): línea nueva ⇒ mutante nuevo,
+sin excepción.
 
 | # | Mutación | Archivo | Test nominado | Resultado |
 |---|---|---|---|---|
@@ -45,6 +47,7 @@ las dos aserciones que las matan.
 | **M10** | `typeof declared === 'number' && Number.isInteger(declared)` (sin el `>= 1`) | `lib/discovery-fetch-limit.ts` | T-CLAMP-08 | ❌ **muere** (1 failed) |
 | **MA1** | se cae la mitad `sentLimit < unclamped` del guard del warn del piso | `services/discovery.ts` | T-CLAMP-02 (4º sub-caso) | ❌ **muere** (1 failed) — **antes del fix-pack SOBREVIVÍA** |
 | **MA2** | se cae la mitad `isBelowComposePoolFloor(sentLimit)` del mismo guard | `services/discovery.ts` | T-CLAMP-01 | ❌ **muere** (1 failed) — **antes del fix-pack SOBREVIVÍA** |
+| **MA3** | `previewDeclaredMaxLimit` devuelve `raw` sin truncar (línea nueva del fix-pack, AR MNR-4) | `lib/discovery-fetch-limit.ts` | T-CLAMP-09 | ❌ **muere** (1 failed) |
 
 ## Notas por mutante — por qué muere, no sólo que muere
 

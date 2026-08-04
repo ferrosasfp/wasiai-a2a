@@ -107,6 +107,42 @@ export function isUsableRegistryMaxLimit(declared: unknown): boolean {
   );
 }
 
+/** Tope de caracteres del `maxLimit` basura que se copia al log. */
+const DECLARED_PREVIEW_MAX_CHARS = 64;
+
+/**
+ * WKH-318 corte B (AR MNR-4) — forma ACOTADA del `maxLimit` basura, para el
+ * `warn REGISTRY_MAX_LIMIT_INVALID`.
+ *
+ * El valor sale de una columna `jsonb` que un tercero escribe sin validación
+ * (`POST /registries` guarda `schema` tal cual, `routes/registries.ts:251`), y
+ * ese warn se emite **por registry y por query**. Copiarlo verbatim deja que un
+ * tenant con `enabled:true` y un `maxLimit` de ~1 MB haga que cada
+ * `/discover?limit=N` de CUALQUIER caller escriba ese blob: amplificación de
+ * volumen de logs con un solo `POST`.
+ *
+ * Qué acota y qué NO, para no prometer de más: acota lo que se ESCRIBE al log
+ * (que es lo que se acumula y lo que un tercero controla), no la serialización
+ * transitoria — `JSON.stringify` de un objeto grande sigue materializándolo una
+ * vez por request, igual que antes. Cerrar eso necesita un serializador propio
+ * y no vale el código.
+ *
+ * Se preserva lo único que el operador necesita del valor: qué llegó, lo bastante
+ * para distinguir `"100"` de `1.5` de `null` de `{}`.
+ */
+export function previewDeclaredMaxLimit(declared: unknown): string {
+  let raw: string;
+  if (typeof declared === 'string') {
+    // Sin `JSON.stringify` para no duplicar el string entero sólo por las comillas.
+    raw = `"${declared.slice(0, DECLARED_PREVIEW_MAX_CHARS + 1)}"`;
+  } else {
+    raw = JSON.stringify(declared) ?? String(declared);
+  }
+  return raw.length > DECLARED_PREVIEW_MAX_CHARS
+    ? `${raw.slice(0, DECLARED_PREVIEW_MAX_CHARS)}…[truncated]`
+    : raw;
+}
+
 /**
  * WKH-318 corte B — techo del registry aplicado al over-fetch.
  *

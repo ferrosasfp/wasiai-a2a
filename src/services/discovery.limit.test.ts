@@ -375,4 +375,35 @@ describe('discover(): contrato de limit / total (hallazgo P1-1)', () => {
       );
     }
   });
+
+  it('T-CLAMP-09: el maxLimit basura que se copia al log viene ACOTADO (AR MNR-4)', async () => {
+    // Un tenant puede `POST /registries` con `schema` arbitrario (el write-path
+    // no valida) y `enabled: true`. Sin tope, cada `/discover?limit=N` de
+    // CUALQUIER caller copia ese blob al log, por registry y por query.
+    const blob = 'x'.repeat(100_000);
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      registryWithMaxLimit(blob),
+    ]);
+    const { upstreamLimits } = serveHonoringLimit(catalog(10));
+
+    await discoveryService.discover({ limit: 5 });
+
+    // El techo basura sigue sin clampear (CD-13): sale el over-fetch de siempre.
+    expect(upstreamLimits).toEqual(['200']);
+    const warned = logSpy.warn.mock.calls.find(
+      (c) =>
+        (c[0] as { error_code?: string }).error_code ===
+        'REGISTRY_MAX_LIMIT_INVALID',
+    );
+    const declared = (warned?.[0] as { declared: string }).declared;
+    // Número LITERAL escrito a mano (CD-7): recalcular
+    // `DECLARED_PREVIEW_MAX_CHARS + '…[truncated]'.length` dejaría vivo a
+    // cualquier mutante que mueva la constante.
+    expect(declared.length).toBe(76);
+    expect(declared.endsWith('…[truncated]')).toBe(true);
+    // Y lo que queda sirve para diagnosticar: dice qué tipo llegó.
+    expect((warned?.[0] as { declaredType: string }).declaredType).toBe(
+      'string',
+    );
+  });
 });

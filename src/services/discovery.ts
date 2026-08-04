@@ -13,6 +13,7 @@ import {
   clampToRegistryMaxLimit,
   isBelowComposePoolFloor,
   isUsableRegistryMaxLimit,
+  previewDeclaredMaxLimit,
   resolveUpstreamFetchLimit,
 } from '../lib/discovery-fetch-limit.js';
 // WKH-318: el vocabulario de la honestidad del catálogo vive en un módulo LEAF
@@ -1093,7 +1094,13 @@ export const discoveryService = {
           {
             error_code: 'REGISTRY_MAX_LIMIT_INVALID',
             registry: registry.name,
-            declared: schema.maxLimit,
+            // AR MNR-4: acotado. Es `jsonb` que un tercero escribe sin validar
+            // y este warn sale por registry Y por query, así que verbatim un
+            // `maxLimit` de ~1 MB se copia al log en cada `/discover?limit=N`
+            // de cualquier caller. `declaredType` es lo que suele explicar el
+            // rechazo; el preview distingue `"100"` de `1.5` de `null` de `{}`.
+            declaredType: typeof schema.maxLimit,
+            declared: previewDeclaredMaxLimit(schema.maxLimit),
           },
           '[discovery.max-limit-invalid] the registry declared an unusable maxLimit; no clamp was applied',
         );
