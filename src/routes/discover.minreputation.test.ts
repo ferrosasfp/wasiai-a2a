@@ -26,6 +26,7 @@ vi.mock('../services/discovery.js', () => ({
   },
 }));
 
+import { ALLOWED_DISCOVER_PARAMS } from '../lib/discovery-query.js';
 import { discoveryService } from '../services/discovery.js';
 import discoverRoutes from './discover.js';
 
@@ -379,5 +380,522 @@ describe('T-03 (AC-3) · `excluded` viaja en el JSON de GET y POST', () => {
       trialAvailable: 2,
       standingUnavailable: false,
     });
+  });
+});
+
+// ── WKH-322 · el alias `min_reputation` y el 400 por clave desconocida ──────
+//
+// Las dos mitades son UNA decisión: el alias sin el 400 arregla un nombre y deja
+// pasar el próximo typo; el 400 sin el alias le cobra al caller una
+// inconsistencia nuestra (`min_reputation` se llama así porque así se llama en
+// `constraints` de `/compose`).
+//
+// CD-6: cada caso tiene su gemelo POST. Un guard que sólo corre en GET deja al
+// otro camino aceptando basura por el mismo endpoint.
+describe('WKH-322 · min_reputation y UNKNOWN_DISCOVER_PARAM', () => {
+  let app: ReturnType<typeof Fastify>;
+
+  beforeAll(async () => {
+    app = Fastify();
+    await app.register(discoverRoutes, { prefix: '/discover' });
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    mockDiscover.mockClear();
+    mockDiscover.mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      sources: [],
+      catalogStatus: 'complete' as const,
+      excluded: {
+        scope: 0,
+        reputation: 4,
+        trialAvailable: 0,
+        standingUnavailable: false,
+      },
+    });
+  });
+
+  it('T-R22 (AC-1): GET `?minReputation=7` llega al service como 7 y la respuesta explica la exclusión', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?minReputation=7',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalledWith(
+      expect.objectContaining({ minReputation: 7 }),
+    );
+    expect(res.json().excluded.reputation).toBe(4);
+  });
+
+  it('T-R23 (AC-1): POST `{ minReputation: 7 }` idem (simetría CD-6)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { minReputation: 7 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalledWith(
+      expect.objectContaining({ minReputation: 7 }),
+    );
+    expect(res.json().excluded.reputation).toBe(4);
+  });
+
+  it('T-R24 (AC-2): GET `?min_reputation=2` filtra — el service recibe 2, NO undefined', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?min_reputation=2',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalledWith(
+      expect.objectContaining({ minReputation: 2 }),
+    );
+  });
+
+  it('T-R24b (AC-2): POST `{ min_reputation: 2 }` filtra igual', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { min_reputation: 2 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalledWith(
+      expect.objectContaining({ minReputation: 2 }),
+    );
+  });
+
+  it('T-R25 (AC-2): los dos nombres producen EL MISMO objeto de llamada y la misma respuesta', async () => {
+    const snake = await app.inject({
+      method: 'GET',
+      url: '/discover?min_reputation=2',
+    });
+    const snakeCall = mockDiscover.mock.calls[0]?.[0];
+
+    mockDiscover.mockClear();
+
+    const camel = await app.inject({
+      method: 'GET',
+      url: '/discover?minReputation=2',
+    });
+    const camelCall = mockDiscover.mock.calls[0]?.[0];
+
+    expect(snakeCall).toEqual(camelCall);
+    expect(snake.statusCode).toBe(camel.statusCode);
+    expect(snake.json()).toEqual(camel.json());
+  });
+
+  it('T-R25b (AC-2): idem por POST', async () => {
+    const snake = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { min_reputation: 2 },
+    });
+    const snakeCall = mockDiscover.mock.calls[0]?.[0];
+
+    mockDiscover.mockClear();
+
+    const camel = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { minReputation: 2 },
+    });
+    const camelCall = mockDiscover.mock.calls[0]?.[0];
+
+    expect(snakeCall).toEqual(camelCall);
+    expect(snake.json()).toEqual(camel.json());
+  });
+
+  it('T-R26 (AC-2): GET `?capability=…` (singular) → 400 que NOMBRA `capabilities`, sin fanout', async () => {
+    // Medido contra producción antes del fix: `?capability=remittance-payout`
+    // devolvía 200 con los 23 agentes del catálogo — 23 donde el nombre correcto
+    // devuelve 1 — porque la ruta leía por nombre y el singular no existía para
+    // ella. El costo real fue media hora buscando el bug en el lugar equivocado,
+    // así que el mensaje tiene que traer el nombre bueno.
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?capability=remittance-payout',
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
+    expect(res.json().error).toContain("'capability'");
+    expect(res.json().error).toContain('capabilities');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R26b (AC-2): POST `{ capability: … }` → el mismo 400', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { capability: 'remittance-payout' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
+    expect(res.json().error).toContain('capabilities');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R27 (AC-2): GET `?bogusparam=zzz` → 400 (se rechaza la CLASE, no sólo los near-miss)', async () => {
+    // Precondición explícita: `bogusparam` no se parece a ninguna clave real, así
+    // que un guard implementado como "rechazo sólo lo que se parece a algo" lo
+    // dejaría pasar.
+    expect(ALLOWED_DISCOVER_PARAMS.has('bogusparam')).toBe(false);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?bogusparam=zzz',
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R27b (AC-2): POST `{ bogusparam: … }` → 400', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { bogusparam: 'zzz' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R28 (AC-3): GET con los dos nombres y valores distintos → 400, sin fanout', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?minReputation=1&min_reputation=5',
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('CONFLICTING_MIN_REPUTATION');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R28b (AC-3): POST con los dos nombres y valores distintos → 400', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { minReputation: 1, min_reputation: 5 },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('CONFLICTING_MIN_REPUTATION');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R28c (AC-3): los dos nombres con el MISMO valor no son conflicto', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?minReputation=5&min_reputation=5.0',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalledWith(
+      expect.objectContaining({ minReputation: 5 }),
+    );
+  });
+
+  it('T-R29 (AC-4): con el historial ILEGIBLE, los dos nombres dan la misma respuesta fail-closed', async () => {
+    // `standingUnavailable: true` = el gateway NO PUDO LEER la reputación. El
+    // alias no puede ablandar el piso (p. ej. mandando 0 en vez del valor): las
+    // dos ramas colapsan al mismo campo antes de salir del parser.
+    mockDiscover.mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      sources: [],
+      catalogStatus: 'complete' as const,
+      excluded: {
+        scope: 0,
+        reputation: 3,
+        trialAvailable: 0,
+        standingUnavailable: true,
+      },
+    });
+
+    const camel = await app.inject({
+      method: 'GET',
+      url: '/discover?minReputation=2',
+    });
+    const camelCall = mockDiscover.mock.calls[0]?.[0];
+    mockDiscover.mockClear();
+
+    const snake = await app.inject({
+      method: 'GET',
+      url: '/discover?min_reputation=2',
+    });
+    const snakeCall = mockDiscover.mock.calls[0]?.[0];
+
+    expect(camelCall).toEqual(snakeCall);
+    expect(snakeCall).toEqual(expect.objectContaining({ minReputation: 2 }));
+    expect(camel.json().agents).toEqual([]);
+    expect(snake.json()).toEqual(camel.json());
+    expect(snake.json().excluded.standingUnavailable).toBe(true);
+  });
+
+  it('T-R29b (AC-4): idem por POST', async () => {
+    mockDiscover.mockResolvedValue({
+      agents: [],
+      total: 0,
+      registries: [],
+      sources: [],
+      catalogStatus: 'complete' as const,
+      excluded: {
+        scope: 0,
+        reputation: 3,
+        trialAvailable: 0,
+        standingUnavailable: true,
+      },
+    });
+
+    const camel = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { minReputation: 2 },
+    });
+    const camelCall = mockDiscover.mock.calls[0]?.[0];
+    mockDiscover.mockClear();
+
+    const snake = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { min_reputation: 2 },
+    });
+
+    expect(mockDiscover.mock.calls[0]?.[0]).toEqual(camelCall);
+    expect(snake.json()).toEqual(camel.json());
+  });
+
+  /**
+   * T-R30 (AC-5) — los 10 parámetros ESCRITOS A MANO, uno por uno.
+   *
+   * CD-10: si este test iterara `ALLOWED_DISCOVER_PARAMS` mediría la constante
+   * contra sí misma, y agregar `pepito` a la lista lo haría pasar afirmando que
+   * `pepito` es un parámetro público. Los nombres de abajo se transcribieron de
+   * `doc/INTEGRATION.md` y de las firmas `Querystring` / `Body` de esta ruta.
+   */
+  const GET_PARAMS_BY_HAND: ReadonlyArray<[string, string]> = [
+    ['allowTrial', 'true'],
+    ['capabilities', 'kyc'],
+    ['includeInactive', 'true'],
+    ['limit', '5'],
+    ['maxPrice', '1'],
+    ['minReputation', '10'],
+    ['min_reputation', '10'],
+    ['q', 'oracle'],
+    ['registry', 'self-published'],
+    ['verified', 'true'],
+  ];
+
+  it.each(
+    GET_PARAMS_BY_HAND,
+  )('T-R30 (AC-5): GET `?%s=%s` → 200 (el parámetro es público y sigue siéndolo)', async (name, value) => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/discover?${name}=${value}`,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalled();
+  });
+
+  const POST_PARAMS_BY_HAND: ReadonlyArray<[string, unknown]> = [
+    ['allowTrial', true],
+    ['capabilities', 'kyc'],
+    ['includeInactive', true],
+    ['limit', 5],
+    ['maxPrice', 1],
+    ['minReputation', 10],
+    ['min_reputation', 10],
+    ['q', 'oracle'],
+    ['registry', 'self-published'],
+    ['verified', true],
+  ];
+
+  it.each(
+    POST_PARAMS_BY_HAND,
+  )('T-R30b (AC-5): POST `{ %s }` → 200', async (name, value) => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { [name as string]: value },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalled();
+  });
+
+  it('T-R31 (DT-8): la FORMA se valida antes que los VALORES', async () => {
+    // Se responde un solo error por request. Una clave desconocida significa que
+    // el modelo mental del caller sobre la forma de la API está equivocado;
+    // contestarle un error de valor sobre OTRO parámetro lo manda a buscar al
+    // lugar equivocado.
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?capability=x&minReputation=abc',
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
+  });
+
+  it('T-R31b (DT-8): idem por POST', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { capability: 'x', minReputation: 'abc' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
+  });
+
+  it("T-R32 (DT-9): POST con body array → 400 INVALID_DISCOVER_BODY (no `unknown parameter '0'`)", async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: [1, 2],
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('INVALID_DISCOVER_BODY');
+    expect(res.json().error).not.toContain("'0'");
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R35 (AR MNR-4): POST con una clave de 100 KB → 400 chico, no un 400 de 100 KB', async () => {
+    // El hallazgo del AR se mide donde pasa: en el cuerpo de la respuesta.
+    // `discovery-query.ts` acota el eco, y acá se verifica que la ruta lo
+    // devuelve acotado — no que la función acote (eso es T-U9).
+    const huge = 'a'.repeat(100_000);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { [huge]: '1' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
+    expect(res.body.length).toBeLessThan(1000);
+    expect(res.json().error).toContain('truncated');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R35b (AR MNR-4): GET con una clave larga en el query string → el mismo 400 acotado', async () => {
+    // 5000 y no 100 KB: el query string entero pasa por la línea de request, y
+    // el límite de Fastify para eso es mucho más chico que el del body. El
+    // punto es el mismo, y la cota que se ejercita es la misma.
+    const long = 'z'.repeat(5000);
+    const res = await app.inject({
+      method: 'GET',
+      url: `/discover?${long}=1`,
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
+    expect(res.body.length).toBeLessThan(1000);
+    expect(res.json().error).toContain('5000 UTF-16 code units');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R32c (CR MNR-2): POST con body PRIMITIVO → 400 INVALID_DISCOVER_BODY, no 200 con el catálogo', async () => {
+    // La guarda de `toDiscoverParamBag` tiene dos mitades y sólo la del array
+    // estaba testeada (T-R32). Mutante que sobrevivía: cambiar
+    // `typeof raw !== 'object' || Array.isArray(raw)` por `Array.isArray(raw)`.
+    // Con `5`, `Object.keys(5)` es `[]` ⇒ ninguna clave desconocida ⇒ **200 con
+    // el catálogo entero**, que es exactamente la clase de bug que esta HU
+    // existe para matar. Con `"ab"`, `Object.keys('ab')` es `['0','1']` ⇒
+    // `unknown parameter '0'`, que es lo que DT-9 existe para evitar.
+    // `doc/INTEGRATION.md:762` ya publica el comportamiento para primitivos.
+    for (const payload of ['5', '"ab"', 'true']) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/discover',
+        headers: { 'content-type': 'application/json' },
+        payload,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVALID_DISCOVER_BODY');
+      expect(res.json().error).not.toContain("'0'");
+      expect(mockDiscover).not.toHaveBeenCalled();
+    }
+  });
+
+  it('T-R32b (DT-9): POST con body `{}` sigue dando 200 (pin de discover.test.ts)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDiscover).toHaveBeenCalledWith(
+      expect.objectContaining({ minReputation: undefined }),
+    );
+  });
+
+  it('T-R33 (borde): `?minReputation=1&minReputation=1` (repetido ⇒ array) → 400 INVALID_MIN_REPUTATION, como hoy', async () => {
+    // Aplanar el array "para ser amable" sería adivinar cuál de los dos valores
+    // quiso el caller. El nombre está en la lista blanca, así que el 400 que
+    // corresponde es el de VALOR, no el de clave desconocida.
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?minReputation=1&minReputation=1',
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('INVALID_MIN_REPUTATION');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R34 (§2.2): POST `{ query: "test" }` → 400 que nombra `q`', async () => {
+    // `query` es el nombre INTERNO del campo de texto libre del tipo
+    // `DiscoveryQuery`; el público es `q`. Varios call-sites de este repo lo
+    // escribieron mal y nadie se enteró en meses: dos escenarios de
+    // `perf-bench.mjs` llamados "empty query" y "filter category" medían la misma
+    // llamada sin filtrar. Este test impide que vuelva a pasar en silencio.
+    //
+    // Acá NO va el conteo: se contó mal cuatro veces seguidas (4 → 6 → 8 → 10) y
+    // un número dentro de un comentario no tiene quién lo obligue a envejecer
+    // bien. El inventario vivo lo mantiene
+    // `src/__tests__/discover-callsites.test.ts`, que barre el repo entero y se
+    // pone rojo ante un call-site nuevo con una clave que la ruta rechaza.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { query: 'test' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
+    expect(res.json().error).toContain("'query'");
+    expect(res.json().error).toMatch(/(^|[ ,])q($|[ ,])/);
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R34b (§2.2): GET `?query=oracle` → el mismo 400', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/discover?query=oracle',
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
+    expect(mockDiscover).not.toHaveBeenCalled();
   });
 });

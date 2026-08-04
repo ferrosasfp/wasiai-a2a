@@ -275,7 +275,7 @@ describe('E2E', () => {
       const res = await app.inject({
         method: 'POST',
         url: '/discover',
-        payload: { query: 'test' },
+        payload: { q: 'test' },
       });
       expect(res.statusCode).toBe(200);
     });

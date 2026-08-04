@@ -273,7 +273,9 @@ test('T-HTTP-06 (AC-3): tools/call discover_agents delegates to handler (mock fe
     const u = new URL(fetchCalls[0].url);
     assert.equal(u.hostname, 'app.wasiai.io');
     assert.equal(u.pathname, '/api/v1/capabilities');
-    assert.equal(u.searchParams.get('query'), 'echo');
+    // WKH-322: entrada `query` (contrato MCP), cable `q` (contrato /discover).
+    assert.equal(u.searchParams.get('q'), 'echo');
+    assert.equal(u.searchParams.get('query'), null);
     // BLQ-iter3-1 invariant: redirect:'error' is set on the gateway fetch.
     assert.equal(fetchCalls[0].redirect, 'error');
   } finally {

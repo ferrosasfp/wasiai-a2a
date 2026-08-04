@@ -138,7 +138,12 @@ export function resolveMaxAmountGuard(perCall, envDefault) {
 export async function discoverAgentsHandler(rawInput, cfg) {
   const input = sanitizeInput('discover_agents', rawInput ?? {});
   const url = new URL('/api/v1/capabilities', cfg.gatewayUrl);
-  if (input.query) url.searchParams.set('query', input.query);
+  // WKH-322: el campo de entrada de la tool se llama `query` (contrato MCP
+  // publicado), pero la clave que viaja por el cable es `q`. El gateway (v2)
+  // copia toda clave verbatim hacia `/discover` de a2a, y ahí `query` no es un
+  // parámetro reconocido: antes se ignoraba en silencio (el filtro nunca se
+  // aplicó) y desde WKH-322 devuelve 400 UNKNOWN_DISCOVER_PARAM.
+  if (input.query) url.searchParams.set('q', input.query);
   if (input.maxPrice !== undefined) url.searchParams.set('maxPrice', String(input.maxPrice));
   if (Array.isArray(input.capabilities) && input.capabilities.length) {
     url.searchParams.set('capabilities', input.capabilities.join(','));
@@ -170,12 +175,37 @@ export async function discoverAgentsHandler(rawInput, cfg) {
     });
     return { ok: false, stage: 'probe', error: `gateway request failed: ${e.message}` };
   }
+  // Mismo orden que `getPaymentQuoteHandler` (:243-245): leer texto y parsear
+  // acá no puede tirar, así que el status se evalúa siempre.
+  const text = await res.text();
   let body;
-  try { body = await res.json(); } catch { body = {}; }
+  try { body = JSON.parse(text); } catch { body = { raw: text }; }
   log.info('tool.discover_agents.response', {
     tool: 'discover_agents', stage: 'done', gateway: cfg.gatewayUrl.toString(),
-    operator: cfg.operatorAddress, ok: res.status === 200, status: res.status,
+    operator: cfg.operatorAddress, ok: res.ok, status: res.status,
   });
+  // WKH-322 BLQ-MED-2: un status de error NO puede volver como si fuera el
+  // resultado. Devolver el body de un 400 en el lugar donde el agente espera
+  // `{agents: [...]}` es el mismo silencio que esta HU cierra, una capa más
+  // afuera: la tool "responde" y el caller no tiene forma de saber que falló.
+  if (!res.ok) {
+    const detail =
+      typeof body?.error === 'string' ? body.error
+      : typeof body?.message === 'string' ? body.message
+      : typeof body?.code === 'string' ? body.code
+      : undefined;
+    log.warn('tool.discover_agents.gateway-error', {
+      tool: 'discover_agents', stage: 'done', gateway: cfg.gatewayUrl.toString(),
+      operator: cfg.operatorAddress, ok: false, status: res.status,
+    });
+    return {
+      ok: false,
+      stage: 'probe',
+      status: res.status,
+      error: `gateway returned HTTP ${res.status} for /api/v1/capabilities${detail ? `: ${detail}` : ''}`,
+      body,
+    };
+  }
   // AC-1: return body unchanged.
   return body;
 }

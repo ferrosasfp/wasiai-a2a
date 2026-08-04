@@ -144,9 +144,22 @@ console.log('▶ Step 1: POST /discover (resolver agents + precios)');
 const discRes = await fetch(`${A2A_URL}/discover`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ query: '', limit: 50 }),
+  // WKH-322: la clave publica es `q`, no `query`.
+  body: JSON.stringify({ q: '', limit: 50 }),
 });
-const disc = await discRes.json();
+// WKH-322: el status primero. Sin esto, un 400 se diagnostica abajo como
+// "Missing: [...]" — falla, pero senalando el lugar equivocado.
+//
+// AR-2 MNR-2: y "primero" quiere decir antes de PARSEAR. `.text()` no puede
+// tirar; `await res.json()` sobre el text/html de un edge proxy si, y el
+// operador terminaba viendo un SyntaxError en lugar del HTTP 400.
+const discBody = await discRes.text();
+if (discRes.status !== 200) {
+  console.error(`  ✗ POST /discover devolvio HTTP ${discRes.status} (se esperaba 200)`);
+  console.error(`    ${discBody.slice(0, 500)}`);
+  process.exit(1);
+}
+const disc = JSON.parse(discBody);
 const slugs = PIPELINE.map(s => s.agent);
 const agents = (disc.agents ?? []).filter(a => slugs.includes(a.slug));
 console.log(`  HTTP ${discRes.status} — ${agents.length}/${PIPELINE.length} agents resolved`);

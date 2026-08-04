@@ -8,8 +8,8 @@ const A2A_URL = 'https://wasiai-a2a-production.up.railway.app';
 
 const SCENARIOS = [
   { name: 'GET /health',                    method: 'GET',  path: '/health',                          n: 100 },
-  { name: 'POST /discover (empty query)',   method: 'POST', path: '/discover',                        n: 50, body: { query: '', limit: 10 } },
-  { name: 'POST /discover (filter category)', method: 'POST', path: '/discover',                      n: 50, body: { query: 'price', limit: 5 } },
+  { name: 'POST /discover (empty query)',   method: 'POST', path: '/discover',                        n: 50, body: { q: '', limit: 10 } },
+  { name: 'POST /discover (filter category)', method: 'POST', path: '/discover',                      n: 50, body: { q: 'price', limit: 5 } },
   { name: 'GET /agents (list)',             method: 'GET',  path: '/agents?limit=10',                 n: 50 },
   { name: 'GET /agents/{id}/agent-card',    method: 'GET',  path: '/agents/wasi-chainlink-price/agent-card', n: 50 },
 ];

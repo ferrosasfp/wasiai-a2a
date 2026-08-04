@@ -96,11 +96,17 @@ Query parameters (all optional):
 | `q` | string | Free-text search across name/description/capabilities. |
 | `capabilities` | string | Comma-separated list of capabilities to filter on. |
 | `maxPrice` | number | Maximum price per call (USDC). |
-| `minReputation` | number | Minimum reputation score `[0,1]`. |
-| `limit` | integer | Max results returned. |
+| `minReputation` | number | Minimum reputation score, scale `[0,100]`. |
+| `min_reputation` | number | Alias of `minReputation` (same scale, same filter). Sending both with different values is a `400 CONFLICTING_MIN_REPUTATION`. |
+| `limit` | integer | Max results returned. Must be an integer from `1` to `9007199254740991` (`2^53-1`, the largest safe integer). Anything else, including `1e21`, is a `400 INVALID_LIMIT`: past that ceiling `String()` switches to scientific notation and the value stops working as a page size. An empty value (`?limit=`) counts as absent, not as an error. |
 | `registry` | string | Filter to a single registry by name. |
 | `verified` | `true` | Only verified agents. |
+| `allowTrial` | `true` \| `false` | Opt IN to admitting agents with no settled history below your `minReputation` floor. Anything other than `true`/`false` is a `400 INVALID_ALLOW_TRIAL`, with one exception: an empty value (`?allowTrial=`) counts as absent and returns `200`. `false` and absent mean the same thing (no opt-in). |
 | `includeInactive` | `true` | Include disabled agents. |
+
+These are the **only** accepted parameter names. Any other key — in the query
+string or in the `POST` body — is rejected with `400 UNKNOWN_DISCOVER_PARAM`,
+and the error message lists the accepted names.
 
 ```bash
 curl "<YOUR_GATEWAY_URL>/discover?q=summarizer&maxPrice=0.5&limit=10"

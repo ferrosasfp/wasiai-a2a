@@ -4,14 +4,37 @@
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import {
+  assertKnownDiscoverParams,
+  ConflictingMinReputationError,
   InvalidAllowTrialError,
+  InvalidDiscoverBodyError,
   InvalidLimitError,
   InvalidMinReputationError,
   parseAllowTrial,
   parseLimit,
-  parseMinReputation,
+  resolveMinReputation,
+  UnknownDiscoverParamError,
 } from '../lib/discovery-query.js';
 import { discoveryService } from '../services/discovery.js';
+
+/**
+ * WKH-322 — normaliza el contenedor de parámetros antes de mirar las claves.
+ *
+ * `null`/`undefined` → `{}`: es el comportamiento vigente del POST con body
+ * vacío, pineado por `discover.test.ts` (`payload: {}` → 200 con filtros
+ * all-undefined).
+ *
+ * Un array o un primitivo, en cambio, NO tienen claves nombradas: sobre `[1,2]`
+ * el chequeo de abajo leería `['0','1']` y contestaría `unknown parameter '0'`,
+ * que es ruidoso e incomprensible a la vez.
+ */
+function toDiscoverParamBag(raw: unknown): Record<string, unknown> {
+  if (raw === null || raw === undefined) return {};
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new InvalidDiscoverBodyError(raw);
+  }
+  return raw as Record<string, unknown>;
+}
 
 /**
  * Fix-pack P1 (hallazgo 2 + AR MENOR-4): `minReputation` / `limit` inválidos →
@@ -21,10 +44,23 @@ import { discoveryService } from '../services/discovery.js';
  * registries ni devolver 200-vacío (o, en el caso de `limit`, un 200 con MÁS
  * agentes de los pedidos). Devuelve los valores normalizados o `undefined` si ya
  * se envió el 400 (para que el handler haga `return reply`).
+ *
+ * WKH-322 — recibe el BAG CRUDO (`request.query` / `request.body`), no tres
+ * campos elegidos a mano. Elegirlos a mano era el bug: el helper nunca veía las
+ * claves que nadie eligió, así que no podía notar que existían y `?capability=x`
+ * o `?bogusparam=zzz` devolvían 200 con el catálogo entero.
+ *
+ * El orden de los pasos es una decisión, no un accidente, y está pineado por
+ * `T-R31`: primero la FORMA (body válido, claves conocidas) y después los
+ * VALORES. Se responde un solo error por request, y una clave desconocida
+ * significa que el modelo mental del caller sobre la forma de la API está
+ * equivocado; contestarle un error de valor sobre OTRO parámetro lo manda a
+ * buscar al lugar equivocado. Es el mismo criterio con que
+ * `capability-resolver.ts` ordena los motivos de su 422.
  */
 function parseFiltersOr400(
   reply: FastifyReply,
-  raw: { minReputation: unknown; limit: unknown; allowTrial: unknown },
+  raw: unknown,
 ):
   | {
       minReputation: number | undefined;
@@ -33,16 +69,28 @@ function parseFiltersOr400(
     }
   | undefined {
   try {
+    const bag = toDiscoverParamBag(raw);
+    assertKnownDiscoverParams(bag);
     return {
-      minReputation: parseMinReputation(raw.minReputation),
-      limit: parseLimit(raw.limit),
+      // WKH-322: los dos nombres del piso (`minReputation` y el alias
+      // `min_reputation` de `/compose`) colapsan acá en UN valor, con el mismo
+      // validador de rango. Aguas abajo hay un solo campo, así que las dos ramas
+      // no pueden divergir en el filtrado.
+      minReputation: resolveMinReputation(
+        bag.minReputation,
+        bag.min_reputation,
+      ),
+      limit: parseLimit(bag.limit),
       // WKH-313: se valida acá, en el helper COMPARTIDO por GET y POST, y no en
       // cada handler. El POST es el que se olvida: un flag que sólo se valida en
       // GET deja al otro camino aceptando basura por el mismo endpoint.
-      allowTrial: parseAllowTrial(raw.allowTrial),
+      allowTrial: parseAllowTrial(bag.allowTrial),
     };
   } catch (err) {
     if (
+      err instanceof InvalidDiscoverBodyError ||
+      err instanceof UnknownDiscoverParamError ||
+      err instanceof ConflictingMinReputationError ||
       err instanceof InvalidMinReputationError ||
       err instanceof InvalidLimitError ||
       err instanceof InvalidAllowTrialError
@@ -70,6 +118,12 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    *   por el registry: ese valor lo controla la parte que se está filtrando.
    *   Un agente sin tasks liquidadas cuenta 0 → excluido si minReputation > 0.
    *   Valor no numérico o fuera de [0,100] → 400 `INVALID_MIN_REPUTATION`.
+   * - min_reputation: WKH-322 — ALIAS de `minReputation`, con el mismo validador
+   *   y el mismo efecto. Existe porque el mismo concepto ya se llama así en
+   *   `constraints` de `/compose` (`compose-step-shape.ts:51`), y quien escribía
+   *   ese nombre acá recibía 200 sin filtro. Los dos juntos con valores
+   *   distintos → 400 `CONFLICTING_MIN_REPUTATION` (no hay precedencia: dos
+   *   pisos incompatibles no se pueden honrar los dos).
    * - limit: max results (PAGE SIZE — ver el contrato de la respuesta). Entero
    *   SEGURO `>= 1`; ausente = sin page size (todos los matches). Valor no entero,
    *   `0`, negativo, no numérico o fuera del rango seguro (`1e21`) → 400
@@ -90,6 +144,11 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
    *   son las dos primeras claves del ranking (AR fix-pack BLQ-ALTO-1). Cualquier
    *   valor que no sea `'true'`/`'false'` → 400 `INVALID_ALLOW_TRIAL` (nunca se
    *   adivina un flag de riesgo).
+   *
+   * WKH-322 — toda clave que no esté en `ALLOWED_DISCOVER_PARAMS`
+   * (`lib/discovery-query.ts`) → 400 `UNKNOWN_DISCOVER_PARAM`, con el nombre de
+   * la clave ofensora y la lista de las aceptadas. Aplica a esta ruta y al POST
+   * de abajo; `GET /discover/:slug` no la usa (TD-322-1).
    *
    * Respuesta — contrato de paginación (fix-pack P1, hallazgo 1):
    * - `agents`: hasta `limit` matches, ordenados verified-first → reputación
@@ -139,6 +198,8 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
           q?: string;
           maxPrice?: string;
           minReputation?: string;
+          /** WKH-322 — alias de `minReputation`; mismo nombre que en `/compose`. */
+          min_reputation?: string;
           allowTrial?: string;
           limit?: string;
           registry?: string;
@@ -150,11 +211,9 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
     ) => {
       const query = request.query;
 
-      const filters = parseFiltersOr400(reply, {
-        minReputation: query.minReputation,
-        limit: query.limit,
-        allowTrial: query.allowTrial,
-      });
+      // WKH-322: se le pasa el query string COMPLETO, no tres campos elegidos a
+      // mano, para que el helper pueda ver las claves que no reconoce.
+      const filters = parseFiltersOr400(reply, query);
       if (!filters) return reply;
 
       const result = await discoveryService.discover({
@@ -192,6 +251,8 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
           q?: string;
           maxPrice?: number;
           minReputation?: number;
+          /** WKH-322 — alias de `minReputation`; mismo nombre que en `/compose`. */
+          min_reputation?: number;
           allowTrial?: boolean;
           limit?: number;
           registry?: string;
@@ -201,6 +262,14 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
       }>,
       reply: FastifyReply,
     ) => {
+      // WKH-322: PRIMERO del handler, y con el body CRUDO (el helper resuelve
+      // `null`/`undefined` → `{}`). Antes corría después de normalizar
+      // `capabilities`: no tiene sentido coercionar los valores de una request
+      // que ya está rechazada, y la guarda de forma tiene que correr antes de
+      // que alguien lea `body.capabilities` de algo que no es un objeto.
+      const filters = parseFiltersOr400(reply, request.body);
+      if (!filters) return reply;
+
       const body = (request.body ?? {}) as Record<string, unknown>;
 
       // Normalize capabilities: accept comma-separated string or string array
@@ -216,13 +285,6 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
             .map((s) => s.trim());
         }
       }
-
-      const filters = parseFiltersOr400(reply, {
-        minReputation: body.minReputation,
-        limit: body.limit,
-        allowTrial: body.allowTrial,
-      });
-      if (!filters) return reply;
 
       const result = await discoveryService.discover({
         capabilities,
