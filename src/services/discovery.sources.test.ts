@@ -501,4 +501,71 @@ describe('WKH-318 — honestidad de `registries` / `sources` / `catalogStatus`',
     expect(result.sources).toEqual([]);
     expect(result.catalogStatus).toBe('complete');
   });
+
+  // ─── WKH-318 corte B: el 400 medido del registro real, y su control ────────
+  //
+  // ⚠️ `serveByHost` NO sirve acá: rutea por hostname y su función de ruta no
+  // recibe la URL, así que no puede decidir según el `?limit=`. Helper local
+  // nuevo, sobre `mockFetch.mockImplementation((url) => ...)`. NO se toca
+  // `serveByHost`: lo usan T-SRC-01..13.
+
+  /**
+   * Imita el contrato MEDIDO de `wasiai-v2` el 2026-08-04:
+   * `?limit<=100` ⇒ 200 + catálogo; `?limit>100` ⇒ 400.
+   *
+   * El 400 va pelado a propósito: `discovery.ts:1115-1117` lanza
+   * `RegistryHttpError` ANTES del `await response.json()` de `:1119`, así que el
+   * body de la respuesta de error nunca se lee ni llega a `sources[]`.
+   */
+  function serveWithCeilingOf100(rows: Record<string, unknown>[]): {
+    upstreamLimits: (string | null)[];
+  } {
+    const upstreamLimits: (string | null)[] = [];
+    mockFetch.mockImplementation((url: string) => {
+      const lim = new URL(url).searchParams.get('limit');
+      upstreamLimits.push(lim);
+      if (lim !== null && Number(lim) > 100) {
+        return Promise.resolve({ ok: false, status: 400 });
+      }
+      return okResponse(lim ? rows.slice(0, Number(lim)) : rows);
+    });
+    return { upstreamLimits };
+  }
+
+  it('T-CLAMP-04: contra el techo real de 100, un registry que DECLARA maxLimit sobrevive (AC-4)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeRegistry({
+        schema: {
+          discovery: { limitParam: 'limit', maxLimit: 100 },
+          invoke: { method: 'POST' },
+        },
+      }),
+    ]);
+    const { upstreamLimits } = serveWithCeilingOf100(catalog(23));
+
+    const result = await discoveryService.discover({ limit: 200 });
+
+    expect(upstreamLimits).toEqual(['100']);
+    expect(result.sources[0]?.state).not.toBe('failed');
+    expect(result.sources[0]?.failure).toBeUndefined();
+    expect(result.sources[0]?.rows).toBe(23);
+    expect(result.catalogStatus).not.toBe('partial');
+    expect(result.registries).toEqual(['test-registry']);
+  });
+
+  it('T-CLAMP-04b: el MISMO registro sin declarar maxLimit sigue cayendo entero (AC-4, control negativo)', async () => {
+    // El control es lo que le da valor a T-CLAMP-04: sin él, ese test pasaría
+    // igual con un mimic que nunca devuelve 400. Y es la prueba de que no hay
+    // default de 100 escondido en el código.
+    const { upstreamLimits } = serveWithCeilingOf100(catalog(23));
+
+    const result = await discoveryService.discover({ limit: 200 });
+
+    expect(upstreamLimits).toEqual(['200']);
+    expect(result.sources[0]?.state).toBe('failed');
+    expect(result.sources[0]?.failure).toBe('http_error');
+    expect(result.sources[0]?.rows).toBeNull();
+    expect(result.catalogStatus).toBe('partial');
+    expect(result.registries).toEqual([]);
+  });
 });

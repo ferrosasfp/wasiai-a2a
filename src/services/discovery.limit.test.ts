@@ -17,9 +17,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RegistryConfig } from '../types/index.js';
 
-vi.mock('../lib/logger.js', () => ({
-  getLogger: () => ({ error: vi.fn(), warn: vi.fn(), info: vi.fn() }),
+// WKH-318 corte B: el factory anterior (`() => ({ warn: vi.fn(), ... })`) creaba
+// un objeto NUEVO en cada llamada, así que el test no podía alcanzar el `vi.fn()`
+// que `discovery.ts:63` capturó al importar. Patrón hoisted, exemplar
+// `compose.test.ts:17-23`. `vi.clearAllMocks()` del beforeEach lo limpia.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
 }));
+vi.mock('../lib/logger.js', () => ({ getLogger: () => logSpy }));
 
 vi.mock('./registry.js', () => ({
   registryService: {
@@ -212,5 +219,132 @@ describe('discover(): contrato de limit / total (hallazgo P1-1)', () => {
     expect(upstreamLimits).toEqual([null]);
     expect(result.agents).toHaveLength(5);
     expect(result.total).toBe(7);
+  });
+
+  // ─── WKH-318 corte B: el clamp al techo declarado por el registry ──────────
+  //
+  // ⚠️ CD-7. Todas las aserciones de límite de acá abajo comparan contra el
+  // número LITERAL entre comillas, leído de la query string que salió. Escribir
+  // `String(Math.min(resolveUpstreamFetchLimit(500), 100))` haría que el test
+  // recalcule la fórmula que vigila: invertir `Math.min` por `Math.max` en
+  // producción Y en el test dejaría el test verde (el mutante M3 sobreviviría).
+
+  /**
+   * `maxLimit` entra como `unknown` a propósito: la columna es `jsonb` y el
+   * write-path de `POST /registries` la guarda sin validar, así que en runtime
+   * puede llegar cualquier cosa. El cast reproduce exactamente ese agujero.
+   */
+  function registryWithMaxLimit(declared: unknown): RegistryConfig {
+    return makeRegistry({
+      schema: {
+        discovery: { limitParam: 'limit', maxLimit: declared as number },
+        invoke: { method: 'POST' },
+      },
+    });
+  }
+
+  it('T-CLAMP-01: maxLimit declarado recorta el over-fetch (AC-1, CD-9a)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      registryWithMaxLimit(100),
+    ]);
+    const { upstreamLimits } = serveHonoringLimit(catalog(10));
+
+    await discoveryService.discover({ limit: 500 });
+
+    // Sin clamp saldría '500' (el caller gana al over-fetch, T-6).
+    expect(upstreamLimits).toEqual(['100']);
+  });
+
+  it('T-CLAMP-02: SIN maxLimit el número enviado es byte-idéntico al de hoy, y no hay warn (AC-2, CD-9b)', async () => {
+    // Los tres sub-casos replican T-4, T-6 y T-5 contra el MISMO registry sin
+    // `maxLimit`: si el clamp dejara de ser aditivo, alguno cambiaría.
+    const a = serveHonoringLimit(catalog(10, 3));
+    await discoveryService.discover({ limit: 5 });
+    expect(a.upstreamLimits).toEqual(['200']);
+
+    const b = serveHonoringLimit(catalog(10));
+    await discoveryService.discover({ limit: 500 });
+    expect(b.upstreamLimits).toEqual(['500']);
+
+    process.env.DISCOVERY_UPSTREAM_FETCH_LIMIT = '300';
+    const c = serveHonoringLimit(catalog(10));
+    await discoveryService.discover({ limit: 5 });
+    expect(c.upstreamLimits).toEqual(['300']);
+
+    // Ausencia de declaración NO es declaración inválida: `undefined` no warnea.
+    expect(logSpy.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ error_code: 'REGISTRY_MAX_LIMIT_INVALID' }),
+      expect.anything(),
+    );
+  });
+
+  it('T-CLAMP-02b: SIN limit del caller no se manda limitParam, aunque haya maxLimit (AC-2, CD-2, CD-9d)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      registryWithMaxLimit(100),
+    ]);
+    const { upstreamLimits } = serveHonoringLimit(catalog(10, 3));
+
+    await discoveryService.discover({});
+
+    // El clamp vive DENTRO del gate: imponer un cap donde antes no había
+    // ninguno reintroduciría el bug de clase "esconder agentes".
+    expect(upstreamLimits).toEqual([null]);
+  });
+
+  it('T-CLAMP-02c: registry SIN limitParam nunca recibe el parámetro, aunque declare maxLimit (AC-2, CD-9e)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeRegistry({
+        schema: { discovery: { maxLimit: 100 }, invoke: { method: 'POST' } },
+      }),
+    ]);
+    const { upstreamLimits } = serveHonoringLimit(catalog(10, 3));
+
+    await discoveryService.discover({ limit: 500 });
+
+    expect(upstreamLimits).toEqual([null]);
+  });
+
+  it('T-CLAMP-06: el schema parseado del MISMO literal jsonb que escribe la migración clampea sin código extra (AC-6)', async () => {
+    // La fuente del 100 es el texto de
+    // `supabase/migrations/20260804000000_wkh318b_registry_max_limit.sql`, no
+    // una constante nuestra: si la migración escribiera otra clave o el lector
+    // mirara otro path, este test se cae.
+    const discoveryFromJsonb = JSON.parse(
+      '{"limitParam":"limit","nextCursorPath":"next_cursor","maxLimit":100}',
+    ) as RegistryConfig['schema']['discovery'];
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      makeRegistry({
+        schema: { discovery: discoveryFromJsonb, invoke: { method: 'POST' } },
+      }),
+    ]);
+    const { upstreamLimits } = serveHonoringLimit(catalog(10));
+
+    await discoveryService.discover({ limit: 500 });
+
+    expect(upstreamLimits).toEqual(['100']);
+  });
+
+  it('T-CLAMP-08: un maxLimit inválido NO clampea y avisa — nunca falla cerrado (CD-13, CD-9c)', async () => {
+    // CD-13: con `maxLimit: 0`, degradar a `?limit=0` dejaría el catálogo casi
+    // vacío EN SILENCIO. Ignorar el techo deja que el registry conteste; si su
+    // techo real es menor, contesta 400, que es visible.
+    const invalidos: unknown[] = ['100', 'abc', 0, -5, 1.5, null, {}];
+
+    for (const declared of invalidos) {
+      logSpy.warn.mockClear();
+      vi.mocked(registryService.getEnabled).mockResolvedValue([
+        registryWithMaxLimit(declared),
+      ]);
+      const { upstreamLimits } = serveHonoringLimit(catalog(10));
+
+      await discoveryService.discover({ limit: 5 });
+
+      // Ni 'NaN' (que es lo que devuelve `Math.min(200, "abc")`), ni '0', ni '1'.
+      expect(upstreamLimits).toEqual(['200']);
+      expect(logSpy.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ error_code: 'REGISTRY_MAX_LIMIT_INVALID' }),
+        expect.anything(),
+      );
+    }
   });
 });

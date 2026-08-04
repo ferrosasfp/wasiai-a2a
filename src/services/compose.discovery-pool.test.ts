@@ -27,9 +27,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RegistryConfig } from '../types/index.js';
 
-vi.mock('../lib/logger.js', () => ({
-  getLogger: () => ({ error: vi.fn(), warn: vi.fn(), info: vi.fn() }),
+// WKH-318 corte B: el factory anterior devolvía un objeto NUEVO por llamada, así
+// que el `vi.fn()` que `discovery.ts:63` capturó era inalcanzable desde el test.
+// Patrón hoisted, exemplar `compose.test.ts:17-23`.
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
 }));
+vi.mock('../lib/logger.js', () => ({ getLogger: () => logSpy }));
 
 vi.mock('./registry.js', () => ({
   registryService: {
@@ -360,5 +366,134 @@ describe('compose.resolveAgent — pool de hidratación de payment (AR BLQ-BAJO-
     const agentAtSettle = mockDownstream.mock.calls[0]?.[0] as Agent;
     expect(agentAtSettle.payment?.chain).toBe('solana-devnet');
     expect(agentAtSettle.payment?.contract).toBe(SOLANA_PAY_TO);
+  });
+
+  // ─── WKH-318 corte B: el clamp visto desde el money-path ───────────────────
+
+  /** Registro que declara el techo que la migración de W2 le pone a `wasiai`. */
+  function registryWithMaxLimit(max: number): RegistryConfig {
+    return makeRegistry({
+      schema: {
+        discovery: { limitParam: 'limit', maxLimit: max },
+        invoke: { method: 'POST' },
+      },
+    });
+  }
+
+  /**
+   * `serveRegistry` + el techo MEDIDO del registro real: `?limit>100` ⇒ 400.
+   * Sin clamp, el pool de `/compose` (200) choca contra ese 400 y la fuente cae
+   * entera, así que el agente no existe para `resolveAgent`.
+   */
+  function serveRegistryWithCeilingOf100(rows: Record<string, unknown>[]): {
+    upstreamLimits: (string | null)[];
+  } {
+    const upstreamLimits: (string | null)[] = [];
+    mockFetch.mockImplementation((rawUrl: string) => {
+      const url = new URL(rawUrl);
+      if (url.pathname.startsWith('/agent/')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve(
+              card(url.pathname.replace('/agent/', ''), false, {
+                method: 'x402',
+                chain: 'avalanche',
+                contract: BASE_PAY_TO,
+              }),
+            ),
+        });
+      }
+      if (url.pathname.startsWith('/invoke/')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ result: 'ok' }),
+        });
+      }
+      const lim = url.searchParams.get('limit');
+      upstreamLimits.push(lim);
+      if (lim !== null && Number(lim) > 100) {
+        return Promise.resolve({ ok: false, status: 400 });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(lim ? rows.slice(0, Number(lim)) : rows),
+      });
+    });
+    return { upstreamLimits };
+  }
+
+  it('T-CLAMP-05 (borde del settle): con el techo declarado, la chain solana llega a signAndSettleDownstream contra un registro que rechaza limit>100 (AC-5)', async () => {
+    // Path REAL de `/compose` (patrón T-POOL-7): el pool sale de
+    // `createDiscoverCache`, no del fallback de `resolveAgent`.
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      registryWithMaxLimit(100),
+    ]);
+    vi.mocked(registryService.getWithSecrets).mockResolvedValue(
+      registryWithMaxLimit(100),
+    );
+    // 100 activos; el target NO verificado ⇒ último del ranking ⇒ fuera del
+    // top-50, o sea que sólo lo alcanza un pool grande.
+    const { upstreamLimits } = serveRegistryWithCeilingOf100(
+      catalogWithTarget(100, 5, 'solana-devnet', SOLANA_PAY_TO),
+    );
+
+    const result = await composeService.compose({
+      steps: [{ agent: TARGET, input: { q: 'x' } }],
+    });
+
+    expect(new Set(upstreamLimits)).toEqual(new Set(['100']));
+    expect(result.success).toBe(true);
+    expect(mockDownstream).toHaveBeenCalledTimes(1);
+    const agentAtSettle = mockDownstream.mock.calls[0]?.[0] as Agent;
+    expect(agentAtSettle.payment?.chain).toBe('solana-devnet');
+    expect(agentAtSettle.payment?.contract).toBe(SOLANA_PAY_TO);
+  });
+
+  it('T-CLAMP-07: un techo POR ENCIMA del piso histórico no rompe la hidratación (AC-7)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      registryWithMaxLimit(100),
+    ]);
+    vi.mocked(registryService.getWithSecrets).mockResolvedValue(
+      registryWithMaxLimit(100),
+    );
+    // 150 en el registro, se traen las primeras 100 (el target entre ellas) y el
+    // page size del pool NO se recorta: el target, último del ranking por no
+    // estar verificado, sigue dentro.
+    serveRegistry(catalogWithTarget(150, 5, 'solana-devnet', SOLANA_PAY_TO));
+
+    const agent = await composeService.resolveAgent({
+      agent: TARGET,
+      input: {},
+    });
+
+    expect(agent?.payment?.chain).toBe('solana-devnet');
+    expect(agent?.payment?.contract).toBe(SOLANA_PAY_TO);
+  });
+
+  it('T-CLAMP-07b (residual honesto): un techo POR DEBAJO del piso hunde el pool, avisa y NO se le pone piso (AC-7, TD-318B-2)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      registryWithMaxLimit(10),
+    ]);
+    vi.mocked(registryService.getWithSecrets).mockResolvedValue(
+      registryWithMaxLimit(10),
+    );
+    const { upstreamLimits } = serveRegistry(
+      catalogWithTarget(200, 5, 'solana-devnet', SOLANA_PAY_TO),
+    );
+    await composeService.resolveAgent({ agent: TARGET, input: {} });
+
+    // Se manda 10, NO 50: poner un piso le mandaría a un registro que declaró 10
+    // un número que rechaza, y perderíamos la fuente entera en vez de sus 10 filas.
+    expect(new Set(upstreamLimits)).toEqual(new Set(['10']));
+    expect(logSpy.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error_code: 'REGISTRY_MAX_LIMIT_BELOW_COMPOSE_POOL',
+      }),
+      expect.anything(),
+    );
   });
 });

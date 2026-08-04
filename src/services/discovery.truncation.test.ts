@@ -270,4 +270,55 @@ describe('WKH-318 — detección de truncamiento', () => {
     expect(result.sources[0]?.truncationEvidence).toBe('cursor');
     expect(result.sources[0]?.state).toBe('truncated');
   });
+
+  // ─── WKH-318 corte B: `page_full` hereda el clamp sin una línea nueva ──────
+  //
+  // `agents.length >= sentLimit` compara contra el límite REALMENTE ENVIADO, y
+  // el clamp cambia `sentLimit` ANTES del request. Estos dos tests pinean que
+  // esa herencia sale bien en las dos direcciones: página llena bajo el techo
+  // declarado ⇒ truncated; página corta bajo el techo ⇒ ok.
+
+  /** Registro que declara techo pero NO declara dónde vive su cursor. */
+  function withMaxLimit(max: number): RegistryConfig {
+    return makeRegistry({
+      schema: {
+        discovery: { limitParam: 'limit', maxLimit: max },
+        invoke: { method: 'POST' },
+      },
+    });
+  }
+
+  it('T-CLAMP-03: con maxLimit, una página llena AL TECHO ⇒ truncated / `page_full` (AC-3)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      withMaxLimit(100),
+    ]);
+    // Pedimos 500, el clamp manda 100, y el registro devuelve 100 filas: la
+    // página se llenó contra el número que enviamos, no contra el que pedimos.
+    serve(catalog(100));
+
+    const result = await discoveryService.discover({ limit: 500 });
+
+    expect(result.sources[0]?.state).toBe('truncated');
+    expect(result.sources[0]?.truncationEvidence).toBe('page_full');
+    expect(result.sources[0]?.rows).toBe(100);
+    expect(result.catalogStatus).toBe('truncated');
+    // Clampear NO es fallar: el 400 que motivó la HU es justamente lo que se evita.
+    expect(result.sources[0]?.failure).toBeUndefined();
+  });
+
+  it('T-CLAMP-03b: con maxLimit, una página CORTA bajo el techo sigue siendo `ok` (AC-3)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      withMaxLimit(100),
+    ]);
+    // El caso que esperamos del registro `wasiai` hoy: 23 agentes, techo 100.
+    // 23 < 100 ⇒ completitud probada. Marcar `truncated` acá sería un falso
+    // positivo que arrastraría todo el catálogo agregado.
+    serve(catalog(23));
+
+    const result = await discoveryService.discover({ limit: 500 });
+
+    expect(result.sources[0]?.state).toBe('ok');
+    expect(result.sources[0]?.truncationEvidence).toBeUndefined();
+    expect(result.sources[0]?.rows).toBe(23);
+  });
 });
