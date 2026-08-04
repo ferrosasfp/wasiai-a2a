@@ -322,6 +322,62 @@ describe('WKH-322 · assertKnownDiscoverParams', () => {
     ).not.toThrow();
   });
 
+  it('T-U9 (AR MNR-4): el eco del nombre está acotado — una clave enorme no vuelve entera', () => {
+    // El nombre lo elige el caller y `POST /discover` acepta hasta 1 MiB de
+    // body (Fastify sin `bodyLimit`). Sin cota, una clave de 100 KB devolvía un
+    // 400 de 100 KB y escribía una línea de log del tamaño del ataque.
+    const huge = 'a'.repeat(100_000);
+    try {
+      assertKnownDiscoverParams({ [huge]: '1' });
+      expect.unreachable('debía lanzar');
+    } catch (err) {
+      const msg = (err as UnknownDiscoverParamError).message;
+      // La cota se afirma en caracteres CONCRETOS, no derivándola de la
+      // constante: `MAX_ECHOED_PARAM_NAME_LENGTH` es lo que se está verificando.
+      expect(msg).toContain(`'${'a'.repeat(64)}'`);
+      expect(msg).not.toContain('a'.repeat(65));
+      // El mensaje entero queda en el orden de los cientos de bytes, no de los
+      // cientos de KB (la enumeración de los 10 aceptados es lo más largo).
+      expect(msg.length).toBeLessThan(500);
+      // La excepción SÍ conserva el nombre completo: lo que se acota es lo que
+      // viaja al caller, no lo que la app tiene disponible.
+      expect((err as UnknownDiscoverParamError).received).toBe(huge);
+    }
+  });
+
+  it('T-U9b (AR MNR-4): cuando trunca lo DICE, con el largo original', () => {
+    // Va separado de T-U9 a propósito, para que dos mutantes distintos tengan
+    // firmas de muerte distintas: "no truncar" mata T-U9 y este; "truncar en
+    // silencio" mata sólo este. Con los dos asertos en el mismo `it` los dos
+    // mutantes morían igual y no se podían distinguir.
+    const huge = 'a'.repeat(100_000);
+    try {
+      assertKnownDiscoverParams({ [huge]: '1' });
+      expect.unreachable('debía lanzar');
+    } catch (err) {
+      const msg = (err as UnknownDiscoverParamError).message;
+      expect(msg).toContain('truncated');
+      expect(msg).toContain('100000 characters');
+    }
+  });
+
+  it('T-U10 (AR MNR-4): un nombre de largo normal NO se trunca ni se anota', () => {
+    // El borde importa: si la cota mordiera nombres plausibles, el 400 dejaría
+    // de servir para lo único que existe — que el caller reconozca su typo.
+    // 64 exactos: el último largo que pasa entero.
+    const exactly64 = 'b'.repeat(64);
+    for (const name of ['capabilty', 'min_reputacion', exactly64]) {
+      try {
+        assertKnownDiscoverParams({ [name]: '1' });
+        expect.unreachable('debía lanzar');
+      } catch (err) {
+        const msg = (err as UnknownDiscoverParamError).message;
+        expect(msg).toContain(`'${name}'`);
+        expect(msg).not.toContain('truncated');
+      }
+    }
+  });
+
   it('T-U8: el mensaje es determinista pero NO promete "la primera que escribió el caller"', () => {
     // Gotcha de JS: las claves con forma de índice entero se enumeran primero.
     // Este test canda que el docstring no afirme un orden que el lenguaje no da.

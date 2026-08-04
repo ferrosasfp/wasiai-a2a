@@ -777,6 +777,41 @@ describe('WKH-322 · min_reputation y UNKNOWN_DISCOVER_PARAM', () => {
     expect(mockDiscover).not.toHaveBeenCalled();
   });
 
+  it('T-R35 (AR MNR-4): POST con una clave de 100 KB → 400 chico, no un 400 de 100 KB', async () => {
+    // El hallazgo del AR se mide donde pasa: en el cuerpo de la respuesta.
+    // `discovery-query.ts` acota el eco, y acá se verifica que la ruta lo
+    // devuelve acotado — no que la función acote (eso es T-U9).
+    const huge = 'a'.repeat(100_000);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discover',
+      payload: { [huge]: '1' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
+    expect(res.body.length).toBeLessThan(1000);
+    expect(res.json().error).toContain('truncated');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
+  it('T-R35b (AR MNR-4): GET con una clave larga en el query string → el mismo 400 acotado', async () => {
+    // 5000 y no 100 KB: el query string entero pasa por la línea de request, y
+    // el límite de Fastify para eso es mucho más chico que el del body. El
+    // punto es el mismo, y la cota que se ejercita es la misma.
+    const long = 'z'.repeat(5000);
+    const res = await app.inject({
+      method: 'GET',
+      url: `/discover?${long}=1`,
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
+    expect(res.body.length).toBeLessThan(1000);
+    expect(res.json().error).toContain('5000 characters');
+    expect(mockDiscover).not.toHaveBeenCalled();
+  });
+
   it('T-R32b (DT-9): POST con body `{}` sigue dando 200 (pin de discover.test.ts)', async () => {
     const res = await app.inject({
       method: 'POST',

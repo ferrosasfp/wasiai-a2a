@@ -198,6 +198,45 @@ export const ALLOWED_DISCOVER_PARAMS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Largo máximo del nombre de parámetro que el 400 devuelve textualmente
+ * (AR MNR-4 de WKH-322).
+ *
+ * El nombre lo elige el caller: en un `POST /discover` una clave JSON puede
+ * medir cientos de KB, porque `src/index.ts` construye Fastify sin `bodyLimit`
+ * y el default son 1 MiB. Sin cota, el cuerpo del 400 crecía con el input del
+ * atacante: amplificación ~1x hacia la respuesta y, sobre todo, una línea de
+ * log del tamaño del ataque por cada request.
+ *
+ * 64 es holgado para todo nombre legítimo: el más largo de la allowlist es
+ * `includeInactive`, de 15 caracteres, y el 400 existe para que el caller
+ * reconozca su typo — a los 64 caracteres ya lo reconoció.
+ */
+export const MAX_ECHOED_PARAM_NAME_LENGTH = 64;
+
+/**
+ * Devuelve el nombre recibido ENTRE COMILLAS y acotado a
+ * `MAX_ECHOED_PARAM_NAME_LENGTH`.
+ *
+ * Devuelve el fragmento entrecomillado completo, y no sólo el nombre, para que
+ * la nota de truncado quede FUERA de las comillas: adentro, un caller (o un
+ * grep) no podría distinguir el nombre de la anotación del server.
+ *
+ * Cuando trunca lo DICE, con el largo original: un caller cuyo nombre real mide
+ * 200 caracteres tiene que poder distinguir "me lo recortaron" de "el server
+ * cree que mi parámetro se llama así". Un truncado mudo sería la misma clase de
+ * silencio que WKH-322 cierra, dentro del mensaje del error que la cierra.
+ *
+ * El nombre completo sigue disponible en la propiedad `received` de la
+ * excepción, que NO viaja al caller: la ruta manda sólo `message` y `code`
+ * (`discover.ts:98`).
+ */
+function describeReceivedParamName(received: unknown): string {
+  const name = String(received);
+  if (name.length <= MAX_ECHOED_PARAM_NAME_LENGTH) return `'${name}'`;
+  return `'${name.slice(0, MAX_ECHOED_PARAM_NAME_LENGTH)}' (truncated; the name sent was ${name.length} characters long)`;
+}
+
+/**
  * Clave de query/body que `/discover` no reconoce. La ruta la mapea a 400
  * `UNKNOWN_DISCOVER_PARAM`.
  *
@@ -221,7 +260,7 @@ export class UnknownDiscoverParamError extends Error {
   readonly code = 'UNKNOWN_DISCOVER_PARAM' as const;
   constructor(readonly received: unknown) {
     super(
-      `unknown parameter '${String(received)}'. Accepted parameters: ${[
+      `unknown parameter ${describeReceivedParamName(received)}. Accepted parameters: ${[
         ...ALLOWED_DISCOVER_PARAMS,
       ].join(', ')}`,
     );
