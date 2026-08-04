@@ -27,8 +27,23 @@
  * `maxLimit: 100` + `GET /discover?limit=150` ⇒ `queryRegistry` aplica después
  * `clampToRegistryMaxLimit` y envía `100`, o sea MENOS de lo que el caller
  * pidió. Es deliberado: el registry no puede dar más sin paginar y paginar está
- * descartado (TD-318-2, se detecta pero no se pagina), y el recorte no se
- * esconde — sale como `truncated`/`page_full` en `sources[]`.
+ * descartado (TD-318-2, se detecta pero no se pagina).
+ *
+ * ⚠️ Qué se ve del recorte, y qué NO (AR BLQ-BAJO-1 del corte B). La versión
+ * anterior de este párrafo decía "el recorte no se esconde — sale como
+ * `truncated`/`page_full` en `sources[]`", y eso es cierto **sólo cuando el
+ * registry no declaró un cursor**. Si declaró `nextCursorPath` y contesta la
+ * clave en nulo, su declaración exacta gana sobre la heurística de página llena
+ * (`discovery.ts:1216-1221` pone `completenessProven` y cortocircuita el
+ * `page_full` de `:1224`) y el recorte sale MUDO. Input medido: registry con
+ * `{limitParam, maxLimit:100, nextCursorPath:'next', agentsPath:'agents'}`, 300
+ * filas upstream, `discover({limit:500})` ⇒ se envían 100, llegan 100 con
+ * `next: null` ⇒ `state:'ok'`, `truncationEvidence: undefined`, `rows:100`,
+ * `catalogStatus:'complete'` — 200 filas cortadas y la respuesta pública afirma
+ * completitud. Control con la misma corrida y la clave `next` AUSENTE:
+ * `truncated`/`page_full`, o sea que la diferencia es exactamente el cursor
+ * nulo. Es la misma clase que TD-318B-1 con otro productor: ahí el recorte lo
+ * hace el registry en silencio, acá lo hacemos nosotros.
  */
 
 /** Over-fetch por registry cuando el caller manda `limit`. */
@@ -198,9 +213,16 @@ export function resolveComposeAgentPoolLimit(): number {
  * la constante.
  *
  * Sólo alimenta un `warn` (`REGISTRY_MAX_LIMIT_BELOW_COMPOSE_POOL`). NO impide
- * el clamp y NO pone un piso: mandarle 50 a un registry que declaró 10 devuelve
- * `400` y se pierde la fuente ENTERA en vez de quedarnos con sus 10 filas. La
- * declaración del registry gana; el costo se declara en vez de esconderse.
+ * el clamp y NO pone un piso: mandarle 50 a un registry que declaró 10 es pedirle
+ * algo que dijo que no acepta, y qué hace con eso lo decide ÉL — no lo
+ * controlamos. Si contesta `400` perdemos la fuente ENTERA en vez de quedarnos
+ * con sus 10 filas; si clampea en silencio contesta `200` y el recorte es mudo.
+ * Medido, para un solo servidor: `wasiai-v2.vercel.app/api/v1/capabilities`
+ * responde `400` con `?limit=101` y `200` con `?limit=100` — de ahí sale el
+ * `100` de la migración de W2, y es la conducta de ESE origen, no una regla de
+ * los registries. En cualquiera de los dos casos poner un piso empeora lo que
+ * hay: la declaración del registry gana y el costo se declara en vez de
+ * esconderse.
  * Cuál es ese costo, con el input: registry con `maxLimit: 10` y 200 agentes
  * activos ⇒ el pool de esa fuente baja a 10 filas, el agente que quede afuera no
  * hidrata `payment.chain` y su leg downstream se saltea en silencio (clase
