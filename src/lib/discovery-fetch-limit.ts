@@ -18,8 +18,17 @@
  * corta y `total` subestimaba los matches. Medido: `limit=5` devolvía 2.
  *
  * Ahora el upstream recibe un límite de OVER-FETCH independiente del page size.
- * Monótono: si el caller pide más que el over-fetch, gana el caller (nunca
- * under-fetch).
+ * Monótono DENTRO DE `resolveUpstreamFetchLimit`: si el caller pide más que el
+ * over-fetch, gana el caller (nunca under-fetch).
+ *
+ * ⚠️ WKH-318 corte B — esa monotonía es de la FUNCIÓN, no del call-site, y el
+ * puntero va acá porque sin él "nunca under-fetch" se lee como garantía de
+ * extremo a extremo. Input que la falsifica en el call-site: registry con
+ * `maxLimit: 100` + `GET /discover?limit=150` ⇒ `queryRegistry` aplica después
+ * `clampToRegistryMaxLimit` y envía `100`, o sea MENOS de lo que el caller
+ * pidió. Es deliberado: el registry no puede dar más sin paginar y paginar está
+ * descartado (TD-318-2, se detecta pero no se pagina), y el recorte no se
+ * esconde — sale como `truncated`/`page_full` en `sources[]`.
  */
 
 /** Over-fetch por registry cuando el caller manda `limit`. */
@@ -49,6 +58,62 @@ export function resolveUpstreamFetchLimit(pageLimit: number): number {
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
   const base = Number.isFinite(n) && n > 0 ? n : DEFAULT_UPSTREAM_FETCH_LIMIT;
   return Math.max(pageLimit, base);
+}
+
+/**
+ * WKH-318 corte B — ¿el `maxLimit` que declaró un registry es usable como techo?
+ *
+ * El parámetro es `unknown` A PROPÓSITO, aunque
+ * `RegistrySchema.discovery.maxLimit` esté tipado `number | undefined`
+ * (`types/index.ts:160`). El valor viene de una columna `jsonb` que
+ * `services/registry.ts:92` asigna directo (`schema: row.schema`) con un
+ * `as unknown as` acotado (`:153-155`), y el write-path NO valida: `POST
+ * /registries` sólo chequea la PRESENCIA de `schema` (`routes/registries.ts:69`)
+ * y lo guarda tal cual (`:251`), sin `zod` ni equivalente. En runtime esto puede
+ * llegar como `"100"`, `0`, `-5`, `1.5`, `null` o `{}`. Tipar el parámetro
+ * `number | undefined` haría que este guard parezca código muerto que tsc ya
+ * garantiza; el `unknown` es lo que documenta la desconfianza en la firma.
+ *
+ * Qué corta, con el input concreto: `Math.min(200, "100")` devuelve `100`
+ * (coerción de JS) y `Math.min(200, "abc")` devuelve `NaN`, que terminaría como
+ * `?limit=NaN` en la query string — el mismo hazard que el docstring de
+ * `resolveUpstreamFetchLimit` ya nombra. El `typeof` las corta antes del
+ * `Math.min`.
+ */
+export function isUsableRegistryMaxLimit(declared: unknown): boolean {
+  return (
+    typeof declared === 'number' && Number.isInteger(declared) && declared >= 1
+  );
+}
+
+/**
+ * WKH-318 corte B — techo del registry aplicado al over-fetch.
+ *
+ * Opción A, decidida en F2: **sin declaración usable no hay clamp**. Un registry
+ * que no declara `maxLimit` (o que declara basura) recibe exactamente el mismo
+ * número que recibía antes de esta HU. No hay default de 100: `100` no es un
+ * estándar, es el techo de UN servidor (`wasiai-v2`), y aplicarlo a un registry
+ * cuyo techo real es 1000 cambiaría un `400` ruidoso y publicado en `sources[]`
+ * por un recorte MUDO del pool de ranking (200 → 100 filas).
+ *
+ * Techo inválido ⇒ sin clamp, nunca fail-closed (CD-13): con `maxLimit: 0` un
+ * fail-closed mandaría `?limit=0`, el registry devolvería 0 filas y el catálogo
+ * quedaría casi vacío en silencio. Ignorar el valor deja que el registry
+ * conteste; si su techo real es menor, contesta `400`, que es visible.
+ *
+ * NO reimplementa el predicado: llama a `isUsableRegistryMaxLimit`, que es la
+ * única expresión de "este techo sirve" (el call-site necesita el MISMO
+ * predicado para decidir si emite el `warn`, y dos copias divergen).
+ */
+export function clampToRegistryMaxLimit(
+  fetchLimit: number,
+  declared: unknown,
+): number {
+  if (!isUsableRegistryMaxLimit(declared)) return fetchLimit;
+  // El `as number` está cubierto por la línea de arriba: el guard devuelve
+  // `boolean` (no un type predicate) porque su firma es parte del contrato de
+  // esta HU, así que tsc no propaga el narrowing solo.
+  return Math.min(fetchLimit, declared as number);
 }
 
 /**
@@ -116,4 +181,25 @@ export function resolveUpstreamFetchLimit(pageLimit: number): number {
  */
 export function resolveComposeAgentPoolLimit(): number {
   return resolveUpstreamFetchLimit(COMPOSE_POOL_MIN_LIMIT);
+}
+
+/**
+ * WKH-318 corte B — ¿el número que quedó después del clamp cae por debajo del
+ * piso histórico del pool de `/compose` (el `COMPOSE_POOL_MIN_LIMIT` de arriba)?
+ *
+ * Existe para que `queryRegistry` no escriba `sent < 50` a mano: sería la
+ * segunda expresión del mismo concepto y las dos divergen apenas alguien mueva
+ * la constante.
+ *
+ * Sólo alimenta un `warn` (`REGISTRY_MAX_LIMIT_BELOW_COMPOSE_POOL`). NO impide
+ * el clamp y NO pone un piso: mandarle 50 a un registry que declaró 10 devuelve
+ * `400` y se pierde la fuente ENTERA en vez de quedarnos con sus 10 filas. La
+ * declaración del registry gana; el costo se declara en vez de esconderse.
+ * Cuál es ese costo, con el input: registry con `maxLimit: 10` y 200 agentes
+ * activos ⇒ el pool de esa fuente baja a 10 filas, el agente que quede afuera no
+ * hidrata `payment.chain` y su leg downstream se saltea en silencio (clase
+ * WKH-113 / BLQ-BAJO-1). Queda como TD-318B-2.
+ */
+export function clampFallsBelowComposePoolFloor(sent: number): boolean {
+  return sent < COMPOSE_POOL_MIN_LIMIT;
 }
