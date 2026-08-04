@@ -852,3 +852,31 @@ avisá: significa que el árbol cambió.**
    su conteo de agentes contra el de nuestro `/discover` **sin** `limit`.
 3. El nombre de este archivo es `story-WKH-318B.md` (las HUs previas usan
    `story-HU-NNN.md`); así lo pidió el orquestador. No es un typo.
+
+---
+
+## ⚠️ Correcciones post-implementación — LEER ANTES DE CITAR ESTE ARCHIVO
+
+Este story file se escribió **antes** de que el código existiera y quedó con
+partes **desmentidas por la implementación**. No se editó el contrato a
+propósito (lo desmentido se documentó aparte), así que quien lo lea primero lee
+la versión vieja. Los punteros:
+
+1. **W0 — la firma del contrato no compila tal cual.**
+   `isUsableRegistryMaxLimit(declared: unknown): boolean` + `Math.min(fetchLimit,
+   declared)` es incompatible bajo `strict`: un `boolean` no propaga narrowing.
+   Se respetó la firma y se agregó `declared as number` con el comentario pegado.
+   Ver `auto-blindaje.md` §W0 y la §2 del `cr-report.md` (mide por qué un type
+   predicate sería **peor**: narrowearía `schema.maxLimit` a `never` en el warn).
+2. **§7.2 — M9 no mata por `"abc"`.** En JS `"abc" >= 1` es `false`, así que ese
+   caso sigue leyéndose inválido. Mata por `"100"` y por `1.5`.
+   Ver `mutation-log.md` §M9.
+3. **§7 — la campaña de 10 mutantes NO cubría el cambio entero.** El guard de
+   W1.3 (`discovery.ts:1106`) quedó afuera y sus **dos** mitades sobrevivían a la
+   suite completa (AR `BLQ-BAJO-2` = CR `M-1`, el mismo defecto medido por los
+   dos). Se agregaron MA1/MA2 con las aserciones que los matan, y MA3 por la
+   línea nueva del fix-pack. Ver `mutation-log.md` (13/13) y `auto-blindaje.md`.
+4. **W0.3 — el helper se llama `isBelowComposePoolFloor`**, no
+   `clampFallsBelowComposePoolFloor` (CR M-2: recibe un solo número y no puede
+   conocer la causa; el nombre viejo hacía parecer redundante justo a la mitad
+   del guard que no tenía test). Desviación deliberada del nombre del contrato.

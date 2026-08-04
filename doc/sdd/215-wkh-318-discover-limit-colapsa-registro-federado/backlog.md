@@ -172,6 +172,14 @@ Precondición del **corte B**, no del corte A: el corte A es desplegable tal cua
 (sólo cambia lo que declara). La migración la aplica el orquestador, sólo a
 **bdwv**, y F4 debería evidenciarla antes de habilitar el modo estricto.
 
+> **CERRADO (corte B, 2026-08-04)**: la migración **está aplicada en bdwv**.
+> Probado, no inferido: la respuesta de producción del 2026-08-04 trae
+> `sources:[{name:WasiAI, state:truncated, rows:20, truncationEvidence:"cursor"}]`,
+> y esa evidencia sólo se produce dentro de `if (schema.nextCursorPath)`
+> (`discovery.ts:1214-1222`), o sea que la clave está en la fila. Lo midió el AR
+> del corte B; el `report.md` de esta HU (2026-07-30) quedó viejo.
+> Ver `doc/sdd/218-wkh-318-corte-b-maxlimit-clamp/work-item.md` §8.
+
 ---
 
 ## D-1 — Decisión tomada: `sources[].failure` se publica
