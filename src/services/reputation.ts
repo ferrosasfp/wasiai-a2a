@@ -84,8 +84,14 @@ interface RepAccumulator {
   successCount: number; // status='success' (cualquier costo)
   failedCount: number; // status='failed'
   /**
-   * AR fix-pack BLQ-MED-2: CALLERS DISTINTOS que registraron al menos un `failed`
-   * (mismo bucketing que `settledByCaller`: `caller_ref_hash` o `'__anon__'`).
+   * AR fix-pack BLQ-MED-2: CALLERS DISTINTOS que registraron al menos un `failed`.
+   *
+   * ⚠️ El bucketing NO es el mismo que el de `settledByCaller`: acá `'__anon__'` se
+   * EXCLUYE (ver `:182-183`, CR MNR-2), y `settledByCaller` sí lo agrupa. No es una
+   * inconsistencia: una llamada x402 anónima no exige registrarse, así que si el
+   * anónimo contara como caller distinto, un atacante con UNA identidad más llamadas
+   * anónimas juntaría dos buckets y anularía el carril igual. Excluirlo es lo que
+   * hace que el ataque cueste dos identidades registradas y no una.
    *
    * Vive al lado de `settledByCaller` y NO toca `failedCount`: la fórmula del score
    * (`computeFromAccumulator`) sigue leyendo el contador crudo, byte por byte. Este

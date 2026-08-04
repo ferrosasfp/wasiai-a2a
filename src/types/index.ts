@@ -380,8 +380,15 @@ export interface AgentStandingCounters {
   successCount: number;
   failedCount: number;
   /**
-   * AR fix-pack BLQ-MED-2 — CALLERS DISTINTOS con al menos un `failed` (bucket
-   * `'__anon__'` para eventos sin `caller_ref_hash`, igual que el cap anti-sybil).
+   * AR fix-pack BLQ-MED-2 — CALLERS DISTINTOS con al menos un `failed`.
+   *
+   * ⚠️ Los eventos SIN `caller_ref_hash` NO cuentan acá. El bucket `'__anon__'`
+   * se EXCLUYE (`reputation.ts:182-183`, CR MNR-2), y esto es lo contrario de lo
+   * que hace el cap anti-sybil, que sí lo agrupa. La razón: una llamada x402
+   * anónima no exige registrarse, así que si el anónimo contara, un atacante con
+   * UNA identidad más llamadas anónimas juntaría dos buckets y anularía el carril
+   * igual. Excluirlo es lo que hace que el ataque cueste dos identidades
+   * registradas distintas y no una.
    *
    * Es el contador que ANULA el carril de estreno, y es distinto de `failedCount`
    * a propósito: con el crudo, UN solo fallo transitorio (el agente caído treinta
