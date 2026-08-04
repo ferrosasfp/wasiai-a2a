@@ -30,27 +30,70 @@
  *   - `T-CS-3`: un POST hacia `/discover` cuyo body el extractor NO sabe leer.
  *     "No sé qué manda este call-site" se reporta rojo a propósito: es lo que
  *     impide que una FORMA nueva de escribir la llamada pase en silencio.
- *   - `T-CS-0` / `T-CS-1`: la herramienta misma, si deja de ver el repo o deja
- *     de entender alguna de las formas que hoy entiende.
+ *   - `T-CS-0` / `T-CS-0b` / `T-CS-1`: la herramienta misma, si deja de ver el
+ *     repo (o los gitignoreados) o deja de entender alguna forma que hoy
+ *     entiende.
+ *   - `T-CS-4`: el extractor medido contra formas PLANTADAS, incluidas las que
+ *     NO caza. Un mecanismo hay que probarlo por lo que deja pasar, no sólo por
+ *     lo que atrapa: las del repo real sólo prueban lo que alguien ya escribió.
  *
- * QUÉ NO CUBRE (límites declarados, no descuidos)
- * -----------------------------------------------
- *   - claves construidas en runtime (`params.set(k, v)` con `k` variable):
- *     ningún análisis estático las alcanza. Hoy no existe ninguna.
+ * QUÉ NO CUBRE (límites MEDIDOS, no descuidos)
+ * --------------------------------------------
+ * ⚠️ LEER ESTO ANTES DE CONFIAR EN EL VERDE. Esta lista existió una vez con UN
+ * solo ítem ("claves construidas en runtime") y era falsa: AR-3 plantó 15 formas
+ * distintas de mandar un parámetro y CINCO con clave literal y estática pasaron
+ * mudas. Una lista de límites que promete de más es peor que no tenerla, porque
+ * el revisor siguiente deja de buscar donde ella dice que no hace falta. Las de
+ * abajo están medidas una por una, y las que se pueden congelar tienen su caso
+ * en `T-CS-4`: si alguien le enseña una forma al extractor, ese test se pone
+ * rojo y hay que sacarla de acá.
+ *
+ * Del extractor (una llamada así pasa MUDA):
+ *   - claves construidas en runtime: `params.set(k, v)` con `k` variable, y su
+ *     gemela del lado body `{ [k]: v }`. Ningún análisis estático las alcanza.
+ *   - un helper propio que reciba las claves de afuera
+ *     (`callDiscover({ query })` con el `set(k, v)` en otro archivo): el
+ *     extractor no cruza archivos.
+ *   - `new URLSearchParams([['query', …]])` — array de pares (el literal de
+ *     OBJETO sí se lee).
+ *   - la query string CONCATENADA: `'/discover' + '?query=' + v`. `QS_RE` exige
+ *     el `?` pegado al path.
+ *   - un `params` ENTRECOMILLADO (`"params": {…}`) no se lee como query params,
+ *     a propósito: en JSON-RPC esa clave es otra cosa. Un `.json` que documente
+ *     un GET con axios queda afuera.
+ *
+ * Del enumerador (el archivo ni siquiera se abre):
+ *   - `git ls-files` NO desciende a SUBMÓDULOS: `contracts/lib/**` son 2104
+ *     archivos invisibles para el barrido.
+ *   - `readTextFile` descarta EN SILENCIO todo archivo > 2 MiB y todo binario, y
+ *     no los suma a `filesScanned`. Un fixture grande no se mira y nadie se
+ *     entera.
+ *   - los archivos GITIGNOREADOS sí se barren, pero SÓLO en la corrida local:
+ *     `actions/checkout` no los materializa, así que en CI no existen. Hoy hay
+ *     dos que llaman al endpoint — `scripts/smoke-base-downstream.mjs`
+ *     (`.gitignore:72`) y `scripts/smoke-prod-via-app-wasiai.mjs`
+ *     (`.gitignore:205`) — y para ellos la corrida del dev antes de commitear es
+ *     la única línea de defensa. Ver `T-CS-0b`.
  *   - `doc/sdd/**` y `doc/audit/**`: son reportes donde CITAR la llamada rota
  *     es el objetivo del texto. El resto de los `.md` (README, `docs/**`,
  *     `doc/INTEGRATION.md`) SÍ se verifica: una doc que publique un parámetro
  *     inexistente es el mismo bug de esta HU, escrito en prosa.
+ *
+ * De la atribución (el dato se lee y se descarta):
+ *   - `isForeignHost` descarta como "registry federado ajeno" todo host literal
+ *     que no matchee `localhost|127.0.0.1|wasiai|railway|vercel`. Un gateway
+ *     self-hosted en un dominio propio se descartaría.
  *   - ventanas que esperan el rechazo (mencionan `UNKNOWN_DISCOVER_PARAM`
  *     cerca): son los tests del propio guard, donde mandar la clave mala es el
  *     punto.
- *   - los archivos GITIGNOREADOS se barren, pero SÓLO en la corrida local:
- *     `actions/checkout` no los materializa, así que en CI no existen y el
- *     barrido no los ve. Hoy hay dos que llaman al endpoint —
- *     `scripts/smoke-base-downstream.mjs` (`.gitignore:72`) y
- *     `scripts/smoke-prod-via-app-wasiai.mjs` (`.gitignore:205`) — y para ellos
- *     la corrida del dev antes de commitear es la única línea de defensa. Ver
- *     `T-CS-0b`.
+ *   - una mención al endpoint dentro de un COMENTARIO de código no abre ventana
+ *     (sí cuenta para la atribución). Un call-site cuya URL sea una variable y
+ *     que sólo esté nombrado en un comentario queda afuera.
+ *
+ * ⚠️ ESTE BARRIDO NO SUSTITUYE LA BÚSQUEDA cuando aparece una forma NUEVA de
+ * escribir la llamada. Cubre las formas que sabe leer, que están enumeradas en
+ * `T-CS-1` y `T-CS-4`; frente a una sexta forma su verde no significa nada. El
+ * modo correcto de subirle la confianza es plantar la forma y medir, no leerlo.
  *
  * SI ESTE TEST DA UN FALSO POSITIVO, no lo silencies con una excepción por
  * archivo: o el extractor está atribuyendo el body al endpoint equivocado
@@ -119,9 +162,25 @@ const SP_RE =
 /** `body.q = …`, `payload['q'] = …`. */
 const MEMBER_RE =
   /\b(?:body|payload|params|filters|query)\s*(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*['"`]([^'"`]+)['"`]\s*\])\s*=(?!=)/g;
-/** Anclas tras las cuales un `{` es el cuerpo de un request. */
+/** Anclas tras las cuales un `{` es el cuerpo de un request.
+ *
+ *  Las comillas alrededor del nombre son opcionales a propósito (AR-3
+ *  `BLQ-BAJO-1`): un fixture `.json` escribe `"body": { "query": … }` y sin eso
+ *  el ancla no matcheaba — el `\b` de `\bbody` sí entra adentro de las comillas,
+ *  pero después venía un `"` donde el regex esperaba el `:`. Medido: el fixture
+ *  `.json` pasaba MUDO y el `.yaml` equivalente (sin comillas) no. */
 const BODY_ANCHOR_RE =
-  /(?:JSON\.stringify\s*\(|--data(?:-raw|-binary)?\s+'|--data(?:-raw|-binary)?\s+"|-d\s+'|-d\s+"|\bbody\s*[:=]\s*|\bpayload\s*[:=]\s*|\bjson\s*[:=]\s*)/g;
+  /(?:JSON\.stringify\s*\(|--data(?:-raw|-binary)?\s+'|--data(?:-raw|-binary)?\s+"|-d\s+'|-d\s+"|["'`]?\bbody\b["'`]?\s*[:=]\s*|["'`]?\bpayload\b["'`]?\s*[:=]\s*|["'`]?\bjson\b["'`]?\s*[:=]\s*)/g;
+/** Anclas tras las cuales un `{` son QUERY PARAMS, no un body (AR-3
+ *  `BLQ-BAJO-1`): `new URLSearchParams({ q: … })` y el `params: { … }` de
+ *  axios/got. Las dos pasaban mudas y ninguna estaba declarada como límite.
+ *
+ *  Van aparte de `BODY_ANCHOR_RE` por dos razones, no por estética: el `how` que
+ *  reportan es `searchParams` (que es lo que son), y NO cuentan como "body
+ *  leído" para el chequeo de POSTs opacos — un `params:` no responde por lo que
+ *  viaja en el cuerpo. */
+const QUERY_OBJECT_ANCHOR_RE =
+  /(?:new\s+URLSearchParams\s*\(|\bparams\s*[:=]\s*)/g;
 /** Construcciones que EMITEN un request (no que lo registran: `app.post` no). */
 const REQUEST_CALL_RE =
   /(?:\bfetch\s*\(|\binject\s*\(|\bhttp\s*\.\s*(?:post|request)\s*\(|\baxios\s*\.\s*post\s*\(|-X\s+POST|--request\s+POST)/g;
@@ -556,6 +615,22 @@ function scanFile(
     a = BODY_ANCHOR_RE.exec(text);
   }
 
+  // 3b. Objetos que se convierten en QUERY STRING (`new URLSearchParams({…})`,
+  //     `params: {…}`). No entran en `bodyAnchors`: no son un cuerpo.
+  QUERY_OBJECT_ANCHOR_RE.lastIndex = 0;
+  let qo = QUERY_OBJECT_ANCHOR_RE.exec(text);
+  while (qo !== null) {
+    const anchor = qo[0] as string;
+    const rest = text.slice(qo.index + anchor.length);
+    const braceRel = rest.search(/\S/);
+    if (braceRel !== -1 && rest[braceRel] === '{') {
+      const open = qo.index + anchor.length + braceRel;
+      for (const { key, offset } of topLevelKeys(text, open).keys)
+        push(offset, key, 'searchParams');
+    }
+    qo = QUERY_OBJECT_ANCHOR_RE.exec(text);
+  }
+
   // 4. POSTs opacos (sólo en código): hay un request POST hacia el endpoint y
   //    NO se pudo leer ningún body cerca. No poder leerlo es rojo.
   if (isCode) {
@@ -823,5 +898,84 @@ describe('WKH-322 · T-CS-4: el extractor contra formas plantadas', () => {
     );
     expect(r.hits).toEqual([]);
     expect(r.opaquePosts).toEqual([]);
+  });
+
+  // ── Las formas que AR-3 plantó y pasaban MUDAS ───────────────────────────
+  // Las cuatro de abajo se enseñaron en este fix-pack. Antes rendían CERO hits.
+
+  it('`new URLSearchParams({ query })` ahora se lee (antes: mudo)', () => {
+    const r = scanText(
+      [
+        'const qs = new URLSearchParams({ query: "oracle", limit: "5" });',
+        'await fetch("https://gw.wasiai.io/discover?" + qs);',
+      ].join('\n'),
+    );
+    expect(r.hits.map((h) => `${h.key}:${h.how}`).sort()).toEqual([
+      'limit:searchParams',
+      'query:searchParams',
+    ]);
+  });
+
+  it('el `params: { … }` de axios ahora se lee (antes: mudo)', () => {
+    const r = scanText(
+      [
+        'await axios.get("https://gw.wasiai.io/discover", {',
+        '  params: { query: "oracle" },',
+        '});',
+      ].join('\n'),
+    );
+    expect(r.hits.map((h) => h.key)).toEqual(['query']);
+  });
+
+  it('CONTRA-CASO: el `"params"` ENTRECOMILLADO de JSON-RPC NO es query params', () => {
+    // ⚠️ Sin este caso el par de arriba se "arregla" con un ancla que también
+    // matchea `"params": {` — y entonces `docs/mcp-integration.md:333` reporta
+    // `arguments` como parámetro de /discover. Medido: pasó de verdad al
+    // enseñar la forma de axios. La distinción es el ENTRECOMILLADO: en JS la
+    // opción de axios es un identificador pelado, en JSON/JSON-RPC la clave va
+    // entre comillas.
+    const r = scanFile(
+      'planted/fixture.md',
+      [
+        "curl -X POST https://gw.wasiai.io/api/mcp -d '{",
+        '  "method": "tools/call",',
+        '  "params": { "name": "discover_agents", "arguments": { "query": "x" } }',
+        "}'",
+        '',
+        'La tool `discover_agents` llama a /discover por dentro.',
+      ].join('\n'),
+    );
+    expect(r.hits.map((h) => h.key)).not.toContain('arguments');
+  });
+
+  it('un `"body"` ENTRECOMILLADO (fixture .json) ahora se lee (antes: mudo)', () => {
+    // `\b` sí entra adentro de las comillas, pero después venía un `"` donde el
+    // ancla esperaba el `:`. Por eso el `.yaml` equivalente SÍ se leía y el
+    // `.json` no: una asimetría que nadie había medido.
+    const r = scanFile(
+      'planted/fixture.json',
+      '{ "request": { "url": "https://gw.wasiai.io/discover", "body": { "query": "oracle" } } }',
+    );
+    expect(r.hits.map((h) => h.key)).toEqual(['query']);
+  });
+
+  it('LÍMITE DECLARADO: `new URLSearchParams([["query", …]])` (array de pares)', () => {
+    const r = scanText(
+      [
+        'const qs = new URLSearchParams([["query", "oracle"]]);',
+        'await fetch("https://gw.wasiai.io/discover?" + qs);',
+      ].join('\n'),
+    );
+    expect(r.hits).toEqual([]);
+  });
+
+  it('LÍMITE DECLARADO: la query string CONCATENADA `"/discover" + "?query=" + v`', () => {
+    // `QS_RE` exige el `?` pegado al path. Enseñar "cualquier literal que
+    // empiece con `?` cerca de una mención al endpoint" traería ruido de todo
+    // el repo; queda declarado en vez de adivinado.
+    const r = scanText(
+      'await fetch("https://gw.wasiai.io" + "/discover" + "?query=" + t);',
+    );
+    expect(r.hits).toEqual([]);
   });
 });
