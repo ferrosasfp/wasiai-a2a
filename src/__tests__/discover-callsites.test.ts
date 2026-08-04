@@ -797,6 +797,12 @@ describe('WKH-322 · call-sites de /discover en todo el repo', () => {
         '  · `partial-body` → SÍ hay literal, pero adentro quedó un spread o un token\n' +
         '                     no resoluble: las claves leídas son un subconjunto de las\n' +
         '                     que salen por el cable.\n' +
+        '⚠️ "ENTERO" tiene UNA excepción declarada, no dos lecturas: la clave COMPUTADA\n' +
+        '`body: JSON.stringify({ [k]: v })` rinde cero claves legibles y aun así sale\n' +
+        'VERDE Y MUDA — no `no-body`, no `partial-body`. Es deliberado y está congelado\n' +
+        'en `T-CS-4` ("LÍMITE DECLARADO: la clave COMPUTADA `{ [k]: v }` pasa muda", más\n' +
+        'abajo en este archivo) junto al razonamiento, en `topLevelKeys`. Compará con\n' +
+        '`JSON.stringify(filters)`, que también rinde cero claves y SÍ sale rojo.\n' +
         'Arreglo: escribir el body como literal junto al call-site, o enseñarle la forma\n' +
         `nueva al extractor (BODY_ANCHOR_RE / MEMBER_RE / topLevelKeys).\n${detail}\n`,
     ).toEqual([]);
