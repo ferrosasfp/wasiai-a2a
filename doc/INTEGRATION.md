@@ -254,6 +254,45 @@ Filters are applied by the gateway (status, `verified`, `capabilities`, free-tex
 `q`, `maxPrice`, `minReputation`), not by the upstream registries, so `limit` only
 ever trims the final, already-filtered and already-sorted set.
 
+#### The complete list of accepted parameters
+
+These are the **only** parameters `GET /discover` and `POST /discover` accept.
+The same names work in the query string (GET) and in the JSON body (POST).
+
+| Parameter | Type | What it does |
+|---|---|---|
+| `allowTrial` | `'true'` / `'false'` (GET), boolean (POST) | Opt in to the trial lane for agents with no settled history (see below). Omitted = not opted in. |
+| `capabilities` | comma-separated string, or array in POST | Keep only agents that declare **all** of these capabilities. Note the **plural**: `capability` is not a parameter. |
+| `includeInactive` | `'true'` (GET), `true` (POST) | Include agents whose status is not active. |
+| `limit` | safe integer `>= 1` | Page size. Omitted = every match, unpaged. |
+| `maxPrice` | number | Maximum price per call, in USDC. |
+| `minReputation` | number in `[0, 100]` | Minimum gateway-computed off-chain score. |
+| `min_reputation` | number in `[0, 100]` | **Alias of `minReputation`** — see below. |
+| `q` | string | Free-text search. This is the public name; `query` is **not** a parameter. |
+| `registry` | string | Restrict the search to one registry by name. |
+| `verified` | `'true'` (GET), `true` (POST) | Keep only verified agents. |
+
+**`min_reputation` is accepted as an alias of `minReputation`**, on both `GET` and
+`POST`, with the same validation and the same result: the two names are parsed by
+the same validator and collapse into the same filter before anything else runs.
+It exists because the same concept is already called `min_reputation` in the
+`constraints` of `/compose`, in this same API. Sending both names with two
+different values returns `400 CONFLICTING_MIN_REPUTATION` — they are one filter,
+so two incompatible floors cannot both be honoured, and picking one silently
+would discard a floor you asked for. Sending both with the same value is fine.
+
+> If you want a single spelling that works on **both** surfaces — `/discover` and
+> the `constraints` of `/compose` — use **`min_reputation`**.
+
+**Any parameter not in the table above returns `400 UNKNOWN_DISCOVER_PARAM`**,
+and the error message names the offending key and lists the accepted ones, so you
+can fix it without coming back to this page. This endpoint used to ignore
+unrecognised keys and answer `200`, which meant a misspelled filter looked exactly
+like a filter that matched everything: `?capability=payout` (singular) returned
+the whole catalogue instead of the one agent that serves it. Discovery is the free
+call where you decide who to pay, so a parameter ignored here is paid for on the
+next call.
+
 **`minReputation`** filters on the **gateway-computed off-chain score**
 (`agent.computedReputation.score`), scale **0-100** — derived from tasks the agent
 actually settled and paid for, with an anti-sybil cap per caller. It deliberately
@@ -720,7 +759,7 @@ All errors share a normalized JSON shape:
 
 | HTTP | Meaning in this API | Recommended action |
 |------|---------------------|--------------------|
-| `400 Bad Request` | A query/body parameter is malformed. The `code` field says which: `INVALID_MIN_REPUTATION` (`minReputation` on `/discover` is not a number in `[0, 100]`). | Fix the parameter. `minReputation` uses the **0-100** off-chain score scale, not 0-1. |
+| `400 Bad Request` | A query/body parameter is malformed or unrecognised. The `code` field says which: `INVALID_MIN_REPUTATION` (`minReputation` / `min_reputation` on `/discover` is not a number in `[0, 100]`), `INVALID_LIMIT` (`limit` is not a safe integer `>= 1`), `INVALID_ALLOW_TRIAL` (`allowTrial` is neither `true` nor `false`), `UNKNOWN_DISCOVER_PARAM` (a key `/discover` does not accept — the message names it and lists the accepted ones), `CONFLICTING_MIN_REPUTATION` (`minReputation` and its alias `min_reputation` were sent with different values), `INVALID_DISCOVER_BODY` (the `POST /discover` body is an array or a primitive instead of a JSON object). | Fix the parameter. `minReputation` uses the **0-100** off-chain score scale, not 0-1. For `UNKNOWN_DISCOVER_PARAM`, the accepted keys are listed in [the complete list of accepted parameters](#the-complete-list-of-accepted-parameters) and in the error message itself. |
 | `401 Unauthorized` | Not emitted by the application layer. May appear from infrastructure (CDN, reverse proxy) if your request is dropped before reaching the app. | Check the URL, TLS, and that your `Authorization` header is well-formed. If you need auth, this API uses `403` (see next row). |
 | `402 Payment Required` | The endpoint needs payment and none was provided. Body includes `accepts[]` with full x402 payment instructions. Note: a request whose *shape* is invalid is rejected with `400` **before** the `402` is emitted, so you never pay to find out the body was malformed (see [5.1](#51-rejected-requests-what-you-are-charged-and-what-is-refunded)). | Sign the EIP-712 authorization, base64-encode the payload, retry with `PAYMENT-SIGNATURE`. Alternatively attach a valid `x-a2a-key`. |
 | `403 Forbidden` | Either no a2a credential was provided on a tenant-scoped endpoint (`error_code: A2A_KEY_REQUIRED` on `/registries` mutations and all of `/tasks` — returned **before any charge**), or an `x-a2a-key` / Bearer was provided but rejected. In the second case the `error_code` field tells you why: `KEY_NOT_FOUND`, `KEY_INACTIVE`, `DAILY_LIMIT`, `INSUFFICIENT_BUDGET`, `SCOPE_DENIED`, `PER_CALL_LIMIT`. The two `/tasks` reads are free, so they never answer the spend-related codes (`DAILY_LIMIT`, `INSUFFICIENT_BUDGET`, `PER_CALL_LIMIT`): nothing is charged, so nothing can be short. Credential problems (`A2A_KEY_REQUIRED`, `KEY_NOT_FOUND`, `KEY_INACTIVE`, and the delegation / key-session codes for those credential types) are still returned. | `KEY_NOT_FOUND`/`KEY_INACTIVE` → verify the key you are sending and that it has not been disabled. `DAILY_LIMIT`/`INSUFFICIENT_BUDGET` → top up or wait for the daily reset. `SCOPE_DENIED` → request a wider scope from the key owner. `PER_CALL_LIMIT` → lower `budget` in the request body. |
