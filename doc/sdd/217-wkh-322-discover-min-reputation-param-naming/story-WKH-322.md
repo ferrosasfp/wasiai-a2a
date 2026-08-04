@@ -108,7 +108,7 @@ que el 400 les es transparente. **No los toques.**
 `doc/QUICKSTART-PUBLISH.md`, `doc/BASE-EVIDENCE.md`): sólo `capabilities`, `limit`, `q`.
 **Ningún ejemplo publicado quedaría rechazado.**
 
-### 2.2 🔴 POST — el SDD dijo "cero" y son CUATRO. Corrección de F2.5
+### 2.2 🔴 POST — el SDD dijo "cero", F2.5 dijo CUATRO y son OCHO. Corrección del fix-pack
 
 > El §3.4 del SDD afirma *"radio interno medido = 0 … no rompe ni un test existente"*.
 > **Eso es falso.** La medición del SDD enumeró las query strings de GET y **no
@@ -122,7 +122,7 @@ uno al otro en `src/routes/discover.ts:229`:
 query: body.q != null ? String(body.q) : undefined,
 ```
 
-**`body.query` no lo lee nadie.** Y cuatro callers de este repo mandan exactamente eso:
+**`body.query` no lo lee nadie.** Y **ocho** call-sites de este repo mandan exactamente eso:
 
 | # | Archivo:línea | Body | Consecuencia del 400 |
 |---|---|---|---|
@@ -130,6 +130,28 @@ query: body.q != null ? String(body.q) : undefined,
 | 2 | `scripts/perf-bench.mjs:11` | `{ query: '', limit: 10 }` | 400 contra prod |
 | 3 | `scripts/perf-bench.mjs:12` | `{ query: 'price', limit: 5 }` | 400 contra prod |
 | 4 | `scripts/k6-load-test.js:127` | `{ capabilities: ['defi'], query: 'oracle', limit: 3 }` | `checkResponse(..., 200)` en `:130` → check en rojo |
+| 5 | `scripts/k6-deep-test.js:356` | `body.query = query.q` | `check 'discover POST 200'` (`:364`) en rojo en cada iteración con `q` no vacío |
+| 6 | `scripts/smoke-e2e-comprehensive.mjs:144` | `{ query: '', limit: 50 }` | 400 → `agents` `undefined` → `?? []` → **el smoke imprime `0/5 target slugs found` y SIGUE, sin fallar** |
+| 7 | `scripts/smoke-e2e-cross-chain.mjs:127` | `{ query: '', limit: 50 }` | 400 → falla en `:132`, pero diagnosticado como "Missing agents" |
+| 8 | `scripts/smoke-e2e-final.mjs:147` | `{ query: '', limit: 50 }` | 400 → falla en `:153`, pero diagnosticado como "Missing" |
+
+> **Corrección del fix-pack (2026-08-04).** F2.5 enumeró 4 y el AR encontró 2 más
+> (`#5`, `#6`). El re-grep del fix-pack encontró **otros 2** que el AR tampoco tenía
+> (`#7`, `#8`): son copias literales de `#6`, y el AR los perdió porque grepeó por
+> nombre de archivo conocido en vez de por la clave. **El grep que encuentra los 8** es
+> por la CLAVE (`"query"\s*:` sobre `scripts/`, `src/`, `packages/`), cruzado con "¿el
+> destino de este `fetch`/`http.post` es `/discover`?" — hay 12 hits más de
+> `JSON.stringify({ query: sql })` que van a la API de Supabase y NO son de esta clase.
+>
+> Los `#6`, `#7` y `#8` se corrigen además con un assert de status: el `#6` no fallaba
+> (mudo) y el `#7`/`#8` fallaban señalando el lugar equivocado.
+
+**Verificados y descartados** (mandan `q` o no van a `/discover`):
+`scripts/hackathon-e2e.mjs:112-116` y `:375` (este último es
+`api.supabase.com/.../database/query`), `scripts/report-stranded-exposure.mjs:80`,
+`scripts/doctor-chaos.js`, `scripts/doctor-dast.js`, `scripts/smoke-base-downstream.mjs:116`,
+`scripts/smoke-downstream-x402.mjs:152,384`, `scripts/smoke-capabilities-schema.mjs:59`,
+`packages/agent-sdk/src/agent.ts:496-513` (y su `dist/agent.js`).
 
 **El daño va más allá del rojo.** `scripts/perf-bench.mjs:11-12` declara dos escenarios
 llamados *"POST /discover (empty query)"* y *"POST /discover (filter category)"*. Como
@@ -143,7 +165,7 @@ como si significara algo.
 |---|---|---|---|
 | `min_reputation` | `minReputation` | el bug que origina la HU | filtro de reputación inerte |
 | `capability` | `capabilities` | la medición del work-item | 23 agentes donde había 1 (factor 23) |
-| `query` | `q` | 4 callers de este repo | dos benchmarks que miden lo mismo y no lo dicen |
+| `query` | `q` | 8 call-sites de este repo | dos benchmarks que miden lo mismo y no lo dicen, y un smoke mudo |
 
 Los tres son nombres **plausibles**. Los tres devuelven **200**. Ninguno hizo nada.
 
@@ -151,11 +173,11 @@ Los tres son nombres **plausibles**. Los tres devuelven **200**. Ninguno hizo na
 
 El permiso para meter el 400 **no se debilita: se invierte a favor**. Ya no descansa en
 "no rompe nada" (que era falso), sino en algo más fuerte y medido: **si en este repo se
-escribió `query` en cuatro lugares distintos y nadie se enteró en meses, el silencio ya
+escribió `query` en ocho lugares distintos y nadie se enteró en meses, el silencio ya
 está costando plata y credibilidad de medición.**
 
 Lo que sí cambia, y hay que decirlo con honestidad, es **R-1**: si nosotros lo
-escribimos mal cuatro veces, la probabilidad de que un integrador externo también lo
+escribimos mal ocho veces, la probabilidad de que un integrador externo también lo
 haya hecho **no es baja**. Ver §9.
 
 ### 2.4 Por qué `query` NO se aliasa (aplicando el criterio que ya fijó el SDD)
@@ -165,7 +187,7 @@ otra superficie de esta API.**
 
 - `min_reputation` **califica**: es contrato público de `/compose`
   (`compose-step-shape.ts:51`), documentado y en uso por chaski-v3.
-- `query` **NO califica**: es un nombre **interno** que se filtró a cuatro callers. No
+- `query` **NO califica**: es un nombre **interno** que se filtró a ocho call-sites. No
   está documentado en ningún lado como parámetro público.
 - `capability` **NO califica**: es un singular plausible, nada más.
 
@@ -174,10 +196,11 @@ imaginación de los callers, y cada sinónimo hay que mantenerlo, documentarlo y
 para siempre. **Para `query` y `capability` la respuesta correcta es el 400 que nombra
 el parámetro bueno.** Se enseña el nombre canónico una vez y no se crea un segundo.
 
-⇒ **Los 4 call-sites se arreglan** (`query` → `q`). Eso además **repara el benchmark**
+⇒ **Los 8 call-sites se arreglan** (`query` → `q`). Eso además **repara el benchmark**
 en vez de sólo callarlo. Es un ensanchamiento de scope **declarado**, no de contrabando:
-`scripts/perf-bench.mjs` y `scripts/k6-load-test.js` no estaban en el Scope IN del
-work-item y entran acá por esta razón y sólo por esta.
+`scripts/perf-bench.mjs`, `scripts/k6-load-test.js`, `scripts/k6-deep-test.js` y los tres
+`scripts/smoke-e2e-*.mjs` no estaban en el Scope IN del work-item y entran acá por esta
+razón y sólo por esta.
 
 ---
 
@@ -535,9 +558,9 @@ llega hoy a `T-R21`** (`:368`). Usá el setup que ya existe (`:22-56`): mock de
 
 **CD-6: cada caso nuevo lleva su gemelo POST.**
 
-#### W1.6 — 🔴 Los cuatro callers internos que hoy mandan `query`
+#### W1.6 — 🔴 Los ocho call-sites internos que hoy mandan `query`
 
-**Esto no es opcional y no es cosmético.** Sin esto, W1 deja la suite en rojo y dos
+**Esto no es opcional y no es cosmético.** Sin esto, W1 deja la suite en rojo y cinco
 scripts rotos contra producción. Ver §2.2 para la evidencia completa.
 
 | Archivo:línea | De | A |
@@ -546,6 +569,15 @@ scripts rotos contra producción. Ver §2.2 para la evidencia completa.
 | `scripts/perf-bench.mjs:11` | `body: { query: '', limit: 10 }` | `body: { q: '', limit: 10 }` |
 | `scripts/perf-bench.mjs:12` | `body: { query: 'price', limit: 5 }` | `body: { q: 'price', limit: 5 }` |
 | `scripts/k6-load-test.js:127` | `{ capabilities: ['defi'], query: 'oracle', limit: 3 }` | `{ capabilities: ['defi'], q: 'oracle', limit: 3 }` |
+| `scripts/k6-deep-test.js:356` | `body.query = query.q` | `body.q = query.q` |
+| `scripts/smoke-e2e-comprehensive.mjs:144` | `{ query: '', limit: 50 }` | `{ q: '', limit: 50 }` **+ assert de status** |
+| `scripts/smoke-e2e-cross-chain.mjs:127` | `{ query: '', limit: 50 }` | `{ q: '', limit: 50 }` **+ assert de status** |
+| `scripts/smoke-e2e-final.mjs:147` | `{ query: '', limit: 50 }` | `{ q: '', limit: 50 }` **+ assert de status** |
+
+Los tres `smoke-e2e-*` llevan además un `if (res.status !== 200) → exit 1`. En
+`smoke-e2e-comprehensive.mjs` es **obligatorio**: sin él la fase A.2 es muda (el 400 se
+tapa con `?? []` y el smoke imprime `0/5` con un ✓ al lado). En los otros dos el smoke ya
+fallaba, pero por "Missing agents", que manda a buscar al lugar equivocado.
 
 **Dejá escrito en el reporte final** (no en el código): los números históricos de
 `perf-bench.mjs` **no son comparables** con los de después del fix. El escenario
@@ -715,10 +747,11 @@ inventes.** Grepeala. Si no existe, escribilo en el reporte y pará.
 
 ### R-1 — El 400 puede romper a un integrador externo
 
-**Estado corregido en F2.5.** El SDD afirmaba radio interno = 0. **Son 4 call-sites**
-(§2.2). Eso **sube**, no baja, la probabilidad estimada del radio externo: si en este
-repo se escribió `query` cuatro veces sin que nadie lo notara, un integrador externo bien
-pudo hacer lo mismo.
+**Estado corregido en F2.5, y corregido otra vez en el fix-pack.** El SDD afirmaba radio
+interno = 0; F2.5 dijo 4; **son 8 call-sites** (§2.2). Eso **sube**, no baja, la
+probabilidad estimada del radio externo: si en este repo se escribió `query` ocho veces
+sin que nadie lo notara — y hicieron falta tres pasadas para contarlas — un integrador
+externo bien pudo hacer lo mismo.
 
 **Mitigaciones asumidas de antemano, no descubiertas después:**
 
@@ -766,9 +799,20 @@ pude preguntar": la exclusión es real y significa lo que parece.
 
 ### R-3 — Esta HU hace VISIBLE a R-2
 
-Un integrador que hoy investiga con `?min_reputation=2` ve **23** agentes y concluye que
-hay oferta de sobra. Después de esta HU verá **0** y un `excluded.reputation` que lo
-explica.
+Un integrador que hoy investiga con `?min_reputation=2` ve **23** agentes — el catálogo
+entero, porque el filtro que pidió no se aplica — y concluye que hay oferta de sobra.
+Después de esta HU verá **5**, con `excluded.reputation: 18` explicando la diferencia.
+
+> ⚠️ **Corrección del fix-pack (AR MNR-1), medida contra producción el 2026-08-04.** Este
+> párrafo decía "verá **0**". Es falso: el `0` pertenece a OTRO caso, el de R-2
+> (`?capabilities=remittance-payout&minReputation=1` → total 0). Sobre el catálogo entero
+> con piso 2 el resultado es **5**. La afirmación de fondo de R-2/R-3 no cambia: el
+> conjunto vacío con piso ≥1 sobre `remittance-payout` ya existe HOY por el nombre
+> camelCase, y esta HU no rompe ningún camino que hoy funcione. Lo que cambia para un
+> caller directo de `min_reputation` es que el filtro que pidió empieza a aplicarse:
+> **23 → 5**. Eso es el fix, no una regresión.
+>
+> **El done-report NO debe republicar "23 → 0".**
 
 **No mitigar. Un diagnóstico correcto no es una regresión.** Si en el AR alguien reporta
 "la HU rompió discovery de payout", la respuesta es: discovery de payout ya estaba roto;
@@ -804,7 +848,8 @@ verificado como inviable.
 - [ ] `T-U1..T-U6` y `T-R22..T-R34` presentes, nombrados y verdes.
 - [ ] **Todos** los mutantes de §7.1 corridos a mano y muertos, con el registro
       mutante → test en el reporte.
-- [ ] Los 4 call-sites de `query` corregidos (§6 W1.6).
+- [ ] Los 8 call-sites de `query` corregidos (§6 W1.6), y los tres `smoke-e2e-*.mjs` con
+      su assert de status.
 - [ ] `doc/INTEGRATION.md` con los 10 parámetros, el alias, la frase de convergencia y las
       3 filas nuevas de la tabla de errores.
 - [ ] `git diff` **no toca**: `src/services/discovery.ts`, `src/services/capability-resolver.ts`,

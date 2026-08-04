@@ -353,7 +353,11 @@ export function discoveryDeepTest() {
   // POST variant
   group('Discovery: POST with body', () => {
     const body = { limit: 10 }
-    if (query.q) body.query = query.q
+    // WKH-322: la clave publica del texto libre es `q`, no `query`. `query` es
+    // el nombre INTERNO del campo en `DiscoveryQuery`; el server lo descartaba
+    // en silencio, asi que este perfil venia midiendo una busqueda sin filtrar
+    // cada vez que el caso sorteado traia `q` no vacio.
+    if (query.q) body.q = query.q
     if (query.caps.length) body.capabilities = query.caps
 
     const r = track(

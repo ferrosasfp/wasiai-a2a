@@ -141,9 +141,20 @@ section('PHASE A.2 — wasiai-a2a /discover');
 const discoverRes = await fetch(`${A2A_URL}/discover`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ query: '', limit: 50 }),
+  // WKH-322: la clave publica es `q`, no `query`.
+  body: JSON.stringify({ q: '', limit: 50 }),
 });
 const discover = await discoverRes.json();
+// WKH-322: sin este assert la fase era MUDA. Con la clave equivocada el server
+// contestaba 400, `discover.agents` quedaba `undefined`, el `?? []` de abajo lo
+// tapaba y el smoke seguia hasta imprimir "0/5 target slugs found" con un ✓ al
+// lado. Un smoke que deja de oler sin decirlo es peor que no tenerlo: arreglar
+// la clave sin agregar el assert deja el mismo agujero para el proximo rename.
+if (discoverRes.status !== 200) {
+  console.error(`  ✗ POST /discover devolvio HTTP ${discoverRes.status} (se esperaba 200)`);
+  console.error(`    ${JSON.stringify(discover)}`);
+  process.exit(1);
+}
 const discovered = discover.agents?.filter(a =>
   FIVE_AGENTS.some(t => t.slug === a.slug)
 ) ?? [];

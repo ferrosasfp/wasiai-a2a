@@ -152,10 +152,14 @@ O sea:
 
 Esto **no lo causa ni lo arregla esta HU** (CD-1: `/compose` no se toca). Se declara como
 **R-2**, con dueño y estado de verificación. Lo que sí hace esta HU es **volverlo
-visible**: hoy un integrador que investiga con `?min_reputation=2` ve 23 agentes y
-concluye que hay oferta de sobra; después de esta HU verá 0 y `excluded.reputation`, que
-es la verdad. Un diagnóstico correcto es un cambio de comportamiento deseado, no una
-regresión.
+visible**: hoy un integrador que investiga con `?min_reputation=2` ve 23 agentes (el
+catálogo entero, porque el filtro que pidió no se aplica) y concluye que hay oferta de
+sobra; después de esta HU verá **5** y un `excluded.reputation: 18`, que es la verdad. Un
+diagnóstico correcto es un cambio de comportamiento deseado, no una regresión.
+
+> **Corregido por el fix-pack (AR MNR-1), medido contra producción el 2026-08-04.** Este
+> párrafo decía "verá 0". El `0` es de OTRO caso — el de R-2,
+> `?capabilities=remittance-payout&minReputation=1` — no el del catálogo entero.
 
 ### 3.4 Impacto verificado sobre la suite y sobre los callers (no estimado: medido)
 
@@ -565,7 +569,7 @@ test que no prueba lo que dice, y en este repo ya pasó tres veces en una sola H
 |---|---|---|---|
 | **R-1** | El 400 sobre claves desconocidas rompe a un integrador externo que hoy manda parámetros extra inertes y recibe 200 | **Radio interno medido = 0** (§3.4: 0 tests, 0 scripts, 0 callers, 0 ejemplos públicos). Radio externo **no enumerable** | Mensaje accionable (nombra la clave y lista las válidas) + `INTEGRATION.md` en el mismo merge (CD-8). **Disparador de reversión**: si post-deploy aparecen 400 `UNKNOWN_DISCOVER_PARAM` de un caller real, la respuesta NO es apagar el guard sino agregar el nombre a la lista si es legítimo, o avisar al integrador si es un typo |
 | **R-2** | 🔴 `remit-cashout-payout-solana` es el **único** agente con `remittance-payout` y queda excluido por cualquier piso `>= 1` ⇒ `/compose` con `min_reputation: 2` (constante de chaski-v3) devuelve **422 `excluded_by_reputation`** y el leg de entrega de valor no resuelve | **MEDIDO hoy contra prod, no inferido** (§3.3): 1 candidato, `computedReputation: null`, `standingUnavailable: false`, `total 0` con piso 1. La cadena hasta el 502 de chaski está documentada en `doc/roadmap/2026-08-incubadora-solana-checklist.md` §0.3 | **Fuera del alcance de esta HU** (CD-1). Salida existente y medida: `allow_trial: true` lo admite por el carril de WKH-313 (`trial.granted`, `remaining_settled_tasks: 3`). Es **decisión de producto del founder**, no de dev. Se cruza con el hallazgo abierto sobre el piso 2 y el carril de estreno (WKH-313) |
-| **R-3** | Esta HU **hace visible** R-2: un integrador que hoy investiga con `?min_reputation=2` ve 23 agentes y después verá 0 | Consecuencia directa y deseada del fix | No mitigar. Un diagnóstico correcto no es una regresión. `excluded.reputation` explica el vacío, y `allowTrial` está documentado en `INTEGRATION.md:270-320` |
+| **R-3** | Esta HU **hace visible** R-2: un integrador que hoy investiga con `?min_reputation=2` ve 23 agentes y después verá **5** (`excluded.reputation: 18`) — el `0` medido pertenece al caso `capabilities=remittance-payout` con piso ≥1, no al catálogo entero (corrección del fix-pack, AR MNR-1) | Consecuencia directa y deseada del fix | No mitigar. Un diagnóstico correcto no es una regresión. `excluded.reputation` explica el vacío, y `allowTrial` está documentado en `INTEGRATION.md:270-320` |
 | **R-4** | `doc/sdd/_INDEX.md` tiene **3** filas desactualizadas (`211` WKH-313, `215` WKH-318, `216` WKH-319 dicen "no mergeado" y git dice que sí — DT-7), y la fila de ESTA HU quedó sin pegar, en `doc/sdd/217-.../_INDEX-row.md`, porque el analyst no tuvo herramienta de edición | Verificado con `git log --oneline main` (DT-7) | **Para `nexus-docs` en el cierre.** No lo arregla ni el Architect ni el Dev. Que quede escrito acá es lo que impide que se pierda |
 | **R-5** | Dos nombres para el mismo parámetro, para siempre | Decisión consciente (DT-1) | Deuda **TD-322-3**. La convergencia real (un solo nombre) exigiría romper `/compose`, verificado como inviable en DT-2 |
 | **TD-322-1** | `GET /discover/:slug` sigue descartando query params desconocidos en silencio | Verificado (`routes/discover.ts:247-268`) | Deuda declarada, fuera de alcance (DT-6) |
