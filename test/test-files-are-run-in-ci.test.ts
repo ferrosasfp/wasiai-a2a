@@ -27,14 +27,28 @@
  *
  * CÓMO DECIDE. No tiene una lista de runners: los DESCUBRE.
  *   1. lee los workflows de `.github/workflows/`, parte cada job en steps y se
- *      queda con los que ejecutan `npm test` / `npm run test…`;
+ *      queda con los que ejecutan `npm test` / `npm run test…` SIN `if:` ni
+ *      `continue-on-error:` (con cualquiera de los dos no se puede afirmar que
+ *      el step corra, ni que su rojo rompa el build → `untranslatable`);
  *   2. de cada step saca su `working-directory` (raíz si no tiene) y lee el
  *      `scripts.test` del `package.json` de ese directorio;
- *   3. traduce ese script a los globs que realmente se expanden: el `include`
- *      del `vitest.config.ts` para vitest, los argumentos glob para
- *      `node --test`.
+ *   3. traduce ese script a los globs que realmente se expanden: `include`
+ *      MENOS `exclude` del `vitest.config.ts` para vitest, los argumentos glob
+ *      para `node --test`.
  * Si no puede traducir un runner, NO adivina: se pone rojo. "No sé qué corre
  * este step" es indistinguible de "este step no corre lo que creo".
+ *
+ * QUÉ NO CUBRE (declarado, no arreglado — medir antes de creerle a esta lista):
+ *   - gating a nivel JOB o WORKFLOW: un `if:` en el `job`, un `on:` que excluya
+ *     `pull_request`, o una `matrix` que no incluya el caso. Sólo se mira el
+ *     bloque del step;
+ *   - `defaults.run.working-directory` a nivel job/workflow (ver `workflowSteps`);
+ *   - filtros de la CLI que no vienen del config: `--exclude`, `--project`,
+ *     `--dir`, `--shard`, o un `vitest run <path>` con argumento posicional;
+ *   - `test.projects` / workspaces de vitest, y `exclude` fuera del bloque
+ *     `test` (se lee el PRIMER array `exclude:` del archivo);
+ *   - `describe.skip` / `it.skip` dentro de un archivo cubierto: el archivo lo
+ *     corre un runner, sus casos pueden no correr. Eso es otra clase.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -54,6 +68,13 @@ interface Runner {
   dir: string;
   /** Globs relativos a `dir` que ese runner expande. */
   globs: string[];
+  /**
+   * Globs que ese runner RESTA de `globs` (el `exclude` de vitest). Un archivo
+   * que matchea acá NO está cubierto aunque matchee `globs`: es exactamente el
+   * agujero que midió AR-4 (agregar un `*.test.ts` al `exclude` bajaba la suite
+   * de 4987 a 4961 tests con el guardián en verde).
+   */
+  excludes: string[];
   /** De dónde salió, para que el mensaje del rojo sea accionable. */
   source: string;
 }
@@ -124,11 +145,17 @@ function globToRegExp(glob: string): RegExp {
 
 // ── Descubrimiento de runners ──────────────────────────────────────────────
 
-/** El array literal de `include:` de un `vitest.config.ts`. `null` si no hay. */
-function vitestIncludeGlobs(configPath: string): string[] | null {
+/**
+ * Un array literal de globs (`include:` o `exclude:`) de un `vitest.config.ts`.
+ * `null` si el archivo no existe o esa clave no está.
+ */
+function vitestGlobArray(
+  configPath: string,
+  key: 'include' | 'exclude',
+): string[] | null {
   if (!existsSync(configPath)) return null;
   const src = readFileSync(configPath, 'utf8');
-  const m = src.match(/\binclude\s*:\s*\[([\s\S]*?)\]/);
+  const m = src.match(new RegExp(`\\b${key}\\s*:\\s*\\[([\\s\\S]*?)\\]`));
   if (!m) return null;
   const globs = [...(m[1] as string).matchAll(/['"`]([^'"`]+)['"`]/g)].map(
     (g) => g[1] as string,
@@ -137,9 +164,17 @@ function vitestIncludeGlobs(configPath: string): string[] | null {
 }
 
 /** Los globs que un `scripts.test` expande de verdad. `null` = no lo entiendo. */
-function globsForTestScript(dir: string, script: string): string[] | null {
+function globsForTestScript(
+  dir: string,
+  script: string,
+): { globs: string[]; excludes: string[] } | null {
   if (/\bvitest\b/.test(script)) {
-    return vitestIncludeGlobs(join(REPO_ROOT, dir, 'vitest.config.ts'));
+    const cfg = join(REPO_ROOT, dir, 'vitest.config.ts');
+    const globs = vitestGlobArray(cfg, 'include');
+    if (globs === null) return null;
+    // Sin `exclude:` explícito vitest usa sus defaults (`node_modules`, `dist`),
+    // que ya están fuera del barrido; restar nada es correcto y no infla el set.
+    return { globs, excludes: vitestGlobArray(cfg, 'exclude') ?? [] };
   }
   if (/\bnode\b[^&|;]*--test\b/.test(script)) {
     // `node --test 'tests/*.test.mjs' otro/glob` → los argumentos posicionales
@@ -148,7 +183,7 @@ function globsForTestScript(dir: string, script: string): string[] | null {
     const args = [...after.matchAll(/'([^']+)'|"([^"]+)"|(\S+)/g)]
       .map((a) => (a[1] ?? a[2] ?? a[3]) as string)
       .filter((a) => !a.startsWith('-'));
-    return args.length > 0 ? args : null;
+    return args.length > 0 ? { globs: args, excludes: [] } : null;
   }
   return null;
 }
@@ -179,11 +214,13 @@ function workflowSteps(yaml: string): string[] {
   return steps;
 }
 
-function discoverRunners(): { runners: Runner[]; untranslatable: string[] } {
+function discoverRunnersFrom(
+  yaml: string,
+  wf = 'fixture.yml',
+): { runners: Runner[]; untranslatable: string[] } {
   const runners: Runner[] = [];
   const untranslatable: string[] = [];
-  for (const wf of readdirSync(WORKFLOW_DIR).filter((f) => /\.ya?ml$/.test(f))) {
-    const yaml = readFileSync(join(WORKFLOW_DIR, wf), 'utf8');
+  {
     for (const step of workflowSteps(yaml)) {
       const run = step.match(/\brun\s*:\s*(.+)/);
       if (!run) continue;
@@ -193,6 +230,19 @@ function discoverRunners(): { runners: Runner[]; untranslatable: string[] } {
       const dir = wd ? (wd[1] as string).replace(/^\.\/?|\/$/g, '') : '';
       const pkgPath = join(REPO_ROOT, dir, 'package.json');
       const source = `${wf} → \`${cmd}\`${dir ? ` (working-directory: ${dir})` : ''}`;
+      // Un step condicionado (`if:`) puede no ejecutarse nunca, y uno con
+      // `continue-on-error:` puede ejecutarse y no romper el build. En los dos
+      // casos "este step corre estos tests" deja de ser afirmable, así que no
+      // cuenta como runner. `smoke-downstream.yml:36` ya usa el segundo idiom,
+      // o sea que no es un modo de falla hipotético en este repo.
+      const gate = step.match(/^\s+(if|continue-on-error)\s*:/m);
+      if (gate) {
+        untranslatable.push(
+          `${source}: el step tiene \`${gate[1]}:\`, así que no puedo afirmar que corra` +
+            ' (ni que su rojo rompa el build). Un runner condicional no cubre nada.',
+        );
+        continue;
+      }
       if (!existsSync(pkgPath)) {
         untranslatable.push(`${source}: no hay package.json en '${dir || '.'}'`);
         continue;
@@ -208,13 +258,28 @@ function discoverRunners(): { runners: Runner[]; untranslatable: string[] } {
         untranslatable.push(`${source}: '${scriptName}' no existe en ${dir || '.'}/package.json`);
         continue;
       }
-      const globs = globsForTestScript(dir, script);
-      if (globs === null || globs.some(unsupportedGlob)) {
+      const expanded = globsForTestScript(dir, script);
+      if (
+        expanded === null ||
+        expanded.globs.some(unsupportedGlob) ||
+        expanded.excludes.some(unsupportedGlob)
+      ) {
         untranslatable.push(`${source}: no sé qué archivos expande \`${script}\``);
         continue;
       }
-      runners.push({ dir, globs, source });
+      runners.push({ dir, ...expanded, source });
     }
+  }
+  return { runners, untranslatable };
+}
+
+function discoverRunners(): { runners: Runner[]; untranslatable: string[] } {
+  const runners: Runner[] = [];
+  const untranslatable: string[] = [];
+  for (const wf of readdirSync(WORKFLOW_DIR).filter((f) => /\.ya?ml$/.test(f))) {
+    const out = discoverRunnersFrom(readFileSync(join(WORKFLOW_DIR, wf), 'utf8'), wf);
+    runners.push(...out.runners);
+    untranslatable.push(...out.untranslatable);
   }
   return { runners, untranslatable };
 }
@@ -224,6 +289,8 @@ function runnersCovering(file: string, runners: Runner[]): Runner[] {
   return runners.filter((r) => {
     if (r.dir !== '' && !file.startsWith(`${r.dir}/`)) return false;
     const rel = r.dir === '' ? file : file.slice(r.dir.length + 1);
+    // El `exclude` gana sobre el `include`, igual que en vitest.
+    if (r.excludes.some((g) => globToRegExp(g).test(rel))) return false;
     return r.globs.some((g) => globToRegExp(g).test(rel));
   });
 }
@@ -274,8 +341,13 @@ describe('archivos de test vs. runners que CI corre', () => {
     // Sin este caso, un `globToRegExp` que devolviera `/.*/ ` haría pasar el test
     // de arriba afirmando cobertura total.
     const fake: Runner[] = [
-      { dir: '', globs: ['src/**/*.test.ts'], source: 'fixture' },
-      { dir: 'sub/pkg', globs: ['tests/*.test.mjs'], source: 'fixture' },
+      { dir: '', globs: ['src/**/*.test.ts'], excludes: [], source: 'fixture' },
+      {
+        dir: 'sub/pkg',
+        globs: ['tests/*.test.mjs'],
+        excludes: [],
+        source: 'fixture',
+      },
     ];
     expect(runnersCovering('src/lib/a.test.ts', fake)).toHaveLength(1);
     expect(runnersCovering('src/a.test.ts', fake)).toHaveLength(1);
@@ -285,5 +357,55 @@ describe('archivos de test vs. runners que CI corre', () => {
     expect(runnersCovering('src/lib/a.test.mjs', fake)).toHaveLength(0);
     expect(runnersCovering('sub/pkg/tests/x/a.test.mjs', fake)).toHaveLength(0);
     expect(runnersCovering('other/tests/a.test.mjs', fake)).toHaveLength(0);
+  });
+
+  it('el `exclude` del runner resta cobertura (AR-4 · vector medido)', () => {
+    // El agujero exacto de AR-4: `include` matchea, `exclude` lo saca, la suite
+    // corre 26 tests menos y nadie chilla. Si `runnersCovering` volviera a mirar
+    // sólo `include`, el primer expect de acá abajo se pone rojo.
+    const excluding: Runner[] = [
+      {
+        dir: '',
+        globs: ['src/**/*.test.ts', 'test/**/*.test.ts'],
+        excludes: ['src/lib/discovery-query.test.ts'],
+        source: 'fixture',
+      },
+    ];
+    expect(runnersCovering('src/lib/discovery-query.test.ts', excluding)).toHaveLength(0);
+    // Y no resta de más: el vecino del mismo directorio sigue cubierto.
+    expect(runnersCovering('src/lib/otro.test.ts', excluding)).toHaveLength(1);
+    expect(runnersCovering('test/a.test.ts', excluding)).toHaveLength(1);
+    // Un `exclude` con glob también resta, no sólo el path literal.
+    const excludingGlob: Runner[] = [
+      { dir: '', globs: ['src/**/*.test.ts'], excludes: ['src/lib/**'], source: 'fixture' },
+    ];
+    expect(runnersCovering('src/lib/a.test.ts', excludingGlob)).toHaveLength(0);
+    expect(runnersCovering('src/otro/a.test.ts', excludingGlob)).toHaveLength(1);
+  });
+
+  it('un step con `if:` o `continue-on-error:` no cuenta como runner (AR-4 · vectores medidos)', () => {
+    // Los otros dos vectores de AR-4: el step existe y nombra `npm test`, pero
+    // no se puede afirmar que corra (`if:` que nunca resuelve true) ni que su
+    // rojo rompa el build (`continue-on-error:`). Los dos tienen que caer en
+    // `untranslatable`, que es lo que pone rojo el primer test de este describe.
+    const base = [
+      'jobs:',
+      '  build-test:',
+      '    steps:',
+      '      - name: Test',
+      '        run: npm test',
+    ].join('\n');
+    expect(discoverRunnersFrom(base).runners).toHaveLength(1);
+    expect(discoverRunnersFrom(base).untranslatable).toEqual([]);
+
+    for (const gate of [
+      "        if: github.ref == 'refs/heads/never'",
+      '        continue-on-error: true',
+    ]) {
+      const gated = base.replace('        run: npm test', `${gate}\n        run: npm test`);
+      const out = discoverRunnersFrom(gated);
+      expect(out.runners, `\`${gate.trim()}\` no debería contar como runner`).toHaveLength(0);
+      expect(out.untranslatable).toHaveLength(1);
+    }
   });
 });
