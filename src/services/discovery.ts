@@ -9,7 +9,12 @@ import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
 // Fix-pack P1 AR BLQ-BAJO-1: el over-fetch vive en un módulo LEAF porque
 // `services/compose.ts` también necesita el límite del pool y las suites que
 // mockean este service completo dejarían el export en `undefined`.
-import { resolveUpstreamFetchLimit } from '../lib/discovery-fetch-limit.js';
+import {
+  clampFallsBelowComposePoolFloor,
+  clampToRegistryMaxLimit,
+  isUsableRegistryMaxLimit,
+  resolveUpstreamFetchLimit,
+} from '../lib/discovery-fetch-limit.js';
 // WKH-318: el vocabulario de la honestidad del catálogo vive en un módulo LEAF
 // por la MISMA razón que `discovery-fetch-limit.js` (ver su docstring): las
 // suites que mockean este service completo dejarían un export nuevo en
@@ -1069,10 +1074,45 @@ export const discoveryService = {
     // el mismo bug de clase "esconder agentes" en el path sin `limit`.
     // WKH-318: el límite EFECTIVAMENTE enviado, para poder detectar `page_full`.
     // `undefined` ⇒ no se mandó ninguno (camino sin `limit` del caller, CD-5/CD-8).
+    // WKH-318 corte B: el over-fetch se recorta al techo que el registry DECLARA
+    // (`schema.discovery.maxLimit`). Sin declaración usable no hay clamp, así que
+    // el número que sale por la red es el mismo de antes (CD-3).
     let sentLimit: number | undefined;
     if (query.limit && schema.limitParam) {
-      sentLimit = resolveUpstreamFetchLimit(query.limit);
+      const unclamped = resolveUpstreamFetchLimit(query.limit);
+      sentLimit = clampToRegistryMaxLimit(unclamped, schema.maxLimit);
       url.searchParams.set(schema.limitParam, sentLimit.toString());
+      // `!== undefined` separa "no declaró techo" de "declaró basura", y la
+      // diferencia es observable: un JSON sin la clave da `undefined` y NO
+      // warnea; un `"maxLimit": null` explícito da `null` y SÍ warnea.
+      if (
+        schema.maxLimit !== undefined &&
+        !isUsableRegistryMaxLimit(schema.maxLimit)
+      ) {
+        log.warn(
+          {
+            error_code: 'REGISTRY_MAX_LIMIT_INVALID',
+            registry: registry.name,
+            declared: schema.maxLimit,
+          },
+          '[discovery.max-limit-invalid] the registry declared an unusable maxLimit; no clamp was applied',
+        );
+      }
+      // Las DOS mitades hacen falta. Sin `sentLimit < unclamped`, un operador que
+      // baja `DISCOVERY_UPSTREAM_FETCH_LIMIT=10` contra un registry SIN `maxLimit`
+      // dispararía este warn, y eso sería salida observable nueva en un camino
+      // que esta HU se comprometió a dejar intacto (CD-3). La primera mitad es la
+      // que dice que fue el clamp quien bajó el número.
+      if (sentLimit < unclamped && clampFallsBelowComposePoolFloor(sentLimit)) {
+        log.warn(
+          {
+            error_code: 'REGISTRY_MAX_LIMIT_BELOW_COMPOSE_POOL',
+            registry: registry.name,
+            sentLimit,
+          },
+          '[discovery.max-limit-below-pool] the declared ceiling sank this source below the historical /compose pool floor; an agent left out will not hydrate payment.chain',
+        );
+      }
     }
     if (query.maxPrice && schema.maxPriceParam) {
       url.searchParams.set(schema.maxPriceParam, query.maxPrice.toString());
