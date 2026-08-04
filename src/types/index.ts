@@ -146,16 +146,27 @@ export interface RegistrySchema {
      * WKH-318: techo de `limit` que este registro acepta, DECLARADO por el
      * registrante.
      *
-     * ⚠️ **TODAVÍA NO LO LEE NADIE.** El campo existe desde el corte A, pero el
-     * clamp (`min(over-fetch, maxLimit)` en `queryRegistry`) llega recién con el
-     * corte B / W3. Antes decía "cuando está, `queryRegistry` envía..." en
-     * presente, y era falso: `maxLimit` no aparecía en ninguna otra línea de
-     * `src/` (AR MNR-E).
+     * Desde el corte B lo lee `queryRegistry`, y sólo ahí. Las tres ramas:
      *
-     * Consecuencia mientras tanto, y es una TERCERA forma de truncamiento que el
-     * corte A no cubre: si el registro clampea en silencio (le pedimos 200 y nos
-     * da 100 sin cursor), la página no se llena y no hay evidencia de
-     * truncamiento. Eso hoy se reporta `ok`. Lo cierra W3.
+     * · **Declarado y usable** (entero `>= 1`) ⇒ el límite que sale por la red
+     *   es `min(over-fetch, maxLimit)`. Input: `maxLimit: 100` +
+     *   `discover({ limit: 500 })` ⇒ se envía `?limit=100`.
+     * · **Ausente** ⇒ NO se clampea nada, comportamiento byte-idéntico al
+     *   anterior al corte B. No hay default: `100` es el techo de un servidor
+     *   concreto, no un estándar, y aplicarlo a un registro que acepta 1000
+     *   recortaría su pool de ranking en silencio.
+     * · **Declarado e inválido** (`"100"`, `0`, `-5`, `1.5`, `null`, `{}` — la
+     *   columna es `jsonb` y el write-path de `POST /registries` no valida) ⇒
+     *   tampoco se clampea, y se emite `warn REGISTRY_MAX_LIMIT_INVALID`. No
+     *   falla cerrado: con `maxLimit: 0`, mandar `?limit=0` vaciaría el catálogo
+     *   en silencio. `undefined` (ausencia) NO warnea; `null` (declaración
+     *   basura) sí.
+     *
+     * ⚠️ Residual honesto (TD-318B-1): esto NO cierra el truncamiento silencioso
+     * en general, sólo para los registros que declaran el campo. Input que lo
+     * demuestra: un registro SIN `maxLimit` que recibe `limit=200`, devuelve 100
+     * filas y no manda cursor ⇒ `100 < 200` ⇒ `completenessProven = true` ⇒
+     * `state: 'ok'`, exactamente como antes, aunque haya clampeado en silencio.
      */
     maxLimit?: number;
     /**

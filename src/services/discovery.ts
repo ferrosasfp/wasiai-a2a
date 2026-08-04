@@ -9,7 +9,13 @@ import { getRegistryCircuitBreaker } from '../lib/circuit-breaker.js';
 // Fix-pack P1 AR BLQ-BAJO-1: el over-fetch vive en un módulo LEAF porque
 // `services/compose.ts` también necesita el límite del pool y las suites que
 // mockean este service completo dejarían el export en `undefined`.
-import { resolveUpstreamFetchLimit } from '../lib/discovery-fetch-limit.js';
+import {
+  clampToRegistryMaxLimit,
+  isBelowComposePoolFloor,
+  isUsableRegistryMaxLimit,
+  previewDeclaredMaxLimit,
+  resolveUpstreamFetchLimit,
+} from '../lib/discovery-fetch-limit.js';
 // WKH-318: el vocabulario de la honestidad del catálogo vive en un módulo LEAF
 // por la MISMA razón que `discovery-fetch-limit.js` (ver su docstring): las
 // suites que mockean este service completo dejarían un export nuevo en
@@ -1069,10 +1075,58 @@ export const discoveryService = {
     // el mismo bug de clase "esconder agentes" en el path sin `limit`.
     // WKH-318: el límite EFECTIVAMENTE enviado, para poder detectar `page_full`.
     // `undefined` ⇒ no se mandó ninguno (camino sin `limit` del caller, CD-5/CD-8).
+    // WKH-318 corte B: el over-fetch se recorta al techo que el registry DECLARA
+    // (`schema.discovery.maxLimit`). Sin declaración usable no hay clamp, así que
+    // el número que sale por la red es el mismo de antes (CD-3).
     let sentLimit: number | undefined;
     if (query.limit && schema.limitParam) {
-      sentLimit = resolveUpstreamFetchLimit(query.limit);
+      const unclamped = resolveUpstreamFetchLimit(query.limit);
+      sentLimit = clampToRegistryMaxLimit(unclamped, schema.maxLimit);
       url.searchParams.set(schema.limitParam, sentLimit.toString());
+      // `!== undefined` separa "no declaró techo" de "declaró basura", y la
+      // diferencia es observable: un JSON sin la clave da `undefined` y NO
+      // warnea; un `"maxLimit": null` explícito da `null` y SÍ warnea.
+      if (
+        schema.maxLimit !== undefined &&
+        !isUsableRegistryMaxLimit(schema.maxLimit)
+      ) {
+        log.warn(
+          {
+            error_code: 'REGISTRY_MAX_LIMIT_INVALID',
+            registry: registry.name,
+            // AR MNR-4: acotado. Es `jsonb` que un tercero escribe sin validar
+            // y este warn sale por registry Y por query, así que verbatim un
+            // `maxLimit` de ~1 MB se copia al log en cada `/discover?limit=N`
+            // de cualquier caller. `declaredType` es lo que suele explicar el
+            // rechazo; el preview distingue `"100"` de `1.5` de `null` de `{}`.
+            declaredType: typeof schema.maxLimit,
+            declared: previewDeclaredMaxLimit(schema.maxLimit),
+          },
+          '[discovery.max-limit-invalid] the registry declared an unusable maxLimit; no clamp was applied',
+        );
+      }
+      // Las DOS mitades hacen falta, y cada una tiene su test. Sin
+      // `sentLimit < unclamped`, un operador que baja
+      // `DISCOVERY_UPSTREAM_FETCH_LIMIT=10` contra un registry SIN `maxLimit`
+      // dispararía este warn, y eso sería salida observable nueva en un camino
+      // que esta HU se comprometió a dejar intacto (CD-3): lo pinea el 4º
+      // sub-caso de T-CLAMP-02 (mutante MA1). El helper de la derecha sólo sabe
+      // `sent < 50` y no puede conocer la causa, así que la primera mitad es la
+      // que dice que fue el clamp quien bajó el número; lo pinea T-CLAMP-01
+      // (mutante MA2). Los dos mutantes sobrevivían a la suite completa.
+      if (sentLimit < unclamped && isBelowComposePoolFloor(sentLimit)) {
+        log.warn(
+          {
+            error_code: 'REGISTRY_MAX_LIMIT_BELOW_COMPOSE_POOL',
+            registry: registry.name,
+            sentLimit,
+          },
+          // AR MNR-5: el warn se emite en `/discover`, donde no hay nada que
+          // hidratar. Lo que se sabe acá es el número enviado; la consecuencia
+          // es CONDICIONAL a que `/compose` resuelva un agente de esta fuente.
+          '[discovery.max-limit-below-pool] the declared ceiling sank this source below the historical /compose pool floor; if /compose later resolves an agent from this source, one left out of the pool will not hydrate payment.chain',
+        );
+      }
     }
     if (query.maxPrice && schema.maxPriceParam) {
       url.searchParams.set(schema.maxPriceParam, query.maxPrice.toString());
