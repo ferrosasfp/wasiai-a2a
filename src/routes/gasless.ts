@@ -166,6 +166,43 @@ async function gaslessCostEstimatorPreHandler(
 
   // DT-C/DT-D: inyectar para Stage B (requirePaymentOrA2AKey).
   request.gaslessEstimatedCostUsd = estimatedCostUsd;
+
+  // HU-192b: la MISMA cifra, para el OTRO riel.
+  //
+  // `gaslessEstimatedCostUsd` lo lee sólo el débito prepago
+  // (`lib/step0-debit.ts:28-34`). El challenge x402 se arma con
+  // `x402ChallengeAmountUsd` (`middleware/x402.ts:396-399`), que esta ruta no
+  // seteaba: el caller sin agent key caía al default plano de 1 USD
+  // (`middleware/x402.ts:285`) para un transfer de hasta el cap
+  // (`lib/price.ts:58`, hoy 10 USD). Verificado en vivo: un transfer de $5
+  // llamaba `quote(1)`.
+  //
+  // Es la misma cuenta que WKH-59 (arriba) cerró para la agent key —
+  // "debitaba placeholder $1 ignorando el valor real on-chain → drain del
+  // operator wallet"— dejada abierta en x402; y es exactamente el escenario que
+  // `routes/compose.ts:449-460` documenta como el motivo por el que compose tuvo
+  // que inyectar el monto real ("the x402 path has no inbound refund … →
+  // gateway loss + undercharge"). Se copia ESE mecanismo, no se inventa otro.
+  //
+  // POR QUÉ ACÁ Y NO UN REEMBOLSO: en el riel x402 el reembolso no existe y no
+  // puede existir con lo que hay — el cobro entrante es un settle on-chain y no
+  // hay saldo interno que acreditar (`lib/step0-refund.ts:12-15`,
+  // `doc/INTEGRATION.md` §5.1, que ya publica `/gasless/transfer` como no
+  // reembolsable). Por eso el monto tiene que salir BIEN a la primera: cobrar de
+  // menos es pérdida del operador, cobrar de más es plata del caller que no
+  // vuelve. `estimatedCostUsd` es el valor exacto del transfer pedido, así que
+  // no se agrega ningún margen.
+  //
+  // `> 0` espeja `compose.ts:481-495`: nunca se advierte un challenge de 0. Un
+  // `value: '0'` (transfer no-op) queda EXACTAMENTE como hoy — sin inyección,
+  // default plano.
+  //
+  // Inerte para el riel prepago: `x402ChallengeAmountUsd` sólo lo lee
+  // `requirePayment`, al que `requirePaymentOrA2AKey` NO delega cuando hay
+  // credencial (`middleware/a2a-key.ts:1622-1628`).
+  if (estimatedCostUsd > 0) {
+    request.x402ChallengeAmountUsd = estimatedCostUsd;
+  }
 }
 
 /** Motivo del refund — sólo para logs/outbox (auditoría post-mortem). */
