@@ -148,6 +148,14 @@ enviado un límite— se lee como evidencia de completitud: `state: 'ok'`.
 `min(over-fetch, maxLimit)`, la página se llena, y `page_full` marca `truncated`.
 Documentado en el docstring de `RegistrySchema.discovery.maxLimit`.
 
+> **Corrección (corte B, 2026-08-04)**: ese "lo cierra" afirma de más. B-3 queda
+> cerrado **sólo para los registros que declaran `maxLimit`**, no para todos. El
+> input que lo demuestra: un registro **sin** `maxLimit` que recibe `limit=200`,
+> devuelve 100 filas y no manda cursor ⇒ `100 < 200` ⇒ `completenessProven = true`
+> ⇒ `state: 'ok'`, idéntico a antes del corte B. El clamp implementado es
+> estrictamente aditivo y no le impone techo a quien no lo declaró.
+> Ver `doc/sdd/218-wkh-318-corte-b-maxlimit-clamp/` y **TD-318B-1**.
+
 ---
 
 ## B-4 — Precondición de deploy, no comentario en un SQL
