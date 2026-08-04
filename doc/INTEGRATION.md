@@ -293,10 +293,10 @@ the whole catalogue instead of the one agent that serves it. Discovery is the fr
 call where you decide who to pay, so a parameter ignored here is paid for on the
 next call.
 
-> The key is echoed back **truncated at 64 characters**, and the message says so
-> along with the length you sent. Legitimate parameter names are far shorter than
-> that (the longest one accepted, `includeInactive`, is 15 characters), so this
-> only affects keys built to make the error response large.
+> The key is echoed back **truncated at 64 UTF-16 code units**, and the message
+> says so along with the length you sent, in the same unit. Legitimate parameter
+> names are far shorter than that (the longest one accepted, `includeInactive`,
+> is 15), so this only affects keys built to make the error response large.
 
 **`minReputation`** filters on the **gateway-computed off-chain score**
 (`agent.computedReputation.score`), scale **0-100** — derived from tasks the agent

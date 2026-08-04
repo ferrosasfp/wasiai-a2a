@@ -218,13 +218,23 @@ export const ALLOWED_DISCOVER_PARAMS: ReadonlySet<string> = new Set([
  *
  * El nombre lo elige el caller: en un `POST /discover` una clave JSON puede
  * medir cientos de KB, porque `src/index.ts` construye Fastify sin `bodyLimit`
- * y el default son 1 MiB. Sin cota, el cuerpo del 400 crecía con el input del
- * atacante: amplificación ~1x hacia la respuesta y, sobre todo, una línea de
- * log del tamaño del ataque por cada request.
+ * y el default son 1 MiB. Sin cota, **el cuerpo del 400 crecía con el input del
+ * atacante** (amplificación ~1x hacia la respuesta). Eso, y sólo eso, es lo que
+ * esta cota resuelve; está medido en `T-R35`/`T-R35b`.
+ *
+ * Lo que esta cota NO hace, para que nadie lo lea como cerrado (AR-2 MNR-1):
+ * en `GET /discover?<nombre gigante>=1` el logger de Fastify (`src/index.ts:95`)
+ * escribe `req.url` **completo**, con el nombre adentro, antes de llegar acá. La
+ * cota vive en la respuesta, no en el request, así que esa línea de log sigue
+ * creciendo con el input. Deuda con nombre: **TD-322-4** (`sdd.md`).
+ * En POST no hay línea equivalente: el 400 sale por `reply.send()` sin log
+ * (`routes/discover.ts:89-102`), un `reply.send()` no dispara el
+ * `setErrorHandler` (`middleware/error-boundary.ts:72`) y `event-tracking.ts:117`
+ * persiste `url.split('?')[0]`, o sea sin query string.
  *
  * 64 es holgado para todo nombre legítimo: el más largo de la allowlist es
- * `includeInactive`, de 15 caracteres, y el 400 existe para que el caller
- * reconozca su typo — a los 64 caracteres ya lo reconoció.
+ * `includeInactive`, de 15 unidades, y el 400 existe para que el caller
+ * reconozca su typo — a las 64 unidades ya lo reconoció.
  */
 export const MAX_ECHOED_PARAM_NAME_LENGTH = 64;
 
@@ -244,11 +254,21 @@ export const MAX_ECHOED_PARAM_NAME_LENGTH = 64;
  * El nombre completo sigue disponible en la propiedad `received` de la
  * excepción, que NO viaja al caller: la ruta manda sólo `message` y `code`
  * (`discover.ts:98`).
+ *
+ * La unidad es la **unidad UTF-16**, y el mensaje lo dice con esa palabra
+ * (AR-2 MNR-4): `String#length` cuenta unidades, no caracteres — 40 emojis dan
+ * `length === 80`, y anunciar "80 characters" erosiona justo la distinción que
+ * este anuncio existe para dar. El corte, en cambio, respeta el par suplente:
+ * `slice(0, 64)` a secas puede dejar un suplente alto suelto y devolver un
+ * string mal formado.
  */
 function describeReceivedParamName(received: unknown): string {
   const name = String(received);
   if (name.length <= MAX_ECHOED_PARAM_NAME_LENGTH) return `'${name}'`;
-  return `'${name.slice(0, MAX_ECHOED_PARAM_NAME_LENGTH)}' (truncated; the name sent was ${name.length} characters long)`;
+  let cut = name.slice(0, MAX_ECHOED_PARAM_NAME_LENGTH);
+  const lastUnit = cut.charCodeAt(cut.length - 1);
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) cut = cut.slice(0, -1);
+  return `'${cut}' (truncated; the name sent was ${name.length} UTF-16 code units long)`;
 }
 
 /**

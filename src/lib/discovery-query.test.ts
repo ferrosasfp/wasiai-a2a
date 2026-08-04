@@ -325,7 +325,9 @@ describe('WKH-322 · assertKnownDiscoverParams', () => {
   it('T-U9 (AR MNR-4): el eco del nombre está acotado — una clave enorme no vuelve entera', () => {
     // El nombre lo elige el caller y `POST /discover` acepta hasta 1 MiB de
     // body (Fastify sin `bodyLimit`). Sin cota, una clave de 100 KB devolvía un
-    // 400 de 100 KB y escribía una línea de log del tamaño del ataque.
+    // 400 de 100 KB. Eso es lo único que la cota resuelve: en POST nadie loguea
+    // el body, y en GET el `req.url` que Fastify sí loguea entero queda fuera
+    // de su alcance (TD-322-4). Ver el JSDoc de `MAX_ECHOED_PARAM_NAME_LENGTH`.
     const huge = 'a'.repeat(100_000);
     try {
       assertKnownDiscoverParams({ [huge]: '1' });
@@ -357,7 +359,31 @@ describe('WKH-322 · assertKnownDiscoverParams', () => {
     } catch (err) {
       const msg = (err as UnknownDiscoverParamError).message;
       expect(msg).toContain('truncated');
-      expect(msg).toContain('100000 characters');
+      expect(msg).toContain('100000 UTF-16 code units');
+    }
+  });
+
+  it('T-U9c (AR-2 MNR-4): el corte no parte un par suplente', () => {
+    // `slice(0, 64)` a secas corta por unidad UTF-16: si la unidad 64 es la
+    // mitad alta de un emoji, el eco queda con un suplente suelto y el string
+    // sale mal formado. No rompe nada visible (`JSON.stringify` lo escapa),
+    // pero el propósito declarado del eco es que el caller RECONOZCA su typo, y
+    // un `\ud83d` colgando no ayuda a eso.
+    const name = `${'a'.repeat(63)}😀${'b'.repeat(50)}`;
+    try {
+      assertKnownDiscoverParams({ [name]: '1' });
+      expect.unreachable('debía lanzar');
+    } catch (err) {
+      const msg = (err as UnknownDiscoverParamError).message;
+      // `String#isWellFormed` es ES2024 y el target del repo es ES2022, así que
+      // la propiedad se afirma directo: ningún suplente suelto en el mensaje.
+      const LONE_SURROGATE =
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+      expect(LONE_SURROGATE.test(msg)).toBe(false);
+      // El emoji entero no entra (empieza en la unidad 64 y mide 2), así que se
+      // cae completo: 63 'a' y nada más adentro de las comillas.
+      expect(msg).toContain(`'${'a'.repeat(63)}'`);
+      expect(msg).toContain('truncated');
     }
   });
 

@@ -808,7 +808,7 @@ describe('WKH-322 · min_reputation y UNKNOWN_DISCOVER_PARAM', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().code).toBe('UNKNOWN_DISCOVER_PARAM');
     expect(res.body.length).toBeLessThan(1000);
-    expect(res.json().error).toContain('5000 characters');
+    expect(res.json().error).toContain('5000 UTF-16 code units');
     expect(mockDiscover).not.toHaveBeenCalled();
   });
 
