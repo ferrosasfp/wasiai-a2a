@@ -168,9 +168,24 @@ export function parseAllowTrial(raw: unknown): boolean | undefined {
  * validación: cada nombre nuevo hay que mantenerlo, documentarlo y testearlo
  * mientras exista la API.
  *
- * El orden de declaración es alfabético (case-insensitive) porque el mensaje del
- * 400 se construye uniendo este Set, y un `Set` de JS itera en orden de
+ * ⚠️ Y hay que tocar OTROS TRES lugares, porque nada los ata mecánicamente a
+ * este Set (CR MNR-3): los tipos `Querystring` y `Body` de `routes/discover.ts`,
+ * y la tabla de parámetros de `doc/INTEGRATION.md`. Los dos modos de falla NO
+ * son simétricos: agregarla al tipo y olvidarla acá da un 400 ruidoso que se
+ * descubre solo; agregarla ACÁ y olvidarse del resto hace que la ruta la acepte
+ * y **nadie la lea** — 200 sin efecto, la clase de bug de WKH-322 reintroducida
+ * por la puerta de atrás. Ningún test lo caza: `T-R30` enumera a mano a
+ * propósito (CD-10), así que una clave nueva en este Set no pone nada en rojo.
+ *
+ * El orden de declaración es FIJO — el del contrato de W0.3 — porque el mensaje
+ * del 400 se construye uniendo este Set, y un `Set` de JS itera en orden de
  * inserción: reordenar acá cambia el mensaje que ve el caller.
+ *
+ * Es *aproximadamente* alfabético, no alfabético (CR MNR-1): `minReputation` va
+ * antes que `min_reputation`, y `sort()` los pone al revés — `'_'` (0x5F) es
+ * menor que `'r'` (0x72), tanto en ASCII case-insensitive como con
+ * `localeCompare(…, { sensitivity: 'base' })`. Están en ese orden a propósito,
+ * para que el nombre canónico se lea primero y el alias después.
  *
  * Por qué está `min_reputation` y por qué NO están `capability` ni `query`:
  * - `min_reputation` YA es contrato público de esta misma API en otra superficie

@@ -812,6 +812,30 @@ describe('WKH-322 · min_reputation y UNKNOWN_DISCOVER_PARAM', () => {
     expect(mockDiscover).not.toHaveBeenCalled();
   });
 
+  it('T-R32c (CR MNR-2): POST con body PRIMITIVO → 400 INVALID_DISCOVER_BODY, no 200 con el catálogo', async () => {
+    // La guarda de `toDiscoverParamBag` tiene dos mitades y sólo la del array
+    // estaba testeada (T-R32). Mutante que sobrevivía: cambiar
+    // `typeof raw !== 'object' || Array.isArray(raw)` por `Array.isArray(raw)`.
+    // Con `5`, `Object.keys(5)` es `[]` ⇒ ninguna clave desconocida ⇒ **200 con
+    // el catálogo entero**, que es exactamente la clase de bug que esta HU
+    // existe para matar. Con `"ab"`, `Object.keys('ab')` es `['0','1']` ⇒
+    // `unknown parameter '0'`, que es lo que DT-9 existe para evitar.
+    // `doc/INTEGRATION.md:762` ya publica el comportamiento para primitivos.
+    for (const payload of ['5', '"ab"', 'true']) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/discover',
+        headers: { 'content-type': 'application/json' },
+        payload,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVALID_DISCOVER_BODY');
+      expect(res.json().error).not.toContain("'0'");
+      expect(mockDiscover).not.toHaveBeenCalled();
+    }
+  });
+
   it('T-R32b (DT-9): POST con body `{}` sigue dando 200 (pin de discover.test.ts)', async () => {
     const res = await app.inject({
       method: 'POST',
