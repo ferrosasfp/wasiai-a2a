@@ -246,3 +246,110 @@ No todo lo señalado entra. Queda escrito para que nadie lo lea después como ol
   "Respuesta".
 - **Aplicar en**: ediciones dentro de bloques de documentación largos. Conviene
   anclar al final de la sección, no a la línea recién escrita.
+
+---
+
+## Fix-pack 3 (AR-3) — el candado prometía una cobertura que no tenía
+
+### [2026-08-04 03:20] Fix-pack 3 — LA LECCIÓN DE LA RONDA: un mecanismo se prueba por lo que NO caza
+- **Error**: el barrido de call-sites que se construyó en el fix-pack 2 para
+  "cerrar la clase" declaraba **un solo límite** ("claves construidas en
+  runtime") y tenía **nueve**. AR-3 plantó 15 formas distintas de mandar un
+  parámetro a `/discover` y **cinco con clave literal y estática pasaron mudas**:
+  `new URLSearchParams({query})`, `new URLSearchParams([['query',…]])`,
+  `axios.get(…,{params:{query}})`, `'/discover' + '?query=' + v` y un fixture
+  `.json` con `"body": {"query": …}`. Ninguna estaba declarada.
+- **Causa raíz**: yo verifiqué el mecanismo contra **el repo real**, o sea contra
+  las formas que alguien ya había escrito. Eso mide lo que el extractor caza, no
+  lo que deja pasar. Un barrido que pasa en verde sobre un repo que no tiene la
+  forma peligrosa **no dice nada sobre esa forma**, y sin embargo se lee igual
+  que una verificación.
+- **Por qué importa aunque no hubiera bug vivo**: ninguna de las 5 formas existe
+  hoy en el repo. El daño no es un call-site roto: es que "QUÉ NO CUBRE" existe
+  para decirle al revisor siguiente **qué le queda por buscar a mano**. Diciendo
+  que la única grieta es runtime, AR-4 no busca `URLSearchParams` y el onceavo
+  call-site entra justo por ahí. Es la clase que esta HU vino a matar,
+  reencarnada una capa más afuera — y es la misma familia que
+  "prosa que afirma de más apaga las revisiones".
+- **Fix**: (a) enseñarle 4 de las formas medidas; (b) declarar las otras con su
+  **fixture en `T-CS-4`**, que le entra a `scanFile` directo — si algún día
+  alguien le enseña una forma declarada como límite, ESE test se pone rojo y
+  obliga a actualizar la lista. El acoplamiento entre la prosa y el
+  comportamiento es lo que faltaba; (c) escribir explícito que el barrido **no
+  sustituye la búsqueda** frente a una forma nueva.
+- **Aplicar en**: todo guard, lint, scanner o invariante nuevo. **Antes de
+  declarar su alcance, plantar a propósito una docena de variantes y medir cuáles
+  pasan mudas.** La lista de límites se escribe con esa medición, no con lo que
+  uno recuerda haber programado. Y ningún ítem de esa lista vale si no tiene un
+  caso que lo congele.
+
+### [2026-08-04 03:05] Fix-pack 3 — "¿leí algo?" no es "¿leí todo?"
+- **Error**: `T-CS-3` existe textualmente para que "no sé qué manda este
+  call-site" salga rojo. Pero `hasBody` era un booleano y `topLevelKeys` salteaba
+  el spread en silencio, así que
+  `body: JSON.stringify({ ...extraFilters, limit: 5 })` salía **VERDE** con un
+  solo hit (`limit`) y el `query` real no aparecía ni como hit ni como rojo.
+- **Causa raíz**: un extractor parcial que devuelve una lista no distingue "esta
+  es la lista completa" de "esto es lo que pude leer". El consumidor asume lo
+  primero. El silencio se cuela por el punto donde el mecanismo sabe **a medias**,
+  que es peor que donde no sabe nada, porque ahí sí aplaude.
+- **Fix**: `topLevelKeys` devuelve `{ keys, unresolved }` y un literal con algo
+  sin resolver adentro **deja de contar como body leído**. `OpaquePost` gana
+  `reason: 'no-body' | 'partial-body'`.
+- **Aplicar en**: cualquier parser/extractor parcial cuyo resultado alimente una
+  decisión de "está cubierto". El tipo de retorno tiene que poder decir "incompleto".
+  Un `string[]` ya perdió esa información — es el mismo patrón que
+  "un `boolean` ya perdió el tercer valor" del money-path.
+
+### [2026-08-04 03:14] Fix-pack 3 — casi tapo el call-site que me pedían destapar
+- **Error**: al empezar a barrer los archivos gitignoreados apareció un falso
+  positivo (`smoke-prod-via-app-wasiai.mjs:71`, el payload x402 reportado como
+  parámetro de `/discover`). Mi primer arreglo fue "un body sólo cuenta si hay un
+  `fetch(`/`http.post(` cerca". Puso el barrido en verde.
+- **Causa raíz**: el verde. El arreglo escondía **también**
+  `smoke-base-downstream.mjs:116`, que manda su body por un helper propio
+  (`api(path, { body })`) y por lo tanto no tiene ninguna construcción de request
+  al lado. O sea: el arreglo tapaba justo el call-site que `BLQ-BAJO-3` pedía
+  destapar, y la suite no lo habría dicho nunca.
+- **Cómo lo detecté**: porque re-corrí **la reproducción del AR** (cambiar
+  `{ q: GOAL }` por `{ query: GOAL }` y exigir rojo) DESPUÉS de mi arreglo, no
+  sólo antes. El test propio pasaba; el que fallaba era el del adversario.
+- **Fix**: descartar ese enfoque y usar otro discriminante — una mención al
+  endpoint dentro de un **comentario** ya no abre ventana (sí sigue contando para
+  la atribución). Queda escrito en el código por qué el otro camino se descartó,
+  para que no se vuelva a intentar.
+- **Aplicar en**: cuando un arreglo pone algo en verde, re-correr **la
+  reproducción del hallazgo**, no la suite. Un fix que hace desaparecer el
+  síntoma tiene dos explicaciones posibles y sólo una es buena.
+
+### [2026-08-04 03:10] Fix-pack 3 — 377 tests verdes que no corría nadie
+- **Error**: los tres tests de regresión que yo mismo escribí en el fix-pack 2
+  para fijar un BLOQUEANTE (`mcp-servers/wasiai-x402/tests/tools.test.mjs`) no
+  los ejecutaba ningún runner. Medido: borrar el fix de `handlers.mjs` dejaba CI
+  **verde**. La búsqueda destapó un segundo sub-árbol igual: `packages/agent-sdk`.
+- **Causa raíz**: escribí el test en el directorio del código que arreglé y di
+  por sentado que "los tests corren". El `include` de `vitest.config.ts` es
+  `src/**` + `test/**`; nadie nombraba `mcp-servers` ni `packages`.
+- **Fix**: el step de CI para los dos sub-paquetes **y** un guardián
+  (`test/test-files-are-run-in-ci.test.ts`) que descubre los runners leyendo los
+  workflows y se pone rojo si aparece un `*.test.*` fuera del alcance de todos.
+  Las dos cosas: el step arregla los casos de hoy, el guardián cierra la clase —
+  y sin el step el guardián nace rojo y se termina exceptuando.
+- **Aplicar en**: al escribir un test en un directorio nuevo, **verificar que el
+  runner lo colecta** (correr el comando de CI, no el del IDE) antes de darlo por
+  protección. Una suite huérfana se lee igual que una suite que pasa.
+
+### [2026-08-04 03:24] Fix-pack 3 — extensión de alcance declarada (`docs/api-reference.md`)
+- **Qué**: se corrigió `docs/api-reference.md:99`, que publicaba `minReputation`
+  con escala `[0,1]` cuando el código valida `[0,100]`, y se agregaron a esa
+  tabla `min_reputation` y `allowTrial`, que faltaban. El archivo es preexistente
+  en `main` y estaba **fuera del Scope IN**.
+- **Por qué se metió igual**: son 2 líneas; esta misma HU ya corrigió la MISMA
+  mentira dos veces en otros dos archivos; y el docstring del guard declara que
+  `docs/**` "SÍ se verifica" porque una doc que publique un parámetro inexistente
+  es el mismo bug escrito en prosa (sólo que el barrido lo daba por verificado
+  mirando las CLAVES, no las escalas). Dejar viva una mentira pública **ya
+  conocida** para preservar la pureza del scope es peor negocio que ampliarlo.
+- **Aplicar en**: la extensión de alcance se declara, no se camufla. Si un
+  hallazgo preexistente es de la misma clase que la HU y cuesta dos líneas,
+  arreglarlo y anotarlo acá; si cuesta más, abrir deuda con nombre.
