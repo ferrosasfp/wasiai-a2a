@@ -243,8 +243,17 @@ export const MAX_ECHOED_PARAM_NAME_LENGTH = 64;
  * `MAX_ECHOED_PARAM_NAME_LENGTH`.
  *
  * Devuelve el fragmento entrecomillado completo, y no sólo el nombre, para que
- * la nota de truncado quede FUERA de las comillas: adentro, un caller (o un
- * grep) no podría distinguir el nombre de la anotación del server.
+ * la nota de truncado quede FUERA de las comillas: adentro, la anotación del
+ * server se leería como parte del nombre que mandó el caller.
+ *
+ * ⚠️ LAS COMILLAS NO SON UN ESCAPE, y la distinción es POSICIONAL, no
+ * delimitadora (AR-3 `MNR-2`): el nombre lo elige el caller, así que puede traer
+ * un `'` adentro. Con la clave `a'` + 80 caracteres, el mensaje sale
+ * `unknown parameter 'a'…bbb' (truncated; …)` y un grep no puede recortar el
+ * nombre por las comillas. No hay inyección — el JSON de la respuesta escapa
+ * bien y `received` no viaja al caller —; lo que NO se puede prometer es que las
+ * comillas delimiten. Quien necesite el nombre exacto tiene que leer el JSON,
+ * no parsear la prosa del `message`.
  *
  * Cuando trunca lo DICE, con el largo original: un caller cuyo nombre real mide
  * 200 caracteres tiene que poder distinguir "me lo recortaron" de "el server
