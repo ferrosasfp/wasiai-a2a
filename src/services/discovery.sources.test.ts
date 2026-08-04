@@ -513,8 +513,8 @@ describe('WKH-318 — honestidad de `registries` / `sources` / `catalogStatus`',
    * Imita el contrato MEDIDO de `wasiai-v2` el 2026-08-04:
    * `?limit<=100` ⇒ 200 + catálogo; `?limit>100` ⇒ 400.
    *
-   * El 400 va pelado a propósito: `discovery.ts:1115-1117` lanza
-   * `RegistryHttpError` ANTES del `await response.json()` de `:1119`, así que el
+   * El 400 va pelado a propósito: `discovery.ts:1162-1164` lanza
+   * `RegistryHttpError` ANTES del `await response.json()` de `:1166`, así que el
    * body de la respuesta de error nunca se lee ni llega a `sources[]`.
    */
   function serveWithCeilingOf100(rows: Record<string, unknown>[]): {

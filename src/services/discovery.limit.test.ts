@@ -19,7 +19,7 @@ import type { RegistryConfig } from '../types/index.js';
 
 // WKH-318 corte B: el factory anterior (`() => ({ warn: vi.fn(), ... })`) creaba
 // un objeto NUEVO en cada llamada, así que el test no podía alcanzar el `vi.fn()`
-// que `discovery.ts:63` capturó al importar. Patrón hoisted, exemplar
+// que `discovery.ts:68` capturó al importar. Patrón hoisted, exemplar
 // `compose.test.ts:17-23`. `vi.clearAllMocks()` del beforeEach lo limpia.
 const logSpy = vi.hoisted(() => ({
   error: vi.fn(),

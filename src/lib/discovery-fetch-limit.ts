@@ -34,8 +34,8 @@
  * `truncated`/`page_full` en `sources[]`", y eso es cierto **sólo cuando el
  * registry no declaró un cursor**. Si declaró `nextCursorPath` y contesta la
  * clave en nulo, su declaración exacta gana sobre la heurística de página llena
- * (`discovery.ts:1216-1221` pone `completenessProven` y cortocircuita el
- * `page_full` de `:1224`) y el recorte sale MUDO. Input medido: registry con
+ * (`discovery.ts:1223-1227` pone `completenessProven` y cortocircuita el
+ * `page_full` de `:1231`) y el recorte sale MUDO. Input medido: registry con
  * `{limitParam, maxLimit:100, nextCursorPath:'next', agentsPath:'agents'}`, 300
  * filas upstream, `discover({limit:500})` ⇒ se envían 100, llegan 100 con
  * `next: null` ⇒ `state:'ok'`, `truncationEvidence: undefined`, `rows:100`,
@@ -80,9 +80,9 @@ export function resolveUpstreamFetchLimit(pageLimit: number): number {
  *
  * El parámetro es `unknown` A PROPÓSITO, aunque
  * `RegistrySchema.discovery.maxLimit` esté tipado `number | undefined`
- * (`types/index.ts:160`). El valor viene de una columna `jsonb` que
+ * (`types/index.ts:171`). El valor viene de una columna `jsonb` que
  * `services/registry.ts:92` asigna directo (`schema: row.schema`) con un
- * `as unknown as` acotado (`:153-155`), y el write-path NO valida: `POST
+ * `as unknown as` acotado (`:155`), y el write-path NO valida: `POST
  * /registries` sólo chequea la PRESENCIA de `schema` (`routes/registries.ts:69`)
  * y lo guarda tal cual (`:251`), sin `zod` ni equivalente. En runtime esto puede
  * llegar como `"100"`, `0`, `-5`, `1.5`, `null` o `{}`. Tipar el parámetro
@@ -168,14 +168,14 @@ export function clampToRegistryMaxLimit(
  *
  * o sea, en la práctica: **una** sola fuente contribuyente con `limitParam`
  * declarado. Por qué:
- *   · El fetch es POR REGISTRY pero el `slice` es GLOBAL: `discovery.ts:293`
+ *   · El fetch es POR REGISTRY pero el `slice` es GLOBAL: `discovery.ts:417-420`
  *     concatena las filas de todos los registries + las self-published locales, y
- *     `discovery.ts:399` corta `slice(0, query.limit)` sobre el TOTAL. Con N
+ *     `discovery.ts:643` corta `slice(0, query.limit)` sobre el TOTAL. Con N
  *     fuentes el fetch puede traer 200·N filas y el slice conserva 200 ⇒ el slice
  *     SÍ descarta candidatos que el fetch trajo, y el ranking (verified-first →
  *     reputación desc → precio asc) decide cuáles.
- *   · `limitParam` es OPCIONAL (`types/index.ts:134`) y el gate es
- *     `query.limit && schema.limitParam` (`discovery.ts:509`): un registry sin
+ *   · `limitParam` es OPCIONAL (`types/index.ts:138`) y el gate es
+ *     `query.limit && schema.limitParam` (`discovery.ts:1081`): un registry sin
  *     `limitParam` — creable por cualquier caller vía `POST /registries` —
  *     devuelve su paginación default y para esa fuente la alineación no existe.
  *

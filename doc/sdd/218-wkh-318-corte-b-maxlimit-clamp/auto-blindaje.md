@@ -92,6 +92,30 @@ implementación y lo que los corta la próxima vez.
 
 ---
 
+### [2026-08-04] Fix-pack — Los punteros `archivo:línea` los corrió mi propio commit
+
+- **Error**: 5 punteros nacieron correctos contra el árbol de F1/F2 y quedaron
+  falsos por las líneas que **esta misma HU** agregó más arriba en los archivos
+  apuntados (`types/index.ts:160`→`171`, `discovery.ts:63`→`68` ×2,
+  `:1115-1117`→`:1162-1164`). Los cazó el CR (M-4).
+- **Causa raíz**: escribí el puntero mirando el archivo en el momento de
+  escribirlo, no en el estado final de la rama. Un puntero es prosa falsable y
+  el `+40` de mi propio W1 lo falsificó.
+- **Fix**: los 5 re-anclados y **verificados uno por uno con `grep -n`** en el
+  árbol de este commit (no en el de HEAD anterior: el fix-pack volvió a mover
+  `discovery.ts`, así que los 3 punteros que escribí HOY en la corrección de
+  BLQ-BAJO-1 también hubo que re-medirlos).
+- **Aplicar en**: cualquier HU que cite `archivo:línea` de un archivo que ella
+  misma modifica. Re-verificar en el ÚLTIMO commit de la rama, con `grep -n` del
+  símbolo apuntado, no del número. Corolario medido: 4 punteros más de este
+  módulo (`discovery.ts:293/399/509`, `types/index.ts:134`) ya estaban corridos
+  **en `main`** por HUs anteriores — `git show main:<archivo> | sed -n '<N>p'`
+  lo prueba —, así que la deriva no se arregla una vez: se arregla cada vez que
+  se toca el archivo. Se re-anclaron acá también (`:417-420`, `:643`, `:1081`,
+  `:138`).
+
+---
+
 ### [2026-08-04] Fix-pack — Un nombre que afirma la causa invita a borrar el guard
 
 - **Error**: llamé al helper `clampFallsBelowComposePoolFloor(sent)` cuando su
@@ -136,8 +160,8 @@ para que la próxima HU que toque estos archivos no las redescubra.
   mimic de techo necesita un helper local sobre
   `mockFetch.mockImplementation((url) => ...)`. `serveByHost` **no se toca**: lo
   usan T-SRC-01..13.
-- El body de un `400` **nunca se lee**: `discovery.ts:1115-1117` lanza
-  `RegistryHttpError` antes del `await response.json()` de `:1119`. Un mimic puede
+- El body de un `400` **nunca se lee**: `discovery.ts:1162-1164` lanza
+  `RegistryHttpError` antes del `await response.json()` de `:1166`. Un mimic puede
   devolver `{ ok: false, status: 400 }` pelado, y **no** se puede afirmar nada
   sobre el mensaje de error del registry porque no llega a `sources[]`.
 - El mock de logger inline (`getLogger: () => ({ warn: vi.fn() })`) crea un objeto

@@ -28,7 +28,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RegistryConfig } from '../types/index.js';
 
 // WKH-318 corte B: el factory anterior devolvía un objeto NUEVO por llamada, así
-// que el `vi.fn()` que `discovery.ts:63` capturó era inalcanzable desde el test.
+// que el `vi.fn()` que `discovery.ts:68` capturó era inalcanzable desde el test.
 // Patrón hoisted, exemplar `compose.test.ts:17-23`.
 const logSpy = vi.hoisted(() => ({
   error: vi.fn(),
