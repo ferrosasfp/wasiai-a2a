@@ -33,7 +33,7 @@ One asymmetry is better read early than discovered against a `400`: Solana is to
 
 ## Discovery by capability
 
-The whole catalog is public and costs nothing to query.
+The whole catalog is public and costs nothing to query. **Unrecognized parameters are rejected with `400 UNKNOWN_DISCOVER_PARAM`** — this prevents misspelled filters (e.g. `capability` instead of `capabilities`) from silently matching everything.
 
 ```bash
 GW=https://wasiai-a2a-production.up.railway.app
@@ -46,6 +46,8 @@ curl -s "$GW/discover?capabilities=price-feed" | jq '.agents[] | {slug, priceUsd
 ```
 
 The first one was published straight against the gateway (`registry: "self-published"`) and charges on Solana; the second lives in a registered external marketplace (`registry: "WasiAI"`) and charges on Avalanche. The client doing the query cannot tell one from the other and does not have to know which network each one charges on, and that indistinguishability is the point: federation, and the chain, are transparent to the consumer.
+
+**Catalog completeness and `limit`.** Without a `limit` parameter, the gateway does not tell each registry how many rows to return, so registries use their own default (often 20). With `limit=50` the gateway enforces the ceiling each registry publishes (`maxResultLimit`), so you get more agents. Measured on 2026-08-04: `/discover` without limit returns 23 agents (`catalogStatus: truncated`), and `/discover?limit=50` returns 25 agents (`catalogStatus: complete`). Always specify a `limit` when querying for filtering or capability selection, especially for `/orchestrate/plan`.
 
 Every agent returned by `/discover` carries an `invokeUrl`, but it is an internal reference. **The caller does not call the agent directly.** It invokes through `/compose` (explicit pipeline) or `/orchestrate` (by goal, with the plan built by an LLM). That is what lets the gateway resolve price, budget, scoping and settlement in a single place instead of leaving it to each client.
 
@@ -142,20 +144,25 @@ Rows below are in product order; the endpoint itself returns Kite first, because
 
 The three EVM rows are checked by sending `x-payment-chain` to `POST /compose` with no payment: the `402` comes back with `eip155:2368`, `eip155:43113` or `eip155:84532` and the amount in that network token's decimals. The Solana row is checked the other way around, and that is its nature: the same request with `x-payment-chain: solana-devnet` returns `400 CHAIN_INBOUND_PAYMENT_UNSUPPORTED`, because it pays outbound and does not charge inbound.
 
+Catalog discovery parameters (WKH-322): `/discover` now rejects unrecognized keys with `400 UNKNOWN_DISCOVER_PARAM`, listing the accepted ones. This prevents misspelled filters from silently matching the entire catalog. The accepted parameters are `allowTrial`, `capabilities`, `includeInactive`, `limit`, `maxPrice`, `minReputation`, `min_reputation`, `q`, `registry`, `verified`. The `min_reputation` alias was added so a single spelling works on both `/discover` and the `constraints` of `/compose`.
+
 **No mainnet is initialized in today's deployment.** The mainnet adapters exist and there were real settlements on Avalanche C-Chain in April 2026 (see [On-chain evidence](#on-chain-evidence)), but the gateway that is up right now runs testnet and devnet, with no real money.
 
-Catalog state on that same deployment: 23 discoverable agents (measured on 2026-07-31 against `GET /discover`), coming from one federated marketplace plus the ones published directly against the gateway. Two of them charge on Solana devnet: the remittance-line agents that declare a charging chain. The agents themselves do not live in this repo: this repo is the protocol and the gateway, and the catalog belongs to third parties.
+Catalog state on that same deployment: discoverable agents come from one federated marketplace plus the ones published directly against the gateway. Two of them charge on Solana devnet: the remittance-line agents that declare a charging chain. The agents themselves do not live in this repo: this repo is the protocol and the gateway, and the catalog belongs to third parties.
 
-That `23` is not a rounded number, and the endpoint that returns it says how much it trusts itself. The same response carries `catalogStatus` and a per-source breakdown; on 2026-07-31 it read:
+**The catalog size depends on whether you ask for a limit.** Without a limit, `/discover` returns 23 agents and `catalogStatus: truncated` (measured 2026-08-04). With `limit=50` the same endpoint returns 25 agents and `catalogStatus: complete`. This is not a data inconsistency: the federated registry publishes a ceiling for how many it will return in a single call, and when no limit is specified the gateway does not pass one downstream, so the registry returns its default page (20 rows). The same query with an explicit `limit` tells the registry "I want N rows, up to your published maximum", and the registry returns more. The response always carries a `catalogStatus` and a per-source breakdown:
 
 ```bash
-curl -s "$GW/capabilities" | jq '{catalogStatus, sources}'
-# "catalogStatus": "truncated"
-# "sources": [ {"name":"WasiAI","state":"truncated","rows":20,"truncationEvidence":"cursor"},
-#              {"name":"self-published","state":"ok","rows":3} ]
+curl -s "$GW/discover" | jq '{catalogStatus, total: .total}'
+# "catalogStatus": "truncated", "total": 23
+
+curl -s "$GW/discover?limit=50" | jq '{catalogStatus, total: .total}'
+# "catalogStatus": "complete", "total": 25
 ```
 
-Read out loud: the federated marketplace returned 20 rows and left a non-empty cursor, so it proved there are more it did not send; the 3 published directly against the gateway are proven complete. A source is only `ok` with evidence, either an exhausted cursor or fewer rows than the limit it was sent; one that answers without either is `unverified`, and one that could not be reached is `failed` with `rows: null` instead of `rows: 0`, because "I could not ask" is not "it has none". Same for the roll-up: `complete` means every source proved it gave everything, not that nobody complained. The catalog would rather declare that it may be incomplete than publish a total it cannot back, which is also why that number can move without anything being broken.
+A source is only `ok` with evidence (an exhausted cursor or fewer rows than the limit it was sent); one that answers without either is `unverified`, and one that could not be reached is `failed` with `rows: null` instead of `rows: 0`, because "I could not ask" is not "it has none". Same for the roll-up: `complete` means every source proved it gave everything, not that nobody complained. The catalog would rather declare that it may be incomplete than publish a total it cannot back, which is also why that number can move without anything being broken.
+
+**Known limitations in discovery:** The pagination API accepts `limit` but does not yet support cursor-based continuation; `/discover?limit=50` returns the first 50 matches with no way to ask for the rest. Without a `limit` parameter, the gateway does not send one to the registry, so the registry returns its default page size (often 20), leaving the catalog more truncated than a user who specifies a limit would see. A registry outage and a client validation error (e.g. malformed `minReputation`) are both reported as `http_error` in telemetry, with no distinction. Self-published agents have `status: 'active'` hardcoded in discovery and cannot be marked inactive by their publisher.
 
 About the apps that consume it, in the correct tense:
 
