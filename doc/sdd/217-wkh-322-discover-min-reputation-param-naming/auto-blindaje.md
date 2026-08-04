@@ -365,3 +365,45 @@ No todo lo señalado entra. Queda escrito para que nadie lo lea después como ol
 - **Aplicar en**: la extensión de alcance se declara, no se camufla. Si un
   hallazgo preexistente es de la misma clase que la HU y cuesta dos líneas,
   arreglarlo y anotarlo acá; si cuesta más, abrir deuda con nombre.
+
+### [2026-08-04 04:00] Fix-pack 4 — cada mecanismo declaró más cobertura de la que tenía
+- **Error**: el guardián de CI que escribí en el fix-pack 3
+  (`test/test-files-are-run-in-ci.test.ts`) prometía traducir cada step a "los
+  globs que **realmente** se expanden" y declaraba UN límite. AR-4 midió tres
+  vectores, los tres verdes: agregar un `*.test.ts` al `exclude` de
+  `vitest.config.ts` (la suite bajaba de 4987 a 4961 tests, guardián en verde),
+  un `if:` que nunca resuelve true, y un `continue-on-error: true`. Los tres
+  dejaban 26 o 347 tests sin correr con un guardián diciendo que estaban
+  cubiertos.
+- **Causa raíz**: verifiqué que el step **existiera**, no que **ejecutara**. Es
+  el mismo error que el guardián existe para cazar, una capa más afuera: leí el
+  `include` y no el `exclude`, leí el `run:` y no el `if:`.
+- **Fix**: el `exclude` se resta del set cubierto y un step con
+  `if:`/`continue-on-error:` cae en `untranslatable`. Lo que quedó afuera
+  (gating a nivel job, `defaults.run`, filtros de CLI, `test.projects`,
+  `describe.skip`) está **declarado** en el docstring, no arreglado: elegí
+  declarar antes que construir otro mecanismo.
+- **El titular de las cuatro rondas**: cada mecanismo que construí para cerrar
+  una clase **declaró más cobertura de la que tenía**, y en las cuatro hizo falta
+  un adversario **plantando casos** para descubrirlo. El grep del fix-pack 1, el
+  barrido del 2, el "leí el body" del 3, el guardián de CI del 4. En ninguna
+  ronda lo encontré leyendo mi propio código; en todas apareció cuando alguien
+  puso un input que yo no había pensado. Un mecanismo nuevo no reduce el
+  problema: lo muda de capa y le suma una promesa nueva que verificar.
+- **Aplicar en**: cuando un arreglo tienta a construir otro mecanismo, elegir la
+  opción **declarativa**. Un límite bien declarado cierra; un mecanismo a medias
+  abre otra ronda. Y todo mecanismo nuevo se verifica plantando el caso que
+  debería matarlo, ANTES de escribir lo que promete cubrir.
+
+### [2026-08-04 04:10] Fix-pack 4 — extensión de alcance declarada (`permissions:` en `ci.yml`)
+- **Qué**: además del `--ignore-scripts` que pedía `BLQ-BAJO-2`, agregué
+  `permissions: contents: read` a nivel workflow en `.github/workflows/ci.yml`.
+  No estaba en el encargo del fix-pack.
+- **Por qué**: es el otro agujero que nombra el mismo bloqueante de AR-4 ("el job
+  `build-test` no declara bloque `permissions:`") y cuesta dos líneas. Sin él los
+  jobs heredan el default del repo, que puede ser read/write en todos los scopes.
+- **Verificado antes de meterlo** (un `permissions` de menos rompe el workflow y
+  eso sería peor que el bug): `actions/checkout` necesita `contents: read`; el
+  `cache: npm` de `setup-node` usa el token del servicio de cache de Actions, no
+  los scopes del `GITHUB_TOKEN`; y ningún step publica, comenta PRs, sube
+  artifacts ni pide OIDC.
