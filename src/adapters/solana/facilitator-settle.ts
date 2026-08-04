@@ -130,6 +130,49 @@ function getFacilitatorUrl(): string | undefined {
   return url && url.length > 0 ? url.replace(/\/+$/, '') : undefined;
 }
 
+/**
+ * ⛔ GUARD DE ARRANQUE — `SOLANA_SETTLE_VIA_FACILITATOR=true` SIN URL de facilitator.
+ *
+ * Lo que pasa hoy sin este guard, medido: `.env.example` entrega las dos variables
+ * pegadas y en el estado inerte (`SOLANA_SETTLE_VIA_FACILITATOR=false` y
+ * `SOLANA_FACILITATOR_URL=` VACÍA). Encender la primera es una línea; la segunda no
+ * pide nada al arrancar. Con la bandera en `'true'` y sin URL, `settle()` reclama el
+ * intent, entra a `settleViaFacilitator` y muere acá abajo (`'not-sent'`) — **un leg
+ * por vez, en producción, sin una sola señal en el arranque**, y con la fila del
+ * ledger ya reclamada. El camino local NO lo cubre a propósito (CD-15): con la
+ * bandera ON el gateway no vuelve a ser camino de dinero ni como fallback.
+ *
+ * Por eso el corte va ACÁ y no en un comentario: el bloque `⛔` de
+ * `payment.ts` (`settleViaFacilitator`) ya decía "condición previa a encender", y
+ * una prosa que nadie hace cumplir no impide un redeploy con una variable a medias.
+ *
+ * ── LO QUE ESTE GUARD **NO** PRUEBA (y no hay que leerle de más) ──────────────
+ * Que haya una URL NO prueba que del otro lado exista `POST /solana/payout`: en el
+ * facilitator esa ruta es opt-in por env propia y, sin ella, **no se registra y
+ * devuelve 404** (`wasiai-facilitator/src/routes/solana-payout.ts`). Ese 404 llega
+ * acá como `'unknown'` (paso 3, código ausente), y eso se deja EXACTAMENTE COMO
+ * ESTÁ: un 404 puede venir de un proxy intermedio y no demuestra que el intent no
+ * se haya pagado. Este guard cierra la puerta que sí es config nuestra —
+ * "encendí la bandera y no dije a dónde" — y ninguna otra.
+ *
+ * La comparación es la MISMA literal `=== 'true'` que usa la ramificación de
+ * `settle()` (`payment.ts`): si el guard fuera más laxo (`Boolean(...)`), rompería
+ * el arranque de configs que toman el camino legado y funcionan.
+ */
+export function assertFacilitatorPayoutConfigured(): void {
+  if (process.env.SOLANA_SETTLE_VIA_FACILITATOR !== 'true') return;
+  if (getFacilitatorUrl() !== undefined) return;
+  throw new Error(
+    `SOLANA_SETTLE_VIA_FACILITATOR is 'true' but no facilitator URL is configured. ` +
+      `Refusing to start — with the flag on the gateway NEVER signs a Solana payout ` +
+      `itself (no local fallback, by design), so every downstream payout leg would ` +
+      `die fail-closed at request time with 'no payout request was sent', one leg at ` +
+      `a time and with no signal at boot. Set SOLANA_FACILITATOR_URL (or ` +
+      `WASIAI_FACILITATOR_URL) to the facilitator that serves POST /solana/payout, or ` +
+      `set SOLANA_SETTLE_VIA_FACILITATOR to 'false' to keep the locally-signed path.`,
+  );
+}
+
 function getFacilitatorApiKey(): string | undefined {
   return (
     process.env.SOLANA_FACILITATOR_API_KEY?.trim() ||

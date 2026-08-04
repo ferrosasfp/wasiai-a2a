@@ -129,6 +129,18 @@ async function buildBundle(chainKey: ChainKey): Promise<AdaptersBundle> {
     // WKH-234 — rail Solana (devnet-only, flag-gated en getSupportedChains()).
     // Con flag OFF el slug nunca pasa el fail-fast de initAdapters → el bundle
     // no se construye → CHAIN_NOT_SUPPORTED (defensa idéntica a Tempo).
+    //
+    // WKH-302 — el guard de arranque del transporte del payout va ACÁ, ANTES de
+    // construir el bundle, por dos motivos: (i) sólo puede haber leg de payout
+    // Solana si este rail se inicializa, así que `SOLANA_SETTLE_VIA_FACILITATOR`
+    // es INERTE sin él y romper el arranque de quien no usa Solana sería un
+    // outage autoinfligido; (ii) el criterio y los nombres de las envs viven en
+    // `facilitator-settle.ts`, que es quien las lee en el camino de request — una
+    // copia acá se desincronizaría. Ver su docstring para qué NO prueba.
+    const { assertFacilitatorPayoutConfigured } = await import(
+      './solana/facilitator-settle.js'
+    );
+    assertFacilitatorPayoutConfigured();
     const { createSolanaAdapters } = await import('./solana/index.js');
     return createSolanaAdapters({ network: 'devnet' });
   }
