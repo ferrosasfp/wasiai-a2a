@@ -9,12 +9,16 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  assertKnownDiscoverParams,
+  ConflictingMinReputationError,
   InvalidAllowTrialError,
   InvalidLimitError,
   InvalidMinReputationError,
   parseAllowTrial,
   parseLimit,
   parseMinReputation,
+  resolveMinReputation,
+  UnknownDiscoverParamError,
 } from './discovery-query.js';
 
 describe('parseMinReputation', () => {
@@ -215,6 +219,117 @@ describe('T-14 · parseAllowTrial (WKH-313)', () => {
       expect(err).toBeInstanceOf(InvalidAllowTrialError);
       expect((err as InvalidAllowTrialError).code).toBe('INVALID_ALLOW_TRIAL');
       expect((err as InvalidAllowTrialError).received).toBe('maybe');
+    }
+  });
+});
+
+// ── WKH-322 · el alias `min_reputation` y el rechazo de claves desconocidas ──
+//
+// El mismo concepto se llama `min_reputation` en `constraints` de `/compose`
+// (`compose-step-shape.ts:51`) y `minReputation` en `/discover`. Antes de esta HU
+// el segundo nombre era el único que filtraba y el primero se descartaba con 200.
+describe('WKH-322 · resolveMinReputation (alias min_reputation)', () => {
+  it('T-U1: los dos nombres producen EL MISMO valor (no hay dos parseos)', () => {
+    expect(resolveMinReputation('5', undefined)).toBe(5);
+    expect(resolveMinReputation(undefined, '5')).toBe(5);
+    expect(resolveMinReputation('5', undefined)).toBe(
+      resolveMinReputation(undefined, '5'),
+    );
+  });
+
+  it('T-U2: valores distintos por los dos nombres → ConflictingMinReputationError', () => {
+    // Se rechaza en vez de aplicar precedencia: con "gana el camelCase",
+    // `minReputation=0` + `min_reputation=5` devolvería 0 y descartaría en
+    // silencio el piso explícito del caller.
+    try {
+      resolveMinReputation('0', '5');
+      expect.unreachable('debía lanzar');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConflictingMinReputationError);
+      expect((err as ConflictingMinReputationError).code).toBe(
+        'CONFLICTING_MIN_REPUTATION',
+      );
+    }
+    expect(() => resolveMinReputation(1, 5)).toThrow(
+      ConflictingMinReputationError,
+    );
+  });
+
+  it('T-U3: el conflicto se mide sobre los NORMALIZADOS, no sobre los crudos', () => {
+    // `'5' !== 5` y `'5' !== '5.0'` como crudos: comparar así daría un conflicto
+    // falso para dos formas de escribir el mismo número.
+    expect(resolveMinReputation('5', 5)).toBe(5);
+    expect(resolveMinReputation('5', '5.0')).toBe(5);
+    expect(resolveMinReputation(5, '5')).toBe(5);
+  });
+
+  it('T-U4: vacío = ausente, no conflicto', () => {
+    expect(resolveMinReputation('5', '')).toBe(5);
+    expect(resolveMinReputation('', '5')).toBe(5);
+    expect(resolveMinReputation('5', null)).toBe(5);
+    expect(resolveMinReputation(undefined, undefined)).toBeUndefined();
+  });
+
+  it('T-U5: un valor inválido por el ALIAS da el MISMO InvalidMinReputationError', () => {
+    // CD-2: `parseMinReputation` es el único validador de rango para los dos
+    // nombres. Un código nuevo para el alias significaría un parseo duplicado.
+    try {
+      resolveMinReputation(undefined, 'abc');
+      expect.unreachable('debía lanzar');
+    } catch (err) {
+      expect(err).toBeInstanceOf(InvalidMinReputationError);
+      expect((err as InvalidMinReputationError).code).toBe(
+        'INVALID_MIN_REPUTATION',
+      );
+    }
+    expect(() => resolveMinReputation(undefined, '101')).toThrow(
+      InvalidMinReputationError,
+    );
+  });
+});
+
+describe('WKH-322 · assertKnownDiscoverParams', () => {
+  it('T-U6: el mensaje NOMBRA la clave mala y ENUMERA las aceptadas', () => {
+    // Un 400 que no dice el nombre correcto convierte un typo de un carácter en
+    // media hora de búsqueda: eso es lo que costó `capability` (singular), que
+    // devolvía el catálogo entero con 200.
+    try {
+      assertKnownDiscoverParams({ capability: 'remittance-payout' });
+      expect.unreachable('debía lanzar');
+    } catch (err) {
+      expect(err).toBeInstanceOf(UnknownDiscoverParamError);
+      expect((err as UnknownDiscoverParamError).code).toBe(
+        'UNKNOWN_DISCOVER_PARAM',
+      );
+      expect((err as UnknownDiscoverParamError).received).toBe('capability');
+      const msg = (err as UnknownDiscoverParamError).message;
+      expect(msg).toContain("'capability'");
+      expect(msg).toContain('capabilities');
+      expect(msg).toContain('minReputation');
+      expect(msg).toContain('min_reputation');
+      expect(msg).toContain('q');
+    }
+  });
+
+  it('T-U7: un objeto vacío y una clave aceptada no lanzan', () => {
+    // Nombres escritos a mano a propósito (CD-10): iterar
+    // `ALLOWED_DISCOVER_PARAMS` acá mediría la constante contra sí misma y
+    // agregar `pepito` a la lista haría pasar el test. La enumeración exhaustiva
+    // de los 10 parámetros vive en `T-R30`, contra la ruta y también a mano.
+    expect(() => assertKnownDiscoverParams({})).not.toThrow();
+    expect(() =>
+      assertKnownDiscoverParams({ capabilities: 'kyc', min_reputation: '2' }),
+    ).not.toThrow();
+  });
+
+  it('T-U8: el mensaje es determinista pero NO promete "la primera que escribió el caller"', () => {
+    // Gotcha de JS: las claves con forma de índice entero se enumeran primero.
+    // Este test canda que el docstring no afirme un orden que el lenguaje no da.
+    try {
+      assertKnownDiscoverParams({ capability: 'b', 1: 'a' });
+      expect.unreachable('debía lanzar');
+    } catch (err) {
+      expect((err as UnknownDiscoverParamError).received).toBe('1');
     }
   });
 });

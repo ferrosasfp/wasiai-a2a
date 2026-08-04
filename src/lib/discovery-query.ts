@@ -150,3 +150,169 @@ export function parseAllowTrial(raw: unknown): boolean | undefined {
   if (raw === false || raw === 'false') return undefined;
   throw new InvalidAllowTrialError(raw);
 }
+
+/**
+ * WKH-322 — las ÚNICAS claves que `/discover` (GET y POST, la ruta raíz) acepta.
+ *
+ * Las 9 primeras son exactamente las que la ruta ya leía antes de esta HU
+ * (`routes/discover.ts`, tipo `Querystring` del GET y tipo `Body` del POST). La
+ * décima, `min_reputation`, es el ALIAS que agrega WKH-322.
+ *
+ * Se exporta (mismo motivo que `ALLOWED_STEP_CONSTRAINTS` en
+ * `compose-step-shape.ts:39-48`) para que los tests NEGATIVOS lean ESTA lista y
+ * no una copia literal. Los tests POSITIVOS, en cambio, enumeran los nombres a
+ * mano: un test que itere esta constante mide la constante contra sí misma, así
+ * que agregar `pepito` acá lo haría pasar afirmando que `pepito` es público.
+ *
+ * ⚠️ Agregar una clave acá es una decisión de PRODUCTO, no un detalle de
+ * validación: cada nombre nuevo hay que mantenerlo, documentarlo y testearlo
+ * mientras exista la API.
+ *
+ * El orden de declaración es alfabético (case-insensitive) porque el mensaje del
+ * 400 se construye uniendo este Set, y un `Set` de JS itera en orden de
+ * inserción: reordenar acá cambia el mensaje que ve el caller.
+ *
+ * Por qué está `min_reputation` y por qué NO están `capability` ni `query`:
+ * - `min_reputation` YA es contrato público de esta misma API en otra superficie
+ *   (`compose-step-shape.ts:51`, `constraints.min_reputation` de `/compose`). Un
+ *   caller que leyó esa mitad de la documentación escribía el nombre "correcto" y
+ *   `/discover` lo descartaba: el 400 sin este alias le cobraría una
+ *   inconsistencia nuestra.
+ * - `capability` (singular) y `query` no son contrato de ninguna superficie.
+ *   `capability` es un singular plausible, y `query` es el nombre INTERNO del
+ *   campo de texto libre del tipo `DiscoveryQuery` (`types/index.ts`), que la
+ *   ruta traduce desde el `q` público. Aliasar por plausibilidad haría que el
+ *   número de nombres válidos crezca con la imaginación de los callers.
+ */
+export const ALLOWED_DISCOVER_PARAMS: ReadonlySet<string> = new Set([
+  'allowTrial',
+  'capabilities',
+  'includeInactive',
+  'limit',
+  'maxPrice',
+  'minReputation',
+  'min_reputation',
+  'q',
+  'registry',
+  'verified',
+]);
+
+/**
+ * Clave de query/body que `/discover` no reconoce. La ruta la mapea a 400
+ * `UNKNOWN_DISCOVER_PARAM`.
+ *
+ * Razón de ser: antes de WKH-322 la ruta leía por nombre las claves que le
+ * interesaban y las demás no existían para ella, así que `?capability=x`
+ * (singular) devolvía HTTP 200 con el catálogo entero — 23 agentes donde el
+ * nombre correcto devolvía 1 — sin una sola señal de que el filtro no se aplicó.
+ *
+ * `/compose` ya rechaza toda clave desconocida en `step.constraints`
+ * (`compose-step-shape.ts:176-185`), y ahí quedó escrito por qué: *"Decirle que
+ * no se soporta es honesto; ignorarlo, no."* Lo que faltaba era la simetría, y la
+ * asimetría era perversa: la superficie que COBRA era estricta y la GRATUITA era
+ * permisiva — y la gratuita es donde el integrador decide a quién pagarle. Un
+ * parámetro ignorado en la consulta gratis se paga en la llamada siguiente.
+ *
+ * Alcance de este guard, para que no se lea de más: cubre las dos rutas raíz
+ * (`GET /discover` y `POST /discover`). `GET /discover/:slug` NO lo usa y sigue
+ * descartando sus query params desconocidos (deuda TD-322-1).
+ */
+export class UnknownDiscoverParamError extends Error {
+  readonly code = 'UNKNOWN_DISCOVER_PARAM' as const;
+  constructor(readonly received: unknown) {
+    super(
+      `unknown parameter '${String(received)}'. Accepted parameters: ${[
+        ...ALLOWED_DISCOVER_PARAMS,
+      ].join(', ')}`,
+    );
+    this.name = 'UnknownDiscoverParamError';
+  }
+}
+
+/**
+ * Los dos nombres de reputación llegaron juntos con valores normalizados
+ * distintos. La ruta la mapea a 400 `CONFLICTING_MIN_REPUTATION`.
+ *
+ * Se eligió 400 y no una regla de precedencia con un caso concreto:
+ * `?minReputation=0&min_reputation=5` (default de plantilla + override explícito)
+ * bajo "gana el camelCase" devolvería `0`, o sea el piso explícito del caller
+ * descartado en silencio — la misma clase de bug que WKH-322 cierra, con el signo
+ * invertido.
+ */
+export class ConflictingMinReputationError extends Error {
+  readonly code = 'CONFLICTING_MIN_REPUTATION' as const;
+  constructor(readonly received: unknown) {
+    super(
+      "minReputation and min_reputation are aliases and were sent with different values; send only one (they are the same filter, so two different values cannot both be honored)",
+    );
+    this.name = 'ConflictingMinReputationError';
+  }
+}
+
+/**
+ * El body del `POST /discover` llegó con una forma que no tiene claves nombradas
+ * (array o primitivo). La ruta la mapea a 400 `INVALID_DISCOVER_BODY`.
+ *
+ * Tiene código propio, y no reutiliza `UNKNOWN_DISCOVER_PARAM`, porque la causa es
+ * otra: sobre `[1,2]`, `Object.keys` devuelve `['0','1']` y el mensaje diría
+ * `unknown parameter '0'` — ruidoso e incomprensible. `null`/`undefined` NO caen
+ * acá: se tratan como body vacío, que es el comportamiento vigente.
+ */
+export class InvalidDiscoverBodyError extends Error {
+  readonly code = 'INVALID_DISCOVER_BODY' as const;
+  constructor(readonly received: unknown) {
+    super('request body must be a JSON object of discover parameters');
+    this.name = 'InvalidDiscoverBodyError';
+  }
+}
+
+/**
+ * Lanza `UnknownDiscoverParamError` si `raw` trae UNA clave fuera de
+ * `ALLOWED_DISCOVER_PARAMS`. El mensaje nombra esa clave Y enumera las aceptadas,
+ * para que el caller pueda corregir sin abrir la documentación: un 400 que no
+ * dice el nombre bueno convierte un typo de un carácter en media hora de
+ * búsqueda.
+ *
+ * Determinismo: el mismo objeto de entrada produce siempre el mismo mensaje. Lo
+ * que NO se promete es que la clave reportada sea "la primera que escribió el
+ * caller": `Object.keys` enumera primero las claves con forma de índice entero,
+ * en orden numérico, antes que las demás, así que con `?1=a&capability=b` el
+ * error reporta `'1'`. (Tampoco se ordena alfabéticamente: eso escondería todavía
+ * más la clave que el caller lee primero.)
+ */
+export function assertKnownDiscoverParams(raw: Record<string, unknown>): void {
+  const unknownKey = Object.keys(raw).find(
+    (k) => !ALLOWED_DISCOVER_PARAMS.has(k),
+  );
+  if (unknownKey !== undefined) throw new UnknownDiscoverParamError(unknownKey);
+}
+
+/**
+ * Colapsa los dos nombres del piso de reputación (`minReputation` camelCase y su
+ * alias `min_reputation`) en UN valor.
+ *
+ * Los dos crudos pasan por `parseMinReputation`, el MISMO validador de rango
+ * `[0,100]`: un valor inválido por cualquiera de los dos nombres da el mismo
+ * `InvalidMinReputationError`, y aguas abajo de esta función hay un solo camino
+ * (el campo `minReputation` del `DiscoveryQuery`), así que las dos ramas no
+ * pueden divergir en el filtrado.
+ *
+ * La comparación de conflicto es entre los valores NORMALIZADOS, no entre los
+ * crudos: `('5', 5)` y `('5', '5.0')` colapsan a `5` sin conflicto. Un vacío
+ * (`''`/`null`/ausente) parsea a `undefined` y cuenta como ausente, así que
+ * `?minReputation=5&min_reputation=` devuelve `5`.
+ */
+export function resolveMinReputation(
+  camelRaw: unknown,
+  snakeRaw: unknown,
+): number | undefined {
+  const camel = parseMinReputation(camelRaw);
+  const snake = parseMinReputation(snakeRaw);
+  if (camel !== undefined && snake !== undefined && camel !== snake) {
+    throw new ConflictingMinReputationError({
+      minReputation: camel,
+      min_reputation: snake,
+    });
+  }
+  return camel ?? snake;
+}
