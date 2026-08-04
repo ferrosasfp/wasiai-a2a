@@ -586,6 +586,26 @@ describe('T-CD15 — con la bandera ON no hay fallback a firma local', () => {
     expect(broadcasts).toHaveLength(0);
   });
 
+  it('★ SIN URL de facilitator ⇒ lanza y el keypair local NUNCA firma', async () => {
+    // La puerta que el guard de arranque cierra ANTES, vista desde el request:
+    // con la bandera ON y sin URL el leg muere `not-sent` y NO hay fallback local
+    // que lo rescate. Es el caso que faltaba en este describe (estaban el 5xx y el
+    // error de red, los dos CON URL), y es el único alcanzable por una config a
+    // medias — la que `.env.example` hace fácil de escribir.
+    process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
+    delete process.env.SOLANA_FACILITATOR_URL;
+    delete process.env.WASIAI_FACILITATOR_URL;
+
+    await expect(
+      new SolanaPaymentAdapter().settle(settleReq('run-nourl:0')),
+    ).rejects.toThrow(/no payout request was sent/);
+
+    expect(mockGetOperatorKeypair).not.toHaveBeenCalled();
+    expect(broadcasts).toHaveLength(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockRecordSigned).not.toHaveBeenCalled();
+  });
+
   it('★ error de red ⇒ lanza, sin firmar localmente', async () => {
     process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
     process.env.SOLANA_FACILITATOR_URL = 'https://facilitator.test';

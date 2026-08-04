@@ -938,9 +938,15 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
    * entre nodos de 0 bloques, y el desfasaje estructural `confirmed`↔`finalized` de
    * 31-32 bloques. 150 bloques (~1 min) deja ~5x sobre ese piso estructural.
    *
-   * ⚠️ Esa medicion es un PISO, no un techo: no se pudo medir un nodo degradado, y
-   * el endpoint del facilitator todavia no existe. El margen esta elegido para el
+   * ⚠️ Esa medicion es un PISO, no un techo: no se pudo medir un nodo degradado, ni
+   * se midio contra el endpoint real del facilitator. El margen esta elegido para el
    * caso que NO se pudo medir, no para el que si.
+   *
+   * (Correccion de un dato que envejecio: este parrafo decia "el endpoint del
+   * facilitator todavia no existe". YA EXISTE — `POST /solana/payout`,
+   * `wasiai-facilitator/src/routes/solana-payout.ts`. Es opt-in por env DEL
+   * FACILITATOR: sin ella la ruta no se registra y responde 404, que del lado de
+   * aca llega como `'unknown'`.)
    *
    * Ganancia sobre pedirle la altura al facilitator: los dos lados de la
    * comparacion final salen del MISMO proveedor RPC, asi que el desfasaje entre
@@ -993,6 +999,14 @@ export class SolanaPaymentAdapter implements ISolanaPaymentAdapter {
    * ⛔ CONDICION PREVIA A ENCENDER `SOLANA_SETTLE_VIA_FACILITATOR`, no a mergear.
    *    La bandera se entrega APAGADA, asi que hoy la ventana no esta viva.
    *    Encenderla sin el marcador la activa.
+   *
+   * ⚠️ QUE HACE CUMPLIR ESTE ⛔ Y QUE NO. El unico pedazo de la precondicion que un
+   *    guard puede verificar es de CONFIG, y ya lo hace cumplir el arranque:
+   *    `assertFacilitatorPayoutConfigured` (`facilitator-settle.ts`) rompe el boot si
+   *    la bandera esta en 'true' sin URL de facilitator. El marcador `dispatched` es
+   *    CODIGO + MIGRACION, y ningun guard lo puede detectar: sigue siendo una
+   *    condicion que decide una persona. O sea que este parrafo NO esta cubierto por
+   *    un test — el de abajo si.
    */
   private async settleViaFacilitator(
     req: SolanaSettleRequest,
