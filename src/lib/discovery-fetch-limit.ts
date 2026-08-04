@@ -170,6 +170,16 @@ export function clampToRegistryMaxLimit(
   // El `as number` está cubierto por la línea de arriba: el guard devuelve
   // `boolean` (no un type predicate) porque su firma es parte del contrato de
   // esta HU, así que tsc no propaga el narrowing solo.
+  //
+  // NO convertirlo a `declared is number` (decidido en CR, medido con
+  // `tsc --strict`): en el call-site `schema.maxLimit !== undefined &&
+  // !isUsableRegistryMaxLimit(schema.maxLimit)` (`discovery.ts:1090-1091`) el
+  // predicate restaría `undefined` y después `number`, dejando **`never`** — o
+  // sea que le enseñaría al compilador que el campo que el warn loguea para
+  // decir CUÁL fue la basura es imposible, y cualquier regla de código muerto
+  // tendría licencia para borrarlo. Además tsc **no verifica** el cuerpo de un
+  // predicate anotado a mano: no gana sanidad, sólo mueve esta aserción no
+  // chequeada de una línea visible a todos los call-sites presentes y futuros.
   return Math.min(fetchLimit, declared as number);
 }
 
