@@ -1114,7 +1114,10 @@ export const discoveryService = {
             registry: registry.name,
             sentLimit,
           },
-          '[discovery.max-limit-below-pool] the declared ceiling sank this source below the historical /compose pool floor; an agent left out will not hydrate payment.chain',
+          // AR MNR-5: el warn se emite en `/discover`, donde no hay nada que
+          // hidratar. Lo que se sabe acá es el número enviado; la consecuencia
+          // es CONDICIONAL a que `/compose` resuelva un agente de esta fuente.
+          '[discovery.max-limit-below-pool] the declared ceiling sank this source below the historical /compose pool floor; if /compose later resolves an agent from this source, one left out of the pool will not hydrate payment.chain',
         );
       }
     }

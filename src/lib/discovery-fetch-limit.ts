@@ -92,8 +92,14 @@ export function resolveUpstreamFetchLimit(pageLimit: number): number {
  * Qué corta, con el input concreto: `Math.min(200, "100")` devuelve `100`
  * (coerción de JS) y `Math.min(200, "abc")` devuelve `NaN`, que terminaría como
  * `?limit=NaN` en la query string — el mismo hazard que el docstring de
- * `resolveUpstreamFetchLimit` ya nombra. El `typeof` las corta antes del
- * `Math.min`.
+ * `resolveUpstreamFetchLimit` ya nombra.
+ *
+ * Quién corta qué (CR M-3, medido): el que las rechaza es `Number.isInteger`,
+ * que NO coerciona — `"100"`, `"abc"`, `null`, `{}` y `1.5` le dan `false` aun
+ * sin el `typeof` de adelante. El `typeof` es load-bearing para el COMPILADOR:
+ * sin él, `declared >= 1` sobre `unknown` no compila (`TS18046`). O sea que la
+ * cláusula se queda, pero no cambia el veredicto de ningún input — y por eso
+ * ningún mutante de la campaña la aisló (M9 borra las dos juntas).
  */
 export function isUsableRegistryMaxLimit(declared: unknown): boolean {
   return (
@@ -225,8 +231,11 @@ export function resolveComposeAgentPoolLimit(): number {
  * esconderse.
  * Cuál es ese costo, con el input: registry con `maxLimit: 10` y 200 agentes
  * activos ⇒ el pool de esa fuente baja a 10 filas, el agente que quede afuera no
- * hidrata `payment.chain` y su leg downstream se saltea en silencio (clase
- * WKH-113 / BLQ-BAJO-1). Queda como TD-318B-2.
+ * hidrata `payment.chain` y su leg downstream **se saltea o apunta al rail
+ * equivocado**, en silencio (la disyunción entera, como en `compose.ts:125-126`;
+ * en el escenario que monta T-CLAMP-05 la rama que ocurre es la segunda: queda
+ * el `chain:'avalanche'` hardcodeado de `getAgent`). Clase WKH-113 /
+ * BLQ-BAJO-1. Queda como TD-318B-2.
  */
 export function isBelowComposePoolFloor(sent: number): boolean {
   return sent < COMPOSE_POOL_MIN_LIMIT;

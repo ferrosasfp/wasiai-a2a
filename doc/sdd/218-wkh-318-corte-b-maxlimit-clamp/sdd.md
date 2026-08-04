@@ -503,7 +503,7 @@ está propagando un `limit`; si devuelve ~23, no.
 | ID | Qué queda abierto | Dueño / gatillo |
 |---|---|---|
 | **TD-318B-1** | B-3 (clamp silencioso del upstream) queda cerrado **solo para registries que declaran `maxLimit`**. Sin declaración, 100 filas ante un pedido de 200 sigue leyéndose `ok`. Corrige la redacción de `backlog.md:139-149`. | W4 de WKH-318 / la HU que agregue evidencia de completitud no auto-declarada (B-6) |
-| **TD-318B-2** | Un registry con `maxLimit < 50` hunde el pool de `/compose` por debajo del piso histórico ⇒ clase WKH-113 (agente no hidratado, leg salteado en silencio). Solo hay `warn`, no hay impedimento. | Gatillo: que aparezca `REGISTRY_MAX_LIMIT_BELOW_COMPOSE_POOL` en logs |
+| **TD-318B-2** | Un registry con `maxLimit < 50` hunde el pool de `/compose` por debajo del piso histórico ⇒ clase WKH-113 (agente no hidratado; su leg se saltea **o apunta al rail equivocado**, en silencio — la disyunción entera, `compose.ts:125-126`; en el escenario de T-CLAMP-05 ocurre la segunda rama). Solo hay `warn`, no hay impedimento. | Gatillo: que aparezca `REGISTRY_MAX_LIMIT_BELOW_COMPOSE_POOL` en logs |
 | **TD-318B-3** | `POST/PATCH /registries` guarda `schema` sin validar (`routes/registries.ts:69,251`). El guard de esta HU es de **lectura**; el de escritura no existe. | HU propia |
 | **TD-318B-4** | Un registry cualquiera puede forzar el `catalogStatus` agregado a `truncated` declarando un `maxLimit` chico. Mismo lado seguro que B-2. | Solo si aparece impacto real |
 | **TD-318B-5** | La precondición de `discovery-fetch-limit.ts:77-105` se releerá cuando un **segundo** registry declare `maxLimit` (CD-6). | La HU que lo declare |
