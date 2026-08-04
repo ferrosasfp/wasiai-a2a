@@ -197,7 +197,10 @@ function catalogWithTarget(
  * exactamente lo que hace el `getAgent` de v2 (WKH-113/H14) y la razón por la que
  * la hidratación desde discover existe.
  */
-function serveRegistry(rows: Record<string, unknown>[]): {
+function serveRegistry(
+  rows: Record<string, unknown>[],
+  opts: { ceiling?: number } = {},
+): {
   upstreamLimits: (string | null)[];
 } {
   const upstreamLimits: (string | null)[] = [];
@@ -227,6 +230,16 @@ function serveRegistry(rows: Record<string, unknown>[]): {
     }
     const lim = url.searchParams.get('limit');
     upstreamLimits.push(lim);
+    // `ceiling` imita un registro que RECHAZA lo que pase su techo declarado
+    // (el contrato medido de `wasiai-v2`: `?limit>100` ⇒ 400). Sin él, el mimic
+    // honra cualquier límite.
+    if (
+      opts.ceiling !== undefined &&
+      lim !== null &&
+      Number(lim) > opts.ceiling
+    ) {
+      return Promise.resolve({ ok: false, status: 400 });
+    }
     return Promise.resolve({
       ok: true,
       status: 200,
@@ -384,46 +397,18 @@ describe('compose.resolveAgent — pool de hidratación de payment (AR BLQ-BAJO-
    * `serveRegistry` + el techo MEDIDO del registro real: `?limit>100` ⇒ 400.
    * Sin clamp, el pool de `/compose` (200) choca contra ese 400 y la fuente cae
    * entera, así que el agente no existe para `resolveAgent`.
+   *
+   * CR M-6: era una copia carácter por carácter de `serveRegistry` con tres
+   * líneas de diferencia — incluido el mimic de `/agent/` con el `payment`
+   * hardcodeado a avalanche, que es *el* punto de este archivo. El día que ese
+   * mimic cambie, una de las dos copias queda vieja y su test sigue verde
+   * midiendo otra cosa, que es justo el modo de falla que este archivo existe
+   * para cazar. Ahora es el mismo mimic con un parámetro.
    */
   function serveRegistryWithCeilingOf100(rows: Record<string, unknown>[]): {
     upstreamLimits: (string | null)[];
   } {
-    const upstreamLimits: (string | null)[] = [];
-    mockFetch.mockImplementation((rawUrl: string) => {
-      const url = new URL(rawUrl);
-      if (url.pathname.startsWith('/agent/')) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () =>
-            Promise.resolve(
-              card(url.pathname.replace('/agent/', ''), false, {
-                method: 'x402',
-                chain: 'avalanche',
-                contract: BASE_PAY_TO,
-              }),
-            ),
-        });
-      }
-      if (url.pathname.startsWith('/invoke/')) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () => Promise.resolve({ result: 'ok' }),
-        });
-      }
-      const lim = url.searchParams.get('limit');
-      upstreamLimits.push(lim);
-      if (lim !== null && Number(lim) > 100) {
-        return Promise.resolve({ ok: false, status: 400 });
-      }
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(lim ? rows.slice(0, Number(lim)) : rows),
-      });
-    });
-    return { upstreamLimits };
+    return serveRegistry(rows, { ceiling: 100 });
   }
 
   it('T-CLAMP-05 (borde del settle): con el techo declarado, la chain solana llega a signAndSettleDownstream contra un registro que rechaza limit>100 (AC-5)', async () => {
