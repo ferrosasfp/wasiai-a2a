@@ -1696,7 +1696,9 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
         contract: PAYTO_ADDR,
       },
     });
-    expect(spec?.chain).toBe('avalanche'); // colapso legacy intacto (CD-2)
+    // TD-CHAIN-ALIAS-AMBIGUO: el colapso legacy CD-2 se eliminó, así que el slug
+    // explícito llega al leg TAL CUAL. El destino no cambia (Fuji, `0xFUJI`).
+    expect(spec?.chain).toBe('avalanche-testnet');
     const logger = makeLogger();
     const result = await signAndSettleDownstream(
       makeAgent({ priceUsdc: 0.5, payment: spec }),
@@ -1704,15 +1706,13 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
     );
     expect(result).toEqual({ txHash: '0xFUJI', settledAmount: '500000' });
     // Lo que este test protege: NINGÚN warning que corte o degrade el leg.
-    // Se pasó de `not.toHaveBeenCalled()` a enumerar los códigos porque el
-    // colapso legacy de arriba (CD-2) reescribe `avalanche-testnet` → el alias
-    // AMBIGUO `avalanche`, y desde la simetría de alias eso emite el aviso
-    // `AMBIGUOUS_CHAIN_ALIAS` (telemetría, NO rechaza — ver el describe de
-    // simetría). El leg settlea igual: el `0xFUJI` de arriba lo prueba.
+    // `AMBIGUOUS_CHAIN_ALIAS` entró a la lista al sacarse el colapso: un agente
+    // que declara su entorno YA NO se cuenta como ambiguo (ese es el arreglo).
     for (const code of [
       'MAINNET_NOT_ALLOWED',
       'CHAIN_ENVIRONMENT_DRIFT',
       'CHAIN_NOT_SUPPORTED',
+      'AMBIGUOUS_CHAIN_ALIAS',
     ]) {
       expect(logger.warn, `code=${code}`).not.toHaveBeenCalledWith(
         expect.objectContaining({ code }),
@@ -1721,13 +1721,18 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
     }
   });
 
-  // ⚠️ El colapso legacy CD-2 hace que un agente que declaró CORRECTAMENTE
-  // `avalanche-testnet` se vea como el alias ambiguo `avalanche` en el leg. Es
-  // una limitación REAL de la telemetría `AMBIGUOUS_CHAIN_ALIAS` (sobre-cuenta)
-  // y un PRE-REQUISITO de la segunda mitad de la postura C: rechazar `avalanche`
-  // sin arreglar antes este colapso rompería a agentes que hicieron lo correcto.
-  // Este test fija la limitación para que quien implemente el rechazo la vea.
-  it('LIMITACIÓN CONOCIDA (TD-CHAIN-ALIAS-AMBIGUO): el colapso CD-2 convierte `avalanche-testnet` (explícito) en `avalanche` (ambiguo)', async () => {
+  // TD-CHAIN-ALIAS-AMBIGUO — RESUELTO. Este test era la CARACTERIZACIÓN de la
+  // limitación: el colapso legacy CD-2 reescribía el slug explícito
+  // `avalanche-testnet` al alias ambiguo `avalanche`, con lo cual un agente que
+  // declaró CORRECTAMENTE su entorno se contaba como ambiguo. Eso sobre-contaba
+  // la telemetría `AMBIGUOUS_CHAIN_ALIAS` y era el PRE-REQUISITO de la segunda
+  // mitad de la postura C: rechazar los ambiguos sin sacar antes el colapso
+  // habría rechazado justo a los que hicieron lo correcto.
+  //
+  // Ahora canda la propiedad INVERSA, que es la que habilita el rechazo:
+  // declarar el entorno alcanza para NO ser contado como ambiguo, punta a punta
+  // (reader → leg).
+  it('TD-CHAIN-ALIAS-AMBIGUO: `avalanche-testnet` (explícito) NO se cuenta como ambiguo en el leg', async () => {
     const { isAmbiguousChainAlias } = await import(
       '../adapters/chain-resolver.js'
     );
@@ -1740,9 +1745,16 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
     });
     // El agente declaró un slug EXPLÍCITO…
     expect(isAmbiguousChainAlias('avalanche-testnet')).toBe(false);
-    // …y el reader lo reescribió a uno ambiguo.
-    expect(spec?.chain).toBe('avalanche');
-    expect(isAmbiguousChainAlias(spec?.chain as string)).toBe(true);
+    // …y el reader ya NO lo reescribe: sale tal cual y sigue siendo explícito.
+    expect(spec?.chain).toBe('avalanche-testnet');
+    expect(isAmbiguousChainAlias(spec?.chain as string)).toBe(false);
+    // Contra-ejemplo: el alias a secas SÍ sigue contándose como ambiguo (sacar
+    // el colapso NO desarmó el clasificador).
+    const bare = readPaymentSpec({
+      payment: { method: 'x402', chain: 'avalanche', contract: PAYTO_ADDR },
+    });
+    expect(bare?.chain).toBe('avalanche');
+    expect(isAmbiguousChainAlias(bare?.chain as string)).toBe(true);
   });
 
   it('T-FIX1B-5: env con valor basura o vacío → fail-CLOSED (no habilita nada)', async () => {

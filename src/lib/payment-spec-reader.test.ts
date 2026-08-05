@@ -8,7 +8,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { normalizeChainSlug } from '../adapters/chain-resolver.js';
+import {
+  isAmbiguousChainAlias,
+  normalizeChainSlug,
+} from '../adapters/chain-resolver.js';
 import { readPaymentSpec } from './payment-spec-reader.js';
 import { isValidPayoutWallet } from './wallet-format.js';
 
@@ -44,8 +47,13 @@ describe('readPaymentSpec — extracción del payment spec (WKH-241)', () => {
     expect(spec?.asset).toBeUndefined();
   });
 
-  // ── Fidelidad de la extracción movida tal cual (CD-2) ────────────
-  it('preserva la normalización legacy avalanche-testnet → "avalanche" (CD-7)', () => {
+  // ── TD-CHAIN-ALIAS-AMBIGUO: el colapso legacy CD-2 se ELIMINÓ ─────
+  // Antes, este literal explícito se reescribía a `'avalanche'` (el alias
+  // AMBIGUO), y eso hacía que un agente que declaró bien su entorno se contara
+  // como ambiguo en `downstream-payment.ts` — bloqueando la segunda mitad de la
+  // postura C (rechazar los ambiguos habría rechazado a los que hicieron lo
+  // correcto). El destino NO cambia: los dos normalizan a `avalanche-fuji`.
+  it('TD-CHAIN-ALIAS-AMBIGUO: avalanche-testnet sale TAL CUAL (el colapso legacy CD-2 ya no existe)', () => {
     const spec = readPaymentSpec({
       payment: {
         method: 'x402',
@@ -53,7 +61,11 @@ describe('readPaymentSpec — extracción del payment spec (WKH-241)', () => {
         contract: EVM_PAYTO,
       },
     });
-    expect(spec?.chain).toBe('avalanche');
+    expect(spec?.chain).toBe('avalanche-testnet');
+    // El destino del leg es el MISMO que antes del cambio.
+    expect(normalizeChainSlug(spec?.chain ?? '')).toBe('avalanche-fuji');
+    // Y deja de contarse como ambiguo, que es el punto del arreglo.
+    expect(isAmbiguousChainAlias(spec?.chain ?? '')).toBe(false);
   });
 
   // ── Fix-pack it2 BLQ-MED-1: los alias MAINNET NO colapsan ─────────
@@ -84,7 +96,7 @@ describe('readPaymentSpec — extracción del payment spec (WKH-241)', () => {
 
   it('FIX-1a: los alias testnet del namespace avalanche NO cambian de forma (mismo destino, string crudo intacto)', () => {
     const cases: Array<[string, string]> = [
-      ['avalanche-testnet', 'avalanche'], // literal legacy (byte-identidad CD-2)
+      ['avalanche-testnet', 'avalanche-testnet'], // sin colapso (TD-CHAIN-ALIAS-AMBIGUO)
       ['avalanche', 'avalanche'],
       ['avalanche-fuji', 'avalanche-fuji'],
       ['fuji', 'fuji'],
@@ -124,7 +136,7 @@ describe('readPaymentSpec — extracción del payment spec (WKH-241)', () => {
     });
     expect(spec).toEqual({
       method: 'x402',
-      chain: 'avalanche',
+      chain: 'avalanche-testnet',
       contract: EVM_PAYTO,
       asset: undefined,
     });

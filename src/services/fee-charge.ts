@@ -19,6 +19,7 @@
  *   - CD-7: viem only (reusamos el PaymentAdapter existente).
  */
 
+import { hasBroadcastEvidence } from '../adapters/errors.js';
 import { getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import type { SignResult } from '../adapters/types.js';
@@ -487,19 +488,46 @@ export async function chargeProtocolFee(
       if (!settleResult.success) {
         // WKH-71 AC-3: relabel operator-gas-funding failures surfaced by the
         // settle adapter (CD-5: message/log only).
-        const { message: errMsg, reason } = describeChargeError(
+        const { message: baseMsg, reason } = describeChargeError(
           `settle failed: ${settleResult.error ?? 'unknown'}`,
         );
+        // HU-201 (extensión a los 2 caminos de fee): el `txHash` que viene CON el
+        // `success:false` es EVIDENCIA DE BROADCAST y NO se descarta. Mismo
+        // clasificador y misma doctrina que `payment-intent.ts:434-469`
+        // (`adapters/errors.ts` — "no entender la respuesta es lo contrario de
+        // tener una prueba"). Acá el veredicto NO decide refund ni reintento (el
+        // reintento ya lo bloquea el 23505 de :419), así que lo que se perdía era
+        // otra cosa y no menos grave: el ÚNICO puntero para cruzar contra la
+        // cadena un fee que PUDO haberse movido. La fila sigue `failed` — el hash
+        // es evidencia de un intento, nunca prueba de cobro.
+        const evidenceHash = hasBroadcastEvidence(settleResult.txHash)
+          ? String(settleResult.txHash)
+          : undefined;
+        // El hash viaja además en el mensaje (y por ende en `error_message`), pero
+        // `truncateError` corta a 180 chars: la columna `tx_hash` es el lugar
+        // AUTORITATIVO, el texto es conveniencia.
+        const errMsg =
+          evidenceHash !== undefined
+            ? `${baseMsg} [broadcast tx: ${evidenceHash}]`
+            : baseMsg;
         log.error(
-          { orchestrationId, detail: errMsg, ...(reason ? { reason } : {}) },
+          {
+            orchestrationId,
+            detail: errMsg,
+            broadcastEvidence: evidenceHash !== undefined,
+            ...(evidenceHash !== undefined
+              ? { settleTxHash: evidenceHash }
+              : {}),
+            ...(reason ? { reason } : {}),
+          },
           'settle reported failure',
         );
-        await markFailed(orchestrationId, errMsg);
+        await markFailed(orchestrationId, errMsg, evidenceHash);
         return {
           status: 'failed',
           feeUsdc,
           error: errMsg,
-          splits: buildSplits('failed', undefined, errMsg),
+          splits: buildSplits('failed', evidenceHash, errMsg),
         };
       }
 
@@ -621,10 +649,21 @@ function describeChargeError(raw: unknown): {
 
 /**
  * Helper para marcar el row como `failed` sin propagar errores (best-effort).
+ *
+ * `evidenceTxHash` (HU-201): hash de broadcast que acompañó a un `success:false`.
+ * Se persiste en la columna `tx_hash` DE UNA FILA `failed` — que es un estado
+ * legítimo y distinto de `charged`: NINGÚN lector infiere cobro desde el hash.
+ * Los tres que leen esa columna cruzan siempre el `status` antes
+ * (`fee-charge.ts:355` y `fee-split.ts:379` sólo la leen si `charged`;
+ * `reverseFeeSplits` saltea todo row que no sea `charged`, `fee-split.ts:652`),
+ * y `trace.recentCalls()` la emite JUNTO al status y le arma el link al explorer
+ * (`trace.ts:502-512`) — o sea que esta evidencia ya tiene dónde verse, que es
+ * la pregunta de control que dejó el fix-pack AR de HU-201.
  */
 async function markFailed(
   orchestrationId: string,
   errorMessage: string,
+  evidenceTxHash?: string,
 ): Promise<void> {
   try {
     await supabase
@@ -632,6 +671,7 @@ async function markFailed(
       .update({
         status: 'failed',
         error_message: truncateError(errorMessage),
+        ...(evidenceTxHash !== undefined ? { tx_hash: evidenceTxHash } : {}),
       })
       .eq('orchestration_id', orchestrationId);
   } catch (err) {
