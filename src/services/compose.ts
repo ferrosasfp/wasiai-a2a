@@ -50,6 +50,10 @@ import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { refundIdemKey } from '../lib/refund-idem.js';
+// Credencial outbound hacia agentes self-published. Módulo leaf (sólo lee env +
+// parsea URLs): ver su docstring para por qué el guard es un mapa host → secreto
+// y no el `registry_id` del agente.
+import { resolveSelfPublishedAuthHeaders } from '../lib/self-published-auth.js';
 // HU-203: los dos ejes del "settle sin resolver" y la forma del evento durable con el
 // que se los lista. Módulo leaf a propósito (ver su docstring).
 import {
@@ -84,6 +88,7 @@ import type {
   StepResult,
   X402PaymentRequest,
 } from '../types/index.js';
+import { SELF_PUBLISHED_REGISTRY_ID } from '../types/index.js';
 import { extractA2APayload, isA2AMessage } from './a2a-protocol.js';
 import { authzService } from './authz.js';
 import { budgetService } from './budget.js';
@@ -1367,9 +1372,35 @@ export const composeService = {
       (r: RegistryConfig) => r.name === agent.registry,
     );
     const authHeaders = buildAuthHeaders(registry);
+    // Credencial OUTBOUND del gateway hacia un agente SELF-PUBLISHED.
+    //
+    // POR QUÉ HACE FALTA: `agent.registry` de un self-published es el nombre
+    // SINTÉTICO 'self-published' (`types/index.ts:217-218`), que NO tiene fila en
+    // `registries`. El `find` de arriba devuelve `undefined` y
+    // `buildAuthHeaders(undefined)` devuelve `{}` — o sea que hasta acá NINGÚN
+    // agente self-published podía recibir credencial del gateway.
+    //
+    // POR QUÉ NO ALCANZA CON MIRAR `registry_id`: el `registry_id` NO es un guard
+    // de seguridad. 'self-published' no tiene fila propia, así que cualquier caller
+    // autenticado puede `POST /registries` con ese nombre y hacer que SUS agentes
+    // federados entren por esta rama. Lo que decide de verdad a quién se le manda
+    // el secreto es el mapa host → secreto de `resolveSelfPublishedAuthHeaders`,
+    // que vive en una env var del deploy y que un publicador no puede tocar. El
+    // `registry_id` sólo ACOTA el alcance del cambio para que el camino federado
+    // quede byte-idéntico; el guard real está del otro lado.
+    //
+    // Ausente la env var → `{}` → comportamiento byte-idéntico al de antes.
+    const selfPublishedAuthHeaders =
+      agent.registry_id === SELF_PUBLISHED_REGISTRY_ID
+        ? resolveSelfPublishedAuthHeaders(agent.invokeUrl)
+        : {};
     let paymentRequest: X402PaymentRequest | undefined;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      // El orden importa: si un registry REAL matcheó, su credencial pisa a la
+      // del mapa self-published. Para un self-published de verdad `authHeaders`
+      // es siempre `{}`, así que nadie más ve un cambio.
+      ...selfPublishedAuthHeaders,
       ...authHeaders,
     };
     // C1 (audit 2026-07-01): NEVER forward the caller's raw, long-lived

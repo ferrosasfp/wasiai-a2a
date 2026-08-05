@@ -23,6 +23,10 @@ import {
 } from './lib/env.js';
 import { assertGasOverheadConfigured } from './lib/gas-overhead.js';
 import { REDACT_PATHS } from './lib/logger.js';
+import {
+  assertSelfPublishedAuthEnv,
+  SELF_PUBLISHED_AUTH_ENV,
+} from './lib/self-published-auth.js';
 import { isPipelineCeilingMisconfigured } from './lib/stranded-payment.js';
 import mcpPlugin from './mcp/index.js';
 import { registerErrorBoundary } from './middleware/error-boundary.js';
@@ -66,6 +70,14 @@ assertRequiredEnv();
 // cierra TODOS los depósitos. Mal escrita → no bootea (con el valor en el mensaje);
 // ausente → warning ruidoso más abajo, cuando el logger ya existe.
 const depositMinimumWarning = assertDepositMinimumEnv();
+
+// Mismo criterio que el mínimo de depósito, sobre la credencial OUTBOUND hacia
+// agentes self-published: PRESENTE PERO ILEGIBLE → no bootea. Si degradara a "sin
+// credencial" en silencio, el síntoma sería un 401 permanente del lado del agente y
+// nadie miraría la env var del gateway. AUSENTE es un estado válido y silencioso
+// (es el default: nadie recibe credencial). Devuelve los HOSTS declarados — nunca
+// los secretos — para que el arranque publique a quién se le va a mandar.
+const selfPublishedAuthHosts = assertSelfPublishedAuthEnv();
 
 // Initialize chain-adaptive adapters before server starts
 await initAdapters();
@@ -148,6 +160,22 @@ if (strandedCeilingMisconfigured) {
 if (depositMinimumWarning !== null) {
   fastify.log.warn(`⚠️  ${depositMinimumWarning}`);
 }
+
+// A qué hosts self-published se les manda credencial. Se publica SIEMPRE, incluso
+// vacío, porque "no le mando credencial a nadie" es justamente el estado que hoy
+// deja inerte la auth ya desplegada del otro lado, y el operador tiene que poder
+// confirmarlo desde el log sin entrar al panel del hosting. Salen los HOSTS, nunca
+// los secretos: `assertSelfPublishedAuthEnv` no devuelve valores.
+fastify.log.info(
+  {
+    setting: SELF_PUBLISHED_AUTH_ENV,
+    hosts: selfPublishedAuthHosts,
+    count: selfPublishedAuthHosts.length,
+  },
+  selfPublishedAuthHosts.length === 0
+    ? 'sin credencial outbound para agentes self-published (variable ausente): ningun agente self-published recibe Authorization del gateway'
+    : 'credencial outbound para agentes self-published activa para los hosts listados (solo https)',
+);
 
 // El estado del umbral de la alerta de exposicion varada. `setting`/`value` estructurados
 // (misma forma que los avisos de configuracion del facilitator) para que el operador

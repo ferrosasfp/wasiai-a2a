@@ -270,6 +270,26 @@ export interface UpdateAgentInput {
   referrerRef?: string;
   /** WKH-234: contexto de familia del `payoutWallet` (namespace-aware). Ausente → EVM. */
   payoutChain?: string;
+  /**
+   * BAJA / ALTA del agente (`a2a_agents.enabled`). `false` lo saca de circulación:
+   * deja de aparecer en `/discover` y deja de ser elegible en `/compose`.
+   *
+   * POR QUÉ EXISTE ESTE CAMPO. La columna `enabled` ya estaba, y el lado LECTOR ya
+   * la respetaba en las tres queries que alimentan discovery
+   * (`services/agent.ts` `listAsAgents` / `getBySlugAsAgent` / `listPublisherAnchors`),
+   * pero NO había ningún productor: `publish` la escribe `true`
+   * (`services/agent.ts:399`) y ningún camino la podía volver a `false`. Era un
+   * control cableado del lado que lee y sin nadie del lado que escribe: un agente
+   * self-published nacía activo y la única baja posible era DESTRUCTIVA
+   * (`DELETE /agents/:slug`), que además de borrarlo pierde su `created_at` (ancla
+   * del carril de estreno) y su `payout_wallet`, y libera el slug para que lo tome
+   * otro. Esto es la baja REVERSIBLE que faltaba.
+   *
+   * El ownership NO necesita código nuevo: el `UPDATE` de `update()` ya filtra por
+   * `.eq('slug', …).eq('owner_ref', …)` y el pre-fetch ya rechaza cross-owner con
+   * `OwnershipMismatchError` → 404 disclosure-safe.
+   */
+  enabled?: boolean;
 }
 
 export interface AgentFieldMapping {
