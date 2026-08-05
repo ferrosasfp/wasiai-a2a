@@ -14,6 +14,7 @@ import {
   classifyDestinationEnvironment,
   findChainEnvironmentDrift,
   getCanonicalChainId,
+  isAmbiguousChainAlias,
   type LegDestination,
   normalizeChainSlug,
 } from '../adapters/chain-resolver.js';
@@ -650,6 +651,33 @@ export async function signAndSettleDownstream(
       `[Downstream] chain=${agent.payment.chain} not supported/initialized — skipped`,
     );
     return null;
+  }
+
+  // 4-bis. Alias AMBIGUO — telemetría, NO rechazo (primera mitad de la postura
+  //        C, ver `isAmbiguousChainAlias`). El agente nombró la red sin decir su
+  //        entorno (`base` / `avalanche` / `tempo` / `solana`). Desde el fix de
+  //        simetría TODOS esos alias resuelven a testnet, así que el leg es
+  //        seguro; esto sólo cuenta quién los usa para poder migrarlos antes de
+  //        pasar a rechazarlos. NO corta el settle a propósito: 16 de los 25
+  //        agentes del catálogo vivo declaran `avalanche`.
+  //
+  //        ⚠️ SOBRE-CUENTA CONOCIDA (`TD-CHAIN-ALIAS-AMBIGUO`): el colapso
+  //        legacy CD-2 de `readPaymentSpec` reescribe el slug EXPLÍCITO
+  //        `avalanche-testnet` → `avalanche`, así que un agente que declaró
+  //        bien igual aparece acá. Este contador mide lo que LLEGA al leg, no lo
+  //        que el agente declaró. Antes de pasar a rechazar hay que medir en el
+  //        reader (sobre el string crudo) o sacar el colapso; si no, el rechazo
+  //        rompería agentes que hicieron lo correcto.
+  if (isAmbiguousChainAlias(agent.payment.chain)) {
+    logger.warn(
+      {
+        agentSlug: agent.slug,
+        declared: agent.payment.chain,
+        resolvedChain: chainKey,
+        code: 'AMBIGUOUS_CHAIN_ALIAS',
+      },
+      `[Downstream] chain='${agent.payment.chain}' does not state its environment — resolved to '${chainKey}' (testnet). Declare an explicit slug; ambiguous aliases will be rejected in a future release`,
+    );
   }
 
   // 4a. WKH-234 — resolución del adapter (lectura del Map del registry, NO mueve

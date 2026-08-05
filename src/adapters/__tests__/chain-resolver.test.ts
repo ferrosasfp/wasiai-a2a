@@ -58,8 +58,12 @@ describe('normalizeChainSlug', () => {
     expect(normalizeChainSlug('hasOwnProperty')).toBeUndefined();
   });
 
-  it('maps base aliases (base, base-testnet) per DT-7 convention', () => {
-    expect(normalizeChainSlug('base')).toBe('base-mainnet');
+  // ⚠️ La vieja DT-7 mapeaba `base` → `base-mainnet` ("convención comunidad").
+  // Se revirtió por la simetría de alias ambiguos: `base` era el único alias
+  // BARE que caía en dinero real mientras `avalanche`/`tempo`/`solana` caían a
+  // testnet. Ver el bloque de `SLUG_ALIASES` en `chain-resolver.ts`.
+  it('maps base aliases (base, base-testnet) to base-sepolia', () => {
+    expect(normalizeChainSlug('base')).toBe('base-sepolia');
     expect(normalizeChainSlug('base-mainnet')).toBe('base-mainnet');
     expect(normalizeChainSlug('base-sepolia')).toBe('base-sepolia');
     expect(normalizeChainSlug('base-testnet')).toBe('base-sepolia');
