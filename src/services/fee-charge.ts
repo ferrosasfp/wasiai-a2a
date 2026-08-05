@@ -195,7 +195,10 @@ function truncateError(msg: string): string {
  *   3. Query idempotency por `orchestration_id`.
  *      - charged → retornar already-charged con txHash existente.
  *      - pending → retornar already-charged inProgress=true (otra llamada activa).
- *      - failed  → permitir retry (avanza).
+ *      - failed / skipped → avanza al paso 4, y ahí el insert choca contra la
+ *        PK ⇒ already-charged inProgress=true. NO hay reintento del cobro: ver
+ *        el comentario del paso 3 antes de intentar habilitarlo (una fila
+ *        `failed` puede llevar el hash de un broadcast real).
  *   4. INSERT `pending` con ON CONFLICT DO NOTHING.
  *      - error 23505 (unique_violation) → already-charged inProgress=true.
  *   5. `paymentAdapter.sign({...})` + `settle({...})` con mismo patrón que
@@ -393,9 +396,25 @@ export async function chargeProtocolFee(
           splits: buildSplits('in-progress'),
         };
       }
-      // 'failed' | 'skipped' → permitimos retry (cae al insert de abajo).
-      // En 'failed' el insert chocará con unique_violation; lo capturamos
-      // igual que el path de race.
+      // 'failed' | 'skipped' → NO se reintenta. Cae al insert de abajo y ese
+      // insert SIEMPRE choca: `orchestration_id` es PK
+      // (`20260421015829_a2a_protocol_fees.sql:8`) y la fila que acabamos de
+      // leer ya ocupa esa clave. El 23505 de abajo (línea ~419) devuelve
+      // `already-charged { inProgress: true }`, así que `sign()`/`settle()` NO
+      // se ejecutan: un fee genuinamente `failed` no se cobra nunca más por
+      // este camino. (Falsable: si un 2º `chargeProtocolFee` con el mismo
+      // `orchestrationId` sobre una fila `failed` llamara a `sign()`, esta
+      // frase sería falsa — lo fija FT-12b en `fee-charge.test.ts`.)
+      //
+      // ⚠️ SI ALGUIEN VIENE A HABILITAR EL REINTENTO, LEER ESTO PRIMERO.
+      // Desde el merge `700341a` (HU-201, `hasBroadcastEvidence` en
+      // `adapters/errors.ts`), una fila `failed` PUEDE llevar en `tx_hash` el
+      // hash de un broadcast que SÍ ocurrió: `failed` significa "el settle no
+      // se pudo confirmar", NO "probado que no se movió plata" (ver el
+      // docstring de `markFailed`). Reintentar sin cruzar antes ese `tx_hash`
+      // contra la cadena es exactamente cómo se paga dos veces. Cualquier
+      // cambio acá es cambio de comportamiento en el money-path y necesita su
+      // propio análisis adversarial: no alcanza con borrar este comentario.
     }
 
     // Paso 4: INSERT pending (ON CONFLICT DO NOTHING via unique_violation). El
