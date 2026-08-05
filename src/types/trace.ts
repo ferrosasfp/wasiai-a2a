@@ -7,7 +7,11 @@
  * `Number` en ningún punto del camino.
  */
 
-import type { PublicDownstreamSkipCode } from '../lib/downstream-skip-code.js';
+import type {
+  DownstreamSkipAction,
+  DownstreamSkipCode,
+  PublicDownstreamSkipCode,
+} from '../lib/downstream-skip-code.js';
 
 /** Red mostrada en la UI (proyección de `lib/chain-display.ChainDisplay`). */
 export interface TraceNetwork {
@@ -27,6 +31,33 @@ export interface TraceSkipCount {
   count: number;
   /** Explicación de una línea, para leer la pantalla sin leer el código. */
   meaning: string;
+}
+
+/**
+ * Conteo por ACCIÓN de los legs que no se pagaron: qué hay que hacer y quién.
+ *
+ * POR QUÉ EXISTE APARTE DE `TraceSkipCount`. El código PÚBLICO colapsa cuatro
+ * causas en `NOT_CONFIGURED` (y seis en `UNAVAILABLE`), y ese colapso es correcto
+ * para el caller —las cuatro lo dejan en el mismo lugar— pero deja al operador
+ * mirando un número que no distingue "no pasa nada" de "hay un deploy roto". Esta
+ * lista es el mismo tráfico agrupado por la ACCIÓN que provoca.
+ *
+ * Es ADMIN-ONLY: `/dashboard/trace` está detrás de un gate fail-closed. El
+ * `code` interno NUNCA sale por la respuesta de `/compose` ni `/orchestrate`.
+ */
+export interface TraceSkipActionCount {
+  action: DownstreamSkipAction;
+  count: number;
+  /** Quién tiene que actuar. */
+  owner: string;
+  /** Qué hay que hacer, en una línea. */
+  next: string;
+  /**
+   * Códigos internos que cayeron en esta acción, con su conteo. Se muestra para
+   * que el operador no tenga que abrir el fuente para saber cuál de las causas
+   * agrupadas fue.
+   */
+  codes: Array<{ code: DownstreamSkipCode; count: number }>;
 }
 
 /** Último settle cross-chain exitoso: el pulso del rail. */
@@ -49,11 +80,24 @@ export interface TraceHealth {
   skips: TraceSkipCount[];
   skipsTotal: number;
   /**
+   * Los MISMOS legs de `skips`, agrupados por la ACCIÓN que provocan. Es lo que
+   * hace accionable la pantalla: `skips` dice `NOT_CONFIGURED × 47` y esto dice
+   * si esos 47 son "el pago está apagado a propósito" o "hay una config rota".
+   */
+  skipActions: TraceSkipActionCount[];
+  /**
    * `false` = ningún evento de la ventana trae la señal de skips (el gateway que
    * generó ese tráfico es anterior a esta pantalla). Evita leer un 0 como
    * "cero skips" cuando en realidad es "sin datos".
    */
   skipSignalPresent: boolean;
+  /**
+   * `false` = ningún evento de la ventana trae el motivo INTERNO (tráfico previo
+   * a este canal, o generado por una ruta que no lo reporta). TERCER VALOR
+   * explícito: distinto de `skipActions: []`, que significa "se leyó y no hubo
+   * ninguno". Sin esto, un gateway viejo se leería como "cero problemas".
+   */
+  skipCauseSignalPresent: boolean;
   /**
    * Techo de eventos que el conteo revisa (query acotada). Viaja en el payload
    * para que la pantalla pueda decir el número real en vez de tenerlo escrito a

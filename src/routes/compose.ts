@@ -12,6 +12,7 @@ import {
   type ComposeStepShapeError,
   validateComposeStepShape,
 } from '../lib/compose-step-shape.js';
+import type { DownstreamSkipCode } from '../lib/downstream-skip-code.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
@@ -959,7 +960,15 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       // Mientras el comentario decía "camino muerto", el leg pagaba de verdad.
       // Ese leg se borró; lo que queda acá es la propagación de la credencial.
       const a2aKey = extractRawKey(request);
+      // Array PRESTADO al pipeline para los motivos INTERNOS de skip. Es un
+      // INPUT y no un campo del `ComposeResult` porque abajo se hace
+      // `reply.send({ ..., ...result })` sin schema de respuesta: cualquier cosa
+      // que viva en el resultado sale por HTTP, y estos códigos son los que
+      // `toPublicSkipCode` genericiza para no filtrar flags, allow-list de
+      // mainnet ni estado de la wallet del operador.
+      const downstreamSkipCauses: DownstreamSkipCode[] = [];
       const result = await composeService.compose({
+        downstreamSkipCauses,
         // HU-208: `steps` (resuelto), NO `body.steps`. `findUnresolvedStepIndex`
         // acaba de garantizar que todos traen un `agent` string, que es lo que
         // permite el narrowing a `ResolvedComposeStep[]` que exige el service.
@@ -1028,7 +1037,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         // sobre datos incompletos. Espejo de orchestrate.ts (que ya cubre su 403).
         // Escritura en memoria, sin await, sin I/O: no puede lanzar ni cambiar el
         // status, el body ni un centavo del refund de arriba.
-        noteDownstreamSkips(request, result.steps);
+        noteDownstreamSkips(request, result.steps, downstreamSkipCauses);
         return reply.status(status).send({
           ...result,
           requestId: request.id,
@@ -1114,7 +1123,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       // WKH-191x: retiene los skip-codes PÚBLICOS del pipeline para que el evento
       // los persista (`a2a_events.metadata.downstreamSkips`). Aditivo puro: NO lee
       // ni cambia nada del money-path, sólo copia lo que ya viaja en el response.
-      noteDownstreamSkips(request, result.steps);
+      noteDownstreamSkips(request, result.steps, downstreamSkipCauses);
       return reply.send({ kiteTxHash, ...result });
     },
   );

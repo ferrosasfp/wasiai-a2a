@@ -8,6 +8,7 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import {
+  type DownstreamSkipCode,
   type PublicDownstreamSkipCode,
   parseSkippedMarker,
 } from '../lib/downstream-skip-code.js';
@@ -53,6 +54,19 @@ export function buildEventType(method: string, endpoint: string): string {
 export function noteDownstreamSkips(
   request: FastifyRequest,
   steps: ReadonlyArray<{ downstreamSettle?: string | undefined }> | undefined,
+  /**
+   * Motivos INTERNOS de los mismos legs, en el array que el route le PRESTÓ al
+   * pipeline (`ComposeRequest.downstreamSkipCauses`). Se pasan aparte y no se
+   * leen de `steps` a propósito: el `StepResult` es la superficie que se
+   * serializa al caller, y estos códigos son los que `toPublicSkipCode`
+   * genericiza justamente para no salir de casa.
+   *
+   * Ausente ⟹ el route no pidió el canal de operador y `downstreamSkipCauses`
+   * queda sin setear, o sea que la fila del evento NO gana la clave. Eso es
+   * "esta ruta no reporta causas", que no es lo mismo que "cero causas" — la
+   * misma distinción ausente/vacío que ya sostiene `downstreamSkips`.
+   */
+  causes?: ReadonlyArray<DownstreamSkipCode> | undefined,
 ): void {
   const codes: PublicDownstreamSkipCode[] = [];
   for (const step of steps ?? []) {
@@ -60,6 +74,7 @@ export function noteDownstreamSkips(
     if (code) codes.push(code);
   }
   request.downstreamSkips = codes;
+  if (causes) request.downstreamSkipCauses = [...causes];
 }
 
 // ── Fastify augmentation for start time (DT-4) ─────────────
@@ -74,6 +89,13 @@ declare module 'fastify' {
      * público SIEMPRE (ver el docstring de `noteDownstreamSkips`).
      */
     downstreamSkips?: PublicDownstreamSkipCode[];
+    /**
+     * Motivos INTERNOS de esos mismos legs (canal de OPERADOR). Vocabulario
+     * INTERNO SIEMPRE: sólo se persiste en `a2a_events`, que se lee desde
+     * `/dashboard/trace` detrás de un gate admin fail-closed. NUNCA se escribe
+     * en una respuesta HTTP.
+     */
+    downstreamSkipCauses?: DownstreamSkipCode[];
   }
 }
 
@@ -131,6 +153,15 @@ export function registerEventTracking(fastify: FastifyInstance): void {
             // corren pipeline NO ganan una clave con `undefined`.
             ...(request.downstreamSkips
               ? { downstreamSkips: request.downstreamSkips }
+              : {}),
+            // Motivo INTERNO de esos mismos legs, para el canal de OPERADOR. El
+            // público de arriba colapsa cuatro causas con cuatro dueños distintos
+            // en `NOT_CONFIGURED`, y ese colapso es correcto para el caller pero
+            // deja al operador sin poder diagnosticar. `a2a_events` es admin-only
+            // (`/dashboard/trace`, gate fail-closed), así que acá el código
+            // interno no filtra nada. Mismo spread-condicional.
+            ...(request.downstreamSkipCauses
+              ? { downstreamSkipCauses: request.downstreamSkipCauses }
               : {}),
           },
         })

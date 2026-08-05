@@ -6,7 +6,10 @@
 // de skip-codes en vez de `string`. Es un ciclo de tipos con
 // `lib/downstream-skip-code.ts` (que importa `DownstreamLogger` de acá), pero
 // `import type` se borra en runtime → no hay ciclo de módulos real.
-import type { PublicDownstreamSkipCode } from '../lib/downstream-skip-code.js';
+import type {
+  DownstreamSkipCode,
+  PublicDownstreamSkipCode,
+} from '../lib/downstream-skip-code.js';
 // HU-203: `ComposeResult.settleRefundWithheld` reusa el vocabulario del módulo que
 // TOMA la decisión de retener, para que no puedan divergir. `import type` → sin ciclo
 // de módulos en runtime.
@@ -745,8 +748,39 @@ export interface DiscoveryResult {
      *     el cupo `M` por publicador no se puede aplicar.
      * Un contador que a veces es exacto y a veces una cota, sin decirlo, es la
      * clase de dato que se lee mal.
+     *
+     * ⚠️ Y HAY UN TERCER CASO, que este docstring no nombraba y que el número no
+     * distinguía: **sin `minReputation` el carril NO SE EVALÚA** y esto queda en
+     * su `0` inicial. Ese `0` no es exacto ni una cota: es "nunca se calculó".
+     * Leerlo requiere mirar `trialEvaluated` primero — ver ahí.
      */
     trialAvailable: number;
+    /**
+     * ¿Se evaluó el carril de estreno en esta consulta?
+     *
+     * `false` ⟺ el caller NO mandó `minReputation`. El bloque que aplica el piso
+     * es el mismo que lee `allowTrial` (`services/discovery.ts`, guard
+     * `if (query.minReputation != null)`), así que sin piso **`allowTrial` no
+     * ejecuta nada**: viaja, se acepta, y el carril no corre.
+     *
+     * POR QUÉ ES UN CAMPO Y NO UN DETALLE. Sin esto, un caller que mandó
+     * `allowTrial: true` recibía `trialAvailable: 0` y no tenía forma de
+     * distinguir "miré y ninguno califica" de "no miré". Son dos acciones
+     * distintas: en el primer caso no hay nada que hacer y en el segundo hay que
+     * mandar TAMBIÉN `minReputation`. Es el mismo tercer valor que
+     * `standingUnavailable` cubre para el otro "no pude": un `0` fabricado se lee
+     * como una respuesta.
+     *
+     * El costo de no tenerlo está medido: el integrador de Chaski tuvo que leer
+     * el fuente del gateway para descubrir que su parámetro era letra muerta
+     * (`chaski-v3/src/infrastructure/a2a/gateway-client.ts`, comentario de
+     * `FX_MIN_REPUTATION`: «Medido en el gateway, no asumido»).
+     *
+     * ⚠️ NO dice si el caller pidió el carril: dice si el gateway lo evaluó. Con
+     * `allowTrial` ausente y `minReputation` presente vale `true`, y ahí
+     * `trialAvailable` es la cota superior de siempre.
+     */
+    trialEvaluated: boolean;
     /**
      * AR fix-pack BLQ-BAJO-4 — la lectura del HISTORIAL falló
      * (`AgentStandingBatch.degraded`). Sin este dato, un batch degradado deja a
@@ -932,6 +966,24 @@ export interface ComposeRequest {
    * compatible. Cuando undefined → fallback a `console.warn`.
    */
   logger?: DownstreamLogger | undefined;
+  /**
+   * Array PRESTADO por el caller para recibir el motivo INTERNO de cada leg
+   * downstream que NO se pagó (uno por step salteado, en orden de ejecución).
+   *
+   * POR QUÉ ES UN INPUT Y NO UN CAMPO DEL `ComposeResult`. Los dos routes hacen
+   * `reply.send({ …, ...result })` sin schema de respuesta, así que TODO lo que
+   * viva en el resultado sale por HTTP al caller — y estos códigos son
+   * justamente los que `toPublicSkipCode` genericiza para no filtrar flags,
+   * allow-list de mainnet ni estado de la wallet del operador. Prestando el
+   * array la fuga es imposible POR CONSTRUCCIÓN: no hay nada que borrar antes de
+   * responder ni un route futuro que se pueda olvidar de borrarlo.
+   *
+   * Es el mismo patrón (y por el mismo tipo de razón) que el `results` prestado
+   * de `composeService.execute`, documentado en `services/compose.ts`.
+   *
+   * Ausente ⟹ compose no anota nada y el comportamiento es idéntico al de antes.
+   */
+  downstreamSkipCauses?: DownstreamSkipCode[] | undefined;
   /**
    * WKH-101 (DT-11): contexto de delegación para el débito per-step (steps 2..N).
    * Cuando está presente, budgetService.debit enruta al RPC atómico
@@ -1180,6 +1232,13 @@ export interface OrchestrateRequest {
   scopingKeyRow?: A2AAgentKeyRow | undefined;
   /** WKH-101 (DT-11): contexto de delegación propagado a composeService.compose. */
   delegationContext?: DelegationDebitContext | undefined;
+  /**
+   * Array PRESTADO para los motivos INTERNOS de skip del leg downstream. Se
+   * propaga tal cual a `composeService.compose`; ver el docstring del campo
+   * homónimo en `ComposeRequest` para por qué es un input y no un campo del
+   * resultado.
+   */
+  downstreamSkipCauses?: DownstreamSkipCode[] | undefined;
   /**
    * WKH-121 (BLQ-ALTO-1): contexto de key-session propagado a
    * composeService.compose para que el cap de sesión se respete en los steps

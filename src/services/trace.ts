@@ -39,9 +39,15 @@ import {
   describeChainId,
 } from '../lib/chain-display.js';
 import {
+  type DownstreamSkipAction,
+  type DownstreamSkipCode,
   describePublicSkipCode,
+  describeSkipActionNext,
+  describeSkipActionOwner,
+  isDownstreamSkipCode,
   isPublicSkipCode,
   type PublicDownstreamSkipCode,
+  toSkipAction,
 } from '../lib/downstream-skip-code.js';
 import { getLogger } from '../lib/logger.js';
 import { supabase } from '../lib/supabase.js';
@@ -55,6 +61,7 @@ import type {
   TraceMoneyLeg,
   TraceNetwork,
   TracePayload,
+  TraceSkipActionCount,
   TraceSkipCount,
 } from '../types/trace.js';
 
@@ -181,6 +188,54 @@ function metaSkips(metadata: unknown): PublicDownstreamSkipCode[] | null {
   const raw = (metadata as Record<string, unknown>).downstreamSkips;
   if (!Array.isArray(raw)) return null;
   return raw.filter(isPublicSkipCode);
+}
+
+/**
+ * Motivos INTERNOS de un evento. `null` = la fila no trae la señal, que NO es lo
+ * mismo que "cero causas" (mismo tercer valor que `metaSkips`). Cualquier valor
+ * fuera del vocabulario interno se descarta: basura en un jsonb no clasifica.
+ */
+function metaSkipCauses(metadata: unknown): DownstreamSkipCode[] | null {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const raw = (metadata as Record<string, unknown>).downstreamSkipCauses;
+  if (!Array.isArray(raw)) return null;
+  return raw.filter(isDownstreamSkipCode);
+}
+
+/**
+ * Agrupa los motivos internos por la ACCIÓN que provocan.
+ *
+ * Es la razón de ser de todo esto: `countSkips` devuelve `NOT_CONFIGURED × 47` y
+ * no dice si alguien tiene que arreglar algo. Acá esos mismos 47 se parten en
+ * "nadie actúa (el pago está apagado)", "operador: config rota", "operador:
+ * decisión de mainnet" y "dev: bug de call-site", que son cuatro respuestas
+ * distintas a la misma pregunta.
+ */
+function countSkipActions(
+  causes: DownstreamSkipCode[],
+): TraceSkipActionCount[] {
+  const byAction = new Map<
+    DownstreamSkipAction,
+    { count: number; codes: Map<DownstreamSkipCode, number> }
+  >();
+  for (const code of causes) {
+    const action = toSkipAction(code);
+    const entry = byAction.get(action) ?? { count: 0, codes: new Map() };
+    entry.count += 1;
+    entry.codes.set(code, (entry.codes.get(code) ?? 0) + 1);
+    byAction.set(action, entry);
+  }
+  return [...byAction.entries()]
+    .map(([action, entry]) => ({
+      action,
+      count: entry.count,
+      owner: describeSkipActionOwner(action),
+      next: describeSkipActionNext(action),
+      codes: [...entry.codes.entries()]
+        .map(([code, count]) => ({ code, count }))
+        .sort((a, b) => b.count - a.count || a.code.localeCompare(b.code)),
+    }))
+    .sort((a, b) => b.count - a.count || a.action.localeCompare(b.action));
 }
 
 function countSkips(codes: PublicDownstreamSkipCode[]): TraceSkipCount[] {
@@ -331,7 +386,9 @@ export const traceService = {
       skipWindowHours: hours,
       skips: skipStats.skips,
       skipsTotal: skipStats.total,
+      skipActions: skipStats.skipActions,
       skipSignalPresent: skipStats.signalPresent,
+      skipCauseSignalPresent: skipStats.causeSignalPresent,
       skipScanLimit: SKIP_SCAN_LIMIT,
       skipScanTruncated: skipStats.truncated,
     };
@@ -386,6 +443,10 @@ export const traceService = {
     skips: TraceSkipCount[];
     total: number;
     signalPresent: boolean;
+    /** Los mismos legs agrupados por la ACCIÓN que provocan (canal de operador). */
+    skipActions: TraceSkipActionCount[];
+    /** `false` = ninguna fila de la ventana trae el motivo interno (tercer valor). */
+    causeSignalPresent: boolean;
     scanned: number;
     truncated: boolean;
   }> {
@@ -404,8 +465,20 @@ export const traceService = {
     }
     const rows = (data as unknown as Array<{ metadata: unknown }> | null) ?? [];
     const codes: PublicDownstreamSkipCode[] = [];
+    const causes: DownstreamSkipCode[] = [];
     let signalPresent = false;
+    // TERCER VALOR, y por eso es una bandera aparte y no `causes.length > 0`: una
+    // fila sin la clave es "este trafico no reporta causas" y una fila con la clave
+    // vacia es "se leyo y no hubo ninguna". Colapsarlas haria que un gateway viejo
+    // se lea como "cero problemas", que es justo lo que esta pantalla no puede
+    // afirmar sin haber mirado.
+    let causeSignalPresent = false;
     for (const row of rows) {
+      const rowCauses = metaSkipCauses(row.metadata);
+      if (rowCauses !== null) {
+        causeSignalPresent = true;
+        causes.push(...rowCauses);
+      }
       const skips = metaSkips(row.metadata);
       if (skips === null) continue;
       signalPresent = true;
@@ -415,6 +488,8 @@ export const traceService = {
       skips: countSkips(codes),
       total: codes.length,
       signalPresent,
+      skipActions: countSkipActions(causes),
+      causeSignalPresent,
       scanned: rows.length,
       // El `.limit()` de PostgREST devuelve EXACTAMENTE el techo cuando hay más
       // filas que eso: el conteo tapó las que quedaron afuera.

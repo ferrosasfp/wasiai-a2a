@@ -191,6 +191,208 @@ export function toPublicSkipCode(
 }
 
 /**
+ * Type-guard runtime del vocabulario INTERNO. Igual que `isPublicSkipCode`, pero
+ * para el otro lado del mapeo: valida strings que vuelven de
+ * `a2a_events.metadata` (jsonb, sin garantía de tipo) antes de clasificarlos.
+ */
+export function isDownstreamSkipCode(
+  value: unknown,
+): value is DownstreamSkipCode {
+  // `hasOwn` (no `in`) por la misma razón que en `isPublicSkipCode`: un
+  // `constructor` heredado del prototipo no es un skip-code.
+  return typeof value === 'string' && Object.hasOwn(PUBLIC_SKIP_CODE, value);
+}
+
+// ─── Clasificación por ACCIÓN (canal de OPERADOR) ──────────────────────
+//
+// EL PROBLEMA QUE RESUELVE. El vocabulario PÚBLICO de arriba colapsa CUATRO
+// causas internas en `NOT_CONFIGURED` — `FLAG_OFF`, `CHAIN_ENVIRONMENT_DRIFT`,
+// `MAINNET_NOT_ALLOWED` y `MISSING_INTENT_ID` — y otras SEIS en `UNAVAILABLE`.
+// Para el CALLER ese colapso es CORRECTO y se mantiene: las cuatro lo dejan en el
+// mismo lugar ("el gateway no pagó ese leg, no es algo que yo pueda arreglar"), o
+// sea que la acción del caller es la misma en las cuatro, y separarlas sólo le
+// filtraría estado nuestro (qué flag, qué allow-list, qué config está rota).
+//
+// Para el OPERADOR el colapso es un agujero: las cuatro llevan a CUATRO personas
+// distintas haciendo CUATRO cosas distintas, y la pantalla de telemetría las
+// cuenta como un solo número. `NOT_CONFIGURED × 47` no dice si alguien tiene que
+// levantarse a arreglar un deploy o si no pasa nada.
+//
+// EL CRITERIO DE ESTA TABLA. Se separa por la ACCIÓN QUE PROVOCA, no por dónde
+// está el código. Dos códigos internos que llevan a la misma persona a hacer lo
+// mismo comparten acción a propósito (p. ej. los seis códigos que describen una
+// agent card mal publicada). Dos códigos que están pegados en el fuente pero
+// llevan a acciones distintas NO se comparten (p. ej. "la wallet está seca" vs
+// "no pude leer el balance").
+//
+// ⚠️ ESTE VOCABULARIO NO SALE POR HTTP AL CALLER. Viaja por el canal de operador
+// (`a2a_events.metadata.downstreamSkipCauses` → `/dashboard/trace`, admin-only y
+// fail-closed). El contrato público no cambia ni un byte.
+
+/**
+ * Qué hay que hacer con un leg que no se pagó, y quién lo hace.
+ *
+ * ⚠️ DOS DE ESTAS ACCIONES SON EL TERCER VALOR, y existen para que "no pude
+ * determinarlo" no se reparta entre "sí" y "no":
+ *  · `OPERATOR_BALANCE_UNKNOWN` — no se pudo LEER el balance del operador. NO es
+ *    "la wallet está seca": recargar no es la acción, averiguar sí lo es.
+ *  · `RECONCILE_ON_CHAIN`       — no se sabe si el pago salió. NO es "no se pagó":
+ *    la acción es mirar la cadena, y NUNCA reintentar a ciegas.
+ */
+export type DownstreamSkipAction =
+  /** Nadie actúa: el pago downstream está apagado por configuración, a propósito. */
+  | 'NONE_SETTLE_DISABLED'
+  /** Operador: la config del deploy es incoherente. Es un incidente. */
+  | 'OPERATOR_FIX_CONFIG'
+  /** Operador: decisión de DINERO — sumar esa mainnet al opt-in, o no. */
+  | 'OPERATOR_DECIDE_MAINNET_OPT_IN'
+  /** Dev del gateway: un call-site nuestro no pasó lo que debía. Es un bug de código. */
+  | 'OPERATOR_FIX_CODE'
+  /** Operador: conectar ese rail, o pedirle al agente que publique en uno soportado. */
+  | 'OPERATOR_CONNECT_CHAIN'
+  /** Publicador del agente: su agent card está mal. El gateway no tiene nada que arreglar. */
+  | 'PUBLISHER_FIX_LISTING'
+  /** Operador: recargar la hot wallet de ese rail. */
+  | 'OPERATOR_FUND_WALLET'
+  /** TERCER VALOR: no se pudo leer el balance. Averiguar, no recargar. */
+  | 'OPERATOR_BALANCE_UNKNOWN'
+  /** Operador: la clave del operador falta o es inválida. */
+  | 'OPERATOR_FIX_KEY'
+  /** Operador: el pago fue RECHAZADO. No salió plata; investigar el facilitator. */
+  | 'INVESTIGATE_PAYMENT_REJECTED'
+  /** TERCER VALOR: puede haberse pagado. Mirar la cadena; NO reintentar. */
+  | 'RECONCILE_ON_CHAIN';
+
+/**
+ * Mapeo interno → ACCIÓN. **EXHAUSTIVO POR TIPO**, por la misma razón que
+ * `PUBLIC_SKIP_CODE`: un `DownstreamSkipCode` nuevo sin decidir a quién despierta
+ * NO COMPILA. Sin esto, la HU siguiente agrega un código y cae por descarte en
+ * cualquier balde, que es exactamente cómo se armó el `NOT_CONFIGURED` de hoy.
+ */
+const SKIP_ACTION: Record<DownstreamSkipCode, DownstreamSkipAction> = {
+  // ── Los CUATRO que el vocabulario público colapsa en `NOT_CONFIGURED`.
+  //    Cuatro acciones distintas, cuatro dueños distintos. Es el motivo de esta tabla.
+  FLAG_OFF: 'NONE_SETTLE_DISABLED',
+  CHAIN_ENVIRONMENT_DRIFT: 'OPERATOR_FIX_CONFIG',
+  MAINNET_NOT_ALLOWED: 'OPERATOR_DECIDE_MAINNET_OPT_IN',
+  MISSING_INTENT_ID: 'OPERATOR_FIX_CODE',
+
+  // ── Declaración del agente. Los SEIS comparten acción A PROPÓSITO: en los seis
+  //    el gateway está sano y el que corrige es el publicador, editando su card.
+  //    El detalle de QUÉ campo está mal ya viaja verbatim en el código público.
+  NO_PAYMENT_FIELD: 'PUBLISHER_FIX_LISTING',
+  METHOD_NOT_SUPPORTED: 'PUBLISHER_FIX_LISTING',
+  INVALID_PAY_TO_FORMAT: 'PUBLISHER_FIX_LISTING',
+  ZERO_PAY_TO: 'PUBLISHER_FIX_LISTING',
+  INVALID_PRICE: 'PUBLISHER_FIX_LISTING',
+  // NO va con los de arriba: acá el que puede resolver es el OPERADOR (conectando
+  // el rail). Los otros cinco el operador no los puede arreglar ni queriendo.
+  CHAIN_NOT_SUPPORTED: 'OPERATOR_CONNECT_CHAIN',
+
+  // ── Wallet del operador. `INSUFFICIENT_BALANCE` es un HECHO medido (la wallet
+  //    está seca ⇒ recargar). Los dos de lectura fallida NO: ahí no se sabe cuánto
+  //    hay, y tratarlos como "seca" haría recargar por las dudas cada vez que un
+  //    RPC parpadea, además de esconder el RPC caído.
+  INSUFFICIENT_BALANCE: 'OPERATOR_FUND_WALLET',
+  BALANCE_LOW_ON_IDEMPOTENT_REPLAY: 'OPERATOR_FUND_WALLET',
+  BALANCE_READ_FAILED: 'OPERATOR_BALANCE_UNKNOWN',
+  BALANCE_PRECHECK_SKIPPED: 'OPERATOR_BALANCE_UNKNOWN',
+
+  SIGNING_FAILED: 'OPERATOR_FIX_KEY',
+
+  // ── Resultado del pago. `SETTLE_FAILED`/`VERIFY_FAILED` afirman que NO se pagó.
+  VERIFY_FAILED: 'INVESTIGATE_PAYMENT_REJECTED',
+  SETTLE_FAILED: 'INVESTIGATE_PAYMENT_REJECTED',
+  // …y estos dos afirman que NO SE SABE, que es una acción opuesta. `SETTLE_UNKNOWN`
+  // ya tiene código público propio por esto mismo; `SETTLE_LEDGER_UNAVAILABLE` no lo
+  // tiene (se genericiza a `UNAVAILABLE`), y acá recupera su acción real: en los dos
+  // casos el leg puede estar pagado y lo que corresponde es mirar la cadena.
+  SETTLE_UNKNOWN: 'RECONCILE_ON_CHAIN',
+  SETTLE_LEDGER_UNAVAILABLE: 'RECONCILE_ON_CHAIN',
+};
+
+/** Clasifica un skip-code interno por la acción que provoca. */
+export function toSkipAction(code: DownstreamSkipCode): DownstreamSkipAction {
+  return SKIP_ACTION[code];
+}
+
+/**
+ * Quién actúa y qué hace, en una línea. **EXHAUSTIVO POR TIPO**: una acción nueva
+ * sin dueño escrito NO COMPILA. Es el único texto que la pantalla muestra.
+ */
+const SKIP_ACTION_MEANING: Record<
+  DownstreamSkipAction,
+  { owner: string; next: string }
+> = {
+  NONE_SETTLE_DISABLED: {
+    owner: 'nadie',
+    next: 'El pago downstream está apagado por configuración. Es un estado deliberado, no una falla: si se esperaba que pagara, encender la feature; si no, no hay nada que hacer.',
+  },
+  OPERATOR_FIX_CONFIG: {
+    owner: 'operador (incidente)',
+    next: 'La config del deploy se contradice a sí misma: el rail declara un entorno y apunta a otro. Corregir la config del deploy antes de que alguien la opte-in.',
+  },
+  OPERATOR_DECIDE_MAINNET_OPT_IN: {
+    owner: 'operador (decisión de dinero)',
+    next: 'Un agente pide cobrar en una mainnet sin opt-in. Es un rechazo SANO, no una falla: decidir si esa red se habilita (plata real) o si el agente publica en otra.',
+  },
+  OPERATOR_FIX_CODE: {
+    owner: 'dev del gateway',
+    next: 'Un call-site nuestro invocó el leg sin lo que el leg exige. Es un bug de código, no de config: arreglar el call-site.',
+  },
+  OPERATOR_CONNECT_CHAIN: {
+    owner: 'operador',
+    next: 'El agente cobra en una red que este gateway no tiene conectada. Conectar el rail, o pedirle al agente que publique en uno soportado.',
+  },
+  PUBLISHER_FIX_LISTING: {
+    owner: 'publicador del agente',
+    next: 'La agent card no dice cómo cobrar, o lo dice mal. El gateway está sano: lo corrige quien publicó el agente.',
+  },
+  OPERATOR_FUND_WALLET: {
+    owner: 'operador',
+    next: 'La hot wallet de ese rail no alcanza para el leg. Recargarla.',
+  },
+  OPERATOR_BALANCE_UNKNOWN: {
+    owner: 'operador',
+    next: 'NO se pudo leer el balance del operador, así que no se sabe si había fondos. Averiguar por qué no se pudo leer (RPC/env del rail); recargar a ciegas no es la respuesta.',
+  },
+  OPERATOR_FIX_KEY: {
+    owner: 'operador',
+    next: 'La firma del operador falló: la clave falta o es inválida en ese rail. Revisar la credencial del deploy.',
+  },
+  INVESTIGATE_PAYMENT_REJECTED: {
+    owner: 'operador',
+    next: 'El pago se intentó y fue rechazado: NO salió plata. Investigar el facilitator o el rail.',
+  },
+  RECONCILE_ON_CHAIN: {
+    owner: 'operador (money-path)',
+    next: 'NO se sabe si el leg se pagó. Mirar la cadena antes de cualquier otra cosa, y NO reintentar a ciegas.',
+  },
+};
+
+/** Acciones como lista runtime, derivada de la tabla (sin segunda lista que desincronizar). */
+export const DOWNSTREAM_SKIP_ACTIONS = Object.keys(
+  SKIP_ACTION_MEANING,
+) as DownstreamSkipAction[];
+
+/** Type-guard runtime de la acción (para strings que vuelven de jsonb). */
+export function isDownstreamSkipAction(
+  value: unknown,
+): value is DownstreamSkipAction {
+  return typeof value === 'string' && Object.hasOwn(SKIP_ACTION_MEANING, value);
+}
+
+/** Quién tiene que actuar ante esta acción (string vacío si no es válida). */
+export function describeSkipActionOwner(value: unknown): string {
+  return isDownstreamSkipAction(value) ? SKIP_ACTION_MEANING[value].owner : '';
+}
+
+/** Qué hay que hacer (string vacío si no es válida). */
+export function describeSkipActionNext(value: unknown): string {
+  return isDownstreamSkipAction(value) ? SKIP_ACTION_MEANING[value].next : '';
+}
+
+/**
  * Significado de cada código PÚBLICO, en una línea, escrito para alguien que
  * conoce el negocio y no el código (WKH-191x, pantalla `/dashboard/trace`).
  *

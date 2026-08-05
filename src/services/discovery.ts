@@ -505,6 +505,13 @@ export const discoveryService = {
     // que convirtió un diagnóstico de Chaski en tres semanas de confusión.
     let excludedByReputation = 0;
     let trialAvailable = 0;
+    // TERCER VALOR de `trialAvailable`. El bloque que aplica el piso es el MISMO
+    // que lee `allowTrial`, así que sin `minReputation` el carril no se evalúa y
+    // el contador se queda en su `0` inicial — un `0` que NO es "ninguno
+    // califica" sino "no se calculó". Sin este flag las dos lecturas son
+    // indistinguibles, y llevan a acciones opuestas: no hacer nada, o mandar
+    // TAMBIÉN el piso. Se propaga SIEMPRE, igual que `standingUnavailable`.
+    let trialEvaluated = false;
 
     if (query.scope) {
       // HU-208 (port de WAS-187 AC-7): un agente que la credencial del llamador
@@ -607,6 +614,10 @@ export const discoveryService = {
       allAgents = floor.agents;
       excludedByReputation = floor.excludedByReputation;
       trialAvailable = floor.trialAvailable;
+      // Se marca acá DENTRO, no afuera con una segunda copia de la condición: el
+      // día que el guard cambie, el flag lo sigue por construcción. Una condición
+      // duplicada es cómo el flag empieza a mentir sin que nada falle.
+      trialEvaluated = true;
     }
 
     // Sort: verified-first (AC-7), then reputation (desc), then price (asc).
@@ -733,6 +744,7 @@ export const discoveryService = {
         scope: excludedByScope,
         reputation: excludedByReputation,
         trialAvailable,
+        trialEvaluated,
         // AR fix-pack BLQ-BAJO-4: el tercer valor del standing YA existía acá
         // adentro (`standingBatch.degraded`, DT-5) y moría en esta función. Sin
         // propagarlo, un batch degradado deja a todos sin score, el filtro los

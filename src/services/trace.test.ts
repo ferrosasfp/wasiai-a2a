@@ -482,6 +482,147 @@ describe('T-6 skipCounts: sólo vocabulario público (AC-6)', () => {
     expect(stats.total).toBe(0);
   });
 
+  // ── El hallazgo, medido en la pantalla ──────────────────────────────────
+  //
+  // "El código de skip colapsa 4 causas distintas en `NOT_CONFIGURED`: la
+  // telemetría no permite diagnosticar por qué no se pagó."
+  //
+  // El test de arriba (T-6) documenta el otro lado de la moneda: los códigos
+  // INTERNOS que llegaran por `downstreamSkips` se DESCARTAN a propósito, porque
+  // ese campo es el vocabulario público. Así que el operador veía
+  // `NOT_CONFIGURED × N` y nada más. Acá se prueba que el canal interno
+  // (`downstreamSkipCauses`) los separa por la ACCIÓN que provocan.
+
+  it('T-CAUSA-trace-a: cuatro causas colapsadas en un solo NOT_CONFIGURED salen como cuatro acciones', async () => {
+    wireFrom({
+      events: [
+        {
+          ...event(),
+          metadata: {
+            requestId: REQ_ID,
+            // Lo que el caller vio: cuatro veces el MISMO código. Indistinguible.
+            downstreamSkips: [
+              'NOT_CONFIGURED',
+              'NOT_CONFIGURED',
+              'NOT_CONFIGURED',
+              'NOT_CONFIGURED',
+            ],
+            // Lo que realmente pasó.
+            downstreamSkipCauses: [
+              'FLAG_OFF',
+              'CHAIN_ENVIRONMENT_DRIFT',
+              'MAINNET_NOT_ALLOWED',
+              'MISSING_INTENT_ID',
+            ],
+          },
+        },
+      ],
+    });
+
+    const stats = await traceService.skipCounts(24);
+
+    // El canal público sigue diciendo lo mismo que antes: un solo balde de 4.
+    expect(stats.skips).toEqual([
+      { code: 'NOT_CONFIGURED', count: 4, meaning: expect.any(String) },
+    ]);
+    // El canal de operador dice CUATRO cosas distintas.
+    expect(stats.causeSignalPresent).toBe(true);
+    expect(stats.skipActions).toHaveLength(4);
+    expect(stats.skipActions.map((a) => a.action).sort()).toEqual(
+      [
+        'NONE_SETTLE_DISABLED',
+        'OPERATOR_DECIDE_MAINNET_OPT_IN',
+        'OPERATOR_FIX_CODE',
+        'OPERATOR_FIX_CONFIG',
+      ].sort(),
+    );
+    // …y cada una dice quién actúa y qué hace, que es lo que la vuelve accionable.
+    for (const entry of stats.skipActions) {
+      expect(entry.owner.length).toBeGreaterThan(0);
+      expect(entry.next.length).toBeGreaterThan(0);
+      expect(entry.count).toBe(1);
+    }
+    // El detalle del código interno viaja para no tener que abrir el fuente.
+    const drift = stats.skipActions.find(
+      (a) => a.action === 'OPERATOR_FIX_CONFIG',
+    );
+    expect(drift?.codes).toEqual([
+      { code: 'CHAIN_ENVIRONMENT_DRIFT', count: 1 },
+    ]);
+    // La única que NO despierta a nadie está identificada como tal.
+    const apagado = stats.skipActions.find(
+      (a) => a.action === 'NONE_SETTLE_DISABLED',
+    );
+    expect(apagado?.owner).toContain('nadie');
+  });
+
+  it('T-CAUSA-trace-b: sin la clave interna → causeSignalPresent false (tercer valor)', async () => {
+    // Tráfico de un gateway anterior a este canal: la pantalla NO puede afirmar
+    // "cero problemas". Es distinto de `skipActions: []`, que sí lo afirma.
+    wireFrom({
+      events: [
+        {
+          ...event(),
+          metadata: { requestId: REQ_ID, downstreamSkips: ['NOT_CONFIGURED'] },
+        },
+      ],
+    });
+    const stats = await traceService.skipCounts(24);
+    expect(stats.signalPresent).toBe(true);
+    expect(stats.causeSignalPresent).toBe(false);
+    expect(stats.skipActions).toEqual([]);
+  });
+
+  it('T-CAUSA-trace-c: clave interna VACÍA → causeSignalPresent true con cero acciones', async () => {
+    wireFrom({
+      events: [
+        {
+          ...event(),
+          metadata: {
+            requestId: REQ_ID,
+            downstreamSkips: [],
+            downstreamSkipCauses: [],
+          },
+        },
+      ],
+    });
+    const stats = await traceService.skipCounts(24);
+    expect(stats.causeSignalPresent).toBe(true);
+    expect(stats.skipActions).toEqual([]);
+  });
+
+  it('T-CAUSA-trace-d: basura y códigos PÚBLICOS en la clave interna se descartan', async () => {
+    // `metadata` es jsonb: nada garantiza la forma. Un código público no es un
+    // código interno y no puede clasificar como si lo fuera.
+    wireFrom({
+      events: [
+        {
+          ...event(),
+          metadata: {
+            requestId: REQ_ID,
+            downstreamSkipCauses: [
+              'FLAG_OFF',
+              'NOT_CONFIGURED',
+              'constructor',
+              7,
+              null,
+            ],
+          },
+        },
+      ],
+    });
+    const stats = await traceService.skipCounts(24);
+    expect(stats.skipActions).toEqual([
+      {
+        action: 'NONE_SETTLE_DISABLED',
+        count: 1,
+        owner: expect.any(String),
+        next: expect.any(String),
+        codes: [{ code: 'FLAG_OFF', count: 1 }],
+      },
+    ]);
+  });
+
   it('array vacío → signalPresent true con cero skips (el gateway sí reporta)', async () => {
     wireFrom({
       events: [

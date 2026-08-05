@@ -346,6 +346,7 @@ describe('T-03 (AC-3) · `excluded` viaja en el JSON de GET y POST', () => {
         scope: 1,
         reputation: 3,
         trialAvailable: 2,
+        trialEvaluated: true,
         // AR fix-pack BLQ-BAJO-4: el cuarto campo del contrato. El doble lo declara
         // en vez de aflojar el tipo: si mañana se agrega otro, la ruta se entera acá.
         standingUnavailable: false,
@@ -364,6 +365,7 @@ describe('T-03 (AC-3) · `excluded` viaja en el JSON de GET y POST', () => {
       scope: 1,
       reputation: 3,
       trialAvailable: 2,
+      trialEvaluated: true,
       standingUnavailable: false,
     });
   });
@@ -380,6 +382,7 @@ describe('T-03 (AC-3) · `excluded` viaja en el JSON de GET y POST', () => {
       scope: 1,
       reputation: 3,
       trialAvailable: 2,
+      trialEvaluated: true,
       standingUnavailable: false,
     });
   });
@@ -420,6 +423,7 @@ describe('WKH-322 · min_reputation y UNKNOWN_DISCOVER_PARAM', () => {
         scope: 0,
         reputation: 4,
         trialAvailable: 0,
+        trialEvaluated: true,
         standingUnavailable: false,
       },
     });
@@ -627,6 +631,7 @@ describe('WKH-322 · min_reputation y UNKNOWN_DISCOVER_PARAM', () => {
         scope: 0,
         reputation: 3,
         trialAvailable: 0,
+        trialEvaluated: true,
         standingUnavailable: true,
       },
     });
@@ -663,6 +668,7 @@ describe('WKH-322 · min_reputation y UNKNOWN_DISCOVER_PARAM', () => {
         scope: 0,
         reputation: 3,
         trialAvailable: 0,
+        trialEvaluated: true,
         standingUnavailable: true,
       },
     });
