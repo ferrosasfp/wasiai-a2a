@@ -12,19 +12,24 @@
  *      EXPECTED_CHAINS (default: Base Sepolia eip155:84532 + Avalanche Fuji
  *      eip155:43113), each declaring THE METHOD THAT CORRESPONDS TO ITS CAIP-2
  *      NAMESPACE (see CHAIN_METHOD_BY_CAIP2_NAMESPACE — 'eip3009' for eip155:*,
- *      'spl-token-transfer-finalized' for solana:*) and breakerState 'CLOSED'.
- *      Fails (exit != 0) if any is missing.
+ *      'spl-token-transfer-finalized' for solana:*) and un breaker ACEPTABLE
+ *      (ver `assertBreakerAcceptable`: 'CLOSED' si el estado viene, o una razón
+ *      conocida si no viene). Fails (exit != 0) if any is missing.
  *
- *      ⚠️ RESIDUAL CONOCIDO — POR QUÉ EL DEFAULT SIGUE SIN SOLANA. Medido contra
- *      el facilitator de producción el 2026-08-04: la entrada `solana:devnet` de
- *      `/supported` NO trae el campo `breakerState` (las cuatro eip155:* sí). O
- *      sea que agregar `solana:devnet` a EXPECTED_CHAINS hoy pasa el chequeo de
- *      método y falla el de breaker con `breakerState='undefined'`. Ese rojo es
- *      CORRECTO y se deja ASÍ a propósito: el smoke no puede certificar un
- *      breaker que el facilitator no publica, y aflojar el chequeo a "si no
- *      viene, no lo mires" es justo el chequeo-que-se-apaga-solo que la nota de
- *      `requiredMethodFor` explica. Lo que falta está del lado del facilitator
- *      (publicar el breaker de Solana), no de este archivo.
+ *      ⚠️ EL RESIDUAL DE SOLANA YA NO ESTÁ, Y NO SE CERRÓ AFLOJANDO EL CHEQUEO.
+ *      Hasta el 2026-08-04 la entrada `solana:devnet` no traía `breakerState` ni
+ *      nada en su lugar, así que `EXPECTED_CHAINS=solana:devnet` salía exit 1 con
+ *      `breakerState='undefined'` — un rojo que acusaba a una cadena sana. El
+ *      facilitator (commit 1c257c2 / fix ad5b352) ahora publica, por cadena,
+ *      EXACTAMENTE UNO de `breakerState` o `breakerStateAbsentReason`, y la
+ *      entrada Solana trae `NO_BREAKER` porque ese adaptador no tiene circuit
+ *      breaker ni corresponde que lo tenga. Verificado contra producción el
+ *      2026-08-05. Lo que este script acepta es la RAZÓN, no la ausencia: sin
+ *      ninguno de los dos campos, o con una razón fuera del enum, sigue rojo.
+ *
+ *      El default de EXPECTED_CHAINS sigue sin Solana porque el rail que este
+ *      smoke cubre de punta a punta (capa E2E) es el EVM; `solana:devnet` ya se
+ *      puede pasar por env y sale verde.
  *   2. E2E layer (opt-in): ONLY when RUN_DOWNSTREAM_E2E=1 AND FUNDER_PK present.
  *      Runs the real provision -> discover -> compose -> downstream-settle flow
  *      (mirror of scripts/smoke-base-downstream.mjs) and asserts a
@@ -106,6 +111,35 @@ const CHAIN_METHOD_BY_CAIP2_NAMESPACE = Object.assign(
 );
 
 const REQUIRED_BREAKER = 'CLOSED';
+/**
+ * Los tres valores que `breakerState` puede tomar en `GET /supported` según el
+ * contrato del facilitator (`doc/openapi.yaml`, campo `breakerState`, y el tipo
+ * `ChainSupportedItem` en `src/core/supported.ts` de ese repo). Cualquier otro
+ * string en ese campo es una respuesta que no entendemos, no un estado.
+ */
+const BREAKER_STATES = ['CLOSED', 'OPEN', 'HALF_OPEN'];
+/**
+ * Las razones por las que una entrada legítimamente NO trae `breakerState`.
+ * Enum publicado por el facilitator (`doc/openapi.yaml`:
+ * `breakerStateAbsentReason.enum`, commit 1c257c2 / fix ad5b352):
+ *   - NO_BREAKER        el adaptador no expone breaker. Es el caso `solana:*`.
+ *   - BREAKER_DISABLED  tiene breaker en passthrough (`CB_ENABLED=false`).
+ *   - ADAPTER_LOOKUP_FAILED  el registry no devolvió el adaptador de una metadata
+ *     que él mismo listó. El facilitator lo documenta como inalcanzable por
+ *     construcción; si aparece, su registry está inconsistente — por eso el log
+ *     de abajo lo marca, aunque no cambia el exit code (no es un breaker abierto).
+ *
+ * ⚠️ ESTA LISTA ES UN CONJUNTO CERRADO A PROPÓSITO. Aceptar cualquier string acá
+ * equivale a aceptar la ausencia del campo: bastaría con que el facilitator
+ * mandara `breakerStateAbsentReason: "?"` —o con que un proxy lo reescribiera—
+ * para que el chequeo del breaker se apagara solo. Un guard que acepta cualquier
+ * cosa en lugar del campo que falta no es un guard.
+ */
+const KNOWN_BREAKER_ABSENT_REASONS = [
+  'NO_BREAKER',
+  'BREAKER_DISABLED',
+  'ADAPTER_LOOKUP_FAILED',
+];
 const FETCH_TIMEOUT_MS = Number(process.env.SMOKE_FETCH_TIMEOUT_MS ?? 10000);
 
 function progress(msg) {
@@ -159,6 +193,100 @@ export function requiredMethodFor(network) {
     );
   }
   return CHAIN_METHOD_BY_CAIP2_NAMESPACE[namespace].method;
+}
+
+/**
+ * Verifica la pata breaker de UNA entrada de `/supported`. Tira si no pasa;
+ * devuelve el fragmento que se imprime en el log de la cadena.
+ *
+ * ⚠️ QUÉ CAMBIÓ Y POR QUÉ (medido, no inferido). Antes acá había
+ * `if (chain.breakerState !== 'CLOSED') throw`, aplicado a TODA cadena. El
+ * 2026-08-05, contra el facilitator de producción:
+ *
+ *     EXPECTED_CHAINS=solana:devnet node scripts/smoke-downstream-x402.mjs
+ *     → [smoke] FAIL: chain solana:devnet (Solana Devnet)
+ *       breakerState='undefined' (expected 'CLOSED')            exit 1
+ *
+ * Ese rojo acusaba a una cadena sana: el `SolanaAdapter` NO TIENE circuit breaker
+ * y no corresponde que lo tenga. El breaker envuelve el camino EVM, donde el
+ * facilitator SIMULA y TRANSMITE una autorización EIP-3009 pagando su propio gas
+ * — abrirlo deja de quemar gas y el caller puede irse a otra cadena ANTES de
+ * pagar. En el riel Solana el facilitator es TESTIGO: lee a commitment
+ * `finalized` una tx que el pagador ya transmitió. No hay gas nuestro que
+ * proteger, y un breaker abierto sólo rechazaría pagos que ya están finales en la
+ * cadena. (Todo esto está en `src/core/supported.ts` del facilitator, commit
+ * 1c257c2 / fix ad5b352.)
+ *
+ * ⚠️ LO QUE **NO** SE HIZO: no se aflojó el chequeo a "si no viene `breakerState`,
+ * no lo mires". Eso sería el chequeo-que-se-apaga-solo que explica el docstring de
+ * `requiredMethodFor`, y borraría la diferencia entre "esta cadena no tiene
+ * breaker" y "el campo se perdió en el camino" / "estoy hablando con un
+ * facilitator anterior a este campo" — que es EXACTAMENTE la distinción que el
+ * facilitator acaba de agregar. La ausencia se acepta sólo cuando viene
+ * ACOMPAÑADA de una razón que está en `KNOWN_BREAKER_ABSENT_REASONS`; sin razón,
+ * o con una razón que no reconocemos, esto sale rojo.
+ *
+ * @param {{name?: string, breakerState?: unknown, breakerStateAbsentReason?: unknown}} chain
+ *        la entrada tal cual vino de `/supported`
+ * @param {string} network id CAIP-2 de la entrada, para el mensaje de error
+ * @returns {string} fragmento de log, p.ej. `breaker=CLOSED` | `breakerAbsent=NO_BREAKER`
+ */
+export function assertBreakerAcceptable(chain, network) {
+  const label = `chain ${network} (${chain?.name ?? '?'})`;
+  const state = chain?.breakerState;
+  const reason = chain?.breakerStateAbsentReason;
+
+  // Caso 1 — el estado VINO: se valida contra el enum y después contra el valor
+  // exigido. Los dos rojos son distintos a propósito: 'OPEN' es un breaker
+  // abierto (la cadena está fallando) y 'sarasa' es una respuesta que no
+  // entendemos; mandar a buscar el problema al lugar equivocado cuesta tiempo.
+  if (state !== undefined) {
+    if (!BREAKER_STATES.includes(state)) {
+      throw new Error(
+        `${label} breakerState='${state}' is not a known breaker state ` +
+          `(known: ${BREAKER_STATES.join(', ')}). Refusing to accept a value ` +
+          'this script cannot interpret.',
+      );
+    }
+    if (state !== REQUIRED_BREAKER) {
+      throw new Error(
+        `${label} breakerState='${state}' (expected '${REQUIRED_BREAKER}')`,
+      );
+    }
+    return `breaker=${state}`;
+  }
+
+  // Caso 2 — no vino el estado y TAMPOCO la razón. ROJO, y este es el caso que
+  // no se puede aflojar: es la respuesta incompleta o el facilitator viejo.
+  if (reason === undefined) {
+    throw new Error(
+      `${label} has NEITHER breakerState NOR breakerStateAbsentReason. ` +
+        'GET /supported must carry exactly one of the two per chain: the ' +
+        'payload is incomplete, was rewritten in transit, or the facilitator ' +
+        'predates the reason field. Not treating a missing field as "this ' +
+        'chain has no breaker".',
+    );
+  }
+
+  // Caso 3 — vino una razón que no está en el conjunto conocido. También ROJO:
+  // "no sé qué me dijiste" no es "está todo bien".
+  if (!KNOWN_BREAKER_ABSENT_REASONS.includes(reason)) {
+    throw new Error(
+      `${label} breakerStateAbsentReason='${reason}' is not a reason this ` +
+        `script understands (known: ${KNOWN_BREAKER_ABSENT_REASONS.join(', ')}). ` +
+        'An unrecognised reason is an answer we cannot read, not a licence to ' +
+        'skip the breaker check.',
+    );
+  }
+
+  // Caso 4 — ausencia legítima y explicada. VERDE, con la razón en el log: el
+  // motivo queda escrito en la evidencia del smoke, no se pierde.
+  return reason === 'ADAPTER_LOOKUP_FAILED'
+    ? // Verde en exit code (no hay breaker abierto), pero el facilitator declara
+      // este valor inalcanzable por construcción: si sale, su registry está
+      // inconsistente y alguien tiene que mirarlo.
+      `breakerAbsent=${reason} (WARN: facilitator registry inconsistent)`
+    : `breakerAbsent=${reason}`;
 }
 
 /**
@@ -236,13 +364,12 @@ export async function runLightLayer() {
         `chain ${expected} (${chain.name ?? '?'}) missing method '${requiredMethod}' (got: ${methods.join(', ')})`,
       );
     }
-    if (chain.breakerState !== REQUIRED_BREAKER) {
-      throw new Error(
-        `chain ${expected} (${chain.name ?? '?'}) breakerState='${chain.breakerState}' (expected '${REQUIRED_BREAKER}')`,
-      );
-    }
+    // El breaker se exige 'CLOSED' cuando la entrada LO TRAE, y se acepta ausente
+    // sólo si viene la razón conocida que lo explica. Que no venga ninguno de los
+    // dos sigue siendo rojo — ver el docstring de `assertBreakerAcceptable`.
+    const breakerLog = assertBreakerAcceptable(chain, expected);
     progress(
-      `chain ${expected} (${chain.name}) OK [methods=${methods.join(',')} breaker=${chain.breakerState}]`,
+      `chain ${expected} (${chain.name}) OK [methods=${methods.join(',')} ${breakerLog}]`,
     );
   }
 
