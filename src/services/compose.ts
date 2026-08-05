@@ -318,6 +318,9 @@ export const composeService = {
       scopingKeyRow,
       chainId,
       logger,
+      // Array PRESTADO por el route para los motivos INTERNOS de skip (canal de
+      // operador). Ausente ⇒ nadie los pidió y no se anota nada.
+      downstreamSkipCauses: skipCauses,
       // WKH-303: precios congelados por un quote firmado. Ausente ⇒ precio vivo (hoy).
       // Vive acá y no en la envoltura `compose()` porque HU-306 bajó el cuerpo del
       // pipeline a este método; el débito per-step que lo consume está en este scope.
@@ -628,6 +631,7 @@ export const composeService = {
           output,
           downstream,
           downstreamSkipCode,
+          skipCauses,
           startTime,
           steps,
           i,
@@ -978,6 +982,7 @@ export const composeService = {
                   output,
                   downstream,
                   downstreamSkipCode,
+                  skipCauses,
                   startTime,
                   steps,
                   i,
@@ -1121,6 +1126,13 @@ export const composeService = {
     downstream?: DownstreamResult | undefined;
     /** Fix-pack P1 (hallazgo 4): motivo del skip del leg downstream, si hubo. */
     downstreamSkipCode?: DownstreamSkipCode | undefined;
+    /**
+     * Array PRESTADO por el caller del pipeline (`ComposeRequest.downstreamSkipCauses`)
+     * para recibir el motivo INTERNO de cada leg salteado. Ver el docstring del
+     * campo en `types/index.ts`: es un input y no un campo del resultado porque
+     * los routes serializan el resultado entero sin schema.
+     */
+    skipCauses?: DownstreamSkipCode[] | undefined;
     startTime: number;
     steps: ResolvedComposeStep[];
     i: number;
@@ -1146,6 +1158,7 @@ export const composeService = {
       output,
       downstream,
       downstreamSkipCode,
+      skipCauses,
       startTime,
       steps,
       i,
@@ -1180,6 +1193,14 @@ export const composeService = {
         downstreamSettle: `skipped:${toPublicSkipCode(downstreamSkipCode)}`,
       }),
     };
+    // Canal de OPERADOR: el motivo INTERNO, que `toPublicSkipCode` acaba de
+    // genericizar. Sin esto, cuatro causas con cuatro dueños distintos
+    // (`FLAG_OFF` / `CHAIN_ENVIRONMENT_DRIFT` / `MAINNET_NOT_ALLOWED` /
+    // `MISSING_INTENT_ID`) llegan a la telemetría como un solo `NOT_CONFIGURED` y
+    // el operador no puede saber si tiene que arreglar algo o si no pasa nada.
+    // Va al array PRESTADO, NO al `StepResult`: el resultado se serializa entero
+    // al caller y estos códigos son los que NO deben salir de casa.
+    if (downstreamSkipCode) skipCauses?.push(downstreamSkipCode);
     // HU-208: procedencia del agente. Se copia del step RESUELTO, que la trae
     // sólo si el gateway lo eligió a partir de una `capability`. Aditivo: en un
     // step nombrado por el llamador el campo queda ausente y la respuesta es

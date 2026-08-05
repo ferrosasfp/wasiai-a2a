@@ -6,7 +6,10 @@
 // de skip-codes en vez de `string`. Es un ciclo de tipos con
 // `lib/downstream-skip-code.ts` (que importa `DownstreamLogger` de acá), pero
 // `import type` se borra en runtime → no hay ciclo de módulos real.
-import type { PublicDownstreamSkipCode } from '../lib/downstream-skip-code.js';
+import type {
+  DownstreamSkipCode,
+  PublicDownstreamSkipCode,
+} from '../lib/downstream-skip-code.js';
 // HU-203: `ComposeResult.settleRefundWithheld` reusa el vocabulario del módulo que
 // TOMA la decisión de retener, para que no puedan divergir. `import type` → sin ciclo
 // de módulos en runtime.
@@ -933,6 +936,24 @@ export interface ComposeRequest {
    */
   logger?: DownstreamLogger | undefined;
   /**
+   * Array PRESTADO por el caller para recibir el motivo INTERNO de cada leg
+   * downstream que NO se pagó (uno por step salteado, en orden de ejecución).
+   *
+   * POR QUÉ ES UN INPUT Y NO UN CAMPO DEL `ComposeResult`. Los dos routes hacen
+   * `reply.send({ …, ...result })` sin schema de respuesta, así que TODO lo que
+   * viva en el resultado sale por HTTP al caller — y estos códigos son
+   * justamente los que `toPublicSkipCode` genericiza para no filtrar flags,
+   * allow-list de mainnet ni estado de la wallet del operador. Prestando el
+   * array la fuga es imposible POR CONSTRUCCIÓN: no hay nada que borrar antes de
+   * responder ni un route futuro que se pueda olvidar de borrarlo.
+   *
+   * Es el mismo patrón (y por el mismo tipo de razón) que el `results` prestado
+   * de `composeService.execute`, documentado en `services/compose.ts`.
+   *
+   * Ausente ⟹ compose no anota nada y el comportamiento es idéntico al de antes.
+   */
+  downstreamSkipCauses?: DownstreamSkipCode[] | undefined;
+  /**
    * WKH-101 (DT-11): contexto de delegación para el débito per-step (steps 2..N).
    * Cuando está presente, budgetService.debit enruta al RPC atómico
    * debit_delegation_and_parent (AC-7 per-step + AC-8/AC-9). undefined → master
@@ -1180,6 +1201,13 @@ export interface OrchestrateRequest {
   scopingKeyRow?: A2AAgentKeyRow | undefined;
   /** WKH-101 (DT-11): contexto de delegación propagado a composeService.compose. */
   delegationContext?: DelegationDebitContext | undefined;
+  /**
+   * Array PRESTADO para los motivos INTERNOS de skip del leg downstream. Se
+   * propaga tal cual a `composeService.compose`; ver el docstring del campo
+   * homónimo en `ComposeRequest` para por qué es un input y no un campo del
+   * resultado.
+   */
+  downstreamSkipCauses?: DownstreamSkipCode[] | undefined;
   /**
    * WKH-121 (BLQ-ALTO-1): contexto de key-session propagado a
    * composeService.compose para que el cap de sesión se respete en los steps

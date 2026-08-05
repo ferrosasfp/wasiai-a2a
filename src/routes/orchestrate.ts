@@ -11,6 +11,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 // WKH-305 (CR MNR-3): módulo LEAF (cero imports de runtime) — la MISMA
 // definición de las reglas de forma que usan el borde de `/compose` y el service.
 import { validateInputMappingShape } from '../lib/compose-input-mapping.js';
+import type { DownstreamSkipCode } from '../lib/downstream-skip-code.js';
 import {
   extractRawKey,
   requirePaymentOrA2AKey,
@@ -160,8 +161,15 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         // BLQ-2: bail early if timeout already sent 504
         if (reply.sent) return;
 
+        // Array PRESTADO al pipeline para los motivos INTERNOS de skip del leg
+        // downstream. Es un INPUT y no un campo del resultado porque abajo se hace
+        // `reply.send({ ..., ...result })` sin schema: todo lo que viva en el
+        // resultado sale por HTTP, y estos codigos son los que se genericizan
+        // justamente para no salir de casa.
+        const downstreamSkipCauses: DownstreamSkipCode[] = [];
         const result = await orchestrateService.orchestrate(
           {
+            downstreamSkipCauses,
             goal: body.goal.trim(),
             budget: body.budget,
             preferCapabilities: body.preferCapabilities,
@@ -224,7 +232,11 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         // WKH-191x: retiene los skip-codes PÚBLICOS del pipeline para que el evento
         // los persista (`a2a_events.metadata.downstreamSkips`). Aditivo puro: NO lee
         // ni cambia nada del money-path, sólo copia lo que ya viaja en el response.
-        noteDownstreamSkips(request, result.pipeline.steps);
+        noteDownstreamSkips(
+          request,
+          result.pipeline.steps,
+          downstreamSkipCauses,
+        );
         return reply.status(status).send({ kiteTxHash, ...result });
       } catch (err) {
         const message =
@@ -728,8 +740,15 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           discoveredAgents: [],
         };
 
+        // Array PRESTADO al pipeline para los motivos INTERNOS de skip del leg
+        // downstream. Es un INPUT y no un campo del resultado porque abajo se hace
+        // `reply.send({ ..., ...result })` sin schema: todo lo que viva en el
+        // resultado sale por HTTP, y estos codigos son los que se genericizan
+        // justamente para no salir de casa.
+        const downstreamSkipCauses: DownstreamSkipCode[] = [];
         const result = await orchestrateService.executeApprovedPlan(
           {
+            downstreamSkipCauses,
             goal: '',
             budget: body.budget,
             preferCapabilities: body.preferCapabilities,
@@ -800,7 +819,11 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           reply.header('x-a2a-remaining-budget', result.remainingBudgetUsd);
         }
         // WKH-191x: ver el comentario del handler atómico (aditivo, telemetría).
-        noteDownstreamSkips(request, result.pipeline.steps);
+        noteDownstreamSkips(
+          request,
+          result.pipeline.steps,
+          downstreamSkipCauses,
+        );
         return reply.status(status).send({ kiteTxHash, ...result });
       } catch (err) {
         const message =

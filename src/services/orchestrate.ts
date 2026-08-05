@@ -1229,6 +1229,11 @@ export const orchestrateService = {
       // y el débito per-step funciona en ambos paths. El guard `i>0` (CD-1)
       // sigue intacto como única defensa anti-double-charge del step 0.
       chainId: request.chainId,
+      // Array PRESTADO por el route para los motivos INTERNOS de skip del leg
+      // downstream (canal de operador). Se propaga tal cual: `/orchestrate` corre
+      // el MISMO pipeline que `/compose` y su telemetría tiene que poder
+      // diagnosticar lo mismo. Ausente ⇒ nadie los pidió.
+      downstreamSkipCauses: request.downstreamSkipCauses,
       // WKH-303: precios CONGELADOS por un quote firmado que el caller redimió en
       // `/orchestrate/execute`. Ausente ⇒ compose debita el precio vivo, como hoy.
       frozenStepPricesUsd: request.frozenStepPricesUsd,

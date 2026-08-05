@@ -106,6 +106,10 @@ vi.mock('../lib/downstream-payment.js', () => ({
 // producción y no un doble, para que el test se rompa si el contrato del adapter cambia.
 import { FacilitatorSettleError } from '../adapters/errors.js';
 import { signAndSettleDownstream } from '../lib/downstream-payment.js';
+import {
+  type DownstreamSkipCode,
+  toSkipAction,
+} from '../lib/downstream-skip-code.js';
 // HU-DOUBLE-PAY: la clasificación de la retención la hacen las funciones REALES
 // de producción (las mismas que llamaba el leg de salida borrado). El test sólo
 // elige DÓNDE se tira el error, no qué significa.
@@ -511,6 +515,128 @@ describe('composeService — WKH-55 downstream x402 hook', () => {
     });
 
     expect(result.steps[0]!.downstreamSettle).toBeUndefined();
+  });
+
+  // ── Canal de OPERADOR: el motivo INTERNO del skip ────────────────────────
+  //
+  // EL HALLAZGO: "el código de skip colapsa 4 causas distintas en
+  // `NOT_CONFIGURED`: la telemetría no permite diagnosticar por qué no se pagó".
+  // Verificado y cierto — `FLAG_OFF`, `CHAIN_ENVIRONMENT_DRIFT`,
+  // `MAINNET_NOT_ALLOWED` y `MISSING_INTENT_ID` salen todas como `NOT_CONFIGURED`,
+  // y ese código público era lo único que llegaba a `a2a_events`.
+  //
+  // El motivo interno viaja ahora por un array PRESTADO por el route (input, no
+  // campo del resultado) para que no pueda salir por HTTP ni por accidente.
+
+  it('T-CAUSA-compose-a: el motivo INTERNO llega al array prestado, no genericizado', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    // `CHAIN_ENVIRONMENT_DRIFT` es una de las cuatro que el público colapsa. Es la
+    // que más importa: significa que NUESTRA config está rota, o sea alguien se
+    // tiene que levantar. Indistinguible de `FLAG_OFF` en el canal viejo.
+    mockDownstream.mockImplementation(async (_agent, logger) => {
+      logger.warn(
+        { code: 'CHAIN_ENVIRONMENT_DRIFT' },
+        '[Downstream] config incoherente',
+      );
+      return null;
+    });
+    const agent = makeAgent({ slug: 'drift-agent', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk();
+
+    const downstreamSkipCauses: DownstreamSkipCode[] = [];
+    const result = await composeService.compose({
+      steps: [{ agent: agent.slug, input: {} }],
+      downstreamSkipCauses,
+    });
+
+    // (1) el caller sigue viendo el código genericizado, byte-idéntico a antes…
+    expect(result.steps[0]!.downstreamSettle).toBe('skipped:NOT_CONFIGURED');
+    // (2) …y el operador ve la causa real.
+    expect(downstreamSkipCauses).toEqual(['CHAIN_ENVIRONMENT_DRIFT']);
+    // (3) el código interno NO viaja en el resultado, que es lo que se serializa.
+    expect(JSON.stringify(result)).not.toContain('CHAIN_ENVIRONMENT_DRIFT');
+  });
+
+  it('T-CAUSA-compose-b: dos causas que el público colapsa llegan SEPARADAS', async () => {
+    // Es la prueba del hallazgo en el camino real: dos steps, dos causas con dos
+    // dueños distintos (nadie actúa vs. decisión de dinero), y el caller ve dos
+    // veces el mismo `NOT_CONFIGURED`.
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const codes = ['FLAG_OFF', 'MAINNET_NOT_ALLOWED'] as const;
+    let call = 0;
+    mockDownstream.mockImplementation(async (_agent, logger) => {
+      logger.warn({ code: codes[call++] }, '[Downstream] skip');
+      return null;
+    });
+    const a1 = makeAgent({ slug: 'c1', priceUsdc: 0 });
+    const a2 = makeAgent({ slug: 'c2', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent)
+      .mockResolvedValueOnce(a1)
+      .mockResolvedValueOnce(a2)
+      .mockResolvedValueOnce(a2);
+    mockFetchOk();
+    mockFetchOk();
+
+    const downstreamSkipCauses: DownstreamSkipCode[] = [];
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'c1', input: {} },
+        { agent: 'c2', input: {} },
+      ],
+      downstreamSkipCauses,
+    });
+
+    // Lo que el caller ve: dos veces lo MISMO. Ese es el colapso, y se mantiene.
+    expect(result.steps.map((s) => s.downstreamSettle)).toEqual([
+      'skipped:NOT_CONFIGURED',
+      'skipped:NOT_CONFIGURED',
+    ]);
+    // Lo que el operador ve: dos causas distintas, en orden de ejecución.
+    expect(downstreamSkipCauses).toEqual(['FLAG_OFF', 'MAINNET_NOT_ALLOWED']);
+    expect(new Set(downstreamSkipCauses.map(toSkipAction)).size).toBe(2);
+  });
+
+  it('T-CAUSA-compose-c: sin array prestado, el comportamiento es idéntico al de antes', async () => {
+    // El canal es opt-in: un caller que no lo pide (el tool MCP, por ejemplo) no
+    // paga nada y no cambia ni un byte de su respuesta.
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockDownstream.mockImplementation(async (_agent, logger) => {
+      logger.warn({ code: 'FLAG_OFF' }, '[Downstream] flag off');
+      return null;
+    });
+    const agent = makeAgent({ slug: 'sin-sink', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk();
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'sin-sink', input: {} }],
+    });
+
+    expect(result.steps[0]!.downstreamSettle).toBe('skipped:NOT_CONFIGURED');
+  });
+
+  it('T-CAUSA-compose-d: un leg que SÍ se pagó no ensucia el canal', async () => {
+    // El array acumula sólo legs NO pagados. Si se llenara con los códigos de
+    // observabilidad que NO cortan (`BALANCE_PRECHECK_SKIPPED`), el operador
+    // contaría como problema un leg que pagó bien.
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    mockDownstream.mockImplementation(async (_agent, logger) => {
+      logger.warn({ code: 'BALANCE_PRECHECK_SKIPPED' }, '[Downstream] sin RPC');
+      return { txHash: '0xok', blockNumber: 7, settledAmount: '1' };
+    });
+    const agent = makeAgent({ slug: 'pago-ok', priceUsdc: 0 });
+    vi.mocked(discoveryService.getAgent).mockResolvedValueOnce(agent);
+    mockFetchOk();
+
+    const downstreamSkipCauses: DownstreamSkipCode[] = [];
+    const result = await composeService.compose({
+      steps: [{ agent: 'pago-ok', input: {} }],
+      downstreamSkipCauses,
+    });
+
+    expect(result.steps[0]!.downstreamTxHash).toBe('0xok');
+    expect(downstreamSkipCauses).toEqual([]);
   });
 
   it('propagates downstreamTxHash to StepResult when downstream succeeds (T-W3-02 / AC-3)', async () => {

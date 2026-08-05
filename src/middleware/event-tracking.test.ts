@@ -31,6 +31,7 @@ vi.mock('../services/event.js', () => ({
   },
 }));
 
+import type { DownstreamSkipCode } from '../lib/downstream-skip-code.js';
 import {
   noteDownstreamSkips,
   registerEventTracking,
@@ -318,13 +319,14 @@ describe('registerEventTracking middleware', () => {
   /** App aislada cuyo handler corre `noteDownstreamSkips` como lo hace /compose. */
   async function appWithSteps(
     steps: ReadonlyArray<{ downstreamSettle?: string | undefined }>,
+    causes?: ReadonlyArray<DownstreamSkipCode>,
   ) {
     const localApp = Fastify();
     registerEventTracking(localApp);
     localApp.post(
       '/compose',
       async (req: FastifyRequest, reply: FastifyReply) => {
-        noteDownstreamSkips(req, steps);
+        noteDownstreamSkips(req, steps, causes);
         return reply.send({ ok: true });
       },
     );
@@ -334,8 +336,9 @@ describe('registerEventTracking middleware', () => {
 
   async function trackedMetadata(
     steps: ReadonlyArray<{ downstreamSettle?: string | undefined }>,
+    causes?: ReadonlyArray<DownstreamSkipCode>,
   ) {
-    const localApp = await appWithSteps(steps);
+    const localApp = await appWithSteps(steps, causes);
     try {
       await localApp.inject({ method: 'POST', url: '/compose', payload: {} });
       await new Promise((r) => setTimeout(r, 50));
@@ -386,5 +389,78 @@ describe('registerEventTracking middleware', () => {
       { downstreamSettle: 'skipped:UNAVAILABLE' },
     ]);
     expect(metadata.downstreamSkips).toEqual(['UNAVAILABLE']);
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Canal de OPERADOR: el motivo INTERNO del skip.
+  //
+  // T-SKIP-4 (arriba) documenta el agujero: los códigos internos NO pueden
+  // viajar por `downstreamSkips`, y esa es la decisión correcta — ese campo se
+  // deriva de la respuesta al caller. El efecto colateral era que las CUATRO
+  // causas que el público colapsa en `NOT_CONFIGURED` llegaban a `a2a_events`
+  // indistinguibles entre sí. Ahora viajan por su propia clave, que sólo lee la
+  // pantalla admin.
+  // ══════════════════════════════════════════════════════════════════
+
+  it('T-CAUSA-evt-1: los motivos internos llegan a metadata.downstreamSkipCauses', async () => {
+    const metadata = await trackedMetadata(
+      [
+        { downstreamSettle: 'skipped:NOT_CONFIGURED' },
+        { downstreamSettle: 'skipped:NOT_CONFIGURED' },
+      ],
+      ['FLAG_OFF', 'CHAIN_ENVIRONMENT_DRIFT'],
+    );
+    // Lo que el caller vio: dos veces lo mismo.
+    expect(metadata.downstreamSkips).toEqual([
+      'NOT_CONFIGURED',
+      'NOT_CONFIGURED',
+    ]);
+    // Lo que el operador puede diagnosticar.
+    expect(metadata.downstreamSkipCauses).toEqual([
+      'FLAG_OFF',
+      'CHAIN_ENVIRONMENT_DRIFT',
+    ]);
+  });
+
+  it('T-CAUSA-evt-2: pipeline sin skips → clave PRESENTE y vacía (reporta y no hubo)', async () => {
+    const metadata = await trackedMetadata([{ downstreamSettle: '0xabc' }], []);
+    expect('downstreamSkipCauses' in metadata).toBe(true);
+    expect(metadata.downstreamSkipCauses).toEqual([]);
+  });
+
+  it('T-CAUSA-evt-3: route que no presta el array → clave AUSENTE (tercer valor)', async () => {
+    // Ausente NO es "cero causas": es "esta ruta no reporta causas". La pantalla
+    // distingue los dos con `causeSignalPresent`.
+    const metadata = await trackedMetadata([
+      { downstreamSettle: 'skipped:NOT_CONFIGURED' },
+    ]);
+    expect('downstreamSkips' in metadata).toBe(true);
+    expect('downstreamSkipCauses' in metadata).toBe(false);
+  });
+
+  it('T-CAUSA-evt-4: el array se COPIA — mutarlo después no cambia lo persistido', async () => {
+    // El array es prestado y vive en el handler; el track es fire-and-forget y
+    // corre después. Si se guardara la referencia, cualquier push posterior
+    // reescribiría telemetría ya "emitida".
+    const causes: DownstreamSkipCode[] = ['FLAG_OFF'];
+    const localApp = Fastify();
+    registerEventTracking(localApp);
+    localApp.post(
+      '/compose',
+      async (req: FastifyRequest, reply: FastifyReply) => {
+        noteDownstreamSkips(req, [], causes);
+        causes.push('SETTLE_FAILED');
+        return reply.send({ ok: true });
+      },
+    );
+    await localApp.ready();
+    try {
+      await localApp.inject({ method: 'POST', url: '/compose', payload: {} });
+      await new Promise((r) => setTimeout(r, 50));
+      const metadata = mockTrack.mock.calls[0]![0]!.metadata;
+      expect(metadata.downstreamSkipCauses).toEqual(['FLAG_OFF']);
+    } finally {
+      await localApp.close();
+    }
   });
 });
