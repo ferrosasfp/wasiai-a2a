@@ -40,15 +40,46 @@ const SLUG_ALIASES: Record<string, ChainKey> = Object.assign(
     '2366': 'kite-mainnet',
     'kite-mainnet': 'kite-mainnet',
 
-    // base-mainnet aliases (DT-7: 'base' alone → mainnet, convención comunidad)
+    // base-mainnet aliases
     '8453': 'base-mainnet',
     'base-mainnet': 'base-mainnet',
-    base: 'base-mainnet',
 
     // base-sepolia aliases
+    //
+    // ⚠️ CAMBIO INTENCIONAL DE API OBSERVABLE — simetría de alias ambiguos.
+    // `base` a secas apuntaba a `base-mainnet` (la vieja DT-7, "convención
+    // comunidad"). Era el ÚNICO alias BARE del mapa que caía en dinero real:
+    // sus tres hermanos (`avalanche`, `tempo`, `solana`) caen a testnet. Esa
+    // asimetría es un footgun silencioso del money-path — no falla, settlea
+    // contra la cadena equivocada — porque quien escribe `base` esperando el
+    // mismo criterio que `avalanche` apunta a chainId 8453.
+    //
+    // La convención comunidad ("base = mainnet") vale en un sistema
+    // mainnet-first. Acá TODO el deploy es testnet y todos los demás bare
+    // aliases significan testnet, así que la convención importada contradice a
+    // sus vecinos: es exactamente lo que la vuelve trampa.
+    //
+    // Regla nueva: NINGÚN alias resuelve a mainnet salvo que lo DIGA
+    // explícitamente (`base-mainnet`, `avalanche-mainnet`, `kite-mainnet`) o
+    // sea el chainId numérico de esa mainnet (`8453`, `43114`, `2366`). Un
+    // alias bare es una declaración incompleta y se interpreta del lado seguro.
+    //
+    // Dirección de seguridad (NO debilita el gate de mainnet del leg
+    // downstream): `WASIAI_DOWNSTREAM_MAINNET_ALLOW` pasa cada entrada de su
+    // CSV por esta misma función (`downstream-payment.ts` →
+    // `isDownstreamMainnetAllowed`). Con este cambio un `…_ALLOW=base` deja de
+    // habilitar `base-mainnet` y pasa a ser una entrada MUERTA (`base-sepolia`
+    // nunca es mainnet). O sea: estrictamente más restrictivo. NADA que hoy
+    // quede del lado seguro cruza al lado de mainnet.
+    //
+    // Costo medido en el catálogo vivo (25 agentes, `/discover?limit=100`):
+    // CERO agentes declaran `base` (16 declaran `avalanche`, 6
+    // `avalanche-fuji`, 3 `solana-devnet`). Ningún doc/env/runbook usa el alias
+    // bare tampoco: los opt-in documentados son todos `-mainnet` explícitos.
     '84532': 'base-sepolia',
     'base-sepolia': 'base-sepolia',
     'base-testnet': 'base-sepolia',
+    base: 'base-sepolia',
 
     // tempo-testnet aliases (WKH-090) — estáticos (el resolver es puro, NO lee
     // el flag; CD-7). Conocer el slug NO expone el rail con flag OFF: el bundle
@@ -126,8 +157,58 @@ const CHAIN_NAMESPACE: Record<ChainKey, ChainNamespace> = {
   'solana-devnet': 'solana',
 };
 
+/**
+ * Set de los nombres de namespace, con prototipo `null` (mismo criterio
+ * anti-prototype-pollution que `SLUG_ALIASES`, CD-19: la consulta viene de
+ * input arbitrario). Se DERIVA de los valores de `CHAIN_NAMESPACE`, así que un
+ * namespace nuevo entra solo — no hay una segunda lista que mantener en
+ * sincronía. Lo consume `isAmbiguousChainAlias`.
+ */
+const NAMESPACE_LOOKUP: Record<string, true> = Object.assign(
+  Object.create(null) as Record<string, true>,
+  Object.fromEntries(
+    Object.values(CHAIN_NAMESPACE).map((ns) => [ns, true as const]),
+  ),
+);
+
 export function getChainNamespace(chainKey: ChainKey): ChainNamespace {
   return CHAIN_NAMESPACE[chainKey];
+}
+
+/**
+ * ¿El string declarado nombra una red SIN decir su entorno?
+ *
+ * Un alias AMBIGUO es el nombre pelado de un namespace (`base`, `avalanche`,
+ * `tempo`, `solana`): identifica la red lógica pero NO si es testnet o mainnet.
+ * Todo lo demás es explícito — `base-sepolia` / `avalanche-mainnet` lo dicen en
+ * el slug, `fuji` es el nombre propio de una testnet, y los chainIds numéricos
+ * (`8453`, `43113`) identifican una red única.
+ *
+ * El conjunto se DERIVA de `ChainNamespace` (no es una segunda lista a mano):
+ * agregar un namespace nuevo clasifica su alias bare automáticamente, así que
+ * no puede quedar desactualizado. Un namespace sin alias bare (`kite`, que hoy
+ * no tiene entrada en `SLUG_ALIASES`) devuelve `false` — no es un alias.
+ *
+ * ⚠️ ESTA FUNCIÓN NO RECHAZA NADA. Es la PRIMERA MITAD de la eliminación de la
+ * clase de error (postura C: "un alias ambiguo se rechaza, hay que escribir
+ * `base-sepolia` o `base-mainnet`"). El rechazo NO se implementó a propósito:
+ * medido contra el catálogo vivo (25 agentes), **16 declaran `avalanche`** —
+ * rechazar hoy rompería el 64% del catálogo de una. El orden obligatorio es
+ * (1) observar quién los usa, (2) migrar esos agentes a slugs explícitos,
+ * (3) recién ahí rechazar.
+ *
+ * SEGUNDA MITAD — DECLARADA, NO CONSTRUIDA (`TD-CHAIN-ALIAS-AMBIGUO`):
+ * cuando el contador de `AMBIGUOUS_CHAIN_ALIAS` en el leg downstream llegue a
+ * cero sostenido, `normalizeChainSlug` pasa a devolver `undefined` para estos
+ * alias y el gateway responde `CHAIN_NOT_SUPPORTED` pidiendo el slug explícito.
+ * Hasta entonces resuelven del lado SEGURO (testnet), que es lo que arregla el
+ * footgun sin romper a nadie.
+ */
+export function isAmbiguousChainAlias(raw: string): boolean {
+  if (typeof raw !== 'string') return false;
+  const key = raw.trim().toLowerCase();
+  if (!Object.hasOwn(SLUG_ALIASES, key)) return false;
+  return Object.hasOwn(NAMESPACE_LOOKUP, key);
 }
 
 /**
@@ -321,6 +402,20 @@ export function findChainEnvironmentDrift(input: {
  * Returns `undefined` for any unknown input. Total — never throws, never
  * returns the default silently (callers MUST decide what to do on undefined).
  */
+/**
+ * Todos los alias que `normalizeChainSlug` reconoce.
+ *
+ * Existe para que el invariante de seguridad "NINGÚN alias resuelve a mainnet
+ * salvo los que lo DICEN explícitamente" sea verificable por ENUMERACIÓN y no
+ * por una lista que alguien mantiene a mano en el test: un alias nuevo entra
+ * solo, y si apunta a una mainnet sin declararlo el test lo caza. Un test que
+ * sólo prueba los alias que el autor se acordó de escribir no cubre al que
+ * viene después.
+ */
+export function listChainAliases(): string[] {
+  return Object.keys(SLUG_ALIASES);
+}
+
 export function normalizeChainSlug(raw: string): ChainKey | undefined {
   if (typeof raw !== 'string') return undefined;
   const key = raw.trim().toLowerCase();

@@ -1703,7 +1703,46 @@ describe('signAndSettleDownstream — mainnet opt-in gate (fix-pack AR-profundo 
       logger,
     );
     expect(result).toEqual({ txHash: '0xFUJI', settledAmount: '500000' });
-    expect(logger.warn).not.toHaveBeenCalled();
+    // Lo que este test protege: NINGÚN warning que corte o degrade el leg.
+    // Se pasó de `not.toHaveBeenCalled()` a enumerar los códigos porque el
+    // colapso legacy de arriba (CD-2) reescribe `avalanche-testnet` → el alias
+    // AMBIGUO `avalanche`, y desde la simetría de alias eso emite el aviso
+    // `AMBIGUOUS_CHAIN_ALIAS` (telemetría, NO rechaza — ver el describe de
+    // simetría). El leg settlea igual: el `0xFUJI` de arriba lo prueba.
+    for (const code of [
+      'MAINNET_NOT_ALLOWED',
+      'CHAIN_ENVIRONMENT_DRIFT',
+      'CHAIN_NOT_SUPPORTED',
+    ]) {
+      expect(logger.warn, `code=${code}`).not.toHaveBeenCalledWith(
+        expect.objectContaining({ code }),
+        expect.any(String),
+      );
+    }
+  });
+
+  // ⚠️ El colapso legacy CD-2 hace que un agente que declaró CORRECTAMENTE
+  // `avalanche-testnet` se vea como el alias ambiguo `avalanche` en el leg. Es
+  // una limitación REAL de la telemetría `AMBIGUOUS_CHAIN_ALIAS` (sobre-cuenta)
+  // y un PRE-REQUISITO de la segunda mitad de la postura C: rechazar `avalanche`
+  // sin arreglar antes este colapso rompería a agentes que hicieron lo correcto.
+  // Este test fija la limitación para que quien implemente el rechazo la vea.
+  it('LIMITACIÓN CONOCIDA (TD-CHAIN-ALIAS-AMBIGUO): el colapso CD-2 convierte `avalanche-testnet` (explícito) en `avalanche` (ambiguo)', async () => {
+    const { isAmbiguousChainAlias } = await import(
+      '../adapters/chain-resolver.js'
+    );
+    const spec = readPaymentSpec({
+      payment: {
+        method: 'x402',
+        chain: 'avalanche-testnet',
+        contract: PAYTO_ADDR,
+      },
+    });
+    // El agente declaró un slug EXPLÍCITO…
+    expect(isAmbiguousChainAlias('avalanche-testnet')).toBe(false);
+    // …y el reader lo reescribió a uno ambiguo.
+    expect(spec?.chain).toBe('avalanche');
+    expect(isAmbiguousChainAlias(spec?.chain as string)).toBe(true);
   });
 
   it('T-FIX1B-5: env con valor basura o vacío → fail-CLOSED (no habilita nada)', async () => {
@@ -2342,5 +2381,158 @@ describe('WKH-302 — disposición del valor en el leg Solana', () => {
     await signAndSettleDownstream(solanaAgent(), makeLogger(), SOL_INTENT);
 
     expect(mockSolanaBalance).toHaveBeenCalled();
+  });
+});
+
+// ─── Simetría de alias de red: el alias BARE no toca dinero real ──────────
+// `avalanche` caía a Fuji pero `base` caía a chainId 8453 (MAINNET). Quien
+// escribía `base` esperando el criterio de `avalanche` mandaba el leg a dinero
+// real, en silencio. Estos tests miden el efecto en el MONEY-PATH (el resolver
+// puro se cubre en `adapters/__tests__/chain-alias-symmetry.test.ts`).
+describe('signAndSettleDownstream — simetría de alias de red', () => {
+  function agentOnChain(chain: string) {
+    return makeAgent({
+      priceUsdc: 0.5,
+      payment: {
+        method: 'x402',
+        asset: 'USDC',
+        chain,
+        contract: PAYTO_ADDR,
+      },
+    });
+  }
+
+  it('★ `base` a secas settlea en base-SEPOLIA; los adapters mainnet NUNCA se tocan', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(agentOnChain('base'), logger);
+
+    // `0xBASE` es el settle de base-sepolia; `0xBASEM` el de base-mainnet.
+    expect(result?.txHash).toBe('0xBASE');
+    expect(mockBaseSettle).toHaveBeenCalledTimes(1);
+    expect(mockBaseMainnetSign).not.toHaveBeenCalled();
+    expect(mockBaseMainnetSettle).not.toHaveBeenCalled();
+  });
+
+  it('★ el leg de `base` firma contra el chainId 84532, no el 8453', async () => {
+    // El destino REAL, no el string: el bundle que el leg resolvió.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+
+    await signAndSettleDownstream(agentOnChain('base'), makeLogger());
+
+    expect(mockGetAdaptersBundle).toHaveBeenCalledWith('base-sepolia');
+    expect(mockGetAdaptersBundle).not.toHaveBeenCalledWith('base-mainnet');
+  });
+
+  it('★ EL GATE NO SE DEBILITA: `…_MAINNET_ALLOW=base` ya NO habilita base-mainnet (entrada MUERTA)', async () => {
+    // Este es el test que prueba la DIRECCIÓN del cambio. El CSV del opt-in pasa
+    // por el MISMO `normalizeChainSlug`; si `base` siguiera resolviendo a
+    // mainnet, esta env abriría el settle de dinero real. Ahora resuelve a
+    // base-sepolia, que nunca es mainnet → la entrada no habilita nada.
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    process.env.WASIAI_DOWNSTREAM_MAINNET_ALLOW = 'base';
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(
+      agentOnChain('base-mainnet'),
+      logger,
+    );
+
+    expect(result).toBeNull();
+    expect(mockBaseMainnetSign).not.toHaveBeenCalled();
+    expect(mockBaseMainnetSettle).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'MAINNET_NOT_ALLOWED',
+        chain: 'base-mainnet',
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('control: el opt-in EXPLÍCITO `base-mainnet` sigue abriendo el settle (el gate no se rompió al revés)', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    process.env.WASIAI_DOWNSTREAM_MAINNET_ALLOW = 'base-mainnet';
+
+    const result = await signAndSettleDownstream(
+      agentOnChain('base-mainnet'),
+      makeLogger(),
+    );
+
+    expect(result?.txHash).toBe('0xBASEM');
+    expect(mockBaseMainnetSettle).toHaveBeenCalledTimes(1);
+  });
+
+  it('el gate sigue cortando lo que cortaba: sin env, base-mainnet y avalanche-mainnet siguen bloqueados', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    for (const chain of [
+      'base-mainnet',
+      'avalanche-mainnet',
+      '43114',
+      '8453',
+    ]) {
+      const logger = makeLogger();
+      const result = await signAndSettleDownstream(agentOnChain(chain), logger);
+      expect(result, `chain=${chain}`).toBeNull();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'MAINNET_NOT_ALLOWED' }),
+        expect.any(String),
+      );
+    }
+    expect(mockBaseMainnetSettle).not.toHaveBeenCalled();
+    expect(mockAvaxMainnetSettle).not.toHaveBeenCalled();
+  });
+
+  // ── Postura C, primera mitad: AVISAR sin rechazar ──
+  it('un alias ambiguo emite AMBIGUOUS_CHAIN_ALIAS y NO rechaza el settle', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+
+    const result = await signAndSettleDownstream(
+      agentOnChain('avalanche'),
+      logger,
+    );
+
+    // Avisa…
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'AMBIGUOUS_CHAIN_ALIAS',
+        declared: 'avalanche',
+        resolvedChain: 'avalanche-fuji',
+      }),
+      expect.any(String),
+    );
+    // …y NO corta: 16 de los 25 agentes del catálogo vivo declaran `avalanche`.
+    expect(result?.txHash).toBe('0xFUJI');
+    expect(mockFujiSettle).toHaveBeenCalledTimes(1);
+  });
+
+  it('`base` (ambiguo) también avisa, resolviendo a base-sepolia', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    const logger = makeLogger();
+
+    await signAndSettleDownstream(agentOnChain('base'), logger);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'AMBIGUOUS_CHAIN_ALIAS',
+        declared: 'base',
+        resolvedChain: 'base-sepolia',
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('control: un slug EXPLÍCITO no emite AMBIGUOUS_CHAIN_ALIAS', async () => {
+    const { signAndSettleDownstream } = await importWithFlag(true);
+    for (const chain of ['avalanche-fuji', 'base-sepolia', '43113']) {
+      const logger = makeLogger();
+      await signAndSettleDownstream(agentOnChain(chain), logger);
+      expect(logger.warn, `chain=${chain}`).not.toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'AMBIGUOUS_CHAIN_ALIAS' }),
+        expect.any(String),
+      );
+    }
   });
 });
