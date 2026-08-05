@@ -35,6 +35,10 @@ describe('readPaymentSpec — extracción del payment spec (WKH-241)', () => {
       chain: 'solana-devnet',
       contract: SOL_PAYTO,
       asset: 'USDC',
+      // Derivados (etiqueta de red del catálogo público): el slug declarado sale
+      // intacto y el gateway agrega a qué rail resuelve y en qué entorno está.
+      resolvedChain: 'solana-devnet',
+      network: 'testnet',
     });
   });
 
@@ -139,7 +143,74 @@ describe('readPaymentSpec — extracción del payment spec (WKH-241)', () => {
       chain: 'avalanche-testnet',
       contract: EVM_PAYTO,
       asset: undefined,
+      resolvedChain: 'avalanche-fuji',
+      network: 'testnet',
     });
+  });
+
+  // ── Etiqueta de red del catálogo público ─────────────────────────
+  //
+  // EL HALLAZGO QUE ESTO CIERRA: 16 de los 25 agentes del catálogo vivo declaran
+  // `avalanche` (medido en `/discover?limit=100` de producción, 2026-08-05) y los
+  // 16 caen en Fuji. Para alguien que lee el catálogo público, "avalanche" suena a
+  // la red real y la respuesta no decía otra cosa.
+  //
+  // EL ARREGLO NO TOCA EL VOCABULARIO QUE LOS AGENTES DECLARAN: `chain` sigue
+  // saliendo tal cual (eso rompería fichas ya publicadas). Lo que cambia es lo que
+  // el catálogo INFORMA: dos campos DERIVADOS.
+  it('el alias ambiguo `avalanche` publica el rail real y su entorno', () => {
+    const spec = readPaymentSpec({
+      payment: { method: 'x402', chain: 'avalanche', contract: EVM_PAYTO },
+    });
+    // Lo que el agente declaró NO se toca (contrato con las fichas publicadas).
+    expect(spec?.chain).toBe('avalanche');
+    // …y el catálogo ahora dice a qué red apunta de verdad.
+    expect(spec?.resolvedChain).toBe('avalanche-fuji');
+    expect(spec?.network).toBe('testnet');
+  });
+
+  it('todo alias que el resolver acepta sale con `resolvedChain` + `network`', () => {
+    // Ningún agente puede publicar un `payment` sin etiqueta de red: si el spec
+    // existe, los dos derivados existen. (Esto es lo que hace verdadera la frase
+    // "en producción no faltan nunca" del docstring de `AgentPaymentSpec`.)
+    const aliases = [
+      'avalanche',
+      'avalanche-fuji',
+      'avalanche-testnet',
+      'avalanche-mainnet',
+      '43113',
+      '43114',
+      'base',
+      'base-sepolia',
+      'base-mainnet',
+      'kite-testnet',
+      'kite-ozone-testnet',
+      'kite-mainnet',
+      'tempo',
+      'tempo-testnet',
+      'solana',
+      'solana-devnet',
+    ];
+    for (const alias of aliases) {
+      const spec = readPaymentSpec({
+        payment: { method: 'x402', chain: alias, contract: EVM_PAYTO },
+      });
+      expect(spec, `alias=${alias}`).toBeDefined();
+      expect(spec?.resolvedChain, `alias=${alias}`).toBe(
+        normalizeChainSlug(alias),
+      );
+      expect(spec?.network, `alias=${alias}`).toBe(
+        alias.includes('mainnet') || alias === '43114' ? 'mainnet' : 'testnet',
+      );
+    }
+  });
+
+  it('un slug que el resolver no conoce NO produce spec (no hay etiqueta que inventar)', () => {
+    expect(
+      readPaymentSpec({
+        payment: { method: 'x402', chain: 'polygon', contract: EVM_PAYTO },
+      }),
+    ).toBeUndefined();
   });
 
   // ── AC-2: sin spec → undefined ───────────────────────────────────

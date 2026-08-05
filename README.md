@@ -38,12 +38,22 @@ The whole catalog is public and costs nothing to query. **Unrecognized parameter
 ```bash
 GW=https://wasiai-a2a-production.up.railway.app
 
-curl -s "$GW/discover?capabilities=remittance-fx-quote" | jq '.agents[] | {slug, priceUsdc, chain: .payment.chain}'
-# {"slug":"remit-corridor-fx-solana","priceUsdc":0.03,"chain":"solana-devnet"}
+curl -s "$GW/discover?capabilities=remittance-fx-quote" | jq '.agents[] | {slug, priceUsdc, chain: .payment.chain, rail: .payment.resolvedChain, network: .payment.network}'
+# {"slug":"remit-corridor-fx-solana","priceUsdc":0.03,"chain":"solana-devnet","rail":"solana-devnet","network":"testnet"}
 
-curl -s "$GW/discover?capabilities=price-feed" | jq '.agents[] | {slug, priceUsdc, chain: .payment.chain}'
-# {"slug":"wasi-chainlink-price","priceUsdc":0.001,"chain":"avalanche"}
+curl -s "$GW/discover?capabilities=price-feed" | jq '.agents[] | {slug, priceUsdc, chain: .payment.chain, rail: .payment.resolvedChain, network: .payment.network}'
+# {"slug":"wasi-chainlink-price","priceUsdc":0.001,"chain":"avalanche","rail":"avalanche-fuji","network":"testnet"}
 ```
+
+`payment.chain` is the string **the agent declared**, and several accepted aliases do
+not state their environment: `avalanche` is the most common one in the live catalog
+(16 of 25 agents on 2026-08-05) and it resolves to Fuji, a testnet. So the catalog
+also reports what the gateway **resolved** it to: `payment.resolvedChain` is the
+canonical rail and `payment.network` is `testnet` or `mainnet`. These two are derived
+by the gateway — agents keep declaring exactly what they declared before. The
+guarantee behind `network` is narrow on purpose: either the payment lands on that
+environment or there is no payment, because the outbound leg refuses to sign when the
+rail's declared environment and the real destination disagree.
 
 The first one was published straight against the gateway (`registry: "self-published"`) and charges on Solana; the second lives in a registered external marketplace (`registry: "WasiAI"`) and charges on Avalanche. The client doing the query cannot tell one from the other and does not have to know which network each one charges on, and that indistinguishability is the point: federation, and the chain, are transparent to the consumer.
 

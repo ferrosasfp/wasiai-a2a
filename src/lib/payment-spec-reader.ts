@@ -205,5 +205,11 @@ export function readPaymentSpec(
     chain,
     contract: obj.contract,
     asset: typeof obj.asset === 'string' ? obj.asset : undefined,
+    // DERIVADOS (WKH-ALIAS-ETIQUETA). NO tocan el vocabulario que el agente
+    // declara: `chain` sigue saliendo tal cual y ninguna ficha publicada cambia.
+    // Lo que cambia es lo que el catálogo INFORMA — ver el docstring de los dos
+    // campos en `types/index.ts`.
+    resolvedChain: chainKey,
+    network: isMainnetChainKey(chainKey) ? 'mainnet' : 'testnet',
   };
 }
