@@ -1431,3 +1431,93 @@ describe('R-4 · cupo por publicador Y por capacidad, medido en `agents`', () =>
     expect(mockListAnchors).toHaveBeenCalledTimes(0);
   });
 });
+
+// ── El carril PEDIDO que no se evalúa, y el `0` que lo tapaba ────────────
+//
+// EL HALLAZGO ADYACENTE (verificado, no supuesto). El bloque que aplica el piso
+// es el MISMO que lee `allowTrial` (`discovery.ts`, guard
+// `if (query.minReputation != null)`). Sin `minReputation` el carril NO CORRE:
+// la clave viaja, el gateway la acepta con 200, y no ejecuta nada.
+//
+// Eso por sí solo es defendible — sin piso no hay nadie excluido, así que no hay
+// nada que relajar. Lo que NO era defendible es lo que la respuesta DECÍA:
+// `trialAvailable` se quedaba en su `0` inicial, y ese `0` es indistinguible del
+// `0` que significa "miré y ninguno califica". Son dos acciones opuestas: en un
+// caso no hay nada que hacer, en el otro hay que mandar TAMBIÉN el piso.
+//
+// El costo de esa ambigüedad está medido afuera: el integrador de Chaski tuvo que
+// leer el fuente del gateway para enterarse de que su parámetro era letra muerta.
+//
+// ⚠️ NO se toca la POLÍTICA. Qué piso usar, y si el leg de payout debe abrir el
+// carril, es una decisión de producto que no vive en este repo.
+describe('T-EVAL · `trialEvaluated`: el tercer valor de `trialAvailable`', () => {
+  it('T-EVAL-1: `allowTrial` SIN piso ⇒ trialEvaluated false (el 0 no es una respuesta)', async () => {
+    serve([raw('recien-llegado')]);
+
+    const result = await discoveryService.discover({ allowTrial: true });
+
+    // El carril no corrió: nadie fue excluido y nadie fue admitido por estreno.
+    expect(result.agents.every((a) => a.trial === undefined)).toBe(true);
+    expect(result.excluded?.reputation).toBe(0);
+    // El contador sigue en 0…
+    expect(result.excluded?.trialAvailable).toBe(0);
+    // …y ESTO es lo que dice que ese 0 no se calculó.
+    expect(result.excluded?.trialEvaluated).toBe(false);
+  });
+
+  it('T-EVAL-2: CON piso ⇒ trialEvaluated true, y el 0 sí es una respuesta', async () => {
+    // Un veterano que pasa por mérito: el carril se evalúa y no admite a nadie,
+    // así que `trialAvailable` es un 0 CALCULADO.
+    serve([raw('veterano')]);
+    standings([
+      ['veterano', counters({ tasksSettled: 10, reputation: rep(20) })],
+    ]);
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    expect(result.excluded?.trialEvaluated).toBe(true);
+    expect(result.excluded?.trialAvailable).toBe(0);
+  });
+
+  it('T-EVAL-3: el flag sigue al PISO, no al opt-in del caller', async () => {
+    // Con piso y SIN `allowTrial` el carril igual se evalúa (ahí `trialAvailable`
+    // es la cota superior de siempre). Si el flag copiara `allowTrial`, este caso
+    // volvería a mentir — al revés.
+    serve([raw('recien-llegado')]);
+
+    const result = await discoveryService.discover({ minReputation: 2 });
+
+    expect(result.excluded?.trialEvaluated).toBe(true);
+    expect(result.excluded?.trialAvailable).toBe(1);
+  });
+
+  it('T-EVAL-4: sin piso y sin opt-in ⇒ también false (no se evaluó nada)', async () => {
+    serve([raw('recien-llegado')]);
+
+    const result = await discoveryService.discover({});
+
+    expect(result.excluded?.trialEvaluated).toBe(false);
+    expect(result.excluded?.trialAvailable).toBe(0);
+  });
+
+  it('T-EVAL-5: `trialEvaluated` NO se confunde con el otro "no pude" del standing', async () => {
+    // `standingUnavailable` es "no pude leer el historial"; `trialEvaluated` es
+    // "no llegué a mirar el carril". Con piso y batch degradado, el carril SÍ se
+    // evalúa (y falla cerrado: no admite a nadie), así que los dos flags dicen
+    // cosas distintas en la misma respuesta.
+    serve([raw('recien-llegado')]);
+    standingDegraded();
+
+    const result = await discoveryService.discover({
+      minReputation: 2,
+      allowTrial: true,
+    });
+
+    expect(result.excluded?.standingUnavailable).toBe(true);
+    expect(result.excluded?.trialEvaluated).toBe(true);
+    expect(result.excluded?.trialAvailable).toBe(0);
+  });
+});

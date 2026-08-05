@@ -386,7 +386,14 @@ into accepting such a candidate below the floor **you** asked for. Rules:
   ask" is not "it has no history".
 - Anything other than `true`/`false` returns `400 INVALID_ALLOW_TRIAL`.
 
-Two response fields go with it:
+**`allowTrial` alone does nothing: it needs `minReputation`.** The lane is evaluated
+inside the same step that applies the floor, so a request that opts in without asking
+for a floor is accepted, returns `200`, and runs no lane at all. That is coherent — with
+no floor nobody is excluded, so there is nothing to relax — but you should not have to
+read our source to find it out, so the response says so: `excluded.trialEvaluated` is
+`false` in exactly that case. Send `minReputation` too.
+
+Three response fields go with it:
 
 - `excluded.reputation` — candidates the floor discarded.
 - `excluded.trialAvailable` — candidates that are **eligible** for the lane. With
@@ -396,7 +403,15 @@ Two response fields go with it:
   bare slug). **Without** `allowTrial` it is an **upper bound**: the per-publisher
   quota needs a lookup that the default path deliberately does not perform, so the
   number is counted before the quota is applied. Read it as "up to N", not as "N will
-  be admitted".
+  be admitted". **Read `excluded.trialEvaluated` first**: when that is `false` this
+  number was never computed and the `0` means nothing.
+- `excluded.trialEvaluated` — `false` means the lane **was not evaluated** in this
+  query, which happens exactly when you did not send `minReputation`. It is there so a
+  `trialAvailable` of `0` cannot be misread: "I looked and nobody qualifies" and "I
+  never looked" lead to different actions, and only the second one is fixed by changing
+  your request. It reports what the **gateway did**, not what you asked for: with a
+  floor and no `allowTrial` it is `true`, and `trialAvailable` is the upper bound
+  described above.
 - `excluded.standingUnavailable` — `true` means the gateway **could not read agent
   history** for this query. Then nobody has a computed score, so the floor excludes
   everyone and `excluded.reputation` counts real exclusions that do **not** mean "these

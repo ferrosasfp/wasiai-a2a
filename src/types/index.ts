@@ -748,8 +748,39 @@ export interface DiscoveryResult {
      *     el cupo `M` por publicador no se puede aplicar.
      * Un contador que a veces es exacto y a veces una cota, sin decirlo, es la
      * clase de dato que se lee mal.
+     *
+     * ⚠️ Y HAY UN TERCER CASO, que este docstring no nombraba y que el número no
+     * distinguía: **sin `minReputation` el carril NO SE EVALÚA** y esto queda en
+     * su `0` inicial. Ese `0` no es exacto ni una cota: es "nunca se calculó".
+     * Leerlo requiere mirar `trialEvaluated` primero — ver ahí.
      */
     trialAvailable: number;
+    /**
+     * ¿Se evaluó el carril de estreno en esta consulta?
+     *
+     * `false` ⟺ el caller NO mandó `minReputation`. El bloque que aplica el piso
+     * es el mismo que lee `allowTrial` (`services/discovery.ts`, guard
+     * `if (query.minReputation != null)`), así que sin piso **`allowTrial` no
+     * ejecuta nada**: viaja, se acepta, y el carril no corre.
+     *
+     * POR QUÉ ES UN CAMPO Y NO UN DETALLE. Sin esto, un caller que mandó
+     * `allowTrial: true` recibía `trialAvailable: 0` y no tenía forma de
+     * distinguir "miré y ninguno califica" de "no miré". Son dos acciones
+     * distintas: en el primer caso no hay nada que hacer y en el segundo hay que
+     * mandar TAMBIÉN `minReputation`. Es el mismo tercer valor que
+     * `standingUnavailable` cubre para el otro "no pude": un `0` fabricado se lee
+     * como una respuesta.
+     *
+     * El costo de no tenerlo está medido: el integrador de Chaski tuvo que leer
+     * el fuente del gateway para descubrir que su parámetro era letra muerta
+     * (`chaski-v3/src/infrastructure/a2a/gateway-client.ts`, comentario de
+     * `FX_MIN_REPUTATION`: «Medido en el gateway, no asumido»).
+     *
+     * ⚠️ NO dice si el caller pidió el carril: dice si el gateway lo evaluó. Con
+     * `allowTrial` ausente y `minReputation` presente vale `true`, y ahí
+     * `trialAvailable` es la cota superior de siempre.
+     */
+    trialEvaluated: boolean;
     /**
      * AR fix-pack BLQ-BAJO-4 — la lectura del HISTORIAL falló
      * (`AgentStandingBatch.degraded`). Sin este dato, un batch degradado deja a
