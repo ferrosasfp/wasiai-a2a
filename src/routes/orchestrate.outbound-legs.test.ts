@@ -228,7 +228,17 @@ function makeAgent(): Agent {
     invocationNote: 'Use POST /compose or POST /orchestrate on the gateway.',
     verified: true,
     status: 'active',
-    metadata: {},
+    // ⚠️ `metadata` es el agent card CRUDO (`discovery.mapAgent` hace
+    // `metadata: raw`), así que trae el bloque `payment` completo. NO es
+    // decorativo: el leg de salida BORRADO resolvía su destino de
+    // `metadata.payTo ?? metadata.payment.contract`. Con `metadata: {}` este
+    // fixture no tenía payTo alcanzable y el leg no habría disparado NUNCA —
+    // o sea que los conteos de settle de abajo habrían dado 1 incluso con el
+    // bug presente, y el test sería verde por el motivo equivocado. Lo cazó la
+    // mutación (revertir el fix y ver morir un test), no la lectura.
+    metadata: {
+      payment: { protocol: 'x402', chain: 'avalanche', contract: PAY_TO },
+    },
     payment: { method: 'x402', chain: 'avalanche', contract: PAY_TO },
   };
 }
