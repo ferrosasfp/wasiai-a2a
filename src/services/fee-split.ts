@@ -22,6 +22,7 @@
  * captura `23505` (CD-2/CD-9). Ownership Guard `owner_ref` en toda query (CD-2).
  */
 
+import { hasBroadcastEvidence } from '../adapters/errors.js';
 import { getPaymentAdapter } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import type { SignResult } from '../adapters/types.js';
@@ -459,13 +460,42 @@ async function chargeLeg(
     }
 
     if (!settleResult.success) {
-      const errMsg = `settle failed: ${settleResult.error ?? 'unknown'}`;
+      // HU-201 (extensión al leg de split): el `txHash` que viene CON el
+      // `success:false` es EVIDENCIA DE BROADCAST y NO se descarta. Ver el bloque
+      // gemelo de `fee-charge.ts` y la doctrina completa en `adapters/errors.ts`.
+      // El leg sigue `failed` y el dinero NO se mueve distinto; lo que se
+      // conserva es el único puntero para cruzar contra la cadena un pago a
+      // creator/referral que PUDO haber salido.
+      const evidenceHash = hasBroadcastEvidence(settleResult.txHash)
+        ? String(settleResult.txHash)
+        : undefined;
+      const errMsg =
+        evidenceHash !== undefined
+          ? `settle failed: ${settleResult.error ?? 'unknown'} [broadcast tx: ${evidenceHash}]`
+          : `settle failed: ${settleResult.error ?? 'unknown'}`;
       log.error(
-        { orchestrationId, role, detail: errMsg },
+        {
+          orchestrationId,
+          role,
+          detail: errMsg,
+          broadcastEvidence: evidenceHash !== undefined,
+          ...(evidenceHash !== undefined ? { settleTxHash: evidenceHash } : {}),
+        },
         'split leg settle failed',
       );
-      await markLegFailed(orchestrationId, role, ownerRef, errMsg);
-      return { ...base, error: errMsg };
+      await markLegFailed(
+        orchestrationId,
+        role,
+        ownerRef,
+        errMsg,
+        evidenceHash,
+      );
+      // Seguro por construcción: un leg `failed` corta en el return temprano de
+      // `settleFeeSplits` (:316) y NUNCA llega al `priorTx` de :335, así que este
+      // hash no puede promoverse a `settlement.txHash` (candado T-FEE-201-E).
+      return evidenceHash !== undefined
+        ? { ...base, txHash: evidenceHash, error: errMsg }
+        : { ...base, error: errMsg };
     }
 
     // Re-verify on-chain ANTES de `charged` (CD-5 / TB-01). RPC_UNAVAILABLE →
@@ -570,11 +600,19 @@ async function markLegFailed(
   role: SplitRecipientRole,
   ownerRef: string,
   errorMessage: string,
+  evidenceTxHash?: string,
 ): Promise<void> {
   try {
     await supabase
       .from(SPLITS_TABLE)
-      .update({ status: 'failed', error_message: truncateError(errorMessage) })
+      .update({
+        status: 'failed',
+        error_message: truncateError(errorMessage),
+        // HU-201: evidencia de broadcast en una fila `failed` (ver `markFailed`
+        // de `fee-charge.ts`). Ownership Guard intacto: los 3 `.eq()` de abajo
+        // NO se tocan.
+        ...(evidenceTxHash !== undefined ? { tx_hash: evidenceTxHash } : {}),
+      })
       .eq('orchestration_id', orchestrationId)
       .eq('recipient_role', role)
       .eq('owner_ref', ownerRef);
