@@ -200,11 +200,32 @@ export type AgentStatus = 'active' | 'inactive' | 'unreachable';
 export interface AgentPaymentSpec {
   method: string; // e.g. 'x402'
   chain: string; // e.g. 'avalanche'
-  // WKH-234: namespace-aware payTo. EVM = `0x${string}`; Solana = base58 mint/
-  // owner pubkey (string). La validación de FORMA vive en `wallet-format`
-  // (`isValidPayoutWallet`) / `validatePayTo` — este tipo solo relaja la forma.
-  contract: `0x${string}` | string; // payTo on-chain address
-  asset?: string | undefined; // e.g. 'USDC' (opcional, pass-through)
+  /**
+   * ⚠️ EL NOMBRE MIENTE — leer antes de usarlo. `contract` NO es un contrato ni un
+   * token: es **la dirección de la billetera que COBRA** (el `payTo` del leg de
+   * salida). El valor va tal cual al destinatario del transfer:
+   * `downstream-payment.ts:772` lo pasa por `validatePayTo` y `:777` lo firma como
+   * `to`. Poner acá la dirección de un token manda el pago al contrato del token.
+   *
+   * QUÉ NO ES:
+   *  · NO es el mint / la dirección del token. El token lo fija el adapter de la
+   *    chain (`adapters/<chain>/payment.ts`), NO la ficha del agente.
+   *  · `asset` (abajo) tampoco lo elige: es sólo una etiqueta pass-through
+   *    (`'USDC'`) que ningún camino de dinero lee.
+   *
+   * El nombre se conserva porque es campo de una respuesta PÚBLICA que consumen
+   * otros servicios y agentes ya publicados (`/discover`): renombrarlo es un
+   * cambio de contrato con costo para terceros. Esta confusión ya produjo un
+   * bloqueante rojo FALSO (se leyó el valor como identificador del token, no
+   * existía como token, y parecía un bug de producción).
+   *
+   * WKH-234: namespace-aware. EVM = `0x${string}`; Solana = pubkey base58 del
+   * dueño de la cuenta que cobra. La validación de FORMA vive en `wallet-format`
+   * (`isValidPayoutWallet`) / `validatePayTo` — este tipo sólo relaja la forma.
+   */
+  contract: `0x${string}` | string; // payTo: billetera de cobro, NO el token
+  /** Etiqueta del símbolo declarado (e.g. 'USDC'). Pass-through: no decide nada. */
+  asset?: string | undefined;
 }
 
 // ============================================================

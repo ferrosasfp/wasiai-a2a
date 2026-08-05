@@ -625,7 +625,7 @@ server-side logs):
 | `NO_PAYMENT_FIELD` | The agent's card declares no `payment` block. | Ask the agent operator to publish a payment spec. |
 | `METHOD_NOT_SUPPORTED` | The agent's `payment.method` is not x402. | Not payable through this rail. |
 | `CHAIN_NOT_SUPPORTED` | The agent's `payment.chain` is not a rail this gateway settles. | Ask the agent to declare a supported chain. |
-| `INVALID_PAY_TO_FORMAT` | The agent's `payment.contract` is not a valid address for its chain. | Agent-side config error. |
+| `INVALID_PAY_TO_FORMAT` | The agent's `payment.contract` is not a valid address for its chain. Despite the name, that field is the agent's **payout wallet** (the x402 `payTo`), not a token or contract address. | Agent-side config error. |
 | `ZERO_PAY_TO` | The agent's payout address is the zero address. | Agent-side config error. |
 | `INVALID_PRICE` | The agent's price is not a finite positive number. | Agent-side config error. |
 | `SETTLE_FAILED` | The payment was attempted and did not go through. | Retryable. |
