@@ -655,13 +655,19 @@ export async function signAndSettleDownstream(
   //        pasar a rechazarlos. NO corta el settle a propósito: 16 de los 25
   //        agentes del catálogo vivo declaran `avalanche`.
   //
-  //        ⚠️ SOBRE-CUENTA CONOCIDA (`TD-CHAIN-ALIAS-AMBIGUO`): el colapso
-  //        legacy CD-2 de `readPaymentSpec` reescribe el slug EXPLÍCITO
-  //        `avalanche-testnet` → `avalanche`, así que un agente que declaró
-  //        bien igual aparece acá. Este contador mide lo que LLEGA al leg, no lo
-  //        que el agente declaró. Antes de pasar a rechazar hay que medir en el
-  //        reader (sobre el string crudo) o sacar el colapso; si no, el rechazo
-  //        rompería agentes que hicieron lo correcto.
+  //        `TD-CHAIN-ALIAS-AMBIGUO` — RESUELTO. Este bloque decía que el contador
+  //        SOBRE-CUENTA porque el colapso legacy CD-2 de `readPaymentSpec`
+  //        reescribía el slug EXPLÍCITO `avalanche-testnet` → `avalanche`. Ese
+  //        colapso YA NO EXISTE (`payment-spec-reader.ts`,
+  //        `resolveAvalancheOutputChain`): el slug explícito llega al leg tal cual
+  //        y no se cuenta como ambiguo (test `T-FIX1B-4b` +
+  //        `TD-CHAIN-ALIAS-AMBIGUO` en `downstream-payment.test.ts`). Sigue siendo
+  //        cierto que este contador mide lo que LLEGA al leg, no el string crudo
+  //        que el agente publicó — pero hoy el reader es pass-through para todos
+  //        los alias testnet, así que las dos cosas coinciden.
+  //
+  //        ⚠️ Este código NO entra en `DownstreamSkipCode`: es un AVISO, el leg se
+  //        paga igual. Ver el docstring del union en `downstream-skip-code.ts`.
   if (isAmbiguousChainAlias(agent.payment.chain)) {
     logger.warn(
       {

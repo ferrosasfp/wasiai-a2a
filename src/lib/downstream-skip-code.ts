@@ -18,13 +18,42 @@
 import type { DownstreamLogger } from '../types/index.js';
 
 /**
- * Códigos de skip/observabilidad del leg downstream. TODO valor que salga en el
- * campo `code` de un log de este módulo tiene que estar acá (fix-pack CR-MNR-5:
- * faltaban los tres últimos, que sí se emitían — un tipo incompleto hace que un
- * consumidor de logs crea que la taxonomía está cerrada cuando no lo está).
- *
+ * Códigos que hablan del INTENTO DE PAGO del leg downstream: por qué no se pagó,
+ * que no se sabe si se pagó, o qué pre-check del intento no se pudo verificar.
  * Los tres primeros grupos CORTAN el leg (`return null`); los de observabilidad
  * NO cortan (ver el catálogo en el docstring de `signAndSettleDownstream`).
+ *
+ * ⚠️ NO ES el catálogo completo de valores que salen en un campo `code` de un log
+ * de `downstream-payment.ts`. (Esta frase decía justamente eso — "TODO valor que
+ * salga en un `code` tiene que estar acá" — y era falsa desde que existe el
+ * clasificador de alias.) Los AVISOS que no hablan del intento de pago quedan
+ * afuera A PROPÓSITO. Hoy hay exactamente uno:
+ *
+ *   · `AMBIGUOUS_CHAIN_ALIAS` (`downstream-payment.ts`, paso 4-bis): el agente
+ *     nombró la red sin decir su entorno. Se cuenta y el leg SIGUE, y se paga
+ *     normal. No dice nada sobre la suerte del pago.
+ *
+ * POR QUÉ AFUERA Y NO ADENTRO. Entrar a este union obliga (los `Record` de abajo
+ * son exhaustivos por tipo) a darle una traducción PÚBLICA y una ACCIÓN de
+ * operador, y las dos tablas están escritas para legs que NO se pagaron:
+ * `PUBLIC_SKIP_MEANING.NOT_CONFIGURED` dice literalmente "por eso no se movió
+ * dinero", y `/dashboard/trace` cuenta acciones de legs sin pagar. Sumar ahí un
+ * aviso de un leg que SÍ se pagó vuelve a mezclar dos incidentes que no se deben
+ * sumar en el mismo contador — que es exactamente el colapso que la tabla de
+ * acciones acaba de terminar de deshacer. La acción real del aviso (que el
+ * publicador migre el slug) ya tiene dueño aparte: `chain-resolver.ts:201`.
+ *
+ * LO QUE ESTE MÓDULO SÍ GARANTIZA, y es mecánico:
+ *  1. Todo miembro de este union tiene traducción pública Y acción de operador —
+ *     los `Record` exhaustivos: agregar un código sin decidir las dos cosas NO
+ *     COMPILA.
+ *  2. `createSkipCapturingLogger` sólo captura los `code` que están en este union,
+ *     así que un aviso NUNCA se convierte en el motivo de skip de una respuesta
+ *     (`steps[].downstreamSettle`) ni en un `downstreamSkipCauses`.
+ *
+ * Falsable: sería falso si `downstream-payment.ts` emitiera un `code` que no sea
+ * ni miembro de este union ni un aviso declarado, o si un aviso llegara a
+ * `lastSkipCode()`. Las dos cosas las fija `downstream-skip-code.catalog.test.ts`.
  */
 export type DownstreamSkipCode =
   | 'FLAG_OFF'
