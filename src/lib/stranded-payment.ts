@@ -155,10 +155,17 @@ function nonEmpty(v: unknown): string | null {
  * construcción — no hay que excluirlo, nunca llegó.
  *
  * Los dos ejes de evidencia son pagos on-chain REALES y distintos:
- *   · `downstreamTxHash` — settle del gateway al agente (camino con agent key).
- *   · `txHash` — settle inbound x402: en el camino SIN `a2aKey` es un pago real al
- *     `payTo` del agente (AC-8). Contar sólo el primero subestimaría el residuo
- *     exactamente en el camino anónimo, que es el que no tiene débito per-step.
+ *   · `downstreamTxHash` — settle del gateway al agente. HOY ES EL ÚNICO.
+ *   · `txHash` — era el settle del SEGUNDO leg de salida de `invokeAgent`, el que
+ *     sólo corría con `!a2aKey` (AC-8).
+ *
+ * ⚠️ HU-DOUBLE-PAY — EL EJE `inbound` YA NO TIENE PRODUCTOR. Ese segundo leg se
+ * borró (le pagaba al agente por segunda vez, del mismo wallet, por el mismo
+ * monto), así que `compose.finishSuccessfulStep` ya no escribe `StepResult.txHash`
+ * y `evidence: 'inbound'` / `'both'` no puede salir de un run real. La rama se
+ * conserva porque esta función es TOTAL sobre `StepResult[]` y la lee también un
+ * lector de filas viejas (CD-12), donde esos valores SÍ existen. No leer estas
+ * líneas como "hay dos rieles de pago": hay uno.
  *
  * Puro y total: sin I/O, sin `throw`. Un step sin ninguna evidencia no entra.
  */

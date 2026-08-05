@@ -92,17 +92,50 @@ if (res.status !== 200) {
 }
 
 console.log(`\n✅ /compose 5-agent OK via app.wasiai.io`);
-console.log(`  Kite inbound: ${body.kiteTxHash ?? '(none)'}`);
+console.log(`  Kite inbound (caller → treasury): ${body.kiteTxHash ?? '(none)'}`);
 if (body.kiteTxHash) console.log(`    ${KITE_EXPLORER}/${body.kiteTxHash}`);
 console.log(`  Total cost: ${body.totalCostUsdc} USDC`);
 console.log(`  Total latency: ${body.totalLatencyMs}ms`);
+
+// ─── HU-DOUBLE-PAY: por qué este bloque cambió ──────────────────────────────
+//
+// Este script es un caller x402 PURO (firma `payment-signature`, no manda
+// `x-a2a-key`) contra 5 agentes EVM con precio > 0: o sea, era EXACTAMENTE el
+// perfil que disparaba los DOS legs de salida del wallet del operador. Y el
+// resumen de abajo leía SÓLO `downstreamTxHash` e imprimía
+// `TOTAL: 1 Kite + N Fuji`. El segundo pago viajaba en `steps[].txHash` — un
+// campo que este script nunca miró — así que una corrida que movía 11 txs
+// reportaba 6, y el doble pago era invisible para quien corría el smoke.
+//
+// Ahora se cuentan TODAS las salidas por step y se falla si un step tiene más de
+// una. Hoy `txHash` viene siempre ausente (el segundo leg se borró); el chequeo
+// existe para que, si vuelve, el smoke lo diga en vez de omitirlo.
 const downstreamTxs = [];
+const extraOutbound = [];
 for (let i = 0; i < (body.steps?.length ?? 0); i++) {
   const s = body.steps[i];
   console.log(`    [${i+1}/${body.steps.length}] ${s.agent.slug} — cost=${s.costUsdc} latency=${s.latencyMs}ms`);
   if (s.downstreamTxHash) {
     downstreamTxs.push(s.downstreamTxHash);
-    console.log(`        ✓ Fuji: ${FUJI_EXPLORER}/${s.downstreamTxHash}`);
+    console.log(`        ✓ pago al agente: ${FUJI_EXPLORER}/${s.downstreamTxHash}`);
+  } else if (s.downstreamSettle) {
+    console.log(`        · sin pago al agente: ${s.downstreamSettle}`);
+  }
+  // El campo del leg BORRADO. Si aparece, hubo una segunda salida por este step.
+  if (s.txHash) {
+    extraOutbound.push({ step: i, agent: s.agent.slug, txHash: s.txHash });
+    console.log(`        ⚠️  SEGUNDA salida en el mismo step: ${KITE_EXPLORER}/${s.txHash}`);
   }
 }
-console.log(`\n  TOTAL: ${(body.kiteTxHash ? 1 : 0) + downstreamTxs.length} on-chain txs (1 Kite + ${downstreamTxs.length} Fuji)`);
+const outboundTotal = downstreamTxs.length + extraOutbound.length;
+console.log(
+  `\n  TOTAL: ${(body.kiteTxHash ? 1 : 0) + outboundTotal} txs on-chain ` +
+  `(${body.kiteTxHash ? 1 : 0} inbound del caller + ${outboundTotal} de salida del operador)`,
+);
+if (extraOutbound.length > 0) {
+  console.error(
+    `\n❌ DOBLE PAGO: ${extraOutbound.length} step(s) produjeron DOS salidas del wallet del operador\n` +
+    JSON.stringify(extraOutbound, null, 2),
+  );
+  process.exit(1);
+}

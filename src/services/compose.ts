@@ -3,19 +3,12 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import {
-  getChainVmFamily,
-  normalizeChainSlug,
-} from '../adapters/chain-resolver.js';
-import { getPaymentAdapter } from '../adapters/registry.js';
-import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 // HU-208: el lector de `category` se movió a un módulo LEAF porque ahora lo
 // comparten el ejecutor (este archivo, que HACE CUMPLIR el alcance) y el selector
 // de candidatos por capacidad. Dos lectores distintos = el selector elige agentes
 // que el ejecutor después rechaza con 403. Ver lib/agent-category.ts.
 import { readAgentCategory } from '../lib/agent-category.js';
 import { hashCallerRef } from '../lib/caller-hash.js';
-import { selectFacilitatorUrl } from '../lib/cdp-selector.js';
 // WKH-305: el resolvedor de `inputFromPrevious` vive en un módulo LEAF (cero
 // imports de runtime) por el mismo motivo que `downstream-skip-code.js`: media
 // docena de suites mockean los módulos gordos del money-path COMPLETOS con
@@ -59,9 +52,7 @@ import { resolveSelfPublishedAuthHeaders } from '../lib/self-published-auth.js';
 import {
   buildSettleUnknownEvent,
   readSettleWithholding,
-  SettleRefundWithheldError,
   type SettleWithholding,
-  withholdingFromSettleResult,
 } from '../lib/settle-withholding.js';
 import { ssrfFetch } from '../lib/ssrf-dispatcher.js';
 // HU-306: la aritmética del residuo varado y la forma de su evento durable. Módulo leaf
@@ -75,7 +66,6 @@ import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
-import { isValidWallet } from '../lib/wallet-format.js';
 import type {
   A2AMessage,
   Agent,
@@ -86,7 +76,6 @@ import type {
   RegistryConfig,
   ResolvedComposeStep,
   StepResult,
-  X402PaymentRequest,
 } from '../types/index.js';
 import { SELF_PUBLISHED_REGISTRY_ID } from '../types/index.js';
 import { extractA2APayload, isA2AMessage } from './a2a-protocol.js';
@@ -96,7 +85,6 @@ import { discoveryService } from './discovery.js';
 import { eventService } from './event.js';
 import { regenerateInputFromErrors } from './llm/input-retry.js';
 import { maybeTransform } from './llm/transform.js';
-import { usdToAtomic } from './payment-intent.js';
 import { refundOutbox } from './refund-outbox.js';
 import { registryService, SYSTEM_OWNER_REF } from './registry.js';
 import { normalizeDestination } from './spend-policy.js';
@@ -623,7 +611,7 @@ export const composeService = {
         }
       };
       try {
-        const { output, txHash, downstream, downstreamSkipCode } =
+        const { output, downstream, downstreamSkipCode } =
           await this.invokeAgent(
             agent,
             input,
@@ -638,7 +626,6 @@ export const composeService = {
         const agg = await this.finishSuccessfulStep({
           agent,
           output,
-          txHash,
           downstream,
           downstreamSkipCode,
           startTime,
@@ -660,7 +647,7 @@ export const composeService = {
 
         // ── HU-203: ¿el settle de este step pudo haber salido igual? ──────
         // LOS DOS EJES en un solo lector (ver `lib/settle-withholding.ts`):
-        //   1. `2xx { success:false, txHash:"0x…" }` — llega como
+        //   1. `2xx { success:false, txHash:"0x…" }` — llegaba como
         //      `SettleRefundWithheldError` desde el settle de `invokeAgent`;
         //   2. el hop sin respuesta utilizable (techo de wall-clock, socket cortado,
         //      HTTP non-2xx, cuerpo ilegible) — llega como `FacilitatorSettleError`
@@ -669,6 +656,20 @@ export const composeService = {
         // non-2xx se aplanaba a `success:false` y terminaba en el mismo `throw`; desde
         // HU-201 llega tipado, pero si nadie lo lee produce EXACTAMENTE el mismo
         // reembolso indebido.
+        //
+        // ⚠️ HU-DOUBLE-PAY — ESTADO REAL DE LOS DOS EJES DESPUÉS DEL BORRADO DEL
+        // SEGUNDO LEG DE SALIDA, dicho acá para que nadie lea de más:
+        //   · eje 1: SIN PRODUCTOR en `src/`. El único sitio que construía un
+        //     `SettleRefundWithheldError` era el settle del leg borrado.
+        //   · eje 2: sin productor que CRUCE este borde. `signAndSettleDownstream`
+        //     no tira nunca (CD-7 de WKH-55): atrapa el throw del adapter adentro y
+        //     lo reporta como skip-code `SETTLE_UNKNOWN`.
+        // El lector se queda igual porque clasifica POR FORMA cualquier error que
+        // cruce este borde (no por `instanceof`), y ese contrato sí sigue vivo: es
+        // lo que evita el reembolso indebido si mañana un leg vuelve a tirar acá.
+        // Lo que NO hay que hacer es leer estas líneas como "acá se cubre un caso
+        // que ocurre": hoy no ocurre.
+        //
         // `undefined` ⟹ no hay evidencia de que el valor se haya movido ⟹ el
         // comportamiento histórico (reembolsar) sigue intacto.
         const settleWithholding = readSettleWithholding(err);
@@ -960,7 +961,7 @@ export const composeService = {
             if (retryDebit.success) {
               try {
                 // ── PASO 5 (DT-5.5): RE-INVOKE reusando invokeAgent.
-                const { output, txHash, downstream, downstreamSkipCode } =
+                const { output, downstream, downstreamSkipCode } =
                   await this.invokeAgent(
                     agent,
                     retryInput, // WKH-305 (AC-7): con el mapeo RE-APLICADO
@@ -975,7 +976,6 @@ export const composeService = {
                 const agg = await this.finishSuccessfulStep({
                   agent,
                   output,
-                  txHash,
                   downstream,
                   downstreamSkipCode,
                   startTime,
@@ -1118,7 +1118,6 @@ export const composeService = {
   async finishSuccessfulStep(ctx: {
     agent: Agent;
     output: unknown;
-    txHash?: string | undefined;
     downstream?: DownstreamResult | undefined;
     /** Fix-pack P1 (hallazgo 4): motivo del skip del leg downstream, si hubo. */
     downstreamSkipCode?: DownstreamSkipCode | undefined;
@@ -1145,7 +1144,6 @@ export const composeService = {
     const {
       agent,
       output,
-      txHash,
       downstream,
       downstreamSkipCode,
       startTime,
@@ -1167,7 +1165,6 @@ export const composeService = {
       output,
       costUsdc: agent.priceUsdc,
       latencyMs,
-      txHash,
       ...(downstream && {
         downstreamTxHash: downstream.txHash,
         downstreamBlockNumber: downstream.blockNumber,
@@ -1276,7 +1273,12 @@ export const composeService = {
         status: 'success',
         latencyMs,
         costUsdc: agent.priceUsdc,
-        txHash,
+        // HU-DOUBLE-PAY: esta columna llevaba el hash del leg de salida BORRADO
+        // (y quedaba NULL para todo caller prepago, porque ese leg miraba
+        // `!a2aKey`). El hash del ÚNICO pago que existe hoy es el del leg
+        // downstream; dejarla en NULL habría apagado la única evidencia durable
+        // de que el step se pagó on-chain.
+        txHash: downstream?.txHash,
         metadata: {
           bridge_type: result.bridgeType ?? null,
           bridge_latency_ms: result.transformLatencyMs ?? null,
@@ -1358,7 +1360,11 @@ export const composeService = {
     intentId?: string,
   ): Promise<{
     output: unknown;
-    txHash?: string | undefined;
+    // HU-DOUBLE-PAY: acá había un `txHash` — el hash del SEGUNDO settle de salida,
+    // el que se borró. La única salida de fondos que queda es el leg downstream y
+    // su hash viaja en `downstream.txHash` (y de ahí a `StepResult.downstreamTxHash`).
+    // Devolver un campo que ya nadie puede poblar habría dejado a los consumidores
+    // buscando el pago en el lugar equivocado.
     downstream?: DownstreamResult;
     /**
      * Fix-pack P1 (hallazgo 4): motivo INTERNO del skip del leg downstream.
@@ -1394,7 +1400,6 @@ export const composeService = {
       agent.registry_id === SELF_PUBLISHED_REGISTRY_ID
         ? resolveSelfPublishedAuthHeaders(agent.invokeUrl)
         : {};
-    let paymentRequest: X402PaymentRequest | undefined;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       // El orden importa: si un registry REAL matcheó, su credencial pisa a la
@@ -1420,152 +1425,42 @@ export const composeService = {
     if (a2aKey && registryIsSystemTrusted) {
       headers['x-a2a-key'] = a2aKey;
     }
-    // WKH-58: only sign inbound x402 when caller paid via x402 (no a2aKey).
-    // a2a-key path: middleware already debited per-call budget, no inbound
-    // settle needed. Pieverse /v2/settle (HTTP 500 since 2026-04-13) is the
-    // legacy path for x402 callers only. Downstream Fuji USDC settle (WKH-55)
-    // still runs for both paths via signAndSettleDownstream below.
-    // Fix-pack AR-profundo FIX 4: guard de FAMILIA del payTo. El inbound x402 es
-    // EVM-only y castea el payTo a `0x${string}` sin validar; un agente que
-    // declara una chain no-EVM expone un payTo base58 (los agentes Solana
-    // self-published lo hacen) que llegaba a `viem.signTypedData` y reventaba el
-    // request con `InvalidAddressError: Address "So111…112" is invalid` — opaco
-    // para el caller. El narrowing de `getPaymentAdapter()` (más abajo) cubre la
-    // familia del ADAPTER default del gateway, NO la familia del payTo del
-    // agente: son dos cosas distintas. Se decide con el resolver puro
-    // (`normalizeChainSlug` + `getChainVmFamily`), sin duplicar validadores de
-    // formato. Chain declarada ausente o no resoluble → comportamiento previo
-    // intacto (los agentes EVM son byte-idénticos).
+    // ─── HU-DOUBLE-PAY: acá vivía el segundo leg de salida (BORRADO) ──────
     //
-    // Fix-pack it2 BLQ-BAJO-1: el guard de la CHAIN declarada no alcanzaba — es
-    // un PROXY, no el valor. El payTo que se castea sale de OTRA fuente
-    // (`agent.metadata.payTo` / `agent.metadata.payment.contract`, resueltos
-    // abajo), y `discovery.mapAgent` setea `metadata: raw` (el agent card COMPLETO
-    // del registry, y cualquier caller autenticado puede registrar un registry).
-    // Repros del AR: (a) `metadata.payTo` base58 SIN `payment` → chain declarada
-    // ausente → el guard no disparaba; (b) `payment.chain: 'avalanche-fuji'`
-    // (pasa el guard) + `metadata.payTo` base58 → idem. En los dos casos el
-    // base58 crudo llegaba a `viem.signTypedData`. Ahora se guardea EL VALOR con
-    // el MISMO validador de formato EVM del money-path
-    // (`isValidWallet` — la fuente única de `wallet-format.ts`, la misma que usa
-    // por debajo el `validatePayTo` interno de `downstream-payment.ts`; sin
-    // duplicar el regex).
+    // Hasta este fix, entre este punto y el `return` de abajo se firmaba y
+    // settleaba un SEGUNDO pago del wallet del operador al MISMO agente, por el
+    // MISMO `agent.priceUsdc`, en paralelo al leg downstream
+    // (`signAndSettleDownstream`, unas líneas más abajo). Se lo llamaba "sign
+    // inbound x402" (WKH-58) y su gate era `priceUsdc > 0 && !a2aKey &&
+    // !inboundVmUnsupported`.
     //
-    // Fix-pack CR-MNR-4: lo COMPARTIDO es el criterio de FORMATO. El rechazo de
-    // la zero-address NO se comparte — vive sólo en el leg downstream (donde el
-    // gateway mueve fondos propios). El sign inbound de acá valida formato y una
-    // zero-address pasa, igual que antes de este fix-pack: asimetría deliberada y
-    // trackeada como `TD-INBOUND-ZERO-PAYTO` (`MULTI-CHAIN.md` §10), porque
-    // cambiar qué payTos firma este gate es un cambio de comportamiento
-    // observable del money-path.
-    const declaredChainKey = agent.payment?.chain
-      ? normalizeChainSlug(agent.payment.chain)
-      : undefined;
-    const declaredVmUnsupported =
-      declaredChainKey !== undefined &&
-      getChainVmFamily(declaredChainKey) !== 'evm';
-    // WAS-V2-3-CLIENT-2: schema drift fallback for payTo (mirrors price_per_call
-    // fallback in discovery). canonical: agent.metadata.payTo (kite registry);
-    // fallback: agent.metadata.payment.contract (wasiai-v2 marketplace).
-    const meta = agent.metadata as Record<string, unknown> | undefined;
-    const canonicalPayTo =
-      typeof meta?.payTo === 'string' ? meta.payTo : undefined;
-    const fallbackPayment = meta?.payment as
-      | Record<string, unknown>
-      | undefined;
-    const fallbackPayTo =
-      typeof fallbackPayment?.contract === 'string'
-        ? fallbackPayment.contract
-        : undefined;
-    const payTo = canonicalPayTo ?? fallbackPayTo;
-    // Fix-pack CR-MNR-4: el resultado del validador se conserva TIPADO
-    // (`isValidWallet` narrowea a `` `0x${string}` ``) en vez de recalcularse con
-    // un cast crudo `payTo as \`0x${string}\`` en el sign de abajo. El cast era
-    // una aserción sin chequeo al lado de un chequeo que ya se había hecho: si
-    // alguien tocaba este guard, el cast seguía compilando igual. Ahora el sign
-    // sólo puede recibir lo que ESTE validador aprobó, por tipos.
-    const payToEvm: `0x${string}` | undefined =
-      payTo !== undefined && isValidWallet(payTo) ? payTo : undefined;
-    // payTo ausente → NO es este guard: sigue cayendo en el throw explícito de
-    // abajo (comportamiento previo intacto).
-    const payToNotEvm = payTo !== undefined && payToEvm === undefined;
-    const inboundVmUnsupported = declaredVmUnsupported || payToNotEvm;
-    if (agent.priceUsdc > 0 && !a2aKey && inboundVmUnsupported) {
-      const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);
-      warn(
-        {
-          agent: agent.slug,
-          chain: declaredChainKey,
-          code: 'INBOUND_VM_UNSUPPORTED',
-          // Fix-pack CR-MNR-5: el `reason` del formato usa el MISMO nombre que el
-          // skip-code del leg downstream para la MISMA condición
-          // (`INVALID_PAY_TO_FORMAT` de `DownstreamSkipCode`). Antes se llamaba
-          // `PAY_TO_FORMAT` acá e `INVALID_PAY_TO_FORMAT` allá: dos nombres para
-          // "el payTo no tiene formato EVM" obligaban a un dashboard a saber que
-          // son lo mismo.
-          reason: declaredVmUnsupported
-            ? 'DECLARED_CHAIN'
-            : 'INVALID_PAY_TO_FORMAT',
-        },
-        '[Compose] inbound x402 sign skipped — payTo is not an EVM address (non-EVM chain declared and/or non-EVM payTo format). The agent fee settles operator-side in the downstream leg.',
-      );
-    }
-    if (agent.priceUsdc > 0 && !a2aKey && !inboundVmUnsupported) {
-      // WKH-234: the inbound x402 (caller→gateway) is EVM-only — it signs an
-      // EIP-3009 authorization on the gateway's DEFAULT chain, and the caller
-      // has NO Solana wallet (§1). `getPaymentAdapter()` narrows to
-      // `EvmPaymentAdapter` and fails-loud if the default chain were ever Solana
-      // (an unsupported inbound config) — pero eso NO dice nada sobre la familia
-      // del payTo del AGENTE, que se filtra en el guard `inboundVmUnsupported`
-      // de arriba. The Solana agent fee is settled operator-side in the
-      // DOWNSTREAM leg (signAndSettleDownstream), not here.
-      // it2 BLQ-BAJO-1: `payTo` se resuelve ARRIBA (el guard necesita el VALOR,
-      // no sólo la chain declarada). Acá sólo queda su fail-loud histórico.
-      //
-      // CR-MNR-4: se chequea `payToEvm` (la variante TIPADA) en vez de `payTo`.
-      // Equivalente exacto: en esta rama `inboundVmUnsupported === false`, o sea
-      // `payToNotEvm === false`, o sea `payTo` ausente O válido ⇒ `payToEvm`
-      // undefined SÓLO cuando `payTo` está ausente, que es justo el caso de este
-      // throw. El mensaje no cambia.
-      if (!payToEvm)
-        throw new Error(
-          `No payTo address for agent ${agent.slug} — neither metadata.payTo nor metadata.payment.contract present`,
-        );
-      // WKH-195 MONEY-PATH: decimals-aware. Una sola resolución del
-      // default-chain adapter reusada para derivar decimals + firmar (DT-2
-      // WKH-192). El settle de :928 resuelve el MISMO singleton determinístico
-      // (registry.ts:185-200) → byte-equivalente, por eso no se toca. Delega en
-      // usdToAtomic (byte-idéntico al legado `× 1e12` en Kite 18d por
-      // construcción, correcto en Base 6d). Fallback `?? 18` sin throw.
-      const adapter = getPaymentAdapter();
-      const decimals = adapter.supportedTokens?.[0]?.decimals ?? 18; // CD-4
-      const valueWei = usdToAtomic(agent.priceUsdc, decimals); // CD-1
-      const result = await adapter.sign({
-        // CR-MNR-4: sin cast — `payToEvm` YA es `` `0x${string}` `` porque salió
-        // del type-predicate de `isValidWallet`. El valor es el mismo `payTo` que
-        // el guard aprobó.
-        to: payToEvm,
-        value: valueWei,
-      });
-      // C2 (audit 2026-07-01): DO NOT forward the freshly-signed EIP-3009
-      // authorization to the downstream agent. An EIP-3009
-      // `transferWithAuthorization` is redeemable permissionlessly by anyone who
-      // holds it: emitting `PAYMENT-SIGNATURE` to `agent.invokeUrl` (a URL the
-      // agent's registrant controls) let the agent redeem it directly against
-      // the token contract and pull `priceUsdc` from the a2a OPERATOR wallet
-      // BEFORE a2a's own settle() ran — then a2a's redundant settle on the same
-      // (now-consumed) nonce reverted, throwing `x402 settle failed`, and the
-      // per-step catch refunded the caller (operator-wallet drain, repeatable).
-      // a2a still settles the authorization itself below (paying the agent's
-      // payTo on-chain) — the agent simply never receives a redeemable copy, so
-      // there is nothing to front-run. The legacy Pieverse inbound x402 path
-      // (broken HTTP 500 since 2026-04-13) is the only thing that consumed this
-      // header, so removing it breaks no working flow.
-      paymentRequest = result.paymentRequest;
-    }
+    // POR QUÉ NO ERA UN LEG INBOUND. Firmaba con `OPERATOR_PRIVATE_KEY`
+    // (`adapters/kite-ozone/payment.ts:279`) hacia el `payTo` del AGENTE: es
+    // dinero SALIENDO del gateway, igual que el leg downstream. El cobro al
+    // caller ocurre una sola vez y en otro lado (`middleware/x402.ts`, un único
+    // `settle()` inbound). Y desde C2 (auditoría 2026-07-01) la autorización que
+    // firmaba ya no se le mandaba a nadie —no viajaba en ningún header—, así que
+    // lo único que hacía era mover fondos.
+    //
+    // POR QUÉ SE BORRA EN VEZ DE EXCLUIRSE CONTRA EL OTRO LEG. Su gate miraba
+    // `!a2aKey`, o sea CÓMO SE AUTENTICÓ EL CALLER, que no dice nada sobre si al
+    // AGENTE hay que pagarle: el mismo agente, con la misma card, invocado por un
+    // caller prepago ya no cobraba por este leg. Un leg de salida que depende del
+    // método de auth del caller no es un riel de pago, y dos gates que tienen que
+    // coincidir son exactamente la forma en la que nació este bug. El ÚNICO
+    // choke-point de salida es ahora `signAndSettleDownstream`, que es además el
+    // que tiene el gate fail-CLOSED de mainnet
+    // (`WASIAI_DOWNSTREAM_MAINNET_ALLOW`), el rechazo de la zero-address, el
+    // pre-check de saldo, la idempotencia por `intentId` y el recibo del ledger —
+    // nada de lo cual tenía el leg borrado.
+    //
+    // Contado, no razonado: `services/compose.outbound-legs.test.ts` ejecuta el
+    // camino y cuenta los settles REALES de los dos legs contra un solo espía.
+    //
     // WKH-SEC-04 (AC-3 / CD-2 / DT-2): runtime SSRF revalidation on
     // invokeUrl before the outbound fetch — mirrors discovery.ts:529. The
-    // headers built above carry x-a2a-key / PAYMENT-SIGNATURE; we MUST NOT
+    // headers built above can carry `x-a2a-key` (el bearer del caller) y las
+    // credenciales del registry / del mapa self-published; we MUST NOT
     // emit them to a host that resolves to a private/loopback/link-local IP
     // (TOCTOU / DNS-rebinding). On SSRFViolationError, log and rethrow so the
     // pipeline aborts this step (caught in execute()'s per-step catch) without
@@ -1589,8 +1484,14 @@ export const composeService = {
     // M2 (audit 2026-06-24): connect-time SSRF guard on invokeUrl. The
     // validateRegistryUrl check above runs at resolution-time, but plain fetch
     // re-resolves DNS; `ssrfFetch` revalidates the SAME resolution the socket
-    // connects to so x-a2a-key / PAYMENT-SIGNATURE headers can never be emitted
+    // connects to so the `x-a2a-key` / credential headers can never be emitted
     // to a private/metadata IP (closes TOCTOU / DNS-rebinding).
+    //
+    // ⚠️ Las dos prosas de arriba nombraban un header `PAYMENT-SIGNATURE` que
+    // este código NO emite desde C2 (auditoría 2026-07-01) y que después del
+    // borrado del segundo leg de salida ya ni siquiera se firma. Un comentario
+    // que nombra una credencial inexistente hace que la revisión busque el
+    // riesgo donde no está.
     const response = await ssrfFetch(agent.invokeUrl, {
       method: 'POST',
       headers,
@@ -1615,120 +1516,6 @@ export const composeService = {
     }
     const data = (await response.json()) as Record<string, unknown>;
     const output = data.result ?? data;
-    let txHash: string | undefined;
-    if (paymentRequest) {
-      // WKH-106 (BASE-03): emit selector decision telemetry when settle
-      // is on Base chain. The Base adapter itself already honors
-      // CDP_FACILITATOR_URL via its own env-var fallback chain (see
-      // src/adapters/base/payment.ts:163-170), but logging the selector
-      // result here gives observability for AC-2 / AC-5 / AC-7 and lets
-      // compose-layer integration tests assert the decision was taken.
-      //
-      // Selector is invoked ONLY when the agent's manifest declares a
-      // Base chain (CD-5 — Kite/Avalanche untouched). Pure function call:
-      // no env mutation, no I/O.
-      const manifestChain = agent.payment?.chain;
-      const chainKey = manifestChain
-        ? normalizeChainSlug(manifestChain)
-        : undefined;
-      if (chainKey?.startsWith('base-')) {
-        const meta = agent.metadata as Record<string, unknown> | undefined;
-        const manifestFacilitatorUrl =
-          typeof meta?.facilitatorUrl === 'string'
-            ? meta.facilitatorUrl
-            : undefined;
-        const selectedUrl = selectFacilitatorUrl({
-          chainKey,
-          cdpFacilitatorUrl: process.env.CDP_FACILITATOR_URL,
-          agentManifestFacilitatorUrl: manifestFacilitatorUrl,
-        });
-        // Structured log — easy to grep in production + drives smoke tests.
-        // Does NOT include the CDP key itself — only the URL host pattern.
-        log.info(
-          `[Compose] Base settle facilitator selector — chainKey=${chainKey} selected=${selectedUrl ?? '<adapter-default>'} cdpEnvSet=${typeof process.env.CDP_FACILITATOR_URL === 'string' && process.env.CDP_FACILITATOR_URL.length > 0}`,
-        );
-      }
-
-      const settleResult = await getPaymentAdapter().settle({
-        authorization: paymentRequest.authorization,
-        signature: paymentRequest.signature,
-        network: paymentRequest.network ?? '',
-      });
-      if (!settleResult.success) {
-        const settleDetail = `x402 settle failed for ${agent.slug}: ${settleResult.error ?? 'unknown'}`;
-        // HU-203, EJE 1 — un `success:false` CON txHash no prueba que no se ejecutó.
-        //
-        // Este `if` descartaba el `settleResult.txHash` y tiraba un `Error` pelado. El
-        // per-step catch de `compose()` no puede distinguir ese error de cualquier otro
-        // fallo del step, así que reembolsaba el débito del caller. Con el hash en la
-        // mano eso significa que el agente cobró on-chain Y el caller recuperó su
-        // budget: la plata sale dos veces de nuestro lado.
-        //
-        // En modo `pieverse` (el DEFAULT de producción, `KITE_FACILITATOR_MODE`) el
-        // adapter devuelve la respuesta del facilitator verbatim, así que este es el
-        // camino vivo. Ver `hasBroadcastEvidence` en `adapters/errors.ts` para por qué
-        // CUALQUIER string no vacío cuenta como evidencia y por qué no se valida el
-        // formato.
-        const withholding = withholdingFromSettleResult(
-          settleResult,
-          `${settleDetail} — the facilitator returned a broadcast tx hash (${settleResult.txHash}), so the payment may have executed on-chain`,
-        );
-        if (withholding) throw new SettleRefundWithheldError(withholding);
-        // Sin hash: el facilitator contestó, con un veredicto legible, que no settleó.
-        // Ése es el único caso que conserva el reembolso automático.
-        throw new Error(settleDetail);
-      }
-      // TB-01 (audit 2026-06-30): re-verify the settle on-chain BEFORE trusting
-      // it. The facilitator just returned `{ success, txHash }`; we independently
-      // re-read that tx and confirm it really moved `>= value` of the token to
-      // the agent's payTo. A forged/replayed/insufficient settle is rejected here
-      // → the step throws → the pipeline aborts (caller is refunded upstream).
-      // Gated behind SETTLE_VERIFY_ONCHAIN (default ON); no-op when OFF.
-      const settleAuth = paymentRequest.authorization as {
-        to?: unknown;
-        value?: unknown;
-      };
-      const settlePayTo =
-        typeof settleAuth.to === 'string' ? settleAuth.to : undefined;
-      let settleValueAtomic: bigint | undefined;
-      try {
-        settleValueAtomic =
-          typeof settleAuth.value === 'string'
-            ? BigInt(settleAuth.value)
-            : undefined;
-      } catch {
-        settleValueAtomic = undefined;
-      }
-      if (settlePayTo && settleValueAtomic !== undefined) {
-        const reVerified = await verifyDefaultChainSettle({
-          txHash: settleResult.txHash,
-          payTo: settlePayTo,
-          requiredAmountAtomic: settleValueAtomic,
-        });
-        // MNR-1: RPC_UNAVAILABLE (a2a couldn't independently check) → ALLOW the
-        // settle (facilitator already confirmed it) but log a clear warning.
-        if (reVerified.warn) {
-          // WKH-150 AC-1b/1c: message reflects the outcome. TESTNET (fail-OPEN,
-          // `ok:true`) preserves the historical text byte-for-byte; MAINNET
-          // (fail-CLOSED, `ok:false`, WKH-144) says REJECTING — the settle is
-          // thrown below in the `!reVerified.ok` block, so "trusting" would be
-          // contradictory. No decision logic changes here.
-          log.warn(
-            reVerified.ok
-              ? `[Compose] settle on-chain re-verify unavailable for ${agent.slug} (${reVerified.reason ?? 'unknown'}), trusting facilitator confirmation`
-              : `[Compose] settle on-chain re-verify unavailable for ${agent.slug} (${reVerified.reason ?? 'unknown'}) — REJECTING facilitator confirmation (fail-closed mainnet)`,
-          );
-        }
-        // A DEFINITIVE contradiction (forged/insufficient/wrong tx) → reject.
-        if (!reVerified.ok) {
-          throw new Error(
-            `x402 settle on-chain re-verification failed for ${agent.slug}: ${reVerified.reason ?? 'unknown'}`,
-          );
-        }
-      }
-      txHash = settleResult.txHash;
-      log.info(`[Compose] x402 settled for ${agent.slug} — txHash: ${txHash}`);
-    }
 
     // ─── WKH-55: Downstream x402 hook (AC-1..AC-10) ──────────────────
     // Defensive logger fallback: si el caller no pasó uno, usamos el logger
@@ -1756,7 +1543,6 @@ export const composeService = {
 
     return {
       output,
-      txHash,
       ...(downstream && { downstream }),
       ...(skipCode && { downstreamSkipCode: skipCode }),
     };
