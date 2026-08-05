@@ -387,6 +387,37 @@ describe('chargeProtocolFee', () => {
     expect(mockSign).not.toHaveBeenCalled();
   });
 
+  // FT-12b: CHEQUEO MECÁNICO del comentario del paso 3 de `chargeProtocolFee`.
+  // El comentario afirma que una fila `failed` NO se reintenta. Si alguien
+  // habilita el reintento (upsert, DELETE previo, `.upsert(onConflict)`, etc.)
+  // este test se pone rojo y obliga a releer la advertencia de doble pago que
+  // vive junto a ese comentario (HU-201 / merge 700341a: una fila `failed`
+  // puede llevar el hash de un broadcast que SÍ ocurrió).
+  it('FT-12b: existing failed row does NOT retry the charge (comment guard)', async () => {
+    process.env.WASIAI_PROTOCOL_FEE_WALLET =
+      '0x1111111111111111111111111111111111111111';
+
+    // La fila `failed` existe y lleva evidencia de broadcast (HU-201).
+    stubSelect({ data: { status: 'failed', tx_hash: '0xBROADCASTED' } });
+    // El insert choca con la PK `orchestration_id` — es lo que hace Postgres
+    // cuando la fila leída arriba ya ocupa la clave.
+    stubInsert({ error: { code: '23505', message: 'duplicate key' } });
+
+    const result = await chargeProtocolFee({
+      orchestrationId: 'id-12b',
+      feeBaseUsdc: 1.0,
+      feeRate: 0.01,
+    });
+
+    expect(result.status).toBe('already-charged');
+    if (result.status === 'already-charged') {
+      expect(result.inProgress).toBe(true);
+    }
+    // Lo que realmente importa: no se vuelve a mover plata.
+    expect(mockSign).not.toHaveBeenCalled();
+    expect(mockSettle).not.toHaveBeenCalled();
+  });
+
   // FT-13 (AC-6): settle returns success:false → row failed
   it('FT-13: marks failed when settle returns success:false', async () => {
     process.env.WASIAI_PROTOCOL_FEE_WALLET =

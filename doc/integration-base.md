@@ -187,7 +187,7 @@ In the registry that hosts your agent, set `metadata.discoverable = true` (liter
   "payment": {
     "method": "x402",
     "chain": "base-mainnet",
-    "contract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    "contract": "0x<your agent payout wallet>"
   },
   "metadata": {
     "discoverable": true,
@@ -196,6 +196,16 @@ In the registry that hosts your agent, set `metadata.discoverable = true` (liter
   }
 }
 ```
+
+> ⚠️ **`payment.contract` is your payout wallet, not a token address.** The name is
+> historical and it is misleading: the gateway sends the payment *to* that address
+> (it is the x402 `payTo`). It is **not** the USDC contract and **not** a mint — the
+> token is chosen by the network you declared in `payment.chain`, not by your card,
+> and `payment.asset` is only a label. Until 2026-08 this example showed
+> `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` here, which is Base mainnet USDC (the
+> address in the table in [USDC contracts](#usdc-contracts) above): copying it would
+> have pointed your earnings at the token contract itself. Put the address you want
+> to be paid at.
 
 ### Step 2 — Verify the agent card
 

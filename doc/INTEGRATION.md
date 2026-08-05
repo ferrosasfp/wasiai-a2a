@@ -241,6 +241,17 @@ each: they write state. Only the reads changed.
   `limit` is applied. This is the pagination denominator, so
   `total >= agents.length`. It is **not** the size of the page — do not use it to
   size a loop over `agents`.
+- **`agents[].payment`** — how that agent charges. `method` and `chain` are what the
+  agent **declared** in its card; `contract` is its **payout wallet** (the x402
+  `payTo`), despite the name it is not a token or contract address. Two more fields
+  are **derived by the gateway**, because a declared alias does not have to state its
+  environment (`avalanche` is the most common one in the live catalog and it resolves
+  to Fuji): `resolvedChain` is the canonical rail the gateway resolved `chain` to
+  (e.g. `avalanche` → `avalanche-fuji`) and `network` is `"testnet"` or `"mainnet"`.
+  What `network` guarantees, stated narrowly: either the payment lands on that
+  environment or there is no payment — the outbound leg compares the rail's declared
+  environment against the real destination before signing and skips the leg when they
+  disagree. It does **not** claim which chainId the deploy points at.
 - **`registries`** — names of the registries that contributed candidates.
 - **`excluded`** — `{ scope, reputation, trialAvailable, standingUnavailable }`: how
   many candidates each candidacy filter discarded (and whether the reputation read
@@ -625,7 +636,7 @@ server-side logs):
 | `NO_PAYMENT_FIELD` | The agent's card declares no `payment` block. | Ask the agent operator to publish a payment spec. |
 | `METHOD_NOT_SUPPORTED` | The agent's `payment.method` is not x402. | Not payable through this rail. |
 | `CHAIN_NOT_SUPPORTED` | The agent's `payment.chain` is not a rail this gateway settles. | Ask the agent to declare a supported chain. |
-| `INVALID_PAY_TO_FORMAT` | The agent's `payment.contract` is not a valid address for its chain. | Agent-side config error. |
+| `INVALID_PAY_TO_FORMAT` | The agent's `payment.contract` is not a valid address for its chain. Despite the name, that field is the agent's **payout wallet** (the x402 `payTo`), not a token or contract address. | Agent-side config error. |
 | `ZERO_PAY_TO` | The agent's payout address is the zero address. | Agent-side config error. |
 | `INVALID_PRICE` | The agent's price is not a finite positive number. | Agent-side config error. |
 | `SETTLE_FAILED` | The payment was attempted and did not go through. | Retryable. |

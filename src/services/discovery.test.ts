@@ -291,6 +291,10 @@ describe('discoveryService', () => {
         asset: 'USDC',
         chain: 'avalanche',
         contract: '0x000000000000000000000000000000000000aBcD',
+        // El agente declara `avalanche` (ambiguo) y el catálogo publica a qué red
+        // apunta de verdad. El slug declarado NO se toca.
+        resolvedChain: 'avalanche-fuji',
+        network: 'testnet',
       });
     });
 
@@ -338,6 +342,8 @@ describe('discoveryService', () => {
         asset: 'USDC',
         chain: 'avalanche-mainnet', // it2 BLQ-MED-1: sin colapso mainnet
         contract: '0x000000000000000000000000000000000000aBcD',
+        resolvedChain: 'avalanche-mainnet',
+        network: 'mainnet',
       });
     });
 

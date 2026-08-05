@@ -139,6 +139,13 @@ function resolveAvalancheOutputChain(
  * Retorna undefined si los campos críticos siguen ausentes O la chain no la
  * conoce el resolver.
  *
+ * ⚠️ `contract` NO ES UN CONTRATO NI UN TOKEN: es la BILLETERA QUE COBRA (el
+ * `payTo` del leg de salida). Este módulo es el único productor de ese campo, así
+ * que el valor que sale de acá es literalmente el destinatario del transfer
+ * (`downstream-payment.ts:772-777`). El token no se declara en la ficha: lo fija
+ * el adapter de la chain. Ver el docstring del campo en `types/index.ts`
+ * (`AgentPaymentSpec.contract`) — el nombre ya produjo un bloqueante rojo falso.
+ *
  * WKH-241 (DT-3): NO valida el FORMATO de `contract` (pass-through, CD-4). El
  * guard de forma vive en settle-time (`validatePayTo` /
  * `isValidSolanaAddress`, `downstream-payment.ts`), que rechaza un payTo
@@ -198,5 +205,11 @@ export function readPaymentSpec(
     chain,
     contract: obj.contract,
     asset: typeof obj.asset === 'string' ? obj.asset : undefined,
+    // DERIVADOS (WKH-ALIAS-ETIQUETA). NO tocan el vocabulario que el agente
+    // declara: `chain` sigue saliendo tal cual y ninguna ficha publicada cambia.
+    // Lo que cambia es lo que el catálogo INFORMA — ver el docstring de los dos
+    // campos en `types/index.ts`.
+    resolvedChain: chainKey,
+    network: isMainnetChainKey(chainKey) ? 'mainnet' : 'testnet',
   };
 }

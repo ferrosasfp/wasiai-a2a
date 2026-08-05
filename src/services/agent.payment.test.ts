@@ -107,6 +107,10 @@ describe('mapRowToAgent — payment spec declarado (WKH-241)', () => {
       chain: 'solana-devnet',
       contract: SOL_PAYTO,
       asset: 'USDC',
+      // Derivados por el gateway (etiqueta de red del catálogo público). El slug
+      // declarado por el agente sale intacto.
+      resolvedChain: 'solana-devnet',
+      network: 'testnet',
     });
     // El payTo es el base58 declarado — NO una address EVM ni la chain default.
     expect(agent?.payment?.contract).toBe(SOL_PAYTO);
@@ -125,6 +129,10 @@ describe('mapRowToAgent — payment spec declarado (WKH-241)', () => {
       chain: 'solana-devnet',
       contract: SOL_PAYTO,
       asset: 'USDC',
+      // Derivados por el gateway (etiqueta de red del catálogo público). El slug
+      // declarado por el agente sale intacto.
+      resolvedChain: 'solana-devnet',
+      network: 'testnet',
     });
   });
 
