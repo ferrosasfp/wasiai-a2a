@@ -139,7 +139,16 @@ function mapRowToAgent(row: AgentRow): Agent {
     invokeUrl: row.agent_url,
     invocationNote: INVOCATION_NOTE,
     verified: false,
-    status: 'active',
+    // El estado se DERIVA de la fila, no se afirma. Antes era el literal
+    // `'active'`, y era cierto sólo por accidente: los dos llamadores de este
+    // mapper filtran `.eq('enabled', true)`, así que nunca le llegaba una fila
+    // dada de baja. Con el literal, el día que una fila deshabilitada llegue por
+    // cualquier motivo (un llamador nuevo que se olvide del filtro, una lectura
+    // sin él) el agente saldría anunciado como ACTIVO. Derivarlo hace que
+    // `discovery.ts:449` (`allAgents.filter(a => a.status === 'active')`) sea una
+    // SEGUNDA barrera independiente del filtro SQL, en vez de un colador que
+    // confía en la primera.
+    status: row.enabled ? 'active' : 'inactive',
     metadata,
     // WKH-241 (AC-1): el spec vive bajo `metadata.payment` — se pasa el objeto
     // `metadata` completo porque el lector busca la key `payment` (y el
@@ -252,6 +261,20 @@ function assertValidReferrerRef(value: unknown): void {
     )
   ) {
     throw new Error('Invalid referrerRef');
+  }
+}
+
+/**
+ * Write-boundary guard de `enabled` (la baja/alta del agente). Defense-in-depth:
+ * el route ya devolvió 422. Hace falta igual porque `routes/agents.ts` le pasa el
+ * `body` CRUDO a `update()`: sin este guard un `enabled: "false"` (string, que es
+ * truthy) o un `enabled: 0` llegarían al UPDATE, y "el agente quedó al revés de lo
+ * que pidió su dueño" es una falla silenciosa. Sólo se acepta un booleano.
+ */
+function assertValidEnabled(value: unknown): void {
+  if (value === undefined) return;
+  if (typeof value !== 'boolean') {
+    throw new Error('Invalid enabled: must be a boolean');
   }
 }
 
@@ -586,6 +609,9 @@ export const publishedAgentService = {
       assertValidPayoutWallet(updates.payoutWallet, updates.payoutChain);
     if (updates.referrerRef !== undefined)
       assertValidReferrerRef(updates.referrerRef);
+    // Baja/alta del agente. Corre DESPUÉS del guard de ownership de arriba: un
+    // caller que no es el dueño ya salió por `OwnershipMismatchError`.
+    if (updates.enabled !== undefined) assertValidEnabled(updates.enabled);
 
     const updateRow: Database['public']['Tables']['a2a_agents']['Update'] = {};
     if (updates.name !== undefined) {
@@ -608,6 +634,13 @@ export const publishedAgentService = {
       updateRow.payout_wallet = updates.payoutWallet;
     if (updates.referrerRef !== undefined)
       updateRow.referrer_ref = updates.referrerRef.trim();
+    // La BAJA (y el alta) del agente. El UPDATE de más abajo filtra por
+    // `.eq('slug', slug).eq('owner_ref', ownerRef)`, así que este campo hereda el
+    // mismo guard anti-IDOR que el resto: nadie puede dar de baja el agente de
+    // otro. `false` lo saca de `/discover` (el SELECT de `listAsAgents` filtra
+    // `enabled=true`) y de `/compose` (`getBySlugAsAgent` filtra igual, y
+    // `discoveryService.getAgent` es por donde compose resuelve el slug).
+    if (updates.enabled !== undefined) updateRow.enabled = updates.enabled;
 
     // Merge de metadata (inputSchema/outputSchema/discoverable) sobre lo
     // existente — el patch parcial no debe borrar los campos no provistos.

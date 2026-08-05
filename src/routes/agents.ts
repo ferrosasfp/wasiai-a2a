@@ -378,6 +378,21 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
           });
         }
 
+        // Baja/alta del agente: si `enabled` viene, debe ser un booleano. Un
+        // `"false"` (string, truthy) o un `0` dejarían al agente al revés de lo
+        // que su dueño pidió, y una baja que no da de baja es peor que no tenerla.
+        if (body.enabled !== undefined && typeof body.enabled !== 'boolean') {
+          request.log.warn(
+            { field: 'enabled' },
+            'agent update rejected: invalid enabled',
+          );
+          return reply.status(422).send({
+            error: 'Invalid enabled',
+            field: 'enabled',
+            reason: 'enabled must be a boolean',
+          });
+        }
+
         // MNR-1: si `capabilities` viene, debe ser un array con >= 1 string.
         if (
           body.capabilities !== undefined &&

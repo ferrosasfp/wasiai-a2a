@@ -213,4 +213,82 @@ describe('agents routes — ownership / anti-IDOR (WKH-134)', () => {
       actualOwnerRef: 'tenant-A',
     });
   });
+
+  // ── Baja / alta del agente (`enabled`) ────────────────────────────
+  //
+  // La baja es una MUTACIÓN DE ESTADO, así que pasa por el mismo guard anti-IDOR
+  // que el resto del PATCH: sin el filtro por `owner_ref` cualquiera podría sacar
+  // de circulación el agente de otro. Se ejercita por la ruta real (HTTP → route →
+  // service → supabase) para que lo que se prueba sea el camino, no la condición.
+
+  it('BAJA — el dueño da de baja su agente → 200, UPDATE bajo el guard de owner_ref, sólo enabled tocado', async () => {
+    currentOwner = 'tenant-A'; // coincide con OWNER_A_ROW.owner_ref
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/agents/a-owned-agent',
+      payload: { enabled: false },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(state.updateCalled).toBe(true);
+    expect(state.eqCalls).toContainEqual(['owner_ref', 'tenant-A']);
+    expect(state.updateArg).toEqual({ enabled: false });
+    expect(mockLog).not.toHaveBeenCalled();
+  });
+
+  it('ALTA — el dueño lo vuelve a habilitar → 200 (la baja es reversible)', async () => {
+    currentOwner = 'tenant-A';
+    state.row = { ...OWNER_A_ROW, enabled: false };
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/agents/a-owned-agent',
+      payload: { enabled: true },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(state.updateArg).toEqual({ enabled: true });
+    expect(state.eqCalls).toContainEqual(['owner_ref', 'tenant-A']);
+  });
+
+  it('BAJA CRUZADA — owner B da de baja el agente de owner A → 404, sin mutación, logOwnershipMismatch', async () => {
+    currentOwner = 'tenant-B';
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/agents/a-owned-agent',
+      payload: { enabled: false },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'Agent not found' });
+    // El agente de A sigue en pie: no corrió ningún UPDATE.
+    expect(state.updateCalled).toBe(false);
+    expect(state.updateArg).toBeNull();
+    expect(mockLog).toHaveBeenCalledTimes(1);
+    expect(mockLog.mock.calls[0]?.[0]).toMatchObject({
+      op: 'agentPublishUpdate',
+      resourceId: 'a-owned-agent',
+      callerOwnerRef: 'tenant-B',
+      actualOwnerRef: 'tenant-A',
+    });
+  });
+
+  it('BAJA con `enabled` no booleano → 422, UPDATE no corre', async () => {
+    currentOwner = 'tenant-A';
+
+    for (const bad of ['false', 0, 1, null]) {
+      state.updateCalled = false;
+      const res = await app.inject({
+        method: 'PATCH',
+        url: '/agents/a-owned-agent',
+        payload: { enabled: bad },
+      });
+
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe('Invalid enabled');
+      expect(state.updateCalled).toBe(false);
+    }
+  });
 });
