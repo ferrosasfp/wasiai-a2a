@@ -19,6 +19,16 @@
  *
  * The function does NOT read `process.env` directly (CD-6) — testable
  * without env mocking.
+ *
+ * ⚠️ HU-DOUBLE-PAY — SIN LLAMADOR DE PRODUCCIÓN. Su único call-site vivo era la
+ * telemetría del settle del SEGUNDO leg de salida de `compose.invokeAgent`, que
+ * se borró. Hoy los únicos llamadores están en `cdp-selector.test.ts`, o sea que
+ * este módulo NO decide nada en el money-path: el override de
+ * `CDP_FACILITATOR_URL` lo aplica el adapter de Base por su cuenta
+ * (`adapters/base/payment.ts`, cadena de fallback propia), que es el camino que
+ * el leg downstream usa de verdad. Queda en pie porque es una función pura y
+ * barata, pero un lector no debe deducir de su existencia que alguien la
+ * consulta antes de settlear.
  */
 
 import type { ChainKey } from '../adapters/types.js';

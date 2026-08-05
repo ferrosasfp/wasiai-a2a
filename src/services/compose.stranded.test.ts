@@ -449,9 +449,10 @@ describe('HU-306 · qué dice la anotación durable (AC-3)', () => {
     const a1 = makeAgent({
       slug: 'pagador',
       priceUsdc: 0.02,
-      // Cadena EVM a propósito: con una cadena declarada NO-EVM el leg inbound no firma
-      // (`declaredVmUnsupported` en `invokeAgent`) y este step tendría una sola
-      // evidencia. Acá se quieren LAS DOS, para fijar cuál manda en `tx_hash`.
+      // HU-DOUBLE-PAY: este fixture buscaba LAS DOS evidencias (inbound +
+      // downstream) para fijar cuál manda en `tx_hash`. El leg que producía la
+      // evidencia "inbound" era el segundo pago de salida y se borró, así que
+      // hoy sólo puede haber una: la del leg downstream.
       payment: {
         method: 'x402',
         chain: 'avalanche',
@@ -505,10 +506,9 @@ describe('HU-306 · qué dice la anotación durable (AC-3)', () => {
       chain: 'avalanche',
       cost_usdc: 0.02,
       settled_atomic: '20000', // atómico, SIN convertir a USD
-      // con las dos evidencias manda el hash DOWNSTREAM (el pago AL agente); el inbound
-      // del mismo step queda igual de recuperable por `compose_run_id`.
+      // El hash es el del leg downstream — el ÚNICO pago al agente que existe.
       tx_hash: '0xDOWN0',
-      evidence: 'both',
+      evidence: 'downstream',
     });
     // EL step que falló NO está en la lista: su residuo, si lo hubiera, es la otra
     // pregunta (`compose_settle_unknown`). Incluirlo inflaría la exposición reportada.
@@ -557,60 +557,6 @@ describe('HU-306 · qué dice la anotación durable (AC-3)', () => {
     );
     expect(failed!.agentId).toBe('j2');
     expect((failed!.metadata as Record<string, unknown>).step).toBe(1);
-  });
-
-  it('T-STRAND-INBOUND: un step pagado SÓLO por el settle inbound también cuenta (AC-8)', async () => {
-    // Camino x402 anónimo: no hay débito per-step, y el hash inbound ES un pago real al
-    // payTo del agente. Contar sólo el downstream subestimaría el residuo justo acá.
-    const a1 = makeAgent({
-      slug: 'inbound-only',
-      priceUsdc: 0.05,
-      metadata: { payTo: EVM_PAYTO },
-    });
-    const a2 = makeAgent({ slug: 'siguiente', id: 'agent-2' });
-    wireAgents(a1, a2);
-    mockDownstream.mockResolvedValue(null); // el leg downstream NO settleó
-    mockSign.mockResolvedValueOnce({
-      xPaymentHeader: 'h',
-      paymentRequest: {
-        authorization: {
-          from: '0xA',
-          to: EVM_PAYTO,
-          value: '50000',
-          validAfter: '0',
-          validBefore: '9999999999',
-          nonce: '0x9',
-        },
-        signature: '0xSIG',
-        network: 'eip155:2368',
-      },
-    });
-    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xINBOUND' });
-    mockFetchOk({ result: 'step0' });
-    mockFetchError(500);
-
-    const result = await composeService.compose({
-      steps: [
-        { agent: 'inbound-only', input: {} },
-        { agent: 'siguiente', input: {} },
-      ],
-    });
-
-    // Premisa: hubo hash inbound y NO hubo downstream.
-    expect(result.steps[0]!.txHash).toBe('0xINBOUND');
-    expect(result.steps[0]!.downstreamTxHash).toBeUndefined();
-
-    const [ev] = strandedEvents();
-    expect(ev).toBeDefined();
-    const paid = (ev!.metadata as Record<string, unknown>).paid_steps as Record<
-      string,
-      unknown
-    >[];
-    expect(paid).toHaveLength(1);
-    expect(paid[0]).toMatchObject({
-      evidence: 'inbound',
-      tx_hash: '0xINBOUND',
-    });
   });
 });
 

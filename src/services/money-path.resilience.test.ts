@@ -82,6 +82,8 @@ vi.mock('../lib/downstream-payment.js', () => ({
   signAndSettleDownstream: vi.fn().mockResolvedValue(null),
 }));
 
+import { signAndSettleDownstream } from '../lib/downstream-payment.js';
+
 // refund-outbox: assert the durable-retry enqueue when a credit RPC fails.
 vi.mock('./refund-outbox.js', () => ({
   refundOutbox: { enqueueRefund: vi.fn().mockResolvedValue(undefined) },
@@ -213,6 +215,11 @@ function withAgents(agents: Agent[]): void {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // HU-DOUBLE-PAY: `clearAllMocks()` limpia el historial pero NO la cola de
+  // `mockResolvedValueOnce`. Una respuesta encolada y no consumida por un test
+  // se la comía el siguiente y lo volvía verde por el motivo equivocado (se vio
+  // al reescribir las inyecciones de fallo de esta suite).
+  mockFetch.mockReset();
   delete process.env.ANTHROPIC_API_KEY;
   // happy defaults — individual tests override to inject failures.
   mockDebit.mockResolvedValue({ success: true });
@@ -250,47 +257,48 @@ describe('compose resilience — settle / downstream failures refund + degrade',
     });
   }
 
-  // I1: settle() returns 5xx-equivalent {success:false} on step 1.
-  it('settle returns failure on step 1 → refund of the step-1 debit, clean error, no double-charge', async () => {
+  // ── I1 REESCRITA (HU-DOUBLE-PAY) ────────────────────────────────────────
+  //
+  // Acá vivían dos tests que inyectaban el fallo en `getPaymentAdapter().settle`
+  // del segundo leg de salida de `invokeAgent`. Ese leg se borró (pagaba al
+  // agente por segunda vez), así que un settle que no aterriza YA NO puede
+  // tumbar el step: el único leg de salida que queda —`signAndSettleDownstream`—
+  // NUNCA tira (CD-7 de WKH-55) y reporta el resultado con un skip-code.
+  //
+  // ⚠️ ESTO ES UN CAMBIO DE COMPORTAMIENTO OBSERVABLE, y se fija acá para que se
+  // vea: antes, un caller x402 cuyo settle fallaba veía el step abortado y el
+  // débito devuelto; ahora ve el step OK con `downstreamSettle: skipped:*`. Es
+  // exactamente lo que ya le pasaba a TODO caller prepago (el leg borrado sólo
+  // corría con `!a2aKey`), así que el fix uniformó los dos caminos en vez de
+  // dejar dos semánticas según cómo se autenticó el caller.
+  //
+  // Al lado hay un efecto que el leg borrado provocaba y nadie había medido: su
+  // settle fallido TIRABA ANTES de que corriera el leg downstream, así que el
+  // agente se quedaba sin cobrar POR CULPA del leg redundante.
+  it('un leg downstream que no settlea NO tumba el step ni devuelve el débito — lo reporta', async () => {
     const res = await runTwoStep(() => {
-      mockFetchOk(); // step-1 downstream responds OK...
-      // ...but the x402 settle for step 1 fails (facilitator 5xx).
-      mockSettle
-        .mockResolvedValueOnce({ success: true, txHash: '0xs0' }) // step 0
-        .mockResolvedValueOnce({ success: false, error: 'facilitator 503' }); // step 1
+      mockFetchOk(); // el agente del step 1 responde OK
+      // El leg reporta que no pudo settlear (mismo contrato que producción:
+      // devuelve null y deja el code en el logger).
+      vi.mocked(signAndSettleDownstream).mockImplementation(
+        async (_agent, logger) => {
+          logger?.warn?.({ code: 'SETTLE_FAILED' }, 'no settle');
+          return null;
+        },
+      );
     });
 
-    // I2: graceful failure, not a thrown 500.
-    expect(res.success).toBe(false);
-    expect(res.error).toMatch(/settle failed|Step 1/i);
-    // I1: step-1 debit (0.02) refunded EXACTLY once with the canonical destination.
-    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
-    const [kid, chain, amount, owner, dest] = mockCreditWithDest.mock.calls[0]!;
-    expect(kid).toBe('k1');
-    expect(chain).toBe(CHAIN_ID);
-    expect(amount).toBeCloseTo(0.02, 6);
-    expect(owner).toBe('owner-test');
-    expect(dest).toBe('wasiai/a2');
-    // No double-charge: step 1 was debited exactly once (no re-debit on a
-    // non-field-error failure → no retry path).
+    expect(res.success).toBe(true);
+    // El débito del step 1 NO se devuelve: el step entregó valor.
+    expect(mockCreditWithDest).not.toHaveBeenCalled();
+    expect(mockCredit).not.toHaveBeenCalled();
+    // …y el caller se entera de que el leg no settleó.
+    expect(res.steps[1]?.downstreamSettle).toBe('skipped:SETTLE_FAILED');
+    // Sigue habiendo UN solo débito por step (no hay doble cobro).
     const step1Debits = mockDebit.mock.calls.filter(
       (c) => (c[5] as string) === 'wasiai/a2',
     );
     expect(step1Debits).toHaveLength(1);
-  });
-
-  // I1/I2: settle() THROWS (network exception) on step 1.
-  it('settle throws on step 1 → refund + graceful error (no unhandled rejection)', async () => {
-    const res = await runTwoStep(() => {
-      mockFetchOk();
-      mockSettle
-        .mockResolvedValueOnce({ success: true, txHash: '0xs0' })
-        .mockRejectedValueOnce(new Error('ECONNRESET facilitator'));
-    });
-    expect(res.success).toBe(false);
-    expect(res.error).toContain('Step 1');
-    expect(mockCreditWithDest).toHaveBeenCalledTimes(1);
-    expect(mockCreditWithDest.mock.calls[0]![2]).toBeCloseTo(0.02, 6);
   });
 
   // I2: downstream agent returns 5xx.
@@ -427,8 +435,15 @@ describe('orchestrate resilience — total failure refunds step-0 debit', () => 
   it('step-0 settle failure (totalCost 0) → full step-0 refund via credit()', async () => {
     const a1 = makeAgent({ slug: 'a1', id: 'id1', priceUsdc: 0.05 });
     withAgents([a1]);
-    mockFetchOk(); // downstream responds...
-    mockSettle.mockResolvedValue({ success: false, error: 'facilitator down' }); // ...settle fails
+    // HU-DOUBLE-PAY: el fallo se inyecta en el AGENTE, no en el settle. El
+    // settle que se usaba acá era el del leg de salida borrado; hoy un settle
+    // que no aterriza no tumba el step (ver la I1 reescrita en la Suite A), así
+    // que inyectarlo ahí ya no produce el fallo total que este test mide.
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      text: async () => 'agent down',
+    });
 
     const result = await orchestrateService.orchestrate(
       {
@@ -463,8 +478,11 @@ describe('orchestrate resilience — total failure refunds step-0 debit', () => 
     });
     const a1 = makeAgent({ slug: 'a1', id: 'id1', priceUsdc: 0.05 });
     withAgents([a1]);
-    mockFetchOk();
-    mockSettle.mockResolvedValue({ success: false, error: 'facilitator down' });
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      text: async () => 'agent down',
+    });
 
     const result = await orchestrateService.orchestrate(
       {

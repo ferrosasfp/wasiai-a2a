@@ -938,18 +938,26 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       // El `if (reply.sent)` de ABAJO (post-compose) SÍ es alcanzable: ahí el
       // handler ya estaba corriendo cuando el timer disparó.
 
-      // WKH-58 fix-pack: propagate the a2a credential to the service so compose
-      // can skip Pieverse inbound x402 (broken upstream WKH-45) when caller
-      // already paid via a2a-key (middleware debited budget per-call).
+      // La credencial CRUDA del caller, derivada con la MISMA extracción que usa
+      // el middleware de auth (`extractRawKey`: `x-a2a-key` O
+      // `Authorization: Bearer wasi_a2a_*`). `compose.invokeAgent` la usa para
+      // reenviar el header `x-a2a-key` al agente cuando su registry es
+      // system-trusted (C1, auditoría 2026-07-01).
       //
-      // C2 (audit 2026-07-01): derive the a2a key with the SAME extraction the
-      // auth middleware uses (x-a2a-key OR `Authorization: Bearer wasi_a2a_*`).
-      // Previously this read ONLY `x-a2a-key`, so a caller authenticated via
-      // `Authorization: Bearer` (whose budget WAS debited, scopingKeyRow set)
-      // looked un-keyed to compose → `invokeAgent` took the operator-signed
-      // EIP-3009 branch (`!a2aKey`) and leaked a redeemable authorization to the
-      // downstream agent. Deriving consistently with the real auth keeps such a
-      // caller on the prepaid path (no operator signature).
+      // C2 (auditoría 2026-07-01): antes esto leía SÓLO `x-a2a-key`, así que un
+      // caller autenticado por `Authorization: Bearer` (con budget YA debitado y
+      // `scopingKeyRow` seteado) se veía SIN key desde compose → `invokeAgent`
+      // tomaba la rama del EIP-3009 firmado por el operador (`!a2aKey`).
+      //
+      // ⚠️ HU-DOUBLE-PAY — ESTE COMENTARIO AFIRMABA DE MÁS Y ESO ESCONDIÓ EL BUG.
+      // Decía que propagar la credencial servía "para saltear el inbound x402 de
+      // Pieverse (roto upstream, WKH-45)". Eran dos afirmaciones falsas: (a) esa
+      // rama NO era un leg inbound sino un SEGUNDO pago de salida al agente,
+      // firmado con `OPERATOR_PRIVATE_KEY`; y (b) no estaba rota — con
+      // `KITE_FACILITATOR_MODE=x402` el adapter se desvía a `settleX402()`
+      // (`adapters/kite-ozone/payment.ts`) y nunca toca `/v2/settle` de Pieverse.
+      // Mientras el comentario decía "camino muerto", el leg pagaba de verdad.
+      // Ese leg se borró; lo que queda acá es la propagación de la credencial.
       const a2aKey = extractRawKey(request);
       const result = await composeService.compose({
         // HU-208: `steps` (resuelto), NO `body.steps`. `findUnresolvedStepIndex`

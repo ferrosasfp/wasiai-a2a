@@ -1052,7 +1052,20 @@ export interface StepResult {
    * decidió, y eso es justo lo que hace auditable una elección server-side.
    */
   resolvedFrom?: { capability: string };
-  txHash?: string | undefined; // Hash de tx on-chain si hubo pago x402
+  /**
+   * @deprecated HU-DOUBLE-PAY — `compose` YA NO LO POBLA, en ningún camino.
+   *
+   * Era el hash del SEGUNDO leg de salida de `invokeAgent` (el mal llamado "sign
+   * inbound x402"), que le pagaba al agente una segunda vez desde el wallet del
+   * operador y sólo corría con `!a2aKey`. Ese leg se borró; el hash del ÚNICO
+   * pago al agente es `downstreamTxHash`.
+   *
+   * El campo se conserva en el tipo por compatibilidad de CABLE (lo leen
+   * consumidores fuera de este repo y el mapper de `mcp/tools/orchestrate.ts`) y
+   * porque `lib/stranded-payment.ts` lo lee al releer filas VIEJAS, donde sí
+   * tiene valor. En una respuesta nueva sale SIEMPRE ausente.
+   */
+  txHash?: string | undefined;
   /** @deprecated Use bridgeType. Kept for backward-compat (WKH-56 DT-3). */
   cacheHit?: boolean | 'SKIPPED';
   /** Latency of bridge resolution (ms). Includes A2A fast-path or maybeTransform. */

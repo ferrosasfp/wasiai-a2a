@@ -4,12 +4,7 @@
  */
 import crypto from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  A2AAgentKeyRow,
-  Agent,
-  RegistryConfig,
-  X402PaymentRequest,
-} from '../types/index.js';
+import type { A2AAgentKeyRow, Agent, RegistryConfig } from '../types/index.js';
 
 // compose.ts logs server-side via getLogger('compose'). Mock it so tests can
 // assert structured log emission (and the no-secret-leak invariant) without
@@ -111,6 +106,13 @@ vi.mock('../lib/downstream-payment.js', () => ({
 // producción y no un doble, para que el test se rompa si el contrato del adapter cambia.
 import { FacilitatorSettleError } from '../adapters/errors.js';
 import { signAndSettleDownstream } from '../lib/downstream-payment.js';
+// HU-DOUBLE-PAY: la clasificación de la retención la hacen las funciones REALES
+// de producción (las mismas que llamaba el leg de salida borrado). El test sólo
+// elige DÓNDE se tira el error, no qué significa.
+import {
+  SettleRefundWithheldError,
+  withholdingFromSettleResult,
+} from '../lib/settle-withholding.js';
 import { budgetService } from './budget.js';
 import { composeService } from './compose.js';
 import { discoveryService } from './discovery.js';
@@ -278,312 +280,62 @@ describe('composeService.invokeAgent', () => {
     expect(callHeaders['X-API-Key']).toBe('abc123');
   });
 
-  it('T-3 (C2 audit 2026-07-01): a2a signs+settles the x402 payment WITHOUT leaking the redeemable EIP-3009 to the agent', async () => {
+  // ── HU-DOUBLE-PAY: el candado contra la vuelta del segundo leg de salida ──
+  //
+  // Este archivo mockea `../lib/downstream-payment.js` completo, así que el leg
+  // downstream NO corre acá; el único settle que podría verse es el del leg
+  // borrado. Que `mockSign`/`mockSettle` (o sea `getPaymentAdapter()` de la
+  // chain DEFAULT del gateway) queden en CERO es exactamente la afirmación de
+  // que ese leg no existe. El conteo de los DOS legs a la vez —y de que el
+  // agente sí cobra— vive en `compose.outbound-legs.test.ts`.
+  it('T-LEGA-GONE: agente EVM pago + caller x402 → `compose` no firma ni settlea nada en la chain default', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    const mockPR: X402PaymentRequest = {
-      authorization: {
-        from: '0xAAA',
-        to: EVM_PAYTO,
-        value: '1000000000000000000',
-        validAfter: '0',
-        validBefore: '9999999999',
-        nonce: '0x1234',
-      },
-      signature: '0xSIG',
-      network: 'eip155:2368',
-    };
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: mockPR,
-    });
-    mockSettle.mockResolvedValue({ success: true, txHash: '0xDEADBEEF' });
     const agent = makeAgent({
       priceUsdc: 1.0,
       metadata: { payTo: EVM_PAYTO },
+      payment: { method: 'x402', chain: 'avalanche', contract: EVM_PAYTO },
     });
     mockFetchOk();
-    const result = await composeService.invokeAgent(agent, { q: 'hello' });
-    const callHeaders = mockFetch.mock.calls[0]![1]!.headers as Record<
-      string,
-      string
-    >;
-    // C2 (audit 2026-07-01): the freshly-signed, permissionlessly-redeemable
-    // EIP-3009 authorization is NO LONGER forwarded to the agent's invokeUrl —
-    // that leak let a malicious agent front-run a2a's settle and drain the
-    // operator wallet. a2a still signs and settles the payment itself, so the
-    // agent's payTo is still paid on-chain (result.txHash present).
-    expect(callHeaders['PAYMENT-SIGNATURE']).toBeUndefined();
-    expect(mockSettle).toHaveBeenCalled();
-    expect(result.txHash).toBe('0xDEADBEEF');
-    expect(result.output).toBe('ok');
-  });
 
-  // ── Fix-pack AR-profundo FIX 4: guard de FAMILIA del payTo inbound ────────
-  // Camino real reproducido por el AR: caller x402 (sin `x-a2a-key`) + agente
-  // self-published Solana con priceUsdc > 0. El payTo es base58 y llegaba crudo
-  // a `viem.signTypedData` vía `to: payTo as \`0x${string}\`` ⇒
-  // `InvalidAddressError: Address "So111…112" is invalid`, un error opaco que no
-  // explica nada. El fee del agente Solana se settlea operator-side en el leg
-  // DOWNSTREAM, no en el inbound.
-  const SOL_PAYTO_INBOUND = 'So11111111111111111111111111111111111111112';
-
-  it('T-FIX4: agente con chain no-EVM + caller x402 → el sign inbound se saltea (INBOUND_VM_UNSUPPORTED), sin InvalidAddressError', async () => {
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    const agent = makeAgent({
-      priceUsdc: 0.05,
-      metadata: { payTo: SOL_PAYTO_INBOUND },
-      payment: {
-        method: 'x402',
-        asset: 'USDC',
-        chain: 'solana-devnet',
-        contract: SOL_PAYTO_INBOUND,
-      },
-    });
-    mockFetchOk({ result: 'ok' });
-
-    // Sin a2aKey = caller x402. NO debe lanzar.
     const result = await composeService.invokeAgent(agent, { q: 'hello' });
 
     expect(result.output).toBe('ok');
-    expect(result.txHash).toBeUndefined();
-    // El sign EVM (y por lo tanto el settle inbound) nunca se intenta.
     expect(mockSign).not.toHaveBeenCalled();
     expect(mockSettle).not.toHaveBeenCalled();
-    const callHeaders = mockFetch.mock.calls[0]![1]!.headers as Record<
-      string,
-      string
-    >;
-    expect(callHeaders['PAYMENT-SIGNATURE']).toBeUndefined();
-    expect(logSpy.warn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        code: 'INBOUND_VM_UNSUPPORTED',
-        chain: 'solana-devnet',
-      }),
-      expect.any(String),
-    );
+    // Y el leg downstream —el único que queda— sí se consulta.
+    expect(mockDownstream).toHaveBeenCalledTimes(1);
   });
+
+  it('T-LEGA-GONE-KEY: mismo agente CON agent key → idéntico (el camino ya no depende de cómo se autenticó el caller)', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const agent = makeAgent({
+      priceUsdc: 1.0,
+      metadata: { payTo: EVM_PAYTO },
+      payment: { method: 'x402', chain: 'avalanche', contract: EVM_PAYTO },
+    });
+    mockFetchOk();
+
+    await composeService.invokeAgent(agent, { q: 'hello' }, 'wasi_a2a_k');
+
+    expect(mockSign).not.toHaveBeenCalled();
+    expect(mockSettle).not.toHaveBeenCalled();
+    expect(mockDownstream).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Fix-pack AR-profundo FIX 4: el payTo base58 de un agente Solana ───────
+  // El guard de FAMILIA que vivía acá protegía al `viem.signTypedData` del leg
+  // de salida borrado. Sin ese sign no hay nada que proteger en `invokeAgent`:
+  // el payTo base58 sólo lo toca el leg downstream, que tiene su propio
+  // `isValidSolanaAddress` (cubierto en `lib/downstream-payment.test.ts`).
 
   // ── Fix-pack it2 BLQ-BAJO-1: el guard debe mirar EL VALOR (payTo), no el proxy
   //    (la chain declarada). Los dos repros del AR: `metadata` viene del agent
   //    card COMPLETO del registry (`discovery.mapAgent` setea `metadata: raw`) y
   //    cualquier caller autenticado puede registrar un registry, así que el payTo
   //    y la chain declarada son fuentes INDEPENDIENTES.
-  it('T-it2-BLQ-BAJO-1a (CASO 2 del AR): metadata.payTo base58 SIN payment declarado → el sign inbound se saltea (INVALID_PAY_TO_FORMAT), sin base58 crudo en viem', async () => {
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    const agent = makeAgent({
-      priceUsdc: 0.05,
-      metadata: { payTo: SOL_PAYTO_INBOUND },
-    });
-    // Sin `payment` no hay chain declarada → el guard viejo no disparaba.
-    agent.payment = undefined;
-    mockFetchOk({ result: 'ok' });
-
-    const result = await composeService.invokeAgent(agent, { q: 'hello' });
-
-    expect(result.output).toBe('ok');
-    expect(mockSign).not.toHaveBeenCalled();
-    expect(mockSettle).not.toHaveBeenCalled();
-    expect(logSpy.warn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        code: 'INBOUND_VM_UNSUPPORTED',
-        reason: 'INVALID_PAY_TO_FORMAT',
-      }),
-      expect.any(String),
-    );
-  });
-
-  it('T-it2-BLQ-BAJO-1b (CASO 3 del AR): chain declarada EVM (pasa el guard viejo) + metadata.payTo base58 → igual se saltea', async () => {
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    const agent = makeAgent({
-      priceUsdc: 0.05,
-      metadata: { payTo: SOL_PAYTO_INBOUND },
-      payment: {
-        method: 'x402',
-        asset: 'USDC',
-        chain: 'avalanche-fuji', // EVM: el guard por chain lo dejaba pasar
-        contract: SOL_PAYTO_INBOUND,
-      },
-    });
-    mockFetchOk({ result: 'ok' });
-
-    const result = await composeService.invokeAgent(agent, { q: 'hello' });
-
-    expect(result.output).toBe('ok');
-    expect(mockSign).not.toHaveBeenCalled();
-    expect(logSpy.warn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        code: 'INBOUND_VM_UNSUPPORTED',
-        reason: 'INVALID_PAY_TO_FORMAT',
-        chain: 'avalanche-fuji',
-      }),
-      expect.any(String),
-    );
-  });
-
-  it('T-it2-BLQ-BAJO-1c: payTo del fallback `payment.contract` también se valida (misma fuente que el cast)', async () => {
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    const agent = makeAgent({
-      priceUsdc: 0.05,
-      // sin metadata.payTo → resuelve por metadata.payment.contract
-      metadata: { payment: { contract: SOL_PAYTO_INBOUND } },
-      payment: {
-        method: 'x402',
-        asset: 'USDC',
-        chain: 'avalanche-fuji',
-        contract: SOL_PAYTO_INBOUND,
-      },
-    });
-    mockFetchOk({ result: 'ok' });
-
-    const result = await composeService.invokeAgent(agent, { q: 'hello' });
-
-    expect(result.output).toBe('ok');
-    expect(mockSign).not.toHaveBeenCalled();
-    expect(logSpy.warn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        code: 'INBOUND_VM_UNSUPPORTED',
-        reason: 'INVALID_PAY_TO_FORMAT',
-      }),
-      expect.any(String),
-    );
-  });
-
-  it('T-FIX4b: agente EVM (chain declarada) sigue firmando inbound — byte-idéntico', async () => {
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: {
-        authorization: {
-          from: '0xAAA',
-          to: EVM_PAYTO,
-          value: '1000000000000000000',
-          validAfter: '0',
-          validBefore: '9999999999',
-          nonce: '0x1234',
-        },
-        signature: '0xSIG',
-        network: 'eip155:43113',
-      },
-    });
-    mockSettle.mockResolvedValue({ success: true, txHash: '0xDEADBEEF' });
-    const agent = makeAgent({
-      priceUsdc: 1.0,
-      metadata: { payTo: EVM_PAYTO },
-      payment: {
-        method: 'x402',
-        asset: 'USDC',
-        chain: 'avalanche-fuji',
-        contract: EVM_PAYTO,
-      },
-    });
-    mockFetchOk();
-
-    const result = await composeService.invokeAgent(agent, { q: 'hello' });
-
-    expect(mockSign).toHaveBeenCalledTimes(1);
-    expect(result.txHash).toBe('0xDEADBEEF');
-    expect(logSpy.warn).not.toHaveBeenCalledWith(
-      expect.objectContaining({ code: 'INBOUND_VM_UNSUPPORTED' }),
-      expect.any(String),
-    );
-  });
-
-  it('T-4: throws when settle fails', async () => {
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: {
-        authorization: {
-          from: '0xAAA',
-          to: EVM_PAYTO,
-          value: '1',
-          validAfter: '0',
-          validBefore: '9999999999',
-          nonce: '0x1234',
-        },
-        signature: '0xSIG',
-        network: 'eip155:2368',
-      },
-    });
-    mockSettle.mockResolvedValue({
-      success: false,
-      txHash: '',
-      error: 'insufficient funds',
-    });
-    const agent = makeAgent({
-      priceUsdc: 1.0,
-      metadata: { payTo: EVM_PAYTO },
-    });
-    mockFetchOk();
-    await expect(
-      composeService.invokeAgent(agent, { q: 'hello' }),
-    ).rejects.toThrow('x402 settle failed');
-  });
-
   // TB-01 (audit 2026-06-30): a settle the facilitator reports as success but
   // that FAILS on-chain re-verification must abort the step (no trust of the
   // facilitator JSON alone).
-  it('TB-01: settle on-chain re-verification failure aborts the step', async () => {
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: {
-        authorization: {
-          from: '0xAAA',
-          to: EVM_PAYTO,
-          value: '1000000000000000000',
-          validAfter: '0',
-          validBefore: '9999999999',
-          nonce: '0x1234',
-        },
-        signature: '0xSIG',
-        network: 'eip155:2368',
-      },
-    });
-    mockSettle.mockResolvedValue({ success: true, txHash: '0xFAKE' });
-    // Forge: facilitator says success, on-chain re-read says mismatch.
-    mockVerifySettle.mockResolvedValueOnce({
-      ok: false,
-      reason: 'AMOUNT_MISMATCH',
-    });
-    const agent = makeAgent({
-      priceUsdc: 1.0,
-      metadata: { payTo: EVM_PAYTO },
-    });
-    mockFetchOk();
-    await expect(
-      composeService.invokeAgent(agent, { q: 'hello' }),
-    ).rejects.toThrow('on-chain re-verification failed');
-  });
-
-  it('T-5: does not settle when agent returns non-2xx', async () => {
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: {
-        authorization: {
-          from: '0xAAA',
-          to: EVM_PAYTO,
-          value: '1',
-          validAfter: '0',
-          validBefore: '9999999999',
-          nonce: '0x1234',
-        },
-        signature: '0xSIG',
-        network: 'eip155:2368',
-      },
-    });
-    const agent = makeAgent({
-      priceUsdc: 1.0,
-      metadata: { payTo: EVM_PAYTO },
-    });
-    mockFetchError(500);
-    await expect(
-      composeService.invokeAgent(agent, { q: 'hello' }),
-    ).rejects.toThrow('returned 500');
-    expect(mockSettle).not.toHaveBeenCalled();
-  });
-
   it('T-6: invokes without auth headers when registry not found', async () => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
     const agent = makeAgent({ priceUsdc: 0 });
@@ -641,14 +393,6 @@ describe('composeService.invokeAgent', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('Budget exceeded');
     expect(result.steps).toHaveLength(1);
-  });
-
-  it('T-8: throws when agent.metadata.payTo is missing', async () => {
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    const agent = makeAgent({ priceUsdc: 1.0, metadata: {} });
-    await expect(
-      composeService.invokeAgent(agent, { q: 'hello' }),
-    ).rejects.toThrow('No payTo address');
   });
 
   it('T-9: structured logs never receive private key or raw signature', async () => {
@@ -2652,231 +2396,6 @@ describe('composeService.compose — WKH-121 key-session multi-step (T-SESS-MULT
 // observable from the compose layer. These tests verify the log line
 // is emitted only when the agent's manifest declares a Base chain.
 // ─────────────────────────────────────────────────────────────────────────
-describe('composeService — WKH-106 BASE-03 selector telemetry', () => {
-  const ORIGINAL_CDP_ENV = process.env.CDP_FACILITATOR_URL;
-
-  function getLogLines(): string[] {
-    // The selector decision is emitted via log.info(message). Each call's
-    // first arg is the message string; coerce to string for substring checks.
-    return logSpy.info.mock.calls.map((c: unknown[]) => String(c[0]));
-  }
-
-  afterEach(() => {
-    if (ORIGINAL_CDP_ENV === undefined) {
-      delete process.env.CDP_FACILITATOR_URL;
-    } else {
-      process.env.CDP_FACILITATOR_URL = ORIGINAL_CDP_ENV;
-    }
-  });
-
-  it('AC-2: logs CDP URL as selected when chain=base-mainnet and env is set', async () => {
-    process.env.CDP_FACILITATOR_URL = 'https://x402.org/facilitator';
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    const mockPR: X402PaymentRequest = {
-      authorization: {
-        from: '0xAAA',
-        to: EVM_PAYTO,
-        value: '1000000',
-        validAfter: '0',
-        validBefore: '9999999999',
-        nonce: '0x1234',
-      },
-      signature: '0xSIG',
-      network: 'eip155:8453',
-    };
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: mockPR,
-    });
-    mockSettle.mockResolvedValue({ success: true, txHash: '0xDEADBEEF' });
-    const agent = makeAgent({
-      priceUsdc: 1.0,
-      metadata: { payTo: EVM_PAYTO },
-      payment: {
-        method: 'x402',
-        chain: 'base-mainnet',
-        contract: EVM_PAYTO,
-      },
-    });
-    mockFetchOk();
-    await composeService.invokeAgent(agent, { q: 'hello' });
-
-    const logCalls = getLogLines();
-    const selectorLog = logCalls.find((l: string) =>
-      l.includes('Base settle facilitator selector'),
-    );
-    expect(selectorLog).toBeDefined();
-    expect(selectorLog).toContain('chainKey=base-mainnet');
-    expect(selectorLog).toContain('selected=https://x402.org/facilitator');
-    expect(selectorLog).toContain('cdpEnvSet=true');
-  });
-
-  it('AC-5: logs adapter-default fallback when env unset (base-sepolia)', async () => {
-    delete process.env.CDP_FACILITATOR_URL;
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    const mockPR: X402PaymentRequest = {
-      authorization: {
-        from: '0xAAA',
-        to: EVM_PAYTO,
-        value: '1000000',
-        validAfter: '0',
-        validBefore: '9999999999',
-        nonce: '0x1234',
-      },
-      signature: '0xSIG',
-      network: 'eip155:84532',
-    };
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: mockPR,
-    });
-    mockSettle.mockResolvedValue({ success: true, txHash: '0xCAFE' });
-    const agent = makeAgent({
-      priceUsdc: 0.5,
-      metadata: { payTo: EVM_PAYTO },
-      payment: {
-        method: 'x402',
-        chain: 'base-sepolia',
-        contract: EVM_PAYTO,
-      },
-    });
-    mockFetchOk();
-    await composeService.invokeAgent(agent, { q: 'hi' });
-
-    const logCalls = getLogLines();
-    const selectorLog = logCalls.find((l: string) =>
-      l.includes('Base settle facilitator selector'),
-    );
-    expect(selectorLog).toBeDefined();
-    expect(selectorLog).toContain('chainKey=base-sepolia');
-    expect(selectorLog).toContain('selected=<adapter-default>');
-    expect(selectorLog).toContain('cdpEnvSet=false');
-  });
-
-  it('AC-7 / CD-5: does NOT log selector when chain is Kite (unaffected)', async () => {
-    process.env.CDP_FACILITATOR_URL = 'https://x402.org/facilitator';
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    const mockPR: X402PaymentRequest = {
-      authorization: {
-        from: '0xAAA',
-        to: EVM_PAYTO,
-        value: '1000000',
-        validAfter: '0',
-        validBefore: '9999999999',
-        nonce: '0x1234',
-      },
-      signature: '0xSIG',
-      network: 'eip155:2368',
-    };
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: mockPR,
-    });
-    mockSettle.mockResolvedValue({ success: true, txHash: '0xKITE' });
-    const agent = makeAgent({
-      priceUsdc: 0.1,
-      metadata: { payTo: EVM_PAYTO },
-      payment: {
-        method: 'x402',
-        chain: 'kite-testnet',
-        contract: EVM_PAYTO,
-      },
-    });
-    mockFetchOk();
-    await composeService.invokeAgent(agent, { q: 'hi' });
-
-    const logCalls = getLogLines();
-    const selectorLog = logCalls.find((l: string) =>
-      l.includes('Base settle facilitator selector'),
-    );
-    expect(selectorLog).toBeUndefined();
-  });
-
-  it('AC-7 / CD-5: does NOT log selector when chain is Avalanche (unaffected)', async () => {
-    process.env.CDP_FACILITATOR_URL = 'https://x402.org/facilitator';
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    const mockPR: X402PaymentRequest = {
-      authorization: {
-        from: '0xAAA',
-        to: EVM_PAYTO,
-        value: '1000000',
-        validAfter: '0',
-        validBefore: '9999999999',
-        nonce: '0x1234',
-      },
-      signature: '0xSIG',
-      network: 'eip155:43113',
-    };
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: mockPR,
-    });
-    mockSettle.mockResolvedValue({ success: true, txHash: '0xFUJI' });
-    const agent = makeAgent({
-      priceUsdc: 0.1,
-      metadata: { payTo: EVM_PAYTO },
-      payment: {
-        method: 'x402',
-        chain: 'avalanche-fuji',
-        contract: EVM_PAYTO,
-      },
-    });
-    mockFetchOk();
-    await composeService.invokeAgent(agent, { q: 'hi' });
-
-    const logCalls = getLogLines();
-    const selectorLog = logCalls.find((l: string) =>
-      l.includes('Base settle facilitator selector'),
-    );
-    expect(selectorLog).toBeUndefined();
-  });
-
-  it('honors agent manifest facilitatorUrl when CDP env is absent', async () => {
-    delete process.env.CDP_FACILITATOR_URL;
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    const mockPR: X402PaymentRequest = {
-      authorization: {
-        from: '0xAAA',
-        to: EVM_PAYTO,
-        value: '1000000',
-        validAfter: '0',
-        validBefore: '9999999999',
-        nonce: '0x1234',
-      },
-      signature: '0xSIG',
-      network: 'eip155:8453',
-    };
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: mockPR,
-    });
-    mockSettle.mockResolvedValue({ success: true, txHash: '0xMAN' });
-    const agent = makeAgent({
-      priceUsdc: 1.0,
-      metadata: {
-        payTo: EVM_PAYTO,
-        facilitatorUrl: 'https://custom.facilitator.example.com',
-      },
-      payment: {
-        method: 'x402',
-        chain: 'base-mainnet',
-        contract: EVM_PAYTO,
-      },
-    });
-    mockFetchOk();
-    await composeService.invokeAgent(agent, { q: 'hello' });
-
-    const logCalls = getLogLines();
-    const selectorLog = logCalls.find((l: string) =>
-      l.includes('Base settle facilitator selector'),
-    );
-    expect(selectorLog).toBeDefined();
-    expect(selectorLog).toContain(
-      'selected=https://custom.facilitator.example.com',
-    );
-  });
-});
-
 // ─── WKH-104 (TD-SYBIL): caller_ref_hash emission in compose_step ─────────
 describe('composeService.compose — caller_ref_hash emission (WKH-104)', () => {
   const TEST_SECRET = 'wkh104-compose-test-secret';
@@ -3787,125 +3306,6 @@ describe('composeService — WKH-114 step verification', () => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// WKH-195 — compose inbound x402 decimals-aware. Seam #2: el pago inbound a un
-// agente (agent.priceUsdc > 0 && !a2aKey) escalaba con `× 1e12` hardcodeado; ahora
-// deriva decimals del default-chain adapter y delega en usdToAtomic (WKH-192).
-// Legacy = BigInt(round(usd*1e6)) * BigInt(1e12). En Kite 18d es byte-idéntico.
-// ════════════════════════════════════════════════════════════════════════════
-describe('WKH-195 compose inbound decimals-aware', () => {
-  const legacyWei = (usd: number): string =>
-    String(BigInt(Math.round(usd * 1_000_000)) * BigInt(1_000_000_000_000));
-  // usdToAtomic(usd, 6) === micro-USD entero (10^0). Local para no importar.
-  const atomic6 = (usd: number): string =>
-    String(BigInt(Math.round(usd * 1_000_000)));
-
-  // Re-prima sign/settle/verify tras un reset dentro de un loop.
-  const primeInbound = () => {
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: {
-        authorization: {
-          from: '0xAAA',
-          to: EVM_PAYTO,
-          value: '0',
-          validAfter: '0',
-          validBefore: '9999999999',
-          nonce: '0x1234',
-        },
-        signature: '0xSIG',
-        network: 'eip155:2368',
-      },
-    });
-    mockSettle.mockResolvedValue({ success: true, txHash: '0xTX' });
-    mockVerifySettle.mockResolvedValue({ ok: true });
-    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    mockFetchOk();
-  };
-
-  afterEach(() => {
-    // Restaurar el default 18d para no filtrar a suites posteriores.
-    mockSupportedTokens.current = [
-      { symbol: 'PYUSD', address: '0x0', decimals: 18 },
-    ];
-  });
-
-  // T2-A (AC-2, AC-3, CD-2): convergencia byte-idéntica Kite 18d, ≥3 precios.
-  it('T2-A: Kite 18d → value firmado === legacy para ≥3 precios', async () => {
-    mockSupportedTokens.current = [
-      { symbol: 'PYUSD', address: '0x0', decimals: 18 },
-    ];
-    for (const price of [1.0, 0.5, 0.001, 0.000001]) {
-      mockSign.mockReset();
-      mockSettle.mockReset();
-      mockFetch.mockReset();
-      primeInbound();
-      const agent = makeAgent({
-        priceUsdc: price,
-        metadata: { payTo: EVM_PAYTO },
-      });
-      await composeService.invokeAgent(agent, { q: 'hello' });
-      expect(mockSign.mock.calls[0]?.[0]?.value).toBe(legacyWei(price));
-    }
-  });
-
-  // T2-B (AC-2, CD-5): Base 6d divergente — el value firmado es el atómico 6d.
-  it('T2-B: Base 6d → value firmado === atómico 6d y DIVERGE del legacy 18d', async () => {
-    mockSupportedTokens.current = [
-      { symbol: 'USDC', address: '0x0', decimals: 6 },
-    ];
-    const price = 1.5;
-    primeInbound();
-    const agent = makeAgent({
-      priceUsdc: price,
-      metadata: { payTo: EVM_PAYTO },
-    });
-    await composeService.invokeAgent(agent, { q: 'hello' });
-    const signed = mockSign.mock.calls[0]?.[0]?.value as string;
-    expect(signed).toBe(atomic6(price));
-    expect(signed).not.toBe(legacyWei(price));
-    expect(BigInt(signed) * 10n ** 12n).toBe(BigInt(legacyWei(price)));
-  });
-
-  // T2-C (AC-4, CD-4): fallback undefined/[] → 18d (legacy), sin fallar por ESTO.
-  it('T2-C: supportedTokens undefined/[] → value firmado === legacy 18d, sin throw', async () => {
-    for (const tokens of [
-      undefined,
-      [] as { symbol: string; address: string; decimals: number }[],
-    ]) {
-      mockSign.mockReset();
-      mockSettle.mockReset();
-      mockFetch.mockReset();
-      mockSupportedTokens.current = tokens;
-      primeInbound();
-      const price = 0.05;
-      const agent = makeAgent({
-        priceUsdc: price,
-        metadata: { payTo: EVM_PAYTO },
-      });
-      const result = await composeService.invokeAgent(agent, { q: 'hello' });
-      expect(mockSign.mock.calls[0]?.[0]?.value).toBe(legacyWei(price));
-      expect(result.output).toBe('ok');
-    }
-  });
-
-  // T2-D (AC-2): tras el sign, el settle de :928 sigue corriendo y el step completa.
-  it('T2-D: tras sign el settle se invoca y el step completa (path :928 intacto)', async () => {
-    mockSupportedTokens.current = [
-      { symbol: 'PYUSD', address: '0x0', decimals: 18 },
-    ];
-    primeInbound();
-    const agent = makeAgent({
-      priceUsdc: 1.0,
-      metadata: { payTo: EVM_PAYTO },
-    });
-    const result = await composeService.invokeAgent(agent, { q: 'hello' });
-    expect(mockSettle).toHaveBeenCalledTimes(1);
-    expect(result.txHash).toBe('0xTX');
-    expect(result.output).toBe('ok');
-  });
-});
-
-// ════════════════════════════════════════════════════════════════════════════
 // HU-203 — un `success:false` del facilitator NO autoriza a devolverle la plata
 // al caller.
 //
@@ -3928,6 +3328,30 @@ describe('WKH-195 compose inbound decimals-aware', () => {
 // per-step reembolsable (`scopingKeyRow`). Con la forma de `POST /compose`
 // (ambos presentes) el settle ni siquiera corre.
 // ════════════════════════════════════════════════════════════════════════════
+/**
+ * HU-203 compose — refund vs evidencia de broadcast.
+ *
+ * ⚠️ HU-DOUBLE-PAY — DE DÓNDE SALE HOY EL ERROR QUE ESTOS TESTS CLASIFICAN.
+ * Hasta el borrado del segundo leg de salida, el error lo producía el
+ * `adapter.settle()` de ESE leg dentro de `invokeAgent`, y por eso estos tests
+ * lo inyectaban con `mockSettle`. Ese leg ya no existe, así que el error se
+ * inyecta AHORA en el borde donde `compose()` lo lee: el `throw` de
+ * `composeService.invokeAgent`.
+ *
+ * QUÉ SIGUE MIDIENDO ESTO, DICHO SIN ADORNOS: la CLASIFICACIÓN
+ * (`withholdingFromSettleResult` / `readSettleWithholding`, funciones de
+ * producción, no re-implementadas acá) y la DECISIÓN DE DINERO que compose toma
+ * con ella (reembolsar o retener, anotar el evento durable, no reintentar).
+ *
+ * QUÉ **NO** MIDE, y hay que decirlo porque el verde de acá no lo cubre: que
+ * exista un productor vivo de esos errores. Hoy NO lo hay —
+ * `signAndSettleDownstream` no tira nunca (CD-7 de WKH-55) y el otro leg se
+ * borró—, así que este camino de compose está sin productor. Es deuda
+ * declarada, `TD-203-NO-PRODUCER`: o vuelve a haber un leg que tire acá, o la
+ * retención se saca junto con `ComposeResult.settleRefundWithheld` y el evento
+ * `compose_settle_unknown`. Sacarla ahora era un diff aparte (toca `orchestrate`,
+ * `reconciliation` y el dashboard) y no hacía falta para cerrar el doble pago.
+ */
 describe('HU-203 compose — refund vs evidencia de broadcast', () => {
   function mockAgentsBySlug(agents: Record<string, Agent>) {
     vi.mocked(discoveryService.getAgent).mockImplementation(
@@ -3935,7 +3359,7 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
     );
   }
 
-  /** Los dos agentes del pipeline: ambos con payTo EVM → ambos firman inbound. */
+  /** Los dos agentes del pipeline. */
   function twoPaidAgents() {
     const a1 = makeAgent({
       slug: 'kyc',
@@ -3951,22 +3375,45 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
     mockAgentsBySlug({ kyc: a1, corridor: a2 });
   }
 
-  function primeSign() {
-    mockSign.mockResolvedValue({
-      xPaymentHeader: 'base64mock',
-      paymentRequest: {
-        authorization: {
-          from: '0xAAA',
-          to: EVM_PAYTO,
-          value: '1',
-          validAfter: '0',
-          validBefore: '9999999999',
-          nonce: '0x1234',
-        },
-        signature: '0xSIG',
-        network: 'eip155:2368',
+  /**
+   * Inyecta un `throw` en la N-ésima INVOCACIÓN de `invokeAgent` (0-based, y
+   * cuenta también los re-invokes del retry adaptativo). El resto de las
+   * invocaciones pasan por la implementación REAL, así que el pipeline, los
+   * débitos y los eventos son los de producción.
+   */
+  function throwOnInvocation(nth: number, err: unknown): void {
+    const real = composeService.invokeAgent.bind(composeService);
+    let seen = -1;
+    vi.spyOn(composeService, 'invokeAgent').mockImplementation(
+      async (...args: Parameters<typeof composeService.invokeAgent>) => {
+        seen += 1;
+        if (seen === nth) throw err;
+        return real(...args);
       },
-    });
+    );
+  }
+
+  /** Cuántas veces se invocó un agente (incluye los re-invokes del retry). */
+  function invocations(): number {
+    return vi.mocked(composeService.invokeAgent).mock.calls.length;
+  }
+
+  /**
+   * El error del EJE 1 tal como lo construía el settle borrado: la retención la
+   * decide `withholdingFromSettleResult` (producción), no el test.
+   */
+  function settleResultError(
+    settleResult: { success: boolean; txHash?: string; error?: string },
+    agentSlug: string,
+  ): Error {
+    const detail = `x402 settle failed for ${agentSlug}: ${settleResult.error ?? 'unknown'}`;
+    const withholding = withholdingFromSettleResult(
+      settleResult,
+      `${detail} — the facilitator returned a broadcast tx hash (${settleResult.txHash}), so the payment may have executed on-chain`,
+    );
+    return withholding
+      ? new SettleRefundWithheldError(withholding)
+      : new Error(detail);
   }
 
   /** La forma de `/orchestrate`: con key row (débito per-step), SIN `a2aKey`. */
@@ -3996,22 +3443,29 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
 
   beforeEach(() => {
     vi.mocked(registryService.getEnabled).mockResolvedValue([]);
-    primeSign();
     twoPaidAgents();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   // ── EJE 1: `2xx { success:false, txHash }` ───────────────────────────────
 
   it('T-203-A1-NO-REFUND: un `success:false` CON txHash NO devuelve el débito del step', async () => {
     mockFetchOk({ result: 'r1' }); // step 0 invoca ok
-    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
-    mockFetchOk({ result: 'r2' }); // step 1 invoca ok
-    // …y el facilitator dice que no settleó, PERO nos da un hash de broadcast.
-    mockSettle.mockResolvedValueOnce({
-      success: false,
-      txHash: '0xBROADCASTED',
-      error: 'insufficient funds',
-    });
+    // Step 1: el facilitator dice que no settleó, PERO nos da un hash de broadcast.
+    throwOnInvocation(
+      1,
+      settleResultError(
+        {
+          success: false,
+          txHash: '0xBROADCASTED',
+          error: 'insufficient funds',
+        },
+        'corridor',
+      ),
+    );
 
     const result = await runTwoStepPipeline();
 
@@ -4035,13 +3489,13 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
     // automático; si también lo retuviéramos, el caller quedaría cobrado por un
     // step que probadamente no se ejecutó.
     mockFetchOk({ result: 'r1' });
-    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
-    mockFetchOk({ result: 'r2' });
-    mockSettle.mockResolvedValueOnce({
-      success: false,
-      txHash: '',
-      error: 'insufficient funds',
-    });
+    throwOnInvocation(
+      1,
+      settleResultError(
+        { success: false, txHash: '', error: 'insufficient funds' },
+        'corridor',
+      ),
+    );
 
     const result = await runTwoStepPipeline();
 
@@ -4057,9 +3511,10 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
     // facilitator que rellena el campo con `'   '` no nos dio ninguna pista, y
     // tratarlo como evidencia retendría plata sin ningún motivo.
     mockFetchOk({ result: 'r1' });
-    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
-    mockFetchOk({ result: 'r2' });
-    mockSettle.mockResolvedValueOnce({ success: false, txHash: '   ' });
+    throwOnInvocation(
+      1,
+      settleResultError({ success: false, txHash: '   ' }, 'corridor'),
+    );
 
     const result = await runTwoStepPipeline();
 
@@ -4075,9 +3530,8 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
     // el eje 1; desde HU-201 llega TIPADO, pero si `compose` no lee su
     // `valueDisposition` el resultado es idéntico: reembolso indebido.
     mockFetchOk({ result: 'r1' });
-    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
-    mockFetchOk({ result: 'r2' });
-    mockSettle.mockRejectedValueOnce(
+    throwOnInvocation(
+      1,
       new FacilitatorSettleError(
         'Facilitator returned HTTP 502 on /settle',
         'unknown',
@@ -4102,9 +3556,8 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
     // retuviéramos, un facilitator mal configurado dejaría a TODOS los callers
     // cobrados por steps que nunca salieron.
     mockFetchOk({ result: 'r1' });
-    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
-    mockFetchOk({ result: 'r2' });
-    mockSettle.mockRejectedValueOnce(
+    throwOnInvocation(
+      1,
       new FacilitatorSettleError(
         'Facilitator network error on settle: getaddrinfo ENOTFOUND',
         'not-sent',
@@ -4129,9 +3582,7 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
       { name: 'FacilitatorSettleError', valueDisposition: 'unknown' },
     );
     mockFetchOk({ result: 'r1' });
-    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
-    mockFetchOk({ result: 'r2' });
-    mockSettle.mockRejectedValueOnce(foreign);
+    throwOnInvocation(1, foreign);
 
     const result = await runTwoStepPipeline();
 
@@ -4146,7 +3597,6 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
     // agente que devuelve 502 es un step sin valor entregado y sin ninguna
     // posibilidad de haber pagado — se reembolsa como siempre.
     mockFetchOk({ result: 'r1' });
-    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
     mockFetchError(502);
 
     const result = await runTwoStepPipeline();
@@ -4160,12 +3610,13 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
 
   it('T-203-SURFACE: la retención deja un evento durable con el hash y el monto', async () => {
     mockFetchOk({ result: 'r1' });
-    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
-    mockFetchOk({ result: 'r2' });
-    mockSettle.mockResolvedValueOnce({
-      success: false,
-      txHash: '0xBROADCASTED',
-    });
+    throwOnInvocation(
+      1,
+      settleResultError(
+        { success: false, txHash: '0xBROADCASTED' },
+        'corridor',
+      ),
+    );
 
     await runTwoStepPipeline();
 
@@ -4188,11 +3639,10 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
     // guard `i > 0`). Compose no tiene nada que retener, pero el settle sin
     // resolver se anota igual: un caso que no se reembolsa y que nadie lista es
     // plata retenida en silencio.
-    mockFetchOk({ result: 'r1' });
-    mockSettle.mockResolvedValueOnce({
-      success: false,
-      txHash: '0xSTEP0BROADCAST',
-    });
+    throwOnInvocation(
+      0,
+      settleResultError({ success: false, txHash: '0xSTEP0BROADCAST' }, 'kyc'),
+    );
 
     const result = await runTwoStepPipeline();
 
@@ -4218,16 +3668,17 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
     // distinta. El primer intento falló limpio (400 con field-errors, sin
     // settle) y por eso se reembolsó; el segundo no.
     mockFetchOk({ result: 'r1' });
-    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
     // Step 1, intento 1: 400 con field-errors → refund d1 + retry.
     mockFetchError(400, '{"fieldErrors":{"amount":["required"]}}');
     mockRegen.mockResolvedValueOnce({ amount: 42 });
-    // Step 1, intento 2 (re-invoke): invoca ok, y el settle vuelve con hash.
-    mockFetchOk({ result: 'r2' });
-    mockSettle.mockResolvedValueOnce({
-      success: false,
-      txHash: '0xRETRYBROADCAST',
-    });
+    // Step 1, intento 2 (invocación #2): el settle vuelve con hash de broadcast.
+    throwOnInvocation(
+      2,
+      settleResultError(
+        { success: false, txHash: '0xRETRYBROADCAST' },
+        'corridor',
+      ),
+    );
 
     const result = await runTwoStepPipeline();
 
@@ -4246,7 +3697,6 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
 
   it('T-203-RETRY-STILL-REFUNDS: si el RE-INVOKE falla sin evidencia, los DOS débitos vuelven', async () => {
     mockFetchOk({ result: 'r1' });
-    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
     mockFetchError(400, '{"fieldErrors":{"amount":["required"]}}');
     mockRegen.mockResolvedValueOnce({ amount: 42 });
     mockFetchError(502); // el re-invoke falla en el agente, sin settle
@@ -4265,23 +3715,28 @@ describe('HU-203 compose — refund vs evidencia de broadcast', () => {
     // trae, a propósito, un cuerpo con field-errors parseables: sin el guard,
     // `willRetry` sería true y el pipeline reintentaría.
     mockFetchOk({ result: 'r1' });
-    mockSettle.mockResolvedValueOnce({ success: true, txHash: '0xSTEP0' });
-    mockFetchOk({ result: 'r2' });
-    mockSettle.mockResolvedValueOnce({
-      success: false,
-      txHash: '0xBROADCASTED',
-      error:
-        'Agent corridor returned 400: {"fieldErrors":{"amount":["required"]}}',
-    });
+    throwOnInvocation(
+      1,
+      settleResultError(
+        {
+          success: false,
+          txHash: '0xBROADCASTED',
+          error:
+            'Agent corridor returned 400: {"fieldErrors":{"amount":["required"]}}',
+        },
+        'corridor',
+      ),
+    );
     mockRegen.mockResolvedValueOnce({ amount: 42 });
 
     await runTwoStepPipeline();
 
-    // Un solo débito (el original) y un solo settle del step 1: no hubo
-    // re-invoke ni re-debit.
+    // Un solo débito (el original) y DOS invocaciones en total (step 0 + step 1
+    // sin retry): no hubo re-invoke ni re-debit.
     expect(mockDebit).toHaveBeenCalledTimes(1);
-    expect(mockSettle).toHaveBeenCalledTimes(2); // step 0 + step 1, sin retry
+    expect(invocations()).toBe(2);
     expect(refundedUsd()).toBe(0);
+    expect(mockRegen).not.toHaveBeenCalled();
   });
 });
 

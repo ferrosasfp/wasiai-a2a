@@ -202,22 +202,16 @@ function isDownstreamMainnetAllowed(chainKey: ChainKey): boolean {
  * WKH-143b). Esta función NO repite el regex: le agrega encima el rechazo de la
  * zero-address, que es una regla propia del leg downstream.
  *
- * ⚠️ ALCANCE (fix-pack CR-MNR-4). Esta función es INTERNA a este módulo. El
- * docstring anterior decía que la compartían "este gate y el sign INBOUND de
- * `compose.invokeAgent`" y que estaba exportada "para ese segundo consumidor":
- * era falso — `compose.ts` importa `isValidWallet`, no `validatePayTo`, y no
- * existía ningún importador externo. Lo que comparten los dos caminos es
- * `isValidWallet` (el criterio de formato); la regla de la zero-address NO se
- * comparte, y esa asimetría es DELIBERADA:
+ * ⚠️ ALCANCE (fix-pack CR-MNR-4). Esta función es INTERNA a este módulo y hoy
+ * cubre el ÚNICO leg de salida que existe.
  *
- *   · leg DOWNSTREAM (acá): payTo == 0x0 ⇒ skip `ZERO_PAY_TO`. El gateway mueve
- *     fondos PROPIOS del operador, así que quemarlos en 0x0 se corta.
- *   · sign INBOUND (`compose.ts`, guard `inboundVmUnsupported`): valida sólo
- *     FORMATO. La zero-address pasa y se firma, igual que antes de este fix-pack.
- *     NO se endureció acá a propósito: el gate inbound lo aprobaron AR+F4 en este
- *     mismo diff y cambiar qué payTos firma es un cambio de comportamiento
- *     observable del money-path, fuera del alcance de un fix de tipos/naming.
- *     Queda como `TD-INBOUND-ZERO-PAYTO` (`MULTI-CHAIN.md` §10).
+ * HU-DOUBLE-PAY: el docstring anterior describía una asimetría deliberada entre
+ * "este gate" y un segundo camino que firmaba sin rechazar la zero-address (el
+ * mal llamado "sign INBOUND" de `compose.invokeAgent`, guard
+ * `inboundVmUnsupported`), trackeada como `TD-INBOUND-ZERO-PAYTO`. Ese camino
+ * era un SEGUNDO pago de salida del wallet del operador y se borró, así que la
+ * asimetría desapareció con él: ya no hay ningún settle del gateway que acepte
+ * un payTo `0x0`, y la deuda queda CERRADA por eliminación del otro lado.
  */
 function validatePayTo(
   contract: string,

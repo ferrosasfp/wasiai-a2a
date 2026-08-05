@@ -37,7 +37,14 @@ let lastSkipMiddlewareDebit: boolean | undefined;
 // indistinguibles para el route, que solo la lee).
 let nextDelegationContext: { delegationId: string } | undefined;
 let nextKeySessionContext: { sessionId: string } | undefined;
-vi.mock('../middleware/a2a-key.js', () => ({
+// HU-DOUBLE-PAY: factory con `importOriginal` — `routes/orchestrate.ts` importa
+// `extractRawKey` de ESTE módulo para derivar la credencial del caller. Una
+// factory sin `importOriginal` lo dejaba `undefined` y el route reventaba en 500
+// (el modo de fallo que documenta doc/sdd/189-.../auto-blindaje.md). Se usa la
+// función REAL a propósito: re-implementarla en el mock la volvería un doble que
+// no puede detectar una divergencia con la extracción del middleware.
+vi.mock('../middleware/a2a-key.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../middleware/a2a-key.js')>()),
   requirePaymentOrA2AKey: () => [
     async (request: FastifyRequest, reply: FastifyReply) => {
       lastSkipMiddlewareDebit = (

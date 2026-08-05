@@ -11,7 +11,10 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 // WKH-305 (CR MNR-3): módulo LEAF (cero imports de runtime) — la MISMA
 // definición de las reglas de forma que usan el borde de `/compose` y el service.
 import { validateInputMappingShape } from '../lib/compose-input-mapping.js';
-import { requirePaymentOrA2AKey } from '../middleware/a2a-key.js';
+import {
+  extractRawKey,
+  requirePaymentOrA2AKey,
+} from '../middleware/a2a-key.js';
 import { createBackpressureHandler } from '../middleware/backpressure.js';
 import { noteDownstreamSkips } from '../middleware/event-tracking.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
@@ -164,6 +167,26 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             preferCapabilities: body.preferCapabilities,
             maxAgents: body.maxAgents,
             // WKH-61: propagar el row del caller para scoping per-step en compose
+            // HU-DOUBLE-PAY — la credencial CRUDA del caller, derivada con la
+            // MISMA extracción que usa el middleware de auth (`extractRawKey`:
+            // `x-a2a-key` O `Authorization: Bearer wasi_a2a_*`).
+            //
+            // POR QUÉ FALTABA Y POR QUÉ IMPORTA: `orchestrate.ts:1216` pasa
+            // `a2aKey: request.a2aKey` a `composeService.compose`, pero NINGUNA de
+            // las tres rutas HTTP poblaba ese campo — sólo lo poblaba el tool MCP
+            // (`mcp/tools/orchestrate.ts`). Como la propiedad es opcional,
+            // compilaba, y por HTTP `a2aKey` llegaba SIEMPRE `undefined`. Efecto
+            // medible: `compose.invokeAgent` no le reenviaba al agente el
+            // `x-a2a-key` del caller (el forward a registries system-trusted de
+            // `compose.ts`), y —hasta este fix— el gate `!a2aKey` del segundo leg
+            // de salida daba SIEMPRE true, así que el doble pago alcanzaba también
+            // a los callers PREPAGOS por este camino.
+            //
+            // Es el MISMO desajuste que la auditoría C2 (2026-07-01) arregló en
+            // `/compose` (`routes/compose.ts`), y que nunca se replicó acá.
+            // `/compose` es un endpoint único; orchestrate son TRES, y los tres
+            // tienen que derivarla igual o vuelve a divergir.
+            a2aKey: extractRawKey(request),
             scopingKeyRow: request.a2aKeyRow,
             // WKH-101 (DT-11): contexto de delegación propagado a compose.
             delegationContext: request.delegationContext,
@@ -274,6 +297,26 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             budget: body.budget,
             preferCapabilities: body.preferCapabilities,
             maxAgents: body.maxAgents,
+            // HU-DOUBLE-PAY — la credencial CRUDA del caller, derivada con la
+            // MISMA extracción que usa el middleware de auth (`extractRawKey`:
+            // `x-a2a-key` O `Authorization: Bearer wasi_a2a_*`).
+            //
+            // POR QUÉ FALTABA Y POR QUÉ IMPORTA: `orchestrate.ts:1216` pasa
+            // `a2aKey: request.a2aKey` a `composeService.compose`, pero NINGUNA de
+            // las tres rutas HTTP poblaba ese campo — sólo lo poblaba el tool MCP
+            // (`mcp/tools/orchestrate.ts`). Como la propiedad es opcional,
+            // compilaba, y por HTTP `a2aKey` llegaba SIEMPRE `undefined`. Efecto
+            // medible: `compose.invokeAgent` no le reenviaba al agente el
+            // `x-a2a-key` del caller (el forward a registries system-trusted de
+            // `compose.ts`), y —hasta este fix— el gate `!a2aKey` del segundo leg
+            // de salida daba SIEMPRE true, así que el doble pago alcanzaba también
+            // a los callers PREPAGOS por este camino.
+            //
+            // Es el MISMO desajuste que la auditoría C2 (2026-07-01) arregló en
+            // `/compose` (`routes/compose.ts`), y que nunca se replicó acá.
+            // `/compose` es un endpoint único; orchestrate son TRES, y los tres
+            // tienen que derivarla igual o vuelve a divergir.
+            a2aKey: extractRawKey(request),
             scopingKeyRow: request.a2aKeyRow,
             delegationContext: request.delegationContext,
             keySessionContext: request.keySessionContext,
@@ -691,6 +734,26 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             budget: body.budget,
             preferCapabilities: body.preferCapabilities,
             maxAgents: body.maxAgents,
+            // HU-DOUBLE-PAY — la credencial CRUDA del caller, derivada con la
+            // MISMA extracción que usa el middleware de auth (`extractRawKey`:
+            // `x-a2a-key` O `Authorization: Bearer wasi_a2a_*`).
+            //
+            // POR QUÉ FALTABA Y POR QUÉ IMPORTA: `orchestrate.ts:1216` pasa
+            // `a2aKey: request.a2aKey` a `composeService.compose`, pero NINGUNA de
+            // las tres rutas HTTP poblaba ese campo — sólo lo poblaba el tool MCP
+            // (`mcp/tools/orchestrate.ts`). Como la propiedad es opcional,
+            // compilaba, y por HTTP `a2aKey` llegaba SIEMPRE `undefined`. Efecto
+            // medible: `compose.invokeAgent` no le reenviaba al agente el
+            // `x-a2a-key` del caller (el forward a registries system-trusted de
+            // `compose.ts`), y —hasta este fix— el gate `!a2aKey` del segundo leg
+            // de salida daba SIEMPRE true, así que el doble pago alcanzaba también
+            // a los callers PREPAGOS por este camino.
+            //
+            // Es el MISMO desajuste que la auditoría C2 (2026-07-01) arregló en
+            // `/compose` (`routes/compose.ts`), y que nunca se replicó acá.
+            // `/compose` es un endpoint único; orchestrate son TRES, y los tres
+            // tienen que derivarla igual o vuelve a divergir.
+            a2aKey: extractRawKey(request),
             scopingKeyRow: request.a2aKeyRow,
             delegationContext: request.delegationContext,
             keySessionContext: request.keySessionContext,

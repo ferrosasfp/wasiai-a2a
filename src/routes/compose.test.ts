@@ -59,20 +59,16 @@ let capturedComposeEstimatedCostUsd: number | undefined;
 let nextEstimatedCostUsd: number | undefined;
 let nextResolvedChainId: number | undefined;
 let nextInjectedDestination: string | undefined;
-vi.mock('../middleware/a2a-key.js', () => ({
-  // C2 (audit 2026-07-01): routes/compose.ts imports extractRawKey to derive the
-  // a2a credential the same way the middleware does (x-a2a-key OR Bearer
-  // wasi_a2a_*). Mirror that logic in the mock.
-  extractRawKey: (request: FastifyRequest) => {
-    const headerKey = request.headers['x-a2a-key'];
-    if (typeof headerKey === 'string') return headerKey;
-    const auth = request.headers.authorization;
-    if (typeof auth === 'string') {
-      const m = /^bearer\s+(.+)$/i.exec(auth);
-      if (m?.[1]?.startsWith('wasi_a2a_')) return m[1];
-    }
-    return undefined;
-  },
+// C2 (audit 2026-07-01): `routes/compose.ts` importa `extractRawKey` de ESTE
+// módulo para derivar la credencial del caller igual que el middleware.
+//
+// HU-DOUBLE-PAY: acá el mock RE-IMPLEMENTABA esa función (el mismo regex, a
+// mano). Era un guard que se comparaba consigo mismo: si `extractRawKey`
+// cambiara de criterio, el route empezaría a ver otra cosa en producción y esta
+// suite seguiría verde contra la copia vieja. Ahora entra la función REAL por
+// `importOriginal` y sólo se reemplaza el middleware de auth.
+vi.mock('../middleware/a2a-key.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../middleware/a2a-key.js')>()),
   requirePaymentOrA2AKey: () => [
     async (request: FastifyRequest, _reply: FastifyReply) => {
       (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = nextKeyRow;
