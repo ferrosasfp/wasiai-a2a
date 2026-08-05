@@ -365,9 +365,10 @@ describe('discoveryService', () => {
 
   // ─── WKH-MULTICHAIN AC-10 (W4): payment.chain + payment.asset exposed in /discover ──
   describe('WKH-MULTICHAIN AC-10: /discover exposes payment.chain and payment.asset', () => {
-    it('returns payment.chain ("avalanche") and payment.asset ("USDC") for an Avalanche-paid agent via discover()', async () => {
-      // Raw agent published with wasiai-v2 testnet shape: chain="avalanche-testnet"
-      // Discovery normalizes to canonical "avalanche" via the SEC-AR allowlist.
+    it('returns payment.chain ("avalanche-testnet", as declared) and payment.asset ("USDC") for an Avalanche-paid agent via discover()', async () => {
+      // Raw agent published with wasiai-v2 testnet shape: chain="avalanche-testnet".
+      // TD-CHAIN-ALIAS-AMBIGUO: el colapso legacy a "avalanche" se eliminó — el
+      // reader publica el string DECLARADO. El destino del leg no cambia.
       setupRegistryResponse([
         makeRawAgent({
           id: 'a-fuji',
@@ -386,9 +387,9 @@ describe('discoveryService', () => {
 
       expect(result.agents).toHaveLength(1);
       expect(result.agents[0]!.payment).toBeDefined();
-      // Discovery normalizes avalanche-testnet → avalanche (canonical), independent
-      // of the middleware ChainKey normalizer (avalanche-fuji). See SDD R-8.
-      expect(result.agents[0]!.payment?.chain).toBe('avalanche');
+      // Sin colapso: sale tal cual lo declaró el agente (el ChainKey del
+      // middleware sigue siendo avalanche-fuji). See SDD R-8.
+      expect(result.agents[0]!.payment?.chain).toBe('avalanche-testnet');
       expect(result.agents[0]!.payment?.asset).toBe('USDC');
       expect(result.agents[0]!.payment?.method).toBe('x402');
     });
@@ -443,8 +444,9 @@ describe('discoveryService', () => {
 
   // ─── WKH-113 (BASE-08): dynamic chain validation via normalizeChainSlug ──
   // readPayment now derives accept/reject from the pure chain-resolver instead
-  // of a hardcoded ALLOWED_CHAIN_VALUES Set (CD-1/CD-9). Output string stays
-  // legacy (CD-7): avalanche-testnet/-mainnet → 'avalanche'; rest pass-through.
+  // of a hardcoded ALLOWED_CHAIN_VALUES Set (CD-1/CD-9). Output string is
+  // pass-through del declarado; la única reescritura es que un alias MAINNET de
+  // avalanche sale como su ChainKey (it2 BLQ-MED-1).
   describe('WKH-113: readPayment dynamic chain validation', () => {
     function makePaymentRaw(chain: string): Record<string, unknown> {
       return {
@@ -491,7 +493,7 @@ describe('discoveryService', () => {
       expect(chainId.payment?.chain).toBe('84532');
     });
 
-    it('T-AC2a: regression — avalanche TESTNET variants collapse to "avalanche" (CD-7, NOT avalanche-fuji); la mainnet NO colapsa (it2 BLQ-MED-1)', () => {
+    it('T-AC2a: regression — los alias testnet de avalanche salen TAL CUAL (el alias a secas NO se re-escribe a avalanche-fuji); la mainnet sale como su ChainKey (it2 BLQ-MED-1)', () => {
       const plain = discoveryService.mapAgent(
         makeRegistry(),
         makePaymentRaw('avalanche'),
@@ -499,11 +501,13 @@ describe('discoveryService', () => {
       expect(plain.payment?.chain).toBe('avalanche');
       expect(plain.payment?.chain).not.toBe('avalanche-fuji');
 
+      // TD-CHAIN-ALIAS-AMBIGUO: el colapso legacy CD-2 se eliminó — el slug
+      // EXPLÍCITO ya no se degrada al alias ambiguo.
       const testnet = discoveryService.mapAgent(
         makeRegistry(),
         makePaymentRaw('avalanche-testnet'),
       );
-      expect(testnet.payment?.chain).toBe('avalanche');
+      expect(testnet.payment?.chain).toBe('avalanche-testnet');
 
       // it2 BLQ-MED-1: el alias mainnet sale como su ChainKey real, así el gate
       // fail-CLOSED del leg downstream lo ve (y el opt-in por env es ejercitable).
