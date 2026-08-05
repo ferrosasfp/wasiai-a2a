@@ -8,9 +8,23 @@
  *
  * Two layers:
  *   1. LIGHT layer (always, network-only, NO secrets): asserts the facilitator
- *      is up (GET /health == 200) and that /supported lists Base Sepolia
- *      (eip155:84532) and Avalanche Fuji (eip155:43113), each with method
- *      'eip3009' and breakerState 'CLOSED'. Fails (exit != 0) if any is missing.
+ *      is up (GET /health == 200) and that /supported lists every chain in
+ *      EXPECTED_CHAINS (default: Base Sepolia eip155:84532 + Avalanche Fuji
+ *      eip155:43113), each declaring THE METHOD THAT CORRESPONDS TO ITS CAIP-2
+ *      NAMESPACE (see CHAIN_METHOD_BY_CAIP2_NAMESPACE — 'eip3009' for eip155:*,
+ *      'spl-token-transfer-finalized' for solana:*) and breakerState 'CLOSED'.
+ *      Fails (exit != 0) if any is missing.
+ *
+ *      ⚠️ RESIDUAL CONOCIDO — POR QUÉ EL DEFAULT SIGUE SIN SOLANA. Medido contra
+ *      el facilitator de producción el 2026-08-04: la entrada `solana:devnet` de
+ *      `/supported` NO trae el campo `breakerState` (las cuatro eip155:* sí). O
+ *      sea que agregar `solana:devnet` a EXPECTED_CHAINS hoy pasa el chequeo de
+ *      método y falla el de breaker con `breakerState='undefined'`. Ese rojo es
+ *      CORRECTO y se deja ASÍ a propósito: el smoke no puede certificar un
+ *      breaker que el facilitator no publica, y aflojar el chequeo a "si no
+ *      viene, no lo mires" es justo el chequeo-que-se-apaga-solo que la nota de
+ *      `requiredMethodFor` explica. Lo que falta está del lado del facilitator
+ *      (publicar el breaker de Solana), no de este archivo.
  *   2. E2E layer (opt-in): ONLY when RUN_DOWNSTREAM_E2E=1 AND FUNDER_PK present.
  *      Runs the real provision -> discover -> compose -> downstream-settle flow
  *      (mirror of scripts/smoke-base-downstream.mjs) and asserts a
@@ -47,12 +61,104 @@ const EXPECTED_CHAINS = (process.env.EXPECTED_CHAINS ?? DEFAULT_EXPECTED_CHAINS)
   .split(',')
   .map((c) => c.trim())
   .filter(Boolean);
-const REQUIRED_METHOD = 'eip3009';
+/**
+ * Método de settle que le exigimos a cada cadena, DERIVADO DE LA CADENA.
+ *
+ * ⚠️ ACÁ HABÍA UN LITERAL `const REQUIRED_METHOD = 'eip3009'` APLICADO A CUALQUIER
+ * CADENA. `eip3009` es un método EVM: una cadena Solana no lo declara ni puede
+ * declararlo. Medido contra el facilitator de producción el 2026-08-04,
+ * `GET /supported` devuelve `solana:devnet` con `methods: ['spl-token-transfer-finalized']`,
+ * así que `EXPECTED_CHAINS=solana:devnet node scripts/smoke-downstream-x402.mjs`
+ * salía exit 1 con «chain solana:devnet (Solana Devnet) missing method 'eip3009'»
+ * — un ROJO FALSO que le echa la culpa a la cadena cuando la cadena está sana. El
+ * único motivo por el que nadie lo vio es que el default de `EXPECTED_CHAINS` no
+ * incluye ninguna cadena Solana: el rail Solana simplemente NO estaba cubierto por
+ * este smoke, y la primera persona que intentara cubrirlo se iba a comer el rojo.
+ *
+ * La clave es el NAMESPACE CAIP-2 del propio id de cadena (`eip155:84532` →
+ * `eip155`, `solana:devnet` → `solana`), o sea que el método sale del dato de
+ * entrada y no de una constante paralela al lado.
+ *
+ * ⚠️ POR QUÉ ESTA TABLA NO SE IMPORTA DE `src/`: se buscó y NO EXISTE allá. El
+ * nombre `spl-token-transfer-finalized` no aparece en ningún archivo de este repo
+ * (el vocabulario de métodos lo define el facilitator, que es otro servicio); lo
+ * más cercano es `getChainVmFamily()` de `src/adapters/chain-resolver.ts`, que
+ * clasifica en `'evm' | 'solana'` pero no nombra métodos, y además es TypeScript
+ * — este script corre con `node` pelado, sin loader de TS.
+ *
+ * Lo que SÍ evita que esta tabla se desincronice es mecánico y no una promesa
+ * escrita: `test/smoke-downstream-x402.method.test.ts` cruza el conjunto de
+ * `vmFamily` de acá contra las familias que `chain-resolver.ts` conoce de verdad
+ * (enumerando `listChainAliases()` → `normalizeChainSlug()` → `getChainVmFamily()`).
+ * Agregar una familia de VM nueva en `src/` sin enseñársela a este script pone ese
+ * test en rojo. Por eso cada entrada lleva su `vmFamily`: es la costura por donde
+ * el cruce agarra.
+ *
+ * Prototipo `null` (mismo criterio anti-prototype-pollution que `SLUG_ALIASES` en
+ * `chain-resolver.ts`): el namespace sale de `EXPECTED_CHAINS`, que es input.
+ */
+const CHAIN_METHOD_BY_CAIP2_NAMESPACE = Object.assign(
+  Object.create(null),
+  /** @type {Record<string, {vmFamily: string, method: string}>} */ ({
+    eip155: { vmFamily: 'evm', method: 'eip3009' },
+    solana: { vmFamily: 'solana', method: 'spl-token-transfer-finalized' },
+  }),
+);
+
 const REQUIRED_BREAKER = 'CLOSED';
 const FETCH_TIMEOUT_MS = Number(process.env.SMOKE_FETCH_TIMEOUT_MS ?? 10000);
 
 function progress(msg) {
   process.stderr.write(`[smoke] ${msg}\n`);
+}
+
+/**
+ * Las familias de VM que este script sabe verificar. La consume el test que las
+ * cruza contra `chain-resolver.ts`; se DERIVA de la tabla (no es una segunda
+ * lista) para que no pueda quedar desactualizada respecto de ella.
+ * @returns {string[]} ordenadas, sin repetidos
+ */
+export function knownVmFamilies() {
+  return [
+    ...new Set(
+      Object.values(CHAIN_METHOD_BY_CAIP2_NAMESPACE).map((e) => e.vmFamily),
+    ),
+  ].sort();
+}
+
+/**
+ * Método de settle que le corresponde a `network` según su namespace CAIP-2.
+ *
+ * ⚠️ TIRA ERROR ANTE UNA CADENA DESCONOCIDA. A PROPÓSITO, Y NO SE "ARREGLA"
+ * DEVOLVIENDO `undefined` NI SALTEANDO EL CHEQUEO. La tentación obvia ante un
+ * namespace que no está en la tabla es dejar pasar la cadena "porque no sabemos
+ * qué exigirle": eso convierte a este smoke en un chequeo que se apaga solo justo
+ * para las cadenas nuevas — las únicas donde todavía no hay confianza acumulada.
+ * Un rail que nadie verificó saldría VERDE y se leería como "verificado", que es
+ * exactamente la clase de falla que este repo ya pagó con un doble pago que
+ * sobrevivió un mes porque su reporter leía dos hashes y nunca el tercero.
+ * No saber qué exigir es un motivo para FALLAR RUIDOSAMENTE, no para aprobar.
+ *
+ * @param {string} network id CAIP-2, p.ej. 'eip155:84532' | 'solana:devnet'
+ * @returns {string} el método exigido
+ */
+export function requiredMethodFor(network) {
+  const raw = typeof network === 'string' ? network.trim() : '';
+  const sep = raw.indexOf(':');
+  const namespace = sep === -1 ? '' : raw.slice(0, sep).toLowerCase();
+  const known = Object.keys(CHAIN_METHOD_BY_CAIP2_NAMESPACE);
+  if (
+    namespace === '' ||
+    !Object.hasOwn(CHAIN_METHOD_BY_CAIP2_NAMESPACE, namespace)
+  ) {
+    throw new Error(
+      `cannot determine the required settle method for chain '${raw}': ` +
+        `unrecognised CAIP-2 namespace '${namespace}' (known: ${known.join(', ')}). ` +
+        'Refusing to skip the method check — teach this script the namespace ' +
+        'instead of letting an unverified chain report green.',
+    );
+  }
+  return CHAIN_METHOD_BY_CAIP2_NAMESPACE[namespace].method;
 }
 
 /**
@@ -121,9 +227,13 @@ export async function runLightLayer() {
       );
     }
     const methods = Array.isArray(chain.methods) ? chain.methods : [];
-    if (!methods.includes(REQUIRED_METHOD)) {
+    // El método sale de la cadena que se está verificando, no de un literal EVM
+    // aplicado a todas. Si la cadena es de una familia que no conocemos, esto
+    // TIRA y el smoke sale rojo — ver el docstring de `requiredMethodFor`.
+    const requiredMethod = requiredMethodFor(expected);
+    if (!methods.includes(requiredMethod)) {
       throw new Error(
-        `chain ${expected} (${chain.name ?? '?'}) missing method '${REQUIRED_METHOD}' (got: ${methods.join(', ')})`,
+        `chain ${expected} (${chain.name ?? '?'}) missing method '${requiredMethod}' (got: ${methods.join(', ')})`,
       );
     }
     if (chain.breakerState !== REQUIRED_BREAKER) {
