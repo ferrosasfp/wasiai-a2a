@@ -48,6 +48,7 @@
  * concreto por la puerta de atrás.
  */
 
+import { classifyCapability } from '../lib/capability-risk.js';
 import { getLogger } from '../lib/logger.js';
 import type {
   A2AAgentKeyRow,
@@ -83,6 +84,68 @@ export type CapabilityResolutionFailure = {
 export type CapabilityResolution =
   | { ok: true; agent: Agent }
   | { ok: false; failure: CapabilityResolutionFailure };
+
+/**
+ * La cola del 422 `excluded_by_reputation` que habla del carril de estreno.
+ *
+ * ⚠️ ESTE MENSAJE EMPUJABA HACIA EL AGUJERO QUE EL REPO ACABA DE CERRAR.
+ * Decía, para CUALQUIER capacidad, «…are eligible for the trial lane with
+ * 'allow_trial'». Ese texto es exactamente lo que lee un dev cuando se le muere
+ * el leg de payout, y encender `allow_trial` en un step que dirige un principal
+ * es el arreglo tentador que abre el sybil: en el carril de estreno los
+ * admitidos empatan todos en score 0 y el desempate es un SORTEO por request
+ * (`lib/trial-standing.ts:286-322`), así que el ganador de ese step es quien
+ * devuelve la dirección de depósito contra la que una persona firma su remesa.
+ * `doc/sdd/211-.../residuales.md:42-50` midió que con 20 de 22 candidatos un
+ * sybil se queda los cupos en ~82% de las requests. Un 422 que sugiere el
+ * arreglo peligroso no es una ayuda: es el primer eslabón del incidente.
+ *
+ * ⚠️ Y NO SE COLAPSA A UN BOOLEAN. `classifyCapability` tiene TRES respuestas y
+ * la tercera no es la segunda (su propio docstring, y `memory/no-pude-preguntar-no-es-no.md`):
+ *
+ *   · `'disbursement'`     → sabemos que mueve plata. NO se sugiere; se PROHÍBE.
+ *   · `'no-disbursement'`  → verificado que no entrega valor. Sugerencia intacta:
+ *                            es un diagnóstico legítimo y sacarlo manda a buscar
+ *                            el problema al catálogo, que es el lugar equivocado.
+ *   · `'unclassified'`     → NO SABEMOS qué hace. Se sugiere CON la advertencia.
+ *                            Tratarlo como `'no-disbursement'` es apostar a que
+ *                            una capacidad que nadie clasificó no toca dinero;
+ *                            tratarlo como `'disbursement'` le saca el
+ *                            diagnóstico a casi todo el catálogo (las dos listas
+ *                            de `capability-risk.ts` son enumeraciones cerradas,
+ *                            no una partición del universo).
+ *
+ * La clasificación se IMPORTA de `lib/capability-risk.ts`, que es su única copia.
+ * No se replica acá ninguna lista de capacidades: una segunda lista es cómo se
+ * desincroniza, y el efecto de desincronizarse en ESTE sitio es volver a sugerir
+ * `allow_trial` sobre un payout.
+ */
+function trialLaneHint(capability: string, trialAvailable: number): string {
+  const head = `; up to ${trialAvailable} candidate(s) have no settled history yet`;
+  const risk = classifyCapability(capability);
+
+  if (risk === 'disbursement') {
+    return (
+      `${head}, but capability '${capability}' disburses funds: do NOT enable ` +
+      "'allow_trial' on this step. It admits agents with no settled history, and " +
+      'this step chooses who receives the principal. Raise the standing of the ' +
+      'agents, or lower min_reputation deliberately, instead.'
+    );
+  }
+
+  const tail =
+    " and are eligible for the trial lane with 'allow_trial' (a per-publisher quota applies)";
+
+  if (risk === 'unclassified') {
+    return (
+      `${head}${tail}. '${capability}' is not classified as disbursement-free, ` +
+      "so check first: 'allow_trial' admits agents with no settled history and " +
+      'must not be enabled on a step that directs funds.'
+    );
+  }
+
+  return `${head}${tail}`;
+}
 
 /**
  * Resuelve UNA capacidad al agente que mejor la cumple, dentro del alcance del
@@ -186,9 +249,7 @@ export async function resolveCapability(
           // del tipo): con 8 elegibles del mismo ancla y M=2, prometer 8 admisiones
           // es prometer 6 que no van a pasar. El único consumidor del número lo
           // leía como exacto.
-          (trialAvailable > 0
-            ? `; up to ${trialAvailable} candidate(s) have no settled history yet and are eligible for the trial lane with 'allow_trial' (a per-publisher quota applies)`
-            : ''),
+          (trialAvailable > 0 ? trialLaneHint(capability, trialAvailable) : ''),
       },
     };
   }

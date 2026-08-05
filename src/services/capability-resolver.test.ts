@@ -284,9 +284,8 @@ describe('T-15 (DT-10) · `excluded_by_reputation` como tercer motivo', () => {
     }
   });
 
-  it('T-15: con candidatos en estreno disponibles, el mensaje NOMBRA la salida', async () => {
-    // Un 422 que dice "no hay agente" cuando hay uno a un flag de distancia manda a
-    // buscar el problema al catálogo, que es el lugar equivocado.
+  /** El `excluded` del 422 con estreno disponible, que es el único caso con cola. */
+  function conEstrenoDisponible(trialAvailable = 1) {
     discoverMock.mockResolvedValue({
       agents: [],
       total: 0,
@@ -294,13 +293,25 @@ describe('T-15 (DT-10) · `excluded_by_reputation` como tercer motivo', () => {
       excluded: {
         scope: 0,
         reputation: 1,
-        trialAvailable: 1,
+        trialAvailable,
         standingUnavailable: false,
       },
     });
+  }
+
+  // ⚠️ ESTE TEST DECÍA `'remittance-payout'` Y ESO ERA EL BUG, NO EL FIXTURE.
+  // `remittance-payout` es una capacidad de DESEMBOLSO (`lib/capability-risk.ts`),
+  // así que el caso "positivo" del mensaje servicial estaba ejercitando justo el
+  // step donde la sugerencia es peligrosa, y el verde se leía como cobertura. La
+  // capacidad no-desembolso es la que corresponde acá; el payout tiene su propio
+  // test abajo, con la aserción invertida.
+  it('T-15: capacidad SIN desembolso → el mensaje NOMBRA la salida', async () => {
+    // Un 422 que dice "no hay agente" cuando hay uno a un flag de distancia manda a
+    // buscar el problema al catálogo, que es el lugar equivocado.
+    conEstrenoDisponible();
 
     const res = await resolveCapability(
-      'remittance-payout',
+      'remittance-fx-quote',
       { min_reputation: 2 },
       undefined,
     );
@@ -315,6 +326,91 @@ describe('T-15 (DT-10) · `excluded_by_reputation` como tercer motivo', () => {
       expect(res.failure.message).toContain('up to 1 candidate(s)');
       expect(res.failure.message).toContain('eligible');
       expect(res.failure.message).not.toContain('would be admitted');
+    }
+  });
+
+  // ── El 422 no puede empujar hacia el agujero del sybil ──────────────────
+  it('T-15b: capacidad de DESEMBOLSO → el mensaje PROHÍBE allow_trial, no lo sugiere', async () => {
+    // El texto del 422 es lo que lee un dev cuando se le muere el leg de payout.
+    // Encender `allow_trial` ahí admite agentes sin historial que empatan en score
+    // 0 y desempatan por sorteo, y el ganador devuelve la dirección de depósito
+    // contra la que una persona firma su remesa.
+    conEstrenoDisponible();
+
+    const res = await resolveCapability(
+      'remittance-payout',
+      { min_reputation: 2 },
+      undefined,
+    );
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.failure.reason).toBe('excluded_by_reputation');
+
+      // ⚠️ `toContain('allow_trial')` NO SIRVE PARA ESTO y por eso no se usa acá:
+      // el mensaje que PROHÍBE también contiene la cadena `allow_trial`, así que
+      // esa aserción pasa igual con la sugerencia y con la prohibición. Lo que
+      // distingue los dos mensajes es la palabra que los convierte en consejo.
+      expect(res.failure.message).not.toContain('eligible');
+      expect(res.failure.message).not.toContain('trial lane');
+      expect(res.failure.message).toMatch(/do NOT enable/);
+      expect(res.failure.message).toContain('disburses funds');
+
+      // El diagnóstico ÚTIL no se pierde: sigue diciendo cuántos hay sin historial
+      // y sigue siendo una cota, no una promesa de admisión.
+      expect(res.failure.message).toContain('up to 1 candidate(s)');
+      expect(res.failure.message).toContain('no settled history');
+      expect(res.failure.message).not.toContain('would be admitted');
+    }
+  });
+
+  it('T-15c: capacidad SIN clasificar → sugiere PERO advierte (el tercer valor no es el segundo)', async () => {
+    // `classifyCapability` devuelve tres cosas y `'unclassified'` es "no sé qué hace
+    // este agente", que NO es "sé que no mueve plata". Colapsarlo contra
+    // `'no-disbursement'` es apostar a que una capacidad que nadie clasificó no toca
+    // dinero, y las dos listas de `capability-risk.ts` son enumeraciones cerradas,
+    // no una partición del universo.
+    conEstrenoDisponible(3);
+
+    const res = await resolveCapability(
+      'una-capacidad-que-nadie-clasifico',
+      { min_reputation: 2 },
+      undefined,
+    );
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.failure.reason).toBe('excluded_by_reputation');
+      expect(res.failure.message).toContain('allow_trial');
+      expect(res.failure.message).toContain('up to 3 candidate(s)');
+      // La advertencia es lo que separa este caso del `no-disbursement` limpio.
+      expect(res.failure.message).toMatch(
+        /must not be enabled on a step that directs funds/,
+      );
+    }
+  });
+
+  it('T-15d: sin candidatos en estreno el mensaje no habla del carril, sea cual sea la capacidad', async () => {
+    // La cola entera está gateada en `trialAvailable > 0`. Sin ese gate, las tres
+    // ramas nuevas serían alcanzables con 0 candidatos y el 422 hablaría de un
+    // carril que no tiene a nadie.
+    for (const cap of [
+      'remittance-payout',
+      'remittance-fx-quote',
+      'una-capacidad-que-nadie-clasifico',
+    ]) {
+      conEstrenoDisponible(0);
+      const res = await resolveCapability(
+        cap,
+        { min_reputation: 2 },
+        undefined,
+      );
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.failure.reason).toBe('excluded_by_reputation');
+        expect(res.failure.message).not.toContain('allow_trial');
+        expect(res.failure.message).not.toContain('candidate(s)');
+      }
     }
   });
 
