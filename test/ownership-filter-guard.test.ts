@@ -129,7 +129,6 @@ import {
 import {
   type Chain,
   GUARDED_VERBS,
-  deriveOwnerTables,
   deriveTables,
   scanSource,
 } from './ownership-filter-guard.scanner.js';

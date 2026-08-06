@@ -145,6 +145,10 @@ el conteo de líneas si se ve el diff entero.
 | M-G4 | el guardián busca `ownerRef` en vez de `owner_ref`: `scanner.ts:76`, `const OWNER_COLUMN = 'ownerRef'` | `1 file changed, 1 insertion(+), 1 deletion(-)` | **KILLED** | **G-07** (+ G-03, G-08, G-09) | `1 failed \| 267 passed \| 6 skipped (274)` · `4 failed \| 5323 passed \| 19 skipped (5346)` |
 | M-G5 | se quita la resolución de constantes: se borra `if (/^[A-Za-z_$][\w$]*$/.test(rawArg)) return consts.get(rawArg) ?? null;` (`scanner.ts:453`) | `1 file changed, 1 deletion(-)` | **KILLED** | **G-05** (+ G-02, G-09) | `1 failed \| 267 passed \| 6 skipped (274)` · `3 failed \| 5324 passed \| 19 skipped (5346)` |
 
+> Nota (fix-pack del CR): la línea que M-G3 borró, `withOwner.add(table);`, vive dentro de
+> `deriveTables`. El envoltorio `deriveOwnerTables` que la fila nombra estaba importado en el test
+> y nunca invocado, así que se borró (MNR-2); el mutante y su veredicto no cambian.
+
 ### N-3 · M-G3 confirmó el modo de falla silencioso, y confirmó que el control de armado lo tapa
 
 Es la fila que más importa de las cinco, y la salida real coincide con lo que §10 predecía:

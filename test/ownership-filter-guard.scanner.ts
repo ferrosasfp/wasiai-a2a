@@ -216,27 +216,30 @@ export function moduleStringConsts(src: string): Map<string, string> {
 // ── (3) Tablas con dueño, derivadas del archivo de tipos ───────────────────
 
 /**
- * Las tablas cuyo bloque `Row` declara una columna `owner_ref`, leídas de
- * `src/types/database.types.ts`.
+ * `withOwner`: las tablas cuyo bloque `Row` declara una columna `owner_ref`,
+ * leídas de `src/types/database.types.ts`. `all`: el universo, para el control
+ * de armado.
  *
  * CD-4: el guardián NO lleva una lista escrita a mano; la deriva en cada
  * corrida. Una lista a mano es lo que ya envejeció una vez: `CLAUDE.md` enumeraba
- * 4 tablas de 21, y una de las 4 (`registries`) decía que no tenía columna de
- * dueño teniéndola. Esa sección ahora declara el CRITERIO y apunta acá.
+ * 4 tablas, y una de las 4 (`registries`) decía que no tenía columna de dueño
+ * teniéndola. Esa sección ahora declara el CRITERIO y apunta acá.
  *
  * El formato del archivo generado, verificado: `Tables: {` con 4 espacios,
  * `<tabla>: {` con 6, `Row: {` con 8, columnas con 10. `Views: {` a 4 espacios
- * cierra el bloque `Tables`.
+ * cierra el bloque `Tables`. Esa suposición sobre la forma de la cabecera la
+ * vigila **G-13**, que es de donde salió que quotear una sola clave dejaba a esta
+ * función ciega a esa tabla sin que ningún control se moviera.
  *
  * Cuenta cualquier tipo: `kite_schema_transforms` declara `owner_ref: string | null`
  * y ENTRA. Que la fila pueda tener `NULL` es otro problema (una fila así es
  * invisible para todos), y este conjunto no opina sobre eso.
+ *
+ * ⚠️ Acá había además un `deriveOwnerTables(typesSrc)` que devolvía sólo
+ * `.withOwner`. Estaba **importado en el test y nunca invocado**, y no lo cazaba
+ * nadie: `package.json:11` es `biome check src/` y el tsconfig incluye sólo
+ * `src/**`. Se borró en el fix-pack del CR; el único lector es `deriveTables`.
  */
-export function deriveOwnerTables(typesSrc: string): Set<string> {
-  return deriveTables(typesSrc).withOwner;
-}
-
-/** Igual que `deriveOwnerTables`, más el universo, para el control de armado. */
 export function deriveTables(typesSrc: string): {
   all: Set<string>;
   withOwner: Set<string>;
