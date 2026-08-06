@@ -184,9 +184,12 @@ const balance = await budgetService.getBalance(
 
 ### Qué debe detectar Adversary Review (AR) / Code Review (CR)
 
-⚠️ La regla **no es sólo sobre `a2a_agent_keys`**: aplica a las 21 tablas del
-criterio de más abajo. Leerla como "revisar `a2a_agent_keys`" es lo que dejó 20
-filtros de otras tablas sin un solo test que los mirara (WKH-SEC-03).
+⚠️ La regla **no es sólo sobre `a2a_agent_keys`**: aplica a **toda** tabla que
+cumpla el criterio de más abajo, sean las que sean hoy. Leerla como "revisar
+`a2a_agent_keys`" es lo que dejó 23 filtros de otras tablas como candidatos a "no
+los mira nadie" (WKH-SEC-03; de esos 23 se mutaron 11 y 8 no los miraba nadie —
+el detalle de qué se midió y qué no está en el docblock de
+`test/ownership-filter-guard.test.ts`).
 
 En cualquier PR que modifique `src/` y toque queries sobre una tabla con
 `owner_ref`:
@@ -208,23 +211,29 @@ En cualquier PR que modifique `src/` y toque queries sobre una tabla con
 `registries | — (admin global) | N/A`, o sea que esa tabla no tiene columna de
 dueño: es **falso**, `src/types/database.types.ts:2567` declara
 `owner_ref: string`. Y las 4 filas hacían creer que el universo eran 4 tablas.
-**Son 21.** Una lista a mano no se actualiza con las migraciones; el criterio sí.
+**Son bastantes más.** Una lista a mano no se actualiza con las migraciones; el
+criterio sí.
 
 **El criterio, que es lo único normativo de esta sección:**
 
 > Toda tabla cuyo bloque `Row` declare la columna `owner_ref` en
-> `src/types/database.types.ts` está bajo esta regla. **Hoy son 21 de 62.**
+> `src/types/database.types.ts` está bajo esta regla.
 
-El número no se escribe a mano en ningún lado: sale del archivo de tipos
-generado, en cada corrida de los tests. Si te hace falta la lista, derivala —
-`deriveTables()` en `test/ownership-filter-guard.scanner.ts` es exactamente eso.
+El criterio es la regla. **El número es una foto y envejece**: al 2026-08-06 eran
+**21 de 62**, y ese "21" no lo verifica nada — G-01 son pisos (`>= 50` / `>= 15`),
+G-09 es `>= 35` y G-11/G-12/G-13 son invariantes *relativos*. Medido: agregando
+al archivo de tipos una 22ª tabla con `owner_ref`, el guardián sigue dando
+`13 passed (13)` y este renglón queda viejo en silencio. Así que **no te apoyes en
+el número de acá: derivalo.** `deriveTables()` en
+`test/ownership-filter-guard.scanner.ts` es exactamente eso, y si no coincide con
+este párrafo, el que tiene razón es `deriveTables()`.
 
 **Dónde vive la verificación mecánica:**
 
 | Archivo | Qué hace |
 |---|---|
 | `test/ownership-filter-guard.test.ts` | El guardián. Toda cadena `supabase.from(<tabla con owner_ref>)` con verbo `select`/`update`/`delete` lleva un filtro por `owner_ref`, o tiene una excepción escrita. Corre en cada `npm test`. |
-| `test/ownership-filter-guard.exceptions.ts` | El motivo de CADA omisión, sitio por sitio. Hoy 41 entradas. Escritas a mano leyendo el código, nunca volcando la salida del escáner. |
+| `test/ownership-filter-guard.exceptions.ts` | El motivo de CADA omisión, sitio por sitio (41 al 2026-08-06 — otra foto: lo que se verifica es que haya UNA entrada por sitio sin filtro, no cuántas). Escritas a mano leyendo el código, nunca volcando la salida del escáner. |
 | `src/services/*.ownership.test.ts` | Que el filtro además **aísle**, con un falso que aplica los filtros pedidos. |
 | `scripts/eq-sweep.mjs` | Barrido de mutación por línea, a mano, para cerrar una HU de seguridad. No corre solo. |
 
