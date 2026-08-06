@@ -102,6 +102,17 @@
  *     interno — pero eso es una lectura de código de esta HU, no una medición
  *     de este guardián.
  *     Ampliar el alcance a los RPC es OTRA HU; declararlo es de ésta.
+ * 10. UN ARCHIVO QUE TODAVÍA NO ESTÁ EN EL ÍNDICE DE GIT. El universo sale de
+ *     `git ls-files src` (`:140-142`), a propósito: es lo que un `checkout`
+ *     trae. La consecuencia es que un archivo nuevo **sin `git add`** es
+ *     invisible para el guardián. Medido: un `src/services/__mnr4-probe.ts`
+ *     recién creado con `supabase.from('a2a_receipts').select('*').eq('id', id)`
+ *     da `13 passed (13)`; con un `git add -N` encima, los mismos tests dan
+ *     `2 failed | 11 passed (13)` nombrando `src/services/__mnr4-probe.ts:3 ·
+ *     a2a_receipts · select`. **No es un agujero de CI** —en CI el archivo llegó
+ *     por un commit, así que está en el índice— sino de la vuelta local: mientras
+ *     escribís el service, el verde que ves no habla de tu archivo. Se cierra
+ *     solo al hacer `git add`, y eso pasa antes de cualquier revisión.
  *
  * Naming: G-01..G-13.
  */
