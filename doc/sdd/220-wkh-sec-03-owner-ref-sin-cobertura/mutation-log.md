@@ -77,6 +77,14 @@ ninguna de las 11.
 | M-04 | `src/services/llm/transform.ts:234` | `.eq('owner_ref', ownerId)` | **KILLED** (ver nota N-1: se lleva puesto el archivo entero, 6/6) | `TR-01 [transform.ts:234]` **y** `TR-01b [transform.ts:234]` | G-08, G-09 + `TR-00`, `TR-02`, `TR-02b`, `TR-03` | `2 failed \| 266 passed \| 6 skipped (274)` · `8 failed \| 5319 passed \| 19 skipped (5346)` |
 | M-05 | `src/services/llm/transform.ts:278` | `.eq('owner_ref', ownerId);` | **KILLED** | `TR-02 [transform.ts:278]: la cadena del hit_count se arma acotada al dueño del caller` | G-08, G-09 | `2 failed \| 266 passed \| 6 skipped (274)` · `3 failed \| 5324 passed \| 19 skipped (5346)` |
 | M-06 | `src/routes/payments.ts:384` | `.eq('owner_ref', callerKey.owner_ref)` | **KILLED** | `PD-01 [payments.ts:384]: A pide la disputa de B → 404 y el cuerpo NO trae los montos` | G-08, G-09 | `2 failed \| 266 passed \| 6 skipped (274)` · `3 failed \| 5324 passed \| 19 skipped (5346)` |
+| M-07 | `src/services/spend-policy.ts:163` | `.eq('owner_ref', ownerId)` | **KILLED** (escenario de integridad ante fila inconsistente, no alcanzable desde ruta autenticada — ver H-5) | `SP-01 [spend-policy.ts:163]: list(K, dueño(K)) no devuelve la fila con key_id=K y owner_ref=B` + `SP-01b (anti-vacuidad)` | G-08, G-09 + **`spend-policy.test.ts` `AC-7: filters by key_id and owner_ref`** (preexistente — ver N-2) | `3 failed \| 265 passed \| 6 skipped (274)` · `5 failed \| 5322 passed \| 19 skipped (5346)` |
+| M-08 | `src/services/spend-policy.ts:190` | `.eq('owner_ref', ownerId)` | **KILLED** (ídem M-07: integridad ante fila inconsistente, no aislamiento) | `SP-02 [spend-policy.ts:190]: delete(K, dueño(K), dest) no borra la fila de B y lanza OwnershipMismatchError` | G-08, G-09 + **`spend-policy.test.ts` `AC-7: deletes filtered by key_id + owner_ref + destination`** (preexistente) | `3 failed \| 265 passed \| 6 skipped (274)` · `4 failed \| 5323 passed \| 19 skipped (5346)` |
+| M-09 | `src/services/spend-policy.ts:219` | `.eq('owner_ref', ownerId)` | **KILLED** (ídem M-07: integridad ante fila inconsistente, no aislamiento) | `SP-03 [spend-policy.ts:219]: hasAnyPolicy(K, dueño(K)) es false si la única fila con key_id=K es de B` | G-08, G-09 + **`spend-policy.test.ts` `AC-7: filters by key_id + owner_ref; true when rows exist`** (preexistente) | `3 failed \| 265 passed \| 6 skipped (274)` · `4 failed \| 5323 passed \| 19 skipped (5346)` |
+| M-10 | `src/services/inbound-task.ts:316` | `.eq('owner_ref', ownerRef)` | **KILLED** (la función no tiene llamador de producción — el único ejercitador es el test) | `IT-01 [inbound-task.ts:316]: get(A, idDeB) → undefined, con el id PRESENTE en la tabla` | G-08, G-09 | `2 failed \| 266 passed \| 6 skipped (274)` · `3 failed \| 5324 passed \| 19 skipped (5346)` |
+| M-11 | `src/services/inbound-task.ts:338` | `.eq('owner_ref', ownerRef)` | **KILLED** (idempotencia, no aislamiento — el ownerRef es server-side) | `IT-02 [inbound-task.ts:338]: dos dueños con el MISMO (source, external_ref) no dedupean entre sí` + `IT-02b` | G-08, G-09 | `2 failed \| 266 passed \| 6 skipped (274)` · `4 failed \| 5323 passed \| 19 skipped (5346)` |
+
+**11 de 11 KILLED. Ninguna sobrevivió, y en las 11 el asesino incluye el test de propiedad del
+sitio, no sólo el guardián.**
 
 ### N-1 · M-04 mata 6 de 6 tests del archivo, y por qué eso no lo invalida
 
@@ -93,3 +101,28 @@ escenario con consecuencia real, y muere solo.
 La mutación es de una línea, el `git diff --stat` dio `1 file changed, 1 deletion(-)`, y los 8
 tests rojos están todos dentro del archivo del sitio más los dos del guardián: no hay un tercer
 archivo que se haya roto por otra razón.
+
+### N-2 · Hallazgo: los tres sitios de `spend-policy` NO estaban sin medir. Ya tenían un espía.
+
+El Story File presenta los 11 como sitios donde "borrás la línea y la suite entera queda
+idéntica". **Para `spend-policy.ts:163`, `:190` y `:219` eso no es cierto, y lo midió esta
+campaña**: cada uno de los tres mutantes puso rojo, además del test nuevo, un test **preexistente**
+de `src/services/spend-policy.test.ts`:
+
+| Mutante | Test preexistente que también murió | Su aserción |
+|---|---|---|
+| M-07 | `spend-policy.test.ts:292` · `AC-7: filters by key_id and owner_ref` | `expect(chain.eq).toHaveBeenCalledWith('owner_ref', 'user-1')` |
+| M-08 | `spend-policy.test.ts:311` · `AC-7: deletes filtered by key_id + owner_ref + destination` | ídem, sobre el DELETE |
+| M-09 | `spend-policy.test.ts:344` · `AC-7: filters by key_id + owner_ref; true when rows exist` | ídem, sobre `hasAnyPolicy` |
+
+Los tres son **espías de llamada** sobre un mock que no aplica los filtros (el anti-patrón que
+esta HU nombra): verifican que la cadena **se escribió** con esa columna y ese valor, no que la
+consulta **aisló**. Es una garantía más débil que la de los tests nuevos —un espía no distingue
+entre "filtró" y "escribió el filtro y la base lo ignoró"— pero **no es cero**, y decir que estos
+tres sitios "no los mide nadie" era afirmar de más.
+
+Lo que sí sigue siendo cierto de estos tres, y es lo que aportan SP-01/02/03: la propiedad se
+prueba **sobre una tabla que aplica los filtros**, y con la declaración explícita de que el
+escenario es integridad ante una fila inconsistente, no un IDOR alcanzable desde la ruta (H-5).
+
+**No se cambió ningún test preexistente por este hallazgo.** Queda anotado acá.
