@@ -136,8 +136,20 @@ figuraban como SURVIVED con «ninguno» en la columna de rojos fuera del guardi�
 `expect(calls.eq).toContainEqual(['owner_ref', OWNER])`
 (`src/adapters/escrow/debit-capture.test.ts:539`), un **espía de argumento**
 sobre dos dobles que son `eq: () => builder` (`:85`, `:469`) — o sea que
-registran el filtro y no lo aplican. Un espía pasa igual con el nombre de la
-columna mal escrito, y ese error deja al dueño sin ver **sus propias** firmas.
+registran el filtro y no lo aplican. Un espía prueba **que la llamada se hizo**,
+no **qué filas volvieron**: pasa igual con el filtro correcto acompañado de una
+consulta ensanchada, porque nadie mira el resultado.
+
+⚠️ **Corregido por el AR (`BLQ-BAJO-2`).** Acá decía que «un espía pasa igual con
+el nombre de la columna mal escrito». Es **falso**, y se refuta con un comando:
+mutando `debit-capture.ts:120` a `.eq('ownerRef', ownerRef)` (`PARSE OK`,
+`1 insertion(+), 1 deletion(-)`) y corriendo **sólo el test preexistente**,
+`node ./node_modules/vitest/vitest.mjs run src/adapters/escrow/debit-capture.test.ts`
+da `Tests 1 failed | 19 passed (20)`, rojo en `:539` — `toContainEqual` compara
+el **par exacto** `['owner_ref', OWNER]`. Reproducido en el fix-pack, no copiado
+del AR. La razón por la que el sitio vale igual es la de arriba (espía ≠
+comportamiento), no la columna mal escrita.
+
 Ahora tiene además un test de comportamiento. Se ve en la tabla: es el único
 sitio con **dos** archivos de test rojos.
 

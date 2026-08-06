@@ -335,11 +335,16 @@ describe('settleArbitrationOnChain — el read-first del nonce (arbiter.ts:110)'
   });
 
   afterEach(() => {
-    if (envAntes.flag === undefined)
-      process.env.ESCROW_ARBITER_ENABLED = undefined;
+    // `delete`, no `= undefined`: asignar `undefined` a una env var deja el
+    // STRING `"undefined"` de 9 caracteres, o sea que «restaurar» inventaría un
+    // `ARBITER_NONCE_SECRET="undefined"` donde antes no había variable. El
+    // idioma del repo es `delete` (`arbiter.test.ts:461`, `:463`, `:1398`,
+    // `:1730`, `:1747`). Se refuta con
+    // `node -e 'process.env.X = undefined; console.log(typeof process.env.X, process.env.X.length)'`
+    // → `string 9`.
+    if (envAntes.flag === undefined) delete process.env.ESCROW_ARBITER_ENABLED;
     else process.env.ESCROW_ARBITER_ENABLED = envAntes.flag;
-    if (envAntes.secret === undefined)
-      process.env.ARBITER_NONCE_SECRET = undefined;
+    if (envAntes.secret === undefined) delete process.env.ARBITER_NONCE_SECRET;
     else process.env.ARBITER_NONCE_SECRET = envAntes.secret;
   });
 

@@ -92,3 +92,33 @@ veces que me equivoqué.
   proceso que sale con `0` sin haber hecho nada): **si el comando puede fallar por un
   motivo distinto del que estás midiendo, su salida no es evidencia**. Vale igual
   para `npx vitest run`, que se usó siempre como `node ./node_modules/vitest/vitest.mjs run`.
+
+---
+
+### [2026-08-06 11:15] Fix-pack AR — Escribí tres afirmaciones que mi propio archivo no podía refutar
+
+- **Error**: en los headers y comentarios de los `*.ownership.test.ts` afirmé tres cosas
+  que un comando concreto desmiente: que sin el filtro «**se persiste** una firma
+  consumible» (`debit-capture.ownership.test.ts`), que «un espía pasa igual con el nombre
+  de la columna **mal escrito**» (mismo archivo, y propagado a `mutation-log.md` y
+  `_INDEX-row.md`), y que «el `updateErr` **sólo se loguea**»
+  (`fee-split.ownership.test.ts`). Las tres las cazó el AR, cada una con un comando.
+- **Causa raíz**: las tres frases describen algo que ocurre **fuera del alcance del
+  archivo donde las escribí** — lo que persiste el RPC (que el propio test **stubea**),
+  lo que hace otro archivo de test, y una rama de log que en ese escenario **no corre**.
+  Al no ser observables desde ahí, ninguna corrida las podía poner en rojo: eran
+  infalsificables **dentro de su propio archivo**, y por eso sobrevivieron a la suite
+  verde y a mi relectura. El pecado no fue equivocarme de mecánica: fue escribir una
+  consecuencia que no medí, al lado de una que sí medí, con el mismo tono.
+- **Fix**: reescribir a lo medido y **pegar al lado el comando que refuta**. Y cuando la
+  frase habla de algo que el archivo no puede observar, **decirlo con todas las letras**
+  (ver `debit-capture.ownership.test.ts:34-37`: «este archivo NO puede medir esa guarda,
+  DC-01..DC-04 stubean el RPC»). Antes de afirmar el efecto **posterior** de un filtro
+  —persistencia, log, contador—, correr la sonda: 3 de 3 veces el efecto real fue
+  distinto del que había supuesto, y en el caso del log era **peor** (mudo, no logueado).
+- **Aplicar en**: todo docblock, comentario y fila de `_INDEX` que describa una
+  consecuencia. Prueba de bolsillo antes de escribir una frase: **¿qué corrida la pone en
+  rojo si deja de ser cierta?** Si la respuesta es «ninguna, porque acá está mockeado»,
+  la frase no va, o va declarada como no medible. Vale doble para la prosa que se
+  **propaga**: la de `BLQ-BAJO-2` viajó del test al `mutation-log.md` y de ahí al
+  `_INDEX-row.md`, y hubo que corregir los tres.

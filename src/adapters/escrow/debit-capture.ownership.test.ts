@@ -11,10 +11,28 @@
  *
  * Lo que ese filtro acota es la lectura del `buyer_wallet` que ANCLA al firmante
  * (`:205-216`). Sin él, la firma se compara contra el `buyer_wallet` del intent
- * de OTRO dueño: si la firma recupera esa wallet, el veredicto pasa de
- * `SIGNER_MISMATCH` (`:236-242`) a `valid` (`:247`), y se persiste una
- * autorización de débito `valid` contra un intent ajeno. Es una firma
- * consumible por el path de escrow.
+ * de OTRO dueño: si la firma recupera esa wallet, el VEREDICTO EN MEMORIA pasa
+ * de `SIGNER_MISMATCH` (`:236-242`) a `valid` (`:247`). Eso es exactamente lo
+ * medido y lo único que se afirma: quitando el filtro, DC-01 se pone rojo, y lo
+ * que DC-01 lee es el veredicto que viajó a `persist()` (`p_status`/`p_reason`,
+ * `debit-capture.ts:275-287`).
+ *
+ * ⚠️ HASTA AHÍ LLEGA: NO se persiste una autorización `valid` contra un intent
+ * ajeno. `persist()` llama al RPC `capture_debit_signature`, que re-verifica el
+ * dueño en la base —`supabase/migrations/20260713000000_wkh191a_debit_signatures.sql:83-85`,
+ * `IF v_owner IS DISTINCT FROM p_owner_ref THEN RAISE EXCEPTION
+ * 'OWNERSHIP_MISMATCH'`— y `debit-capture.ts:288` relanza ese error. El
+ * comentario de producción DOS LÍNEAS ARRIBA del filtro ya lo dice (`:205-206`).
+ * O sea que lo que este filtro aporta es DEFENSA EN PROFUNDIDAD sobre el
+ * veredicto: sin él, un veredicto `valid` calculado contra la wallet de otro
+ * dueño llega hasta la puerta de la base y lo único que queda entre ese veredicto
+ * y una firma consumible es el `RAISE` del RPC. Decir «se persiste» o «es una
+ * firma consumible» sería afirmar de más (BLQ-BAJO-1 del AR).
+ *
+ * Y ESTE ARCHIVO NO PUEDE MEDIR ESA GUARDA: DC-01..DC-04 stubean el RPC
+ * (`mockRpc.mockResolvedValue(...)`, `:173-176`), así que toda frase sobre lo
+ * que la base persiste es infalsificable acá adentro. Se refuta o se confirma
+ * leyendo la migración, no corriendo este archivo.
  *
  * ── EL SITIO 13.º: POR QUÉ TAMBIÉN ESTÁ ACÁ, Y POR QUÉ NO SUMA ────────────
  *
@@ -22,8 +40,16 @@
  * porque ya moría: `debit-capture.test.ts:539` lo mata. Pero lo que lo mata es
  * `expect(calls.eq).toContainEqual(['owner_ref', OWNER])`, un ESPÍA DE ARGUMENTO
  * sobre dos dobles que son `eq: () => builder` (`:85`, `:469`) — o sea que
- * registran el filtro y no lo aplican. Un espía pasa igual con el nombre de la
- * columna mal escrito, y ese error deja al dueño sin ver SUS PROPIAS firmas.
+ * registran el filtro y no lo aplican. Un espía prueba QUE LA LLAMADA SE HIZO,
+ * no QUÉ FILAS VOLVIERON: pasa igual con el filtro correcto acompañado de una
+ * consulta ensanchada, porque nadie mira el resultado.
+ *
+ * Lo que ese espía SÍ caza es la columna mal escrita, y está medido: mutando
+ * `debit-capture.ts:120` a `.eq('ownerRef', ownerRef)` y corriendo
+ * `node ./node_modules/vitest/vitest.mjs run src/adapters/escrow/debit-capture.test.ts`
+ * da `Tests 1 failed | 19 passed (20)`, rojo en `:539`, porque
+ * `toContainEqual` compara el PAR exacto `['owner_ref', OWNER]`. Es el mismo
+ * comando que refuta esta frase si algún día deja de ser cierta.
  * DC-03/DC-04 lo cubren por comportamiento. Es un extra declarado: NO forma
  * parte de los 12 ni de la aritmética `11 + 12 = 23`.
  *

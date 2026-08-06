@@ -260,8 +260,15 @@ describe('fee-split — los 4 filtros por dueño del reparto del fee (WKH-SEC-04
   // Y sobre `reverseFeeSplits` (sitio 4) hay algo más fuerte que declarar: NO
   // TIENE NINGÚN LLAMADOR DE PRODUCCIÓN. Su propio docblock lo dice
   // (`fee-split.ts:636`: «v1: NO se cablea a orchestrate/compose»), y
-  // `command grep -rn "reverseFeeSplits" src/ --include=*.ts` devuelve sólo el
-  // propio `fee-split.ts` y una mención en un comentario de `fee-charge.ts:677`.
+  // `command grep -rn "reverseFeeSplits" src/ --include=*.ts` devuelve —corrido
+  // el 2026-08-06, con este párrafo ya escrito— 20 hits en 4 archivos:
+  // `fee-split.ts` (6: la definición y sus logs), `fee-split.test.ts` (7) y
+  // este archivo (6), más UN solo hit fuera de `fee-split.*`:
+  // `fee-charge.ts:677`, y está DENTRO de un comentario. Los dos conteos de
+  // test se mueven cada vez que se edita un comentario como éste; lo que no se
+  // mueve sin un llamador nuevo es que el único hit de otro módulo sea prosa.
+  // (La redacción anterior decía «sólo el propio `fee-split.ts` y una mención
+  // en `fee-charge.ts`», y omitía los dos archivos de test: MNR-1 del AR.)
 
   it('FS-02 [fee-split.ts:538]: si el leg pasa a ser de B entre el INSERT y el UPDATE, NO queda `charged` con el tx de A', async () => {
     // Arranca vacío: el INSERT crea la fila como de A.
@@ -285,9 +292,20 @@ describe('fee-split — los 4 filtros por dueño del reparto del fee (WKH-SEC-04
     // la deja `NULL`. Lo que se afirma es que no tiene el tx de A.
     expect(row?.tx_hash ?? null).toBeNull();
     // ⚠️ Y esto es comportamiento REAL que conviene tener escrito: el leg se
-    // reporta `charged` igual (`fee-split.ts:549`), porque el transfer SÍ salió
-    // y el `updateErr` sólo se loguea (`:540-547`). El filtro acota la
-    // ESCRITURA, no el reporte.
+    // reporta `charged` igual (`fee-split.ts:549`), porque el transfer SÍ salió.
+    // El filtro acota la ESCRITURA, no el reporte. Son DOS caminos distintos y
+    // sólo uno deja rastro:
+    //   (i)  `updateErr` != null → se reporta `charged` Y SE LOGUEA
+    //        (`fee-split.ts:540-547`). Es deuda declarada e intencional: el
+    //        comentario de producción de `:541-542` la explica.
+    //   (ii) el UPDATE matchea CERO filas — ESTE escenario — → PostgREST no
+    //        devuelve error, `updateErr` queda `null`, `:540-547` NO CORRE y no
+    //        se emite NI UNA línea de log. Divergencia MUDA entre lo reportado
+    //        (`charged`) y lo persistido (`pending`).
+    // (ii) está MEDIDO, no razonado: sonda temporal sobre esta misma prueba con
+    // `logSpy.error/warn/info.mock.calls.length` → `0 / 0 / 0`, fila en
+    // `pending`, reportado `charged`. Se refuta agregando acá
+    // `expect(logSpy.error).toHaveBeenCalled()` y viendo el rojo.
     expect(out.legs[0]?.status).toBe('charged');
   });
 
@@ -350,10 +368,16 @@ describe('fee-split — los 4 filtros por dueño del reparto del fee (WKH-SEC-04
     const row = findLeg(fake);
     expect(row?.owner_ref).toBe(OWNER_B);
     expect(row?.status).toBe('charged');
-    // ⚠️ Comportamiento REAL que conviene tener escrito: `reversedCount` cuenta
-    // igual (`fee-split.ts:707`), porque el UPDATE no devuelve error cuando no
-    // matchea ninguna fila — sólo se saltea el `continue` de `:699-705`. El
-    // contador NO es evidencia de que algo se haya reversado.
+    // ⚠️ Comportamiento REAL que conviene tener escrito: el UPDATE no devuelve
+    // error cuando no matchea ninguna fila, así que se saltea el `continue` de
+    // `:699-705` y el resultado AFIRMA LA REVERSA ENTERA. No es sólo el
+    // contador (`reversedCount += 1`, `:707`): también `legs.push({ ... status:
+    // 'reversed' })` (`:708-717`), o sea que el payload que sale de la función
+    // describe un leg reversado que en la base sigue `charged`. Medido con una
+    // sonda temporal sobre esta misma prueba: `out.legs[0]` sale
+    // `{ status: 'reversed', txHash: '0xAAA-tx-de-A' }` mientras la fila
+    // persistida queda en `charged` (lo que afirma la línea de abajo).
+    // NI el contador NI el payload son evidencia de que algo se haya reversado.
     expect(out).toMatchObject({ status: 'reversed', reversedCount: 1 });
   });
 
