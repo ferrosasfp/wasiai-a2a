@@ -126,3 +126,89 @@ prueba **sobre una tabla que aplica los filtros**, y con la declaración explíc
 escenario es integridad ante una fila inconsistente, no un IDOR alcanzable desde la ruta (H-5).
 
 **No se cambió ningún test preexistente por este hallazgo.** Queda anotado acá.
+
+---
+
+## 2. Las 5 mutaciones del guardián
+
+Un guardián sin mutación es el hallazgo que esta HU existe para cerrar, así que se le aplicó el
+mismo trato. Acá la mutación no siempre puede ser "borrar una línea" (M-G1 planta, M-G2 borra una
+entrada de 11 líneas, M-G4 sustituye), así que **cada fila lleva su `git diff` completo mostrado
+antes de correr**, que es la versión fuerte del antídoto de la Trampa A: no hace falta confiar en
+el conteo de líneas si se ve el diff entero.
+
+| ID | Mutación | Diffstat real | Veredicto | Asesino | Conteo crudo |
+|---|---|---|---|---|---|
+| M-G1 | plantar una cadena sintética sin filtro **en el árbol real**: se agrega al final de `src/services/receipt.ts` la línea `export const __synthUnfiltered = () => supabase.from('a2a_receipts').select('*').eq('id', 'x');` | `1 file changed, 1 insertion(+)` | **KILLED** | **G-08** (+ G-09) | `1 failed \| 267 passed \| 6 skipped (274)` · `2 failed \| 5325 passed \| 19 skipped (5346)` |
+| M-G2 | borrar **UNA** entrada de `test/ownership-filter-guard.exceptions.ts` (la de `src/adapters/escrow/schema-preflight.ts:142`, `probe-de-esquema`) | `1 file changed, 11 deletions(-)` | **KILLED** | **G-08** (+ G-09) | `1 failed \| 267 passed \| 6 skipped (274)` · `2 failed \| 5325 passed \| 19 skipped (5346)` |
+| M-G3 | `deriveOwnerTables` devuelve `∅`: se borra `withOwner.add(table);` (`scanner.ts:269`) | `1 file changed, 1 deletion(-)` | **KILLED** | **G-01** (+ G-02, G-09). **G-08 quedó VERDE** — ver N-3 | `1 failed \| 267 passed \| 6 skipped (274)` · `3 failed \| 5324 passed \| 19 skipped (5346)` |
+| M-G4 | el guardián busca `ownerRef` en vez de `owner_ref`: `scanner.ts:76`, `const OWNER_COLUMN = 'ownerRef'` | `1 file changed, 1 insertion(+), 1 deletion(-)` | **KILLED** | **G-07** (+ G-03, G-08, G-09) | `1 failed \| 267 passed \| 6 skipped (274)` · `4 failed \| 5323 passed \| 19 skipped (5346)` |
+| M-G5 | se quita la resolución de constantes: se borra `if (/^[A-Za-z_$][\w$]*$/.test(rawArg)) return consts.get(rawArg) ?? null;` (`scanner.ts:453`) | `1 file changed, 1 deletion(-)` | **KILLED** | **G-05** (+ G-02, G-09) | `1 failed \| 267 passed \| 6 skipped (274)` · `3 failed \| 5324 passed \| 19 skipped (5346)` |
+
+### N-3 · M-G3 confirmó el modo de falla silencioso, y confirmó que el control de armado lo tapa
+
+Es la fila que más importa de las cinco, y la salida real coincide con lo que §10 predecía:
+
+- **G-01 se puso rojo** — el control de armado nota que el conjunto de tablas quedó vacío.
+- **`★ G-08` NO aparece en la lista de tests rojos: quedó VERDE.** Con `∅` tablas el escáner no
+  encuentra ninguna cadena, `UNFILTERED` queda vacío, y el test estrella pasa **afirmando que no
+  hay ninguna cadena sin filtro**. Ese es exactamente el modo de falla que dejó 23 filtros sin
+  medir: un instrumento que se degrada a "no encuentro nada" y reporta verde.
+
+Sin G-01, M-G3 sería un mutante **SURVIVED** con el guardián entero en verde. Con G-01, muere.
+
+### N-4 · M-G1 y M-G2 tienen la misma firma de muerte, y no son el mismo mutante
+
+Las dos ponen rojos `G-08` y `G-09` con el mismo conteo (`2 failed | 5325 passed`). §10 avisa que
+dos firmas idénticas pueden significar un mutante mal construido, así que se comparó **el hallazgo
+que reporta el rojo**, no sólo el nombre del test:
+
+```
+M-G1 →  Hallazgos:
+          src/services/receipt.ts:304 · a2a_receipts · select
+M-G2 →  Hallazgos:
+          src/adapters/escrow/schema-preflight.ts:142 · a2a_payment_intent_debit_signatures · select
+```
+
+Son sitios distintos, y cada uno es el que la mutación tocó. La coincidencia de firma es una
+propiedad del contrato de G-08 —"cadena sin filtro **y** sin excepción"— que tiene dos formas de
+violarse: agregando una cadena o sacando una excepción. Las dos formas se probaron y las dos
+mueren.
+
+Por qué G-09 acompaña en las dos: su última aserción es
+`expect(UNFILTERED.length).toBe(OWNERSHIP_FILTER_EXCEPTIONS.length)` (`ownership-filter-guard.test.ts:329`).
+M-G1 la rompe por izquierda (42 ≠ 41) y M-G2 por derecha (41 ≠ 40).
+
+---
+
+## 3. Resultado
+
+**16 mutantes, 16 KILLED, 0 SURVIVED.**
+
+- Las **11 de producción**: en las 11 murió el test de propiedad del sitio, no sólo el guardián.
+- Las **5 del guardián**: el guardián reporta (M-G1), su lista de excepciones es portante (M-G2),
+  su degradación silenciosa la caza el control de armado (M-G3), la comparación de la columna es
+  estricta (M-G4) y resuelve constantes de módulo (M-G5).
+
+Estado del árbol al cerrar la campaña, re-medido:
+
+```
+ Test Files  268 passed | 6 skipped (274)
+      Tests  5327 passed | 19 skipped (5346)
+   Duration  9.91s
+```
+
+Idéntico a la baseline de §0. `git diff --stat HEAD -- src` **vacío**: las 12 mutaciones que
+tocaron archivos bajo `src/` (M-01..M-11 y M-G1) se revirtieron con `git checkout --` y se
+verificó el árbol después de cada una (CD-1, AC-7).
+
+### Lo que esta campaña NO midió, y no hay que leerle de más
+
+- **Que los 11 filtros funcionen contra Postgres.** El falso de `owner-scoped-fake.ts` aplica los
+  `.eq()` que el servicio pide; que PostgREST haga lo mismo con el `SERVICE_KEY` es una suposición
+  del método, no algo que esta campaña haya observado. **No se pudo verificar** acá.
+- **Que el valor del filtro sea el correcto.** Todos estos mutantes borran el filtro entero. Un
+  mutante que cambiara `ownerRef` por otro owner es otra clase de mutación y **no se corrió**.
+- **Los 12 sitios de WKH-SEC-04.** Fuera del corte, sin mutar.
+- **Que la mutación de un `insert`/`upsert` muera.** Están fuera del alcance del guardián por
+  diseño (§8.W0.1 regla 4) y no se mutaron.
