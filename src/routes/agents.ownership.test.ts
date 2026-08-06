@@ -6,6 +6,29 @@
  * (in-memory) + route real + middleware mockeado, para ejercitar el guard de
  * ownership end-to-end. `logOwnershipMismatch` se mockea para asertar la llamada
  * PII-safe manteniendo la clase real `OwnershipMismatchError` (instanceof).
+ *
+ * ── WKH-SEC-03 · QUÉ GARANTIZA ESTE ARCHIVO Y QUÉ NO ─────────────────────
+ *
+ * Este archivo verifica que **la consulta se escribió** (el mock registra los
+ * `.eq()` en `:72`), **no que aisló**: `maybeSingle`/`single` (`:76-77`)
+ * devuelven `state.row` sin importar qué columna ni qué valor se filtró.
+ *
+ * `T-PUB-08` y `T-PUB-09` pasan por el **pre-chequeo en JS** de
+ * `src/services/agent.ts:701`, no por el filtro de la consulta. Verificado por
+ * mutación: borrando `src/services/agent.ts:715` (el `.eq('owner_ref', …)` del
+ * DELETE) este archivo queda **VERDE, 9/9**.
+ *
+ * El aislamiento por filtro de `publishedAgentService` se prueba en
+ * **`src/services/agent.ownership.test.ts`**, con un falso que aplica los
+ * filtros pedidos sobre una tabla con dos dueños.
+ *
+ * `T-143B-06` (`:184`) sí es un espía de argumento sobre el UPDATE, y ese sitio
+ * no necesita más: es la razón por la que la línea del UPDATE de `agent.ts` no
+ * estaba entre los sitios sin cobertura.
+ *
+ * El mock NO se arregla acá a propósito: cambiar el contrato de `state.eqCalls`
+ * y `state.row` rompería los tests preexistentes de este archivo, incluido
+ * `T-143B-06`, que depende deliberadamente de ese espía.
  */
 
 import Fastify from 'fastify';

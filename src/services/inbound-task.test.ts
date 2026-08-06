@@ -299,6 +299,13 @@ describe('ingest SSRF gate (AC-7)', () => {
 // ── ownership (AC-9) ─────────────────────────────────────────────
 
 describe('ownership scoping (AC-9/CD-OBL-2)', () => {
+  // WKH-SEC-03 — QUÉ AFIRMA ESTE TEST DE VERDAD: que si la DB devuelve `null`,
+  // el servicio devuelve `undefined`. No dice nada del filtro por dueño: el mock
+  // de este archivo (`:94-97` registra los `.eq()` en `ctx.eqs`; `:103-106`
+  // `maybeSingle` devuelve `getSingle`) NO aplica ningún filtro, así que la
+  // respuesta la decide el fixture y no la columna que se filtró. Verificado por
+  // mutación: borrando `inbound-task.ts:316` este archivo queda VERDE (29/29).
+  // El aislamiento por filtro se prueba en `inbound-task.ownership.test.ts`.
   it('get cross-tenant → undefined', async () => {
     getSingle = { data: null, error: null };
     const r = await inboundTaskService.get('other-owner', 'row-1');
@@ -312,6 +319,13 @@ describe('ownership scoping (AC-9/CD-OBL-2)', () => {
     ).rejects.toBeInstanceOf(InboundTaskNotFoundError);
   });
 
+  // WKH-SEC-03 — EL TÍTULO AFIRMA DE MÁS. El cuerpo recorre `updates` (los
+  // UPDATE) y el `inserts[0]`; NO mira ninguno de los dos SELECT — ni el de
+  // `get` (`inbound-task.ts:316`) ni el de `getByExternalRef` (`:338`), que son
+  // justamente los dos sitios que estaban sin cobertura. Se deja el nombre como
+  // está a propósito: renombrarlo cambia el nombre del test en todo reporte
+  // histórico y no agrega cobertura. Los dos SELECT se cubren en
+  // `inbound-task.ownership.test.ts` (IT-01, IT-02).
   it('toda query filtra por owner_ref', async () => {
     mockOrchestrate.mockResolvedValue({
       orchestrationId: 'orch-1',
