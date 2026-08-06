@@ -13,10 +13,10 @@
  * ── POR QUÉ HAY UN ARCHIVO NUEVO SI YA EXISTE `evidence.test.ts` ──────────
  *
  * Porque `evidence.test.ts` no mide esto, aunque su prosa diga que sí. Su doble
- * de supabase es `eq: () => b` (`evidence.test.ts:49`): REGISTRA el filtro y no
+ * de supabase es `eq: () => b` (`evidence.test.ts:55`): REGISTRA el filtro y no
  * lo APLICA — la respuesta la decide el nombre de la tabla. Y su fixture tiene
- * un solo dueño (`OWNER`, `:36`), así que su caso titulado «de otro owner»
- * (`:186`) devuelve un `PGRST116` enlatado que sale igual con el filtro puesto o
+ * un solo dueño (`OWNER`, `:42`), así que su caso titulado «de otro owner»
+ * (`:192`) devuelve un `PGRST116` enlatado que sale igual con el filtro puesto o
  * borrado. No se toca (rompe contratos de los que dependen sus otros tests): lo
  * que hace este archivo es cubrir la propiedad que aquél no cubre.
  *
@@ -33,7 +33,7 @@
  * de llegar hasta acá: un `intentId` ajeno se rechaza con `OWNERSHIP_MISMATCH`
  * primero. Decir que estos filtros «impiden» un IDOR sería afirmar de más.
  *
- * Naming: EV-01, EV-02, EV-BS.
+ * Naming: EV-01..EV-04, EV-BS.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';

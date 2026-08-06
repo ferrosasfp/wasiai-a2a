@@ -7,6 +7,12 @@
  * (DEADLINE_EXPIRED), T-6b (DEADLINE_TOO_FAR), T-7 (ownership best-effort no-throw),
  * T-9 (decimals=6, atómico exacto). recoverDebitAuthorization/buildDebitDomain
  * reales (viem); registry/escrow-verifier/supabase mockeados. Sin red ni DB.
+ *
+ * ⚠️ WKH-SEC-04 — LÍMITE DE ESTE ARCHIVO: sus dobles NO aplican los filtros
+ * (`:85` y `:469` son `eq: () => builder`) y su control de dueño es un espía de
+ * argumento (`:539`), que pasa igual con el nombre de la columna mal escrito; el
+ * acotamiento por `owner_ref` de `debit-capture.ts` (`:120` y `:212`) lo cubre
+ * por comportamiento `src/adapters/escrow/debit-capture.ownership.test.ts`.
  */
 
 import { keccak256, stringToBytes } from 'viem';

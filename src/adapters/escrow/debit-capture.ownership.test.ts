@@ -19,9 +19,9 @@
  * ── EL SITIO 13.º: POR QUÉ TAMBIÉN ESTÁ ACÁ, Y POR QUÉ NO SUMA ────────────
  *
  * `debit-capture.ts:120` (`readValidDebitSignature`) NO está entre los 12
- * porque ya moría: `debit-capture.test.ts:533` lo mata. Pero lo que lo mata es
+ * porque ya moría: `debit-capture.test.ts:539` lo mata. Pero lo que lo mata es
  * `expect(calls.eq).toContainEqual(['owner_ref', OWNER])`, un ESPÍA DE ARGUMENTO
- * sobre dos dobles que son `eq: () => builder` (`:79`, `:463`) — o sea que
+ * sobre dos dobles que son `eq: () => builder` (`:85`, `:469`) — o sea que
  * registran el filtro y no lo aplican. Un espía pasa igual con el nombre de la
  * columna mal escrito, y ese error deja al dueño sin ver SUS PROPIAS firmas.
  * DC-03/DC-04 lo cubren por comportamiento. Es un extra declarado: NO forma
