@@ -1,6 +1,9 @@
 /**
- * `arbiterService` — los filtros por dueño de las dos transiciones de disputa
- * (WKH-SEC-04, sitios 6 y 7 de los 12).
+ * `arbiter.ts` — los filtros por dueño de las dos transiciones de disputa y del
+ * read-first del nonce (WKH-SEC-04, sitios 5, 6 y 7 de los 12).
+ *
+ * El sitio 5 (`arbiter.ts:110`) tiene su propio `describe` al final del archivo,
+ * con su declaración: necesita un montaje de gates que los otros dos no.
  *
  * ── EL HUECO QUE CIERRA ESTE ARCHIVO ──────────────────────────────────────
  *
@@ -39,10 +42,10 @@
  * hasta acá: un `intentId` ajeno se rechaza con `OWNERSHIP_MISMATCH` primero.
  * Decir que estos filtros «impiden» un IDOR sería afirmar de más.
  *
- * Naming: AR-01..AR-04, AR-BS.
+ * Naming: AR-01..AR-06, AR-BS.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../lib/logger.js', () => ({
   getLogger: () => ({ error: vi.fn(), warn: vi.fn(), info: vi.fn() }),
@@ -60,9 +63,60 @@ vi.mock('./receipt.js', () => ({
   receiptService: { emit: (...a: unknown[]) => mockEmit(...a) },
 }));
 
+// ── Los gates en cascada que hay que armar para llegar al nonce (AR-05).
+//    Montaje copiado de `arbiter.test.ts:1664-1740` (`armEscrow`). El doble de
+//    supabase de ese archivo NO se copia: es el que nunca aplica `owner_ref`.
+const mockGetDefaultChainKey = vi.hoisted(() => vi.fn(() => 'kite'));
+const mockGetAdaptersBundle = vi.hoisted(() =>
+  vi.fn(() => ({ payment: { supportedTokens: [{ decimals: 6 }] } })),
+);
+vi.mock('../adapters/registry.js', () => ({
+  getDefaultChainKey: () => mockGetDefaultChainKey(),
+  getAdaptersBundle: () => mockGetAdaptersBundle(),
+  getPaymentAdapter: () => ({ sign: vi.fn(), settle: vi.fn() }),
+  getChainConfig: () => ({ name: 'kite', chainId: 2368, explorerUrl: '' }),
+}));
+
+const mockResolveEscrow = vi.hoisted(() =>
+  vi.fn(() => '0x7777777777777777777777777777777777777777'),
+);
+const mockReadConsent = vi.hoisted(() => vi.fn(async () => true));
+vi.mock('../adapters/escrow-verifier.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../adapters/escrow-verifier.js')>()),
+  resolveEscrowContract: () => mockResolveEscrow(),
+  readArbitrationConsent: () => mockReadConsent(),
+}));
+
+// `deriveArbiterNonce` y `getArbiterNonceSecret` se preservan REALES: son lo que
+// produce el nonce propio de A cuando el read-first NO encuentra el de B.
+const mockExecResolve = vi.hoisted(() =>
+  vi.fn(async (_args: { nonce: bigint }) => ({
+    kind: 'confirmed' as const,
+    txHash: '0xtx',
+  })),
+);
+vi.mock('../adapters/escrow/arbiter-executor.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../adapters/escrow/arbiter-executor.js')
+  >()),
+  executeResolveDispute: (a: { nonce: bigint }) => mockExecResolve(a),
+}));
+
+// El seam operator-custodial. Se dobla para poder afirmar que NO se cayó a él:
+// si algún gate fallara, el test pasaría por la rama equivocada sin avisar.
+const mockSettleSeam = vi.hoisted(() =>
+  vi.fn(async (_base: unknown) => ({
+    status: 'settled' as const,
+    txHash: '0xseam',
+  })),
+);
+vi.mock('./payment-intent.js', () => ({
+  settlePaymentIntentOnChain: (base: unknown) => mockSettleSeam(base),
+}));
+
 import { supabase } from '../lib/supabase.js';
 import { createOwnerScopedFake } from './__tests__/owner-scoped-fake.js';
-import { arbiterService } from './arbiter.js';
+import { arbiterService, settleArbitrationOnChain } from './arbiter.js';
 
 const OWNER_A = 'owner-A-0xaaaa';
 const OWNER_B = 'owner-B-0xbbbb';
@@ -102,7 +156,23 @@ const META = {
   resolutionNote: null,
 };
 
+/** Las columnas que `getOrCreateArbiterNonce` (`arbiter.ts:106-111`) filtra y lee. */
+const NONCE_COLUMNS = ['intent_id', 'owner_ref', 'nonce'];
+
+/** El nonce ya persistido de B. > 2^53 a propósito: se compara como bigint. */
+const NONCE_DE_B = '4312989337224638380';
+/** Lo que el RPC first-writer-wins devuelve cuando el read-first NO encuentra. */
+const NONCE_DEL_RPC = '777';
+
+/**
+ * Secreto de test (≥32 chars, ≥16 caracteres únicos) para pasar el guard de
+ * entropía de `getArbiterNonceSecret` (`arbiter-executor.ts:136-141`). Espeja
+ * `openssl rand -hex 32`. Copiado de `arbiter.test.ts:117`.
+ */
+const TEST_SECRET = '0123456789abcdef'.repeat(4);
+
 const mockFrom = vi.mocked(supabase.from);
+const mockRpc = vi.mocked(supabase.rpc);
 
 function findIntent(
   fake: ReturnType<typeof createOwnerScopedFake>,
@@ -194,5 +264,136 @@ describe('arbiterService — filtros por dueño de las transiciones de disputa (
       'update:scoped', // revertDisputeToOpen → arbiter.ts:1070
       'update:scoped', // holdArbitration     → arbiter.ts:1100
     ]);
+  });
+});
+
+/**
+ * `arbiter.ts:110` — el read-first del nonce del árbitro (sitio 5 de los 12).
+ *
+ * ── POR QUÉ ESTE FILTRO NO ES COSMÉTICO ───────────────────────────────────
+ *
+ * `intent_id` es la PRIMARY KEY de `a2a_arbiter_nonces`
+ * (`supabase/migrations/20260713000003_wkh194_arbiter_nonces.sql:6`;
+ * `database.types.ts:44-49`, `isOneToOne: true`). O sea que un `intent_id`
+ * determina UNA fila, y el `.eq('owner_ref', …)` decide si esa fila se acepta o
+ * se ignora. Sin el filtro, el read-first devuelve el nonce persistido de B
+ * (`arbiter.ts:121`) y A lo REUSA en el `resolveDispute` on-chain en vez de
+ * derivar el suyo: es reuso de nonce en el camino de escrow, justo lo que
+ * WKH-194 existe para impedir.
+ *
+ * ── EL MONTAJE QUE HACE FALTA ─────────────────────────────────────────────
+ *
+ * `getOrCreateArbiterNonce` es privada (`arbiter.ts:100`). Se llega por
+ * `settleArbitrationOnChain` (`:175`, exportada), que la llama en `:208` sólo
+ * después de cuatro gates en cascada (`:186-209`): flag `ESCROW_ARBITER_ENABLED`,
+ * `getDefaultChainKey`, `resolveEscrowContract`, `readArbitrationConsent` y
+ * `decimals` del token. Cualquiera que falte devuelve el seam operator-custodial
+ * SIN tocar el nonce — por eso los dos tests afirman también que NO se cayó al
+ * seam: si no, pasarían por la rama equivocada sin avisar.
+ *
+ * Igual que los otros tres de arbiter, el camino de producción pasa antes por el
+ * chequeo de dueño en JavaScript de `openDispute` (`arbiter.ts:606-608`). Lo que
+ * se prueba es la propiedad de la función, no una defensa de ruta.
+ */
+describe('settleArbitrationOnChain — el read-first del nonce (arbiter.ts:110)', () => {
+  let fake: ReturnType<typeof createOwnerScopedFake>;
+  const envAntes = {
+    flag: process.env.ESCROW_ARBITER_ENABLED,
+    secret: process.env.ARBITER_NONCE_SECRET,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.ESCROW_ARBITER_ENABLED = 'true';
+    process.env.ARBITER_NONCE_SECRET = TEST_SECRET;
+    mockGetDefaultChainKey.mockReturnValue('kite');
+    mockGetAdaptersBundle.mockReturnValue({
+      payment: { supportedTokens: [{ decimals: 6 }] },
+    });
+    mockResolveEscrow.mockReturnValue(
+      '0x7777777777777777777777777777777777777777',
+    );
+    mockReadConsent.mockResolvedValue(true);
+    mockExecResolve.mockResolvedValue({ kind: 'confirmed', txHash: '0xtx' });
+    mockRpc.mockResolvedValue({
+      data: [{ persisted_nonce: NONCE_DEL_RPC }],
+      error: null,
+    } as never);
+
+    fake = createOwnerScopedFake({
+      a2a_arbiter_nonces: {
+        columns: NONCE_COLUMNS,
+        rows: [
+          { intent_id: INTENT_A, owner_ref: OWNER_A, nonce: '111111' },
+          { intent_id: INTENT_B, owner_ref: OWNER_B, nonce: NONCE_DE_B },
+        ],
+      },
+    });
+    mockFrom.mockImplementation(
+      (table: string) => fake.from(table) as ReturnType<typeof mockFrom>,
+    );
+  });
+
+  afterEach(() => {
+    if (envAntes.flag === undefined)
+      process.env.ESCROW_ARBITER_ENABLED = undefined;
+    else process.env.ESCROW_ARBITER_ENABLED = envAntes.flag;
+    if (envAntes.secret === undefined)
+      process.env.ARBITER_NONCE_SECRET = undefined;
+    else process.env.ARBITER_NONCE_SECRET = envAntes.secret;
+  });
+
+  function settleParams(intentId: string, ownerRef: string) {
+    return {
+      intentId,
+      ownerRef,
+      payTo: '0x2222222222222222222222222222222222222222',
+      finalAmountUsd: 5,
+      chainId: 2368,
+      keyId: 'key-1',
+    };
+  }
+
+  /** El `nonce` con el que el código llamó a `executeResolveDispute` (`:212-219`). */
+  function nonceUsado(): bigint {
+    const arg = mockExecResolve.mock.calls[0]?.[0];
+    expect(arg).toBeDefined();
+    return (arg as { nonce: bigint }).nonce;
+  }
+
+  it('AR-05 [arbiter.ts:110]: A settlea el intent de B → NO reusa el nonce persistido de B, y la fila de B SIGUE ahí', async () => {
+    // Sin afirmar que la fila existe, un "no lo reusó" podría venir de una tabla
+    // vacía y el test pasaría sin ejercitar el filtro (CD-25).
+    expect(
+      fake.rows('a2a_arbiter_nonces').find((r) => r.intent_id === INTENT_B)
+        ?.nonce,
+    ).toBe(NONCE_DE_B);
+
+    const out = await settleArbitrationOnChain(settleParams(INTENT_B, OWNER_A));
+
+    // No se cayó al seam: los cuatro gates pasaron y el nonce se resolvió.
+    expect(mockSettleSeam).not.toHaveBeenCalled();
+    expect(out.status).toBe('settled');
+    // LA ASERCIÓN QUE IMPORTA: el nonce que fue a la cadena NO es el de B.
+    expect(nonceUsado()).not.toBe(BigInt(NONCE_DE_B));
+    expect(nonceUsado()).toBe(BigInt(NONCE_DEL_RPC));
+    // Y el read-first fue un MISS, así que hubo que ir al RPC first-writer-wins.
+    expect(mockRpc).toHaveBeenCalledWith(
+      'get_or_create_arbiter_nonce',
+      expect.objectContaining({ p_intent_id: INTENT_B, p_owner_ref: OWNER_A }),
+    );
+  });
+
+  it('AR-06 (anti-vacuidad): A settlea el SUYO y sí reusa su nonce persistido, sin ir al RPC', async () => {
+    // La otra dirección (CD-6). Sin esto, un filtro con la columna mal escrita
+    // —`.eq('ownerRef', …)`— pasaría AR-05 perfectamente y rompería el
+    // exactly-once de WKH-194: cada pasada derivaría un nonce nuevo para el
+    // MISMO intent, que es lo contrario de lo que el read-first garantiza.
+    const out = await settleArbitrationOnChain(settleParams(INTENT_A, OWNER_A));
+
+    expect(mockSettleSeam).not.toHaveBeenCalled();
+    expect(out.status).toBe('settled');
+    expect(nonceUsado()).toBe(111111n);
+    expect(mockRpc).not.toHaveBeenCalled();
   });
 });

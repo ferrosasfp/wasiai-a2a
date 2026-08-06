@@ -193,6 +193,60 @@ describe('readEvidence — las 3 consultas por dueño (WKH-SEC-04)', () => {
     expect(ev.receiptSettleTotalUsd).toBe(2);
   });
 
+  // ══════════════════════════════════════════════════════════
+  // GRUPO B — integridad ante una fila inconsistente.
+  //           ESTO NO ES AISLAMIENTO ENTRE INQUILINOS.
+  // ══════════════════════════════════════════════════════════
+  //
+  // DECLARACIÓN OBLIGATORIA (AC-3). Los dos filtros de abajo no son redundantes
+  // con ningún otro, pero el estado que los revela es una fila cuyo `owner_ref`
+  // NO coincide con el del recurso al que apunta su clave foránea: un voucher de
+  // `owner-B` colgado del intent de `owner-A`, y un recibo de `owner-B` colgado
+  // de la sesión de `owner-A`. Ninguna restricción de base lo impide —no hay
+  // CHECK ni FK compuesta que ligue los dos `owner_ref`— pero la aplicación no
+  // lo produce hoy. O sea: el escenario NO es alcanzable en producción HOY.
+  //
+  // El test igual vale, y por una razón concreta: `voucherCount`,
+  // `vouchersTotalUsd` (`evidence.ts:85-89`) y `receiptSettleTotalUsd`
+  // (`:116-119`) son ENTRADAS de `classify` — o sea que una fila ajena que se
+  // cuele cambia el VEREDICTO de una disputa, y con él a quién se le paga.
+  //
+  // Presentar esto como «A no ve los vouchers de B» sería afirmar de más: A
+  // nunca pide los vouchers de B acá, porque el `intent_id` es el suyo.
+
+  it('EV-03 [evidence.ts:76]: un voucher de B colgado del intent de A NO entra en el conteo ni en el total', async () => {
+    // La fila inconsistente: `intent_id` de A, `owner_ref` de B.
+    fake.rows('a2a_payment_vouchers').push({
+      intent_id: INTENT_A,
+      owner_ref: OWNER_B,
+      amount_usd: '77.000000',
+    });
+
+    const ev = await readEvidence(INTENT_A, OWNER_A);
+
+    // Sin el filtro: 2 vouchers y 78.5 USD. Los dos son entradas de `classify`.
+    expect(ev.voucherCount).toBe(1);
+    expect(ev.vouchersTotalUsd).toBe(1.5);
+  });
+
+  it('EV-04 [evidence.ts:96]: un recibo de B colgado de la sesión de A NO suma al total settleado', async () => {
+    // La fila inconsistente: `session_id` de A, `owner_ref` de B. El
+    // `receipt_type` es uno de los tres de `SETTLE_RECEIPT_TYPES`
+    // (`evidence.ts:26-30`), o sea que sí sumaría si el filtro no estuviera.
+    fake.rows('a2a_receipts').push({
+      id: 'rec-B-colgado-de-A',
+      owner_ref: OWNER_B,
+      session_id: INTENT_A,
+      receipt_type: 'budget_debit',
+      amount_usd: '88.000000',
+    });
+
+    const ev = await readEvidence(INTENT_A, OWNER_A);
+
+    // Sin el filtro: 90. Ese número corrobora `consumed_usd` aguas abajo.
+    expect(ev.receiptSettleTotalUsd).toBe(2);
+  });
+
   it('EV-BS (backstop estructural): las 3 consultas llevan el filtro por dueño, y nombra la que falte', async () => {
     // Complemento de los tests de propiedad: si alguien borra UN filtro, este
     // test dice CUÁL de los tres sitios quedó abierto. No los reemplaza —una
