@@ -15,8 +15,9 @@
  *  · MEDIDO ACÁ — 11 sitios, campaña completa en
  *    `doc/sdd/220-wkh-sec-03-owner-ref-sin-cobertura/mutation-log.md:70-87`, una
  *    fila por mutante con su conteo crudo. De los 11, **8 no los miraba ningún
- *    test preexistente** (el único rojo de cada uno de esos 8 mutantes está
- *    dentro del archivo de test NUEVO del sitio, más el colateral G-08/G-09) y
+ *    test preexistente** — en esos 8 mutantes TODOS los rojos caen dentro del
+ *    archivo de test NUEVO del sitio, más el colateral G-08/G-09, así que no hay
+ *    un solo test de antes que se haya enterado — y
  *    **3 sí**: `spend-policy.ts:163`, `:190` y `:219` ya tenían un espía de
  *    llamada en `src/services/spend-policy.test.ts` (`:292`, `:311`, `:344`), y
  *    borrando `:163` ese archivo solo da `1 failed | 17 passed (18)`. De los 8,
@@ -24,10 +25,10 @@
  *    borrándolo en `ef384b7` la suite entera daba `5294 passed | 19 skipped
  *    (5313)`, el baseline exacto, cero rojos (`sdd.md:146-147`).
  *  · HEREDADO, NO RE-MEDIDO — los 12 sitios de WKH-SEC-04, declarados «fuera del
- *    corte, sin mutar» en `mutation-log.md:212`. Su única evidencia sigue siendo
+ *    corte, sin mutar» en `mutation-log.md:216`. Su única evidencia sigue siendo
  *    el barrido de A1, que no se re-corrió acá y cuya línea base este mismo SDD
- *    declara equivocada y corrige (`sdd.md:494-497`, CD-8: «un mutante comparado
- *    contra la baseline equivocada se clasifica al revés»). Sobre esos 12 esta
+ *    declara equivocada y corrige (`sdd.md:494-497`, CD-8: «Un mutante comparado
+ *    contra el baseline equivocado se clasifica al revés»). Sobre esos 12 esta
  *    HU no midió nada.
  *
  * POR QUÉ UN GUARDIÁN ADEMÁS DE LOS TESTS DE PROPIEDAD. Los `*.ownership.test.ts`
