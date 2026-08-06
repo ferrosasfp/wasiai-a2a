@@ -271,7 +271,8 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     category: 'admin-cross-tenant',
     reason:
       'resolveHold: override humano admin-gated. Lee el row real para tomar `owner_ref` como dato ' +
-      'autoritativo (:1233-1235). Ruta dashboard.ts:630, gate requireAdminTokenStrict (fail-closed).',
+      'autoritativo (:1233-1235). Ruta POST /api/arbitrations/:intentId/resolve, ' +
+      'dashboard.ts:515-516, gate requireAdminTokenStrict en :517 (fail-closed en dev Y prod).',
   },
   {
     file: 'src/services/arbiter.ts',
@@ -281,7 +282,9 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     category: 'admin-cross-tenant',
     reason:
       'resolveHold: lectura best-effort de la evidencia del hold (ambiguity_reason/llm_reasoning) ' +
-      'para preservarla. Mismo gate admin fail-closed que la anterior.',
+      'para preservarla. Misma ruta y mismo gate que la anterior: dashboard.ts:515-517, ' +
+      'requireAdminTokenStrict. NO confundir con dashboard.ts:630, que es ' +
+      'POST /api/reconciliation/:intentId/resolve y llama a reconciliationService.resolveIntent.',
   },
   {
     file: 'src/services/event.ts',
@@ -472,7 +475,7 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     category: 'chequeo-en-js',
     reason:
       'getRow(slug) es un pre-fetch deliberadamente SIN filtro, para poder distinguir "no existe" ' +
-      'de "no es tuyo". El dueño se compara en JS en :571 (update) y :701 (delete), que lanzan ' +
+      'de "no es tuyo". El dueño se compara en JS en :580 (update) y :701 (delete), que lanzan ' +
       'OwnershipMismatchError. En :407 se usa como pre-check de colisión de slug, donde no hay ' +
       'dueño que comparar. El filtro de la ESCRITURA que viene después sí existe y lo prueba ' +
       'src/services/agent.ownership.test.ts (AG-02).',
@@ -495,9 +498,9 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     verb: 'select',
     category: 'chequeo-en-js',
     reason:
-      'reverseFeeSplits lee TODAS las patas de la orquestación y filtra por dueño en JS en :675 ' +
+      'reverseFeeSplits lee TODAS las patas de la orquestación y filtra por dueño en JS en :676 ' +
       '(`rows.filter(r => r.owner_ref === ownerRef)`), devolviendo `ownership_mismatch` si ninguna ' +
-      'es del caller. El UPDATE que sigue (:691) SÍ lleva `.eq("owner_ref", ownerRef)`. Sitio de ' +
+      'es del caller. El UPDATE que sigue (:697) SÍ lleva `.eq("owner_ref", ownerRef)`. Sitio de ' +
       'WKH-SEC-04: se anota, no se toca acá.',
   },
 

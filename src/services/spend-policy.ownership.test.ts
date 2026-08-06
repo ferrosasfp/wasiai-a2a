@@ -20,9 +20,18 @@
  * **El fixture es deliberadamente inconsistente. No es un escenario de ataque.**
  *
  * Escribir acá "estos tres previenen un IDOR" sería exactamente la clase de
- * prosa que afirma de más que esta HU existe para sacar del repo. Lo que sí es
- * cierto y medible: `src/services/spend-policy.ts:163`, `:190` y `:219` se
- * pueden borrar hoy y la suite entera queda verde (medido en `ef384b7`).
+ * prosa que afirma de más que esta HU existe para sacar del repo.
+ *
+ * ⚠️ Y esa clase de prosa estuvo escrita acá mismo. La versión anterior de este
+ * bloque decía que `src/services/spend-policy.ts:163`, `:190` y `:219` "se
+ * pueden borrar hoy y la suite entera queda verde". **Es falso, y se midió**:
+ * los tres ya tenían un espía de llamada preexistente en
+ * `src/services/spend-policy.test.ts` (`:292`, `:311`, `:344`). Borrando `:163`,
+ * ese archivo solo da `1 failed | 17 passed (18)` con
+ * `× AC-7: filters by key_id and owner_ref`. Lo que un espía NO distingue es
+ * "filtró" de "escribió el filtro y la consulta lo ignoró"; eso es lo que
+ * agregan SP-01/02/03, sobre un falso que SÍ aplica los filtros.
+ * (Desarrollado en `mutation-log.md` §N-2.)
  *
  * Naming: SP-01, SP-02, SP-03, más un control anti-vacuidad por cada uno.
  */

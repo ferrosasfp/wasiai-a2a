@@ -212,3 +212,128 @@ verificó el árbol después de cada una (CD-1, AC-7).
 - **Los 12 sitios de WKH-SEC-04.** Fuera del corte, sin mutar.
 - **Que la mutación de un `insert`/`upsert` muera.** Están fuera del alcance del guardián por
   diseño (§8.W0.1 regla 4) y no se mutaron.
+
+---
+
+## 4. Fix-pack del Adversarial Review (AR `6c9ad1a` → RECHAZADO)
+
+Dos mutantes nuevos, los dos del AR, los dos aplicados **de verdad** sobre el árbol y con la
+salida real pegada. El árbol se restauró después de cada uno (`git status --porcelain` sin
+archivos de producción modificados).
+
+### M-G6 · El ataque que M-G3 no cubría: degradar el conjunto de tablas PARCIALMENTE
+
+M-G3 vació el conjunto entero y lo cazaron G-01, G-02, G-08 y G-09. El AR atacó por el modo de
+falla más probable de un parser que casi funciona: que se coma **algunas**.
+
+**La mutación**, en `deriveTables` (`ownership-filter-guard.scanner.ts`), condicionando el
+`withOwner.add(table)` para excluir `a2a_arbiter_nonces`, `a2a_inbound_tasks`,
+`a2a_key_spend_policies` y `a2a_payment_vouchers` — cuatro tablas elegidas porque **todas sus
+cadenas están filtradas hoy**, así que el conteo de `UNFILTERED` no se mueve.
+
+**ANTES del fix (guardián en `6c9ad1a`, 10 controles):**
+
+```
+Paso 1 · sólo el mutante            → Tests  10 passed (10)
+Paso 2 · mutante + una cadena real sin filtro agregada a `spend-policy.ts`
+                                    → Tests  10 passed (10)
+Paso 3 · CONTROL, escáner sano + esa misma cadena
+   × ★ G-08 ... src/services/spend-policy.ts:232 · a2a_key_spend_policies · select
+   × G-09   ... expected 42 to be 41
+                                    → Tests  2 failed | 8 passed (10)
+```
+
+O sea: **SURVIVED**, y con el guardián ciego se podía después agregar una cadena sin filtro sobre
+una tabla de política de gasto sin que nada se pusiera rojo.
+
+**Causa medida**: los pisos de G-01 (`>= 50` / `>= 15`, reales 62 / 21) y de G-02 (`>= 90` /
+`>= 60`, reales 101 / 87) tienen holgura de sobra. Un piso protege contra el conjunto **vacío**,
+no contra el **sesgado**.
+
+**El fix — dos invariantes de consistencia, ningún número nuevo:**
+
+- **G-11**: un SEGUNDO lector de `src/types/database.types.ts`, escrito con otro algoritmo
+  (parte el archivo en bloques por tabla y pregunta por `\bowner_ref\b` en el bloque entero, en
+  vez de exigirlo dentro de `Row:` a 10 espacios), y los dos conjuntos tienen que coincidir. Vive
+  en el archivo del test y no en el escáner, a propósito.
+- **G-12**: toda tabla que el árbol NOMBRA en un `supabase.from(...)` y que declara `owner_ref`
+  tiene que estar dentro del universo con el que el guardián barre. Es la consecuencia de
+  seguridad, y no envejece: una migración que agregue una tabla mueve los dos lados juntos.
+
+**DESPUÉS del fix, el mismo mutante (paso 1 solo, sin necesidad de la cadena):**
+
+```
+ × G-11: los DOS lectores del archivo de tipos dan el mismo conjunto de tablas con dueño
+   soloOraculo: ["a2a_arbiter_nonces","a2a_inbound_tasks","a2a_key_spend_policies","a2a_payment_vouchers"]
+ × G-12: toda tabla con dueño que el árbol NOMBRA está dentro del universo del guardián
+   ["a2a_arbiter_nonces","a2a_inbound_tasks","a2a_key_spend_policies","a2a_payment_vouchers"]
+      Tests  2 failed | 10 passed (12)
+```
+
+**KILLED**, y muere en el **paso 1**: nombra las cuatro tablas exactas, antes de que exista
+ninguna consulta vulnerable.
+
+⚠️ **Lo que este cruce NO caza, y hay que decirlo**: los dos lectores comparten UNA suposición —
+que dentro de `Tables:` cada tabla abre con su nombre a 6 espacios. Un cambio de formato del
+archivo generado rompe a los dos a la vez y G-11 sigue en verde. Para ese caso el control es el
+piso de G-01, que es un número y sí envejece. **No se probó** un mutante de esa clase.
+
+### M-G7 · La excepción que miente sobre qué sitio describe (MNR-2)
+
+**La mutación**: en la entrada de `receipt.ts:192`, poner `table: 'registries', verb: 'delete'`
+sobre lo que en realidad es un `update` a `a2a_receipts`.
+
+**ANTES**: `Tests  10 passed (10)`. La clave del match era sólo `archivo:línea`; `table` y `verb`
+no los comparaba nadie, y el `reason` se lee a la luz de esos dos campos.
+
+**DESPUÉS** (G-10 ampliado):
+
+```
+ × G-10: toda excepción tiene categoría de la unión cerrada y motivo no vacío
+   "src/services/receipt.ts:192 · la entrada dice registries/delete · la cadena es a2a_receipts/update"
+      Tests  1 failed | 11 passed (12)
+```
+
+**KILLED.**
+
+### M-G8 · El handler de señal que NO alcanzaba (MNR-3)
+
+El AR pidió `try/finally` + `SIGINT` en `scripts/eq-sweep.mjs`, que muta producción in-place. Se
+agregaron, **y no funcionaron**. Medido: `kill -INT` al proceso **no imprimió nada y no paró
+nada** — el barrido siguió hasta `# KILLED 46`, y un `git status` a mitad de camino mostraba
+`M src/services/identity.ts`.
+
+**La causa**: registrar un listener de señal le saca a la señal su acción por defecto (matar el
+proceso) y la convierte en un callback que espera al event loop. El barrido era un `for` 100%
+sincrónico con `spawnSync` adentro: nunca le devolvía el control, así que el callback quedaba
+encolado para siempre. **El handler solo empeoraba el original**: antes Ctrl-C mataba en el acto
+dejando el archivo mutado; después Ctrl-C no hacía nada.
+
+**El fix**: un `await new Promise(r => setImmediate(r))` al principio de cada iteración, con el
+árbol ya restaurado.
+
+**Verificación, ejecutando**:
+
+```
+# SIGINT — abortando el barrido.
+proceso: MUERTO
+git status --porcelain (worktree): CERO archivos de producción modificados
+```
+
+### Los números del F1 que este fix-pack corrigió midiéndolos
+
+| Decía | Lo medido | Cómo |
+|---|---|---|
+| «23 filtros que ningún test mira» | **20** | borrando `spend-policy.ts:163`, `spend-policy.test.ts` da `1 failed \| 17 passed (18)` con `× AC-7: filters by key_id and owner_ref`. Los tres de `spend-policy` ya tenían espía (§N-2) |
+| «~87 líneas» para el barrido completo | **46** | `--all` muta 46. El 87 es `.eq('owner_ref'` en cualquier posición de `src/` **incluyendo tests** — un número que el guion nunca usó |
+| «~22 min» el barrido completo | **≈ 8-9 min**, extrapolado | 26,08 s medidos para `--all` con el guardián solo (46/46 KILLED, ~0,57 s c/u) + 10,47 s medidos de suite completa. **No se corrió** `--all` contra la suite entera |
+| «18 tablas con `owner_ref`» | **21** de 62 | `deriveTables` + el segundo lector de G-11, que coinciden |
+
+### Lo que este fix-pack NO midió
+
+- **Que G-11/G-12 cacen una degradación del formato del archivo de tipos.** No se corrió ese
+  mutante. Lo declarado arriba es que **no lo cazan**.
+- **Que los `supabase.rpc(...)` estén libres de IDOR.** Son 42 call-sites en 13 archivos y quedan
+  enteros fuera del guardián. Se leyó el caso de `a2a_solana_settle_intents` y no se encontró un
+  IDOR vivo; los otros 42 **no se auditaron acá**. Queda declarado en el punto 9 del docblock.
+- **Un barrido `--all` contra la suite completa.** Sólo se corrió contra el guardián.

@@ -14,12 +14,23 @@
  * que sí corre en cada PR es `test/ownership-filter-guard.test.ts`, que es
  * estático y tarda milisegundos.
  *
- * Por qué NO está cableado a CI (WKH-SEC-03, DT-4): costos medidos en este
- * worktree — la suite tarda ~10 s de pared, así que el barrido completo son
- * ~87 líneas × ~15 s ≈ 22 min, y el acotado a las 11 líneas de WKH-SEC-03
- * ≈ 3 min. Un control de 22 min compite con el ciclo de trabajo y se termina
- * desactivando. El argumento de que "el orden de magnitud lo descarta" nunca se
- * midió y es falso; el que vale es éste.
+ * Por qué NO está cableado a CI (WKH-SEC-03, DT-4). La decisión no cambia, los
+ * números sí: son de correr esto, no de estimarlo.
+ *
+ *   - `--all` muta **46 líneas**, no ~87. Las 46 son las que matchean `CALL_RE`,
+ *     que está anclado en `^\s*\.` sobre archivos de producción. El 87 de la
+ *     versión anterior de este comentario es el conteo de `.eq('owner_ref'` en
+ *     CUALQUIER posición de `src/` incluyendo los `*.test.ts` — o sea, un número
+ *     que este guion nunca usó para nada.
+ *   - `--all --tests test/ownership-filter-guard.test.ts`: **26,08 s** de pared
+ *     medidos, 46/46 KILLED. Son ~0,57 s por mutación.
+ *   - La suite COMPLETA tarda **10,47 s** medidos, así que `--all` contra la
+ *     suite entera da ≈ 46 × 11 s ≈ **8-9 min**. Eso es una extrapolación, no
+ *     una medición: no se corrió entero contra la suite completa.
+ *
+ * 8-9 min siguen compitiendo con el ciclo de trabajo, así que el veredicto de
+ * DT-4 es el mismo. El argumento de que "el orden de magnitud lo descarta" nunca
+ * se midió y es falso; el que vale es éste.
  *
  * ── LAS DOS TRAMPAS QUE ESTE GUION EVITA A PROPÓSITO ─────────────────────
  *
@@ -41,6 +52,13 @@
  * Requiere el árbol LIMPIO en los archivos a mutar (si no, aborta): el guion
  * restaura con `git checkout --`, y eso se llevaría puesto cualquier cambio sin
  * commitear.
+ *
+ * La restauración está en un `finally` y en handlers de `SIGINT`/`SIGTERM`/
+ * `SIGHUP` (ver `restaurar()`): un Ctrl-C en el medio del barrido repone el
+ * archivo mutado antes de salir. Lo que NO puede cubrirse desde acá es un
+ * `SIGKILL` o un corte de luz — ahí el árbol queda con la línea borrada y hay
+ * que correr `git checkout -- <archivo>` a mano; el `git status` lo muestra y
+ * G-08 lo pone rojo en el siguiente `npm test`.
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -174,29 +192,97 @@ let survived = 0;
 let killed = 0;
 let invalid = 0;
 
-for (const file of files) {
-  for (const { line, text } of targetLines(file)) {
-    deleteLine(file, line);
+/**
+ * El archivo que está mutado AHORA MISMO, o `null`. Existe por un motivo
+ * medido, no por prolijidad: entre `deleteLine` y el `git checkout --` que lo
+ * repone pasa una corrida entera de la suite (~10 s), y el barrido completo son
+ * ~9 min. Un Ctrl-C, un `kill`, o una excepción en el medio dejaban un
+ * `.eq('owner_ref', …)` BORRADO en el árbol de trabajo, que es exactamente el
+ * bug que este guion existe para cazar, plantado por el guion.
+ *
+ * (Lo tapaba a medias que G-08 lo caza en el siguiente `npm test`. "A medias"
+ * porque nadie garantiza que el siguiente comando sea `npm test`, y porque el
+ * árbol queda sucio mientras tanto.)
+ */
+let mutado = null;
 
-    if (!diffIsSingleDeletion(file)) {
-      git(['checkout', '--', file]);
-      console.log(`INVALID   ${file}:${line}  (el diff no es 1 sola baja)`);
-      invalid += 1;
-      continue;
-    }
-
-    const run = runSuite(args.tests);
+/** Repone el archivo mutado. Idempotente: un segundo Ctrl-C no rompe nada. */
+function restaurar({ anunciar = false } = {}) {
+  if (mutado === null) return;
+  const file = mutado;
+  mutado = null;
+  try {
     git(['checkout', '--', file]);
-
-    const verdict = run.ok ? 'SURVIVED' : 'KILLED';
-    if (run.ok) survived += 1;
-    else killed += 1;
-
-    console.log(`${verdict.padEnd(9)} ${file}:${line}`);
-    console.log(`          borrado: ${text.trim()}`);
-    console.log(`          ${run.summary}`);
-    for (const f of run.failed) console.log(`          ${f}`);
+    if (anunciar) console.error(`# restaurado: ${file}`);
+  } catch (err) {
+    // Si esto falla, el árbol QUEDA SUCIO y hay que decirlo fuerte: callarlo
+    // sería la misma falla silenciosa de la que trata toda esta HU.
+    console.error(
+      `\n# ⚠️ NO SE PUDO RESTAURAR ${file}. Corré: git checkout -- ${file}\n# ${String(err)}`,
+    );
   }
+}
+
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => {
+    console.error(`\n# ${sig} — abortando el barrido.`);
+    restaurar({ anunciar: true });
+    process.exit(130);
+  });
+}
+
+/**
+ * ⚠️ ESTE `await` NO ES DECORATIVO, Y REGISTRAR EL HANDLER SIN ÉL NO ALCANZA.
+ *
+ * Medido acá: con los `process.on('SIGINT', …)` puestos y el barrido escrito
+ * como un `for` sincrónico, un `kill -INT` al proceso **no imprimía nada y no
+ * paraba nada** — el barrido siguió hasta el final (`# KILLED 46`). El motivo:
+ * registrar un listener de señal le saca a la señal su acción por defecto (matar
+ * el proceso) y la convierte en un callback que espera al event loop; un bucle
+ * 100% sincrónico, con `spawnSync` adentro, nunca le devuelve el control, así
+ * que el callback queda encolado para siempre.
+ *
+ * O sea que el handler solo empeoraba el original: antes Ctrl-C mataba el
+ * proceso en el acto (dejando el archivo mutado, que es el bug), después Ctrl-C
+ * no hacía absolutamente nada. Este `setImmediate` es el que le da al event loop
+ * su turno entre iteración e iteración, con el árbol ya restaurado.
+ */
+const cederElTurno = () => new Promise((r) => setImmediate(r));
+
+try {
+  for (const file of files) {
+    for (const { line, text } of targetLines(file)) {
+      // Antes de tocar nada: si hay una señal encolada, se atiende ACÁ, con el
+      // árbol limpio.
+      await cederElTurno();
+
+      deleteLine(file, line);
+      mutado = file;
+
+      if (!diffIsSingleDeletion(file)) {
+        restaurar();
+        console.log(`INVALID   ${file}:${line}  (el diff no es 1 sola baja)`);
+        invalid += 1;
+        continue;
+      }
+
+      const run = runSuite(args.tests);
+      restaurar();
+
+      const verdict = run.ok ? 'SURVIVED' : 'KILLED';
+      if (run.ok) survived += 1;
+      else killed += 1;
+
+      console.log(`${verdict.padEnd(9)} ${file}:${line}`);
+      console.log(`          borrado: ${text.trim()}`);
+      console.log(`          ${run.summary}`);
+      for (const f of run.failed) console.log(`          ${f}`);
+    }
+  }
+} finally {
+  // Cubre la excepción (un archivo ilegible, un `git` que falla): sin esto, el
+  // stack trace se lleva puesta la restauración.
+  restaurar({ anunciar: true });
 }
 
 console.log('');

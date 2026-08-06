@@ -24,9 +24,13 @@
  *  (b) El VALOR que se le pasa al filtro. `.eq('owner_ref', otroOwner)` sale
  *      como `ownerFiltered: true`. Presencia textual, no semántica.
  *  (c) Los literales de expresión regular con comillas desbalanceadas dentro
- *      (`/[^']/`). El enmascarado usa la heurística estándar de «después de
- *      `( , = : [ ! & | ? { } ; return` una `/` abre regex»; si un archivo
- *      rompiera esa heurística el enmascarado se desincroniza. El control es
+ *      (`/[^']/`). El enmascarado decide que una `/` abre regex mirando UN solo
+ *      carácter hacia atrás: el conjunto exacto es el de `regexCanStart()`
+ *      (`:96-97`), o sea `( , = : [ ! & | ? { } ; + - * % ~ ^` más el inicio de
+ *      archivo. **Las palabras clave NO están**: un `return /re/.test(x)` se lee
+ *      como una división y el enmascarado se desincroniza desde ahí. Población
+ *      hoy 0 — no hay ningún `return /` en `src/` no-test — pero es una
+ *      medición del árbol de hoy, no una propiedad del escáner. El control es
  *      G-02: el conteo global sobre el árbol real tiene un piso, así que una
  *      desincronización que se coma cadenas pone el guardián en rojo.
  */
@@ -216,7 +220,9 @@ export function moduleStringConsts(src: string): Map<string, string> {
  * `src/types/database.types.ts`.
  *
  * CD-4: el guardián NO lleva una lista escrita a mano; la deriva en cada
- * corrida. Una lista a mano es lo que ya envejeció en `CLAUDE.md` (dice 4).
+ * corrida. Una lista a mano es lo que ya envejeció una vez: `CLAUDE.md` enumeraba
+ * 4 tablas de 21, y una de las 4 (`registries`) decía que no tenía columna de
+ * dueño teniéndola. Esa sección ahora declara el CRITERIO y apunta acá.
  *
  * El formato del archivo generado, verificado: `Tables: {` con 4 espacios,
  * `<tabla>: {` con 6, `Row: {` con 8, columnas con 10. `Views: {` a 4 espacios

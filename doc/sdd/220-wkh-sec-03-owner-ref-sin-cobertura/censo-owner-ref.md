@@ -170,8 +170,8 @@ dueño aunque la cadena no nombre `owner_ref`.
 | # | Sitio | Tabla | Verbo | Motivo | Motivo en el código |
 |---|---|---|---|---|---|
 | 18 | `src/services/arbiter.ts:1178` | `a2a_payment_intents` | select | `listHolds`: *«cross-tenant DELIBERADO … superficie de ALTO PRIVILEGIO gateada SÓLO por `requireAdminToken`»*. Ruta `src/routes/dashboard.ts:477`. | `:1171-1174` |
-| 19 | `src/services/arbiter.ts:1237` | `a2a_payment_intents` | select | `resolveHold`: override humano admin-gated; lee el row real para tomar `owner_ref` como dato autoritativo. Ruta `dashboard.ts:630` (`requireAdminTokenStrict`, fail-closed). | `:1233-1235` |
-| 20 | `src/services/arbiter.ts:1270` | `a2a_arbitrations` | select | `resolveHold`: lectura best-effort de la evidencia del hold, mismo gate admin. | `:1265-1266` |
+| 19 | `src/services/arbiter.ts:1237` | `a2a_payment_intents` | select | `resolveHold`: override humano admin-gated; lee el row real para tomar `owner_ref` como dato autoritativo. Ruta `POST /api/arbitrations/:intentId/resolve` = `dashboard.ts:515-516`, gate `requireAdminTokenStrict` en `:517` (fail-closed en dev Y prod). ⚠️ **Acá decía `dashboard.ts:630`, y era un puntero AUTO-CONFIRMANTE**: esa línea también es un `requireAdminTokenStrict`, pero de `POST /api/reconciliation/:intentId/resolve`, que llama a `reconciliationService.resolveIntent` (`:633`). Quien fuera a verificarlo encontraba el gate que esperaba encontrar y estampaba OK sin haber mirado nunca la ruta de arbitraje. La conclusión no cambia; la evidencia sí. | `:1233-1235` |
+| 20 | `src/services/arbiter.ts:1270` | `a2a_arbitrations` | select | `resolveHold`: lectura best-effort de la evidencia del hold. Misma ruta y mismo gate que la #19: `dashboard.ts:515-517`. (Mismo puntero corregido.) | `:1265-1266` |
 | 21 | `src/services/event.ts:120` | `registries` | select | `stats()`: contador global del panel. Ruta `dashboard.ts:424`, gate `requireAdminToken` (opt-in: **503 en producción** si `DASHBOARD_ADMIN_TOKEN` no está, passthrough en dev). | `:113-115` |
 | 22 | `src/services/event.ts:128` | `tasks` | select | `stats()`: agregado de tasks por status, mismo gate. Sólo lee la columna `status`. | `:126` |
 | 23 | `src/services/reconciliation.ts:564` | `a2a_payment_intent_debit_signatures` | select | `readLeasedRow(intentId)`: el intent lo elige el operador del panel. Ruta `dashboard.ts:680` / `:742`, gate `requireAdminTokenStrict` (fail-closed). | `:552-558` |
@@ -204,9 +204,9 @@ dueño aunque la cadena no nombre `owner_ref`.
 
 | # | Sitio | Tabla | Verbo | Motivo | Motivo en el código |
 |---|---|---|---|---|---|
-| 38 | `src/services/agent.ts:318` | `a2a_agents` | select | `getRow(slug)`: pre-fetch deliberadamente **sin** filtro, para poder distinguir «no existe» de «no es tuyo». El dueño se compara en JS en `:571` (update) y `:701` (delete), que lanzan `OwnershipMismatchError`. También se usa como pre-check de colisión de slug en `:407`, donde no hay dueño que comparar. | `:313-314` |
+| 38 | `src/services/agent.ts:318` | `a2a_agents` | select | `getRow(slug)`: pre-fetch deliberadamente **sin** filtro, para poder distinguir «no existe» de «no es tuyo». El dueño se compara en JS en `:580` (update) y `:701` (delete), que lanzan `OwnershipMismatchError`. También se usa como pre-check de colisión de slug en `:407`, donde no hay dueño que comparar. | `:313-314` |
 | 39 | `src/services/arbiter.ts:594` | `a2a_payment_intents` | select | *«Owner-check en app (no owner-guarded SELECT) para preservar `OWNERSHIP_MISMATCH` vs `INTENT_NOT_FOUND`»*. El chequeo real está en `:606-608`. Filtrarlo colapsaría 403 y 404 en uno solo. | `:591-592` |
-| 40 | `src/services/fee-split.ts:645` | `a2a_fee_splits` | select | `reverseFeeSplits`: lee TODAS las patas de la orquestación y filtra por dueño en JS en `:675` (`rows.filter(r => r.owner_ref === ownerRef)`), devolviendo `ownership_mismatch` si ninguna es del caller. El UPDATE que sigue (`:691`) **sí** lleva `.eq('owner_ref', ownerRef)`. | `:675-681` |
+| 40 | `src/services/fee-split.ts:645` | `a2a_fee_splits` | select | `reverseFeeSplits`: lee TODAS las patas de la orquestación y filtra por dueño en JS en `:676` (`rows.filter(r => r.owner_ref === ownerRef)`), devolviendo `ownership_mismatch` si ninguna es del caller. El UPDATE que sigue (`:697`) **sí** lleva `.eq('owner_ref', ownerRef)`. | `:675-681` |
 
 ### `unicidad-global` (1)
 
