@@ -329,10 +329,76 @@ Returns `403` for unknown / inactive keys, `200` with shape:
 }
 ```
 
+### `GET /auth/deposit-info`
+
+Public, no auth. Returns `{ "networks": [...] }` with one entry per chain
+the running process initialized, listing where to send the funds for that
+chain. EVM entries carry `treasury` (or `escrow_contract` when
+`escrow_mode` is `true`), `token.address` and `min_confirmations`; the
+Solana entry carries `deposit_account` (the derived ATA),
+`deposit_account_owner` and `token.mint`. Every entry repeats the same
+`deposit_minimum_usdc` and `deposits_enabled`, because the minimum belongs
+to the deposit path and not to a chain.
+
+When the operator has not configured a minimum, `deposit_minimum_usdc` is
+`null` and `deposits_enabled` is `false`. That is not "any amount works":
+in that state `POST /auth/deposit` rejects every deposit with
+`503 DEPOSIT_MINIMUM_NOT_CONFIGURED` (`src/routes/auth/deposit.ts`, the
+`mapDepositMinimumError` helper).
+
+Read the destination from this endpoint instead of hardcoding it. The
+addresses come from the same helpers the verifier uses, so a chain that is
+not initialized in the running process does not appear here at all.
+
 ### `POST /auth/deposit`
 
-Returns `501 deposit_verification_pending`. The endpoint is reserved for
-on-chain deposit verification (tracked as WKH-35) and is not active.
+Live since WKH-35. It verifies a confirmed on-chain transfer and, only
+then, credits `budget[chain_id]` on the calling key. Concrete check that it
+is not a placeholder: calling it with no key returns `403`, not `501`
+(`src/__tests__/e2e/e2e.test.ts:205`).
+
+Before the first call, bind the wallet you will pay from with
+`POST /auth/funding-wallet`. A deposit whose sender does not match that
+binding is refused and no row is written, so the legitimate depositor can
+still claim the same transfer afterwards.
+
+Body:
+
+```json
+{
+  "key_id": "<the calling key's own id>",
+  "chain_id": 43113,
+  "tx_hash": "0x...",
+  "amount": "10.00"
+}
+```
+
+`tx_hash` accepts an EVM hash (`0x` + 64 hex) or a Solana base58
+signature; the format has to match the family of the resolved chain, and a
+mismatch is a `400 INVALID_INPUT`. The chain is resolved from
+`x-payment-chain` when present, otherwise from `chain_id`. The credited
+chain always comes from the resolved bundle, never from the body.
+
+Status codes:
+
+- `200`: credited. Body is `{ "balance": "...", "chain_id": <number> }`.
+- `400`: `INVALID_INPUT`, `CHAIN_NOT_SUPPORTED`, `CHAIN_MISMATCH`,
+  `DEPOSIT_BELOW_MINIMUM` (carries `minimum_usdc`), or a verification
+  refusal such as `AMOUNT_MISMATCH` / `RECIPIENT_MISMATCH`.
+- `403`: `OWNERSHIP_MISMATCH` when `key_id` is not the calling key,
+  `FUNDING_WALLET_NOT_BOUND`, or `FUNDING_WALLET_MISMATCH`. A missing or
+  inactive key also lands here, but with a plain `error` string and no
+  `error_code`.
+- `409`: `DEPOSIT_ALREADY_CREDITED`. The same `tx_hash` cannot be
+  credited twice.
+- `503`: the gateway could not answer for the chain or the config:
+  `RPC_UNAVAILABLE`, `DEPOSIT_MINIMUM_NOT_CONFIGURED`,
+  `ESCROW_CONTRACT_NOT_CONFIGURED`, or, on Solana,
+  `DEPOSIT_VERIFICATION_UNKNOWN`.
+
+`DEPOSIT_VERIFICATION_UNKNOWN` means "could not determine", which is not
+"declined": no budget was credited and the signature was not consumed, so
+the same signature can be presented again once the RPC recovers.
 
 ### `POST /auth/bind/:chain`
 
@@ -361,18 +427,32 @@ Methods supported:
 
 ## Endpoints intentionally NOT documented
 
-These are registered in `src/index.ts` but are operator-only / internal
-and are **not** part of the public API surface:
+These are registered in `src/index.ts` and left out of the reference above,
+so they are **not** covered by the v1 stability rules. "Not documented" is
+not the same as "not reachable": read each entry for who can actually call
+it. This list is maintained by hand and is not derived from the route
+table, so a route added after the last edit of this file will be missing
+from both halves.
 
 - `GET /tasks/*` — task store (planned for A2A spec push notifications).
 - `GET /dashboard` — operator-facing aggregated metrics.
 - `GET /metrics` — Prometheus scrape endpoint.
 - `GET /mock-registry/agents/*` — local mock used by tests.
-- `POST /gasless/*` — operator gasless transfer; not callable by third
-  parties.
-- `GET /capabilities` — **does not exist** on `wasiai-a2a`. If you saw
-  it elsewhere it belongs to the upstream `wasiai-v2` thin-proxy, not
-  to this service.
+- `POST /gasless/transfer`: moves funds from the operator wallet. It is
+  **not** operator-only: its preHandler is `requirePaymentOrA2AKey`
+  (`src/routes/gasless.ts`), so any caller with a `wasi_a2a_*` key or a
+  valid x402 payment reaches it, and the x402 challenge is priced at the
+  estimated transfer amount rather than a flat figure. `GET /gasless/status`
+  takes no auth at all. They are left out of the reference because their
+  shape is not covered by the v1 stability rules below, not because a third
+  party cannot call them.
+- `GET /capabilities`: this listing used to claim the endpoint does not
+  exist here. It does: `src/index.ts` registers `capabilitiesRoutes` under
+  the `/capabilities` prefix, and `curl <YOUR_GATEWAY_URL>/capabilities`
+  returns `200` with `methods`, `chains` and `agents`. Each `chains` entry
+  reports `acceptsInboundPayment`, which is `false` for an outbound-only
+  rail such as `solana-devnet`. `wasiai-v2` proxies to this route; it is not
+  the owner of it.
 
 If you need any of these exposed publicly, open an issue — do not assume
 they will keep working as today.
@@ -531,8 +611,10 @@ add-only in v1):
 | `SCOPE_DENIED` | `403` | Authenticated key's `allowed_*` filters reject the resolved agent / registry / category. |
 | `SSRF_BLOCKED` | `422` | A submitted URL resolves to a loopback / private / link-local host. |
 | `INSUFFICIENT_BALANCE` | `402` / `503` | Operator wallet balance pre-flight failed for the downstream chain. |
-| `not_implemented` | `501` | Endpoint is a documented placeholder (e.g. `POST /auth/bind/:chain`). |
-| `deposit_verification_pending` | `501` | `POST /auth/deposit` reservation. |
+| `not_implemented` | `501` | Endpoint is a documented placeholder. `POST /auth/bind/:chain` is the only route that emits it today, and it carries it in a `status` field rather than `code` (`src/routes/auth/bind.ts`). |
+| `DEPOSIT_ALREADY_CREDITED` | `409` | The `tx_hash` sent to `POST /auth/deposit` was already credited. |
+| `FUNDING_WALLET_MISMATCH` | `403` | The sender of the deposit is not the wallet bound with `POST /auth/funding-wallet`. |
+| `DEPOSIT_VERIFICATION_UNKNOWN` | `503` | The gateway could not determine on-chain whether the deposit landed. Nothing was credited and the proof was not consumed; retry the same `tx_hash` later. |
 
 When a route does not set a `code`, callers should treat the HTTP
 status code as the structured signal and the `error` string as a

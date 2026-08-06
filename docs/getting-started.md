@@ -539,11 +539,22 @@ For the full chain list, asset contracts and activation flags, read
 
 ## Bring your own Kite Passport
 
-`[ROADMAP — WKH-69]` — Kite Passport identity binding is tracked but
-not implemented today. The `bindings.kite_passport` field on
-`GET /auth/me` always returns `null`, and `POST /auth/bind/:chain`
-returns `501 not_implemented`. Do not depend on Kite Passport flows
-yet; the next iteration of this doc will land alongside WKH-69.
+`[ROADMAP — WKH-69]`: `POST /auth/bind/:chain` returns
+`501 not_implemented`, with the token in a `status` field
+(`src/routes/auth/bind.ts`). That much holds on any deployment.
+
+The `bindings.kite_passport` field on `GET /auth/me` is a different story,
+and this page used to say it "always returns `null`". It returns whatever
+is stored on the key (`src/routes/auth/me.ts`). A second route,
+`POST /auth/bind-passport`, does write it, and it is mounted only when
+`PASSPORT_BINDING_ENABLED=true` (`src/routes/auth/funding-wallet.ts`); with
+the flag off the route is a plain `404` and the field stays `null`. So the
+`null` is a property of a deployment's configuration, not of the code. The
+value of that flag on the hosted gateway was not verified for this edit.
+Treat the field as read-only and read it rather than assuming it.
+
+Do not depend on Kite Passport flows yet; the next iteration of this doc
+will land alongside WKH-69.
 
 ---
 

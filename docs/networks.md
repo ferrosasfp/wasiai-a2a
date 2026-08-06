@@ -2,8 +2,38 @@
 
 WasiAI A2A is **chain-adaptive**: a single deployment can settle inbound
 payments on one chain and outbound (downstream) payments to agents on a
-different chain. This page lists every chain, asset, contract address and
-explorer that the service knows about today.
+different chain.
+
+## Every chain slug the code knows
+
+This is the full `ChainKey` union from `src/adapters/types.ts`. A test
+(`src/adapters/chain-docs.test.ts`) fails the build if a slug is added
+there and not named on this page, so this table cannot silently fall
+behind the union. The test does not check the columns to its right: those
+are maintained by hand and can be stale even while the test is green.
+
+| Slug | chainId | Enters the supported set |
+|---|---:|---|
+| `kite-ozone-testnet` | 2368 | always; also the fallback when neither `WASIAI_A2A_CHAINS` nor `WASIAI_A2A_CHAIN` is set |
+| `kite-mainnet` | 2366 | always, but see the coupling warning below |
+| `avalanche-fuji` | 43113 | always |
+| `avalanche-mainnet` | 43114 | always; the outbound leg needs a second opt-in |
+| `base-sepolia` | 84532 | always |
+| `base-mainnet` | 8453 | always |
+| `tempo-testnet` | 42429 | only with `TEMPO_ADAPTER_ENABLED=true` |
+| `solana-devnet` | non-EVM; synthetic sentinel, `900001` unless `SOLANA_SYNTHETIC_CHAIN_ID` overrides it | only with `SOLANA_ADAPTER_ENABLED=true` |
+
+"Enters the supported set" is about `getSupportedChains()` in
+`src/adapters/registry.ts`, not about what a given deployment runs. A slug
+is only initialized if it is listed in `WASIAI_A2A_CHAINS`; one that is
+not listed answers `CHAIN_NOT_SUPPORTED`. To see what the deployment you
+are talking to actually initialized, ask it:
+`curl <YOUR_GATEWAY_URL>/capabilities | jq '.chains'`.
+
+The Kite and Avalanche sections below carry the asset, token contract and
+explorer detail. Base, Tempo and Solana are wired in code but have no
+section on this page yet; for Solana, the README's "Solana rail" section
+is the maintained description.
 
 > **Status legend**
 > - **Active by default** — works out of the box, no env flags required.
@@ -20,6 +50,14 @@ explorer that the service knows about today.
 Inbound = the chain on which **you** (the developer / agent) pay WasiAI to
 unlock a `/compose` or `/orchestrate` call. The protocol uses x402 with
 EIP-712 signatures over EIP-3009 `TransferWithAuthorization`.
+
+Kite is not the only inbound rail. `acceptsInboundPayment` in
+`src/adapters/registry.ts` returns `true` for every EVM bundle, so any
+initialized EVM chain can take the inbound leg, including Avalanche Fuji
+and Base Sepolia. It returns `false` for Solana, which is outbound only:
+sending `x-payment-chain: solana-devnet` to `POST /compose` answers
+`400 CHAIN_INBOUND_PAYMENT_UNSUPPORTED`. Only the Kite rows have their
+asset and EIP-712 detail written out below.
 
 | Chain | Chain ID | x402 network tag | Asset | Token contract | Explorer | Status |
 |-------|---------:|------------------|-------|----------------|----------|--------|
@@ -138,6 +176,12 @@ Outbound = the chain on which **WasiAI** pays the downstream agent
 (merchant) on your behalf when a `/compose` step is settled. The flag
 `WASIAI_DOWNSTREAM_X402` must be `true` for the downstream settle to fire.
 
+Avalanche is not the only outbound rail either. The leg chain comes from
+the agent's card, so any initialized chain can receive it, and Solana
+devnet is the rail the remittance agents in the live catalog declare. The
+Avalanche tables below are the only ones on this page with asset and
+contract detail; that is a gap in this page, not a limit of the code.
+
 | Chain | Chain ID | x402 network tag | Asset | Default token contract | Explorer | Status |
 |-------|---------:|------------------|-------|------------------------|----------|--------|
 | Avalanche Fuji | `43113` | `eip155:43113` | USDC (6 decimals) | `0x5425890298aed601595a70AB815c96711a31Bc65` | https://testnet.snowtrace.io | Active by default |
@@ -204,23 +248,42 @@ posts to its facilitator.
 
 ## Discovery and chain filtering
 
-`/discover` does **not** accept a `chain` query parameter at the query
-layer — the supported query parameters are `q`, `capabilities`,
-`maxPrice`, `minReputation`, `limit`, `registry`, `verified` and
-`includeInactive` (see
-[api-reference.md](./api-reference.md#discovery)). The agent's
-`payment.chain` field on each result is **informational** — it indicates
-which chain the agent expects to be paid on, but the discovery service
-does not filter results by chain.
+`/discover` does **not** accept a `chain` query parameter, and since
+WKH-322 it does not ignore it either: `?chain=avalanche` comes back as
+`400 UNKNOWN_DISCOVER_PARAM` with the accepted names in the message. The
+accepted list is not repeated here on purpose, because it moved twice in
+one week and this page fell behind both times. The canonical table lives
+in [api-reference.md](./api-reference.md#discovery), and the error body
+itself is the runtime answer.
+
+The discovery service does not filter results by chain. To choose a rail,
+read the `payment` block on each result:
+
+| Field | Who writes it | What it means |
+|---|---|---|
+| `payment.chain` | the agent, in its own card | the slug the publisher typed. Several are ambiguous: as of 2026-08-05, 16 of the 25 agents in the production catalog declare `avalanche`, which reads like the real network and resolves to Fuji. |
+| `payment.resolvedChain` | derived by the gateway | the canonical rail that slug resolves to, e.g. `avalanche` becomes `avalanche-fuji`. |
+| `payment.network` | derived by the gateway | `testnet` or `mainnet`. This is **not** an x402 CAIP-2 tag; a tag like `eip155:43113` appears in `accepts[0].network` of a `402` challenge, which is a different payload. |
+
+What `payment.network` promises, narrowly: either the payment lands in
+that environment or there is no payment. The downstream leg compares the
+slug's environment against the bundle's real destination before signing
+and returns without paying on a mismatch
+(`findChainEnvironmentDrift`, `CHAIN_ENVIRONMENT_DRIFT` in
+`src/lib/downstream-payment.ts`). What it does not promise: the chainId
+the deployment points at, which config such as `KITE_NETWORK` can move.
 
 If you want chain-restricted results, the supported approaches today are:
 
 - **Filter by registry.** Use `?registry=<name>` to scope results to a
   registry whose listed agents are all priced on the same chain (this is
   registry-curation, not a chain-aware filter).
-- **Post-filter client-side.** Read each result's `payment.chain` field
-  (or the `payment.network` x402 tag) and drop rows that do not match
-  your wallet's funded chain.
+- **Post-filter client-side** on `payment.resolvedChain` rather than on
+  `payment.chain`, and drop rows that do not match your wallet's funded
+  rail. Both fields are optional in the type, because the same interface
+  also describes the raw card an agent declares; on the `/discover` path
+  they are always set, since `readPaymentSpec` is the only producer of
+  `Agent.payment`.
 
 The downstream payment chain (Fuji vs C-Chain) is decided per-call by the
 gateway based on the operator env flags above and is independent of any
@@ -232,10 +295,25 @@ discovery-side filtering.
 
 - **Kite Passport identity binding** — `[ROADMAP — WKH-69]`. When
   shipped, A2A keys will optionally bind to a Kite Passport DID for
-  on-chain reputation. Today the `bindings.kite_passport` field on
-  `GET /auth/me` is always `null`.
-- Other EVM chains (Base, Optimism, Arbitrum) are tracked in the backlog
-  but not implemented; do not assume they work.
+  on-chain reputation. This bullet used to add that
+  `bindings.kite_passport` on `GET /auth/me` is always `null`; that is
+  conditional, not universal. See the Kite Passport section of
+  [getting-started.md](./getting-started.md) for the flag that decides it.
+- **Base is not a roadmap chain.** `base-sepolia` and `base-mainnet` are
+  members of the `ChainKey` union and unconditional members of
+  `SUPPORTED_CHAINS` in `src/adapters/registry.ts`, with a factory branch
+  each (`createBaseAdapters`) and no feature flag. This bullet used to
+  group Base with Optimism and Arbitrum and tell the reader not to assume
+  it works. What is still true is narrower: a slug is only usable if the
+  deployment lists it in `WASIAI_A2A_CHAINS`. The README reports Base
+  Sepolia among the chains initialized on the production deployment and no
+  mainnet at all, measured against `/capabilities` on 2026-08-04; that
+  reading was not repeated for this edit. Check it yourself with
+  `curl <YOUR_GATEWAY_URL>/capabilities | jq '.chains'` rather than
+  trusting this sentence.
+- Optimism and Arbitrum are not in the code: neither string appears
+  anywhere under `src/`, so there is no slug to configure and any attempt
+  to name one is a startup `Unsupported chain` error.
 
 ---
 
@@ -244,8 +322,17 @@ discovery-side filtering.
 If anything on this page disagrees with the running service, the
 running service wins. The canonical sources inside the repo are:
 
+- `src/adapters/types.ts`: the `ChainKey` union, which is the complete
+  list of slugs. `src/adapters/chain-docs.test.ts` fails when a slug there
+  is missing from this page.
+- `src/adapters/registry.ts`: which slugs enter the supported set, which
+  ones sit behind a flag, and `acceptsInboundPayment`.
+- `src/adapters/chain-resolver.ts`: `CANONICAL_CHAIN_ID`, the slug to
+  chainId map.
 - `src/adapters/kite-ozone/chain.ts` — Kite chain definitions.
 - `src/adapters/kite-ozone/payment.ts` — inbound asset selection.
 - `src/lib/downstream-payment.ts` — outbound chain selection.
 
-Open a PR against `docs/networks.md` if you spot drift.
+Everything on this page except the slug column of the first table is
+maintained by hand and can be stale while the test suite is green. Open a
+PR against `docs/networks.md` if you spot drift.
