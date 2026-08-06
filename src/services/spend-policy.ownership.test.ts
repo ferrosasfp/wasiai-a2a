@@ -3,14 +3,31 @@
  *
  * ⚠️ ESTE ARCHIVO NO PRUEBA AISLAMIENTO, Y DECIRLO ES LA MITAD DE SU VALOR.
  *
- * Estos tres filtros **no previenen un IDOR**. Las tres rutas son
- * `/keys/me/spend-policies` (`src/routes/auth/spend-policy.ts:79` es el
- * `fastify.get`, `:106` el `fastify.delete`) y las tres pasan `callerKey.id`
+ * Estos tres filtros **no previenen un IDOR**, y no son tres rutas: son DOS
+ * rutas y una función sin llamador. La versión anterior de este bloque decía
+ * «las tres rutas» y citaba dos.
+ *
+ * ── `spend-policy.ts:163` y `:190`: SÍ hay ruta, y el caller no elige la key ──
+ * Las dos son `/keys/me/spend-policies` (`src/routes/auth/spend-policy.ts:79` es
+ * el `fastify.get`, `:106` el `fastify.delete`) y las dos pasan `callerKey.id`
  * **y** `callerKey.owner_ref`, dos campos de la **misma fila autenticada**
  * (`:94-95` y `:125-126`). No hay parámetro de ruta para la key: el caller no
- * puede pasar un `keyId` ajeno. Como una `key_id` pertenece a exactamente un
- * dueño, en una base **consistente** el filtro por `key_id` ya acota al dueño, y
- * borrar `.eq('owner_ref', …)` **no cambia ninguna salida de ninguna ruta**.
+ * puede pasar un `keyId` ajeno.
+ *
+ * ── `spend-policy.ts:219` (`hasAnyPolicy`) NO TIENE LLAMADOR DE PRODUCCIÓN ──
+ * Medido: `grep -rn 'hasAnyPolicy' src --include=*.ts` da la definición
+ * (`spend-policy.ts:214`), sus usos en dos archivos de test
+ * (`src/services/spend-policy.test.ts:341,353` y este) y un `vi.fn()` de mock en
+ * `src/routes/auth.spend-policies.test.ts:54`. **Ninguna ruta la llama**, y su
+ * propio docblock lo admite (`spend-policy.ts:209-212`: «NO se usa en el
+ * hot-path del débito […] Se expone para tests/diagnóstico»). **La única
+ * superficie que ejercita este filtro es este test.** No se puede afirmar que
+ * proteja una ruta, porque no hay ruta; lo que sí se puede afirmar es que el
+ * filtro existe y que si mañana alguien le cuelga una, SP-03 ya está.
+ *
+ * Y en los tres: como una `key_id` pertenece a exactamente un dueño, en una base
+ * **consistente** el filtro por `key_id` ya acota al dueño, así que borrar
+ * `.eq('owner_ref', …)` **no cambia ninguna salida de ninguna ruta**.
  *
  * Lo que estos tests afirman es **integridad ante una fila inconsistente**: una
  * fila con `key_id = K` pero `owner_ref ≠ dueño(K)` no se le entrega al dueño de
