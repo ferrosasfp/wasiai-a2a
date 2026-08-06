@@ -320,11 +320,18 @@ proceso: MUERTO
 git status --porcelain (worktree): CERO archivos de producción modificados
 ```
 
+### Lo que este fix-pack NO midió — actualizado por el fix-pack del CR
+
+> El punto «que G-11/G-12 cacen una degradación del formato del archivo de tipos» decía
+> **«no se corrió ese mutante»**. Se corrió en el fix-pack del CR: es **M-G9**, §5. La forma
+> resultó más angosta y más barata que "cambio de formato" — alcanza con quotear **una** clave —
+> y ahora la caza **G-13**.
+
 ### Los números del F1 que este fix-pack corrigió midiéndolos
 
 | Decía | Lo medido | Cómo |
 |---|---|---|
-| «23 filtros que ningún test mira» | **20** | borrando `spend-policy.ts:163`, `spend-policy.test.ts` da `1 failed \| 17 passed (18)` con `× AC-7: filters by key_id and owner_ref`. Los tres de `spend-policy` ya tenían espía (§N-2) |
+| «23 filtros que ningún test mira» | **de los 23, acá se midieron 11**: 8 sin ningún test que los mirara y 3 con espía preexistente. De los otros 12 (SEC-04) esta campaña no midió nada | borrando `spend-policy.ts:163`, `spend-policy.test.ts` da `1 failed \| 17 passed (18)` con `× AC-7: filters by key_id and owner_ref`, así que esos tres NO estaban sin mirar (§N-2). El «20» = 23 − 3 mezcla los 11 medidos con los 12 heredados del barrido de A1 y **no se debe citar como medido** |
 | «~87 líneas» para el barrido completo | **46** | `--all` muta 46. El 87 es `.eq('owner_ref'` en cualquier posición de `src/` **incluyendo tests** — un número que el guion nunca usó |
 | «~22 min» el barrido completo | **≈ 8-9 min**, extrapolado | 26,08 s medidos para `--all` con el guardián solo (46/46 KILLED, ~0,57 s c/u) + 10,47 s medidos de suite completa. **No se corrió** `--all` contra la suite entera |
 | «18 tablas con `owner_ref`» | **21** de 62 | `deriveTables` + el segundo lector de G-11, que coinciden |
@@ -332,8 +339,81 @@ git status --porcelain (worktree): CERO archivos de producción modificados
 ### Lo que este fix-pack NO midió
 
 - **Que G-11/G-12 cacen una degradación del formato del archivo de tipos.** No se corrió ese
-  mutante. Lo declarado arriba es que **no lo cazan**.
+  mutante acá. **Se corrió en el fix-pack del CR: §5, M-G9.**
 - **Que los `supabase.rpc(...)` estén libres de IDOR.** Son 42 call-sites en 13 archivos y quedan
   enteros fuera del guardián. Se leyó el caso de `a2a_solana_settle_intents` y no se encontró un
   IDOR vivo; los otros 42 **no se auditaron acá**. Queda declarado en el punto 9 del docblock.
 - **Un barrido `--all` contra la suite completa.** Sólo se corrió contra el guardián.
+
+---
+
+## 5. Fix-pack del Code Review (CR `16847c3` → RECHAZADO)
+
+### M-G9 · La cabecera QUOTEADA: el agujero compartido de G-11/G-12, medido
+
+El CR reprodujo que la suposición que los dos lectores comparten no es sólo el **formato** del
+archivo (un cambio global), sino el **juego de caracteres del nombre**, y que eso ciega **una
+tabla por vez** — justo por debajo de los pisos de G-01 (`>= 50` sobre 62 reales, `>= 15` sobre
+21). Se reprodujo acá **ejecutando**, en tres pasos, sobre `16847c3` con los 12 controles:
+
+**La mutación**, en `src/types/database.types.ts:664`, sin tocar la indentación:
+
+```
+-      a2a_key_spend_policies: {
++      "a2a_key_spend_policies": {
+```
+
+`git diff --stat` → `1 file changed, 1 insertion(+), 1 deletion(-)`.
+
+**ANTES del fix (guardián en `16847c3`, 12 controles):**
+
+```
+Paso 1 · sólo el mutante                                   → Tests  12 passed (12)
+Paso 2 · mutante + `export const __synthUnfiltered = () =>
+          supabase.from('a2a_key_spend_policies').select('*').eq('id','x');`
+          agregada al final de `src/services/spend-policy.ts`
+                                                            → Tests  12 passed (12)
+Paso 3 · CONTROL: los tipos restaurados y esa misma cadena todavía puesta
+   × G-09 ... AssertionError: expected 42 to be 41 // Object.is equality
+                                                            → Tests  2 failed | 10 passed (12)
+```
+
+*(Del paso 3 se pegó la salida de G-09, que es la que quedó capturada en la corrida; el nombre del
+otro rojo es `★ G-08`. El **mismo control re-corrido después del fix**, con los 13 controles, sí
+tiene su hallazgo completo: `× ★ G-08 → src/services/spend-policy.ts:230 · a2a_key_spend_policies ·
+select` y `× G-09 → expected 42 to be 41`, `Tests 2 failed | 11 passed (13)`.)*
+
+O sea: **SURVIVED**, y con el guardián ciego a esa tabla el IDOR era invisible. Y como el
+`UNFILTERED` de esa tabla no se mueve, tampoco se movía ningún conteo.
+
+**El fix — G-13, y ataca por el otro lado.** G-11 y G-12 preguntan *"¿qué tablas hay?"*, y una
+cabecera con otra sintaxis no es un error para esa pregunta: simplemente no existe. G-13 invierte
+la pregunta y clasifica **todas** las líneas a 6 espacios de adentro de `Tables:` en tres cajas
+conocidas —cabecera parseada, cierre, comentario— y exige que **la cuarta caja esté vacía**.
+
+Medido sobre el archivo de hoy: **125 líneas a 6 espacios dentro de `Tables:` = 62 cabeceras + 62
+cierres `};` + 1 apertura de comentario** (`database.types.ts:1054`, el `COMMENT ON TABLE` de
+`a2a_solana_settle_intents`); el cuerpo de ese comentario va a 7 espacios y no entra. *(El CR
+declaró «62 cabeceras, 63 `};`»; contadas con el instrumento de G-13 son 62 y 62 más la línea del
+comentario, y las tres suman los mismos 125.)*
+
+**DESPUÉS del fix, el mismo mutante, paso 1 solo:**
+
+```
+ × G-13: ninguna cabecera de tabla del archivo de tipos quedó SIN PARSEAR
+AssertionError: ... : expected [ Array(1) ] to deeply equal []
++ [
++   "database.types.ts:664 → \"a2a_key_spend_policies\": {",
++ ]
+      Tests  1 failed | 12 passed (13)
+```
+
+**KILLED**, en el paso 1, nombrando el archivo, la línea y el texto exacto — antes de que exista
+ninguna consulta vulnerable. Árbol restaurado con `git checkout -- src/types/database.types.ts` y
+`git checkout -- src/services/spend-policy.ts`; `git status --porcelain` sin archivos de
+producción modificados.
+
+**Lo que G-13 sigue sin cubrir**: un cambio de indentación (si `Tables:` deja de estar a 4
+espacios o las tablas a 6, las tres cajas quedan vacías a la vez). Contra eso están sus dos
+controles de armado —`cabeceras.length === ORACLE_BLOCKS.size` y `>= 50`— y el piso de G-01.
+**Ese mutante no se corrió.**

@@ -103,7 +103,7 @@
  *     de este guardián.
  *     Ampliar el alcance a los RPC es OTRA HU; declararlo es de ésta.
  *
- * Naming: G-01..G-12.
+ * Naming: G-01..G-13.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -161,9 +161,19 @@ const { all: ALL_TABLES, withOwner: OWNER_TABLES } = deriveTables(typesSrc);
  *
  * ⚠️ LO QUE ESTE CRUCE NO CAZA, y decirlo es la mitad de su valor: los dos
  * lectores comparten UNA suposición — que dentro de `Tables:` cada tabla abre
- * con su nombre a 6 espacios. Un cambio de formato del archivo generado que
- * rompa esa suposición rompe a los DOS a la vez y el cruce sigue en verde. Para
- * ese caso el control es el piso de G-01, que es un número y sí envejece.
+ * con `^ {6}<identificador>: {`. Un cambio del archivo generado que rompa esa
+ * suposición rompe a los DOS a la vez y el cruce sigue en verde. **Y el agujero
+ * no es sólo un cambio global de formato: es también el JUEGO DE CARACTERES del
+ * nombre.** Medido sobre `16847c3`: quotear UNA sola clave
+ * (`a2a_key_spend_policies:` → `"a2a_key_spend_policies":`), sin tocar la
+ * indentación, dejaba los 12 controles en verde, y con eso puesto una cadena
+ * real sin filtro sobre esa tabla también daba `12 passed (12)` — el control con
+ * los tipos sanos daba `2 failed | 10 passed`. Esa es la forma que
+ * `supabase gen types` emite para cualquier nombre que no sea identificador JS,
+ * y ciega UNA TABLA POR VEZ, donde los pisos de G-01 (`>= 50` sobre 62 reales,
+ * `>= 15` sobre 21) tienen holgura de sobra y no disparan.
+ *
+ * Lo que cierra ese agujero es **G-13**, y por eso no alcanza con el piso.
  */
 function tableBlocks(src: string): Map<string, string> {
   const blocks = new Map<string, string>();
@@ -194,6 +204,52 @@ function tableBlocks(src: string): Map<string, string> {
   flush();
   return blocks;
 }
+
+/**
+ * TERCER lector, y no busca tablas: busca **lo que los otros dos descartaron sin
+ * mirar**. Los dos anteriores tienen la misma forma —"si la línea matchea la
+ * cabecera, es una tabla; si no, sigo"—, así que una cabecera con otra sintaxis
+ * no es un error para ninguno: simplemente no existe. Esto invierte la pregunta
+ * y clasifica TODAS las líneas a 6 espacios de adentro de `Tables:` en tres
+ * cajas conocidas, para que la cuarta caja —la que no se esperaba— sea el
+ * hallazgo de G-13.
+ *
+ * Las tres cajas, verificadas contra el archivo de hoy: 62 cabeceras, 62 cierres
+ * `};` y 1 apertura de comentario (`/**` en `database.types.ts:1054`, el
+ * `COMMENT ON TABLE` de `a2a_solana_settle_intents`). Total 125, que es cuanto
+ * hay. El cuerpo del comentario va a 7 espacios y no entra acá.
+ */
+function lineasA6Espacios(src: string): {
+  cabeceras: string[];
+  cierres: string[];
+  comentarios: string[];
+  desconocidas: string[];
+} {
+  const cabeceras: string[] = [];
+  const cierres: string[] = [];
+  const comentarios: string[] = [];
+  const desconocidas: string[] = [];
+  let inTables = false;
+  let lineno = 0;
+  for (const line of src.split('\n')) {
+    lineno += 1;
+    const top = /^ {4}([A-Za-z_$][\w$]*)\s*:\s*\{\s*$/.exec(line);
+    if (top !== null) {
+      inTables = top[1] === 'Tables';
+      continue;
+    }
+    if (!inTables) continue;
+    if (!/^ {6}\S/.test(line)) continue;
+    const donde = `database.types.ts:${lineno} → ${line.trim()}`;
+    if (/^ {6}[A-Za-z_$][\w$]*\s*:\s*\{\s*$/.test(line)) cabeceras.push(donde);
+    else if (/^ {6}\}[;,]?\s*$/.test(line)) cierres.push(donde);
+    else if (/^ {6}(\/\*|\/\/)/.test(line)) comentarios.push(donde);
+    else desconocidas.push(donde);
+  }
+  return { cabeceras, cierres, comentarios, desconocidas };
+}
+
+const SEIS_ESPACIOS = lineasA6Espacios(typesSrc);
 
 const ORACLE_BLOCKS = tableBlocks(typesSrc);
 const ORACLE_OWNER = new Set(
@@ -239,7 +295,7 @@ const EXCEPTED = new Set(
 
 describe('ownership filter guard — cadenas sobre tablas con owner_ref', () => {
   // ══════════════════════════════════════════════════════════════
-  // CONTROL DE ARMADO (G-01, G-02, G-11, G-12)
+  // CONTROL DE ARMADO (G-01, G-02, G-11, G-12, G-13)
   // Sin estos, un parser roto deja las listas vacías y G-08 pasa en verde
   // sin verificar nada: la falla silenciosa de siempre, adentro del guardián
   // que existe para cazar una falla silenciosa.
@@ -253,6 +309,13 @@ describe('ownership filter guard — cadenas sobre tablas con owner_ref', () => 
   // verdes, y con el sesgo puesto se podía agregar una cadena real sin filtro
   // sobre `a2a_key_spend_policies` y seguían verdes los diez. G-11 y G-12 son
   // la respuesta a ESO, y no son números: son invariantes de consistencia.
+  //
+  // Y G-11/G-12 tampoco alcanzaban solos, porque los dos lectores que cruzan
+  // comparten la forma de la cabecera: quotear UNA clave del archivo de tipos
+  // dejaba los DOCE en verde y una cadena sin filtro sobre esa tabla invisible
+  // (medido sobre `16847c3`, ver `mutation-log.md` §M-G9). G-13 es la respuesta
+  // a ESO, y ataca por el otro lado: en vez de buscar tablas, exige que no
+  // sobre NINGUNA línea sin clasificar.
   // ══════════════════════════════════════════════════════════════
 
   it('G-01: el conjunto de tablas con dueño se derivó de verdad del archivo de tipos', () => {
@@ -340,6 +403,42 @@ describe('ownership filter guard — cadenas sobre tablas con owner_ref', () => 
     expect(
       [...TABLAS_TOCADAS].filter((t) => OWNER_TABLES.has(t)).length,
     ).toBeGreaterThanOrEqual(15);
+  });
+
+  it('G-13: ninguna cabecera de tabla del archivo de tipos quedó SIN PARSEAR', () => {
+    // El agujero que G-11 y G-12 NO cierran, porque los dos lectores lo
+    // comparten: una cabecera con otra sintaxis no es un error para ninguno de
+    // los dos — no existe. Medido en `16847c3`, con los 12 controles anteriores:
+    // quotear UNA clave (`a2a_key_spend_policies:` → `"a2a_key_spend_policies":`)
+    // dejaba `12 passed (12)`, y con eso puesto una cadena real sin filtro sobre
+    // esa tabla seguía dando `12 passed (12)`. Ciega una tabla POR VEZ, así que
+    // los pisos de G-01 no disparan (holgura de 12 y de 6).
+    //
+    // Input que lo pone en rojo: cualquier línea a 6 espacios dentro de
+    // `Tables:` que no sea una cabecera parseada, un cierre o un comentario.
+    expect(
+      SEIS_ESPACIOS.desconocidas,
+      'Hay líneas a 6 espacios dentro de `Tables:` que NO son una cabecera de tabla\n' +
+        'que este guardián sepa parsear, ni un cierre, ni un comentario. El caso típico\n' +
+        'es una clave quoteada (`"mi-tabla": {`), que es lo que `supabase gen types`\n' +
+        'emite para cualquier nombre que no sea identificador JS. Los DOS lectores de\n' +
+        'G-11 la descartan igual, así que el cruce sigue verde y esa tabla queda\n' +
+        'INVISIBLE para G-08: sus cadenas sin filtro no aparecen por ningún lado.\n' +
+        'Arreglo: enseñarle la forma nueva a los tres lectores (`deriveTables` en\n' +
+        '`test/ownership-filter-guard.scanner.ts`, `tableBlocks` y `lineasA6Espacios`\n' +
+        'acá), NO agregar la excepción a esta lista.\n',
+    ).toEqual([]);
+    // Cada tabla abre y cierra: si una cabecera deja de parsear, su `};` sigue
+    // ahí y este par se desbalancea. Es un invariante RELATIVO — una migración
+    // que agregue una tabla mueve los dos lados juntos.
+    expect(SEIS_ESPACIOS.cierres.length).toBe(SEIS_ESPACIOS.cabeceras.length);
+    // Y la cabecera que este lector cuenta es la misma tabla que el oráculo de
+    // G-11 puso en su mapa: sin esto, contar 62 y 62 no dice de QUÉ son.
+    expect(SEIS_ESPACIOS.cabeceras.length).toBe(ORACLE_BLOCKS.size);
+    // Control de armado: si el barrido no encontrara ninguna línea, las tres
+    // listas serían vacías y lo de arriba pasaría por vacuidad.
+    expect(SEIS_ESPACIOS.cabeceras.length).toBeGreaterThanOrEqual(50);
+    expect(SEIS_ESPACIOS.comentarios.length).toBeGreaterThanOrEqual(1);
   });
 
   // ══════════════════════════════════════════════════════════════
