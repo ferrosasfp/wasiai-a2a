@@ -184,25 +184,74 @@ const balance = await budgetService.getBalance(
 
 ### Qué debe detectar Adversary Review (AR) / Code Review (CR)
 
-En cualquier PR que modifique `src/services/*.ts` y toque queries sobre
-`a2a_agent_keys`:
+⚠️ La regla **no es sólo sobre `a2a_agent_keys`**: aplica a **toda** tabla que
+cumpla el criterio de más abajo, sean las que sean hoy. Leerla como "revisar
+`a2a_agent_keys`" es lo que dejó 23 filtros de otras tablas como candidatos a "no
+los mira nadie" (WKH-SEC-03; de esos 23 se mutaron 11 y 8 no los miraba nadie —
+el detalle de qué se midió y qué no está en el docblock de
+`test/ownership-filter-guard.test.ts`).
 
-1. Buscar `.from('a2a_agent_keys')` y verificar que la cadena incluye
+En cualquier PR que modifique `src/` y toque queries sobre una tabla con
+`owner_ref`:
+
+1. Buscar `.from('<tabla>')` y verificar que la cadena incluye
    `.eq('owner_ref', <value>)` antes del `.single()` / `.maybeSingle()` /
    resolución de la promise.
 2. Si el service agrega una nueva función que recibe un `keyId`, su firma
    DEBE incluir un `ownerId: string` (no `string | undefined`).
 3. Si detectás una violación, marcalo **BLOQUEANTE** en el AR. El bug es
    equivalente a un IDOR (Insecure Direct Object Reference).
+4. El paso 1 lo hace solo `test/ownership-filter-guard.test.ts` en cada
+   `npm test`. Lo que **no** hace es mirar el VALOR del filtro, ni los
+   `supabase.rpc(...)`: eso sigue siendo trabajo de quien revisa.
 
-### Tablas con ownership en app-layer (hoy)
+### Tablas con ownership en app-layer — el criterio, no la lista
 
-| Tabla | Columna owner | Protegida en services |
-|-------|--------------|----------------------|
-| `a2a_agent_keys` | `owner_ref` | SI (WKH-53) |
-| `tasks` | `owner_ref` | SI (WKH-54) |
-| `a2a_events` | — (telemetría global) | N/A |
-| `registries` | — (admin global) | N/A |
+⛔ **Acá había una lista de 4 nombres escrita a mano, y envejeció mal.** Decía
+`registries | — (admin global) | N/A`, o sea que esa tabla no tiene columna de
+dueño: es **falso**, `src/types/database.types.ts:2567` declara
+`owner_ref: string`. Y las 4 filas hacían creer que el universo eran 4 tablas.
+**Son bastantes más.** Una lista a mano no se actualiza con las migraciones; el
+criterio sí.
+
+**El criterio, que es lo único normativo de esta sección:**
+
+> Toda tabla cuyo bloque `Row` declare la columna `owner_ref` en
+> `src/types/database.types.ts` está bajo esta regla.
+
+El criterio es la regla. **El número es una foto y envejece**: al 2026-08-06 eran
+**21 de 62**, y ese "21" no lo verifica nada — G-01 son pisos (`>= 50` / `>= 15`),
+G-09 es `>= 35` y G-11/G-12/G-13 son invariantes *relativos*. Medido: agregando
+al archivo de tipos una 22ª tabla con `owner_ref`, el guardián sigue dando
+`13 passed (13)` y este renglón queda viejo en silencio. Así que **no te apoyes en
+el número de acá: derivalo.** `deriveTables()` en
+`test/ownership-filter-guard.scanner.ts` es exactamente eso, y si no coincide con
+este párrafo, el que tiene razón es `deriveTables()`.
+
+**Dónde vive la verificación mecánica:**
+
+| Archivo | Qué hace |
+|---|---|
+| `test/ownership-filter-guard.test.ts` | El guardián. Toda cadena `supabase.from(<tabla con owner_ref>)` con verbo `select`/`update`/`delete` lleva un filtro por `owner_ref`, o tiene una excepción escrita. Corre en cada `npm test`. |
+| `test/ownership-filter-guard.exceptions.ts` | El motivo de CADA omisión, sitio por sitio (41 al 2026-08-06 — otra foto: lo que se verifica es que haya UNA entrada por sitio sin filtro, no cuántas). Escritas a mano leyendo el código, nunca volcando la salida del escáner. |
+| `src/services/*.ownership.test.ts` | Que el filtro además **aísle**, con un falso que aplica los filtros pedidos. |
+| `scripts/eq-sweep.mjs` | Barrido de mutación por línea, a mano, para cerrar una HU de seguridad. No corre solo. |
+
+⚠️ **El guardián verifica PRESENCIA, no VALOR.** Un `.eq('owner_ref', otroOwner)`
+—la columna correcta con el valor equivocado— lo pasa sin chistar. Eso lo cubren
+los `*.ownership.test.ts`, y sólo para los sitios que tienen uno. La lista
+completa de lo que el guardián NO cubre (entre otros: los `supabase.rpc(...)`,
+que quedan enteros afuera) está en el docblock de
+`test/ownership-filter-guard.test.ts`. **Leela antes de apoyarte en su verde.**
+
+Dos casos que la lista vieja mezclaba y conviene tener claros:
+
+- `registries` **tiene** `owner_ref`, y aun así se consulta sin filtrar: es un
+  catálogo compartido por diseño (`registryService.list`, `src/services/registry.ts:172`,
+  cadena en `:174`). Que la columna exista no obliga a filtrar; obliga a
+  **escribir por qué no**.
+- `a2a_events` **no** tiene `owner_ref` (telemetría global), así que no entra al
+  conjunto por sí sola. Eso es correcto y sigue siéndolo.
 
 ### RLS real (Postgres-level)
 
