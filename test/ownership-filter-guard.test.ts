@@ -8,12 +8,27 @@
  * El cliente de Supabase usa `SUPABASE_SERVICE_KEY`, que BYPASSEA RLS: los
  * `.eq('owner_ref', …)` de la capa de aplicación son la única barrera entre
  * inquilinos. El censo abrió con 23 de esos filtros como candidatos a "no los
- * mira nadie"; mutados uno por uno, **20 lo eran y 3 no**: `spend-policy.ts:163`,
- * `:190` y `:219` ya tenían un espía de llamada preexistente en
- * `src/services/spend-policy.test.ts` (`:292`, `:311`, `:344`). Borrando `:163`,
- * ese archivo solo da `1 failed | 17 passed (18)`. Los 20 restantes sí: borrando
- * `src/services/receipt.ts:293` la suite completa quedaba en
- * `5294 passed | 19 skipped`, cero rojos — o sea, idéntica.
+ * mira nadie". **De esos 23 se mutaron uno por uno los 11 de este corte; los
+ * otros 12 son de WKH-SEC-04 y acá NO se mutaron.** Separar lo medido de lo
+ * heredado es el punto de este párrafo, y la lista de abajo dice cuál es cuál.
+ *
+ *  · MEDIDO ACÁ — 11 sitios, campaña completa en
+ *    `doc/sdd/220-wkh-sec-03-owner-ref-sin-cobertura/mutation-log.md:70-87`, una
+ *    fila por mutante con su conteo crudo. De los 11, **8 no los miraba ningún
+ *    test preexistente** (el único rojo de cada uno de esos 8 mutantes está
+ *    dentro del archivo de test NUEVO del sitio, más el colateral G-08/G-09) y
+ *    **3 sí**: `spend-policy.ts:163`, `:190` y `:219` ya tenían un espía de
+ *    llamada en `src/services/spend-policy.test.ts` (`:292`, `:311`, `:344`), y
+ *    borrando `:163` ese archivo solo da `1 failed | 17 passed (18)`. De los 8,
+ *    el único con su salida completa pegada es `src/services/receipt.ts:293`:
+ *    borrándolo en `ef384b7` la suite entera daba `5294 passed | 19 skipped
+ *    (5313)`, el baseline exacto, cero rojos (`sdd.md:146-147`).
+ *  · HEREDADO, NO RE-MEDIDO — los 12 sitios de WKH-SEC-04, declarados «fuera del
+ *    corte, sin mutar» en `mutation-log.md:212`. Su única evidencia sigue siendo
+ *    el barrido de A1, que no se re-corrió acá y cuya línea base este mismo SDD
+ *    declara equivocada y corrige (`sdd.md:494-497`, CD-8: «un mutante comparado
+ *    contra la baseline equivocada se clasifica al revés»). Sobre esos 12 esta
+ *    HU no midió nada.
  *
  * POR QUÉ UN GUARDIÁN ADEMÁS DE LOS TESTS DE PROPIEDAD. Los `*.ownership.test.ts`
  * cubren 11 sitios, de a uno. El guardián cubre la CLASE: la cadena número 102
