@@ -2,7 +2,7 @@
 
 > Worktree `/home/ferdev/.openclaw/workspace/wt-sec04`, rama
 > `feat/221-wkh-sec-04-owner-ref-dinero-y-disputas`, HEAD `853ed66`, base `b7fa4e7`, AR previo en
-> `99e3ed0`.
+> `99e3ed0`. **Todas las citas `archivo:línea` de este documento están ancladas a `853ed66`**, no a HEAD: las que el fix-pack posterior corrió están enumeradas en `fix-pack-cr.md:244-249`, y NO se renumeran acá a propósito (F4 §1.4 dictaminó que ese criterio es correcto).
 > Árbol verificado con `git status --porcelain` **vacío** antes y después de cada sonda (7 sondas: 1
 > mutante de columna, 2 archivos de prueba temporales, 4 mutantes de reemplazo). Estado final: vacío,
 > HEAD `853ed66`.

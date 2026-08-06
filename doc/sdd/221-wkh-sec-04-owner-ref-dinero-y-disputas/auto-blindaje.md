@@ -179,3 +179,72 @@ veces que me equivoqué.
   echo $?`. Si hace falta filtrar, capturar el exit **antes** (`cmd; rc=$?`) o usar
   `PIPESTATUS[0]`. Y desconfiar por default del verde que llega por un pipe: acá el error
   de medición y el bug del wrapper apuntaban los dos al falso negativo.
+
+---
+
+### [2026-08-06 14:05] Fix-pack F4 — Mi barrido resolvió 20/20 y aun así se me escaparon dos: miré el conjunto equivocado
+
+- **Error**: cerré el fix-pack del CR con una tabla de 20 citas verificadas con `sed -n`
+  **después** de editar, y las 20 resolvían. F4 igual rechazó, por dos citas que ese barrido
+  **no podía ver**: (1) la frase que el AR había refutado seguía viva, textual, en
+  `debit-capture.test.ts:13` —un **cuarto** sitio, cuando el `auto-blindaje` decía que habían
+  sido tres—, y (2) `test/ownership-filter-guard.test.ts:122` citaba `` `:140-142` `` para un
+  sujeto que **mi propia reescritura del punto 8 había corrido a `:155`**.
+- **Causa raíz**: las tres rondas barrieron **lo que yo escribí**. Estas dos viven en lo que
+  **desplacé** y en lo que **copié a un archivo ajeno**. Son dos puntos ciegos distintos del
+  mismo método:
+  - **La desplazada**: el que cita es el **propio archivo editado**, con un `:NNN` **desnudo**.
+    No aparece en `grep -rn "<archivo>:[0-9]"` (regla de `:150-157`) porque no lleva el nombre
+    del archivo, y no aparece en «mis citas» porque no la escribí: ya estaba, y la corrí.
+  - **La copiada al costado**: el `auto-blindaje` decía que la prosa de `BLQ-BAJO-2` «viajó del
+    test al `mutation-log.md` y de ahí al `_INDEX-row.md`». Perseguí **aguas abajo, dentro de
+    `doc/`**. La cuarta estaba **al costado, dentro de `src/`**, en un header ajeno escrito en
+    la misma wave. Y sus **tres punteros eran exactos**: ningún barrido de números la marca,
+    porque lo falso era la **oración**.
+- **Fix**: el control que cierra las dos, corrido **después de la última edición** y pegado en
+  `fix-pack-f4.md:231-329`:
+  1. Para **cada** archivo tocado, `git diff -U0 <base> -- <archivo> | grep '^@@'` da el punto
+     de inserción y el delta. **Toda cita del propio archivo con nº mayor a ese punto se
+     re-mide**, la haya escrito esta HU o no. El chequeo fuerte no es «¿resuelve?» sino
+     **«¿resuelve al MISMO texto que resolvía en la base?»**: comparar `HOY[n]` contra
+     `BASE[n − delta]`. Un `IGUAL` prueba que la cita sobrevivió al desplazamiento; un
+     `DISTINTA` es el bug, y **resuelve igual a algo plausible**, que es por lo que no se ve.
+  2. Toda frase copiada a un archivo ajeno se re-lee **con la frase corregida al lado**, no
+     sola. Si dos archivos del mismo merge dicen lo contrario sobre lo mismo, mergear garantiza
+     que el próximo lector crea el equivocado.
+- **Aplicar en**: toda HU que edite un archivo **y** lo cite, y toda corrección de prosa que
+  se propague. Dos corolarios que valen solos:
+  - **El universo se parte en dos y una mitad es gratis**: si `delta neto == tamaño`, el archivo
+    es 100% nuevo y no puede tener nada desplazado. Acá eso dejó 15 de 19 archivos fuera del
+    control y concentró el trabajo en los **4** con contenido preexistente. Uno de esos 4
+    —`owner-scoped-fake.ts`, `+82` líneas, **el mayor desplazamiento del changeset**— no lo
+    había mirado nadie, ni yo ni las tres revisiones.
+  - **La edición línea-neutra deja de ser preferencia y pasa a ser obligación** cuando el bloque
+    editado contiene auto-citas. El header de `debit-capture.test.ts` tiene tres (`:85`, `:469`,
+    `:539`) citadas desde seis documentos: una sexta línea las rompía las tres.
+
+---
+
+### [2026-08-06 14:20] Fix-pack F4 — `sed -n '326p;287p;292p'` imprime en orden de ARCHIVO, y casi reporto un hallazgo falso
+
+- **Error**: verificando `MNR-2` corrí `sed -n '326p;287p;292p'` sobre `owner-scoped-fake.ts` y
+  leí las tres líneas **en el orden en que las pedí**. Conclusión: que `adversarial-review.md:150-151`
+  tenía los dos punteros **cruzados** (`:326` para `dupKey()` y `:287-292` para el `?.`). Lo
+  escribí como hallazgo nuevo. **Era falso**: los dos punteros del AR son exactos.
+- **Causa raíz**: `sed` recorre el archivo **una sola vez, de arriba abajo**, y emite cada línea
+  cuando llega a ella. El orden de los comandos `Np` es irrelevante. Comprobado:
+  `printf 'A\nB\nC\n' | sed -n '3p;1p;2p'` → `A B C`, **no** `C A B`. Yo le atribuí a `:326` la
+  primera línea impresa, que era la de `:287`. El agravante es el de siempre: las tres líneas
+  eran plausibles para cualquiera de los tres números, así que la lectura equivocada
+  **se confirmaba sola**. Es `evidencia-que-se-autoconfirma` aplicada a la herramienta de medir.
+- **Fix**: cuando se piden varias líneas sueltas, **una por comando** o con la línea rotulada:
+  `grep -n "patrón" archivo`, o `awk 'NR==326||NR==287{print NR": "$0}'`. Acá lo cazó
+  `grep -n "onUpdateStart\|dupKey"`, que **imprime el número junto al texto** y por eso no se
+  puede desalinear. Verificado: `:287` = `const dupKey = …`, `:292` = `};`, `:326` =
+  `fake.onUpdateStart?.(table);` — el AR tenía razón en los dos.
+- **Aplicar en**: toda verificación `archivo:línea` de este pipeline, que es la moneda con la
+  que se pagan AR, CR y F4. **Regla**: si la salida de la sonda no trae el número de línea
+  pegado al texto, la sonda no sirve para adjudicar un puntero. Y el sesgo a vigilar es el
+  propio: yo estaba **buscando** un hallazgo en un artefacto de revisor, y la herramienta me
+  entregó uno. Un hallazgo hay que verificarlo **antes** de reportarlo, con la misma dureza con
+  la que se verifica un arreglo.

@@ -291,3 +291,50 @@ el rango equivocado seguía devolviendo texto plausible.
 **Convención que quedó**: en `debit-capture.ownership.test.ts` un `` `:NNN` `` desnudo
 refiere a `debit-capture.ts` (producción). Cuando refiere al propio archivo de test, se
 nombra («de ESTE archivo»). Está declarado en el mismo header, en `:33`.
+
+---
+
+## Addendum F4 — la lista completa de citas de artefactos de revisor que NO se editan
+
+> Agregado por el fix-pack de F4 (`fix-pack-f4.md`), en respuesta a `MNR-2` y `MNR-3` de
+> `validation.md`. **Va acá, al final y sin tocar una línea de arriba**, porque el ítem 1 de
+> «Lo que NO pude verificar» (`:244-249`) es la lista que F4 pidió ampliar, y meterle renglones
+> en el medio habría corrido `:285-289` — o sea, habría roto las citas de `validation.md` a
+> este mismo documento. Es literalmente el defecto que F4 vino a cerrar.
+
+El ítem 1 nombraba **sólo `code-review.md`**. La política («no se le corrigen los números a un
+artefacto de revisor, porque lo convertiría en un documento que ya no describe lo que revisó»)
+la validó F4 §1.4 como **correcta**, pero la lista estaba incompleta. Ésta es entera:
+
+| Artefacto | Ancla declarada | Citas que hoy no resuelven a HEAD, y por qué |
+|---|---|---|
+| `code-review.md` | `853ed66` (`:4-5`) | Las 7 a `fee-split.ownership.test.ts` posteriores a `:265`, corridas **+3** por la corrección de `MNR-2` de este mismo fix-pack. Enumeradas en `:244-249`. F4 las verificó: **7/7 resuelven en `853ed66`** |
+| `adversarial-review.md` | `99e3ed0` (`:3`) | **`:169`** cita `` story-HU-WKH-SEC-04.md:696 `` para «el `Out of Scope` prohíbe arreglar». Es la **misma cita falsa** que se corrigió en `fix-pack-ar.md:246`, y el desmentido de `:219-238` **nombraba sólo ese archivo**. Queda nombrada acá (`MNR-3` de F4) |
+| `adversarial-review.md` | ídem | **`:149`** cita `` owner-scoped-fake.ts:152 `` para «`onUpdateStart` es aditivo». `:152` es `  /**`, la apertura del docblock (`MNR-2` de F4) |
+| `validation.md` | `c09badc` (`:4-5`) | Sus citas a `debit-capture.test.ts:12-13`, `test/ownership-filter-guard.test.ts:122` y `_INDEX-row.md:21` describen el texto **anterior** a este fix-pack de F4. Que ya no coincidan es el efecto buscado, no un desfase |
+| `validation.md` | ídem | **`:182`** atribuye a `code-review.md:170` la verificación de los punteros `:85`/`:469`/`:539`. `:170` es la primera línea del bloque de `grep` del `MNR-1`; los punteros los verifica **`code-review.md:65-66`**. El hecho que la frase afirma —que el CR miró los punteros y no la oración— es correcto |
+
+**Lo medido, no supuesto** (`sed -n` a HEAD, después de la última edición):
+
+```
+$ sed -n '696p' doc/sdd/221-…/story-HU-WKH-SEC-04.md
+- **Arreglar cualquier filtro.** Los 12 están. Esta HU no arregla: mide.
+                     ← es otro bullet: habla de FILTROS, no de tocar archivos de test
+
+$ sed -n '667,668p' doc/sdd/221-…/story-HU-WKH-SEC-04.md
+- **Tocar** `evidence.test.ts` / `debit-capture.test.ts` / `fee-split.test.ts` / `arbiter.test.ts` más
+  allá de una línea de comentario en el header (§9).
+                     ← la prohibición REAL, y está en §11 Constraint Directives, no en §12
+
+$ sed -n '152p;158p;229p' src/services/__tests__/owner-scoped-fake.ts
+  /**                                              ← :152, lo que cita el AR
+  onUpdateStart: ((table: string) => void) | null; ← :158, la declaración
+    onUpdateStart: null,                           ← :229, el default (el AR también lo cita, y es exacto)
+```
+
+**Impacto de los dos, dicho sin agrandarlo**: nulo sobre las conclusiones. En `:149` el segundo
+puntero del mismo paréntesis (`:229`) es exacto y es el que sostiene la afirmación —«default
+`null`»—, y el AR además la verificó por comportamiento, no por lectura. En `:169` la decisión
+que el AR toma (no tocar `arbiter/evidence.test.ts`) es la correcta y la prohibición existe: lo
+que falla es el número, no el veredicto. **Se declaran igual**, porque una cita que resuelve a
+algo plausible es exactamente la clase de defecto que costó tres rondas en esta HU.

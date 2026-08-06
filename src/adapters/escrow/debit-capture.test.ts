@@ -10,9 +10,9 @@
  *
  * ⚠️ WKH-SEC-04 — LÍMITE DE ESTE ARCHIVO: sus dobles NO aplican los filtros
  * (`:85` y `:469` son `eq: () => builder`) y su control de dueño es un espía de
- * argumento (`:539`), que pasa igual con el nombre de la columna mal escrito; el
- * acotamiento por `owner_ref` de `debit-capture.ts` (`:120` y `:212`) lo cubre
- * por comportamiento `src/adapters/escrow/debit-capture.ownership.test.ts`.
+ * argumento (`:539`): prueba QUE LA LLAMADA SE HIZO, no QUÉ FILAS VOLVIERON — la
+ * columna mal escrita SÍ la caza, medido en `debit-capture.ownership.test.ts:43-52`;
+ * ese archivo cubre por comportamiento `debit-capture.ts` (`:120` y `:212`).
  */
 
 import { keccak256, stringToBytes } from 'viem';

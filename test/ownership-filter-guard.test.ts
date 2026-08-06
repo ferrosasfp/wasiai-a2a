@@ -119,7 +119,7 @@
  *     de este guardián.
  *     Ampliar el alcance a los RPC es OTRA HU; declararlo es de ésta.
  * 10. UN ARCHIVO QUE TODAVÍA NO ESTÁ EN EL ÍNDICE DE GIT. El universo sale de
- *     `git ls-files src` (`:140-142`), a propósito: es lo que un `checkout`
+ *     `git ls-files src` (`:155-157`), a propósito: es lo que un `checkout`
  *     trae. La consecuencia es que un archivo nuevo **sin `git add`** es
  *     invisible para el guardián. Medido: un `src/services/__mnr4-probe.ts`
  *     recién creado con `supabase.from('a2a_receipts').select('*').eq('id', id)`
