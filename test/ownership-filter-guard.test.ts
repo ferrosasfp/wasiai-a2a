@@ -81,11 +81,26 @@
  *  7. RLS. No la mide ni la reemplaza: es WKH-SEC-02 (`CLAUDE.md:247-255`). Y
  *     mientras el cliente use `SUPABASE_SERVICE_KEY` (BYPASSRLS), RLS no vuelve
  *     redundante ningún filtro de aplicación.
- *  8. (Del estado del corte, no del instrumento.) Entre el merge de WKH-SEC-03 y
- *     el de WKH-SEC-04 este guardián está verde con 12 sitios que no tienen test
- *     de propiedad: `fee-split` ×4, `arbiter` ×3, `evidence` ×3,
- *     `reconciliation` ×1, `debit-capture` ×1. Para esos 12, lo que se sabe es
- *     que el filtro está escrito. Que funcione no lo midió nadie todavía.
+ *  8. (Del estado del corte, no del instrumento.) LOS 12 SITIOS DEL CAMINO DEL
+ *     DINERO Y LAS DISPUTAS YA TIENEN TEST DE PROPIEDAD — los escribió
+ *     WKH-SEC-04: `fee-split` ×4, `arbiter` ×3, `evidence` ×3,
+ *     `reconciliation` ×1, `debit-capture` ×1. Medidos uno por uno con la
+ *     mutación aplicada sobre la suite completa: los 12 pasan de SURVIVED a
+ *     KILLED por un test que NO es este archivo
+ *     (`doc/sdd/221-wkh-sec-04-owner-ref-dinero-y-disputas/mutation-log.md`).
+ *     Con eso, los 23 sitios del censo de SEC-03 (11 + 12) están cubiertos.
+ *
+ *     ⚠️ LO QUE SIGUE SIN CUBRIR NO ES ESO. Este guardián verde + los 23 tests
+ *     de propiedad NO dicen nada sobre (a) el VALOR que se le pasa al filtro
+ *     —punto 1 de esta misma lista—, ni sobre (b) los 42 `supabase.rpc()` del
+ *     punto 9, que son el resto del camino del dinero. Los dos huecos siguen
+ *     abiertos y siguen siendo de otra HU.
+ *
+ *     ⚠️ Y NO: quitar cualquiera de los 12 NO deja «la suite verde». Desde el
+ *     merge de SEC-03 pone en rojo `G-08` y `G-09` de este archivo, incluso sin
+ *     ningún test de comportamiento. La frase correcta para un filtro sin
+ *     cobertura es: «quitándolo, el único rojo es el del guardián; ningún test
+ *     de comportamiento se entera».
  *  9. `supabase.rpc(...)` — el universo del escáner es `supabase.from(`, así que
  *     los RPC quedan ENTEROS afuera. Medido hoy sobre `src/` no-test:
  *     **42 call-sites en 13 archivos**, entre ellos `budget.ts`,
@@ -104,7 +119,7 @@
  *     de este guardián.
  *     Ampliar el alcance a los RPC es OTRA HU; declararlo es de ésta.
  * 10. UN ARCHIVO QUE TODAVÍA NO ESTÁ EN EL ÍNDICE DE GIT. El universo sale de
- *     `git ls-files src` (`:140-142`), a propósito: es lo que un `checkout`
+ *     `git ls-files src` (`:155-157`), a propósito: es lo que un `checkout`
  *     trae. La consecuencia es que un archivo nuevo **sin `git add`** es
  *     invisible para el guardián. Medido: un `src/services/__mnr4-probe.ts`
  *     recién creado con `supabase.from('a2a_receipts').select('*').eq('id', id)`

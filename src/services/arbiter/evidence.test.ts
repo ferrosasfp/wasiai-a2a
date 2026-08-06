@@ -7,6 +7,12 @@
  *     un valid:false por config (secret ausente, sin tamper_detected) NO invalida.
  *   - agregación receiptSettleTotalUsd sobre SETTLE_RECEIPT_TYPES (null si ninguno).
  *   - mapeo PGRST116 → INTENT_NOT_FOUND (disclosure-safe).
+ *
+ * ⚠️ WKH-SEC-04 — LÍMITE DE ESTE ARCHIVO: su doble NO aplica los filtros (`:55`
+ * es `eq: () => b`) y su fixture tiene un solo dueño (`:42`), así que lo que
+ * mide es la lógica determinística, NO el acotamiento por `owner_ref`; los tres
+ * `.eq('owner_ref', …)` de `evidence.ts` (`:57`, `:76`, `:96`) los cubre por
+ * comportamiento `src/services/arbiter/evidence.ownership.test.ts`.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';

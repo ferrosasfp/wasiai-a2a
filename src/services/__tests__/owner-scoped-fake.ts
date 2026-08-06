@@ -51,8 +51,28 @@
  * falla es ruidoso: una cadena que llame a un método ausente explota con «is not
  * a function», no degrada a «no matcheó nada».
  *
- * Tampoco tiene `onUpdateStart` (E-1 sí lo tiene): el único entrelazado de este
- * corte es sobre un DELETE, así que el hook que hay es `onDeleteStart`.
+ * ── LO QUE AGREGÓ WKH-SEC-04 (aditivo, default inerte) ────────────────────
+ *
+ * `onUpdateStart` — el gemelo de `onDeleteStart` sobre el verbo `update`. Lo
+ * pidieron los tres UPDATE de `src/services/fee-split.ts` (`:538`, `:618`,
+ * `:697`), cuya fila objetivo ya queda determinada por el UNIQUE
+ * `(orchestration_id, recipient_role)` de
+ * `supabase/migrations/20260705000000_wkh136_fee_splits.sql:40` — que NO incluye
+ * `owner_ref`. En una sola pasada, con el filtro por dueño o sin él, el UPDATE
+ * toca la misma fila: sólo se separan si la fila cambia de dueño entre el read
+ * previo y la escritura. Default `null`: sin escenario que lo asigne, no corre.
+ *
+ * `TableSpec.unique` — un modelo mínimo del índice UNIQUE. Sin él, un INSERT
+ * sobre una combinación ya ocupada se empujaba igual y el camino
+ * `SELECT → null → INSERT → 23505` de `fee-split.ts:404-407` era inalcanzable
+ * desde un test. Default `undefined`: sin `unique` declarado, el `insert` sigue
+ * empujando sin mirar nada, exactamente como antes.
+ *
+ * ⚠️ LÍMITE DECLARADO de `unique`: con `unique` puesto, un `upsert` que choca
+ * también devuelve `23505` en vez de resolver el conflicto. Eso NO es la
+ * semántica de PostgREST — es la misma ausencia de `onConflict` que ya declara
+ * el comentario de `upsert()` más abajo, ahora visible. Una tabla que necesite
+ * upsert con resolución de conflicto NO debe declarar `unique`.
  */
 
 /** Un filtro pedido por el servicio: columna y valor, tal cual llegaron. */
@@ -102,6 +122,16 @@ export interface TableSpec {
    */
   columns: string[];
   rows?: Row[];
+  /**
+   * Índices UNIQUE de la tabla, cada uno como la lista de sus columnas. Un
+   * `insert`/`upsert` cuya fila repite una combinación ya presente devuelve
+   * `{ data: null, error: { code: '23505', … } }`, igual que Postgres, en vez de
+   * empujar un duplicado que la base real habría rechazado.
+   *
+   * Omitirlo (el default) deja el comportamiento previo intacto: se empuja sin
+   * mirar nada.
+   */
+  unique?: string[][];
 }
 
 export interface OwnerScopedFake {
@@ -119,6 +149,13 @@ export interface OwnerScopedFake {
    * detrás de un pre-chequeo en JavaScript.
    */
   onDeleteStart: ((table: string) => void) | null;
+  /**
+   * El gemelo de `onDeleteStart` sobre `.update()`: corre ENTRE el read previo
+   * del servicio y la escritura, antes de que se apliquen los filtros. Es lo
+   * único que separa un UPDATE con filtro por dueño de uno sin él cuando la fila
+   * objetivo ya está determinada por otro índice UNIQUE.
+   */
+  onUpdateStart: ((table: string) => void) | null;
 }
 
 /** Mismo shape que PostgREST cuando `single()` no matchea exactamente una fila. */
@@ -149,22 +186,47 @@ function columnError(table: string, column: string): FakeError {
   };
 }
 
+/**
+ * El primer índice UNIQUE que la fila nueva violaría, si hay alguno. Compara con
+ * `===` sobre las columnas del índice, la misma igualdad que usa `applyFilters`.
+ */
+function uniqueViolation(
+  rows: Row[],
+  row: Row,
+  indexes: string[][],
+): string[] | undefined {
+  return indexes.find((cols) =>
+    rows.some((existing) => cols.every((c) => existing[c] === row[c])),
+  );
+}
+
+/** Mismo shape que PostgREST cuando un INSERT choca contra un índice UNIQUE. */
+function uniqueError(table: string, cols: string[]): FakeError {
+  return {
+    message: `duplicate key value violates unique constraint on ${table} (${cols.join(', ')})`,
+    code: '23505',
+  };
+}
+
 export function createOwnerScopedFake(
   spec: Record<string, TableSpec>,
 ): OwnerScopedFake {
   const data = new Map<string, Row[]>();
   const columns = new Map<string, string[]>();
+  const uniques = new Map<string, string[][]>();
   for (const [table, def] of Object.entries(spec)) {
     data.set(
       table,
       (def.rows ?? []).map((r) => ({ ...r })),
     );
     columns.set(table, [...def.columns]);
+    if (def.unique !== undefined) uniques.set(table, def.unique);
   }
 
   const fake: OwnerScopedFake = {
     queries: [],
     onDeleteStart: null,
+    onUpdateStart: null,
     rows: (table) => data.get(table) ?? [],
     resolved: () => fake.queries.filter((q) => q.resolved),
     from: (table) => makeBuilder(table),
@@ -218,6 +280,17 @@ export function createOwnerScopedFake(
       return rows;
     };
 
+    /**
+     * El `23505` que la fila a insertar provocaría, o `null`. Sin `unique`
+     * declarado para la tabla devuelve `null` siempre: es el default inerte.
+     */
+    const dupKey = (): FakeError | null => {
+      const indexes = uniques.get(table);
+      if (indexes === undefined || inserted === null) return null;
+      const hit = uniqueViolation(tableRows(), inserted, indexes);
+      return hit === undefined ? null : uniqueError(table, hit);
+    };
+
     const badColumn = (): FakeError | null => {
       const bad = unknownColumn(filters, columns.get(table) ?? []);
       return bad === undefined ? null : columnError(table, bad);
@@ -248,6 +321,9 @@ export function createOwnerScopedFake(
         kind = 'update';
         patch = next;
         touch();
+        // Mismo punto que en `delete()`: el servicio ya hizo su read y todavía
+        // no aplicó los filtros de esta escritura.
+        fake.onUpdateStart?.(table);
         return builder;
       },
       /**
@@ -290,6 +366,8 @@ export function createOwnerScopedFake(
         const bad = badColumn();
         if (bad !== null) return { data: null, error: bad };
         if ((kind === 'insert' || kind === 'upsert') && inserted !== null) {
+          const dup = dupKey();
+          if (dup !== null) return { data: null, error: dup };
           const row = { ...inserted };
           tableRows().push(row);
           return { data: row, error: null };
@@ -333,6 +411,10 @@ export function createOwnerScopedFake(
           }
         }
         if ((kind === 'insert' || kind === 'upsert') && inserted !== null) {
+          const dup = dupKey();
+          if (dup !== null) {
+            return Promise.resolve(onFulfilled({ data: null, error: dup }));
+          }
           const row = { ...inserted };
           tableRows().push(row);
           return Promise.resolve(onFulfilled({ data: [row], error: null }));
