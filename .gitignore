@@ -135,10 +135,16 @@ backups/
 /SPRINT-SECURITY-COMPLETE-2026-04-27.md
 /doc/audit/2026-06-24-auditoria-profunda.md
 /doc/audit/2026-06-24-auto-blindaje.md
+/doc/audit/2026-06-28-best-practices-audit.md
 /doc/audit/2026-06-29-a2a-hardening-auto-blindaje.md
 /doc/audit/2026-06-29-external-audit.md
 /doc/audit/compose-404-budget-drain-investigation.md
 /doc/audit/e2e-integral-2026-07-07.md
+# Auditoría de deuda técnica del 2026-08-06 (6 reportes). Misma razón que las de
+# arriba, y con un agravante: varios de sus hallazgos SIGUEN ABIERTOS, así que
+# publicarlos acá es entregar el mapa antes que el parche. Este repo es PUBLIC.
+# Quedaban sin trackear pero TAMPOCO ignorados, o sea que un `git add -A` los subía.
+/doc/audit/deuda-tecnica-2026-08-06/
 /doc/competitive/attack-plan-2026-07.md
 /doc/competitive/okx-ai-analysis-2026-07.md
 /doc/demo/3-way-split-runbook.md
