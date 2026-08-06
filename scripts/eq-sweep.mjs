@@ -53,12 +53,20 @@
  * restaura con `git checkout --`, y eso se llevaría puesto cualquier cambio sin
  * commitear.
  *
- * La restauración está en un `finally` y en handlers de `SIGINT`/`SIGTERM`/
- * `SIGHUP` (ver `restaurar()`): un Ctrl-C en el medio del barrido repone el
- * archivo mutado antes de salir. Lo que NO puede cubrirse desde acá es un
- * `SIGKILL` o un corte de luz — ahí el árbol queda con la línea borrada y hay
- * que correr `git checkout -- <archivo>` a mano; el `git status` lo muestra y
- * G-08 lo pone rojo en el siguiente `npm test`.
+ * La restauración está en un `finally`, y un Ctrl-C en el medio del barrido
+ * repone el archivo mutado antes de salir. **Quien lo repone NO es el handler de
+ * señal**: para cuando el handler llega a correr, el archivo ya está restaurado.
+ * Lo que hace el trabajo es DÓNDE está el `await` — el `cederElTurno()` del
+ * principio de cada iteración, con el árbol ya limpio, que es el único momento en
+ * que el event loop atiende la señal. Los handlers de `SIGINT`/`SIGTERM`/`SIGHUP`
+ * imprimen y salen con 130; su `restaurar()` encuentra `mutado === null` y no
+ * hace nada. El porqué completo, con lo que se midió cuando no estaba el `await`,
+ * está sobre `cederElTurno` (`:241-257`) — y sin ese `await` los handlers no sólo
+ * no reponían: no corrían nunca.
+ *
+ * Lo que NO puede cubrirse desde acá es un `SIGKILL` o un corte de luz — ahí el
+ * árbol queda con la línea borrada y hay que correr `git checkout -- <archivo>` a
+ * mano; el `git status` lo muestra y G-08 lo pone rojo en el siguiente `npm test`.
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
