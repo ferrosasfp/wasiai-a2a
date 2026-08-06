@@ -30,9 +30,9 @@
  * firma consumible» sería afirmar de más (BLQ-BAJO-1 del AR).
  *
  * Y ESTE ARCHIVO NO PUEDE MEDIR ESA GUARDA: DC-01..DC-04 stubean el RPC
- * (`mockRpc.mockResolvedValue(...)`, `:173-176`), así que toda frase sobre lo
- * que la base persiste es infalsificable acá adentro. Se refuta o se confirma
- * leyendo la migración, no corriendo este archivo.
+ * (`mockRpc.mockResolvedValue(...)` de ESTE archivo, `:199-202`), así que toda
+ * frase sobre lo que la base persiste es infalsificable acá adentro. Se refuta
+ * o se confirma leyendo la migración, no corriendo este archivo.
  *
  * ── EL SITIO 13.º: POR QUÉ TAMBIÉN ESTÁ ACÁ, Y POR QUÉ NO SUMA ────────────
  *

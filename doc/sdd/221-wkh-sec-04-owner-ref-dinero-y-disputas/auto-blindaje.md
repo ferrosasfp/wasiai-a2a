@@ -112,7 +112,7 @@ veces que me equivoqué.
   consecuencia que no medí, al lado de una que sí medí, con el mismo tono.
 - **Fix**: reescribir a lo medido y **pegar al lado el comando que refuta**. Y cuando la
   frase habla de algo que el archivo no puede observar, **decirlo con todas las letras**
-  (ver `debit-capture.ownership.test.ts:34-37`: «este archivo NO puede medir esa guarda,
+  (ver `debit-capture.ownership.test.ts:32-35`: «este archivo NO puede medir esa guarda,
   DC-01..DC-04 stubean el RPC»). Antes de afirmar el efecto **posterior** de un filtro
   —persistencia, log, contador—, correr la sonda: 3 de 3 veces el efecto real fue
   distinto del que había supuesto, y en el caso del log era **peor** (mudo, no logueado).
@@ -122,3 +122,60 @@ veces que me equivoqué.
   la frase no va, o va declarada como no medible. Vale doble para la prosa que se
   **propaga**: la de `BLQ-BAJO-2` viajó del test al `mutation-log.md` y de ahí al
   `_INDEX-row.md`, y hubo que corregir los tres.
+
+---
+
+### [2026-08-06 11:30] Fix-pack CR — El fix-pack anterior invalidó su propia cita al escribirla
+
+- **Error**: al reescribir el header de `debit-capture.ownership.test.ts` para cerrar
+  `BLQ-BAJO-1` del AR, le agregué 18 líneas. Eso empujó el stub `mockRpc.mockResolvedValue`
+  de `:173` a `:199` — y la cita que escribí en ese mismo commit quedó diciendo `:173-176`.
+  El CR lo marcó BLOQUEANTE. Los **4** hallazgos del CR son el mismo defecto: cité números
+  medidos contra un estado del archivo anterior a mi propia edición.
+- **Causa raíz**: medí **mientras** editaba, no **después**. Y hay un agravante que
+  convierte el error en trampa: `sed -n '173,176p'` sobre ese test devuelve un literal con
+  campos `debit_nonce`, `debit_key_id_hash`, `debit_hop1_tx_hash`, `debit_settle_status`.
+  **Se parece a un stub de firmas.** Un revisor que abre la línea ve algo plausible y
+  estampa OK. Es `evidencia-que-se-autoconfirma` aplicada al puntero que sostenía la única
+  frase escrita para cerrar el bloqueante. Segundo factor: en ese header los `:NNN`
+  desnudos refieren a `debit-capture.ts`, así que un `:NNN` suelto **se lee como producción
+  por defecto** — y `debit-capture.ts:173-176` también existe y también es plausible
+  (`keccak256(stringToBytes(keyId))`). Las dos lecturas fallan, ninguna avisa.
+- **Fix**: (a) la cita pasa a `:199-202` **con el archivo desambiguado** («de ESTE
+  archivo»), verificado con `sed -n '199,202p'` **después** de cerrar la edición; (b) la
+  edición se hizo **línea-neutra a propósito** —el bloque sigue midiendo 4 líneas, `:32-35`—
+  para que las 3 citas de `doc/` que apuntan a él no se movieran; (c) el desfase +3 que sí
+  introduje en `fee-split.ownership.test.ts` se persiguió hasta sus 3 citas en
+  `fix-pack-ar.md` (`:71`, `:94`, `:127`) y se corrigió cada una contra `sed -n`.
+- **Aplicar en**: cualquier tarea que edite un archivo **y** lo cite. Dos reglas mecánicas,
+  y la segunda es la que faltaba:
+  1. **Verificar las citas al final, nunca durante.** Recorrer cada `` `:NNN` `` del diff con
+     `sed -n 'NNNp' <archivo>` y pegar la salida. Si una cita apunta a un archivo distinto
+     del que la contiene, decirlo explícitamente.
+  2. **Preferir la edición línea-neutra** cuando el bloque editado es destino de citas
+     externas. Si no se puede, **buscar quién lo cita antes de dar por cerrado**
+     (`grep -rn "<archivo>:[0-9]"`), porque el desfase viaja: acá viajó a 3 documentos.
+  3. Corolario del agravante: cuando el `:NNN` es del **propio** archivo pero el header
+     usa `:NNN` desnudo para otro, **nombrar el archivo**. Un rango que resuelve a algo
+     «parecido a lo esperado» es peor que uno que resuelve a nada.
+
+---
+
+### [2026-08-06 11:34] Fix-pack CR — Medí `npx biome` con un pipe y me dio el resultado tranquilizador
+
+- **Error**: para verificar `MNR-3` corrí `npx biome check src/ 2>&1 | tail -8; echo
+  "exit=$?"`. Devolvió `Checked 472 files in 138ms. No fixes applied.` y `exit=0`, o sea
+  **lo contrario** de lo que decía el CR. Estuve a punto de escribir que el hallazgo del CR
+  no se reproducía.
+- **Causa raíz**: dos fallas sumadas en un solo comando. (1) `$?` después de un pipe es el
+  del **último** proceso — medí el exit code de `tail`, no el de `npx`. (2) La salida
+  redirigida a través del wrapper de este shell sale corrupta con exit 0 (lección
+  `rtk-proxy-corrupts-redirected-output`). Las dos empujan en la **misma** dirección: verde.
+- **Fix**: re-medir **a pelo**, sin pipe y sin redirección. Ahí sí:
+  `npx biome check src/` → `Lint: 2 errors, 0 warnings` + `npm error could not determine
+  executable to run`, `exit=1`; `./node_modules/.bin/biome check src/` →
+  `Checked 472 files in 141ms. No fixes applied.`, `exit=0`. El CR tenía razón.
+- **Aplicar en**: toda verificación cuyo veredicto sea el **exit code**. Nunca `cmd | tail;
+  echo $?`. Si hace falta filtrar, capturar el exit **antes** (`cmd; rc=$?`) o usar
+  `PIPESTATUS[0]`. Y desconfiar por default del verde que llega por un pipe: acá el error
+  de medición y el bug del wrapper apuntaban los dos al falso negativo.

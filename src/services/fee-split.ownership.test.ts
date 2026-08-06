@@ -262,10 +262,13 @@ describe('fee-split — los 4 filtros por dueño del reparto del fee (WKH-SEC-04
   // (`fee-split.ts:636`: «v1: NO se cablea a orchestrate/compose»), y
   // `command grep -rn "reverseFeeSplits" src/ --include=*.ts` devuelve —corrido
   // el 2026-08-06, con este párrafo ya escrito— 20 hits en 4 archivos:
-  // `fee-split.ts` (6: la definición y sus logs), `fee-split.test.ts` (7) y
-  // este archivo (6), más UN solo hit fuera de `fee-split.*`:
-  // `fee-charge.ts:677`, y está DENTRO de un comentario. Los dos conteos de
-  // test se mueven cada vez que se edita un comentario como éste; lo que no se
+  // `fee-split.ts` (6, de los cuales sólo 4 son código: la definición `:640` y
+  // tres strings de log, `:666`/`:680`/`:702`; los otros 2 son COMENTARIOS,
+  // `:18` del docblock del módulo y `:628` un separador de sección),
+  // `fee-split.test.ts` (7) y este archivo (6), más UN solo hit fuera de
+  // `fee-split.*`: `fee-charge.ts:677`, y está DENTRO de un comentario.
+  // LOS TRES conteos se mueven al editar un comentario como éste —el de
+  // `fee-split.ts` también, por esos dos hits suyos que son prosa—; lo que no se
   // mueve sin un llamador nuevo es que el único hit de otro módulo sea prosa.
   // (La redacción anterior decía «sólo el propio `fee-split.ts` y una mención
   // en `fee-charge.ts`», y omitía los dos archivos de test: MNR-1 del AR.)

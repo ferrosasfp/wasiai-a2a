@@ -30,11 +30,11 @@
 - **Cómo quedó**: se afirma sólo lo medido — sin el filtro de `:212` cambia el
   **veredicto en memoria** de `SIGNER_MISMATCH` (`:236-242`) a `valid` (`:247`), que es
   exactamente lo que lee `DC-01` en `p_status`/`p_reason`. Se agregó un bloque `⚠️ HASTA
-  AHÍ LLEGA` (`:20-32`) que dice que la persistencia la sigue bloqueando el RPC, y que lo
+  AHÍ LLEGA` (`:20-30`) que dice que la persistencia la sigue bloqueando el RPC, y que lo
   que aporta el filtro es **defensa en profundidad sobre el veredicto**: sin él, lo único
   que separa un `valid` ajeno de la base es el `RAISE` del RPC.
-- **Y se declaró el límite del propio archivo** (`:34-37`): `DC-01..DC-04` **stubean** el
-  RPC (`mockRpc.mockResolvedValue(...)`, `debit-capture.ownership.test.ts:173-176`), así
+- **Y se declaró el límite del propio archivo** (`:32-35`): `DC-01..DC-04` **stubean** el
+  RPC (`mockRpc.mockResolvedValue(...)`, `debit-capture.ownership.test.ts:199-202`), así
   que cualquier frase sobre lo que la base persiste es **infalsificable acá adentro** —
   se refuta leyendo la migración, no corriendo el archivo. Eso es lo que dejó pasar la
   frase vieja.
@@ -68,7 +68,7 @@
 
 ## BLQ-BAJO-3 — «el `updateErr` sólo se loguea» describía una rama que no corre
 
-- **Sitios**: `src/services/fee-split.ownership.test.ts:287-310` (antes `:287-290`) y la
+- **Sitios**: `src/services/fee-split.ownership.test.ts:290-313` (antes `:287-290`) y la
   misma frase propagada en `doc/sdd/221-…/_INDEX-row.md:21`, que también se corrigió.
 - **Sonda propia** (copia temporal del archivo de test, `src/services/zz-probe.test.ts`,
   corrida y **borrada**; `git status --porcelain` verificado vacío después):
@@ -91,7 +91,7 @@
 
 ## MNR-1 — la descripción del grep no coincidía con su salida
 
-- **Sitio**: `src/services/fee-split.ownership.test.ts:260-272`.
+- **Sitio**: `src/services/fee-split.ownership.test.ts:260-274`.
 - **Grep re-corrido HOY** (no se copió el número del AR, que dice «5 archivos» y tampoco
   coincide):
 
@@ -124,7 +124,7 @@
 
 ## MNR-3 — el hallazgo (b) se quedaba en el contador
 
-- **Sitio**: `src/services/fee-split.ownership.test.ts:371-381` (antes `:353-357`), y la
+- **Sitio**: `src/services/fee-split.ownership.test.ts:374-384` (antes `:353-357`), y la
   misma frase en `doc/sdd/221-…/_INDEX-row.md:21`, corregida también.
 - **Medido con la misma sonda temporal** sobre FS-04:
 
@@ -156,16 +156,43 @@ $ node ./node_modules/vitest/vitest.mjs run
 colapsa la salida y pierde los `skipped`.
 
 ```
-$ npx tsc --noEmit          →  exit 0
-$ npx biome check src/      →  Checked 472 files in 139ms. No fixes applied.   exit 0
+$ ./node_modules/.bin/tsc --noEmit      →  exit 0
+$ ./node_modules/.bin/biome check src/  →  Checked 472 files in 141ms. No fixes applied.   exit 0
 ```
 
-⚠️ `npx biome check src/` **a través del wrapper de este shell** volvió a dar la salida
-mezclada que ya está documentada en `auto-blindaje.md` (`Lint: 2 errors` + `npm error
-could not determine executable to run`). La corrida limpia es la de arriba (`rtk proxy npx
-biome check src/`), y da lo mismo que `./node_modules/.bin/biome check src/`:
-`Checked 472 files ... exit=0`. **El «2 errors» no es del lint**: es el wrapper fallando
-por otra cosa.
+⚠️ **Etiqueta corregida — `MNR-3` del CR.** Este bloque decía `$ npx tsc --noEmit` /
+`$ npx biome check src/`, y **cuatro líneas más abajo el propio documento** decía que
+`npx biome check src/` acá falla. Los dos no pueden ser ciertos a la vez. Re-medido en
+este fix-pack, los dos comandos **a pelo** (sin pipe y sin redirección, ver la nota de
+abajo), 2026-08-06:
+
+```
+$ ./node_modules/.bin/biome check src/
+Checked 472 files in 141ms. No fixes applied.
+exit=0
+$ npx biome check src/
+Lint: 2 errors, 0 warnings
+═══════════════════════════════════════
+npm error could not determine executable to run
+exit=1
+```
+
+O sea que la salida de `Checked 472 files` **no puede** haber venido del `npx` que la
+encabezaba. No se puede reconstruir cuál invocación generó aquel transcript de `139ms`,
+así que **no se re-etiquetó a ojo: se volvió a medir**, y lo que quedó arriba es esa
+corrida, con el binario que figura escrito. El `141ms` varía entre corridas;
+`Checked 472 files`, `No fixes applied` y `exit 0` no.
+
+⚠️ **Cómo medirlo, porque medirlo mal da el resultado tranquilizador.** `npx biome check
+src/ 2>&1 | tail -8` en este shell imprime `Checked 472 files ... ` y `echo $?` da `0` —
+las dos cosas falsas: el `$?` es el de `tail`, y la salida sale corrupta por el wrapper
+(lección `rtk-proxy-corrupts-redirected-output`). **Esa medición mal hecha se hizo en este
+mismo fix-pack** y por un momento dio por bueno el `npx`. Sólo el comando a pelo, sin
+pipe, muestra el `exit=1`.
+
+**Regla que queda**: en este repo se escribe `./node_modules/.bin/<bin>`, no `npx <bin>`.
+El caso medido es específico de biome — `npx tsc --noEmit` sí funciona — pero un bloque
+`$ comando → salida` sólo vale si el comando escrito es el que produjo esa salida.
 
 ### Re-verificación de mutantes (4 de los 13, con el método del AR)
 
@@ -216,7 +243,11 @@ fix-pack agregó un archivo a esa lista ni tocó una línea fuera de un comentar
   clasificó: «deuda declarada, NO tarea propia».
 - **No se tocaron `arbiter/evidence.test.ts` ni `debit-capture.test.ts`.** El AR (§6)
   confirmó que la decisión de no tocarlos es la correcta y el Story File lo prohíbe
-  explícitamente (`story-HU-WKH-SEC-04.md:696`, `Out of Scope`).
+  explícitamente (`story-HU-WKH-SEC-04.md:667-668`, §11 Constraint Directives → PROHIBIDO:
+  «**Tocar** `evidence.test.ts` / `debit-capture.test.ts` / … más allá de una línea de
+  comentario en el header»). **Corregido en el fix-pack del CR**: acá decía `:696`, que es
+  otro bullet («Arreglar cualquier filtro», §12 Out of Scope) y no dice nada de esos dos
+  archivos.
 - **No se tocó `test/ownership-filter-guard.test.ts`.** Ni el escáner ni las 41
   excepciones; su único cambio sigue siendo el del bloque de comentario del header, ya
   revisado en el AR §7.
@@ -229,7 +260,7 @@ fix-pack agregó un archivo a esa lista ni tocó una línea fuera de un comentar
    verifiqué **leyendo** la migración (`…wkh191a_debit_signatures.sql:83-85`) y el
    relanzamiento en `debit-capture.ts:288`. No hay en este repo ningún test que ejecute
    ese RPC contra Postgres: los tests lo stubean. Esa limitación está ahora **escrita
-   dentro del archivo que hacía la afirmación** (`debit-capture.ownership.test.ts:34-37`),
+   dentro del archivo que hacía la afirmación** (`debit-capture.ownership.test.ts:32-35`),
    que es justamente lo que faltaba.
 2. **Que el caso (ii) de BLQ-BAJO-3 se comporte igual contra PostgREST real.** La sonda
    corrió contra `owner-scoped-fake.ts`, no contra Supabase. Lo que sí es verificable sin
