@@ -31,10 +31,13 @@
  * Espejo estructural de `settleX402` (`src/adapters/avalanche/payment.ts`).
  */
 
+import { getLogger } from '../../lib/logger.js';
 import {
   classifySettleTransportError,
   FacilitatorSettleError,
 } from '../errors.js';
+
+const log = getLogger('solana-facilitator-payout-route');
 
 /** Mismo techo de wall-clock que el hop del facilitator EVM. */
 const FACILITATOR_TIMEOUT_MS = 30_000;
@@ -155,6 +158,13 @@ function getFacilitatorUrl(): string | undefined {
  * se haya pagado. Este guard cierra la puerta que sí es config nuestra —
  * "encendí la bandera y no dije a dónde" — y ninguna otra.
  *
+ * WKH-342 — lo de arriba SIGUE SIENDO CIERTO PALABRA POR PALABRA de este guard, que no
+ * cambió: es el piso, y la que pregunta por la ruta es otra cosa (`probePayoutRoute` /
+ * `ensurePayoutRouteReady`, más abajo). Y esa otra cosa tampoco lee la existencia de un
+ * status code: la lee de un 200 sano donde el facilitator ENUMERÓ sus rutas dedicadas.
+ * El 404 del POST real sigue cayendo en `'unknown'` exactamente como antes; el 404 sobre
+ * el `/supported` del sondeo es `route_unaskable/probe_http_error` y deja pasar.
+ *
  * La comparación es la MISMA literal `=== 'true'` que usa la ramificación de
  * `settle()` (`payment.ts`): si el guard fuera más laxo (`Boolean(...)`), rompería
  * el arranque de configs que toman el camino legado y funcionan.
@@ -171,6 +181,301 @@ export function assertFacilitatorPayoutConfigured(): void {
       `WASIAI_FACILITATOR_URL) to the facilitator that serves POST /solana/payout, or ` +
       `set SOLANA_SETTLE_VIA_FACILITATOR to 'false' to keep the locally-signed path.`,
   );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WKH-342 — SONDEO DE LA RUTA DEDICADA: preguntarle al facilitator, no al string
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * El id que `GET /supported` del facilitator publica en `dedicatedRoutes` cuando la
+ * ruta de tesorería está registrada (`wasiai-facilitator/src/core/supported.ts`,
+ * tipo `DedicatedRouteId`). Es el par método+path tal cual, no un alias: tiene que
+ * coincidir con el `fetch` de `payoutViaFacilitator`, que va a
+ * `${facilitatorUrl}/solana/payout` con `method: 'POST'`.
+ */
+const PAYOUT_ROUTE_ID = 'POST /solana/payout';
+
+/**
+ * Techo del SONDEO, y a propósito NO es `FACILITATOR_TIMEOUT_MS` (30 s).
+ *
+ * Ese techo de 30 s es para un request que FIRMA Y TRANSMITE: vale esperarlo. Este
+ * sondeo es un `GET` a un endpoint de discovery que no toca la cadena, y encima corre
+ * en el camino perezoso de un leg de dinero — sumarle 30 s de espera a un pago para
+ * averiguar si la ruta existe cambiaría un problema de configuración por un problema
+ * de latencia. Si el facilitator no puede contestar un `/supported` en 5 s, el
+ * veredicto correcto es "no pude preguntar" y se sigue igual.
+ */
+const PAYOUT_ROUTE_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * TTL del veredicto POSITIVO (ms). 300 s, y ACÁ ME APARTO del exemplar a propósito:
+ * `ensureSolanaSchemaReady` cachea su `ok:true` PARA SIEMPRE
+ * (`schema-preflight.ts:233-235`) y tiene razón, porque su sujeto es NUESTRA base —
+ * revertir esa migración es una acción de operador que viene con un restart nuestro,
+ * así que el cache se limpia solo.
+ *
+ * Acá el sujeto es OTRO SERVICIO, que redespliega sin avisarnos y sin reiniciarnos.
+ * Un `route_registered` eterno significa que si mañana el operador del facilitator
+ * apaga `SOLANA_PAYOUT_ENABLED`, este proceso sigue creyendo por siempre que la ruta
+ * está — y el gate queda mintiendo hasta el próximo deploy nuestro. Con 300 s, el
+ * peor caso es 5 minutos de creencia vieja, y el costo de equivocarse en esa ventana
+ * es el comportamiento de HOY (el POST real va, el 404 cae en `'unknown'`), no un
+ * doble pago.
+ */
+const PAYOUT_ROUTE_POSITIVE_TTL_MS = 300_000;
+
+/**
+ * TTL de todo veredicto NO positivo (ms). 60 s, mismo número que
+ * `RETRY_MS_DEFAULT` del preflight de esquema, y por el mismo motivo: cachear un
+ * negativo para siempre dejaría el leg apagado hasta el próximo deploy por un blip
+ * transitorio, y no cachear nada haría un sondeo por request contra un facilitator
+ * caído.
+ */
+const PAYOUT_ROUTE_NEGATIVE_TTL_MS = 60_000;
+
+/**
+ * POR QUÉ "NO PUDE PREGUNTAR" TIENE SU PROPIO ESTADO Y SUS PROPIAS RAZONES.
+ *
+ * Cada una nombra una CAUSA distinta con una ACCIÓN distinta del operador. Molde:
+ * `SolanaSchemaFailure` (`schema-preflight.ts:72-91`). Colapsarlas en un booleano
+ * volvería a hacer indistinguible "el facilitator me dijo que no la tiene" de "no
+ * pude hablar con el facilitator", que es exactamente el defecto que esta HU corrige.
+ */
+export type UnaskableReason =
+  /**
+   * El `fetch` del sondeo rechazó: DNS, connection refused, timeout, abort. Acción:
+   * mirar la red y si el facilitator está vivo. NO se clasifica con
+   * `classifySettleTransportError` — esa función decide la disposición del VALOR
+   * (`'not-sent'` vs `'unknown'`) y el sondeo no manda valor: ahí `'not-sent'` sería
+   * trivialmente cierto en los tres desenlaces, o sea información cero.
+   */
+  | 'transport_error'
+  /**
+   * Status ≠ 200, **incluido un 404 sobre `/supported` mismo**. Acción: hay un proxy
+   * en el medio, o la URL apunta a otra cosa. Que un 404 caiga acá y no en
+   * `route_absent` es el candado central: un 404 lo puede emitir cualquier
+   * intermediario y no es el facilitator enumerando sus rutas.
+   */
+  | 'probe_http_error'
+  /** 200 pero el cuerpo no es JSON, o no es un objeto. Acción: ídem — alguien reescribió la respuesta. */
+  | 'body_unreadable'
+  /**
+   * 200 sano y `dedicatedRoutes` NO es un array (típicamente ausente). Acción: el
+   * facilitator es ANTERIOR a la mitad A de WKH-342 — desplegá A. Este es el estado
+   * en el que vive el sistema entre el deploy de B y el de A, y por eso tiene que
+   * dejar pasar: si bloqueara, la mitad B sola cortaría los pagos.
+   */
+  | 'field_absent';
+
+/**
+ * TRES desenlaces, nunca dos.
+ *
+ * - `route_registered` — 200 + JSON parseable + `dedicatedRoutes` es array Y contiene
+ *   el id. El sistema sigue y hace el POST.
+ * - `route_absent` — 200 + JSON parseable + `dedicatedRoutes` es array y NO contiene
+ *   el id. Determinación NEGATIVA, y la única que puede emitirla es el facilitator
+ *   real contestando bien: rechaza el leg ANTES del POST.
+ * - `route_unaskable` — todo lo demás. NO es una determinación sobre la ruta: es la
+ *   ausencia de una. Deja pasar al POST real.
+ *
+ * ⚠️ Es una unión discriminada y no un booleano ni un `boolean | undefined` a
+ * propósito. Un booleano fuerza a elegir a qué lado va "no sé" y borra la pregunta;
+ * un `boolean | undefined` conserva el tercer valor pero pierde la razón, o sea la
+ * acción del operador.
+ */
+export type PayoutRouteVerdict =
+  | { readonly state: 'route_registered' }
+  | { readonly state: 'route_absent'; readonly detail: string }
+  | {
+      readonly state: 'route_unaskable';
+      readonly reason: UnaskableReason;
+      readonly detail: string;
+    };
+
+let _routeCached: PayoutRouteVerdict | null = null;
+let _routeCachedAt = 0;
+let _routeInFlight: Promise<PayoutRouteVerdict> | null = null;
+
+/** TEST-ONLY — limpia el veredicto memoizado. Espejo de `_resetSolanaSchemaPreflight`. */
+export function _resetPayoutRoutePreflight(): void {
+  _routeCached = null;
+  _routeCachedAt = 0;
+  _routeInFlight = null;
+}
+
+/**
+ * La MISMA literal `=== 'true'` que usa `assertFacilitatorPayoutConfigured` (arriba) y
+ * la ramificación de `settle()` en `payment.ts`. Un `Boolean(process.env.X)` mandaría
+ * a la red a toda config que tenga la variable en `'false'`, `'0'` o `''` — o sea a
+ * las que toman el camino legado y hoy funcionan.
+ *
+ * El criterio vive DENTRO de este módulo, no en el call-site del warm-up: este archivo
+ * es el dueño de esos nombres de env (mismo motivo textual que
+ * `src/adapters/registry.ts:135-138`), y un gate duplicado en `src/index.ts` podría
+ * divergir de este.
+ */
+function isPayoutViaFacilitatorOn(): boolean {
+  return process.env.SOLANA_SETTLE_VIA_FACILITATOR === 'true';
+}
+
+/**
+ * Le PREGUNTA al facilitator. NUNCA lanza: todo camino devuelve un veredicto.
+ *
+ * `facilitatorUrl` entra por parámetro (ya normalizada por `getFacilitatorUrl`) para
+ * que este cuerpo no tenga que decidir qué hacer sin URL — ese caso lo resuelve
+ * `ensurePayoutRouteReady`, que ni siquiera sondea.
+ */
+async function probePayoutRoute(
+  facilitatorUrl: string,
+): Promise<PayoutRouteVerdict> {
+  const probeUrl = `${facilitatorUrl}/supported`;
+  let response: Response;
+  try {
+    response = await fetch(probeUrl, {
+      method: 'GET',
+      signal: AbortSignal.timeout(PAYOUT_ROUTE_PROBE_TIMEOUT_MS),
+    });
+  } catch (err) {
+    return {
+      state: 'route_unaskable',
+      reason: 'transport_error',
+      detail: `GET ${probeUrl} failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  if (response.status !== 200) {
+    return {
+      state: 'route_unaskable',
+      reason: 'probe_http_error',
+      detail: `GET ${probeUrl} answered HTTP ${response.status} — a status code is not the facilitator enumerating its routes, and a 404 here is what an intermediate proxy looks like`,
+    };
+  }
+
+  const body = (await response.json().catch(() => null)) as unknown;
+  // Un array TAMBIÉN es `body_unreadable`, no `field_absent`: en un array
+  // `body.dedicatedRoutes` es `undefined` y leerlo como "campo ausente" atribuiría al
+  // facilitator una respuesta que no dio. Lo que hay del otro lado es otra cosa
+  // contestando.
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    return {
+      state: 'route_unaskable',
+      reason: 'body_unreadable',
+      detail: `GET ${probeUrl} answered HTTP 200 with a body that is not a JSON object`,
+    };
+  }
+
+  const routes = (body as { dedicatedRoutes?: unknown }).dedicatedRoutes;
+  // ⚠️ `Array.isArray`, NUNCA truthiness ni `.length`. `[]` y `undefined` son los dos
+  // falsy y son desenlaces OPUESTOS: `[]` es el facilitator diciendo "ninguna de las
+  // tres", `undefined` es "este facilitator no contesta esa pregunta".
+  if (!Array.isArray(routes)) {
+    return {
+      state: 'route_unaskable',
+      reason: 'field_absent',
+      detail: `GET ${probeUrl} answered HTTP 200 but dedicatedRoutes is not an array — this facilitator predates WKH-342, so it cannot say whether ${PAYOUT_ROUTE_ID} exists. Deploy the facilitator half.`,
+    };
+  }
+
+  if (routes.includes(PAYOUT_ROUTE_ID)) return { state: 'route_registered' };
+
+  return {
+    state: 'route_absent',
+    detail: `GET ${probeUrl} enumerated its dedicated routes as [${routes.map((r) => String(r)).join(', ')}] and ${PAYOUT_ROUTE_ID} is not among them`,
+  };
+}
+
+/**
+ * Veredicto memoizado, single-flight, con TTL DOBLE. Mecánica copiada de
+ * `ensureSolanaSchemaReady` (`schema-preflight.ts:240-275`).
+ *
+ * Devuelve `null` —y no un veredicto— cuando el gate NO ESTÁ ARMADO, que son dos
+ * casos y ninguno habla de la ruta:
+ *   · bandera distinta de `'true'` ⟹ este proceso no usa el facilitator para el
+ *     payout, así que preguntarle sería una llamada de red gratis en un camino que no
+ *     la necesita (AC-5: cero `fetch`);
+ *   · sin URL configurada ⟹ la decisión ya está tomada aguas arriba y es MÁS FUERTE:
+ *     `payoutViaFacilitator` corta con `'not-sent'` antes de llegar acá
+ *     (`:203-209` del original), y el arranque ya falló por
+ *     `assertFacilitatorPayoutConfigured`.
+ *
+ * `null` NO es un cuarto desenlace del sondeo: es "no se sondeó". Meterlo dentro de
+ * `route_unaskable` haría que cada llamada del camino legado emitiera un `warn` sobre
+ * un facilitator que nadie pensaba usar.
+ */
+export async function ensurePayoutRouteReady(): Promise<PayoutRouteVerdict | null> {
+  if (!isPayoutViaFacilitatorOn()) return null;
+  const facilitatorUrl = getFacilitatorUrl();
+  if (facilitatorUrl === undefined) return null;
+
+  if (_routeCached !== null) {
+    const ttlMs =
+      _routeCached.state === 'route_registered'
+        ? PAYOUT_ROUTE_POSITIVE_TTL_MS
+        : PAYOUT_ROUTE_NEGATIVE_TTL_MS;
+    if (Date.now() - _routeCachedAt < ttlMs) return _routeCached;
+  }
+  if (_routeInFlight !== null) return _routeInFlight;
+
+  const run = probePayoutRoute(facilitatorUrl).then(
+    (verdict) => {
+      _routeCached = verdict;
+      _routeCachedAt = Date.now();
+      _routeInFlight = null;
+      if (verdict.state === 'route_absent') {
+        log.error(
+          { detail: verdict.detail },
+          'SOLANA PAYOUT ROUTE IS NOT REGISTERED ON THE CONFIGURED FACILITATOR — every payout leg will be refused BEFORE any request is sent (fail-closed, no value moves). The facilitator answered normally and did not list POST /solana/payout: turn SOLANA_PAYOUT_ENABLED on in the facilitator (it also needs its own operator key, distinct from the fee-payer and release-authority keys), or point SOLANA_FACILITATOR_URL at a facilitator that serves that route.',
+        );
+      } else if (verdict.state === 'route_unaskable') {
+        log.warn(
+          { reason: verdict.reason, detail: verdict.detail },
+          'could not ask the facilitator whether POST /solana/payout exists — proceeding with the real payout request, which is exactly the behaviour that predates WKH-342 (a 404 there lands on the unknown disposition: no refund, no re-send, human review). This is NOT evidence that the route is missing.',
+        );
+      }
+      return verdict;
+    },
+    // `probePayoutRoute` ya es no-throw; esto es defensa en profundidad para que el
+    // gate de un camino de dinero no pueda rechazar la promise NUNCA.
+    (err: unknown) => {
+      const verdict: PayoutRouteVerdict = {
+        state: 'route_unaskable',
+        reason: 'transport_error',
+        detail: err instanceof Error ? err.message : String(err),
+      };
+      _routeCached = verdict;
+      _routeCachedAt = Date.now();
+      _routeInFlight = null;
+      return verdict;
+    },
+  );
+  _routeInFlight = run;
+  return run;
+}
+
+/**
+ * Warm-up del arranque (`src/index.ts`). Fire-and-forget A PROPÓSITO, igual que
+ * `warmSolanaSchemaPreflight`: el objetivo es que la alarma suene AL ARRANCAR en vez
+ * de en medio de una transferencia, no que el vecino pueda impedirnos levantar.
+ *
+ * ⚠️ EL GATE DE LA BANDERA VIVE ACÁ ADENTRO, y en eso me aparto de los dos warm-ups
+ * vecinos de `src/index.ts` (`if (isEscrowSettleEnabled()) …` en `:338` y
+ * `if (process.env.SOLANA_ADAPTER_ENABLED === 'true') …` en `:345`), que lo llevan en
+ * el call-site. Motivo: el gate perezoso de `payoutViaFacilitator` consulta el MISMO
+ * `ensurePayoutRouteReady()`, así que si el criterio estuviera en `index.ts` habría
+ * dos copias de la condición y podrían divergir — y divergir acá significa que el
+ * warm-up y el gate opinan distinto sobre si hay que sondear.
+ *
+ * Por qué NO bloquea el arranque, medido: `railway.json:10` de este repo trae
+ * `restartPolicyType: 'ON_FAILURE'` SIN `restartPolicyMaxRetries` (el facilitator sí
+ * lo trae) y `healthcheckTimeout: 60`. Un sondeo bloqueante contra un facilitator
+ * caído dos minutos dejaría al gateway en un ciclo de reinicios por un vecino.
+ *
+ * El único fallo de arranque de este archivo sigue siendo el de
+ * `assertFacilitatorPayoutConfigured`: bandera en `'true'` y sin URL.
+ */
+export function warmPayoutRoutePreflight(): void {
+  void ensurePayoutRouteReady().catch(() => {});
 }
 
 function getFacilitatorApiKey(): string | undefined {
@@ -204,6 +509,38 @@ export async function payoutViaFacilitator(
   if (facilitatorUrl === undefined) {
     throw new FacilitatorSettleError(
       'SOLANA_FACILITATOR_URL is not configured — no payout request was sent',
+      'not-sent',
+    );
+  }
+
+  // ── Paso 0 (WKH-342) — el gate PEREZOSO. Va acá y no en el arranque por las mismas
+  // tres razones que el preflight de esquema (`schema-preflight.ts:33-45`): no rompe el
+  // arranque de quien no usa este camino, no hay ventana TOCTOU contra el proceso ya
+  // vivo, y no es una consulta por request (veredicto memoizado, compartido con el
+  // warm-up del arranque — no pueden divergir).
+  //
+  // ⚠️ LA ASIMETRÍA, y va al revés de lo que la intuición pide: SÓLO `route_absent`
+  // corta. `route_unaskable` DEJA PASAR, porque los dos errores no cuestan lo mismo:
+  //   · bloquear con "no sé" convierte un blip del vecino en un corte de pagos NUESTRO,
+  //     autoinfligido, con el facilitator posiblemente sano;
+  //   · dejar pasar tiene el costo ACOTADO Y YA CONOCIDO: el POST real hereda intacta la
+  //     clasificación de los pasos 1-4 de abajo, donde un 404 mudo cae en `'unknown'`
+  //     (paso 3, código ausente) ⟹ ni refund ni re-envío, revisión humana. O sea que el
+  //     peor caso de `route_unaskable` ES EL COMPORTAMIENTO DE HOY, no uno peor: no hay
+  //     doble pago en esa rama.
+  // Y ojo con la comparación fácil: en `schema-preflight.ts:148-160` la decisión es la
+  // CONTRARIA (no medir ⟹ cortar) porque allá permitir de más habilita un segundo pago
+  // irreversible. Acá no medir sólo POSTERGA una determinación. La regla es la misma —el
+  // default va del lado del error barato— y por eso el resultado es distinto. No los
+  // unifiques.
+  const routeVerdict = await ensurePayoutRouteReady();
+  if (routeVerdict !== null && routeVerdict.state === 'route_absent') {
+    // MISMA construcción que la rama sin URL de arriba: `FacilitatorSettleError` con
+    // `'not-sent'`. Cero disposiciones nuevas, cero códigos nuevos, cero `SettleResult`
+    // fabricado — el sondeo decide sobre la CAPACIDAD, nunca sobre el valor de un pago
+    // concreto, y acá el request no salió, que es un hecho y no una inferencia.
+    throw new FacilitatorSettleError(
+      `Facilitator at ${facilitatorUrl} does not serve ${PAYOUT_ROUTE_ID} — no payout request was sent. ${routeVerdict.detail}`,
       'not-sent',
     );
   }

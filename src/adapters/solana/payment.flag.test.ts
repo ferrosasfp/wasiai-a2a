@@ -297,7 +297,11 @@ describe('T-AC3 — exactamente UN camino por request, nunca los dos', () => {
   it('★ bandera ON: firma el facilitator; el keypair local NUNCA se resuelve', async () => {
     process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
     process.env.SOLANA_FACILITATOR_URL = 'https://facilitator.test';
-    fetchSpy.mockResolvedValue(okPayoutResponse());
+    // ⚠️ WKH-342 — `mockImplementation` y no `mockResolvedValue(okPayoutResponse())`: el
+    // cuerpo de un `Response` se lee UNA vez, y desde WKH-342 con la bandera ON hay DOS
+    // requests HTTP (el sondeo `GET /supported` y el `POST /solana/payout`). Reusar el
+    // mismo objeto le daba al segundo un cuerpo consumido.
+    fetchSpy.mockImplementation(() => Promise.resolve(okPayoutResponse()));
 
     const adapter = new SolanaPaymentAdapter();
     const res = await adapter.settle(settleReq('run-on:0'));
@@ -308,7 +312,18 @@ describe('T-AC3 — exactamente UN camino por request, nunca los dos', () => {
     expect(mockGetOperatorKeypair).not.toHaveBeenCalled();
     expect(broadcasts).toHaveLength(0);
     expect(mockGetOrCreateAta).not.toHaveBeenCalled();
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // ⚠️ WKH-342 — acá decía `expect(fetchSpy).toHaveBeenCalledTimes(1)`, y ese `1` ya no
+    // es verdad: el sondeo de la ruta dedicada agrega un `GET {url}/supported` DELANTE
+    // del POST. Lo que este test protege —"exactamente UN camino por request, nunca los
+    // dos"— se conserva y se afina: lo que no puede haber más de una vez es el request
+    // QUE MUEVE VALOR. Un segundo POST sería un doble pago; un GET de discovery no mueve
+    // nada. Contar POSTs es estrictamente más específico que contar fetches.
+    const postUrls = (fetchSpy.mock.calls as unknown[][])
+      .filter(
+        (c) => ((c[1] as RequestInit | undefined)?.method ?? 'GET') === 'POST',
+      )
+      .map((c) => String(c[0]));
+    expect(postUrls).toEqual(['https://facilitator.test/solana/payout']);
   });
 
   it('★ bandera OFF: firma el gateway; el hop HTTP NUNCA se invoca', async () => {
