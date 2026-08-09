@@ -526,6 +526,75 @@ describe('WKH-342 T-B4/T-B5/T-B6 — route_unaskable: "no pude preguntar" DEJA P
     ).toBe('body_unreadable');
   });
 
+  // ── AR BLQ-BAJO-1 · el CUARTO desenlace: un array de la forma equivocada ────────
+  //
+  // El defecto medido: `route_absent` se emitía en cuanto `includes` daba `false`, sin
+  // mirar de qué estaban hechos los elementos. Con
+  // `{"dedicatedRoutes":[{"id":"POST /solana/payout"}]}` el veredicto era `route_absent`,
+  // el leg moría `'not-sent'` y NO salía un solo POST — con la ruta servida del otro lado.
+  // O sea: un cambio de una línea en el facilitator apagaba todo el payout Solana, y ningún
+  // test de los dos repos se ponía rojo.
+  it('★ T-B12 / AC-4: elementos que NO son strings ⇒ body_unreadable, y el POST SÍ se hace', async () => {
+    fetchSpy
+      .mockResolvedValueOnce(
+        jsonResponse(200, { dedicatedRoutes: [{ id: 'POST /solana/payout' }] }),
+      )
+      .mockResolvedValue(jsonResponse(200, { signature: SIG }));
+
+    const verdict = await ensurePayoutRouteReady();
+    expect(verdict?.state).toBe('route_unaskable');
+    expect(
+      verdict?.state === 'route_unaskable' ? verdict.reason : undefined,
+    ).toBe('body_unreadable');
+    // Y lo que importa del fix: NO corta. Antes acá el leg moría sin POST.
+    expect((await payoutViaFacilitator(input)).signature).toBe(SIG);
+    expect(calledUrls()).toEqual([PROBE_URL, POST_URL]);
+  });
+
+  it('★ T-B12b: un array MIXTO (un string válido + un objeto) tampoco autoriza un route_absent', async () => {
+    // El `every` mira TODOS los elementos: que uno sea legible no vuelve legible al resto,
+    // y con un elemento que no entiendo no puedo afirmar qué enumeró el facilitator.
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(200, { dedicatedRoutes: ['POST /solana/sponsor', 42] }),
+    );
+    const verdict = await ensurePayoutRouteReady();
+    expect(
+      verdict?.state === 'route_unaskable' ? verdict.reason : verdict?.state,
+    ).toBe('body_unreadable');
+  });
+
+  it('★ T-B13 / AC-4: una diferencia de CAPITALIZACIÓN no es evidencia de que la ruta falte ⇒ route_registered', async () => {
+    // MEDIDO antes del fix: `['post /solana/payout']` daba `route_absent` y cero POST.
+    // La comparación normalizada sólo puede convertir un `route_absent` en un
+    // `route_registered` — nunca al revés—, así que sólo puede DEJAR PASAR de más, y el
+    // peor caso de eso es el comportamiento de hoy. Cortar por un casing distinto sí
+    // sería un costo nuevo.
+    fetchSpy
+      .mockResolvedValueOnce(
+        jsonResponse(200, { dedicatedRoutes: ['  post   /solana/payout '] }),
+      )
+      .mockResolvedValue(jsonResponse(200, { signature: SIG }));
+
+    expect(await ensurePayoutRouteReady()).toEqual({
+      state: 'route_registered',
+    });
+    expect((await payoutViaFacilitator(input)).signature).toBe(SIG);
+  });
+
+  it('★ T-B13b: EL CONTROL — normalizar no hizo que todo matchee: otra ruta sigue siendo route_absent', async () => {
+    // Sin este control, T-B13 pasaría igual con un `() => true` en lugar de la
+    // comparación, y `route_absent` habría dejado de existir en silencio.
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(200, {
+        dedicatedRoutes: [
+          'POST /solana/sponsor',
+          'POST /solana/escrow/release',
+        ],
+      }),
+    );
+    expect((await ensurePayoutRouteReady())?.state).toBe('route_absent');
+  });
+
   it('★ T-B6d: los cuatro motivos de route_unaskable dejan pasar al POST — ninguno bloquea un leg', async () => {
     const cases: Array<[UnaskableReasonName, () => void]> = [
       [

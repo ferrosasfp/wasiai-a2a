@@ -377,12 +377,102 @@ async function probePayoutRoute(
     };
   }
 
-  if (routes.includes(PAYOUT_ROUTE_ID)) return { state: 'route_registered' };
+  // ⚠️ AR BLQ-BAJO-1 — LA MISMA DISCIPLINA, UN NIVEL MÁS ADENTRO.
+  //
+  // Arriba se aplica dos veces "forma que no entiendo ⟹ `unaskable`": al CUERPO (`:360`)
+  // y al CAMPO (`:372`). Faltaba el tercer nivel, los ELEMENTOS — y el nivel que falta es
+  // el que decide, porque `['POST /solana/payout'].includes(…)` sobre
+  // `[{ id: 'POST /solana/payout' }]` da `false` y ese `false` caía directo en
+  // `route_absent`, que CORTA EL PAGO.
+  //
+  // MEDIDO antes del fix, con `{"dedicatedRoutes":[{"id":"POST /solana/payout"}]}`:
+  // veredicto `route_absent`, `detail` con `as [[object Object]]`, el leg muerto en
+  // `'not-sent'` y `urls = ["…/supported"]` — CERO POST, con la ruta servida del otro
+  // lado. Un cambio de una línea en el vecino (publicar objetos en vez de strings) apagaba
+  // todo el payout Solana fail-closed sin un test rojo en ninguno de los dos repos.
+  //
+  // Un array cuyos elementos no son strings NO es el facilitator enumerando rutas: es otra
+  // cosa contestando. Eso es `body_unreadable`, igual que un cuerpo que no es objeto.
+  if (!routes.every((route): route is string => typeof route === 'string')) {
+    return {
+      state: 'route_unaskable',
+      reason: 'body_unreadable',
+      detail: `GET ${probeUrl} answered HTTP 200 with a dedicatedRoutes array whose elements are not all strings (${routes.map((r) => typeof r).join(', ')}) — that is not this facilitator enumerating its routes, so it cannot be read as "the route is missing"`,
+    };
+  }
 
+  // Comparación NORMALIZADA (verbo en mayúsculas, espacios colapsados), y la dirección de
+  // la tolerancia importa: normalizar sólo puede convertir un `route_absent` en un
+  // `route_registered`, nunca al revés. O sea que sólo puede hacer que el gate DEJE PASAR
+  // de más, cuyo peor caso es el comportamiento de hoy (el POST sale, y su 404 cae en
+  // `'unknown'`); si fuera al revés estaría agregando cortes de pago por una diferencia de
+  // capitalización, que no es evidencia de que la ruta no exista.
+  // MEDIDO antes del fix: `['post /solana/payout']` ⟹ `route_absent`, cero POST.
+  const normalize = (route: string): string =>
+    route.trim().replace(/\s+/g, ' ').toUpperCase();
+  const wanted = normalize(PAYOUT_ROUTE_ID);
+  if (routes.some((route) => normalize(route) === wanted)) {
+    return { state: 'route_registered' };
+  }
+
+  // Único camino a `route_absent`: 200 + objeto + `dedicatedRoutes` array + TODOS los
+  // elementos strings + ninguno igual (normalizado) al id. Sólo el facilitator real,
+  // contestando bien, llega hasta acá.
   return {
     state: 'route_absent',
-    detail: `GET ${probeUrl} enumerated its dedicated routes as [${routes.map((r) => String(r)).join(', ')}] and ${PAYOUT_ROUTE_ID} is not among them`,
+    detail: `GET ${probeUrl} enumerated its dedicated routes as [${routes.join(', ')}] and ${PAYOUT_ROUTE_ID} is not among them`,
   };
+}
+
+/**
+ * AR MNR-2 — el logger del veredicto, con `switch` EXHAUSTIVO.
+ *
+ * El `if/else if` que había acá aceptaba un estado nuevo en silencio: MEDIDO, agregar un
+ * cuarto miembro al union dejaba `tsc --noEmit` en exit 0 y ese estado no matcheaba ni la
+ * rama `error` ni la `warn`, o sea **telemetría cero** para el caso nuevo. Caía del lado
+ * permisivo, que por la asimetría del gate es el correcto — pero mudo, y un desenlace del
+ * money-path que no se loguea es un desenlace que nadie va a ver.
+ *
+ * El `default` con `never` convierte eso en un error de compilación: quien agregue un
+ * estado tiene que decidir explícitamente si suena y con qué nivel.
+ *
+ * Mutante de una línea que restauraría el silencio: cambiar el `default` por
+ * `default: return;` (o borrar la anotación `: never`) — ahí `tsc` vuelve a aceptar un
+ * estado nuevo sin tratarlo.
+ */
+function logRouteVerdict(verdict: PayoutRouteVerdict): void {
+  switch (verdict.state) {
+    case 'route_registered':
+      // Silencio a propósito: es el caso sano y suena una vez por TTL en cada proceso.
+      return;
+    case 'route_absent':
+      log.error(
+        { detail: verdict.detail },
+        'SOLANA PAYOUT ROUTE IS NOT REGISTERED ON THE CONFIGURED FACILITATOR — every payout leg will be refused BEFORE any request is sent (fail-closed, no value moves). The facilitator answered normally and did not list POST /solana/payout: turn SOLANA_PAYOUT_ENABLED on in the facilitator (it also needs its own operator key, distinct from the fee-payer and release-authority keys), or point SOLANA_FACILITATOR_URL at a facilitator that serves that route.',
+      );
+      return;
+    case 'route_unaskable':
+      log.warn(
+        { reason: verdict.reason, detail: verdict.detail },
+        'could not ask the facilitator whether POST /solana/payout exists — proceeding with the real payout request, which is exactly the behaviour that predates WKH-342 (a 404 there lands on the unknown disposition: no refund, no re-send, human review). This is NOT evidence that the route is missing.',
+      );
+      return;
+    default: {
+      // COMPILE-TIME: si esta asignación no compila, alguien agregó un estado al union y
+      // no dijo si suena. Ése es el punto de MNR-2.
+      const exhaustive: never = verdict;
+      // RUNTIME: inalcanzable mientras el `never` compile, y aun así NO se lanza. Este
+      // logger corre dentro del `.then` del veredicto, así que un `throw` acá rechazaría
+      // la promise que el gate perezoso `await`ea, y un error sin clasificar en un camino
+      // de dinero es peor que un estado sin tratar. Suena y sigue: el lado permisivo es el
+      // mismo que elige la asimetría del gate.
+      log.error(
+        { verdict: JSON.stringify(exhaustive) },
+        'unhandled payout route verdict — the probe produced a state this logger does not know. Treated as non-blocking (the gate only cuts on route_absent), but it is a code defect: add the case.',
+      );
+      return;
+    }
+  }
 }
 
 /**
@@ -422,17 +512,7 @@ export async function ensurePayoutRouteReady(): Promise<PayoutRouteVerdict | nul
       _routeCached = verdict;
       _routeCachedAt = Date.now();
       _routeInFlight = null;
-      if (verdict.state === 'route_absent') {
-        log.error(
-          { detail: verdict.detail },
-          'SOLANA PAYOUT ROUTE IS NOT REGISTERED ON THE CONFIGURED FACILITATOR — every payout leg will be refused BEFORE any request is sent (fail-closed, no value moves). The facilitator answered normally and did not list POST /solana/payout: turn SOLANA_PAYOUT_ENABLED on in the facilitator (it also needs its own operator key, distinct from the fee-payer and release-authority keys), or point SOLANA_FACILITATOR_URL at a facilitator that serves that route.',
-        );
-      } else if (verdict.state === 'route_unaskable') {
-        log.warn(
-          { reason: verdict.reason, detail: verdict.detail },
-          'could not ask the facilitator whether POST /solana/payout exists — proceeding with the real payout request, which is exactly the behaviour that predates WKH-342 (a 404 there lands on the unknown disposition: no refund, no re-send, human review). This is NOT evidence that the route is missing.',
-        );
-      }
+      logRouteVerdict(verdict);
       return verdict;
     },
     // `probePayoutRoute` ya es no-throw; esto es defensa en profundidad para que el

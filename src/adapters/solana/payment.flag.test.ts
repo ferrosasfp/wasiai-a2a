@@ -199,6 +199,7 @@ vi.mock('./schema-preflight.js', () => ({
 }));
 
 import { base58Encode } from './base58.js';
+import { _resetPayoutRoutePreflight } from './facilitator-settle.js';
 import { _resetSolanaClients, SolanaPaymentAdapter } from './payment.js';
 
 const savedEnv = new Map<string, string | undefined>();
@@ -236,6 +237,20 @@ function okPayoutResponse(overrides: Record<string, unknown> = {}): Response {
       ...overrides,
     }),
     { status: 200, headers: { 'content-type': 'application/json' } },
+  );
+}
+
+/**
+ * AR BLQ-MED-1 — los `fetch` del leg partidos por VERBO, no por índice.
+ *
+ * Con la bandera ON hay DOS requests desde WKH-342: el sondeo `GET {url}/supported` y el
+ * `POST {url}/solana/payout`. Leer el POST como `fetchSpy.mock.calls[0]` pasó a leer el
+ * sondeo, y un test que afirmaba sobre el body del POST se quedaba mirando un `GET` sin
+ * body. Buscar por verbo es además robusto ante otro request que se agregue delante.
+ */
+function postCalls(): unknown[][] {
+  return (fetchSpy.mock.calls as unknown[][]).filter(
+    (c) => ((c[1] as RequestInit | undefined)?.method ?? 'GET') === 'POST',
   );
 }
 
@@ -278,6 +293,16 @@ beforeEach(() => {
   fakeConnection.getParsedTransaction.mockResolvedValue(null);
   fakeConnection.getSignatureStatuses.mockReset();
   fakeConnection.getSignatureStatuses.mockResolvedValue({ value: [null] });
+  // ⚠️ WKH-342 / AR BLQ-MED-1 — SIN esta línea este archivo quedaba ACOPLADO POR ORDEN, y
+  // el acoplamiento lo introdujo WKH-342, no venía de antes. El veredicto del sondeo de la
+  // ruta dedicada se memoiza a nivel de módulo con TTL de 60 s: el PRIMER test con la
+  // bandera ON dejaba `_routeCached` poblado y los 6 siguientes no sondeaban, así que sus
+  // dobles de un solo `Response` seguían funcionando. Corridos aislados (`-t`), el sondeo
+  // consumía el cuerpo del `Response` y el POST veía `body === null` ⟹ 'unknown'.
+  // MEDIDO: `vitest run src/adapters/solana/payment.flag.test.ts -t "el POST lleva el
+  // contrato"` daba 1 failed. Con el reset acá, cada test sondea SIEMPRE y su doble tiene
+  // que aguantar los dos requests — que es lo que pasa en producción.
+  _resetPayoutRoutePreflight();
   fetchSpy = vi.spyOn(globalThis, 'fetch');
 });
 
@@ -318,12 +343,9 @@ describe('T-AC3 — exactamente UN camino por request, nunca los dos', () => {
     // dos"— se conserva y se afina: lo que no puede haber más de una vez es el request
     // QUE MUEVE VALOR. Un segundo POST sería un doble pago; un GET de discovery no mueve
     // nada. Contar POSTs es estrictamente más específico que contar fetches.
-    const postUrls = (fetchSpy.mock.calls as unknown[][])
-      .filter(
-        (c) => ((c[1] as RequestInit | undefined)?.method ?? 'GET') === 'POST',
-      )
-      .map((c) => String(c[0]));
-    expect(postUrls).toEqual(['https://facilitator.test/solana/payout']);
+    expect(postCalls().map((c) => String(c[0]))).toEqual([
+      'https://facilitator.test/solana/payout',
+    ]);
   });
 
   it('★ bandera OFF: firma el gateway; el hop HTTP NUNCA se invoca', async () => {
@@ -341,11 +363,16 @@ describe('T-AC3 — exactamente UN camino por request, nunca los dos', () => {
   it('★ el POST lleva el contrato de §6.1 (intentId, payTo, amountAtomic, network)', async () => {
     process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
     process.env.SOLANA_FACILITATOR_URL = 'https://facilitator.test/';
-    fetchSpy.mockResolvedValue(okPayoutResponse());
+    // AR BLQ-MED-1: un `Response` se lee UNA vez y con la bandera ON hay DOS requests
+    // (el sondeo `GET /supported` y el `POST /solana/payout`). Cada llamada, su objeto.
+    fetchSpy.mockImplementation(() => Promise.resolve(okPayoutResponse()));
 
     await new SolanaPaymentAdapter().settle(settleReq('run-1:2'));
 
-    const [url, init] = fetchSpy.mock.calls[0] ?? [];
+    // AR BLQ-MED-1: `mock.calls[0]` era el POST y desde WKH-342 es el sondeo. El POST se
+    // busca por verbo, y que haya EXACTAMENTE uno es parte de lo que se afirma.
+    expect(postCalls()).toHaveLength(1);
+    const [url, init] = postCalls()[0] ?? [];
     expect(String(url)).toBe('https://facilitator.test/solana/payout');
     const body = JSON.parse(String((init as RequestInit).body)) as Record<
       string,
@@ -362,7 +389,10 @@ describe('T-AC3 — exactamente UN camino por request, nunca los dos', () => {
   it('alreadySettled:true es un ÉXITO (es un pago que ya ocurrió), no un error', async () => {
     process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
     process.env.SOLANA_FACILITATOR_URL = 'https://facilitator.test';
-    fetchSpy.mockResolvedValue(okPayoutResponse({ alreadySettled: true }));
+    // AR BLQ-MED-1: idem — un `Response` por llamada (sondeo + POST).
+    fetchSpy.mockImplementation(() =>
+      Promise.resolve(okPayoutResponse({ alreadySettled: true })),
+    );
 
     const res = await new SolanaPaymentAdapter().settle(settleReq('run-rep:0'));
     expect(res.success).toBe(true);
@@ -377,7 +407,9 @@ describe('T-AC3 — exactamente UN camino por request, nunca los dos', () => {
     // (150). Errar por arriba hace esperar de más; errar por abajo es un doble pago.
     process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
     process.env.SOLANA_FACILITATOR_URL = 'https://facilitator.test';
-    fetchSpy.mockResolvedValue(okPayoutResponse());
+    // AR BLQ-MED-1: un `Response` se lee UNA vez y con la bandera ON hay DOS requests
+    // (el sondeo `GET /supported` y el `POST /solana/payout`). Cada llamada, su objeto.
+    fetchSpy.mockImplementation(() => Promise.resolve(okPayoutResponse()));
 
     await new SolanaPaymentAdapter().settle(settleReq('run-cota:0'));
 
@@ -395,7 +427,9 @@ describe('T-AC3 — exactamente UN camino por request, nunca los dos', () => {
     // la fila condenada si después la cadena dijera que no está.
     process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
     process.env.SOLANA_FACILITATOR_URL = 'https://facilitator.test';
-    fetchSpy.mockResolvedValue(okPayoutResponse());
+    // AR BLQ-MED-1: un `Response` se lee UNA vez y con la bandera ON hay DOS requests
+    // (el sondeo `GET /supported` y el `POST /solana/payout`). Cada llamada, su objeto.
+    fetchSpy.mockImplementation(() => Promise.resolve(okPayoutResponse()));
 
     const res = await new SolanaPaymentAdapter().settle(settleReq('run-vbt:0'));
 
@@ -414,7 +448,9 @@ describe('T-AC3 — exactamente UN camino por request, nunca los dos', () => {
     // DE MAÑANA.
     process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
     process.env.SOLANA_FACILITATOR_URL = 'https://facilitator.test';
-    fetchSpy.mockResolvedValue(okPayoutResponse());
+    // AR BLQ-MED-1: un `Response` se lee UNA vez y con la bandera ON hay DOS requests
+    // (el sondeo `GET /supported` y el `POST /solana/payout`). Cada llamada, su objeto.
+    fetchSpy.mockImplementation(() => Promise.resolve(okPayoutResponse()));
     // El status dice que la firma ESTÁ en la cadena…
     fakeConnection.getSignatureStatuses.mockResolvedValue({
       value: [{ err: null }],
@@ -493,7 +529,11 @@ describe('T-AC4 — con la bandera ausente todo es idéntico a pre-302', () => {
     await new SolanaPaymentAdapter().settle(settleReq('run-shared:0'));
 
     expect(claimedBeforePost).toBe(true);
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // AR BLQ-MED-1: eran 2 fetches desde WKH-342 (sondeo + POST). Lo que no puede
+    // duplicarse es el request que mueve valor, y el `mockImplementation` de arriba corre
+    // en los DOS, así que la propiedad medida —el reclamo pasó antes del primer request
+    // que sale— es la misma o más fuerte.
+    expect(postCalls()).toHaveLength(1);
   });
 });
 
@@ -665,7 +705,9 @@ describe('T-CD15 — con la bandera ON no hay fallback a firma local', () => {
     // la bandera ON — justo lo que CD-15 prohíbe, y sin ningún test rojo.
     process.env.SOLANA_SETTLE_VIA_FACILITATOR = 'true';
     process.env.SOLANA_FACILITATOR_URL = 'https://facilitator.test';
-    fetchSpy.mockResolvedValue(okPayoutResponse());
+    // AR BLQ-MED-1: un `Response` se lee UNA vez y con la bandera ON hay DOS requests
+    // (el sondeo `GET /supported` y el `POST /solana/payout`). Cada llamada, su objeto.
+    fetchSpy.mockImplementation(() => Promise.resolve(okPayoutResponse()));
     seedLedger('run-resign:0', {
       status: 'signed',
       signature: SEEDED_SIG,

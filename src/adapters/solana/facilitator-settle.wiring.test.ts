@@ -22,9 +22,21 @@
  * este archivo hace aserciones sobre índices y tipos que quiero que `tsc --noEmit`
  * evalúe.
  *
- * LO QUE ESTE TEST NO CUBRE (declarado): que la línea se EJECUTE. Verifica que está
- * escrita después de `listen(` y sin `await`. Un `if (false)` alrededor, o un
- * `process.exit()` antes, lo pasarían. Eso sería otra clase de defecto.
+ * LO QUE ESTE TEST NO CUBRE (declarado, y CORREGIDO por AR MNR-3 — mi declaración
+ * anterior era más amplia que la verdad).
+ *
+ * No cubre que la línea se EJECUTE: verifica que está escrita después de `listen(`, una
+ * sola vez y sin `await`. Pero el residuo es MÁS ANGOSTO de lo que decía acá, y la
+ * diferencia está medida:
+ *   · `if (Number('0')) warmPayoutRoutePreflight();` (guarda INLINE) ⟹ **T-B7 y T-B7b
+ *     ROJOS**. La regex de la llamada exige que el `warmPayoutRoutePreflight();` arranque
+ *     la línea (`^[^\S\n]*`), así que cualquier guarda en la misma línea la rompe.
+ *   · `if (Number('0')) {\n  warmPayoutRoutePreflight();\n}` (bloque MULTILÍNEA) ⟹ los 4
+ *     verdes. **Ése es el residuo real**, y es el único.
+ *   · Un `process.exit()` antes también pasaría.
+ * Y el radio de un descableado es acotado: se pierde la ALARMA DE ARRANQUE, no el gate. El
+ * gate del leg de pago es `ensurePayoutRouteReady()` dentro de `payoutViaFacilitator`, que
+ * sondea igual la primera vez que se usa.
  */
 
 import { readFileSync } from 'node:fs';
