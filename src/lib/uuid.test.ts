@@ -28,11 +28,16 @@ describe('isValidUUID (WKH-345)', () => {
   // T-U2 — mutante que lo mata: endurecer el patrón a v4, o sea
   // `[0-9a-f]{4}-[0-9a-f]{4}-` → `4[0-9a-f]{3}-[89ab][0-9a-f]{3}-`.
   //
-  // Es el ÚNICO testigo de ese mutante en todo el repo: el resto de la suite no
-  // lo ve, porque cada id que fabrica sale de `gen_random_uuid()` (v4) y por lo
-  // tanto pasa igual con el patrón endurecido. Si este test se borra, endurecer
-  // el regex deja la suite entera verde mientras estrecha el contrato de cinco
-  // rutas públicas.
+  // Medido en `2d8168c`: ese mutante pone rojos 13 tests. NO es cierto que el
+  // resto de la suite sea ciego a él (esa era la hipótesis, y es falsa: 11 de
+  // los 13 están fuera de este archivo). Pero esos 11 caen porque sus fixtures
+  // son literales escritos a mano sin forma de v4 —
+  // `tasks.test.ts:95` es `'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'` —, así que
+  // señalan "el fixture no es v4", no "el contrato no debe pedir v4".
+  //
+  // Este test es el único que afirma lo segundo. Sin él, la lectura natural del
+  // rojo es "actualizo los 11 fixtures a v4", y el contrato de cinco rutas
+  // públicas queda estrechado con la suite en verde.
   it('T-U2 (AC-6) el nil UUID pasa: el predicado es de FORMA, no de versión', () => {
     expect(isValidUUID('00000000-0000-0000-0000-000000000000')).toBe(true);
     // v1 (variant `1`) y variant `c`: dos formas válidas que un patrón de v4

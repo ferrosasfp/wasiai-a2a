@@ -13,9 +13,16 @@
  *   Ni la versión ni la variant. `00000000-0000-0000-0000-000000000000` (el nil
  *   UUID) pasa, y un v1/v3/v5 también. Endurecerlo a v4
  *   (`4[0-9a-f]{3}-[89ab][0-9a-f]{3}`) estrecharía el contrato de cinco rutas
- *   públicas sin ninguna AC que lo pida, y la suite completa es CIEGA a ese
- *   cambio porque todos los ids del repo salen de `gen_random_uuid()`, que es
- *   v4. El único testigo de esta decisión es T-U2 en `uuid.test.ts`.
+ *   públicas sin ninguna AC que lo pida. T-U2 en `uuid.test.ts` es el testigo
+ *   deliberado de esa decisión.
+ *
+ *   Medido en `2d8168c`: aplicar ese endurecimiento pone rojos 13 tests, de los
+ *   cuales 11 están FUERA de `uuid.test.ts` y no hablan de versiones — caen de
+ *   rebote porque sus fixtures son literales escritos a mano que no tienen forma
+ *   de v4 (p.ej. `tasks.test.ts:95`, `'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'`).
+ *   O sea: quien endurezca el patrón va a ver la suite en rojo, pero por el
+ *   motivo equivocado, y la lectura fácil es "arreglo los fixtures". T-U2 es el
+ *   único que dice POR QUÉ no hay que hacerlo.
  *
  * PARA QUÉ SIRVE
  *   El valor de un `:id` llega sin validar a una columna `uuid` de Postgres, que
