@@ -14,6 +14,7 @@ import {
   getInitializedChainKeys,
   initAdapters,
 } from './adapters/registry.js';
+import { warmPayoutRoutePreflight } from './adapters/solana/facilitator-settle.js';
 import { warmSolanaSchemaPreflight } from './adapters/solana/schema-preflight.js';
 import {
   assertDepositMinimumEnv,
@@ -343,6 +344,17 @@ if (isEscrowSettleEnabled()) warmEscrowSchemaPreflight();
 // esta habilitado. Sin esto, la primera noticia de que falta la migracion llegaria en
 // medio de una transferencia en vez de en el arranque.
 if (process.env.SOLANA_ADAPTER_ENABLED === 'true') warmSolanaSchemaPreflight();
+
+// WKH-342: sondear si el facilitator configurado tiene registrada `POST /solana/payout`,
+// para que "esa ruta no existe" se sepa en el arranque y no leg por leg. Fire-and-forget
+// por el mismo motivo que los dos de arriba.
+//
+// ⚠️ SIN `if` EN ESTE CALL-SITE, y eso es una diferencia deliberada con las dos líneas de
+// arriba: el criterio (`SOLANA_SETTLE_VIA_FACILITATOR === 'true'` + hay URL) vive DENTRO
+// de `ensurePayoutRouteReady`, que es también el gate perezoso del leg de pago. Duplicarlo
+// acá daría dos copias de la condición que pueden divergir. Con la bandera apagada esta
+// llamada no hace ni un `fetch`.
+warmPayoutRoutePreflight();
 
 // M6 (audit 2026-06-24): sweep periódico del outbox de refunds. Reintenta los
 // refunds best-effort que NO aplicaron nada. processRefundOutbox NUNCA tira
