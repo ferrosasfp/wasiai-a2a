@@ -1,3 +1,11 @@
+
+
+> ⚠️ **YA INSERTADA — NO VOLVER A COPIARLA.** La fila `217` del índice existe desde el
+> saneamiento del 2026-08-10. Copiarla de nuevo crearía una fila duplicada, y el guardián
+> `test/sdd-index-matches-folders.test.ts` (control G-A2) pone `npm test` en **rojo** si eso
+> pasa. Este archivo queda como registro de cómo se redactó, no como pendiente.
+> Si el estado cambió, se edita la fila del `_INDEX.md`, no esta copia.
+
 <!--
 FILA LISTA PARA PEGAR EN doc/sdd/_INDEX.md, inmediatamente DESPUÉS de la fila `215`
 (WKH-318) y ANTES del `---` de cierre (hoy `_INDEX.md:184`).
