@@ -507,27 +507,34 @@ export async function ensurePayoutRouteReady(): Promise<PayoutRouteVerdict | nul
   }
   if (_routeInFlight !== null) return _routeInFlight;
 
+  /**
+   * CR MNR-3(b) — UN SOLO camino de commit para los dos desenlaces de la promise.
+   *
+   * Antes la rama `onRejected` cacheaba su `route_unaskable` **sin pasar por
+   * `logRouteVerdict`**, y eso la volvía la ÚNICA excepción a la frase que motiva el
+   * `switch` exhaustivo ("todo veredicto suena con su nivel"). Inalcanzable hoy —
+   * `probePayoutRoute` es no-throw— pero una excepción viva a la regla de al lado es
+   * justo lo que hace que la regla deje de leerse. Se cierra en vez de declararse:
+   * memoizar y loguear ocurren en el mismo lugar, así que no pueden divergir.
+   */
+  const commit = (verdict: PayoutRouteVerdict): PayoutRouteVerdict => {
+    _routeCached = verdict;
+    _routeCachedAt = Date.now();
+    _routeInFlight = null;
+    logRouteVerdict(verdict);
+    return verdict;
+  };
+
   const run = probePayoutRoute(facilitatorUrl).then(
-    (verdict) => {
-      _routeCached = verdict;
-      _routeCachedAt = Date.now();
-      _routeInFlight = null;
-      logRouteVerdict(verdict);
-      return verdict;
-    },
+    commit,
     // `probePayoutRoute` ya es no-throw; esto es defensa en profundidad para que el
     // gate de un camino de dinero no pueda rechazar la promise NUNCA.
-    (err: unknown) => {
-      const verdict: PayoutRouteVerdict = {
+    (err: unknown) =>
+      commit({
         state: 'route_unaskable',
         reason: 'transport_error',
         detail: err instanceof Error ? err.message : String(err),
-      };
-      _routeCached = verdict;
-      _routeCachedAt = Date.now();
-      _routeInFlight = null;
-      return verdict;
-    },
+      }),
   );
   _routeInFlight = run;
   return run;
