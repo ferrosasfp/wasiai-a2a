@@ -21,7 +21,7 @@ Un `:id` sin formato UUID válido llegaba sin validar hasta una columna `uuid` d
 - **F2.5**: `story-file.md` con protocolo de dos pasos (evidencia de AC-5 + tests de ruta + mutantes)
 - **F3**: Implementación en **4 waves** (W0: extracción + unitarios; W1: fixtures solo; W2: guards + tests; W3: gates + mutación + residuos + autorización de 6º archivo)
 - **AR**: **APROBADO** — 0 bloqueantes, **6 MENOR** (números inflados en docblocks, afirmaciones falsas sobre cobertura, citas desplazadas tras refactor) — todos resueltos en fix-pack (`c3b7333`)
-- **CR**: No se corrió como fase separada; el AR cubrió las 11 categorías de calidad de código y su veredicto está documentado en `ar-report.md`
+- **CR**: no se corrió como fase separada. El AR cubrió las 11 categorías de calidad de código y **su veredicto no quedó persistido como archivo**: el agente adversarial tiene prohibido generar archivos de reporte, así que entregó su análisis en el mensaje al orquestador. Lo que sobrevive en el repo es el resumen de la sección Hallazgos de este documento (0 bloqueantes, 6 MENOR, todos resueltos en fix-pack). ⚠️ Límite declarado: la evidencia `archivo:línea` completa del AR **no está en el repo**.
 - **F4 (Validation)**: **APROBADO PARA DONE** — 6/6 ACs PASS + 4 gates ejecutados (suite 276 TF / 5407 T, tsc limpio, biome 476 archivos, scope IN exacto 14 archivos, cero drift)
 
 ---
