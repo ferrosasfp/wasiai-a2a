@@ -233,14 +233,18 @@ describe('auth signed-auth endpoints (WKH-123)', () => {
 
     const res = await app.inject({
       method: 'PATCH',
-      url: '/auth/key-session/sess-1/require-signature',
+      url: '/auth/key-session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/require-signature',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
       payload: { require_signature: true },
     });
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, require_signature: true });
-    expect(mockSessionSetReqSig).toHaveBeenCalledWith('sess-1', 'user-1', true);
+    expect(mockSessionSetReqSig).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'user-1',
+      true,
+    );
   });
 
   it('AC-10 session: owner≠/unknown → 404 SESSION_NOT_FOUND (disclosure-safe)', async () => {
@@ -249,7 +253,7 @@ describe('auth signed-auth endpoints (WKH-123)', () => {
 
     const res = await app.inject({
       method: 'PATCH',
-      url: '/auth/key-session/sess-x/require-signature',
+      url: '/auth/key-session/99999999-9999-4999-8999-999999999999/require-signature',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
       payload: { require_signature: true },
     });
@@ -264,7 +268,7 @@ describe('auth signed-auth endpoints (WKH-123)', () => {
 
     const res = await app.inject({
       method: 'PATCH',
-      url: '/auth/key-session/sess-1/require-signature',
+      url: '/auth/key-session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/require-signature',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
       payload: { require_signature: true },
     });
@@ -278,9 +282,28 @@ describe('auth signed-auth endpoints (WKH-123)', () => {
 
     const res = await app.inject({
       method: 'PATCH',
-      url: '/auth/key-session/sess-1/require-signature',
+      url: '/auth/key-session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/require-signature',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
       payload: {},
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('INVALID_INPUT');
+    expect(mockSessionSetReqSig).not.toHaveBeenCalled();
+  });
+
+  // ── WKH-345 · `:id` sin forma de UUID ─────────────────────
+  // El body es VÁLIDO acá a propósito: es lo que distingue este 400 del 400 por
+  // body del test de arriba. Con un body inválido, el test pasaría igual sin
+  // guard y no mediría nada.
+  it('T-2b (AC-2) PATCH require-signature con :id malformado → 400 INVALID_INPUT, setRequireSignature NOT llamado', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/auth/key-session/not-a-uuid/require-signature',
+      headers: { authorization: `Bearer ${MASTER_KEY}` },
+      payload: { require_signature: true },
     });
 
     expect(res.statusCode).toBe(400);

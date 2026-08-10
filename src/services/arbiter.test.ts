@@ -120,6 +120,16 @@ const mockRpc = vi.mocked(supabase.rpc);
 const mockFrom = vi.mocked(supabase.from);
 
 const OWNER = 'tenant-A';
+
+/**
+ * El id del intent que conoce el falso de la base (`:_conds.id` en `makeArbDb`).
+ *
+ * WKH-345: tiene forma de UUID porque `a2a_payment_intents.id` ES una columna
+ * `uuid`, y porque cuatro de estos fixtures se inyectan por HTTP contra
+ * `POST /payments/session/:id/dispute`, que ahora valida la forma en el borde.
+ * Con el `'i1'` anterior esas cuatro URLs cruzaban el guard por accidente.
+ */
+const INTENT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const PAYTO = '0x2222222222222222222222222222222222222222';
 
 type RpcHandler = (args: Record<string, unknown>) => {
@@ -142,7 +152,7 @@ function happySettle(): void {
 
 function makeEvidence(over: Partial<DisputeEvidence>): DisputeEvidence {
   return {
-    intentId: 'i1',
+    intentId: INTENT_ID,
     authorizedUsd: 10,
     consumedUsd: 0,
     chainId: 2368,
@@ -246,7 +256,9 @@ function makeArbDb(init: {
       if (row.status !== 'open') {
         return {
           data: null,
-          error: { message: `INTENT_NOT_OPEN: intent i1 is ${row.status}` },
+          error: {
+            message: `INTENT_NOT_OPEN: intent ${INTENT_ID} is ${row.status}`,
+          },
         };
       }
       row.status = 'disputed';
@@ -284,7 +296,9 @@ function makeArbDb(init: {
       } else {
         return {
           data: null,
-          error: { message: `INTENT_NOT_OPEN: intent i1 is ${row.status}` },
+          error: {
+            message: `INTENT_NOT_OPEN: intent ${INTENT_ID} is ${row.status}`,
+          },
         };
       }
       return snapshot(prev, final);
@@ -382,7 +396,7 @@ function makeArbDb(init: {
         if (table === 'a2a_arbiter_nonces') {
           return Promise.resolve({ data: nonceStore, error: null });
         }
-        if (table === 'a2a_payment_intents' && b._conds.id !== 'i1') {
+        if (table === 'a2a_payment_intents' && b._conds.id !== INTENT_ID) {
           return Promise.resolve({ data: null, error: null });
         }
         // WKH-189: resolveHold lee la fila a2a_arbitrations original (best-effort)
@@ -492,7 +506,7 @@ describe('AC-1 rules inequívoco', () => {
     wireDb(db);
     mockReadEvidence.mockResolvedValue(makeEvidence({ consumedUsd: 0 }));
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.decision).toBe('refund');
     expect(r.method).toBe('rules');
@@ -516,7 +530,7 @@ describe('AC-3 ejecución de desenlaces', () => {
       makeEvidence({ consumedUsd: 10, voucherCount: 2, vouchersTotalUsd: 10 }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.decision).toBe('release');
     expect(r.settleUsd).toBe(10);
@@ -542,7 +556,7 @@ describe('AC-3 ejecución de desenlaces', () => {
       }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.decision).toBe('split');
     expect(r.settleUsd).toBeCloseTo(3.7, 8);
@@ -570,7 +584,7 @@ describe('AC-2 escalado a LLM acotado', () => {
       reasoning: 'partial delivery per on-chain evidence',
     });
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(mockClassifyAmbiguous).toHaveBeenCalledTimes(1);
     expect(r.method).toBe('llm');
@@ -597,7 +611,7 @@ describe('AC-6 fail-closed (LLM null → hold)', () => {
     );
     mockClassifyAmbiguous.mockResolvedValue(null); // breaker/timeout/invalid
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.status).toBe('held');
     expect(r.decision).toBe('hold');
@@ -630,7 +644,7 @@ describe('AC-6 sobre-tope (cap gate)', () => {
       }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.status).toBe('held');
     expect(r.atStakeUsd).toBe(100);
@@ -656,7 +670,7 @@ describe('AC-6 sobre-tope (cap gate)', () => {
       }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
     expect(r.status).toBe('executed');
     expect(mockSettle).toHaveBeenCalledTimes(1);
   });
@@ -675,7 +689,7 @@ describe('AC-4 anti-race doble-settle', () => {
     wireDb(db);
 
     await expect(
-      paymentIntentService.closeSession('i1', OWNER),
+      paymentIntentService.closeSession(INTENT_ID, OWNER),
     ).rejects.toMatchObject({ code: 'INTENT_NOT_OPEN' });
     // El cierre normal NO settlea el intent en disputa (doble-settle imposible).
     expect(mockSettle).not.toHaveBeenCalled();
@@ -685,9 +699,9 @@ describe('AC-4 anti-race doble-settle', () => {
   it('open_dispute sobre intent NO-open → INTENT_NOT_OPEN (el perdedor del row-lock aborta)', async () => {
     const db = makeArbDb({ authorized_usd: 10, status: 'closing' });
     wireDb(db);
-    await expect(arbiterService.openDispute('i1', OWNER)).rejects.toMatchObject(
-      { code: 'INTENT_NOT_OPEN' },
-    );
+    await expect(
+      arbiterService.openDispute(INTENT_ID, OWNER),
+    ).rejects.toMatchObject({ code: 'INTENT_NOT_OPEN' });
   });
 });
 
@@ -702,14 +716,14 @@ describe('exactly-once (recovery idempotente)', () => {
     );
 
     // 1ª ejecución: split settle 4, residual 6 refundado.
-    const r1 = await arbiterService.openDispute('i1', OWNER);
+    const r1 = await arbiterService.openDispute(INTENT_ID, OWNER);
     expect(r1.status).toBe('executed');
     expect(db.refunds).toEqual([6]);
     expect(db.row.status).toBe('settled');
 
     // recovery 2× (barrido/retry): finalize idempotente no-op → sin doble-refund.
-    await arbiterService.recoverArbClosing('i1', OWNER, true);
-    await arbiterService.recoverArbClosing('i1', OWNER, true);
+    await arbiterService.recoverArbClosing(INTENT_ID, OWNER, true);
+    await arbiterService.recoverArbClosing(INTENT_ID, OWNER, true);
     expect(db.refunds).toEqual([6]); // jamás dos veces
     expect(mockSettle).toHaveBeenCalledTimes(1); // NO re-settle
   });
@@ -726,16 +740,16 @@ describe('exactly-once (recovery idempotente)', () => {
     // settle on-chain OK, record 'settled' OK, finalize BLIP. El dinero YA se movió
     // on-chain → executed; el residual aún no acreditado (huérfano arb_closing),
     // igual que closeSession (settled branch NO lanza INTERNAL).
-    const r1 = await arbiterService.openDispute('i1', OWNER);
+    const r1 = await arbiterService.openDispute(INTENT_ID, OWNER);
     expect(r1.status).toBe('executed');
     expect(db.refunds).toEqual([]);
     expect(db.row.status).toBe('arb_closing');
     expect(db.row.settle_outcome).toBe('settled');
 
     // recovery: finalize idempotente → residual acreditado una sola vez.
-    await arbiterService.recoverArbClosing('i1', OWNER, true);
+    await arbiterService.recoverArbClosing(INTENT_ID, OWNER, true);
     expect(db.refunds).toEqual([6]);
-    await arbiterService.recoverArbClosing('i1', OWNER, true);
+    await arbiterService.recoverArbClosing(INTENT_ID, OWNER, true);
     expect(db.refunds).toEqual([6]); // terminal, sin doble-refund
     expect(mockSettle).toHaveBeenCalledTimes(1);
   });
@@ -758,17 +772,17 @@ describe('exactly-once (recovery idempotente)', () => {
     );
 
     // release, settle inequívoco falla → record failed_unequivocal, finalize BLIP → INTERNAL.
-    await expect(arbiterService.openDispute('i1', OWNER)).rejects.toMatchObject(
-      { code: 'INTERNAL' },
-    );
+    await expect(
+      arbiterService.openDispute(INTENT_ID, OWNER),
+    ).rejects.toMatchObject({ code: 'INTERNAL' });
     expect(db.refunds).toEqual([]);
     expect(db.row.status).toBe('arb_closing');
     expect(db.row.settle_outcome).toBe('failed_unequivocal');
 
     // recovery: finalize idempotente → refund del deposit COMPLETO una sola vez.
-    await arbiterService.recoverArbClosing('i1', OWNER, true);
+    await arbiterService.recoverArbClosing(INTENT_ID, OWNER, true);
     expect(db.refunds).toEqual([10]);
-    await arbiterService.recoverArbClosing('i1', OWNER, true);
+    await arbiterService.recoverArbClosing(INTENT_ID, OWNER, true);
     expect(db.refunds).toEqual([10]); // terminal, sin doble-refund
     expect(mockSettle).toHaveBeenCalledTimes(1);
   });
@@ -792,7 +806,7 @@ describe('AC-3 fail-closed settle on-chain', () => {
       makeEvidence({ consumedUsd: 10, voucherCount: 2, vouchersTotalUsd: 10 }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
     expect(r.status).toBe('executed');
     expect(db.refunds).toEqual([10]); // deposit completo (herencia BLQ-ALTO-1)
     expect(db.row.status).toBe('refunded');
@@ -807,7 +821,7 @@ describe('AC-3 fail-closed settle on-chain', () => {
       makeEvidence({ consumedUsd: 10, voucherCount: 2, vouchersTotalUsd: 10 }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
     expect(r.status).toBe('executed');
     expect(db.refunds).toEqual([]); // ambiguo → NO refund (evita doble-gasto)
     expect(db.row.status).toBe('failed');
@@ -826,9 +840,9 @@ describe('AC-5 testnet-only (fail-closed)', () => {
     wireDb(db);
     mockReadEvidence.mockResolvedValue(makeEvidence({ chainId }));
 
-    await expect(arbiterService.openDispute('i1', OWNER)).rejects.toMatchObject(
-      { code: 'CHAIN_NOT_SUPPORTED' },
-    );
+    await expect(
+      arbiterService.openDispute(INTENT_ID, OWNER),
+    ).rejects.toMatchObject({ code: 'CHAIN_NOT_SUPPORTED' });
     expect(mockSettle).not.toHaveBeenCalled();
     expect(db.refunds).toEqual([]);
   });
@@ -842,7 +856,7 @@ describe('AC-5 testnet-only (fail-closed)', () => {
     mockReadEvidence.mockResolvedValue(
       makeEvidence({ chainId, consumedUsd: 0 }),
     );
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
     expect(r.status).toBe('executed'); // refund total, sin chain rejection
   });
 });
@@ -859,16 +873,16 @@ describe('BLQ-BAJO-1 disputed no-brick', () => {
     wireDb(db);
     mockReadEvidence.mockResolvedValue(makeEvidence({ chainId: 43114 }));
 
-    await expect(arbiterService.openDispute('i1', OWNER)).rejects.toMatchObject(
-      { code: 'CHAIN_NOT_SUPPORTED' },
-    );
+    await expect(
+      arbiterService.openDispute(INTENT_ID, OWNER),
+    ).rejects.toMatchObject({ code: 'CHAIN_NOT_SUPPORTED' });
     // Pre-check ANTES de transicionar: el intent NUNCA pasó a 'disputed'.
     expect(db.row.status).toBe('open');
     expect(mockSettle).not.toHaveBeenCalled();
     expect(db.refunds).toEqual([]);
 
     // No bricked: el settlement normal sigue disponible.
-    const r = await paymentIntentService.closeSession('i1', OWNER);
+    const r = await paymentIntentService.closeSession(INTENT_ID, OWNER);
     expect(r.status).toBe('settled');
     expect(mockSettle).toHaveBeenCalledTimes(1);
     expect(db.refunds).toEqual([6]); // residual 10-4 al buyer
@@ -880,16 +894,16 @@ describe('BLQ-BAJO-1 disputed no-brick', () => {
     wireDb(db);
     mockReadEvidence.mockRejectedValue(new ArbiterError('INTERNAL'));
 
-    await expect(arbiterService.openDispute('i1', OWNER)).rejects.toMatchObject(
-      { code: 'INTERNAL' },
-    );
+    await expect(
+      arbiterService.openDispute(INTENT_ID, OWNER),
+    ).rejects.toMatchObject({ code: 'INTERNAL' });
     // Rollback best-effort: NO quedó bricked en 'disputed'.
     expect(db.row.status).toBe('open');
     expect(mockSettle).not.toHaveBeenCalled();
     expect(db.refunds).toEqual([]);
 
     // No bricked: closeSession normal procede tras el rollback.
-    const r = await paymentIntentService.closeSession('i1', OWNER);
+    const r = await paymentIntentService.closeSession(INTENT_ID, OWNER);
     expect(r.status).toBe('settled');
     expect(mockSettle).toHaveBeenCalledTimes(1);
     expect(db.refunds).toEqual([6]);
@@ -903,11 +917,13 @@ describe('CD-2 ownership guard', () => {
     // open_dispute con owner mismatch → el RPC lanza OWNERSHIP_MISMATCH.
     db.handlers.open_dispute = () => ({
       data: null,
-      error: { message: 'OWNERSHIP_MISMATCH: intent i1 not owned by caller' },
+      error: {
+        message: `OWNERSHIP_MISMATCH: intent ${INTENT_ID} not owned by caller`,
+      },
     });
     wireDb(db);
     await expect(
-      arbiterService.openDispute('i1', 'tenant-B'),
+      arbiterService.openDispute(INTENT_ID, 'tenant-B'),
     ).rejects.toMatchObject({ code: 'OWNERSHIP_MISMATCH' });
     expect(mockSettle).not.toHaveBeenCalled();
   });
@@ -932,7 +948,7 @@ describe('AC-7 flag OFF byte-idéntico', () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
-      url: '/payments/session/i1/dispute',
+      url: `/payments/session/${INTENT_ID}/dispute`,
       payload: {},
     });
     expect(res.statusCode).toBe(404);
@@ -946,7 +962,7 @@ describe('AC-7 flag OFF byte-idéntico', () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'GET',
-      url: '/payments/session/i1/dispute',
+      url: `/payments/session/${INTENT_ID}/dispute`,
     });
     expect(res.statusCode).toBe(404);
     await app.close();
@@ -959,7 +975,7 @@ describe('AC-7 flag OFF byte-idéntico', () => {
     wireDb(db);
     // Un intent 'open' normal jamás alcanza disputed/arb_* con el flag OFF; la
     // guarda nueva es rama muerta → el cierre settlea igual que antes de WKH-139.
-    const r = await paymentIntentService.closeSession('i1', OWNER);
+    const r = await paymentIntentService.closeSession(INTENT_ID, OWNER);
     expect(r.status).toBe('settled');
     expect(mockSettle).toHaveBeenCalledTimes(1);
     expect(db.refunds).toEqual([6]); // residual 10-4 al buyer, idéntico
@@ -988,7 +1004,7 @@ describe('route dispute (flag ON)', () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
-      url: '/payments/session/i1/dispute',
+      url: `/payments/session/${INTENT_ID}/dispute`,
       payload: {},
     });
     expect(res.statusCode).toBe(200);
@@ -1007,7 +1023,7 @@ describe('route dispute (flag ON)', () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
-      url: '/payments/session/i1/dispute',
+      url: `/payments/session/${INTENT_ID}/dispute`,
       payload: {},
     });
     expect(res.statusCode).toBe(409);
@@ -1027,7 +1043,7 @@ describe('WKH-189 T-2 resolveHold(release) money-path', () => {
     const db = makeArbDb({ authorized_usd: 10, status: 'arb_hold' });
     wireDb(db);
 
-    const r = await arbiterService.resolveHold('i1', {
+    const r = await arbiterService.resolveHold(INTENT_ID, {
       decision: 'release',
       resolvedBy: 'admin-jane',
       note: null,
@@ -1062,7 +1078,7 @@ describe('WKH-189 T-3 persistencia de auditoría + preservación de evidencia', 
     });
     wireDb(db);
 
-    const r = await arbiterService.resolveHold('i1', {
+    const r = await arbiterService.resolveHold(INTENT_ID, {
       decision: 'split',
       splitPct: 50,
       resolvedBy: 'admin-jane',
@@ -1115,7 +1131,7 @@ describe('WKH-189 T-4 guardas de estado', () => {
     const db = makeArbDb({ authorized_usd: 10, status: 'settled' });
     wireDb(db);
     await expect(
-      arbiterService.resolveHold('i1', {
+      arbiterService.resolveHold(INTENT_ID, {
         decision: 'release',
         resolvedBy: null,
         note: null,
@@ -1129,7 +1145,7 @@ describe('WKH-189 T-4 guardas de estado', () => {
     const db = makeArbDb({ authorized_usd: 10, status: 'open' });
     wireDb(db);
     await expect(
-      arbiterService.resolveHold('i1', {
+      arbiterService.resolveHold(INTENT_ID, {
         decision: 'refund',
         resolvedBy: null,
         note: null,
@@ -1150,7 +1166,7 @@ describe('WKH-189 T-6 testnet-guard fail-closed', () => {
     });
     wireDb(db);
     await expect(
-      arbiterService.resolveHold('i1', {
+      arbiterService.resolveHold(INTENT_ID, {
         decision: 'release',
         resolvedBy: null,
         note: null,
@@ -1169,7 +1185,7 @@ describe('WKH-189 T-7 sin cap (CD-9) + clamp [0,deposit]', () => {
     const db = makeArbDb({ authorized_usd: 1000, status: 'arb_hold' });
     wireDb(db);
 
-    const r = await arbiterService.resolveHold('i1', {
+    const r = await arbiterService.resolveHold(INTENT_ID, {
       decision: 'split',
       splitPct: 50,
       resolvedBy: null,
@@ -1187,7 +1203,7 @@ describe('WKH-189 T-7 sin cap (CD-9) + clamp [0,deposit]', () => {
     wireDb(db);
 
     await expect(
-      arbiterService.resolveHold('i1', {
+      arbiterService.resolveHold(INTENT_ID, {
         decision: 'split',
         splitPct: 500,
         resolvedBy: null,
@@ -1204,7 +1220,7 @@ describe('WKH-189 T-7 sin cap (CD-9) + clamp [0,deposit]', () => {
     wireDb(db);
 
     await expect(
-      arbiterService.resolveHold('i1', {
+      arbiterService.resolveHold(INTENT_ID, {
         decision: 'split',
         splitPct: -5,
         resolvedBy: null,
@@ -1219,7 +1235,7 @@ describe('WKH-189 T-7 sin cap (CD-9) + clamp [0,deposit]', () => {
     happySettle();
     const db0 = makeArbDb({ authorized_usd: 1000, status: 'arb_hold' });
     wireDb(db0);
-    const r0 = await arbiterService.resolveHold('i1', {
+    const r0 = await arbiterService.resolveHold(INTENT_ID, {
       decision: 'split',
       splitPct: 0,
       resolvedBy: null,
@@ -1230,7 +1246,7 @@ describe('WKH-189 T-7 sin cap (CD-9) + clamp [0,deposit]', () => {
     happySettle();
     const db100 = makeArbDb({ authorized_usd: 1000, status: 'arb_hold' });
     wireDb(db100);
-    const r100 = await arbiterService.resolveHold('i1', {
+    const r100 = await arbiterService.resolveHold(INTENT_ID, {
       decision: 'split',
       splitPct: 100,
       resolvedBy: null,
@@ -1245,7 +1261,7 @@ describe('WKH-189 T-7 sin cap (CD-9) + clamp [0,deposit]', () => {
     const db = makeArbDb({ authorized_usd: 1000, status: 'arb_hold' });
     wireDb(db);
 
-    const r = await arbiterService.resolveHold('i1', {
+    const r = await arbiterService.resolveHold(INTENT_ID, {
       decision: 'release',
       resolvedBy: null,
       note: null,
@@ -1285,7 +1301,7 @@ describe('WKH-189 T-8 idempotencia / no-op in-flight (CD-10)', () => {
     });
     wireDb(db);
 
-    const r = await arbiterService.resolveHold('i1', {
+    const r = await arbiterService.resolveHold(INTENT_ID, {
       decision: 'split',
       splitPct: 40,
       resolvedBy: null,
@@ -1322,7 +1338,7 @@ describe('WKH-189 T-10 invariante CD-8 (arb_hold nunca al recovery)', () => {
 
     // Aunque el RPC ensanchado transicione arb_hold→arb_closing, el guard
     // `prev_status !== 'arb_closing'` de recoverArbClosing corta antes de refundar.
-    await arbiterService.recoverArbClosing('i1', OWNER, true);
+    await arbiterService.recoverArbClosing(INTENT_ID, OWNER, true);
     expect(db.refunds).toEqual([]); // deposit NO reembolsado
     expect(mockSettle).not.toHaveBeenCalled();
   });
@@ -1388,10 +1404,14 @@ describe('WKH-189 T-11 migration SQL structure (up + down)', () => {
 
 // ────────────────────────────────────────────────────────────────────────────
 // WKH-191g — wire on-chain del árbitro al escrow (flag-gated, aditivo).
-// key_id de makeArbDb = 'k1'; el nonce esperado deriva de keccak256('k1') + 'i1'.
+// key_id de makeArbDb = 'k1'; el nonce esperado deriva de keccak256('k1') + INTENT_ID.
 // ────────────────────────────────────────────────────────────────────────────
 const EXPECTED_KEY_HASH = keccak256(stringToBytes('k1'));
-const EXPECTED_NONCE = deriveArbiterNonce(EXPECTED_KEY_HASH, 'i1', TEST_SECRET);
+const EXPECTED_NONCE = deriveArbiterNonce(
+  EXPECTED_KEY_HASH,
+  INTENT_ID,
+  TEST_SECRET,
+);
 
 describe('WKH-191g wire — flag OFF (default) → byte-idéntico, cero on-chain', () => {
   it('AC-1/AC-7: release con flag OFF → settlePaymentIntentOnChain, executeResolveDispute NO llamado', async () => {
@@ -1408,7 +1428,7 @@ describe('WKH-191g wire — flag OFF (default) → byte-idéntico, cero on-chain
       }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.decision).toBe('release');
     expect(mockExecResolve).not.toHaveBeenCalled();
@@ -1434,7 +1454,7 @@ describe('WKH-191g wire — triple gate → fallback', () => {
       }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.decision).toBe('release');
     expect(mockExecResolve).not.toHaveBeenCalled();
@@ -1458,7 +1478,7 @@ describe('WKH-191g wire — triple gate → fallback', () => {
       }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.decision).toBe('release');
     expect(mockExecResolve).not.toHaveBeenCalled();
@@ -1489,7 +1509,7 @@ describe('WKH-191g wire — flag ON + escrow + consent=true', () => {
       }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.decision).toBe('release');
     expect(mockExecResolve).toHaveBeenCalledTimes(1);
@@ -1520,7 +1540,7 @@ describe('WKH-191g wire — flag ON + escrow + consent=true', () => {
       }),
     );
 
-    await arbiterService.openDispute('i1', OWNER);
+    await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(mockExecLock).toHaveBeenCalledTimes(1);
     expect(mockExecLock).toHaveBeenCalledWith(
@@ -1540,7 +1560,7 @@ describe('WKH-191g wire — flag ON + escrow + consent=true', () => {
       makeEvidence({ authorizedUsd: 10, consumedUsd: 0 }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.decision).toBe('refund');
     expect(mockExecRelease).toHaveBeenCalledTimes(1);
@@ -1567,7 +1587,7 @@ describe('WKH-191g wire — flag ON + escrow + consent=true', () => {
       makeEvidence({ authorizedUsd: 10, consumedUsd: 0 }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     // Idéntico al happy off-chain: refund ejecutado, deposit al buyer.
     expect(r.decision).toBe('refund');
@@ -1592,7 +1612,7 @@ describe('WKH-191g wire — flag ON + escrow + consent=true', () => {
       }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.decision).toBe('release');
     expect(mockSettle).not.toHaveBeenCalled();
@@ -1617,7 +1637,7 @@ describe('WKH-191g wire — flag ON + escrow + consent=true', () => {
       }),
     );
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.decision).toBe('release');
     expect(mockSettle).not.toHaveBeenCalled();
@@ -1653,7 +1673,7 @@ function resolveNonceArg(idx: number): bigint {
 }
 
 const SETTLE_PARAMS = {
-  intentId: 'i1',
+  intentId: INTENT_ID,
   ownerRef: OWNER,
   payTo: PAYTO,
   finalAmountUsd: 5,
@@ -1774,7 +1794,7 @@ describe('WKH-194 exactly-once + no-adivinable + defensa', () => {
     wireDb(db);
     releaseEvidence();
 
-    const r = await arbiterService.openDispute('i1', OWNER);
+    const r = await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(r.decision).toBe('release');
     expect(db.row.settle_outcome).toBe('failed_ambiguous');
@@ -1795,7 +1815,7 @@ describe('WKH-194 exactly-once + no-adivinable + defensa', () => {
     wireDb(db);
     releaseEvidence();
 
-    await arbiterService.openDispute('i1', OWNER);
+    await arbiterService.openDispute(INTENT_ID, OWNER);
 
     expect(db.row.settle_outcome).toBe('failed_unequivocal');
     expect(db.refunds).toEqual([10]); // deposit completo al buyer (byte-idéntico a hoy)

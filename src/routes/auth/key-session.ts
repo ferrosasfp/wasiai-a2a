@@ -9,6 +9,7 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { isValidUUID } from '../../lib/uuid.js';
 import {
   InvalidKeySessionInputError,
   keySessionService,
@@ -127,6 +128,15 @@ export const keySessionRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(403).send({ error: 'Invalid or inactive API key' });
       }
 
+      // WKH-345: forma del `:id` ANTES de la capa de datos. Sin esto el valor
+      // llega a una columna `uuid` y Postgres responde 22P02 → 500.
+      // Va DESPUÉS del gate de prefijo de sub-sesión y del 403 de auth, a
+      // propósito: un autenticador explícitamente prohibido no debe recibir
+      // feedback sobre la forma del id (T-5 lo fija).
+      if (!isValidUUID(req.params.id)) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+
       try {
         await keySessionService.revoke(req.params.id, callerKey.owner_ref);
         return reply.status(200).send({ revoked: true });
@@ -177,6 +187,14 @@ export const keySessionRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(400).send({ error_code: 'INVALID_INPUT' });
       }
       const value = body.require_signature;
+
+      // WKH-345: forma del `:id` ANTES de la capa de datos. Va DESPUÉS de la
+      // validación de body porque este handler ya responde 400 INVALID_INPUT al
+      // body y más abajo 400 SIGNING_SECRET_NOT_SET: mantener el body primero
+      // preserva el orden actual sin tener que decidir cuál de los dos gana.
+      if (!isValidUUID(req.params.id)) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
 
       try {
         await keySessionService.setRequireSignature(

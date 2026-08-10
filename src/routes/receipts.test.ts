@@ -149,13 +149,16 @@ describe('receipts routes', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: '/receipts/rcpt-1/verify',
+      url: '/receipts/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/verify',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 
     expect(res.statusCode).toBe(200);
     expect(res.json().valid).toBe(true);
-    expect(mockVerify).toHaveBeenCalledWith('rcpt-1', 'user-1');
+    expect(mockVerify).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'user-1',
+    );
   });
 
   // ── AC-5 ──────────────────────────────────────────────────
@@ -170,7 +173,7 @@ describe('receipts routes', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: '/receipts/rcpt-1/verify',
+      url: '/receipts/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/verify',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 
@@ -186,7 +189,7 @@ describe('receipts routes', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: '/receipts/other-owner-rcpt',
+      url: '/receipts/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 
@@ -200,11 +203,44 @@ describe('receipts routes', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: '/receipts/other-owner-rcpt/verify',
+      url: '/receipts/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/verify',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 
     expect(res.statusCode).toBe(404);
+    expect(mockVerify).not.toHaveBeenCalled();
+  });
+
+  // ── WKH-345 · `:id` sin forma de UUID ─────────────────────
+  // Antes de esta HU el valor llegaba a una columna `uuid` y Postgres
+  // respondía 22P02, que nadie traducía: 500. El aserto de `not.toHaveBeenCalled`
+  // es el que mata el mutante "mover el guard adentro del try".
+  it('T-1a (AC-1) GET /receipts/:id con :id malformado → 400 INVALID_INPUT, getById NOT llamado', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/receipts/not-a-uuid',
+      headers: { authorization: `Bearer ${MASTER_KEY}` },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('INVALID_INPUT');
+    expect(mockGetById).not.toHaveBeenCalled();
+  });
+
+  it('T-1b (AC-1) GET /receipts/:id/verify con :id malformado → 400 INVALID_INPUT, getById y verify NOT llamados', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/receipts/not-a-uuid/verify',
+      headers: { authorization: `Bearer ${MASTER_KEY}` },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('INVALID_INPUT');
+    expect(mockGetById).not.toHaveBeenCalled();
     expect(mockVerify).not.toHaveBeenCalled();
   });
 });
