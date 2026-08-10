@@ -160,6 +160,37 @@ Dos daños de una sola edición mecánica sobre `src/services/arbiter.test.ts`.
   a un archivo que yo mismo desplacé se re-mide después de la última edición: los
   barridos miran lo que escribí, no lo que **moví**.
 
+- **Addendum del fix-pack de MENORes — el arreglo de arriba estaba INCOMPLETO, y de
+  la forma que peor se ve.** Ese `Fix (3)` dice "re-medí las dos líneas y corregí el
+  log". Corrigió **dos** (`:385`→`:395` y `:1394`→`:1404`) y dejó **cuatro**: los
+  `url:` de la tabla del 6º archivo (`:935 :949 :991 :1010`), que necesitaban el mismo
+  `+10` y llegaron mal hasta `c3b7333`. Hoy son `:951 :965 :1007 :1026`.
+
+  La variante del patrón, que es la que más costó en toda la sesión:
+
+  > **Un barrido arregla lo que fuiste a buscar, no lo que desplazaste.** Fui a
+  > buscar dos citas concretas porque eran las dos que me habían llamado la
+  > atención, las arreglé, y firmé el fix. El desplazamiento no distingue entre las
+  > citas que recordás y las que no: le aplica el `+10` a **todas** las que están
+  > debajo. Un fix "verificado" que enumera sus objetivos a mano hereda exactamente
+  > el sesgo de quien lo escribió.
+
+  Y es peor que el error original, porque **un fix declarado apaga la sospecha**: la
+  entrada decía "corregí el log" y nadie —yo incluido— volvió a mirar el resto de las
+  citas de ese archivo. Ninguno de los 6 MENOR del AR sobre `c3b7333` las menciona
+  tampoco.
+
+  **El control, y esta vez es mecánico y no una lista**: después de la última
+  edición, enumerar **todas** las citas `archivo:línea` de los documentos y afirmar
+  cada una contra el árbol con un `assert` de **contenido**, no de número. En el
+  fix-pack fueron **39 citas**: 37 las confirmó el `assert` directo y 2 dieron rojo
+  por mi patrón de búsqueda, no por la cita — `auth.key-session.test.ts:161`
+  (correcta, pero contra `2745bb2`, el commit del que habla la entrada #3) y
+  `e2e.test.ts:30` (apunta al `const UUID_RE =`, con el patrón v4 en `:31`). Las dos
+  se resolvieron leyendo el archivo. Así aparecieron estas cuatro citas viejas, que
+  **no** había roto yo, además de las tres que sí desplacé en este fix-pack
+  (`uuid.ts:51`→`:57`, `arbiter.test.ts:395`→`:399`, `:1404`→`:1410`).
+
 ---
 
 ### [2026-08-10] Fix-pack MENORes — PATRÓN: un refixture consume el testigo, y el que se queda solo no lo sabe
@@ -184,6 +215,18 @@ mecanismo y las dos invisibles para los gates.
   > aceptan **apaga el testigo sin poner nada en rojo** — el test sigue pasando, y
   > pasa por el motivo equivocado. Y el testigo que sobrevive queda **solo**, sin
   > que nada en el repo lo diga.
+
+- **El alcance del "dos", que es a propósito.** Este patrón —*el refixture apaga la
+  propiedad que hacía testigo a un test*— tiene **dos instancias medidas**, las de
+  arriba. Pertenece a una familia más amplia, *"un test no prueba lo que dice
+  probar"*, que sí tiene más casos en el proyecto: un fixture del caso **positivo**
+  que omitía justamente el campo que el guard compara, y un assert que clavaba la
+  **presencia** de una frase y no su **posición**. Esos dos **no entran acá**: no son
+  refixtures. El enunciado angosto es el que trae el control ejecutable (aplicar el
+  mutante de orden y contar rojos); ensancharlo a la familia lo dejaría sin control.
+  Si alguien viene a subir el número, la pregunta es si el caso nuevo **cambió el
+  valor de un input que otro test usaba como discriminante** — no si el test falla en
+  probar lo que promete.
 
 - **Por qué es peligroso y no sólo prolijo**: no es la cobertura que se pierde hoy,
   es la que se pierde **mañana**. Acá quedó T-4e como único testigo de D-3: si
@@ -245,3 +288,40 @@ de ellas además **en un docblock de producción**.
   commit: la resta es la única forma de separar la víctima del preexistente. Es el
   mismo control que la entrada #4 pide para los hashes de commit, aplicado a los
   hashes de contenido.
+
+---
+
+### [2026-08-10] Fix-pack MENORes — Leí un "0 coincidencias" y volví a aplicar la edición: dupliqué dos bloques
+
+- **Error**: después de escribir dos bloques nuevos en `auto-blindaje.md`, corrí
+  `git status --short` y `grep -c` para confirmarlos. `git status` salió **vacío** (con
+  el árbol sucio) y los `grep -c` dieron **0** (con los bloques ya escritos). Leí eso
+  como "las ediciones se perdieron", anuncié que el árbol se había revertido, y las
+  **volví a aplicar**. Quedaron **dos copias** de cada bloque, más una tercera del
+  párrafo del AR.
+- **Cómo lo encontré**: por el propio control de la entrada anterior. Al terminar
+  conté las ocurrencias con `python3` en vez de con el `grep` de antes, y los cuatro
+  marcadores dieron **2**. `/usr/bin/git status --short` mostraba los dos archivos
+  modificados, o sea que la primera lectura era falsa en las dos mitades.
+- **Qué NO voy a afirmar**: por qué mintió. Repetí la secuencia exacta después y las
+  tres formas de medir (`grep` envuelto, `rtk proxy grep`, `/usr/bin/grep`, `python3`)
+  coincidieron. **No pude reproducirlo**, así que no tengo el mecanismo, y escribir
+  "la herramienta X tiene un bug" sería inventarlo. Diez corridas verdes no dicen nada
+  de un fallo intermitente.
+- **Causa raíz, que sí es mía y no de la herramienta**: traté un **resultado negativo**
+  como prueba de ausencia, con un solo instrumento, y encima usé para verificar el
+  mismo tipo de comando con el que después iba a escribir. Un "0 coincidencias" es
+  justamente la lectura que hay que cruzar: si es falso, la acción que dispara
+  (re-aplicar) **agrega**, y agregar es una corrupción silenciosa y aditiva. Un `.md`
+  duplicado no lo caza ningún gate — `npm test` da verde, `tsc` y `biome` no leen
+  prosa —, así que el único lector es el humano que abre el documento y ve el mismo
+  párrafo dos veces.
+- **Fix**: reconstruí el archivo desde el objeto de git (`git show 8187a98:<archivo>`),
+  verifiqué que la base tuviera **0** copias, apliqué cada bloque **una** vez con
+  `assert s.count(old)==1`, y cerré con un `assert n==1` sobre los cinco marcadores más
+  un conteo de encabezados `###` (7 entradas, ninguna repetida).
+- **Aplicar en**: **toda afirmación de ausencia se mide con un instrumento distinto
+  del que va a aplicar el cambio** — para conteos en archivos, `python3 ...count(...)`,
+  que no pasa por ningún envoltorio. Y cuando la acción que sigue a un "no está" es
+  *volver a escribirlo*, el control va **después**: contar y exigir exactamente uno.
+  Es el mismo criterio que "no pude preguntar ≠ no pasó", del lado de la escritura.

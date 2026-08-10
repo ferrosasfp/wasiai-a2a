@@ -204,7 +204,14 @@ sitios en 5 archivos, **todos bajo `src/routes/`**, y éste vive en `src/service
 
 Los cuatro sitios son las líneas `url:` que inyectan. Van con **dos** números,
 porque el archivo se desplazó dos veces: `+10` por el bloque de `INTENT_ID` y `+6`
-por el fix-pack de MENORes. Re-medidos con `python3` sobre el árbol final:
+por el fix-pack de MENORes. Re-medidos con `python3` sobre el árbol final.
+
+⚠️ **Estos cuatro números llegaron MAL hasta `c3b7333`**, y no los desplazó el
+fix-pack: eran los de `2d8168c` y les faltaba el `+10` del bloque de `INTENT_ID`. El
+arreglo de auto-blindaje #5 corrigió dos citas desplazadas (`:385`→`:395`,
+`:1394`→`:1404`) y se dejó estas cuatro, que estaban debajo del mismo bloque. Un
+barrido arregla lo que fue a buscar, no lo que desplazó — está escrito como variante
+del patrón en el addendum de auto-blindaje #5.
 
 | Sitio en `2d8168c` | Hoy (`url:`) | El `it(` que lo contiene | Qué pide | Estado con el guard, antes del arreglo |
 |---|---|---|---|---|
