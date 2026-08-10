@@ -119,13 +119,16 @@ describe('auth key-session revoke endpoint', () => {
 
     const res = await app.inject({
       method: 'DELETE',
-      url: '/auth/key-session/sess-1',
+      url: '/auth/key-session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ revoked: true });
-    expect(mockRevoke).toHaveBeenCalledWith('sess-1', 'user-1');
+    expect(mockRevoke).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'user-1',
+    );
   });
 
   it('T-NOTFOUND-ROUTE (AC-3) service throws SessionNotFoundError → 404 SESSION_NOT_FOUND', async () => {
@@ -134,7 +137,7 @@ describe('auth key-session revoke endpoint', () => {
 
     const res = await app.inject({
       method: 'DELETE',
-      url: '/auth/key-session/sess-999',
+      url: '/auth/key-session/99999999-9999-4999-8999-999999999999',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 
@@ -149,19 +152,22 @@ describe('auth key-session revoke endpoint', () => {
 
     const res = await app.inject({
       method: 'DELETE',
-      url: '/auth/key-session/sess-1',
+      url: '/auth/key-session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ revoked: true });
-    expect(mockRevoke).toHaveBeenCalledWith('sess-1', 'user-1');
+    expect(mockRevoke).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'user-1',
+    );
   });
 
   it('T-SUBSESSION (AC-5) session token authenticator → 403 SESSION_NOT_ALLOWED, revoke NOT called', async () => {
     const res = await app.inject({
       method: 'DELETE',
-      url: '/auth/key-session/sess-1',
+      url: '/auth/key-session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       headers: { authorization: `Bearer ${SESSION_TOKEN}` },
     });
 

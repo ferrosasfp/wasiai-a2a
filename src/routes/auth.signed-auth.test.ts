@@ -233,14 +233,18 @@ describe('auth signed-auth endpoints (WKH-123)', () => {
 
     const res = await app.inject({
       method: 'PATCH',
-      url: '/auth/key-session/sess-1/require-signature',
+      url: '/auth/key-session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/require-signature',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
       payload: { require_signature: true },
     });
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, require_signature: true });
-    expect(mockSessionSetReqSig).toHaveBeenCalledWith('sess-1', 'user-1', true);
+    expect(mockSessionSetReqSig).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'user-1',
+      true,
+    );
   });
 
   it('AC-10 session: owner≠/unknown → 404 SESSION_NOT_FOUND (disclosure-safe)', async () => {
@@ -249,7 +253,7 @@ describe('auth signed-auth endpoints (WKH-123)', () => {
 
     const res = await app.inject({
       method: 'PATCH',
-      url: '/auth/key-session/sess-x/require-signature',
+      url: '/auth/key-session/99999999-9999-4999-8999-999999999999/require-signature',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
       payload: { require_signature: true },
     });
@@ -264,7 +268,7 @@ describe('auth signed-auth endpoints (WKH-123)', () => {
 
     const res = await app.inject({
       method: 'PATCH',
-      url: '/auth/key-session/sess-1/require-signature',
+      url: '/auth/key-session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/require-signature',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
       payload: { require_signature: true },
     });
@@ -278,7 +282,7 @@ describe('auth signed-auth endpoints (WKH-123)', () => {
 
     const res = await app.inject({
       method: 'PATCH',
-      url: '/auth/key-session/sess-1/require-signature',
+      url: '/auth/key-session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/require-signature',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
       payload: {},
     });

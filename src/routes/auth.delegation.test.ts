@@ -307,13 +307,16 @@ describe('auth delegation endpoints', () => {
 
     const res = await app.inject({
       method: 'DELETE',
-      url: '/auth/delegation/del-1',
+      url: '/auth/delegation/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ revoked: true });
-    expect(mockRevoke).toHaveBeenCalledWith('del-1', 'user-1');
+    expect(mockRevoke).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'user-1',
+    );
   });
 
   it('T13 (AC-12) DELETE on foreign delegation → 403 OWNERSHIP_MISMATCH', async () => {
@@ -322,7 +325,7 @@ describe('auth delegation endpoints', () => {
 
     const res = await app.inject({
       method: 'DELETE',
-      url: '/auth/delegation/del-999',
+      url: '/auth/delegation/99999999-9999-4999-8999-999999999999',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 

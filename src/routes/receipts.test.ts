@@ -149,13 +149,16 @@ describe('receipts routes', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: '/receipts/rcpt-1/verify',
+      url: '/receipts/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/verify',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 
     expect(res.statusCode).toBe(200);
     expect(res.json().valid).toBe(true);
-    expect(mockVerify).toHaveBeenCalledWith('rcpt-1', 'user-1');
+    expect(mockVerify).toHaveBeenCalledWith(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'user-1',
+    );
   });
 
   // ── AC-5 ──────────────────────────────────────────────────
@@ -170,7 +173,7 @@ describe('receipts routes', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: '/receipts/rcpt-1/verify',
+      url: '/receipts/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/verify',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 
@@ -186,7 +189,7 @@ describe('receipts routes', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: '/receipts/other-owner-rcpt',
+      url: '/receipts/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 
@@ -200,7 +203,7 @@ describe('receipts routes', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: '/receipts/other-owner-rcpt/verify',
+      url: '/receipts/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/verify',
       headers: { authorization: `Bearer ${MASTER_KEY}` },
     });
 

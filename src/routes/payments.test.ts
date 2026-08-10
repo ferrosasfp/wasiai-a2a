@@ -150,7 +150,7 @@ describe('T-AC4 owner guard (route)', () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
-      url: '/payments/session/i1/close',
+      url: '/payments/session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/close',
       payload: {},
     });
     expect(res.statusCode).toBe(403);
@@ -166,7 +166,7 @@ describe('T-AC4 owner guard (route)', () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
-      url: '/payments/session/i1/voucher',
+      url: '/payments/session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/voucher',
       payload: { voucherId: 'v1', amountUsd: 1 },
     });
     expect(res.statusCode).toBe(409);
@@ -200,7 +200,7 @@ describe('T-WRITE guard money-path (CD-12)', () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
-      url: '/payments/session/i1/voucher',
+      url: '/payments/session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/voucher',
       payload: { voucherId: 'v1', amountUsd: 'abc' },
     });
     expect(res.statusCode).toBe(422);
@@ -278,7 +278,7 @@ describe('T-WRITE guard money-path (CD-12)', () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
-      url: '/payments/upto/i1/settle',
+      url: '/payments/upto/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/settle',
       payload: { reportedUsageUsd: -1 },
     });
     expect(res.statusCode).toBe(422);
@@ -301,7 +301,7 @@ describe('T-3 flag OFF byte-idéntico (AC-3)', () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
-      url: '/payments/session/i1/close',
+      url: '/payments/session/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/close',
       payload: {
         debitSignature: `0x${'ab'.repeat(65)}`,
         debitNonce: '1',
@@ -314,7 +314,7 @@ describe('T-3 flag OFF byte-idéntico (AC-3)', () => {
     // 4º arg (debitCapture) === undefined → llamada byte-idéntica (pese a que el
     // body SÍ trae campos debit*, el gate del flag OFF los descarta en el route).
     expect(mockService.closeSession).toHaveBeenCalledWith(
-      'i1',
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       'tenant-A',
       false,
       undefined,
@@ -339,7 +339,7 @@ describe('T-3 flag OFF byte-idéntico (AC-3)', () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'POST',
-      url: '/payments/upto/i1/settle',
+      url: '/payments/upto/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/settle',
       payload: {
         reportedUsageUsd: 2,
         debitSignature: `0x${'ab'.repeat(65)}`,
@@ -351,7 +351,7 @@ describe('T-3 flag OFF byte-idéntico (AC-3)', () => {
     expect(res.statusCode).toBe(200);
     // 5º arg (debitCapture) === undefined (body con debit* + flag OFF → descartado).
     expect(mockService.settleUpto).toHaveBeenCalledWith(
-      'i1',
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       'tenant-A',
       2,
       false,
