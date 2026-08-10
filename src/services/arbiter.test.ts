@@ -256,7 +256,9 @@ function makeArbDb(init: {
       if (row.status !== 'open') {
         return {
           data: null,
-          error: { message: `INTENT_NOT_OPEN: intent i1 is ${row.status}` },
+          error: {
+            message: `INTENT_NOT_OPEN: intent ${INTENT_ID} is ${row.status}`,
+          },
         };
       }
       row.status = 'disputed';
@@ -294,7 +296,9 @@ function makeArbDb(init: {
       } else {
         return {
           data: null,
-          error: { message: `INTENT_NOT_OPEN: intent i1 is ${row.status}` },
+          error: {
+            message: `INTENT_NOT_OPEN: intent ${INTENT_ID} is ${row.status}`,
+          },
         };
       }
       return snapshot(prev, final);
@@ -913,7 +917,9 @@ describe('CD-2 ownership guard', () => {
     // open_dispute con owner mismatch → el RPC lanza OWNERSHIP_MISMATCH.
     db.handlers.open_dispute = () => ({
       data: null,
-      error: { message: 'OWNERSHIP_MISMATCH: intent i1 not owned by caller' },
+      error: {
+        message: `OWNERSHIP_MISMATCH: intent ${INTENT_ID} not owned by caller`,
+      },
     });
     wireDb(db);
     await expect(

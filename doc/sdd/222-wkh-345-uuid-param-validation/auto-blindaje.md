@@ -159,3 +159,88 @@ Dos daños de una sola edición mecánica sobre `src/services/arbiter.test.ts`.
   comentarios, el orden correcto es **replace primero, prosa después**. Y toda cita
   a un archivo que yo mismo desplacé se re-mide después de la última edición: los
   barridos miran lo que escribí, no lo que **moví**.
+
+---
+
+### [2026-08-10] Fix-pack MENORes — PATRÓN: un refixture consume el testigo, y el que se queda solo no lo sabe
+
+Ya no es anécdota: **dos instancias medidas en esta misma HU**, con el mismo
+mecanismo y las dos invisibles para los gates.
+
+- **Instancia 1 (auto-blindaje #3)**: W1 cambió el `url:` de T-SUBSESSION
+  (`auth.key-session.test.ts`) de `sess-1` a un UUID válido. Con eso T-SUBSESSION
+  dejó de ser el testigo del orden "gate de prefijo antes del guard". Medido con
+  M-4: T-5 rojo, **T-SUBSESSION verde**.
+- **Instancia 2 (ésta)**: el refactor a `INTENT_ID` cambió el `url:` de
+  `arbiter.test.ts` (el `POST` dispute con flag OFF) de `'i1'` a un UUID válido.
+  Con eso dejó de ser el testigo del orden `isArbiterEnabled()` antes del guard.
+  Medido con M-5 (`payments.ts` `b1cfcd21…` → `c0502dd2…`, en `c3b7333`): **1 solo
+  rojo en todo el repo, T-4e**, y `arbiter.test.ts` **64 passed (64)**.
+
+- **El patrón, escrito para que sirva sin el contexto de esta HU**:
+
+  > Un test es testigo de un **orden** sólo mientras su input pueda ser rechazado
+  > por la primera de las dos guardas. Refixturear ese input a un valor que ambas
+  > aceptan **apaga el testigo sin poner nada en rojo** — el test sigue pasando, y
+  > pasa por el motivo equivocado. Y el testigo que sobrevive queda **solo**, sin
+  > que nada en el repo lo diga.
+
+- **Por qué es peligroso y no sólo prolijo**: no es la cobertura que se pierde hoy,
+  es la que se pierde **mañana**. Acá quedó T-4e como único testigo de D-3: si
+  alguien lo borra o lo "simplifica" a un `:id` bien formado —razonando que
+  `arbiter.test.ts` ya prueba el flag OFF— la propiedad queda sin ningún test y la
+  suite sigue verde. Ninguno de los tres gates lo ve: `npm test` da verde,
+  `tsc` y `biome` no leen semántica de cobertura.
+- **Fix**: tres lugares, porque el que borra un test no lee el `.md`.
+  (1) El log lo declara: sección "El arreglo CONSUMIÓ un testigo".
+  (2) El aviso vive **en el propio testigo**, no sólo en la doc: el comentario de
+  T-4e (`src/routes/payments.uuid-param.test.ts`) dice que es el único, con el
+  número medido y con la advertencia de que refixturear su `:id` a uno válido lo
+  apaga igual que borrarlo.
+  (3) El comentario del código de producción que fija el orden ya nombraba al test
+  (`payments.ts:352-356`), así el camino también existe desde el lado del código.
+- **Aplicar en**: **cada vez que una wave de fixtures cambie un `url:`/input que
+  otra wave usa como testigo de orden**, el control son dos preguntas y un comando:
+  ¿qué propiedad del input viejo era la que medía?, ¿queda algún otro test con esa
+  propiedad? — y después aplicar el mutante de orden y **contar cuántos rojos da**.
+  Si da **uno**, ése es el único testigo y hay que escribirlo. Si da **cero**, la
+  propiedad ya no tiene cobertura.
+
+---
+
+### [2026-08-10] Fix-pack MENORes — Le cargué a un mutante 2 fallos que ya estaban rojos, y cité un `sha256sum` sin su commit
+
+Dos formas de inflar evidencia de mutación, las dos mías, las dos en el mismo
+párrafo del log y una de ellas **en un docblock de producción**.
+
+- **Error A — el mutante no mató 13, mató 11.** Escribí "M-2 → 13 rojos, 11 fuera
+  de `uuid.test.ts`" en `src/lib/uuid.ts` y en el log. Medido en `2d8168c`, sí: pero
+  en **ese** commit `arbiter.test.ts:991` y `:1010` ya estaban rojos **sin ningún
+  mutante** (es la entrada #2 de este mismo archivo, o sea que yo ya lo sabía). Los
+  conté como víctimas del mutante. La fila de M-3 sí desglosaba "+ los 2
+  preexistentes"; la de M-2 no. Re-medido en `c3b7333` con el árbol limpio:
+  **M-2 = 11 rojos, 9 fuera** (los 9 en `tasks.test.ts`), **M-3 = 32 rojos, 29
+  fuera en 9 archivos**.
+- **Error B — un `sha256sum` de "original" sin commit al lado.** El log daba
+  `3595862d…` como el original de `src/lib/uuid.ts`, sin decir dónde. Ese hash vale
+  en `af4e126`/`c9bcee0`/`2d8168c`; desde `7862f88` el archivo es `616b7c54…`. Quien
+  re-corriera el mutante hoy calcularía un original distinto del citado y **no
+  tendría forma de distinguir eso de una manipulación del archivo** — que es justo
+  lo que el control R-1 existe para descartar.
+- **Causa raíz común**: un número de mutación es un **par** (resultado, estado del
+  árbol), y yo escribí sólo el primer miembro. Sin el commit, "13 rojos" y
+  `3595862d…` no son verificables ni falsables: son decoración con formato de dato.
+  Y en el caso de A hay algo peor — el número **exagera a favor de mi propio test**:
+  hace parecer que el mutante tiene 2 víctimas más de las que tiene.
+- **Fix**: (1) re-corrí M-2 y M-3 sobre la suite completa en `c3b7333` y reescribí
+  los tres lugares (docblock de `uuid.ts`, docblock de `uuid.test.ts`, tabla del
+  log) con los números medidos; (2) el log ahora lleva una tabla de "originales,
+  cada uno con el commit donde vale", leídos con
+  `git show <commit>:<archivo> | sha256sum` (del objeto de git, no del árbol); (3)
+  cada fila de mutante tiene columna **"Medido en"**.
+- **Aplicar en**: **todo resultado de mutación se escribe con el commit del árbol
+  base, y todo `sha256sum` de "original" con el commit donde vale.** Antes de
+  atribuirle un rojo a un mutante, correr la suite **sin** el mutante en ese mismo
+  commit: la resta es la única forma de separar la víctima del preexistente. Es el
+  mismo control que la entrada #4 pide para los hashes de commit, aplicado a los
+  hashes de contenido.

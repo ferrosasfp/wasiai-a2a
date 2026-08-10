@@ -192,6 +192,16 @@ describe('payments — `:id` sin forma de UUID (WKH-345)', () => {
   // desconocido que la ruta existe: una regresión de disclosure, no un detalle
   // de orden. Mutante que lo mata: mover el `if (!isValidUUID(...))` arriba del
   // `if (!isArbiterEnabled())`.
+  //
+  // ⚠️ NO BORRAR, NI "SIMPLIFICAR" EL `:id` A UNO BIEN FORMADO. Medido en
+  // `c3b7333` con ese mutante aplicado: **es el único rojo del repo entero**, y
+  // `src/services/arbiter.test.ts` queda 64/64 en verde. Ese archivo tenía un
+  // segundo testigo del mismo orden mientras inyectaba con `'i1'`; al pasar a un
+  // UUID válido dejó de poder distinguir los dos órdenes. O sea que hoy este test
+  // es la ÚNICA cobertura de D-3 en el repo: si se va, la propiedad queda sin
+  // testigo y la suite no se pone roja. Con un `:id` válido acá tampoco hay
+  // testigo, porque el guard deja pasar el pedido en cualquiera de los dos
+  // órdenes.
   it('T-4e (D-3) POST /session/:id/dispute con ARBITER_ENABLED apagado → 404 NOT_FOUND, NO 422', async () => {
     delete process.env.ARBITER_ENABLED;
     expect(isArbiterEnabled()).toBe(false);

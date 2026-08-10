@@ -2,10 +2,25 @@
  * Tests de `src/lib/uuid.ts` — predicado de FORMA de UUID (WKH-345).
  *
  * Estos cuatro existen porque el guard de las cinco rutas se anula con UNA
- * línea: `return UUID_RE.test(id)` → `return true`. Los tests de ruta ven ese
- * mutante, pero no ven los otros dos (M-2, endurecer a v4; M-3, flags `gi`),
- * porque todos los ids que fabrican las suites son v4 y se piden una sola vez.
- * Cada `it` de acá nombra el mutante de una línea que lo pone rojo.
+ * línea: `return UUID_RE.test(id)` → `return true`. Cada `it` de acá nombra el
+ * mutante de una línea que lo pone rojo.
+ *
+ * LO QUE NO SON: los únicos testigos de esos mutantes. Acá había escrito que los
+ * tests de ruta "no ven M-2 ni M-3 porque todos los ids que fabrican las suites
+ * son v4 y se piden una sola vez". Las dos mitades son falsas, y las dos se
+ * caen con una corrida de la suite completa (`c3b7333`):
+ *
+ *   M-2 (endurecer a v4)   → **11 rojos, 9 FUERA de este archivo**, los 9 en
+ *                            `src/routes/tasks.test.ts`, que es justamente un
+ *                            archivo de tests de ruta. Los ids de fixture NO son
+ *                            todos v4: `tasks.test.ts:95` es
+ *                            `'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'`.
+ *   M-3 (flags `i` → `gi`) → **32 rojos, 29 FUERA**, en 9 archivos. Los ids SÍ se
+ *                            piden más de una vez por proceso, que es exactamente
+ *                            por qué el `lastIndex` compartido mata 29 de rebote.
+ *
+ * El valor de estos cuatro no es ser los únicos rojos: es ser los únicos que
+ * dicen POR QUÉ el rojo no se arregla tocando el fixture (ver T-U2).
  */
 import { describe, expect, it } from 'vitest';
 import { isValidUUID, UUID_RE } from './uuid.js';
@@ -28,15 +43,22 @@ describe('isValidUUID (WKH-345)', () => {
   // T-U2 — mutante que lo mata: endurecer el patrón a v4, o sea
   // `[0-9a-f]{4}-[0-9a-f]{4}-` → `4[0-9a-f]{3}-[89ab][0-9a-f]{3}-`.
   //
-  // Medido en `2d8168c`: ese mutante pone rojos 13 tests. NO es cierto que el
-  // resto de la suite sea ciego a él (esa era la hipótesis, y es falsa: 11 de
-  // los 13 están fuera de este archivo). Pero esos 11 caen porque sus fixtures
-  // son literales escritos a mano sin forma de v4 —
-  // `tasks.test.ts:95` es `'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'` —, así que
-  // señalan "el fixture no es v4", no "el contrato no debe pedir v4".
+  // Medido en `c3b7333` (suite completa, árbol limpio): ese mutante pone rojos
+  // **11** tests, de los cuales **9 están fuera de este archivo** (los 9 en
+  // `src/routes/tasks.test.ts`). NO es cierto que el resto de la suite sea ciego
+  // a él: ésa era la hipótesis, y es falsa. Los otros 2 rojos son de acá (T-U2 y
+  // T-U4).
+  //
+  // El 13/11 que decía antes era de `2d8168c` y le atribuía al mutante 2 fallos
+  // **preexistentes** (`arbiter.test.ts`, ya arreglados): el mutante nunca mató
+  // 13.
+  //
+  // Pero esos 9 caen porque sus fixtures son literales escritos a mano sin forma
+  // de v4 — `tasks.test.ts:95` es `'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'` —, así
+  // que señalan "el fixture no es v4", no "el contrato no debe pedir v4".
   //
   // Este test es el único que afirma lo segundo. Sin él, la lectura natural del
-  // rojo es "actualizo los 11 fixtures a v4", y el contrato de cinco rutas
+  // rojo es "actualizo los 9 fixtures a v4", y el contrato de cinco rutas
   // públicas queda estrechado con la suite en verde.
   it('T-U2 (AC-6) el nil UUID pasa: el predicado es de FORMA, no de versión', () => {
     expect(isValidUUID('00000000-0000-0000-0000-000000000000')).toBe(true);

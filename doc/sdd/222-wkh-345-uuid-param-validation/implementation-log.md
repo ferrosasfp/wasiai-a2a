@@ -94,15 +94,47 @@ tocó** y sigue verde.
 ## Mutación
 
 Cada mutante se aplicó exigiendo que el `sha256sum` **difiera** antes de correr la
-suite (R-1), se juzgó contra **mi** línea base (R-3), y se restauró probándolo con
-`git diff` vacío (R-2). `src/lib/uuid.ts` original: `3595862d0c6383495edaf667a69757e1…`.
+suite (R-1), se juzgó contra **mi** línea base (R-3), y se restauró **reescribiendo
+el archivo** (nunca `git checkout --`) hasta que `git diff` diera vacío (R-2).
 
-| ID | Mutante | `sha256sum` mutado | Esperado | **Medido** |
-|---|---|---|---|---|
-| **M-1** | `return UUID_RE.test(id)` → `return true` | `6ae64af867f67e00…` | T-U1 + 11 tests de ruta rojos | **15 rojos**: T-U1, los **9** tests de ruta de presencia (T-1a, T-1b, T-2a, T-2b, T-3, T-4a..T-4d) y **5 preexistentes de `tasks`**. T-4e y T-5 quedan verdes **por construcción** (ver abajo). |
-| **M-2** | endurecer el patrón a v4 | `062d6ff27f4a7890…` | sólo T-U2 rojo | **13 rojos**: T-U2, **T-U4**, y **11 fuera de `uuid.test.ts`**. La expectativa era falsa: ver auto-blindaje #1. |
-| **M-3** | flags `i` → `gi` | `c861d2f23de12a82…` | T-U3 rojo | **33 rojos**: T-U3 + 30 colaterales en 10 archivos + los 2 preexistentes. El `lastIndex` compartido rompiendo ids válidos, medido. |
-| **M-4** (propio) | mover el guard **arriba** del gate de prefijo en `DELETE /key-session/:id` | `7472834d14892925…` (de `29770366321c21ff…`) | — | **T-5 rojo** (`400` donde espera `403`), **T-SUBSESSION verde**. Justifica el desvío de T-5. |
+### Los "originales", cada uno con el commit donde vale
+
+Un `sha256sum` de "original" sin commit al lado no sirve para nada: `src/lib/uuid.ts`
+**cambió de contenido dos veces** en esta rama (al corregirse su docblock en
+`7862f88`, y otra vez en el fix-pack de MENORes). Quien re-corra el mutante hoy
+calcula un "original" distinto del citado y **no puede distinguir eso de una
+manipulación del archivo**.
+
+| Archivo | `sha256sum` original | Vale en |
+|---|---|---|
+| `src/lib/uuid.ts` | `3595862d0c6383495edaf667…` | `af4e126`, `c9bcee0`, `2d8168c` |
+| `src/lib/uuid.ts` | `616b7c549986b64fc2e938c2…` | `7862f88`, `f5793c8`, `f69bff8`, `c3b7333` |
+| `src/routes/auth/key-session.ts` | `29770366321c21ffb07f61b0…` | `2d8168c` … `c3b7333` (no cambió) |
+| `src/routes/payments.ts` | `b1cfcd212cc032b7f2380f5f…` | `2d8168c` … `c3b7333` (no cambió) |
+
+Los cuatro hashes de la tabla los leí con `git show <commit>:<archivo> | sha256sum`, o
+sea del **objeto de git**, no del árbol de trabajo. Falta la tercera fila de
+`uuid.ts` —la del fix-pack de MENORes—: va en el commit siguiente, porque su commit
+todavía no existe mientras escribo esto y un identificador no se escribe antes de
+existir (auto-blindaje #4).
+
+| ID | Mutante | Medido en | `sha256sum` mutado | Esperado | **Medido** |
+|---|---|---|---|---|---|
+| **M-1** | `return UUID_RE.test(id)` → `return true` | `2d8168c` | `6ae64af867f67e00…` | T-U1 + 11 tests de ruta rojos | **15 rojos**: T-U1, los **9** tests de ruta de presencia (T-1a, T-1b, T-2a, T-2b, T-3, T-4a..T-4d) y **5 preexistentes de `tasks`**. T-4e y T-5 quedan verdes **por construcción** (ver abajo). |
+| **M-2** | endurecer el patrón a v4 | `c3b7333` (re-medido) | `4b5b64236511a9be…` | sólo T-U2 rojo | **11 rojos, 9 fuera de `uuid.test.ts`** — los 9 en `src/routes/tasks.test.ts`, los 2 de acá son T-U2 y **T-U4**. La expectativa era falsa: ver auto-blindaje #1. |
+| **M-3** | flags `i` → `gi` | `c3b7333` (re-medido) | `05b5989a5751c791…` | T-U3 rojo | **32 rojos, 29 fuera de `uuid.test.ts`** en **9 archivos**; los 3 de acá son T-U3, T-U2 y T-U4. El `lastIndex` compartido rompiendo ids válidos, medido. |
+| **M-4** (propio) | mover el guard **arriba** del gate de prefijo en `DELETE /key-session/:id` | `2d8168c` | `7472834d14892925…` (de `key-session.ts`) | — | **T-5 rojo** (`400` donde espera `403`), **T-SUBSESSION verde**. Justifica el desvío de T-5. |
+| **M-5** (propio, fix-pack) | mover el guard **arriba** del gate `isArbiterEnabled()` en `POST /session/:id/dispute` | `c3b7333` | `c0502dd2a6a4cdda…` (de `payments.ts`) | — | **1 solo rojo en TODO el repo: T-4e**. `arbiter.test.ts` queda **64 passed (64)**. Ver "el testigo que consumió el arreglo". |
+
+### Por qué M-2 y M-3 se re-midieron, y qué cambió
+
+El `13 rojos / 11 fuera` de M-2 y el `33 rojos` de M-3 son de `2d8168c`, commit en el
+que **`arbiter.test.ts:991` y `:1010` ya estaban rojos sin ningún mutante**
+(auto-blindaje #2). La fila de M-3 lo desglosaba (`+ los 2 preexistentes`); la de M-2
+**no**, así que le cargaba al mutante 2 fallos que no eran suyos. Re-medidos en
+`c3b7333`, con esos 2 ya arreglados y el árbol limpio: **M-2 = 11/9** y
+**M-3 = 32/29 en 9 archivos**. Ésos son los números que también quedaron escritos en
+los docblocks de `src/lib/uuid.ts` y `src/lib/uuid.test.ts`.
 
 ### Por qué M-1 da 9 y no 11
 
@@ -127,8 +159,8 @@ no una copia.
 | Lint | `biome check src/` | **limpio** — 476 archivos, 0 errores |
 | Suite | `npm test` | **0 rojos** — `5407 passed \| 19 skipped (5426)` |
 | Ownership (ver abajo) | `git diff --stat 2745bb2 -- src/services/ ':!*.test.ts'` | **vacío** |
-| Ownership — la excepción, visible | `git diff --stat 2745bb2 -- src/services/` | `arbiter.test.ts` \| **85 insertions, 71 deletions** (1 archivo) |
-| Un solo regex (AC-6) | `grep -rn "0-9a-f]{8}-" src/` | **1 sola ocurrencia de producción**: `src/lib/uuid.ts:51`. Las otras 5 son de test, con sus propios patrones más estrictos. |
+| Ownership — la excepción, visible | `git diff --stat 2745bb2 -- src/services/` | `arbiter.test.ts` \| **94 insertions, 74 deletions** (1 archivo). Era `+85 −71` antes del fix-pack de MENORes, que agregó las 3 interpolaciones de `${INTENT_ID}` en los mensajes del falso. |
+| Un solo regex (AC-6) | `grep -rn "0-9a-f]{8}-" src/` | **1 sola ocurrencia de producción**: `src/lib/uuid.ts:57` (era `:51`; el fix-pack de MENORes agregó 6 líneas al docblock de arriba, re-medido con `python3` sobre el árbol final). Las otras 5 son de test, con sus propios patrones más estrictos. |
 | Censo de `.params` | `grep -rl "\.params" src/routes/` | **16 archivos, conjunto idéntico** al de `2745bb2` (comparé los dos conjuntos, no sólo el total). |
 | Censo de fixtures de path param | criterio corregido, ver abajo | **11 sitios, los 11 deliberados**. Cero accidentales. |
 
@@ -146,7 +178,7 @@ hacer que el chequeo diga la verdad sobre lo que protege:
 
 ```bash
 git diff --stat 2745bb2 -- src/services/ ':!*.test.ts'    # vacío  ⇒ cero producción
-git diff --stat 2745bb2 -- src/services/                  # 1 archivo, +85 −71
+git diff --stat 2745bb2 -- src/services/                  # 1 archivo, +94 −74
 ```
 
 **Verificado que el pathspec de exclusión funciona en este git** (2.43.0) antes de
@@ -169,23 +201,60 @@ evidencia acá — verifica presencia textual del filtro, no su valor, y deja lo
 `:id = 'i1'`, que no tiene forma de UUID. El censo de §5 no lo lista: enumera 20
 sitios en 5 archivos, **todos bajo `src/routes/`**, y éste vive en `src/services/`.
 
-| Sitio | Qué pide | Estado con el guard, antes del arreglo |
-|---|---|---|
-| `:935` | `POST` dispute, flag **OFF**, espera `404` | **verde** — el gate del flag corre antes del guard. Testigo independiente de D-3 y de T-4e. |
-| `:949` | `GET` dispute, flag OFF, espera `404` | **verde** — `GET` no lleva guard (P-5). |
-| `:991` | `POST` dispute, flag **ON**, espera `200` | **ROJO**, recibía `422` |
-| `:1010` | `POST` dispute, flag ON, espera `409 INTENT_NOT_OPEN` | **ROJO**, recibía `422` |
+Los cuatro sitios son las líneas `url:` que inyectan. Van con **dos** números,
+porque el archivo se desplazó dos veces: `+10` por el bloque de `INTENT_ID` y `+6`
+por el fix-pack de MENORes. Re-medidos con `python3` sobre el árbol final:
+
+| Sitio en `2d8168c` | Hoy (`url:`) | El `it(` que lo contiene | Qué pide | Estado con el guard, antes del arreglo |
+|---|---|---|---|---|
+| `:935` | **`:951`** | `:941` | `POST` dispute, flag **OFF**, espera `404` | **verde** — el gate del flag corre antes del guard. |
+| `:949` | **`:965`** | `:960` | `GET` dispute, flag OFF, espera `404` | **verde** — `GET` no lleva guard (P-5). |
+| `:991` | **`:1007`** | `:994` | `POST` dispute, flag **ON**, espera `200` | **ROJO**, recibía `422` |
+| `:1010` | **`:1026`** | `:1015` | `POST` dispute, flag ON, espera `409 INTENT_NOT_OPEN` | **ROJO**, recibía `422` |
 
 Se escaló en vez de arreglarlo de una (§2: "si creés que hace falta tocar uno más,
 parás y escalás"). El coordinador autorizó el arreglo, **incluidos los dos verdes**:
-dejar `'i1'` en `:935` y `:949` deja dos fixtures que **cruzan el guard nuevo por
+dejar `'i1'` en los dos primeros deja dos fixtures que **cruzan el guard nuevo por
 accidente**, y un cambio de orden mañana los rompe sin que se entienda por qué.
+
+### ⚠️ El arreglo CONSUMIÓ un testigo, y T-4e quedó solo
+
+La fila del `POST` con flag OFF decía, además, "testigo independiente de D-3 y de
+T-4e". **Ya no lo es, y eso hay que leerlo como una pérdida de cobertura.** La
+frase no era falsa —la columna habla de *antes del arreglo*, y antes sí lo era—,
+pero el estado que describe ya no existe.
+
+Medido con **M-5** (mover el guard arriba del gate `isArbiterEnabled()` en
+`POST /session/:id/dispute`; `payments.ts` `b1cfcd21…` → `c0502dd2…`, en `c3b7333`):
+
+```
+npm test                              → 1 failed | 5406 passed  (1 solo rojo)
+  el único rojo: payments.uuid-param.test.ts > T-4e
+npx vitest run src/services/arbiter.test.ts → 64 passed (64)
+```
+
+O sea: con el `:id` refixtureado a un UUID **válido**, ese test ya no puede
+distinguir "el gate del flag corre primero" de "el guard corre primero" — pasa el
+guard en los dos órdenes y recibe su `404` igual.
+
+> **Hoy T-4e (`src/routes/payments.uuid-param.test.ts`) es el ÚNICO testigo del
+> orden `isArbiterEnabled()` antes del guard de forma (D-3) en todo el repo.**
+> Si alguien lo borra creyendo que `arbiter.test.ts` cubre el orden, D-3 pierde
+> **toda** su cobertura y la suite no se pone roja. Lo mismo vale al revés: no
+> "simplificar" T-4e a un `:id` bien formado.
+
+Es la **segunda vez en esta misma HU** que un refixture apaga un testigo: la
+primera fue T-SUBSESSION (`auth.key-session.test.ts`, auto-blindaje #3), donde W1
+cambió `sess-1` por un UUID válido. Dos instancias medidas del mismo mecanismo
+dejan de ser anécdota, así que está nombrado **como patrón** en el auto-blindaje
+(entrada #6), con su control.
 
 ### El arreglo NO fueron 4 líneas, y la razón importa
 
 `makeArbDb` compara el id contra el literal: era `:385` (`b._conds.id !== 'i1'`)
-en `2745bb2` y ahora es **`:395`** (`!== INTENT_ID`), porque el bloque de la
-constante nueva corrió el archivo **+10 líneas**. O sea que los 4 sitios **no se
+en `2745bb2`, pasó a `:395` con el bloque de la constante nueva (**+10 líneas**) y
+hoy está en **`:399`** (`!== INTENT_ID`), tras el **+4** del fix-pack de MENORes
+por encima de esa línea. O sea que los 4 sitios **no se
 pueden arreglar en aislamiento**: cambiar sólo las URLs hace que el falso no
 encuentre la fila y los tests fallen por otro motivo. Las dos salidas eran:
 
@@ -199,8 +268,23 @@ Se hizo lo segundo: `const INTENT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'`
 fixture— y además vuelve el fixture **realista**: `a2a_payment_intents.id` ES una
 columna `uuid`, así que `'i1'` nunca pudo haber existido en la base.
 
+**Faltaban 3, y el fix-pack de MENORes las cerró.** Ese barrido tomó los literales
+`'i1'` sueltos, pero no las **tres apariciones dentro de un string más grande**: los
+mensajes de error que fabrica el falso, en `:259`, `:297` y `:916` de aquel momento.
+Quedaban diciendo `intent i1` con el fixture ya llamándose `INTENT_ID`, o sea
+contradiciendo el "un solo id con nombre en todo el archivo" de acá arriba.
+Verificado inofensivo antes de tocarlos: ninguna aserción compara esos strings, y el
+servicio no los parsea — hace `msg.includes('OWNERSHIP_MISMATCH')` y
+`msg.includes('INTENT_NOT_OPEN')` (`src/services/arbiter.ts:347` y `:353`), o sea un
+`includes` sobre el mensaje entero, que es indiferente al id que lleve dentro. Y aun así se
+arreglan: pasan a `${INTENT_ID}`, que además es lo que hace el RPC real
+(`RAISE EXCEPTION 'INTENT_NOT_OPEN: intent % is %', p_intent_id, v_status`,
+`supabase/migrations/20260704100000_wkh139_arbiter.sql:111`). Interpolar corrió las
+tres líneas a 3 objetos multi-línea (el formatter de biome no las deja en 80
+columnas), y de ahí el **+6** de desplazamiento que se re-midió arriba.
+
 Verificado: `arbiter.test.ts` **64 passed (64)**, incluido el test del nonce
-derivado (`:1404`, `deriveArbiterNonce(EXPECTED_KEY_HASH, INTENT_ID, …)`), que era
+derivado (hoy `:1410`, `deriveArbiterNonce(EXPECTED_KEY_HASH, INTENT_ID, …)`), que era
 el único sitio donde el valor del id no es opaco sino que entra a una derivación
 criptográfica. Los dos lados derivan del mismo constante, así que se movieron
 juntos.

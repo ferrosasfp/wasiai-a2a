@@ -16,13 +16,19 @@
  *   públicas sin ninguna AC que lo pida. T-U2 en `uuid.test.ts` es el testigo
  *   deliberado de esa decisión.
  *
- *   Medido en `2d8168c`: aplicar ese endurecimiento pone rojos 13 tests, de los
- *   cuales 11 están FUERA de `uuid.test.ts` y no hablan de versiones — caen de
- *   rebote porque sus fixtures son literales escritos a mano que no tienen forma
- *   de v4 (p.ej. `tasks.test.ts:95`, `'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'`).
+ *   Medido en `c3b7333` (suite completa, árbol limpio): aplicar ese
+ *   endurecimiento pone rojos **11** tests, de los cuales **9 están FUERA de
+ *   `uuid.test.ts`** y no hablan de versiones — caen de rebote porque sus
+ *   fixtures son literales escritos a mano que no tienen forma de v4 (los 9 están
+ *   en `tasks.test.ts`, cuyo `VALID_UUID` de `:95` es
+ *   `'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'`). Los otros 2 rojos son T-U2 y T-U4.
  *   O sea: quien endurezca el patrón va a ver la suite en rojo, pero por el
  *   motivo equivocado, y la lectura fácil es "arreglo los fixtures". T-U2 es el
  *   único que dice POR QUÉ no hay que hacerlo.
+ *
+ *   Este renglón decía `2d8168c`: 13 rojos / 11 fuera. Eran 11/9: los 2 de
+ *   diferencia estaban rojos en `2d8168c` SIN ningún mutante (`arbiter.test.ts`,
+ *   ver auto-blindaje #2), así que se le estaban cargando al mutante.
  *
  * PARA QUÉ SIRVE
  *   El valor de un `:id` llega sin validar a una columna `uuid` de Postgres, que
