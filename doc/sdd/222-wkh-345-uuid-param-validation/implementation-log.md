@@ -109,14 +109,15 @@ manipulación del archivo**.
 |---|---|---|
 | `src/lib/uuid.ts` | `3595862d0c6383495edaf667…` | `af4e126`, `c9bcee0`, `2d8168c` |
 | `src/lib/uuid.ts` | `616b7c549986b64fc2e938c2…` | `7862f88`, `f5793c8`, `f69bff8`, `c3b7333` |
-| `src/routes/auth/key-session.ts` | `29770366321c21ffb07f61b0…` | `2d8168c` … `c3b7333` (no cambió) |
-| `src/routes/payments.ts` | `b1cfcd212cc032b7f2380f5f…` | `2d8168c` … `c3b7333` (no cambió) |
+| `src/lib/uuid.ts` | `a1e585c08bd4148ece9dcd2b…` | `ee886ba` (fix-pack de MENORes) en adelante |
+| `src/routes/auth/key-session.ts` | `29770366321c21ffb07f61b0…` | `2d8168c` … `ee886ba` (no cambió en ningún commit de la rama) |
+| `src/routes/payments.ts` | `b1cfcd212cc032b7f2380f5f…` | `2d8168c` … `ee886ba` (no cambió en ningún commit de la rama) |
 
-Los cuatro hashes de la tabla los leí con `git show <commit>:<archivo> | sha256sum`, o
-sea del **objeto de git**, no del árbol de trabajo. Falta la tercera fila de
-`uuid.ts` —la del fix-pack de MENORes—: va en el commit siguiente, porque su commit
-todavía no existe mientras escribo esto y un identificador no se escribe antes de
-existir (auto-blindaje #4).
+Los cinco hashes de la tabla los leí con `git show <commit>:<archivo> | sha256sum`, o
+sea del **objeto de git**, no del árbol de trabajo. La tercera fila de `uuid.ts` —la
+del fix-pack de MENORes— se agregó en un commit **posterior** a `ee886ba` a propósito:
+mientras escribía el fix-pack ese commit todavía no existía, y un identificador no se
+escribe antes de existir (auto-blindaje #4). `git rev-parse ee886ba` antes de citarlo.
 
 | ID | Mutante | Medido en | `sha256sum` mutado | Esperado | **Medido** |
 |---|---|---|---|---|---|
