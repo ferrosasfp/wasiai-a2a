@@ -36,31 +36,39 @@ export const ROWS_WITHOUT_FOLDER: readonly RowWithoutFolder[] = [
   {
     key: '011',
     reason:
-      'HU de abril 2026 (WKH-10, LLM planning) cerrada antes de que existiera la convención ' +
-      'de una carpeta por HU: no hay `doc/sdd/011-…` en el árbol ni en el historial. ' +
-      'La fila conserva su rama, `feat/wkh-10-llm-planner`.',
+      'HU de abril 2026 (WKH-10, LLM planning) sin carpeta: medido con ' +
+      '`git log --all --diff-filter=A -- "doc/sdd/011-*"`, que da 0 commits, o sea que la ' +
+      'carpeta no existe hoy NI existió nunca en ninguna rama. La fila conserva su rama, ' +
+      '`feat/wkh-10-llm-planner`.',
   },
   {
     key: '012',
     reason:
-      'Ídem 011: WKH-13 (`POST /orchestrate` completo), abril 2026, sin carpeta creada nunca. ' +
-      'Su evolutivo posterior SÍ tiene carpeta y es la fila `015` (`015-orchestrate-llm-planning`).',
+      'WKH-13 (`POST /orchestrate` completo), abril 2026: 0 commits agregando `doc/sdd/012-*` en ' +
+      'todo el historial. Su evolutivo posterior SÍ tiene carpeta y es la fila `015` ' +
+      '(`015-orchestrate-llm-planning`).',
   },
   {
     key: '016',
     reason:
-      'Patch en modo FAST directo sobre `main` (`5a14ab8`, copiar `src/static/*` a `dist/static`). ' +
-      'El modo FAST no genera artefactos SDD; la evidencia es el commit.',
+      'Patch en modo FAST directo sobre `main` (`5a14ab8`, copiar `src/static/*` a `dist/static`); ' +
+      'la evidencia del trabajo es ese commit. Verificado que la carpeta no existió nunca: ' +
+      '`git log --all --diff-filter=A -- "doc/sdd/016-*"` da 0 commits. ' +
+      '(Ojo: NO es que "el modo FAST no genera carpeta" — las filas `030` y `031` son FAST y sí ' +
+      'la tienen. Lo que se afirma acá es sólo lo medido para esta fila.)',
   },
   {
     key: '020',
-    reason: 'Patch FAST sobre `main` (doc de contratos Kite + banner DEPRECATED en el spike). Sin carpeta por diseño del modo.',
+    reason:
+      'Patch FAST sobre `main` (doc de contratos Kite + banner DEPRECATED en el spike). Carpeta ' +
+      'inexistente en todo el historial: `git log --all --diff-filter=A -- "doc/sdd/020-*"` da 0.',
   },
   {
     key: '021',
     reason:
-      'Patch FAST sobre `main` + repo `wasiai-landing` (pitch Fase 0). La mitad del trabajo ' +
-      'no vive en este repo, así que una carpeta acá sería un índice incompleto.',
+      'Patch FAST sobre `main` + repo `wasiai-landing` (pitch Fase 0): la mitad del trabajo no ' +
+      'vive en este repo. Carpeta inexistente en todo el historial ' +
+      '(`git log --all --diff-filter=A -- "doc/sdd/021-*"` da 0).',
   },
   {
     key: '136',
