@@ -73,6 +73,7 @@
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { refundStep0Debit } from '../lib/step0-refund.js';
+import { isValidUUID } from '../lib/uuid.js';
 import { requireA2AKey } from '../middleware/a2a-key.js';
 import {
   chargedRoute,
@@ -86,13 +87,6 @@ import {
 } from '../services/task.js';
 import type { Task, TaskState } from '../types/index.js';
 import { TASK_STATES } from '../types/index.js';
-
-// ── UUID validation helper ──────────────────────────────────
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function isValidUUID(id: string): boolean {
-  return UUID_RE.test(id);
-}
 
 /**
  * Extract the authenticated caller's owner_ref from the request.

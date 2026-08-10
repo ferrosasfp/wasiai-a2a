@@ -177,4 +177,44 @@ describe('auth key-session revoke endpoint', () => {
     expect(mockRevoke).not.toHaveBeenCalled();
     expect(mockLookupByHash).not.toHaveBeenCalled();
   });
+
+  // ── WKH-345 · `:id` sin forma de UUID ─────────────────────
+  it('T-2a (AC-2) DELETE con :id malformado → 400 INVALID_INPUT, revoke NOT llamado', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/auth/key-session/not-a-uuid',
+      headers: { authorization: `Bearer ${MASTER_KEY}` },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('INVALID_INPUT');
+    expect(mockRevoke).not.toHaveBeenCalled();
+  });
+
+  // T-5 — fija el ORDEN del guard (D-3), y por eso el `:id` de acá es
+  // MALFORMADO a propósito.
+  //
+  // El mutante que este test mata es "mover el guard antes del gate de prefijo
+  // de sub-sesión": con el guard primero, este pedido respondería 400
+  // INVALID_INPUT en vez de 403 SESSION_NOT_ALLOWED, o sea le daría feedback de
+  // forma a un autenticador explícitamente prohibido.
+  //
+  // ⚠️ T-SUBSESSION, justo arriba, NO mata ese mutante: su `:id` tiene forma
+  // válida, así que con el guard adelante igual pasa de largo y sigue dando 403.
+  // Los dos hacen falta: aquél prueba que el guard no rompió el gate para ids
+  // bien formados; éste prueba que el gate sigue ganando cuando el id es basura.
+  it('T-5 (D-3) session token + :id malformado → 403 SESSION_NOT_ALLOWED (NO 400), lookupByHash NOT llamado', async () => {
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/auth/key-session/not-a-uuid',
+      headers: { authorization: `Bearer ${SESSION_TOKEN}` },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error_code).toBe('SESSION_NOT_ALLOWED');
+    expect(mockRevoke).not.toHaveBeenCalled();
+    expect(mockLookupByHash).not.toHaveBeenCalled();
+  });
 });

@@ -8,6 +8,7 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { isValidUUID } from '../../lib/uuid.js';
 import { delegationService } from '../../services/delegation.js';
 import {
   DelegationNonceReplayError,
@@ -134,6 +135,13 @@ export const delegationRoutes: FastifyPluginAsync = async (fastify) => {
       const callerKey = await resolveCallerKey(req);
       if (!callerKey?.is_active) {
         return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      // WKH-345: forma del `:id` ANTES de la capa de datos. Sin esto el valor
+      // llega a una columna `uuid` y Postgres responde 22P02 → 500. Va DESPUÉS
+      // del 403 de auth.
+      if (!isValidUUID(req.params.id)) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
       }
 
       try {

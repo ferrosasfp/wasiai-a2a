@@ -370,4 +370,19 @@ describe('auth delegation endpoints', () => {
     });
     expect(res.statusCode).toBe(403);
   });
+
+  // ── WKH-345 · `:id` sin forma de UUID ─────────────────────
+  it('T-3 (AC-3) DELETE /auth/delegation/:id con :id malformado → 400 INVALID_INPUT, revoke NOT llamado', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/auth/delegation/not-a-uuid',
+      headers: { authorization: `Bearer ${MASTER_KEY}` },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('INVALID_INPUT');
+    expect(mockRevoke).not.toHaveBeenCalled();
+  });
 });

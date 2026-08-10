@@ -21,6 +21,7 @@ import {
 } from '../adapters/escrow/debit-capture.js';
 import { getChainConfig } from '../adapters/registry.js';
 import { supabase } from '../lib/supabase.js';
+import { isValidUUID } from '../lib/uuid.js';
 import { arbiterService, isArbiterEnabled } from '../services/arbiter.js';
 import {
   PaymentIntentError,
@@ -253,6 +254,14 @@ export const paymentsRoutes: FastifyPluginAsync = async (fastify) => {
       if (!callerKey?.is_active) {
         return reply.status(403).send({ error: 'Invalid or inactive API key' });
       }
+      // WKH-345: forma del `:id` ANTES de la capa de datos. Sin esto el valor
+      // llega a una columna `uuid` y Postgres responde 22P02 → 500. Va DESPUÉS
+      // del 403 de auth. Este guard NO toca ningún cobro, débito ni refund:
+      // sólo adelanta un rechazo de forma a antes del primer await que habla
+      // con supabase o con el adapter.
+      if (!isValidUUID(req.params.id)) {
+        return reply.status(422).send({ error_code: 'INVALID_INPUT' });
+      }
       const b = (req.body ?? {}) as Record<string, unknown>;
 
       if (!isNonEmptyString(b.voucherId) || !isFiniteNonNegative(b.amountUsd)) {
@@ -289,6 +298,11 @@ export const paymentsRoutes: FastifyPluginAsync = async (fastify) => {
       const callerKey = await resolveCallerKey(req);
       if (!callerKey?.is_active) {
         return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      // WKH-345: forma del `:id` ANTES de la capa de datos (ver /voucher).
+      if (!isValidUUID(req.params.id)) {
+        return reply.status(422).send({ error_code: 'INVALID_INPUT' });
       }
 
       const b = (req.body ?? {}) as Record<string, unknown>;
@@ -334,6 +348,14 @@ export const paymentsRoutes: FastifyPluginAsync = async (fastify) => {
       const callerKey = await resolveCallerKey(req);
       if (!callerKey?.is_active) {
         return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+      // WKH-345: forma del `:id` ANTES de la capa de datos. El orden acá NO es
+      // negociable: va DESPUÉS del gate `isArbiterEnabled()` de arriba. Con el
+      // flag apagado esta ruta responde 404, byte-idéntico a "no existe"; si el
+      // guard corriera primero, un `:id` malformado devolvería 422 y anunciaría
+      // que la ruta existe. Eso es una regresión de disclosure. T-4e lo fija.
+      if (!isValidUUID(req.params.id)) {
+        return reply.status(422).send({ error_code: 'INVALID_INPUT' });
       }
       try {
         const outcome = await arbiterService.openDispute(
@@ -481,6 +503,10 @@ export const paymentsRoutes: FastifyPluginAsync = async (fastify) => {
       const callerKey = await resolveCallerKey(req);
       if (!callerKey?.is_active) {
         return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+      // WKH-345: forma del `:id` ANTES de la capa de datos (ver /voucher).
+      if (!isValidUUID(req.params.id)) {
+        return reply.status(422).send({ error_code: 'INVALID_INPUT' });
       }
       const b = (req.body ?? {}) as Record<string, unknown>;
 

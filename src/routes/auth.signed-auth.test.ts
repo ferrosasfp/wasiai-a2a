@@ -292,6 +292,25 @@ describe('auth signed-auth endpoints (WKH-123)', () => {
     expect(mockSessionSetReqSig).not.toHaveBeenCalled();
   });
 
+  // ── WKH-345 · `:id` sin forma de UUID ─────────────────────
+  // El body es VÁLIDO acá a propósito: es lo que distingue este 400 del 400 por
+  // body del test de arriba. Con un body inválido, el test pasaría igual sin
+  // guard y no mediría nada.
+  it('T-2b (AC-2) PATCH require-signature con :id malformado → 400 INVALID_INPUT, setRequireSignature NOT llamado', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/auth/key-session/not-a-uuid/require-signature',
+      headers: { authorization: `Bearer ${MASTER_KEY}` },
+      payload: { require_signature: true },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('INVALID_INPUT');
+    expect(mockSessionSetReqSig).not.toHaveBeenCalled();
+  });
+
   // ── POST /key-session require_signature (AC-11) ───────────
 
   it('AC-11: POST key-session require_signature:true → 201 with signing_secret once', async () => {

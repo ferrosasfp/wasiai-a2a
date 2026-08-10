@@ -210,4 +210,37 @@ describe('receipts routes', () => {
     expect(res.statusCode).toBe(404);
     expect(mockVerify).not.toHaveBeenCalled();
   });
+
+  // ── WKH-345 · `:id` sin forma de UUID ─────────────────────
+  // Antes de esta HU el valor llegaba a una columna `uuid` y Postgres
+  // respondía 22P02, que nadie traducía: 500. El aserto de `not.toHaveBeenCalled`
+  // es el que mata el mutante "mover el guard adentro del try".
+  it('T-1a (AC-1) GET /receipts/:id con :id malformado → 400 INVALID_INPUT, getById NOT llamado', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/receipts/not-a-uuid',
+      headers: { authorization: `Bearer ${MASTER_KEY}` },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('INVALID_INPUT');
+    expect(mockGetById).not.toHaveBeenCalled();
+  });
+
+  it('T-1b (AC-1) GET /receipts/:id/verify con :id malformado → 400 INVALID_INPUT, getById y verify NOT llamados', async () => {
+    mockLookupByHash.mockResolvedValue(makeKeyRow());
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/receipts/not-a-uuid/verify',
+      headers: { authorization: `Bearer ${MASTER_KEY}` },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('INVALID_INPUT');
+    expect(mockGetById).not.toHaveBeenCalled();
+    expect(mockVerify).not.toHaveBeenCalled();
+  });
 });

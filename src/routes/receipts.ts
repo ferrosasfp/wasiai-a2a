@@ -11,6 +11,7 @@
 
 import crypto from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { isValidUUID } from '../lib/uuid.js';
 import { identityService, isIdentityVerified } from '../services/identity.js';
 import { receiptService } from '../services/receipt.js';
 import type { A2AAgentKeyRow } from '../types/index.js';
@@ -75,6 +76,14 @@ const receiptsRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(403).send({ error: 'Invalid or inactive API key' });
       }
 
+      // WKH-345: forma del `:id` ANTES de la capa de datos. Sin esto el valor
+      // llega a una columna `uuid` y Postgres responde 22P02 → 500. Va DESPUÉS
+      // del 403 de auth: a quien no probó ser un caller válido no se le da
+      // feedback de forma.
+      if (!isValidUUID(req.params.id)) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
+      }
+
       const receipt = await receiptService.getById(
         req.params.id,
         callerKey.owner_ref,
@@ -99,6 +108,11 @@ const receiptsRoutes: FastifyPluginAsync = async (fastify) => {
       const callerKey = await resolveCallerKey(req);
       if (!callerKey?.is_active) {
         return reply.status(403).send({ error: 'Invalid or inactive API key' });
+      }
+
+      // WKH-345: forma del `:id` ANTES de la capa de datos (ver GET /:id).
+      if (!isValidUUID(req.params.id)) {
+        return reply.status(400).send({ error_code: 'INVALID_INPUT' });
       }
 
       // Disclosure-safe: a cross-owner / unknown id → 404 (AC-8). getById is the
