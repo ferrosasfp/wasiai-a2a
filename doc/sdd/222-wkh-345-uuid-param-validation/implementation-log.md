@@ -23,7 +23,7 @@ No es el `5330 passed | 19 skipped` que circula: ése es de `b7fa4e7`.
 | Paso | Wave | Commit | Test Files | Tests |
 |---|---|---|---|---|
 | **A** | W1 (sólo fixtures) | `c9bcee0` | 275 passed \| 6 skipped (281) | **5395 passed** \| 19 skipped (5414) |
-| **B** | W3 (cierre) | `2d8168c` | 1 failed \| 275 passed \| 6 skipped (282) | **2 failed** \| 5405 passed \| 19 skipped (5426) |
+| **B** | W3 (cierre) | `7862f88` (árbol limpio) | 1 failed \| 275 passed \| 6 skipped (282) | **2 failed** \| 5405 passed \| 19 skipped (5426) |
 
 ### Paso A — la evidencia de AC-5
 
