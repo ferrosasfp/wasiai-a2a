@@ -210,8 +210,9 @@ mecanismo y las dos invisibles para los gates.
 
 ### [2026-08-10] Fix-pack MENORes — Le cargué a un mutante 2 fallos que ya estaban rojos, y cité un `sha256sum` sin su commit
 
-Dos formas de inflar evidencia de mutación, las dos mías, las dos en el mismo
-párrafo del log y una de ellas **en un docblock de producción**.
+Dos formas de inflar evidencia de mutación, las dos mías, las dos en la sección
+"Mutación" del log (una en la tabla, la otra en el párrafo que la introduce), y una
+de ellas además **en un docblock de producción**.
 
 - **Error A — el mutante no mató 13, mató 11.** Escribí "M-2 → 13 rojos, 11 fuera
   de `uuid.test.ts`" en `src/lib/uuid.ts` y en el log. Medido en `2d8168c`, sí: pero
