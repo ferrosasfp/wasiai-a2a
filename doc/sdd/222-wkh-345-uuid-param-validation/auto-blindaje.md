@@ -59,14 +59,20 @@
   ruta, y acá vive en `src/services/`.
 - **Fix**: (1) suite completa como única fuente del veredicto de wave — la
   corrida dirigida sirve para iterar rápido, nunca para cerrar; (2) me escribí un
-  censo propio que busca, en **`src/` y `test/` enteros**, todo string que apunte
-  a una de las 9 superficies con guard y cuyo `:id` no tenga forma de UUID. Ese
-  censo devuelve 10 sitios: 6 son mis tests negativos nuevos (a propósito) y 4
-  son los de `arbiter.test.ts`.
+  censo propio que busca, en **`src/` y `test/` enteros** (495 archivos), todo
+  string que arme una URL hacia una superficie con guard con un `:id` sin forma de
+  UUID. Escalado y arreglado con autorización; censo final: **11 sitios, los 11
+  deliberados, cero accidentales, ningún 7º archivo**.
+- **El criterio corregido**, que es lo único que sobrevive al script:
+
+  > El censo de fixtures de path param se define por **lo que el fixture
+  > construye**, no por dónde vive el archivo.
+
 - **Aplicar en**: toda HU que cambie **la respuesta de una ruta compartida**. El
-  censo tiene que ser por *superficie HTTP* (la URL), no por *directorio*. Y si un
-  documento de entrada trae una lista de sitios, la lista es una pista, no el
-  perímetro: el perímetro se mide.
+  censo va por *superficie HTTP* (la URL), no por *directorio* — acotarlo a
+  `src/routes/` es exactamente lo que dejó pasar este caso. Y si un documento de
+  entrada trae una lista de sitios, la lista es una pista, no el perímetro: el
+  perímetro se mide.
 
 ---
 
@@ -97,3 +103,59 @@
   `url:`, preguntarse **qué propiedad del fixture viejo era la que medía**. Un
   refixture puede desarmar un testigo sin poner nada en rojo. Y el control es el
   de siempre: si un test dice qué mutante lo mata, aplicalo.
+
+---
+
+### [2026-08-10] Wave 3 — Escribí en el log un commit que todavía no existía
+
+- **Error**: al documentar el Paso B puse `` `7f4ad2c` `` como su commit. Ese hash
+  **no existía**: lo escribí antes de commitear, con la forma correcta de un hash
+  corto de git. El commit real terminó siendo `f69bff8`.
+- **Causa raíz**: la misma de la entrada #1, y a una hora de distancia. Rellené un
+  campo que **parece** un dato medido con algo que no medí, porque el documento
+  pedía "conteo + commit en la misma línea" y yo tenía el conteo pero todavía no el
+  commit. El orden correcto era commitear y después escribir.
+- **Por qué es peor que un typo**: un hash inventado es **indistinguible de uno
+  real** para quien lee. No falla ningún test, no lo caza ningún lint, y `git show`
+  sobre él da "unknown revision" recién cuando alguien intenta verificarlo. Es la
+  forma más pura de "evidencia que se auto-confirma": una cita con formato
+  impecable apuntando a la nada.
+- **Fix**: commiteé primero, leí el hash con `git rev-parse --short HEAD`, y
+  reemplacé el inventado verificando que hubiera **exactamente una** ocurrencia
+  antes de tocar nada. Después re-corrí la suite completa con `src/` limpio en
+  `f69bff8` para que el número y el commit sean de la misma cosa.
+- **Aplicar en**: **ningún identificador se escribe antes de existir** — commits,
+  hashes, líneas de archivos que todavía no guardé, ids de PR. Si el documento
+  necesita el dato, el dato va después del comando que lo produce, nunca antes. Y
+  el control es barato: `git rev-parse <hash>` sobre cada hash citado.
+
+---
+
+### [2026-08-10] Wave 3 — Mi propio find/replace me rompió la prosa y las citas, en el mismo commit
+
+Dos daños de una sola edición mecánica sobre `src/services/arbiter.test.ts`.
+
+- **Error A — el reemplazo se comió su propia explicación.** Inserté un docblock que
+  decía «Con el `'i1'` anterior esas cuatro URLs cruzaban el guard por accidente» y
+  **después** corrí `s.replace("'i1'", "INTENT_ID")` sobre todo el archivo. El
+  replace no distingue código de comentario: dejó «Con el `INTENT_ID` anterior»,
+  o sea una frase que afirma que el id anterior era el nuevo. Se contradice sola.
+- **Error B — cité líneas de antes de mi propio desplazamiento.** El bloque de la
+  constante agregó 10 líneas arriba de todo, así que el `:385` del falso pasó a
+  `:395` y el nonce de `:1394` a `:1404`. Escribí en el log los números **viejos**,
+  que ya no existían cuando guardé el documento.
+- **Causa raíz común**: traté una edición mecánica como atómica cuando tiene dos
+  efectos, y los dos son invisibles para los gates. `npm test` da verde con un
+  comentario que miente; `tsc` y `biome` no leen prosa ni verifican que un
+  `archivo:línea` de un `.md` apunte a algo. El único instrumento que los ve es
+  releer **después** de la última edición, que es justo el paso 5 de §9.
+- **Fix**: (1) restauré la frase del docblock; (2) barrí `grep -n "INTENT_ID"`
+  filtrando los usos sintácticos, para encontrar todos los lugares donde el replace
+  había entrado en prosa — apareció uno más, `:1401`, que en ese caso era correcto;
+  (3) re-medí las dos líneas con `python3` y corregí el log, dejando escrito el
+  desplazamiento (**+10**) en vez de sólo el número nuevo, así la próxima cita se
+  puede recalcular.
+- **Aplicar en**: cuando un find/replace toque un archivo donde también escribí
+  comentarios, el orden correcto es **replace primero, prosa después**. Y toda cita
+  a un archivo que yo mismo desplacé se re-mide después de la última edición: los
+  barridos miran lo que escribí, no lo que **moví**.

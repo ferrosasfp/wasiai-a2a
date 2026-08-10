@@ -127,7 +127,7 @@ const OWNER = 'tenant-A';
  * WKH-345: tiene forma de UUID porque `a2a_payment_intents.id` ES una columna
  * `uuid`, y porque cuatro de estos fixtures se inyectan por HTTP contra
  * `POST /payments/session/:id/dispute`, que ahora valida la forma en el borde.
- * Con el `INTENT_ID` anterior esas cuatro URLs cruzaban el guard por accidente.
+ * Con el `'i1'` anterior esas cuatro URLs cruzaban el guard por accidente.
  */
 const INTENT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const PAYTO = '0x2222222222222222222222222222222222222222';
