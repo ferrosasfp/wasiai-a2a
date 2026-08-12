@@ -33,19 +33,37 @@ Una asimetría que conviene leer temprano en vez de descubrirla contra un `400`:
 
 ## Descubrimiento por capacidad
 
-Todo el catálogo es público y no cuesta nada consultarlo.
+Todo el catálogo es público y no cuesta nada consultarlo. **Los parámetros no reconocidos se rechazan con `400 UNKNOWN_DISCOVER_PARAM`**, lo que evita que un filtro mal escrito (por ejemplo `capability` en vez de `capabilities`) matchee todo en silencio.
 
 ```bash
 GW=https://wasiai-a2a-production.up.railway.app
 
-curl -s "$GW/discover?capabilities=remittance-fx-quote" | jq '.agents[] | {slug, priceUsdc, chain: .payment.chain}'
-# {"slug":"remit-corridor-fx-solana","priceUsdc":0.03,"chain":"solana-devnet"}
+curl -s "$GW/discover?capabilities=remittance-fx-quote" | jq '.agents[] | {slug, priceUsdc, chain: .payment.chain, rail: .payment.resolvedChain, network: .payment.network}'
+# {"slug":"remit-corridor-fx-solana","priceUsdc":0.03,"chain":"solana-devnet","rail":"solana-devnet","network":"testnet"}
 
-curl -s "$GW/discover?capabilities=price-feed" | jq '.agents[] | {slug, priceUsdc, chain: .payment.chain}'
-# {"slug":"wasi-chainlink-price","priceUsdc":0.001,"chain":"avalanche"}
+curl -s "$GW/discover?capabilities=price-feed" | jq '.agents[] | {slug, priceUsdc, chain: .payment.chain, rail: .payment.resolvedChain, network: .payment.network}'
+# {"slug":"wasi-chainlink-price","priceUsdc":0.001,"chain":"avalanche","rail":"avalanche-fuji","network":"testnet"}
 ```
 
+`payment.chain` es la cadena de texto **que el agente declaró**, y varios alias aceptados
+no dicen su entorno: `avalanche` es el más común en el catálogo vivo (16 de 25 agentes al
+2026-08-05) y resuelve a Fuji, que es una red de pruebas. Por eso el catálogo informa
+además a qué lo **resolvió** el gateway: `payment.resolvedChain` es el rail canónico y
+`payment.network` es `testnet` o `mainnet`. Esos dos los deriva el gateway, y los agentes
+siguen declarando exactamente lo que declaraban antes. La garantía detrás de `network` es
+angosta a propósito: o el pago aterriza en ese entorno o no hay pago, porque la pata de
+salida se niega a firmar cuando el entorno declarado del rail y el destino real no
+coinciden.
+
 El primero se publicó directo contra el gateway (`registry: "self-published"`) y cobra en Solana; el segundo vive en un marketplace externo registrado (`registry: "WasiAI"`) y cobra en Avalanche. El cliente que consulta no distingue uno de otro ni tiene que saber en qué red cobra cada uno, y esa indistinción es el punto: la federación, y la cadena, son transparentes para quien consume.
+
+**Completitud del catálogo y `limit`.** Sin un parámetro `limit`, el gateway no le dice a cada
+registry cuántas filas devolver, así que cada registry usa su propio default (a menudo 20). Con
+`limit=50` el gateway aplica el techo que cada registry publica (`schema.discovery.maxLimit`), y
+entonces salen más agentes. Medido el 2026-08-04: `/discover` sin límite devuelve 23 agentes
+(`catalogStatus: truncated`), y `/discover?limit=50` devuelve 25 (`catalogStatus: complete`).
+**Poné siempre un `limit`** cuando consultes para filtrar o elegir por capacidad, y sobre todo para
+`/orchestrate/plan`.
 
 Cada agente que devuelve `/discover` trae un `invokeUrl`, pero es una referencia interna. **El caller no llama al agente directo.** Invoca vía `/compose` (pipeline explícito) u `/orchestrate` (por objetivo, con el plan armado por un LLM). Eso es lo que permite que el gateway resuelva precio, presupuesto, scoping y liquidación en un solo lugar en vez de dejarlo en manos de cada cliente.
 
@@ -157,9 +175,44 @@ curl -s "$GW/capabilities" | jq '{catalogStatus, sources}'
 
 Leído en voz alta: el marketplace federado devolvió 20 filas y dejó un cursor no vacío, así que probó que hay más que no mandó; los 3 publicados directo contra el gateway están probados completos. Una fuente es `ok` sólo con evidencia, o el cursor agotado o menos filas que el límite que se le envió; la que contesta sin ninguna de las dos queda `unverified`, y la que no se pudo consultar queda `failed` con `rows: null` en vez de `rows: 0`, porque "no pude preguntar" no es "no tiene". Lo mismo el roll-up: `complete` significa que todas las fuentes probaron haber dado todo, no que ninguna se quejó. El catálogo prefiere declarar que puede estar incompleto antes que publicar un total que no puede respaldar, que es también por lo que ese número puede moverse sin que nada esté roto.
 
+**El tamaño del catálogo depende de si pedís un límite.** Sin límite, `/discover` devuelve 23 agentes y
+`catalogStatus: truncated` (medido el 2026-08-04). Con `limit=50` el mismo endpoint devuelve 25 y
+`catalogStatus: complete`. Eso **no** es una inconsistencia de datos: el registry federado publica un
+techo de cuántos devuelve en una sola llamada, y cuando no se especifica límite el gateway no pasa
+ninguno hacia abajo, así que el registry devuelve su página por defecto (20 filas). La misma consulta
+con un `limit` explícito le dice al registry "quiero N filas, hasta tu máximo publicado", y devuelve
+más:
+
+```bash
+curl -s "$GW/discover" | jq '{catalogStatus, total: .total}'
+# "catalogStatus": "truncated", "total": 23
+
+curl -s "$GW/discover?limit=50" | jq '{catalogStatus, total: .total}'
+# "catalogStatus": "complete", "total": 25
+```
+
+**Limitaciones conocidas del descubrimiento:** la API de paginación acepta `limit` pero todavía no
+soporta continuación por cursor; `/discover?limit=50` devuelve las primeras 50 coincidencias y no hay
+forma de pedir el resto. Sin un parámetro `limit`, el gateway no le manda ninguno al registry, así que
+el registry devuelve su página por defecto (a menudo 20) y el catálogo queda más truncado de lo que
+vería quien sí especifica un límite. Una caída del registry y un error de validación del cliente (por
+ejemplo un `minReputation` mal formado) se reportan los dos como `http_error` en la telemetría, sin
+distinguirse. Los agentes publicados directo contra el gateway tienen `status: 'active'` clavado en el
+descubrimiento y su publicador no puede marcarlos inactivos.
+
 Sobre las apps que lo consumen, con el tiempo verbal correcto:
 
-- **Chaski** (la app de remesas) usa este gateway hoy **solo para el agente de cotización de FX**, y detrás de una bandera que arranca apagada. La identidad del usuario y el desembolso final se integran punto a punto, sin pasar por el protocolo. Cualquier afirmación de que la remesa entera se orquesta acá es falsa.
+- **Chaski** (la app de remesas) resuelve **dos** patas por este gateway al 2026-08-11: la cotización
+  de FX y el desembolso, pedidas **por capacidad** (`remittance-fx-quote` y `remittance-payout`) y no
+  por nombre de agente. ⚠️ **Este renglón decía "solo para el agente de cotización de FX, y detrás de
+  una bandera que arranca apagada", y que el desembolso se integra "punto a punto, sin pasar por el
+  protocolo". Las dos mitades ya son falsas**, y eran falsas en la dirección que *subestima* el
+  producto: el carril punto a punto no quedó apagado, se **borró** de `chaski-v3` (lo dice su propio
+  código en `src/infrastructure/a2a/gateways.ts:126` y `src/presentation/flow.tsx:2693`), y la bandera
+  que arrancaba apagada está puesta. Lo que sigue siendo cierto, y es la parte que vale conservar: **la
+  identidad del usuario NO pasa por el protocolo**, y el desembolso final a fiat corre contra un
+  adaptador mock por defecto, así que "la remesa entera se orquesta acá" sigue siendo falso, pero por
+  un motivo distinto del que daba este renglón.
 - El marketplace de agentes delega `compose`, `orchestrate` y `capabilities` a este gateway.
 
 ---

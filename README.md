@@ -176,7 +176,17 @@ A source is only `ok` with evidence (an exhausted cursor or fewer rows than the 
 
 About the apps that consume it, in the correct tense:
 
-- **Chaski** (the remittance app) uses this gateway today **only for the FX quote agent**, and behind a flag that starts off. User identity and the final disbursement are integrated point to point, without going through the protocol. Any claim that the whole remittance is orchestrated here is false.
+- **Chaski** (the remittance app) resolves **two** legs through this gateway as of 2026-08-11: the FX
+  quote and the payout, asked for **by capability** (`remittance-fx-quote` and `remittance-payout`)
+  rather than by agent name. ⚠️ **This bullet used to say "only for the FX quote agent, and behind a
+  flag that starts off", and that it integrates the disbursement "point to point, without going
+  through the protocol". Both halves are now false**, and they were false in the direction that
+  *understates* the product: the point-to-point rail was not gated, it was **deleted** from
+  `chaski-v3` (its own code says so in `src/infrastructure/a2a/gateways.ts:126` and
+  `src/presentation/flow.tsx:2693`), and the flag that used to start off is set. What is still true,
+  and is the part worth keeping: **user identity does not go through the protocol**, and the final
+  fiat disbursement runs against a mock adapter by default, so "the whole remittance is orchestrated
+  here" remains false for a different reason than this bullet used to give.
 - The agent marketplace delegates `compose`, `orchestrate` and `capabilities` to this gateway.
 
 ---
