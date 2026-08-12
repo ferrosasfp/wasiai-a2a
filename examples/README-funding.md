@@ -1,5 +1,12 @@
 # Integrar el fondeo de un Agent Key (WasiAI-a2a)
 
+> ⚠️ **Esta guía es del carril EVM, y al 2026-08-11 no menciona Solana ni una vez.** Las redes que
+> cubre son Kite, Avalanche Fuji y Base Sepolia, con `viem` y firma EIP-712. El rail principal del
+> proyecto hoy es **Solana devnet**, y su camino es otro: el fee del agente se paga por x402 y el
+> principal de la remesa va a un escrow en Solana, documentado en el README de la raíz bajo
+> "Solana rail" y en el repo `solana-programs`. Los dos carriles conviven; esto no está obsoleto, está
+> **acotado**. Si vas a fondear una Agent Key en Solana, esta guía no es la tuya.
+
 Guía para que un dev (o un agente autónomo) cargue saldo USDC en su Agent Key y use `/compose` y `/orchestrate`.
 
 ## Modelo de claves (no confundir)

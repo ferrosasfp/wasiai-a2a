@@ -1,5 +1,10 @@
 # Fondeo paso a paso (1 script por paso)
 
+> ⚠️ **Carril EVM.** Estos 6 pasos usan `viem`, que es un cliente de Ethereum, así que corren sobre
+> Kite, Fuji o Base Sepolia y **no** sobre Solana. Verificado el 2026-08-11. El equivalente Solana no
+> vive acá: el rail Solana se documenta en el README de la raíz y su escrow en el repo
+> `solana-programs`.
+
 Misma secuencia que `examples/fund-agent-key.mjs`, pero partida en 6 pasos para correrlos
 de a uno y ver el resultado de cada endpoint. El estado compartido vive en
 `/tmp/wasi-run/state.json` (cada paso lee lo que dejó el anterior).

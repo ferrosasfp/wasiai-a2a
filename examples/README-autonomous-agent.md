@@ -1,5 +1,10 @@
 # Autonomous Agent (reference) — `examples/autonomous-agent.ts`
 
+> ⚠️ **Carril EVM**, porque corre sobre `@wasiai/agent-sdk`, cuya configuración exige un `chainId`
+> numérico y sólo conoce redes de `viem` (medido el 2026-08-11). El rail Solana del proyecto no pasa
+> por este ejemplo. Verificado el mismo día: `examples/autonomous-agent.ts` **existe** y el paquete que
+> usa también, así que el ejemplo apunta a algo real.
+
 Agente económico **autónomo** de referencia para `@wasiai/agent-sdk` (WKH-105).
 Dado una funding wallet (private key) + un goal, corre el ciclo de vida completo
 **sin intervención humana**:

@@ -1,5 +1,12 @@
 # @wasiai/agent-sdk
 
+> ⚠️ **Este SDK es de EVM, y no por convención sino por estructura.** Medido el 2026-08-11:
+> `src/config.ts:1-2` importa `Chain` y las redes desde `viem/chains`, y `src/config.ts:21-22` exige
+> un `chainId` **numérico**. Solana no tiene chain id numérico, así que la configuración de este SDK
+> **no puede expresar Solana** ni queriendo; `viem` es peerDependency. El rail principal del proyecto
+> hoy es Solana devnet y su camino no pasa por acá: se documenta en el README de la raíz bajo
+> "Solana rail". Esto no está obsoleto, está **acotado a un lado del ecosistema**.
+
 SDK TypeScript para agentes económicos autónomos sobre el protocolo WasiAI-a2a.
 Cubre el ciclo de vida completo sin intervención humana:
 

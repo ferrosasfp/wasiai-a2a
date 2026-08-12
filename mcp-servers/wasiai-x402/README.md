@@ -4,6 +4,17 @@ A standalone MCP (Model Context Protocol) server that exposes 3 tools for Claude
 managed agents to discover WasiAI agents, request quotes, and execute x402 payments
 against `app.wasiai.io` (Kite testnet PYUSD inbound + downstream USDC outbound).
 
+> ⚠️ **Which rail this covers, and a reading with a date on it.** This server talks to the
+> **marketplace** at `app.wasiai.io` and charges on **Kite testnet**, which is the EVM side. The
+> project's main rail today is **Solana devnet**, and it does not go through here: for that, see
+> "Solana rail" in the root README. Both rails are live at once, so nothing below is obsolete, it is
+> **scoped**.
+>
+> Checked 2026-08-11: `https://app.wasiai.io` answers (HTTP 307, a redirect off the bare root, which
+> is what it is supposed to do), and this folder's `package.json` is present. That is the "does the
+> first click work" check and nothing more: it does not prove any of the 3 tools still behave as
+> written below. Re-run the calls if you are about to rely on them.
+
 **Status**: alpha. Mainnet exposure: `pay_x402` signs real EIP-3009 authorizations
 that may be settled on-chain by the gateway facilitator.
 
