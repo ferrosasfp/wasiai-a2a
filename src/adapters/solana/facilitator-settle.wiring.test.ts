@@ -80,7 +80,12 @@ describe('WKH-342 T-B7 / AC-2 — src/index.ts llama al warm-up del sondeo', () 
 
   it('★ T-B7c: la función viene del módulo dueño de las envs, no de una copia local', () => {
     expect(source).toMatch(
-      /import\s*\{\s*warmPayoutRoutePreflight\s*\}\s*from\s*'\.\/adapters\/solana\/facilitator-settle\.js'/,
+      // El `[^}]*` a los dos lados tolera que el import traiga OTROS símbolos del mismo
+      // módulo (hoy `readPayoutRouteHealth`, para el campo `solanaPayoutRoute` de /health)
+      // y también que esté partido en varias líneas. NO afloja lo que este test vigila,
+      // que es su propia frase: de qué MÓDULO sale la función. Cambiar esa ruta lo sigue
+      // poniendo rojo, y eso está medido, no supuesto.
+      /import\s*\{[^}]*\bwarmPayoutRoutePreflight\b[^}]*\}\s*from\s*'\.\/adapters\/solana\/facilitator-settle\.js'/,
     );
   });
 

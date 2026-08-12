@@ -14,7 +14,10 @@ import {
   getInitializedChainKeys,
   initAdapters,
 } from './adapters/registry.js';
-import { warmPayoutRoutePreflight } from './adapters/solana/facilitator-settle.js';
+import {
+  warmPayoutRoutePreflight,
+  readPayoutRouteHealth,
+} from './adapters/solana/facilitator-settle.js';
 import { warmSolanaSchemaPreflight } from './adapters/solana/schema-preflight.js';
 import {
   assertDepositMinimumEnv,
@@ -248,6 +251,17 @@ fastify.get(
       // `src/__tests__/e2e/setup.ts`, que duplica este handler porque este módulo hace
       // `await initAdapters()` a nivel de módulo y no se puede importar desde un test.
       ...getStrandedHealthField(),
+      // El carril de payout Solana, que hasta acá NO aparecía en esta respuesta: la
+      // palabra "solana" no figuraba ni una vez, y este servicio es el que rutea los
+      // pagos a los agentes Solana. El facilitator sí sondea el RPC y lo publica por
+      // cadena; lo que faltaba era lo que sólo sabe el gateway, que es si su propio
+      // carril de salida está armado y qué contestó el último sondeo de la ruta.
+      //
+      // ⚠️ Campo SIEMPRE presente, a diferencia del de arriba que devuelve `{}` cuando
+      // su umbral no está seteado. Acá un campo ausente se leería como "no hay
+      // problema", y `rail_off` es información: dice que el carril NO está armado.
+      // Síncrono y no-throw como exige CD-10; `readPayoutRouteHealth` no sondea.
+      solanaPayoutRoute: readPayoutRouteHealth(),
     });
   },
 );

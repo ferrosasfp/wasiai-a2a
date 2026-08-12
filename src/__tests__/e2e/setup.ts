@@ -263,6 +263,7 @@ import tasksRoutes from '../../routes/tasks.js';
 import wellKnownRoutes from '../../routes/well-known.js';
 // HU-306: el mismo helper que usa `src/index.ts` en su `/health` (una sola fuente).
 import { getStrandedHealthField } from '../../services/stranded-alert.js';
+import { readPayoutRouteHealth } from '../../adapters/solana/facilitator-settle.js';
 import type { A2AAgentKeyRow } from '../../types/index.js';
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -350,6 +351,11 @@ export async function buildTestApp() {
         // test; si sólo se tocara allá, el campo no sería testeable end-to-end y las dos
         // copias divergirían en silencio.
         ...getStrandedHealthField(),
+        // MISMA línea que `src/index.ts`, por el mismo motivo que la de arriba: esta copia
+        // del handler existe porque `index.ts` hace `await initAdapters()` a nivel de
+        // módulo. Si el campo viviera sólo allá, las dos copias divergirían en silencio y
+        // ningún test e2e vería el campo nuevo.
+        solanaPayoutRoute: readPayoutRouteHealth(),
       });
     },
   );

@@ -12,6 +12,12 @@ on:
   schedule:
     - cron: '0 7 * * *' # daily 07:00 UTC
 
+# `issues: write` para el aviso de abajo. Declarar el bloque RESTRINGE al listado, así
+# que `contents: read` tiene que estar o el checkout se queda sin permiso.
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   light-smoke:
     runs-on: ubuntu-latest
@@ -34,3 +40,55 @@ jobs:
       - name: Run downstream x402 light smoke (no secrets)
         run: npm run smoke:downstream
         continue-on-error: ${{ github.event_name == 'pull_request' }}
+
+      # AVISO. Sólo en la corrida por RELOJ, y el motivo es que las otras dos ya se ven:
+      # un fallo en `push:main` lo mira quien acaba de pushear y uno en `pull_request` es
+      # informativo por diseño. La corrida del reloj es la única que puede ponerse roja sin
+      # que nadie se entere, que es exactamente el agujero que este paso cierra.
+      #
+      # ⚠️ `failure()` es verdadero si falló CUALQUIER paso anterior, no sólo el smoke
+      # (`npm ci` incluido). Por eso el texto del issue NO afirma que haya una regresión:
+      # dice que la corrida falló y manda a leer el log. Prometer la causa sería inventarla.
+      - name: Abrir issue si la corrida por reloj falla
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITULO: 'smoke-downstream: la corrida por reloj esta fallando'
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cuerpo=$(printf '%s\n' \
+            "La corrida **por reloj** de \`smoke-downstream\` falló." \
+            "" \
+            "- Corrida: $RUN_URL" \
+            "- Commit: \`$GITHUB_SHA\`" \
+            "" \
+            "Qué NO dice este aviso: cuál fue la causa. Falló algún paso del job, que puede" \
+            "ser el smoke o \`npm ci\`. Hay que abrir el log." \
+            "" \
+            "Este issue se cierra solo en la próxima corrida por reloj que pase en verde." \
+            "Si sigue abierto, el reloj sigue rojo.")
+          # Dedup por título exacto: si ya hay uno abierto, comenta en vez de acumular issues.
+          # Sin `--label` a propósito: `gh issue create --label` falla si la etiqueta no existe
+          # en el repo, y eso convertiría el aviso en un segundo fallo silencioso.
+          existente=$(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existente" ]; then
+            gh issue comment "$existente" --body "$cuerpo"
+          else
+            gh issue create --title "$TITULO" --body "$cuerpo"
+          fi
+
+      # La contracara, y no es un adorno: un issue que queda abierto para siempre es el
+      # control que la gente aprende a ignorar. Si el reloj vuelve al verde, se cierra.
+      - name: Cerrar el issue si el reloj volvio al verde
+        if: success() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITULO: 'smoke-downstream: la corrida por reloj esta fallando'
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          existente=$(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existente" ]; then
+            gh issue close "$existente" --comment "La corrida por reloj volvió a pasar: $RUN_URL"
+          fi

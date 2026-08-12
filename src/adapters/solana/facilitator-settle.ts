@@ -297,6 +297,40 @@ let _routeCached: PayoutRouteVerdict | null = null;
 let _routeCachedAt = 0;
 let _routeInFlight: Promise<PayoutRouteVerdict> | null = null;
 
+/**
+ * Lo que `/health` puede decir del carril de payout Solana, y son CINCO estados que no
+ * se fusionan.
+ *
+ * - `rail_off` — el carril no está armado (bandera apagada o sin URL). No hay nada que
+ *   sondear, así que "no hay veredicto" acá NO es una falla.
+ * - `not_probed_yet` — armado, pero el sondeo todavía no dejó veredicto. Distinto del
+ *   anterior a propósito: fusionarlos haría que un carril apagado y un sondeo que nunca
+ *   terminó se lean igual, que es la clase de colapso que este repo viene arreglando.
+ * - los TRES veredictos de `PayoutRouteVerdict`, con el momento en que se midieron.
+ *
+ * ⚠️ **Esto NO sondea.** Lee el veredicto ya memoizado y nada más, porque el handler de
+ * `/health` es síncrono, no espera a nadie y no puede tirar (CD-10). El corolario hay que
+ * tenerlo presente al leerlo: `probedAt` puede ser viejo. Se publica justamente para que
+ * quien lo mire pueda decidir si le sirve, en vez de creer que es de ahora.
+ *
+ * ⚠️ **El criterio de "armado" NO se duplica acá**: sale de `isPayoutViaFacilitatorOn()` +
+ * `getFacilitatorUrl()`, las mismas dos que usa `ensurePayoutRouteReady` diez líneas más
+ * abajo. Vive dentro de este módulo por el mismo motivo que dice el call-site de
+ * `warmPayoutRoutePreflight` en `src/index.ts`: dos copias de la condición divergen.
+ */
+export type PayoutRouteHealth =
+  | { readonly state: 'rail_off' }
+  | { readonly state: 'not_probed_yet' }
+  | (PayoutRouteVerdict & { readonly probedAt: string });
+
+/** Lectura SÍNCRONA para `/health`. No sondea, no espera, no tira. */
+export function readPayoutRouteHealth(): PayoutRouteHealth {
+  if (!isPayoutViaFacilitatorOn()) return { state: 'rail_off' };
+  if (getFacilitatorUrl() === undefined) return { state: 'rail_off' };
+  if (_routeCached === null) return { state: 'not_probed_yet' };
+  return { ..._routeCached, probedAt: new Date(_routeCachedAt).toISOString() };
+}
+
 /** TEST-ONLY — limpia el veredicto memoizado. Espejo de `_resetSolanaSchemaPreflight`. */
 export function _resetPayoutRoutePreflight(): void {
   _routeCached = null;
