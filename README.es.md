@@ -263,7 +263,7 @@ Adentro del gateway hay cuatro capas:
 | Capa | Qué contiene |
 |---|---|
 | L4 API pública | `/discover`, `/compose`, `/orchestrate`, agent cards, `/tasks`, `/auth`, `/dashboard` |
-| L3 primitivas | identidad (`wasi_a2a_*`), presupuesto por clave y por cadena con débito atómico, scoping, rate limits |
+| L3 piezas básicas | identidad (`wasi_a2a_*`), presupuesto por clave y por cadena con débito atómico, scoping, rate limits |
 | L2 adaptadores | `PaymentAdapter`, `AttestationAdapter`, `GaslessAdapter`, `IdentityBindingAdapter` |
 | L1 infra | RPCs y contratos de cada red |
 

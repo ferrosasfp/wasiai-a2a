@@ -237,7 +237,7 @@ Inside the gateway there are four layers:
 | Layer | What it holds |
 |---|---|
 | L4 public API | `/discover`, `/compose`, `/orchestrate`, agent cards, `/tasks`, `/auth`, `/dashboard` |
-| L3 primitives | identity (`wasi_a2a_*`), budget per key and per chain with atomic debit, scoping, rate limits |
+| L3 building blocks | identity (`wasi_a2a_*`), budget per key and per chain with atomic debit, scoping, rate limits |
 | L2 adapters | `PaymentAdapter`, `AttestationAdapter`, `GaslessAdapter`, `IdentityBindingAdapter` |
 | L1 infra | RPCs and contracts for each network |
 
