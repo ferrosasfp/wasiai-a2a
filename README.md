@@ -339,7 +339,7 @@ Real scripts from `package.json`:
 
 Without a real `SUPABASE_URL` the server still boots and answers `/health`, but anything touching catalog or budget fails: persistence is not optional.
 
-`.env.example` documents 180 variables with their defaults (counted with `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`), and the few that change money behavior are grouped together there.
+`.env.example` documents **181 variables** with their defaults (counted with `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`, and that same count is re-derived by `test/readme-numbers.test.ts` on every `npm test`), and the few that change money behavior are grouped together there.
 
 Two boot guards worth knowing before touching mainnet config:
 
@@ -362,22 +362,25 @@ An example: on August 14, 2026, the production facilitator's `/supported` endpoi
 npm test
 ```
 
-State measured in this repo, not quoted from another document:
+State measured in this repo, not quoted from another document. Each number below is either re-derived on every `npm test` by `test/readme-numbers.test.ts`, or written with the date it was measured on so that it does not silently rot:
 
 | Metric | Value |
 |---|---|
-| Tests | 4,862 passing, 19 skipped (4,881 total) |
-| Test files | 242 passing, 6 skipped (248) |
-| Statement coverage | 86.97% |
-| Branch coverage | 78.87% |
-| Function coverage | 92.15% |
-| Line coverage | 88.49% |
+| Test files | **285 test files** in the root suite. Derived from the `include` of `vitest.config.ts` over the git index, and checked in both READMEs, by `test/readme-numbers.test.ts` |
+| Test cases | printed by `npm test`. Deliberately not written down here: it changes with every test added, and a test that pinned it would have to run the suite it is counting |
+| Coverage floor enforced by CI | statements **80%**, branches **70%**, functions **80%**, lines **80%** (`vitest.config.ts:26-31`). Below any of the four, `npm run test:coverage` exits non-zero and the `coverage` job fails |
+| Coverage measured | `npm run test:coverage` printed 87.49% statements, 79.64% branches, 92.48% functions and 89.02% lines on 2026-08-15 |
 | Typecheck | `tsc --noEmit` clean |
-| Lint | `npm run lint` (Biome) over 441 files; the `ci` badge at the top is the live result |
+| Lint | `npm run lint` (Biome) over **477 files**, which is the `src/**/*.ts` of `biome.json` |
+| CI | the `ci` badge at the top is the live result of `.github/workflows/ci.yml`, and nothing in this table overrides it |
 
-The skipped ones are the `*.real.test.ts`, which need a real Postgres and are gated on `INTEGRATION_TEST_DB_URL`, plus one manual e2e against devnet. They skip, they do not fail, so CI does not depend on a live database. The `ci.yml` workflow runs typecheck, lint, suite and coverage on every PR and every push to `main`.
+Read the badge, not this table: if `ci` is red the workflow stopped at its first failing step, and every later step — the suite included — is reported as `skipped`, which is not the same as passed. The steps run in order (typecheck, lint, suite) with no `if: always()`, so a lint error alone is enough to leave the suite unrun on that commit.
 
-Coverage thresholds are pinned just below the current measurement, as a ratchet: they exist to catch regression, not to declare victory.
+A handful of files skip rather than run: the `*.real.test.ts` need a real Postgres and are gated on `INTEGRATION_TEST_DB_URL`, plus one manual e2e against devnet. They skip, they do not fail, so CI does not depend on a live database. `npm test` prints how many.
+
+The 285 above is the root suite only. CI runs two more suites from sub-packages with their own runners, `mcp-servers/wasiai-x402` and `packages/agent-sdk`; they are not in that number, and `test/test-files-are-run-in-ci.test.ts` is what stops a third sub-package from being born with nobody running it.
+
+Against the 2026-08-15 measurement, the enforced floor sits between 7.5 and 12.5 points lower. It is a ratchet for a collapse, not for a one-point regression: a floor pinned right under the measurement turns every refactor red and gets raised by whoever is in a hurry.
 
 ---
 

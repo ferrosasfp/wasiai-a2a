@@ -20,9 +20,9 @@ export default defineConfig({
     },
     coverage: {
       provider: 'v8',
-      // Thresholds set slightly below current measured coverage
-      // (statements 84.6 / branches 76.6 / functions 86.7 / lines 86.2)
-      // to act as a regression ratchet without failing the build today.
+      // Piso de regresión, NO la medición del día. El 2026-08-15 la suite daba
+      // 87.49 / 79.64 / 92.48 / 89.02, o sea entre 7.5 y 12.5 puntos por encima
+      // de estos cuatro. Un piso pegado a la medición pone en rojo cada refactor.
       thresholds: {
         statements: 80,
         branches: 70,

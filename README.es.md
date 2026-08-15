@@ -365,7 +365,7 @@ Scripts reales del `package.json`:
 
 Sin `SUPABASE_URL` real el servidor arranca igual y responde `/health`, pero todo lo que toque catálogo o presupuesto falla: la persistencia no es opcional.
 
-`.env.example` documenta 180 variables con sus defaults (contadas con `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`), y las pocas que cambian el comportamiento del dinero están agrupadas ahí.
+`.env.example` documenta **181 variables** con sus defaults (contadas con `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`, y esa misma cuenta la re-deriva `test/readme-numbers.test.ts` en cada `npm test`), y las pocas que cambian el comportamiento del dinero están agrupadas ahí.
 
 Dos guardas de arranque que conviene conocer antes de tocar config de mainnet:
 
@@ -380,22 +380,25 @@ Dos guardas de arranque que conviene conocer antes de tocar config de mainnet:
 npm test
 ```
 
-Estado medido en este repo, no citado de otro documento:
+Estado medido en este repo, no citado de otro documento. Cada número de abajo o se re-deriva en cada `npm test` con `test/readme-numbers.test.ts`, o está escrito con la fecha en que se midió para que no envejezca en silencio:
 
 | Métrica | Valor |
 |---|---|
-| Tests | 4.862 verdes, 19 salteados (4.881 en total) |
-| Archivos de test | 242 verdes, 6 salteados (248) |
-| Cobertura de sentencias | 86,97% |
-| Cobertura de ramas | 78,87% |
-| Cobertura de funciones | 92,15% |
-| Cobertura de líneas | 88,49% |
+| Archivos de test | **285 archivos de test** en la suite raíz. Derivado del `include` de `vitest.config.ts` sobre el índice de git, y verificado en los dos README, por `test/readme-numbers.test.ts` |
+| Casos de test | lo imprime `npm test`. A propósito no se escribe acá: cambia con cada test nuevo, y un test que lo clavara tendría que correr la suite que está contando |
+| Piso de cobertura que exige el CI | sentencias **80%**, ramas **70%**, funciones **80%**, líneas **80%** (`vitest.config.ts:26-31`). Por debajo de cualquiera de los cuatro, `npm run test:coverage` sale con código distinto de cero y el job `coverage` falla |
+| Cobertura medida | `npm run test:coverage` imprimió 87,49% de sentencias, 79,64% de ramas, 92,48% de funciones y 89,02% de líneas el 2026-08-15 |
 | Typecheck | `tsc --noEmit` limpio |
-| Lint | `npm run lint` (Biome) sobre 441 archivos; el badge `ci` de arriba es el resultado vivo |
+| Lint | `npm run lint` (Biome) sobre **477 archivos**, que es el `src/**/*.ts` de `biome.json` |
+| CI | el badge `ci` de arriba es el resultado vivo de `.github/workflows/ci.yml`, y nada de esta tabla lo pisa |
 
-Los salteados son los `*.real.test.ts`, que necesitan un Postgres de verdad y están condicionados a `INTEGRATION_TEST_DB_URL`, más un e2e manual contra devnet. Se saltean, no fallan, así que el CI no depende de una base viva. El workflow `ci.yml` corre typecheck, lint, suite y cobertura en cada PR y en cada push a `main`.
+Leé el badge, no esta tabla: si `ci` está en rojo el workflow se cortó en su primer paso fallado, y todo paso posterior — la suite incluida — se reporta como `skipped`, que no es lo mismo que pasado. Los pasos corren en orden (typecheck, lint, suite) y sin `if: always()`, así que un solo error de lint alcanza para dejar la suite sin correr en ese commit.
 
-Los umbrales de cobertura están fijados apenas por debajo de la medición actual, como trinquete: sirven para detectar regresión, no para declarar victoria.
+Unos pocos archivos se saltean en vez de correr: los `*.real.test.ts` necesitan un Postgres de verdad y están condicionados a `INTEGRATION_TEST_DB_URL`, más un e2e manual contra devnet. Se saltean, no fallan, así que el CI no depende de una base viva. `npm test` imprime cuántos son.
+
+El 285 de arriba es sólo la suite raíz. El CI corre dos suites más, de sub-paquetes con runner propio, `mcp-servers/wasiai-x402` y `packages/agent-sdk`; no están en ese número, y `test/test-files-are-run-in-ci.test.ts` es lo que impide que un tercer sub-paquete nazca sin que nadie lo corra.
+
+Contra la medición del 2026-08-15, el piso exigido queda entre 7,5 y 12,5 puntos más abajo. Es un trinquete para un derrumbe, no para una regresión de un punto: un piso pegado a la medición pone en rojo cada refactor y termina bajándolo el que tiene apuro.
 
 ---
 
