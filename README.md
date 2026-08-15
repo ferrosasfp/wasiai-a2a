@@ -348,11 +348,11 @@ Two boot guards worth knowing before touching mainnet config:
 
 **Two independent gates for real money**: There are two separate checks before a payment to a mainnet chain reaches production. Neither one alone is enough; both must pass:
 
-1. **First gate: the facilitator**. The settlement service (`wasiai-facilitator`) registers chains only when their adapter is enabled (flag like `*_ENABLED`) and the RPC endpoint is configured. If a network is not registered there, the adapter does not exist, and settlement stops with a connection error.
+1. **First gate: the facilitator**. The settlement service (`wasiai-facilitator`) registers chains only when their adapter is enabled (flag like `*_ENABLED`) and the RPC endpoint is configured. If a network is not registered there, the adapter does not exist, and settlement cannot proceed.
 
 2. **Second gate: this repo**. Even if a mainnet chain is registered in the facilitator, this gateway will not invoke it unless the chain slug is listed in `WASIAI_DOWNSTREAM_MAINNET_ALLOW`. The check happens at runtime (`src/lib/downstream-payment.ts:186-194`); if the chain is mainnet and not in the opt-in, the settle is skipped with `code: 'MAINNET_NOT_ALLOWED'` (line 740) and mapped to the action `OPERATOR_DECIDE_MAINNET_OPT_IN` (src/lib/downstream-skip-code.ts:306). This behavior is fail-closed: an empty or missing variable blocks all mainnet legs.
 
-An example: on August 14, 2026, the production facilitator's `/supported` endpoint returned four chains (Kite Testnet, Avalanche Fuji, Base Sepolia, Solana Devnet), none of them mainnet. That means the first gate was already closed. However, even if it returned Avalanche C-Chain mainnet (43114) in the future, it would stay blocked until someone adds it to `WASIAI_DOWNSTREAM_MAINNET_ALLOW` and redeploys. That double-lock is by design: testing one variable in a configuration is not enough proof that a real money path is safe.
+An example: on August 14, 2026, the production facilitator's `/supported` endpoint returned four chains (Kite Testnet, Avalanche Fuji, Base Sepolia, Solana Devnet), none of them mainnet. That means the first gate was already closed. However, even if it returned Avalanche C-Chain mainnet (43114) in the future, it would still be blocked unless that chain is listed in `WASIAI_DOWNSTREAM_MAINNET_ALLOW` and redeploys. That double-lock is by design: testing one variable in a configuration is not enough proof that a real money path is safe.
 
 ---
 
