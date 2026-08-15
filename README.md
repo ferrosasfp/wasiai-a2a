@@ -249,7 +249,7 @@ Full detail in [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADA
 
 ## Endpoints
 
-Every row below was read off `src/routes/` with the prefixes registered in `src/index.ts:270-313`. That is a claim about each row, not a claim that the table is generated or exhaustive — nobody here checks it mechanically, so re-derive it yourself if you are going to rely on it: `grep -rnE 'fastify\.(get|post|put|patch|delete)' src/routes/`. `/mock-registry/agents` shows up in that grep and is deliberately absent from the tables: it is mounted only outside production (`src/index.ts:292`).
+Every row below was read off `src/routes/` with the prefixes registered in `src/index.ts:270-313`. That is a claim about each row, not a claim that the table is generated or exhaustive — nobody here checks it mechanically, so re-derive it yourself if you are going to rely on it: `grep -rnE 'fastify\.(get|post|put|patch|delete)' src/routes/`. `/mock-registry/agents` shows up in that grep and is deliberately absent from the tables: it is mounted only outside production (`src/index.ts:292-297`).
 
 **Public, free**
 

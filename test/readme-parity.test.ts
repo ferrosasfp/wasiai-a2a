@@ -3,10 +3,12 @@
  * archivos y tienen la misma estructura de secciones.
  *
  * ⚠️ EL BUG QUE ESTE TEST EXISTE PARA CAZAR (medido 2026-08-15, auditoría
- * externa). `README.md:349-355` tenía la subsección **"Two independent gates for
- * real money"** — las dos compuertas que hay que pasar antes de que un pago a
- * una cadena mainnet llegue a producción, con las dos citas que lo sostienen —
- * y `README.es.md` no la tenía. La agregó `2fbeb8a`, que tocó UN archivo:
+ * externa). `README.md` tenía la subsección **"Two independent gates for real
+ * money"** — las dos compuertas que hay que pasar antes de que un pago a una
+ * cadena mainnet llegue a producción, con las dos citas que lo sostienen — y
+ * `README.es.md` no la tenía. (Estaba en `:349-355` del árbol auditado,
+ * `3750e3a`; el número se escribe con su commit porque una línea se mueve sola.)
+ * La agregó `2fbeb8a`, que tocó UN archivo:
  *
  *     $ git show --stat 2fbeb8a
  *     README.md | 8 ++++++++

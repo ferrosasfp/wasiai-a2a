@@ -281,7 +281,7 @@ Detalle completo en [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAI
 
 ## Endpoints
 
-Cada fila de abajo se leyó de `src/routes/` con los prefijos que registra `src/index.ts:270-313`. Eso es una afirmación sobre cada fila, no una afirmación de que la tabla esté generada ni de que sea exhaustiva — acá nadie lo verifica mecánicamente, así que si vas a apoyarte en esto, re-derivalo: `grep -rnE 'fastify\.(get|post|put|patch|delete)' src/routes/`. `/mock-registry/agents` aparece en ese grep y está a propósito fuera de las tablas: se monta sólo fuera de producción (`src/index.ts:292`).
+Cada fila de abajo se leyó de `src/routes/` con los prefijos que registra `src/index.ts:270-313`. Eso es una afirmación sobre cada fila, no una afirmación de que la tabla esté generada ni de que sea exhaustiva — acá nadie lo verifica mecánicamente, así que si vas a apoyarte en esto, re-derivalo: `grep -rnE 'fastify\.(get|post|put|patch|delete)' src/routes/`. `/mock-registry/agents` aparece en ese grep y está a propósito fuera de las tablas: se monta sólo fuera de producción (`src/index.ts:292-297`).
 
 **Públicos, sin costo**
 
