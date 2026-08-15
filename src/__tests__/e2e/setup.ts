@@ -244,6 +244,7 @@ import crypto from 'node:crypto';
 import cors from '@fastify/cors';
 // ── Imports (after mocks) ─────────────────────────────────────
 import Fastify from 'fastify';
+import { readPayoutRouteHealth } from '../../adapters/solana/facilitator-settle.js';
 import { registerErrorBoundary } from '../../middleware/error-boundary.js';
 import { registerRateLimit } from '../../middleware/rate-limit.js';
 import {
@@ -263,7 +264,6 @@ import tasksRoutes from '../../routes/tasks.js';
 import wellKnownRoutes from '../../routes/well-known.js';
 // HU-306: el mismo helper que usa `src/index.ts` en su `/health` (una sola fuente).
 import { getStrandedHealthField } from '../../services/stranded-alert.js';
-import { readPayoutRouteHealth } from '../../adapters/solana/facilitator-settle.js';
 import type { A2AAgentKeyRow } from '../../types/index.js';
 
 // ── Helpers ───────────────────────────────────────────────────

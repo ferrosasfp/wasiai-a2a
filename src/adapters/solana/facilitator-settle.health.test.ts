@@ -90,7 +90,9 @@ describe('readPayoutRouteHealth — los cinco estados no se fusionan', () => {
     expect(salida.state).toBe('route_registered');
     // `probedAt` tiene que ser una fecha REAL, no un placeholder: se publica para que
     // quien lo lea decida si el veredicto le sirve o ya es viejo.
-    expect('probedAt' in salida && typeof salida.probedAt === 'string').toBe(true);
+    expect('probedAt' in salida && typeof salida.probedAt === 'string').toBe(
+      true,
+    );
     if ('probedAt' in salida) {
       expect(Number.isNaN(Date.parse(salida.probedAt))).toBe(false);
     }

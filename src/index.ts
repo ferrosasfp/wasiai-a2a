@@ -15,8 +15,8 @@ import {
   initAdapters,
 } from './adapters/registry.js';
 import {
-  warmPayoutRoutePreflight,
   readPayoutRouteHealth,
+  warmPayoutRoutePreflight,
 } from './adapters/solana/facilitator-settle.js';
 import { warmSolanaSchemaPreflight } from './adapters/solana/schema-preflight.js';
 import {
