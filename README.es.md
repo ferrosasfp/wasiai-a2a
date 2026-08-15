@@ -21,7 +21,7 @@ El gateway federa los catálogos de los marketplaces registrados: un agente publ
 
 ## Solana primero
 
-**Solana es la red principal de este gateway.** Es el único rail no EVM del código y la cadena en la que cobra hoy la línea de remesa del catálogo: de sus agentes, los dos que declaran cadena de cobro (`remit-corridor-fx-solana` y `remit-cashout-payout-solana`) la declaran `solana-devnet` (medido contra `GET /discover` del deployment de producción el 2026-07-31).
+**Solana es la red principal de este gateway.** Es el único rail no EVM del código y la cadena en la que cobra hoy la línea de remesa del catálogo: sus tres agentes (`remit-corridor-fx-solana`, `remit-cashout-payout-solana` y `remit-kyc-validator`) declaran los tres `solana-devnet` (medido contra `GET /discover?limit=50` del deployment de producción el 2026-08-15: 25 agentes, `catalogStatus: complete`, 3 en `solana-devnet`). El 2026-07-31 eran dos; `remit-kyc-validator` llegó después, y este renglón quedó una medición atrás hasta que se releyó.
 
 El leg de pago Solana no es roadmap: mueve USDC-SPL de verdad. La transferencia [`3pNqu9jH…`](https://explorer.solana.com/tx/3pNqu9jHduGaXioB8Mf7WNvBgZQgJV4MnE6NDGWZdz6aY5gr2ivxfbwzrnweutSVtyKnvv7y7kXnARroktjyWsZx?cluster=devnet) está confirmada en devnet (`err: None`), es del USDC de Circle (`4zMMC9sr…`) y el destinatario es la wallet de cobro del agente `remit-corridor-fx-solana`. Se verifica con un `getTransaction` contra el RPC público de devnet, sin pedirle permiso a nadie.
 
@@ -58,12 +58,14 @@ coinciden.
 El primero se publicó directo contra el gateway (`registry: "self-published"`) y cobra en Solana; el segundo vive en un marketplace externo registrado (`registry: "WasiAI"`) y cobra en Avalanche. El cliente que consulta no distingue uno de otro ni tiene que saber en qué red cobra cada uno, y esa indistinción es el punto: la federación, y la cadena, son transparentes para quien consume.
 
 **Completitud del catálogo y `limit`.** Sin un parámetro `limit`, el gateway no le dice a cada
-registry cuántas filas devolver, así que cada registry usa su propio default (a menudo 20). Con
-`limit=50` el gateway aplica el techo que cada registry publica (`schema.discovery.maxLimit`), y
-entonces salen más agentes. Medido el 2026-08-04: `/discover` sin límite devuelve 23 agentes
-(`catalogStatus: truncated`), y `/discover?limit=50` devuelve 25 (`catalogStatus: complete`).
-**Poné siempre un `limit`** cuando consultes para filtrar o elegir por capacidad, y sobre todo para
-`/orchestrate/plan`.
+registry cuántas filas devolver, así que cada registry sirve su propia página por default. Con
+`limit=50` el gateway aplica el techo que cada registry publica (`schema.discovery.maxLimit`).
+Medido el 2026-08-15, tres corridas seguidas: `/discover` pelado y `/discover?limit=50` devuelven
+los dos 25 agentes y `catalogStatus: complete`, con la fuente federada dando sus 22 filas sin que
+se las pidan. El 2026-08-04 esa misma llamada pelada devolvía 23 y `truncated`.
+Que es exactamente el motivo para **poner un `limit`** cuando consultes para filtrar o elegir por
+capacidad, y sobre todo para `/orchestrate/plan`: sin él, lo que te llega depende de un default
+que es de otro y puede cambiar sin avisar — como acaba de pasar.
 
 Cada agente que devuelve `/discover` trae un `invokeUrl`, pero es una referencia interna. **El caller no llama al agente directo.** Invoca vía `/compose` (pipeline explícito) u `/orchestrate` (por objetivo, con el plan armado por un LLM). Eso es lo que permite que el gateway resuelva precio, presupuesto, scoping y liquidación en un solo lugar en vez de dejarlo en manos de cada cliente.
 
@@ -162,30 +164,33 @@ Las tres filas EVM se comprueban mandando `x-payment-chain` a `POST /compose` si
 
 **Ninguna red mainnet está inicializada en el deployment de hoy.** Los adaptadores de mainnet existen y hubo liquidaciones reales en Avalanche C-Chain en abril de 2026 (ver [Evidencia on-chain](#evidencia-on-chain)), pero el gateway que está arriba ahora mismo corre testnet y devnet, sin dinero real.
 
-Estado del catálogo en ese mismo deployment: 23 agentes descubribles (medido el 2026-07-31 contra `GET /discover`), de un marketplace federado más los publicados directo contra el gateway. Dos cobran en Solana devnet: son los de la línea de remesa que declaran cadena de cobro. Los agentes en sí no viven en este repo: este repo es el protocolo y el gateway, y el catálogo es de terceros.
+Estado del catálogo en ese mismo deployment: 25 agentes descubribles (medido el 2026-08-15 contra `GET /discover`, tres corridas seguidas), de un marketplace federado más los publicados directo contra el gateway. Tres cobran en Solana devnet, y son toda la línea de remesa. Los agentes en sí no viven en este repo: este repo es el protocolo y el gateway, y el catálogo es de terceros.
 
-Ese `23` no es un número redondeado, y el endpoint que lo devuelve dice cuánto se cree a sí mismo. La misma respuesta trae `catalogStatus` y el desglose por fuente; el 2026-07-31 decía:
+Ese `25` no es un número redondeado, y el endpoint que lo devuelve dice cuánto se cree a sí mismo. La misma respuesta trae `catalogStatus` y el desglose por fuente; el 2026-08-15 dice:
 
 ```bash
 curl -s "$GW/capabilities" | jq '{catalogStatus, sources}'
-# "catalogStatus": "truncated"
-# "sources": [ {"name":"WasiAI","state":"truncated","rows":20,"truncationEvidence":"cursor"},
+# "catalogStatus": "complete"
+# "sources": [ {"name":"WasiAI","state":"ok","rows":22},
 #              {"name":"self-published","state":"ok","rows":3} ]
 ```
 
-Leído en voz alta: el marketplace federado devolvió 20 filas y dejó un cursor no vacío, así que probó que hay más que no mandó; los 3 publicados directo contra el gateway están probados completos. Una fuente es `ok` sólo con evidencia, o el cursor agotado o menos filas que el límite que se le envió; la que contesta sin ninguna de las dos queda `unverified`, y la que no se pudo consultar queda `failed` con `rows: null` en vez de `rows: 0`, porque "no pude preguntar" no es "no tiene". Lo mismo el roll-up: `complete` significa que todas las fuentes probaron haber dado todo, no que ninguna se quejó. El catálogo prefiere declarar que puede estar incompleto antes que publicar un total que no puede respaldar, que es también por lo que ese número puede moverse sin que nada esté roto.
+El 2026-07-31 la misma llamada decía `truncated`, con la fuente federada en `{"state":"truncated","rows":20,"truncationEvidence":"cursor"}`: había devuelto 20 filas y dejado un cursor no vacío, o sea que probó que había más y no lo mandó. Ese es el caso que el campo existe para nombrar, y sigue siendo posible aunque hoy no se dé.
 
-**El tamaño del catálogo depende de si pedís un límite.** Sin límite, `/discover` devuelve 23 agentes y
-`catalogStatus: truncated` (medido el 2026-08-04). Con `limit=50` el mismo endpoint devuelve 25 y
-`catalogStatus: complete`. Eso **no** es una inconsistencia de datos: el registry federado publica un
-techo de cuántos devuelve en una sola llamada, y cuando no se especifica límite el gateway no pasa
-ninguno hacia abajo, así que el registry devuelve su página por defecto (20 filas). La misma consulta
-con un `limit` explícito le dice al registry "quiero N filas, hasta tu máximo publicado", y devuelve
-más:
+Leído en voz alta, la respuesta de hoy: las dos fuentes están probadas completas. Una fuente es `ok` sólo con evidencia, o el cursor agotado o menos filas que el límite que se le envió; la que contesta sin ninguna de las dos queda `unverified`, y la que no se pudo consultar queda `failed` con `rows: null` en vez de `rows: 0`, porque "no pude preguntar" no es "no tiene". Lo mismo el roll-up: `complete` significa que todas las fuentes probaron haber dado todo, no que ninguna se quejó. El catálogo prefiere declarar que puede estar incompleto antes que publicar un total que no puede respaldar, que es también por lo que ese número puede moverse sin que nada esté roto.
+
+**El tamaño del catálogo puede depender de si pedís un límite.** Medido el 2026-08-15, tres corridas
+seguidas, las dos formas coinciden: 25 agentes y `catalogStatus: complete`, con un desglose por fuente
+de 22 filas del registry federado `WasiAI` y 3 self-published. El 2026-08-04 la llamada pelada
+devolvía 23 y `truncated` y sólo la forma con `limit=50` devolvía 25, y eso tampoco era una
+inconsistencia de datos: cuando no se especifica límite el gateway no pasa ninguno hacia abajo, así
+que cada registry sirve su página por defecto, y un `limit` explícito le dice "quiero N filas, hasta
+tu máximo publicado". La diferencia desapareció porque la fuente federada ahora devuelve todo su
+conjunto sin que se lo pidan, no porque el mecanismo se haya ido:
 
 ```bash
 curl -s "$GW/discover" | jq '{catalogStatus, total: .total}'
-# "catalogStatus": "truncated", "total": 23
+# "catalogStatus": "complete", "total": 25     (el 2026-08-04 era "truncated", 23)
 
 curl -s "$GW/discover?limit=50" | jq '{catalogStatus, total: .total}'
 # "catalogStatus": "complete", "total": 25
@@ -194,8 +199,9 @@ curl -s "$GW/discover?limit=50" | jq '{catalogStatus, total: .total}'
 **Limitaciones conocidas del descubrimiento:** la API de paginación acepta `limit` pero todavía no
 soporta continuación por cursor; `/discover?limit=50` devuelve las primeras 50 coincidencias y no hay
 forma de pedir el resto. Sin un parámetro `limit`, el gateway no le manda ninguno al registry, así que
-el registry devuelve su página por defecto (a menudo 20) y el catálogo queda más truncado de lo que
-vería quien sí especifica un límite. Una caída del registry y un error de validación del cliente (por
+el registry devuelve la página por defecto que tenga, y el catálogo puede quedar más truncado de lo
+que vería quien sí especifica un límite (pasó el 2026-08-04; el 2026-08-15 las dos formas devuelven
+los mismos 25). Una caída del registry y un error de validación del cliente (por
 ejemplo un `minReputation` mal formado) se reportan los dos como `http_error` en la telemetría, sin
 distinguirse. Los agentes publicados directo contra el gateway tienen `status: 'active'` clavado en el
 descubrimiento y su publicador no puede marcarlos inactivos.
