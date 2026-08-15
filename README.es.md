@@ -376,6 +376,14 @@ Dos guardas de arranque que conviene conocer antes de tocar config de mainnet:
 - El proceso **se niega a arrancar** si el slug de cadena y la variable de red del adaptador se contradicen (por ejemplo el slug de Kite testnet con `KITE_NETWORK=mainnet`, que apuntaría el bundle "testnet" a la cadena 2366 con dinero real).
 - El leg de salida hacia cualquier mainnet exige un opt-in explícito en `WASIAI_DOWNSTREAM_MAINNET_ALLOW`. Vacío o ausente significa que ningún leg de mainnet liquida: corta con `MAINNET_NOT_ALLOWED`. Es fail-closed a propósito.
 
+**Dos compuertas independientes para el dinero real**: hay dos chequeos separados antes de que un pago a una cadena mainnet llegue a producción. Ninguno alcanza solo; tienen que pasar los dos:
+
+1. **Primera compuerta: el facilitator**. El servicio de liquidación (`wasiai-facilitator`) registra una cadena sólo cuando su adaptador está habilitado (un flag tipo `*_ENABLED`) y el endpoint RPC está configurado. Si una red no está registrada ahí, el adaptador no existe y no hay liquidación posible.
+
+2. **Segunda compuerta: este repo**. Aunque una cadena mainnet esté registrada en el facilitator, este gateway no la invoca salvo que el slug esté listado en `WASIAI_DOWNSTREAM_MAINNET_ALLOW`. El chequeo ocurre en runtime (`src/lib/downstream-payment.ts:186-194`); si la cadena es mainnet y no está en el opt-in, el settle se saltea con `code: 'MAINNET_NOT_ALLOWED'` (línea 740) y se mapea a la acción `OPERATOR_DECIDE_MAINNET_OPT_IN` (src/lib/downstream-skip-code.ts:306). Es fail-closed: una variable vacía o ausente bloquea todos los legs de mainnet.
+
+Un ejemplo: el 14 de agosto de 2026 el endpoint `/supported` del facilitator de producción devolvía cuatro cadenas (Kite Testnet, Avalanche Fuji, Base Sepolia, Solana Devnet), ninguna mainnet. O sea que la primera compuerta ya estaba cerrada. Pero aunque en el futuro devolviera Avalanche C-Chain mainnet (43114), seguiría bloqueado mientras esa cadena no esté listada en `WASIAI_DOWNSTREAM_MAINNET_ALLOW` y no se redespliegue. Ese doble candado es a propósito: probar una variable de una configuración no alcanza como prueba de que un camino de dinero real es seguro.
+
 ---
 
 ## Tests
@@ -388,7 +396,7 @@ Estado medido en este repo, no citado de otro documento. Cada número de abajo o
 
 | Métrica | Valor |
 |---|---|
-| Archivos de test | **285 archivos de test** en la suite raíz. Derivado del `include` de `vitest.config.ts` sobre el índice de git, y verificado en los dos README, por `test/readme-numbers.test.ts` |
+| Archivos de test | **286 archivos de test** en la suite raíz. Derivado del `include` de `vitest.config.ts` sobre el índice de git, y verificado en los dos README, por `test/readme-numbers.test.ts` |
 | Casos de test | lo imprime `npm test`. A propósito no se escribe acá: cambia con cada test nuevo, y un test que lo clavara tendría que correr la suite que está contando |
 | Piso de cobertura que exige el CI | sentencias **80%**, ramas **70%**, funciones **80%**, líneas **80%** (`vitest.config.ts:26-31`). Por debajo de cualquiera de los cuatro, `npm run test:coverage` sale con código distinto de cero y el job `coverage` falla |
 | Cobertura medida | `npm run test:coverage` imprimió 87,49% de sentencias, 79,64% de ramas, 92,48% de funciones y 89,02% de líneas el 2026-08-15 |
@@ -400,7 +408,7 @@ Leé el badge, no esta tabla: si `ci` está en rojo el workflow se cortó en su 
 
 Unos pocos archivos se saltean en vez de correr: los `*.real.test.ts` necesitan un Postgres de verdad y están condicionados a `INTEGRATION_TEST_DB_URL`, más un e2e manual contra devnet. Se saltean, no fallan, así que el CI no depende de una base viva. `npm test` imprime cuántos son.
 
-El 285 de arriba es sólo la suite raíz. El CI corre dos suites más, de sub-paquetes con runner propio, `mcp-servers/wasiai-x402` y `packages/agent-sdk`; no están en ese número, y `test/test-files-are-run-in-ci.test.ts` es lo que impide que un tercer sub-paquete nazca sin que nadie lo corra.
+El 286 de arriba es sólo la suite raíz. El CI corre dos suites más, de sub-paquetes con runner propio, `mcp-servers/wasiai-x402` y `packages/agent-sdk`; no están en ese número, y `test/test-files-are-run-in-ci.test.ts` es lo que impide que un tercer sub-paquete nazca sin que nadie lo corra.
 
 Contra la medición del 2026-08-15, el piso exigido queda entre 7,5 y 12,5 puntos más abajo. Es un trinquete para un derrumbe, no para una regresión de un punto: un piso pegado a la medición pone en rojo cada refactor y termina bajándolo el que tiene apuro.
 

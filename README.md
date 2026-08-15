@@ -370,7 +370,7 @@ State measured in this repo, not quoted from another document. Each number below
 
 | Metric | Value |
 |---|---|
-| Test files | **285 test files** in the root suite. Derived from the `include` of `vitest.config.ts` over the git index, and checked in both READMEs, by `test/readme-numbers.test.ts` |
+| Test files | **286 test files** in the root suite. Derived from the `include` of `vitest.config.ts` over the git index, and checked in both READMEs, by `test/readme-numbers.test.ts` |
 | Test cases | printed by `npm test`. Deliberately not written down here: it changes with every test added, and a test that pinned it would have to run the suite it is counting |
 | Coverage floor enforced by CI | statements **80%**, branches **70%**, functions **80%**, lines **80%** (`vitest.config.ts:26-31`). Below any of the four, `npm run test:coverage` exits non-zero and the `coverage` job fails |
 | Coverage measured | `npm run test:coverage` printed 87.49% statements, 79.64% branches, 92.48% functions and 89.02% lines on 2026-08-15 |
@@ -382,7 +382,7 @@ Read the badge, not this table: if `ci` is red the workflow stopped at its first
 
 A handful of files skip rather than run: the `*.real.test.ts` need a real Postgres and are gated on `INTEGRATION_TEST_DB_URL`, plus one manual e2e against devnet. They skip, they do not fail, so CI does not depend on a live database. `npm test` prints how many.
 
-The 285 above is the root suite only. CI runs two more suites from sub-packages with their own runners, `mcp-servers/wasiai-x402` and `packages/agent-sdk`; they are not in that number, and `test/test-files-are-run-in-ci.test.ts` is what stops a third sub-package from being born with nobody running it.
+The 286 above is the root suite only. CI runs two more suites from sub-packages with their own runners, `mcp-servers/wasiai-x402` and `packages/agent-sdk`; they are not in that number, and `test/test-files-are-run-in-ci.test.ts` is what stops a third sub-package from being born with nobody running it.
 
 Against the 2026-08-15 measurement, the enforced floor sits between 7.5 and 12.5 points lower. It is a ratchet for a collapse, not for a one-point regression: a floor pinned right under the measurement turns every refactor red and gets raised by whoever is in a hurry.
 
