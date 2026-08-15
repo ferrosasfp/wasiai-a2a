@@ -249,7 +249,7 @@ Full detail in [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADA
 
 ## Endpoints
 
-All verified against `src/routes/`.
+Every row below was read off `src/routes/` with the prefixes registered in `src/index.ts:270-313`. That is a claim about each row, not a claim that the table is generated or exhaustive — nobody here checks it mechanically, so re-derive it yourself if you are going to rely on it: `grep -rnE 'fastify\.(get|post|put|patch|delete)' src/routes/`. `/mock-registry/agents` shows up in that grep and is deliberately absent from the tables: it is mounted only outside production (`src/index.ts:292`).
 
 **Public, free**
 
@@ -284,6 +284,8 @@ A single operation asks for **two** credentials: `POST /dashboard/api/reconcilia
 | `POST` | `/agents/:slug/link` · `/agents/links/:token/redeem` | depends on the link | scoped invocation links |
 | `POST` | `/mcp` | depends on the method | MCP server (JSON-RPC) |
 | `POST` | `/inbound/:source/tasks` | yes | external task intake by webhook, authenticated with HMAC |
+| `POST` | `/gasless/transfer` | yes | on-chain transfer signed by the operator wallet. The debit is refunded on the three paths where nothing leaves — RPC down, module not operational, transfer failed — each one calling `refundGaslessDebit` in `src/routes/gasless.ts` |
+| `GET` | `/receipts`, `/receipts/:id`, `/receipts/:id/verify` | no | HMAC-chained receipts of the caller's own operations; `/verify` recomputes the hash and reports tampering |
 
 Publishing an agent is free on purpose: charging for listing discourages exactly what the catalog needs. Charging goes where execution happens.
 
@@ -297,7 +299,9 @@ Publishing an agent is free on purpose: charging for listing discourages exactly
 
 Reading a task is free on purpose. The A2A lifecycle is driven by polling `GET /tasks/:id`, so charging for reads meant a poll every 5 seconds cost 720 USD per hour: the price was fighting the protocol. Free reads do not emit a `402` challenge because there is nothing to pay.
 
-**Identity and budget**: `POST /auth/agent-signup`, `GET /auth/me`, `POST /auth/deposit` (verifies the deposit on-chain before crediting; accepts either a Solana signature or an EVM hash, and rejects before hitting the network if the reference does not match the requested chain; the Solana leg is behind `A2A_DEPOSIT_ENABLED_SOLANA` and is on in the live deployment, see [Solana rail](#solana-rail)), `POST|GET|DELETE /auth/key-session`, `POST|GET|DELETE /auth/delegation`, `PUT|GET|DELETE /auth/keys/me/spend-policies`, `POST /auth/erc8004/bind`, `GET /auth/erc8004/resolve/:token_id`. `POST /auth/bind/:chain` still returns `501`: it is a declared placeholder, not a function.
+**Identity and budget**: `POST /auth/agent-signup`, `GET /auth/me`, `GET /auth/deposit-info`, `POST /auth/deposit` (verifies the deposit on-chain before crediting; accepts either a Solana signature or an EVM hash, and rejects before hitting the network if the reference does not match the requested chain; the Solana leg is behind `A2A_DEPOSIT_ENABLED_SOLANA` and is on in the live deployment, see [Solana rail](#solana-rail)), `POST|GET|DELETE /auth/key-session`, `POST|GET|DELETE /auth/delegation`, `PUT|GET|DELETE /auth/keys/me/spend-policies`, `POST /auth/erc8004/bind`, `GET /auth/erc8004/resolve/:token_id`. `POST /auth/bind/:chain` still returns `501`: it is a declared placeholder, not a function.
+
+Four more under the same prefix, all writing on the caller's own key and all with the key id taken from the authenticated caller and never from the body: `POST /auth/funding-wallet` binds a funding wallet with proof of control (the caller signs `WASIAI_BIND_FUNDING_WALLET:<key_id>` on EVM or `WASIAI_BIND_FUNDING_WALLET_SOLANA:<key_id>` on Solana — two different texts on purpose: the preimages already differ today anyway (EIP-191 prefixes its message, a Solana wallet signs raw bytes), and the namespace is there so that non-collision does not rest on a wallet convention this repo does not control — and from then on `/auth/deposit` requires the transfer to come from that wallet), and `PATCH /auth/agent-key/:id/require-signature` plus `PATCH /auth/key-session/:id/require-signature` toggle the EIP-712 per-request signature on the master key and on a sub-session. `POST /auth/bind-passport` binds a Kite Agent Passport, and it only exists when `PASSPORT_BINDING_ENABLED=true`: with the flag off the route is not mounted at all and the answer is a plain `404`, not a `403`.
 
 **Scheduled payments**: `POST /payments/session` (metered, with vouchers and closing) and `POST /payments/upto` (ceiling signed by both parties), plus their `/settle`, `/close` and `/dispute`.
 
