@@ -21,7 +21,7 @@ El gateway federa los catálogos de los marketplaces registrados: un agente publ
 
 ## Solana primero
 
-**Solana es la red principal de este gateway.** Es el único rail no EVM del código y la cadena en la que cobra hoy la línea de remesa del catálogo: de sus agentes, los dos que declaran cadena de cobro (`remit-corridor-fx-solana` y `remit-cashout-payout-solana`) la declaran `solana-devnet` (medido contra `GET /discover` del deployment de producción el 2026-07-31).
+**Solana es la red principal de este gateway.** Es el único rail no EVM del código y la cadena en la que cobra hoy la línea de remesa del catálogo: sus tres agentes (`remit-corridor-fx-solana`, `remit-cashout-payout-solana` y `remit-kyc-validator`) declaran los tres `solana-devnet` (medido contra `GET /discover?limit=50` del deployment de producción el 2026-08-15: 25 agentes, `catalogStatus: complete`, 3 en `solana-devnet`). El 2026-07-31 eran dos; `remit-kyc-validator` llegó después, y este renglón quedó una medición atrás hasta que se releyó.
 
 El leg de pago Solana no es roadmap: mueve USDC-SPL de verdad. La transferencia [`3pNqu9jH…`](https://explorer.solana.com/tx/3pNqu9jHduGaXioB8Mf7WNvBgZQgJV4MnE6NDGWZdz6aY5gr2ivxfbwzrnweutSVtyKnvv7y7kXnARroktjyWsZx?cluster=devnet) está confirmada en devnet (`err: None`), es del USDC de Circle (`4zMMC9sr…`) y el destinatario es la wallet de cobro del agente `remit-corridor-fx-solana`. Se verifica con un `getTransaction` contra el RPC público de devnet, sin pedirle permiso a nadie.
 
@@ -58,12 +58,14 @@ coinciden.
 El primero se publicó directo contra el gateway (`registry: "self-published"`) y cobra en Solana; el segundo vive en un marketplace externo registrado (`registry: "WasiAI"`) y cobra en Avalanche. El cliente que consulta no distingue uno de otro ni tiene que saber en qué red cobra cada uno, y esa indistinción es el punto: la federación, y la cadena, son transparentes para quien consume.
 
 **Completitud del catálogo y `limit`.** Sin un parámetro `limit`, el gateway no le dice a cada
-registry cuántas filas devolver, así que cada registry usa su propio default (a menudo 20). Con
-`limit=50` el gateway aplica el techo que cada registry publica (`schema.discovery.maxLimit`), y
-entonces salen más agentes. Medido el 2026-08-04: `/discover` sin límite devuelve 23 agentes
-(`catalogStatus: truncated`), y `/discover?limit=50` devuelve 25 (`catalogStatus: complete`).
-**Poné siempre un `limit`** cuando consultes para filtrar o elegir por capacidad, y sobre todo para
-`/orchestrate/plan`.
+registry cuántas filas devolver, así que cada registry sirve su propia página por default. Con
+`limit=50` el gateway aplica el techo que cada registry publica (`schema.discovery.maxLimit`).
+Medido el 2026-08-15, tres corridas seguidas: `/discover` pelado y `/discover?limit=50` devuelven
+los dos 25 agentes y `catalogStatus: complete`, con la fuente federada dando sus 22 filas sin que
+se las pidan. El 2026-08-04 esa misma llamada pelada devolvía 23 y `truncated`.
+Que es exactamente el motivo para **poner un `limit`** cuando consultes para filtrar o elegir por
+capacidad, y sobre todo para `/orchestrate/plan`: sin él, lo que te llega depende de un default
+que es de otro y puede cambiar sin avisar — como acaba de pasar.
 
 Cada agente que devuelve `/discover` trae un `invokeUrl`, pero es una referencia interna. **El caller no llama al agente directo.** Invoca vía `/compose` (pipeline explícito) u `/orchestrate` (por objetivo, con el plan armado por un LLM). Eso es lo que permite que el gateway resuelva precio, presupuesto, scoping y liquidación en un solo lugar en vez de dejarlo en manos de cada cliente.
 
@@ -162,30 +164,33 @@ Las tres filas EVM se comprueban mandando `x-payment-chain` a `POST /compose` si
 
 **Ninguna red mainnet está inicializada en el deployment de hoy.** Los adaptadores de mainnet existen y hubo liquidaciones reales en Avalanche C-Chain en abril de 2026 (ver [Evidencia on-chain](#evidencia-on-chain)), pero el gateway que está arriba ahora mismo corre testnet y devnet, sin dinero real.
 
-Estado del catálogo en ese mismo deployment: 23 agentes descubribles (medido el 2026-07-31 contra `GET /discover`), de un marketplace federado más los publicados directo contra el gateway. Dos cobran en Solana devnet: son los de la línea de remesa que declaran cadena de cobro. Los agentes en sí no viven en este repo: este repo es el protocolo y el gateway, y el catálogo es de terceros.
+Estado del catálogo en ese mismo deployment: 25 agentes descubribles (medido el 2026-08-15 contra `GET /discover`, tres corridas seguidas), de un marketplace federado más los publicados directo contra el gateway. Tres cobran en Solana devnet, y son toda la línea de remesa. Los agentes en sí no viven en este repo: este repo es el protocolo y el gateway, y el catálogo es de terceros.
 
-Ese `23` no es un número redondeado, y el endpoint que lo devuelve dice cuánto se cree a sí mismo. La misma respuesta trae `catalogStatus` y el desglose por fuente; el 2026-07-31 decía:
+Ese `25` no es un número redondeado, y el endpoint que lo devuelve dice cuánto se cree a sí mismo. La misma respuesta trae `catalogStatus` y el desglose por fuente; el 2026-08-15 dice:
 
 ```bash
 curl -s "$GW/capabilities" | jq '{catalogStatus, sources}'
-# "catalogStatus": "truncated"
-# "sources": [ {"name":"WasiAI","state":"truncated","rows":20,"truncationEvidence":"cursor"},
+# "catalogStatus": "complete"
+# "sources": [ {"name":"WasiAI","state":"ok","rows":22},
 #              {"name":"self-published","state":"ok","rows":3} ]
 ```
 
-Leído en voz alta: el marketplace federado devolvió 20 filas y dejó un cursor no vacío, así que probó que hay más que no mandó; los 3 publicados directo contra el gateway están probados completos. Una fuente es `ok` sólo con evidencia, o el cursor agotado o menos filas que el límite que se le envió; la que contesta sin ninguna de las dos queda `unverified`, y la que no se pudo consultar queda `failed` con `rows: null` en vez de `rows: 0`, porque "no pude preguntar" no es "no tiene". Lo mismo el roll-up: `complete` significa que todas las fuentes probaron haber dado todo, no que ninguna se quejó. El catálogo prefiere declarar que puede estar incompleto antes que publicar un total que no puede respaldar, que es también por lo que ese número puede moverse sin que nada esté roto.
+El 2026-07-31 la misma llamada decía `truncated`, con la fuente federada en `{"state":"truncated","rows":20,"truncationEvidence":"cursor"}`: había devuelto 20 filas y dejado un cursor no vacío, o sea que probó que había más y no lo mandó. Ese es el caso que el campo existe para nombrar, y sigue siendo posible aunque hoy no se dé.
 
-**El tamaño del catálogo depende de si pedís un límite.** Sin límite, `/discover` devuelve 23 agentes y
-`catalogStatus: truncated` (medido el 2026-08-04). Con `limit=50` el mismo endpoint devuelve 25 y
-`catalogStatus: complete`. Eso **no** es una inconsistencia de datos: el registry federado publica un
-techo de cuántos devuelve en una sola llamada, y cuando no se especifica límite el gateway no pasa
-ninguno hacia abajo, así que el registry devuelve su página por defecto (20 filas). La misma consulta
-con un `limit` explícito le dice al registry "quiero N filas, hasta tu máximo publicado", y devuelve
-más:
+Leído en voz alta, la respuesta de hoy: las dos fuentes están probadas completas. Una fuente es `ok` sólo con evidencia, o el cursor agotado o menos filas que el límite que se le envió; la que contesta sin ninguna de las dos queda `unverified`, y la que no se pudo consultar queda `failed` con `rows: null` en vez de `rows: 0`, porque "no pude preguntar" no es "no tiene". Lo mismo el roll-up: `complete` significa que todas las fuentes probaron haber dado todo, no que ninguna se quejó. El catálogo prefiere declarar que puede estar incompleto antes que publicar un total que no puede respaldar, que es también por lo que ese número puede moverse sin que nada esté roto.
+
+**El tamaño del catálogo puede depender de si pedís un límite.** Medido el 2026-08-15, tres corridas
+seguidas, las dos formas coinciden: 25 agentes y `catalogStatus: complete`, con un desglose por fuente
+de 22 filas del registry federado `WasiAI` y 3 self-published. El 2026-08-04 la llamada pelada
+devolvía 23 y `truncated` y sólo la forma con `limit=50` devolvía 25, y eso tampoco era una
+inconsistencia de datos: cuando no se especifica límite el gateway no pasa ninguno hacia abajo, así
+que cada registry sirve su página por defecto, y un `limit` explícito le dice "quiero N filas, hasta
+tu máximo publicado". La diferencia desapareció porque la fuente federada ahora devuelve todo su
+conjunto sin que se lo pidan, no porque el mecanismo se haya ido:
 
 ```bash
 curl -s "$GW/discover" | jq '{catalogStatus, total: .total}'
-# "catalogStatus": "truncated", "total": 23
+# "catalogStatus": "complete", "total": 25     (el 2026-08-04 era "truncated", 23)
 
 curl -s "$GW/discover?limit=50" | jq '{catalogStatus, total: .total}'
 # "catalogStatus": "complete", "total": 25
@@ -194,8 +199,9 @@ curl -s "$GW/discover?limit=50" | jq '{catalogStatus, total: .total}'
 **Limitaciones conocidas del descubrimiento:** la API de paginación acepta `limit` pero todavía no
 soporta continuación por cursor; `/discover?limit=50` devuelve las primeras 50 coincidencias y no hay
 forma de pedir el resto. Sin un parámetro `limit`, el gateway no le manda ninguno al registry, así que
-el registry devuelve su página por defecto (a menudo 20) y el catálogo queda más truncado de lo que
-vería quien sí especifica un límite. Una caída del registry y un error de validación del cliente (por
+el registry devuelve la página por defecto que tenga, y el catálogo puede quedar más truncado de lo
+que vería quien sí especifica un límite (pasó el 2026-08-04; el 2026-08-15 las dos formas devuelven
+los mismos 25). Una caída del registry y un error de validación del cliente (por
 ejemplo un `minReputation` mal formado) se reportan los dos como `http_error` en la telemetría, sin
 distinguirse. Los agentes publicados directo contra el gateway tienen `status: 'active'` clavado en el
 descubrimiento y su publicador no puede marcarlos inactivos.
@@ -275,7 +281,7 @@ Detalle completo en [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAI
 
 ## Endpoints
 
-Todos verificados contra `src/routes/`.
+Cada fila de abajo se leyó de `src/routes/` con los prefijos que registra `src/index.ts:270-313`. Eso es una afirmación sobre cada fila, no una afirmación de que la tabla esté generada ni de que sea exhaustiva — acá nadie lo verifica mecánicamente, así que si vas a apoyarte en esto, re-derivalo: `grep -rnE 'fastify\.(get|post|put|patch|delete)' src/routes/`. `/mock-registry/agents` aparece en ese grep y está a propósito fuera de las tablas: se monta sólo fuera de producción (`src/index.ts:292-297`).
 
 **Públicos, sin costo**
 
@@ -310,6 +316,8 @@ Una sola operación pide **dos** credenciales: `POST /dashboard/api/reconciliati
 | `POST` | `/agents/:slug/link` · `/agents/links/:token/redeem` | según el link | links de invocación acotados |
 | `POST` | `/mcp` | según el método | servidor MCP (JSON-RPC) |
 | `POST` | `/inbound/:source/tasks` | sí | ingreso de tareas externas por webhook, autenticado por HMAC |
+| `POST` | `/gasless/transfer` | sí | transferencia on-chain firmada por la wallet del operador. El débito se reembolsa en los tres caminos en los que no sale nada — RPC caído, módulo no operativo, transferencia fallida —, cada uno llamando a `refundGaslessDebit` en `src/routes/gasless.ts` |
+| `GET` | `/receipts`, `/receipts/:id`, `/receipts/:id/verify` | no | recibos encadenados por HMAC de las operaciones del propio caller; `/verify` recalcula el hash e informa si algo fue alterado |
 
 Publicar un agente es gratis a propósito: cobrar el alta desincentiva justo lo que necesita el catálogo. El cobro va donde hay ejecución.
 
@@ -323,7 +331,9 @@ Publicar un agente es gratis a propósito: cobrar el alta desincentiva justo lo 
 
 Leer una tarea es gratis a propósito. El ciclo de vida A2A se maneja por polling de `GET /tasks/:id`, así que cobrar por lectura significaba que un poll cada 5 segundos costaba 720 USD por hora: el precio peleaba contra el protocolo. Las lecturas gratis no emiten challenge `402` porque no hay nada que pagar.
 
-**Identidad y presupuesto**: `POST /auth/agent-signup`, `GET /auth/me`, `POST /auth/deposit` (verifica el depósito on-chain antes de acreditar; acepta una firma Solana o un hash EVM, y rechaza antes de salir a la red si la referencia no corresponde a la cadena pedida; el leg Solana va detrás de `A2A_DEPOSIT_ENABLED_SOLANA` y está prendido en el deployment en vivo, ver [Rail Solana](#rail-solana)), `POST|GET|DELETE /auth/key-session`, `POST|GET|DELETE /auth/delegation`, `PUT|GET|DELETE /auth/keys/me/spend-policies`, `POST /auth/erc8004/bind`, `GET /auth/erc8004/resolve/:token_id`. `POST /auth/bind/:chain` sigue devolviendo `501`: es un placeholder declarado, no una función.
+**Identidad y presupuesto**: `POST /auth/agent-signup`, `GET /auth/me`, `GET /auth/deposit-info`, `POST /auth/deposit` (verifica el depósito on-chain antes de acreditar; acepta una firma Solana o un hash EVM, y rechaza antes de salir a la red si la referencia no corresponde a la cadena pedida; el leg Solana va detrás de `A2A_DEPOSIT_ENABLED_SOLANA` y está prendido en el deployment en vivo, ver [Rail Solana](#rail-solana)), `POST|GET|DELETE /auth/key-session`, `POST|GET|DELETE /auth/delegation`, `PUT|GET|DELETE /auth/keys/me/spend-policies`, `POST /auth/erc8004/bind`, `GET /auth/erc8004/resolve/:token_id`. `POST /auth/bind/:chain` sigue devolviendo `501`: es un placeholder declarado, no una función.
+
+Cuatro más bajo el mismo prefijo, todas escribiendo sobre la clave del propio caller y todas con el id de clave tomado del caller autenticado y nunca del body: `POST /auth/funding-wallet` ata una funding wallet con prueba de control (el caller firma `WASIAI_BIND_FUNDING_WALLET:<key_id>` en EVM o `WASIAI_BIND_FUNDING_WALLET_SOLANA:<key_id>` en Solana — dos textos distintos a propósito: hoy los preimágenes ya difieren igual (EIP-191 prefija su mensaje, un wallet Solana firma los bytes crudos), y el namespace está para que esa no-colisión no dependa de una convención de wallets que este repo no controla — y de ahí en adelante `/auth/deposit` exige que la transferencia venga de esa wallet), y `PATCH /auth/agent-key/:id/require-signature` más `PATCH /auth/key-session/:id/require-signature` prenden y apagan la firma EIP-712 por request, sobre la clave maestra y sobre una sub-sesión. `POST /auth/bind-passport` ata un Kite Agent Passport, y sólo existe cuando `PASSPORT_BINDING_ENABLED=true`: con el flag apagado la ruta no se monta y la respuesta es un `404` pelado, no un `403`.
 
 **Pagos programados**: `POST /payments/session` (medido, con vouchers y cierre) y `POST /payments/upto` (tope firmado por ambas partes), más sus `/settle`, `/close` y `/dispute`.
 
@@ -365,12 +375,20 @@ Scripts reales del `package.json`:
 
 Sin `SUPABASE_URL` real el servidor arranca igual y responde `/health`, pero todo lo que toque catálogo o presupuesto falla: la persistencia no es opcional.
 
-`.env.example` documenta 180 variables con sus defaults (contadas con `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`), y las pocas que cambian el comportamiento del dinero están agrupadas ahí.
+`.env.example` documenta **181 variables** con sus defaults (contadas con `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`, y esa misma cuenta la re-deriva `test/readme-numbers.test.ts` en cada `npm test`), y las pocas que cambian el comportamiento del dinero están agrupadas ahí.
 
 Dos guardas de arranque que conviene conocer antes de tocar config de mainnet:
 
 - El proceso **se niega a arrancar** si el slug de cadena y la variable de red del adaptador se contradicen (por ejemplo el slug de Kite testnet con `KITE_NETWORK=mainnet`, que apuntaría el bundle "testnet" a la cadena 2366 con dinero real).
 - El leg de salida hacia cualquier mainnet exige un opt-in explícito en `WASIAI_DOWNSTREAM_MAINNET_ALLOW`. Vacío o ausente significa que ningún leg de mainnet liquida: corta con `MAINNET_NOT_ALLOWED`. Es fail-closed a propósito.
+
+**Dos compuertas independientes para el dinero real**: hay dos chequeos separados antes de que un pago a una cadena mainnet llegue a producción. Ninguno alcanza solo; tienen que pasar los dos:
+
+1. **Primera compuerta: el facilitator**. El servicio de liquidación (`wasiai-facilitator`) registra una cadena sólo cuando su adaptador está habilitado (un flag tipo `*_ENABLED`) y el endpoint RPC está configurado. Si una red no está registrada ahí, el adaptador no existe y no hay liquidación posible.
+
+2. **Segunda compuerta: este repo**. Aunque una cadena mainnet esté registrada en el facilitator, este gateway no la invoca salvo que el slug esté listado en `WASIAI_DOWNSTREAM_MAINNET_ALLOW`. El chequeo ocurre en runtime (`src/lib/downstream-payment.ts:186-194`); si la cadena es mainnet y no está en el opt-in, el settle se saltea con `code: 'MAINNET_NOT_ALLOWED'` (línea 740) y se mapea a la acción `OPERATOR_DECIDE_MAINNET_OPT_IN` (src/lib/downstream-skip-code.ts:306). Es fail-closed: una variable vacía o ausente bloquea todos los legs de mainnet.
+
+Un ejemplo: el 14 de agosto de 2026 el endpoint `/supported` del facilitator de producción devolvía cuatro cadenas (Kite Testnet, Avalanche Fuji, Base Sepolia, Solana Devnet), ninguna mainnet. O sea que la primera compuerta ya estaba cerrada. Pero aunque en el futuro devolviera Avalanche C-Chain mainnet (43114), seguiría bloqueado mientras esa cadena no esté listada en `WASIAI_DOWNSTREAM_MAINNET_ALLOW` y no se redespliegue. Ese doble candado es a propósito: probar una variable de una configuración no alcanza como prueba de que un camino de dinero real es seguro.
 
 ---
 
@@ -380,22 +398,25 @@ Dos guardas de arranque que conviene conocer antes de tocar config de mainnet:
 npm test
 ```
 
-Estado medido en este repo, no citado de otro documento:
+Estado medido en este repo, no citado de otro documento. Cada número de abajo o se re-deriva en cada `npm test` con `test/readme-numbers.test.ts`, o está escrito con la fecha en que se midió para que no envejezca en silencio:
 
 | Métrica | Valor |
 |---|---|
-| Tests | 4.862 verdes, 19 salteados (4.881 en total) |
-| Archivos de test | 242 verdes, 6 salteados (248) |
-| Cobertura de sentencias | 86,97% |
-| Cobertura de ramas | 78,87% |
-| Cobertura de funciones | 92,15% |
-| Cobertura de líneas | 88,49% |
+| Archivos de test | **286 archivos de test** en la suite raíz. Derivado del `include` de `vitest.config.ts` sobre el índice de git, y verificado en los dos README, por `test/readme-numbers.test.ts` |
+| Casos de test | lo imprime `npm test`. A propósito no se escribe acá: cambia con cada test nuevo, y un test que lo clavara tendría que correr la suite que está contando |
+| Piso de cobertura que exige el CI | sentencias **80%**, ramas **70%**, funciones **80%**, líneas **80%** (`vitest.config.ts:26-31`). Por debajo de cualquiera de los cuatro, `npm run test:coverage` sale con código distinto de cero y el job `coverage` falla |
+| Cobertura medida | `npm run test:coverage` imprimió 87,49% de sentencias, 79,64% de ramas, 92,48% de funciones y 89,02% de líneas el 2026-08-15 |
 | Typecheck | `tsc --noEmit` limpio |
-| Lint | `npm run lint` (Biome) sobre 441 archivos; el badge `ci` de arriba es el resultado vivo |
+| Lint | `npm run lint` (Biome) sobre **477 archivos**, que es el `src/**/*.ts` de `biome.json` |
+| CI | el badge `ci` de arriba es el resultado vivo de `.github/workflows/ci.yml`, y nada de esta tabla lo pisa |
 
-Los salteados son los `*.real.test.ts`, que necesitan un Postgres de verdad y están condicionados a `INTEGRATION_TEST_DB_URL`, más un e2e manual contra devnet. Se saltean, no fallan, así que el CI no depende de una base viva. El workflow `ci.yml` corre typecheck, lint, suite y cobertura en cada PR y en cada push a `main`.
+Leé el badge, no esta tabla: si `ci` está en rojo el workflow se cortó en su primer paso fallado, y todo paso posterior — la suite incluida — se reporta como `skipped`, que no es lo mismo que pasado. Los pasos corren en orden (typecheck, lint, suite) y sin `if: always()`, así que un solo error de lint alcanza para dejar la suite sin correr en ese commit.
 
-Los umbrales de cobertura están fijados apenas por debajo de la medición actual, como trinquete: sirven para detectar regresión, no para declarar victoria.
+Unos pocos archivos se saltean en vez de correr: los `*.real.test.ts` necesitan un Postgres de verdad y están condicionados a `INTEGRATION_TEST_DB_URL`, más un e2e manual contra devnet. Se saltean, no fallan, así que el CI no depende de una base viva. `npm test` imprime cuántos son.
+
+El 286 de arriba es sólo la suite raíz. El CI corre dos suites más, de sub-paquetes con runner propio, `mcp-servers/wasiai-x402` y `packages/agent-sdk`; no están en ese número, y `test/test-files-are-run-in-ci.test.ts` es lo que impide que un tercer sub-paquete nazca sin que nadie lo corra.
+
+Contra la medición del 2026-08-15, el piso exigido queda entre 7,5 y 12,5 puntos más abajo. Es un trinquete para un derrumbe, no para una regresión de un punto: un piso pegado a la medición pone en rojo cada refactor y termina bajándolo el que tiene apuro.
 
 ---
 

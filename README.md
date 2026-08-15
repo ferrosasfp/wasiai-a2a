@@ -21,7 +21,7 @@ The gateway federates the catalogs of the registered marketplaces: an agent publ
 
 ## Solana first
 
-**Solana is the primary network of this gateway.** It is the only non-EVM rail in the codebase and the chain where the remittance line of the catalog charges today: of its agents, the two that declare a charging chain (`remit-corridor-fx-solana` and `remit-cashout-payout-solana`) declare `solana-devnet` (measured against `GET /discover` on the production deployment on 2026-07-31).
+**Solana is the primary network of this gateway.** It is the only non-EVM rail in the codebase and the chain where the remittance line of the catalog charges today: its three agents (`remit-corridor-fx-solana`, `remit-cashout-payout-solana` and `remit-kyc-validator`) all declare `solana-devnet` (measured against `GET /discover?limit=50` on the production deployment on 2026-08-15: 25 agents, `catalogStatus: complete`, 3 of them on `solana-devnet`). It was two of them on 2026-07-31; `remit-kyc-validator` came after, and this line was one measurement behind until it was re-read.
 
 The Solana payment leg is not roadmap: it moves real USDC-SPL. Transfer [`3pNqu9jH…`](https://explorer.solana.com/tx/3pNqu9jHduGaXioB8Mf7WNvBgZQgJV4MnE6NDGWZdz6aY5gr2ivxfbwzrnweutSVtyKnvv7y7kXnARroktjyWsZx?cluster=devnet) is confirmed on devnet (`err: None`), it is Circle's USDC (`4zMMC9sr…`), and the recipient is the payout wallet of the `remit-corridor-fx-solana` agent. You verify it with a `getTransaction` against the public devnet RPC, without asking anyone for permission.
 
@@ -57,7 +57,7 @@ rail's declared environment and the real destination disagree.
 
 The first one was published straight against the gateway (`registry: "self-published"`) and charges on Solana; the second lives in a registered external marketplace (`registry: "WasiAI"`) and charges on Avalanche. The client doing the query cannot tell one from the other and does not have to know which network each one charges on, and that indistinguishability is the point: federation, and the chain, are transparent to the consumer.
 
-**Catalog completeness and `limit`.** Without a `limit` parameter, the gateway does not tell each registry how many rows to return, so registries use their own default (often 20). With `limit=50` the gateway enforces the ceiling each registry publishes (`schema.discovery.maxLimit`), so you get more agents. Measured on 2026-08-04: `/discover` without limit returns 23 agents (`catalogStatus: truncated`), and `/discover?limit=50` returns 25 agents (`catalogStatus: complete`). Always specify a `limit` when querying for filtering or capability selection, especially for `/orchestrate/plan`.
+**Catalog completeness and `limit`.** Without a `limit` parameter, the gateway does not tell each registry how many rows to return, so each registry serves its own default page. With `limit=50` the gateway enforces the ceiling each registry publishes (`schema.discovery.maxLimit`). Measured on 2026-08-15, three calls in a row: the bare `/discover` and `/discover?limit=50` both return 25 agents and `catalogStatus: complete`, with the federated source giving its 22 rows unasked. On 2026-08-04 that same bare call returned 23 and `truncated`. Which is exactly the reason to pass a `limit` when you query for filtering or capability selection, and especially for `/orchestrate/plan`: without it, what you get depends on a default that belongs to someone else and can change without notice — as it just did.
 
 Every agent returned by `/discover` carries an `invokeUrl`, but it is an internal reference. **The caller does not call the agent directly.** It invokes through `/compose` (explicit pipeline) or `/orchestrate` (by goal, with the plan built by an LLM). That is what lets the gateway resolve price, budget, scoping and settlement in a single place instead of leaving it to each client.
 
@@ -158,13 +158,13 @@ Catalog discovery parameters (WKH-322): `/discover` now rejects unrecognized key
 
 **No mainnet is initialized in today's deployment.** The mainnet adapters exist and there were real settlements on Avalanche C-Chain in April 2026 (see [On-chain evidence](#on-chain-evidence)), but the gateway that is up right now runs testnet and devnet, with no real money.
 
-Catalog state on that same deployment: discoverable agents come from one federated marketplace plus the ones published directly against the gateway. Two of them charge on Solana devnet: the remittance-line agents that declare a charging chain. The agents themselves do not live in this repo: this repo is the protocol and the gateway, and the catalog belongs to third parties.
+Catalog state on that same deployment: discoverable agents come from one federated marketplace plus the ones published directly against the gateway. Three of them charge on Solana devnet, and they are the whole remittance line (same measurement as above, 2026-08-15). The agents themselves do not live in this repo: this repo is the protocol and the gateway, and the catalog belongs to third parties.
 
-**The catalog size depends on whether you ask for a limit.** Without a limit, `/discover` returns 23 agents and `catalogStatus: truncated` (measured 2026-08-04). With `limit=50` the same endpoint returns 25 agents and `catalogStatus: complete`. This is not a data inconsistency: the federated registry publishes a ceiling for how many it will return in a single call, and when no limit is specified the gateway does not pass one downstream, so the registry returns its default page (20 rows). The same query with an explicit `limit` tells the registry "I want N rows, up to your published maximum", and the registry returns more. The response always carries a `catalogStatus` and a per-source breakdown:
+**The catalog size can depend on whether you ask for a limit.** Measured 2026-08-15, three calls in a row, both forms agree: 25 agents and `catalogStatus: complete`, with a per-source breakdown of 22 rows from the federated `WasiAI` registry and 3 self-published. On 2026-08-04 the bare call returned 23 and `truncated` and only the `limit=50` form returned 25, and that was not a data inconsistency either: when no limit is passed the gateway does not send one downstream, so each registry serves its own default page, and an explicit `limit` says "I want N rows, up to your published maximum". The difference disappeared because the federated source now returns its whole set unasked, not because the mechanism went away. The response always carries a `catalogStatus` and a per-source breakdown:
 
 ```bash
 curl -s "$GW/discover" | jq '{catalogStatus, total: .total}'
-# "catalogStatus": "truncated", "total": 23
+# "catalogStatus": "complete", "total": 25     (on 2026-08-04 it was "truncated", 23)
 
 curl -s "$GW/discover?limit=50" | jq '{catalogStatus, total: .total}'
 # "catalogStatus": "complete", "total": 25
@@ -172,7 +172,7 @@ curl -s "$GW/discover?limit=50" | jq '{catalogStatus, total: .total}'
 
 A source is only `ok` with evidence (an exhausted cursor or fewer rows than the limit it was sent); one that answers without either is `unverified`, and one that could not be reached is `failed` with `rows: null` instead of `rows: 0`, because "I could not ask" is not "it has none". Same for the roll-up: `complete` means every source proved it gave everything, not that nobody complained. The catalog would rather declare that it may be incomplete than publish a total it cannot back, which is also why that number can move without anything being broken.
 
-**Known limitations in discovery:** The pagination API accepts `limit` but does not yet support cursor-based continuation; `/discover?limit=50` returns the first 50 matches with no way to ask for the rest. Without a `limit` parameter, the gateway does not send one to the registry, so the registry returns its default page size (often 20), leaving the catalog more truncated than a user who specifies a limit would see. A registry outage and a client validation error (e.g. malformed `minReputation`) are both reported as `http_error` in telemetry, with no distinction. Self-published agents have `status: 'active'` hardcoded in discovery and cannot be marked inactive by their publisher.
+**Known limitations in discovery:** The pagination API accepts `limit` but does not yet support cursor-based continuation; `/discover?limit=50` returns the first 50 matches with no way to ask for the rest. Without a `limit` parameter, the gateway does not send one to the registry, so the registry returns whatever its default page is, which can leave the catalog more truncated than a user who specifies a limit would see (it did on 2026-08-04; on 2026-08-15 both forms return the same 25). A registry outage and a client validation error (e.g. malformed `minReputation`) are both reported as `http_error` in telemetry, with no distinction. Self-published agents have `status: 'active'` hardcoded in discovery and cannot be marked inactive by their publisher.
 
 About the apps that consume it, in the correct tense:
 
@@ -249,7 +249,7 @@ Full detail in [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADA
 
 ## Endpoints
 
-All verified against `src/routes/`.
+Every row below was read off `src/routes/` with the prefixes registered in `src/index.ts:270-313`. That is a claim about each row, not a claim that the table is generated or exhaustive — nobody here checks it mechanically, so re-derive it yourself if you are going to rely on it: `grep -rnE 'fastify\.(get|post|put|patch|delete)' src/routes/`. `/mock-registry/agents` shows up in that grep and is deliberately absent from the tables: it is mounted only outside production (`src/index.ts:292-297`).
 
 **Public, free**
 
@@ -284,6 +284,8 @@ A single operation asks for **two** credentials: `POST /dashboard/api/reconcilia
 | `POST` | `/agents/:slug/link` · `/agents/links/:token/redeem` | depends on the link | scoped invocation links |
 | `POST` | `/mcp` | depends on the method | MCP server (JSON-RPC) |
 | `POST` | `/inbound/:source/tasks` | yes | external task intake by webhook, authenticated with HMAC |
+| `POST` | `/gasless/transfer` | yes | on-chain transfer signed by the operator wallet. The debit is refunded on the three paths where nothing leaves — RPC down, module not operational, transfer failed — each one calling `refundGaslessDebit` in `src/routes/gasless.ts` |
+| `GET` | `/receipts`, `/receipts/:id`, `/receipts/:id/verify` | no | HMAC-chained receipts of the caller's own operations; `/verify` recomputes the hash and reports tampering |
 
 Publishing an agent is free on purpose: charging for listing discourages exactly what the catalog needs. Charging goes where execution happens.
 
@@ -297,7 +299,9 @@ Publishing an agent is free on purpose: charging for listing discourages exactly
 
 Reading a task is free on purpose. The A2A lifecycle is driven by polling `GET /tasks/:id`, so charging for reads meant a poll every 5 seconds cost 720 USD per hour: the price was fighting the protocol. Free reads do not emit a `402` challenge because there is nothing to pay.
 
-**Identity and budget**: `POST /auth/agent-signup`, `GET /auth/me`, `POST /auth/deposit` (verifies the deposit on-chain before crediting; accepts either a Solana signature or an EVM hash, and rejects before hitting the network if the reference does not match the requested chain; the Solana leg is behind `A2A_DEPOSIT_ENABLED_SOLANA` and is on in the live deployment, see [Solana rail](#solana-rail)), `POST|GET|DELETE /auth/key-session`, `POST|GET|DELETE /auth/delegation`, `PUT|GET|DELETE /auth/keys/me/spend-policies`, `POST /auth/erc8004/bind`, `GET /auth/erc8004/resolve/:token_id`. `POST /auth/bind/:chain` still returns `501`: it is a declared placeholder, not a function.
+**Identity and budget**: `POST /auth/agent-signup`, `GET /auth/me`, `GET /auth/deposit-info`, `POST /auth/deposit` (verifies the deposit on-chain before crediting; accepts either a Solana signature or an EVM hash, and rejects before hitting the network if the reference does not match the requested chain; the Solana leg is behind `A2A_DEPOSIT_ENABLED_SOLANA` and is on in the live deployment, see [Solana rail](#solana-rail)), `POST|GET|DELETE /auth/key-session`, `POST|GET|DELETE /auth/delegation`, `PUT|GET|DELETE /auth/keys/me/spend-policies`, `POST /auth/erc8004/bind`, `GET /auth/erc8004/resolve/:token_id`. `POST /auth/bind/:chain` still returns `501`: it is a declared placeholder, not a function.
+
+Four more under the same prefix, all writing on the caller's own key and all with the key id taken from the authenticated caller and never from the body: `POST /auth/funding-wallet` binds a funding wallet with proof of control (the caller signs `WASIAI_BIND_FUNDING_WALLET:<key_id>` on EVM or `WASIAI_BIND_FUNDING_WALLET_SOLANA:<key_id>` on Solana — two different texts on purpose: the preimages already differ today anyway (EIP-191 prefixes its message, a Solana wallet signs raw bytes), and the namespace is there so that non-collision does not rest on a wallet convention this repo does not control — and from then on `/auth/deposit` requires the transfer to come from that wallet), and `PATCH /auth/agent-key/:id/require-signature` plus `PATCH /auth/key-session/:id/require-signature` toggle the EIP-712 per-request signature on the master key and on a sub-session. `POST /auth/bind-passport` binds a Kite Agent Passport, and it only exists when `PASSPORT_BINDING_ENABLED=true`: with the flag off the route is not mounted at all and the answer is a plain `404`, not a `403`.
 
 **Scheduled payments**: `POST /payments/session` (metered, with vouchers and closing) and `POST /payments/upto` (ceiling signed by both parties), plus their `/settle`, `/close` and `/dispute`.
 
@@ -339,7 +343,7 @@ Real scripts from `package.json`:
 
 Without a real `SUPABASE_URL` the server still boots and answers `/health`, but anything touching catalog or budget fails: persistence is not optional.
 
-`.env.example` documents 180 variables with their defaults (counted with `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`), and the few that change money behavior are grouped together there.
+`.env.example` documents **181 variables** with their defaults (counted with `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`, and that same count is re-derived by `test/readme-numbers.test.ts` on every `npm test`), and the few that change money behavior are grouped together there.
 
 Two boot guards worth knowing before touching mainnet config:
 
@@ -362,22 +366,25 @@ An example: on August 14, 2026, the production facilitator's `/supported` endpoi
 npm test
 ```
 
-State measured in this repo, not quoted from another document:
+State measured in this repo, not quoted from another document. Each number below is either re-derived on every `npm test` by `test/readme-numbers.test.ts`, or written with the date it was measured on so that it does not silently rot:
 
 | Metric | Value |
 |---|---|
-| Tests | 4,862 passing, 19 skipped (4,881 total) |
-| Test files | 242 passing, 6 skipped (248) |
-| Statement coverage | 86.97% |
-| Branch coverage | 78.87% |
-| Function coverage | 92.15% |
-| Line coverage | 88.49% |
+| Test files | **286 test files** in the root suite. Derived from the `include` of `vitest.config.ts` over the git index, and checked in both READMEs, by `test/readme-numbers.test.ts` |
+| Test cases | printed by `npm test`. Deliberately not written down here: it changes with every test added, and a test that pinned it would have to run the suite it is counting |
+| Coverage floor enforced by CI | statements **80%**, branches **70%**, functions **80%**, lines **80%** (`vitest.config.ts:26-31`). Below any of the four, `npm run test:coverage` exits non-zero and the `coverage` job fails |
+| Coverage measured | `npm run test:coverage` printed 87.49% statements, 79.64% branches, 92.48% functions and 89.02% lines on 2026-08-15 |
 | Typecheck | `tsc --noEmit` clean |
-| Lint | `npm run lint` (Biome) over 441 files; the `ci` badge at the top is the live result |
+| Lint | `npm run lint` (Biome) over **477 files**, which is the `src/**/*.ts` of `biome.json` |
+| CI | the `ci` badge at the top is the live result of `.github/workflows/ci.yml`, and nothing in this table overrides it |
 
-The skipped ones are the `*.real.test.ts`, which need a real Postgres and are gated on `INTEGRATION_TEST_DB_URL`, plus one manual e2e against devnet. They skip, they do not fail, so CI does not depend on a live database. The `ci.yml` workflow runs typecheck, lint, suite and coverage on every PR and every push to `main`.
+Read the badge, not this table: if `ci` is red the workflow stopped at its first failing step, and every later step — the suite included — is reported as `skipped`, which is not the same as passed. The steps run in order (typecheck, lint, suite) with no `if: always()`, so a lint error alone is enough to leave the suite unrun on that commit.
 
-Coverage thresholds are pinned just below the current measurement, as a ratchet: they exist to catch regression, not to declare victory.
+A handful of files skip rather than run: the `*.real.test.ts` need a real Postgres and are gated on `INTEGRATION_TEST_DB_URL`, plus one manual e2e against devnet. They skip, they do not fail, so CI does not depend on a live database. `npm test` prints how many.
+
+The 286 above is the root suite only. CI runs two more suites from sub-packages with their own runners, `mcp-servers/wasiai-x402` and `packages/agent-sdk`; they are not in that number, and `test/test-files-are-run-in-ci.test.ts` is what stops a third sub-package from being born with nobody running it.
+
+Against the 2026-08-15 measurement, the enforced floor sits between 7.5 and 12.5 points lower. It is a ratchet for a collapse, not for a one-point regression: a floor pinned right under the measurement turns every refactor red and gets raised by whoever is in a hurry.
 
 ---
 
