@@ -185,17 +185,17 @@ backups/
 /doc/security/audit-delta-2026-07-02.md
 /doc/security/audit-ecosystem-2026-07-01.md
 /doc/security/secret-rotation-runbook.md
-/doc/solana-labs/M1-roadmap.md
-/doc/solana-labs/M2-business.md
-/doc/solana-labs/M3-arquitectura.md
+# Solana LATAM Labs. M1/M2/M3 y sus renders SÍ se publican: son los entregables
+# del programa, el README los linkea desde su tabla de documentación, y el enlace
+# daba 404 justamente porque estaban acá. Lo que NO se publica es la auditoría:
+# es el registro de gaps de producción del money-path, con archivo:línea del
+# código vulnerable de tres repos y la mecánica de cada ataque. Misma razón que
+# `/doc/audit/` y `/doc/security/` de más arriba, y con el mismo agravante: hay
+# hallazgos que SIGUEN ABIERTOS — DB-2 (RLS real en las tablas del money-path) es
+# el WKH-SEC-02 que CLAUDE.md todavía declara pendiente, "hasta que se implemente,
+# la app es la única línea de defensa". Publicarla es entregar el mapa antes que
+# el parche. Este repo es PUBLIC. La entrega al mentor va por la carpeta Drive.
 /doc/solana-labs/auditoria-produccion.md
-/doc/solana-labs/entregables/M1-ecosistema-diagrama.png
-/doc/solana-labs/entregables/M1-roadmap.pdf
-/doc/solana-labs/entregables/M2-business.pdf
-/doc/solana-labs/entregables/M3-arquitectura-diagrama.jpg
-/doc/solana-labs/entregables/M3-arquitectura-diagrama.png
-/doc/solana-labs/entregables/M3-arquitectura.pdf
-/doc/solana-labs/entregables/M3-flujo-diagrama.png
 /doc/solana-labs/entregables/auditoria-produccion.pdf
 /scripts/191h/1-execute-upgrade.cjs
 /scripts/191h/2-provision-arbiter.cjs
