@@ -11,6 +11,19 @@ node_modules
 dist/
 *.tsbuildinfo
 
+# Residuo de corridas locales, NO fuente. Los tres aparecían como `??` y un
+# `git add -A` los habría commiteado a un repo PUBLIC.
+#   via-proxy.json  → volcado del IDL de Anchor del escrow DR5GoMT7sAKz… El IDL
+#                     de verdad vive en el repo solana-programs; esta copia en la
+#                     raíz envejece sola y contradice a la buena (ver la lección
+#                     de que la cadena envejece sin que nadie edite nada).
+#   via-proxy.err   → stderr de esa misma corrida.
+#   .gas-snapshot   → salida de `forge snapshot`; cambia con cada corrida y
+#                     ensucia el diff sin decir nada del código.
+/via-proxy.json
+/via-proxy.err
+/contracts/.gas-snapshot
+
 # IDE
 .idea/
 .vscode/
