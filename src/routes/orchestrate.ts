@@ -18,6 +18,7 @@ import {
   requirePaymentOrA2AKey,
 } from '../middleware/a2a-key.js';
 import { createBackpressureHandler } from '../middleware/backpressure.js';
+import { contractingGuardHandler } from '../middleware/contracting-guard.js';
 import { noteDownstreamSkips } from '../middleware/event-tracking.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';
@@ -136,6 +137,12 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         },
       },
       preHandler: [
+        // WKH-360 (AC-5/AC-6): la CAPA 2 va PRIMERA de las TRES cadenas de
+        // orchestrate, antes de `markSkipMiddlewareDebitHandler` y por lo tanto
+        // antes de cualquier decision de debito. Las tres la necesitan: las tres
+        // desembocan en `executeApprovedPlan`, que es donde vive el unico debito
+        // del step-0 de orchestrate.
+        contractingGuardHandler,
         // WKH-65: forward-key (optional, env-gated) runs BEFORE backpressure/timeout/payment.
         // Returns [] when WASIAI_V2_FORWARD_KEY is unset → no-op spread.
         ...requireForwardKey(),
@@ -208,6 +215,12 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             // per-step de steps 1..N use el chainId del bundle resuelto en el
             // middleware. Desde WKH-102 ya no es exclusivo de delegación.
             chainId: request.resolvedChainId,
+            // WKH-360 (AC-7): la traza de contratacion entrante YA VALIDADA por
+            // `contractingGuardHandler` (primer preHandler de esta cadena). Baja al
+            // service y de ahi a compose, que es quien la EMITE. Ausente ⇒ cadena
+            // vacia / profundidad 0, o sea el 100% del trafico de hoy.
+            contractingChain: request.contractingChain,
+            contractingDepth: request.contractingDepth,
           },
           orchestrationId,
         );
@@ -298,6 +311,12 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         },
       },
       preHandler: [
+        // WKH-360 (AC-5/AC-6): la CAPA 2 va PRIMERA de las TRES cadenas de
+        // orchestrate, antes de `markSkipMiddlewareDebitHandler` y por lo tanto
+        // antes de cualquier decision de debito. Las tres la necesitan: las tres
+        // desembocan en `executeApprovedPlan`, que es donde vive el unico debito
+        // del step-0 de orchestrate.
+        contractingGuardHandler,
         ...requireForwardKey(),
         createBackpressureHandler(),
         createTimeoutHandler(
@@ -522,6 +541,12 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         },
       },
       preHandler: [
+        // WKH-360 (AC-5/AC-6): la CAPA 2 va PRIMERA de las TRES cadenas de
+        // orchestrate, antes de `markSkipMiddlewareDebitHandler` y por lo tanto
+        // antes de cualquier decision de debito. Las tres la necesitan: las tres
+        // desembocan en `executeApprovedPlan`, que es donde vive el unico debito
+        // del step-0 de orchestrate.
+        contractingGuardHandler,
         ...requireForwardKey(),
         createBackpressureHandler(),
         createTimeoutHandler(
@@ -796,6 +821,12 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             delegationContext: request.delegationContext,
             keySessionContext: request.keySessionContext,
             chainId: request.resolvedChainId,
+            // WKH-360 (AC-7): la traza de contratacion entrante YA VALIDADA por
+            // `contractingGuardHandler` (primer preHandler de esta cadena). Baja al
+            // service y de ahi a compose, que es quien la EMITE. Ausente ⇒ cadena
+            // vacia / profundidad 0, o sea el 100% del trafico de hoy.
+            contractingChain: request.contractingChain,
+            contractingDepth: request.contractingDepth,
             // gate AC-3: el cap aprobado por el cliente.
             //
             // WKH-303: con un quote válido el cap gate NO corre. Ese gate re-resuelve

@@ -79,8 +79,13 @@ vi.mock('undici', async (importOriginal) => {
   return { ...actual, fetch: mockFetch };
 });
 
-import { CONTRACTING_LOOP_DETECTED } from '../lib/contracting-chain.js';
+import {
+  CONTRACTING_LOOP_DETECTED,
+  contractingErrorMessage,
+  readInboundContracting,
+} from '../lib/contracting-chain.js';
 import { composeService } from './compose.js';
+import { registryService } from './registry.js';
 
 const SELF = 'gw.wasiai.example';
 const ENV_KEYS = ['A2A_SELF_HOSTS', 'BASE_URL', 'A2A_CONTRACTING_DEPTH_MAX'];
@@ -288,5 +293,247 @@ describe('WKH-360 SITIO 4 — invokeAgent: bloqueo de EMISIÓN (⛔ NO es guard 
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(result.output).toBe('ok');
+  });
+});
+
+describe('WKH-360 AC-7 — la traza SALIENTE que emite cada invocación', () => {
+  /** Los headers con los que salió la invocación número `n` (0-indexed). */
+  function headersOf(n: number): Record<string, string> {
+    return (mockFetch.mock.calls[n]?.[1] as { headers: Record<string, string> })
+      .headers;
+  }
+
+  it('T-PROP-1: agrega NUESTRO eslabón y la profundidad INCREMENTADA', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+
+    await composeService.compose({
+      steps: [
+        { agent: 's0', input: {} },
+        { agent: 's1', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+      contractingChain: ['a.example'],
+      contractingDepth: 0,
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    for (const n of [0, 1]) {
+      const h = headersOf(n);
+      expect(h['x-a2a-contracting-chain'], `invocacion ${n}`).toBe(
+        `a.example,${SELF}`,
+      );
+      // La profundidad que se emite es la DEL SALTO QUE ESTAMOS HACIENDO, no la
+      // que recibimos: sin el incremento, una cadena de N gateways cooperativos
+      // reportaría siempre 0 y el techo nunca cortaría.
+      expect(h['x-a2a-contracting-depth'], `invocacion ${n}`).toBe('1');
+    }
+  });
+
+  it('T-PROP-1b: sin traza entrante, salimos como PRIMER eslabón con profundidad 1', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+
+    await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    const h = headersOf(0);
+    expect(h['x-a2a-contracting-chain']).toBe(SELF);
+    expect(h['x-a2a-contracting-depth']).toBe('1');
+  });
+
+  it('T-PROP-2 (CD-18): sin identidad derivable NO se emite NINGUNO de los dos + warn', async () => {
+    // Emitir una cadena sin nuestro eslabón es PEOR que no emitir nada: el gateway
+    // de al lado leería una traza que afirma NO contenernos, o sea una razón para
+    // seguir. Y no puede ser silencioso, porque deja al siguiente sin el dato.
+    delete process.env.A2A_SELF_HOSTS;
+    delete process.env.BASE_URL;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+
+    await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    const h = headersOf(0);
+    expect(h['x-a2a-contracting-chain']).toBeUndefined();
+    expect(h['x-a2a-contracting-depth']).toBeUndefined();
+    const warned = logSpy.warn.mock.calls.some((c) =>
+      String(c[1] ?? '').includes('contracting-chain.not-emitted'),
+    );
+    expect(warned).toBe(true);
+  });
+
+  it('T-PROP-3 (CD-4, MUT-15): la traza NO PISA la credencial del registry', async () => {
+    // ── POR QUÉ ASÍ Y NO "los headers de siempre siguen saliendo" ──────────
+    // Un test que sólo verifique que `Content-Type` y la traza están presentes
+    // pasa IGUAL con los headers nuevos puestos DEBAJO del spread de
+    // credenciales, o sea que no mide el ORDEN — que es lo único que CD-4 pide.
+    //
+    // El discriminante es una COLISIÓN DE NOMBRES real: un registry puede
+    // declarar `auth: {type:'header', key, value}` con la clave que quiera,
+    // incluida la de nuestro header de protocolo. Con el orden correcto (traza
+    // ANTES de las credenciales) gana la CREDENCIAL y llega intacta al agente;
+    // con el orden invertido gana la traza y la credencial **se destruye en
+    // silencio**, que es exactamente el modo de falla que el orden previene.
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      {
+        id: 'reg-1',
+        name: 'wasiai',
+        discoveryEndpoint: 'https://a.example/discover',
+        invokeEndpoint: 'https://a.example/invoke/{slug}',
+        schema: { discovery: {}, invoke: { method: 'POST' } },
+        enabled: true,
+        createdAt: new Date(),
+        ownerRef: 'system',
+        auth: {
+          type: 'header',
+          key: 'x-a2a-contracting-chain',
+          value: 'CREDENCIAL-DEL-REGISTRY',
+        },
+      },
+    ] as unknown as never);
+
+    const agent = makeAgent('s0', 'https://a.example/s0');
+    await composeService.invokeAgent(
+      agent,
+      { q: 'hi' },
+      'bearer-del-caller',
+      undefined,
+      undefined,
+      {
+        chain: [],
+        depth: 0,
+        canonicalId: SELF,
+      },
+    );
+
+    const h = headersOf(0);
+    // LA CREDENCIAL SOBREVIVIÓ. Con `MUT-15` acá saldría `SELF` y el agente
+    // recibiría nuestra traza en vez de su credencial.
+    expect(h['x-a2a-contracting-chain']).toBe('CREDENCIAL-DEL-REGISTRY');
+    expect(h['Content-Type']).toBe('application/json');
+  });
+
+  it('T-PROP-3b: sin colisión, la traza y la credencial salen LAS DOS', async () => {
+    // El gemelo del anterior: con claves distintas no hay nada que pisar y los dos
+    // headers coexisten. Sin este `it`, T-PROP-3 pasaría también si la traza no se
+    // emitiera nunca.
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      {
+        id: 'reg-1',
+        name: 'wasiai',
+        discoveryEndpoint: 'https://a.example/discover',
+        invokeEndpoint: 'https://a.example/invoke/{slug}',
+        schema: { discovery: {}, invoke: { method: 'POST' } },
+        enabled: true,
+        createdAt: new Date(),
+        ownerRef: 'system',
+        auth: { type: 'header', key: 'x-registry-secret', value: 'CRED' },
+      },
+    ] as unknown as never);
+
+    const agent = makeAgent('s0', 'https://a.example/s0');
+    await composeService.invokeAgent(
+      agent,
+      { q: 'hi' },
+      'bearer',
+      undefined,
+      undefined,
+      {
+        chain: ['a.example'],
+        depth: 0,
+        canonicalId: SELF,
+      },
+    );
+
+    const h = headersOf(0);
+    expect(h['x-registry-secret']).toBe('CRED');
+    expect(h['x-a2a-contracting-chain']).toBe(`a.example,${SELF}`);
+    expect(h['x-a2a-contracting-depth']).toBe('1');
+  });
+
+  it('T-PROP-4: la traza que EMITIMOS la caza nuestro propio lector (ida y vuelta)', async () => {
+    // Si el emisor y el lector divergen, el transitivo no cierra ni entre dos
+    // instancias NUESTRAS — que es el caso mínimo que la capa 2 tiene que cubrir.
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+
+    await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    const h = headersOf(0);
+    const verdict = readInboundContracting(
+      {
+        chain: h['x-a2a-contracting-chain'],
+        depth: h['x-a2a-contracting-depth'],
+      },
+      [SELF],
+      2,
+    );
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) expect(verdict.code).toBe(CONTRACTING_LOOP_DETECTED);
+  });
+});
+
+describe('WKH-360 CD-19 — un solo STRING por código, en las DOS superficies', () => {
+  it('T-CODE-1: el `errorCode` del pipeline y el `error_code` del preHandler son la MISMA constante', async () => {
+    // El mismo bucle sale como `errorCode` (camel) si lo caza el loop del pipeline y
+    // como `error_code` (snake) si lo caza un preHandler. Las CLAVES son dos por el
+    // shape histórico del repo, pero el VALOR tiene que ser uno: así un cliente
+    // matchea un solo string aunque tenga que mirar dos claves.
+    process.env.A2A_SELF_HOSTS = SELF;
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      slug === 'self'
+        ? makeAgent('self', `https://${SELF}/compose`)
+        : makeAgent(slug, 'https://a.example/x'),
+    );
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'a', input: {} },
+        { agent: 'self', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    // El del pipeline (camel)…
+    expect(result.errorCode).toBe(CONTRACTING_LOOP_DETECTED);
+    // …es idéntico al string que el leaf exporta y que consume el preHandler.
+    expect(CONTRACTING_LOOP_DETECTED).toBe('CONTRACTING_LOOP_DETECTED');
+    // Y el `error` en prosa sale del MISMO generador del leaf en las dos capas.
+    expect(result.error).toContain(
+      contractingErrorMessage(CONTRACTING_LOOP_DETECTED),
+    );
   });
 });

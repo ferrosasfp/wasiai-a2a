@@ -30,6 +30,7 @@ import {
   extractRawKey,
   requirePaymentOrA2AKey,
 } from '../middleware/a2a-key.js';
+import { contractingGuardHandler } from '../middleware/contracting-guard.js';
 import { noteDownstreamSkips } from '../middleware/event-tracking.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';
@@ -896,6 +897,12 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
     {
       config: { rateLimit: orchestrateRateLimit() },
       preHandler: [
+        // WKH-360 (AC-5/AC-6): la CAPA 2 va PRIMERA de toda la cadena — antes de la
+        // validación de forma, antes de la resolución de capacidades, antes del
+        // preHandler de precio y, sobre todo, antes de `requirePaymentOrA2AKey`. Un
+        // request cuya traza ya nos contiene, o que llegó al techo de profundidad, no
+        // tiene por qué costar ni una consulta al catálogo, y mucho menos un débito.
+        contractingGuardHandler,
         // WKH-65: forward-key (optional, env-gated) runs BEFORE timeout/payment.
         // Returns [] when WASIAI_V2_FORWARD_KEY is unset → no-op spread.
         ...requireForwardKey(),
@@ -1044,6 +1051,19 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         // el warn `compose-price.fallback per-step` salga al pino transport
         // configurado en server.ts (vs console.warn raw).
         logger: request.log,
+        // WKH-360 (AC-7): la traza entrante YA VALIDADA por `contractingGuardHandler`
+        // (primer preHandler de esta cadena). El service la usa para EMITIR la traza
+        // saliente con nuestro eslabón y la profundidad incrementada. Ausente ⇒
+        // cadena vacía y profundidad 0, que es el 100% del tráfico de hoy.
+        //
+        // `exactOptionalPropertyTypes` está activo, así que se spreadea condicional
+        // en vez de asignar `undefined`.
+        ...(request.contractingChain !== undefined && {
+          contractingChain: request.contractingChain,
+        }),
+        ...(request.contractingDepth !== undefined && {
+          contractingDepth: request.contractingDepth,
+        }),
       });
 
       // BLQ-2: bail early if timeout fired during compose

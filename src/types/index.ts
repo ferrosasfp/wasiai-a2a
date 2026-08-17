@@ -1386,6 +1386,17 @@ export interface OrchestrateRequest {
    * flag baja a compose para la capa 2 (TOCTOU).
    */
   requireCompleteCatalog?: boolean | undefined;
+  /**
+   * WKH-360 (AC-5/AC-7): la traza de contratación ENTRANTE, ya validada por el
+   * preHandler `contractingGuard` de las TRES rutas de orchestrate. Se propaga tal
+   * cual a `composeService.compose`, que es quien EMITE la traza saliente con
+   * nuestro eslabón y la profundidad incrementada.
+   *
+   * Ausente ⇒ cadena vacía / profundidad 0 ⇒ comportamiento idéntico al de hoy.
+   */
+  contractingChain?: string[] | undefined;
+  /** WKH-360 (AC-6): profundidad de contratación entrante, ya validada. */
+  contractingDepth?: number | undefined;
 }
 
 export interface OrchestrateResult {

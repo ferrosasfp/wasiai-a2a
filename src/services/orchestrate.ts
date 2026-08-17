@@ -1338,6 +1338,12 @@ export const orchestrateService = {
       // WKH-303: precios CONGELADOS por un quote firmado que el caller redimió en
       // `/orchestrate/execute`. Ausente ⇒ compose debita el precio vivo, como hoy.
       frozenStepPricesUsd: request.frozenStepPricesUsd,
+      // WKH-360 (AC-7): la traza de contratación entrante baja a compose, que es
+      // quien la EMITE con nuestro eslabón y la profundidad incrementada. Sin esta
+      // propagación, un pipeline lanzado por /orchestrate saldría con la traza VACÍA
+      // y el gateway de al lado no podría cerrar el transitivo ni cooperando.
+      contractingChain: request.contractingChain,
+      contractingDepth: request.contractingDepth,
     });
 
     // WKH-132 (AC-1/DT-1): protocolFeeUsdc reportado = rate sobre el COSTO REAL

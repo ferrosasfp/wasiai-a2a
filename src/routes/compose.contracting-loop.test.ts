@@ -135,7 +135,11 @@ vi.mock('../middleware/rate-limit.js', () => ({
   orchestrateRateLimit: () => false,
 }));
 
-import { CONTRACTING_LOOP_DETECTED } from '../lib/contracting-chain.js';
+import {
+  CONTRACTING_DEPTH_EXCEEDED,
+  CONTRACTING_LAYER2_BEST_EFFORT_NOTE,
+  CONTRACTING_LOOP_DETECTED,
+} from '../lib/contracting-chain.js';
 import {
   resolveAgentDestination,
   resolveAgentPriceUsdc,
@@ -163,36 +167,39 @@ function okPipeline() {
   };
 }
 
+// La app y los hooks viven en el scope del MÓDULO porque los comparten los dos
+// `describe` de este archivo (capa 1 y capa 2): las dos miden la MISMA cadena real de
+// preHandlers de `/compose`, que es justamente el punto.
+let app: ReturnType<typeof Fastify>;
+
+beforeAll(async () => {
+  app = Fastify();
+  await app.register(composeRoutes, { prefix: '/compose' });
+  await app.ready();
+});
+
+afterAll(() => app.close());
+
+beforeEach(() => {
+  for (const k of ENV_KEYS) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  vi.clearAllMocks();
+  budgetState.balance = 10;
+  mockResolveDest.mockResolvedValue(null);
+  mockCompose.mockResolvedValue(okPipeline());
+});
+
+afterEach(() => {
+  for (const k of ENV_KEYS) {
+    const v = saved[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+});
+
 describe('WKH-360 SITIO 1 — /compose step-0: el corte ocurre ANTES del débito', () => {
-  let app: ReturnType<typeof Fastify>;
-
-  beforeAll(async () => {
-    app = Fastify();
-    await app.register(composeRoutes, { prefix: '/compose' });
-    await app.ready();
-  });
-
-  afterAll(() => app.close());
-
-  beforeEach(() => {
-    for (const k of ENV_KEYS) {
-      saved[k] = process.env[k];
-      delete process.env[k];
-    }
-    vi.clearAllMocks();
-    budgetState.balance = 10;
-    mockResolveDest.mockResolvedValue(null);
-    mockCompose.mockResolvedValue(okPipeline());
-  });
-
-  afterEach(() => {
-    for (const k of ENV_KEYS) {
-      const v = saved[k];
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  });
-
   it('T-L1-1 (AC-4, CD-3): destino propio → 400 + CERO llamadas a debit + saldo intacto', async () => {
     process.env.A2A_SELF_HOSTS = SELF;
     mockResolvePrice.mockResolvedValueOnce(0.001);
@@ -438,5 +445,120 @@ describe('WKH-360 SITIO 1 — /compose step-0: el corte ocurre ANTES del débito
 
     expect(res.statusCode).toBe(400);
     expect(debitMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('WKH-360 CAPA 2 — el corte por TRAZA también ocurre antes del débito', () => {
+  // La matriz de validación de la capa 2 vive en
+  // `middleware/contracting-guard.test.ts`. ACÁ se mide lo único que ese archivo no
+  // puede medir: que el preHandler está PRIMERO en la cadena REAL de `/compose`, o
+  // sea antes de `requirePaymentOrA2AKey`. Sin este archivo, el guard podría estar
+  // último y los tests del middleware seguirían verdes.
+
+  it('T-L2-1-ORDEN: traza que nos contiene → 400 y CERO llamadas a debit', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    mockResolvePrice.mockResolvedValueOnce(0.001);
+    mockResolveDest.mockResolvedValueOnce({
+      registry: 'wasiai',
+      slug: 'agente-ajeno',
+      invokeUrl: 'https://otro-agente.example/run',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: {
+        'x-a2a-key': 'wasi_a2a_funded_master_key',
+        'x-a2a-contracting-chain': SELF,
+      },
+      payload: { steps: [{ agent: 'agente-ajeno', input: {} }] },
+    });
+
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBe(10);
+    expect(mockCompose).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe(CONTRACTING_LOOP_DETECTED);
+    // CD-6: la limitación best-effort viaja en el body del error.
+    expect(res.json().note).toBe(CONTRACTING_LAYER2_BEST_EFFORT_NOTE);
+  });
+
+  it('T-DEPTH-1-ORDEN: profundidad en el techo → 400 y CERO llamadas a debit', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    mockResolvePrice.mockResolvedValueOnce(0.001);
+    mockResolveDest.mockResolvedValueOnce({
+      registry: 'wasiai',
+      slug: 'agente-ajeno',
+      invokeUrl: 'https://otro-agente.example/run',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: {
+        'x-a2a-key': 'wasi_a2a_funded_master_key',
+        'x-a2a-contracting-depth': '2',
+      },
+      payload: { steps: [{ agent: 'agente-ajeno', input: {} }] },
+    });
+
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBe(10);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe(CONTRACTING_DEPTH_EXCEEDED);
+  });
+
+  it('T-CHAIN-1-ORDEN: header ilegible → 400 y CERO llamadas a debit', async () => {
+    // Un header forjado sólo puede hacer fallar LA PETICIÓN QUE LO TRAE, y encima
+    // gratis: ni un débito, ni una consulta al catálogo.
+    process.env.A2A_SELF_HOSTS = SELF;
+    mockResolvePrice.mockResolvedValueOnce(0.001);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: {
+        'x-a2a-key': 'wasi_a2a_funded_master_key',
+        'x-a2a-contracting-depth': '1e9',
+      },
+      payload: { steps: [{ agent: 'agente-ajeno', input: {} }] },
+    });
+
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error_code).toBe('CONTRACTING_DEPTH_MALFORMED');
+    // El guard corta ANTES del preHandler de precio: ni se cotizó.
+    expect(mockResolvePrice).not.toHaveBeenCalled();
+  });
+
+  it('T-L2+2-ORDEN (AC-8): traza de TERCEROS bajo el techo → 200 y se debita normal', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    mockResolvePrice.mockResolvedValueOnce(0.001);
+    mockResolveDest.mockResolvedValueOnce({
+      registry: 'wasiai',
+      slug: 'agente-ajeno',
+      invokeUrl: 'https://otro-agente.example/run',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: {
+        'x-a2a-key': 'wasi_a2a_funded_master_key',
+        'x-a2a-contracting-chain': 'otro-gw.example',
+        'x-a2a-contracting-depth': '1',
+      },
+      payload: { steps: [{ agent: 'agente-ajeno', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(debitMock).toHaveBeenCalledTimes(1);
+    // Y la traza validada llegó al service para que la EMITA (AC-7).
+    expect(mockCompose).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contractingChain: ['otro-gw.example'],
+        contractingDepth: 1,
+      }),
+    );
   });
 });

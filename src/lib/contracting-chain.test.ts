@@ -686,3 +686,70 @@ describe('T-FLAG-1 (CD-1) — barrido TEXTUAL: ninguna bandera gatea el corte', 
     expect(process.env.A2A_SELF_CONTRACTING_ALLOW).toBeUndefined();
   });
 });
+
+describe('CD-16 — el `split` NO se ejecuta sobre un header que excede el largo', () => {
+  /**
+   * Esto es lo que distingue "rechaza el header de 8 KB" de "rechaza el header de
+   * 8 KB SIN materializar el arreglo que el tercero pidió". Un test que sólo mire el
+   * código de error pasa igual con el chequeo de largo DESPUÉS del split, y ahí el
+   * trabajo ya se hizo: la protección es contra el trabajo, no contra el valor.
+   *
+   * El espía registra el LARGO del receptor de cada `split`, así que se puede
+   * afirmar que ninguno fue el string gigante sin depender de cuántos otros `split`
+   * corran (los hay: la env de hosts usa `split(',')`).
+   */
+  it('T-CHAIN-1-SPY: con 8192 caracteres, ningún `split` recibe ese string', () => {
+    const original = String.prototype.split;
+    const receiverLengths: number[] = [];
+    try {
+      String.prototype.split = function (
+        this: string,
+        ...args: Parameters<typeof original>
+      ) {
+        receiverLengths.push(this.length);
+        return original.apply(this, args);
+      } as typeof original;
+
+      const big = 'a'.repeat(8192);
+      const verdict = readInboundContracting(
+        { chain: big, depth: undefined },
+        ['gw.example.com'],
+        DEFAULT_CONTRACTING_DEPTH_MAX,
+      );
+      expect(verdict.ok).toBe(false);
+      if (!verdict.ok) expect(verdict.code).toBe(CONTRACTING_CHAIN_MALFORMED);
+      // LA ASERCIÓN QUE IMPORTA: el string gigante nunca fue el receptor de un split.
+      expect(receiverLengths).not.toContain(8192);
+    } finally {
+      String.prototype.split = original;
+    }
+  });
+
+  it('T-CHAIN-1-SPY-b: control positivo — una cadena DENTRO del largo SÍ se splitea', () => {
+    // Sin este control, el `it` de arriba pasaría también si `readInboundContracting`
+    // no splitease NUNCA (por ejemplo si alguien lo reescribe con otro parser), y
+    // entonces no estaría midiendo el ORDEN sino un accidente.
+    const original = String.prototype.split;
+    const receiverLengths: number[] = [];
+    try {
+      String.prototype.split = function (
+        this: string,
+        ...args: Parameters<typeof original>
+      ) {
+        receiverLengths.push(this.length);
+        return original.apply(this, args);
+      } as typeof original;
+
+      const chain = 'a.example,b.example';
+      const verdict = readInboundContracting(
+        { chain, depth: undefined },
+        ['gw.example.com'],
+        DEFAULT_CONTRACTING_DEPTH_MAX,
+      );
+      expect(verdict.ok).toBe(true);
+      expect(receiverLengths).toContain(chain.length);
+    } finally {
+      String.prototype.split = original;
+    }
+  });
+});

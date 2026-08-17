@@ -24,6 +24,7 @@ import {
 // que no puedan desalinearse. Leaf (no `services/discovery.js`) porque las suites
 // que mockean el service completo dejarían el export en `undefined`.
 import {
+  buildOutboundContractingHeaders,
   CONTRACTING_LOOP_DETECTED,
   contractingErrorMessage,
   isSelfDestination,
@@ -331,7 +332,25 @@ export const composeService = {
       // Vive acá y no en la envoltura `compose()` porque HU-306 bajó el cuerpo del
       // pipeline a este método; el débito per-step que lo consume está en este scope.
       frozenStepPricesUsd,
+      // WKH-360 (AC-5/AC-7): la traza de contratación ENTRANTE, ya validada por el
+      // preHandler `contractingGuard`. Ausente ⇒ cadena vacía y profundidad 0, que
+      // es el 100% del tráfico de hoy.
+      contractingChain,
+      contractingDepth,
     } = request;
+    // WKH-360 (AC-7): lo que vamos a EMITIR en cada invocación de este pipeline. Se
+    // resuelve UNA vez por pipeline y no por step: la identidad del gateway no
+    // cambia entre steps, y resolverla N veces abriría la puerta a que dos steps del
+    // mismo run emitan trazas distintas.
+    //
+    // Sin `hint` a propósito: este método recibe un `ComposeRequest`, no un
+    // `FastifyRequest`. Es una de las razones por las que la identidad no se deriva
+    // de `resolveBaseUrl`.
+    const outboundContracting = {
+      chain: contractingChain ?? [],
+      depth: contractingDepth ?? 0,
+      canonicalId: resolveSelfHosts().canonicalId,
+    };
     let totalCost = 0;
     let totalLatency = 0;
     let lastOutput: unknown = null;
@@ -669,6 +688,7 @@ export const composeService = {
             a2aKey,
             undefined,
             `${composeRunId}:${i}`, // WKH-234 intentId (leg Solana, AC-7)
+            outboundContracting, // WKH-360 (AC-7): la traza saliente
           );
         // WKH-234 (AC-8): si el settle downstream fue Solana, anota el ledger.
         recordSolanaLegIfAny(downstream);
@@ -1020,6 +1040,7 @@ export const composeService = {
                     a2aKey,
                     undefined,
                     `${composeRunId}:${i}`, // WKH-234 intentId — MISMO que el master (AC-7 idempotente)
+                    outboundContracting, // WKH-360 (AC-7): MISMA traza que el master
                   );
                 // WKH-234 (AC-8): retry-ok — anota el ledger si fue Solana.
                 recordSolanaLegIfAny(downstream);
@@ -1427,6 +1448,23 @@ export const composeService = {
     // ignora. Canónico `contextId:stepIndex:payTo`; ausente → el downstream
     // deriva un fallback por leg.
     intentId?: string,
+    /**
+     * WKH-360 (AC-7): la traza de contratación a EMITIR en esta invocación.
+     *
+     * ⚠️ OPCIONAL, y no es negociable que lo sea: medido, hay **33 call-sites de
+     * test en 4 archivos** que llaman este método con 2 ó 3 argumentos
+     * (`compose.ssrf.test.ts` ×4, `compose.selfpublished-auth.test.ts` ×9,
+     * `compose.test.ts` ×11, `compose.outbound-legs.test.ts` ×9). Hacerlo
+     * requerido rompe los 33 por un motivo que no es el de esta HU. Los 2
+     * call-sites de PRODUCCIÓN sí lo pasan.
+     *
+     * Ausente ⇒ no se emite ningún header nuevo ⇒ invocación byte-idéntica.
+     */
+    contracting?: {
+      chain: string[];
+      depth: number;
+      canonicalId: string | null;
+    },
   ): Promise<{
     output: unknown;
     // HU-DOUBLE-PAY: acá había un `txHash` — el hash del SEGUNDO settle de salida,
@@ -1471,12 +1509,45 @@ export const composeService = {
         : {};
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      // ── WKH-360 (AC-7) · la traza de contratación saliente ────────────────
+      // ⚠️ VAN ACÁ, ANTES DEL SPREAD DE LAS CREDENCIALES, y el orden es normativo
+      // (CD-4): así estas dos claves NO pueden pisar una credencial por accidente
+      // ni ahora ni cuando alguien agregue otra. Al revés —debajo de
+      // `...authHeaders`— una colisión de nombres borraría la credencial en
+      // silencio, que es el modo de falla que este archivo ya viene endurecido
+      // para evitar. Mutante que lo fija: `MUT-15`.
+      //
+      // Sin `canonicalId` devuelve `{}` y no se emite NINGUNO de los dos
+      // (CD-18): una cadena sin nuestro eslabón es peor que ninguna cadena,
+      // porque el siguiente gateway leería una traza que afirma NO contenernos.
+      //
+      // Ausente el argumento `contracting` (los 33 call-sites de test que llaman
+      // con 2 ó 3 argumentos) ⇒ `{}` ⇒ headers byte-idénticos a los de antes.
+      ...(contracting
+        ? buildOutboundContractingHeaders(
+            contracting.chain,
+            contracting.depth,
+            contracting.canonicalId,
+          )
+        : {}),
       // El orden importa: si un registry REAL matcheó, su credencial pisa a la
       // del mapa self-published. Para un self-published de verdad `authHeaders`
       // es siempre `{}`, así que nadie más ve un cambio.
       ...selfPublishedAuthHeaders,
       ...authHeaders,
     };
+    if (contracting && contracting.canonicalId === null) {
+      // CD-18: se avisa UNA vez por invocación. Que no se emita la traza no es
+      // gratis — deja al siguiente gateway sin el dato con el que la capa 2
+      // decide — así que tiene que ser visible y no silencioso.
+      const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);
+      warn(
+        { slug: agent.slug },
+        'contracting-chain.not-emitted: sin identidad propia derivable no se emite ' +
+          'la traza de contratacion (emitirla sin nuestro eslabon afirmaria que no ' +
+          'estamos en la cadena). Setea BASE_URL o A2A_SELF_HOSTS.',
+      );
+    }
     // C1 (audit 2026-07-01): NEVER forward the caller's raw, long-lived
     // `x-a2a-key` bearer to an `invokeUrl` of a THIRD-PARTY (auto-registered)
     // registry. `agent.invokeUrl` derives from `registry.invokeEndpoint`, a

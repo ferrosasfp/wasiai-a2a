@@ -101,3 +101,130 @@
   **caduca**: se re-corre después de la ÚLTIMA edición.
 
 ---
+
+### [2026-08-17 15:44] Wave 1 — El guardián de conteos lee el ÍNDICE DE GIT, así que la suite verde de W0 se volvió roja al commitear
+
+- **Error**: W0 cerró con `suite_exit=0` y ese número fue al commit message. Al
+  arrancar W1, la MISMA suite sin ningún cambio mío daba **4 rojos** en
+  `test/readme-numbers.test.ts`: `expected 286 to be 287` (archivos de test) y
+  `expected 477 to be 479` (archivos que linta Biome).
+- **Causa raíz**: ese guardián deriva sus conteos de **`git ls-files`**
+  (`test/readme-numbers.test.ts:82-92`), o sea del **índice**, no del working tree.
+  Cuando corrí la suite en W0 los dos archivos nuevos del leaf estaban **sin
+  trackear**, así que no los contaba y los números viejos de los README seguían
+  siendo ciertos. El `git add` del commit los hizo tracked y ahí los números se
+  volvieron falsos. **Mi verde de W0 era cierto en el momento en que lo medí y
+  falso un segundo después, por mi propio commit.**
+- **Fix**: (a) los números derivados, no incrementados a mano
+  (`290` y `482`, sacados de `git ls-files` filtrado por los globs de
+  `vitest.config.ts` y `biome.json`); (b) **el cambio de protocolo, que es lo que
+  vale**: `git add -A` PRIMERO y **después** correr la suite, para que la medición
+  sea la del estado que se va a commitear.
+- **Aplicar en**: W2 y W3 **agregan más archivos** (`contracting-guard.ts` +
+  su test, `well-known.test.ts`), así que esto vuelve a morder en las dos.
+  Generalización: **una wave que agrega o borra un archivo trackeado tiene que
+  stagear antes de medir.** Y más general todavía: cuando un guardián deriva de
+  `git ls-files`, `git diff` o `git log`, la pregunta no es "¿corrí la suite?" sino
+  "¿la corrí contra el estado que voy a entregar?".
+
+---
+
+### [2026-08-17 15:45] Wave 1 — El Story File listaba 3 mocks que rompen `tsc`; el cuarto rompe en RUNTIME y no estaba
+
+- **Error**: extendí `resolveAgentDestination` con `invokeUrl`, arreglé los 3 mocks
+  tipados que §3.6 del Story File lista, `tsc` dio 0 — y la suite dio **3 rojos**
+  en `src/services/agent-price.test.ts` (`T-DEST-1`, `T-DEST-2`, `T-DEST-3`).
+- **Causa raíz**: esos tres hacen `expect(dest).toEqual({ registry, slug })`, que es
+  una comparación **EXACTA**. Un campo nuevo en el retorno la rompe **en runtime**,
+  no en compilación, así que `tsc --noEmit` verde no dice nada sobre ellos. §3.6
+  enumeró los sitios que rompen `tsc` (3) y el factory de `vi.mock` que rompe el
+  runtime (1), pero no la clase "aserción de forma exacta sobre el valor de retorno".
+- **Fix**: los tres `toEqual` ahora incluyen `invokeUrl`, con el comentario de por
+  qué: así el campo del que DEPENDE el guard queda con testigo — si alguien deja de
+  devolverlo, esos tres se ponen rojos antes de que el guard quede ciego en silencio.
+  O sea que el fixture quedó MÁS fuerte, no sólo reparado.
+- **Aplicar en**: al ensanchar el retorno de cualquier función, `tsc` cubre los
+  mocks TIPADOS y no cubre (a) los factories de `vi.mock`, (b) los `toEqual` /
+  `toStrictEqual` / `toMatchObject` exactos, (c) los snapshots. La sonda que los
+  encuentra a los tres es `/usr/bin/grep -rn "<nombre>" src/ --include=*.test.ts`,
+  y **hay que correrla además de `tsc`**.
+
+---
+
+### [2026-08-17 15:47] Wave 1 — Quise loguear a `error` en un tipo que no tiene `error`
+
+- **Error**: `tsc` falló con
+  `src/services/compose.ts(1570,32): error TS2339: Property 'error' does not exist on type 'DownstreamLogger'`.
+  Había escrito `logger?.error?.bind(logger) ?? log.error.bind(log)`, copiando el
+  idiom de `warn` que ese archivo ya usa.
+- **Causa raíz**: `DownstreamLogger` (`src/types/index.ts`) declara **sólo `warn` e
+  `info`**. Copié la forma del idiom sin verificar la SUPERFICIE del tipo. La
+  tentación inmediata era la peor salida: degradar el log a `warn` para que entrara
+  en el shape — que habría violado CD-17, donde el NIVEL es parte del contrato
+  (que esa rama dispare significa que un guard pre-débito no corrió).
+- **Fix**: usar el logger **del módulo** (`log.error`), que es un Pino real. No se
+  ensanchó `DownstreamLogger`: es un tipo compartido y agregarle `error` obligaría a
+  crecer a todos sus implementadores por una necesidad de un solo call-site. Efecto
+  lateral bueno y ahora escrito en el código: **un caller no puede tragarse este
+  log**, porque no pasa por el logger que él inyecta.
+- **Aplicar en**: cuando el NIVEL de un log es parte de un requisito, verificar que
+  el logger disponible en ese scope lo soporte **antes** de elegir el sitio. Si no
+  lo soporta, la respuesta es cambiar de logger, nunca de nivel.
+
+---
+
+### [2026-08-17 16:02] Wave 1 — Un mutante que NO COMPILA reporta `exit=1` y `0 rojos`, y las dos lecturas son falsas
+
+- **Error**: la primera corrida de `MUT-03` (mover el guard del Sitio 2 debajo del
+  débito) dio `tsc exit=2`, **11 suites en rojo por error de import** y el resumen
+  `Tests 5333 passed | 19 skipped` — sin línea `Tests N failed`. Mi harness lo
+  imprimió como **`(MEDIDO: exit=1, 0 rojos)`**.
+- **Causa raíz doble**:
+  1. **El mutante**: extraje el bloque del guard con **2 de sus 3 llaves de
+     cierre**. La estructura es `if (selfHosts.length > 0) { for (…) { if (dest && …)
+     { … return } } }`, o sea TRES cierres después del `return`, y yo corté en el
+     segundo. Al borrarlo quedó una llave huérfana.
+  2. **El instrumento**: `exit=1` con `0 rojos` es **indistinguible de un KILL si
+     mirás sólo el exit code, e indistinguible de un SOBREVIVIENTE si mirás sólo los
+     rojos**. Las dos lecturas son falsas: el mutante no midió NADA porque el código
+     nunca corrió.
+- **Fix**: (a) re-extraer con las tres llaves, verificado imprimiendo **la línea
+  que sigue al bloque**; (b) **el harness ahora ABORTA con exit 5 y el cartel
+  `⛔ MUTANTE INVALIDO: no compila. NINGUN veredicto vale.`** si `tsc` no da 0, así
+  que este modo de falla no puede volver a pasar por un veredicto. Re-corrido:
+  `MUT-03` MATA (exit=1, 2 rojos, en `879faa7`).
+- **Aplicar en**: los 4 mutantes de MOVIMIENTO que quedan (`MUT-12`, `MUT-15`, y
+  cualquier reubicación). **Todo mutante lleva un `tsc` como precondición del
+  veredicto, no como comentario.** Y para extraer un bloque: contar los cierres
+  mirando la ANIDACIÓN, no la indentación, e imprimir el borde para verificarlo.
+
+---
+
+### [2026-08-17 15:40] Wave 1 — DESVIACIÓN del Story File: el canal de corte del Sitio 2
+
+- **Qué dice el contrato**: §4.2 prescribe que `executeApprovedPlan` corte "por el
+  canal que ese método ya usa para los cortes pre-débito — el mismo patrón del
+  `__quoteStale`", o sea un miembro nuevo en la unión de retorno.
+- **Qué hice**: devolver un `OrchestrateResult` normal con
+  `pipeline.errorCode = CONTRACTING_LOOP_DETECTED`, y que las dos rutas de ejecución
+  lo mapeen a **400** más un `error_code` top-level de familia 1.
+- **Por qué, MEDIDO**: un miembro nuevo en la unión de `executeApprovedPlan` fuerza
+  narrowing en **3 call-sites de producción** (`services/orchestrate.ts:447`,
+  `services/agent-link.ts:362`, `routes/orchestrate.ts:749`); y como el corte SÍ es
+  alcanzable por el camino atómico (a diferencia del cap gate, que no lo es),
+  `orchestrate()` también tendría que ensanchar su retorno, sumando **3 call-sites
+  más** (`services/inbound-task.ts:512`, `routes/orchestrate.ts:170`,
+  `mcp/tools/orchestrate.ts:24`). Total **6 call-sites en 5 archivos, y 3 de esos
+  archivos NO están en el Scope IN de §14**. El canal elegido toca **1 archivo, que
+  sí está en el Scope IN**, y reusa el mecanismo que el repo YA tiene para "el
+  pipeline no corrió y acá está el motivo" (el mapeo
+  `pipeline.errorCode === 'SCOPE_DENIED' → 403` que las dos rutas ya hacían).
+- **Qué NO cambia**: el ORDEN. El `return` está en el mismo punto de inserción
+  (después del cap gate, antes del price-fallback y antes de los dos consumidores de
+  plata), y `T-L1-3` mide CERO llamadas a `debit`. `MUT-03` lo confirma.
+- **Estado**: §16.15 del propio Story File deja esta forma abierta ("si AR prefiere
+  otra forma, es un cambio chico — pero entonces hay que decidir qué status devuelve
+  `/orchestrate/execute`"). **Decidido: 400.** Queda para que AR lo ratifique o lo
+  rechace; no lo estoy presentando como lo que el contrato pedía.
+
+---
