@@ -690,6 +690,96 @@ export function isSelfDestination(
 }
 
 /**
+ * AC-11 (W4) — ¿el ejecutor de este step declaró un fee de orquestación propio?
+ *
+ * **UNA definición, DOS direcciones**: lee exactamente el sobre que NOSOTROS
+ * emitimos en el 200 de `/compose` (`protocolFeeStatus` + `protocolFeeUsdc`). Que
+ * sea el mismo par de claves en las dos puntas es lo que hace que dos gateways
+ * WasiAI encadenados se entiendan sin configuración, y que este lector no pueda
+ * quedar desalineado del emisor sin que se note.
+ *
+ * ⛔ EL FEE AJENO SE **LEE**, NO SE ESTIMA. No hay forma de calcular el fee de otro
+ * coordinador desde acá: su tasa es suya. Si no lo declara, el dato NO EXISTE.
+ *
+ * Los tres casos, y por qué el primero es el que preserva AC-8 para el 100% del
+ * tráfico de hoy:
+ *  · **sin `protocolFeeStatus`** ⇒ `undefined` ⇒ el campo queda AUSENTE del
+ *    `StepResult`. Los 25 agentes descubribles en prod no emiten ese campo, así que
+ *    ésta es la rama por la que pasa todo el tráfico existente y la respuesta queda
+ *    byte-idéntica.
+ *  · **`'charged'` + monto finito `> 0`** ⇒ `{ declared: true, usdc }`.
+ *  · **`protocolFeeStatus` presente, cualquier otro caso** ⇒ `{ declared: false }`.
+ *
+ * ⛔ **NUNCA `usdc: 0`** (CD-5). "No lo declaró" no es "cobró cero": un cero
+ * fabricado es una afirmación falsa con formato de dato, y aguas arriba se sumaría a
+ * un rollup como si fuera información. El tercer valor es explícito.
+ *
+ * `> 0` y no `>= 0` a propósito: un coordinador que declara `charged` con monto 0 se
+ * está contradiciendo, y la lectura honesta de una contradicción es "declaró algo que
+ * no puedo usar" (`declared: false`), no "cobró cero".
+ */
+export function readCoordinatorFee(
+  raw: Record<string, unknown>,
+): undefined | { declared: true; usdc: number } | { declared: false } {
+  if (!('protocolFeeStatus' in raw)) return undefined;
+  const status = raw.protocolFeeStatus;
+  const amount = raw.protocolFeeUsdc;
+  if (
+    status === 'charged' &&
+    typeof amount === 'number' &&
+    Number.isFinite(amount) &&
+    amount > 0
+  ) {
+    return { declared: true, usdc: amount };
+  }
+  return { declared: false };
+}
+
+/**
+ * AC-11 (W4) — el ROLL-UP del fee en cascada de un pipeline.
+ *
+ * Función pura sobre los `coordinatorFee` de los steps. Tres call-sites (el 200 de
+ * `/compose`, el de `/orchestrate` atómico y el de `/orchestrate/execute`) para que
+ * las tres superficies no puedan calcularlo distinto.
+ *
+ * `{}` cuando NINGÚN step fue un coordinador ⇒ los dos campos quedan AUSENTES ⇒
+ * respuesta byte-idéntica para el 100% del tráfico de hoy (AC-8).
+ *
+ * `'partial'` ⟺ hubo al menos un coordinador que NO declaró su monto. Es el tercer
+ * valor de CD-5 a nivel de pipeline: sin él, un total que le falta un sumando se
+ * leería como un total completo.
+ */
+export function rollUpCascadedFee(
+  fees: ReadonlyArray<
+    { declared: true; usdc: number } | { declared: false } | undefined
+  >,
+):
+  | Record<string, never>
+  | {
+      cascadedOrchestrationFeeUsdc?: number;
+      cascadedOrchestrationFeeStatus: 'complete' | 'partial';
+    } {
+  const present = fees.filter((f) => f !== undefined);
+  if (present.length === 0) return {};
+  let sum = 0;
+  let anyUndeclared = false;
+  for (const fee of present) {
+    if (fee.declared) sum += fee.usdc;
+    else anyUndeclared = true;
+  }
+  const status = anyUndeclared ? ('partial' as const) : ('complete' as const);
+  // Si NINGUNO declaró monto, no hay suma que publicar: se omite el número y queda
+  // sólo el `partial`, que es la información honesta (hubo cascada, no sé cuánto).
+  if (sum === 0 && anyUndeclared) {
+    return { cascadedOrchestrationFeeStatus: status };
+  }
+  return {
+    cascadedOrchestrationFeeUsdc: Number(sum.toFixed(6)),
+    cascadedOrchestrationFeeStatus: status,
+  };
+}
+
+/**
  * AC-7 — los headers que salen en cada invocación a un agente.
  *
  * Devuelve `{}` si `canonicalId` es `null` (CD-18). Emitir una cadena SIN nuestro

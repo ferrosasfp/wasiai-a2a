@@ -30,9 +30,11 @@ import {
   isContractingDepthMaxMisconfigured,
   isSelfDestination,
   readContractingGuardHealth,
+  readCoordinatorFee,
   readInboundContracting,
   resolveContractingDepthMax,
   resolveSelfHosts,
+  rollUpCascadedFee,
 } from './contracting-chain.js';
 
 const LIB_DIR = fileURLToPath(new URL('.', import.meta.url));
@@ -763,5 +765,82 @@ describe('CD-16 — el `split` NO se ejecuta sobre un header que excede el largo
     } finally {
       String.prototype.split = original;
     }
+  });
+});
+
+describe('readCoordinatorFee / rollUpCascadedFee — AC-11 y CD-5', () => {
+  it('T-U-FEE-1: sin `protocolFeeStatus` ⇒ undefined (no es un coordinador)', () => {
+    expect(readCoordinatorFee({ result: 'ok' })).toBeUndefined();
+    expect(readCoordinatorFee({})).toBeUndefined();
+  });
+
+  it('T-U-FEE-2: `charged` con monto finito > 0 ⇒ declared true', () => {
+    expect(
+      readCoordinatorFee({
+        protocolFeeStatus: 'charged',
+        protocolFeeUsdc: 0.02,
+      }),
+    ).toEqual({ declared: true, usdc: 0.02 });
+  });
+
+  it('T-U-FEE-3 (CD-5): declarado pero sin monto usable ⇒ declared FALSE, nunca usdc 0', () => {
+    // Los cinco modos en que un sobre llega sin monto usable. En NINGUNO se
+    // fabrica un cero: "no lo declaró" no es "cobró cero".
+    for (const raw of [
+      { protocolFeeStatus: 'unknown' },
+      { protocolFeeStatus: 'not_charged' },
+      { protocolFeeStatus: 'charged' }, // sin monto
+      { protocolFeeStatus: 'charged', protocolFeeUsdc: 0 }, // se contradice
+      { protocolFeeStatus: 'charged', protocolFeeUsdc: Number.NaN },
+    ]) {
+      const out = readCoordinatorFee(raw);
+      expect(out, JSON.stringify(raw)).toEqual({ declared: false });
+      expect(out).not.toHaveProperty('usdc');
+    }
+  });
+
+  it('T-U-FEE-4: `charged` con monto NO numérico (string) ⇒ declared false', () => {
+    // Lo escribe un tercero: un `"0.02"` no se coerciona a número.
+    expect(
+      readCoordinatorFee({
+        protocolFeeStatus: 'charged',
+        protocolFeeUsdc: '0.02',
+      }),
+    ).toEqual({ declared: false });
+  });
+
+  it('T-U-ROLL-1 (AC-8): ningún coordinador ⇒ `{}` ⇒ respuesta byte-idéntica', () => {
+    expect(rollUpCascadedFee([undefined, undefined])).toEqual({});
+    expect(rollUpCascadedFee([])).toEqual({});
+  });
+
+  it('T-U-ROLL-2: todos declararon ⇒ suma + `complete`', () => {
+    expect(
+      rollUpCascadedFee([
+        { declared: true, usdc: 0.02 },
+        { declared: true, usdc: 0.03 },
+        undefined,
+      ]),
+    ).toEqual({
+      cascadedOrchestrationFeeUsdc: 0.05,
+      cascadedOrchestrationFeeStatus: 'complete',
+    });
+  });
+
+  it('T-U-ROLL-3 (CD-5): uno no declaró ⇒ `partial`, y el total NO se lee como completo', () => {
+    expect(
+      rollUpCascadedFee([{ declared: true, usdc: 0.02 }, { declared: false }]),
+    ).toEqual({
+      cascadedOrchestrationFeeUsdc: 0.02,
+      cascadedOrchestrationFeeStatus: 'partial',
+    });
+  });
+
+  it('T-U-ROLL-4 (CD-5): NINGUNO declaró monto ⇒ `partial` SIN número inventado', () => {
+    // Hubo cascada y no se sabe cuánto. Publicar `0` acá sería decir "los
+    // coordinadores no cobraron nada", que es una afirmación que nadie hizo.
+    const out = rollUpCascadedFee([{ declared: false }, { declared: false }]);
+    expect(out).toEqual({ cascadedOrchestrationFeeStatus: 'partial' });
+    expect(out).not.toHaveProperty('cascadedOrchestrationFeeUsdc');
   });
 });

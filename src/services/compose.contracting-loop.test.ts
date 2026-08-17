@@ -553,3 +553,89 @@ describe('WKH-360 CD-19 — un solo STRING por código, en las DOS superficies',
     );
   });
 });
+
+describe('WKH-360 AC-11 — el fee del coordinador AJENO se LEE, no se estima', () => {
+  it('T-FEE-4: sobre `charged` + monto ⇒ `{declared:true}` y rollup `complete`', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+    // El agente responde CON ENVOLTORIO: el sobre convive con `result`.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        result: { salida: 'ok' },
+        protocolFeeStatus: 'charged',
+        protocolFeeUsdc: 0.02,
+      }),
+    });
+
+    const result = await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.steps[0]?.coordinatorFee).toEqual({
+      declared: true,
+      usdc: 0.02,
+    });
+    // ⚠️ Y el `output` es el CONTENIDO de `result`, o sea que el sobre se leyó
+    // ANTES del colapso `data.result ?? data`. Si se leyera después, el sobre ya no
+    // existiría y este campo sería `undefined` SIEMPRE, sin que nada fallara.
+    // Mutante: `MUT-12`.
+    expect(result.steps[0]?.output).toEqual({ salida: 'ok' });
+  });
+
+  it('T-FEE-5 (CD-5): sobre presente SIN monto usable ⇒ `{declared:false}`, jamás `usdc: 0`', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 'ok', protocolFeeStatus: 'unknown' }),
+    });
+
+    const result = await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    expect(result.steps[0]?.coordinatorFee).toEqual({ declared: false });
+    // ⛔ NINGÚN cero fabricado en todo el resultado del step.
+    expect(JSON.stringify(result.steps[0]?.coordinatorFee)).not.toContain('0');
+  });
+
+  it('T-FEE-6 (AC-8, CD-7): agente NORMAL (sin sobre) ⇒ el campo NO existe', async () => {
+    // La rama por la que pasa el 100% del tráfico de hoy: los 25 agentes de prod no
+    // emiten `protocolFeeStatus`, así que el `StepResult` queda byte-idéntico.
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 'ok' }),
+    });
+
+    const result = await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    expect(result.steps[0]).not.toHaveProperty('coordinatorFee');
+  });
+});

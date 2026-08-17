@@ -17,6 +17,7 @@ import {
   contractingErrorMessage,
   isSelfDestination,
   resolveSelfHosts,
+  rollUpCascadedFee,
 } from '../lib/contracting-chain.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
@@ -1635,6 +1636,14 @@ export const orchestrateService = {
       pipeline,
       consideredAgents: plan.discoveredAgents,
       protocolFeeUsdc,
+      // WKH-360 (AC-11/AC-12): el fee de orquestación AJENO, sumado sobre los steps
+      // cuyo ejecutor resultó ser a su vez un coordinador. Los dos campos quedan
+      // AUSENTES si no hubo ninguno, que es el 100% del tráfico de hoy ⇒ respuesta
+      // byte-idéntica. `partial` ⟺ hubo un coordinador que no declaró su monto: sin
+      // ese tercer valor, un total al que le falta un sumando se leería como
+      // completo. La MISMA función pura que usa `/compose`, para que las tres
+      // superficies no puedan calcularlo distinto.
+      ...rollUpCascadedFee(pipeline.steps.map((st) => st.coordinatorFee)),
       // WKH-44: spread condicional — solo aparecen en el body si hay valor.
       ...(feeChargeError !== undefined && { feeChargeError }),
       ...(feeChargeTxHash !== undefined && { feeChargeTxHash }),

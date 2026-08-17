@@ -17,6 +17,7 @@ import {
   contractingErrorMessage,
   isSelfDestination,
   resolveSelfHosts,
+  rollUpCascadedFee,
 } from '../lib/contracting-chain.js';
 import type { DownstreamSkipCode } from '../lib/downstream-skip-code.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
@@ -1120,11 +1121,24 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       // WKH-118: best-effort 1% protocol fee post-compose (espejo orchestrate.ts:437-482).
       // Idempotencia por request.id; base = result.totalCostUsdc. NUNCA rompe el 200
       // (CD-1): todo error queda en variables locales + console. El response NO cambia (CD-4).
-      // CD-4: feeChargeTxHash NO se declara — en compose (a diferencia de
-      // orchestrate) ningún campo de fee se serializa en el response, así que la
-      // variable quedaría asignada-pero-no-leída (biome noUnusedVariables). El
-      // txHash que necesita el recibo se lee de `feeResult.txHash` directamente.
+      // ⚠️ CD-21 — ACÁ DECÍA "en compose (a diferencia de orchestrate) ningún campo
+      // de fee se serializa en el response", y WKH-360 lo volvió FALSO: el 200 de
+      // `/compose` ahora declara `protocolFeeUsdc` / `feeRatePercent` /
+      // `protocolFeeStatus` (AC-10). Se reescribe en el MISMO commit que lo
+      // invalida, porque una prosa que afirma de más apaga las revisiones futuras.
+      //
+      // Lo que SIGUE siendo cierto y es la razón de que `feeChargeTxHash` no se
+      // declare: **el txHash del fee NO se serializa**. Publicar el hash de la
+      // transferencia del fee expone el movimiento de la wallet de plataforma, y el
+      // caller necesita el MONTO, no el hash. La variable quedaría
+      // asignada-pero-no-leída (biome `noUnusedVariables`); el txHash que necesita
+      // el recibo se lee de `feeResult.txHash` directamente.
       let feeChargeError: string | undefined;
+      // WKH-360 (AC-10): la disposición del fee de ESTE gateway, para el 200.
+      // Arranca en `'unknown'` — el tercer valor de CD-5 — porque si el bloque de
+      // abajo se va por el `catch`, la disposición es DESCONOCIDA, no "no se cobró".
+      let protocolFeeStatus: 'charged' | 'not_charged' | 'unknown' = 'unknown';
+      let protocolFeeUsdc: number | undefined;
       try {
         // WKH-143 (DT-2/DT-5/CD-9/CD-1b): resolvemos el creator del agente
         // primario SOLO cuando `splitsActive()` (gate NO-throw). Con el default
@@ -1150,11 +1164,23 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         const feeResult = await chargeProtocolFee(feeParams);
         if (feeResult.status === 'failed') {
           feeChargeError = feeResult.error;
+          // CD-5: `failed` NO es `not_charged`. Un HTTP que falla no prueba que la
+          // transferencia no se transmitió — este mismo camino importa
+          // `hasBroadcastEvidence` justamente por eso. La disposición es
+          // DESCONOCIDA y el monto se OMITE: "no pude preguntar" ≠ "no pasó".
+          protocolFeeStatus = 'unknown';
           log.error({ detail: feeResult.error }, 'fee charge failed');
+        } else if (feeResult.status === 'skipped') {
+          // CD-5: el `feeUsdc` que trae un `skipped` (WALLET_UNSET) es el monto
+          // CALCULADO y NO COBRADO. Reportarlo como cobrado sería una afirmación
+          // falsa con formato de dato, así que el monto se OMITE.
+          protocolFeeStatus = 'not_charged';
         } else if (
           feeResult.status === 'charged' ||
           feeResult.status === 'already-charged'
         ) {
+          protocolFeeStatus = 'charged';
+          protocolFeeUsdc = feeResult.feeUsdc;
           // WKH-124: emit protocol_fee receipt SOLO si charged + owner_ref presente.
           // Fire-and-forget (CD-6/CD-7): su fallo/latencia NUNCA afecta el 200.
           if (feeResult.status === 'charged' && request.a2aKeyRow?.owner_ref) {
@@ -1197,7 +1223,25 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       // los persista (`a2a_events.metadata.downstreamSkips`). Aditivo puro: NO lee
       // ni cambia nada del money-path, sólo copia lo que ya viaja en el response.
       noteDownstreamSkips(request, result.steps, downstreamSkipCauses);
-      return reply.send({ kiteTxHash, ...result });
+      // ── WKH-360 (AC-10/AC-11/AC-12) · el fee, VISIBLE ────────────────────────
+      // Estrictamente ADITIVO: todas las claves de antes salen con el mismo nombre y
+      // el mismo valor. `protocolFeeUsdc` se OMITE salvo que se haya cobrado de
+      // verdad (CD-5: nada de ceros fabricados), y los dos campos de cascada quedan
+      // AUSENTES si ningún step fue un coordinador — que es el 100% del tráfico de
+      // hoy, así que la respuesta actual no se mueve un byte.
+      //
+      // ⚠️ `protocolFeeUsdc` es la pata de PLATAFORMA que este gateway cobró, NO el
+      // total del pipeline (el costo ejecutado es `totalCostUsdc`) y NO el
+      // `fee_usdc` de la tabla `a2a_protocol_fees`, que es post-split. Este número
+      // sale de `FeeChargeResult`, nunca de la tabla.
+      return reply.send({
+        kiteTxHash,
+        ...result,
+        feeRatePercent: Number((getProtocolFeeRate() * 100).toFixed(6)),
+        protocolFeeStatus,
+        ...(protocolFeeUsdc !== undefined && { protocolFeeUsdc }),
+        ...rollUpCascadedFee(result.steps.map((s) => s.coordinatorFee)),
+      });
     },
   );
 };

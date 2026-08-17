@@ -28,6 +28,7 @@ import {
   CONTRACTING_LOOP_DETECTED,
   contractingErrorMessage,
   isSelfDestination,
+  readCoordinatorFee,
   resolveSelfHosts,
 } from '../lib/contracting-chain.js';
 import { resolveComposeAgentPoolLimit } from '../lib/discovery-fetch-limit.js';
@@ -681,7 +682,7 @@ export const composeService = {
         }
       };
       try {
-        const { output, downstream, downstreamSkipCode } =
+        const { output, downstream, downstreamSkipCode, coordinatorFee } =
           await this.invokeAgent(
             agent,
             input,
@@ -699,6 +700,7 @@ export const composeService = {
           output,
           downstream,
           downstreamSkipCode,
+          coordinatorFee, // WKH-360 (AC-11)
           skipCauses,
           startTime,
           steps,
@@ -1033,15 +1035,19 @@ export const composeService = {
             if (retryDebit.success) {
               try {
                 // ── PASO 5 (DT-5.5): RE-INVOKE reusando invokeAgent.
-                const { output, downstream, downstreamSkipCode } =
-                  await this.invokeAgent(
-                    agent,
-                    retryInput, // WKH-305 (AC-7): con el mapeo RE-APLICADO
-                    a2aKey,
-                    undefined,
-                    `${composeRunId}:${i}`, // WKH-234 intentId — MISMO que el master (AC-7 idempotente)
-                    outboundContracting, // WKH-360 (AC-7): MISMA traza que el master
-                  );
+                const {
+                  output,
+                  downstream,
+                  downstreamSkipCode,
+                  coordinatorFee,
+                } = await this.invokeAgent(
+                  agent,
+                  retryInput, // WKH-305 (AC-7): con el mapeo RE-APLICADO
+                  a2aKey,
+                  undefined,
+                  `${composeRunId}:${i}`, // WKH-234 intentId — MISMO que el master (AC-7 idempotente)
+                  outboundContracting, // WKH-360 (AC-7): MISMA traza que el master
+                );
                 // WKH-234 (AC-8): retry-ok — anota el ledger si fue Solana.
                 recordSolanaLegIfAny(downstream);
                 // ── PASO 6a: 2xx → éxito. El retry-debit SE QUEDA (caller
@@ -1051,6 +1057,7 @@ export const composeService = {
                   output,
                   downstream,
                   downstreamSkipCode,
+                  coordinatorFee, // WKH-360 (AC-11): MISMO que el master
                   skipCauses,
                   startTime,
                   steps,
@@ -1196,6 +1203,16 @@ export const composeService = {
     /** Fix-pack P1 (hallazgo 4): motivo del skip del leg downstream, si hubo. */
     downstreamSkipCode?: DownstreamSkipCode | undefined;
     /**
+     * WKH-360 (AC-11): el fee de orquestación que DECLARÓ el ejecutor de este step,
+     * cuando ese ejecutor es a su vez un coordinador. Lo LEE `invokeAgent` del sobre
+     * de la respuesta; acá sólo se copia al `StepResult`. Ausente ⇒ no es un
+     * coordinador ⇒ el `StepResult` no gana ninguna clave.
+     */
+    coordinatorFee?:
+      | { declared: true; usdc: number }
+      | { declared: false }
+      | undefined;
+    /**
      * Array PRESTADO por el caller del pipeline (`ComposeRequest.downstreamSkipCauses`)
      * para recibir el motivo INTERNO de cada leg salteado. Ver el docstring del
      * campo en `types/index.ts`: es un input y no un campo del resultado porque
@@ -1227,6 +1244,7 @@ export const composeService = {
       output,
       downstream,
       downstreamSkipCode,
+      coordinatorFee,
       skipCauses,
       startTime,
       steps,
@@ -1261,6 +1279,10 @@ export const composeService = {
       ...(downstreamSkipCode && {
         downstreamSettle: `skipped:${toPublicSkipCode(downstreamSkipCode)}`,
       }),
+      // WKH-360 (AC-11): el fee AJENO, tal como lo declaró su dueño. Aditivo: la
+      // clave sólo aparece si el ejecutor emitió el sobre, que hoy no hace ninguno
+      // de los 25 agentes de prod ⇒ respuesta byte-idéntica para el tráfico actual.
+      ...(coordinatorFee !== undefined && { coordinatorFee }),
     };
     // Canal de OPERADOR: el motivo INTERNO, que `toPublicSkipCode` acaba de
     // genericizar. Sin esto, cuatro causas con cuatro dueños distintos
@@ -1479,6 +1501,16 @@ export const composeService = {
      * traduce al vocabulario PÚBLICO antes de ponerlo en la respuesta.
      */
     downstreamSkipCode?: DownstreamSkipCode;
+    /**
+     * WKH-360 (AC-11): el fee de orquestación que declaró el ejecutor de este step,
+     * LEÍDO del sobre de su respuesta (`protocolFeeStatus` / `protocolFeeUsdc`) —
+     * nunca estimado. Ausente ⇒ el ejecutor no es un coordinador, que es el caso de
+     * los 25 agentes descubribles en prod.
+     */
+    coordinatorFee?:
+      | { declared: true; usdc: number }
+      | { declared: false }
+      | undefined;
   }> {
     const registries = await registryService.getEnabled();
     const registry = registries.find(
@@ -1690,6 +1722,14 @@ export const composeService = {
       );
     }
     const data = (await response.json()) as Record<string, unknown>;
+    // ── WKH-360 (AC-11): el sobre del fee se lee del `data` CRUDO ────────────
+    // ⚠️ ANTES del colapso `data.result ?? data` de la línea siguiente, y el orden
+    // es load-bearing: si el agente respondió con envoltorio (`{ result: {...},
+    // protocolFeeStatus: 'charged', protocolFeeUsdc: 0.02 }`), después del colapso
+    // `output` es el CONTENIDO de `result` y el sobre ya no está — leerlo ahí
+    // devolvería `undefined` SIEMPRE y el fee en cascada quedaría invisible sin que
+    // nada falle. Mutante que lo fija: `MUT-12`.
+    const coordinatorFee = readCoordinatorFee(data);
     const output = data.result ?? data;
 
     // ─── WKH-55: Downstream x402 hook (AC-1..AC-10) ──────────────────
@@ -1720,6 +1760,9 @@ export const composeService = {
       output,
       ...(downstream && { downstream }),
       ...(skipCode && { downstreamSkipCode: skipCode }),
+      // WKH-360 (AC-11): sólo si el ejecutor declaró el sobre. Ausente ⇒ no es un
+      // coordinador ⇒ el `StepResult` no gana ninguna clave (AC-8).
+      ...(coordinatorFee !== undefined && { coordinatorFee }),
     };
   },
 };

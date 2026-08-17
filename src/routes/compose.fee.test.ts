@@ -350,8 +350,19 @@ describe('compose routes — WKH-118 protocol fee', () => {
     expect(mockEmit).not.toHaveBeenCalled();
   });
 
-  // T-FEE-8 (CD-4 regresión): response body inalterado.
-  it('T-FEE-8 (CD-4): charged → response sin feeChargeError/feeChargeTxHash/protocolFeeUsdc', async () => {
+  // ⚠️ T-FEE-8 — WKH-360 INVIRTIÓ UNA DE SUS TRES ASERCIONES, Y ESO ES EL PUNTO.
+  // Este `it` afirmaba que el 200 de `/compose` NO trae `protocolFeeUsdc`. AC-10 de
+  // WKH-360 exige justamente lo contrario: el fee de protocolo de ESTE gateway tiene
+  // que ser VISIBLE (antes el propio código decía "en compose ningún campo de fee se
+  // serializa", y eso era el hueco #3 de la HU).
+  //
+  // Las otras DOS aserciones se quedan y NO son cosmética:
+  //  · `feeChargeError` ausente — el cobro sigue siendo best-effort y su error NO
+  //    contamina el 200.
+  //  · `feeChargeTxHash` ausente — ⛔ el hash de la transferencia del fee NO se
+  //    serializa NUNCA: publicarlo expone el movimiento de la wallet de plataforma.
+  //    El caller necesita el MONTO, no el hash. Esta línea es la que lo guarda.
+  it('T-FEE-8 (CD-4 + WKH-360 AC-10): charged → SÍ el monto, NUNCA el txHash del fee', async () => {
     mockChargeFee.mockResolvedValueOnce({
       status: 'charged',
       feeUsdc: 0.005,
@@ -368,10 +379,133 @@ describe('compose routes — WKH-118 protocol fee', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body).not.toHaveProperty('feeChargeError');
+    // ⛔ el hash NO sale, ni con este nombre ni con ninguno.
     expect(body).not.toHaveProperty('feeChargeTxHash');
-    expect(body).not.toHaveProperty('protocolFeeUsdc');
+    expect(JSON.stringify(body)).not.toContain('0xfee');
+    // WKH-360 (AC-10): el MONTO sí sale, y con el status que lo califica.
+    expect(body.protocolFeeUsdc).toBe(0.005);
+    expect(body.protocolFeeStatus).toBe('charged');
+    expect(typeof body.feeRatePercent).toBe('number');
     // El body es { kiteTxHash, ...result } — success intacto.
     expect(body.success).toBe(true);
     expect(body.totalCostUsdc).toBe(0.05);
+  });
+
+  // ── WKH-360 · AC-10 / CD-5 · los tres estados del fee PROPIO ──────────────
+  it('T-FEE-2wkh (AC-10, CD-5): skipped(WALLET_UNSET) → not_charged y monto AUSENTE', async () => {
+    // El `feeUsdc` que trae un `skipped` es el monto CALCULADO y NO COBRADO.
+    // Reportarlo como cobrado sería una afirmación falsa con formato de dato.
+    mockChargeFee.mockResolvedValueOnce({
+      status: 'skipped',
+      feeUsdc: 0.005,
+      reason: 'WALLET_UNSET',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'a1', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.protocolFeeStatus).toBe('not_charged');
+    expect(body).not.toHaveProperty('protocolFeeUsdc');
+  });
+
+  it('T-FEE-3wkh (AC-10, CD-5): failed → `unknown`, NO `not_charged`, y monto AUSENTE', async () => {
+    // "No pude preguntar" ≠ "no pasó". Un HTTP que falla no prueba que la
+    // transferencia no se transmitió — por eso este camino importa
+    // `hasBroadcastEvidence`. La disposición es DESCONOCIDA: el tercer valor.
+    mockChargeFee.mockResolvedValueOnce({
+      status: 'failed',
+      feeUsdc: 0.005,
+      error: 'rpc down',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'a1', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.protocolFeeStatus).toBe('unknown');
+    expect(body.protocolFeeStatus).not.toBe('not_charged');
+    expect(body).not.toHaveProperty('protocolFeeUsdc');
+  });
+
+  it('T-FEE-6wkh (AC-8, CD-7): agente NORMAL → los dos campos de cascada AUSENTES', async () => {
+    // El gemelo positivo de AC-11: los 25 agentes de prod no emiten
+    // `protocolFeeStatus`, así que la respuesta no gana NI UNA clave de cascada.
+    mockChargeFee.mockResolvedValueOnce({
+      status: 'charged',
+      feeUsdc: 0.005,
+      txHash: '0xfee',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'a1', input: {} }] },
+    });
+
+    const body = res.json();
+    expect(body).not.toHaveProperty('cascadedOrchestrationFeeUsdc');
+    expect(body).not.toHaveProperty('cascadedOrchestrationFeeStatus');
+    // y ningún step ganó `coordinatorFee`
+    for (const st of body.steps ?? []) {
+      expect(st).not.toHaveProperty('coordinatorFee');
+    }
+  });
+
+  // ── WKH-360 · AC-12 ────────────────────────────────────────────────────
+  it('el conjunto de claves de la línea base es SUBCONJUNTO del nuevo, con los mismos valores', async () => {
+    // La línea base son las claves que el 200 de `/compose` publicaba ANTES de esta
+    // HU. Están escritas a mano a propósito: son el contrato ya publicado, así que
+    // derivarlas del código de hoy haría que el test se moviera junto con una
+    // regresión en vez de cazarla.
+    const BASELINE = {
+      kiteTxHash: undefined as unknown,
+      success: true,
+      output: 'ok',
+      steps: [] as unknown[],
+      totalCostUsdc: 0.05,
+      totalLatencyMs: 5,
+    };
+
+    mockChargeFee.mockResolvedValueOnce({
+      status: 'charged',
+      feeUsdc: 0.005,
+      txHash: '0xfee',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'a1', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+
+    // (a) NINGUNA clave vieja desapareció…
+    for (const key of Object.keys(BASELINE)) {
+      if (key === 'kiteTxHash') continue; // sólo presente con pago x402
+      expect(Object.keys(body), `se perdió la clave "${key}"`).toContain(key);
+    }
+    // (b) …y las que tenían valor conocido lo conservan IGUAL.
+    expect(body.success).toBe(BASELINE.success);
+    expect(body.output).toBe(BASELINE.output);
+    expect(body.totalCostUsdc).toBe(BASELINE.totalCostUsdc);
+    expect(body.totalLatencyMs).toBe(BASELINE.totalLatencyMs);
+    // (c) y lo que se agregó es exactamente lo declarado por AC-10.
+    expect(body.protocolFeeStatus).toBe('charged');
+    expect(body.protocolFeeUsdc).toBe(0.005);
   });
 });
