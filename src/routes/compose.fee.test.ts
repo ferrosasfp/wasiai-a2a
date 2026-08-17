@@ -353,8 +353,12 @@ describe('compose routes — WKH-118 protocol fee', () => {
   // ⚠️ T-FEE-8 — WKH-360 INVIRTIÓ UNA DE SUS TRES ASERCIONES, Y ESO ES EL PUNTO.
   // Este `it` afirmaba que el 200 de `/compose` NO trae `protocolFeeUsdc`. AC-10 de
   // WKH-360 exige justamente lo contrario: el fee de protocolo de ESTE gateway tiene
-  // que ser VISIBLE (antes el propio código decía "en compose ningún campo de fee se
-  // serializa", y eso era el hueco #3 de la HU).
+  // que ser VISIBLE — el comentario de `routes/compose.ts` que declaraba lo opuesto
+  // se reescribió por CD-21 en el mismo commit, y ése era el hueco #3 de la HU.
+  //
+  // ⚠️ Este párrafo NO reproduce la frase vieja textual A PROPÓSITO: el control de
+  // CD-21 es un `grep` sobre `src/`, y una cita verbatim —aunque sea histórica— lo
+  // deja con un hit y un auditor futuro no puede distinguir la cita del claim vivo.
   //
   // Las otras DOS aserciones se quedan y NO son cosmética:
   //  · `feeChargeError` ausente — el cobro sigue siendo best-effort y su error NO
@@ -392,6 +396,18 @@ describe('compose routes — WKH-118 protocol fee', () => {
   });
 
   // ── WKH-360 · AC-10 / CD-5 · los tres estados del fee PROPIO ──────────────
+  /**
+   * ⚠️ TESTIGO ÚNICO DE `MUT-14`. Medido: reportar `feeResult.feeUsdc` en la rama
+   * `skipped` deja la suite completa en **1 solo rojo, y es éste**
+   * (MEDIDO: exit=1, 1 rojos, en `1015f90`).
+   *
+   * O sea que **cambiarle el input lo apaga igual que borrarlo** (CD-22): si este
+   * `it` deja de montar el caso `skipped`, nada más en el repo distingue "publicó el
+   * monto calculado como si se hubiera cobrado" de "omitió el monto". Y esa
+   * distinción es exactamente CD-5: el `feeUsdc` de un `skipped` es el monto
+   * CALCULADO Y NO COBRADO, así que publicarlo es una afirmación falsa con formato
+   * de dato.
+   */
   it('T-FEE-2wkh (AC-10, CD-5): skipped(WALLET_UNSET) → not_charged y monto AUSENTE', async () => {
     // El `feeUsdc` que trae un `skipped` es el monto CALCULADO y NO COBRADO.
     // Reportarlo como cobrado sería una afirmación falsa con formato de dato.

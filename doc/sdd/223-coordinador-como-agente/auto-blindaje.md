@@ -228,3 +228,123 @@
   rechace; no lo estoy presentando como lo que el contrato pedía.
 
 ---
+
+### [2026-08-17 16:09] Wave 2 — Escribí "un header repetido llega como `string[]`" y la medición lo desmintió
+
+- **Error**: `T-CHAIN-4` afirmaba que un header repetido llega como `string[]` y que
+  por lo tanto es AUSENCIA (patrón `pick`). El test dio
+  `expected [ 'a.example', 'b.example' ] to deeply equal []`.
+- **Causa raíz**: copié la semántica del patrón `pick` de `a2a-key.ts` sin verificar
+  **cuándo** produce `string[]` de verdad. Medido con un socket crudo contra un
+  `http.createServer`:
+
+      x-a2a-contracting-chain: a.example
+      x-a2a-contracting-chain: b.example
+      ⇒ req.headers['x-a2a-contracting-chain'] === 'a.example, b.example'   (STRING)
+
+  **Node JOINEA los duplicados con `', '`** para casi todos los headers; el `string[]`
+  es de `set-cookie` y un puñado más. O sea que en ESTE header la rama `string[]` es
+  **defensiva y no el caso real**.
+- **Fix**: reescribí el `it` con lo medido (`T-CHAIN-4`) y agregué `T-CHAIN-5`, que
+  monta el vector de ataque (repetir el header para esconder nuestro eslabón) y
+  verifica que igual cae por MEMBRESÍA. **Y el hallazgo cambió el estado de una
+  decisión**: el `trim()` por elemento del paso 3, que yo había puesto por interop,
+  resultó ser lo que hace que un header repetido LEGÍTIMO se lea bien — la forma
+  joineada trae un espacio después de la coma. Pasó de ser una comodidad a tener un
+  input que lo justifica.
+- **Aplicar en**: antes de escribir "el header llega como X", **mandar el header y
+  mirar**. El costo fue un `node -e` con un socket crudo. La regla general: una
+  afirmación sobre el comportamiento de la PLATAFORMA (no del código propio) se mide
+  con la plataforma, no se hereda de un patrón vecino que puede estar cubriendo otro
+  caso.
+
+---
+
+### [2026-08-17 16:12] Wave 2 — Mi primer `T-PROP-3` NO mataba a `MUT-15`
+
+- **Error**: escribí `T-PROP-3` (CD-4) assertando que después de agregar la traza
+  seguían saliendo el `Content-Type` y el `x-a2a-key`. Eso pasa **exactamente igual**
+  con los headers nuevos puestos DEBAJO del spread de credenciales, o sea que el test
+  no medía el ORDEN, que es lo único que CD-4 pide.
+- **Causa raíz**: confundí "los headers de siempre siguen presentes" (aditividad) con
+  "los headers nuevos no pisan una credencial" (orden). Son propiedades distintas y
+  sólo la segunda distingue el código correcto del mutante.
+- **Fix**: reescribí el test alrededor de una **COLISIÓN DE NOMBRES real**. Un
+  registry puede declarar `auth: {type:'header', key, value}` con la clave que quiera,
+  incluida `x-a2a-contracting-chain`. Con el orden correcto gana la CREDENCIAL y llega
+  intacta; con el orden invertido gana la traza y **la credencial se destruye en
+  silencio**. Más `T-PROP-3b` (sin colisión salen las dos cosas), para que el primero
+  no pueda pasar por "la traza no se emite nunca".
+- **Verificación**: `MUT-15` MATA con **1 solo rojo, y es este `it`**
+  (MEDIDO: exit=1, 1 rojos, en `6f252ad`). Anotado EN EL TESTIGO, con el aviso de que
+  refixturearle la colisión lo apaga igual que borrarlo (CD-22).
+- **Aplicar en**: todo test de ORDEN entre dos escrituras al mismo diccionario. La
+  pregunta que lo separa del test de presencia: **¿qué input hace que las dos órdenes
+  den resultados DISTINTOS?** Si no existe, el test no mide orden.
+
+---
+
+### [2026-08-17 16:23] Wave 3 — Mi control "mecánico" se comparaba consigo mismo
+
+- **Error**: `T-CARD-3` (el control de que cada `endpoint` publicado por la carta
+  EXISTE) comparaba los paths declarados contra una lista
+  `const REGISTERED_PREFIXES = ['/discover','/compose','/orchestrate']` **escrita a
+  mano en el propio test**.
+- **Causa raíz**: eso es una TERCERA expresión del mismo dato (la carta, `index.ts`, y
+  ahora el test). El escenario que el test existe para cazar —alguien renombra el
+  prefijo en `index.ts`— **no lo habría cazado**, porque la lista del test estaba tan
+  desactualizada como la carta. Un guard que recalcula lo que vigila aplaude cualquier
+  cosa.
+- **Fix**: el test **DERIVA** los prefijos leyendo `src/index.ts` con un regex sobre
+  los `register(xRoutes, { prefix: '...' })`, y además asserta que la derivación
+  encontró algo (`> 3`), para que un regex que deja de matchear no lo deje verde por
+  vacío. **Verificado con una mutación puntual**: renombrar el prefijo `/compose` lo
+  pone en rojo con el mensaje accionable, y la derivación encuentra los 18 prefijos
+  reales. Restaurado con md5 idéntico.
+- **Aplicar en**: cualquier test que verifique "A coincide con B". Si el test tiene su
+  propia copia de B, no verifica nada — hay que **leer B de su fuente**. Y si la
+  lectura puede devolver vacío, hay que assertar que no lo hizo.
+
+---
+
+### [2026-08-17 16:41] Wave 4 — Un mutante que MATA por el motivo equivocado (178 rojos en vez de 2)
+
+- **Error**: la primera versión de `MUT-12` (leer el sobre del fee DESPUÉS del colapso
+  `data.result ?? data`) dio **178 rojos en 14 archivos**. El veredicto "MATA" era
+  correcto por casualidad; el número era basura.
+- **Causa raíz**: escribí el mutante como
+  `readCoordinatorFee((output ?? {}) as Record<string, unknown>)`, y `output` suele ser
+  un **primitivo** (`'ok'`). Adentro, `'protocolFeeStatus' in raw` sobre un primitivo
+  **TIRA TypeError**, así que el mutante no estaba midiendo "el sobre se lee tarde":
+  estaba tirando abajo medio pipeline. Un mutante que rompe por una excepción es
+  indistinguible de uno que rompe por la semántica **si sólo mirás el conteo**.
+- **Fix**: reescribí el mutante para que lo ÚNICO que cambie sea **dónde** se lee
+  (guardando el caso primitivo). Re-corrido: **exit=1, 2 rojos, en `1015f90`**, y los
+  dos testigos son `T-FEE-4` y `T-FEE-5`, que son los semánticos. Ahora el número dice
+  algo.
+- **Aplicar en**: un mutante tiene que ser **mínimo y del mismo tipo** que el código
+  que reemplaza. Si su conteo de rojos es desproporcionado respecto de lo que toca, la
+  primera hipótesis es que el mutante rompió otra cosa — no que el guard esté
+  espectacularmente bien cubierto. Regla operativa: **leer los NOMBRES de los testigos
+  y verificar que son los que el mutante debía matar**; si aparecen suites que no
+  tienen nada que ver, el mutante está mal escrito.
+
+---
+
+### [2026-08-17 16:37] Wave 4 — Dos veces el mismo error de scope al APPENDEAR un `describe`
+
+- **Error**: agregué bloques `describe` al final de
+  `routes/compose.contracting-loop.test.ts` y de `routes/compose.fee.test.ts` que
+  usaban `app`, y las dos veces dio `ReferenceError: app is not defined`.
+- **Causa raíz**: `app` se declara con `let app` **dentro** del `describe` existente,
+  así que un `describe` hermano no lo ve. Appendear al final de un archivo es lo más
+  cómodo y por eso lo hice dos veces seguidas sin mirar el scope.
+- **Fix**: en el primer caso subí `app` y sus hooks al scope del MÓDULO (los dos
+  `describe` miden la misma cadena real de preHandlers, así que compartirlos es lo
+  correcto); en el segundo moví el `it` DENTRO del `describe` existente. Y de paso el
+  segundo tenía un `totalLatencyMs: 10` inventado donde el fixture real dice `5`.
+- **Aplicar en**: antes de appendear un `describe` a un archivo de test, mirar **de
+  quién es el `app`/`server`/fixture** que se va a usar. Y no inventar valores
+  esperados de un fixture ajeno: leerlos.
+
+---
