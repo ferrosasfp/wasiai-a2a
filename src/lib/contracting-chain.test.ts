@@ -809,6 +809,43 @@ describe('readCoordinatorFee / rollUpCascadedFee — AC-11 y CD-5', () => {
     ).toEqual({ declared: false });
   });
 
+  /**
+   * ⚠️ TESTIGO ÚNICO del guard de tipo de `readCoordinatorFee` (fix-pack, AR/BLQ-MED-2).
+   *
+   * El `in` de JavaScript **TIRA** sobre un primitivo, no devuelve `false`:
+   * `'protocolFeeStatus' in 'plain-string'` ⇒ `TypeError`. El argumento venía de
+   * un `as Record<string, unknown>` sobre `response.json()`, que es una promesa a
+   * `tsc` y no un hecho: un agente puede responder 200 con un JSON escalar.
+   *
+   * Por qué el modo de falla es CARO y no cosmético: el throw sube al catch
+   * per-step de `execute()`, que corre **después** del `budgetService.debit` de ese
+   * step ⇒ el caller queda **cobrado por un step que ahora falla**. En el árbol
+   * base (`3823580`) ese mismo body funcionaba, así que es una REGRESIÓN de cobro.
+   *
+   * Este `it` es el único que ejercita los cinco primitivos. Cambiarle el input
+   * (dejar sólo objetos) lo apaga igual que borrarlo.
+   */
+  it('T-U-FEE-5: body JSON NO-OBJETO (string/número/bool/null) ⇒ undefined, y NO TIRA', () => {
+    const scalars: unknown[] = ['plain-string', 42, true, null, undefined];
+    // El conteo se asserta para que borrar una fila ponga esto en rojo (CR/MNR-5).
+    expect(scalars).toHaveLength(5);
+    for (const raw of scalars) {
+      expect(() => readCoordinatorFee(raw), String(raw)).not.toThrow();
+      expect(readCoordinatorFee(raw), String(raw)).toBeUndefined();
+    }
+    // Control positivo: el guard de tipo NO se comió el caso que sí es objeto.
+    expect(
+      readCoordinatorFee({ protocolFeeStatus: 'charged', protocolFeeUsdc: 1 }),
+    ).toEqual({ declared: true, usdc: 1 });
+  });
+
+  it('T-U-FEE-6: un ARRAY es `typeof object` y NO trae el sobre ⇒ undefined', () => {
+    // `typeof [] === 'object'` y `'x' in []` no tira, así que el array pasa el
+    // guard de tipo y cae por la vía normal (sin `protocolFeeStatus` ⇒ undefined).
+    expect(readCoordinatorFee([])).toBeUndefined();
+    expect(readCoordinatorFee([1, 2, 3])).toBeUndefined();
+  });
+
   it('T-U-ROLL-1 (AC-8): ningún coordinador ⇒ `{}` ⇒ respuesta byte-idéntica', () => {
     expect(rollUpCascadedFee([undefined, undefined])).toEqual({});
     expect(rollUpCascadedFee([])).toEqual({});

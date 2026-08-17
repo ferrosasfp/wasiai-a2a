@@ -638,4 +638,71 @@ describe('WKH-360 AC-11 — el fee del coordinador AJENO se LEE, no se estima', 
 
     expect(result.steps[0]).not.toHaveProperty('coordinatorFee');
   });
+
+  /**
+   * ⚠️ TESTIGO del fix-pack AR/BLQ-MED-2, y el que mide la CONSECUENCIA DE PLATA
+   * (el unitario `T-U-FEE-5` sólo mide que la función no tire).
+   *
+   * El body de un agente lo escribe un TERCERO y `JSON.parse` devuelve escalares
+   * sin chistar. Con el `in` sin guard de tipo, un 200 con body `"plain-string"`
+   * hacía tirar `TypeError` **dentro** de `invokeAgent`; el throw lo agarra el
+   * catch per-step de `execute()`, que corre **después** del `budgetService.debit`
+   * de ese step. Resultado: **débito hecho y step fallado**, con un body que en el
+   * árbol base (`3823580`) daba `success: true`.
+   *
+   * ⚠️ EL ESCALAR VA EN EL STEP **1**, NO EN EL 0, y eso es lo que hace que el
+   * mutante muera por la razón CARA. Medido, con el escalar en el step 0 el
+   * mutante mata igual pero con otro texto (`débito: expected 1 times, but got 0`):
+   * el pipeline se cae ANTES de llegar al primer débito de compose, así que ese
+   * `it` estaría midiendo "el pipeline se rompe" y no "el caller quedó cobrado".
+   * Con el escalar en el step 1, el débito de ese step YA OCURRIÓ cuando el
+   * `TypeError` sale, y el mutante muere en `success` con `debit` en 1 — que es
+   * exactamente el enunciado de AC-8 que la regresión rompía.
+   * (El step 0 lo cobra el MIDDLEWARE, que este harness no ejercita.)
+   */
+  it('T-FEE-7 (AC-8): un 200 con body JSON ESCALAR no falla el step ya cobrado', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+    // Los tres primitivos que `JSON.parse` puede devolver en la raíz de un 200.
+    const scalarBodies: unknown[] = ['plain-string', 42, true];
+    expect(scalarBodies).toHaveLength(3);
+
+    for (const body of scalarBodies) {
+      vi.clearAllMocks();
+      budgetState.balance = 100;
+      // step 0 normal; step 1 escalar (ver el ⚠️ del docblock).
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ result: 'ok' }),
+        })
+        .mockResolvedValue({ ok: true, status: 200, json: async () => body });
+
+      const result = await composeService.compose({
+        steps: [
+          { agent: 's0', input: {} },
+          { agent: 's1', input: {} },
+        ],
+        scopingKeyRow: keyRow,
+        chainId: 2368,
+        maxBudget: 50,
+      });
+
+      // ── EL DINERO PRIMERO ────────────────────────────────────────────────
+      // compose debita los steps 1..N ⇒ exactamente UN débito en un pipeline de 2,
+      // y ese débito ocurre ANTES de leer el body del step 1. Que el débito exista
+      // y el step FALLE es el bug: cobrado por un step que no entregó.
+      expect(debitMock, String(body)).toHaveBeenCalledTimes(1);
+      expect(result.success, String(body)).toBe(true);
+      expect(result.steps, String(body)).toHaveLength(2);
+      // Y el sobre no existe: un escalar no declara fee, así que el campo queda
+      // AUSENTE — nunca `{declared:false}`, que afirmaría que hubo un coordinador.
+      expect(result.steps[1], String(body)).not.toHaveProperty(
+        'coordinatorFee',
+      );
+    }
+  });
 });

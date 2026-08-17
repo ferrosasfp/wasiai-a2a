@@ -717,13 +717,35 @@ export function isSelfDestination(
  * `> 0` y no `>= 0` a propósito: un coordinador que declara `charged` con monto 0 se
  * está contradiciendo, y la lectura honesta de una contradicción es "declaró algo que
  * no puedo usar" (`declared: false`), no "cobró cero".
+ *
+ * ─── POR QUÉ EL ARGUMENTO ES `unknown` Y NO `Record<string, unknown>` ───────
+ * Fix-pack AR/BLQ-MED-2. El único call-site lo alimenta con
+ * `(await response.json()) as Record<string, unknown>` (`services/compose.ts`), y
+ * ese `as` es una PROMESA A `tsc`, NO UN HECHO: el body lo escribe un tercero y
+ * `JSON.parse` devuelve felizmente un escalar. Medido:
+ *
+ *     'protocolFeeStatus' in 'plain-string'   ⇒  TypeError   (NO `false`)
+ *     'x' in 42 · 'x' in true · 'x' in null   ⇒  TypeError
+ *
+ * El `in` **tira** sobre un primitivo. Y el throw no muere acá: lo agarra el catch
+ * per-step de `execute()`, que corre **DESPUÉS** del `budgetService.debit` de ese
+ * step ⇒ el caller queda **cobrado por un step que ahora falla**, con un body que
+ * en el árbol base funcionaba. Por eso el tipo de entrada es el que el dato
+ * realmente tiene (`unknown`) y el guard es de RUNTIME.
+ *
+ * `typeof x === 'object' && x !== null` y nada más: `typeof null === 'object'` (el
+ * bug histórico del lenguaje) y `null` también hace tirar al `in`. Un array pasa
+ * el guard —`typeof [] === 'object'` y el `in` no tira sobre arrays— y cae por la
+ * vía normal: no trae `protocolFeeStatus` ⇒ `undefined`. Testigo: `T-U-FEE-5`.
  */
 export function readCoordinatorFee(
-  raw: Record<string, unknown>,
+  raw: unknown,
 ): undefined | { declared: true; usdc: number } | { declared: false } {
+  if (typeof raw !== 'object' || raw === null) return undefined;
   if (!('protocolFeeStatus' in raw)) return undefined;
-  const status = raw.protocolFeeStatus;
-  const amount = raw.protocolFeeUsdc;
+  const envelope = raw as Record<string, unknown>;
+  const status = envelope.protocolFeeStatus;
+  const amount = envelope.protocolFeeUsdc;
   if (
     status === 'charged' &&
     typeof amount === 'number' &&
