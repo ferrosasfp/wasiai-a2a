@@ -550,7 +550,24 @@ describe('agent-card routes', () => {
         'compose',
         'orchestrate',
       ]);
-      expect(body.authentication.schemes).toEqual([]);
+      // ⚠️ WKH-360 (AC-1b): acá decía `toEqual([])`. La inversión es el punto de la
+      // HU: la carta tiene que declarar con qué se le paga. Se re-apunta el testigo
+      // a la propiedad que sí vale.
+      expect(body.authentication.schemes).toContain('bearer');
+      // AC-1a/AC-1c: cada skill dice DÓNDE se la contrata y CÓMO se paga.
+      for (const skill of body.skills as { id: string }[]) {
+        expect(
+          (skill as { endpoint?: unknown }).endpoint,
+          `skill ${skill.id}`,
+        ).toBeDefined();
+        expect(
+          (skill as { pricing?: unknown }).pricing,
+          `skill ${skill.id}`,
+        ).toBeDefined();
+      }
+      // AC-1: el contrato de la traza de contratación, publicado.
+      expect(body.contracting.depthMax).toBe(2);
+      expect(body.contracting.chainHeader).toBe('x-a2a-contracting-chain');
     });
   });
 });

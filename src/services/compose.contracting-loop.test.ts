@@ -381,6 +381,22 @@ describe('WKH-360 AC-7 — la traza SALIENTE que emite cada invocación', () => 
     expect(warned).toBe(true);
   });
 
+  /**
+   * ⚠️ TESTIGO ÚNICO DE `MUT-15`. Medido: mover la llamada a
+   * `buildOutboundContractingHeaders` DEBAJO de `...authHeaders` deja la suite
+   * completa en **1 solo rojo, y es éste**
+   * (MEDIDO: exit=1, 1 rojos, en `6f252ad`).
+   *
+   * Y por eso **cambiarle el input lo apaga igual que borrarlo** (CD-22): si el
+   * `auth.key` de este registry deja de COLISIONAR con
+   * `x-a2a-contracting-chain`, no queda nada en el repo que distinga el orden
+   * correcto del invertido — los dos emiten los mismos headers con los mismos
+   * valores en todos los demás casos. La colisión ES el instrumento.
+   *
+   * Historial que conviene no repetir: la primera versión de este `it` assertaba
+   * "el `Content-Type` y la traza siguen saliendo", y con eso `MUT-15`
+   * **sobrevivía**.
+   */
   it('T-PROP-3 (CD-4, MUT-15): la traza NO PISA la credencial del registry', async () => {
     // ── POR QUÉ ASÍ Y NO "los headers de siempre siguen saliendo" ──────────
     // Un test que sólo verifique que `Content-Type` y la traza están presentes

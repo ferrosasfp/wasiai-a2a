@@ -3,7 +3,14 @@ import {
   APP_ALIGNMENT_DISCLAIMER,
   getSupportedAppIntents,
 } from '../adapters/app-intent-mapper.js';
+import { getInboundPaymentChainKeys } from '../adapters/registry.js';
 import { validateAgentSchemas } from '../lib/bazaar.js';
+import {
+  CONTRACTING_CHAIN_HEADER,
+  CONTRACTING_DEPTH_HEADER,
+  CONTRACTING_LAYER2_BEST_EFFORT_NOTE,
+  resolveContractingDepthMax,
+} from '../lib/contracting-chain.js';
 import type {
   Agent,
   AgentCard,
@@ -12,6 +19,7 @@ import type {
   AgentSkill,
   RegistryConfig,
 } from '../types/index.js';
+import { getProtocolFeeRate } from './fee-charge.js';
 
 /**
  * WKH-106 (BASE-03): read the agent's discoverable opt-in flag.
@@ -192,9 +200,80 @@ export const agentCardService = {
   },
 
   /**
+   * WKH-360 (AC-2) — el contexto que la carta propia necesita para declarar CÓMO se
+   * la contrata. UN solo call-site: `buildSelfAgentCard`, más abajo en este mismo
+   * objeto.
+   *
+   * ⚠️ POR QUÉ UNA FUNCIÓN Y NO TRES LECTURAS INLINE. AC-2 exige que la carta se
+   * construya desde UNA sola función y que `/capabilities` siga derivando de ella
+   * (hoy `/capabilities` hace `card.skills`, `card.name`, `card.url`). Si estos tres
+   * datos se leyeran en el route, habría una SEGUNDA expresión de la oferta y las
+   * dos superficies podrían divergir sin que `tsc` diga nada.
+   *
+   * Las tres fuentes, una por dato, ninguna inventada:
+   *  · **esquemas de pago** — `bearer` SIEMPRE (el carril de agent key prepaga no
+   *    está gateado por nada) y `x402` SÓLO si hay alguna chain inicializada que
+   *    acepte cobro de ENTRADA. Sale de `getInboundPaymentChainKeys()`, que es la
+   *    lista viva del proceso y no una constante: si mañana no hay ninguna chain
+   *    EVM, `x402` desaparece de la carta sin que nadie edite nada.
+   *  · **tasa** — `getProtocolFeeRate()`, la MISMA expresión que ya usa
+   *    `/orchestrate/plan`. No hay precio fijo por skill (ver abajo).
+   *  · **profundidad de contratación** — `resolveContractingDepthMax()`, el MISMO
+   *    lector que usa el guard. Publicar un número distinto del que se aplica sería
+   *    peor que no publicarlo.
+   */
+  resolveSelfCardContext(): {
+    schemes: string[];
+    feeRatePercent: number;
+    depthMax: number;
+  } {
+    const inboundChains = getInboundPaymentChainKeys();
+    return {
+      // `bearer` primero: es el carril que SIEMPRE está disponible.
+      schemes: ['bearer', ...(inboundChains.length > 0 ? ['x402'] : [])],
+      // 6 decimales, igual que el resto de los montos/tasas de este repo.
+      feeRatePercent: Number((getProtocolFeeRate() * 100).toFixed(6)),
+      depthMax: resolveContractingDepthMax(),
+    };
+  },
+
+  /**
    * Build the gateway's own Agent Card (self-card).
+   *
+   * ── WKH-360 (AC-1): la carta ahora dice CÓMO CONTRATARLA ───────────────────
+   * Antes declaraba 9 claves, `authentication.schemes: []` y ningún endpoint ni
+   * precio por skill: publicaba QUÉ sabe hacer el gateway y nada sobre cómo
+   * contratarlo, o sea que la tesis "el coordinador es a su vez un agente A2A" no
+   * era accionable desde la carta.
+   *
+   * ⚠️ NO HAY `priceUsdc` POR SKILL, Y SU AUSENCIA ES DELIBERADA (AC-3). Declarar
+   * un precio fijo sería FABRICAR UNA OFERTA: los precios de los agentes son
+   * pass-through y lo que este gateway cobra es una TASA sobre el costo realmente
+   * ejecutado, que no se conoce antes de ejecutar. Así que la carta declara el
+   * MODELO (`protocol-fee-on-executed-cost` + la tasa) y apunta al COTIZADOR
+   * (`POST /orchestrate/plan`, que devuelve `costPerStep`, `totalCostUsdc`,
+   * `protocolFeeUsdc` y `maxQuotedCostUsdc`, y NO cobra). Eso es exactamente lo que
+   * AC-1 admite con su "o la forma de obtenerlo".
+   *
+   * ⚠️ Los `path` de los endpoints son una SEGUNDA EXPRESIÓN del registro de rutas
+   * de `src/index.ts`, y `tsc` NO los ata. El control es mecánico y vive en
+   * `src/routes/well-known.test.ts` (`T-CARD-3`): arranca la app con
+   * `fastify.inject()` y verifica que cada `endpoint` declarado responda distinto de
+   * 404. Si alguien renombra un prefijo, ese test se pone rojo.
+   *
+   * CD-5: ningún campo se emite en `0` ni en `null` para decir "no sé". `x402`
+   * simplemente NO se lista cuando no hay chain de entrada — no sale
+   * `x402: false`.
    */
   buildSelfAgentCard(baseUrl: string): AgentCard {
+    const ctx = agentCardService.resolveSelfCardContext();
+    /** El cotizador al que apunta el modelo de precio de las skills pagas. */
+    const quoteEndpoint = '/orchestrate/plan';
+    const paidPricing = {
+      model: 'protocol-fee-on-executed-cost' as const,
+      feeRatePercent: ctx.feeRatePercent,
+      quoteEndpoint,
+    };
     return {
       name: 'WasiAI A2A Gateway',
       description:
@@ -210,23 +289,49 @@ export const agentCardService = {
           name: 'Discover Agents',
           description:
             'Search and discover AI agents across multiple registries',
+          endpoint: { method: 'POST', path: '/discover' },
+          // `free` no es un acto de fe: `/discover` no tiene preHandler de pago
+          // (medido) y `T-CARD-2` lo fija con un `inject` sin credencial que espera
+          // distinto de 402.
+          pricing: { model: 'free' },
         },
         {
           id: 'compose',
           name: 'Compose Agents',
           description: 'Execute multi-agent pipelines with sequential steps',
+          endpoint: { method: 'POST', path: '/compose' },
+          pricing: paidPricing,
         },
         {
           id: 'orchestrate',
           name: 'Orchestrate Agents',
           description:
             'Goal-based orchestration that automatically selects and chains agents',
+          endpoint: { method: 'POST', path: '/orchestrate' },
+          pricing: paidPricing,
         },
       ],
       inputModes: ['text/plain'],
       outputModes: ['text/plain'],
       authentication: {
-        schemes: [],
+        // DERIVADO del registry vivo, no una constante. Antes era `[]`, o sea una
+        // carta que no decía con qué se paga.
+        schemes: ctx.schemes,
+      },
+      // WKH-360 (AC-1): el contrato de la traza de contratación, para que otro
+      // coordinador pueda hablarlo sin leer nuestro código.
+      //
+      // `bestEffortNote` NO es adorno y NO se puede omitir: publica que la
+      // detección de bucles TRANSITIVOS depende de que cada intermediario reenvíe
+      // los headers. Sin ese texto, la carta induciría a creer que declarar los
+      // headers alcanza para estar cubierto. Sale de la MISMA constante que va al
+      // body del error (CD-6/CD-19), así que la promesa publicada y la emitida no
+      // pueden divergir.
+      contracting: {
+        depthMax: ctx.depthMax,
+        chainHeader: CONTRACTING_CHAIN_HEADER,
+        depthHeader: CONTRACTING_DEPTH_HEADER,
+        bestEffortNote: CONTRACTING_LAYER2_BEST_EFFORT_NOTE,
       },
       invocationNote:
         'Agent invocations must go through POST /compose or POST /orchestrate on this gateway, not directly to external agent hosts.',

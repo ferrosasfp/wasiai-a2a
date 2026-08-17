@@ -698,6 +698,18 @@ describe('CD-16 — el `split` NO se ejecuta sobre un header que excede el largo
    * afirmar que ninguno fue el string gigante sin depender de cuántos otros `split`
    * corran (los hay: la env de hosts usa `split(',')`).
    */
+  /**
+   * ⚠️ TESTIGO ÚNICO DE `MUT-09`. Medido: mover el chequeo de largo a DESPUÉS del
+   * `split` deja la suite completa en **1 solo rojo, y es éste**
+   * (MEDIDO: exit=1, 1 rojos, en `6f252ad`).
+   *
+   * Consecuencia práctica, y por eso está escrito acá y no sólo en el `.md`:
+   * **cambiarle el input a este `it` lo apaga igual que borrarlo** (CD-22). Si el
+   * `'a'.repeat(8192)` baja por debajo del techo de largo, o si el espía deja de
+   * envolver `String.prototype.split`, el mutante sobrevive y NADA MÁS en el repo
+   * lo nota — el código de error que devuelve el guard es el MISMO con el chequeo
+   * antes o después del split, así que ningún test de veredicto puede reemplazarlo.
+   */
   it('T-CHAIN-1-SPY: con 8192 caracteres, ningún `split` recibe ese string', () => {
     const original = String.prototype.split;
     const receiverLengths: number[] = [];
