@@ -23,6 +23,12 @@ import {
 // `resolveAgent` sale del MISMO módulo leaf que el over-fetch de discovery, para
 // que no puedan desalinearse. Leaf (no `services/discovery.js`) porque las suites
 // que mockean el service completo dejarían el export en `undefined`.
+import {
+  CONTRACTING_LOOP_DETECTED,
+  contractingErrorMessage,
+  isSelfDestination,
+  resolveSelfHosts,
+} from '../lib/contracting-chain.js';
 import { resolveComposeAgentPoolLimit } from '../lib/discovery-fetch-limit.js';
 import {
   type DownstreamLogger,
@@ -373,6 +379,48 @@ export const composeService = {
             },
           };
         }
+      }
+      // ── WKH-360 · SITIO 3 del guard de capa 1 (AC-4, steps 1..N) · 💰 ──────
+      // ESTE es el guard de dinero de los steps del pipeline: el débito per-step
+      // vive MUY abajo (el `budgetService.debit` del bloque de más adelante), así
+      // que cortar acá satisface CD-3 con margen.
+      //
+      // Tres razones para este punto exacto, las tres leídas del comentario que ya
+      // estaba acá:
+      //  · la autorización va PRIMERO (doctrina ya escrita abajo): un caller sin
+      //    scope recibe SCOPE_DENIED (403) y no un error de bucle. Los dos rechazan
+      //    antes de cobrar, así que el orden entre ellos no es una decisión de plata;
+      //  · `getStepGasOverheadUsd` LANZA en mainnet sin configurar, así que un
+      //    bucle no puede reportarse como un error de gas;
+      //  · queda pre-`resolveStepInput`, o sea antes de todo lo que este loop
+      //    calcula para el step.
+      //
+      // Cubre el happy-path Y el retry adaptativo, porque los dos `invokeAgent`
+      // están dentro de esta MISMA iteración.
+      //
+      // ⚠️ ES AUTORITATIVO AUNQUE LOS SITIOS 1 Y 2 YA HAYAN PASADO, y no es
+      // redundancia: el precio tiene cache de 60 s y el catálogo puede cambiar
+      // entre el preflight y la ejecución. Un destino que era ajeno cuando se
+      // cotizó puede ser propio cuando se ejecuta.
+      //
+      // Sin `hint` acá a propósito: este método no tiene `FastifyRequest` (recibe
+      // un `ComposeRequest`), que es una de las razones por las que la identidad no
+      // se deriva de `resolveBaseUrl`.
+      if (isSelfDestination(agent.invokeUrl, resolveSelfHosts().hosts)) {
+        const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);
+        warn(
+          { slug: agent.slug, step: i, layer: 'direct', site: 'pipeline-loop' },
+          'contracting-loop.blocked',
+        );
+        return {
+          success: false,
+          output: null,
+          steps: results,
+          totalCostUsdc: totalCost,
+          totalLatencyMs: totalLatency,
+          error: `Step ${i}: ${contractingErrorMessage(CONTRACTING_LOOP_DETECTED)}`,
+          errorCode: CONTRACTING_LOOP_DETECTED,
+        };
       }
       // WKH-305: la ENTRADA del step se construye ANTES del bloque de débito.
       // Antes se construía después, o sea que un step con entrada inválida se
@@ -1500,6 +1548,41 @@ export const composeService = {
         );
       }
       throw err;
+    }
+
+    // ── WKH-360 · SITIO 4 · ⛔ ESTE NO ES EL GUARD DE DINERO (CD-17) ─────────
+    // Es el bloqueo de EMISIÓN de último recurso, y NADA MÁS. Está acá porque el
+    // `ssrfFetch` de abajo es el ÚNICO punto del repo por el que sale una
+    // invocación a un agente, o sea el choke-point que AC-4 exige para "no emitir
+    // la petición HTTP saliente".
+    //
+    // ⛔ NO satisface CD-3 y está PROHIBIDO presentarlo como si lo hiciera: un
+    // throw acá lo agarra el catch per-step de `execute()`, que corre DESPUÉS del
+    // `budgetService.debit` del step. Si esta rama dispara, YA SE COBRÓ, y el
+    // reembolso (`refundStepDebit`) es best-effort. El guard que sí corta antes del
+    // dinero es el SITIO 3 (en el loop de `execute`), más el SITIO 1 (preHandler de
+    // /compose) y el SITIO 2 (service de /orchestrate) para los respectivos step-0.
+    //
+    // Por eso loguea a `error` y no a `warn`: que esta rama dispare significa que
+    // un guard pre-débito NO corrió, y eso es un defecto a investigar, no una
+    // condición esperada.
+    if (isSelfDestination(agent.invokeUrl, resolveSelfHosts().hosts)) {
+      // Se usa el logger DEL MÓDULO y no el `logger` que pasa el caller, a
+      // propósito y no por comodidad: `DownstreamLogger` declara sólo `warn` e
+      // `info` (`types/index.ts`), así que no tiene `error`. Ensancharlo obligaría a
+      // todos sus implementadores a crecer, y degradar este evento a `warn` para que
+      // entre en ese shape violaría CD-17 — el nivel es parte del contrato acá,
+      // porque que esta rama dispare significa que un guard pre-débito NO corrió.
+      // Efecto lateral bueno: un caller no puede tragarse este log.
+      log.error(
+        { slug: agent.slug, layer: 'direct', site: 'invoke-prefetch' },
+        'contracting-loop.blocked-at-emission: el guard PRE-DEBITO no corrio para ' +
+          'este step. La invocacion saliente NO se emite, pero el debito de este ' +
+          'step YA OCURRIO y su reembolso es best-effort.',
+      );
+      throw new Error(
+        `Agent ${agent.slug}: ${contractingErrorMessage(CONTRACTING_LOOP_DETECTED)}`,
+      );
     }
 
     // M2 (audit 2026-06-24): connect-time SSRF guard on invokeUrl. The

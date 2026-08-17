@@ -100,18 +100,35 @@ export async function resolveAgentPriceUsdc(
  * - Discovery throws: propaga el error (el preHandler ya lo mapea a 503; este
  *   resolver se llama dentro del mismo try del preHandler).
  *
- * @returns `{ registry, slug }` canónicos del agente resuelto, o null.
+ * WKH-360: devuelve además el `invokeUrl`, que esta función YA resolvía y
+ * DESCARTABA. Lo necesita el guard anti-bucle de capa 1 del step-0: sin la URL de
+ * destino no hay forma de preguntar "¿este destino somos nosotros?" antes del
+ * débito del middleware. Cero llamadas nuevas a discovery — es el mismo `Agent`
+ * que ya estaba en la mano.
+ *
+ * `Agent.invokeUrl` es REQUERIDO en el tipo, así que en producción siempre viene
+ * poblado. Un factory de `vi.mock` puede no traerlo (medido:
+ * `src/middleware/x402.non-evm-inbound.test.ts` devuelve `{slug, registry,
+ * payment}`), y por eso el consumidor (`isSelfDestination`) acepta
+ * `string | undefined` y devuelve `false` sin tirar en vez de romper suites por un
+ * motivo que no es el de la HU.
+ *
+ * @returns `{ registry, slug, invokeUrl }` canónicos del agente resuelto, o null.
  */
 export async function resolveAgentDestination(
   agentSlug: string,
   registryName?: string,
-): Promise<{ registry: string; slug: string } | null> {
+): Promise<{ registry: string; slug: string; invokeUrl: string } | null> {
   // Mismo orden de resolución que compose.resolveAgent (registry hint primero,
   // luego sin registry para tolerar case/registry omitido por el caller).
   let agent = await discoveryService.getAgent(agentSlug, registryName);
   if (!agent) agent = await discoveryService.getAgent(agentSlug);
   if (!agent) return null;
-  return { registry: agent.registry, slug: agent.slug };
+  return {
+    registry: agent.registry,
+    slug: agent.slug,
+    invokeUrl: agent.invokeUrl,
+  };
 }
 
 /**

@@ -416,6 +416,11 @@ describe('compose preHandler — WKH-59 real-price-debit', () => {
     mockResolveDest.mockResolvedValueOnce({
       registry: 'wasiai',
       slug: 'myagent',
+      // WKH-360: `resolveAgentDestination` ahora devuelve el `invokeUrl` (lo
+      // necesita el guard anti-bucle del step-0). El host es AJENO a propósito:
+      // este `it` mide el destino canónico del cap, y un host propio lo haría
+      // rechazar por bucle antes de llegar a lo que mide.
+      invokeUrl: 'https://agente-ajeno.example/run',
     });
 
     const res = await app.inject({

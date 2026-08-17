@@ -12,6 +12,12 @@ import {
   type ComposeStepShapeError,
   validateComposeStepShape,
 } from '../lib/compose-step-shape.js';
+import {
+  CONTRACTING_LOOP_DETECTED,
+  contractingErrorMessage,
+  isSelfDestination,
+  resolveSelfHosts,
+} from '../lib/contracting-chain.js';
 import type { DownstreamSkipCode } from '../lib/downstream-skip-code.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
@@ -733,6 +739,53 @@ async function resolveComposePriceHandler(
     const composeDestination = resolved
       ? deriveComposeDestination(resolved)
       : undefined;
+
+    // ── WKH-360 · SITIO 1 del guard de capa 1 (AC-4, step 0) · 💰 ────────────
+    // ESTE guard corta ANTES DEL DINERO, y por eso vive acá y no en el route
+    // handler: este preHandler está en el array en la posición ANTERIOR a
+    // `...requirePaymentOrA2AKey(`, que es EL DÉBITO del step-0 de /compose
+    // (`src/middleware/a2a-key.ts`). El `return reply...` aborta el preHandler
+    // lifecycle antes de ese middleware — el mismo idiom que los tres hermanos de
+    // este handler (`AGENT_NOT_FOUND` ×2 y `REGISTRY_UNAVAILABLE`), y por el mismo
+    // motivo que el comentario del guard de `price === null` ya explica.
+    //
+    // El step-0 NO lo cubre el guard del loop de `executePipeline`: para cuando el
+    // service existe, el middleware ya cobró. Y NO se pone en
+    // `augmentX402ChallengeAmount` aunque ésa ya recorra los steps 1..N
+    // pre-débito, porque sus DOS call-sites la envuelven en `.catch()`: un guard
+    // dentro de un bloque best-effort es un guard que se puede tragar.
+    //
+    // El conjunto de identidad de ESTE sitio lleva `hint`: es el único de los
+    // cuatro donde hay un `FastifyRequest`, y `request.hostname` (fastify 5, sin
+    // puerto) es el host por el que entró la petición. Agrandar el conjunto sólo
+    // produce MÁS rechazos (ver la monotonía en `lib/contracting-chain.ts`).
+    const { hosts: selfHosts } = resolveSelfHosts(request.hostname);
+    if (resolved && isSelfDestination(resolved.invokeUrl, selfHosts)) {
+      request.log.warn(
+        {
+          slug: firstAgent,
+          registry: firstStep.registry ?? null,
+          layer: 'direct',
+          site: 'compose-price-prehandler',
+        },
+        'contracting-loop.blocked',
+      );
+      return reply.status(400).send({
+        error: contractingErrorMessage(CONTRACTING_LOOP_DETECTED),
+        error_code: CONTRACTING_LOOP_DETECTED,
+        layer: 'direct',
+      });
+    }
+    if (resolved && !resolved.invokeUrl) {
+      // TRAMPA 1: producción no puede producirlo (`Agent.invokeUrl` es requerido
+      // en el tipo, así que el chequeo es por FALSY y no por `=== undefined`, que
+      // tsc rechazaría como comparación imposible), un factory de `vi.mock` sí.
+      // Se loguea el slug, NUNCA la URL.
+      request.log.warn(
+        { slug: firstAgent },
+        'contracting-loop.destination-unreadable',
+      );
+    }
 
     if (price === 0 && resolved === null) {
       // MONEY-PATH FIX (compose-404-budget-drain): `resolveAgentPriceUsdc`

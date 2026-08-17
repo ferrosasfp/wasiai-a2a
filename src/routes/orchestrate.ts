@@ -11,6 +11,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 // WKH-305 (CR MNR-3): módulo LEAF (cero imports de runtime) — la MISMA
 // definición de las reglas de forma que usan el borde de `/compose` y el service.
 import { validateInputMappingShape } from '../lib/compose-input-mapping.js';
+import { CONTRACTING_LOOP_DETECTED } from '../lib/contracting-chain.js';
 import type { DownstreamSkipCode } from '../lib/downstream-skip-code.js';
 import {
   extractRawKey,
@@ -218,7 +219,15 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         // WKH-61: pipeline.errorCode === 'SCOPE_DENIED' → 403 (legacy 200 path).
         // TD-WKH-61-2: la limpieza completa del mapeo `pipeline.success===false`
         // → 4xx queda fuera de scope; solo agregamos el branch SCOPE_DENIED.
-        const status = result.pipeline.errorCode === 'SCOPE_DENIED' ? 403 : 200;
+        // WKH-360: el corte del SITIO 2 (bucle de contratación, pre-débito) sale
+        // como 400. Cae en la misma familia de status que el resto de los rechazos
+        // de dominio sobre un body bien formado; NO se estrena un 508.
+        const status =
+          result.pipeline.errorCode === 'SCOPE_DENIED'
+            ? 403
+            : result.pipeline.errorCode === CONTRACTING_LOOP_DETECTED
+              ? 400
+              : 200;
         // WKH-127 (AC-4): el service decidió el fallback $1 → seteamos el header acá
         // (el service no recibe reply, CD-7).
         if (result.debitFallback) {
@@ -237,7 +246,17 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           result.pipeline.steps,
           downstreamSkipCauses,
         );
-        return reply.status(status).send({ kiteTxHash, ...result });
+        // WKH-360 (CD-19): el `error_code` top-level de familia 1, para que un
+        // cliente matchee UN solo string sin tener que mirar dentro de `pipeline`.
+        // El VALOR sale de la misma constante del leaf que usa el camel de adentro.
+        return reply.status(status).send({
+          kiteTxHash,
+          ...result,
+          ...(result.pipeline.errorCode === CONTRACTING_LOOP_DETECTED && {
+            error_code: CONTRACTING_LOOP_DETECTED,
+            layer: 'direct',
+          }),
+        });
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Orchestration failed';
@@ -811,7 +830,13 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
 
         const kiteTxHash = request.paymentTxHash;
         // Mismo mapeo de status/headers que `/` (CD-6).
-        const status = result.pipeline.errorCode === 'SCOPE_DENIED' ? 403 : 200;
+        // WKH-360: mismo mapeo que `/` — el corte del SITIO 2 sale 400.
+        const status =
+          result.pipeline.errorCode === 'SCOPE_DENIED'
+            ? 403
+            : result.pipeline.errorCode === CONTRACTING_LOOP_DETECTED
+              ? 400
+              : 200;
         if (result.debitFallback) {
           reply.header('x-debit-fallback', 'registry-miss');
         }
@@ -824,7 +849,17 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           result.pipeline.steps,
           downstreamSkipCauses,
         );
-        return reply.status(status).send({ kiteTxHash, ...result });
+        // WKH-360 (CD-19): el `error_code` top-level de familia 1, para que un
+        // cliente matchee UN solo string sin tener que mirar dentro de `pipeline`.
+        // El VALOR sale de la misma constante del leaf que usa el camel de adentro.
+        return reply.status(status).send({
+          kiteTxHash,
+          ...result,
+          ...(result.pipeline.errorCode === CONTRACTING_LOOP_DETECTED && {
+            error_code: CONTRACTING_LOOP_DETECTED,
+            layer: 'direct',
+          }),
+        });
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Orchestration execute failed';

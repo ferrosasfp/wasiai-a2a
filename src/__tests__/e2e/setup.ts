@@ -245,6 +245,7 @@ import cors from '@fastify/cors';
 // ── Imports (after mocks) ─────────────────────────────────────
 import Fastify from 'fastify';
 import { readPayoutRouteHealth } from '../../adapters/solana/facilitator-settle.js';
+import { readContractingGuardHealth } from '../../lib/contracting-chain.js';
 import { registerErrorBoundary } from '../../middleware/error-boundary.js';
 import { registerRateLimit } from '../../middleware/rate-limit.js';
 import {
@@ -356,6 +357,11 @@ export async function buildTestApp() {
         // módulo. Si el campo viviera sólo allá, las dos copias divergirían en silencio y
         // ningún test e2e vería el campo nuevo.
         solanaPayoutRoute: readPayoutRouteHealth(),
+        // WKH-360: MISMA línea que `src/index.ts`, por el mismo motivo que las dos de
+        // arriba. Que sea una LLAMADA A FUNCIÓN y no un objeto literal es deliberado:
+        // dos literales escritos a mano en dos handlers divergen apenas alguien toque
+        // uno, y acá el e2e tiene que verificar EL MISMO campo que sirve prod.
+        contractingGuard: readContractingGuardHealth(),
       });
     },
   );

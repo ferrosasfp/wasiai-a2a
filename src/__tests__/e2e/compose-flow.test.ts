@@ -227,7 +227,14 @@ describe('compose HTTP e2e flow (P0)', () => {
     nextResolvedChainId = undefined;
     nextInjectedDestination = undefined;
     mockResolvePrice.mockResolvedValue(0.05);
-    mockResolveDest.mockResolvedValue({ registry: 'wasiai', slug: 'kyc' });
+    // WKH-360: `invokeUrl` con host AJENO. Es el default de TODA esta suite e2e,
+    // así que un host propio haría que el guard anti-bucle del step-0 cortara cada
+    // caso del camino feliz.
+    mockResolveDest.mockResolvedValue({
+      registry: 'wasiai',
+      slug: 'kyc',
+      invokeUrl: 'https://agente-ajeno.example/run',
+    });
     mockDebit.mockResolvedValue({ success: true });
     mockCreditWithDest.mockResolvedValue({ success: true });
     // discover fallback (resolveAgent hydration path) returns nothing useful.

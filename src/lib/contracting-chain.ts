@@ -574,6 +574,39 @@ export function readInboundContracting(
   return { ok: true, chain, depth };
 }
 
+/**
+ * El campo `contractingGuard` de `GET /health`. Aditivo y SIN valores sensibles:
+ * sale la CANTIDAD de hosts propios, nunca los hosts.
+ *
+ * ⚠️ VIVE ACÁ, Y NO INLINE EN EL HANDLER, porque `/health` está DUPLICADO: el
+ * handler de `src/index.ts` está replicado en `src/__tests__/e2e/setup.ts` (ese
+ * módulo hace `await initAdapters()` a nivel de módulo, así que no se puede
+ * importar desde un test). Dos objetos literales escritos a mano divergen apenas
+ * alguien toque uno; con una función, el e2e verifica EL MISMO campo que sirve
+ * prod.
+ *
+ * Para qué sirve el dato: es la única forma de confirmar DESPUÉS del deploy si
+ * `BASE_URL` / `A2A_SELF_HOSTS` quedaron efectivamente puestas — desde afuera no
+ * se puede distinguir (NC-1) — y de eso depende si la capa 1 cubre los alias
+ * propios o sólo el `Host` por el que entró cada petición.
+ *
+ * `source: 'request-only'` NO es un error: es información. Dice que el conjunto
+ * derivado de la configuración está vacío y que lo único que sostiene la identidad
+ * es el `Host` entrante.
+ */
+export function readContractingGuardHealth(): {
+  selfHostCount: number;
+  depthMax: number;
+  source: 'env' | 'request-only';
+} {
+  const { hosts } = resolveSelfHosts();
+  return {
+    selfHostCount: hosts.length,
+    depthMax: resolveContractingDepthMax(),
+    source: hosts.length > 0 ? 'env' : 'request-only',
+  };
+}
+
 /** Los cuatro códigos que este módulo puede emitir. */
 export type ContractingErrorCode =
   | typeof CONTRACTING_LOOP_DETECTED

@@ -5,13 +5,18 @@
  * Este archivo cubre `src/lib/contracting-chain.ts` **como función pura**. Que los
  * guards estén efectivamente CABLEADOS —y, sobre todo, que corten ANTES del
  * débito— NO se prueba acá: eso vive en los tests de ORDEN de los cuatro sitios
- * (`routes/compose.test.ts`, `services/compose.test.ts`,
- * `services/orchestrate.test.ts`, `middleware/contracting-guard.test.ts`).
+ * (`routes/compose.contracting-loop.test.ts`,
+ * `services/compose.contracting-loop.test.ts`,
+ * `services/orchestrate.contracting-loop.test.ts`).
  * Un verde de este archivo NO dice nada sobre el orden respecto del dinero.
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  assertSelfHostsEnv,
   buildOutboundContractingHeaders,
   CONTRACTING_CHAIN_HEADER,
   CONTRACTING_CHAIN_MALFORMED,
@@ -24,10 +29,13 @@ import {
   DEFAULT_CONTRACTING_DEPTH_MAX,
   isContractingDepthMaxMisconfigured,
   isSelfDestination,
+  readContractingGuardHealth,
   readInboundContracting,
   resolveContractingDepthMax,
   resolveSelfHosts,
 } from './contracting-chain.js';
+
+const LIB_DIR = fileURLToPath(new URL('.', import.meta.url));
 
 const ENV_KEYS = [
   'A2A_SELF_HOSTS',
@@ -557,5 +565,124 @@ describe('buildOutboundContractingHeaders — AC-7 / CD-18', () => {
     );
     expect(v.ok).toBe(false);
     if (!v.ok) expect(v.code).toBe(CONTRACTING_LOOP_DETECTED);
+  });
+});
+
+describe('assertSelfHostsEnv — throw si ilegible, warn si vacío (patrón de assertDepositMinimumEnv)', () => {
+  it('T-ENV-1: `A2A_SELF_HOSTS` con ESQUEMA ⇒ LANZA (no degrada a [] en silencio)', () => {
+    // Es el caso en el que el operador CREE tener la identidad puesta. Degradarlo a
+    // "sin alias" en silencio dejaría al guard sin reconocer como propio justo el
+    // host que el operador declaró, y el síntoma (un bucle que pasa) no apunta a la
+    // env var.
+    process.env.A2A_SELF_HOSTS = 'https://gw.example.com';
+    expect(() => assertSelfHostsEnv()).toThrow(/MAL ESCRITA/);
+    // el mensaje dice el formato aceptado y por qué no bootea
+    expect(() => assertSelfHostsEnv()).toThrow(/A2A_SELF_HOSTS/);
+  });
+
+  it('T-ENV-1b: entrada DUPLICADA ⇒ LANZA', () => {
+    process.env.A2A_SELF_HOSTS = 'gw.example.com,GW.EXAMPLE.COM.';
+    expect(() => assertSelfHostsEnv()).toThrow(/MAL ESCRITA/);
+  });
+
+  it('T-ENV-1c: con puerto o con path ⇒ LANZA', () => {
+    for (const raw of ['gw.example.com:8443', 'gw.example.com/compose']) {
+      process.env.A2A_SELF_HOSTS = raw;
+      expect(() => assertSelfHostsEnv(), `raw=${raw}`).toThrow(/MAL ESCRITA/);
+    }
+  });
+
+  it('T-ENV-2: AUSENTE (y sin BASE_URL) ⇒ devuelve el texto de WARN, NO lanza', () => {
+    // NO THROW a propósito: no se pudo verificar el valor de `BASE_URL` en el
+    // Railway de prod (NC-1) y voltear el servicio por eso sería un radio de
+    // explosión mayor que el problema.
+    let out: string | null = null;
+    expect(() => {
+      out = assertSelfHostsEnv();
+    }).not.toThrow();
+    expect(out).not.toBeNull();
+    // El texto tiene que decir QUÉ queda cubierto y QUÉ no, o el operador no puede
+    // decidir si le alcanza.
+    expect(String(out)).toContain('Host');
+    expect(String(out)).toContain('ALIAS');
+    expect(String(out)).toContain('selfHostCount');
+  });
+
+  it('T-ENV-2b: `/health` publica `source:"request-only"` cuando el conjunto está vacío', () => {
+    const health = readContractingGuardHealth();
+    expect(health).toEqual({
+      selfHostCount: 0,
+      depthMax: 2,
+      source: 'request-only',
+    });
+  });
+
+  it('T-ENV-3: configurada ⇒ null, y `/health` publica `source:"env"` con el CONTEO (no los hosts)', () => {
+    process.env.A2A_SELF_HOSTS = 'gw.example.com,alias.example.com';
+    expect(assertSelfHostsEnv()).toBeNull();
+    const health = readContractingGuardHealth();
+    expect(health).toEqual({
+      selfHostCount: 2,
+      depthMax: 2,
+      source: 'env',
+    });
+    // Que NO salgan los hosts es parte del contrato del campo: sale el conteo.
+    expect(JSON.stringify(health)).not.toContain('gw.example.com');
+  });
+
+  it('T-ENV-4: sólo `BASE_URL` alcanza para que NO haya warn', () => {
+    process.env.BASE_URL = 'https://gw.example.com';
+    expect(assertSelfHostsEnv()).toBeNull();
+    expect(readContractingGuardHealth().source).toBe('env');
+  });
+});
+
+describe('T-FLAG-1 (CD-1) — barrido TEXTUAL: ninguna bandera gatea el corte', () => {
+  /**
+   * La convención por default de este repo para una env booleana es `=== 'true'`
+   * con default OFF. Aplicada a este guard shippearía el guard APAGADO, y el
+   * síntoma sería que no pasa nada — que se ve igual que "no hay bucles".
+   *
+   * Este barrido es el control EJECUTABLE de esa prohibición. Un comentario que
+   * dice "no hay banderas" no se puede medir; esto sí, y se rompe el día que
+   * alguien agregue una.
+   */
+  const GUARD_SOURCES = ['contracting-chain.ts'];
+
+  it("no hay ningún `=== 'true'` en el fuente del guard", () => {
+    for (const file of GUARD_SOURCES) {
+      const src = readFileSync(join(LIB_DIR, file), 'utf8');
+      // Se buscan las dos formas de la convención, con comilla simple y doble.
+      expect(src, `${file} tiene un === 'true'`).not.toMatch(/===\s*'true'/);
+      expect(src, `${file} tiene un === "true"`).not.toMatch(/===\s*"true"/);
+    }
+  });
+
+  it('las ÚNICAS envs que el guard lee son las dos de identidad/techo + BASE_URL', () => {
+    // Si aparece una env nueva en este módulo, este test la pone en evidencia y
+    // obliga a justificarla. Lo que se prohíbe no es "leer envs" (la identidad ES
+    // una env): es leer un INTERRUPTOR.
+    const src = readFileSync(join(LIB_DIR, 'contracting-chain.ts'), 'utf8');
+    const reads = [
+      ...src.matchAll(/process\.env(?:\.([A-Z0-9_]+)|\[([^\]]+)\])/g),
+    ]
+      .map((m) => m[1] ?? m[2])
+      .filter((x): x is string => x !== undefined);
+    const unique = [...new Set(reads)].sort();
+    expect(unique).toEqual(['BASE_URL', 'DEPTH_MAX_ENV', 'SELF_HOSTS_ENV']);
+  });
+
+  it('el corte funciona con `process.env` limpio de banderas', () => {
+    // Sólo la identidad. Ninguna bandera puesta.
+    process.env.A2A_SELF_HOSTS = 'gw.example.com';
+    expect(
+      isSelfDestination(
+        'https://gw.example.com/compose',
+        resolveSelfHosts().hosts,
+      ),
+    ).toBe(true);
+    // Y una allow-list de auto-contratación NO existe todavía (TD-360-1): si
+    // alguien la shippea, tiene que venir vacía por default = denegar.
+    expect(process.env.A2A_SELF_CONTRACTING_ALLOW).toBeUndefined();
   });
 });

@@ -12,6 +12,12 @@ import {
   anthropicCircuitBreaker,
   CircuitOpenError,
 } from '../lib/circuit-breaker.js';
+import {
+  CONTRACTING_LOOP_DETECTED,
+  contractingErrorMessage,
+  isSelfDestination,
+  resolveSelfHosts,
+} from '../lib/contracting-chain.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
@@ -27,7 +33,10 @@ import type {
   OrchestrateResult,
   ResolvedComposeStep,
 } from '../types/index.js';
-import { resolveAgentPriceUsdc } from './agent-price.js';
+import {
+  resolveAgentDestination,
+  resolveAgentPriceUsdc,
+} from './agent-price.js';
 import { resolveAgentSplitContext } from './agent-split-context.js';
 import { budgetService } from './budget.js';
 import { composeService } from './compose.js';
@@ -1111,6 +1120,98 @@ export const orchestrateService = {
           currentCostUsdc,
           maxQuotedCostUsdc: request.maxQuotedCostUsdc,
         };
+      }
+    }
+
+    // ── WKH-360 · SITIO 2 del guard de capa 1 (AC-4, step 0 de orchestrate) · 💰
+    // El punto exacto NO es una elección: el comentario del cap gate de acá arriba
+    // ya declara este lugar como "ANTES del price-fallback y de cualquier
+    // budgetService.debit o composeService.compose". Este guard se para ahí mismo,
+    // o sea antes del `budgetService.debit` del step-0 (más abajo en este método) y
+    // antes del `composeService.compose`.
+    //
+    // POR QUÉ HACE FALTA además del Sitio 3 (el loop de compose): en /orchestrate*
+    // el débito del step-0 lo hace ESTE SERVICE, no el middleware — las tres rutas
+    // apagan el débito del middleware con `markSkipMiddlewareDebitHandler`. O sea
+    // que para orchestrate el ÚNICO débito del step-0 es el de acá, y si el guard
+    // corriera recién dentro de compose el step-0 ya estaría cobrado.
+    //
+    // Cubre las TRES rutas de orchestrate porque las tres desembocan en este
+    // método.
+    //
+    // ⛔ NO se cruza `plan.discoveredAgents` contra `plan.steps[i].agent` a mano:
+    // sería una SEGUNDA expresión de la resolución y divergiría en
+    // /orchestrate/execute, donde los steps vienen del body del cliente. Se llama
+    // la MISMA `resolveAgentDestination` que usa el Sitio 1, por step, con el mismo
+    // patrón de iteración que `quoteMaxCostUsdc`. El costo son N lookups con cache
+    // de 60 s, y en /execute ese lookup YA ocurre dentro de `quoteMaxCostUsdc`.
+    //
+    // El `selfHosts.length > 0` de adelante no es una optimización cosmética: sin
+    // identidad conocida el guard no puede decidir nada, así que evita N lookups
+    // que no cambiarían el veredicto y deja el camino BYTE-IDÉNTICO al de hoy
+    // cuando no hay configuración (AC-8 / CD-1).
+    const { hosts: selfHosts } = resolveSelfHosts();
+    if (selfHosts.length > 0) {
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        if (!step || typeof step.agent !== 'string') continue;
+        const dest = await resolveAgentDestination(step.agent, step.registry);
+        if (dest && isSelfDestination(dest.invokeUrl, selfHosts)) {
+          log.warn(
+            {
+              orchestrationId,
+              slug: step.agent,
+              step: i,
+              layer: 'direct',
+              site: 'orchestrate-pre-debit',
+            },
+            'contracting-loop.blocked',
+          );
+          // Se devuelve un `OrchestrateResult` normal con el código en
+          // `pipeline.errorCode`, que es el canal que este repo YA usa para "el
+          // pipeline no se ejecutó y acá está el motivo" (el mapeo
+          // `pipeline.errorCode === 'SCOPE_DENIED' → 403` de las dos rutas de
+          // ejecución). El route agrega el 400 y el `error_code` top-level.
+          //
+          // Cero débito y cero compose: este `return` está ANTES de los dos.
+          const loopResult: OrchestrateResult = {
+            orchestrationId,
+            answer: null,
+            reasoning: contractingErrorMessage(CONTRACTING_LOOP_DETECTED),
+            pipeline: {
+              success: false,
+              output: null,
+              steps: [],
+              totalCostUsdc: 0,
+              totalLatencyMs: 0,
+              error: `Step ${i}: ${contractingErrorMessage(CONTRACTING_LOOP_DETECTED)}`,
+              errorCode: CONTRACTING_LOOP_DETECTED,
+            },
+            consideredAgents: plan.discoveredAgents,
+            protocolFeeUsdc: 0,
+          };
+
+          eventService
+            .track({
+              eventType: 'orchestrate_goal',
+              status: 'failed',
+              latencyMs: Date.now() - startTime,
+              costUsdc: 0,
+              goal,
+              metadata: {
+                orchestrationId,
+                agentCount: steps.length,
+                fallback: usedFallback,
+                broadenRetryUsed: plan.broadenRetryUsed ?? false,
+                retryAgentCount: plan.retryAgentCount ?? null,
+              },
+            })
+            .catch((err) =>
+              log.error({ err }, '[Orchestrate] event tracking failed'),
+            );
+
+          return loopResult;
+        }
       }
     }
 
