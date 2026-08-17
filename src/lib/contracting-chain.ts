@@ -1,0 +1,680 @@
+/**
+ * WKH-360 — identidad propia del gateway y traza de contratación entre
+ * coordinadores A2A.
+ *
+ * ─── POR QUÉ ES UN MÓDULO LEAF (cero imports) ───────────────────────────────
+ * Lo consumen CUATRO capas distintas: un route (`routes/compose.ts`), dos
+ * services (`services/compose.ts`, `services/orchestrate.ts`) y un middleware
+ * (`middleware/contracting-guard.ts`). Y **63 archivos de test mockean
+ * `../adapters/registry.js`** con factories sin `importOriginal`; el mismo hazard
+ * con `../services/discovery.js` ya rompió 12 y 84 tests en otra HU
+ * (`src/lib/discovery-fetch-limit.ts:1-11` lo documenta). Un archivo sin
+ * dependencias no puede quedar `undefined` en ninguna suite porque ninguna lo
+ * mockea. Precedentes en este repo: `compose-limits.ts`,
+ * `discovery-fetch-limit.ts`, `downstream-skip-code.ts`, `pricing-constants.ts`.
+ *
+ * `process.env` SÍ se lee acá (es un global, no un import), igual que
+ * `self-published-auth.ts:115` y `discovery-fetch-limit.ts:75`. Lo que NO va:
+ * ningún `import` del repo, ningún logging (los call-sites loguean) y ninguna
+ * decisión de dinero. Este módulo devuelve VEREDICTOS; quien cobra o no cobra es
+ * el call-site.
+ *
+ * ─── EL PUNTO FINAL DEL HOSTNAME, MEDIDO (CD-15) ────────────────────────────
+ * ⛔ NO reusar `canonicalizeHostKey` de `src/lib/self-published-auth.ts:89-105`.
+ * Su docblock (`:82`) afirma que produce el host "(minúsculas, punycode, SIN
+ * PUNTO FINAL)" y **eso es falso**. Medido en `3823580` con
+ * `node -e "console.log(new URL('https://EXAMPLE.com./x').hostname)"`:
+ *
+ *     new URL('https://EXAMPLE.com./x').hostname  ===  'example.com.'   ⚠️ con punto
+ *     new URL('https://EXAMPLE.COM/x').hostname   ===  'example.com'
+ *
+ * El punto final SOBREVIVE. Reusar esa función creyendo el comentario deja un
+ * bypass de UNA TECLA: `https://<self>./compose` no matchearía la identidad y el
+ * guard anti-bucle aplaudiría. Por eso `canonicalizeHost` de acá replica los
+ * pasos 1-6 de esa función **verbatim en comportamiento** y agrega el **paso 7**
+ * (strip del punto final), que es el aporte de esta HU. El over-claim de ese
+ * docblock ajeno queda REPORTADO (NC-6) y NO se arregla desde acá: ese archivo
+ * está en el camino de credenciales y está fuera del Scope IN.
+ *
+ * ⚠️ Que hoy el borde de Railway conteste 404 a la variante con punto final
+ * (medido: `…up.railway.app./health` → 404 vs `…up.railway.app/health` → 200)
+ * **NO es un guard y no cuenta como mitigación**: es política de ruteo por Host
+ * de un hosting, que cambia el día que se agrega un dominio propio o se mueve el
+ * deploy.
+ *
+ * ─── LOS 8 VALORES DE PROFUNDIDAD, MEDIDOS (CD-14) ──────────────────────────
+ * Por qué la profundidad NO se lee con `parseInt` ni con `Number`. Medido en
+ * `3823580` con `node -e`:
+ *
+ *   valor      | parseInt(v,10) | Number(v)   | ^[0-9]{1,3}$ | decisión
+ *   -----------|----------------|-------------|--------------|------------------
+ *   ausente    | —              | —           | —            | 0 (caller directo)
+ *   '0'..'999' | igual          | igual       | sí           | valor
+ *   '1e9'      | 1          ⚠️  | 1000000000  | no           | RECHAZO
+ *   ''         | NaN            | 0       ⚠️  | no           | RECHAZO
+ *   ' 2'       | 2          ⚠️  | 2           | no           | RECHAZO
+ *   '2abc'     | 2          ⚠️  | NaN         | no           | RECHAZO
+ *   '0x10'     | 0              | 16          | no           | RECHAZO
+ *   '1000'     | 1000           | 1000        | no           | RECHAZO por forma
+ *
+ * Las cuatro filas con ⚠️ son el motivo de la regla. Tres de ellas producen un
+ * número **plausible y MENOR al techo**: el modo de falla no es un error visible,
+ * es **un guard que aplaude**. `'1e9'` leído como `1` es un atacante declarando
+ * profundidad mil millones y pasando como si fuera el primer salto; `''` leído
+ * como `0` es un **reseteo del contador** a pedido de un tercero.
+ *
+ * Por eso: presente-pero-ilegible se **RECHAZA**, nunca se degrada a 0. Ausente
+ * SÍ es 0, y eso no es una concesión: es el 100% del tráfico de hoy (los 25
+ * agentes descubribles en prod no emiten estos headers), y tratarlo como rechazo
+ * rompería todos los callers.
+ *
+ * La conversión dígito-a-número es manual (`digitsToInt`) justamente para que en
+ * este archivo no exista ningún `parseInt` ni `Number(` en el camino de la
+ * profundidad.
+ *
+ * ─── LA DERIVACIÓN DEL TECHO POR DEFAULT = 2 (no es un número elegido) ──────
+ * El costo de un bucle NO es lineal en la profundidad: es **exponencial con base
+ * `MAX_COMPOSE_STEPS`**. Datos medidos en `3823580`: fan-out por nivel
+ * = `MAX_COMPOSE_STEPS` = 5 (`src/lib/compose-limits.ts:38`); peor caso del
+ * débito por step = `PLACEHOLDER_FEE_USD` = 1.0 (`src/lib/pricing-constants.ts:16`);
+ * gas overhead = 0 en testnet y sin env (`src/services/compose.ts:433`); el techo
+ * de exposición por pipeline se entrega SIN configurar ⇒ `+Infinity`
+ * (`src/lib/stranded-payment.ts:342-348`); y `maxBudget: 0`/ausente sigue
+ * significando SIN LÍMITE.
+ *
+ * Con techo `D` los débitos posibles son `Σ_{k=1..D} 5^k = (5^(D+1) − 5)/4`:
+ *
+ *   D          | peticiones | débitos | peor caso USD | ¿cubre la tesis del deck?
+ *   -----------|------------|---------|---------------|--------------------------
+ *   1          | 6          | 5       | $5            | no: prohíbe que un
+ *              |            |         |               | coordinador que nos
+ *              |            |         |               | contrata contrate a otro
+ *   2 (default)| 31         | 30      | $30           | sí
+ *   3          | 156        | 155     | $155          | un nivel de más sin caso
+ *   sin techo  | sin cota   | sin cota| sólo lo frena el saldo de la key
+ *
+ * **2 es el número más chico que cubre la tesis publicada** (plataforma →
+ * nosotros → otro coordinador → agentes). Subirlo cuesta ×5 por nivel.
+ *
+ * ⚠️ **El techo NO detecta ciclos: ACOTA COSTO.** Los ciclos los detecta la traza
+ * (paso 5 de `readInboundContracting`). El techo existe para el ciclo que la traza
+ * NO PUEDE VER: el que pasa por un intermediario que no reenvía los headers.
+ * Confundir las dos cosas es un over-claim.
+ *
+ * ⚠️ Y los otros techos del servicio NO frenan un bucle:
+ *  · el timeout (`middleware/timeout.ts:8-25`) hace un `setTimeout` que manda un
+ *    504 y NADA MÁS: no aborta el pipeline, así que un bucle sigue gastando
+ *    después del 504;
+ *  · el rate-limit de `/orchestrate` es 10/60 s con store EN PROCESO y key
+ *    `request.ip`, y `TRUST_PROXY` es opt-in con default `false`
+ *    (`src/lib/env.ts:53`), así que detrás del borde de Railway los callers
+ *    externos podrían compartir un bucket. El valor de `TRUST_PROXY` en prod NO
+ *    se pudo verificar (NC-2): esto se escribe con las dos lecturas y no como
+ *    garantía.
+ *
+ * ─── LO QUE ESTE MÓDULO NO CIERRA ──────────────────────────────────────────
+ * · **El transitivo contra un adversario.** La capa 2 depende de que la
+ *   contraparte reenvíe los headers ⇒ es BEST-EFFORT (ver
+ *   `CONTRACTING_LAYER2_BEST_EFFORT_NOTE`, que va en el BODY del error para que el
+ *   caller lo sepa). Contra alguien que los borra a propósito lo que queda en pie
+ *   es la capa 1 (identidad del destino) y el techo.
+ * · **El bypass por IP literal.** La comparación es POR NOMBRE:
+ *   `https://69.46.46.64/compose` no matchea. Residual declarado (R-3 /
+ *   TD-360-2), NO cerrado acá. `A2A_SELF_HOSTS` acepta un literal si un operador
+ *   lo necesita.
+ * · **Un `302` de un tercero hacia nosotros.** `ssrf-dispatcher` sigue redirects
+ *   a mano y sólo revalida SSRF por hop, así que la capa 1 no lo ve al momento de
+ *   decidir. Lo que sí ocurre es que los headers de acá NO están en los 4
+ *   `CREDENTIAL_HEADERS` que ese módulo borra por hop, así que la traza sobrevive
+ *   el salto y la capa 2 lo caza en el inbound del siguiente gateway.
+ */
+
+/** Header con la cadena de contratación (CSV de hostnames canónicos). */
+export const CONTRACTING_CHAIN_HEADER = 'x-a2a-contracting-chain';
+
+/** Header con la profundidad de contratación (entero decimal). */
+export const CONTRACTING_DEPTH_HEADER = 'x-a2a-contracting-depth';
+
+/** Env con los hostnames propios adicionales (CSV). */
+export const SELF_HOSTS_ENV = 'A2A_SELF_HOSTS';
+
+/** Env con el techo de profundidad de contratación. */
+export const DEPTH_MAX_ENV = 'A2A_CONTRACTING_DEPTH_MAX';
+
+/**
+ * CD-6/CD-19 — UN solo texto para la limitación de la capa 2, consumido por el
+ * BODY del error, por la Agent Card y por los tests.
+ *
+ * Vive acá, y no como literal en cada call-site, para que el mensaje que EMITE el
+ * código y el que ASSERTA el test no puedan divergir: si divergen, la promesa que
+ * el caller lee y la que el test verifica dejan de ser la misma frase.
+ */
+export const CONTRACTING_LAYER2_BEST_EFFORT_NOTE =
+  'La deteccion de bucles TRANSITIVOS es BEST-EFFORT: depende de que cada ' +
+  'intermediario reenvie los headers x-a2a-contracting-chain y ' +
+  'x-a2a-contracting-depth. Una contraparte que los borra no queda cubierta por ' +
+  'esta capa; contra ese caso lo que queda en pie es el rechazo por identidad ' +
+  'del destino y el techo de profundidad.';
+
+/** CD-19: UN solo string por código, consumido desde las DOS superficies. */
+export const CONTRACTING_LOOP_DETECTED = 'CONTRACTING_LOOP_DETECTED';
+export const CONTRACTING_DEPTH_EXCEEDED = 'CONTRACTING_DEPTH_EXCEEDED';
+export const CONTRACTING_DEPTH_MALFORMED = 'CONTRACTING_DEPTH_MALFORMED';
+export const CONTRACTING_CHAIN_MALFORMED = 'CONTRACTING_CHAIN_MALFORMED';
+
+/**
+ * Techo de profundidad por default. **Derivado con números** en el docblock de
+ * arriba (tabla `D`), no elegido: es el más chico que cubre la tesis publicada.
+ */
+export const DEFAULT_CONTRACTING_DEPTH_MAX = 2;
+
+/** Techo máximo aceptable para la env (un techo enorme es un techo apagado). */
+const DEPTH_MAX_ENV_CEILING = 64;
+
+/** Largo máximo de un hostname según DNS. */
+const MAX_HOSTNAME_CHARS = 253;
+
+/** Tope absoluto del header de cadena, independiente del techo configurado. */
+const CHAIN_HEADER_ABSOLUTE_MAX_CHARS = 4096;
+
+/** Sólo dígitos ASCII, 1 a 3. Ver la tabla de los 8 valores en el docblock. */
+const DECIMAL_1_TO_3_DIGITS = /^[0-9]{1,3}$/;
+
+/**
+ * Convierte 1..3 dígitos ASCII a número **sin `parseInt` ni `Number`** (CD-14).
+ *
+ * Precondición: el argumento YA pasó `DECIMAL_1_TO_3_DIGITS`. Con esa
+ * precondición el resultado está en `[0, 999]` y no puede ser `NaN`.
+ *
+ * Existe para que en este archivo no haya ningún `parseInt`/`Number(` en el
+ * camino de la profundidad: la regla es verificable con un grep, y una regla que
+ * se verifica con un grep no se relaja sin que se note.
+ */
+function digitsToInt(digits: string): number {
+  let out = 0;
+  for (let i = 0; i < digits.length; i += 1) {
+    out = out * 10 + (digits.charCodeAt(i) - 48);
+  }
+  return out;
+}
+
+/**
+ * Un header repetido llega como `string[]`, y eso **es ausencia**.
+ * Patrón `pick` de `src/middleware/a2a-key.ts:187-195`.
+ */
+function pickSingleHeader(
+  raw: string | string[] | undefined,
+): string | undefined {
+  return typeof raw === 'string' ? raw : undefined;
+}
+
+/**
+ * Canonicaliza un host a la forma comparable con `new URL(x).hostname`.
+ *
+ * Pasos 1-6: `canonicalizeHostKey` (`src/lib/self-published-auth.ts:89-105`),
+ * verbatim en COMPORTAMIENTO. **Paso 7: el strip del punto final**, que esa
+ * función NO hace aunque su docblock diga que sí (medido; ver el encabezado).
+ *
+ * Devuelve `null` para cualquier cosa que no sea EXACTAMENTE un host: con
+ * esquema, con puerto, con userinfo, con path/query/fragment, con espacios en los
+ * bordes, IPv6 entre corchetes.
+ */
+export function canonicalizeHost(raw: string): string | null {
+  // 1 · bordes: un valor con espacios es un valor que el operador escribió mal.
+  if (raw.trim() !== raw || raw.length === 0) return null;
+  // 2 · esquema, userinfo, puerto, IPv6.
+  if (raw.includes('/') || raw.includes('@') || raw.includes(':')) return null;
+  let parsed: URL;
+  try {
+    // 3 · el parser de la plataforma hace minúsculas + punycode gratis.
+    parsed = new URL(`https://${raw}`);
+  } catch {
+    return null;
+  }
+  // 4 · puerto/userinfo que se colaron por otra vía.
+  if (parsed.port !== '') return null;
+  if (parsed.username !== '' || parsed.password !== '') return null;
+  // 5 · path/query/fragment.
+  if (parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') {
+    return null;
+  }
+  const host = parsed.hostname;
+  // 6 · host vacío.
+  if (host.length === 0) return null;
+  // 7 ⚠️ EL PASO QUE NO EXISTE EN `canonicalizeHostKey` (CD-15). Sin esto,
+  //     `https://<self>./compose` es un bypass de identidad de una tecla.
+  return host.endsWith('.') ? host.slice(0, -1) : host;
+}
+
+/**
+ * Extrae el host de un `BASE_URL` que puede venir como URL completa o como host
+ * pelado. Monótono: si no se puede leer, no aporta nada al conjunto.
+ */
+function hostFromBaseUrl(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  try {
+    return canonicalizeHost(new URL(trimmed).hostname);
+  } catch {
+    return canonicalizeHost(trimmed);
+  }
+}
+
+/**
+ * Estado de `A2A_SELF_HOSTS`, en los tres valores que el arranque necesita
+ * distinguir (mismo contrato que `classifyDepositMinimumEnv`).
+ *
+ * `invalid` incluye los DUPLICADOS a propósito: dos entradas que canonicalizan al
+ * mismo host (`GW.example.com` y `gw.example.com.`) son el caso en el que el
+ * operador cree tener DOS alias cubiertos y tiene uno.
+ */
+export function classifySelfHostsEnv():
+  | { state: 'absent' }
+  | { state: 'configured'; hosts: string[] }
+  | { state: 'invalid'; reason: string } {
+  const raw = process.env[SELF_HOSTS_ENV];
+  if (raw === undefined || raw.trim().length === 0) return { state: 'absent' };
+
+  const entries = raw.split(',');
+  const hosts: string[] = [];
+  for (const entry of entries) {
+    const canonical = canonicalizeHost(entry.trim());
+    if (canonical === null) {
+      return {
+        state: 'invalid',
+        reason: `la entrada "${entry}" no es un hostname pelado`,
+      };
+    }
+    if (hosts.includes(canonical)) {
+      return {
+        state: 'invalid',
+        reason: `la entrada "${entry}" esta DUPLICADA (canonicaliza a "${canonical}")`,
+      };
+    }
+    hosts.push(canonical);
+  }
+  return { state: 'configured', hosts };
+}
+
+/**
+ * Assertion de arranque. MISMO contrato que `assertDepositMinimumEnv`
+ * (`src/lib/env.ts:107-131`): **throw** si la env está presente pero ilegible,
+ * **texto de warn** si el conjunto que sale de la config está vacío, `null` si
+ * está OK.
+ *
+ * Las dos causas se tratan distinto A PROPÓSITO:
+ *  · PRESENTE PERO ILEGIBLE → THROW, en cualquier `NODE_ENV`. Es el caso en el que
+ *    el operador **cree** tener la identidad puesta (`A2A_SELF_HOSTS='https://gw'`
+ *    con esquema, o con una entrada duplicada). Es un typo que se arregla en
+ *    segundos y, al no bootear, la revisión anterior sigue sirviendo.
+ *  · CONJUNTO VACÍO → warn ruidoso, NO throw. No se pudo verificar el valor de
+ *    `BASE_URL` en el Railway de prod (NC-1) y voltear el servicio por eso es un
+ *    radio de explosión mayor que el problema. Además el conjunto vacío NO deja el
+ *    guard inerte para el caso común: el `hint` por request (el `Host` por el que
+ *    entró la petición) cubre el bucle directo sin ninguna configuración. Lo que
+ *    NO cubre son los ALIAS distintos del host por el que entró la petición.
+ */
+export function assertSelfHostsEnv(): string | null {
+  const status = classifySelfHostsEnv();
+  if (status.state === 'invalid') {
+    throw new Error(
+      `${SELF_HOSTS_ENV} esta MAL ESCRITA: ${status.reason}. La variable ESTA ` +
+        'presente, asi que no es un olvido: es el valor lo que el gateway no ' +
+        'puede leer, y con el ilegible el conjunto de identidad propia queda ' +
+        'INCOMPLETO — el guard anti-bucle no reconoceria como propio el host que ' +
+        'el operador creyo haber declarado. Formato aceptado: hostnames PELADOS ' +
+        'separados por coma, sin esquema, sin puerto, sin path y sin repetir ' +
+        '(por ejemplo "gw.example.com,alias.example.com"). Se rechazan: ' +
+        '"https://gw" (esquema), "gw:8443" (puerto), "gw/x" (path) y entradas ' +
+        'duplicadas. Se rechaza el arranque para no quedar con la identidad a ' +
+        'medias y sin aviso. Ver .env.example.',
+    );
+  }
+  // El conjunto NO es sólo esta env: `BASE_URL` tambien aporta.
+  if (resolveSelfHosts().hosts.length > 0) return null;
+  return (
+    `${SELF_HOSTS_ENV} NO ESTA CONFIGURADA y BASE_URL tampoco aporta un host ` +
+    'legible, asi que el conjunto de identidad propia derivado de la ' +
+    'configuracion esta VACIO. Lo que SIGUE cubierto: el bucle directo por el ' +
+    'host por el que entra cada peticion (se usa el Host del request como hint, ' +
+    'y agrandar ese conjunto solo puede producir MAS rechazos, nunca menos). Lo ' +
+    'que NO queda cubierto: los ALIAS propios distintos de ese host (dominio ' +
+    'propio, dominio de Railway, o un literal de IP). GET /health publica ' +
+    'contractingGuard.selfHostCount para confirmarlo despues del deploy. Setea ' +
+    `${SELF_HOSTS_ENV} con tus hostnames separados por coma. Ver .env.example.`
+  );
+}
+
+/**
+ * El conjunto de identidad propia y el eslabón con el que nos anunciamos.
+ *
+ * Fuentes, EN ESTE ORDEN: `BASE_URL` → `A2A_SELF_HOSTS` → el `hint` del request.
+ * `canonicalId` es el PRIMER elemento en ese orden, o `null` si el conjunto queda
+ * vacío. **No lleva env propia**: un `A2A_GATEWAY_ID` suelto sería un cuarto
+ * lugar donde "quién soy" puede divergir, y derivarlo es lo que garantiza que la
+ * traza que EMITIMOS sea comparable con el conjunto que COMPARAMOS. (Este repo ya
+ * se rompió por tener dos lectores de un mismo concepto: `lib/agent-category.ts`
+ * se extrajo por eso.)
+ *
+ * ─── POR QUÉ EL `hint` DEL REQUEST ES ADMISIBLE AUNQUE EL CALLER LO INFLUYA ──
+ * Leer esto antes de marcarlo como agujero, porque es lo primero que parece uno.
+ * Este conjunto se usa **únicamente como PREDICADO DE NEGACIÓN**: agrandarlo sólo
+ * puede producir **MÁS rechazos, nunca menos**. Un caller que mande
+ * `Host: victima-agente.com` consigue que el gateway **se niegue** a llamar a
+ * `victima-agente.com` **en su propia petición**: es un auto-DoS de UN request, no
+ * un bypass ni un ataque a un tercero. **Esa monotonía es la propiedad**, y es la
+ * razón por la que NO se usa `resolveBaseUrl` (`services/agent-card.ts:67-76`)
+ * como fuente única: sus ramas 2 y 3 dependen de headers del caller, o sea que
+ * una identidad que el caller puede MOVER es una identidad que el caller puede
+ * **VACIAR** — y vaciarla sí sería un bypass. Además `resolveBaseUrl` necesita un
+ * `FastifyRequest`, y el loop de `executePipeline` no tiene ninguno.
+ *
+ * Sin el `hint`, un deploy sin `BASE_URL` ni `A2A_SELF_HOSTS` tendría conjunto
+ * VACÍO y la capa 1 quedaría INERTE: exactamente el escenario que CD-1 prohíbe.
+ */
+export function resolveSelfHosts(hint?: string): {
+  hosts: string[];
+  canonicalId: string | null;
+} {
+  const hosts: string[] = [];
+  const add = (host: string | null): void => {
+    if (host !== null && !hosts.includes(host)) hosts.push(host);
+  };
+
+  const baseUrl = process.env.BASE_URL;
+  if (baseUrl !== undefined) add(hostFromBaseUrl(baseUrl));
+
+  const envStatus = classifySelfHostsEnv();
+  if (envStatus.state === 'configured') {
+    for (const host of envStatus.hosts) add(host);
+  }
+
+  if (hint !== undefined) add(canonicalizeHost(hint.trim()));
+
+  return { hosts, canonicalId: hosts.length > 0 ? (hosts[0] as string) : null };
+}
+
+/**
+ * Techo de profundidad efectivo. Ausente **o ilegible** ⇒ el default DEL CÓDIGO,
+ * jamás `Infinity` (patrón de `discovery-fetch-limit.ts:74-79` y de
+ * `readPipelineCeilingUsd`, `stranded-payment.ts:351-356`).
+ *
+ * Un techo que cae al default EN SILENCIO es el caso en el que el operador cree
+ * tener otro número, así que el arranque además avisa —
+ * ver `isContractingDepthMaxMisconfigured`.
+ *
+ * ⚠️ `0` es un valor LEGIBLE y su consecuencia es total: con techo 0 se rechaza
+ * el 100% del tráfico (un caller directo tiene profundidad 0 y el corte es
+ * `depth >= depthMax`). No es un "sin límite extra": es el servicio cerrado. Está
+ * dicho también en `.env.example`.
+ *
+ * ⚠️ ASIMETRÍA DELIBERADA con el paso 4 de `readInboundContracting`, y NO se
+ * unifican: acá el valor se `trim`ea y en el header NO. CD-14 prohíbe el parseo
+ * laxo de la profundidad DEL HEADER porque la controla un TERCERO, y ahí `' 2'`
+ * leído como `2` es el ataque (`parseInt(' 2', 10) === 2`). Esta env la escribe el
+ * OPERADOR: un espacio de más en un panel de Railway no es un adversario, y ante
+ * cualquier cosa que no sean dígitos igual cae al default. Igualar los dos
+ * caminos "por consistencia" rompería uno de los dos. Test: `T-U-MAX-7`.
+ */
+export function resolveContractingDepthMax(): number {
+  const raw = process.env[DEPTH_MAX_ENV];
+  if (raw === undefined) return DEFAULT_CONTRACTING_DEPTH_MAX;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return DEFAULT_CONTRACTING_DEPTH_MAX;
+  if (!DECIMAL_1_TO_3_DIGITS.test(trimmed)) {
+    return DEFAULT_CONTRACTING_DEPTH_MAX;
+  }
+  const value = digitsToInt(trimmed);
+  if (value > DEPTH_MAX_ENV_CEILING) return DEFAULT_CONTRACTING_DEPTH_MAX;
+  return value;
+}
+
+/**
+ * ¿El techo configurado es ilegible y por lo tanto se está usando el default?
+ * Alimenta un `warn` de arranque: sin él, el operador que escribió `'abc'` cree
+ * tener un techo puesto.
+ */
+export function isContractingDepthMaxMisconfigured(): boolean {
+  const raw = process.env[DEPTH_MAX_ENV];
+  if (raw === undefined) return false;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return false;
+  if (!DECIMAL_1_TO_3_DIGITS.test(trimmed)) return true;
+  return digitsToInt(trimmed) > DEPTH_MAX_ENV_CEILING;
+}
+
+/**
+ * Tope de caracteres del header de cadena, en función del techo.
+ * `min((253+1) × (depthMax+1), 4096)`. Con `depthMax=2` ⇒ **762**.
+ *
+ * Se evalúa **ANTES del `split`** (CD-16) para no materializar un arreglo grande a
+ * pedido de un tercero: misma clase que `previewDeclaredMaxLimit`
+ * (`discovery-fetch-limit.ts:81-90`), donde lo que se acota es lo que un tercero
+ * puede hacernos construir.
+ */
+function chainHeaderMaxChars(depthMax: number): number {
+  return Math.min(
+    (MAX_HOSTNAME_CHARS + 1) * (depthMax + 1),
+    CHAIN_HEADER_ABSOLUTE_MAX_CHARS,
+  );
+}
+
+export type ContractingHeaderVerdict =
+  | { ok: true; chain: string[]; depth: number }
+  | { ok: false; code: typeof CONTRACTING_LOOP_DETECTED; layer: 'chain' }
+  | {
+      ok: false;
+      code: typeof CONTRACTING_DEPTH_EXCEEDED;
+      depth: number;
+      depthMax: number;
+    }
+  | { ok: false; code: typeof CONTRACTING_DEPTH_MALFORMED }
+  | { ok: false; code: typeof CONTRACTING_CHAIN_MALFORMED; reason: string };
+
+/**
+ * Los SEIS pasos de validación del inbound, **en este orden**, que es normativo
+ * (CD-16). Cada paso existe por un input hostil concreto:
+ *
+ *  1 · LARGO del header de cadena ≤ `chainHeaderMaxChars(depthMax)` (762 con
+ *      techo 2). Input: un header de **8192 caracteres**. Va **ANTES del `split`**:
+ *      si el largo se chequea después, ya materializamos el arreglo que el
+ *      atacante pidió.
+ *  2 · CANTIDAD de elementos ≤ `depthMax + 1`. Input: **400 elementos válidos de
+ *      5 caracteres**, que pasan el paso 1 y no deben pasar.
+ *  3 · FORMA: `canonicalizeHost(e) !== null` para TODOS. Input: un elemento basura
+ *      al lado de los válidos, que es la forma de meter ruido para que un lector
+ *      laxo pierda NUESTRO eslabón. **Se rechaza, NO se ignora.**
+ *  4 · PROFUNDIDAD: ausente ⇒ 0; `^[0-9]{1,3}$` ⇒ valor; cualquier otra cosa ⇒
+ *      RECHAZO. Los 8 valores medidos están en el docblock del archivo.
+ *  5 · MEMBRESÍA: `selfHosts ∩ elementos ≠ ∅` ⇒ bucle. Input:
+ *      `otro-gw, <SELF>., tercero` (mayúsculas Y punto final).
+ *  6 · TECHO: `depth >= depthMax`. Con `>` en vez de `>=` pasa exactamente el
+ *      nivel del techo.
+ *
+ * Los pasos 1-4 son rechazos **seguros**: un header forjado sólo puede hacer
+ * fallar LA PETICIÓN QUE LO TRAE. No hay forma de usarlos contra un tercero.
+ *
+ * Cada elemento se `trim`ea antes de canonicalizar, a propósito: un CSV con
+ * espacios (`"a.example, b.example"`) es interop normal, y trimear NO debilita
+ * nada — un atacante que escriba `" <self>"` para esconder nuestro eslabón queda
+ * cazado por MEMBRESÍA en vez de por FORMA, o sea rechazado igual.
+ */
+export function readInboundContracting(
+  h: {
+    chain: string | string[] | undefined;
+    depth: string | string[] | undefined;
+  },
+  selfHosts: string[],
+  depthMax: number,
+): ContractingHeaderVerdict {
+  const rawChain = pickSingleHeader(h.chain);
+  const rawDepth = pickSingleHeader(h.depth);
+
+  // ── PASO 1 · LARGO, antes del `split` (CD-16) ──────────────────────────
+  if (
+    rawChain !== undefined &&
+    rawChain.length > chainHeaderMaxChars(depthMax)
+  ) {
+    return {
+      ok: false,
+      code: CONTRACTING_CHAIN_MALFORMED,
+      reason: `el header excede ${chainHeaderMaxChars(depthMax)} caracteres`,
+    };
+  }
+
+  const rawElements =
+    rawChain === undefined || rawChain.trim().length === 0
+      ? []
+      : rawChain.split(',');
+
+  // ── PASO 2 · CANTIDAD ──────────────────────────────────────────────────
+  if (rawElements.length > depthMax + 1) {
+    return {
+      ok: false,
+      code: CONTRACTING_CHAIN_MALFORMED,
+      reason: `la cadena trae ${rawElements.length} eslabones y el maximo es ${depthMax + 1}`,
+    };
+  }
+
+  // ── PASO 3 · FORMA ─────────────────────────────────────────────────────
+  const chain: string[] = [];
+  for (const element of rawElements) {
+    const canonical = canonicalizeHost(element.trim());
+    if (canonical === null) {
+      return {
+        ok: false,
+        code: CONTRACTING_CHAIN_MALFORMED,
+        reason: 'un eslabon de la cadena no es un hostname legible',
+      };
+    }
+    chain.push(canonical);
+  }
+
+  // ── PASO 4 · PROFUNDIDAD (CD-14: ni parseInt ni Number) ────────────────
+  let depth = 0;
+  if (rawDepth !== undefined) {
+    if (!DECIMAL_1_TO_3_DIGITS.test(rawDepth)) {
+      return { ok: false, code: CONTRACTING_DEPTH_MALFORMED };
+    }
+    depth = digitsToInt(rawDepth);
+  }
+
+  // ── PASO 5 · MEMBRESÍA ─────────────────────────────────────────────────
+  for (const link of chain) {
+    if (selfHosts.includes(link)) {
+      return { ok: false, code: CONTRACTING_LOOP_DETECTED, layer: 'chain' };
+    }
+  }
+
+  // ── PASO 6 · TECHO ─────────────────────────────────────────────────────
+  if (depth >= depthMax) {
+    return { ok: false, code: CONTRACTING_DEPTH_EXCEEDED, depth, depthMax };
+  }
+
+  return { ok: true, chain, depth };
+}
+
+/** Los cuatro códigos que este módulo puede emitir. */
+export type ContractingErrorCode =
+  | typeof CONTRACTING_LOOP_DETECTED
+  | typeof CONTRACTING_DEPTH_EXCEEDED
+  | typeof CONTRACTING_DEPTH_MALFORMED
+  | typeof CONTRACTING_CHAIN_MALFORMED;
+
+/**
+ * CD-19 — UN texto por código, para que el `error` en prosa no divergea entre las
+ * tres superficies que lo emiten (preHandler de capa 2, Sitio 1 del route, y el
+ * `errorCode` del resultado del pipeline).
+ *
+ * El del bucle **no afirma que el transitivo esté cerrado**: la nota best-effort
+ * la agrega el call-site de la capa 2 desde
+ * `CONTRACTING_LAYER2_BEST_EFFORT_NOTE`, que es una constante aparte justamente
+ * para que se pueda assertar textual.
+ */
+export function contractingErrorMessage(code: ContractingErrorCode): string {
+  switch (code) {
+    case CONTRACTING_LOOP_DETECTED:
+      return (
+        'Bucle de contratacion: el destino de este paso es este mismo gateway. ' +
+        'La peticion se rechaza SIN cobrar y sin emitir la invocacion saliente.'
+      );
+    case CONTRACTING_DEPTH_EXCEEDED:
+      return (
+        'Techo de profundidad de contratacion alcanzado. El techo acota el COSTO ' +
+        'de una cadena de coordinadores; no es una deteccion de ciclo. La ' +
+        'peticion se rechaza sin cobrar.'
+      );
+    case CONTRACTING_DEPTH_MALFORMED:
+      return (
+        `El header ${CONTRACTING_DEPTH_HEADER} esta presente pero no es un ` +
+        'entero decimal de 1 a 3 digitos. Un valor ilegible NO se degrada a 0: ' +
+        'leerlo como 0 seria un reseteo del contador de profundidad a pedido de ' +
+        'un tercero. La peticion se rechaza sin cobrar.'
+      );
+    case CONTRACTING_CHAIN_MALFORMED:
+      return (
+        `El header ${CONTRACTING_CHAIN_HEADER} esta presente pero no es un CSV ` +
+        'de hostnames pelados dentro de los limites de largo y de cantidad. La ' +
+        'peticion se rechaza sin cobrar.'
+      );
+  }
+}
+
+/**
+ * CAPA 1 — ¿este destino somos nosotros?
+ *
+ * Compara **sólo el `hostname`**, a propósito: puerto y esquema se IGNORAN, así
+ * que `https://yo:8443/x` y `http://yo/x` **siguen siendo yo**. Ignorarlos es la
+ * dirección fail-closed (rechaza más, nunca menos); comparar `url.host` (que
+ * lleva el puerto) dejaría pasar `https://<self>:8443/compose`.
+ *
+ * `url` vacío/ilegible ⇒ `false` **y NO tira**. Es un estado que producción no
+ * puede producir (`Agent.invokeUrl` es requerido) pero que un factory de
+ * `vi.mock` sí (medido: `src/middleware/x402.non-evm-inbound.test.ts:143-147`
+ * devuelve `{slug, registry, payment}` sin `invokeUrl`). Un `throw` acá rompería
+ * suites por un motivo que no es el de esta HU; el call-site loguea `warn`.
+ *
+ * Conjunto vacío ⇒ `false`: el guard **no puede inventar identidad**. Ese caso lo
+ * cubre el `warn` de arranque, no un rechazo indiscriminado.
+ */
+export function isSelfDestination(
+  url: string | undefined,
+  selfHosts: string[],
+): boolean {
+  if (url === undefined || url.trim().length === 0) return false;
+  if (selfHosts.length === 0) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  // `canonicalizeHost` sobre el `hostname` cierra las DOS puntas del punto final
+  // (CD-15): el conjunto ya viene canonicalizado y el destino se canonicaliza acá.
+  const host = canonicalizeHost(parsed.hostname);
+  if (host === null) return false;
+  return selfHosts.includes(host);
+}
+
+/**
+ * AC-7 — los headers que salen en cada invocación a un agente.
+ *
+ * Devuelve `{}` si `canonicalId` es `null` (CD-18). Emitir una cadena SIN nuestro
+ * eslabón es **peor que no emitir nada**: el siguiente gateway leería una traza
+ * que afirma NO CONTENERNOS, o sea que le estaríamos dando una razón para seguir.
+ * El call-site loguea `warn` una vez por invocación en ese caso.
+ *
+ * La profundidad sale **incrementada**: lo que emitimos es la profundidad DEL
+ * SALTO QUE ESTAMOS HACIENDO, no la que recibimos.
+ */
+export function buildOutboundContractingHeaders(
+  chain: string[],
+  depth: number,
+  canonicalId: string | null,
+): Record<string, string> {
+  if (canonicalId === null) return {};
+  return {
+    [CONTRACTING_CHAIN_HEADER]: [...chain, canonicalId].join(','),
+    [CONTRACTING_DEPTH_HEADER]: String(depth + 1),
+  };
+}
