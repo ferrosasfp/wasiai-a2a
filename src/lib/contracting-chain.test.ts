@@ -881,6 +881,82 @@ describe('El campo `contractingGuard` de /health está en LOS DOS handlers', () 
   });
 });
 
+describe('Los dos `warn` de arranque se EMITEN (no sólo su texto)', () => {
+  /**
+   * ⚠️ AR-it2 / BLQ-BAJO-2 — el "avisa" del Cierre 3 no tenía ningún testigo.
+   *
+   * La razón (2) del bloqueante original era *"cero señal de arranque"*. La señal
+   * existe y su TEXTO está testeado (`T-ENV-2`, `T-U-MAX-6b`), pero **nada
+   * garantizaba que se emita**: el re-AR borró entero el bloque
+   * `if (contractingDepthWarning !== null) { fastify.log.warn(...) }` de
+   * `src/index.ts` y midió `tsc` 0, lint 0 y la suite en **5613 passed, cero
+   * rojos**. Un texto que nadie imprime no es una señal.
+   *
+   * Es un barrido TEXTUAL por el mismo motivo que `T-HEALTH-BOTH`: `src/index.ts`
+   * hace `await initAdapters()` a nivel de módulo, así que no se puede importar
+   * desde un test y no hay forma de ejercitar el arranque de prod acá.
+   *
+   * ⛔ QUÉ NO PRUEBA: que el warn se vea en el log de Railway, ni que el operador lo
+   * lea. Prueba que el call-site existe y que pasa la variable correcta — que es
+   * exactamente lo que el mutante del re-AR borraba sin que nada se cayera.
+   */
+  const INDEX = join(LIB_DIR, '..', 'index.ts');
+
+  /** Las DOS emisiones, con el productor de cada texto al lado. */
+  const EMISIONES = [
+    { variable: 'selfHostsWarning', productor: 'assertSelfHostsEnv()' },
+    {
+      variable: 'contractingDepthWarning',
+      productor: 'contractingDepthMaxWarning()',
+    },
+  ];
+
+  it('T-WARN-EMIT: `src/index.ts` guardea y loguea los dos textos de warn', () => {
+    // `readFileSync` tira si el path no existe ⇒ una cita rota no queda verde.
+    const src = readFileSync(INDEX, 'utf8');
+    expect(EMISIONES).toHaveLength(2);
+
+    for (const { variable, productor } of EMISIONES) {
+      // 1 · el texto se PRODUCE y se guarda en la variable esperada.
+      expect(src, `${variable} no sale de ${productor}`).toContain(
+        `const ${variable} = ${productor};`,
+      );
+
+      // 2 · hay un guard `!== null` para esa variable…
+      const guard = `if (${variable} !== null) {`;
+      const at = src.indexOf(guard);
+      expect(
+        at,
+        `falta el guard de ${variable} en src/index.ts`,
+      ).toBeGreaterThan(-1);
+
+      // 3 · …y DENTRO de ese bloque se emite un `fastify.log.warn` con ESA
+      //     variable. El bloque se acota por llaves balanceadas para que un warn
+      //     de otra cosa, más abajo en el archivo, no lo dé por cubierto.
+      let depth = 0;
+      let end = at;
+      for (let i = at + guard.length - 1; i < src.length; i += 1) {
+        if (src[i] === '{') depth += 1;
+        else if (src[i] === '}') {
+          depth -= 1;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      expect(end, `bloque sin cerrar para ${variable}`).toBeGreaterThan(at);
+      const bloque = src.slice(at, end);
+      expect(bloque, `${variable} no se loguea a warn`).toContain(
+        'fastify.log.warn(',
+      );
+      expect(bloque, `el warn de ${variable} no usa esa variable`).toContain(
+        `\${${variable}}`,
+      );
+    }
+  });
+});
+
 describe('El `selfHostHint` en TODOS los call-sites de producción', () => {
   /**
    * ⚠️ ESTE BLOQUE EXISTE PORQUE UNA FRASE NO ES UN CONTROL.
