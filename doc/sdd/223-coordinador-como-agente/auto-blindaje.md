@@ -210,7 +210,10 @@
   lo mapeen a **400** más un `error_code` top-level de familia 1.
 - **Por qué, MEDIDO**: un miembro nuevo en la unión de `executeApprovedPlan` fuerza
   narrowing en **3 call-sites de producción** (`services/orchestrate.ts:447`,
-  `services/agent-link.ts:362`, `routes/orchestrate.ts:749`); y como el corte SÍ es
+  `services/agent-link.ts:383` — era `:362` y **la desplazó el fix-pack 2** al agregar
+  el docblock del `selfHostHint`; ancla textual:
+  `const result = await orchestrateService.executeApprovedPlan(` —,
+  `routes/orchestrate.ts:749`); y como el corte SÍ es
   alcanzable por el camino atómico (a diferencia del cap gate, que no lo es),
   `orchestrate()` también tendría que ensanchar su retorno, sumando **3 call-sites
   más** (`services/inbound-task.ts:512`, `routes/orchestrate.ts:170`,
@@ -454,5 +457,37 @@
   puede tener testigo hoy**, y decirlo es más barato que inventarle uno. La medición
   que corresponde no es "¿pasa?", es "¿qué se rompe si lo saco?" — y si la respuesta
   es "nada", eso es el hallazgo, no un problema del test.
+
+---
+
+### [2026-08-18 02:10] Fix-pack 2 · cierre — Barrido de citas: 1 rota por mí, 2 que ya estaban rotas
+
+- **Error**: agregar docblocks a `src/services/agent-link.ts` y a `src/index.ts` desplazó
+  líneas que **otros archivos citan por número**. Es la clase de daño que ningún barrido
+  del diff caza, porque el archivo que queda mal **no aparece en el diff**.
+- **Causa raíz**: el fix-pack es casi todo prosa, y la prosa empuja líneas hacia abajo.
+- **Medido** (comparando el TEXTO de la línea citada en `d9a8cbb` contra hoy, para las
+  23 citas que apuntan a archivos que este fix-pack tocó): **6 movidas**, y de esas:
+  - **1 la rompí yo**: `auto-blindaje.md:213 → services/agent-link.ts:362`, que en
+    `d9a8cbb` daba `const result = await orchestrateService.executeApprovedPlan(` y hoy
+    da otra cosa. Corregida a `:383` **con ancla textual al lado**, para que la próxima
+    edición no la vuelva a romper en silencio.
+  - **2 ya estaban rotas antes de tocar nada**, en
+    `src/adapters/solana/facilitator-settle.wiring.test.ts`: cita `src/index.ts:246-248`
+    para el comentario de `await initAdapters()` (que vive en `:326`, y en `d9a8cbb`
+    vivía en `:322`) y `src/index.ts:338`/`:345` para los dos warm-ups con `if` (que
+    viven en `:441`/`:448`, y en `d9a8cbb` en `:437`/`:444`). Están off por ~76 y ~100
+    líneas, o sea que **no las desplazó este fix-pack**: ya no matcheaban en el
+    baseline. Este fix-pack sólo les sumó +2/+4. ⛔ **NO se corrigen acá**: es un
+    archivo del carril Solana, fuera del scope de esta HU. Queda **reportado**.
+  - **3 son un artefacto de mi propio chequeo**: las filas del §4 de
+    `implementation-log.md` que citan el Story File contra `3823580`, no contra
+    `d9a8cbb`. Comparadas contra el baseline equivocado dan "movida" y no lo son.
+- **Aplicar en**: (1) todo fix-pack con mucha prosa termina con este barrido, y el
+  criterio es **comparar el TEXTO de la línea, no la aritmética**; (2) cuando una cita
+  aparece rota, verificar contra el BASELINE antes de atribuírsela — tres de las seis
+  no eran mías y una de ésas ni siquiera estaba rota; (3) al arreglar un número,
+  dejarle el **ancla textual** al lado: es lo único que no envejece con la próxima
+  edición.
 
 ---
