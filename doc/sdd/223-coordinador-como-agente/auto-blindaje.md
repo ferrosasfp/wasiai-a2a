@@ -400,3 +400,59 @@
   mutante.
 
 ---
+
+### [2026-08-18 01:05] Fix-pack 2 · Bloque 1 — `git checkout <archivo>` para restaurar UN mutante me borró TODO el archivo
+
+- **Error**: apliqué un mutante a `src/services/agent-link.ts` con un `replace` puntual
+  y lo "restauré" con `git checkout src/services/agent-link.ts`. Ese comando no revierte
+  el mutante: revierte el archivo **a HEAD**, y mis tres ediciones del fix todavía no
+  estaban commiteadas. Las perdí las tres. Lo detecté porque verifiqué el md5 después
+  de restaurar y no coincidía con el de antes del mutante.
+- **Causa raíz**: confundí "deshacer mi último cambio" con "volver al estado
+  commiteado". Con el árbol limpio son lo mismo; con trabajo sin commitear, no.
+- **Fix**: la restauración de un mutante es la **sustitución inversa** (el mismo
+  `replace` al revés), nunca `git checkout`. Y el control que lo delata es el que ya
+  estaba en las reglas: **md5 antes / md5 después**. Reapliqué las ediciones a mano.
+- **Aplicar en**: todo mutante sobre un archivo con cambios sin commitear — que en un
+  fix-pack es **el caso normal**, porque el mutante se corre justo después de escribir
+  el fix y antes del commit. Si el md5 no vuelve, no es "un espacio de más": revisá qué
+  se llevó puesto. Y si el mutante va sobre un archivo YA commiteado, `git checkout`
+  sigue siendo seguro — la diferencia es esa, no el comando.
+
+---
+
+### [2026-08-18 01:20] Fix-pack 2 · Bloque 2 — El mutante no tocaba lo que el test asserta, y "no mató" no significaba nada
+
+- **Error**: para calibrar la aserción nueva de `T-ENV-2` (`expect(warn).toContain('HONESTO')`)
+  mutilé el texto del warn sacándole `'SOLO CONTRA UN CALLER '`. La suite quedó **verde**
+  y por un momento eso se leía como "el test es débil".
+- **Causa raíz**: la sustitución que elegí dejaba **intacta la palabra asertada**
+  (`HONESTO` estaba en el fragmento siguiente de la concatenación). El instrumento
+  apuntaba a otro lado: no medí el mutante contra lo que el test mira.
+- **Fix**: mutante corregido (sacar `HONESTO` y `ACCIDENTAL`, que es lo asertado) ⇒
+  murió con el texto exacto `expected '…' to contain 'HONESTO'`.
+- **Aplicar en**: cuando un mutante **no** mata, la primera hipótesis no es "el test es
+  débil": es **"mi mutante no tocó lo que el test lee"**. El control es de una línea —
+  imprimir el texto resultante y buscar en él la cadena que la aserción espera. Es la
+  misma familia que "dos instrumentos de medición que mintieron" de
+  `candados-que-se-pudren-solos.md`, ahora del lado del mutante.
+
+---
+
+### [2026-08-18 01:40] Fix-pack 2 · Bloque 5 — Estuve por reportar MNR-6 como "cerrado" sin testigo
+
+- **Error**: agregué `resolveAgentDestination` a las dos factories amputadas y el
+  primer borrador del mensaje de commit lo listaba junto a los otros cinco MENORes,
+  todos con su mutante. MNR-6 no tiene ninguno.
+- **Causa raíz**: el arreglo es **profiláctico** — hoy ninguna ruta de esos dos
+  archivos alcanza esa export, así que no hay comportamiento que un test pueda mirar.
+  El impulso fue asumir que "arreglado" y "verificado" son lo mismo.
+- **Fix**: lo **medí** en vez de suponerlo: saqué la export de las dos factories y
+  corrí los dos archivos ⇒ **65 passed, 0 fail**. O sea que el mutante NO mata, por
+  construcción. Queda escrito así en el commit, con los md5 de la restauración.
+- **Aplicar en**: todo arreglo preventivo. Un cambio que no puede fallar hoy **no
+  puede tener testigo hoy**, y decirlo es más barato que inventarle uno. La medición
+  que corresponde no es "¿pasa?", es "¿qué se rompe si lo saco?" — y si la respuesta
+  es "nada", eso es el hallazgo, no un problema del test.
+
+---
