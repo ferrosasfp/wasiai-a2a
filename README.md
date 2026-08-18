@@ -257,7 +257,7 @@ Every row below was read off `src/routes/` with the prefixes registered in `src/
 |---|---|---|
 | `GET` | `/` | service info |
 | `GET` | `/health` | health probe |
-| `GET` | `/.well-known/agent.json` | the gateway's own agent card |
+| `GET` | `/.well-known/agent.json` | the gateway's own agent card. The same identity is anchored on-chain in the [Solana Agent Registry](https://explorer.solana.com/address/8EQfLhMG9aKTgxS5YarUmg9SsUWqCFa4ZQ8NMR2HzFde?cluster=devnet) |
 | `GET \| POST` | `/discover` | search agents across all registries |
 | `GET` | `/discover/:slug` | a single agent |
 | `GET` | `/capabilities` | methods, initialized chains and catalog |
@@ -395,10 +395,15 @@ Verifiable settlements. The Solana one is devnet (no real money) and was confirm
 | Tx | Network | What it was |
 |---|---|---|
 | [`3pNqu9jH…`](https://explorer.solana.com/tx/3pNqu9jHduGaXioB8Mf7WNvBgZQgJV4MnE6NDGWZdz6aY5gr2ivxfbwzrnweutSVtyKnvv7y7kXnARroktjyWsZx?cluster=devnet) | Solana devnet | Circle USDC-SPL outbound to the payout wallet of `remit-corridor-fx-solana`, 0.000001 |
+| [`3jHFjCeY…`](https://explorer.solana.com/tx/3jHFjCeYpXUdcGSPM7NkUzzUgNyQ3Z7htdtg39t8rUaemJuWV5JkSCPRiv6NadYkKj9PWMQpnPfZqg23mFZFq2ER?cluster=devnet) | Solana devnet | The gateway registering **itself** as an agent in the [Solana Agent Registry](https://explorer.solana.com/address/8EQfLhMG9aKTgxS5YarUmg9SsUWqCFa4ZQ8NMR2HzFde?cluster=devnet), 0.0034 rent |
 | [`0x9fa6ff83…`](https://snowtrace.io/tx/0x9fa6ff83eb10e51685ce078e69f9c42fcbe3b138b5b8c3f32909c9fee279c6f1) | Avalanche C-Chain (43114) | USDC outbound to `wasi-chainlink-price`, $0.001 |
 | [`0xa22086d0…`](https://snowtrace.io/tx/0xa22086d048b0222a8e08a5ca08997ae6c359e5ba674e63133a0ffbc463af16f9) | Avalanche C-Chain (43114) | USDC outbound to `wasi-defi-sentiment`, $0.010 |
 | [`0xca10320c…`](https://snowtrace.io/tx/0xca10320c24ff513d773ce65e0bd306d4acce3e4883180c9dca5573da6cf1dfdb) | Avalanche C-Chain (43114) | USDC outbound to `wasi-wallet-profiler`, $0.050 |
 | [`0x6f406c08…`](https://testnet.kitescan.ai/tx/0x6f406c08f6e59e3c5029f57ec3a84bb4596b94bb02568055ec4f9572981a1bf9) | Kite testnet (2368) | PYUSD inbound, 1.0 |
+
+The registry row is a different kind of evidence from the others: it is not a payment, it is the coordinator's own identity. The gateway publishes an agent card at `/.well-known/agent.json`, and that card is served by a domain we control. The registry entry is not: it is an MPL Core asset on Solana whose account data points at an IPFS document listing the three orchestration skills and `x402Support: true`, a field the registry itself defines. Anyone can read it without asking us anything.
+
+Being registered is not the same as being discovered. Nobody has found this gateway through the registry yet, and that sentence stays here until someone does.
 
 On Base Sepolia there are five documented runs (three standalone settlements, one end-to-end `/compose` and one of the outbound leg), with hashes and verification method in [`doc/BASE-EVIDENCE.md`](doc/BASE-EVIDENCE.md).
 
