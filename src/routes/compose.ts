@@ -12,6 +12,13 @@ import {
   type ComposeStepShapeError,
   validateComposeStepShape,
 } from '../lib/compose-step-shape.js';
+import {
+  CONTRACTING_LOOP_DETECTED,
+  contractingErrorMessage,
+  isSelfDestination,
+  resolveSelfHosts,
+  rollUpCascadedFee,
+} from '../lib/contracting-chain.js';
 import type { DownstreamSkipCode } from '../lib/downstream-skip-code.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
@@ -24,6 +31,7 @@ import {
   extractRawKey,
   requirePaymentOrA2AKey,
 } from '../middleware/a2a-key.js';
+import { contractingGuardHandler } from '../middleware/contracting-guard.js';
 import { noteDownstreamSkips } from '../middleware/event-tracking.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';
@@ -734,6 +742,56 @@ async function resolveComposePriceHandler(
       ? deriveComposeDestination(resolved)
       : undefined;
 
+    // ── WKH-360 · SITIO 1 del guard de capa 1 (AC-4, step 0) · 💰 ────────────
+    // ESTE guard corta ANTES DEL DINERO, y por eso vive acá y no en el route
+    // handler: este preHandler está en el array en la posición ANTERIOR a
+    // `...requirePaymentOrA2AKey(`, que es EL DÉBITO del step-0 de /compose
+    // (`src/middleware/a2a-key.ts`). El `return reply...` aborta el preHandler
+    // lifecycle antes de ese middleware — el mismo idiom que los tres hermanos de
+    // este handler (`AGENT_NOT_FOUND` ×2 y `REGISTRY_UNAVAILABLE`), y por el mismo
+    // motivo que el comentario del guard de `price === null` ya explica.
+    //
+    // El step-0 NO lo cubre el guard del loop de `executePipeline`: para cuando el
+    // service existe, el middleware ya cobró. Y NO se pone en
+    // `augmentX402ChallengeAmount` aunque ésa ya recorra los steps 1..N
+    // pre-débito, porque sus DOS call-sites la envuelven en `.catch()`: un guard
+    // dentro de un bloque best-effort es un guard que se puede tragar.
+    //
+    // El conjunto de identidad de ESTE sitio lleva `hint`: es el único de los
+    // cuatro donde hay un `FastifyRequest`, y `request.hostname` (fastify 5, sin
+    // puerto) es el host por el que entró la petición. CON `A2A_SELF_HOSTS` o
+    // `BASE_URL` puestas, agrandar el conjunto sólo produce MÁS rechazos (ver la
+    // monotonía en `lib/contracting-chain.ts`). ⛔ Sin esas dos envs el caller no
+    // agranda el conjunto: lo DEFINE, y con un `Host` ilegible lo VACÍA y este
+    // guard vuelve al estado inerte (AR-it2/BLQ-MED-2, testigo `T-L1-2e`).
+    const { hosts: selfHosts } = resolveSelfHosts(request.hostname);
+    if (resolved && isSelfDestination(resolved.invokeUrl, selfHosts)) {
+      request.log.warn(
+        {
+          slug: firstAgent,
+          registry: firstStep.registry ?? null,
+          layer: 'direct',
+          site: 'compose-price-prehandler',
+        },
+        'contracting-loop.blocked',
+      );
+      return reply.status(400).send({
+        error: contractingErrorMessage(CONTRACTING_LOOP_DETECTED),
+        error_code: CONTRACTING_LOOP_DETECTED,
+        layer: 'direct',
+      });
+    }
+    if (resolved && !resolved.invokeUrl) {
+      // TRAMPA 1: producción no puede producirlo (`Agent.invokeUrl` es requerido
+      // en el tipo, así que el chequeo es por FALSY y no por `=== undefined`, que
+      // tsc rechazaría como comparación imposible), un factory de `vi.mock` sí.
+      // Se loguea el slug, NUNCA la URL.
+      request.log.warn(
+        { slug: firstAgent },
+        'contracting-loop.destination-unreadable',
+      );
+    }
+
     if (price === 0 && resolved === null) {
       // MONEY-PATH FIX (compose-404-budget-drain): `resolveAgentPriceUsdc`
       // returns 0 (NOT null) for a slug whose lenient `getAgent` lookup yields a
@@ -843,6 +901,12 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
     {
       config: { rateLimit: orchestrateRateLimit() },
       preHandler: [
+        // WKH-360 (AC-5/AC-6): la CAPA 2 va PRIMERA de toda la cadena — antes de la
+        // validación de forma, antes de la resolución de capacidades, antes del
+        // preHandler de precio y, sobre todo, antes de `requirePaymentOrA2AKey`. Un
+        // request cuya traza ya nos contiene, o que llegó al techo de profundidad, no
+        // tiene por qué costar ni una consulta al catálogo, y mucho menos un débito.
+        contractingGuardHandler,
         // WKH-65: forward-key (optional, env-gated) runs BEFORE timeout/payment.
         // Returns [] when WASIAI_V2_FORWARD_KEY is unset → no-op spread.
         ...requireForwardKey(),
@@ -991,6 +1055,28 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         // el warn `compose-price.fallback per-step` salga al pino transport
         // configurado en server.ts (vs console.warn raw).
         logger: request.log,
+        // WKH-360 (AC-7): la traza entrante YA VALIDADA por `contractingGuardHandler`
+        // (primer preHandler de esta cadena). El service la usa para EMITIR la traza
+        // saliente con nuestro eslabón y la profundidad incrementada. Ausente ⇒
+        // cadena vacía y profundidad 0, que es el 100% del tráfico de hoy.
+        //
+        // `exactOptionalPropertyTypes` está activo, así que se spreadea condicional
+        // en vez de asignar `undefined`.
+        ...(request.contractingChain !== undefined && {
+          contractingChain: request.contractingChain,
+        }),
+        ...(request.contractingDepth !== undefined && {
+          contractingDepth: request.contractingDepth,
+        }),
+        // WKH-360 (fix-pack AR/CR BLQ-MED-1): el `Host` por el que entró ESTA
+        // petición, para que los SITIOS 3 y 4 (dentro del service, donde no hay
+        // `FastifyRequest`) tengan identidad propia sin configuración. Sin esto,
+        // con `BASE_URL` y `A2A_SELF_HOSTS` ausentes el conjunto de identidad del
+        // pipeline queda `[]` y el guard de los steps 1..N —donde vive el `5^k`—
+        // queda inerte. Mismo valor que ya consume el SITIO 1 doce líneas más
+        // arriba en este archivo; se pasa por el request y no se re-resuelve
+        // adentro para que los cuatro sitios comparen contra el MISMO conjunto.
+        selfHostHint: request.hostname,
       });
 
       // BLQ-2: bail early if timeout fired during compose
@@ -1046,12 +1132,38 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
 
       // WKH-118: best-effort 1% protocol fee post-compose (espejo orchestrate.ts:437-482).
       // Idempotencia por request.id; base = result.totalCostUsdc. NUNCA rompe el 200
-      // (CD-1): todo error queda en variables locales + console. El response NO cambia (CD-4).
-      // CD-4: feeChargeTxHash NO se declara — en compose (a diferencia de
-      // orchestrate) ningún campo de fee se serializa en el response, así que la
-      // variable quedaría asignada-pero-no-leída (biome noUnusedVariables). El
-      // txHash que necesita el recibo se lee de `feeResult.txHash` directamente.
+      // (CD-1): todo error queda en variables locales + console.
+      //
+      // ⚠️ CD-21 · DOS FRASES DE ACÁ QUEDARON FALSAS CON WKH-360, y se reescriben en
+      // el mismo commit que las invalida:
+      //  [FALSA] · que en compose ningun campo de fee se serializa en el response
+      //  [FALSA] · que el response NO cambia (CD-4)
+      // El 200 de `/compose` ahora declara `feeRatePercent`, `protocolFeeStatus` y
+      // —cuando se cobró— `protocolFeeUsdc` (AC-10), así que el resultado de ESTE
+      // bloque sí es visible para el caller: un fallo del cobro deja
+      // `protocolFeeStatus: 'unknown'`. Lo que sigue en pie de CD-1 es que un fallo
+      // acá **no rompe el 200 ni cambia el pipeline**.
+      //
+      // ⛔ CÓMO SE CITA UNA FRASE QUE SE VOLVIÓ FALSA (fix-pack CR/MNR-1). Cada línea
+      // que contenga parte de la frase vieja lleva su propio marcador `[FALSA]`. La
+      // versión anterior de este comentario reproducía la frase VERBATIM y lo único
+      // que la distinguía de un claim vivo era dónde caía el salto de línea: un
+      // `grep` del auditor devolvía el hit y el marcador quedaba en OTRA línea. Un
+      // marcador por línea es lo que hace que `grep -n` no pueda mentir. Mismo
+      // criterio aplicado en `services/orchestrate.ts` (la frase del "cache de 60 s").
+      //
+      // Lo que SIGUE siendo cierto y es la razón de que `feeChargeTxHash` no se
+      // declare: **el txHash del fee NO se serializa**. Publicar el hash de la
+      // transferencia del fee expone el movimiento de la wallet de plataforma, y el
+      // caller necesita el MONTO, no el hash. La variable quedaría
+      // asignada-pero-no-leída (biome `noUnusedVariables`); el txHash que necesita
+      // el recibo se lee de `feeResult.txHash` directamente.
       let feeChargeError: string | undefined;
+      // WKH-360 (AC-10): la disposición del fee de ESTE gateway, para el 200.
+      // Arranca en `'unknown'` — el tercer valor de CD-5 — porque si el bloque de
+      // abajo se va por el `catch`, la disposición es DESCONOCIDA, no "no se cobró".
+      let protocolFeeStatus: 'charged' | 'not_charged' | 'unknown' = 'unknown';
+      let protocolFeeUsdc: number | undefined;
       try {
         // WKH-143 (DT-2/DT-5/CD-9/CD-1b): resolvemos el creator del agente
         // primario SOLO cuando `splitsActive()` (gate NO-throw). Con el default
@@ -1077,11 +1189,23 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         const feeResult = await chargeProtocolFee(feeParams);
         if (feeResult.status === 'failed') {
           feeChargeError = feeResult.error;
+          // CD-5: `failed` NO es `not_charged`. Un HTTP que falla no prueba que la
+          // transferencia no se transmitió — este mismo camino importa
+          // `hasBroadcastEvidence` justamente por eso. La disposición es
+          // DESCONOCIDA y el monto se OMITE: "no pude preguntar" ≠ "no pasó".
+          protocolFeeStatus = 'unknown';
           log.error({ detail: feeResult.error }, 'fee charge failed');
+        } else if (feeResult.status === 'skipped') {
+          // CD-5: el `feeUsdc` que trae un `skipped` (WALLET_UNSET) es el monto
+          // CALCULADO y NO COBRADO. Reportarlo como cobrado sería una afirmación
+          // falsa con formato de dato, así que el monto se OMITE.
+          protocolFeeStatus = 'not_charged';
         } else if (
           feeResult.status === 'charged' ||
           feeResult.status === 'already-charged'
         ) {
+          protocolFeeStatus = 'charged';
+          protocolFeeUsdc = feeResult.feeUsdc;
           // WKH-124: emit protocol_fee receipt SOLO si charged + owner_ref presente.
           // Fire-and-forget (CD-6/CD-7): su fallo/latencia NUNCA afecta el 200.
           if (feeResult.status === 'charged' && request.a2aKeyRow?.owner_ref) {
@@ -1124,7 +1248,33 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       // los persista (`a2a_events.metadata.downstreamSkips`). Aditivo puro: NO lee
       // ni cambia nada del money-path, sólo copia lo que ya viaja en el response.
       noteDownstreamSkips(request, result.steps, downstreamSkipCauses);
-      return reply.send({ kiteTxHash, ...result });
+      // ── WKH-360 (AC-10/AC-11/AC-12) · el fee, VISIBLE ────────────────────────
+      // ADITIVO: todas las claves de antes salen con el mismo nombre y el mismo
+      // valor, y ninguna se quita. Con precisión, porque acá decía
+      // [FALSA] "la respuesta actual no se mueve un byte"
+      // y eso es falso (fix-pack CR/MNR-4): el 200 gana **DOS claves
+      // INCONDICIONALES**, `feeRatePercent` y `protocolFeeStatus`, así que ningún
+      // response es byte-idéntico al de antes. Lo que sí es cierto, y es lo que AC-12
+      // pide, es que el cambio sea **sólo por agregado**: un cliente que lee las
+      // claves que le importan no ve ninguna diferencia.
+      //
+      // Las otras tres SÍ son condicionales: `protocolFeeUsdc` se OMITE salvo que se
+      // haya cobrado de verdad (CD-5: nada de ceros fabricados), y los dos campos de
+      // cascada quedan AUSENTES si ningún step fue un coordinador — que hoy es el
+      // 100% del tráfico, porque ninguno de los 25 agentes de prod emite el sobre.
+      //
+      // ⚠️ `protocolFeeUsdc` es la pata de PLATAFORMA que este gateway cobró, NO el
+      // total del pipeline (el costo ejecutado es `totalCostUsdc`) y NO el
+      // `fee_usdc` de la tabla `a2a_protocol_fees`, que es post-split. Este número
+      // sale de `FeeChargeResult`, nunca de la tabla.
+      return reply.send({
+        kiteTxHash,
+        ...result,
+        feeRatePercent: Number((getProtocolFeeRate() * 100).toFixed(6)),
+        protocolFeeStatus,
+        ...(protocolFeeUsdc !== undefined && { protocolFeeUsdc }),
+        ...rollUpCascadedFee(result.steps.map((s) => s.coordinatorFee)),
+      });
     },
   );
 };

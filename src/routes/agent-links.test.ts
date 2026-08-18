@@ -139,6 +139,32 @@ describe('redeem HTTP mapping (AC-4)', () => {
     expect(res.statusCode).toBe(503);
     expect(res.json().error_code).toBe('LINK_EXECUTION_UNAVAILABLE');
   });
+
+  /**
+   * WKH-360 fix-pack 2 (AR-it2/BLQ-MED-1) — la mitad de arriba del cableado.
+   * `T-L1-2f` (en `services/agent-link.test.ts`) mide que el service pase el hint a
+   * `executeApprovedPlan`; acá se mide que el ROUTE se lo dé al service. Sin las
+   * dos mitades, borrar el argumento del route deja verde el test del service.
+   *
+   * ⚠️ `Host` lo escribe el caller — es exactamente el punto de `T-L1-2e`. Lo que
+   * este `it` congela es que el valor VIAJE, no que sea confiable.
+   */
+  it('T-L1-2h: el route le pasa `request.hostname` al service', async () => {
+    mockRedeem.mockResolvedValue({
+      orchestrationId: 'orch-1',
+      answer: null,
+      protocolFeeUsdc: 0,
+      pipeline: { success: true, output: null },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents/links/sometoken/redeem',
+      payload: { input: {} },
+      headers: { host: 'gw.example' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(mockRedeem.mock.calls[0]?.[2]).toBe('gw.example');
+  });
 });
 
 // ── T15 — AC-5: no existe endpoint de mutación (PATCH/PUT) ──

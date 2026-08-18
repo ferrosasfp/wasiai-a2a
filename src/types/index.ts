@@ -1071,6 +1071,63 @@ export interface ComposeRequest {
    * route reembolsa el step-0. Ausente/`false` ⇒ comportamiento de hoy.
    */
   requireCompleteCatalog?: boolean | undefined;
+  /**
+   * WKH-360 (AC-5/AC-6): la traza de contratación ENTRANTE, ya validada por el
+   * preHandler `contractingGuard` y poblada por el route. Índice 0 = el primer
+   * coordinador de la cadena.
+   *
+   * ⚠️ VIAJA EN EL REQUEST Y NO EN EL `ComposeResult`, a propósito y por el mismo
+   * motivo que `downstreamSkipCauses` (ver su docstring más arriba): los dos
+   * routes hacen `reply.send({ …, ...result })` sin schema de respuesta, así que
+   * TODO lo que viva en el resultado sale por HTTP al caller. Una traza de
+   * contratación en la respuesta le contaría a cualquier caller qué otros
+   * coordinadores están en la cadena.
+   *
+   * Ausente ⟹ cadena vacía ⟹ comportamiento idéntico al de antes de esta HU, que
+   * es el 100% del tráfico de hoy.
+   */
+  contractingChain?: string[] | undefined;
+  /**
+   * WKH-360 (AC-6): la profundidad de contratación ENTRANTE ya validada.
+   *
+   * Ausente ⟹ 0 (caller directo). "Ausente" e "ilegible" NO son lo mismo: un
+   * valor presente que no se puede leer se RECHAZA en el preHandler y nunca llega
+   * acá, porque degradarlo a 0 sería un reseteo del contador a pedido de un
+   * tercero. Ver `src/lib/contracting-chain.ts`.
+   */
+  contractingDepth?: number | undefined;
+  /**
+   * WKH-360 (AC-4, fix-pack AR/CR BLQ-MED-1): el `Host` por el que ENTRÓ la
+   * petición HTTP, para que el guard anti-bucle tenga identidad propia sin ninguna
+   * configuración.
+   *
+   * ⚠️ **POR QUÉ EXISTE ESTE CAMPO Y NO SE RESUELVE ABAJO.** El conjunto de
+   * identidad se arma con `BASE_URL` → `A2A_SELF_HOSTS` → el `Host` del request.
+   * Las dos primeras son envs y el leaf las lee solo; la tercera necesita un
+   * `FastifyRequest`, **y los services no tienen ninguno**. Sin este campo, con las
+   * dos envs ausentes el conjunto queda `[]`, `isSelfDestination` devuelve `false`
+   * por conjunto vacío y los guards de los steps 1..N —donde vive el costo `5^k`—
+   * quedan INERTES. Medido: sin las dos envs se cobraba el step y salía la
+   * invocación contra nosotros mismos.
+   *
+   * Viaja por el MISMO canal que `contractingChain`: un campo del request que el
+   * route puebla con `request.hostname` (fastify 5, sin puerto).
+   *
+   * **Monótono para el conjunto de identidad, CON `A2A_SELF_HOSTS` o `BASE_URL`
+   * puestas**: ahí agrandarlo sólo puede producir MÁS rechazos. Un caller que forja
+   * `Host: victima.com` consigue que el gateway se **niegue** a llamar a
+   * `victima.com` en SU PROPIA petición — auto-DoS de un request, no un bypass, y
+   * no puede vaciar lo que las envs declararon (`T-L1-2d`).
+   *
+   * ⛔ **SIN LAS DOS ENVS ESA MONOTONÍA NO ES UNA GARANTÍA** (AR-it2/BLQ-MED-2): el
+   * conjunto es `[canonicalizeHost(hint)]`, o sea que el caller no lo agranda, lo
+   * **DEFINE** — y con un `Host` ilegible lo deja en `[]` y el guard vuelve al
+   * estado inerte (medido: `'a b'`, `'http://x'`, `'::1'`, `''`; testigo
+   * `T-L1-2e`). Lo que el hint cubre ahí es el bucle **accidental**, no el hostil.
+   * (Ver también la salvedad sobre `canonicalId` en `resolveSelfHosts`: ese eslabón
+   * lo emitimos NOSOTROS hacia terceros y sin config lo elige el caller.)
+   */
+  selfHostHint?: string | undefined;
 }
 
 export interface ComposeResult {
@@ -1087,8 +1144,25 @@ export interface ComposeResult {
    * el mapeo de status de `routes/compose.ts` (`let status = 400`). NO agrega una
    * rama de status nueva: un mapeo irresoluble es un body que el gateway no puede
    * satisfacer, o sea el mismo 400 de siempre.
+   *
+   * WKH-360: `CONTRACTING_LOOP_DETECTED` y `CONTRACTING_DEPTH_EXCEEDED` → **400**
+   * por ese MISMO `default`, exactamente como `INPUT_MAPPING_FAILED`. Tampoco
+   * agregan rama de status, y eso es deliberado: estrenar un `508 Loop Detected`
+   * sumaría un código que ningún cliente de este ecosistema maneja a cambio de
+   * cero información que el `errorCode` no dé.
+   *
+   * ⚠️ El STRING de los dos sale de `src/lib/contracting-chain.ts` (CD-19), no de
+   * un literal escrito acá: el mismo bucle se reporta como `error_code` (snake) si
+   * lo caza un preHandler y como `errorCode` (camel) si lo caza el loop del
+   * pipeline, y lo que ata las dos superficies es que el VALOR sea una sola
+   * constante. Un cliente matchea un solo string aunque mire dos claves.
    */
-  errorCode?: 'SCOPE_DENIED' | 'DEST_CAP_EXCEEDED' | 'INPUT_MAPPING_FAILED';
+  errorCode?:
+    | 'SCOPE_DENIED'
+    | 'DEST_CAP_EXCEEDED'
+    | 'INPUT_MAPPING_FAILED'
+    | 'CONTRACTING_LOOP_DETECTED'
+    | 'CONTRACTING_DEPTH_EXCEEDED';
   /** WKH-61: target denegado, para debugging. `category` se omite si el agent no la expone. */
   scopeDeniedTarget?: {
     registry: string;
@@ -1211,6 +1285,29 @@ export interface StepResult {
   transformLLM?: LLMBridgeStats;
   /** WKH-114: veredicto evaluado (AC-4). */
   acceptance?: StepAcceptance;
+  /**
+   * WKH-360 (AC-11): el fee de orquestación que declaró el EJECUTOR de este step,
+   * cuando ese ejecutor es a su vez un coordinador.
+   *
+   * Se **LEE**, no se estima. La señal de que el agente es un coordinador es que
+   * su respuesta trae el MISMO sobre que nosotros emitimos (`protocolFeeStatus`):
+   *  · sin `protocolFeeStatus` ⟹ este campo queda **AUSENTE** (no es un
+   *    coordinador). Ésta es la rama que preserva AC-8 para el 100% del tráfico de
+   *    hoy: los 25 agentes descubribles en prod no emiten ese campo.
+   *  · declaró un monto cobrado ⟹ `{ declared: true, usdc }`.
+   *  · lo declaró pero sin monto usable ⟹ `{ declared: false }`.
+   *
+   * ⛔ **NUNCA `usdc: 0`** (CD-5). "No lo declaró" no es "cobró cero": un cero
+   * fabricado es una afirmación falsa con formato de dato. El tercer valor es
+   * explícito.
+   *
+   * Este campo SÍ es público a propósito (viaja en el `ComposeResult` y sale por
+   * HTTP): el punto de AC-11 es que el fee en cascada sea VISIBLE para quien paga.
+   */
+  coordinatorFee?:
+    | { declared: true; usdc: number }
+    | { declared: false }
+    | undefined;
 }
 
 // ============================================================
@@ -1321,6 +1418,25 @@ export interface OrchestrateRequest {
    * flag baja a compose para la capa 2 (TOCTOU).
    */
   requireCompleteCatalog?: boolean | undefined;
+  /**
+   * WKH-360 (AC-5/AC-7): la traza de contratación ENTRANTE, ya validada por el
+   * preHandler `contractingGuard` de las TRES rutas de orchestrate. Se propaga tal
+   * cual a `composeService.compose`, que es quien EMITE la traza saliente con
+   * nuestro eslabón y la profundidad incrementada.
+   *
+   * Ausente ⇒ cadena vacía / profundidad 0 ⇒ comportamiento idéntico al de hoy.
+   */
+  contractingChain?: string[] | undefined;
+  /** WKH-360 (AC-6): profundidad de contratación entrante, ya validada. */
+  contractingDepth?: number | undefined;
+  /**
+   * WKH-360 (AC-4, fix-pack AR/CR BLQ-MED-1): el `Host` por el que entró la
+   * petición. Lo puebla el route con `request.hostname` y lo consumen el SITIO 2
+   * (acá, el step-0 de las tres rutas de orchestrate) y —propagado a
+   * `ComposeRequest.selfHostHint`— los SITIOS 3 y 4. Ver el docstring largo en
+   * `ComposeRequest`.
+   */
+  selfHostHint?: string | undefined;
 }
 
 export interface OrchestrateResult {
@@ -1674,6 +1790,35 @@ export interface AgentSkill {
   id: string;
   name: string;
   description: string;
+  /**
+   * WKH-360 (AC-1c): el endpoint CONCRETO con el que se contrata esta skill.
+   *
+   * Extensión ADITIVA — un consumidor que no la entiende la ignora (DT-6). Sale
+   * del prefijo con el que la ruta está registrada, y como `tsc` no ata un path
+   * literal al registro de rutas, el control es MECÁNICO: `T-CARD-3` arranca la
+   * app con `fastify.inject()` y verifica que cada `endpoint` declarado responda
+   * distinto de 404.
+   */
+  endpoint?: { method: 'POST'; path: string };
+  /**
+   * WKH-360 (AC-1a): cómo se paga esta skill.
+   *
+   * ⚠️ NO hay `priceUsdc` por skill, y su ausencia es deliberada: declarar un
+   * precio fijo sería **fabricar una oferta** (justo lo que AC-3 prohíbe). Los
+   * precios de los agentes son pass-through y el gateway cobra una TASA sobre el
+   * costo realmente ejecutado, así que el precio de un pipeline concreto se
+   * COTIZA en `POST /orchestrate/plan` (que devuelve `costPerStep`,
+   * `totalCostUsdc`, `protocolFeeUsdc` y `maxQuotedCostUsdc`, y no cobra). La
+   * carta declara el MODELO y apunta al COTIZADOR — que es lo que AC-1 admite con
+   * su "o la forma de obtenerlo".
+   */
+  pricing?:
+    | { model: 'free' }
+    | {
+        model: 'protocol-fee-on-executed-cost';
+        feeRatePercent: number;
+        quoteEndpoint: string;
+      };
 }
 
 export interface AgentCard {
@@ -1729,6 +1874,25 @@ export interface AgentCard {
     supported: AppIntentName[];
     alignment: 'conceptual';
     disclaimer: string;
+  };
+  /**
+   * WKH-360 (AC-1): cómo contratar a este gateway COMO AGENTE, es decir el
+   * contrato de la traza de contratación que otro coordinador tiene que hablar.
+   *
+   * Extensión ADITIVA — quien no la entiende la ignora (DT-6).
+   *
+   * `bestEffortNote` NO es adorno: publica, en la carta, que la detección de
+   * bucles transitivos depende de que los intermediarios reenvíen los headers. Sin
+   * ese texto la carta induciría a creer que declarar los headers alcanza para
+   * estar cubierto. Sale de `CONTRACTING_LAYER2_BEST_EFFORT_NOTE`
+   * (`src/lib/contracting-chain.ts`), que es la MISMA constante que va al body del
+   * error, para que la promesa publicada y la emitida no puedan divergir.
+   */
+  contracting?: {
+    depthMax: number;
+    chainHeader: string;
+    depthHeader: string;
+    bestEffortNote: string;
   };
 }
 

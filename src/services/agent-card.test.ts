@@ -1,5 +1,6 @@
 import type { FastifyRequest } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { CONTRACTING_LAYER2_BEST_EFFORT_NOTE } from '../lib/contracting-chain.js';
 import type { Agent, RegistryConfig } from '../types/index.js';
 import { agentCardService, resolveBaseUrl } from './agent-card.js';
 
@@ -498,9 +499,91 @@ describe('agentCardService', () => {
       ]);
     });
 
-    it('sets empty auth schemes', () => {
+    // ⚠️ WKH-360 (AC-1b) — ESTE `it` decía `toEqual([])` y su INVERSIÓN es el punto
+    // de la HU, no un daño colateral. La carta con `schemes: []` publicaba un agente
+    // A2A que no dice con qué se le paga, y el AC exige que lo declare.
+    //
+    // El testigo NO se borró: se re-apuntó a la propiedad que sí tiene que valer, que
+    // es que `bearer` esté SIEMPRE (el carril de agent key prepaga no está gateado por
+    // nada) y que el conjunto se DERIVE del registry vivo en vez de ser una constante.
+    it('WKH-360 (AC-1b): declara `bearer` siempre — ya NO son schemes vacíos', () => {
       const card = agentCardService.buildSelfAgentCard('https://gw.wasiai.io');
-      expect(card.authentication.schemes).toEqual([]);
+      expect(card.authentication.schemes).toContain('bearer');
+      expect(card.authentication.schemes).not.toEqual([]);
+    });
+
+    it('WKH-360 (AC-3, CD-5): sin chain de cobro de ENTRADA, `x402` NO se lista', () => {
+      // El caso es alcanzable HOY: `solana-devnet` sale con
+      // `acceptsInboundPayment: false`, así que un deploy solo-Solana no tiene
+      // ninguna chain de entrada. Lo que NO se hace es emitir `x402: false` ni
+      // `x402: null` — el esquema simplemente no aparece (CD-5: ningún placeholder).
+      const card = agentCardService.buildSelfAgentCard('https://gw.wasiai.io');
+      // En esta suite no hay adapters inicializados ⇒ no hay chain de entrada.
+      expect(card.authentication.schemes).not.toContain('x402');
+      expect(JSON.stringify(card)).not.toContain('"x402":false');
+      expect(JSON.stringify(card)).not.toContain('"x402":null');
+    });
+
+    it('WKH-360 (AC-1a/AC-1c): cada skill trae `endpoint` y `pricing`', () => {
+      const card = agentCardService.buildSelfAgentCard('https://gw.wasiai.io');
+      for (const skill of card.skills) {
+        expect(skill.endpoint, `skill ${skill.id}`).toBeDefined();
+        expect(skill.endpoint?.method, `skill ${skill.id}`).toBe('POST');
+        expect(skill.pricing, `skill ${skill.id}`).toBeDefined();
+      }
+      // `/discover` es gratis; las dos que mueven plata declaran el MODELO y
+      // apuntan al cotizador. NO hay `priceUsdc`: sería fabricar una oferta (AC-3).
+      const discover = card.skills.find((s) => s.id === 'discover');
+      expect(discover?.pricing).toEqual({ model: 'free' });
+      const compose = card.skills.find((s) => s.id === 'compose');
+      expect(compose?.pricing).toMatchObject({
+        model: 'protocol-fee-on-executed-cost',
+        quoteEndpoint: '/orchestrate/plan',
+      });
+      expect(JSON.stringify(card)).not.toContain('priceUsdc');
+    });
+
+    it('WKH-360 (AC-1): `contracting` publica el techo y los DOS headers', () => {
+      const card = agentCardService.buildSelfAgentCard('https://gw.wasiai.io');
+      expect(card.contracting?.depthMax).toBe(2);
+      expect(card.contracting?.chainHeader).toBe('x-a2a-contracting-chain');
+      expect(card.contracting?.depthHeader).toBe('x-a2a-contracting-depth');
+      // CD-6: la nota best-effort sale de la MISMA constante que el body del error.
+      expect(card.contracting?.bestEffortNote).toBe(
+        CONTRACTING_LAYER2_BEST_EFFORT_NOTE,
+      );
+    });
+
+    it('T-CARD-6 (AC-3, CD-5): NINGÚN campo nuevo de la carta vale 0 ni null', () => {
+      // Barrido recursivo. Un `0` fabricado es una afirmación falsa con formato de
+      // dato, y es el modo de falla que CD-5 prohíbe para toda esta HU.
+      const card = agentCardService.buildSelfAgentCard('https://gw.wasiai.io');
+      const offenders: string[] = [];
+      const walk = (node: unknown, path: string): void => {
+        if (node === null) {
+          offenders.push(`${path} = null`);
+          return;
+        }
+        if (typeof node === 'number' && node === 0) {
+          offenders.push(`${path} = 0`);
+          return;
+        }
+        if (Array.isArray(node)) {
+          for (const [i, v] of node.entries()) walk(v, `${path}[${i}]`);
+          return;
+        }
+        if (typeof node === 'object') {
+          for (const [k, v] of Object.entries(
+            node as Record<string, unknown>,
+          )) {
+            walk(v, `${path}.${k}`);
+          }
+        }
+      };
+      walk(card.contracting, 'contracting');
+      for (const s of card.skills) walk(s.pricing, `skills.${s.id}.pricing`);
+      walk(card.authentication, 'authentication');
+      expect(offenders).toEqual([]);
     });
 
     it('uses baseUrl as url', () => {

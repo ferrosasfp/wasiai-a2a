@@ -20,6 +20,15 @@ import {
 } from './adapters/solana/facilitator-settle.js';
 import { warmSolanaSchemaPreflight } from './adapters/solana/schema-preflight.js';
 import {
+  assertSelfHostsEnv,
+  contractingDepthMaxWarning,
+  DEPTH_MAX_ENV,
+  readContractingGuardHealth,
+  resolveContractingDepthMax,
+  resolveSelfHosts,
+  SELF_HOSTS_ENV,
+} from './lib/contracting-chain.js';
+import {
   assertDepositMinimumEnv,
   assertRequiredEnv,
   isProduction,
@@ -82,6 +91,39 @@ const depositMinimumWarning = assertDepositMinimumEnv();
 // (es el default: nadie recibe credencial). Devuelve los HOSTS declarados — nunca
 // los secretos — para que el arranque publique a quién se le va a mandar.
 const selfPublishedAuthHosts = assertSelfPublishedAuthEnv();
+
+// WKH-360: MISMO criterio, sobre la identidad propia del gateway (el conjunto con el
+// que el guard anti-bucle decide "este destino soy yo"). PRESENTE PERO ILEGIBLE
+// (`A2A_SELF_HOSTS='https://gw'`, o con una entrada duplicada) → no bootea: es el
+// caso en el que el operador CREE tener la identidad puesta, y si degradara a "sin
+// alias" en silencio el guard dejaría de reconocer como propio justo el host que el
+// operador declaró. CONJUNTO VACÍO → warning ruidoso más abajo, NO throw: no se pudo
+// verificar el valor de `BASE_URL` en el Railway de prod (NC-1) y voltear el servicio
+// por eso es un radio de explosión mayor que el problema — y el `hint` por request
+// (el `Host` entrante, que viaja del route a los cuatro sitios) sigue cubriendo el
+// bucle directo POR HTTP sin ninguna configuración.
+//
+// ⛔ Que quede claro qué NO cubre ese hint, porque es lo que decide si este warning
+// es urgente: los ALIAS propios, los callers NO-HTTP (tool MCP e `inbound-task`, que
+// no tienen `Host` que pasar) y el eslabón que anunciamos hacia afuera. Setear
+// `A2A_SELF_HOSTS` es paso del deploy, no una mejora opcional.
+//
+// ⚠️ Y "por HTTP" enumera CALL-SITES, no un protocolo: se rompió una vez con
+// `POST /agents/links/:token/redeem`, que entra por HTTP y no bajaba el hint
+// (AR-it2/BLQ-MED-1). Lo que sostiene la frase es `T-HINT-CALLSITES`, no la frase.
+const selfHostsWarning = assertSelfHostsEnv();
+
+// WKH-360: y el techo de profundidad, con el mismo criterio que el techo de exposición
+// de acá abajo — ilegible hace fail-closed AL DEFAULT DEL CÓDIGO (nunca "sin techo"),
+// pero eso no puede ser mudo: `A2A_CONTRACTING_DEPTH_MAX=1O` y la env sin setear se
+// comportan igual y se ven igual, y el operador creería tener puesto otro número.
+//
+// Devuelve el TEXTO y no un booleano (fix-pack AR/BLQ-MED-3): los motivos por los que
+// el techo configurado no se usa necesitan mensajes DISTINTOS. Un `0` no es un typo
+// —es legible— y decirle al operador "tu valor no está haciendo nada" lo manda a
+// buscar un error de tipeo que no existe; lo que necesita leer es que un 0 habría
+// cerrado el 100% del tráfico y que para apagar el servicio no es por acá.
+const contractingDepthWarning = contractingDepthMaxWarning();
 
 // Initialize chain-adaptive adapters before server starts
 await initAdapters();
@@ -164,6 +206,38 @@ if (strandedCeilingMisconfigured) {
 if (depositMinimumWarning !== null) {
   fastify.log.warn(`⚠️  ${depositMinimumWarning}`);
 }
+
+if (selfHostsWarning !== null) {
+  fastify.log.warn(`⚠️  ${selfHostsWarning}`);
+}
+
+if (contractingDepthWarning !== null) {
+  fastify.log.warn(
+    {
+      setting: DEPTH_MAX_ENV,
+      effective: resolveContractingDepthMax(),
+    },
+    `⚠️  ${contractingDepthWarning}`,
+  );
+}
+
+// WKH-360: el conjunto de identidad propia se publica SIEMPRE, incluso vacío, por el
+// mismo motivo que los hosts self-published de más abajo: "no me reconozco a mí mismo
+// por ningún alias" es justamente el estado que deja la capa 1 dependiendo sólo del
+// `Host` de cada petición, y el operador tiene que poder confirmarlo desde el log sin
+// entrar al panel del hosting. Un host no es un secreto — `POST /discover` ya publica
+// el `invokeUrl` de los agentes del catálogo.
+fastify.log.info(
+  {
+    setting: SELF_HOSTS_ENV,
+    hosts: resolveSelfHosts().hosts,
+    count: resolveSelfHosts().hosts.length,
+    depthMax: resolveContractingDepthMax(),
+  },
+  resolveSelfHosts().hosts.length === 0
+    ? 'guard anti-bucle SIN identidad configurada: por HTTP la capa 1 se apoya en el Host de cada peticion, y eso cubre el bucle ACCIDENTAL, no a un caller que ataca — sin esta variable el Host no agranda el conjunto, lo DEFINE, asi que un Host ilegible lo deja VACIO y el guard queda inerte. Tampoco quedan cubiertos los alias propios, los callers no-HTTP (tool MCP e inbound-task) ni el eslabon que anunciamos hacia afuera. Setear A2A_SELF_HOSTS.'
+    : 'guard anti-bucle con identidad configurada para los hosts listados',
+);
 
 // A qué hosts self-published se les manda credencial. Se publica SIEMPRE, incluso
 // vacío, porque "no le mando credencial a nadie" es justamente el estado que hoy
@@ -262,6 +336,20 @@ fastify.get(
       // problema", y `rail_off` es información: dice que el carril NO está armado.
       // Síncrono y no-throw como exige CD-10; `readPayoutRouteHealth` no sondea.
       solanaPayoutRoute: readPayoutRouteHealth(),
+      // WKH-360: el estado del guard anti-bucle. Aditivo, SIN valores sensibles: sale
+      // la CANTIDAD de hosts propios, no los hosts. Es lo que permite confirmar
+      // DESPUÉS del deploy si `BASE_URL`/`A2A_SELF_HOSTS` quedaron puestas —
+      // medición que desde afuera no se puede hacer (NC-1) y de la que depende si la
+      // capa 1 cubre los alias o sólo el Host de cada petición.
+      //
+      // `source: 'request-only'` es información, no un error: dice que el conjunto
+      // derivado de la config está vacío y que lo único que sostiene la identidad es
+      // el `Host` entrante. Síncrono, sin `await` y sin poder tirar (CD-10).
+      //
+      // ⚠️ La MISMA línea está en `src/__tests__/e2e/setup.ts`, que duplica este
+      // handler (ver el aviso del campo `stranded` de más arriba). Si este campo se
+      // agrega sólo acá, el e2e afirma un `/health` que no es el de prod.
+      contractingGuard: readContractingGuardHealth(),
     });
   },
 );

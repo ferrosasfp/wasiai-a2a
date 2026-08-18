@@ -235,7 +235,16 @@ describe('resolveAgentDestination', () => {
 
     const dest = await resolveAgentDestination('myagent', 'wasiai');
 
-    expect(dest).toEqual({ registry: 'wasiai', slug: 'myagent' });
+    expect(dest).toEqual({
+      registry: 'wasiai',
+      slug: 'myagent',
+      // WKH-360: `resolveAgentDestination` ahora devuelve tambien el `invokeUrl`
+      // (lo necesita el guard anti-bucle del step-0, que sin la URL no puede
+      // preguntar "este destino somos nosotros?"). El `toEqual` es EXACTO, asi
+      // que este campo lo fija: si alguien deja de devolverlo, estos tres `it`
+      // se ponen en rojo antes que el guard quede ciego en silencio.
+      invokeUrl: 'https://example.com/invoke',
+    });
     expect(mockGetAgent).toHaveBeenCalledWith('myagent', 'wasiai');
   });
 
@@ -248,7 +257,16 @@ describe('resolveAgentDestination', () => {
 
     const dest = await resolveAgentDestination('myagent', undefined);
 
-    expect(dest).toEqual({ registry: 'wasiai', slug: 'myagent' });
+    expect(dest).toEqual({
+      registry: 'wasiai',
+      slug: 'myagent',
+      // WKH-360: `resolveAgentDestination` ahora devuelve tambien el `invokeUrl`
+      // (lo necesita el guard anti-bucle del step-0, que sin la URL no puede
+      // preguntar "este destino somos nosotros?"). El `toEqual` es EXACTO, asi
+      // que este campo lo fija: si alguien deja de devolverlo, estos tres `it`
+      // se ponen en rojo antes que el guard quede ciego en silencio.
+      invokeUrl: 'https://example.com/invoke',
+    });
     expect(mockGetAgent).toHaveBeenNthCalledWith(1, 'myagent', undefined);
   });
 
@@ -261,7 +279,16 @@ describe('resolveAgentDestination', () => {
 
     const dest = await resolveAgentDestination('myagent', 'wrong-hint');
 
-    expect(dest).toEqual({ registry: 'wasiai', slug: 'myagent' });
+    expect(dest).toEqual({
+      registry: 'wasiai',
+      slug: 'myagent',
+      // WKH-360: `resolveAgentDestination` ahora devuelve tambien el `invokeUrl`
+      // (lo necesita el guard anti-bucle del step-0, que sin la URL no puede
+      // preguntar "este destino somos nosotros?"). El `toEqual` es EXACTO, asi
+      // que este campo lo fija: si alguien deja de devolverlo, estos tres `it`
+      // se ponen en rojo antes que el guard quede ciego en silencio.
+      invokeUrl: 'https://example.com/invoke',
+    });
     expect(mockGetAgent).toHaveBeenNthCalledWith(1, 'myagent', 'wrong-hint');
     // Fallback espeja compose.resolveAgent: getAgent(slug) sin 2º arg.
     expect(mockGetAgent).toHaveBeenNthCalledWith(2, 'myagent');

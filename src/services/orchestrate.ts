@@ -12,6 +12,13 @@ import {
   anthropicCircuitBreaker,
   CircuitOpenError,
 } from '../lib/circuit-breaker.js';
+import {
+  CONTRACTING_LOOP_DETECTED,
+  contractingErrorMessage,
+  isSelfDestination,
+  resolveSelfHosts,
+  rollUpCascadedFee,
+} from '../lib/contracting-chain.js';
 import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
@@ -27,7 +34,10 @@ import type {
   OrchestrateResult,
   ResolvedComposeStep,
 } from '../types/index.js';
-import { resolveAgentPriceUsdc } from './agent-price.js';
+import {
+  resolveAgentDestination,
+  resolveAgentPriceUsdc,
+} from './agent-price.js';
 import { resolveAgentSplitContext } from './agent-split-context.js';
 import { budgetService } from './budget.js';
 import { composeService } from './compose.js';
@@ -1114,6 +1124,142 @@ export const orchestrateService = {
       }
     }
 
+    // ── WKH-360 · SITIO 2 del guard de capa 1 (AC-4, step 0 de orchestrate) · 💰
+    // El punto exacto NO es una elección: el comentario del cap gate de acá arriba
+    // ya declara este lugar como "ANTES del price-fallback y de cualquier
+    // budgetService.debit o composeService.compose". Este guard se para ahí mismo,
+    // o sea antes del `budgetService.debit` del step-0 (más abajo en este método) y
+    // antes del `composeService.compose`.
+    //
+    // POR QUÉ HACE FALTA además del Sitio 3 (el loop de compose): en /orchestrate*
+    // el débito del step-0 lo hace ESTE SERVICE, no el middleware — las tres rutas
+    // apagan el débito del middleware con `markSkipMiddlewareDebitHandler`. O sea
+    // que para orchestrate el ÚNICO débito del step-0 es el de acá, y si el guard
+    // corriera recién dentro de compose el step-0 ya estaría cobrado.
+    //
+    // Cubre las TRES rutas de orchestrate porque las tres desembocan en este
+    // método.
+    //
+    // ⛔ NO se cruza `plan.discoveredAgents` contra `plan.steps[i].agent` a mano:
+    // sería una SEGUNDA expresión de la resolución y divergiría en
+    // /orchestrate/execute, donde los steps vienen del body del cliente. Se llama
+    // la MISMA `resolveAgentDestination` que usa el Sitio 1, por step, con el mismo
+    // patrón de iteración que `quoteMaxCostUsdc`.
+    //
+    // ─── EL COSTO REAL DE ESTE BLOQUE, MEDIDO (fix-pack CR/BLQ-BAJO-3) ────────
+    // [FALSA] ⚠️ Acá decía que esto son N lookups "con cache de 60 s" — el marcador
+    // [FALSA] de esta línea es para que un `grep` no confunda la cita con un claim
+    // vivo (fix-pack CR/MNR-1). **Es falso**: ese cache NO cubre este camino.
+    // El `Map` de `services/agent-price.ts` lo consulta ÚNICAMENTE
+    // `resolveAgentPriceUsdc`; `resolveAgentDestination` llama
+    // `discoveryService.getAgent` DIRECTO.
+    //
+    // ⚠️ Y la cuenta anterior decía "hasta 5 SELECT + 10 fetches" para 5 steps, que
+    // **subestima el lado de la DB** (AR-it2/MNR-4). Un `getAgent` no es UN SELECT:
+    //   · `publishedAgentService.getBySlugAsAgent` — SELECT sobre `a2a_agents`
+    //     (`services/agent.ts:526`), y sólo se saltea si vino un `registry` que no
+    //     es el self-published;
+    //   · más el de registries: `registryService.getEnabled()` — SELECT sobre
+    //     `registries` **sin cache** (`services/registry.ts:463`) cuando no hay
+    //     `registry`, o `getWithSecrets(registryId)` cuando sí lo hay.
+    // O sea **hasta 2 SELECT por `getAgent`**, y `resolveAgentDestination` puede
+    // llamar `getAgent` DOS veces (el segundo intento sin `registry`, línea
+    // `agent-price.ts:125`) ⇒ **hasta 4 SELECT por step**. Para un plan de 5 steps
+    // el techo son **20 SELECT**, no 5, más un `ssrfFetch` saliente por registry
+    // habilitado en cada `getAgent` que llegue al fanout. Todo **secuencial y antes
+    // del débito**.
+    //
+    // El piso no se publica como número porque depende de qué steps traen `registry`
+    // y de cuántos resuelven local-first; lo que hay que saber para decidir es el
+    // TECHO, y el techo es el de arriba.
+    //
+    // Se deja así, y no detrás de un cache nuevo, por dos razones: (a) el dato
+    // tiene que ser FRESCO — el catálogo puede cambiar entre el preflight y la
+    // ejecución, y un destino cacheado como ajeno es exactamente el bypass que el
+    // guard existe para negar; (b) agregar un cache acá sería un segundo lector del
+    // catálogo con su propia política de expiración. Lo que se corrige es la
+    // AFIRMACIÓN, que decía que era barato. En `/orchestrate/execute` este lookup
+    // igual YA ocurre dentro de `quoteMaxCostUsdc`.
+    //
+    // ─── Y SI ESTE `await` TIRA: FAIL-CLOSED, DECIDIDO (fix-pack CR/BLQ-BAJO-3) ─
+    // No hay `try` a propósito. Un blip de la DB sube al catch del route, que
+    // re-lanza ⇒ 5xx **sin débito y sin invocación saliente**. Es superficie de 5xx
+    // nueva para el camino atómico, y se acepta: la alternativa (tragarse el error
+    // y seguir) es ejecutar el pipeline sin saber si un destino somos nosotros, o
+    // sea el guard apagado justo cuando la infra tiembla. Un guard que falla abierto
+    // no es un guard. Testigo: `T-L1-3d`.
+    //
+    // El `selfHosts.length > 0` de adelante no es una optimización cosmética: sin
+    // identidad conocida el guard no puede decidir nada, así que evita N lookups que
+    // no cambiarían el veredicto. ⚠️ Con el `hint` de abajo ese conjunto ya NO queda
+    // vacío en el camino HTTP (el `Host` de la petición siempre aporta un host), así
+    // que esta rama corta es hoy el camino de los callers NO-HTTP (el tool MCP y
+    // `inbound-task`), que no tienen `Host` que pasar.
+    const { hosts: selfHosts } = resolveSelfHosts(request.selfHostHint);
+    if (selfHosts.length > 0) {
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        if (!step || typeof step.agent !== 'string') continue;
+        const dest = await resolveAgentDestination(step.agent, step.registry);
+        if (dest && isSelfDestination(dest.invokeUrl, selfHosts)) {
+          log.warn(
+            {
+              orchestrationId,
+              slug: step.agent,
+              step: i,
+              layer: 'direct',
+              site: 'orchestrate-pre-debit',
+            },
+            'contracting-loop.blocked',
+          );
+          // Se devuelve un `OrchestrateResult` normal con el código en
+          // `pipeline.errorCode`, que es el canal que este repo YA usa para "el
+          // pipeline no se ejecutó y acá está el motivo" (el mapeo
+          // `pipeline.errorCode === 'SCOPE_DENIED' → 403` de las dos rutas de
+          // ejecución). El route agrega el 400 y el `error_code` top-level.
+          //
+          // Cero débito y cero compose: este `return` está ANTES de los dos.
+          const loopResult: OrchestrateResult = {
+            orchestrationId,
+            answer: null,
+            reasoning: contractingErrorMessage(CONTRACTING_LOOP_DETECTED),
+            pipeline: {
+              success: false,
+              output: null,
+              steps: [],
+              totalCostUsdc: 0,
+              totalLatencyMs: 0,
+              error: `Step ${i}: ${contractingErrorMessage(CONTRACTING_LOOP_DETECTED)}`,
+              errorCode: CONTRACTING_LOOP_DETECTED,
+            },
+            consideredAgents: plan.discoveredAgents,
+            protocolFeeUsdc: 0,
+          };
+
+          eventService
+            .track({
+              eventType: 'orchestrate_goal',
+              status: 'failed',
+              latencyMs: Date.now() - startTime,
+              costUsdc: 0,
+              goal,
+              metadata: {
+                orchestrationId,
+                agentCount: steps.length,
+                fallback: usedFallback,
+                broadenRetryUsed: plan.broadenRetryUsed ?? false,
+                retryAgentCount: plan.retryAgentCount ?? null,
+              },
+            })
+            .catch((err) =>
+              log.error({ err }, '[Orchestrate] event tracking failed'),
+            );
+
+          return loopResult;
+        }
+      }
+    }
+
     // WKH-127 (AC-4): plannedCost 0 (todos priceUsdc===0) → fallback $1 + warn + flag.
     // El header x-debit-fallback lo setea el route leyendo result.debitFallback (CD-7).
     let debitFallback = false;
@@ -1237,6 +1383,17 @@ export const orchestrateService = {
       // WKH-303: precios CONGELADOS por un quote firmado que el caller redimió en
       // `/orchestrate/execute`. Ausente ⇒ compose debita el precio vivo, como hoy.
       frozenStepPricesUsd: request.frozenStepPricesUsd,
+      // WKH-360 (AC-7): la traza de contratación entrante baja a compose, que es
+      // quien la EMITE con nuestro eslabón y la profundidad incrementada. Sin esta
+      // propagación, un pipeline lanzado por /orchestrate saldría con la traza VACÍA
+      // y el gateway de al lado no podría cerrar el transitivo ni cooperando.
+      contractingChain: request.contractingChain,
+      contractingDepth: request.contractingDepth,
+      // WKH-360 (fix-pack AR/CR BLQ-MED-1): y el `Host` entrante, que es lo que le
+      // da identidad propia a los SITIOS 3 y 4 dentro del pipeline sin ninguna
+      // configuración. Sin esta línea, un pipeline lanzado por /orchestrate corre
+      // sus steps 1..N con conjunto de identidad VACÍO.
+      selfHostHint: request.selfHostHint,
     });
 
     // WKH-132 (AC-1/DT-1): protocolFeeUsdc reportado = rate sobre el COSTO REAL
@@ -1528,6 +1685,14 @@ export const orchestrateService = {
       pipeline,
       consideredAgents: plan.discoveredAgents,
       protocolFeeUsdc,
+      // WKH-360 (AC-11/AC-12): el fee de orquestación AJENO, sumado sobre los steps
+      // cuyo ejecutor resultó ser a su vez un coordinador. Los dos campos quedan
+      // AUSENTES si no hubo ninguno, que es el 100% del tráfico de hoy ⇒ respuesta
+      // byte-idéntica. `partial` ⟺ hubo un coordinador que no declaró su monto: sin
+      // ese tercer valor, un total al que le falta un sumando se leería como
+      // completo. La MISMA función pura que usa `/compose`, para que las tres
+      // superficies no puedan calcularlo distinto.
+      ...rollUpCascadedFee(pipeline.steps.map((st) => st.coordinatorFee)),
       // WKH-44: spread condicional — solo aparecen en el body si hay valor.
       ...(feeChargeError !== undefined && { feeChargeError }),
       ...(feeChargeTxHash !== undefined && { feeChargeTxHash }),

@@ -23,6 +23,14 @@ import {
 // `resolveAgent` sale del MISMO módulo leaf que el over-fetch de discovery, para
 // que no puedan desalinearse. Leaf (no `services/discovery.js`) porque las suites
 // que mockean el service completo dejarían el export en `undefined`.
+import {
+  buildOutboundContractingHeaders,
+  CONTRACTING_LOOP_DETECTED,
+  contractingErrorMessage,
+  isSelfDestination,
+  readCoordinatorFee,
+  resolveSelfHosts,
+} from '../lib/contracting-chain.js';
 import { resolveComposeAgentPoolLimit } from '../lib/discovery-fetch-limit.js';
 import {
   type DownstreamLogger,
@@ -325,7 +333,38 @@ export const composeService = {
       // Vive acá y no en la envoltura `compose()` porque HU-306 bajó el cuerpo del
       // pipeline a este método; el débito per-step que lo consume está en este scope.
       frozenStepPricesUsd,
+      // WKH-360 (AC-5/AC-7): la traza de contratación ENTRANTE, ya validada por el
+      // preHandler `contractingGuard`. Ausente ⇒ cadena vacía y profundidad 0, que
+      // es el 100% del tráfico de hoy.
+      contractingChain,
+      contractingDepth,
+      // WKH-360 (fix-pack AR/CR BLQ-MED-1): el `Host` por el que entró la petición,
+      // que el route puebla. Es lo único que le da identidad propia a este pipeline
+      // cuando `BASE_URL` y `A2A_SELF_HOSTS` están ausentes.
+      selfHostHint,
     } = request;
+    // WKH-360 (AC-7): la identidad propia de ESTE pipeline. Se resuelve UNA vez por
+    // pipeline y no por step: la identidad del gateway no cambia entre steps, y
+    // resolverla N veces abriría la puerta a que dos steps del mismo run comparen
+    // contra conjuntos distintos o emitan trazas distintas.
+    //
+    // ⚠️ CON `hint` (fix-pack AR/CR BLQ-MED-1). Antes se resolvía sin él "porque este
+    // método recibe un `ComposeRequest`, no un `FastifyRequest`" — cierto, y por eso
+    // el `Host` ahora VIAJA en el `ComposeRequest`, igual que la traza entrante. Sin
+    // eso, con las dos envs ausentes esto daba `hosts: []` y `canonicalId: null`, o
+    // sea: SITIO 3 y SITIO 4 inertes (`isSelfDestination` con conjunto vacío
+    // devuelve `false`) y CERO traza saliente. Los steps 1..N son justamente donde
+    // vive el costo `5^k`.
+    const selfIdentity = resolveSelfHosts(selfHostHint);
+    const outboundContracting = {
+      chain: contractingChain ?? [],
+      depth: contractingDepth ?? 0,
+      canonicalId: selfIdentity.canonicalId,
+      // El conjunto viaja con la traza para que el SITIO 4 (dentro de `invokeAgent`,
+      // que tampoco tiene el request) compare contra EL MISMO conjunto que el
+      // SITIO 3, y no contra uno re-resuelto sin `hint`.
+      selfHosts: selfIdentity.hosts,
+    };
     let totalCost = 0;
     let totalLatency = 0;
     let lastOutput: unknown = null;
@@ -373,6 +412,49 @@ export const composeService = {
             },
           };
         }
+      }
+      // ── WKH-360 · SITIO 3 del guard de capa 1 (AC-4, steps 1..N) · 💰 ──────
+      // ESTE es el guard de dinero de los steps del pipeline: el débito per-step
+      // vive MUY abajo (el `budgetService.debit` del bloque de más adelante), así
+      // que cortar acá satisface CD-3 con margen.
+      //
+      // Tres razones para este punto exacto, las tres leídas del comentario que ya
+      // estaba acá:
+      //  · la autorización va PRIMERO (doctrina ya escrita abajo): un caller sin
+      //    scope recibe SCOPE_DENIED (403) y no un error de bucle. Los dos rechazan
+      //    antes de cobrar, así que el orden entre ellos no es una decisión de plata;
+      //  · `getStepGasOverheadUsd` LANZA en mainnet sin configurar, así que un
+      //    bucle no puede reportarse como un error de gas;
+      //  · queda pre-`resolveStepInput`, o sea antes de todo lo que este loop
+      //    calcula para el step.
+      //
+      // Cubre el happy-path Y el retry adaptativo, porque los dos `invokeAgent`
+      // están dentro de esta MISMA iteración.
+      //
+      // ⚠️ ES AUTORITATIVO AUNQUE LOS SITIOS 1 Y 2 YA HAYAN PASADO, y no es
+      // redundancia: el catálogo puede cambiar entre el preflight y la ejecución, y
+      // un destino que era ajeno cuando se cotizó puede ser propio cuando se
+      // ejecuta.
+      //
+      // CON `hint`, vía `selfIdentity` (fix-pack AR/CR BLQ-MED-1): el conjunto sale
+      // del `Host` que el route puso en el request. Con las dos envs ausentes esto
+      // daba `[]` y `isSelfDestination` devolvía `false` por conjunto vacío ⇒ el
+      // guard de los steps 1..N —donde vive el `5^k`— era INERTE.
+      if (isSelfDestination(agent.invokeUrl, selfIdentity.hosts)) {
+        const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);
+        warn(
+          { slug: agent.slug, step: i, layer: 'direct', site: 'pipeline-loop' },
+          'contracting-loop.blocked',
+        );
+        return {
+          success: false,
+          output: null,
+          steps: results,
+          totalCostUsdc: totalCost,
+          totalLatencyMs: totalLatency,
+          error: `Step ${i}: ${contractingErrorMessage(CONTRACTING_LOOP_DETECTED)}`,
+          errorCode: CONTRACTING_LOOP_DETECTED,
+        };
       }
       // WKH-305: la ENTRADA del step se construye ANTES del bloque de débito.
       // Antes se construía después, o sea que un step con entrada inválida se
@@ -614,13 +696,14 @@ export const composeService = {
         }
       };
       try {
-        const { output, downstream, downstreamSkipCode } =
+        const { output, downstream, downstreamSkipCode, coordinatorFee } =
           await this.invokeAgent(
             agent,
             input,
             a2aKey,
             undefined,
             `${composeRunId}:${i}`, // WKH-234 intentId (leg Solana, AC-7)
+            outboundContracting, // WKH-360 (AC-7): la traza saliente
           );
         // WKH-234 (AC-8): si el settle downstream fue Solana, anota el ledger.
         recordSolanaLegIfAny(downstream);
@@ -631,6 +714,7 @@ export const composeService = {
           output,
           downstream,
           downstreamSkipCode,
+          coordinatorFee, // WKH-360 (AC-11)
           skipCauses,
           startTime,
           steps,
@@ -965,14 +1049,19 @@ export const composeService = {
             if (retryDebit.success) {
               try {
                 // ── PASO 5 (DT-5.5): RE-INVOKE reusando invokeAgent.
-                const { output, downstream, downstreamSkipCode } =
-                  await this.invokeAgent(
-                    agent,
-                    retryInput, // WKH-305 (AC-7): con el mapeo RE-APLICADO
-                    a2aKey,
-                    undefined,
-                    `${composeRunId}:${i}`, // WKH-234 intentId — MISMO que el master (AC-7 idempotente)
-                  );
+                const {
+                  output,
+                  downstream,
+                  downstreamSkipCode,
+                  coordinatorFee,
+                } = await this.invokeAgent(
+                  agent,
+                  retryInput, // WKH-305 (AC-7): con el mapeo RE-APLICADO
+                  a2aKey,
+                  undefined,
+                  `${composeRunId}:${i}`, // WKH-234 intentId — MISMO que el master (AC-7 idempotente)
+                  outboundContracting, // WKH-360 (AC-7): MISMA traza que el master
+                );
                 // WKH-234 (AC-8): retry-ok — anota el ledger si fue Solana.
                 recordSolanaLegIfAny(downstream);
                 // ── PASO 6a: 2xx → éxito. El retry-debit SE QUEDA (caller
@@ -982,6 +1071,7 @@ export const composeService = {
                   output,
                   downstream,
                   downstreamSkipCode,
+                  coordinatorFee, // WKH-360 (AC-11): MISMO que el master
                   skipCauses,
                   startTime,
                   steps,
@@ -1127,6 +1217,16 @@ export const composeService = {
     /** Fix-pack P1 (hallazgo 4): motivo del skip del leg downstream, si hubo. */
     downstreamSkipCode?: DownstreamSkipCode | undefined;
     /**
+     * WKH-360 (AC-11): el fee de orquestación que DECLARÓ el ejecutor de este step,
+     * cuando ese ejecutor es a su vez un coordinador. Lo LEE `invokeAgent` del sobre
+     * de la respuesta; acá sólo se copia al `StepResult`. Ausente ⇒ no es un
+     * coordinador ⇒ el `StepResult` no gana ninguna clave.
+     */
+    coordinatorFee?:
+      | { declared: true; usdc: number }
+      | { declared: false }
+      | undefined;
+    /**
      * Array PRESTADO por el caller del pipeline (`ComposeRequest.downstreamSkipCauses`)
      * para recibir el motivo INTERNO de cada leg salteado. Ver el docstring del
      * campo en `types/index.ts`: es un input y no un campo del resultado porque
@@ -1158,6 +1258,7 @@ export const composeService = {
       output,
       downstream,
       downstreamSkipCode,
+      coordinatorFee,
       skipCauses,
       startTime,
       steps,
@@ -1192,6 +1293,10 @@ export const composeService = {
       ...(downstreamSkipCode && {
         downstreamSettle: `skipped:${toPublicSkipCode(downstreamSkipCode)}`,
       }),
+      // WKH-360 (AC-11): el fee AJENO, tal como lo declaró su dueño. Aditivo: la
+      // clave sólo aparece si el ejecutor emitió el sobre, que hoy no hace ninguno
+      // de los 25 agentes de prod ⇒ respuesta byte-idéntica para el tráfico actual.
+      ...(coordinatorFee !== undefined && { coordinatorFee }),
     };
     // Canal de OPERADOR: el motivo INTERNO, que `toPublicSkipCode` acaba de
     // genericizar. Sin esto, cuatro causas con cuatro dueños distintos
@@ -1379,6 +1484,34 @@ export const composeService = {
     // ignora. Canónico `contextId:stepIndex:payTo`; ausente → el downstream
     // deriva un fallback por leg.
     intentId?: string,
+    /**
+     * WKH-360 (AC-7): la traza de contratación a EMITIR en esta invocación.
+     *
+     * ⚠️ OPCIONAL, y no es negociable que lo sea: medido, hay **33 call-sites de
+     * test en 4 archivos** que llaman este método con 2 ó 3 argumentos
+     * (`compose.ssrf.test.ts` ×4, `compose.selfpublished-auth.test.ts` ×9,
+     * `compose.test.ts` ×11, `compose.outbound-legs.test.ts` ×9). Hacerlo
+     * requerido rompe los 33 por un motivo que no es el de esta HU. Los 2
+     * call-sites de PRODUCCIÓN sí lo pasan.
+     *
+     * Ausente ⇒ no se emite ningún header nuevo ⇒ invocación byte-idéntica.
+     */
+    contracting?: {
+      chain: string[];
+      depth: number;
+      canonicalId: string | null;
+      /**
+       * El conjunto de identidad propia YA resuelto por `execute()` **con el `hint`
+       * del request** (fix-pack AR/CR BLQ-MED-1). Viaja acá y no se re-resuelve
+       * adentro para que el SITIO 4 compare contra EL MISMO conjunto que el SITIO 3:
+       * dos resoluciones distintas del mismo concepto es exactamente cómo un guard
+       * de último recurso pasa a estar midiendo otra cosa.
+       *
+       * Ausente el argumento entero (los 33 call-sites de test) ⇒ el Sitio 4 cae al
+       * conjunto derivado sólo de la configuración, que es el comportamiento previo.
+       */
+      selfHosts: string[];
+    },
   ): Promise<{
     output: unknown;
     // HU-DOUBLE-PAY: acá había un `txHash` — el hash del SEGUNDO settle de salida,
@@ -1393,6 +1526,16 @@ export const composeService = {
      * traduce al vocabulario PÚBLICO antes de ponerlo en la respuesta.
      */
     downstreamSkipCode?: DownstreamSkipCode;
+    /**
+     * WKH-360 (AC-11): el fee de orquestación que declaró el ejecutor de este step,
+     * LEÍDO del sobre de su respuesta (`protocolFeeStatus` / `protocolFeeUsdc`) —
+     * nunca estimado. Ausente ⇒ el ejecutor no es un coordinador, que es el caso de
+     * los 25 agentes descubribles en prod.
+     */
+    coordinatorFee?:
+      | { declared: true; usdc: number }
+      | { declared: false }
+      | undefined;
   }> {
     const registries = await registryService.getEnabled();
     const registry = registries.find(
@@ -1423,12 +1566,45 @@ export const composeService = {
         : {};
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      // ── WKH-360 (AC-7) · la traza de contratación saliente ────────────────
+      // ⚠️ VAN ACÁ, ANTES DEL SPREAD DE LAS CREDENCIALES, y el orden es normativo
+      // (CD-4): así estas dos claves NO pueden pisar una credencial por accidente
+      // ni ahora ni cuando alguien agregue otra. Al revés —debajo de
+      // `...authHeaders`— una colisión de nombres borraría la credencial en
+      // silencio, que es el modo de falla que este archivo ya viene endurecido
+      // para evitar. Mutante que lo fija: `MUT-15`.
+      //
+      // Sin `canonicalId` devuelve `{}` y no se emite NINGUNO de los dos
+      // (CD-18): una cadena sin nuestro eslabón es peor que ninguna cadena,
+      // porque el siguiente gateway leería una traza que afirma NO contenernos.
+      //
+      // Ausente el argumento `contracting` (los 33 call-sites de test que llaman
+      // con 2 ó 3 argumentos) ⇒ `{}` ⇒ headers byte-idénticos a los de antes.
+      ...(contracting
+        ? buildOutboundContractingHeaders(
+            contracting.chain,
+            contracting.depth,
+            contracting.canonicalId,
+          )
+        : {}),
       // El orden importa: si un registry REAL matcheó, su credencial pisa a la
       // del mapa self-published. Para un self-published de verdad `authHeaders`
       // es siempre `{}`, así que nadie más ve un cambio.
       ...selfPublishedAuthHeaders,
       ...authHeaders,
     };
+    if (contracting && contracting.canonicalId === null) {
+      // CD-18: se avisa UNA vez por invocación. Que no se emita la traza no es
+      // gratis — deja al siguiente gateway sin el dato con el que la capa 2
+      // decide — así que tiene que ser visible y no silencioso.
+      const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);
+      warn(
+        { slug: agent.slug },
+        'contracting-chain.not-emitted: sin identidad propia derivable no se emite ' +
+          'la traza de contratacion (emitirla sin nuestro eslabon afirmaria que no ' +
+          'estamos en la cadena). Setea BASE_URL o A2A_SELF_HOSTS.',
+      );
+    }
     // C1 (audit 2026-07-01): NEVER forward the caller's raw, long-lived
     // `x-a2a-key` bearer to an `invokeUrl` of a THIRD-PARTY (auto-registered)
     // registry. `agent.invokeUrl` derives from `registry.invokeEndpoint`, a
@@ -1502,6 +1678,52 @@ export const composeService = {
       throw err;
     }
 
+    // ── WKH-360 · SITIO 4 · ⛔ ESTE NO ES EL GUARD DE DINERO (CD-17) ─────────
+    // Es el bloqueo de EMISIÓN de último recurso, y NADA MÁS. Está acá porque el
+    // `ssrfFetch` de abajo es el ÚNICO punto del repo por el que sale una
+    // invocación a un agente, o sea el choke-point que AC-4 exige para "no emitir
+    // la petición HTTP saliente".
+    //
+    // ⛔ NO satisface CD-3 y está PROHIBIDO presentarlo como si lo hiciera: un
+    // throw acá lo agarra el catch per-step de `execute()`, que corre DESPUÉS del
+    // `budgetService.debit` del step. Si esta rama dispara, YA SE COBRÓ, y el
+    // reembolso (`refundStepDebit`) es best-effort. El guard que sí corta antes del
+    // dinero es el SITIO 3 (en el loop de `execute`), más el SITIO 1 (preHandler de
+    // /compose) y el SITIO 2 (service de /orchestrate) para los respectivos step-0.
+    //
+    // Por eso loguea a `error` y no a `warn`: que esta rama dispare significa que
+    // un guard pre-débito NO corrió, y eso es un defecto a investigar, no una
+    // condición esperada.
+    //
+    // El conjunto sale del argumento `contracting` (fix-pack AR/CR BLQ-MED-1), que
+    // es EL MISMO que usó el Sitio 3 —resuelto con el `Host` del request— y no una
+    // segunda resolución. Cuando el argumento no viene (los 33 call-sites de test,
+    // y cualquier llamador que no sea el pipeline) se cae al conjunto derivado sólo
+    // de la configuración: sigue siendo monótono, nunca inventa identidad.
+    if (
+      isSelfDestination(
+        agent.invokeUrl,
+        contracting?.selfHosts ?? resolveSelfHosts().hosts,
+      )
+    ) {
+      // Se usa el logger DEL MÓDULO y no el `logger` que pasa el caller, a
+      // propósito y no por comodidad: `DownstreamLogger` declara sólo `warn` e
+      // `info` (`types/index.ts`), así que no tiene `error`. Ensancharlo obligaría a
+      // todos sus implementadores a crecer, y degradar este evento a `warn` para que
+      // entre en ese shape violaría CD-17 — el nivel es parte del contrato acá,
+      // porque que esta rama dispare significa que un guard pre-débito NO corrió.
+      // Efecto lateral bueno: un caller no puede tragarse este log.
+      log.error(
+        { slug: agent.slug, layer: 'direct', site: 'invoke-prefetch' },
+        'contracting-loop.blocked-at-emission: el guard PRE-DEBITO no corrio para ' +
+          'este step. La invocacion saliente NO se emite, pero el debito de este ' +
+          'step YA OCURRIO y su reembolso es best-effort.',
+      );
+      throw new Error(
+        `Agent ${agent.slug}: ${contractingErrorMessage(CONTRACTING_LOOP_DETECTED)}`,
+      );
+    }
+
     // M2 (audit 2026-06-24): connect-time SSRF guard on invokeUrl. The
     // validateRegistryUrl check above runs at resolution-time, but plain fetch
     // re-resolves DNS; `ssrfFetch` revalidates the SAME resolution the socket
@@ -1536,6 +1758,14 @@ export const composeService = {
       );
     }
     const data = (await response.json()) as Record<string, unknown>;
+    // ── WKH-360 (AC-11): el sobre del fee se lee del `data` CRUDO ────────────
+    // ⚠️ ANTES del colapso `data.result ?? data` de la línea siguiente, y el orden
+    // es load-bearing: si el agente respondió con envoltorio (`{ result: {...},
+    // protocolFeeStatus: 'charged', protocolFeeUsdc: 0.02 }`), después del colapso
+    // `output` es el CONTENIDO de `result` y el sobre ya no está — leerlo ahí
+    // devolvería `undefined` SIEMPRE y el fee en cascada quedaría invisible sin que
+    // nada falle. Mutante que lo fija: `MUT-12`.
+    const coordinatorFee = readCoordinatorFee(data);
     const output = data.result ?? data;
 
     // ─── WKH-55: Downstream x402 hook (AC-1..AC-10) ──────────────────
@@ -1566,6 +1796,9 @@ export const composeService = {
       output,
       ...(downstream && { downstream }),
       ...(skipCode && { downstreamSkipCode: skipCode }),
+      // WKH-360 (AC-11): sólo si el ejecutor declaró el sobre. Ausente ⇒ no es un
+      // coordinador ⇒ el `StepResult` no gana ninguna clave (AC-8).
+      ...(coordinatorFee !== undefined && { coordinatorFee }),
     };
   },
 };

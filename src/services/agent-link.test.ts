@@ -15,8 +15,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../lib/supabase.js', () => ({
   supabase: { from: vi.fn(), rpc: vi.fn() },
 }));
+// AR-it2/MNR-6: el factory declara TODAS las exports que el módulo real tiene. Un
+// factory literal que omite una deja esa export en `undefined` para toda la suite, y
+// en el fix-pack 1 ese mismo patrón (con `resolveAgentDestination`) puso 5 tests de
+// facturación en 500. Hoy este archivo no toca `resolveAgentDestination`; la razón
+// para declararla igual es que la próxima ruta que la alcance no falle acá.
 vi.mock('./agent-price.js', () => ({
   resolveAgentPriceUsdc: vi.fn(),
+  resolveAgentDestination: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('./fee-charge.js', () => ({
   getProtocolFeeRate: () => 0.01,
@@ -231,6 +237,44 @@ describe('redeem (AC-2/AC-3/AC-4/CD-4/CD-8)', () => {
     // settle redeemed exactly-once.
     expect(settleCalls).toHaveLength(1);
     expect(settleCalls[0]?.p_outcome).toBe('redeemed');
+  });
+
+  /**
+   * WKH-360 fix-pack 2 (AR-it2/BLQ-MED-1) — el TERCER caller HTTP del money-path.
+   *
+   * `POST /agents/links/:token/redeem` es público y entra por HTTP, pero el `Host`
+   * se quedaba en el route: `executeApprovedPlan` recibía el request SIN
+   * `selfHostHint` y, con `BASE_URL`/`A2A_SELF_HOSTS` ausentes, el conjunto de
+   * identidad quedaba `[]` ⇒ SITIO 2 salteado y SITIOS 3/4 comparando contra vacío.
+   *
+   * ⛔ Este `it` mide el CABLEADO (que el valor llegue), no el corte. Que el corte
+   * ocurra —y que ocurra ANTES del débito— lo miden `T-L1-2c` y los tests de orden
+   * de los cuatro sitios. Y el barrido que impide que aparezca un CUARTO caller sin
+   * hint es `T-HINT-CALLSITES` en `src/lib/contracting-chain.test.ts`.
+   */
+  it('T-L1-2f: el `Host` del redeem baja hasta `executeApprovedPlan`', async () => {
+    linksSingle = { data: openLinkRow(), error: null };
+    keysSingle = { data: { id: KEY_ID, owner_ref: OWNER }, error: null };
+    mockPrice.mockResolvedValue(0.05);
+    mockExecute.mockResolvedValue(okResult());
+
+    await agentLinkService.redeem('wasi_a2a_link_tok', { q: 1 }, 'gw.example');
+
+    expect(mockExecute.mock.calls[0]?.[0].selfHostHint).toBe('gw.example');
+  });
+
+  it('T-L1-2g: sin hint el campo queda AUSENTE, no `undefined` (CD-9)', async () => {
+    // `exactOptionalPropertyTypes`: los callers no-HTTP (tool MCP, inbound-task) no
+    // tienen `Host`. El campo NO debe existir en el objeto — un `undefined`
+    // explícito rompe el tipo y además haría ver como "seteado" algo que no lo está.
+    linksSingle = { data: openLinkRow(), error: null };
+    keysSingle = { data: { id: KEY_ID, owner_ref: OWNER }, error: null };
+    mockPrice.mockResolvedValue(0.05);
+    mockExecute.mockResolvedValue(okResult());
+
+    await agentLinkService.redeem('wasi_a2a_link_tok', { q: 1 });
+
+    expect(mockExecute.mock.calls[0]?.[0]).not.toHaveProperty('selfHostHint');
   });
 
   // T6 — precio > cap pre-claim.

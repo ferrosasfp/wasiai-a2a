@@ -285,10 +285,31 @@ export const agentLinkService = {
    *   5. settle exactly-once: redeemed | reopen(__quoteStale, cero débito) |
    *      failed(throw, terminal, CD-8).
    * El link NUNCA debita/settlea/refunda por su cuenta (CD-5).
+   *
+   * ─── `selfHostHint`: EL TERCER CALLER HTTP DE `executeApprovedPlan` ─────────
+   * WKH-360, fix-pack 2 (AR-it2/BLQ-MED-1). `POST /agents/links/:token/redeem` es
+   * **público** (`routes/agent-links.ts:6`, auth por posesión del token) y entra
+   * por HTTP, así que el `Host` de la petición existe — pero se quedaba en el
+   * route y nunca bajaba. Medido con el harness que borra `BASE_URL` y
+   * `A2A_SELF_HOSTS` (el mismo de `T-L1-2c`): `debit` 1 vez, `fetchedUrls()`
+   * CONTENÍA nuestra propia URL, `errorCode` `undefined` y `success` `true`.
+   * O sea: el SITIO 2 se salteaba entero por su gate `selfHosts.length > 0` y los
+   * SITIOS 3 y 4 comparaban contra `[]`.
+   *
+   * ⚠️ **Y acá el bucle lo paga un tercero**: el plan usa `billingKeyRow: ownerKey`,
+   * o sea la key del que EMITIÓ el link, mientras que el caller es anónimo. En las
+   * otras dos rutas el que gasta es el que llama.
+   *
+   * ⛔ Que este parámetro exista no se sostiene con esta frase: lo sostiene
+   * `T-HINT-CALLSITES` (`src/lib/contracting-chain.test.ts`), que **enumera** los
+   * call-sites de producción de `orchestrate`/`executeApprovedPlan`/`compose` y se
+   * cae cuando aparece uno nuevo sin `selfHostHint` que no esté en su lista de
+   * excepciones escritas. Este call-site es el que ninguna frase enumeró.
    */
   async redeem(
     token: string,
     redeemInput: Record<string, unknown>,
+    selfHostHint?: string,
   ): Promise<RedeemResult> {
     const hash = crypto.createHash('sha256').update(token).digest('hex');
 
@@ -368,6 +389,11 @@ export const agentLinkService = {
           keySessionContext: undefined,
           chainId: claim.chain_id,
           maxQuotedCostUsdc: cap,
+          // WKH-360 fix-pack 2 (AR-it2/BLQ-MED-1): el `Host` por el que entró el
+          // redeem. Sin esto los SITIOS 2/3/4 quedan con conjunto `[]` en un deploy
+          // sin `BASE_URL` ni `A2A_SELF_HOSTS`. Ver el docblock de este método.
+          // CD-9 (`exactOptionalPropertyTypes`): NO poner `selfHostHint: undefined`.
+          ...(selfHostHint !== undefined ? { selfHostHint } : {}),
         },
         plan,
         orchestrationId,

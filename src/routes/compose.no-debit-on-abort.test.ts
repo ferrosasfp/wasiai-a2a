@@ -241,6 +241,10 @@ describe('compose route — NO debit when price preHandler short-circuits', () =
     mockResolveDest.mockResolvedValueOnce({
       registry: 'wasiai',
       slug: 'free-but-real',
+      // WKH-360: host AJENO a propósito. Este `it` es el guardrail de que un agente
+      // que EXISTE con precio 0 sigue tomando el fallback placeholder; con un host
+      // propio el guard anti-bucle cortaría antes y el guardrail mediría otra cosa.
+      invokeUrl: 'https://agente-ajeno.example/run',
     });
     mockCompose.mockResolvedValueOnce({
       success: true,

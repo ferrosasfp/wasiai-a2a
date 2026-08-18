@@ -138,7 +138,24 @@ vi.mock('./llm/transform.js', () => ({
 }));
 // `resolveAgentPriceUsdc` es el precio VIVO que la ruta re-resuelve. Se mockea para
 // poder moverlo por encima y por debajo del congelado.
-vi.mock('./agent-price.js', () => ({ resolveAgentPriceUsdc: vi.fn() }));
+//
+// ⚠️ CON `importOriginal`, y NO es cosmético (fix-pack WKH-360 AR/CR BLQ-MED-1).
+// Este factory devolvía SÓLO `resolveAgentPriceUsdc`, así que
+// `resolveAgentDestination` —del MISMO módulo— quedaba `undefined`. Mientras el
+// guard anti-bucle del step-0 no corría en este harness eso no se notaba; desde que
+// el `Host` de `app.inject` (`localhost`) le da identidad propia al guard, el bloque
+// SÍ corre y llamaba a `undefined(...)` ⇒ **5 tests de FACTURACIÓN en 500**. Es el
+// hazard que `src/lib/contracting-chain.ts` documenta en su encabezado: un factory
+// sin `importOriginal` no es un mock parcial, es un módulo amputado.
+//
+// Con `importOriginal` la `resolveAgentDestination` REAL corre sobre el
+// `discoveryService.getAgent` ya mockeado de este archivo (que devuelve `null`), que
+// es el comportamiento que estos tests quieren: sin destino resoluble, el guard no
+// tiene nada que rechazar y la facturación es lo único bajo medición.
+vi.mock('./agent-price.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./agent-price.js')>()),
+  resolveAgentPriceUsdc: vi.fn(),
+}));
 
 const { mockFetch } = vi.hoisted(() => ({ mockFetch: vi.fn() }));
 vi.stubGlobal('fetch', mockFetch);

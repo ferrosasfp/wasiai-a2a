@@ -11,12 +11,14 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 // WKH-305 (CR MNR-3): módulo LEAF (cero imports de runtime) — la MISMA
 // definición de las reglas de forma que usan el borde de `/compose` y el service.
 import { validateInputMappingShape } from '../lib/compose-input-mapping.js';
+import { CONTRACTING_LOOP_DETECTED } from '../lib/contracting-chain.js';
 import type { DownstreamSkipCode } from '../lib/downstream-skip-code.js';
 import {
   extractRawKey,
   requirePaymentOrA2AKey,
 } from '../middleware/a2a-key.js';
 import { createBackpressureHandler } from '../middleware/backpressure.js';
+import { contractingGuardHandler } from '../middleware/contracting-guard.js';
 import { noteDownstreamSkips } from '../middleware/event-tracking.js';
 import { requireForwardKey } from '../middleware/forward-key.js';
 import { orchestrateRateLimit } from '../middleware/rate-limit.js';
@@ -135,6 +137,12 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         },
       },
       preHandler: [
+        // WKH-360 (AC-5/AC-6): la CAPA 2 va PRIMERA de las TRES cadenas de
+        // orchestrate, antes de `markSkipMiddlewareDebitHandler` y por lo tanto
+        // antes de cualquier decision de debito. Las tres la necesitan: las tres
+        // desembocan en `executeApprovedPlan`, que es donde vive el unico debito
+        // del step-0 de orchestrate.
+        contractingGuardHandler,
         // WKH-65: forward-key (optional, env-gated) runs BEFORE backpressure/timeout/payment.
         // Returns [] when WASIAI_V2_FORWARD_KEY is unset → no-op spread.
         ...requireForwardKey(),
@@ -207,6 +215,18 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             // per-step de steps 1..N use el chainId del bundle resuelto en el
             // middleware. Desde WKH-102 ya no es exclusivo de delegación.
             chainId: request.resolvedChainId,
+            // WKH-360 (AC-7): la traza de contratacion entrante YA VALIDADA por
+            // `contractingGuardHandler` (primer preHandler de esta cadena). Baja al
+            // service y de ahi a compose, que es quien la EMITE. Ausente ⇒ cadena
+            // vacia / profundidad 0, o sea el 100% del trafico de hoy.
+            contractingChain: request.contractingChain,
+            contractingDepth: request.contractingDepth,
+            // WKH-360 (fix-pack AR/CR BLQ-MED-1): el `Host` por el que entro ESTA
+            // peticion. Sin esto, con `BASE_URL` y `A2A_SELF_HOSTS` ausentes el
+            // conjunto de identidad queda vacio y el SITIO 2 se saltea entero por su
+            // gate `selfHosts.length > 0` => el step-0 de esta ruta queda SIN guard
+            // de dinero. Baja tambien a compose (SITIOS 3 y 4).
+            selfHostHint: request.hostname,
           },
           orchestrationId,
         );
@@ -218,7 +238,15 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         // WKH-61: pipeline.errorCode === 'SCOPE_DENIED' → 403 (legacy 200 path).
         // TD-WKH-61-2: la limpieza completa del mapeo `pipeline.success===false`
         // → 4xx queda fuera de scope; solo agregamos el branch SCOPE_DENIED.
-        const status = result.pipeline.errorCode === 'SCOPE_DENIED' ? 403 : 200;
+        // WKH-360: el corte del SITIO 2 (bucle de contratación, pre-débito) sale
+        // como 400. Cae en la misma familia de status que el resto de los rechazos
+        // de dominio sobre un body bien formado; NO se estrena un 508.
+        const status =
+          result.pipeline.errorCode === 'SCOPE_DENIED'
+            ? 403
+            : result.pipeline.errorCode === CONTRACTING_LOOP_DETECTED
+              ? 400
+              : 200;
         // WKH-127 (AC-4): el service decidió el fallback $1 → seteamos el header acá
         // (el service no recibe reply, CD-7).
         if (result.debitFallback) {
@@ -237,7 +265,17 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           result.pipeline.steps,
           downstreamSkipCauses,
         );
-        return reply.status(status).send({ kiteTxHash, ...result });
+        // WKH-360 (CD-19): el `error_code` top-level de familia 1, para que un
+        // cliente matchee UN solo string sin tener que mirar dentro de `pipeline`.
+        // El VALOR sale de la misma constante del leaf que usa el camel de adentro.
+        return reply.status(status).send({
+          kiteTxHash,
+          ...result,
+          ...(result.pipeline.errorCode === CONTRACTING_LOOP_DETECTED && {
+            error_code: CONTRACTING_LOOP_DETECTED,
+            layer: 'direct',
+          }),
+        });
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Orchestration failed';
@@ -279,6 +317,12 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         },
       },
       preHandler: [
+        // WKH-360 (AC-5/AC-6): la CAPA 2 va PRIMERA de las TRES cadenas de
+        // orchestrate, antes de `markSkipMiddlewareDebitHandler` y por lo tanto
+        // antes de cualquier decision de debito. Las tres la necesitan: las tres
+        // desembocan en `executeApprovedPlan`, que es donde vive el unico debito
+        // del step-0 de orchestrate.
+        contractingGuardHandler,
         ...requireForwardKey(),
         createBackpressureHandler(),
         createTimeoutHandler(
@@ -503,6 +547,12 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
         },
       },
       preHandler: [
+        // WKH-360 (AC-5/AC-6): la CAPA 2 va PRIMERA de las TRES cadenas de
+        // orchestrate, antes de `markSkipMiddlewareDebitHandler` y por lo tanto
+        // antes de cualquier decision de debito. Las tres la necesitan: las tres
+        // desembocan en `executeApprovedPlan`, que es donde vive el unico debito
+        // del step-0 de orchestrate.
+        contractingGuardHandler,
         ...requireForwardKey(),
         createBackpressureHandler(),
         createTimeoutHandler(
@@ -777,6 +827,18 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             delegationContext: request.delegationContext,
             keySessionContext: request.keySessionContext,
             chainId: request.resolvedChainId,
+            // WKH-360 (AC-7): la traza de contratacion entrante YA VALIDADA por
+            // `contractingGuardHandler` (primer preHandler de esta cadena). Baja al
+            // service y de ahi a compose, que es quien la EMITE. Ausente ⇒ cadena
+            // vacia / profundidad 0, o sea el 100% del trafico de hoy.
+            contractingChain: request.contractingChain,
+            contractingDepth: request.contractingDepth,
+            // WKH-360 (fix-pack AR/CR BLQ-MED-1): el `Host` por el que entro ESTA
+            // peticion. Sin esto, con `BASE_URL` y `A2A_SELF_HOSTS` ausentes el
+            // conjunto de identidad queda vacio y el SITIO 2 se saltea entero por su
+            // gate `selfHosts.length > 0` => el step-0 de esta ruta queda SIN guard
+            // de dinero. Baja tambien a compose (SITIOS 3 y 4).
+            selfHostHint: request.hostname,
             // gate AC-3: el cap aprobado por el cliente.
             //
             // WKH-303: con un quote válido el cap gate NO corre. Ese gate re-resuelve
@@ -811,7 +873,13 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
 
         const kiteTxHash = request.paymentTxHash;
         // Mismo mapeo de status/headers que `/` (CD-6).
-        const status = result.pipeline.errorCode === 'SCOPE_DENIED' ? 403 : 200;
+        // WKH-360: mismo mapeo que `/` — el corte del SITIO 2 sale 400.
+        const status =
+          result.pipeline.errorCode === 'SCOPE_DENIED'
+            ? 403
+            : result.pipeline.errorCode === CONTRACTING_LOOP_DETECTED
+              ? 400
+              : 200;
         if (result.debitFallback) {
           reply.header('x-debit-fallback', 'registry-miss');
         }
@@ -824,7 +892,17 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
           result.pipeline.steps,
           downstreamSkipCauses,
         );
-        return reply.status(status).send({ kiteTxHash, ...result });
+        // WKH-360 (CD-19): el `error_code` top-level de familia 1, para que un
+        // cliente matchee UN solo string sin tener que mirar dentro de `pipeline`.
+        // El VALOR sale de la misma constante del leaf que usa el camel de adentro.
+        return reply.status(status).send({
+          kiteTxHash,
+          ...result,
+          ...(result.pipeline.errorCode === CONTRACTING_LOOP_DETECTED && {
+            error_code: CONTRACTING_LOOP_DETECTED,
+            layer: 'direct',
+          }),
+        });
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Orchestration execute failed';

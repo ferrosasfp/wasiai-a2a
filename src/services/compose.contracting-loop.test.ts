@@ -1,0 +1,891 @@
+/**
+ * WKH-360 · SITIOS 3 y 4 del guard anti-bucle.
+ *
+ *   · SITIO 3 — el loop de `execute`, steps 1..N. 💰 ES GUARD DE DINERO: corta antes
+ *     del `budgetService.debit` per-step. Lo que se asserta NO es el rechazo: es
+ *     que `debit` se llamó EXACTAMENTE para los steps anteriores y NO para el que
+ *     apunta a nosotros. Mutante: `MUT-01` (mover el bloque debajo del débito).
+ *
+ *   · SITIO 4 — `invokeAgent`, pre-fetch. ⛔ NO ES GUARD DE DINERO (CD-17) y este
+ *     archivo no lo presenta como tal. Corre DESPUÉS del débito del step, así que si
+ *     dispara ya se cobró y el reembolso es best-effort. Su valor es bloquear la
+ *     EMISIÓN, y su test es de ORDEN respecto del `fetch`, más el NIVEL del log
+ *     (`error`, no `warn`) — el nivel es parte del contrato porque que esta rama
+ *     dispare significa que un guard pre-débito no corrió.
+ *
+ * Se cuenta lo EJECUTADO, no la condición de un `if`: `debitMock` decrementa un
+ * saldo en memoria y `mockFetch` registra cada URL, así que un débito de más o una
+ * emisión de más se ven en un número.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { A2AAgentKeyRow, Agent } from '../types/index.js';
+
+const logSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+}));
+vi.mock('../lib/logger.js', () => ({ getLogger: () => logSpy }));
+
+vi.mock('./registry.js', () => ({
+  registryService: { getEnabled: vi.fn().mockResolvedValue([]) },
+  SYSTEM_OWNER_REF: 'system',
+}));
+
+vi.mock('../adapters/registry.js', () => ({
+  getPaymentAdapter: () => ({ sign: vi.fn(), settle: vi.fn() }),
+}));
+
+const mockGetAgent = vi.hoisted(() => vi.fn());
+vi.mock('./discovery.js', () => ({
+  discoveryService: {
+    getAgent: mockGetAgent,
+    discover: vi.fn().mockResolvedValue({ agents: [], total: 0 }),
+  },
+}));
+
+vi.mock('./event.js', () => ({
+  eventService: { track: vi.fn().mockResolvedValue({}) },
+}));
+
+vi.mock('../lib/downstream-payment.js', () => ({
+  signAndSettleDownstream: vi.fn().mockResolvedValue(null),
+}));
+
+// El contador de dinero del per-step.
+const budgetState = vi.hoisted(() => ({ balance: 100 }));
+const debitMock = vi.hoisted(() =>
+  vi.fn(async (_k: string, _c: number, amount: number) => {
+    budgetState.balance -= amount;
+    return { success: true };
+  }),
+);
+vi.mock('./budget.js', () => ({
+  budgetService: {
+    debit: debitMock,
+    credit: vi.fn().mockResolvedValue({ success: true }),
+    creditWithDest: vi.fn().mockResolvedValue({ success: true }),
+    getBalance: vi.fn(async () => budgetState.balance.toFixed(2)),
+  },
+}));
+
+// `ssrfFetch` llama al `fetch` de undici, no al global: se rutean los dos al MISMO
+// espía para que "no se emitió" sea una afirmación sobre lo ejecutado.
+const { mockFetch } = vi.hoisted(() => ({ mockFetch: vi.fn() }));
+vi.stubGlobal('fetch', mockFetch);
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('undici')>();
+  return { ...actual, fetch: mockFetch };
+});
+
+import {
+  CONTRACTING_LOOP_DETECTED,
+  contractingErrorMessage,
+  readInboundContracting,
+  resolveSelfHosts,
+} from '../lib/contracting-chain.js';
+import { composeService } from './compose.js';
+import { registryService } from './registry.js';
+
+const SELF = 'gw.wasiai.example';
+const ENV_KEYS = ['A2A_SELF_HOSTS', 'BASE_URL', 'A2A_CONTRACTING_DEPTH_MAX'];
+const saved: Record<string, string | undefined> = {};
+
+function makeAgent(slug: string, invokeUrl: string, price = 0.01): Agent {
+  return {
+    id: `id-${slug}`,
+    name: slug,
+    slug,
+    description: 'test',
+    capabilities: ['test'],
+    priceUsdc: price,
+    registry: 'wasiai',
+    registry_id: 'wasiai',
+    invokeUrl,
+    invocationNote: 'gateway-only',
+    verified: true,
+    status: 'active',
+    metadata: {},
+  };
+}
+
+const keyRow = {
+  id: 'k1',
+  owner_ref: 'o1',
+} as unknown as A2AAgentKeyRow;
+
+beforeEach(() => {
+  for (const k of ENV_KEYS) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  vi.clearAllMocks();
+  budgetState.balance = 100;
+  mockFetch.mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: async () => ({ result: 'ok' }),
+  });
+  // Sin allow-list de SSRF los hosts .example resolverían DNS de verdad; se
+  // whitelistean para que el único guard bajo prueba sea el de identidad.
+  process.env.DISCOVERY_SSRF_ALLOWLIST = `${SELF},a.example,b.example,c.example`;
+});
+
+// ⚠️ El `saved` de arriba se ESCRIBÍA y no se leía nunca (fix-pack CR/MNR-3):
+// este archivo borra tres envs en su `beforeEach` y, sin este `afterEach`, se las
+// deja borradas al resto del proceso. Calibrado por el CR: con la config actual de
+// vitest (un fork por archivo) no hay fuga, así que el impacto de HOY es CERO — con
+// `--no-isolate` sí la hay. Se restaura igual: el aislamiento es del runner, no de
+// este archivo, y depender de la config del runner para no contaminar es depender de
+// algo que este archivo no controla.
+afterEach(() => {
+  for (const k of ENV_KEYS) {
+    const v = saved[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+});
+
+/** Devuelve las URLs por las que EFECTIVAMENTE salió una invocación. */
+function fetchedUrls(): string[] {
+  return mockFetch.mock.calls.map((c) => String(c[0]));
+}
+
+describe('WKH-360 SITIO 3 — el loop del pipeline corta ANTES del débito per-step', () => {
+  it('T-L1-2 (AC-4, CD-3): self en steps[2] de 3 → debit llamado 1 vez (step 1), NO 2', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    mockGetAgent.mockImplementation(async (slug: string) => {
+      if (slug === 'a') return makeAgent('a', 'https://a.example/run');
+      if (slug === 'b') return makeAgent('b', 'https://b.example/run');
+      if (slug === 'self') return makeAgent('self', `https://${SELF}/compose`);
+      return null;
+    });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'a', input: {} },
+        { agent: 'b', input: {} },
+        { agent: 'self', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    // ── EL ORDEN RESPECTO DEL DINERO ────────────────────────────────────
+    // compose debita steps 1..N (el guard `i > 0` deja el step-0 al middleware),
+    // así que en un pipeline de 3 los débitos posibles son i=1 e i=2. El guard
+    // cortó en i=2 ANTES de su débito ⇒ exactamente UNA llamada.
+    expect(debitMock).toHaveBeenCalledTimes(1);
+    // Y NO se emitió la invocación del step propio.
+    expect(fetchedUrls()).not.toContain(`https://${SELF}/compose`);
+    expect(fetchedUrls()).toHaveLength(2);
+
+    // El código sale por el `errorCode` CAMEL del resultado del pipeline
+    // (familia 3), que es la superficie de este sitio.
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe(CONTRACTING_LOOP_DETECTED);
+  });
+
+  it('T-L1-2b: self en steps[1] de 3 → CERO débitos y ninguna emisión del step propio', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    mockGetAgent.mockImplementation(async (slug: string) => {
+      if (slug === 'a') return makeAgent('a', 'https://a.example/run');
+      if (slug === 'self') return makeAgent('self', `https://${SELF}/compose`);
+      if (slug === 'c') return makeAgent('c', 'https://c.example/run');
+      return null;
+    });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'a', input: {} },
+        { agent: 'self', input: {} },
+        { agent: 'c', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBe(100);
+    expect(fetchedUrls()).not.toContain(`https://${SELF}/compose`);
+    expect(result.errorCode).toBe(CONTRACTING_LOOP_DETECTED);
+  });
+
+  it('T-L1+5 (AC-8, CD-7): pipeline de 5 steps AJENOS → 200, 4 débitos, 5 emisiones', async () => {
+    // El gemelo positivo con `MAX_COMPOSE_STEPS` (=5). Sin esto, los dos `it` de
+    // arriba no distinguen "el guard corta el bucle" de "rompí el pipeline".
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 's0', input: {} },
+        { agent: 's1', input: {} },
+        { agent: 's2', input: {} },
+        { agent: 's3', input: {} },
+        { agent: 's4', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.errorCode).toBeUndefined();
+    // 5 steps, débito en i=1..4 (el step-0 lo cobra el middleware) ⇒ 4.
+    expect(debitMock).toHaveBeenCalledTimes(4);
+    expect(fetchedUrls()).toHaveLength(5);
+  });
+
+  it('T-L1+6 (AC-8): sin identidad configurada NI hint, el pipeline corre igual', async () => {
+    // ⚠️ "sin identidad configurada" acá quiere decir sin las dos envs Y SIN EL
+    // `Host` del request: es el camino NO-HTTP (el tool MCP, `inbound-task`), el
+    // único donde el conjunto de identidad sigue pudiendo quedar vacío. Ver
+    // `T-L1-2c`, que es el mismo escenario CON hint y sí corta.
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 's0', input: {} },
+        { agent: 's1', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    expect(result.success).toBe(true);
+    expect(debitMock).toHaveBeenCalledTimes(1);
+    expect(fetchedUrls()).toHaveLength(2);
+  });
+
+  /**
+   * ⚠️ TESTIGO del fix-pack AR/CR BLQ-MED-1 para el SITIO 3, y es la
+   * **reproducción del CR con el signo invertido**.
+   *
+   * Lo que el CR midió en `71fdaf7`, con este mismo harness (que borra las dos
+   * envs en su `beforeEach`): `debit` llamado 1 vez, `fetchedUrls()` CONTENÍA
+   * nuestra propia URL y `errorCode` era `undefined`. **Se cobró el step propio y
+   * salió la invocación contra nosotros mismos.**
+   *
+   * El motivo era que el conjunto de identidad se resolvía SIN `hint`: con las dos
+   * envs ausentes daba `[]`, y `isSelfDestination` con conjunto vacío devuelve
+   * `false` por diseño (el guard no puede inventar identidad). O sea que los steps
+   * 1..N —donde vive el costo `5^k`— no tenían guard en un deploy sin configurar.
+   *
+   * ⛔ NO "arreglar" este `it` seteando `A2A_SELF_HOSTS`: con la env puesta pasa
+   * también sin el fix, y deja de medir nada.
+   */
+  it('T-L1-2c (AC-4, CD-3): SIN las dos envs, el `Host` entrante alcanza para cortar', async () => {
+    expect(process.env.A2A_SELF_HOSTS).toBeUndefined();
+    expect(process.env.BASE_URL).toBeUndefined();
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      slug === 'self'
+        ? makeAgent('self', `https://${SELF}/compose`)
+        : makeAgent(slug, 'https://a.example/run'),
+    );
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'a', input: {} },
+        { agent: 'self', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+      // Lo ÚNICO que cambia respecto del escenario que sangraba: el route pasa el
+      // `Host` por el que entró la petición.
+      selfHostHint: SELF,
+    });
+
+    // ── EL DINERO PRIMERO ──────────────────────────────────────────────────
+    // El step propio es i=1, que es el primero que compose debita ⇒ cero débitos.
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBe(100);
+    // Y NO salió la invocación contra nosotros mismos.
+    expect(fetchedUrls()).not.toContain(`https://${SELF}/compose`);
+    expect(result.errorCode).toBe(CONTRACTING_LOOP_DETECTED);
+  });
+
+  it('T-L1-2d: el `hint` es MONÓTONO — un Host ajeno no apaga la identidad de las envs', () => {
+    // La propiedad que hace admisible que el caller influya el conjunto: sólo puede
+    // AGREGAR. Un `Host` forjado no puede sacar del conjunto lo que las envs
+    // declararon, que es lo único que sería un bypass.
+    //
+    // ⛔ LEER `T-L1-2e` ANTES DE CITAR ESTE `it` COMO GARANTÍA. La primera línea de
+    // acá abajo setea `A2A_SELF_HOSTS`, así que lo que se mide es el caso
+    // CONFIGURADO. Sin esa env no hay conjunto base que agrandar y la monotonía es
+    // verdadera como enunciado y vacía como propiedad de seguridad.
+    process.env.A2A_SELF_HOSTS = SELF;
+    const conHintAjeno = resolveSelfHosts('atacante.example');
+    expect(conHintAjeno.hosts).toContain(SELF);
+    expect(conHintAjeno.hosts).toContain('atacante.example');
+    // …y el eslabón con el que nos anunciamos NO se lo lleva el caller mientras
+    // haya identidad configurada: `canonicalId` es el PRIMERO del orden
+    // BASE_URL → A2A_SELF_HOSTS → hint.
+    expect(conHintAjeno.canonicalId).toBe(SELF);
+  });
+
+  /**
+   * ⚠️ EL GEMELO DE `T-L1-2d` SIN `A2A_SELF_HOSTS` (AR-it2/BLQ-MED-2).
+   *
+   * `T-L1-2d` prueba la monotonía **en el caso configurado**, que es el único que
+   * ejercita. Sin las dos envs el conjunto es literalmente
+   * `[canonicalizeHost(hint)]`: **no hay conjunto base que agrandar**, así que
+   * "agrandarlo sólo produce más rechazos" sigue siendo cierto como enunciado y
+   * deja de ser una propiedad de seguridad. Lo que el caller hace ahí no es
+   * agrandar: es **definir**, y también **vaciar**.
+   *
+   * Los cuatro valores de abajo salen del propio `canonicalizeHost` (espacio,
+   * esquema, IPv6 sin corchetes, vacío) y llegan al gateway como un `Host` plano.
+   * Medido con fastify en este árbol: `Host: a b` ⇒ `request.hostname === 'a b'`
+   * con `trustProxy` en `false` **y** en `true`; y con `trustProxy: true` el mismo
+   * valor entra además por `X-Forwarded-Host` (`{host:'real.example',
+   * 'x-forwarded-host':'a b'}` ⇒ `hostname === 'a b'`). O sea que el vaciado NO
+   * depende de `TRUST_PROXY`: esa env agrega un segundo header, no el agujero.
+   *
+   * ⛔ Esto NO se arregla revirtiendo el `hint`: sin él, un deploy sin configurar
+   * deja los cuatro sitios inertes SIEMPRE, en vez de sólo contra un caller que
+   * ataca. Lo que cierra el caso es setear `A2A_SELF_HOSTS`.
+   */
+  it('T-L1-2e: SIN las dos envs el caller no agranda el conjunto — lo DEFINE, y puede VACIARLO', () => {
+    expect(process.env.A2A_SELF_HOSTS).toBeUndefined();
+    expect(process.env.BASE_URL).toBeUndefined();
+
+    // 1 · sin conjunto base, el hint ES el conjunto (no lo agranda).
+    const soloHint = resolveSelfHosts('atacante.example');
+    expect(soloHint.hosts).toEqual(['atacante.example']);
+    // …y el eslabón que ANUNCIAMOS lo elige el caller (acá la monotonía no aplica).
+    expect(soloHint.canonicalId).toBe('atacante.example');
+
+    // 2 · y el mismo canal deja el conjunto VACÍO, que es el estado inerte.
+    for (const hint of ['a b', 'http://x', '::1', '']) {
+      const vaciado = resolveSelfHosts(hint);
+      expect(vaciado.hosts, `hint ${JSON.stringify(hint)}`).toEqual([]);
+      expect(vaciado.canonicalId, `hint ${JSON.stringify(hint)}`).toBeNull();
+    }
+
+    // 3 · CONTRASTE: con la env puesta, los mismos cuatro valores NO pueden vaciar.
+    process.env.A2A_SELF_HOSTS = SELF;
+    for (const hint of ['a b', 'http://x', '::1', '']) {
+      expect(
+        resolveSelfHosts(hint).hosts,
+        `hint ${JSON.stringify(hint)}`,
+      ).toEqual([SELF]);
+    }
+  });
+});
+
+describe('WKH-360 SITIO 4 — invokeAgent: bloqueo de EMISIÓN (⛔ NO es guard de dinero)', () => {
+  it('T-L1-7 (AC-4, CD-17): destino propio → NO se emite el fetch y se loguea a ERROR', async () => {
+    // Se llama `invokeAgent` DIRECTAMENTE, que es el escenario "el Sitio 3 no
+    // corrió" sin necesidad de stubearlo: este método es el que un camino futuro
+    // podría alcanzar sin pasar por el loop.
+    process.env.A2A_SELF_HOSTS = SELF;
+    const agent = makeAgent('self', `https://${SELF}/compose`);
+
+    let caught: unknown;
+    try {
+      await composeService.invokeAgent(agent, { q: 'hi' }, 'secret-a2a-key');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    // La petición saliente NO salió — que es lo único que este sitio garantiza.
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    // ── EL NIVEL DEL LOG ES PARTE DEL CONTRATO (CD-17) ──────────────────
+    // `error`, no `warn`: que esta rama dispare significa que un guard
+    // pre-débito NO corrió, y eso es un defecto a investigar. Si esto fuera
+    // `warn` se leería como una condición esperada.
+    expect(logSpy.error).toHaveBeenCalled();
+    expect(logSpy.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('blocked-at-emission'),
+    );
+    const msg = String(logSpy.error.mock.calls[0]?.[1] ?? '');
+    expect(msg).toContain('blocked-at-emission');
+    // El mensaje dice, en el log, que ya se cobró y que el reembolso es
+    // best-effort: sin eso, un operador leería este error como "no pasó nada".
+    expect(msg).toContain('best-effort');
+  });
+
+  it('T-L1+7 (CD-7): destino ajeno → invokeAgent emite normalmente', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'otro.example';
+    const agent = makeAgent('otro', 'https://otro.example/run');
+
+    const result = await composeService.invokeAgent(agent, { q: 'hi' });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(result.output).toBe('ok');
+  });
+});
+
+describe('WKH-360 AC-7 — la traza SALIENTE que emite cada invocación', () => {
+  /** Los headers con los que salió la invocación número `n` (0-indexed). */
+  function headersOf(n: number): Record<string, string> {
+    return (mockFetch.mock.calls[n]?.[1] as { headers: Record<string, string> })
+      .headers;
+  }
+
+  it('T-PROP-1: agrega NUESTRO eslabón y la profundidad INCREMENTADA', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+
+    await composeService.compose({
+      steps: [
+        { agent: 's0', input: {} },
+        { agent: 's1', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+      contractingChain: ['a.example'],
+      contractingDepth: 0,
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    for (const n of [0, 1]) {
+      const h = headersOf(n);
+      expect(h['x-a2a-contracting-chain'], `invocacion ${n}`).toBe(
+        `a.example,${SELF}`,
+      );
+      // La profundidad que se emite es la DEL SALTO QUE ESTAMOS HACIENDO, no la
+      // que recibimos: sin el incremento, una cadena de N gateways cooperativos
+      // reportaría siempre 0 y el techo nunca cortaría.
+      expect(h['x-a2a-contracting-depth'], `invocacion ${n}`).toBe('1');
+    }
+  });
+
+  it('T-PROP-1b: sin traza entrante, salimos como PRIMER eslabón con profundidad 1', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+
+    await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    const h = headersOf(0);
+    expect(h['x-a2a-contracting-chain']).toBe(SELF);
+    expect(h['x-a2a-contracting-depth']).toBe('1');
+  });
+
+  it('T-PROP-2 (CD-18): sin identidad derivable NI hint NO se emite NINGUNO de los dos + warn', async () => {
+    // Emitir una cadena sin nuestro eslabón es PEOR que no emitir nada: el gateway
+    // de al lado leería una traza que afirma NO contenernos, o sea una razón para
+    // seguir. Y no puede ser silencioso, porque deja al siguiente sin el dato.
+    //
+    // ⚠️ Sin las dos envs Y SIN `selfHostHint`: es el camino NO-HTTP (tool MCP,
+    // `inbound-task`), el único que hoy puede quedarse sin identidad derivable. El
+    // camino HTTP tiene siempre el `Host` — ver `T-PROP-5`.
+    delete process.env.A2A_SELF_HOSTS;
+    delete process.env.BASE_URL;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+
+    await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    const h = headersOf(0);
+    expect(h['x-a2a-contracting-chain']).toBeUndefined();
+    expect(h['x-a2a-contracting-depth']).toBeUndefined();
+    const warned = logSpy.warn.mock.calls.some((c) =>
+      String(c[1] ?? '').includes('contracting-chain.not-emitted'),
+    );
+    expect(warned).toBe(true);
+  });
+
+  /**
+   * Fix-pack AR/CR BLQ-MED-1, la tercera consecuencia del conjunto vacío: sin
+   * `canonicalId` **no se emite traza saliente**, y entonces el gateway de al lado
+   * no puede cooperar ni queriendo — su capa 2 no recibe nada que leer. Con el
+   * `Host` entrante hay eslabón, así que la traza sale.
+   *
+   * ⚠️ Y ACÁ ESTÁ EL RESIDUAL, escrito donde se mide: cuando el eslabón sale del
+   * `Host` y NO de la configuración, lo que anunciamos es un valor que el caller
+   * influye. Un `Host` forjado nos hace anunciarnos con OTRO nombre — y esa parte
+   * NO está cubierta por el argumento de monotonía, que vale para el conjunto de
+   * NEGACIÓN y no para el eslabón que emitimos. Contra la alternativa (no emitir
+   * nada, que es lo que pasaba antes) sigue siendo mejor: la profundidad se
+   * incrementa igual y el techo del vecino empieza a contar. Lo que lo cierra es
+   * setear `A2A_SELF_HOSTS`, y por eso es paso obligatorio del deploy.
+   */
+  it('T-PROP-5: SIN las dos envs, el `Host` entrante alcanza para EMITIR la traza', async () => {
+    expect(process.env.A2A_SELF_HOSTS).toBeUndefined();
+    expect(process.env.BASE_URL).toBeUndefined();
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+
+    await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+      selfHostHint: SELF,
+    });
+
+    const h = headersOf(0);
+    expect(h['x-a2a-contracting-chain']).toBe(SELF);
+    expect(h['x-a2a-contracting-depth']).toBe('1');
+    // …y no se avisó de "no pude emitir", porque sí se emitió.
+    const warned = logSpy.warn.mock.calls.some((c) =>
+      String(c[1] ?? '').includes('contracting-chain.not-emitted'),
+    );
+    expect(warned).toBe(false);
+  });
+
+  /**
+   * ⚠️ TESTIGO ÚNICO DE `MUT-15`. Medido: mover la llamada a
+   * `buildOutboundContractingHeaders` DEBAJO de `...authHeaders` deja la suite
+   * completa en **1 solo rojo, y es éste**
+   * (MEDIDO: exit=1, 1 rojos, en `6f252ad`).
+   *
+   * Y por eso **cambiarle el input lo apaga igual que borrarlo** (CD-22): si el
+   * `auth.key` de este registry deja de COLISIONAR con
+   * `x-a2a-contracting-chain`, no queda nada en el repo que distinga el orden
+   * correcto del invertido — los dos emiten los mismos headers con los mismos
+   * valores en todos los demás casos. La colisión ES el instrumento.
+   *
+   * Historial que conviene no repetir: la primera versión de este `it` assertaba
+   * "el `Content-Type` y la traza siguen saliendo", y con eso `MUT-15`
+   * **sobrevivía**.
+   */
+  it('T-PROP-3 (CD-4, MUT-15): la traza NO PISA la credencial del registry', async () => {
+    // ── POR QUÉ ASÍ Y NO "los headers de siempre siguen saliendo" ──────────
+    // Un test que sólo verifique que `Content-Type` y la traza están presentes
+    // pasa IGUAL con los headers nuevos puestos DEBAJO del spread de
+    // credenciales, o sea que no mide el ORDEN — que es lo único que CD-4 pide.
+    //
+    // El discriminante es una COLISIÓN DE NOMBRES real: un registry puede
+    // declarar `auth: {type:'header', key, value}` con la clave que quiera,
+    // incluida la de nuestro header de protocolo. Con el orden correcto (traza
+    // ANTES de las credenciales) gana la CREDENCIAL y llega intacta al agente;
+    // con el orden invertido gana la traza y la credencial **se destruye en
+    // silencio**, que es exactamente el modo de falla que el orden previene.
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      {
+        id: 'reg-1',
+        name: 'wasiai',
+        discoveryEndpoint: 'https://a.example/discover',
+        invokeEndpoint: 'https://a.example/invoke/{slug}',
+        schema: { discovery: {}, invoke: { method: 'POST' } },
+        enabled: true,
+        createdAt: new Date(),
+        ownerRef: 'system',
+        auth: {
+          type: 'header',
+          key: 'x-a2a-contracting-chain',
+          value: 'CREDENCIAL-DEL-REGISTRY',
+        },
+      },
+    ] as unknown as never);
+
+    const agent = makeAgent('s0', 'https://a.example/s0');
+    await composeService.invokeAgent(
+      agent,
+      { q: 'hi' },
+      'bearer-del-caller',
+      undefined,
+      undefined,
+      {
+        chain: [],
+        depth: 0,
+        canonicalId: SELF,
+        selfHosts: [SELF],
+      },
+    );
+
+    const h = headersOf(0);
+    // LA CREDENCIAL SOBREVIVIÓ. Con `MUT-15` acá saldría `SELF` y el agente
+    // recibiría nuestra traza en vez de su credencial.
+    expect(h['x-a2a-contracting-chain']).toBe('CREDENCIAL-DEL-REGISTRY');
+    expect(h['Content-Type']).toBe('application/json');
+  });
+
+  it('T-PROP-3b: sin colisión, la traza y la credencial salen LAS DOS', async () => {
+    // El gemelo del anterior: con claves distintas no hay nada que pisar y los dos
+    // headers coexisten. Sin este `it`, T-PROP-3 pasaría también si la traza no se
+    // emitiera nunca.
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    vi.mocked(registryService.getEnabled).mockResolvedValue([
+      {
+        id: 'reg-1',
+        name: 'wasiai',
+        discoveryEndpoint: 'https://a.example/discover',
+        invokeEndpoint: 'https://a.example/invoke/{slug}',
+        schema: { discovery: {}, invoke: { method: 'POST' } },
+        enabled: true,
+        createdAt: new Date(),
+        ownerRef: 'system',
+        auth: { type: 'header', key: 'x-registry-secret', value: 'CRED' },
+      },
+    ] as unknown as never);
+
+    const agent = makeAgent('s0', 'https://a.example/s0');
+    await composeService.invokeAgent(
+      agent,
+      { q: 'hi' },
+      'bearer',
+      undefined,
+      undefined,
+      {
+        chain: ['a.example'],
+        depth: 0,
+        canonicalId: SELF,
+        selfHosts: [SELF],
+      },
+    );
+
+    const h = headersOf(0);
+    expect(h['x-registry-secret']).toBe('CRED');
+    expect(h['x-a2a-contracting-chain']).toBe(`a.example,${SELF}`);
+    expect(h['x-a2a-contracting-depth']).toBe('1');
+  });
+
+  it('T-PROP-4: la traza que EMITIMOS la caza nuestro propio lector (ida y vuelta)', async () => {
+    // Si el emisor y el lector divergen, el transitivo no cierra ni entre dos
+    // instancias NUESTRAS — que es el caso mínimo que la capa 2 tiene que cubrir.
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+
+    await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    const h = headersOf(0);
+    const verdict = readInboundContracting(
+      {
+        chain: h['x-a2a-contracting-chain'],
+        depth: h['x-a2a-contracting-depth'],
+      },
+      [SELF],
+      2,
+    );
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) expect(verdict.code).toBe(CONTRACTING_LOOP_DETECTED);
+  });
+});
+
+describe('WKH-360 CD-19 — un solo STRING por código, en las DOS superficies', () => {
+  it('T-CODE-1: el `errorCode` del pipeline y el `error_code` del preHandler son la MISMA constante', async () => {
+    // El mismo bucle sale como `errorCode` (camel) si lo caza el loop del pipeline y
+    // como `error_code` (snake) si lo caza un preHandler. Las CLAVES son dos por el
+    // shape histórico del repo, pero el VALOR tiene que ser uno: así un cliente
+    // matchea un solo string aunque tenga que mirar dos claves.
+    process.env.A2A_SELF_HOSTS = SELF;
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      slug === 'self'
+        ? makeAgent('self', `https://${SELF}/compose`)
+        : makeAgent(slug, 'https://a.example/x'),
+    );
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'a', input: {} },
+        { agent: 'self', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    // El del pipeline (camel)…
+    expect(result.errorCode).toBe(CONTRACTING_LOOP_DETECTED);
+    // …es idéntico al string que el leaf exporta y que consume el preHandler.
+    expect(CONTRACTING_LOOP_DETECTED).toBe('CONTRACTING_LOOP_DETECTED');
+    // Y el `error` en prosa sale del MISMO generador del leaf en las dos capas.
+    expect(result.error).toContain(
+      contractingErrorMessage(CONTRACTING_LOOP_DETECTED),
+    );
+  });
+});
+
+describe('WKH-360 AC-11 — el fee del coordinador AJENO se LEE, no se estima', () => {
+  it('T-FEE-4: sobre `charged` + monto ⇒ `{declared:true}` y rollup `complete`', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+    // El agente responde CON ENVOLTORIO: el sobre convive con `result`.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        result: { salida: 'ok' },
+        protocolFeeStatus: 'charged',
+        protocolFeeUsdc: 0.02,
+      }),
+    });
+
+    const result = await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.steps[0]?.coordinatorFee).toEqual({
+      declared: true,
+      usdc: 0.02,
+    });
+    // ⚠️ Y el `output` es el CONTENIDO de `result`, o sea que el sobre se leyó
+    // ANTES del colapso `data.result ?? data`. Si se leyera después, el sobre ya no
+    // existiría y este campo sería `undefined` SIEMPRE, sin que nada fallara.
+    // Mutante: `MUT-12`.
+    expect(result.steps[0]?.output).toEqual({ salida: 'ok' });
+  });
+
+  it('T-FEE-5 (CD-5): sobre presente SIN monto usable ⇒ `{declared:false}`, jamás `usdc: 0`', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 'ok', protocolFeeStatus: 'unknown' }),
+    });
+
+    const result = await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    expect(result.steps[0]?.coordinatorFee).toEqual({ declared: false });
+    // ⛔ NINGÚN cero fabricado en todo el resultado del step.
+    expect(JSON.stringify(result.steps[0]?.coordinatorFee)).not.toContain('0');
+  });
+
+  it('T-FEE-6 (AC-8, CD-7): agente NORMAL (sin sobre) ⇒ el campo NO existe', async () => {
+    // La rama por la que pasa el 100% del tráfico de hoy: los 25 agentes de prod no
+    // emiten `protocolFeeStatus`, así que el `StepResult` queda byte-idéntico.
+    process.env.A2A_SELF_HOSTS = SELF;
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: 'ok' }),
+    });
+
+    const result = await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+    });
+
+    expect(result.steps[0]).not.toHaveProperty('coordinatorFee');
+  });
+
+  /**
+   * ⚠️ TESTIGO del fix-pack AR/BLQ-MED-2, y el que mide la CONSECUENCIA DE PLATA
+   * (el unitario `T-U-FEE-5` sólo mide que la función no tire).
+   *
+   * El body de un agente lo escribe un TERCERO y `JSON.parse` devuelve escalares
+   * sin chistar. Con el `in` sin guard de tipo, un 200 con body `"plain-string"`
+   * hacía tirar `TypeError` **dentro** de `invokeAgent`; el throw lo agarra el
+   * catch per-step de `execute()`, que corre **después** del `budgetService.debit`
+   * de ese step. Resultado: **débito hecho y step fallado**, con un body que en el
+   * árbol base (`3823580`) daba `success: true`.
+   *
+   * ⚠️ EL ESCALAR VA EN EL STEP **1**, NO EN EL 0, y eso es lo que hace que el
+   * mutante muera por la razón CARA. Medido, con el escalar en el step 0 el
+   * mutante mata igual pero con otro texto (`débito: expected 1 times, but got 0`):
+   * el pipeline se cae ANTES de llegar al primer débito de compose, así que ese
+   * `it` estaría midiendo "el pipeline se rompe" y no "el caller quedó cobrado".
+   * Con el escalar en el step 1, el débito de ese step YA OCURRIÓ cuando el
+   * `TypeError` sale, y el mutante muere en `success` con `debit` en 1 — que es
+   * exactamente el enunciado de AC-8 que la regresión rompía.
+   * (El step 0 lo cobra el MIDDLEWARE, que este harness no ejercita.)
+   */
+  it('T-FEE-7 (AC-8): un 200 con body JSON ESCALAR no falla el step ya cobrado', async () => {
+    process.env.A2A_SELF_HOSTS = SELF;
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+    // Los tres primitivos que `JSON.parse` puede devolver en la raíz de un 200.
+    const scalarBodies: unknown[] = ['plain-string', 42, true];
+    expect(scalarBodies).toHaveLength(3);
+
+    for (const body of scalarBodies) {
+      vi.clearAllMocks();
+      budgetState.balance = 100;
+      // step 0 normal; step 1 escalar (ver el ⚠️ del docblock).
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ result: 'ok' }),
+        })
+        .mockResolvedValue({ ok: true, status: 200, json: async () => body });
+
+      const result = await composeService.compose({
+        steps: [
+          { agent: 's0', input: {} },
+          { agent: 's1', input: {} },
+        ],
+        scopingKeyRow: keyRow,
+        chainId: 2368,
+        maxBudget: 50,
+      });
+
+      // ── EL DINERO PRIMERO ────────────────────────────────────────────────
+      // compose debita los steps 1..N ⇒ exactamente UN débito en un pipeline de 2,
+      // y ese débito ocurre ANTES de leer el body del step 1. Que el débito exista
+      // y el step FALLE es el bug: cobrado por un step que no entregó.
+      expect(debitMock, String(body)).toHaveBeenCalledTimes(1);
+      expect(result.success, String(body)).toBe(true);
+      expect(result.steps, String(body)).toHaveLength(2);
+      // Y el sobre no existe: un escalar no declara fee, así que el campo queda
+      // AUSENTE — nunca `{declared:false}`, que afirmaría que hubo un coordinador.
+      expect(result.steps[1], String(body)).not.toHaveProperty(
+        'coordinatorFee',
+      );
+    }
+  });
+});
