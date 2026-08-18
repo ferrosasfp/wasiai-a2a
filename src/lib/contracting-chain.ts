@@ -72,6 +72,16 @@
  * este archivo no exista ningún `parseInt` ni `Number(` en el camino de la
  * profundidad.
  *
+ * ⚠️ **ESA REGLA NO SE VERIFICA CON UN GREP A SECAS, y decir que sí era el
+ * candado romo** (fix-pack AR/MNR-6): `grep -c "parseInt\|Number("` sobre este
+ * archivo da **8** — casi todos dentro de los comentarios que EXPLICAN la regla,
+ * más el `Number(sum.toFixed(6))` legítimo de `rollUpCascadedFee`, que es la única
+ * función de acá que no toca profundidad y sí necesita aritmética decimal. Un grep
+ * que devuelve 8 no discrimina. El control real es `T-CD14-SWEEP`, que barre el
+ * CÓDIGO sin comentarios y FUERA del rollup (medido: 1 sola ocurrencia en código,
+ * y está adentro del rollup), y que se cae si alguien mete un `Number(` en el
+ * camino de la profundidad.
+ *
  * ─── LA DERIVACIÓN DEL TECHO POR DEFAULT = 2 (no es un número elegido) ──────
  * El costo de un bucle NO es lineal en la profundidad: es **exponencial con base
  * `MAX_COMPOSE_STEPS`**. Datos medidos en `3823580`: fan-out por nivel

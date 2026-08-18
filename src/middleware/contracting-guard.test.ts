@@ -247,7 +247,9 @@ describe('CAPA 2 — la profundidad y el techo (AC-6, CD-14)', () => {
   });
 
   it('T-DEPTH-4 (CD-14): " 2", "2abc", "0x10" y "1000" → los CUATRO rechazados', async () => {
-    for (const raw of [' 2', '2abc', '0x10', '1000']) {
+    const cases = [' 2', '2abc', '0x10', '1000'];
+    expect(cases).toHaveLength(4);
+    for (const raw of cases) {
       const res = await post({ [CONTRACTING_DEPTH_HEADER]: raw });
       expect(res.statusCode, `depth=${JSON.stringify(raw)}`).toBe(400);
       expect(res.json().error_code, `depth=${JSON.stringify(raw)}`).toBe(

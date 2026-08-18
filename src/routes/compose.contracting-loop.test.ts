@@ -335,10 +335,14 @@ describe('WKH-360 SITIO 1 — /compose step-0: el corte ocurre ANTES del débito
     // que existe hoy. Si alguien mete `.vercel.app` en el conjunto de identidad,
     // este `it` se pone rojo.
     process.env.A2A_SELF_HOSTS = 'wasiai-a2a-production.up.railway.app';
-    for (const host of [
+    const hosts = [
       'wasiai-v2.vercel.app',
       'wasiai-remittance-agents.vercel.app',
-    ]) {
+    ];
+    // Son los DOS hosts reales de prod. El conteo se asserta para que borrar uno
+    // no reduzca la cobertura en silencio (fix-pack CR/MNR-5).
+    expect(hosts).toHaveLength(2);
+    for (const host of hosts) {
       vi.clearAllMocks();
       budgetState.balance = 10;
       mockCompose.mockResolvedValue(okPipeline());

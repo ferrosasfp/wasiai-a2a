@@ -155,7 +155,9 @@ describe('readInboundContracting — paso 4: los 8 valores de profundidad (CD-14
   it("T-U-DEPTH-5: ' 2', '2abc', '0x10' ⇒ MALFORMED (parseInt lee 2, 2 y 0)", () => {
     expect(Number.parseInt(' 2', 10)).toBe(2);
     expect(Number.parseInt('2abc', 10)).toBe(2);
-    for (const raw of [' 2', '2abc', '0x10']) {
+    const cases = [' 2', '2abc', '0x10'];
+    expect(cases).toHaveLength(3);
+    for (const raw of cases) {
       const v = read(undefined, raw);
       expect(v.ok, `depth=${JSON.stringify(raw)}`).toBe(false);
       if (!v.ok) expect(v.code).toBe(CONTRACTING_DEPTH_MALFORMED);
@@ -235,7 +237,9 @@ describe('readInboundContracting — pasos 1-3: largo, cantidad y forma de la ca
   });
 
   it('T-U-CHAIN-5: header ausente o vacío ⇒ cadena vacía (no rechazo)', () => {
-    for (const raw of [undefined, '', '   ']) {
+    const cases = [undefined, '', '   '];
+    expect(cases).toHaveLength(3);
+    for (const raw of cases) {
       const v = read(raw, undefined);
       expect(v.ok, `chain=${JSON.stringify(raw)}`).toBe(true);
       if (v.ok) expect(v.chain).toEqual([]);
@@ -346,10 +350,12 @@ describe('isSelfDestination — la capa 1', () => {
     // Medido hoy contra prod: POST /discover → total 25, en
     // wasiai-v2.vercel.app (22) + wasiai-remittance-agents.vercel.app (3),
     // CERO apuntando al gateway. O sea que este guard rechaza 0 tráfico vivo.
-    for (const url of [
+    const urls = [
       'https://wasiai-v2.vercel.app/api/v1/agents/x/invoke',
       'https://wasiai-remittance-agents.vercel.app/api/invoke',
-    ]) {
+    ];
+    expect(urls).toHaveLength(2);
+    for (const url of urls) {
       expect(
         isSelfDestination(url, ['wasiai-a2a-production.up.railway.app']),
       ).toBe(false);
@@ -615,7 +621,9 @@ describe('assertSelfHostsEnv — throw si ilegible, warn si vacío (patrón de a
   });
 
   it('T-ENV-1c: con puerto o con path ⇒ LANZA', () => {
-    for (const raw of ['gw.example.com:8443', 'gw.example.com/compose']) {
+    const cases = ['gw.example.com:8443', 'gw.example.com/compose'];
+    expect(cases).toHaveLength(2);
+    for (const raw of cases) {
       process.env.A2A_SELF_HOSTS = raw;
       expect(() => assertSelfHostsEnv(), `raw=${raw}`).toThrow(/MAL ESCRITA/);
     }
@@ -675,12 +683,31 @@ describe('T-FLAG-1 (CD-1) — barrido TEXTUAL: ninguna bandera gatea el corte', 
    * Este barrido es el control EJECUTABLE de esa prohibición. Un comentario que
    * dice "no hay banderas" no se puede medir; esto sí, y se rompe el día que
    * alguien agregue una.
+   *
+   * ⚠️ SON DOS ARCHIVOS, NO UNO (fix-pack AR/MNR-2 + CR/MNR-2). Acá había un solo
+   * path —el leaf—, que es justamente **el archivo donde una bandera NO iría**: el
+   * leaf no tiene call-sites ni cadena de preHandlers. El AR lo midió: poniendo la
+   * bandera en `middleware/contracting-guard.ts` el barrido seguía verde. El
+   * middleware es el que decide si el guard de capa 2 corre para CADA request, o
+   * sea el lugar natural de un interruptor.
+   *
+   * El path viejo también citaba `contracting-chain.flag.test.ts`, un archivo que
+   * **no existe** (AR/MNR-3). Las citas de acá abajo se verifican solas: si el
+   * archivo no existe, `readFileSync` tira.
    */
-  const GUARD_SOURCES = ['contracting-chain.ts'];
+  const GUARD_SOURCES = [
+    join(LIB_DIR, 'contracting-chain.ts'),
+    join(LIB_DIR, '..', 'middleware', 'contracting-guard.ts'),
+  ];
 
-  it("no hay ningún `=== 'true'` en el fuente del guard", () => {
+  it("no hay ningún `=== 'true'` en NINGUNO de los dos fuentes del guard", () => {
+    // Conteo asserteado: si alguien saca un path de la lista, esto se pone rojo en
+    // vez de barrer menos en silencio.
+    expect(GUARD_SOURCES).toHaveLength(2);
     for (const file of GUARD_SOURCES) {
-      const src = readFileSync(join(LIB_DIR, file), 'utf8');
+      // Tira si el path no existe ⇒ una cita rota no puede quedar verde.
+      const src = readFileSync(file, 'utf8');
+      expect(src.length, `${file} está vacío`).toBeGreaterThan(0);
       // Se buscan las dos formas de la convención, con comilla simple y doble.
       expect(src, `${file} tiene un === 'true'`).not.toMatch(/===\s*'true'/);
       expect(src, `${file} tiene un === "true"`).not.toMatch(/===\s*"true"/);
@@ -713,6 +740,91 @@ describe('T-FLAG-1 (CD-1) — barrido TEXTUAL: ninguna bandera gatea el corte', 
     // Y una allow-list de auto-contratación NO existe todavía (TD-360-1): si
     // alguien la shippea, tiene que venir vacía por default = denegar.
     expect(process.env.A2A_SELF_CONTRACTING_ALLOW).toBeUndefined();
+  });
+});
+
+describe('El campo `contractingGuard` de /health está en LOS DOS handlers', () => {
+  /**
+   * `/health` está DUPLICADO: el handler de producción vive en `src/index.ts` y su
+   * réplica para tests en `src/__tests__/e2e/setup.ts` (ese módulo hace
+   * `await initAdapters()` a nivel de módulo, así que `src/index.ts` no se puede
+   * importar desde un test — por eso la réplica existe).
+   *
+   * `T-HEALTH-CONTRACTING` (en `e2e.test.ts`) ejercita el campo de verdad, pero
+   * **sólo puede ejercitar la RÉPLICA**. Si el campo se borrara del handler de
+   * PRODUCCIÓN, ese test seguiría verde y `/health` de prod dejaría de publicar el
+   * único instrumento que NC-1 designa para verificar la identidad después del
+   * deploy. Este barrido textual es lo que cubre esa mitad.
+   *
+   * Es textual porque no hay otra forma: el handler de prod no es importable.
+   */
+  const HEALTH_HANDLERS = [
+    join(LIB_DIR, '..', 'index.ts'),
+    join(LIB_DIR, '..', '__tests__', 'e2e', 'setup.ts'),
+  ];
+
+  it('T-HEALTH-BOTH: los dos handlers llaman a `readContractingGuardHealth()`', () => {
+    expect(HEALTH_HANDLERS).toHaveLength(2);
+    for (const file of HEALTH_HANDLERS) {
+      // `readFileSync` tira si el path no existe ⇒ una cita rota no queda verde.
+      const src = readFileSync(file, 'utf8');
+      expect(src, `${file} no publica el campo en /health`).toContain(
+        'contractingGuard: readContractingGuardHealth()',
+      );
+    }
+  });
+});
+
+describe('CD-14 — el candado del camino de la PROFUNDIDAD, acotado', () => {
+  /**
+   * CD-14 prohíbe `parseInt`/`Number(` **en el camino de la profundidad**, porque
+   * los cuatro valores de la tabla del docblock (`'1e9'`, `''`, `' 2'`, `'2abc'`)
+   * producen con esos lectores un número plausible y menor al techo: el modo de
+   * falla no es un error, es **un guard que aplaude**. Por eso `digitsToInt`.
+   *
+   * ⚠️ EL CANDADO ERA "verificable con un grep" Y QUEDÓ ROMO EN EL MISMO COMMIT
+   * (fix-pack AR/MNR-6): `grep -c "parseInt\|Number("` sobre el archivo da **8**
+   * (medido en este árbol), casi todos dentro de los comentarios que EXPLICAN la
+   * regla, más el `Number(sum.toFixed(6))` legítimo del rollup de fees. Un grep que
+   * devuelve 8 no discrimina nada, así que la regla dejó de ser verificable en el
+   * momento en que se escribió.
+   *
+   * Acá el barrido se acota a lo que la regla realmente prohíbe: **el código, sin
+   * comentarios, fuera de `rollUpCascadedFee`** — que es la única función del
+   * archivo que no toca la profundidad y sí necesita aritmética decimal. Medido en
+   * este árbol: 1 sola ocurrencia en código, y está adentro del rollup.
+   */
+  const SRC = readFileSync(join(LIB_DIR, 'contracting-chain.ts'), 'utf8');
+
+  /** Quita comentarios de bloque y de línea. El `[^:]` salva los `https://`. */
+  function stripComments(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+  }
+
+  it('T-CD14-SWEEP: ningún `parseInt(`/`Number(` en código fuera del rollup de fees', () => {
+    const code = stripComments(SRC);
+    const start = code.indexOf('export function rollUpCascadedFee');
+    expect(start, 'no se encontró `rollUpCascadedFee`').toBeGreaterThan(-1);
+    const end = start + 1 + code.slice(start + 1).indexOf('\nexport function ');
+    expect(end, 'no se encontró el final del rollup').toBeGreaterThan(start);
+
+    const rollup = code.slice(start, end);
+    const fueraDelRollup = code.slice(0, start) + code.slice(end);
+
+    // ── LA ASERCIÓN ────────────────────────────────────────────────────────
+    expect(fueraDelRollup).not.toMatch(/parseInt\(|Number\(/);
+
+    // ── CONTROLES, para que el `not.toMatch` de arriba no pase por accidente ──
+    // 1 · el stripper no se comió el archivo (si devolviera '' todo pasaría).
+    expect(fueraDelRollup).toContain('function digitsToInt');
+    expect(fueraDelRollup).toContain('DECIMAL_1_TO_3_DIGITS.test');
+    // 2 · la partición apunta a la función correcta y NO está vacía.
+    expect(rollup).toContain('cascadedOrchestrationFeeStatus');
+    // 3 · control POSITIVO del regex: el rollup SÍ tiene el `Number(` legítimo, así
+    //     que el barrido está mirando un patrón que existe en este archivo.
+    expect(rollup).toMatch(/Number\(/);
   });
 });
 
@@ -813,13 +925,17 @@ describe('readCoordinatorFee / rollUpCascadedFee — AC-11 y CD-5', () => {
   it('T-U-FEE-3 (CD-5): declarado pero sin monto usable ⇒ declared FALSE, nunca usdc 0', () => {
     // Los cinco modos en que un sobre llega sin monto usable. En NINGUNO se
     // fabrica un cero: "no lo declaró" no es "cobró cero".
-    for (const raw of [
+    const sobres = [
       { protocolFeeStatus: 'unknown' },
       { protocolFeeStatus: 'not_charged' },
       { protocolFeeStatus: 'charged' }, // sin monto
       { protocolFeeStatus: 'charged', protocolFeeUsdc: 0 }, // se contradice
       { protocolFeeStatus: 'charged', protocolFeeUsdc: Number.NaN },
-    ]) {
+    ];
+    // Son CINCO modos, y el conteo se asserta: borrar una fila tiene que ponerse
+    // en rojo, no barrer un caso menos en silencio (fix-pack CR/MNR-5).
+    expect(sobres).toHaveLength(5);
+    for (const raw of sobres) {
       const out = readCoordinatorFee(raw);
       expect(out, JSON.stringify(raw)).toEqual({ declared: false });
       expect(out).not.toHaveProperty('usdc');
@@ -919,7 +1035,9 @@ describe('readCoordinatorFee / rollUpCascadedFee — AC-11 y CD-5', () => {
     });
     // …y un centavo por encima, no.
     expect(sobre(1_000_000_000.01)).toEqual({ declared: false });
-    for (const enorme of [1e300, Number.MAX_VALUE, Number.MAX_SAFE_INTEGER]) {
+    const enormes = [1e300, Number.MAX_VALUE, Number.MAX_SAFE_INTEGER];
+    expect(enormes).toHaveLength(3);
+    for (const enorme of enormes) {
       const out = sobre(enorme);
       expect(out, String(enorme)).toEqual({ declared: false });
       // ⛔ Y NO se recorta al techo: publicar el techo sería publicar un número que

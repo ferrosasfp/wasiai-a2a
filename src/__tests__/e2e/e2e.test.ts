@@ -375,6 +375,64 @@ describe('E2E', () => {
         delete process.env.STRANDED_EXPOSURE_ALERT_THRESHOLD_USD;
       }
     });
+
+    /**
+     * ⚠️ WKH-360 · fix-pack CR/BLQ-BAJO-2 — **el campo `contractingGuard` de
+     * `/health` no lo verificaba NINGÚN test, en ninguno de los dos handlers.**
+     * Medido por el CR: borrando la línea de `e2e/setup.ts` la suite quedaba en
+     * `5594 passed, cero rojos`.
+     *
+     * Por qué importa más que un campo cualquiera: NC-1 lo designa como **el único
+     * instrumento** para saber, DESPUÉS del deploy, si `BASE_URL`/`A2A_SELF_HOSTS`
+     * quedaron puestas — desde afuera del hosting no se puede distinguir. Y de eso
+     * depende si la capa 1 cubre los alias propios o sólo el `Host` de cada
+     * petición (fix-pack BLQ-MED-1). Un instrumento que puede desaparecer sin que
+     * nada se ponga rojo no es un instrumento.
+     *
+     * Sigue el precedente de `T-HEALTH-SHAPE`, veinte líneas más arriba: par
+     * presente/ausente contra el handler REAL vía `inject('/health')`, no contra el
+     * helper.
+     */
+    it('T-HEALTH-CONTRACTING: sin identidad configurada, el campo dice `request-only` con conteo 0', async () => {
+      const savedHosts = process.env.A2A_SELF_HOSTS;
+      const savedBase = process.env.BASE_URL;
+      delete process.env.A2A_SELF_HOSTS;
+      delete process.env.BASE_URL;
+      try {
+        const res = await app.inject({ method: 'GET', url: '/health' });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body).toHaveProperty('status', 'ok');
+        // El campo existe SIEMPRE: "no me reconozco por ningún alias" es
+        // justamente el estado que hay que poder ver después del deploy.
+        expect(body).toHaveProperty('contractingGuard');
+        expect(body.contractingGuard.selfHostCount).toBe(0);
+        expect(body.contractingGuard.source).toBe('request-only');
+        expect(typeof body.contractingGuard.depthMax).toBe('number');
+      } finally {
+        if (savedHosts !== undefined) process.env.A2A_SELF_HOSTS = savedHosts;
+        if (savedBase !== undefined) process.env.BASE_URL = savedBase;
+      }
+    });
+
+    it('T-HEALTH-CONTRACTING: con identidad configurada dice `env` con el CONTEO, nunca los hosts', async () => {
+      const savedHosts = process.env.A2A_SELF_HOSTS;
+      process.env.A2A_SELF_HOSTS = 'gw.example.com,alias.example.com';
+      try {
+        const res = await app.inject({ method: 'GET', url: '/health' });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body.contractingGuard.selfHostCount).toBe(2);
+        expect(body.contractingGuard.source).toBe('env');
+        // ⛔ Sale el CONTEO, no los hosts. Es parte del contrato del campo.
+        expect(JSON.stringify(body.contractingGuard)).not.toContain(
+          'gw.example.com',
+        );
+      } finally {
+        if (savedHosts === undefined) delete process.env.A2A_SELF_HOSTS;
+        else process.env.A2A_SELF_HOSTS = savedHosts;
+      }
+    });
   });
 
   // ── Bearer auth on /auth/me (WKH-BEARER-FIX AC-8) ────────
