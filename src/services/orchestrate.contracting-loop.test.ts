@@ -248,6 +248,84 @@ describe('WKH-360 SITIO 2 — /orchestrate: el corte ocurre ANTES del débito de
     expect(result.pipeline.errorCode).toBe(CONTRACTING_LOOP_DETECTED);
   });
 
+  /**
+   * ⚠️ TESTIGO del fix-pack AR/CR BLQ-MED-1 para el SITIO 2.
+   *
+   * Sin `hint`, el conjunto de identidad de este método salía de las envs, y con
+   * las dos ausentes el gate `if (selfHosts.length > 0)` **se salteaba el bloque
+   * entero**: el step-0 de las TRES rutas de `/orchestrate*` quedaba sin guard de
+   * dinero, y en orchestrate ese débito lo hace ESTE service (las tres rutas apagan
+   * el del middleware con `markSkipMiddlewareDebitHandler`). O sea que no había
+   * ningún otro que lo cubriera.
+   *
+   * ⛔ NO setear `A2A_SELF_HOSTS` en este `it`: con la env puesta pasa también sin
+   * el fix y deja de medir nada.
+   */
+  it('T-L1-3c (AC-4, CD-3): SIN las dos envs, el `Host` entrante corta antes del débito', async () => {
+    expect(process.env.A2A_SELF_HOSTS).toBeUndefined();
+    expect(process.env.BASE_URL).toBeUndefined();
+    const selfAgent = makeAgent({
+      slug: 'self-loop',
+      id: 'id-self',
+      invokeUrl: `https://${SELF}/compose`,
+    });
+    withAgents([selfAgent]);
+    vi.mocked(discoveryService.getAgent).mockResolvedValue(selfAgent);
+
+    const result = await orchestrateService.orchestrate(
+      {
+        goal: 'multi-step pipeline',
+        budget: 5.0,
+        maxAgents: 1,
+        scopingKeyRow: makeKeyRow(),
+        chainId: CHAIN_ID,
+        // Lo único que cambia: el route pasa el `Host` de la petición.
+        selfHostHint: SELF,
+      },
+      'orch-loop-1c',
+    );
+
+    // ── EL DINERO PRIMERO ──────────────────────────────────────────────────
+    expect(mockDebit).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(result.pipeline.errorCode).toBe(CONTRACTING_LOOP_DETECTED);
+  });
+
+  /**
+   * La OTRA arista del Sitio 2 que el CR marcó sin cubrir (CR/BLQ-BAJO-3): el
+   * `await resolveAgentDestination` del guard no está en ningún `try`. La decisión
+   * es FAIL-CLOSED y ahora está escrita en el código; esto la mide.
+   *
+   * Lo que importa no es el status —el route lo convierte en 5xx— sino que el
+   * fallo ocurra con CERO plata movida y CERO invocación saliente. Un guard que
+   * ante un blip de DB siguiera de largo estaría ejecutando el pipeline sin saber
+   * si un destino somos nosotros.
+   */
+  it('T-L1-3d: si el lookup del guard TIRA, no se debita ni se emite nada (fail-closed)', async () => {
+    const agent = makeAgent({ slug: 'a1', id: 'id1' });
+    withAgents([agent]);
+    vi.mocked(discoveryService.getAgent).mockRejectedValue(
+      new Error('supabase unavailable'),
+    );
+
+    await expect(
+      orchestrateService.orchestrate(
+        {
+          goal: 'multi-step pipeline',
+          budget: 5.0,
+          maxAgents: 1,
+          scopingKeyRow: makeKeyRow(),
+          chainId: CHAIN_ID,
+          selfHostHint: SELF,
+        },
+        'orch-loop-1d',
+      ),
+    ).rejects.toThrow('supabase unavailable');
+
+    expect(mockDebit).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it('T-L1+8 (AC-8, CD-7): plan de agentes AJENOS → corre y SÍ debita', async () => {
     // El gemelo positivo. Sin esto, los dos de arriba no distinguen "el guard
     // corta el bucle" de "rompí /orchestrate".
@@ -277,9 +355,17 @@ describe('WKH-360 SITIO 2 — /orchestrate: el corte ocurre ANTES del débito de
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  it('T-L1+9 (AC-8): SIN identidad configurada, /orchestrate corre igual y no hace lookups extra', async () => {
+  it('T-L1+9 (AC-8): SIN identidad configurada NI hint, /orchestrate corre igual y no hace lookups extra', async () => {
     // El `selfHosts.length > 0` de adelante del guard deja el camino
-    // byte-idéntico al de hoy cuando no hay configuración: ni un lookup de más.
+    // byte-idéntico al de hoy cuando no hay NADA de identidad: ni un lookup de más.
+    //
+    // ⚠️ Desde el fix-pack (AR/CR BLQ-MED-1) esta rama ya NO es el camino HTTP: los
+    // routes pasan `selfHostHint`, así que por HTTP el conjunto nunca queda vacío.
+    // Lo que este `it` congela hoy es el camino NO-HTTP — el tool MCP
+    // (`src/mcp/tools/orchestrate.ts`) y `services/inbound-task.ts`, que llaman al
+    // service sin `FastifyRequest` y por lo tanto sin `Host` que pasar. ⛔ Para
+    // ESOS dos caminos el guard sigue dependiendo de `BASE_URL`/`A2A_SELF_HOSTS`, y
+    // eso es residual declarado, no cobertura.
     const a1 = makeAgent({ slug: 'a1', id: 'id1', priceUsdc: 0.01 });
     withAgents([a1]);
     vi.mocked(discoveryService.getAgent).mockResolvedValue(null);

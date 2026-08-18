@@ -415,6 +415,42 @@ describe('WKH-360 SITIO 1 — /compose step-0: el corte ocurre ANTES del débito
     expect(res.json().error_code).toBe(CONTRACTING_LOOP_DETECTED);
   });
 
+  /**
+   * ⚠️ TESTIGO DEL CABLEADO del fix-pack AR/CR BLQ-MED-1, y hace falta que sea un
+   * `it` aparte.
+   *
+   * Los tests de los SITIOS 3 y 4 viven en `services/compose.contracting-loop.test.ts`
+   * y le pasan `selfHostHint` A MANO al service. Eso mide el guard, **no el
+   * cableado**: si el route dejara de poblar el campo, esos `it` seguirían verdes y
+   * el guard estaría inerte en producción — que es exactamente la forma del bug que
+   * este fix-pack corrige. Acá el valor lo pone `routes/compose.ts` leyendo
+   * `request.hostname` de una petición REAL de `app.inject`.
+   */
+  it('T-L1+10: el route PASA el `Host` entrante al service (cableado, no simulacro)', async () => {
+    mockResolvePrice.mockResolvedValueOnce(0.001);
+    mockResolveDest.mockResolvedValueOnce({
+      registry: 'wasiai',
+      slug: 'agente-ajeno',
+      invokeUrl: 'https://otro-agente.example/run',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: {
+        'x-a2a-key': 'wasi_a2a_funded_master_key',
+        host: 'gw-cableado.example',
+      },
+      payload: { steps: [{ agent: 'agente-ajeno', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockCompose).toHaveBeenCalledTimes(1);
+    expect(mockCompose.mock.calls[0]?.[0]).toMatchObject({
+      selfHostHint: 'gw-cableado.example',
+    });
+  });
+
   it('T-FLAG-1 (CD-1): NINGUNA env nueva gatea el corte', async () => {
     // El corte funciona con `process.env` limpio de banderas: lo único que se lee
     // es el CONJUNTO DE IDENTIDAD, que es un dato, no un interruptor. Una bandera

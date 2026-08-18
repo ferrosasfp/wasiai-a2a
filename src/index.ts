@@ -99,8 +99,14 @@ const selfPublishedAuthHosts = assertSelfPublishedAuthEnv();
 // alias" en silencio el guard dejaría de reconocer como propio justo el host que el
 // operador declaró. CONJUNTO VACÍO → warning ruidoso más abajo, NO throw: no se pudo
 // verificar el valor de `BASE_URL` en el Railway de prod (NC-1) y voltear el servicio
-// por eso es un radio de explosión mayor que el problema — además el `hint` por
-// request sigue cubriendo el caso común sin ninguna configuración.
+// por eso es un radio de explosión mayor que el problema — y el `hint` por request
+// (el `Host` entrante, que viaja del route a los cuatro sitios) sigue cubriendo el
+// bucle directo POR HTTP sin ninguna configuración.
+//
+// ⛔ Que quede claro qué NO cubre ese hint, porque es lo que decide si este warning
+// es urgente: los ALIAS propios, los callers NO-HTTP (tool MCP e `inbound-task`, que
+// no tienen `Host` que pasar) y el eslabón que anunciamos hacia afuera. Setear
+// `A2A_SELF_HOSTS` es paso del deploy, no una mejora opcional.
 const selfHostsWarning = assertSelfHostsEnv();
 
 // WKH-360: y el techo de profundidad, con el mismo criterio que el techo de exposición
@@ -225,7 +231,7 @@ fastify.log.info(
     depthMax: resolveContractingDepthMax(),
   },
   resolveSelfHosts().hosts.length === 0
-    ? 'guard anti-bucle sin identidad configurada: la capa 1 depende del Host de cada peticion (los alias propios NO quedan cubiertos)'
+    ? 'guard anti-bucle SIN identidad configurada: por HTTP la capa 1 se apoya en el Host de cada peticion; NO quedan cubiertos los alias propios, los callers no-HTTP (tool MCP e inbound-task) ni el eslabon que anunciamos hacia afuera. Setear A2A_SELF_HOSTS.'
     : 'guard anti-bucle con identidad configurada para los hosts listados',
 );
 

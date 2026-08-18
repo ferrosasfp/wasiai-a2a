@@ -316,10 +316,25 @@ export function classifySelfHostsEnv():
  *    segundos y, al no bootear, la revisión anterior sigue sirviendo.
  *  · CONJUNTO VACÍO → warn ruidoso, NO throw. No se pudo verificar el valor de
  *    `BASE_URL` en el Railway de prod (NC-1) y voltear el servicio por eso es un
- *    radio de explosión mayor que el problema. Además el conjunto vacío NO deja el
- *    guard inerte para el caso común: el `hint` por request (el `Host` por el que
- *    entró la petición) cubre el bucle directo sin ninguna configuración. Lo que
- *    NO cubre son los ALIAS distintos del host por el que entró la petición.
+ *    radio de explosión mayor que el problema. El conjunto vacío tampoco deja el
+ *    guard inerte **en el camino HTTP**: el `hint` (el `Host` por el que entró la
+ *    petición) viaja desde el route hasta los cuatro sitios y cubre el bucle
+ *    directo sin ninguna configuración.
+ *
+ * ⛔ **QUÉ NO CUBRE EL `hint`** — la frase de arriba vale para el camino HTTP y para
+ * nada más. Sin `A2A_SELF_HOSTS` quedan afuera, MEDIDO:
+ *  1 · los **ALIAS** propios distintos del host por el que entró la petición
+ *      (dominio propio vs dominio de Railway vs literal de IP): un caller que nos
+ *      pega por el alias A y pide un step contra el alias B no queda cortado;
+ *  2 · los **CALLERS NO-HTTP**, que no tienen `Host` que pasar: el tool MCP
+ *      (`src/mcp/tools/orchestrate.ts`) y `src/services/inbound-task.ts` llaman al
+ *      service directo, sin `FastifyRequest`. Para esos dos caminos el guard
+ *      depende de `BASE_URL`/`A2A_SELF_HOSTS` y de nada más. Testigos: `T-L1+6`,
+ *      `T-L1+9`, `T-PROP-2`;
+ *  3 · el eslabón que ANUNCIAMOS (`canonicalId`) sale del `Host` cuando no hay
+ *      config, o sea de un valor que el caller influye — ver la salvedad en
+ *      `resolveSelfHosts`.
+ * Por eso setear `A2A_SELF_HOSTS` es **paso del deploy**, no una mejora opcional.
  */
 export function assertSelfHostsEnv(): string | null {
   const status = classifySelfHostsEnv();
@@ -342,13 +357,17 @@ export function assertSelfHostsEnv(): string | null {
   return (
     `${SELF_HOSTS_ENV} NO ESTA CONFIGURADA y BASE_URL tampoco aporta un host ` +
     'legible, asi que el conjunto de identidad propia derivado de la ' +
-    'configuracion esta VACIO. Lo que SIGUE cubierto: el bucle directo por el ' +
-    'host por el que entra cada peticion (se usa el Host del request como hint, ' +
-    'y agrandar ese conjunto solo puede producir MAS rechazos, nunca menos). Lo ' +
-    'que NO queda cubierto: los ALIAS propios distintos de ese host (dominio ' +
-    'propio, dominio de Railway, o un literal de IP). GET /health publica ' +
-    'contractingGuard.selfHostCount para confirmarlo despues del deploy. Setea ' +
-    `${SELF_HOSTS_ENV} con tus hostnames separados por coma. Ver .env.example.`
+    'configuracion esta VACIO. Lo que SIGUE cubierto: el bucle directo POR HTTP, ' +
+    'usando el Host de cada peticion como hint (agrandar ese conjunto solo puede ' +
+    'producir MAS rechazos, nunca menos). Lo que NO queda cubierto, y por eso ' +
+    'esto es un warning y no una nota: (1) los ALIAS propios distintos del host ' +
+    'por el que entro la peticion — dominio propio, dominio de Railway, literal ' +
+    'de IP; (2) los callers que NO son HTTP y por lo tanto no tienen Host que ' +
+    'pasar: el tool MCP y el ruteo in-process de inbound-task; (3) el eslabon con ' +
+    'el que nos anunciamos hacia afuera sale del Host entrante, que lo influye el ' +
+    'caller. GET /health publica contractingGuard.selfHostCount para confirmar el ' +
+    `estado despues del deploy. Setea ${SELF_HOSTS_ENV} con tus hostnames ` +
+    'separados por coma. Ver .env.example.'
   );
 }
 
@@ -378,6 +397,18 @@ export function assertSelfHostsEnv(): string | null {
  *
  * Sin el `hint`, un deploy sin `BASE_URL` ni `A2A_SELF_HOSTS` tendría conjunto
  * VACÍO y la capa 1 quedaría INERTE: exactamente el escenario que CD-1 prohíbe.
+ *
+ * ⚠️ **DÓNDE NO LLEGA EL ARGUMENTO DE MONOTONÍA: `canonicalId`.** Lo de arriba vale
+ * para `hosts`, que se usa como predicado de NEGACIÓN. `canonicalId` es otra cosa:
+ * es el eslabón con el que nos ANUNCIAMOS hacia afuera, y es el PRIMERO del orden
+ * `BASE_URL` → `A2A_SELF_HOSTS` → `hint`. Con las dos envs puestas el caller no lo
+ * puede mover (testigo: `T-L1-2d`). **Sin ninguna env, sale del `Host` entrante**, y
+ * ahí un caller que forja el `Host` nos hace emitir una traza con un eslabón que no
+ * es el nuestro — o sea que el gateway de al lado leería una cadena que no nos
+ * contiene y no tendría razón para frenar. Se acepta igual porque la alternativa
+ * medida es PEOR: sin `hint` el `canonicalId` es `null` y **no se emite ninguna
+ * traza**, con lo cual el vecino tampoco nos ve Y ADEMÁS su contador de profundidad
+ * nunca avanza. Lo que cierra este caso no es un guard: es setear `A2A_SELF_HOSTS`.
  */
 export function resolveSelfHosts(hint?: string): {
   hosts: string[];

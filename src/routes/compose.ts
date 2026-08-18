@@ -1065,6 +1065,15 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         ...(request.contractingDepth !== undefined && {
           contractingDepth: request.contractingDepth,
         }),
+        // WKH-360 (fix-pack AR/CR BLQ-MED-1): el `Host` por el que entró ESTA
+        // petición, para que los SITIOS 3 y 4 (dentro del service, donde no hay
+        // `FastifyRequest`) tengan identidad propia sin configuración. Sin esto,
+        // con `BASE_URL` y `A2A_SELF_HOSTS` ausentes el conjunto de identidad del
+        // pipeline queda `[]` y el guard de los steps 1..N —donde vive el `5^k`—
+        // queda inerte. Mismo valor que ya consume el SITIO 1 doce líneas más
+        // arriba en este archivo; se pasa por el request y no se re-resuelve
+        // adentro para que los cuatro sitios comparen contra el MISMO conjunto.
+        selfHostHint: request.hostname,
       });
 
       // BLQ-2: bail early if timeout fired during compose

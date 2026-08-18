@@ -1096,6 +1096,30 @@ export interface ComposeRequest {
    * tercero. Ver `src/lib/contracting-chain.ts`.
    */
   contractingDepth?: number | undefined;
+  /**
+   * WKH-360 (AC-4, fix-pack AR/CR BLQ-MED-1): el `Host` por el que ENTRÓ la
+   * petición HTTP, para que el guard anti-bucle tenga identidad propia sin ninguna
+   * configuración.
+   *
+   * ⚠️ **POR QUÉ EXISTE ESTE CAMPO Y NO SE RESUELVE ABAJO.** El conjunto de
+   * identidad se arma con `BASE_URL` → `A2A_SELF_HOSTS` → el `Host` del request.
+   * Las dos primeras son envs y el leaf las lee solo; la tercera necesita un
+   * `FastifyRequest`, **y los services no tienen ninguno**. Sin este campo, con las
+   * dos envs ausentes el conjunto queda `[]`, `isSelfDestination` devuelve `false`
+   * por conjunto vacío y los guards de los steps 1..N —donde vive el costo `5^k`—
+   * quedan INERTES. Medido: sin las dos envs se cobraba el step y salía la
+   * invocación contra nosotros mismos.
+   *
+   * Viaja por el MISMO canal que `contractingChain`: un campo del request que el
+   * route puebla con `request.hostname` (fastify 5, sin puerto).
+   *
+   * **Monótono para el conjunto de identidad**: agrandarlo sólo puede producir MÁS
+   * rechazos. Un caller que forja `Host: victima.com` consigue que el gateway se
+   * **niegue** a llamar a `victima.com` en SU PROPIA petición — auto-DoS de un
+   * request, no un bypass. No puede VACIAR el conjunto, que es lo único que sería
+   * un bypass. (Ver la salvedad sobre `canonicalId` en `resolveSelfHosts`.)
+   */
+  selfHostHint?: string | undefined;
 }
 
 export interface ComposeResult {
@@ -1397,6 +1421,14 @@ export interface OrchestrateRequest {
   contractingChain?: string[] | undefined;
   /** WKH-360 (AC-6): profundidad de contratación entrante, ya validada. */
   contractingDepth?: number | undefined;
+  /**
+   * WKH-360 (AC-4, fix-pack AR/CR BLQ-MED-1): el `Host` por el que entró la
+   * petición. Lo puebla el route con `request.hostname` y lo consumen el SITIO 2
+   * (acá, el step-0 de las tres rutas de orchestrate) y —propagado a
+   * `ComposeRequest.selfHostHint`— los SITIOS 3 y 4. Ver el docstring largo en
+   * `ComposeRequest`.
+   */
+  selfHostHint?: string | undefined;
 }
 
 export interface OrchestrateResult {

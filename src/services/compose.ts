@@ -338,19 +338,32 @@ export const composeService = {
       // es el 100% del tráfico de hoy.
       contractingChain,
       contractingDepth,
+      // WKH-360 (fix-pack AR/CR BLQ-MED-1): el `Host` por el que entró la petición,
+      // que el route puebla. Es lo único que le da identidad propia a este pipeline
+      // cuando `BASE_URL` y `A2A_SELF_HOSTS` están ausentes.
+      selfHostHint,
     } = request;
-    // WKH-360 (AC-7): lo que vamos a EMITIR en cada invocación de este pipeline. Se
-    // resuelve UNA vez por pipeline y no por step: la identidad del gateway no
-    // cambia entre steps, y resolverla N veces abriría la puerta a que dos steps del
-    // mismo run emitan trazas distintas.
+    // WKH-360 (AC-7): la identidad propia de ESTE pipeline. Se resuelve UNA vez por
+    // pipeline y no por step: la identidad del gateway no cambia entre steps, y
+    // resolverla N veces abriría la puerta a que dos steps del mismo run comparen
+    // contra conjuntos distintos o emitan trazas distintas.
     //
-    // Sin `hint` a propósito: este método recibe un `ComposeRequest`, no un
-    // `FastifyRequest`. Es una de las razones por las que la identidad no se deriva
-    // de `resolveBaseUrl`.
+    // ⚠️ CON `hint` (fix-pack AR/CR BLQ-MED-1). Antes se resolvía sin él "porque este
+    // método recibe un `ComposeRequest`, no un `FastifyRequest`" — cierto, y por eso
+    // el `Host` ahora VIAJA en el `ComposeRequest`, igual que la traza entrante. Sin
+    // eso, con las dos envs ausentes esto daba `hosts: []` y `canonicalId: null`, o
+    // sea: SITIO 3 y SITIO 4 inertes (`isSelfDestination` con conjunto vacío
+    // devuelve `false`) y CERO traza saliente. Los steps 1..N son justamente donde
+    // vive el costo `5^k`.
+    const selfIdentity = resolveSelfHosts(selfHostHint);
     const outboundContracting = {
       chain: contractingChain ?? [],
       depth: contractingDepth ?? 0,
-      canonicalId: resolveSelfHosts().canonicalId,
+      canonicalId: selfIdentity.canonicalId,
+      // El conjunto viaja con la traza para que el SITIO 4 (dentro de `invokeAgent`,
+      // que tampoco tiene el request) compare contra EL MISMO conjunto que el
+      // SITIO 3, y no contra uno re-resuelto sin `hint`.
+      selfHosts: selfIdentity.hosts,
     };
     let totalCost = 0;
     let totalLatency = 0;
@@ -419,14 +432,15 @@ export const composeService = {
       // están dentro de esta MISMA iteración.
       //
       // ⚠️ ES AUTORITATIVO AUNQUE LOS SITIOS 1 Y 2 YA HAYAN PASADO, y no es
-      // redundancia: el precio tiene cache de 60 s y el catálogo puede cambiar
-      // entre el preflight y la ejecución. Un destino que era ajeno cuando se
-      // cotizó puede ser propio cuando se ejecuta.
+      // redundancia: el catálogo puede cambiar entre el preflight y la ejecución, y
+      // un destino que era ajeno cuando se cotizó puede ser propio cuando se
+      // ejecuta.
       //
-      // Sin `hint` acá a propósito: este método no tiene `FastifyRequest` (recibe
-      // un `ComposeRequest`), que es una de las razones por las que la identidad no
-      // se deriva de `resolveBaseUrl`.
-      if (isSelfDestination(agent.invokeUrl, resolveSelfHosts().hosts)) {
+      // CON `hint`, vía `selfIdentity` (fix-pack AR/CR BLQ-MED-1): el conjunto sale
+      // del `Host` que el route puso en el request. Con las dos envs ausentes esto
+      // daba `[]` y `isSelfDestination` devolvía `false` por conjunto vacío ⇒ el
+      // guard de los steps 1..N —donde vive el `5^k`— era INERTE.
+      if (isSelfDestination(agent.invokeUrl, selfIdentity.hosts)) {
         const warn = logger?.warn?.bind(logger) ?? log.warn.bind(log);
         warn(
           { slug: agent.slug, step: i, layer: 'direct', site: 'pipeline-loop' },
@@ -1486,6 +1500,17 @@ export const composeService = {
       chain: string[];
       depth: number;
       canonicalId: string | null;
+      /**
+       * El conjunto de identidad propia YA resuelto por `execute()` **con el `hint`
+       * del request** (fix-pack AR/CR BLQ-MED-1). Viaja acá y no se re-resuelve
+       * adentro para que el SITIO 4 compare contra EL MISMO conjunto que el SITIO 3:
+       * dos resoluciones distintas del mismo concepto es exactamente cómo un guard
+       * de último recurso pasa a estar midiendo otra cosa.
+       *
+       * Ausente el argumento entero (los 33 call-sites de test) ⇒ el Sitio 4 cae al
+       * conjunto derivado sólo de la configuración, que es el comportamiento previo.
+       */
+      selfHosts: string[];
     },
   ): Promise<{
     output: unknown;
@@ -1669,7 +1694,18 @@ export const composeService = {
     // Por eso loguea a `error` y no a `warn`: que esta rama dispare significa que
     // un guard pre-débito NO corrió, y eso es un defecto a investigar, no una
     // condición esperada.
-    if (isSelfDestination(agent.invokeUrl, resolveSelfHosts().hosts)) {
+    //
+    // El conjunto sale del argumento `contracting` (fix-pack AR/CR BLQ-MED-1), que
+    // es EL MISMO que usó el Sitio 3 —resuelto con el `Host` del request— y no una
+    // segunda resolución. Cuando el argumento no viene (los 33 call-sites de test,
+    // y cualquier llamador que no sea el pipeline) se cae al conjunto derivado sólo
+    // de la configuración: sigue siendo monótono, nunca inventa identidad.
+    if (
+      isSelfDestination(
+        agent.invokeUrl,
+        contracting?.selfHosts ?? resolveSelfHosts().hosts,
+      )
+    ) {
       // Se usa el logger DEL MÓDULO y no el `logger` que pasa el caller, a
       // propósito y no por comodidad: `DownstreamLogger` declara sólo `warn` e
       // `info` (`types/index.ts`), así que no tiene `error`. Ensancharlo obligaría a

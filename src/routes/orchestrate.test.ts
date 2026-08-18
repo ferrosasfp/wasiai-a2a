@@ -625,6 +625,50 @@ describe('orchestrate routes — WKH-131 /plan + /execute', () => {
     expect(lastSkipMiddlewareDebit).toBe(true);
   });
 
+  /**
+   * ⚠️ TESTIGO DEL CABLEADO del fix-pack WKH-360 AR/CR BLQ-MED-1, para las DOS
+   * rutas de ejecución de orchestrate.
+   *
+   * El guard anti-bucle del step-0 de orchestrate (SITIO 2) vive en el service y
+   * necesita identidad propia. Sin `BASE_URL` ni `A2A_SELF_HOSTS` esa identidad sólo
+   * puede venir del `Host` de la petición, y el service no tiene `FastifyRequest`:
+   * lo pasa el route. Los tests del SITIO 2 (`services/orchestrate.contracting-loop.test.ts`)
+   * le pasan el campo A MANO, así que **no prueban este cableado**; si el route
+   * dejara de poblarlo, el guard quedaría inerte en producción con toda la suite en
+   * verde. Por eso se asserta acá, sobre una petición real de `app.inject`.
+   */
+  it('T-ROUTE-HINT: /orchestrate y /orchestrate/execute pasan el `Host` entrante al service', async () => {
+    mockOrchestrate.mockResolvedValue(okResult());
+    mockExecute.mockResolvedValue(okResult());
+
+    await app.inject({
+      method: 'POST',
+      url: '/orchestrate',
+      headers: { 'x-a2a-key': 'wasi_a2a_test', host: 'gw-cableado.example' },
+      payload: { goal: 'do the thing', budget: 1.0 },
+    });
+    expect(mockOrchestrate).toHaveBeenCalledTimes(1);
+    expect(mockOrchestrate.mock.calls[0]?.[0]).toMatchObject({
+      selfHostHint: 'gw-cableado.example',
+    });
+
+    await app.inject({
+      method: 'POST',
+      url: '/orchestrate/execute',
+      headers: { 'x-a2a-key': 'wasi_a2a_test', host: 'gw-cableado.example' },
+      payload: {
+        orchestrationId: 'o-exec-hint',
+        steps: [{ agent: 'a1', registry: 'wasiai', input: { q: 0 } }],
+        maxQuotedCostUsdc: 1.0,
+        budget: 1.0,
+      },
+    });
+    expect(mockExecute).toHaveBeenCalledTimes(1);
+    expect(mockExecute.mock.calls[0]?.[0]).toMatchObject({
+      selfHostHint: 'gw-cableado.example',
+    });
+  });
+
   // T-ROUTE-EXEC (AC-10/CD-6): SCOPE_DENIED → 403; headers x-debit-fallback /
   // x-a2a-remaining-budget reflejan el result del service.
   it('T-ROUTE-EXEC: SCOPE_DENIED → 403', async () => {

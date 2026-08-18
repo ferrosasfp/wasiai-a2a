@@ -221,6 +221,12 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             // vacia / profundidad 0, o sea el 100% del trafico de hoy.
             contractingChain: request.contractingChain,
             contractingDepth: request.contractingDepth,
+            // WKH-360 (fix-pack AR/CR BLQ-MED-1): el `Host` por el que entro ESTA
+            // peticion. Sin esto, con `BASE_URL` y `A2A_SELF_HOSTS` ausentes el
+            // conjunto de identidad queda vacio y el SITIO 2 se saltea entero por su
+            // gate `selfHosts.length > 0` => el step-0 de esta ruta queda SIN guard
+            // de dinero. Baja tambien a compose (SITIOS 3 y 4).
+            selfHostHint: request.hostname,
           },
           orchestrationId,
         );
@@ -827,6 +833,12 @@ const orchestrateRoutes: FastifyPluginAsync = async (fastify) => {
             // vacia / profundidad 0, o sea el 100% del trafico de hoy.
             contractingChain: request.contractingChain,
             contractingDepth: request.contractingDepth,
+            // WKH-360 (fix-pack AR/CR BLQ-MED-1): el `Host` por el que entro ESTA
+            // peticion. Sin esto, con `BASE_URL` y `A2A_SELF_HOSTS` ausentes el
+            // conjunto de identidad queda vacio y el SITIO 2 se saltea entero por su
+            // gate `selfHosts.length > 0` => el step-0 de esta ruta queda SIN guard
+            // de dinero. Baja tambien a compose (SITIOS 3 y 4).
+            selfHostHint: request.hostname,
             // gate AC-3: el cap aprobado por el cliente.
             //
             // WKH-303: con un quote válido el cap gate NO corre. Ese gate re-resuelve

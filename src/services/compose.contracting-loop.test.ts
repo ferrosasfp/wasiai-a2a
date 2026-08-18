@@ -83,6 +83,7 @@ import {
   CONTRACTING_LOOP_DETECTED,
   contractingErrorMessage,
   readInboundContracting,
+  resolveSelfHosts,
 } from '../lib/contracting-chain.js';
 import { composeService } from './compose.js';
 import { registryService } from './registry.js';
@@ -227,7 +228,11 @@ describe('WKH-360 SITIO 3 — el loop del pipeline corta ANTES del débito per-s
     expect(fetchedUrls()).toHaveLength(5);
   });
 
-  it('T-L1+6 (AC-8): sin identidad configurada, el pipeline corre igual', async () => {
+  it('T-L1+6 (AC-8): sin identidad configurada NI hint, el pipeline corre igual', async () => {
+    // ⚠️ "sin identidad configurada" acá quiere decir sin las dos envs Y SIN EL
+    // `Host` del request: es el camino NO-HTTP (el tool MCP, `inbound-task`), el
+    // único donde el conjunto de identidad sigue pudiendo quedar vacío. Ver
+    // `T-L1-2c`, que es el mismo escenario CON hint y sí corta.
     process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
     mockGetAgent.mockImplementation(async (slug: string) =>
       makeAgent(slug, `https://a.example/${slug}`),
@@ -246,6 +251,68 @@ describe('WKH-360 SITIO 3 — el loop del pipeline corta ANTES del débito per-s
     expect(result.success).toBe(true);
     expect(debitMock).toHaveBeenCalledTimes(1);
     expect(fetchedUrls()).toHaveLength(2);
+  });
+
+  /**
+   * ⚠️ TESTIGO del fix-pack AR/CR BLQ-MED-1 para el SITIO 3, y es la
+   * **reproducción del CR con el signo invertido**.
+   *
+   * Lo que el CR midió en `71fdaf7`, con este mismo harness (que borra las dos
+   * envs en su `beforeEach`): `debit` llamado 1 vez, `fetchedUrls()` CONTENÍA
+   * nuestra propia URL y `errorCode` era `undefined`. **Se cobró el step propio y
+   * salió la invocación contra nosotros mismos.**
+   *
+   * El motivo era que el conjunto de identidad se resolvía SIN `hint`: con las dos
+   * envs ausentes daba `[]`, y `isSelfDestination` con conjunto vacío devuelve
+   * `false` por diseño (el guard no puede inventar identidad). O sea que los steps
+   * 1..N —donde vive el costo `5^k`— no tenían guard en un deploy sin configurar.
+   *
+   * ⛔ NO "arreglar" este `it` seteando `A2A_SELF_HOSTS`: con la env puesta pasa
+   * también sin el fix, y deja de medir nada.
+   */
+  it('T-L1-2c (AC-4, CD-3): SIN las dos envs, el `Host` entrante alcanza para cortar', async () => {
+    expect(process.env.A2A_SELF_HOSTS).toBeUndefined();
+    expect(process.env.BASE_URL).toBeUndefined();
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      slug === 'self'
+        ? makeAgent('self', `https://${SELF}/compose`)
+        : makeAgent(slug, 'https://a.example/run'),
+    );
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'a', input: {} },
+        { agent: 'self', input: {} },
+      ],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+      // Lo ÚNICO que cambia respecto del escenario que sangraba: el route pasa el
+      // `Host` por el que entró la petición.
+      selfHostHint: SELF,
+    });
+
+    // ── EL DINERO PRIMERO ──────────────────────────────────────────────────
+    // El step propio es i=1, que es el primero que compose debita ⇒ cero débitos.
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBe(100);
+    // Y NO salió la invocación contra nosotros mismos.
+    expect(fetchedUrls()).not.toContain(`https://${SELF}/compose`);
+    expect(result.errorCode).toBe(CONTRACTING_LOOP_DETECTED);
+  });
+
+  it('T-L1-2d: el `hint` es MONÓTONO — un Host ajeno no apaga la identidad de las envs', () => {
+    // La propiedad que hace admisible que el caller influya el conjunto: sólo puede
+    // AGREGAR. Un `Host` forjado no puede sacar del conjunto lo que las envs
+    // declararon, que es lo único que sería un bypass.
+    process.env.A2A_SELF_HOSTS = SELF;
+    const conHintAjeno = resolveSelfHosts('atacante.example');
+    expect(conHintAjeno.hosts).toContain(SELF);
+    expect(conHintAjeno.hosts).toContain('atacante.example');
+    // …y el eslabón con el que nos anunciamos NO se lo lleva el caller mientras
+    // haya identidad configurada: `canonicalId` es el PRIMERO del orden
+    // BASE_URL → A2A_SELF_HOSTS → hint.
+    expect(conHintAjeno.canonicalId).toBe(SELF);
   });
 });
 
@@ -354,10 +421,14 @@ describe('WKH-360 AC-7 — la traza SALIENTE que emite cada invocación', () => 
     expect(h['x-a2a-contracting-depth']).toBe('1');
   });
 
-  it('T-PROP-2 (CD-18): sin identidad derivable NO se emite NINGUNO de los dos + warn', async () => {
+  it('T-PROP-2 (CD-18): sin identidad derivable NI hint NO se emite NINGUNO de los dos + warn', async () => {
     // Emitir una cadena sin nuestro eslabón es PEOR que no emitir nada: el gateway
     // de al lado leería una traza que afirma NO contenernos, o sea una razón para
     // seguir. Y no puede ser silencioso, porque deja al siguiente sin el dato.
+    //
+    // ⚠️ Sin las dos envs Y SIN `selfHostHint`: es el camino NO-HTTP (tool MCP,
+    // `inbound-task`), el único que hoy puede quedarse sin identidad derivable. El
+    // camino HTTP tiene siempre el `Host` — ver `T-PROP-5`.
     delete process.env.A2A_SELF_HOSTS;
     delete process.env.BASE_URL;
     process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
@@ -379,6 +450,47 @@ describe('WKH-360 AC-7 — la traza SALIENTE que emite cada invocación', () => 
       String(c[1] ?? '').includes('contracting-chain.not-emitted'),
     );
     expect(warned).toBe(true);
+  });
+
+  /**
+   * Fix-pack AR/CR BLQ-MED-1, la tercera consecuencia del conjunto vacío: sin
+   * `canonicalId` **no se emite traza saliente**, y entonces el gateway de al lado
+   * no puede cooperar ni queriendo — su capa 2 no recibe nada que leer. Con el
+   * `Host` entrante hay eslabón, así que la traza sale.
+   *
+   * ⚠️ Y ACÁ ESTÁ EL RESIDUAL, escrito donde se mide: cuando el eslabón sale del
+   * `Host` y NO de la configuración, lo que anunciamos es un valor que el caller
+   * influye. Un `Host` forjado nos hace anunciarnos con OTRO nombre — y esa parte
+   * NO está cubierta por el argumento de monotonía, que vale para el conjunto de
+   * NEGACIÓN y no para el eslabón que emitimos. Contra la alternativa (no emitir
+   * nada, que es lo que pasaba antes) sigue siendo mejor: la profundidad se
+   * incrementa igual y el techo del vecino empieza a contar. Lo que lo cierra es
+   * setear `A2A_SELF_HOSTS`, y por eso es paso obligatorio del deploy.
+   */
+  it('T-PROP-5: SIN las dos envs, el `Host` entrante alcanza para EMITIR la traza', async () => {
+    expect(process.env.A2A_SELF_HOSTS).toBeUndefined();
+    expect(process.env.BASE_URL).toBeUndefined();
+    process.env.DISCOVERY_SSRF_ALLOWLIST = 'a.example';
+    mockGetAgent.mockImplementation(async (slug: string) =>
+      makeAgent(slug, `https://a.example/${slug}`),
+    );
+
+    await composeService.compose({
+      steps: [{ agent: 's0', input: {} }],
+      scopingKeyRow: keyRow,
+      chainId: 2368,
+      maxBudget: 50,
+      selfHostHint: SELF,
+    });
+
+    const h = headersOf(0);
+    expect(h['x-a2a-contracting-chain']).toBe(SELF);
+    expect(h['x-a2a-contracting-depth']).toBe('1');
+    // …y no se avisó de "no pude emitir", porque sí se emitió.
+    const warned = logSpy.warn.mock.calls.some((c) =>
+      String(c[1] ?? '').includes('contracting-chain.not-emitted'),
+    );
+    expect(warned).toBe(false);
   });
 
   /**
@@ -440,6 +552,7 @@ describe('WKH-360 AC-7 — la traza SALIENTE que emite cada invocación', () => 
         chain: [],
         depth: 0,
         canonicalId: SELF,
+        selfHosts: [SELF],
       },
     );
 
@@ -481,6 +594,7 @@ describe('WKH-360 AC-7 — la traza SALIENTE que emite cada invocación', () => 
         chain: ['a.example'],
         depth: 0,
         canonicalId: SELF,
+        selfHosts: [SELF],
       },
     );
 

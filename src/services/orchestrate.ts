@@ -1144,14 +1144,41 @@ export const orchestrateService = {
     // sería una SEGUNDA expresión de la resolución y divergiría en
     // /orchestrate/execute, donde los steps vienen del body del cliente. Se llama
     // la MISMA `resolveAgentDestination` que usa el Sitio 1, por step, con el mismo
-    // patrón de iteración que `quoteMaxCostUsdc`. El costo son N lookups con cache
-    // de 60 s, y en /execute ese lookup YA ocurre dentro de `quoteMaxCostUsdc`.
+    // patrón de iteración que `quoteMaxCostUsdc`.
+    //
+    // ─── EL COSTO REAL DE ESTE BLOQUE, MEDIDO (fix-pack CR/BLQ-BAJO-3) ────────
+    // ⚠️ Acá decía "N lookups con cache de 60 s" y **es falso**: ese cache NO cubre
+    // este camino. El `Map` de `services/agent-price.ts` lo consulta ÚNICAMENTE
+    // `resolveAgentPriceUsdc`; `resolveAgentDestination` llama
+    // `discoveryService.getAgent` DIRECTO. Lo que cuesta cada iteración es un
+    // SELECT a Supabase + **un `ssrfFetch` saliente por registry habilitado**, y
+    // hasta el doble si el primer intento con `registry` no matchea (hay un segundo
+    // `getAgent` sin registry). Para un plan de 5 steps: hasta 5 SELECT + 10
+    // fetches, **secuenciales y antes del débito**.
+    //
+    // Se deja así, y no detrás de un cache nuevo, por dos razones: (a) el dato
+    // tiene que ser FRESCO — el catálogo puede cambiar entre el preflight y la
+    // ejecución, y un destino cacheado como ajeno es exactamente el bypass que el
+    // guard existe para negar; (b) agregar un cache acá sería un segundo lector del
+    // catálogo con su propia política de expiración. Lo que se corrige es la
+    // AFIRMACIÓN, que decía que era barato. En `/orchestrate/execute` este lookup
+    // igual YA ocurre dentro de `quoteMaxCostUsdc`.
+    //
+    // ─── Y SI ESTE `await` TIRA: FAIL-CLOSED, DECIDIDO (fix-pack CR/BLQ-BAJO-3) ─
+    // No hay `try` a propósito. Un blip de la DB sube al catch del route, que
+    // re-lanza ⇒ 5xx **sin débito y sin invocación saliente**. Es superficie de 5xx
+    // nueva para el camino atómico, y se acepta: la alternativa (tragarse el error
+    // y seguir) es ejecutar el pipeline sin saber si un destino somos nosotros, o
+    // sea el guard apagado justo cuando la infra tiembla. Un guard que falla abierto
+    // no es un guard. Testigo: `T-L1-3d`.
     //
     // El `selfHosts.length > 0` de adelante no es una optimización cosmética: sin
-    // identidad conocida el guard no puede decidir nada, así que evita N lookups
-    // que no cambiarían el veredicto y deja el camino BYTE-IDÉNTICO al de hoy
-    // cuando no hay configuración (AC-8 / CD-1).
-    const { hosts: selfHosts } = resolveSelfHosts();
+    // identidad conocida el guard no puede decidir nada, así que evita N lookups que
+    // no cambiarían el veredicto. ⚠️ Con el `hint` de abajo ese conjunto ya NO queda
+    // vacío en el camino HTTP (el `Host` de la petición siempre aporta un host), así
+    // que esta rama corta es hoy el camino de los callers NO-HTTP (el tool MCP y
+    // `inbound-task`), que no tienen `Host` que pasar.
+    const { hosts: selfHosts } = resolveSelfHosts(request.selfHostHint);
     if (selfHosts.length > 0) {
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
@@ -1345,6 +1372,11 @@ export const orchestrateService = {
       // y el gateway de al lado no podría cerrar el transitivo ni cooperando.
       contractingChain: request.contractingChain,
       contractingDepth: request.contractingDepth,
+      // WKH-360 (fix-pack AR/CR BLQ-MED-1): y el `Host` entrante, que es lo que le
+      // da identidad propia a los SITIOS 3 y 4 dentro del pipeline sin ninguna
+      // configuración. Sin esta línea, un pipeline lanzado por /orchestrate corre
+      // sus steps 1..N con conjunto de identidad VACÍO.
+      selfHostHint: request.selfHostHint,
     });
 
     // WKH-132 (AC-1/DT-1): protocolFeeUsdc reportado = rate sobre el COSTO REAL

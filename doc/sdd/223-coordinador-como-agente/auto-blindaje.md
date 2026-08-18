@@ -348,3 +348,55 @@
   esperados de un fixture ajeno: leerlos.
 
 ---
+### [2026-08-17 18:15] Fix-pack Grupo 1 — Encender un guard inerte prendió un mock AMPUTADO, y el rojo cayó en FACTURACIÓN
+
+- **Error**: al propagar el `Host` entrante como `hint`, la suite completa pasó de
+  `5598 passed | exit 0` a **`5 failed`** — y los cinco rojos no eran de esta HU:
+  `services/orchestrate.quote-billing.test.ts`, los tests de que se cobra el precio
+  CONGELADO. Los cinco daban **500 en vez de 200**.
+- **Causa raíz**: `vi.mock('./agent-price.js', () => ({ resolveAgentPriceUsdc: vi.fn() }))`
+  — un factory **sin `importOriginal`** — dejaba `resolveAgentDestination` (del MISMO
+  módulo) en `undefined`. Mientras el guard del Sitio 2 no corría en ese harness
+  (`selfHosts` vacío ⇒ el bloque entero se salteaba) nadie lo notaba. Con el `hint`, el
+  `Host: localhost` que pone `app.inject` da identidad propia ⇒ el bloque SÍ corre ⇒
+  `undefined(...)` ⇒ throw ⇒ 500. Es **exactamente el hazard que el encabezado de
+  `src/lib/contracting-chain.ts` documenta** para `../adapters/registry.js`, y que
+  motivó que el módulo fuera leaf; no se me ocurrió que aplicaba también a un módulo
+  que yo no estaba mockeando.
+- **Fix**: el factory pasa a `async (importOriginal) => ({ ...(await importOriginal()), resolveAgentPriceUsdc: vi.fn() })`.
+  La `resolveAgentDestination` REAL corre sobre el `discoveryService.getAgent` ya
+  mockeado del archivo (devuelve `null`), que es lo que esos tests quieren.
+- **Lo que el rojo REALMENTE decía, y por eso vale escribirlo**: era la **evidencia de
+  que el fix funciona**. El bloque del Sitio 2 nunca se había ejecutado en el camino de
+  `/orchestrate/execute` de ese harness; el 500 fue la primera vez que corrió. Un
+  "arreglo" que hubiera vuelto el guard a su estado inerte habría puesto la suite en
+  verde y el agujero de vuelta.
+- **Aplicar en**: (1) cuando un fix **enciende** código que antes se salteaba, esperar
+  rojos en suites que no tienen nada que ver — son mocks amputados que el camino muerto
+  tapaba, y hay que leerlos como cobertura nueva, no como daño; (2) antes de dar por
+  bueno un `selfHosts.length > 0` (o cualquier gate de "no puedo decidir, me salteo"),
+  preguntarse **cuánto código deja sin ejecutar en los tests**; (3) un `vi.mock` con
+  factory literal amputa el módulo entero: si el módulo exporta más de una cosa,
+  `importOriginal`.
+
+---
+
+### [2026-08-17 17:56] Fix-pack Grupo 2 — Mi testigo moría por la razón BARATA y yo iba a declarar la cara
+
+- **Error**: escribí `T-FEE-7` (el 200 con body escalar) poniendo el escalar en el
+  **step 0**, y en el comentario declaré que medía "el caller queda cobrado por un step
+  que falla". Al calibrarlo contra el mutante, el texto de la muerte fue
+  `débito: expected 1 times, but got 0 times`: con el escalar en el step 0 el pipeline
+  se cae **antes** del primer débito de compose, así que el `it` estaba midiendo "se
+  rompe el pipeline", no la consecuencia de plata.
+- **Causa raíz**: escribí la aserción de plata primero (bien) pero no verifiqué **por
+  qué** moría. El mutante mataba, el conteo daba, y con eso me alcanzaba.
+- **Fix**: el escalar va en el step **1** (el primero que compose debita). Ahora el
+  mutante muere en `expected false to be true` con `debit` en **1**: cobrado y fallado,
+  que es el enunciado exacto de AC-8. El motivo quedó escrito en el docblock del `it`.
+- **Aplicar en**: **leer el TEXTO de la muerte de cada testigo nuevo, no sólo el
+  conteo**. "Mata" no es "mata por lo que yo digo que mide". Es la misma lección que
+  §6 de esta HU ya había aprendido con `MUT-12`, ahora del lado del testigo en vez del
+  mutante.
+
+---
