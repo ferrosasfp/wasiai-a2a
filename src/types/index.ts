@@ -1113,11 +1113,19 @@ export interface ComposeRequest {
    * Viaja por el MISMO canal que `contractingChain`: un campo del request que el
    * route puebla con `request.hostname` (fastify 5, sin puerto).
    *
-   * **Monótono para el conjunto de identidad**: agrandarlo sólo puede producir MÁS
-   * rechazos. Un caller que forja `Host: victima.com` consigue que el gateway se
-   * **niegue** a llamar a `victima.com` en SU PROPIA petición — auto-DoS de un
-   * request, no un bypass. No puede VACIAR el conjunto, que es lo único que sería
-   * un bypass. (Ver la salvedad sobre `canonicalId` en `resolveSelfHosts`.)
+   * **Monótono para el conjunto de identidad, CON `A2A_SELF_HOSTS` o `BASE_URL`
+   * puestas**: ahí agrandarlo sólo puede producir MÁS rechazos. Un caller que forja
+   * `Host: victima.com` consigue que el gateway se **niegue** a llamar a
+   * `victima.com` en SU PROPIA petición — auto-DoS de un request, no un bypass, y
+   * no puede vaciar lo que las envs declararon (`T-L1-2d`).
+   *
+   * ⛔ **SIN LAS DOS ENVS ESA MONOTONÍA NO ES UNA GARANTÍA** (AR-it2/BLQ-MED-2): el
+   * conjunto es `[canonicalizeHost(hint)]`, o sea que el caller no lo agranda, lo
+   * **DEFINE** — y con un `Host` ilegible lo deja en `[]` y el guard vuelve al
+   * estado inerte (medido: `'a b'`, `'http://x'`, `'::1'`, `''`; testigo
+   * `T-L1-2e`). Lo que el hint cubre ahí es el bucle **accidental**, no el hostil.
+   * (Ver también la salvedad sobre `canonicalId` en `resolveSelfHosts`: ese eslabón
+   * lo emitimos NOSOTROS hacia terceros y sin config lo elige el caller.)
    */
   selfHostHint?: string | undefined;
 }

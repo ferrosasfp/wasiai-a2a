@@ -282,7 +282,22 @@ texto de la HU.**
 - **El eslabón que ANUNCIAMOS sin configuración.** Sin las dos envs, el `canonicalId`
   sale del `Host`, que el caller influye. El argumento de monotonía **no aplica acá**
   (aplica al conjunto de negación); está escrito en `resolveSelfHosts` y medido en
-  `T-PROP-5`.
+  `T-PROP-5`. ⚠️ Y ese eslabón **puede nombrar a un tercero**: sale en el header que
+  emitimos NOSOTROS hacia agentes ajenos, o sea una afirmación sobre nuestra
+  identidad, firmada por nosotros, con contenido elegido por el caller.
+- **⚠️ SIN LAS DOS ENVS, EL CALLER NO AGRANDA EL CONJUNTO: LO DEFINE, Y PUEDE
+  VACIARLO** (AR-it2 / BLQ-MED-2). La monotonía que hace admisible el `hint` está
+  escrita como propiedad de seguridad en seis lugares y **sólo vale en el caso
+  CONFIGURADO** — `T-L1-2d`, que la congela, setea `A2A_SELF_HOSTS` en su primera
+  línea. Sin envs `hosts` es literalmente `[canonicalizeHost(hint)]`, así que el
+  enunciado es cierto y la garantía es vacía. Medido: `resolveSelfHosts('a b')`,
+  `('http://x')`, `('::1')` y `('')` ⇒ `hosts: []` y `canonicalId: null`, o sea el
+  guard **inerte a pedido**; y medido con fastify en este árbol, `Host: a b` ⇒
+  `request.hostname === 'a b'` con `trustProxy` en `false` **y** en `true` (con
+  `true` entra además por `X-Forwarded-Host`). ⛔ La conclusión **no es revertir el
+  hint**: sin él ese mismo deploy queda inerte SIEMPRE, no sólo bajo ataque. Lo que
+  el hint cubre es el bucle **accidental**; lo que cierra el hostil es setear
+  `A2A_SELF_HOSTS`. Testigo: `T-L1-2e`.
 - **El bypass por IP literal.** La comparación de identidad es **por NOMBRE**. R-3 /
   TD-360-2, residual declarado.
 - **Que hoy haya drenaje de fondos en curso.** Lo medido es que **el guard no
@@ -298,8 +313,16 @@ texto de la HU.**
 - **`BASE_URL` en el Railway de prod** (NC-1). No se puede distinguir desde afuera.
   El diseño no depende de la respuesta (conjunto vacío ⇒ `warn`, no `throw`), y
   `GET /health` → `contractingGuard.selfHostCount` lo resuelve **después del deploy**.
-- **`TRUST_PROXY` en prod** (NC-2). Afecta la narrativa del DoS colateral, no el
-  diseño.
+- **`TRUST_PROXY` en prod** (NC-2). ⚠️ **Esta línea decía que sólo afecta la
+  narrativa del DoS colateral, y quedó FALSA** (AR-it2 / BLQ-MED-2): con
+  `trustProxy` activo `request.hostname` sale de **`X-Forwarded-Host`**, que es el
+  `selfHostHint` del guard, así que la env es parte de la **superficie de ataque**
+  del guard y no sólo del rate-limit. Lo medido en este árbol con fastify matiza el
+  hallazgo en la dirección **peor**: `Host: a b` ⇒ `request.hostname === 'a b'` con
+  `trustProxy` en `false` **también**, o sea que el vaciado del conjunto **no
+  depende de `TRUST_PROXY`** — esa env agrega un segundo header por donde entra, no
+  el agujero. Sigue sin verificarse su valor en prod, y ahora la respuesta importa
+  para dos cosas, no una.
 - **El comportamiento en PRODUCCIÓN de todo lo de esta HU.** Nada se ejecutó contra
   prod salvo `POST /discover` (gratis y read-only) y `GET /.well-known/agent.json`.
   ⛔ No se invocó `/compose` ni `/orchestrate` contra prod: mueven plata.

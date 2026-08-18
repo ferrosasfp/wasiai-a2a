@@ -759,8 +759,11 @@ async function resolveComposePriceHandler(
     //
     // El conjunto de identidad de ESTE sitio lleva `hint`: es el único de los
     // cuatro donde hay un `FastifyRequest`, y `request.hostname` (fastify 5, sin
-    // puerto) es el host por el que entró la petición. Agrandar el conjunto sólo
-    // produce MÁS rechazos (ver la monotonía en `lib/contracting-chain.ts`).
+    // puerto) es el host por el que entró la petición. CON `A2A_SELF_HOSTS` o
+    // `BASE_URL` puestas, agrandar el conjunto sólo produce MÁS rechazos (ver la
+    // monotonía en `lib/contracting-chain.ts`). ⛔ Sin esas dos envs el caller no
+    // agranda el conjunto: lo DEFINE, y con un `Host` ilegible lo VACÍA y este
+    // guard vuelve al estado inerte (AR-it2/BLQ-MED-2, testigo `T-L1-2e`).
     const { hosts: selfHosts } = resolveSelfHosts(request.hostname);
     if (resolved && isSelfDestination(resolved.invokeUrl, selfHosts)) {
       request.log.warn(

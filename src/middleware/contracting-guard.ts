@@ -65,10 +65,14 @@ export async function contractingGuardHandler(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
-  // El `hint` es el `Host` por el que entró la petición. Agrandar el conjunto de
-  // identidad sólo puede producir MÁS rechazos (ver la monotonía en el leaf), así
-  // que que el caller lo influya no es un bypass: es un auto-DoS de su propio
-  // request.
+  // El `hint` es el `Host` por el que entró la petición. CON `A2A_SELF_HOSTS` o
+  // `BASE_URL` puestas, agrandar el conjunto de identidad sólo puede producir MÁS
+  // rechazos (ver la monotonía en el leaf), así que que el caller lo influya no es
+  // un bypass: es un auto-DoS de su propio request.
+  // ⛔ SIN esas dos envs el caller no agranda el conjunto: lo DEFINE, y con un
+  // `Host` ilegible lo deja VACÍO (AR-it2/BLQ-MED-2, testigo `T-L1-2e`). Acá eso
+  // se traduce en que la capa 2 deja de reconocer nuestro eslabón en la cadena
+  // entrante. Contra ese caso lo que aplica es setear `A2A_SELF_HOSTS`.
   const { hosts: selfHosts } = resolveSelfHosts(request.hostname);
   const depthMax = resolveContractingDepthMax();
 

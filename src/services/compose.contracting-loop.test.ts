@@ -320,6 +320,11 @@ describe('WKH-360 SITIO 3 — el loop del pipeline corta ANTES del débito per-s
     // La propiedad que hace admisible que el caller influya el conjunto: sólo puede
     // AGREGAR. Un `Host` forjado no puede sacar del conjunto lo que las envs
     // declararon, que es lo único que sería un bypass.
+    //
+    // ⛔ LEER `T-L1-2e` ANTES DE CITAR ESTE `it` COMO GARANTÍA. La primera línea de
+    // acá abajo setea `A2A_SELF_HOSTS`, así que lo que se mide es el caso
+    // CONFIGURADO. Sin esa env no hay conjunto base que agrandar y la monotonía es
+    // verdadera como enunciado y vacía como propiedad de seguridad.
     process.env.A2A_SELF_HOSTS = SELF;
     const conHintAjeno = resolveSelfHosts('atacante.example');
     expect(conHintAjeno.hosts).toContain(SELF);
@@ -328,6 +333,55 @@ describe('WKH-360 SITIO 3 — el loop del pipeline corta ANTES del débito per-s
     // haya identidad configurada: `canonicalId` es el PRIMERO del orden
     // BASE_URL → A2A_SELF_HOSTS → hint.
     expect(conHintAjeno.canonicalId).toBe(SELF);
+  });
+
+  /**
+   * ⚠️ EL GEMELO DE `T-L1-2d` SIN `A2A_SELF_HOSTS` (AR-it2/BLQ-MED-2).
+   *
+   * `T-L1-2d` prueba la monotonía **en el caso configurado**, que es el único que
+   * ejercita. Sin las dos envs el conjunto es literalmente
+   * `[canonicalizeHost(hint)]`: **no hay conjunto base que agrandar**, así que
+   * "agrandarlo sólo produce más rechazos" sigue siendo cierto como enunciado y
+   * deja de ser una propiedad de seguridad. Lo que el caller hace ahí no es
+   * agrandar: es **definir**, y también **vaciar**.
+   *
+   * Los cuatro valores de abajo salen del propio `canonicalizeHost` (espacio,
+   * esquema, IPv6 sin corchetes, vacío) y llegan al gateway como un `Host` plano.
+   * Medido con fastify en este árbol: `Host: a b` ⇒ `request.hostname === 'a b'`
+   * con `trustProxy` en `false` **y** en `true`; y con `trustProxy: true` el mismo
+   * valor entra además por `X-Forwarded-Host` (`{host:'real.example',
+   * 'x-forwarded-host':'a b'}` ⇒ `hostname === 'a b'`). O sea que el vaciado NO
+   * depende de `TRUST_PROXY`: esa env agrega un segundo header, no el agujero.
+   *
+   * ⛔ Esto NO se arregla revirtiendo el `hint`: sin él, un deploy sin configurar
+   * deja los cuatro sitios inertes SIEMPRE, en vez de sólo contra un caller que
+   * ataca. Lo que cierra el caso es setear `A2A_SELF_HOSTS`.
+   */
+  it('T-L1-2e: SIN las dos envs el caller no agranda el conjunto — lo DEFINE, y puede VACIARLO', () => {
+    expect(process.env.A2A_SELF_HOSTS).toBeUndefined();
+    expect(process.env.BASE_URL).toBeUndefined();
+
+    // 1 · sin conjunto base, el hint ES el conjunto (no lo agranda).
+    const soloHint = resolveSelfHosts('atacante.example');
+    expect(soloHint.hosts).toEqual(['atacante.example']);
+    // …y el eslabón que ANUNCIAMOS lo elige el caller (acá la monotonía no aplica).
+    expect(soloHint.canonicalId).toBe('atacante.example');
+
+    // 2 · y el mismo canal deja el conjunto VACÍO, que es el estado inerte.
+    for (const hint of ['a b', 'http://x', '::1', '']) {
+      const vaciado = resolveSelfHosts(hint);
+      expect(vaciado.hosts, `hint ${JSON.stringify(hint)}`).toEqual([]);
+      expect(vaciado.canonicalId, `hint ${JSON.stringify(hint)}`).toBeNull();
+    }
+
+    // 3 · CONTRASTE: con la env puesta, los mismos cuatro valores NO pueden vaciar.
+    process.env.A2A_SELF_HOSTS = SELF;
+    for (const hint of ['a b', 'http://x', '::1', '']) {
+      expect(
+        resolveSelfHosts(hint).hosts,
+        `hint ${JSON.stringify(hint)}`,
+      ).toEqual([SELF]);
+    }
   });
 });
 

@@ -451,6 +451,12 @@ describe('resolveSelfHosts — la MONOTONÍA es la propiedad', () => {
     // produce MÁS rechazos, nunca menos. Un caller que manda
     // `Host: victima.example` logra que NOSOTROS nos neguemos a llamar a
     // victima.example en SU PROPIA petición: auto-DoS de un request, no bypass.
+    //
+    // ⛔ Y la primera línea de abajo es la CONDICIÓN, no un detalle del harness:
+    // `BASE_URL` es lo que hace que exista un conjunto base que agrandar. Sin las
+    // dos envs esta propiedad es verdadera como enunciado y vacía como garantía —
+    // el caller DEFINE el conjunto y puede vaciarlo (AR-it2/BLQ-MED-2). El gemelo
+    // que mide ESE caso es `T-L1-2e` (`services/compose.contracting-loop.test.ts`).
     process.env.BASE_URL = 'https://gw.example.com';
     const sinHint = resolveSelfHosts().hosts;
     const conHint = resolveSelfHosts('victima.example').hosts;
@@ -682,6 +688,12 @@ describe('assertSelfHostsEnv — throw si ilegible, warn si vacío (patrón de a
     expect(String(out)).toContain('Host');
     expect(String(out)).toContain('ALIAS');
     expect(String(out)).toContain('selfHostCount');
+    // AR-it2/BLQ-MED-2: el texto decía que el Host entrante cubre el bucle directo,
+    // a secas. Sin esta env ese Host no AGRANDA el conjunto —lo DEFINE— así que un
+    // caller puede dejarlo en cero. El warn tiene que decirlo o el operador lee una
+    // cobertura que no tiene. Testigo del comportamiento: `T-L1-2e`.
+    expect(String(out)).toContain('HONESTO');
+    expect(String(out)).toContain('DEFINE');
   });
 
   it('T-ENV-2b: `/health` publica `source:"request-only"` cuando el conjunto está vacío', () => {

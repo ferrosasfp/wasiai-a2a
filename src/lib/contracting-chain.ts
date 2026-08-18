@@ -126,6 +126,14 @@
  *    se pudo verificar (NC-2): esto se escribe con las dos lecturas y no como
  *    garantía.
  *
+ * ⚠️ Y `TRUST_PROXY` **no es sólo narrativa del DoS** (AR-it2/BLQ-MED-2): con
+ * `trustProxy` activo `request.hostname` —que es el `selfHostHint` de este guard—
+ * sale de `X-Forwarded-Host`. Medido en este árbol: con `trustProxy: true`,
+ * `{host:'real.example','x-forwarded-host':'atacante.example'}` ⇒
+ * `hostname === 'atacante.example'`. Y con `trustProxy: false`, `Host: a b` ⇒
+ * `hostname === 'a b'`, o sea que **el agujero no lo abre esa env**: la abre el
+ * hecho de que el `Host` lo escribe el caller. Ver `resolveSelfHosts`.
+ *
  * ─── LO QUE ESTE MÓDULO NO CIERRA ──────────────────────────────────────────
  * · **El transitivo contra un adversario.** La capa 2 depende de que la
  *   contraparte reenvíe los headers ⇒ es BEST-EFFORT (ver
@@ -433,9 +441,12 @@ export function assertSelfHostsEnv(): string | null {
   return (
     `${SELF_HOSTS_ENV} NO ESTA CONFIGURADA y BASE_URL tampoco aporta un host ` +
     'legible, asi que el conjunto de identidad propia derivado de la ' +
-    'configuracion esta VACIO. Lo que SIGUE cubierto: el bucle directo POR HTTP, ' +
-    'usando el Host de cada peticion como hint (agrandar ese conjunto solo puede ' +
-    'producir MAS rechazos, nunca menos). Lo que NO queda cubierto, y por eso ' +
+    'configuracion esta VACIO. Lo que SIGUE cubierto, y SOLO CONTRA UN CALLER ' +
+    'HONESTO: el bucle ACCIDENTAL directo por HTTP, usando el Host de cada ' +
+    'peticion como hint. Sin esta variable ese Host no AGRANDA el conjunto: lo ' +
+    'DEFINE, asi que un caller que manda un Host ilegible (medido: "a b", ' +
+    '"http://x", "::1", vacio) lo deja en CERO y vuelve el guard inerte a pedido. ' +
+    'Lo que NO queda cubierto, y por eso ' +
     'esto es un warning y no una nota: (1) los ALIAS propios distintos del host ' +
     'por el que entro la peticion — dominio propio, dominio de Railway, literal ' +
     'de IP; (2) los callers que NO son HTTP y por lo tanto no tienen Host que ' +
@@ -460,19 +471,44 @@ export function assertSelfHostsEnv(): string | null {
  *
  * ─── POR QUÉ EL `hint` DEL REQUEST ES ADMISIBLE AUNQUE EL CALLER LO INFLUYA ──
  * Leer esto antes de marcarlo como agujero, porque es lo primero que parece uno.
- * Este conjunto se usa **únicamente como PREDICADO DE NEGACIÓN**: agrandarlo sólo
- * puede producir **MÁS rechazos, nunca menos**. Un caller que mande
- * `Host: victima-agente.com` consigue que el gateway **se niegue** a llamar a
- * `victima-agente.com` **en su propia petición**: es un auto-DoS de UN request, no
- * un bypass ni un ataque a un tercero. **Esa monotonía es la propiedad**, y es la
- * razón por la que NO se usa `resolveBaseUrl` (`services/agent-card.ts:67-76`)
- * como fuente única: sus ramas 2 y 3 dependen de headers del caller, o sea que
- * una identidad que el caller puede MOVER es una identidad que el caller puede
- * **VACIAR** — y vaciarla sí sería un bypass. Además `resolveBaseUrl` necesita un
- * `FastifyRequest`, y el loop de `executePipeline` no tiene ninguno.
+ * **CON `A2A_SELF_HOSTS` o `BASE_URL` PUESTAS** este conjunto se usa únicamente
+ * como PREDICADO DE NEGACIÓN y agrandarlo sólo puede producir **MÁS rechazos,
+ * nunca menos**. Un caller que mande `Host: victima-agente.com` consigue que el
+ * gateway **se niegue** a llamar a `victima-agente.com` **en su propia petición**:
+ * es un auto-DoS de UN request, no un bypass ni un ataque a un tercero. Esa
+ * monotonía es la razón por la que NO se usa `resolveBaseUrl`
+ * (`services/agent-card.ts:67-76`) como fuente única: sus ramas 2 y 3 dependen de
+ * headers del caller, o sea que una identidad que el caller puede MOVER es una
+ * identidad que el caller puede **VACIAR** — y vaciarla sí sería un bypass. Además
+ * `resolveBaseUrl` necesita un `FastifyRequest`, y el loop de `executePipeline` no
+ * tiene ninguno. Testigo del caso configurado: `T-L1-2d`.
  *
- * Sin el `hint`, un deploy sin `BASE_URL` ni `A2A_SELF_HOSTS` tendría conjunto
- * VACÍO y la capa 1 quedaría INERTE: exactamente el escenario que CD-1 prohíbe.
+ * ⛔ **Y SIN LAS DOS ENVS, ESE PÁRRAFO NO ES UNA PROPIEDAD DE SEGURIDAD**
+ * (AR-it2/BLQ-MED-2). Ahí `hosts` es literalmente `[canonicalizeHost(hint)]`: no
+ * hay conjunto base que agrandar, así que la monotonía es verdadera como enunciado
+ * y **vacía** como garantía. Lo que el caller hace no es agrandar — es **definir**,
+ * y también **vaciar**. Medido, con el hint llegando como `Host` plano:
+ *
+ *     resolveSelfHosts('a b') · ('http://x') · ('::1') · ('')
+ *        ⇒  { hosts: [], canonicalId: null }        ⇒ guard INERTE
+ *     resolveSelfHosts('atacante.example')
+ *        ⇒  { hosts: ['atacante.example'], canonicalId: 'atacante.example' }
+ *
+ * Y ese `canonicalId` influenciable **nombra a un tercero en un header que EMITIMOS
+ * nosotros** hacia agentes ajenos: es una afirmación sobre nuestra identidad,
+ * firmada por nosotros, con contenido elegido por el caller.
+ * Medido con fastify en este árbol: `Host: a b` ⇒ `request.hostname === 'a b'` con
+ * `trustProxy` en `false` **y** en `true`; con `trustProxy: true` el mismo valor
+ * entra además por `X-Forwarded-Host`. O sea que esto **no depende de
+ * `TRUST_PROXY`**: esa env agrega un segundo header, no el agujero (ver NC-2).
+ * Testigo: `T-L1-2e`.
+ *
+ * ⛔ La conclusión NO es revertir el `hint`, y la alternativa está medida: sin él,
+ * un deploy sin `BASE_URL` ni `A2A_SELF_HOSTS` tendría conjunto VACÍO y la capa 1
+ * quedaría INERTE **siempre** —el escenario que CD-1 prohíbe— en vez de sólo contra
+ * un caller que ataca. Con el hint, lo que queda cubierto es el bucle
+ * **accidental**, que es real y es el caso común. Lo que cierra el caso hostil es
+ * setear `A2A_SELF_HOSTS`, que por eso es paso del deploy.
  *
  * ⚠️ **DÓNDE NO LLEGA EL ARGUMENTO DE MONOTONÍA: `canonicalId`.** Lo de arriba vale
  * para `hosts`, que se usa como predicado de NEGACIÓN. `canonicalId` es otra cosa:

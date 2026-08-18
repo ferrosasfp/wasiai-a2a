@@ -235,7 +235,7 @@ fastify.log.info(
     depthMax: resolveContractingDepthMax(),
   },
   resolveSelfHosts().hosts.length === 0
-    ? 'guard anti-bucle SIN identidad configurada: por HTTP la capa 1 se apoya en el Host de cada peticion; NO quedan cubiertos los alias propios, los callers no-HTTP (tool MCP e inbound-task) ni el eslabon que anunciamos hacia afuera. Setear A2A_SELF_HOSTS.'
+    ? 'guard anti-bucle SIN identidad configurada: por HTTP la capa 1 se apoya en el Host de cada peticion, y eso cubre el bucle ACCIDENTAL, no a un caller que ataca — sin esta variable el Host no agranda el conjunto, lo DEFINE, asi que un Host ilegible lo deja VACIO y el guard queda inerte. Tampoco quedan cubiertos los alias propios, los callers no-HTTP (tool MCP e inbound-task) ni el eslabon que anunciamos hacia afuera. Setear A2A_SELF_HOSTS.'
     : 'guard anti-bucle con identidad configurada para los hosts listados',
 );
 
