@@ -1129,12 +1129,25 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
 
       // WKH-118: best-effort 1% protocol fee post-compose (espejo orchestrate.ts:437-482).
       // Idempotencia por request.id; base = result.totalCostUsdc. NUNCA rompe el 200
-      // (CD-1): todo error queda en variables locales + console. El response NO cambia (CD-4).
-      // ⚠️ CD-21 — ACÁ DECÍA "en compose (a diferencia de orchestrate) ningún campo
-      // de fee se serializa en el response", y WKH-360 lo volvió FALSO: el 200 de
-      // `/compose` ahora declara `protocolFeeUsdc` / `feeRatePercent` /
-      // `protocolFeeStatus` (AC-10). Se reescribe en el MISMO commit que lo
-      // invalida, porque una prosa que afirma de más apaga las revisiones futuras.
+      // (CD-1): todo error queda en variables locales + console.
+      //
+      // ⚠️ CD-21 · DOS FRASES DE ACÁ QUEDARON FALSAS CON WKH-360, y se reescriben en
+      // el mismo commit que las invalida:
+      //  [FALSA] · que en compose ningun campo de fee se serializa en el response
+      //  [FALSA] · que el response NO cambia (CD-4)
+      // El 200 de `/compose` ahora declara `feeRatePercent`, `protocolFeeStatus` y
+      // —cuando se cobró— `protocolFeeUsdc` (AC-10), así que el resultado de ESTE
+      // bloque sí es visible para el caller: un fallo del cobro deja
+      // `protocolFeeStatus: 'unknown'`. Lo que sigue en pie de CD-1 es que un fallo
+      // acá **no rompe el 200 ni cambia el pipeline**.
+      //
+      // ⛔ CÓMO SE CITA UNA FRASE QUE SE VOLVIÓ FALSA (fix-pack CR/MNR-1). Cada línea
+      // que contenga parte de la frase vieja lleva su propio marcador `[FALSA]`. La
+      // versión anterior de este comentario reproducía la frase VERBATIM y lo único
+      // que la distinguía de un claim vivo era dónde caía el salto de línea: un
+      // `grep` del auditor devolvía el hit y el marcador quedaba en OTRA línea. Un
+      // marcador por línea es lo que hace que `grep -n` no pueda mentir. Mismo
+      // criterio aplicado en `services/orchestrate.ts` (la frase del "cache de 60 s").
       //
       // Lo que SIGUE siendo cierto y es la razón de que `feeChargeTxHash` no se
       // declare: **el txHash del fee NO se serializa**. Publicar el hash de la
@@ -1233,11 +1246,19 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       // ni cambia nada del money-path, sólo copia lo que ya viaja en el response.
       noteDownstreamSkips(request, result.steps, downstreamSkipCauses);
       // ── WKH-360 (AC-10/AC-11/AC-12) · el fee, VISIBLE ────────────────────────
-      // Estrictamente ADITIVO: todas las claves de antes salen con el mismo nombre y
-      // el mismo valor. `protocolFeeUsdc` se OMITE salvo que se haya cobrado de
-      // verdad (CD-5: nada de ceros fabricados), y los dos campos de cascada quedan
-      // AUSENTES si ningún step fue un coordinador — que es el 100% del tráfico de
-      // hoy, así que la respuesta actual no se mueve un byte.
+      // ADITIVO: todas las claves de antes salen con el mismo nombre y el mismo
+      // valor, y ninguna se quita. Con precisión, porque acá decía
+      // [FALSA] "la respuesta actual no se mueve un byte"
+      // y eso es falso (fix-pack CR/MNR-4): el 200 gana **DOS claves
+      // INCONDICIONALES**, `feeRatePercent` y `protocolFeeStatus`, así que ningún
+      // response es byte-idéntico al de antes. Lo que sí es cierto, y es lo que AC-12
+      // pide, es que el cambio sea **sólo por agregado**: un cliente que lee las
+      // claves que le importan no ve ninguna diferencia.
+      //
+      // Las otras tres SÍ son condicionales: `protocolFeeUsdc` se OMITE salvo que se
+      // haya cobrado de verdad (CD-5: nada de ceros fabricados), y los dos campos de
+      // cascada quedan AUSENTES si ningún step fue un coordinador — que hoy es el
+      // 100% del tráfico, porque ninguno de los 25 agentes de prod emite el sobre.
       //
       // ⚠️ `protocolFeeUsdc` es la pata de PLATAFORMA que este gateway cobró, NO el
       // total del pipeline (el costo ejecutado es `totalCostUsdc`) y NO el

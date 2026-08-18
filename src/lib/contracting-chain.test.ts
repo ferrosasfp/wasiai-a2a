@@ -98,7 +98,46 @@ describe('canonicalizeHost — las 6 variantes de host', () => {
     expect(canonicalizeHost('gw.example.com:8443')).toBeNull();
     expect(canonicalizeHost('user@gw.example.com')).toBeNull();
     expect(canonicalizeHost('gw.example.com/compose')).toBeNull();
-    expect(canonicalizeHost('[::1]')).toBeNull();
+  });
+
+  /**
+   * Fix-pack AR/MNR-1. Antes se rechazaban las DOS formas de IPv6, y la doc
+   * invitaba a poner "un literal de IP" en `A2A_SELF_HOSTS` — donde una entrada
+   * ilegible hace que **el proceso no arranque**. O sea: seguir la doc volteaba el
+   * servicio.
+   *
+   * Se acepta SÓLO la forma con corchetes, y no por estilo: el conjunto se compara
+   * contra `new URL(destino).hostname`, que para IPv6 devuelve siempre esa forma.
+   * Aceptar `::1` pelado sería aceptar algo que nunca puede matchear un destino —
+   * bootea y no protege, que es el peor de los dos mundos.
+   */
+  it('T-U-HOST-7 (AR/MNR-1): IPv6 ENTRE CORCHETES se acepta; pelado y con puerto, no', () => {
+    // La forma que `new URL().hostname` produce, que es contra la que comparamos.
+    expect(new URL('https://[::1]/x').hostname).toBe('[::1]');
+    expect(canonicalizeHost('[::1]')).toBe('[::1]');
+    expect(canonicalizeHost('[2001:db8::1]')).toBe('[2001:db8::1]');
+    // El parser NORMALIZA, así que dos escrituras de la misma dirección colapsan al
+    // mismo valor — la propiedad que hace que no puedan divergir.
+    expect(canonicalizeHost('[::0001]')).toBe('[::1]');
+
+    // Pelado: NO. Nunca podría matchear un destino, así que aceptarlo sería
+    // dejar bootear una identidad que no protege.
+    expect(canonicalizeHost('::1')).toBeNull();
+    // Con puerto: NO (no termina en `]`).
+    expect(canonicalizeHost('[::1]:8443')).toBeNull();
+    // Basura entre corchetes: NO (el parser tira y se devuelve null sin tirar).
+    expect(canonicalizeHost('[not-ipv6]')).toBeNull();
+    expect(canonicalizeHost('[]')).toBeNull();
+    expect(canonicalizeHost('[::1]x')).toBeNull();
+
+    // Y el efecto que motivó el fix: con la forma correcta el arranque NO se cae.
+    process.env.A2A_SELF_HOSTS = '[::1]';
+    expect(() => assertSelfHostsEnv()).not.toThrow();
+    expect(resolveSelfHosts().hosts).toEqual(['[::1]']);
+    // …y un destino IPv6 propio se reconoce de punta a punta.
+    expect(
+      isSelfDestination('https://[::1]/compose', resolveSelfHosts().hosts),
+    ).toBe(true);
   });
 
   it('T-U-HOST-5: rechaza bordes con espacios y el string vacío', () => {

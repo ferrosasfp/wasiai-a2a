@@ -5,12 +5,16 @@
  * ─── POR QUÉ ES UN MÓDULO LEAF (cero imports) ───────────────────────────────
  * Lo consumen CUATRO capas distintas: un route (`routes/compose.ts`), dos
  * services (`services/compose.ts`, `services/orchestrate.ts`) y un middleware
- * (`middleware/contracting-guard.ts`). Y **63 archivos de test mockean
- * `../adapters/registry.js`** con factories sin `importOriginal`; el mismo hazard
- * con `../services/discovery.js` ya rompió 12 y 84 tests en otra HU
- * (`src/lib/discovery-fetch-limit.ts:1-11` lo documenta). Un archivo sin
- * dependencias no puede quedar `undefined` en ninguna suite porque ninguna lo
- * mockea. Precedentes en este repo: `compose-limits.ts`,
+ * (`middleware/contracting-guard.ts`). Y **66 archivos de test mockean
+ * `adapters/registry.js`** con factories sin `importOriginal`
+ * (`grep -rl "vi.mock('../adapters/registry.js'" src --include=*.test.ts | wc -l`
+ * ⇒ 66 en `8b1d07a`; **es una foto y crece sola** — decía 63 sin sha y envejeció
+ * dentro de la propia HU). El mismo hazard con `../services/discovery.js` ya rompió
+ * 12 y 84 tests en otra HU (`src/lib/discovery-fetch-limit.ts:1-11` lo documenta), y
+ * el fix-pack de ESTA lo volvió a comer con `./agent-price.js`: 5 tests de
+ * facturación en 500 porque un factory literal dejaba una export en `undefined`.
+ * Un archivo sin dependencias no puede quedar `undefined` en ninguna suite porque
+ * ninguna lo mockea. Precedentes en este repo: `compose-limits.ts`,
  * `discovery-fetch-limit.ts`, `downstream-skip-code.ts`, `pricing-constants.ts`.
  *
  * `process.env` SÍ se lee acá (es un global, no un import), igual que
@@ -131,7 +135,9 @@
  * · **El bypass por IP literal.** La comparación es POR NOMBRE:
  *   `https://69.46.46.64/compose` no matchea. Residual declarado (R-3 /
  *   TD-360-2), NO cerrado acá. `A2A_SELF_HOSTS` acepta un literal si un operador
- *   lo necesita.
+ *   lo necesita: IPv4 tal cual (`69.46.46.64`) e **IPv6 SÓLO entre corchetes**
+ *   (`[::1]`, no `::1` — ver `canonicalizeHost`, y ojo que una entrada ilegible
+ *   NO BOOTEA el proceso).
  * · **Un `302` de un tercero hacia nosotros.** `ssrf-dispatcher` sigue redirects
  *   a mano y sólo revalida SSRF por hop, así que la capa 1 no lo ve al momento de
  *   decidir. Lo que sí ocurre es que los headers de acá NO están en los 4
@@ -255,13 +261,41 @@ function pickSingleHeader(
  *
  * Devuelve `null` para cualquier cosa que no sea EXACTAMENTE un host: con
  * esquema, con puerto, con userinfo, con path/query/fragment, con espacios en los
- * bordes, IPv6 entre corchetes.
+ * bordes.
+ *
+ * ─── IPv6: SE ACEPTA **ENTRE CORCHETES**, y sólo así (fix-pack AR/MNR-1) ────
+ * Antes se rechazaba cualquier `:`, o sea las dos formas. Consecuencia medida: un
+ * operador que leía "`A2A_SELF_HOSTS` acepta un literal de IP si lo necesitás" y
+ * escribía `::1` o `[::1]` **no bootea el proceso** (`assertSelfHostsEnv` tira ante
+ * una entrada ilegible, a propósito). La doc invitaba a hacer algo que voltea el
+ * servicio.
+ *
+ * La forma con corchetes es la única correcta, y no es una preferencia de estilo:
+ * el conjunto se compara contra `new URL(destino).hostname`, que para IPv6 devuelve
+ * **siempre** la forma con corchetes y normalizada. Medido:
+ *
+ *     new URL('https://[::1]/x').hostname            === '[::1]'
+ *     new URL('https://[::0001]/x').hostname         === '[::1]'      (normaliza)
+ *     new URL('https://[::ffff:127.0.0.1]/x').hostname === '[::ffff:7f00:1]'
+ *     new URL('https://[not-ipv6]') / '[::1]x' / '[]' ⇒ THROW
+ *
+ * O sea: aceptar `::1` pelado sería aceptar una entrada que **nunca** puede
+ * matchear un destino, que es el peor de los dos mundos (bootea y no protege). Se
+ * sigue rechazando. `[::1]:8443` también, porque no termina en `]` y cae por el
+ * chequeo de `:`. Testigo: `T-U-HOST-7`.
+ *
+ * ⛔ Esto NO cierra R-3: la comparación sigue siendo por NOMBRE. Que un operador
+ * PUEDA declarar un literal no significa que el bypass por IP literal esté cerrado.
  */
 export function canonicalizeHost(raw: string): string | null {
   // 1 · bordes: un valor con espacios es un valor que el operador escribió mal.
   if (raw.trim() !== raw || raw.length === 0) return null;
-  // 2 · esquema, userinfo, puerto, IPv6.
-  if (raw.includes('/') || raw.includes('@') || raw.includes(':')) return null;
+  // 2 · esquema, userinfo, puerto. Los `:` de un IPv6 ENTRE CORCHETES sobreviven:
+  //     es la forma que devuelve `new URL(...).hostname` y por lo tanto la única
+  //     que puede matchear un destino.
+  const bracketedIpv6 = raw.startsWith('[') && raw.endsWith(']');
+  if (raw.includes('/') || raw.includes('@')) return null;
+  if (!bracketedIpv6 && raw.includes(':')) return null;
   let parsed: URL;
   try {
     // 3 · el parser de la plataforma hace minúsculas + punycode gratis.

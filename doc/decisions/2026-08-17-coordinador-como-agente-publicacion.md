@@ -100,11 +100,45 @@ saber **qué URL va a republicar**.
 | # | Queda abierto | ⛔ Prohibido escribir |
 |---|---|---|
 | **R-3 / TD-360-2** | **Bypass por IP literal.** La comparación de identidad es **por NOMBRE**: `https://<nuestra-ip>/compose` no matchea salvo que un operador ponga esa IP en `A2A_SELF_HOSTS`. Cerrarlo pediría resolver DNS de nuestros propios hosts por step: caro, inestable (las IPs de Railway rotan) y solapado con el módulo SSRF | que la capa 1 "cierra el bucle directo" **sin calificar que es por nombre** |
-| **R-4** | **La capa 2 NO cierra el transitivo contra un adversario** que borra los headers. Lo que queda en pie es la capa 1 (que no consulta ningún header del caller) y el techo de profundidad | "bucle transitivo cerrado" a secas |
+| **R-4** | **La capa 2 NO cierra el transitivo contra un adversario** que borra los headers. Lo que queda en pie es la capa 1 (que no consulta ningún header del caller) y el techo de profundidad. ⚠️ **Y no es teórico: es la topología de HOY** — ver el bloque de abajo | "bucle transitivo cerrado" a secas; y **decir "R-4 es un riesgo teórico"**, que es lo que la redacción anterior dejaba entender |
 | **TD-360-1** | La **allow-list** de auto-contratación legítima, si algún día aparece un caso. Hoy no existe ninguno (0 de 25 agentes de prod apuntan al gateway). Si entra, entra **vacía por default = denegar** | shippearla en esta HU |
 | **NC-1** | **No se pudo verificar si `BASE_URL` está seteada en el Railway de prod.** Un `GET /.well-known/agent.json` con `X-Forwarded-Proto: http` devuelve `url` en `https://`, y eso es compatible con `BASE_URL` seteada **y** con Railway reescribiendo el header: desde afuera no se distingue. El diseño no depende de la respuesta (conjunto vacío ⇒ `warn`, no `throw`), y **`GET /health` publica `contractingGuard.selfHostCount` para confirmarlo después del deploy** | que `BASE_URL` está (o no está) seteada en prod |
 | **NC-2** | **No se pudo verificar `TRUST_PROXY` en prod.** Cambia si el rate-limit buckeatea por IP real o si todos los callers externos comparten un bucket. Afecta la NARRATIVA de cuánto DoS colateral produce un bucle, no el diseño | afirmar que el rate-limit acota (o no acota) el bucle en prod |
 | **WKH-361 (candidato)** | **El bucle de DISCOVERY**: registrar como `registry` el propio `/discover`. Es un vector real y contiguo (`POST /registries` valida forma y SSRF y nada más, sin control de identidad propia), pero **no mueve plata** y tiene circuit-breaker por registry. Comparte el módulo leaf de esta HU ⇒ va **después**, nunca en paralelo | tratarlo como cubierto por esta HU |
+
+### ⚠️ R-4 no es un riesgo teórico: la Capa 2 nace con cobertura efectiva ~0 (AR/MNR-5)
+
+Medido por el AR: **22 de los 25 agentes descubribles en prod viven en `wasiai-v2`**,
+que **nos llama** y **no reenvía** los headers `x-a2a-contracting-chain` /
+`x-a2a-contracting-depth`. O sea que en el camino real de hoy la traza entrante llega
+vacía casi siempre, y la Capa 2 —que es la que detecta el ciclo TRANSITIVO— no tiene
+nada que leer.
+
+⛔ **Consecuencia que hay que escribir y no suavizar**: la Capa 2 se despliega
+funcionando y **sin cobertura efectiva en el camino principal**. Lo que protege hoy es
+la Capa 1 (identidad del destino, que no consulta ningún header del caller) y el techo
+de profundidad. Nada de esto se arregla desde este repo.
+
+**HU DE SEGUIMIENTO — va en `wasiai-v2`, no acá.** Una capacidad que cruza servicios
+no existe hasta que **los dos** la reconocen. Enunciado para quien la abra:
+
+> **`wasiai-v2` reenvía la traza de contratación A2A.** Cuando `wasiai-v2` invoca al
+> gateway A2A (`/compose`, `/orchestrate`, `/orchestrate/execute`), debe **propagar
+> tal cual** los headers `x-a2a-contracting-chain` y `x-a2a-contracting-depth` que
+> recibió, y —si actúa como coordinador— **agregar su propio eslabón** con la misma
+> semántica que `buildOutboundContractingHeaders` de este repo
+> (`src/lib/contracting-chain.ts`): la profundidad que se emite es la del salto que se
+> está haciendo, o sea la recibida **+1**.
+> **Criterio de aceptación medible**: una petición a `wasiai-v2` con esos dos headers
+> puestos tiene que llegar al gateway A2A con la cadena que incluye el eslabón de
+> `wasiai-v2` y la profundidad incrementada — verificable con el `warn`
+> `contracting-guard.rejected` del gateway, o con un 400 `CONTRACTING_LOOP_DETECTED`
+> en un ciclo armado a propósito.
+> **Contrato ya publicado** (no hay que inventarlo): `GET /.well-known/agent.json` del
+> gateway declara `contracting.chainHeader`, `contracting.depthHeader`,
+> `contracting.depthMax` y `contracting.bestEffortNote`.
+
+⛔ **Hasta que esa HU esté, PROHIBIDO escribir que la Capa 2 "cubre" el ecosistema.**
 
 ---
 

@@ -17,7 +17,7 @@
  * Mutante: `MUT-03` (mover el bloque a después del `if (!debitRes.success)`).
  */
 import crypto from 'node:crypto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { A2AAgentKeyRow, Agent } from '../types/index.js';
 
 const mockCreate = vi.fn();
@@ -188,6 +188,21 @@ beforeEach(() => {
     json: async () => ({ result: 'ok' }),
   });
   process.env.DISCOVERY_SSRF_ALLOWLIST = `${SELF},otro-agente.example`;
+});
+
+// ⚠️ El `saved` de arriba se ESCRIBÍA y no se leía nunca (fix-pack CR/MNR-3):
+// este archivo borra tres envs en su `beforeEach` y, sin este `afterEach`, se las
+// deja borradas al resto del proceso. Calibrado por el CR: con la config actual de
+// vitest (un fork por archivo) no hay fuga, así que el impacto de HOY es CERO — con
+// `--no-isolate` sí la hay. Se restaura igual: el aislamiento es del runner, no de
+// este archivo, y depender de la config del runner para no contaminar es depender de
+// algo que este archivo no controla.
+afterEach(() => {
+  for (const k of ENV_KEYS) {
+    const v = saved[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
 });
 
 describe('WKH-360 SITIO 2 — /orchestrate: el corte ocurre ANTES del débito del step-0', () => {

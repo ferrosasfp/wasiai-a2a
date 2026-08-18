@@ -25,14 +25,46 @@
 | Wave | `tsc` | `biome` | Suite (`Tests`) | Δ | ownership |
 |---|---|---|---|---|---|
 | base `3823580` | 0 | — | `5441 passed \| 19 skipped` · exit 0 | — | 13/13 |
-| W0 | 0 | 0 (479) | `5497 passed \| 19 skipped` · exit 0 | +56 | 13/13 |
+| W0 | 0 | 0 (479) | ❌ `5497 passed \| 19 skipped` · exit 0 — **CIFRA FALSA, ver la fila de abajo** | +56 | 13/13 |
+| **W0 · el número REAL de `23a27dd`** | 0 | 0 (479) | **`4 failed \| 5493 passed \| 19 skipped` · `suite_exit=1`** | — | 13/13 |
 | W1 | 0 | 0 (482) | `5526 passed \| 19 skipped` · exit 0 | +29 | 13/13 |
 | W2 | 0 | 0 (484) | `5561 passed \| 19 skipped` · exit 0 | +35 | 13/13 |
 | W3 | 0 | 0 (485) | `5579 passed \| 19 skipped` · exit 0 | +18 | 13/13 |
 | W4 | 0 | 0 (485) | `5594 passed \| 19 skipped` · exit 0 | +15 | 13/13 |
 
-**+153 tests netos sobre el baseline. Cero tests preexistentes movidos sin
-explicación**; los TRES que cambiaron de aserción están documentados abajo (§5).
+**Cero tests preexistentes movidos sin explicación**; los TRES que cambiaron de
+aserción están documentados abajo (§5). El total neto vs el baseline está en §9, que
+es donde vive el número vivo — acá quedó la foto de cada wave.
+
+### ⚠️ La fila de W0: la cifra que el commit declara es FALSA (CR/BLQ-BAJO-1)
+
+El mensaje del commit `23a27dd` dice `exit 0` y `5497 passed`. **Ese árbol tiene 4
+rojos.** Re-medido de forma independiente en el fix-pack, en un worktree detached a
+`23a27dd` con el `node_modules` de este árbol:
+
+```
+node ./node_modules/vitest/vitest.mjs run
+  Test Files  1 failed | 280 passed | 6 skipped (287)
+       Tests  4 failed | 5493 passed | 19 skipped (5516)     suite_exit=1
+  FAIL test/readme-numbers.test.ts  (×4)
+    expected 286 to be 287     (archivos de test)
+    expected 477 to be 479     (archivos que linta Biome)
+```
+
+**Motivo, y ya estaba diagnosticado**: `auto-blindaje.md` §"mi verde de W0 era cierto
+en el momento en que lo medí y falso un segundo después, por mi propio commit"
+describe el mecanismo con precisión — `readme-numbers.test.ts` **re-deriva** el conteo
+de archivos del repo, así que agregar los archivos de W0 invalidó los números que los
+README publicaban, y eso pasó **después** de correr la suite y **antes** de commitear.
+Lo que faltó fue corregir la cifra ya escrita.
+
+**Resuelto en W1** (`879faa7` actualiza los dos README y la suite vuelve a exit 0);
+verificado: desde W1 en adelante todas las filas dan `exit 0`.
+
+⛔ **No se reescribió la historia.** El commit `23a27dd` queda como está y esta fila es
+la corrección. Riesgo que deja abierto, y por eso se escribe: un `bisect`, un revert o
+un merge parcial que se pare en `23a27dd` da CI **rojo** con un commit cuyo mensaje
+dice estar verde.
 
 Comandos (sin pipes para adjudicar, CD-13):
 
@@ -115,21 +147,54 @@ líneas que la HU tenía que reescribir** (o sea que es confirmación, no daño)
 | `src/routes/compose.ts:1127` | el `reply.send({kiteTxHash, ...result})`, ahora con los campos de fee (AC-10) |
 | `src/services/agent-price.ts:114` | el `return` de `resolveAgentDestination`, ahora con `invokeUrl` |
 
-**Mapa de desplazamiento** de los archivos tocados (para navegar el Story File):
+**Mapa de navegación** de los archivos tocados.
 
-| Archivo | Citas del rango bajo | Citas del rango alto |
+⛔ **ESTE MAPA YA NO TIENE NÚMEROS DE LÍNEA DE DESTINO, Y ES A PROPÓSITO.** La versión
+anterior los tenía y **estaba mal en 3 de las 5 filas de `src/types/index.ts`, todas
+por exactamente +11** (AR/BLQ-BAJO-2). Peor: cuando el fix-pack recomputó los valores
+que el AR había corregido, **volvieron a estar mal**, porque el propio fix-pack
+desplazó las líneas otra vez. Un número de destino en un `.md` es un dato que envejece
+con cada edición del código que describe, y su modo de falla es
+**auto-confirmante**: el destino equivocado casi siempre muestra prosa plausible.
+
+Por eso la columna de destino es el **ANCLA TEXTUAL**: se busca ese texto y listo.
+
+| Archivo | Cita del Story File | Ancla textual (buscar esto) |
 |---|---|---|
-| `src/types/index.ts` | `:374`, `:989`, `:1027` sin mover | `:1091`→`:1128-1133`, `:1144`→`:1186`, `:1398`→`:1463`, `:1673`→`:1738`, `:1679`→`:1773` |
-| `src/services/compose.ts` | `:334`→`:360`, `:376`→`:402` (+26) | `:1424`→`:1542`, `:1516`→`:1702`, `:1538`→`:1724` (+118…+194) |
-| `src/routes/compose.ts` | `:688`→`:696`, `:735`→`:743` (+8) | `:867`→`:928` (+61), `:1132`→`:1249` (+117) |
-| `src/services/orchestrate.ts` | `:1061`→`:1071`, `:1115`→`:1125` (+10) | `:1149`→`:1251`, `:1213`→`:1315` (+102) |
-| `src/routes/orchestrate.ts` | `:137`→`:139` (+2) | `:806`→`:856` (+50) |
-| `src/index.ts` | `:173`→`:218` (+45) | `:271`→`:347` (+76) |
+| `src/types/index.ts` | `:374` | `export interface Agent {` |
+| | `:989` | `export interface ComposeRequest {` |
+| | `:1027` | `POR QUÉ ES UN INPUT Y NO UN CAMPO DEL` |
+| | `:1091` | ⚠️ **reescrita** — era el `errorCode?:` de una línea; hoy es una unión multilínea con los dos códigos nuevos |
+| | `:1144` | `export interface StepResult {` |
+| | `:1398` | `discoveredAgents: Agent[];` |
+| | `:1673` | `export interface AgentSkill {` |
+| | `:1679` | `export interface AgentCard {` |
+| `src/services/compose.ts` | `:334` | `for (let i = 0; i < steps.length; i++) {` |
+| | `:376` | ⚠️ **AMBIGUA** — la línea base es `}`, que aparece 10 veces. Sin ancla útil |
+| | `:1424` | `const headers: Record<string, string> = {` |
+| | `:1516` | `const response = await ssrfFetch(agent.invokeUrl, {` |
+| | `:1538` | `const data = (await response.json()) as Record<string, unknown>;` |
+| `src/routes/compose.ts` | `:688` | `async function resolveComposePriceHandler(` |
+| | `:867` | `...requirePaymentOrA2AKey(` |
+| | `:1132` | `export default composeRoutes;` |
+| `src/services/orchestrate.ts` | `:1061` | `async executeApprovedPlan(` |
+| | `:1115` | ⚠️ **AMBIGUA** — `}`, 22 ocurrencias |
+| | `:1149` | `const debitRes = await budgetService.debit(` |
+| | `:1213` | `const pipeline = await composeService.compose({` |
+| `src/routes/orchestrate.ts` | `:137` | ⚠️ **AMBIGUA** — `preHandler: [`, 3 ocurrencias (las tres rutas) |
+| | `:806` | `error_code: 'QUOTE_STALE',` |
+| `src/index.ts` | `:173` | ⚠️ **AMBIGUA** — `fastify.log.info(`, 2 ocurrencias |
+| | `:271` | `await fastify.register(discoverRoutes, { prefix: '/discover' });` |
 
-⚠️ **Advertencia sobre este mapa**: para líneas de contenido genérico (`};`, `);`) el
-"match más cercano" puede apuntar a otra línea idéntica. Las filas de arriba son las
-de contenido distintivo. **No es una fuente autoritativa: es una ayuda de
-navegación.** Lo autoritativo es el texto.
+Las cinco filas marcadas ⚠️ **AMBIGUA** son exactamente el modo de falla que la
+advertencia vieja describía y que el mapa viejo igual publicaba como si fueran
+destinos ciertos: la línea de la cita es contenido genérico (`}`, `preHandler: [`), así
+que **ninguna herramienta puede decir a cuál se refería**. Se dejan marcadas en vez de
+resolverlas a ojo.
+
+Comando con el que se derivó esta tabla (compara `git show 3823580:<archivo>` contra el
+archivo de hoy por TEXTO EXACTO de la línea, y reporta 0, 1 o N coincidencias):
+`node -e` con `execSync('git show 3823580:'+f)` — ver el commit del fix-pack Grupo 6.
 
 ---
 
@@ -190,6 +255,23 @@ texto de la HU.**
   error (`CONTRACTING_LAYER2_BEST_EFFORT_NOTE`) y en la Agent Card. Contra ese caso lo
   que queda en pie es la capa 1 (que **no consulta ningún header del caller**) y el
   techo de profundidad.
+- **⚠️ Y la capa 2 nace con cobertura efectiva ~0 EN EL CAMINO REAL**, que no es lo
+  mismo que lo de arriba (AR/MNR-5): **22 de los 25 agentes de prod viven en
+  `wasiai-v2`**, que nos llama y **no reenvía** los headers. No es un adversario: es la
+  topología de hoy. La HU de seguimiento va **en `wasiai-v2`** y está enunciada con su
+  criterio de aceptación en `doc/decisions/2026-08-17-coordinador-como-agente-publicacion.md` §5.
+  ⛔ Hasta entonces, prohibido escribir que la capa 2 "cubre" el ecosistema.
+- **La capa 1 en los caminos NO-HTTP.** El `hint` del fix-pack (Grupo 1) llega a los
+  cuatro sitios **por HTTP**. El tool MCP (`src/mcp/tools/orchestrate.ts`) y
+  `src/services/inbound-task.ts` llaman al service in-process, sin `FastifyRequest` y
+  por lo tanto sin `Host` que pasar: para esos dos el guard depende **sólo** de
+  `BASE_URL` / `A2A_SELF_HOSTS`. Congelado en `T-L1+6`, `T-L1+9` y `T-PROP-2`.
+- **Los ALIAS propios sin `A2A_SELF_HOSTS`.** El `Host` entrante cubre el host por el
+  que entró la petición y ningún otro. Setear la env es **paso del deploy**.
+- **El eslabón que ANUNCIAMOS sin configuración.** Sin las dos envs, el `canonicalId`
+  sale del `Host`, que el caller influye. El argumento de monotonía **no aplica acá**
+  (aplica al conjunto de negación); está escrito en `resolveSelfHosts` y medido en
+  `T-PROP-5`.
 - **El bypass por IP literal.** La comparación de identidad es **por NOMBRE**. R-3 /
   TD-360-2, residual declarado.
 - **Que hoy haya drenaje de fondos en curso.** Lo medido es que **el guard no
@@ -211,3 +293,75 @@ texto de la HU.**
   prod salvo `POST /discover` (gratis y read-only) y `GET /.well-known/agent.json`.
   ⛔ No se invocó `/compose` ni `/orchestrate` contra prod: mueven plata.
 - **Los catálogos externos de NC-4.** Ninguna fila verificada, ninguna aprobada.
+
+---
+
+## 9 · Fix-pack post AR/CR (2026-08-17)
+
+AR y CR **rechazaron**. Los dos coincidieron en que el núcleo está sano —los tres
+cortes pre-débito son reales y los dos revisores los re-midieron por separado— y en
+que lo que bloqueaba eran **controles y frases que no medían lo que decían**. Ningún
+hallazgo tocaba el orden respecto del dinero, y **el fix-pack tampoco lo cambia**.
+
+### 9.1 · Un commit por grupo
+
+| Grupo | sha | Qué entró |
+|---|---|---|
+| 2 | `84051dd` | `readCoordinatorFee` tiraba `TypeError` sobre un 200 con body escalar, **después del débito** |
+| 3 | `8157f32` | `A2A_CONTRACTING_DEPTH_MAX=0` apagaba el money-path, legible y en silencio |
+| 1 | `f7661e1` | el guard quedaba INERTE sin config; el `Host` entrante viaja como `hint` a los 4 sitios + las 4 frases calificadas |
+| 4 | `72ae303` | el rollup fabricaba un `0` con status `complete` y podía publicar `null` |
+| 5 | `8b1d07a` | cuatro controles que no controlaban (`/health`, `GUARD_SOURCES`, el grep de CD-14, conteos de filas) |
+| 6 | *(este commit)* | números y frases que envejecieron, más la HU de seguimiento de `wasiai-v2` |
+
+### 9.2 · Criterio de salida, corrido en cada commit
+
+| Grupo | `tsc` | `biome` | Suite (`Tests`) | Δ |
+|---|---|---|---|---|
+| entrada (`71fdaf7`) | 0 | 0 (485) | `5594 passed \| 19 skipped` · exit 0 | — |
+| 2 (`84051dd`) | 0 | 0 (485) | `5597 passed \| 19 skipped` · exit 0 | +3 |
+| 3 (`8157f32`) | 0 | 0 (485) | `5598 passed \| 19 skipped` · exit 0 | +1 |
+| 1 (`f7661e1`) | 0 | 0 (485) | `5605 passed \| 19 skipped` · exit 0 | +7 |
+| 4 (`72ae303`) | 0 | 0 (485) | `5608 passed \| 19 skipped` · exit 0 | +3 |
+| 5 (`8b1d07a`) | 0 | 0 (485) | `5612 passed \| 19 skipped` · exit 0 | +4 |
+| 6 (este) | 0 | 0 (485) | `5613 passed \| 19 skipped` · exit 0 | +1 |
+
+**+19 tests netos sobre `71fdaf7`; +172 sobre el baseline `3823580`.** Archivos de
+test: **292** en los siete commits (los `it` nuevos entraron en archivos existentes,
+así que `readme-numbers.test.ts` no se movió).
+
+### 9.3 · Mutantes del fix-pack — 8 corridos, 8 muertos
+
+Protocolo: sustitución verificada **por el texto resultante**, aguja verificada `== 1`,
+restauración verificada con **`md5sum -c`** y `git status --short` al final de cada
+uno. Ningún archivo se editó mientras una batería medía.
+
+| ID | Mutación | Medido | Testigos |
+|---|---|---|---|
+| `FP-01` | sacar el guard de tipo de `readCoordinatorFee` | **MATA** (2 rojos) | `T-U-FEE-5` (texto: el `TypeError` literal), `T-FEE-7` (texto: `expected false to be true`, con `debit` en 1) |
+| `FP-02` | quitar el `hint` de los **services** (Sitios 2 y 3) | **MATA** (3 rojos) | `T-L1-2c` y `T-L1-3c` mueren por `debit: not called ⇒ called 1 times`; `T-PROP-5` por `expected undefined` |
+| `FP-03` | quitar el `hint` de los **routes** | **MATA** (2 rojos) | `T-L1+10`, `T-ROUTE-HINT` — el cableado, que los de arriba NO cubren |
+| `FP-04` | restaurar el gate viejo del rollup (`sum === 0 && anyUndeclared`) | **MATA** (2 rojos) | `T-U-ROLL-5`, `T-U-ROLL-6` |
+| `FP-05` | quitar el techo del monto en `readCoordinatorFee` | **MATA** (1 rojo) | `T-U-FEE-7` |
+| `FP-06` | borrar el campo `contractingGuard` del handler de `e2e/setup.ts` | **MATA** (2 rojos) | `T-HEALTH-CONTRACTING` ×2. **Es la mutación exacta del CR**, que en `71fdaf7` daba `5594 passed, cero rojos` |
+| `FP-07` | borrar el campo `contractingGuard` del handler de **prod** (`index.ts`) | **MATA** (1 rojo) | `T-HEALTH-BOTH` — el handler de prod no es importable, así que este barrido textual es lo único que lo cubre |
+| `FP-08` | poner un `=== 'true'` en `middleware/contracting-guard.ts` | **MATA** (1 rojo) | `T-FLAG-1`. **Es la calibración inversa del AR**, que con `GUARD_SOURCES` de un solo path seguía en verde |
+
+Más dos calibraciones que **cambiaron un testigo** en vez de aceptarlo:
+`Number(rawDepth)` en el paso 4 mata `T-CD14-SWEEP` (el candado de CD-14, que antes
+del fix-pack no discriminaba), y el escalar movido del step 0 al step 1 en `T-FEE-7`
+(ver `auto-blindaje.md`: moría por la razón barata).
+
+### 9.4 · Lo que NO se hizo, y por qué
+
+- **`it.each` (CR/MNR-5, segunda mitad).** Los 8 bucles de casos ahora asserten la
+  cantidad de filas, que es la propiedad que faltaba (borrar una fila pone rojo).
+  Convertirlos a `it.each` renombra y multiplica los `it` **que los reportes de AR y CR
+  citan por nombre**, a cambio de nada más. Declarado, no hecho.
+- **Cerrar R-3 / la IP literal.** Sigue abierto. El fix-pack sólo hizo que la forma
+  IPv6 que la doc recomendaba **no voltee el arranque** (AR/MNR-1).
+- **Cerrar el transitivo.** Sigue abierto, y ahora está escrito que en el camino real
+  la Capa 2 nace con cobertura efectiva ~0 (§7).
+- **Un cache para el lookup del Sitio 2.** Se corrigió la FRASE (decía "cache de 60 s"
+  y ese cache no cubre ese camino); el lookup sigue yendo fresco a propósito, con el
+  costo real escrito y el fail-closed decidido y medido (`T-L1-3d`).

@@ -1147,8 +1147,10 @@ export const orchestrateService = {
     // patrón de iteración que `quoteMaxCostUsdc`.
     //
     // ─── EL COSTO REAL DE ESTE BLOQUE, MEDIDO (fix-pack CR/BLQ-BAJO-3) ────────
-    // ⚠️ Acá decía "N lookups con cache de 60 s" y **es falso**: ese cache NO cubre
-    // este camino. El `Map` de `services/agent-price.ts` lo consulta ÚNICAMENTE
+    // [FALSA] ⚠️ Acá decía que esto son N lookups "con cache de 60 s" — el marcador
+    // [FALSA] de esta línea es para que un `grep` no confunda la cita con un claim
+    // vivo (fix-pack CR/MNR-1). **Es falso**: ese cache NO cubre este camino.
+    // El `Map` de `services/agent-price.ts` lo consulta ÚNICAMENTE
     // `resolveAgentPriceUsdc`; `resolveAgentDestination` llama
     // `discoveryService.getAgent` DIRECTO. Lo que cuesta cada iteración es un
     // SELECT a Supabase + **un `ssrfFetch` saliente por registry habilitado**, y
