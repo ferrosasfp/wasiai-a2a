@@ -188,6 +188,27 @@ const CHAIN_HEADER_ABSOLUTE_MAX_CHARS = 4096;
 const DECIMAL_1_TO_3_DIGITS = /^[0-9]{1,3}$/;
 
 /**
+ * Techo del monto que un coordinador ajeno puede DECLARAR como fee (fix-pack
+ * AR/BLQ-BAJO-1). Este número lo escribe un TERCERO en el body de su respuesta.
+ *
+ * ⚠️ Es un techo de **REPRESENTABILIDAD, no de plausibilidad**, y la diferencia
+ * importa: un coordinador que declara $100.000.000 sigue publicándose tal cual,
+ * porque el gateway no tiene forma de saber qué es plausible en el negocio de otro.
+ * Lo que se prohíbe es que el número entre en un rango donde la aritmética que
+ * hacemos con él deje de ser aritmética.
+ *
+ * Derivación, con los números al lado:
+ *  · el rollup suma a lo sumo `MAX_COMPOSE_STEPS` = 5 montos
+ *    (`src/lib/compose-limits.ts:38`; no se importa porque este módulo es leaf);
+ *  · publica `Number(sum.toFixed(6))`, o sea 6 decimales;
+ *  · `Number.MAX_SAFE_INTEGER / 1e6 === 9007199254.740992` (medido) es la suma más
+ *    grande con la que esos 6 decimales siguen siendo exactos.
+ * Con `1e9` por monto, la suma máxima es `5e9 < 9.007e9` ⇒ el redondeo nunca miente
+ * y `Infinity` es inalcanzable por esta vía. Testigos: `T-U-FEE-7`, `T-U-ROLL-6`.
+ */
+const COORDINATOR_FEE_MAX_USDC = 1_000_000_000;
+
+/**
  * Convierte 1..3 dígitos ASCII a número **sin `parseInt` ni `Number`** (CD-14).
  *
  * Precondición: el argumento YA pasó `DECIMAL_1_TO_3_DIGITS`. Con esa
@@ -803,7 +824,8 @@ export function isSelfDestination(
  *    `StepResult`. Los 25 agentes descubribles en prod no emiten ese campo, así que
  *    ésta es la rama por la que pasa todo el tráfico existente y la respuesta queda
  *    byte-idéntica.
- *  · **`'charged'` + monto finito `> 0`** ⇒ `{ declared: true, usdc }`.
+ *  · **`'charged'` + monto finito, `> 0` y `<= COORDINATOR_FEE_MAX_USDC`** ⇒
+ *    `{ declared: true, usdc }`.
  *  · **`protocolFeeStatus` presente, cualquier otro caso** ⇒ `{ declared: false }`.
  *
  * ⛔ **NUNCA `usdc: 0`** (CD-5). "No lo declaró" no es "cobró cero": un cero
@@ -833,6 +855,14 @@ export function isSelfDestination(
  * bug histórico del lenguaje) y `null` también hace tirar al `in`. Un array pasa
  * el guard —`typeof [] === 'object'` y el `in` no tira sobre arrays— y cae por la
  * vía normal: no trae `protocolFeeStatus` ⇒ `undefined`. Testigo: `T-U-FEE-5`.
+ *
+ * ─── EL TECHO DEL MONTO (fix-pack AR/BLQ-BAJO-1) ────────────────────────────
+ * `Number.isFinite` sola no alcanza: `1e300` es finito y **lo escribe un tercero**.
+ * Ver `COORDINATOR_FEE_MAX_USDC` para la derivación. Un monto por encima del techo
+ * NO es un error del lector: es un coordinador declarando algo que no se puede
+ * usar, así que cae en el MISMO tercer valor que ya existe (`declared: false`) y no
+ * en un `undefined` —que significaría "no es un coordinador"— ni en un recorte
+ * silencioso al techo, que sería publicar un número que nadie declaró.
  */
 export function readCoordinatorFee(
   raw: unknown,
@@ -846,7 +876,8 @@ export function readCoordinatorFee(
     status === 'charged' &&
     typeof amount === 'number' &&
     Number.isFinite(amount) &&
-    amount > 0
+    amount > 0 &&
+    amount <= COORDINATOR_FEE_MAX_USDC
   ) {
     return { declared: true, usdc: amount };
   }
@@ -866,6 +897,39 @@ export function readCoordinatorFee(
  * `'partial'` ⟺ hubo al menos un coordinador que NO declaró su monto. Es el tercer
  * valor de CD-5 a nivel de pipeline: sin él, un total que le falta un sumando se
  * leería como un total completo.
+ *
+ * ─── LAS DOS FORMAS EN QUE ESTO FABRICABA UN NÚMERO (fix-pack AR/BLQ-BAJO-1) ──
+ * Los montos los controla un TERCERO, y con eso se llegaba a dos publicaciones
+ * falsas. Medido en `71fdaf7`:
+ *
+ *  1 · **El cero fabricado con status "estoy seguro"**:
+ *      `rollUpCascadedFee([{declared:true, usdc:1e-9}])` ⇒
+ *      `{cascadedOrchestrationFeeUsdc: 0, status:'complete'}`. El monto era > 0 y
+ *      declarado, pero `Number((1e-9).toFixed(6)) === 0` (medido). Publicar ese 0
+ *      dice "los coordinadores no cobraron nada", que es justo la afirmación que
+ *      CD-5 prohíbe fabricar — y encima con `complete`, o sea sin margen de duda.
+ *  2 · **`Infinity` publicado como `null`**: dos montos enormes ⇒ `sum` infinito, y
+ *      `JSON.stringify({a: Infinity})` da `{"a":null}` (medido). Un `null` en un
+ *      campo de plata es indistinguible de "no aplica".
+ *
+ * La regla ahora es una sola y cubre las dos: **si el número que se iba a publicar
+ * no es un número utilizable, se OMITE y queda sólo el status**. Omitir es el tercer
+ * valor que este archivo ya usa en todos lados; publicar un 0 o un `null` es
+ * inventar. El `status` se conserva porque SÍ se sabe: hubo cascada.
+ *
+ * `(1)` ya no se puede alcanzar desde producción —el techo de
+ * `COORDINATOR_FEE_MAX_USDC` no lo evita, un monto chiquito es legítimo— así que el
+ * caso vive acá. `(2)` sí quedó inalcanzable vía `readCoordinatorFee`, pero esta
+ * función es pura y exportada: no confía en su llamador.
+ *
+ * ⚠️ CÓMO SE LEE EL RESULTADO, incluida la combinación nueva:
+ *   los dos campos ausentes        ⇒ ningún step fue un coordinador (AC-8).
+ *   status + monto                 ⇒ eso se cobró en cascada.
+ *   status `partial` sin monto     ⇒ hubo cascada y NINGUNO declaró cuánto.
+ *   status `complete` SIN monto    ⇒ todos declararon, y el total es > 0 pero está
+ *                                    por DEBAJO de la resolución publicada (1e-6).
+ *                                    NO es cero: es "más chico de lo que este campo
+ *                                    puede expresar".
  */
 export function rollUpCascadedFee(
   fees: ReadonlyArray<
@@ -886,13 +950,19 @@ export function rollUpCascadedFee(
     else anyUndeclared = true;
   }
   const status = anyUndeclared ? ('partial' as const) : ('complete' as const);
-  // Si NINGUNO declaró monto, no hay suma que publicar: se omite el número y queda
-  // sólo el `partial`, que es la información honesta (hubo cascada, no sé cuánto).
-  if (sum === 0 && anyUndeclared) {
+  // El número que SE IBA a publicar, calculado antes de decidir si se publica.
+  const rounded = Number.isFinite(sum) ? Number(sum.toFixed(6)) : Number.NaN;
+  // Las TRES razones para omitirlo, todas con la misma consecuencia: se publica el
+  // status y NO un número inventado.
+  //  · nadie declaró monto ⇒ no hay suma que publicar;
+  //  · la suma no es finita ⇒ `JSON.stringify` la sacaría como `null`;
+  //  · el redondeo a 6 decimales la lleva a 0 ⇒ publicar 0 afirmaría "no cobraron
+  //    nada" sobre montos que SÍ fueron declarados y son > 0.
+  if (!Number.isFinite(rounded) || rounded === 0) {
     return { cascadedOrchestrationFeeStatus: status };
   }
   return {
-    cascadedOrchestrationFeeUsdc: Number(sum.toFixed(6)),
+    cascadedOrchestrationFeeUsdc: rounded,
     cascadedOrchestrationFeeStatus: status,
   };
 }

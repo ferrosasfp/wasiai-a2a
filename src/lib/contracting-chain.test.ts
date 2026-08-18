@@ -900,11 +900,92 @@ describe('readCoordinatorFee / rollUpCascadedFee — AC-11 y CD-5', () => {
     });
   });
 
+  /**
+   * Fix-pack AR/BLQ-BAJO-1. El monto lo escribe un TERCERO y `Number.isFinite` sola
+   * no alcanza: `1e300` es finito. El techo es de REPRESENTABILIDAD (ver
+   * `COORDINATOR_FEE_MAX_USDC`), y por encima de él la lectura honesta es la misma
+   * que para cualquier otro monto inusable: `declared: false`.
+   */
+  it('T-U-FEE-7: monto por encima del techo ⇒ declared FALSE (no se recorta al techo)', () => {
+    const sobre = (usdc: number) =>
+      readCoordinatorFee({
+        protocolFeeStatus: 'charged',
+        protocolFeeUsdc: usdc,
+      });
+    // El borde exacto pasa…
+    expect(sobre(1_000_000_000)).toEqual({
+      declared: true,
+      usdc: 1_000_000_000,
+    });
+    // …y un centavo por encima, no.
+    expect(sobre(1_000_000_000.01)).toEqual({ declared: false });
+    for (const enorme of [1e300, Number.MAX_VALUE, Number.MAX_SAFE_INTEGER]) {
+      const out = sobre(enorme);
+      expect(out, String(enorme)).toEqual({ declared: false });
+      // ⛔ Y NO se recorta al techo: publicar el techo sería publicar un número que
+      // el coordinador no declaró.
+      expect(out).not.toHaveProperty('usdc');
+    }
+  });
+
   it('T-U-ROLL-4 (CD-5): NINGUNO declaró monto ⇒ `partial` SIN número inventado', () => {
     // Hubo cascada y no se sabe cuánto. Publicar `0` acá sería decir "los
     // coordinadores no cobraron nada", que es una afirmación que nadie hizo.
     const out = rollUpCascadedFee([{ declared: false }, { declared: false }]);
     expect(out).toEqual({ cascadedOrchestrationFeeStatus: 'partial' });
     expect(out).not.toHaveProperty('cascadedOrchestrationFeeUsdc');
+  });
+
+  /**
+   * ⚠️ TESTIGO ÚNICO del cero FABRICADO (fix-pack AR/BLQ-BAJO-1).
+   *
+   * Medido en `71fdaf7`: `rollUpCascadedFee([{declared:true, usdc:1e-9}])` devolvía
+   * `{cascadedOrchestrationFeeUsdc: 0, cascadedOrchestrationFeeStatus:'complete'}`.
+   * El monto era declarado y > 0; el `0` lo fabricaba el redondeo
+   * (`Number((1e-9).toFixed(6)) === 0`, medido). Publicado con `complete`, o sea
+   * afirmando SIN DUDA que los coordinadores no cobraron nada — la afirmación exacta
+   * que CD-5 prohíbe inventar. Y el monto lo controla un tercero.
+   *
+   * ⛔ Cambiar el `1e-9` por un número que sobreviva al redondeo apaga este `it`
+   * igual que borrarlo (CD-22): lo que se mide es el borde del redondeo.
+   */
+  it('T-U-ROLL-5 (CD-5): un monto que el redondeo lleva a 0 se OMITE, no se publica', () => {
+    // Precondición medida, para que el `it` no dependa de una creencia sobre toFixed.
+    expect(Number((1e-9).toFixed(6))).toBe(0);
+
+    const out = rollUpCascadedFee([{ declared: true, usdc: 1e-9 }]);
+    expect(out).not.toHaveProperty('cascadedOrchestrationFeeUsdc');
+    // El status SÍ se publica: que hubo cascada se sabe. Lo que no se sabe con la
+    // resolución de este campo es cuánto.
+    expect(out).toEqual({ cascadedOrchestrationFeeStatus: 'complete' });
+    // Control positivo: un monto que SÍ sobrevive al redondeo se publica igual que
+    // siempre. Sin esto, el `it` pasaría también si se omitiera SIEMPRE el número.
+    expect(rollUpCascadedFee([{ declared: true, usdc: 0.000002 }])).toEqual({
+      cascadedOrchestrationFeeUsdc: 0.000002,
+      cascadedOrchestrationFeeStatus: 'complete',
+    });
+  });
+
+  /**
+   * ⚠️ TESTIGO ÚNICO del `null` publicado (fix-pack AR/BLQ-BAJO-1).
+   *
+   * Medido: `JSON.stringify({a: Infinity})` ⇒ `{"a":null}`. Un `null` en un campo de
+   * plata es indistinguible de "no aplica", y los sumandos los controla un tercero.
+   *
+   * Este caso hoy NO se alcanza vía `readCoordinatorFee` (el techo
+   * `COORDINATOR_FEE_MAX_USDC` lo cierra aguas arriba), pero esta función es pura y
+   * exportada: la aserción es que **no confía en su llamador**. Por eso el input se
+   * arma acá directamente y no pasando por el lector.
+   */
+  it('T-U-ROLL-6: una suma no finita NO se publica (y no sale como `null` por JSON)', () => {
+    expect(JSON.stringify({ a: Number.POSITIVE_INFINITY })).toBe('{"a":null}');
+
+    const out = rollUpCascadedFee([
+      { declared: true, usdc: Number.MAX_VALUE },
+      { declared: true, usdc: Number.MAX_VALUE },
+    ]);
+    expect(out).toEqual({ cascadedOrchestrationFeeStatus: 'complete' });
+    // La aserción que importa: lo que se serializa no tiene un `null` de plata.
+    expect(JSON.stringify(out)).not.toContain('null');
   });
 });
