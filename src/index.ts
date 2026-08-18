@@ -107,6 +107,10 @@ const selfPublishedAuthHosts = assertSelfPublishedAuthEnv();
 // es urgente: los ALIAS propios, los callers NO-HTTP (tool MCP e `inbound-task`, que
 // no tienen `Host` que pasar) y el eslabón que anunciamos hacia afuera. Setear
 // `A2A_SELF_HOSTS` es paso del deploy, no una mejora opcional.
+//
+// ⚠️ Y "por HTTP" enumera CALL-SITES, no un protocolo: se rompió una vez con
+// `POST /agents/links/:token/redeem`, que entra por HTTP y no bajaba el hint
+// (AR-it2/BLQ-MED-1). Lo que sostiene la frase es `T-HINT-CALLSITES`, no la frase.
 const selfHostsWarning = assertSelfHostsEnv();
 
 // WKH-360: y el techo de profundidad, con el mismo criterio que el techo de exposición

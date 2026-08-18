@@ -155,7 +155,17 @@ const agentLinkRoutes: FastifyPluginAsync = async (fastify) => {
           : {};
 
       try {
-        const result = await agentLinkService.redeem(req.params.token, input);
+        // WKH-360 fix-pack 2 (AR-it2/BLQ-MED-1): el `Host` por el que entró ESTA
+        // petición. Este endpoint es público y entra por HTTP, así que el hint
+        // existe — antes se quedaba acá y `executeApprovedPlan` recibía el conjunto
+        // de identidad vacío. Mismo valor y mismo patrón que `routes/compose.ts` y
+        // las dos rutas de `routes/orchestrate.ts`; enumerado por
+        // `T-HINT-CALLSITES`.
+        const result = await agentLinkService.redeem(
+          req.params.token,
+          input,
+          req.hostname,
+        );
         if (reply.sent) return;
         return reply
           .status(200)

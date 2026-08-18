@@ -11,8 +11,8 @@
  * Un verde de este archivo NO dice nada sobre el orden respecto del dinero.
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -811,6 +811,159 @@ describe('El campo `contractingGuard` de /health está en LOS DOS handlers', () 
         'contractingGuard: readContractingGuardHealth()',
       );
     }
+  });
+});
+
+describe('El `selfHostHint` en TODOS los call-sites de producción', () => {
+  /**
+   * ⚠️ ESTE BLOQUE EXISTE PORQUE UNA FRASE NO ES UN CONTROL.
+   *
+   * Historia medida, y es lo que justifica el barrido: el fix-pack 1 cableó el
+   * `hint` en `routes/compose.ts` y en las dos rutas de `routes/orchestrate.ts`, y
+   * la HU declaró el residual como "por HTTP queda cubierto". **Había un tercer
+   * caller HTTP que nadie enumeró**: `POST /agents/links/:token/redeem`
+   * (`routes/agent-links.ts`, público, auth por posesión del token), que llama
+   * `executeApprovedPlan` desde `services/agent-link.ts`. Con las dos envs ausentes
+   * reproducía **byte por byte** el escenario que `T-L1-2c` congela como cerrado
+   * (`debit` 1 vez, la invocación saliente contra nosotros mismos, `errorCode`
+   * `undefined`), y encima el que paga es el que EMITIÓ el link, no el caller.
+   *
+   * El agujero no fue el código: fue que **el conjunto de call-sites no estaba
+   * enumerado por nada que se cayera al crecer**. Este test es esa enumeración.
+   *
+   * ⛔ QUÉ NO PRUEBA ESTE TEST: que el hint valga algo. Sólo mira que el call-site
+   * lo PASE. Que el guard corte, y que corte ANTES del débito, lo miden los tests
+   * de orden de los cuatro sitios (`*.contracting-loop.test.ts`). Y no dice nada
+   * sobre el valor del hint — un `Host` forjado sigue siendo un `Host` forjado
+   * (ver `T-L1-2e` y la salvedad de `resolveSelfHosts`).
+   */
+  const SRC_DIR = join(LIB_DIR, '..');
+
+  /** Los puntos de entrada al money-path que aceptan (o propagan) el hint. */
+  const ENTRYPOINTS = [
+    'orchestrateService.orchestrate(',
+    'orchestrateService.executeApprovedPlan(',
+    'this.executeApprovedPlan(',
+    'composeService.compose(',
+  ];
+
+  /**
+   * Call-sites SIN `selfHostHint`, con el motivo escrito **uno por uno**. Mismo
+   * contrato que `test/ownership-filter-guard.exceptions.ts`: la omisión no se
+   * tolera, se JUSTIFICA. Una entrada que sobra también rompe el test (abajo), así
+   * que la lista no se puede podrir hacia el otro lado.
+   */
+  const SIN_HINT: Record<string, string> = {
+    'mcp/tools/orchestrate.ts :: orchestrateService.orchestrate( #1':
+      'caller NO-HTTP: el tool MCP no tiene `FastifyRequest` ni `Host` que pasar. ' +
+      'Para este camino el conjunto de identidad depende SÓLO de BASE_URL / ' +
+      'A2A_SELF_HOSTS. Residual declarado (implementation-log §7), NO cobertura.',
+    'services/inbound-task.ts :: orchestrateService.orchestrate( #1':
+      'caller NO-HTTP: ruteo in-process de tareas entrantes, arma su propio ' +
+      '`OrchestrateRequest` sin request HTTP. Mismo residual que el tool MCP.',
+    'services/orchestrate.ts :: this.executeApprovedPlan( #1':
+      'NO construye un request nuevo: reenvía el MISMO `request` que recibió ' +
+      '`orchestrate()`, con el `selfHostHint` que le haya puesto su llamador. ' +
+      'Agregarle un hint acá sería un segundo lugar donde se decide la identidad.',
+  };
+
+  /** Quita comentarios para no contar una MENCIÓN como si fuera un call-site. */
+  function stripComments(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+  }
+
+  /** Texto de los argumentos de la llamada que abre en `openIdx`. */
+  function argsOf(src: string, openIdx: number): string {
+    let depth = 0;
+    for (let i = openIdx; i < src.length; i += 1) {
+      if (src[i] === '(') depth += 1;
+      else if (src[i] === ')') {
+        depth -= 1;
+        if (depth === 0) return src.slice(openIdx + 1, i);
+      }
+    }
+    return src.slice(openIdx + 1);
+  }
+
+  function listProductionSources(dir: string, out: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === '__tests__' || entry.name === 'node_modules')
+          continue;
+        listProductionSources(full, out);
+      } else if (
+        entry.name.endsWith('.ts') &&
+        !entry.name.endsWith('.test.ts') &&
+        !entry.name.endsWith('.d.ts')
+      ) {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  /** Todos los call-sites de producción, con su veredicto. */
+  function scan(): Array<{ key: string; hasHint: boolean }> {
+    const sites: Array<{ key: string; hasHint: boolean }> = [];
+    for (const file of listProductionSources(SRC_DIR).sort()) {
+      const rel = relative(SRC_DIR, file).split(sep).join('/');
+      const code = stripComments(readFileSync(file, 'utf8'));
+      for (const entry of ENTRYPOINTS) {
+        let from = 0;
+        let n = 0;
+        for (;;) {
+          const at = code.indexOf(entry, from);
+          if (at === -1) break;
+          n += 1;
+          const open = at + entry.length - 1;
+          sites.push({
+            key: `${rel} :: ${entry} #${n}`,
+            hasHint: argsOf(code, open).includes('selfHostHint'),
+          });
+          from = at + entry.length;
+        }
+      }
+    }
+    return sites;
+  }
+
+  it('T-HINT-CALLSITES: ningún call-site de producción sin `selfHostHint` sin excepción escrita', () => {
+    const sites = scan();
+
+    // ── CONTROLES, para que las dos aserciones de abajo no pasen en vacío ──────
+    // Si el escáner dejara de encontrar call-sites (un rename, un stripComments
+    // que se come el archivo), el `every` de más abajo sería trivialmente cierto.
+    expect(sites.length).toBeGreaterThanOrEqual(
+      Object.keys(SIN_HINT).length + 4,
+    );
+    // Los cuatro que HOY pasan el hint, nombrados: si uno se cae, se cae el test y
+    // no queda tapado por un total.
+    for (const esperado of [
+      'routes/compose.ts :: composeService.compose( #1',
+      'routes/orchestrate.ts :: orchestrateService.orchestrate( #1',
+      'routes/orchestrate.ts :: orchestrateService.executeApprovedPlan( #1',
+      'services/agent-link.ts :: orchestrateService.executeApprovedPlan( #1',
+    ]) {
+      const site = sites.find((s) => s.key === esperado);
+      expect(site, `call-site desaparecido: ${esperado}`).toBeDefined();
+      expect(site?.hasHint, `${esperado} dejó de pasar selfHostHint`).toBe(
+        true,
+      );
+    }
+
+    // ── LA ASERCIÓN ───────────────────────────────────────────────────────────
+    // Un call-site nuevo sin hint rompe acá, que es el punto entero del barrido.
+    const huerfanos = sites
+      .filter((s) => !s.hasHint && SIN_HINT[s.key] === undefined)
+      .map((s) => s.key);
+    expect(huerfanos).toEqual([]);
+
+    // ── Y la lista de excepciones no se puede pudrir hacia el otro lado ───────
+    const vivos = new Set(sites.filter((s) => !s.hasHint).map((s) => s.key));
+    expect(Object.keys(SIN_HINT).filter((k) => !vivos.has(k))).toEqual([]);
   });
 });
 

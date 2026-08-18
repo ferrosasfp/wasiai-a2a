@@ -375,7 +375,10 @@ describe('WKH-360 SITIO 2 — /orchestrate: el corte ocurre ANTES del débito de
     // byte-idéntico al de hoy cuando no hay NADA de identidad: ni un lookup de más.
     //
     // ⚠️ Desde el fix-pack (AR/CR BLQ-MED-1) esta rama ya NO es el camino HTTP: los
-    // routes pasan `selfHostHint`, así que por HTTP el conjunto nunca queda vacío.
+    // routes pasan `selfHostHint`. ⛔ "Los routes" es un CONJUNTO DE CALL-SITES y
+    // enumeró mal una vez: `POST /agents/links/:token/redeem` entra por HTTP y no
+    // bajaba el hint (AR-it2/BLQ-MED-1). Hoy lo enumera `T-HINT-CALLSITES`
+    // (`src/lib/contracting-chain.test.ts`), que se cae cuando aparece uno nuevo.
     // Lo que este `it` congela hoy es el camino NO-HTTP — el tool MCP
     // (`src/mcp/tools/orchestrate.ts`) y `services/inbound-task.ts`, que llaman al
     // service sin `FastifyRequest` y por lo tanto sin `Host` que pasar. ⛔ Para

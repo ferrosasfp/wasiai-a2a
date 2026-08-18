@@ -400,6 +400,17 @@ export function classifySelfHostsEnv():
  *      config, o sea de un valor que el caller influye — ver la salvedad en
  *      `resolveSelfHosts`.
  * Por eso setear `A2A_SELF_HOSTS` es **paso del deploy**, no una mejora opcional.
+ *
+ * ⚠️ **"POR HTTP" ES UNA AFIRMACIÓN SOBRE UN CONJUNTO DE CALL-SITES, NO SOBRE EL
+ * PROTOCOLO — y ya enumeró mal una vez.** El fix-pack 1 cableó el hint en
+ * `routes/compose.ts` y en las dos rutas de `routes/orchestrate.ts`, y esta misma
+ * lista se leía como cerrada mientras existía un TERCER caller HTTP sin hint:
+ * `POST /agents/links/:token/redeem` (público) → `services/agent-link.ts` →
+ * `executeApprovedPlan` (AR-it2/BLQ-MED-1), donde además **el bucle lo paga el que
+ * emitió el link**, no el caller. Lo que sostiene hoy la frase NO es la frase: es
+ * `T-HINT-CALLSITES` (`src/lib/contracting-chain.test.ts`), que enumera los
+ * call-sites de producción de `orchestrate`/`executeApprovedPlan`/`compose` y se
+ * cae cuando aparece uno nuevo sin `selfHostHint` sin excepción escrita.
  */
 export function assertSelfHostsEnv(): string | null {
   const status = classifySelfHostsEnv();

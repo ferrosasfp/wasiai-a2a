@@ -266,6 +266,17 @@ texto de la HU.**
   `src/services/inbound-task.ts` llaman al service in-process, sin `FastifyRequest` y
   por lo tanto sin `Host` que pasar: para esos dos el guard depende **sólo** de
   `BASE_URL` / `A2A_SELF_HOSTS`. Congelado en `T-L1+6`, `T-L1+9` y `T-PROP-2`.
+  ⚠️ **Esta línea enumeraba mal, y así estuvo escrita en seis lugares** (AR-it2 /
+  BLQ-MED-1): había un TERCER caller **HTTP** sin hint,
+  `POST /agents/links/:token/redeem` (público, `routes/agent-links.ts`) →
+  `services/agent-link.ts` → `executeApprovedPlan`, que con las dos envs ausentes
+  reproducía byte por byte el escenario que `T-L1-2c` congela como cerrado, y donde
+  **el bucle lo paga el que emitió el link**, no el caller anónimo. Cableado en el
+  fix-pack 2. ⛔ Lo que impide la próxima recurrencia **no es esta lista**: es
+  `T-HINT-CALLSITES` (`src/lib/contracting-chain.test.ts`), que enumera los
+  call-sites de producción de `orchestrate`/`executeApprovedPlan`/`compose` y se cae
+  cuando aparece uno nuevo sin `selfHostHint` que no tenga excepción escrita.
+  Testigos del cableado nuevo: `T-L1-2f`, `T-L1-2g`, `T-L1-2h`.
 - **Los ALIAS propios sin `A2A_SELF_HOSTS`.** El `Host` entrante cubre el host por el
   que entró la petición y ningún otro. Setear la env es **paso del deploy**.
 - **El eslabón que ANUNCIAMOS sin configuración.** Sin las dos envs, el `canonicalId`
