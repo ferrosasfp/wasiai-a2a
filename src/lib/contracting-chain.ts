@@ -294,6 +294,36 @@ function pickSingleHeader(
  *
  * ⛔ Esto NO cierra R-3: la comparación sigue siendo por NOMBRE. Que un operador
  * PUEDA declarar un literal no significa que el bypass por IP literal esté cerrado.
+ *
+ * ─── EL ORDEN DE LOS PASOS 6 Y 7 (fix-pack 2, AR-it2/BLQ-BAJO-1) ────────────
+ * El chequeo de vacío (paso 6) corría **antes** del strip del punto final (paso 7),
+ * así que el 7 fabricaba exactamente el vacío que el 6 existe para rechazar.
+ * Medido en `d9a8cbb`:
+ *
+ *     canonicalizeHost('.') === canonicalizeHost('。') === canonicalizeHost('%2e')
+ *        ⇒  ''       (string vacío, NO null)
+ *
+ * Y ese `''` no se quedaba quieto: entraba al conjunto de identidad como si fuera
+ * un host. Con `A2A_SELF_HOSTS=.`, medido:
+ *
+ *     classifySelfHostsEnv()        ⇒ {"state":"configured","hosts":[""]}
+ *     assertSelfHostsEnv()          ⇒ null        ← NINGÚN warn de arranque
+ *     readContractingGuardHealth()  ⇒ {"selfHostCount":1,"depthMax":2,"source":"env"}
+ *     isSelfDestination(url, [''])  ⇒ false       ← guard INERTE
+ *
+ * La tercera línea es **byte-idéntica a la de un deploy bien configurado**, y es la
+ * que `.env.example` designa como verificación post-deploy (NC-1). O sea: el
+ * operador sigue el procedimiento, ve la señal de éxito y el guard está apagado.
+ * **El único instrumento que la HU nombra era el que mentía.**
+ *
+ * Segundo efecto, sobre CD-18: `buildOutboundContractingHeaders` compara
+ * `canonicalId === null`, no falsy ⇒ con `canonicalId === ''` **sí emitíamos** una
+ * cadena que este mismo repo rechaza con `CONTRACTING_CHAIN_MALFORMED` (paso 3 del
+ * inbound) ⇒ cada invocación saliente hacia un gateway conforme se cae con 400 y la
+ * causa raíz se reporta como "configurado".
+ *
+ * Con el orden corregido esas tres entradas caen en `invalid`, y ahí `assertSelfHostsEnv`
+ * ya **tira** al arrancar, igual que con `'a b'`. Testigos: `T-U-HOST-8`, `T-ENV-5`.
  */
 export function canonicalizeHost(raw: string): string | null {
   // 1 · bordes: un valor con espacios es un valor que el operador escribió mal.
@@ -319,11 +349,15 @@ export function canonicalizeHost(raw: string): string | null {
     return null;
   }
   const host = parsed.hostname;
-  // 6 · host vacío.
-  if (host.length === 0) return null;
   // 7 ⚠️ EL PASO QUE NO EXISTE EN `canonicalizeHostKey` (CD-15). Sin esto,
   //     `https://<self>./compose` es un bypass de identidad de una tecla.
-  return host.endsWith('.') ? host.slice(0, -1) : host;
+  const stripped = host.endsWith('.') ? host.slice(0, -1) : host;
+  // 6 · host vacío. ⚠️ VA DESPUÉS DEL 7, Y ESE ORDEN ES EL ARREGLO
+  //     (AR-it2/BLQ-BAJO-1). Estaba antes, así que el paso 7 FABRICABA justo el
+  //     vacío que el 6 existe para rechazar: `'.'`, `'。'` y `'%2e'` daban `""`.
+  //     Ver el bloque del docblock para lo que ese `""` hacía aguas arriba.
+  if (stripped.length === 0) return null;
+  return stripped;
 }
 
 /**

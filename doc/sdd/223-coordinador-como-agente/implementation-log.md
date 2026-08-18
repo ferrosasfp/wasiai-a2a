@@ -313,6 +313,18 @@ texto de la HU.**
 - **`BASE_URL` en el Railway de prod** (NC-1). No se puede distinguir desde afuera.
   El diseño no depende de la respuesta (conjunto vacío ⇒ `warn`, no `throw`), y
   `GET /health` → `contractingGuard.selfHostCount` lo resuelve **después del deploy**.
+  ⚠️ **Ese instrumento —el único que NC-1 nombra— mentía** (AR-it2 / BLQ-BAJO-1):
+  `canonicalizeHost` corría el chequeo de vacío ANTES del strip del punto final, así
+  que `'.'`, `'。'` y `'%2e'` daban `""` en vez de `null`. Con `A2A_SELF_HOSTS=.`,
+  medido en `d9a8cbb`: `classifySelfHostsEnv()` ⇒ `{"state":"configured","hosts":[""]}`,
+  `assertSelfHostsEnv()` ⇒ `null` (sin warn de arranque) y `readContractingGuardHealth()`
+  ⇒ `{"selfHostCount":1,"depthMax":2,"source":"env"}` — **byte-idéntico al de un
+  deploy bien configurado**, con `isSelfDestination(url, [''])` ⇒ `false`, o sea el
+  guard inerte. Segundo efecto sobre CD-18: `buildOutboundContractingHeaders` compara
+  `=== null`, no falsy, así que con `canonicalId === ''` **emitíamos** una cadena que
+  este mismo repo rechaza con `CONTRACTING_CHAIN_MALFORMED`. Corregido en el fix-pack
+  2 (el vacío se chequea DESPUÉS del strip ⇒ esas entradas caen en `invalid` y el
+  arranque tira, como ya tiraba con `'a b'`). Testigos: `T-U-HOST-8`, `T-ENV-5`.
 - **`TRUST_PROXY` en prod** (NC-2). ⚠️ **Esta línea decía que sólo afecta la
   narrativa del DoS colateral, y quedó FALSA** (AR-it2 / BLQ-MED-2): con
   `trustProxy` activo `request.hostname` sale de **`X-Forwarded-Host`**, que es el

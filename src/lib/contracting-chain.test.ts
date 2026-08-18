@@ -140,6 +140,35 @@ describe('canonicalizeHost — las 6 variantes de host', () => {
     ).toBe(true);
   });
 
+  /**
+   * AR-it2 / BLQ-BAJO-1 — el paso 7 FABRICABA el vacío que el paso 6 rechaza.
+   *
+   * El chequeo de host vacío corría ANTES del strip del punto final, así que `'.'`
+   * pasaba el 6 con largo 1 y salía del 7 con largo 0. Medido en `d9a8cbb`:
+   * `canonicalizeHost('.') === ''` (string vacío, NO `null`), ídem `'。'` (punto
+   * ideográfico, que el parser normaliza) y `'%2e'` (punto percent-encoded).
+   *
+   * ⛔ Lo grave NO es el `''`: es lo que hacía aguas arriba. Con `A2A_SELF_HOSTS=.`
+   * el arranque NO avisaba y `GET /health` publicaba
+   * `{"selfHostCount":1,"source":"env"}` — **byte-idéntico a un deploy bien
+   * configurado**— con el guard inerte. Ese campo es el instrumento que NC-1
+   * designa para verificar la identidad DESPUÉS del deploy: el único que había,
+   * mintiendo. Ver `T-ENV-5`.
+   */
+  it('T-U-HOST-8 (AR-it2/BLQ-BAJO-1): las tres formas de un punto solo dan null, no ""', () => {
+    for (const raw of ['.', '。', '%2e']) {
+      const out = canonicalizeHost(raw);
+      // La aserción se escribe así y no con `toBeNull()` a secas para que el
+      // mensaje de fallo distinga `''` de `null`, que es EXACTAMENTE el bug.
+      expect(out, `canonicalizeHost(${JSON.stringify(raw)})`).toBe(null);
+      expect(out, `${JSON.stringify(raw)} no puede dar string vacío`).not.toBe(
+        '',
+      );
+    }
+    // Y el paso 7 sigue haciendo lo suyo: un host real con punto final se limpia.
+    expect(canonicalizeHost('gw.example.com.')).toBe('gw.example.com');
+  });
+
   it('T-U-HOST-5: rechaza bordes con espacios y el string vacío', () => {
     expect(canonicalizeHost(' gw.example.com')).toBeNull();
     expect(canonicalizeHost('gw.example.com ')).toBeNull();
@@ -716,6 +745,32 @@ describe('assertSelfHostsEnv — throw si ilegible, warn si vacío (patrón de a
     });
     // Que NO salgan los hosts es parte del contrato del campo: sale el conteo.
     expect(JSON.stringify(health)).not.toContain('gw.example.com');
+  });
+
+  /**
+   * AR-it2 / BLQ-BAJO-1 — la señal de éxito de `/health` era indistinguible de la
+   * de un deploy bien configurado, con el guard apagado.
+   *
+   * Este `it` congela las CUATRO consecuencias del `''`, no sólo el veredicto de
+   * `canonicalizeHost` (eso lo mide `T-U-HOST-8`): que el estado sea `invalid`, que
+   * el arranque TIRE como ya tira con `'a b'`, que `/health` no diga `source:'env'`
+   * y que el conjunto quede en cero en vez de en uno.
+   */
+  it('T-ENV-5 (AR-it2/BLQ-BAJO-1): `A2A_SELF_HOSTS=.` es `invalid`, no `configured`', () => {
+    process.env.A2A_SELF_HOSTS = '.';
+    expect(classifySelfHostsEnv().state).toBe('invalid');
+    // Mismo trato que `'a b'`: presente pero ilegible ⇒ no bootea.
+    expect(() => assertSelfHostsEnv()).toThrow(/MAL ESCRITA/);
+    // Y el instrumento post-deploy deja de mentir: `request-only`, no `env`.
+    expect(readContractingGuardHealth()).toEqual({
+      selfHostCount: 0,
+      depthMax: 2,
+      source: 'request-only',
+    });
+    // El eslabón que anunciaríamos ya no es `''` (que CD-18 dejaba pasar por
+    // comparar `=== null`) y por lo tanto no emitimos una cadena que este mismo
+    // repo rechaza con CONTRACTING_CHAIN_MALFORMED.
+    expect(resolveSelfHosts().canonicalId).toBeNull();
   });
 
   it('T-ENV-4: sólo `BASE_URL` alcanza para que NO haya warn', () => {
