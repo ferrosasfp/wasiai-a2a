@@ -5,11 +5,22 @@
  * ─── POR QUÉ ES UN MÓDULO LEAF (cero imports) ───────────────────────────────
  * Lo consumen CUATRO capas distintas: un route (`routes/compose.ts`), dos
  * services (`services/compose.ts`, `services/orchestrate.ts`) y un middleware
- * (`middleware/contracting-guard.ts`). Y **66 archivos de test mockean
- * `adapters/registry.js`** con factories sin `importOriginal`
- * (`grep -rl "vi.mock('../adapters/registry.js'" src --include=*.test.ts | wc -l`
- * ⇒ 66 en `8b1d07a`; **es una foto y crece sola** — decía 63 sin sha y envejeció
- * dentro de la propia HU). El mismo hazard con `../services/discovery.js` ya rompió
+ * (`middleware/contracting-guard.ts`). Y **hay archivos de test que mockean
+ * `adapters/registry.js` con factories sin `importOriginal`**, que es lo que
+ * dejaría este módulo en `undefined` si tuviera imports del repo.
+ *
+ * ⛔ ACÁ HABÍA UN TOTAL, Y ES LA TERCERA VERSIÓN DEL MISMO NÚMERO QUE ENVEJECE
+ * (AR-it2/MNR-1). Decía `63` sin sha; después `66` con sha `8b1d07a` **y con un
+ * comando publicado que devuelve 63**, porque ese comando sólo cuenta la forma
+ * `../` y hay 3 archivos con `../../`. Y el `66` tampoco describía lo que la frase
+ * afirmaba: al 2026-08-17, sha `c1989a1`, **66 archivos mockean el módulo pero
+ * sólo 58 lo hacen con un factory sin `importOriginal`** (derivado contando las
+ * dos profundidades y mirando si el factory recibe argumento).
+ *
+ * El invariante NO necesita el total: lo que sostiene la regla del leaf es que el
+ * conjunto **no es vacío y nadie lo mantiene**. Eso es lo que verifica
+ * `T-LEAF-MOCKS`; el número, si hace falta, se DERIVA — nunca se copia de acá.
+ * El mismo hazard con `../services/discovery.js` ya rompió
  * 12 y 84 tests en otra HU (`src/lib/discovery-fetch-limit.ts:1-11` lo documenta), y
  * el fix-pack de ESTA lo volvió a comer con `./agent-price.js`: 5 tests de
  * facturación en 500 porque un factory literal dejaba una export en `undefined`.
@@ -202,7 +213,13 @@ const DEPTH_MAX_ENV_CEILING = 64;
  */
 const DEPTH_MAX_ENV_FLOOR = 1;
 
-/** Largo máximo de un hostname según DNS. */
+/**
+ * Largo máximo de un hostname según DNS. Lo usan DOS cosas, y hasta el fix-pack 2
+ * era **sólo una**: el presupuesto del header de cadena (`chainHeaderMaxChars`,
+ * que asume este largo por eslabón) y —desde AR-it2/MNR-5— el paso 8 de
+ * `canonicalizeHost`. Con la constante declarada y no aplicada, el presupuesto
+ * hablaba de un límite que nada hacía cumplir.
+ */
 const MAX_HOSTNAME_CHARS = 253;
 
 /** Tope absoluto del header de cadena, independiente del techo configurado. */
@@ -357,6 +374,14 @@ export function canonicalizeHost(raw: string): string | null {
   //     vacío que el 6 existe para rechazar: `'.'`, `'。'` y `'%2e'` daban `""`.
   //     Ver el bloque del docblock para lo que ese `""` hacía aguas arriba.
   if (stripped.length === 0) return null;
+  // 8 · LARGO (AR-it2/MNR-5). `MAX_HOSTNAME_CHARS` estaba declarado y NO se aplicaba
+  //     acá: medido en `d9a8cbb`, `canonicalizeHost('a'.repeat(300))` devolvía los
+  //     300 caracteres enteros. El presupuesto del header de cadena
+  //     (`chainHeaderMaxChars`) asume 253 por eslabón, así que un eslabón más largo
+  //     nos hace EMITIR una cadena que supera el tope que el receptor aplica — y el
+  //     que rechaza es el otro gateway, con `CONTRACTING_CHAIN_MALFORMED`.
+  //     Va después del strip para no contar un punto final que ya no está.
+  if (stripped.length > MAX_HOSTNAME_CHARS) return null;
   return stripped;
 }
 
@@ -1052,9 +1077,10 @@ export function readCoordinatorFee(
  *   status + monto                 ⇒ eso se cobró en cascada.
  *   status `partial` sin monto     ⇒ hubo cascada y NINGUNO declaró cuánto.
  *   status `complete` SIN monto    ⇒ todos declararon, y el total es > 0 pero está
- *                                    por DEBAJO de la resolución publicada (1e-6).
- *                                    NO es cero: es "más chico de lo que este campo
- *                                    puede expresar".
+ *                                    por DEBAJO de la resolución publicada (1e-6),
+ *                                    o **no es publicable por otra razón** (suma no
+ *                                    finita, suma negativa). NO es cero: es "no hay
+ *                                    número que este campo pueda expresar".
  */
 export function rollUpCascadedFee(
   fees: ReadonlyArray<
@@ -1077,13 +1103,20 @@ export function rollUpCascadedFee(
   const status = anyUndeclared ? ('partial' as const) : ('complete' as const);
   // El número que SE IBA a publicar, calculado antes de decidir si se publica.
   const rounded = Number.isFinite(sum) ? Number(sum.toFixed(6)) : Number.NaN;
-  // Las TRES razones para omitirlo, todas con la misma consecuencia: se publica el
+  // Las CUATRO razones para omitirlo, todas con la misma consecuencia: se publica el
   // status y NO un número inventado.
   //  · nadie declaró monto ⇒ no hay suma que publicar;
   //  · la suma no es finita ⇒ `JSON.stringify` la sacaría como `null`;
   //  · el redondeo a 6 decimales la lleva a 0 ⇒ publicar 0 afirmaría "no cobraron
-  //    nada" sobre montos que SÍ fueron declarados y son > 0.
-  if (!Number.isFinite(rounded) || rounded === 0) {
+  //    nada" sobre montos que SÍ fueron declarados y son > 0;
+  //  · la suma es NEGATIVA (AR-it2/MNR-3). El corte es `<= 0` y no `=== 0`: medido
+  //    en `d9a8cbb`, `rollUpCascadedFee([{declared:true, usdc:-1}])` publicaba
+  //    **-1 con status `complete`**, o sea "los coordinadores te devolvieron plata,
+  //    y estoy seguro". El docblock de `readCoordinatorFee` defiende el caso
+  //    `Infinity` con "esta función no confía en su llamador"; para el SIGNO sí
+  //    confiaba. Inalcanzable desde producción —`readCoordinatorFee` exige
+  //    `amount > 0`— pero esta función es pura y exportada.
+  if (!Number.isFinite(rounded) || rounded <= 0) {
     return { cascadedOrchestrationFeeStatus: status };
   }
   return {

@@ -169,6 +169,22 @@ describe('canonicalizeHost — las 6 variantes de host', () => {
     expect(canonicalizeHost('gw.example.com.')).toBe('gw.example.com');
   });
 
+  /**
+   * AR-it2 / MNR-5 — `MAX_HOSTNAME_CHARS = 253` estaba declarado y no se aplicaba
+   * en `canonicalizeHost`: medido en `d9a8cbb`, `'a'.repeat(300)` salía entero.
+   * El presupuesto del header de cadena (`chainHeaderMaxChars`) asume 253 por
+   * eslabón, así que un eslabón más largo nos hace **emitir** una cadena que supera
+   * el tope que el receptor aplica — y el que la rechaza es el otro gateway.
+   */
+  it('T-U-HOST-9 (AR-it2/MNR-5): un host de más de 253 caracteres se rechaza', () => {
+    expect(canonicalizeHost('a'.repeat(300))).toBeNull();
+    // El borde exacto, de los dos lados: 253 pasa, 254 no.
+    expect(canonicalizeHost('a'.repeat(253))).toBe('a'.repeat(253));
+    expect(canonicalizeHost('a'.repeat(254))).toBeNull();
+    // El largo se mide DESPUÉS del strip del punto final: 253 + el punto pasa.
+    expect(canonicalizeHost(`${'a'.repeat(253)}.`)).toBe('a'.repeat(253));
+  });
+
   it('T-U-HOST-5: rechaza bordes con espacios y el string vacío', () => {
     expect(canonicalizeHost(' gw.example.com')).toBeNull();
     expect(canonicalizeHost('gw.example.com ')).toBeNull();
@@ -881,6 +897,54 @@ describe('El campo `contractingGuard` de /health está en LOS DOS handlers', () 
   });
 });
 
+describe('La regla del módulo LEAF, como invariante y no como total', () => {
+  /**
+   * AR-it2 / MNR-1 — el docblock de este módulo justificaba "cero imports" con un
+   * NÚMERO de archivos de test que mockean `adapters/registry.js`, y ese número fue
+   * mal **tres veces**: `63` sin sha, `66` con sha pero con un comando publicado que
+   * devuelve 63 (contaba sólo la forma `../`, y hay 3 con `../../`), y `66` descrito
+   * como "con factories sin `importOriginal`" cuando 8 de esos 66 sí lo usan.
+   *
+   * ⛔ Un total en un comentario es un dato que envejece solo y **nadie lo
+   * mantiene**. Lo que la regla del leaf necesita no es el total: es que el conjunto
+   * **no sea vacío**. Eso es lo que se verifica acá, y por eso este `it` no asserta
+   * ninguna cantidad — un piso `>= 1` no envejece, un `=== 66` sí.
+   */
+  const SRC_DIR = join(LIB_DIR, '..');
+
+  function listTests(dir: string, out: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) listTests(full, out);
+      else if (entry.name.endsWith('.test.ts')) out.push(full);
+    }
+    return out;
+  }
+
+  it('T-LEAF-MOCKS: existen tests que mockean `adapters/registry.js` sin `importOriginal`', () => {
+    const MOCK_RE =
+      /vi\.mock\('(?:\.\.\/)+adapters\/registry\.js',\s*(?:async\s*)?\(\s*\)/;
+    const sinImportOriginal = listTests(SRC_DIR).filter((f) =>
+      MOCK_RE.test(readFileSync(f, 'utf8')),
+    );
+
+    // LA ASERCIÓN: el conjunto no es vacío. Mientras haya UNO, un import del repo
+    // en `contracting-chain.ts` puede dejarlo `undefined` en esa suite.
+    expect(sinImportOriginal.length).toBeGreaterThan(0);
+
+    // CONTROL de que el regex no matchea por accidente: el archivo encontrado tiene
+    // que ser un `.test.ts` real y contener el mock textualmente.
+    const primero = sinImportOriginal[0] as string;
+    expect(primero.endsWith('.test.ts')).toBe(true);
+    expect(readFileSync(primero, 'utf8')).toContain('adapters/registry.js');
+
+    // Y el invariante que la regla realmente protege: este módulo no importa nada
+    // del repo, así que ninguna suite puede dejarlo `undefined`.
+    const leaf = readFileSync(join(LIB_DIR, 'contracting-chain.ts'), 'utf8');
+    expect(leaf).not.toMatch(/^import\s/m);
+  });
+});
+
 describe('Los dos `warn` de arranque se EMITEN (no sólo su texto)', () => {
   /**
    * ⚠️ AR-it2 / BLQ-BAJO-2 — el "avisa" del Cierre 3 no tenía ningún testigo.
@@ -1440,5 +1504,32 @@ describe('readCoordinatorFee / rollUpCascadedFee — AC-11 y CD-5', () => {
     expect(out).toEqual({ cascadedOrchestrationFeeStatus: 'complete' });
     // La aserción que importa: lo que se serializa no tiene un `null` de plata.
     expect(JSON.stringify(out)).not.toContain('null');
+  });
+
+  /**
+   * AR-it2 / MNR-3 — el signo. `readCoordinatorFee` exige `amount > 0`, así que
+   * desde producción no se llega; pero `rollUpCascadedFee` es **pura y exportada**,
+   * y su propio docblock defiende el caso `Infinity` con "no confía en su
+   * llamador". Para el signo sí confiaba: medido en `d9a8cbb`,
+   * `rollUpCascadedFee([{declared:true, usdc:-1}])` publicaba
+   * `{cascadedOrchestrationFeeUsdc: -1, status: 'complete'}` — un reintegro que
+   * nadie declaró, con status "estoy seguro".
+   */
+  it('T-U-ROLL-7 (AR-it2/MNR-3): una suma NEGATIVA se OMITE, no se publica', () => {
+    expect(rollUpCascadedFee([{ declared: true, usdc: -1 }])).toEqual({
+      cascadedOrchestrationFeeStatus: 'complete',
+    });
+    // Un negativo que hunde a otros montos legítimos tampoco se publica.
+    expect(
+      rollUpCascadedFee([
+        { declared: true, usdc: 1 },
+        { declared: true, usdc: -5 },
+      ]),
+    ).toEqual({ cascadedOrchestrationFeeStatus: 'complete' });
+    // CONTROL: el camino positivo sigue publicando (que el corte no se comió todo).
+    expect(rollUpCascadedFee([{ declared: true, usdc: 2 }])).toEqual({
+      cascadedOrchestrationFeeUsdc: 2,
+      cascadedOrchestrationFeeStatus: 'complete',
+    });
   });
 });

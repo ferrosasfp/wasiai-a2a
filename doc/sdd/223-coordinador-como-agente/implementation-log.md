@@ -171,11 +171,11 @@ Por eso la columna de destino es el **ANCLA TEXTUAL**: se busca ese texto y list
 | | `:1679` | `export interface AgentCard {` |
 | `src/services/compose.ts` | `:334` | `for (let i = 0; i < steps.length; i++) {` |
 | | `:376` | ⚠️ **AMBIGUA** — la línea base es `}`, que aparece 10 veces. Sin ancla útil |
-| | `:1424` | `const headers: Record<string, string> = {` |
+| | `:1424` | `····const headers: Record<string, string> = {` (⚠️ **con los 4 espacios de indentación**: sin ellos hits=2 — ver AR-it2/MNR-2) |
 | | `:1516` | `const response = await ssrfFetch(agent.invokeUrl, {` |
 | | `:1538` | `const data = (await response.json()) as Record<string, unknown>;` |
 | `src/routes/compose.ts` | `:688` | `async function resolveComposePriceHandler(` |
-| | `:867` | `...requirePaymentOrA2AKey(` |
+| | `:867` | `········...requirePaymentOrA2AKey(` (⚠️ **con los 8 espacios**: sin ellos hits=2, porque un comentario en `:748` la nombra — AR-it2/MNR-2) |
 | | `:1132` | `export default composeRoutes;` |
 | `src/services/orchestrate.ts` | `:1061` | `async executeApprovedPlan(` |
 | | `:1115` | ⚠️ **AMBIGUA** — `}`, 22 ocurrencias |
@@ -186,15 +186,53 @@ Por eso la columna de destino es el **ANCLA TEXTUAL**: se busca ese texto y list
 | `src/index.ts` | `:173` | ⚠️ **AMBIGUA** — `fastify.log.info(`, 2 ocurrencias |
 | | `:271` | `await fastify.register(discoverRoutes, { prefix: '/discover' });` |
 
-Las cinco filas marcadas ⚠️ **AMBIGUA** son exactamente el modo de falla que la
+Las cuatro filas marcadas ⚠️ **AMBIGUA** son exactamente el modo de falla que la
 advertencia vieja describía y que el mapa viejo igual publicaba como si fueran
 destinos ciertos: la línea de la cita es contenido genérico (`}`, `preHandler: [`), así
 que **ninguna herramienta puede decir a cuál se refería**. Se dejan marcadas en vez de
 resolverlas a ojo.
 
-Comando con el que se derivó esta tabla (compara `git show 3823580:<archivo>` contra el
-archivo de hoy por TEXTO EXACTO de la línea, y reporta 0, 1 o N coincidencias):
-`node -e` con `execSync('git show 3823580:'+f)` — ver el commit del fix-pack Grupo 6.
+### ⚠️ La unicidad del ancla NO se había verificado (AR-it2 / MNR-2)
+
+Se cambió un mecanismo que envejece (el número de línea) por uno que no envejece (el
+texto), y **no se verificó la propiedad que hace útil al segundo: que el ancla
+identifique UNA línea**. Medido en `c1989a1`, **2 de las 19 anclas tenían 2
+coincidencias** y ninguna de las dos estaba entre las marcadas AMBIGUA:
+
+| Ancla | hits | Por qué |
+|---|---|---|
+| `const headers: Record<string, string> = {` (`services/compose.ts`) | 2 → `[175, 1567]` | `:175` es otro `headers` que termina en `};` |
+| `...requirePaymentOrA2AKey(` (`routes/compose.ts`) | 2 → `[748, 931]` | `:748` es un **comentario que la nombra** |
+
+Las dos se desambiguaron **incluyendo la indentación** (verificado: hits=1 en las dos).
+El resto de la tabla da hits=1.
+
+**Comando de derivación — ahora cuenta los hits y marca AMBIGUA si ≠ 1.** El barrido
+que buscaba el texto sin contarlo podía dar por bueno un ancla que apunta a dos
+lugares, que es el modo de falla auto-confirmante de siempre: el destino equivocado
+casi siempre muestra prosa plausible.
+
+```js
+// La búsqueda es por SUBSTRING, que es como la usa un lector (grep / Ctrl-F).
+// hits === 1 -> ancla útil.  hits !== 1 -> AMBIGUA (0 = rota, N = no identifica).
+const fs = require('fs');
+for (const [f, a] of ANCLAS) {
+  const hits = [];
+  fs.readFileSync(f, 'utf8').split('\n').forEach((l, i) => {
+    if (l.includes(a)) hits.push(i + 1);
+  });
+  console.log(`${hits.length === 1 ? 'OK' : 'AMBIGUA'} hits=${hits.length} ${f} «${a}» ${JSON.stringify(hits)}`);
+}
+```
+
+⛔ Y esto sigue sin ser un control ejecutable: **nada corre ese script en `npm test`**.
+Es un procedimiento manual, igual que `scripts/eq-sweep.mjs`. Lo que cambió es que el
+procedimiento ahora mide la unicidad; que alguien lo corra no lo garantiza nada.
+
+Comando con el que se derivó la columna de citas (compara `git show 3823580:<archivo>`
+contra el archivo de hoy por TEXTO EXACTO de la línea, y reporta 0, 1 o N
+coincidencias): `node -e` con `execSync('git show 3823580:'+f)` — ver el commit del
+fix-pack Grupo 6.
 
 ---
 

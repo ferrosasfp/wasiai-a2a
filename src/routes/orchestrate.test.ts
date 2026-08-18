@@ -69,8 +69,12 @@ vi.mock('../middleware/forward-key.js', () => ({
 }));
 
 // ── WKH-131: mock agent-price (route /execute re-resuelve server-side) ──
+// AR-it2/MNR-6: se declara TODA export del módulo real. Un factory literal que omite
+// una la deja en `undefined` para toda la suite — el mismo patrón que en el fix-pack 1
+// puso 5 tests de facturación en 500 al omitir `resolveAgentDestination`.
 vi.mock('../services/agent-price.js', () => ({
   resolveAgentPriceUsdc: vi.fn().mockResolvedValue(0.05),
+  resolveAgentDestination: vi.fn().mockResolvedValue(null),
 }));
 
 // ── WKH-131: mock fee-charge (route /execute lee getProtocolFeeRate) ──

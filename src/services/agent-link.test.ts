@@ -15,8 +15,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../lib/supabase.js', () => ({
   supabase: { from: vi.fn(), rpc: vi.fn() },
 }));
+// AR-it2/MNR-6: el factory declara TODAS las exports que el módulo real tiene. Un
+// factory literal que omite una deja esa export en `undefined` para toda la suite, y
+// en el fix-pack 1 ese mismo patrón (con `resolveAgentDestination`) puso 5 tests de
+// facturación en 500. Hoy este archivo no toca `resolveAgentDestination`; la razón
+// para declararla igual es que la próxima ruta que la alcance no falle acá.
 vi.mock('./agent-price.js', () => ({
   resolveAgentPriceUsdc: vi.fn(),
+  resolveAgentDestination: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('./fee-charge.js', () => ({
   getProtocolFeeRate: () => 0.01,

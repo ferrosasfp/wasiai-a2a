@@ -1152,11 +1152,26 @@ export const orchestrateService = {
     // vivo (fix-pack CR/MNR-1). **Es falso**: ese cache NO cubre este camino.
     // El `Map` de `services/agent-price.ts` lo consulta ÚNICAMENTE
     // `resolveAgentPriceUsdc`; `resolveAgentDestination` llama
-    // `discoveryService.getAgent` DIRECTO. Lo que cuesta cada iteración es un
-    // SELECT a Supabase + **un `ssrfFetch` saliente por registry habilitado**, y
-    // hasta el doble si el primer intento con `registry` no matchea (hay un segundo
-    // `getAgent` sin registry). Para un plan de 5 steps: hasta 5 SELECT + 10
-    // fetches, **secuenciales y antes del débito**.
+    // `discoveryService.getAgent` DIRECTO.
+    //
+    // ⚠️ Y la cuenta anterior decía "hasta 5 SELECT + 10 fetches" para 5 steps, que
+    // **subestima el lado de la DB** (AR-it2/MNR-4). Un `getAgent` no es UN SELECT:
+    //   · `publishedAgentService.getBySlugAsAgent` — SELECT sobre `a2a_agents`
+    //     (`services/agent.ts:526`), y sólo se saltea si vino un `registry` que no
+    //     es el self-published;
+    //   · más el de registries: `registryService.getEnabled()` — SELECT sobre
+    //     `registries` **sin cache** (`services/registry.ts:463`) cuando no hay
+    //     `registry`, o `getWithSecrets(registryId)` cuando sí lo hay.
+    // O sea **hasta 2 SELECT por `getAgent`**, y `resolveAgentDestination` puede
+    // llamar `getAgent` DOS veces (el segundo intento sin `registry`, línea
+    // `agent-price.ts:125`) ⇒ **hasta 4 SELECT por step**. Para un plan de 5 steps
+    // el techo son **20 SELECT**, no 5, más un `ssrfFetch` saliente por registry
+    // habilitado en cada `getAgent` que llegue al fanout. Todo **secuencial y antes
+    // del débito**.
+    //
+    // El piso no se publica como número porque depende de qué steps traen `registry`
+    // y de cuántos resuelven local-first; lo que hay que saber para decidir es el
+    // TECHO, y el techo es el de arriba.
     //
     // Se deja así, y no detrás de un cache nuevo, por dos razones: (a) el dato
     // tiene que ser FRESCO — el catálogo puede cambiar entre el preflight y la
