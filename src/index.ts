@@ -21,8 +21,8 @@ import {
 import { warmSolanaSchemaPreflight } from './adapters/solana/schema-preflight.js';
 import {
   assertSelfHostsEnv,
+  contractingDepthMaxWarning,
   DEPTH_MAX_ENV,
-  isContractingDepthMaxMisconfigured,
   readContractingGuardHealth,
   resolveContractingDepthMax,
   resolveSelfHosts,
@@ -107,7 +107,13 @@ const selfHostsWarning = assertSelfHostsEnv();
 // de acá abajo — ilegible hace fail-closed AL DEFAULT DEL CÓDIGO (nunca "sin techo"),
 // pero eso no puede ser mudo: `A2A_CONTRACTING_DEPTH_MAX=1O` y la env sin setear se
 // comportan igual y se ven igual, y el operador creería tener puesto otro número.
-const contractingDepthMisconfigured = isContractingDepthMaxMisconfigured();
+//
+// Devuelve el TEXTO y no un booleano (fix-pack AR/BLQ-MED-3): los motivos por los que
+// el techo configurado no se usa necesitan mensajes DISTINTOS. Un `0` no es un typo
+// —es legible— y decirle al operador "tu valor no está haciendo nada" lo manda a
+// buscar un error de tipeo que no existe; lo que necesita leer es que un 0 habría
+// cerrado el 100% del tráfico y que para apagar el servicio no es por acá.
+const contractingDepthWarning = contractingDepthMaxWarning();
 
 // Initialize chain-adaptive adapters before server starts
 await initAdapters();
@@ -195,17 +201,13 @@ if (selfHostsWarning !== null) {
   fastify.log.warn(`⚠️  ${selfHostsWarning}`);
 }
 
-if (contractingDepthMisconfigured) {
+if (contractingDepthWarning !== null) {
   fastify.log.warn(
     {
       setting: DEPTH_MAX_ENV,
       effective: resolveContractingDepthMax(),
     },
-    '⚠️  A2A_CONTRACTING_DEPTH_MAX esta SETEADA pero es ilegible (no es un entero ' +
-      'de 1 a 3 digitos en [0, 64]) — el gateway esta usando el DEFAULT DEL CODIGO, ' +
-      'no el numero que configuraste. Fail-closed al default es deliberado (un techo ' +
-      'que se cae a "sin limite" seria el guard apagado), pero el valor que pusiste ' +
-      'no esta haciendo nada. Ver .env.example.',
+    `⚠️  ${contractingDepthWarning}`,
   );
 }
 

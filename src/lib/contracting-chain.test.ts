@@ -26,8 +26,8 @@ import {
   CONTRACTING_LOOP_DETECTED,
   canonicalizeHost,
   classifySelfHostsEnv,
+  contractingDepthMaxWarning,
   DEFAULT_CONTRACTING_DEPTH_MAX,
-  isContractingDepthMaxMisconfigured,
   isSelfDestination,
   readContractingGuardHealth,
   readCoordinatorFee,
@@ -474,14 +474,21 @@ describe('resolveContractingDepthMax — fail-closed al default DEL CÓDIGO', ()
   it('T-U-MAX-2: valor legible en rango ⇒ ese valor', () => {
     process.env.A2A_CONTRACTING_DEPTH_MAX = '3';
     expect(resolveContractingDepthMax()).toBe(3);
-    expect(isContractingDepthMaxMisconfigured()).toBe(false);
+    expect(contractingDepthMaxWarning()).toBeNull();
+    // El borde bajo del rango aceptado: 1 SÍ se obedece y no avisa.
+    process.env.A2A_CONTRACTING_DEPTH_MAX = '1';
+    expect(resolveContractingDepthMax()).toBe(1);
+    expect(contractingDepthMaxWarning()).toBeNull();
   });
 
-  it('T-U-MAX-3: ilegible ⇒ default + misconfigured=true (NO sin techo)', () => {
-    for (const raw of ['abc', '1e9', '-1', '2.5', '1000', '0x10']) {
+  it('T-U-MAX-3: ilegible ⇒ default + warn (NO sin techo)', () => {
+    const cases = ['abc', '1e9', '-1', '2.5', '1000', '0x10'];
+    // Conteo asserteado: borrar una fila tiene que ponerse en rojo (CR/MNR-5).
+    expect(cases).toHaveLength(6);
+    for (const raw of cases) {
       process.env.A2A_CONTRACTING_DEPTH_MAX = raw;
       expect(resolveContractingDepthMax(), `raw=${raw}`).toBe(2);
-      expect(isContractingDepthMaxMisconfigured(), `raw=${raw}`).toBe(true);
+      expect(contractingDepthMaxWarning(), `raw=${raw}`).toContain('ILEGIBLE');
     }
   });
 
@@ -494,7 +501,7 @@ describe('resolveContractingDepthMax — fail-closed al default DEL CÓDIGO', ()
     // ante cualquier cosa que no sean dígitos.
     process.env.A2A_CONTRACTING_DEPTH_MAX = ' 2';
     expect(resolveContractingDepthMax()).toBe(2);
-    expect(isContractingDepthMaxMisconfigured()).toBe(false);
+    expect(contractingDepthMaxWarning()).toBeNull();
 
     // el mismo string, en el header, se RECHAZA
     const v = read(undefined, ' 2');
@@ -502,28 +509,48 @@ describe('resolveContractingDepthMax — fail-closed al default DEL CÓDIGO', ()
     if (!v.ok) expect(v.code).toBe(CONTRACTING_DEPTH_MALFORMED);
   });
 
-  it('T-U-MAX-4: por encima del tope de 64 ⇒ default + misconfigured', () => {
+  it('T-U-MAX-4: por encima del tope de 64 ⇒ default + warn que dice el tope', () => {
     process.env.A2A_CONTRACTING_DEPTH_MAX = '65';
     expect(resolveContractingDepthMax()).toBe(2);
-    expect(isContractingDepthMaxMisconfigured()).toBe(true);
+    expect(contractingDepthMaxWarning()).toContain('64');
   });
 
   it('T-U-MAX-5: vacía ⇒ default, y NO cuenta como mal escrita', () => {
     process.env.A2A_CONTRACTING_DEPTH_MAX = '  ';
     expect(resolveContractingDepthMax()).toBe(2);
-    expect(isContractingDepthMaxMisconfigured()).toBe(false);
+    expect(contractingDepthMaxWarning()).toBeNull();
   });
 
-  it('T-U-MAX-6: `0` es LEGIBLE y su consecuencia es cerrar el servicio', () => {
-    // No es un "sin límite extra": con techo 0 todo caller directo (depth 0)
-    // cae en `depth >= depthMax`. Queda documentado acá y en `.env.example`
-    // para que nadie lo lea como un no-op.
+  /**
+   * Fix-pack AR/BLQ-MED-3. Antes de esto `0` se OBEDECÍA (el rango publicado era
+   * `[0,64]`), era LEGIBLE —así que no había warn de arranque— y su consecuencia
+   * era cerrar el servicio entero. La razón por la que no alcanzaba con
+   * documentarlo: en este repo `maxBudget: 0` y el ceiling de exposición ausente
+   * significan SIN LÍMITE, así que un `0` acá es casi siempre alguien pidiendo
+   * "sin tope" y apagando el money-path.
+   */
+  it('T-U-MAX-6: `0` NO se obedece — cae al default y AVISA', () => {
     process.env.A2A_CONTRACTING_DEPTH_MAX = '0';
-    expect(resolveContractingDepthMax()).toBe(0);
-    expect(isContractingDepthMaxMisconfigured()).toBe(false);
+    expect(resolveContractingDepthMax()).toBe(2);
+    const warning = contractingDepthMaxWarning();
+    // El texto tiene que decir las dos cosas que el operador necesita saber.
+    expect(warning).toContain('100% DEL TRAFICO');
+    expect(warning).toContain('se apaga el deploy');
+    // …y hacia dónde ir si de verdad quería el ajuste más restrictivo.
+    expect(warning).toContain('es 1');
+  });
+
+  it('T-U-MAX-6b: por qué 0 sería fatal — el corte es `>=`, no `>`', () => {
+    // ⚠️ Esta es la MEDICIÓN que justifica el `it` de arriba, y por eso llama a
+    // `readInboundContracting` con el techo COMO ARGUMENTO en vez de por env: lo
+    // que la env ya no permite es SETEARLO, no que la función lo acepte. Si algún
+    // día el corte pasa a `>`, este `it` se pone en rojo y el de arriba pierde su
+    // fundamento — que es exactamente lo que se quiere que se note.
     const v = read(undefined, undefined, ['gw.example.com'], 0);
     expect(v.ok).toBe(false);
     if (!v.ok) expect(v.code).toBe(CONTRACTING_DEPTH_EXCEEDED);
+    // Un caller directo, sin ningún header: el 100% del tráfico de hoy.
+    expect(read(undefined, undefined, ['gw.example.com'], 1).ok).toBe(true);
   });
 });
 

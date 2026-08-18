@@ -126,6 +126,12 @@ curl -s "$GW/.well-known/agent.json" | jq '{schemes: .authentication.schemes, co
 curl -s "$GW/.well-known/agent.json" | jq '.contracting.depthMax'
 ```
 
-⚠️ **`A2A_CONTRACTING_DEPTH_MAX=0` no es "sin límite extra": es el servicio
-cerrado.** Un caller directo tiene profundidad 0 y el corte es `depth >= techo`, así
-que con 0 se rechaza el 100% del tráfico. No sirve como interruptor de emergencia.
+⚠️ **`A2A_CONTRACTING_DEPTH_MAX=0` NO SE OBEDECE** (fix-pack AR/BLQ-MED-3; antes de
+eso el rango aceptado era `[0,64]` y el `0` se aplicaba tal cual). Con techo 0 se
+rechazaría el 100% del tráfico: un caller directo tiene profundidad 0 y el corte es
+`depth >= techo`. Como en este repo un `0` significa **sin límite** en las formas
+vecinas (`maxBudget`, `PIPELINE_EXPOSURE_CEILING_USD`), un `0` acá es casi siempre
+alguien pidiendo "sin tope" y apagando el money-path entero — y era **silencioso**,
+porque `0` es un valor legible y el warn de arranque no salía. Ahora cae al default
+(2) **y avisa con un texto propio**. Rango aceptado: **`[1, 64]`**. Para apagar el
+servicio no es por acá: se apaga el deploy.

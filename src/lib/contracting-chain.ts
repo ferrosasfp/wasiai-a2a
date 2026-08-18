@@ -171,6 +171,13 @@ export const DEFAULT_CONTRACTING_DEPTH_MAX = 2;
 /** Techo máximo aceptable para la env (un techo enorme es un techo apagado). */
 const DEPTH_MAX_ENV_CEILING = 64;
 
+/**
+ * Techo MÍNIMO aceptable para la env. `0` cerraría el 100% del tráfico y en este
+ * repo un `0` significa "sin límite" en las formas vecinas; `1` es el ajuste más
+ * restrictivo con caso de uso. Ver el bloque de `resolveContractingDepthMax`.
+ */
+const DEPTH_MAX_ENV_FLOOR = 1;
+
 /** Largo máximo de un hostname según DNS. */
 const MAX_HOSTNAME_CHARS = 253;
 
@@ -401,12 +408,27 @@ export function resolveSelfHosts(hint?: string): {
  *
  * Un techo que cae al default EN SILENCIO es el caso en el que el operador cree
  * tener otro número, así que el arranque además avisa —
- * ver `isContractingDepthMaxMisconfigured`.
+ * ver `contractingDepthMaxWarning`.
  *
- * ⚠️ `0` es un valor LEGIBLE y su consecuencia es total: con techo 0 se rechaza
- * el 100% del tráfico (un caller directo tiene profundidad 0 y el corte es
- * `depth >= depthMax`). No es un "sin límite extra": es el servicio cerrado. Está
- * dicho también en `.env.example`.
+ * ─── POR QUÉ `0` NO ES UN VALOR ACEPTADO (fix-pack, AR/BLQ-MED-3) ──────────
+ * Acá `0` se trataba como legible, y el rango publicado era `[0, 64]`. Medido:
+ * `readInboundContracting(sin headers, [self], 0)` ⇒ `CONTRACTING_DEPTH_EXCEEDED`,
+ * o sea **el 100% del tráfico rechazado** — un caller directo tiene profundidad 0
+ * y el corte es `depth >= depthMax`. Las tres razones por las que ahora cae al
+ * default en vez de obedecerse:
+ *
+ *  1 · **El repo enseña lo contrario para esta MISMA forma.** `maxBudget: 0` y el
+ *      ceiling de exposición ausente significan *sin límite* (ver la tabla de
+ *      arriba). Un operador que escribe `0` pidiendo "sin tope" **apagaría el
+ *      money-path entero**, que es lo más lejos posible de lo que pidió.
+ *  2 · **No había señal de arranque**: `0` era legible, así que el warn no salía.
+ *      El único síntoma era un 400 cuyo texto manda a buscar un bucle **en el
+ *      caller**, o sea el lugar equivocado.
+ *  3 · **No existe caso de uso**: `1` ya es el ajuste más restrictivo útil (prohíbe
+ *      que un coordinador que nos contrata contrate a otro).
+ *
+ * Para apagar el servicio no es por acá: se apaga el deploy. Rango aceptado:
+ * `[1, 64]`. Testigos: `T-U-MAX-6` y `T-U-MAX-6b`.
  *
  * ⚠️ ASIMETRÍA DELIBERADA con el paso 4 de `readInboundContracting`, y NO se
  * unifican: acá el valor se `trim`ea y en el header NO. CD-14 prohíbe el parseo
@@ -426,21 +448,64 @@ export function resolveContractingDepthMax(): number {
   }
   const value = digitsToInt(trimmed);
   if (value > DEPTH_MAX_ENV_CEILING) return DEFAULT_CONTRACTING_DEPTH_MAX;
+  // `0` NO se obedece: cerraría el 100% del tráfico. Ver el bloque del docblock.
+  if (value < DEPTH_MAX_ENV_FLOOR) return DEFAULT_CONTRACTING_DEPTH_MAX;
   return value;
 }
 
 /**
- * ¿El techo configurado es ilegible y por lo tanto se está usando el default?
- * Alimenta un `warn` de arranque: sin él, el operador que escribió `'abc'` cree
- * tener un techo puesto.
+ * El texto del `warn` de arranque cuando el techo configurado NO se está usando, o
+ * `null` si el valor efectivo es el que el operador escribió.
+ *
+ * ⚠️ Devuelve el TEXTO y no un `boolean`, y el cambio es del fix-pack
+ * (AR/BLQ-MED-3). Antes esto era `isContractingDepthMaxMisconfigured(): boolean` y
+ * el booleano **no podía distinguir los dos motivos**, que necesitan mensajes
+ * distintos y hasta opuestos:
+ *  · ilegible (`'1O'`) ⇒ "el valor que pusiste no está haciendo nada";
+ *  · `0` ⇒ "el valor que pusiste **cerraría el servicio**, y para apagarlo no es
+ *    por acá".
+ * Un operador que lee el primer texto ante un `0` sale a buscar un typo que no
+ * existe. MISMO contrato que `assertSelfHostsEnv()` de este archivo, que ya
+ * devuelve `string | null` para exactamente este uso.
  */
-export function isContractingDepthMaxMisconfigured(): boolean {
+export function contractingDepthMaxWarning(): string | null {
   const raw = process.env[DEPTH_MAX_ENV];
-  if (raw === undefined) return false;
+  if (raw === undefined) return null;
   const trimmed = raw.trim();
-  if (trimmed.length === 0) return false;
-  if (!DECIMAL_1_TO_3_DIGITS.test(trimmed)) return true;
-  return digitsToInt(trimmed) > DEPTH_MAX_ENV_CEILING;
+  if (trimmed.length === 0) return null;
+
+  const common =
+    `El gateway esta usando el DEFAULT DEL CODIGO (${DEFAULT_CONTRACTING_DEPTH_MAX}), ` +
+    `no el numero que configuraste. Rango aceptado: enteros de ` +
+    `${DEPTH_MAX_ENV_FLOOR} a ${DEPTH_MAX_ENV_CEILING}. Ver .env.example.`;
+
+  if (!DECIMAL_1_TO_3_DIGITS.test(trimmed)) {
+    return (
+      `${DEPTH_MAX_ENV} esta SETEADA pero es ILEGIBLE ("${trimmed}"). ` +
+      'Fail-closed al default es deliberado (un techo que se cae a "sin limite" ' +
+      `seria el guard apagado), pero el valor que pusiste no esta haciendo nada. ${common}`
+    );
+  }
+  const value = digitsToInt(trimmed);
+  if (value < DEPTH_MAX_ENV_FLOOR) {
+    return (
+      `${DEPTH_MAX_ENV}=0 NO SE OBEDECE, a proposito. Con techo 0 se rechazaria ` +
+      'el 100% DEL TRAFICO: un caller directo tiene profundidad 0 y el corte es ' +
+      '`depth >= techo`. En este repo un 0 significa SIN LIMITE en las formas ' +
+      'vecinas (maxBudget, el ceiling de exposicion), asi que un 0 aca es casi ' +
+      'siempre alguien pidiendo "sin tope" y apagando el money-path entero. ' +
+      'Para apagar el servicio no es por aca: se apaga el deploy. ' +
+      `Si querias el ajuste mas restrictivo util, es 1. ${common}`
+    );
+  }
+  if (value > DEPTH_MAX_ENV_CEILING) {
+    return (
+      `${DEPTH_MAX_ENV}=${value} supera el tope de ${DEPTH_MAX_ENV_CEILING} ` +
+      '(un techo enorme es un techo apagado, y el costo del bucle crece x5 por ' +
+      `nivel). ${common}`
+    );
+  }
+  return null;
 }
 
 /**

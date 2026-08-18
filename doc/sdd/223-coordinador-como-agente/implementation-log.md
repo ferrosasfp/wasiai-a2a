@@ -169,12 +169,11 @@ El Story File listaba 3; **el cuarto** (`src/services/agent-price.test.ts`,
    §3.1 no enumera.** Se agregaron porque `/health` está **duplicado** (prod + e2e) y
    el rollup tiene **tres** call-sites: en los dos casos, dos expresiones a mano
    divergen. Ningún export de §3.1 fue renombrado ni removido.
-4. **`A2A_CONTRACTING_DEPTH_MAX=0` es legible y cierra el servicio** (rechaza el 100%
-   del tráfico, porque un caller directo tiene profundidad 0 y el corte es `>=`). El
-   rango `[0,64]` es el que el Story File especifica, así que se implementó tal cual,
-   **pero la consecuencia quedó escrita** en el docblock, en `.env.example`, en el doc
-   de decisiones y en un test (`T-U-MAX-6`). **Candidato a que AR decida si `0` debe
-   ser inválido.**
+4. ~~**`A2A_CONTRACTING_DEPTH_MAX=0` es legible y cierra el servicio**~~ — **RESUELTO
+   en el fix-pack (§9, Grupo 3). El AR lo RECHAZÓ y su veredicto prevalece sobre el
+   del CR, que lo había ratificado.** Se había implementado el rango `[0,64]` que
+   especifica el Story File, con la consecuencia sólo DOCUMENTADA. Hoy `0` **cae al
+   default y avisa**; rango aceptado `[1,64]`. Ver §9.
 5. **Asimetría deliberada en el parseo de la profundidad**: la ENV se `trim`ea y el
    HEADER no. CD-14 aplica al header (lo controla un tercero); la env la escribe el
    operador. Fijada con `T-U-MAX-7` para que nadie las "unifique por consistencia".
