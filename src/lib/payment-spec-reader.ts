@@ -4,7 +4,7 @@
  * Módulo LEAF: importa SOLO `normalizeChainSlug` (`../adapters/chain-resolver.js`,
  * resolver puro) + el tipo `AgentPaymentSpec` (import type, borrado en runtime).
  * CERO imports de servicios — `discovery.ts` ya importa `publishedAgentService`
- * de `agent.ts` (`discovery.ts:23`), así que exportar el lector desde
+ * de `agent.ts` (`discovery.ts:63`), así que exportar el lector desde
  * `discovery.ts` habría creado un ciclo de módulos (WKH-241 DT-1). Mismo patrón
  * leaf que `wallet-format.ts` / `chain-resolver.ts` / `price.ts`.
  *

@@ -491,7 +491,7 @@ async function chargeLeg(
         evidenceHash,
       );
       // Seguro por construcción: un leg `failed` corta en el return temprano de
-      // `settleFeeSplits` (:316) y NUNCA llega al `priorTx` de :335, así que este
+      // `settleFeeSplits` (:316) y NUNCA llega al `priorTx` de :336, así que este
       // hash no puede promoverse a `settlement.txHash` (candado T-FEE-201-E).
       return evidenceHash !== undefined
         ? { ...base, txHash: evidenceHash, error: errMsg }

@@ -1,0 +1,1685 @@
+/**
+ * Guardián: toda cita `archivo:línea` escrita en los 14 archivos del Corte A
+ * está DECLARADA A MANO en `test/cited-lines-guard.citations.ts` con (a) el
+ * texto que esa línea tiene que contener y (b) el camino de símbolos que la
+ * contiene; y `npm test` se pone en ROJO cuando el texto se movió, cuando la
+ * declaración es ambigua, cuando el archivo citado es el equivocado, o cuando
+ * aparece una cita nueva sin declarar.
+ *
+ * ⚠️ EL BUG QUE ESTE TEST EXISTE PARA CAZAR (medido, no supuesto).
+ * Hoy NINGÚN test de este repo puede ponerse rojo porque un comentario, un
+ * docblock o un nombre de test apunten a la línea equivocada. El guardián
+ * estructural más nuevo del repo, `test/payment-guards-live-in-one-place.test.ts`,
+ * BORRA los comentarios antes de mirar (`codeOnly`, `:45`) — y tiene que
+ * hacerlo, su docblock `:16-20` explica el falso positivo que lo obliga. O sea
+ * que el agujero no es un descuido: es estructural.
+ *
+ * Y la tasa de defecto NO es de gente distraída. Los propios artefactos de esta
+ * HU se midieron a sí mismos: el SDD encontró 2 citas mal de ~60 propias, una de
+ * ellas por copiar un número de otro documento en vez de abrir el archivo — la
+ * violación literal de la regla que estaba redactando en ese momento. El Story
+ * File encontró una tercera, y de un tipo peor: el SDD había declarado FALSA una
+ * cita que era CORRECTA (`tsconfig.json:19`), o sea que aplicar esa «corrección»
+ * habría metido una cita falsa dentro de la HU que existe para sacarlas.
+ * 3 de ~60 (5 %) en el mejor caso posible: roles dedicados, concentrados,
+ * escribiendo el documento que define cómo no cometer ese error.
+ *
+ * CÓMO DECIDE. El universo de citas NO se declara: se DERIVA en cada corrida,
+ * barriendo los 14 paths con las cuatro formas sintácticas del escáner. Lo único
+ * escrito a mano es la AFIRMACIÓN sobre cada cita (`mustContain` + `symbolPath`).
+ * Esa asimetría es todo el diseño: derivar la afirmación del contenido actual de
+ * la línea daría verde siempre, incluso después de que una inserción corriera el
+ * archivo y la cita pasara a apuntar a otra cosa — que es justo el accidente que
+ * hay que cazar.
+ *
+ * ── 🎯 EL REGISTRO NO GUARDA LA LÍNEA DEL CITADOR ──────────────────────────
+ *
+ * La clave es `{from, cite-token}`; la línea del citador se DERIVA. Guardar un
+ * `fromLine` sería construir, dentro del arreglo, el defecto que el arreglo
+ * arregla. El mensaje de error SÍ imprime la línea derivada; el registro no la
+ * guarda.
+ *
+ * ── LA COBERTURA HONESTA, QUE SE PUBLICA A PROPÓSITO ───────────────────────
+ *
+ * El corte se aprobó declarando que cubría el **6,0 %** de las anclas de
+ * `src`+`test` (45 de 749 medidas por el SDD) y el **0,21 %** del repo entero
+ * (~21.300 anclas, de las cuales `doc/` trackeado aporta ~20.550 en 736
+ * citadores). Esos dos porcentajes se publican porque el corte se aprobó con
+ * ellos, y hay que leerlos con esta advertencia:
+ *
+ * ⚠️ **EL NUMERADOR Y EL DENOMINADOR SON LOS DOS PISOS, así que el porcentaje no
+ * es confiable en NINGUNA de las dos direcciones.** El numerador medido acá no
+ * es 45 (ver más abajo), y el denominador 749 salió del MISMO escáner que se
+ * comía los dotfiles, así que también está subestimado. La conclusión que sí se
+ * sostiene, y es la única que importa: **lo que este guardián NO cubre es la
+ * abrumadora mayoría de las citas del repo.**
+ *
+ * ⛔ LA FRASE PROHIBIDA es «las citas del repo están verificadas». La única
+ * frase admisible es: **«estas citas no pueden mentir sin que la suite se
+ * caiga»**. Un guardián verde sobre el 6 % que se presenta como cobertura es
+ * exactamente la prosa que afirma de más que esta HU existe para cazar.
+ *
+ * La cobertura crece por TRINQUETE, no por campaña: `G-C4` obliga a declarar
+ * cada cita nueva en el momento en que se escribe, que es cuando es barata.
+ * Nadie tiene que acordarse de nada.
+ *
+ * ── ⚠️ TODO NÚMERO DE ACÁ ES UNA FOTO. DERIVALO, NO LO CITES ───────────────
+ *
+ * 45, 749, 20.550, 6,0 %, 0,21 % son mediciones de un día concreto, y los
+ * controles de `G-C1` son PISOS: envejecen en silencio, que es exactamente el
+ * defecto de esta clase. Para derivar el número de hoy: correr `scanSource`
+ * sobre `CORTE_A_PATHS` y contar (es lo que hace `FOUND`, más abajo). Si este
+ * párrafo y `FOUND.length` no coinciden, el que tiene razón es `FOUND.length`.
+ *
+ * 🔴 Medido en la implementación: barriendo los 14 paths, el total NO es 45,
+ * **es 57**, de los cuales 53 son claves `{from, cite}` distintas: 50
+ * declaradas + 3 falsos positivos. (Las 4 ocurrencias de diferencia son tokens
+ * repetidos dentro del mismo citador — ver el punto 13.)
+ *
+ * ⚠️ Y el desglose por forma de HOY es **P1=15 · P2=19 · P3=16 · P4=7**, que NO
+ * es el que tenía el árbol al empezar: una de las correcciones de esta misma HU
+ * (`compose.ts:130` → `src/services/compose.ts:571`) le agregó el directorio al
+ * token y lo movió de P2 a P1. Escribí «P1=14 P2=20» acá y **ya estaba viejo por
+ * mi propia edición, en la misma sesión**; lo cazó derivarlo, no releerlo. Es el
+ * fenómeno de esta HU aplicándose a esta HU, y por eso el desglose se deriva.
+ *
+ * ANTES de las correcciones, las formas P1, P2 y P3 coincidían EXACTAMENTE,
+ * archivo por archivo, con las dos derivaciones previas (14 / 12 / 16). La
+ * diferencia entera estaba en dos poblaciones que esas derivaciones no veían:
+ *
+ *   · **+8 citas REALES a un DOTFILE** (`.gitignore:172` y compañía, en
+ *     `test/sdd-index-matches-folders.exceptions.ts`). Los dos escáneres
+ *     anteriores exigían un nombre ANTES del punto de la extensión, y
+ *     `.gitignore` no lo tiene. Ésta es la falla compartida que el Story File
+ *     anticipó al declarar la concordancia entre los dos escáneres previos como
+ *     CONCORDANCIA y no como prueba: «los dos salen de la misma spec, pueden
+ *     compartir defecto». Compartían éste. **Y las 8 citas están MAL**, las
+ *     cinco corridas exactamente +13 líneas.
+ *   · **+4 tokens de RUIDO** en la forma P4 (`{reputation:100}`, `minLength:1`,
+ *     y dos `:00` de un timestamp ISO). El escáner los reporta A PROPÓSITO en
+ *     vez de descartarlos por rango: una heurística «los números chicos no son
+ *     líneas» se come mañana una cita real a la línea 80. Van a
+ *     `SCANNER_FALSE_POSITIVES` con motivo escrito, o sea al lado RUIDOSO.
+ *
+ * ⇒ 45 era, textualmente, un PISO. Lo es.
+ *
+ * ── QUÉ NO CUBRE (declarado, no arreglado — medir antes de creerle a la lista) ──
+ *
+ *  1. LAS CITAS EN ARCHIVOS NO TRACKEADOS POR GIT. El universo sale del índice
+ *     de git a propósito: es lo que un `checkout` trae, así que no depende del
+ *     disco de quien corre los tests. El caso medido y grave es
+ *     `.nexus/project-context.md`, que NO está en git.
+ *     🪞 Y la ironía es un dato, no un chiste: ese archivo es **justamente el
+ *     documento que le pide al lector verificar sus citas**, y es el que ningún
+ *     guardián de este repo puede alcanzar. Trackearlo NO es la solución
+ *     obvia — este repo es PÚBLICO, meterlo en git publica su contenido. La
+ *     deuda (`TD-316-CITAS-PROJECT-CONTEXT`) es «revisar qué contiene y recién
+ *     después decidir».
+ *  2. LAS CITAS EN PROSA SUELTA: «la línea 95», «el guard de más abajo», «el
+ *     docblock de arriba». No tienen forma sintáctica, así que ningún patrón las
+ *     devuelve. **Es la razón por la que el conteo de este guardián es un PISO y
+ *     no un total, y no hay cota superior conocida.** Las que alguien LEA y
+ *     decida que no se pueden anclar van a `UNANCHORABLE_PROSE`; esa lista mide
+ *     lo que se leyó, no lo que hay.
+ *  3. EL VALOR SEMÁNTICO DE LA AFIRMACIÓN. Se verifica que la línea citada diga
+ *     lo declarado; NO que la prosa alrededor sea verdadera. Un comentario con
+ *     el número BIEN y la conclusión FALSA pasa en verde. Peor: es el modo de
+ *     falla dominante — en el caso medido de `src/services/compose.ts:688` la
+ *     afirmación de fondo era correcta y lo único falso era el número, que es
+ *     justo lo que hace que «abrir y comparar» confirme la mentira.
+ *  4. EL 94 % RESTANTE DE `src`+`test` (704 de 749 anclas medidas) y el 99,8 %
+ *     del repo. Ver el bloque de cobertura honesta de arriba.
+ *  5. LOS 41 PARES `{file,line}` DE `test/ownership-filter-guard.exceptions.ts`.
+ *     No es un hueco: es una DELEGACIÓN, y se escribe porque si no se lee igual.
+ *     Ya tienen testigo MEJOR que éste — con precisión de línea y en las DOS
+ *     direcciones: `G-09` se pone rojo cuando una excepción ya no corresponde a
+ *     su sitio y `G-08` cuando un sitio no tiene excepción. Además son
+ *     invisibles para este escáner por construcción: cada par se escribe en dos
+ *     líneas separadas (`file: 'src/...'` y `line: 1178`), así que nunca produce
+ *     el token `archivo:N`.
+ *  6. LAS CITAS A `doc/sdd/_INDEX.md` — dueño `G-F1`/`G-F2`. Ver
+ *     `DELEGATED_TARGETS`, vigilado por `G-C9`.
+ *  7. LA CITA QUE APUNTA A UNA LÍNEA CORRECTA DE UN ARCHIVO QUE DEJÓ DE SER EL
+ *     RELEVANTE: el refactor movió el candado a otro módulo y la vieja línea
+ *     sigue existiendo, diciendo lo mismo. Verde, y la prosa miente.
+ *  8. LOS RANGOS `A-B`. Se verifica que la conjunción caiga DENTRO del rango, no
+ *     que las B−A+1 líneas sigan diciendo lo que la prosa afirma del bloque.
+ *  9. `README.md`, `doc/INTEGRATION.md` Y LAS ~20.550 ANCLAS DE `doc/`. Corte D,
+ *     y hoy es un programa, no una HU.
+ * 10. LA CITA QUE SE ESCRIBE EN UN ARCHIVO FUERA DE LOS 14 PATHS. El universo es
+ *     EXPLÍCITO: un archivo nuevo no entra solo. Cada corte siguiente tiene que
+ *     ampliar `CORTE_A_PATHS`, y mientras no se amplíe **el silencio es real**.
+ * 11. UN ARCHIVO QUE TODAVÍA NO ESTÁ EN EL ÍNDICE DE GIT. Consecuencia de la
+ *     misma decisión del punto 1: mientras escribís el archivo, el verde que ves
+ *     no habla de él. Se cierra solo al hacer `git add`.
+ * 12. LAS CITAS DE LOS PROPIOS ARTEFACTOS DE ESTA HU. `doc/sdd/224-…/sdd.md` y
+ *     su `story-file.md` viven en `doc/sdd/`, que no está en el universo de
+ *     ningún corte. Las 3 citas falsas que esta HU encontró en sus PROPIOS
+ *     documentos son la prueba empírica de que eso importa.
+ * 13. EL DUPLICADO EXACTO. Cuando el mismo token aparece dos o más veces en el
+ *     mismo citador, UNA declaración cubre todas las ocurrencias: son la misma
+ *     afirmación repetida (mismo archivo, misma línea, mismo `mustContain`). Lo
+ *     que NO se verifica es que la prosa alrededor de cada ocurrencia diga lo
+ *     mismo — eso es el punto 3. No se resuelve con un índice posicional a
+ *     propósito: un `nth` es un número de posición, o sea la misma clase de dato
+ *     frágil que este guardián existe para no volver a guardar.
+ * 14. 🎯 LOS 4 ARCHIVOS DE ESTE GUARDIÁN. No están en `CORTE_A_PATHS`, y son los
+ *     citadores más densos que este commit agregó al repo: medido con
+ *     `scanSource` sobre ellos mismos, **260 tokens** (`test` 76 · `citations`
+ *     100 · `exceptions` 46 · `scanner` 38) contra 57 en TODO el Corte A. O sea
+ *     que el guardián más que cuadruplicó la población de citas del repo en
+ *     archivos que él mismo no mira. (Foto del 2026-08-19, RE-DERIVADA tres
+ *     veces —243 antes del fix-pack del re-AR, 247 después, 260 después del
+ *     fix-pack de prosa del CR— corriendo `scanSource` sobre los cuatro paths.
+ *     Que este número se mueva cada vez que alguien escribe una línea de prosa
+ *     acá es exactamente lo que el ítem denuncia, y las tres fotos lo prueban.)
+ *     **Se decidió declararlo y NO incluirlos, y la razón es medida, no de
+ *     esfuerzo** — el desglose de los 260:
+ *       · **89** son literalmente el valor del campo `cite` de una entrada de
+ *         `CITED_LINES`. Ésos YA tienen testigo, y mejor que el de acá: `G-C5`
+ *         verifica esa misma cita contra el archivo apuntado y `G-C7` se pone
+ *         rojo si el token desaparece de su citador.
+ *       · **101** son `:N` sueltos (P3/P4) sin archivo: números de línea citados
+ *         dentro de la prosa que explica el algoritmo.
+ *       · **29** nombran archivos que el ÍNDICE DE GIT no tiene, y son TRES
+ *         grupos, no dos. (Re-derivado el 2026-08-19 — la versión anterior
+ *         decía «21 fixtures» y «5 son `.nexus/project-context.md:6`», y las
+ *         dos estaban mal contadas: CR `MNR-cr-5`.)
+ *           — **16** son fixtures en memoria de `G-C2`/`G-C3`
+ *             (`./splash.tsx:245` ×5, `foo.ts:42` ×3, `a.ts:1` ×2, `b.ts:2` ×2,
+ *             `../../lib/fixture.ts:3` ×2, `./no/existe.ts:1` ×2): ésos no
+ *             existen ni pueden existir.
+ *           — **8** son `x.io:8443`, que NO es un archivo: es el host y el
+ *             puerto de la URL de calibración. La propia HU lo declara ruido
+ *             legítimo CON path (ver el barrido de `G-C11`), así que llamarlo
+ *             «un archivo que no existe ni puede existir» era generalizar.
+ *           — **5** nombran `.nexus/project-context.md`, y son DOS tokens
+ *             distintos: 4 × `:6` + 1 × `:6-12`. Ese archivo SÍ existe en disco
+ *             y NO está trackeado, así que es —literalmente— el ejemplo de la
+ *             segunda salida de emergencia que el candado 2️⃣ declara y no
+ *             cierra (`TD-316-CITAS-PROJECT-CONTEXT`).
+ *         Declararlos a todos exigiría una excusa escrita por cada fixture, o
+ *         sea llenar el archivo de excusas de ruido para poder verificar otra
+ *         cosa.
+ *       · **41** nombran un archivo trackeado; de ésos, 9 son el token
+ *         HISTÓRICO `.gitignore:172` —el bug que esta HU arregló, citado como
+ *         ejemplo de lo que estaba mal—, que por construcción ya no describe esa
+ *         línea. Meter los 4 archivos al corte convertiría cada mención del bug
+ *         en una cita rota.
+ *     El residuo real —las citas de estos 4 archivos que sí afirman algo sobre
+ *     otro archivo— **se verificó A MANO, una por una, y ninguna es falsa**: las
+ *     ~20 anteriores las abrió el AR; las que agregó el fix-pack se abrieron al
+ *     escribirlas (`fee-split.ts:316` = `const failed = …`, `:320` =
+ *     `return settlement;`, `:335` NO menciona `priorTx`, con
+ *     `git status --porcelain src/` vacío ⇒ disco = `HEAD`). El segundo
+ *     fix-pack (el del re-AR) NO agregó ningún token nuevo que nombre un archivo
+ *     trackeado —esa categoría quedó en 36—: sus tokens nuevos son un `cite` ya
+ *     declarado y tres del ejemplo que ilustra la segunda salida de emergencia,
+ *     que por definición no resuelve.
+ *     🪞 EL TERCERO —el fix-pack de prosa del CR, que escribió estas mismas
+ *     líneas— SÍ agregó dos, y se declaran acá porque callarlos sería el defecto
+ *     que esta HU persigue: `test/readme-parity.test.ts:105` y
+ *     `test/scripts-imported-by-tests-are-tracked.test.ts:61`. Las dos se
+ *     abrieron al escribirlas y las dos son ciertas (`:105` es el string
+ *     `'src/lib/downstream-payment.ts:186-194'` dentro de una línea de código;
+ *     `:61` es `function stripComments(source: string): string`). Corregir una
+ *     afirmación falsa de este archivo SUBE la deuda de este mismo ítem: 36 → 41
+ *     trackeados, 247 → 260 tokens — y el salto necesitó DOS pasadas, porque
+ *     escribir el número lo movió. Lo que no tienen es
+ *     testigo MECÁNICO, y ésa es la diferencia que este ítem declara: cada vez
+ *     que este archivo crece, crece la prosa que nadie confronta. Queda como
+ *     `TD-224-CITAS-DEL-PROPIO-GUARDIAN`, y su arreglo NO es agregar los paths:
+ *     es un corte que sepa distinguir un token que AFIRMA de uno que es DATO.
+ *
+ * Naming: G-C1..G-C12.
+ */
+
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+import {
+  CITED_LINES,
+  CORTE_A_PATHS,
+  DELEGATED_TARGETS,
+  type DelegatedTarget,
+} from './cited-lines-guard.citations.js';
+import {
+  SCANNER_FALSE_POSITIVES,
+  UNANCHORABLE_PROSE,
+  UNICITY_EXCEPTIONS,
+} from './cited-lines-guard.exceptions.js';
+import {
+  type CiteForm,
+  type FoundCite,
+  citeMatchesTarget,
+  citeNamesFile,
+  citeTargetIfTracked,
+  isOrderedSubsequence,
+  locate,
+  normalizeTarget,
+  resolveSymbolPath,
+  scanSource,
+  stripComments,
+} from './cited-lines-guard.scanner.js';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(HERE, '..');
+
+/** Contra el ÍNDICE de git, no contra el disco: es lo que `checkout` trae. */
+function trackedFiles(): string[] {
+  const out = execFileSync('git', ['ls-files', '-z'], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return out.split('\0').filter(Boolean);
+}
+
+const TRACKED: readonly string[] = trackedFiles();
+const TRACKED_SET = new Set(TRACKED);
+
+/** Índice basename → paths, para el control positivo del cero (`E-WRONG_FILE`). */
+const BY_BASENAME = new Map<string, string[]>();
+for (const f of TRACKED) {
+  const base = f.slice(f.lastIndexOf('/') + 1);
+  const list = BY_BASENAME.get(base);
+  if (list === undefined) BY_BASENAME.set(base, [f]);
+  else list.push(f);
+}
+
+const SRC_CACHE = new Map<string, string>();
+function readTracked(rel: string): string {
+  const hit = SRC_CACHE.get(rel);
+  if (hit !== undefined) return hit;
+  const src = readFileSync(join(REPO_ROOT, rel), 'utf8');
+  SRC_CACHE.set(rel, src);
+  return src;
+}
+
+/** El universo: se DERIVA en cada corrida, no se declara. */
+const FOUND: readonly FoundCite[] = CORTE_A_PATHS.flatMap((p) =>
+  scanSource(readTracked(p), p),
+);
+
+const FORMS: readonly CiteForm[] = ['P1', 'P2', 'P3', 'P4'];
+const countByForm = (form: CiteForm): number =>
+  FOUND.filter((c) => c.form === form).length;
+
+const citeKey = (from: string, cite: string): string => `${from} :: ${cite}`;
+
+const DELEGATED_SET = new Set(DELEGATED_TARGETS.map((d) => d.target));
+const DELEGATED_BASENAMES = new Set(
+  DELEGATED_TARGETS.map((d) => d.target.slice(d.target.lastIndexOf('/') + 1)),
+);
+
+/** ¿Esta cita apunta a un target cuyo dueño es OTRO guardián? */
+function isDelegated(c: FoundCite): boolean {
+  if (c.path === undefined) return false;
+  if (DELEGATED_SET.has(c.path)) return true;
+  const base = c.path.slice(c.path.lastIndexOf('/') + 1);
+  return !c.path.includes('/') && DELEGATED_BASENAMES.has(base);
+}
+
+/**
+ * 🔴 LAS FALLAS DE UNA DELEGACIÓN, contra un índice de git y un lector
+ * INYECTADOS. Es la parte de `G-C9` que tiene que valer para CUALQUIER entrada,
+ * y por eso es una función y no una lista de literales adentro del `it(`.
+ *
+ * La versión anterior de `G-C9` pedía dos cosas por entrada —target trackeado y
+ * motivo de 40 caracteres— y verificaba el dueño con literales HARDCODEADOS de
+ * la única entrada que existía (`G-F1`, `G-F2`, `CITED_INDEX_LINES`). Medido:
+ * una entrada nueva con `ownedBy: 'NADIE. No existe ningún guardián que
+ * verifique estas citas.'` sacaba 3 citas reales del universo con el guardián en
+ * **10/10 verde**, y como `OCCURRENCES` y `DECLARED` bajan a la par, el
+ * invariante estricto de `G-C4` quedaba balanceado y tampoco avisaba. Una
+ * delegación es la excusa más barata de escribir —una entrada saca hasta 4
+ * claves de una vez— y tenía la cara más respetable: parece una decisión de
+ * arquitectura.
+ *
+ * Pura sobre sus entradas a propósito: `G-C12` la prueba con fixtures en memoria
+ * en las DOS direcciones (dueño vivo → 0 fallas; dueño inventado → falla) y
+ * `G-C9` la aplica al árbol real. Sin ese par, el control volvería a ser «lo que
+ * la lista dice hoy».
+ *
+ * ⚠️ LO QUE ESTO NO VERIFICA, y hay que leerlo antes de apoyarse en su verde:
+ * comprueba que el dueño EXISTA, que CORRA (hay un `*.test.ts` entre sus
+ * archivos), que sus controles sigan escritos y que NOMBRE este target. NO
+ * comprueba que el dueño efectivamente VERIFIQUE las citas a ese target — es la
+ * misma clase de límite que «presencia, no valor» del guardián de ownership.
+ * Quien escribe una delegación sigue teniendo que abrir al dueño y leerlo; lo
+ * que ya no puede es inventarlo.
+ *
+ * 🔴 Y ACÁ ESTÁ ESCRITO **CÓMO SE CAE**, que es lo que faltaba. La primera
+ * versión hacía los dos `includes()` sobre el fuente CRUDO, así que **un
+ * COMENTARIO alcanzaba**. Medido, sin inventar nada: `src/lib/downstream-payment.ts`
+ * delegado a `src/lib/money-invariants.fuzz.test.ts` —un archivo que existe,
+ * que corre, cuyos controles siguen escritos y que nombra el target en un
+ * comentario— sacaba **4 claves del módulo de liquidación del money-path** del
+ * universo con el guardián en **12/12 verde**. La delegación es la excusa más
+ * BARATA que queda (una entrada saca N claves de una vez, contra 1 de
+ * `SCANNER_FALSE_POSITIVES`), así que era la que menos podía conformarse con
+ * prosa.
+ *
+ * DECISIÓN, entre las dos que había: se EXIGE la coincidencia **en código**, no
+ * en prosa — `stripComments` antes de los `includes()`. La alternativa era
+ * escribir «el comentario cuenta» y dejar que el revisor lo supiera; se
+ * descartó porque el defecto que este guardián persigue es exactamente
+ * «la prosa dice una cosa y la máquina otra», y aceptar la prosa acá sería
+ * escribir la excepción adentro del control que la prohíbe. Instrumento:
+ * `stripComments`, el mismo criterio que `codeOnly` en
+ * `test/payment-guards-live-in-one-place.test.ts` (Corte A, fuera de scope: no
+ * se tocó ni se importó de ahí).
+ *
+ * ⚠️ Lo que ESTO tampoco cierra, con esas palabras — y acá el costo está
+ * MEDIDO, no estimado. La versión anterior de este párrafo decía que el costo
+ * «subió de escribir un comentario a escribir código muerto que alguien va a
+ * ver en el diff; no bajó a cero». Eso es FALSO, y falso en el sentido
+ * peligroso: dice que cuesta MÁS de lo que cuesta (CR `MNR-cr-1`).
+ *
+ * 1. `stripComments` borra los bloques y las líneas que son SÓLO comentario.
+ *    **NO borra el comentario al final de una línea de código.** Medido
+ *    llamando a la función: `// <target>` y un bloque que nombre el target se
+ *    BORRAN; `const _C = 1; // cubre <target>` SOBREVIVE. O sea que el costo
+ *    de esta excusa no es «código muerto»: es **un comentario**, sólo que
+ *    pegado al final de una línea de código.
+ * 2. Y hay un escalón más abajo: **CERO líneas escritas**. Hoy, en `main`,
+ *    `test/readme-parity.test.ts:105` ya nombra `src/lib/downstream-payment.ts`
+ *    dentro de un string de una línea de CÓDIGO —sobrevive `stripComments`— y
+ *    es un `*.test.ts` que corre. Pero no verifica una sola cita: compara qué
+ *    archivos nombran los dos README. Delegarle ese target saca sus 4 claves
+ *    del universo sin escribir nada en ningún lado.
+ *
+ * O sea: la delegación sigue siendo **el interruptor más barato del guardián**
+ * —una entrada saca N claves de una vez, contra 1 de `SCANNER_FALSE_POSITIVES`—
+ * y su candado sigue siendo de PRESENCIA, no mecánico. Queda ABIERTO y con
+ * nombre: `TD-224-DELEGACION-CUESTA-CERO`, y su costo real, medido, es CERO
+ * líneas. `G-C12` mide que `stripComments` se APLIQUE; no mide que apagar la
+ * delegación sea caro.
+ */
+function delegationFindings(
+  d: DelegatedTarget,
+  tracked: ReadonlySet<string>,
+  read: (rel: string) => string | null,
+): string[] {
+  const out: string[] = [];
+  const tag = `DELEGATED_TARGETS · ${d.target}`;
+  // Lecturas defensivas: a este archivo no lo typechequea CI, así que una
+  // entrada a la que le falte un campo tiene que dar un mensaje, no un TypeError.
+  const ownedBy = typeof d.ownedBy === 'string' ? d.ownedBy : '';
+  const reason = typeof d.reason === 'string' ? d.reason : '';
+  const ownerFiles = (Array.isArray(d.ownerFiles) ? d.ownerFiles : []).filter(
+    (f): f is string => typeof f === 'string' && f.length > 0,
+  );
+  const ownerControls = (Array.isArray(d.ownerControls) ? d.ownerControls : []).filter(
+    (c): c is string => typeof c === 'string',
+  );
+
+  if (typeof d.target !== 'string' || !tracked.has(d.target)) {
+    out.push(`${tag} · el target delegado no está en el índice de git`);
+  }
+  if (reason.trim().length < 40) out.push(`${tag} · motivo demasiado corto`);
+
+  const sources = new Map<string, string>();
+  for (const f of ownerFiles) {
+    if (!tracked.has(f)) {
+      out.push(`${tag} · el archivo del dueño \`${f}\` no está en el índice de git`);
+      continue;
+    }
+    const src = read(f);
+    // 🔴 `stripComments` acá y no en el `read`: lo que se guarda es el CÓDIGO del
+    // dueño. Un comentario que nombra el target o que menciona un control ya
+    // borrado no cuenta — ver la decisión escrita en el docblock de arriba.
+    if (src === null) out.push(`${tag} · no se pudo leer el archivo del dueño \`${f}\``);
+    else sources.set(f, stripComments(src));
+  }
+
+  if (ownerFiles.length === 0) {
+    out.push(
+      `${tag} · sin \`ownerFiles\`: el dueño es una FRASE («${ownedBy.slice(0, 40)}…») y nada lo abre. ` +
+        'Una delegación sin archivo que abrir es un agujero con cara de decisión.',
+    );
+  } else if (![...sources.keys()].some((f) => f.endsWith('.test.ts'))) {
+    out.push(
+      `${tag} · ninguno de los \`ownerFiles\` legibles es un \`*.test.ts\`: un dueño que no CORRE no es un dueño.`,
+    );
+  }
+
+  if (ownerFiles.length > 0 && !ownerFiles.some((f) => ownedBy.includes(f))) {
+    out.push(
+      `${tag} · \`ownedBy\` no nombra ninguno de sus \`ownerFiles\`: la prosa y la máquina están ` +
+        'diciendo cosas distintas, que es el defecto que este guardián persigue.',
+    );
+  }
+
+  if (ownerControls.length === 0) {
+    out.push(`${tag} · sin \`ownerControls\`: nada prueba que el dueño siga teniendo controles vivos.`);
+  }
+  const all = [...sources.values()];
+  for (const c of ownerControls) {
+    if (c.trim().length < 4) {
+      out.push(`${tag} · el control \`${c}\` es demasiado corto para identificar nada`);
+    } else if (!all.some((s) => s.includes(c))) {
+      out.push(
+        `${tag} · el control \`${c}\` ya NO existe en el CÓDIGO de ` +
+          `[${[...sources.keys()].join(', ')}] (los comentarios no cuentan). ` +
+          'Las citas a este target quedaron sin dueño y este guardián las sigue descartando.',
+      );
+    }
+  }
+
+  if (typeof d.target === 'string' && !all.some((s) => s.includes(d.target))) {
+    out.push(
+      `${tag} · ninguno de los \`ownerFiles\` NOMBRA \`${d.target}\` EN CÓDIGO: lo menciona la prosa ` +
+        'o no lo menciona nadie. Un archivo que nombra el target en un comentario y no lo vigila ' +
+        'es la delegación más barata que existe, y saca N claves del universo de una vez.',
+    );
+  }
+  return out;
+}
+
+const DECLARED = new Map(CITED_LINES.map((e) => [citeKey(e.from, e.cite), e]));
+const FALSE_POSITIVE_KEYS = new Set(
+  SCANNER_FALSE_POSITIVES.map((e) => citeKey(e.from, e.cite)),
+);
+const UNICITY_KEYS = new Set(UNICITY_EXCEPTIONS.map((e) => citeKey(e.from, e.cite)));
+
+/**
+ * Las ocurrencias VIVAS por clave. Una misma clave puede aparecer más de una vez
+ * en el mismo citador (el mismo token repetido): UNA declaración las cubre a
+ * todas, porque son la misma afirmación repetida. Lo que NO se hace es guardar
+ * un índice posicional para distinguirlas — sería volver a guardar un número de
+ * posición, que es la clase de dato frágil que este guardián no vuelve a tocar.
+ */
+const OCCURRENCES = new Map<string, FoundCite[]>();
+for (const c of FOUND) {
+  if (isDelegated(c)) continue;
+  const k = citeKey(c.file, c.cite);
+  const list = OCCURRENCES.get(k);
+  if (list === undefined) OCCURRENCES.set(k, [c]);
+  else list.push(c);
+}
+
+// ── El algoritmo de los NUEVE códigos de fallo ─────────────────────────────
+
+interface Finding {
+  readonly code: string;
+  readonly key: string;
+  readonly message: string;
+}
+
+/** ¿Cuántas líneas tiene el archivo, contadas como las cuenta el escáner? */
+const lineCount = (src: string): number => src.split('\n').length;
+
+/**
+ * Evalúa UNA entrada declarada, en el orden de §7.4. El orden importa: si el
+ * archivo citado no existe, un cero de `locate` no significa «el ancla
+ * desapareció», significa que no se buscó en ningún lado.
+ */
+function evaluate(entry: (typeof CITED_LINES)[number]): Finding[] {
+  const key = citeKey(entry.from, entry.cite);
+  const out: Finding[] = [];
+
+  // (1) El archivo citado existe y está trackeado.
+  if (!TRACKED_SET.has(entry.target)) {
+    return [
+      {
+        code: 'E-TARGET_MISSING',
+        key,
+        message:
+          `el archivo citado \`${entry.target}\` no existe, o no está trackeado por git. ` +
+          'Un cero de grep acá NO significa «el ancla desapareció»: significa que no se ' +
+          'buscó en ningún lado.',
+      },
+    ];
+  }
+
+  // (2) El token y el `target` declarado hablan del mismo archivo (DT-11).
+  if (!citeMatchesTarget(entry.from, entry.cite, entry.target)) {
+    out.push({
+      code: 'E-CITE_TARGET_MISMATCH',
+      key,
+      message:
+        `la entrada dice \`target: '${entry.target}'\` y el token cita \`${entry.cite}\`: ` +
+        'o la entrada se copió de otra y no se corrigió, o el comentario cambió de archivo.',
+    });
+    return out;
+  }
+
+  const targetSrc = readTracked(entry.target);
+  const total = lineCount(targetSrc);
+
+  // (3) La línea citada existe dentro del archivo.
+  const last = entry.endLine ?? entry.line;
+  if (entry.line > total || last > total) {
+    out.push({
+      code: 'E-LINE_OUT_OF_RANGE',
+      key,
+      message: `la línea citada está FUERA del archivo: \`${entry.target}\` tiene ${total} líneas.`,
+    });
+    return out;
+  }
+
+  const hits = locate(targetSrc, entry.target, entry.mustContain, entry.symbolPath);
+
+  // (4) La declaración distingue UNA línea. La excepción acota SÓLO esto.
+  if (hits.length > 1) {
+    if (!UNICITY_KEYS.has(key)) {
+      out.push({
+        code: 'E-NEEDLE_VACUOUS',
+        key,
+        message:
+          `tu declaración matchea las líneas [${hits.join(', ')}] de \`${entry.target}\`: no puede ` +
+          'distinguir la correcta de la equivocada, así que estaría verde apuntando a cualquiera ' +
+          'de ellas. Escalera: (1) alargá la conjunción de `mustContain`; (2) si la línea es ' +
+          'intrínsecamente no identificable, la cita está mal y se RE-APUNTA a la línea de la ' +
+          'FIRMA del símbolo que la contiene; (3) recién ahí, una entrada en ' +
+          '`UNICITY_EXCEPTIONS` con el motivo de ESE sitio.',
+      });
+    }
+    // Con excepción de unicidad, la conjunción SIGUE obligada a caer en la
+    // línea citada (CD-14: la excepción acota la unicidad, nunca el match).
+    if (!hits.includes(entry.line) && !hits.some((h) => h >= entry.line && h <= last)) {
+      out.push({
+        code: 'E-LINE_MOVED',
+        key,
+        message:
+          `la cita tiene una excepción de UNICIDAD, pero ninguno de sus hits [${hits.join(', ')}] ` +
+          `cae en la línea citada (:${entry.line}). La excepción acota la unicidad, NUNCA el match.`,
+      });
+    }
+    return out;
+  }
+
+  if (hits.length === 1) {
+    const hit = hits[0] as number;
+    // (5) El ancla está, pero en otra línea: el archivo se corrió.
+    if (hit < entry.line || hit > last) {
+      out.push({
+        code: 'E-LINE_MOVED',
+        key,
+        message:
+          `se corrió el archivo: tu ancla está ahora en \`${entry.target}:${hit}\` y la cita dice ` +
+          `\`:${entry.line}\`. Re-apuntá la cita de \`${entry.from}\`. ` +
+          '⚠️ ABRÍ esa línea antes de copiar este número: el mensaje deriva de una needle escrita ' +
+          'a mano, así que dice dónde está la needle, NO que la prosa alrededor siga siendo cierta.',
+      });
+    }
+    return out;
+  }
+
+  // (6) CERO hits. 🎯 ACÁ VIVE EL CONTROL POSITIVO DEL CERO, DENTRO DEL
+  // ALGORITMO: antes de decir «no está», se busca en los HERMANOS con el mismo
+  // basename. Un cero sin control positivo se lee como «ya no está» cuando lo
+  // que pasa es que el ARCHIVO citado es el equivocado.
+  const base = entry.target.slice(entry.target.lastIndexOf('/') + 1);
+  const siblings = (BY_BASENAME.get(base) ?? []).filter((f) => f !== entry.target);
+  const enHermanos = siblings.flatMap((f) => {
+    const hs = locate(readTracked(f), f, entry.mustContain, entry.symbolPath);
+    return hs.map((h) => `${f}:${h}`);
+  });
+
+  if (enHermanos.length === 1) {
+    out.push({
+      code: 'E-WRONG_FILE',
+      key,
+      message:
+        `el ARCHIVO citado está mal, no la línea: tu ancla vive en \`${enHermanos[0]}\`. ` +
+        `Buscar en \`${entry.target}\` da CERO, y ese cero NO es «ya no está»: hay ` +
+        `${siblings.length + 1} archivo(s) con el basename \`${base}\` en el índice de git.`,
+    });
+    return out;
+  }
+
+  // (7) Cero acá y cero en los hermanos: el ancla desapareció de verdad.
+  out.push({
+    code: 'E-ANCHOR_GONE',
+    key,
+    message:
+      `el ancla desapareció del repo: cero hits en \`${entry.target}\` y cero en los ` +
+      `${siblings.length} archivo(s) con el mismo basename` +
+      (enHermanos.length > 1 ? ` (hay ${enHermanos.length} candidatos ambiguos: ${enHermanos.join(', ')})` : '') +
+      '. Antes de re-apuntar, RELEÉ la prosa: puede que la afirmación también sea falsa ahora, ' +
+      'no sólo el número.',
+  });
+  return out;
+}
+
+/** (8) y (9): el símbolo contenedor. Se evalúan aparte porque son AC-4. */
+function evaluateSymbol(entry: (typeof CITED_LINES)[number]): Finding[] {
+  const key = citeKey(entry.from, entry.cite);
+  if (!TRACKED_SET.has(entry.target)) return [];
+  const targetSrc = readTracked(entry.target);
+  if (entry.line > lineCount(targetSrc)) return [];
+  const actual = resolveSymbolPath(targetSrc, entry.target, entry.line);
+
+  // (9) `symbolPath: []` NO es un escape. Si el resolver devuelve algo y la
+  // entrada declara `[]`, es rojo: sin esto, las 45 entradas se declararían con
+  // `[]` el primer día de fricción y AC-4 quedaría apagado.
+  if (entry.symbolPath.length === 0) {
+    if (actual.length === 0) return [];
+    return [
+      {
+        code: 'E-SYMBOL_OMITTED',
+        key,
+        message:
+          `la entrada declara \`symbolPath: []\` pero el resolver SÍ devuelve un camino en ` +
+          `\`${entry.target}:${entry.line}\`: [${actual.join(' > ')}]. ` +
+          '`[]` se admite sólo cuando el resolver no devuelve nada (target sin símbolos, o ' +
+          'docblock de cabecera).',
+      },
+    ];
+  }
+
+  // (8) El camino declarado es SUBSECUENCIA ORDENADA del real.
+  if (!isOrderedSubsequence(entry.symbolPath, actual)) {
+    return [
+      {
+        code: 'E-SYMBOL_DRIFT',
+        key,
+        message:
+          `la línea \`${entry.target}:${entry.line}\` cae dentro de [${actual.join(' > ')}] y la ` +
+          `entrada declara [${entry.symbolPath.join(' > ')}]. O la cita se movió a otro símbolo ` +
+          'con el mismo texto, o el símbolo se renombró.',
+      },
+    ];
+  }
+  return [];
+}
+
+const FINDINGS: readonly Finding[] = CITED_LINES.flatMap(evaluate);
+const SYMBOL_FINDINGS: readonly Finding[] = CITED_LINES.flatMap(evaluateSymbol);
+const show = (f: Finding): string => `${f.key}\n      ${f.code} · ${f.message}`;
+
+describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
+  // ══════════════════════════════════════════════════════════════
+  // CONTROL DE ARMADO (G-C1) Y ANTI-VACUIDAD DEL INSTRUMENTO (G-C2, G-C3)
+  // Sin estos, un escáner roto deja el universo vacío y G-C4 pasa en verde sin
+  // verificar nada: la falla silenciosa de siempre, adentro del guardián que
+  // existe para cazar una falla silenciosa.
+  // ══════════════════════════════════════════════════════════════
+
+  it('G-C1: el universo se derivó del índice de git y no es trivial', () => {
+    // Input que lo pone en rojo: borrar un path de `CORTE_A_PATHS` (el conteo
+    // deja de ser 14). Un `git ls-files` que devuelva vacío (0 archivos
+    // trackeados). Romper el regex de una forma (esa forma cae a 0).
+    //
+    // 🔴 EL PISO POR FORMA NO ES DECORACIÓN. Sin él, romper el regex de P4 sólo
+    // bajaría el total y el guardián seguiría verde — y adentro de P4 está la
+    // cita falsa del guard anti-doble-débito del camino del dinero
+    // (`src/services/compose.ts:688`), que es invisible a las otras tres formas
+    // porque se escribe `:208`, sin backticks. Ése es exactamente el modo de
+    // falla que dejó pasar el barrido anterior.
+    expect(TRACKED.length).toBeGreaterThan(500);
+    expect(CORTE_A_PATHS.length).toBe(14);
+
+    const faltantes = CORTE_A_PATHS.filter((p) => !TRACKED_SET.has(p));
+    expect(
+      faltantes,
+      'Hay paths del Corte A que NO están en el índice de git. El universo de este\n' +
+        'guardián se deriva del índice a propósito (es lo que un `checkout` trae), así\n' +
+        'que un path que no está ahí NO se barre y su silencio no lo avisa nada.\n' +
+        'Arreglo: `git add` el archivo, o sacarlo de `CORTE_A_PATHS` con motivo escrito.\n',
+    ).toEqual([]);
+
+    // El piso del total. Es un PISO, no la medición del día: la medición del día
+    // es `FOUND.length` y se deriva acá arriba. Un piso pegado a la medición
+    // pone en rojo cada comentario que alguien borra.
+    expect(FOUND.length).toBeGreaterThanOrEqual(40);
+
+    // Y cada una de las CUATRO formas tiene población real.
+    const vacias = FORMS.filter((f) => countByForm(f) === 0);
+    expect(
+      vacias,
+      'Hay formas de cita cuyo barrido devolvió CERO. Un cero acá no es "no hay":\n' +
+        'es casi siempre un regex roto, y el guardián sigue verde porque el total todavía\n' +
+        `supera el piso.\nDistribución de hoy: ${FORMS.map((f) => `${f}=${countByForm(f)}`).join(' ')}\n`,
+    ).toEqual([]);
+
+    // Control de armado de este mismo test: `CORTE_A_PATHS` sin duplicados, o
+    // el conteo de 14 mentiría sobre cuántos archivos distintos se barren.
+    expect(new Set(CORTE_A_PATHS).size).toBe(CORTE_A_PATHS.length);
+  });
+
+  it('G-C2: el escáner encuentra las CUATRO formas y no reporta el falso positivo conocido', () => {
+    // Fixtures EN MEMORIA con la respuesta conocida de antemano. Sin esto, el
+    // único test del escáner sería "lo que el escáner encuentra hoy", que es un
+    // instrumento comparándose contra su propia salida: da verde con cualquier
+    // implementación, incluida la que no encuentra nada.
+    //
+    // Input que lo pone en rojo: un escáner que NO REPORTE NUNCA (los positivos
+    // quedan en 0). Uno que REPORTE SIEMPRE (`::1` aparece). Quitar el `./` del
+    // regex (el caso `./splash.tsx:245` desaparece — es una cita que otro repo
+    // perdió de verdad, por exactamente eso). Quitar el soporte de dotfile (el
+    // caso `.gitignore:172` deja de traer nombre de archivo y cae a P4).
+    const one = (src: string): FoundCite => {
+      const hits = scanSource(src, 'src/lib/fixture.ts');
+      expect(hits, `fixture sin exactamente 1 cita: ${src}`).toHaveLength(1);
+      return hits[0] as FoundCite;
+    };
+
+    const p1 = one('// ver src/services/agent.ts:721');
+    expect(p1.form).toBe('P1');
+    expect(p1.path).toBe('src/services/agent.ts');
+    expect(p1.num).toBe(721);
+
+    const rel = one('// ver ./splash.tsx:245');
+    expect(rel.form).toBe('P1');
+    expect(rel.path).toBe('./splash.tsx');
+    expect(normalizeTarget('src/lib/fixture.ts', rel.cite)).toBe('src/lib/splash.tsx');
+
+    const up = one('// ver ../adapters/solana/chain.ts:84');
+    expect(up.form).toBe('P1');
+    expect(normalizeTarget('src/lib/fixture.ts', up.cite)).toBe(
+      'src/adapters/solana/chain.ts',
+    );
+
+    const p2 = one('// ver agent.ts:721');
+    expect(p2.form).toBe('P2');
+    expect(p2.path).toBe('agent.ts');
+    // Un token P2 no nombra directorio: no se puede resolver sin inventar una
+    // raíz. Lo resuelve el humano en `target`, y el guardián cruza consistencia.
+    expect(normalizeTarget('src/lib/fixture.ts', p2.cite)).toBeNull();
+
+    // Un DIRECTORIO que empieza con punto. Es lo que se pierde si alguien le
+    // saca el `.` a la clase de caracteres del segmento: el token sigue
+    // matcheando pero DECAPITADO (`nexus/project-context.md`), o sea que el
+    // cruce contra el `target` declarado empieza a fallar por el archivo
+    // equivocado en vez de avisar que el patrón se rompió.
+    const dotDir = one('// ver .nexus/project-context.md:6-12');
+    expect(dotDir.form).toBe('P1');
+    expect(dotDir.path).toBe('.nexus/project-context.md');
+    expect(dotDir.endNum).toBe(12);
+
+    const dot = one('// ver `.gitignore:172`');
+    expect(dot.form).toBe('P2');
+    expect(dot.path).toBe('.gitignore');
+    expect(dot.num).toBe(172);
+
+    const p3 = one('// ver `:692`');
+    expect(p3.form).toBe('P3');
+    expect(p3.cite).toBe('`:692`');
+    expect(p3.num).toBe(692);
+
+    const p4 = one('// guard i>0 de :208');
+    expect(p4.form).toBe('P4');
+    expect(p4.cite).toBe(':208');
+    expect(p4.num).toBe(208);
+
+    const rango = one('// ver types/index.ts:203-225');
+    expect(rango.num).toBe(203);
+    expect(rango.endNum).toBe(225);
+
+    // EL FALSO POSITIVO MEDIDO: `::1` (IPv6, vive en `src/types/index.ts`).
+    // La regla es sintáctica y estrecha: el carácter previo a los `:` no puede
+    // ser `:`. Un escáner que reporte siempre falla acá.
+    expect(scanSource("const local = '::1';", 'src/lib/fixture.ts')).toEqual([]);
+
+    // Y el ruido SÍ se reporta, a propósito. Descartar `:8443` por rango sería
+    // inventar una heurística que mañana se come una cita real a la línea 80.
+    // El ruido cae del lado RUIDOSO: se exceptúa a mano, no se adivina.
+    const puerto = one("const url = 'https://x:8443/y';");
+    expect(puerto.form).toBe('P4');
+    expect(puerto.num).toBe(8443);
+
+    // Control de armado de este mismo test: un escáner que no reporte nunca
+    // haría que TODOS los `one(...)` de arriba fallen, pero los dos `toEqual([])`
+    // pasarían. Este par cierra esa asimetría.
+    expect(scanSource('// sin ninguna cita acá', 'src/lib/fixture.ts')).toEqual([]);
+    expect(scanSource('// dos: a.ts:1 y b.ts:2', 'src/lib/fixture.ts')).toHaveLength(2);
+  });
+
+  it('G-C3: el resolver de símbolos no es vacuo y respeta la whitelist de kinds', () => {
+    // Input que lo pone en rojo: un resolver que devuelva SIEMPRE `[]` (los
+    // positivos fallan). Uno SIN whitelist de kinds, que baja hasta el nodo más
+    // interno y devuelve nombres de EXPRESIÓN (`add`, `from`, `request`) que
+    // ningún humano escribiría a mano — esa variante se descartó MIDIENDO:
+    // fallaba en 4 de 5 casos reales. Uno que use `getStart()` en vez del full
+    // start: el docblock deja de mapear a la declaración que documenta, y en
+    // este repo casi todas las citas viven en docblocks.
+    const clase = [
+      'export class C {',
+      '  m(): void {',
+      '    doSomething();',
+      '  }',
+      '}',
+    ].join('\n');
+    expect(resolveSymbolPath(clase, 'src/lib/fixture.ts', 3)).toEqual(['C', 'm']);
+
+    // Docblock de CABECERA: antes de cualquier declaración nombrable. `[]` es la
+    // respuesta correcta, y es el único caso en que `symbolPath: []` se admite.
+    const cabecera = [
+      '/**',
+      ' * Un docblock de cabecera, en la línea 2.',
+      ' */',
+      "import { x } from './x.js';",
+      'export function f(): void {}',
+    ].join('\n');
+    expect(resolveSymbolPath(cabecera, 'src/lib/fixture.ts', 2)).toEqual([]);
+
+    // El docblock de una FUNCIÓN sí mapea a la función: es el full start. Con
+    // `getStart()` esto daría `[]` y las citas de docblock quedarían huérfanas.
+    const docDeFuncion = [
+      "import { x } from './x.js';",
+      '/**',
+      ' * Documenta `f`, en la línea 3.',
+      ' */',
+      'export function f(): void {}',
+    ].join('\n');
+    expect(resolveSymbolPath(docDeFuncion, 'src/lib/fixture.ts', 3)).toEqual(['f']);
+
+    // Los bloques de vitest se nombran por su string literal: es lo que un
+    // humano escribiría, y es lo que se lee en la salida de CI.
+    const test = [
+      "describe('el guardián', () => {",
+      "  it('AG-01: hace la cosa', () => {",
+      '    expect(1).toBe(1);',
+      '  });',
+      '});',
+    ].join('\n');
+    expect(resolveSymbolPath(test, 'test/fixture.test.ts', 3)).toEqual([
+      'el guardián',
+      'AG-01: hace la cosa',
+    ]);
+
+    // `PropertySignature` anidada a 3 niveles de type literal: es la forma del
+    // archivo de tipos generado, y el caso que FUERZA el `symbolPath`
+    // (`owner_ref: string;` aparece 66 veces en `src/types/database.types.ts`,
+    // así que sin ámbito esa cita es indeclarable).
+    const tipos = [
+      'export type Database = {',
+      '  public: {',
+      '    Tables: {',
+      '      registries: {',
+      '        Row: {',
+      '          owner_ref: string;',
+      '        };',
+      '      };',
+      '    };',
+      '  };',
+      '};',
+    ].join('\n');
+    expect(resolveSymbolPath(tipos, 'src/types/fixture.ts', 6)).toEqual([
+      'Database',
+      'public',
+      'Tables',
+      'registries',
+      'Row',
+      'owner_ref',
+    ]);
+
+    // LA WHITELIST, medida: el nodo más interno de una cadena de llamadas trae
+    // `add` / `failedCallers`, que es la variante descartada. El resolver tiene
+    // que quedarse en la declaración contenedora.
+    const cadena = [
+      'function accumulateRow(): void {',
+      '  failedCallers.add(ANON_CALLER_BUCKET);',
+      '}',
+    ].join('\n');
+    expect(resolveSymbolPath(cadena, 'src/services/fixture.ts', 2)).toEqual([
+      'accumulateRow',
+    ]);
+
+    // Targets SIN símbolos TS: el resolver devuelve `[]` y el guard exige `[]`.
+    expect(resolveSymbolPath('# titulo\ntexto', 'CLAUDE.md', 2)).toEqual([]);
+    expect(resolveSymbolPath('{"a": 1}', 'tsconfig.json', 1)).toEqual([]);
+
+    // La SUBSECUENCIA ordenada, que es la regla de comparación de `G-C6`.
+    // No es sufijo (esa variante se descartó midiendo) ni igualdad.
+    expect(isOrderedSubsequence(['registries', 'Row'], ['Database', 'public', 'Tables', 'registries', 'Row', 'owner_ref'])).toBe(true);
+    expect(isOrderedSubsequence(['Row', 'registries'], ['Database', 'registries', 'Row'])).toBe(false);
+    expect(isOrderedSubsequence([], ['lo', 'que', 'sea'])).toBe(true);
+    expect(isOrderedSubsequence(['noEsta'], ['a', 'b'])).toBe(false);
+
+    // Y `locate` combina las dos condiciones. Control de vacuidad sobre el
+    // mecanismo, no sobre un fixture de juguete: con una needle perezosa la
+    // conjunción matchea de más y `locate` devuelve más de una línea.
+    const dos = ['function f() {', '  if (i > 0) a();', '}', 'function g() {', '  if (i > 0) b();', '}'].join('\n');
+    expect(locate(dos, 'src/lib/fixture.ts', ['i > 0'], [])).toEqual([2, 5]);
+    expect(locate(dos, 'src/lib/fixture.ts', ['i > 0'], ['g'])).toEqual([5]);
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // EL GUARDIÁN PROPIAMENTE DICHO (G-C4..G-C9)
+  // ══════════════════════════════════════════════════════════════
+
+  it('G-C4: toda cita que el barrido encuentra está DECLARADA (el universo se deriva)', () => {
+    // Input que lo pone en rojo: agregar `// ver foo.ts:42` a cualquiera de los
+    // 14 paths. Se pone rojo con el archivo citador, su línea DERIVADA y el
+    // token — sin que el registro haya guardado nunca esa línea.
+    const huerfanas = [...OCCURRENCES.entries()]
+      .filter(([k]) => !DECLARED.has(k) && !FALSE_POSITIVE_KEYS.has(k))
+      .flatMap(([, cs]) => cs.map((c) => `${c.file}:${c.line} · ${c.form} · ${c.cite}`))
+      .sort();
+    expect(
+      huerfanas,
+      `Hay ${huerfanas.length} cita(s) \`archivo:línea\` sin declarar en los archivos del Corte A.\n` +
+        'Una cita sin declarar no puede ponerse roja cuando el archivo citado se corra: es\n' +
+        'exactamente el agujero que este guardián existe para cerrar, y se cierra en el momento\n' +
+        'en que la cita se escribe, que es cuando es barato.\n' +
+        'Arreglo: ABRÍ la línea citada, leela, y agregá una entrada a `CITED_LINES` con el texto\n' +
+        'que esa línea tiene que contener y el camino de símbolos que la contiene. NO copies el\n' +
+        'texto de ningún documento ni de la salida de ningún escáner.\n' +
+        'Si el token NO es una cita (un puerto, un offset), va a `SCANNER_FALSE_POSITIVES` con\n' +
+        `el motivo escrito.\nHallazgos:\n${huerfanas.map((h) => `  ${h}`).join('\n')}\n`,
+    ).toEqual([]);
+
+    // EL INVARIANTE ESTRICTO. Sin él, una entrada declarada cuyo sitio ya no
+    // existe en el fuente no se nota: el conjunto de huérfanas sigue vacío y el
+    // registro se va llenando de permisos que ya nadie revisa. (Es AC-8, y por
+    // eso además existe G-C7, que lo dice con nombres.)
+    expect(
+      OCCURRENCES.size,
+      'El número de claves `{from, cite}` VIVAS dejó de coincidir con el de entradas\n' +
+        'declaradas + falsos positivos. O hay una declaración cuyo sitio desapareció, o una\n' +
+        'clave se declaró dos veces.\n',
+    ).toBe(DECLARED.size + FALSE_POSITIVE_KEYS.size);
+
+    // Ninguna clave está en DOS cajas a la vez: una cita no puede ser al mismo
+    // tiempo una afirmación declarada y un falso positivo del escáner.
+    const enDos = [...DECLARED.keys()].filter((k) => FALSE_POSITIVE_KEYS.has(k));
+    expect(enDos, 'Hay claves declaradas Y marcadas como falso positivo a la vez.').toEqual([]);
+
+    // Control de armado de este mismo test: si el barrido no encontrara nada,
+    // `huerfanas` sería vacío por vacuidad y esto pasaría sin medir nada.
+    expect(OCCURRENCES.size).toBeGreaterThanOrEqual(35);
+  });
+
+  it('G-C5: el ancla citada sigue ahí, es única, y el archivo citado es el correcto', () => {
+    // Input que lo pone en rojo, uno por código:
+    //  · mover de sitio la línea anclada           -> E-LINE_MOVED (con el número nuevo)
+    //  · declarar `mustContain: ['i > 0']`         -> E-NEEDLE_VACUOUS (5 hits reales)
+    //  · `line: 99999`                             -> E-LINE_OUT_OF_RANGE
+    //  · `target: 'src/routes/compose.ts'`         -> E-WRONG_FILE apuntando a services/
+    //  · `target: 'src/no/existe.ts'`              -> E-TARGET_MISSING
+    //  · cambiar el `target` sin cambiar el token  -> E-CITE_TARGET_MISMATCH
+    const malas = FINDINGS.map(show);
+    expect(
+      malas,
+      `Hay ${FINDINGS.length} cita(s) declarada(s) que ya no describen lo que hay en el archivo\n` +
+        'citado. Cada código dice qué clase de falla es, y la distinción importa:\n' +
+        '  E-TARGET_MISSING       el archivo no existe -> un cero de grep NO es "ya no está"\n' +
+        '  E-CITE_TARGET_MISMATCH el token y el `target` declarado no hablan del mismo archivo\n' +
+        '  E-LINE_OUT_OF_RANGE    la línea citada está fuera del archivo\n' +
+        '  E-NEEDLE_VACUOUS       la declaración matchea más de una línea: no distingue nada\n' +
+        '  E-LINE_MOVED           el ancla sigue en el repo, en otra línea\n' +
+        '  E-WRONG_FILE           el ancla vive en un archivo HERMANO con el mismo basename\n' +
+        '  E-ANCHOR_GONE          cero acá y cero en los hermanos: releé la prosa, no sólo el número\n' +
+        `Hallazgos:\n${malas.map((m) => `  ${m}`).join('\n')}\n`,
+    ).toEqual([]);
+
+    // Control de armado: si `CITED_LINES` estuviera vacío, lo de arriba pasaría
+    // sin evaluar una sola cita.
+    expect(CITED_LINES.length).toBeGreaterThanOrEqual(35);
+  });
+
+  it('G-C6: la línea citada sigue cayendo dentro del símbolo declarado', () => {
+    // Input que lo pone en rojo: mover la cita a otra línea DEJANDO la needle
+    // (el resolver da otro símbolo -> E-SYMBOL_DRIFT). Vaciar un `symbolPath`
+    // que el resolver sí resuelve -> E-SYMBOL_OMITTED.
+    //
+    // Y la razón por la que esto es OBLIGATORIO no es "por si acaso": es lo
+    // único que hace la unicidad SATISFACIBLE. `owner_ref: string;` aparece 66
+    // veces en `src/types/database.types.ts`, así que sin ámbito la cita de
+    // `CLAUDE.md:212` —correcta, normativa, del criterio de seguridad del
+    // repo— sería INDECLARABLE.
+    const malas = SYMBOL_FINDINGS.map(show);
+    expect(
+      malas,
+      `Hay ${SYMBOL_FINDINGS.length} cita(s) cuyo camino de símbolos declarado ya no describe\n` +
+        'dónde cae la línea citada. Esto se pone rojo INCLUSO cuando el `mustContain` sigue\n' +
+        'matcheando, que es el caso en que el texto se duplicó en otro símbolo.\n' +
+        `Hallazgos:\n${malas.map((m) => `  ${m}`).join('\n')}\n`,
+    ).toEqual([]);
+
+    // Control de armado: si TODAS las entradas declararan `[]`, este control no
+    // mediría nada. Al menos una parte sustantiva tiene camino real.
+    const conCamino = CITED_LINES.filter((e) => e.symbolPath.length > 0);
+    expect(conCamino.length).toBeGreaterThanOrEqual(10);
+  });
+
+  it('G-C7: ninguna entrada del registro sobrevive a su sitio citador', () => {
+    // Input que lo pone en rojo: borrar el comentario que hace la cita y dejar
+    // la entrada. Simétrico de G-09 en `ownership-filter-guard.test.ts`: una
+    // lista que se pudre va perdiendo alcance sin avisar, y cada entrada muerta
+    // es una afirmación que ya nadie confronta con el código.
+    const muertas = [
+      ...CITED_LINES.filter((e) => !OCCURRENCES.has(citeKey(e.from, e.cite))).map(
+        (e) => `CITED_LINES · ${citeKey(e.from, e.cite)}`,
+      ),
+      ...SCANNER_FALSE_POSITIVES.filter(
+        (e) => !OCCURRENCES.has(citeKey(e.from, e.cite)),
+      ).map((e) => `SCANNER_FALSE_POSITIVES · ${citeKey(e.from, e.cite)}`),
+      ...UNICITY_EXCEPTIONS.filter(
+        (e) => !OCCURRENCES.has(citeKey(e.from, e.cite)),
+      ).map((e) => `UNICITY_EXCEPTIONS · ${citeKey(e.from, e.cite)}`),
+    ].sort();
+    expect(
+      muertas,
+      'Hay entradas cuyo token ya no aparece en su archivo citador: o el comentario se\n' +
+        'borró, o el token cambió de texto (por ejemplo, al corregir el número).\n' +
+        'Arreglo: borrar la entrada si la cita desapareció, o actualizar el campo `cite` si el\n' +
+        'token cambió. NO dejarla "por las dudas".\n',
+    ).toEqual([]);
+  });
+
+  it('G-C8: forma y motivo de cada entrada, validados en RUNTIME', () => {
+    // Validado en RUNTIME y no por tipo, y la diferencia importa: medido,
+    // `tsconfig.json:19` es `include: ["src/**\/*"]` y `package.json:11` es
+    // `"lint": "biome check src/"`, así que a este archivo NO lo typechequea CI
+    // ni lo lintea nadie. Un `mustContain: []` compila en el editor, no rompe
+    // CI y ENTRARÍA AL REPO.
+    //
+    // Input que lo pone en rojo: `mustContain: []`, o con una needle de 2
+    // caracteres (matchea en todos lados). `line: 0`. Dos excepciones con el
+    // mismo motivo palabra por palabra. Una entrada de `UNICITY_EXCEPTIONS` sin
+    // su declaración en `CITED_LINES`.
+    const malas: string[] = [];
+    for (const e of CITED_LINES) {
+      const k = citeKey(e.from, e.cite);
+      if (!CORTE_A_PATHS.includes(e.from)) malas.push(`${k} · \`from\` fuera de CORTE_A_PATHS`);
+      if (typeof e.target !== 'string' || e.target.length === 0) malas.push(`${k} · \`target\` vacío`);
+      if (!Number.isInteger(e.line) || e.line < 1) malas.push(`${k} · \`line\` no es un entero >= 1`);
+      if (e.endLine !== undefined && (!Number.isInteger(e.endLine) || e.endLine < e.line)) {
+        malas.push(`${k} · \`endLine\` no es un entero >= \`line\``);
+      }
+      if (e.mustContain.length === 0) malas.push(`${k} · \`mustContain\` VACÍO: no afirma nada`);
+      const cortas = e.mustContain.filter((n) => n.trim().length < 4);
+      if (cortas.length > 0) malas.push(`${k} · needles demasiado cortas: ${JSON.stringify(cortas)}`);
+      // `targetReason` es obligatorio cuando el token NO nombra archivo (P3/P4)
+      // y el target no es el propio citador: es el único caso en que nada
+      // mecánico puede cruzar el token contra el `target` (DT-11).
+      if (!citeNamesFile(e.cite) && e.target !== e.from && (e.targetReason ?? '').trim().length < 20) {
+        malas.push(
+          `${k} · falta \`targetReason\`: el token no nombra archivo y el target (${e.target}) no ` +
+            'es el citador, así que NADA mecánico puede cruzar los dos. El motivo va escrito.',
+        );
+      }
+    }
+
+    const motivos: string[] = [];
+    for (const [nombre, lista] of [
+      ['UNICITY_EXCEPTIONS', UNICITY_EXCEPTIONS.map((e) => ({ k: citeKey(e.from, e.cite), reason: e.reason }))],
+      ['SCANNER_FALSE_POSITIVES', SCANNER_FALSE_POSITIVES.map((e) => ({ k: citeKey(e.from, e.cite), reason: e.reason }))],
+      ['UNANCHORABLE_PROSE', UNANCHORABLE_PROSE.map((e) => ({ k: `${e.from} :: ${e.quote}`, reason: e.reason }))],
+    ] as const) {
+      for (const e of lista) {
+        if (typeof e.reason !== 'string' || e.reason.trim().length < 40) {
+          malas.push(`${nombre} · ${e.k} · motivo vacío o demasiado corto para decir algo`);
+        }
+        motivos.push(e.reason.trim());
+      }
+    }
+    // Un motivo genérico repetido es el fracaso de este archivo aunque todo esté
+    // en verde: si dos sitios comparten motivo palabra por palabra, uno de los
+    // dos no se leyó.
+    expect(new Set(motivos).size, 'Hay motivos repetidos palabra por palabra.').toBe(motivos.length);
+
+    // 🔴 CD-14, EL CANDADO QUE IMPIDE EL INTERRUPTOR DE APAGADO — Y VALE PARA
+    // LAS TRES LISTAS DE `exceptions.ts`, no sólo para la primera.
+    //
+    // 1️⃣ Una excepción de unicidad acota SÓLO el `hits === 1`. La cita sigue
+    // OBLIGADA a estar declarada, a que el archivo exista, a que la línea exista
+    // y a que la conjunción matchee ESA línea. Sin esto, cualquiera que vea un
+    // rojo escribe una excepción y el guardián deja de medir.
+    for (const e of UNICITY_EXCEPTIONS) {
+      const k = citeKey(e.from, e.cite);
+      if (!DECLARED.has(k)) {
+        malas.push(
+          `UNICITY_EXCEPTIONS · ${k} · exceptúa la unicidad de una cita que NO está declarada en ` +
+            '`CITED_LINES`. La excepción acota la unicidad, NUNCA la declaración.',
+        );
+      }
+    }
+
+    // 2️⃣ `SCANNER_FALSE_POSITIVES` es la lista que exceptúa TODO: la clave sale
+    // del conjunto de huérfanas de `G-C4` Y del invariante estricto. Medido: sin
+    // este candado, mover una cita REAL, con path y normativa
+    // (`CLAUDE.md :: src/types/database.types.ts:2567`) desde `CITED_LINES` hasta
+    // acá, con una excusa plausible de 40 caracteres, dejaba el guardián en
+    // 10/10 VERDE. Ninguno de los otros controles lo notaba: el token se sigue
+    // encontrando, sólo se deja de verificar, así que ni `FOUND.length` ni el
+    // invariante se mueven un milímetro.
+    //
+    // ⚠️ La regla NO es «ningún token con path» — `https://x.io:8443/y` produce
+    // un P2 con path (`x.io`) que es ruido legítimo. La regla es «ningún token
+    // que nombre un archivo TRACKEADO POR GIT», y las dos direcciones las mide
+    // `G-C11` con fixtures en memoria.
+    //
+    // 🚧 ACOTAR NO ES CERRAR — y son DOS salidas, no una:
+    //
+    //   (a) UN TOKEN SIN ARCHIVO. Un `:N` suelto (P3/P4) se puede seguir
+    //       moviendo acá con una excusa, porque nada mecánico separa un `:336`
+    //       que cita una línea de un `:8443` que es un puerto.
+    //   (b) UN TOKEN QUE SÍ NOMBRA UN ARCHIVO, PERO QUE NO ESTÁ EN EL ÍNDICE DE
+    //       GIT. `citeTargetIfTracked` pregunta por el ÍNDICE, no por el disco,
+    //       así que un archivo que existe pero nadie trackeó devuelve `null` y
+    //       también se puede declarar ruido. Repro medida: una cita a
+    //       `.nexus/project-context.md:6` escrita en un archivo del Corte A, más
+    //       su entrada acá, deja el guardián en 12/12 VERDE.
+    //       🔴 Y la asimetría es lo que lo hace un defecto y no una elección: la
+    //       MISMA cita declarada en `CITED_LINES` pone el guardián en ROJO
+    //       (`E-TARGET_MISSING`). Declarada ruido, pasa en verde.
+    //       NO se cierra leyendo el disco A PROPÓSITO: el índice es lo que un
+    //       `checkout` trae, y un guardián que dependa de qué archivos sueltos
+    //       tenga cada quien en su working tree da distinto en CI que en local.
+    //       Población hoy dentro del Corte A: 0. Es una frase que falta, no un
+    //       agujero abierto — `TD-316-CITAS-PROJECT-CONTEXT`.
+    //
+    // Cuánto cubre el candado: `CITED_LINES.filter(citeNamesFile)` sobre
+    // `CITED_LINES.length`. Al 2026-08-19 eran 31 de 50 — es una FOTO, no la
+    // cites: derivala con `citeNamesFile` sobre `CITED_LINES`, que es la única
+    // fuente que no envejece. Las otras 19 dependen de que quien escriba la
+    // excusa la escriba en serio, y de que quien revise la lea.
+    const ruidoQueNombraArchivoTrackeado = (
+      lista: readonly { readonly from: string; readonly cite: string }[],
+    ): string[] =>
+      lista.flatMap((e) => {
+        const hit = citeTargetIfTracked(e.from, e.cite, TRACKED_SET, BY_BASENAME);
+        return hit === null
+          ? []
+          : [
+              `SCANNER_FALSE_POSITIVES · ${citeKey(e.from, e.cite)} · el token NOMBRA un archivo que ` +
+                `EXISTE en el índice de git (\`${hit}\`), así que no es ruido del escáner: es una ` +
+                'AFIRMACIÓN sobre el repo. Va a `CITED_LINES` con su `mustContain`, o se corrige el ' +
+                'comentario. Esta lista es la única que exceptúa TODO, y por eso es la que no admite ' +
+                'excusas: apagar una cita real acá es indistinguible de un guardián sano.',
+            ];
+      });
+
+    const hallazgosDelRuidoReal = ruidoQueNombraArchivoTrackeado(SCANNER_FALSE_POSITIVES);
+    malas.push(...hallazgosDelRuidoReal);
+
+    // ══ EL TESTIGO NEGATIVO DE ESTE CANDADO, SOBRE EL REGISTRO REAL ══════════
+    //
+    // 🔴 POR QUÉ ACÁ ADENTRO Y NO EN `G-C11`. `G-C11` prueba la REGLA
+    // (`citeTargetIfTracked`) con fixtures en memoria; NADA probaba que `G-C8`
+    // la APLIQUE al registro real. La diferencia no es teórica: se midieron dos
+    // arreglos truchos que dejaban el guardián en 12/12 VERDE con `G-C11`
+    // intacto —
+    //   · TRUCHO A: una línea de filtro adentro de este barrido
+    //     (`if (e.reason.trim().length > 150) continue;`) más la cita real
+    //     movida acá con una excusa larga. La regla sigue perfecta; deja de
+    //     aplicarse.
+    //   · TRUCHO B: hacer que `citeTargetIfTracked` resuelva SÓLO los basenames
+    //     que los fixtures de `G-C11` usan. Los 6 casos positivos de `G-C11`
+    //     son justo ésos, así que sigue verde, y `downstream-payment.ts:772`
+    //     —money-path— se puede declarar ruido.
+    //
+    // Cómo los mata este testigo, que es lo que hay que leer antes de tocarlo:
+    //
+    //  1. Los canarios son citas REALES del registro, con su `from` y su token
+    //     originales — no fixtures. Un `citeTargetIfTracked` que sólo resuelva
+    //     un puñado de basenames deja de resolver la mayoría de los canarios y
+    //     la resta no da. (Al 2026-08-19: 18 basenames distintos, FOTO.)
+    //  2. Cada canario se emite UNA VEZ POR CADA `reason` que hoy vive en
+    //     `SCANNER_FALSE_POSITIVES`, leído en RUNTIME. Un filtro por `reason`
+    //     que esconda una entrada nueva esconde también a los canarios que
+    //     llevan ESA MISMA `reason`, y la resta no da.
+    //  3. Los canarios se barren EN LA MISMA LLAMADA que las entradas reales,
+    //     appendeados. Un `continue` por índice, o un `break`, o un `slice`,
+    //     recorta a los canarios igual que a las entradas.
+    //  4. Se compara el DELTA contra la corrida sin canarios, no un número
+    //     escrito a mano: el testigo no se pudre cuando la lista real cambie.
+    //
+    // Lo que este testigo NO cierra, con esas palabras: un mutante que
+    // discrimine por el CONTENIDO del token (por ejemplo, ignorar exactamente
+    // el único token que se quiere apagar) sigue pasando. Lo que dejó de ser
+    // posible es apagar el candado ENTERO, o filtrarlo por `reason`.
+    //
+    // 🔴 Y SÓLO por `reason`. Este párrafo decía «o por un campo de la
+    // entrada», y eso era FALSO para el campo `from` (CR `MNR-cr-2`). El
+    // testigo emite un canario por cada `reason` REAL, pero los canarios
+    // llevan el `from` de las citas que siguen en `CITED_LINES`: una cita que
+    // el atacante SACA de `CITED_LINES` deja de aportar su `from`. Repro
+    // medida, 12/12 VERDE: mover `src/services/agent.payment.test.ts ::
+    // downstream-payment.ts:247` —la FIRMA de `settleSolanaLeg`, money-path—
+    // a `SCANNER_FALSE_POSITIVES` con una excusa larga, más una línea en el
+    // barrido de arriba: `if (e.from === 'src/services/agent.payment.test.ts')
+    // return [];`. Cuesta exactamente lo mismo que el TRUCHO A que este
+    // testigo acaba de cerrar. Funciona porque ese citador aporta EXACTAMENTE
+    // 1 canario, y derivado hoy 3 de los 11 citadores están así:
+    // `src/services/agent.ts`, `src/services/agent.payment.test.ts` y
+    // `src/routes/agents.publish.test.ts` (FOTO del 2026-08-19 — derivala
+    // agrupando `citasQueNombranArchivo` por `from`).
+    // El arreglo —emitir también un canario por cada `from` real, el mismo
+    // patrón que ya se usa para `reason`— NO se hizo en esta HU: queda
+    // ABIERTO como `TD-224-CANARIOS-POR-FROM`.
+    const citasQueNombranArchivo = CITED_LINES.filter(
+      (c) =>
+        citeNamesFile(c.cite) &&
+        TRACKED_SET.has(c.target) &&
+        citeMatchesTarget(c.from, c.cite, c.target),
+    );
+    // Control de vacuidad: sin canarios, la resta de abajo daría 0 === 0 y este
+    // testigo aplaudiría cualquier implementación. El piso es 10 y no el número
+    // de hoy a propósito — un `toBe(31)` se pudre con la primera cita que
+    // alguien agregue o borre.
+    expect(
+      citasQueNombranArchivo.length,
+      'No quedan citas declaradas que nombren un archivo trackeado, así que el testigo del\n' +
+        'candado 2️⃣ se quedó sin material y estaría pasando por vacuidad.\n',
+    ).toBeGreaterThanOrEqual(10);
+
+    const CANARIOS = [
+      // El canario base: no depende de que la lista de ruido tenga entradas.
+      ...citasQueNombranArchivo.map((c) => ({
+        from: c.from,
+        cite: c.cite,
+        reason: 'canario sintético: esta entrada no existe en disco, sólo dentro de este assert',
+      })),
+      // Y uno por cada `reason` REAL de la lista, leído en runtime: es lo que
+      // hace que un filtro por `reason` no pueda esconder una entrada nueva.
+      ...SCANNER_FALSE_POSITIVES.flatMap((e) =>
+        citasQueNombranArchivo.map((c) => ({ from: c.from, cite: c.cite, reason: e.reason })),
+      ),
+    ];
+    const conCanarios = ruidoQueNombraArchivoTrackeado([...SCANNER_FALSE_POSITIVES, ...CANARIOS]);
+    expect(
+      conCanarios.length - hallazgosDelRuidoReal.length,
+      'EL CANDADO 2️⃣ DEJÓ DE APLICARSE AL REGISTRO REAL.\n' +
+        'Se metieron citas REALES de `CITED_LINES` en el barrido de `SCANNER_FALSE_POSITIVES` y el\n' +
+        'barrido NO las marcó. O `citeTargetIfTracked` dejó de resolver, o el bucle de arriba\n' +
+        'ganó un filtro que saltea entradas. `G-C11` puede seguir verde: prueba la REGLA, no su\n' +
+        'aplicación — que es exactamente el agujero que este assert existe para tapar.\n',
+    ).toBe(CANARIOS.length);
+    // 🚧 LO QUE ESTE TESTIGO NO SE APLICA A SÍ MISMO — declarado, NO cerrado.
+    // El esperado (`CANARIOS.length`) se deriva del PROPIO conjunto de
+    // canarios. Eso lo hace inmortal a los cambios del registro —que es para
+    // lo que se eligió— y CIEGO a que el conjunto se achique. Repro medida
+    // (CR `MNR-cr-3`), 12/12 VERDE: borrar las 5 líneas del bloque de canarios
+    // por `reason` de acá arriba —las que un comentario declara como lo que
+    // mata el filtro por `reason`— deja el guardián en 12/12 sin que nada se
+    // ponga rojo; y con ese bloque borrado, el TRUCHO A vuelve a pasar. El
+    // único piso es el `toBeGreaterThanOrEqual(10)` de arriba, que cubre SÓLO
+    // los canarios base y no dice nada de los canarios por `reason`.
+    // Es un RESIDUAL, no un agujero: exige editar el guardián. Se declara y no
+    // se arregla A PROPÓSITO — cerrar el meta-nivel (un assert de armado del
+    // propio testigo, derivado, del estilo del que ya existe en `G-C11`) es la
+    // HU siguiente, no ésta. Queda con nombre: `TD-224-QUIEN-VIGILA-AL-TESTIGO`.
+
+    // 3️⃣ `UNANCHORABLE_PROSE` es para prosa SIN forma sintáctica. Si el `quote`
+    // contiene algo que el propio escáner sabe encontrar, entonces se puede
+    // anclar por definición. Esta lista no saca nada del universo (no puede
+    // apagar un rojo), pero sí es donde terminaría archivándose lo que da
+    // trabajo declarar.
+    for (const e of UNANCHORABLE_PROSE) {
+      const dentro = scanSource(e.quote, e.from);
+      if (dentro.length > 0) {
+        malas.push(
+          `UNANCHORABLE_PROSE · ${e.from} :: ${e.quote} · el \`quote\` contiene ` +
+            `${dentro.length} token(s) que el escáner SÍ encuentra (${dentro.map((c) => c.cite).join(', ')}): ` +
+            'no es prosa suelta, es una cita con forma. Va a `CITED_LINES`.',
+        );
+      }
+    }
+
+    expect(
+      malas.sort(),
+      'Hay entradas cuya FORMA no se sostiene en runtime. Nada de esto lo caza el editor:\n' +
+        'este archivo no lo typechequea CI ni lo lintea nadie.\n',
+    ).toEqual([]);
+  });
+
+  it('G-C9: la delegación tiene dueño VIVO, verificado POR ENTRADA', () => {
+    // Input que lo pone en rojo: borrar `G-F2` de
+    // `test/sdd-index-matches-folders.test.ts`, o borrar `CITED_INDEX_LINES` de
+    // su archivo de excepciones. Y —esto es lo que ANTES no pasaba— agregar una
+    // entrada nueva con un dueño inventado: `ownedBy: 'NADIE…'` sin
+    // `ownerFiles`, o con `ownerFiles` que no nombran el target.
+    //
+    // 🔴 Sin este control, borrar `G-F2` dejaría las citas `_INDEX.md:N` sin
+    // dueño Y sin que nada avise: `G-C4` las seguiría descartando en silencio
+    // por estar en `DELEGATED_TARGETS`, o sea que la delegación se convertiría
+    // en un agujero con cara de decisión.
+    //
+    // 🔴 Y con la versión hardcodeada de este control —tres literales de
+    // `_INDEX.md` escritos a mano— la delegación era EL SEGUNDO INTERRUPTOR DE
+    // APAGADO: cualquier entrada NUEVA pasaba sin que su dueño se mirara. Ahora
+    // cada entrada se evalúa con `delegationFindings`, que es la misma función
+    // que `G-C12` prueba en las dos direcciones con fixtures en memoria.
+    //
+    // ⚠️ La población de citas delegadas hoy es 0, y este control NO afirma que
+    // sea > 0: eso sería un candado que se pudre solo el día que alguien borre
+    // la última. Lo que afirma es que el dueño existe, corre, y nombra al target.
+    const leer = (rel: string): string | null => {
+      try {
+        return readTracked(rel);
+      } catch {
+        return null;
+      }
+    };
+    const muertos = DELEGATED_TARGETS.flatMap((d) =>
+      delegationFindings(d, TRACKED_SET, leer),
+    ).sort();
+    expect(
+      muertos,
+      'La delegación declarada en `DELEGATED_TARGETS` perdió a su dueño, o nunca lo tuvo.\n' +
+        'Las citas a ese target quedan sin verificar por NADIE, y este guardián las sigue\n' +
+        'descartando ANTES de todo (`isDelegated`), así que el silencio es total: ni el\n' +
+        'conjunto de huérfanas ni el invariante estricto de `G-C4` se mueven.\n' +
+        'Arreglo: o se restituye el guardián dueño, o esas citas pasan a declararse acá.\n' +
+        `Hallazgos:\n${muertos.map((m) => `  ${m}`).join('\n')}\n`,
+    ).toEqual([]);
+
+    // Control de armado: una lista vacía haría pasar lo de arriba por vacuidad.
+    expect(DELEGATED_TARGETS.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // EL GUARDIÁN DECLARA LO QUE NO CUBRE (G-C10)
+  // ══════════════════════════════════════════════════════════════
+
+  it('G-C10: el docblock declara por escrito qué NO cubre este guardián', () => {
+    // Input que lo pone en rojo: borrar la sección de no-cobertura, o bajarla de
+    // 8 ítems, o sacarle cualquiera de los tres literales que el AC exige.
+    //
+    // Esto NO es ceremonia: un guardián verde sobre el 6 % de las anclas se lee
+    // como "las citas del repo están verificadas" si nadie escribió al lado qué
+    // queda afuera. Merece su propio `it(` y no un assert escondido dentro de
+    // otro control, porque el lugar donde tiene que leerse es la salida de CI.
+    const self = readTracked('test/cited-lines-guard.test.ts');
+
+    // 🪞 SE MIRA EL DOCBLOCK, NO EL ARCHIVO ENTERO, y esto NO es cosmético:
+    // medido con un mutante, `expect(self.includes('<literal>'))` es un control
+    // que NO PUEDE ponerse rojo JAMÁS, porque el literal que busca está escrito
+    // en la misma línea que lo busca. Reemplacé el literal por
+    // `ZZ-NUMERO-QUE-NO-EXISTE-EN-NINGUN-LADO` —una cadena que no está en ningún
+    // otro lugar del repo— y el control siguió **10/10 verde**: se satisfacía a
+    // sí mismo. Es un guardián comparándose contra su propia salida, adentro del
+    // guardián que existe para cazar prosa que nadie confronta. Recortando la
+    // cabecera (todo lo que está ANTES del primer `import`), los `includes` se
+    // evalúan contra la PROSA y no contra el assert.
+    const cabecera = self.slice(0, self.indexOf('\nimport {'));
+    expect(
+      cabecera.length,
+      'No se pudo recortar el docblock de cabecera: sin el recorte, todos los `includes`\n' +
+        'de este control se satisfacen solos.\n',
+    ).toBeGreaterThan(1000);
+
+    const marca = 'QUÉ NO CUBRE';
+    expect(cabecera.includes(marca), 'falta la sección de no-cobertura').toBe(true);
+
+    const seccion = cabecera.slice(cabecera.indexOf(marca), cabecera.indexOf('Naming: G-C1'));
+    const items = seccion.match(/^\s*\*\s{0,2}\d+\.\s/gm) ?? [];
+    expect(
+      items.length,
+      `La sección de no-cobertura tiene ${items.length} ítems numerados y hacen falta al\n` +
+        'menos 8. Cada ítem es un silencio que alguien LEYÓ y decidió dejar; sin escribirlo,\n' +
+        'el verde de este archivo se lee como cobertura.\n',
+    ).toBeGreaterThanOrEqual(8);
+
+    // Los TRES literales que el criterio de aceptación exige nombrar.
+    for (const literal of ['NO TRACKEADOS POR GIT', 'PROSA SUELTA', 'VALOR SEMÁNTICO']) {
+      expect(
+        seccion.includes(literal),
+        `La sección de no-cobertura no nombra «${literal}», que es uno de los tres\n` +
+          'que el criterio de aceptación exige declarar explícitamente.\n',
+      ).toBe(true);
+    }
+
+    // Los DOS porcentajes de cobertura honesta, y la frase prohibida declarada
+    // como prohibida. Un guardián que no publica su cobertura afirma de más.
+    //
+    // ⚠️ SE CLAVA LA FORMA, NO LOS DÍGITOS, y la razón es un candado que se
+    // pudría solo: acá había `expect(self.includes('6,0 %'))` y
+    // `expect(self.includes('0,21 %'))` sobre dos números que el bloque de
+    // arriba declara NO CONFIABLES en ninguna de las dos direcciones, y que una
+    // deuda registrada (`TD-316-CITAS-DOTFILE-EN-OTROS-CORTES`) se compromete a
+    // RE-DERIVAR. El día que alguien cumpla esa deuda, el porcentaje correcto
+    // entra en conflicto con el literal y el rojo no señala nada falso: señala
+    // que el candado apunta a un número que su propio autor declaró equivocado.
+    // Lo normativo de AC-10 es que la cobertura se PUBLIQUE con su advertencia,
+    // no cuánto da hoy.
+    const cobertura = cabecera.slice(
+      cabecera.indexOf('LA COBERTURA HONESTA'),
+      cabecera.indexOf(marca),
+    );
+    const porcentajes = cobertura.match(/\d+,\d+ %/g) ?? [];
+    expect(
+      porcentajes.length,
+      'El bloque de cobertura honesta tiene que publicar los DOS porcentajes (el de\n' +
+        '`src`+`test` y el del repo entero). Se verifica que estén publicados, NO cuánto dan:\n' +
+        'clavar los dígitos es un candado que se pudre el día que alguien re-derive el\n' +
+        'denominador, que es una deuda registrada.\n',
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      cobertura.includes('LOS DOS PISOS'),
+      'Falta la advertencia de que numerador y denominador son PISOS. Un porcentaje\n' +
+        'publicado sin ella se lee como una medición, y no lo es.\n',
+    ).toBe(true);
+    expect(
+      cabecera.includes('LA FRASE PROHIBIDA'),
+      'El docblock dejó de declarar cuál es la frase PROHIBIDA. Es la mitad normativa de\n' +
+        'AC-10: publicar un porcentaje sin decir cómo NO se puede leer es afirmar de más.\n',
+    ).toBe(true);
+
+    // Control de armado de este mismo test: si `cabecera` viniera vacía o del
+    // archivo equivocado, los `includes` de arriba pasarían por casualidad o
+    // fallarían todos juntos. Esto lo ancla al archivo correcto.
+    expect(cabecera.includes('Naming: G-C1..G-C12')).toBe(true);
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // LOS TESTIGOS DE LOS DOS CANDADOS (G-C11, G-C12)
+  // Un candado sin testigo es una línea de código que nadie midió: la primera
+  // versión de CD-14 se aplicó a la lista equivocada y las otras dos listas
+  // quedaron siendo el interruptor de apagado. Estos dos controles prueban la
+  // REGLA con fixtures en memoria y en las DOS direcciones — el caso malo tiene
+  // que morir y el caso bueno tiene que seguir pasando.
+  //
+  // 🔴 Y EL MISMO ESTÁNDAR, APLICADO A ESTOS DOS: un testigo de la REGLA no es
+  // un testigo de su APLICACIÓN. Estos dos usan fixtures en memoria a propósito
+  // —es lo que los hace independientes del árbol—, y por eso mismo NO ven si el
+  // guardián sigue LLAMÁNDOLOS sobre el registro real. Se midieron dos arreglos
+  // truchos que dejaban a `G-C11` en verde con el candado apagado (un filtro
+  // adentro del barrido de `G-C8`; un `citeTargetIfTracked` que resuelve sólo
+  // los basenames que los fixtures de acá usan). Quien cubre eso es el testigo
+  // NEGATIVO que vive adentro de `G-C8`, sobre el registro real, y hacen falta
+  // los dos: el de acá dice qué responde la función, el de allá dice que se la
+  // sigue preguntando. Lo mismo vale para `G-C12` y su aplicación en `G-C9`.
+  // ══════════════════════════════════════════════════════════════
+
+  it('G-C11: el candado de `SCANNER_FALSE_POSITIVES` mata la cita real y deja pasar el ruido', () => {
+    // El universo de git de juguete, para que el fixture no dependa del árbol.
+    const tracked = new Set([
+      'src/types/database.types.ts',
+      'src/lib/fixture.ts',
+      'src/lib/splash.tsx',
+      '.gitignore',
+      'CLAUDE.md',
+    ]);
+    const byBase = new Map<string, readonly string[]>();
+    for (const f of tracked) {
+      const b = f.slice(f.lastIndexOf('/') + 1);
+      byBase.set(b, [...(byBase.get(b) ?? []), f]);
+    }
+    const T = (from: string, token: string): string | null =>
+      citeTargetIfTracked(from, token, tracked, byBase);
+
+    // 🔴 EL CASO MALO — el mutante medido que dejaba 10/10 verde: la cita real,
+    // P1, normativa, del criterio de seguridad del repo, movida a la lista de
+    // ruido con una excusa plausible. Tiene que resolver a un archivo trackeado.
+    expect(T('CLAUDE.md', 'src/types/database.types.ts:2567')).toBe(
+      'src/types/database.types.ts',
+    );
+    // Y sus variantes: P2 por basename, `./` y `../` resueltos contra el citador,
+    // y el sufijo alineado por segmento que `citeMatchesTarget` acepta.
+    expect(T('CLAUDE.md', 'database.types.ts:2567')).toBe('src/types/database.types.ts');
+    expect(T('src/lib/fixture.ts', './splash.tsx:245')).toBe('src/lib/splash.tsx');
+    expect(T('src/lib/x/y.ts', '../../lib/fixture.ts:3')).toBe('src/lib/fixture.ts');
+    expect(T('CLAUDE.md', 'types/database.types.ts:2567')).toBe('src/types/database.types.ts');
+    expect(T('CLAUDE.md', '.gitignore:185')).toBe('.gitignore');
+
+    // ✅ EL CASO BUENO — LA CALIBRACIÓN, y es la mitad que hace que la regla sea
+    // usable: `https://x.io:8443/y` produce un token P2 CON PATH (`x.io`) que es
+    // ruido legítimo del escáner. Si la regla fuera «ningún token con path», este
+    // caso quedaría sin poder declararse y el arreglo sería peor que el bug.
+    const url = scanSource("const u = 'https://x.io:8443/y';", 'src/lib/fixture.ts');
+    expect(url).toHaveLength(1);
+    expect((url[0] as FoundCite).form).toBe('P2');
+    expect((url[0] as FoundCite).path).toBe('x.io');
+    expect(T('src/lib/fixture.ts', (url[0] as FoundCite).cite)).toBeNull();
+
+    // Y el resto del ruido que hoy está declarado: los `:N` sueltos no nombran
+    // archivo, así que el candado no les cuesta nada.
+    expect(T('src/types/index.ts', ':100')).toBeNull();
+    expect(T('src/types/index.ts', ':1')).toBeNull();
+    expect(T('src/services/agent.payment.test.ts', ':00')).toBeNull();
+    expect(T('src/lib/fixture.ts', '`:692`')).toBeNull();
+    // Un archivo que NO existe en el índice tampoco es una afirmación verificable.
+    expect(T('src/lib/fixture.ts', 'foo.ts:42')).toBeNull();
+    expect(T('src/lib/fixture.ts', './no/existe.ts:1')).toBeNull();
+
+    // Control de armado de este mismo test: una función que devolviera SIEMPRE
+    // `null` pasaría todos los `toBeNull()` de arriba, y una que devolviera
+    // siempre un string pasaría los otros. Están los dos lados, y este par lo
+    // deja explícito.
+    expect(T('CLAUDE.md', 'CLAUDE.md:212')).toBe('CLAUDE.md');
+    expect(T('CLAUDE.md', ':212')).toBeNull();
+  });
+
+  it('G-C12: el candado de la delegación mata al dueño inventado y deja pasar al real', () => {
+    const tracked = new Set([
+      'doc/sdd/_INDEX.md',
+      'test/sdd-index-matches-folders.test.ts',
+      'test/sdd-index-matches-folders.exceptions.ts',
+      'src/services/discovery.ts',
+      'test/otro-guardian.test.ts',
+      'test/dueno-de-comentario.test.ts',
+    ]);
+    const FUENTES: Record<string, string> = {
+      'test/sdd-index-matches-folders.test.ts':
+        "const INDEX_REL = 'doc/sdd/_INDEX.md';\nit('G-F1: …', () => {});\nit('G-F2: …', () => {});",
+      'test/sdd-index-matches-folders.exceptions.ts':
+        "// citas a doc/sdd/_INDEX.md\nexport const CITED_INDEX_LINES = [];",
+      'test/otro-guardian.test.ts': "it('X-01: no habla de ningún target delegado', () => {});",
+      // 🔴 El dueño REPURPOSADO: existe, corre, su control sigue escrito, y
+      // nombra el target… en un comentario. Es la forma exacta del exploit
+      // medido con `src/lib/money-invariants.fuzz.test.ts`.
+      'test/dueno-de-comentario.test.ts':
+        '/**\n * Invariantes del money-path sobre src/services/discovery.ts.\n */\n' +
+        "// también menciona src/services/discovery.ts acá\n" +
+        "it('X-02: un invariante que no verifica ninguna cita', () => {});\n" +
+        '// el control viejo era X-03, ya no existe\n',
+    };
+    const leer = (rel: string): string | null => FUENTES[rel] ?? null;
+    const bueno: DelegatedTarget = {
+      target: 'doc/sdd/_INDEX.md',
+      ownedBy: 'G-F1/G-F2 en test/sdd-index-matches-folders.test.ts',
+      ownerFiles: [
+        'test/sdd-index-matches-folders.test.ts',
+        'test/sdd-index-matches-folders.exceptions.ts',
+      ],
+      ownerControls: ["it('G-F1", "it('G-F2", 'export const CITED_INDEX_LINES'],
+      reason: 'x'.repeat(41),
+    };
+
+    // ✅ EL CASO BUENO: el dueño existe, corre, sus controles están escritos y
+    // nombra al target. Cero hallazgos.
+    expect(delegationFindings(bueno, tracked, leer)).toEqual([]);
+
+    // 🔴 EL CASO MALO MEDIDO: el mutante que sacaba 3 citas reales del universo
+    // con 10/10 verde. Sin `ownerFiles`, el dueño es una frase.
+    const inventado = {
+      target: 'src/services/discovery.ts',
+      ownedBy: 'NADIE. No existe ningún guardián que verifique estas citas.',
+      reason: 'x'.repeat(41),
+    } as unknown as DelegatedTarget;
+    expect(delegationFindings(inventado, tracked, leer).length).toBeGreaterThan(0);
+
+    // Y las variantes con MEJOR cara, que son las que hay que cazar: un dueño
+    // que existe pero no habla de este target; un `ownerFiles` que no corre; un
+    // control que ya no está; una prosa que nombra un archivo que no declaró.
+    const noHablaDelTarget: DelegatedTarget = {
+      ...bueno,
+      target: 'src/services/discovery.ts',
+      ownedBy: 'G-F1 en test/sdd-index-matches-folders.test.ts',
+    };
+    expect(delegationFindings(noHablaDelTarget, tracked, leer)).toEqual([
+      expect.stringContaining('EN CÓDIGO'),
+    ]);
+
+    // 🔴 EL TERCER INTERRUPTOR, y el más barato de todos: el dueño REPURPOSADO.
+    // Existe, CORRE, su control sigue escrito, y nombra el target — pero lo
+    // nombra en un COMENTARIO. Con los `includes()` sobre el fuente crudo esto
+    // daba CERO hallazgos y sacaba N claves del universo de una vez; medido con
+    // `src/lib/money-invariants.fuzz.test.ts` sobre
+    // `src/lib/downstream-payment.ts`: 4 claves del módulo de liquidación del
+    // money-path, con el guardián en 12/12 VERDE.
+    const duenoDeComentario: DelegatedTarget = {
+      target: 'src/services/discovery.ts',
+      ownedBy: 'los invariantes de test/dueno-de-comentario.test.ts',
+      ownerFiles: ['test/dueno-de-comentario.test.ts'],
+      ownerControls: ["it('X-02"],
+      reason: 'x'.repeat(41),
+    };
+    expect(delegationFindings(duenoDeComentario, tracked, leer)).toEqual([
+      expect.stringContaining('EN CÓDIGO'),
+    ]);
+
+    // Y la otra mitad del mismo cambio: un `ownerControl` que sólo sobrevive en
+    // un comentario tampoco cuenta. Un control BORRADO cuyo nombre quedó en la
+    // prosa («el control viejo era X-03») es indistinguible de uno vivo si se
+    // mira el fuente crudo.
+    const controlSoloEnComentario: DelegatedTarget = {
+      ...duenoDeComentario,
+      ownerControls: ["it('X-02", 'X-03'],
+    };
+    expect(delegationFindings(controlSoloEnComentario, tracked, leer)).toEqual([
+      expect.stringContaining('X-03` ya NO existe en el CÓDIGO'),
+      expect.stringContaining('EN CÓDIGO'),
+    ]);
+
+    // ✅ LA CALIBRACIÓN DE ESTE MISMO CAMBIO: exigir CÓDIGO no puede romper al
+    // dueño real. El bueno de arriba nombra `doc/sdd/_INDEX.md` en una línea de
+    // código (`const INDEX_REL = …`) y sus tres controles son `it(`/`export
+    // const`, no prosa. Si `stripComments` borrara de más, este caso sería el
+    // primero en caerse.
+    expect(delegationFindings(bueno, tracked, leer)).toEqual([]);
+
+    const duenoQueNoCorre: DelegatedTarget = {
+      ...bueno,
+      ownedBy: 'CITED_INDEX_LINES en test/sdd-index-matches-folders.exceptions.ts',
+      ownerFiles: ['test/sdd-index-matches-folders.exceptions.ts'],
+      ownerControls: ['export const CITED_INDEX_LINES'],
+    };
+    // ⚠️ Dos hallazgos, no uno, y el segundo es la MEDICIÓN del cambio a
+    // código-y-no-prosa: este `ownerFiles` nombra `doc/sdd/_INDEX.md` sólo en su
+    // línea de comentario, así que además de no correr, tampoco declara el
+    // target en código. Con los `includes()` sobre el fuente crudo daba uno solo.
+    expect(delegationFindings(duenoQueNoCorre, tracked, leer)).toEqual([
+      expect.stringContaining('no CORRE'),
+      expect.stringContaining('EN CÓDIGO'),
+    ]);
+
+    const controlBorrado: DelegatedTarget = {
+      ...bueno,
+      ownerControls: ["it('G-F1", "it('G-F3"],
+    };
+    expect(delegationFindings(controlBorrado, tracked, leer)).toEqual([
+      expect.stringContaining("G-F3` ya NO existe"),
+    ]);
+
+    const prosaQueNoCoincide: DelegatedTarget = {
+      ...bueno,
+      ownedBy: 'algún guardián por ahí',
+    };
+    expect(delegationFindings(prosaQueNoCoincide, tracked, leer)).toEqual([
+      expect.stringContaining('no nombra ninguno de sus `ownerFiles`'),
+    ]);
+
+    const archivoFantasma: DelegatedTarget = {
+      ...bueno,
+      ownedBy: 'test/no-existe.test.ts',
+      ownerFiles: ['test/no-existe.test.ts'],
+    };
+    expect(delegationFindings(archivoFantasma, tracked, leer).length).toBeGreaterThan(0);
+
+    // Control de armado de este mismo test: una función que devolviera SIEMPRE
+    // hallazgos haría fallar el caso bueno, y una que no devolviera NINGUNO
+    // haría fallar los seis malos. Los dos lados están medidos arriba.
+    expect(delegationFindings(bueno, tracked, leer)).toHaveLength(0);
+  });
+});

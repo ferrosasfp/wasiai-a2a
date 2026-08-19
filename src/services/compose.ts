@@ -685,7 +685,7 @@ export const composeService = {
             // `settle_signature` base58 de una transferencia real: la
             // reconciliación cruza ambos. `stepDebitedUsd` es el DÉBITO DEL CALLER
             // y vale 0 para `i === 0` (lo debita el middleware vía
-            // composeEstimatedCostUsd, guard `i > 0` de :208) ⇒ un compose de UN
+            // composeEstimatedCostUsd, guard `i > 0` de :571) ⇒ un compose de UN
             // step con agente Solana emitía `amount_usd = 0` junto a una firma
             // real. Además incluye el gas overhead del gateway, que nunca se le
             // paga al agente.
