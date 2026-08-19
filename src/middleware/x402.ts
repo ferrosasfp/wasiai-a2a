@@ -81,21 +81,19 @@ export const PAYMENT_SIGNATURE_HEADER = 'payment-signature';
 export const X_A2A_PAYMENT_CHAIN_HEADER = 'x-a2a-payment-chain';
 
 /**
- * HU-204 — código estable para "esta chain existe y está inicializada, pero NO
- * acepta cobro de ENTRADA". Distinto de `CHAIN_NOT_SUPPORTED` a propósito: ahí
- * el slug es desconocido o el rail no está prendido (el caller no puede hacer
- * nada más que cambiar de chain); acá el rail SÍ está vivo, sólo que en la
- * dirección contraria — y el caller tiene DOS salidas (otra chain para el x402,
- * o una agent key prepaga, que sí cobra en esta chain).
+ * HU-204 · WKH-314 — código estable para "esta chain está inicializada y AHORA
+ * MISMO no acepta cobro de ENTRADA". Distinto de `CHAIN_NOT_SUPPORTED` (slug
+ * desconocido o chain ausente del registry): acá la chain está viva, su leg de
+ * SALIDA sigue pagando, y el caller tiene TRES salidas — ver el mensaje.
  */
 export const X402_INBOUND_UNSUPPORTED_CODE =
   'CHAIN_INBOUND_PAYMENT_UNSUPPORTED';
 
 /**
- * Mensaje del 400 de arriba. Explica la ASIMETRÍA (no sólo la negación) y las
- * dos salidas, porque un integrador tiene que poder resolverlo leyendo la
- * respuesta: negar sin decir por qué ni qué hacer es la razón por la que este
- * caso se vivía como "el gateway está roto".
+ * Mensaje del 400. Cierto en LOS DOS estados del rail y para cualquier chain
+ * non-EVM: el `false` que lo dispara es `acceptsInboundPayment`, que sobre un
+ * bundle non-EVM es `isSolanaX402InboundConfigured()` — CONFIGURACIÓN, no un
+ * límite del código. Una 3ra familia de VM sin inbound volvería falso eso.
  */
 export function inboundPaymentUnsupportedMessage(
   chainKey: ChainKey,
@@ -106,14 +104,16 @@ export function inboundPaymentUnsupportedMessage(
       ? inboundChains.join(', ')
       : '(none initialized on this deployment)';
   return (
-    `Chain '${chainKey}' does not accept INBOUND x402 payment (caller → gateway). ` +
-    `It is an OUTBOUND settlement rail: the gateway pays agents on '${chainKey}' ` +
-    `from its own operator wallet, but callers cannot pay the gateway there — ` +
-    `the inbound leg needs an EVM signed authorization (EIP-3009), which this ` +
-    `chain's payment adapter does not implement. ` +
-    `To pay with x402, set 'x-payment-chain' to one of: ${alternatives}. ` +
-    `To keep using '${chainKey}', use a prepaid agent key ('x-a2a-key'): that ` +
-    `path debits your budget on '${chainKey}' and is unaffected by this limit.`
+    `Chain '${chainKey}' is not accepting INBOUND x402 payment (caller → ` +
+    `gateway) on this deployment right now. The OUTBOUND leg is ` +
+    `unaffected: the gateway still pays agents on '${chainKey}'. That is a ` +
+    `CONFIGURATION state, not a limit of the code: 'GET /capabilities' ` +
+    `publishes chains[].acceptsInboundPayment from the same expression ` +
+    `this check reads. Three ways forward: (1) send the x402 on a chain ` +
+    `that accepts it now: ${alternatives}; (2) keep '${chainKey}' with a ` +
+    `prepaid agent key ('x-a2a-key'), which debits your budget on ` +
+    `'${chainKey}'; (3) ask this deployment's operator to turn the inbound ` +
+    `rail on for '${chainKey}' — turned on, it answers 402 instead of 400.`
   );
 }
 

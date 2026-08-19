@@ -1,36 +1,36 @@
 /**
- * HU-204 — cobro x402 de ENTRADA sobre una chain OUTBOUND-ONLY (rail Solana).
+ * HU-204 · WKH-314 — cobro x402 de ENTRADA sobre una chain non-EVM cuyo rail de
+ * entrada está APAGADO (hoy `solana-devnet`, sin las envs del inbound).
  *
- * ─── POR QUÉ ESTE ARCHIVO EXISTE (y por qué 3.8k tests verdes no vieron el 500) ──
+ * ─── QUÉ AFIRMA ESTE ARCHIVO, Y QUÉ DEJÓ DE AFIRMAR ────────────────────────
  *
- * El bug era: `POST /compose` con `x-payment-chain: solana-devnet` y sin
+ * Nació con HU-204: `POST /compose` con `x-payment-chain: solana-devnet` y sin
  * credencial devolvía 500 INTERNAL_ERROR. El camino:
  *   x402.ts (guard del bundle) acepta `solana-devnet` (existe e inicializado)
  *     → `buildX402Response` → `getPaymentAdapter()` → THROW (non-EVM, registry.ts)
  *       → error-boundary → 500.
  *
- * La suite no lo veía por una razón ESTRUCTURAL, no por falta de casos: no
- * existía NI UN test en la intersección "registry REAL con Solana inicializado"
- * × "middleware x402".
+ * El corte a 400 no se aflojó y estos tests siguen exigiendo lo mismo. Lo que
+ * WKH-314 cambió es POR QUÉ: el gateway YA tiene código para cobrar inbound en
+ * Solana, así que el 400 de acá es el estado de la CONFIGURACIÓN de este proceso
+ * (las envs del rail sin setear), NO una propiedad de la chain ni "una mitad que
+ * nunca existió". Por eso el archivo se reescribió en vez de borrarse: la
+ * exigencia se conserva, la afirmación se invierte. El control que lo vuelve
+ * falsable es T-204-09 — enciende las cuatro envs en el MISMO proceso y el MISMO
+ * registry pasa a listar `solana-devnet` como chain de ENTRADA, sin tocar código.
  *
- *  · `x402.chain-aware.test.ts:80` hace `vi.mock('../adapters/registry.js', …)`:
- *    su `getPaymentAdapter` es un `vi.fn()` que devuelve un stub EVM y NUNCA
- *    lanza, así que el throw real es inalcanzable desde ahí. Sus dos tests
- *    "de Solana" (`:301`, `:712`) usan el slug `solana-mainnet`, que NO está en
- *    `SLUG_ALIASES` (`chain-resolver.ts:61-66`) — o sea que ejercitan el camino
- *    CONTRARIO (slug irreconocible → 400), no el bundle Solana.
- *  · `adapters/__tests__/registry.test.ts:1050` sí alcanza el throw, pero
- *    llamando a `getPaymentAdapter()` directo: nunca pasa por un request HTTP,
- *    así que no puede ver en qué status termina.
+ * ─── POR QUÉ EL REGISTRY ES REAL ──────────────────────────────────────────
  *
- * Este archivo cierra esa intersección con el patrón de `registry.test.ts`:
- * el registry es REAL (no se moquea) y sólo se moquean las FACTORIES de cada
- * chain, que es lo que evita abrir clientes RPC. Por eso acá `initAdapters()`
- * construye bundles de verdad, `getAdaptersBundle('solana-devnet')` devuelve un
- * bundle con `vmFamily: 'solana'` y `getPaymentAdapter('solana-devnet')`
- * lanzaría — exactamente la condición de producción.
+ * La suite no veía el 500 por una razón ESTRUCTURAL: no existía NI UN test en la
+ * intersección "registry REAL con Solana inicializado" × "middleware x402"
+ * (`x402.chain-aware.test.ts:80` moquea el registry entero, y sus dos tests "de
+ * Solana" usan el slug `solana-mainnet`, que ni siquiera es reconocible).
+ * Acá el registry es REAL y sólo se moquean las FACTORIES de cada chain, que es
+ * lo que evita abrir clientes RPC: `initAdapters()` construye bundles de verdad,
+ * `getAdaptersBundle('solana-devnet')` da `vmFamily: 'solana'` y
+ * `getPaymentAdapter('solana-devnet')` lanzaría — la condición de producción.
  *
- * Naming: T-204-01..T-204-08.
+ * Naming: T-204-01..T-204-09.
  */
 
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
@@ -223,7 +223,7 @@ function buildX402App(): ReturnType<typeof Fastify> {
   return app;
 }
 
-describe('HU-204 — x402 inbound sobre chain outbound-only (registry REAL)', () => {
+describe('HU-204 · WKH-314 — x402 inbound sobre chain non-EVM con el rail de entrada APAGADO (registry REAL)', () => {
   const ORIGINAL_ENV = { ...process.env };
 
   beforeEach(async () => {
@@ -247,15 +247,46 @@ describe('HU-204 — x402 inbound sobre chain outbound-only (registry REAL)', ()
   // Sin esto, todo lo de abajo podría estar verde por no haber alcanzado nunca
   // el bundle Solana (que es exactamente el falso verde de la suite anterior).
 
-  it('T-204-01: el registry REAL tiene el bundle Solana y getPaymentAdapter() sobre él LANZA', () => {
+  it('T-204-01: el registry REAL tiene el bundle non-EVM, getPaymentAdapter() sobre él LANZA, y con las envs del rail sin setear el inbound no lo lista', () => {
     const bundle = getAdaptersBundle('solana-devnet');
     expect(bundle?.payment.vmFamily).toBe('solana');
     // La bomba que producía el 500: este accessor es EVM-only por diseño.
     expect(() => getPaymentAdapter('solana-devnet')).toThrow(
       /resolved a non-EVM \(solana\) adapter/,
     );
-    // Y la chain EVM del mismo proceso sigue viva.
     expect(getPaymentAdapter('base-sepolia').chainId).toBe(84532);
+    // Ese `['base-sepolia']` es config, no naturaleza: T-204-09 lo invierte.
+    expect(getInboundPaymentChainKeys()).toEqual(['base-sepolia']);
+  });
+
+  // ── T-204-09: la INVERSIÓN por diseño (WKH-314) ───────────────────────────
+  // El `false` de T-204-01 no es la naturaleza de la chain: es la config de ESTE
+  // proceso. Se encienden las cuatro envs del rail —sin re-inicializar adapters,
+  // sin tocar una línea de código— y el MISMO registry pasa a listar
+  // `solana-devnet` como chain de ENTRADA. Es, medido, la frase que el 400 le
+  // promete al integrador: *"ask this deployment's operator to turn the inbound
+  // rail on"*. Lo que pasa DESPUÉS de encenderlo (challenge, prueba, consumo)
+  // vive en `x402.solana-inbound.test.ts`; acá se mide sólo el interruptor.
+
+  it('T-204-09: con las cuatro envs del rail seteadas, el MISMO proceso pasa a listar solana-devnet como chain de entrada', () => {
+    expect(getInboundPaymentChainKeys()).toEqual(['base-sepolia']);
+
+    // `SOLANA_ADAPTER_ENABLED` ya está en 'true' desde el beforeEach; faltan las
+    // tres del inbound. La `payTo` es una pubkey base58 real (el mint de wSOL):
+    // `getSolanaInboundPayTo()` devuelve `null` si no lo es, y el secreto tiene
+    // largo mínimo, así que una config a medias NO enciende nada.
+    process.env.SOLANA_X402_INBOUND_ENABLED = 'true';
+    process.env.SOLANA_X402_INBOUND_PAY_TO =
+      'So11111111111111111111111111111111111111112';
+    process.env.SOLANA_X402_INBOUND_CHALLENGE_SECRET = 'k'.repeat(48);
+
+    expect(getInboundPaymentChainKeys()).toEqual([
+      'base-sepolia',
+      'solana-devnet',
+    ]);
+
+    // Y el interruptor es REVERSIBLE en el mismo proceso: no hay estado pegado.
+    process.env.SOLANA_X402_INBOUND_ENABLED = 'false';
     expect(getInboundPaymentChainKeys()).toEqual(['base-sepolia']);
   });
 
@@ -288,9 +319,15 @@ describe('HU-204 — x402 inbound sobre chain outbound-only (registry REAL)', ()
     }
   });
 
-  // ── T-204-03: el mensaje tiene que ser RESOLUBLE leyéndolo ────────────────
+  // ── T-204-03: el mensaje tiene que ser RESOLUBLE leyéndolo, y CIERTO ──────
+  // Acá estaba clavada la frase que el F4 (§6.2) midió engañosa: el 400 decía
+  // *"It is an OUTBOUND settlement rail … the inbound leg needs an EVM signed
+  // authorization (EIP-3009), which this chain's payment adapter does not
+  // implement"* — presentado como propiedad DEL CÓDIGO, que es exactamente lo
+  // que el README dice que NO es. Este test lo fija en las dos direcciones: lo
+  // que el mensaje DEBE decir, y lo que ya no puede volver a decir.
 
-  it('T-204-03: el 400 explica la asimetría, lista las chains de entrada y ofrece la salida prepaga', async () => {
+  it('T-204-03: el 400 acota la negación a ESTE deployment, la llama CONFIGURACIÓN y nombra las TRES salidas', async () => {
     const app = buildX402App();
     await app.ready();
     try {
@@ -302,15 +339,35 @@ describe('HU-204 — x402 inbound sobre chain outbound-only (registry REAL)', ()
       });
       const body = JSON.parse(res.body) as ErrorBody;
 
-      // (a) NIEGA la dirección correcta, no la chain entera.
+      // (a) NIEGA la dirección correcta, y ACOTADA en el tiempo y al deploy.
       expect(body.error).toMatch(/INBOUND/);
-      expect(body.error).toMatch(/OUTBOUND settlement rail/);
-      expect(body.error).toMatch(/the gateway pays agents/i);
-      // (b) da la alternativa CONCRETA, derivada del registry vivo.
+      expect(body.error).toMatch(/on this deployment right now/);
+      // (b) el condicional va DENTRO de la afirmación, no en una nota al pie.
+      expect(body.error).toMatch(
+        /CONFIGURATION state, not a limit of the code/,
+      );
+      // (c) la asimetría, sin inventarle una causa al código.
+      expect(body.error).toMatch(/OUTBOUND leg is unaffected/);
+      expect(body.error).toMatch(/still pays agents/i);
+      // (d) SALIDA 1: la alternativa CONCRETA, derivada del registry vivo.
       expect(body.error).toContain('base-sepolia');
       expect(body.inbound_payment_chains).toEqual(['base-sepolia']);
-      // (c) y la segunda salida: la key prepaga SÍ cobra en esta chain.
+      // (e) SALIDA 2: la key prepaga SÍ cobra en esta chain.
       expect(body.error).toMatch(/x-a2a-key/);
+      // (f) SALIDA 3 (la que WKH-314 hizo existir): pedirle al operador que lo
+      //     encienda, con el efecto prometido — el mismo request da 402.
+      expect(body.error).toMatch(/turn the inbound rail on/);
+      expect(body.error).toMatch(/answers 402 instead of 400/);
+      // (g) 🔴 Y LO QUE YA NO PUEDE DECIR. Estas tres frases eran propiedades
+      //     DEL CÓDIGO y desde WKH-314 son falsas: el camino inbound existe y
+      //     está apagado por configuración. Si alguien las reintroduce, acá se
+      //     pone rojo antes de que vuelvan a salir en producción.
+      expect(body.error).not.toMatch(/OUTBOUND settlement rail/);
+      expect(body.error).not.toMatch(/EIP-3009/);
+      expect(body.error).not.toMatch(/does not implement/);
+      // (h) y el mensaje NO nombra a Solana: esta función la comen todas las
+      //     chains non-EVM, y un texto Solana-only mentiría en la próxima.
+      expect(body.error).not.toMatch(/solana(?!-devnet)/i);
     } finally {
       await app.close();
     }
@@ -401,7 +458,7 @@ describe('HU-204 — x402 inbound sobre chain outbound-only (registry REAL)', ()
   // El guard vive dentro de `requirePayment`, y `requirePaymentOrA2AKey` sólo
   // delega ahí cuando NO hay `x-a2a-key` (a2a-key.ts:1606). Si el guard se
   // hubiera puesto un nivel más arriba, esta chain quedaría muerta también para
-  // el prepago, que es el ÚNICO camino que hoy cobra en Solana.
+  // el prepago, que hoy —con el rail de entrada apagado— es el único que cobra.
 
   it('T-204-07: con x-a2a-key, solana-devnet sigue resolviendo chainId 900001 (sin 400)', async () => {
     mockLookupByHash.mockResolvedValue(makeKeyRow());

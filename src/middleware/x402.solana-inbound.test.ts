@@ -3,12 +3,12 @@
  *
  * ─── POR QUE ESTE ARCHIVO Y NO UN CASO MAS EN `x402.non-evm-inbound.test.ts` ──
  *
- * Aquella suite fija el comportamiento de HU-204: con Solana como rail
- * outbound-only, un cobro entrante da **400 `CHAIN_INBOUND_PAYMENT_UNSUPPORTED`**.
- * Esta HU invierte esa expectativa **sólo cuando el camino está configurado**, y la
- * regla de la casa es no reescribir la suite que uno vuelve obsoleta: aquélla queda
- * **verde e intacta** (con el flag apagado sigue siendo la verdad), y las expectativas
- * nuevas viven acá.
+ * Aquella suite fija el comportamiento con el rail de entrada APAGADO: un cobro
+ * entrante da **400 `CHAIN_INBOUND_PAYMENT_UNSUPPORTED`**. Esta HU invierte esa
+ * expectativa **sólo cuando el camino está configurado**, así que aquélla sigue
+ * exigiendo lo mismo — pero **fue reescrita** (fix-pack del F4, §6.3): su 400 ya
+ * no se afirma como propiedad de la chain sino de la CONFIGURACIÓN, y su
+ * T-204-09 enciende las envs del rail y mide el flip en el mismo proceso.
  *
  * El registry es **REAL** (mismo patrón que la suite hermana): sólo se moquean las
  * factories de cada chain, así que `getAdaptersBundle('solana-devnet')` devuelve un

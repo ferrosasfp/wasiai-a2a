@@ -265,3 +265,70 @@ la próxima HU no los repita.
 - **Aplicar en**: toda comparación contra un límite ajeno. Si el límite vive en otro
   archivo, el test lo lee de ahí; si no, la afirmación envejece en silencio y nadie se
   entera.
+
+### [2026-08-19] FIX F4 — El README decía "configuración" y la API contestaba "el código no puede" (§6.2 + §6.3)
+
+- **Error**: dos hallazgos que son **uno solo**. (1) Un ítem del Scope IN
+  (`work-item.md:284-285`: *"reescritura DELIBERADA de
+  `src/middleware/x402.non-evm-inbound.test.ts` … reescribir, no borrar"*) se declaró y
+  **no se hizo**: la HU agregó `x402.solana-inbound.test.ts` en vez de invertir aquél
+  (`git diff main...HEAD --stat` sobre ese archivo = vacío). (2) Por eso mismo, el
+  mensaje que el integrador recibe de verdad —`inboundPaymentUnsupportedMessage`— quedó
+  afirmando **sin condicional** *"It is an OUTBOUND settlement rail … the inbound leg
+  needs an EVM signed authorization (EIP-3009), which this chain's payment adapter does
+  not implement"*: una propiedad **del código**, que es exactamente lo que `README.md:97`
+  dice que **no** es. Vivo en producción (HTTP 400 medido por el F4; control positivo
+  `base-sepolia` ⇒ 402) y en un repo público.
+- **Causa raíz**: la frase estaba **clavada por un test verde**
+  (`T-204-03`, `expect(body.error).toMatch(/OUTBOUND settlement rail/)`) en el archivo
+  que el Scope IN mandaba reescribir. No reescribirlo no dejó un hueco de cobertura:
+  dejó un **candado sosteniendo la afirmación vieja**, así que nadie iba a verlo rojo.
+  El docblock de `x402.solana-inbound.test.ts:9-10` argumentaba lo contrario ("la regla
+  de la casa es no reescribir la suite que uno vuelve obsoleta") — una regla razonable
+  que acá tapó un ítem explícito del Scope IN.
+- **Fix**: el mensaje se reescribió chain-agnóstico (lo comen **todas** las non-EVM, no
+  sólo Solana: el `false` sale de `acceptsInboundPayment`, `src/adapters/registry.ts:523`),
+  con el condicional DENTRO de la afirmación (*"on this deployment right now"*, *"That is
+  a CONFIGURATION state, not a limit of the code"*) y las **tres** salidas nombradas
+  (otra chain / key prepaga / **pedirle al operador que encienda el rail**).
+  `x402.non-evm-inbound.test.ts` se **reescribió, no se borró**: mismas exigencias, otra
+  afirmación. `T-204-03` fija el texto nuevo **y** prohíbe las tres frases viejas
+  (`OUTBOUND settlement rail`, `EIP-3009`, `does not implement`); `T-204-09` es nuevo y
+  enciende las cuatro envs en el MISMO proceso para probar que el 400 es config.
+  Calibrado: revertido SOLO el texto del mensaje ⇒ `T-204-03` **rojo**
+  (`expected … to match /on this deployment right now/`), los otros 8 verdes;
+  `acceptsInboundPayment` mutado a `return false` ⇒ `T-204-09` **rojo**, los otros 8
+  verdes. Restauración por **sha256** contra un registro previo, nunca `git checkout --`.
+- **Aplicar en**: cuando una HU cambia lo que un ERROR de la API significa, el texto del
+  error es **artefacto de la HU**, no documentación. Y antes de declarar "esa suite queda
+  intacta porque sigue verde": preguntá **qué afirma**, no si pasa. Un test verde que
+  sostiene una frase que dejó de ser cierta es peor que un hueco — el hueco no defiende
+  a nadie.
+
+### [2026-08-19] TD — El costo del `unknown` y su mensaje EVM-específico (F4 §3.c, NO se implementó)
+
+- **Qué queda abierto** (dos cosas, mismo productor):
+  1. **Amplificación 0 → N por fallo genuino.** `unknown` dispara `emitUnknown`
+     (`src/middleware/x402.ts:995`) → `emitInboundSettleUnknownEvent`
+     (`src/middleware/x402.ts:404`), que por invocación hace un `request.log.error`
+     **alertable** (`src/middleware/x402.ts:425`) **y** una fila durable en `a2a_events`
+     con `status:'failed'` (`src/middleware/x402.ts:448-465`), **sin dedup ni
+     rate-limit**. Contraste medido en el MISMO archivo: `warnDefaultChainApplied` sí
+     tiene ventana + cap (`src/middleware/x402.ts:142` y `:159`, aplicados en `:207`).
+     Aritmética del F4: un
+     cliente que obedece el `Retry-After: 15` ⇒ **4 logs ERROR + 4 filas failed en 60 s**
+     por un pago que no va a prosperar (antes del fix-pack 2: 1 log `info`, 0 eventos).
+  2. **El texto es EVM-específico y falso para el productor nuevo.**
+     `src/middleware/x402.ts:437` dice *"the facilitator hop was cut without an answer,
+     so the payment may have executed on-chain … the caller may have been charged"*. En
+     el inbound Solana **no hay facilitator** (firma el pagador; el gateway sólo lee la
+     cadena) y `txHash` es `null` siempre (`src/middleware/x402.ts:877`); en el caso
+     `err`-sin-finalidad el caller **no** fue cobrado por nosotros. Compartir el canal
+     fue correcto (DT-14); no se ajustó el texto para el segundo productor.
+- **Por qué no entra acá**: fuera del encargo del fix-pack F4 (que es §6.2 + §6.3).
+  Ninguna de las dos es bloqueante y el rail nace apagado, así que hoy **no hay
+  productor en producción**.
+- **Cuándo hay que hacerlo**: **ANTES de encender el rail** (`SOLANA_X402_INBOUND_ENABLED
+  = true`), que es el momento en que el primer `unknown` real puede aparecer. Alcance
+  propuesto por el F4: parametrizar el mensaje por productor (EVM/facilitator vs Solana/
+  testigo) y evaluar dedup por `(caip2, signature)`.
