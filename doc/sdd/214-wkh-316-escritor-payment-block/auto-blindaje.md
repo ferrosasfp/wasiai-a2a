@@ -94,3 +94,51 @@
   sobre archivos nuevos. Regla operativa: **la restauración no se declara, se mide** — md5 antes,
   md5 después, y `git status` para el caso simétrico (un archivo tracked que quedó modificado). Un
   "restauré" sin hash es exactamente el mismo error que un "verde" sin correr la suite.
+
+---
+
+### [2026-08-19 00:21] Wave 2 — Un guardián que sólo ve el ÍNDICE DE GIT explotó una wave TARDE
+
+- **Error**: la puerta de W1 dio verde (`287 passed | 6 skipped`). La de W2 arrancó con
+  `test/readme-numbers.test.ts` en **4 failed**, y dos de los cuatro eran por el archivo que había
+  agregado en **W1**, no en W2.
+- **Causa raíz**: ese guardián deriva sus números de `git ls-files` (`test/readme-numbers.test.ts:83`),
+  o sea del **índice de git**, no del disco — a propósito, porque un archivo sin trackear no lo ve
+  nadie más y Biome respeta el `.gitignore`. Consecuencia que no es obvia: **un archivo nuevo no
+  cuenta hasta que lo agregás al índice**, así que la puerta de la wave que lo crea pasa en verde y
+  la que explota es la SIGUIENTE. El instrumento estaba bien; mi modelo de cuándo mide, no.
+- **Fix**: `git add` de los archivos de la wave **ANTES** de correr la suite de la puerta, y recién
+  ahí leer los conteos. Medido con el índice ya cargado: `294` archivos de test y `489` que linta
+  Biome (base `292` / `485`; `+2` test y `+4` lint entre W1 y W2). Se actualizaron los cuatro
+  números publicados, en `README.md:378` y `:383` y en `README.es.md:405` y `:410`.
+- **Aplicar en**: W3A, W3B y W4, que agregan más archivos de test. Y en cualquier HU de este repo
+  que cree archivos: **el orden correcto es `git add` → correr la puerta → commitear**, nunca
+  `correr la puerta → git add → commitear`. Un verde medido con el índice desactualizado no dice
+  nada sobre el árbol que el próximo clon va a ver.
+- **Desviación de scope que esto obliga**: `README.es.md` **no está en el Scope IN** del Story File
+  (sólo `README.md`, archivo #12). El guardián verifica los DOS. Se toca, y sólo para mover esos dos
+  números.
+
+---
+
+### [2026-08-19 00:20] Wave 2 — T-316-09 no se puede escribir como está especificado, y escribirlo igual habría dado un verde falso
+
+- **Error**: implementé T-316-09 tal como lo pide el Story File —*"`0x0000…0000` en **3 cajas
+  distintas** → `ZERO_PAYMENT_PAYTO` las 3 veces"*— y el caso `0X0000…0000` dio
+  `INVALID_PAYMENT_PAYTO_FORMAT`, no `ZERO_PAYMENT_PAYTO`.
+- **Causa raíz**: dos hechos que el Story File no midió. (1) **La zero address no tiene un solo
+  carácter con caja**: son 40 ceros, así que el conjunto de "cajas distintas" de su cuerpo tiene
+  tamaño **1**. (2) Lo único con caja es el prefijo, y `isValidWallet('0X' + '0'.repeat(40))` es
+  **`false`** (medido), así que ese candidato lo rechaza el **paso 4** y nunca llega al paso 5.
+- **Fix**: el test se reescribió para afirmar lo que de verdad pasa —`0x000…0` →
+  `ZERO_PAYMENT_PAYTO`, `0X000…0` → `INVALID_PAYMENT_PAYTO_FORMAT`— **asserteando el `error_code` en
+  los dos** (CD-A4), con el porqué escrito al lado. El `toLowerCase()` de la rama EVM del paso 5 se
+  **mantiene** porque lo manda el diseño y quedaría correcto si el guard de formato se aflojara,
+  pero queda escrito que **no es load-bearing**: ningún input que pase el paso 4 cambia de valor al
+  bajarle la caja Y además es la zero address. Donde la insensibilidad a la caja EVM sí decide algo
+  es en el paso 7, y eso lo fija T-316-10.
+- **Aplicar en**: cualquier test que diga "en N cajas distintas". **Antes de escribirlo, mirá si el
+  valor TIENE caracteres con caja.** Si lo hubiera escrito con `expect(r.ok).toBe(false)` en vez de
+  con el `error_code`, los tres casos habrían pasado y yo habría publicado que AC-5 es
+  case-insensitive — que es falso, y encima el test habría muerto por la razón barata (AC-4). Es
+  CD-A4 exactamente: un testigo que muere por el motivo equivocado no prueba lo que dice probar.
