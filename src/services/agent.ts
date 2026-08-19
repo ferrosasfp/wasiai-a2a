@@ -18,6 +18,11 @@
 
 import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import { readPaymentSpec } from '../lib/payment-spec-reader.js';
+import {
+  logPaymentBlockChange,
+  readStoredPaymentBlock,
+  validatePaymentBlock,
+} from '../lib/payment-spec-writer.js';
 import { parsePriceSafe } from '../lib/price.js';
 import { supabase } from '../lib/supabase.js';
 import {
@@ -31,6 +36,7 @@ import {
 import type { Database, Json } from '../types/database.types.js';
 import type {
   Agent,
+  AgentPaymentSpecInput,
   PublishAgentInput,
   UpdateAgentInput,
 } from '../types/index.js';
@@ -73,6 +79,13 @@ export interface PublishedAgentRecord {
   discoverable: boolean;
   inputSchema?: Record<string, unknown>;
   outputSchema?: Record<string, unknown>;
+  /**
+   * WKH-316: bloque `payment` tal como quedó PERSISTIDO en `metadata.payment`
+   * (las 4 keys del input, sin los derivados). Presente sólo si la fila tiene
+   * bloque — nunca `null`. El `Agent.payment` de discovery es otra cosa: lo
+   * produce `readPaymentSpec` y trae además `resolvedChain`/`network`.
+   */
+  payment?: AgentPaymentSpecInput;
   createdAt: string;
 }
 
@@ -176,24 +189,40 @@ function mapRowToRecord(row: AgentRow): PublishedAgentRecord {
   };
   if (inputSchema !== undefined) record.inputSchema = inputSchema;
   if (outputSchema !== undefined) record.outputSchema = outputSchema;
+  // WKH-316: el bloque tal como está PERSISTIDO (4 keys, sin los derivados).
+  // Asignación condicional obligatoria por `exactOptionalPropertyTypes`, y NUNCA
+  // `null`: una fila sin bloque deja `record.payment` ausente, no nulo (AC-11).
+  const payment = readStoredPaymentBlock(meta);
+  if (payment !== undefined) record.payment = payment;
   return record;
 }
 
 /**
  * Construye el objeto `metadata` (JSONB) a partir de los campos WKH-106.
  * Retorna null si no hay ninguno (columna nullable).
+ *
+ * ⚠️ WKH-316 — `payment` ENTRA POR UN PARÁMETRO APARTE, NO POR `source`, y es a
+ * propósito. Si fuera una key más de `source`, la llamada `buildMetadata(input)`
+ * tomaría `input.payment` — que es el objeto CRUDO del caller— y lo persistiría
+ * con sus keys de más. Como parámetro separado, el único valor que se le puede
+ * pasar es el que produjo `validatePaymentBlock`: la regla deja de depender de
+ * que nadie se equivoque en el call-site.
  */
-function buildMetadata(source: {
-  inputSchema?: Record<string, unknown>;
-  outputSchema?: Record<string, unknown>;
-  discoverable?: boolean;
-}): Record<string, unknown> | null {
+function buildMetadata(
+  source: {
+    inputSchema?: Record<string, unknown>;
+    outputSchema?: Record<string, unknown>;
+    discoverable?: boolean;
+  },
+  payment?: AgentPaymentSpecInput,
+): Record<string, unknown> | null {
   const meta: Record<string, unknown> = {};
   if (source.inputSchema !== undefined) meta.inputSchema = source.inputSchema;
   if (source.outputSchema !== undefined)
     meta.outputSchema = source.outputSchema;
   if (source.discoverable !== undefined)
     meta.discoverable = source.discoverable;
+  if (payment !== undefined) meta.payment = payment;
   return Object.keys(meta).length > 0 ? meta : null;
 }
 
@@ -395,6 +424,17 @@ export const publishedAgentService = {
     // 422). Ausentes → no-op → columnas NULL (AC-5).
     assertValidPayoutWallet(input.payoutWallet, input.payoutChain);
     assertValidReferrerRef(input.referrerRef);
+    // WKH-316: defense-in-depth del bloque `payment` (el route ya devolvió 422),
+    // MISMO patrón que `assertValidPayoutWallet`. Lo que se persiste sale de
+    // `result.block`, NUNCA de `input.payment`: acá el input puede seguir siendo
+    // el objeto crudo del caller, y un `{ ...raw }` metería en el JSONB los
+    // campos que el gateway DERIVA (`resolvedChain`, `network`).
+    let paymentBlock: AgentPaymentSpecInput | undefined;
+    if (input.payment !== undefined) {
+      const result = await validatePaymentBlock(input.payment);
+      if (!result.ok) throw new Error('Invalid payment');
+      paymentBlock = result.block;
+    }
     const capabilities = sanitizeCapabilities(input.capabilities);
 
     // Slug server-side (CD-5): guards de whitespace idénticos a
@@ -409,7 +449,7 @@ export const publishedAgentService = {
       throw new Error(`Agent '${slug}' already exists`);
     }
 
-    const metadata = buildMetadata(input);
+    const metadata = buildMetadata(input, paymentBlock);
     const row: Database['public']['Tables']['a2a_agents']['Insert'] = {
       slug,
       name: input.name,
@@ -440,6 +480,19 @@ export const publishedAgentService = {
         throw new Error(`Agent '${slug}' already exists`);
       }
       throw new Error(`Failed to publish agent: ${error.message}`);
+    }
+
+    // Auditoría DESPUÉS del INSERT exitoso: si el insert falla no hubo cambio de
+    // billetera que auditar. Sin bloque no se loguea nada — el ruido tapa la
+    // única pregunta que este log existe para contestar.
+    if (paymentBlock !== undefined) {
+      logPaymentBlockChange({
+        op: 'publish',
+        slug,
+        ownerRef,
+        prev: null,
+        next: paymentBlock,
+      });
     }
 
     return mapRowToRecord(data as unknown as AgentRow);
@@ -612,6 +665,32 @@ export const publishedAgentService = {
     // Baja/alta del agente. Corre DESPUÉS del guard de ownership de arriba: un
     // caller que no es el dueño ya salió por `OwnershipMismatchError`.
     if (updates.enabled !== undefined) assertValidEnabled(updates.enabled);
+    // WKH-316 — defense-in-depth del bloque `payment`. Corre DESPUÉS del guard de
+    // dueño: un caller que no es el dueño ya salió por `OwnershipMismatchError`.
+    //
+    // 🔴 ESTE ES EL PUNTO DONDE SE CIERRA EL AGUJERO DEL PATCH. El route le pasa
+    // el `body` CRUDO a este método (a diferencia del POST, que arma un `input`
+    // con whitelist) y el sistema de tipos NO lo detiene: `Record<string,
+    // unknown>` es asignable a `UpdateAgentInput` porque todas sus props son
+    // opcionales. Si acá persistiéramos `updates.payment` en vez de
+    // `result.block`, un `PATCH {"payment":{…,"resolvedChain":"avalanche-mainnet"}}`
+    // escribiría esa key en el JSONB y ningún otro test se pondría rojo.
+    let paymentBlock: AgentPaymentSpecInput | undefined;
+    if (updates.payment !== undefined && updates.payment !== null) {
+      const result = await validatePaymentBlock(updates.payment);
+      if (!result.ok) throw new Error('Invalid payment');
+      paymentBlock = result.block;
+    }
+    // ⚠️ EL `prev` DEL LOG SE CAPTURA **ANTES** DEL MERGE, Y NO ES UN DETALLE DE
+    // ESTILO. `readMetadataObject` devuelve el MISMO objeto (`raw as
+    // Record<string, unknown>`), no una copia, así que el merge de más abajo
+    // MUTA `existing.metadata` en el lugar. Leyendo `prev` después del merge, el
+    // log reportaría la billetera NUEVA como si fuera la vieja — o sea, mentiría
+    // exactamente en la única pregunta que existe para contestar. Medido: sin
+    // esta línea, `T-316-14` (reemplazo) sale con `prev.contract === next.contract`.
+    const previousPaymentBlock = readStoredPaymentBlock(
+      readMetadataObject(existing.metadata),
+    );
 
     const updateRow: Database['public']['Tables']['a2a_agents']['Update'] = {};
     if (updates.name !== undefined) {
@@ -647,7 +726,10 @@ export const publishedAgentService = {
     if (
       updates.inputSchema !== undefined ||
       updates.outputSchema !== undefined ||
-      updates.discoverable !== undefined
+      updates.discoverable !== undefined ||
+      // WKH-316: `payment: null` TAMBIÉN entra acá (`null !== undefined`), y
+      // tiene que entrar — es la señal de BORRADO (AC-8).
+      updates.payment !== undefined
     ) {
       const meta = readMetadataObject(existing.metadata);
       if (updates.inputSchema !== undefined)
@@ -656,7 +738,20 @@ export const publishedAgentService = {
         meta.outputSchema = updates.outputSchema;
       if (updates.discoverable !== undefined)
         meta.discoverable = updates.discoverable;
-      updateRow.metadata = meta as unknown as Json;
+      // Tres estados, no dos: ausente no llega hasta acá; `null` borra la key;
+      // un objeto la reemplaza por el bloque que produjo el validador.
+      if (updates.payment === null) {
+        delete meta.payment;
+      } else if (paymentBlock !== undefined) {
+        meta.payment = paymentBlock;
+      }
+      // R-7 — colapso a `null`. Borrar la única key dejaría `{}`, y la columna
+      // usa `null` para "sin metadata" (`buildMetadata` ya devuelve `null` en el
+      // alta). Es inalcanzable por cualquier otro camino —los otros tres campos
+      // sólo ASIGNAN, nunca borran—, así que no cambia el comportamiento de
+      // ningún PATCH que existiera antes de esta HU.
+      updateRow.metadata =
+        Object.keys(meta).length > 0 ? (meta as unknown as Json) : null;
     }
 
     const { data, error } = await supabase
@@ -679,6 +774,18 @@ export const publishedAgentService = {
         throw new OwnershipMismatchError();
       }
       throw new Error(`Failed to update agent '${slug}': ${error.message}`);
+    }
+
+    // Auditoría DESPUÉS del UPDATE exitoso. `prev` sale de la fila que ya
+    // habíamos leído para el guard de dueño, así que no cuesta una query más.
+    if (updates.payment !== undefined) {
+      logPaymentBlockChange({
+        op: updates.payment === null ? 'delete' : 'update',
+        slug,
+        ownerRef,
+        prev: previousPaymentBlock,
+        next: paymentBlock ?? null,
+      });
     }
 
     return mapRowToRecord(data as unknown as AgentRow);

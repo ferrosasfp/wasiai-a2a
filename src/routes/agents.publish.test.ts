@@ -72,6 +72,45 @@ vi.mock('../services/agent.js', async () => {
   };
 });
 
+/**
+ * 🔴 WKH-316 — SIN ESTE MOCK NINGÚN TEST DE `payment` PUEDE DAR 201.
+ *
+ * Este archivo NO inicializa el registry de adapters (sus mocks son `node:dns`,
+ * supabase, el service y el middleware de auth). `getAdaptersBundle` arranca con
+ * `if (!_initialized) return undefined;`, así que sin este override devuelve
+ * `undefined` para TODA chain y el paso 3 de `validatePaymentBlock` rechaza
+ * cualquier bloque con `PAYMENT_CHAIN_NOT_INITIALIZED`.
+ *
+ * El síntoma es un 422 donde se espera un 201, y parece un bug del guard. **No lo
+ * es.** Está prohibido tocar el orden o la condición de los guards para que un
+ * test pase: AC-3 es justamente la mitad de la HU que impide publicar una ficha
+ * que nunca va a poder cobrar.
+ *
+ * `importOriginal` + spread: sin el spread, todo export no overrideado queda
+ * `undefined` y la suite explota por un motivo ajeno. Y `getAdaptersBundle` sigue
+ * devolviendo `undefined` para al menos una chain conocida (todo lo que no sea
+ * `solana-devnet`/`avalanche-fuji`), o el test de AC-3 no podría ponerse rojo.
+ */
+const INITIALIZED_CHAINS = ['solana-devnet', 'avalanche-fuji'];
+vi.mock('../adapters/registry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../adapters/registry.js')>();
+  return {
+    ...actual,
+    getInitializedChainKeys: () => INITIALIZED_CHAINS,
+    getAdaptersBundle: (chainKey?: string) =>
+      chainKey !== undefined && INITIALIZED_CHAINS.includes(chainKey)
+        ? { payment: { supportedTokens: [{ symbol: 'USDC' }] } }
+        : undefined,
+  };
+});
+
+// El operador no se resuelve en esta suite (no hay envs de firma): AC-6 degrada
+// aceptando, que es justo lo que necesitan los tests de camino feliz.
+vi.mock('../lib/operator-address.js', () => ({
+  resolveOperatorAddress: () => Promise.resolve(null),
+}));
+
 // auth middleware — inyecta a2aKeyRow (o simula ausencia con currentOwner=null).
 let currentOwner: string | null = 'tenant-A';
 vi.mock('../middleware/a2a-key.js', () => ({
@@ -577,5 +616,317 @@ describe('agents routes — publish flow (WKH-134)', () => {
     expect(raw).not.toContain('referrer_ref');
     expect(raw).not.toContain('payoutWallet');
     expect(raw).not.toContain('referrerRef');
+  });
+
+  // ── WKH-316 · el bloque `payment` en el route del POST ───────────
+  //
+  // ⚠️ Lo que este bloque NO prueba: que el bloque se PERSISTA. Acá el service
+  // está mockeado, así que lo que se mide es el guard del route y lo que el
+  // route le pasa al service. La persistencia y el merge los fija
+  // `src/services/agent.payment.test.ts`, que usa el service REAL.
+
+  const SOL_PAYTO = 'So11111111111111111111111111111111111111112';
+  const VALID_PAYMENT = {
+    method: 'x402',
+    chain: 'solana-devnet',
+    contract: SOL_PAYTO,
+    asset: 'USDC',
+  };
+
+  it('T-316-01: POST con bloque payment válido → 201 y body.payment con las 4 keys', async () => {
+    mockPublish.mockResolvedValueOnce({
+      ...RECORD_RESPONSE,
+      payment: VALID_PAYMENT,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: { ...VALID_BODY, payment: VALID_PAYMENT },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.json().payment).toEqual(VALID_PAYMENT);
+    // Y el route le pasó al service el bloque VALIDADO, no el body crudo.
+    expect(mockPublish.mock.calls[0]?.[0]?.payment).toEqual(VALID_PAYMENT);
+  });
+
+  it('T-316-01 (CD-10 en el route): las keys derivadas del caller no llegan al service', async () => {
+    mockPublish.mockResolvedValueOnce(RECORD_RESPONSE);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: {
+        ...VALID_BODY,
+        payment: {
+          ...VALID_PAYMENT,
+          resolvedChain: 'avalanche-mainnet',
+          network: 'mainnet',
+          sarasa: 1,
+        },
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    const sent = mockPublish.mock.calls[0]?.[0]?.payment;
+    expect(Object.keys(sent ?? {}).sort()).toEqual([
+      'asset',
+      'chain',
+      'contract',
+      'method',
+    ]);
+  });
+
+  it('T-316-20 · AC-11: POST SIN payment → 201, y el service NO recibe la key payment', async () => {
+    mockPublish.mockResolvedValueOnce(RECORD_RESPONSE);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: VALID_BODY,
+    });
+
+    expect(res.statusCode).toBe(201);
+    // `undefined`, NUNCA `null`: la ausencia se dice ausentando la key.
+    expect(mockPublish.mock.calls[0]?.[0]).not.toHaveProperty('payment');
+    // Y el 201 no inventa un `payment: null` en la respuesta.
+    expect(res.json()).not.toHaveProperty('payment');
+  });
+
+  it.each([
+    [
+      'chain desconocida',
+      { ...VALID_PAYMENT, chain: 'polygon' },
+      'INVALID_PAYMENT_CHAIN',
+    ],
+    [
+      'riel apagado',
+      {
+        ...VALID_PAYMENT,
+        chain: 'kite-ozone-testnet',
+        contract: '0x000000000000000000000000000000000000aBcD',
+      },
+      'PAYMENT_CHAIN_NOT_INITIALIZED',
+    ],
+    [
+      'method distinto de x402',
+      { ...VALID_PAYMENT, method: 'X402' },
+      'UNSUPPORTED_PAYMENT_METHOD',
+    ],
+    [
+      'payTo de otra familia',
+      {
+        ...VALID_PAYMENT,
+        contract: '0x000000000000000000000000000000000000aBcD',
+      },
+      'INVALID_PAYMENT_PAYTO_FORMAT',
+    ],
+    [
+      'pubkey de todos ceros',
+      { ...VALID_PAYMENT, contract: '1'.repeat(32) },
+      'ZERO_PAYMENT_PAYTO',
+    ],
+    [
+      'asset que no matchea',
+      { ...VALID_PAYMENT, asset: 'PEN' },
+      'PAYMENT_ASSET_MISMATCH',
+    ],
+    ['payment null en el ALTA', null, 'INVALID_PAYMENT_BLOCK'],
+  ])('T-316-04/05/19: %s → 422 con su error_code, y publish() NO se llama', async (_label, payment, code) => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: { ...VALID_BODY, payment },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe('Invalid payment');
+    // Se assertea el CÓDIGO, no sólo el 422 (CD-A4): varios de estos casos
+    // podrían morir por el guard equivocado y el 422 no lo delataría.
+    expect(res.json().error_code).toBe(code);
+    // Nada tocó la base: el guard del route corre antes del service.
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
+  it('T-316-05: el 422 de riel apagado trae la lista accionable de rieles vivos', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: {
+        ...VALID_BODY,
+        payment: {
+          ...VALID_PAYMENT,
+          chain: 'kite-ozone-testnet',
+          contract: '0x000000000000000000000000000000000000aBcD',
+        },
+      },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().initializedChains).toContain('avalanche-fuji');
+  });
+
+  it('CD-8: el reason del 422 NO refleja el valor que mandó el caller', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: {
+        ...VALID_BODY,
+        payment: { ...VALID_PAYMENT, chain: 'chain-secreta-del-caller' },
+      },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.body).not.toContain('chain-secreta-del-caller');
+  });
+
+  // ── AR/MNR-1 · el log del 422 NO lleva el valor crudo del caller ──
+  //
+  // POR QUÉ ES UN TEST Y NO UNA CONVENCIÓN. `body.payment` es JSON elegido por
+  // el caller, y `src/index.ts` construye Fastify sin `bodyLimit` (default de
+  // 1 MiB), así que una línea de log que lo eche entera crece con el input del
+  // atacante — en el camino del dinero y con el repo público. Los 5 guards
+  // hermanos de `routes/agents.ts` (`priceUsdc` `:220`, `payoutWallet` `:237`,
+  // `referrerRef` `:252`, `enabled` `:459`, `capabilities` `:475` — todos
+  // re-medidos DESPUÉS de este fix, que desplazó las líneas de abajo del POST)
+  // loguean sólo el `field`; estos dos se desalinearon y el AR lo cazó.
+  //
+  // ⚠️ SE VERIFICA LA AUSENCIA DE LA KEY, NO QUE EL VALOR VENGA VACÍO. Un
+  // `value: ''` o un `value: '[redacted]'` pasarían un `not.toContain(marker)`
+  // sin acotar nada el día que alguien "arregle" el truncado con un slice; lo
+  // que fija la cota es que la key no exista.
+
+  /**
+   * Levanta una app aparte con un pino que escribe a un array (mismo patrón que
+   * `src/middleware/forward-key.test.ts:204-232`) y devuelve las líneas
+   * parseadas. `level: 'warn'` deja afuera el request/response logging de
+   * Fastify, que es `info`.
+   */
+  async function captureWarnLines(
+    inject: (a: ReturnType<typeof Fastify>) => Promise<unknown>,
+  ): Promise<Array<Record<string, unknown>>> {
+    const lines: Array<Record<string, unknown>> = [];
+    const logApp = Fastify({
+      logger: {
+        level: 'warn',
+        stream: {
+          write(line: string) {
+            // No se traga el error de parseo: pino tiene que emitir JSON válido
+            // con esta configuración, y si no lo hace este test dejó de medir.
+            try {
+              lines.push(JSON.parse(line) as Record<string, unknown>);
+            } catch (err) {
+              expect.fail(
+                `línea de log no parseable: ${JSON.stringify(line)} (${String(err)})`,
+              );
+            }
+          },
+        },
+      },
+    });
+    await logApp.register(agentsRoutes, { prefix: '/agents' });
+    await logApp.ready();
+    try {
+      await inject(logApp);
+    } finally {
+      await logApp.close();
+    }
+    return lines;
+  }
+
+  // `chain` desconocida en minúsculas a propósito: `normalizeChainSlug` hace
+  // `trim().toLowerCase()`, así que en mayúsculas la marca no volvería verbatim
+  // ni siquiera si el route logueara el crudo, y el test sería más débil.
+  const RAW_MARKER = 'marca-cruda-del-caller-que-no-debe-loguearse';
+
+  it('T-316-27 · AR/MNR-1: el 422 del POST loguea { field, code } y NUNCA el payment crudo', async () => {
+    const lines = await captureWarnLines((a) =>
+      a.inject({
+        method: 'POST',
+        url: '/agents',
+        payload: {
+          ...VALID_BODY,
+          payment: { ...VALID_PAYMENT, chain: RAW_MARKER },
+        },
+      }),
+    );
+
+    const rejected = lines.filter(
+      (l) => l.msg === 'agent publish rejected: invalid payment',
+    );
+    // Control de vacuidad: sin esto, un guard que no loguea NADA (o un stream
+    // que no captura) haría pasar todas las aserciones de abajo.
+    expect(rejected).toHaveLength(1);
+    const line = rejected[0] as Record<string, unknown>;
+    expect(line.field).toBe('payment.chain');
+    expect(line.code).toBe('INVALID_PAYMENT_CHAIN');
+    // La KEY no está: no es que esté vacía.
+    expect(Object.keys(line)).not.toContain('value');
+    // Y el crudo no se cuela por ninguna otra key de la línea.
+    expect(JSON.stringify(line)).not.toContain(RAW_MARKER);
+  });
+
+  it('T-316-28 · AR/MNR-1: el 422 del PATCH loguea { field, code } y NUNCA el payment crudo', async () => {
+    const lines = await captureWarnLines((a) =>
+      a.inject({
+        method: 'PATCH',
+        url: '/agents/my-weather-agent',
+        payload: { payment: { ...VALID_PAYMENT, chain: RAW_MARKER } },
+      }),
+    );
+
+    const rejected = lines.filter(
+      (l) => l.msg === 'agent update rejected: invalid payment',
+    );
+    expect(rejected).toHaveLength(1);
+    const line = rejected[0] as Record<string, unknown>;
+    expect(line.field).toBe('payment.chain');
+    expect(line.code).toBe('INVALID_PAYMENT_CHAIN');
+    expect(Object.keys(line)).not.toContain('value');
+    expect(JSON.stringify(line)).not.toContain(RAW_MARKER);
+    // Y el service no se tocó: el guard del route corre antes.
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  // ── AR/MNR-2 · desviación de contrato DECLARADA ──────────────────
+  //
+  // `POST /agents` con `payment: null` pasó de **201** (en `main` @ `8242b16`
+  // `payment` era una key desconocida del body y se ignoraba, igual que el
+  // `slug`) a **422 `INVALID_PAYMENT_BLOCK`**. Es deliberado: en un ALTA no hay
+  // nada que borrar, así que aceptar el `null` en silencio sería inventarle un
+  // significado. Ningún AC lo cubría (AC-11 sólo habla de omitir la key), así
+  // que se declara acá y en `auto-blindaje.md`.
+  //
+  // El test es un PAR, y el par es lo que lo hace no-vacío: el MISMO `null` en
+  // el PATCH es la señal de borrado (AC-8). Alinear el POST con el PATCH
+  // —`body.payment !== undefined && body.payment !== null`— es exactamente la
+  // "simplificación" que este test tiene que matar.
+  it('T-316-29 · AR/MNR-2: `payment: null` es 422 en el ALTA (contrato nuevo, declarado)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: { ...VALID_BODY, payment: null },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error_code).toBe('INVALID_PAYMENT_BLOCK');
+    expect(res.json().field).toBe('payment');
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
+  it('T-316-29 (el otro lado del par): el MISMO `null` en el PATCH es BORRADO, no 422', async () => {
+    mockUpdate.mockResolvedValueOnce(RECORD_RESPONSE);
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/agents/my-weather-agent',
+      payload: { payment: null },
+    });
+
+    expect(res.statusCode).toBe(200);
+    // El `null` llega al service: es la señal de borrado, no un valor inválido.
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(mockUpdate.mock.calls[0]?.[1]).toHaveProperty('payment', null);
   });
 });

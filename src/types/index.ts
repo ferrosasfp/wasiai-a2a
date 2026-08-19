@@ -261,6 +261,37 @@ export interface AgentPaymentSpec {
   network?: 'testnet' | 'mainnet' | undefined;
 }
 
+/**
+ * WKH-316 — lo que un agente DECLARA al publicar por API (`POST /agents` /
+ * `PATCH /agents/:slug`). Es el lado ESCRITOR del bloque `payment`; el lector
+ * (`readPaymentSpec`) ya existía desde WKH-241.
+ *
+ * NO es `AgentPaymentSpec` (arriba): ese tipo tiene además `resolvedChain` y
+ * `network`, que los DERIVA el gateway en cada lectura
+ * (`lib/payment-spec-reader.ts:212-213`) y que el caller NO puede escribir. Por
+ * eso este tipo tiene 4 campos y aquél 6: si el input los aceptara, un caller
+ * podría dejar `resolvedChain: 'avalanche-mainnet'` envenenado dentro del JSONB
+ * `a2a_agents.metadata` — `/discover` no cambiaría (el lector los recomputa
+ * siempre), pero el valor quedaría ahí para todo consumidor del bloque crudo.
+ *
+ * El validador de estos 4 campos es `lib/payment-spec-writer.ts`
+ * (`validatePaymentBlock`), único choke-point del write path.
+ */
+export interface AgentPaymentSpecInput {
+  /** Debe ser EXACTAMENTE `'x402'`: sin trim, sin lowercase. */
+  method: string;
+  /** Alias de chain que `normalizeChainSlug` conozca Y riel inicializado. */
+  chain: string;
+  /**
+   * ⚠️ EL NOMBRE MIENTE — es la BILLETERA DE COBRO (el `payTo`), NO un token ni
+   * un contrato. El porqué del nombre, y el bloqueante rojo falso que ya
+   * produjo, están en el docblock de `AgentPaymentSpec.contract` (`:203-225`).
+   */
+  contract: string;
+  /** Etiqueta. Se compara case-insensitive con `supportedTokens[0].symbol`. */
+  asset?: string;
+}
+
 // ============================================================
 // SELF-PUBLISHED AGENT TYPES (WKH-134)
 // ============================================================
@@ -306,6 +337,13 @@ export interface PublishAgentInput {
    * `'evm'` → comportamiento byte-idéntico.
    */
   payoutChain?: string;
+  /**
+   * WKH-316: bloque `payment` declarado. Opcional — omitirlo se comporta
+   * byte-idéntico a hoy. NO se deriva de `payoutWallet`/`payoutChain` ni al
+   * revés: `payoutWallet` es la pata del creator-split, `payment.contract` es
+   * el payTo del precio completo.
+   */
+  payment?: AgentPaymentSpecInput;
 }
 
 /**
@@ -327,6 +365,15 @@ export interface UpdateAgentInput {
   referrerRef?: string;
   /** WKH-234: contexto de familia del `payoutWallet` (namespace-aware). Ausente → EVM. */
   payoutChain?: string;
+  /**
+   * WKH-316: bloque `payment` declarado.
+   *
+   * Los tres estados son distintos y NO se pueden colapsar:
+   *  · ausente / `undefined` → no se toca el bloque que ya haya;
+   *  · objeto → se valida y se reemplaza;
+   *  · `null` EXPLÍCITO → se BORRA la key `payment` de `metadata`.
+   */
+  payment?: AgentPaymentSpecInput | null;
   /**
    * BAJA / ALTA del agente (`a2a_agents.enabled`). `false` lo saca de circulación:
    * deja de aparecer en `/discover` y deja de ser elegible en `/compose`.

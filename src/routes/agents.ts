@@ -25,6 +25,11 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { normalizeChainSlug } from '../adapters/chain-resolver.js';
 import {
+  PAYMENT_REJECTION_REASON,
+  type PaymentBlockRejection,
+  validatePaymentBlock,
+} from '../lib/payment-spec-writer.js';
+import {
   SSRFViolationError,
   validateRegistryUrl,
 } from '../lib/url-validator.js';
@@ -92,6 +97,36 @@ function isValidPayoutWalletForChain(
     ns = slug === 'solana-devnet' ? 'solana' : 'evm';
   }
   return isValidPayoutWallet(v, ns);
+}
+
+/**
+ * WKH-316 — cuerpo de la respuesta 422 de un bloque `payment` rechazado.
+ *
+ * ⚠️ ESTA FUNCIÓN NO VALIDA NADA (CD-9). Los 7 guards viven en
+ * `validatePaymentBlock` (`lib/payment-spec-writer.ts`) y en ningún otro lado;
+ * acá sólo se traduce el rechazo a JSON. Re-implementar cualquiera de los
+ * chequeos en este archivo está prohibido.
+ *
+ * El `reason` sale del mapa del módulo y es ESTÁTICO: **ninguno refleja el valor
+ * recibido** (CD-8) — y AR/MNR-1 lo sacó también del LOG: se loguea sólo
+ * `{ field, code }`, nunca el valor del caller (`T-316-27` / `T-316-28`).
+ */
+function paymentRejectionBody(
+  rejection: PaymentBlockRejection,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    error: 'Invalid payment',
+    error_code: rejection.code,
+    field: rejection.field,
+    reason: PAYMENT_REJECTION_REASON[rejection.code],
+  };
+  // La lista de rieles vivos sólo acompaña a AC-3, y es ACCIONABLE, no
+  // disclosure: `getInitializedChainKeys()` ya sale sin auth por
+  // `GET /capabilities` (`chains[].key`).
+  if (rejection.code === 'PAYMENT_CHAIN_NOT_INITIALIZED') {
+    body.initializedChains = rejection.initializedChains;
+  }
+  return body;
 }
 
 /**
@@ -224,6 +259,40 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
           });
         }
 
+        // WKH-316: bloque `payment` presente pero inválido → 422. Los 7 guards
+        // viven en `validatePaymentBlock` (CD-9); acá sólo se traduce.
+        //
+        // Nota de contrato: en el ALTA, un `payment: null` explícito NO es
+        // "sin bloque" — cae en `INVALID_PAYMENT_BLOCK`. En una creación no hay
+        // nada que borrar, así que aceptarlo en silencio sería inventarle un
+        // significado. "Sin bloque" se dice omitiendo la key (AC-11).
+        let paymentBlock: PublishAgentInput['payment'];
+        if (body.payment !== undefined) {
+          const result = await validatePaymentBlock(body.payment);
+          if (!result.ok) {
+            // AR/MNR-1: se loguea `{ field, code }` y NUNCA el valor crudo del
+            // caller, igual que los 5 guards hermanos de este archivo
+            // (`priceUsdc`, `payoutWallet`, `referrerRef`, `enabled`,
+            // `capabilities`). `body.payment` es JSON elegido por el caller e
+            // `src/index.ts` construye Fastify sin `bodyLimit` (default 1 MiB),
+            // así que echarlo al log hace que la línea crezca con el input del
+            // atacante — la misma clase de deuda que TD-322-4
+            // (`src/lib/discovery-query.ts:219-229`). La línea es de longitud
+            // acotada: `field` y `code` son literales del validador.
+            request.log.warn(
+              {
+                field: result.rejection.field,
+                code: result.rejection.code,
+              },
+              'agent publish rejected: invalid payment',
+            );
+            return reply
+              .status(422)
+              .send(paymentRejectionBody(result.rejection));
+          }
+          paymentBlock = result.block;
+        }
+
         // CD-5: el slug se deriva server-side del `name` — cualquier `slug`
         // del body se ignora (no se pasa al service). Se arma el input SOLO
         // con los campos presentes (exactOptionalPropertyTypes: sin `undefined`).
@@ -259,6 +328,10 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
           input.payoutChain = body.payoutChain;
         if (typeof body.referrerRef === 'string')
           input.referrerRef = body.referrerRef.trim();
+        // WKH-316: lo que viaja al service es el bloque que produjo el
+        // validador, NO `body.payment`. El service igual lo re-valida y vuelve a
+        // producirlo (defense-in-depth), pero el route no le pasa el crudo.
+        if (paymentBlock !== undefined) input.payment = paymentBlock;
 
         const record = await publishedAgentService.publish(
           input,
@@ -407,6 +480,32 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
             field: 'capabilities',
             reason: 'capabilities must be a non-empty array of strings',
           });
+        }
+
+        // WKH-316: mismo guard espejo que POST, con UNA diferencia de contrato:
+        // acá `payment: null` es la señal de BORRADO (AC-8), así que se deja
+        // pasar sin validar. Ausente = "no lo toques"; objeto = reemplazar.
+        //
+        // ⚠️ Un caller que NO es el dueño y manda un bloque inválido recibe 422,
+        // no 404: este guard corre antes que el guard de dueño, que vive adentro
+        // de `update()`. Disclosure: cero — la validación depende sólo del input
+        // del caller y de config que ya es pública por `GET /capabilities`.
+        if (body.payment !== undefined && body.payment !== null) {
+          const result = await validatePaymentBlock(body.payment);
+          if (!result.ok) {
+            // AR/MNR-1: sólo `{ field, code }`, nunca el crudo del caller.
+            // Ver la nota extendida en el guard espejo del POST.
+            request.log.warn(
+              {
+                field: result.rejection.field,
+                code: result.rejection.code,
+              },
+              'agent update rejected: invalid payment',
+            );
+            return reply
+              .status(422)
+              .send(paymentRejectionBody(result.rejection));
+          }
         }
 
         const record = await publishedAgentService.update(
