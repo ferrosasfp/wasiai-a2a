@@ -660,23 +660,23 @@
   obliga a declarar el `mustContain` de **cada** cita existente, a mano, leyendo cada una, y el
   guardián arranca **rojo por definición** hasta que estén todas. Toca decenas de archivos. Es la
   antítesis de un fix-pack de AR, que no puede tener scope. **Es otra HU.**
-- **El conjunto por donde arranca, ya medido acá** (para que la HU no empiece de cero): en los 11
-  archivos de `src/`+`test/` del Scope IN de WKH-316 hay **28 anclas en 24 líneas** —contando las dos
-  formas, larga (`archivo.ts:N`) y corta (`` `:N` ``)—. **19 las escribió o las re-apuntó esta HU, y
-  las 19 son ciertas**: 6 en `src/lib/operator-address.ts` (`chain.ts:84`, `:95`, `:137-149`,
-  `:81-82`, `deposit-verifier.ts:167-175`, `registry.ts:1-16`), 6 escritas en
-  `src/routes/agents.publish.test.ts` (5 apuntan a los guards hermanos **de `routes/agents.ts`** —
-  `:220`, `:237`, `:252`, `:459`, `:475`— y 1 a `forward-key.test.ts:204-232`), 2 en
-  `src/routes/agents.ownership.test.ts` (`:808`, `:822`), 2 en
-  `test/payment-guards-live-in-one-place.test.ts` (`:66`, `:124`), 1 en `src/routes/agents.ts`
-  (`discovery-query.ts:219-229`) y 2 en `src/types/index.ts` (`payment-spec-reader.ts:212-213`,
-  `:203-225`). De las **9 pre-existentes**, **6 son falsas** (la de `MNR-1`, las 4 de su tabla, y
-  `types/index.ts:385 → agent.ts:399` ya declarada en W4) y **3 son exactas**
-  (`agent.ts:161 → discovery.ts:449`, y `types/index.ts:207 → downstream-payment.ts:772` /
-  `:246 → :711-735`). O sea: el defecto de esta HU fue **desplazar y no re-verificar**, no escribir mal.
-  ⚠️ **Límite de este conteo**: el barrido de la forma corta busca la cita **entre backticks**
-  (`` `:N` ``, `` `:N-M` ``); una escrita en prosa suelta ("la línea 95") no la devuelve. El 28 es un
-  piso, no un total.
+- **El conjunto por donde arranca, ya medido acá** (para que la HU no empiece de cero): son **12** archivos de
+  `src/`+`test/` en el Scope IN, **no 11** (`MNR-1`). El omitido, `test/ownership-filter-guard.exceptions.ts`,
+  no es el más chico: **41** pares estructurados `{file, line}` + **14** anclas de prosa = **más anclas que
+  cualquier otro fichero del Scope IN**. Universo re-derivado en la fase DONE con los **tres** patrones (con
+  ruta · sin directorio · sólo `` `:N` `` entre backticks): **46 anclas en 40 líneas**. El **28 en 24** que
+  decía este renglón era el universo de 11 ficheros y sólo extensión `.ts`; reconcilia con el **43** que
+  midió el F4 (`.ts` solo) y con el **32** que contó el CR (sin el 12º fichero).
+  **20 las escribió o las re-apuntó esta HU, y las 20 son ciertas** —era "19" (`MNR-2`): el diff de
+  `src/routes/agents.ownership.test.ts` re-apunta **tres**, no dos (`:808`, `:822` y `:211`; el tercero ya
+  estaba en la tabla de W4 pero no en esta suma)—. Reparto: 6 en `src/lib/operator-address.ts`, 6 en
+  `src/routes/agents.publish.test.ts`, 3 en `src/routes/agents.ownership.test.ts`, 2 en
+  `test/payment-guards-live-in-one-place.test.ts`, 1 en `src/routes/agents.ts` y 2 en `src/types/index.ts`;
+  la lista con nombre y destino está verificada una por una en `cr-report.md:65-86`. Sumando las **5** de
+  `exceptions.ts`: **25 anclas escritas o re-apuntadas por esta HU, y las 25 son ciertas**. De las **9
+  pre-existentes**, **6 son falsas** y **3 exactas** ⇒ el defecto de esta HU fue **desplazar y no
+  re-verificar**, no escribir mal. ⚠️ **Límite: el 46 es un PISO, no un total** — el patrón de la forma corta
+  busca entre backticks, y una cita en prosa suelta ("la línea 95") no la devuelve ningún patrón.
 - **Qué la dispara** (cualquiera alcanza):
   1. Que una cita rota mande a alguien a **otra función del mismo archivo** en el camino del dinero.
      Ya pasó dos veces acá (`:761` era el `owner_ref` de `update()`; `:599` la misma línea de texto

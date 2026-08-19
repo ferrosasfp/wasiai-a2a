@@ -243,7 +243,7 @@ gateway's default rail.
 | `method` | yes | Must be exactly `"x402"`. Not trimmed, not lowercased: `"X402"` and `" x402 "` are rejected. |
 | `chain` | yes | A chain slug this gateway knows **and** has active in this deployment. |
 | `contract` | yes | See the warning below. This is a **wallet**, not a token. |
-| `asset` | no | A label. Checked against the token the rail settles, then stored as you sent it. |
+| `asset` | no | A label. Checked against the token the rail settles. Your letter case is preserved exactly; leading and trailing whitespace is trimmed. |
 
 #### `contract` is the wallet that gets paid, not a token address
 
