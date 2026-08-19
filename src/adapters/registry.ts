@@ -5,6 +5,7 @@ import {
   getCanonicalChainId,
   type LegDestination,
 } from './chain-resolver.js';
+import { isSolanaX402InboundConfigured } from './solana/chain.js';
 import type {
   AdaptersBundle,
   AttestationAdapter,
@@ -520,7 +521,20 @@ export function getDefaultChainKey(): ChainKey | null {
  * `GET /capabilities` (que la publica), para que no puedan divergir.
  */
 export function acceptsInboundPayment(bundle: AdaptersBundle): boolean {
-  return bundle.payment.vmFamily === 'evm';
+  // El camino EVM queda BYTE-IDENTICO: era `vmFamily === 'evm'` y sigue siendo `true`
+  // para todo bundle EVM, sin leer una sola env nueva. Esta HU AGREGA una familia de
+  // VM; no reemplaza ni condiciona la que ya entraba.
+  if (bundle.payment.vmFamily === 'evm') return true;
+  // WKH-314: Solana pasa a ser una capacidad REAL, y CONDICIONADA. `isSolana…()` es
+  // pura y síncrona (exige las dos flags + la `payTo` + el secreto), así que se puede
+  // llamar desde acá — que es lo que hace que el guard del middleware y lo que publica
+  // `/capabilities` NO PUEDAN DIVERGIR: es la misma expresión.
+  //
+  // ⚠️ Dice "configurado", no "sano". La salud (tabla, RPC, colisión con la cuenta de
+  // depósito) la mide el preflight inbound, perezosamente, en el camino del cobro. Con
+  // la config incompleta el valor publicado es `false` y el camino está cerrado, que es
+  // lo que importa: nunca se publica una capacidad sin cablear.
+  return isSolanaX402InboundConfigured();
 }
 
 /**

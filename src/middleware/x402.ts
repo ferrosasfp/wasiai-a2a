@@ -8,6 +8,7 @@ import type {
   FastifyRequest,
   preHandlerHookHandler,
 } from 'fastify';
+import { parseUnits } from 'viem';
 import { resolveChainKey } from '../adapters/chain-resolver.js';
 import {
   hasBroadcastEvidence,
@@ -25,8 +26,32 @@ import {
   rpcUnavailableResult,
   verifySettledTx,
 } from '../adapters/settle-verifier.js';
-import type { ChainKey } from '../adapters/types.js';
+import { base58DecodeToBytes } from '../adapters/solana/base58.js';
+import {
+  getSolanaCaip2,
+  getSolanaConnection,
+  getSolanaFallbackConnection,
+  getSolanaInboundPayTo,
+  getSolanaUsdcDecimals,
+} from '../adapters/solana/chain.js';
+import { ensureSolanaInboundReady } from '../adapters/solana/inbound-preflight.js';
+import { probeInboundProof } from '../adapters/solana/inbound-presence.js';
+import {
+  combineInboundBinding,
+  combineInboundPresence,
+} from '../adapters/solana/inbound-verify.js';
+import type { ChainKey, SolanaInboundChallenge } from '../adapters/types.js';
+import {
+  buildSolanaChallenge,
+  SOLANA_CHALLENGE_TTL_SECONDS,
+  verifySolanaChallengeReference,
+} from '../lib/solana-x402-challenge.js';
 import { eventService } from '../services/event.js';
+import {
+  consumeInboundProof,
+  peekInboundProof,
+  recordInboundObserved,
+} from '../services/solana-inbound-proof.js';
 import { checkAndRecordX402Nonce } from '../services/x402-nonce.js';
 import type {
   X402PaymentPayload,
@@ -356,6 +381,98 @@ export async function buildX402Response(
   return { error: errorMessage, accepts: [payload], x402Version: 2 };
 }
 
+/**
+ * HU-198 + HU-201 — EL CANAL UNICO del "settle inbound de resultado DESCONOCIDO".
+ *
+ * Estaba inline dentro del `catch`, y por eso el segundo eje (2xx `success:false`
+ * CON txHash, el camino pieverse) no lo usaba: le respondía "Payment settlement
+ * failed" y no dejaba ni log ni evento. Extraído para que los DOS ejes emitan lo
+ * mismo — un log alertable + un `a2a_events` durable donde reconciliarlo.
+ *
+ * `txHash` es la evidencia de broadcast cuando existe (eje HU-201) y `null` cuando
+ * el hop no contestó y no hay nada que anotar (eje HU-198).
+ *
+ * ⚠️ WKH-314 — POR QUE PASO DE CLOSURE A FUNCION DE MODULO (DT-14). La rama Solana
+ * necesita el MISMO canal, y una segunda copia de este bloque es una copia que puede
+ * divergir: dos `error_code`, dos `eventType`, dos formas de `metadata`, y una
+ * reconciliación que sólo encuentra la mitad de los casos. Se conservan
+ * `error_code: X402_SETTLE_UNKNOWN` y `eventType: x402_settle_unknown`; la rama Solana
+ * pasa `extraMetadata` (firma y referencia) y **no manda** `authorizationNonce`,
+ * porque en Solana no hay ninguno.
+ */
+export function emitInboundSettleUnknownEvent(args: {
+  request: FastifyRequest;
+  chainKey: ChainKey;
+  payTo: string;
+  requiredAmount: string;
+  resource: string;
+  authorizationNonce: string | null;
+  detail: string;
+  txHash: string | null;
+  extraMetadata?: Record<string, unknown>;
+}): void {
+  const {
+    request,
+    chainKey,
+    payTo,
+    requiredAmount,
+    resource,
+    authorizationNonce,
+    detail,
+    txHash,
+  } = args;
+  request.log.error(
+    {
+      error_code: 'X402_SETTLE_UNKNOWN',
+      valueDisposition: 'unknown',
+      chainKey,
+      payTo,
+      requiredAmount,
+      ...(txHash !== null ? { settleTxHash: txHash } : {}),
+      detail,
+    },
+    txHash !== null
+      ? 'x402 inbound settle result UNKNOWN: the facilitator answered `success:false` BUT returned a broadcast tx hash, so the payment may have executed on-chain. Access denied (no confirmation) and the caller may have been charged — check that tx hash on-chain before treating this as unpaid.'
+      : 'x402 inbound settle result UNKNOWN: the facilitator hop was cut without an answer, so the payment may have executed on-chain. Access denied (no confirmation) and the caller may have been charged — reconcile against the chain before treating this as unpaid.',
+  );
+  // AR BLQ-MEDIO-3: un log no es una superficie de reconciliación. El lado
+  // OUTBOUND recibió estado DURABLE (`resolving_settle`) + un lugar donde mirarlo
+  // (`listPending()` / `listAmbiguous()`); el INBOUND se quedaba sólo con el log,
+  // sobre la plata del CALLER, y encima con el nonce ya quemado más arriba (así
+  // que el reintento del mismo header da X402_REPLAY). Se persiste un `a2a_events`
+  // para que exista DÓNDE reconciliarlo.
+  //
+  // Fire-and-forget con `.catch()`: `track()` TIRA si el insert falla, y un
+  // problema de telemetría NO puede cambiar la respuesta de un money-path.
+  void eventService
+    .track({
+      eventType: 'x402_settle_unknown',
+      status: 'failed',
+      metadata: {
+        error_code: 'X402_SETTLE_UNKNOWN',
+        valueDisposition: 'unknown',
+        chainKey,
+        payTo,
+        requiredAmount,
+        authorizationNonce,
+        // HU-201: y cuando el facilitator NOS DIO el hash, es la clave directa.
+        settleTxHash: txHash,
+        resource,
+        detail,
+        ...(args.extraMetadata ?? {}),
+      },
+    })
+    .catch((trackErr: unknown) => {
+      request.log.error(
+        {
+          error_code: 'X402_SETTLE_UNKNOWN_EVENT_FAILED',
+          detail: trackErr instanceof Error ? trackErr.message : 'unknown',
+        },
+        'x402 inbound settle UNKNOWN could not be persisted as an event — the only remaining record is the log line above',
+      );
+    });
+}
+
 export function decodeXPayment(header: string): X402PaymentRequest {
   let decoded: string;
   try {
@@ -379,6 +496,523 @@ export function decodeXPayment(header: string): X402PaymentRequest {
       'Missing or invalid "signature" field in payment-signature',
     );
   return parsed as X402PaymentRequest;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ── WKH-314 — LA RAMA SOLANA DEL COBRO INBOUND ─────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+//
+// El gateway es **TESTIGO**, nunca tesorero: no firma, no transmite y no toca
+// ninguna clave privada Solana en este camino. El pagador transfiere USDC con su
+// propia wallet y su propio fee, presenta la FIRMA, y acá se verifica esa firma
+// contra la cadena y se honra **exactamente una vez**.
+//
+// ⚠️ QUIEN PAGA EL GAS, DICHO EXPLICITAMENTE: **el pagador**. Este camino no
+// patrocina nada — no hay `feePayer` del gateway, no hay transacción construida
+// por nosotros, no hay tope de facilitator que exceder. Es la diferencia con el
+// depósito de `chaski-v3`, donde el facilitator ES el `feePayer` y por eso ahí los
+// topes de cómputo son parte del contrato. Acá no hay camino patrocinado que topar.
+//
+// ⚠️ Y ESTA RAMA NO TOCA EL CAMINO EVM. Entra con `return` inmediato antes de que
+// se lea el header de pago, así que ni una línea de `:514` en adelante se ejecuta
+// para Solana ni cambia para EVM.
+
+/** Cuánto esperar antes de reintentar, en los rechazos que SI son reintentables. */
+const SOLANA_INBOUND_RETRY_AFTER_SECONDS = 15;
+
+/** Firma ed25519: 64 bytes exactos. Un base58 de otro largo NO es una firma. */
+const SOLANA_SIGNATURE_BYTES = 64;
+
+/**
+ * Los `error_code` de esta rama. **Tabla CERRADA**: un código que no esté acá no
+ * existe, y `X402_SETTLE_UNKNOWN` es REUSADO (CD-8), no inventado.
+ */
+type SolanaInboundErrorCode =
+  | 'X402_SOLANA_PROOF_MALFORMED'
+  | 'X402_SOLANA_REFERENCE_MISMATCH'
+  | 'X402_SOLANA_CHALLENGE_EXPIRED'
+  | 'X402_SOLANA_AMOUNT_SHORT'
+  | 'X402_SOLANA_TERMS_MISMATCH'
+  | 'X402_SOLANA_TX_FAILED'
+  | 'X402_SOLANA_NOT_FINALIZED'
+  | 'X402_SOLANA_PROOF_ABSENT'
+  | 'X402_SOLANA_PROOF_REPLAY'
+  | 'X402_SETTLE_UNKNOWN';
+
+/**
+ * Los únicos tres rechazos que se arreglan ESPERANDO. Mandar `Retry-After` en un
+ * rechazo por monto insuficiente sería mentirle al pagador: por más que espere, esa
+ * transferencia nunca va a alcanzar.
+ */
+const SOLANA_RETRYABLE_CODES: ReadonlySet<SolanaInboundErrorCode> = new Set([
+  'X402_SOLANA_NOT_FINALIZED',
+  'X402_SOLANA_PROOF_ABSENT',
+  'X402_SETTLE_UNKNOWN',
+]);
+
+/**
+ * WKH-SEC-03 en su versión Solana: **UNA sola resolución** del destinatario y del
+ * monto, reusada por el challenge del 402 y por la verificación del binding, para que
+ * no puedan divergir (CD-11). El equivalente exacto de `resolvePaymentRequirements`,
+ * pero SIN `getPaymentAdapter()` — que lanza a propósito sobre un bundle non-EVM.
+ */
+function resolveSolanaPaymentRequirements(opts: PaymentMiddlewareOptions): {
+  payTo: string | null;
+  requiredAmount: string;
+} {
+  const decimals = getSolanaUsdcDecimals();
+  const requiredAmount =
+    opts.amount ??
+    parseUnits(
+      String(opts.amountUsd ?? DEFAULT_AMOUNT_USD),
+      decimals,
+    ).toString();
+  return { payTo: getSolanaInboundPayTo(), requiredAmount };
+}
+
+/** El cuerpo del 402 con la tupla que el pagador Solana necesita. */
+function buildSolanaX402Response(
+  opts: PaymentMiddlewareOptions,
+  challenge: SolanaInboundChallenge,
+  merchantName: string,
+  errorMessage: string,
+  errorCode?: SolanaInboundErrorCode,
+): X402Response & { error_code?: string } {
+  const payload: X402PaymentPayload = {
+    scheme: 'exact',
+    network: challenge.network,
+    maxAmountRequired: challenge.maxAmountRequired,
+    resource: challenge.resource,
+    description: opts.description,
+    mimeType: 'application/json',
+    payTo: challenge.payTo,
+    maxTimeoutSeconds: SOLANA_CHALLENGE_TTL_SECONDS,
+    // El "asset" de Solana es el MINT (base58), análogo VM-agnóstico del address ERC-20.
+    asset: challenge.mint,
+    extra: {
+      // Lo que ata la transferencia a ESTE cobro. El pagador la adjunta como cuenta
+      // read-only no-firmante de su transferencia (convención Solana Pay).
+      reference: challenge.reference,
+      issuedAt: challenge.issuedAt,
+      expiresAt: challenge.expiresAt,
+      mint: challenge.mint,
+    },
+    // Sale del ADAPTER del bundle (`getMerchantName()`), igual que en la rama EVM.
+    // No se re-lee la env acá: sería una segunda definición del mismo valor.
+    merchantName,
+  };
+  return {
+    error: errorMessage,
+    ...(errorCode !== undefined ? { error_code: errorCode } : {}),
+    accepts: [payload],
+    x402Version: 2,
+  };
+}
+
+/**
+ * EL HANDLER DEL COBRO INBOUND SOLANA. Implementa la secuencia P0..P9, **en ese
+ * orden**, y el orden no es decorativo:
+ *
+ *   P0 preflight (fail-closed)     · P1 forma del sobre       · P2 la referencia
+ *   P3 peek del store              · P4 la cadena             · P5 el binding
+ *   P6 persistir el veredicto      · P7 EL COBRO              · P9 conceder
+ *
+ * · **P2 antes que P4** para que una referencia forjada se rechace SIN gastar una
+ *   sola llamada al RPC. Es la defensa barata contra el que copia una firma del
+ *   explorer y contra el que quiere que le paguemos el rate-limit del nodo.
+ * · **P3 antes que P4** porque un reintento cuya fila ya está `observed` salta la
+ *   cadena entera: la incertidumbre se paga UNA vez en la vida del pago.
+ * · **P7 lo más tarde posible** porque es irreversible. Residuo DECLARADO: si la
+ *   respuesta HTTP se pierde después del consumo, el pagador queda cobrado sin
+ *   servicio y su reintento da `replay`. Es la misma postura que el camino EVM tiene
+ *   hoy; no se resuelve acá, se mitiga poniendo el consumo pegado al grant.
+ *
+ * ⚠️ LA INVARIANTE QUE NINGUN CAMINO DE ACA PUEDE ROMPER:
+ * **ningún estado que no sea `finalized_ok` con términos cumplidos concede acceso, y
+ * ningún camino que no conceda acceso escribe `consumed`.**
+ */
+async function handleSolanaInboundPayment(args: {
+  request: FastifyRequest;
+  reply: FastifyReply;
+  opts: PaymentMiddlewareOptions;
+  resource: string;
+  chainKey: ChainKey;
+  merchantName: string;
+}): Promise<FastifyReply | undefined> {
+  const { request, reply, opts, resource, chainKey, merchantName } = args;
+  const { payTo, requiredAmount } = resolveSolanaPaymentRequirements(opts);
+  const caip2 = getSolanaCaip2();
+
+  /** Rechaza. **Nunca concede, nunca consume.** Un solo lugar arma la respuesta. */
+  const deny = async (
+    code: SolanaInboundErrorCode,
+    message: string,
+    challenge: SolanaInboundChallenge | null,
+  ): Promise<FastifyReply> => {
+    if (SOLANA_RETRYABLE_CODES.has(code)) {
+      reply.header('Retry-After', String(SOLANA_INBOUND_RETRY_AFTER_SECONDS));
+    }
+    request.log.info(
+      { error_code: code, chainKey },
+      'x402 solana inbound rejected',
+    );
+    return reply
+      .status(402)
+      .send(
+        challenge === null
+          ? { error: message, error_code: code, x402Version: 2, accepts: [] }
+          : buildSolanaX402Response(
+              opts,
+              challenge,
+              merchantName,
+              message,
+              code,
+            ),
+      );
+  };
+
+  // ── P0. La salud del camino, fail-closed ────────────────────────────────
+  //
+  // Va ANTES de emitir el challenge a propósito: invitar a pagar cuando no podemos
+  // verificar sería tomarle la plata al pagador sin poder honrarla. `/capabilities`
+  // publica "configurado", no "sano" — la diferencia se enforcea acá.
+  const ready = await ensureSolanaInboundReady();
+  if (!ready.ok || payTo === null) {
+    return deny(
+      'X402_SETTLE_UNKNOWN',
+      `Solana inbound payments are configured but not currently serviceable (${ready.ok ? 'payTo unresolved' : ready.failure}). No challenge is issued: paying against a gateway that cannot verify the proof would take your money without granting access. This is retryable.`,
+      null,
+    );
+  }
+
+  const built = buildSolanaChallenge({
+    resource,
+    amountAtomic: requiredAmount,
+  });
+  if (!built.ok) {
+    return deny(
+      'X402_SETTLE_UNKNOWN',
+      `Solana inbound payments are not serviceable right now: ${built.detail}`,
+      null,
+    );
+  }
+  const challenge = built.challenge;
+
+  // ── Sin sobre: el 402 con la tupla. Es el camino normal del primer request ──
+  const canonical = request.headers[X_PAYMENT_HEADER];
+  const legacy = request.headers[PAYMENT_SIGNATURE_HEADER];
+  const xPaymentHeader =
+    typeof canonical === 'string' && canonical.length > 0 ? canonical : legacy;
+  if (!xPaymentHeader || typeof xPaymentHeader !== 'string') {
+    return reply
+      .status(402)
+      .send(
+        buildSolanaX402Response(
+          opts,
+          challenge,
+          merchantName,
+          'payment-signature header is required',
+        ),
+      );
+  }
+
+  // ── P1. La forma del sobre. Sin red, sin DB ─────────────────────────────
+  let payload: X402PaymentRequest;
+  try {
+    // `decodeXPayment` NO se toca (DT-15): ya exige `authorization` objeto y
+    // `signature` string, que es exactamente la forma mínima de este sobre.
+    payload = decodeXPayment(xPaymentHeader);
+  } catch (err) {
+    return deny(
+      'X402_SOLANA_PROOF_MALFORMED',
+      `Invalid payment-signature format: ${err instanceof Error ? err.message : String(err)}`,
+      challenge,
+    );
+  }
+  const signature = payload.signature;
+  if (typeof signature !== 'string' || !isSolanaSignatureShaped(signature)) {
+    return deny(
+      'X402_SOLANA_PROOF_MALFORMED',
+      'the `signature` field is not a base58-encoded 64-byte Solana transaction signature',
+      challenge,
+    );
+  }
+  const auth = payload.authorization as Record<string, unknown>;
+
+  // ── P2. La referencia se RE-DERIVA y se compara en tiempo constante ──────
+  const verdict = verifySolanaChallengeReference({
+    presented: {
+      reference: auth.reference,
+      payTo: auth.payTo,
+      amountAtomic: auth.amountAtomic,
+      mint: auth.mint,
+      issuedAt: auth.issuedAt,
+      expiresAt: auth.expiresAt,
+    },
+    resource,
+    network: caip2,
+  });
+  if (verdict.state === 'malformed') {
+    return deny('X402_SOLANA_PROOF_MALFORMED', verdict.detail, challenge);
+  }
+  if (verdict.state === 'reference_mismatch') {
+    return deny('X402_SOLANA_REFERENCE_MISMATCH', verdict.detail, challenge);
+  }
+  if (verdict.state === 'expired') {
+    return deny('X402_SOLANA_CHALLENGE_EXPIRED', verdict.detail, challenge);
+  }
+  if (verdict.state === 'not_configured') {
+    return deny('X402_SETTLE_UNKNOWN', verdict.detail, null);
+  }
+  // A partir de acá los términos del sobre son NUESTROS: los firmamos con el MAC, así
+  // que se pueden usar como los términos del pago sin volver a desconfiar de ellos.
+  const presented = {
+    reference: String(auth.reference),
+    payTo: String(auth.payTo),
+    amountAtomic: String(auth.amountAtomic),
+    mint: String(auth.mint),
+    issuedAt: Number(auth.issuedAt),
+    expiresAt: Number(auth.expiresAt),
+  };
+  const proofArgs = {
+    caip2,
+    signature,
+    reference: presented.reference,
+    resource,
+    payTo: presented.payTo,
+    amountAtomic: presented.amountAtomic,
+    mint: presented.mint,
+  };
+
+  /** El canal ÚNICO del `unknown`, con la firma y la referencia como claves. */
+  const emitUnknown = (detail: string): void => {
+    emitInboundSettleUnknownEvent({
+      request,
+      chainKey,
+      payTo: presented.payTo,
+      requiredAmount: presented.amountAtomic,
+      resource,
+      // En Solana no hay `authorization.nonce` de EIP-3009: la clave es la firma.
+      authorizationNonce: null,
+      detail,
+      txHash: null,
+      extraMetadata: { signature, reference: presented.reference },
+    });
+  };
+
+  // ── P3. El peek del store ───────────────────────────────────────────────
+  const peek = await peekInboundProof(caip2, signature);
+  if (peek.state === 'consumed') {
+    return deny(
+      'X402_SOLANA_PROOF_REPLAY',
+      'this payment signature has already been used to obtain service. A Solana signature can be presented any number of times and the chain will not object — the gateway keeps the single-use ledger, and this one is already spent.',
+      challenge,
+    );
+  }
+  if (peek.state === 'unknown') {
+    emitUnknown(`inbound proof peek unavailable: ${peek.detail}`);
+    return deny(
+      'X402_SETTLE_UNKNOWN',
+      'the single-use ledger could not be read, so it cannot be established whether this proof was already spent. Access NOT granted and the proof was NOT consumed: retrying later is safe.',
+      challenge,
+    );
+  }
+  const cachedTermsMatch =
+    peek.state === 'observed' &&
+    peek.terms.reference === proofArgs.reference &&
+    peek.terms.resource === proofArgs.resource &&
+    peek.terms.payTo === proofArgs.payTo &&
+    peek.terms.amountAtomic === proofArgs.amountAtomic &&
+    peek.terms.mint === proofArgs.mint;
+  if (peek.state === 'observed' && !cachedTermsMatch) {
+    return deny(
+      'X402_SOLANA_TERMS_MISMATCH',
+      'this signature is already recorded against a different payment (other recipient, amount, mint, reference or resource). The same transfer cannot pay for two things.',
+      challenge,
+    );
+  }
+
+  // ── P4 + P5. La cadena, UNA sola vez en la vida del pago (DT-12) ────────
+  if (!cachedTermsMatch) {
+    const probeArgs = {
+      signature,
+      payTo: presented.payTo,
+      mint: presented.mint,
+      requiredAtomic: presented.amountAtomic,
+      reference: presented.reference,
+      issuedAt: presented.issuedAt,
+      expiresAt: presented.expiresAt,
+    };
+    const primary = await probeInboundProof(getSolanaConnection(), probeArgs);
+    // DT-10 — el segundo proveedor. `null` = no configurado, que NO es lo mismo que
+    // un segundo proveedor que no supo contestar.
+    let fallback: Awaited<ReturnType<typeof probeInboundProof>> | null = null;
+    try {
+      const fallbackConn = getSolanaFallbackConnection();
+      if (fallbackConn !== null) {
+        fallback = await probeInboundProof(fallbackConn, probeArgs);
+      }
+    } catch (err) {
+      // Una `SOLANA_RPC_URL_FALLBACK` inválida NO se lee como "no hay fallback": eso
+      // convertiría un error de config en un veredicto más permisivo.
+      fallback = {
+        presence: {
+          state: 'unknown',
+          detail: err instanceof Error ? err.message : String(err),
+        },
+        binding: {
+          state: 'unknown',
+          detail: 'fallback provider unavailable',
+        },
+      };
+    }
+
+    const presence = combineInboundPresence(
+      primary.presence,
+      fallback?.presence ?? null,
+    );
+    const binding = combineInboundBinding(
+      primary.binding,
+      fallback?.binding ?? null,
+    );
+
+    switch (presence.state) {
+      case 'terms_mismatch':
+        return deny(
+          presence.detail.includes('AMOUNT_SHORT')
+            ? 'X402_SOLANA_AMOUNT_SHORT'
+            : 'X402_SOLANA_TERMS_MISMATCH',
+          `the transaction does not satisfy the challenge terms: ${presence.detail}`,
+          challenge,
+        );
+      case 'landed_failed':
+        return deny(
+          'X402_SOLANA_TX_FAILED',
+          `that transaction landed and FAILED on-chain, so nothing moved: ${presence.detail}`,
+          challenge,
+        );
+      case 'not_finalized':
+        return deny(
+          'X402_SOLANA_NOT_FINALIZED',
+          `the transaction is ${presence.confirmationStatus} but not yet finalized. Finality is a precondition for granting access; present the same signature again in a few seconds — it has NOT been consumed.`,
+          challenge,
+        );
+      case 'absent':
+        return deny(
+          'X402_SOLANA_PROOF_ABSENT',
+          'two independent nodes searched their transaction history and do not know that signature.',
+          challenge,
+        );
+      case 'unknown':
+        emitUnknown(`chain verdict unavailable: ${presence.detail}`);
+        return deny(
+          'X402_SETTLE_UNKNOWN',
+          'the chain could not be queried about that signature, so it can be neither confirmed nor denied. Access NOT granted and the proof was NOT consumed: retrying later is safe.',
+          challenge,
+        );
+      case 'finalized_ok':
+        break;
+    }
+
+    // P5 — el binding. Se evalúa DESPUES de la presencia porque un `finalized_ok`
+    // sobre otra transacción no es este pago.
+    if (binding.state === 'reference_absent') {
+      return deny(
+        'X402_SOLANA_REFERENCE_MISMATCH',
+        `that transaction does not carry this challenge's reference: ${binding.detail}`,
+        challenge,
+      );
+    }
+    if (binding.state === 'outside_window') {
+      return deny(
+        'X402_SOLANA_CHALLENGE_EXPIRED',
+        `that transaction landed outside this challenge's window: ${binding.detail}`,
+        challenge,
+      );
+    }
+    if (binding.state === 'unknown') {
+      emitUnknown(`binding undetermined: ${binding.detail}`);
+      return deny(
+        'X402_SETTLE_UNKNOWN',
+        'it could not be determined whether that transaction carries this challenge reference. Access NOT granted and the proof was NOT consumed: retrying later is safe.',
+        challenge,
+      );
+    }
+
+    // ── P6. Persistir el veredicto de la cadena ───────────────────────────
+    const observed = await recordInboundObserved(proofArgs);
+    if (observed.outcome === 'replay') {
+      return deny(
+        'X402_SOLANA_PROOF_REPLAY',
+        'this payment signature has already been used to obtain service.',
+        challenge,
+      );
+    }
+    if (observed.outcome === 'terms_conflict') {
+      return deny(
+        'X402_SOLANA_TERMS_MISMATCH',
+        'this signature is already recorded against a different payment.',
+        challenge,
+      );
+    }
+    if (observed.outcome === 'store_unavailable') {
+      emitUnknown(`inbound proof observe failed: ${observed.detail}`);
+      return deny(
+        'X402_SETTLE_UNKNOWN',
+        'the chain verdict could not be persisted, so access cannot be granted against it. The proof was NOT consumed: retrying later is safe.',
+        challenge,
+      );
+    }
+  }
+
+  // ── P7. EL COBRO. Escritura condicional atómica, exactamente un ganador ──
+  const consumed = await consumeInboundProof(proofArgs);
+  switch (consumed.outcome) {
+    case 'replay':
+      return deny(
+        'X402_SOLANA_PROOF_REPLAY',
+        'this payment signature has already been used to obtain service.',
+        challenge,
+      );
+    case 'terms_conflict':
+      return deny(
+        'X402_SOLANA_TERMS_MISMATCH',
+        'this signature is recorded against a different payment.',
+        challenge,
+      );
+    case 'store_unavailable':
+      emitUnknown(`inbound proof consume failed: ${consumed.detail}`);
+      return deny(
+        'X402_SETTLE_UNKNOWN',
+        'the single-use ledger did not confirm the consumption of this proof, so access cannot be granted. The proof was NOT consumed: retrying later is safe.',
+        challenge,
+      );
+    case 'consumed':
+      break;
+  }
+
+  // ── P9. Recién ahora se concede ─────────────────────────────────────────
+  request.paymentTxHash = signature;
+  request.paymentVerified = true;
+  if (!reply.sent) reply.header('payment-response', signature);
+  return undefined;
+}
+
+/**
+ * ¿Este string tiene la forma de una firma Solana? base58 que decodifica a **64 bytes
+ * exactos**.
+ *
+ * Se mide la longitud DECODIFICADA y no la del string: base58 no tiene largo fijo, y
+ * un regex del alfabeto acepta cualquier cosa dentro de él. Una "firma" de 63 bytes
+ * llegaría hasta el RPC y volvería como un error de transporte que se leería como
+ * `unknown` — o sea, como un problema nuestro en vez de un sobre mal armado.
+ */
+function isSolanaSignatureShaped(candidate: string): boolean {
+  try {
+    return base58DecodeToBytes(candidate).length === SOLANA_SIGNATURE_BYTES;
+  } catch {
+    return false;
+  }
 }
 
 export function requirePayment(
@@ -510,6 +1144,26 @@ export function requirePayment(
     // requeriría agregar AMBOS headers a `exposedHeaders` del CORS: decisión
     // pendiente, depende de si aparecen consumidores browser reales.
     reply.header(X_A2A_PAYMENT_CHAIN_HEADER, chainKey);
+
+    // ── WKH-314 · DT-4 — LA BIFURCACION SOLANA, CON `return` INMEDIATO ──────
+    //
+    // Va ACA, y no más abajo, por una razón mecánica: todo lo que sigue pasa por
+    // `getPaymentAdapter()`, que LANZA a propósito sobre un bundle non-EVM. Esta HU
+    // **no generaliza** ese pipeline (sigue siendo EVM-only y sigue lanzando): lo
+    // bifurca antes. Consecuencia medible: ni una línea del camino EVM de abajo se
+    // modifica ni se ejecuta para Solana.
+    if (bundle.payment.vmFamily === 'solana') {
+      return await handleSolanaInboundPayment({
+        request,
+        reply,
+        opts,
+        resource,
+        chainKey,
+        // Del adapter del bundle, que es el mismo objeto que la rama EVM consulta.
+        // `getPaymentAdapter()` NO se usa acá: lanza a propósito sobre non-EVM.
+        merchantName: bundle.payment.getMerchantName(),
+      });
+    }
 
     // DT-2 / AC-4: canónico x402 (X-PAYMENT) gana sobre legacy (payment-signature).
     // DT-10: .length > 0 evita que un X-PAYMENT vacío gane sobre un payment-signature válido.
@@ -671,62 +1325,29 @@ export function requirePayment(
      * `txHash` es la evidencia de broadcast cuando existe (eje HU-201) y `null` cuando
      * el hop no contestó y no hay nada que anotar (eje HU-198).
      */
+    // WKH-314 · DT-14 — el canal del `unknown` es UNO SOLO, y ahora vive en el
+    // módulo (`emitInboundSettleUnknownEvent`) para que la rama Solana emita
+    // EXACTAMENTE lo mismo en vez de una segunda copia que puede divergir. Esta
+    // closure conserva su nombre y su firma: los dos call-sites EVM de abajo no se
+    // tocan, y `x402.settle-unknown.test.ts` verde SIN MODIFICARSE es la prueba de
+    // que la extracción no cambió nada.
     const emitInboundSettleUnknown = (
       detail: string,
       txHash: string | null,
     ): void => {
-      request.log.error(
-        {
-          error_code: 'X402_SETTLE_UNKNOWN',
-          valueDisposition: 'unknown',
-          chainKey,
-          payTo,
-          requiredAmount,
-          ...(txHash !== null ? { settleTxHash: txHash } : {}),
-          detail,
-        },
-        txHash !== null
-          ? 'x402 inbound settle result UNKNOWN: the facilitator answered `success:false` BUT returned a broadcast tx hash, so the payment may have executed on-chain. Access denied (no confirmation) and the caller may have been charged — check that tx hash on-chain before treating this as unpaid.'
-          : 'x402 inbound settle result UNKNOWN: the facilitator hop was cut without an answer, so the payment may have executed on-chain. Access denied (no confirmation) and the caller may have been charged — reconcile against the chain before treating this as unpaid.',
-      );
-      // AR BLQ-MEDIO-3: un log no es una superficie de reconciliación. El lado
-      // OUTBOUND recibió estado DURABLE (`resolving_settle`) + un lugar donde mirarlo
-      // (`listPending()` / `listAmbiguous()`); el INBOUND se quedaba sólo con el log,
-      // sobre la plata del CALLER, y encima con el nonce ya quemado más arriba (así
-      // que el reintento del mismo header da X402_REPLAY). Se persiste un `a2a_events`
-      // para que exista DÓNDE reconciliarlo.
-      //
-      // Fire-and-forget con `.catch()`: `track()` TIRA si el insert falla, y un
-      // problema de telemetría NO puede cambiar la respuesta de un money-path.
-      void eventService
-        .track({
-          eventType: 'x402_settle_unknown',
-          status: 'failed',
-          metadata: {
-            error_code: 'X402_SETTLE_UNKNOWN',
-            valueDisposition: 'unknown',
-            chainKey,
-            payTo,
-            requiredAmount,
-            // El nonce es la clave para cruzar contra la cadena: es el que el
-            // facilitator pudo haber consumido al broadcastear.
-            authorizationNonce:
-              typeof inboundNonce === 'string' ? inboundNonce : null,
-            // HU-201: y cuando el facilitator NOS DIO el hash, es la clave directa.
-            settleTxHash: txHash,
-            resource,
-            detail,
-          },
-        })
-        .catch((trackErr: unknown) => {
-          request.log.error(
-            {
-              error_code: 'X402_SETTLE_UNKNOWN_EVENT_FAILED',
-              detail: trackErr instanceof Error ? trackErr.message : 'unknown',
-            },
-            'x402 inbound settle UNKNOWN could not be persisted as an event — the only remaining record is the log line above',
-          );
-        });
+      emitInboundSettleUnknownEvent({
+        request,
+        chainKey,
+        payTo,
+        requiredAmount,
+        resource,
+        // El nonce es la clave para cruzar contra la cadena: es el que el
+        // facilitator pudo haber consumido al broadcastear.
+        authorizationNonce:
+          typeof inboundNonce === 'string' ? inboundNonce : null,
+        detail,
+        txHash,
+      });
     };
 
     let settleResult: {

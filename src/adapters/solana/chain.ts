@@ -155,6 +155,141 @@ export function getSolanaOperatorKeypair(): Keypair {
   return keypair;
 }
 
+// ── WKH-314 — x402 INBOUND Solana (bloque ADITIVO) ────────────────────────
+//
+// Todo lo de acá abajo es config del camino de ENTRADA: el gateway COBRA en Solana.
+// Ni una de estas funciones toca `getSolanaOperatorKeypair()` ni ninguna clave
+// privada, y no pueden hacerlo: el gateway es TESTIGO de un pago que firma el
+// pagador, no tesorero (AC-9 / DT-16). `SOLANA_X402_INBOUND_PAY_TO` es una PUBKEY que
+// se lee de env, **nunca** derivada de un secreto.
+
+/** Longitud mínima del secreto del HMAC de la referencia. */
+const INBOUND_CHALLENGE_SECRET_MIN_LENGTH = 32;
+
+/** Bytes exactos de una pubkey ed25519 de Solana. */
+const SOLANA_PUBKEY_BYTES = 32;
+
+/** Connection de FALLBACK cacheada por proceso (DT-10). `null` = no configurada. */
+let _fallbackConnection: Connection | null = null;
+
+/**
+ * ¿Este string es una pubkey base58 de 32 bytes exactos?
+ *
+ * ⚠️ Se exige la LONGITUD DECODIFICADA, no el largo del string ni un regex del
+ * alfabeto. Un base58 de 31 o 33 bytes pasa cualquier regex y **no es una cuenta
+ * Solana**: publicarlo como `payTo` en un challenge mandaría al pagador a transferir a
+ * una dirección que no existe, y esa plata no la recupera nadie.
+ */
+function isBase58Pubkey(raw: string): boolean {
+  try {
+    return base58DecodeToBytes(raw).length === SOLANA_PUBKEY_BYTES;
+  } catch {
+    // `base58DecodeToBytes` lanza con un mensaje que nombra la env del OPERADOR
+    // (es su call-site original). Se traga acá a propósito: dejarlo salir hablaría
+    // de un secreto que este camino ni siquiera lee.
+    return false;
+  }
+}
+
+/**
+ * La wallet que RECIBE el cobro inbound, o `null` si no está configurada o no es una
+ * pubkey base58 de 32 bytes.
+ *
+ * ⚠️ NUNCA se deriva de `SOLANA_OPERATOR_PRIVATE_KEY`. Que el operador y el receptor
+ * puedan coincidir es una decisión del despliegue; DERIVARLA ataría un camino que sólo
+ * RECIBE a la llave que FIRMA, que es exactamente lo que AC-9 prohíbe.
+ */
+export function getSolanaInboundPayTo(): string | null {
+  const raw = process.env.SOLANA_X402_INBOUND_PAY_TO?.trim();
+  if (raw === undefined || raw === '') return null;
+  return isBase58Pubkey(raw) ? raw : null;
+}
+
+/**
+ * El secreto del HMAC de la referencia, o `null` si falta o es demasiado corto.
+ *
+ * NUNCA se loguea, NUNCA viaja en un mensaje de error, NUNCA sale en el 402. El
+ * challenge publica la referencia DERIVADA, que es pública por construcción (es una
+ * cuenta de la transacción del pagador).
+ */
+export function getSolanaInboundChallengeSecret(): string | null {
+  const raw = process.env.SOLANA_X402_INBOUND_CHALLENGE_SECRET;
+  if (raw === undefined) return null;
+  return raw.length >= INBOUND_CHALLENGE_SECRET_MIN_LENGTH ? raw : null;
+}
+
+/**
+ * ¿El camino de cobro inbound en Solana está CONFIGURADO? Pura y síncrona.
+ *
+ * Las CUATRO cosas juntas: el adapter Solana encendido **Y** el flag propio del
+ * inbound **Y** una `payTo` que es una pubkey de verdad **Y** un secreto de largo
+ * suficiente. Comparación LITERAL contra `'true'`: cualquier otro valor deja el camino
+ * apagado.
+ *
+ * El flag es PROPIO y va ANDeado, no reusado: el rail de SALIDA (pagarle a un agente)
+ * y un camino de ENTRADA de dinero son dos decisiones distintas, y quien enciende el
+ * primero no está diciendo nada sobre el segundo.
+ *
+ * ⚠️ LIMITACION DECLARADA, no escondida: esto dice **"configurado"**, no *"la DB y el
+ * RPC están sanos"*. `GET /capabilities` es síncrono y no puede esperar un probe de
+ * red. La salud se enforcea perezosamente en la verificación (preflight inbound), y lo
+ * que importa se cumple igual: con la config incompleta el valor publicado es `false`
+ * y el camino está cerrado.
+ * *Esto sería falso si*: con `SOLANA_X402_INBOUND_PAY_TO` vacío esta función
+ * devolviera `true` — entonces `/capabilities` publicaría una capacidad que el
+ * middleware no puede servir.
+ */
+export function isSolanaX402InboundConfigured(): boolean {
+  if (process.env.SOLANA_ADAPTER_ENABLED !== 'true') return false;
+  if (process.env.SOLANA_X402_INBOUND_ENABLED !== 'true') return false;
+  if (getSolanaInboundPayTo() === null) return false;
+  return getSolanaInboundChallengeSecret() !== null;
+}
+
+/**
+ * ¿Esta URL de RPC se declara de MAINNET? (CD-5)
+ *
+ * ⚠️ ACOTA, NO CIERRA — y decirlo importa. Caza el caso ETIQUETADO
+ * (`api.mainnet-beta.solana.com`, `...mainnet.rpcpool.com`, el `?cluster=mainnet` de
+ * un proxy), que es la forma en que este error se comete de verdad: copiar la URL del
+ * cluster equivocado. **NO puede** cazar un endpoint de mainnet con un hostname
+ * opaco —un proveedor con la red en el api-key— porque desde la URL no hay nada que
+ * medir. Para eso está el resto del diseño devnet-only, no esta función.
+ * *Esto sería falso si*: alguien pusiera `https://rpc.example.com/k/abc` apuntando a
+ * mainnet — pasa este guard, y esta función NO afirma lo contrario.
+ */
+function looksLikeMainnetRpc(url: string): boolean {
+  return url.toLowerCase().includes('mainnet');
+}
+
+/**
+ * El SEGUNDO proveedor de RPC (DT-10), cacheado por proceso. `null` cuando no hay
+ * `SOLANA_RPC_URL_FALLBACK` configurada.
+ *
+ * ⚠️ LANZA si la URL se declara de mainnet. Es fail-closed de CONFIGURACION, no un
+ * warn: un `unknown` de esta HU se resuelve preguntándole a un segundo nodo, y si ese
+ * segundo nodo es de otra red sus respuestas son sobre otro ledger — un `absent` suyo
+ * no es evidencia de nada. El preflight lo traduce a un veredicto negativo con motivo
+ * propio, así que el operador lo ve al arrancar y no en el primer cobro.
+ *
+ * ⚠️ Y CACHEA DESPUES DE VALIDAR, a propósito: si cacheara antes, el primer llamado
+ * lanzaría y el segundo devolvería la conexión del cache sin re-chequear. Un guard que
+ * se saltea con un reintento no es un guard (misma lección que
+ * `getSolanaOperatorKeypair`).
+ */
+export function getSolanaFallbackConnection(): Connection | null {
+  if (_fallbackConnection) return _fallbackConnection;
+  const raw = process.env.SOLANA_RPC_URL_FALLBACK?.trim();
+  if (raw === undefined || raw === '') return null;
+  if (looksLikeMainnetRpc(raw)) {
+    throw new Error(
+      'SOLANA_RPC_URL_FALLBACK looks like a MAINNET endpoint — this rail is devnet-only (CD-5). A fallback on another ledger cannot corroborate anything: its "absent" would be about transactions that were never supposed to be there. Point it at a SECOND devnet provider, different from SOLANA_RPC_URL.',
+    );
+  }
+  _fallbackConnection = new Connection(raw, getSolanaCommitment());
+  return _fallbackConnection;
+}
+
 /**
  * TEST-ONLY — limpia la Connection + operator cacheados (mirror
  * `_resetWalletClient`). CD-17.
@@ -162,4 +297,7 @@ export function getSolanaOperatorKeypair(): Keypair {
 export function _resetSolanaChain(): void {
   _connection = null;
   _operator = null;
+  // WKH-314: la del fallback también, o un test que cambia
+  // `SOLANA_RPC_URL_FALLBACK` seguiría hablando con el endpoint del test anterior.
+  _fallbackConnection = null;
 }

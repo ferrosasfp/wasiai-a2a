@@ -163,7 +163,7 @@ export function _resetSolanaSchemaPreflight(): void {
  * operador puede declararlo, y esa declaracion queda REGISTRADA en la configuracion en
  * vez de perderse en un warn de arranque que nadie lee.
  */
-async function probeRpcHistoryRetention(): Promise<SolanaSchemaVerdict | null> {
+export async function probeRpcHistoryRetention(): Promise<SolanaSchemaVerdict | null> {
   let currentSlot: number;
   let firstAvailable: number;
   try {

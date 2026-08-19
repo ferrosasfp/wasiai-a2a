@@ -14,10 +14,12 @@ import {
   getInitializedChainKeys,
   initAdapters,
 } from './adapters/registry.js';
+import { isSolanaX402InboundConfigured } from './adapters/solana/chain.js';
 import {
   readPayoutRouteHealth,
   warmPayoutRoutePreflight,
 } from './adapters/solana/facilitator-settle.js';
+import { warmSolanaInboundPreflight } from './adapters/solana/inbound-preflight.js';
 import { warmSolanaSchemaPreflight } from './adapters/solana/schema-preflight.js';
 import {
   assertSelfHostsEnv,
@@ -446,6 +448,14 @@ if (isEscrowSettleEnabled()) warmEscrowSchemaPreflight();
 // esta habilitado. Sin esto, la primera noticia de que falta la migracion llegaria en
 // medio de una transferencia en vez de en el arranque.
 if (process.env.SOLANA_ADAPTER_ENABLED === 'true') warmSolanaSchemaPreflight();
+
+// WKH-314: y lo mismo para el camino de ENTRADA (el gateway COBRA en Solana). Mismo
+// contrato que la linea de arriba, con UNA diferencia deliberada: el `if` usa
+// `isSolanaX402InboundConfigured()` en vez de leer la env suelta, porque ese predicado
+// es el MISMO que publica `/capabilities` y el que consume el guard del middleware.
+// Con el flag apagado esto no corre, no toca la red y no toca la base: el cambio es
+// inerte por construccion hasta que el operador complete los 5 pasos del runbook.
+if (isSolanaX402InboundConfigured()) warmSolanaInboundPreflight();
 
 // WKH-342: sondear si el facilitator configurado tiene registrada `POST /solana/payout`,
 // para que "esa ruta no existe" se sepa en el arranque y no leg por leg. Fire-and-forget

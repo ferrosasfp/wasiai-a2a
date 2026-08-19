@@ -464,3 +464,119 @@ export interface AdaptersBundle {
     explorerUrl: string;
   };
 }
+
+// ── WKH-314 — x402 INBOUND Solana (bloque ADITIVO; SettlementPresence NO se toca) ──
+//
+// ⚠️ POR QUE NO SE REUSA `SettlementPresence` (§5 · DT-C2 del Story File): su
+// `landed_ok` **no implica `finalized`**. Sale de un probe que lee a `'confirmed'` y
+// que DESCARTA `confirmationStatus` (sólo mira `status.err`). Para el camino de
+// SALIDA eso está bien y queda congelado. Para dinero que ENTRA es el mismo agujero
+// que WKH-315 midió y cerró: una tx `confirmed` que la cadena todavía puede descartar
+// concedería el servicio. Acá la finalidad es una PRECONDICION del grant, así que
+// tiene que ser un estado del tipo y no un campo que se puede olvidar de mirar.
+//
+// ⚠️ Y POR QUE NO SE REUSA `SolanaDepositLanding` (WKH-315): ese tipo responde
+// *"¿aterrizó y finalizó?"* y NADA sobre los términos, porque un depósito **descubre**
+// el monto en vez de exigirlo. Un cobro sí lo exige: el challenge dice cuánto, a quién
+// y en qué mint ANTES de que el pagador firme. Por eso acá presencia y términos viven
+// en el MISMO tipo (`finalized_ok` ya trae `creditedAtomic`, y `terms_mismatch` es un
+// estado propio): un `finalized_ok` que no cumpla los términos no se puede construir.
+
+/**
+ * Presencia + finalidad + términos de la firma que el PAGADOR presenta.
+ *
+ * Seis estados, y la exhaustividad la fuerza el compilador en el combinador y en el
+ * handler. Ninguno que no sea `finalized_ok` concede acceso.
+ */
+export type SolanaInboundPresence =
+  /** Aterrizó, sin error, `finalized`, y CUMPLE los términos. Único grant. */
+  | { state: 'finalized_ok'; creditedAtomic: string }
+  /** Aterrizó y falló on-chain: nada se movió. Terminal, NO se consume la prueba. */
+  | { state: 'landed_failed'; detail: string }
+  /** Aterrizó, `processed`/`confirmed`, todavía no `finalized`. Negativa MEDIDA y REINTENTABLE. */
+  | { state: 'not_finalized'; confirmationStatus: string }
+  /** Aterrizó y finalizó, pero los términos NO cumplen (monto/mint/destino). Fail-closed. */
+  | { state: 'terms_mismatch'; detail: string }
+  /** El nodo RESPONDIÓ, buscando en el histórico, y no la conoce. Prueba de ausencia. */
+  | { state: 'absent' }
+  /** No se pudo preguntar. NUNCA autoriza conceder. */
+  | { state: 'unknown'; detail: string };
+
+/**
+ * El binding de la prueba con ESTE challenge: la `reference` tiene que aparecer como
+ * cuenta de la transacción y el `blockTime` tiene que caer dentro de la ventana.
+ *
+ * ⚠️ `unknown` NO es "la referencia no está". Una tx v0 cuyas direcciones cargadas no
+ * se pueden resolver deja la pregunta SIN RESPUESTA, y responderla en negativo sería
+ * rechazar un pago real por no poder leerlo.
+ */
+export type SolanaInboundBinding =
+  /** La referencia está entre las cuentas y el `blockTime` cae en la ventana. */
+  | { state: 'bound'; blockTime: number }
+  /** MEDIDO: las cuentas se pudieron enumerar por completo y la referencia no está. */
+  | { state: 'reference_absent'; detail: string }
+  /** MEDIDO: la tx aterrizó fuera de `[issuedAt, expiresAt]`. */
+  | { state: 'outside_window'; detail: string }
+  /** No se pudo determinar (tx v0 sin direcciones resolubles, campo ausente, throw). */
+  | { state: 'unknown'; detail: string };
+
+/**
+ * La tupla que el 402 publica. `issuedAt`/`expiresAt` son ABSOLUTOS (unix segundos) y
+ * están DENTRO del MAC: la expiración no se lee nunca del campo suelto que manda el
+ * cliente.
+ */
+export interface SolanaInboundChallenge {
+  /** CAIP-2 (`solana:<genesis>`). */
+  readonly network: string;
+  readonly mint: string;
+  /** Unidades ATOMICAS del mint, como string (WKH-196: nunca un number). */
+  readonly maxAmountRequired: string;
+  readonly payTo: string;
+  /** base58 de 32 bytes — o sea una clave pública válida, usable como cuenta. */
+  readonly reference: string;
+  readonly resource: string;
+  readonly issuedAt: number;
+  readonly expiresAt: number;
+}
+
+/**
+ * Resultado de persistir el veredicto de la cadena (P6). NUNCA un boolean: un `false`
+ * colapsaría "ya se cobró" con "el store no contestó", que tienen remedios opuestos.
+ */
+export type InboundObserveResult =
+  | { outcome: 'observed'; attempts: number }
+  /** La fila ya está `consumed`: a esta firma ya se le sirvió. */
+  | { outcome: 'replay' }
+  /** La misma firma contra otro destino/monto/mint/referencia/recurso: NO es este pago. */
+  | { outcome: 'terms_conflict'; detail: string }
+  /** No se pudo saber. NUNCA concede. */
+  | { outcome: 'store_unavailable'; detail: string };
+
+/** Resultado del cobro (P7). `consumed` es lo ÚNICO que autoriza servir. */
+export type InboundConsumeResult =
+  | { outcome: 'consumed' }
+  | { outcome: 'replay' }
+  | { outcome: 'terms_conflict'; detail: string }
+  | { outcome: 'store_unavailable'; detail: string };
+
+/** Los términos con los que una prueba quedó registrada. */
+export interface InboundProofTerms {
+  readonly reference: string;
+  readonly resource: string;
+  readonly payTo: string;
+  readonly amountAtomic: string;
+  readonly mint: string;
+}
+
+/**
+ * Peek de idempotencia (P3). **NO autoriza ni impide**: informa. Su valor es evitar
+ * gastar la cadena dos veces por el mismo pago (DT-12) y cortar un replay sin tocar el
+ * RPC.
+ */
+export type InboundPeekResult =
+  | { state: 'none' }
+  /** Ya hay veredicto de la cadena para esta firma: P4 y P5 se saltan. */
+  | { state: 'observed'; terms: InboundProofTerms }
+  | { state: 'consumed' }
+  /** No se pudo preguntar. NUNCA concede, y tampoco afirma que la prueba sea nueva. */
+  | { state: 'unknown'; detail: string };

@@ -402,6 +402,60 @@ un entorno que además sirve valor real dispara la conversión a **allowlist fai
 y esa story hay que abrirla ANTES del flip. La deuda **no se cierra en WKH-315** (Scope
 OUT del SDD §6): se declara y queda sin dueño asignado.
 
+### 10.2 WKH-314 — el cobro x402 entrante por Solana: la asimetría deja de ser total
+
+Hasta acá, `acceptsInboundPayment` (`adapters/registry.ts`) era literalmente
+`bundle.payment.vmFamily === 'evm'`: Solana era un rail **outbound-only** y un cobro
+entrante contestaba `400 CHAIN_INBOUND_PAYMENT_UNSUPPORTED`. Esa asimetría **ya no es
+total**, pero tampoco desapareció, y la diferencia importa:
+
+- **Lo que ahora existe**: el gateway puede COBRAR en Solana devnet. El pagador
+  transfiere USDC con su wallet y su fee, presenta la firma, y el gateway la verifica
+  contra la cadena y la honra exactamente una vez. El gateway es **testigo**: no firma,
+  no transmite y no toca ninguna clave privada Solana en ese camino.
+- **Lo que sigue sin existir**: `getPaymentAdapter()` sigue siendo `EvmPaymentAdapter` y
+  **sigue lanzando** sobre un bundle non-EVM. Todo el pipeline
+  `buildX402Response → resolvePaymentRequirements → verify → settle → re-verify` sigue
+  siendo EVM-only. Esta HU **bifurca antes** de tocarlo; no lo generaliza. Un adapter de
+  pago Solana en ese pipeline sigue sin escribirse.
+
+**Sigue apagado por default y es devnet-only.** `acceptsInboundPayment` para Solana pasa
+a ser `isSolanaX402InboundConfigured()`, que exige **las cuatro cosas juntas**:
+`SOLANA_ADAPTER_ENABLED='true'` **Y** `SOLANA_X402_INBOUND_ENABLED='true'` **Y** una
+`SOLANA_X402_INBOUND_PAY_TO` que sea pubkey base58 de 32 bytes **Y** un
+`SOLANA_X402_INBOUND_CHALLENGE_SECRET` de largo suficiente. Es **una sola definición**,
+consumida por el guard del middleware y por `GET /capabilities`, para que lo publicado y
+lo servible no puedan divergir.
+
+| Env | Qué controla | Default |
+|-----|--------------|---------|
+| `SOLANA_X402_INBOUND_ENABLED` | Gate del cobro entrante, comparación literal contra `'true'`. Propio y ANDeado con `SOLANA_ADAPTER_ENABLED`, por el mismo criterio que `A2A_DEPOSIT_ENABLED_SOLANA`. | `false` |
+| `SOLANA_X402_INBOUND_PAY_TO` | **Pubkey** base58 de la wallet que recibe. Nunca una clave privada, nunca derivada de `SOLANA_OPERATOR_PRIVATE_KEY`. **Debe ser distinta de la cuenta de depósito** (ver abajo). | vacía |
+| `SOLANA_X402_INBOUND_CHALLENGE_SECRET` | Secreto del HMAC con el que se deriva la `reference` de cada challenge. | vacía |
+| `SOLANA_RPC_URL_FALLBACK` | Ya existía y **no la leía nadie**; este camino la enciende como SEGUNDO proveedor. Una URL que se declara de mainnet hace **fallar el preflight**. | vacía |
+
+**El cobro doble que este camino habilitaría si se configura mal.** WKH-315 acredita
+saldo cuando una firma transfiere USDC a la ATA de depósito, con su propio uso único en
+`a2a_key_deposits`. WKH-314 lleva el suyo en `a2a_solana_inbound_proofs`. **Si
+`SOLANA_X402_INBOUND_PAY_TO` fuera la cuenta de depósito, una sola transferencia se
+cobraría dos veces** —crédito de saldo y servicio— y ninguno de los dos stores mira al
+otro. El preflight inbound lo compara (incluida la ATA derivada) y **falla cerrado** con
+`SOLANA_INBOUND_PAYTO_COLLIDES_WITH_DEPOSIT`.
+
+**`TD-INBOUND-MULTI-ATA` — deuda declarada, del leg de SALIDA.** `checkTerms`
+(`adapters/solana/payment.ts`) mide el crédito con un `.find()` por `(owner, mint)`, o
+sea que toma **la primera** cuenta de token del destinatario. Si esa wallet tiene dos
+cuentas del mismo mint y el pago cae en la segunda, mide cero y produce un
+`landed_mismatch` **falso sobre un pago real**. El camino de ENTRADA de WKH-314 **no
+tiene** esa deuda: mide sumando `Σ(post − pre)` sobre todas las cuentas del
+destinatario. **La deuda queda abierta para el leg de salida**, que esta HU no toca
+(`payment.ts` recibe cero cambios, a propósito: es money-path recién shipeado).
+
+**Y `TD-SOLANA-CAIP2-DENYLIST` se eroda por segunda vez.** Su condición de reactivación
+—*"cuando el rail Solana salga de flag OFF"*— la eroda WKH-315 desde el depósito y ahora
+también este camino: encender `SOLANA_X402_INBOUND_ENABLED` en un entorno que sirve valor
+real dispara la conversión a allowlist fail-CLOSED. La deuda **no se cierra acá**.
+
 ## 11. Referencias
 
 - **Work item**: [`../sdd/086-wkh-multichain-a2a/work-item.md`](../sdd/086-wkh-multichain-a2a/work-item.md)

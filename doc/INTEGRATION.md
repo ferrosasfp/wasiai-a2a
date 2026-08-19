@@ -892,6 +892,108 @@ A complete, runnable reference implementation lives in [`scripts/demo-x402.ts`](
 npx tsx scripts/demo-x402.ts https://wasiai-a2a-production.up.railway.app
 ```
 
+### 4.1 Paying in Solana (devnet) — WKH-314
+
+The x402 cycle above is EVM. Solana works the same way at the protocol level and
+differently at the wallet level, because Solana has no EIP-3009: **you do not sign an
+authorization we then execute — you execute the transfer yourself and show us the
+signature.**
+
+**You pay the network fee.** The gateway does not sponsor this transfer, does not build
+it and never signs anything on this path: it is a witness, not a treasurer. There are no
+sponsor compute limits to hit here, because there is no sponsor.
+
+**This path is OFF by default and devnet-only.** When it is off, asking to pay in Solana
+answers `400 CHAIN_INBOUND_PAYMENT_UNSUPPORTED` with the list of chains that do accept
+inbound payment. Check `GET /capabilities` — `chains[].acceptsInboundPayment` tells you
+whether a chain will take your money before you send any.
+
+**1. Ask for the challenge.** Send `x-payment-chain: solana-devnet` with no payment
+header. The `402` carries the tuple you need:
+
+```json
+{
+  "error": "payment-signature header is required",
+  "x402Version": 2,
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      "maxAmountRequired": "1000000",
+      "payTo": "<base58 pubkey>",
+      "asset": "<USDC mint, base58>",
+      "extra": {
+        "reference": "<base58 32-byte pubkey>",
+        "issuedAt": 1755600000,
+        "expiresAt": 1755600900
+      }
+    }
+  ]
+}
+```
+
+`maxAmountRequired` is in **atomic units** of that mint (6 decimals for USDC), as a
+string. `expiresAt` is an **absolute** unix timestamp, not a duration.
+
+**2. Send the transfer.** An SPL transfer of `maxAmountRequired` of `asset` to `payTo`,
+signed and paid for by you, with **`reference` added to the transfer instruction as a
+read-only, non-signer account** (the Solana Pay convention). The reference is what ties
+your transaction to this specific charge; a transfer without it is a real payment for
+nothing we can attribute.
+
+**3. Wait for finality, then present the signature.** Base64 the envelope and retry:
+
+```json
+{
+  "authorization": {
+    "reference": "<from the 402>",
+    "payTo": "<from the 402>",
+    "amountAtomic": "<maxAmountRequired>",
+    "mint": "<asset>",
+    "issuedAt": 1755600000,
+    "expiresAt": 1755600900
+  },
+  "signature": "<your transaction signature, base58>",
+  "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+}
+```
+
+Echo the six `authorization` fields **exactly as they came**: they are covered by a MAC,
+so changing any of them —including `expiresAt`— invalidates the reference.
+
+**Finality is a precondition.** The gateway grants access only when the chain reports
+your transaction as `finalized`. Presenting it earlier answers
+`X402_SOLANA_NOT_FINALIZED` with a `Retry-After`, and **your proof is not consumed** —
+present the same signature again once it finalizes.
+
+#### What each rejection means, and whether your signature is still spendable
+
+Every one of these is HTTP `402`. **None of them consumes your proof** except
+`X402_SOLANA_PROOF_REPLAY`, which reports one that was already consumed.
+
+| `error_code` | What happened | Retryable | Signature still spendable |
+|---|---|---|---|
+| `X402_SOLANA_PROOF_MALFORMED` | The envelope is missing a field, or `signature` is not base58 of 64 bytes | no — fix the envelope | yes |
+| `X402_SOLANA_REFERENCE_MISMATCH` | The reference does not re-derive from our secret, or it is not among the accounts of that transaction | no — get a fresh challenge | yes |
+| `X402_SOLANA_CHALLENGE_EXPIRED` | The challenge expired, or the transaction landed outside its window | no — get a fresh challenge | yes |
+| `X402_SOLANA_AMOUNT_SHORT` | The recipient was credited **less** than required | no — waiting will not help | yes |
+| `X402_SOLANA_TERMS_MISMATCH` | Wrong mint, wrong recipient, or that signature is already recorded against a different charge | no | yes |
+| `X402_SOLANA_TX_FAILED` | The transaction landed and failed on-chain: nothing moved | no | yes |
+| `X402_SOLANA_NOT_FINALIZED` | Landed, not finalized yet | **yes** (`Retry-After`) | yes |
+| `X402_SOLANA_PROOF_ABSENT` | Two independent nodes searched their history and do not know that signature | **yes** (`Retry-After`) | yes |
+| `X402_SOLANA_PROOF_REPLAY` | That signature already bought service | no | **no — already spent** |
+| `X402_SETTLE_UNKNOWN` | We could not ask the chain or our own ledger. Not a verdict about your payment | **yes** (`Retry-After`) | yes |
+
+Two things worth internalising, because they are the difference between this path and a
+naive one:
+
+- **A Solana signature is not single-use by itself.** Unlike an EIP-3009 nonce, nothing
+  on-chain stops you from presenting the same landed transaction again — it is already
+  written, there is nothing left to spend. The single-use ledger lives in the gateway,
+  and it is keyed on `(chain, signature)`.
+- **`X402_SETTLE_UNKNOWN` is not "no".** It means the question could not be answered. We
+  do not consume your proof on that path precisely so that retrying is safe.
+
 ---
 
 ## 5. Error Codes

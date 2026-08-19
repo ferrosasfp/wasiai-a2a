@@ -96,7 +96,7 @@ const PG_UNDEFINED_TABLE = '42P01';
  * direccion barata del error: `probe_failed` manda a mirar la DB y reintenta;
  * `table_missing` manda a tocar migraciones y no reintenta.
  */
-function isRelationMissingError(err: {
+export function isRelationMissingError(err: {
   code?: string | null;
   message?: string | null;
 }): boolean {
@@ -119,7 +119,7 @@ function isRelationMissingError(err: {
  * tambien cubre `AbortError` / timeout). Un error que SI viene del servidor trae el
  * `code` del cuerpo PostgREST y un status HTTP real.
  */
-function isTransportFailure(res: {
+export function isTransportFailure(res: {
   status?: number;
   error?: { code?: string | null } | null;
 }): boolean {

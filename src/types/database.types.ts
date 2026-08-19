@@ -2929,6 +2929,61 @@ export type Database = {
           attempts: number | null;
         }[];
       };
+      /**
+       * WKH-314 — las 3 funciones del uso único de las pruebas de pago x402 inbound
+       * en Solana. La tabla `a2a_solana_inbound_proofs` se toca EXCLUSIVAMENTE desde
+       * acá (SECURITY DEFINER con `search_path` fijo), así que no tiene entrada en
+       * `Tables`: no hay ningún `.from()` sobre ella en `src/`.
+       *
+       * `amount_atomic` viaja como `string` (WKH-196, igual que el ledger de settle).
+       */
+      record_solana_inbound_observed: {
+        Args: {
+          p_caip2: string;
+          p_signature: string;
+          p_reference: string;
+          p_resource: string;
+          p_pay_to: string;
+          p_amount_atomic: string;
+          p_mint: string;
+        };
+        Returns: {
+          applied: boolean;
+          outcome: string;
+          status: string | null;
+          attempts: number | null;
+        }[];
+      };
+      consume_solana_inbound_proof: {
+        Args: {
+          p_caip2: string;
+          p_signature: string;
+          p_reference: string;
+          p_resource: string;
+          p_pay_to: string;
+          p_amount_atomic: string;
+          p_mint: string;
+        };
+        Returns: {
+          applied: boolean;
+          outcome: string;
+          status: string | null;
+          attempts: number | null;
+        }[];
+      };
+      peek_solana_inbound_proof: {
+        Args: { p_caip2: string; p_signature: string; p_probe?: boolean };
+        Returns: {
+          found: boolean;
+          status: string | null;
+          reference: string | null;
+          resource: string | null;
+          pay_to: string | null;
+          amount_atomic: string | null;
+          mint: string | null;
+          attempts: number | null;
+        }[];
+      };
       claim_agent_link: {
         Args: { p_token_hash: string };
         Returns: {
