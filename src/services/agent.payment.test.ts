@@ -300,7 +300,7 @@ describe('mapRowToAgent — payment spec declarado (WKH-241)', () => {
     const [agent] = await publishedAgentService.listAsAgents();
 
     // No se agrega un segundo guard de formato en discovery (Scope OUT/CD-1);
-    // `settleSolanaLeg` (downstream-payment.ts:132) lo skipea con
+    // `settleSolanaLeg` (downstream-payment.ts:247) lo skipea con
     // INVALID_PAY_TO_FORMAT sin mover fondos — ver downstream-payment.test.ts
     // (T-234-AC3c / T-241-AC5).
     expect(agent?.payment?.contract).toBe('abc');

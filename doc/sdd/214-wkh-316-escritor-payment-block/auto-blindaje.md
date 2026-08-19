@@ -220,9 +220,18 @@
   mecánico (el de ownership sólo mira su propio campo `line`), y envejecen en silencio.
 - **Qué encontré, medido contra `main` = `8242b16` y contra el árbol final**:
 
-  ⚠️ **Dos celdas de esta tabla estaban MAL y las corrigió el fix-pack del AR** (ver la entrada
-  `[2026-08-19 01:19] Fix-pack AR — BLQ-BAJO-1`). Los valores de abajo son los **corregidos y
-  re-medidos por contenido**; el número que había antes está tachado al lado.
+  ⚠️ **Esta tabla se corrigió DOS veces: la primera por mal medida, la segunda por INCOMPLETA.**
+  El fix-pack de la it-1 arregló dos celdas cuyo número era falso (entrada
+  `[2026-08-19 01:19] Fix-pack AR — BLQ-BAJO-1`); el fix-pack de la it-2 agregó las **6 filas que
+  faltaban** de `src/services/agent.ownership.test.ts` (entrada
+  `[2026-08-19 02:10] Fix-pack AR it-2 — BLQ-BAJO-1`). Los valores de abajo son los **re-medidos por
+  contenido Y por función contenedora**; el número que había antes está tachado al lado.
+
+  El universo de anclas a `src/services/agent.ts` que hay en `agent.ownership.test.ts` está
+  **enumerado, no buscado**: son **8 anclas en 7 líneas** (`:6` trae dos), y las 8 están abajo.
+  Contadas con `command grep -n ':[0-9]\+' <archivo>` —todo token de línea, no
+  `agent\.ts:[0-9]`— que devuelve 9 líneas: 7 apuntan a `services/agent.ts`, `:13` apunta a
+  `src/routes/agents.ownership.test.ts` (nombrado en `:10`) y `:34` a `task.ownership.test.ts`.
 
   | Archivo que cita | Cita | Ahora es | ¿Lo arreglé? |
   |---|---|---|---|
@@ -230,6 +239,12 @@
   | `src/routes/agents.ownership.test.ts:18` | `services/agent.ts:715` | `:822` | ✅ sí (Scope IN) |
   | `src/routes/agents.ownership.test.ts:25` | `:184` (T-143B-06, del propio archivo) | `:211` | ✅ sí (Scope IN) |
   | `src/services/agent.ownership.test.ts:6` | `services/agent.ts:549` (el `.eq('owner_ref')` de **`listMine`**) y `:715` (el de **`delete`**) | **`:602`** (~~`:761`~~) y `:822` | ❌ **NO** — fuera de Scope IN |
+  | `src/services/agent.ownership.test.ts:20` | `:692` — `const existing = await this.getRow(slug);`, el pre-chequeo de **`delete`**. Cita **corta** (sin prefijo de archivo) | **`:799`** | ❌ **NO** — fuera de Scope IN |
+  | `src/services/agent.ownership.test.ts:21` | `:701` — `if (existing.owner_ref !== ownerRef) {`, la comparación en JS. Cita **corta** | **`:808`** | ❌ **NO** — fuera de Scope IN |
+  | `src/services/agent.ownership.test.ts:22` | `:712-716` — la cadena del DELETE, `.from('a2a_agents')` → `.select();`. Cita **corta** | **`:819-823`** | ❌ **NO** — fuera de Scope IN |
+  | `src/services/agent.ownership.test.ts:36` | `agent.ts:721` — `return Array.isArray(data) && data.length > 0;` | **`:828`** | ❌ **NO** — fuera de Scope IN |
+  | `src/services/agent.ownership.test.ts:112` | `[agent.ts:549]` — 🔴 **NOMBRE DEL TEST `AG-01`, se imprime en CI**: el `.eq('owner_ref', ownerRef)` de `listMine`. Hoy `:549` es `.in('slug', slugs)`, en **`listPublisherAnchors`** (firma `:537`) | **`:602`** | ❌ **NO** — fuera de Scope IN |
+  | `src/services/agent.ownership.test.ts:124` | `[agent.ts:715]` — 🔴 **NOMBRE DEL TEST `AG-02`, se imprime en CI**: el `.eq('owner_ref', ownerRef)` del DELETE. Hoy `:715` es `updateRow.referrer_ref = …`, en **`update()`** (firma `:619`) | **`:822`** | ❌ **NO** — fuera de Scope IN |
   | `src/services/discovery.ts:255` | `services/agent.ts:429-440` — 🔴 **cita PREEXISTENTEMENTE FALSA**: ese ancla es el INSERT de `publish()`, no el SELECT de `listAsAgents` (ver `MNR-4`) | ancla desplazado: `:469-480` · **ancla que la prosa afirma: `:506-510`** | ❌ **NO** — **CD-6 prohíbe tocar `discovery.ts`** |
   | `src/services/orchestrate.ts:1160` | `services/agent.ts:526` (el `await supabase` de **`getBySlugAsAgent`**) | **`:579`** (~~`:599`~~) | ❌ **NO** — fuera de Scope IN |
   | `src/lib/self-published-auth.ts:29` | `routes/agents.ts:265` (`keyRow.owner_ref,` en la llamada a `publish()` del POST) | **`:338`** (~~`:330`~~ — el fix-pack de `MNR-1` agregó `+8` líneas arriba; ver la nota de abajo) | ❌ **NO** — fuera de Scope IN |
@@ -304,7 +319,9 @@
 
   Las otras dos citas de la tabla se re-verificaron igual y **estaban bien**: `main:715` → `:822`
   (las dos en `delete`, `main:691` / `:798`) y `routes/agents.ts:265` → `:330` (las dos son
-  `keyRow.owner_ref,` en la llamada a `publish()` del POST).
+  `keyRow.owner_ref,` en la llamada a `publish()` del POST) — **`:330` es el valor del árbol que
+  auditaba la it-1, y este mismo fix-pack lo movió a `:338`** nueve líneas más abajo (punto 3 de la
+  entrada `MNR-1`). **El valor vigente es `:338`**, que es el que trae la tabla de W4.
 - **Aplicar en**: **todo re-apuntado de citas.** Dos reglas operativas, y la segunda es la que
   faltaba:
   1. Si tu diff inserta líneas **en el medio** de un archivo, ese archivo tiene **más de un delta**.
@@ -472,3 +489,210 @@
 - **Aplicar en**: toda HU que meta un dato **money-relevante** dentro de un merge en memoria
   preexistente. Regla operativa: heredar un patrón no es heredar su severidad — **la severidad la
   fija el dato que metés, no el que ya estaba**.
+
+---
+
+# Fix-pack #2 del AR (it-2 — veredicto RECHAZADO: 1 BLQ-BAJO + 2 MENOR)
+
+> `ar-report-it2.md` · `nexus-adversary` · 2026-08-19, sobre HEAD `d546e29`. Las 3 entradas de abajo
+> son la respuesta, una por hallazgo. Lo que la it-2 confirmó a favor del fix-pack #1 —los 5 mutantes
+> nuevos que matan, `M15`/`D`/`E`/`F` idénticos al árbol anterior, los 4 números re-apuntados, la
+> neutralidad de línea que salvó una cita real— no se re-litigó ni se tocó.
+
+### [2026-08-19 02:10] Fix-pack AR it-2 — BLQ-BAJO-1 · Declaré UNA línea de un archivo que tiene SIETE, bajo un encabezado que afirmaba completitud
+
+- **Error**: la fila del inventario de W4 para `src/services/agent.ownership.test.ts` nombra **sólo la
+  línea `:6`**, y el encabezado que le puse arriba declaraba los valores *"corregidos y re-medidos por
+  contenido"*. Ese archivo tiene **6 anclas más** a `src/services/agent.ts` que **esta HU desplazó**, y
+  ninguna estaba declarada en `auto-blindaje.md`, `ar-report.md` ni `story-file.md`. **Dos son NOMBRES
+  DE TEST** —`:112` = `AG-01 [agent.ts:549]` y `:124` = `AG-02 [agent.ts:715]`—, o sea que se imprimen
+  en la salida de CI: el próximo que vea fallar `AG-01 [agent.ts:549]` va a abrir `:549` y encontrar
+  `.in('slug', slugs)` **en otra función** (`listPublisherAnchors`, firma `:537`). Y `AG-01`/`AG-02` no
+  son dos tests cualquiera: son los que sostienen la propiedad de aislamiento de WKH-SEC-03.
+- 🔴 **El `ar-report-it2.md` pide 4 filas y las que faltan son 6.** Las dos que ningún artefacto
+  nombró —ni el mío ni el del AR— son `:21` (`` `:701` ``, la comparación de dueño en JavaScript) y
+  `:22` (`` `:712-716` ``, la cadena del DELETE). Las agregué igual: el contrato era cerrar el
+  universo, no cerrar la lista del AR.
+- **Causa raíz — buscar en vez de enumerar, y las 6 se dividen en dos formas de invisibilidad**: las
+  cuatro rondas de esta clase (AR-1 → el fix-pack #1 → las 3 que el fix-pack #1 rompió → estas 6)
+  fallaron por el mismo mecanismo. Yo barrí `grep -rn 'services/agent\.ts:[0-9]' src/ test/`, y me
+  quedé con lo que devolvió:
+  - **3 anclas CORTAS**, sin nombre de archivo: `` `:692` `` (`:20`), `` `:701` `` (`:21`),
+    `` `:712-716` `` (`:22`). Dentro del docblock de un archivo que ya nombró su objetivo en el
+    primer párrafo, las anclas siguientes se escriben así. Son invisibles para **cualquier** grep que
+    exija un nombre de archivo, incluido el que la propia entrada de W4 declara como "el barrido
+    correcto" (`grep -oE '<archivo>\.ts:[0-9]+'`).
+  - **3 anclas SIN EL DIRECTORIO**: `agent.ts:721` (`:36`), `[agent.ts:549]` (`:112`),
+    `[agent.ts:715]` (`:124`). Éstas sí las devuelve `agent\.ts:[0-9]`, pero **no** el patrón que yo
+    usé, que llevaba el prefijo `services/`. Son las que perdí por escribir el patrón más específico
+    de lo que el repo escribe.
+  O sea que ni el barrido que yo corrí ni el que W4 declara correcto habrían encontrado las 6. El
+  único que las encuentra, sobre un archivo del que ya sabés que cita:
+  `command grep -n ':[0-9]\+' <archivo>` —todo token de línea— y después clasificar cada uno **a
+  mano** por destino.
+- **El universo, cerrado y contado** (no "las que encontré"): en `src/services/agent.ownership.test.ts`
+  hay **8 anclas a `src/services/agent.ts`, en 7 líneas** (`:6` trae dos). El grep de todos los tokens
+  devuelve **9 líneas**: las 7 de arriba, más `:13` que apunta a `src/routes/agents.ownership.test.ts`
+  (el archivo que `:10` nombra) y `:34` que apunta a `task.ownership.test.ts:285-317`. Las 8 están en
+  la tabla de W4. **Ninguna se arregla acá**: el archivo no está en el diff de esta rama (verificado
+  con `git diff --numstat 8242b16..HEAD`), así que van declaradas con su valor nuevo ya medido.
+- **Cómo verifiqué los 6 números — tres controles, ninguno por texto** (el texto no discrimina:
+  `.eq('owner_ref', ownerRef)` aparece **6 veces** en `agent.ts` y
+  `const { data, error } = await supabase` **9 veces**, así que abrir la línea y comparar da OK con el
+  número equivocado):
+  1. **Contenido + función contenedora**: abrí cada ancla viejo en
+     `git show 8242b16:src/services/agent.ts` y el nuevo en HEAD, y verifiqué que el nuevo cae entre la
+     firma de su función y la firma siguiente. `delete` = `:798` → `};` del objeto en `:830`;
+     `listMine` = `:598` → `update` en `:619`.
+  2. **Delta por tramos**: los cinco anclas de `delete` dan **+107** exacto (692→799, 701→808,
+     712→819, 715→822, 721→828) y el de `listMine` **+53** (549→602). Son los dos tramos que la it-1
+     ya había medido; un número que no cae en su tramo es un número mal derivado.
+  3. **Cruce con una medición independiente que ya estaba en el repo**:
+     `src/routes/agents.ownership.test.ts:17-18` —que **sí** es Scope IN y arreglé en W4— cita **los
+     mismos dos anclas** (`:701` y `:715`) y ya decía `:808` y `:822`. Dos de los seis valores nuevos
+     estaban medidos hace horas, en otro archivo del mismo diff, y no los crucé.
+- ⚠️ **Y esta edición vuelve a mover el medio de este archivo, así que lo declaro en vez de dejarlo
+  envejecer en silencio**: `ar-report-it2.md` cita `auto-blindaje.md:232` (la fila del inventario),
+  `:235` (la de `self-published-auth.ts`) y `:306` (la celda `:330`). Con las 6 filas nuevas y el
+  encabezado reescrito, hoy son **`:241`**, **`:250`** y **`:321`**, y el encabezado que el AR citó
+  como `:9-11` —número que no era: `:9-11` es el cuerpo de la entrada de W0— es **`:223-234`**. **No
+  edito `ar-report-it2.md`**: es una medición congelada del árbol `d546e29`, igual que el
+  `ar-report.md` de la it-1 (cuyo `:249` el propio AR declaró viejo en su §10.5). Barrido para
+  confirmar que no hay otro citador: `command grep -rn 'auto-blindaje\.md:[0-9]' src/ test/ doc/
+  README*.md scripts/` da **99** coincidencias, de las cuales **4** apuntan a este archivo y las
+  cuatro están en `ar-report-it2.md` (`:301`, `:304`, `:326`, `:423`); 1 es esta línea y las **94**
+  restantes apuntan a los `auto-blindaje.md` de otras HUs. **Cero citadores en `src/` y en `test/`.**
+
+- **Aplicar en**: **todo inventario de citas.** Tres reglas, y la tercera es la que corta esta clase:
+  1. Un inventario se **enumera**, no se busca. Primero contás cuántas hay en el archivo, después las
+     clasificás. *"Encontré 4"* no es una medición; *"son 8, acá están las 8"* sí. Y si tu tabla lleva
+     un encabezado que dice "corregidos", el encabezado afirma **completitud**, no sólo exactitud.
+  2. Los greps por `archivo\.ts:[0-9]` tienen **dos** puntos ciegos estructurales, y esta HU se
+     comió los dos: la cita **corta** (`` `:701` ``), que es la forma normal dentro del docblock de un
+     archivo que ya nombró su objetivo, y la cita **sin directorio** (`agent.ts:721` cuando tu patrón
+     dice `services/agent\.ts`). Cuanto más específico el patrón, más grande el punto ciego. Sobre un
+     archivo sospechado, grepeá `':[0-9]\+'` a secas y descartá a mano.
+  3. Una cita que vive en el **nombre de un test** es de máxima prioridad: se imprime en CI, la lee
+     alguien que ya está debuggeando, y si miente lo manda a leer otra función. Las citas del `it(...)`
+     se revisan **antes** que las del docblock.
+
+---
+
+### [2026-08-19 02:10] Fix-pack AR it-2 — MNR-1 · Desplacé 63 líneas una cita PRE-EXISTENTE sin re-abrirla, y era falsa desde antes
+
+- **Error**: `src/services/agent.payment.test.ts:303` decía *"`settleSolanaLeg`
+  (downstream-payment.ts:132) lo skipea con INVALID_PAY_TO_FORMAT sin mover fondos"*. `:132` es
+  **prosa de un docblock de campo de interfaz** (`NonEvmSettleReceipt.amountUsd`, *"Monto REALMENTE
+  settleado al agente, en USD…"*), sin relación con el skip. La afirmación de fondo es **cierta**; el
+  número nunca lo fue.
+- **Es PRE-EXISTENTE, y eso no me excusa**: el mismo texto está en
+  `git show 8242b16:src/services/agent.payment.test.ts` en `:240`. Esta HU no la escribió: la **movió
+  +63 líneas** dentro de su propio archivo (+538/-2) sin re-abrirla. Es la simétrica de `MNR-4` de la
+  it-1: allá publiqué el número nuevo de una cita falsa; acá desplacé una cita falsa sin mirarla.
+- **Fix**: `:132` → **`:247`**, y ese número a propósito: `:247` es
+  `async function settleSolanaLeg(`, o sea **la línea ES la firma** — el único tipo de ancla que se
+  verifica sin ambigüedad y que un lector puede re-derivar grepeando el nombre. El skip que la prosa
+  afirma vive dentro de esa misma función, en `:257-262`
+  (`if (!isValidSolanaAddress(payTo))` → `logger.warn({ …, code: 'INVALID_PAY_TO_FORMAT' })` →
+  `return null`); el único otro uso del nombre es la llamada en `:763`. La corrección es
+  **línea-neutra** (`git diff --numstat` = `1 1`, el archivo sigue en 815 líneas), porque
+  `agent.payment.test.ts` es un archivo citado y no vuelve a mover nada.
+- **Por qué ésta sí y `discovery.ts:255` no**: `agent.payment.test.ts` es Scope IN de esta HU;
+  `discovery.ts` lo prohíbe **CD-6**. Misma clase de defecto, dos tratamientos, y la diferencia es el
+  scope, no la gravedad.
+- 🔴 **Y el criterio que la habilitó habilita 4 más, que NO arreglé** (fix-pack acotado a una línea de
+  `src/` por instrucción; van declaradas para que no se pierdan). Son PRE-EXISTENTES, están en
+  archivos **Scope IN** y ningún CD las prohíbe, exactamente como esta:
+
+  | Cita | Lo que afirma | Qué hay ahí | Ancla real (medido acá) |
+  |---|---|---|---|
+  | `src/routes/agents.ts:47` | *"helper privado de `registries.ts:35`"* | `:35` es `requireA2AKeyPresence,` — **un specifier de import** | `mapOwnershipError` en `src/routes/registries.ts:94` (la rama `OwnershipMismatchError` en `:100`) |
+  | `src/types/index.ts:207` | *"`:777` lo firma como `to`"* | `:777` es `contract: agent.payment.contract,` dentro de un `logger.warn` | `downstream-payment.ts:922` (`to: payToCheck.addr,` en `adapter.sign`) |
+  | `src/types/index.ts:510` | *"el bucket `'__anon__'` se EXCLUYE (`reputation.ts:182-183`)"* | `:182-183` es **prosa** del bloque `CR MNR-2` (que arranca en `:169`) | `src/services/reputation.ts:189` (`if (bucket !== ANON_CALLER_BUCKET) …`) |
+  | `src/types/index.ts:1450` | *"el guard `i>0` de `compose.ts:130`"* | `src/routes/compose.ts:130` abre un docblock de validación de shape; `src/services/compose.ts:130` es prosa del over-fetch. `grep 'i > 0' src/routes/compose.ts` da **cero** | `src/services/compose.ts:571` (`if (i > 0 && scopingKeyRow && chainId !== undefined)`) — **el archivo citado también está mal** |
+
+  La primera columna de `src/types/index.ts:207` (`downstream-payment.ts:772` = `validatePayTo(...)`)
+  y `src/services/agent.ts:161` (`discovery.ts:449` = `allAgents.filter(a => a.status === 'active')`)
+  **sí** son exactas, medidas igual. Ninguna de las 4 falsas la escribió ni la desplazó esta HU.
+- **Aplicar en**: **toda cita que tu diff desplace dentro de tu propio archivo.** Que el texto no
+  aparezca en tu diff como modificado no quiere decir que siga siendo cierto. Y si el archivo es Scope
+  IN, *"es pre-existente"* deja de ser un motivo para no arreglarla: pasa a ser el motivo por el que
+  **sí** te toca.
+
+---
+
+### [2026-08-19 02:10] Fix-pack AR it-2 — MNR-2 · DEUDA `TD-316-CITAS-SIN-TESTIGO` (acotamiento, NO cierre — es otra HU)
+
+- **Qué es**: **ninguna cita `archivo.ts:N` de este repo tiene testigo posible.** Ningún test puede
+  ponerse rojo porque un comentario apunte a la línea equivocada, ni porque un docblock afirme un
+  candado que no existe.
+- **El mecanismo, medido — por qué hoy es IMPOSIBLE que algo se ponga rojo**:
+  - `test/payment-guards-live-in-one-place.test.ts:45-55` (`codeOnly`) **borra los comentarios antes de
+    mirar**: `.replace(/\/\*[\s\S]*?\*\//g, '')` se come todo bloque `/* … */` y el `filter` de
+    `:50-53` saca las líneas que arrancan con `//`, `*` o `/*`. Y **tiene que hacerlo**: su propio
+    docblock (`:16-20`) explica que si no, `x402` en `routes/agents.ts:66` y
+    `getInitializedChainKeys()` en `:124` darían falso positivo (las dos, verificadas exactas). O sea
+    que el guardián estructural que esta HU creó **no puede** ponerse rojo por prosa, por construcción.
+  - De los **15** archivos de `test/` que leen fuentes con `readFileSync` (contados:
+    `command grep -rln readFileSync test/` → 15), **ninguno** verifica un `archivo.ts:N`.
+    `docs-referenced-by-code-exist` valida **existencia de documento** (nivel path, y sólo punteros a
+    `.md`); `ownership-filter-guard` mira presencia de `.eq('owner_ref', …)` en cadenas
+    `supabase.from()` y no mira prosa; `readme-numbers` / `readme-parity` sólo cubren los README.
+- **El número que importa**: **0 cazables por cualquier test de este repo**, sobre un blast radius de
+  esta sola HU que el `ar-report-it2.md` contó en **12** y que, con las **dos** anclas que él también
+  contó de menos (`:21` y `:22`), es **14**. Y midiendo las citas pre-existentes de los archivos Scope
+  IN aparecieron **4 más** falsas (la tabla de `MNR-1`): **18 citas defectuosas, 0 cazables.** El 12
+  no era un techo, era lo que se había buscado.
+  Y la tasa no bajó escribiendo prosa más cuidadosa: bajó cada vez que
+  alguien la midió a mano y volvió a subir en cuanto nadie la midió. **Cuatro rondas** de fix-pack
+  sobre el mismo archivo lo miden, y la cuarta apareció sólo al enumerar todos los tokens
+  `:[0-9]+` — no al grepear `agent\.ts:[0-9]`.
+- **El diseño ya existe adentro de este repo, aplicado a UN solo destino**:
+  `test/sdd-index-matches-folders.exceptions.ts:160-192` define
+  `CitedIndexLine = { from, line, mustContain }` y la constante `CITED_INDEX_LINES` (`:181-192`), con
+  las dos propiedades que faltan y su razón escrita al lado (`:172-179`): el `mustContain` va **a
+  mano** —*"es una afirmación sobre el mundo, no una lectura del mundo"*, porque derivarlo del
+  contenido actual daría verde siempre— y el **universo SÍ se deriva**, grepeando `src/`, con el
+  control **G-F2: "una cita nueva sin declarar = rojo"**
+  (`test/sdd-index-matches-folders.test.ts:420`). Hoy cubre un único destino: `doc/sdd/_INDEX.md:N`,
+  con 2 entradas.
+- **Por qué se DIFIERE y no se arregla acá**: generalizarlo a citas `*.ts:N` desde `src/` y `test/`
+  obliga a declarar el `mustContain` de **cada** cita existente, a mano, leyendo cada una, y el
+  guardián arranca **rojo por definición** hasta que estén todas. Toca decenas de archivos. Es la
+  antítesis de un fix-pack de AR, que no puede tener scope. **Es otra HU.**
+- **El conjunto por donde arranca, ya medido acá** (para que la HU no empiece de cero): en los 11
+  archivos de `src/`+`test/` del Scope IN de WKH-316 hay **28 anclas en 24 líneas** —contando las dos
+  formas, larga (`archivo.ts:N`) y corta (`` `:N` ``)—. **19 las escribió o las re-apuntó esta HU, y
+  las 19 son ciertas**: 6 en `src/lib/operator-address.ts` (`chain.ts:84`, `:95`, `:137-149`,
+  `:81-82`, `deposit-verifier.ts:167-175`, `registry.ts:1-16`), 6 escritas en
+  `src/routes/agents.publish.test.ts` (5 apuntan a los guards hermanos **de `routes/agents.ts`** —
+  `:220`, `:237`, `:252`, `:459`, `:475`— y 1 a `forward-key.test.ts:204-232`), 2 en
+  `src/routes/agents.ownership.test.ts` (`:808`, `:822`), 2 en
+  `test/payment-guards-live-in-one-place.test.ts` (`:66`, `:124`), 1 en `src/routes/agents.ts`
+  (`discovery-query.ts:219-229`) y 2 en `src/types/index.ts` (`payment-spec-reader.ts:212-213`,
+  `:203-225`). De las **9 pre-existentes**, **6 son falsas** (la de `MNR-1`, las 4 de su tabla, y
+  `types/index.ts:385 → agent.ts:399` ya declarada en W4) y **3 son exactas**
+  (`agent.ts:161 → discovery.ts:449`, y `types/index.ts:207 → downstream-payment.ts:772` /
+  `:246 → :711-735`). O sea: el defecto de esta HU fue **desplazar y no re-verificar**, no escribir mal.
+  ⚠️ **Límite de este conteo**: el barrido de la forma corta busca la cita **entre backticks**
+  (`` `:N` ``, `` `:N-M` ``); una escrita en prosa suelta ("la línea 95") no la devuelve. El 28 es un
+  piso, no un total.
+- **Qué la dispara** (cualquiera alcanza):
+  1. Que una cita rota mande a alguien a **otra función del mismo archivo** en el camino del dinero.
+     Ya pasó dos veces acá (`:761` era el `owner_ref` de `update()`; `:599` la misma línea de texto
+     dentro de `listMine`) y las dos veces **la evidencia se auto-confirmó**: el número equivocado
+     contenía el texto buscado, así que abrir la línea y comparar daba OK.
+  2. La próxima HU que cambie el largo de `src/services/agent.ts` o `src/routes/agents.ts`, los dos
+     archivos con más citas entrantes de este repo.
+  3. Que se agregue otra cita en un **nombre de test** (hoy hay al menos 2, `AG-01`/`AG-02`): se
+     imprime en CI y se lee mientras alguien debuggea.
+- **Acotamiento mientras esté abierta — cuál es y cuál NO es**: lo único que hay es el **barrido manual
+  del cierre de cada HU**, y esta HU midió su techo: cuatro rondas, y las últimas 6 anclas se vieron
+  sólo cambiando el patrón del barrido. Eso **acota la tasa, no cierra el camino**: no hay ningún
+  control que se ponga rojo, así que la garantía dura exactamente lo que dure la disciplina del que
+  revisa, y una cita rota se descubre **cuando manda a alguien a la función equivocada**, no cuando se
+  escribe.
+- **Aplicar en**: cuando declares un agujero que ningún test puede cazar, la salida no es prometer más
+  cuidado: es **buscar si el patrón que lo cerraría ya existe en el repo aplicado a otro destino.**
+  Acá existía, con nombre (`CITED_INDEX_LINES`), con su control de universo (G-F2) y con su control
+  anti-vacuidad (`mustContain` a mano) ya pensados.
